@@ -8,17 +8,13 @@ import { changed, notifyCampaign, publishWithin, setCampaignStatusWithin } from 
 import { HYBRID_DEPENDENCIES } from './hybridDependencies'
 import { LISTABLE_FEATURE_CODES } from './hybridListPrice.service'
 import { compileHybridPublication } from './hybridOffer.service'
-import { hybridOfferDefinition } from './hybridOffer.schema'
+import { hybridOfferDefinition, MINIMUM_PRICE } from './hybridOffer.schema'
 import { assertPromotionBelowList, listPriceOf } from './hybridPriceRule'
 import { ensureHybridPublicationPrices } from './hybridPrices'
-import { lockProducts, productKeyOf, type ProductKey } from './hybridProduct'
+import { LOCK_WAIT, lockProducts, productKeyOf, type ProductKey } from './hybridProduct'
 import { assertHybridSalesOpen } from './hybridPurchase.service'
 
 const errorMap: z.ZodErrorMap = () => ({ message: 'Valor requerido o formato no válido' })
-// The price floor of `hybridOfferDefinition`: a discount that lands below it blocks the group, never rounds up to it.
-const MINIMUM_PRICE = 10
-// Group operations queue on the product locks behind list saves and other groups: give them room to wait (no P2028).
-const LOCK_WAIT = { timeout: 15_000 }
 // A group holds at most one campaign per listable function (31 today); the cap only guards the read.
 const MAX_MEMBERS = 100
 
@@ -285,7 +281,7 @@ export async function createPercentPromotion(input: unknown, staffId: string): P
           createdById: staffId,
         },
       })
-      await publishWithin(tx, campaign.id, 1, staffId)
+      await publishWithin(tx, campaign.id, 1, staffId, { allowGrouped: true })
       campaignIds.push(campaign.id)
     }
     await auditGroup(tx, group.id, staffId, 'HYBRID_PROMOTION_GROUP_CREATED', {
@@ -441,7 +437,7 @@ export async function recalculatePromotionGroup(groupId: string, expectedRevisio
         data: { draftDefinition: promotionDefinition(featureCode, rows[index].listPrice!, group) },
       })
       if (drafted.count !== 1) changed()
-      await publishWithin(tx, campaign.id, campaign.revision, staffId)
+      await publishWithin(tx, campaign.id, campaign.revision, staffId, { allowGrouped: true })
     }
     await auditGroup(tx, groupId, staffId, 'HYBRID_PROMOTION_GROUP_RECALCULATED', {
       revision: expectedRevision + 1,

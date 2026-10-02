@@ -10,6 +10,7 @@ import {
   createHybridCampaign,
   updateHybridCampaign,
   publishHybridCampaign,
+  publishWithin,
   getPublicHybridOffer,
   getHybridCampaign,
   listHybridCampaigns,
@@ -262,6 +263,56 @@ describe('a LIST is priced from «Precios», never from the campaign editor (spe
     await listPublicHybridOffers({})
     expect(db.hybridCampaign.findMany).toHaveBeenCalledTimes(2)
     for (const [args] of db.hybridCampaign.findMany.mock.calls) expect(args.where).toMatchObject({ purpose: 'PROMOTION' })
+  })
+})
+
+describe('a «% de descuento» promotion is managed only through its group', () => {
+  afterEach(() => delete process.env.HYBRID_BILLING_ENABLED)
+  it('the campaign editor refuses to edit, publish or change the status of a grouped campaign, without writing', async () => {
+    row.promotionGroupId = 'group1'
+    pubs = [stored('pub')]
+    row.currentPublicationId = 'pub'
+    process.env.HYBRID_BILLING_ENABLED = 'true'
+    const grouped = { statusCode: 409, code: 'HYBRID_CAMPAIGN_GROUPED' }
+    await expect(updateHybridCampaign('campaign1', { ...input, expectedRevision: 1 }, 'staff1')).rejects.toMatchObject(grouped)
+    await expect(publishHybridCampaign('campaign1', 1, 'staff1')).rejects.toMatchObject(grouped)
+    for (const status of ['PAUSED', 'ENDED'] as const)
+      await expect(setHybridCampaignStatus('campaign1', { status, expectedRevision: 1 }, 'staff1')).rejects.toMatchObject(grouped)
+    await expect(
+      setHybridCampaignStatus('campaign1', { status: 'ACTIVE', expectedRevision: 1, publicationId: 'pub' }, 'staff1'),
+    ).rejects.toMatchObject(grouped)
+    expect(db.hybridCampaign.updateMany).not.toHaveBeenCalled()
+    expect(db.hybridOfferPublication.create).not.toHaveBeenCalled()
+  })
+  it('the group path still publishes its own campaigns', async () => {
+    row.promotionGroupId = 'group1'
+    await expect(publishWithin(db, 'campaign1', 1, 'staff1', { allowGrouped: true })).resolves.toMatchObject({ campaignId: 'campaign1' })
+  })
+})
+
+describe('a generated promotion is purchasable only while its parent LIST is on sale (spec §4.2)', () => {
+  afterEach(() => delete process.env.HYBRID_BILLING_ENABLED)
+  const single = { ...input.definition, kind: 'FEATURES', featureCodes: ['CFDI'] } as any
+  delete single.choiceCount
+  delete single.eligibleFeatureCodes
+  it('the public list and detail say it is not purchasable while the LIST is paused, and purchasable once it is back', async () => {
+    process.env.HYBRID_BILLING_ENABLED = 'true'
+    Object.assign(row, { status: 'ACTIVE', promotionGroupId: 'group1', draftDefinition: single, currentPublicationId: 'gp' })
+    pubs = [{ id: 'gp', version: 1, name: input.name, ...compileHybridPublication(single) }]
+    let lists: { listProductKey: string }[] = []
+    db.hybridCampaign.findMany.mockImplementation(async ({ where }: any) => (where.purpose === 'LIST' ? lists : [row]))
+    const listed = async () => (await listPublicHybridOffers({})).items[0].purchaseAvailable
+    const detail = async () => (await getPublicHybridOffer('herramientas-tienda')).purchaseAvailable
+    expect(await listed()).toBe(false)
+    expect(await detail()).toBe(false)
+    lists = [{ listProductKey: 'FEATURE:CFDI' }]
+    expect(await listed()).toBe(true)
+    expect(await detail()).toBe(true)
+    // The page's parents are read in ONE bounded query, never one per row.
+    expect(db.hybridCampaign.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { purpose: 'LIST', status: 'ACTIVE', listProductKey: { in: ['FEATURE:CFDI'] } }, take: 1 }),
+    )
+    expect((await listPublicHybridOffers({})).total).toBe(113)
   })
 })
 

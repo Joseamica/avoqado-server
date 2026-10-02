@@ -117,8 +117,11 @@ describe('seeding the plan lists at the classic monthly price (spec §4.2)', () 
     ])
     expect(await priceOf(lists[0].currentPublicationId)).toBe(1970.84)
     expect(await priceOf(lists[1].currentPublicationId)).toBe(1158.84)
+    // A Stripe Product name is permanent: never the classic plans' «Pro» / «Premium».
+    expect(lists.map(list => list.name)).toEqual(['Lista Premium', 'Lista Pro'])
     for (const list of lists) {
       const publication = await prisma.hybridOfferPublication.findUniqueOrThrow({ where: { id: list.currentPublicationId! } })
+      expect(publication.name).toBe(list.name)
       expect(publication.stripePriceId).toBe(`price_seed_${publication.id}`)
       expect(hybridOfferDefinition.parse(publication.definition)).toMatchObject({
         kind: 'PLAN',

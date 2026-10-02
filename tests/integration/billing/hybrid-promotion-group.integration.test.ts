@@ -40,6 +40,12 @@ import { hybridOfferDefinition } from '@/services/launchCampaigns/hybridOffer.sc
 import { listPriceBoard, saveListPrice, setListPriceStatus } from '@/services/launchCampaigns/hybridListPrice.service'
 import { acceptHybridQuote, createHybridQuote } from '@/services/launchCampaigns/hybridPurchase.service'
 import {
+  getPublicHybridOffer,
+  listPublicHybridOffers,
+  publishHybridCampaign,
+  setHybridCampaignStatus,
+} from '@/services/launchCampaigns/hybridCampaign.service'
+import {
   createPercentPromotion,
   previewPercentPromotion,
   recalculatePromotionGroup,
@@ -288,6 +294,37 @@ describe(`a 20 % group over ${MAIN} (list 599, 3 cycles)`, () => {
     )
     expect(await campaign(campaignId)).toMatchObject({ reservedCount: 1, redeemedCount: 0 })
     redemptionId = (await prisma.hybridRedemption.findFirstOrThrow({ where: { campaignId } })).id
+  })
+
+  it('(2b) the public list and detail stop offering it while its LIST is paused, and offer it again once resumed', async () => {
+    const { name, slug } = await campaign(campaignId)
+    const listed = async () => (await listPublicHybridOffers({ q: name })).items.map(item => [item.slug, item.purchaseAvailable])
+    const setList = async (status: 'ACTIVE' | 'PAUSED') =>
+      setListPriceStatus(
+        {
+          productKey: `FEATURE:${MAIN}`,
+          status,
+          expectedRevision: (
+            await prisma.hybridCampaign.findFirstOrThrow({ where: { purpose: 'LIST', listProductKey: `FEATURE:${MAIN}` } })
+          ).revision,
+        },
+        staffId,
+      )
+    await setList('PAUSED')
+    // Still listed (the total stays exact) but it says it cannot be bought, as quoting it would refuse.
+    expect(await listed()).toEqual([[slug, false]])
+    expect(await getPublicHybridOffer(slug)).toMatchObject({ slug, purchaseAvailable: false })
+    await setList('ACTIVE')
+    expect(await listed()).toEqual([[slug, true]])
+    expect(await getPublicHybridOffer(slug)).toMatchObject({ slug, purchaseAvailable: true })
+    // A member of a group is edited only through its group: the single-campaign editor refuses it.
+    const { revision } = await campaign(campaignId)
+    const grouped = { statusCode: 409, code: 'HYBRID_CAMPAIGN_GROUPED' }
+    await expect(publishHybridCampaign(campaignId, revision, staffId)).rejects.toMatchObject(grouped)
+    await expect(setHybridCampaignStatus(campaignId, { status: 'PAUSED', expectedRevision: revision }, staffId)).rejects.toMatchObject(
+      grouped,
+    )
+    expect(await campaign(campaignId)).toMatchObject({ status: 'ACTIVE', revision })
   })
 
   it('(3) pause → lower the list → recalculate → reactivate, keeping identity, capacity and redemptions', async () => {

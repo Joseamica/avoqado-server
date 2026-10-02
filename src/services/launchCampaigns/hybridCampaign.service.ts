@@ -87,6 +87,12 @@ export function changed(): never {
   throw new ConflictError('La ficha cambió. Actualiza la página y revisa la nueva versión.', 'HYBRID_CAMPAIGN_STALE')
 }
 
+/** A «% de descuento» member is managed only through its group: editing one alone breaks the group (`loadGroup`). */
+function assertNotGrouped(campaign: { promotionGroupId: string | null }) {
+  if (campaign.promotionGroupId)
+    throw new ConflictError('Esta promoción pertenece a un descuento %: cámbiala desde su grupo.', 'HYBRID_CAMPAIGN_GROUPED')
+}
+
 /**
  * A promotion price goes on sale only under its product lock and below its list (spec §4.4). Called before any campaign
  * row write, so a concurrent list change and this promotion serialize on the product, never pass on a stale read.
@@ -129,6 +135,7 @@ export async function updateHybridCampaign(id: string, input: unknown, staffId: 
       const current = await tx.hybridCampaign.findUnique({ where: { id } })
       // A LIST is priced only from «Precios» (spec §4.2): to this editor it does not exist.
       if (!current || current.purpose === 'LIST') throw new NotFoundError('Oferta no encontrada.')
+      assertNotGrouped(current)
       if (current.revision !== expectedRevision) changed()
       if (current.status === 'ENDED') throw new ConflictError('Esta oferta terminó. Duplica la ficha para crear otra.')
       if (current.code !== data.code || current.slug !== data.slug)
@@ -153,9 +160,16 @@ export async function updateHybridCampaign(id: string, input: unknown, staffId: 
  * Publishing inside the caller's transaction (the «% de descuento» generator publishes many in one). The product lock and
  * the list rule come before the first write to the campaign row.
  */
-export async function publishWithin(tx: Prisma.TransactionClient, id: string, expectedRevision: number, staffId: string) {
+export async function publishWithin(
+  tx: Prisma.TransactionClient,
+  id: string,
+  expectedRevision: number,
+  staffId: string,
+  { allowGrouped = false }: { allowGrouped?: boolean } = {},
+) {
   const campaign = await tx.hybridCampaign.findUnique({ where: { id } })
   if (!campaign || campaign.purpose === 'LIST') throw new NotFoundError('Oferta no encontrada.')
+  if (!allowGrouped) assertNotGrouped(campaign)
   if (campaign.revision !== expectedRevision) changed()
   // PROMOTION: CHECK guarantees non-null
   if (campaign.status === 'ENDED' || campaign.endsAt! <= new Date())
@@ -233,6 +247,26 @@ function publicHybridFeatures(publication: { definition: unknown; includedFeatur
   }))
 }
 
+/**
+ * The product keys, among these, whose LIST is on sale: a generated promotion sells only while its parent does (quote and
+ * accept refuse it otherwise, spec §4.2). One bounded read for a whole page; a LIST is unique per product key.
+ */
+async function parentListsOnSale(keys: string[]): Promise<Set<string>> {
+  const unique = [...new Set(keys)]
+  if (!unique.length) return new Set()
+  const lists = await prisma.hybridCampaign.findMany({
+    where: { purpose: 'LIST', status: 'ACTIVE', listProductKey: { in: unique } },
+    select: { listProductKey: true },
+    take: unique.length,
+  })
+  return new Set(lists.flatMap(list => list.listProductKey ?? []))
+}
+
+/** The parent product of a generated promotion (null for one that is not single-product, which never sells). */
+function parentKeyOf(campaign: { promotionGroupId: string | null }, publication: { definition: unknown }): string | null {
+  return campaign.promotionGroupId ? productKeyOf(hybridOfferDefinition.parse(publication.definition)) : null
+}
+
 /** The publication that is on sale: the explicit pointer, never "the highest version". */
 export async function loadCurrentPublication(
   tx: Prisma.TransactionClient | typeof prisma,
@@ -256,6 +290,8 @@ export async function getPublicHybridOffer(slug: string) {
     throw new ConflictError('Se agotaron los lugares de esta oferta.', 'HYBRID_OFFER_FULL')
   const publication = await loadCurrentPublication(prisma, campaign)
   if (!publication) throw new NotFoundError('Esta oferta no está disponible.')
+  const parentKey = parentKeyOf(campaign, publication)
+  const parentOnSale = !campaign.promotionGroupId || (parentKey !== null && (await parentListsOnSale([parentKey])).has(parentKey))
   return {
     schemaVersion: 1,
     id: publication.id,
@@ -272,7 +308,7 @@ export async function getPublicHybridOffer(slug: string) {
     audience: campaign.audience,
     // PROMOTION: CHECK guarantees non-null
     placesRemaining: campaign.capacity! - campaign.reservedCount - campaign.redeemedCount,
-    purchaseAvailable: process.env.HYBRID_BILLING_ENABLED === 'true',
+    purchaseAvailable: process.env.HYBRID_BILLING_ENABLED === 'true' && parentOnSale,
   }
 }
 
@@ -323,6 +359,8 @@ export async function setHybridCampaignStatus(id: string, input: unknown, staffI
   const body = parse(hybridStatusBody, input)
   const current = await prisma.hybridCampaign.findUnique({ where: { id } })
   if (!current || current.purpose === 'LIST') throw new NotFoundError('Oferta no encontrada.')
+  // The group path writes statuses through `setCampaignStatusWithin` directly; this entry point is the editor's.
+  assertNotGrouped(current)
   if (current.revision !== body.expectedRevision) changed()
   if (current.status === 'ENDED') throw new ConflictError('Esta campaña terminó. Duplica la ficha para crear otra.')
   let goingOnSale: HybridOfferDefinition | null = null
@@ -382,6 +420,7 @@ export async function listPublicHybridOffers(input: unknown) {
         reservedCount: true,
         redeemedCount: true,
         currentPublicationId: true,
+        promotionGroupId: true,
       },
     }),
     prisma.hybridCampaign.count({ where }),
@@ -396,29 +435,33 @@ export async function listPublicHybridOffers(input: unknown) {
       })
     : []
   const onSale = new Map(publications.map(publication => [publication.id, publication]))
-  const items = rows.flatMap(row => {
+  const pointed = rows.flatMap(row => {
     const publication = row.currentPublicationId ? onSale.get(row.currentPublicationId) : undefined
-    if (!publication) return []
-    return [
-      {
-        schemaVersion: 1,
-        id: publication.id,
-        version: publication.version,
-        code: row.code,
-        slug: row.slug,
-        name: publication.name,
-        definition: publication.definition,
-        definitionHash: publication.definitionHash,
-        includedFeatureCodes: publication.includedFeatureCodes,
-        features: publicHybridFeatures(publication),
-        startsAt: row.startsAt,
-        endsAt: row.endsAt,
-        audience: row.audience,
-        // PROMOTION: CHECK guarantees non-null
-        placesRemaining: row.capacity! - row.reservedCount - row.redeemedCount,
-        purchaseAvailable: process.env.HYBRID_BILLING_ENABLED === 'true' && row.reservedCount + row.redeemedCount < row.capacity!,
-      },
-    ]
+    return publication ? [{ row, publication, parentKey: parentKeyOf(row, publication) }] : []
+  })
+  // A generated promotion of a paused (or missing) list stays listed (the total is exact) but says it cannot be bought.
+  const parents = await parentListsOnSale(pointed.flatMap(({ parentKey }) => parentKey ?? []))
+  const items = pointed.map(({ row, publication, parentKey }) => {
+    const parentOnSale = !row.promotionGroupId || (parentKey !== null && parents.has(parentKey))
+    return {
+      schemaVersion: 1,
+      id: publication.id,
+      version: publication.version,
+      code: row.code,
+      slug: row.slug,
+      name: publication.name,
+      definition: publication.definition,
+      definitionHash: publication.definitionHash,
+      includedFeatureCodes: publication.includedFeatureCodes,
+      features: publicHybridFeatures(publication),
+      startsAt: row.startsAt,
+      endsAt: row.endsAt,
+      audience: row.audience,
+      // PROMOTION: CHECK guarantees non-null
+      placesRemaining: row.capacity! - row.reservedCount - row.redeemedCount,
+      purchaseAvailable:
+        process.env.HYBRID_BILLING_ENABLED === 'true' && parentOnSale && row.reservedCount + row.redeemedCount < row.capacity!,
+    }
   })
   return { items, total, page, pageSize, totalPages: Math.ceil(total / pageSize) }
 }

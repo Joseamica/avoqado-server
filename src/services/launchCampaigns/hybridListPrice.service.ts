@@ -10,7 +10,7 @@ import { compileHybridPublication } from './hybridOffer.service'
 import { hybridOfferDefinition } from './hybridOffer.schema'
 import { assertPriceRuleForList } from './hybridPriceRule'
 import { ensureHybridPublicationPrices } from './hybridPrices'
-import { lockProducts, productKeySql, type ProductKey } from './hybridProduct'
+import { LOCK_WAIT, lockProducts, productKeySql, type ProductKey } from './hybridProduct'
 
 export interface ListPriceRow {
   productKey: string
@@ -62,9 +62,6 @@ const PRODUCTS: readonly ProductRow[] = [
 
 /** The 31 CONFIGURABLE functions with a code: the only products whose list price is edited here (spec §4.2). */
 export const LISTABLE_FEATURE_CODES: string[] = PRODUCTS.filter(p => p.featureCode && !p.notEditableReason).map(p => p.featureCode!)
-
-// Saves, finalizations and status changes queue on the product lock behind each other: give them room to wait (no P2028).
-const LOCK_WAIT = { timeout: 15_000 }
 
 const priceOf = (definition: Prisma.JsonValue) => hybridOfferDefinition.parse(definition).terms.price
 
@@ -171,10 +168,17 @@ async function prepareAndFinalize(key: ProductKey, listId: string, publicationId
       publicationId,
       error: error instanceof Error ? error.message : String(error),
     })
+    // The row is a convenience for the screen: failing to read it must not replace the Stripe error the caller acts on.
+    let row: ListPriceRow | undefined
+    try {
+      row = await rowOf(key)
+    } catch {
+      row = undefined
+    }
     throw new ConflictError(
       'No pudimos preparar el precio en Stripe. El precio anterior se sigue vendiendo; reintenta.',
       'HYBRID_LIST_PREPARING',
-      await rowOf(key),
+      row,
     )
   }
   await finalizeListPublication(key, listId, publicationId, revision, staffId)
@@ -199,7 +203,9 @@ async function saveList(product: ProductRow, definition: unknown, expectedRevisi
           listProductKey: key,
           code: `L_${tail}`.slice(0, 32),
           slug: `lista-${tail.toLowerCase().replace(/_/g, '-')}`,
-          name: product.name,
+          // The publication (and so the Stripe Product, whose name is permanent) takes this name: a plan list is never
+          // named like the classic plan products «Pro» / «Premium».
+          name: product.planTier ? `Lista ${product.name}` : product.name,
           startsAt: new Date(),
           endsAt: null,
           capacity: null,

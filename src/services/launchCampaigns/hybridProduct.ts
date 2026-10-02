@@ -20,6 +20,9 @@ export function productKeySql(alias: string): Prisma.Sql {
   return Prisma.sql`(CASE WHEN ${d}->>'kind' = 'PLAN' THEN 'PLAN:' || (${d}->>'planTier') WHEN ${d}->>'kind' = 'FEATURES' AND jsonb_array_length(${d}->'featureCodes') = 1 THEN 'FEATURE:' || (${d}->'featureCodes'->>0) END)`
 }
 
+/** Catalog price writes queue on the product locks behind each other (list saves, groups): room to wait, no P2028. */
+export const LOCK_WAIT = { timeout: 15_000 }
+
 /** Catalog price writes serialize per product; many products are locked deduplicated and sorted (no inverse-order deadlock). */
 export async function lockProducts(tx: Prisma.TransactionClient, keys: string[]) {
   for (const key of [...new Set(keys)].sort()) await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'precio:' + key}))`
