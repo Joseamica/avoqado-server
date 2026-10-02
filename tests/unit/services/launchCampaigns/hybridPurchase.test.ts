@@ -17,6 +17,7 @@ jest.mock('@/services/dashboard/seatReconciliation.service', () => ({ assertKeep
 const creditSource = jest.fn()
 jest.mock('@/services/launchCampaigns/hybridSources', () => ({ readHybridCreditSource: (...args: unknown[]) => creditSource(...args) }))
 import { Prisma } from '@prisma/client'
+import { addMonths } from 'date-fns'
 import { BadRequestError } from '@/errors/AppError'
 import { createHybridQuote, getHybridReplacementOptions } from '@/services/launchCampaigns/hybridPurchase.service'
 import { compileHybridPublication } from '@/services/launchCampaigns/hybridOffer.service'
@@ -251,6 +252,69 @@ describe('spec §4.2: the quote checks dependencies over the whole purchase, wit
       code: 'HYBRID_DEPENDENCY_TERM',
       details: [{ featureCode: 'UPSELL_AI', requiredFeatureCode: 'UPSELL', requiredUntil: null, unit: null }],
     })
+  })
+})
+
+// Codex C2: an END line runs `promotionCycles` months from its Stripe period start, which provisioning may open well
+// after the acceptance (journal retries). Validation must hold for every start the code allows, not only for `now`.
+describe('an END line is checked for the latest start the purchase may still get, and for the earliest', () => {
+  const endId = 'cm923456789012345678901234'
+  const endCampaign = 'cma23456789012345678901234'
+  const endLine = (featureCode: string) => ({
+    ...publication,
+    id: endId,
+    campaignId: endCampaign,
+    name: 'Un mes',
+    includedFeatureCodes: [featureCode],
+    definition: {
+      schemaVersion: 1,
+      kind: 'FEATURES',
+      featureCodes: [featureCode],
+      terms: { ...publication.definition.terms, price: 99, promotionCycles: 1, renewal: { kind: 'END' } },
+    },
+    campaign: { ...publication.campaign, id: endCampaign, currentPublicationId: endId },
+  })
+  const buy = () => createHybridQuote('venue', 'staff', { lines: [{ publicationId: endId }] })
+  const minute = 60000
+
+  it('a one-month UPSELL_AI over a Pro ending a minute after that month is refused: a late start outlives the Pro', async () => {
+    prismaMock.hybridOfferPublication.findMany.mockResolvedValue([endLine('UPSELL_AI')])
+    const proEnds = new Date(addMonths(new Date(), 1).getTime() + minute)
+    inventory.mockResolvedValue({
+      vivas: [{ subscriptionId: 'sub_classic', proyecciones: [{ tipo: 'PLAN', tier: 'PRO' }] }],
+      detalle: { sub_classic: { customerId: 'cus_test', terminaEn: proEnds.toISOString() } },
+      conCambiosProgramados: [],
+    })
+    await expect(buy()).rejects.toMatchObject({
+      code: 'HYBRID_DEPENDENCY_TERM',
+      details: [expect.objectContaining({ featureCode: 'UPSELL_AI', requiredFeatureCode: 'UPSELL' })],
+    })
+    expect(prismaMock.hybridPurchase.create).not.toHaveBeenCalled()
+  })
+
+  it('a one-month INVENTORY_TRACKING under a kept AUTO_REORDER ending an hour after that month is refused: an immediate start ends first', async () => {
+    prismaMock.hybridOfferPublication.findMany.mockResolvedValue([endLine('INVENTORY_TRACKING')])
+    prismaMock.venueFeature.findMany.mockResolvedValue([
+      {
+        stripeSubscriptionId: null,
+        endDate: new Date(addMonths(new Date(), 1).getTime() + 60 * minute),
+        feature: { code: 'AUTO_REORDER' },
+      },
+    ])
+    await expect(buy()).rejects.toMatchObject({
+      code: 'HYBRID_DEPENDENCY_TERM',
+      details: [expect.objectContaining({ featureCode: 'AUTO_REORDER', requiredFeatureCode: 'INVENTORY_TRACKING' })],
+    })
+  })
+
+  it('a dependency the venue keeps past every possible end holds the line', async () => {
+    prismaMock.hybridOfferPublication.findMany.mockResolvedValue([endLine('UPSELL_AI')])
+    inventory.mockResolvedValue({
+      vivas: [{ subscriptionId: 'sub_classic', proyecciones: [{ tipo: 'PLAN', tier: 'PRO' }] }],
+      detalle: { sub_classic: { customerId: 'cus_test', terminaEn: addMonths(new Date(), 2).toISOString() } },
+      conCambiosProgramados: [],
+    })
+    await expect(buy()).resolves.toMatchObject({ status: 'QUOTED' })
   })
 })
 

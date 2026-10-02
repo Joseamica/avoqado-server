@@ -10,7 +10,7 @@ import { compileHybridPublication } from './hybridOffer.service'
 import { hybridOfferDefinition } from './hybridOffer.schema'
 import { assertPriceRuleForList } from './hybridPriceRule'
 import { ensureHybridPublicationPrices } from './hybridPrices'
-import { LOCK_WAIT, lockProducts, productKeySql, type ProductKey } from './hybridProduct'
+import { lockProducts, priceTransaction, productKeySql, type ProductKey } from './hybridProduct'
 
 export interface ListPriceRow {
   productKey: string
@@ -131,7 +131,7 @@ export async function listPriceBoard(): Promise<ListPriceRow[]> {
  * activates the list: one someone paused stays paused.
  */
 async function finalizeListPublication(key: ProductKey, listId: string, publicationId: string, expectedRevision: number, staffId: string) {
-  await prisma.$transaction(async tx => {
+  await priceTransaction(async tx => {
     await lockProducts(tx, [key])
     const list = await tx.hybridCampaign.findUniqueOrThrow({ where: { id: listId } })
     const moved = await tx.hybridCampaign.updateMany({
@@ -155,7 +155,7 @@ async function finalizeListPublication(key: ProductKey, listId: string, publicat
       ? priceOf((await tx.hybridOfferPublication.findUniqueOrThrow({ where: { id: list.currentPublicationId } })).definition)
       : null
     await audit(tx, listId, staffId, 'HYBRID_LIST_PRICE_SAVED', { productKey: key, before, after, publicationId })
-  }, LOCK_WAIT)
+  })
 }
 
 /** Steps 3–4: prepare Stripe outside any transaction; on failure the old price keeps selling and the new one stays pending. */
@@ -189,7 +189,7 @@ async function prepareAndFinalize(key: ProductKey, listId: string, publicationId
 async function saveList(product: ProductRow, definition: unknown, expectedRevision: number | null, staffId: string) {
   const key = product.productKey as ProductKey
   const compiled = compileHybridPublication(definition)
-  const pending = await prisma.$transaction(async tx => {
+  const pending = await priceTransaction(async tx => {
     await lockProducts(tx, [key])
     const found = await tx.hybridCampaign.findFirst({ where: { purpose: 'LIST', listProductKey: key } })
     if ((found?.revision ?? null) !== expectedRevision) changed()
@@ -203,9 +203,10 @@ async function saveList(product: ProductRow, definition: unknown, expectedRevisi
           listProductKey: key,
           code: `L_${tail}`.slice(0, 32),
           slug: `lista-${tail.toLowerCase().replace(/_/g, '-')}`,
-          // The publication (and so the Stripe Product, whose name is permanent) takes this name: a plan list is never
-          // named like the classic plan products «Pro» / «Premium».
-          name: product.planTier ? `Lista ${product.name}` : product.name,
+          // The publication (and so the Stripe Product, whose name is permanent, and the customer's quote lines and
+          // contracts) takes this name: a plan list reads «Plan Pro» / «Plan Premium», never like the classic plan
+          // products «Pro» / «Premium».
+          name: product.planTier ? `Plan ${product.name}` : product.name,
           startsAt: new Date(),
           endsAt: null,
           capacity: null,
@@ -237,7 +238,7 @@ async function saveList(product: ProductRow, definition: unknown, expectedRevisi
     })
     if (claimed.count !== 1) changed()
     return { listId: list.id, publicationId: publication.id, revision: list.revision + 1 }
-  }, LOCK_WAIT)
+  })
   return prepareAndFinalize(key, pending.listId, pending.publicationId, pending.revision, staffId)
 }
 
@@ -266,13 +267,19 @@ export async function saveListPrice(
   return saveList(product, parsed.data, input.expectedRevision, staffId)
 }
 
-/** Finishes a pending price (preparation failed earlier); with nothing pending it returns the row unchanged. */
-export async function retryListPrice(productKey: string, staffId: string): Promise<ListPriceRow> {
+/**
+ * Finishes a pending price (preparation failed earlier); with nothing pending it returns the row unchanged.
+ * `expectedRevision` is the row the admin saw: a newer save (a different pending) fails as superseded instead of being
+ * published under their «Reintentar». Without it (clients before the field) it finishes whatever is pending.
+ */
+export async function retryListPrice(productKey: string, staffId: string, expectedRevision?: number): Promise<ListPriceRow> {
   const list = await prisma.hybridCampaign.findFirst({
     where: { purpose: 'LIST', listProductKey: productKey },
     select: { id: true, revision: true, pendingPublicationId: true },
   })
   if (!list?.pendingPublicationId) return rowOf(productKey)
+  if (expectedRevision !== undefined && list.revision !== expectedRevision)
+    throw new ConflictError('Hay un cambio de precio más reciente.', 'HYBRID_LIST_SUPERSEDED')
   return prepareAndFinalize(productKey as ProductKey, list.id, list.pendingPublicationId, list.revision, staffId)
 }
 
@@ -319,7 +326,7 @@ export async function setListPriceStatus(
   if (PRODUCTS.find(p => p.productKey === input.productKey)?.notEditableReason)
     throw new BadRequestError('Este producto no admite precio de lista en esta pantalla.', 'HYBRID_LIST_NOT_EDITABLE')
   const key = input.productKey as ProductKey
-  await prisma.$transaction(async tx => {
+  await priceTransaction(async tx => {
     await lockProducts(tx, [key])
     const list = await tx.hybridCampaign.findFirst({ where: { purpose: 'LIST', listProductKey: key } })
     if (!list) throw new NotFoundError('Este producto no tiene precio de lista.', 'HYBRID_LIST_NOT_FOUND')
@@ -336,6 +343,6 @@ export async function setListPriceStatus(
     })
     if (updated.count !== 1) changed()
     await audit(tx, list.id, staffId, 'HYBRID_LIST_STATUS_CHANGED', { productKey: key, previous: list.status, status: input.status })
-  }, LOCK_WAIT)
+  })
   return rowOf(key)
 }

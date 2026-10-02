@@ -176,7 +176,7 @@ export function registerHybridPricingTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'preview_percent_promotion',
-    'Simula un descuento por porcentaje sobre el precio de lista: por función muestra el precio de lista, el precio con descuento y a cuánto renueva, las que se omiten por no tener lista en venta, las que quedarían bajo $10 (bloquean) y las que requieren otra función. No crea nada. Sólo para Avoqado.',
+    'Simula un descuento por porcentaje sobre el precio de lista: por función muestra el precio de lista, el precio con descuento y a cuánto renueva, las que se omiten por no tener lista en venta, las que quedarían bajo $10 (bloquean), las que requieren otra función y, en «overlaps», las promociones activas de esa misma función cuya vigencia se traslapa (es un aviso: no bloquea). No crea nada. Sólo para Avoqado.',
     percentPromotionBody.shape,
     async input => {
       if (!scope.isSuperAdmin) return forbidden()
@@ -215,6 +215,8 @@ export function registerHybridPricingTools(server: McpServer, scope: McpScope) {
                 renovacion: row.renewalPrice,
                 estado: row.status,
                 requiere: row.requires,
+                // Spec §4.4: other ACTIVE promotions of the function whose window meets this one (a warning, not a block).
+                traslapes: row.overlaps.map(overlap => ({ promocion: overlap.name, precio: overlap.price })),
               })),
             },
             mensaje: `Sin descuento → ${rows.filter(row => row.status === 'OK').length} promociones pausadas al ${input.percentOff} %. Vuelve a llamar con confirm: true.`,

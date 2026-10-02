@@ -219,6 +219,26 @@ describe(`saving the list price of ${MAIN}`, () => {
     await expect(retryListPrice(`FEATURE:${MAIN}`, staffId)).resolves.toMatchObject({ price: 299, pendingPrice: null })
     expect(await priceOf((await list(MAIN)).currentPublicationId)).toBe(299)
   })
+
+  it('(3b) «Reintentar» on a pending price someone replaced fails as superseded instead of publishing theirs (Codex C3)', async () => {
+    const key = `FEATURE:${MAIN}`
+    prepare.mockRejectedValueOnce(new Error('stripe down'))
+    await settle(saveListPrice({ productKey: key, price: 249, expectedRevision: await rev(MAIN) }, staffId))
+    const seenByA = await boardRow(MAIN)
+    expect(seenByA).toMatchObject({ price: 299, pendingPrice: 249 })
+    // B saves another price; Stripe fails again, so it stays pending too.
+    prepare.mockRejectedValueOnce(new Error('stripe down'))
+    await settle(saveListPrice({ productKey: key, price: 319, expectedRevision: await rev(MAIN) }, staffId))
+
+    await expect(retryListPrice(key, staffId, seenByA.revision!)).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'HYBRID_LIST_SUPERSEDED',
+    })
+    expect(await boardRow(MAIN)).toMatchObject({ price: 299, pendingPrice: 319 })
+    // Retried from the row that shows B's price, it goes on sale; then back to 299 for the board case below.
+    await expect(retryListPrice(key, staffId, (await boardRow(MAIN)).revision!)).resolves.toMatchObject({ price: 319, pendingPrice: null })
+    await saveListPrice({ productKey: key, price: 299, expectedRevision: await rev(MAIN) }, staffId)
+  })
 })
 
 it('(4) pausing takes the list off sale; a new price keeps it PAUSED, and resuming puts it back on sale', async () => {

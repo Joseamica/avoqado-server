@@ -10,8 +10,7 @@ import { getOrCreateStripeCustomer, stripe, STRIPE_DENTRO_DEL_CANDADO } from '@/
 import { autorizarObligacionNueva } from '@/services/access/autorizarObligacionNueva'
 import { fromStripeAmount } from '@/services/payments/providers/money'
 import { hybridOfferDefinition } from './hybridOffer.schema'
-import { lineCoverage, projectionCodes, retainedCoverage } from './hybridCoverage'
-import { assertDependencyTerms } from './hybridDependencies'
+import { assertCartDependencyTerms, projectionCodes, retainedCoverage } from './hybridCoverage'
 import { buildHybridQuote, type QuoteLine } from './hybridQuote'
 import { hybridHash } from './hybridProvider'
 import { readHybridCreditSource } from './hybridSources'
@@ -265,10 +264,11 @@ export async function observeHybridQuote(venueId: string, body: z.output<typeof 
     })),
     dropFeatureCodes: body.dropFeatureCodes,
   })
-  assertDependencyTerms([
-    ...retainedCoverage({ inventory, replaceSubscriptionIds: body.replaceSubscriptionIds, ...retained }),
-    ...lineCoverage(composition.lines, now),
-  ])
+  assertCartDependencyTerms(
+    retainedCoverage({ inventory, replaceSubscriptionIds: body.replaceSubscriptionIds, ...retained }),
+    composition.lines,
+    now,
+  )
   const compatible = evaluarCompatibilidad(
     inventory.vivas,
     { tipo: 'HYBRID', proyecciones: hybridProjections(composition.lines), reemplaza: composition.replaces },
@@ -398,10 +398,7 @@ export async function acceptHybridQuote(venueId: string, staffId: string, quoteI
       // Spec §4.2 rule 5: a cancellation scheduled after the re-observation above only shows up here, under the lock.
       // Reads only: no campaign row is written before lockProducts below.
       const retained = await readRetained(tx, venueId, inventory, saved.replaces, now)
-      assertDependencyTerms([
-        ...retainedCoverage({ inventory, replaceSubscriptionIds: saved.replaces, ...retained }),
-        ...lineCoverage(saved.lines, now),
-      ])
+      assertCartDependencyTerms(retainedCoverage({ inventory, replaceSubscriptionIds: saved.replaces, ...retained }), saved.lines, now)
       const claimed = await tx.hybridPurchase.updateMany({
         where: { id: quoteId, venueId, status: 'QUOTED', quoteExpiresAt: { gt: now } },
         data: {

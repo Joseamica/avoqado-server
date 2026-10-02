@@ -3,7 +3,7 @@ import { FEATURE_CATALOG } from '@/config/featureCatalog'
 import { PAID_PLAN_TIER_CODES } from '@/services/access/basePlan.service'
 import type { InventarioDeObligaciones } from '@/services/access/inventarioDeObligaciones'
 import type { Proyeccion } from '@/services/access/obligacionesDeCobro'
-import type { CoverageItem } from './hybridDependencies'
+import { assertDependencyTerms, type CoverageItem } from './hybridDependencies'
 import { hybridOfferDefinition, type HybridOfferDefinition } from './hybridOffer.schema'
 import { planIncludes } from './hybridOffer.service'
 
@@ -37,6 +37,23 @@ export function lineCoverage(
       unit: { kind: 'LINE' as const, publicationId: line.publicationId },
     }))
   })
+}
+
+/**
+ * Latest start of an accepted purchase's Stripe period, after its acceptance: provisioning may journal the subscription
+ * until `paymentExpiresAt` (acceptance + 23 h, `acceptHybridQuote`) and then create it under that journal's key for 23 h
+ * more (`recordedStripeWrite`); one more hour covers the calls in flight. An END line runs its cycles from that start.
+ */
+export const MAX_START_DELAY_MS = 47 * 3600000
+
+/**
+ * Spec §4.2 rule 2 for a cart: its END lines start with the Stripe period, anywhere from `now` to MAX_START_DELAY_MS
+ * later. Both ends are checked: a late start lets a new line outlive a dependency the venue keeps, an early one lets a
+ * kept function outlive a new dependency line (lines of one cart share the start, so they shift together).
+ */
+export function assertCartDependencyTerms(retained: CoverageItem[], lines: Parameters<typeof lineCoverage>[0], now: Date): void {
+  for (const start of [now, new Date(now.getTime() + MAX_START_DELAY_MS)])
+    assertDependencyTerms([...retained, ...lineCoverage(lines, start)])
 }
 
 /** What the quote already read about the venue, without the subscriptions it replaces. */

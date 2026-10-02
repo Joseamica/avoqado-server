@@ -98,7 +98,16 @@ beforeEach(() => {
   preview.mockResolvedValue({
     creatable: true,
     rows: [
-      { featureCode: 'CFDI', name: 'Facturación electrónica', listPrice: 599, price: 479.2, renewalPrice: 599, status: 'OK', requires: [] },
+      {
+        featureCode: 'CFDI',
+        name: 'Facturación electrónica',
+        listPrice: 599,
+        price: 479.2,
+        renewalPrice: 599,
+        status: 'OK',
+        requires: [],
+        overlaps: [{ campaignId: 'c9', name: 'Otoño · Facturación', price: 399 }],
+      },
     ],
   })
   create.mockResolvedValue({ groupId: 'group-1', campaignIds: ['c1'] })
@@ -241,7 +250,12 @@ describe('list prices and «% de descuento» from the customer MCP (superadmin o
   it('create_percent_promotion previews per function before creating; with confirm it creates and audits', async () => {
     const first = read(await call('create_percent_promotion', percentBody))
     expect(first).toMatchObject({ ok: false, requiresConfirmation: true })
-    expect(first.preview.funciones[0]).toMatchObject({ precioLista: 599, precioConDescuento: 479.2, renovacion: 599 })
+    expect(first.preview.funciones[0]).toMatchObject({
+      precioLista: 599,
+      precioConDescuento: 479.2,
+      renovacion: 599,
+      traslapes: [{ promocion: 'Otoño · Facturación', precio: 399 }],
+    })
     expect(preview).toHaveBeenCalledWith(percentBody)
     expect(create).not.toHaveBeenCalled()
     const done = read(await call('create_percent_promotion', { ...percentBody, confirm: true }))

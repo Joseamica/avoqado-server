@@ -117,8 +117,18 @@ describe('superadmin «Precios» HTTP contract', () => {
   it('reads the board, retries a pending price and changes a list status', async () => {
     await as(request(app).get(base)).expect(200)
     expect(board).toHaveBeenCalledWith()
+    // A client from before the field sends no body: the retry finishes whatever is pending, as it always did.
     await as(request(app).post(`${base}/lists/FEATURE%3ACFDI/retry`)).expect(200)
-    expect(retry).toHaveBeenCalledWith('FEATURE:CFDI', 'superadmin-1')
+    expect(retry).toHaveBeenLastCalledWith('FEATURE:CFDI', 'superadmin-1', undefined)
+    // The revision the admin saw travels to the service, which refuses a newer pending (Codex C3).
+    await as(request(app).post(`${base}/lists/FEATURE%3ACFDI/retry`))
+      .send({ expectedRevision: 4 })
+      .expect(200)
+    expect(retry).toHaveBeenLastCalledWith('FEATURE:CFDI', 'superadmin-1', 4)
+    await as(request(app).post(`${base}/lists/FEATURE%3ACFDI/retry`))
+      .send({ expectedRevision: '4' })
+      .expect(400)
+    expect(retry).toHaveBeenCalledTimes(2)
     await as(request(app).post(`${base}/lists/FEATURE%3ACFDI/status`))
       .send({ status: 'PAUSED', expectedRevision: 5 })
       .expect(200)

@@ -216,9 +216,36 @@ it('(1) the preview marks every function: on sale, under $10 (blocks) and withou
   expect(preview).toEqual({
     creatable: false,
     rows: [
-      { featureCode: CHEAP, name: expect.any(String), listPrice: 20, price: 2, renewalPrice: 20, status: 'BELOW_MINIMUM', requires: [] },
-      { featureCode: MAIN, name: expect.any(String), listPrice: 599, price: 59.9, renewalPrice: 599, status: 'OK', requires: [] },
-      { featureCode: NO_LIST, name: expect.any(String), listPrice: null, price: null, renewalPrice: null, status: 'NO_LIST', requires: [] },
+      {
+        featureCode: CHEAP,
+        name: expect.any(String),
+        listPrice: 20,
+        price: 2,
+        renewalPrice: 20,
+        status: 'BELOW_MINIMUM',
+        requires: [],
+        overlaps: [],
+      },
+      {
+        featureCode: MAIN,
+        name: expect.any(String),
+        listPrice: 599,
+        price: 59.9,
+        renewalPrice: 599,
+        status: 'OK',
+        requires: [],
+        overlaps: [],
+      },
+      {
+        featureCode: NO_LIST,
+        name: expect.any(String),
+        listPrice: null,
+        price: null,
+        renewalPrice: null,
+        status: 'NO_LIST',
+        requires: [],
+        overlaps: [],
+      },
     ],
   })
   // Never raised to $10 in silence: the % promised would change (spec §4.3).
@@ -325,6 +352,23 @@ describe(`a 20 % group over ${MAIN} (list 599, 3 cycles)`, () => {
       grouped,
     )
     expect(await campaign(campaignId)).toMatchObject({ status: 'ACTIVE', revision })
+  })
+
+  it('(2c) previewing another discount over the same function warns of the active one whose window it meets (spec §4.4)', async () => {
+    const { name } = await campaign(campaignId)
+    const overlapping = await previewPercentPromotion(body([MAIN, CHEAP], 10, null))
+    expect(overlapping.rows.find(row => row.featureCode === MAIN)?.overlaps).toEqual([{ campaignId, name, price: 479.2 }])
+    expect(overlapping.rows.find(row => row.featureCode === CHEAP)?.overlaps).toEqual([])
+    // A warning, never a block.
+    expect(overlapping.creatable).toBe(true)
+    // A window that starts once the active one ended meets nothing.
+    const { endsAt } = await group(groupId)
+    const later = {
+      ...body([MAIN], 10, null),
+      startsAt: new Date(endsAt.getTime() + minute).toISOString(),
+      endsAt: new Date(endsAt.getTime() + 7 * 24 * 60 * minute).toISOString(),
+    }
+    expect((await previewPercentPromotion(later)).rows[0].overlaps).toEqual([])
   })
 
   it('(3) pause → lower the list → recalculate → reactivate, keeping identity, capacity and redemptions', async () => {

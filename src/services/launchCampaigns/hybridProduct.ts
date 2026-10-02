@@ -1,4 +1,6 @@
 import { Prisma } from '@prisma/client'
+import { ConflictError } from '@/errors/AppError'
+import prisma from '@/utils/prismaClient'
 import type { HybridOfferDefinition } from './hybridOffer.schema'
 
 export type ProductKey = `FEATURE:${string}` | 'PLAN:PRO' | 'PLAN:PREMIUM'
@@ -20,8 +22,22 @@ export function productKeySql(alias: string): Prisma.Sql {
   return Prisma.sql`(CASE WHEN ${d}->>'kind' = 'PLAN' THEN 'PLAN:' || (${d}->>'planTier') WHEN ${d}->>'kind' = 'FEATURES' AND jsonb_array_length(${d}->'featureCodes') = 1 THEN 'FEATURE:' || (${d}->'featureCodes'->>0) END)`
 }
 
-/** Catalog price writes queue on the product locks behind each other (list saves, groups): room to wait, no P2028. */
-export const LOCK_WAIT = { timeout: 15_000 }
+/** Catalog price writes queue on the product locks behind each other (list saves, groups, the editor): room to wait. */
+const LOCK_WAIT = { timeout: 15_000 }
+
+/**
+ * Every catalog transaction that takes product locks: it may wait LOCK_WAIT for them, and running out of it (P2028) is a
+ * retryable 409, never a 500.
+ */
+export async function priceTransaction<T>(fn: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> {
+  try {
+    return await prisma.$transaction(fn, LOCK_WAIT)
+  } catch (error) {
+    if ((error as { code?: string }).code === 'P2028')
+      throw new ConflictError('Otra operación está cambiando el precio de este producto; reintenta en unos segundos.', 'HYBRID_PRICE_BUSY')
+    throw error
+  }
+}
 
 /** Catalog price writes serialize per product; many products are locked deduplicated and sorted (no inverse-order deadlock). */
 export async function lockProducts(tx: Prisma.TransactionClient, keys: string[]) {

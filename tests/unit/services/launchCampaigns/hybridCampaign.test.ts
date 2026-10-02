@@ -327,6 +327,18 @@ it('broadcasts only a campaign invalidation to superadmins after the transaction
   expect(broadcast).not.toHaveBeenCalled()
 })
 
+// Codex C4: waiting on the product lock gets the catalog's 15 s; running out of it is a retryable 409, never a 500.
+it('publishing waits on the product lock with the catalog budget, and running out of it is a retryable 409', async () => {
+  await publishHybridCampaign('campaign1', 1, 'staff1')
+  expect(db.$transaction).toHaveBeenLastCalledWith(expect.any(Function), { timeout: 15_000 })
+  db.$transaction.mockRejectedValueOnce(Object.assign(new Error('Transaction already closed'), { code: 'P2028' }))
+  await expect(publishHybridCampaign('campaign1', 1, 'staff1')).rejects.toMatchObject({
+    statusCode: 409,
+    code: 'HYBRID_PRICE_BUSY',
+    message: 'Otra operación está cambiando el precio de este producto; reintenta en unos segundos.',
+  })
+})
+
 it('pages campaign redemptions with a total and exposes the saved issue without leaking customer/payment URLs', async () => {
   const { listHybridRedemptions } = await import('@/services/launchCampaigns/hybridCampaign.service')
   db.hybridCampaign.findUnique.mockResolvedValue({ id: 'campaign' })

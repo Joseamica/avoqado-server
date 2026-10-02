@@ -23,6 +23,8 @@ const listStatusBody = z
   .object({ status: z.enum(['ACTIVE', 'PAUSED'], { errorMap }), expectedRevision: revision }, { errorMap })
   .strict('Campo no admitido')
 const recalculateBody = z.object({ expectedRevision: revision }, { errorMap }).strict('Campo no admitido')
+// The revision of the row whose pending price the admin retries; optional for clients from before the field.
+const retryBody = z.object({ expectedRevision: revision.optional() }, { errorMap }).strict('Campo no admitido')
 const gapVenuesQuery = z
   .object(
     {
@@ -71,9 +73,11 @@ export const saveList = asyncHandler(async (req, res) => {
   const body = parse(listPriceBody, req.body)
   res.json({ success: true, data: await saveListPrice({ productKey: key, ...body }, req.authContext!.userId) })
 })
-export const retryList = asyncHandler(async (req, res) =>
-  res.json({ success: true, data: await retryListPrice(productKey(req.params.productKey), req.authContext!.userId) }),
-)
+export const retryList = asyncHandler(async (req, res) => {
+  const key = productKey(req.params.productKey)
+  const { expectedRevision } = parse(retryBody, req.body ?? {})
+  res.json({ success: true, data: await retryListPrice(key, req.authContext!.userId, expectedRevision) })
+})
 export const listStatus = asyncHandler(async (req, res) => {
   const key = productKey(req.params.productKey)
   const body = parse(listStatusBody, req.body)

@@ -8,7 +8,7 @@ import { BadRequestError, ConflictError, NotFoundError } from '@/errors/AppError
 import { compileHybridPublication } from './hybridOffer.service'
 import { hybridOfferDefinition, type HybridOfferDefinition } from './hybridOffer.schema'
 import { assertPromotionBelowList } from './hybridPriceRule'
-import { lockProducts, productKeyOf } from './hybridProduct'
+import { lockProducts, priceTransaction, productKeyOf } from './hybridProduct'
 
 const errorMap: z.ZodErrorMap = () => ({ message: 'Valor requerido o formato no válido' })
 export const hybridCampaignBody = z
@@ -130,30 +130,34 @@ export async function createHybridCampaign(input: unknown, staffId: string) {
 export async function updateHybridCampaign(id: string, input: unknown, staffId: string) {
   const { expectedRevision, ...body } = parse(hybridCampaignUpdateBody, input)
   const data = draftData(body)
-  return prisma
-    .$transaction(async tx => {
-      const current = await tx.hybridCampaign.findUnique({ where: { id } })
-      // A LIST is priced only from «Precios» (spec §4.2): to this editor it does not exist.
-      if (!current || current.purpose === 'LIST') throw new NotFoundError('Oferta no encontrada.')
-      assertNotGrouped(current)
-      if (current.revision !== expectedRevision) changed()
-      if (current.status === 'ENDED') throw new ConflictError('Esta oferta terminó. Duplica la ficha para crear otra.')
-      if (current.code !== data.code || current.slug !== data.slug)
-        throw new BadRequestError('El código y la dirección no cambian. Duplica la oferta.')
-      if (data.capacity < current.reservedCount + current.redeemedCount)
-        throw new ConflictError('El cupo no puede ser menor a los lugares ya comprometidos.')
-      const result = await tx.hybridCampaign.updateMany({
-        where: { id, revision: expectedRevision, reservedCount: current.reservedCount, redeemedCount: current.redeemedCount },
-        data: { ...data, revision: { increment: 1 } },
-      })
-      if (result.count !== 1) changed()
-      await audit(tx, id, staffId, 'HYBRID_CAMPAIGN_UPDATED', { revision: expectedRevision + 1 })
-      return tx.hybridCampaign.findUniqueOrThrow({ where: { id } })
+  return priceTransaction(async tx => {
+    const current = await tx.hybridCampaign.findUnique({ where: { id } })
+    // A LIST is priced only from «Precios» (spec §4.2): to this editor it does not exist.
+    if (!current || current.purpose === 'LIST') throw new NotFoundError('Oferta no encontrada.')
+    assertNotGrouped(current)
+    if (current.revision !== expectedRevision) changed()
+    if (current.status === 'ENDED') throw new ConflictError('Esta oferta terminó. Duplica la ficha para crear otra.')
+    if (current.code !== data.code || current.slug !== data.slug)
+      throw new BadRequestError('El código y la dirección no cambian. Duplica la oferta.')
+    if (data.capacity < current.reservedCount + current.redeemedCount)
+      throw new ConflictError('El cupo no puede ser menor a los lugares ya comprometidos.')
+    // An ACTIVE promotion keeps selling its publication: a window (or capacity) that reopens puts that price on sale again,
+    // and its list may have dropped while it was out of its window (the list rule skips promotions no longer in force).
+    if (current.status === 'ACTIVE' && data.endsAt > new Date()) {
+      const onSale = await loadCurrentPublication(tx, current)
+      if (onSale) await lockAndCheckListRule(tx, hybridOfferDefinition.parse(onSale.definition))
+    }
+    const result = await tx.hybridCampaign.updateMany({
+      where: { id, revision: expectedRevision, reservedCount: current.reservedCount, redeemedCount: current.redeemedCount },
+      data: { ...data, revision: { increment: 1 } },
     })
-    .then(async row => {
-      await notifyCampaign(id)
-      return row
-    })
+    if (result.count !== 1) changed()
+    await audit(tx, id, staffId, 'HYBRID_CAMPAIGN_UPDATED', { revision: expectedRevision + 1 })
+    return tx.hybridCampaign.findUniqueOrThrow({ where: { id } })
+  }).then(async row => {
+    await notifyCampaign(id)
+    return row
+  })
 }
 
 /**
@@ -203,12 +207,10 @@ export async function publishWithin(
 }
 
 export async function publishHybridCampaign(id: string, expectedRevision: number, staffId: string) {
-  return prisma
-    .$transaction(tx => publishWithin(tx, id, expectedRevision, staffId))
-    .then(async row => {
-      await notifyCampaign(id)
-      return row
-    })
+  return priceTransaction(tx => publishWithin(tx, id, expectedRevision, staffId)).then(async row => {
+    await notifyCampaign(id)
+    return row
+  })
 }
 
 // Superadmin's «Campañas» list leaves out the campaigns a «% de descuento» group owns (they show once, as their group).
@@ -379,16 +381,14 @@ export async function setHybridCampaignStatus(id: string, input: unknown, staffI
     await ensureHybridPublicationPrices(publication.id)
     goingOnSale = hybridOfferDefinition.parse(publication.definition)
   }
-  return prisma
-    .$transaction(async tx => {
-      // (Re)activating puts the price on sale again: its list may have dropped since it was published.
-      if (goingOnSale) await lockAndCheckListRule(tx, goingOnSale)
-      return setCampaignStatusWithin(tx, current, body.status, staffId, body.publicationId ?? null)
-    })
-    .then(async row => {
-      await notifyCampaign(id)
-      return row
-    })
+  return priceTransaction(async tx => {
+    // (Re)activating puts the price on sale again: its list may have dropped since it was published.
+    if (goingOnSale) await lockAndCheckListRule(tx, goingOnSale)
+    return setCampaignStatusWithin(tx, current, body.status, staffId, body.publicationId ?? null)
+  }).then(async row => {
+    await notifyCampaign(id)
+    return row
+  })
 }
 
 /** Public data only; private cohort identifiers and editable draft terms never leave the server. */

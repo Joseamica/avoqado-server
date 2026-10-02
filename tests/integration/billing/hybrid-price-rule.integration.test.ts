@@ -3,7 +3,12 @@ import prisma from '@/utils/prismaClient'
 jest.mock('@/services/launchCampaigns/hybridPrices', () => ({ ensureHybridPublicationPrices: jest.fn(async () => undefined) }))
 import { compileHybridPublication } from '@/services/launchCampaigns/hybridOffer.service'
 import { hybridOfferDefinition } from '@/services/launchCampaigns/hybridOffer.schema'
-import { createHybridCampaign, publishHybridCampaign, setHybridCampaignStatus } from '@/services/launchCampaigns/hybridCampaign.service'
+import {
+  createHybridCampaign,
+  publishHybridCampaign,
+  setHybridCampaignStatus,
+  updateHybridCampaign,
+} from '@/services/launchCampaigns/hybridCampaign.service'
 import { lockProducts, productKeyOf, productKeySql, type ProductKey } from '@/services/launchCampaigns/hybridProduct'
 import { assertPriceRuleForList, violatesListRule } from '@/services/launchCampaigns/hybridPriceRule'
 
@@ -16,6 +21,8 @@ const AUDIT = 'VENUE_AUDIT_LOG'
 const NO_LIST = 'TRANSACTION_EXPORT'
 const FIRST_LIST = 'PRICE_LABELS'
 const RACE = 'GOOGLE_REVIEW_REDIRECT'
+// Priced by no suite on this DB (hybrid-delivery uses it on its own database).
+const REOPEN = 'ADVANCED_REPORTS'
 let staffId: string
 let n = 0
 
@@ -429,3 +436,80 @@ it.each([
   expect(rowFree).toBe(true)
   expect(result.error).toBeNull()
 })
+
+/** The editor's body for a campaign as stored, with a new window end. */
+async function extend(id: string, endsAt: Date) {
+  const current = await row(id)
+  return updateHybridCampaign(
+    id,
+    {
+      code: current.code,
+      slug: current.slug,
+      name: current.name,
+      startsAt: current.startsAt.toISOString(),
+      endsAt: endsAt.toISOString(),
+      capacity: current.capacity,
+      audience: current.audience,
+      eligibleOrganizationIds: current.eligibleOrganizationIds,
+      listed: current.listed,
+      definition: current.draftDefinition,
+      expectedRevision: current.revision,
+    },
+    staffId,
+  )
+}
+
+// Codex C1: R-4A lets a list drop under an ACTIVE promotion whose window ended; the editor must not reopen that window
+// at a price above today's list.
+it("(8) extending an expired ACTIVE promotion is held to today's list; one that still fits it extends", async () => {
+  const key: ProductKey = `FEATURE:${REOPEN}`
+  const list = await createList(key, feature(REOPEN, 100))
+  const above = await promotion(feature(REOPEN, 80, { kind: 'REPRICE', price: 100 }))
+  const fits = await promotion(feature(REOPEN, 60, { kind: 'REPRICE', price: 70 }))
+  for (const id of [above, fits]) {
+    await publish(id)
+    await activate(id)
+  }
+  // Their window passes while they stay ACTIVE; then the list drops to 70 (allowed: neither is «vigente» any more).
+  const past = new Date(Date.now() - 60000)
+  await prisma.hybridCampaign.updateMany({ where: { id: { in: [above, fits] } }, data: { endsAt: past } })
+  await expect(prisma.$transaction(tx => assertPriceRuleForList(tx, key, 70))).resolves.toBeUndefined()
+  await pointList(list, feature(REOPEN, 70))
+
+  const before = await row(above)
+  const future = new Date(Date.now() + 7 * 86400000)
+  // Reopened, it would sell at 80 and renew at 100 against a list of 70.
+  await expect(extend(above, future)).rejects.toMatchObject({ statusCode: 409, code: 'HYBRID_PRICE_ABOVE_LIST' })
+  expect(await row(above)).toMatchObject({ status: 'ACTIVE', revision: before.revision, endsAt: past })
+  await expect(extend(fits, future)).resolves.toMatchObject({ status: 'ACTIVE', endsAt: future })
+})
+
+// Codex C4: the editor's publish and activation wait for the product lock with the catalog's budget (15 s, as list saves
+// and groups do); Prisma's default 5 s turned a 6 s holder into an HTTP 500.
+it.each([
+  ['publishing', false],
+  ['activating', true],
+])(
+  '%s a promotion outlasts a 6 s holder of its product lock',
+  async (_label, activating) => {
+    const promo = await promotion(feature(NO_LIST, 100))
+    if (activating) await publish(promo)
+    let entered!: () => void
+    const locked = new Promise<void>(resolve => (entered = resolve))
+    const holder = settle(
+      prisma.$transaction(
+        async tx => {
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`precio:FEATURE:${NO_LIST}`}))`
+          entered()
+          await new Promise(resolve => setTimeout(resolve, 6000))
+        },
+        { timeout: 30000 },
+      ),
+    )
+    await locked
+    const [held, result] = await Promise.all([holder, settle<unknown>(activating ? activate(promo) : publish(promo))])
+    expect(held.error).toBeNull()
+    expect(result.error).toBeNull()
+  },
+  30000,
+)
