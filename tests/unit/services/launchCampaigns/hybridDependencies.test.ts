@@ -1,6 +1,11 @@
-import { addMonths } from 'date-fns'
 import { assertDependencyTerms, dependencyTermIssues, HYBRID_DEPENDENCIES } from '@/services/launchCampaigns/hybridDependencies'
-import { assertCartDependencyTerms, lineCoverage, MAX_START_DELAY_MS, retainedCoverage } from '@/services/launchCampaigns/hybridCoverage'
+import {
+  addUtcMonths,
+  assertCartDependencyTerms,
+  lineCoverage,
+  MAX_START_DELAY_MS,
+  retainedCoverage,
+} from '@/services/launchCampaigns/hybridCoverage'
 
 const DEPS = { AUTO_REORDER: ['INVENTORY_TRACKING'] }
 const d = (iso: string) => new Date(`${iso}T12:00:00.000Z`)
@@ -144,7 +149,7 @@ describe('new cart lines as coverage', () => {
         now,
       ),
     ).toEqual([
-      { featureCode: 'INVENTORY_TRACKING', endsAt: addMonths(now, 3), unit: line('end') },
+      { featureCode: 'INVENTORY_TRACKING', endsAt: addUtcMonths(now, 3), unit: line('end') },
       { featureCode: 'AUTO_REORDER', endsAt: null, unit: line('same') },
       { featureCode: 'CFDI', endsAt: null, unit: line('same') },
       { featureCode: 'UPSELL', endsAt: null, unit: line('reprice') },
@@ -152,9 +157,9 @@ describe('new cart lines as coverage', () => {
   })
 })
 
-// Codex round 2 (R-C2c): `addMonths` clips month ends (29–31 Jan → 28 Feb), so an END line's end is not monotone in its
-// start across a local midnight. Run under TZ=UTC and TZ=America/Mexico_City: both zones reproduce it.
-describe('the start window of a cart is cut at every local midnight', () => {
+// Codex round 2 (R-C2c): month ends clip (29–31 Jan → 28 Feb), so an END line's end is not monotone in its start across
+// a midnight. Since round 3 (R-C2d) the months and the midnights are UTC, as Stripe's: the same answer under any TZ.
+describe('the start window of a cart is cut at every UTC midnight', () => {
   const upsellAi = {
     publicationId: 'end',
     featureCodes: ['UPSELL_AI'],
@@ -176,7 +181,7 @@ describe('the start window of a cart is cut at every local midnight', () => {
   it('a recovered start between the two ends outlives the dependency although both ends pass, and the cart is refused', () => {
     expect(issuesAt(accepted)).toEqual([])
     expect(issuesAt(new Date(accepted.getTime() + MAX_START_DELAY_MS))).toEqual([])
-    // Codex's start: 30 Jan 23:45 UTC ends 28 Feb 23:45 UTC (17:45 in Mexico City ends 28 Feb 17:45 = 23:45 UTC).
+    // Codex's start: 30 Jan 23:45 UTC ends 28 Feb 23:45 UTC, past the dependency.
     expect(issuesAt(new Date('2027-01-30T23:45:00.000Z'))).toHaveLength(1)
     let error: unknown
     try {
@@ -194,6 +199,58 @@ describe('the start window of a cart is cut at every local midnight', () => {
     const longer = [{ ...kept[0], endsAt: new Date('2027-03-03T00:00:00.000Z') }]
     expect(() => assertCartDependencyTerms(longer, [upsellAi], accepted)).not.toThrow()
   })
+})
+
+// Codex round 3 (R-C2d): Stripe advances a monthly cycle from its UTC anchor, clipping to the month's end. Every month
+// addition here is that one, never the process zone's: the same cart must give the same answer under any TZ (run these
+// under TZ=UTC and TZ=America/Mexico_City).
+describe("month arithmetic is Stripe's, in UTC", () => {
+  it('adds calendar months in UTC from the anchor, clipping to the month end and keeping the time', () => {
+    const plus = (iso: string, months: number) => addUtcMonths(new Date(iso), months).toISOString()
+    expect(plus('2027-01-31T05:00:00.000Z', 1)).toBe('2027-02-28T05:00:00.000Z')
+    expect(plus('2028-01-31T05:00:00.000Z', 1)).toBe('2028-02-29T05:00:00.000Z')
+    expect(plus('2027-01-31T05:00:00.000Z', 3)).toBe('2027-04-30T05:00:00.000Z')
+    expect(plus('2027-12-31T23:59:59.999Z', 2)).toBe('2028-02-29T23:59:59.999Z')
+    // From the anchor, not month after month: the 31st comes back after a short month.
+    expect(plus('2027-01-31T05:00:00.000Z', 2)).toBe('2027-03-31T05:00:00.000Z')
+    expect(plus('2027-02-28T05:00:00.000Z', 1)).toBe('2027-03-28T05:00:00.000Z')
+    expect(plus('2027-01-15T00:30:00.000Z', 12)).toBe('2028-01-15T00:30:00.000Z')
+  })
+
+  const upsell = (cycles: number) => ({
+    publicationId: 'end',
+    featureCodes: ['UPSELL'],
+    terms: {
+      currency: 'MXN' as const,
+      interval: 'MONTHLY' as const,
+      price: 99,
+      taxIncluded: true as const,
+      promotionCycles: cycles,
+      renewal: { kind: 'END' as const },
+    },
+  })
+  // A kept UPSELL_AI (its scheduled cancellation) needs UPSELL until then; the cart brings UPSELL as an END line.
+  it.each([
+    ['Codex: 31 Jan → 28 Feb', '2027-01-31T05:00:00.000Z', 1, '2027-02-28T05:30:00.000Z'],
+    ['leap February', '2028-01-31T05:00:00.000Z', 1, '2028-02-29T05:30:00.000Z'],
+    ['three months', '2028-01-31T05:00:00.000Z', 3, '2028-04-30T05:30:00.000Z'],
+    ['twelve months', '2028-01-31T05:00:00.000Z', 12, '2029-01-31T05:30:00.000Z'],
+  ])(
+    '%s: a Stripe start at acceptance ends the new dependency 30 min before the kept function, so it is refused',
+    (_label, at, cycles, keptUntil) => {
+      const kept = [{ featureCode: 'UPSELL_AI', endsAt: new Date(keptUntil), unit: { kind: 'RETAINED' as const, source: 'sub_kept' } }]
+      let error: unknown
+      try {
+        assertCartDependencyTerms(kept, [upsell(cycles)], new Date(at))
+      } catch (caught) {
+        error = caught
+      }
+      expect(error).toMatchObject({
+        code: 'HYBRID_DEPENDENCY_TERM',
+        details: [expect.objectContaining({ featureCode: 'UPSELL_AI', requiredFeatureCode: 'UPSELL' })],
+      })
+    },
+  )
 })
 
 describe('what the venue keeps, with end dates', () => {
@@ -266,7 +323,7 @@ describe('what the venue keeps, with end dates', () => {
       grants: [],
     })
     expect(ends(items)).toEqual({
-      'INVENTORY_TRACKING@sub_end': addMonths(startsAt, 2).toISOString(),
+      'INVENTORY_TRACKING@sub_end': addUtcMonths(startsAt, 2).toISOString(),
       // cancelAt limits ANY contract, also SAME_PRICE and REPRICE (spec §4.2).
       'INVENTORY_TRACKING@sub_cancel': at(5).toISOString(),
       'INVENTORY_TRACKING@sub_same': null,

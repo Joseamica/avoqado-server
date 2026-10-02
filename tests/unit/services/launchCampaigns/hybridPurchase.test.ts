@@ -17,10 +17,10 @@ jest.mock('@/services/dashboard/seatReconciliation.service', () => ({ assertKeep
 const creditSource = jest.fn()
 jest.mock('@/services/launchCampaigns/hybridSources', () => ({ readHybridCreditSource: (...args: unknown[]) => creditSource(...args) }))
 import { Prisma } from '@prisma/client'
-import { addMonths } from 'date-fns'
 import { BadRequestError } from '@/errors/AppError'
 import { createHybridQuote, getHybridReplacementOptions } from '@/services/launchCampaigns/hybridPurchase.service'
 import { compileHybridPublication } from '@/services/launchCampaigns/hybridOffer.service'
+import { addUtcMonths } from '@/services/launchCampaigns/hybridCoverage'
 const pubId = 'cm123456789012345678901234'
 const campaignId = 'cm223456789012345678901234'
 const now = Date.now()
@@ -279,7 +279,7 @@ describe('an END line is checked for the latest start the purchase may still get
 
   it('a one-month UPSELL_AI over a Pro ending a minute after that month is refused: a late start outlives the Pro', async () => {
     prismaMock.hybridOfferPublication.findMany.mockResolvedValue([endLine('UPSELL_AI')])
-    const proEnds = new Date(addMonths(new Date(), 1).getTime() + minute)
+    const proEnds = new Date(addUtcMonths(new Date(), 1).getTime() + minute)
     inventory.mockResolvedValue({
       vivas: [{ subscriptionId: 'sub_classic', proyecciones: [{ tipo: 'PLAN', tier: 'PRO' }] }],
       detalle: { sub_classic: { customerId: 'cus_test', terminaEn: proEnds.toISOString() } },
@@ -297,7 +297,7 @@ describe('an END line is checked for the latest start the purchase may still get
     prismaMock.venueFeature.findMany.mockResolvedValue([
       {
         stripeSubscriptionId: null,
-        endDate: new Date(addMonths(new Date(), 1).getTime() + 60 * minute),
+        endDate: new Date(addUtcMonths(new Date(), 1).getTime() + 60 * minute),
         feature: { code: 'AUTO_REORDER' },
       },
     ])
@@ -311,7 +311,7 @@ describe('an END line is checked for the latest start the purchase may still get
     prismaMock.hybridOfferPublication.findMany.mockResolvedValue([endLine('UPSELL_AI')])
     inventory.mockResolvedValue({
       vivas: [{ subscriptionId: 'sub_classic', proyecciones: [{ tipo: 'PLAN', tier: 'PRO' }] }],
-      detalle: { sub_classic: { customerId: 'cus_test', terminaEn: addMonths(new Date(), 2).toISOString() } },
+      detalle: { sub_classic: { customerId: 'cus_test', terminaEn: addUtcMonths(new Date(), 2).toISOString() } },
       conCambiosProgramados: [],
     })
     await expect(buy()).resolves.toMatchObject({ status: 'QUOTED' })

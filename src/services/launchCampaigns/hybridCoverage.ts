@@ -1,4 +1,3 @@
-import { addDays, addMonths, startOfDay } from 'date-fns'
 import { FEATURE_CATALOG } from '@/config/featureCatalog'
 import { PAID_PLAN_TIER_CODES } from '@/services/access/basePlan.service'
 import type { InventarioDeObligaciones } from '@/services/access/inventarioDeObligaciones'
@@ -19,10 +18,26 @@ export const projectionCodes = (projection: Proyeccion): string[] => {
   return []
 }
 
+/**
+ * `date` plus `months` calendar months in UTC, the day clipped to the target month's end (31 Jan + 1 → 28 Feb, 31 Jan +
+ * 2 → 31 Mar): how Stripe advances a monthly cycle from its UTC anchor (`hybridSchedule` sends it month durations).
+ * Never the process zone: the same cart must get the same answer under any TZ.
+ */
+export function addUtcMonths(date: Date, months: number): Date {
+  const year = date.getUTCFullYear()
+  const month = date.getUTCMonth() + months
+  const lastDay = new Date(Date.UTC(year, month + 1, 0)).getUTCDate()
+  const result = new Date(date.getTime())
+  result.setUTCFullYear(year, month, Math.min(date.getUTCDate(), lastDay))
+  return result
+}
+
+const DAY_MS = 86400000
+
 const earliest = (...dates: Array<Date | null | undefined>) =>
   dates.reduce<Date | null>((min, date) => (date && (!min || date < min) ? date : min), null)
 const endOfPromotion = (terms: HybridOfferDefinition['terms'], from: Date) =>
-  terms.renewal.kind === 'END' ? addMonths(from, terms.promotionCycles ?? 0) : null
+  terms.renewal.kind === 'END' ? addUtcMonths(from, terms.promotionCycles ?? 0) : null
 
 /** New cart lines as coverage: END lines end at now + promotionCycles months; others never. */
 export function lineCoverage(
@@ -48,16 +63,16 @@ export const MAX_START_DELAY_MS = 47 * 3600000
 
 /**
  * Spec §4.2 rule 2 for a cart: its END lines start with the Stripe period, anywhere from `now` to MAX_START_DELAY_MS
- * later (lines of one cart share that start). `addMonths` clips month ends (29–31 Jan → 28 Feb), so an end is not
- * monotone in the start across a midnight of the zone date-fns uses (the runtime's). Within one such day every line end
- * moves with the start (slope 1) and a kept end not at all (slope 0), so the gap between a function and its dependency
- * is monotone on each day: the window's two ends plus both sides of each midnight inside it cover every start.
+ * later (lines of one cart share that start). `addUtcMonths` clips month ends (29–31 Jan → 28 Feb), so an end is not
+ * monotone in the start across a UTC midnight. Within one UTC day (no DST: always 24 h) every line end moves with the
+ * start (slope 1) and a kept end not at all (slope 0), so the gap between a function and its dependency is monotone on
+ * each day: the window's two ends plus both sides of each UTC midnight inside it cover every start.
  */
 export function assertCartDependencyTerms(retained: CoverageItem[], lines: Parameters<typeof lineCoverage>[0], now: Date): void {
   const latest = new Date(now.getTime() + MAX_START_DELAY_MS)
   const starts = [now, latest]
-  for (let midnight = addDays(startOfDay(now), 1); midnight <= latest; midnight = addDays(midnight, 1))
-    starts.push(new Date(midnight.getTime() - 1), midnight)
+  for (let midnight = (Math.floor(now.getTime() / DAY_MS) + 1) * DAY_MS; midnight <= latest.getTime(); midnight += DAY_MS)
+    starts.push(new Date(midnight - 1), new Date(midnight))
   for (const start of starts) assertDependencyTerms([...retained, ...lineCoverage(lines, start)])
 }
 
