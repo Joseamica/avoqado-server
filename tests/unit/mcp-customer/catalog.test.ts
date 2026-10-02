@@ -157,3 +157,38 @@ it('el catálogo de publicación contiene sólo herramientas declaradas y ningun
     expect(DIRECTORY_TOOLS.has(name)).toBe(false)
   }
 })
+
+it('el directorio publica descripciones propias, sin nombrar herramientas ni dar órdenes al asistente', () => {
+  const { DIRECTORY_TOOLS } = require('@/mcp/directory/catalog')
+  const { DIRECTORY_DESCRIPTIONS } = require('@/mcp/directory/descriptions')
+  expect(Object.keys(DIRECTORY_DESCRIPTIONS).sort()).toEqual([...DIRECTORY_TOOLS].sort())
+  // Sólo nombres con forma de identificador: palabras sueltas como «reservations» son vocabulario, no una referencia.
+  const toolNames = Object.keys(TOOL_EFFECTS).filter(n => n.includes('_'))
+  for (const [name, description] of Object.entries(DIRECTORY_DESCRIPTIONS) as Array<[string, string]>) {
+    expect(description.length).toBeGreaterThan(40)
+    for (const other of toolNames)
+      expect({ name, mentions: description.includes(other) && other !== name ? other : null }).toEqual({ name, mentions: null })
+    expect({
+      name,
+      order: description.match(/\b(never|do not|don't|always|first use|use the|show|ask|instead of|nunca|usa|muestra)\b/i)?.[0] ?? null,
+    }).toEqual({
+      name,
+      order: null,
+    })
+  }
+})
+
+it('el perfil de directorio usa su descripción y el manual conserva la original', async () => {
+  const { DIRECTORY_DESCRIPTIONS } = require('@/mcp/directory/descriptions')
+  const directory = await connected(['mcp:read'], 'directory')
+  const manual = await connected(['mcp:read'])
+  try {
+    expect((await directory.client.listTools()).tools.find(t => t.name === 'daily_sales')?.description).toBe(
+      DIRECTORY_DESCRIPTIONS.daily_sales,
+    )
+    expect((await manual.client.listTools()).tools.find(t => t.name === 'daily_sales')?.description).toBe('Ventas')
+  } finally {
+    await directory.close()
+    await manual.close()
+  }
+})
