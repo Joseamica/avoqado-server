@@ -1,3 +1,5 @@
+import { MCP_DIRECTORY_RESOURCE_URL } from './config'
+
 export const MCP_LOGIN_SCRIPT = `
 (function(){var form=document.querySelector('form');if(!form)return;var errBox=document.getElementById('mcp-err');function showError(m){if(errBox){errBox.textContent=m;errBox.style.display='block';}}function navigate(u,self){if(!self){try{if(window.top&&window.top!==window){window.top.location.href=u;return;}}catch(e){}}window.location.href=u;}form.addEventListener('submit',function(e){e.preventDefault();var btn=form.querySelector('button[type=submit]');if(btn)btn.disabled=true;fetch('/mcp-oauth/approve',{method:'POST',headers:{'X-Mcp-Submit':'fetch'},body:new URLSearchParams(new FormData(form))}).then(function(r){return r.json();}).then(function(d){if(d&&d.redirect){navigate(d.redirect,d.self===true);return;}showError((d&&d.error)||'No se pudo conectar. Intenta de nuevo.');if(btn)btn.disabled=false;}).catch(function(){showError('No se pudo conectar. Intenta de nuevo.');if(btn)btn.disabled=false;});});})();
 `
@@ -111,7 +113,11 @@ export function renderLoginPage(
       ? 'Esta conexión puede <strong>leer y realizar acciones</strong> con tus permisos. Las acciones de alto impacto piden confirmación.'
       : 'Esta conexión es de <strong>solo lectura</strong>: puede consultar información, pero no modificarla.'
   } El acceso está <strong>limitado a tu rol y tus locales</strong>. Puedes desconectarla cuando quieras.</p>`
-  const intro = `<p class="sub"><strong>${app}</strong> quiere acceder a los datos de tus locales en tu nombre.</p>`
+  const catalog =
+    p.resource === MCP_DIRECTORY_RESOURCE_URL.href
+      ? 'Catálogo de publicación: ventas, productos e inventario. No incluye cobros, reembolsos ni nómina.'
+      : 'MCP manual: operaciones disponibles según tus permisos.'
+  const intro = `<p class="sub"><strong>${app}</strong> quiere acceder a los datos de tus locales en tu nombre. ${catalog}</p>`
 
   const body = opts.orgPick
     ? `

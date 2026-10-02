@@ -7,12 +7,12 @@ import { text } from '@/mcp/respond'
 import { instrumentTools } from '@/mcp/instrument'
 import type { McpScope } from '@/mcp/scope'
 
-async function connected(scopes: string[]) {
+async function connected(scopes: string[], profile: 'manual' | 'directory' = 'manual') {
   const server = new McpServer({ name: 'catalog-test', version: '1' })
   const client = new Client({ name: 'test', version: '1' })
   const [a, b] = InMemoryTransport.createLinkedPair()
   instrumentTools(server, { staffId: 's', org: 'o' })
-  configureToolCatalog(server, { staffId: 's', activeOrg: 'o', scopes } as McpScope)
+  configureToolCatalog(server, { staffId: 's', activeOrg: 'o', scopes } as McpScope, profile)
   const read = jest.fn(async ({ mode }: { mode?: string }) =>
     text(
       mode === 'error'
@@ -121,4 +121,39 @@ it('cada herramienta del código tiene exactamente una declaración de efectos',
   }
   expect(names.length).toBe(new Set(names).size)
   expect(names.sort()).toEqual(Object.keys(TOOL_EFFECTS).sort())
+})
+
+it('directorio bloquea herramientas excluidas también por invocación directa, sin recortar el MCP manual', async () => {
+  const c = await connected(['mcp:read', 'mcp:write'], 'directory')
+  try {
+    expect((await c.client.listTools()).tools.map(t => t.name)).toEqual(['daily_sales'])
+    expect((await c.client.callTool({ name: 'record_manual_payment', arguments: {} })).isError).toBe(true)
+    expect(c.write).not.toHaveBeenCalled()
+    expect((await c.client.callTool({ name: 'daily_sales', arguments: {} })).isError).not.toBe(true)
+  } finally {
+    await c.close()
+  }
+})
+
+it('el catálogo de publicación contiene sólo herramientas declaradas y ninguna administración interna', () => {
+  const { DIRECTORY_TOOLS } = require('@/mcp/directory/catalog')
+  expect(DIRECTORY_TOOLS.size).toBeGreaterThan(0)
+  for (const name of DIRECTORY_TOOLS) expect(TOOL_EFFECTS[name]).toBeDefined()
+  for (const name of [
+    'avoqado_internal_docs',
+    'register_expense',
+    'import_expense_xml',
+    'expenses',
+    'employees',
+    'add_employee',
+    'staff_documents',
+    'issue_refund',
+    'record_manual_payment',
+    'create_payment_link',
+    'accept_hybrid_purchase',
+    'venue_feature_grid',
+    'create_launch_campaign',
+  ]) {
+    expect(DIRECTORY_TOOLS.has(name)).toBe(false)
+  }
 })

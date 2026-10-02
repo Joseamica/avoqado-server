@@ -50,6 +50,14 @@ const CUSTOMER_BOUNDARY = `6. BOUNDARY — you may explain WHAT Avoqado does and
 const SUPERADMIN_NOTE = `6. This connection belongs to a platform SUPERADMIN (Avoqado staff). You MAY discuss how Avoqado is built: use the \`avoqado_internal_docs\` tool (index first, then the document) for architecture, payments/settlement flows, merchant models, permissions, database schema and terminal internals, and answer from those documents rather than from memory. Tool errors on this connection are raw (not sanitized) to help debugging.`
 
 /** Build the instructions string for a connection. Superadmins get internals access; everyone else gets the boundary. */
-export function buildMcpInstructions(opts: { isSuperAdmin: boolean }): string {
+export function buildMcpInstructions(opts: { isSuperAdmin: boolean; directory?: boolean }): string {
+  if (opts.directory)
+    return [
+      DATA_RULES,
+      VENUE_RULES,
+      INVENTORY_RULES,
+      CUSTOMER_BOUNDARY,
+      'DIRECTORY CATALOG: only sales summaries, product catalog and ingredient inventory are available in this connection. Do not offer payment/refund execution, fiscal/payroll records, subscription purchases or internal platform administration. Explain unavailable operations without switching endpoint or requesting broader access. Do not claim any platform has certified this catalog before approval.',
+    ].join('\n\n')
   return [DATA_RULES, VENUE_RULES, INVENTORY_RULES, PRODUCT_RULES, opts.isSuperAdmin ? SUPERADMIN_NOTE : CUSTOMER_BOUNDARY].join('\n\n')
 }

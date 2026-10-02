@@ -73,6 +73,8 @@ import { resolveMasterCatalogAccess } from '@/services/master-catalog/masterCata
 import { buildMcpInstructions } from './instructions'
 import { registerHelpTools } from './tools/help'
 import { motivoDeSesionInvalidada } from '@/utils/passwordChangeGuard'
+import { MCP_DIRECTORY_RESOURCE_URL, MCP_RESOURCE_URL } from './oauth/config'
+import type { McpProfile } from './directory/catalog'
 
 /** Flags gating PlayTelecom / white-label-only tool groups, computed once per connection. */
 export interface ToolRegistrationFlags {
@@ -176,8 +178,11 @@ const SERVER_INFO = { name: 'avoqado-customer-mcp', version: '0.1.0' }
 const SERVER_CAPABILITIES = { tools: { listChanged: true } }
 
 /** A bare MCP server with the process-wide identity, capabilities and instructions. */
-export function createMcpServer(isSuperAdmin: boolean): McpServer {
-  return new McpServer(SERVER_INFO, { instructions: buildMcpInstructions({ isSuperAdmin }), capabilities: SERVER_CAPABILITIES })
+export function createMcpServer(isSuperAdmin: boolean, profile: McpProfile = 'manual'): McpServer {
+  return new McpServer(profile === 'directory' ? { ...SERVER_INFO, name: 'avoqado-directory-mcp' } : SERVER_INFO, {
+    instructions: buildMcpInstructions({ isSuperAdmin, directory: profile === 'directory' }),
+    capabilities: SERVER_CAPABILITIES,
+  })
 }
 
 /**
@@ -185,22 +190,27 @@ export function createMcpServer(isSuperAdmin: boolean): McpServer {
  * one thing that changes its answer) — one indexed query instead of the whole scope. That is what lets the MCP guard
  * give the handshake no slot, so a new conversation can always connect (Codex, round 3).
  */
-export async function buildHandshakeServer(staffId: string): Promise<McpServer> {
-  return createMcpServer(await isActiveSuperAdmin(staffId))
+export async function buildHandshakeServer(staffId: string, profile: McpProfile = 'manual'): Promise<McpServer> {
+  return createMcpServer(await isActiveSuperAdmin(staffId), profile)
 }
 
 /** Build a per-request MCP server bound to the caller's resolved scope. */
-async function buildServerForIdentity(staffId: string, activeOrg: string, scopes?: string[]): Promise<McpServer> {
+async function buildServerForIdentity(
+  staffId: string,
+  activeOrg: string,
+  scopes?: string[],
+  profile: McpProfile = 'manual',
+): Promise<McpServer> {
   const scope = await resolveScope(staffId, activeOrg)
   // Never discard an explicit empty grant or give legacy tokens implicit write access.
   scope.scopes = scopes ?? ['mcp:read']
 
   const isSuperAdmin = scope.isSuperAdmin === true
-  const server = createMcpServer(isSuperAdmin)
+  const server = createMcpServer(isSuperAdmin, profile)
   // Log every tool call (must run BEFORE registering tools). isSuperAdmin: raw errors for staff,
   // sanitized (generic message + ref) for customers — see sanitizeThrownError.
-  instrumentTools(server, { staffId, org: activeOrg, isSuperAdmin })
-  configureToolCatalog(server, scope)
+  instrumentTools(server, { staffId, org: activeOrg, isSuperAdmin: isSuperAdmin && profile === 'manual' })
+  configureToolCatalog(server, scope, profile)
 
   const [serializedEnabled, whiteLabelEnabled, catalogAccess] = await Promise.all([
     moduleService.anyVenueHasModule(scope.allowedVenueIds, MODULE_CODES.SERIALIZED_INVENTORY),
@@ -228,7 +238,7 @@ async function buildServerForIdentity(staffId: string, activeOrg: string, scopes
  * Phase 1: requireBearerAuth populated req.auth.extra ({ staffId, activeOrg }) via
  * provider.verifyAccessToken. Phase-0 dev server passes a raw bearer header instead.
  */
-export async function handleMcpRequest(req: Request, res: Response): Promise<void> {
+async function handleMcpProfileRequest(req: Request, res: Response, profile: McpProfile): Promise<void> {
   // Running work of this request: the MCP guard frees the caller's slot only when it (and every tool it
   // started) is over — a closed connection does not stop it.
   const endWork = beginWork()
@@ -239,13 +249,16 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
     let scopes: string[] | undefined
     const extra = (req as { auth?: { extra?: Record<string, unknown> } }).auth?.extra
     if (extra && typeof extra.staffId === 'string' && typeof extra.activeOrg === 'string') {
+      const resource = (req as Request & { auth?: { resource?: URL } }).auth?.resource
+      if (resource?.href !== (profile === 'directory' ? MCP_DIRECTORY_RESOURCE_URL : MCP_RESOURCE_URL).href)
+        throw new Error('Invalid MCP token resource')
       staffId = extra.staffId
       activeOrg = extra.activeOrg
       // provider.verifyAccessToken threads the token's real granted scopes here.
       if (Array.isArray(extra.scopes)) scopes = extra.scopes.filter((s): s is string => typeof s === 'string')
     } else {
       const token = (req.headers.authorization ?? '').replace(/^Bearer\s+/i, '')
-      const payload = verifyMcpToken(token) // throws on bad / expired / wrong-audience → 401 below
+      const payload = verifyMcpToken(token, profile) // throws on bad / expired / wrong-audience → 401 below
       // Codex S4: el mismo corte de sesión que en `provider.verifyAccessToken` (este es el camino del
       // servidor de desarrollo, sin `requireBearerAuth`). El mensaje dice «token» → 401 abajo.
       if (await motivoDeSesionInvalidada(payload.sub, emisionDeCadena(payload))) throw new Error('MCP token revoked by session cutoff')
@@ -255,7 +268,9 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
     }
     const message = describeMcpMessage(req.body)
     const isHandshake = message.kind === 'request' && MCP_HANDSHAKE_METHODS.has(message.method ?? '')
-    const server = isHandshake ? await buildHandshakeServer(staffId) : await buildServerForIdentity(staffId, activeOrg, scopes)
+    const server = isHandshake
+      ? await buildHandshakeServer(staffId, profile)
+      : await buildServerForIdentity(staffId, activeOrg, scopes, profile)
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined })
     res.on('close', () => {
       void transport.close()
@@ -295,4 +310,12 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
   } finally {
     endWork()
   }
+}
+
+export async function handleMcpRequest(req: Request, res: Response): Promise<void> {
+  return handleMcpProfileRequest(req, res, 'manual')
+}
+
+export async function handleDirectoryMcpRequest(req: Request, res: Response): Promise<void> {
+  return handleMcpProfileRequest(req, res, 'directory')
 }

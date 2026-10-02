@@ -4,6 +4,7 @@ import type { McpScope } from './scope'
 import { ScopeError } from './errors'
 import { text } from './respond'
 import { CONFIRMATION_TTL, issueConfirmation, validConfirmation } from './confirmation'
+import { DIRECTORY_TOOLS, type McpProfile } from './directory/catalog'
 
 /** Explicit effects, never guessed from a name or permission suffix. New tools must declare one. */
 export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
@@ -361,7 +362,7 @@ export function structureToolResult(result: unknown) {
 }
 
 /** Uses the SDK's disabled-tool gate for BOTH discovery and direct tools/call requests. */
-export function configureToolCatalog(server: McpServer, scope: McpScope): void {
+export function configureToolCatalog(server: McpServer, scope: McpScope, profile: McpProfile = 'manual'): void {
   const host = server as unknown as Record<string, (...args: any[]) => any>
   const register = host.registerTool.bind(server)
   const registerCatalogTool = (name: string, config: Record<string, any>, callback: (...args: any[]) => any) => {
@@ -381,7 +382,8 @@ export function configureToolCatalog(server: McpServer, scope: McpScope): void {
             .describe('Token de la vista previa de ESTA operación. Confirma sólo después de la autorización humana.'),
         }
       : config.inputSchema
-    const granted = () => (scope.scopes ?? ['mcp:read']).includes(readOnly ? 'mcp:read' : 'mcp:write')
+    const included = profile === 'manual' || DIRECTORY_TOOLS.has(name)
+    const granted = () => included && (scope.scopes ?? ['mcp:read']).includes(readOnly ? 'mcp:read' : 'mcp:write')
     const tool = register(
       name,
       {
@@ -399,6 +401,7 @@ export function configureToolCatalog(server: McpServer, scope: McpScope): void {
         },
       },
       async (...args: any[]) => {
+        if (!included) throw new ScopeError('Esta operación no está disponible en el catálogo de publicación de Avoqado.')
         if (!granted())
           throw new ScopeError(
             `Esta conexión requiere autorizar ${readOnly ? 'mcp:read' : 'mcp:write'}. Vuelve a conectar con ese permiso.`,

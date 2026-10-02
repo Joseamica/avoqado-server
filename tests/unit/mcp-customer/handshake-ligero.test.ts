@@ -90,7 +90,7 @@ describe('handleMcpRequest elige el servidor ligero sólo para el saludo', () =>
       '/mcp',
       express.json(),
       (req: { auth?: unknown }, _res: unknown, next: () => void) => {
-        req.auth = { extra: { staffId: 'staff-1', activeOrg: 'org-1' } }
+        req.auth = { resource: new URL('http://localhost:12344/mcp'), extra: { staffId: 'staff-1', activeOrg: 'org-1' } }
         next()
       },
       handleMcpRequest,

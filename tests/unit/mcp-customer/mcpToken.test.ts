@@ -41,3 +41,14 @@ describe('emisionDeCadena — la fecha con la que se juzga el corte de sesión',
     expect(provider).toMatch(/emisionDeCadena\(/)
   })
 })
+
+describe('audiencia del catálogo de directorio', () => {
+  it('no acepta el token de directorio en el MCP manual ni el manual en el directorio', () => {
+    const directory = issueMcpToken('s', 'o', 3600, 'c', ['mcp:read'], undefined, 'directory')
+    expect(() => verifyMcpToken(directory)).toThrow()
+    expect(verifyMcpToken(directory, 'directory').profile).toBe('directory')
+    const manual = issueMcpToken('s', 'o')
+    expect(() => verifyMcpToken(manual, 'directory')).toThrow()
+    expect(verifyMcpToken(manual).sub).toBe('s')
+  })
+})
