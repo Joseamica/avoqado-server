@@ -30,7 +30,11 @@ const mockedLogger = logger as unknown as { info: jest.Mock; warn: jest.Mock; er
 const mockResolveScope = resolveScope as jest.Mock
 
 function makeReq(body: unknown) {
-  return { auth: { extra: { staffId: 'staff-1', activeOrg: 'org-1' } }, body, headers: {} } as unknown as Request
+  return {
+    auth: { resource: new URL('http://localhost:12344/mcp'), extra: { staffId: 'staff-1', activeOrg: 'org-1' } },
+    body,
+    headers: {},
+  } as unknown as Request
 }
 
 function makeRes() {
