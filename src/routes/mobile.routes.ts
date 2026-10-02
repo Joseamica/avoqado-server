@@ -73,7 +73,7 @@ import { pinLoginRateLimiter, pinOverrideRateLimiter, pinSwitchUserRateLimiter }
 import { capturarVenueDeLaRuta, registerDeviceMiddleware } from '../middlewares/registerDevice.middleware'
 import { validateRequest } from '../middlewares/validation'
 import { recordFastPaymentParamsSchema, recordPaymentBodySchema } from '../schemas/tpv.schema'
-import { gatewayHeartbeatSchema, printConfigParamSchema, syncPrintJobsSchema } from '../schemas/mobile/print.mobile.schema'
+import { gatewayHeartbeatSchema, impresoraObservadaSchema, printConfigParamSchema, syncPrintJobsSchema } from '../schemas/mobile/print.mobile.schema'
 import { setKitchenDisplaySchema } from '../schemas/dashboard/printStation.schema'
 import * as announcementReadController from '../controllers/shared/announcement.read.controller'
 
@@ -3275,6 +3275,17 @@ router.put(
   checkPermission('printers:manage'),
   validateRequest(setKitchenDisplaySchema),
   printMobileController.setStationKitchenDisplay,
+)
+// «La impresora que se encuentra sola» (Testarudo, 2-oct): la tablet encontró una impresora de red en otra dirección
+// (DHCP) y lo avisa para que el panel y las demás tablets la tengan. Mismo permiso que leer la config: quien imprime
+// comandas la puede corregir; el service sólo acepta red local, nunca pisa una corrección más nueva (CAS) y audita.
+router.post(
+  '/venues/:venueId/printers/:printerId/observed',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  checkPermission('orders:read'),
+  validateRequest(impresoraObservadaSchema),
+  printMobileController.reportarImpresoraObservada,
 )
 router.post(
   '/venues/:venueId/print-jobs/sync',

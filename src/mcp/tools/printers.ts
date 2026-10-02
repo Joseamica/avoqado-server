@@ -40,7 +40,7 @@ export function registerPrinterTools(server: McpServer, scope: McpScope): void {
 
   server.tool(
     'list_printers',
-    "List the physical printers of a venue (PRINT_STATIONS) plus its print gateway (the single always-on device that owns the printers on the LAN). Shows each printer's name, connection type, address, paper width, charset and last known status. Connection type POS_INTERNAL means the POS device's own built-in printer (Sunmi): it has NO address and each ticket prints on the device that charged the sale. Also returns leftMarginChars: how many character columns the POS shifts printing to the right (ESC/POS `GS L`), which is how a narrow 58mm roll mounted with adapters inside an 80mm print head is kept on the paper — 0 means no shift, and a non-zero value on an 80mm printer means someone calibrated it for a narrow roll. Read-only — requires printers:read.",
+    "List the physical printers of a venue (PRINT_STATIONS) plus its print gateway (the single always-on device that owns the printers on the LAN). Shows each printer's name, connection type, address, paper width, charset and last known status. Connection type POS_INTERNAL means the POS device's own built-in printer (Sunmi): it has NO address and each ticket prints on the device that charged the sale. Also returns leftMarginChars: how many character columns the POS shifts printing to the right (ESC/POS `GS L`), which is how a narrow 58mm roll mounted with adapters inside an 80mm print head is kept on the paper — 0 means no shift, and a non-zero value on an 80mm printer means someone calibrated it for a narrow roll. Network printers may change IP on their own (DHCP): the POS finds the printer again on the LAN and updates its address here automatically (audited as PRINTER_ADDRESS_AUTO_UPDATED). stableKey is the identity the POS learned for it — 'mac:…' (its hardware address) or 'mdns:…' (the name it announces) — and is what lets the POS tell two identical printers apart; empty means not learned yet. Each POS prints DIRECTLY to the printer address; the gateway address is NOT used to print, so a stale gateway address does not stop comandas. Read-only — requires printers:read.",
     {
       venueId: z.string().describe('Venue to inspect (must be in your scope)'),
     },
@@ -56,7 +56,7 @@ export function registerPrinterTools(server: McpServer, scope: McpScope): void {
         printers,
         nota: gateway
           ? undefined
-          : 'Este venue no tiene un gateway de impresión designado — sin él las comandas no se rutean. Configúralo en el dashboard (Impresoras y estaciones).',
+          : 'Este venue no tiene un gateway de impresión designado. No afecta la impresión (cada POS imprime directo a la impresora); sólo define qué aparato reporta el historial de comandas.',
       })
     },
   )
