@@ -73,5 +73,30 @@ export const gatewayHeartbeatSchema = z.object({
   query: z.object({}).passthrough().optional(),
 })
 
+/**
+ * POST /mobile/venues/:venueId/printers/:printerId/observed — la tablet encontró la impresora en otra dirección (o
+ * aprendió su identidad). Forma aquí; la regla (red local, CAS, identidad) en el service.
+ */
+export const impresoraObservadaSchema = z.object({
+  body: z
+    .object({
+      previousAddress: z.string().min(1, 'La dirección anterior es requerida').max(120, 'Máximo 120 caracteres'),
+      address: z.string().min(1, 'La dirección nueva es requerida').max(120, 'Máximo 120 caracteres'),
+      stableKey: z
+        .string()
+        .regex(/^(mac:[0-9A-F]{12}|mdns:.{1,100})$/, 'Identidad inválida (mac:XXXXXXXXXXXX o mdns:<nombre>)')
+        .optional(),
+    })
+    .strict(),
+  params: z
+    .object({
+      venueId: z.string().min(1, 'El venue es requerido'),
+      printerId: z.string().min(1, 'La impresora es requerida'),
+    })
+    .passthrough(),
+  query: z.object({}).passthrough().optional(),
+})
+
+export type ImpresoraObservadaInput = z.infer<typeof impresoraObservadaSchema>['body']
 export type SyncPrintJobsInput = z.infer<typeof syncPrintJobsSchema>['body']
 export type GatewayHeartbeatInput = z.infer<typeof gatewayHeartbeatSchema>['body']

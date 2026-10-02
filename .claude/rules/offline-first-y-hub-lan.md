@@ -164,6 +164,14 @@ NO hay forma de configurarla. Es el hueco de instalación más grande que queda.
 **El permiso de "dispositivos cercanos"** (Android 13+) es obligatorio para descubrir impresoras: si alguien lo rechaza en la instalación,
 la lista sale vacía y —sin alta manual— el local se queda sin imprimir.
 
+### 4.2 La impresora que se encuentra sola (Testarudo, 2-oct-2026)
+
+Las tablets encuentran solas una impresora de red que cambió de IP (DHCP) y lo avisan con
+`POST /mobile/venues/:venueId/printers/:printerId/observed` (`reportarImpresoraObservada`): sólo red local, CAS sobre la
+dirección que la tablet vio (nunca pisa una corrección más nueva), `stableKey` (`mac:…`/`mdns:…`) se aprende una vez y no
+se reemplaza, `ActivityLog` `PRINTER_ADDRESS_AUTO_UPDATED`. `PrintGateway.address` NO se usa para imprimir. Detalle del
+lado de las apps: §4.2 de la misma regla en avoqado-android / avoqado-ios.
+
 ## 5. Qué es online-only A PROPÓSITO
 
 No "se nos olvidó": quitar descuento/cargo ya aplicado, cortesía de UN item ya enviado, canje de lealtad, pago con TARJETA (Blumon necesita
