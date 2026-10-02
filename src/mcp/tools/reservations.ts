@@ -4,6 +4,7 @@ import { StaffRole } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
+import { personSearchWhere } from '../personSearch'
 import { text } from '../respond'
 import {
   createReservation,
@@ -191,19 +192,13 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
         }
         assignedStaffId = member.staffId
       } else if (staffName) {
-        const nameParts = staffName.trim().split(/\s+/).filter(Boolean)
         const matches = await prisma.staffVenue.findMany({
           where: {
             venueId,
             active: true,
             staff: {
               active: true,
-              AND: nameParts.map(part => ({
-                OR: [
-                  { firstName: { contains: part, mode: 'insensitive' as const } },
-                  { lastName: { contains: part, mode: 'insensitive' as const } },
-                ],
-              })),
+              ...personSearchWhere(staffName),
             },
           },
           select: { staffId: true, staff: { select: { firstName: true, lastName: true } } },
@@ -1200,12 +1195,7 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
         const matches = await prisma.customer.findMany({
           where: {
             ...base,
-            OR: [
-              { firstName: { contains: search, mode: 'insensitive' as const } },
-              { lastName: { contains: search, mode: 'insensitive' as const } },
-              { email: { contains: search, mode: 'insensitive' as const } },
-              { phone: { contains: search } },
-            ],
+            ...personSearchWhere(search, { contact: true }),
           },
           select: { id: true, firstName: true, lastName: true },
           orderBy: { totalSpent: 'desc' },

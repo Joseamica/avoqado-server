@@ -3,6 +3,7 @@ import { z } from 'zod'
 import prisma from '@/utils/prismaClient'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
+import { personSearchWhere } from '../personSearch'
 import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
 import { planGateMessage } from '../planGate'
@@ -43,12 +44,7 @@ export function registerCustomerTools(server: McpServer, scope: McpScope) {
           ...where,
           ...(search
             ? {
-                OR: [
-                  { firstName: { contains: search, mode: 'insensitive' as const } },
-                  { lastName: { contains: search, mode: 'insensitive' as const } },
-                  { email: { contains: search, mode: 'insensitive' as const } },
-                  { phone: { contains: search } },
-                ],
+                ...personSearchWhere(search, { contact: true }),
               }
             : {}),
         },
@@ -97,12 +93,7 @@ export function registerCustomerTools(server: McpServer, scope: McpScope) {
       const matches = await prisma.customer.findMany({
         where: {
           ...base,
-          OR: [
-            { firstName: { contains: search, mode: 'insensitive' as const } },
-            { lastName: { contains: search, mode: 'insensitive' as const } },
-            { email: { contains: search, mode: 'insensitive' as const } },
-            { phone: { contains: search } },
-          ],
+          ...personSearchWhere(search, { contact: true }),
         },
         select: {
           id: true,
@@ -180,12 +171,7 @@ export function registerCustomerTools(server: McpServer, scope: McpScope) {
       const matches = await prisma.customer.findMany({
         where: {
           ...base,
-          OR: [
-            { firstName: { contains: search, mode: 'insensitive' as const } },
-            { lastName: { contains: search, mode: 'insensitive' as const } },
-            { email: { contains: search, mode: 'insensitive' as const } },
-            { phone: { contains: search } },
-          ],
+          ...personSearchWhere(search, { contact: true }),
         },
         select: { id: true, firstName: true, lastName: true, tags: true },
         orderBy: { totalSpent: 'desc' },
@@ -244,12 +230,7 @@ export function registerCustomerTools(server: McpServer, scope: McpScope) {
       const matches = await prisma.customer.findMany({
         where: {
           ...base,
-          OR: [
-            { firstName: { contains: search, mode: 'insensitive' as const } },
-            { lastName: { contains: search, mode: 'insensitive' as const } },
-            { email: { contains: search, mode: 'insensitive' as const } },
-            { phone: { contains: search } },
-          ],
+          ...personSearchWhere(search, { contact: true }),
         },
         select: { id: true, firstName: true, lastName: true, notes: true },
         orderBy: { totalSpent: 'desc' },

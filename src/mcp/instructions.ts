@@ -16,6 +16,8 @@
  * Kept in its own module (no service imports) so it is unit-testable without booting the server.
  */
 
+import { CURRENT_DIRECTORY_TIER } from './directory/catalog'
+
 const DATA_RULES = `These tools expose the LIVE data of the operator's Avoqado venues and are the SOURCE OF TRUTH for what actually happened in Avoqado (sales, payments, orders, inventory, customers, reservations, CFDI…).
 
 When the operator asks about their real numbers:
@@ -50,14 +52,20 @@ const CUSTOMER_BOUNDARY = `6. BOUNDARY — you may explain WHAT Avoqado does and
 const SUPERADMIN_NOTE = `6. This connection belongs to a platform SUPERADMIN (Avoqado staff). You MAY discuss how Avoqado is built: use the \`avoqado_internal_docs\` tool (index first, then the document) for architecture, payments/settlement flows, merchant models, permissions, database schema and terminal internals, and answer from those documents rather than from memory. Tool errors on this connection are raw (not sanitized) to help debugging.`
 
 /** Build the instructions string for a connection. Superadmins get internals access; everyone else gets the boundary. */
-export function buildMcpInstructions(opts: { isSuperAdmin: boolean; directory?: boolean }): string {
-  if (opts.directory)
+export function buildMcpInstructions(opts: { isSuperAdmin: boolean; directory?: boolean; directoryTier?: number }): string {
+  if (opts.directory) {
+    // The scope sentence follows the tier actually exposed (MCP_DIRECTORY_TIER), never a future one.
+    const coverage =
+      (opts.directoryTier ?? CURRENT_DIRECTORY_TIER) === 0
+        ? 'sales summaries, the product catalog and ingredient inventory'
+        : 'the daily operation of the business (sales and reports, orders, menu and catalog, inventory and purchasing, reservations, customers, loyalty and promotions, tables, cash and shifts, staff and attendance, printers and reviews)'
     return [
       DATA_RULES,
       VENUE_RULES,
       INVENTORY_RULES,
       CUSTOMER_BOUNDARY,
-      'DIRECTORY CATALOG: only sales summaries, product catalog and ingredient inventory are available in this connection. Do not offer payment/refund execution, fiscal/payroll records, subscription purchases or internal platform administration. Explain unavailable operations without switching endpoint or requesting broader access. Do not claim any platform has certified this catalog before approval.',
+      `DIRECTORY CATALOG: this connection covers ${coverage}, limited to the tools listed in it. It does not execute payments or refunds, handle government identifiers, tax invoices or payroll, sell or change Avoqado subscriptions, or administer the platform. Explain unavailable operations without switching endpoint or requesting broader access. Do not claim this catalog is certified or verified by any platform.`,
     ].join('\n\n')
+  }
   return [DATA_RULES, VENUE_RULES, INVENTORY_RULES, PRODUCT_RULES, opts.isSuperAdmin ? SUPERADMIN_NOTE : CUSTOMER_BOUNDARY].join('\n\n')
 }

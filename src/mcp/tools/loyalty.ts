@@ -3,6 +3,7 @@ import { z } from 'zod'
 import prisma from '@/utils/prismaClient'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
+import { personSearchWhere } from '../personSearch'
 import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
 import { adjustPoints, updateLoyaltyConfig } from '@/services/dashboard/loyalty.dashboard.service'
@@ -82,12 +83,7 @@ export function registerLoyaltyTools(server: McpServer, scope: McpScope) {
       const matches = await prisma.customer.findMany({
         where: {
           ...base,
-          OR: [
-            { firstName: { contains: search, mode: 'insensitive' as const } },
-            { lastName: { contains: search, mode: 'insensitive' as const } },
-            { email: { contains: search, mode: 'insensitive' as const } },
-            { phone: { contains: search } },
-          ],
+          ...personSearchWhere(search, { contact: true }),
         },
         select: { id: true, firstName: true, lastName: true, loyaltyPoints: true },
         orderBy: { totalSpent: 'desc' },
@@ -163,12 +159,7 @@ export function registerLoyaltyTools(server: McpServer, scope: McpScope) {
       const matches = await prisma.customer.findMany({
         where: {
           ...base,
-          OR: [
-            { firstName: { contains: search, mode: 'insensitive' as const } },
-            { lastName: { contains: search, mode: 'insensitive' as const } },
-            { email: { contains: search, mode: 'insensitive' as const } },
-            { phone: { contains: search } },
-          ],
+          ...personSearchWhere(search, { contact: true }),
         },
         select: { id: true, firstName: true, lastName: true, loyaltyPoints: true },
         orderBy: { totalSpent: 'desc' },

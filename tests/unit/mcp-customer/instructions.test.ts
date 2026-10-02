@@ -40,3 +40,32 @@ describe('buildMcpInstructions', () => {
     }
   })
 })
+
+describe('instrucciones del catálogo de directorio', () => {
+  const text = buildMcpInstructions({ isSuperAdmin: false, directory: true, directoryTier: 1 })
+
+  it('con la tanda base prendida no promete lo que todavía no expone', () => {
+    const base = buildMcpInstructions({ isSuperAdmin: false, directory: true, directoryTier: 0 })
+    expect(base).toMatch(/sales summaries, the product catalog and ingredient inventory/)
+    expect(base).not.toMatch(/reservations, customers/)
+    expect(base).toMatch(/does not execute payments or refunds/)
+  })
+
+  it('describe la operación diaria y ya no la limita a ventas, productos e inventario', () => {
+    expect(text).not.toMatch(/only sales summaries, product catalog and ingredient inventory/)
+    expect(text).toMatch(/reservations/)
+    expect(text).toMatch(/customers/)
+  })
+
+  it('sigue declarando lo que el directorio nunca ofrece', () => {
+    expect(text).toMatch(/does not execute payments or refunds/)
+    expect(text).toMatch(/government identifiers/)
+    expect(text).toMatch(/subscriptions/)
+    expect(text).toMatch(/without switching endpoint or requesting broader access/)
+  })
+
+  it('no afirma que una plataforma lo certificó', () => {
+    expect(text).toMatch(/Do not claim this catalog is certified or verified/)
+    expect(text).not.toMatch(/avoqado_internal_docs/)
+  })
+})
