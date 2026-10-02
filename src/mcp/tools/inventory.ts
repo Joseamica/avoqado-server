@@ -45,18 +45,22 @@ const BATCH_STATUS_LABEL = {
   [BatchStatus.QUARANTINED]: 'Retenido',
 } as const
 
-const rawMaterialQuantityInput = z
-  .number()
-  .finite('La cantidad debe ser finita')
-  .min(0, 'La cantidad no puede ser negativa')
-  .max(999999999.999, 'La cantidad supera el rango permitido')
-  .refine(v => new Decimal(v).decimalPlaces() <= 3, 'La cantidad admite hasta 3 decimales')
-const rawMaterialCostInput = z
-  .number()
-  .finite('El costo debe ser finito')
-  .positive('El costo debe ser positivo')
-  .max(999999.9999, 'El costo supera el rango permitido')
-  .refine(v => new Decimal(v).decimalPlaces() <= 4, 'El costo admite hasta 4 decimales')
+// Funciones, no constantes: una misma instancia de Zod en dos campos sale en el JSON Schema como
+// `$ref` al otro campo, sin `type`, y el directorio de Claude lo marca como parámetro sin tipo.
+const rawMaterialQuantityInput = () =>
+  z
+    .number()
+    .finite('La cantidad debe ser finita')
+    .min(0, 'La cantidad no puede ser negativa')
+    .max(999999999.999, 'La cantidad supera el rango permitido')
+    .refine(v => new Decimal(v).decimalPlaces() <= 3, 'La cantidad admite hasta 3 decimales')
+const rawMaterialCostInput = () =>
+  z
+    .number()
+    .finite('El costo debe ser finito')
+    .positive('El costo debe ser positivo')
+    .max(999999.9999, 'El costo supera el rango permitido')
+    .refine(v => new Decimal(v).decimalPlaces() <= 4, 'El costo admite hasta 4 decimales')
 
 export function registerInventoryTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
@@ -376,9 +380,9 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
       rawMaterialId: z.string().min(1),
       name: z.string().trim().min(1, 'El nombre es requerido').max(200).optional(),
       description: z.string().max(2000).optional(),
-      costPerUnit: rawMaterialCostInput.optional(),
-      minimumStock: rawMaterialQuantityInput.optional(),
-      reorderPoint: rawMaterialQuantityInput.optional(),
+      costPerUnit: rawMaterialCostInput().optional(),
+      minimumStock: rawMaterialQuantityInput().optional(),
+      reorderPoint: rawMaterialQuantityInput().optional(),
       expectedUpdatedAt: z.string().datetime().optional(),
       confirm: z.boolean().optional(),
     },
@@ -449,10 +453,10 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
       name: z.string().min(1).describe('Ingredient name, e.g. "Harina"'),
       category: z.string().min(1).describe('Category (see list in the tool description)'),
       unit: z.string().min(1).describe('Unit of measure (see list in the tool description)'),
-      currentStock: rawMaterialQuantityInput.describe('Current stock on hand (in the chosen unit)'),
-      minimumStock: rawMaterialQuantityInput.describe('Minimum stock before it is "low" (must be ≤ reorderPoint)'),
-      reorderPoint: rawMaterialQuantityInput.describe('Stock level at which to reorder'),
-      costPerUnit: rawMaterialCostInput.describe('Cost per unit (money)'),
+      currentStock: rawMaterialQuantityInput().describe('Current stock on hand (in the chosen unit)'),
+      minimumStock: rawMaterialQuantityInput().describe('Minimum stock before it is "low" (must be ≤ reorderPoint)'),
+      reorderPoint: rawMaterialQuantityInput().describe('Stock level at which to reorder'),
+      costPerUnit: rawMaterialCostInput().describe('Cost per unit (money)'),
       sku: z.string().optional().describe('Stock code (auto-generated from the name if omitted)'),
       description: z.string().optional().describe('Description'),
       perishable: z.boolean().optional().describe('Whether it is perishable'),

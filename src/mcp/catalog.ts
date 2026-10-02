@@ -5,6 +5,7 @@ import { ScopeError } from './errors'
 import { text } from './respond'
 import { CONFIRMATION_TTL, issueConfirmation, validConfirmation } from './confirmation'
 import { DIRECTORY_TOOLS, type McpProfile } from './directory/catalog'
+import { DIRECTORY_DESCRIPTIONS } from './directory/descriptions'
 
 /** Explicit effects, never guessed from a name or permission suffix. New tools must declare one. */
 export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
@@ -388,6 +389,8 @@ export function configureToolCatalog(server: McpServer, scope: McpScope, profile
       name,
       {
         ...config,
+        // The directory publishes its own descriptions: the manual ones mention tools it does not expose.
+        ...(profile === 'directory' && DIRECTORY_DESCRIPTIONS[name] ? { description: DIRECTORY_DESCRIPTIONS[name] } : {}),
         title,
         inputSchema,
         outputSchema,
