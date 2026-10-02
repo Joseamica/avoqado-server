@@ -16516,6 +16516,7 @@ model McpRefreshToken {
   staffId   String
   activeOrg String
   scopes    String[]  @default([])
+  resource  String? // null = legacy/manual MCP; directory grants retain their resource through rotation
   expiresAt DateTime
   revokedAt DateTime?
   createdAt DateTime  @default(now())

@@ -1,6 +1,9 @@
 import jwt from 'jsonwebtoken'
+import { MCP_DIRECTORY_RESOURCE_URL } from './oauth/config'
+import type { McpProfile } from './directory/catalog'
 
 export const MCP_AUDIENCE = 'avoqado-mcp'
+export const MCP_DIRECTORY_AUDIENCE = MCP_DIRECTORY_RESOURCE_URL.href
 
 function getSecret(): jwt.Secret {
   const secret = process.env.ACCESS_TOKEN_SECRET
@@ -9,6 +12,7 @@ function getSecret(): jwt.Secret {
 }
 
 export interface McpTokenPayload {
+  profile?: 'directory' // derived from the verified audience; legacy/manual tokens have no profile
   sub: string // Staff.id
   org: string // active organization id
   cid?: string // OAuth client id (Phase 1); absent for dev-server tokens
@@ -31,6 +35,7 @@ export function issueMcpToken(
   clientId?: string,
   scopes?: string[],
   concedidoEn?: Date,
+  profile: McpProfile = 'manual',
 ): string {
   const payload: Record<string, unknown> = { sub: staffId, org: activeOrg }
   if (clientId) payload.cid = clientId
@@ -38,7 +43,10 @@ export function issueMcpToken(
   // El acceso emitido en una renovación hereda la fecha de la autorización original: si la contraseña
   // cambió entre validar y emitir, su `iat` sería posterior al corte y viviría su hora completa.
   if (concedidoEn) payload.gat = Math.floor(concedidoEn.getTime() / 1000)
-  return jwt.sign(payload, getSecret(), { audience: MCP_AUDIENCE, expiresIn: ttlSeconds })
+  return jwt.sign(payload, getSecret(), {
+    audience: profile === 'directory' ? MCP_DIRECTORY_AUDIENCE : MCP_AUDIENCE,
+    expiresIn: ttlSeconds,
+  })
 }
 
 /**
@@ -50,14 +58,19 @@ export function emisionDeCadena(payload: Pick<McpTokenPayload, 'iat' | 'gat'>): 
 }
 
 /** Verify an MCP token. Rejects any token NOT minted for the MCP audience. */
-export function verifyMcpToken(token: string): McpTokenPayload {
-  const decoded = jwt.verify(token, getSecret(), { audience: MCP_AUDIENCE }) as jwt.JwtPayload
+export function verifyMcpToken(token: string, profile: McpProfile | 'either' = 'manual'): McpTokenPayload {
+  const audience =
+    profile === 'either' ? [MCP_AUDIENCE, MCP_DIRECTORY_AUDIENCE] : profile === 'directory' ? MCP_DIRECTORY_AUDIENCE : MCP_AUDIENCE
+  const decoded = jwt.verify(token, getSecret(), { audience }) as jwt.JwtPayload
+  // Issued tokens have exactly one audience. Reject multi-resource tokens rather than broadening a grant.
+  if (decoded.aud !== MCP_AUDIENCE && decoded.aud !== MCP_DIRECTORY_AUDIENCE) throw new Error('Invalid MCP token audience')
   const org = (decoded as Record<string, unknown>).org
   if (!decoded.sub || typeof org !== 'string') throw new Error('Invalid MCP token payload')
   const cid = (decoded as Record<string, unknown>).cid
   const scp = (decoded as Record<string, unknown>).scp
   const gat = (decoded as Record<string, unknown>).gat
   return {
+    ...(decoded.aud === MCP_DIRECTORY_AUDIENCE ? { profile: 'directory' as const } : {}),
     sub: decoded.sub,
     org,
     cid: typeof cid === 'string' ? cid : undefined,

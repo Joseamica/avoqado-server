@@ -3,7 +3,7 @@ import { z } from 'zod'
 import { InvalidClientError, InvalidRequestError, InvalidScopeError } from '@modelcontextprotocol/sdk/server/auth/errors.js'
 import { redirectUriMatches } from '@modelcontextprotocol/sdk/server/auth/handlers/authorize.js'
 import { prismaClientsStore } from './clientsStore'
-import { MCP_RESOURCE_URL, MCP_SCOPES_SUPPORTED } from './config'
+import { MCP_DIRECTORY_RESOURCE_URL, MCP_RESOURCE_URL, MCP_SCOPES_SUPPORTED } from './config'
 
 const requestSchema = z.object({
   client_id: z.string().min(1).max(2048),
@@ -28,7 +28,7 @@ export async function validateAuthorizationRequest(input: unknown) {
   if (!scopes.length || scopes.some(scope => !MCP_SCOPES_SUPPORTED.includes(scope))) {
     throw new InvalidScopeError('Unsupported scope')
   }
-  if (data.resource !== undefined && data.resource !== MCP_RESOURCE_URL.href) {
+  if (data.resource !== undefined && ![MCP_RESOURCE_URL.href, MCP_DIRECTORY_RESOURCE_URL.href].includes(data.resource)) {
     throw new InvalidRequestError('Invalid resource')
   }
   // Fixed key order + sorted scopes make the binding independent of form field order.

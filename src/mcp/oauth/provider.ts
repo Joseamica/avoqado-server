@@ -7,13 +7,32 @@ import { prismaClientsStore } from './clientsStore'
 import { consumeAuthCode, peekAuthCodeChallenge, createRefreshToken, consumeRefreshToken, revokeRefreshToken } from './tokenStore'
 import { validateAuthorizationRequest } from './authorizationRequest'
 import { renderLoginPage } from './loginPage'
-import { ACCESS_TTL_SECONDS, MCP_RESOURCE_URL } from './config'
+import { ACCESS_TTL_SECONDS, MCP_DIRECTORY_RESOURCE_URL, MCP_RESOURCE_URL } from './config'
 import { InvalidGrantError, InvalidTokenError, InvalidScopeError } from '@modelcontextprotocol/sdk/server/auth/errors.js'
 import { motivoDeConcesionInvalidada, motivoDeSesionInvalidada } from '../../utils/passwordChangeGuard'
 
 // Codex S4: cambiar la contraseña o «cerrar sesión en todos mis dispositivos» mata también lo que el
 // asistente tiene guardado — el código sin canjear y el refresh de 30 días —, no sólo el dashboard.
 const SESION_CORTADA = 'la sesión se cerró (cambio de contraseña o cierre de sesiones); vuelve a conectar'
+
+function grantResource(original?: string, requested?: URL) {
+  const resource = original ?? MCP_RESOURCE_URL.href
+  if (![MCP_RESOURCE_URL.href, MCP_DIRECTORY_RESOURCE_URL.href].includes(resource) || (requested && requested.href !== resource)) {
+    throw new InvalidGrantError('resource must match the original consent')
+  }
+  return { resource, profile: resource === MCP_DIRECTORY_RESOURCE_URL.href ? ('directory' as const) : ('manual' as const) }
+}
+
+/** A token for one catalog must never be replayed at the other endpoint. */
+export function verifierForMcpResource(resource: URL) {
+  return {
+    async verifyAccessToken(token: string) {
+      const info = await provider.verifyAccessToken(token)
+      if (info.resource?.href !== resource.href) throw new InvalidTokenError('Token is bound to a different MCP resource')
+      return info
+    },
+  }
+}
 
 export const provider: OAuthServerProvider = {
   get clientsStore() {
@@ -56,36 +75,61 @@ export const provider: OAuthServerProvider = {
     authorizationCode: string,
     _codeVerifier?: string,
     redirectUri?: string,
+    requestedResource?: URL,
   ): Promise<OAuthTokens> {
     const data = await consumeAuthCode(authorizationCode)
     if (!data) throw new InvalidGrantError('invalid or expired authorization code')
     if (data.clientId !== client.client_id) throw new InvalidGrantError('code was issued to a different client')
     if (redirectUri !== undefined && redirectUri !== data.redirectUri) throw new InvalidGrantError('redirect_uri mismatch')
+    const grant = grantResource(data.resource, requestedResource)
     if (await motivoDeConcesionInvalidada(data.staffId, data.issuedAt)) throw new InvalidGrantError(SESION_CORTADA)
 
-    const access_token = issueMcpToken(data.staffId, data.activeOrg, ACCESS_TTL_SECONDS, client.client_id, data.scopes, data.issuedAt)
+    const access_token = issueMcpToken(
+      data.staffId,
+      data.activeOrg,
+      ACCESS_TTL_SECONDS,
+      client.client_id,
+      data.scopes,
+      data.issuedAt,
+      grant.profile,
+    )
     const { token: refresh_token } = await createRefreshToken({
       clientId: client.client_id,
       staffId: data.staffId,
       activeOrg: data.activeOrg,
       scopes: data.scopes,
+      resource: grant.resource,
       // La cadena nace con la fecha del código: ése es el momento en que el dueño autorizó.
       grantedAt: data.issuedAt,
     })
     return { access_token, token_type: 'Bearer', expires_in: ACCESS_TTL_SECONDS, scope: data.scopes.join(' ') || undefined, refresh_token }
   },
 
-  async exchangeRefreshToken(client: OAuthClientInformationFull, refreshToken: string, scopes?: string[]): Promise<OAuthTokens> {
+  async exchangeRefreshToken(
+    client: OAuthClientInformationFull,
+    refreshToken: string,
+    scopes?: string[],
+    requestedResource?: URL,
+  ): Promise<OAuthTokens> {
     const data = await consumeRefreshToken(refreshToken)
     if (!data) throw new InvalidGrantError('invalid or expired refresh token')
     if (data.clientId !== client.client_id) throw new InvalidGrantError('refresh token was issued to a different client')
+    const grant = grantResource(data.resource, requestedResource)
     if (await motivoDeConcesionInvalidada(data.staffId, data.issuedAt)) throw new InvalidGrantError(SESION_CORTADA)
 
     if (scopes?.some(s => !data.scopes.includes(s))) {
       throw new InvalidScopeError('Requested scope exceeds the original consent; reconnect to authorize additional access')
     }
     const grantedScopes = scopes ?? data.scopes
-    const access_token = issueMcpToken(data.staffId, data.activeOrg, ACCESS_TTL_SECONDS, client.client_id, grantedScopes, data.issuedAt)
+    const access_token = issueMcpToken(
+      data.staffId,
+      data.activeOrg,
+      ACCESS_TTL_SECONDS,
+      client.client_id,
+      grantedScopes,
+      data.issuedAt,
+      grant.profile,
+    )
     // Rotate: consumeRefreshToken already atomically revoked the presented token (single-use);
     // just issue the replacement. (No separate revoke call — that would be a redundant no-op now.)
     // 🔴 El reemplazo HEREDA la fecha original (Codex ronda 8): validar y emitir no son atómicos, y un
@@ -95,6 +139,7 @@ export const provider: OAuthServerProvider = {
       staffId: data.staffId,
       activeOrg: data.activeOrg,
       scopes: grantedScopes,
+      resource: grant.resource,
       grantedAt: data.issuedAt,
     })
     return {
@@ -107,7 +152,7 @@ export const provider: OAuthServerProvider = {
   },
 
   async verifyAccessToken(token: string): Promise<AuthInfo> {
-    const { sub, org, cid, scp, exp, iat, gat } = verifyMcpToken(token) // throws on bad/expired/wrong-audience
+    const { sub, org, cid, scp, exp, iat, gat, profile } = verifyMcpToken(token, 'either') // endpoint verifier enforces its resource
     // Mismo corte y mismo margen que cualquier token de acceso (segundos). Se juzga con la fecha MÁS
     // VIEJA que trae: la de la autorización original de su cadena, si la tiene (Codex ronda 8).
     const emision = emisionDeCadena({ iat, gat })
@@ -118,7 +163,7 @@ export const provider: OAuthServerProvider = {
       // Legacy tokens retain read access only. An explicit empty grant stays empty.
       scopes: scp ?? ['mcp:read'],
       expiresAt: exp, // required by the SDK bearer middleware
-      resource: MCP_RESOURCE_URL,
+      resource: profile === 'directory' ? MCP_DIRECTORY_RESOURCE_URL : MCP_RESOURCE_URL,
       extra: { staffId: sub, activeOrg: org, scopes: scp ?? ['mcp:read'] },
     }
   },

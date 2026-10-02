@@ -8,7 +8,8 @@ jest.mock('../../../src/mcp/oauth/tokenStore', () => ({
 }))
 jest.mock('../../../src/mcp/oauth/clientsStore', () => ({ prismaClientsStore: {} }))
 
-import { provider } from '../../../src/mcp/oauth/provider'
+import { MCP_DIRECTORY_RESOURCE_URL, MCP_RESOURCE_URL } from '../../../src/mcp/oauth/config'
+import { verifierForMcpResource, provider } from '../../../src/mcp/oauth/provider'
 import { issueMcpToken } from '../../../src/mcp/mcpToken'
 import * as store from '../../../src/mcp/oauth/tokenStore'
 
@@ -222,4 +223,39 @@ describe('regresión: un refresh nunca amplía el consentimiento', () => {
     const result = await provider.exchangeRefreshToken({ client_id: 'c1' } as never, 'r1')
     expect((await provider.verifyAccessToken(result.access_token)).scopes).toEqual(['mcp:read'])
   })
+})
+
+describe('el consentimiento no cambia de catálogo al canjear o renovar', () => {
+  const resource = new URL('/mcp/directory', process.env.MCP_ISSUER_URL ?? 'http://localhost:12344')
+  beforeEach(() => {
+    const data = { clientId: 'c1', staffId: 's1', activeOrg: 'o1', scopes: ['mcp:read'], resource: resource.href }
+    ;(store.consumeAuthCode as jest.Mock).mockResolvedValue({ ...data, redirectUri: 'http://cb' })
+    ;(store.consumeRefreshToken as jest.Mock).mockResolvedValue(data)
+    ;(store.createRefreshToken as jest.Mock).mockResolvedValue({ token: 'rotated' })
+  })
+  it('conserva el recurso del código en acceso y refresh', async () => {
+    const result = await provider.exchangeAuthorizationCode({ client_id: 'c1' } as never, 'code', undefined, undefined, resource)
+    expect((await provider.verifyAccessToken(result.access_token)).resource?.href).toBe(resource.href)
+    expect(store.createRefreshToken).toHaveBeenCalledWith(expect.objectContaining({ resource: resource.href }))
+  })
+  it('renueva sólo para el recurso original incluso cuando el cliente lo omite', async () => {
+    const result = await provider.exchangeRefreshToken({ client_id: 'c1' } as never, 'refresh', ['mcp:read'])
+    expect((await provider.verifyAccessToken(result.access_token)).resource?.href).toBe(resource.href)
+    expect(store.createRefreshToken).toHaveBeenCalledWith(expect.objectContaining({ resource: resource.href }))
+  })
+  it('rechaza cambiar el recurso en código o refresh', async () => {
+    const other = new URL('/mcp', resource)
+    await expect(provider.exchangeAuthorizationCode({ client_id: 'c1' } as never, 'code', undefined, undefined, other)).rejects.toThrow()
+    await expect(provider.exchangeRefreshToken({ client_id: 'c1' } as never, 'refresh', undefined, other)).rejects.toThrow()
+    expect(store.createRefreshToken).not.toHaveBeenCalled()
+  })
+})
+
+it('cada endpoint rechaza tokens del otro recurso aunque scopes y usuario coincidan', async () => {
+  const manual = issueMcpToken('s1', 'o1', 3600, 'c1', ['mcp:read', 'mcp:write'])
+  const directory = issueMcpToken('s1', 'o1', 3600, 'c1', ['mcp:read', 'mcp:write'], undefined, 'directory')
+  await expect(verifierForMcpResource(MCP_RESOURCE_URL).verifyAccessToken(directory)).rejects.toThrow()
+  await expect(verifierForMcpResource(MCP_DIRECTORY_RESOURCE_URL).verifyAccessToken(manual)).rejects.toThrow()
+  await expect(verifierForMcpResource(MCP_RESOURCE_URL).verifyAccessToken(manual)).resolves.toBeTruthy()
+  await expect(verifierForMcpResource(MCP_DIRECTORY_RESOURCE_URL).verifyAccessToken(directory)).resolves.toBeTruthy()
 })

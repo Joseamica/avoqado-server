@@ -1,7 +1,7 @@
 import express, { type Request, type Response, type Express, type NextFunction } from 'express'
 import cookieParser from 'cookie-parser'
 import { createHash } from 'crypto'
-import { mcpAuthRouter } from '@modelcontextprotocol/sdk/server/auth/router.js'
+import { mcpAuthRouter, mcpAuthMetadataRouter, createOAuthMetadata } from '@modelcontextprotocol/sdk/server/auth/router.js'
 import { authenticateForMcp, McpLoginError } from './credentials'
 import { resolveActiveOrganizationId } from '@/services/staffOrganization.service'
 import { createAuthCode } from './tokenStore'
@@ -10,7 +10,7 @@ import { mountMcpSecurity } from '../security'
 import { validateAuthorizationRequest } from './authorizationRequest'
 import { OAuthError } from '@modelcontextprotocol/sdk/server/auth/errors.js'
 import { provider } from './provider'
-import { MCP_ISSUER_URL, MCP_RESOURCE_URL, MCP_SCOPES_SUPPORTED } from './config'
+import { MCP_DIRECTORY_RESOURCE_URL, MCP_ISSUER_URL, MCP_RESOURCE_URL, MCP_SCOPES_SUPPORTED } from './config'
 import { staffIdFromDashboardSession, sesionDelDashboard } from './session'
 import { verifyOrgPickToken, verificarTokenDelSelector, listActiveOrganizations, tokenParaElSelector } from './orgPick'
 import prisma from '@/utils/prismaClient'
@@ -383,4 +383,13 @@ export function mountCustomerMcpAuth(app: Express): void {
   )
   // Our consent-form target.
   app.use(approveHandler())
+  // Same authorization server; separate protected-resource discovery for the directory catalog.
+  app.use(
+    mcpAuthMetadataRouter({
+      oauthMetadata: createOAuthMetadata({ provider, issuerUrl: MCP_ISSUER_URL, scopesSupported: MCP_SCOPES_SUPPORTED }),
+      resourceServerUrl: MCP_DIRECTORY_RESOURCE_URL,
+      scopesSupported: MCP_SCOPES_SUPPORTED,
+      resourceName: 'Avoqado — catálogo de publicación',
+    }),
+  )
 }

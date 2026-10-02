@@ -24,3 +24,15 @@ it('embeds the oauth params as hidden fields and posts to the approve route', ()
 it('shows an error banner when provided', () => {
   expect(renderLoginPage({ clientId: 'c1', redirectUri: 'x', codeChallenge: 'cc' }, { error: 'Bad password' })).toContain('Bad password')
 })
+
+it('identifica el catálogo de publicación antes del consentimiento', () => {
+  const { MCP_DIRECTORY_RESOURCE_URL } = require('@/mcp/oauth/config')
+  const html = renderLoginPage({
+    clientId: 'c',
+    redirectUri: 'http://cb',
+    codeChallenge: 'challenge',
+    resource: MCP_DIRECTORY_RESOURCE_URL.href,
+  })
+  expect(html).toContain('Catálogo de publicación')
+  expect(html).toContain('No incluye cobros, reembolsos ni nómina')
+})

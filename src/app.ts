@@ -33,14 +33,14 @@ import {
 } from './services/dashboard/product.dashboard.service'
 import mainApiRouter from './routes' // Esto importa el 'router' exportado por defecto de 'src/routes/index.ts'
 import { getCorsConfig, Environment } from './config/corsOptions'
-import { handleMcpRequest } from './mcp/server'
+import { handleDirectoryMcpRequest, handleMcpRequest } from './mcp/server'
 import { mcpRateLimitMiddleware } from './middlewares/mcp-rate-limit.middleware'
 import { mcpRequestGuardMiddleware } from './middlewares/mcp-request-guard.middleware'
 import { mountCustomerMcpAuth } from './mcp/oauth/router'
-import { provider as mcpOAuthProvider } from './mcp/oauth/provider'
+import { verifierForMcpResource } from './mcp/oauth/provider'
 import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js'
 import { getOAuthProtectedResourceMetadataUrl } from '@modelcontextprotocol/sdk/server/auth/router.js'
-import { MCP_RESOURCE_URL } from './mcp/oauth/config'
+import { MCP_DIRECTORY_RESOURCE_URL, MCP_RESOURCE_URL } from './mcp/oauth/config'
 
 // Import routes
 import publicMenuRoutes from './routes/publicMenu.routes'
@@ -194,37 +194,42 @@ mountCustomerMcpAuth(app)
 
 // Customer-facing MCP endpoint (Streamable HTTP). Guarded by the SDK bearer middleware, which
 // validates the access token via provider.verifyAccessToken and sets req.auth.extra {staffId, activeOrg}.
-app.post(
-  '/mcp',
-  requireBearerAuth({
-    verifier: mcpOAuthProvider,
-    resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(MCP_RESOURCE_URL),
-  }),
-  // Volume ceiling — AFTER auth so it can key on the caller's staffId/org. requireBearerAuth proves
-  // WHO calls; nothing limited HOW MUCH, leaving ~250 tools open to fuzzing at full speed.
-  mcpRateLimitMiddleware,
-  express.json(),
-  // The brake from the 2026-09-23 freeze: one tool call at a time per person, a deadline that cancels
-  // the work at its next read, and the tool logged when it STARTS (with an execution context).
-  mcpRequestGuardMiddleware,
-  handleMcpRequest,
-)
+for (const { path, resource, handler } of [
+  { path: '/mcp', resource: MCP_RESOURCE_URL, handler: handleMcpRequest },
+  { path: '/mcp/directory', resource: MCP_DIRECTORY_RESOURCE_URL, handler: handleDirectoryMcpRequest },
+]) {
+  app.post(
+    path,
+    requireBearerAuth({
+      verifier: verifierForMcpResource(resource),
+      resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(resource),
+    }),
+    // Volume ceiling — AFTER auth so it can key on the caller's staffId/org. requireBearerAuth proves
+    // WHO calls; nothing limited HOW MUCH, leaving ~250 tools open to fuzzing at full speed.
+    mcpRateLimitMiddleware,
+    express.json(),
+    // The brake from the 2026-09-23 freeze: one tool call at a time per person, a deadline that cancels
+    // the work at its next read, and the tool logged when it STARTS (with an execution context).
+    mcpRequestGuardMiddleware,
+    handler,
+  )
 
-// MCP here is JSON-RPC over POST (stateless Streamable HTTP — no standalone GET/SSE stream,
-// and we never issue session ids, so there is no session for a client to DELETE).
-// Answer GET *and* DELETE with 405 + Allow:POST so it reads as a real MCP endpoint, not an
-// Express 404 — the Streamable HTTP spec prescribes exactly this for both verbs.
-app.all('/mcp', (req, res, next) => {
-  if (req.method !== 'GET' && req.method !== 'DELETE') return next()
-  return res
-    .set('Allow', 'POST')
-    .status(405)
-    .json({
-      jsonrpc: '2.0',
-      error: { code: -32000, message: 'Method Not Allowed. The Avoqado MCP endpoint accepts POST (JSON-RPC) only.' },
-      id: null,
-    })
-})
+  // MCP here is JSON-RPC over POST (stateless Streamable HTTP — no standalone GET/SSE stream,
+  // and we never issue session ids, so there is no session for a client to DELETE).
+  // Answer GET *and* DELETE with 405 + Allow:POST so it reads as a real MCP endpoint, not an
+  // Express 404 — the Streamable HTTP spec prescribes exactly this for both verbs.
+  app.all(path, (req, res, next) => {
+    if (req.method !== 'GET' && req.method !== 'DELETE') return next()
+    return res
+      .set('Allow', 'POST')
+      .status(405)
+      .json({
+        jsonrpc: '2.0',
+        error: { code: -32000, message: 'Method Not Allowed. The Avoqado MCP endpoint accepts POST (JSON-RPC) only.' },
+        id: null,
+      })
+  })
+}
 
 // ⚠️ Public settlement report route — token-validated, no auth middleware
 // Mounted before configureCoreMiddlewares to avoid auth checks

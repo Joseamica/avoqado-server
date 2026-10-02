@@ -128,3 +128,13 @@ describe('refresh tokens', () => {
     expect([a, b].filter(Boolean)).toHaveLength(1)
   })
 })
+
+it('conserva el recurso del directorio al almacenar y consumir un refresh', async () => {
+  const resource = 'http://localhost:12344/mcp/directory'
+  db.mcpRefreshToken.create.mockResolvedValue({})
+  await createRefreshToken({ clientId: 'c1', staffId: 's1', activeOrg: 'o1', scopes: ['mcp:read'], resource })
+  expect(db.mcpRefreshToken.create.mock.calls[0][0].data.resource).toBe(resource)
+  db.mcpRefreshToken.updateMany.mockResolvedValue({ count: 1 })
+  db.mcpRefreshToken.findUnique.mockResolvedValue({ clientId: 'c1', staffId: 's1', activeOrg: 'o1', scopes: ['mcp:read'], resource })
+  expect((await consumeRefreshToken('opaque'))?.resource).toBe(resource)
+})
