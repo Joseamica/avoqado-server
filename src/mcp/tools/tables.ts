@@ -3,6 +3,7 @@ import { z } from 'zod'
 import prisma from '@/utils/prismaClient'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
+import { personSearchWhere } from '../personSearch'
 import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
 import { TableStatus } from '@prisma/client'
@@ -252,7 +253,7 @@ export function registerTableTools(server: McpServer, scope: McpScope) {
           where: {
             venueId,
             staff: {
-              OR: [{ firstName: { contains: staff, mode: 'insensitive' } }, { lastName: { contains: staff, mode: 'insensitive' } }],
+              ...personSearchWhere(staff),
             },
           },
           select: { staffId: true, staff: { select: { firstName: true, lastName: true } } },

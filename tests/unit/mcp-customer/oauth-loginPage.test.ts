@@ -36,3 +36,21 @@ it('identifica el catálogo de publicación antes del consentimiento', () => {
   expect(html).toContain('Catálogo de publicación')
   expect(html).toContain('No incluye cobros, reembolsos ni nómina')
 })
+
+it('con la tanda de lecturas prendida, el consentimiento describe la operación diaria', () => {
+  const previous = process.env.MCP_DIRECTORY_TIER
+  process.env.MCP_DIRECTORY_TIER = '1'
+  try {
+    jest.isolateModules(() => {
+      const { renderLoginPage: render } = require('@/mcp/oauth/loginPage')
+      const { MCP_DIRECTORY_RESOURCE_URL } = require('@/mcp/oauth/config')
+      const html = render({ clientId: 'c', redirectUri: 'http://cb', codeChallenge: 'cc', resource: MCP_DIRECTORY_RESOURCE_URL.href })
+      expect(html).toContain('la operación diaria de tus locales')
+      expect(html).toContain('No incluye cobros, reembolsos, facturación ni nómina')
+      expect(html).not.toContain('ventas, productos e inventario.')
+    })
+  } finally {
+    if (previous === undefined) delete process.env.MCP_DIRECTORY_TIER
+    else process.env.MCP_DIRECTORY_TIER = previous
+  }
+})

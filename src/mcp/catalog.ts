@@ -6,6 +6,7 @@ import { text } from './respond'
 import { CONFIRMATION_TTL, issueConfirmation, validConfirmation } from './confirmation'
 import { DIRECTORY_TOOLS, type McpProfile } from './directory/catalog'
 import { DIRECTORY_DESCRIPTIONS } from './directory/descriptions'
+import { redactDirectoryResult } from './directory/redact'
 
 /** Explicit effects, never guessed from a name or permission suffix. New tools must declare one. */
 export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
@@ -384,6 +385,8 @@ export function configureToolCatalog(server: McpServer, scope: McpScope, profile
         }
       : config.inputSchema
     const included = profile === 'manual' || DIRECTORY_TOOLS.has(name)
+    // Directory answers drop fiscal and third-party integration identifiers (see directory/redact.ts).
+    const run = profile === 'directory' ? async (...a: any[]) => redactDirectoryResult(await callback(...a)) : callback
     const granted = () => included && (scope.scopes ?? ['mcp:read']).includes(readOnly ? 'mcp:read' : 'mcp:write')
     const tool = register(
       name,
@@ -409,7 +412,7 @@ export function configureToolCatalog(server: McpServer, scope: McpScope, profile
           throw new ScopeError(
             `Esta conexión requiere autorizar ${readOnly ? 'mcp:read' : 'mcp:write'}. Vuelve a conectar con ese permiso.`,
           )
-        if (!needsPreview) return structureToolResult(await callback(...args))
+        if (!needsPreview) return structureToolResult(await run(...args))
         const { confirmationToken, ...input } = args[0]
         const { confirm: _confirm, ...intent } = input
         if (input.confirm === true && !validConfirmation(confirmationToken, scope, name, intent)) {
@@ -423,7 +426,7 @@ export function configureToolCatalog(server: McpServer, scope: McpScope, profile
             }),
           )
         }
-        const result = structureToolResult(await callback(input, ...args.slice(1)))
+        const result = structureToolResult(await run(input, ...args.slice(1)))
         const data = result.structuredContent.data as Record<string, unknown> | null
         if (data?.requiresConfirmation === true && input.confirm !== true) {
           // Existing previews can supply concurrency fields that were unknown on the first call.

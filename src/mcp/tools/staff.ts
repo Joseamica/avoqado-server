@@ -6,6 +6,7 @@ import prisma from '@/utils/prismaClient'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { requireWriteScopeAlways } from '../requireWriteScopeAlways'
+import { personSearchWhere } from '../personSearch'
 import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
 import { inviteTeamMember, updateTeamMember } from '@/services/dashboard/team.dashboard.service'
@@ -81,10 +82,7 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
                 ...(activeOnly ? { active: true } : {}),
                 ...(search
                   ? {
-                      OR: [
-                        { firstName: { contains: search, mode: 'insensitive' as const } },
-                        { lastName: { contains: search, mode: 'insensitive' as const } },
-                      ],
+                      ...personSearchWhere(search),
                     }
                   : {}),
               },
@@ -361,10 +359,7 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
         where: {
           ...base,
           staff: {
-            OR: [
-              { firstName: { contains: name, mode: 'insensitive' as const } },
-              { lastName: { contains: name, mode: 'insensitive' as const } },
-            ],
+            ...personSearchWhere(name),
           },
         },
         select: { staffId: true, staff: { select: { firstName: true, lastName: true, active: true } } },
@@ -495,10 +490,7 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
             ? { id: resolvedStaffVenueId }
             : {
                 staff: {
-                  OR: [
-                    { firstName: { contains: name, mode: 'insensitive' as const } },
-                    { lastName: { contains: name, mode: 'insensitive' as const } },
-                  ],
+                  ...personSearchWhere(name),
                 },
               }),
         },

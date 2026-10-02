@@ -3,6 +3,7 @@ import { z } from 'zod'
 import prisma from '@/utils/prismaClient'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
+import { personSearchWhere } from '../personSearch'
 import { text } from '../respond'
 import { getCreditPacks, getCustomerPurchases, redeemItemManually } from '@/services/dashboard/creditPack.dashboard.service'
 import { sellPackInPerson } from '@/services/mobile/creditPack.mobile.service'
@@ -60,12 +61,7 @@ export function registerCreditPackTools(server: McpServer, scope: McpScope) {
       const matches = await prisma.customer.findMany({
         where: {
           ...base,
-          OR: [
-            { firstName: { contains: search, mode: 'insensitive' as const } },
-            { lastName: { contains: search, mode: 'insensitive' as const } },
-            { email: { contains: search, mode: 'insensitive' as const } },
-            { phone: { contains: search } },
-          ],
+          ...personSearchWhere(search, { contact: true }),
         },
         select: { id: true, firstName: true, lastName: true },
         orderBy: { totalSpent: 'desc' },
@@ -134,12 +130,7 @@ export function registerCreditPackTools(server: McpServer, scope: McpScope) {
       const matches = await prisma.customer.findMany({
         where: {
           ...base,
-          OR: [
-            { firstName: { contains: search, mode: 'insensitive' as const } },
-            { lastName: { contains: search, mode: 'insensitive' as const } },
-            { email: { contains: search, mode: 'insensitive' as const } },
-            { phone: { contains: search } },
-          ],
+          ...personSearchWhere(search, { contact: true }),
         },
         select: { id: true, firstName: true, lastName: true },
         orderBy: { totalSpent: 'desc' },
@@ -269,12 +260,7 @@ export function registerCreditPackTools(server: McpServer, scope: McpScope) {
       const customers = await prisma.customer.findMany({
         where: {
           ...base,
-          OR: [
-            { firstName: { contains: customerSearch, mode: 'insensitive' as const } },
-            { lastName: { contains: customerSearch, mode: 'insensitive' as const } },
-            { email: { contains: customerSearch, mode: 'insensitive' as const } },
-            { phone: { contains: customerSearch } },
-          ],
+          ...personSearchWhere(customerSearch, { contact: true }),
         },
         select: { id: true, firstName: true, lastName: true },
         orderBy: { totalSpent: 'desc' },
