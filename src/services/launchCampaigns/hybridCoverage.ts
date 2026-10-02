@@ -1,4 +1,4 @@
-import { addMonths } from 'date-fns'
+import { addDays, addMonths, startOfDay } from 'date-fns'
 import { FEATURE_CATALOG } from '@/config/featureCatalog'
 import { PAID_PLAN_TIER_CODES } from '@/services/access/basePlan.service'
 import type { InventarioDeObligaciones } from '@/services/access/inventarioDeObligaciones'
@@ -48,12 +48,17 @@ export const MAX_START_DELAY_MS = 47 * 3600000
 
 /**
  * Spec §4.2 rule 2 for a cart: its END lines start with the Stripe period, anywhere from `now` to MAX_START_DELAY_MS
- * later. Both ends are checked: a late start lets a new line outlive a dependency the venue keeps, an early one lets a
- * kept function outlive a new dependency line (lines of one cart share the start, so they shift together).
+ * later (lines of one cart share that start). `addMonths` clips month ends (29–31 Jan → 28 Feb), so an end is not
+ * monotone in the start across a midnight of the zone date-fns uses (the runtime's). Within one such day every line end
+ * moves with the start (slope 1) and a kept end not at all (slope 0), so the gap between a function and its dependency
+ * is monotone on each day: the window's two ends plus both sides of each midnight inside it cover every start.
  */
 export function assertCartDependencyTerms(retained: CoverageItem[], lines: Parameters<typeof lineCoverage>[0], now: Date): void {
-  for (const start of [now, new Date(now.getTime() + MAX_START_DELAY_MS)])
-    assertDependencyTerms([...retained, ...lineCoverage(lines, start)])
+  const latest = new Date(now.getTime() + MAX_START_DELAY_MS)
+  const starts = [now, latest]
+  for (let midnight = addDays(startOfDay(now), 1); midnight <= latest; midnight = addDays(midnight, 1))
+    starts.push(new Date(midnight.getTime() - 1), midnight)
+  for (const start of starts) assertDependencyTerms([...retained, ...lineCoverage(lines, start)])
 }
 
 /** What the quote already read about the venue, without the subscriptions it replaces. */

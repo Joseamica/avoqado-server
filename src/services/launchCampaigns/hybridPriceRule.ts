@@ -1,4 +1,5 @@
-import type { Prisma } from '@prisma/client'
+import { Prisma } from '@prisma/client'
+import prisma from '@/utils/prismaClient'
 import { Decimal } from '@prisma/client/runtime/library'
 import { ConflictError } from '@/errors/AppError'
 import { utcTs } from '@/utils/sqlDates'
@@ -84,6 +85,43 @@ export async function promotionsBrokenByList(tx: Prisma.TransactionClient, key: 
       },
     ]
   })
+}
+
+/** An ACTIVE promotion of the same product whose window meets a new one (spec §4.4: a warning, never a block). */
+export interface PromotionOverlap {
+  campaignId: string
+  name: string
+  price: number
+}
+
+/**
+ * The ACTIVE single-product promotions over these products whose window meets [startsAt, endsAt), by product key, in
+ * creation order (`excludeCampaignId`: the one under review). One bounded query, filtered by product in SQL.
+ * ponytail: LIMIT 1000, like the board's groups; page it per product if that ever gets close.
+ */
+export async function activePromotionOverlaps(
+  keys: string[],
+  startsAt: Date,
+  endsAt: Date,
+  excludeCampaignId?: string,
+): Promise<Map<string, PromotionOverlap[]>> {
+  const byKey = new Map<string, PromotionOverlap[]>()
+  if (!keys.length) return byKey
+  const rows = await prisma.$queryRaw<{ productKey: string; id: string; name: string; definition: unknown }[]>`
+    SELECT ${productKeySql('p')} AS "productKey", c.id, c.name, p.definition
+    FROM "HybridCampaign" c
+    JOIN "HybridOfferPublication" p ON p.id = c."currentPublicationId"
+    WHERE c.purpose = 'PROMOTION' AND c.status = 'ACTIVE'
+      AND c."startsAt" < ${utcTs(endsAt)} AND c."endsAt" > ${utcTs(startsAt)}
+      AND ${productKeySql('p')} IN (${Prisma.join(keys)})
+      ${excludeCampaignId ? Prisma.sql`AND c.id <> ${excludeCampaignId}` : Prisma.empty}
+    ORDER BY c."createdAt", c.id
+    LIMIT 1000`
+  for (const row of rows) {
+    const overlap = { campaignId: row.id, name: row.name, price: hybridOfferDefinition.parse(row.definition).terms.price }
+    byKey.set(row.productKey, [...(byKey.get(row.productKey) ?? []), overlap])
+  }
+  return byKey
 }
 
 /** List side guard: throws HYBRID_LIST_BREAKS_PROMOTIONS with details = RuleViolation[] when the list would break active promotions. */

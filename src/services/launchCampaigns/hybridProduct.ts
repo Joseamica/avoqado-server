@@ -34,7 +34,10 @@ export async function priceTransaction<T>(fn: (tx: Prisma.TransactionClient) => 
     return await prisma.$transaction(fn, LOCK_WAIT)
   } catch (error) {
     if ((error as { code?: string }).code === 'P2028')
-      throw new ConflictError('Otra operación está cambiando el precio de este producto; reintenta en unos segundos.', 'HYBRID_PRICE_BUSY')
+      throw Object.assign(
+        new ConflictError('Otra operación está cambiando el precio de este producto; reintenta en unos segundos.', 'HYBRID_PRICE_BUSY'),
+        { cause: error },
+      )
     throw error
   }
 }

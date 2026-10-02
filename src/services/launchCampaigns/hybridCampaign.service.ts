@@ -5,9 +5,9 @@ import logger from '@/config/logger'
 import { z } from 'zod'
 import prisma from '@/utils/prismaClient'
 import { BadRequestError, ConflictError, NotFoundError } from '@/errors/AppError'
-import { compileHybridPublication } from './hybridOffer.service'
+import { compileHybridPublication, previewHybridOffer } from './hybridOffer.service'
 import { hybridOfferDefinition, type HybridOfferDefinition } from './hybridOffer.schema'
-import { assertPromotionBelowList } from './hybridPriceRule'
+import { activePromotionOverlaps, assertPromotionBelowList } from './hybridPriceRule'
 import { lockProducts, priceTransaction, productKeyOf } from './hybridProduct'
 
 const errorMap: z.ZodErrorMap = () => ({ message: 'Valor requerido o formato no válido' })
@@ -54,6 +54,19 @@ export const hybridCampaignListQuery = z
   )
   .strict('Filtro no admitido')
 
+// The window under review travels in the query string: the shared preview body stays strict and unchanged, and an older
+// server simply ignores it.
+const reviewWindowQuery = z
+  .object(
+    {
+      campaignId: z.string({ errorMap }).min(1).max(64).optional(),
+      startsAt: z.string({ errorMap }).datetime({ offset: true, message: 'Indica fecha, hora y zona' }).optional(),
+      endsAt: z.string({ errorMap }).datetime({ offset: true, message: 'Indica fecha, hora y zona' }).optional(),
+    },
+    { errorMap },
+  )
+  .strict('Filtro no admitido')
+
 function parse<T extends z.ZodTypeAny>(schema: T, input: unknown): z.output<T> {
   const result = schema.safeParse(input)
   if (!result.success)
@@ -77,6 +90,19 @@ function draftData(input: z.infer<typeof hybridCampaignBody>) {
     endsAt: new Date(input.endsAt),
     draftDefinition: definition as Prisma.InputJsonValue,
   }
+}
+
+/**
+ * The editor's «Revisar oferta»: the shared offer preview plus, for a single-product offer reviewed with its window, the
+ * ACTIVE promotions of that product whose window meets it, without the campaign under review (spec §4.4: the promotions
+ * screen warns of the overlap; it never blocks it).
+ */
+export async function reviewHybridCampaignOffer(body: unknown, query: unknown) {
+  const preview = previewHybridOffer(body)
+  const { campaignId, startsAt, endsAt } = parse(reviewWindowQuery, query ?? {})
+  const key = startsAt && endsAt ? productKeyOf(hybridOfferDefinition.parse((body as { offer: unknown }).offer)) : null
+  const overlaps = key ? ((await activePromotionOverlaps([key], new Date(startsAt!), new Date(endsAt!), campaignId)).get(key) ?? []) : []
+  return { ...preview, overlaps }
 }
 
 export async function audit(tx: Prisma.TransactionClient, id: string, staffId: string, action: string, data: Prisma.InputJsonObject) {

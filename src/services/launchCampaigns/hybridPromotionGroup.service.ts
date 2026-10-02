@@ -4,15 +4,14 @@ import { z } from 'zod'
 import { FEATURE_CATALOG } from '@/config/featureCatalog'
 import { BadRequestError, ConflictError, NotFoundError } from '@/errors/AppError'
 import prisma from '@/utils/prismaClient'
-import { utcTs } from '@/utils/sqlDates'
 import { changed, notifyCampaign, publishWithin, setCampaignStatusWithin } from './hybridCampaign.service'
 import { HYBRID_DEPENDENCIES } from './hybridDependencies'
 import { LISTABLE_FEATURE_CODES } from './hybridListPrice.service'
 import { compileHybridPublication } from './hybridOffer.service'
 import { hybridOfferDefinition, MINIMUM_PRICE } from './hybridOffer.schema'
-import { assertPromotionBelowList, listPriceOf } from './hybridPriceRule'
+import { activePromotionOverlaps, assertPromotionBelowList, listPriceOf, type PromotionOverlap } from './hybridPriceRule'
 import { ensureHybridPublicationPrices } from './hybridPrices'
-import { lockProducts, priceTransaction, productKeyOf, productKeySql, type ProductKey } from './hybridProduct'
+import { lockProducts, priceTransaction, productKeyOf, type ProductKey } from './hybridProduct'
 import { assertHybridSalesOpen } from './hybridPurchase.service'
 
 const errorMap: z.ZodErrorMap = () => ({ message: 'Valor requerido o formato no válido' })
@@ -220,47 +219,15 @@ async function auditGroup(tx: Prisma.TransactionClient, id: string, staffId: str
   await tx.activityLog.create({ data: { staffId, action, entity: 'HybridPromotionGroup', entityId: id, data } })
 }
 
-/** An ACTIVE promotion of the same function whose window meets the new one (spec §4.4: a warning, never a block). */
-export interface PercentOverlap {
-  campaignId: string
-  name: string
-  price: number
-}
-
-/**
- * The ACTIVE single-function promotions over these functions whose window meets [startsAt, endsAt), in creation order: one
- * bounded query, filtered by product in SQL (`productKeySql`, as the list-price rule does).
- * ponytail: LIMIT 1000, like the board's groups; page it per product if that ever gets close.
- */
-async function overlapsByCode(codes: string[], startsAt: Date, endsAt: Date): Promise<Map<string, PercentOverlap[]>> {
-  const byCode = new Map<string, PercentOverlap[]>()
-  if (!codes.length) return byCode
-  const rows = await prisma.$queryRaw<{ productKey: string; id: string; name: string; definition: unknown }[]>`
-    SELECT ${productKeySql('p')} AS "productKey", c.id, c.name, p.definition
-    FROM "HybridCampaign" c
-    JOIN "HybridOfferPublication" p ON p.id = c."currentPublicationId"
-    WHERE c.purpose = 'PROMOTION' AND c.status = 'ACTIVE'
-      AND c."startsAt" < ${utcTs(endsAt)} AND c."endsAt" > ${utcTs(startsAt)}
-      AND ${productKeySql('p')} IN (${Prisma.join(codes.map(keyOf))})
-    ORDER BY c."createdAt", c.id
-    LIMIT 1000`
-  for (const row of rows) {
-    const code = row.productKey.slice('FEATURE:'.length)
-    const overlap = { campaignId: row.id, name: row.name, price: hybridOfferDefinition.parse(row.definition).terms.price }
-    byCode.set(code, [...(byCode.get(code) ?? []), overlap])
-  }
-  return byCode
-}
-
 export async function previewPercentPromotion(
   input: unknown,
-): Promise<{ rows: (PercentPreviewRow & { overlaps: PercentOverlap[] })[]; creatable: boolean }> {
+): Promise<{ rows: (PercentPreviewRow & { overlaps: PromotionOverlap[] })[]; creatable: boolean }> {
   const body = parse(percentPromotionBody, input)
   const codes = targetFeatureCodes(body.target)
   const rows = await prisma.$transaction(tx => previewRows(tx, codes, body, true))
-  const overlaps = await overlapsByCode(codes, new Date(body.startsAt), new Date(body.endsAt))
+  const overlaps = await activePromotionOverlaps(codes.map(keyOf), new Date(body.startsAt), new Date(body.endsAt))
   return {
-    rows: rows.map(row => ({ ...row, overlaps: overlaps.get(row.featureCode) ?? [] })),
+    rows: rows.map(row => ({ ...row, overlaps: overlaps.get(keyOf(row.featureCode)) ?? [] })),
     creatable: rows.some(row => row.status === 'OK') && rows.every(row => row.status !== 'BELOW_MINIMUM'),
   }
 }

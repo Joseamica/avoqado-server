@@ -1,6 +1,6 @@
 import { addMonths } from 'date-fns'
 import { assertDependencyTerms, dependencyTermIssues, HYBRID_DEPENDENCIES } from '@/services/launchCampaigns/hybridDependencies'
-import { lineCoverage, retainedCoverage } from '@/services/launchCampaigns/hybridCoverage'
+import { assertCartDependencyTerms, lineCoverage, MAX_START_DELAY_MS, retainedCoverage } from '@/services/launchCampaigns/hybridCoverage'
 
 const DEPS = { AUTO_REORDER: ['INVENTORY_TRACKING'] }
 const d = (iso: string) => new Date(`${iso}T12:00:00.000Z`)
@@ -149,6 +149,50 @@ describe('new cart lines as coverage', () => {
       { featureCode: 'CFDI', endsAt: null, unit: line('same') },
       { featureCode: 'UPSELL', endsAt: null, unit: line('reprice') },
     ])
+  })
+})
+
+// Codex round 2 (R-C2c): `addMonths` clips month ends (29–31 Jan → 28 Feb), so an END line's end is not monotone in its
+// start across a local midnight. Run under TZ=UTC and TZ=America/Mexico_City: both zones reproduce it.
+describe('the start window of a cart is cut at every local midnight', () => {
+  const upsellAi = {
+    publicationId: 'end',
+    featureCodes: ['UPSELL_AI'],
+    terms: {
+      currency: 'MXN' as const,
+      interval: 'MONTHLY' as const,
+      price: 99,
+      taxIncluded: true as const,
+      promotionCycles: 1,
+      renewal: { kind: 'END' as const },
+    },
+  }
+  const accepted = new Date('2027-01-29T20:00:00.000Z')
+  const kept = [
+    { featureCode: 'UPSELL', endsAt: new Date('2027-02-28T21:00:00.000Z'), unit: { kind: 'RETAINED' as const, source: 'sub_pro' } },
+  ]
+  const issuesAt = (start: Date) => dependencyTermIssues([...kept, ...lineCoverage([upsellAi], start)], HYBRID_DEPENDENCIES)
+
+  it('a recovered start between the two ends outlives the dependency although both ends pass, and the cart is refused', () => {
+    expect(issuesAt(accepted)).toEqual([])
+    expect(issuesAt(new Date(accepted.getTime() + MAX_START_DELAY_MS))).toEqual([])
+    // Codex's start: 30 Jan 23:45 UTC ends 28 Feb 23:45 UTC (17:45 in Mexico City ends 28 Feb 17:45 = 23:45 UTC).
+    expect(issuesAt(new Date('2027-01-30T23:45:00.000Z'))).toHaveLength(1)
+    let error: unknown
+    try {
+      assertCartDependencyTerms(kept, [upsellAi], accepted)
+    } catch (caught) {
+      error = caught
+    }
+    expect(error).toMatchObject({
+      code: 'HYBRID_DEPENDENCY_TERM',
+      details: [expect.objectContaining({ featureCode: 'UPSELL_AI', requiredFeatureCode: 'UPSELL' })],
+    })
+  })
+
+  it('a dependency kept past every start in the window holds the line', () => {
+    const longer = [{ ...kept[0], endsAt: new Date('2027-03-03T00:00:00.000Z') }]
+    expect(() => assertCartDependencyTerms(longer, [upsellAi], accepted)).not.toThrow()
   })
 })
 

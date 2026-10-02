@@ -331,11 +331,14 @@ it('broadcasts only a campaign invalidation to superadmins after the transaction
 it('publishing waits on the product lock with the catalog budget, and running out of it is a retryable 409', async () => {
   await publishHybridCampaign('campaign1', 1, 'staff1')
   expect(db.$transaction).toHaveBeenLastCalledWith(expect.any(Function), { timeout: 15_000 })
-  db.$transaction.mockRejectedValueOnce(Object.assign(new Error('Transaction already closed'), { code: 'P2028' }))
+  const expired = Object.assign(new Error('Transaction already closed'), { code: 'P2028' })
+  db.$transaction.mockRejectedValueOnce(expired)
   await expect(publishHybridCampaign('campaign1', 1, 'staff1')).rejects.toMatchObject({
     statusCode: 409,
     code: 'HYBRID_PRICE_BUSY',
     message: 'Otra operación está cambiando el precio de este producto; reintenta en unos segundos.',
+    // The Prisma error stays attached for the logs.
+    cause: expired,
   })
 })
 

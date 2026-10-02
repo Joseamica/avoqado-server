@@ -33,7 +33,7 @@ import { activateLaunchCampaign, previewLaunchOffer } from '@/services/launchCam
 import { launchOfferAvailability } from '@/services/launchCampaigns/launchOfferMath'
 import { CAMPAIGN_CHANNEL_VALUES, CAMPAIGN_STATUS_VALUES, CAMPAIGN_VERTICAL_VALUES } from '@/services/launchCampaigns/launchCampaignEnums'
 import { hybridOfferPreviewBody } from '@/services/launchCampaigns/hybridOffer.schema'
-import { previewHybridOffer } from '@/services/launchCampaigns/hybridOffer.service'
+import { reviewHybridCampaignOffer } from '@/services/launchCampaigns/hybridCampaign.service'
 
 const SOLO_AVOQADO = 'Solo Avoqado puede ver o cambiar las ofertas de lanzamiento.'
 
@@ -45,11 +45,16 @@ export function registerLaunchCampaignTools(server: McpServer, scope: McpScope):
   registerHybridPricingTools(server, scope)
   server.tool(
     'preview_hybrid_offer',
-    'Simula una oferta de plan, funciones específicas o paquete a elección. Valida cantidad, funciones ya incluidas, dependencias, precio total en pesos MXN y renovación. El escenario es hipotético. No publica, reserva, cobra ni activa funciones. Sólo para Avoqado.',
-    hybridOfferPreviewBody.shape,
-    async input => {
+    'Simula una oferta de plan, funciones específicas o paquete a elección. Valida cantidad, funciones ya incluidas, dependencias, precio total en pesos MXN y renovación. Con la vigencia (startsAt y endsAt) de una oferta de un solo producto, «overlaps» lista las promociones activas de ese producto cuya vigencia se traslapa, sin la campaña campaignId (es un aviso: no bloquea). El escenario es hipotético. No publica, reserva, cobra ni activa funciones. Sólo para Avoqado.',
+    {
+      ...hybridOfferPreviewBody.shape,
+      campaignId: z.string().optional().describe('La campaña que se revisa: no se cuenta como traslape de sí misma'),
+      startsAt: z.string().optional().describe('Inicio de la vigencia (ISO con zona) para buscar traslapes'),
+      endsAt: z.string().optional().describe('Fin de la vigencia (ISO con zona) para buscar traslapes'),
+    },
+    async ({ campaignId, startsAt, endsAt, ...input }) => {
       if (!scope.isSuperAdmin) return text({ ok: false, error: SOLO_AVOQADO })
-      return text(previewHybridOffer(input))
+      return text(await reviewHybridCampaignOffer(input, { campaignId, startsAt, endsAt }))
     },
   )
 

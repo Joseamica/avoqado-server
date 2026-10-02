@@ -7,6 +7,7 @@ import {
   createHybridCampaign,
   publishHybridCampaign,
   setHybridCampaignStatus,
+  reviewHybridCampaignOffer,
   updateHybridCampaign,
 } from '@/services/launchCampaigns/hybridCampaign.service'
 import { lockProducts, productKeyOf, productKeySql, type ProductKey } from '@/services/launchCampaigns/hybridProduct'
@@ -482,6 +483,32 @@ it("(8) extending an expired ACTIVE promotion is held to today's list; one that 
   await expect(extend(above, future)).rejects.toMatchObject({ statusCode: 409, code: 'HYBRID_PRICE_ABOVE_LIST' })
   expect(await row(above)).toMatchObject({ status: 'ACTIVE', revision: before.revision, endsAt: past })
   await expect(extend(fits, future)).resolves.toMatchObject({ status: 'ACTIVE', endsAt: future })
+})
+
+// Codex round 2, spec §4.4: the editor's «Revisar oferta» warns of the other ACTIVE promotions of the same product
+// whose window meets the reviewed one, never of the campaign under review itself.
+it('(9) the editor review names the other ACTIVE promotions of the product in its window, not itself', async () => {
+  const mine = await promotion(feature(NO_LIST, 90))
+  const other = await promotion(feature(NO_LIST, 80))
+  for (const id of [mine, other]) {
+    await publish(id)
+    await activate(id)
+  }
+  const window = (from: number, to: number) => ({
+    campaignId: mine,
+    startsAt: new Date(Date.now() + from * 86400000).toISOString(),
+    endsAt: new Date(Date.now() + to * 86400000).toISOString(),
+  })
+  const ids = (overlaps: { campaignId: string }[]) => overlaps.map(overlap => overlap.campaignId)
+  const review = await reviewHybridCampaignOffer({ offer: feature(NO_LIST, 70) }, window(0, 3))
+  expect(review.overlaps).toEqual(expect.arrayContaining([{ campaignId: other, name: (await row(other)).name, price: 80 }]))
+  expect(ids(review.overlaps)).not.toContain(mine)
+  // A window that starts once theirs ended (7 days) meets neither.
+  const later = await reviewHybridCampaignOffer({ offer: feature(NO_LIST, 70) }, window(8, 9))
+  expect(ids(later.overlaps)).not.toContain(other)
+  // A paused one is not on sale: it is not an overlap.
+  await pause(other)
+  expect(ids((await reviewHybridCampaignOffer({ offer: feature(NO_LIST, 70) }, window(0, 3))).overlaps)).not.toContain(other)
 })
 
 // Codex C4: the editor's publish and activation wait for the product lock with the catalog's budget (15 s, as list saves
