@@ -227,9 +227,12 @@ describe('valoración — feature nueva: bordes', () => {
     await prisma.servicePayTableCell.createMany({
       data: [0, 1, 2, 3, 4].map(count => ({ versionId: v2.id, payLevelId: ids.coach!, count, amount: new Prisma.Decimal(400) })),
     })
-    const id = await clase(ids.bsf!, ids.productBsf!, ids.sofia!, '2026-09-21T14:00:00.000Z', confirmadas(6))
-    expect(await valorUna(ids.bsf!, id)).toMatchObject({ estado: 'EXCEPCION', motivo: 'SIN_MONTO_PARA_ESE_CONTEO' })
-    await prisma.servicePayTableVersion.delete({ where: { id: v2.id } })
+    try {
+      const id = await clase(ids.bsf!, ids.productBsf!, ids.sofia!, '2026-09-21T14:00:00.000Z', confirmadas(6))
+      expect(await valorUna(ids.bsf!, id)).toMatchObject({ estado: 'EXCEPCION', motivo: 'SIN_MONTO_PARA_ESE_CONTEO' })
+    } finally {
+      await prisma.servicePayTableVersion.delete({ where: { id: v2.id } })
+    }
   })
   it('clase cancelada o que no ha terminado no entra', async () => {
     const cancelada = await clase(ids.pn!, ids.productPn!, ids.ana!, '2026-09-14T14:00:00.000Z', confirmadas(3), { status: 'CANCELLED' })
@@ -273,12 +276,15 @@ describe('valoración — feature nueva: bordes', () => {
   })
   it('tabla específica sin versión vigente no desplaza a la general', async () => {
     const t = await prisma.servicePayTable.create({ data: { venueId: ids.pn!, name: 'Sólo Reformer', productIds: [ids.productPn!] } })
-    await prisma.servicePayTableVersion.create({
-      data: { tableId: t.id, effectiveFrom: fechaComoDbDate('2026-12-01'), revision: 1, maxCount: 10 },
-    })
-    const id = await clase(ids.pn!, ids.productPn!, ids.ana!, '2026-09-18T20:00:00.000Z', confirmadas(8))
-    expect(Number((await valorUna(ids.pn!, id)).monto)).toBe(570)
-    await prisma.servicePayTable.delete({ where: { id: t.id } })
+    try {
+      await prisma.servicePayTableVersion.create({
+        data: { tableId: t.id, effectiveFrom: fechaComoDbDate('2026-12-01'), revision: 1, maxCount: 10 },
+      })
+      const id = await clase(ids.pn!, ids.productPn!, ids.ana!, '2026-09-18T20:00:00.000Z', confirmadas(8))
+      expect(Number((await valorUna(ids.pn!, id)).monto)).toBe(570)
+    } finally {
+      await prisma.servicePayTable.delete({ where: { id: t.id } })
+    }
   })
   it('zona horaria: una clase a las 23:30 del 30-sep en CDMX es de septiembre', async () => {
     const id = await clase(ids.pn!, ids.productPn!, ids.ana!, '2026-10-01T05:30:00.000Z', confirmadas(1), {
@@ -286,6 +292,133 @@ describe('valoración — feature nueva: bordes', () => {
     })
     const v = await valorUna(ids.pn!, id)
     expect(v.fechaLocal).toBe('2026-09-30')
+  })
+})
+
+/**
+ * Sede aislada por prueba: las reglas de tabla se prueban sin tocar las tablas compartidas de PN/BSF, así que una
+ * prueba que falle no contamina a las demás. Se borran en afterAll con el resto de sedes de la org.
+ */
+let sedes = 0
+async function sedeAislada(productos = 1) {
+  const s = `aislada-${++sedes}`
+  const v = await prisma.venue.create({ data: { organizationId: ids.org!, name: `${key}-${s}`, slug: `${key}-${s}`, timezone: TZ } })
+  const cat = await prisma.menuCategory.create({ data: { venueId: v.id, name: 'Clases', slug: `${key}-${s}-c`, availableDays: [] } })
+  const productIds: string[] = []
+  for (let i = 0; i < productos; i++) {
+    const p = await prisma.product.create({
+      data: {
+        venueId: v.id,
+        categoryId: cat.id,
+        sku: `${key}-${s}-p${i}`,
+        name: `Clase ${i}`,
+        type: 'CLASS',
+        price: new Prisma.Decimal(300),
+        duration: 50,
+        maxParticipants: 10,
+        tags: [],
+        allergens: [],
+      },
+    })
+    productIds.push(p.id)
+  }
+  return { venueId: v.id, productIds }
+}
+/** Tabla con una versión y la misma cifra en todas las celdas (0..10) del nivel Coach. */
+async function tablaPlana(
+  venueId: string,
+  monto: number,
+  o: { productIds?: string[]; desde?: string; archivedFrom?: string; tableId?: string; revision?: number } = {},
+) {
+  const tableId =
+    o.tableId ??
+    (
+      await prisma.servicePayTable.create({
+        data: {
+          venueId,
+          name: `t-${monto}`,
+          productIds: o.productIds ?? [],
+          archivedFrom: o.archivedFrom ? fechaComoDbDate(o.archivedFrom) : null,
+        },
+      })
+    ).id
+  const v = await prisma.servicePayTableVersion.create({
+    data: { tableId, effectiveFrom: fechaComoDbDate(o.desde ?? '2026-01-01'), revision: o.revision ?? 1, maxCount: 10 },
+  })
+  await prisma.servicePayTableCell.createMany({
+    data: Array.from({ length: 11 }, (_, count) => ({ versionId: v.id, payLevelId: ids.coach!, count, amount: new Prisma.Decimal(monto) })),
+  })
+  return { tableId, versionId: v.id }
+}
+
+describe('valoración — feature nueva: reglas de tabla, coach y totales', () => {
+  it('la tabla específica del producto (con versión vigente) gana a la general; otro producto sigue con la general', async () => {
+    const { venueId, productIds } = await sedeAislada(2)
+    const [reformer, otro] = productIds
+    await tablaPlana(venueId, 100)
+    await tablaPlana(venueId, 999, { productIds: [reformer] })
+    const a = await clase(venueId, reformer, ids.sofia!, '2026-09-10T14:00:00.000Z', confirmadas(3))
+    const b = await clase(venueId, otro, ids.sofia!, '2026-09-10T16:00:00.000Z', confirmadas(3))
+    expect(await valorUna(venueId, a)).toMatchObject({ estado: 'OK' })
+    expect(Number((await valorUna(venueId, a)).monto)).toBe(999)
+    expect(Number((await valorUna(venueId, b)).monto)).toBe(100)
+  })
+
+  it('dos versiones de tabla el mismo día: gana la revisión mayor', async () => {
+    const { venueId, productIds } = await sedeAislada()
+    const { tableId, versionId: rev1 } = await tablaPlana(venueId, 100, { desde: '2026-09-01', revision: 1 })
+    const { versionId: rev2 } = await tablaPlana(venueId, 200, { tableId, desde: '2026-09-01', revision: 2 })
+    const id = await clase(venueId, productIds[0], ids.sofia!, '2026-09-10T14:00:00.000Z', confirmadas(3))
+    const v = await valorUna(venueId, id)
+    expect(v.tableVersionId).toBe(rev2)
+    expect(v.tableVersionId).not.toBe(rev1)
+    expect(Number(v.monto)).toBe(200)
+  })
+
+  it('archivedFrom: antes de la fecha la tabla sigue aplicando (en hora local); desde esa fecha no → SIN_TABLA, o la siguiente', async () => {
+    const { venueId, productIds } = await sedeAislada()
+    const p = productIds[0]
+    await tablaPlana(venueId, 100, { archivedFrom: '2026-09-20' })
+    // 2026-09-20T05:30Z = 19-sep 23:30 en CDMX: todavía antes del archivo.
+    const antes = await clase(venueId, p, ids.sofia!, '2026-09-20T05:30:00.000Z', confirmadas(3), { endIso: '2026-09-20T06:20:00.000Z' })
+    const desde = await clase(venueId, p, ids.sofia!, '2026-09-20T15:00:00.000Z', confirmadas(3))
+    expect(Number((await valorUna(venueId, antes)).monto)).toBe(100)
+    expect(await valorUna(venueId, desde)).toMatchObject({ estado: 'EXCEPCION', motivo: 'SIN_TABLA', tableVersionId: null, monto: null })
+    // La tabla que la reemplaza a partir del 20 toma su lugar, sin tocar lo anterior.
+    await tablaPlana(venueId, 200, { desde: '2026-09-20' })
+    expect(Number((await valorUna(venueId, desde)).monto)).toBe(200)
+    expect(Number((await valorUna(venueId, antes)).monto)).toBe(100)
+  })
+
+  it('«Ajustar monto» NO resuelve SIN_COACH: sigue excepción, sin monto, y no suma en los totales', async () => {
+    const { venueId, productIds } = await sedeAislada()
+    await tablaPlana(venueId, 100)
+    const id = await clase(venueId, productIds[0], null, '2026-09-10T14:00:00.000Z', confirmadas(3))
+    await prisma.classSessionPayState.create({
+      data: { classSessionId: id, payAmountOverride: new Prisma.Decimal(500), overrideReason: 'sin coach pero con monto' },
+    })
+    expect(await valorUna(venueId, id)).toMatchObject({ estado: 'EXCEPCION', motivo: 'SIN_COACH', monto: null, tieneAjuste: true })
+    const estados = await contarPorEstado(prisma, filtro(venueId))
+    expect(estados).toMatchObject({ ok: 0, excluidas: 0, excepciones: 1 })
+    expect(Number(estados.total)).toBe(0)
+    expect(await resumenPorPersona(prisma, filtro(venueId))).toEqual([])
+  })
+
+  it('coach dado de baja (Staff inactivo y sin acceso a la sede) cobra la clase que sí dio', async () => {
+    const s = (
+      await prisma.staff.create({ data: { email: `${key}-baja@example.test`, firstName: 'Baja', lastName: 'Test', active: false } })
+    ).id
+    await prisma.staffVenue.create({
+      data: { staffId: s, venueId: ids.pn!, role: 'WAITER', active: false, endDate: new Date('2026-09-25T00:00:00.000Z') },
+    })
+    await prisma.staffPayLevelAssignment.create({
+      data: { organizationId: ids.org!, staffId: s, payLevelId: ids.coach!, effectiveFrom: fechaComoDbDate('2026-01-01'), revision: 1 },
+    })
+    const id = await clase(ids.pn!, ids.productPn!, s, '2026-09-19T20:00:00.000Z', confirmadas(3))
+    expect(await valorUna(ids.pn!, id)).toMatchObject({ estado: 'OK', staffId: s, payLevelName: 'Coach' })
+    expect(Number((await valorUna(ids.pn!, id)).monto)).toBe(PN_C[3])
+    const resumen = await resumenPorPersona(prisma, filtro(ids.pn!))
+    expect(resumen.find(r => r.staffId === s)).toMatchObject({ clases: 1 })
   })
 })
 
