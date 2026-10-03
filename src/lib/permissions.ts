@@ -496,6 +496,12 @@ export const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   'commissions:payout': ['commissions:read', 'commissions:approve', 'commissions:payout'],
 
   // ===========================
+  // STAFF PAY (pago por servicio: tablas por nivel y sede)
+  // ===========================
+  'staffpay:read': ['staffpay:read', 'teams:read', 'reservations:read'],
+  'staffpay:manage': ['staffpay:read', 'staffpay:manage', 'teams:read', 'reservations:read'],
+
+  // ===========================
   // CASH OUT (PlayTelecom promoter same-day commission — module-gated, white-label)
   // ===========================
   'cash-out:read': ['cash-out:read', 'teams:read'],
@@ -1201,6 +1207,9 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'commissions:delete',
     'commissions:view_own',
     'commissions:approve',
+    // Pago por servicio (configurar y ver; el cierre llega con staffpay:close en la fase 2)
+    'staffpay:read',
+    'staffpay:manage',
     // Cash Out (PlayTelecom back-office — config rate tables + calendar, generate report; module-gated)
     'cash-out:read',
     'cash-out:manage',
@@ -1302,6 +1311,8 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'printers:*', // PRINT_STATIONS: impresoras, estaciones y ruteo de comandas (feature gratis/core)
     'receipt-layout:*', // RECEIPT_LAYOUT: diseñar el ticket en papel — administrativo; MANAGER excluido a propósito
     'commissions:*', // Commission system (full control including payout)
+    'staffpay:read',
+    'staffpay:manage',
     'cash-out:*', // Cash Out (PlayTelecom same-day promoter commission) — full control
     'menu:*',
     'orders:*',
@@ -2069,6 +2080,8 @@ export const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
     'commissions:payout',
     'commissions:org-manage',
   ],
+  // Pago por servicio (tabla de pagos por nivel y sede)
+  staffpay: ['staffpay:read', 'staffpay:manage'],
   // Cash Out (PlayTelecom same-day promoter commission — module-gated, white-label)
   'cash-out': ['cash-out:read', 'cash-out:view_own', 'cash-out:withdraw', 'cash-out:manage', 'cash-out:report'],
   // Org-level goals management
