@@ -7,6 +7,7 @@ import { CONFIRMATION_TTL, issueConfirmation, validConfirmation } from './confir
 import { DIRECTORY_TOOLS, type McpProfile } from './directory/catalog'
 import { DIRECTORY_DESCRIPTIONS } from './directory/descriptions'
 import { redactDirectoryResult } from './directory/redact'
+import { directoryInputSchema } from './directory/input'
 
 /** Explicit effects, never guessed from a name or permission suffix. New tools must declare one. */
 export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
@@ -374,16 +375,17 @@ export function configureToolCatalog(server: McpServer, scope: McpScope, profile
     const title = config.title ?? name.replace(/_/g, ' ').replace(/^./, (c: string) => c.toUpperCase())
     // Existing durable catalog/waste workflows already bind a preview in their own service.
     const needsPreview = !readOnly && config.inputSchema?.confirm && !config.inputSchema?.previewToken && !config.inputSchema?.previewDigest
+    const baseInput = profile === 'directory' ? directoryInputSchema(name, config.inputSchema) : config.inputSchema
     const inputSchema = needsPreview
       ? {
-          ...config.inputSchema,
+          ...baseInput,
           confirmationToken: z
             .string()
             .max(2048)
             .optional()
             .describe('Token de la vista previa de ESTA operación. Confirma sólo después de la autorización humana.'),
         }
-      : config.inputSchema
+      : baseInput
     const included = profile === 'manual' || DIRECTORY_TOOLS.has(name)
     // Directory answers drop fiscal and third-party integration identifiers (see directory/redact.ts).
     const run = profile === 'directory' ? async (...a: any[]) => redactDirectoryResult(await callback(...a)) : callback
