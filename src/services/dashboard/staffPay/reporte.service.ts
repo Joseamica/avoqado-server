@@ -89,14 +89,16 @@ function fuentePorPersona(c: Contexto): Prisma.Sql | null {
 }
 
 // Las consultas pesadas del reporte, como funciones: el reporte las ejecuta y A13 las pasa por `EXPLAIN` (Codex R3-R1-12).
+// `total` sale de la MISMA fuente que las personas: la tarjeta y la suma de las personas no pueden descuadrar.
 const sqlCuentaAbierto = (fuente: Prisma.Sql) =>
-  Prisma.sql`SELECT COUNT(DISTINCT u."staffId")::int AS personas, SUM(u.ajuste) AS ajustes FROM (${fuente}) u`
+  Prisma.sql`SELECT COUNT(DISTINCT u."staffId")::int AS personas, SUM(u.monto) AS total FROM (${fuente}) u`
 
 const sqlPaginaAbierto = (c: Contexto, fuente: Prisma.Sql, offset: number, limit: number) => Prisma.sql`
   SELECT g.*, nv.name AS "payLevelName"
   FROM (
     SELECT u."staffId", MAX(u."staffName") AS "staffName",
-           ARRAY_AGG(DISTINCT u."venueId") FILTER (WHERE u.clases > 0) AS "venueIds",
+           -- Las sedes donde hubo dinero (clases o ajustes), la misma regla que el cerrado.
+           ARRAY_AGG(DISTINCT u."venueId") AS "venueIds",
            SUM(u.clases)::int AS clases, COALESCE(SUM(u.lugares), 0)::int AS "sumaLugares",
            SUM(u.ajuste) AS ajustes, SUM(u.monto) AS total
     FROM (${fuente}) u
@@ -165,24 +167,22 @@ export async function reportePeriodo(input: {
   const offset = Math.max(0, Math.trunc(input.offset) || 0)
   const limit = Math.min(Math.max(input.limit, 1), 100)
   if (c.fila?.status === 'CLOSED') return reporteCerrado(c, offset, limit)
-  // Tarjetas: agregados en la base (fase 1), sede por sede.
-  let total = new Prisma.Decimal(0)
+  // Contadores de clases: agregados en la base (fase 1), sede por sede. El dinero sale de `cuenta`, abajo.
   let clases = 0,
     excepciones = 0,
     excluidas = 0
   for (const f of c.filtros) {
     const e = await contarPorEstado(prisma, f)
-    total = total.plus(e.total)
     clases += e.ok
     excepciones += e.excepciones
     excluidas += e.excluidas
   }
   const fuente = fuentePorPersona(c)
-  // Total de personas y de ajustes: un COUNT(DISTINCT) y un SUM aparte (Codex R2-R1-12).
+  // Total de personas y de dinero: un COUNT(DISTINCT) y un SUM aparte (Codex R2-R1-12).
   const [cuenta] = fuente
-    ? await prisma.$queryRaw<Array<{ personas: number; ajustes: Prisma.Decimal | null }>>(sqlCuentaAbierto(fuente))
-    : [{ personas: 0, ajustes: null }]
-  total = total.plus(cuenta.ajustes ?? 0)
+    ? await prisma.$queryRaw<Array<{ personas: number; total: Prisma.Decimal | null }>>(sqlCuentaAbierto(fuente))
+    : [{ personas: 0, total: null }]
+  const total = cuenta.total ?? new Prisma.Decimal(0)
   // La página: agrupada por persona, ordenada por nombre e id, con OFFSET/LIMIT en SQL; el nivel vigente al final del
   // periodo sólo para las personas de ESTA página.
   const pagina = fuente
@@ -309,6 +309,13 @@ async function recorrer(
   return { items, nextCursor: null }
 }
 
+/** Codex R2-R1-21: lo EN VIVO (desglose, excepciones, huérfanas) excluye las clases ancladas: de un periodo cerrado mentiría. */
+async function contextoEnVivo(userId: string, venueId: string, fecha?: string, sede?: string): Promise<Contexto> {
+  const c = await contexto(userId, venueId, fecha, sede)
+  if (c.fila?.status === 'CLOSED') throw new ConflictError('Este periodo ya se cerró: consulta el recibo.', 'PERIODO_CERRADO')
+  return c
+}
+
 export async function detallePersona(input: {
   userId: string
   venueId: string
@@ -318,9 +325,7 @@ export async function detallePersona(input: {
   despuesDe?: string
   limit: number
 }) {
-  const c = await contexto(input.userId, input.venueId, input.fecha, input.sede)
-  // Codex R2-R1-21: el desglose en vivo excluye las clases ancladas; de un periodo cerrado sería una lista vacía que miente.
-  if (c.fila?.status === 'CLOSED') throw new ConflictError('Este periodo ya se cerró: consulta el recibo.', 'PERIODO_CERRADO')
+  const c = await contextoEnVivo(input.userId, input.venueId, input.fecha, input.sede)
   return recorrer(c, { staffId: input.staffId }, input.despuesDe, input.limit)
 }
 
@@ -332,7 +337,7 @@ export async function excepcionesPeriodo(input: {
   despuesDe?: string
   limit: number
 }) {
-  return recorrer(await contexto(input.userId, input.venueId, input.fecha, input.sede), {}, input.despuesDe, input.limit, true)
+  return recorrer(await contextoEnVivo(input.userId, input.venueId, input.fecha, input.sede), {}, input.despuesDe, input.limit, true)
 }
 
 function whereHuerfanas(c: Contexto): Prisma.ReservationWhereInput {
@@ -357,7 +362,7 @@ export async function huerfanasPeriodo(input: {
   offset: number
   limit: number
 }) {
-  const c = await contexto(input.userId, input.venueId, input.fecha, input.sede)
+  const c = await contextoEnVivo(input.userId, input.venueId, input.fecha, input.sede)
   if (!c.filtros.length) return { items: [], total: 0 }
   const where = whereHuerfanas(c)
   const [rows, total] = await Promise.all([

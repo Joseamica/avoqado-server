@@ -4,7 +4,7 @@ import { reportePeriodo, detallePersona, excepcionesPeriodo, huerfanasPeriodo } 
 import { fechaComoDbDate } from '@/services/dashboard/staffPay/periodos'
 import { agregarAjusteManual } from '@/services/dashboard/staffPay/ajustesManuales.service'
 import { cerrarPeriodo, previewCierre } from '@/services/dashboard/staffPay/cierre.service'
-import { reciboDePersona } from '@/services/dashboard/staffPay/recibos.service'
+import { marcarPagado, reciboDePersona } from '@/services/dashboard/staffPay/recibos.service'
 import { borrarMundo, clase as claseF2, confirmadas as confirmadasF2, crearMundo, crearSede, Mundo, tablaMindform } from './_mundo'
 
 const mockSedesLegibles = jest.fn()
@@ -252,7 +252,12 @@ describe('reporte de la fase 2: ajustes en el abierto, congelado en el cerrado',
     const r = await reportePeriodo({ userId: w.owner, venueId: w.venueId, fecha: '2026-08-15', offset: 0, limit: 50 })
     expect(r.periodo).toMatchObject({ estado: 'OPEN', start: '2026-08-01' })
     expect(r.tarjetas).toMatchObject({ total: '720.00', personas: 2 })
-    expect(r.personas.items.find(p => p.staffId === w.carla)).toMatchObject({ clases: 0, ajustes: '150.00', total: '150.00', venueIds: [] })
+    expect(r.personas.items.find(p => p.staffId === w.carla)).toMatchObject({
+      clases: 0,
+      ajustes: '150.00',
+      total: '150.00',
+      venueIds: [w.venueId],
+    })
     // Codex R2-R1-12: ordenadas por nombre y paginadas EN SQL; el total sale del COUNT(DISTINCT) aparte.
     expect(r.personas.items.map(p => p.staffName)).toEqual(['Ana QA', 'Carla QA'])
     const pag2 = await reportePeriodo({ userId: w.owner, venueId: w.venueId, fecha: '2026-08-15', offset: 1, limit: 1 })
@@ -276,6 +281,8 @@ describe('reporte de la fase 2: ajustes en el abierto, congelado en el cerrado',
     expect(r.periodo.estado).toBe('CLOSED')
     expect(r.tarjetas).toMatchObject({ total: '720.00', clases: 1, personas: 2, pagadas: 0, excepciones: 0 })
     expect(r.personas.items.find(p => p.staffId === w.ana)).toMatchObject({ clases: 1, total: '570.00', pagadoEn: null })
+    // Misma regla de sedes que el abierto: donde hubo dinero (Carla sólo tiene su bono en PN).
+    expect(r.personas.items.find(p => p.staffId === w.carla)).toMatchObject({ clases: 0, ajustes: '150.00', venueIds: [w.venueId] })
     // Codex R2-R1-12: también el cerrado se ordena por nombre y se pagina en SQL.
     expect(r.personas.items.map(p => p.staffName)).toEqual(['Ana QA', 'Carla QA'])
     const pag2 = await reportePeriodo({ userId: w.owner, venueId: w.venueId, fecha: '2026-08-15', offset: 1, limit: 1 })
@@ -289,6 +296,24 @@ describe('reporte de la fase 2: ajustes en el abierto, congelado en el cerrado',
       statusCode: 409,
       message: 'Este periodo ya se cerró: consulta el recibo.',
     })
+    // Lo mismo las excepciones y las huérfanas: valoran en vivo y listarían una clase creada después del cierre.
+    const cerrado = { code: 'PERIODO_CERRADO', statusCode: 409, message: 'Este periodo ya se cerró: consulta el recibo.' }
+    await expect(excepcionesPeriodo({ userId: w.owner, venueId: w.venueId, fecha: '2026-08-15', limit: 50 })).rejects.toMatchObject(cerrado)
+    await expect(
+      huerfanasPeriodo({ userId: w.owner, venueId: w.venueId, fecha: '2026-08-15', offset: 0, limit: 50 }),
+    ).rejects.toMatchObject(cerrado)
+  })
+
+  it('el contador de pagadas es del periodo entero aunque la página traiga una sola persona (Codex R1-23)', async () => {
+    const r0 = await reportePeriodo({ userId: w.owner, venueId: w.venueId, fecha: '2026-08-15', offset: 0, limit: 1 })
+    await marcarPagado({ userId: w.owner, venueId: w.venueId, periodId: r0.periodo.id!, staffId: w.carla })
+    const r = await reportePeriodo({ userId: w.owner, venueId: w.venueId, fecha: '2026-08-15', offset: 0, limit: 1 })
+    expect(r.tarjetas).toMatchObject({ personas: 2, pagadas: 1 })
+    expect(r.personas.items).toHaveLength(1)
+    expect(r.personas.items[0]).toMatchObject({ staffName: 'Ana QA', pagadoEn: null })
+    const pag2 = await reportePeriodo({ userId: w.owner, venueId: w.venueId, fecha: '2026-08-15', offset: 1, limit: 1 })
+    expect(pag2.tarjetas).toMatchObject({ pagadas: 1 })
+    expect(pag2.personas.items[0].pagadoEn).toEqual(expect.any(String))
   })
 
   it('una diferencia liquidada desde una sede que YA apagó el módulo sigue en el reporte y en el recibo del periodo abierto (Codex R3-Nuevo 2)', async () => {
@@ -327,6 +352,54 @@ describe('reporte de la fase 2: ajustes en el abierto, congelado en el cerrado',
       expect(r.personas.items.find(p => p.staffId === x.ana)).toMatchObject({ ajustes: '40.00', total: '610.00' })
       const recibo = await reciboDePersona({ userId: x.owner, venueId: x.venueId, staffId: x.ana, fecha: '2026-09-15', limit: 100 })
       expect(recibo.total).toBe('610.00')
+      // Sedes por persona = donde hubo dinero: clases en PN + la diferencia de BSF.
+      const ambas = [x.venueId, bsf.venueId].sort()
+      expect(r.personas.items.find(p => p.staffId === x.ana)!.venueIds).toEqual(ambas)
+
+      // Un ajuste en una sede NO legible no aparece ni suma en el ABIERTO: Sofía sólo tiene un bono en BSF.
+      await prisma.serviceEarning.create({
+        data: {
+          organizationId: x.orgId,
+          venueId: bsf.venueId,
+          periodId: sept.id,
+          staffId: x.sofia,
+          concept: 'MANUAL',
+          clientKey: `${x.key}-bono-sofia`,
+          amount: new Prisma.Decimal(100),
+          reason: 'Bono',
+          descriptor: { fecha: '2026-09-10' },
+        },
+      })
+      mockSedesLegibles.mockResolvedValue({ venueIds: [x.venueId], parcial: true }) // el lector sólo puede leer PN
+      const soloPn = await reportePeriodo({ userId: x.owner, venueId: x.venueId, fecha: '2026-09-15', offset: 0, limit: 50 })
+      expect(soloPn).toMatchObject({ parcial: true, venueIds: [x.venueId], tarjetas: { total: '570.00', personas: 1 } })
+      expect(soloPn.personas.total).toBe(1)
+      expect(soloPn.personas.items).toEqual([
+        expect.objectContaining({ staffId: x.ana, ajustes: '0.00', total: '570.00', venueIds: [x.venueId] }),
+      ])
+
+      // Se cierra septiembre y se vuelve a leer: misma regla de sedes y vista parcial en el CERRADO.
+      mockSedesLegibles.mockResolvedValue({ venueIds: [x.venueId, bsf.venueId], parcial: false })
+      const AHORA_OCT = new Date('2026-10-02T12:00:00Z')
+      const p = await previewCierre({ userId: x.owner, venueId: x.venueId, fecha: '2026-09-15', ahora: AHORA_OCT })
+      await cerrarPeriodo({
+        userId: x.owner,
+        venueId: x.venueId,
+        fecha: '2026-09-15',
+        ahora: AHORA_OCT,
+        huellaEsperada: p.huella,
+        confirmarHuerfanas: true,
+      })
+      const todo = await reportePeriodo({ userId: x.owner, venueId: x.venueId, fecha: '2026-09-15', offset: 0, limit: 50 })
+      expect(todo).toMatchObject({ parcial: false, periodo: { estado: 'CLOSED' }, tarjetas: { total: '710.00', personas: 2 } })
+      expect(todo.personas.items.find(i => i.staffId === x.ana)).toMatchObject({ total: '610.00', venueIds: ambas })
+      expect(todo.personas.items.find(i => i.staffId === x.sofia)).toMatchObject({ total: '100.00', venueIds: [bsf.venueId] })
+      mockSedesLegibles.mockResolvedValue({ venueIds: [x.venueId], parcial: true })
+      const parcial = await reportePeriodo({ userId: x.owner, venueId: x.venueId, fecha: '2026-09-15', offset: 0, limit: 50 })
+      expect(parcial).toMatchObject({ parcial: true, venueIds: [x.venueId], tarjetas: { total: '570.00', personas: 1 } })
+      expect(parcial.personas.items).toEqual([
+        expect.objectContaining({ staffId: x.ana, ajustes: '0.00', total: '570.00', venueIds: [x.venueId] }),
+      ])
     } finally {
       ;(global as any).__sedes = undefined
       await borrarMundo(x)
