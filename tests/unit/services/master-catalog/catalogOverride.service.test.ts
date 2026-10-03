@@ -172,8 +172,29 @@ describe('catalog venue override requests', () => {
     await expect(makePreview()).rejects.toMatchObject({ statusCode: 403, code: 'CATALOG_VENUE_PERMISSION_DENIED' })
     expect(prisma.venueRolePermission.findUnique).toHaveBeenCalledWith({
       where: { venueId_role: { venueId: 'venue-1', role: 'OWNER' } },
-      select: { permissions: true },
+      select: { permissions: true, deniedPermissions: true },
     })
+  })
+
+  // 🔴 Hermano del P1 #2 de Codex (B3b, código r1): la autoridad del catálogo leía sólo `permissions` del rol y no
+  // lo que el negocio le QUITÓ (`deniedPermissions`). Lo quitado tiene que mandar aquí igual que en checkPermission.
+  it('honors what the venue DENIED to the role even when the stored override still lists it', async () => {
+    ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValue(membership({ permissionSetId: null, permissionSet: null, role: 'OWNER' }))
+    ;(prisma.venueRolePermission.findUnique as jest.Mock).mockResolvedValue({
+      permissions: ['catalog-venue:read', 'catalog-venue:request-override'],
+      deniedPermissions: ['catalog-venue:request-override'],
+    })
+    await expect(makePreview()).rejects.toMatchObject({ statusCode: 403, code: 'CATALOG_VENUE_PERMISSION_DENIED' })
+    expect(prisma.catalogIdempotencyRecord.create).not.toHaveBeenCalled()
+  })
+
+  it('control: the same stored override without denials still authorizes the request', async () => {
+    ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValue(membership({ permissionSetId: null, permissionSet: null, role: 'OWNER' }))
+    ;(prisma.venueRolePermission.findUnique as jest.Mock).mockResolvedValue({
+      permissions: ['catalog-venue:read', 'catalog-venue:request-override'],
+      deniedPermissions: [],
+    })
+    await expect(makePreview()).resolves.toMatchObject({ requests: [expect.objectContaining({ field: 'name' })] })
   })
 
   it.each([
