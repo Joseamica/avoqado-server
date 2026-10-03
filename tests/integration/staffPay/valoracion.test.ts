@@ -130,6 +130,7 @@ afterAll(async () => {
   // Sin org (beforeAll falló) un `organizationId: undefined` quitaría el filtro y borraría TODAS las sedes.
   if (!ids.org) return
   await prisma.venue.deleteMany({ where: { organizationId: ids.org } })
+  await prisma.servicePayPeriod.deleteMany({ where: { organizationId: ids.org } })
   await prisma.staffPayLevelAssignment.deleteMany({ where: { organizationId: ids.org } })
   await prisma.staffPayLevel.deleteMany({ where: { organizationId: ids.org } })
   await prisma.staff.deleteMany({ where: { email: { startsWith: key } } })
@@ -244,7 +245,18 @@ describe('valoración — feature nueva: bordes', () => {
   })
   it('una clase anclada (originPeriodId) no entra en vivo', async () => {
     const id = await clase(ids.pn!, ids.productPn!, ids.ana!, '2026-09-14T15:00:00.000Z', confirmadas(3))
-    await prisma.classSessionPayState.create({ data: { classSessionId: id, originPeriodId: 'periodo-cerrado-ficticio' } })
+    const periodo = await prisma.servicePayPeriod.create({
+      data: {
+        organizationId: ids.org!,
+        periodStart: fechaComoDbDate('2026-09-01'),
+        periodEnd: fechaComoDbDate('2026-09-30'),
+        status: 'CLOSED',
+        venueIds: [ids.pn!],
+        closedAt: new Date(),
+        closeFingerprint: 'fixture',
+      },
+    })
+    await prisma.classSessionPayState.create({ data: { classSessionId: id, originPeriodId: periodo.id } })
     expect(await valorarClases(prisma, filtro(ids.pn!, { claseIds: [id] }), { limite: 10 })).toHaveLength(0)
   })
   it('cambio de nivel el día 16: el 15 sigue como Coach, el 16 ya es Head Coach', async () => {

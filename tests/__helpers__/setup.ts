@@ -382,6 +382,9 @@ const prismaMock: any = {
   servicePayTableVersion: createMockModel(),
   servicePayTableCell: createMockModel(),
   classSessionPayState: createMockModel(),
+  servicePayPeriod: createMockModel(),
+  serviceEarning: createMockModel(),
+  staffPayStatement: createMockModel(),
   commissionSummary: createMockModel(),
   milestoneAchievement: createMockModel(),
   // Credit Pack models

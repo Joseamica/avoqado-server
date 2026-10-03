@@ -146,6 +146,7 @@ model Organization {
   servicePayPeriodicity    ServicePayPeriodicity     @default(MONTHLY)
   staffPayLevels           StaffPayLevel[]
   staffPayLevelAssignments StaffPayLevelAssignment[]
+  servicePayPeriods        ServicePayPeriod[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -18633,7 +18634,8 @@ model ServicePayTableVersion {
   createdById   String?
   createdAt     DateTime            @default(now())
 
-  cells ServicePayTableCell[]
+  cells  ServicePayTableCell[]
+  anclas ClassSessionPayState[]
 
   @@unique([tableId, effectiveFrom, revision])
   @@index([tableId, effectiveFrom])
@@ -18653,19 +18655,105 @@ model ServicePayTableCell {
 
 /// Estado de pago de una clase (1 a 1). Aparte de ClassSession para no exponer montos por reservations:read.
 model ClassSessionPayState {
-  classSessionId     String       @id
-  classSession       ClassSession @relation(fields: [classSessionId], references: [id], onDelete: Cascade)
+  classSessionId     String                  @id
+  classSession       ClassSession            @relation(fields: [classSessionId], references: [id], onDelete: Cascade)
   payCountOverride   Int?
-  payAmountOverride  Decimal?     @db.Decimal(12, 2)
-  payExcluded        Boolean      @default(false)
+  payAmountOverride  Decimal?                @db.Decimal(12, 2)
+  payExcluded        Boolean                 @default(false)
   overrideReason     String?
   overrideById       String?
   overrideAt         DateTime?
-  /// Ancla (spec §5.4). Se escribe en la fase 2; la FK a ServicePayPeriod llega con ese modelo.
+  /// Ancla (spec §5.4). Se escribe UNA vez: al cerrar su periodo o al liquidar su primera diferencia.
   originPeriodId     String?
-  valuationDate      DateTime?    @db.Date
+  originPeriod       ServicePayPeriod?       @relation(fields: [originPeriodId], references: [id], onDelete: Restrict)
+  valuationDate      DateTime?               @db.Date
   valuationVersionId String?
-  updatedAt          DateTime     @updatedAt
+  valuationVersion   ServicePayTableVersion? @relation(fields: [valuationVersionId], references: [id], onDelete: Restrict)
+  updatedAt          DateTime                @updatedAt
 
   @@index([originPeriodId])
+}
+
+enum ServicePayPeriodStatus {
+  OPEN
+  CLOSED
+}
+
+enum ServiceEarningConcept {
+  SERVICE // pago congelado de una clase para una persona (nace al cerrar)
+  RECONCILE // corrección de una clase ya congelada (nace al liquidar una diferencia)
+  MANUAL // bono, descuento o corrección libre, sin clase
+}
+
+enum ServiceEarningSource {
+  CLASS_SESSION
+}
+
+/// Periodo de pago de una organización (spec §5.7). Intervalos canónicos sin traslape; periodEnd inclusivo.
+model ServicePayPeriod {
+  id               String                 @id @default(cuid())
+  organizationId   String
+  organization     Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  periodStart      DateTime               @db.Date
+  periodEnd        DateTime               @db.Date
+  status           ServicePayPeriodStatus @default(OPEN)
+  /// Alcance: sedes con el módulo. Un periodo OPEN sólo crece; uno CLOSED conserva el suyo.
+  venueIds         String[]               @default([])
+  closedAt         DateTime?
+  closedById       String?
+  closeFingerprint String?
+  createdAt        DateTime               @default(now())
+  updatedAt        DateTime               @updatedAt
+
+  earnings   ServiceEarning[]
+  statements StaffPayStatement[]
+  anclas     ClassSessionPayState[]
+
+  @@unique([organizationId, periodStart])
+  @@index([organizationId, periodEnd])
+}
+
+/// Devengo (spec §5.6). La foto: nunca se recalcula. Único parcial (sourceType, sourceId, staffId) WHERE SERVICE.
+model ServiceEarning {
+  id             String                @id @default(cuid())
+  organizationId String
+  venueId        String
+  periodId       String
+  period         ServicePayPeriod      @relation(fields: [periodId], references: [id], onDelete: Restrict)
+  staffId        String
+  concept        ServiceEarningConcept
+  sourceType     ServiceEarningSource?
+  sourceId       String?
+  occurredAt     DateTime?
+  payLevelId     String?
+  payLevelName   String?
+  tableVersionId String?
+  countMode      ServicePayCountMode?
+  count          Int?
+  amount         Decimal               @db.Decimal(12, 2)
+  reason         String?
+  /// Para mostrar sin reconstruir: clase, fecha y hora local, sede, coach.
+  descriptor     Json
+  clientKey      String?
+  createdById    String?
+  createdAt      DateTime              @default(now())
+
+  @@index([periodId, staffId])
+  @@index([sourceType, sourceId, staffId])
+  @@index([organizationId, staffId])
+}
+
+/// Recibo de una persona en un periodo cerrado. Avoqado REGISTRA un pago hecho fuera; no mueve dinero.
+model StaffPayStatement {
+  id        String           @id @default(cuid())
+  periodId  String
+  period    ServicePayPeriod @relation(fields: [periodId], references: [id], onDelete: Restrict)
+  staffId   String
+  total     Decimal          @db.Decimal(12, 2)
+  paidAt    DateTime?
+  paidById  String?
+  paidNote  String?
+  createdAt DateTime         @default(now())
+
+  @@unique([periodId, staffId])
 }

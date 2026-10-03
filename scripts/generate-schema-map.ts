@@ -492,6 +492,9 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   ServicePayTableVersion: 'Commissions & Sales Goals',
   ServicePayTableCell: 'Commissions & Sales Goals',
   ClassSessionPayState: 'Commissions & Sales Goals',
+  ServicePayPeriod: 'Commissions & Sales Goals',
+  ServiceEarning: 'Commissions & Sales Goals',
+  StaffPayStatement: 'Commissions & Sales Goals',
 
   // 16. Reservations & Booking
   Reservation: 'Reservations & Booking',
