@@ -142,6 +142,11 @@ model Organization {
   // organización ha tomado. RESTRICT en la FK — una redención es evidencia de un cobro.
   launchCampaignRedemptions LaunchCampaignRedemption[] @relation("LaunchCampaignRedemptionOrganization")
 
+  // Pago por servicio (spec 2026-10-02): periodicidad del corte y niveles de pago de la organización
+  servicePayPeriodicity    ServicePayPeriodicity     @default(MONTHLY)
+  staffPayLevels           StaffPayLevel[]
+  staffPayLevelAssignments StaffPayLevelAssignment[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
@@ -542,6 +547,8 @@ model Venue {
   reservationSettings    ReservationSettings?
   // Fase 1 — avisos de aprobación de clientes pendientes de entregar
   customerApprovalOutbox CustomerApprovalOutbox[]
+  // Pago por servicio — tablas de pago por clase de esta sede
+  servicePayTables       ServicePayTable[]
 
   // Per-venue defaults applied to NEW payment links + admin notification
   // preferences when a link is paid. See VenuePaymentLinkSettings for fields.
@@ -1129,11 +1136,12 @@ model Staff {
   milestoneAchievements       MilestoneAchievement[]
 
   // Reservations
-  reservationsAssigned  Reservation[]  @relation("ReservationStaff")
-  reservationsCreated   Reservation[]  @relation("ReservationCreatedBy")
-  classSessionsAssigned ClassSession[] @relation("ClassSessionStaff")
-  classSessionsCreated  ClassSession[] @relation("ClassSessionCreatedBy")
-  slotHolds             SlotHold[]
+  reservationsAssigned     Reservation[]             @relation("ReservationStaff")
+  reservationsCreated      Reservation[]             @relation("ReservationCreatedBy")
+  classSessionsAssigned    ClassSession[]            @relation("ClassSessionStaff")
+  classSessionsCreated     ClassSession[]            @relation("ClassSessionCreatedBy")
+  slotHolds                SlotHold[]
+  staffPayLevelAssignments StaffPayLevelAssignment[] @relation("StaffPayLevelAssignmentStaff")
 
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
@@ -14272,6 +14280,7 @@ model ClassSession {
   // Relations
   reservations Reservation[]
   slotHolds    SlotHold[]
+  payState     ClassSessionPayState?
 
   // Google Calendar Sync (Phase 2 — push)
   calendarSyncOutbox  CalendarSyncOutbox[]
@@ -18538,4 +18547,125 @@ enum LaunchCampaignRedemptionStatus {
   RESERVED
   APPLIED
   RELEASED
+}
+
+// ==========================================
+// PAGO POR SERVICIO (spec 2026-10-02-pago-a-staff-por-servicio-design.md)
+// ==========================================
+
+enum ServicePayTableKind {
+  TOTAL_BY_COUNT // monto total de la clase según el conteo de lugares
+}
+
+enum ServicePayCountMode {
+  BOOKED // reservó (aunque falte); NO_SHOW cuenta sólo si tuvo confirmedAt
+  ATTENDED // sólo quien llegó — apagado hasta la fase 0b
+}
+
+enum ServicePayPeriodicity {
+  MONTHLY
+  SEMIMONTHLY // quincenas 1-15 y 16-fin
+}
+
+/// Nivel de pago dinámico por organización (Head Coach, Coach, Junior, Senior…).
+model StaffPayLevel {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name           String
+  sortOrder      Int          @default(0)
+  archivedAt     DateTime?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  assignments StaffPayLevelAssignment[]
+  cells       ServicePayTableCell[]
+
+  @@unique([organizationId, name])
+  @@index([organizationId, sortOrder])
+}
+
+/// Quién tiene qué nivel desde qué fecha local. Gana el mayor effectiveFrom <= fecha y, dentro, la mayor revision.
+model StaffPayLevelAssignment {
+  id             String        @id @default(cuid())
+  organizationId String
+  organization   Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  staffId        String
+  staff          Staff         @relation("StaffPayLevelAssignmentStaff", fields: [staffId], references: [id], onDelete: Cascade)
+  payLevelId     String
+  payLevel       StaffPayLevel @relation(fields: [payLevelId], references: [id], onDelete: Restrict)
+  effectiveFrom  DateTime      @db.Date
+  revision       Int
+  createdById    String?
+  createdAt      DateTime      @default(now())
+
+  @@unique([organizationId, staffId, effectiveFrom, revision])
+  @@index([organizationId, staffId, effectiveFrom])
+}
+
+/// Tabla de pagos de una sede. productIds vacío = todas las clases. productIds no se edita (spec §5.3).
+model ServicePayTable {
+  id           String    @id @default(cuid())
+  venueId      String
+  venue        Venue     @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  name         String
+  productIds   String[]  @default([])
+  archivedFrom DateTime? @db.Date
+  createdById  String?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  versions ServicePayTableVersion[]
+
+  @@index([venueId])
+}
+
+/// Versión inmutable de una tabla. Editar = publicar otra versión.
+model ServicePayTableVersion {
+  id            String              @id @default(cuid())
+  tableId       String
+  table         ServicePayTable     @relation(fields: [tableId], references: [id], onDelete: Cascade)
+  effectiveFrom DateTime            @db.Date
+  revision      Int
+  kind          ServicePayTableKind @default(TOTAL_BY_COUNT)
+  countMode     ServicePayCountMode @default(BOOKED)
+  maxCount      Int
+  createdById   String?
+  createdAt     DateTime            @default(now())
+
+  cells ServicePayTableCell[]
+
+  @@unique([tableId, effectiveFrom, revision])
+  @@index([tableId, effectiveFrom])
+}
+
+/// Una celda por número exacto de lugares (0..maxCount) y nivel. Sin celda = excepción; $0 = pago de cero.
+model ServicePayTableCell {
+  versionId  String
+  version    ServicePayTableVersion @relation(fields: [versionId], references: [id], onDelete: Cascade)
+  payLevelId String
+  payLevel   StaffPayLevel          @relation(fields: [payLevelId], references: [id], onDelete: Restrict)
+  count      Int
+  amount     Decimal                @db.Decimal(12, 2)
+
+  @@id([versionId, payLevelId, count])
+}
+
+/// Estado de pago de una clase (1 a 1). Aparte de ClassSession para no exponer montos por reservations:read.
+model ClassSessionPayState {
+  classSessionId     String       @id
+  classSession       ClassSession @relation(fields: [classSessionId], references: [id], onDelete: Cascade)
+  payCountOverride   Int?
+  payAmountOverride  Decimal?     @db.Decimal(12, 2)
+  payExcluded        Boolean      @default(false)
+  overrideReason     String?
+  overrideById       String?
+  overrideAt         DateTime?
+  /// Ancla (spec §5.4). Se escribe en la fase 2; la FK a ServicePayPeriod llega con ese modelo.
+  originPeriodId     String?
+  valuationDate      DateTime?    @db.Date
+  valuationVersionId String?
+  updatedAt          DateTime     @updatedAt
+
+  @@index([originPeriodId])
 }

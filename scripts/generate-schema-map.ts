@@ -486,6 +486,12 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   PromoterBankAccount: 'Commissions & Sales Goals',
   PromoterCommissionEntry: 'Commissions & Sales Goals',
   CashOutWithdrawal: 'Commissions & Sales Goals',
+  StaffPayLevel: 'Commissions & Sales Goals',
+  StaffPayLevelAssignment: 'Commissions & Sales Goals',
+  ServicePayTable: 'Commissions & Sales Goals',
+  ServicePayTableVersion: 'Commissions & Sales Goals',
+  ServicePayTableCell: 'Commissions & Sales Goals',
+  ClassSessionPayState: 'Commissions & Sales Goals',
 
   // 16. Reservations & Booking
   Reservation: 'Reservations & Booking',
