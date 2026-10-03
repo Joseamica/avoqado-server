@@ -9,10 +9,12 @@ import {
   asignarNivelSchema,
   crearNivelSchema,
   crearTablaSchema,
+  cursorQuerySchema,
   editarNivelSchema,
   fechaQuerySchema,
   levelParamsSchema,
   publicarVersionSchema,
+  reporteQuerySchema,
   staffParamsSchema,
   tableParamsSchema,
   venueParamsSchema,
@@ -98,6 +100,33 @@ router.get(
   checkPermission('staffpay:read'),
   validateRequest(z.object({ params: tableParamsSchema })),
   controller.tableHistory,
+)
+
+// Reporte del periodo abierto (spec §6.2, §9.2): multi-sede; el service junta sólo las sedes que el usuario puede leer
+// y marca la vista como parcial.
+router.get(
+  '/report',
+  checkPermission('staffpay:read'),
+  validateRequest(z.object({ params: venueParamsSchema, query: reporteQuerySchema })),
+  controller.getReport,
+)
+router.get(
+  '/report/staff/:staffId',
+  checkPermission('staffpay:read'),
+  validateRequest(z.object({ params: staffParamsSchema, query: cursorQuerySchema })),
+  controller.getStaffDetail,
+)
+router.get(
+  '/report/exceptions',
+  checkPermission('staffpay:read'),
+  validateRequest(z.object({ params: venueParamsSchema, query: cursorQuerySchema })),
+  controller.getExceptions,
+)
+router.get(
+  '/report/orphans',
+  checkPermission('staffpay:read'),
+  validateRequest(z.object({ params: venueParamsSchema, query: reporteQuerySchema })),
+  controller.getOrphans,
 )
 
 export default router

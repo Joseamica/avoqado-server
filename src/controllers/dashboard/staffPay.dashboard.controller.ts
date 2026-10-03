@@ -4,6 +4,7 @@ import prisma from '../../utils/prismaClient'
 import { venueHasServicePayAccess } from '../../services/dashboard/staffPay/acceso'
 import * as niveles from '../../services/dashboard/staffPay/niveles.service'
 import * as tablas from '../../services/dashboard/staffPay/tablas.service'
+import * as reporte from '../../services/dashboard/staffPay/reporte.service'
 import { hoyLocal } from '../../services/dashboard/staffPay/periodos'
 
 export function ctx(req: Request): { venueId: string; userId: string } {
@@ -171,6 +172,57 @@ export async function tableHistory(req: Request, res: Response, next: NextFuncti
   try {
     const { venueId } = ctx(req)
     res.json(await tablas.historialDeTabla(venueId, req.params.tableId))
+  } catch (e) {
+    next(e)
+  }
+}
+
+// Reporte del periodo abierto. `req.query` ya viene parseado por validateRequest (reporteQuerySchema / cursorQuerySchema);
+// aun así se pasan campos explícitos, nunca el objeto entero.
+function consultaPaginada(req: Request): { fecha?: string; offset: number; limit: number } {
+  const q = req.query as { fecha?: string; offset?: number | string; limit?: number | string }
+  return { fecha: q.fecha, offset: Number(q.offset ?? 0), limit: Number(q.limit ?? 50) }
+}
+function consultaConCursor(req: Request): { fecha?: string; despuesDe?: string; limit: number } {
+  const q = req.query as { fecha?: string; cursor?: string; limit?: number | string }
+  return { fecha: q.fecha, despuesDe: q.cursor, limit: Number(q.limit ?? 50) }
+}
+
+export async function getReport(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { venueId, userId } = ctx(req)
+    const { fecha, offset, limit } = consultaPaginada(req)
+    res.json(await reporte.reportePeriodo({ userId, venueId, fecha, offset, limit }))
+  } catch (e) {
+    next(e)
+  }
+}
+
+export async function getStaffDetail(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { venueId, userId } = ctx(req)
+    const { fecha, despuesDe, limit } = consultaConCursor(req)
+    res.json(await reporte.detallePersona({ userId, venueId, staffId: req.params.staffId, fecha, despuesDe, limit }))
+  } catch (e) {
+    next(e)
+  }
+}
+
+export async function getExceptions(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { venueId, userId } = ctx(req)
+    const { fecha, despuesDe, limit } = consultaConCursor(req)
+    res.json(await reporte.excepcionesPeriodo({ userId, venueId, fecha, despuesDe, limit }))
+  } catch (e) {
+    next(e)
+  }
+}
+
+export async function getOrphans(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { venueId, userId } = ctx(req)
+    const { fecha, offset, limit } = consultaPaginada(req)
+    res.json(await reporte.huerfanasPeriodo({ userId, venueId, fecha, offset, limit }))
   } catch (e) {
     next(e)
   }
