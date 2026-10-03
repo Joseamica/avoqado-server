@@ -298,6 +298,9 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   staff_service_pay_config: 'read',
   staff_service_pay_detail: 'read',
   staff_service_pay_summary: 'read',
+  close_service_pay_period: 'write',
+  add_service_pay_adjustment: 'write',
+  mark_service_pay_paid: 'write',
   staff_detail: 'read',
   staff_documents: 'read',
   staff_online: 'read',
@@ -437,7 +440,7 @@ export function configureToolCatalog(server: McpServer, scope: McpScope, profile
           // Existing previews can supply concurrency fields that were unknown on the first call.
           // Bind those exact values as well, rather than invalidating an otherwise correct confirmation.
           const confirmationArguments = { ...intent }
-          for (const field of ['expectedSourceFingerprint', 'expectedUpdatedAt', 'resolvedProductId', 'resolvedStaffVenueId']) {
+          for (const field of ['expectedSourceFingerprint', 'expectedUpdatedAt', 'resolvedProductId', 'resolvedStaffVenueId', 'fecha']) {
             if (config.inputSchema?.[field] && data[field] != null) confirmationArguments[field] = data[field]
           }
           return structureToolResult(

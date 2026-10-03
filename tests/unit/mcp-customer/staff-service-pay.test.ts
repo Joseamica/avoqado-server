@@ -1,3 +1,7 @@
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
+import { configureToolCatalog } from '@/mcp/catalog'
 import { registerStaffPayTools } from '../../../src/mcp/tools/staffPay'
 import type { McpScope } from '../../../src/mcp/scope'
 
@@ -9,6 +13,7 @@ const mockHasPermission = jest.fn()
 jest.mock('@/mcp/guard', () => ({
   createGuard: () => ({
     venueFilter: (v?: string) => { if (v === 'foreign') throw new Error('ScopeError: venue out of scope'); return { venueId: { in: [v ?? 'v1'] } } },
+    tienePermiso: (permiso: string, _venueId: string) => mockHasPermission({ role: 'OWNER' }, permiso),
   }),
 }))
 jest.mock('@/services/access/access.service', () => ({ hasPermission: (...a: unknown[]) => mockHasPermission(...a) }))
@@ -19,6 +24,28 @@ jest.mock('@/services/dashboard/staffPay/reporte.service', () => ({
 }))
 jest.mock('@/services/dashboard/staffPay/niveles.service', () => ({ listarNiveles: jest.fn().mockResolvedValue([]), nivelesVigentes: jest.fn().mockResolvedValue([]) }))
 jest.mock('@/services/dashboard/staffPay/tablas.service', () => ({ listarTablas: jest.fn().mockResolvedValue([]) }))
+const mockPreview = jest.fn()
+const mockCerrar = jest.fn()
+const mockAjuste = jest.fn()
+const mockPagado = jest.fn()
+const mockRequireWrite = jest.fn()
+jest.mock('@/services/dashboard/staffPay/cierre.service', () => ({ previewCierre: (...a: unknown[]) => mockPreview(...a), cerrarPeriodo: (...a: unknown[]) => mockCerrar(...a) }))
+const mockPreviewAjuste = jest.fn()
+const mockPreviewPagado = jest.fn()
+jest.mock('@/services/dashboard/staffPay/ajustesManuales.service', () => ({
+  agregarAjusteManual: (...a: unknown[]) => mockAjuste(...a),
+  previewAjusteManual: (...a: unknown[]) => mockPreviewAjuste(...a),
+}))
+const mockRecibo = jest.fn()
+const mockPeriodoDeFecha = jest.fn()
+jest.mock('@/services/dashboard/staffPay/recibos.service', () => ({
+  marcarPagado: (...a: unknown[]) => mockPagado(...a),
+  previewPagado: (...a: unknown[]) => mockPreviewPagado(...a),
+  reciboDePersona: (...a: unknown[]) => mockRecibo(...a),
+}))
+jest.mock('@/services/dashboard/staffPay/periodosGuardados', () => ({ periodoQueContieneFecha: (...a: unknown[]) => mockPeriodoDeFecha(...a) }))
+jest.mock('@/mcp/requireWriteScopeAlways', () => ({ requireWriteScopeAlways: (...a: unknown[]) => mockRequireWrite(...a) }))
+jest.mock('@/mcp/audit', () => ({ auditMcpWrite: jest.fn() }))
 jest.mock('@/utils/prismaClient', () => ({ __esModule: true, default: { venue: { findUnique: jest.fn().mockResolvedValue({ organizationId: 'o1', timezone: 'America/Mexico_City' }) } } }))
 
 const handlers = new Map<string, (a: Record<string, unknown>, e: unknown) => Promise<{ content: Array<{ text: string }> }>>()
@@ -50,5 +77,139 @@ describe('staff_service_pay — regresión', () => {
     mockAccess.mockResolvedValue(false)
     const r = parse(await handlers.get('staff_service_pay_config')!({ venueId: 'v1' }, {}))
     expect(r.ok).toBe(false); expect(r.error).toMatch(/no está activo/)
+  })
+})
+
+describe('staff_service_pay — escritura (spec §9.3)', () => {
+  it('cerrar sin confirm devuelve el preview y su huella; no cierra', async () => {
+    mockPreview.mockResolvedValue({ clases: 72, personas: 4, total: '36620.00', huella: 'h'.repeat(64), puedeCerrar: true, bloqueos: [], huerfanas: 0 })
+    const r = parse(await handlers.get('close_service_pay_period')!({ venueId: 'v1', fecha: '2026-08-15' }, {}))
+    expect(r).toMatchObject({ ok: false, requiresConfirmation: true, expectedSourceFingerprint: 'h'.repeat(64) })
+    expect(r.message).toMatch(/72 clases.*4 personas.*36,620/)
+    expect(mockCerrar).not.toHaveBeenCalled()
+    expect(mockRequireWrite).toHaveBeenCalledWith(expect.anything(), 'staffpay:close', expect.any(String))
+  })
+  it('cerrar con confirm pasa la huella esperada al service', async () => {
+    mockCerrar.mockResolvedValue({ periodId: 'p1', total: '36620.00', yaCerrado: false })
+    await handlers.get('close_service_pay_period')!({ venueId: 'v1', fecha: '2026-08-15', confirm: true, expectedSourceFingerprint: 'h'.repeat(64), confirmarHuerfanas: true }, {})
+    expect(mockCerrar).toHaveBeenCalledWith(expect.objectContaining({ huellaEsperada: 'h'.repeat(64), confirmarHuerfanas: true }))
+  })
+  it('si la huella cambió, devuelve el error con el preview nuevo (no un 500)', async () => {
+    mockCerrar.mockRejectedValue(Object.assign(new Error('Los números cambiaron'), { statusCode: 409, code: 'HUELLA_CAMBIO', details: { preview: { total: '1.00' } } }))
+    const r = parse(await handlers.get('close_service_pay_period')!({ venueId: 'v1', fecha: '2026-08-15', confirm: true, expectedSourceFingerprint: 'x' }, {}))
+    expect(r).toMatchObject({ ok: false, code: 'HUELLA_CAMBIO', preview: { total: '1.00' } })
+  })
+  it('un periodo ya cerrado o bloqueado no ofrece confirmar (sin huella que confirmar)', async () => {
+    mockPreview.mockResolvedValue({ clases: 72, personas: 4, total: '36620.00', huella: '', puedeCerrar: false, bloqueos: [{ codigo: 'YA_CERRADO' }], huerfanas: 0 })
+    const r = parse(await handlers.get('close_service_pay_period')!({ venueId: 'v1', fecha: '2026-08-15' }, {}))
+    expect(r.requiresConfirmation).toBeUndefined()
+    expect(r).toMatchObject({ ok: false })
+    expect(r.error).toMatch(/ya está cerrado/)
+  })
+  it('con reservas sin horario, pide confirmarlas en la vista previa antes de ofrecer cerrar', async () => {
+    mockPreview.mockResolvedValue({ clases: 72, personas: 4, total: '36620.00', huella: 'h'.repeat(64), puedeCerrar: true, bloqueos: [], huerfanas: 3 })
+    const r = parse(await handlers.get('close_service_pay_period')!({ venueId: 'v1', fecha: '2026-08-15' }, {}))
+    expect(r).toMatchObject({ ok: false, needsInput: true, field: 'confirmarHuerfanas' })
+    expect(r.requiresConfirmation).toBeUndefined()
+    const ok = parse(await handlers.get('close_service_pay_period')!({ venueId: 'v1', fecha: '2026-08-15', confirmarHuerfanas: true }, {}))
+    expect(ok).toMatchObject({ requiresConfirmation: true, expectedSourceFingerprint: 'h'.repeat(64) })
+  })
+  it('sin staffpay:close no hay ni preview', async () => {
+    mockHasPermission.mockReturnValue(false)
+    const r = parse(await handlers.get('close_service_pay_period')!({ venueId: 'v1', fecha: '2026-08-15' }, {}))
+    expect(r).toMatchObject({ ok: false }); expect(r.error).toMatch(/staffpay:close/)
+    expect(mockPreview).not.toHaveBeenCalled()
+  })
+  it('el ajuste manual: preview con el periodo destino y su huella; confirmar la exige y la pasa al service', async () => {
+    const sinClave = parse(await handlers.get('add_service_pay_adjustment')!({ venueId: 'v1', staffId: 's1', amount: 100, reason: 'Bono', confirm: true }, {}))
+    expect(sinClave).toMatchObject({ ok: false, needsInput: true, field: 'idempotencyKey' })
+    mockPreviewAjuste.mockResolvedValue({ periodo: { start: '2026-09-01', end: '2026-09-30', estado: 'OPEN' }, staffId: 's1', sede: 'v1', amount: '100.00', reason: 'Bono', huella: 'a'.repeat(64) })
+    const pv = parse(await handlers.get('add_service_pay_adjustment')!({ venueId: 'v1', staffId: 's1', amount: 100, reason: 'Bono', idempotencyKey: 'clave-1234' }, {}))
+    expect(pv).toMatchObject({ requiresConfirmation: true, expectedSourceFingerprint: 'a'.repeat(64), fecha: '2026-09-01' })
+    expect(pv.message).toMatch(/2026-09-01/)
+    const sinHuella = parse(await handlers.get('add_service_pay_adjustment')!({ venueId: 'v1', staffId: 's1', amount: 100, reason: 'Bono', idempotencyKey: 'clave-1234', confirm: true }, {}))
+    expect(sinHuella).toMatchObject({ needsInput: true, field: 'expectedSourceFingerprint' })
+    // Sin fecha, el service usaría «hoy»: un reintento tras la medianoche del cambio de periodo daría CLAVE_REUTILIZADA.
+    const sinFecha = parse(await handlers.get('add_service_pay_adjustment')!({ venueId: 'v1', staffId: 's1', amount: 100, reason: 'Bono', idempotencyKey: 'clave-1234', confirm: true, expectedSourceFingerprint: 'a'.repeat(64) }, {}))
+    expect(sinFecha).toMatchObject({ needsInput: true, field: 'fecha' })
+    expect(mockAjuste).not.toHaveBeenCalled()
+    mockAjuste.mockResolvedValue({ id: 'e1', amount: '100.00' })
+    await handlers.get('add_service_pay_adjustment')!({ venueId: 'v1', staffId: 's1', amount: 100, reason: 'Bono', fecha: '2026-09-01', idempotencyKey: 'clave-1234', confirm: true, expectedSourceFingerprint: 'a'.repeat(64) }, {})
+    expect(mockAjuste).toHaveBeenCalledWith(expect.objectContaining({ clientKey: 'mcp-clave-1234', sede: 'v1', fecha: '2026-09-01', huellaEsperada: 'a'.repeat(64) }))
+  })
+  it('un ajuste que cae en un periodo cerrado no ofrece confirmar', async () => {
+    mockPreviewAjuste.mockResolvedValue({ periodo: { start: '2026-08-01', end: '2026-08-31', estado: 'CLOSED' }, staffId: 's1', sede: 'v1', amount: '100.00', reason: 'Bono', huella: 'a'.repeat(64) })
+    const pv = parse(await handlers.get('add_service_pay_adjustment')!({ venueId: 'v1', staffId: 's1', amount: 100, reason: 'Bono', fecha: '2026-08-15', idempotencyKey: 'clave-1234' }, {}))
+    expect(pv.requiresConfirmation).toBeUndefined()
+    expect(pv.error).toMatch(/ya está cerrado/)
+  })
+  it('marcar pagado: el preview lista los recibos que se marcarían; confirmar pasa la huella', async () => {
+    mockPreviewPagado.mockResolvedValue({ periodo: { start: '2026-08-01', end: '2026-08-31', estado: 'CLOSED' }, cantidad: 1, total: '570.00', recibos: [{ staffId: 'a', nombre: 'Ana', total: '570.00' }], huella: 'b'.repeat(64) })
+    const r = parse(await handlers.get('mark_service_pay_paid')!({ venueId: 'v1', periodId: 'p1' }, {}))
+    expect(r).toMatchObject({ requiresConfirmation: true, expectedSourceFingerprint: 'b'.repeat(64) })
+    expect(r.message).toMatch(/1 recibo\(s\) \(todos los pendientes\) por \$570.*Ana \$570/)
+    mockPagado.mockResolvedValue({ marcados: 1 })
+    await handlers.get('mark_service_pay_paid')!({ venueId: 'v1', periodId: 'p1', confirm: true, expectedSourceFingerprint: 'b'.repeat(64) }, {})
+    expect(mockPagado).toHaveBeenCalledWith(expect.objectContaining({ huellaEsperada: 'b'.repeat(64) }))
+  })
+  it('con más recibos que la muestra, el mensaje dice cuántos faltan por nombrar (nada se calla — Codex R2-Nuevo 1)', async () => {
+    mockPreviewPagado.mockResolvedValue({ periodo: { start: '2026-08-01', end: '2026-08-31', estado: 'CLOSED' }, cantidad: 101, total: '10100.00', recibos: Array.from({ length: 100 }, (_, i) => ({ staffId: `s${i}`, nombre: `P${i}`, total: '100.00' })), huella: 'b'.repeat(64) })
+    const r = parse(await handlers.get('mark_service_pay_paid')!({ venueId: 'v1', periodId: 'p1' }, {}))
+    expect(r.message).toMatch(/101 recibo\(s\).*por \$10,100\.00.*y 1 más/)
+  })
+  it('el desglose de un periodo CERRADO devuelve el recibo congelado con cursor, límite y sede (Codex R2-R1-21)', async () => {
+    mockPeriodoDeFecha.mockResolvedValue({ id: 'p8', status: 'CLOSED' })
+    mockRecibo.mockResolvedValue({ persona: 'Ana', renglones: [], total: '570.00', cantidad: 1, siguiente: null })
+    const r = parse(await handlers.get('staff_service_pay_detail')!({ venueId: 'v1', staffId: 'a', fecha: '2026-08-15', sede: 'v1', cursor: 'c', limit: 20 }, {}))
+    expect(r).toMatchObject({ cerrado: true, recibo: { total: '570.00' } })
+    expect(mockRecibo).toHaveBeenCalledWith(expect.objectContaining({ userId: 's1', venueId: 'v1', staffId: 'a', fecha: '2026-08-15', sede: 'v1', cursor: 'c', limit: 20 }))
+    expect(mockDetalle).not.toHaveBeenCalled()
+  })
+  it('si el periodo se cerró entre la consulta y el desglose en vivo (PERIODO_CERRADO), cae al recibo congelado', async () => {
+    mockPeriodoDeFecha.mockResolvedValue({ id: 'p8', status: 'OPEN' })
+    mockDetalle.mockRejectedValue(Object.assign(new Error('Este periodo ya se cerró: consulta el recibo.'), { statusCode: 409, code: 'PERIODO_CERRADO' }))
+    mockRecibo.mockResolvedValue({ persona: 'Ana', renglones: [], total: '570.00', cantidad: 1, siguiente: null })
+    const r = parse(await handlers.get('staff_service_pay_detail')!({ venueId: 'v1', staffId: 'a', fecha: '2026-08-15' }, {}))
+    expect(r).toMatchObject({ cerrado: true })
+  })
+  it('un cursor de antes del cierre se explica en texto claro para volver a empezar sin cursor (Codex R3-Nuevo 3)', async () => {
+    mockPeriodoDeFecha.mockResolvedValue({ id: 'p8', status: 'CLOSED' })
+    mockRecibo.mockRejectedValue(Object.assign(new Error('El periodo cambió mientras leías: vuelve a cargar el recibo desde el principio.'), { statusCode: 409, code: 'RECIBO_CAMBIO' }))
+    const r = parse(await handlers.get('staff_service_pay_detail')!({ venueId: 'v1', staffId: 'a', fecha: '2026-08-15', cursor: 'v1:clase001' }, {}))
+    expect(r).toMatchObject({ ok: false, code: 'RECIBO_CAMBIO', reiniciar: true })
+    expect(r.message).toMatch(/SIN cursor/)
+  })
+  it('un recibo cerrado de una sede FUERA del alcance de la conexión se niega ANTES de consultar nada (Codex R2-Nuevo 2)', async () => {
+    // La conexión sólo alcanza la organización A; 'foreign' es una sede de la B con su periodo cerrado.
+    mockPeriodoDeFecha.mockResolvedValue({ id: 'pB', status: 'CLOSED' })
+    await expect(handlers.get('staff_service_pay_detail')!({ venueId: 'foreign', staffId: 'a', fecha: '2026-08-15' }, {})).rejects.toThrow('out of scope')
+    expect(mockPeriodoDeFecha).not.toHaveBeenCalled()
+    expect(mockRecibo).not.toHaveBeenCalled()
+  })
+})
+
+describe('staff_service_pay — por el catálogo real (dos pasos con confirmationToken)', () => {
+  it('el ajuste confirma con la fecha del periodo que mostró el preview, nunca con «hoy»', async () => {
+    const server = new McpServer({ name: 'staffpay', version: '1' })
+    const s = { ...scope, scopes: ['mcp:read', 'mcp:write'] } as unknown as McpScope
+    configureToolCatalog(server, s)
+    registerStaffPayTools(server, s)
+    const client = new Client({ name: 'staffpay-test', version: '1' })
+    const [a, b] = InMemoryTransport.createLinkedPair()
+    await Promise.all([server.connect(a), client.connect(b)])
+    try {
+      const call = async (args: Record<string, unknown>) =>
+        JSON.parse(((await client.callTool({ name: 'add_service_pay_adjustment', arguments: args })).content as Array<{ text: string }>)[0].text)
+      mockPreviewAjuste.mockResolvedValue({ periodo: { start: '2026-09-01', end: '2026-09-30', estado: 'OPEN' }, staffId: 's1', sede: 'v1', amount: '100.00', reason: 'Bono', huella: 'a'.repeat(64) })
+      const p = await call({ venueId: 'v1', staffId: 's1', amount: 100, reason: 'Bono', idempotencyKey: 'clave-1234' })
+      expect(p.confirmationArguments).toMatchObject({ fecha: '2026-09-01', expectedSourceFingerprint: 'a'.repeat(64) })
+      mockAjuste.mockResolvedValue({ id: 'e1', amount: '100.00', yaExistia: false })
+      const r = await call({ ...p.confirmationArguments, confirm: true, confirmationToken: p.confirmationToken })
+      expect(r).toMatchObject({ ok: true, id: 'e1' })
+      expect(mockAjuste).toHaveBeenCalledWith(expect.objectContaining({ fecha: '2026-09-01', clientKey: 'mcp-clave-1234', huellaEsperada: 'a'.repeat(64) }))
+    } finally {
+      await client.close()
+      await server.close()
+    }
   })
 })
