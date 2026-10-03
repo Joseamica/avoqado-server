@@ -167,4 +167,17 @@ describe('valoración con ancla (spec §6.1)', () => {
     expect(await una(id)).toMatchObject({ estado: 'OK', periodoOrigen: null })
     expect(await una(id, 'vivo')).toMatchObject({ estado: 'OK' })
   })
+
+  it('una clase anclada en OTRO periodo no se cuenta en agosto aunque su fecha caiga en agosto (nunca dos veces)', async () => {
+    const septiembre = (await periodoCerrado(m, '2026-09-01', '2026-09-30')).id
+    const id = await clase(m, { staffId: m.ana, inicioIso: '2026-08-21T14:00:00Z', reservas: confirmadas(8) })
+    await prisma.classSessionPayState.create({
+      data: { classSessionId: id, originPeriodId: septiembre, valuationDate: fechaComoDbDate('2026-09-05'), valuationVersionId: v1 },
+    })
+    expect(await una(id)).toBeUndefined()
+    expect(await una(id, 'vivo')).toBeUndefined()
+    // Y sí aparece en SU periodo, aunque su fecha caiga fuera del rango que se consulta.
+    const [enSuPeriodo] = await valorarClases(prisma, { ...filtro([id]), periodId: septiembre }, { limite: 5 })
+    expect(enSuPeriodo).toMatchObject({ estado: 'OK', periodoOrigen: septiembre, fechaValoracion: '2026-09-05' })
+  })
 })

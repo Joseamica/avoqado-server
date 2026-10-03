@@ -69,26 +69,42 @@ export function valoracionCte(f: FiltroValoracion): Prisma.Sql {
   if (f.modo === 'periodo' && !f.periodId) throw new Error('valoracionCte: el modo periodo exige periodId')
   const porClases = f.claseIds?.length ? Prisma.sql`AND cs.id IN (${Prisma.join(f.claseIds)})` : Prisma.empty
   const porCoach = f.staffId ? Prisma.sql`AND cs."assignedStaffId" = ${f.staffId}` : Prisma.empty
-  const enRango = Prisma.sql`cs."startsAt" >= ${utcTs(f.desde)} AND cs."startsAt" < ${utcTs(f.hasta)} AND cs."endsAt" <= ${utcTs(f.ahora)}`
-  const seleccion =
-    f.modo === 'periodo'
-      ? Prisma.sql`(ps."originPeriodId" = ${f.periodId} OR (ps."originPeriodId" IS NULL AND ${enRango}))`
-      : Prisma.sql`${enRango} AND cs.status <> 'CANCELLED' AND ps."originPeriodId" IS NULL`
-  return Prisma.sql`
-    WITH clases AS (
-      SELECT cs.id, cs."venueId", cs."productId", cs."startsAt", cs."assignedStaffId",
-             (((cs."startsAt" AT TIME ZONE 'UTC') AT TIME ZONE ${f.tz}))::date AS fecha_local,
-             COALESCE(ps."valuationDate", (((cs."startsAt" AT TIME ZONE 'UTC') AT TIME ZONE ${f.tz}))::date) AS fecha_valoracion,
-             ps."valuationVersionId" AS version_anclada,
-             ps."originPeriodId" AS periodo_origen,
-             (cs.status = 'CANCELLED') AS cancelada,
-             ps."payCountOverride", ps."payAmountOverride", COALESCE(ps."payExcluded", false) AS excluida
+  const columnas = Prisma.sql`
+      cs.id, cs."venueId", cs."productId", cs."startsAt", cs."assignedStaffId",
+      (((cs."startsAt" AT TIME ZONE 'UTC') AT TIME ZONE ${f.tz}))::date AS fecha_local,
+      COALESCE(ps."valuationDate", (((cs."startsAt" AT TIME ZONE 'UTC') AT TIME ZONE ${f.tz}))::date) AS fecha_valoracion,
+      ps."valuationVersionId" AS version_anclada,
+      ps."originPeriodId" AS periodo_origen,
+      (cs.status = 'CANCELLED') AS cancelada,
+      ps."payCountOverride", ps."payAmountOverride", COALESCE(ps."payExcluded", false) AS excluida`
+  // Sin ancla, del rango de la sede ya terminadas (índice por sede + startsAt).
+  const sinAnclaEnRango = (porEstado: Prisma.Sql) => Prisma.sql`
+      SELECT ${columnas}
       FROM "ClassSession" cs
       LEFT JOIN "ClassSessionPayState" ps ON ps."classSessionId" = cs.id
       WHERE cs."venueId" = ${f.venueId}
-        AND ${seleccion}
+        AND cs."startsAt" >= ${utcTs(f.desde)} AND cs."startsAt" < ${utcTs(f.hasta)} AND cs."endsAt" <= ${utcTs(f.ahora)}
+        ${porEstado}
+        AND ps."originPeriodId" IS NULL
+        ${porClases}
+        ${porCoach}`
+  // Modo periodo: dos SELECT completos y no un OR (un OR entre ps y el rango de cs recorre toda la sede). La rama de
+  // anclas entra por el índice de originPeriodId; la otra, sin filtro de estado: una cancelada sin ancla sale EXCLUIDA.
+  const clases =
+    f.modo === 'periodo'
+      ? Prisma.sql`
+      SELECT ${columnas}
+      FROM "ClassSessionPayState" ps
+      JOIN "ClassSession" cs ON cs.id = ps."classSessionId"
+      WHERE ps."originPeriodId" = ${f.periodId}
+        AND cs."venueId" = ${f.venueId}
         ${porClases}
         ${porCoach}
+      UNION ALL
+      ${sinAnclaEnRango(Prisma.empty)}`
+      : sinAnclaEnRango(Prisma.sql`AND cs.status <> 'CANCELLED'`)
+  return Prisma.sql`
+    WITH clases AS (${clases}
     ),
     con_regla AS (
       SELECT c.*,
@@ -122,6 +138,7 @@ export function valoracionCte(f: FiltroValoracion): Prisma.Sql {
         SELECT true AS existe, e."payLevelId", e."payLevelName" AS level_name
         FROM "ServiceEarning" e
         WHERE e."sourceType" = 'CLASS_SESSION' AND e."sourceId" = c.id AND e."staffId" = c."assignedStaffId"
+          AND e."organizationId" = ${f.organizationId}
           AND e.concept IN ('SERVICE', 'RECONCILE')
         ORDER BY e."createdAt" ASC, e.id ASC
         LIMIT 1
