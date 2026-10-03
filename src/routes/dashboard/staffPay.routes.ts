@@ -5,6 +5,7 @@ import { validateRequest } from '../../middlewares/validation'
 import * as controller from '../../controllers/dashboard/staffPay.dashboard.controller'
 import { venueHasServicePayAccess } from '../../services/dashboard/staffPay/acceso'
 import {
+  ajusteClaseSchema,
   archivarTablaSchema,
   asignarNivelSchema,
   crearNivelSchema,
@@ -15,6 +16,7 @@ import {
   levelParamsSchema,
   publicarVersionSchema,
   reporteQuerySchema,
+  sessionPayParamsSchema,
   staffParamsSchema,
   tableParamsSchema,
   venueParamsSchema,
@@ -127,6 +129,20 @@ router.get(
   checkPermission('staffpay:read'),
   validateRequest(z.object({ params: venueParamsSchema, query: reporteQuerySchema })),
   controller.getOrphans,
+)
+
+// Tarjeta de pago de una clase y sus ajustes auditados (spec §5.4, §6.1).
+router.get(
+  '/class-sessions/:sessionId/pay',
+  checkPermission('staffpay:read'),
+  validateRequest(z.object({ params: sessionPayParamsSchema })),
+  controller.getClassPay,
+)
+router.put(
+  '/class-sessions/:sessionId/pay-adjustments',
+  checkPermission('staffpay:manage'),
+  validateRequest(z.object({ params: sessionPayParamsSchema, body: ajusteClaseSchema })),
+  controller.putClassPayAdjustments,
 )
 
 export default router

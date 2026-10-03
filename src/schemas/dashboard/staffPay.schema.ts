@@ -55,3 +55,12 @@ export const cursorQuerySchema = z.object({
   cursor: z.string().max(200).optional(),
   limit: z.coerce.number().int().min(1).max(100).default(50),
 })
+
+// Tarjeta y ajustes de una clase (spec §5.4). Sólo forma: la regla de negocio y la sede las revisa el service.
+export const sessionPayParamsSchema = venueParamsSchema.extend({ sessionId: z.string().cuid('Clase inválida') })
+export const ajusteClaseSchema = z.object({
+  payCountOverride: z.number().int('Debe ser un número entero').min(0, 'Mínimo 0').max(500, 'Máximo 500').nullable(),
+  payAmountOverride: z.number().min(0, 'El monto no puede ser negativo').max(1_000_000, 'Monto demasiado grande').nullable(),
+  payExcluded: z.boolean(),
+  reason: z.string().trim().min(3, 'Escribe el motivo (mínimo 3 letras)').max(300, 'Máximo 300 caracteres'),
+})

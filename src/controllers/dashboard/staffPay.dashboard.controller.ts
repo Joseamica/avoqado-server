@@ -5,6 +5,7 @@ import { venueHasServicePayAccess } from '../../services/dashboard/staffPay/acce
 import * as niveles from '../../services/dashboard/staffPay/niveles.service'
 import * as tablas from '../../services/dashboard/staffPay/tablas.service'
 import * as reporte from '../../services/dashboard/staffPay/reporte.service'
+import * as ajustes from '../../services/dashboard/staffPay/ajustesClase.service'
 import { hoyLocal } from '../../services/dashboard/staffPay/periodos'
 
 export function ctx(req: Request): { venueId: string; userId: string } {
@@ -223,6 +224,37 @@ export async function getOrphans(req: Request, res: Response, next: NextFunction
     const { venueId, userId } = ctx(req)
     const { fecha, sede, offset, limit } = consultaPaginada(req)
     res.json(await reporte.huerfanasPeriodo({ userId, venueId, fecha, sede, offset, limit }))
+  } catch (e) {
+    next(e)
+  }
+}
+
+// Tarjeta y ajustes de una clase (spec §5.4). El service busca la clase por id Y sede.
+export async function getClassPay(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { venueId } = ctx(req)
+    res.json(await ajustes.pagoDeClase(venueId, req.params.sessionId))
+  } catch (e) {
+    next(e)
+  }
+}
+
+export async function putClassPayAdjustments(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { venueId, userId } = ctx(req)
+    // Campos explícitos: nada extra del body llega al service.
+    const { payCountOverride, payAmountOverride, payExcluded, reason } = req.body
+    res.json(
+      await ajustes.guardarAjusteDeClase({
+        venueId,
+        classSessionId: req.params.sessionId,
+        payCountOverride,
+        payAmountOverride,
+        payExcluded,
+        reason,
+        actorId: userId,
+      }),
+    )
   } catch (e) {
     next(e)
   }
