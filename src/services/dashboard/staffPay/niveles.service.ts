@@ -53,6 +53,26 @@ export async function editarNivel(input: {
   venueId: string
 }) {
   await assertPermisoEnTodasLasSedes(input.actorId, input.organizationId, 'staffpay:manage')
+  try {
+    return await editarNivelTx(input)
+  } catch (e) {
+    // Mismo mensaje que crearNivel (spec §5.1): nombre único por organización, nunca un 500 anónimo.
+    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+      throw new ConflictError(`Ya existe un nivel llamado «${input.name?.trim() ?? ''}»`)
+    }
+    throw e
+  }
+}
+
+function editarNivelTx(input: {
+  organizationId: string
+  levelId: string
+  name?: string
+  sortOrder?: number
+  archived?: boolean
+  actorId: string
+  venueId: string
+}) {
   return withSerializableRetry(async tx => {
     const actual = await tx.staffPayLevel.findFirst({ where: { id: input.levelId, organizationId: input.organizationId } })
     if (!actual) throw new NotFoundError('Nivel no encontrado')

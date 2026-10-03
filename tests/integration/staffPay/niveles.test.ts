@@ -124,6 +124,13 @@ describe('niveles — feature nueva', () => {
 })
 
 describe('niveles — regresión', () => {
+  it('renombrar a un nombre que ya usa la organización da mensaje claro (no un 500 anónimo)', async () => {
+    const coach = await prisma.staffPayLevel.findFirstOrThrow({ where: { organizationId: org, name: 'Coach' } })
+    await expect(
+      editarNivel({ organizationId: org, levelId: coach.id, name: '  Head Coach ', actorId: ana, venueId: venue }),
+    ).rejects.toThrow('Ya existe un nivel llamado «Head Coach»')
+    expect((await prisma.staffPayLevel.findUniqueOrThrow({ where: { id: coach.id } })).name).toBe('Coach')
+  })
   it('archivar un nivel en uso no rompe asignaciones históricas', async () => {
     const coach = await prisma.staffPayLevel.findFirstOrThrow({ where: { organizationId: org, name: 'Coach' } })
     await editarNivel({ organizationId: org, levelId: coach.id, archived: true, actorId: ana, venueId: venue })
