@@ -3,7 +3,7 @@ import * as sellosIva from '@/services/fiscal/sellosIva'
 import { randomUUID } from 'crypto'
 import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
-import { issueCfdiForOrder, cancelCfdi, aplicarCancelacion } from '@/services/fiscal/cfdi.service'
+import { issueCfdiForOrder } from '@/services/fiscal/cfdi.service'
 import { huellaDeEntrada, leerEntrada, paramsDesdeEntrada } from '@/services/fiscal/entradaDocumental'
 import { encenderIvaPorProducto } from '../../__helpers__/iva-por-producto'
 
@@ -11,7 +11,7 @@ const database = new URL(process.env.TEST_DATABASE_URL ?? '')
 // La base fiscal de esta Mac o la desechable de CI (ci-cd.yml adopta ese nombre en vez de relajar la guarda): nunca otra.
 if (
   !['localhost', '127.0.0.1'].includes(database.hostname) ||
-  !['/av_db_25_iva_test', '/avoqado_h1a_test_20260808'].includes(database.pathname)
+  !['/av_db_25_iva_test', '/av_db_25_iva_test_b3c', '/avoqado_h1a_test_20260808'].includes(database.pathname)
 ) {
   throw new Error('Esta suite exige la base local av_db_25_iva_test o la desechable de CI avoqado_h1a_test_20260808.')
 }
@@ -168,58 +168,27 @@ describe('emisión individual sellada', () => {
     })
     expect(await prisma.orderItemSelloIva.findFirst({ where: { cfdiId: second.id } })).toMatchObject({ intento: 2 })
   })
-  it.each(['STAMPED', 'CANCELLED'] as const)('legacy validación atrasada no pisa al ganador %s tras vencer el TTL', async winner => {
+  // D21 (founder, 1-oct, opción A): una reserva heredada (sin protocoloIva) en un estado reintentable ya no puede existir. Las dos
+  // pruebas que la fabricaban a partir de un intento incierto («legacy validación atrasada no pisa al ganador STAMPED/CANCELLED
+  // tras vencer el TTL») se reemplazan por la del rechazo: volverla heredada falla y la transacción no deja nada a medias.
+  it('un intento incierto ya no puede volverse heredada: la base lo rechaza y no libera sus sellos', async () => {
     const o = await order()
     provider.createInvoice.mockRejectedValueOnce(new Error('timeout'))
     await issue(o.id)
     const initial = await row(o.id)
-    await prisma.$transaction(async tx => {
-      await sellosIva.liberarSellosDe(tx, initial.id)
-      await tx.cfdi.update({
-        where: { id: initial.id },
-        data: { protocoloIva: null, entrada: Prisma.DbNull, entradaHuella: null, enviadoAt: null },
-      })
-    })
-    await prisma.fiscalEmisor.update({ where: { id: fiscalEmisorId }, data: { csdStatus: 'EXPIRED' } })
-    const entered = deferred()
-    const release = deferred()
-    provider.findByExternalId.mockImplementationOnce(async () => {
-      entered.resolve()
-      await release.promise
-      return null
-    })
-    const stale = issue(o.id).then(
-      value => ({ value }),
-      error => ({ error }),
-    )
-    try {
-      await entered.promise
-      const claimed = await row(o.id)
-      await prisma.cfdi.update({ where: { id: initial.id }, data: { updatedAt: new Date(Date.now() - 4 * 60_000) } })
-      await prisma.fiscalEmisor.update({ where: { id: fiscalEmisorId }, data: { csdStatus: 'ACTIVE' } })
-      await prisma.product.update({ where: { id: productId }, data: { ivaTratamiento: 'IVA_0' } })
-      expect((await issue(o.id)).status).toBe('STAMPED')
-      if (winner === 'CANCELLED') {
-        await cancelCfdi(
-          { cfdiId: initial.id, motivo: '02', sandbox: true, expectedVenueId: venueId },
-          {
-            loadCfdi: id => prisma.cfdi.findUnique({ where: { id }, include: { fiscalEmisor: true } }),
-            updateCfdi: aplicarCancelacion,
-            resolveProvider: () => ({ ...provider, cancelInvoice: async () => ({ status: 'canceled', cancelledAt: new Date() }) }) as any,
-          },
-        )
-      }
-      const before = await row(o.id)
-      expect(before).toMatchObject({ status: winner, attempts: claimed.attempts + 1, protocoloIva: null, taxCents: 0, totalCents: 11600 })
-      release.resolve()
-      expect(await stale).toMatchObject({ error: { statusCode: 409 } })
-      expect(await row(o.id)).toEqual(before)
-      expect(provider.createInvoice).toHaveBeenCalledTimes(2)
-    } finally {
-      release.resolve()
-      await stale
-      await prisma.fiscalEmisor.update({ where: { id: fiscalEmisorId }, data: { csdStatus: 'ACTIVE' } })
-    }
+    expect(initial).toMatchObject({ status: 'STAMP_FAILED', falloDefinitivo: false, protocoloIva: 1 })
+    await expect(
+      prisma.$transaction(async tx => {
+        await sellosIva.liberarSellosDe(tx, initial.id)
+        await tx.cfdi.update({
+          where: { id: initial.id },
+          data: { protocoloIva: null, entrada: Prisma.DbNull, entradaHuella: null, enviadoAt: null },
+        })
+      }),
+    ).rejects.toThrow(/Cfdi_heredada_solo_terminada/)
+    expect(await row(o.id)).toEqual(initial)
+    expect(await prisma.orderItemSelloIva.count({ where: { cfdiId: initial.id } })).toBe(1)
+    expect(await prisma.orderItem.findUnique({ where: { id: o.items[0].id } })).toMatchObject({ ivaTratamiento: 'IVA_16' })
   })
   it('rechazo y liberación revierten juntos si falla la liberación', async () => {
     const o = await order()
@@ -472,29 +441,38 @@ describe('emisión individual sellada', () => {
     expect((await a).status).toBe('STAMPED')
     expect(provider.createInvoice).toHaveBeenCalledTimes(1)
   })
-  it('una factura viva legacy sin llave también excluye otra emisión', async () => {
+  // D21: la «factura viva legacy sin llave» en STAMP_FAILED ya no puede existir (una heredada sólo existe terminada), así que la
+  // prueba que la usaba para excluir otra emisión se reemplaza por el rechazo. La única heredada sin llave que sigue viva es la
+  // TIMBRADA, y ésa sigue excluyendo: la emisión la devuelve como ya facturada, sin tocar al PAC.
+  it('una heredada sin llave a medias ya no puede existir; timbrada, sigue excluyendo otra emisión', async () => {
     const o = await order()
-    await prisma.cfdi.create({
-      data: {
-        venueId,
-        fiscalEmisorId,
-        orderId: o.id,
-        flow: 'STAFF_B',
-        status: 'STAMP_FAILED',
-        idempotencyKey: null,
-        receptorRfc: receptor.rfc,
-        receptorNombre: receptor.razonSocial,
-        receptorRegimen: receptor.regimenFiscal,
-        receptorCp: receptor.codigoPostal,
-        usoCfdi: receptor.usoCfdi,
-        formaPago: '01',
-        metodoPago: 'PUE',
-        subtotalCents: 10000,
-        taxCents: 1600,
-        totalCents: 11600,
-      },
-    })
-    await expect(issue(o.id)).rejects.toMatchObject({ statusCode: 409 })
+    const heredada = (status: 'STAMP_FAILED' | 'STAMPED') =>
+      prisma.cfdi.create({
+        data: {
+          venueId,
+          fiscalEmisorId,
+          orderId: o.id,
+          flow: 'STAFF_B',
+          status,
+          protocoloIva: null,
+          idempotencyKey: null,
+          ...(status === 'STAMPED' ? { uuid: randomUUID(), facturapiId: randomUUID() } : {}),
+          receptorRfc: receptor.rfc,
+          receptorNombre: receptor.razonSocial,
+          receptorRegimen: receptor.regimenFiscal,
+          receptorCp: receptor.codigoPostal,
+          usoCfdi: receptor.usoCfdi,
+          formaPago: '01',
+          metodoPago: 'PUE',
+          subtotalCents: 10000,
+          taxCents: 1600,
+          totalCents: 11600,
+        },
+      })
+    await expect(heredada('STAMP_FAILED')).rejects.toThrow(/Cfdi_heredada_solo_terminada/)
+    expect(await prisma.cfdi.count({ where: { orderId: o.id } })).toBe(0)
+    const timbrada = await heredada('STAMPED')
+    expect(await issue(o.id)).toMatchObject({ status: 'STAMPED', alreadyIssued: true, cfdi: { id: timbrada.id } })
     expect(provider.createInvoice).not.toHaveBeenCalled()
     expect(await prisma.cfdi.count({ where: { orderId: o.id } })).toBe(1)
   })
