@@ -2,8 +2,9 @@
 import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { cerrarPeriodo, previewCierre } from '@/services/dashboard/staffPay/cierre.service'
-import { borrarMundo, clase, confirmadas, crearMundo, Mundo, tablaMindform } from './_mundo'
-import { fechaComoDbDate } from '@/services/dashboard/staffPay/periodos'
+import { borrarMundo, clase, confirmadas, crearMundo, crearSede, Mundo, tablaMindform, TZ } from './_mundo'
+import { fechaComoDbDate, venuePeriodRange } from '@/services/dashboard/staffPay/periodos'
+import { valorarClases } from '@/services/dashboard/staffPay/valoracion'
 
 jest.mock('@/services/dashboard/staffPay/acceso', () => ({
   ...jest.requireActual('@/services/dashboard/staffPay/acceso'),
@@ -79,6 +80,14 @@ describe('cerrar el periodo (spec §6.3)', () => {
     const periodo = await prisma.servicePayPeriod.findUniqueOrThrow({ where: { id: r.periodId } })
     expect(periodo).toMatchObject({ status: 'CLOSED', closedById: m.owner, closeFingerprint: p.huella })
     expect(await prisma.activityLog.count({ where: { action: 'SERVICE_PAY_PERIOD_CLOSED', entityId: r.periodId } })).toBe(1)
+    // Lo congelado ya no entra en vivo: la valoración en vivo del periodo queda vacía (spec §6.2).
+    const { from, to } = venuePeriodRange({ start: '2026-08-01', end: '2026-08-31' }, TZ)
+    const vivo = await valorarClases(
+      prisma,
+      { venueId: m.venueId, organizationId: m.orgId, tz: TZ, desde: from, hasta: to, ahora: AHORA },
+      { limite: 100 },
+    )
+    expect(vivo).toEqual([])
   })
 
   it('un segundo clic (o un reintento después del commit) devuelve el mismo cierre sin escribir nada', async () => {
@@ -127,7 +136,7 @@ describe('cerrar el periodo (spec §6.3)', () => {
     })
     expect(await prisma.serviceEarning.count({ where: { organizationId: m.orgId } })).toBe(0)
     // La transacción entera se revierte: ni el periodo que había creado queda guardado.
-    expect(await prisma.servicePayPeriod.count({ where: { organizationId: m.orgId, status: 'CLOSED' } })).toBe(0)
+    expect(await prisma.servicePayPeriod.count({ where: { organizationId: m.orgId } })).toBe(0)
   })
 
   it('no cierra: periodo sin terminar, clase en curso (23:30 del 31) o excepciones; y el preview dice por qué', async () => {
@@ -269,6 +278,72 @@ describe('cerrar el periodo (spec §6.3)', () => {
       valuationDate: fechaComoDbDate('2026-08-04'),
       valuationVersionId: null,
       payExcluded: true,
+    })
+  })
+
+  it('una clase cancelada del periodo no se paga ni se ancla; preview y cierre coinciden', async () => {
+    m = await mundoConAgosto('cierre-cancelada')
+    await clase(m, { staffId: m.ana, inicioIso: '2026-08-04T14:00:00Z', reservas: confirmadas(8) })
+    const cancelada = await clase(m, { staffId: m.sofia, inicioIso: '2026-08-05T14:00:00Z', reservas: confirmadas(6), status: 'CANCELLED' })
+    const p = await preview(m)
+    expect(p).toMatchObject({ puedeCerrar: true, clases: 1, excluidas: 0, personas: 1, total: '570.00' })
+    const r = await cerrar(m, { huella: p.huella })
+    expect(r).toMatchObject({ yaCerrado: false, total: '570.00', huella: p.huella })
+    expect(await prisma.serviceEarning.count({ where: { organizationId: m.orgId, sourceId: cancelada } })).toBe(0)
+    expect(await prisma.classSessionPayState.findUnique({ where: { classSessionId: cancelada } })).toBeNull()
+  })
+
+  it('D2: una sede que activa el módulo después de guardar el periodo entra al cierre con la misma huella del preview', async () => {
+    m = await mundoConAgosto('cierre-d2')
+    await prisma.servicePayPeriod.create({
+      data: {
+        organizationId: m.orgId,
+        periodStart: fechaComoDbDate('2026-08-01'),
+        periodEnd: fechaComoDbDate('2026-08-31'),
+        venueIds: [m.venueId],
+      },
+    })
+    const bsf = await crearSede(m.orgId, m.key, 'bsf')
+    await tablaMindform(m, bsf.venueId)
+    await clase(m, { staffId: m.ana, inicioIso: '2026-08-04T14:00:00Z', reservas: confirmadas(8) })
+    await clase(m, {
+      staffId: m.sofia,
+      inicioIso: '2026-08-05T14:00:00Z',
+      reservas: confirmadas(8),
+      venueId: bsf.venueId,
+      productId: bsf.productId,
+    })
+    ;(global as any).__sedes = [m.venueId, bsf.venueId]
+    const p = await preview(m)
+    expect(p).toMatchObject({ periodo: { venueIds: [m.venueId, bsf.venueId].sort() }, total: '1050.00' })
+    const r = await cerrar(m, { huella: p.huella })
+    expect(r).toMatchObject({ huella: p.huella, total: '1050.00', venueIds: [m.venueId, bsf.venueId].sort() })
+    const lineas = await prisma.serviceEarning.findMany({ where: { organizationId: m.orgId }, orderBy: { amount: 'asc' }, take: 10 })
+    expect(lineas.map(l => [l.venueId, l.amount.toFixed(2)])).toEqual([
+      [bsf.venueId, '480.00'],
+      [m.venueId, '570.00'],
+    ])
+    expect((await prisma.servicePayPeriod.findUniqueOrThrow({ where: { id: r.periodId } })).venueIds).toEqual(
+      [m.venueId, bsf.venueId].sort(),
+    )
+  })
+
+  it('el preview de un periodo ya cerrado da lo guardado (YA_CERRADO), no lo que hoy se ve en vivo', async () => {
+    m = await mundoConAgosto('cierre-preview-cerrado')
+    await clase(m, { staffId: m.ana, inicioIso: '2026-08-04T14:00:00Z', reservas: confirmadas(8) })
+    const r = await cerrar(m)
+    // Una clase que llegó tarde (sin ancla) sí se vería en vivo; el periodo cerrado no la suma.
+    await clase(m, { staffId: m.sofia, inicioIso: '2026-08-10T14:00:00Z', reservas: confirmadas(8) })
+    expect(await preview(m)).toMatchObject({
+      periodo: { id: r.periodId },
+      puedeCerrar: false,
+      bloqueos: [{ codigo: 'YA_CERRADO' }],
+      clases: 1,
+      personas: 1,
+      totalServicios: '570.00',
+      totalAjustes: '0.00',
+      total: '570.00',
+      huella: '',
     })
   })
 

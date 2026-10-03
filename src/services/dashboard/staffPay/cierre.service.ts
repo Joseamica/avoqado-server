@@ -13,7 +13,7 @@ import { Huella } from './huella'
 type Tx = Prisma.TransactionClient
 type Db = Tx | typeof prisma
 
-/** Medido en la Tarea A13 con 50,000 clases. No se baja sin volver a medir (spec §6.3 punto 3). */
+/** Provisional: lo fija la Tarea A13, medido con 50,000 clases. No se baja sin volver a medir (spec §6.3 punto 3). */
 export const TIMEOUT_CIERRE_MS = 120_000
 export const LOTE_CIERRE = 500
 const TZ_DEFAULT = 'America/Mexico_City'
@@ -177,13 +177,13 @@ async function idsHuerfanas(db: Db, a: Alcance, ahora: Date): Promise<string[]> 
 type AjusteGuardado = { id: string; staffId: string; venueId: string; amount: Prisma.Decimal }
 
 /** TODOS los ajustes del periodo, por páginas con cursor: un tope de página nunca es un tope contable (Codex R1-3). */
-async function ajustesDelPeriodo(db: Db, periodId: string | null): Promise<AjusteGuardado[]> {
+async function ajustesDelPeriodo(db: Db, organizationId: string, periodId: string | null): Promise<AjusteGuardado[]> {
   if (!periodId) return []
   const todos: AjusteGuardado[] = []
   let despuesDe: string | undefined
   for (;;) {
     const page = await db.serviceEarning.findMany({
-      where: { periodId, concept: { in: ['RECONCILE', 'MANUAL'] }, ...(despuesDe ? { id: { gt: despuesDe } } : {}) },
+      where: { organizationId, periodId, concept: { in: ['RECONCILE', 'MANUAL'] }, ...(despuesDe ? { id: { gt: despuesDe } } : {}) },
       select: { id: true, staffId: true, venueId: true, amount: true },
       orderBy: { id: 'asc' },
       take: 1000,
@@ -317,8 +317,9 @@ export async function previewCierre(input: {
       }
     }
   }
+  if (a.estado === 'CLOSED' && a.periodId) return previewCerrado({ ...a, periodId: a.periodId })
   const bloqueos = await bloqueosDe(prisma, a, ahora)
-  const ajustes = await ajustesDelPeriodo(prisma, a.periodId)
+  const ajustes = await ajustesDelPeriodo(prisma, a.organizationId, a.periodId)
   const huerfanas = await idsHuerfanas(prisma, a, ahora)
   const r = await recorrer(prisma, a, ahora, { tamLote: input.tamLote ?? LOTE_CIERRE, ajustes, huerfanas })
   return {
@@ -336,19 +337,62 @@ export async function previewCierre(input: {
   }
 }
 
+/** Lo GUARDADO de un periodo cerrado: personas y total de los recibos (lo mismo que el retorno idempotente). */
+async function recibosGuardados(db: Db, organizationId: string, periodId: string) {
+  const agg = await db.staffPayStatement.aggregate({
+    where: { periodId, period: { organizationId } },
+    _count: { _all: true },
+    _sum: { total: true },
+  })
+  return { personas: agg._count._all, total: agg._sum.total ?? new Prisma.Decimal(0) }
+}
+
 async function resultadoGuardado(db: Db, p: ServicePayPeriod, yaCerrado: boolean): Promise<ResultadoCierre> {
-  const agg = await db.staffPayStatement.aggregate({ where: { periodId: p.id }, _count: { _all: true }, _sum: { total: true } })
+  const g = await recibosGuardados(db, p.organizationId, p.id)
   return {
     periodId: p.id,
     start: dbDateComoFecha(p.periodStart),
     end: dbDateComoFecha(p.periodEnd),
     venueIds: p.venueIds,
-    personas: agg._count._all,
-    total: (agg._sum.total ?? new Prisma.Decimal(0)).toFixed(2),
+    personas: g.personas,
+    total: g.total.toFixed(2),
     huella: p.closeFingerprint ?? '',
     yaCerrado,
   }
 }
+
+/**
+ * Preview de un periodo CERRADO: lo guardado, nunca el recorrido en vivo (que sólo vería lo que llegó tarde y
+ * mostraría otro total). `clases` y `totalServicios` salen de sus SERVICE; `excluidas` no se reconstruye (0): el
+ * detalle de un periodo cerrado se lee en el recibo.
+ */
+async function previewCerrado(a: Alcance & { periodId: string }): Promise<PreviewCierre> {
+  const [g, servicios] = await Promise.all([
+    recibosGuardados(prisma, a.organizationId, a.periodId),
+    prisma.serviceEarning.aggregate({
+      where: { organizationId: a.organizationId, periodId: a.periodId, concept: 'SERVICE' },
+      _count: { _all: true },
+      _sum: { amount: true },
+    }),
+  ])
+  const totalServicios = servicios._sum.amount ?? new Prisma.Decimal(0)
+  return {
+    periodo: { id: a.periodId, start: a.periodo.start, end: a.periodo.end, venueIds: a.venueIds },
+    puedeCerrar: false,
+    bloqueos: [{ codigo: 'YA_CERRADO' }],
+    clases: servicios._count._all,
+    excluidas: 0,
+    personas: g.personas,
+    totalServicios: totalServicios.toFixed(2),
+    totalAjustes: g.total.minus(totalServicios).toFixed(2),
+    total: g.total.toFixed(2),
+    huerfanas: 0,
+    huella: '',
+  }
+}
+
+/** Centinela: la huella cambió. Se convierte en `ConflictError HUELLA_CAMBIO` FUERA de la transacción (ya revertida). */
+class HuellaCambio extends Error {}
 
 export async function cerrarPeriodo(input: {
   userId: string
@@ -363,121 +407,131 @@ export async function cerrarPeriodo(input: {
   const organizationId = await organizacionDe(input.venueId)
   const ahora = input.ahora ?? new Date()
   const tamLote = input.tamLote ?? LOTE_CIERRE
-  return withSerializableRetry(
-    async tx => {
-      const fila = await asegurarPeriodo(tx, organizationId, input.fecha)
-      let p = await bloquearPeriodo(tx, fila.id)
-      const sinPermiso = 'Para cerrar necesitas el permiso de cerrar periodos en todas las sedes del periodo'
-      // Permiso también ANTES del retorno idempotente (Codex R1-8): un «ya estaba cerrado» no regala los totales.
-      if (p.status === 'CLOSED') {
+  try {
+    return await withSerializableRetry(
+      async tx => {
+        const fila = await asegurarPeriodo(tx, organizationId, input.fecha)
+        let p = await bloquearPeriodo(tx, fila.id)
+        const sinPermiso = 'Para cerrar necesitas el permiso de cerrar periodos en todas las sedes del periodo'
+        // Permiso también ANTES del retorno idempotente (Codex R1-8): un «ya estaba cerrado» no regala los totales.
+        if (p.status === 'CLOSED') {
+          await assertPermisoEnSedes(input.userId, p.venueIds, 'staffpay:close', sinPermiso)
+          return resultadoGuardado(tx, p, true)
+        }
+        // D2: el cierre suma las sedes que hoy tienen el módulo, con permiso en cada una (`ampliarAlcance`).
+        p = await ampliarAlcance(tx, p, await sedesConServicePay(organizationId), input.userId)
         await assertPermisoEnSedes(input.userId, p.venueIds, 'staffpay:close', sinPermiso)
-        return resultadoGuardado(tx, p, true)
-      }
-      // D2: el cierre suma las sedes que hoy tienen el módulo, con permiso en cada una (`ampliarAlcance`).
-      p = await ampliarAlcance(tx, p, await sedesConServicePay(organizationId), input.userId)
-      await assertPermisoEnSedes(input.userId, p.venueIds, 'staffpay:close', sinPermiso)
-      const a = await alcanceDe(tx, p)
-      const bloqueos = await bloqueosDe(tx, a, ahora)
-      const b = (codigo: Bloqueo['codigo']) => bloqueos.find(x => x.codigo === codigo)
-      if (b('NO_HA_TERMINADO'))
-        throw new BadRequestError(`El periodo termina el ${a.periodo.end}: todavía no se puede cerrar`, 'PERIODO_NO_TERMINA')
-      const enCurso = b('CLASES_EN_CURSO') as { n: number } | undefined
-      if (enCurso) throw new BadRequestError(`Hay ${enCurso.n} clase(s) en curso: espera a que terminen`, 'CLASES_EN_CURSO')
-      const exc = b('EXCEPCIONES') as { n: number } | undefined
-      if (exc)
-        throw new BadRequestError(`Quedan ${exc.n} clase(s) que no se pueden pagar todavía: resuélvelas antes de cerrar`, 'HAY_EXCEPCIONES')
-      const huerfanas = await idsHuerfanas(tx, a, ahora)
-      if (huerfanas.length && !input.confirmarHuerfanas) {
-        throw new BadRequestError(
-          `Confirma que las ${huerfanas.length} reserva(s) de clase sin horario no cuentan para ningún pago`,
-          'HUERFANAS_SIN_CONFIRMAR',
-        )
-      }
+        const a = await alcanceDe(tx, p)
+        const bloqueos = await bloqueosDe(tx, a, ahora)
+        const b = (codigo: Bloqueo['codigo']) => bloqueos.find(x => x.codigo === codigo)
+        if (b('NO_HA_TERMINADO'))
+          throw new BadRequestError(`El periodo termina el ${a.periodo.end}: todavía no se puede cerrar`, 'PERIODO_NO_TERMINA')
+        const enCurso = b('CLASES_EN_CURSO') as { n: number } | undefined
+        if (enCurso) throw new BadRequestError(`Hay ${enCurso.n} clase(s) en curso: espera a que terminen`, 'CLASES_EN_CURSO')
+        const exc = b('EXCEPCIONES') as { n: number } | undefined
+        if (exc)
+          throw new BadRequestError(
+            `Quedan ${exc.n} clase(s) que no se pueden pagar todavía: resuélvelas antes de cerrar`,
+            'HAY_EXCEPCIONES',
+          )
+        const huerfanas = await idsHuerfanas(tx, a, ahora)
+        if (huerfanas.length && !input.confirmarHuerfanas) {
+          throw new BadRequestError(
+            `Confirma que las ${huerfanas.length} reserva(s) de clase sin horario no cuentan para ningún pago`,
+            'HUERFANAS_SIN_CONFIRMAR',
+          )
+        }
 
-      // Los ajustes se LEEN antes de escribir los SERVICE y se hashean después de las clases, igual que en el preview.
-      const ajustes = await ajustesDelPeriodo(tx, p.id)
-      let lotes = 0
-      const r = await recorrer(tx, a, ahora, {
-        tamLote,
-        ajustes,
-        huerfanas,
-        alLote: async (lote, sede) => {
-          const pagables = lote.filter(c => c.estado === 'OK' && c.staffId && c.monto !== null)
-          if (pagables.length) {
-            await tx.serviceEarning.createMany({
-              data: pagables.map(c => ({
-                organizationId,
-                venueId: c.venueId,
-                periodId: p.id,
-                staffId: c.staffId!,
-                concept: 'SERVICE' as const,
-                sourceType: 'CLASS_SESSION' as const,
-                sourceId: c.classSessionId,
-                occurredAt: c.startsAt,
-                payLevelId: c.payLevelId,
-                payLevelName: c.payLevelName,
-                tableVersionId: c.tableVersionId,
-                countMode: c.countMode,
-                count: c.conteo,
-                amount: new Prisma.Decimal(c.monto!),
-                descriptor: descriptorDeClase(c, sede),
-                createdById: input.userId,
-              })),
-            })
-          }
-          await anclarClases(tx, p.id, lote)
-          input.alTerminarLote?.(++lotes)
-        },
-      })
-      if (r.huella !== input.huellaEsperada) {
-        // El preview nuevo corre con el cliente global (fuera de esta transacción, que se va a revertir): muestra el
-        // estado real de la base, que es lo que el usuario tiene que volver a revisar.
-        throw new ConflictError('Los números cambiaron desde que los revisaste: revisa el cierre de nuevo', 'HUELLA_CAMBIO', {
-          preview: await previewCierre({ userId: input.userId, venueId: input.venueId, fecha: input.fecha, ahora, tamLote }),
+        // Los ajustes se LEEN antes de escribir los SERVICE y se hashean después de las clases, igual que en el preview.
+        const ajustes = await ajustesDelPeriodo(tx, organizationId, p.id)
+        let lotes = 0
+        const r = await recorrer(tx, a, ahora, {
+          tamLote,
+          ajustes,
+          huerfanas,
+          alLote: async (lote, sede) => {
+            const pagables = lote.filter(c => c.estado === 'OK' && c.staffId && c.monto !== null)
+            if (pagables.length) {
+              await tx.serviceEarning.createMany({
+                data: pagables.map(c => ({
+                  organizationId,
+                  venueId: c.venueId,
+                  periodId: p.id,
+                  staffId: c.staffId!,
+                  concept: 'SERVICE' as const,
+                  sourceType: 'CLASS_SESSION' as const,
+                  sourceId: c.classSessionId,
+                  occurredAt: c.startsAt,
+                  payLevelId: c.payLevelId,
+                  payLevelName: c.payLevelName,
+                  tableVersionId: c.tableVersionId,
+                  countMode: c.countMode,
+                  count: c.conteo,
+                  amount: new Prisma.Decimal(c.monto!),
+                  descriptor: descriptorDeClase(c, sede),
+                  createdById: input.userId,
+                })),
+              })
+            }
+            await anclarClases(tx, p.id, lote)
+            input.alTerminarLote?.(++lotes)
+          },
         })
-      }
+        if (r.huella !== input.huellaEsperada) throw new HuellaCambio()
 
-      // Recibos: suma de lo YA ESCRITO del periodo (servicios y ajustes), uno por persona — quien sólo tiene un bono también.
-      const sumas = await tx.serviceEarning.groupBy({ by: ['staffId'], where: { periodId: p.id }, _sum: { amount: true } })
-      if (sumas.length) {
-        await tx.staffPayStatement.createMany({
-          data: sumas.map(s => ({ periodId: p.id, staffId: s.staffId, total: s._sum.amount ?? new Prisma.Decimal(0) })),
+        // Recibos: suma de lo YA ESCRITO del periodo (servicios y ajustes), uno por persona — quien sólo tiene un bono también.
+        const sumas = await tx.serviceEarning.groupBy({
+          by: ['staffId'],
+          where: { organizationId, periodId: p.id },
+          _sum: { amount: true },
         })
-      }
-      const cerrado = await tx.servicePayPeriod.updateMany({
-        where: { id: p.id, status: 'OPEN' },
-        data: { status: 'CLOSED', closedAt: new Date(), closedById: input.userId, closeFingerprint: r.huella },
-      })
-      if (cerrado.count !== 1) throw new ConflictError('El periodo cambió mientras se cerraba: revisa de nuevo')
-      const total = sumas.reduce((acc, s) => acc.plus(s._sum.amount ?? 0), new Prisma.Decimal(0))
-      await writeLegacyActivityAuditTx(tx, {
-        staffId: input.userId,
-        venueId: input.venueId,
-        action: 'SERVICE_PAY_PERIOD_CLOSED',
-        entity: 'ServicePayPeriod',
-        entityId: p.id,
-        data: {
-          periodo: { start: a.periodo.start, end: a.periodo.end },
+        if (sumas.length) {
+          await tx.staffPayStatement.createMany({
+            data: sumas.map(s => ({ periodId: p.id, staffId: s.staffId, total: s._sum.amount ?? new Prisma.Decimal(0) })),
+          })
+        }
+        const cerrado = await tx.servicePayPeriod.updateMany({
+          where: { id: p.id, status: 'OPEN' },
+          data: { status: 'CLOSED', closedAt: new Date(), closedById: input.userId, closeFingerprint: r.huella },
+        })
+        if (cerrado.count !== 1) throw new ConflictError('El periodo cambió mientras se cerraba: revisa de nuevo')
+        const total = sumas.reduce((acc, s) => acc.plus(s._sum.amount ?? 0), new Prisma.Decimal(0))
+        await writeLegacyActivityAuditTx(tx, {
+          staffId: input.userId,
+          venueId: input.venueId,
+          action: 'SERVICE_PAY_PERIOD_CLOSED',
+          entity: 'ServicePayPeriod',
+          entityId: p.id,
+          data: {
+            periodo: { start: a.periodo.start, end: a.periodo.end },
+            venueIds: a.venueIds,
+            clases: r.clases,
+            excluidas: r.excluidas,
+            personas: sumas.length,
+            total: total.toFixed(2),
+            huella: r.huella,
+            huerfanas,
+          },
+        })
+        return {
+          periodId: p.id,
+          start: a.periodo.start,
+          end: a.periodo.end,
           venueIds: a.venueIds,
-          clases: r.clases,
-          excluidas: r.excluidas,
           personas: sumas.length,
           total: total.toFixed(2),
           huella: r.huella,
-          huerfanas,
-        },
-      })
-      return {
-        periodId: p.id,
-        start: a.periodo.start,
-        end: a.periodo.end,
-        venueIds: a.venueIds,
-        personas: sumas.length,
-        total: total.toFixed(2),
-        huella: r.huella,
-        yaCerrado: false,
-      }
-    },
-    { timeoutMs: TIMEOUT_CIERRE_MS },
-  )
+          yaCerrado: false,
+        }
+      },
+      { timeoutMs: TIMEOUT_CIERRE_MS },
+    )
+  } catch (e) {
+    if (!(e instanceof HuellaCambio)) throw e
+    // Fuera de la transacción (ya revertida y sin el candado del periodo): el preview nuevo muestra el estado real de la
+    // base, que es lo que el usuario tiene que volver a revisar.
+    throw new ConflictError('Los números cambiaron desde que los revisaste: revisa el cierre de nuevo', 'HUELLA_CAMBIO', {
+      preview: await previewCierre({ userId: input.userId, venueId: input.venueId, fecha: input.fecha, ahora, tamLote }),
+    })
+  }
 }
