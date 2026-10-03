@@ -1,12 +1,22 @@
-import { Prisma } from '@prisma/client'
+import { Prisma, ServicePayPeriod } from '@prisma/client'
 import prisma from '../../../utils/prismaClient'
-import { sedesLegibles } from './acceso'
-import { ClaseValorada, contarPorEstado, FiltroValoracion, llegoAlTopePersonas, resumenPorPersona, valorarClases } from './valoracion'
-import { hoyLocal, periodoQueContiene, PeriodoCanonico, venuePeriodRange } from './periodos'
-import { nivelesVigentes } from './niveles.service'
+import { ConflictError } from '../../../errors/AppError'
+import { alcanceLegibleDelPeriodo, periodoQueContieneFecha } from './periodosGuardados'
+import { ClaseValorada, contarPorEstado, FiltroValoracion, valoracionCte, valorarClases } from './valoracion'
+import { dbDateComoFecha, hoyLocal, periodoQueContiene, PeriodoCanonico, venuePeriodRange } from './periodos'
 
-export type ClaseValoradaDto = Omit<ClaseValorada, 'monto'> & { monto: string | null }
-const dto = (c: ClaseValorada): ClaseValoradaDto => ({ ...c, monto: c.monto ? new Prisma.Decimal(c.monto).toFixed(2) : null })
+/** Los campos del ancla (A4) no salen en el desglose: la pantalla no los usa y `payAmountOverride` saldría sin formato. */
+type CamposDelAncla = 'fechaValoracion' | 'periodoOrigen' | 'cancelada' | 'payCountOverride' | 'payAmountOverride' | 'excluida'
+export type ClaseValoradaDto = Omit<ClaseValorada, 'monto' | CamposDelAncla> & { monto: string | null }
+const dto = ({
+  fechaValoracion,
+  periodoOrigen,
+  cancelada,
+  payCountOverride,
+  payAmountOverride,
+  excluida,
+  ...c
+}: ClaseValorada): ClaseValoradaDto => ({ ...c, monto: c.monto ? new Prisma.Decimal(c.monto).toFixed(2) : null })
 
 interface Contexto {
   organizationId: string
@@ -15,6 +25,8 @@ interface Contexto {
   venueIds: string[]
   parcial: boolean
   filtros: FiltroValoracion[]
+  /** El periodo guardado que contiene la fecha (D1: puede no existir aún). */
+  fila: ServicePayPeriod | null
 }
 
 /**
@@ -29,10 +41,13 @@ async function contexto(userId: string, venueId: string, fecha?: string, sede?: 
   })
   const tzBase = v.timezone || 'America/Mexico_City'
   const periodicidad = v.organization.servicePayPeriodicity
-  const periodo = periodoQueContiene(fecha ?? hoyLocal(tzBase), periodicidad)
-  const legibles = await sedesLegibles(userId, v.organizationId)
-  const venueIds = sede ? legibles.venueIds.filter(id => id === sede) : legibles.venueIds
-  const parcial = legibles.parcial || (sede !== undefined && venueIds.length === 0)
+  const canonico = periodoQueContiene(fecha ?? hoyLocal(tzBase), periodicidad)
+  const fila = await periodoQueContieneFecha(prisma, v.organizationId, canonico.start)
+  const periodo: PeriodoCanonico = fila ? { start: dbDateComoFecha(fila.periodStart), end: dbDateComoFecha(fila.periodEnd) } : canonico
+  // 🔴 El MISMO alcance legible que el recibo (Codex R1-1, R3-Nuevo 2): CERRADO = su alcance guardado; ABIERTO = sus
+  // sedes guardadas ∪ las que hoy tienen el módulo (una diferencia liquidada desde una sede que ya lo apagó NO
+  // desaparece). Filtrado por permiso y por `sede`.
+  const { venueIds, parcial } = await alcanceLegibleDelPeriodo(userId, v.organizationId, fila, sede)
   const venues = venueIds.length
     ? await prisma.venue.findMany({
         where: { id: { in: venueIds }, organizationId: v.organizationId },
@@ -47,7 +62,94 @@ async function contexto(userId: string, venueId: string, fecha?: string, sede?: 
     const { from, to } = venuePeriodRange(periodo, tz)
     return { venueId: id, organizationId: v.organizationId, tz, desde: from, hasta: to, ahora }
   })
-  return { organizationId: v.organizationId, periodicidad, periodo, venueIds, parcial, filtros }
+  return { organizationId: v.organizationId, periodicidad, periodo, venueIds, parcial, filtros, fila }
+}
+
+/**
+ * La fuente de personas del periodo ABIERTO, en UNA consulta (Codex R2-R1-12): la valoración en vivo de cada sede (cada
+ * rama es una subconsulta con su PROPIO `WITH`) más los RECONCILE/MANUAL guardados del periodo, con `UNION ALL`.
+ * Devuelve null si no hay ninguna sede legible.
+ */
+function fuentePorPersona(c: Contexto): Prisma.Sql | null {
+  const partes = c.filtros.map(
+    f => Prisma.sql`
+      SELECT vv."staffId", vv."staffName", vv."venueId", 1 AS clases, vv.conteo AS lugares, vv.monto, 0::numeric AS ajuste
+      FROM (${valoracionCte(f)} SELECT * FROM valoradas) vv
+      WHERE vv.estado = 'OK' AND vv."staffId" IS NOT NULL`,
+  )
+  if (c.fila && c.venueIds.length) {
+    partes.push(Prisma.sql`
+      SELECT e."staffId", NULLIF(TRIM(CONCAT(s."firstName", ' ', s."lastName")), '') AS "staffName", e."venueId",
+             0 AS clases, 0 AS lugares, e.amount AS monto, e.amount AS ajuste
+      FROM "ServiceEarning" e
+      LEFT JOIN "Staff" s ON s.id = e."staffId"
+      WHERE e."periodId" = ${c.fila.id} AND e.concept IN ('RECONCILE', 'MANUAL') AND e."venueId" IN (${Prisma.join(c.venueIds)})`)
+  }
+  return partes.length ? Prisma.join(partes, ' UNION ALL ') : null
+}
+
+// Las consultas pesadas del reporte, como funciones: el reporte las ejecuta y A13 las pasa por `EXPLAIN` (Codex R3-R1-12).
+const sqlCuentaAbierto = (fuente: Prisma.Sql) =>
+  Prisma.sql`SELECT COUNT(DISTINCT u."staffId")::int AS personas, SUM(u.ajuste) AS ajustes FROM (${fuente}) u`
+
+const sqlPaginaAbierto = (c: Contexto, fuente: Prisma.Sql, offset: number, limit: number) => Prisma.sql`
+  SELECT g.*, nv.name AS "payLevelName"
+  FROM (
+    SELECT u."staffId", MAX(u."staffName") AS "staffName",
+           ARRAY_AGG(DISTINCT u."venueId") FILTER (WHERE u.clases > 0) AS "venueIds",
+           SUM(u.clases)::int AS clases, COALESCE(SUM(u.lugares), 0)::int AS "sumaLugares",
+           SUM(u.ajuste) AS ajustes, SUM(u.monto) AS total
+    FROM (${fuente}) u
+    GROUP BY u."staffId"
+    ORDER BY MAX(u."staffName") ASC NULLS LAST, u."staffId" ASC
+    OFFSET ${offset} LIMIT ${limit}
+  ) g
+  LEFT JOIN LATERAL (
+    SELECT l.name
+    FROM "StaffPayLevelAssignment" a JOIN "StaffPayLevel" l ON l.id = a."payLevelId"
+    WHERE a."organizationId" = ${c.organizationId} AND a."staffId" = g."staffId" AND a."effectiveFrom" <= ${c.periodo.end}::date
+    ORDER BY a."effectiveFrom" DESC, a.revision DESC
+    LIMIT 1
+  ) nv ON true
+  ORDER BY g."staffName" ASC NULLS LAST, g."staffId" ASC`
+
+// Codex R3-R1-12: las dos consultas del reporte cerrado, como funciones (las ejecuta `reporteCerrado` y las mide A13).
+const sqlTarjetasCerrado = (c: Contexto) => Prisma.sql`
+    SELECT SUM(e.amount) AS total, COUNT(*) FILTER (WHERE e.concept = 'SERVICE')::int AS clases,
+           COUNT(DISTINCT e."staffId")::int AS personas,
+           COUNT(DISTINCT e."staffId") FILTER (WHERE st."paidAt" IS NOT NULL)::int AS pagadas
+    FROM "ServiceEarning" e
+    LEFT JOIN "StaffPayStatement" st ON st."periodId" = e."periodId" AND st."staffId" = e."staffId"
+    WHERE e."periodId" = ${c.fila!.id} AND e."venueId" IN (${Prisma.join(c.venueIds)})`
+
+const sqlPaginaCerrado = (c: Contexto, offset: number, limit: number) => Prisma.sql`
+    SELECT e."staffId", NULLIF(TRIM(CONCAT(s."firstName", ' ', s."lastName")), '') AS "staffName",
+           MAX(e."payLevelName") FILTER (WHERE e.concept = 'SERVICE') AS "payLevelName",
+           ARRAY_AGG(DISTINCT e."venueId") AS "venueIds",
+           COUNT(*) FILTER (WHERE e.concept = 'SERVICE')::int AS clases,
+           COALESCE(SUM(e.count) FILTER (WHERE e.concept = 'SERVICE'), 0)::int AS "sumaLugares",
+           SUM(e.amount) FILTER (WHERE e.concept <> 'SERVICE') AS ajustes,
+           SUM(e.amount) AS total, MAX(st."paidAt") AS "paidAt"
+    FROM "ServiceEarning" e
+    LEFT JOIN "Staff" s ON s.id = e."staffId"
+    LEFT JOIN "StaffPayStatement" st ON st."periodId" = e."periodId" AND st."staffId" = e."staffId"
+    WHERE e."periodId" = ${c.fila!.id} AND e."venueId" IN (${Prisma.join(c.venueIds)})
+    GROUP BY e."staffId", s."firstName", s."lastName"
+    -- Codex R2-R1-12: por nombre e id, paginado en SQL; el total de personas es el COUNT(DISTINCT) de arriba.
+    ORDER BY "staffName" ASC NULLS LAST, e."staffId" ASC
+    OFFSET ${offset} LIMIT ${limit}`
+
+/**
+ * Las consultas del reporte TAL COMO se ejecutan (agregada por persona y `COUNT(DISTINCT)`), SÓLO para su `EXPLAIN` en
+ * A13 (Codex R3-R1-12). null si no hay sedes legibles.
+ */
+export async function consultasDelReporte(input: { userId: string; venueId: string; fecha?: string; offset: number; limit: number }) {
+  const c = await contexto(input.userId, input.venueId, input.fecha)
+  if (c.fila?.status === 'CLOSED') {
+    return c.venueIds.length ? { cuenta: sqlTarjetasCerrado(c), pagina: sqlPaginaCerrado(c, input.offset, input.limit) } : null
+  }
+  const fuente = fuentePorPersona(c)
+  return fuente ? { cuenta: sqlCuentaAbierto(fuente), pagina: sqlPaginaAbierto(c, fuente, input.offset, input.limit) } : null
 }
 
 export async function reportePeriodo(input: {
@@ -61,61 +163,118 @@ export async function reportePeriodo(input: {
   const c = await contexto(input.userId, input.venueId, input.fecha, input.sede)
   // El MCP llama sin la validación de la ruta: el offset se acota aquí también.
   const offset = Math.max(0, Math.trunc(input.offset) || 0)
-  let truncado = false
+  const limit = Math.min(Math.max(input.limit, 1), 100)
+  if (c.fila?.status === 'CLOSED') return reporteCerrado(c, offset, limit)
+  // Tarjetas: agregados en la base (fase 1), sede por sede.
   let total = new Prisma.Decimal(0)
   let clases = 0,
     excepciones = 0,
     excluidas = 0
-  const porPersona = new Map<
-    string,
-    { staffId: string; staffName: string; venueIds: string[]; clases: number; sumaLugares: number; total: Prisma.Decimal }
-  >()
   for (const f of c.filtros) {
     const e = await contarPorEstado(prisma, f)
     total = total.plus(e.total)
     clases += e.ok
     excepciones += e.excepciones
     excluidas += e.excluidas
-    const resumen = await resumenPorPersona(prisma, f)
-    if (llegoAlTopePersonas(resumen.length)) truncado = true
-    for (const r of resumen) {
-      const p = porPersona.get(r.staffId) ?? {
-        staffId: r.staffId,
-        staffName: r.staffName,
-        venueIds: [],
-        clases: 0,
-        sumaLugares: 0,
-        total: new Prisma.Decimal(0),
-      }
-      p.venueIds.push(f.venueId)
-      p.clases += r.clases
-      p.sumaLugares += r.sumaLugares
-      p.total = p.total.plus(r.total)
-      porPersona.set(r.staffId, p)
-    }
   }
-  const niveles = new Map(
-    porPersona.size ? (await nivelesVigentes(c.organizationId, c.periodo.end)).map(n => [n.staffId, n.payLevelName]) : [],
-  )
-  const todas = [...porPersona.values()].sort((a, b) => b.total.comparedTo(a.total) || a.staffId.localeCompare(b.staffId))
-  const limit = Math.min(Math.max(input.limit, 1), 100)
-  const items = todas.slice(offset, offset + limit).map(p => ({
+  const fuente = fuentePorPersona(c)
+  // Total de personas y de ajustes: un COUNT(DISTINCT) y un SUM aparte (Codex R2-R1-12).
+  const [cuenta] = fuente
+    ? await prisma.$queryRaw<Array<{ personas: number; ajustes: Prisma.Decimal | null }>>(sqlCuentaAbierto(fuente))
+    : [{ personas: 0, ajustes: null }]
+  total = total.plus(cuenta.ajustes ?? 0)
+  // La página: agrupada por persona, ordenada por nombre e id, con OFFSET/LIMIT en SQL; el nivel vigente al final del
+  // periodo sólo para las personas de ESTA página.
+  const pagina = fuente
+    ? await prisma.$queryRaw<
+        Array<{
+          staffId: string
+          staffName: string | null
+          payLevelName: string | null
+          venueIds: string[] | null
+          clases: number
+          sumaLugares: number
+          ajustes: Prisma.Decimal | null
+          total: Prisma.Decimal
+        }>
+      >(sqlPaginaAbierto(c, fuente, offset, limit))
+    : []
+  const items = pagina.map(p => ({
     staffId: p.staffId,
-    staffName: p.staffName,
-    payLevelName: niveles.get(p.staffId) ?? null,
-    venueIds: p.venueIds,
+    staffName: p.staffName ?? '—',
+    payLevelName: p.payLevelName,
+    venueIds: p.venueIds ?? [],
     clases: p.clases,
     promedioLugares: p.clases ? Math.round((p.sumaLugares / p.clases) * 10) / 10 : 0,
-    total: p.total.toFixed(2),
+    ajustes: (p.ajustes ?? new Prisma.Decimal(0)).toFixed(2),
+    total: new Prisma.Decimal(p.total).toFixed(2),
+    pagadoEn: null as string | null,
   }))
   return {
-    periodo: { ...c.periodo, periodicidad: c.periodicidad },
+    periodo: { ...c.periodo, periodicidad: c.periodicidad, id: c.fila?.id ?? null, estado: 'OPEN' as const },
     parcial: c.parcial,
     venueIds: c.venueIds,
-    truncado,
-    tarjetas: { total: total.toFixed(2), clases, personas: porPersona.size, excepciones, excluidas },
-    personas: { items, total: todas.length, offset, limit },
+    // El campo se queda (contrato); ya no hay tope por sede que pueda truncar: se pagina en SQL (Codex R2-R1-12).
+    truncado: false,
+    tarjetas: { total: total.toFixed(2), clases, personas: cuenta.personas, excepciones, excluidas },
+    personas: { items, total: cuenta.personas, offset, limit },
     huerfanas: await contarHuerfanas(c),
+  }
+}
+
+async function reporteCerrado(c: Contexto, offset: number, limit: number) {
+  const periodo = { ...c.periodo, periodicidad: c.periodicidad, id: c.fila!.id, estado: 'CLOSED' as const }
+  const vacio = { periodo, parcial: c.parcial, venueIds: c.venueIds, truncado: false, huerfanas: 0 }
+  if (!c.venueIds.length) {
+    return {
+      ...vacio,
+      tarjetas: { total: '0.00', clases: 0, personas: 0, pagadas: 0, excepciones: 0, excluidas: 0 },
+      personas: { items: [], total: 0, offset, limit },
+    }
+  }
+  const [t] = await prisma.$queryRaw<Array<{ total: Prisma.Decimal | null; clases: number; personas: number; pagadas: number }>>(
+    sqlTarjetasCerrado(c),
+  )
+  const filas = await prisma.$queryRaw<
+    Array<{
+      staffId: string
+      staffName: string | null
+      payLevelName: string | null
+      venueIds: string[]
+      clases: number
+      sumaLugares: number
+      ajustes: Prisma.Decimal | null
+      total: Prisma.Decimal
+      paidAt: Date | null
+    }>
+  >(sqlPaginaCerrado(c, offset, limit))
+  return {
+    ...vacio,
+    // `pagadas` es del periodo entero (Codex R1-23): el contador no puede depender de la página que se ve.
+    tarjetas: {
+      total: (t.total ?? new Prisma.Decimal(0)).toFixed(2),
+      clases: t.clases,
+      personas: t.personas,
+      pagadas: t.pagadas,
+      excepciones: 0,
+      excluidas: 0,
+    },
+    personas: {
+      items: filas.map(f => ({
+        staffId: f.staffId,
+        staffName: f.staffName ?? '—',
+        payLevelName: f.payLevelName,
+        venueIds: f.venueIds,
+        clases: f.clases,
+        promedioLugares: f.clases ? Math.round((f.sumaLugares / f.clases) * 10) / 10 : 0,
+        ajustes: (f.ajustes ?? new Prisma.Decimal(0)).toFixed(2),
+        total: new Prisma.Decimal(f.total).toFixed(2),
+        pagadoEn: f.paidAt?.toISOString() ?? null,
+      })),
+      total: t.personas,
+      offset,
+      limit,
+    },
   }
 }
 
@@ -159,12 +318,10 @@ export async function detallePersona(input: {
   despuesDe?: string
   limit: number
 }) {
-  return recorrer(
-    await contexto(input.userId, input.venueId, input.fecha, input.sede),
-    { staffId: input.staffId },
-    input.despuesDe,
-    input.limit,
-  )
+  const c = await contexto(input.userId, input.venueId, input.fecha, input.sede)
+  // Codex R2-R1-21: el desglose en vivo excluye las clases ancladas; de un periodo cerrado sería una lista vacía que miente.
+  if (c.fila?.status === 'CLOSED') throw new ConflictError('Este periodo ya se cerró: consulta el recibo.', 'PERIODO_CERRADO')
+  return recorrer(c, { staffId: input.staffId }, input.despuesDe, input.limit)
 }
 
 export async function excepcionesPeriodo(input: {

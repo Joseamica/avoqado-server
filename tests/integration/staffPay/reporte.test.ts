@@ -2,9 +2,30 @@ import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { reportePeriodo, detallePersona, excepcionesPeriodo, huerfanasPeriodo } from '@/services/dashboard/staffPay/reporte.service'
 import { fechaComoDbDate } from '@/services/dashboard/staffPay/periodos'
+import { agregarAjusteManual } from '@/services/dashboard/staffPay/ajustesManuales.service'
+import { cerrarPeriodo, previewCierre } from '@/services/dashboard/staffPay/cierre.service'
+import { reciboDePersona } from '@/services/dashboard/staffPay/recibos.service'
+import { borrarMundo, clase as claseF2, confirmadas as confirmadasF2, crearMundo, crearSede, Mundo, tablaMindform } from './_mundo'
 
 const mockSedesLegibles = jest.fn()
-jest.mock('@/services/dashboard/staffPay/acceso', () => ({ sedesLegibles: (...a: unknown[]) => mockSedesLegibles(...a) }))
+jest.mock('@/services/dashboard/staffPay/acceso', () => ({
+  ...jest.requireActual('@/services/dashboard/staffPay/acceso'),
+  sedesLegibles: (...a: unknown[]) => mockSedesLegibles(...a),
+  // Codex R3-Nuevo 2: el reporte ya no llama `sedesLegibles`; lee el alcance con `alcanceLegibleDelPeriodo`
+  // (sedes guardadas ∪ activas, filtradas por permiso). Para no reescribir los casos de la fase 1, `mockSedesLegibles`
+  // sigue diciendo QUÉ puede leer el usuario y, si `__sedes` no está puesto, también qué sedes tienen el módulo.
+  sedesConServicePay: jest.fn(async () => (global as any).__sedes ?? (await mockSedesLegibles())?.venueIds ?? []),
+  sedesLegiblesDe: jest.fn(async (_u: string, venueIds: string[]) => {
+    const permiso = await mockSedesLegibles()
+    if (!permiso) return { venueIds, parcial: false }
+    const l = venueIds.filter(v => permiso.venueIds.includes(v))
+    return { venueIds: l, parcial: permiso.parcial || l.length < new Set(venueIds).size }
+  }),
+  tienePermisoEn: jest.fn(async () => true),
+  // El cierre resuelve sus permisos ANTES de la transacción con `sedesConPermiso` (A8): sin esto llamaría al real.
+  sedesConPermiso: jest.fn(async (_u: string, venueIds: string[]) => venueIds),
+  assertPermisoEnSedes: jest.fn(async () => undefined),
+}))
 
 const key = `reporte-${process.pid}-${Date.now()}`
 let org: string, pn: string, bsf: string, ana: string, hc: string
@@ -136,6 +157,9 @@ describe('reporte — feature nueva', () => {
     mockSedesLegibles.mockResolvedValue({ venueIds: [pn, bsf], parcial: false })
     const p1 = await detallePersona({ userId: ana, venueId: pn, staffId: ana, fecha: FECHA, limit: 1 })
     expect(p1.items).toHaveLength(1)
+    // Los campos del ancla (A4) no salen en el desglose: `payAmountOverride` saldría como "500" junto a `monto` "500.00".
+    expect(p1.items[0]).not.toHaveProperty('payAmountOverride')
+    expect(p1.items[0]).not.toHaveProperty('periodoOrigen')
     const p2 = await detallePersona({ userId: ana, venueId: pn, staffId: ana, fecha: FECHA, despuesDe: p1.nextCursor!, limit: 1 })
     expect(p2.items).toHaveLength(1)
     expect(p2.items[0].venueId).not.toBe(p1.items[0].venueId)
@@ -199,5 +223,113 @@ describe('reporte — filtro de sede y «nada se trunca» (fix round 1, spec §7
     expect(r.personas.items).toHaveLength(1)
     const h = await huerfanasPeriodo({ userId: ana, venueId: pn, fecha: FECHA, offset: -5, limit: 10 })
     expect(h.items).toHaveLength(1)
+  })
+})
+
+describe('reporte de la fase 2: ajustes en el abierto, congelado en el cerrado', () => {
+  let w: Mundo
+  const AHORA = new Date('2026-09-02T12:00:00Z')
+  beforeAll(async () => {
+    w = await crearMundo('reporte-f2')
+    await tablaMindform(w)
+  })
+  afterAll(() => borrarMundo(w))
+
+  it('el abierto suma los ajustes guardados y muestra a quien sólo tiene un ajuste', async () => {
+    mockSedesLegibles.mockResolvedValue({ venueIds: [w.venueId], parcial: false })
+    ;(global as any).__sedes = [w.venueId]
+    await claseF2(w, { staffId: w.ana, inicioIso: '2026-08-04T14:00:00Z', reservas: confirmadasF2(8) })
+    await agregarAjusteManual({
+      userId: w.owner,
+      venueId: w.venueId,
+      sede: w.venueId,
+      staffId: w.carla,
+      amount: 150,
+      reason: 'Bono',
+      fecha: '2026-08-10',
+      clientKey: `${w.key}-b1`,
+    })
+    const r = await reportePeriodo({ userId: w.owner, venueId: w.venueId, fecha: '2026-08-15', offset: 0, limit: 50 })
+    expect(r.periodo).toMatchObject({ estado: 'OPEN', start: '2026-08-01' })
+    expect(r.tarjetas).toMatchObject({ total: '720.00', personas: 2 })
+    expect(r.personas.items.find(p => p.staffId === w.carla)).toMatchObject({ clases: 0, ajustes: '150.00', total: '150.00', venueIds: [] })
+    // Codex R2-R1-12: ordenadas por nombre y paginadas EN SQL; el total sale del COUNT(DISTINCT) aparte.
+    expect(r.personas.items.map(p => p.staffName)).toEqual(['Ana QA', 'Carla QA'])
+    const pag2 = await reportePeriodo({ userId: w.owner, venueId: w.venueId, fecha: '2026-08-15', offset: 1, limit: 1 })
+    expect(pag2.personas).toMatchObject({ total: 2, offset: 1, limit: 1 })
+    expect(pag2.personas.items.map(p => p.staffName)).toEqual(['Carla QA'])
+    expect(pag2.truncado).toBe(false)
+  })
+
+  it('el cerrado se lee de lo congelado aunque después cambien las reservas', async () => {
+    const p = await previewCierre({ userId: w.owner, venueId: w.venueId, fecha: '2026-08-15', ahora: AHORA })
+    await cerrarPeriodo({
+      userId: w.owner,
+      venueId: w.venueId,
+      fecha: '2026-08-15',
+      ahora: AHORA,
+      huellaEsperada: p.huella,
+      confirmarHuerfanas: true,
+    })
+    await prisma.reservation.updateMany({ where: { venueId: w.venueId }, data: { status: 'CANCELLED' } })
+    const r = await reportePeriodo({ userId: w.owner, venueId: w.venueId, fecha: '2026-08-15', offset: 0, limit: 50 })
+    expect(r.periodo.estado).toBe('CLOSED')
+    expect(r.tarjetas).toMatchObject({ total: '720.00', clases: 1, personas: 2, pagadas: 0, excepciones: 0 })
+    expect(r.personas.items.find(p => p.staffId === w.ana)).toMatchObject({ clases: 1, total: '570.00', pagadoEn: null })
+    // Codex R2-R1-12: también el cerrado se ordena por nombre y se pagina en SQL.
+    expect(r.personas.items.map(p => p.staffName)).toEqual(['Ana QA', 'Carla QA'])
+    const pag2 = await reportePeriodo({ userId: w.owner, venueId: w.venueId, fecha: '2026-08-15', offset: 1, limit: 1 })
+    expect(pag2.personas).toMatchObject({ total: 2, offset: 1, limit: 1 })
+    expect(pag2.personas.items.map(p => p.staffName)).toEqual(['Carla QA'])
+    // Codex R2-R1-21: el desglose EN VIVO de un periodo cerrado no devuelve una lista vacía: dice que se consulte el recibo.
+    await expect(
+      detallePersona({ userId: w.owner, venueId: w.venueId, staffId: w.ana, fecha: '2026-08-15', limit: 50 }),
+    ).rejects.toMatchObject({
+      code: 'PERIODO_CERRADO',
+      statusCode: 409,
+      message: 'Este periodo ya se cerró: consulta el recibo.',
+    })
+  })
+
+  it('una diferencia liquidada desde una sede que YA apagó el módulo sigue en el reporte y en el recibo del periodo abierto (Codex R3-Nuevo 2)', async () => {
+    const x = await crearMundo('reporte-f2-bsf')
+    try {
+      await tablaMindform(x)
+      const bsf = await crearSede(x.orgId, x.key, 'bsf')
+      ;(global as any).__sedes = [x.venueId] // BSF apagó el módulo; quien lee tiene permiso en las dos
+      mockSedesLegibles.mockResolvedValue({ venueIds: [x.venueId, bsf.venueId], parcial: false })
+      await claseF2(x, { staffId: x.ana, inicioIso: '2026-09-04T14:00:00Z', reservas: confirmadasF2(8) }) // PN $570 en vivo
+      // Lo que deja «Liquidar» (B2) con «sumar la sede»: BSF en el alcance del periodo abierto y su RECONCILE de +$40.
+      const sept = await prisma.servicePayPeriod.create({
+        data: {
+          organizationId: x.orgId,
+          periodStart: fechaComoDbDate('2026-09-01'),
+          periodEnd: fechaComoDbDate('2026-09-30'),
+          venueIds: [x.venueId, bsf.venueId].sort(),
+        },
+      })
+      await prisma.serviceEarning.create({
+        data: {
+          organizationId: x.orgId,
+          venueId: bsf.venueId,
+          periodId: sept.id,
+          staffId: x.ana,
+          concept: 'RECONCILE',
+          sourceType: 'CLASS_SESSION',
+          sourceId: 'clase-de-agosto-en-bsf',
+          amount: new Prisma.Decimal(40),
+          reason: 'Diferencia de una clase ya cerrada',
+          descriptor: { clase: 'Reformer', fecha: '2026-08-05' },
+        },
+      })
+      const r = await reportePeriodo({ userId: x.owner, venueId: x.venueId, fecha: '2026-09-15', offset: 0, limit: 50 })
+      expect(r).toMatchObject({ parcial: false, tarjetas: { total: '610.00' } })
+      expect(r.personas.items.find(p => p.staffId === x.ana)).toMatchObject({ ajustes: '40.00', total: '610.00' })
+      const recibo = await reciboDePersona({ userId: x.owner, venueId: x.venueId, staffId: x.ana, fecha: '2026-09-15', limit: 100 })
+      expect(recibo.total).toBe('610.00')
+    } finally {
+      ;(global as any).__sedes = undefined
+      await borrarMundo(x)
+    }
   })
 })
