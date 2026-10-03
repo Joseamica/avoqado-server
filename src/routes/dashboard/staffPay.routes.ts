@@ -5,12 +5,16 @@ import { validateRequest } from '../../middlewares/validation'
 import * as controller from '../../controllers/dashboard/staffPay.dashboard.controller'
 import { venueHasServicePayAccess } from '../../services/dashboard/staffPay/acceso'
 import {
+  archivarTablaSchema,
   asignarNivelSchema,
   crearNivelSchema,
+  crearTablaSchema,
   editarNivelSchema,
   fechaQuerySchema,
   levelParamsSchema,
+  publicarVersionSchema,
   staffParamsSchema,
+  tableParamsSchema,
   venueParamsSchema,
 } from '../../schemas/dashboard/staffPay.schema'
 
@@ -62,6 +66,38 @@ router.get(
   checkPermission('staffpay:read'),
   validateRequest(z.object({ params: staffParamsSchema })),
   controller.assignmentHistory,
+)
+
+// Tablas de pago: son de la SEDE (spec §5.3); la ruta ya exige el permiso en esta sede.
+router.get(
+  '/tables',
+  checkPermission('staffpay:read'),
+  validateRequest(z.object({ params: venueParamsSchema, query: fechaQuerySchema })),
+  controller.listTables,
+)
+router.post(
+  '/tables',
+  checkPermission('staffpay:manage'),
+  validateRequest(z.object({ params: venueParamsSchema, body: crearTablaSchema })),
+  controller.createTable,
+)
+router.post(
+  '/tables/:tableId/versions',
+  checkPermission('staffpay:manage'),
+  validateRequest(z.object({ params: tableParamsSchema, body: publicarVersionSchema })),
+  controller.publishVersion,
+)
+router.post(
+  '/tables/:tableId/archive',
+  checkPermission('staffpay:manage'),
+  validateRequest(z.object({ params: tableParamsSchema, body: archivarTablaSchema })),
+  controller.archiveTable,
+)
+router.get(
+  '/tables/:tableId/versions',
+  checkPermission('staffpay:read'),
+  validateRequest(z.object({ params: tableParamsSchema })),
+  controller.tableHistory,
 )
 
 export default router

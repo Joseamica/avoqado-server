@@ -3,6 +3,7 @@ import { BadRequestError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { venueHasServicePayAccess } from '../../services/dashboard/staffPay/acceso'
 import * as niveles from '../../services/dashboard/staffPay/niveles.service'
+import * as tablas from '../../services/dashboard/staffPay/tablas.service'
 import { hoyLocal } from '../../services/dashboard/staffPay/periodos'
 
 export function ctx(req: Request): { venueId: string; userId: string } {
@@ -105,6 +106,71 @@ export async function assignmentHistory(req: Request, res: Response, next: NextF
   try {
     const { venueId } = ctx(req)
     res.json(await niveles.historialDeNivel((await orgDeVenue(venueId)).organizationId, req.params.staffId))
+  } catch (e) {
+    next(e)
+  }
+}
+
+export async function listTables(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { venueId } = ctx(req)
+    const { tz } = await orgDeVenue(venueId)
+    res.json(await tablas.listarTablas(venueId, (req.query.fecha as string) || hoyLocal(tz)))
+  } catch (e) {
+    next(e)
+  }
+}
+
+export async function createTable(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { venueId, userId } = ctx(req)
+    const { name, productIds } = req.body
+    res
+      .status(201)
+      .json(
+        await tablas.crearTabla({ venueId, organizationId: (await orgDeVenue(venueId)).organizationId, name, productIds, actorId: userId }),
+      )
+  } catch (e) {
+    next(e)
+  }
+}
+
+export async function publishVersion(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { venueId, userId } = ctx(req)
+    const { effectiveFrom, countMode, maxCount, cells, simular } = req.body
+    res.json(
+      await tablas.publicarVersion({
+        venueId,
+        organizationId: (await orgDeVenue(venueId)).organizationId,
+        tableId: req.params.tableId,
+        effectiveFrom,
+        countMode,
+        maxCount,
+        // Sólo las tres llaves de cada celda: nada extra del body llega al createMany.
+        cells: (cells as tablas.CeldaInput[]).map(({ payLevelId, count, amount }) => ({ payLevelId, count, amount })),
+        actorId: userId,
+        soloSimular: !!simular,
+      }),
+    )
+  } catch (e) {
+    next(e)
+  }
+}
+
+export async function archiveTable(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { venueId, userId } = ctx(req)
+    res.json(await tablas.archivarTabla({ venueId, tableId: req.params.tableId, archivedFrom: req.body.archivedFrom, actorId: userId }))
+  } catch (e) {
+    next(e)
+  }
+}
+
+export async function tableHistory(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { venueId } = ctx(req)
+    res.json(await tablas.historialDeTabla(venueId, req.params.tableId))
   } catch (e) {
     next(e)
   }
