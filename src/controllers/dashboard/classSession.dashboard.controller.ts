@@ -82,7 +82,8 @@ export async function updateClassSession(req: Request, res: Response, next: Next
   try {
     const venueId = resolveVenueId(req)
     const { sessionId } = req.params
-    const session = await classSessionService.updateClassSession(venueId, sessionId, req.body)
+    const { userId } = (req as any).authContext
+    const session = await classSessionService.updateClassSession(venueId, sessionId, req.body, userId)
     res.json(session)
   } catch (error) {
     next(error)
