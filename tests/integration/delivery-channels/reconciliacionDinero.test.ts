@@ -1005,6 +1005,8 @@ describe('reconcileDeliveryOrderFromProvider (Tarea 13)', () => {
           fiscalEmisorId: emisor.id,
           flow: 'STAFF_B',
           orderId: order.id,
+          // D21: una heredada (sin protocoloIva) sólo puede existir terminada; este CFDI en DRAFT es de la ruta nueva.
+          protocoloIva: 1,
           receptorRfc: 'XAXX010101000',
           receptorNombre: 'PÚBLICO EN GENERAL',
           receptorRegimen: '616',

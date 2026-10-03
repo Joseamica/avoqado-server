@@ -5,6 +5,9 @@
  * (b) confirm:true sin version ⇒ pide la versión, no confirma;
  * (c) confirm:true completo ⇒ llama al servicio con versionVista/motivo, y audita;
  * (d) sin la feature CFDI ⇒ no llama a nada (ni siquiera la vista previa).
+ *
+ * B3b, Tarea 2: la vista previa trae la `huella` de la venta y confirmar la EXIGE. Con
+ * confirm:true sin huella no se escribe nada: sale una vista previa nueva con su huella.
  */
 import { registerCfdiTools } from '../../../src/mcp/tools/cfdi'
 import type { McpScope } from '../../../src/mcp/scope'
@@ -58,17 +61,26 @@ jest.mock('@/config/logger', () => ({
 }))
 
 const handlers = new Map<string, (a: Record<string, unknown>, e: unknown) => Promise<{ content: Array<{ text: string }> }>>()
+const descripciones = new Map<string, { descripcion: string; esquema: Record<string, unknown> }>()
 const scope = { staffId: 's1', activeOrg: 'o1', allowedVenueIds: ['v1'], perVenueAccess: new Map() } as McpScope
 const call = (n: string, args: Record<string, unknown>) => handlers.get(n)!(args, {})
 const parse = (r: { content: Array<{ text: string }> }) => JSON.parse(r.content[0].text)
 
 beforeAll(() => {
-  const reg = { tool: (...a: unknown[]) => handlers.set(a[0] as string, a[a.length - 1] as never) } as never
+  const reg = {
+    tool: (...a: unknown[]) => {
+      handlers.set(a[0] as string, a[a.length - 1] as never)
+      descripciones.set(a[0] as string, { descripcion: a[1] as string, esquema: a[2] as Record<string, unknown> })
+    },
+  } as never
   registerCfdiTools(reg, scope)
 })
 
 beforeEach(() => {
   jest.clearAllMocks()
+  // clearAllMocks no quita implementaciones: una prueba que deja un mockResolvedValue no puede filtrarse a la siguiente.
+  mockVistaPreviaContrato.mockReset()
+  mockConfirmarContratoIvaIncluido.mockReset()
   mockVenuesWithFeatureAccess.mockResolvedValue(new Set(['v1']))
   mockVenueFindUnique.mockResolvedValue({ timezone: 'America/Mexico_City' })
 })
@@ -86,7 +98,10 @@ const PREVIEW_CONFIRMABLE = {
   paymentStatus: 'PAID',
   paidAmountMxn: 150.5,
   confirmable: true,
+  // Opaca para el tool (Codex B3b r1 P2 #4: el servidor la emite como SHA-256 en hex); sólo se devuelve tal cual.
+  huella: '9f2c4e1ab0d37c55e8f1a6b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f6',
 }
+const HUELLA = PREVIEW_CONFIRMABLE.huella
 
 describe('confirm_order_price_contract — confirm-gated (IVA por producto, plan 2)', () => {
   it('(a) sin confirm ⇒ devuelve la vista previa, NO llama al servicio de confirmar, sin auditoría', async () => {
@@ -104,6 +119,9 @@ describe('confirm_order_price_contract — confirm-gated (IVA por producto, plan
     })
     expect(out.message).toMatch(/ORD-1/)
     expect(out.message).toMatch(/version: 3/)
+    // B3b: la huella viaja en la vista previa y el mensaje la pide de vuelta, tal cual.
+    expect(out.preview.huella).toBe(HUELLA)
+    expect(out.message).toContain(HUELLA)
     // F3: PAID ⇒ «pagada $X», nunca «cobrada» a secas.
     expect(out.message).toMatch(/pagada \$150\.50/)
     expect(out.message).not.toMatch(/\bcobrada\b/)
@@ -138,7 +156,9 @@ describe('confirm_order_price_contract — confirm-gated (IVA por producto, plan
   })
 
   it('(b) confirm:true sin version ⇒ pide la versión, no confirma', async () => {
-    const out = parse(await call('confirm_order_price_contract', { venueId: 'v1', orderId: 'o1', confirm: true, motivo: 'x' }))
+    const out = parse(
+      await call('confirm_order_price_contract', { venueId: 'v1', orderId: 'o1', confirm: true, huella: HUELLA, motivo: 'x' }),
+    )
 
     expect(out.ok).toBe(false)
     expect(out.error).toMatch(/version/)
@@ -147,7 +167,9 @@ describe('confirm_order_price_contract — confirm-gated (IVA por producto, plan
   })
 
   it('confirm:true sin motivo ⇒ pide el motivo, no confirma', async () => {
-    const out = parse(await call('confirm_order_price_contract', { venueId: 'v1', orderId: 'o1', confirm: true, version: 3 }))
+    const out = parse(
+      await call('confirm_order_price_contract', { venueId: 'v1', orderId: 'o1', confirm: true, version: 3, huella: HUELLA }),
+    )
 
     expect(out.ok).toBe(false)
     expect(out.error).toMatch(/motivo/)
@@ -164,6 +186,7 @@ describe('confirm_order_price_contract — confirm-gated (IVA por producto, plan
         orderId: 'o1',
         confirm: true,
         version: 3,
+        huella: HUELLA,
         motivo: 'El cliente lo confirmó por WhatsApp.',
       }),
     )
@@ -172,6 +195,7 @@ describe('confirm_order_price_contract — confirm-gated (IVA por producto, plan
       venueId: 'v1',
       orderId: 'o1',
       versionVista: 3,
+      huellaVista: HUELLA, // tal cual, sin interpretarla
       staffId: 's1',
       motivo: 'El cliente lo confirmó por WhatsApp.',
     })
@@ -195,7 +219,9 @@ describe('confirm_order_price_contract — confirm-gated (IVA por producto, plan
       message: 'La venta cambió desde que la revisaste. Vuelve a pedir la vista previa.',
     })
 
-    const out = parse(await call('confirm_order_price_contract', { venueId: 'v1', orderId: 'o1', confirm: true, version: 3, motivo: 'x' }))
+    const out = parse(
+      await call('confirm_order_price_contract', { venueId: 'v1', orderId: 'o1', confirm: true, version: 3, huella: HUELLA, motivo: 'x' }),
+    )
 
     expect(out.ok).toBe(false)
     expect(out.error).toMatch(/cambió/)
@@ -218,7 +244,9 @@ describe('confirm_order_price_contract — confirm-gated (IVA por producto, plan
   it('sin la feature CFDI y con confirm:true ⇒ tampoco confirma', async () => {
     mockVenuesWithFeatureAccess.mockResolvedValueOnce(new Set())
 
-    const out = parse(await call('confirm_order_price_contract', { venueId: 'v1', orderId: 'o1', confirm: true, version: 3, motivo: 'x' }))
+    const out = parse(
+      await call('confirm_order_price_contract', { venueId: 'v1', orderId: 'o1', confirm: true, version: 3, huella: HUELLA, motivo: 'x' }),
+    )
 
     expect(out.ok).toBe(false)
     expect(out.planRequired).toBe(true)
@@ -255,12 +283,51 @@ describe('confirm_order_price_contract — confirm-gated (IVA por producto, plan
   it('(F9) si el servicio de confirmar LANZA (no rechaza), el tool no truena: responde ok:false y loguea con logger.error', async () => {
     mockConfirmarContratoIvaIncluido.mockRejectedValueOnce(new Error('conexión perdida a media transacción'))
 
-    const out = parse(await call('confirm_order_price_contract', { venueId: 'v1', orderId: 'o1', confirm: true, version: 3, motivo: 'x' }))
+    const out = parse(
+      await call('confirm_order_price_contract', { venueId: 'v1', orderId: 'o1', confirm: true, version: 3, huella: HUELLA, motivo: 'x' }),
+    )
 
     expect(out.ok).toBe(false)
     expect(typeof out.error).toBe('string')
     expect(out.error.length).toBeGreaterThan(0)
     expect(mockLoggerError).toHaveBeenCalled()
     expect(mockAudit).not.toHaveBeenCalled()
+  })
+
+  it('🔴 (B3b) confirm:true con version y motivo pero SIN huella ⇒ NO escribe: vista previa nueva con su huella', async () => {
+    mockVistaPreviaContrato.mockResolvedValueOnce(PREVIEW_CONFIRMABLE)
+    // Si el tool escribiera, el servicio «confirmaría»: la prueba tiene que caer por la llamada, no por un undefined.
+    mockConfirmarContratoIvaIncluido.mockResolvedValue({ ok: true })
+
+    const out = parse(await call('confirm_order_price_contract', { venueId: 'v1', orderId: 'o1', confirm: true, version: 3, motivo: 'x' }))
+
+    expect(mockConfirmarContratoIvaIncluido).not.toHaveBeenCalled()
+    expect(mockAudit).not.toHaveBeenCalled()
+    expect(mockVistaPreviaContrato).toHaveBeenCalledWith('v1', 'o1')
+    expect(out.ok).toBe(false)
+    expect(out.requiresConfirmation).toBe(true)
+    expect(out.preview.huella).toBe(HUELLA)
+    expect(out.message).toContain(HUELLA)
+    expect(out.message).toMatch(/huella/)
+  })
+
+  it('(B3b) confirm:true sin huella y la venta ya NO es confirmable ⇒ el motivo, sin escribir', async () => {
+    mockVistaPreviaContrato.mockResolvedValueOnce({
+      ...PREVIEW_CONFIRMABLE,
+      confirmable: false,
+      motivo: 'Esta venta está cancelada; no se factura.',
+    })
+    mockConfirmarContratoIvaIncluido.mockResolvedValue({ ok: true })
+
+    const out = parse(await call('confirm_order_price_contract', { venueId: 'v1', orderId: 'o1', confirm: true, version: 3, motivo: 'x' }))
+
+    expect(out).toMatchObject({ ok: false, error: 'Esta venta está cancelada; no se factura.' })
+    expect(mockConfirmarContratoIvaIncluido).not.toHaveBeenCalled()
+  })
+
+  it('(B3b) la descripción del tool y su esquema piden la huella', () => {
+    const tool = descripciones.get('confirm_order_price_contract')!
+    expect(tool.descripcion).toMatch(/huella/)
+    expect(Object.keys(tool.esquema)).toContain('huella')
   })
 })

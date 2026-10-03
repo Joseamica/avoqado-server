@@ -74,12 +74,16 @@ export async function assertCatalogVenueAccess(
   } else {
     const roleOverride = await tx.venueRolePermission.findUnique({
       where: { venueId_role: { venueId: context.venueId, role: staffVenue.role } },
-      select: { permissions: true },
+      select: { permissions: true, deniedPermissions: true },
     })
     // WHY: A stored override remains authoritative when empty, while this
     // venue surface never inherits SUPERADMIN's platform-wide wildcard.
+    // WHY (deniedPermissions): what the venue REMOVED from the role must win here
+    // exactly as in checkPermission; the second operand applies those denials with
+    // the canonical resolver and can only narrow the stored-override result.
     allowed = roleOverride
-      ? evaluatePermissionList(roleOverride.permissions, permission)
+      ? evaluatePermissionList(roleOverride.permissions, permission) &&
+        hasPermission(staffVenue.role as StaffRole, roleOverride.permissions, permission, roleOverride.deniedPermissions)
       : staffVenue.role === 'SUPERADMIN'
         ? false
         : hasPermission(staffVenue.role as StaffRole, null, permission)

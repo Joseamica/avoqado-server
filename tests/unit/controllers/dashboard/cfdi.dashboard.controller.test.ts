@@ -9,6 +9,16 @@ jest.mock('../../../../src/services/fiscal/cfdi.service', () => ({
   cancelCfdi: (...a: any[]) => mockCancel(...a),
   getCfdiStatus: (...a: any[]) => mockGetStatus(...a),
   listCfdisForVenue: (...a: any[]) => mockListCfdis(...a),
+  // Literales distintos a propósito del texto real: una constante `undefined` no puede pasar las pruebas.
+  MOTIVO_CONTRATO_DESCONOCIDO: 'MOTIVO-CONTRATO-DESCONOCIDO',
+  MOTIVO_IVA_APARTE: 'MOTIVO-IVA-APARTE',
+}))
+
+const mockVistaPrevia = jest.fn()
+const mockConfirmar = jest.fn()
+jest.mock('../../../../src/services/fiscal/confirmarContratoDePrecio.service', () => ({
+  vistaPreviaContrato: (...a: any[]) => mockVistaPrevia(...a),
+  confirmarContratoIvaIncluido: (...a: any[]) => mockConfirmar(...a),
 }))
 
 // resolveRequestVenueId: real implementation (priority: URL param → x-venue-id header → token).
@@ -115,6 +125,7 @@ import {
   syncEmisorLogoController,
   downloadCfdiFileController,
   sendCfdiEmailController,
+  confirmOrderPriceContractController,
 } from '../../../../src/controllers/dashboard/cfdi.dashboard.controller'
 
 // ==========================================
@@ -364,6 +375,132 @@ describe('issueCfdiForOrderController', () => {
         flow: 'STAFF_B',
       }),
     )
+  })
+})
+
+// ──────────────────────────────────────────────────────────────────────────────
+// B3b, Tarea 1: el 422 de «Facturar» trae la vista previa del contrato de precio
+// ──────────────────────────────────────────────────────────────────────────────
+
+describe('issueCfdiForOrderController — vista previa del contrato de precio en el 422', () => {
+  const VISTA = { orderId: 'o1', version: 7, huella: 'h-7', confirmable: true, totalMxn: 6040, paymentStatus: 'PAID' }
+  let req: any
+  let res: any
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockVistaPrevia.mockReset()
+    mockLogAction.mockResolvedValue(undefined)
+    req = mockReq({ params: { orderId: 'o1', venueId: 'venue-1' } })
+    res = mockRes()
+  })
+
+  it('422 por contrato desconocido ⇒ conserva error/reasons/cfdiId y trae la vista previa', async () => {
+    mockIssue.mockResolvedValue({ status: 'VALIDATION_FAILED', reasons: ['otro', 'MOTIVO-CONTRATO-DESCONOCIDO'], cfdi: { id: 'cfdi-9' } })
+    mockVistaPrevia.mockResolvedValue(VISTA)
+    await issueCfdiForOrderController(req, res)
+    expect(res.status).toHaveBeenCalledWith(422)
+    expect(res.json).toHaveBeenCalledWith({
+      error: 'No se pudo facturar',
+      reasons: ['otro', 'MOTIVO-CONTRATO-DESCONOCIDO'],
+      cfdiId: 'cfdi-9',
+      priceContract: VISTA,
+    })
+    expect(mockVistaPrevia).toHaveBeenCalledWith('venue-1', 'o1')
+  })
+
+  it('vista previa NO confirmable ⇒ su motivo reemplaza al de «confírmalo», en el mismo lugar', async () => {
+    mockIssue.mockResolvedValue({ status: 'VALIDATION_FAILED', reasons: ['MOTIVO-CONTRATO-DESCONOCIDO', 'otro'], cfdi: { id: 'cfdi-9' } })
+    mockVistaPrevia.mockResolvedValue({ ...VISTA, confirmable: false, motivo: 'Esta venta separó el impuesto al cobrar…' })
+    await issueCfdiForOrderController(req, res)
+    expect(res.json.mock.calls[0][0].reasons).toEqual(['Esta venta separó el impuesto al cobrar…', 'otro'])
+    expect(res.json.mock.calls[0][0].priceContract.confirmable).toBe(false)
+  })
+
+  it('422 por otra causa ⇒ sin vista previa ni consulta', async () => {
+    mockIssue.mockResolvedValue({ status: 'VALIDATION_FAILED', reasons: ['otro motivo'], cfdi: { id: 'cfdi-9' } })
+    await issueCfdiForOrderController(req, res)
+    expect(res.json).toHaveBeenCalledWith({ error: 'No se pudo facturar', reasons: ['otro motivo'], cfdiId: 'cfdi-9' })
+    expect(mockVistaPrevia).not.toHaveBeenCalled()
+  })
+
+  it('si leer la vista previa falla, el 422 sale igual (sin priceContract) y no responde 500', async () => {
+    mockIssue.mockResolvedValue({ status: 'VALIDATION_FAILED', reasons: ['MOTIVO-CONTRATO-DESCONOCIDO'], cfdi: { id: 'cfdi-9' } })
+    mockVistaPrevia.mockRejectedValue(new Error('conexión perdida'))
+    await issueCfdiForOrderController(req, res)
+    expect(res.status).toHaveBeenCalledWith(422)
+    expect(res.json).toHaveBeenCalledWith({ error: 'No se pudo facturar', reasons: ['MOTIVO-CONTRATO-DESCONOCIDO'], cfdiId: 'cfdi-9' })
+    // Review Focus 6: el problema queda registrado, no se traga en silencio.
+    expect(jest.requireMock('../../../../src/config/logger').warn).toHaveBeenCalled()
+  })
+})
+
+// ──────────────────────────────────────────────────────────────────────────────
+// B3b, Tarea 2: confirmar el contrato de precio desde el dashboard
+// ──────────────────────────────────────────────────────────────────────────────
+
+describe('confirmOrderPriceContractController', () => {
+  const reqCon = (body: any, overrides: Partial<any> = {}): any => ({
+    params: { orderId: 'o1', venueId: 'venue-1' },
+    body,
+    authContext: { userId: 'staff-1', venueId: 'venue-1' },
+    ...overrides,
+  })
+  let res: any
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockConfirmar.mockReset()
+    res = mockRes()
+  })
+
+  it('confirma con la versión y la huella vistas y el autor de la sesión', async () => {
+    mockConfirmar.mockResolvedValue({ ok: true })
+    await confirmOrderPriceContractController(reqCon({ version: 7, huella: 'h-7' }), res)
+    expect(mockConfirmar).toHaveBeenCalledWith({
+      venueId: 'venue-1',
+      orderId: 'o1',
+      versionVista: 7,
+      huellaVista: 'h-7',
+      staffId: 'staff-1',
+      motivo: 'Confirmado desde el dashboard al facturar',
+    })
+    expect(res.status).toHaveBeenCalledWith(200)
+    expect(res.json).toHaveBeenCalledWith({ ok: true })
+  })
+
+  it.each([
+    ['NO_ENCONTRADA', 404],
+    ['NO_CONFIRMABLE', 409],
+    ['CAMBIO_DESDE_LA_VISTA', 409],
+  ])('%s ⇒ %i con el mensaje y el código del servicio', async (code, http) => {
+    mockConfirmar.mockResolvedValue({ ok: false, code, message: 'texto' })
+    await confirmOrderPriceContractController(reqCon({ version: 7, huella: 'h-7' }), res)
+    expect(res.status).toHaveBeenCalledWith(http)
+    expect(res.json).toHaveBeenCalledWith({ error: 'texto', code })
+  })
+
+  it('el negocio sale de la URL (el mismo que validó checkPermission), no del token', async () => {
+    mockConfirmar.mockResolvedValue({ ok: true })
+    await confirmOrderPriceContractController(
+      reqCon({ version: 7, huella: 'h-7' }, { authContext: { userId: 'staff-1', venueId: 'venue-del-token' } }),
+      res,
+    )
+    expect(mockConfirmar).toHaveBeenCalledWith(expect.objectContaining({ venueId: 'venue-1' }))
+  })
+
+  it('no escribe su propia bitácora: el servicio ya deja ORDER_PRICE_CONTRACT_CONFIRMED en su transacción', async () => {
+    mockConfirmar.mockResolvedValue({ ok: true })
+    await confirmOrderPriceContractController(reqCon({ version: 7, huella: 'h-7' }), res)
+    expect(mockLogAction).not.toHaveBeenCalled()
+  })
+
+  it('si el servicio lanza (p. ej. se cae la base), responde 500 en español y lo registra', async () => {
+    mockConfirmar.mockRejectedValue(new Error('conexión perdida'))
+    await confirmOrderPriceContractController(reqCon({ version: 7, huella: 'h-7' }), res)
+    expect(res.status).toHaveBeenCalledWith(500)
+    expect(res.json.mock.calls[0][0].error).toMatch(/No se pudo confirmar/)
+    expect(jest.requireMock('../../../../src/config/logger').error).toHaveBeenCalled()
   })
 })
 

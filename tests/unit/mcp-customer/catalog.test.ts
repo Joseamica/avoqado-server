@@ -227,6 +227,42 @@ it('ninguna tanda del directorio incluye herramientas prohibidas, y todas están
   // Las tandas que no son la base se publican por tipo de efecto: la de lecturas sólo puede leer.
   const lecturas = DIRECTORY_TIERS.find((t: { name: string }) => t.name === 'lecturas')
   for (const name of lecturas.tools) expect({ name, effect: TOOL_EFFECTS[name] }).toEqual({ name, effect: 'read' })
+  // La tanda de escrituras sólo lleva cambios internos: nada que avise a terceros, otorgue accesos o toque el dinero
+  // de una cuenta abierta. Esas van en una tanda posterior, con sus propios candados.
+  const escrituras = DIRECTORY_TIERS.find((t: { name: string }) => t.name === 'escrituras')
+  const conEfectosExternos = [
+    'reschedule_reservation',
+    'cancel_reservation',
+    'set_reservation_status',
+    'create_reservation',
+    'update_reservation',
+    'add_to_waitlist',
+    'configure_reservations',
+    'invite_staff',
+    'update_staff_member',
+    'approve_overtime',
+    'respond_to_review',
+    'set_birthday_automation',
+    'adjust_loyalty_points',
+    'redeem_loyalty_on_check',
+    'redeem_stamp_reward',
+    'configure_wallet_card',
+    'configure_referral',
+    'decide_customer_approval',
+    'apply_service_charge',
+    'comp_table_check',
+    'redeem_credit',
+    'configure_auto_reorder',
+    'configure_receipt_layout',
+    // Auditoría 3-oct: el alta puede mandar un correo de referidos; los comensales pueden activar un cargo automático.
+    'create_customer',
+    'set_table_check_details',
+  ]
+  expect(escrituras.tools.length).toBe(27)
+  for (const name of escrituras.tools) {
+    expect({ name, effect: TOOL_EFFECTS[name] }).toEqual({ name, effect: 'write' })
+    expect({ name, externo: conEfectosExternos.includes(name) }).toEqual({ name, externo: false })
+  }
 })
 
 it('el directorio publica descripciones propias, sin nombrar herramientas ni dar órdenes al asistente', () => {

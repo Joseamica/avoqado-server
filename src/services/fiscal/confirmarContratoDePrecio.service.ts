@@ -5,8 +5,14 @@
  * auditada en la MISMA transacción: si el registro de auditoría falla, la venta NO cambia.
  *
  * No emite ni toca ningún CFDI — sólo corrige el dato que la facturación (plan 3) va a leer.
+ *
+ * B3b (Tarea 2): la versión sola no basta. El motor de descuentos, el cierre del cobro y el editor de
+ * órdenes del dashboard cambian la venta SIN subir `version`. Por eso la vista previa trae una `huella`
+ * de todo lo que le enseña a la persona (y de lo que identifica la venta), y confirmar exige esa huella:
+ * se compara antes de escribir y se repite, campo por campo, en el WHERE del UPDATE.
  */
-import type { Prisma } from '@prisma/client'
+import { createHash } from 'crypto'
+import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { writeLegacyActivityAuditTx } from '@/services/activityAudit.service'
 
@@ -56,7 +62,49 @@ const SELECT = {
   status: true,
   paymentStatus: true,
   paidAmount: true,
+  discountAmount: true,
 } as const
+
+const MENSAJE_CAMBIO_DESDE_LA_VISTA = 'La venta cambió desde que la revisaste. Vuelve a pedir la vista previa.'
+
+/**
+ * Huella de la venta tal como la vio la persona: todo lo que la vista previa le enseña o que identifica la
+ * venta. Si cualquiera de esos datos cambia —aunque `version` no suba—, la huella cambia. Los importes van
+ * con `toFixed(2)` para que un mismo Decimal dé siempre la misma cadena. Es una cadena opaca: nadie la
+ * interpreta; sólo se compara.
+ *
+ * Codex (B3b, código r1, P2 #4): la composición lleva el folio COMPLETO, que no tiene límite de largo; como
+ * texto plano, un folio de 250 caracteres daba una huella de 311 que el esquema HTTP rechazaba. Por eso sale
+ * como SHA-256 en hex: 64 caracteres para cualquier venta (`LONGITUD_HUELLA_CONTRATO`). No es una firma: sólo
+ * detecta cambios; quién puede confirmar lo decide el permiso. Las igualdades del UPDATE usan los valores
+ * tipados de la orden, no la huella.
+ */
+export function huellaContrato(o: {
+  version: number
+  orderNumber: string
+  createdAt: Date
+  status: string
+  total: unknown
+  paidAmount: unknown
+  discountAmount: unknown
+  paymentStatus: string
+}): string {
+  const d = (x: unknown) => new Prisma.Decimal(String(x ?? 0)).toFixed(2)
+  const composicion = [
+    o.version,
+    o.orderNumber,
+    o.createdAt.toISOString(),
+    o.status,
+    d(o.total),
+    d(o.paidAmount),
+    d(o.discountAmount),
+    o.paymentStatus,
+  ].join('|')
+  return createHash('sha256').update(composicion, 'utf8').digest('hex')
+}
+
+/** Largo fijo de `huellaContrato` (SHA-256 en hex). El esquema de la ruta topa la huella con este valor. */
+export const LONGITUD_HUELLA_CONTRATO = 64
 
 export interface VistaPreviaContrato {
   orderId: string
@@ -75,6 +123,8 @@ export interface VistaPreviaContrato {
   paidAmountMxn: number
   confirmable: boolean
   motivo?: string
+  // B3b: lo que hay que devolver para confirmar (ver `huellaContrato`).
+  huella: string
 }
 
 export async function vistaPreviaContrato(venueId: string, orderId: string): Promise<VistaPreviaContrato | null> {
@@ -95,6 +145,7 @@ export async function vistaPreviaContrato(venueId: string, orderId: string): Pro
     paidAmountMxn: Number(o.paidAmount),
     confirmable: motivo === null,
     ...(motivo ? { motivo } : {}),
+    huella: huellaContrato(o),
   }
 }
 
@@ -102,6 +153,7 @@ export async function confirmarContratoIvaIncluido(p: {
   venueId: string
   orderId: string
   versionVista: number
+  huellaVista: string
   staffId: string | null
   motivo: string
 }): Promise<{ ok: true } | { ok: false; code: 'NO_ENCONTRADA' | 'NO_CONFIRMABLE' | 'CAMBIO_DESDE_LA_VISTA'; message: string }> {
@@ -110,12 +162,20 @@ export async function confirmarContratoIvaIncluido(p: {
     if (!o) return { ok: false as const, code: 'NO_ENCONTRADA' as const, message: 'No encontré esa venta en este negocio.' }
     const motivo = await motivoNoConfirmable(tx, o)
     if (motivo) return { ok: false as const, code: 'NO_CONFIRMABLE' as const, message: motivo }
-    // CAS: sólo si nadie tocó la venta desde la vista previa (version) Y sigue siendo elegible EN
-    // ESTE INSTANTE (F2 — TOCTOU). Entre la lectura de arriba y este UPDATE, otra transacción
-    // puede haber cambiado taxAmount/source/status SIN tocar `version` — es exactamente lo que
-    // hace el motor de descuentos viejo (F1). Repetir esos hechos en el WHERE hace que Postgres
-    // los vuelva a comprobar contra el dato YA comprometido en el instante del UPDATE, no contra
-    // el que leímos arriba (EvalPlanQual bajo READ COMMITTED). El vínculo con la cotización NO
+    // B3b: lo que la persona vio tiene que ser lo que hay. La huella cubre lo que `version` no ve
+    // (descuentos, cobros y ediciones que no la suben). Si no coincide, no se escribe nada.
+    if (huellaContrato(o) !== p.huellaVista) {
+      return { ok: false as const, code: 'CAMBIO_DESDE_LA_VISTA' as const, message: MENSAJE_CAMBIO_DESDE_LA_VISTA }
+    }
+    // CAS: sólo si nadie tocó la venta desde la vista previa (version y huella) Y sigue siendo
+    // elegible EN ESTE INSTANTE (F2 — TOCTOU). Entre la lectura de arriba y este UPDATE, otra
+    // transacción puede haber cambiado taxAmount/source/status —o cualquier dato de la huella—
+    // SIN tocar `version`: es exactamente lo que hacen el motor de descuentos viejo (F1), el
+    // cierre del cobro y el editor de órdenes del dashboard. Repetir esos hechos en el WHERE hace
+    // que Postgres los vuelva a comprobar contra el dato YA comprometido en el instante del
+    // UPDATE, no contra el que leímos arriba (EvalPlanQual bajo READ COMMITTED). Las igualdades
+    // de la huella usan los valores TIPADOS de `o` (no se interpreta la cadena): `o` ya pasó la
+    // comparación de arriba, así que es lo que la persona vio. El vínculo con la cotización NO
     // puede cambiar tras convertirse (una orden no se "desconvierte"), así que ese sigue siendo
     // sólo un chequeo previo — no hace falta repetirlo en el WHERE.
     const r = await tx.order.updateMany({
@@ -126,16 +186,19 @@ export async function confirmarContratoIvaIncluido(p: {
         contratoDePrecio: 'DESCONOCIDO',
         taxAmount: 0,
         source: { not: 'POS' },
-        status: { notIn: ['CANCELLED', 'DELETED'] },
+        // La igualdad ya excluye CANCELLED/DELETED: `motivoNoConfirmable` rechazó esos estados arriba.
+        status: o.status,
+        orderNumber: o.orderNumber,
+        createdAt: o.createdAt,
+        total: o.total,
+        paidAmount: o.paidAmount,
+        discountAmount: o.discountAmount,
+        paymentStatus: o.paymentStatus,
       },
       data: { contratoDePrecio: 'IVA_INCLUIDO', version: { increment: 1 } },
     })
     if (r.count === 0) {
-      return {
-        ok: false as const,
-        code: 'CAMBIO_DESDE_LA_VISTA' as const,
-        message: 'La venta cambió desde que la revisaste. Vuelve a pedir la vista previa.',
-      }
+      return { ok: false as const, code: 'CAMBIO_DESDE_LA_VISTA' as const, message: MENSAJE_CAMBIO_DESDE_LA_VISTA }
     }
     // Dentro de la MISMA transacción: si el log no se puede escribir (p. ej. un staffId que
     // viola la FK), la excepción revierte también el UPDATE de arriba — nunca queda un contrato

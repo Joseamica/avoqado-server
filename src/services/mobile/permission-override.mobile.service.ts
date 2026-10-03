@@ -67,6 +67,11 @@ export class OverrideInsufficientError extends Error {
  * 🔴 El Json de `StaffVenue.permissions` NO participa: hoy `checkPermission`
  * tampoco lo mira, así que tomarlo en cuenta aceptaría PINs para acciones que
  * el middleware seguiría rechazando.
+ *
+ * 🔴 Lo que el negocio le QUITÓ al rol (`deniedPermissions`) también cuenta, igual
+ * que en `checkPermission`. Sin eso (Codex, B3b código r1, P1 #2) un ADMIN al que
+ * el dueño le retiró `cfdi:configure` recibía 403 sin PIN, pero tecleaba SU PROPIO
+ * PIN, obtenía un token de ese permiso y pasaba el middleware presentándolo.
  */
 async function staffVenueCan(params: {
   venueId: string
@@ -82,11 +87,18 @@ async function staffVenueCan(params: {
 
   const venueRolePermission = await prisma.venueRolePermission.findUnique({
     where: { venueId_role: { venueId, role } },
-    select: { permissions: true },
+    select: { permissions: true, deniedPermissions: true },
   })
 
   const customPermissions = venueRolePermission ? (venueRolePermission.permissions as string[]) : null
-  return hasPermission(role, customPermissions, requiredPermission)
+  const deniedPermissions = venueRolePermission ? ((venueRolePermission.deniedPermissions as string[]) ?? null) : null
+  // 🔴 Las DOS lecturas, con AND (Codex, B3b código r2, N1): aplicar exclusiones re-resuelve dependencias —excluir
+  // `scale:use` abre `scale:*` y `scale:configure` agrega `tpv-settings:*`—, así que la lectura con exclusiones sola
+  // podía HABILITAR un token que sin ellas se rechazaba. Quitar un permiso sólo puede quitar: el PIN exige las dos.
+  return (
+    hasPermission(role, customPermissions, requiredPermission) &&
+    hasPermission(role, customPermissions, requiredPermission, deniedPermissions)
+  )
 }
 
 export async function createPermissionOverride(params: {

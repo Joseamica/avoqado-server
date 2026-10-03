@@ -101,6 +101,7 @@ import * as tpvMessageController from '../controllers/dashboard/tpv-message.dash
 import { preserveContext } from '@/observability/preserveContext'
 import {
   issueCfdiForOrderController,
+  confirmOrderPriceContractController,
   listCfdisController,
   getCfdiStatusController,
   cancelCfdiController,
@@ -317,6 +318,7 @@ import {
 import { createTerminalOrderSchema } from '../schemas/dashboard/terminalOrder.schema'
 import {
   issueCfdiSchema,
+  confirmPriceContractSchema,
   listCfdisSchema,
   cancelCfdiSchema,
   sendCfdiEmailSchema,
@@ -3648,6 +3650,19 @@ router.post(
   checkFeatureAccess('CFDI'),
   checkPermission('cfdi:issue'),
   issueCfdiForOrderController,
+)
+
+// ---- IVA por producto (B3b): confirmar que una venta VIEJA se cobró con el IVA incluido ----
+// La pide el diálogo de «Facturar» cuando el 422 trae `priceContract`. Mismo permiso que el MCP
+// `confirm_order_price_contract` (`cfdi:configure`: OWNER/ADMIN de fábrica, o quien el dueño lo conceda).
+// Validar el cuerpo antes que el plan y el permiso, como la de facturar.
+router.post(
+  '/venues/:venueId/orders/:orderId/price-contract/confirm',
+  authenticateTokenMiddleware,
+  validateRequest(confirmPriceContractSchema),
+  checkFeatureAccess('CFDI'),
+  checkPermission('cfdi:configure'),
+  confirmOrderPriceContractController,
 )
 
 // ---- CFDI list (paginated) — MUST be registered BEFORE /:cfdiId so bare /cfdi is matched first ----

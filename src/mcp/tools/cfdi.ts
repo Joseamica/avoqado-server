@@ -319,18 +319,26 @@ export function registerCfdiTools(server: McpServer, scope: McpScope) {
   //
   // Sólo corrige el DATO que la facturación va a leer: no emite, cancela ni toca ningún CFDI. Dos
   // pasos, igual que la nota de crédito de arriba, porque otra persona puede tocar la venta entre
-  // la vista previa y la confirmación — el candado es la versión que la persona vio.
+  // la vista previa y la confirmación — el candado es la versión Y la huella que la persona vio
+  // (B3b: hay escritores que cambian la venta sin subir la versión). La huella es OBLIGATORIA: si
+  // fuera opcional, esta puerta conservaría el hueco que la huella cierra en el dashboard.
   server.tool(
     'confirm_order_price_contract',
-    'Confirma que una venta VIEJA — de antes de que este negocio empezara a marcar el IVA por producto — se cobró con el IVA YA incluido en el precio (como se cobra normalmente en México). Sólo aplica a ventas cuyo tratamiento de IVA se desconoce; una vez confirmada, esa venta se puede facturar con el IVA de cada producto. NO emite, cancela ni modifica ninguna factura — sólo corrige el dato. Sin confirm, sólo devuelve la vista previa.',
+    'Confirma que una venta VIEJA — de antes de que este negocio empezara a marcar el IVA por producto — se cobró con el IVA YA incluido en el precio (como se cobra normalmente en México). Sólo aplica a ventas cuyo tratamiento de IVA se desconoce; una vez confirmada, esa venta se puede facturar con el IVA de cada producto. NO emite, cancela ni modifica ninguna factura — sólo corrige el dato. Sin confirm, sólo devuelve la vista previa con su version y su huella. Para ejecutar, vuelve a llamar con confirm:true, la version, la huella tal cual y un motivo; sin la huella no se escribe nada (devuelve una vista previa nueva), y si la venta cambió desde la vista previa tampoco.',
     {
       venueId: z.string().describe('El local de la venta (debe estar en tu alcance)'),
       orderId: z.string().describe('Id de la venta a confirmar'),
       confirm: z.boolean().optional().describe('true para ejecutar; sin él sólo devuelve la vista previa'),
       version: z.number().int().optional().describe('La versión que viste en la vista previa (obligatoria con confirm:true)'),
+      huella: z
+        .string()
+        .optional()
+        .describe(
+          'La huella que te devolvió la vista previa, tal cual (obligatoria con confirm:true; sin ella sólo devuelve la vista previa)',
+        ),
       motivo: z.string().optional().describe('Por qué se sabe que esta venta cobró el IVA incluido (obligatorio con confirm:true)'),
     },
-    async ({ venueId, orderId, confirm, version, motivo }) => {
+    async ({ venueId, orderId, confirm, version, huella, motivo }) => {
       guard.venueFilter(venueId)
       // Revisión final (F4): corregir el contrato de precio de una venta VIEJA es una decisión de
       // configuración fiscal del negocio (no un timbrado del día a día) — el spec la reserva al
@@ -348,7 +356,9 @@ export function registerCfdiTools(server: McpServer, scope: McpScope) {
         })
       }
 
-      if (!confirm) {
+      // B3b: sin huella no se escribe nada — ni con confirm:true. Sale una vista previa nueva (con su
+      // versión y su huella) y la instrucción de volver a llamar con ellas.
+      if (!confirm || !huella) {
         const preview = await vistaPreviaContrato(venueId, orderId)
         if (!preview) return text({ ok: false, error: 'No encontré esa venta en este negocio.' })
         if (!preview.confirmable) return text({ ok: false, error: preview.motivo })
@@ -373,14 +383,14 @@ export function registerCfdiTools(server: McpServer, scope: McpScope) {
           message:
             `Esto marcará la venta #${preview.orderNumber} (${montoTexto}, ${fechaLocal}) con el IVA YA incluido en el precio. ` +
             'Con eso podrá facturarse con el IVA de cada producto. No emite ni cancela ninguna factura. ' +
-            `Para confirmar, llama otra vez con confirm: true, version: ${preview.version} y un motivo.`,
+            `Para confirmar, llama otra vez con confirm: true, version: ${preview.version}, huella: "${preview.huella}" y un motivo.`,
         })
       }
 
       if (version === undefined) {
         return text({
           ok: false,
-          error: 'Falta version: pide la vista previa primero (sin confirm) y usa el número que te devuelva.',
+          error: 'Falta version: pide la vista previa primero (sin confirm) y usa la version y la huella que te devuelva.',
         })
       }
       if (!motivo || !motivo.trim()) {
@@ -392,7 +402,14 @@ export function registerCfdiTools(server: McpServer, scope: McpScope) {
       // `emit_refund_credit_note` arriba.
       let result: Awaited<ReturnType<typeof confirmarContratoIvaIncluido>>
       try {
-        result = await confirmarContratoIvaIncluido({ venueId, orderId, versionVista: version, staffId: scope.staffId, motivo })
+        result = await confirmarContratoIvaIncluido({
+          venueId,
+          orderId,
+          versionVista: version,
+          huellaVista: huella,
+          staffId: scope.staffId,
+          motivo,
+        })
       } catch (err) {
         logger.error('[mcp] confirm_order_price_contract: fallo inesperado al confirmar el contrato', {
           venueId,
