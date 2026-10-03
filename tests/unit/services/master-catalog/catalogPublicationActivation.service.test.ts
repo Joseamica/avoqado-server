@@ -4,6 +4,7 @@ import {
   evaluateCatalogProductActivationAuthority,
   projectCatalogProductActivation,
 } from '@/services/master-catalog/catalogPublicationActivation.service'
+import { CATALOG_RETAIL_MANAGED_FIELD_MASK_V1, CATALOG_RETAIL_MANAGED_FIELD_MASK_V2 } from '@/types/master-catalog'
 
 const context = {
   organizationId: 'org-1',
@@ -73,6 +74,43 @@ describe('catalogPublicationActivation.service', () => {
         approvedOverrides: [{ field: 'name', localValue: 'Local approved', status: 'APPROVED' }],
       } as never),
     ).toBe(true)
+  })
+
+  it('D15: una vinculación guardada con la máscara V1 (con IVA) sigue teniendo autoridad aunque el negocio cambió el IVA', () => {
+    const { hashCatalogManagedFieldsV1 } = jest.requireActual('@/services/master-catalog/catalogHash.service')
+    // La instantánea del CREATE anterior a D15: trae taxRate/objetoImp. El producto hoy está al 0 %, pero el IVA ya no se proyecta.
+    const snapshot: Record<string, string> = {
+      cost: '12.50',
+      description: 'Descripción',
+      imageUrl: 'https://example.test/item.png',
+      name: 'Corporate',
+      objetoImp: '02',
+      satProductKey: '50192100',
+      satUnitKey: 'H87',
+      taxRate: '0.1600',
+      type: 'REGULAR',
+      unit: 'PIECE',
+    }
+    const mask = [...CATALOG_RETAIL_MANAGED_FIELD_MASK_V1]
+    const hash = hashCatalogManagedFieldsV1({ hashVersion: 1, fieldMask: mask, values: snapshot }).hash
+    const fields = CATALOG_RETAIL_MANAGED_FIELD_MASK_V2.map(field => ({
+      field,
+      before: snapshot[field],
+      proposed: snapshot[field],
+      changed: false,
+      diverged: false,
+    }))
+    const authority = {
+      managedHashVersion: 1,
+      managedFieldMask: mask,
+      lastPublishedManagedSnapshot: snapshot,
+      lastPublishedManagedHash: hash,
+      projection: { fieldMask: [...CATALOG_RETAIL_MANAGED_FIELD_MASK_V2], fields },
+      approvedOverrides: [],
+    }
+
+    expect(evaluateCatalogProductActivationAuthority(authority as never)).toBe(true)
+    expect(evaluateCatalogProductActivationAuthority({ ...authority, managedFieldMask: [...mask].reverse() } as never)).toBe(false)
   })
 
   it('stages activation through dual idempotent authority with an exact operation-only line', async () => {

@@ -13,6 +13,7 @@ import prisma from '../../utils/prismaClient'
 import { writeCatalogAudit } from './catalogAudit.service'
 import { acquireCatalogGovernanceVenueFence } from './catalogGovernanceFence.service'
 import { canonicalJsonV1, hashCanonicalJsonV1, hashCatalogManagedFieldsV1 } from './catalogHash.service'
+import { persistedMaskMatchesCurrent } from './catalogManagedMask.service'
 import { enqueueCatalogPublicationOutboxTx } from './catalogPublicationOutbox.service'
 import { createCatalogPublicationStagingService } from './catalogPublicationStaging.service'
 import { loadCatalogPublicationTargetsTx } from './catalogPublicationTargetLoader.service'
@@ -63,7 +64,8 @@ export function evaluateCatalogProductActivationAuthority(input: {
     typeof input.lastPublishedManagedSnapshot !== 'object' ||
     input.lastPublishedManagedSnapshot === null ||
     Array.isArray(input.lastPublishedManagedSnapshot) ||
-    canonicalJsonV1(input.managedFieldMask) !== canonicalJsonV1(input.projection.fieldMask)
+    // D15: la máscara guardada vale si es la vigente o la V1 de la que salió; el hash se verifica abajo con la GUARDADA.
+    !persistedMaskMatchesCurrent(input.managedFieldMask, input.projection.fieldMask)
   )
     return false
   try {

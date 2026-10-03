@@ -1,6 +1,9 @@
 import * as XLSX from 'xlsx'
 import { CATALOG_EXPORT_HYDRATED_ROW_CAP_V1, createCatalogExportService } from '@/services/master-catalog/catalogExport.service'
 import { createCatalogExportErrorsService } from '@/services/master-catalog/catalogExportErrors.service'
+import { validateCatalogImportMetadata } from '@/services/master-catalog/catalogImportMapping.service'
+import { CATALOG_IVA_HISTORIC_NOTE } from '@/services/master-catalog/catalogManagedMask.service'
+import { parseMasterCatalogXlsxBuffer } from '@/workers/masterCatalogXlsx.worker'
 
 const generatedAt = new Date('2026-08-09T12:34:56.000Z')
 const context = {
@@ -47,6 +50,7 @@ describe('catalog export template and durable errors', () => {
       ['documentType', 'catalog-master-import'],
       ['filters', '{}'],
       ['generatedAt', generatedAt.toISOString()],
+      ['ivaNote', CATALOG_IVA_HISTORIC_NOTE],
       ['organizationId', 'org-pits'],
       ['profileVersion', '2,5'],
       ['schemaVersion', '1'],
@@ -84,6 +88,16 @@ describe('catalog export template and durable errors', () => {
         take: CATALOG_EXPORT_HYDRATED_ROW_CAP_V1 + 1,
       }),
     )
+  })
+
+  it('ida y vuelta: la plantilla que baja el dashboard (con su fila ivaNote) pasa el lector y la Metadata del importador', async () => {
+    const tx = { catalogValidationProfile: { findMany: jest.fn().mockResolvedValue([]) } }
+    const prisma = { $transaction: jest.fn(async (callback: (client: typeof tx) => unknown) => callback(tx)) }
+    const file = await createCatalogExportService({ prisma: prisma as never, now: () => generatedAt }).catalogImportTemplate(context)
+
+    const workbook = parseMasterCatalogXlsxBuffer(file.buffer)
+    expect(workbook.sheets.Metadata.rows.map(row => row.values.key?.value)).toContain('ivaNote')
+    await expect(validateCatalogImportMetadata(workbook, context.organizationId, async () => undefined)).resolves.toEqual([])
   })
 
   it('exports distinct durable findings at one coordinate with snapshot-only profile versions', async () => {

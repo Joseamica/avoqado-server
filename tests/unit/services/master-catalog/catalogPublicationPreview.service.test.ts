@@ -210,6 +210,34 @@ describe('catalogPublicationPreview.service', () => {
     expect(h.dependencies.loadTargetsTx).not.toHaveBeenCalled()
   })
 
+  it.each(['taxRate', 'objetoImp'])(
+    'D15: una decisión sobre %s se rechaza con «El IVA se configura en cada negocio», antes de la transacción',
+    async field => {
+      const h = harness()
+
+      await expect(
+        h.service.preview(context, {
+          operation: 'CATALOG_FIELDS_PUBLISH',
+          idempotencyKey: `iva-${field}`,
+          targets: [
+            {
+              catalogItemId: 'item-1',
+              venueId: 'venue-1',
+              productId: 'product-1',
+              decisions: [
+                { field: 'description', decision: 'PUBLISH_CORPORATE' },
+                { field: 'name', decision: 'PUBLISH_CORPORATE' },
+                { field, decision: 'PUBLISH_CORPORATE' },
+              ],
+            },
+          ],
+        } as never),
+      ).rejects.toMatchObject({ statusCode: 422, code: 'CATALOG_IVA_NOT_MANAGED', message: 'El IVA se configura en cada negocio' })
+      expect(h.prisma.$transaction).not.toHaveBeenCalled()
+      expect(h.dependencies.loadTargetsTx).not.toHaveBeenCalled()
+    },
+  )
+
   it.each([
     ['null root', null],
     ['array root', []],

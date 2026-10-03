@@ -276,4 +276,9 @@ describe('catalogExport workbook v1', () => {
       }),
     ).rejects.toMatchObject({ statusCode: 422, code: 'CATALOG_EXPORT_INVALID' })
   })
+
+  it('D15: escribe la nota de IVA histórico como una llave más de Metadata cuando se pide', async () => {
+    const workbook = await createCatalogWorkbookWriterV1()({ metadata: { ...metadata, ivaNote: 'Nota de prueba' }, sheets: [] })
+    expect(readRows(workbook, 'Metadata')).toContainEqual(['ivaNote', 'Nota de prueba'])
+  })
 })

@@ -3,6 +3,7 @@ import {
   createCatalogPublicationReversionPreviewService,
   projectCatalogPublicationReversion,
 } from '@/services/master-catalog/catalogPublicationReversion.service'
+import { CATALOG_RETAIL_MANAGED_FIELD_MASK_V1 } from '@/types/master-catalog'
 
 function source(overrides: Record<string, unknown> = {}) {
   return {
@@ -161,6 +162,55 @@ describe('catalogPublicationReversion.service', () => {
         currentValues: { description: 'Editada después', name: 'Nombre corp' },
       } as never),
     ).toThrow(expect.objectContaining({ statusCode: 409, code: 'CATALOG_REVERSION_CONFLICT' }))
+  })
+
+  it('D15: una línea histórica con máscara V1 se revierte SIN el IVA, aunque el producto haya cambiado de IVA después', () => {
+    const projection = projectCatalogPublicationReversion({
+      operation: 'CATALOG_FIELDS_REVERSION',
+      source: source({
+        fieldMask: ['description', 'name', 'objetoImp', 'taxRate'],
+        decisions: [
+          { field: 'description', before: 'Vieja', proposed: 'Corporativa', after: 'Corporativa' },
+          { field: 'name', before: 'Nombre viejo', proposed: 'Nombre corp', after: 'Nombre corp' },
+          { field: 'objetoImp', before: '02', proposed: '02', after: '02' },
+          { field: 'taxRate', before: '0.0800', proposed: '0.1600', after: '0.1600' },
+        ],
+      }),
+      currentLineId: 'current-line-2',
+      // El negocio pasó el producto a 0 % después de la publicación: antes de D15 esto era «El Product cambió…» (409).
+      currentValues: { description: 'Corporativa', name: 'Nombre corp', objetoImp: '02', taxRate: '0.0000' },
+    } as never)
+
+    expect(projection.fieldMask).toEqual(['description', 'name'])
+    expect(projection.decisions.map(decision => decision.field)).toEqual(['description', 'name'])
+    expect(projection.before).toEqual({ description: 'Corporativa', name: 'Nombre corp' })
+    expect(projection.after).toEqual({ description: 'Vieja', name: 'Nombre viejo' })
+  })
+
+  it('D15: una línea V1 completa cuyo ÚNICO cambio fue el IVA no se revierte: «No hay cambios del catálogo que revertir»', () => {
+    const igual = (field: string, value: string) => ({ field, before: value, proposed: value, after: value })
+    const decisions = [
+      igual('cost', '12.50'),
+      igual('description', 'Descripción'),
+      igual('imageUrl', 'https://example.test/item.png'),
+      igual('name', 'Nombre'),
+      igual('objetoImp', '02'),
+      igual('satProductKey', '50192100'),
+      igual('satUnitKey', 'H87'),
+      { field: 'taxRate', before: '0.0800', proposed: '0.1600', after: '0.1600' },
+      igual('type', 'REGULAR'),
+      igual('unit', 'PIECE'),
+    ]
+    const currentValues = Object.fromEntries(decisions.map(decision => [decision.field, decision.after]))
+
+    expect(() =>
+      projectCatalogPublicationReversion({
+        operation: 'CATALOG_FIELDS_REVERSION',
+        source: source({ fieldMask: [...CATALOG_RETAIL_MANAGED_FIELD_MASK_V1], decisions }),
+        currentLineId: 'current-line-2',
+        currentValues: { ...currentValues, taxRate: '0.0000' },
+      } as never),
+    ).toThrow(expect.objectContaining({ statusCode: 409, code: 'CATALOG_REVERSION_NOTHING_TO_REVERT' }))
   })
 
   it('persists inverse decisions, audit and outbox in the caller transaction', async () => {
