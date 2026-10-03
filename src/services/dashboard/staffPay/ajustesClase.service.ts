@@ -3,6 +3,10 @@ import prisma from '../../../utils/prismaClient'
 import { BadRequestError, NotFoundError } from '../../../errors/AppError'
 import { withSerializableRetry } from '../../../utils/serializableRetry'
 import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
+import { venueDayKey } from '../../../utils/venueDateKeys'
+import { exigirPermisoEnSedes, sedesConPermiso } from './acceso'
+import { dbDateComoFecha } from './periodos'
+import { bloquearPeriodo, lockClase, lockPeriodosDeOrganizacion, periodoQueContieneFecha } from './periodosGuardados'
 import { valorarClases } from './valoracion'
 
 export interface AjusteDeClase {
@@ -11,6 +15,16 @@ export interface AjusteDeClase {
   payExcluded: boolean
   reason: string | null
   at: Date | null
+}
+
+/** Una línea ya contabilizada de la clase (spec §6.6): su devengo, el periodo donde quedó y si su recibo se pagó. */
+export interface LineaContabilizada {
+  concepto: 'SERVICE' | 'RECONCILE'
+  staffId: string
+  staffName: string
+  monto: string
+  periodo: { start: string; end: string }
+  pagadoEn: string | null
 }
 
 export interface PagoDeClase {
@@ -26,6 +40,9 @@ export interface PagoDeClase {
   payLevelName: string | null
   ajuste: AjusteDeClase | null
   anclada: boolean
+  /** El periodo donde la clase se contabilizó por primera vez (su ancla), o null si aún no. */
+  periodoOrigen: { id: string; start: string; end: string; estado: 'OPEN' | 'CLOSED' } | null
+  lineas: LineaContabilizada[]
 }
 
 export interface GuardarAjusteInput {
@@ -70,6 +87,41 @@ function validarForma(input: GuardarAjusteInput): string {
   return reason
 }
 
+async function lineasDeClase(
+  db: Prisma.TransactionClient | typeof prisma,
+  organizationId: string,
+  classSessionId: string,
+): Promise<LineaContabilizada[]> {
+  const es = await db.serviceEarning.findMany({
+    where: { organizationId, sourceType: 'CLASS_SESSION', sourceId: classSessionId },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    take: 100,
+    include: { period: { select: { periodStart: true, periodEnd: true } } },
+  })
+  if (!es.length) return []
+  const staffIds = [...new Set(es.map(e => e.staffId))]
+  const staff = await db.staff.findMany({
+    where: { id: { in: staffIds } },
+    select: { id: true, firstName: true, lastName: true },
+    take: staffIds.length,
+  })
+  const recibos = await db.staffPayStatement.findMany({
+    where: { period: { organizationId }, OR: es.map(e => ({ periodId: e.periodId, staffId: e.staffId })) },
+    select: { periodId: true, staffId: true, paidAt: true },
+    take: es.length,
+  })
+  const nombre = new Map(staff.map(s => [s.id, `${s.firstName} ${s.lastName}`.trim()]))
+  const pagado = new Map(recibos.map(r => [`${r.periodId}:${r.staffId}`, r.paidAt]))
+  return es.map(e => ({
+    concepto: e.concept as 'SERVICE' | 'RECONCILE',
+    staffId: e.staffId,
+    staffName: nombre.get(e.staffId) ?? '—',
+    monto: e.amount.toFixed(2),
+    periodo: { start: dbDateComoFecha(e.period.periodStart), end: dbDateComoFecha(e.period.periodEnd) },
+    pagadoEn: pagado.get(`${e.periodId}:${e.staffId}`)?.toISOString() ?? null,
+  }))
+}
+
 /**
  * Tarjeta de pago de UNA clase (spec §6.1). La clase se busca por id Y sede: nunca se lee la de otra sede.
  * Usa la misma valoración que el reporte; los estados NO_TERMINADA y CANCELADA son sólo de la tarjeta.
@@ -101,6 +153,16 @@ export async function pagoDeClase(
         at: ps.overrideAt,
       }
     : null
+  const origen = ps?.originPeriodId
+    ? await db.servicePayPeriod.findFirst({
+        where: { id: ps.originPeriodId, organizationId: cs.venue.organizationId },
+        select: { id: true, periodStart: true, periodEnd: true, status: true },
+      })
+    : null
+  const periodoOrigen = origen
+    ? { id: origen.id, start: dbDateComoFecha(origen.periodStart), end: dbDateComoFecha(origen.periodEnd), estado: origen.status }
+    : null
+  const lineas = origen ? await lineasDeClase(db, cs.venue.organizationId, cs.id) : []
   const base = {
     classSessionId: cs.id,
     motivo: null,
@@ -113,11 +175,12 @@ export async function pagoDeClase(
     payLevelName: null,
     ajuste,
     anclada: !!ps?.originPeriodId,
+    periodoOrigen,
+    lineas,
   }
   if (cs.status === 'CANCELLED') return { ...base, estado: 'CANCELADA' }
   const ahora = new Date()
   if (cs.endsAt > ahora) return { ...base, estado: 'NO_TERMINADA' }
-  // Fase 2: una clase anclada se lee de su devengo congelado y de su valoración con el ancla.
   const [v] = await valorarClases(
     db,
     {
@@ -128,6 +191,8 @@ export async function pagoDeClase(
       hasta: new Date(cs.startsAt.getTime() + 1),
       ahora,
       claseIds: [cs.id],
+      // Una clase anclada se valora con su ancla (spec §5.4): «lo que corresponde hoy» con la versión y fecha congeladas.
+      ...(origen ? { modo: 'periodo' as const, periodId: origen.id } : {}),
     },
     { limite: 1 },
   )
@@ -148,19 +213,46 @@ export async function pagoDeClase(
 
 /**
  * Corregir conteo / ajustar monto / excluir una clase (spec §5.4), con el protocolo único de escritura (spec §5):
- * transacción serializable con reintento, candado de la fila de la clase (filtrada por sede) y ActivityLog DENTRO
- * de la transacción con el antes y el después. Mandar los tres en null/false quita el ajuste y la clase vuelve al
- * cálculo. En la fase 1 no hay periodos ni anclas, así que el candado de la clase es todo el protocolo.
+ * transacción serializable con reintento → candado del PERIODO (el de origen si la clase está anclada; si no, el que
+ * contiene su fecha, o el de periodos de la organización si aún no existe) → candado de la CLASE (el mismo de la
+ * liquidación) y su fila → releer el ancla DENTRO. Si está anclada, corregirla pide `staffpay:close` en su sede, y lo
+ * congelado nunca se toca: sólo cambia «lo que corresponde hoy». ActivityLog DENTRO con el antes y el después. Mandar
+ * los tres en null/false quita el ajuste y la clase vuelve al cálculo.
  */
 export async function guardarAjusteDeClase(input: GuardarAjusteInput): Promise<PagoDeClase> {
+  // El permiso con el cliente GLOBAL, ANTES de la transacción (como el cierre y marcar pagado, A8): dentro sólo se compara.
+  const permitidas = new Set(await sedesConPermiso(input.actorId, [input.venueId], 'staffpay:close'))
   return withSerializableRetry(async tx => {
     // Primero la sede: a otra sede se le contesta «no encontrada» antes de revisar nada más.
-    const cs = await tx.$queryRaw<Array<{ id: string }>>(Prisma.sql`
-      SELECT id FROM "ClassSession" WHERE id = ${input.classSessionId} AND "venueId" = ${input.venueId} FOR UPDATE`)
-    if (cs.length === 0) throw new NotFoundError('Clase no encontrada')
+    const info = await tx.classSession.findFirst({
+      where: { id: input.classSessionId, venueId: input.venueId },
+      select: {
+        startsAt: true,
+        venue: { select: { organizationId: true, timezone: true } },
+        payState: { select: { originPeriodId: true } },
+      },
+    })
+    if (!info) throw new NotFoundError('Clase no encontrada')
     const reason = validarForma(input)
+    // 1) Periodo primero (spec §5): el de origen si está anclada; si no, el que contiene su fecha, si ya existe.
+    const fechaLocal = venueDayKey(info.startsAt, info.venue.timezone || 'America/Mexico_City')
+    const periodo = info.payState?.originPeriodId ?? (await periodoQueContieneFecha(tx, info.venue.organizationId, fechaLocal))?.id
+    // Si todavía no existe, el candado de periodos de la organización: un cierre que lo está creando lo tiene hasta su
+    // commit, así que el ajuste lo espera en vez de cruzarse con él (Codex R1-6: sin esto, ajuste y cierre podían
+    // bloquearse mutuamente sobre ClassSession / ClassSessionPayState, y 40P01 no se reintenta).
+    if (periodo) await bloquearPeriodo(tx, periodo)
+    else await lockPeriodosDeOrganizacion(tx, info.venue.organizationId)
+    // 2) Luego la clase: el candado compartido con la liquidación, y su fila.
+    await lockClase(tx, input.classSessionId)
+    await tx.$queryRaw(
+      Prisma.sql`SELECT id FROM "ClassSession" WHERE id = ${input.classSessionId} AND "venueId" = ${input.venueId} FOR UPDATE`,
+    )
+    // 3) Releer el ancla DENTRO: si un cierre ganó la carrera, el reintento la ve y exige staffpay:close.
     const antes = await tx.classSessionPayState.findUnique({ where: { classSessionId: input.classSessionId } })
-    // Fase 2 (protocolo único, spec §5): si `antes?.originPeriodId` existe, exigir staffpay:close aquí dentro.
+    if (antes?.originPeriodId) {
+      exigirPermisoEnSedes(permitidas, [input.venueId], 'Esta clase ya se contabilizó: corregirla necesita el permiso de cerrar periodos')
+    }
+    // Sólo los campos del ajuste: el ancla (originPeriodId, valuationDate, valuationVersionId) nunca se toca aquí.
     const datos = {
       payCountOverride: input.payCountOverride,
       payAmountOverride: input.payAmountOverride === null ? null : new Prisma.Decimal(input.payAmountOverride),
