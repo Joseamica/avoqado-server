@@ -9,6 +9,7 @@
  */
 
 import { z } from 'zod'
+import { LONGITUD_HUELLA_CONTRATO } from '@/services/fiscal/confirmarContratoDePrecio.service'
 
 // ==========================================
 // BODY SCHEMAS (raw, for type inference)
@@ -34,6 +35,32 @@ const issueCfdiBodyShape = z.object({
 /** Schema passed to validateRequest() for POST /venues/:venueId/orders/:orderId/cfdi */
 export const issueCfdiSchema = z.object({
   body: issueCfdiBodyShape,
+})
+
+/**
+ * Schema passed to validateRequest() for POST /venues/:venueId/orders/:orderId/price-contract/confirm (B3b).
+ * La versión y la huella son las que trajo la vista previa del 422 de «Facturar»; el servicio las compara.
+ */
+export const confirmPriceContractSchema = z.object({
+  params: z.object({
+    venueId: z.string().min(1, 'El negocio es requerido'),
+    orderId: z.string().min(1, 'La venta es requerida'),
+  }),
+  body: z.object({
+    version: z
+      .number({ required_error: 'La versión es requerida', invalid_type_error: 'La versión debe ser un número' })
+      .int('La versión debe ser un entero')
+      .nonnegative('La versión no puede ser negativa'),
+    huella: z
+      .string({
+        required_error: 'La huella de la vista previa es requerida',
+        invalid_type_error: 'La huella de la vista previa no es válida',
+      })
+      .min(1, 'La huella de la vista previa es requerida')
+      // La huella es un SHA-256 en hex (`huellaContrato`): ninguna huella del servidor pasa de ese largo.
+      // Codex B3b r1 P2 #4: con el folio en texto plano, un folio largo daba una huella que este tope rechazaba.
+      .max(LONGITUD_HUELLA_CONTRATO, 'La huella de la vista previa no es válida'),
+  }),
 })
 
 // ==========================================

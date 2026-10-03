@@ -476,6 +476,12 @@ export async function issueCfdiForOrder(
 }
 
 const PROCESANDO = 'La factura de esta venta se está procesando; intenta de nuevo en unos minutos.'
+/** Venta MIXTA sin contrato: el dueño la desbloquea confirmando que el precio ya incluía IVA (§4.6). */
+export const MOTIVO_CONTRATO_DESCONOCIDO =
+  'Esta venta tiene productos con IVA distinto de 16 % y no consta que se cobró con IVA incluido; confírmalo antes de facturar.'
+/** Venta MIXTA que separó el impuesto al cobrar: no se confirma (§4.2), se dice por qué. */
+export const MOTIVO_IVA_APARTE =
+  'Esta venta cobró el IVA aparte y tiene productos con IVA distinto de 16 %; no se puede facturar desde Avoqado. Si necesitas factura, escríbenos a soporte.'
 type IssueParams = Parameters<typeof issueCfdiForOrder>[0]
 
 /** Reservar y recapturar son las únicas rutas que leen la venta viva. El PAC sólo recibe la foto. */
@@ -1567,11 +1573,10 @@ export async function loadOrderForCfdiFromDb(
     // contrato/liquidación no aportan nada nuevo (nunca se timbraría de todos modos) y sólo
     // distraerían de la causa real, que es corregir el producto.
     if (!hayBloqueados(tratamientos)) {
-      if (order.contratoDePrecio !== 'IVA_INCLUIDO') {
-        unsupportedReasons.push(
-          'Esta venta tiene productos con IVA distinto de 16 % y no consta que se cobró con IVA incluido; confírmalo antes de facturar.',
-        )
-      }
+      // B3b: «IVA aparte» NO se confirma (§4.2), así que su motivo no puede pedir confirmarlo; sólo la venta
+      // sin contrato (DESCONOCIDO) lleva el de «confírmalo», que el controlador enriquece con la vista previa.
+      if (order.contratoDePrecio === 'IVA_APARTE') unsupportedReasons.push(MOTIVO_IVA_APARTE)
+      else if (order.contratoDePrecio !== 'IVA_INCLUIDO') unsupportedReasons.push(MOTIVO_CONTRATO_DESCONOCIDO)
       if (order.paymentStatus !== 'PAID') {
         unsupportedReasons.push(
           'Esta venta tiene productos con IVA distinto de 16 % y no está pagada por completo; se factura cuando se liquide.',
