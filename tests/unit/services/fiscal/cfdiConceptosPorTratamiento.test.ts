@@ -26,6 +26,8 @@ import {
   loadOrderForCfdiFromDb,
   repartirDescuentoDeOrden,
   RenglonParaCfdi,
+  MOTIVO_CONTRATO_DESCONOCIDO,
+  MOTIVO_IVA_APARTE,
 } from '../../../../src/services/fiscal/cfdi.service'
 import { assembleSaleInput } from '../../../../src/services/fiscal/assembleSaleInput'
 import { buildCreateInvoiceParams } from '../../../../src/services/fiscal/cfdiPayloadBuilder'
@@ -488,6 +490,23 @@ const conTratamiento = (t: string, nombre: string, precio: number, over: Record<
   })
 
 describe('rama mixta (algún renglón ≠ IVA_16)', () => {
+  it('caso Mavericks: café al 0 % + contrato confirmado ⇒ un concepto de $6,040 con $2,958 de descuento, al 0 %', async () => {
+    const grano = conTratamiento('IVA_0', 'GRN TURISMO 2 KG', 6040)
+    const r = await resultadoDe(orden(3082, { contratoDePrecio: 'IVA_INCLUIDO', discountAmount: D(2958), items: [grano] }))
+    expect(r.motivos).toEqual([])
+    expect(r.payload.items).toHaveLength(1)
+    expect(r.status).toBe('STAMPED')
+    expect(r.payload.items[0]).toMatchObject({
+      objetoImp: '02',
+      taxes: TASA_0,
+      taxIncluded: true,
+      unitPriceCents: 604000,
+      discountCents: 295800,
+    })
+    // el cargador guarda la base DESPUÉS del descuento (cfdi.service.ts:1604): a tasa 0, subtotal = total = $3,082
+    expect(r.guardado).toEqual({ subtotalCents: 308200, taxCents: 0, totalCents: 308200 })
+  })
+
   it('IVA_0 + contrato IVA_INCLUIDO + PAID: sin motivos; concepto 02 con traslado Tasa 0, IVA incluido', async () => {
     const r = await resultadoDe(orden(150, { items: [cafe(), conTratamiento('IVA_0', 'Café en grano', 50)] }))
     expect(r.motivos).toEqual([])
@@ -549,15 +568,23 @@ describe('rama mixta (algún renglón ≠ IVA_16)', () => {
     expect(r.guardado).toEqual({ subtotalCents: 10000, taxCents: 0, totalCents: 10000 })
   })
 
-  it('mixta con contrato DESCONOCIDO ⇒ motivo del contrato, no se timbra', async () => {
+  it('mixta con contrato DESCONOCIDO ⇒ el motivo pide confirmarlo, no se timbra', async () => {
     const r = await resultadoDe(orden(150, { contratoDePrecio: 'DESCONOCIDO', items: [cafe(), conTratamiento('IVA_0', 'Grano', 50)] }))
     expect(r.status).toBe('VALIDATION_FAILED')
-    expect(r.motivos).toEqual([MOTIVO_CONTRATO])
+    expect(r.motivos).toEqual([MOTIVO_CONTRATO_DESCONOCIDO])
+    expect(MOTIVO_CONTRATO_DESCONOCIDO).toBe(MOTIVO_CONTRATO) // regresión: el texto de hoy no cambia
   })
 
-  it('mixta con contrato IVA_APARTE ⇒ motivo del contrato', async () => {
+  // B3b, Tarea 1: una venta que separó el IVA al cobrar no se confirma (§4.2). Antes compartía el texto de
+  // «confírmalo» con la DESCONOCIDA y mandaba al dueño a una confirmación que el servidor iba a rechazar.
+  it('mixta con contrato IVA_APARTE ⇒ motivo propio, que NO ofrece confirmar', async () => {
     const r = await resultadoDe(orden(150, { contratoDePrecio: 'IVA_APARTE', items: [cafe(), conTratamiento('EXENTO', 'Libro', 50)] }))
-    expect(r.motivos).toEqual([MOTIVO_CONTRATO])
+    expect(r.status).toBe('VALIDATION_FAILED')
+    expect(r.motivos).toEqual([MOTIVO_IVA_APARTE])
+    expect(MOTIVO_IVA_APARTE).not.toMatch(/confírmalo/i)
+    // Dice qué hacer (a quién acudir), no sólo que no se puede.
+    expect(MOTIVO_IVA_APARTE).toMatch(/soporte/i)
+    expect(MOTIVO_IVA_APARTE).toMatch(/IVA aparte/)
   })
 
   it('mixta con paymentStatus PENDING ⇒ motivo de liquidación, no se timbra', async () => {

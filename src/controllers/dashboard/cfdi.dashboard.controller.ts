@@ -15,7 +15,14 @@ import { Request, Response } from 'express'
 import { env } from '@/config/env'
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
-import { issueCfdiForOrder, cancelCfdi, getCfdiStatus, listCfdisForVenue } from '@/services/fiscal/cfdi.service'
+import {
+  issueCfdiForOrder,
+  cancelCfdi,
+  getCfdiStatus,
+  listCfdisForVenue,
+  MOTIVO_CONTRATO_DESCONOCIDO,
+} from '@/services/fiscal/cfdi.service'
+import { vistaPreviaContrato, confirmarContratoIvaIncluido, VistaPreviaContrato } from '@/services/fiscal/confirmarContratoDePrecio.service'
 import { replaceCfdi } from '@/services/fiscal/cfdiReplacement.service'
 import { emitRefundCreditNote, getRefundCreditNoteStatus } from '@/services/fiscal/cfdiCreditNote.service'
 import { searchSatCatalog } from '@/services/fiscal/satCatalogLookup.service'
@@ -61,10 +68,30 @@ export async function issueCfdiForOrderController(req: Request, res: Response): 
     })
 
     if (result.status === 'VALIDATION_FAILED') {
+      // B3b: si el único camino es confirmar el contrato de precio (venta MIXTA sin contrato), el 422 trae la
+      // vista previa para que el diálogo ofrezca confirmarlo sin otra ida y vuelta. Es un enriquecimiento
+      // OPCIONAL: si leerla falla, el 422 sale igual que siempre (nunca un 500 por esto). Sólo se AGREGA
+      // `priceContract`: `error`, `reasons` y `cfdiId` no cambian de nombre ni de forma.
+      let reasons = result.reasons
+      let priceContract: VistaPreviaContrato | null = null
+      if (reasons?.includes(MOTIVO_CONTRATO_DESCONOCIDO)) {
+        try {
+          priceContract = await vistaPreviaContrato(venueId, orderId)
+        } catch (error) {
+          logger.warn('[cfdi] no se pudo leer la vista previa del contrato de precio; el 422 sale sin ella', { venueId, orderId, error })
+        }
+        // Una venta vieja que no se puede confirmar (separó el impuesto, ajuste del motor de descuentos viejo,
+        // cotización, cancelada…) no debe decir «confírmalo»: su motivo toma ese lugar, los demás quedan igual.
+        if (priceContract && !priceContract.confirmable && priceContract.motivo) {
+          const motivo = priceContract.motivo
+          reasons = reasons.map(m => (m === MOTIVO_CONTRATO_DESCONOCIDO ? motivo : m))
+        }
+      }
       res.status(422).json({
         error: 'No se pudo facturar',
-        reasons: result.reasons,
+        reasons,
         cfdiId: result.cfdi?.id,
+        ...(priceContract ? { priceContract } : {}),
       })
       return
     }
@@ -171,6 +198,50 @@ export async function issueCfdiForOrderController(req: Request, res: Response): 
 
     logger.error(aviso)
     res.status(500).json({ error: 'Error interno al facturar' })
+  }
+}
+
+/**
+ * POST /api/v1/dashboard/venues/:venueId/orders/:orderId/price-contract/confirm
+ *
+ * B3b: confirmar que una venta VIEJA (contrato desconocido) se cobró con el IVA incluido, desde el diálogo de
+ * «Facturar». Llama al MISMO servicio que el MCP `confirm_order_price_contract`, ligado a la versión y la huella
+ * que la persona vio en la vista previa del 422. Gated by checkFeatureAccess('CFDI') + checkPermission('cfdi:configure').
+ * El cuerpo ya lo validó validateRequest(confirmPriceContractSchema). La bitácora (ORDER_PRICE_CONTRACT_CONFIRMED) la
+ * escribe el servicio dentro de su transacción: aquí no se agrega otro registro.
+ */
+export async function confirmOrderPriceContractController(req: Request, res: Response): Promise<void> {
+  const { orderId } = req.params
+  const { version, huella } = req.body
+  // Mismo negocio que validó checkPermission (URL → x-venue-id → token).
+  const authContext = (req as any).authContext ?? {}
+  const venueId = resolveRequestVenueId(req, authContext)
+  if (!venueId) {
+    res.status(400).json({ error: 'Venue ID requerido' })
+    return
+  }
+
+  try {
+    const result = await confirmarContratoIvaIncluido({
+      venueId,
+      orderId,
+      versionVista: version,
+      huellaVista: huella,
+      staffId: authContext.userId ?? null,
+      motivo: 'Confirmado desde el dashboard al facturar',
+    })
+    if (result.ok) {
+      res.status(200).json({ ok: true })
+      return
+    }
+    res.status(result.code === 'NO_ENCONTRADA' ? 404 : 409).json({ error: result.message, code: result.code })
+  } catch (err: unknown) {
+    logger.error(`[cfdi.controller] confirmar el contrato de precio falló para la venta ${orderId}`, {
+      venueId,
+      orderId,
+      error: err instanceof Error ? err.message : String(err),
+    })
+    res.status(500).json({ error: 'No se pudo confirmar el contrato de precio de esta venta. Intenta de nuevo.' })
   }
 }
 
