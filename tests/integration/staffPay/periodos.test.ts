@@ -11,7 +11,7 @@ import {
 import { asignarNivel } from '@/services/dashboard/staffPay/niveles.service'
 import { publicarVersion, archivarTabla } from '@/services/dashboard/staffPay/tablas.service'
 import { borrarMundo, crearMundo, crearSede, Mundo, periodoCerrado, tablaMindform, TZ } from './_mundo'
-import { dbDateComoFecha, hoyLocal } from '@/services/dashboard/staffPay/periodos'
+import { dbDateComoFecha, fechaComoDbDate, hoyLocal } from '@/services/dashboard/staffPay/periodos'
 
 jest.mock('@/services/dashboard/staffPay/acceso', () => ({
   ...jest.requireActual('@/services/dashboard/staffPay/acceso'),
@@ -116,6 +116,19 @@ describe('periodos guardados (spec §5.7)', () => {
     await expect(archivarTabla({ venueId: m.venueId, tableId: t.tableId, archivedFrom: '2026-02-20', actorId: m.owner })).rejects.toThrow(
       /ya está cerrado/,
     )
+  })
+
+  it('mover el archivo de una tabla archivada DENTRO de un periodo cerrado tampoco se acepta (spec §5.3: lo congelado no se cambia)', async () => {
+    // Sede aparte: así la tabla «archivada desde el 5-feb» no se empalma con la de PN y el único motivo de rechazo es el cierre.
+    const sede = await crearSede(m.orgId, m.key, 'arch')
+    const t = await tablaMindform(m, sede.venueId)
+    const archivada = fechaComoDbDate('2026-02-05')
+    await prisma.servicePayTable.update({ where: { id: t.tableId }, data: { archivedFrom: archivada } })
+    await expect(
+      archivarTabla({ venueId: sede.venueId, tableId: t.tableId, archivedFrom: '2026-04-01', actorId: m.owner }),
+    ).rejects.toThrow(/ya está cerrado/)
+    const despues = await prisma.servicePayTable.findUniqueOrThrow({ where: { id: t.tableId }, select: { archivedFrom: true } })
+    expect(despues.archivedFrom).toEqual(archivada)
   })
 
   it('la periodicidad no se puede cambiar cuando ya hay periodos guardados (nunca traslapes)', async () => {

@@ -271,6 +271,8 @@ export async function archivarTabla(input: { venueId: string; tableId: string; a
     if (!t) throw new NotFoundError('Tabla no encontrada')
     const sede = await tx.venue.findUniqueOrThrow({ where: { id: input.venueId }, select: { organizationId: true } })
     await assertFechaNoCerrada(tx, sede.organizationId, input.archivedFrom)
+    // Mover un archivo que ya cae dentro de un periodo cerrado cambia lo congelado (spec §5.3): también se revisa la fecha vieja.
+    if (t.archivedFrom) await assertFechaNoCerrada(tx, sede.organizationId, dbDateComoFecha(t.archivedFrom))
     // Mover el archivo a una fecha posterior alarga la vigencia: puede traslaparse con su reemplazo.
     await assertSinEmpate(tx, {
       id: t.id,

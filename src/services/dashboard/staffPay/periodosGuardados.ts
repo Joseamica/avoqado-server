@@ -20,7 +20,11 @@ export async function periodoQueContieneFecha(db: Db, organizationId: string, fe
   return db.servicePayPeriod.findFirst({ where: { organizationId, periodStart: { lte: d }, periodEnd: { gte: d } } })
 }
 
-/** El periodo que contiene `fecha`; si no existe, se deriva de la periodicidad y se crea bajo el candado. */
+/**
+ * El periodo que contiene `fecha`; si no existe, se deriva de la periodicidad y se crea. Con SERIALIZABLE la foto se toma en la
+ * primera sentencia, antes de esperar el candado: lo que hace correcta la carrera es SSI + el índice único
+ * (organizationId, periodStart) + el reintento de `withSerializableRetry`, no el candado.
+ */
 export async function asegurarPeriodo(tx: Tx, organizationId: string, fecha: string): Promise<ServicePayPeriod> {
   const existente = await periodoQueContieneFecha(tx, organizationId, fecha)
   if (existente) return existente
