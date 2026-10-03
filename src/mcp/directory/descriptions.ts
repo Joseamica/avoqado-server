@@ -256,4 +256,60 @@ export const DIRECTORY_DESCRIPTIONS: Record<string, string> = {
     'Charge requests sent from the point of sale to payment terminals in accessible branches: terminals currently busy, recent charges and older charges still unresolved, with outcome (charged, not charged with its evidence, or unresolved), confirming source, attempts and amounts in pesos. Requires tpv:read. Paginated; read-only.',
   upsell_status:
     "Checkout suggestions of a branch: attributed revenue, ticket lift measured against a control group, where suggestions are enabled, active rules, proposals awaiting the owner's decision and the reasons a rule would not reach the point of sale. Requires the Pro plan.",
+
+  // Tanda «escrituras»
+  set_customer_tags:
+    'Adds and/or removes free-text tags on one customer of a branch (for example VIP, an allergy or a birthday month), merged with the existing tags. The customer is found by name, email or phone; several matches are returned for disambiguation. Applies immediately and does not change balances or loyalty points. Requires customers:update.',
+  add_customer_note:
+    'Appends a free-text note to one customer of a branch, keeping the existing notes. The customer is found by name, email or phone; several matches are returned for disambiguation. Applies immediately and does not change balances or loyalty points. Requires customers:update.',
+  create_discount:
+    'Creates a manual discount in a branch, which staff choose per order at checkout: name, type (percentage, fixed amount or comp), value, optional minimum purchase and maximum discount. Automatic discounts are not created from this connector. Applies immediately and does not change any open order. Requires discounts:create and the Pro plan (promotions).',
+  create_coupon:
+    'Creates a coupon code for an existing discount of a branch, found by name, with optional total and per-customer use limits, minimum purchase and validity dates. Two steps: without confirm it returns a preview and a confirmation token; the coupon is created only on a second call with confirm:true and that token. Requires coupons:create and the Pro plan (promotions).',
+  create_promotion:
+    'Creates a promotion in a branch (combo, bundle or 2x1) as a draft that stays off until it is published separately. Two steps: without confirm it validates and returns what would be created plus a confirmation token; the draft is created only on a second call with confirm:true and that token. Requires discounts:create and the Pro plan (promotions).',
+  create_inter_venue_transfer:
+    "Creates an ingredient transfer between two branches of the organization with the origin and destination ingredient ids and quantities: a request from the destination (pull), which waits for the origin's approval, or a shipment from the origin (push), which is created already approved. Applies immediately; stock moves only when the transfer is dispatched. Requires inventory-transfers:request and the Premium plan (inventory tracking).",
+  approve_inter_venue_transfer:
+    'Approves, from the origin branch, a pending transfer request made by another branch. Applies immediately; stock moves only when the transfer is dispatched. Requires inventory-transfers:approve and the Premium plan (inventory tracking).',
+  reject_inter_venue_transfer:
+    'Rejects, from the origin branch, a pending transfer request made by another branch, with a required reason. Applies immediately. Requires inventory-transfers:approve.',
+  cancel_inter_venue_transfer:
+    'Cancels a transfer between branches before it is dispatched, with a reason; a transfer already dispatched is not reverted. Applies immediately. Requires inventory-transfers:read plus inventory-transfers:approve at the origin branch or inventory-transfers:request at the destination.',
+  dispatch_inter_venue_transfer:
+    'Dispatches a transfer from the origin branch: deducts the quantities from origin stock in batch order (FIFO) and freezes cost and expiry per batch. Two steps: without confirm it returns the requested items and a confirmation token (stock availability is checked when confirming); stock moves only on a second call with confirm:true and that token. Uses an idempotency key so a repeated confirmation does not dispatch twice. Requires inventory-transfers:dispatch.',
+  receive_inter_venue_transfer:
+    "Receives a dispatched transfer at the destination branch, fully or partially: adds the quantities to destination stock, creates or updates batches keeping cost and expiry, and updates the destination ingredient's cost. Two steps: without confirm it returns a preview and a confirmation token; stock moves only on a second call with confirm:true and that token. Uses an idempotency key. Requires inventory-transfers:receive.",
+  resolve_inter_venue_transfer_variance:
+    'Classifies and closes the differences between dispatched and received quantities of a transfer, item by item; differences are not converted into waste automatically. Two steps: without confirm it returns a preview and a confirmation token; the resolution applies only on a second call with confirm:true and that token. Uses an idempotency key. Requires inventory-transfers:receive.',
+  cancel_stock_count:
+    'Cancels a physical inventory count that is still in progress; stock is not changed (only completed counts adjust stock), and completed counts cannot be cancelled. Two steps: without confirm it returns a preview and a confirmation token; the count is cancelled only on a second call with confirm:true and that token. Cannot be undone. Requires inventory:update and the Premium plan (inventory tracking).',
+  set_raw_material_presentations:
+    'Replaces the full set of purchase and dispatch presentations of one ingredient (for example 1 box = 360 pieces), each with an explicit conversion factor to the base unit; future purchase valuation uses these factors. Two steps: without confirm it returns the current and new presentations and a confirmation token; the change applies only on a second call with confirm:true and that token. Requires inventory:update and the Premium plan (inventory tracking).',
+  quarantine_batch:
+    'Holds an ingredient batch for a quality problem, removing its remaining quantity from available stock and from consumption order (recorded as a spoilage movement), or releases it back unless it has expired; a reason is required. Two steps: without confirm it returns a preview and a confirmation token; the change applies only on a second call with confirm:true and that token. Requires inventory:adjust and the Premium plan (inventory tracking).',
+  log_waste:
+    "Records waste of a product or ingredient in a branch (thrown away, spoiled, broken, dropped or expired) with quantity, unit and reason code (OTHER requires a note). Stock is reduced as far as it goes and any remainder is recorded as without stock, so stock does not go below zero; the branch's own low-stock alerts to its managers may follow. The item is identified by name or by type and id; several matches are returned as candidates. Two steps: the first call returns a preview, a folio and a confirmation payload without moving anything; the waste is recorded only on a second call with that payload. Repeating the same confirmation does not duplicate the record. Requires inventory:log-waste and the Premium plan (inventory tracking).",
+  configure_loyalty:
+    'Configures the loyalty program of a branch: active state, points per amount spent and per visit, redemption value of a point, minimum points to redeem, point expiry and stamp card settings. Only the fields sent change; a branch without a program gets one with default values first. No customer balance is touched. Two steps: without confirm it returns the main program fields with current and new values and a confirmation token; the change applies only on a second call with confirm:true and that token. Requires loyalty:update and the Pro plan (loyalty).',
+  create_modifier_group:
+    'Creates a modifier group in a branch (for example extras or cooking point) with its options, each with a name and optional extra price, and whether a selection is required, multiple selections are allowed and the minimum and maximum selections. Applies immediately; the group is attached to products separately. Requires menu:create.',
+  undo_check_in:
+    'Reverts a check-in recorded by mistake on a reservation, identified by confirmation code, returning it to its previous status from its status log; an order opened by the check-in stays open. Refused when any order of the reservation already has a completed payment. Applies immediately. Requires reservations:update and the reservations feature.',
+  set_staff_schedule:
+    'Replaces the weekly schedule and date exceptions of one professional (staff membership id) in a branch. Two steps: without confirm it returns the current and proposed schedule and a confirmation token; the schedule is saved only on a second call with confirm:true and that token. Requires teams:update and the reservations feature.',
+  set_service_staff:
+    'Replaces the list of professionals who can perform one appointment service of a branch. Two steps: without confirm it returns the current and proposed list and a confirmation token; the list is saved only on a second call with confirm:true and that token. Requires menu:update and the reservations feature.',
+  set_table_status:
+    'Sets the status of one table of a branch, by table number: available, occupied, reserved or cleaning. A table with an open order cannot be marked available. Applies immediately. Requires tables:update.',
+  move_table_check:
+    'Moves the open check of one table to another table of the same branch, keeping its items; the target becomes occupied and the source table is released when it has no other open check. Refused when the target is occupied or reserved or the order is already paid. Applies immediately. Requires tables:update.',
+  assign_table_check:
+    'Changes the staff member who serves the open check of one table (by staff id or name). Payments, tips and cash closeout keep the staff member who processed each payment. Applies immediately. Requires orders:update.',
+  split_table_check:
+    'Splits the open check of one table into a second check on the same table by moving the given item ids; at least one item stays on the original check. Refused when the check has payments, discounts, manual service charges or a promotion that would be split. Applies immediately. Requires orders:update.',
+  split_table_check_by_seat:
+    "Splits the open check of one table into one check per seat: items tagged with a seat move to that seat's new check and untagged items stay; the lowest seat keeps the original check. Needs items on at least two seats and is refused when the check has discounts or manual service charges. Applies immediately. Requires orders:update.",
+  merge_table_check:
+    'Merges the open check of a source table into the open check of a target table: the items move to the target check and the source check is cancelled; the source table is released when it has no other open check. Refused when either check has a payment, when the source check has discounts or manual service charges, or while a card-terminal charge on the source check is still unresolved. Applies immediately. Requires orders:merge.',
 }
