@@ -1,7 +1,7 @@
 import { Prisma } from '@prisma/client'
 import prisma from '../../../utils/prismaClient'
 import { sedesLegibles } from './acceso'
-import { ClaseValorada, contarPorEstado, FiltroValoracion, resumenPorPersona, valorarClases } from './valoracion'
+import { ClaseValorada, contarPorEstado, FiltroValoracion, llegoAlTopePersonas, resumenPorPersona, valorarClases } from './valoracion'
 import { hoyLocal, periodoQueContiene, PeriodoCanonico, venuePeriodRange } from './periodos'
 import { nivelesVigentes } from './niveles.service'
 
@@ -17,7 +17,12 @@ interface Contexto {
   filtros: FiltroValoracion[]
 }
 
-async function contexto(userId: string, venueId: string, fecha?: string): Promise<Contexto> {
+/**
+ * Alcance del reporte: las sedes con el módulo que el usuario puede leer (spec §9.2) y, si pidió `sede` (filtro de sede,
+ * spec §7.3), sólo la intersección con esa sede. Una sede no legible o sin el módulo da alcance VACÍO, nunca otras sedes,
+ * y entonces `parcial` es true: el usuario no está viendo lo que pidió.
+ */
+async function contexto(userId: string, venueId: string, fecha?: string, sede?: string): Promise<Contexto> {
   const v = await prisma.venue.findUniqueOrThrow({
     where: { id: venueId },
     select: { organizationId: true, timezone: true, organization: { select: { servicePayPeriodicity: true } } },
@@ -25,7 +30,9 @@ async function contexto(userId: string, venueId: string, fecha?: string): Promis
   const tzBase = v.timezone || 'America/Mexico_City'
   const periodicidad = v.organization.servicePayPeriodicity
   const periodo = periodoQueContiene(fecha ?? hoyLocal(tzBase), periodicidad)
-  const { venueIds, parcial } = await sedesLegibles(userId, v.organizationId)
+  const legibles = await sedesLegibles(userId, v.organizationId)
+  const venueIds = sede ? legibles.venueIds.filter(id => id === sede) : legibles.venueIds
+  const parcial = legibles.parcial || (sede !== undefined && venueIds.length === 0)
   const venues = venueIds.length
     ? await prisma.venue.findMany({
         where: { id: { in: venueIds }, organizationId: v.organizationId },
@@ -43,8 +50,18 @@ async function contexto(userId: string, venueId: string, fecha?: string): Promis
   return { organizationId: v.organizationId, periodicidad, periodo, venueIds, parcial, filtros }
 }
 
-export async function reportePeriodo(input: { userId: string; venueId: string; fecha?: string; offset: number; limit: number }) {
-  const c = await contexto(input.userId, input.venueId, input.fecha)
+export async function reportePeriodo(input: {
+  userId: string
+  venueId: string
+  fecha?: string
+  sede?: string
+  offset: number
+  limit: number
+}) {
+  const c = await contexto(input.userId, input.venueId, input.fecha, input.sede)
+  // El MCP llama sin la validación de la ruta: el offset se acota aquí también.
+  const offset = Math.max(0, Math.trunc(input.offset) || 0)
+  let truncado = false
   let total = new Prisma.Decimal(0)
   let clases = 0,
     excepciones = 0,
@@ -59,7 +76,9 @@ export async function reportePeriodo(input: { userId: string; venueId: string; f
     clases += e.ok
     excepciones += e.excepciones
     excluidas += e.excluidas
-    for (const r of await resumenPorPersona(prisma, f)) {
+    const resumen = await resumenPorPersona(prisma, f)
+    if (llegoAlTopePersonas(resumen.length)) truncado = true
+    for (const r of resumen) {
       const p = porPersona.get(r.staffId) ?? {
         staffId: r.staffId,
         staffName: r.staffName,
@@ -80,7 +99,7 @@ export async function reportePeriodo(input: { userId: string; venueId: string; f
   )
   const todas = [...porPersona.values()].sort((a, b) => b.total.comparedTo(a.total) || a.staffId.localeCompare(b.staffId))
   const limit = Math.min(Math.max(input.limit, 1), 100)
-  const items = todas.slice(input.offset, input.offset + limit).map(p => ({
+  const items = todas.slice(offset, offset + limit).map(p => ({
     staffId: p.staffId,
     staffName: p.staffName,
     payLevelName: niveles.get(p.staffId) ?? null,
@@ -93,8 +112,9 @@ export async function reportePeriodo(input: { userId: string; venueId: string; f
     periodo: { ...c.periodo, periodicidad: c.periodicidad },
     parcial: c.parcial,
     venueIds: c.venueIds,
+    truncado,
     tarjetas: { total: total.toFixed(2), clases, personas: porPersona.size, excepciones, excluidas },
-    personas: { items, total: todas.length, offset: input.offset, limit },
+    personas: { items, total: todas.length, offset, limit },
     huerfanas: await contarHuerfanas(c),
   }
 }
@@ -135,14 +155,27 @@ export async function detallePersona(input: {
   venueId: string
   staffId: string
   fecha?: string
+  sede?: string
   despuesDe?: string
   limit: number
 }) {
-  return recorrer(await contexto(input.userId, input.venueId, input.fecha), { staffId: input.staffId }, input.despuesDe, input.limit)
+  return recorrer(
+    await contexto(input.userId, input.venueId, input.fecha, input.sede),
+    { staffId: input.staffId },
+    input.despuesDe,
+    input.limit,
+  )
 }
 
-export async function excepcionesPeriodo(input: { userId: string; venueId: string; fecha?: string; despuesDe?: string; limit: number }) {
-  return recorrer(await contexto(input.userId, input.venueId, input.fecha), {}, input.despuesDe, input.limit, true)
+export async function excepcionesPeriodo(input: {
+  userId: string
+  venueId: string
+  fecha?: string
+  sede?: string
+  despuesDe?: string
+  limit: number
+}) {
+  return recorrer(await contexto(input.userId, input.venueId, input.fecha, input.sede), {}, input.despuesDe, input.limit, true)
 }
 
 function whereHuerfanas(c: Contexto): Prisma.ReservationWhereInput {
@@ -159,8 +192,15 @@ async function contarHuerfanas(c: Contexto): Promise<number> {
   return prisma.reservation.count({ where: whereHuerfanas(c) })
 }
 
-export async function huerfanasPeriodo(input: { userId: string; venueId: string; fecha?: string; offset: number; limit: number }) {
-  const c = await contexto(input.userId, input.venueId, input.fecha)
+export async function huerfanasPeriodo(input: {
+  userId: string
+  venueId: string
+  fecha?: string
+  sede?: string
+  offset: number
+  limit: number
+}) {
+  const c = await contexto(input.userId, input.venueId, input.fecha, input.sede)
   if (!c.filtros.length) return { items: [], total: 0 }
   const where = whereHuerfanas(c)
   const [rows, total] = await Promise.all([
@@ -175,7 +215,7 @@ export async function huerfanasPeriodo(input: { userId: string; venueId: string;
         customer: { select: { firstName: true, lastName: true } },
       },
       orderBy: [{ startsAt: 'asc' }, { id: 'asc' }],
-      skip: input.offset,
+      skip: Math.max(0, Math.trunc(input.offset) || 0),
       take: Math.min(Math.max(input.limit, 1), 100),
     }),
     prisma.reservation.count({ where }),

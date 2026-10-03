@@ -173,7 +173,9 @@ export async function valorarClases(
 }
 
 /** Tope de PERSONAS por sede (no de clases): las clases se agregan en la base, nunca se truncan. */
-const TOPE_PERSONAS_POR_SEDE = 2000
+export const TOPE_PERSONAS_POR_SEDE = 2000
+/** «Nada se trunca» (spec §6.2): si una sede devolvió el tope, el reporte lo DICE (`truncado`). */
+export const llegoAlTopePersonas = (filas: number): boolean => filas >= TOPE_PERSONAS_POR_SEDE
 
 export async function resumenPorPersona(db: Db, f: FiltroValoracion): Promise<ResumenSede[]> {
   const rows = await db.$queryRaw<
@@ -187,7 +189,7 @@ export async function resumenPorPersona(db: Db, f: FiltroValoracion): Promise<Re
     GROUP BY "staffId"
     ORDER BY "staffId" ASC
     LIMIT ${TOPE_PERSONAS_POR_SEDE}`
-  if (rows.length >= TOPE_PERSONAS_POR_SEDE) {
+  if (llegoAlTopePersonas(rows.length)) {
     logger.warn('staffPay.resumenPorPersona: la sede llegó al tope de personas con pago', {
       venueId: f.venueId,
       tope: TOPE_PERSONAS_POR_SEDE,

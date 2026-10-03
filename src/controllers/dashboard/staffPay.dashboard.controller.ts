@@ -179,20 +179,20 @@ export async function tableHistory(req: Request, res: Response, next: NextFuncti
 
 // Reporte del periodo abierto. `req.query` ya viene parseado por validateRequest (reporteQuerySchema / cursorQuerySchema);
 // aun así se pasan campos explícitos, nunca el objeto entero.
-function consultaPaginada(req: Request): { fecha?: string; offset: number; limit: number } {
-  const q = req.query as { fecha?: string; offset?: number | string; limit?: number | string }
-  return { fecha: q.fecha, offset: Number(q.offset ?? 0), limit: Number(q.limit ?? 50) }
+function consultaPaginada(req: Request): { fecha?: string; sede?: string; offset: number; limit: number } {
+  const q = req.query as { fecha?: string; sede?: string; offset?: number | string; limit?: number | string }
+  return { fecha: q.fecha, sede: q.sede, offset: Number(q.offset ?? 0), limit: Number(q.limit ?? 50) }
 }
-function consultaConCursor(req: Request): { fecha?: string; despuesDe?: string; limit: number } {
-  const q = req.query as { fecha?: string; cursor?: string; limit?: number | string }
-  return { fecha: q.fecha, despuesDe: q.cursor, limit: Number(q.limit ?? 50) }
+function consultaConCursor(req: Request): { fecha?: string; sede?: string; despuesDe?: string; limit: number } {
+  const q = req.query as { fecha?: string; sede?: string; cursor?: string; limit?: number | string }
+  return { fecha: q.fecha, sede: q.sede, despuesDe: q.cursor, limit: Number(q.limit ?? 50) }
 }
 
 export async function getReport(req: Request, res: Response, next: NextFunction) {
   try {
     const { venueId, userId } = ctx(req)
-    const { fecha, offset, limit } = consultaPaginada(req)
-    res.json(await reporte.reportePeriodo({ userId, venueId, fecha, offset, limit }))
+    const { fecha, sede, offset, limit } = consultaPaginada(req)
+    res.json(await reporte.reportePeriodo({ userId, venueId, fecha, sede, offset, limit }))
   } catch (e) {
     next(e)
   }
@@ -201,8 +201,8 @@ export async function getReport(req: Request, res: Response, next: NextFunction)
 export async function getStaffDetail(req: Request, res: Response, next: NextFunction) {
   try {
     const { venueId, userId } = ctx(req)
-    const { fecha, despuesDe, limit } = consultaConCursor(req)
-    res.json(await reporte.detallePersona({ userId, venueId, staffId: req.params.staffId, fecha, despuesDe, limit }))
+    const { fecha, sede, despuesDe, limit } = consultaConCursor(req)
+    res.json(await reporte.detallePersona({ userId, venueId, staffId: req.params.staffId, fecha, sede, despuesDe, limit }))
   } catch (e) {
     next(e)
   }
@@ -211,8 +211,8 @@ export async function getStaffDetail(req: Request, res: Response, next: NextFunc
 export async function getExceptions(req: Request, res: Response, next: NextFunction) {
   try {
     const { venueId, userId } = ctx(req)
-    const { fecha, despuesDe, limit } = consultaConCursor(req)
-    res.json(await reporte.excepcionesPeriodo({ userId, venueId, fecha, despuesDe, limit }))
+    const { fecha, sede, despuesDe, limit } = consultaConCursor(req)
+    res.json(await reporte.excepcionesPeriodo({ userId, venueId, fecha, sede, despuesDe, limit }))
   } catch (e) {
     next(e)
   }
@@ -221,8 +221,8 @@ export async function getExceptions(req: Request, res: Response, next: NextFunct
 export async function getOrphans(req: Request, res: Response, next: NextFunction) {
   try {
     const { venueId, userId } = ctx(req)
-    const { fecha, offset, limit } = consultaPaginada(req)
-    res.json(await reporte.huerfanasPeriodo({ userId, venueId, fecha, offset, limit }))
+    const { fecha, sede, offset, limit } = consultaPaginada(req)
+    res.json(await reporte.huerfanasPeriodo({ userId, venueId, fecha, sede, offset, limit }))
   } catch (e) {
     next(e)
   }

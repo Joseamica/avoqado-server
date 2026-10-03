@@ -42,13 +42,16 @@ export const publicarVersionSchema = z.object({
 export const archivarTablaSchema = z.object({ archivedFrom: fechaSchema })
 
 // Reporte del periodo abierto (spec §6.2): renglones paginados con tope duro de 100.
+const sedeSchema = z.string().cuid('Sede inválida')
 export const reporteQuerySchema = z.object({
   fecha: fechaSchema.optional(),
+  sede: sedeSchema.optional(),
   offset: z.coerce.number().int().min(0).default(0),
   limit: z.coerce.number().int().min(1).max(100).default(50),
 })
 export const cursorQuerySchema = z.object({
   fecha: fechaSchema.optional(),
+  sede: sedeSchema.optional(),
   cursor: z.string().max(200).optional(),
   limit: z.coerce.number().int().min(1).max(100).default(50),
 })
