@@ -3,7 +3,7 @@ import AppError from '../../errors/AppError'
 import type { CatalogCommandContext, CatalogWorkbookUpload } from '../../types/master-catalog'
 import { hashCanonicalJsonV1 } from './catalogHash.service'
 import { assertCatalogOrganizationValueRevisions, validateCatalogItemInput } from './catalogItemValidation.service'
-import type { CatalogItemAggregateCommand, CatalogReferenceProposal } from './catalogItem.types'
+import { CATALOG_ITEM_DEFAULT_IVA, type CatalogItemAggregateCommand, type CatalogReferenceProposal } from './catalogItem.types'
 import {
   calculateCatalogImportConfirmCapacityCooperativelyV1,
   calculateCatalogImportConfirmCapacityV1,
@@ -252,10 +252,13 @@ export function createCatalogImportValidationService(dependencies: CatalogImport
               presentationLabel: scalar.presentationLabel,
               unit: scalar.unit,
               productType,
-              taxRate: scalar.taxRate,
+              // D15: el IVA del Excel es histórico. Vacío ⇒ alta al 16 % (02); edición ⇒ lo que el artículo ya tiene (como HTTP).
+              taxRate:
+                scalar.taxRate ?? (operation === 'UPDATE' ? current?.taxRate.toFixed(4) : undefined) ?? CATALOG_ITEM_DEFAULT_IVA.taxRate,
               satProductKey: scalar.satProductKey,
               satUnitKey: scalar.satUnitKey,
-              objetoImp: scalar.objetoImp,
+              objetoImp:
+                scalar.objetoImp ?? (operation === 'UPDATE' ? current?.objetoImp : undefined) ?? CATALOG_ITEM_DEFAULT_IVA.objetoImp,
               iepsMode: scalar.iepsMode,
               iepsRate: scalar.iepsRate,
               iepsQuota: scalar.iepsQuota,

@@ -77,6 +77,18 @@ export interface UpdateCatalogItemInput extends CreateCatalogItemInput {
   organizationValueDeactivations: CatalogOrganizationValueDeactivationInput[]
 }
 
+/**
+ * D15 (IVA por producto, spec planes 6-7 §4.7): el catálogo maestro ya no administra el IVA. Las rutas HTTP de alta y edición
+ * aceptan `taxRate` y `objetoImp` (clientes viejos) pero ya no los exigen; el servicio completa lo que falte.
+ */
+export type CatalogItemIvaOptional<T extends CreateCatalogItemInput> = Omit<T, 'taxRate' | 'objetoImp'> & {
+  taxRate?: string
+  objetoImp?: string
+}
+
+/** El IVA con que nace un artículo cuando no lo trae (HTTP o Excel): 16 %, ObjetoImp 02 (el mismo default de `Product`). */
+export const CATALOG_ITEM_DEFAULT_IVA = { taxRate: '0.1600', objetoImp: '02' } as const
+
 export interface RetireCatalogItemInput {
   catalogItemId: string
   expectedRevision: number

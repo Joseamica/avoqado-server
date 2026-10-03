@@ -1,6 +1,6 @@
 import { CatalogItemKind } from '@prisma/client'
-import type { CatalogValidationBaselineFieldV1, CatalogManagedFieldV1 } from '../../types/master-catalog'
-import { CATALOG_PREPARED_DISH_MANAGED_FIELD_MASK_V1, CATALOG_RETAIL_MANAGED_FIELD_MASK_V1 } from '../../types/master-catalog'
+import type { CatalogValidationBaselineFieldV1, CatalogManagedFieldV2 } from '../../types/master-catalog'
+import { CATALOG_PREPARED_DISH_MANAGED_FIELD_MASK_V2, CATALOG_RETAIL_MANAGED_FIELD_MASK_V2 } from '../../types/master-catalog'
 import { CATALOG_VALIDATION_BASELINE_V1 } from './catalogValidation.service'
 import { canonicalJsonV1, hashCanonicalJsonV1 } from './catalogHash.service'
 import type {
@@ -26,7 +26,9 @@ function jsonEquals(left: CatalogPublicationJson, right: CatalogPublicationJson)
   return canonicalJsonV1(left) === canonicalJsonV1(right)
 }
 
-function managedValueFromItem(input: CatalogPublicationProjectionInput, field: CatalogManagedFieldV1): CatalogPublicationJson {
+// D15 (spec planes 6-7 §4.7): el IVA ya no se proyecta. El `taxRate`/`objetoImp` del artículo y del producto no se leen aquí:
+// ni cambian una publicación, ni producen divergencia, ni entran al hash del destino.
+function managedValueFromItem(input: CatalogPublicationProjectionInput, field: CatalogManagedFieldV2): CatalogPublicationJson {
   const item = input.item
   if (field === 'cost') {
     const price = item.prices.find(
@@ -38,15 +40,13 @@ function managedValueFromItem(input: CatalogPublicationProjectionInput, field: C
     )
     return price?.amount.toFixed(2) ?? null
   }
-  if (field === 'taxRate') return item.taxRate.toFixed(4)
   if (field === 'type') return item.productType
   return item[field]
 }
 
-function managedValueFromProduct(input: CatalogPublicationProjectionInput, field: CatalogManagedFieldV1): CatalogPublicationJson {
+function managedValueFromProduct(input: CatalogPublicationProjectionInput, field: CatalogManagedFieldV2): CatalogPublicationJson {
   const product = input.product
   if (field === 'cost') return product.cost?.toFixed(2) ?? null
-  if (field === 'taxRate') return product.taxRate.toFixed(4)
   return product[field]
 }
 
@@ -142,13 +142,13 @@ function unsupportedProfile(input: CatalogPublicationProjectionInput): { code: s
 
 function invalidProjection(
   input: CatalogPublicationProjectionInput,
-  fieldMask: readonly CatalogManagedFieldV1[],
+  fieldMask: readonly CatalogManagedFieldV2[],
   code: string,
   diagnostic: string,
   status: 'INVALID' | 'RECIPE_COST_STALE' = 'INVALID',
 ): CatalogPublicationProjection {
-  const before: Partial<Record<CatalogManagedFieldV1, CatalogPublicationJson>> = {}
-  const proposed: Partial<Record<CatalogManagedFieldV1, CatalogPublicationJson>> = {}
+  const before: Partial<Record<CatalogManagedFieldV2, CatalogPublicationJson>> = {}
+  const proposed: Partial<Record<CatalogManagedFieldV2, CatalogPublicationJson>> = {}
   const published = isPlainObject(input.binding.lastPublishedManagedSnapshot) ? input.binding.lastPublishedManagedSnapshot : null
   const fields = fieldMask.map(field => {
     const currentValue = managedValueFromProduct(input, field)
@@ -186,7 +186,7 @@ function invalidProjection(
 
 export function projectCatalogPublicationTarget(input: CatalogPublicationProjectionInput): CatalogPublicationProjection {
   const fieldMask =
-    input.item.kind === CatalogItemKind.RETAIL_PRODUCT ? CATALOG_RETAIL_MANAGED_FIELD_MASK_V1 : CATALOG_PREPARED_DISH_MANAGED_FIELD_MASK_V1
+    input.item.kind === CatalogItemKind.RETAIL_PRODUCT ? CATALOG_RETAIL_MANAGED_FIELD_MASK_V2 : CATALOG_PREPARED_DISH_MANAGED_FIELD_MASK_V2
 
   // WHY: Cost has no FX/fallback authority; a compatible retail target needs
   // one ACTIVE ORGANIZATION PURCHASE_COST in exactly Venue.currency.
@@ -215,8 +215,8 @@ export function projectCatalogPublicationTarget(input: CatalogPublicationProject
   if (profileProblem) return invalidProjection(input, fieldMask, profileProblem.code, profileProblem.diagnostic)
 
   const published = isPlainObject(input.binding.lastPublishedManagedSnapshot) ? input.binding.lastPublishedManagedSnapshot : null
-  const before: Partial<Record<CatalogManagedFieldV1, CatalogPublicationJson>> = {}
-  const proposed: Partial<Record<CatalogManagedFieldV1, CatalogPublicationJson>> = {}
+  const before: Partial<Record<CatalogManagedFieldV2, CatalogPublicationJson>> = {}
+  const proposed: Partial<Record<CatalogManagedFieldV2, CatalogPublicationJson>> = {}
   const fields = fieldMask.map(field => {
     const currentValue = managedValueFromProduct(input, field)
     const proposedValue = managedValueFromItem(input, field)

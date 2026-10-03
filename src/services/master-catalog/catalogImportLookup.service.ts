@@ -27,6 +27,9 @@ export interface CatalogImportItemLookupRow {
   revision: number
   invariantVersion: bigint
   businessTypes: Array<{ businessType: string }>
+  /** D15: el IVA guardado; una edición del Excel con las celdas de IVA vacías lo conserva (como HTTP). */
+  taxRate: Prisma.Decimal
+  objetoImp: string
 }
 
 export interface CatalogImportPriceLookupRow {
@@ -251,6 +254,8 @@ export async function loadCatalogImportLookup(
     revision: true,
     invariantVersion: true,
     businessTypes: { select: { businessType: true } },
+    taxRate: true,
+    objetoImp: true,
   } as const
   const itemsById = await findCatalogImportRowsInChunks(
     itemIds,

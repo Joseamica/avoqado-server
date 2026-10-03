@@ -9,8 +9,9 @@ import type {
   CatalogVenueProvenanceInput,
   CatalogVenueProvenanceResult,
 } from '../../types/master-catalog'
-import { CATALOG_PREPARED_DISH_MANAGED_FIELD_MASK_V1, CATALOG_RETAIL_MANAGED_FIELD_MASK_V1 } from '../../types/master-catalog'
+import { CATALOG_PREPARED_DISH_MANAGED_FIELD_MASK_V2, CATALOG_RETAIL_MANAGED_FIELD_MASK_V2 } from '../../types/master-catalog'
 import prisma from '../../utils/prismaClient'
+import { persistedMaskMatchesCurrent } from './catalogManagedMask.service'
 
 const DEFAULT_PAGE_SIZE = 25
 const MAX_PAGE_SIZE = 100
@@ -111,26 +112,32 @@ export const catalogVenueProvenanceSelect = {
 
 type ProvenanceRow = Prisma.CatalogVenueBindingGetPayload<{ select: typeof catalogVenueProvenanceSelect }>
 
+/**
+ * D15: la máscara vigente es la V2 (sin IVA). Una vinculación guardada con la V1 (con IVA) se lee como su V2; cualquier otra
+ * forma sigue siendo inválida. Devuelve la máscara VIGENTE (los overrides trabajan con ella).
+ */
 export function assertCatalogManagedFieldMask(kind: unknown, persistedMask: readonly string[]): CatalogManagedFieldV1[] {
-  const expected = kind === 'RETAIL_PRODUCT' ? CATALOG_RETAIL_MANAGED_FIELD_MASK_V1 : CATALOG_PREPARED_DISH_MANAGED_FIELD_MASK_V1
   if (kind !== 'RETAIL_PRODUCT' && kind !== 'PREPARED_DISH') {
     throw new ConflictError('Máscara administrada de catálogo inválida', 'CATALOG_BINDING_MANAGED_MASK_INVALID')
   }
-  if (persistedMask.length !== expected.length || persistedMask.some((field, index) => field !== expected[index])) {
+  const current = kind === 'RETAIL_PRODUCT' ? CATALOG_RETAIL_MANAGED_FIELD_MASK_V2 : CATALOG_PREPARED_DISH_MANAGED_FIELD_MASK_V2
+  if (!persistedMaskMatchesCurrent(persistedMask, current)) {
     throw new ConflictError('Máscara administrada de catálogo inválida', 'CATALOG_BINDING_MANAGED_MASK_INVALID')
   }
-  return [...expected]
+  return [...current]
 }
 
 function mapProvenance(row: ProvenanceRow): CatalogVenueProvenanceResult {
-  const managedFieldMask = assertCatalogManagedFieldMask(row.catalogItem.kind, row.managedFieldMask)
+  // D15: la máscara GUARDADA viaja con la instantánea y el hash (con ella se verifican); la VIGENTE dice qué administra hoy.
+  const currentManagedFieldMask = assertCatalogManagedFieldMask(row.catalogItem.kind, row.managedFieldMask)
   return {
     bindingId: row.id,
     catalogItemId: row.catalogItemId,
     productId: row.productId,
     status: row.status,
     revision: row.revision,
-    managedFieldMask,
+    managedFieldMask: [...row.managedFieldMask] as CatalogManagedFieldV1[],
+    currentManagedFieldMask,
     lastPublishedCatalogRevision: row.lastPublishedCatalogRevision,
     lastPublishedManagedSnapshot: row.lastPublishedManagedSnapshot,
     lastPublishedManagedHash: row.lastPublishedManagedHash,

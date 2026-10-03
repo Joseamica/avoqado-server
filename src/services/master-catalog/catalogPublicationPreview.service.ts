@@ -3,7 +3,7 @@ import cuid from 'cuid'
 import { randomBytes } from 'node:crypto'
 import AppError, { ForbiddenError, ServiceUnavailableError, ValidationError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
-import { CATALOG_PREPARED_DISH_MANAGED_FIELD_MASK_V1, CATALOG_RETAIL_MANAGED_FIELD_MASK_V1 } from '../../types/master-catalog'
+import { CATALOG_PREPARED_DISH_MANAGED_FIELD_MASK_V2, CATALOG_RETAIL_MANAGED_FIELD_MASK_V2 } from '../../types/master-catalog'
 import type {
   CatalogCommandContext,
   CatalogManagedFieldV1,
@@ -14,15 +14,17 @@ import type {
   CatalogPublicationPreviewTargetInput,
 } from '../../types/master-catalog'
 import type { CatalogPublicationProjection, ProjectedCatalogPublicationTarget } from './catalogPublication.types'
+import { catalogIvaNotManagedError, isCatalogIvaField } from './catalogManagedMask.service'
 import { loadCatalogPublicationTargetsTx } from './catalogPublicationTargetLoader.service'
 import { createCatalogPublicationStagingService } from './catalogPublicationStaging.service'
 import { resolveMasterCatalogAccess } from './masterCatalogAccess.service'
 
 export const CATALOG_PUBLICATION_TARGET_CAP = 10_000
 export const CATALOG_PUBLICATION_IDEMPOTENCY_KEY_MAX_BYTES = 256
+// D15: sólo los campos que el catálogo administra hoy (V2). Una decisión sobre el IVA se rechaza con su propio motivo.
 const MANAGED_FIELDS = new Set<CatalogManagedFieldV1>([
-  ...CATALOG_RETAIL_MANAGED_FIELD_MASK_V1,
-  ...CATALOG_PREPARED_DISH_MANAGED_FIELD_MASK_V1,
+  ...CATALOG_RETAIL_MANAGED_FIELD_MASK_V2,
+  ...CATALOG_PREPARED_DISH_MANAGED_FIELD_MASK_V2,
 ])
 
 interface CatalogPublicationPreviewDependencies {
@@ -45,6 +47,10 @@ function targetKey(target: Pick<CatalogPublicationPreviewTargetInput, 'catalogIt
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function decidesCatalogIva(value: unknown): boolean {
+  return Array.isArray(value) && value.some(decision => isPlainObject(decision) && isCatalogIvaField(decision.field))
 }
 
 function exactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
@@ -116,6 +122,8 @@ function validateInput(input: CatalogPublicationPreviewInput, targetCap: number)
       invalidInput()
     }
     if (![target.catalogItemId, target.venueId, target.productId].every(semanticId)) invalidInput()
+    // D15: antes que la forma de las decisiones, para que el motivo sea el del IVA y no «forma inválida».
+    if (hasDecisions && decidesCatalogIva(target.decisions)) throw catalogIvaNotManagedError()
     if (hasDecisions && !validDecisions(target.decisions)) invalidInput()
   }
   const keys = input.targets.map(targetKey)

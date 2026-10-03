@@ -710,7 +710,9 @@ describe('carreras con las funciones REALES: bloqueador, espera probada en pg_st
         'la publicación formada antes de Organization',
         60_000,
       )
-      cambio = desenlace(updateProduct(f.venueId, f.productId, { ivaTratamiento: 'IVA_0' }, actor(f.staffId)))
+      // D15 (B4a): el IVA ya no es campo del catálogo; un cambio SÓLO de IVA ya no deja vieja la vista previa (se aplicaría).
+      // El nombre, que el catálogo sí administra, va en el MISMO cambio para que el reintento siga encontrando su preview vieja.
+      cambio = desenlace(updateProduct(f.venueId, f.productId, { ivaTratamiento: 'IVA_0', name: 'Nombre local e2' }, actor(f.staffId)))
       const pidCambio = await esperaDetrasDe(fila.pid, '%FROM "Product" AS product%', 'el cambio esperando la fila del producto')
       await antesaladelCatalogo.soltar()
       await esperaDetrasDe(
@@ -728,9 +730,9 @@ describe('carreras con las funciones REALES: bloqueador, espera probada en pg_st
     const [p, c] = [await publicacion, await cambio]
     noEs40P01(p)
     noEs40P01(c)
-    expect(c).toMatchObject({ ok: { ivaTratamiento: 'IVA_0' } })
+    expect(c).toMatchObject({ ok: { ivaTratamiento: 'IVA_0', name: 'Nombre local e2' } })
     // Ruling T4-R2 (de PF9): el cambio marcó la organización después de la foto de la publicación ⇒ 40001. Con el reintento de
-    // R12 ya no sale: la aplicación se repite, encuentra el producto ya en IVA_0 y su vista previa vieja ⇒ STALE_PREVIEW.
+    // R12 ya no sale: la aplicación se repite, encuentra el nombre local nuevo y su vista previa vieja ⇒ STALE_PREVIEW.
     expect(p).toMatchObject({ statusCode: 409, code: 'STALE_PREVIEW' })
     expect(huboUn40001()).toBe(true)
   })

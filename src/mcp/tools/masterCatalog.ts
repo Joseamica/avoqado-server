@@ -14,6 +14,12 @@ import {
   isCatalogPublicationIdempotencyKey,
 } from '@/services/master-catalog/catalogPublicationPreview.service'
 import { catalogPublicationService } from '@/services/master-catalog/catalogPublication.service'
+import {
+  CATALOG_IVA_HISTORIC_NOTE,
+  CATALOG_IVA_NOT_MANAGED_CODE,
+  CATALOG_IVA_NOT_MANAGED_MESSAGE,
+  isCatalogIvaField,
+} from '@/services/master-catalog/catalogManagedMask.service'
 import { resolveCatalogVenueContext } from '@/services/master-catalog/masterCatalogRead.service'
 import { ScopeError, requireCatalogWriteScope } from '../guard'
 import { text } from '../respond'
@@ -57,6 +63,19 @@ function commandContext(scope: McpScope) {
   })
 }
 
+// D15: el IVA se configura en cada negocio. El catálogo lo dice con su motivo antes de tocar ningún servicio.
+const IVA_NOT_MANAGED = { ok: false, code: CATALOG_IVA_NOT_MANAGED_CODE, error: CATALOG_IVA_NOT_MANAGED_MESSAGE } as const
+
+function decidesCatalogIva(targets: ReadonlyArray<Record<string, unknown>>): boolean {
+  return targets.some(
+    target =>
+      Array.isArray(target.decisions) &&
+      target.decisions.some(
+        decision => typeof decision === 'object' && decision !== null && isCatalogIvaField((decision as { field?: unknown }).field),
+      ),
+  )
+}
+
 export function registerMasterCatalogTools(server: McpServer, scope: McpScope) {
   server.tool(
     'list_catalog_items',
@@ -78,7 +97,7 @@ export function registerMasterCatalogTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'preview_catalog_import',
-    'Validate a base64 XLSX import and create a confirmation preview.',
+    'Validate a base64 XLSX import and create a confirmation preview. The VAT columns (iva_rate, objeto_imp) are historical: they may be blank and never configure VAT on venue products.',
     {
       fileBase64: z
         .string()
@@ -87,13 +106,14 @@ export function registerMasterCatalogTools(server: McpServer, scope: McpScope) {
       originalFilename: z.string().min(1).max(255),
     },
     async ({ fileBase64, originalFilename }) =>
-      text(
-        await previewCatalogImport(await commandContext(scope), {
+      text({
+        ...(await previewCatalogImport(await commandContext(scope), {
           buffer: Buffer.from(fileBase64, 'base64'),
           mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
           originalFilename,
-        }),
-      ),
+        })),
+        ivaNote: CATALOG_IVA_HISTORIC_NOTE,
+      }),
   )
 
   server.tool(
@@ -110,13 +130,17 @@ export function registerMasterCatalogTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'preview_catalog_publication',
-    'Preview a catalog publication operation.',
+    'Preview a catalog publication operation. VAT is not published by the catalog: it is configured in each venue, so decisions on taxRate or objetoImp are rejected.',
     {
       operation: z.enum(['CATALOG_FIELDS_PUBLISH', 'CATALOG_PRODUCT_ACTIVATION', 'CATALOG_FIELDS_REVERSION']),
       idempotencyKey: z.string().refine(isCatalogPublicationIdempotencyKey),
       targets: z.array(z.record(z.string(), z.unknown())).min(1).max(CATALOG_PUBLICATION_TARGET_CAP),
     },
-    async input => text(await catalogPublicationService.preview(await commandContext(scope), input as never)),
+    async input => {
+      const context = await commandContext(scope)
+      if (input.operation === 'CATALOG_FIELDS_PUBLISH' && decidesCatalogIva(input.targets)) return text(IVA_NOT_MANAGED)
+      return text(await catalogPublicationService.preview(context, input as never))
+    },
   )
 
   server.tool(
@@ -133,7 +157,7 @@ export function registerMasterCatalogTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'request_catalog_override',
-    'Request a local managed-field override for a catalog-bound venue product.',
+    'Request a local managed-field override for a catalog-bound venue product. VAT (taxRate, objetoImp) is not managed by the catalog: it is configured in each venue, and those fields are rejected.',
     {
       phase: z.enum(['PREVIEW', 'CONFIRM']),
       venueId: z.string().min(1).max(256),
@@ -208,6 +232,7 @@ export function registerMasterCatalogTools(server: McpServer, scope: McpScope) {
       // check. Recheck active organization/gate with READ, not corporate mutate,
       // so an org VIEWER who is a venue MANAGER keeps the same HTTP permission.
       requireCatalogWriteScope(scope)
+      if (parsed.phase === 'PREVIEW' && parsed.requests.some(request => isCatalogIvaField(request.field))) return text(IVA_NOT_MANAGED)
       const context = await readContext(scope)
       const venueContext = await resolveCatalogVenueContext(parsed.venueId, context.actor, context.organizationId)
       if (parsed.phase === 'PREVIEW') {
