@@ -483,7 +483,11 @@ export async function updateClassSession(venueId: string, sessionId: string, dat
       entityId: sessionId,
       data: {
         antes: { assignedStaffId: session.assignedStaffId, startsAt: session.startsAt.toISOString(), endsAt: session.endsAt.toISOString() },
-        despues: { assignedStaffId: updated.assignedStaffId ?? null, startsAt: updated.startsAt.toISOString(), endsAt: updated.endsAt.toISOString() },
+        despues: {
+          assignedStaffId: updated.assignedStaffId ?? null,
+          startsAt: updated.startsAt.toISOString(),
+          endsAt: updated.endsAt.toISOString(),
+        },
       },
     })
 
