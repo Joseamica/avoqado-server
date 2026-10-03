@@ -242,10 +242,11 @@ export async function guardarAjusteDeClase(input: GuardarAjusteInput): Promise<P
     // bloquearse mutuamente sobre ClassSession / ClassSessionPayState, y 40P01 no se reintenta).
     if (periodo) await bloquearPeriodo(tx, periodo)
     else await lockPeriodosDeOrganizacion(tx, info.venue.organizationId)
-    // 2) Luego la clase: el candado compartido con la liquidación, y su fila.
+    // 2) Luego la clase: el candado compartido con la liquidación, y su fila. `FOR NO KEY UPDATE`: serializa las ediciones
+    // de la clase sin chocar con el `FOR KEY SHARE` de la llave foránea cuando el cierre la ancla (misma familia que el periodo).
     await lockClase(tx, input.classSessionId)
     await tx.$queryRaw(
-      Prisma.sql`SELECT id FROM "ClassSession" WHERE id = ${input.classSessionId} AND "venueId" = ${input.venueId} FOR UPDATE`,
+      Prisma.sql`SELECT id FROM "ClassSession" WHERE id = ${input.classSessionId} AND "venueId" = ${input.venueId} FOR NO KEY UPDATE`,
     )
     // 3) Releer el ancla DENTRO: si un cierre ganó la carrera, el reintento la ve y exige staffpay:close.
     const antes = await tx.classSessionPayState.findUnique({ where: { classSessionId: input.classSessionId } })

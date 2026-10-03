@@ -60,9 +60,17 @@ export async function lockClase(tx: Tx, classSessionId: string): Promise<void> {
   await tx.$queryRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))::text`)
 }
 
-/** Candado del periodo (spec §5 paso 2). Sólo bloquea: ampliar el alcance es `ampliarAlcance`, con permiso (Codex R1-9). */
+/**
+ * Candado del periodo (spec §5 paso 2). Sólo bloquea: ampliar el alcance es `ampliarAlcance`, con permiso (Codex R1-9).
+ * `FOR NO KEY UPDATE` y no `FOR UPDATE`: sigue serializando a todos los escritores del periodo entre sí (choca con otro
+ * NO KEY UPDATE y con el `UPDATE status` del cierre), pero NO con el `FOR KEY SHARE` que toma la llave foránea de quien
+ * sólo apunta al periodo (anclar una clase, un devengo). Con `FOR UPDATE`, un ajuste con el periodo tomado esperando la
+ * clase y una liquidación con la clase tomada anclándola en el periodo se bloqueaban mutuamente (40P01, sin reintento).
+ */
 export async function bloquearPeriodo(tx: Tx, periodId: string): Promise<ServicePayPeriod> {
-  const filas = await tx.$queryRaw<Array<{ id: string }>>(Prisma.sql`SELECT id FROM "ServicePayPeriod" WHERE id = ${periodId} FOR UPDATE`)
+  const filas = await tx.$queryRaw<Array<{ id: string }>>(
+    Prisma.sql`SELECT id FROM "ServicePayPeriod" WHERE id = ${periodId} FOR NO KEY UPDATE`,
+  )
   if (!filas.length) throw new NotFoundError('Periodo no encontrado')
   return tx.servicePayPeriod.findUniqueOrThrow({ where: { id: periodId } })
 }

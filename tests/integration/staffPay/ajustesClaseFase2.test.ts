@@ -1,8 +1,10 @@
 // tests/integration/staffPay/ajustesClaseFase2.test.ts — ajustes de una clase ya contabilizada (spec §5, §5.4, §6.6).
+import { Prisma, PrismaClient } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { guardarAjusteDeClase, pagoDeClase } from '@/services/dashboard/staffPay/ajustesClase.service'
 import { cerrarPeriodo, previewCierre } from '@/services/dashboard/staffPay/cierre.service'
 import { fechaComoDbDate } from '@/services/dashboard/staffPay/periodos'
+import { bloquearPeriodo } from '@/services/dashboard/staffPay/periodosGuardados'
 import { barreraDelPeriodo, borrarMundo, clase, confirmadas, crearMundo, Mundo, tablaMindform } from './_mundo'
 
 // `__admin` (Sofía, ADMIN) no tiene staffpay:close; el OWNER sí. Los permisos de escribir se resuelven ANTES de la
@@ -14,10 +16,6 @@ jest.mock('@/services/dashboard/staffPay/acceso', () => ({
   sedesConPermiso: jest.fn(async (userId: string, venueIds: string[], permiso: string) =>
     permiso === 'staffpay:close' && userId === (global as any).__admin ? [] : venueIds,
   ),
-  assertPermisoEnSedes: jest.fn(async (userId: string, _v: string[], permiso: string) => {
-    if (permiso === 'staffpay:close' && userId === (global as any).__admin)
-      throw Object.assign(new Error('Esta clase ya se contabilizó'), { statusCode: 403 })
-  }),
 }))
 
 const AHORA = new Date('2026-09-02T12:00:00Z')
@@ -165,6 +163,57 @@ describe('ajustes de una clase ya contabilizada (spec §5.4)', () => {
     await expect(ajustar(m.owner, id, 9)).resolves.toMatchObject({ conteo: 9, monto: '610.00' })
     const congelado = await prisma.serviceEarning.findFirstOrThrow({ where: { sourceId: id, concept: 'SERVICE' } })
     expect(congelado.amount.toFixed(2)).toBe('570.00')
+  })
+
+  // Ronda 1 de A10 (40P01 latente con la liquidación de B2): quien tiene el candado del periodo NO debe detener a quien sólo
+  // apunta a él con una llave foránea (la comprobación de la FK toma FOR KEY SHARE, que choca con FOR UPDATE y no con
+  // FOR NO KEY UPDATE). Y el candado sigue serializando a otro escritor del mismo periodo.
+  it('el candado del periodo no detiene a quien ancla una clase en él, pero sí a otro escritor del periodo', async () => {
+    const id = await clase(m, { staffId: m.ana, inicioIso: '2026-08-04T14:00:00Z', reservas: confirmadas(8) })
+    const agosto = await prisma.servicePayPeriod.create({
+      data: {
+        organizationId: m.orgId,
+        periodStart: fechaComoDbDate('2026-08-01'),
+        periodEnd: fechaComoDbDate('2026-08-31'),
+        venueIds: [m.venueId],
+      },
+    })
+    const otra = new PrismaClient({ datasources: { db: { url: process.env.DATABASE_URL } } })
+    let soltar!: () => void
+    let tomado!: () => void
+    const suelto = new Promise<void>(r => (soltar = r))
+    const listo = new Promise<void>(r => (tomado = r))
+    const tieneElCandado = prisma.$transaction(
+      async t => {
+        await bloquearPeriodo(t, agosto.id)
+        tomado()
+        await suelto
+      },
+      { maxWait: 10_000, timeout: 30_000 },
+    )
+    // Con un tiempo límite corto: si espera el candado de la primera, revienta con «lock timeout» en vez de colgarse.
+    const conLimite = <T>(f: (t: Prisma.TransactionClient) => Promise<T>) =>
+      otra.$transaction(async t => {
+        await t.$executeRaw`SET LOCAL lock_timeout = '1500ms'`
+        return f(t)
+      })
+    try {
+      await Promise.race([listo, tieneElCandado]) // si no pudo tomar el candado, falla aquí en vez de colgarse
+      await conLimite(t =>
+        t.classSessionPayState.upsert({
+          where: { classSessionId: id },
+          create: { classSessionId: id, originPeriodId: agosto.id },
+          update: { originPeriodId: agosto.id },
+        }),
+      )
+      await expect(conLimite(t => bloquearPeriodo(t, agosto.id))).rejects.toThrow(/lock timeout/)
+    } finally {
+      soltar()
+      await tieneElCandado
+      await otra.$disconnect()
+    }
+    const ps = await prisma.classSessionPayState.findUniqueOrThrow({ where: { classSessionId: id } })
+    expect(ps.originPeriodId).toBe(agosto.id)
   })
 
   it('una clase cancelada después del cierre conserva sus líneas en la tarjeta', async () => {
