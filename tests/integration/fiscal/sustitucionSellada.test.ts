@@ -11,7 +11,7 @@ const database = new URL(process.env.TEST_DATABASE_URL ?? '')
 // La base fiscal de esta Mac o la desechable de CI (ci-cd.yml adopta ese nombre en vez de relajar la guarda): nunca otra.
 if (
   !['localhost', '127.0.0.1'].includes(database.hostname) ||
-  !['/av_db_25_iva_test', '/avoqado_h1a_test_20260808'].includes(database.pathname)
+  !['/av_db_25_iva_test', '/av_db_25_iva_test_b3c', '/avoqado_h1a_test_20260808'].includes(database.pathname)
 ) {
   throw new Error('Esta suite exige la base local av_db_25_iva_test o la desechable de CI avoqado_h1a_test_20260808.')
 }
@@ -243,7 +243,44 @@ describe('sustitución sellada', () => {
         type: 'INGRESO',
         flow: 'STAFF_B',
         status,
+        // D21: dato de la ruta nueva (una heredada sin protocoloIva sólo puede existir terminada); la prueba es sobre la otra VIVA.
+        protocoloIva: 1,
         idempotencyKey: `${cfdi.idempotencyKey}-n2`,
+        falloDefinitivo: false,
+        receptorRfc: receptor.rfc,
+        receptorNombre: receptor.razonSocial,
+        receptorRegimen: receptor.regimenFiscal,
+        receptorCp: receptor.codigoPostal,
+        usoCfdi: receptor.usoCfdi,
+        formaPago: '01',
+        metodoPago: 'PUE',
+        subtotalCents: 10000,
+        taxCents: 1600,
+        totalCents: 11600,
+      },
+    })
+    await expect(replacement(cfdi.id)).rejects.toThrow(/proceso/)
+    expect(provider.createInvoice).not.toHaveBeenCalled()
+    expect(await prisma.cfdi.count({ where: { replacesCfdiId: cfdi.id } })).toBe(0)
+  })
+  // Las dos ramas del filtro de admisión (cfdi.service.ts, `idempotencyKey: null` OR `not: llave`): una heredada TIMBRADA con llave
+  // distinta y otra sin llave (SQL: `NULL <> 'x'` no es verdadero, así que sin la rama explícita no bloquearía).
+  it.each([
+    ['con otra llave', (base: string | null) => `${base}-n2-heredada`],
+    ['sin llave (idempotencyKey null)', () => null],
+  ])('otra individual heredada (protocoloIva null) TIMBRADA %s impide reservar', async (_caso, llave) => {
+    const { o, cfdi } = await original()
+    await prisma.cfdi.create({
+      data: {
+        venueId,
+        orderId: o.id,
+        fiscalEmisorId,
+        type: 'INGRESO',
+        flow: 'STAFF_B',
+        // D21: una heredada TIMBRADA sigue existiendo en producción y debe seguir bloqueando
+        status: 'STAMPED',
+        protocoloIva: null,
+        idempotencyKey: llave(cfdi.idempotencyKey),
         falloDefinitivo: false,
         receptorRfc: receptor.rfc,
         receptorNombre: receptor.razonSocial,
@@ -321,6 +358,8 @@ describe('sustitución sellada', () => {
             fiscalEmisorId,
             flow: 'STAFF_B',
             status: 'STAMP_FAILED',
+            // D21: dato de la ruta nueva (una heredada sin protocoloIva sólo puede existir terminada).
+            protocoloIva: 1,
             falloDefinitivo: false,
             idempotencyKey: `${cfdi.idempotencyKey}-n2`,
             receptorRfc: receptor.rfc,
@@ -369,94 +408,39 @@ describe('sustitución sellada', () => {
     expect(provider.cancelInvoice).not.toHaveBeenCalled()
     expect(await prisma.activityLog.count({ where: { entityId: sub.id, action: 'CFDI_TIMBRE_DUPLICADO' } })).toBe(1)
   })
-  async function historicalReplacement(cfdi: any) {
-    return prisma.cfdi.create({
-      data: {
-        venueId,
-        orderId: cfdi.orderId,
-        fiscalEmisorId,
-        flow: 'STAFF_B',
-        status: 'STAMP_FAILED',
-        attempts: 2,
-        idempotencyKey: `${cfdi.idempotencyKey}-r1`,
-        replacesCfdiId: cfdi.id,
-        receptorRfc: receptor.rfc,
-        receptorNombre: receptor.razonSocial,
-        receptorRegimen: receptor.regimenFiscal,
-        receptorCp: receptor.codigoPostal,
-        usoCfdi: receptor.usoCfdi,
-        formaPago: '01',
-        metodoPago: 'PUE',
-        subtotalCents: 9000,
-        taxCents: 1500,
-        totalCents: 10500,
-      },
-    })
-  }
-  it.each(['pending', 'valid'] as const)('legacy consulta %s sinUUID no finaliza ni cancela', async status => {
+  // D21 (founder, 1-oct, opción A): una sustituta HEREDADA (sin protocoloIva) en un estado reintentable ya no puede existir; la
+  // restricción Cfdi_heredada_solo_terminada lo impide. Por eso las pruebas que reintentaban o recuperaban una (consulta
+  // pending/valid sin UUID, recuperación con el dinero histórico, envío tardío contra una cancelación o una versión nueva) se
+  // reemplazan por esta: crearla falla y no queda nada a medias. Toda sustituta nueva nace con protocoloIva = 1 (prueba 1).
+  it.each(['STAMP_FAILED', 'STAMPING'] as const)('una sustituta heredada %s ya no puede existir: la base la rechaza', async status => {
     const { cfdi } = await original()
-    const sub = await historicalReplacement(cfdi)
-    let atLookup: any
-    provider.findByExternalId.mockImplementation(async () => {
-      atLookup = await replacementRow(cfdi.id)
-      return { ...stamped, status, uuid: null }
-    })
-    await expect(replacement(cfdi.id)).rejects.toThrow(/proceso|procesando/)
-    expect(await replacementRow(cfdi.id)).toMatchObject({ status: 'STAMPING', attempts: 3, uuid: null, entrada: null, protocoloIva: null })
-    expect(await replacementRow(cfdi.id)).toEqual(atLookup)
-    expect(provider.findByExternalId).toHaveBeenCalledWith(sub.idempotencyKey)
-    expect(provider.createInvoice).not.toHaveBeenCalled()
-    expect(provider.downloadXml).not.toHaveBeenCalled()
-    expect(provider.cancelInvoice).not.toHaveBeenCalled()
+    const antes = await prisma.cfdi.findUniqueOrThrow({ where: { id: cfdi.id } })
+    await expect(
+      prisma.cfdi.create({
+        data: {
+          venueId,
+          orderId: cfdi.orderId,
+          fiscalEmisorId,
+          flow: 'STAFF_B',
+          status,
+          protocoloIva: null,
+          attempts: 2,
+          idempotencyKey: `${cfdi.idempotencyKey}-r1`,
+          replacesCfdiId: cfdi.id,
+          receptorRfc: receptor.rfc,
+          receptorNombre: receptor.razonSocial,
+          receptorRegimen: receptor.regimenFiscal,
+          receptorCp: receptor.codigoPostal,
+          usoCfdi: receptor.usoCfdi,
+          formaPago: '01',
+          metodoPago: 'PUE',
+          subtotalCents: 9000,
+          taxCents: 1500,
+          totalCents: 10500,
+        },
+      }),
+    ).rejects.toThrow(/Cfdi_heredada_solo_terminada/)
+    expect(await prisma.cfdi.count({ where: { replacesCfdiId: cfdi.id } })).toBe(0)
+    expect(await prisma.cfdi.findUniqueOrThrow({ where: { id: cfdi.id } })).toEqual(antes)
   })
-  it('legacy recuperada conserva dinero histórico y finaliza identidad antes de archivos', async () => {
-    const { cfdi } = await original()
-    await historicalReplacement(cfdi)
-    provider.findByExternalId.mockResolvedValue({ ...stamped })
-    provider.downloadXml.mockImplementationOnce(async () => {
-      expect(await replacementRow(cfdi.id)).toMatchObject({ status: 'STAMPED', uuid: stamped.uuid, totalCents: 10500 })
-      return Buffer.from('<Comprobante/>')
-    })
-    const res = await replacement(cfdi.id)
-    expect(res.status).toBe('REPLACED')
-    const sub = await replacementRow(cfdi.id)
-    expect(sub).toMatchObject({
-      totalCents: 10500,
-      subtotalCents: 9000,
-      taxCents: 1500,
-      entrada: null,
-      entradaHuella: null,
-      protocoloIva: null,
-      attempts: 3,
-      taxBreakdown: [],
-    })
-    expect(await prisma.orderItemSelloIva.count({ where: { cfdiId: sub.id } })).toBe(0)
-    expect(provider.createInvoice).not.toHaveBeenCalled()
-  })
-  it.each(['pending', 'failure', 'valid'] as const)(
-    'legacy envío %s tardío no revive cancelación ni pisa versión posterior',
-    async response => {
-      for (const state of ['CANCELLED', 'NEW_VERSION']) {
-        const { cfdi } = await original()
-        const old = await historicalReplacement(cfdi)
-        provider.cancelInvoice.mockClear()
-        provider.findByExternalId.mockResolvedValue(null)
-        provider.createInvoice.mockImplementationOnce(async () => {
-          await prisma.cfdi.update({
-            where: { id: old.id },
-            data: state === 'CANCELLED' ? { status: 'CANCELLED', cancelStatus: 'ACCEPTED' } : { attempts: 4 },
-          })
-          if (response === 'failure') throw new Error('timeout')
-          return { ...stamped, status: response, uuid: response === 'pending' ? null : stamped.uuid }
-        })
-        await expect(replacement(cfdi.id)).rejects.toThrow(/proceso|procesando/)
-        expect(await replacementRow(cfdi.id)).toMatchObject(
-          state === 'CANCELLED'
-            ? { status: 'CANCELLED', cancelStatus: 'ACCEPTED', uuid: null }
-            : { status: 'STAMPING', attempts: 4, uuid: null },
-        )
-        expect(provider.cancelInvoice).not.toHaveBeenCalled()
-      }
-    },
-  )
 })

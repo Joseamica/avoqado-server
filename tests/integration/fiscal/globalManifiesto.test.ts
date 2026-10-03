@@ -18,7 +18,7 @@ const database = new URL(process.env.TEST_DATABASE_URL ?? '')
 // La base fiscal de esta Mac o la desechable de CI (ci-cd.yml adopta ese nombre en vez de relajar la guarda): nunca otra.
 if (
   !['localhost', '127.0.0.1'].includes(database.hostname) ||
-  !['/av_db_25_iva_test', '/avoqado_h1a_test_20260808'].includes(database.pathname)
+  !['/av_db_25_iva_test', '/av_db_25_iva_test_b3c', '/avoqado_h1a_test_20260808'].includes(database.pathname)
 )
   throw new Error('Dedicated test DB required')
 const NOW = new Date('2026-06-03T17:00:00Z')
@@ -370,36 +370,31 @@ describe('global con manifiesto y entrada congelada', () => {
     expect(await row()).toMatchObject({ attempts: 1, falloDefinitivo: true })
     expect(await prisma.orderItemSelloIva.count({ where: { cfdiId: (await row()).id } })).toBe(0)
   })
-  async function legacy() {
+  // D21 (founder, 1-oct, opción A): una global HEREDADA (sin protocoloIva) en un estado reintentable ya no puede existir. Las nueve
+  // pruebas que la fabricaban a partir de un intento incierto (consulta pending en STAMPING, sin órdenes elegibles, recuperar
+  // identidad, reintento con identidad histórica, respuesta valid/pending/failure de otra versión, pending/valid sin UUID) se
+  // reemplazan por la del rechazo: volverla heredada falla y la transacción no deja nada a medias (manifiesto y sellos incluidos).
+  it('una global incierta ya no puede volverse heredada: la base lo rechaza sin soltar manifiesto ni sellos', async () => {
     await order()
     provider.createGlobalInvoice.mockRejectedValueOnce(new Error('timeout'))
     await global()
     const c = await row()
-    await prisma.$transaction(async tx => {
-      await liberarSellosDe(tx, c.id)
-      await tx.cfdiGlobalOrden.deleteMany({ where: { cfdiId: c.id } })
-      await tx.cfdi.update({
-        where: { id: c.id },
-        data: { protocoloIva: null, entrada: Prisma.DbNull, entradaHuella: null, enviadoAt: null },
-      })
-    })
-    provider.createGlobalInvoice.mockClear()
-    return row()
-  }
-  it('legacy STAMPING consulta pending sin escribir identidad ni timestamp', async () => {
-    const c = await legacy()
-    const before = await prisma.cfdi.update({ where: { id: c.id }, data: { status: 'STAMPING' } })
-    provider.findByExternalId.mockResolvedValue({ ...valid(), status: 'pending', uuid: null })
-    await expect(global()).rejects.toThrow(/procesando/)
-    expect(await row()).toEqual(before)
-    expect(provider.createGlobalInvoice).not.toHaveBeenCalled()
-  })
-  it('legacy sin órdenes elegibles conserva el conteo de mixtas', async () => {
-    const before = await legacy()
-    await prisma.product.update({ where: { id: productId }, data: { ivaTratamiento: 'IVA_0' } })
-    expect(await global()).toMatchObject({ status: 'NOTHING_TO_INVOICE', candidateCount: 0, excluidasPorIvaMixto: 1 })
-    expect(await row()).toEqual(before)
-    expect(provider.createGlobalInvoice).not.toHaveBeenCalled()
+    expect(c).toMatchObject({ status: 'STAMP_FAILED', falloDefinitivo: false, protocoloIva: 1 })
+    expect(await prisma.cfdiGlobalOrden.count({ where: { cfdiId: c.id } })).toBe(1)
+    expect(await prisma.orderItemSelloIva.count({ where: { cfdiId: c.id } })).toBe(1)
+    await expect(
+      prisma.$transaction(async tx => {
+        await liberarSellosDe(tx, c.id)
+        await tx.cfdiGlobalOrden.deleteMany({ where: { cfdiId: c.id } })
+        await tx.cfdi.update({
+          where: { id: c.id },
+          data: { protocoloIva: null, entrada: Prisma.DbNull, entradaHuella: null, enviadoAt: null },
+        })
+      }),
+    ).rejects.toThrow(/Cfdi_heredada_solo_terminada/)
+    expect(await row()).toEqual(c)
+    expect(await prisma.cfdiGlobalOrden.count({ where: { cfdiId: c.id } })).toBe(1)
+    expect(await prisma.orderItemSelloIva.count({ where: { cfdiId: c.id } })).toBe(1)
   })
   it('un fallo después de manifiesto y sellos revierte toda la reserva global', async () => {
     const o = await order()
@@ -421,50 +416,6 @@ describe('global con manifiesto y entrada congelada', () => {
     expect(await prisma.cfdi.count({ where: { venueId } })).toBe(0)
     expect(await prisma.cfdiGlobalOrden.count({ where: { orderId: o.id } })).toBe(0)
     expect(await prisma.orderItemSelloIva.count({ where: { orderItem: { orderId: o.id } } })).toBe(0)
-    expect(provider.createGlobalInvoice).not.toHaveBeenCalled()
-  })
-  it('legacy recupera identidad sin inventar foto ni reescribir montos históricos', async () => {
-    const c = await legacy()
-    const stamped = valid()
-    provider.findByExternalId.mockResolvedValue(stamped)
-    provider.downloadXml.mockImplementation(async () => {
-      expect((await row()).status).toBe('STAMPED')
-      return Buffer.from('<Comprobante/>')
-    })
-    expect((await global()).status).toBe('STAMPED')
-    expect(provider.findByExternalId).toHaveBeenCalledWith(c.idempotencyKey)
-    expect(provider.createGlobalInvoice).not.toHaveBeenCalled()
-    expect(await row()).toMatchObject({ entrada: null, protocoloIva: null, subtotalCents: c.subtotalCents, taxCents: c.taxCents })
-    expect(await prisma.cfdiGlobalOrden.count({ where: { cfdiId: c.id } })).toBe(0)
-  })
-  it('legacy reintenta con identidad histórica y escribe versión antes del PAC', async () => {
-    const c = await legacy()
-    provider.createGlobalInvoice.mockImplementation(async params => {
-      expect(params.externalId).toBe(c.idempotencyKey)
-      expect(params.idempotencyKey).toBeUndefined()
-      expect((await row()).attempts).toBe(c.attempts + 1)
-      return valid()
-    })
-    expect((await global()).status).toBe('STAMPED')
-    expect(await row()).toMatchObject({ entrada: null, protocoloIva: null })
-  })
-  it.each(['valid', 'pending', 'failure'])('legacy ignora respuesta %s después de cambiar la versión', async outcome => {
-    await legacy()
-    provider.createGlobalInvoice.mockImplementation(async () => {
-      const c = await row()
-      await prisma.cfdi.update({ where: { id: c.id }, data: { attempts: c.attempts + 1 } })
-      if (outcome === 'failure') throw new Error('late')
-      return outcome === 'valid' ? valid() : { ...valid(), status: 'pending', uuid: null }
-    })
-    await expect(global()).rejects.toThrow(/procesando/)
-    expect(await row()).toMatchObject({ attempts: 3, status: 'STAMPING', uuid: null, facturapiId: null, protocoloIva: null })
-    expect(provider.downloadXml).not.toHaveBeenCalled()
-  })
-  it.each(['pending', 'valid'])('legacy %s sinUUID no finaliza ni reenvía', async status => {
-    await legacy()
-    provider.findByExternalId.mockResolvedValue({ ...valid(), status, uuid: null })
-    await expect(global()).rejects.toThrow(/procesando/)
-    expect((await row()).status).toBe('STAMP_FAILED')
     expect(provider.createGlobalInvoice).not.toHaveBeenCalled()
   })
 })

@@ -13,7 +13,7 @@ const testDatabase = new URL(process.env.TEST_DATABASE_URL ?? '')
 // La base fiscal de esta Mac o la desechable de CI (ci-cd.yml adopta ese nombre en vez de relajar la guarda): nunca otra.
 if (
   !['localhost', '127.0.0.1'].includes(testDatabase.hostname) ||
-  !['/av_db_25_iva_test', '/avoqado_h1a_test_20260808'].includes(testDatabase.pathname)
+  !['/av_db_25_iva_test', '/av_db_25_iva_test_b3c', '/avoqado_h1a_test_20260808'].includes(testDatabase.pathname)
 ) {
   throw new Error('Esta suite exige la base local av_db_25_iva_test o la desechable de CI avoqado_h1a_test_20260808.')
 }
@@ -98,6 +98,8 @@ describe('sellarRenglones / liberarSellosDe / renglonesSellados (integración)',
         fiscalEmisorId,
         flow: 'STAFF_B',
         orderId: orderId ?? null,
+        // D21: una heredada (sin protocoloIva) sólo puede existir terminada; este CFDI en DRAFT es de la ruta nueva.
+        protocoloIva: 1,
         receptorRfc: 'XAXX010101000',
         receptorNombre: 'PÚBLICO EN GENERAL',
         receptorRegimen: '616',
