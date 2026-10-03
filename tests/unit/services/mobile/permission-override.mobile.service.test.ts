@@ -218,6 +218,81 @@ describe('createPermissionOverride', () => {
       expect.objectContaining({ where: { venueId_role: { venueId: VENUE, role: StaffRole.WAITER } } }),
     )
   })
+
+  /**
+   * 🔴 Codex (B3b, código r1, P1 #2): el negocio le puede QUITAR a un rol un permiso de fábrica
+   * (`VenueRolePermission.deniedPermissions`). `checkPermission` respeta esa exclusión, así que el ADMIN recibe 403
+   * sin PIN. Si aquí se ignorara, ese mismo ADMIN tecleaba SU PROPIO PIN, obtenía un token del permiso que le
+   * quitaron y pasaba el middleware con él: el PIN devolvía lo que el dueño retiró a propósito.
+   */
+  describe('respeta lo que el negocio le QUITÓ al rol (deniedPermissions)', () => {
+    const adminStaffVenue = {
+      ...managerStaffVenue,
+      id: 'sv_admin',
+      role: StaffRole.ADMIN,
+      staff: { firstName: 'Ana', lastName: 'Admin' },
+    }
+
+    it('🔴 un ADMIN al que le quitaron cfdi:configure NO emite un token de ese permiso con su propio PIN', async () => {
+      ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValue(adminStaffVenue)
+      ;(prisma.venueRolePermission.findUnique as jest.Mock).mockResolvedValue({ permissions: [], deniedPermissions: ['cfdi:configure'] })
+
+      await expect(createPermissionOverride({ venueId: VENUE, pin: '4321', permission: 'cfdi:configure', now: NOW })).rejects.toMatchObject(
+        { code: 'OVERRIDE_INSUFFICIENT', authorizer: { staffVenueId: 'sv_admin', role: StaffRole.ADMIN } },
+      )
+      expect(prisma.permissionOverride.create).not.toHaveBeenCalled()
+    })
+
+    it('la exclusión de UN permiso no le quita al ADMIN los demás: su PIN sigue autorizando lo que conserva', async () => {
+      ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValue(adminStaffVenue)
+      ;(prisma.venueRolePermission.findUnique as jest.Mock).mockResolvedValue({ permissions: [], deniedPermissions: ['cfdi:configure'] })
+
+      const result = await createPermissionOverride({ venueId: VENUE, pin: '4321', permission: 'cfdi:issue', now: NOW })
+      expect(result.authorizedBy.id).toBe('sv_admin')
+    })
+
+    it('un ADMIN SIN exclusiones sí emite el token de cfdi:configure (control: el rechazo de arriba es la exclusión)', async () => {
+      ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValue(adminStaffVenue)
+      ;(prisma.venueRolePermission.findUnique as jest.Mock).mockResolvedValue({ permissions: [], deniedPermissions: [] })
+
+      const result = await createPermissionOverride({ venueId: VENUE, pin: '4321', permission: 'cfdi:configure', now: NOW })
+      expect(result.authorizedBy.id).toBe('sv_admin')
+      expect(prisma.permissionOverride.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({ permission: 'cfdi:configure', authorizedById: 'sv_admin' }),
+      })
+    })
+
+    /**
+     * 🔴 Codex (B3b, código r2, N1): aplicar exclusiones re-resuelve dependencias. Excluir `scale:use` abre el comodín
+     * `scale:*` del ADMIN, `scale:configure` sobrevive y su dependencia AGREGA `tpv-settings:read`/`update`, que ese
+     * ADMIN no tenía. Sin exclusiones el PIN se rechazaba; con la exclusión a secas se emitía el token. Quitar un
+     * permiso nunca puede habilitar otro: el PIN exige las DOS lecturas (sin y con exclusiones).
+     */
+    it.each(['tpv-settings:read', 'tpv-settings:update'])(
+      '🔴 excluir scale:use NO le habilita al ADMIN un token de %s que sin exclusiones no tenía',
+      async permiso => {
+        ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValue(adminStaffVenue)
+        ;(prisma.venueRolePermission.findUnique as jest.Mock).mockResolvedValue({ permissions: [], deniedPermissions: ['scale:use'] })
+
+        await expect(createPermissionOverride({ venueId: VENUE, pin: '4321', permission: permiso, now: NOW })).rejects.toBeInstanceOf(
+          OverrideInsufficientError,
+        )
+        expect(prisma.permissionOverride.create).not.toHaveBeenCalled()
+      },
+    )
+
+    it.each(['tpv-settings:read', 'tpv-settings:update'])(
+      'control: el mismo ADMIN SIN exclusiones tampoco emite %s (el rechazo de arriba es el de siempre)',
+      async permiso => {
+        ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValue(adminStaffVenue)
+        ;(prisma.venueRolePermission.findUnique as jest.Mock).mockResolvedValue({ permissions: [], deniedPermissions: [] })
+
+        await expect(createPermissionOverride({ venueId: VENUE, pin: '4321', permission: permiso, now: NOW })).rejects.toBeInstanceOf(
+          OverrideInsufficientError,
+        )
+      },
+    )
+  })
 })
 
 describe('consumePermissionOverride', () => {
