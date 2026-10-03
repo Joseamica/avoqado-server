@@ -3,7 +3,7 @@ import prisma from '../../../utils/prismaClient'
 import { BadRequestError, ConflictError, NotFoundError } from '../../../errors/AppError'
 import { withSerializableRetry } from '../../../utils/serializableRetry'
 import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
-import { assertPermisoEnSedes, assertPermisoEnTodasLasSedes, sedesConServicePay, sedesLegiblesDe } from './acceso'
+import { assertPermisoEnSedes, assertPermisoEnTodasLasSedes, exigirPermisoEnSedes, sedesConServicePay, sedesLegiblesDe } from './acceso'
 import { dbDateComoFecha, fechaComoDbDate, hoyLocal, Periodicidad, periodoQueContiene } from './periodos'
 
 type Tx = Prisma.TransactionClient
@@ -24,8 +24,10 @@ export async function periodoQueContieneFecha(db: Db, organizationId: string, fe
  * El periodo que contiene `fecha`; si no existe, se deriva de la periodicidad y se crea. Con SERIALIZABLE la foto se toma en la
  * primera sentencia, antes de esperar el candado: lo que hace correcta la carrera es SSI + el índice único
  * (organizationId, periodStart) + el reintento de `withSerializableRetry`, no el candado.
+ * `activas`: las sedes con el módulo, ya resueltas ANTES de la transacción (el cierre las pasa para no consultar el
+ * cliente global aquí dentro). Sin ellas se consultan, como siempre.
  */
-export async function asegurarPeriodo(tx: Tx, organizationId: string, fecha: string): Promise<ServicePayPeriod> {
+export async function asegurarPeriodo(tx: Tx, organizationId: string, fecha: string, activas?: string[]): Promise<ServicePayPeriod> {
   const existente = await periodoQueContieneFecha(tx, organizationId, fecha)
   if (existente) return existente
   await lockPeriodosDeOrganizacion(tx, organizationId)
@@ -43,7 +45,7 @@ export async function asegurarPeriodo(tx: Tx, organizationId: string, fecha: str
       organizationId,
       periodStart: fechaComoDbDate(p.start),
       periodEnd: fechaComoDbDate(p.end),
-      venueIds: (await sedesConServicePay(organizationId)).sort(),
+      venueIds: [...(activas ?? (await sedesConServicePay(organizationId)))].sort(),
     },
   })
 }
@@ -70,13 +72,15 @@ export async function bloquearPeriodo(tx: Tx, periodId: string): Promise<Service
  * unión —las sedes que el periodo ya tiene más las nuevas—, no sólo en las nuevas (Codex R2-R1-9): con permiso sólo en
  * BSF nadie amplía un periodo de PN a PN+BSF. `exigirModulo` (default true) pide que la sede tenga hoy el módulo; la
  * liquidación lo apaga para que la deuda de una sede que se desactivó tenga dónde caer (spec §5.6).
+ * `activas` y `permitidas` (opcionales): módulos y permisos ya resueltos ANTES de la transacción; con ellos no se consulta
+ * el cliente global aquí dentro (lo usa el cierre). Sin ellos se consultan, como siempre.
  */
 export async function ampliarAlcance(
   tx: Tx,
   p: ServicePayPeriod,
   venueIds: string[],
   userId: string,
-  o: { exigirModulo?: boolean } = {},
+  o: { exigirModulo?: boolean; activas?: string[]; permitidas?: ReadonlySet<string> } = {},
 ): Promise<ServicePayPeriod> {
   const nuevas = [...new Set(venueIds)].filter(v => !p.venueIds.includes(v)).sort()
   if (!nuevas.length) return p
@@ -84,16 +88,13 @@ export async function ampliarAlcance(
   const deLaOrg = await tx.venue.count({ where: { id: { in: nuevas }, organizationId: p.organizationId } })
   if (deLaOrg !== nuevas.length) throw new NotFoundError('Sede no encontrada')
   if (o.exigirModulo !== false) {
-    const activas = await sedesConServicePay(p.organizationId)
+    const activas = o.activas ?? (await sedesConServicePay(p.organizationId))
     if (nuevas.some(v => !activas.includes(v))) throw new BadRequestError('Esa sede no tiene Pago por servicio activo', 'SEDE_SIN_MODULO')
   }
   const union = [...p.venueIds, ...nuevas].sort()
-  await assertPermisoEnSedes(
-    userId,
-    union,
-    'staffpay:close',
-    'Para sumar una sede al periodo necesitas el permiso de cerrar periodos en todas sus sedes',
-  )
+  const explicacion = 'Para sumar una sede al periodo necesitas el permiso de cerrar periodos en todas sus sedes'
+  if (o.permitidas) exigirPermisoEnSedes(o.permitidas, union, explicacion)
+  else await assertPermisoEnSedes(userId, union, 'staffpay:close', explicacion)
   return tx.servicePayPeriod.update({ where: { id: p.id }, data: { venueIds: union } })
 }
 

@@ -9,6 +9,8 @@ jest.mock('@/services/dashboard/staffPay/acceso', () => ({
   ...jest.requireActual('@/services/dashboard/staffPay/acceso'),
   sedesConServicePay: jest.fn(async () => (global as any).__sedes),
   tienePermisoEn: jest.fn(async () => true),
+  // El cierre resuelve sus permisos ANTES de la transacción (revisión A8, Importante 2).
+  sedesConPermiso: jest.fn(async (_u: string, venueIds: string[]) => venueIds),
   assertPermisoEnSedes: jest.fn(async () => undefined),
 }))
 const acceso = jest.requireMock('@/services/dashboard/staffPay/acceso')

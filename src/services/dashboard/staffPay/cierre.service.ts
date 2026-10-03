@@ -4,7 +4,7 @@ import prisma from '../../../utils/prismaClient'
 import { BadRequestError, ConflictError } from '../../../errors/AppError'
 import { withSerializableRetry } from '../../../utils/serializableRetry'
 import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
-import { assertPermisoEnSedes, sedesConServicePay, tienePermisoEn } from './acceso'
+import { exigirPermisoEnSedes, sedesConPermiso, sedesConServicePay, tienePermisoEn } from './acceso'
 import { ampliarAlcance, asegurarPeriodo, bloquearPeriodo, periodoQueContieneFecha } from './periodosGuardados'
 import { dbDateComoFecha, PeriodoCanonico, periodoQueContiene, venuePeriodRange } from './periodos'
 import { ClaseValorada, contarPorEstado, FiltroValoracion, valorarClases } from './valoracion'
@@ -407,20 +407,26 @@ export async function cerrarPeriodo(input: {
   const organizationId = await organizacionDe(input.venueId)
   const ahora = input.ahora ?? new Date()
   const tamLote = input.tamLote ?? LOTE_CIERRE
+  // Módulos y permisos con el cliente GLOBAL, ANTES de la transacción: dentro retendrían su conexión mientras piden otra
+  // (la familia de Codex R4-Nuevo 1). Candidatas: el alcance del periodo como está ahora ∪ las sedes con el módulo. Dentro
+  // sólo se COMPARA contra lo resuelto; una sede que entró al alcance entretanto no tiene permiso resuelto y se niega.
+  const activas = await sedesConServicePay(organizationId)
+  const filaAntes = await periodoQueContieneFecha(prisma, organizationId, input.fecha)
+  const permitidas = new Set(await sedesConPermiso(input.userId, [...(filaAntes?.venueIds ?? []), ...activas], 'staffpay:close'))
   try {
     return await withSerializableRetry(
       async tx => {
-        const fila = await asegurarPeriodo(tx, organizationId, input.fecha)
+        const fila = await asegurarPeriodo(tx, organizationId, input.fecha, activas)
         let p = await bloquearPeriodo(tx, fila.id)
         const sinPermiso = 'Para cerrar necesitas el permiso de cerrar periodos en todas las sedes del periodo'
         // Permiso también ANTES del retorno idempotente (Codex R1-8): un «ya estaba cerrado» no regala los totales.
         if (p.status === 'CLOSED') {
-          await assertPermisoEnSedes(input.userId, p.venueIds, 'staffpay:close', sinPermiso)
+          exigirPermisoEnSedes(permitidas, p.venueIds, sinPermiso)
           return resultadoGuardado(tx, p, true)
         }
         // D2: el cierre suma las sedes que hoy tienen el módulo, con permiso en cada una (`ampliarAlcance`).
-        p = await ampliarAlcance(tx, p, await sedesConServicePay(organizationId), input.userId)
-        await assertPermisoEnSedes(input.userId, p.venueIds, 'staffpay:close', sinPermiso)
+        p = await ampliarAlcance(tx, p, activas, input.userId, { activas, permitidas })
+        exigirPermisoEnSedes(permitidas, p.venueIds, sinPermiso)
         const a = await alcanceDe(tx, p)
         const bloqueos = await bloqueosDe(tx, a, ahora)
         const b = (codigo: Bloqueo['codigo']) => bloqueos.find(x => x.codigo === codigo)

@@ -60,6 +60,22 @@ export async function sedesLegiblesDe(userId: string, venueIds: string[]): Promi
   return { venueIds: legibles, parcial: legibles.length < todas.length }
 }
 
+/**
+ * Las sedes de `venueIds` donde `userId` tiene `permiso`. Para resolver el permiso ANTES de una transacción de escritura:
+ * usa el cliente GLOBAL, y dentro de la transacción eso retendría su conexión mientras pide otra (la familia de Codex
+ * R4-Nuevo 1). Dentro se compara contra este conjunto con `exigirPermisoEnSedes`.
+ */
+export async function sedesConPermiso(userId: string, venueIds: string[], permiso: string): Promise<string[]> {
+  const permitidas: string[] = []
+  for (const v of [...new Set(venueIds)].sort()) if (await tienePermiso(userId, v, permiso)) permitidas.push(v)
+  return permitidas
+}
+
+/** La regla de `assertPermisoEnSedes` contra un conjunto ya resuelto (`sedesConPermiso`). Pura: va dentro de la transacción. */
+export function exigirPermisoEnSedes(permitidas: ReadonlySet<string>, venueIds: string[], explicacion: string): void {
+  if (venueIds.some(v => !permitidas.has(v))) throw new ForbiddenError(explicacion)
+}
+
 /** Exige `permiso` en CADA sede (spec §9.2: cerrar, liquidar, marcar pagado). Revisa en orden fijo. */
 export async function assertPermisoEnSedes(userId: string, venueIds: string[], permiso: string, explicacion: string): Promise<void> {
   for (const venueId of [...new Set(venueIds)].sort()) {

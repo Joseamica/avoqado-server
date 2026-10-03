@@ -14,6 +14,8 @@ jest.mock('@/services/access/access.service', () => ({
 import {
   assertPermisoEnSedes,
   assertPermisoEnTodasLasSedes,
+  exigirPermisoEnSedes,
+  sedesConPermiso,
   sedesLegibles,
   sedesLegiblesDe,
   venueHasServicePayAccess,
@@ -81,5 +83,21 @@ describe('acceso — fase 2: assertPermisoEnSedes y sedesLegiblesDe', () => {
     mockIsModuleEnabled.mockResolvedValue(false)
     mockGetUserAccess.mockImplementation(async (_u: string, v: string) => ({ corePermissions: v === 'pn' ? ['staffpay:read'] : [] }))
     await expect(sedesLegiblesDe('u', ['bsf', 'pn'])).resolves.toEqual({ venueIds: ['pn'], parcial: true })
+  })
+})
+
+describe('acceso — permisos resueltos ANTES de una transacción (revisión A8, Importante 2)', () => {
+  it('sedesConPermiso devuelve sólo las sedes con el permiso, sin repetidas y sin las que no tienen membresía', async () => {
+    mockGetUserAccess.mockImplementation(async (_u: string, v: string) => {
+      if (v === 'x') throw new Error('no membership')
+      return { corePermissions: v === 'bsf' ? ['staffpay:read'] : ['staffpay:close'] }
+    })
+    await expect(sedesConPermiso('u', ['pn', 'bsf', 'x', 'pn'], 'staffpay:close')).resolves.toEqual(['pn'])
+  })
+  it('exigirPermisoEnSedes (pura) pasa con todas dentro y niega con la explicación si falta una', () => {
+    expect(() => exigirPermisoEnSedes(new Set(['pn', 'bsf']), ['pn'], 'falta')).not.toThrow()
+    expect(() => exigirPermisoEnSedes(new Set(['pn']), ['pn', 'bsf'], 'Necesitas cerrar en todas')).toThrow(
+      expect.objectContaining({ statusCode: 403, message: 'Necesitas cerrar en todas' }),
+    )
   })
 })

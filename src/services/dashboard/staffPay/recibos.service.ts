@@ -7,7 +7,7 @@ import { utcTs } from '../../../utils/sqlDates'
 import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
 import { encodeExport, EncodedExport, ExportColumnDef, getRowCapForFormat } from '../export.helpers'
 import { runWithoutCancellation } from '../../../utils/requestCancellation'
-import { assertPermisoEnSedes, sedesConServicePay, sedesLegiblesDe } from './acceso'
+import { assertPermisoEnSedes, exigirPermisoEnSedes, sedesConPermiso, sedesConServicePay, sedesLegiblesDe } from './acceso'
 import { bloquearPeriodo, periodoQueContieneFecha } from './periodosGuardados'
 import { dbDateComoFecha, periodoQueContiene, venuePeriodRange } from './periodos'
 import { valoracionCte } from './valoracion'
@@ -75,13 +75,23 @@ async function pendientesDePago(db: Db, p: { id: string; status: string }, staff
   return { cantidad, total, muestra, huella: h.digest('hex') }
 }
 
+const TOPE_SEDES_RECIBO = 500
+
+/** Las sedes de un recibo, para su permiso. Nunca recorta: con más del tope se niega en vez de revisar sólo una parte. */
 async function sedesDeRecibo(db: Db, periodId: string, staffId: string): Promise<string[]> {
   const sedes = await db.serviceEarning.findMany({
     where: { periodId, staffId },
     select: { venueId: true },
     distinct: ['venueId'],
-    take: 500,
+    orderBy: { venueId: 'asc' },
+    take: TOPE_SEDES_RECIBO + 1,
   })
+  if (sedes.length > TOPE_SEDES_RECIBO) {
+    throw new BadRequestError(
+      `Este recibo tiene más de ${TOPE_SEDES_RECIBO} sedes: no se puede revisar el permiso. Pide ayuda a Avoqado.`,
+      'RECIBO_DEMASIADAS_SEDES',
+    )
+  }
   return sedes.map(s => s.venueId)
 }
 
@@ -125,6 +135,15 @@ export async function marcarPagado(input: {
   huellaEsperada?: string
 }) {
   const v = await prisma.venue.findUniqueOrThrow({ where: { id: input.venueId }, select: { organizationId: true } })
+  // Permisos con el cliente GLOBAL, ANTES de la transacción: dentro retendrían su conexión mientras piden otra (la familia
+  // de Codex R4-Nuevo 1). Candidatas: las sedes del periodo (y, uno por uno, las del recibo). Dentro sólo se COMPARA.
+  const antes = await prisma.servicePayPeriod.findFirst({
+    where: { id: input.periodId, organizationId: v.organizationId },
+    select: { venueIds: true },
+  })
+  if (!antes) throw new NotFoundError('Periodo no encontrado')
+  const candidatas = input.staffId ? [...antes.venueIds, ...(await sedesDeRecibo(prisma, input.periodId, input.staffId))] : antes.venueIds
+  const permitidas = new Set(await sedesConPermiso(input.userId, candidatas, 'staffpay:close'))
   return withSerializableRetry(async tx => {
     const p = await bloquearPeriodo(tx, input.periodId)
     if (p.organizationId !== v.organizationId) throw new NotFoundError('Periodo no encontrado')
@@ -133,34 +152,28 @@ export async function marcarPagado(input: {
     if (input.staffId) {
       const sedes = await sedesDeRecibo(tx, p.id, input.staffId)
       if (!sedes.length) throw new NotFoundError('Esa persona no tiene recibo en este periodo')
-      await assertPermisoEnSedes(
-        input.userId,
-        sedes,
-        'staffpay:close',
-        'Para marcar pagado este recibo necesitas el permiso de cerrar periodos en todas sus sedes',
-      )
+      exigirPermisoEnSedes(permitidas, sedes, 'Para marcar pagado este recibo necesitas el permiso de cerrar periodos en todas sus sedes')
     } else {
-      await assertPermisoEnSedes(
-        input.userId,
+      exigirPermisoEnSedes(
+        permitidas,
         p.venueIds,
-        'staffpay:close',
         'Para marcar pagados a todos necesitas el permiso de cerrar periodos en todas las sedes del periodo',
       )
     }
-    // Codex R2-Nuevo 1: con huella, se recalcula DENTRO con el MISMO recorrido completo del preview y se compara ANTES
-    // de escribir; la escritura usa el MISMO `where` y tiene que tocar exactamente esa cantidad. Un ConflictError no se
-    // reintenta (`withSerializableRetry` sólo reintenta 40001/55P03): sale tal cual y la transacción se revierte.
-    const confirmado = input.huellaEsperada ? await pendientesDePago(tx, p, input.staffId) : null
+    // Codex R2-Nuevo 1: se recalcula DENTRO con el MISMO recorrido completo del preview y, con huella, se compara ANTES
+    // de escribir; la escritura usa el MISMO `where` y tiene que tocar exactamente esa cantidad (también da el monto del
+    // ActivityLog). Un ConflictError no se reintenta (`withSerializableRetry` sólo reintenta 40001/55P03).
+    const pendientes = await pendientesDePago(tx, p, input.staffId)
     const cambiaron = () => new ConflictError('Los recibos cambiaron desde la vista previa: revisa de nuevo', 'HUELLA_CAMBIO')
-    if (confirmado && confirmado.huella !== input.huellaEsperada) throw cambiaron()
+    if (input.huellaEsperada && pendientes.huella !== input.huellaEsperada) throw cambiaron()
     const marcados = (
       await tx.staffPayStatement.updateMany({
         where: { periodId: p.id, paidAt: null, ...(input.staffId ? { staffId: input.staffId } : {}) },
         data: { paidAt: new Date(), paidById: input.userId, paidNote: input.nota ?? null },
       })
     ).count
-    // Red: si el conjunto escrito no es el confirmado, se revierte todo.
-    if (confirmado && marcados !== confirmado.cantidad) throw cambiaron()
+    // Red: si el conjunto escrito no es el recorrido (el confirmado), se revierte todo; así el monto del log es el marcado.
+    if (marcados !== pendientes.cantidad) throw cambiaron()
     if (marcados > 0) {
       await writeLegacyActivityAuditTx(tx, {
         staffId: input.userId,
@@ -168,7 +181,13 @@ export async function marcarPagado(input: {
         action: 'SERVICE_PAY_MARKED_PAID',
         entity: 'ServicePayPeriod',
         entityId: p.id,
-        data: { staffId: input.staffId ?? 'todos', marcados, nota: input.nota ?? null },
+        data: {
+          staffId: input.staffId ?? 'todos',
+          marcados,
+          total: pendientes.total.toFixed(2),
+          periodo: { start: dbDateComoFecha(p.periodStart), end: dbDateComoFecha(p.periodEnd) },
+          nota: input.nota ?? null,
+        },
       })
     }
     return { marcados }
@@ -198,6 +217,8 @@ interface FuenteRecibo {
   /** UNA consulta (UNION ALL) con todos los renglones; null si el usuario no puede leer ninguna sede. */
   sql: Prisma.Sql | null
   pagadoEn: string | null
+  /** De QUÉ recibo es un cursor (organización, inicio del periodo, persona y sede): ver `leerCursor`. */
+  llave: string
 }
 
 type EntradaRecibo = {
@@ -359,28 +380,34 @@ async function fuenteDelRecibo(
     nombreSede: new Map([...prep.sedes].map(([id, x]) => [id, x.nombre])),
     sql: partes.length ? Prisma.join(partes, ' UNION ALL ') : null,
     pagadoEn: pagado?.paidAt?.toISOString() ?? null,
+    llave: createHash('sha256')
+      .update([prep.organizationId, canon.start, input.staffId, input.sede ?? ''].join('|'))
+      .digest('hex')
+      .slice(0, 12),
   }
 }
 
 /**
- * Cursor «<A|C>.<instante ISO>|<id>»: la llave estable (fecha de servicio, id) más el ESTADO del periodo con que se
- * emitió (Codex R3-Nuevo 3). Un cursor de otro estado (el periodo se cerró entre páginas) o con el formato del desglose
- * en vivo (`venueId:classSessionId`) no se puede seguir: 409 `RECIBO_CAMBIO` y se vuelve a leer desde el principio.
+ * Cursor «<A|C>.<llave>.<instante ISO>|<id>»: la posición estable (fecha de servicio, id), el ESTADO del periodo con que
+ * se emitió (Codex R3-Nuevo 3) y la `llave` de SU recibo (organización, inicio del periodo, persona y sede). Un cursor de
+ * otro estado (el periodo se cerró entre páginas), de OTRO recibo (otra persona, otro periodo, otro filtro de sede: sin
+ * la llave, devolvía sólo los renglones posteriores de la otra persona con el total completo) o con el formato del
+ * desglose en vivo (`venueId:classSessionId`) no se puede seguir: 409 `RECIBO_CAMBIO` y se vuelve a leer desde el principio.
  */
 const prefijo = (estado: 'OPEN' | 'CLOSED') => (estado === 'CLOSED' ? 'C' : 'A')
 const reciboCambio = () =>
   new ConflictError('El periodo cambió mientras leías: vuelve a cargar el recibo desde el principio.', 'RECIBO_CAMBIO')
 
-function leerCursor(s: string, estado: 'OPEN' | 'CLOSED'): { instante: Date; id: string } {
-  const m = /^([AC])\.([^|]+)\|(.+)$/.exec(s)
+function leerCursor(s: string, f: Pick<FuenteRecibo, 'periodo' | 'llave'>): { instante: Date; id: string } {
+  const m = /^([AC])\.([0-9a-f]{12})\.([^|]+)\|(.+)$/.exec(s)
   if (!m) {
     if (/^[^|]+:[^|]+$/.test(s)) throw reciboCambio() // el cursor del desglose en vivo de un periodo que ya se cerró
     throw new BadRequestError('Cursor inválido')
   }
-  if (m[1] !== prefijo(estado)) throw reciboCambio()
-  const instante = new Date(m[2])
+  if (m[1] !== prefijo(f.periodo.estado) || m[2] !== f.llave) throw reciboCambio()
+  const instante = new Date(m[3])
   if (Number.isNaN(instante.getTime())) throw new BadRequestError('Cursor inválido')
-  return { instante, id: m[3] }
+  return { instante, id: m[4] }
 }
 
 async function totalDelRecibo(db: Db, f: FuenteRecibo): Promise<{ total: Prisma.Decimal; cantidad: number }> {
@@ -402,14 +429,14 @@ async function paginaDelRecibo(
   limite: number,
 ): Promise<{ filas: FilaRecibo[]; siguiente: string | null }> {
   // El cursor se valida aunque la fuente esté vacía: un cursor viejo nunca se acepta en silencio.
-  const c = cursor ? leerCursor(cursor, f.periodo.estado) : null
+  const c = cursor ? leerCursor(cursor, f) : null
   if (!f.sql) return { filas: [], siguiente: null }
   const filas = await db.$queryRaw<FilaRecibo[]>(sqlPaginaDelRecibo(f.sql, c, limite))
   const pagina = filas.slice(0, limite)
   const u = pagina[pagina.length - 1]
   return {
     filas: pagina,
-    siguiente: filas.length > limite && u ? `${prefijo(f.periodo.estado)}.${u.instante.toISOString()}|${u.id}` : null,
+    siguiente: filas.length > limite && u ? `${prefijo(f.periodo.estado)}.${f.llave}.${u.instante.toISOString()}|${u.id}` : null,
   }
 }
 
@@ -451,7 +478,7 @@ export async function reciboDePersona(input: EntradaRecibo): Promise<Recibo> {
 /** La consulta de UNA página del recibo tal como se ejecuta, para su `EXPLAIN` en A13 (Codex R3-R1-12). Nada más la usa. */
 export async function consultaDePaginaDelRecibo(input: EntradaRecibo): Promise<Prisma.Sql | null> {
   const f = await fuenteDelRecibo(prisma, await prepararRecibo(input), input)
-  return f.sql ? sqlPaginaDelRecibo(f.sql, input.cursor ? leerCursor(input.cursor, f.periodo.estado) : null, acotar(input.limit)) : null
+  return f.sql ? sqlPaginaDelRecibo(f.sql, input.cursor ? leerCursor(input.cursor, f) : null, acotar(input.limit)) : null
 }
 
 /** Las filas que reciben LOS DOS formatos, PDF y Excel (Codex R2-R1-14): cada renglón con su signo + el total. Pura. */
@@ -478,6 +505,8 @@ const COLUMNAS: ExportColumnDef<RenglonRecibo>[] = [
   { id: 'lugares', label: 'Lugares', value: r => r.lugares },
   { id: 'monto', label: 'Monto', value: r => r.monto },
 ]
+/** El Excel lleva el monto como NÚMERO (el dueño lo suma); `monto` ya viene redondeado a 2 decimales por `toFixed(2)`. */
+const COLUMNAS_EXCEL: ExportColumnDef<RenglonRecibo>[] = COLUMNAS.map(c => (c.id === 'monto' ? { ...c, value: r => Number(r.monto) } : c))
 const slug = (s: string) =>
   s
     .normalize('NFD')
@@ -523,9 +552,10 @@ export async function exportarRecibo(input: {
     }
     return { f, total, renglones }
   })
+  const columnas = input.format === 'xlsx' ? COLUMNAS_EXCEL : COLUMNAS
   const encoded = await encodeExport(input.format, {
-    allColumns: COLUMNAS,
-    requestedColumnIds: COLUMNAS.map(c => c.id),
+    allColumns: columnas,
+    requestedColumnIds: columnas.map(c => c.id),
     rows: filasDelRecibo({ renglones, total: total.toFixed(2), parcial: f.parcial }),
     title: `Recibo de ${f.persona} · ${f.periodo.start} al ${f.periodo.end}`,
   })

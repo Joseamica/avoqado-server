@@ -10,6 +10,8 @@ jest.mock('@/services/dashboard/staffPay/acceso', () => ({
   ...jest.requireActual('@/services/dashboard/staffPay/acceso'),
   sedesConServicePay: jest.fn(async () => (global as any).__sedes),
   tienePermisoEn: jest.fn(async () => true),
+  // El cierre resuelve sus permisos ANTES de la transacción (revisión A8, Importante 2).
+  sedesConPermiso: jest.fn(async (_u: string, venueIds: string[]) => venueIds),
   assertPermisoEnSedes: jest.fn(async () => undefined),
 }))
 const acceso = jest.requireMock('@/services/dashboard/staffPay/acceso')
@@ -348,6 +350,7 @@ describe('cerrar el periodo (spec §6.3)', () => {
   })
 
   it('sin staffpay:close en todas las sedes, el preview dice SIN_PERMISO SIN ningún número y el cierre se rechaza', async () => {
+    const sinPermiso = { statusCode: 403, message: 'Para cerrar necesitas el permiso de cerrar periodos en todas las sedes del periodo' }
     m = await mundoConAgosto('cierre-permiso')
     await clase(m, { staffId: m.ana, inicioIso: '2026-08-04T14:00:00Z', reservas: confirmadas(8) })
     acceso.tienePermisoEn.mockResolvedValueOnce(false)
@@ -358,11 +361,11 @@ describe('cerrar el periodo (spec §6.3)', () => {
       huella: '',
       periodo: { venueIds: [] },
     })
-    acceso.assertPermisoEnSedes.mockRejectedValueOnce(Object.assign(new Error('Necesitas cerrar en todas'), { statusCode: 403 }))
-    await expect(cerrar(m)).rejects.toThrow('Necesitas cerrar en todas')
+    acceso.sedesConPermiso.mockResolvedValueOnce([])
+    await expect(cerrar(m)).rejects.toMatchObject(sinPermiso)
     // Ya cerrado por alguien con permiso: el retorno idempotente también exige el permiso.
     await cerrar(m)
-    acceso.assertPermisoEnSedes.mockRejectedValueOnce(Object.assign(new Error('Necesitas cerrar en todas'), { statusCode: 403 }))
-    await expect(cerrar(m)).rejects.toThrow('Necesitas cerrar en todas')
+    acceso.sedesConPermiso.mockResolvedValueOnce([])
+    await expect(cerrar(m)).rejects.toMatchObject(sinPermiso)
   })
 })
