@@ -44,3 +44,25 @@ export async function sedesLegibles(userId: string, organizationId: string): Pro
   for (const v of sedes) if (await tienePermiso(userId, v, 'staffpay:read')) venueIds.push(v)
   return { venueIds, parcial: venueIds.length < sedes.length }
 }
+
+export async function tienePermisoEn(userId: string, venueId: string, permiso: string): Promise<boolean> {
+  return tienePermiso(userId, venueId, permiso)
+}
+
+/**
+ * Lo HISTÓRICO se lee sobre el alcance del periodo, no sobre las sedes que hoy tienen el módulo (Codex R1-1): apagar
+ * BSF no puede cambiar el recibo cerrado de Ana ni esconder sus diferencias.
+ */
+export async function sedesLegiblesDe(userId: string, venueIds: string[]): Promise<{ venueIds: string[]; parcial: boolean }> {
+  const todas = [...new Set(venueIds)].sort()
+  const legibles: string[] = []
+  for (const v of todas) if (await tienePermiso(userId, v, 'staffpay:read')) legibles.push(v)
+  return { venueIds: legibles, parcial: legibles.length < todas.length }
+}
+
+/** Exige `permiso` en CADA sede (spec §9.2: cerrar, liquidar, marcar pagado). Revisa en orden fijo. */
+export async function assertPermisoEnSedes(userId: string, venueIds: string[], permiso: string, explicacion: string): Promise<void> {
+  for (const venueId of [...new Set(venueIds)].sort()) {
+    if (!(await tienePermiso(userId, venueId, permiso))) throw new ForbiddenError(explicacion)
+  }
+}

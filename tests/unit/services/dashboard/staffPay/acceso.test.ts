@@ -11,7 +11,13 @@ jest.mock('@/services/access/access.service', () => ({
   hasPermission: (access: { corePermissions: string[] }, p: string) => access.corePermissions.includes(p),
 }))
 
-import { assertPermisoEnTodasLasSedes, sedesLegibles, venueHasServicePayAccess } from '@/services/dashboard/staffPay/acceso'
+import {
+  assertPermisoEnSedes,
+  assertPermisoEnTodasLasSedes,
+  sedesLegibles,
+  sedesLegiblesDe,
+  venueHasServicePayAccess,
+} from '@/services/dashboard/staffPay/acceso'
 
 describe('acceso — feature nueva', () => {
   beforeEach(() => {
@@ -48,5 +54,32 @@ describe('acceso — regresión', () => {
   it('una organización sin sedes con el módulo no autoriza nada', async () => {
     prismaMock.venue.findMany.mockResolvedValue([])
     await expect(assertPermisoEnTodasLasSedes('u1', 'org1', 'staffpay:manage')).rejects.toThrow()
+  })
+})
+
+describe('acceso — fase 2: assertPermisoEnSedes y sedesLegiblesDe', () => {
+  it('pasa con permiso en todas y falla con la explicación si falta en una', async () => {
+    mockGetUserAccess.mockImplementation(async (_u: string, v: string) => ({
+      corePermissions: v === 'v2' ? ['staffpay:read'] : ['staffpay:read', 'staffpay:close'],
+    }))
+    await expect(assertPermisoEnSedes('u', ['v1'], 'staffpay:close', 'falta')).resolves.toBeUndefined()
+    await expect(assertPermisoEnSedes('u', ['v1', 'v2'], 'staffpay:close', 'Necesitas cerrar en todas')).rejects.toThrow(
+      'Necesitas cerrar en todas',
+    )
+  })
+  it('sin membresía en una sede (getUserAccess lanza) también se niega', async () => {
+    mockGetUserAccess.mockImplementation(async (_u: string, v: string) => {
+      if (v === 'v2') throw new Error('no membership')
+      return { corePermissions: ['staffpay:close'] }
+    })
+    await expect(assertPermisoEnSedes('u', ['v1', 'v2'], 'staffpay:close', 'Necesitas cerrar en todas')).rejects.toThrow(
+      'Necesitas cerrar en todas',
+    )
+  })
+  it('sedesLegiblesDe filtra el alcance del PERIODO por permiso, aunque la sede ya no tenga el módulo (Codex R1-1)', async () => {
+    // Lo histórico no depende del módulo de hoy: el módulo «apagado» no cambia el resultado.
+    mockIsModuleEnabled.mockResolvedValue(false)
+    mockGetUserAccess.mockImplementation(async (_u: string, v: string) => ({ corePermissions: v === 'pn' ? ['staffpay:read'] : [] }))
+    await expect(sedesLegiblesDe('u', ['bsf', 'pn'])).resolves.toEqual({ venueIds: ['pn'], parcial: true })
   })
 })

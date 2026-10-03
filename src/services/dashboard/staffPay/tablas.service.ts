@@ -5,6 +5,7 @@ import { withSerializableRetry } from '../../../utils/serializableRetry'
 import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
 import { contarClasesQueCambian } from './efecto'
 import { dbDateComoFecha, fechaComoDbDate } from './periodos'
+import { assertFechaNoCerrada } from './periodosGuardados'
 
 export interface CeldaInput {
   payLevelId: string
@@ -188,7 +189,7 @@ async function validarYCrearVersion(tx: Prisma.TransactionClient, input: Version
     const validos = await tx.staffPayLevel.count({ where: { id: { in: niveles }, organizationId: input.organizationId } })
     if (validos !== niveles.length) throw new NotFoundError('Nivel no encontrado')
   }
-  // Fase 2: rechazar effectiveFrom dentro de un periodo cerrado (spec §5.3).
+  await assertFechaNoCerrada(tx, input.organizationId, input.effectiveFrom)
   const primera = tabla.versions[0]?.effectiveFrom
   await assertSinEmpate(tx, {
     id: tabla.id,
@@ -268,6 +269,8 @@ export async function archivarTabla(input: { venueId: string; tableId: string; a
       },
     })
     if (!t) throw new NotFoundError('Tabla no encontrada')
+    const sede = await tx.venue.findUniqueOrThrow({ where: { id: input.venueId }, select: { organizationId: true } })
+    await assertFechaNoCerrada(tx, sede.organizationId, input.archivedFrom)
     // Mover el archivo a una fecha posterior alarga la vigencia: puede traslaparse con su reemplazo.
     await assertSinEmpate(tx, {
       id: t.id,

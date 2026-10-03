@@ -6,6 +6,7 @@ import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
 import { assertPermisoEnTodasLasSedes, sedesConServicePay } from './acceso'
 import { contarClasesQueCambian } from './efecto'
 import { dbDateComoFecha, fechaComoDbDate } from './periodos'
+import { assertFechaNoCerrada } from './periodosGuardados'
 
 export async function listarNiveles(organizationId: string) {
   return prisma.staffPayLevel.findMany({
@@ -137,13 +138,15 @@ export async function asignarNivel(input: {
   soloSimular: boolean
 }) {
   await assertPermisoEnTodasLasSedes(input.actorId, input.organizationId, 'staffpay:manage')
-  // Fase 2: aquí se rechaza un effectiveFrom dentro de un periodo cerrado (spec §5.2). En la fase 1 no existen.
+  await assertFechaNoCerrada(prisma, input.organizationId, input.effectiveFrom)
   const sedes = await sedesConServicePay(input.organizationId)
   const clasesQueCambian = await contarClasesQueCambian(input.organizationId, sedes, async tx => {
     await insertarAsignacion(tx, input)
   })
   if (input.soloSimular) return { clasesQueCambian }
   const creada = await withSerializableRetry(async tx => {
+    // Un cierre que gane la carrera tiene que verse (spec §5.2).
+    await assertFechaNoCerrada(tx, input.organizationId, input.effectiveFrom)
     const a = await insertarAsignacion(tx, input)
     await writeLegacyActivityAuditTx(tx, {
       staffId: input.actorId,
