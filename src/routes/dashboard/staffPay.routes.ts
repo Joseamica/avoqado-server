@@ -6,15 +6,24 @@ import * as controller from '../../controllers/dashboard/staffPay.dashboard.cont
 import { venueHasServicePayAccess } from '../../services/dashboard/staffPay/acceso'
 import {
   ajusteClaseSchema,
+  ajusteManualSchema,
   archivarTablaSchema,
   asignarNivelSchema,
+  cerrarPeriodoSchema,
   crearNivelSchema,
   crearTablaSchema,
   cursorQuerySchema,
   editarNivelSchema,
+  exportReciboQuerySchema,
   fechaQuerySchema,
+  fechaRequeridaQuerySchema,
   levelParamsSchema,
+  listaPeriodosQuerySchema,
+  marcarPagadoSchema,
+  periodicidadSchema,
+  periodParamsSchema,
   publicarVersionSchema,
+  reciboQuerySchema,
   reporteQuerySchema,
   sessionPayParamsSchema,
   staffParamsSchema,
@@ -143,6 +152,56 @@ router.put(
   checkPermission('staffpay:manage'),
   validateRequest(z.object({ params: sessionPayParamsSchema, body: ajusteClaseSchema })),
   controller.putClassPayAdjustments,
+)
+
+// Fase 2: cerrar y pagar. El permiso de ruta revisa la sede del URL; el service, el alcance completo (spec §9.2).
+router.get(
+  '/periods',
+  checkPermission('staffpay:read'),
+  validateRequest(z.object({ params: venueParamsSchema, query: listaPeriodosQuerySchema })),
+  controller.listPeriods,
+)
+router.patch(
+  '/periodicity',
+  checkPermission('staffpay:close'),
+  validateRequest(z.object({ params: venueParamsSchema, body: periodicidadSchema })),
+  controller.patchPeriodicity,
+)
+router.get(
+  '/periods/close-preview',
+  checkPermission('staffpay:read'),
+  validateRequest(z.object({ params: venueParamsSchema, query: fechaRequeridaQuerySchema })),
+  controller.getClosePreview,
+)
+router.post(
+  '/periods/close',
+  checkPermission('staffpay:close'),
+  validateRequest(z.object({ params: venueParamsSchema, body: cerrarPeriodoSchema })),
+  controller.postClose,
+)
+router.post(
+  '/periods/:periodId/paid',
+  checkPermission('staffpay:close'),
+  validateRequest(z.object({ params: periodParamsSchema, body: marcarPagadoSchema })),
+  controller.postPaid,
+)
+router.post(
+  '/adjustments',
+  checkPermission('staffpay:close'),
+  validateRequest(z.object({ params: venueParamsSchema, body: ajusteManualSchema })),
+  controller.postAdjustment,
+)
+router.get(
+  '/staff/:staffId/receipt',
+  checkPermission('staffpay:read'),
+  validateRequest(z.object({ params: staffParamsSchema, query: reciboQuerySchema })),
+  controller.getReceipt,
+)
+router.get(
+  '/staff/:staffId/receipt/export',
+  checkPermission('staffpay:read'),
+  validateRequest(z.object({ params: staffParamsSchema, query: exportReciboQuerySchema })),
+  controller.getReceiptExport,
 )
 
 export default router

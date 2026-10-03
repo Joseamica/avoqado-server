@@ -64,3 +64,43 @@ export const ajusteClaseSchema = z.object({
   payExcluded: z.boolean(),
   reason: z.string().trim().min(3, 'Escribe el motivo (mínimo 3 letras)').max(300, 'Máximo 300 caracteres'),
 })
+
+// ── Fase 2: cerrar y pagar (spec §6.3-6.5). Sólo forma: las reglas de negocio las revisa el service. ──
+export const periodicidadSchema = z.object({
+  periodicidad: z.enum(['MONTHLY', 'SEMIMONTHLY'], { errorMap: () => ({ message: 'Elige mensual o quincenal' }) }),
+})
+export const fechaRequeridaQuerySchema = z.object({ fecha: fechaSchema })
+/** «Ver periodos anteriores»: el listado se pide por páginas de 24; nada se recorta en silencio. */
+export const listaPeriodosQuerySchema = z.object({ antesDe: fechaSchema.optional() })
+export const cerrarPeriodoSchema = z.object({
+  fecha: fechaSchema,
+  huellaEsperada: z.string().regex(/^[a-f0-9]{64}$/, 'Revisa el cierre antes de confirmarlo'),
+  confirmarHuerfanas: z.boolean().default(false),
+})
+export const periodParamsSchema = venueParamsSchema.extend({ periodId: z.string().cuid('Periodo inválido') })
+export const marcarPagadoSchema = z.object({
+  staffId: z.string().cuid('Persona inválida').optional(),
+  nota: z.string().trim().max(200, 'Máximo 200 caracteres').optional(),
+})
+export const ajusteManualSchema = z.object({
+  sede: sedeSchema,
+  staffId: z.string().cuid('Persona inválida'),
+  amount: z
+    .number({ invalid_type_error: 'Escribe un monto' })
+    .refine(n => n !== 0, 'El monto no puede ser cero')
+    .refine(n => Math.abs(n) <= 1_000_000, 'Monto demasiado grande')
+    .refine(n => Math.round(n * 100) / 100 === n, 'Máximo dos decimales'),
+  reason: z.string().trim().min(3, 'Escribe el motivo (mínimo 3 letras)').max(300, 'Máximo 300 caracteres'),
+  fecha: fechaSchema.optional(),
+  clientKey: z.string().regex(/^[A-Za-z0-9_.-]{8,120}$/, 'Clave de solicitud inválida'),
+})
+export const exportReciboQuerySchema = z.object({
+  fecha: fechaSchema,
+  format: z.enum(['pdf', 'xlsx'], { errorMap: () => ({ message: 'Formato inválido (pdf o xlsx)' }) }),
+})
+/** El recibo por páginas (Codex R2-R1-20): el cursor lo da la página anterior (`siguiente`). */
+export const reciboQuerySchema = z.object({
+  fecha: fechaSchema,
+  cursor: z.string().max(200, 'Cursor inválido').optional(),
+  limit: z.coerce.number().int().min(1, 'Mínimo 1').max(500, 'Máximo 500').default(100),
+})

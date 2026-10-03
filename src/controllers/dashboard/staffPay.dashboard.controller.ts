@@ -7,6 +7,11 @@ import * as tablas from '../../services/dashboard/staffPay/tablas.service'
 import * as reporte from '../../services/dashboard/staffPay/reporte.service'
 import * as ajustes from '../../services/dashboard/staffPay/ajustesClase.service'
 import { hoyLocal } from '../../services/dashboard/staffPay/periodos'
+import * as periodos from '../../services/dashboard/staffPay/periodosGuardados'
+import * as cierre from '../../services/dashboard/staffPay/cierre.service'
+import * as manuales from '../../services/dashboard/staffPay/ajustesManuales.service'
+import * as recibos from '../../services/dashboard/staffPay/recibos.service'
+import { sendExport } from '../../services/dashboard/export.helpers'
 
 export function ctx(req: Request): { venueId: string; userId: string } {
   const venueId = req.params.venueId
@@ -255,6 +260,58 @@ export async function putClassPayAdjustments(req: Request, res: Response, next: 
         actorId: userId,
       }),
     )
+  } catch (e) {
+    next(e)
+  }
+}
+
+// ── Fase 2: cerrar y pagar. Los errores de los services llevan su `code` (PERIODO_CERRADO, HUELLA_CAMBIO…): pasan a
+// `next` tal cual. Los parámetros SÓLO para pruebas (ahora, tamLote, entreLotes, trasPreparar) jamás salen de la petición. ──
+const manejar = (fn: (req: Request) => Promise<unknown>) => async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    res.json(await fn(req))
+  } catch (e) {
+    next(e)
+  }
+}
+
+export const listPeriods = manejar(req =>
+  periodos.listarPeriodos({ ...ctx(req), antesDe: req.query.antesDe ? String(req.query.antesDe) : undefined, limit: 24 }),
+)
+export const patchPeriodicity = manejar(req => periodos.cambiarPeriodicidad({ ...ctx(req), periodicidad: req.body.periodicidad }))
+export const getClosePreview = manejar(req => cierre.previewCierre({ ...ctx(req), fecha: String(req.query.fecha) }))
+export const postClose = manejar(req => {
+  const { fecha, huellaEsperada, confirmarHuerfanas } = req.body
+  return cierre.cerrarPeriodo({ ...ctx(req), fecha, huellaEsperada, confirmarHuerfanas })
+})
+export const postPaid = manejar(req => {
+  const { staffId, nota } = req.body
+  return recibos.marcarPagado({ ...ctx(req), periodId: req.params.periodId, staffId, nota })
+})
+export const postAdjustment = manejar(req => {
+  // Campos explícitos: nada extra del body (p. ej. una huellaEsperada) llega al service.
+  const { sede, staffId, amount, reason, fecha, clientKey } = req.body
+  return manuales.agregarAjusteManual({ ...ctx(req), sede, staffId, amount, reason, fecha, clientKey })
+})
+export const getReceipt = manejar(req =>
+  recibos.reciboDePersona({
+    ...ctx(req),
+    staffId: req.params.staffId,
+    fecha: String(req.query.fecha),
+    cursor: req.query.cursor ? String(req.query.cursor) : undefined,
+    limit: Number(req.query.limit ?? 100),
+  }),
+)
+
+export async function getReceiptExport(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { encoded, nombre } = await recibos.exportarRecibo({
+      ...ctx(req),
+      staffId: req.params.staffId,
+      fecha: String(req.query.fecha),
+      format: req.query.format as 'pdf' | 'xlsx',
+    })
+    sendExport(res, encoded, nombre)
   } catch (e) {
     next(e)
   }
