@@ -202,6 +202,8 @@ describe('ajustes manuales (spec §6.4)', () => {
       fecha: '2026-08-20',
     })
     expect(pv.periodo).toMatchObject({ start: '2026-08-01', end: '2026-08-31', estado: 'OPEN' })
+    // A quién y en qué sede: lo que el humano revisa antes de autorizar (dos «Ana» en el estudio).
+    expect(pv).toMatchObject({ persona: 'Carla QA', sedeNombre: `${m.key}-pn` })
     await expect(ajuste({ fecha: '2026-09-10', huellaEsperada: pv.huella })).rejects.toMatchObject({ code: 'HUELLA_CAMBIO' })
     await expect(ajuste({ fecha: '2026-08-21', huellaEsperada: pv.huella })).resolves.toMatchObject({ amount: '300.00' })
   })

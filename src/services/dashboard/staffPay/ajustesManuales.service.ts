@@ -65,17 +65,24 @@ export function huellaDeAjuste(p: {
     .digest('hex')
 }
 
-/** La persona trabaja (o trabajó) en alguna sede de la organización. La comparten el preview y la confirmación. */
-async function assertPersonaDeLaOrg(staffId: string, organizationId: string): Promise<void> {
-  const deLaOrg = await prisma.staffVenue.findFirst({ where: { staffId, venue: { organizationId } }, select: { id: true } })
-  if (!deLaOrg) throw new BadRequestError('Esa persona no trabaja en este negocio', 'PERSONA_AJENA')
+/**
+ * La persona trabaja (o trabajó) en alguna sede de la organización; devuelve su nombre (nunca el de alguien de otro
+ * negocio). La comparten el preview y la confirmación.
+ */
+async function personaDeLaOrg(staffId: string, organizationId: string): Promise<string> {
+  const staff = await prisma.staff.findFirst({
+    where: { id: staffId, venues: { some: { venue: { organizationId } } } },
+    select: { firstName: true, lastName: true },
+  })
+  if (!staff) throw new BadRequestError('Esa persona no trabaja en este negocio', 'PERSONA_AJENA')
+  return `${staff.firstName} ${staff.lastName}`.trim()
 }
 
 export async function previewAjusteManual(input: Omit<AjusteManualInput, 'clientKey' | 'huellaEsperada'>) {
   const { monto, reason } = validarForma({ ...input, clientKey: 'preview-sin-clave' })
   const sede = await prisma.venue.findUnique({
     where: { id: input.sede },
-    select: { organizationId: true, timezone: true, organization: { select: { servicePayPeriodicity: true } } },
+    select: { organizationId: true, timezone: true, name: true, organization: { select: { servicePayPeriodicity: true } } },
   })
   const quien = await prisma.venue.findUnique({ where: { id: input.venueId }, select: { organizationId: true } })
   if (!sede || !quien || sede.organizationId !== quien.organizationId) throw new NotFoundError('Sede no encontrada')
@@ -85,7 +92,8 @@ export async function previewAjusteManual(input: Omit<AjusteManualInput, 'client
     'staffpay:close',
     'Para agregar un ajuste necesitas el permiso de cerrar periodos en esa sede',
   )
-  await assertPersonaDeLaOrg(input.staffId, sede.organizationId)
+  // Nombre y sede en el preview: es lo que el humano revisa antes de autorizar un pago (dos «Ana» en el estudio).
+  const persona = await personaDeLaOrg(input.staffId, sede.organizationId)
   const fecha = input.fecha ?? hoyLocal(sede.timezone || TZ_DEFAULT)
   const fila = await periodoQueContieneFecha(prisma, sede.organizationId, fecha)
   // Lo mismo que exigirá `ampliarAlcance` al confirmar: la sede ya está en el alcance guardado o hoy tiene el módulo.
@@ -98,7 +106,9 @@ export async function previewAjusteManual(input: Omit<AjusteManualInput, 'client
   return {
     periodo,
     staffId: input.staffId,
+    persona,
     sede: input.sede,
+    sedeNombre: sede.name,
     amount: monto.toFixed(2),
     reason,
     huella: huellaDeAjuste({ start: periodo.start, end: periodo.end, staffId: input.staffId, sede: input.sede, amount: monto, reason }),
@@ -137,7 +147,7 @@ export async function agregarAjusteManual(input: AjusteManualInput): Promise<Aju
     'staffpay:close',
     'Para agregar un ajuste necesitas el permiso de cerrar periodos en esa sede',
   )
-  await assertPersonaDeLaOrg(input.staffId, organizationId)
+  await personaDeLaOrg(input.staffId, organizationId)
   const fecha = input.fecha ?? hoyLocal(tz)
   fechaComoDbDate(fecha) // valida la forma ANTES de compararla como texto con el periodo de un reintento
 

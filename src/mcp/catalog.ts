@@ -439,6 +439,8 @@ export function configureToolCatalog(server: McpServer, scope: McpScope, profile
         if (data?.requiresConfirmation === true && input.confirm !== true) {
           // Existing previews can supply concurrency fields that were unknown on the first call.
           // Bind those exact values as well, rather than invalidating an otherwise correct confirmation.
+          // `fecha`: el ajuste manual de pago por servicio confirma en el periodo que se VIO en la vista previa, aunque pase la
+          // medianoche del cambio de periodo (con «hoy» un reintento daría CLAVE_REUTILIZADA y un bono doble). No quitar.
           const confirmationArguments = { ...intent }
           for (const field of ['expectedSourceFingerprint', 'expectedUpdatedAt', 'resolvedProductId', 'resolvedStaffVenueId', 'fecha']) {
             if (config.inputSchema?.[field] && data[field] != null) confirmationArguments[field] = data[field]

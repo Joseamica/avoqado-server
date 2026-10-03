@@ -2,6 +2,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { configureToolCatalog } from '@/mcp/catalog'
+import { auditMcpWrite } from '@/mcp/audit'
 import { registerStaffPayTools } from '../../../src/mcp/tools/staffPay'
 import type { McpScope } from '../../../src/mcp/scope'
 
@@ -93,6 +94,12 @@ describe('staff_service_pay — escritura (spec §9.3)', () => {
     mockCerrar.mockResolvedValue({ periodId: 'p1', total: '36620.00', yaCerrado: false })
     await handlers.get('close_service_pay_period')!({ venueId: 'v1', fecha: '2026-08-15', confirm: true, expectedSourceFingerprint: 'h'.repeat(64), confirmarHuerfanas: true }, {})
     expect(mockCerrar).toHaveBeenCalledWith(expect.objectContaining({ huellaEsperada: 'h'.repeat(64), confirmarHuerfanas: true }))
+    expect(auditMcpWrite).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ action: 'SERVICE_PAY_PERIOD_CLOSED', entityId: 'p1' }))
+  })
+  it('un cierre repetido (yaCerrado) no se vuelve a auditar', async () => {
+    mockCerrar.mockResolvedValue({ periodId: 'p1', total: '36620.00', yaCerrado: true })
+    await handlers.get('close_service_pay_period')!({ venueId: 'v1', fecha: '2026-08-15', confirm: true, expectedSourceFingerprint: 'h'.repeat(64) }, {})
+    expect(auditMcpWrite).not.toHaveBeenCalled()
   })
   it('si la huella cambió, devuelve el error con el preview nuevo (no un 500)', async () => {
     mockCerrar.mockRejectedValue(Object.assign(new Error('Los números cambiaron'), { statusCode: 409, code: 'HUELLA_CAMBIO', details: { preview: { total: '1.00' } } }))
@@ -113,6 +120,7 @@ describe('staff_service_pay — escritura (spec §9.3)', () => {
     expect(r.requiresConfirmation).toBeUndefined()
     const ok = parse(await handlers.get('close_service_pay_period')!({ venueId: 'v1', fecha: '2026-08-15', confirmarHuerfanas: true }, {}))
     expect(ok).toMatchObject({ requiresConfirmation: true, expectedSourceFingerprint: 'h'.repeat(64) })
+    expect(ok.message).toMatch(/3 reserva\(s\) de clase sin horario no cuentan/)
   })
   it('sin staffpay:close no hay ni preview', async () => {
     mockHasPermission.mockReturnValue(false)
@@ -123,10 +131,12 @@ describe('staff_service_pay — escritura (spec §9.3)', () => {
   it('el ajuste manual: preview con el periodo destino y su huella; confirmar la exige y la pasa al service', async () => {
     const sinClave = parse(await handlers.get('add_service_pay_adjustment')!({ venueId: 'v1', staffId: 's1', amount: 100, reason: 'Bono', confirm: true }, {}))
     expect(sinClave).toMatchObject({ ok: false, needsInput: true, field: 'idempotencyKey' })
-    mockPreviewAjuste.mockResolvedValue({ periodo: { start: '2026-09-01', end: '2026-09-30', estado: 'OPEN' }, staffId: 's1', sede: 'v1', amount: '100.00', reason: 'Bono', huella: 'a'.repeat(64) })
+    mockPreviewAjuste.mockResolvedValue({ periodo: { start: '2026-09-01', end: '2026-09-30', estado: 'OPEN' }, staffId: 's1', persona: 'Ana López', sede: 'v1', sedeNombre: 'Polanco', amount: '100.00', reason: 'Bono', huella: 'a'.repeat(64) })
     const pv = parse(await handlers.get('add_service_pay_adjustment')!({ venueId: 'v1', staffId: 's1', amount: 100, reason: 'Bono', idempotencyKey: 'clave-1234' }, {}))
     expect(pv).toMatchObject({ requiresConfirmation: true, expectedSourceFingerprint: 'a'.repeat(64), fecha: '2026-09-01' })
-    expect(pv.message).toMatch(/2026-09-01/)
+    expect(pv.message).toMatch(/Se agrega un bono de \$100\.00 a Ana López en Polanco con el motivo «Bono» al periodo del 2026-09-01/)
+    const desc = parse(await handlers.get('add_service_pay_adjustment')!({ venueId: 'v1', staffId: 's1', amount: -50, reason: 'Bono', idempotencyKey: 'clave-5678' }, {}))
+    expect(desc.message).toMatch(/Se descuentan \$50\.00 a Ana López en Polanco/)
     const sinHuella = parse(await handlers.get('add_service_pay_adjustment')!({ venueId: 'v1', staffId: 's1', amount: 100, reason: 'Bono', idempotencyKey: 'clave-1234', confirm: true }, {}))
     expect(sinHuella).toMatchObject({ needsInput: true, field: 'expectedSourceFingerprint' })
     // Sin fecha, el service usaría «hoy»: un reintento tras la medianoche del cambio de periodo daría CLAVE_REUTILIZADA.
@@ -136,6 +146,18 @@ describe('staff_service_pay — escritura (spec §9.3)', () => {
     mockAjuste.mockResolvedValue({ id: 'e1', amount: '100.00' })
     await handlers.get('add_service_pay_adjustment')!({ venueId: 'v1', staffId: 's1', amount: 100, reason: 'Bono', fecha: '2026-09-01', idempotencyKey: 'clave-1234', confirm: true, expectedSourceFingerprint: 'a'.repeat(64) }, {})
     expect(mockAjuste).toHaveBeenCalledWith(expect.objectContaining({ clientKey: 'mcp-clave-1234', sede: 'v1', fecha: '2026-09-01', huellaEsperada: 'a'.repeat(64) }))
+    expect(auditMcpWrite).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ action: 'SERVICE_PAY_MANUAL_ADJUSTMENT', entityId: 'e1' }))
+  })
+  it('un reintento del ajuste (yaExistia) no se vuelve a auditar', async () => {
+    mockAjuste.mockResolvedValue({ id: 'e1', amount: '100.00', yaExistia: true })
+    await handlers.get('add_service_pay_adjustment')!({ venueId: 'v1', staffId: 's1', amount: 100, reason: 'Bono', fecha: '2026-09-01', idempotencyKey: 'clave-1234', confirm: true, expectedSourceFingerprint: 'a'.repeat(64) }, {})
+    expect(mockAjuste).toHaveBeenCalled()
+    expect(auditMcpWrite).not.toHaveBeenCalled()
+  })
+  it('una sede del ajuste fuera del alcance de la conexión se niega antes de consultar nada', async () => {
+    await expect(handlers.get('add_service_pay_adjustment')!({ venueId: 'v1', sede: 'foreign', staffId: 's1', amount: 100, reason: 'Bono', idempotencyKey: 'clave-1234' }, {})).rejects.toThrow('out of scope')
+    expect(mockAccess).not.toHaveBeenCalled()
+    expect(mockPreviewAjuste).not.toHaveBeenCalled()
   })
   it('un ajuste que cae en un periodo cerrado no ofrece confirmar', async () => {
     mockPreviewAjuste.mockResolvedValue({ periodo: { start: '2026-08-01', end: '2026-08-31', estado: 'CLOSED' }, staffId: 's1', sede: 'v1', amount: '100.00', reason: 'Bono', huella: 'a'.repeat(64) })
@@ -151,6 +173,16 @@ describe('staff_service_pay — escritura (spec §9.3)', () => {
     mockPagado.mockResolvedValue({ marcados: 1 })
     await handlers.get('mark_service_pay_paid')!({ venueId: 'v1', periodId: 'p1', confirm: true, expectedSourceFingerprint: 'b'.repeat(64) }, {})
     expect(mockPagado).toHaveBeenCalledWith(expect.objectContaining({ huellaEsperada: 'b'.repeat(64) }))
+    expect(auditMcpWrite).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ action: 'SERVICE_PAY_MARKED_PAID', entityId: 'p1' }))
+  })
+  it('marcar pagado sin nada marcado no audita; con la huella cambiada avisa que puede que ya se haya registrado', async () => {
+    mockPagado.mockResolvedValue({ marcados: 0 })
+    await handlers.get('mark_service_pay_paid')!({ venueId: 'v1', periodId: 'p1', confirm: true, expectedSourceFingerprint: 'b'.repeat(64) }, {})
+    expect(auditMcpWrite).not.toHaveBeenCalled()
+    mockPagado.mockRejectedValue(Object.assign(new Error('Los recibos cambiaron desde la vista previa: revisa de nuevo'), { statusCode: 409, code: 'HUELLA_CAMBIO' }))
+    const r = parse(await handlers.get('mark_service_pay_paid')!({ venueId: 'v1', periodId: 'p1', confirm: true, expectedSourceFingerprint: 'b'.repeat(64) }, {}))
+    expect(r).toMatchObject({ ok: false, code: 'HUELLA_CAMBIO' })
+    expect(r.error).toMatch(/Revisa el preview: puede que ya se haya registrado/)
   })
   it('con más recibos que la muestra, el mensaje dice cuántos faltan por nombrar (nada se calla — Codex R2-Nuevo 1)', async () => {
     mockPreviewPagado.mockResolvedValue({ periodo: { start: '2026-08-01', end: '2026-08-31', estado: 'CLOSED' }, cantidad: 101, total: '10100.00', recibos: Array.from({ length: 100 }, (_, i) => ({ staffId: `s${i}`, nombre: `P${i}`, total: '100.00' })), huella: 'b'.repeat(64) })
@@ -183,6 +215,12 @@ describe('staff_service_pay — escritura (spec §9.3)', () => {
     // La conexión sólo alcanza la organización A; 'foreign' es una sede de la B con su periodo cerrado.
     mockPeriodoDeFecha.mockResolvedValue({ id: 'pB', status: 'CLOSED' })
     await expect(handlers.get('staff_service_pay_detail')!({ venueId: 'foreign', staffId: 'a', fecha: '2026-08-15' }, {})).rejects.toThrow('out of scope')
+    expect(mockPeriodoDeFecha).not.toHaveBeenCalled()
+    expect(mockRecibo).not.toHaveBeenCalled()
+  })
+  it('un desglose filtrado por una sede fuera del alcance se niega antes de consultar nada', async () => {
+    await expect(handlers.get('staff_service_pay_detail')!({ venueId: 'v1', staffId: 'a', fecha: '2026-08-15', sede: 'foreign' }, {})).rejects.toThrow('out of scope')
+    expect(mockAccess).not.toHaveBeenCalled()
     expect(mockPeriodoDeFecha).not.toHaveBeenCalled()
     expect(mockRecibo).not.toHaveBeenCalled()
   })

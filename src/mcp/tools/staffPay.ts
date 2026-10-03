@@ -59,7 +59,9 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
       limit: z.number().int().positive().max(100).optional().describe('Max rows (default 50)'),
     },
     async ({ venueId, staffId, fecha: f, sede, cursor, limit }) => {
-      // PRIMERO el alcance de la CONEXIÓN, también para un periodo cerrado: `reciboDePersona` sólo conoce al usuario.
+      // PRIMERO el alcance de la CONEXIÓN (sede incluida), también para un periodo cerrado: `reciboDePersona` sólo conoce
+      // al usuario.
+      if (sede) guard.venueFilter(sede)
       const no = await puedeLeer(venueId)
       if (no) return text({ ok: false, error: no })
       const v = await prisma.venue.findUnique({ where: { id: venueId }, select: { organizationId: true, timezone: true } })
@@ -116,10 +118,10 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
     return null
   }
   // Un 4xx del service (huella cambió, periodo cerrado, sin permiso…) es una respuesta, no un 500.
-  const fallo = (e: unknown) => {
+  const fallo = (e: unknown, extra = '') => {
     const err = e as { statusCode?: number; message?: string; code?: string; details?: { preview?: unknown } }
     if (!err?.statusCode || err.statusCode >= 500) throw e
-    return text({ ok: false, error: err.message, code: err.code ?? null, preview: err.details?.preview ?? null })
+    return text({ ok: false, error: `${err.message}${extra}`, code: err.code ?? null, preview: err.details?.preview ?? null })
   }
   const pesos = (s: string) => Number(s).toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
   const motivo = (b: Bloqueo) =>
@@ -175,7 +177,9 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
             requiresConfirmation: true,
             preview: p,
             expectedSourceFingerprint: p.huella,
-            message: `Se congelan ${p.clases} clases de ${p.personas} personas, $${pesos(p.total)}. Lo que cambie después aparecerá como diferencia pendiente.`,
+            message: `Se congelan ${p.clases} clases de ${p.personas} personas, $${pesos(p.total)}.${
+              p.huerfanas > 0 ? ` ${p.huerfanas} reserva(s) de clase sin horario no cuentan para ningún pago.` : ''
+            } Lo que cambie después aparecerá como diferencia pendiente.`,
           })
         }
         const r = await cerrarPeriodo({
@@ -216,6 +220,7 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
       confirm: z.boolean().optional(),
     },
     async ({ venueId, sede, staffId, amount, reason, fecha: f, idempotencyKey, expectedSourceFingerprint, confirm }) => {
+      if (sede) guard.venueFilter(sede) // la sede de la línea, por el alcance de la conexión antes de consultar nada
       const no = await puedeEscribir(venueId)
       if (no) return text({ ok: false, error: no })
       if (!idempotencyKey) return text({ ok: false, needsInput: true, field: 'idempotencyKey', question: 'Pasa una idempotencyKey única para este ajuste.' })
@@ -233,7 +238,8 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
             // El catálogo la liga a la confirmación: un reintento tras la medianoche del cambio de periodo sigue cayendo
             // en ESTE periodo (con «hoy» respondería CLAVE_REUTILIZADA y el humano recapturaría un bono doble).
             fecha: f ?? pv.periodo.start,
-            message: `Se agrega un ${amount >= 0 ? 'bono' : 'descuento'} de $${pesos(String(Math.abs(amount)))} con el motivo «${reason}» al periodo del ${pv.periodo.start} al ${pv.periodo.end}.`,
+            // A quién y en qué sede: con dos «Ana» en el estudio, esta pantalla es lo que evita pagarle a la equivocada.
+            message: `${amount >= 0 ? 'Se agrega un bono de' : 'Se descuentan'} $${pesos(String(Math.abs(amount)))} a ${pv.persona} en ${pv.sedeNombre} con el motivo «${reason}» al periodo del ${pv.periodo.start} al ${pv.periodo.end}.`,
           })
         }
         if (!expectedSourceFingerprint) return text({ ok: false, needsInput: true, field: 'expectedSourceFingerprint', question: 'Pide primero la vista previa.' })
@@ -309,7 +315,8 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
         }
         return text({ ok: true, ...r })
       } catch (e) {
-        return fallo(e)
+        const cambio = (e as { code?: string })?.code === 'HUELLA_CAMBIO'
+        return fallo(e, cambio ? ' Revisa el preview: puede que ya se haya registrado.' : '')
       }
     },
   )
