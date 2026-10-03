@@ -5,7 +5,7 @@ import prisma from '../../../utils/prismaClient'
 import { BadRequestError, ConflictError, NotFoundError } from '../../../errors/AppError'
 import { withSerializableRetry } from '../../../utils/serializableRetry'
 import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
-import { assertPermisoEnSedes } from './acceso'
+import { assertPermisoEnSedes, sedesConServicePay } from './acceso'
 import { ampliarAlcance, asegurarPeriodo, bloquearPeriodo, periodoQueContieneFecha } from './periodosGuardados'
 import { dbDateComoFecha, fechaComoDbDate, hoyLocal, periodoQueContiene } from './periodos'
 
@@ -65,6 +65,12 @@ export function huellaDeAjuste(p: {
     .digest('hex')
 }
 
+/** La persona trabaja (o trabajó) en alguna sede de la organización. La comparten el preview y la confirmación. */
+async function assertPersonaDeLaOrg(staffId: string, organizationId: string): Promise<void> {
+  const deLaOrg = await prisma.staffVenue.findFirst({ where: { staffId, venue: { organizationId } }, select: { id: true } })
+  if (!deLaOrg) throw new BadRequestError('Esa persona no trabaja en este negocio', 'PERSONA_AJENA')
+}
+
 export async function previewAjusteManual(input: Omit<AjusteManualInput, 'clientKey' | 'huellaEsperada'>) {
   const { monto, reason } = validarForma({ ...input, clientKey: 'preview-sin-clave' })
   const sede = await prisma.venue.findUnique({
@@ -79,8 +85,13 @@ export async function previewAjusteManual(input: Omit<AjusteManualInput, 'client
     'staffpay:close',
     'Para agregar un ajuste necesitas el permiso de cerrar periodos en esa sede',
   )
+  await assertPersonaDeLaOrg(input.staffId, sede.organizationId)
   const fecha = input.fecha ?? hoyLocal(sede.timezone || TZ_DEFAULT)
   const fila = await periodoQueContieneFecha(prisma, sede.organizationId, fecha)
+  // Lo mismo que exigirá `ampliarAlcance` al confirmar: la sede ya está en el alcance guardado o hoy tiene el módulo.
+  if (!fila?.venueIds.includes(input.sede) && !(await sedesConServicePay(sede.organizationId)).includes(input.sede)) {
+    throw new BadRequestError('Esa sede no tiene Pago por servicio activo', 'SEDE_SIN_MODULO')
+  }
   const periodo = fila
     ? { start: dbDateComoFecha(fila.periodStart), end: dbDateComoFecha(fila.periodEnd), estado: fila.status }
     : { ...periodoQueContiene(fecha, sede.organization.servicePayPeriodicity), estado: 'OPEN' as const }
@@ -126,8 +137,7 @@ export async function agregarAjusteManual(input: AjusteManualInput): Promise<Aju
     'staffpay:close',
     'Para agregar un ajuste necesitas el permiso de cerrar periodos en esa sede',
   )
-  const deLaOrg = await prisma.staffVenue.findFirst({ where: { staffId: input.staffId, venue: { organizationId } }, select: { id: true } })
-  if (!deLaOrg) throw new BadRequestError('Esa persona no trabaja en este negocio', 'PERSONA_AJENA')
+  await assertPersonaDeLaOrg(input.staffId, organizationId)
   const fecha = input.fecha ?? hoyLocal(tz)
   fechaComoDbDate(fecha) // valida la forma ANTES de compararla como texto con el periodo de un reintento
 

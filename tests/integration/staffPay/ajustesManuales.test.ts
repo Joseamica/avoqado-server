@@ -11,6 +11,7 @@ jest.mock('@/services/dashboard/staffPay/acceso', () => ({
   tienePermisoEn: jest.fn(async () => true),
   assertPermisoEnSedes: jest.fn(async () => undefined),
 }))
+const acceso = jest.requireMock('@/services/dashboard/staffPay/acceso')
 
 const AHORA = new Date('2026-09-02T12:00:00Z')
 let m: Mundo
@@ -67,6 +68,79 @@ describe('ajustes manuales (spec §6.4)', () => {
     // Otro día del MISMO periodo es la misma operación: devuelve la guardada.
     await expect(ajuste({ clientKey: `${m.key}-destino`, fecha: '2026-08-25' })).resolves.toMatchObject({ id: agosto.id, yaExistia: true })
     expect(await prisma.serviceEarning.count({ where: { organizationId: m.orgId, concept: 'MANUAL' } })).toBe(1)
+  })
+
+  it('la clave es POR ORGANIZACIÓN: la misma clientKey en otro negocio se guarda (sin 500 y sin revelar la otra)', async () => {
+    const m2 = await crearMundo('manuales-b')
+    try {
+      const clientKey = `compartida-${m.key}`
+      const a = await ajuste({ clientKey })
+      ;(global as any).__sedes = [m2.venueId]
+      const b = await agregarAjusteManual({
+        userId: m2.owner,
+        venueId: m2.venueId,
+        sede: m2.venueId,
+        staffId: m2.carla,
+        amount: 300,
+        reason: 'Bono de septiembre',
+        fecha: '2026-08-20',
+        clientKey,
+      })
+      expect(a.yaExistia).toBe(false)
+      expect(b).toMatchObject({ yaExistia: false, sede: m2.venueId, staffId: m2.carla })
+      expect(b.id).not.toBe(a.id)
+      expect(await prisma.serviceEarning.count({ where: { organizationId: m.orgId, clientKey } })).toBe(1)
+      expect(await prisma.serviceEarning.count({ where: { organizationId: m2.orgId, clientKey } })).toBe(1)
+    } finally {
+      await borrarMundo(m2)
+    }
+  })
+
+  it('permiso: exige staffpay:close en la sede del ajuste', async () => {
+    acceso.assertPermisoEnSedes.mockClear()
+    await ajuste()
+    expect(acceso.assertPermisoEnSedes).toHaveBeenCalledWith(m.owner, [m.venueId], 'staffpay:close', expect.any(String))
+  })
+
+  it('otra organización: una persona con StaffVenue en otro negocio es PERSONA_AJENA y una sede ajena no se encuentra', async () => {
+    const m2 = await crearMundo('manuales-c')
+    try {
+      await expect(ajuste({ staffId: m2.ana })).rejects.toMatchObject({ code: 'PERSONA_AJENA' })
+      await expect(ajuste({ sede: m2.venueId })).rejects.toMatchObject({ statusCode: 404 })
+      expect(await prisma.serviceEarning.count({ where: { organizationId: { in: [m.orgId, m2.orgId] } } })).toBe(0)
+    } finally {
+      await borrarMundo(m2)
+    }
+  })
+
+  it('el preview rechaza lo mismo que la confirmación: persona ajena y sede sin el módulo', async () => {
+    const pv = (extra: Partial<Parameters<typeof previewAjusteManual>[0]> = {}) =>
+      previewAjusteManual({
+        userId: m.owner,
+        venueId: m.venueId,
+        sede: m.venueId,
+        staffId: m.carla,
+        amount: 300,
+        reason: 'Bono',
+        fecha: '2026-08-20',
+        ...extra,
+      })
+    const ajena = await prisma.staff.create({
+      data: { email: `${m.key}-ajena@example.test`, firstName: 'Ajena', lastName: 'QA', active: true },
+    })
+    await expect(pv({ staffId: ajena.id })).rejects.toMatchObject({ code: 'PERSONA_AJENA' })
+    const otra = await crearSede(m.orgId, m.key, 'bsf') // sin módulo y fuera del alcance
+    await expect(pv({ sede: otra.venueId })).rejects.toMatchObject({ code: 'SEDE_SIN_MODULO' })
+    // Una sede que ya está en el alcance guardado del periodo sí se puede, aunque hoy no tenga el módulo.
+    await prisma.servicePayPeriod.create({
+      data: {
+        organizationId: m.orgId,
+        periodStart: fechaComoDbDate('2026-08-01'),
+        periodEnd: fechaComoDbDate('2026-08-31'),
+        venueIds: [m.venueId, otra.venueId],
+      },
+    })
+    await expect(pv({ sede: otra.venueId })).resolves.toMatchObject({ sede: otra.venueId, periodo: { estado: 'OPEN' } })
   })
 
   it('doble clic: dos envíos SIMULTÁNEOS con la misma clave dejan una sola línea y los dos devuelven la misma', async () => {
