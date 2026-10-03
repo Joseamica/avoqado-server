@@ -15,6 +15,13 @@ export interface FiltroValoracion {
   ahora: Date
   claseIds?: string[]
   staffId?: string
+  /**
+   * 'vivo' (default): clases terminadas SIN ancla del rango (la fase 1, intacta).
+   * 'periodo': candidatas de un periodo (spec §6.4) — las ancladas en `periodId` por id, sin importar fecha ni estado,
+   * más las sin ancla del rango ya terminadas. Se valoran con su ancla; una cancelada vale $0 (EXCLUIDA).
+   */
+  modo?: 'vivo' | 'periodo'
+  periodId?: string
 }
 
 export interface ClaseValorada {
@@ -24,6 +31,12 @@ export interface ClaseValorada {
   productName: string
   startsAt: Date
   fechaLocal: string
+  fechaValoracion: string
+  periodoOrigen: string | null
+  cancelada: boolean
+  payCountOverride: number | null
+  payAmountOverride: Prisma.Decimal | null
+  excluida: boolean
   staffId: string | null
   staffName: string | null
   payLevelId: string | null
@@ -53,50 +66,73 @@ export interface ResumenSede {
  * el índice Reservation(venueId, classSessionId).
  */
 export function valoracionCte(f: FiltroValoracion): Prisma.Sql {
+  if (f.modo === 'periodo' && !f.periodId) throw new Error('valoracionCte: el modo periodo exige periodId')
   const porClases = f.claseIds?.length ? Prisma.sql`AND cs.id IN (${Prisma.join(f.claseIds)})` : Prisma.empty
   const porCoach = f.staffId ? Prisma.sql`AND cs."assignedStaffId" = ${f.staffId}` : Prisma.empty
+  const enRango = Prisma.sql`cs."startsAt" >= ${utcTs(f.desde)} AND cs."startsAt" < ${utcTs(f.hasta)} AND cs."endsAt" <= ${utcTs(f.ahora)}`
+  const seleccion =
+    f.modo === 'periodo'
+      ? Prisma.sql`(ps."originPeriodId" = ${f.periodId} OR (ps."originPeriodId" IS NULL AND ${enRango}))`
+      : Prisma.sql`${enRango} AND cs.status <> 'CANCELLED' AND ps."originPeriodId" IS NULL`
   return Prisma.sql`
     WITH clases AS (
       SELECT cs.id, cs."venueId", cs."productId", cs."startsAt", cs."assignedStaffId",
              (((cs."startsAt" AT TIME ZONE 'UTC') AT TIME ZONE ${f.tz}))::date AS fecha_local,
+             COALESCE(ps."valuationDate", (((cs."startsAt" AT TIME ZONE 'UTC') AT TIME ZONE ${f.tz}))::date) AS fecha_valoracion,
+             ps."valuationVersionId" AS version_anclada,
+             ps."originPeriodId" AS periodo_origen,
+             (cs.status = 'CANCELLED') AS cancelada,
              ps."payCountOverride", ps."payAmountOverride", COALESCE(ps."payExcluded", false) AS excluida
       FROM "ClassSession" cs
       LEFT JOIN "ClassSessionPayState" ps ON ps."classSessionId" = cs.id
       WHERE cs."venueId" = ${f.venueId}
-        AND cs."startsAt" >= ${utcTs(f.desde)}
-        AND cs."startsAt" < ${utcTs(f.hasta)}
-        AND cs."endsAt" <= ${utcTs(f.ahora)}
-        AND cs.status <> 'CANCELLED'
-        AND ps."originPeriodId" IS NULL
+        AND ${seleccion}
         ${porClases}
         ${porCoach}
     ),
     con_regla AS (
-      SELECT c.*, tv.version_id, tv."countMode", tv."maxCount", lv."payLevelId", lv.level_name
+      SELECT c.*,
+             COALESCE(va.id, tv.version_id) AS version_id,
+             COALESCE(va."countMode", tv."countMode") AS "countMode",
+             COALESCE(va."maxCount", tv."maxCount") AS "maxCount",
+             -- Si la persona YA tiene una línea, manda la PRIMERA aunque su nivel fuera NULL (Codex R1-5): un cierre por
+             -- monto ajustado sin nivel no se convierte después en tarifa por una asignación retroactiva.
+             CASE WHEN lp.existe THEN lp."payLevelId" ELSE lv."payLevelId" END AS "payLevelId",
+             CASE WHEN lp.existe THEN lp.level_name ELSE lv.level_name END AS level_name
       FROM clases c
+      LEFT JOIN "ServicePayTableVersion" va ON va.id = c.version_anclada
       LEFT JOIN LATERAL (
         SELECT v.id AS version_id, v."countMode", v."maxCount"
         FROM "ServicePayTable" t
         JOIN LATERAL (
           SELECT v2.id, v2."countMode", v2."maxCount"
           FROM "ServicePayTableVersion" v2
-          WHERE v2."tableId" = t.id AND v2."effectiveFrom" <= c.fecha_local
+          WHERE v2."tableId" = t.id AND v2."effectiveFrom" <= c.fecha_valoracion
           ORDER BY v2."effectiveFrom" DESC, v2.revision DESC
           LIMIT 1
         ) v ON true
-        WHERE t."venueId" = c."venueId"
-          AND (t."archivedFrom" IS NULL OR t."archivedFrom" > c.fecha_local)
+        WHERE c.version_anclada IS NULL
+          AND t."venueId" = c."venueId"
+          AND (t."archivedFrom" IS NULL OR t."archivedFrom" > c.fecha_valoracion)
           AND (c."productId" = ANY(t."productIds") OR cardinality(t."productIds") = 0)
         ORDER BY (cardinality(t."productIds") > 0) DESC
         LIMIT 1
       ) tv ON true
+      LEFT JOIN LATERAL (
+        SELECT true AS existe, e."payLevelId", e."payLevelName" AS level_name
+        FROM "ServiceEarning" e
+        WHERE e."sourceType" = 'CLASS_SESSION' AND e."sourceId" = c.id AND e."staffId" = c."assignedStaffId"
+          AND e.concept IN ('SERVICE', 'RECONCILE')
+        ORDER BY e."createdAt" ASC, e.id ASC
+        LIMIT 1
+      ) lp ON true
       LEFT JOIN LATERAL (
         SELECT a."payLevelId", l.name AS level_name
         FROM "StaffPayLevelAssignment" a
         JOIN "StaffPayLevel" l ON l.id = a."payLevelId"
         WHERE a."organizationId" = ${f.organizationId}
           AND a."staffId" = c."assignedStaffId"
-          AND a."effectiveFrom" <= c.fecha_local
+          AND a."effectiveFrom" <= c.fecha_valoracion
         ORDER BY a."effectiveFrom" DESC, a.revision DESC
         LIMIT 1
       ) lv ON true
@@ -119,13 +155,16 @@ export function valoracionCte(f: FiltroValoracion): Prisma.Sql {
     valoradas AS (
       SELECT cc.id AS "classSessionId", cc."venueId", cc."productId", p.name AS "productName", cc."startsAt",
              to_char(cc.fecha_local, 'YYYY-MM-DD') AS "fechaLocal",
+             to_char(cc.fecha_valoracion, 'YYYY-MM-DD') AS "fechaValoracion",
+             cc.periodo_origen AS "periodoOrigen", cc.cancelada,
+             cc."payCountOverride", cc."payAmountOverride", cc.excluida,
              cc."assignedStaffId" AS "staffId", NULLIF(TRIM(CONCAT(s."firstName", ' ', s."lastName")), '') AS "staffName",
              cc."payLevelId", cc.level_name AS "payLevelName", cc.version_id AS "tableVersionId",
              cc."countMode"::text AS "countMode", cc."maxCount",
              cc.conteo_calculado AS "conteoCalculado", cc.conteo,
              (cc."payCountOverride" IS NOT NULL OR cc."payAmountOverride" IS NOT NULL OR cc.excluida) AS "tieneAjuste",
              CASE
-               WHEN cc.excluida THEN 'EXCLUIDA'
+               WHEN cc.cancelada OR cc.excluida THEN 'EXCLUIDA'
                WHEN cc."assignedStaffId" IS NULL THEN 'EXCEPCION'
                WHEN cc."payAmountOverride" IS NOT NULL THEN 'OK'
                WHEN cc."payLevelId" IS NULL THEN 'EXCEPCION'
@@ -134,7 +173,7 @@ export function valoracionCte(f: FiltroValoracion): Prisma.Sql {
                ELSE 'OK'
              END AS estado,
              CASE
-               WHEN cc.excluida THEN NULL
+               WHEN cc.cancelada OR cc.excluida THEN NULL
                WHEN cc."assignedStaffId" IS NULL THEN 'SIN_COACH'
                WHEN cc."payAmountOverride" IS NOT NULL THEN NULL
                WHEN cc."payLevelId" IS NULL THEN 'COACH_SIN_NIVEL'
@@ -143,7 +182,7 @@ export function valoracionCte(f: FiltroValoracion): Prisma.Sql {
                ELSE NULL
              END AS motivo,
              CASE
-               WHEN cc.excluida OR cc."assignedStaffId" IS NULL THEN NULL
+               WHEN cc.cancelada OR cc.excluida OR cc."assignedStaffId" IS NULL THEN NULL
                WHEN cc."payAmountOverride" IS NOT NULL THEN cc."payAmountOverride"
                ELSE cell.amount
              END AS monto
