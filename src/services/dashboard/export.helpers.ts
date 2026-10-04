@@ -34,6 +34,8 @@ export interface EncodeExportOptions<TRow> {
   rows: TRow[]
   /** Title for PDF / sheet name for XLSX. */
   title: string
+  /** Nombre de la hoja de Excel si no debe ser el título (se limpia igual). */
+  sheetName?: string
 }
 
 export interface EncodedExport {
@@ -210,14 +212,14 @@ async function encodePdf<TRow>(columns: ExportColumnDef<TRow>[], rows: TRow[], t
  */
 export async function encodeExport<TRow>(
   format: ExportFormat,
-  { allColumns, requestedColumnIds, rows, title }: EncodeExportOptions<TRow>,
+  { allColumns, requestedColumnIds, rows, title, sheetName }: EncodeExportOptions<TRow>,
 ): Promise<EncodedExport> {
   const columns = pickColumns(allColumns, requestedColumnIds)
   if (columns.length === 0) {
     throw new Error('No valid columns requested for export')
   }
   if (format === 'csv') return encodeCsv(columns, rows)
-  if (format === 'xlsx') return encodeXlsx(columns, rows, title)
+  if (format === 'xlsx') return encodeXlsx(columns, rows, sheetName ?? title)
   return encodePdf(columns, rows, title)
 }
 

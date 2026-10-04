@@ -5,7 +5,7 @@ import { BadRequestError, ConflictError, NotFoundError } from '../../../errors/A
 import { withSerializableRetry } from '../../../utils/serializableRetry'
 import { utcTs } from '../../../utils/sqlDates'
 import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
-import { encodeExport, EncodedExport, ExportColumnDef, getRowCapForFormat } from '../export.helpers'
+import { encodeExport, EncodedExport, ExportColumnDef, fechaMx, getRowCapForFormat } from '../export.helpers'
 import { runWithoutCancellation } from '../../../utils/requestCancellation'
 import { assertPermisoEnSedes, exigirPermisoEnSedes, sedesConPermiso, sedesConServicePay, sedesLegiblesDe } from './acceso'
 import { bloquearPeriodo, periodoQueContieneFecha } from './periodosGuardados'
@@ -454,12 +454,13 @@ const aRenglon =
   (f: FuenteRecibo) =>
   (r: FilaRecibo): RenglonRecibo => ({
     tipo: r.tipo,
+    // Un ajuste no es de un día de servicio: su fecha es la de CAPTURA y no lleva hora (QA 2026-10-03, defecto 9).
     fecha: r.fecha,
-    hora: r.hora,
+    hora: r.tipo === 'AJUSTE' ? null : r.hora,
     // Lo congelado manda (spec §5.6; Codex bloque A #8): renombrar la sede no reescribe un recibo cerrado. El nombre de
     // hoy sólo para lo valorado en vivo, que no trae foto.
     sede: r.sedeFoto ?? f.nombreSede.get(r.venueId) ?? '',
-    concepto: r.tipo === 'AJUSTE' ? (r.reason ?? 'Ajuste') : `${r.clase ?? 'Clase'}${r.tipo === 'DIFERENCIA' ? ' (diferencia)' : ''}`,
+    concepto: r.tipo === 'AJUSTE' ? (r.reason ?? 'Ajuste') : `${r.tipo === 'DIFERENCIA' ? 'Diferencia: ' : ''}${r.clase ?? 'Clase'}`,
     lugares: r.lugares,
     monto: new Prisma.Decimal(r.monto).toFixed(2),
   })
@@ -509,16 +510,23 @@ export function filasDelRecibo(r: Pick<Recibo, 'renglones' | 'total' | 'parcial'
   ]
 }
 
+const pesos = new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN' })
+/** «29 sep 2026»; un ajuste se fecha cuando se capturó y lo dice. La fila del total va sin fecha. */
+const fechaDelRenglon = (r: RenglonRecibo) => (r.fecha ? `${fechaMx(r.fecha)}${r.tipo === 'AJUSTE' ? ' (captura)' : ''}` : '')
 const COLUMNAS: ExportColumnDef<RenglonRecibo>[] = [
-  { id: 'fecha', label: 'Fecha', value: r => r.fecha },
+  { id: 'fecha', label: 'Fecha', value: fechaDelRenglon },
   { id: 'hora', label: 'Hora', value: r => r.hora },
   { id: 'sede', label: 'Sede', value: r => r.sede },
   { id: 'concepto', label: 'Concepto', value: r => r.concepto },
   { id: 'lugares', label: 'Lugares', value: r => r.lugares },
-  { id: 'monto', label: 'Monto', value: r => r.monto },
+  { id: 'monto', label: 'Monto', value: r => pesos.format(Number(r.monto)) },
 ]
-/** El Excel lleva el monto como NÚMERO (el dueño lo suma); `monto` ya viene redondeado a 2 decimales por `toFixed(2)`. */
-const COLUMNAS_EXCEL: ExportColumnDef<RenglonRecibo>[] = COLUMNAS.map(c => (c.id === 'monto' ? { ...c, value: r => Number(r.monto) } : c))
+/** El Excel lleva el monto como NÚMERO con formato de moneda (el dueño lo suma); `monto` ya viene con 2 decimales. */
+const COLUMNAS_EXCEL: ExportColumnDef<RenglonRecibo>[] = COLUMNAS.map(c =>
+  c.id === 'monto' ? { ...c, value: r => Number(r.monto), numFmt: '$#,##0.00' } : c,
+)
+/** Las columnas de cada formato (exportada para su prueba). */
+export const columnasDelRecibo = (formato: 'pdf' | 'xlsx') => (formato === 'xlsx' ? COLUMNAS_EXCEL : COLUMNAS)
 const slug = (s: string) =>
   s
     .normalize('NFD')
@@ -564,12 +572,13 @@ export async function exportarRecibo(input: {
     }
     return { f, total, renglones }
   })
-  const columnas = input.format === 'xlsx' ? COLUMNAS_EXCEL : COLUMNAS
+  const columnas = columnasDelRecibo(input.format)
   const encoded = await encodeExport(input.format, {
     allColumns: columnas,
     requestedColumnIds: columnas.map(c => c.id),
     rows: filasDelRecibo({ renglones, total: total.toFixed(2), parcial: f.parcial }),
-    title: `Recibo de ${f.persona} · ${f.periodo.start} al ${f.periodo.end}`,
+    title: `Recibo de ${f.persona} · ${fechaMx(f.periodo.start)} al ${fechaMx(f.periodo.end)}`,
+    sheetName: `Recibo de ${f.persona}`,
   })
   return { encoded, nombre: `recibo-${slug(f.persona)}-${f.periodo.start}` }
 }

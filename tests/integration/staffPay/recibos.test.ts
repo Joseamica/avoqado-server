@@ -165,6 +165,30 @@ describe('recibos (spec §6.5, §7.3)', () => {
     const p2 = await recibo(m.carla, { fecha: '2026-09-15', limit: 1, cursor: p1.siguiente! })
     expect(p2.renglones.map(x => [x.tipo, x.concepto, x.monto])).toEqual([['AJUSTE', 'Bono de septiembre', '100.00']])
     expect(p2).toMatchObject({ total: '580.00', siguiente: null })
+    // QA 2026-10-03, defecto 9: el ajuste se fecha cuando se capturó y SIN hora (no es de un día de servicio).
+    expect(p2.renglones[0]).toMatchObject({ fecha: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/), hora: null })
+  })
+
+  it('una diferencia dice «Diferencia: <clase>» en el concepto (QA 2026-10-03, defecto 9)', async () => {
+    await prisma.serviceEarning.create({
+      data: {
+        organizationId: m.orgId,
+        venueId: m.venueId,
+        periodId,
+        staffId: m.carla,
+        concept: 'RECONCILE',
+        sourceType: 'CLASS_SESSION',
+        sourceId: `${m.key}-dif`,
+        amount: new Prisma.Decimal(40),
+        descriptor: { clase: 'Reformer', fecha: '2026-08-06', hora: '08:00' },
+      },
+    })
+    try {
+      const r = await recibo(m.carla)
+      expect(r.renglones.map(x => [x.tipo, x.concepto, x.fecha, x.hora])).toEqual([['DIFERENCIA', 'Diferencia: Reformer', '2026-08-06', '08:00']])
+    } finally {
+      await prisma.serviceEarning.deleteMany({ where: { periodId, staffId: m.carla, concept: 'RECONCILE' } })
+    }
   })
 
   it('la zona horaria sale de la MISMA instantánea que los montos: nunca el día de antes con el monto de después (Codex R5)', async () => {
@@ -473,12 +497,16 @@ describe('recibos (spec §6.5, §7.3)', () => {
     const xlsx = await exportarRecibo({ userId: m.owner, venueId: m.venueId, staffId: m.sofia, fecha: '2026-08-15', format: 'xlsx' })
     // El contenido, no sólo los bytes (Codex R1-14): cada monto con su signo y el total, contra lo persistido. En el Excel
     // el monto es una celda NUMÉRICA (el dueño la suma — revisión A8, menor 5), no texto.
-    const libro = XLSX.read(xlsx.encoded.buffer)
+    const libro = XLSX.read(xlsx.encoded.buffer, { cellNF: true })
+    // QA 2026-10-03, defecto 15: la hoja se llama con el nombre, sin el periodo cortado ni un «·» colgando…
+    expect(libro.SheetNames).toEqual(['Recibo de Sofia QA'])
     const hoja = libro.Sheets[libro.SheetNames[0]]
     const filas = XLSX.utils.sheet_to_json<Record<string, unknown>>(hoja, { raw: true })
     const montos = filas.map(f => Object.values(f).at(-1))
     expect(montos).toEqual([480, 200, -50, 630])
-    expect(hoja.F2.t).toBe('n')
+    // …y el monto es número CON formato de moneda.
+    expect(hoja.F2).toMatchObject({ t: 'n', z: '$#,##0.00' })
+    expect(Object.keys(filas[0])).toContain('Concepto')
     const persistido = await prisma.serviceEarning.aggregate({ where: { periodId, staffId: m.sofia }, _sum: { amount: true } })
     expect(montos.at(-1)).toBe(Number(persistido._sum.amount!.toFixed(2)))
   })
