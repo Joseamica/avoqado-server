@@ -134,6 +134,6 @@ describe('acceso — tope de sedes con el módulo (Codex bloque A #2): nunca rec
     await expect(sedesConServicePay('org1')).resolves.toEqual(['v0003', 'v0560'])
     // Por páginas con cursor (id), cada una acotada; sin una consulta de módulo por sede.
     expect(prismaMock.venue.findMany.mock.calls[1][0]).toMatchObject({ where: { organizationId: 'org1', id: { gt: 'v0499' } } })
-    for (const [arg] of prismaMock.venue.findMany.mock.calls) expect(arg.take).toBeLessThanOrEqual(501)
+    for (const [arg] of prismaMock.venue.findMany.mock.calls) expect(arg?.take).toBeLessThanOrEqual(501)
   })
 })

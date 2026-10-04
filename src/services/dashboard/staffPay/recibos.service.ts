@@ -255,7 +255,7 @@ async function prepararRecibo(input: { userId: string; venueId: string; staffId:
   // La persona, sólo si trabaja (o trabajó) en esta organización: nunca el nombre de alguien de otro negocio. «Trabajó» lo
   // acredita también un devengo en la organización (Codex bloque A #4): eliminarla del equipo borra su StaffVenue pero no
   // su recibo cerrado, que tiene que seguir abriendo (pantalla, PDF y Excel).
-  const select = { firstName: true, lastName: true }
+  const select = { firstName: true, lastName: true } as const
   const staff =
     (await prisma.staff.findFirst({
       where: { id: input.staffId, venues: { some: { venue: { organizationId: v.organizationId } } } },
