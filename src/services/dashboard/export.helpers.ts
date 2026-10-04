@@ -21,6 +21,8 @@ export interface ExportColumnDef<TRow> {
   label: string
   /** Pluck the cell value from a row. Returns string | number | null. */
   value: (row: TRow) => string | number | null | undefined
+  /** Sólo Excel: formato de número de sus celdas NUMÉRICAS (p. ej. `'$#,##0.00'`). Sin él, la celda queda como siempre. */
+  numFmt?: string
 }
 
 export interface EncodeExportOptions<TRow> {
@@ -61,6 +63,37 @@ function csvField(raw: unknown): string {
   return s
 }
 
+const MESES = ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic']
+
+/** «29 sep 2026» de una fecha 'AAAA-MM-DD' que ya es local (no se convierte de zona). Fijo, sin depender del ICU. */
+export function fechaMx(ymd: string): string {
+  const [y, m, d] = ymd.split('-').map(Number)
+  return `${d} ${MESES[m - 1]} ${y}`
+}
+
+/** «3 oct 2026, 20:48» (24 h, hora de CDMX: la ayuda no conoce la zona de cada sede). */
+function fechaHoraMx(instante: Date): string {
+  const p = Object.fromEntries(
+    new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Mexico_City', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
+      .formatToParts(instante)
+      .map(x => [x.type, x.value]),
+  )
+  return `${fechaMx(`${p.year}-${p.month}-${p.day}`)}, ${p.hour}:${p.minute}`
+}
+
+/**
+ * Nombre de hoja válido para Excel: sin `\ / ? * [ ] :`, a lo más 31 caracteres y, si hubo que cortar, en un límite de
+ * palabra y sin separador colgando («Recibo de Carlos Rodríguez ·» → «Recibo de Carlos Rodríguez»).
+ */
+function nombreDeHoja(title: string): string {
+  let s = title.replace(/[\\/?*[\]:]/g, '').replace(/\s+/g, ' ').trim()
+  if (s.length > 31) {
+    const corte = s.slice(0, 32).lastIndexOf(' ')
+    s = s.slice(0, corte > 0 ? corte : 31)
+  }
+  return s.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N})]+$/gu, '') || 'Export'
+}
+
 function encodeCsv<TRow>(columns: ExportColumnDef<TRow>[], rows: TRow[]): EncodedExport {
   const header = columns.map(c => csvField(c.label)).join(',')
   const lines = rows.map(row => columns.map(c => csvField(c.value(row) ?? '')).join(','))
@@ -80,6 +113,13 @@ function encodeXlsx<TRow>(columns: ExportColumnDef<TRow>[], rows: TRow[], title:
   const dataRows = rows.map(row => columns.map(c => c.value(row) ?? ''))
   const aoa = [headerRow, ...dataRows]
   const sheet = XLSX.utils.aoa_to_sheet(aoa)
+  columns.forEach((c, colIdx) => {
+    if (!c.numFmt) return
+    for (let r = 1; r <= dataRows.length; r++) {
+      const cell = sheet[XLSX.utils.encode_cell({ r, c: colIdx })]
+      if (cell?.t === 'n') cell.z = c.numFmt
+    }
+  })
   // Roughly autofit columns based on header + first 50 row widths.
   const widths = headerRow.map((label, colIdx) => {
     let max = String(label).length
@@ -92,9 +132,7 @@ function encodeXlsx<TRow>(columns: ExportColumnDef<TRow>[], rows: TRow[], title:
   })
   ;(sheet as any)['!cols'] = widths
   const wb = XLSX.utils.book_new()
-  // Sheet names: max 31 chars, no special characters in some clients — keep it simple.
-  const safeTitle = title.replace(/[\\/?*[\]:]/g, '').slice(0, 28) || 'Export'
-  XLSX.utils.book_append_sheet(wb, sheet, safeTitle)
+  XLSX.utils.book_append_sheet(wb, sheet, nombreDeHoja(title))
   const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer
   return {
     buffer,
@@ -114,51 +152,47 @@ async function encodePdf<TRow>(columns: ExportColumnDef<TRow>[], rows: TRow[], t
 
   doc.fontSize(16).text(title, { align: 'left' })
   doc.moveDown(0.5)
-  doc.fontSize(8).fillColor('#666').text(`Generado: ${new Date().toLocaleString()}`)
+  doc.fontSize(8).fillColor('#666').text(`Generado: ${fechaHoraMx(new Date())}`)
   doc.moveDown(1)
   doc.fillColor('#000')
 
-  // Naive table: equal-width columns. For wide column counts, font shrinks.
-  const pageWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right
+  // Tabla de columnas iguales. Cada fila calcula su `y` UNA vez y todas sus celdas se dibujan en esa `y` fija: `text()`
+  // mueve `doc.y`, así que leerlo celda por celda recorría las celdas (QA pago al staff 2026-10-03, defecto 1).
+  const left = doc.page.margins.left
+  const pageWidth = doc.page.width - left - doc.page.margins.right
   const colWidth = pageWidth / columns.length
   const rowHeight = 16
   const fontSize = columns.length > 8 ? 7 : 9
+  let y = doc.y
 
-  const drawHeader = () => {
-    doc.fontSize(fontSize).fillColor('#fff')
-    doc.rect(doc.page.margins.left, doc.y, pageWidth, rowHeight).fill('#374151')
-    let x = doc.page.margins.left
-    columns.forEach(c => {
-      doc.fillColor('#fff').text(c.label, x + 4, doc.y - rowHeight + 4, { width: colWidth - 8, ellipsis: true })
-      x += colWidth
-    })
-    doc.fillColor('#000')
-    doc.moveDown(0.2)
+  const drawRow = (cells: string[], fondo: string | null, color: string) => {
+    if (fondo) doc.rect(left, y, pageWidth, rowHeight).fill(fondo)
+    doc.fontSize(fontSize).fillColor(color)
+    // `height` + `ellipsis`: una sola línea por celda, cortada con «…» si no cabe; con `height` pdfkit nunca abre página.
+    cells.forEach((texto, i) => doc.text(texto, left + i * colWidth + 4, y + 4, { width: colWidth - 8, height: rowHeight, ellipsis: true }))
+    y += rowHeight
   }
+  const drawHeader = () => drawRow(columns.map(c => c.label), '#374151', '#fff')
 
   drawHeader()
-
   rows.forEach((row, idx) => {
-    if (doc.y + rowHeight > doc.page.height - doc.page.margins.bottom) {
+    if (y + rowHeight > doc.page.height - doc.page.margins.bottom) {
       doc.addPage({ size: 'A4', layout: 'landscape', margin: 32 })
+      y = doc.page.margins.top
       drawHeader()
     }
-    // zebra stripes for readability
-    if (idx % 2 === 0) {
-      doc.rect(doc.page.margins.left, doc.y, pageWidth, rowHeight).fill('#f3f4f6')
-      doc.fillColor('#000')
-    }
-    let x = doc.page.margins.left
-    columns.forEach(c => {
-      const v = c.value(row)
-      doc.fontSize(fontSize).text(v === null || v === undefined ? '' : String(v), x + 4, doc.y - rowHeight + 4, {
-        width: colWidth - 8,
-        ellipsis: true,
-      })
-      x += colWidth
-    })
-    doc.moveDown(0.2)
+    drawRow(
+      columns.map(c => {
+        const v = c.value(row)
+        return v === null || v === undefined ? '' : String(v)
+      }),
+      idx % 2 === 0 ? '#f3f4f6' : null, // zebra stripes for readability
+      '#000',
+    )
   })
+  doc.fillColor('#000')
+  doc.x = left
+  doc.y = y
 
   doc.end()
   const buffer = await done
