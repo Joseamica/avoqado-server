@@ -3,7 +3,7 @@ import prisma from '../../../utils/prismaClient'
 import { BadRequestError, ConflictError, NotFoundError } from '../../../errors/AppError'
 import { withSerializableRetry } from '../../../utils/serializableRetry'
 import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
-import { contarClasesQueCambian } from './efecto'
+import { EfectoDelCambio, efectoDelCambio } from './efecto'
 import { dbDateComoFecha, fechaComoDbDate } from './periodos'
 import { assertFechaNoCerrada } from './periodosGuardados'
 
@@ -142,6 +142,8 @@ export async function crearTabla(input: { venueId: string; organizationId: strin
   })
 }
 
+const NO_EMPIEZA = 'la tabla no puede empezar'
+
 interface VersionInput {
   venueId: string
   organizationId: string
@@ -189,7 +191,7 @@ async function validarYCrearVersion(tx: Prisma.TransactionClient, input: Version
     const validos = await tx.staffPayLevel.count({ where: { id: { in: niveles }, organizationId: input.organizationId } })
     if (validos !== niveles.length) throw new NotFoundError('Nivel no encontrado')
   }
-  await assertFechaNoCerrada(tx, input.organizationId, input.effectiveFrom)
+  await assertFechaNoCerrada(tx, input.organizationId, input.effectiveFrom, NO_EMPIEZA)
   const primera = tabla.versions[0]?.effectiveFrom
   await assertSinEmpate(tx, {
     id: tabla.id,
@@ -222,12 +224,24 @@ async function validarYCrearVersion(tx: Prisma.TransactionClient, input: Version
   return v
 }
 
-export async function publicarVersion(input: VersionInput & { soloSimular: boolean }) {
+/** `ahora`: sólo pruebas, el «hoy» de la simulación (la ruta no lo pasa). */
+export async function publicarVersion(
+  input: VersionInput & { soloSimular: boolean; ahora?: Date },
+): Promise<EfectoDelCambio & { versionId?: string; revision?: number }> {
   try {
-    const clasesQueCambian = await contarClasesQueCambian(input.organizationId, [input.venueId], async tx => {
-      await validarYCrearVersion(tx, input)
-    })
-    if (input.soloSimular) return { clasesQueCambian }
+    // Antes de simular: una fecha dentro de un periodo cerrado se explica sin valorar nada (revisión final, I-2).
+    await assertFechaNoCerrada(prisma, input.organizationId, input.effectiveFrom, NO_EMPIEZA)
+    const efecto = await efectoDelCambio(
+      input.organizationId,
+      [input.venueId],
+      input.effectiveFrom,
+      async tx => {
+        await validarYCrearVersion(tx, input)
+      },
+      input.ahora,
+    )
+    const { clasesQueCambian } = efecto
+    if (input.soloSimular) return efecto
     const v = await withSerializableRetry(async tx => {
       const creada = await validarYCrearVersion(tx, input)
       await writeLegacyActivityAuditTx(tx, {
@@ -248,7 +262,7 @@ export async function publicarVersion(input: VersionInput & { soloSimular: boole
       })
       return creada
     })
-    return { clasesQueCambian, versionId: v.id, revision: v.revision }
+    return { ...efecto, versionId: v.id, revision: v.revision }
   } catch (e) {
     // Dos publicaciones simultáneas del mismo día calcularon la misma revisión (doble clic en «Guardar»).
     if (esP2002(e)) throw new ConflictError('Se publicó otra versión de esta tabla al mismo tiempo; revisa la tabla y vuelve a intentarlo')
@@ -270,7 +284,7 @@ export async function archivarTabla(input: { venueId: string; tableId: string; a
     })
     if (!t) throw new NotFoundError('Tabla no encontrada')
     const sede = await tx.venue.findUniqueOrThrow({ where: { id: input.venueId }, select: { organizationId: true } })
-    await assertFechaNoCerrada(tx, sede.organizationId, input.archivedFrom)
+    await assertFechaNoCerrada(tx, sede.organizationId, input.archivedFrom, 'la tabla no puede archivarse')
     // Mover un archivo que ya cae dentro de un periodo cerrado cambia lo congelado (spec §5.3): también se revisa la fecha vieja.
     if (t.archivedFrom) await assertFechaNoCerrada(tx, sede.organizationId, dbDateComoFecha(t.archivedFrom))
     // Mover el archivo a una fecha posterior alarga la vigencia: puede traslaparse con su reemplazo.

@@ -9,7 +9,7 @@ import { encodeExport, EncodedExport, ExportColumnDef, fechaMx, getRowCapForForm
 import { runWithoutCancellation } from '../../../utils/requestCancellation'
 import { assertPermisoEnSedes, exigirPermisoEnSedes, sedesConPermiso, sedesConServicePay, sedesLegiblesDe } from './acceso'
 import { bloquearPeriodo, periodoQueContieneFecha } from './periodosGuardados'
-import { dbDateComoFecha, periodoQueContiene, venuePeriodRange } from './periodos'
+import { dbDateComoFecha, MESES_LARGOS, periodoQueContiene, venuePeriodRange } from './periodos'
 import { valoracionCte } from './valoracion'
 
 /** Tope de UNA página del recibo (Codex R2-R1-20). El recibo entero no tiene tope: se recorre con cursor. */
@@ -453,7 +453,6 @@ async function paginaDelRecibo(
   }
 }
 
-const MESES = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre']
 /**
  * Una diferencia dice de qué clase es (QA bloque B, defecto 3): «Diferencia · Yoga del 28 sep 2026 (clase de septiembre)».
  * La fecha es la local de la clase en su sede (la de su foto) y el mes, el de su periodo de origen.
@@ -462,7 +461,7 @@ function conceptoDe(r: FilaRecibo): string {
   if (r.tipo === 'AJUSTE') return r.reason ?? 'Ajuste'
   const clase = r.clase ?? 'Clase'
   if (r.tipo === 'CLASE') return clase
-  const mes = r.origen ? ` (clase de ${MESES[Number(r.origen.slice(5, 7)) - 1]})` : ''
+  const mes = r.origen ? ` (clase de ${MESES_LARGOS[Number(r.origen.slice(5, 7)) - 1]})` : ''
   return `Diferencia · ${clase} del ${fechaMx(r.fecha)}${mes}`
 }
 

@@ -4,7 +4,8 @@ import { BadRequestError, ConflictError, NotFoundError } from '../../../errors/A
 import { withSerializableRetry } from '../../../utils/serializableRetry'
 import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
 import { assertPermisoEnSedes, assertPermisoEnTodasLasSedes, exigirPermisoEnSedes, sedesConServicePay, sedesLegiblesDe } from './acceso'
-import { dbDateComoFecha, fechaComoDbDate, hoyLocal, Periodicidad, periodoQueContiene } from './periodos'
+import { fechaMx } from '../export.helpers'
+import { dbDateComoFecha, diaCivilSiguiente, fechaComoDbDate, hoyLocal, MESES_LARGOS, Periodicidad, periodoQueContiene } from './periodos'
 
 type Tx = Prisma.TransactionClient
 type Db = Tx | typeof prisma
@@ -125,14 +126,35 @@ export async function alcanceLegibleDelPeriodo(
   return { venueIds, parcial: legibles.parcial || (sede !== undefined && venueIds.length === 0) }
 }
 
-/** Spec §5.2 y §5.3: una vigencia (o un archivo) dentro de un periodo cerrado no se acepta. */
-export async function assertFechaNoCerrada(db: Db, organizationId: string, fecha: string): Promise<void> {
+/** «Septiembre» si es el mes completo; si no, «La quincena del 1 sep 2026 al 15 sep 2026». */
+function nombreDelPeriodo(start: string, end: string): string {
+  const mes = MESES_LARGOS[Number(start.slice(5, 7)) - 1]
+  return start.endsWith('-01') && diaCivilSiguiente(end).endsWith('-01')
+    ? `${mes[0].toUpperCase()}${mes.slice(1)}`
+    : `La quincena del ${fechaMx(start)} al ${fechaMx(end)}`
+}
+
+/**
+ * Spec §5.2 y §5.3: una vigencia (o un archivo) dentro de un periodo cerrado no se acepta. `details.primeraFechaPermitida`:
+ * el primer día después de los periodos cerrados seguidos que contienen la fecha. Con `accion` («la tabla no puede empezar»)
+ * el mensaje lo dice así y remite a «Ajustar monto» (revisión final, I-2); sin ella, el genérico de siempre.
+ */
+export async function assertFechaNoCerrada(db: Db, organizationId: string, fecha: string, accion?: string): Promise<void> {
   const p = await periodoQueContieneFecha(db, organizationId, fecha)
-  if (p?.status === 'CLOSED') {
-    throw new BadRequestError(
-      `El periodo del ${dbDateComoFecha(p.periodStart)} al ${dbDateComoFecha(p.periodEnd)} ya está cerrado: elige una fecha posterior`,
-    )
+  if (p?.status !== 'CLOSED') return
+  const start = dbDateComoFecha(p.periodStart)
+  const end = dbDateComoFecha(p.periodEnd)
+  let primera = diaCivilSiguiente(end)
+  // ponytail: un paso por periodo cerrado seguido; con más de 120 (10 años mensuales) se queda en el que llegó.
+  for (let i = 0; i < 120; i++) {
+    const siguiente = await periodoQueContieneFecha(db, organizationId, primera)
+    if (siguiente?.status !== 'CLOSED') break
+    primera = diaCivilSiguiente(dbDateComoFecha(siguiente.periodEnd))
   }
+  const mensaje = accion
+    ? `${nombreDelPeriodo(start, end)} ya se cerró: ${accion} antes del ${fechaMx(primera)}. Para una clase de un mes cerrado usa «Ajustar monto» en la clase`
+    : `El periodo del ${start} al ${end} ya está cerrado: elige una fecha posterior`
+  throw new BadRequestError(mensaje, 'FECHA_EN_PERIODO_CERRADO', { primeraFechaPermitida: primera })
 }
 
 export interface PeriodoListado {

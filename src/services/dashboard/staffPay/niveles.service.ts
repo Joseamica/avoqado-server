@@ -4,7 +4,7 @@ import { BadRequestError, ConflictError, NotFoundError } from '../../../errors/A
 import { withSerializableRetry } from '../../../utils/serializableRetry'
 import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
 import { assertPermisoEnTodasLasSedes, sedesConServicePay } from './acceso'
-import { contarClasesQueCambian } from './efecto'
+import { EfectoDelCambio, efectoDelCambio } from './efecto'
 import { dbDateComoFecha, fechaComoDbDate } from './periodos'
 import { assertFechaNoCerrada } from './periodosGuardados'
 
@@ -128,6 +128,8 @@ async function insertarAsignacion(
   })
 }
 
+const NO_EMPIEZA = 'el nivel no puede empezar'
+
 export async function asignarNivel(input: {
   organizationId: string
   staffId: string
@@ -136,17 +138,26 @@ export async function asignarNivel(input: {
   actorId: string
   venueId: string
   soloSimular: boolean
-}) {
+  /** Sólo pruebas: el «hoy» de la simulación (la ruta no lo pasa). */
+  ahora?: Date
+}): Promise<EfectoDelCambio & { asignacionId?: string }> {
   await assertPermisoEnTodasLasSedes(input.actorId, input.organizationId, 'staffpay:manage')
-  await assertFechaNoCerrada(prisma, input.organizationId, input.effectiveFrom)
+  await assertFechaNoCerrada(prisma, input.organizationId, input.effectiveFrom, NO_EMPIEZA)
   const sedes = await sedesConServicePay(input.organizationId)
-  const clasesQueCambian = await contarClasesQueCambian(input.organizationId, sedes, async tx => {
-    await insertarAsignacion(tx, input)
-  })
-  if (input.soloSimular) return { clasesQueCambian }
+  const efecto = await efectoDelCambio(
+    input.organizationId,
+    sedes,
+    input.effectiveFrom,
+    async tx => {
+      await insertarAsignacion(tx, input)
+    },
+    input.ahora,
+  )
+  const { clasesQueCambian } = efecto
+  if (input.soloSimular) return efecto
   const creada = await withSerializableRetry(async tx => {
     // Un cierre que gane la carrera tiene que verse (spec §5.2).
-    await assertFechaNoCerrada(tx, input.organizationId, input.effectiveFrom)
+    await assertFechaNoCerrada(tx, input.organizationId, input.effectiveFrom, NO_EMPIEZA)
     const a = await insertarAsignacion(tx, input)
     await writeLegacyActivityAuditTx(tx, {
       staffId: input.actorId,
@@ -164,7 +175,7 @@ export async function asignarNivel(input: {
     })
     return a
   })
-  return { clasesQueCambian, asignacionId: creada.id }
+  return { ...efecto, asignacionId: creada.id }
 }
 
 export async function historialDeNivel(organizationId: string, staffId: string) {

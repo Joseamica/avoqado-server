@@ -10,7 +10,7 @@ import {
 } from '@/services/dashboard/staffPay/periodosGuardados'
 import { asignarNivel } from '@/services/dashboard/staffPay/niveles.service'
 import { publicarVersion, archivarTabla } from '@/services/dashboard/staffPay/tablas.service'
-import { borrarMundo, crearMundo, crearSede, Mundo, periodoCerrado, tablaMindform, TZ } from './_mundo'
+import { borrarMundo, clase, confirmadas, crearMundo, crearSede, Mundo, periodoCerrado, PN_HC, tablaMindform, TZ } from './_mundo'
 import { dbDateComoFecha, fechaComoDbDate, hoyLocal } from '@/services/dashboard/staffPay/periodos'
 
 jest.mock('@/services/dashboard/staffPay/acceso', () => ({
@@ -97,7 +97,7 @@ describe('periodos guardados (spec §5.7)', () => {
         venueId: m.venueId,
         soloSimular: false,
       }),
-    ).rejects.toThrow(/ya está cerrado/)
+    ).rejects.toThrow(/^Febrero ya se cerró: el nivel no puede empezar antes del /)
     expect(await prisma.staffPayLevelAssignment.count({ where: { organizationId: m.orgId } })).toBe(antes)
     const t = await tablaMindform(m)
     await expect(
@@ -112,9 +112,9 @@ describe('periodos guardados (spec §5.7)', () => {
         actorId: m.owner,
         soloSimular: false,
       }),
-    ).rejects.toThrow(/ya está cerrado/)
+    ).rejects.toThrow(/^Febrero ya se cerró: la tabla no puede empezar antes del /)
     await expect(archivarTabla({ venueId: m.venueId, tableId: t.tableId, archivedFrom: '2026-02-20', actorId: m.owner })).rejects.toThrow(
-      /ya está cerrado/,
+      /^Febrero ya se cerró: la tabla no puede archivarse antes del /,
     )
   })
 
@@ -137,5 +137,96 @@ describe('periodos guardados (spec §5.7)', () => {
     )
     const org = await prisma.organization.findUniqueOrThrow({ where: { id: m.orgId }, select: { servicePayPeriodicity: true } })
     expect(org.servicePayPeriodicity).toBe('MONTHLY')
+  })
+})
+
+// Revisión final, I-2: el aviso «Cambia el pago de N clases» valoraba sólo el periodo de HOY. Con una vigencia en septiembre
+// (aún sin cerrar, lo normal a inicio de mes) decía 0 aunque cambiaran todas las clases de septiembre que se calculan en vivo.
+describe('efecto de publicar una tabla o asignar un nivel (spec §7.1)', () => {
+  const AHORA_OCT = new Date('2026-10-04T12:00:00Z')
+  let w: Mundo
+  let tableId: string
+  beforeAll(async () => {
+    w = await crearMundo('efecto')
+    ;(global as any).__sedes = [w.venueId]
+    tableId = (await tablaMindform(w)).tableId
+    // Agosto cerrado; septiembre y octubre abiertos (septiembre aún sin cerrar, como a inicio de mes).
+    await periodoCerrado(w, '2026-08-01', '2026-08-31')
+    for (const inicioIso of ['2026-08-10T14:00:00Z', '2026-09-10T14:00:00Z', '2026-09-20T14:00:00Z', '2026-10-02T14:00:00Z'])
+      await clase(w, { staffId: w.ana, inicioIso, reservas: confirmadas(8) })
+  })
+  afterAll(async () => {
+    await borrarMundo(w)
+    ;(global as any).__sedes = [m.venueId]
+  })
+  const simular = (effectiveFrom: string) =>
+    publicarVersion({
+      venueId: w.venueId,
+      organizationId: w.orgId,
+      tableId,
+      effectiveFrom,
+      countMode: 'BOOKED',
+      maxCount: 10,
+      // Head Coach +$10 en cada conteo: cambia toda clase de Ana que se calcule en vivo.
+      cells: PN_HC.map((amount, count) => ({ payLevelId: w.hc, count, amount: amount + 10 })),
+      actorId: w.owner,
+      soloSimular: true,
+      ahora: AHORA_OCT,
+    })
+
+  it('cuenta las clases de CADA periodo abierto desde la vigencia hasta hoy, no sólo las de hoy', async () => {
+    expect(await simular('2026-09-01')).toEqual({
+      clasesQueCambian: 3,
+      porPeriodo: [
+        { start: '2026-09-01', end: '2026-09-30', clases: 2 },
+        { start: '2026-10-01', end: '2026-10-31', clases: 1 },
+      ],
+      periodosSinContar: 0,
+    })
+    expect(await prisma.servicePayTableVersion.count({ where: { tableId } })).toBe(1) // simular no guarda
+  })
+
+  it('asignar un nivel cuenta igual (Ana pasa a Coach desde septiembre)', async () => {
+    const r = await asignarNivel({
+      organizationId: w.orgId,
+      staffId: w.ana,
+      payLevelId: w.coach,
+      effectiveFrom: '2026-09-15',
+      actorId: w.owner,
+      venueId: w.venueId,
+      soloSimular: true,
+      ahora: AHORA_OCT,
+    })
+    expect(r).toEqual({
+      clasesQueCambian: 2,
+      porPeriodo: [
+        { start: '2026-09-01', end: '2026-09-30', clases: 1 },
+        { start: '2026-10-01', end: '2026-10-31', clases: 1 },
+      ],
+      periodosSinContar: 0,
+    })
+  })
+
+  it('con muchos periodos abiertos recorre los 3 más recientes y dice cuántos más quedaron sin contar; salta el cerrado', async () => {
+    // Desde febrero: abiertos feb-jul, sep y oct (agosto cerrado) = 8. Se cuentan jul, sep y oct.
+    expect(await simular('2026-02-01')).toEqual({
+      clasesQueCambian: 3,
+      porPeriodo: [
+        { start: '2026-07-01', end: '2026-07-31', clases: 0 },
+        { start: '2026-09-01', end: '2026-09-30', clases: 2 },
+        { start: '2026-10-01', end: '2026-10-31', clases: 1 },
+      ],
+      periodosSinContar: 5,
+    })
+  })
+
+  it('una vigencia dentro de un periodo CERRADO se rechaza con una explicación y la primera fecha que sí se puede', async () => {
+    await expect(simular('2026-08-15')).rejects.toMatchObject({
+      statusCode: 400,
+      code: 'FECHA_EN_PERIODO_CERRADO',
+      message:
+        'Agosto ya se cerró: la tabla no puede empezar antes del 1 sep 2026. Para una clase de un mes cerrado usa «Ajustar monto» en la clase',
+      details: { primeraFechaPermitida: '2026-09-01' },
+    })
   })
 })

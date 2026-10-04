@@ -8,6 +8,21 @@ export interface PeriodoCanonico {
   end: string
 }
 
+export const MESES_LARGOS = [
+  'enero',
+  'febrero',
+  'marzo',
+  'abril',
+  'mayo',
+  'junio',
+  'julio',
+  'agosto',
+  'septiembre',
+  'octubre',
+  'noviembre',
+  'diciembre',
+]
+
 const pad = (n: number) => String(n).padStart(2, '0')
 const ultimoDia = (y: number, m: number) => new Date(Date.UTC(y, m, 0)).getUTCDate()
 
