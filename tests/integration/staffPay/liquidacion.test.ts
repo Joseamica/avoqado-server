@@ -521,6 +521,50 @@ describe('liquidar una diferencia (spec §6.4)', () => {
     expect(await pendientes(id)).toEqual({ [m.ana]: '40.00' })
   })
 
+  it('la MISMA clave con una diferencia NUEVA en el mismo destino no es la misma operación: CLAVE_REUTILIZADA (revisión final, I-1)', async () => {
+    const id = await clase(m, { staffId: m.ana, inicioIso: '2026-08-04T14:00:00Z', reservas: confirmadas(8) })
+    await cerrarAgosto()
+    await prisma.classSessionPayState.update({ where: { classSessionId: id }, data: { payCountOverride: 9 } })
+    const clave = `${m.key}-settle`
+    // Como el MCP: preview y confirmación con la fecha del destino que se VIO (dentro de septiembre), siempre la misma clave.
+    const pedir = async () => {
+      const pv = await previewLiquidacion({
+        userId: m.owner,
+        venueId: m.venueId,
+        classSessionId: id,
+        destinoFecha: '2026-09-01',
+        ahora: AHORA,
+      })
+      return liquidarDiferencia({
+        userId: m.owner,
+        venueId: m.venueId,
+        classSessionId: id,
+        destinoFecha: '2026-09-01',
+        ahora: AHORA,
+        periodoOrigenId: pv.periodoOrigen!.id,
+        huellaEsperada: pv.huella,
+        solicitudId: clave,
+      })
+    }
+    const mas40 = [{ staffId: m.ana, amount: '40.00' }]
+    expect(await pedir()).toEqual({ lineas: mas40, yaLiquidada: false })
+    // La repetición real (nada cambió) se reconoce.
+    expect(await pedir()).toEqual({ lineas: mas40, yaLiquidada: true })
+    // Se corrige a 10: hay +$40 NUEVOS. Reusar la clave ya no devuelve las líneas viejas (dejaba lo nuevo sin pagar).
+    await prisma.classSessionPayState.update({ where: { classSessionId: id }, data: { payCountOverride: 10 } })
+    await expect(pedir()).rejects.toMatchObject({
+      code: 'CLAVE_REUTILIZADA',
+      message: expect.stringMatching(
+        /ya liquidó \+\$40\.00 en el periodo del 2026-09-01 al 2026-09-30 y la clase tiene una diferencia nueva de \+\$40\.00: usa otra clave/,
+      ),
+    })
+    expect(await reconcile(id)).toBe(1)
+    expect(await pendientes(id)).toEqual({ [m.ana]: '40.00' })
+    // Con otra clave, sí se paga.
+    expect(await liquidar(id)).toEqual({ lineas: mas40, yaLiquidada: false })
+    expect(await pendientes(id)).toEqual({ [m.ana]: '0.00' })
+  })
+
   it('dos liquidaciones SIMULTÁNEAS de la misma clase con solicitudes distintas dejan UN juego de líneas (barrera real — Codex R2-R1-15)', async () => {
     const id = await clase(m, { staffId: m.ana, inicioIso: '2026-08-04T14:00:00Z', reservas: confirmadas(8) })
     await cerrarAgosto()

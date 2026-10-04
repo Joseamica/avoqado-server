@@ -248,6 +248,21 @@ async function liquidar(input: LiquidarInput): Promise<ResultadoLiquidacion> {
             'CLAVE_REUTILIZADA',
           )
         }
+        // Y si HOY la clase vuelve a tener algo pendiente, no es una repetición: es otra diferencia pedida con la misma clave
+        // (revisión final, I-1: corregida de 9 a 10 tras liquidar, devolver las líneas viejas dejaba los +$40 nuevos sin
+        // pagar). Sin pendiente, o en excepción (no se puede liquidar), es la repetición de siempre.
+        const { filas: hoy } = await diferenciasDeClase(tx, { venueId: input.venueId, classSessionId: input.classSessionId }, { ahora })
+        const nuevas = hoy.filter(f => f.pendiente !== null && !new Prisma.Decimal(f.pendiente).isZero())
+        if (nuevas.length) {
+          const suma = (xs: Array<string | Prisma.Decimal>) => xs.reduce<Prisma.Decimal>((a, x) => a.plus(x), new Prisma.Decimal(0))
+          const firmado = (d: Prisma.Decimal) => `${d.isNegative() ? '-' : '+'}$${d.abs().toFixed(2)}`
+          const nuevo = suma(nuevas.map(f => f.pendiente!))
+          const g = guardados[0]
+          throw new ConflictError(
+            `Esa clave ya liquidó ${firmado(suma(previas.map(p => p.amount)))} en el periodo del ${dbDateComoFecha(g.periodStart)} al ${dbDateComoFecha(g.periodEnd)} y la clase tiene ${nuevo.isZero() ? 'una diferencia nueva por liquidar' : `una diferencia nueva de ${firmado(nuevo)}`}: usa otra clave`,
+            'CLAVE_REUTILIZADA',
+          )
+        }
         return { lineas: previas.map(p => ({ staffId: p.staffId, amount: p.amount.toFixed(2) })), yaLiquidada: true }
       }
       // 1) Periodo destino (por default el de hoy): sólo una inserción NUEVA exige que esté abierto.

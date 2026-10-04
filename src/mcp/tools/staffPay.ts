@@ -63,7 +63,8 @@ const QUE_HACER_LIQUIDAR: Record<string, string> = {
   ORIGEN_CAMBIO:
     'Pide de nuevo la vista previa: si la clase se movió a un periodo abierto, ya no hay diferencia que liquidar (se paga al cerrar ese periodo).',
   PERIODO_CERRADO: 'Pide la vista previa sin destinoFecha (o con un día del periodo abierto) para liquidar en el periodo abierto.',
-  CLAVE_REUTILIZADA: 'Usa una idempotencyKey nueva para esta liquidación.',
+  CLAVE_REUTILIZADA:
+    'Usa una idempotencyKey nueva para esta liquidación: pide la vista previa con ella, muéstrasela al usuario y confirma con la misma.',
   CLASE_EN_EXCEPCION: 'Resuelve la clase (coach, nivel, tabla o monto) y vuelve a pedir la vista previa.',
   SEDE_FUERA_DEL_PERIODO: 'Si el usuario quiere sumar la sede al periodo, repite la vista previa con ampliarAlcance: true.',
 }

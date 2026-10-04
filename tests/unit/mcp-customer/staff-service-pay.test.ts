@@ -834,6 +834,42 @@ describe('staff_service_pay — por el catálogo real (dos pasos con confirmatio
       await server.close()
     }
   })
+  it('reusar la idempotencyKey cuando la clase tiene una diferencia NUEVA: el agente recibe qué pasó y que use una nueva (I-1)', async () => {
+    const server = new McpServer({ name: 'staffpay', version: '1' })
+    const s = { ...scope, scopes: ['mcp:read', 'mcp:write'] } as unknown as McpScope
+    configureToolCatalog(server, s)
+    registerStaffPayTools(server, s)
+    const client = new Client({ name: 'staffpay-test', version: '1' })
+    const [a, b] = InMemoryTransport.createLinkedPair()
+    await Promise.all([server.connect(a), client.connect(b)])
+    try {
+      const call = async (args: Record<string, unknown>) =>
+        JSON.parse(
+          ((await client.callTool({ name: 'settle_service_pay_difference', arguments: args })).content as Array<{ text: string }>)[0].text,
+        )
+      const liquidar = async () => {
+        const p = await call({ venueId: 'v1', classSessionId: 'c1', idempotencyKey: 'settle-c1' })
+        return call({ ...p.confirmationArguments, confirm: true, confirmationToken: p.confirmationToken })
+      }
+      mockPreviewLiq.mockResolvedValue(pvLiq({ destino: { start: '2026-10-01', end: '2026-10-31', venueIds: ['v1'] } }))
+      mockLiquidar.mockResolvedValueOnce({ lineas: [{ staffId: 'a', amount: '40.00' }], yaLiquidada: false })
+      expect(await liquidar()).toMatchObject({ ok: true, yaLiquidada: false })
+      // El 10-oct se corrige a 10: la vista previa dice +$40 nuevos y el agente reusa la clave (cae en octubre otra vez).
+      const msg =
+        'Esa clave ya liquidó +$40.00 en el periodo del 2026-10-01 al 2026-10-31 y la clase tiene una diferencia nueva de +$40.00: usa otra clave'
+      mockLiquidar.mockRejectedValueOnce(Object.assign(new Error(msg), { statusCode: 409, code: 'CLAVE_REUTILIZADA' }))
+      const r = await liquidar()
+      expect(r).toMatchObject({ ok: false, code: 'CLAVE_REUTILIZADA' })
+      expect(r.error).toContain(msg)
+      expect(r.error).toMatch(/Usa una idempotencyKey nueva/)
+      expect(mockLiquidar).toHaveBeenLastCalledWith(expect.objectContaining({ destinoFecha: '2026-10-01', solicitudId: 'mcp-settle-c1' }))
+      // Sólo la primera se audita.
+      expect(auditMcpWrite).toHaveBeenCalledTimes(1)
+    } finally {
+      await client.close()
+      await server.close()
+    }
+  })
   it('liquidar exige una idempotencyKey que quepa en la clave del service (4 a 96, sin «:»)', async () => {
     const server = new McpServer({ name: 'staffpay', version: '1' })
     const s = { ...scope, scopes: ['mcp:read', 'mcp:write'] } as unknown as McpScope
