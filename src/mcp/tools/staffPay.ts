@@ -21,7 +21,11 @@ import { requireWriteScopeAlways } from '../requireWriteScopeAlways'
 import { auditMcpWrite } from '../audit'
 
 const sedeArg = z.string().min(1).max(64).optional().describe('Only this venue of the organization (default: all venues you can read)')
-const fecha = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe('Any day inside the pay period, YYYY-MM-DD venue-local (default: today)')
+const fecha = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/)
+  .optional()
+  .describe('Any day inside the pay period, YYYY-MM-DD venue-local (default: today)')
 
 /** Las mismas palabras que el dashboard (`staffPay.json`): el agente se lo repite al dueño. */
 const MOTIVOS: Record<MotivoExcepcion, string> = {
@@ -45,10 +49,13 @@ const diaUTC = (f: string) => {
   const [y, m, d] = f.split('-').map(Number)
   return new Date(Date.UTC(y, m - 1, d))
 }
-const diaLegible = (f: string) => diaUTC(f).toLocaleDateString('es-MX', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' })
+const diaLegible = (f: string) =>
+  diaUTC(f).toLocaleDateString('es-MX', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' })
 /** «de septiembre de 2026» si es el mes completo; si no, «del 1 sep 2026 al 15 sep 2026». */
 const periodoLegible = (p: { start: string; end: string }) =>
-  p.start.endsWith('-01') && p.start.slice(0, 7) === p.end.slice(0, 7) && diaUTC(p.end).getUTCMonth() !== new Date(diaUTC(p.end).getTime() + 86_400_000).getUTCMonth()
+  p.start.endsWith('-01') &&
+  p.start.slice(0, 7) === p.end.slice(0, 7) &&
+  diaUTC(p.end).getUTCMonth() !== new Date(diaUTC(p.end).getTime() + 86_400_000).getUTCMonth()
     ? `de ${diaUTC(p.start).toLocaleDateString('es-MX', { month: 'long', year: 'numeric', timeZone: 'UTC' })}`
     : `del ${diaLegible(p.start)} al ${diaLegible(p.end)}`
 
@@ -104,7 +111,10 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
       // El recibo congelado respeta cursor, límite y sede (Codex R2-R1-21).
       const recibo = async () => {
         try {
-          return text({ cerrado: true, recibo: await reciboDePersona({ userId: scope.staffId, venueId, staffId, fecha: dia, sede, cursor, limit: limit ?? 50 }) })
+          return text({
+            cerrado: true,
+            recibo: await reciboDePersona({ userId: scope.staffId, venueId, staffId, fecha: dia, sede, cursor, limit: limit ?? 50 }),
+          })
         } catch (e) {
           // Codex R3-Nuevo 3: el cursor es de antes de un cierre (o del desglose en vivo): se pide de nuevo SIN cursor.
           if ((e as { code?: string })?.code !== 'RECIBO_CAMBIO') throw e
@@ -119,7 +129,9 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
       }
       if ((await periodoQueContieneFecha(prisma, v.organizationId, dia))?.status === 'CLOSED') return recibo()
       try {
-        return text(await detallePersona({ userId: scope.staffId, venueId, staffId, fecha: dia, sede, despuesDe: cursor, limit: limit ?? 50 }))
+        return text(
+          await detallePersona({ userId: scope.staffId, venueId, staffId, fecha: dia, sede, despuesDe: cursor, limit: limit ?? 50 }),
+        )
       } catch (e) {
         // Se cerró entre la consulta y el desglose: el server responde PERIODO_CERRADO y se lee lo congelado.
         if ((e as { code?: string })?.code === 'PERIODO_CERRADO') return recibo()
@@ -138,7 +150,11 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
       const v = await prisma.venue.findUnique({ where: { id: venueId }, select: { organizationId: true, timezone: true } })
       if (!v) return text({ ok: false, error: 'Sede no encontrada' })
       const dia = f ?? hoyLocal(v.timezone || 'America/Mexico_City')
-      const [niveles, asignaciones, tablas] = await Promise.all([listarNiveles(v.organizationId), nivelesVigentes(v.organizationId, dia), listarTablas(venueId, dia)])
+      const [niveles, asignaciones, tablas] = await Promise.all([
+        listarNiveles(v.organizationId),
+        nivelesVigentes(v.organizationId, dia),
+        listarTablas(venueId, dia),
+      ])
       return text({ fecha: dia, niveles, asignaciones, tablas })
     },
   )
@@ -181,7 +197,10 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
     'Close a pay-per-service period for the whole organization: freezes the pay of every finished class into one receipt per person. Two steps: call without confirm to get the preview (classes, people, total, blockers) and its expectedSourceFingerprint; then call again with confirm:true and that fingerprint. If numbers changed in between it returns the new preview instead of closing. Requires staffpay:close in every venue of the period.',
     {
       venueId: z.string().min(1).max(64).describe('Venue in your scope'),
-      fecha: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe('Any day inside the period to close, YYYY-MM-DD venue-local'),
+      fecha: z
+        .string()
+        .regex(/^\d{4}-\d{2}-\d{2}$/)
+        .describe('Any day inside the period to close, YYYY-MM-DD venue-local'),
       confirmarHuerfanas: z.boolean().optional().describe('Confirm that class bookings without a schedule do not count for any pay'),
       expectedSourceFingerprint: z.string().max(128).optional().describe('Fingerprint from the preview'),
       confirm: z.boolean().optional(),
@@ -255,8 +274,16 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
       staffId: z.string().min(1).max(64).describe('Person who receives the adjustment'),
       amount: z.number().describe('Pesos; negative for a deduction; never 0'),
       reason: z.string().min(3).max(300).describe('Why (shown on the receipt)'),
-      fecha: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe('Any day inside the target open period (default: today); the preview returns the one to confirm with'),
-      idempotencyKey: z.string().regex(/^[A-Za-z0-9_.-]{4,100}$/).optional().describe('Unique key for this adjustment (letters, digits, - _ .)'),
+      fecha: z
+        .string()
+        .regex(/^\d{4}-\d{2}-\d{2}$/)
+        .optional()
+        .describe('Any day inside the target open period (default: today); the preview returns the one to confirm with'),
+      idempotencyKey: z
+        .string()
+        .regex(/^[A-Za-z0-9_.-]{4,100}$/)
+        .optional()
+        .describe('Unique key for this adjustment (letters, digits, - _ .)'),
       expectedSourceFingerprint: z.string().max(128).optional().describe('Fingerprint from the preview'),
       confirm: z.boolean().optional(),
     },
@@ -264,12 +291,17 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
       if (sede) guard.venueFilter(sede) // la sede de la línea, por el alcance de la conexión antes de consultar nada
       const no = await puedeEscribir(venueId)
       if (no) return text({ ok: false, error: no })
-      if (!idempotencyKey) return text({ ok: false, needsInput: true, field: 'idempotencyKey', question: 'Pasa una idempotencyKey única para este ajuste.' })
+      if (!idempotencyKey)
+        return text({ ok: false, needsInput: true, field: 'idempotencyKey', question: 'Pasa una idempotencyKey única para este ajuste.' })
       try {
         if (confirm !== true) {
           const pv = await previewAjusteManual({ userId: scope.staffId, venueId, sede: sede ?? venueId, staffId, amount, reason, fecha: f })
           if (pv.periodo.estado === 'CLOSED') {
-            return text({ ok: false, preview: pv, error: `El periodo del ${pv.periodo.start} al ${pv.periodo.end} ya está cerrado: elige una fecha del periodo abierto.` })
+            return text({
+              ok: false,
+              preview: pv,
+              error: `El periodo del ${pv.periodo.start} al ${pv.periodo.end} ya está cerrado: elige una fecha del periodo abierto.`,
+            })
           }
           return text({
             ok: false,
@@ -283,8 +315,10 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
             message: `${amount >= 0 ? 'Se agrega un bono de' : 'Se descuentan'} $${pesos(String(Math.abs(amount)))} a ${pv.persona} en ${pv.sedeNombre} con el motivo «${reason}» al periodo del ${pv.periodo.start} al ${pv.periodo.end}.`,
           })
         }
-        if (!expectedSourceFingerprint) return text({ ok: false, needsInput: true, field: 'expectedSourceFingerprint', question: 'Pide primero la vista previa.' })
-        if (!f) return text({ ok: false, needsInput: true, field: 'fecha', question: 'Confirma con la fecha que devolvió la vista previa.' })
+        if (!expectedSourceFingerprint)
+          return text({ ok: false, needsInput: true, field: 'expectedSourceFingerprint', question: 'Pide primero la vista previa.' })
+        if (!f)
+          return text({ ok: false, needsInput: true, field: 'fecha', question: 'Confirma con la fecha que devolvió la vista previa.' })
         const r = await agregarAjusteManual({
           userId: scope.staffId,
           venueId,
@@ -343,7 +377,8 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
             message: `Se registran como pagados ${pv.cantidad} recibo(s) (${staffId ? 'esa persona' : 'todos los pendientes'}) por $${pesos(pv.total)}: ${nombres}${resto}.`,
           })
         }
-        if (!expectedSourceFingerprint) return text({ ok: false, needsInput: true, field: 'expectedSourceFingerprint', question: 'Pide primero la vista previa.' })
+        if (!expectedSourceFingerprint)
+          return text({ ok: false, needsInput: true, field: 'expectedSourceFingerprint', question: 'Pide primero la vista previa.' })
         const r = await marcarPagado({ userId: scope.staffId, venueId, periodId, staffId, nota, huellaEsperada: expectedSourceFingerprint })
         if (r.marcados) {
           await auditMcpWrite(scope, {
@@ -378,7 +413,9 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
         const r = await diferenciasDelPeriodo({ userId: scope.staffId, venueId, periodId, cursor, limit: limit ?? 50 })
         const ids = [...new Set(r.items.map(f => f.venueId))]
         const sedes = new Map(
-          (await prisma.venue.findMany({ where: { id: { in: ids } }, select: { id: true, name: true, currency: true }, take: ids.length })).map(v => [v.id, v]),
+          (
+            await prisma.venue.findMany({ where: { id: { in: ids } }, select: { id: true, name: true, currency: true }, take: ids.length })
+          ).map(v => [v.id, v]),
         )
         return text({
           items: r.items.map(f => ({
@@ -413,9 +450,19 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
     {
       venueId: z.string().min(1).max(64).describe('Venue of the class'),
       classSessionId: z.string().min(1).max(64).describe('Class with a pending difference'),
-      destinoFecha: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe('Any day inside the open period that receives it (default: today); the preview returns the one to confirm with'),
-      idempotencyKey: z.string().regex(/^[A-Za-z0-9_.-]{4,96}$/).describe('Unique key for this settlement (4-96 letters, digits, - _ .)'),
-      ampliarAlcance: z.boolean().optional().describe('Add the class venue to the open period when it is not there (e.g. the venue turned the feature off)'),
+      destinoFecha: z
+        .string()
+        .regex(/^\d{4}-\d{2}-\d{2}$/)
+        .optional()
+        .describe('Any day inside the open period that receives it (default: today); the preview returns the one to confirm with'),
+      idempotencyKey: z
+        .string()
+        .regex(/^[A-Za-z0-9_.-]{4,96}$/)
+        .describe('Unique key for this settlement (4-96 letters, digits, - _ .)'),
+      ampliarAlcance: z
+        .boolean()
+        .optional()
+        .describe('Add the class venue to the open period when it is not there (e.g. the venue turned the feature off)'),
       expectedSourceFingerprint: z.string().max(128).optional().describe('Fingerprint from the preview'),
       confirm: z.boolean().optional(),
     },
@@ -427,14 +474,23 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
         if (confirm !== true) {
           const pv = await previewLiquidacion({ userId: scope.staffId, venueId, classSessionId, destinoFecha })
           if (!pv.periodoOrigen) {
-            return text({ ok: false, preview: pv, error: 'Esta clase no pertenece a un periodo cerrado: no tiene diferencia que liquidar (se paga al cerrar su periodo).' })
+            return text({
+              ok: false,
+              preview: pv,
+              error: 'Esta clase no pertenece a un periodo cerrado: no tiene diferencia que liquidar (se paga al cerrar su periodo).',
+            })
           }
           if (pv.bloqueada) {
             const motivos = [...new Set(pv.filas.flatMap(f => (f.motivo ? [MOTIVOS[f.motivo]] : [])))].join('; ')
-            return text({ ok: false, preview: pv, error: `La clase tiene algo sin resolver (${motivos || 'coach, nivel, tabla o monto'}): resuélvela antes de liquidar.` })
+            return text({
+              ok: false,
+              preview: pv,
+              error: `La clase tiene algo sin resolver (${motivos || 'coach, nivel, tabla o monto'}): resuélvela antes de liquidar.`,
+            })
           }
           const conMonto = pv.filas.filter(f => f.pendiente !== null && Number(f.pendiente) !== 0)
-          if (!conMonto.length) return text({ ok: false, preview: pv, error: 'Esta clase no tiene diferencia pendiente: no hay nada que liquidar.' })
+          if (!conMonto.length)
+            return text({ ok: false, preview: pv, error: 'Esta clase no tiene diferencia pendiente: no hay nada que liquidar.' })
           const sede = await prisma.venue.findUnique({ where: { id: venueId }, select: { name: true, currency: true } })
           const sedeNombre = sede?.name ?? venueId
           const moneda = sede?.currency ?? 'MXN'
@@ -467,12 +523,17 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
             }`,
           })
         }
-        if (!expectedSourceFingerprint) return text({ ok: false, needsInput: true, field: 'expectedSourceFingerprint', question: 'Pide primero la vista previa.' })
+        if (!expectedSourceFingerprint)
+          return text({ ok: false, needsInput: true, field: 'expectedSourceFingerprint', question: 'Pide primero la vista previa.' })
         // El origen sale de un preview DENTRO de esta llamada; la huella, del argumento: si la clase se movió, la huella (que
         // cubre el origen) ya no coincide y el service responde HUELLA_CAMBIO u ORIGEN_CAMBIO.
         const pv = await previewLiquidacion({ userId: scope.staffId, venueId, classSessionId, destinoFecha })
         if (!pv.periodoOrigen) {
-          return text({ ok: false, code: 'ORIGEN_CAMBIO', error: `La clase ya no pertenece a un periodo cerrado. ${QUE_HACER_LIQUIDAR.ORIGEN_CAMBIO}` })
+          return text({
+            ok: false,
+            code: 'ORIGEN_CAMBIO',
+            error: `La clase ya no pertenece a un periodo cerrado. ${QUE_HACER_LIQUIDAR.ORIGEN_CAMBIO}`,
+          })
         }
         const r = await liquidarDiferencia({
           userId: scope.staffId,
