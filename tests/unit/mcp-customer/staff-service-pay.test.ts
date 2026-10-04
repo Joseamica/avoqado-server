@@ -69,6 +69,11 @@ describe('staff_service_pay — regresión', () => {
   it('rechaza una sede fuera del alcance', async () => {
     await expect(handlers.get('staff_service_pay_summary')!({ venueId: 'foreign' }, {})).rejects.toThrow('out of scope')
   })
+  it('un resumen filtrado por una sede fuera del alcance de la conexión se niega antes de consultar nada', async () => {
+    await expect(handlers.get('staff_service_pay_summary')!({ venueId: 'v1', sede: 'foreign' }, {})).rejects.toThrow('out of scope')
+    expect(mockAccess).not.toHaveBeenCalled()
+    expect(mockReporte).not.toHaveBeenCalled()
+  })
   it('sin staffpay:read no lee nada', async () => {
     mockHasPermission.mockReturnValue(false)
     const r = parse(await handlers.get('staff_service_pay_detail')!({ venueId: 'v1', staffId: 'cxxxxxxxxxxxxxxxxxxxxxxxx' }, {}))

@@ -41,6 +41,8 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
       limit: z.number().int().positive().max(100).optional().describe('Max people (default 50)'),
     },
     async ({ venueId, fecha: f, sede, offset, limit }) => {
+      // PRIMERO el alcance de la CONEXIÓN para la sede del filtro, antes de consultar nada (como el desglose y las escrituras).
+      if (sede) guard.venueFilter(sede)
       const no = await puedeLeer(venueId)
       if (no) return text({ ok: false, error: no })
       return text(await reportePeriodo({ userId: scope.staffId, venueId, fecha: f, sede, offset: offset ?? 0, limit: limit ?? 50 }))
