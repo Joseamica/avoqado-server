@@ -318,4 +318,91 @@ describe('diferencias pendientes (spec §6.4)', () => {
       expect(p2).toMatchObject({ nextCursor: null, parcial: true })
     })
   })
+  describe('la causa de cada diferencia (QA bloque B, defecto 4)', () => {
+    /** persona → [causa, conteoCongelado, conteo, coachActualNombre], sólo las filas con algo pendiente o en excepción. */
+    const causas = async (classSessionId: string) =>
+      Object.fromEntries(
+        (await diferenciasDeClase(prisma, { venueId: m.venueId, classSessionId })).filas.map(f => [
+          f.persona,
+          [f.causa, f.conteoCongelado, f.conteo, f.coachActualNombre],
+        ]),
+      )
+    const anclada = async (dia: string, n = 8) => {
+      const id = await clase(m, { staffId: m.ana, inicioIso: `2026-08-${dia}T14:00:00Z`, reservas: confirmadas(n) })
+      return id
+    }
+
+    it('conteo corregido: CONTEO con el conteo congelado y el de hoy', async () => {
+      const id = await anclada('04')
+      await cerrarAgosto()
+      await prisma.classSessionPayState.update({ where: { classSessionId: id }, data: { payCountOverride: 9 } })
+      expect(await causas(id)).toEqual({ [m.ana]: ['CONTEO', 8, 9, 'Ana QA'] })
+    })
+
+    it('otra coach: COACH_SALE para la original (con el nombre de quien la da hoy) y COACH_ENTRA para la suplente', async () => {
+      const id = await anclada('04')
+      await cerrarAgosto()
+      await prisma.classSession.update({ where: { id }, data: { assignedStaffId: m.sofia } })
+      expect(await causas(id)).toEqual({
+        [m.ana]: ['COACH_SALE', 8, 8, 'Sofia QA'],
+        [m.sofia]: ['COACH_ENTRA', null, 8, 'Sofia QA'],
+      })
+    })
+
+    it('cancelada, excluida del pago y tardía', async () => {
+      const cancelada = await anclada('04')
+      const excluida = await anclada('05')
+      await cerrarAgosto()
+      const tardia = await clase(m, { staffId: m.ana, inicioIso: '2026-08-20T14:00:00Z', reservas: confirmadas(3) })
+      await prisma.classSession.update({ where: { id: cancelada }, data: { status: 'CANCELLED' } })
+      await prisma.classSessionPayState.update({ where: { classSessionId: excluida }, data: { payExcluded: true } })
+      expect(await causas(cancelada)).toEqual({ [m.ana]: ['CANCELADA', 8, 8, 'Ana QA'] })
+      expect(await causas(excluida)).toEqual({ [m.ana]: ['EXCLUIDA', 8, 8, 'Ana QA'] })
+      expect(await causas(tardia)).toEqual({ [m.ana]: ['TARDIA', null, 3, 'Ana QA'] })
+      // La lista del periodo trae los mismos campos.
+      const lista = await diferenciasDelPeriodo({ userId: m.owner, venueId: m.venueId, periodId, limit: 50 })
+      expect(Object.fromEntries(lista.items.map(i => [i.classSessionId, i.causa]))).toEqual({
+        [cancelada]: 'CANCELADA',
+        [excluida]: 'EXCLUIDA',
+        [tardia]: 'TARDIA',
+      })
+    })
+
+    it('monto ajustado con el mismo conteo: MONTO', async () => {
+      const id = await anclada('04')
+      await cerrarAgosto()
+      await prisma.classSessionPayState.update({ where: { classSessionId: id }, data: { payAmountOverride: 600 } })
+      expect(await causas(id)).toEqual({ [m.ana]: ['MONTO', 8, 8, 'Ana QA'] })
+    })
+
+    it('tras liquidar en 9, otra corrección a 10 compara contra 9 (la última línea), no contra el cierre', async () => {
+      const id = await anclada('04')
+      await cerrarAgosto()
+      await prisma.serviceEarning.create({
+        data: {
+          organizationId: m.orgId,
+          venueId: m.venueId,
+          periodId,
+          staffId: m.ana,
+          concept: 'RECONCILE',
+          sourceType: 'CLASS_SESSION',
+          sourceId: id,
+          count: 9,
+          amount: 40,
+          descriptor: {},
+        },
+      })
+      await prisma.classSessionPayState.update({ where: { classSessionId: id }, data: { payCountOverride: 10 } })
+      expect(await causas(id)).toEqual({ [m.ana]: ['CONTEO', 9, 10, 'Ana QA'] })
+    })
+
+    it('sin pendiente o en excepción no hay causa', async () => {
+      const igual = await anclada('04')
+      const sinCoach = await anclada('05')
+      await cerrarAgosto()
+      await prisma.classSession.update({ where: { id: sinCoach }, data: { assignedStaffId: null } })
+      expect(await causas(igual)).toEqual({ [m.ana]: [null, 8, 8, 'Ana QA'] })
+      expect(await causas(sinCoach)).toEqual({ [m.ana]: [null, 8, 8, null] })
+    })
+  })
 })

@@ -703,11 +703,28 @@ describe('staff_service_pay_differences (lista de lo pendiente de un periodo cer
       moneda: 'MXN',
       enExcepcion: false,
       motivo: null,
+      causa: null,
     })
-    expect(r.items[1]).toMatchObject({ persona: null, pendiente: null, enExcepcion: true, motivo: 'La coach no tiene nivel' })
+    expect(r.items[1]).toMatchObject({ persona: null, pendiente: null, enExcepcion: true, motivo: 'La coach no tiene nivel', causa: null })
     expect(r).toMatchObject({ nextCursor: 'v1:c1:a', parcial: true })
     expect(r.message).toMatch(/Vista parcial/)
   })
+  it('cada fila dice POR QUÉ existe, en español, con las palabras del dashboard (QA bloque B, defecto 4)', async () => {
+    const casos: Array<[Record<string, unknown>, string | null]> = [
+      [{ causa: 'CONTEO', conteoCongelado: 8, conteo: 9 }, 'Conteo corregido: 8 → 9'],
+      [{ causa: 'COACH_SALE', coachActualNombre: 'Sofía Ruiz' }, 'Ya no da esta clase (ahora: Sofía Ruiz)'],
+      [{ causa: 'COACH_ENTRA' }, 'Ahora da esta clase'],
+      [{ causa: 'CANCELADA' }, 'Clase cancelada después del cierre'],
+      [{ causa: 'EXCLUIDA' }, 'Clase excluida del pago'],
+      [{ causa: 'TARDIA' }, 'Clase registrada después del cierre'],
+      [{ causa: 'MONTO' }, 'Monto de la clase corregido'],
+      [{ causa: null }, null],
+    ]
+    mockDiferencias.mockResolvedValue({ items: casos.map(([extra]) => filaCompleta(extra)), nextCursor: null, parcial: false })
+    const r = parse(await handlers.get('staff_service_pay_differences')!({ venueId: 'v1', periodId: 'p8' }, {}))
+    expect(r.items.map((i: { causa: string | null }) => i.causa)).toEqual(casos.map(([, texto]) => texto))
+  })
+
   it('sin limit pide 50; sin staffpay:read no lee nada; con el módulo apagado lo explica', async () => {
     mockDiferencias.mockResolvedValue({ items: [], nextCursor: null, parcial: false })
     const vacio = parse(await handlers.get('staff_service_pay_differences')!({ venueId: 'v1', periodId: 'p8' }, {}))

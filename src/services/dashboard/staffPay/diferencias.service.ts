@@ -20,6 +20,8 @@ const TOPE_SIN_ANCLA = 5000
 const entero = (x: number | undefined, porDefecto: number, min: number, max: number) =>
   x !== undefined && Number.isFinite(x) ? Math.min(Math.max(Math.trunc(x), min), max) : porDefecto
 
+export type CausaDiferencia = 'CONTEO' | 'COACH_SALE' | 'COACH_ENTRA' | 'CANCELADA' | 'EXCLUIDA' | 'TARDIA' | 'MONTO'
+
 export interface FilaDiferencia {
   classSessionId: string
   venueId: string
@@ -32,6 +34,7 @@ export interface FilaDiferencia {
   persona: string | null
   personaNombre: string | null
   coachActual: string | null
+  coachActualNombre?: string | null
   estadoClase: 'OK' | 'EXCLUIDA' | 'EXCEPCION'
   motivo: MotivoExcepcion | null
   corresponde: string | null
@@ -48,6 +51,10 @@ export interface FilaDiferencia {
   tableVersionId: string | null
   countMode: string | null
   conteo: number
+  /** El conteo de la última línea de `persona` en la clase (su SERVICE, o su RECONCILE si ya se liquidó); null si no tiene. */
+  conteoCongelado?: number | null
+  /** Por qué hay diferencia (QA bloque B, defecto 4); null sin pendiente o en excepción (ésta ya trae `motivo`). */
+  causa?: CausaDiferencia | null
 }
 
 type Fila = Omit<FilaDiferencia, 'corresponde' | 'congelado' | 'conciliado' | 'pendiente'> & {
@@ -67,6 +74,65 @@ const aDto = (f: Fila): FilaDiferencia => ({
 })
 
 type CursorFila = { classSessionId: string; persona: string }
+
+/**
+ * Por qué existe cada diferencia (QA bloque B, defecto 4), con UNA consulta para las filas que se devuelven (≤ una página o
+ * una clase), nunca dentro del recorrido: sumarle columnas al SQL del recorrido le quitaba a Postgres su plan genérico rápido
+ * (medido con 50,000 clases: la página sin diferencias pasaba de 2.0 s a 3.6 s). Por clase: si está cancelada, el nombre de
+ * su coach y, por persona, el conteo de su ÚLTIMA línea (SERVICE o RECONCILE: tras una liquidación compara contra ésa).
+ */
+async function conCausa(db: Db, organizationId: string, filas: FilaDiferencia[]): Promise<FilaDiferencia[]> {
+  const ids = [...new Set(filas.map(f => f.classSessionId))]
+  if (!ids.length) return filas
+  const info = await db.$queryRaw<
+    Array<{ cid: string; cancelada: boolean; coach: string | null; staffId: string | null; conteo: number | null }>
+  >`
+    SELECT cs.id AS cid, (cs.status = 'CANCELLED') AS cancelada,
+           NULLIF(TRIM(CONCAT(s."firstName", ' ', s."lastName")), '') AS coach, u."staffId", u.count AS conteo
+    FROM "ClassSession" cs
+    JOIN "Venue" v ON v.id = cs."venueId" AND v."organizationId" = ${organizationId}
+    LEFT JOIN "Staff" s ON s.id = cs."assignedStaffId"
+    LEFT JOIN (
+      SELECT DISTINCT ON (e."sourceId", e."staffId") e."sourceId", e."staffId", e.count
+      FROM "ServiceEarning" e
+      WHERE e."organizationId" = ${organizationId} AND e."sourceType" = 'CLASS_SESSION' AND e."sourceId" = ANY(${ids}::text[])
+        AND e.concept IN ('SERVICE', 'RECONCILE')
+      ORDER BY e."sourceId", e."staffId", e."createdAt" DESC, e.id DESC
+    ) u ON u."sourceId" = cs.id
+    WHERE cs.id = ANY(${ids}::text[])`
+  const clases = new Map<string, { cancelada: boolean; coach: string | null; lineas: Map<string, number | null> }>()
+  for (const r of info) {
+    const c = clases.get(r.cid) ?? { cancelada: r.cancelada, coach: r.coach, lineas: new Map() }
+    if (r.staffId) c.lineas.set(r.staffId, r.conteo)
+    clases.set(r.cid, c)
+  }
+  return filas.map(f => {
+    const c = clases.get(f.classSessionId)
+    const propia = f.persona !== null && !!c?.lineas.has(f.persona)
+    const conteoCongelado = propia ? (c!.lineas.get(f.persona!) ?? null) : null
+    return {
+      ...f,
+      coachActualNombre: f.coachActual ? (c?.coach ?? null) : null,
+      conteoCongelado,
+      causa: causaDe(f, c, propia, conteoCongelado),
+    }
+  })
+}
+
+/** La regla, fila por fila. Sin pendiente o en excepción (ésta ya trae `motivo`) no hay causa. */
+function causaDe(
+  f: FilaDiferencia,
+  c: { cancelada: boolean; lineas: Map<string, number | null> } | undefined,
+  propia: boolean,
+  conteoCongelado: number | null,
+): CausaDiferencia | null {
+  if (f.pendiente === null || new Prisma.Decimal(f.pendiente).isZero()) return null
+  if (c?.cancelada) return 'CANCELADA'
+  if (f.estadoClase === 'EXCLUIDA') return 'EXCLUIDA'
+  if (f.persona !== f.coachActual) return 'COACH_SALE'
+  if (!propia) return c?.lineas.size ? 'COACH_ENTRA' : 'TARDIA'
+  return conteoCongelado !== null && f.conteo !== conteoCongelado ? 'CONTEO' : 'MONTO'
+}
 
 /**
  * LA valoración (spec §6.1) en modo 'periodo' de UN lote de clases (`f.claseIds`, nunca vacío), envuelta (spec §6.4):
@@ -212,7 +278,8 @@ export async function diferenciasDeClase(
   const origen = await origenDeClase(db, input.venueId, cs, ahora)
   if (!origen) return { origen: null, filas: [] }
   const f = { ...filtroDelPeriodo(origen, input.venueId, cs.venue.timezone || TZ_DEFAULT, ahora), claseIds: [input.classSessionId] }
-  return { origen, filas: (await db.$queryRaw<Fila[]>(diferenciasSql(f, null, false))).map(aDto) }
+  const filas = (await db.$queryRaw<Fila[]>(diferenciasSql(f, null, false))).map(aDto)
+  return { origen, filas: await conCausa(db, origen.organizationId, filas) }
 }
 
 /**
@@ -279,7 +346,7 @@ export async function diferenciasDelPeriodo(
         if (items.length > limite) {
           const u = items[limite - 1]
           return {
-            items: items.slice(0, limite),
+            items: await conCausa(prisma, v.organizationId, items.slice(0, limite)),
             nextCursor: `${u.venueId}:${u.classSessionId}:${u.persona ?? ''}`,
             parcial: legibles.parcial,
           }
@@ -288,5 +355,5 @@ export async function diferenciasDelPeriodo(
       desde = { id: ids[ids.length - 1], incluido: false }
     }
   }
-  return { items, nextCursor: null, parcial: legibles.parcial }
+  return { items: await conCausa(prisma, v.organizationId, items), nextCursor: null, parcial: legibles.parcial }
 }

@@ -12,7 +12,7 @@ import { agregarAjusteManual, previewAjusteManual } from '@/services/dashboard/s
 import { marcarPagado, previewPagado, reciboDePersona } from '@/services/dashboard/staffPay/recibos.service'
 import { periodoQueContieneFecha } from '@/services/dashboard/staffPay/periodosGuardados'
 import { liquidarDiferencia, previewLiquidacion } from '@/services/dashboard/staffPay/liquidacion.service'
-import { diferenciasDelPeriodo } from '@/services/dashboard/staffPay/diferencias.service'
+import { diferenciasDelPeriodo, FilaDiferencia } from '@/services/dashboard/staffPay/diferencias.service'
 import type { MotivoExcepcion } from '@/services/dashboard/staffPay/valoracion'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
@@ -33,6 +33,27 @@ const MOTIVOS: Record<MotivoExcepcion, string> = {
   COACH_SIN_NIVEL: 'La coach no tiene nivel',
   SIN_TABLA: 'No hay tabla de pagos para esta clase',
   SIN_MONTO_PARA_ESE_CONTEO: 'Falta el monto para ese número de lugares',
+}
+/** Por qué existe cada diferencia, con las mismas palabras que el dashboard (QA bloque B, defecto 4). */
+function causaLegible(f: Pick<FilaDiferencia, 'causa' | 'conteo' | 'conteoCongelado' | 'coachActualNombre'>): string | null {
+  switch (f.causa) {
+    case 'CONTEO':
+      return `Conteo corregido: ${f.conteoCongelado} → ${f.conteo}`
+    case 'COACH_SALE':
+      return f.coachActualNombre ? `Ya no da esta clase (ahora: ${f.coachActualNombre})` : 'Ya no da esta clase'
+    case 'COACH_ENTRA':
+      return 'Ahora da esta clase'
+    case 'CANCELADA':
+      return 'Clase cancelada después del cierre'
+    case 'EXCLUIDA':
+      return 'Clase excluida del pago'
+    case 'TARDIA':
+      return 'Clase registrada después del cierre'
+    case 'MONTO':
+      return 'Monto de la clase corregido'
+    default:
+      return null
+  }
 }
 /** Qué hacer ante cada rechazo de «liquidar diferencia» (spec §6.4): el agente lo sigue sin adivinar. */
 const QUE_HACER_LIQUIDAR: Record<string, string> = {
@@ -411,7 +432,7 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'staff_service_pay_differences',
-    'Pending pay differences of a CLOSED pay-per-service period: classes whose pay changed after closing (corrected head count, substitute coach, cancellation, a class that arrived late). One row per class and person: what corresponds today, what was frozen at closing, what was already settled and what is pending (positive or negative), or the exception that blocks it. Paginated with a cursor; partial=true means some venues were left out for lack of permission. Settle a class with settle_service_pay_difference. Requires staffpay:read.',
+    'Pending pay differences of a CLOSED pay-per-service period: classes whose pay changed after closing (corrected head count, substitute coach, cancellation, a class that arrived late). One row per class and person: why it exists (causa, in Spanish), what corresponds today, what was frozen at closing, what was already settled and what is pending (positive or negative), or the exception that blocks it. Paginated with a cursor; partial=true means some venues were left out for lack of permission. Settle a class with settle_service_pay_difference. Requires staffpay:read.',
     {
       venueId: z.string().min(1).max(64).describe('Venue in your scope'),
       periodId: z.string().min(1).max(64).describe('Closed period'),
@@ -445,6 +466,7 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
             moneda: sedes.get(f.venueId)?.currency ?? 'MXN',
             enExcepcion: f.pendiente === null,
             motivo: f.motivo ? MOTIVOS[f.motivo] : null,
+            causa: causaLegible(f),
           })),
           nextCursor: r.nextCursor,
           parcial: r.parcial,
