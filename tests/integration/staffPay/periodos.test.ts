@@ -220,6 +220,21 @@ describe('efecto de publicar una tabla o asignar un nivel (spec §7.1)', () => {
     })
   })
 
+  it('una vigencia de hace 25 años también llega a hoy: cuenta los periodos recientes y dice cuántos quedaron sin contar (m2)', async () => {
+    // La versión vigente tiene que ser MÁS vieja que la nueva para que la nueva aplique hoy: se mueve al año 2000.
+    await prisma.servicePayTableVersion.updateMany({ where: { tableId }, data: { effectiveFrom: fechaComoDbDate('2000-01-01') } })
+    // 2001-10 a 2026-10 son 301 periodos mensuales; agosto de 2026 cerrado ⇒ 300 abiertos; se cuentan jul, sep y oct ⇒ 297.
+    expect(await simular('2001-10-01')).toEqual({
+      clasesQueCambian: 3,
+      porPeriodo: [
+        { start: '2026-07-01', end: '2026-07-31', clases: 0 },
+        { start: '2026-09-01', end: '2026-09-30', clases: 2 },
+        { start: '2026-10-01', end: '2026-10-31', clases: 1 },
+      ],
+      periodosSinContar: 297,
+    })
+  })
+
   it('una vigencia dentro de un periodo CERRADO se rechaza con una explicación y la primera fecha que sí se puede', async () => {
     await expect(simular('2026-08-15')).rejects.toMatchObject({
       statusCode: 400,

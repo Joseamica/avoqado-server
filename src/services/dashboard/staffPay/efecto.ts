@@ -1,7 +1,7 @@
 import { Prisma } from '@prisma/client'
 import prisma from '../../../utils/prismaClient'
 import { valorarClases } from './valoracion'
-import { diaCivilSiguiente, fechaComoDbDate, hoyLocal, PeriodoCanonico, periodoQueContiene, venuePeriodRange } from './periodos'
+import { fechaComoDbDate, hoyLocal, Periodicidad, PeriodoCanonico, periodoQueContiene, venuePeriodRange } from './periodos'
 
 export class FinDeSimulacion extends Error {
   constructor(public readonly resultado: EfectoDelCambio) {
@@ -17,8 +17,8 @@ export interface EfectoPorPeriodo {
 }
 /**
  * «Cambia el pago de N clases de septiembre y M de octubre» (spec §7.1, revisión final I-2). `porPeriodo`: los periodos
- * ABIERTOS recorridos, del más viejo al más nuevo (también los que quedan en 0). `periodosSinContar`: periodos abiertos
- * MÁS VIEJOS que también cambian y no se recorrieron por el tope.
+ * ABIERTOS recorridos, del más viejo al más nuevo (también los que quedan en 0). `periodosSinContar`: periodos abiertos MÁS
+ * VIEJOS que no se recorrieron por el tope (no contados: pueden tener 0 cambios o varios).
  */
 export interface EfectoDelCambio {
   clasesQueCambian: number
@@ -30,9 +30,28 @@ export interface EfectoDelCambio {
 export const TOPE_PERIODOS_EFECTO = 3
 const TZ_DEFAULT = 'America/Mexico_City'
 
+/** Periodos que se enumeran uno por uno, hacia atrás desde hoy (10 años quincenales, 20 mensuales). */
+const VENTANA_PERIODOS = 240
+
+/** Posición de un periodo canónico en una cuenta continua: la resta de dos da cuántos periodos hay entre ellos. */
+function indice(inicio: string, periodicidad: Periodicidad): number {
+  const [y, m, d] = inicio.split('-').map(Number)
+  const mes = y * 12 + (m - 1)
+  return periodicidad === 'MONTHLY' ? mes : mes * 2 + (d >= 16 ? 1 : 0)
+}
+
+/** El periodo canónico anterior a `p`. */
+function anterior(p: PeriodoCanonico, periodicidad: Periodicidad): PeriodoCanonico {
+  const dia = new Date(`${p.start}T12:00:00Z`)
+  dia.setUTCDate(dia.getUTCDate() - 1)
+  return periodoQueContiene(dia.toISOString().slice(0, 10), periodicidad)
+}
+
 /**
  * Los periodos NO cerrados desde el que contiene `desde` hasta el de hoy (los cerrados conservan su pago congelado; el
- * modo vivo además ya no ve lo anclado). Los más recientes, hasta el tope.
+ * modo vivo además ya no ve lo anclado): se cuentan los más recientes, hasta el tope. Se enumera HACIA ATRÁS desde hoy
+ * (revisión final, m2: enumerar desde `desde` con un tope nunca llegaba a hoy con una vigencia muy vieja), y lo que queda
+ * antes de la ventana sólo se cuenta con aritmética, menos sus cerrados.
  */
 async function periodosAbiertos(
   db: Prisma.TransactionClient,
@@ -41,27 +60,38 @@ async function periodosAbiertos(
   hoy: string,
 ): Promise<{ contar: PeriodoCanonico[]; sinContar: number }> {
   const org = await db.organization.findUniqueOrThrow({ where: { id: organizationId }, select: { servicePayPeriodicity: true } })
-  const todos: PeriodoCanonico[] = []
-  // ponytail: a lo más 240 periodos (10 años quincenales) desde `desde`; más atrás no se enumera.
-  for (let p = periodoQueContiene(desde, org.servicePayPeriodicity); p.start <= hoy && todos.length < 240; ) {
-    todos.push(p)
-    p = periodoQueContiene(diaCivilSiguiente(p.end), org.servicePayPeriodicity)
+  const per = org.servicePayPeriodicity
+  const inicio = periodoQueContiene(desde, per)
+  const ventana: PeriodoCanonico[] = []
+  for (let p = periodoQueContiene(hoy, per); ventana.length < VENTANA_PERIODOS && p.start >= inicio.start; p = anterior(p, per)) {
+    ventana.unshift(p)
   }
-  if (!todos.length) return { contar: [], sinContar: 0 }
+  if (!ventana.length) return { contar: [], sinContar: 0 } // la vigencia empieza después de hoy: nada ha cambiado aún
   const cerrados = await db.servicePayPeriod.findMany({
     where: {
       organizationId,
       status: 'CLOSED',
-      periodStart: { lte: fechaComoDbDate(todos[todos.length - 1].end) },
-      periodEnd: { gte: fechaComoDbDate(todos[0].start) },
+      periodStart: { lte: fechaComoDbDate(ventana[ventana.length - 1].end) },
+      periodEnd: { gte: fechaComoDbDate(ventana[0].start) },
     },
     select: { periodStart: true },
-    take: todos.length,
+    take: ventana.length,
   })
   const inicios = new Set(cerrados.map(c => c.periodStart.toISOString().slice(0, 10)))
-  const abiertos = todos.filter(p => !inicios.has(p.start))
+  const abiertos = ventana.filter(p => !inicios.has(p.start))
   const contar = abiertos.slice(-TOPE_PERIODOS_EFECTO)
-  return { contar, sinContar: abiertos.length - contar.length }
+  // Los periodos más viejos que la ventana: cuántos hay, menos los cerrados.
+  const antes = indice(ventana[0].start, per) - indice(inicio.start, per)
+  const cerradosAntes = antes
+    ? await db.servicePayPeriod.count({
+        where: {
+          organizationId,
+          status: 'CLOSED',
+          periodStart: { gte: fechaComoDbDate(inicio.start), lt: fechaComoDbDate(ventana[0].start) },
+        },
+      })
+    : 0
+  return { contar, sinContar: abiertos.length - contar.length + antes - cerradosAntes }
 }
 
 /** Firma de cada clase calculada en vivo de esos periodos, con el índice del periodo al que pertenece. */
