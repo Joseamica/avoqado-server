@@ -29,7 +29,7 @@ async function celdasDelPdf(rows: Row[], title = 'Prueba') {
     const sueltos: string[] = []
     // Las llamadas a addPage y text se intercalan: se ordenan por su número de invocación global.
     const eventos = [
-      ...text.mock.calls.map((args, i) => ({ orden: text.mock.invocationCallOrder[i], args })),
+      ...text.mock.calls.map((args, i) => ({ orden: text.mock.invocationCallOrder[i], args: args as unknown[] })),
       ...addPage.mock.calls.map((_args, i) => ({ orden: addPage.mock.invocationCallOrder[i], args: null })),
     ].sort((p, q) => p.orden - q.orden)
     for (const e of eventos) {
