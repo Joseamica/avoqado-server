@@ -4,7 +4,15 @@ const mockIsModuleEnabled = jest.fn()
 const mockGetUserAccess = jest.fn()
 jest.mock('@/services/modules/module.service', () => ({
   MODULE_CODES: { SERVICE_PAY: 'SERVICE_PAY' },
-  moduleService: { isModuleEnabled: (...a: unknown[]) => mockIsModuleEnabled(...a) },
+  moduleService: {
+    isModuleEnabled: (...a: unknown[]) => mockIsModuleEnabled(...a),
+    // La versión en lote replica la precedencia de isModuleEnabled (module.service): aquí, sobre el mismo mock.
+    venuesWithModule: async (ids: string[]) => {
+      const s = new Set<string>()
+      for (const id of ids) if (await mockIsModuleEnabled(id, 'SERVICE_PAY')) s.add(id)
+      return s
+    },
+  },
 }))
 jest.mock('@/services/access/access.service', () => ({
   getUserAccess: (...a: unknown[]) => mockGetUserAccess(...a),
@@ -16,6 +24,7 @@ import {
   assertPermisoEnTodasLasSedes,
   exigirPermisoEnSedes,
   sedesConPermiso,
+  sedesConServicePay,
   sedesLegibles,
   sedesLegiblesDe,
   venueHasServicePayAccess,
@@ -99,5 +108,32 @@ describe('acceso — permisos resueltos ANTES de una transacción (revisión A8,
     expect(() => exigirPermisoEnSedes(new Set(['pn']), ['pn', 'bsf'], 'Necesitas cerrar en todas')).toThrow(
       expect.objectContaining({ statusCode: 403, message: 'Necesitas cerrar en todas' }),
     )
+  })
+})
+
+describe('acceso — tope de sedes con el módulo (Codex bloque A #2): nunca recorta en silencio', () => {
+  const ids = (n: number, desde = 0) => Array.from({ length: n }, (_, i) => ({ id: `v${String(desde + i).padStart(4, '0')}` }))
+  beforeEach(() => {
+    prismaMock.venue.findMany.mockReset()
+    mockIsModuleEnabled.mockReset()
+  })
+
+  it('con más de 500 sedes con el módulo se niega con la explicación, en vez de cerrar sin la 501', async () => {
+    prismaMock.venue.findMany.mockResolvedValueOnce(ids(500)).mockResolvedValueOnce(ids(1, 500)).mockResolvedValue([])
+    mockIsModuleEnabled.mockResolvedValue(true)
+    await expect(sedesConServicePay('org1')).rejects.toMatchObject({
+      statusCode: 400,
+      code: 'DEMASIADAS_SEDES',
+      message: expect.stringMatching(/más de 500 sedes con el módulo.*contacta a Avoqado/),
+    })
+  })
+
+  it('más de 500 sedes en la organización pero pocas con el módulo: las recorre todas y devuelve sólo esas', async () => {
+    prismaMock.venue.findMany.mockResolvedValueOnce(ids(500)).mockResolvedValueOnce(ids(100, 500)).mockResolvedValue([])
+    mockIsModuleEnabled.mockImplementation(async (id: string) => ['v0003', 'v0560'].includes(id))
+    await expect(sedesConServicePay('org1')).resolves.toEqual(['v0003', 'v0560'])
+    // Por páginas con cursor (id), cada una acotada; sin una consulta de módulo por sede.
+    expect(prismaMock.venue.findMany.mock.calls[1][0]).toMatchObject({ where: { organizationId: 'org1', id: { gt: 'v0499' } } })
+    for (const [arg] of prismaMock.venue.findMany.mock.calls) expect(arg.take).toBeLessThanOrEqual(501)
   })
 })

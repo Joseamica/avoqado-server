@@ -1,5 +1,5 @@
 import prisma from '../../../utils/prismaClient'
-import { ForbiddenError } from '../../../errors/AppError'
+import { BadRequestError, ForbiddenError } from '../../../errors/AppError'
 import { getUserAccess, hasPermission } from '../../access/access.service'
 import { MODULE_CODES, moduleService } from '../../modules/module.service'
 
@@ -7,16 +7,41 @@ export async function venueHasServicePayAccess(venueId: string): Promise<boolean
   return moduleService.isModuleEnabled(venueId, MODULE_CODES.SERVICE_PAY)
 }
 
-/** Sedes de la organización con el módulo activo: el alcance de toda operación de organización (spec §5.7, §9.2). */
+/** Tope de sedes con el módulo por organización: el alcance de un periodo (y sus permisos) se resuelve completo en memoria. */
+export const TOPE_SEDES_CON_MODULO = 500
+const LOTE_SEDES = 500
+
+/**
+ * Sedes de la organización con el módulo activo: el alcance de toda operación de organización (spec §5.7, §9.2).
+ * Recorre TODAS las sedes por páginas (cursor por id) y resuelve el módulo en lote (`venuesWithModule`, misma precedencia
+ * que `isModuleEnabled`). Con más del tope se NIEGA (Codex bloque A #2): un recorte dejaba fuera del cierre, del alcance
+ * guardado y del recibo el dinero de la sede 501 sin avisar.
+ */
 export async function sedesConServicePay(organizationId: string): Promise<string[]> {
-  const venues = await prisma.venue.findMany({
-    where: { organizationId },
-    select: { id: true },
-    orderBy: { id: 'asc' },
-    take: 500,
-  })
   const activas: string[] = []
-  for (const v of venues) if (await venueHasServicePayAccess(v.id)) activas.push(v.id)
+  let despuesDe: string | undefined
+  for (;;) {
+    const page = await prisma.venue.findMany({
+      where: { organizationId, ...(despuesDe ? { id: { gt: despuesDe } } : {}) },
+      select: { id: true },
+      orderBy: { id: 'asc' },
+      take: LOTE_SEDES,
+    })
+    if (!page.length) break
+    const conModulo = await moduleService.venuesWithModule(
+      page.map(v => v.id),
+      MODULE_CODES.SERVICE_PAY,
+    )
+    for (const v of page) if (conModulo.has(v.id)) activas.push(v.id)
+    if (activas.length > TOPE_SEDES_CON_MODULO) {
+      throw new BadRequestError(
+        `Esta organización tiene más de ${TOPE_SEDES_CON_MODULO} sedes con el módulo: el cierre no puede continuar; contacta a Avoqado.`,
+        'DEMASIADAS_SEDES',
+      )
+    }
+    if (page.length < LOTE_SEDES) break
+    despuesDe = page[page.length - 1].id
+  }
   return activas
 }
 
