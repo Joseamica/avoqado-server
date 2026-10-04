@@ -717,6 +717,7 @@ describe('staff_service_pay_differences (lista de lo pendiente de un periodo cer
       [{ causa: 'CANCELADA' }, 'Clase cancelada después del cierre'],
       [{ causa: 'EXCLUIDA' }, 'Clase excluida del pago'],
       [{ causa: 'TARDIA' }, 'Clase registrada después del cierre'],
+      [{ causa: 'REINCLUIDA' }, 'Clase que no se pagaba al cerrar y ahora sí'],
       [{ causa: 'MONTO' }, 'Monto de la clase corregido'],
       [{ causa: null }, null],
     ]

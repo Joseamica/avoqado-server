@@ -20,7 +20,17 @@ const TOPE_SIN_ANCLA = 5000
 const entero = (x: number | undefined, porDefecto: number, min: number, max: number) =>
   x !== undefined && Number.isFinite(x) ? Math.min(Math.max(Math.trunc(x), min), max) : porDefecto
 
-export type CausaDiferencia = 'CONTEO' | 'COACH_SALE' | 'COACH_ENTRA' | 'CANCELADA' | 'EXCLUIDA' | 'TARDIA' | 'MONTO'
+export type CausaDiferencia =
+  | 'CONTEO'
+  | 'COACH_SALE'
+  | 'COACH_ENTRA'
+  | 'CANCELADA'
+  | 'EXCLUIDA'
+  /** Se creó DESPUÉS del cierre de su periodo. */
+  | 'TARDIA'
+  /** Ya existía al cerrar pero no se pagó (excluida y anclada sin SERVICE, o cancelada sin ancla) y ahora sí cuenta. */
+  | 'REINCLUIDA'
+  | 'MONTO'
 
 export interface FilaDiferencia {
   classSessionId: string
@@ -79,15 +89,16 @@ type CursorFila = { classSessionId: string; persona: string }
  * Por qué existe cada diferencia (QA bloque B, defecto 4), con UNA consulta para las filas que se devuelven (≤ una página o
  * una clase), nunca dentro del recorrido: sumarle columnas al SQL del recorrido le quitaba a Postgres su plan genérico rápido
  * (medido con 50,000 clases: la página sin diferencias pasaba de 2.0 s a 3.6 s). Por clase: si está cancelada, el nombre de
- * su coach y, por persona, el conteo de su ÚLTIMA línea (SERVICE o RECONCILE: tras una liquidación compara contra ésa).
+ * su coach, cuándo se creó y, por persona, el conteo de su ÚLTIMA línea (SERVICE o RECONCILE: tras una liquidación compara
+ * contra ésa). `cerradoEn`: el `closedAt` del periodo de origen de TODAS las filas (el listado o el de la clase).
  */
-async function conCausa(db: Db, organizationId: string, filas: FilaDiferencia[]): Promise<FilaDiferencia[]> {
+async function conCausa(db: Db, organizationId: string, cerradoEn: Date | null, filas: FilaDiferencia[]): Promise<FilaDiferencia[]> {
   const ids = [...new Set(filas.map(f => f.classSessionId))]
   if (!ids.length) return filas
   const info = await db.$queryRaw<
-    Array<{ cid: string; cancelada: boolean; coach: string | null; staffId: string | null; conteo: number | null }>
+    Array<{ cid: string; cancelada: boolean; creada: Date; coach: string | null; staffId: string | null; conteo: number | null }>
   >`
-    SELECT cs.id AS cid, (cs.status = 'CANCELLED') AS cancelada,
+    SELECT cs.id AS cid, (cs.status = 'CANCELLED') AS cancelada, cs."createdAt" AS creada,
            NULLIF(TRIM(CONCAT(s."firstName", ' ', s."lastName")), '') AS coach, u."staffId", u.count AS conteo
     FROM "ClassSession" cs
     JOIN "Venue" v ON v.id = cs."venueId" AND v."organizationId" = ${organizationId}
@@ -100,9 +111,11 @@ async function conCausa(db: Db, organizationId: string, filas: FilaDiferencia[])
       ORDER BY e."sourceId", e."staffId", e."createdAt" DESC, e.id DESC
     ) u ON u."sourceId" = cs.id
     WHERE cs.id = ANY(${ids}::text[])`
-  const clases = new Map<string, { cancelada: boolean; coach: string | null; lineas: Map<string, number | null> }>()
+  const clases = new Map<string, InfoClase & { coach: string | null }>()
   for (const r of info) {
-    const c = clases.get(r.cid) ?? { cancelada: r.cancelada, coach: r.coach, lineas: new Map() }
+    // Existía al cerrar: createdAt y closedAt son instantes UTC (ver `utcTs`), así que se comparan directo.
+    const antes = cerradoEn !== null && r.creada <= cerradoEn
+    const c = clases.get(r.cid) ?? { cancelada: r.cancelada, existiaAlCerrar: antes, coach: r.coach, lineas: new Map() }
     if (r.staffId) c.lineas.set(r.staffId, r.conteo)
     clases.set(r.cid, c)
   }
@@ -119,18 +132,22 @@ async function conCausa(db: Db, organizationId: string, filas: FilaDiferencia[])
   })
 }
 
-/** La regla, fila por fila. Sin pendiente o en excepción (ésta ya trae `motivo`) no hay causa. */
-function causaDe(
-  f: FilaDiferencia,
-  c: { cancelada: boolean; lineas: Map<string, number | null> } | undefined,
-  propia: boolean,
-  conteoCongelado: number | null,
-): CausaDiferencia | null {
+type InfoClase = { cancelada: boolean; existiaAlCerrar: boolean; lineas: Map<string, number | null> }
+
+/**
+ * La regla, fila por fila. Sin pendiente o en excepción (ésta ya trae `motivo`) no hay causa. Si nadie tiene líneas de la
+ * clase: REINCLUIDA si ya contaba para ese cierre y no se pagó (anclada sin SERVICE, o creada antes del cierre — una
+ * cancelada al cerrar no se ancla); TARDIA sólo si se creó después.
+ */
+function causaDe(f: FilaDiferencia, c: InfoClase | undefined, propia: boolean, conteoCongelado: number | null): CausaDiferencia | null {
   if (f.pendiente === null || new Prisma.Decimal(f.pendiente).isZero()) return null
   if (c?.cancelada) return 'CANCELADA'
   if (f.estadoClase === 'EXCLUIDA') return 'EXCLUIDA'
   if (f.persona !== f.coachActual) return 'COACH_SALE'
-  if (!propia) return c?.lineas.size ? 'COACH_ENTRA' : 'TARDIA'
+  if (!propia) {
+    if (c?.lineas.size) return 'COACH_ENTRA'
+    return f.periodoOrigenId || c?.existiaAlCerrar ? 'REINCLUIDA' : 'TARDIA'
+  }
   return conteoCongelado !== null && f.conteo !== conteoCongelado ? 'CONTEO' : 'MONTO'
 }
 
@@ -279,7 +296,7 @@ export async function diferenciasDeClase(
   if (!origen) return { origen: null, filas: [] }
   const f = { ...filtroDelPeriodo(origen, input.venueId, cs.venue.timezone || TZ_DEFAULT, ahora), claseIds: [input.classSessionId] }
   const filas = (await db.$queryRaw<Fila[]>(diferenciasSql(f, null, false))).map(aDto)
-  return { origen, filas: await conCausa(db, origen.organizationId, filas) }
+  return { origen, filas: await conCausa(db, origen.organizationId, origen.closedAt, filas) }
 }
 
 /**
@@ -346,7 +363,7 @@ export async function diferenciasDelPeriodo(
         if (items.length > limite) {
           const u = items[limite - 1]
           return {
-            items: await conCausa(prisma, v.organizationId, items.slice(0, limite)),
+            items: await conCausa(prisma, v.organizationId, p.closedAt, items.slice(0, limite)),
             nextCursor: `${u.venueId}:${u.classSessionId}:${u.persona ?? ''}`,
             parcial: legibles.parcial,
           }
@@ -355,5 +372,5 @@ export async function diferenciasDelPeriodo(
       desde = { id: ids[ids.length - 1], incluido: false }
     }
   }
-  return { items: await conCausa(prisma, v.organizationId, items), nextCursor: null, parcial: legibles.parcial }
+  return { items: await conCausa(prisma, v.organizationId, p.closedAt, items), nextCursor: null, parcial: legibles.parcial }
 }

@@ -49,6 +49,8 @@ function causaLegible(f: Pick<FilaDiferencia, 'causa' | 'conteo' | 'conteoCongel
       return 'Clase excluida del pago'
     case 'TARDIA':
       return 'Clase registrada después del cierre'
+    case 'REINCLUIDA':
+      return 'Clase que no se pagaba al cerrar y ahora sí'
     case 'MONTO':
       return 'Monto de la clase corregido'
     default:

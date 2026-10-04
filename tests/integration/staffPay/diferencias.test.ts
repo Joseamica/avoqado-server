@@ -368,6 +368,35 @@ describe('diferencias pendientes (spec §6.4)', () => {
       })
     })
 
+    it('una clase que no se pagaba al cerrar y ahora sí es REINCLUIDA, no TARDIA: excluida → incluida y cancelada → reactivada', async () => {
+      const excluida = await anclada('04')
+      const cancelada = await anclada('05')
+      // Al cerrar: la excluida se ancla SIN SERVICE; la cancelada ni se paga ni se ancla.
+      await prisma.classSessionPayState.create({ data: { classSessionId: excluida, payExcluded: true, overrideReason: 'prueba' } })
+      await prisma.classSession.update({ where: { id: cancelada }, data: { status: 'CANCELLED' } })
+      await cerrarAgosto()
+      expect(await prisma.serviceEarning.count({ where: { sourceId: { in: [excluida, cancelada] } } })).toBe(0)
+      await prisma.classSessionPayState.update({ where: { classSessionId: excluida }, data: { payExcluded: false } })
+      await prisma.classSession.update({ where: { id: cancelada }, data: { status: 'SCHEDULED' } })
+      expect(await causas(excluida)).toEqual({ [m.ana]: ['REINCLUIDA', null, 8, 'Ana QA'] })
+      expect(await causas(cancelada)).toEqual({ [m.ana]: ['REINCLUIDA', null, 8, 'Ana QA'] })
+      // Anclada sin líneas aunque se creó después (p. ej. una liquidación de $0 la ancló): también REINCLUIDA.
+      const anclada0 = await clase(m, { staffId: m.ana, inicioIso: '2026-08-21T14:00:00Z', reservas: confirmadas(3) })
+      await prisma.classSessionPayState.create({
+        data: { classSessionId: anclada0, originPeriodId: periodId, valuationDate: new Date('2026-08-21T00:00:00Z') },
+      })
+      expect(await causas(anclada0)).toEqual({ [m.ana]: ['REINCLUIDA', null, 3, 'Ana QA'] })
+      // La que se CREÓ después del cierre sigue siendo TARDIA.
+      const tardia = await clase(m, { staffId: m.ana, inicioIso: '2026-08-20T14:00:00Z', reservas: confirmadas(3) })
+      const lista = await diferenciasDelPeriodo({ userId: m.owner, venueId: m.venueId, periodId, limit: 50 })
+      expect(Object.fromEntries(lista.items.map(i => [i.classSessionId, i.causa]))).toEqual({
+        [excluida]: 'REINCLUIDA',
+        [cancelada]: 'REINCLUIDA',
+        [anclada0]: 'REINCLUIDA',
+        [tardia]: 'TARDIA',
+      })
+    })
+
     it('monto ajustado con el mismo conteo: MONTO', async () => {
       const id = await anclada('04')
       await cerrarAgosto()
