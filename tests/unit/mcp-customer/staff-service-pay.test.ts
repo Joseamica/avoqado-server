@@ -825,14 +825,20 @@ describe('staff_service_pay — por el catálogo real (dos pasos con confirmatio
     const [a, b] = InMemoryTransport.createLinkedPair()
     await Promise.all([server.connect(a), client.connect(b)])
     try {
+      // El agente recibe un mensaje en español que dice qué formato usar (no el error de zod en inglés) y no se toca el service.
       for (const idempotencyKey of [undefined, 'abc', 'clave:1234', 'k'.repeat(97)]) {
         const r = await client.callTool({
           name: 'settle_service_pay_difference',
           arguments: { venueId: 'v1', classSessionId: 'c1', idempotencyKey },
         })
-        expect(r.isError).toBe(true)
+        expect(r.isError).toBeFalsy()
+        const p = JSON.parse((r.content as Array<{ text: string }>)[0].text)
+        expect(p).toMatchObject({ ok: false, needsInput: true, field: 'idempotencyKey' })
+        expect(p.question).toMatch(/obligatoria: de 4 a 96 caracteres, sólo letras, números, guion, guion bajo y punto/)
+        expect(p.question).toMatch(/la misma en la vista previa y al confirmar/)
       }
       expect(mockPreviewLiq).not.toHaveBeenCalled()
+      expect(mockLiquidar).not.toHaveBeenCalled()
     } finally {
       await client.close()
       await server.close()

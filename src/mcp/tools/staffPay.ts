@@ -44,6 +44,8 @@ const QUE_HACER_LIQUIDAR: Record<string, string> = {
   CLASE_EN_EXCEPCION: 'Resuelve la clase (coach, nivel, tabla o monto) y vuelve a pedir la vista previa.',
   SEDE_FUERA_DEL_PERIODO: 'Si el usuario quiere sumar la sede al periodo, repite la vista previa con ampliarAlcance: true.',
 }
+/** La clave de «liquidar diferencia» viaja en `solicitudId` (`mcp-` + ella): 4 a 96, sin «:» (cabe en la clave del service). */
+const CLAVE_LIQUIDACION = /^[A-Za-z0-9_.-]{4,96}$/
 /** `YYYY-MM-DD` (fecha local) como fecha UTC: sólo para darle formato, nunca como instante. */
 const diaUTC = (f: string) => {
   const [y, m, d] = f.split('-').map(Number)
@@ -455,10 +457,13 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
         .regex(/^\d{4}-\d{2}-\d{2}$/)
         .optional()
         .describe('Any day inside the open period that receives it (default: today); the preview returns the one to confirm with'),
+      // Sin .regex() de zod: su error sale en inglés y antes del handler. Se valida abajo y se responde en español (needsInput).
       idempotencyKey: z
         .string()
-        .regex(/^[A-Za-z0-9_.-]{4,96}$/)
-        .describe('Unique key for this settlement (4-96 letters, digits, - _ .)'),
+        .optional()
+        .describe(
+          'Required. Unique key for this settlement (4-96 letters, digits, - _ .); use the same one in the preview and when confirming',
+        ),
       ampliarAlcance: z
         .boolean()
         .optional()
@@ -470,6 +475,14 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
       // El módulo se exige en la ORGANIZACIÓN, no en la sede de la clase (Codex R2-R1-1, spec §5.6).
       const no = await puedeEscribir(venueId, 'organizacion')
       if (no) return text({ ok: false, error: no })
+      if (!idempotencyKey || !CLAVE_LIQUIDACION.test(idempotencyKey))
+        return text({
+          ok: false,
+          needsInput: true,
+          field: 'idempotencyKey',
+          question:
+            'idempotencyKey es obligatoria: de 4 a 96 caracteres, sólo letras, números, guion, guion bajo y punto; usa la misma en la vista previa y al confirmar.',
+        })
       try {
         if (confirm !== true) {
           const pv = await previewLiquidacion({ userId: scope.staffId, venueId, classSessionId, destinoFecha })
