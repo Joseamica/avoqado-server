@@ -44,6 +44,9 @@ export interface PreviewCierre {
   total: string
   huerfanas: number
   huella: string
+  /** Las sedes de `periodo.venueIds` con clases pagables o ajustes, en su mismo orden (QA 2026-10-03, defecto 8: el
+   *  modal nombraba sedes sin una sola clase). No entra en la huella. */
+  sedesConDinero: string[]
 }
 
 export interface ResultadoCierre {
@@ -247,6 +250,7 @@ interface Recorrido {
   clases: number
   excluidas: number
   personas: Set<string>
+  sedesConDinero: Set<string>
   totalServicios: Prisma.Decimal
   totalAjustes: Prisma.Decimal
   huella: string
@@ -275,6 +279,7 @@ async function recorrer(
     clases: 0,
     excluidas: 0,
     personas: new Set<string>(),
+    sedesConDinero: new Set<string>(),
     totalServicios: new Prisma.Decimal(0),
     totalAjustes: new Prisma.Decimal(0),
   }
@@ -294,6 +299,7 @@ async function recorrer(
         if (c.estado === 'OK' && c.staffId && c.monto !== null) {
           r.clases++
           r.personas.add(c.staffId)
+          r.sedesConDinero.add(s.venueId)
           r.totalServicios = r.totalServicios.plus(c.monto)
         } else if (c.estado === 'EXCLUIDA') r.excluidas++
       }
@@ -305,6 +311,7 @@ async function recorrer(
     huella.ajuste(aj)
     r.totalAjustes = r.totalAjustes.plus(aj.amount)
     r.personas.add(aj.staffId)
+    r.sedesConDinero.add(aj.venueId)
   }
   for (const id of o.huerfanas) huella.huerfana(id)
   return { ...r, huella: huella.digest() }
@@ -338,6 +345,7 @@ export async function previewCierre(input: {
         total: '0.00',
         huerfanas: 0,
         huella: '',
+        sedesConDinero: [],
       }
     }
   }
@@ -358,6 +366,7 @@ export async function previewCierre(input: {
     total: r.totalServicios.plus(r.totalAjustes).toFixed(2),
     huerfanas: huerfanas.length,
     huella: r.huella,
+    sedesConDinero: a.venueIds.filter(v => r.sedesConDinero.has(v)),
   }
 }
 
@@ -391,14 +400,17 @@ async function resultadoGuardado(db: Db, p: ServicePayPeriod, yaCerrado: boolean
  * detalle de un periodo cerrado se lee en el recibo.
  */
 async function previewCerrado(a: Alcance & { periodId: string }): Promise<PreviewCierre> {
-  const [g, servicios] = await Promise.all([
+  const [g, servicios, porSede] = await Promise.all([
     recibosGuardados(prisma, a.organizationId, a.periodId),
     prisma.serviceEarning.aggregate({
       where: { organizationId: a.organizationId, periodId: a.periodId, concept: 'SERVICE' },
       _count: { _all: true },
       _sum: { amount: true },
     }),
+    // Una fila por sede (GROUP BY): acotado por el número de sedes del alcance.
+    prisma.serviceEarning.groupBy({ by: ['venueId'], where: { organizationId: a.organizationId, periodId: a.periodId } }),
   ])
+  const conDinero = new Set(porSede.map(x => x.venueId))
   const totalServicios = servicios._sum.amount ?? new Prisma.Decimal(0)
   return {
     periodo: { id: a.periodId, start: a.periodo.start, end: a.periodo.end, venueIds: a.venueIds },
@@ -412,6 +424,7 @@ async function previewCerrado(a: Alcance & { periodId: string }): Promise<Previe
     total: g.total.toFixed(2),
     huerfanas: 0,
     huella: '',
+    sedesConDinero: a.venueIds.filter(v => conDinero.has(v)),
   }
 }
 

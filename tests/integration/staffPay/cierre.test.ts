@@ -5,6 +5,7 @@ import { cerrarPeriodo, previewCierre } from '@/services/dashboard/staffPay/cier
 import { barreraDelPeriodo, borrarMundo, clase, confirmadas, crearMundo, crearSede, Mundo, tablaMindform, TZ } from './_mundo'
 import { fechaComoDbDate, venuePeriodRange } from '@/services/dashboard/staffPay/periodos'
 import { valorarClases } from '@/services/dashboard/staffPay/valoracion'
+import { agregarAjusteManual } from '@/services/dashboard/staffPay/ajustesManuales.service'
 
 jest.mock('@/services/dashboard/staffPay/acceso', () => ({
   ...jest.requireActual('@/services/dashboard/staffPay/acceso'),
@@ -381,6 +382,35 @@ describe('cerrar el periodo (spec §6.3)', () => {
     )
   })
 
+  it('sedesConDinero nombra sólo las sedes con clases pagables o ajustes; venueIds y la huella no cambian (QA 2026-10-03, defecto 8)', async () => {
+    m = await mundoConAgosto('cierre-sedes-con-dinero')
+    const bsf = await crearSede(m.orgId, m.key, 'bsf')
+    await tablaMindform(m, bsf.venueId)
+    ;(global as any).__sedes = [m.venueId, bsf.venueId]
+    await clase(m, { staffId: m.ana, inicioIso: '2026-08-04T14:00:00Z', reservas: confirmadas(8) })
+    const p = await preview(m)
+    expect(p.periodo.venueIds).toEqual([m.venueId, bsf.venueId].sort())
+    expect(p.sedesConDinero).toEqual([m.venueId])
+    // Un ajuste en la otra sede también es dinero de esa sede (y sale en el orden de venueIds).
+    await agregarAjusteManual({
+      userId: m.owner,
+      venueId: m.venueId,
+      sede: bsf.venueId,
+      staffId: m.sofia,
+      amount: 100,
+      reason: 'Bono',
+      fecha: '2026-08-20',
+      clientKey: `${m.key}-bono-bsf`,
+    })
+    const p2 = await preview(m)
+    expect(p2.sedesConDinero).toEqual([m.venueId, bsf.venueId].sort())
+    // El cierre acepta la huella del preview: sedesConDinero no entra en ella.
+    const r = await cerrar(m, { huella: p2.huella })
+    expect(r).toMatchObject({ huella: p2.huella, venueIds: [m.venueId, bsf.venueId].sort() })
+    // Ya cerrado, el preview (lo guardado) dice lo mismo.
+    expect((await preview(m)).sedesConDinero).toEqual([m.venueId, bsf.venueId].sort())
+  })
+
   it('el preview de un periodo ya cerrado da lo guardado (YA_CERRADO), no lo que hoy se ve en vivo', async () => {
     m = await mundoConAgosto('cierre-preview-cerrado')
     await clase(m, { staffId: m.ana, inicioIso: '2026-08-04T14:00:00Z', reservas: confirmadas(8) })
@@ -411,6 +441,7 @@ describe('cerrar el periodo (spec §6.3)', () => {
       clases: 0,
       huella: '',
       periodo: { venueIds: [] },
+      sedesConDinero: [],
     })
     acceso.sedesConPermiso.mockResolvedValueOnce([])
     await expect(cerrar(m)).rejects.toMatchObject(sinPermiso)
