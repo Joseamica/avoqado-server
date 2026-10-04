@@ -205,6 +205,8 @@ interface FilaRecibo {
   clase: string | null
   sedeFoto: string | null
   reason: string | null
+  /** De una DIFERENCIA: el inicio del periodo de origen de su clase (`descriptor.periodoOrigen.start`, B2). */
+  origen: string | null
   lugares: number | null
   monto: Prisma.Decimal
 }
@@ -357,7 +359,7 @@ async function fuenteDelRecibo(
              COALESCE(e."occurredAt", e."createdAt") AS instante, e.id, e."venueId",
              COALESCE(e.descriptor->>'fecha', to_char(e."createdAt", 'YYYY-MM-DD')) AS fecha,
              e.descriptor->>'hora' AS hora, e.descriptor->>'clase' AS clase, e.descriptor->>'sede' AS "sedeFoto",
-             e.reason, e.count AS lugares, e.amount AS monto
+             e.reason, e.descriptor->'periodoOrigen'->>'start' AS origen, e.count AS lugares, e.amount AS monto
       FROM "ServiceEarning" e
       WHERE e."periodId" = ${fila.id} AND e."staffId" = ${input.staffId} AND e."venueId" IN (${Prisma.join(venueIds)})
         ${fila.status === 'CLOSED' ? Prisma.empty : Prisma.sql`AND e.concept IN ('RECONCILE', 'MANUAL')`}`)
@@ -371,7 +373,8 @@ async function fuenteDelRecibo(
       partes.push(Prisma.sql`
         SELECT 'CLASE'::text AS tipo, vv."startsAt" AS instante, vv."classSessionId" AS id, vv."venueId", vv."fechaLocal" AS fecha,
                to_char(((vv."startsAt" AT TIME ZONE 'UTC') AT TIME ZONE ${tz}), 'HH24:MI') AS hora,
-               vv."productName" AS clase, NULL::text AS "sedeFoto", NULL::text AS reason, vv.conteo AS lugares, vv.monto
+               vv."productName" AS clase, NULL::text AS "sedeFoto", NULL::text AS reason, NULL::text AS origen,
+               vv.conteo AS lugares, vv.monto
         FROM (${valoracionCte(f)} SELECT * FROM valoradas) vv
         WHERE vv.estado = 'OK' AND vv.monto IS NOT NULL`)
     }
@@ -450,6 +453,19 @@ async function paginaDelRecibo(
   }
 }
 
+const MESES = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre']
+/**
+ * Una diferencia dice de qué clase es (QA bloque B, defecto 3): «Diferencia · Yoga del 28 sep 2026 (clase de septiembre)».
+ * La fecha es la local de la clase en su sede (la de su foto) y el mes, el de su periodo de origen.
+ */
+function conceptoDe(r: FilaRecibo): string {
+  if (r.tipo === 'AJUSTE') return r.reason ?? 'Ajuste'
+  const clase = r.clase ?? 'Clase'
+  if (r.tipo === 'CLASE') return clase
+  const mes = r.origen ? ` (clase de ${MESES[Number(r.origen.slice(5, 7)) - 1]})` : ''
+  return `Diferencia · ${clase} del ${fechaMx(r.fecha)}${mes}`
+}
+
 const aRenglon =
   (f: FuenteRecibo) =>
   (r: FilaRecibo): RenglonRecibo => ({
@@ -460,7 +476,7 @@ const aRenglon =
     // Lo congelado manda (spec §5.6; Codex bloque A #8): renombrar la sede no reescribe un recibo cerrado. El nombre de
     // hoy sólo para lo valorado en vivo, que no trae foto.
     sede: r.sedeFoto ?? f.nombreSede.get(r.venueId) ?? '',
-    concepto: r.tipo === 'AJUSTE' ? (r.reason ?? 'Ajuste') : `${r.tipo === 'DIFERENCIA' ? 'Diferencia: ' : ''}${r.clase ?? 'Clase'}`,
+    concepto: conceptoDe(r),
     lugares: r.lugares,
     monto: new Prisma.Decimal(r.monto).toFixed(2),
   })

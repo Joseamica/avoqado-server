@@ -169,23 +169,44 @@ describe('recibos (spec §6.5, §7.3)', () => {
     expect(p2.renglones[0]).toMatchObject({ fecha: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/), hora: null })
   })
 
-  it('una diferencia dice «Diferencia: <clase>» en el concepto (QA 2026-10-03, defecto 9)', async () => {
-    await prisma.serviceEarning.create({
-      data: {
-        organizationId: m.orgId,
-        venueId: m.venueId,
-        periodId,
-        staffId: m.carla,
-        concept: 'RECONCILE',
-        sourceType: 'CLASS_SESSION',
-        sourceId: `${m.key}-dif`,
-        amount: new Prisma.Decimal(40),
-        descriptor: { clase: 'Reformer', fecha: '2026-08-06', hora: '08:00' },
-      },
+  it('una diferencia dice la clase, su fecha y su mes de origen, en pantalla y en el Excel (QA bloque B, defecto 3)', async () => {
+    const reconcile = (sufijo: string, amount: number, descriptor: Prisma.InputJsonObject) =>
+      prisma.serviceEarning.create({
+        data: {
+          organizationId: m.orgId,
+          venueId: m.venueId,
+          periodId,
+          staffId: m.carla,
+          concept: 'RECONCILE',
+          sourceType: 'CLASS_SESSION',
+          sourceId: `${m.key}-${sufijo}`,
+          occurredAt: new Date(`${descriptor.fecha}T14:00:00Z`),
+          amount: new Prisma.Decimal(amount),
+          descriptor,
+        },
+      })
+    // Una clase de julio (su ancla) que hoy cae el 6 de agosto, y una línea vieja sin `periodoOrigen` en su foto.
+    await reconcile('dif-julio', 40, {
+      clase: 'Reformer',
+      fecha: '2026-08-06',
+      hora: '08:00',
+      periodoOrigen: { start: '2026-07-01', end: '2026-07-31' },
     })
+    await reconcile('dif-vieja', -40, { clase: 'Reformer', fecha: '2026-08-07', hora: '08:00' })
     try {
       const r = await recibo(m.carla)
-      expect(r.renglones.map(x => [x.tipo, x.concepto, x.fecha, x.hora])).toEqual([['DIFERENCIA', 'Diferencia: Reformer', '2026-08-06', '08:00']])
+      expect(r.renglones.map(x => [x.tipo, x.concepto, x.fecha, x.hora])).toEqual([
+        ['DIFERENCIA', 'Diferencia · Reformer del 6 ago 2026 (clase de julio)', '2026-08-06', '08:00'],
+        ['DIFERENCIA', 'Diferencia · Reformer del 7 ago 2026', '2026-08-07', '08:00'],
+      ])
+      // El PDF y el Excel salen de los mismos renglones (`filasDelRecibo`): el Excel lo comprueba celda por celda.
+      const xlsx = await exportarRecibo({ userId: m.owner, venueId: m.venueId, staffId: m.carla, fecha: '2026-08-15', format: 'xlsx' })
+      const libro = XLSX.read(xlsx.encoded.buffer)
+      const conceptos = XLSX.utils.sheet_to_json<Record<string, unknown>>(libro.Sheets[libro.SheetNames[0]]).map(f => f.Concepto)
+      expect(conceptos.slice(0, 2)).toEqual([
+        'Diferencia · Reformer del 6 ago 2026 (clase de julio)',
+        'Diferencia · Reformer del 7 ago 2026',
+      ])
     } finally {
       await prisma.serviceEarning.deleteMany({ where: { periodId, staffId: m.carla, concept: 'RECONCILE' } })
     }
