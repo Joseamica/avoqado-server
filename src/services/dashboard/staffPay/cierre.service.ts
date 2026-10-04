@@ -13,8 +13,14 @@ import { Huella } from './huella'
 type Tx = Prisma.TransactionClient
 type Db = Tx | typeof prisma
 
-/** Provisional: lo fija la Tarea A13, medido con 50,000 clases. No se baja sin volver a medir (spec §6.3 punto 3). */
-export const TIMEOUT_CIERRE_MS = 120_000
+/**
+ * Medido 2026-10-03 (A13): 50,000 clases en 65 s (heap +48 MB), con las tablas de devengos y anclas ya usadas y con
+ * estadísticas al día; el doble, al minuto: 180 s. No se baja sin volver a medir (spec §6.3 punto 3).
+ * 🔴 Con esas tablas VACÍAS o sin estadísticas (el primer cierre) NO termina en este tiempo: el plan de la valoración cae
+ * en un índice equivocado y cada lote cuesta más que el anterior. Es un defecto abierto que este número no compensa; ver
+ * la prueba de diagnóstico de `tests/integration/staffPay/cierre.carga.test.ts`.
+ */
+export const TIMEOUT_CIERRE_MS = 180_000
 export const LOTE_CIERRE = 500
 const TZ_DEFAULT = 'America/Mexico_City'
 
