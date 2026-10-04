@@ -2,7 +2,7 @@
 import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { cerrarPeriodo, previewCierre } from '@/services/dashboard/staffPay/cierre.service'
-import { borrarMundo, clase, confirmadas, crearMundo, crearSede, Mundo, tablaMindform, TZ } from './_mundo'
+import { barreraDelPeriodo, borrarMundo, clase, confirmadas, crearMundo, crearSede, Mundo, tablaMindform, TZ } from './_mundo'
 import { fechaComoDbDate, venuePeriodRange } from '@/services/dashboard/staffPay/periodos'
 import { valorarClases } from '@/services/dashboard/staffPay/valoracion'
 
@@ -111,6 +111,39 @@ describe('cerrar el periodo (spec §6.3)', () => {
     expect([a.yaCerrado, b.yaCerrado].sort()).toEqual([false, true])
     expect(await prisma.serviceEarning.count({ where: { organizationId: m.orgId } })).toBe(1)
     expect(await prisma.staffPayStatement.count({ where: { periodId: a.periodId } })).toBe(1)
+  })
+
+  it('dos cierres que esperan JUNTOS el candado del periodo ya guardado: uno cierra, el otro devuelve el mismo cierre (Codex bloque A #7)', async () => {
+    // `Promise.all` solo no garantiza el entrelazado: el segundo podía llegar después del commit del primero. La barrera
+    // retiene el candado hasta ver a LAS DOS sesiones detenidas; al soltarla, la perdedora choca (40001) y reintenta.
+    m = await mundoConAgosto('cierre-barrera')
+    await clase(m, { staffId: m.ana, inicioIso: '2026-08-04T14:00:00Z', reservas: confirmadas(8) })
+    const agosto = await prisma.servicePayPeriod.create({
+      data: {
+        organizationId: m.orgId,
+        periodStart: fechaComoDbDate('2026-08-01'),
+        periodEnd: fechaComoDbDate('2026-08-31'),
+        venueIds: [m.venueId],
+      },
+    })
+    const p = await preview(m)
+    const barrera = await barreraDelPeriodo(agosto.id)
+    const dos = Promise.allSettled([cerrar(m, { huella: p.huella }), cerrar(m, { huella: p.huella })])
+    try {
+      await barrera.esperarA(2)
+    } finally {
+      await barrera.soltar()
+    }
+    const [a, b] = (await dos).map(r => {
+      if (r.status !== 'fulfilled') throw r.reason
+      return r.value
+    })
+    expect([a.yaCerrado, b.yaCerrado].sort()).toEqual([false, true])
+    expect(a).toMatchObject({ periodId: agosto.id, total: '570.00', huella: p.huella })
+    expect(b).toMatchObject({ periodId: agosto.id, total: a.total, huella: a.huella })
+    expect(await prisma.serviceEarning.count({ where: { organizationId: m.orgId, concept: 'SERVICE' } })).toBe(1)
+    expect(await prisma.staffPayStatement.count({ where: { periodId: agosto.id } })).toBe(1)
+    expect(await prisma.activityLog.count({ where: { action: 'SERVICE_PAY_PERIOD_CLOSED', entityId: agosto.id } })).toBe(1)
   })
 
   it('si los números cambiaron desde el preview, rechaza con el preview nuevo y no escribe nada', async () => {
