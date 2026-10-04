@@ -5,7 +5,7 @@ import prisma from '../../../utils/prismaClient'
 import { BadRequestError, ConflictError, NotFoundError } from '../../../errors/AppError'
 import { withSerializableRetry } from '../../../utils/serializableRetry'
 import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
-import { assertPermisoEnSedes, sedesConServicePay } from './acceso'
+import { assertPermisoEnSedes, sedesConPermiso, sedesConServicePay } from './acceso'
 import { ampliarAlcance, asegurarPeriodo, bloquearPeriodo, periodoQueContieneFecha } from './periodosGuardados'
 import { dbDateComoFecha, fechaComoDbDate, hoyLocal, periodoQueContiene } from './periodos'
 
@@ -150,6 +150,15 @@ export async function agregarAjusteManual(input: AjusteManualInput): Promise<Aju
   await personaDeLaOrg(input.staffId, organizationId)
   const fecha = input.fecha ?? hoyLocal(tz)
   fechaComoDbDate(fecha) // valida la forma ANTES de compararla como texto con el periodo de un reintento
+  // Módulos y permisos con el cliente GLOBAL, ANTES de la transacción, como el cierre (Codex bloque A #3): dentro, con el
+  // pool lleno, la ganadora del candado esperaría otra conexión mientras las demás esperan su candado. Candidatas: el
+  // alcance del periodo como está ahora ∪ las sedes con el módulo ∪ la sede del ajuste. Dentro sólo se COMPARA; una sede
+  // que entró al alcance entretanto no tiene permiso resuelto y se niega (conservador).
+  const activas = await sedesConServicePay(organizationId)
+  const filaAntes = await periodoQueContieneFecha(prisma, organizationId, fecha)
+  const permitidas = new Set(
+    await sedesConPermiso(input.userId, [...(filaAntes?.venueIds ?? []), ...activas, input.sede], 'staffpay:close'),
+  )
 
   return withSerializableRetry(async tx => {
     const previa = await tx.serviceEarning.findFirst({
@@ -171,7 +180,7 @@ export async function agregarAjusteManual(input: AjusteManualInput): Promise<Aju
       if (!igual) throw new ConflictError('Esta solicitud ya se usó para otro ajuste. Vuelve a abrir el formulario.', 'CLAVE_REUTILIZADA')
       return aDto(tx, previa, true)
     }
-    const fila = await asegurarPeriodo(tx, organizationId, fecha)
+    const fila = await asegurarPeriodo(tx, organizationId, fecha, activas)
     let p = await bloquearPeriodo(tx, fila.id)
     if (p.status !== 'OPEN') {
       throw new ConflictError('Ese periodo ya está cerrado: agrega el ajuste al periodo abierto', 'PERIODO_CERRADO')
@@ -189,7 +198,7 @@ export async function agregarAjusteManual(input: AjusteManualInput): Promise<Aju
         throw new ConflictError('El periodo destino cambió desde la vista previa: revisa de nuevo', 'HUELLA_CAMBIO')
     }
     // D2: la sede de la línea entra al alcance con el módulo activo y permiso de cerrar en TODA la unión (Codex R2-R1-9).
-    p = await ampliarAlcance(tx, p, [input.sede], input.userId)
+    p = await ampliarAlcance(tx, p, [input.sede], input.userId, { activas, permitidas })
     const ahoraLocal = formatInTimeZone(new Date(), tz, 'yyyy-MM-dd HH:mm')
     const e = await tx.serviceEarning.create({
       data: {

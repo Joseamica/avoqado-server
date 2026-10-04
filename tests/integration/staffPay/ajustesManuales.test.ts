@@ -169,6 +169,59 @@ describe('ajustes manuales (spec §6.4)', () => {
     expect(await prisma.serviceEarning.count({ where: { organizationId: m.orgId, concept: 'MANUAL' } })).toBe(1)
   })
 
+  it('módulos y permisos se resuelven ANTES de la transacción: dentro no se llama al cliente global (Codex bloque A #3)', async () => {
+    // Con el pool lleno, una transacción que pide OTRA conexión para el módulo o el permiso espera a sí misma (timeout).
+    // Dos caminos: un periodo que se CREA (asegurarPeriodo) y uno guardado al que se le SUMA la sede (ampliarAlcance).
+    const otra = await crearSede(m.orgId, m.key, 'bsf')
+    await prisma.servicePayPeriod.create({
+      data: {
+        organizationId: m.orgId,
+        periodStart: fechaComoDbDate('2026-08-01'),
+        periodEnd: fechaComoDbDate('2026-08-31'),
+        venueIds: [otra.venueId],
+      },
+    })
+    const linea: string[] = []
+    const real = prisma.$transaction.bind(prisma)
+    const espia = jest.spyOn(prisma, '$transaction').mockImplementation(((fn: any, o: any) =>
+      real(async (tx: any) => {
+        linea.push('abre')
+        try {
+          return await fn(tx)
+        } finally {
+          linea.push('cierra')
+        }
+      }, o)) as any)
+    const globales = ['sedesConServicePay', 'sedesConPermiso', 'assertPermisoEnSedes'] as const
+    const originales = globales.map(g => acceso[g].getMockImplementation())
+    globales.forEach((g, i) =>
+      acceso[g].mockImplementation(async (...a: unknown[]) => {
+        linea.push(g)
+        return originales[i](...a)
+      }),
+    )
+    try {
+      const julio = await ajuste({ fecha: '2026-07-10' }) // crea julio
+      const agosto = await ajuste() // agosto ya existe sólo con BSF: suma PN
+      expect(julio.periodo).toEqual({ start: '2026-07-01', end: '2026-07-31' })
+      expect((await prisma.servicePayPeriod.findUniqueOrThrow({ where: { id: agosto.periodId } })).venueIds.sort()).toEqual(
+        [m.venueId, otra.venueId].sort(),
+      )
+    } finally {
+      espia.mockRestore()
+      globales.forEach((g, i) => acceso[g].mockImplementation(originales[i]))
+    }
+    const dentro: string[] = []
+    let abierta = 0
+    for (const x of linea) {
+      if (x === 'abre') abierta++
+      else if (x === 'cierra') abierta--
+      else if (abierta > 0) dentro.push(x)
+    }
+    expect(linea.filter(x => x === 'abre').length).toBeGreaterThanOrEqual(2)
+    expect(dentro).toEqual([])
+  })
+
   it('rechaza: monto cero, motivo corto, periodo cerrado, sede sin el módulo y persona de otro negocio', async () => {
     await expect(ajuste({ amount: 0 })).rejects.toThrow(/no puede ser cero/)
     await expect(ajuste({ reason: 'x' })).rejects.toThrow(/motivo/)
