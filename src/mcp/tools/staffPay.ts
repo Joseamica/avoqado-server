@@ -46,6 +46,8 @@ const QUE_HACER_LIQUIDAR: Record<string, string> = {
 }
 /** La clave de «liquidar diferencia» viaja en `solicitudId` (`mcp-` + ella): 4 a 96, sin «:» (cabe en la clave del service). */
 const CLAVE_LIQUIDACION = /^[A-Za-z0-9_.-]{4,96}$/
+/** La del ajuste manual viaja en `clientKey` (`mcp-` + ella): 4 a 100, cabe en la clave del service (8 a 120). */
+const CLAVE_AJUSTE = /^[A-Za-z0-9_.-]{4,100}$/
 /** `YYYY-MM-DD` (fecha local) como fecha UTC: sólo para darle formato, nunca como instante. */
 const diaUTC = (f: string) => {
   const [y, m, d] = f.split('-').map(Number)
@@ -281,11 +283,13 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
         .regex(/^\d{4}-\d{2}-\d{2}$/)
         .optional()
         .describe('Any day inside the target open period (default: today); the preview returns the one to confirm with'),
+      // Sin .regex() de zod: su error sale en inglés y antes del handler. Se valida abajo y se responde en español (needsInput).
       idempotencyKey: z
         .string()
-        .regex(/^[A-Za-z0-9_.-]{4,100}$/)
         .optional()
-        .describe('Unique key for this adjustment (letters, digits, - _ .)'),
+        .describe(
+          'Required. Unique key for this adjustment (4-100 letters, digits, - _ .); use the same one in the preview and when confirming',
+        ),
       expectedSourceFingerprint: z.string().max(128).optional().describe('Fingerprint from the preview'),
       confirm: z.boolean().optional(),
     },
@@ -293,8 +297,14 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
       if (sede) guard.venueFilter(sede) // la sede de la línea, por el alcance de la conexión antes de consultar nada
       const no = await puedeEscribir(venueId)
       if (no) return text({ ok: false, error: no })
-      if (!idempotencyKey)
-        return text({ ok: false, needsInput: true, field: 'idempotencyKey', question: 'Pasa una idempotencyKey única para este ajuste.' })
+      if (!idempotencyKey || !CLAVE_AJUSTE.test(idempotencyKey))
+        return text({
+          ok: false,
+          needsInput: true,
+          field: 'idempotencyKey',
+          question:
+            'idempotencyKey es obligatoria: de 4 a 100 caracteres, sólo letras, números, guion, guion bajo y punto; usa la misma en la vista previa y al confirmar.',
+        })
       try {
         if (confirm !== true) {
           const pv = await previewAjusteManual({ userId: scope.staffId, venueId, sede: sede ?? venueId, staffId, amount, reason, fecha: f })

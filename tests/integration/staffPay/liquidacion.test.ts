@@ -371,13 +371,22 @@ describe('liquidar una diferencia (spec §6.4)', () => {
     expect(dentro).toEqual([])
   })
 
-  it('una cancelación que llega A MEDIA liquidación queda de un lado de la foto y nada se pierde', async () => {
+  // Codex bloque B, P2: `Promise.allSettled` no garantizaba el cruce y `pagado + pendiente = 0` era circular (dos RECONCILE de
+  // +$40 también daban 0). Se fuerzan los dos órdenes y se afirman valores. La cancelación es una escritura normal, sin los
+  // candados del pago (como la de reservas). Con SERIALIZABLE la foto se toma en la PRIMERA sentencia de la transacción: una
+  // barrera de la base (clase o periodo) sólo detiene a la liquidación DESPUÉS de su foto. Para el orden «la cancelación
+  // primero» la barrera va antes de la transacción: en la resolución de permisos, que se hace afuera.
+  it.each([
+    ['la cancelación confirma mientras la liquidación espera el candado de la clase, ya con su foto', 'despues'],
+    ['la cancelación confirma antes de que la liquidación abra su transacción', 'antes'],
+  ] as const)('una cancelación que llega a media liquidación queda de un lado de la foto (%s)', async (_t, cuando) => {
     const id = await clase(m, { staffId: m.ana, inicioIso: '2026-08-04T14:00:00Z', reservas: confirmadas(8) })
     await cerrarAgosto()
     await prisma.classSessionPayState.update({ where: { classSessionId: id }, data: { payCountOverride: 9 } })
     const pv = await previewLiquidacion({ userId: m.owner, venueId: m.venueId, classSessionId: id, destinoFecha: DESTINO, ahora: AHORA })
-    const [liq] = await Promise.allSettled([
-      liquidarDiferencia({
+    const cancelar = () => prisma.classSession.update({ where: { id }, data: { status: 'CANCELLED' } })
+    const liquidacion = () => {
+      const p = liquidarDiferencia({
         userId: m.owner,
         venueId: m.venueId,
         classSessionId: id,
@@ -386,17 +395,51 @@ describe('liquidar una diferencia (spec §6.4)', () => {
         periodoOrigenId: pv.periodoOrigen!.id,
         huellaEsperada: pv.huella,
         solicitudId: `${m.key}-carrera`,
-      }),
-      prisma.classSession.update({ where: { id }, data: { status: 'CANCELLED' } }),
-    ])
-    if (liq.status === 'rejected') expect(liq.reason).toMatchObject({ code: 'HUELLA_CAMBIO' })
-    // Invariante: lo pagado + lo pendiente = lo que corresponde hoy ($0, porque la clase se canceló).
-    const pagado = await prisma.serviceEarning.aggregate({ where: { sourceId: id }, _sum: { amount: true } })
-    const pend = (await diferenciasDeClase(prisma, { venueId: m.venueId, classSessionId: id }, { ahora: AHORA })).filas.reduce(
-      (a, f) => a + Number(f.pendiente),
-      0,
-    )
-    expect(Number(pagado._sum.amount) + pend).toBe(0)
+      })
+      p.catch(() => undefined) // si algo falla antes del allSettled, que no quede un rechazo sin atender
+      return p
+    }
+    let liq: Promise<unknown> | undefined
+    if (cuando === 'despues') {
+      const barrera = await barreraDeLaClase(id)
+      try {
+        liq = liquidacion()
+        await barrera.esperarA(1) // ya tomó su foto y el destino; espera la clase
+        await cancelar() // no toma candados del pago: confirma mientras tanto
+      } finally {
+        await barrera.soltar()
+      }
+    } else {
+      let soltar!: () => void
+      let detenida!: () => void
+      const suelto = new Promise<void>(r => (soltar = r))
+      const enEspera = new Promise<void>(r => (detenida = r))
+      const original = acceso.sedesConPermiso.getMockImplementation()
+      acceso.sedesConPermiso.mockImplementationOnce(async (...a: unknown[]) => {
+        detenida()
+        await suelto
+        return original(...a)
+      })
+      liq = liquidacion()
+      await enEspera
+      await cancelar()
+      soltar()
+    }
+    const [resultado] = await Promise.allSettled([liq!])
+    const montos = async (concept: 'SERVICE' | 'RECONCILE') =>
+      (await prisma.serviceEarning.findMany({ where: { sourceId: id, concept }, take: 5 })).map(e => e.amount.toFixed(2))
+    expect(await montos('SERVICE')).toEqual(['570.00']) // lo congelado no se mueve
+    if (cuando === 'despues') {
+      // La liquidación quedó antes de la foto: paga +$40 una vez y la cancelación aparece como el nuevo negativo.
+      expect(resultado).toEqual({ status: 'fulfilled', value: { lineas: [{ staffId: m.ana, amount: '40.00' }], yaLiquidada: false } })
+      expect(await montos('RECONCILE')).toEqual(['40.00'])
+      expect(await pendientes(id)).toEqual({ [m.ana]: '-610.00' })
+    } else {
+      // La cancelación quedó antes de la foto: la huella cambió (ahora son −$570) y no se escribe nada.
+      expect(resultado).toMatchObject({ status: 'rejected', reason: { code: 'HUELLA_CAMBIO', details: { preview: { total: '-570.00' } } } })
+      expect(await montos('RECONCILE')).toEqual([])
+      expect(await pendientes(id)).toEqual({ [m.ana]: '-570.00' })
+    }
   })
 
   it('repetir la MISMA solicitud después de que su destino se cerró la reconoce: yaLiquidada, sin líneas nuevas (Codex R2-R1-4)', async () => {
@@ -429,9 +472,53 @@ describe('liquidar una diferencia (spec §6.4)', () => {
     })
     // La repetición idéntica NO recibe PERIODO_CERRADO: es la misma operación, ya registrada.
     expect(await pedir()).toEqual({ lineas: [{ staffId: m.ana, amount: '40.00' }], yaLiquidada: true })
+    // También sin fecha (hoy ya es octubre) y con otra fecha DENTRO del periodo donde quedó (Codex bloque B, P1 (b) y (c)).
+    const repetir = (destinoFecha?: string) =>
+      liquidarDiferencia({
+        userId: m.owner,
+        venueId: m.venueId,
+        classSessionId: id,
+        destinoFecha,
+        ahora: OCTUBRE,
+        periodoOrigenId: pv.periodoOrigen!.id,
+        huellaEsperada: pv.huella,
+        solicitudId: `${m.key}-sept`,
+      })
+    expect(await repetir()).toEqual({ lineas: [{ staffId: m.ana, amount: '40.00' }], yaLiquidada: true })
+    expect(await repetir('2026-09-30')).toEqual({ lineas: [{ staffId: m.ana, amount: '40.00' }], yaLiquidada: true })
     expect(await reconcile(id)).toBe(1)
     // Una solicitud NUEVA a ese destino ya cerrado sí recibe PERIODO_CERRADO.
     await expect(liquidar(id)).rejects.toMatchObject({ code: 'PERIODO_CERRADO' })
+  })
+
+  it('la MISMA clave pedida para OTRO destino explícito no es la misma operación: CLAVE_REUTILIZADA y no escribe (Codex bloque B, P1)', async () => {
+    const id = await clase(m, { staffId: m.ana, inicioIso: '2026-08-04T14:00:00Z', reservas: confirmadas(8) })
+    await cerrarAgosto()
+    await prisma.classSessionPayState.update({ where: { classSessionId: id }, data: { payCountOverride: 9 } })
+    const clave = `${m.key}-k`
+    expect(await liquidar(id, { solicitudId: clave })).toEqual({ lineas: [{ staffId: m.ana, amount: '40.00' }], yaLiquidada: false })
+    // Aparece otra diferencia (+$40) y se pide liquidarla en OCTUBRE con la misma clave: antes devolvía las líneas de
+    // septiembre como `yaLiquidada` y lo nuevo quedaba sin pagar.
+    await prisma.classSessionPayState.update({ where: { classSessionId: id }, data: { payCountOverride: 10 } })
+    const OCT = '2026-10-10'
+    const pv = await previewLiquidacion({ userId: m.owner, venueId: m.venueId, classSessionId: id, destinoFecha: OCT, ahora: AHORA })
+    await expect(
+      liquidarDiferencia({
+        userId: m.owner,
+        venueId: m.venueId,
+        classSessionId: id,
+        destinoFecha: OCT,
+        ahora: AHORA,
+        periodoOrigenId: pv.periodoOrigen!.id,
+        huellaEsperada: pv.huella,
+        solicitudId: clave,
+      }),
+    ).rejects.toMatchObject({
+      code: 'CLAVE_REUTILIZADA',
+      message: expect.stringMatching(/ya se usó para liquidar en el periodo del 2026-09-01 al 2026-09-30: usa otra clave/),
+    })
+    expect(await reconcile(id)).toBe(1)
+    expect(await pendientes(id)).toEqual({ [m.ana]: '40.00' })
   })
 
   it('dos liquidaciones SIMULTÁNEAS de la misma clase con solicitudes distintas dejan UN juego de líneas (barrera real — Codex R2-R1-15)', async () => {

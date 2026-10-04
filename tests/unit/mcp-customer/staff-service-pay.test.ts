@@ -844,4 +844,31 @@ describe('staff_service_pay — por el catálogo real (dos pasos con confirmatio
       await server.close()
     }
   })
+  it('el ajuste manual exige una idempotencyKey con formato y lo dice en español (no el error de zod en inglés)', async () => {
+    const server = new McpServer({ name: 'staffpay', version: '1' })
+    const s = { ...scope, scopes: ['mcp:read', 'mcp:write'] } as unknown as McpScope
+    configureToolCatalog(server, s)
+    registerStaffPayTools(server, s)
+    const client = new Client({ name: 'staffpay-test', version: '1' })
+    const [a, b] = InMemoryTransport.createLinkedPair()
+    await Promise.all([server.connect(a), client.connect(b)])
+    try {
+      for (const idempotencyKey of [undefined, 'abc', 'clave:1234', 'k'.repeat(101)]) {
+        const r = await client.callTool({
+          name: 'add_service_pay_adjustment',
+          arguments: { venueId: 'v1', staffId: 's1', amount: 100, reason: 'Bono', idempotencyKey },
+        })
+        expect(r.isError).toBeFalsy()
+        const p = JSON.parse((r.content as Array<{ text: string }>)[0].text)
+        expect(p).toMatchObject({ ok: false, needsInput: true, field: 'idempotencyKey' })
+        expect(p.question).toMatch(/obligatoria: de 4 a 100 caracteres, sólo letras, números, guion, guion bajo y punto/)
+        expect(p.question).toMatch(/la misma en la vista previa y al confirmar/)
+      }
+      expect(mockPreviewAjuste).not.toHaveBeenCalled()
+      expect(mockAjuste).not.toHaveBeenCalled()
+    } finally {
+      await client.close()
+      await server.close()
+    }
+  })
 })

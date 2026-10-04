@@ -232,10 +232,22 @@ async function liquidar(input: LiquidarInput): Promise<ResultadoLiquidacion> {
         // Permiso sobre el destino YA GUARDADO (puede estar cerrado): la respuesta repetida no regala montos.
         const guardados = await tx.servicePayPeriod.findMany({
           where: { id: { in: [...new Set(previas.map(p => p.periodId))] }, organizationId },
-          select: { venueIds: true },
+          select: { venueIds: true, periodStart: true, periodEnd: true },
           take: previas.length,
         })
         exigirPermisoEnSedes(permitidas, [input.venueId, ...guardados.flatMap(g => g.venueIds)], SIN_PERMISO)
+        // Un destino EXPLÍCITO fuera del periodo donde quedó la operación no es la misma solicitud (Codex bloque B, P1): con
+        // la misma clave pedida para octubre, devolver las líneas de septiembre dejaría sin pagar lo nuevo. Sin fecha, o con
+        // una dentro de ese periodo, es la repetición de siempre (también después de que se cerró).
+        const fuera = input.destinoFecha
+          ? guardados.find(g => input.destinoFecha! < dbDateComoFecha(g.periodStart) || input.destinoFecha! > dbDateComoFecha(g.periodEnd))
+          : undefined
+        if (fuera) {
+          throw new ConflictError(
+            `Esa clave ya se usó para liquidar en el periodo del ${dbDateComoFecha(fuera.periodStart)} al ${dbDateComoFecha(fuera.periodEnd)}: usa otra clave`,
+            'CLAVE_REUTILIZADA',
+          )
+        }
         return { lineas: previas.map(p => ({ staffId: p.staffId, amount: p.amount.toFixed(2) })), yaLiquidada: true }
       }
       // 1) Periodo destino (por default el de hoy): sólo una inserción NUEVA exige que esté abierto.
