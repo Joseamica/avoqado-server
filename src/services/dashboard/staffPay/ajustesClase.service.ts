@@ -81,6 +81,13 @@ const MAX_MONTO = 1_000_000
 const tieneAjuste = (p: ClassSessionPayState | null): p is ClassSessionPayState =>
   !!p && (p.payCountOverride !== null || p.payAmountOverride !== null || p.payExcluded)
 
+type Resumen = ReturnType<typeof resumenDeAjuste>
+/** Dos resúmenes de ajuste iguales, campo por campo (`jsonb` guarda las llaves en otro orden). */
+const mismoAjuste = (a: Resumen, b: Resumen) =>
+  a === null || b === null
+    ? a === b
+    : a.payCountOverride === b.payCountOverride && a.payAmountOverride === b.payAmountOverride && a.payExcluded === b.payExcluded
+
 /** Lo que la auditoría guarda de un ajuste: null cuando la clase va por el cálculo. */
 function resumenDeAjuste(p: { payCountOverride: number | null; payAmountOverride: Prisma.Decimal | null; payExcluded: boolean } | null) {
   if (!p || (p.payCountOverride === null && p.payAmountOverride === null && !p.payExcluded)) return null
@@ -387,18 +394,17 @@ async function guardarDentro(input: GuardarAjusteInput, permitidas: Set<string>)
         select: { data: true },
       })
       if (previa) {
-        // Campo por campo: `jsonb` guarda las llaves en otro orden.
-        type Resumen = ReturnType<typeof resumenDeAjuste>
         const suyo = ((previa.data as { despues?: Resumen } | null)?.despues ?? null) as Resumen
-        const pedido = resumenDeAjuste(datos)
-        const mismo =
-          suyo === null || pedido === null
-            ? suyo === pedido
-            : suyo.payCountOverride === pedido.payCountOverride &&
-              suyo.payAmountOverride === pedido.payAmountOverride &&
-              suyo.payExcluded === pedido.payExcluded
-        if (!mismo) {
+        if (!mismoAjuste(suyo, resumenDeAjuste(datos))) {
           throw new ConflictError('Esa clave ya se usó para otro ajuste de esta clase: usa otra clave', 'CLAVE_REUTILIZADA')
+        }
+        // Y la clase sigue como la dejó esa clave (revisión final, m1): si alguien la cambió después, pedir «déjala en 9»
+        // con la misma clave es otra corrección, no la repetición; responder `yaAplicado` la dejaría sin aplicar.
+        if (!mismoAjuste(suyo, resumenDeAjuste(antes))) {
+          throw new ConflictError(
+            'Esa clave ya dejó la clase así, pero desde entonces la cambiaron: para volver a corregirla usa otra clave',
+            'CLAVE_REUTILIZADA',
+          )
         }
         return { ...(await pagoDeClase(input.venueId, input.classSessionId, tx)), yaAplicado: true }
       }

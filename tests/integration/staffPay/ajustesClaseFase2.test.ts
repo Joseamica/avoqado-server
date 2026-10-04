@@ -274,6 +274,27 @@ describe('vista previa y confirmación de un ajuste de clase (para el MCP)', () 
     expect(log.data).toMatchObject({ clientKey: `${m.key}-aj`, despues: { payCountOverride: 9 } })
   })
 
+  it('la clave que dejó la clase en 9, reusada después de que alguien la pasó a 10, no es la misma operación: 409 (m1)', async () => {
+    const id = await clase(m, { staffId: m.ana, inicioIso: '2026-08-04T14:00:00Z', reservas: confirmadas(8) })
+    await cerrar()
+    const dejarEn9 = async () => {
+      const pv = await previewAjusteDeClase({ ...cambio(9), classSessionId: id })
+      return guardarAjusteDeClase({ ...cambio(9), classSessionId: id, clientKey: `${m.key}-k9`, huellaEsperada: pv.huella })
+    }
+    expect(await dejarEn9()).toMatchObject({ conteo: 9, yaAplicado: false })
+    // La repetición real (nada cambió desde entonces) se reconoce.
+    expect(await dejarEn9()).toMatchObject({ conteo: 9, yaAplicado: true })
+    // Alguien la pasa a 10 en el dashboard; el usuario pide «déjala en 9» y el agente reusa la clave.
+    await guardarAjusteDeClase({ ...cambio(10), classSessionId: id })
+    await expect(dejarEn9()).rejects.toMatchObject({ code: 'CLAVE_REUTILIZADA', message: expect.stringMatching(/usa otra clave/) })
+    expect(await prisma.classSessionPayState.findUniqueOrThrow({ where: { classSessionId: id } })).toMatchObject({ payCountOverride: 10 })
+    // Con otra clave sí se aplica.
+    const pv = await previewAjusteDeClase({ ...cambio(9), classSessionId: id })
+    expect(
+      await guardarAjusteDeClase({ ...cambio(9), classSessionId: id, clientKey: `${m.key}-k9-bis`, huellaEsperada: pv.huella }),
+    ).toMatchObject({ conteo: 9, yaAplicado: false })
+  })
+
   it('si la clase cambió entre la vista previa y la confirmación: HUELLA_CAMBIO con una vista previa nueva, y no se aplica', async () => {
     const id = await clase(m, { staffId: m.ana, inicioIso: '2026-08-04T14:00:00Z', reservas: confirmadas(8) })
     await cerrar()
