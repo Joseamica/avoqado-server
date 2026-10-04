@@ -2,6 +2,7 @@
 import { Prisma, PrismaClient } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { fechaComoDbDate } from '@/services/dashboard/staffPay/periodos'
+import { lockClase } from '@/services/dashboard/staffPay/periodosGuardados'
 
 export const TZ = 'America/Mexico_City'
 export const PN_HC = [0, 430, 430, 430, 430, 460, 490, 530, 570, 610, 650]
@@ -164,7 +165,13 @@ export async function periodoCerrado(m: Mundo, start: string, end: string) {
  * con un candado de fila, la primera sesión espera al bloqueador y la segunda espera a la primera (`pg_blocking_pids`
  * de la segunda no trae al bloqueador), así que una búsqueda recursiva desde su pid es lo que ve a las dos.
  */
-export async function barreraDelPeriodo(periodId: string) {
+export const barreraDelPeriodo = (periodId: string) =>
+  barrera(t => t.$queryRaw`SELECT id FROM "ServicePayPeriod" WHERE id = ${periodId} FOR UPDATE`)
+
+/** La misma barrera sobre el candado de UNA clase (`lockClase`): quien llega ahí ya tiene SU periodo tomado (B2). */
+export const barreraDeLaClase = (classSessionId: string) => barrera(t => lockClase(t, classSessionId))
+
+async function barrera(tomar: (t: Prisma.TransactionClient) => Promise<unknown>) {
   const url = process.env.DATABASE_URL
   const bloqueador = new PrismaClient({ datasources: { db: { url } } })
   const observador = new PrismaClient({ datasources: { db: { url } } })
@@ -175,14 +182,14 @@ export async function barreraDelPeriodo(periodId: string) {
   const tx = bloqueador.$transaction(
     async t => {
       const [{ pid }] = await t.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`
-      await t.$queryRaw`SELECT id FROM "ServicePayPeriod" WHERE id = ${periodId} FOR UPDATE`
+      await tomar(t)
       tomado(pid)
       await suelto
     },
     { maxWait: 10_000, timeout: 60_000 },
   )
   const pidBloqueador = await Promise.race([listo, tx.then(() => -1)])
-  if (pidBloqueador < 0) throw new Error('La barrera no pudo tomar el candado del periodo')
+  if (pidBloqueador < 0) throw new Error('La barrera no pudo tomar su candado')
   let cerrada = false
   return {
     /** Espera hasta ver `n` sesiones detenidas por el candado de ESTE bloqueador (directa o en cadena). */

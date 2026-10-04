@@ -204,7 +204,10 @@ async function ajustesDelPeriodo(db: Db, organizationId: string, periodId: strin
   }
 }
 
-export function descriptorDeClase(c: ClaseValorada, sede: { nombre: string; tz: string }): Prisma.InputJsonObject {
+export function descriptorDeClase(
+  c: Pick<ClaseValorada, 'productName' | 'fechaLocal' | 'startsAt' | 'staffName'>,
+  sede: { nombre: string; tz: string },
+): Prisma.InputJsonObject {
   return {
     clase: c.productName,
     fecha: c.fechaLocal,
