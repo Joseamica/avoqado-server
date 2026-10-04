@@ -20,6 +20,7 @@ import {
   levelParamsSchema,
   listaPeriodosQuerySchema,
   marcarPagadoSchema,
+  pagadoPreviewQuerySchema,
   periodicidadSchema,
   periodParamsSchema,
   publicarVersionSchema,
@@ -184,6 +185,14 @@ router.post(
   checkPermission('staffpay:close'),
   validateRequest(z.object({ params: periodParamsSchema, body: marcarPagadoSchema })),
   controller.postPaid,
+)
+// Sólo lectura: lo que «marcar pagado» registraría (cantidad, total pendiente, huella). La ruta pide leer; el service exige
+// además `staffpay:close` en todas las sedes de esos recibos (el mismo permiso que marcar), así que no enseña de más.
+router.get(
+  '/periods/:periodId/paid-preview',
+  checkPermission('staffpay:read'),
+  validateRequest(z.object({ params: periodParamsSchema, query: pagadoPreviewQuerySchema })),
+  controller.getPaidPreview,
 )
 router.post(
   '/adjustments',

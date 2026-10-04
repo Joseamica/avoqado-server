@@ -288,6 +288,13 @@ export const postPaid = manejar(req => {
   const { staffId, nota } = req.body
   return recibos.marcarPagado({ ...ctx(req), periodId: req.params.periodId, staffId, nota })
 })
+export const getPaidPreview = manejar(req =>
+  recibos.previewPagado({
+    ...ctx(req),
+    periodId: req.params.periodId,
+    ...(req.query.staffId ? { staffId: String(req.query.staffId) } : {}),
+  }),
+)
 export const postAdjustment = manejar(req => {
   // Campos explícitos: nada extra del body (p. ej. una huellaEsperada) llega al service.
   const { sede, staffId, amount, reason, fecha, clientKey } = req.body
@@ -299,6 +306,7 @@ export const getReceipt = manejar(req =>
     staffId: req.params.staffId,
     fecha: String(req.query.fecha),
     cursor: req.query.cursor ? String(req.query.cursor) : undefined,
+    sede: req.query.sede ? String(req.query.sede) : undefined,
     limit: Number(req.query.limit ?? 100),
   }),
 )

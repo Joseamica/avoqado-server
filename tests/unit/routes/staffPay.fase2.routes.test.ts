@@ -5,6 +5,7 @@ jest.mock('@/services/dashboard/staffPay/cierre.service', () => ({ previewCierre
 jest.mock('@/services/dashboard/staffPay/ajustesManuales.service', () => ({ agregarAjusteManual: jest.fn() }))
 jest.mock('@/services/dashboard/staffPay/recibos.service', () => ({
   marcarPagado: jest.fn(),
+  previewPagado: jest.fn(),
   reciboDePersona: jest.fn(),
   exportarRecibo: jest.fn(),
 }))
@@ -50,6 +51,19 @@ describe('Zod de la fase 2 (sólo forma, mensajes en español)', () => {
       true,
     )
   })
+  it('el recibo acepta un filtro de sede opcional con forma de id (Codex bloque A #5)', () => {
+    expect(schemas.reciboQuerySchema.safeParse({ fecha: '2026-08-15', sede: CUID }).success).toBe(true)
+    const malo = schemas.reciboQuerySchema.safeParse({ fecha: '2026-08-15', sede: 'pn' })
+    expect(malo.success).toBe(false)
+    if (!malo.success) expect(malo.error.errors.map(e => e.message)).toEqual(['Sede inválida'])
+    // La exportación queda igual: sin sede.
+    expect(schemas.exportReciboQuerySchema.parse({ fecha: '2026-08-15', format: 'pdf', sede: CUID })).not.toHaveProperty('sede')
+  })
+  it('el preview de marcar pagado acepta staffId opcional (Codex bloque A #6)', () => {
+    expect(schemas.pagadoPreviewQuerySchema.safeParse({}).success).toBe(true)
+    expect(schemas.pagadoPreviewQuerySchema.safeParse({ staffId: CUID }).success).toBe(true)
+    expect(schemas.pagadoPreviewQuerySchema.safeParse({ staffId: 'ana' }).success).toBe(false)
+  })
   it('periodicidad, marcar pagado y lista de periodos: sólo forma', () => {
     expect(schemas.periodicidadSchema.safeParse({ periodicidad: 'WEEKLY' }).success).toBe(false)
     expect(schemas.periodicidadSchema.safeParse({ periodicidad: 'SEMIMONTHLY' }).success).toBe(true)
@@ -85,6 +99,7 @@ describe('Rutas de la fase 2: método, ruta y permiso', () => {
     ['get', '/periods/close-preview', 'staffpay:read'],
     ['post', '/periods/close', 'staffpay:close'],
     ['post', '/periods/:periodId/paid', 'staffpay:close'],
+    ['get', '/periods/:periodId/paid-preview', 'staffpay:read'],
     ['post', '/adjustments', 'staffpay:close'],
     ['get', '/staff/:staffId/receipt', 'staffpay:read'],
     ['get', '/staff/:staffId/receipt/export', 'staffpay:read'],
@@ -149,6 +164,33 @@ describe('Controller de la fase 2', () => {
       cursor: 'abc|def',
       limit: 50,
     })
+  })
+
+  it('el recibo pasa el filtro de sede al service (Codex bloque A #5)', async () => {
+    ;(recibos.reciboDePersona as jest.Mock).mockResolvedValue({})
+    await controller.getReceipt(
+      req({ params: { venueId: 'v1', staffId: 's1' }, query: { fecha: '2026-08-15', limit: 50, sede: CUID } }),
+      res(),
+      jest.fn(),
+    )
+    expect((recibos.reciboDePersona as jest.Mock).mock.calls[0][0]).toMatchObject({ staffId: 's1', fecha: '2026-08-15', sede: CUID })
+  })
+
+  it('el preview de marcar pagado lee el periodo de la ruta y el staffId opcional; responde lo del service (Codex bloque A #6)', async () => {
+    const pv = {
+      periodo: { start: '2026-08-01', end: '2026-08-31', estado: 'CLOSED' },
+      cantidad: 2,
+      total: '1030.00',
+      recibos: [],
+      huella: 'h',
+    }
+    ;(recibos.previewPagado as jest.Mock).mockResolvedValue(pv)
+    const r = res()
+    await controller.getPaidPreview(req({ params: { venueId: 'v1', periodId: 'p1' }, query: { staffId: 's1', ahora: 'x' } }), r, jest.fn())
+    expect((recibos.previewPagado as jest.Mock).mock.calls[0][0]).toEqual({ venueId: 'v1', userId: 'u1', periodId: 'p1', staffId: 's1' })
+    expect(r.json).toHaveBeenCalledWith(pv)
+    await controller.getPaidPreview(req({ params: { venueId: 'v1', periodId: 'p1' } }), res(), jest.fn())
+    expect((recibos.previewPagado as jest.Mock).mock.calls[1][0]).toEqual({ venueId: 'v1', userId: 'u1', periodId: 'p1' })
   })
 
   it('el ajuste manual pasa sólo los campos del Zod (sin huellaEsperada colada)', async () => {

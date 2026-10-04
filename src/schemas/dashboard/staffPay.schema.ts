@@ -78,6 +78,8 @@ export const cerrarPeriodoSchema = z.object({
   confirmarHuerfanas: z.boolean().default(false),
 })
 export const periodParamsSchema = venueParamsSchema.extend({ periodId: z.string().cuid('Periodo inválido') })
+/** Cuánto registraría «marcar pagado» (Codex bloque A #6): de todos los pendientes del periodo, o de una persona. */
+export const pagadoPreviewQuerySchema = z.object({ staffId: z.string().cuid('Persona inválida').optional() })
 export const marcarPagadoSchema = z.object({
   staffId: z.string().cuid('Persona inválida').optional(),
   nota: z.string().trim().max(200, 'Máximo 200 caracteres').optional(),
@@ -101,6 +103,8 @@ export const exportReciboQuerySchema = z.object({
 /** El recibo por páginas (Codex R2-R1-20): el cursor lo da la página anterior (`siguiente`). */
 export const reciboQuerySchema = z.object({
   fecha: fechaSchema,
+  /** Filtro de sede (Codex bloque A #5): el desglose de una sede suma sólo sus renglones, como el encabezado. */
+  sede: sedeSchema.optional(),
   cursor: z.string().max(200, 'Cursor inválido').optional(),
   limit: z.coerce.number().int().min(1, 'Mínimo 1').max(500, 'Máximo 500').default(100),
 })
