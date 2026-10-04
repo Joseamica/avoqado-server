@@ -71,13 +71,57 @@ describe('diferencias de UNA clase: gate de organización (Codex R2-R1-1, spec �
   it('el resto de las rutas sigue detrás del gate de la SEDE: con la sede apagada, 403 aunque la organización lo tenga', async () => {
     mockSedeTiene.mockResolvedValue(false)
     mockOrgTiene.mockResolvedValue(true)
-    const r = await request(server).get(`${base}/class-sessions/${CLASE}/pay`)
+    const r = await request(server).get(`${base}/report`)
     expect(r.status).toBe(403)
     expect(r.body.error).toBe('module_disabled')
     // La lista del periodo también: es de la sede.
     const lista = await request(server).get(`${base}/periods/${PERIODO}/differences`)
     expect(lista.status).toBe(403)
     expect(lista.body.error).toBe('module_disabled')
+  })
+})
+
+// Revisión final, M-2: una sede que apagó el módulo dejaba una diferencia en excepción sin salida (liquidar pasaba por el
+// gate de la organización y «Ajustar monto» por el de la sede). La tarjeta y su ajuste van con el gate de la organización.
+describe('tarjeta de pago de una clase y su ajuste: gate de organización (spec §5.6)', () => {
+  const AJUSTE = { payCountOverride: null, payAmountOverride: 600, payExcluded: false, reason: 'Monto acordado' }
+  it('sede con el módulo APAGADO + organización con el módulo en otra sede ⇒ pasan (la tarjeta y el ajuste)', async () => {
+    mockSedeTiene.mockResolvedValue(false)
+    mockOrgTiene.mockResolvedValue(true)
+    const card = await request(server).get(`${base}/class-sessions/${CLASE}/pay`)
+    expect(card.status).toBe(200)
+    expect(card.body).toMatchObject({ handler: 'getClassPay' })
+    const ajuste = await request(server).put(`${base}/class-sessions/${CLASE}/pay-adjustments`).send(AJUSTE)
+    expect(ajuste.status).toBe(200)
+    expect(ajuste.body).toMatchObject({ handler: 'putClassPayAdjustments', body: AJUSTE })
+    expect(mockSedeTiene).not.toHaveBeenCalled()
+  })
+  it('organización sin el módulo en NINGUNA sede ⇒ 403 module_disabled', async () => {
+    mockSedeTiene.mockResolvedValue(false)
+    mockOrgTiene.mockResolvedValue(false)
+    const card = await request(server).get(`${base}/class-sessions/${CLASE}/pay`)
+    expect(card.status).toBe(403)
+    expect(card.body.error).toBe('module_disabled')
+    const ajuste = await request(server).put(`${base}/class-sessions/${CLASE}/pay-adjustments`).send(AJUSTE)
+    expect(ajuste.status).toBe(403)
+    expect(ajuste.body.error).toBe('module_disabled')
+  })
+  it('su validación no cambia: un monto negativo o sin motivo ⇒ 400 y no llega al controller', async () => {
+    mockOrgTiene.mockResolvedValue(true)
+    expect(
+      (
+        await request(server)
+          .put(`${base}/class-sessions/${CLASE}/pay-adjustments`)
+          .send({ ...AJUSTE, payAmountOverride: -1 })
+      ).status,
+    ).toBe(400)
+    expect(
+      (
+        await request(server)
+          .put(`${base}/class-sessions/${CLASE}/pay-adjustments`)
+          .send({ ...AJUSTE, reason: 'x' })
+      ).status,
+    ).toBe(400)
   })
 })
 

@@ -81,6 +81,23 @@ router.post(
   validateRequest(z.object({ params: sessionPayParamsSchema, body: liquidarSchema })),
   controller.postSettleDifference,
 )
+// Tarjeta de pago de una clase y sus ajustes auditados (spec §5.4, §6.1), con el MISMO gate de organización (revisión
+// final, M-2): una diferencia en excepción de una sede que apagó el módulo se resuelve con «Ajustar monto» y después se
+// liquida; con el gate de la sede se quedaba sin salida (spec §5.6). Permisos y validación, iguales.
+router.get(
+  '/class-sessions/:sessionId/pay',
+  servicePayGateOrganizacion,
+  checkPermission('staffpay:read'),
+  validateRequest(z.object({ params: sessionPayParamsSchema })),
+  controller.getClassPay,
+)
+router.put(
+  '/class-sessions/:sessionId/pay-adjustments',
+  servicePayGateOrganizacion,
+  checkPermission('staffpay:manage'),
+  validateRequest(z.object({ params: sessionPayParamsSchema, body: ajusteClaseSchema })),
+  controller.putClassPayAdjustments,
+)
 
 router.use(servicePayGate)
 
@@ -174,20 +191,6 @@ router.get(
   checkPermission('staffpay:read'),
   validateRequest(z.object({ params: venueParamsSchema, query: reporteQuerySchema })),
   controller.getOrphans,
-)
-
-// Tarjeta de pago de una clase y sus ajustes auditados (spec §5.4, §6.1).
-router.get(
-  '/class-sessions/:sessionId/pay',
-  checkPermission('staffpay:read'),
-  validateRequest(z.object({ params: sessionPayParamsSchema })),
-  controller.getClassPay,
-)
-router.put(
-  '/class-sessions/:sessionId/pay-adjustments',
-  checkPermission('staffpay:manage'),
-  validateRequest(z.object({ params: sessionPayParamsSchema, body: ajusteClaseSchema })),
-  controller.putClassPayAdjustments,
 )
 
 // Fase 2: cerrar y pagar. El permiso de ruta revisa la sede del URL; el service, el alcance completo (spec §9.2).
