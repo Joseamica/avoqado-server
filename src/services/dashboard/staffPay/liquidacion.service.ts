@@ -4,7 +4,7 @@ import prisma from '../../../utils/prismaClient'
 import { BadRequestError, ConflictError, NotFoundError } from '../../../errors/AppError'
 import { withSerializableRetry } from '../../../utils/serializableRetry'
 import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
-import { exigirPermisoEnSedes, sedesConPermiso, sedesConServicePay } from './acceso'
+import { exigirPermisoEnSedes, sedesConPermiso, sedesConServicePay, sedesLegiblesDe } from './acceso'
 import { ampliarAlcance, asegurarPeriodo, bloquearPeriodo, lockClase, periodoQueContieneFecha } from './periodosGuardados'
 import { dbDateComoFecha, hoyLocal, periodoQueContiene } from './periodos'
 import { anclarClases, descriptorDeClase } from './cierre.service'
@@ -19,7 +19,10 @@ const SIN_PERMISO = 'Para liquidar necesitas el permiso de cerrar periodos en la
 
 export interface PreviewLiquidacion {
   periodoOrigen: { id: string; start: string; end: string } | null
+  /** `venueIds`: sólo las sedes del destino que quien lee puede ver (la huella sí cubre el alcance completo). */
   destino: Destino
+  /** La sede de la clase ya está en el alcance del destino; si no, el dashboard ofrece «Sumar la sede y liquidar». */
+  sedeEnDestino: boolean
   filas: FilaDiferencia[]
   total: string
   bloqueada: boolean
@@ -124,9 +127,13 @@ export async function previewLiquidacion(input: {
   const destino = await destinoSinCandado(ctx.organizationId, input.destinoFecha ?? hoyLocal(ctx.tz, ahora))
   const { origen, filas } = await diferenciasDeClase(prisma, { venueId: input.venueId, classSessionId: input.classSessionId }, { ahora })
   const previas = await devengosDeClase(prisma, ctx.organizationId, input.classSessionId)
+  // Lo que se muestra se filtra a lo legible (patrón del Bloque A); la huella va sobre el alcance completo, que es lo que la
+  // liquidación bloquea y compara.
+  const legibles = await sedesLegiblesDe(input.userId, destino.venueIds)
   return {
     periodoOrigen: origen ? { id: origen.id, start: dbDateComoFecha(origen.periodStart), end: dbDateComoFecha(origen.periodEnd) } : null,
-    destino,
+    destino: { ...destino, venueIds: legibles.venueIds },
+    sedeEnDestino: destino.venueIds.includes(input.venueId),
     filas,
     total: filas.reduce((a, f) => (f.pendiente === null ? a : a.plus(f.pendiente)), new Prisma.Decimal(0)).toFixed(2),
     bloqueada: filas.some(f => f.pendiente === null),
@@ -146,13 +153,7 @@ async function nivelDePrimeraLinea(tx: Tx, organizationId: string, classSessionI
 /** Centinela: la huella cambió. Se convierte en `ConflictError HUELLA_CAMBIO` FUERA de la transacción (ya revertida). */
 class HuellaCambio extends Error {}
 
-/**
- * «Liquidar diferencia» de UNA clase (spec §6.4), una sola vez, con el protocolo único (§5): SERIALIZABLE → candado del
- * periodo DESTINO → candado de la CLASE → releer y decidir dentro. El periodo de ORIGEN sólo se lee, nunca se bloquea: el
- * ajuste de clase toma origen → clase, y destino → clase → origen sería un ciclo (40P01, que no se reintenta). Anclar la
- * clase en el origen sólo toma `FOR KEY SHARE` por la llave foránea, compatible con el `FOR NO KEY UPDATE` del ajuste.
- */
-export async function liquidarDiferencia(input: {
+export interface LiquidarInput {
   userId: string
   venueId: string
   classSessionId: string
@@ -162,13 +163,44 @@ export async function liquidarDiferencia(input: {
   destinoFecha?: string
   ampliarAlcance?: boolean
   ahora?: Date
-}): Promise<ResultadoLiquidacion> {
+}
+
+/** El insert chocó con el índice único `(organizationId, clientKey)`: otra copia de la MISMA solicitud guardó antes. */
+const esClaveRepetida = (e: unknown) =>
+  e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002' && String(e.meta?.target ?? '').includes('clientKey')
+
+/**
+ * «Liquidar diferencia» de UNA clase (spec §6.4), una sola vez. Red del índice único (spec §5.6): si otra copia de la misma
+ * solicitud guardó sus líneas entre el paso 0 y el insert sin chocar como 40001 (por ejemplo, una escritura que no es
+ * SERIALIZABLE), el insert da P2002; se corre UNA vez más y el paso 0 la reconoce como ya liquidada. Otro P2002 se relanza.
+ */
+export async function liquidarDiferencia(input: LiquidarInput): Promise<ResultadoLiquidacion> {
+  try {
+    return await liquidar(input)
+  } catch (e) {
+    if (!esClaveRepetida(e)) throw e
+    return liquidar(input)
+  }
+}
+
+/**
+ * Protocolo único (§5): SERIALIZABLE → candado del periodo DESTINO → candado de la CLASE → releer y decidir dentro. El
+ * periodo de ORIGEN sólo se lee, nunca se bloquea: el ajuste de clase toma origen → clase, y destino → clase → origen sería
+ * un ciclo (40P01, que no se reintenta). Anclar la clase en el origen sólo toma `FOR KEY SHARE` por la llave foránea,
+ * compatible con el `FOR NO KEY UPDATE` del ajuste. Y destino → clase es también el orden del ajuste de una clase SIN ancla
+ * cuya fecha cae en el destino: invertirlo aquí sería otro 40P01.
+ */
+async function liquidar(input: LiquidarInput): Promise<ResultadoLiquidacion> {
   if (typeof input.solicitudId !== 'string' || !CLAVE.test(input.solicitudId)) throw new BadRequestError('Clave de solicitud inválida')
   const ctx = await contextoClase(input.venueId, input.classSessionId)
   const { organizationId } = ctx
   const ahora = input.ahora ?? new Date()
   const fecha = input.destinoFecha ?? hoyLocal(ctx.tz, ahora)
   const prefijo = `${input.solicitudId}:`
+  // `startsWith` viaja como `LIKE 'prefijo%'` SIN escapar (medido: el parámetro llega tal cual) y la clave admite «_», que
+  // en LIKE es comodín: se escapa (`\` es el ESCAPE por default de PostgreSQL). Sin esto, `a_b` tomaba como suyas las
+  // líneas de `a-b`: `yaLiquidada` con las de otra operación, o un CLAVE_REUTILIZADA falso.
+  const patron = prefijo.replace(/[\\%_]/g, '\\$&')
   // Módulos y permisos con el cliente GLOBAL, ANTES de la transacción (regla del Bloque A, como el cierre): dentro
   // retendrían su conexión mientras piden otra. Candidatas: la sede de la clase ∪ el destino como está ahora ∪ las sedes con
   // el módulo (el destino que nazca las toma) ∪ los destinos ya guardados de esta solicitud. Dentro sólo se COMPARA; una
@@ -176,7 +208,7 @@ export async function liquidarDiferencia(input: {
   const activas = await sedesConServicePay(organizationId)
   const destinoAntes = await periodoQueContieneFecha(prisma, organizationId, fecha)
   const guardadosAntes = await prisma.servicePayPeriod.findMany({
-    where: { organizationId, earnings: { some: { organizationId, clientKey: { startsWith: prefijo } } } },
+    where: { organizationId, earnings: { some: { organizationId, clientKey: { startsWith: patron } } } },
     select: { venueIds: true },
     take: 100,
   })
@@ -187,7 +219,7 @@ export async function liquidarDiferencia(input: {
       // 0) Idempotencia PRIMERO (Codex R2-R1-4 / R2-Nuevo 4), por organización (la clave es única por organización): una
       // repetición se reconoce aunque su destino ya se haya cerrado. La restricción única sigue siendo la red ante la carrera.
       const previas = await tx.serviceEarning.findMany({
-        where: { organizationId, clientKey: { startsWith: prefijo } },
+        where: { organizationId, clientKey: { startsWith: patron } },
         select: { staffId: true, amount: true, sourceId: true, periodId: true },
         orderBy: { staffId: 'asc' },
         take: 1000,
@@ -281,26 +313,29 @@ export async function liquidarDiferencia(input: {
       if (lineas.length) await tx.serviceEarning.createMany({ data: lineas })
       // 10) Ancla: si no tenía, en el origen revalidado; si tenía sin versión y hoy hay regla, la versión UNA vez.
       const clase = filas[0]
+      let ancla: { periodoOrigen?: string; version: string | null } | null = null
       if (clase && !clase.periodoOrigenId) {
-        await anclarClases(tx, origen.id, [
+        const escritas = await anclarClases(tx, origen.id, [
           { classSessionId: input.classSessionId, fechaValoracion: clase.fechaValoracion, tableVersionId: clase.tableVersionId },
         ])
+        if (escritas) ancla = { periodoOrigen: origen.id, version: clase.tableVersionId }
       } else if (clase?.tableVersionId) {
-        await tx.classSessionPayState.updateMany({
+        const { count } = await tx.classSessionPayState.updateMany({
           where: { classSessionId: input.classSessionId, valuationVersionId: null },
           data: { valuationVersionId: clase.tableVersionId },
         })
+        if (count) ancla = { version: clase.tableVersionId }
       }
       const resultado = conMonto.map(f => ({ staffId: f.persona!, amount: new Prisma.Decimal(f.pendiente!).toFixed(2) }))
-      // 11) Rastro, en el mismo tx.
-      if (resultado.length) {
+      // 11) Rastro, en el mismo tx, de toda escritura: líneas, o sólo el ancla / la versión cuando no hay nada que pagar.
+      if (resultado.length || ancla) {
         await writeLegacyActivityAuditTx(tx, {
           staffId: input.userId,
           venueId: input.venueId,
           action: 'SERVICE_PAY_DIFFERENCE_SETTLED',
           entity: 'ClassSession',
           entityId: input.classSessionId,
-          data: { origen: origen.id, destino: destino.id, solicitudId: input.solicitudId, lineas: resultado, huella },
+          data: { origen: origen.id, destino: destino.id, solicitudId: input.solicitudId, lineas: resultado, ancla, huella },
         })
       }
       return { lineas: resultado, yaLiquidada: resultado.length === 0 }

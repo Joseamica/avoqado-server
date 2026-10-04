@@ -217,14 +217,17 @@ export function descriptorDeClase(
   }
 }
 
-/** Ancla de una vez (spec §5.4): nunca pisa un ancla existente. `updatedAt` en UTC, como lo escribe Prisma. */
+/**
+ * Ancla de una vez (spec §5.4): nunca pisa un ancla existente. `updatedAt` en UTC, como lo escribe Prisma. Devuelve cuántas
+ * clases quedaron ancladas (las que ya lo estaban no cuentan).
+ */
 export async function anclarClases(
   tx: Tx,
   periodId: string,
   filas: Array<{ classSessionId: string; fechaValoracion: string; tableVersionId: string | null }>,
-): Promise<void> {
-  if (!filas.length) return
-  await tx.$executeRaw`
+): Promise<number> {
+  if (!filas.length) return 0
+  return tx.$executeRaw`
     INSERT INTO "ClassSessionPayState" ("classSessionId", "originPeriodId", "valuationDate", "valuationVersionId", "payExcluded", "updatedAt")
     SELECT x.cid, ${periodId}, x.fecha::date, x.ver, false, (NOW() AT TIME ZONE 'UTC')
     FROM unnest(${filas.map(f => f.classSessionId)}::text[], ${filas.map(f => f.fechaValoracion)}::text[],
