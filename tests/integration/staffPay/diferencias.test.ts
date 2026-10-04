@@ -1,9 +1,15 @@
 // tests/integration/staffPay/diferencias.test.ts
 import prisma from '@/utils/prismaClient'
-import { diferenciasDeClase, diferenciasDelPeriodo, FilaDiferencia } from '@/services/dashboard/staffPay/diferencias.service'
+import {
+  diferenciasDeClase,
+  diferenciasDelPeriodo,
+  diferenciasSql,
+  FilaDiferencia,
+} from '@/services/dashboard/staffPay/diferencias.service'
 import { cerrarPeriodo, previewCierre } from '@/services/dashboard/staffPay/cierre.service'
 import { pagoDeClase } from '@/services/dashboard/staffPay/ajustesClase.service'
-import { borrarMundo, clase, confirmadas, crearMundo, Mundo, tablaMindform } from './_mundo'
+import { NotFoundError } from '@/errors/AppError'
+import { borrarMundo, clase, confirmadas, crearMundo, crearSede, Mundo, tablaMindform } from './_mundo'
 
 jest.mock('@/services/dashboard/staffPay/acceso', () => ({
   ...jest.requireActual('@/services/dashboard/staffPay/acceso'),
@@ -14,6 +20,7 @@ jest.mock('@/services/dashboard/staffPay/acceso', () => ({
   tienePermisoEn: jest.fn(async () => true),
   assertPermisoEnSedes: jest.fn(async () => undefined),
 }))
+const acceso = jest.requireMock('@/services/dashboard/staffPay/acceso')
 
 const AHORA = new Date('2026-09-02T12:00:00Z')
 let m: Mundo
@@ -38,7 +45,7 @@ const todasLasPaginas = async (limit: number, tamLote?: number, topeSinAncla?: n
   const items: FilaDiferencia[] = []
   let cursor: string | undefined
   for (let i = 0; i < 50; i++) {
-    const p = await diferenciasDelPeriodo({ userId: m.owner, venueId: m.venueId, periodId, limit, cursor, tamLote, topeSinAncla })
+    const p = await diferenciasDelPeriodo({ userId: m.owner, venueId: m.venueId, periodId, limit, cursor }, { tamLote, topeSinAncla })
     expect(p.items.length).toBeLessThanOrEqual(limit)
     items.push(...p.items)
     if (!p.nextCursor) return items
@@ -146,6 +153,52 @@ describe('diferencias pendientes (spec §6.4)', () => {
     expect(p2.items).toHaveLength(1)
     expect(p2.nextCursor).toBeNull()
     expect(new Set([...p1.items, ...p2.items].map(i => i.classSessionId))).toEqual(new Set(ids.slice(0, 3)))
+    // Una página que se llena justo con lo último no ofrece «Cargar más» (mira una fila de más).
+    const justa = await diferenciasDelPeriodo({ userId: m.owner, venueId: m.venueId, periodId, limit: 3 })
+    expect(justa.items).toHaveLength(3)
+    expect(justa.nextCursor).toBeNull()
+  })
+
+  it('limit y lote no finitos o con decimales caen a un valor válido (nunca el periodo entero ni un SQL roto)', async () => {
+    // 51 diferencias (una más que la página por default): sin reservas se congelan en $0 y corregidas a 9 dan +$610.
+    const ids = [] as string[]
+    for (let i = 0; i < 51; i++)
+      ids.push(await clase(m, { staffId: m.ana, inicioIso: `2026-08-${String(1 + (i % 28)).padStart(2, '0')}T14:00:00Z` }))
+    await cerrarAgosto()
+    await prisma.classSessionPayState.updateMany({ where: { classSessionId: { in: ids } }, data: { payCountOverride: 9 } })
+    const raro = await diferenciasDelPeriodo(
+      { userId: m.owner, venueId: m.venueId, periodId, limit: NaN },
+      { tamLote: NaN, topeSinAncla: Infinity },
+    )
+    expect(raro.items).toHaveLength(50)
+    expect(raro.items.every(i => i.pendiente === '610.00')).toBe(true)
+    expect(raro.nextCursor).not.toBeNull()
+    const decimal = await diferenciasDelPeriodo({ userId: m.owner, venueId: m.venueId, periodId, limit: 1.7 }, { tamLote: 1.5 })
+    expect(decimal.items).toHaveLength(1)
+    expect(decimal.nextCursor).not.toBeNull()
+  })
+
+  it('el SQL de las diferencias exige ids: sin ellos valoraría el periodo entero sin LIMIT', () => {
+    const f = { venueId: m.venueId, organizationId: m.orgId, tz: 'UTC', desde: AHORA, hasta: AHORA, ahora: AHORA }
+    expect(() => diferenciasSql({ ...f, modo: 'periodo', periodId: 'x', claseIds: [] }, null, true)).toThrow(/claseIds/)
+    expect(() => diferenciasSql({ ...f, modo: 'periodo', periodId: 'x' }, null, true)).toThrow(/claseIds/)
+  })
+
+  it('una sede que no existe es «no encontrada», no un error de Prisma', async () => {
+    await cerrarAgosto()
+    await expect(diferenciasDelPeriodo({ userId: m.owner, venueId: 'no-existe', periodId, limit: 10 })).rejects.toBeInstanceOf(
+      NotFoundError,
+    )
+  })
+
+  it('una clase sin ancla de una sede FUERA del alcance del periodo cerrado no es candidata de él (spec §5.6)', async () => {
+    await cerrarAgosto() // alcance: sólo la sede del mundo
+    const b = await crearSede(m.orgId, m.key, 'bsf')
+    await tablaMindform(m, b.venueId)
+    const id = await clase(m, { staffId: m.ana, inicioIso: '2026-08-20T14:00:00Z', reservas: confirmadas(3), ...b })
+    expect(await diferenciasDeClase(prisma, { venueId: b.venueId, classSessionId: id })).toEqual({ origen: null, filas: [] })
+    expect(await pagoDeClase(b.venueId, id)).toMatchObject({ llegoTarde: false, anclada: false })
+    expect((await diferenciasDelPeriodo({ userId: m.owner, venueId: m.venueId, periodId, limit: 50 })).items).toEqual([])
   })
 
   it('un lote sin ninguna diferencia no corta el recorrido: con lotes de 1 encuentra la clase que va después', async () => {
@@ -158,7 +211,7 @@ describe('diferencias pendientes (spec §6.4)', () => {
       await prisma.classSession.findFirstOrThrow({ where: { id: { in: ids } }, orderBy: { id: 'desc' }, select: { id: true } })
     ).id
     await prisma.classSessionPayState.update({ where: { classSessionId: ultima }, data: { payCountOverride: 9 } })
-    const lista = await diferenciasDelPeriodo({ userId: m.owner, venueId: m.venueId, periodId, limit: 50, tamLote: 1 })
+    const lista = await diferenciasDelPeriodo({ userId: m.owner, venueId: m.venueId, periodId, limit: 50 }, { tamLote: 1 })
     expect(lista.items.map(i => [i.classSessionId, i.persona, i.pendiente])).toEqual([[ultima, m.ana, '40.00']])
     expect(lista.nextCursor).toBeNull()
   })
@@ -223,5 +276,46 @@ describe('diferencias pendientes (spec §6.4)', () => {
         expect(items.map(i => [i.classSessionId, i.pendiente])).toEqual(esperado)
       }
     }
+  })
+  describe('dos sedes', () => {
+    let sedes: string[]
+    let porSede: Record<string, string[]>
+    beforeEach(async () => {
+      const b = await crearSede(m.orgId, m.key, 'bsf')
+      await tablaMindform(m, b.venueId)
+      ;(global as any).__sedes = [m.venueId, b.venueId]
+      const ids: Record<string, string[]> = { [m.venueId]: [], [b.venueId]: [] }
+      for (const d of [4, 5]) {
+        ids[m.venueId].push(await clase(m, { staffId: m.ana, inicioIso: `2026-08-0${d}T14:00:00Z`, reservas: confirmadas(8) }))
+        ids[b.venueId].push(await clase(m, { staffId: m.ana, inicioIso: `2026-08-0${d}T15:00:00Z`, reservas: confirmadas(8), ...b }))
+      }
+      await cerrarAgosto()
+      for (const id of [...ids[m.venueId], ...ids[b.venueId]])
+        await prisma.classSessionPayState.update({ where: { classSessionId: id }, data: { payCountOverride: 9 } })
+      // El orden del servicio: sedes por id; dentro, clases en el orden de la base.
+      sedes = [m.venueId, b.venueId].sort()
+      porSede = {}
+      for (const v of sedes)
+        porSede[v] = (await prisma.classSession.findMany({ where: { venueId: v }, orderBy: { id: 'asc' }, select: { id: true } })).map(
+          c => c.id,
+        )
+    })
+
+    it('el cursor cruza de la primera sede a la segunda sin repetir ni saltar filas', async () => {
+      const items = await todasLasPaginas(1)
+      expect(items.map(i => [i.venueId, i.classSessionId, i.pendiente])).toEqual(sedes.flatMap(v => porSede[v].map(id => [v, id, '40.00'])))
+    })
+
+    it('si la sede del cursor deja de ser legible entre páginas, sigue en la siguiente sin repetir ni saltar filas', async () => {
+      const p1 = await diferenciasDelPeriodo({ userId: m.owner, venueId: m.venueId, periodId, limit: 1 })
+      expect(p1.items.map(i => i.classSessionId)).toEqual([porSede[sedes[0]][0]])
+      acceso.sedesLegiblesDe.mockImplementationOnce(async (_u: string, venueIds: string[]) => ({
+        venueIds: venueIds.filter(v => v !== sedes[0]),
+        parcial: true,
+      }))
+      const p2 = await diferenciasDelPeriodo({ userId: m.owner, venueId: m.venueId, periodId, limit: 10, cursor: p1.nextCursor! })
+      expect(p2.items.map(i => i.classSessionId)).toEqual(porSede[sedes[1]])
+      expect(p2).toMatchObject({ nextCursor: null, parcial: true })
+    })
   })
 })

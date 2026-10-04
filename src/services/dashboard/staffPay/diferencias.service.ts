@@ -13,8 +13,12 @@ const TZ_DEFAULT = 'America/Mexico_City'
 /** Clases valoradas por lote al recorrer un periodo (el mismo tamaño que el cierre, A13). */
 export const LOTE_DIFERENCIAS = 500
 const TOPE_PAGINA = 100
+const PAGINA_DEFAULT = 50
 /** Ids «sin ancla» que se cargan de una vez por sede y página (casi siempre unas cuantas). */
 const TOPE_SIN_ANCLA = 5000
+/** Entero en [min, max]; lo no finito (NaN, Infinity, undefined) cae al default: nunca el periodo entero ni un LIMIT roto. */
+const entero = (x: number | undefined, porDefecto: number, min: number, max: number) =>
+  x !== undefined && Number.isFinite(x) ? Math.min(Math.max(Math.trunc(x), min), max) : porDefecto
 
 export interface FilaDiferencia {
   classSessionId: string
@@ -35,6 +39,10 @@ export interface FilaDiferencia {
   conciliado: string
   /** null: la clase está en excepción (D5): no se liquida hasta resolverla. */
   pendiente: string | null
+  /**
+   * Los cinco siguientes son de la CLASE valorada hoy (los de `coachActual`), no de `persona`: si `persona ≠ coachActual`
+   * (la coach original tras una sustitución) su «corresponde» es 0 y su nivel no aplica.
+   */
   payLevelId: string | null
   payLevelName: string | null
   tableVersionId: string | null
@@ -67,6 +75,8 @@ type CursorFila = { classSessionId: string; persona: string }
  * Sin LIMIT: lo acota el lote de clases. Orden fijo (clase, persona) para el cursor.
  */
 export function diferenciasSql(f: FiltroValoracion, despues: CursorFila | null, soloPendientes: boolean): Prisma.Sql {
+  // Sin ids, `valoracionCte` valoraría el periodo entero y aquí no hay LIMIT.
+  if (!f.claseIds?.length) throw new Error('diferenciasSql: exige claseIds')
   const trasFila = despues
     ? Prisma.sql`AND (y."classSessionId", COALESCE(y.persona, '')) > (${despues.classSessionId}::text, ${despues.persona}::text)`
     : Prisma.empty
@@ -153,9 +163,14 @@ export const idsCandidatas = (f: FiltroDelPeriodo, desde: Desde, n: number, sinA
   return Prisma.sql`SELECT id FROM (${Prisma.join(ramas, ' UNION ALL ')}) u ORDER BY id ASC LIMIT ${n}`
 }
 
-/** El periodo cerrado del que una clase es candidata: su ancla, o el cerrado que contiene su fecha (llegó tarde). */
+/**
+ * El periodo cerrado del que una clase es candidata: su ancla (por id, siempre), o —sin ancla, ya terminada— el cerrado que
+ * contiene su fecha (llegó tarde) SÓLO si su sede está en el alcance de ese periodo: los cerrados conservan su alcance y
+ * toda línea pertenece al alcance de su periodo (spec §5.6). Así coincide con lo que lista `diferenciasDelPeriodo`.
+ */
 export async function origenDeClase(
   db: Db,
+  venueId: string,
   cs: {
     startsAt: Date
     endsAt: Date
@@ -169,7 +184,7 @@ export async function origenDeClase(
   }
   if (cs.endsAt > ahora) return null
   const p = await periodoQueContieneFecha(db, cs.venue.organizationId, venueDayKey(cs.startsAt, cs.venue.timezone || TZ_DEFAULT))
-  return p?.status === 'CLOSED' ? p : null
+  return p?.status === 'CLOSED' && p.venueIds.includes(venueId) ? p : null
 }
 
 const filtroDelPeriodo = (p: ServicePayPeriod, venueId: string, tz: string, ahora: Date) => {
@@ -180,9 +195,10 @@ const filtroDelPeriodo = (p: ServicePayPeriod, venueId: string, tz: string, ahor
 /** Las diferencias de UNA clase, todas sus personas (no escribe). Sin periodo cerrado de origen: `{ origen: null, filas: [] }`. */
 export async function diferenciasDeClase(
   db: Db,
-  input: { venueId: string; classSessionId: string; ahora?: Date },
+  input: { venueId: string; classSessionId: string },
+  opts: { ahora?: Date } = {},
 ): Promise<{ origen: ServicePayPeriod | null; filas: FilaDiferencia[] }> {
-  const ahora = input.ahora ?? new Date()
+  const ahora = opts.ahora ?? new Date()
   const cs = await db.classSession.findFirst({
     where: { id: input.classSessionId, venueId: input.venueId },
     select: {
@@ -193,7 +209,7 @@ export async function diferenciasDeClase(
     },
   })
   if (!cs) throw new NotFoundError('Clase no encontrada')
-  const origen = await origenDeClase(db, cs, ahora)
+  const origen = await origenDeClase(db, input.venueId, cs, ahora)
   if (!origen) return { origen: null, filas: [] }
   const f = { ...filtroDelPeriodo(origen, input.venueId, cs.venue.timezone || TZ_DEFAULT, ahora), claseIds: [input.classSessionId] }
   return { origen, filas: (await db.$queryRaw<Fila[]>(diferenciasSql(f, null, false))).map(aDto) }
@@ -205,18 +221,19 @@ export async function diferenciasDeClase(
  * lotes de ≤`tamLote` ids por llave (`idsCandidatas`): cada lote cuesta lo mismo y un lote sin pendientes no corta el
  * recorrido. No escribe.
  */
-export async function diferenciasDelPeriodo(input: {
-  userId: string
-  venueId: string
-  periodId: string
-  cursor?: string
-  limit: number
-  ahora?: Date
-  /** Sólo para pruebas: el tamaño del lote de ids y el tope de la lista «sin ancla». */
-  tamLote?: number
-  topeSinAncla?: number
-}): Promise<{ items: FilaDiferencia[]; nextCursor: string | null; parcial: boolean }> {
-  const v = await prisma.venue.findUniqueOrThrow({ where: { id: input.venueId }, select: { organizationId: true } })
+export async function diferenciasDelPeriodo(
+  input: {
+    userId: string
+    venueId: string
+    periodId: string
+    cursor?: string
+    limit: number
+  },
+  /** Sólo pruebas y medición (fuera de `input` para que una ruta que reenvíe `req.query` no pueda meterlos). */
+  opts: { ahora?: Date; tamLote?: number; topeSinAncla?: number } = {},
+): Promise<{ items: FilaDiferencia[]; nextCursor: string | null; parcial: boolean }> {
+  const v = await prisma.venue.findFirst({ where: { id: input.venueId }, select: { organizationId: true } })
+  if (!v) throw new NotFoundError('Sede no encontrada')
   const p = await prisma.servicePayPeriod.findFirst({ where: { id: input.periodId, organizationId: v.organizationId } })
   if (!p) throw new NotFoundError('Periodo no encontrado')
   if (p.status !== 'CLOSED') return { items: [], nextCursor: null, parcial: false }
@@ -229,10 +246,10 @@ export async function diferenciasDelPeriodo(input: {
       take: p.venueIds.length,
     })
   ).sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
-  const limite = Math.min(Math.max(input.limit, 1), TOPE_PAGINA)
-  const tam = Math.min(Math.max(input.tamLote ?? LOTE_DIFERENCIAS, 1), 1000)
-  const tope = Math.min(Math.max(input.topeSinAncla ?? TOPE_SIN_ANCLA, 1), TOPE_SIN_ANCLA)
-  const ahora = input.ahora ?? new Date()
+  const limite = entero(input.limit, PAGINA_DEFAULT, 1, TOPE_PAGINA)
+  const tam = entero(opts.tamLote, LOTE_DIFERENCIAS, 1, 1000)
+  const tope = entero(opts.topeSinAncla, TOPE_SIN_ANCLA, 1, TOPE_SIN_ANCLA)
+  const ahora = opts.ahora ?? new Date()
   const [cv, cc, cp] = input.cursor ? input.cursor.split(':') : []
   // Se reanuda en la sede del cursor o, si ya no es legible, en la siguiente: nunca se repite desde el principio.
   let idx = cv ? sedes.findIndex(s => s.id >= cv) : 0
@@ -258,8 +275,14 @@ export async function diferenciasDelPeriodo(input: {
       }
       for (const fila of await prisma.$queryRaw<Fila[]>(diferenciasSql({ ...f, claseIds: ids }, enCursor, true))) {
         items.push(aDto(fila))
-        if (items.length === limite) {
-          return { items, nextCursor: `${s.id}:${fila.classSessionId}:${fila.persona ?? ''}`, parcial: legibles.parcial }
+        // Una fila de más: si existe, hay otra página y el cursor es la última que se devuelve; si no, `nextCursor` null.
+        if (items.length > limite) {
+          const u = items[limite - 1]
+          return {
+            items: items.slice(0, limite),
+            nextCursor: `${u.venueId}:${u.classSessionId}:${u.persona ?? ''}`,
+            parcial: legibles.parcial,
+          }
         }
       }
       desde = { id: ids[ids.length - 1], incluido: false }

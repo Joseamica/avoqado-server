@@ -167,7 +167,7 @@ export async function pagoDeClase(
     : null
   const lineas = origen ? await lineasDeClase(db, cs.venue.organizationId, cs.id) : []
   const ahora = new Date()
-  const llegoTarde = !ps?.originPeriodId && cs.status !== 'CANCELLED' && !!(await origenDeClase(db, cs, ahora))
+  const llegoTarde = !ps?.originPeriodId && cs.status !== 'CANCELLED' && !!(await origenDeClase(db, venueId, cs, ahora))
   const base = {
     classSessionId: cs.id,
     motivo: null,
