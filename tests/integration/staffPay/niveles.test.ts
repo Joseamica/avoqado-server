@@ -9,6 +9,8 @@ jest.mock('@/services/dashboard/staffPay/acceso', () => ({
   sedesConServicePay: jest.fn(async () => (global as any).__sedes),
 }))
 
+// Fecha fija coherente con las vigencias de 2026 de estas pruebas (rango de ±24 meses, full-testing A11).
+const AHORA = new Date('2026-10-04T12:00:00Z')
 const key = `niveles-${process.pid}-${Date.now()}`
 let org: string, venue: string, product: string, ana: string
 
@@ -71,6 +73,7 @@ describe('niveles — feature nueva', () => {
       actorId: ana,
       venueId: venue,
       soloSimular: false,
+      ahora: AHORA,
     })
     await asignarNivel({
       organizationId: org,
@@ -80,6 +83,7 @@ describe('niveles — feature nueva', () => {
       actorId: ana,
       venueId: venue,
       soloSimular: false,
+      ahora: AHORA,
     })
     const hist = await historialDeNivel(org, ana)
     expect(hist.map(h => h.revision)).toEqual([2, 1])
@@ -147,6 +151,7 @@ describe('niveles — regresión', () => {
         actorId: ana,
         venueId: venue,
         soloSimular: false,
+        ahora: AHORA,
       }),
     ).rejects.toThrow('archivado')
     await expect(
@@ -158,6 +163,7 @@ describe('niveles — regresión', () => {
         actorId: ana,
         venueId: venue,
         soloSimular: false,
+        ahora: AHORA,
       }),
     ).rejects.toThrow('Nivel no encontrado')
   })

@@ -26,6 +26,8 @@ jest.mock('@/services/dashboard/staffPay/acceso', () => ({
 }))
 
 let m: Mundo
+// Fecha fija coherente con los periodos de 2026 de este mundo (rango de ±24 meses, full-testing A11).
+const AHORA = new Date('2026-10-04T12:00:00Z')
 beforeAll(async () => {
   m = await crearMundo('periodos')
   ;(global as any).__sedes = [m.venueId]
@@ -98,6 +100,7 @@ describe('periodos guardados (spec §5.7)', () => {
         actorId: m.owner,
         venueId: m.venueId,
         soloSimular: false,
+        ahora: AHORA,
       }),
     ).rejects.toThrow(/^Febrero ya se cerró: el nivel no puede empezar antes del /)
     expect(await prisma.staffPayLevelAssignment.count({ where: { organizationId: m.orgId } })).toBe(antes)
@@ -113,11 +116,12 @@ describe('periodos guardados (spec §5.7)', () => {
         cells: [],
         actorId: m.owner,
         soloSimular: false,
+        ahora: AHORA,
       }),
     ).rejects.toThrow(/^Febrero ya se cerró: la tabla no puede empezar antes del /)
-    await expect(archivarTabla({ venueId: m.venueId, tableId: t.tableId, archivedFrom: '2026-02-20', actorId: m.owner })).rejects.toThrow(
-      /^Febrero ya se cerró: la tabla no puede archivarse antes del /,
-    )
+    await expect(
+      archivarTabla({ venueId: m.venueId, tableId: t.tableId, archivedFrom: '2026-02-20', actorId: m.owner, ahora: AHORA }),
+    ).rejects.toThrow(/^Febrero ya se cerró: la tabla no puede archivarse antes del /)
   })
 
   it('mover el archivo de una tabla archivada DENTRO de un periodo cerrado tampoco se acepta (spec §5.3: lo congelado no se cambia)', async () => {
@@ -127,7 +131,7 @@ describe('periodos guardados (spec §5.7)', () => {
     const archivada = fechaComoDbDate('2026-02-05')
     await prisma.servicePayTable.update({ where: { id: t.tableId }, data: { archivedFrom: archivada } })
     await expect(
-      archivarTabla({ venueId: sede.venueId, tableId: t.tableId, archivedFrom: '2026-04-01', actorId: m.owner }),
+      archivarTabla({ venueId: sede.venueId, tableId: t.tableId, archivedFrom: '2026-04-01', actorId: m.owner, ahora: AHORA }),
     ).rejects.toThrow(/ya está cerrado/)
     const despues = await prisma.servicePayTable.findUniqueOrThrow({ where: { id: t.tableId }, select: { archivedFrom: true } })
     expect(despues.archivedFrom).toEqual(archivada)

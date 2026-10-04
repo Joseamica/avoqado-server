@@ -248,6 +248,7 @@ describe('reporte de la fase 2: ajustes en el abierto, congelado en el cerrado',
       reason: 'Bono',
       fecha: '2026-08-10',
       clientKey: `${w.key}-b1`,
+      ahora: AHORA,
     })
     const r = await reportePeriodo({ userId: w.owner, venueId: w.venueId, fecha: '2026-08-15', offset: 0, limit: 50 })
     expect(r.periodo).toMatchObject({ estado: 'OPEN', start: '2026-08-01' })

@@ -88,6 +88,7 @@ describe('ajustes manuales (spec §6.4)', () => {
         reason: 'Bono de septiembre',
         fecha: '2026-08-20',
         clientKey,
+        ahora: AHORA,
       })
       expect(a.yaExistia).toBe(false)
       expect(b).toMatchObject({ yaExistia: false, sede: m2.venueId, staffId: m2.carla })
@@ -126,6 +127,7 @@ describe('ajustes manuales (spec §6.4)', () => {
         amount: 300,
         reason: 'Bono',
         fecha: '2026-08-20',
+        ahora: AHORA,
         ...extra,
       })
     const ajena = await prisma.staff.create({
@@ -277,6 +279,7 @@ describe('ajustes manuales (spec §6.4)', () => {
       amount: 300,
       reason: 'Bono de septiembre',
       fecha: '2026-08-20',
+      ahora: AHORA,
     })
     expect(pv.periodo).toMatchObject({ start: '2026-08-01', end: '2026-08-31', estado: 'OPEN' })
     // A quién y en qué sede: lo que el humano revisa antes de autorizar (dos «Ana» en el estudio).

@@ -5,6 +5,8 @@ import { crearTabla, publicarVersion, listarTablas, archivarTabla, historialDeTa
 
 jest.mock('@/services/dashboard/staffPay/acceso', () => ({ sedesConServicePay: jest.fn(async () => (global as any).__sedes) }))
 
+// Fecha fija coherente con las vigencias de 2026 de estas pruebas (rango de ±24 meses, full-testing A11).
+const AHORA = new Date('2026-10-04T12:00:00Z')
 const key = `tablas-${process.pid}-${Date.now()}`
 let org: string, venue: string, product: string, hc: string, staff: string
 const celdas = (max: number, monto: (n: number) => number) =>
@@ -55,6 +57,7 @@ describe('tablas — feature nueva', () => {
       cells: celdas(2, () => 400),
       actorId: staff,
       soloSimular: false,
+      ahora: AHORA,
     })
     const r2 = await publicarVersion({
       venueId: venue,
@@ -66,6 +69,7 @@ describe('tablas — feature nueva', () => {
       cells: celdas(2, () => 450),
       actorId: staff,
       soloSimular: false,
+      ahora: AHORA,
     })
     expect(r2.revision).toBe(2)
     const [vig] = await listarTablas(venue, '2026-09-10')
@@ -86,6 +90,7 @@ describe('tablas — feature nueva', () => {
       cells: celdas(2, () => 1),
       actorId: staff,
       soloSimular: true,
+      ahora: AHORA,
     })
     expect(await prisma.servicePayTableVersion.count({ where: { tableId: t.id } })).toBe(antes)
   })
@@ -105,6 +110,7 @@ describe('tablas — regresión', () => {
         cells: celdas(2, () => 1),
         actorId: staff,
         soloSimular: false,
+        ahora: AHORA,
       }),
     ).rejects.toThrow('todavía no está disponible')
   })
@@ -119,6 +125,7 @@ describe('tablas — regresión', () => {
       maxCount: 2,
       actorId: staff,
       soloSimular: false,
+      ahora: AHORA,
     }
     const antes = await prisma.servicePayTableVersion.count({ where: { tableId: t.id } })
     await expect(publicarVersion({ ...base, cells: [{ payLevelId: hc, count: 3, amount: 1 }] })).rejects.toThrow('fuera de la tabla')
@@ -150,13 +157,21 @@ describe('tablas — regresión', () => {
   })
   it('archivar con fecha deja vigentes las clases anteriores', async () => {
     const t = await prisma.servicePayTable.findFirstOrThrow({ where: { venueId: venue, name: 'Reformer' } })
-    await archivarTabla({ venueId: venue, tableId: t.id, archivedFrom: '2026-12-01', actorId: staff })
+    await archivarTabla({ venueId: venue, tableId: t.id, archivedFrom: '2026-12-01', actorId: staff, ahora: AHORA })
     expect((await listarTablas(venue, '2026-11-30')).some(x => x.id === t.id)).toBe(true)
     expect((await listarTablas(venue, '2026-12-01')).some(x => x.id === t.id)).toBe(false)
   })
   it('el empate se rechaza también al publicar y al mover el archivo: la tabla de reemplazo no se traslapa con la archivada', async () => {
     const vieja = await prisma.servicePayTable.findFirstOrThrow({ where: { venueId: venue, name: 'Reformer' } })
-    const base = { venueId: venue, organizationId: org, countMode: 'BOOKED' as const, maxCount: 2, actorId: staff, soloSimular: false }
+    const base = {
+      venueId: venue,
+      organizationId: org,
+      countMode: 'BOOKED' as const,
+      maxCount: 2,
+      actorId: staff,
+      soloSimular: false,
+      ahora: AHORA,
+    }
     // Específica + «todas» NO es empate: la específica gana por precedencia.
     await publicarVersion({ ...base, tableId: vieja.id, effectiveFrom: '2026-09-01', cells: celdas(2, () => 500) })
     // La vieja está archivada desde el 1-dic: se puede crear su reemplazo desde ya.
@@ -171,9 +186,9 @@ describe('tablas — regresión', () => {
     const ok = await publicarVersion({ ...base, tableId: nueva.id, effectiveFrom: '2026-12-01', cells: celdas(2, () => 600) })
     expect(ok.revision).toBe(1)
     // Alargar el archivo de la vieja la volvería a traslapar con la nueva.
-    await expect(archivarTabla({ venueId: venue, tableId: vieja.id, archivedFrom: '2027-01-01', actorId: staff })).rejects.toThrow(
-      'chocaría con «Reformer nueva»',
-    )
+    await expect(
+      archivarTabla({ venueId: venue, tableId: vieja.id, archivedFrom: '2027-01-01', actorId: staff, ahora: AHORA }),
+    ).rejects.toThrow('chocaría con «Reformer nueva»')
     // Una versión de la nueva anterior a su primera fecha tampoco cabe.
     await expect(publicarVersion({ ...base, tableId: nueva.id, effectiveFrom: '2026-10-15', cells: celdas(2, () => 600) })).rejects.toThrow(
       'chocaría',
@@ -199,6 +214,7 @@ describe('tablas — regresión', () => {
           cells: celdas(2, () => 1),
           actorId: staff,
           soloSimular: false,
+          ahora: AHORA,
         }),
       ).rejects.toThrow('al mismo tiempo')
     } finally {

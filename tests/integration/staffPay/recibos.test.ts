@@ -65,6 +65,7 @@ beforeAll(async () => {
     reason: 'Bono puntualidad',
     fecha: '2026-08-20',
     clientKey: `${m.key}-bono`,
+    ahora: AHORA,
   })
   // Un descuento manual: el PDF y el Excel tienen que llevar su signo (Codex R2-R1-14).
   await agregarAjusteManual({
@@ -76,6 +77,7 @@ beforeAll(async () => {
     reason: 'Descuento por retardo',
     fecha: '2026-08-21',
     clientKey: `${m.key}-desc`,
+    ahora: AHORA,
   })
   const p = await previewCierre({ userId: m.owner, venueId: m.venueId, fecha: '2026-08-15', ahora: AHORA })
   periodId = (
@@ -158,6 +160,7 @@ describe('recibos (spec §6.5, §7.3)', () => {
       reason: 'Bono de septiembre',
       fecha: '2026-09-10',
       clientKey: `${m.key}-sep`,
+      ahora: AHORA,
     })
     const p1 = await recibo(m.carla, { fecha: '2026-09-15', limit: 1 })
     expect(p1).toMatchObject({ periodo: { estado: 'OPEN', start: '2026-09-01' }, total: '580.00', cantidad: 2 })

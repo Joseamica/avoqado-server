@@ -401,6 +401,7 @@ describe('cerrar el periodo (spec §6.3)', () => {
       reason: 'Bono',
       fecha: '2026-08-20',
       clientKey: `${m.key}-bono-bsf`,
+      ahora: AHORA,
     })
     const p2 = await preview(m)
     expect(p2.sedesConDinero).toEqual([m.venueId, bsf.venueId].sort())
