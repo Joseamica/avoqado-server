@@ -70,6 +70,11 @@ describe('Zod de la fase 2 (sólo forma, mensajes en español)', () => {
     expect(schemas.marcarPagadoSchema.safeParse({}).success).toBe(true)
     expect(schemas.marcarPagadoSchema.safeParse({ staffId: 'no-es-cuid' }).success).toBe(false)
     expect(schemas.marcarPagadoSchema.safeParse({ nota: 'x'.repeat(201) }).success).toBe(false)
+    // huellaEsperada opcional, 64 hex como la de cerrar (Codex bloque A, duda 1).
+    expect(schemas.marcarPagadoSchema.safeParse({ huellaEsperada: 'c'.repeat(64) }).success).toBe(true)
+    const huellaMala = schemas.marcarPagadoSchema.safeParse({ huellaEsperada: 'x' })
+    expect(huellaMala.success).toBe(false)
+    if (!huellaMala.success) expect(huellaMala.error.errors.map(e => e.message)).toEqual(['Revisa la vista previa antes de confirmar'])
     expect(schemas.listaPeriodosQuerySchema.safeParse({ antesDe: '2026-08-01' }).success).toBe(true)
     expect(schemas.listaPeriodosQuerySchema.safeParse({ antesDe: 'ayer' }).success).toBe(false)
     expect(schemas.periodParamsSchema.safeParse({ venueId: CUID, periodId: CUID }).success).toBe(true)
@@ -218,10 +223,11 @@ describe('Controller de la fase 2', () => {
     })
   })
 
-  it('marcar pagado usa el periodo de la ruta y no deja pasar huellaEsperada del body', async () => {
+  it('marcar pagado usa el periodo de la ruta y pasa la huella del preview; sin ella, igual que antes (Codex bloque A, duda 1)', async () => {
     ;(recibos.marcarPagado as jest.Mock).mockResolvedValue({})
+    const huella = 'd'.repeat(64)
     await controller.postPaid(
-      req({ params: { venueId: 'v1', periodId: 'p1' }, body: { staffId: 's1', nota: 'Transferencia', huellaEsperada: 'x' } }),
+      req({ params: { venueId: 'v1', periodId: 'p1' }, body: { staffId: 's1', nota: 'Transferencia', huellaEsperada: huella, extra: 1 } }),
       res(),
       jest.fn(),
     )
@@ -231,7 +237,12 @@ describe('Controller de la fase 2', () => {
       periodId: 'p1',
       staffId: 's1',
       nota: 'Transferencia',
+      huellaEsperada: huella,
     })
+    await controller.postPaid(req({ params: { venueId: 'v1', periodId: 'p1' }, body: { nota: 'Transferencia' } }), res(), jest.fn())
+    const sinHuella = (recibos.marcarPagado as jest.Mock).mock.calls[1][0]
+    expect(sinHuella).toEqual({ venueId: 'v1', userId: 'u1', periodId: 'p1', nota: 'Transferencia' })
+    expect(sinHuella).not.toHaveProperty('huellaEsperada')
   })
 
   it('los errores del service (con su code) pasan intactos a next', async () => {

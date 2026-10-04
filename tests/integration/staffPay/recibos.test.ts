@@ -7,6 +7,8 @@ import { cerrarPeriodo, previewCierre } from '@/services/dashboard/staffPay/cier
 import { agregarAjusteManual } from '@/services/dashboard/staffPay/ajustesManuales.service'
 import { guardarAjusteDeClase } from '@/services/dashboard/staffPay/ajustesClase.service'
 import { getRowCapForFormat } from '@/services/dashboard/export.helpers'
+import { marcarPagadoSchema } from '@/schemas/dashboard/staffPay.schema'
+import * as controller from '@/controllers/dashboard/staffPay.dashboard.controller'
 import { borrarMundo, clase, confirmadas, crearMundo, crearSede, Mundo, tablaMindform, TZ } from './_mundo'
 
 jest.mock('@/services/dashboard/staffPay/acceso', () => ({
@@ -269,6 +271,31 @@ describe('recibos (spec §6.5, §7.3)', () => {
       code: 'HUELLA_CAMBIO',
     })
     expect(await prisma.staffPayStatement.findFirstOrThrow({ where: { periodId, staffId: m.sofia } })).toMatchObject({ paidAt: null })
+  })
+
+  it('por la ruta: «Marcar todos» con la huella de un preview viejo ⇒ 409 HUELLA_CAMBIO; sin huella marca como antes (Codex bloque A, duda 1)', async () => {
+    // Cuerpo por el MISMO Zod de la ruta y el controller real hasta el service: lo que manda el dashboard.
+    const postPaid = async (body: unknown) => {
+      const next = jest.fn()
+      const res = { json: jest.fn() }
+      const req = { params: { venueId: m.venueId, periodId }, body: marcarPagadoSchema.parse(body), authContext: { userId: m.owner } }
+      await controller.postPaid(req as any, res as any, next)
+      return { next, res }
+    }
+    await estadoDePago([])
+    const pv = await previewPagado({ userId: m.owner, venueId: m.venueId, periodId })
+    expect(pv).toMatchObject({ cantidad: 2, total: '1660.00' })
+    // Entre el preview y la confirmación, alguien marca a Ana: el total mostrado ($1,660) ya no es el que se registraría.
+    expect(await marcarPagado({ userId: m.owner, venueId: m.venueId, periodId, staffId: m.ana })).toEqual({ marcados: 1 })
+    const viejo = await postPaid({ huellaEsperada: pv.huella })
+    expect(viejo.res.json).not.toHaveBeenCalled()
+    expect(viejo.next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 409, code: 'HUELLA_CAMBIO' }))
+    expect(await prisma.staffPayStatement.findFirstOrThrow({ where: { periodId, staffId: m.sofia } })).toMatchObject({ paidAt: null })
+    // Con la huella vigente marca exactamente lo mostrado; sin huella, como hoy.
+    const vigente = await previewPagado({ userId: m.owner, venueId: m.venueId, periodId })
+    expect((await postPaid({ huellaEsperada: vigente.huella })).res.json).toHaveBeenCalledWith({ marcados: 1 })
+    await estadoDePago([])
+    expect((await postPaid({})).res.json).toHaveBeenCalledWith({ marcados: 2 })
   })
 
   it('un recibo pendiente que aparece después del preview: HUELLA_CAMBIO y no se marca ninguno (Codex R2-Nuevo 1)', async () => {

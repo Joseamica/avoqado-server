@@ -83,6 +83,11 @@ export const pagadoPreviewQuerySchema = z.object({ staffId: z.string().cuid('Per
 export const marcarPagadoSchema = z.object({
   staffId: z.string().cuid('Persona inválida').optional(),
   nota: z.string().trim().max(200, 'Máximo 200 caracteres').optional(),
+  /** La del preview (`paid-preview`): confirmar marca exactamente lo mostrado o responde HUELLA_CAMBIO. Opcional: sin ella, como antes. */
+  huellaEsperada: z
+    .string()
+    .regex(/^[a-f0-9]{64}$/, 'Revisa la vista previa antes de confirmar')
+    .optional(),
 })
 export const ajusteManualSchema = z.object({
   sede: sedeSchema,

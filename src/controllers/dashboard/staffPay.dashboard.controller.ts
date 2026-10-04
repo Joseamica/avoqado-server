@@ -285,8 +285,14 @@ export const postClose = manejar(req => {
   return cierre.cerrarPeriodo({ ...ctx(req), fecha, huellaEsperada, confirmarHuerfanas })
 })
 export const postPaid = manejar(req => {
-  const { staffId, nota } = req.body
-  return recibos.marcarPagado({ ...ctx(req), periodId: req.params.periodId, staffId, nota })
+  const { staffId, nota, huellaEsperada } = req.body
+  return recibos.marcarPagado({
+    ...ctx(req),
+    periodId: req.params.periodId,
+    staffId,
+    nota,
+    ...(huellaEsperada ? { huellaEsperada } : {}),
+  })
 })
 export const getPaidPreview = manejar(req =>
   recibos.previewPagado({
