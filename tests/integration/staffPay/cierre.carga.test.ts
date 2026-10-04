@@ -11,7 +11,7 @@ import { valoracionCte } from '@/services/dashboard/staffPay/valoracion'
 import { fechaComoDbDate, venuePeriodRange } from '@/services/dashboard/staffPay/periodos'
 import { consultasDelReporte, reportePeriodo } from '@/services/dashboard/staffPay/reporte.service'
 import { consultaDePaginaDelRecibo, reciboDePersona } from '@/services/dashboard/staffPay/recibos.service'
-// Las diferencias (`diferencias.service`) no existen hasta B1: su medición la agrega B5 a este archivo (Preflight-8).
+import { diferenciasDelPeriodo, diferenciasSql, idsCandidatas, idsSinAncla } from '@/services/dashboard/staffPay/diferencias.service'
 import { borrarMundo, crearMundo, Mundo, periodoCerrado, tablaMindform, TZ } from './_mundo'
 
 jest.mock('@/services/dashboard/staffPay/acceso', () => ({
@@ -309,7 +309,34 @@ describirSi('cierre con 50,000 clases (spec §6.3 punto 3)', () => {
         limit: 100,
       }),
     )
-    // ← B5 (Preflight-8) agrega aquí la medición de las diferencias.
+    // Las diferencias del periodo cerrado (B1; medición de B5, Preflight-8), con la misma siembra.
+    const difInput = { userId: m.owner, venueId: m.venueId, periodId: r.periodId }
+    // (a) Sin ninguna diferencia (nada se ha corregido desde el cierre): la página recorre las 50,000 clases y vuelve vacía.
+    const sinDif = await medir('diferencias del periodo (página SIN ninguna diferencia: recorre las 50,000)', () =>
+      diferenciasDelPeriodo({ ...difInput, limit: 100 }),
+    )
+    expect(sinDif).toMatchObject({ items: [], nextCursor: null })
+    // (b) 1,000 clases corregidas de 8 a 9 después del cierre: 1,000 diferencias de +$40 (Ana 570→610, coach 480→520).
+    const corregidas = await prisma.$executeRaw`
+      UPDATE "ClassSessionPayState" SET "payCountOverride" = 9
+      WHERE "classSessionId" IN (SELECT 'carga' || g FROM generate_series(1, 1000) g)`
+    expect(corregidas).toBe(1000) // las 1,000 clases están ancladas por el cierre: ninguna se saltó
+    const dif = await medir('diferencias del periodo (página 1 de 1,000 clases con diferencia)', () =>
+      diferenciasDelPeriodo({ ...difInput, limit: 100 }),
+    )
+    expect(dif.items).toHaveLength(100)
+    expect(dif.items.every(i => i.pendiente === '40.00')).toBe(true)
+    expect(dif.nextCursor).not.toBeNull()
+    // (c) El tope de la página (100) se respeta aunque se pida más: nada viaja entero.
+    const pedidoGrande = await medir('diferencias del periodo (limit 10,000 → tapa de 100)', () =>
+      diferenciasDelPeriodo({ ...difInput, limit: 10_000 }),
+    )
+    expect(pedidoGrande.items).toHaveLength(100)
+    // El plan REAL de un lote, tal como lo arma el service: ids candidatos (anclas ∪ sin ancla), los «sin ancla» y la valoración envuelta.
+    const idsDif = (await prisma.$queryRaw<Array<{ id: string }>>(idsCandidatas(fp, null, 500, null))).map(x => x.id)
+    await explicar('diferencias · ids candidatos del lote (anclas ∪ sin ancla)', idsCandidatas(fp, null, 500, null))
+    await explicar('diferencias · clases sin ancla de la sede (una vez por página)', idsSinAncla(fp, null, 5000))
+    await explicar('diferencias · valoración envuelta de un lote de 500 ids', diferenciasSql({ ...fp, claseIds: idsDif }, null, true))
 
     // Al final y no justo tras el cierre: si el cierre rebasa el presupuesto, que las demás mediciones sí queden impresas.
     expect(ms).toBeLessThan(TIMEOUT_CIERRE_MS / 2)
