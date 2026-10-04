@@ -32,6 +32,14 @@ jest.mock('@/services/dashboard/staffPay/liquidacion.service', () => ({
   previewLiquidacion: (...a: unknown[]) => mockPreviewLiq(...a),
   liquidarDiferencia: (...a: unknown[]) => mockLiquidar(...a),
 }))
+const mockCard = jest.fn()
+const mockPreviewClase = jest.fn()
+const mockGuardarClase = jest.fn()
+jest.mock('@/services/dashboard/staffPay/ajustesClase.service', () => ({
+  pagoDeClase: (...a: unknown[]) => mockCard(...a),
+  previewAjusteDeClase: (...a: unknown[]) => mockPreviewClase(...a),
+  guardarAjusteDeClase: (...a: unknown[]) => mockGuardarClase(...a),
+}))
 const mockDiferencias = jest.fn()
 jest.mock('@/services/dashboard/staffPay/diferencias.service', () => ({
   diferenciasDelPeriodo: (...a: unknown[]) => mockDiferencias(...a),
@@ -920,6 +928,185 @@ describe('staff_service_pay — por el catálogo real (dos pasos con confirmatio
       }
       expect(mockPreviewAjuste).not.toHaveBeenCalled()
       expect(mockAjuste).not.toHaveBeenCalled()
+    } finally {
+      await client.close()
+      await server.close()
+    }
+  })
+})
+
+// Revisión final, M-1: resolver UNA clase por MCP (lo que la ruta `PUT /class-sessions/:id/pay-adjustments` ya hace).
+describe('adjust_service_pay_class', () => {
+  const tarjeta = (extra: Record<string, unknown> = {}) => ({
+    classSessionId: 'c1',
+    estado: 'OK',
+    motivo: null,
+    monto: '570.00',
+    conteo: 8,
+    staffName: 'Ana Martínez',
+    ajuste: null,
+    anclada: true,
+    llegoTarde: false,
+    ...extra,
+  })
+  const efecto = (extra: Record<string, unknown> = {}) => ({
+    clase: { productName: 'Yoga', fechaLocal: '2026-09-28' },
+    antes: tarjeta(),
+    despues: tarjeta({ conteo: 9, monto: '610.00' }),
+    periodoCerrado: { start: '2026-09-01', end: '2026-09-30' },
+    pendiente: '40.00',
+    huella: 'e'.repeat(64),
+    ...extra,
+  })
+  const ajustar = (args: Record<string, unknown>) =>
+    handlers.get('adjust_service_pay_class')!(
+      { venueId: 'v1', classSessionId: 'c1', reason: 'Eran nueve', idempotencyKey: 'ajuste-c1', ...args },
+      {},
+    )
+  beforeEach(() => {
+    mockCard.mockResolvedValue(tarjeta())
+    mockPreviewClase.mockResolvedValue(efecto())
+  })
+
+  it('la vista previa dice qué cambia en dinero y lo que queda por liquidar; no escribe', async () => {
+    const r = parse(await ajustar({ payCountOverride: 9 }))
+    expect(r).toMatchObject({ ok: false, requiresConfirmation: true, expectedSourceFingerprint: 'e'.repeat(64) })
+    expect(r.message).toBe(
+      'La clase Yoga del 28 sep 2026 de Ana Martínez pasa de $570.00 a $610.00; como el periodo de septiembre de 2026 ya se cerró, queda una diferencia de +$40.00 MXN por liquidar (settle_service_pay_difference).',
+    )
+    expect(mockPreviewClase).toHaveBeenCalledWith({
+      venueId: 'v1',
+      classSessionId: 'c1',
+      payCountOverride: 9,
+      payAmountOverride: null,
+      payExcluded: false,
+      reason: 'Eran nueve',
+      actorId: 's1',
+    })
+    expect(mockGuardarClase).not.toHaveBeenCalled()
+    expect(auditMcpWrite).not.toHaveBeenCalled()
+  })
+
+  it('lo que no se manda conserva su valor actual (null vuelve al cálculo)', async () => {
+    mockCard.mockResolvedValue(tarjeta({ ajuste: { payCountOverride: 9, payAmountOverride: '600.00', payExcluded: false } }))
+    await ajustar({ payExcluded: true })
+    expect(mockPreviewClase).toHaveBeenCalledWith(
+      expect.objectContaining({ payCountOverride: 9, payAmountOverride: 600, payExcluded: true }),
+    )
+    await ajustar({ payAmountOverride: null })
+    expect(mockPreviewClase).toHaveBeenLastCalledWith(
+      expect.objectContaining({ payCountOverride: 9, payAmountOverride: null, payExcluded: false }),
+    )
+  })
+
+  it('sin cambio real no ofrece confirmar', async () => {
+    mockCard.mockResolvedValue(tarjeta({ ajuste: { payCountOverride: 9, payAmountOverride: null, payExcluded: false } }))
+    const r = parse(await ajustar({ payCountOverride: 9 }))
+    expect(r).toMatchObject({ ok: false })
+    expect(r.error).toMatch(/ya tiene esos valores/)
+    expect(mockPreviewClase).not.toHaveBeenCalled()
+  })
+
+  it('confirmar pasa la huella y la clave al service, con el cambio completo; audita sólo si aplicó', async () => {
+    mockGuardarClase.mockResolvedValue({ ...tarjeta({ conteo: 9, monto: '610.00' }), yaAplicado: false })
+    const r = parse(await ajustar({ payCountOverride: 9, confirm: true, expectedSourceFingerprint: 'e'.repeat(64) }))
+    expect(r).toMatchObject({ ok: true, monto: '610.00', yaAplicado: false })
+    expect(mockGuardarClase).toHaveBeenCalledWith({
+      venueId: 'v1',
+      classSessionId: 'c1',
+      payCountOverride: 9,
+      payAmountOverride: null,
+      payExcluded: false,
+      reason: 'Eran nueve',
+      actorId: 's1',
+      clientKey: 'mcp-ajuste-c1',
+      huellaEsperada: 'e'.repeat(64),
+    })
+    expect(auditMcpWrite).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ action: 'SERVICE_PAY_CLASS_ADJUSTED', entity: 'ClassSession', entityId: 'c1', venueId: 'v1' }),
+    )
+    jest.clearAllMocks()
+    mockHasPermission.mockReturnValue(true)
+    mockOrgTiene.mockResolvedValue(true)
+    mockCard.mockResolvedValue(tarjeta({ ajuste: { payCountOverride: 9, payAmountOverride: null, payExcluded: false } }))
+    mockGuardarClase.mockResolvedValue({ ...tarjeta({ conteo: 9, monto: '610.00' }), yaAplicado: true })
+    expect(parse(await ajustar({ payCountOverride: 9, confirm: true, expectedSourceFingerprint: 'e'.repeat(64) }))).toMatchObject({
+      ok: true,
+      yaAplicado: true,
+    })
+    expect(auditMcpWrite).not.toHaveBeenCalled()
+  })
+
+  it('permisos: staffpay:manage siempre; si la clase ya se contabilizó, además staffpay:close', async () => {
+    mockHasPermission.mockImplementation((_a: unknown, p: string) => p !== 'staffpay:close')
+    const anclada = parse(await ajustar({ payCountOverride: 9 }))
+    expect(anclada.error).toMatch(/ya se contabilizó.*staffpay:close/)
+    expect(mockPreviewClase).not.toHaveBeenCalled()
+    // Sin ancla basta staffpay:manage (lo mismo que la ruta).
+    mockCard.mockResolvedValue(tarjeta({ anclada: false }))
+    expect(parse(await ajustar({ payCountOverride: 9 }))).toMatchObject({ requiresConfirmation: true })
+    mockHasPermission.mockImplementation((_a: unknown, p: string) => p !== 'staffpay:manage')
+    expect(parse(await ajustar({ payCountOverride: 9 })).error).toMatch(/staffpay:manage/)
+  })
+
+  it('el módulo se exige en la organización: una sede que lo apagó resuelve sus clases; sin módulo en ninguna, no', async () => {
+    mockAccess.mockResolvedValue(false)
+    expect(parse(await ajustar({ payCountOverride: 9 }))).toMatchObject({ requiresConfirmation: true })
+    expect(mockAccess).not.toHaveBeenCalled()
+    mockOrgTiene.mockResolvedValue(false)
+    expect(parse(await ajustar({ payCountOverride: 9 })).error).toMatch(/no está activo en ninguna sede/)
+  })
+
+  it('la sede fuera del alcance se niega antes de consultar nada; la clave mal formada se pide en español', async () => {
+    await expect(ajustar({ venueId: 'foreign', payCountOverride: 9 })).rejects.toThrow('out of scope')
+    expect(mockCard).not.toHaveBeenCalled()
+    for (const idempotencyKey of [undefined, 'abc', 'clave:1234']) {
+      const r = parse(await ajustar({ payCountOverride: 9, idempotencyKey }))
+      expect(r).toMatchObject({ ok: false, needsInput: true, field: 'idempotencyKey' })
+      expect(r.question).toMatch(/obligatoria: de 4 a 100 caracteres/)
+    }
+    expect(mockCard).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['HUELLA_CAMBIO', 409, /vista previa.*sin confirm/],
+    ['CLAVE_REUTILIZADA', 409, /idempotencyKey nueva/],
+  ])('%s del service ⇒ texto claro con qué hacer', async (code, statusCode, queHacer) => {
+    mockGuardarClase.mockRejectedValue(Object.assign(new Error('mensaje del service'), { statusCode, code }))
+    const r = parse(await ajustar({ payCountOverride: 9, confirm: true, expectedSourceFingerprint: 'e'.repeat(64) }))
+    expect(r).toMatchObject({ ok: false, code })
+    expect(r.error).toMatch(queHacer)
+    expect(auditMcpWrite).not.toHaveBeenCalled()
+  })
+
+  it('una clase en excepción al liquidar remite a esta tool', async () => {
+    mockPreviewLiq.mockResolvedValue(pvLiq())
+    mockLiquidar.mockRejectedValue(Object.assign(new Error('mensaje del service'), { statusCode: 400, code: 'CLASE_EN_EXCEPCION' }))
+    const r = parse(await settle({ confirm: true, expectedSourceFingerprint: 'h'.repeat(64) }))
+    expect(r.error).toMatch(/adjust_service_pay_class/)
+  })
+
+  it('por el catálogo real: el token liga el cambio; con otro conteo no sirve', async () => {
+    const server = new McpServer({ name: 'staffpay', version: '1' })
+    const s = { ...scope, scopes: ['mcp:read', 'mcp:write'] } as unknown as McpScope
+    configureToolCatalog(server, s)
+    registerStaffPayTools(server, s)
+    const client = new Client({ name: 'staffpay-test', version: '1' })
+    const [a, b] = InMemoryTransport.createLinkedPair()
+    await Promise.all([server.connect(a), client.connect(b)])
+    try {
+      const call = async (args: Record<string, unknown>) =>
+        JSON.parse(
+          ((await client.callTool({ name: 'adjust_service_pay_class', arguments: args })).content as Array<{ text: string }>)[0].text,
+        )
+      const p = await call({ venueId: 'v1', classSessionId: 'c1', payCountOverride: 9, reason: 'Eran nueve', idempotencyKey: 'ajuste-c1' })
+      expect(p.confirmationArguments).toMatchObject({ payCountOverride: 9, expectedSourceFingerprint: 'e'.repeat(64) })
+      const otro = await call({ ...p.confirmationArguments, payCountOverride: 10, confirm: true, confirmationToken: p.confirmationToken })
+      expect(otro).toMatchObject({ needsInput: true, field: 'confirmationToken' })
+      expect(mockGuardarClase).not.toHaveBeenCalled()
+      mockGuardarClase.mockResolvedValue({ ...tarjeta({ conteo: 9, monto: '610.00' }), yaAplicado: false })
+      expect(await call({ ...p.confirmationArguments, confirm: true, confirmationToken: p.confirmationToken })).toMatchObject({ ok: true })
     } finally {
       await client.close()
       await server.close()

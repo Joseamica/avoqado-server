@@ -102,6 +102,7 @@ it('los previews que persisten lotes se clasifican como escritura', () => {
 
 it('pago por servicio: liquidar una diferencia escribe; la lista de diferencias sólo lee', () => {
   expect(TOOL_EFFECTS.settle_service_pay_difference).toBe('write')
+  expect(TOOL_EFFECTS.adjust_service_pay_class).toBe('write')
   expect(TOOL_EFFECTS.staff_service_pay_differences).toBe('read')
 })
 
@@ -182,6 +183,7 @@ const NUNCA_EN_DIRECTORIO = [
   'send_cfdi_email',
   'set_fiscal_loss',
   'settle_service_pay_difference',
+  'adjust_service_pay_class',
   'set_sales_retention',
   'staff_documents',
   'stamp_payroll_receipts',

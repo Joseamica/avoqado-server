@@ -1,7 +1,7 @@
 // tests/integration/staffPay/ajustesClaseFase2.test.ts — ajustes de una clase ya contabilizada (spec §5, §5.4, §6.6).
 import { Prisma, PrismaClient } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
-import { guardarAjusteDeClase, pagoDeClase } from '@/services/dashboard/staffPay/ajustesClase.service'
+import { guardarAjusteDeClase, pagoDeClase, previewAjusteDeClase } from '@/services/dashboard/staffPay/ajustesClase.service'
 import { cerrarPeriodo, previewCierre } from '@/services/dashboard/staffPay/cierre.service'
 import { fechaComoDbDate } from '@/services/dashboard/staffPay/periodos'
 import { bloquearPeriodo } from '@/services/dashboard/staffPay/periodosGuardados'
@@ -223,5 +223,67 @@ describe('ajustes de una clase ya contabilizada (spec §5.4)', () => {
     const card = await pagoDeClase(m.venueId, id)
     expect(card).toMatchObject({ estado: 'CANCELADA', anclada: true })
     expect(card.lineas).toHaveLength(1)
+  })
+})
+
+// Revisión final, M-1: la tool MCP `adjust_service_pay_class` confirma en dos pasos sobre esta MISMA función: la vista previa
+// dice qué cambia en dinero sin escribir nada; la confirmación lleva su huella y una clave de solicitud.
+describe('vista previa y confirmación de un ajuste de clase (para el MCP)', () => {
+  const cambio = (payCountOverride: number) => ({
+    venueId: m.venueId,
+    payCountOverride,
+    payAmountOverride: null,
+    payExcluded: false,
+    reason: 'Eran más',
+    actorId: m.owner,
+  })
+  const logs = (id: string) =>
+    prisma.activityLog.findMany({ where: { action: 'SERVICE_PAY_CLASS_ADJUSTED', entity: 'ClassSession', entityId: id }, take: 10 })
+
+  it('la vista previa dice antes, después y lo que queda por liquidar, sin escribir nada', async () => {
+    const id = await clase(m, { staffId: m.ana, inicioIso: '2026-08-04T14:00:00Z', reservas: confirmadas(8) })
+    await cerrar()
+    const pv = await previewAjusteDeClase({ ...cambio(9), classSessionId: id })
+    expect(pv).toMatchObject({
+      clase: { productName: 'Reformer', fechaLocal: '2026-08-04' },
+      antes: { estado: 'OK', conteo: 8, monto: '570.00' },
+      despues: { estado: 'OK', conteo: 9, monto: '610.00', staffName: 'Ana QA' },
+      periodoCerrado: { start: '2026-08-01', end: '2026-08-31' },
+      pendiente: '40.00',
+    })
+    expect(pv.huella).toMatch(/^[a-f0-9]{64}$/)
+    expect(await prisma.classSessionPayState.findUniqueOrThrow({ where: { classSessionId: id } })).toMatchObject({ payCountOverride: null })
+    expect(await logs(id)).toHaveLength(0)
+    // Una clase de un periodo abierto: no hay nada por liquidar (se paga al cerrar).
+    const abierta = await clase(m, { staffId: m.ana, inicioIso: '2026-09-01T14:00:00Z', reservas: confirmadas(8) })
+    expect(await previewAjusteDeClase({ ...cambio(9), classSessionId: abierta })).toMatchObject({ periodoCerrado: null, pendiente: null })
+  })
+
+  it('confirmar con la huella aplica UNA vez: repetir la clave la reconoce; la misma clave con otro cambio es un error', async () => {
+    const id = await clase(m, { staffId: m.ana, inicioIso: '2026-08-04T14:00:00Z', reservas: confirmadas(8) })
+    await cerrar()
+    const pv = await previewAjusteDeClase({ ...cambio(9), classSessionId: id })
+    const confirmar = (payCountOverride: number) =>
+      guardarAjusteDeClase({ ...cambio(payCountOverride), classSessionId: id, clientKey: `${m.key}-aj`, huellaEsperada: pv.huella })
+    expect(await confirmar(9)).toMatchObject({ estado: 'OK', conteo: 9, monto: '610.00', yaAplicado: false })
+    // Se perdió la respuesta y se repite: misma clave, mismo cambio ⇒ la misma operación (la huella ya no importa).
+    expect(await confirmar(9)).toMatchObject({ conteo: 9, monto: '610.00', yaAplicado: true })
+    await expect(confirmar(10)).rejects.toMatchObject({ code: 'CLAVE_REUTILIZADA' })
+    const [log, ...otros] = await logs(id)
+    expect(otros).toHaveLength(0)
+    expect(log.data).toMatchObject({ clientKey: `${m.key}-aj`, despues: { payCountOverride: 9 } })
+  })
+
+  it('si la clase cambió entre la vista previa y la confirmación: HUELLA_CAMBIO con una vista previa nueva, y no se aplica', async () => {
+    const id = await clase(m, { staffId: m.ana, inicioIso: '2026-08-04T14:00:00Z', reservas: confirmadas(8) })
+    await cerrar()
+    const pv = await previewAjusteDeClase({ ...cambio(9), classSessionId: id })
+    // Mientras tanto otra persona cambia la coach de la clase.
+    await prisma.classSession.update({ where: { id }, data: { assignedStaffId: m.sofia } })
+    await expect(
+      guardarAjusteDeClase({ ...cambio(9), classSessionId: id, clientKey: `${m.key}-cambio`, huellaEsperada: pv.huella }),
+    ).rejects.toMatchObject({ code: 'HUELLA_CAMBIO', details: { preview: { despues: { staffName: 'Sofia QA' } } } })
+    expect(await prisma.classSessionPayState.findUniqueOrThrow({ where: { classSessionId: id } })).toMatchObject({ payCountOverride: null })
+    expect(await logs(id)).toHaveLength(0)
   })
 })

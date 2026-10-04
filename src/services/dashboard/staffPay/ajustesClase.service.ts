@@ -1,11 +1,12 @@
+import { createHash } from 'crypto'
 import { ClassSessionPayState, Prisma } from '@prisma/client'
 import prisma from '../../../utils/prismaClient'
-import { BadRequestError, NotFoundError } from '../../../errors/AppError'
+import { BadRequestError, ConflictError, NotFoundError } from '../../../errors/AppError'
 import { withSerializableRetry } from '../../../utils/serializableRetry'
 import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
 import { venueDayKey } from '../../../utils/venueDateKeys'
 import { exigirPermisoEnSedes, sedesConPermiso } from './acceso'
-import { origenDeClase } from './diferencias.service'
+import { diferenciasDeClase, origenDeClase } from './diferencias.service'
 import { dbDateComoFecha } from './periodos'
 import { bloquearPeriodo, lockClase, lockPeriodosDeOrganizacion, periodoQueContieneFecha } from './periodosGuardados'
 import { valorarClases } from './valoracion'
@@ -56,6 +57,22 @@ export interface GuardarAjusteInput {
   payExcluded: boolean
   reason: string
   actorId: string
+  /** Clave de la solicitud (el MCP): una repetición con el mismo cambio se reconoce (`yaAplicado`); con otro, 409. */
+  clientKey?: string
+  /** Huella de `previewAjusteDeClase`: si la clase cambió desde la vista previa, 409 HUELLA_CAMBIO y no se aplica. */
+  huellaEsperada?: string
+}
+
+/** Qué cambia en dinero (revisión final, M-1): la tarjeta antes y después y, si su periodo ya se cerró, lo que queda por liquidar. */
+export interface EfectoDeAjuste {
+  clase: { productName: string; fechaLocal: string }
+  antes: PagoDeClase
+  despues: PagoDeClase
+  /** El periodo CERRADO del que la clase es candidata (su ancla, o el que contiene su fecha si llegó tarde); null si no hay. */
+  periodoCerrado: { start: string; end: string } | null
+  /** Lo que queda por liquidar con el cambio; null sin periodo cerrado o si la clase queda en excepción. */
+  pendiente: string | null
+  huella: string
 }
 
 const MAX_CONTEO = 500
@@ -224,9 +241,106 @@ export async function pagoDeClase(
  * congelado nunca se toca: sólo cambia «lo que corresponde hoy». ActivityLog DENTRO con el antes y el después. Mandar
  * los tres en null/false quita el ajuste y la clase vuelve al cálculo.
  */
-export async function guardarAjusteDeClase(input: GuardarAjusteInput): Promise<PagoDeClase> {
+export async function guardarAjusteDeClase(input: GuardarAjusteInput): Promise<PagoDeClase & { yaAplicado: boolean }> {
+  if (input.clientKey !== undefined && !CLAVE.test(input.clientKey)) throw new BadRequestError('Clave de solicitud inválida')
   // El permiso con el cliente GLOBAL, ANTES de la transacción (como el cierre y marcar pagado, A8): dentro sólo se compara.
   const permitidas = new Set(await sedesConPermiso(input.actorId, [input.venueId], 'staffpay:close'))
+  try {
+    return await guardarDentro(input, permitidas)
+  } catch (e) {
+    if (!(e instanceof HuellaCambio)) throw e
+    // Fuera de la transacción (ya revertida), como el cierre y la liquidación: la vista previa nueva es el estado real.
+    const { clientKey: _c, huellaEsperada: _h, ...cambio } = input
+    throw new ConflictError('La clase cambió desde la vista previa: revísala de nuevo', 'HUELLA_CAMBIO', {
+      preview: await previewAjusteDeClase(cambio),
+    })
+  }
+}
+
+const CLAVE = /^[A-Za-z0-9_.-]{8,120}$/
+/** Centinela: la huella cambió. Se convierte en `ConflictError HUELLA_CAMBIO` FUERA de la transacción (ya revertida). */
+class HuellaCambio extends Error {}
+/** Centinela de la vista previa: lleva el efecto fuera de una transacción que SIEMPRE se revierte. */
+class FinDeVistaPrevia extends Error {
+  constructor(readonly efecto: EfectoDeAjuste) {
+    super('vista previa terminada')
+  }
+}
+
+/**
+ * Aplica el cambio dentro de `tx` y mide su efecto (revisión final, M-1). La vista previa lo corre en una transacción que se
+ * revierte; la confirmación, dentro del protocolo, después de los candados: misma función, misma huella.
+ */
+async function efectoDelAjuste(
+  tx: Prisma.TransactionClient,
+  input: Pick<GuardarAjusteInput, 'venueId' | 'classSessionId' | 'payCountOverride' | 'payAmountOverride' | 'payExcluded'>,
+  datos: ReturnType<typeof datosDelAjuste>,
+): Promise<EfectoDeAjuste> {
+  const cs = await tx.classSession.findFirst({
+    where: { id: input.classSessionId, venueId: input.venueId },
+    select: { startsAt: true, product: { select: { name: true } }, venue: { select: { timezone: true } } },
+  })
+  if (!cs) throw new NotFoundError('Clase no encontrada')
+  const antes = await pagoDeClase(input.venueId, input.classSessionId, tx)
+  await tx.classSessionPayState.upsert({
+    where: { classSessionId: input.classSessionId },
+    create: { classSessionId: input.classSessionId, ...datos },
+    update: datos,
+  })
+  const despues = await pagoDeClase(input.venueId, input.classSessionId, tx)
+  const { origen, filas } = await diferenciasDeClase(tx, { venueId: input.venueId, classSessionId: input.classSessionId })
+  const pendiente =
+    origen && !filas.some(f => f.pendiente === null) ? filas.reduce((a, f) => a.plus(f.pendiente!), new Prisma.Decimal(0)).toFixed(2) : null
+  const periodoCerrado = origen ? { start: dbDateComoFecha(origen.periodStart), end: dbDateComoFecha(origen.periodEnd) } : null
+  const foto = (c: PagoDeClase) => [c.estado, c.motivo ?? '∅', c.monto ?? '∅', c.conteo ?? '∅', c.staffName ?? '∅'].join('|')
+  const huella = createHash('sha256')
+    .update(
+      [
+        input.classSessionId,
+        input.payCountOverride ?? '∅',
+        input.payAmountOverride ?? '∅',
+        input.payExcluded,
+        foto(antes),
+        foto(despues),
+        periodoCerrado?.start ?? '∅',
+        pendiente ?? '∅',
+      ].join('\n'),
+    )
+    .digest('hex')
+  return {
+    clase: { productName: cs.product.name, fechaLocal: venueDayKey(cs.startsAt, cs.venue.timezone || 'America/Mexico_City') },
+    antes,
+    despues,
+    periodoCerrado,
+    pendiente,
+    huella,
+  }
+}
+
+/** Lo que haría un ajuste de clase (no escribe nada): el efecto se mide en una transacción que SIEMPRE se revierte. */
+export async function previewAjusteDeClase(input: Omit<GuardarAjusteInput, 'clientKey' | 'huellaEsperada'>): Promise<EfectoDeAjuste> {
+  const reason = validarForma(input)
+  try {
+    await prisma.$transaction(async tx => {
+      throw new FinDeVistaPrevia(await efectoDelAjuste(tx, input, datosDelAjuste(input, reason)))
+    })
+  } catch (e) {
+    if (e instanceof FinDeVistaPrevia) return e.efecto
+    throw e
+  }
+  throw new Error('previewAjusteDeClase: la vista previa no terminó')
+}
+
+const datosDelAjuste = (input: GuardarAjusteInput | Omit<GuardarAjusteInput, 'clientKey' | 'huellaEsperada'>, reason: string) => ({
+  payCountOverride: input.payCountOverride,
+  payAmountOverride: input.payAmountOverride === null ? null : new Prisma.Decimal(input.payAmountOverride),
+  payExcluded: input.payExcluded,
+  overrideReason: reason,
+  overrideById: input.actorId,
+  overrideAt: new Date(),
+})
+
+async function guardarDentro(input: GuardarAjusteInput, permitidas: Set<string>): Promise<PagoDeClase & { yaAplicado: boolean }> {
   return withSerializableRetry(async tx => {
     // Primero la sede: a otra sede se le contesta «no encontrada» antes de revisar nada más.
     const info = await tx.classSession.findFirst({
@@ -259,27 +373,52 @@ export async function guardarAjusteDeClase(input: GuardarAjusteInput): Promise<P
       exigirPermisoEnSedes(permitidas, [input.venueId], 'Esta clase ya se contabilizó: corregirla necesita el permiso de cerrar periodos')
     }
     // Sólo los campos del ajuste: el ancla (originPeriodId, valuationDate, valuationVersionId) nunca se toca aquí.
-    const datos = {
-      payCountOverride: input.payCountOverride,
-      payAmountOverride: input.payAmountOverride === null ? null : new Prisma.Decimal(input.payAmountOverride),
-      payExcluded: input.payExcluded,
-      overrideReason: reason,
-      overrideById: input.actorId,
-      overrideAt: new Date(),
+    const datos = datosDelAjuste(input, reason)
+    // 4) Una repetición de la MISMA solicitud (el MCP perdió la respuesta) se reconoce por su clave en el rastro de esta clase,
+    // ANTES de la huella (que ya no cuadraría: la clase cambió por la propia solicitud). Con otro cambio, la clave no sirve.
+    if (input.clientKey) {
+      const previa = await tx.activityLog.findFirst({
+        where: {
+          action: 'SERVICE_PAY_CLASS_ADJUSTED',
+          entity: 'ClassSession',
+          entityId: input.classSessionId,
+          data: { path: ['clientKey'], equals: input.clientKey },
+        },
+        select: { data: true },
+      })
+      if (previa) {
+        // Campo por campo: `jsonb` guarda las llaves en otro orden.
+        type Resumen = ReturnType<typeof resumenDeAjuste>
+        const suyo = ((previa.data as { despues?: Resumen } | null)?.despues ?? null) as Resumen
+        const pedido = resumenDeAjuste(datos)
+        const mismo =
+          suyo === null || pedido === null
+            ? suyo === pedido
+            : suyo.payCountOverride === pedido.payCountOverride &&
+              suyo.payAmountOverride === pedido.payAmountOverride &&
+              suyo.payExcluded === pedido.payExcluded
+        if (!mismo) {
+          throw new ConflictError('Esa clave ya se usó para otro ajuste de esta clase: usa otra clave', 'CLAVE_REUTILIZADA')
+        }
+        return { ...(await pagoDeClase(input.venueId, input.classSessionId, tx)), yaAplicado: true }
+      }
     }
-    await tx.classSessionPayState.upsert({
-      where: { classSessionId: input.classSessionId },
-      create: { classSessionId: input.classSessionId, ...datos },
-      update: datos,
-    })
+    // 5) Aplicar y medir el efecto; con la huella de la vista previa, si la clase cambió, se revierte todo.
+    const efecto = await efectoDelAjuste(tx, input, datos)
+    if (input.huellaEsperada !== undefined && efecto.huella !== input.huellaEsperada) throw new HuellaCambio()
     await writeLegacyActivityAuditTx(tx, {
       staffId: input.actorId,
       venueId: input.venueId,
       action: 'SERVICE_PAY_CLASS_ADJUSTED',
       entity: 'ClassSession',
       entityId: input.classSessionId,
-      data: { antes: resumenDeAjuste(antes), despues: resumenDeAjuste(datos), motivo: reason },
+      data: {
+        antes: resumenDeAjuste(antes),
+        despues: resumenDeAjuste(datos),
+        motivo: reason,
+        ...(input.clientKey ? { clientKey: input.clientKey } : {}),
+      },
     })
-    return pagoDeClase(input.venueId, input.classSessionId, tx)
+    return { ...efecto.despues, yaAplicado: false }
   })
 }

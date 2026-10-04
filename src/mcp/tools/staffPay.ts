@@ -13,6 +13,12 @@ import { marcarPagado, previewPagado, reciboDePersona } from '@/services/dashboa
 import { periodoQueContieneFecha } from '@/services/dashboard/staffPay/periodosGuardados'
 import { liquidarDiferencia, previewLiquidacion } from '@/services/dashboard/staffPay/liquidacion.service'
 import { diferenciasDelPeriodo, FilaDiferencia } from '@/services/dashboard/staffPay/diferencias.service'
+import {
+  guardarAjusteDeClase,
+  pagoDeClase,
+  previewAjusteDeClase,
+  type PagoDeClase,
+} from '@/services/dashboard/staffPay/ajustesClase.service'
 import type { MotivoExcepcion } from '@/services/dashboard/staffPay/valoracion'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
@@ -65,8 +71,15 @@ const QUE_HACER_LIQUIDAR: Record<string, string> = {
   PERIODO_CERRADO: 'Pide la vista previa sin destinoFecha (o con un día del periodo abierto) para liquidar en el periodo abierto.',
   CLAVE_REUTILIZADA:
     'Usa una idempotencyKey nueva para esta liquidación: pide la vista previa con ella, muéstrasela al usuario y confirma con la misma.',
-  CLASE_EN_EXCEPCION: 'Resuelve la clase (coach, nivel, tabla o monto) y vuelve a pedir la vista previa.',
+  CLASE_EN_EXCEPCION:
+    'Resuelve la clase (coach, nivel, tabla o monto; con adjust_service_pay_class puedes ajustar su monto o corregir su conteo) y vuelve a pedir la vista previa.',
   SEDE_FUERA_DEL_PERIODO: 'Si el usuario quiere sumar la sede al periodo, repite la vista previa con ampliarAlcance: true.',
+}
+/** Qué hacer ante cada rechazo de «ajustar una clase». */
+const QUE_HACER_AJUSTE_CLASE: Record<string, string> = {
+  HUELLA_CAMBIO: 'Pide de nuevo la vista previa (sin confirm) y muéstrasela al usuario antes de confirmar.',
+  CLAVE_REUTILIZADA:
+    'Usa una idempotencyKey nueva para este ajuste: pide la vista previa con ella, muéstrasela al usuario y confirma con la misma.',
 }
 /** La clave de «liquidar diferencia» viaja en `solicitudId` (`mcp-` + ella): 4 a 96, sin «:» (cabe en la clave del service). */
 const CLAVE_LIQUIDACION = /^[A-Za-z0-9_.-]{4,96}$/
@@ -606,6 +619,132 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
       } catch (e) {
         const code = (e as { code?: string })?.code
         return fallo(e, code && QUE_HACER_LIQUIDAR[code] ? `. ${QUE_HACER_LIQUIDAR[code]}` : '')
+      }
+    },
+  )
+
+  // Revisión final, M-1: lo que la ruta `PUT /class-sessions/:id/pay-adjustments` hace, sobre la MISMA función.
+  /** Cómo se lee el pago de la clase en un estado: monto, o por qué no tiene. */
+  const pagoLegible = (c: PagoDeClase) =>
+    c.monto !== null
+      ? `$${pesos(c.monto)}`
+      : c.estado === 'EXCLUIDA'
+        ? 'excluida ($0.00)'
+        : c.estado === 'CANCELADA'
+          ? 'cancelada ($0.00)'
+          : c.estado === 'NO_TERMINADA'
+            ? 'sin pago todavía (no ha terminado)'
+            : `sin pago (${c.motivo ? MOTIVOS[c.motivo as MotivoExcepcion] : 'algo sin resolver'})`
+
+  server.tool(
+    'adjust_service_pay_class',
+    'Correct the pay of ONE class: fix the seats counted (payCountOverride), set an agreed amount in pesos (payAmountOverride) or leave it out of pay (payExcluded). Fields you omit keep their current value; null goes back to the calculated value. Use it to resolve a class blocked by an exception before settling its difference. Two steps: the preview says what changes in money and, if the class belongs to an already closed period, the difference left to settle with settle_service_pay_difference, plus expectedSourceFingerprint; then confirm:true with it. idempotencyKey is required. Works even if the class venue turned pay-per-service off, as long as some venue of the organization has it. Requires staffpay:manage in the class venue, and staffpay:close if the class was already counted in a closed period.',
+    {
+      venueId: z.string().min(1).max(64).describe('Venue of the class'),
+      classSessionId: z.string().min(1).max(64).describe('Class to correct'),
+      // Sin reglas de zod (su error sale en inglés): el service valida y responde en español.
+      payCountOverride: z.number().nullable().optional().describe('Seats to pay instead of the count (0-500); null: back to the count'),
+      payAmountOverride: z.number().nullable().optional().describe('Agreed amount in pesos instead of the table; null: back to the table'),
+      payExcluded: z.boolean().optional().describe('true: this class is not paid; false: include it again'),
+      reason: z.string().describe('Why (3-300 characters; kept in the audit log)'),
+      idempotencyKey: z
+        .string()
+        .optional()
+        .describe(
+          'Required. Unique key for this correction (4-100 letters, digits, - _ .); use the same one in the preview and when confirming',
+        ),
+      expectedSourceFingerprint: z.string().max(128).optional().describe('Fingerprint from the preview'),
+      confirm: z.boolean().optional(),
+    },
+    async ({
+      venueId,
+      classSessionId,
+      payCountOverride,
+      payAmountOverride,
+      payExcluded,
+      reason,
+      idempotencyKey,
+      expectedSourceFingerprint,
+      confirm,
+    }) => {
+      guard.venueFilter(venueId) // lanza si la sede está fuera del alcance, antes de consultar nada
+      requireWriteScopeAlways(scope, 'staffpay:manage', 'corrige el pago de una clase')
+      if (!guard.tienePermiso('staffpay:manage', venueId))
+        return text({ ok: false, error: 'Necesitas el permiso staffpay:manage en esta sede.' })
+      // Como la ruta (M-2): el módulo en la ORGANIZACIÓN, para que una sede que lo apagó pueda resolver sus clases (spec §5.6).
+      if (!(await organizacionTieneServicePay(venueId)))
+        return text({ ok: false, error: 'Pago por servicio no está activo en ninguna sede de este negocio; pídelo a Avoqado.' })
+      if (!idempotencyKey || !CLAVE_AJUSTE.test(idempotencyKey))
+        return text({
+          ok: false,
+          needsInput: true,
+          field: 'idempotencyKey',
+          question:
+            'idempotencyKey es obligatoria: de 4 a 100 caracteres, sólo letras, números, guion, guion bajo y punto; usa la misma en la vista previa y al confirmar.',
+        })
+      try {
+        const card = await pagoDeClase(venueId, classSessionId)
+        // El mismo permiso que el service exige a la ruta: una clase ya contabilizada sólo la corrige quien puede cerrar.
+        if (card.anclada && !guard.tienePermiso('staffpay:close', venueId))
+          return text({
+            ok: false,
+            error: 'Esta clase ya se contabilizó en un periodo cerrado: corregirla necesita el permiso staffpay:close.',
+          })
+        // Lo que no se manda conserva su valor actual; null vuelve al cálculo.
+        const a = card.ajuste
+        const cambio = {
+          payCountOverride: payCountOverride !== undefined ? payCountOverride : (a?.payCountOverride ?? null),
+          payAmountOverride:
+            payAmountOverride !== undefined ? payAmountOverride : a?.payAmountOverride != null ? Number(a.payAmountOverride) : null,
+          payExcluded: payExcluded ?? a?.payExcluded ?? false,
+        }
+        const entrada = { venueId, classSessionId, ...cambio, reason, actorId: scope.staffId }
+        if (confirm !== true) {
+          const igual =
+            cambio.payCountOverride === (a?.payCountOverride ?? null) &&
+            cambio.payAmountOverride === (a?.payAmountOverride != null ? Number(a.payAmountOverride) : null) &&
+            cambio.payExcluded === (a?.payExcluded ?? false)
+          if (igual) return text({ ok: false, error: 'La clase ya tiene esos valores: no hay nada que cambiar.' })
+          const pv = await previewAjusteDeClase(entrada)
+          const sede = await prisma.venue.findUnique({ where: { id: venueId }, select: { currency: true } })
+          const moneda = sede?.currency ?? 'MXN'
+          const quien = pv.despues.staffName ?? pv.antes.staffName
+          const cerrado = pv.periodoCerrado ? `el periodo ${periodoLegible(pv.periodoCerrado)}` : null
+          const resto = !cerrado
+            ? ''
+            : pv.pendiente === null
+              ? `; ${cerrado} ya se cerró y la clase sigue sin resolver: todavía no se puede liquidar`
+              : Number(pv.pendiente) !== 0
+                ? `; como ${cerrado} ya se cerró, queda una diferencia de ${conSigno(pv.pendiente, moneda)} por liquidar (settle_service_pay_difference)`
+                : `; ${cerrado} ya se cerró y no queda diferencia por liquidar`
+          return text({
+            ok: false,
+            requiresConfirmation: true,
+            preview: pv,
+            expectedSourceFingerprint: pv.huella,
+            message: `La clase ${pv.clase.productName} del ${diaLegible(pv.clase.fechaLocal)}${quien ? ` de ${quien}` : ''} pasa de ${pagoLegible(pv.antes)} a ${pagoLegible(pv.despues)}${resto}.`,
+          })
+        }
+        if (!expectedSourceFingerprint)
+          return text({ ok: false, needsInput: true, field: 'expectedSourceFingerprint', question: 'Pide primero la vista previa.' })
+        const r = await guardarAjusteDeClase({
+          ...entrada,
+          clientKey: `mcp-${idempotencyKey}`,
+          huellaEsperada: expectedSourceFingerprint,
+        })
+        if (!r.yaAplicado) {
+          await auditMcpWrite(scope, {
+            action: 'SERVICE_PAY_CLASS_ADJUSTED',
+            entity: 'ClassSession',
+            entityId: classSessionId,
+            venueId,
+            data: { ...cambio, monto: r.monto },
+          })
+        }
+        return text({ ok: true, ...r })
+      } catch (e) {
+        const code = (e as { code?: string })?.code
+        return fallo(e, code && QUE_HACER_AJUSTE_CLASE[code] ? `. ${QUE_HACER_AJUSTE_CLASE[code]}` : '')
       }
     },
   )

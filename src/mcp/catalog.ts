@@ -302,6 +302,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   add_service_pay_adjustment: 'write',
   mark_service_pay_paid: 'write',
   settle_service_pay_difference: 'write',
+  adjust_service_pay_class: 'write',
   staff_service_pay_differences: 'read',
   staff_detail: 'read',
   staff_documents: 'read',
