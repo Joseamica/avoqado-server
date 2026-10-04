@@ -28,6 +28,7 @@ const ajuste = (extra: Partial<Parameters<typeof agregarAjusteManual>[0]> = {}) 
     reason: 'Bono de septiembre',
     fecha: '2026-08-20',
     clientKey: `${m.key}-${++n}`,
+    ahora: AHORA,
     ...extra,
   })
 
@@ -224,6 +225,7 @@ describe('ajustes manuales (spec §6.4)', () => {
 
   it('rechaza: monto cero, motivo corto, periodo cerrado, sede sin el módulo y persona de otro negocio', async () => {
     await expect(ajuste({ amount: 0 })).rejects.toThrow(/no puede ser cero/)
+    await expect(ajuste({ amount: 10.005 })).rejects.toThrow('El monto admite hasta 2 decimales')
     await expect(ajuste({ reason: 'x' })).rejects.toThrow(/motivo/)
     const otra = await crearSede(m.orgId, m.key, 'bsf') // sin módulo: no está en __sedes
     await expect(ajuste({ sede: otra.venueId })).rejects.toMatchObject({ code: 'SEDE_SIN_MODULO' })
@@ -242,6 +244,28 @@ describe('ajustes manuales (spec §6.4)', () => {
       confirmarHuerfanas: true,
     })
     await expect(ajuste()).rejects.toMatchObject({ code: 'PERIODO_CERRADO' })
+  })
+
+  // full-testing A6: aceptaba 1900 y 2999 y creaba esos periodos (el de 2999 salía primero en el selector como «Abierto»).
+  it('la fecha va de hoy − 12 meses al fin del periodo de hoy: fuera, 400 con el rango y SIN crear ningún periodo', async () => {
+    const periodos = () => prisma.servicePayPeriod.count({ where: { organizationId: m.orgId } })
+    const antes = await periodos()
+    // AHORA = 2 sep 2026 ⇒ del 2 sep 2025 al 30 sep 2026 (fin del periodo mensual de hoy).
+    const fuera = {
+      statusCode: 400,
+      code: 'FECHA_FUERA_DE_RANGO',
+      message: 'La fecha del ajuste debe estar entre 2 sep 2025 y 30 sep 2026',
+      details: { desde: '2025-09-02', hasta: '2026-09-30' },
+    }
+    const base = { userId: m.owner, venueId: m.venueId, sede: m.venueId, staffId: m.carla, amount: 300, reason: 'Bono', ahora: AHORA }
+    for (const fecha of ['1900-01-01', '2999-01-01', '2025-09-01', '2026-10-01']) {
+      await expect(ajuste({ fecha })).rejects.toMatchObject(fuera)
+      await expect(previewAjusteManual({ ...base, fecha })).rejects.toMatchObject(fuera)
+    }
+    expect(await periodos()).toBe(antes)
+    // Los bordes sí entran.
+    await expect(ajuste({ fecha: '2025-09-02' })).resolves.toMatchObject({ periodo: { start: '2025-09-01', end: '2025-09-30' } })
+    await expect(ajuste({ fecha: '2026-09-30' })).resolves.toMatchObject({ periodo: { start: '2026-09-01', end: '2026-09-30' } })
   })
 
   it('la huella del preview fija el periodo destino: confirmar hacia otro periodo pide revisar (Codex R1-10)', async () => {

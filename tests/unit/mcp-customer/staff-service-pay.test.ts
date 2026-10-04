@@ -1113,3 +1113,58 @@ describe('adjust_service_pay_class', () => {
     }
   })
 })
+
+// full-testing A6/A8/C14: el MCP pasa por los MISMOS services; sus 400 le llegan al agente en español y un no-cambio no se audita.
+describe('reglas del service por MCP (full-testing)', () => {
+  it('ajuste manual con fecha fuera de rango: el agente recibe el rango, sin preview ni escritura', async () => {
+    mockPreviewAjuste.mockRejectedValue(
+      Object.assign(new Error('La fecha del ajuste debe estar entre 4 oct 2025 y 31 oct 2026'), {
+        statusCode: 400,
+        code: 'FECHA_FUERA_DE_RANGO',
+      }),
+    )
+    const r = parse(
+      await handlers.get('add_service_pay_adjustment')!(
+        { venueId: 'v1', staffId: 's1', amount: 100, reason: 'Bono', fecha: '2999-01-01', idempotencyKey: 'clave-1234' },
+        {},
+      ),
+    )
+    expect(r).toMatchObject({
+      ok: false,
+      code: 'FECHA_FUERA_DE_RANGO',
+      error: 'La fecha del ajuste debe estar entre 4 oct 2025 y 31 oct 2026',
+    })
+    expect(mockAjuste).not.toHaveBeenCalled()
+  })
+  it('ajustar una clase con un monto de 3 decimales: el 400 del service llega tal cual', async () => {
+    mockCard.mockResolvedValue({ classSessionId: 'c1', estado: 'OK', monto: '570.00', ajuste: null, anclada: false })
+    mockPreviewClase.mockRejectedValue(Object.assign(new Error('El monto admite hasta 2 decimales'), { statusCode: 400 }))
+    const r = parse(
+      await handlers.get('adjust_service_pay_class')!(
+        { venueId: 'v1', classSessionId: 'c1', payAmountOverride: 10.005, reason: 'Acordado', idempotencyKey: 'ajuste-c1' },
+        {},
+      ),
+    )
+    expect(r).toMatchObject({ ok: false, error: 'El monto admite hasta 2 decimales' })
+  })
+  it('ajustar una clase sin cambios reales (sinCambios) no se audita', async () => {
+    mockCard.mockResolvedValue({ classSessionId: 'c1', estado: 'OK', monto: '610.00', ajuste: null, anclada: false })
+    mockGuardarClase.mockResolvedValue({ classSessionId: 'c1', monto: '610.00', yaAplicado: false, sinCambios: true })
+    const r = parse(
+      await handlers.get('adjust_service_pay_class')!(
+        {
+          venueId: 'v1',
+          classSessionId: 'c1',
+          payCountOverride: 9,
+          reason: 'Eran nueve',
+          idempotencyKey: 'ajuste-c1',
+          confirm: true,
+          expectedSourceFingerprint: 'e'.repeat(64),
+        },
+        {},
+      ),
+    )
+    expect(r).toMatchObject({ ok: true, sinCambios: true })
+    expect(auditMcpWrite).not.toHaveBeenCalled()
+  })
+})

@@ -5,7 +5,7 @@ import { withSerializableRetry } from '../../../utils/serializableRetry'
 import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
 import { EfectoDelCambio, efectoDelCambio } from './efecto'
 import { dbDateComoFecha, fechaComoDbDate } from './periodos'
-import { assertFechaNoCerrada } from './periodosGuardados'
+import { assertFechaEnRango, assertFechaNoCerrada, hoyDeLaSede, rangoDeVigencia } from './periodosGuardados'
 
 export interface CeldaInput {
   payLevelId: string
@@ -229,7 +229,9 @@ export async function publicarVersion(
   input: VersionInput & { soloSimular: boolean; ahora?: Date },
 ): Promise<EfectoDelCambio & { versionId?: string; revision?: number }> {
   try {
-    // Antes de simular: una fecha dentro de un periodo cerrado se explica sin valorar nada (revisión final, I-2).
+    // Antes de simular: una fecha fuera de rango (full-testing A11) o dentro de un periodo cerrado (revisión final, I-2) se
+    // explica sin valorar nada. Primero el rango; dentro de él, un periodo cerrado gana.
+    assertFechaEnRango(input.effectiveFrom, rangoDeVigencia(await hoyDeLaSede(input.venueId, input.ahora)), 'La fecha de inicio')
     await assertFechaNoCerrada(prisma, input.organizationId, input.effectiveFrom, NO_EMPIEZA)
     const efecto = await efectoDelCambio(
       input.organizationId,
@@ -270,8 +272,10 @@ export async function publicarVersion(
   }
 }
 
-export async function archivarTabla(input: { venueId: string; tableId: string; archivedFrom: string; actorId: string }) {
+/** `ahora`: sólo pruebas, el «hoy» del rango de fechas (la ruta no lo pasa). */
+export async function archivarTabla(input: { venueId: string; tableId: string; archivedFrom: string; actorId: string; ahora?: Date }) {
   const archivedFrom = fechaComoDbDate(input.archivedFrom)
+  assertFechaEnRango(input.archivedFrom, rangoDeVigencia(await hoyDeLaSede(input.venueId, input.ahora)), 'La fecha de archivo')
   return withSerializableRetry(async tx => {
     const t = await tx.servicePayTable.findFirst({
       where: { id: input.tableId, venueId: input.venueId },

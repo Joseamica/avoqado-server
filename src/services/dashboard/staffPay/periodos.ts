@@ -48,6 +48,15 @@ export function diaCivilSiguiente(fecha: string): string {
   return `${t.getUTCFullYear()}-${pad(t.getUTCMonth() + 1)}-${pad(t.getUTCDate())}`
 }
 
+/** La misma fecha `n` meses después (o antes, con `n` negativo); el día se recorta al último del mes (31-mar − 1 = 28-feb). */
+export function sumarMeses(fecha: string, n: number): string {
+  const [y, mo, d] = partes(fecha)
+  const total = y * 12 + (mo - 1) + n
+  const y2 = Math.floor(total / 12)
+  const m2 = total - y2 * 12 + 1
+  return `${y2}-${pad(m2)}-${pad(Math.min(d, ultimoDia(y2, m2)))}`
+}
+
 export function venuePeriodRange(p: PeriodoCanonico, tz: string): { from: Date; to: Date } {
   return {
     from: fromZonedTime(`${p.start}T00:00:00.000`, tz),

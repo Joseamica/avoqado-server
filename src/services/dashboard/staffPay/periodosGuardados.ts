@@ -5,7 +5,16 @@ import { withSerializableRetry } from '../../../utils/serializableRetry'
 import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
 import { assertPermisoEnSedes, assertPermisoEnTodasLasSedes, exigirPermisoEnSedes, sedesConServicePay, sedesLegiblesDe } from './acceso'
 import { fechaMx } from '../export.helpers'
-import { dbDateComoFecha, diaCivilSiguiente, fechaComoDbDate, hoyLocal, MESES_LARGOS, Periodicidad, periodoQueContiene } from './periodos'
+import {
+  dbDateComoFecha,
+  diaCivilSiguiente,
+  fechaComoDbDate,
+  hoyLocal,
+  MESES_LARGOS,
+  Periodicidad,
+  periodoQueContiene,
+  sumarMeses,
+} from './periodos'
 
 type Tx = Prisma.TransactionClient
 type Db = Tx | typeof prisma
@@ -124,6 +133,27 @@ export async function alcanceLegibleDelPeriodo(
   const legibles = await sedesLegiblesDe(userId, alcance)
   const venueIds = sede ? legibles.venueIds.filter(id => id === sede) : legibles.venueIds
   return { venueIds, parcial: legibles.parcial || (sede !== undefined && venueIds.length === 0) }
+}
+
+/**
+ * Una fecha de negocio dentro de un rango razonable (full-testing A6/A11): fuera ⇒ 400 `FECHA_FUERA_DE_RANGO` con
+ * `details { desde, hasta }` ('YYYY-MM-DD'), ANTES de crear o simular nada. `que`: «La fecha del ajuste», «La fecha de inicio»…
+ */
+export function assertFechaEnRango(fecha: string, rango: { desde: string; hasta: string }, que: string): void {
+  fechaComoDbDate(fecha) // la forma, antes de comparar como texto
+  if (fecha < rango.desde || fecha > rango.hasta) {
+    throw new BadRequestError(`${que} debe estar entre ${fechaMx(rango.desde)} y ${fechaMx(rango.hasta)}`, 'FECHA_FUERA_DE_RANGO', rango)
+  }
+}
+
+/** Vigencia de una tabla o un nivel (y la fecha de archivo de una tabla): de hoy − 24 meses a hoy + 24 meses. */
+export const rangoDeVigencia = (hoy: string) => ({ desde: sumarMeses(hoy, -24), hasta: sumarMeses(hoy, 24) })
+
+/** «Hoy» en la zona de la sede (`ahora`: sólo pruebas). */
+export async function hoyDeLaSede(venueId: string, ahora?: Date): Promise<string> {
+  const v = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
+  if (!v) throw new NotFoundError('Sede no encontrada')
+  return hoyLocal(v.timezone || 'America/Mexico_City', ahora)
 }
 
 /** «Septiembre» si es el mes completo; si no, «La quincena del 1 sep 2026 al 15 sep 2026». */

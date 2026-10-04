@@ -6,7 +6,7 @@ import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
 import { assertPermisoEnTodasLasSedes, sedesConServicePay } from './acceso'
 import { EfectoDelCambio, efectoDelCambio } from './efecto'
 import { dbDateComoFecha, fechaComoDbDate } from './periodos'
-import { assertFechaNoCerrada } from './periodosGuardados'
+import { assertFechaEnRango, assertFechaNoCerrada, hoyDeLaSede, rangoDeVigencia } from './periodosGuardados'
 
 export async function listarNiveles(organizationId: string) {
   return prisma.staffPayLevel.findMany({
@@ -142,6 +142,8 @@ export async function asignarNivel(input: {
   ahora?: Date
 }): Promise<EfectoDelCambio & { asignacionId?: string }> {
   await assertPermisoEnTodasLasSedes(input.actorId, input.organizationId, 'staffpay:manage')
+  // full-testing A11: primero el rango (±24 meses, hoy en la zona de la sede); dentro de él, un periodo cerrado gana.
+  assertFechaEnRango(input.effectiveFrom, rangoDeVigencia(await hoyDeLaSede(input.venueId, input.ahora)), 'La fecha de inicio')
   await assertFechaNoCerrada(prisma, input.organizationId, input.effectiveFrom, NO_EMPIEZA)
   const sedes = await sedesConServicePay(input.organizationId)
   const efecto = await efectoDelCambio(

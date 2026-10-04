@@ -6,8 +6,8 @@ import { BadRequestError, ConflictError, NotFoundError } from '../../../errors/A
 import { withSerializableRetry } from '../../../utils/serializableRetry'
 import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
 import { assertPermisoEnSedes, sedesConPermiso, sedesConServicePay } from './acceso'
-import { ampliarAlcance, asegurarPeriodo, bloquearPeriodo, periodoQueContieneFecha } from './periodosGuardados'
-import { dbDateComoFecha, fechaComoDbDate, hoyLocal, periodoQueContiene } from './periodos'
+import { ampliarAlcance, asegurarPeriodo, assertFechaEnRango, bloquearPeriodo, periodoQueContieneFecha } from './periodosGuardados'
+import { dbDateComoFecha, fechaComoDbDate, hoyLocal, Periodicidad, periodoQueContiene, sumarMeses } from './periodos'
 
 const TZ_DEFAULT = 'America/Mexico_City'
 
@@ -22,6 +22,8 @@ export interface AjusteManualInput {
   clientKey: string
   /** Huella del preview (`previewAjusteManual`): fija el periodo destino que vio quien confirmó (Codex R1-10, R2-Nuevo 3). */
   huellaEsperada?: string
+  /** Sólo pruebas: el «hoy» del rango de fechas (la ruta y el MCP no lo pasan). */
+  ahora?: Date
 }
 export interface AjusteManualDto {
   id: string
@@ -41,7 +43,7 @@ function validarForma(input: AjusteManualInput): { monto: Prisma.Decimal; reason
   const monto = new Prisma.Decimal(input.amount)
   if (monto.isZero()) throw new BadRequestError('El monto no puede ser cero')
   if (monto.abs().gt(MAX_MONTO)) throw new BadRequestError('Monto demasiado grande')
-  if (monto.decimalPlaces() > 2) throw new BadRequestError('Máximo dos decimales')
+  if (monto.decimalPlaces() > 2) throw new BadRequestError('El monto admite hasta 2 decimales')
   const reason = typeof input.reason === 'string' ? input.reason.trim() : ''
   if (reason.length < 3) throw new BadRequestError('Escribe el motivo (mínimo 3 letras)')
   if (reason.length > 300) throw new BadRequestError('Máximo 300 caracteres')
@@ -63,6 +65,16 @@ export function huellaDeAjuste(p: {
   return createHash('sha256')
     .update([p.start, p.end, p.staffId, p.sede, p.amount.toFixed(2), p.reason].join('|'))
     .digest('hex')
+}
+
+/**
+ * full-testing A6: la fecha de un ajuste va de hoy − 12 meses al fin del periodo que contiene hoy (hoy en la zona de la sede).
+ * Aceptaba 1900 y 2999 y creaba esos periodos (el de 2999 salía primero en el selector como «Abierto»). Se revisa ANTES de
+ * crear ningún periodo, en la vista previa y al confirmar.
+ */
+function assertFechaDelAjuste(fecha: string, tz: string, periodicidad: Periodicidad, ahora: Date | undefined): void {
+  const hoy = hoyLocal(tz, ahora)
+  assertFechaEnRango(fecha, { desde: sumarMeses(hoy, -12), hasta: periodoQueContiene(hoy, periodicidad).end }, 'La fecha del ajuste')
 }
 
 /**
@@ -94,7 +106,8 @@ export async function previewAjusteManual(input: Omit<AjusteManualInput, 'client
   )
   // Nombre y sede en el preview: es lo que el humano revisa antes de autorizar un pago (dos «Ana» en el estudio).
   const persona = await personaDeLaOrg(input.staffId, sede.organizationId)
-  const fecha = input.fecha ?? hoyLocal(sede.timezone || TZ_DEFAULT)
+  const fecha = input.fecha ?? hoyLocal(sede.timezone || TZ_DEFAULT, input.ahora)
+  assertFechaDelAjuste(fecha, sede.timezone || TZ_DEFAULT, sede.organization.servicePayPeriodicity, input.ahora)
   const fila = await periodoQueContieneFecha(prisma, sede.organizationId, fecha)
   // Lo mismo que exigirá `ampliarAlcance` al confirmar: la sede ya está en el alcance guardado o hoy tiene el módulo.
   if (!fila?.venueIds.includes(input.sede) && !(await sedesConServicePay(sede.organizationId)).includes(input.sede)) {
@@ -137,7 +150,10 @@ async function aDto(db: Prisma.TransactionClient, e: ServiceEarning, yaExistia: 
 export async function agregarAjusteManual(input: AjusteManualInput): Promise<AjusteManualDto> {
   const { monto, reason } = validarForma(input)
   const quien = await prisma.venue.findUnique({ where: { id: input.venueId }, select: { organizationId: true } })
-  const sede = await prisma.venue.findUnique({ where: { id: input.sede }, select: { organizationId: true, timezone: true, name: true } })
+  const sede = await prisma.venue.findUnique({
+    where: { id: input.sede },
+    select: { organizationId: true, timezone: true, name: true, organization: { select: { servicePayPeriodicity: true } } },
+  })
   if (!quien || !sede || sede.organizationId !== quien.organizationId) throw new NotFoundError('Sede no encontrada')
   const organizationId = sede.organizationId
   const tz = sede.timezone || TZ_DEFAULT
@@ -148,8 +164,9 @@ export async function agregarAjusteManual(input: AjusteManualInput): Promise<Aju
     'Para agregar un ajuste necesitas el permiso de cerrar periodos en esa sede',
   )
   await personaDeLaOrg(input.staffId, organizationId)
-  const fecha = input.fecha ?? hoyLocal(tz)
+  const fecha = input.fecha ?? hoyLocal(tz, input.ahora)
   fechaComoDbDate(fecha) // valida la forma ANTES de compararla como texto con el periodo de un reintento
+  assertFechaDelAjuste(fecha, tz, sede.organization.servicePayPeriodicity, input.ahora)
   // Módulos y permisos con el cliente GLOBAL, ANTES de la transacción, como el cierre (Codex bloque A #3): dentro, con el
   // pool lleno, la ganadora del candado esperaría otra conexión mientras las demás esperan su candado. Candidatas: el
   // alcance del periodo como está ahora ∪ las sedes con el módulo ∪ la sede del ajuste. Dentro sólo se COMPARA; una sede

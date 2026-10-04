@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { withSerializableRetry } from '@/utils/serializableRetry'
 import {
@@ -10,6 +11,7 @@ import {
 } from '@/services/dashboard/staffPay/periodosGuardados'
 import { asignarNivel } from '@/services/dashboard/staffPay/niveles.service'
 import { publicarVersion, archivarTabla } from '@/services/dashboard/staffPay/tablas.service'
+import { efectoDelCambio } from '@/services/dashboard/staffPay/efecto'
 import { borrarMundo, clase, confirmadas, crearMundo, crearSede, Mundo, periodoCerrado, PN_HC, tablaMindform, TZ } from './_mundo'
 import { dbDateComoFecha, fechaComoDbDate, hoyLocal } from '@/services/dashboard/staffPay/periodos'
 
@@ -221,10 +223,19 @@ describe('efecto de publicar una tabla o asignar un nivel (spec §7.1)', () => {
   })
 
   it('una vigencia de hace 25 años también llega a hoy: cuenta los periodos recientes y dice cuántos quedaron sin contar (m2)', async () => {
-    // La versión vigente tiene que ser MÁS vieja que la nueva para que la nueva aplique hoy: se mueve al año 2000.
+    // La API ya no acepta una vigencia así (full-testing A11: ±24 meses); el recorrido se prueba directo, con una versión
+    // vigente más vieja que la nueva para que la nueva aplique hoy (se mueve al año 2000).
     await prisma.servicePayTableVersion.updateMany({ where: { tableId }, data: { effectiveFrom: fechaComoDbDate('2000-01-01') } })
+    const aplicar = async (tx: Prisma.TransactionClient) => {
+      const v = await tx.servicePayTableVersion.create({
+        data: { tableId, effectiveFrom: fechaComoDbDate('2001-10-01'), revision: 1, maxCount: 10 },
+      })
+      await tx.servicePayTableCell.createMany({
+        data: PN_HC.map((a, count) => ({ versionId: v.id, payLevelId: w.hc, count, amount: new Prisma.Decimal(a + 10) })),
+      })
+    }
     // 2001-10 a 2026-10 son 301 periodos mensuales; agosto de 2026 cerrado ⇒ 300 abiertos; se cuentan jul, sep y oct ⇒ 297.
-    expect(await simular('2001-10-01')).toEqual({
+    expect(await efectoDelCambio(w.orgId, [w.venueId], '2001-10-01', aplicar, AHORA_OCT)).toEqual({
       clasesQueCambian: 3,
       porPeriodo: [
         { start: '2026-07-01', end: '2026-07-31', clases: 0 },
@@ -233,6 +244,53 @@ describe('efecto de publicar una tabla o asignar un nivel (spec §7.1)', () => {
       ],
       periodosSinContar: 297,
     })
+  })
+
+  // full-testing A11: la API aceptaba 1900 y 2999 (y el aviso decía «1515 meses abiertos»).
+  it('la vigencia va de hoy − 24 meses a hoy + 24 meses: fuera, 400 con el rango, al simular y al guardar', async () => {
+    const fuera = {
+      statusCode: 400,
+      code: 'FECHA_FUERA_DE_RANGO',
+      message: 'La fecha de inicio debe estar entre 4 oct 2024 y 4 oct 2028',
+      details: { desde: '2024-10-04', hasta: '2028-10-04' },
+    }
+    for (const fecha of ['1900-01-01', '2999-01-01', '2024-10-03', '2028-10-05']) {
+      await expect(simular(fecha)).rejects.toMatchObject(fuera)
+      await expect(
+        asignarNivel({
+          organizationId: w.orgId,
+          staffId: w.ana,
+          payLevelId: w.coach,
+          effectiveFrom: fecha,
+          actorId: w.owner,
+          venueId: w.venueId,
+          soloSimular: false,
+          ahora: AHORA_OCT,
+        }),
+      ).rejects.toMatchObject(fuera)
+    }
+    // Guardar (no sólo simular) también, y archivar: la fecha de archivo con su propio texto.
+    await expect(
+      publicarVersion({
+        venueId: w.venueId,
+        organizationId: w.orgId,
+        tableId,
+        effectiveFrom: '2999-01-01',
+        countMode: 'BOOKED',
+        maxCount: 10,
+        cells: [],
+        actorId: w.owner,
+        soloSimular: false,
+        ahora: AHORA_OCT,
+      }),
+    ).rejects.toMatchObject(fuera)
+    await expect(
+      archivarTabla({ venueId: w.venueId, tableId, archivedFrom: '2999-01-01', actorId: w.owner, ahora: AHORA_OCT }),
+    ).rejects.toMatchObject({ ...fuera, message: 'La fecha de archivo debe estar entre 4 oct 2024 y 4 oct 2028' })
+    expect(await prisma.servicePayTableVersion.count({ where: { tableId } })).toBe(1)
+    // Los bordes entran (simular).
+    await expect(simular('2024-10-04')).resolves.toMatchObject({ clasesQueCambian: expect.any(Number) })
+    await expect(simular('2028-10-04')).resolves.toMatchObject({ clasesQueCambian: 0, porPeriodo: [] })
   })
 
   it('una vigencia dentro de un periodo CERRADO se rechaza con una explicación y la primera fecha que sí se puede', async () => {
