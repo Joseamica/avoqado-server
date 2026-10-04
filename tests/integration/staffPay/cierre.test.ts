@@ -295,6 +295,24 @@ describe('cerrar el periodo (spec §6.3)', () => {
     expect(await prisma.classSessionPayState.findUnique({ where: { classSessionId: cancelada } })).toBeNull()
   })
 
+  it('un lote con ids pero SIN clase valorable (una cancelada en medio) no corta el recorrido: paga las dos pagables y la huella coincide', async () => {
+    // Con lotes de 1 y las llaves en orden, el lote del medio trae el id de la cancelada y la valoración lo devuelve vacío.
+    // El recorrido sólo sale cuando ya no hay MÁS IDS; si saliera con el lote valorado vacío, la segunda pagable se perdería en silencio.
+    m = await mundoConAgosto('cierre-lote-vacio')
+    const a = await clase(m, { staffId: m.ana, inicioIso: '2026-08-04T14:00:00Z', reservas: confirmadas(8) })
+    const cancelada = await clase(m, { staffId: m.sofia, inicioIso: '2026-08-05T14:00:00Z', reservas: confirmadas(6), status: 'CANCELLED' })
+    const b = await clase(m, { staffId: m.ana, inicioIso: '2026-08-06T14:00:00Z', reservas: confirmadas(8) })
+    // Precondición: el recorrido pagina por id, así que la cancelada DEBE quedar entre las dos pagables.
+    expect([a, cancelada, b].sort()).toEqual([a, cancelada, b])
+    const p = await preview(m, { tamLote: 1 })
+    expect(p).toMatchObject({ puedeCerrar: true, clases: 2, excluidas: 0, personas: 1, total: '1140.00' })
+    expect((await preview(m)).huella).toBe(p.huella)
+    const r = await cerrar(m, { huella: p.huella, tamLote: 1 })
+    expect(r).toMatchObject({ yaCerrado: false, total: '1140.00', huella: p.huella })
+    expect(await prisma.serviceEarning.count({ where: { organizationId: m.orgId, sourceId: { in: [a, b] } } })).toBe(2)
+    expect(await prisma.serviceEarning.count({ where: { organizationId: m.orgId, sourceId: cancelada } })).toBe(0)
+  })
+
   it('D2: una sede que activa el módulo después de guardar el periodo entra al cierre con la misma huella del preview', async () => {
     m = await mundoConAgosto('cierre-d2')
     await prisma.servicePayPeriod.create({
