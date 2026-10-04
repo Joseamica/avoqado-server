@@ -63,6 +63,12 @@ export interface GuardarAjusteInput {
   huellaEsperada?: string
 }
 
+/**
+ * La tarjeta después del ajuste. `yaAplicado`: la misma solicitud (`clientKey`) ya se había aplicado. `sinCambios`: lo pedido
+ * es lo que la clase ya tenía; no se escribió nada.
+ */
+export type ResultadoAjuste = PagoDeClase & { yaAplicado: boolean; sinCambios: boolean }
+
 /** Qué cambia en dinero (revisión final, M-1): la tarjeta antes y después y, si su periodo ya se cerró, lo que queda por liquidar. */
 export interface EfectoDeAjuste {
   clase: { productName: string; fechaLocal: string }
@@ -107,6 +113,8 @@ function validarForma(input: GuardarAjusteInput): string {
   if (m !== null && (typeof m !== 'number' || !Number.isFinite(m) || m < 0 || m > MAX_MONTO)) {
     throw new BadRequestError('El monto debe ser un número entre 0 y 1,000,000')
   }
+  // full-testing A8: 10.005 se guardaba como 10.01 sin avisar (la columna es Decimal(12,2)).
+  if (m !== null && new Prisma.Decimal(m).decimalPlaces() > 2) throw new BadRequestError('El monto admite hasta 2 decimales')
   if (typeof input.payExcluded !== 'boolean') throw new BadRequestError('Excluir: valor inválido (sí o no)')
   const reason = typeof input.reason === 'string' ? input.reason.trim() : ''
   if (reason.length < 3) throw new BadRequestError('Escribe el motivo (mínimo 3 letras)')
@@ -248,7 +256,7 @@ export async function pagoDeClase(
  * congelado nunca se toca: sólo cambia «lo que corresponde hoy». ActivityLog DENTRO con el antes y el después. Mandar
  * los tres en null/false quita el ajuste y la clase vuelve al cálculo.
  */
-export async function guardarAjusteDeClase(input: GuardarAjusteInput): Promise<PagoDeClase & { yaAplicado: boolean }> {
+export async function guardarAjusteDeClase(input: GuardarAjusteInput): Promise<ResultadoAjuste> {
   if (input.clientKey !== undefined && !CLAVE.test(input.clientKey)) throw new BadRequestError('Clave de solicitud inválida')
   // El permiso con el cliente GLOBAL, ANTES de la transacción (como el cierre y marcar pagado, A8): dentro sólo se compara.
   const permitidas = new Set(await sedesConPermiso(input.actorId, [input.venueId], 'staffpay:close'))
@@ -347,7 +355,7 @@ const datosDelAjuste = (input: GuardarAjusteInput | Omit<GuardarAjusteInput, 'cl
   overrideAt: new Date(),
 })
 
-async function guardarDentro(input: GuardarAjusteInput, permitidas: Set<string>): Promise<PagoDeClase & { yaAplicado: boolean }> {
+async function guardarDentro(input: GuardarAjusteInput, permitidas: Set<string>): Promise<ResultadoAjuste> {
   return withSerializableRetry(async tx => {
     // Primero la sede: a otra sede se le contesta «no encontrada» antes de revisar nada más.
     const info = await tx.classSession.findFirst({
@@ -406,10 +414,18 @@ async function guardarDentro(input: GuardarAjusteInput, permitidas: Set<string>)
             'CLAVE_REUTILIZADA',
           )
         }
-        return { ...(await pagoDeClase(input.venueId, input.classSessionId, tx)), yaAplicado: true }
+        return { ...(await pagoDeClase(input.venueId, input.classSessionId, tx)), yaAplicado: true, sinCambios: false }
       }
     }
-    // 5) Aplicar y medir el efecto; con la huella de la vista previa, si la clase cambió, se revierte todo.
+    // 5) Lo pedido es lo que la clase ya tiene (y con el mismo motivo): no se toca nada ni se deja rastro (full-testing C14:
+    // el dashboard reintenta el PUT cuando se pierde la respuesta y cada reintento auditaba otra vez «antes = después»).
+    if (
+      mismoAjuste(resumenDeAjuste(antes), resumenDeAjuste(datos)) &&
+      (resumenDeAjuste(datos) === null || antes?.overrideReason === reason)
+    ) {
+      return { ...(await pagoDeClase(input.venueId, input.classSessionId, tx)), yaAplicado: false, sinCambios: true }
+    }
+    // 6) Aplicar y medir el efecto; con la huella de la vista previa, si la clase cambió, se revierte todo.
     const efecto = await efectoDelAjuste(tx, input, datos)
     if (input.huellaEsperada !== undefined && efecto.huella !== input.huellaEsperada) throw new HuellaCambio()
     await writeLegacyActivityAuditTx(tx, {
@@ -425,6 +441,6 @@ async function guardarDentro(input: GuardarAjusteInput, permitidas: Set<string>)
         ...(input.clientKey ? { clientKey: input.clientKey } : {}),
       },
     })
-    return { ...efecto.despues, yaAplicado: false }
+    return { ...efecto.despues, yaAplicado: false, sinCambios: false }
   })
 }

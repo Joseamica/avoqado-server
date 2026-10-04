@@ -295,6 +295,35 @@ describe('vista previa y confirmación de un ajuste de clase (para el MCP)', () 
     ).toMatchObject({ conteo: 9, yaAplicado: false })
   })
 
+  // full-testing A8: aceptaba 10.005 y guardaba 10.01 sin avisar.
+  it('un monto con más de 2 decimales se rechaza con un mensaje claro, en la vista previa y al guardar', async () => {
+    const id = await clase(m, { staffId: m.ana, inicioIso: '2026-08-04T14:00:00Z', reservas: confirmadas(8) })
+    const conMonto = { ...cambio(9), payCountOverride: null, payAmountOverride: 10.005, classSessionId: id }
+    await expect(previewAjusteDeClase(conMonto)).rejects.toMatchObject({ statusCode: 400, message: 'El monto admite hasta 2 decimales' })
+    await expect(guardarAjusteDeClase(conMonto)).rejects.toMatchObject({ statusCode: 400, message: 'El monto admite hasta 2 decimales' })
+    expect(await prisma.classSessionPayState.findUnique({ where: { classSessionId: id } })).toBeNull()
+    await expect(guardarAjusteDeClase({ ...conMonto, payAmountOverride: 10.05 })).resolves.toMatchObject({ monto: '10.05' })
+  })
+
+  // full-testing C14: el dashboard reintenta el PUT cuando se pierde la respuesta y el service auditaba aunque nada cambiara.
+  it('pedir lo que la clase ya tiene no toca nada ni deja rastro: sinCambios; cambiar sólo el motivo sí se guarda', async () => {
+    const id = await clase(m, { staffId: m.ana, inicioIso: '2026-08-04T14:00:00Z', reservas: confirmadas(8) })
+    expect(await guardarAjusteDeClase({ ...cambio(9), classSessionId: id })).toMatchObject({ conteo: 9, sinCambios: false })
+    const ps = await prisma.classSessionPayState.findUniqueOrThrow({ where: { classSessionId: id } })
+    expect(await guardarAjusteDeClase({ ...cambio(9), classSessionId: id })).toMatchObject({ conteo: 9, sinCambios: true })
+    expect(await logs(id)).toHaveLength(1)
+    expect((await prisma.classSessionPayState.findUniqueOrThrow({ where: { classSessionId: id } })).overrideAt).toEqual(ps.overrideAt)
+    // Quitar un ajuste que no existe tampoco escribe.
+    const otra = await clase(m, { staffId: m.ana, inicioIso: '2026-08-05T14:00:00Z', reservas: confirmadas(8) })
+    expect(await guardarAjusteDeClase({ ...cambio(9), payCountOverride: null, classSessionId: otra })).toMatchObject({ sinCambios: true })
+    expect(await logs(otra)).toHaveLength(0)
+    // El mismo cambio con otro motivo es una edición: se guarda y se audita.
+    expect(await guardarAjusteDeClase({ ...cambio(9), reason: 'Eran nueve, revisado', classSessionId: id })).toMatchObject({
+      sinCambios: false,
+    })
+    expect(await logs(id)).toHaveLength(2)
+  })
+
   it('si la clase cambió entre la vista previa y la confirmación: HUELLA_CAMBIO con una vista previa nueva, y no se aplica', async () => {
     const id = await clase(m, { staffId: m.ana, inicioIso: '2026-08-04T14:00:00Z', reservas: confirmadas(8) })
     await cerrar()

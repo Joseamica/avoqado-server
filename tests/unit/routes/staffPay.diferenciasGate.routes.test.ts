@@ -106,22 +106,21 @@ describe('tarjeta de pago de una clase y su ajuste: gate de organización (spec 
     expect(ajuste.status).toBe(403)
     expect(ajuste.body.error).toBe('module_disabled')
   })
-  it('su validación no cambia: un monto negativo o sin motivo ⇒ 400 y no llega al controller', async () => {
+  it('validación: monto negativo, más de 2 decimales, sin motivo o clave mal formada ⇒ 400; la clave es opcional', async () => {
     mockOrgTiene.mockResolvedValue(true)
-    expect(
-      (
-        await request(server)
-          .put(`${base}/class-sessions/${CLASE}/pay-adjustments`)
-          .send({ ...AJUSTE, payAmountOverride: -1 })
-      ).status,
-    ).toBe(400)
-    expect(
-      (
-        await request(server)
-          .put(`${base}/class-sessions/${CLASE}/pay-adjustments`)
-          .send({ ...AJUSTE, reason: 'x' })
-      ).status,
-    ).toBe(400)
+    const put = (body: Record<string, unknown>) => request(server).put(`${base}/class-sessions/${CLASE}/pay-adjustments`).send(body)
+    expect((await put({ ...AJUSTE, payAmountOverride: -1 })).status).toBe(400)
+    expect((await put({ ...AJUSTE, reason: 'x' })).status).toBe(400)
+    // full-testing A8: 10.005 se guardaba como 10.01 sin avisar.
+    const tresDecimales = await put({ ...AJUSTE, payAmountOverride: 10.005 })
+    expect(tresDecimales.status).toBe(400)
+    expect(tresDecimales.body.error).toMatch(/El monto admite hasta 2 decimales/)
+    // full-testing C14: el dashboard manda una clave para que un reintento no audite dos veces.
+    expect((await put({ ...AJUSTE, clientKey: 'corta' })).status).toBe(400)
+    expect((await put({ ...AJUSTE, clientKey: 'k'.repeat(101) })).status).toBe(400)
+    const conClave = await put({ ...AJUSTE, clientKey: 'ajuste-clase-1234' })
+    expect(conClave.body).toMatchObject({ handler: 'putClassPayAdjustments', body: { ...AJUSTE, clientKey: 'ajuste-clase-1234' } })
+    expect((await put({ ...AJUSTE, payAmountOverride: 10.05 })).status).toBe(200)
   })
 })
 

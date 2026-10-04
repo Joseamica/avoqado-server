@@ -60,9 +60,19 @@ export const cursorQuerySchema = z.object({
 export const sessionPayParamsSchema = venueParamsSchema.extend({ sessionId: z.string().cuid('Clase inválida') })
 export const ajusteClaseSchema = z.object({
   payCountOverride: z.number().int('Debe ser un número entero').min(0, 'Mínimo 0').max(500, 'Máximo 500').nullable(),
-  payAmountOverride: z.number().min(0, 'El monto no puede ser negativo').max(1_000_000, 'Monto demasiado grande').nullable(),
+  payAmountOverride: z
+    .number()
+    .min(0, 'El monto no puede ser negativo')
+    .max(1_000_000, 'Monto demasiado grande')
+    .refine(n => Math.round(n * 100) / 100 === n, 'El monto admite hasta 2 decimales')
+    .nullable(),
   payExcluded: z.boolean(),
   reason: z.string().trim().min(3, 'Escribe el motivo (mínimo 3 letras)').max(300, 'Máximo 300 caracteres'),
+  /** Opcional (full-testing C14): la misma solicitud reintentada no se audita dos veces. */
+  clientKey: z
+    .string()
+    .regex(/^[A-Za-z0-9_.-]{8,100}$/, 'Clave de solicitud inválida')
+    .optional(),
 })
 
 // ── Fase 2: cerrar y pagar (spec §6.3-6.5). Sólo forma: las reglas de negocio las revisa el service. ──
@@ -96,7 +106,7 @@ export const ajusteManualSchema = z.object({
     .number({ invalid_type_error: 'Escribe un monto' })
     .refine(n => n !== 0, 'El monto no puede ser cero')
     .refine(n => Math.abs(n) <= 1_000_000, 'Monto demasiado grande')
-    .refine(n => Math.round(n * 100) / 100 === n, 'Máximo dos decimales'),
+    .refine(n => Math.round(n * 100) / 100 === n, 'El monto admite hasta 2 decimales'),
   reason: z.string().trim().min(3, 'Escribe el motivo (mínimo 3 letras)').max(300, 'Máximo 300 caracteres'),
   fecha: fechaSchema.optional(),
   clientKey: z.string().regex(/^[A-Za-z0-9_.-]{8,120}$/, 'Clave de solicitud inválida'),

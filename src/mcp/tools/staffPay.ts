@@ -732,7 +732,7 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
           clientKey: `mcp-${idempotencyKey}`,
           huellaEsperada: expectedSourceFingerprint,
         })
-        if (!r.yaAplicado) {
+        if (!r.yaAplicado && !r.sinCambios) {
           await auditMcpWrite(scope, {
             action: 'SERVICE_PAY_CLASS_ADJUSTED',
             entity: 'ClassSession',

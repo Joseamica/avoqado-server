@@ -250,7 +250,7 @@ export async function putClassPayAdjustments(req: Request, res: Response, next: 
   try {
     const { venueId, userId } = ctx(req)
     // Campos explícitos: nada extra del body llega al service.
-    const { payCountOverride, payAmountOverride, payExcluded, reason } = req.body
+    const { payCountOverride, payAmountOverride, payExcluded, reason, clientKey } = req.body
     res.json(
       await ajustes.guardarAjusteDeClase({
         venueId,
@@ -259,6 +259,8 @@ export async function putClassPayAdjustments(req: Request, res: Response, next: 
         payAmountOverride,
         payExcluded,
         reason,
+        // Opcional (full-testing C14): con ella, el reintento de la MISMA solicitud se reconoce (`yaAplicado`).
+        clientKey,
         actorId: userId,
       }),
     )

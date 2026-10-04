@@ -12,6 +12,7 @@ jest.mock('@/services/dashboard/staffPay/recibos.service', () => ({
 jest.mock('@/services/dashboard/export.helpers', () => ({ sendExport: jest.fn() }))
 jest.mock('@/services/dashboard/staffPay/diferencias.service', () => ({ diferenciasDelPeriodo: jest.fn() }))
 jest.mock('@/services/dashboard/staffPay/liquidacion.service', () => ({ previewLiquidacion: jest.fn(), liquidarDiferencia: jest.fn() }))
+jest.mock('@/services/dashboard/staffPay/ajustesClase.service', () => ({ guardarAjusteDeClase: jest.fn(), pagoDeClase: jest.fn() }))
 
 import * as periodos from '@/services/dashboard/staffPay/periodosGuardados'
 import * as cierre from '@/services/dashboard/staffPay/cierre.service'
@@ -20,6 +21,7 @@ import * as recibos from '@/services/dashboard/staffPay/recibos.service'
 import { sendExport } from '@/services/dashboard/export.helpers'
 import * as dif from '@/services/dashboard/staffPay/diferencias.service'
 import * as liq from '@/services/dashboard/staffPay/liquidacion.service'
+import * as ajustesClase from '@/services/dashboard/staffPay/ajustesClase.service'
 import * as controller from '@/controllers/dashboard/staffPay.dashboard.controller'
 import router, { servicePayGateOrganizacion } from '@/routes/dashboard/staffPay.routes'
 
@@ -389,5 +391,30 @@ describe('Controller de la fase 2', () => {
     ;(cierre.previewCierre as jest.Mock).mockResolvedValue({})
     await controller.getClosePreview(req({ query: { fecha: '2026-08-15' } }), res(), jest.fn())
     expect((cierre.previewCierre as jest.Mock).mock.calls[0][0]).toEqual({ venueId: 'v1', userId: 'u1', fecha: '2026-08-15' })
+  })
+  it('«Ajustar monto» pasa la clave de la solicitud al service (full-testing C14) y nada más del body', async () => {
+    ;(ajustesClase.guardarAjusteDeClase as jest.Mock).mockResolvedValue({ ok: 1 })
+    const sinClave = { payCountOverride: 9, payAmountOverride: null, payExcluded: false, reason: 'Eran nueve' }
+    const body = { ...sinClave, clientKey: 'ajuste-clase-1234' }
+    await controller.putClassPayAdjustments(
+      req({ params: { venueId: 'v1', sessionId: 'c1' }, body: { ...body, huellaEsperada: 'z' } }),
+      res(),
+      jest.fn(),
+    )
+    expect((ajustesClase.guardarAjusteDeClase as jest.Mock).mock.calls[0][0]).toEqual({
+      venueId: 'v1',
+      classSessionId: 'c1',
+      ...body,
+      actorId: 'u1',
+    })
+    // Sin clave, como siempre.
+    await controller.putClassPayAdjustments(req({ params: { venueId: 'v1', sessionId: 'c1' }, body: sinClave }), res(), jest.fn())
+    expect((ajustesClase.guardarAjusteDeClase as jest.Mock).mock.calls[1][0]).toEqual({
+      venueId: 'v1',
+      classSessionId: 'c1',
+      ...sinClave,
+      clientKey: undefined,
+      actorId: 'u1',
+    })
   })
 })
