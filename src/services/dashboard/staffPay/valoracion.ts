@@ -67,8 +67,15 @@ export interface ResumenSede {
  */
 export function valoracionCte(f: FiltroValoracion): Prisma.Sql {
   if (f.modo === 'periodo' && !f.periodId) throw new Error('valoracionCte: el modo periodo exige periodId')
-  const porClases = f.claseIds?.length ? Prisma.sql`AND cs.id IN (${Prisma.join(f.claseIds)})` : Prisma.empty
+  // UN arreglo como parámetro, no `IN ($1…$500)`: Prisma reusa la sentencia preparada y, a la sexta, Postgres pasa al plan
+  // genérico. Con la lista suelta, desde el 6.º lote cada uno pasaba de ~15 ms a 275 ms con 20,000 clases (~800 con 50,000),
+  // y volvía a 15 con `plan_cache_mode = force_custom_plan` (A13). Con `= ANY($1)` se queda en ~15-20 ms sin forzar nada.
+  const porClases = f.claseIds?.length ? Prisma.sql`AND cs.id = ANY(${f.claseIds}::text[])` : Prisma.empty
   const porCoach = f.staffId ? Prisma.sql`AND cs."assignedStaffId" = ${f.staffId}` : Prisma.empty
+  // En modo vivo sólo entran clases SIN ancla, y por construcción ésas no tienen versión anclada ni líneas SERVICE/RECONCILE
+  // (las tres nacen con el ancla: en el cierre y en la liquidación). `AND false` deja `va` y `lp` en NULL sin consultar (A13:
+  // con la tabla de devengos sin estadísticas, `lp` recorría todos los devengos de la persona por cada clase).
+  const soloConAncla = f.modo === 'periodo' ? Prisma.empty : Prisma.sql`AND false`
   const columnas = Prisma.sql`
       cs.id, cs."venueId", cs."productId", cs."startsAt", cs."assignedStaffId",
       (((cs."startsAt" AT TIME ZONE 'UTC') AT TIME ZONE ${f.tz}))::date AS fecha_local,
@@ -116,7 +123,7 @@ export function valoracionCte(f: FiltroValoracion): Prisma.Sql {
              CASE WHEN lp.existe THEN lp."payLevelId" ELSE lv."payLevelId" END AS "payLevelId",
              CASE WHEN lp.existe THEN lp.level_name ELSE lv.level_name END AS level_name
       FROM clases c
-      LEFT JOIN "ServicePayTableVersion" va ON va.id = c.version_anclada
+      LEFT JOIN "ServicePayTableVersion" va ON va.id = c.version_anclada ${soloConAncla}
       LEFT JOIN LATERAL (
         SELECT v.id AS version_id, v."countMode", v."maxCount"
         FROM "ServicePayTable" t
@@ -139,7 +146,7 @@ export function valoracionCte(f: FiltroValoracion): Prisma.Sql {
         FROM "ServiceEarning" e
         WHERE e."sourceType" = 'CLASS_SESSION' AND e."sourceId" = c.id AND e."staffId" = c."assignedStaffId"
           AND e."organizationId" = ${f.organizationId}
-          AND e.concept IN ('SERVICE', 'RECONCILE')
+          AND e.concept IN ('SERVICE', 'RECONCILE') ${soloConAncla}
         ORDER BY e."createdAt" ASC, e.id ASC
         LIMIT 1
       ) lp ON true

@@ -3,6 +3,7 @@ import { formatInTimeZone } from 'date-fns-tz'
 import prisma from '../../../utils/prismaClient'
 import { BadRequestError, ConflictError } from '../../../errors/AppError'
 import { withSerializableRetry } from '../../../utils/serializableRetry'
+import { utcTs } from '../../../utils/sqlDates'
 import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
 import { exigirPermisoEnSedes, sedesConPermiso, sedesConServicePay, tienePermisoEn } from './acceso'
 import { ampliarAlcance, asegurarPeriodo, bloquearPeriodo, periodoQueContieneFecha } from './periodosGuardados'
@@ -14,14 +15,14 @@ type Tx = Prisma.TransactionClient
 type Db = Tx | typeof prisma
 
 /**
- * Medido 2026-10-03 (A13): 50,000 clases en 65 s (heap +48 MB), con las tablas de devengos y anclas ya usadas y con
- * estadísticas al día; el doble, al minuto: 180 s. No se baja sin volver a medir (spec §6.3 punto 3).
- * 🔴 Con esas tablas VACÍAS o sin estadísticas (el primer cierre) NO termina en este tiempo: el plan de la valoración cae
- * en un índice equivocado y cada lote cuesta más que el anterior. Es un defecto abierto que este número no compensa; ver
- * la prueba de diagnóstico de `tests/integration/staffPay/cierre.carga.test.ts`.
+ * Medido 2026-10-03 (A13, ronda 1), 50,000 clases: 9.0 s EN FRÍO (primer cierre: devengos y anclas vacíos y sin
+ * estadísticas) y 9.2 s CON HISTORIAL; el doble del peor (18.5 s), al minuto y con el mínimo: 60 s. Antes del arreglo
+ * (lectura de todo el resto en cada lote y escrituras entre lotes): 66 s con historial y en frío no terminaba. No se baja
+ * sin volver a medir (spec §6.3 punto 3): `tests/integration/staffPay/cierre.carga.test.ts`, con y sin MEDIR_EN_FRIO=1.
  */
-export const TIMEOUT_CIERRE_MS = 180_000
+export const TIMEOUT_CIERRE_MS = 60_000
 export const LOTE_CIERRE = 500
+const BLOQUE_ESCRITURA = 1000
 const TZ_DEFAULT = 'America/Mexico_City'
 
 export type Bloqueo =
@@ -230,6 +231,18 @@ export async function anclarClases(
     WHERE "ClassSessionPayState"."originPeriodId" IS NULL`
 }
 
+/**
+ * Los siguientes `n` ids de clase de la sede en el rango, por llave (A13): se pagina ANTES de los joins pesados y sólo
+ * esos ids se valoran. Sin los demás filtros de la valoración (terminada, no cancelada, sin ancla): ésos los aplica la
+ * valoración, así que un lote puede valorar menos de `n` clases, nunca otras.
+ */
+export const consultaIdsDelLote = (f: FiltroValoracion, despuesDe: string | undefined, n: number): Prisma.Sql => Prisma.sql`
+  SELECT cs.id FROM "ClassSession" cs
+  WHERE cs."venueId" = ${f.venueId} AND cs."startsAt" >= ${utcTs(f.desde)} AND cs."startsAt" < ${utcTs(f.hasta)}
+    ${despuesDe ? Prisma.sql`AND cs.id > ${despuesDe}` : Prisma.empty}
+  ORDER BY cs.id ASC
+  LIMIT ${n}`
+
 interface Recorrido {
   clases: number
   excluidas: number
@@ -242,8 +255,8 @@ interface Recorrido {
 /**
  * El ÚNICO recorrido de la huella (spec §6.3 puntos 2 y 4), el mismo para el preview y el cierre: cabecera → clases
  * (sede → clase, por lotes con cursor `classSessionId > último`) → ajustes por id → huérfanas por id. Cada lote pasa
- * por la huella ANTES de `alLote` (que en el cierre escribe sus SERVICE y sus anclas). Todo nace dentro de cada llamada:
- * un reintento de `withSerializableRetry` empieza de cero. `digest()` se llama una sola vez.
+ * por la huella ANTES de `alLote`. No escribe nada: el cierre guarda lo de cada lote y escribe al terminar (A13). Todo
+ * nace dentro de cada llamada: un reintento de `withSerializableRetry` empieza de cero. `digest()` se llama una sola vez.
  */
 async function recorrer(
   db: Db,
@@ -265,12 +278,17 @@ async function recorrer(
     totalServicios: new Prisma.Decimal(0),
     totalAjustes: new Prisma.Decimal(0),
   }
+  // El mismo tope que `valorarClases`: con más ids que su LIMIT se perderían clases del lote.
+  const tam = Math.min(Math.max(o.tamLote, 1), 1000)
   for (const s of a.sedes) {
     const f = filtroDe(a, s, ahora)
     let despuesDe: string | undefined
     for (;;) {
-      const lote = await valorarClases(db, f, { despuesDe, limite: o.tamLote })
-      if (!lote.length) break
+      // A13: primero los ids del lote (por llave), luego la valoración de SÓLO esos ids. Antes cada lote valoraba todo lo
+      // que quedaba del periodo para quedarse con 500 (O(N²/lote)). El orden sigue siendo por classSessionId.
+      const ids = (await db.$queryRaw<Array<{ id: string }>>(consultaIdsDelLote(f, despuesDe, tam))).map(x => x.id)
+      if (!ids.length) break
+      const lote = await valorarClases(db, { ...f, claseIds: ids }, { limite: tam })
       for (const c of lote) {
         huella.clase(c)
         if (c.estado === 'OK' && c.staffId && c.monto !== null) {
@@ -280,7 +298,7 @@ async function recorrer(
         } else if (c.estado === 'EXCLUIDA') r.excluidas++
       }
       if (o.alLote) await o.alLote(lote, s)
-      despuesDe = lote[lote.length - 1].classSessionId
+      despuesDe = ids[ids.length - 1]
     }
   }
   for (const aj of o.ajustes) {
@@ -456,40 +474,49 @@ export async function cerrarPeriodo(input: {
 
         // Los ajustes se LEEN antes de escribir los SERVICE y se hashean después de las clases, igual que en el preview.
         const ajustes = await ajustesDelPeriodo(tx, organizationId, p.id)
+        // A13: LEER todo y DESPUÉS escribir. Si cada lote escribiera sus SERVICE y sus anclas, la lectura del siguiente
+        // tocaría filas sin confirmar que nadie puede analizar, y en el primer cierre (tablas vacías) el plan se degrada lote
+        // tras lote. Aquí se guarda sólo lo que se va a escribir.
+        // ponytail: memoria O(clases), ~1-2 KB por clase (pico +78/+103 MB con 50,000). Si hiciera falta bajarla, los SERVICE
+        // pueden escribirse por lote (la lectura en vivo ya no toca ServiceEarning) y dejar sólo las anclas para el final.
+        const servicios: Prisma.ServiceEarningCreateManyInput[] = []
+        const anclas: Parameters<typeof anclarClases>[2] = []
         let lotes = 0
         const r = await recorrer(tx, a, ahora, {
           tamLote,
           ajustes,
           huerfanas,
           alLote: async (lote, sede) => {
-            const pagables = lote.filter(c => c.estado === 'OK' && c.staffId && c.monto !== null)
-            if (pagables.length) {
-              await tx.serviceEarning.createMany({
-                data: pagables.map(c => ({
-                  organizationId,
-                  venueId: c.venueId,
-                  periodId: p.id,
-                  staffId: c.staffId!,
-                  concept: 'SERVICE' as const,
-                  sourceType: 'CLASS_SESSION' as const,
-                  sourceId: c.classSessionId,
-                  occurredAt: c.startsAt,
-                  payLevelId: c.payLevelId,
-                  payLevelName: c.payLevelName,
-                  tableVersionId: c.tableVersionId,
-                  countMode: c.countMode,
-                  count: c.conteo,
-                  amount: new Prisma.Decimal(c.monto!),
-                  descriptor: descriptorDeClase(c, sede),
-                  createdById: input.userId,
-                })),
+            for (const c of lote) {
+              anclas.push({ classSessionId: c.classSessionId, fechaValoracion: c.fechaValoracion, tableVersionId: c.tableVersionId })
+              if (c.estado !== 'OK' || !c.staffId || c.monto === null) continue
+              servicios.push({
+                organizationId,
+                venueId: c.venueId,
+                periodId: p.id,
+                staffId: c.staffId,
+                concept: 'SERVICE',
+                sourceType: 'CLASS_SESSION',
+                sourceId: c.classSessionId,
+                occurredAt: c.startsAt,
+                payLevelId: c.payLevelId,
+                payLevelName: c.payLevelName,
+                tableVersionId: c.tableVersionId,
+                countMode: c.countMode,
+                count: c.conteo,
+                amount: new Prisma.Decimal(c.monto),
+                descriptor: descriptorDeClase(c, sede),
+                createdById: input.userId,
               })
             }
-            await anclarClases(tx, p.id, lote)
             input.alTerminarLote?.(++lotes)
           },
         })
+        // Antes de escribir: si la huella cambió, se aborta sin haber tocado nada (el resultado es el mismo que abortar después).
         if (r.huella !== input.huellaEsperada) throw new HuellaCambio()
+        for (let i = 0; i < servicios.length; i += BLOQUE_ESCRITURA)
+          await tx.serviceEarning.createMany({ data: servicios.slice(i, i + BLOQUE_ESCRITURA) })
+        for (let i = 0; i < anclas.length; i += BLOQUE_ESCRITURA) await anclarClases(tx, p.id, anclas.slice(i, i + BLOQUE_ESCRITURA))
 
         // Recibos: suma de lo YA ESCRITO del periodo (servicios y ajustes), uno por persona — quien sólo tiene un bono también.
         const sumas = await tx.serviceEarning.groupBy({

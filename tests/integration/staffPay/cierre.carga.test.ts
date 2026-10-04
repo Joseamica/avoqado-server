@@ -2,16 +2,12 @@
 // Contra `av-db-25-pago-staff`, NUNCA otra base. Se corre así (una vez, con --runInBand):
 //   MEDIR_CIERRE=1 TZ=UTC TEST_DATABASE_URL="$PAGO_DB" DATABASE_URL="$PAGO_DB" \
 //     npx jest --selectProjects=integration --runTestsByPath tests/integration/staffPay/cierre.carga.test.ts --runInBand
+// EN FRÍO (el primer cierre de una organización: devengos y anclas vacíos y sin estadísticas): además MEDIR_EN_FRIO=1, contra
+// una base DESECHABLE recién migrada (`createdb av-db-25-pago-staff-carga` + `prisma migrate deploy`), que luego se borra.
 import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
-import {
-  anclarClases,
-  cerrarPeriodo,
-  descriptorDeClase,
-  previewCierre,
-  TIMEOUT_CIERRE_MS,
-} from '@/services/dashboard/staffPay/cierre.service'
-import { valorarClases, valoracionCte } from '@/services/dashboard/staffPay/valoracion'
+import { cerrarPeriodo, consultaIdsDelLote, previewCierre, TIMEOUT_CIERRE_MS } from '@/services/dashboard/staffPay/cierre.service'
+import { valoracionCte } from '@/services/dashboard/staffPay/valoracion'
 import { fechaComoDbDate, venuePeriodRange } from '@/services/dashboard/staffPay/periodos'
 import { consultasDelReporte, reportePeriodo } from '@/services/dashboard/staffPay/reporte.service'
 import { consultaDePaginaDelRecibo, reciboDePersona } from '@/services/dashboard/staffPay/recibos.service'
@@ -35,6 +31,8 @@ const OTROS_MESES = 10_000
 /** Personas además de Ana (Codex R4-R1-12): el reporte tiene que tener páginas avanzadas que SÍ traigan filas. */
 const OTRAS = 200
 const describirSi = process.env.MEDIR_CIERRE === '1' ? describe : describe.skip
+/** Sin historial de devengos ni anclas, y sin `ANALYZE` de esas tablas antes de cerrar: el primer cierre de todos (A13). */
+const EN_FRIO = process.env.MEDIR_EN_FRIO === '1'
 jest.setTimeout(30 * 60_000)
 
 describirSi('cierre con 50,000 clases (spec §6.3 punto 3)', () => {
@@ -120,9 +118,9 @@ describirSi('cierre con 50,000 clases (spec §6.3 punto 3)', () => {
     return r
   }
   // Codex R3-R1-12: el plan REAL de cada consulta pesada, tal como la arma el service (no una copia del SQL).
-  const explicar = async (nombre: string, sql: Prisma.Sql | null | undefined, db: Pick<typeof prisma, '$queryRaw'> = prisma) => {
+  const explicar = async (nombre: string, sql: Prisma.Sql | null | undefined) => {
     if (!sql) throw new Error(`${nombre}: no hay consulta que medir`)
-    const planDe = await db.$queryRaw<Array<{ 'QUERY PLAN': string }>>`EXPLAIN (ANALYZE, BUFFERS) ${sql}`
+    const planDe = await prisma.$queryRaw<Array<{ 'QUERY PLAN': string }>>`EXPLAIN (ANALYZE, BUFFERS) ${sql}`
     const texto = planDe.map(x => x['QUERY PLAN']).join('\n')
     console.log(`── EXPLAIN ${nombre}\n${texto}`)
     const tiempo = /Execution Time: ([\d.]+) ms/.exec(texto)?.[1]
@@ -147,12 +145,10 @@ describirSi('cierre con 50,000 clases (spec §6.3 punto 3)', () => {
 
   /**
    * Estado normal de la tabla de devengos desde el segundo mes de uso: ya tiene un mes cerrado (10,000 renglones y 10,000 anclas
-   * de julio) y estadísticas al día. Se siembra una sola vez (la prueba en frío de abajo corre ANTES, con la tabla vacía).
+   * de julio) y estadísticas al día. Con MEDIR_EN_FRIO=1 no se siembra: es el primer cierre de todos.
    */
-  let hayHistorial = false
   let julioId = ''
   const sembrarHistorial = async () => {
-    if (hayHistorial) return
     const julio = await periodoCerrado(m, '2026-07-01', '2026-07-31')
     julioId = julio.id
     await prisma.$executeRaw`
@@ -165,98 +161,22 @@ describirSi('cierre con 50,000 clases (spec §6.3 punto 3)', () => {
       FROM "ClassSession" cs WHERE cs."venueId" = ${m.venueId}::text AND cs.id LIKE 'cjul%'`
     await prisma.$executeRawUnsafe('ANALYZE "ServiceEarning"')
     await prisma.$executeRawUnsafe('ANALYZE "ClassSessionPayState"')
-    hayHistorial = true
   }
-
-  /**
-   * Diagnóstico (A13): el plan de un lote del cierre CUANDO YA HAY devengos escritos en la misma transacción — justo la
-   * condición del cierre real, que el `EXPLAIN` suelto de más abajo no reproduce. Escribe lotes como el cierre, imprime el
-   * plan y el tiempo de la consulta de valoración con 2,500 y con 5,000 devengos ya escritos, y deshace todo (ROLLBACK).
-   * Corre ANTES de cerrar: el cierre ancla las clases y ya no quedaría nada que valorar en vivo.
-   */
-  const diagnosticoEnTransaccion = async () => {
-    class Deshacer extends Error {}
-    const f = filtroAgosto()
-    const sede = { nombre: 'sede', tz: TZ }
-    await expect(
-      prisma.$transaction(
-        async tx => {
-          const periodo = await tx.servicePayPeriod.create({
-            data: {
-              organizationId: m.orgId,
-              periodStart: fechaComoDbDate('2026-08-01'),
-              periodEnd: fechaComoDbDate('2026-08-31'),
-              status: 'OPEN',
-              venueIds: [m.venueId],
-            },
-          })
-          let despuesDe: string | undefined
-          let escritos = 0
-          const escribirLotes = async (lotes: number) => {
-            for (let i = 0; i < lotes; i++) {
-              const lote = await valorarClases(tx, f, { despuesDe, limite: 500 })
-              await tx.serviceEarning.createMany({
-                data: lote
-                  .filter(c => c.estado === 'OK' && c.staffId && c.monto !== null)
-                  .map(c => ({
-                    organizationId: m.orgId,
-                    venueId: c.venueId,
-                    periodId: periodo.id,
-                    staffId: c.staffId!,
-                    concept: 'SERVICE' as const,
-                    sourceType: 'CLASS_SESSION' as const,
-                    sourceId: c.classSessionId,
-                    occurredAt: c.startsAt,
-                    payLevelId: c.payLevelId,
-                    payLevelName: c.payLevelName,
-                    tableVersionId: c.tableVersionId,
-                    countMode: c.countMode,
-                    count: c.conteo,
-                    amount: new Prisma.Decimal(c.monto!),
-                    descriptor: descriptorDeClase(c, sede),
-                    createdById: m.owner,
-                  })),
-              })
-              await anclarClases(tx, periodo.id, lote)
-              escritos += lote.length
-              despuesDe = lote[lote.length - 1].classSessionId
-            }
-          }
-          await medir('diagnóstico: 5 lotes (0 → 2,500 devengos)', () => escribirLotes(5))
-          await explicar(`lote con ${escritos} devengos ya escritos en la transacción`, valoracionDe(f, despuesDe), tx)
-          await medir('diagnóstico: 5 lotes más (2,500 → 5,000 devengos)', () => escribirLotes(5))
-          await explicar(`lote con ${escritos} devengos ya escritos en la transacción`, valoracionDe(f, despuesDe), tx)
-          await tx.$executeRawUnsafe('ANALYZE "ServiceEarning"')
-          await explicar(
-            `lote con ${escritos} devengos, DESPUÉS de ANALYZE "ServiceEarning" dentro de la transacción`,
-            valoracionDe(f, despuesDe),
-            tx,
-          )
-          throw new Deshacer()
-        },
-        { timeout: 20 * 60_000, maxWait: 60_000 },
-      ),
-    ).rejects.toBeInstanceOf(Deshacer)
-  }
-
-  it('diagnóstico EN FRÍO: tabla de devengos vacía (el primer cierre de todos)', async () => {
-    console.log('── CASO: tabla de devengos vacía y sin estadísticas')
-    await diagnosticoEnTransaccion()
-  })
-
-  it('diagnóstico CON HISTORIAL: tabla de devengos con 10,000 renglones de julio y ANALYZE al día', async () => {
-    await sembrarHistorial()
-    console.log('── CASO: tabla de devengos con historial (10,000 renglones, estadísticas al día)')
-    await diagnosticoEnTransaccion()
-  })
 
   it('mide el EXPLAIN de la valoración y el tiempo y la memoria del cierre completo', async () => {
     const f = filtroAgosto()
-    // El estado normal de la tabla de devengos (desde el segundo mes de uso). El caso en frío no termina: lo documenta el diagnóstico.
-    await sembrarHistorial()
-    // La valoración EN VIVO, el primer lote del cierre y uno con cursor (el recorrido del cierre usa exactamente esta forma).
-    await explicar('valoración EN VIVO · primer lote (LIMIT 500)', valoracionDe(f))
-    await explicar('valoración EN VIVO · lote con cursor (classSessionId > carga3)', valoracionDe(f, 'carga3'))
+    // EN FRÍO: devengos y anclas vacíos y sin estadísticas. Si no, el estado normal desde el segundo mes de uso.
+    console.log(`── ESCENARIO: ${EN_FRIO ? 'EN FRÍO (sin historial ni estadísticas de devengos y anclas)' : 'CON HISTORIAL'}`)
+    if (!EN_FRIO) await sembrarHistorial()
+    // Un lote del recorrido del cierre, tal como lo arma el service: primero los ids por llave, luego la valoración de ésos.
+    const loteVivo = async (nombre: string, despuesDe?: string) => {
+      const idsSql = consultaIdsDelLote(f, despuesDe, 500)
+      await explicar(`${nombre} · ids del lote`, idsSql)
+      const ids = (await prisma.$queryRaw<Array<{ id: string }>>(idsSql)).map(x => x.id)
+      await explicar(`${nombre} · valoración de esos ids`, valoracionDe({ ...f, claseIds: ids }))
+    }
+    await loteVivo('valoración EN VIVO · primer lote (500 ids)')
+    await loteVivo('valoración EN VIVO · lote con cursor (classSessionId > carga3)', 'carga3')
 
     const reporteDe = (offset: number) =>
       consultasDelReporte({ userId: m.owner, venueId: m.venueId, fecha: '2026-08-15', offset, limit: 50 })
@@ -333,10 +253,11 @@ describirSi('cierre con 50,000 clases (spec §6.3 punto 3)', () => {
       const { from: desde, to: hasta } = venuePeriodRange({ start, end }, TZ)
       return { ...f, desde, hasta, modo: 'periodo' as const }
     }
-    await explicar(
-      'valoración modo PERIODO · periodo de julio (10,000 anclas de 60,000)',
-      valoracionDe({ ...rango('2026-07-01', '2026-07-31'), periodId: julioId }),
-    )
+    if (julioId)
+      await explicar(
+        'valoración modo PERIODO · periodo de julio (10,000 anclas de 60,000)',
+        valoracionDe({ ...rango('2026-07-01', '2026-07-31'), periodId: julioId }),
+      )
     const chico = await periodoCerrado(m, '2026-09-01', '2026-09-30')
     await prisma.$executeRaw`
       INSERT INTO "ClassSessionPayState" ("classSessionId", "originPeriodId", "valuationDate", "payExcluded", "updatedAt")
