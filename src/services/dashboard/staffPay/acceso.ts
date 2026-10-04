@@ -107,3 +107,12 @@ export async function assertPermisoEnSedes(userId: string, venueIds: string[], p
     if (!(await tienePermiso(userId, venueId, permiso))) throw new ForbiddenError(explicacion)
   }
 }
+
+/**
+ * ¿ALGUNA sede de la organización de esta sede tiene el módulo? (Codex R2-R1-1, spec §5.6) Las diferencias de UNA clase
+ * se leen y se liquidan aunque la sede de la clase ya lo haya apagado: su deuda siempre tiene dónde caer.
+ */
+export async function organizacionTieneServicePay(venueId: string): Promise<boolean> {
+  const v = await prisma.venue.findUnique({ where: { id: venueId }, select: { organizationId: true } })
+  return !!v && (await sedesConServicePay(v.organizationId)).length > 0
+}

@@ -18,7 +18,19 @@ jest.mock('@/mcp/guard', () => ({
   }),
 }))
 jest.mock('@/services/access/access.service', () => ({ hasPermission: (...a: unknown[]) => mockHasPermission(...a) }))
-jest.mock('@/services/dashboard/staffPay/acceso', () => ({ venueHasServicePayAccess: (...a: unknown[]) => mockAccess(...a) }))
+const mockOrgTiene = jest.fn()
+jest.mock('@/services/dashboard/staffPay/acceso', () => ({
+  venueHasServicePayAccess: (...a: unknown[]) => mockAccess(...a),
+  organizacionTieneServicePay: (...a: unknown[]) => mockOrgTiene(...a),
+}))
+const mockPreviewLiq = jest.fn()
+const mockLiquidar = jest.fn()
+jest.mock('@/services/dashboard/staffPay/liquidacion.service', () => ({
+  previewLiquidacion: (...a: unknown[]) => mockPreviewLiq(...a),
+  liquidarDiferencia: (...a: unknown[]) => mockLiquidar(...a),
+}))
+const mockDiferencias = jest.fn()
+jest.mock('@/services/dashboard/staffPay/diferencias.service', () => ({ diferenciasDelPeriodo: (...a: unknown[]) => mockDiferencias(...a) }))
 jest.mock('@/services/dashboard/staffPay/reporte.service', () => ({
   reportePeriodo: (...a: unknown[]) => mockReporte(...a),
   detallePersona: (...a: unknown[]) => mockDetalle(...a),
@@ -47,14 +59,37 @@ jest.mock('@/services/dashboard/staffPay/recibos.service', () => ({
 jest.mock('@/services/dashboard/staffPay/periodosGuardados', () => ({ periodoQueContieneFecha: (...a: unknown[]) => mockPeriodoDeFecha(...a) }))
 jest.mock('@/mcp/requireWriteScopeAlways', () => ({ requireWriteScopeAlways: (...a: unknown[]) => mockRequireWrite(...a) }))
 jest.mock('@/mcp/audit', () => ({ auditMcpWrite: jest.fn() }))
-jest.mock('@/utils/prismaClient', () => ({ __esModule: true, default: { venue: { findUnique: jest.fn().mockResolvedValue({ organizationId: 'o1', timezone: 'America/Mexico_City' }) } } }))
+jest.mock('@/utils/prismaClient', () => ({ __esModule: true, default: {
+    venue: {
+      findUnique: jest.fn().mockResolvedValue({ organizationId: 'o1', timezone: 'America/Mexico_City', name: 'Avoqado Wellness', currency: 'MXN' }),
+      findMany: jest.fn().mockResolvedValue([{ id: 'v1', name: 'Avoqado Wellness', currency: 'MXN' }]),
+    },
+  },
+}))
 
 const handlers = new Map<string, (a: Record<string, unknown>, e: unknown) => Promise<{ content: Array<{ text: string }> }>>()
 const scope = { staffId: 's1', activeOrg: 'o1', allowedVenueIds: ['v1'], perVenueAccess: new Map([['v1', { role: 'OWNER' }]]) } as unknown as McpScope
 const parse = (r: { content: Array<{ text: string }> }) => JSON.parse(r.content[0].text)
 
 beforeAll(() => registerStaffPayTools({ tool: (...a: unknown[]) => handlers.set(a[0] as string, a[a.length - 1] as never) } as never, scope))
-beforeEach(() => { jest.clearAllMocks(); mockHasPermission.mockReturnValue(true); mockAccess.mockResolvedValue(true) })
+beforeEach(() => { jest.clearAllMocks(); mockHasPermission.mockReturnValue(true); mockAccess.mockResolvedValue(true); mockOrgTiene.mockResolvedValue(true) })
+
+// La forma REAL de `previewLiquidacion` (B2): filas de `diferenciasDeClase`, destino legible y `sedeEnDestino`.
+const fila = (persona: string | null, personaNombre: string | null, pendiente: string | null, extra: Record<string, unknown> = {}) => ({
+  classSessionId: 'c1', venueId: 'v1', productName: 'Yoga', fechaLocal: '2026-08-04', persona, personaNombre, estadoClase: 'OK', motivo: null,
+  corresponde: '610.00', congelado: '570.00', conciliado: '0.00', pendiente, ...extra,
+})
+const pvLiq = (extra: Record<string, unknown> = {}) => ({
+  periodoOrigen: { id: 'p8', start: '2026-08-01', end: '2026-08-31' },
+  destino: { start: '2026-09-01', end: '2026-09-30', venueIds: ['v1'] },
+  sedeEnDestino: true,
+  filas: [fila('a', 'Ana Martínez', '40.00')],
+  total: '40.00',
+  bloqueada: false,
+  huella: 'h'.repeat(64),
+  ...extra,
+})
+const settle = (args: Record<string, unknown>) => handlers.get('settle_service_pay_difference')!({ venueId: 'v1', classSessionId: 'c1', idempotencyKey: 'clave-1234', ...args }, {})
 
 describe('staff_service_pay — feature nueva', () => {
   it('summary devuelve el reporte del periodo en pesos', async () => {
@@ -231,6 +266,184 @@ describe('staff_service_pay — escritura (spec §9.3)', () => {
   })
 })
 
+describe('settle_service_pay_difference (liquidar una diferencia, spec §6.4)', () => {
+  it('liquidar sin confirm devuelve el preview con la huella; con confirm usa el origen del preview y la clave del MCP', async () => {
+    mockPreviewLiq.mockResolvedValue(pvLiq())
+    const pv = parse(await handlers.get('settle_service_pay_difference')!({ venueId: 'v1', classSessionId: 'c1', idempotencyKey: 'clave-1234' }, {}))
+    expect(pv).toMatchObject({ requiresConfirmation: true, expectedSourceFingerprint: 'h'.repeat(64) })
+    mockLiquidar.mockResolvedValue({ lineas: [{ staffId: 'a', amount: '40.00' }], yaLiquidada: false })
+    await handlers.get('settle_service_pay_difference')!({ venueId: 'v1', classSessionId: 'c1', idempotencyKey: 'clave-1234', confirm: true, expectedSourceFingerprint: 'h'.repeat(64) }, {})
+    expect(mockLiquidar).toHaveBeenCalledWith(expect.objectContaining({ periodoOrigenId: 'p8', huellaEsperada: 'h'.repeat(64), solicitudId: 'mcp-clave-1234' }))
+    expect(auditMcpWrite).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ action: 'SERVICE_PAY_DIFFERENCE_SETTLED', entity: 'ClassSession', entityId: 'c1' }))
+    expect(mockRequireWrite).toHaveBeenCalledWith(expect.anything(), 'staffpay:close', expect.any(String))
+  })
+  it('el preview NOMBRA a la persona, el monto con signo y moneda, la clase, su fecha, la sede y el periodo destino (A12)', async () => {
+    mockPreviewLiq.mockResolvedValue(pvLiq())
+    const pv = parse(await settle({}))
+    expect(pv.message).toBe('Se liquida una diferencia de +$40.00 MXN a Ana Martínez por Yoga del 4 ago 2026 en Avoqado Wellness; cae en el periodo de septiembre de 2026.')
+    // La fecha que el catálogo liga al token: el periodo que se VIO, aunque pase la medianoche.
+    expect(pv).toMatchObject({ destinoFecha: '2026-09-01', moneda: 'MXN' })
+    expect(mockPreviewLiq).toHaveBeenCalledWith({ userId: 's1', venueId: 'v1', classSessionId: 'c1', destinoFecha: undefined })
+    expect(mockLiquidar).not.toHaveBeenCalled()
+  })
+  it('una sustitución nombra a las dos personas, con su signo, aunque el total sea $0; un pendiente de $0 no se nombra', async () => {
+    mockPreviewLiq.mockResolvedValue(
+      pvLiq({
+        destino: { start: '2026-09-01', end: '2026-09-15', venueIds: ['v1'] },
+        filas: [fila('a', 'Ana Martínez', '-570.00'), fila('b', 'Beto Ruiz', '0.00'), fila('c', 'Carla Soto', '570.00')],
+        total: '0.00',
+      }),
+    )
+    const pv = parse(await settle({ destinoFecha: '2026-09-10' }))
+    expect(pv.requiresConfirmation).toBe(true)
+    expect(pv.message).toBe(
+      'Se liquidan diferencias de -$570.00 MXN a Ana Martínez, +$570.00 MXN a Carla Soto por Yoga del 4 ago 2026 en Avoqado Wellness; caen en el periodo del 1 sep 2026 al 15 sep 2026.',
+    )
+    expect(pv.destinoFecha).toBe('2026-09-10')
+  })
+  it('una clase en excepción no ofrece confirmar y dice el motivo legible', async () => {
+    mockPreviewLiq.mockResolvedValue(pvLiq({ filas: [fila(null, null, null, { estadoClase: 'EXCEPCION', motivo: 'SIN_TABLA' })], total: '0.00', bloqueada: true }))
+    const r = parse(await settle({}))
+    expect(r.requiresConfirmation).toBeUndefined()
+    expect(r).toMatchObject({ ok: false })
+    expect(r.error).toMatch(/No hay tabla de pagos para esta clase.*resuélvel/)
+  })
+  it('sin nada pendiente, o sin periodo cerrado de origen, no ofrece confirmar', async () => {
+    mockPreviewLiq.mockResolvedValue(pvLiq({ filas: [fila('a', 'Ana Martínez', '0.00')], total: '0.00' }))
+    const cero = parse(await settle({}))
+    expect(cero.requiresConfirmation).toBeUndefined()
+    expect(cero.error).toMatch(/no tiene diferencia pendiente/)
+    mockPreviewLiq.mockResolvedValue(pvLiq({ periodoOrigen: null, filas: [], total: '0.00' }))
+    const sinOrigen = parse(await settle({}))
+    expect(sinOrigen.requiresConfirmation).toBeUndefined()
+    expect(sinOrigen.error).toMatch(/no pertenece a un periodo cerrado/)
+  })
+  it('la sede fuera del periodo destino pide ampliarAlcance ANTES de ofrecer confirmar; con él, el mensaje lo dice', async () => {
+    mockPreviewLiq.mockResolvedValue(pvLiq({ sedeEnDestino: false, destino: { start: '2026-09-01', end: '2026-09-30', venueIds: ['v2'] } }))
+    const r = parse(await settle({}))
+    expect(r).toMatchObject({ ok: false, needsInput: true, field: 'ampliarAlcance' })
+    expect(r.requiresConfirmation).toBeUndefined()
+    expect(r.question).toMatch(/Avoqado Wellness no está en el periodo de septiembre de 2026.*ampliarAlcance:true/)
+    const ok = parse(await settle({ ampliarAlcance: true }))
+    expect(ok.requiresConfirmation).toBe(true)
+    expect(ok.message).toMatch(/Avoqado Wellness se suma a ese periodo\.$/)
+  })
+  it('confirmar sin la huella del preview la pide; un reintento ya liquidado no se vuelve a auditar', async () => {
+    mockPreviewLiq.mockResolvedValue(pvLiq())
+    const sinHuella = parse(await settle({ confirm: true }))
+    expect(sinHuella).toMatchObject({ needsInput: true, field: 'expectedSourceFingerprint' })
+    expect(mockLiquidar).not.toHaveBeenCalled()
+    mockLiquidar.mockResolvedValue({ lineas: [{ staffId: 'a', amount: '40.00' }], yaLiquidada: true })
+    const r = parse(await settle({ confirm: true, expectedSourceFingerprint: 'h'.repeat(64), destinoFecha: '2026-09-01', ampliarAlcance: true }))
+    expect(r).toMatchObject({ ok: true, yaLiquidada: true })
+    expect(mockLiquidar).toHaveBeenCalledWith({
+      userId: 's1', venueId: 'v1', classSessionId: 'c1', destinoFecha: '2026-09-01', ampliarAlcance: true,
+      periodoOrigenId: 'p8', huellaEsperada: 'h'.repeat(64), solicitudId: 'mcp-clave-1234',
+    })
+    expect(auditMcpWrite).not.toHaveBeenCalled()
+  })
+  it.each([
+    ['SEDE_FUERA_DEL_PERIODO', 400, /ampliarAlcance: true/],
+    ['HUELLA_CAMBIO', 409, /vista previa.*sin confirm/],
+    ['ORIGEN_CAMBIO', 409, /vista previa/],
+    ['PERIODO_CERRADO', 409, /periodo abierto/],
+    ['CLAVE_REUTILIZADA', 409, /idempotencyKey nueva/],
+    ['CLASE_EN_EXCEPCION', 400, /coach, nivel, tabla o monto/],
+  ])('%s del service ⇒ texto claro con qué hacer (no un 500)', async (code, statusCode, queHacer) => {
+    mockPreviewLiq.mockResolvedValue(pvLiq())
+    mockLiquidar.mockRejectedValue(Object.assign(new Error('mensaje del service'), { statusCode, code, details: { preview: { total: '80.00' } } }))
+    const r = parse(await settle({ confirm: true, expectedSourceFingerprint: 'h'.repeat(64) }))
+    expect(r).toMatchObject({ ok: false, code, preview: { total: '80.00' } })
+    expect(r.error).toMatch(/^mensaje del service\. /)
+    expect(r.error).toMatch(queHacer)
+    expect(auditMcpWrite).not.toHaveBeenCalled()
+  })
+  it('una sede fuera del alcance de la conexión se niega ANTES de consultar nada', async () => {
+    await expect(settle({ venueId: 'foreign' })).rejects.toThrow('out of scope')
+    expect(mockOrgTiene).not.toHaveBeenCalled()
+    expect(mockPreviewLiq).not.toHaveBeenCalled()
+  })
+  it('sin staffpay:close no hay ni preview', async () => {
+    mockHasPermission.mockReturnValue(false)
+    const r = parse(await settle({}))
+    expect(r.error).toMatch(/staffpay:close/)
+    expect(mockPreviewLiq).not.toHaveBeenCalled()
+  })
+})
+
+describe('settle_service_pay_difference — el módulo se exige en la organización, no en la sede de la clase (Codex R2-R1-1)', () => {
+  beforeEach(() => {
+    mockPreviewLiq.mockResolvedValue(pvLiq())
+  })
+  it('sede de la clase con el módulo apagado + organización con el módulo en otra sede ⇒ sí da el preview', async () => {
+    mockAccess.mockResolvedValue(false)
+    mockOrgTiene.mockResolvedValue(true)
+    const pv = parse(await handlers.get('settle_service_pay_difference')!({ venueId: 'v1', classSessionId: 'c1', idempotencyKey: 'clave-1234' }, {}))
+    expect(pv).toMatchObject({ requiresConfirmation: true })
+    expect(mockOrgTiene).toHaveBeenCalledWith('v1')
+  })
+  it('organización sin el módulo en ninguna sede ⇒ lo explica y no calcula nada', async () => {
+    mockAccess.mockResolvedValue(false)
+    mockOrgTiene.mockResolvedValue(false)
+    const r = parse(await handlers.get('settle_service_pay_difference')!({ venueId: 'v1', classSessionId: 'c1', idempotencyKey: 'clave-1234' }, {}))
+    expect(r).toMatchObject({ ok: false })
+    expect(r.error).toMatch(/no está activo en ninguna sede/)
+    expect(mockPreviewLiq).not.toHaveBeenCalled()
+  })
+  it('las otras escrituras siguen exigiendo el módulo en SU sede', async () => {
+    mockAccess.mockResolvedValue(false)
+    mockOrgTiene.mockResolvedValue(true)
+    const r = parse(await handlers.get('close_service_pay_period')!({ venueId: 'v1', fecha: '2026-08-15' }, {}))
+    expect(r.error).toMatch(/no está activo en este negocio/)
+    expect(mockPreview).not.toHaveBeenCalled()
+  })
+})
+
+describe('staff_service_pay_differences (lista de lo pendiente de un periodo cerrado)', () => {
+  const filaCompleta = (extra: Record<string, unknown> = {}) => ({
+    ...fila('a', 'Ana Martínez', '40.00'),
+    startsAt: new Date('2026-08-04T14:00:00Z'), fechaValoracion: '2026-08-04', periodoOrigenId: 'p8', coachActual: 'a',
+    payLevelId: 'l1', payLevelName: 'Head Coach', tableVersionId: 'tv1', countMode: 'BOOKED', conteo: 9, ...extra,
+  })
+  it('devuelve por fila clase, fecha local, sede, persona y montos con moneda; cursor y vista parcial', async () => {
+    mockDiferencias.mockResolvedValue({
+      items: [filaCompleta(), filaCompleta({ persona: null, personaNombre: null, estadoClase: 'EXCEPCION', motivo: 'COACH_SIN_NIVEL', corresponde: null, pendiente: null })],
+      nextCursor: 'v1:c1:a',
+      parcial: true,
+    })
+    const r = parse(await handlers.get('staff_service_pay_differences')!({ venueId: 'v1', periodId: 'p8', cursor: 'v1:c0:a', limit: 20 }, {}))
+    // Un solo argumento: las opciones de prueba (ahora, tamLote, topeSinAncla) nunca salen del MCP.
+    expect(mockDiferencias.mock.calls[0]).toEqual([{ userId: 's1', venueId: 'v1', periodId: 'p8', cursor: 'v1:c0:a', limit: 20 }])
+    expect(r.items[0]).toEqual({
+      classSessionId: 'c1', clase: 'Yoga', fecha: '2026-08-04', venueId: 'v1', sede: 'Avoqado Wellness', staffId: 'a', persona: 'Ana Martínez',
+      corresponde: '610.00', congelado: '570.00', conciliado: '0.00', pendiente: '40.00', moneda: 'MXN', enExcepcion: false, motivo: null,
+    })
+    expect(r.items[1]).toMatchObject({ persona: null, pendiente: null, enExcepcion: true, motivo: 'La coach no tiene nivel' })
+    expect(r).toMatchObject({ nextCursor: 'v1:c1:a', parcial: true })
+    expect(r.message).toMatch(/Vista parcial/)
+  })
+  it('sin limit pide 50; sin staffpay:read no lee nada; con el módulo apagado lo explica', async () => {
+    mockDiferencias.mockResolvedValue({ items: [], nextCursor: null, parcial: false })
+    const vacio = parse(await handlers.get('staff_service_pay_differences')!({ venueId: 'v1', periodId: 'p8' }, {}))
+    expect(mockDiferencias).toHaveBeenCalledWith(expect.objectContaining({ limit: 50 }))
+    expect(vacio).toMatchObject({ items: [], nextCursor: null, parcial: false })
+    expect(vacio.message).toBeUndefined()
+    mockDiferencias.mockClear()
+    mockHasPermission.mockReturnValue(false)
+    expect(parse(await handlers.get('staff_service_pay_differences')!({ venueId: 'v1', periodId: 'p8' }, {})).error).toMatch(/staffpay:read/)
+    mockHasPermission.mockReturnValue(true)
+    mockAccess.mockResolvedValue(false)
+    expect(parse(await handlers.get('staff_service_pay_differences')!({ venueId: 'v1', periodId: 'p8' }, {})).error).toMatch(/no está activo/)
+    expect(mockDiferencias).not.toHaveBeenCalled()
+  })
+  it('una sede fuera del alcance se niega antes de consultar nada; un periodo que no existe es una respuesta, no un 500', async () => {
+    await expect(handlers.get('staff_service_pay_differences')!({ venueId: 'foreign', periodId: 'p8' }, {})).rejects.toThrow('out of scope')
+    expect(mockDiferencias).not.toHaveBeenCalled()
+    mockDiferencias.mockRejectedValue(Object.assign(new Error('Periodo no encontrado'), { statusCode: 404 }))
+    expect(parse(await handlers.get('staff_service_pay_differences')!({ venueId: 'v1', periodId: 'p8' }, {}))).toMatchObject({ ok: false, error: 'Periodo no encontrado' })
+  })
+})
+
 describe('staff_service_pay — por el catálogo real (dos pasos con confirmationToken)', () => {
   it('el ajuste confirma con la fecha del periodo que mostró el preview, nunca con «hoy»', async () => {
     const server = new McpServer({ name: 'staffpay', version: '1' })
@@ -250,6 +463,57 @@ describe('staff_service_pay — por el catálogo real (dos pasos con confirmatio
       const r = await call({ ...p.confirmationArguments, confirm: true, confirmationToken: p.confirmationToken })
       expect(r).toMatchObject({ ok: true, id: 'e1' })
       expect(mockAjuste).toHaveBeenCalledWith(expect.objectContaining({ fecha: '2026-09-01', clientKey: 'mcp-clave-1234', huellaEsperada: 'a'.repeat(64) }))
+    } finally {
+      await client.close()
+      await server.close()
+    }
+  })
+  it('liquidar confirma con la clase, la fecha destino y la ampliación que se vieron; con otras, el token no sirve', async () => {
+    const server = new McpServer({ name: 'staffpay', version: '1' })
+    const s = { ...scope, scopes: ['mcp:read', 'mcp:write'] } as unknown as McpScope
+    configureToolCatalog(server, s)
+    registerStaffPayTools(server, s)
+    const client = new Client({ name: 'staffpay-test', version: '1' })
+    const [a, b] = InMemoryTransport.createLinkedPair()
+    await Promise.all([server.connect(a), client.connect(b)])
+    try {
+      const call = async (args: Record<string, unknown>) =>
+        JSON.parse(((await client.callTool({ name: 'settle_service_pay_difference', arguments: args })).content as Array<{ text: string }>)[0].text)
+      mockPreviewLiq.mockResolvedValue(pvLiq())
+      const p = await call({ venueId: 'v1', classSessionId: 'c1', idempotencyKey: 'clave-1234' })
+      expect(p.confirmationArguments).toEqual({
+        venueId: 'v1', classSessionId: 'c1', idempotencyKey: 'clave-1234', destinoFecha: '2026-09-01', expectedSourceFingerprint: 'h'.repeat(64),
+      })
+      for (const cambio of [{ destinoFecha: '2026-10-01' }, { ampliarAlcance: true }, { classSessionId: 'c2' }]) {
+        const r = await call({ ...p.confirmationArguments, ...cambio, confirm: true, confirmationToken: p.confirmationToken })
+        expect(r).toMatchObject({ needsInput: true, field: 'confirmationToken' })
+      }
+      expect(mockLiquidar).not.toHaveBeenCalled()
+      mockLiquidar.mockResolvedValue({ lineas: [{ staffId: 'a', amount: '40.00' }], yaLiquidada: false })
+      const r = await call({ ...p.confirmationArguments, confirm: true, confirmationToken: p.confirmationToken })
+      expect(r).toMatchObject({ ok: true, lineas: [{ staffId: 'a', amount: '40.00' }] })
+      expect(mockLiquidar).toHaveBeenCalledWith(
+        expect.objectContaining({ classSessionId: 'c1', destinoFecha: '2026-09-01', periodoOrigenId: 'p8', huellaEsperada: 'h'.repeat(64), solicitudId: 'mcp-clave-1234' }),
+      )
+    } finally {
+      await client.close()
+      await server.close()
+    }
+  })
+  it('liquidar exige una idempotencyKey que quepa en la clave del service (4 a 96, sin «:»)', async () => {
+    const server = new McpServer({ name: 'staffpay', version: '1' })
+    const s = { ...scope, scopes: ['mcp:read', 'mcp:write'] } as unknown as McpScope
+    configureToolCatalog(server, s)
+    registerStaffPayTools(server, s)
+    const client = new Client({ name: 'staffpay-test', version: '1' })
+    const [a, b] = InMemoryTransport.createLinkedPair()
+    await Promise.all([server.connect(a), client.connect(b)])
+    try {
+      for (const idempotencyKey of [undefined, 'abc', 'clave:1234', 'k'.repeat(97)]) {
+        const r = await client.callTool({ name: 'settle_service_pay_difference', arguments: { venueId: 'v1', classSessionId: 'c1', idempotencyKey } })
+        expect(r.isError).toBe(true)
+      }
+      expect(mockPreviewLiq).not.toHaveBeenCalled()
     } finally {
       await client.close()
       await server.close()

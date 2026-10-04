@@ -2,7 +2,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 import prisma from '@/utils/prismaClient'
 import { hasPermission } from '@/services/access/access.service'
-import { venueHasServicePayAccess } from '@/services/dashboard/staffPay/acceso'
+import { organizacionTieneServicePay, venueHasServicePayAccess } from '@/services/dashboard/staffPay/acceso'
 import { detallePersona, reportePeriodo } from '@/services/dashboard/staffPay/reporte.service'
 import { listarNiveles, nivelesVigentes } from '@/services/dashboard/staffPay/niveles.service'
 import { listarTablas } from '@/services/dashboard/staffPay/tablas.service'
@@ -11,6 +11,9 @@ import { cerrarPeriodo, previewCierre, type Bloqueo } from '@/services/dashboard
 import { agregarAjusteManual, previewAjusteManual } from '@/services/dashboard/staffPay/ajustesManuales.service'
 import { marcarPagado, previewPagado, reciboDePersona } from '@/services/dashboard/staffPay/recibos.service'
 import { periodoQueContieneFecha } from '@/services/dashboard/staffPay/periodosGuardados'
+import { liquidarDiferencia, previewLiquidacion } from '@/services/dashboard/staffPay/liquidacion.service'
+import { diferenciasDelPeriodo } from '@/services/dashboard/staffPay/diferencias.service'
+import type { MotivoExcepcion } from '@/services/dashboard/staffPay/valoracion'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
@@ -19,6 +22,35 @@ import { auditMcpWrite } from '../audit'
 
 const sedeArg = z.string().min(1).max(64).optional().describe('Only this venue of the organization (default: all venues you can read)')
 const fecha = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe('Any day inside the pay period, YYYY-MM-DD venue-local (default: today)')
+
+/** Las mismas palabras que el dashboard (`staffPay.json`): el agente se lo repite al dueño. */
+const MOTIVOS: Record<MotivoExcepcion, string> = {
+  SIN_COACH: 'La clase no tiene coach',
+  COACH_SIN_NIVEL: 'La coach no tiene nivel',
+  SIN_TABLA: 'No hay tabla de pagos para esta clase',
+  SIN_MONTO_PARA_ESE_CONTEO: 'Falta el monto para ese número de lugares',
+}
+/** Qué hacer ante cada rechazo de «liquidar diferencia» (spec §6.4): el agente lo sigue sin adivinar. */
+const QUE_HACER_LIQUIDAR: Record<string, string> = {
+  HUELLA_CAMBIO: 'Pide de nuevo la vista previa (sin confirm) y muéstrasela al usuario antes de confirmar.',
+  ORIGEN_CAMBIO:
+    'Pide de nuevo la vista previa: si la clase se movió a un periodo abierto, ya no hay diferencia que liquidar (se paga al cerrar ese periodo).',
+  PERIODO_CERRADO: 'Pide la vista previa sin destinoFecha (o con un día del periodo abierto) para liquidar en el periodo abierto.',
+  CLAVE_REUTILIZADA: 'Usa una idempotencyKey nueva para esta liquidación.',
+  CLASE_EN_EXCEPCION: 'Resuelve la clase (coach, nivel, tabla o monto) y vuelve a pedir la vista previa.',
+  SEDE_FUERA_DEL_PERIODO: 'Si el usuario quiere sumar la sede al periodo, repite la vista previa con ampliarAlcance: true.',
+}
+/** `YYYY-MM-DD` (fecha local) como fecha UTC: sólo para darle formato, nunca como instante. */
+const diaUTC = (f: string) => {
+  const [y, m, d] = f.split('-').map(Number)
+  return new Date(Date.UTC(y, m - 1, d))
+}
+const diaLegible = (f: string) => diaUTC(f).toLocaleDateString('es-MX', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' })
+/** «de septiembre de 2026» si es el mes completo; si no, «del 1 sep 2026 al 15 sep 2026». */
+const periodoLegible = (p: { start: string; end: string }) =>
+  p.start.endsWith('-01') && p.start.slice(0, 7) === p.end.slice(0, 7) && diaUTC(p.end).getUTCMonth() !== new Date(diaUTC(p.end).getTime() + 86_400_000).getUTCMonth()
+    ? `de ${diaUTC(p.start).toLocaleDateString('es-MX', { month: 'long', year: 'numeric', timeZone: 'UTC' })}`
+    : `del ${diaLegible(p.start)} al ${diaLegible(p.end)}`
 
 export function registerStaffPayTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
@@ -112,11 +144,17 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
   )
 
   // ── Fase 2: escritura. Dos pasos (el catálogo emite y valida el confirmationToken). ──
-  const puedeEscribir = async (venueId: string): Promise<string | null> => {
+  // `modulo: 'organizacion'` (sólo liquidar, Codex R2-R1-1, spec §5.6): la sede de la clase pudo apagar el módulo; basta con
+  // que alguna sede de la organización lo tenga. Las demás escrituras lo exigen en su sede.
+  const puedeEscribir = async (venueId: string, modulo: 'sede' | 'organizacion' = 'sede'): Promise<string | null> => {
     guard.venueFilter(venueId) // lanza si la sede está fuera del alcance
     requireWriteScopeAlways(scope, 'staffpay:close', 'registra pagos al staff')
     if (!guard.tienePermiso('staffpay:close', venueId)) return 'Necesitas el permiso staffpay:close en esta sede.'
-    if (!(await venueHasServicePayAccess(venueId))) return 'Pago por servicio no está activo en este negocio; pídelo a Avoqado.'
+    if (modulo === 'sede') {
+      if (!(await venueHasServicePayAccess(venueId))) return 'Pago por servicio no está activo en este negocio; pídelo a Avoqado.'
+    } else if (!(await organizacionTieneServicePay(venueId))) {
+      return 'Pago por servicio no está activo en ninguna sede de este negocio; pídelo a Avoqado.'
+    }
     return null
   }
   // Un 4xx del service (huella cambió, periodo cerrado, sin permiso…) es una respuesta, no un 500.
@@ -126,6 +164,7 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
     return text({ ok: false, error: `${err.message}${extra}`, code: err.code ?? null, preview: err.details?.preview ?? null })
   }
   const pesos = (s: string) => Number(s).toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+  const conSigno = (s: string, moneda: string) => `${Number(s) < 0 ? '-' : '+'}$${pesos(String(Math.abs(Number(s))))} ${moneda}`
   const motivo = (b: Bloqueo) =>
     b.codigo === 'NO_HA_TERMINADO'
       ? `el periodo termina el ${b.hasta}`
@@ -319,6 +358,145 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
       } catch (e) {
         const cambio = (e as { code?: string })?.code === 'HUELLA_CAMBIO'
         return fallo(e, cambio ? ' Revisa el preview: puede que ya se haya registrado.' : '')
+      }
+    },
+  )
+
+  server.tool(
+    'staff_service_pay_differences',
+    'Pending pay differences of a CLOSED pay-per-service period: classes whose pay changed after closing (corrected head count, substitute coach, cancellation, a class that arrived late). One row per class and person: what corresponds today, what was frozen at closing, what was already settled and what is pending (positive or negative), or the exception that blocks it. Paginated with a cursor; partial=true means some venues were left out for lack of permission. Settle a class with settle_service_pay_difference. Requires staffpay:read.',
+    {
+      venueId: z.string().min(1).max(64).describe('Venue in your scope'),
+      periodId: z.string().min(1).max(64).describe('Closed period'),
+      cursor: z.string().max(200).optional().describe('nextCursor from the previous page'),
+      limit: z.number().int().positive().max(100).optional().describe('Max rows (default 50)'),
+    },
+    async ({ venueId, periodId, cursor, limit }) => {
+      const no = await puedeLeer(venueId)
+      if (no) return text({ ok: false, error: no })
+      try {
+        const r = await diferenciasDelPeriodo({ userId: scope.staffId, venueId, periodId, cursor, limit: limit ?? 50 })
+        const ids = [...new Set(r.items.map(f => f.venueId))]
+        const sedes = new Map(
+          (await prisma.venue.findMany({ where: { id: { in: ids } }, select: { id: true, name: true, currency: true }, take: ids.length })).map(v => [v.id, v]),
+        )
+        return text({
+          items: r.items.map(f => ({
+            classSessionId: f.classSessionId,
+            clase: f.productName,
+            fecha: f.fechaLocal,
+            venueId: f.venueId,
+            sede: sedes.get(f.venueId)?.name ?? null,
+            staffId: f.persona,
+            persona: f.personaNombre,
+            corresponde: f.corresponde,
+            congelado: f.congelado,
+            conciliado: f.conciliado,
+            pendiente: f.pendiente,
+            moneda: sedes.get(f.venueId)?.currency ?? 'MXN',
+            enExcepcion: f.pendiente === null,
+            motivo: f.motivo ? MOTIVOS[f.motivo] : null,
+          })),
+          nextCursor: r.nextCursor,
+          parcial: r.parcial,
+          ...(r.parcial ? { message: 'Vista parcial: faltan sedes del periodo donde no tienes staffpay:read.' } : {}),
+        })
+      } catch (e) {
+        return fallo(e)
+      }
+    },
+  )
+
+  server.tool(
+    'settle_service_pay_difference',
+    'Settle the pending pay difference of one class that belongs to an already closed period (a corrected head count, a substitute coach, a cancellation after closing, a class that arrived late). The difference is added once to an open period; the closed receipt never changes. Works even if the class venue later turned pay-per-service off, as long as some venue of the organization has it. Two steps: preview (who receives how much, the class, the venue and the period it lands in, and expectedSourceFingerprint), then confirm:true with that fingerprint. If the class venue is not in the open period it asks for ampliarAlcance:true to add it. idempotencyKey is required so a retry never pays twice. Requires staffpay:close in the class venue and in every venue of the open period.',
+    {
+      venueId: z.string().min(1).max(64).describe('Venue of the class'),
+      classSessionId: z.string().min(1).max(64).describe('Class with a pending difference'),
+      destinoFecha: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe('Any day inside the open period that receives it (default: today); the preview returns the one to confirm with'),
+      idempotencyKey: z.string().regex(/^[A-Za-z0-9_.-]{4,96}$/).describe('Unique key for this settlement (4-96 letters, digits, - _ .)'),
+      ampliarAlcance: z.boolean().optional().describe('Add the class venue to the open period when it is not there (e.g. the venue turned the feature off)'),
+      expectedSourceFingerprint: z.string().max(128).optional().describe('Fingerprint from the preview'),
+      confirm: z.boolean().optional(),
+    },
+    async ({ venueId, classSessionId, destinoFecha, idempotencyKey, ampliarAlcance, expectedSourceFingerprint, confirm }) => {
+      // El módulo se exige en la ORGANIZACIÓN, no en la sede de la clase (Codex R2-R1-1, spec §5.6).
+      const no = await puedeEscribir(venueId, 'organizacion')
+      if (no) return text({ ok: false, error: no })
+      try {
+        if (confirm !== true) {
+          const pv = await previewLiquidacion({ userId: scope.staffId, venueId, classSessionId, destinoFecha })
+          if (!pv.periodoOrigen) {
+            return text({ ok: false, preview: pv, error: 'Esta clase no pertenece a un periodo cerrado: no tiene diferencia que liquidar (se paga al cerrar su periodo).' })
+          }
+          if (pv.bloqueada) {
+            const motivos = [...new Set(pv.filas.flatMap(f => (f.motivo ? [MOTIVOS[f.motivo]] : [])))].join('; ')
+            return text({ ok: false, preview: pv, error: `La clase tiene algo sin resolver (${motivos || 'coach, nivel, tabla o monto'}): resuélvela antes de liquidar.` })
+          }
+          const conMonto = pv.filas.filter(f => f.pendiente !== null && Number(f.pendiente) !== 0)
+          if (!conMonto.length) return text({ ok: false, preview: pv, error: 'Esta clase no tiene diferencia pendiente: no hay nada que liquidar.' })
+          const sede = await prisma.venue.findUnique({ where: { id: venueId }, select: { name: true, currency: true } })
+          const sedeNombre = sede?.name ?? venueId
+          const moneda = sede?.currency ?? 'MXN'
+          const periodo = periodoLegible(pv.destino)
+          // La deuda de una sede fuera del periodo entra sólo con ampliación explícita (spec §5.6): se pide aquí, para que
+          // el token ya la lleve (como las huérfanas del cierre).
+          if (!pv.sedeEnDestino && ampliarAlcance !== true) {
+            return text({
+              ok: false,
+              needsInput: true,
+              field: 'ampliarAlcance',
+              preview: pv,
+              question: `${sedeNombre} no está en el periodo ${periodo}. Si el usuario quiere sumarla para liquidar, vuelve a pedir la vista previa con ampliarAlcance:true.`,
+            })
+          }
+          // A quién, cuánto, de qué clase y en qué sede: con dos «Ana» en el estudio, esto evita pagarle a la equivocada (A12).
+          const c = conMonto[0]
+          const quien = conMonto.map(f => `${conSigno(f.pendiente!, moneda)} a ${f.personaNombre ?? 'una persona sin nombre'}`).join(', ')
+          const varias = conMonto.length > 1
+          return text({
+            ok: false,
+            requiresConfirmation: true,
+            preview: pv,
+            expectedSourceFingerprint: pv.huella,
+            // El catálogo la liga a la confirmación: se liquida en el periodo que se VIO, aunque pase la medianoche.
+            destinoFecha: destinoFecha ?? pv.destino.start,
+            moneda,
+            message: `Se liquida${varias ? 'n diferencias' : ' una diferencia'} de ${quien} por ${c.productName} del ${diaLegible(c.fechaLocal)} en ${sedeNombre}; ${varias ? 'caen' : 'cae'} en el periodo ${periodo}.${
+              pv.sedeEnDestino ? '' : ` ${sedeNombre} se suma a ese periodo.`
+            }`,
+          })
+        }
+        if (!expectedSourceFingerprint) return text({ ok: false, needsInput: true, field: 'expectedSourceFingerprint', question: 'Pide primero la vista previa.' })
+        // El origen sale de un preview DENTRO de esta llamada; la huella, del argumento: si la clase se movió, la huella (que
+        // cubre el origen) ya no coincide y el service responde HUELLA_CAMBIO u ORIGEN_CAMBIO.
+        const pv = await previewLiquidacion({ userId: scope.staffId, venueId, classSessionId, destinoFecha })
+        if (!pv.periodoOrigen) {
+          return text({ ok: false, code: 'ORIGEN_CAMBIO', error: `La clase ya no pertenece a un periodo cerrado. ${QUE_HACER_LIQUIDAR.ORIGEN_CAMBIO}` })
+        }
+        const r = await liquidarDiferencia({
+          userId: scope.staffId,
+          venueId,
+          classSessionId,
+          destinoFecha,
+          ampliarAlcance,
+          periodoOrigenId: pv.periodoOrigen.id,
+          huellaEsperada: expectedSourceFingerprint,
+          solicitudId: `mcp-${idempotencyKey}`,
+        })
+        if (!r.yaLiquidada) {
+          await auditMcpWrite(scope, {
+            action: 'SERVICE_PAY_DIFFERENCE_SETTLED',
+            entity: 'ClassSession',
+            entityId: classSessionId,
+            venueId,
+            data: { lineas: r.lineas },
+          })
+        }
+        return text({ ok: true, ...r })
+      } catch (e) {
+        const code = (e as { code?: string })?.code
+        return fallo(e, code && QUE_HACER_LIQUIDAR[code] ? `. ${QUE_HACER_LIQUIDAR[code]}` : '')
       }
     },
   )

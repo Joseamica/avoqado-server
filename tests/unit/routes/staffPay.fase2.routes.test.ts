@@ -10,14 +10,18 @@ jest.mock('@/services/dashboard/staffPay/recibos.service', () => ({
   exportarRecibo: jest.fn(),
 }))
 jest.mock('@/services/dashboard/export.helpers', () => ({ sendExport: jest.fn() }))
+jest.mock('@/services/dashboard/staffPay/diferencias.service', () => ({ diferenciasDelPeriodo: jest.fn() }))
+jest.mock('@/services/dashboard/staffPay/liquidacion.service', () => ({ previewLiquidacion: jest.fn(), liquidarDiferencia: jest.fn() }))
 
 import * as periodos from '@/services/dashboard/staffPay/periodosGuardados'
 import * as cierre from '@/services/dashboard/staffPay/cierre.service'
 import * as manuales from '@/services/dashboard/staffPay/ajustesManuales.service'
 import * as recibos from '@/services/dashboard/staffPay/recibos.service'
 import { sendExport } from '@/services/dashboard/export.helpers'
+import * as dif from '@/services/dashboard/staffPay/diferencias.service'
+import * as liq from '@/services/dashboard/staffPay/liquidacion.service'
 import * as controller from '@/controllers/dashboard/staffPay.dashboard.controller'
-import router from '@/routes/dashboard/staffPay.routes'
+import router, { servicePayGateOrganizacion } from '@/routes/dashboard/staffPay.routes'
 
 const CUID = 'ckxxxxxxxxxxxxxxxxxxxxxxx'
 
@@ -80,6 +84,27 @@ describe('Zod de la fase 2 (sólo forma, mensajes en español)', () => {
     expect(schemas.periodParamsSchema.safeParse({ venueId: CUID, periodId: CUID }).success).toBe(true)
     expect(schemas.periodParamsSchema.safeParse({ venueId: CUID, periodId: 'x' }).success).toBe(false)
   })
+  it('liquidar exige origen, huella y una clave de solicitud', () => {
+    const ok = { periodoOrigenId: 'ckxxxxxxxxxxxxxxxxxxxxxxx', huellaEsperada: 'a'.repeat(64), solicitudId: 's'.repeat(16) }
+    expect(schemas.liquidarSchema.safeParse(ok).success).toBe(true)
+    expect(schemas.liquidarSchema.safeParse({ ...ok, solicitudId: 'x' }).success).toBe(false)
+    // «Sumar la sede y liquidar» (SEDE_FUERA_DEL_PERIODO) y una fecha del periodo destino.
+    expect(schemas.liquidarSchema.safeParse({ ...ok, ampliarAlcance: true, destinoFecha: '2026-09-10' }).success).toBe(true)
+    expect(schemas.liquidarSchema.safeParse({ ...ok, ampliarAlcance: 'si' }).success).toBe(false)
+    // Sin `:` (la clave de cada línea es `${solicitudId}:${persona}`).
+    expect(schemas.liquidarSchema.safeParse({ ...ok, solicitudId: 'clave:12345678' }).success).toBe(false)
+    const malo = schemas.liquidarSchema.safeParse({ ...ok, huellaEsperada: 'x' })
+    expect(malo.success).toBe(false)
+    if (!malo.success) expect(malo.error.errors.map(e => e.message)).toEqual(['Revisa la diferencia antes de liquidarla'])
+  })
+  it('la lista de diferencias: limit de 1 a 100, 50 por default, convertido a número (minor de B1)', () => {
+    expect(schemas.differencesQuerySchema.parse({})).toEqual({ limit: 50 })
+    expect(schemas.differencesQuerySchema.parse({ limit: '20', cursor: 'v:c:p' })).toEqual({ limit: 20, cursor: 'v:c:p' })
+    expect(schemas.differencesQuerySchema.safeParse({ limit: '101' }).success).toBe(false)
+    expect(schemas.differencesQuerySchema.safeParse({ limit: 'Infinity' }).success).toBe(false)
+    expect(schemas.destinoQuerySchema.safeParse({ destinoFecha: 'ayer' }).success).toBe(false)
+    expect(schemas.destinoQuerySchema.safeParse({}).success).toBe(true)
+  })
   it('cerrar sin confirmarHuerfanas la deja en false', () => {
     expect(schemas.cerrarPeriodoSchema.parse({ fecha: '2026-08-15', huellaEsperada: 'b'.repeat(64) })).toMatchObject({
       confirmarHuerfanas: false,
@@ -108,6 +133,9 @@ describe('Rutas de la fase 2: método, ruta y permiso', () => {
     ['post', '/adjustments', 'staffpay:close'],
     ['get', '/staff/:staffId/receipt', 'staffpay:read'],
     ['get', '/staff/:staffId/receipt/export', 'staffpay:read'],
+    ['get', '/periods/:periodId/differences', 'staffpay:read'],
+    ['get', '/class-sessions/:sessionId/difference', 'staffpay:read'],
+    ['post', '/class-sessions/:sessionId/difference/settle', 'staffpay:close'],
   ])('%s %s exige %s', (method, path, permission) => {
     expect(permiso(method, path)).toBe(permission)
   })
@@ -118,6 +146,21 @@ describe('Rutas de la fase 2: método, ruta y permiso', () => {
     const primera = stack.findIndex(l => l.route?.path === '/periods')
     expect(gate).toBeGreaterThan(-1)
     expect(primera).toBeGreaterThan(gate)
+  })
+
+  it('las dos rutas de UNA clase van ANTES del gate de la sede, con el de la organización; la lista del periodo, después (Codex R2-R1-1)', () => {
+    const stack: any[] = (router as any).stack
+    const gate = stack.findIndex(l => !l.route && l.handle?.name === 'servicePayGate')
+    const ruta = (method: string, path: string) => stack.findIndex(l => l.route?.path === path && l.route.methods[method])
+    for (const [method, path] of [
+      ['get', '/class-sessions/:sessionId/difference'],
+      ['post', '/class-sessions/:sessionId/difference/settle'],
+    ]) {
+      const i = ruta(method, path)
+      expect({ path, antesDelGate: i > -1 && i < gate }).toEqual({ path, antesDelGate: true })
+      expect(stack[i].route.stack[0].handle).toBe(servicePayGateOrganizacion)
+    }
+    expect(ruta('get', '/periods/:periodId/differences')).toBeGreaterThan(gate)
   })
 })
 
@@ -279,6 +322,63 @@ describe('Controller de la fase 2', () => {
       res(),
       next,
     )
+    expect(next).toHaveBeenCalledWith(e)
+  })
+
+  it('la lista de diferencias pasa periodo, cursor y limit; jamás las opciones de prueba (ahora, tamLote, topeSinAncla)', async () => {
+    ;(dif.diferenciasDelPeriodo as jest.Mock).mockResolvedValue({ items: [], nextCursor: null, parcial: false })
+    const r = res()
+    await controller.getDifferences(
+      req({
+        params: { venueId: 'v1', periodId: 'p8' },
+        query: { cursor: 'v1:c1:a', limit: 20, ahora: '2020-01-01', tamLote: 1, topeSinAncla: 1 },
+      }),
+      r,
+      jest.fn(),
+    )
+    // Un solo argumento: el segundo (`opts`) nunca sale de la petición.
+    expect((dif.diferenciasDelPeriodo as jest.Mock).mock.calls[0]).toEqual([
+      { venueId: 'v1', userId: 'u1', periodId: 'p8', cursor: 'v1:c1:a', limit: 20 },
+    ])
+    expect(r.json).toHaveBeenCalledWith({ items: [], nextCursor: null, parcial: false })
+  })
+
+  it('el preview de liquidar pasa la clase y la fecha destino, nada más', async () => {
+    ;(liq.previewLiquidacion as jest.Mock).mockResolvedValue({ huella: 'h' })
+    await controller.getClassDifference(
+      req({ params: { venueId: 'v1', sessionId: 'c1' }, query: { destinoFecha: '2026-09-10', ahora: '2020-01-01' } }),
+      res(),
+      jest.fn(),
+    )
+    const llamada = (liq.previewLiquidacion as jest.Mock).mock.calls[0]
+    expect(llamada).toEqual([{ venueId: 'v1', userId: 'u1', classSessionId: 'c1', destinoFecha: '2026-09-10' }])
+    expect(llamada[0]).not.toHaveProperty('ahora')
+  })
+
+  it('liquidar arma la llamada campo por campo: ni ahora ni otro usuario o sede del body llegan al service', async () => {
+    ;(liq.liquidarDiferencia as jest.Mock).mockResolvedValue({ lineas: [], yaLiquidada: true })
+    const cuerpo = {
+      periodoOrigenId: CUID,
+      huellaEsperada: 'e'.repeat(64),
+      solicitudId: 'solicitud-1234',
+      destinoFecha: '2026-09-10',
+      ampliarAlcance: true,
+    }
+    await controller.postSettleDifference(
+      req({ params: { venueId: 'v1', sessionId: 'c1' }, body: { ...cuerpo, ahora: '2020-01-01', userId: 'otro', venueId: 'otra' } }),
+      res(),
+      jest.fn(),
+    )
+    const llamada = (liq.liquidarDiferencia as jest.Mock).mock.calls[0]
+    expect(llamada).toEqual([{ venueId: 'v1', userId: 'u1', classSessionId: 'c1', ...cuerpo }])
+    expect(llamada[0]).not.toHaveProperty('ahora')
+  })
+
+  it('un error de liquidar (con su code) pasa intacto a next', async () => {
+    const e = Object.assign(new Error('Esa sede no está en el periodo destino'), { code: 'SEDE_FUERA_DEL_PERIODO' })
+    ;(liq.liquidarDiferencia as jest.Mock).mockRejectedValue(e)
+    const next = jest.fn()
+    await controller.postSettleDifference(req({ params: { venueId: 'v1', sessionId: 'c1' }, body: {} }), res(), next)
     expect(next).toHaveBeenCalledWith(e)
   })
 

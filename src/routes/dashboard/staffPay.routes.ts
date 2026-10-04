@@ -3,7 +3,7 @@ import { z } from 'zod'
 import { checkPermission } from '../../middlewares/checkPermission.middleware'
 import { validateRequest } from '../../middlewares/validation'
 import * as controller from '../../controllers/dashboard/staffPay.dashboard.controller'
-import { venueHasServicePayAccess } from '../../services/dashboard/staffPay/acceso'
+import { organizacionTieneServicePay, venueHasServicePayAccess } from '../../services/dashboard/staffPay/acceso'
 import {
   ajusteClaseSchema,
   ajusteManualSchema,
@@ -13,11 +13,14 @@ import {
   crearNivelSchema,
   crearTablaSchema,
   cursorQuerySchema,
+  destinoQuerySchema,
+  differencesQuerySchema,
   editarNivelSchema,
   exportReciboQuerySchema,
   fechaQuerySchema,
   fechaRequeridaQuerySchema,
   levelParamsSchema,
+  liquidarSchema,
   listaPeriodosQuerySchema,
   marcarPagadoSchema,
   pagadoPreviewQuerySchema,
@@ -47,6 +50,38 @@ export async function servicePayGate(req: Request, res: Response, next: NextFunc
     return next(error)
   }
 }
+
+/**
+ * Gate de las diferencias de UNA clase (Codex R2-R1-1, spec §5.6): liquidar suma la sede de la clase al periodo destino
+ * aunque ya no tenga el módulo, así que basta con que ALGUNA sede de su organización lo tenga. Va antes del gate de la sede.
+ */
+export async function servicePayGateOrganizacion(req: Request, res: Response, next: NextFunction) {
+  try {
+    if (await organizacionTieneServicePay(req.params.venueId)) return next()
+    return res
+      .status(403)
+      .json({ error: 'module_disabled', message: 'Pago por servicio no está activo en ninguna sede de este negocio. Pídelo a Avoqado.' })
+  } catch (error) {
+    return next(error)
+  }
+}
+// La sede del URL es la de la clase: el preview pide leer ahí; liquidar, `staffpay:close` ahí, y el service lo exige
+// además en todas las sedes del periodo destino (spec §9.2).
+router.get(
+  '/class-sessions/:sessionId/difference',
+  servicePayGateOrganizacion,
+  checkPermission('staffpay:read'),
+  validateRequest(z.object({ params: sessionPayParamsSchema, query: destinoQuerySchema })),
+  controller.getClassDifference,
+)
+router.post(
+  '/class-sessions/:sessionId/difference/settle',
+  servicePayGateOrganizacion,
+  checkPermission('staffpay:close'),
+  validateRequest(z.object({ params: sessionPayParamsSchema, body: liquidarSchema })),
+  controller.postSettleDifference,
+)
+
 router.use(servicePayGate)
 
 // Niveles y asignaciones: son de la ORGANIZACIÓN; escribir exige staffpay:manage en todas sus sedes (spec §9.2, en el service).
@@ -211,6 +246,13 @@ router.get(
   checkPermission('staffpay:read'),
   validateRequest(z.object({ params: staffParamsSchema, query: exportReciboQuerySchema })),
   controller.getReceiptExport,
+)
+// Lo pendiente de un periodo CERRADO (spec §6.4), por páginas; el service lee sólo las sedes legibles del alcance histórico.
+router.get(
+  '/periods/:periodId/differences',
+  checkPermission('staffpay:read'),
+  validateRequest(z.object({ params: periodParamsSchema, query: differencesQuerySchema })),
+  controller.getDifferences,
 )
 
 export default router

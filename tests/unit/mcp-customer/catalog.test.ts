@@ -100,6 +100,11 @@ it('los previews que persisten lotes se clasifican como escritura', () => {
   expect(TOOL_EFFECTS.print_routing_preview).toBe('read')
 })
 
+it('pago por servicio: liquidar una diferencia escribe; la lista de diferencias sólo lee', () => {
+  expect(TOOL_EFFECTS.settle_service_pay_difference).toBe('write')
+  expect(TOOL_EFFECTS.staff_service_pay_differences).toBe('read')
+})
+
 it('cada herramienta del código tiene exactamente una declaración de efectos', () => {
   const fs = require('fs') as typeof import('fs')
   const path = require('path') as typeof import('path')
@@ -176,6 +181,7 @@ const NUNCA_EN_DIRECTORIO = [
   'register_expense',
   'send_cfdi_email',
   'set_fiscal_loss',
+  'settle_service_pay_difference',
   'set_sales_retention',
   'staff_documents',
   'stamp_payroll_receipts',

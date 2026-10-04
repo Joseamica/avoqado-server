@@ -11,6 +11,8 @@ import * as periodos from '../../services/dashboard/staffPay/periodosGuardados'
 import * as cierre from '../../services/dashboard/staffPay/cierre.service'
 import * as manuales from '../../services/dashboard/staffPay/ajustesManuales.service'
 import * as recibos from '../../services/dashboard/staffPay/recibos.service'
+import * as dif from '../../services/dashboard/staffPay/diferencias.service'
+import * as liq from '../../services/dashboard/staffPay/liquidacion.service'
 import { sendExport } from '../../services/dashboard/export.helpers'
 
 export function ctx(req: Request): { venueId: string; userId: string } {
@@ -316,6 +318,32 @@ export const getReceipt = manejar(req =>
     limit: Number(req.query.limit ?? 100),
   }),
 )
+
+// ── Bloque B: diferencias y liquidación (spec §6.4). Campo por campo: `ahora`, `tamLote` y `topeSinAncla` son de pruebas
+// y jamás salen de la petición (las opciones de `diferenciasDelPeriodo` ni se pasan). ──
+export const getDifferences = manejar(req => {
+  const q = req.query as { cursor?: string; limit?: number | string }
+  return dif.diferenciasDelPeriodo({ ...ctx(req), periodId: req.params.periodId, cursor: q.cursor, limit: Number(q.limit ?? 50) })
+})
+export const getClassDifference = manejar(req =>
+  liq.previewLiquidacion({
+    ...ctx(req),
+    classSessionId: req.params.sessionId,
+    destinoFecha: (req.query as { destinoFecha?: string }).destinoFecha,
+  }),
+)
+export const postSettleDifference = manejar(req => {
+  const { periodoOrigenId, huellaEsperada, solicitudId, destinoFecha, ampliarAlcance } = req.body
+  return liq.liquidarDiferencia({
+    ...ctx(req),
+    classSessionId: req.params.sessionId,
+    periodoOrigenId,
+    huellaEsperada,
+    solicitudId,
+    destinoFecha,
+    ampliarAlcance,
+  })
+})
 
 export async function getReceiptExport(req: Request, res: Response, next: NextFunction) {
   try {

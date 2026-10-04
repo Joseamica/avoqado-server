@@ -113,3 +113,20 @@ export const reciboQuerySchema = z.object({
   cursor: z.string().max(200, 'Cursor inválido').optional(),
   limit: z.coerce.number().int().min(1, 'Mínimo 1').max(500, 'Máximo 500').default(100),
 })
+
+// ── Bloque B: diferencias de un periodo cerrado y «Liquidar diferencia» (spec §6.4). ──
+/** Lo pendiente de un periodo cerrado, por páginas: `limit` llega como NÚMERO (1-100, 50 por default). */
+export const differencesQuerySchema = z.object({
+  cursor: z.string().max(200).optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+})
+export const destinoQuerySchema = z.object({ destinoFecha: fechaSchema.optional() })
+export const liquidarSchema = z.object({
+  periodoOrigenId: z.string().cuid('Periodo inválido'),
+  huellaEsperada: z.string().regex(/^[a-f0-9]{64}$/, 'Revisa la diferencia antes de liquidarla'),
+  /** Sin `:`: cada línea guarda `${solicitudId}:${persona}` (la misma regla que el service). */
+  solicitudId: z.string().regex(/^[A-Za-z0-9_.-]{8,100}$/, 'Clave de solicitud inválida'),
+  destinoFecha: fechaSchema.optional(),
+  /** «Sumar la sede y liquidar»: la sede de la clase entra al periodo destino (SEDE_FUERA_DEL_PERIODO). */
+  ampliarAlcance: z.boolean().optional(),
+})
