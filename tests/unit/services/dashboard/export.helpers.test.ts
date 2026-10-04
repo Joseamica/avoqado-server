@@ -79,9 +79,50 @@ describe('encodeExport · PDF: una tabla que se lee', () => {
     expect(celdas.filter(c => /^a\d+$/.test(c.t)).map(c => c.t)).toEqual(filas(80).map(r => r.a))
   })
 
+  /** Lo que pdfkit DIBUJA de cada celda (ya con «…» si no cupo) y el ancho que se le dio, en orden. */
+  async function dibujado(cols: ExportColumnDef<Row>[], rows: Row[]) {
+    const proto = PDFDocument.prototype as unknown as { _fragment: (texto: string, ...resto: unknown[]) => unknown }
+    const fragment = jest.spyOn(proto, '_fragment')
+    const text = jest.spyOn(PDFDocument.prototype, 'text')
+    try {
+      await encodeExport('pdf', { allColumns: cols, requestedColumnIds: cols.map(c => c.id), rows, title: 'Prueba' })
+      const anchos = text.mock.calls
+        .filter(args => typeof args[1] === 'number')
+        .map(args => ({ t: String(args[0]), x: args[1] as unknown as number, width: (args[3] as { width: number }).width }))
+      return { fragmentos: fragment.mock.calls.map(args => String(args[0])), anchos }
+    } finally {
+      fragment.mockRestore()
+      text.mockRestore()
+    }
+  }
+
+  it('sin pesos, columnas iguales como siempre (las demás exportaciones no cambian)', async () => {
+    const { anchos } = await dibujado(COLS, filas(1))
+    const encabezado = anchos.slice(0, 3)
+    expect(new Set(encabezado.map(c => c.width)).size).toBe(1)
+    const paso = encabezado[1].x - encabezado[0].x
+    expect(encabezado[2].x - encabezado[1].x).toBeCloseTo(paso)
+    expect(encabezado[0].width).toBeCloseTo(paso - 8)
+  })
+
+  it('con `pdfAncho` cada columna toma su parte y un texto largo se dibuja completo, sin «…»', async () => {
+    const largo = 'Diferencia · Yoga (clase grupal) del 28 sep 2026 (clase de septiembre)'
+    const conPesos = COLS.map(c => ({ ...c, pdfAncho: c.id === 'c' ? 4 : 1 }))
+    const { fragmentos, anchos } = await dibujado(conPesos, [{ a: 'x', b: 1, c: largo }])
+    const [a, b, c] = anchos.slice(0, 3)
+    expect(a.width).toBeCloseTo(b.width)
+    expect(c.width + 8).toBeCloseTo((a.width + 8) * 4)
+    expect(fragmentos).toContain(largo)
+    expect(fragmentos.some(f => f.includes('…'))).toBe(false)
+    // El mismo texto con columnas iguales sí se corta: la prueba ve el corte cuando existe.
+    expect((await dibujado(COLS, [{ a: 'x', b: 1, c: largo }])).fragmentos.some(f => f.endsWith('…'))).toBe(true)
+  })
+
   it('«Generado:» en formato de México (día mes año, 24 h), no el de EE. UU.', async () => {
     const { sueltos } = await celdasDelPdf(filas(1))
-    expect(sueltos).toContainEqual(expect.stringMatching(/^Generado: \d{1,2} (ene|feb|mar|abr|may|jun|jul|ago|sep|oct|nov|dic) \d{4}, \d{2}:\d{2}$/))
+    expect(sueltos).toContainEqual(
+      expect.stringMatching(/^Generado: \d{1,2} (ene|feb|mar|abr|may|jun|jul|ago|sep|oct|nov|dic) \d{4}, \d{2}:\d{2}$/),
+    )
   })
 })
 

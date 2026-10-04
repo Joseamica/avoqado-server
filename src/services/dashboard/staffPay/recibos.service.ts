@@ -529,13 +529,17 @@ export function filasDelRecibo(r: Pick<Recibo, 'renglones' | 'total' | 'parcial'
 const pesos = new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN' })
 /** «29 sep 2026»; un ajuste se fecha cuando se capturó y lo dice. La fila del total va sin fecha. */
 const fechaDelRenglon = (r: RenglonRecibo) => (r.fecha ? `${fechaMx(r.fecha)}${r.tipo === 'AJUSTE' ? ' (captura)' : ''}` : '')
+/**
+ * `pdfAncho`: el Concepto se lleva casi la mitad de la hoja para que una diferencia se lea entera en el PDF («Diferencia ·
+ * Yoga (clase grupal) del 28 sep 2026 (clase de septiembre)», ~280 pt a 9 pt) sin cortar fecha de captura, sede ni monto.
+ */
 const COLUMNAS: ExportColumnDef<RenglonRecibo>[] = [
-  { id: 'fecha', label: 'Fecha', value: fechaDelRenglon },
-  { id: 'hora', label: 'Hora', value: r => r.hora },
-  { id: 'sede', label: 'Sede', value: r => r.sede },
-  { id: 'concepto', label: 'Concepto', value: r => r.concepto },
-  { id: 'lugares', label: 'Lugares', value: r => r.lugares },
-  { id: 'monto', label: 'Monto', value: r => pesos.format(Number(r.monto)) },
+  { id: 'fecha', label: 'Fecha', value: fechaDelRenglon, pdfAncho: 1.3 },
+  { id: 'hora', label: 'Hora', value: r => r.hora, pdfAncho: 0.6 },
+  { id: 'sede', label: 'Sede', value: r => r.sede, pdfAncho: 1.5 },
+  { id: 'concepto', label: 'Concepto', value: r => r.concepto, pdfAncho: 4 },
+  { id: 'lugares', label: 'Lugares', value: r => r.lugares, pdfAncho: 0.7 },
+  { id: 'monto', label: 'Monto', value: r => pesos.format(Number(r.monto)), pdfAncho: 1 },
 ]
 /** El Excel lleva el monto como NÚMERO con formato de moneda (el dueño lo suma); `monto` ya viene con 2 decimales. */
 const COLUMNAS_EXCEL: ExportColumnDef<RenglonRecibo>[] = COLUMNAS.map(c =>

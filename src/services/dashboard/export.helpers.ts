@@ -23,6 +23,8 @@ export interface ExportColumnDef<TRow> {
   value: (row: TRow) => string | number | null | undefined
   /** Sólo Excel: formato de número de sus celdas NUMÉRICAS (p. ej. `'$#,##0.00'`). Sin él, la celda queda como siempre. */
   numFmt?: string
+  /** Sólo PDF: peso relativo de su ancho (default 1). Si ninguna columna lo trae, columnas iguales, como siempre. */
+  pdfAncho?: number
 }
 
 export interface EncodeExportOptions<TRow> {
@@ -158,11 +160,15 @@ async function encodePdf<TRow>(columns: ExportColumnDef<TRow>[], rows: TRow[], t
   doc.moveDown(1)
   doc.fillColor('#000')
 
-  // Tabla de columnas iguales. Cada fila calcula su `y` UNA vez y todas sus celdas se dibujan en esa `y` fija: `text()`
-  // mueve `doc.y`, así que leerlo celda por celda recorría las celdas (QA pago al staff 2026-10-03, defecto 1).
+  // Tabla de columnas iguales, salvo que traigan `pdfAncho` (peso relativo). Cada fila calcula su `y` UNA vez y todas sus
+  // celdas se dibujan en esa `y` fija: `text()` mueve `doc.y`, así que leerlo celda por celda recorría las celdas (QA pago
+  // al staff 2026-10-03, defecto 1).
   const left = doc.page.margins.left
   const pageWidth = doc.page.width - left - doc.page.margins.right
-  const colWidth = pageWidth / columns.length
+  const pesos = columns.map(c => (c.pdfAncho && c.pdfAncho > 0 ? c.pdfAncho : 1))
+  const sumaPesos = pesos.reduce((a, p) => a + p, 0)
+  const anchos = pesos.map(p => (pageWidth * p) / sumaPesos)
+  const xs = anchos.map((_, i) => left + anchos.slice(0, i).reduce((a, w) => a + w, 0))
   const rowHeight = 16
   const fontSize = columns.length > 8 ? 7 : 9
   let y = doc.y
@@ -171,7 +177,7 @@ async function encodePdf<TRow>(columns: ExportColumnDef<TRow>[], rows: TRow[], t
     if (fondo) doc.rect(left, y, pageWidth, rowHeight).fill(fondo)
     doc.fontSize(fontSize).fillColor(color)
     // `height` + `ellipsis`: una sola línea por celda, cortada con «…» si no cabe; con `height` pdfkit nunca abre página.
-    cells.forEach((texto, i) => doc.text(texto, left + i * colWidth + 4, y + 4, { width: colWidth - 8, height: rowHeight, ellipsis: true }))
+    cells.forEach((texto, i) => doc.text(texto, xs[i] + 4, y + 4, { width: anchos[i] - 8, height: rowHeight, ellipsis: true }))
     y += rowHeight
   }
   const drawHeader = () => drawRow(columns.map(c => c.label), '#374151', '#fff')
