@@ -5,6 +5,7 @@ import { withSerializableRetry } from '../../../utils/serializableRetry'
 import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
 import { venueDayKey } from '../../../utils/venueDateKeys'
 import { exigirPermisoEnSedes, sedesConPermiso } from './acceso'
+import { origenDeClase } from './diferencias.service'
 import { dbDateComoFecha } from './periodos'
 import { bloquearPeriodo, lockClase, lockPeriodosDeOrganizacion, periodoQueContieneFecha } from './periodosGuardados'
 import { valorarClases } from './valoracion'
@@ -40,6 +41,8 @@ export interface PagoDeClase {
   payLevelName: string | null
   ajuste: AjusteDeClase | null
   anclada: boolean
+  /** Sin ancla, ya terminada, no cancelada y su fecha cae en un periodo CERRADO: se paga como diferencia de ése (spec §6.4). */
+  llegoTarde: boolean
   /** El periodo donde la clase se contabilizó por primera vez (su ancla), o null si aún no. */
   periodoOrigen: { id: string; start: string; end: string; estado: 'OPEN' | 'CLOSED' } | null
   lineas: LineaContabilizada[]
@@ -163,6 +166,8 @@ export async function pagoDeClase(
     ? { id: origen.id, start: dbDateComoFecha(origen.periodStart), end: dbDateComoFecha(origen.periodEnd), estado: origen.status }
     : null
   const lineas = origen ? await lineasDeClase(db, cs.venue.organizationId, cs.id) : []
+  const ahora = new Date()
+  const llegoTarde = !ps?.originPeriodId && cs.status !== 'CANCELLED' && !!(await origenDeClase(db, cs, ahora))
   const base = {
     classSessionId: cs.id,
     motivo: null,
@@ -175,11 +180,11 @@ export async function pagoDeClase(
     payLevelName: null,
     ajuste,
     anclada: !!ps?.originPeriodId,
+    llegoTarde,
     periodoOrigen,
     lineas,
   }
   if (cs.status === 'CANCELLED') return { ...base, estado: 'CANCELADA' }
-  const ahora = new Date()
   if (cs.endsAt > ahora) return { ...base, estado: 'NO_TERMINADA' }
   const [v] = await valorarClases(
     db,
