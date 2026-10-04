@@ -216,6 +216,35 @@ describe('recibos (spec §6.5, §7.3)', () => {
     expect(r).toMatchObject({ total: '1030.00', parcial: false })
   })
 
+  it('eliminar a la persona del equipo NO esconde su recibo histórico: sus devengos acreditan la relación (Codex bloque A #4)', async () => {
+    // La eliminación permanente del equipo borra el StaffVenue y conserva el Staff y sus devengos.
+    const membresias = await prisma.staffVenue.findMany({ where: { staffId: m.sofia }, take: 10 })
+    await prisma.staffVenue.deleteMany({ where: { staffId: m.sofia } })
+    try {
+      await expect(recibo(m.sofia)).resolves.toMatchObject({ persona: 'Sofia QA', total: '630.00', cantidad: 3 })
+      const xlsx = await exportarRecibo({ userId: m.owner, venueId: m.venueId, staffId: m.sofia, fecha: '2026-08-15', format: 'xlsx' })
+      expect(xlsx.nombre).toMatch(/^recibo-sofia-qa-/)
+    } finally {
+      await prisma.staffVenue.createMany({ data: membresias.map(({ id: _id, ...x }) => x) })
+    }
+    // Sin membresía NI devengos en la organización: nunca el nombre de alguien ajeno.
+    const ajena = await prisma.staff.create({
+      data: { email: `${m.key}-ajena-recibo@example.test`, firstName: 'Ajena', lastName: 'QA', active: true },
+    })
+    await expect(recibo(ajena.id)).rejects.toMatchObject({ statusCode: 404, message: 'Persona no encontrada' })
+  })
+
+  it('renombrar la sede después del cierre no cambia el recibo cerrado: manda el nombre congelado (Codex bloque A #8)', async () => {
+    const original = (await prisma.venue.findUniqueOrThrow({ where: { id: m.venueId }, select: { name: true } })).name
+    await prisma.venue.update({ where: { id: m.venueId }, data: { name: 'Centro' } })
+    try {
+      const r = await recibo(m.sofia)
+      expect(r.renglones.map(x => x.sede)).toEqual([original, original, original])
+    } finally {
+      await prisma.venue.update({ where: { id: m.venueId }, data: { name: original } })
+    }
+  })
+
   it('marcar pagado: el recibo que incluye BSF exige permiso en BSF; el que sólo es de PN no', async () => {
     await estadoDePago([])
     ;(global as any).__cierre = [m.venueId]

@@ -252,11 +252,21 @@ interface ReciboPreparado {
 
 async function prepararRecibo(input: { userId: string; venueId: string; staffId: string; fecha: string }): Promise<ReciboPreparado> {
   const v = await prisma.venue.findUniqueOrThrow({ where: { id: input.venueId }, select: { organizationId: true } })
-  // La persona, sólo si trabaja (o trabajó) en esta organización: nunca el nombre de alguien de otro negocio.
-  const staff = await prisma.staff.findFirst({
-    where: { id: input.staffId, venues: { some: { venue: { organizationId: v.organizationId } } } },
-    select: { firstName: true, lastName: true },
-  })
+  // La persona, sólo si trabaja (o trabajó) en esta organización: nunca el nombre de alguien de otro negocio. «Trabajó» lo
+  // acredita también un devengo en la organización (Codex bloque A #4): eliminarla del equipo borra su StaffVenue pero no
+  // su recibo cerrado, que tiene que seguir abriendo (pantalla, PDF y Excel).
+  const select = { firstName: true, lastName: true }
+  const staff =
+    (await prisma.staff.findFirst({
+      where: { id: input.staffId, venues: { some: { venue: { organizationId: v.organizationId } } } },
+      select,
+    })) ??
+    ((await prisma.serviceEarning.findFirst({
+      where: { organizationId: v.organizationId, staffId: input.staffId },
+      select: { id: true },
+    }))
+      ? await prisma.staff.findUnique({ where: { id: input.staffId }, select })
+      : null)
   if (!staff) throw new NotFoundError('Persona no encontrada')
   const filaAhora = await periodoQueContieneFecha(prisma, v.organizationId, input.fecha)
   const activas = await sedesConServicePay(v.organizationId)
@@ -446,7 +456,9 @@ const aRenglon =
     tipo: r.tipo,
     fecha: r.fecha,
     hora: r.hora,
-    sede: f.nombreSede.get(r.venueId) ?? r.sedeFoto ?? '',
+    // Lo congelado manda (spec §5.6; Codex bloque A #8): renombrar la sede no reescribe un recibo cerrado. El nombre de
+    // hoy sólo para lo valorado en vivo, que no trae foto.
+    sede: r.sedeFoto ?? f.nombreSede.get(r.venueId) ?? '',
     concepto: r.tipo === 'AJUSTE' ? (r.reason ?? 'Ajuste') : `${r.clase ?? 'Clase'}${r.tipo === 'DIFERENCIA' ? ' (diferencia)' : ''}`,
     lugares: r.lugares,
     monto: new Prisma.Decimal(r.monto).toFixed(2),
