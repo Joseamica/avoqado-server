@@ -80,6 +80,17 @@ export const FEATURE_CATALOG: readonly FeatureCatalogEntry[] = Object.freeze(
         },
       },
       {
+        id: 'AGGREGATOR_PASSES',
+        featureCode: 'AGGREGATOR_PASSES',
+        name: 'Pases de TotalPass y Wellhub',
+        description: 'Recibe reservas y check-ins de socios de TotalPass sin capturar a mano. Wellhub, muy pronto.',
+        category: 'sell',
+        minimumTier: 'PRO',
+        offering: 'CONFIGURABLE',
+        requirement: 'Requiere Reservas con clases y una cuenta de TotalPass.',
+        names: { es: 'Pases de TotalPass y Wellhub', en: 'TotalPass and Wellhub passes', fr: 'Pass TotalPass et Wellhub' },
+      },
+      {
         id: 'CFDI',
         featureCode: 'CFDI',
         name: 'Facturación CFDI',

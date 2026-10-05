@@ -491,7 +491,8 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
             updated = await completeReservation(reservation.venueId, reservation.id)
             break
           case 'no_show':
-            updated = await markNoShow(reservation.venueId, reservation.id, 'SYSTEM')
+            // Lo pide una persona: no es el no-show automático (sólo ése espera a una visita de pase pendiente).
+            updated = await markNoShow(reservation.venueId, reservation.id, scope.staffId)
             break
         }
         await auditMcpWrite(scope, {
@@ -1091,7 +1092,7 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'class_session_detail',
-    'The roster of ONE class session in a venue you can access, by its sessionId (from list_class_sessions): the class, when, capacity / enrolled / available, the instructor, and the list of ATTENDEES (name, party size, status, confirmation code). Answers "¿quién está inscrito en la clase de las 6?". Pass venueId + sessionId.',
+    'The roster of ONE class session in a venue you can access, by its sessionId (from list_class_sessions): the class, when, capacity / enrolled / available, the instructor, and the list of ATTENDEES (name, party size, status, confirmation code). Pass members (TotalPass/Wellhub) carry pass.provider, pass.visitStatus and, when the venue must confirm the arrival by hand, pass.awaitingVenueUntil. Answers "¿quién está inscrito en la clase de las 6?". Pass venueId + sessionId.',
     {
       venueId: z.string().describe('Venue that owns the session (must be in your scope)'),
       sessionId: z.string().min(1).describe('Class session id (from list_class_sessions)'),
@@ -1124,6 +1125,15 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
             partySize: r.partySize,
             status: r.status, // PENDING | CONFIRMED | CHECKED_IN
             confirmationCode: r.confirmationCode,
+            // Socio de un pase (TotalPass/Wellhub): proveedor, estado de su visita y, si el negocio confirma a mano,
+            // hasta cuándo puede confirmarla. null = cliente propio.
+            pass: r.aggregatorBooking
+              ? {
+                  provider: r.aggregatorBooking.provider,
+                  visitStatus: r.passVisit?.status ?? null,
+                  awaitingVenueUntil: r.passVisit?.awaitingVenue ? r.passVisit.deadlineAt.toISOString() : null,
+                }
+              : null,
           })),
         })
       } catch {

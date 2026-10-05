@@ -144,9 +144,36 @@ describe('class_session_detail (read, PRO-gated)', () => {
     expect(out.found).toBe(true)
     expect(out.session).toMatchObject({ sessionId: 'cs1', enrolled: 3, available: 7, instructor: 'Ana Ruiz' })
     expect(out.attendees).toEqual([
-      { name: 'Luis', phone: '555', partySize: 2, status: 'CONFIRMED', confirmationCode: 'RES-AAA' },
-      { name: 'Mar Lopez', phone: '999', partySize: 1, status: 'CHECKED_IN', confirmationCode: 'RES-BBB' },
+      { name: 'Luis', phone: '555', partySize: 2, status: 'CONFIRMED', confirmationCode: 'RES-AAA', pass: null },
+      { name: 'Mar Lopez', phone: '999', partySize: 1, status: 'CHECKED_IN', confirmationCode: 'RES-BBB', pass: null },
     ])
+  })
+
+  it('dice qué asistentes vienen por un pase, el estado de su visita y si espera al estudio', async () => {
+    const deadlineAt = new Date('2026-07-01T18:30:00Z')
+    mockGetClassSession.mockResolvedValueOnce({
+      id: 'cs1',
+      product: { name: 'Yoga' },
+      startsAt: new Date('2026-07-01T18:00:00Z'),
+      endsAt: new Date('2026-07-01T19:00:00Z'),
+      duration: 60,
+      capacity: 10,
+      enrolled: 2,
+      available: 8,
+      assignedStaff: null,
+      status: 'SCHEDULED',
+      reservations: [
+        {
+          confirmationCode: 'RES-PAS', status: 'CONFIRMED', partySize: 1, guestName: 'Ana', guestPhone: null, customer: null,
+          aggregatorBooking: { id: 'b1', provider: 'TOTALPASS' },
+          passVisit: { id: 'v1', status: 'PENDING', deadlineAt, awaitingVenue: true },
+        },
+        { confirmationCode: 'RES-OWN', status: 'CONFIRMED', partySize: 1, guestName: 'Luis', guestPhone: null, customer: null, aggregatorBooking: null, passVisit: null },
+      ],
+    })
+    const out = parse(await call('class_session_detail', { venueId: 'v1', sessionId: 'cs1' }))
+    expect(out.attendees[0].pass).toEqual({ provider: 'TOTALPASS', visitStatus: 'PENDING', awaitingVenueUntil: deadlineAt.toISOString() })
+    expect(out.attendees[1].pass).toBeNull()
   })
 
   it('returns found:false when the session is not in this venue', async () => {

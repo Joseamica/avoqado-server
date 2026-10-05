@@ -9,6 +9,7 @@ import { hybridOfferDefinition, hybridOfferPreviewBody } from './hybridOffer.sch
 const dependencies: Readonly<Record<string, readonly string[]>> = {
   AUTO_REORDER: ['INVENTORY_TRACKING'],
   UPSELL_AI: ['UPSELL'],
+  AGGREGATOR_PASSES: ['RESERVATIONS'], // R36: los pases de TotalPass/Wellhub sólo sirven sobre clases.
 }
 const catalogByCode = new Map(FEATURE_CATALOG.filter(entry => entry.featureCode).map(entry => [entry.featureCode!, entry]))
 

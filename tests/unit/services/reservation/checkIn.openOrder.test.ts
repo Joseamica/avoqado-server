@@ -129,6 +129,21 @@ describe('checkInReservationAndOpenOrder', () => {
     expect(withSerializableRetry).toHaveBeenCalledTimes(1)
   })
 
+  // nuevo — la visita ya la pagó el pase
+  it('reserva de pase ⇒ no abre orden por cobrar', async () => {
+    prismaMock.aggregatorBooking.findUnique.mockResolvedValueOnce({ id: 'b1' } as any)
+    ;(createOrderFromReservation as jest.Mock).mockResolvedValue({ orderId: 'ord-1', created: true })
+
+    const r = await checkInReservationAndOpenOrder(cmd)
+
+    expect(createOrderFromReservation).not.toHaveBeenCalled()
+    expect(prismaMock.aggregatorBooking.findUnique).toHaveBeenCalledWith({ where: { reservationId: 'res-1' }, select: { id: true } })
+    expect(r).toMatchObject({ id: 'res-1', status: 'CHECKED_IN', orderId: null, orderCreated: false })
+    expect(r.services).toEqual([{ id: 'svc-1', name: 'Yoga', price: null, duration: 60 }])
+    expect(r.orderError).toBeUndefined()
+    expect('orderError' in r).toBe(false)
+  })
+
   it('si el check-in puro truena (409), NO se intenta la orden', async () => {
     armReservation('NO_SHOW')
     await expect(checkInReservationAndOpenOrder(cmd)).rejects.toMatchObject({ statusCode: 409 })

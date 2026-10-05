@@ -69,6 +69,8 @@ process.env.MP_PUBLIC_KEY_TEST = process.env.MP_PUBLIC_KEY_TEST || 'TEST-pk-test
 process.env.MP_ACCESS_TOKEN_TEST = process.env.MP_ACCESS_TOKEN_TEST || 'TEST-at-test'
 process.env.MERCADO_PAGO_TOKEN_KEY =
   process.env.MERCADO_PAGO_TOKEN_KEY || '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+process.env.AGGREGATOR_TOKEN_KEY = process.env.AGGREGATOR_TOKEN_KEY || 'b'.repeat(64)
+process.env.TOTALPASS_PARTNER_API_KEY = process.env.TOTALPASS_PARTNER_API_KEY || 'partner-test-key'
 process.env.MP_API_BASE_URL = process.env.MP_API_BASE_URL || 'https://api.mercadopago.com'
 process.env.MP_AUTH_BASE_URL = process.env.MP_AUTH_BASE_URL || 'https://auth.mercadopago.com.mx'
 
@@ -413,6 +415,15 @@ const prismaMock: any = {
   googleOAuthSession: createMockModel(),
   // Google Calendar Sync (Phase 2 — push)
   calendarSyncOutbox: createMockModel(),
+  aggregatorConnection: createMockModel(),
+  aggregatorProductLink: createMockModel(),
+  aggregatorSessionLink: createMockModel(),
+  aggregatorCapacityRule: createMockModel(),
+  aggregatorBooking: createMockModel(),
+  aggregatorVisit: createMockModel(),
+  customerExternalIdentity: createMockModel(),
+  aggregatorInboundEvent: createMockModel(),
+  aggregatorOutbox: createMockModel(),
   reservationGoogleEventMapping: createMockModel(),
   reservationSettings: createMockModel(),
   // Slot holds (booking + reschedule countdown)
@@ -473,6 +484,12 @@ prismaMock.externalBusyBlock.findFirst.mockResolvedValue(null)
 // Tests that don't exercise migration badges shouldn't have to mock it — default to
 // no in-flight migrations so the result is iterable and the "Migrando…" badge is off.
 prismaMock.tpvCommandQueue.findMany.mockResolvedValue([])
+// Conector de pases: `checkInReservation` (rama de transición) busca visitas de pase de la reserva. Casi ninguna reserva
+// las tiene: por default ninguna, para que los tests de check-in que no ejercitan pases no tengan que mockearlo.
+prismaMock.aggregatorVisit.findMany.mockResolvedValue([])
+// Conector de pases: crear/editar/cancelar sesiones y cambiar su lista llama `enqueuePassSessionSync`, que busca las
+// conexiones activas del venue. Casi ningún venue tiene: por default ninguna, para que esos tests no tengan que mockearlo.
+prismaMock.aggregatorConnection.findMany.mockResolvedValue([])
 prismaMock.orderItem.findMany.mockResolvedValue([])
 prismaMock.inventoryPosting.create.mockResolvedValue({ id: 'posting-default', status: 'PENDING' })
 prismaMock.inventoryPosting.updateMany.mockResolvedValue({ count: 0 })
