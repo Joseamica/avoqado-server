@@ -231,21 +231,45 @@ export async function enqueueRefundPaymentEffectsInTx(
   originalPaymentId: string,
 ): Promise<void> {
   const { createRefundCommission } = await import('../dashboard/commission/commission-calculation.service')
-  await createRefundCommission(refundPaymentId, originalPaymentId, {
-    db: tx,
-    sink: async data => {
-      const dedupeKey = `commission:${refundPaymentId}:${data.configId}:${data.staffId}:v1`
-      await enqueuePaymentEffect(tx, {
-        venueId: data.venueId,
-        paymentId: refundPaymentId,
-        orderId: data.orderId ?? null,
-        kind: 'COMMISSION',
-        dedupeKey,
-        payload: JSON.parse(JSON.stringify(data)),
-      })
-      return { id: dedupeKey }
-    },
-  })
+  // Fase 3 (A2, resolución del ensamblaje): una falla al CALCULAR el reverso de la comisión nunca bloquea la devolución —el
+  // dinero ya salió o está saliendo—. Se revierte sólo ese cálculo y queda una obligación visible para revisión, igual que en
+  // el cobro. Una conexión perdida de verdad sigue tumbando el commit (la siguiente consulta falla igual).
+  await tx.$executeRawUnsafe('SAVEPOINT refund_commission_snapshot')
+  try {
+    await createRefundCommission(refundPaymentId, originalPaymentId, {
+      db: tx,
+      sink: async data => {
+        const dedupeKey = `commission:${refundPaymentId}:${data.configId}:${data.staffId}:v1`
+        await enqueuePaymentEffect(tx, {
+          venueId: data.venueId,
+          paymentId: refundPaymentId,
+          orderId: data.orderId ?? null,
+          kind: 'COMMISSION',
+          dedupeKey,
+          payload: JSON.parse(JSON.stringify(data)),
+        })
+        return { id: dedupeKey }
+      },
+    })
+    await tx.$executeRawUnsafe('RELEASE SAVEPOINT refund_commission_snapshot')
+  } catch {
+    await tx.$executeRawUnsafe('ROLLBACK TO SAVEPOINT refund_commission_snapshot')
+    const refund = await tx.payment.findUniqueOrThrow({ where: { id: refundPaymentId }, select: { venueId: true, orderId: true } })
+    const dedupeKey = 'commission:' + refundPaymentId + ':policy-error:v1'
+    await enqueuePaymentEffect(tx, {
+      venueId: refund.venueId,
+      paymentId: refundPaymentId,
+      orderId: refund.orderId,
+      kind: 'COMMISSION',
+      dedupeKey,
+      payload: { policyError: COMMISSION_REVIEW_REASON, originalPaymentId },
+    })
+    await tx.paymentEffect.updateMany({
+      where: { venueId: refund.venueId, paymentId: refundPaymentId, dedupeKey },
+      data: { lastError: COMMISSION_REVIEW_REASON },
+    })
+    await tx.$executeRawUnsafe('RELEASE SAVEPOINT refund_commission_snapshot')
+  }
   const payment = await tx.payment.findUniqueOrThrow({ where: { id: refundPaymentId }, select: { venueId: true, orderId: true } })
   await enqueuePaymentEffect(tx, {
     venueId: payment.venueId,

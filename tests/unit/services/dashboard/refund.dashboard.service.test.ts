@@ -4,6 +4,13 @@ import { issueRefund } from '@/services/dashboard/refund.dashboard.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { prismaMock } from '../../../__helpers__/setup'
 
+// Fase 3 (A2): la devolución del dashboard encola su reverso de comisión DENTRO de su transacción. Esta suite prueba otra
+// cosa y no siembra lo que el encolado lee; el resto del módulo (lo usa el costo diferido) queda real.
+jest.mock('@/services/tpv/paymentEffects.service', () => ({
+  ...jest.requireActual('@/services/tpv/paymentEffects.service'),
+  enqueueRefundPaymentEffectsInTx: jest.fn().mockResolvedValue(undefined),
+}))
+
 // logAction is globally mocked to a no-op jest.fn in tests/__helpers__/setup.ts,
 // so we assert the audit dual-write on the mock itself (not prismaMock.activityLog).
 

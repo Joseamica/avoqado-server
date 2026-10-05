@@ -1384,9 +1384,38 @@ export async function applyFrozenCommissionInTx(tx: Prisma.TransactionClient, ef
   ) {
     throw new Error('INVALID_COMMISSION_SNAPSHOT')
   }
+  // Fase 3 (A2, Codex r1-3): una fila existente en CUALQUIER estado —también VOIDED— ya está materializada. Antes se buscaba
+  // excluyendo VOIDED y un efecto pendiente revivía una comisión que alguien anuló.
   const existing = await tx.commissionCalculation.findFirst({
-    where: { paymentId: effect.paymentId, configId: data.configId, staffId: data.staffId, status: { not: CommissionCalcStatus.VOIDED } },
+    where: { venueId: effect.venueId, paymentId: effect.paymentId, configId: data.configId, staffId: data.staffId },
     select: { id: true },
   })
-  if (!existing) await tx.commissionCalculation.create({ data })
+  if (existing) return
+  // Fase 3 (A2, Codex r2-1): un REVERSO todavía en cola no revive cuando su comisión original ya se anuló. El worker tiene
+  // el candado de la orden —el mismo que toma la anulación—, así que lo que se lee aquí no cambia hasta que termina.
+  if (await esReversoDeUnaComisionAnulada(tx, effect, data.configId, data.staffId)) return
+  await tx.commissionCalculation.create({ data })
+}
+
+/** ¿El efecto es el reverso de una devolución cuya comisión original (misma persona y esquema) está toda anulada? */
+async function esReversoDeUnaComisionAnulada(
+  tx: Prisma.TransactionClient,
+  effect: PaymentEffect,
+  configId: string,
+  staffId: string,
+): Promise<boolean> {
+  const devolucion = await tx.payment.findFirst({
+    where: { id: effect.paymentId, venueId: effect.venueId },
+    select: { type: true, processorData: true },
+  })
+  if (devolucion?.type !== PaymentType.REFUND) return false
+  const originalPaymentId = (devolucion.processorData as { originalPaymentId?: unknown } | null)?.originalPaymentId
+  if (typeof originalPaymentId !== 'string') return false
+  const originales = await tx.commissionCalculation.findMany({
+    where: { venueId: effect.venueId, paymentId: originalPaymentId, configId, staffId },
+    select: { status: true },
+    take: 10,
+  })
+  // Sin original materializada todavía (su efecto sigue en cola) el reverso se crea: la original llegará después.
+  return originales.length > 0 && originales.every(o => o.status === CommissionCalcStatus.VOIDED)
 }

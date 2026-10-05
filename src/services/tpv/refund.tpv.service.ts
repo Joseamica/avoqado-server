@@ -34,7 +34,6 @@ import prisma from '../../utils/prismaClient'
 import { generateDigitalReceipt } from './digitalReceipt.tpv.service'
 import { Decimal } from '@prisma/client/runtime/library'
 import { asegurarObligacionDeCostoNegativo, costearYProyectarReembolso } from '../payments/deferredTransactionCost.service'
-import { createRefundCommission } from '../dashboard/commission/commission-calculation.service'
 import { restockOrderItems } from '../dashboard/inventoryRestock.service'
 import { logAction } from '../dashboard/activity-log.service'
 import { resolveAutofacturaAvailable } from './payment.tpv.service'
@@ -1254,18 +1253,6 @@ export async function recordRefund(
     // Don't fail the refund if TransactionCost creation fails
     logger.error('Failed to create refund TransactionCost', { error, refundPaymentId: result.id })
   }
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // STEP 5b: Create negative CommissionCalculation for refund (non-blocking)
-  // ═══════════════════════════════════════════════════════════════════════════
-  createRefundCommission(result.id, refundData.originalPaymentId).catch(error => {
-    // Don't fail the refund if commission reversal fails
-    logger.error('Failed to create refund commission', {
-      refundPaymentId: result.id,
-      originalPaymentId: refundData.originalPaymentId,
-      error: error instanceof Error ? error.message : String(error),
-    })
-  })
 
   // ═══════════════════════════════════════════════════════════════════════════
   // STEP 6: Revertir el sello que esta venta había otorgado
