@@ -261,7 +261,7 @@ export async function createCommissionConfig(venueId: string, data: CreateCommis
       maxAmount: data.maxAmount,
       includeTips: data.includeTips ?? false, // Tips NOT included by default
       includeDiscount: data.includeDiscount ?? false,
-      includeTax: data.includeTax ?? false,
+      includeTax: data.includeTax ?? true, // D5 (fase 3): «con IVA» de fábrica, igual que la base de datos
       roleRates: data.roleRates ?? Prisma.JsonNull,
       filterByCategories: data.filterByCategories ?? false,
       categoryIds: data.categoryIds ?? [],

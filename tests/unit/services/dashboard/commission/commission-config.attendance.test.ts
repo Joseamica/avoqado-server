@@ -69,4 +69,9 @@ describe('asistencia → comisiones en el config', () => {
     await updateCommissionConfig('cfg-1', 'venue-1', { attendanceLatePenaltyRate: 0.5 } as any)
     expect(db.commissionConfig.update.mock.calls[0][0].data).toEqual(expect.objectContaining({ attendanceLatePenaltyRate: 0.5 }))
   })
+
+  it('🔴 D5: crear un esquema sin mencionar el IVA lo deja «con IVA» (lo que pagó el cliente)', async () => {
+    await createCommissionConfig('venue-1', { name: 'Meseros', defaultRate: 0.03 } as any, 'staff-1')
+    expect(db.commissionConfig.create.mock.calls[0][0].data).toEqual(expect.objectContaining({ includeTax: true }))
+  })
 })

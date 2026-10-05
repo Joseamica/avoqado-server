@@ -12862,7 +12862,7 @@ model CommissionConfig {
   // Base calculation settings
   includeTips     Boolean @default(false) // Tips are already direct bonus, exclude by default
   includeDiscount Boolean @default(false) // Calculate on pre/post-discount amount
-  includeTax      Boolean @default(false) // Include tax in calculation base
+  includeTax      Boolean @default(true) // D5 (fase 3): «con IVA» = lo que pagó el cliente; false = «sin el IVA registrado»
 
   // Role-based rates (JSON object: { "WAITER": 0.03, "CASHIER": 0.02 })
   roleRates Json?

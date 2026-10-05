@@ -6,6 +6,8 @@
  * Correr: TZ=UTC TEST_DATABASE_URL="$PAGO_F3_DB" npx jest --selectProjects integration \
  *   --runTestsByPath tests/integration/commission/basePorCobro.integration.test.ts --ci
  */
+import fs from 'fs'
+import path from 'path'
 import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { enqueuePaymentCommissionInTx } from '@/services/tpv/paymentEffects.service'
@@ -27,7 +29,10 @@ import {
 
 let m: MundoComisiones
 beforeAll(asegurarBaseDePrueba)
-afterEach(() => borrarMundoComisiones(m))
+afterEach(async () => {
+  await borrarMundoComisiones(m)
+  m = undefined as unknown as MundoComisiones // una prueba sin mundo propio no vuelve a borrar el de la anterior
+})
 
 /** Cobra la orden en estos montos, uno tras otro, y materializa cada comisión como lo hace la terminal. */
 async function cobrarEnPartes(orderId: string, montos: number[]): Promise<string[]> {
@@ -192,5 +197,36 @@ describe('A1c · «con IVA» es lo que pagó el cliente; «sin el IVA registrado
     })
     const [p] = await cobrarEnPartes(orderId, [116])
     expect((await filaDe(p)).baseAmount.toFixed(2)).toBe('100.00')
+  })
+})
+
+describe('A1d · migración: «con IVA» de fábrica y en los esquemas existentes (spec §9-1)', () => {
+  /** El SQL REAL de la migración, sin comentarios, partido en sentencias. */
+  function sentencias(): string[] {
+    const dir = path.join(__dirname, '../../../prisma/migrations')
+    const migracion = fs.readdirSync(dir).find(nombre => nombre.endsWith('_commission_include_tax_default'))
+    if (!migracion) throw new Error('falta la migración *_commission_include_tax_default')
+    return fs
+      .readFileSync(path.join(dir, migracion, 'migration.sql'), 'utf-8')
+      .split('\n')
+      .filter(linea => !linea.trim().startsWith('--'))
+      .join('\n')
+      .split(';')
+      .map(s => s.trim())
+      .filter(Boolean)
+  }
+
+  it('🔴 la columna nace «con IVA»', async () => {
+    const [col] = await prisma.$queryRaw<Array<{ d: string | null }>>`
+      SELECT column_default AS d FROM information_schema.columns WHERE table_name = 'CommissionConfig' AND column_name = 'includeTax'`
+    expect(col.d).toBe('true')
+  })
+
+  it('🔴 marca «con IVA» los esquemas que existían sin él (acotado al negocio de la prueba)', async () => {
+    m = await crearMundoComisiones('migracion', { includeTax: false })
+    const update = sentencias().find(s => s.startsWith('UPDATE'))
+    expect(update).toBeDefined()
+    await prisma.$executeRawUnsafe(`${update} AND "venueId" = '${m.venueId}'`)
+    expect((await prisma.commissionConfig.findUniqueOrThrow({ where: { id: m.configId } })).includeTax).toBe(true)
   })
 })
