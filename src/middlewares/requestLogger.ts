@@ -117,7 +117,18 @@ export const requestLoggerMiddleware = (req: Request, res: Response, next: NextF
       // middleware montado con `use()` (sin ruta) también bajaría a info; hoy ninguno lo hace (los que contestan 404 —
       // resolveVenueBySlug, bindTpv*Target— van dentro de la ruta, y `checkPublicVenueFeature` deja pasar al controlador).
       const sinRuta = statusCode === 404 && !req.route
-      const level = statusCode >= 500 ? 'error' : statusCode >= 400 && !sinRuta ? 'warn' : 'info'
+      // Un handler puede declarar que su respuesta es un desenlace ESPERADO (`res.locals.requestEndLevel`): la espera de un cobro
+      // que el cajero canceló cierra con 504 a propósito y no es una falla (3-oct-2026: los 9 «Error 504» de un día eran eso).
+      // Sólo se aceptan info/warn; cualquier otro valor se ignora y decide el status.
+      const declarado = res.locals?.requestEndLevel
+      const level =
+        declarado === 'info' || declarado === 'warn'
+          ? declarado
+          : statusCode >= 500
+            ? 'error'
+            : statusCode >= 400 && !sinRuta
+              ? 'warn'
+              : 'info'
 
       if (!shouldSkipLogging) {
         // Enrich logs with auth context (available after auth middleware runs)

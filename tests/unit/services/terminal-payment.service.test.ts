@@ -790,6 +790,8 @@ describe('TerminalPaymentService — durable per-terminal lock (Slice 1)', () =>
     await terminalPaymentService.cancelPayment('T-CANCEL', 'REQ-C', undefined, 'venue-1')
     const result = await p1
     expect(result.status).toBe('timeout')
+    // La marca deja que el controlador baje el log a info sin cambiar el 504 (3-oct-2026).
+    expect(result.cancelRequested).toBe(true)
     expect(tpr().updateMany).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ status: 'CANCEL_REQUESTED' }) }),
     )

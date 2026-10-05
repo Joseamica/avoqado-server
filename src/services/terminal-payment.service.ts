@@ -108,6 +108,8 @@ export interface TerminalPaymentResult {
    * bancario y `findReconcilablePayment` protegen el dinero.
    */
   claimedSuccess?: Record<string, unknown>
+  /** La espera se cerró porque el cajero canceló desde el POS. Interna: el controlador baja el log a info y NO la expone. */
+  cancelRequested?: true
   paymentId?: string
   transactionId?: string
   cardDetails?: {
@@ -6022,6 +6024,7 @@ class TerminalPaymentService {
           requestId,
           status: 'timeout',
           errorMessage: 'Cancelación solicitada. Confirma el resultado en la terminal antes de volver a cobrar.',
+          cancelRequested: true,
         })
       }
     }
