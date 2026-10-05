@@ -25,8 +25,14 @@
  *                                                   − parte prorrateada del de orden
  *   PRECIO_DE_LISTA (`includeDiscount=true`)      → `unitPrice × quantity`
  */
+import { Prisma } from '@prisma/client'
 import prisma from '../../../../../src/utils/prismaClient'
-import { calculateCategoryFilteredAmount, calculateLeftoverAmount } from '../../../../../src/services/dashboard/commission/commission-utils'
+import {
+  calculateBaseAmount,
+  calculateCategoryFilteredAmount,
+  calculateLeftoverAmount,
+} from '../../../../../src/services/dashboard/commission/commission-utils'
+import { repartir } from '../../../../../src/services/dashboard/commission/repartoPorCobro'
 
 const CONFIG_DEFAULT = { includeTax: false, includeDiscount: false }
 const CONFIG_PRE_DESCUENTO = { includeTax: false, includeDiscount: true }
@@ -166,5 +172,47 @@ describe('comisión del sobrante (catch-all) — misma aritmética', () => {
     const sobrante = await calculateLeftoverAmount('order-1', ['cat-reclamada'], CONFIG_DEFAULT)
 
     expect(porCategoria + sobrante).toBe(450) // 500 − 50 de descuento de orden
+  })
+})
+
+/**
+ * Medición del §11 del spec de pago por servicio (H4, 5-oct-2026), con la regla de la fase 3: el camino general recibe la
+ * PARTE de este cobro del descuento (`repartir`), no el de toda la orden. Orden de lista $500 con $50 de descuento.
+ */
+describe('H4 · la misma venta, por los dos caminos', () => {
+  const D = (n: number) => new Prisma.Decimal(n)
+  const SIN_PROPINA = { includeTips: false }
+  /** Un cobro con SU parte del descuento de la orden, como lo arma `createCommissionForPayment`. */
+  const cobro = (amount: number, descuento: Prisma.Decimal) => ({
+    amount: D(amount),
+    tipAmount: D(0),
+    taxAmount: D(0),
+    discountAmount: descuento,
+  })
+
+  beforeEach(() => {
+    ;(prisma.orderItem.findMany as jest.Mock).mockResolvedValue([linea(300, 1, 0), linea(200, 1, 0)])
+    orden(50)
+  })
+
+  it('un solo cobro: los dos caminos dan la misma base en los dos modos', async () => {
+    const unico = { totalOrden: D(450), cobro: D(450) }
+    expect(calculateBaseAmount(cobro(450, repartir(unico, D(50))), { ...CONFIG_DEFAULT, ...SIN_PROPINA }).baseAmount).toBe(
+      await calculateCategoryFilteredAmount('order-1', ['cat-1'], CONFIG_DEFAULT),
+    )
+    expect(calculateBaseAmount(cobro(450, repartir(unico, D(50))), { ...CONFIG_PRE_DESCUENTO, ...SIN_PROPINA }).baseAmount).toBe(
+      await calculateCategoryFilteredAmount('order-1', ['cat-1'], CONFIG_PRE_DESCUENTO),
+    )
+  })
+
+  it('🔴 dos cobros de la misma orden en «precio de lista» suman el precio de lista ($500), no $550', () => {
+    const c = { totalOrden: D(450), cobro: D(225) }
+    const parteDelPrimero = repartir(c, D(50))
+    // El segundo ve al primero confirmado, con la parte del descuento que quedó registrada en su comisión.
+    const otro = { monto: D(225), base: null, descuento: parteDelPrimero, iva: null }
+    const total =
+      calculateBaseAmount(cobro(225, parteDelPrimero), { ...CONFIG_PRE_DESCUENTO, ...SIN_PROPINA }).baseAmount +
+      calculateBaseAmount(cobro(225, repartir(c, D(50), [otro], 'descuento')), { ...CONFIG_PRE_DESCUENTO, ...SIN_PROPINA }).baseAmount
+    expect(total).toBe(500)
   })
 })

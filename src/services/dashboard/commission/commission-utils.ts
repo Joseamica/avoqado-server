@@ -25,6 +25,8 @@ import {
   selectCommissionableLines,
   OrderLineForCommission,
 } from './commission-base'
+import { computeStoredOrderTotal } from '../../shared/orderBalance'
+import { type CobroDeLaOrden, type OtroCobro, repartir } from './repartoPorCobro'
 
 // ============================================
 // Type Definitions
@@ -128,9 +130,10 @@ export function decimalToNumber(value: Decimal | null | undefined): number {
 export async function findActiveCommissionConfig(
   venueId: string,
   effectiveDate: Date = new Date(),
+  db: Prisma.TransactionClient = prisma,
 ): Promise<CommissionConfigWithRelations | null> {
   // 1. Check venue-level configs first
-  const config = await prisma.commissionConfig.findFirst({
+  const config = await db.commissionConfig.findFirst({
     where: {
       venueId,
       active: true,
@@ -162,13 +165,13 @@ export async function findActiveCommissionConfig(
   }
 
   // 2. Fallback: check org-level configs
-  const venue = await prisma.venue.findUnique({
+  const venue = await db.venue.findUnique({
     where: { id: venueId },
     select: { organizationId: true },
   })
 
   if (venue?.organizationId) {
-    const orgConfig = await prisma.commissionConfig.findFirst({
+    const orgConfig = await db.commissionConfig.findFirst({
       where: {
         orgId: venue.organizationId,
         venueId: null, // Org-level configs have no venueId
@@ -373,35 +376,25 @@ export function applyCommissionBounds(amount: number, config: { minAmount: Decim
 // ============================================
 
 /**
- * Base comisionable de un COBRO, cuando el esquema no filtra por categoría.
+ * Base comisionable de UN cobro cuando el esquema no filtra por categoría.
  *
- * Misma base única que el camino de líneas (`commission-base.ts`): el cobro se
- * normaliza a UNA línea sintética cuyo precio de lista es `payment.amount +
- * descuento` y cuyo descuento es el de la orden. Así:
+ * 🔴 `discountAmount` y `taxAmount` son la PARTE DE ESTE COBRO (`repartir`, fase 3 A1), nunca los de toda la orden: con la
+ * cuenta en dos cobros, cada uno recibía el descuento completo y «precio de lista» comisionaba $550 sobre una venta de $500.
+ * El tope del descuento por subtotal (B2/B2c) se aplica ANTES de repartir, en `cobroDeLaOrden`.
  *
  *   LO_COBRADO      → `payment.amount` (lo que el cliente pagó de verdad)
- *   PRECIO_DE_LISTA → `payment.amount + descuento`
+ *   PRECIO_DE_LISTA → `payment.amount` + su parte del descuento
  *
- * que es exactamente lo que este camino ya hacía — la unificación no le mueve la
- * base a ningún venue, sólo deja de depender de si su configuración filtra o no
- * por categoría.
- *
- * 🔴 La PROPINA no es parte de la base de la venta: se suma DESPUÉS y sólo si el
- * esquema trae `includeTips`, igual que en el camino por categorías
- * (`commission-calculation.service.ts`). Por eso no entra en la función pura.
- *
- * @param payment - Payment data
- * @param config - Commission config with inclusion settings
- * @returns Base amount for commission calculation
+ * 🔴 La PROPINA no es parte de la base de la venta: se suma DESPUÉS y sólo si el esquema trae `includeTips`.
  */
 export function calculateBaseAmount(
   payment: {
     amount: Decimal
     tipAmount?: Decimal | null
+    /** La parte de ESTE cobro del IVA registrado de la orden. */
     taxAmount?: Decimal | null
+    /** La parte de ESTE cobro del descuento efectivo de la orden. */
     discountAmount?: Decimal | null
-    /** `Order.subtotal`: tope del descuento EFECTIVO de mercancía (la cabecera nominal puede superarlo). */
-    subtotal?: Decimal | null
   },
   config: {
     includeTips: boolean
@@ -412,11 +405,7 @@ export function calculateBaseAmount(
   const paidAmount = decimalToNumber(payment.amount)
   const tipAmount = decimalToNumber(payment.tipAmount)
   const taxAmount = decimalToNumber(payment.taxAmount)
-  // 🔴 Desde B2/B2c `Order.discountAmount` es la Σ de las filas, SIN tope: una cortesía encima de un fijo de cuenta la deja
-  // mayor que el subtotal (el cobro topa la mercancía en 0). Para reconstruir el precio de lista sólo cuenta lo que de verdad
-  // se descontó de la mercancía, min(cabecera, subtotal); con la nominal, «lista» comisionaría una venta que nunca existió.
-  const nominalDiscount = decimalToNumber(payment.discountAmount)
-  const discountAmount = payment.subtotal == null ? nominalDiscount : Math.min(nominalDiscount, decimalToNumber(payment.subtotal))
+  const discountAmount = decimalToNumber(payment.discountAmount)
 
   let baseAmount = commissionableAmount([{ gross: paidAmount + discountAmount, lineDiscount: discountAmount, tax: taxAmount }], {
     base: resolveCommissionBase(config),
@@ -428,12 +417,124 @@ export function calculateBaseAmount(
     baseAmount += tipAmount
   }
 
+  return { baseAmount, tipAmount, discountAmount, taxAmount }
+}
+
+// ============================================
+// Un cobro dentro de su orden (fase 3, A1)
+// ============================================
+
+/** Lo que el reparto por cobro lee de la orden: el `select` de `payment.order` en los dos creadores de comisión. */
+export const ORDEN_PARA_REPARTO_SELECT = {
+  id: true,
+  createdById: true,
+  servedById: true,
+  subtotal: true,
+  discountAmount: true,
+  taxAmount: true,
+  serviceChargeAmount: true,
+  contratoDePrecio: true,
+  status: true,
+} satisfies Prisma.OrderSelect
+
+export type OrdenParaReparto = Prisma.OrderGetPayload<{ select: typeof ORDEN_PARA_REPARTO_SELECT }>
+
+const CERO = new Prisma.Decimal(0)
+const dec = (v: Prisma.Decimal | number | string | null | undefined) => new Prisma.Decimal(v == null ? 0 : String(v))
+
+/**
+ * ESTE cobro dentro de su orden: lo que la orden cobra sin propina (`computeStoredOrderTotal`, la regla del saldo) y los dos
+ * valores de la orden que se reparten entre cobros:
+ *
+ * - `descuento`: el EFECTIVO de mercancía, min(cabecera, subtotal). Es el tope de B2/B2c que vivía en `calculateBaseAmount`
+ *   (`origin/develop` `commission-utils.ts:419`): la cabecera es la Σ de las filas, sin tope, y puede pasar al subtotal.
+ * - `iva`: el REGISTRADO en la orden, incluido en el precio o cobrado aparte.
+ *
+ * Sin orden (cobro suelto) el cobro es todo: no hay nada que repartir. Los OTROS cobros los lee `otrosCobros`, por esquema.
+ */
+export function cobroDeLaOrden(payment: { amount: Decimal; orderId: string | null; order: OrdenParaReparto | null }): CobroDeLaOrden {
+  const cobro = new Prisma.Decimal(payment.amount)
+  const o = payment.order
+  if (!payment.orderId || !o) return { totalOrden: cobro, cobro, descuento: CERO, iva: CERO }
+  const subtotal = Prisma.Decimal.max(CERO, new Prisma.Decimal(o.subtotal ?? 0))
   return {
-    baseAmount,
-    tipAmount,
-    discountAmount,
-    taxAmount,
+    totalOrden: computeStoredOrderTotal({
+      subtotal: o.subtotal,
+      discountAmount: o.discountAmount,
+      serviceChargeAmount: o.serviceChargeAmount,
+      contratoDePrecio: o.contratoDePrecio,
+      taxAmount: o.taxAmount,
+      status: o.status,
+      tipAmount: 0,
+    }),
+    cobro,
+    descuento: Prisma.Decimal.min(Prisma.Decimal.max(CERO, new Prisma.Decimal(o.discountAmount ?? 0)), subtotal),
+    iva: Prisma.Decimal.max(CERO, new Prisma.Decimal(o.taxAmount ?? 0)),
   }
+}
+
+/**
+ * Los OTROS cobros confirmados de la orden que se ven AHORA, con lo que ya recibió cada uno de ESTE esquema: sus filas no
+ * anuladas más sus comisiones todavía en cola (el worker marca DONE en la misma transacción en que crea la fila: una foto
+ * nunca ve las dos). `null` = ese cobro no tiene registro de este esquema y `repartir` cuenta su parte proporcional.
+ *
+ * 🔴 Se llama con el candado de la orden TOMADO (el mismo de los dos creadores y del worker): así el segundo en confirmarse
+ * ve al primero, sea cual sea la fecha de cada uno (Codex plan r2, el riesgo de A1b: ordenar por `createdAt` dejaba que dos
+ * cobros confirmados al revés de sus fechas se llevaran cada uno 0.02 de un descuento de 0.03). Sin `take`: truncar
+ * cambiaría dinero, y son los cobros de UNA orden.
+ */
+export async function otrosCobros(
+  db: Prisma.TransactionClient,
+  payment: { id: string; venueId: string; orderId: string | null },
+  configId: string,
+): Promise<OtroCobro[]> {
+  if (!payment.orderId) return []
+  const filas = await db.$queryRaw<
+    Array<{ monto: Prisma.Decimal; registrado: boolean; base: Prisma.Decimal; descuento: Prisma.Decimal; iva: Prisma.Decimal }>
+  >(Prisma.sql`
+    WITH otros_de_la_orden AS (
+      SELECT p.id, p.amount AS monto FROM "Payment" p
+      WHERE p."venueId" = ${payment.venueId} AND p."orderId" = ${payment.orderId} AND p.id <> ${payment.id}
+        AND p.status = 'COMPLETED' AND (p.type IS NULL OR p.type NOT IN ('REFUND', 'TEST'))
+    ),
+    registrado AS (
+      SELECT cc."paymentId" AS id, cc."baseAmount" - cc."tipAmount" AS base, cc."discountAmount" AS descuento, cc."taxAmount" AS iva
+      FROM "CommissionCalculation" cc
+      WHERE cc."venueId" = ${payment.venueId} AND cc."configId" = ${configId} AND cc."voidedAt" IS NULL
+        AND cc."paymentId" IN (SELECT id FROM otros_de_la_orden)
+      UNION ALL
+      SELECT e."paymentId",
+             (e.payload->>'baseAmount')::numeric - COALESCE((e.payload->>'tipAmount')::numeric, 0),
+             COALESCE((e.payload->>'discountAmount')::numeric, 0),
+             COALESCE((e.payload->>'taxAmount')::numeric, 0)
+      FROM "PaymentEffect" e
+      WHERE e."venueId" = ${payment.venueId} AND e.kind = 'COMMISSION' AND e.status IN ('PENDING', 'PROCESSING', 'DEAD_LETTER')
+        AND e.payload->>'configId' = ${configId} AND e."paymentId" IN (SELECT id FROM otros_de_la_orden)
+    )
+    SELECT o.monto, COUNT(r.id) > 0 AS registrado,
+           COALESCE(SUM(r.base), 0) AS base, COALESCE(SUM(r.descuento), 0) AS descuento, COALESCE(SUM(r.iva), 0) AS iva
+    FROM otros_de_la_orden o LEFT JOIN registrado r ON r.id = o.id
+    GROUP BY o.id, o.monto
+  `)
+  return filas.map(f => ({
+    monto: dec(f.monto),
+    base: f.registrado ? dec(f.base) : null,
+    descuento: f.registrado ? dec(f.descuento) : null,
+    iva: f.registrado ? dec(f.iva) : null,
+  }))
+}
+
+/**
+ * La base de UNA orden (de unas categorías o del sobrante) que le toca a ESTE cobro: su parte —con lo que ya recibieron los
+ * otros cobros de ese esquema, `otros`—, sin pasar de lo que el esquema todavía no comisionó de esa orden — el tope de
+ * siempre: cobros calculados con la regla anterior ya consumieron la base completa (Mindform, $34.20 sobre una venta de
+ * $380; 268c5fc6).
+ */
+export function baseDelCobro(c: CobroDeLaOrden, baseDeLaOrden: number, yaComisionado: number, otros: OtroCobro[]): number {
+  // En decimal, no en binario: 0.1 + 0.2 no puede decidir un centavo (Codex plan r1-3).
+  const base = new Prisma.Decimal(baseDeLaOrden)
+  const queda = base.minus(new Prisma.Decimal(yaComisionado)).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP)
+  return Prisma.Decimal.max(CERO, Prisma.Decimal.min(repartir(c, base, otros, 'base'), queda)).toNumber()
 }
 
 // ============================================

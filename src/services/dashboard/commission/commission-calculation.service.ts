@@ -43,7 +43,12 @@ import {
   decimalToNumber,
   getVenueTimezone,
   CommissionConfigWithRelations,
+  cobroDeLaOrden,
+  otrosCobros,
+  baseDelCobro,
+  ORDEN_PARA_REPARTO_SELECT,
 } from './commission-utils'
+import { redondearRepartido, repartir } from './repartoPorCobro'
 import { subMonths, startOfMonth, endOfMonth } from 'date-fns'
 import { toZonedTime, fromZonedTime } from 'date-fns-tz'
 import { getApplicableTierRate, resolveGoalBasedTier } from './commission-tier.service'
@@ -222,7 +227,7 @@ export async function createCommissionForPayment(
   const payment = await db.payment.findUnique({
     where: { id: paymentId },
     include: {
-      order: { select: { id: true, createdById: true, servedById: true, subtotal: true, discountAmount: true, taxAmount: true } },
+      order: { select: ORDEN_PARA_REPARTO_SELECT },
       shift: { select: { id: true } },
       venue: { select: { id: true, timezone: true } },
     },
@@ -259,6 +264,10 @@ export async function createCommissionForPayment(
       )
   }
 
+  // A1 (Codex r3-14): el descuento, el IVA y la base por categorías son de la ORDEN; cada cobro comisiona SU parte. Los
+  // otros cobros se leen por esquema (`otrosCobros`) con el candado de la orden ya tomado arriba.
+  const enLaOrden = cobroDeLaOrden(payment)
+
   const categoryScoped = configs.filter(c => c.filterByCategories && c.categoryIds.length > 0)
   const catchAll = configs.filter(c => !(c.filterByCategories && c.categoryIds.length > 0))
   const claimed = [...new Set(categoryScoped.flatMap(c => c.categoryIds))]
@@ -277,11 +286,15 @@ export async function createCommissionForPayment(
       },
       db,
     )
-    // 🔴 MONEY: la base viene de los ITEMS DE LA ORDEN pero esto corre POR COBRO. Sin
-    // descontar lo ya comisionado, una orden con N cobros paga la misma venta N veces
-    // (bug real: Mindform, $34.20 sobre una venta de $380). Misma defensa del fix de
-    // descuentos apilados (268c5fc6): cobrar contra el REMANENTE, no contra el total.
-    let base = Math.max(0, Math.round((orderBase - (await alreadyCommissionedItemBase(payment.orderId, config.id, db, true))) * 100) / 100)
+    // 🔴 MONEY: la base viene de los ITEMS DE LA ORDEN pero esto corre POR COBRO. Cada cobro se lleva su parte proporcional
+    // (antes el PRIMERO se llevaba toda: devolverlo dejaba la comisión en $0 aunque seguía cobrada la otra mitad) y nunca más
+    // de lo que queda por comisionar (Mindform, $34.20 sobre una venta de $380; 268c5fc6).
+    let base = baseDelCobro(
+      enLaOrden,
+      orderBase,
+      await alreadyCommissionedItemBase(payment.orderId, config.id, db, true),
+      await otrosCobros(db, payment, config.id),
+    )
     const tip = config.includeTips ? decimalToNumber(payment.tipAmount) : 0
     if (config.includeTips) base += tip
     if (base <= 0) continue
@@ -295,13 +308,15 @@ export async function createCommissionForPayment(
   if (generalConfig) {
     let amounts: { baseAmount: number; tipAmount: number; discountAmount: number; taxAmount: number } | null = null
     if (claimed.length === 0) {
+      // A1: la parte de ESTE cobro del IVA registrado y del descuento efectivo de la orden, no los de toda la orden; lo que
+      // ya recibieron los otros cobros sale de SUS filas de este esquema, no del orden de las fechas.
+      const otros = await otrosCobros(db, payment, generalConfig.id)
       const r = calculateBaseAmount(
         {
           amount: payment.amount,
           tipAmount: payment.tipAmount,
-          taxAmount: payment.order?.taxAmount,
-          discountAmount: payment.order?.discountAmount,
-          subtotal: payment.order?.subtotal,
+          taxAmount: repartir(enLaOrden, enLaOrden.iva, otros, 'iva'),
+          discountAmount: repartir(enLaOrden, enLaOrden.descuento, otros, 'descuento'),
         },
         generalConfig,
       )
@@ -317,11 +332,12 @@ export async function createCommissionForPayment(
         },
         db,
       )
-      // 🔴 MONEY: mismo defecto que la rama category-scoped — el sobrante también es
-      // base DE ORDEN evaluada POR COBRO. Se descuenta lo que esta config ya cobró.
-      let base = Math.max(
-        0,
-        Math.round((orderLeftover - (await alreadyCommissionedItemBase(payment.orderId, generalConfig.id, db, true))) * 100) / 100,
+      // 🔴 MONEY: mismo reparto que la rama por categorías — el sobrante también es base DE ORDEN evaluada POR COBRO.
+      let base = baseDelCobro(
+        enLaOrden,
+        orderLeftover,
+        await alreadyCommissionedItemBase(payment.orderId, generalConfig.id, db, true),
+        await otrosCobros(db, payment, generalConfig.id),
       )
       const tip = generalConfig.includeTips ? decimalToNumber(payment.tipAmount) : 0
       if (generalConfig.includeTips) base += tip
@@ -1121,22 +1137,27 @@ export async function getCommissionByPaymentId(
  * @returns Array of created calculations (one per eligible staff). May be
  *          shorter than the input if some staff were filtered out.
  */
-export async function createSplitCommissionForPayment(paymentId: string, staffIds: string[]): Promise<CommissionCalculationResult[]> {
+export async function createSplitCommissionForPayment(
+  paymentId: string,
+  staffIds: string[],
+  options: CommissionOptions = {},
+): Promise<CommissionCalculationResult[]> {
   logger.info('Creating SPLIT commission for payment', { paymentId, staffCount: staffIds.length })
 
   if (staffIds.length === 0) return []
   if (staffIds.length === 1) {
     // Caller should have routed through createCommissionForPayment; guard
     // anyway so this function is safe to call with any list length.
-    return createCommissionForPayment(paymentId)
+    return createCommissionForPayment(paymentId, options)
   }
+  if (!options.db) return prisma.$transaction(tx => createSplitCommissionForPayment(paymentId, staffIds, { ...options, db: tx }))
+  const db = options.db
 
-  const payment = await prisma.payment.findUnique({
+  const payment = await db.payment.findUnique({
     where: { id: paymentId },
     include: {
-      order: { select: { id: true, subtotal: true, discountAmount: true, taxAmount: true } },
+      order: { select: ORDEN_PARA_REPARTO_SELECT },
       shift: { select: { id: true } },
-      venue: { select: { id: true, timezone: true } },
     },
   })
 
@@ -1150,29 +1171,34 @@ export async function createSplitCommissionForPayment(paymentId: string, staffId
     return []
   }
 
-  const config = await findActiveCommissionConfig(payment.venueId, payment.createdAt)
+  const config = await findActiveCommissionConfig(payment.venueId, payment.createdAt, db)
   if (!config) {
     logger.info('No active commission config for venue (split)', { paymentId, venueId: payment.venueId })
     return []
   }
 
-  // Compute the FULL base amount once — same path as the single-recipient
-  // function uses for non-category configs. We then divide it equally
-  // before writing each row.
+  // A1: la base de la venta que le toca a ESTE cobro (su parte del descuento, del IVA o de la base por categorías). Se
+  // calcula UNA vez y se divide entre las personas de la liga. Bajo el candado de la orden, como `createCommissionForPayment`:
+  // los otros cobros se leen ya confirmados (Codex plan r2). Congelando (A5) ya lo tomó `freezePaymentCommissionInTx`.
+  if (payment.orderId)
+    await db.$queryRaw(Prisma.sql`SELECT id FROM "Order" WHERE id = ${payment.orderId} AND "venueId" = ${payment.venueId} FOR UPDATE`)
+  const enLaOrden = cobroDeLaOrden(payment)
+  const otros = await otrosCobros(db, payment, config.id)
   let totalBaseAmount: number
   let totalTipAmount: number
   let totalDiscountAmount: number
   let totalTaxAmount: number
 
   if (config.filterByCategories && config.categoryIds.length > 0 && payment.orderId) {
-    const orderBase = await calculateCategoryFilteredAmount(payment.orderId, config.categoryIds, {
-      includeTax: config.includeTax,
-      includeDiscount: config.includeDiscount,
-    })
-    // 🔴 MONEY: mismo defecto que `createCommissionForPayment` — base DE ORDEN evaluada POR
-    // COBRO. Aquí las filas se reparten entre varios destinatarios, así que la suma de lo ya
-    // comisionado por esta config sobre esta orden ES la base ya cobrada.
-    totalBaseAmount = Math.max(0, Math.round((orderBase - (await alreadyCommissionedItemBase(payment.orderId, config.id))) * 100) / 100)
+    const orderBase = await calculateCategoryFilteredAmount(
+      payment.orderId,
+      config.categoryIds,
+      { includeTax: config.includeTax, includeDiscount: config.includeDiscount },
+      db,
+    )
+    // 🔴 MONEY: base DE ORDEN evaluada POR COBRO — su parte, y nunca más de lo que queda por comisionar (las N filas de un
+    // cobro dividido suman la base completa, que es lo que `alreadyCommissionedItemBase` ve).
+    totalBaseAmount = baseDelCobro(enLaOrden, orderBase, await alreadyCommissionedItemBase(payment.orderId, config.id, db), otros)
     totalTipAmount = config.includeTips ? decimalToNumber(payment.tipAmount) : 0
     totalDiscountAmount = 0
     totalTaxAmount = 0
@@ -1182,9 +1208,8 @@ export async function createSplitCommissionForPayment(paymentId: string, staffId
       {
         amount: payment.amount,
         tipAmount: payment.tipAmount,
-        taxAmount: payment.order?.taxAmount,
-        discountAmount: payment.order?.discountAmount,
-        subtotal: payment.order?.subtotal,
+        taxAmount: repartir(enLaOrden, enLaOrden.iva, otros, 'iva'),
+        discountAmount: repartir(enLaOrden, enLaOrden.descuento, otros, 'descuento'),
       },
       config,
     )
@@ -1201,17 +1226,30 @@ export async function createSplitCommissionForPayment(paymentId: string, staffId
   }
 
   const splitCount = staffIds.length
-  const splitBase = totalBaseAmount / splitCount
-  const splitTip = totalTipAmount / splitCount
-  const splitDiscount = totalDiscountAmount / splitCount
-  const splitTax = totalTaxAmount / splitCount
+  // 🔴 MONEY (Codex plan r1-4): base, propina, descuento e IVA se reparten en CENTAVOS, con el centavo que sobra asignado en
+  // un orden estable (por id de persona): las filas suman exacto lo cobrado. Antes cada una guardaba total/N y la base de
+  // datos redondeaba cada fila por su cuenta.
+  const orden = [...staffIds].sort()
+  const enPartes = (total: number) => {
+    // Al centavo ANTES de repartir: el total llega como `number` (base + propina en binario: 225.1 + 0.2 =
+    // 225.29999999999998) y `redondearRepartido` exige un total que sus partes de centavos sumen exacto.
+    const t = new Prisma.Decimal(total).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP)
+    return redondearRepartido(
+      orden.map(() => t.div(splitCount)),
+      t,
+    )
+  }
+  const bases = enPartes(totalBaseAmount)
+  const propinas = enPartes(totalTipAmount)
+  const descuentos = enPartes(totalDiscountAmount)
+  const impuestos = enPartes(totalTaxAmount)
 
-  const results: CommissionCalculationResult[] = []
-
-  for (const staffId of staffIds) {
+  // 1) Quién cobra y con qué tasa: las reglas de cada persona que deciden SI cobra.
+  const elegibles: Array<{ i: number; staffId: string; effectiveRate: number }> = []
+  for (const [i, staffId] of orden.entries()) {
     // Per-staff idempotency: skip if a calc already exists for this
     // (paymentId, staffId). Lets webhooks retry without creating duplicates.
-    const existing = await prisma.commissionCalculation.findFirst({
+    const existing = await db.commissionCalculation.findFirst({
       where: { paymentId, staffId, status: { not: CommissionCalcStatus.VOIDED } },
       select: { id: true },
     })
@@ -1220,13 +1258,13 @@ export async function createSplitCommissionForPayment(paymentId: string, staffId
       continue
     }
 
-    const staffInfo = await validateStaffForCommission(staffId, payment.venueId)
+    const staffInfo = await validateStaffForCommission(staffId, payment.venueId, db)
     if (!staffInfo) {
       logger.info('Staff not eligible for split commission, skipping', { paymentId, staffId })
       continue
     }
 
-    const override = await findActiveOverride(config.id, staffId, payment.createdAt)
+    const override = await findActiveOverride(config.id, staffId, payment.createdAt, db)
     if (override?.excludeFromCommissions) {
       logger.info('Staff excluded via override, skipping split row', { paymentId, staffId })
       continue
@@ -1235,49 +1273,46 @@ export async function createSplitCommissionForPayment(paymentId: string, staffId
     // Splits intentionally skip TIERED rate calculation — see function-level
     // docstring. Pass tierRate=null so the cascade falls back to override →
     // role-based → default.
-    const effectiveRate = calculateFinalRate(config, override, staffInfo.role, null)
+    elegibles.push({ i, staffId, effectiveRate: calculateFinalRate(config, override, staffInfo.role, null) })
+  }
 
-    let grossCommission: number
-    switch (config.calcType) {
-      case CommissionCalcType.FIXED:
-        // Fixed amount is per transaction — divide so the total still
-        // equals the configured fixed amount, not staffCount × it.
-        grossCommission = decimalToNumber(config.defaultRate) / splitCount
-        break
-      case CommissionCalcType.PERCENTAGE:
-      case CommissionCalcType.TIERED:
-      default:
-        grossCommission = splitBase * effectiveRate
-        break
-    }
+  // 2) 🔴 MONEY (Codex plan r1-4): la comisión de cada una sobre SU parte, con los centavos repartidos sobre el total exacto:
+  // $10 entre tres son 3.34 + 3.33 + 3.33, nunca $9.99. Un FIXED se divide entre las N personas de la liga, como siempre.
+  const brutas = redondearRepartido(
+    elegibles.map(e =>
+      config.calcType === CommissionCalcType.FIXED
+        ? new Prisma.Decimal(config.defaultRate).div(splitCount)
+        : bases[e.i].mul(e.effectiveRate),
+    ),
+  )
 
-    let netCommission = applyCommissionBounds(grossCommission, config)
-    grossCommission = Math.round(grossCommission * 100) / 100
-    netCommission = Math.round(netCommission * 100) / 100
+  // 3) Las reglas de cada persona que quedan: topes y asistencia.
+  const results: CommissionCalculationResult[] = []
+  for (const [k, e] of elegibles.entries()) {
+    const grossCommission = brutas[k].toNumber()
+    let netCommission = Math.round(applyCommissionBounds(grossCommission, config) * 100) / 100
 
     // Cada persona del split se juzga con SU asistencia — el retardo de una no toca a la otra.
-    const attendancePenaltyRate = await resolveAttendancePenaltyRate({
-      config,
-      staffId,
-      venueId: payment.venueId,
-      at: payment.createdAt,
-    })
+    const attendancePenaltyRate = await resolveAttendancePenaltyRate(
+      { config, staffId: e.staffId, venueId: payment.venueId, at: payment.createdAt },
+      db,
+    )
     netCommission = applyAttendancePenalty(netCommission, attendancePenaltyRate)
 
-    const calc = await prisma.commissionCalculation.create({
+    const calc = await db.commissionCalculation.create({
       data: {
         venueId: payment.venueId,
-        staffId,
+        staffId: e.staffId,
         attendancePenaltyRate,
         paymentId: payment.id,
         orderId: payment.orderId,
         shiftId: payment.shift?.id,
         configId: config.id,
-        baseAmount: splitBase,
-        tipAmount: splitTip,
-        discountAmount: splitDiscount,
-        taxAmount: splitTax,
-        effectiveRate,
+        baseAmount: bases[e.i],
+        tipAmount: propinas[e.i],
+        discountAmount: descuentos[e.i],
+        taxAmount: impuestos[e.i],
+        effectiveRate: e.effectiveRate,
         grossCommission,
         netCommission,
         calcType: config.calcType,
@@ -1286,21 +1321,14 @@ export async function createSplitCommissionForPayment(paymentId: string, staffId
       },
     })
 
-    logger.info('Split commission row created', {
-      calculationId: calc.id,
-      paymentId,
-      staffId,
-      splitBase,
-      netCommission,
-      splitCount,
-    })
+    logger.info('Split commission row created', { calculationId: calc.id, paymentId, staffId: e.staffId, netCommission, splitCount })
 
     results.push({
       calculationId: calc.id,
       paymentId,
-      staffId,
-      baseAmount: splitBase,
-      effectiveRate,
+      staffId: e.staffId,
+      baseAmount: bases[e.i].toNumber(),
+      effectiveRate: e.effectiveRate,
       grossCommission,
       netCommission,
     })
