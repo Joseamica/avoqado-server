@@ -38,7 +38,7 @@ function notEditableReason(entry: FeatureCatalogEntry): ListPriceRow['notEditabl
   return null
 }
 
-/** Every product of the «Precios» screen: the 40 catalog entries, then both plans (their price is phase 2). */
+/** Every product of the «Precios» screen: the 41 catalog entries, then both plans (their price is phase 2). */
 const PRODUCTS: readonly ProductRow[] = [
   ...FEATURE_CATALOG.map(entry => ({
     productKey: `FEATURE:${entry.featureCode ?? entry.id}`,
@@ -60,7 +60,7 @@ const PRODUCTS: readonly ProductRow[] = [
   })),
 ]
 
-/** The 31 CONFIGURABLE functions with a code: the only products whose list price is edited here (spec §4.2). */
+/** The 32 CONFIGURABLE functions with a code: the only products whose list price is edited here (spec §4.2). */
 export const LISTABLE_FEATURE_CODES: string[] = PRODUCTS.filter(p => p.featureCode && !p.notEditableReason).map(p => p.featureCode!)
 
 const priceOf = (definition: Prisma.JsonValue) => hybridOfferDefinition.parse(definition).terms.price

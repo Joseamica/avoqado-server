@@ -306,10 +306,11 @@ it('(6) an ACTIVE promotion whose window already ended never blocks a lower list
 
 it('(7) the board lists every catalog function plus both plans, each saying why it is not editable', async () => {
   const board = await listPriceBoard()
-  expect(LISTABLE_FEATURE_CODES).toHaveLength(31)
-  expect(board).toHaveLength(42)
+  expect(LISTABLE_FEATURE_CODES).toHaveLength(32)
+  expect(board).toHaveLength(43)
   expect(board.filter(row => row.editable).map(row => row.featureCode)).toEqual(LISTABLE_FEATURE_CODES)
   const byKey = new Map(board.map(row => [row.productKey, row]))
+  expect(byKey.get('FEATURE:AGGREGATOR_PASSES')).toMatchObject({ editable: true, notEditableReason: null })
   expect(byKey.get('FEATURE:BASE_POS')).toMatchObject({ editable: false, notEditableReason: 'SYSTEM', featureCode: null })
   expect(byKey.get('FEATURE:CHATBOT')).toMatchObject({ editable: false, notEditableReason: 'FREE' })
   expect(byKey.get('FEATURE:WHITE_LABEL_DASHBOARD')).toMatchObject({ editable: false, notEditableReason: 'CONTACT' })
