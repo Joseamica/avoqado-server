@@ -687,6 +687,10 @@ model Venue {
   updatedAt         DateTime           @updatedAt
   supplierItemCodes SupplierItemCode[]
 
+  // Conector de pases (TotalPass/Wellhub)
+  aggregatorConnections   AggregatorConnection[]
+  aggregatorCapacityRules AggregatorCapacityRule[]
+
   @@unique([id, organizationId])
   @@index([organizationId])
   @@index([slug])
@@ -1997,6 +2001,9 @@ model Product {
   supplierItemCodes SupplierItemCode[]
   invoiceLines      PurchaseOrderInvoiceLine[]
   wasteReports      InventoryWasteReport[]
+
+  // Conector de pases (TotalPass/Wellhub)
+  aggregatorProductLinks AggregatorProductLink[]
 
   @@unique([venueId, sku])
   @@unique([venueId, gtin])
@@ -4855,13 +4862,23 @@ model HybridCampaign {
   revision       Int @default(1)
   status         LaunchCampaignStatus @default(DRAFT)
   startsAt       DateTime
-  endsAt         DateTime
-  capacity       Int
+  // SQL CHECK HybridCampaign_purpose_shape: PROMOTION requires endsAt + capacity and no listProductKey;
+  // LIST has neither, requires listProductKey and never belongs to a promotion group.
+  endsAt         DateTime?
+  capacity       Int?
   reservedCount  Int @default(0)
   redeemedCount  Int @default(0)
   audience       String
   eligibleOrganizationIds String[] @default([])
   listed         Boolean @default(false)
+  purpose              HybridCampaignPurpose @default(PROMOTION)
+  // SQL partial UNIQUE (listProductKey) WHERE purpose = 'LIST': one list price per product.
+  listProductKey       String?
+  promotionGroupId     String?
+  promotionGroup       HybridPromotionGroup? @relation(fields: [promotionGroupId], references: [id], onDelete: Restrict)
+  // Explicit "currently sold" publication; readers use this pointer, never the highest version.
+  currentPublicationId String?
+  pendingPublicationId String?
   createdById    String
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
@@ -4870,6 +4887,32 @@ model HybridCampaign {
 
   @@index([status, listed, startsAt, endsAt])
   @@index([createdAt, id])
+  @@index([purpose, status])
+  @@index([promotionGroupId])
+}
+
+enum HybridCampaignPurpose {
+  LIST
+  PROMOTION
+}
+
+/// "% off" generator: one PROMOTION campaign per listed feature, managed together.
+model HybridPromotionGroup {
+  id                 String               @id @default(cuid())
+  name               String
+  // SQL CHECK HybridPromotionGroup_percent: percentOff 1-90, capacityPerFeature >= 1, endsAt > startsAt.
+  percentOff         Int
+  target             Json
+  startsAt           DateTime
+  endsAt             DateTime
+  promotionCycles    Int?
+  capacityPerFeature Int
+  status             LaunchCampaignStatus @default(PAUSED)
+  revision           Int                  @default(1)
+  createdById        String
+  createdAt          DateTime             @default(now())
+  updatedAt          DateTime             @updatedAt
+  campaigns          HybridCampaign[]
 }
 
 /// Immutable commercial terms; provider references may be attached after publication.
@@ -7628,6 +7671,9 @@ model Customer {
 
   // Fase 1 — campañas de correo
   campaignDeliveries CustomerCampaignDelivery[]
+
+  // Conector de pases (TotalPass/Wellhub)
+  externalIdentities CustomerExternalIdentity[]
 
   @@unique([venueId, email]) // Unique email per venue (not globally)
   @@unique([venueId, phone]) // Unique phone per venue (not globally)
@@ -14072,6 +14118,11 @@ model Reservation {
   updatedAt DateTime @updatedAt
 
   // Indexes
+
+  // Conector de pases (TotalPass/Wellhub)
+  aggregatorBooking AggregatorBooking?
+  aggregatorVisits  AggregatorVisit[]
+
   @@unique([venueId, confirmationCode])
   @@index([venueId, status, startsAt])
   @@index([venueId, startsAt, endsAt])
@@ -14287,6 +14338,9 @@ model ClassSession {
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  // Conector de pases (TotalPass/Wellhub)
+  aggregatorSessionLinks AggregatorSessionLink[]
 
   @@index([venueId, startsAt])
   @@index([venueId, productId, startsAt])
@@ -14692,6 +14746,281 @@ model CalendarSyncOutbox {
   @@index([reservationId])
   @@index([classSessionId])
   @@index([targetConnectionId])
+}
+
+/// Conector de pases (TotalPass, Wellhub). Spec 2026-10-02-conector-de-pases-wellhub-totalpass-design.md
+enum AggregatorProvider {
+  TOTALPASS
+  WELLHUB
+}
+
+enum AggregatorConnectionStatus {
+  PENDING /// creada; falta autenticar o suscribir webhooks
+  ACTIVE
+  PAUSED /// el estudio la apagó; no se publica ni se acepta nada
+  REVOKED /// la llave dejó de servir (401); hay que volver a conectar
+}
+
+/// Cuándo le decimos al agregador «sí vino». AUTO = al llegar su check-in. ON_VENUE_CHECKIN = cuando
+/// el estudio registra la asistencia en Avoqado (kiosco, POS, dashboard, coach).
+enum AggregatorConfirmMode {
+  AUTO
+  ON_VENUE_CHECKIN
+}
+
+enum AggregatorInboundKind {
+  BOOKING
+  CHECKIN
+}
+
+enum AggregatorEventStatus {
+  RECEIVED
+  PROCESSED
+  FAILED
+  IGNORED /// válido pero sin acción (p. ej. estado desconocido); se guarda para revisarlo
+}
+
+enum AggregatorBookingDecision {
+  ACCEPTED
+  DENIED
+  CANCELLED
+}
+
+enum AggregatorVisitStatus {
+  PENDING
+  CONFIRMED
+  ALREADY_CONFIRMED /// el agregador ya la tenía validada (p. ej. la recepción en su portal)
+  EXPIRED /// venció el plazo sin validar: ese cobro se pierde
+  REJECTED
+}
+
+enum AggregatorOutboxOperation {
+  SYNC_SESSION /// crear/actualizar/dar de baja la ocurrencia y su cupo
+  RESPOND_BOOKING
+  VALIDATE_VISIT
+  CANCEL_BOOKING /// el estudio canceló o quitó de la clase a un socio desde Avoqado: se da de baja su reserva en el proveedor
+}
+
+enum AggregatorOutboxStatus {
+  PENDING
+  IN_PROGRESS
+  DONE
+  FAILED
+  DEAD_LETTER
+  SKIPPED
+}
+
+enum AggregatorCapacityScope {
+  DEFAULT /// capa 1: todas las clases
+  WEEKLY /// capa 2: un día de la semana (y opcionalmente una hora)
+  SESSION /// capa 3: una sesión concreta
+}
+
+model AggregatorConnection {
+  id                   String                     @id @default(cuid())
+  venueId              String
+  venue                Venue                      @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  provider             AggregatorProvider
+  /// TotalPass: `identifier` (UUID) de la sucursal. Wellhub: gym_id.
+  externalPlaceId      String?
+  externalPlaceName    String?
+  /// place_api_key cifrada (AGGREGATOR_TOKEN_KEY). Nunca se loguea.
+  credentialCiphertext Bytes?
+  /// Secreto opaco en la URL del webhook (TotalPass no firma sus webhooks).
+  webhookToken         String                     @unique
+  status               AggregatorConnectionStatus @default(PENDING)
+  confirmMode          AggregatorConfirmMode      @default(AUTO)
+  /// Banderas del proveedor (p. ej. { hasSlotConfirmation: true }).
+  config               Json?
+  lastError            String?                    @db.Text
+  createdAt            DateTime                   @default(now())
+  updatedAt            DateTime                   @updatedAt
+
+  productLinks AggregatorProductLink[]
+  sessionLinks AggregatorSessionLink[]
+  bookings     AggregatorBooking[]
+  visits       AggregatorVisit[]
+  events       AggregatorInboundEvent[]
+  outbox       AggregatorOutbox[]
+
+  @@unique([venueId, provider])
+  @@unique([provider, externalPlaceId])
+  @@index([status])
+}
+
+model AggregatorProductLink {
+  id               String               @id @default(cuid())
+  connectionId     String
+  connection       AggregatorConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  venueId          String
+  productId        String
+  product          Product              @relation(fields: [productId], references: [id], onDelete: Cascade)
+  /// TotalPass: `planId` numérico (como texto). Wellhub: product_id.
+  externalPlanId   String
+  /// TotalPass: `code` del plan (8 caracteres) que llega en los webhooks.
+  externalPlanCode String?
+  active           Boolean              @default(true)
+  createdAt        DateTime             @default(now())
+  updatedAt        DateTime             @updatedAt
+
+  @@unique([connectionId, productId])
+  @@index([venueId])
+}
+
+model AggregatorSessionLink {
+  id                   String               @id @default(cuid())
+  connectionId         String
+  connection           AggregatorConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  venueId              String
+  classSessionId       String
+  classSession         ClassSession         @relation(fields: [classSessionId], references: [id], onDelete: Cascade)
+  /// TotalPass: occurrenceUuid. Null hasta que se publica.
+  externalOccurrenceId String?
+  /// Fecha-hora con la que se publicó; si la sesión cambia de hora, se da de baja y se crea otra.
+  publishedStartsAt    DateTime?
+  publishedSpots       Int?
+  /// Huella de lo último enviado (título, coach, duración, cupo, estado) para no repetir llamadas.
+  publishedHash        String?
+  /// false = dada de baja en el proveedor.
+  live                 Boolean              @default(true)
+  lastSyncedAt         DateTime?
+  createdAt            DateTime             @default(now())
+  updatedAt            DateTime             @updatedAt
+
+  @@unique([connectionId, classSessionId])
+  @@index([connectionId, externalOccurrenceId])
+}
+
+model AggregatorCapacityRule {
+  id             String                  @id @default(cuid())
+  venueId        String
+  venue          Venue                   @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  scope          AggregatorCapacityScope
+  /// WEEKLY: 0 = domingo … 6 = sábado (hora local del venue).
+  weekday        Int?
+  /// WEEKLY: minuto del día de inicio de la clase (hora local); null = todo el día.
+  startMinute    Int?
+  /// SESSION: la sesión a la que aplica.
+  classSessionId String?
+  maxSpots       Int
+  createdAt      DateTime                @default(now())
+  updatedAt      DateTime                @updatedAt
+
+  @@index([venueId, scope])
+  @@index([classSessionId])
+}
+
+model AggregatorBooking {
+  id                String                    @id @default(cuid())
+  connectionId      String
+  connection        AggregatorConnection      @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  venueId           String
+  provider          AggregatorProvider
+  /// Null cuando la reserva se rechazó (no se creó Reservation).
+  reservationId     String?                   @unique
+  reservation       Reservation?              @relation(fields: [reservationId], references: [id], onDelete: SetNull)
+  classSessionId    String?
+  externalBookingId String
+  externalUserId    String
+  externalPlanCode  String?
+  decision          AggregatorBookingDecision
+  /// Motivo canónico del rechazo (p. ej. CLASS_FULL), visible para el estudio.
+  denyReason        String?
+  createdAt         DateTime                  @default(now())
+  updatedAt         DateTime                  @updatedAt
+
+  @@unique([provider, externalBookingId])
+  @@index([venueId, createdAt])
+  /// Cupo publicado de una clase (cada SYNC_SESSION) y búsqueda de la reserva de un check-in.
+  @@index([connectionId, classSessionId])
+  @@index([connectionId, externalUserId])
+}
+
+model AggregatorVisit {
+  id                String                @id @default(cuid())
+  connectionId      String
+  connection        AggregatorConnection  @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  venueId           String
+  provider          AggregatorProvider
+  externalUserId    String
+  /// Llave de dedupe: sha256 del endpoint de validación (TotalPass) o el id del check-in (Wellhub).
+  externalCheckinId String
+  /// TotalPass: URL literal de validación (trae un token de un solo uso).
+  validationRef     String                @db.Text
+  reservationId     String?
+  reservation       Reservation?          @relation(fields: [reservationId], references: [id], onDelete: SetNull)
+  startedAt         DateTime
+  deadlineAt        DateTime
+  status            AggregatorVisitStatus @default(PENDING)
+  /// 'AUTO' | 'VENUE'
+  confirmedBy       String?
+  confirmedAt       DateTime?
+  lastError         String?               @db.Text
+  createdAt         DateTime              @default(now())
+  updatedAt         DateTime              @updatedAt
+
+  @@unique([provider, externalCheckinId])
+  @@index([venueId, status, deadlineAt])
+  @@index([reservationId])
+  /// Vencer y re-encolar visitas de todos los negocios (el job filtra por estado y plazo, sin venueId).
+  @@index([status, deadlineAt])
+}
+
+model CustomerExternalIdentity {
+  id             String             @id @default(cuid())
+  venueId        String
+  customerId     String
+  customer       Customer           @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  provider       AggregatorProvider
+  externalUserId String
+  createdAt      DateTime           @default(now())
+
+  @@unique([venueId, provider, externalUserId])
+  @@index([customerId])
+}
+
+model AggregatorInboundEvent {
+  id            String                @id @default(cuid())
+  provider      AggregatorProvider
+  connectionId  String
+  connection    AggregatorConnection  @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  venueId       String
+  kind          AggregatorInboundKind
+  dedupKey      String                @unique
+  payload       Json
+  status        AggregatorEventStatus @default(RECEIVED)
+  error         String?               @db.Text
+  attemptCount  Int                   @default(0)
+  nextAttemptAt DateTime?
+  receivedAt    DateTime              @default(now())
+  processedAt   DateTime?
+
+  @@index([status, nextAttemptAt])
+  @@index([venueId, receivedAt])
+}
+
+model AggregatorOutbox {
+  id                  String                    @id @default(cuid())
+  venueId             String
+  connectionId        String
+  connection          AggregatorConnection      @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  operation           AggregatorOutboxOperation
+  classSessionId      String?
+  aggregatorBookingId String?
+  aggregatorVisitId   String?
+  /// Junta trabajo repetido: `${operation}:${connectionId}:${objetoId}`.
+  coalesceKey         String
+  status              AggregatorOutboxStatus    @default(PENDING)
+  attempts            Int                       @default(0)
+  scheduledAt         DateTime                  @default(now())
+  claimToken          String?
+  leaseUntil          DateTime?
+  lastError           String?                   @db.Text
+  createdAt           DateTime                  @default(now())
+  processedAt         DateTime?
+
+  @@index([status, scheduledAt])
+  @@index([coalesceKey, status])
 }
 
 /// Mapping between an Avoqado source row (reservation OR class session) and the

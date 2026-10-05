@@ -57,6 +57,8 @@ function mkTx(row: Partial<any>, opts: { casCount?: number; rereadStatus?: strin
     // se resuelven con la MISMA tx (antes attachServices abría otra conexión).
     venue: { findUniqueOrThrow: jest.fn(async () => ({ organizationId: 'org-del-venue' })) },
     product: { findMany: jest.fn(async () => [{ id: 'svc-1', name: 'Yoga', price: null, duration: 60 }]) },
+    // Conector de pases: el gancho del check-in busca visitas de pase de la reserva (casi siempre ninguna).
+    aggregatorVisit: { findMany: jest.fn(async () => []) },
   }
   return tx
 }
@@ -231,5 +233,47 @@ describe('checkInReservation (puro, dentro de tx)', () => {
     const tx = mkTx({})
     tx.reservation.findFirst.mockResolvedValue(null)
     await expect(checkInReservation(tx, base)).rejects.toMatchObject({ statusCode: 404 })
+  })
+
+  // nuevo — conector de pases
+  it('al pasar a CHECKED_IN avisa al conector de pases dentro de la misma tx', async () => {
+    const spy = jest.spyOn(require('@/services/aggregators/core/visitHook'), 'onVenueCheckIn').mockResolvedValue(undefined)
+    try {
+      const tx = mkTx({ status: 'PENDING' })
+      await checkInReservation(tx, base)
+      expect(spy).toHaveBeenCalledWith(tx, 'res-1', 'DASHBOARD')
+      // después del ActivityLog: si el check-in no dejó rastro, no se avisa
+      expect(spy.mock.invocationCallOrder[0]).toBeGreaterThan(tx.activityLog.create.mock.invocationCallOrder[0])
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  // nuevo — conector de pases: idempotente, el aviso sólo sale en la transición
+  it('ALREADY_CHECKED_IN (ya estaba o perdió la carrera) → no avisa al conector de pases', async () => {
+    const spy = jest.spyOn(require('@/services/aggregators/core/visitHook'), 'onVenueCheckIn').mockResolvedValue(undefined)
+    try {
+      await checkInReservation(mkTx({ status: 'CHECKED_IN', checkedInAt: NOW }), base)
+      await checkInReservation(mkTx({ status: 'CONFIRMED' }, { casCount: 0, rereadStatus: 'CHECKED_IN' }), base)
+      expect(spy).not.toHaveBeenCalled()
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  // nuevo — conector de pases: PASS no tiene ventana (sólo KIOSK la tiene) y no relanza el gancho
+  it('source PASS a +1 h → ok, sin consultar la ventana del kiosco ni buscar visitas', async () => {
+    const tx = mkTx({ status: 'CONFIRMED', startsAt: new Date(NOW.getTime() - 60 * 60_000) })
+    const pass = { type: 'SERVICE' as const, servicePrincipalId: 'aggregator:TOTALPASS' }
+    await expect(checkInReservation(tx, { ...base, actor: pass, source: 'PASS' })).resolves.toMatchObject({ outcome: 'CHECKED_IN' })
+    expect(getReservationSettings).not.toHaveBeenCalled()
+    expect(tx.aggregatorVisit.findMany).not.toHaveBeenCalled()
+  })
+
+  // regresión — una reserva normal (sin pase) sigue pasando a CHECKED_IN con el gancho real
+  it('sin visitas de pase el gancho real no encola nada y el check-in sigue igual', async () => {
+    const tx = mkTx({ status: 'CONFIRMED' })
+    await expect(checkInReservation(tx, base)).resolves.toMatchObject({ outcome: 'CHECKED_IN' })
+    expect(tx.aggregatorVisit.findMany).toHaveBeenCalledTimes(1)
   })
 })

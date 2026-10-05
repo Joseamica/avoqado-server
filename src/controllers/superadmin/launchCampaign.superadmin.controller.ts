@@ -27,11 +27,11 @@ import {
   updateLaunchCampaign,
 } from '../../services/launchCampaigns/launchCampaign.service'
 import { activateLaunchCampaign, previewLaunchOffer } from '../../services/launchCampaigns/launchCampaignStripe.service'
-import { previewHybridOffer } from '../../services/launchCampaigns/hybridOffer.service'
+import { reviewHybridCampaignOffer } from '../../services/launchCampaigns/hybridCampaign.service'
 
-export const hybridPreview = (req: Request, res: Response, next: NextFunction) => {
+export const hybridPreview = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    res.json({ success: true, data: previewHybridOffer(req.body) })
+    res.json({ success: true, data: await reviewHybridCampaignOffer(req.body, req.query) })
   } catch (error) {
     next(error)
   }

@@ -55,4 +55,16 @@ describe('redactUrlSecrets', () => {
     expect(() => redactUrlSecrets('/x?%%%&code=Y')).not.toThrow()
     expect(redactUrlSecrets('/x?%%%&code=Y')).not.toContain('Y')
   })
+
+  // nuevo — conector de pases: el secreto viaja como SEGMENTO de la ruta, no en el query
+  it('🔴 redacta el token del webhook de pases, con o sin query', () => {
+    const token = 'Zx9_aB-3kLmN0pQrStUvWxYz1234567890abcdEFGH'
+    expect(redactUrlSecrets(`/api/v1/webhooks/aggregators/totalpass/${token}/booking`)).toBe(
+      '/api/v1/webhooks/aggregators/totalpass/[redactado]/booking',
+    )
+    expect(redactUrlSecrets(`/api/v1/webhooks/aggregators/totalpass/${token}/booking?page=2`)).toBe(
+      '/api/v1/webhooks/aggregators/totalpass/[redactado]/booking?page=2',
+    )
+    expect(redactUrlSecrets(`/api/v1/webhooks/aggregators/totalpass/${token}/booking?token=x`)).not.toContain(token)
+  })
 })

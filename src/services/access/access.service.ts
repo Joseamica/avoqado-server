@@ -73,7 +73,7 @@ const DEFAULT_FEATURE_ACCESS: FeatureAccess = {
  * Example: User has 'tpv:read' permission, but if AVOQADO_TPVS feature is disabled
  * or user's role doesn't have access to it, the permission is removed.
  */
-const PERMISSION_TO_FEATURE_MAP: Record<string, string> = {
+export const PERMISSION_TO_FEATURE_MAP: Record<string, string> = {
   // TPV Management
   'tpv:read': 'AVOQADO_TPVS',
   'tpv:write': 'AVOQADO_TPVS',
@@ -103,6 +103,9 @@ const PERMISSION_TO_FEATURE_MAP: Record<string, string> = {
   'delivery-channels:manage': 'DELIVERY_CHANNELS',
   'delivery-channels:request': 'DELIVERY_CHANNELS',
   'delivery-channels:connect': 'DELIVERY_CHANNELS',
+
+  // Pases (TotalPass/Wellhub) — función AGGREGATOR_PASSES (Pro). Sin esto, en white-label el permiso pasaría el filtro.
+  'reservations:manage-passes': 'AGGREGATOR_PASSES',
 
   // Menu Management
   'menu:read': 'AVOQADO_MENU',

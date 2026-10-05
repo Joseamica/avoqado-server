@@ -57,6 +57,8 @@ describe('reservation availability controller boundaries', () => {
     jest.restoreAllMocks()
     jest.resetAllMocks()
     jest.spyOn(settingsService, 'getReservationSettings').mockResolvedValue(settings)
+    // resetAllMocks borra el default del setup: sin conexiones de pases, el gancho de sincronización no escribe nada.
+    prismaMock.aggregatorConnection.findMany.mockResolvedValue([])
     prismaMock.venue.findUnique.mockResolvedValue({ timezone: 'UTC' })
     prismaMock.venue.findFirst.mockResolvedValue({
       id: 'venue-1',
@@ -198,6 +200,63 @@ describe('reservation availability controller boundaries', () => {
       { writeOrigin: 'DASHBOARD', allowOverCapacity: true },
       'staff-1',
     )
+  })
+
+  // nuevo — Codex F6: el enlace público del recordatorio no puede mover a un socio de pase a otra clase (su lugar en
+  // TotalPass se quedaría en la vieja); la cambia él desde la app del agregador.
+  it('public class reschedule of a pass member ⇒ 409 PASS_RESERVATION_NOT_RESCHEDULABLE and nothing moves', async () => {
+    const classReservation = {
+      id: 'reservation-1',
+      venueId: 'venue-1',
+      status: 'CONFIRMED',
+      startsAt: new Date(Date.now() + 48 * 60 * 60_000),
+      classSessionId: 'old-session',
+    } as any
+    jest.spyOn(reservationService, 'getReservationByCancelSecret').mockResolvedValue(classReservation)
+    prismaMock.$transaction.mockImplementation((cb: any) => cb(prismaMock))
+    prismaMock.reservation.findFirst.mockResolvedValueOnce(classReservation)
+    prismaMock.aggregatorBooking.findFirst.mockResolvedValueOnce({ provider: 'TOTALPASS' })
+    const req: any = { params: { venueSlug: 'venue', cancelSecret: 'secret' }, body: { classSessionId: 'new-session' } }
+    const res = responseMock()
+    const next = jest.fn()
+
+    await publicController.rescheduleReservation(req, res, next)
+
+    expect(res.json).not.toHaveBeenCalled()
+    expect(next.mock.calls[0][0]).toMatchObject({
+      statusCode: 409,
+      code: 'PASS_RESERVATION_NOT_RESCHEDULABLE',
+      message: 'Esta reserva llegó por TotalPass: el socio la cambia desde la app de TotalPass.',
+    })
+    expect(prismaMock.reservation.updateMany).not.toHaveBeenCalled()
+  })
+
+  // regresión — una reserva de clase normal se sigue cambiando desde el enlace público
+  it('public class reschedule of a regular reservation still moves it', async () => {
+    jest.spyOn(reservationService, 'getReservationByCancelSecret').mockResolvedValue({
+      id: 'reservation-1',
+      venueId: 'venue-1',
+      status: 'CONFIRMED',
+      startsAt: new Date(Date.now() + 48 * 60 * 60_000),
+      classSessionId: 'old-session',
+    } as any)
+    const move = jest.spyOn(reservationService, 'rescheduleClassReservation').mockResolvedValue({
+      confirmationCode: 'RES-1',
+      status: 'CONFIRMED',
+      startsAt,
+      endsAt,
+      partySize: 1,
+      spotIds: [],
+    } as any)
+    const req: any = { params: { venueSlug: 'venue', cancelSecret: 'secret' }, body: { classSessionId: 'new-session' } }
+    const res = responseMock()
+    const next = jest.fn()
+
+    await publicController.rescheduleReservation(req, res, next)
+
+    expect(next).not.toHaveBeenCalled()
+    expect(move).toHaveBeenCalledWith(expect.objectContaining({ reservationId: 'reservation-1', newClassSessionId: 'new-session' }))
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ confirmationCode: 'RES-1', startsAt }))
   })
 
   it('public appointment reschedule declares PUBLIC origin', async () => {

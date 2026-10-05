@@ -17,6 +17,17 @@ const mismatch = () =>
   new ConflictError('No pudimos verificar la cobertura pagada. Conservamos tu compra para revisarla.', 'HYBRID_DELIVERY_UNVERIFIED')
 type Composition = Array<{ contractId: string; itemId: string; featureCodes: string[]; priceId: string; amount: string }>
 
+/**
+ * The delivery's one «not paid» criterion for a period: open dispute, fully refunded, or funded below the sum of its lines
+ * (`expected`). The price-gap report repeats it in SQL (`periodFundedSql`); its integration test checks both agree.
+ */
+export function hybridPeriodInvalid(
+  funding: { funded: Prisma.Decimal.Value; refunded: Prisma.Decimal.Value; disputed: boolean },
+  expected: Prisma.Decimal,
+) {
+  return funding.disputed || new Prisma.Decimal(funding.refunded).gte(funding.funded) || new Prisma.Decimal(funding.funded).lt(expected)
+}
+
 /** Always reads live provider state; webhook order and browser success redirects are never payment authority. */
 export async function reconcileHybridInvoice(venueId: string, purchaseId: string, invoiceId: string) {
   const deadline = Date.now() + 550000
@@ -169,7 +180,7 @@ async function reconcileInvoice(venueId: string, purchaseId: string, invoiceId: 
   const expected = composition.reduce((sum, line) => sum.add(line.amount), new Prisma.Decimal(0))
   const underfunded = new Prisma.Decimal(funding.funded).lt(expected)
   if (underfunded && !funding.impaired) throw mismatch()
-  const invalid = disputed || new Prisma.Decimal(funding.refunded).gte(funding.funded) || underfunded
+  const invalid = hybridPeriodInvalid(funding, expected)
   // Configure the agreed future price before activating a paid purchase; recovery repeats the same recorded operation.
   if (!invalid && invoiceId === purchase.initialInvoiceId && purchase.status !== 'COMPLETED') {
     await assertLive()
