@@ -471,3 +471,55 @@ describe('la propina guardada es la que ENTRÓ a la base', () => {
     expect(filas.map((f: any) => Number(f.tipAmount))).toEqual([0, 0])
   })
 })
+
+/**
+ * 🔴 MONEY (Codex B2c r1, P1) — desde B2/B2c la cabecera `Order.discountAmount` es la Σ de las filas de descuento y PUEDE
+ * quedar mayor que `Order.subtotal` (una cortesía encima de un fijo de cuenta). El cobro está bien (`computeStoredOrderTotal`
+ * topa la mercancía en 0), pero «precio de lista» reconstruye el bruto como `cobro + descuento`: con la cabecera nominal
+ * comisiona una venta que nunca existió. La base usa el descuento EFECTIVO de mercancía = min(descuento, subtotal).
+ *
+ * Caso de Codex: café $100 + pan $50 (subtotal 150), fijo de cuenta $60, cortesía del café ($100) ⇒ cabecera 160; cargo fijo
+ * $20 ⇒ se cobran $20. Lista = 20 + min(160, 150) = 170 ⇒ 10 % = $17 (con la cabecera nominal: 20 + 160 = 180 ⇒ $18).
+ */
+describe('precio de lista con la cabecera de descuento mayor que el subtotal', () => {
+  const LISTA_10 = { ...GENERAL, defaultRate: new Decimal(0.1), includeDiscount: true }
+  const cuentaRegalada = () => {
+    const p = payment(20)
+    return { ...p, order: { ...p.order, subtotal: new Decimal(150), discountAmount: new Decimal(160) } }
+  }
+
+  it('MONEY: cobro completo comisiona $17 sobre $170 de lista, no $18', async () => {
+    prismaMock.payment.findUnique.mockResolvedValue(cuentaRegalada())
+    prismaMock.commissionConfig.findMany.mockResolvedValue([LISTA_10])
+
+    const results = await createCommissionForPayment('pay-1')
+
+    expect(results).toHaveLength(1)
+    expect(results[0].baseAmount).toBe(170)
+    expect(results[0].netCommission).toBe(17)
+  })
+
+  it('MONEY: comisión dividida reparte $17 (8.50 c/u), no $18', async () => {
+    prismaMock.payment.findUnique.mockResolvedValue(cuentaRegalada())
+    prismaMock.commissionConfig.findFirst.mockResolvedValue(LISTA_10)
+
+    const results = await createSplitCommissionForPayment('pay-1', ['staff-1', 'staff-2'])
+
+    expect(results).toHaveLength(2)
+    expect(results.map(r => r.netCommission)).toEqual([8.5, 8.5])
+  })
+
+  it('control — con la cabecera ≤ subtotal el precio de lista no cambia (cobro 90 + descuento 60 = 150)', async () => {
+    const p = payment(90)
+    prismaMock.payment.findUnique.mockResolvedValue({
+      ...p,
+      order: { ...p.order, subtotal: new Decimal(150), discountAmount: new Decimal(60) },
+    })
+    prismaMock.commissionConfig.findMany.mockResolvedValue([LISTA_10])
+
+    const results = await createCommissionForPayment('pay-1')
+
+    expect(results[0].baseAmount).toBe(150)
+    expect(results[0].netCommission).toBe(15)
+  })
+})

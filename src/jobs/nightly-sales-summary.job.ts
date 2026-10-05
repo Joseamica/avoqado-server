@@ -483,6 +483,9 @@ async function warnOnClampedOrders(venueId: string, startDate: Date, endDate: Da
         AND o.subtotal - o."discountAmount"
             - (SELECT COALESCE(SUM(oi."discountAmount"), 0) FROM "OrderItem" oi
                WHERE oi."orderId" = o.id AND ${Prisma.raw(isItemLevelDiscountSql())}) < 0
+        -- B2c F2: desde B2/B2c la cabecera es Σ filas SIN tope; una cortesía sobre un fijo (160 sobre 150, total 0) es legítima.
+        -- Sólo es daño la cabecera que sus FILAS no explican: sin filas (ORD-1779465117373) o Σ filas ≠ cabecera.
+        AND (SELECT SUM(od.amount) FROM "OrderDiscount" od WHERE od."orderId" = o.id) IS DISTINCT FROM o."discountAmount"
       ORDER BY net_sales ASC
       LIMIT ${SAMPLE_LIMIT + 1}
     `

@@ -228,6 +228,48 @@ describe('manualPayment.service', () => {
         }),
       )
     })
+    // 🔴 MONEY (Codex B2c r1, barrido F1): desde B2/B2c la cabecera `discountAmount` es la Σ de las filas SIN tope y puede
+    // pasar el subtotal (cortesía encima de un fijo de cuenta). El cobro topa la mercancía en 0; con la cabecera nominal este
+    // camino restaba de más y se comía el IVA que va aparte: 150 + 16 − 160 = 6 ⇒ un pago de $6 SALDABA una cuenta que debe $16.
+    it('MONEY: cabecera mayor que el subtotal — la mercancía se topa en 0 y el IVA aparte sigue debiéndose', async () => {
+      const orderUpdate = jest.fn()
+      const mockOrder = {
+        id: ORDER_ID,
+        venueId: VENUE_ID,
+        subtotal: new Prisma.Decimal(150),
+        taxAmount: new Prisma.Decimal(16),
+        discountAmount: new Prisma.Decimal(160),
+        total: new Prisma.Decimal(16),
+        paymentStatus: 'PENDING',
+        payments: [],
+        orderCustomers: [],
+      }
+      ;(prismaMock.$transaction as jest.Mock).mockImplementation(async (cb: any) =>
+        cb({
+          $queryRaw: filaDeOrdenBloqueada(),
+          order: { findFirst: jest.fn().mockResolvedValue(mockOrder), update: orderUpdate },
+          payment: { count: jest.fn().mockResolvedValue(0), create: jest.fn().mockResolvedValue({ id: 'pay-iva' }) },
+          shift: { findFirst: jest.fn().mockResolvedValue(null), update: jest.fn(), updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
+          orderCustomer: { create: jest.fn() },
+          venueTransaction: { create: jest.fn() },
+          paymentAllocation: { create: jest.fn() },
+        }),
+      )
+
+      await manualPaymentService.createManualPayment(VENUE_ID, USER_ID, {
+        orderId: ORDER_ID,
+        amount: '6',
+        tipAmount: '0',
+        method: 'CASH',
+        source: 'OTHER',
+        externalSource: 'BUQ',
+      })
+
+      const data = orderUpdate.mock.calls[0][0].data
+      expect(data.paymentStatus).toBe('PARTIAL')
+      expect(Number(data.total)).toBe(16)
+      expect(Number(data.remainingBalance)).toBe(10)
+    })
   })
 
   // ─── INVENTARIO (fase 5.6) ───────────────────────────────────────────────

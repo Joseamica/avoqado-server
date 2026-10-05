@@ -202,7 +202,9 @@ export function buildReceiptInput(params: {
     items: order.items.map(aItem),
     subtotalCents: pesosACentavos(order.subtotal),
     taxCents: pesosACentavos(order.taxAmount),
-    discountCents: order.discountAmount ? pesosACentavos(order.discountAmount) || null : null,
+    // El descuento EFECTIVO de mercancía: desde B2/B2c la cabecera es la Σ de las filas SIN tope y puede pasar el subtotal
+    // (el total ya topa la mercancía en 0); imprimirla entera dejaría un ticket que no cuadra.
+    discountCents: Math.min(pesosACentavos(order.discountAmount), pesosACentavos(order.subtotal)) || null,
     tipCents: pesosACentavos(payment.tipAmount) || null,
     totalCents: pesosACentavos(order.total),
     tender: aTender(payment),

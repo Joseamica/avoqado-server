@@ -73,7 +73,16 @@ function db() {
     product: { findMany: jest.fn(async () => [{ id: 'product', name: 'Product', price: new Prisma.Decimal(100), soldByWeight: false }]) },
     modifier: { findMany: jest.fn(async () => [{ id: 'modifier', name: 'Extra', price: new Prisma.Decimal(10) }]) },
     staff: { findUnique: jest.fn(async () => ({ id: 'staff' })) },
-    orderDiscount: { findMany: jest.fn(async () => []), update: jest.fn() },
+    orderDiscount: {
+      findMany: jest.fn(async () => []),
+      update: jest.fn(),
+      // B2b T6 (Codex r5): anular TODO cierra las reducciones de impuesto de sus filas.
+      updateMany: jest.fn(async () => ({ count: 0 })),
+      create: jest.fn(async ({ data }: any) => ({ id: 'od-nueva', ...data })),
+      delete: jest.fn(),
+    },
+    // B2c T4 (P5): la cortesía de la terminal crea su fila espejo con quien la otorga (StaffVenue) y el recorte puede retirar filas.
+    staffVenue: { findFirst: jest.fn(async () => null) },
     orderServiceCharge: { findMany: jest.fn(async () => []), update: jest.fn() },
     orderAction: { create: jest.fn(async () => ({})) },
     orderCustomer: { deleteMany: jest.fn(async () => ({ count: 0 })) },
@@ -263,7 +272,10 @@ describe('validation and historical amounts', () => {
   })
   it('add recalculates order percentages excluding promotions, preserves item discount and partial balance', async () => {
     tx.order.findUnique.mockResolvedValue({ ...order(), paymentStatus: 'PARTIAL', paidAmount: 30 })
-    tx.orderItem.findMany.mockResolvedValueOnce([]).mockResolvedValue([{ total: 100 }, { total: 50, orderPromotionId: 'promo' }])
+    tx.orderItem.findMany.mockResolvedValueOnce([]).mockResolvedValue([
+      { id: 'line', total: 100, discountAmount: 0 },
+      { id: 'promo-line', total: 50, discountAmount: 0, orderPromotionId: 'promo' },
+    ])
     tx.orderDiscount.findMany.mockResolvedValue([
       { id: 'd1', type: 'PERCENTAGE', value: 10, amount: 9 },
       { id: 'd2', type: 'PERCENTAGE', value: 50, amount: 5, appliedToItemIds: ['line'] },
@@ -271,7 +283,11 @@ describe('validation and historical amounts', () => {
     tx.orderServiceCharge.findMany.mockResolvedValue([{ id: 'charge', type: 'PERCENTAGE', value: 10, amount: 10 }])
     await addItemsToOrder('venue', 'order', [{ productId: 'product', quantity: 1 }], 1)
     expect(tx.orderDiscount.update).toHaveBeenCalledTimes(1)
-    expect(tx.orderDiscount.update).toHaveBeenCalledWith({ where: { id: 'd1' }, data: { amount: 10 } })
+    // B2: la misma escritura guarda el reparto canónico (sin la línea de promoción); `d2` es dirigida y sin reparto.
+    expect(tx.orderDiscount.update).toHaveBeenCalledWith({
+      where: { id: 'd1' },
+      data: { amount: 10, reparto: { v: 1, alcance: 'CUENTA', conPromociones: false, espejo: false, renglones: { line: 1000 } } },
+    })
     expect(tx.order.updateMany.mock.calls[0][0].data).toMatchObject({
       subtotal: 150,
       discountAmount: 15,
@@ -279,6 +295,100 @@ describe('validation and historical amounts', () => {
       total: 148.5,
       remainingBalance: 118.5,
     })
+  })
+  it('remove re-reparte una fila FIJA de cuenta sobre los renglones que quedan, sin cambiar su importe', async () => {
+    const otra = {
+      ...line,
+      id: 'otra',
+      total: new Prisma.Decimal(50),
+      unitPrice: new Prisma.Decimal(50),
+      discountAmount: new Prisma.Decimal(0),
+      orderPromotionId: null,
+    }
+    tx.order.findUnique.mockResolvedValue({
+      ...order(),
+      items: [{ ...line, discountAmount: new Prisma.Decimal(0), orderPromotionId: null }, otra],
+      subtotal: new Prisma.Decimal(150),
+      discountAmount: new Prisma.Decimal(30),
+    })
+    const fija = { v: 1, alcance: 'CUENTA', conPromociones: true, espejo: false, renglones: { line: 2000, otra: 1000 } }
+    tx.orderDiscount.findMany.mockResolvedValue([
+      { id: 'fija', type: 'FIXED_AMOUNT', value: 30, amount: 30, appliedToItemIds: [], reparto: fija },
+    ])
+    await removeOrderItem('venue', 'order', 'otra', 1)
+    expect(tx.orderDiscount.update).toHaveBeenCalledWith({
+      where: { id: 'fija' },
+      data: { reparto: { ...fija, renglones: { line: 3000 } } },
+    })
+    expect(tx.order.update.mock.calls.at(-1)[0].data).toMatchObject({ subtotal: 100, discountAmount: 30, total: 70 })
+    expect(globalDb.orderDiscount.update).not.toHaveBeenCalled()
+  })
+  it('add (la misma función que reproduce ADD_ITEMS offline) re-reparte una fila FIJA sobre los renglones de hoy; la cortesía queda en 0', async () => {
+    tx.orderItem.findMany.mockResolvedValueOnce([]).mockResolvedValue([
+      { id: 'line', total: 100, discountAmount: 0, orderPromotionId: null },
+      { id: 'regalo', total: 0, discountAmount: 50, orderPromotionId: null },
+      { id: 'nueva', total: 100, discountAmount: 0, orderPromotionId: null },
+    ])
+    const fija = { v: 1, alcance: 'CUENTA', conPromociones: true, espejo: false, renglones: { line: 2000 } }
+    tx.orderDiscount.findMany.mockResolvedValue([
+      { id: 'fija', type: 'FIXED_AMOUNT', value: 20, amount: 20, appliedToItemIds: [], reparto: fija },
+    ])
+    await addItemsToOrder('venue', 'order', [{ productId: 'product', quantity: 1 }], 1, true)
+    expect(tx.orderDiscount.update).toHaveBeenCalledWith({
+      where: { id: 'fija' },
+      data: { reparto: { ...fija, renglones: { line: 1000, nueva: 1000 } } },
+    })
+    expect(tx.order.updateMany.mock.calls[0][0].data).toMatchObject({ subtotal: 200, discountAmount: 20, total: 180 })
+  })
+  it('🔴 P2: applyDiscount heredado con artículos crea su fila DIRIGIDA congelada; la cabecera es la de hoy', async () => {
+    await applyDiscount('venue', 'order', { type: 'PERCENTAGE', value: 10, itemIds: ['line'], staffId: 'staff', expectedVersion: 1 } as any)
+    expect(tx.orderDiscount.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        orderId: 'order',
+        type: 'PERCENTAGE',
+        value: 10,
+        amount: 10,
+        appliedToItemIds: ['line'],
+        isManual: true,
+        reparto: { v: 1, alcance: 'DIRIGIDO', conPromociones: null, espejo: false, renglones: { line: 1000 } },
+      }),
+    })
+    expect(tx.order.update.mock.calls.at(-1)[0].data).toMatchObject({ discountAmount: 10 })
+    expect(globalDb.orderDiscount.create).not.toHaveBeenCalled()
+  })
+  it('🔴 P2: applyDiscount heredado sin artículos crea su fila de CUENTA con la cuenta de hoy como base (importe congelado, como «Cobrar»)', async () => {
+    await applyDiscount('venue', 'order', { type: 'PERCENTAGE', value: 10, staffId: 'staff', expectedVersion: 1 } as any)
+    expect(tx.orderDiscount.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        amount: 10,
+        appliedToItemIds: ['line'],
+        reparto: { v: 1, alcance: 'CUENTA', conPromociones: true, base: ['line'], espejo: false, renglones: {} },
+      }),
+    })
+  })
+  // Codex r1 P2: sin renglones no hay destinos; la fila quedaría como % de cuenta y el recálculo la re-derivaría.
+  it('🔴 P2: applyDiscount heredado sobre una cuenta SIN renglones no crea fila; sólo la cabecera, como hoy', async () => {
+    tx.order.findUnique.mockResolvedValue({ ...order(), items: [] })
+    await applyDiscount('venue', 'order', { type: 'PERCENTAGE', value: 10, staffId: 'staff', expectedVersion: 1 } as any)
+    expect(tx.orderDiscount.create).not.toHaveBeenCalled()
+    expect(tx.order.update.mock.calls.at(-1)[0].data).toMatchObject({ discountAmount: 10, total: 90 })
+  })
+  // Codex r1 P1: la cabecera de una orden anterior a B2 ($20 sin fila) se congela en su fila antes de la nueva.
+  it('🔴 P1: applyDiscount heredado sobre una orden con $20 históricos de cabecera los congela antes de crear su fila', async () => {
+    tx.order.findUnique.mockResolvedValue({ ...order(), discountAmount: new Prisma.Decimal(20), total: new Prisma.Decimal(80) })
+    await applyDiscount('venue', 'order', { type: 'FIXED_AMOUNT', value: 10, staffId: 'staff', expectedVersion: 1 } as any)
+    const creadas = tx.orderDiscount.create.mock.calls.map((c: any) => c[0].data)
+    expect(creadas.map((d: any) => [d.name, Number(d.amount), d.reparto === undefined])).toEqual([
+      ['Descuento anterior', 20, true],
+      ['Descuento', 10, false],
+    ])
+    expect(tx.order.update.mock.calls.at(-1)[0].data).toMatchObject({ discountAmount: 30, total: 70 })
+  })
+  it('control de regresión (ruling R-6): un applyDiscount heredado de $0 no crea fila ni sincroniza; la cabecera es la de hoy', async () => {
+    await applyDiscount('venue', 'order', { type: 'PERCENTAGE', value: 0, staffId: 'staff', expectedVersion: 1 } as any)
+    expect(tx.orderDiscount.create).not.toHaveBeenCalled()
+    expect(tx.orderDiscount.findMany).not.toHaveBeenCalled()
+    expect(tx.order.update.mock.calls.at(-1)[0].data).toMatchObject({ discountAmount: 0, total: 100 })
   })
 })
 
@@ -294,4 +404,123 @@ it('advisory stock reads run before opening the Order transaction', async () => 
     take: 1,
   })
   expect(tx.product.findMany).toHaveBeenCalled()
+})
+
+describe('R9 (Codex r4 R4-1): lo que sale se lleva su IVA, ANTES de borrar y de sincronizar', () => {
+  const conIva = (taxAmount: number, extra: Record<string, unknown> = {}) => ({
+    ...line,
+    taxAmount: new Prisma.Decimal(taxAmount),
+    discountAmount: new Prisma.Decimal(0),
+    orderPromotionId: null,
+    isCortesia: false,
+    product: { categoryId: 'c1' },
+    ...extra,
+  })
+  const pan = () => conIva(8, { id: 'pan', unitPrice: new Prisma.Decimal(50), total: new Prisma.Decimal(50) })
+
+  it('🔴 removeOrderItem con un 10 % de cuenta D16: incrementos [−16, +1.60] y R9 primero; total 52.20 (sin R9: [+1.60] y 68.20)', async () => {
+    const cuenta = {
+      v: 1,
+      alcance: 'CUENTA',
+      conPromociones: false,
+      espejo: false,
+      reduceImpuesto: true,
+      renglones: { line: 1000, pan: 500 },
+    }
+    tx.order.findUnique.mockResolvedValue({
+      ...order(),
+      contratoDePrecio: 'IVA_APARTE',
+      subtotal: new Prisma.Decimal(150),
+      discountAmount: new Prisma.Decimal(15),
+      taxAmount: new Prisma.Decimal(21.6),
+      items: [conIva(16), pan()],
+    })
+    tx.orderDiscount.findMany.mockResolvedValue([
+      {
+        id: 'pct',
+        type: 'PERCENTAGE',
+        value: 10,
+        amount: 15,
+        taxReduction: 2.4,
+        appliedToItemIds: [],
+        createdAt: new Date(0),
+        reparto: cuenta,
+      },
+    ])
+    tx.order.findUniqueOrThrow
+      .mockResolvedValueOnce({ contratoDePrecio: 'IVA_APARTE', taxAmount: new Prisma.Decimal(21.6) }) // R9
+      .mockResolvedValueOnce({ contratoDePrecio: 'IVA_APARTE', taxAmount: new Prisma.Decimal(5.6) }) // la sincronización, ya sin el IVA del café
+    await removeOrderItem('venue', 'order', 'line', 1)
+    const conIncremento = tx.order.update.mock.calls
+      .map(([a]: any, i: number) => [a, i] as const)
+      .filter(([a]: any) => a.data.taxAmount?.increment !== undefined)
+    expect(conIncremento.map(([a]: any) => Number(a.data.taxAmount.increment))).toEqual([-16, 1.6])
+    const r9 = tx.order.update.mock.invocationCallOrder[conIncremento[0][1]]
+    expect(r9).toBeLessThan(tx.orderItem.delete.mock.invocationCallOrder[0])
+    expect(r9).toBeLessThan(tx.orderDiscount.update.mock.invocationCallOrder[0])
+    expect(tx.orderDiscount.update).toHaveBeenCalledWith({
+      where: { id: 'pct' },
+      data: expect.objectContaining({ amount: 5, taxReduction: 0.8 }),
+    })
+    expect(tx.order.update.mock.calls.at(-1)[0].data).toMatchObject({
+      subtotal: 50,
+      discountAmount: 5,
+      total: 52.2,
+      remainingBalance: 52.2,
+    })
+  })
+
+  it('🔴 voidItems parcial: increment −16 antes del deleteMany y total 58 (sin R9: 74)', async () => {
+    tx.order.findUnique.mockResolvedValue({
+      ...order(),
+      contratoDePrecio: 'IVA_APARTE',
+      subtotal: new Prisma.Decimal(150),
+      taxAmount: new Prisma.Decimal(24),
+      total: new Prisma.Decimal(174),
+      items: [conIva(16), pan()],
+    })
+    tx.order.findUniqueOrThrow.mockResolvedValue({ contratoDePrecio: 'IVA_APARTE', taxAmount: new Prisma.Decimal(24) })
+    await voidItems('venue', 'order', { itemIds: ['line'], reason: 'error', staffId: 'staff', expectedVersion: 1 })
+    // La lista (y no un `findIndex`): sin R9 el rojo es por aserción (`[]`), no un TypeError sobre el índice −1.
+    const conIncremento = tx.order.update.mock.calls
+      .map(([a]: any, i: number) => [a, i] as const)
+      .filter(([a]: any) => a.data.taxAmount?.increment !== undefined)
+    expect(conIncremento.map(([a]: any) => Number(a.data.taxAmount.increment))).toEqual([-16])
+    expect(tx.order.update.mock.invocationCallOrder[conIncremento[0][1]]).toBeLessThan(tx.orderItem.deleteMany.mock.invocationCallOrder[0])
+    expect(tx.order.update.mock.calls.at(-1)[0].data).toMatchObject({ subtotal: 50, total: 58, remainingBalance: 58 })
+  })
+})
+
+describe('R11 (Codex r5): una importada de SoftRestaurant se rechaza bajo el candado ANTES de R9 y de toda escritura', () => {
+  // Precio CON IVA y su impuesto por pieza, como los manda el puente; con PARTIAL, anular todo pasaría por las guardas de cobro.
+  const importada = () => ({
+    ...order(),
+    originSystem: 'POS_SOFTRESTAURANT',
+    contratoDePrecio: 'IVA_APARTE',
+    paymentStatus: 'PARTIAL',
+    subtotal: new Prisma.Decimal(100),
+    taxAmount: new Prisma.Decimal(16),
+    total: new Prisma.Decimal(116),
+    items: [{ ...line, unitPrice: new Prisma.Decimal(116), total: new Prisma.Decimal(116), taxAmount: new Prisma.Decimal(16) }],
+  })
+  const nadaEscrito = () => ({
+    r9: tx.order.findUniqueOrThrow.mock.calls.length,
+    orden: tx.order.update.mock.calls.length + tx.order.updateMany.mock.calls.length,
+    renglones: tx.orderItem.update.mock.calls.length + tx.orderItem.delete.mock.calls.length + tx.orderItem.deleteMany.mock.calls.length,
+    filas: tx.orderDiscount.update.mock.calls.length + tx.orderDiscount.updateMany.mock.calls.length,
+    acciones: tx.orderAction.create.mock.calls.length,
+    guardasDeCobro: tx.payment.aggregate.mock.calls.length + tx.terminalPaymentRequest.findFirst.mock.calls.length,
+  })
+  const cero = { r9: 0, orden: 0, renglones: 0, filas: 0, acciones: 0, guardasDeCobro: 0 }
+
+  it.each([
+    ['removeOrderItem', () => removeOrderItem('venue', 'order', 'line', 1)],
+    ['voidItems (todo)', () => voidItems('venue', 'order', { itemIds: ['line'], reason: 'error', staffId: 'staff', expectedVersion: 1 })],
+  ] as const)('🔴 %s: ORDEN_IMPORTADA_DEL_POS sin leer R9, sin guardas de cobro y sin escribir nada', async (_w, correr) => {
+    tx.order.findUnique.mockResolvedValue(importada())
+    // Lo que R9 leería: con esto, una guarda puesta DESPUÉS de R9 deja ver su escritura (−16 a la cabecera) antes del rechazo.
+    tx.order.findUniqueOrThrow.mockResolvedValue({ contratoDePrecio: 'IVA_APARTE', taxAmount: new Prisma.Decimal(16) })
+    await expect(correr()).rejects.toMatchObject({ code: 'ORDEN_IMPORTADA_DEL_POS' })
+    expect(nadaEscrito()).toEqual(cero)
+  })
 })

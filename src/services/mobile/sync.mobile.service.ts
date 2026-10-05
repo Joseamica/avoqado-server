@@ -29,6 +29,7 @@ import prisma from '../../utils/prismaClient'
 import { Prisma } from '@prisma/client'
 import logger from '../../config/logger'
 import AppError from '../../errors/AppError'
+import { CODIGOS_TRANSITORIOS } from '../shared/erroresTransitorios'
 import { hasFeatureAccess } from '../../middlewares/checkFeatureAccess.middleware'
 import {
   DEFAULT_OWNERSHIP_OVERRIDES,
@@ -100,21 +101,8 @@ export interface SyncIntentAck {
   details?: unknown
 }
 
-/** Códigos que son TRANSITORIOS → el intent se reintenta, nunca se pierde. */
-const RETRYABLE_ERROR_CODES = new Set([
-  'VERSION_CONFLICT',
-  // Prisma / PostgreSQL transitorios: nunca deben convertirse en cuarentena.
-  'P1001', // database unreachable
-  'P1002', // connection timeout
-  'P1008', // operation timeout
-  'P1017', // connection closed
-  'P2024', // connection pool timeout
-  'P2028', // interactive transaction timeout (p. ej. `cancelOrder` esperando el lock de la orden con el pool saturado)
-  'P2034', // transaction conflict / deadlock
-  'ECONNRESET',
-  'ECONNREFUSED',
-  'ETIMEDOUT',
-])
+/** Códigos que son TRANSITORIOS → el intent se reintenta, nunca se pierde (la lista vive en `shared/erroresTransitorios`). */
+const RETRYABLE_ERROR_CODES = CODIGOS_TRANSITORIOS
 
 /**
  * Una reserva PROCESSING evita que dos replays concurrentes ejecuten el mismo

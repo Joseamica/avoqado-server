@@ -6,6 +6,10 @@ import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import { DEFAULT_TIMEZONE, isWithinVenueSchedule } from '@/utils/datetime'
 import { resolvePromotionLines, type PromotionOptionSnapshot } from './resolvePromotionLines'
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
+import { rechazarSiEsImportada } from '@/services/shared/ordenImportada'
+import { conservarDescuentoHistorico, recortarDescuentosDeRenglones } from '@/services/shared/repartoDescuentoTx'
+import { esErrorTransitorio } from '@/services/shared/erroresTransitorios'
+import { logAction } from '@/services/dashboard/activity-log.service'
 
 export interface ApplyPromotionParams {
   venueId: string
@@ -88,11 +92,14 @@ async function applyPromotionInTransaction(
   // una cuenta ya pagada/cancelada (audit 2026-08-13).
   const order = await tx.order.findFirst({
     where: { id: orderId, venueId },
-    select: { paymentStatus: true, status: true, discountAmount: true, paidAmount: true },
+    select: { paymentStatus: true, status: true, discountAmount: true, paidAmount: true, originSystem: true },
   })
   if (!order) {
     throw new NotFoundError('No encontramos esa cuenta en este establecimiento.')
   }
+  // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
+  // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
+  rechazarSiEsImportada(order)
   if (order.paymentStatus === 'PAID' || order.paymentStatus === 'REFUNDED') {
     throw new BadRequestError('A una cuenta ya pagada no se le pueden agregar promociones.')
   }
@@ -241,29 +248,61 @@ export async function removePromotionFromOrder(params: { venueId: string; orderI
 
   // 🔴 Candado de la orden (Plan3b) ANTES de releer la instancia y el estado: el retiro, sus líneas y el total se
   // deciden y escriben sobre la misma foto.
-  await prisma.$transaction(async tx => {
+  const recorte = await prisma.$transaction(async tx => {
     if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) {
       throw new NotFoundError('No encontramos esa promoción en la cuenta.')
     }
     const found = await tx.orderPromotion.findFirst({
       where: { id: orderPromotionId, orderId, order: { venueId } },
-      select: { id: true, order: { select: { paymentStatus: true, discountAmount: true, paidAmount: true } } },
+      select: { id: true, order: { select: { paymentStatus: true, discountAmount: true, paidAmount: true, originSystem: true } } },
     })
     if (!found) {
       throw new NotFoundError('No encontramos esa promoción en la cuenta.')
     }
+    // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
+    // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
+    rechazarSiEsImportada(found.order)
     // De una cuenta pagada no se borra una venta: eso es un reembolso, con su
     // rastro. Borrar líneas históricas dejaría el corte sin cuadrar.
     if (found.order.paymentStatus === 'PAID' || found.order.paymentStatus === 'REFUNDED') {
       throw new BadRequestError('Esta cuenta ya se pagó: retira la promoción con un reembolso, no borrándola.')
     }
 
+    // R7-1 (ruling de B2): el resto de cabecera sin fila se congela ANTES de recortar; si no, el recálculo (Σ filas) lo perdería.
+    await conservarDescuentoHistorico(tx, orderId, found.order.discountAmount)
+    // P4 (founder, 1-oct): lo dirigido a las líneas del combo (un premio de cartilla) se retira con su beneficio ANTES de
+    // borrarlas; si no, el premio seguía restando sobre el resto de la cuenta.
+    const lineas = await tx.orderItem.findMany({ where: { orderId, orderPromotionId }, select: { id: true } })
+    const resultado = await recortarDescuentosDeRenglones(tx, orderId, { renglones: lineas.map(l => l.id), venueId })
     await tx.orderItem.deleteMany({ where: { orderPromotionId } })
     await tx.orderPromotion.delete({ where: { id: orderPromotionId } })
     // El total de la orden deja de incluir la promoción EN la misma transacción
     // (audit 2026-08-13: quitar el combo de $99 dejaba el total en $199).
-    await recalculateOrderTotals(orderId, Number(found.order.discountAmount ?? 0), Number(found.order.paidAmount ?? 0), tx)
+    await recalculateOrderTotals(
+      orderId,
+      Math.max(0, Number(found.order.discountAmount ?? 0) - resultado.recortadoPesos),
+      Number(found.order.paidAmount ?? 0),
+      tx,
+    )
+    return resultado
   }, ORDER_LOCK_WAIT_BUDGET)
+
+  for (const r of recorte.retiradas) {
+    void logAction({
+      staffId: null,
+      venueId,
+      action: 'DISCOUNT_REMOVED',
+      entity: 'Order',
+      entityId: orderId,
+      data: {
+        orderDiscountId: r.id,
+        name: r.name,
+        motivo: 'promocion-retirada',
+        pointsRefunded: r.pointsRefunded,
+        stampRewardReturned: r.stampRewardReturned,
+      },
+    })
+  }
 }
 
 /**
@@ -276,8 +315,10 @@ export async function removePromotionFromOrder(params: { venueId: string; orderI
  * promos del intento anterior del MISMO intent sobreviven huérfanas cuando la
  * ronda al final se rechaza en definitivo.
  *
- * Best-effort por promoción: un fallo se loguea y no detiene a las demás ni
- * tapa el error original de la ronda. Devuelve cuántas retiró.
+ * Best-effort por promoción: un fallo DEFINITIVO se loguea y no detiene a las
+ * demás ni tapa el error original de la ronda. Un TRANSITORIO tampoco detiene a
+ * las demás, pero al final se relanza (Codex r2 N5): el intent queda en RETRY.
+ * Devuelve cuántas retiró.
  */
 export async function removeIntentPromotions(venueId: string, orderId: string, instanceIds: string[]): Promise<number> {
   if (instanceIds.length === 0) return 0
@@ -288,6 +329,7 @@ export async function removeIntentPromotions(venueId: string, orderId: string, i
   })
 
   let removed = 0
+  let transitorio: unknown = null
   for (const orphan of orphans) {
     try {
       await removePromotionFromOrder({ venueId, orderId, orderPromotionId: orphan.id })
@@ -298,7 +340,11 @@ export async function removeIntentPromotions(venueId: string, orderId: string, i
         orderPromotionId: orphan.id,
         error: err instanceof Error ? err.message : String(err),
       })
+      // Codex r2 N5: un error TRANSITORIO no se traga — la compensación quedó a medias y el intent debe reintentarse. Se sigue
+      // con las demás (best-effort) y al final se relanza: el reducer lo deja en RETRY en vez de REJECTED.
+      if (transitorio === null && esErrorTransitorio(err)) transitorio = err
     }
   }
+  if (transitorio !== null) throw transitorio
   return removed
 }

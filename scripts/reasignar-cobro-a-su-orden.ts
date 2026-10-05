@@ -10,14 +10,15 @@
  *     `aplicarReasignacion` (src/services/shared/reasignarCobro.ts) y sólo se llama con --apply.
  *   · Escribir exige repetir el host exacto de la base en --confirm-host. Ninguna URL se imprime.
  *   · Cada caso se valida con la MISMA aritmética del saldo que usa el cobro (`computeOrderBalance`)
- *     y se cierra por `reconcileOrderFromPayments`, el mismo camino del cobro. Nada duplicado aquí.
+ *     y se cierra con `settleStandalonePaymentInTx`, el cierre transaccional del cobro de la terminal, en la
+ *     MISMA transacción que mueve el cobro (Codex r10 #6). Nada duplicado aquí.
  *
  * `--base render` cambia DATABASE_URL por RENDER_DATABASE_URL ANTES de cargar el cliente de Prisma —
  * por eso todo lo que toca la base se importa DINÁMICAMENTE en `main`— para no tener que exportar la
  * URL de producción en la terminal. Sin `--base`, se usa DATABASE_URL tal cual (la base local).
  *
- * Lo que NO hace, y el script lo avisa: no descuenta inventario de la orden restaurada (reconciliar
- * con un cobro que ya cubre la cuenta no dispara la deducción, a propósito).
+ * La orden restaurada se cierra con sus efectos de saldar (vale de inventario y lealtad), como cualquier
+ * cobro que salda; el origen sólo recalcula sus totales: esos efectos ya los tuvo cuando se saldó.
  */
 import 'dotenv/config'
 import { readFileSync } from 'node:fs'
@@ -114,6 +115,9 @@ function hostDeLaBase(): string {
   return host
 }
 
+/** Tarea 6d, I-1: la integrada o con vales por área se cierra sin sus efectos de saldar (su dueño del cierre es otro). */
+const AVISO_INVENTARIO = 'venta integrada o con vales por área: se guardaron sólo sus totales — inventario no descontado, ajústalo aparte'
+
 const pesos = (v: Prisma.Decimal | number | string | null | undefined): string => `$${new Prisma.Decimal((v ?? 0).toString()).toFixed(2)}`
 const horaMx = (d: Date): string => new Date(d.getTime() - 6 * 3_600_000).toISOString().slice(5, 19).replace('T', ' ')
 
@@ -128,8 +132,16 @@ const SELECT_ORDEN = {
   subtotal: true,
   discountAmount: true,
   serviceChargeAmount: true,
+  // P12 (Codex r7 #5): el saldo de la reasignación suma el IVA que va aparte con la regla compartida.
+  contratoDePrecio: true,
+  taxAmount: true,
   total: true,
   tipAmount: true,
+  // Tarea 6d: quién salda la cuenta (`cierreDelCobroSaldaLaCuenta`) y la mesa que se libera. Una sola cuenta: sus renglones.
+  source: true,
+  externalId: true,
+  tableId: true,
+  items: { select: { areaTicketLineId: true } },
   payments: {
     where: { status: 'COMPLETED' as const },
     select: { id: true, status: true, type: true, amount: true, tipAmount: true },
@@ -147,8 +159,14 @@ type OrdenCruda = {
   subtotal: Prisma.Decimal
   discountAmount: Prisma.Decimal | null
   serviceChargeAmount: Prisma.Decimal | null
+  contratoDePrecio: string | null
+  taxAmount: Prisma.Decimal
   total: Prisma.Decimal
   tipAmount: Prisma.Decimal
+  source: string
+  externalId: string | null
+  tableId: string | null
+  items: Array<{ areaTicketLineId: string | null }>
   payments: Array<{ id: string; status: string; type: string | null; amount: Prisma.Decimal; tipAmount: Prisma.Decimal }>
 }
 
@@ -163,6 +181,12 @@ const aFoto = (o: OrdenCruda): OrdenFoto & { total: Prisma.Decimal; tipGuardado:
   subtotal: o.subtotal,
   discountAmount: o.discountAmount,
   serviceChargeAmount: o.serviceChargeAmount,
+  contratoDePrecio: o.contratoDePrecio,
+  taxAmount: o.taxAmount,
+  source: o.source,
+  externalId: o.externalId,
+  tableId: o.tableId,
+  items: o.items,
   cobros: o.payments,
   total: o.total,
   tipGuardado: o.tipAmount,
@@ -233,7 +257,8 @@ function imprimirCaso(i: number, c: Cargado, veredicto: Veredicto | undefined): 
     const r = veredicto.resumen
     console.log(
       `   ✅ SE PUEDE MOVER — cuenta del destino ${pesos(r.baseDestino)} · cobro+propina ${pesos(r.pagoMasPropina)} · saldo del origen después ${pesos(r.saldoOrigenDespues)}` +
-        (r.destinoCambiaEstado ? ' · el destino pasa de CANCELLED a COMPLETED/PAID' : ''),
+        (r.destinoCambiaEstado ? ' · el destino pasa de CANCELLED a COMPLETED/PAID' : '') +
+        (r.destinoConEfectosDeCierre ? '' : ` · ⚠️ ${AVISO_INVENTARIO}`),
     )
   } else {
     console.log('   🔴 NO SE MUEVE:')
@@ -261,8 +286,9 @@ async function main(): Promise<void> {
 
   // Imports dinámicos: el cliente de Prisma lee DATABASE_URL al cargarse, y `elegirBase` ya la eligió.
   const { default: prisma } = await import('../src/utils/prismaClient')
-  const { reconcileOrderFromPayments } = await import('../src/services/tpv/payment.tpv.service')
-  const { logAction } = await import('../src/services/dashboard/activity-log.service')
+  const { settleStandalonePaymentInTx } = await import('../src/services/tpv/payment.tpv.service')
+  const { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } = await import('../src/services/shared/paymentShiftClaim')
+  const { releaseTableIfSettled } = await import('../src/services/tpv/table.tpv.service')
 
   try {
     const cargados: Cargado[] = []
@@ -286,42 +312,91 @@ async function main(): Promise<void> {
       return
     }
 
-    const deps: DepsAplicar = {
+    // Codex r10 #6 / r11 #7: TODO en UNA transacción, bajo el candado de las dos órdenes; lo releído con el `tx` es lo que
+    // `aplicarReasignacion` vuelve a validar. Nada de `logAction` (escribe fuera de la transacción): la bitácora va con el `tx`.
+    // Por negocio: el candado comprueba que cada orden siga siendo del negocio del cobro.
+    const depsDe = (venueId: string): DepsAplicar => ({
       enTransaccion: fn =>
-        prisma.$transaction(async tx =>
-          fn({
-            moverCobro: async (paymentId, de, a) =>
-              (await tx.payment.updateMany({ where: { id: paymentId, orderId: de, status: 'COMPLETED' }, data: { orderId: a } })).count,
-            prepararDestino: async (ordenId, data) => {
-              await tx.order.update({ where: { id: ordenId }, data })
-            },
-          }),
+        prisma.$transaction(
+          tx =>
+            fn({
+              bloquear: async ids => {
+                for (const id of ids) {
+                  if (!(await lockExistingOrderForPayment(tx, { venueId, orderId: id }))) {
+                    throw new Error(`la orden ${id} ya no es del negocio`)
+                  }
+                }
+              },
+              releer: async antes => {
+                const cobro = await tx.payment.findUniqueOrThrow({
+                  where: { id: antes.cobro.id },
+                  select: {
+                    id: true,
+                    venueId: true,
+                    orderId: true,
+                    status: true,
+                    type: true,
+                    amount: true,
+                    tipAmount: true,
+                    shiftId: true,
+                    createdAt: true,
+                  },
+                })
+                const [origen, destino] = await Promise.all(
+                  [antes.origen.id, antes.destino.id].map(id => tx.order.findUniqueOrThrow({ where: { id }, select: SELECT_ORDEN })),
+                )
+                return {
+                  cobro: { ...cobro, type: cobro.type as string | null, status: cobro.status as string },
+                  origen: aFoto(origen as OrdenCruda),
+                  destino: aFoto(destino as OrdenCruda),
+                }
+              },
+              moverCobro: async (paymentId, de, a) =>
+                (await tx.payment.updateMany({ where: { id: paymentId, orderId: de, status: 'COMPLETED' }, data: { orderId: a } })).count,
+              prepararDestino: async (ordenId, data) => {
+                await tx.order.update({ where: { id: ordenId }, data })
+              },
+              guardarTotales: async (ordenId, cobro, conEfectos) => {
+                const pago = cobro
+                  ? {
+                      id: cobro.id,
+                      amount: new Prisma.Decimal((cobro.amount ?? 0).toString()),
+                      tipAmount: new Prisma.Decimal((cobro.tipAmount ?? 0).toString()),
+                    }
+                  : { amount: new Prisma.Decimal(0), tipAmount: new Prisma.Decimal(0) }
+                await settleStandalonePaymentInTx(tx, venueId, ordenId, pago, undefined, false, conEfectos)
+              },
+              fijarCompletadoEn: async (id, cuando) => {
+                await tx.order.update({ where: { id }, data: { completedAt: cuando } })
+              },
+              bitacora: async p => {
+                await tx.activityLog.create({
+                  data: {
+                    staffId: null,
+                    venueId: p.venueId,
+                    action: p.action,
+                    entity: p.entity,
+                    entityId: p.entityId,
+                    data: p.data as Prisma.InputJsonValue,
+                  },
+                })
+              },
+            }),
+          ORDER_LOCK_WAIT_BUDGET,
         ),
-      reconciliar: id => reconcileOrderFromPayments(id),
-      fijarCompletadoEn: async (id, cuando) => {
-        await prisma.order.update({ where: { id }, data: { completedAt: cuando } })
-      },
-      bitacora: async p => {
-        await logAction({
-          staffId: null,
-          venueId: p.venueId,
-          action: p.action,
-          entity: p.entity,
-          entityId: p.entityId,
-          data: p.data as Prisma.InputJsonValue,
-        })
-      },
-    }
+      liberarMesa: (venue, tableId) => releaseTableIfSettled(venue, tableId),
+    })
 
     let hechos = 0
     let fallidos = 0
     for (const c of aplicables) {
       if (!c.cobro || !c.origen || !c.destino) continue
       try {
-        const r = await aplicarReasignacion(deps, c.caso, c.cobro, c.origen, c.destino)
+        const r = await aplicarReasignacion(depsDe(c.cobro.venueId), c.caso, c.cobro, c.origen, c.destino)
         if (r.ok) {
           hechos++
           console.log(`✅ ${c.caso.paymentId}: movido de ${c.origen.orderNumber} a ${c.destino.orderNumber}`)
+          if (!r.resumen.destinoConEfectosDeCierre) console.log(`   ⚠️  ${c.destino.orderNumber}: ${AVISO_INVENTARIO}`)
         } else {
           fallidos++
           console.log(`🔴 ${c.caso.paymentId}: rechazado al aplicar — ${r.motivos.join(' · ')}`)
@@ -337,11 +412,6 @@ async function main(): Promise<void> {
     for (const c of cargados) {
       const de = await cargarCaso(prisma, c.caso)
       if (de.cobro && de.origen && de.destino) imprimirCaso(cargados.indexOf(c), de, undefined)
-    }
-    if (hechos > 0) {
-      console.log(
-        '\n⚠️  El inventario de las órdenes restauradas NO se descontó (reconciliar con un cobro que ya cubre la cuenta no deduce). Si el negocio lleva inventario de esos productos, ajústalo aparte.',
-      )
     }
   } finally {
     await prisma.$disconnect()

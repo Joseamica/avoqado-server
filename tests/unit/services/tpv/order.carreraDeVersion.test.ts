@@ -24,12 +24,15 @@ import { Decimal } from '@prisma/client/runtime/library'
 jest.mock('@/utils/prismaClient', () => {
   const mockPrismaObj: any = {
     order: { findUnique: jest.fn(), update: jest.fn() },
-    orderItem: { update: jest.fn(), delete: jest.fn(), deleteMany: jest.fn() },
+    // B2 (P2): `applyDiscount` crea su fila y sincroniza su reparto, que lee los renglones de la orden.
+    orderItem: { update: jest.fn(), delete: jest.fn(), deleteMany: jest.fn(), findMany: jest.fn(async () => []) },
     orderAction: { create: jest.fn() },
-    orderDiscount: { findMany: jest.fn() },
+    orderDiscount: { findMany: jest.fn(async () => []), create: jest.fn(async () => ({})), update: jest.fn(), delete: jest.fn() },
     orderServiceCharge: { findMany: jest.fn(), update: jest.fn() },
     orderCustomer: { deleteMany: jest.fn() },
     staff: { findUnique: jest.fn() },
+    // B2c T4 (P5): la cortesía de la terminal crea su fila espejo con quien la otorga (StaffVenue) y el recorte puede retirar filas.
+    staffVenue: { findFirst: jest.fn(async () => null) },
     // Diseño §C.6: voidItems toma el candado de la orden y consulta el cobro de terminal vivo DENTRO de la tx.
     $queryRaw: jest.fn(async () => [{ id: 'order-bajo-candado' }]),
     terminalPaymentRequest: { findFirst: jest.fn(async () => null) },

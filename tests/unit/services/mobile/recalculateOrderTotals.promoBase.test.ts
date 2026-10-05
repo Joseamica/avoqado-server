@@ -15,8 +15,8 @@ describe('recalculateOrderTotals — base de descuento sin líneas de promoción
   beforeEach(() => {
     jest.clearAllMocks()
     prismaMock.orderItem.findMany.mockResolvedValue([
-      { total: 100, orderPromotionId: null },
-      { total: 99, orderPromotionId: 'op-1' }, // combo: precio ya negociado
+      { id: 'n', total: 100, discountAmount: 0, orderPromotionId: null },
+      { id: 'p', total: 99, discountAmount: 0, orderPromotionId: 'op-1' }, // combo: precio ya negociado
     ] as any)
     prismaMock.orderServiceCharge.findMany.mockResolvedValue([] as any)
     prismaMock.orderDiscount.update.mockResolvedValue({} as any)
@@ -36,7 +36,10 @@ describe('recalculateOrderTotals — base de descuento sin líneas de promoción
 
     await recalculateOrderTotals('order-1', 0, 0, prismaMock)
 
-    expect(prismaMock.orderDiscount.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'd1' }, data: { amount: 20 } }))
+    // Desde B2 la misma escritura guarda el reparto; el importe es el de hoy.
+    expect(prismaMock.orderDiscount.update).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: 'd1' }, data: expect.objectContaining({ amount: 20 }) }),
+    )
     const orderData = prismaMock.order.update.mock.calls[0][0].data
     // El subtotal SÍ incluye el combo (dinero que se cobra)…
     expect(orderData.subtotal).toBe(199)
@@ -47,8 +50,8 @@ describe('recalculateOrderTotals — base de descuento sin líneas de promoción
 
   it('sin promos en la cuenta, el % sigue sobre el subtotal completo (regresión)', async () => {
     prismaMock.orderItem.findMany.mockResolvedValue([
-      { total: 100, orderPromotionId: null },
-      { total: 50, orderPromotionId: null },
+      { id: 'a', total: 100, discountAmount: 0, orderPromotionId: null },
+      { id: 'b', total: 50, discountAmount: 0, orderPromotionId: null },
     ] as any)
     prismaMock.orderDiscount.findMany.mockResolvedValue([
       { id: 'd1', type: 'PERCENTAGE', value: 10, amount: 15, appliedToItemIds: [] },
@@ -56,6 +59,9 @@ describe('recalculateOrderTotals — base de descuento sin líneas de promoción
 
     await recalculateOrderTotals('order-1', 0, 0, prismaMock)
 
-    expect(prismaMock.orderDiscount.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'd1' }, data: { amount: 15 } }))
+    // Desde B2 la misma escritura guarda el reparto; el importe es el de hoy.
+    expect(prismaMock.orderDiscount.update).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: 'd1' }, data: expect.objectContaining({ amount: 15 }) }),
+    )
   })
 })

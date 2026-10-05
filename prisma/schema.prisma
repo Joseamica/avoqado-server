@@ -9007,6 +9007,11 @@ model OrderDiscount {
   // discount/cortesía affected. Existing endpoints may leave it empty.
   // See docs/TPV_COBRAR_STRUCTURED_DISCOUNTS.md before adopting elsewhere.
   appliedToItemIds String[] @default([])
+  // IVA por producto, bloque B2 (spec planes 6-7 §4.1, D7): cuánto le tocó a cada renglón. Lo deja en su forma canónica
+  // `sincronizarRepartos` (src/services/shared/repartoDescuentoTx.ts) en la misma transacción que el escritor. JSON v1
+  // { v, alcance, conPromociones, base?, espejo, renglones: { [orderItemId]: centavos }, ambito?, tope?, reduceImpuesto? }.
+  // Nulo en filas de antes de B2 (D8).
+  reparto          Json?
 
   // Flags
   isComp      Boolean @default(false) // Was this a comp?
