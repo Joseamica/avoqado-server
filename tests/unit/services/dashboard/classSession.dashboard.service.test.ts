@@ -992,7 +992,9 @@ describe('ClassSession Dashboard Service', () => {
       expect(prismaMock.calendarSyncOutbox.create).toHaveBeenCalledTimes(2)
       expect(publishMock).toHaveBeenCalledTimes(1)
       expect(publishMock).toHaveBeenCalledWith(['outbox-updated-attempt-2'])
-      expect(logActionMock).toHaveBeenCalledTimes(1)
+      // El rastro vive dentro de la tx: el intento 1 se revierte (mock: 2 escrituras), no hay logAction post-commit.
+      expect(prismaMock.activityLog.create).toHaveBeenCalledTimes(2)
+      expect(logActionMock).not.toHaveBeenCalled()
     })
 
     it('rejects an interval inverted by a concurrent partial-end update after retry', async () => {
@@ -1130,6 +1132,34 @@ describe('ClassSession Dashboard Service', () => {
       expect(prismaMock.classSession.update).toHaveBeenCalledWith(
         expect.objectContaining({ data: expect.objectContaining({ assignedStaffId: null }) }),
       )
+    })
+
+    describe('rastro del cambio de coach (pago por servicio, spec §6.6)', () => {
+      it('escribe el ActivityLog DENTRO de la transacción con actor y antes/después', async () => {
+        prismaMock.$queryRaw.mockResolvedValue([makeLockedSession({ assignedStaffId: 'staff-a' })])
+        prismaMock.classSession.update.mockResolvedValue(makeSession({ assignedStaffId: 'staff-b' }))
+        prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'sv', venue: { organizationId: 'org' } })
+        await updateClassSession(VENUE_ID, SESSION_ID, { assignedStaffId: 'staff-b' } as any, 'actor-1')
+        expect(prismaMock.activityLog.create).toHaveBeenCalledWith({
+          data: expect.objectContaining({
+            staffId: 'actor-1',
+            action: 'CLASS_SESSION_UPDATED',
+            entityId: SESSION_ID,
+            data: expect.objectContaining({
+              antes: expect.objectContaining({ assignedStaffId: 'staff-a' }),
+              despues: expect.objectContaining({ assignedStaffId: 'staff-b' }),
+            }),
+          }),
+        })
+        expect(logActionMock).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'CLASS_SESSION_UPDATED' }))
+      })
+      it('sin actor (llamadas viejas) sigue funcionando y deja staffId null', async () => {
+        prismaMock.$queryRaw.mockResolvedValue([makeLockedSession()])
+        prismaMock.classSession.update.mockResolvedValue(makeSession({ capacity: 15 }))
+        prismaMock.reservation.aggregate.mockResolvedValue({ _sum: { partySize: 0 } })
+        await updateClassSession(VENUE_ID, SESSION_ID, { capacity: 15 } as any)
+        expect(prismaMock.activityLog.create).toHaveBeenCalledWith({ data: expect.objectContaining({ staffId: null }) })
+      })
     })
   })
 

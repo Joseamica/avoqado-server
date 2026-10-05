@@ -21,6 +21,7 @@ import { registerSerializedTools } from './tools/serialized'
 import { registerProcurementTools } from './tools/procurement'
 import { registerCfdiTools } from './tools/cfdi'
 import { registerCommissionTools } from './tools/commissions'
+import { registerStaffPayTools } from './tools/staffPay'
 import { registerSubscriptionTools } from './tools/subscriptions'
 import { registerMenuTools } from './tools/menu'
 import { registerStaffTools } from './tools/staff'
@@ -106,6 +107,7 @@ export function registerAllTools(server: McpServer, scope: McpScope, flags: Tool
   registerProcurementTools(server, scope)
   registerCfdiTools(server, scope)
   registerCommissionTools(server, scope)
+  registerStaffPayTools(server, scope)
   registerSubscriptionTools(server, scope)
   registerMenuTools(server, scope)
   registerStaffTools(server, scope)

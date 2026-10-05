@@ -100,6 +100,12 @@ it('los previews que persisten lotes se clasifican como escritura', () => {
   expect(TOOL_EFFECTS.print_routing_preview).toBe('read')
 })
 
+it('pago por servicio: liquidar una diferencia escribe; la lista de diferencias sólo lee', () => {
+  expect(TOOL_EFFECTS.settle_service_pay_difference).toBe('write')
+  expect(TOOL_EFFECTS.adjust_service_pay_class).toBe('write')
+  expect(TOOL_EFFECTS.staff_service_pay_differences).toBe('read')
+})
+
 it('cada herramienta del código tiene exactamente una declaración de efectos', () => {
   const fs = require('fs') as typeof import('fs')
   const path = require('path') as typeof import('path')
@@ -153,9 +159,11 @@ const NUNCA_EN_DIRECTORIO = [
   'accounting_iva_cashflow',
   'accounts_payable',
   'add_employee',
+  'add_service_pay_adjustment',
   'cash_out_org_withdrawals',
   'cash_out_withdrawals',
   'cfdi_status',
+  'close_service_pay_period',
   'confirm_order_price_contract',
   'diot',
   'electronic_accounting_balance',
@@ -169,10 +177,13 @@ const NUNCA_EN_DIRECTORIO = [
   'import_expense_xml',
   'isr_provisional',
   'mark_expense_paid',
+  'mark_service_pay_paid',
   'payroll_run',
   'register_expense',
   'send_cfdi_email',
   'set_fiscal_loss',
+  'settle_service_pay_difference',
+  'adjust_service_pay_class',
   'set_sales_retention',
   'staff_documents',
   'stamp_payroll_receipts',

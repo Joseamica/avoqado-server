@@ -15,6 +15,7 @@ import { Prisma, ReservationStatus, AggregatorConfirmMode, AggregatorVisitStatus
 import { withSerializableRetry } from '@/utils/serializableRetry'
 import { createOrderFromReservation } from '../reservation/createOrderFromReservation'
 import { logAction } from './activity-log.service'
+import { writeLegacyActivityAuditTx } from '../activityAudit.service'
 import { buildSyncKey, collapseSupersededOps, enqueuePush, resolveClassSessionPushTargets } from '@/services/google-calendar/outbox.service'
 import { publishPushNotification } from '@/communication/rabbitmq/gcal-push-consumer'
 import logger from '../../config/logger'
@@ -463,7 +464,7 @@ interface LockedClassSessionRow {
   assignedStaffId: string | null
 }
 
-export async function updateClassSession(venueId: string, sessionId: string, data: UpdateClassSessionDto) {
+export async function updateClassSession(venueId: string, sessionId: string, data: UpdateClassSessionDto, actorStaffId?: string) {
   const { updated, pushRowIds } = await withSerializableRetry(async tx => {
     const sessions = await tx.$queryRaw<LockedClassSessionRow[]>(Prisma.sql`
       SELECT id, "startsAt", "endsAt", status, "assignedStaffId"
@@ -542,6 +543,22 @@ export async function updateClassSession(venueId: string, sessionId: string, dat
       include: SESSION_INCLUDE,
     })
 
+    await writeLegacyActivityAuditTx(tx, {
+      staffId: actorStaffId ?? null,
+      venueId,
+      action: 'CLASS_SESSION_UPDATED',
+      entity: 'ClassSession',
+      entityId: sessionId,
+      data: {
+        antes: { assignedStaffId: session.assignedStaffId, startsAt: session.startsAt.toISOString(), endsAt: session.endsAt.toISOString() },
+        despues: {
+          assignedStaffId: updated.assignedStaffId ?? null,
+          startsAt: updated.startsAt.toISOString(),
+          endsAt: updated.endsAt.toISOString(),
+        },
+      },
+    })
+
     const targets = await resolveClassSessionPushTargets(tx, {
       venueId,
       assignedStaffId: updated.assignedStaffId ?? null,
@@ -569,13 +586,6 @@ export async function updateClassSession(venueId: string, sessionId: string, dat
       }),
     )
   }
-
-  logAction({
-    venueId,
-    action: 'CLASS_SESSION_UPDATED',
-    entity: 'ClassSession',
-    entityId: sessionId,
-  })
 
   return updated
 }

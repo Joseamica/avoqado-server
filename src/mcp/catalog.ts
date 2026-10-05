@@ -305,6 +305,15 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   split_table_check_by_seat: 'write',
   staff_attendance: 'read',
   staff_commission: 'read',
+  staff_service_pay_config: 'read',
+  staff_service_pay_detail: 'read',
+  staff_service_pay_summary: 'read',
+  close_service_pay_period: 'write',
+  add_service_pay_adjustment: 'write',
+  mark_service_pay_paid: 'write',
+  settle_service_pay_difference: 'write',
+  adjust_service_pay_class: 'write',
+  staff_service_pay_differences: 'read',
   staff_detail: 'read',
   staff_documents: 'read',
   staff_online: 'read',
@@ -443,8 +452,18 @@ export function configureToolCatalog(server: McpServer, scope: McpScope, profile
         if (data?.requiresConfirmation === true && input.confirm !== true) {
           // Existing previews can supply concurrency fields that were unknown on the first call.
           // Bind those exact values as well, rather than invalidating an otherwise correct confirmation.
+          // `fecha`: el ajuste manual de pago por servicio confirma en el periodo que se VIO en la vista previa, aunque pase la
+          // medianoche del cambio de periodo (con «hoy» un reintento daría CLAVE_REUTILIZADA y un bono doble). No quitar.
+          // `destinoFecha`: lo mismo para «liquidar diferencia»: se liquida en el periodo destino que se VIO. No quitar.
           const confirmationArguments = { ...intent }
-          for (const field of ['expectedSourceFingerprint', 'expectedUpdatedAt', 'resolvedProductId', 'resolvedStaffVenueId']) {
+          for (const field of [
+            'expectedSourceFingerprint',
+            'expectedUpdatedAt',
+            'resolvedProductId',
+            'resolvedStaffVenueId',
+            'fecha',
+            'destinoFecha',
+          ]) {
             if (config.inputSchema?.[field] && data[field] != null) confirmationArguments[field] = data[field]
           }
           return structureToolResult(
