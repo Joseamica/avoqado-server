@@ -80,6 +80,18 @@ describe('repartir', () => {
   it('un cobro que llega con la orden ya saldada no recibe nada', () => {
     expect(pesos(repartir({ totalOrden: D(450), cobro: D(10) }, D(50), [otro(450, D(50))]))).toBe('0.00')
   })
+
+  it('🔴 cada `campo` lee SU valor del otro cobro; sin registro (null) cuenta con su parte proporcional', () => {
+    // El otro cobro (la mitad de la orden) ya recibió base 30 y descuento 20, y NO tiene registro de IVA. Este cobro completa la
+    // orden y se lleva lo que falta de 50: 50-30 = 20 (base), 50-20 = 30 (descuento), 50-25 = 25 (IVA: la mitad proporcional del otro).
+    const c = { totalOrden: D(450), cobro: D(225) }
+    const otroCobro = { monto: D(225), base: D(30), descuento: D(20), iva: null }
+    expect((['base', 'descuento', 'iva'] as const).map(campo => pesos(repartir(c, D(50), [otroCobro], campo)))).toEqual([
+      '20.00',
+      '30.00',
+      '25.00',
+    ])
+  })
 })
 
 describe('redondearRepartido (Codex plan r1-4)', () => {
@@ -97,5 +109,18 @@ describe('redondearRepartido (Codex plan r1-4)', () => {
     expect(redondearRepartido([D(50), D(50)]).map(pesos)).toEqual(['50.00', '50.00'])
     const partes = redondearRepartido([D('0.333'), D('0.333'), D('0.334')])
     expect(pesos(partes.reduce((s, x) => s.plus(x), D(0)))).toBe('1.00')
+  })
+
+  it('🔴 un total menor que los exactos falla en voz alta (los exactos suman 10 y se pide 9; antes devolvía 5 + 5 sin avisar)', () => {
+    expect(() => redondearRepartido([D(5), D(5)], D(9))).toThrow(/no suman el total/)
+  })
+
+  it('🔴 un total mayor que los exactos falla en voz alta (los exactos suman 10 y se pide 11; antes devolvía 5.01 + 5.01 sin avisar)', () => {
+    expect(() => redondearRepartido([D(5), D(5)], D(11))).toThrow(/no suman el total/)
+  })
+
+  it('con el total por defecto nunca lanza: $10 entre tres, 10/3 × 3, da 3.34, 3.33 y 3.33', () => {
+    const tercio = D(10).div(3)
+    expect(redondearRepartido([tercio, tercio, tercio]).map(pesos)).toEqual(['3.34', '3.33', '3.33'])
   })
 })

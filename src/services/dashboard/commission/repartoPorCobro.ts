@@ -16,7 +16,7 @@ const CERO = new Prisma.Decimal(0)
 export function parteDelCobro(input: {
   totalOrden: Prisma.Decimal // lo que se cobra en total por la orden, sin propina
   cobro: Prisma.Decimal // lo que pagó ESTE cobro (sin propina)
-  valor: Prisma.Decimal // lo que se reparte (descuento, IVA o base de categoría de la orden)
+  valor: Prisma.Decimal // lo que se reparte (descuento, IVA o base de categoría de la orden); debe ser ≥ 0 (con negativos la suma deja de ser `valor`)
   yaRepartido: Prisma.Decimal // lo que ya se asignó a cobros anteriores de la misma orden
   esUltimo: boolean // el cobro que completa la orden se lleva el residuo de centavos
 }): Prisma.Decimal {
@@ -53,6 +53,8 @@ const completa = (acumulado: Prisma.Decimal, total: Prisma.Decimal) => acumulado
  * fechas: bajo el candado de la orden, `yaRepartido` es lo que ya recibieron los OTROS cobros confirmados visibles —lo
  * registrado (`campo`), o su parte proporcional si no tienen registro— y el cobro que completa la orden se lleva lo que
  * falta, con el residuo de centavos. Así dos cobros confirmados en cualquier orden suman exactamente el valor.
+ *
+ * `valor` debe ser ≥ 0: con un valor negativo (p. ej. un reverso) las partes dejan de sumar `valor`.
  *
  * ponytail: un cobro SIN registro que en su momento completó la orden cuenta aquí como proporcional, no como residuo; sólo
  * pesa si llega OTRO cobro después de saldada la orden (sobrepago), y es a lo más un centavo por cobro.
@@ -94,6 +96,14 @@ export function redondearRepartido(
     if (centavos <= 0) break
     partes[i] = partes[i].plus('0.01')
     centavos--
+  }
+  // Guarda de dinero: un `total` que no concuerda con los exactos (o con más centavos que partes) dejaría partes que no suman.
+  // Mejor fallar en voz alta que repartir de más o de menos sin avisar.
+  const suma = partes.reduce((s, x) => s.plus(x), CERO)
+  if (!suma.equals(total)) {
+    throw new Error(
+      `redondearRepartido: las partes suman ${suma.toFixed(2)} y no suman el total ${total.toString()}; los exactos no concuerdan con el total.`,
+    )
   }
   return partes
 }
