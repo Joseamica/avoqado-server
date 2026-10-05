@@ -3,13 +3,9 @@ import { FEATURE_CATALOG, type FeatureCatalogEntry } from '@/config/featureCatal
 import { BadRequestError, ConflictError } from '@/errors/AppError'
 import { elPlanConcede, FREE_TIER_CODES, type BaseTier } from '@/services/access/basePlan.service'
 import { listFeatureCatalog } from './featureCatalog.service'
+import { HYBRID_DEPENDENCIES as dependencies } from './hybridDependencies'
 import { hybridOfferDefinition, hybridOfferPreviewBody } from './hybridOffer.schema'
 
-// Operational dependencies visible in the existing inventory/upsell routes. This is NOT an access resolver.
-const dependencies: Readonly<Record<string, readonly string[]>> = {
-  AUTO_REORDER: ['INVENTORY_TRACKING'],
-  UPSELL_AI: ['UPSELL'],
-}
 const catalogByCode = new Map(FEATURE_CATALOG.filter(entry => entry.featureCode).map(entry => [entry.featureCode!, entry]))
 
 /**
@@ -45,8 +41,10 @@ export function compileHybridPublication(input: unknown) {
       : definition.kind === 'FEATURES'
         ? [...definition.featureCodes].sort()
         : []
-  if (definition.kind === 'FEATURES' && !preview.selection.valid) {
-    throw new BadRequestError(preview.selection.issues.map(issue => issue.message).join(' '), 'HYBRID_OFFER_COMPOSITION')
+  if (definition.kind === 'FEATURES') {
+    // Spec §4.2 rule 1: one function publishes without its dependency; the quote checks it, with dates, over the purchase.
+    const issues = preview.selection.issues.filter(issue => definition.featureCodes.length > 1 || issue.code !== 'MISSING_DEPENDENCY')
+    if (issues.length) throw new BadRequestError(issues.map(issue => issue.message).join(' '), 'HYBRID_OFFER_COMPOSITION')
   }
   if (definition.kind === 'CHOICE_BUNDLE') {
     for (const code of definition.eligibleFeatureCodes) {

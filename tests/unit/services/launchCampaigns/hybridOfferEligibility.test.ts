@@ -4,10 +4,11 @@ import { audienceIncludes, hybridOfferBlocker } from '@/services/launchCampaigns
 const now = new Date('2026-09-28T12:00:00Z')
 const org = { id: 'org', createdAt: new Date('2026-09-01T00:00:00Z') }
 const campaign = (overrides: Record<string, unknown> = {}) => ({
+  purpose: 'PROMOTION' as 'LIST' | 'PROMOTION',
   status: 'ACTIVE',
   startsAt: new Date('2026-09-20T00:00:00Z'),
-  endsAt: new Date('2026-10-20T00:00:00Z'),
-  capacity: 10,
+  endsAt: new Date('2026-10-20T00:00:00Z') as Date | null,
+  capacity: 10 as number | null,
   reservedCount: 0,
   redeemedCount: 0,
   audience: 'ALL',
@@ -50,6 +51,22 @@ describe('hybridOfferBlocker', () => {
   it('PREPARING while Stripe prices are not ready, including the renewal price of a reprice', () => {
     expect(hybridOfferBlocker(campaign(), publication({ stripePriceId: null }), org, now)).toBe('PREPARING')
     expect(hybridOfferBlocker(campaign(), publication({ renewalKind: 'REPRICE' }), org, now)).toBe('PREPARING')
+  })
+
+  it('a LIST ignores capacity and end date', () => {
+    const list = campaign({ purpose: 'LIST', endsAt: null, capacity: null, reservedCount: 7, redeemedCount: 40 })
+    expect(hybridOfferBlocker(list, publication(), org, now)).toBeNull()
+  })
+
+  it('a PAUSED LIST is unavailable, and so is one whose pointer moved', () => {
+    const list = { purpose: 'LIST' as const, endsAt: null, capacity: null }
+    expect(hybridOfferBlocker(campaign({ ...list, status: 'PAUSED' }), publication(), org, now)).toBe('UNAVAILABLE')
+    expect(hybridOfferBlocker(campaign({ ...list, latestPublicationId: 'pub_v2' }), publication(), org, now)).toBe('UNAVAILABLE')
+  })
+
+  it('anything that is not a LIST needs its promotion window: a missing one fails closed', () => {
+    expect(hybridOfferBlocker(campaign({ endsAt: null }), publication(), org, now)).toBe('UNAVAILABLE')
+    expect(hybridOfferBlocker(campaign({ capacity: null }), publication(), org, now)).toBe('UNAVAILABLE')
   })
 })
 

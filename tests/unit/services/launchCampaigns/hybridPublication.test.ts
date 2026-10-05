@@ -27,8 +27,10 @@ describe('published hybrid offer composition', () => {
     expect(publication.includedFeatureCodes).toEqual(['LOYALTY_PROGRAM'])
     expect(publication.definitionHash).toMatch(/^[a-f0-9]{64}$/)
   })
-  it('rejects a fixed offer missing its paid dependency', () => {
-    expect(() => compileHybridPublication({ ...fixed, featureCodes: ['UPSELL_AI'] })).toThrow(/requiere|dependencia/i)
+  // Spec §4.2 rule 1: a single function publishes alone (the quote checks its dependency, with dates); a bundle does not.
+  it('rejects a fixed bundle missing its paid dependency, but publishes that function alone', () => {
+    expect(() => compileHybridPublication({ ...fixed, featureCodes: ['UPSELL_AI', 'CFDI'] })).toThrow(/requiere|dependencia/i)
+    expect(compileHybridPublication({ ...fixed, featureCodes: ['UPSELL_AI'] }).includedFeatureCodes).toEqual(['UPSELL_AI'])
   })
   it('rejects a choice pool containing a dependency that cannot fit in N', () => {
     expect(() =>

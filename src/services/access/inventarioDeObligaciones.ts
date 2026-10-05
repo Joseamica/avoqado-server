@@ -14,6 +14,7 @@ import type Stripe from 'stripe'
 import AppError from '@/errors/AppError'
 import prisma from '@/utils/prismaClient'
 import { stripe, stripeAfirmaQueNoExiste } from '@/services/stripe.service'
+import { subscriptionPeriod } from '@/utils/stripeSubscriptionPeriod'
 import { clasificarEstado, clasificarSuscripcion, type CatalogoDeCobro, type ObligacionViva, type Proyeccion } from './obligacionesDeCobro'
 import { hybridScheduleReceipt } from '../launchCampaigns/hybridSchedule'
 
@@ -29,7 +30,15 @@ export interface InventarioDeObligaciones {
   vivas: ObligacionViva[]
   detalle: Record<
     string,
-    { status: string; customerId: string | null; variosItems: boolean; pausaDeCobranza: boolean; metodoDeCobro: string | null }
+    {
+      status: string
+      customerId: string | null
+      variosItems: boolean
+      pausaDeCobranza: boolean
+      metodoDeCobro: string | null
+      /** ISO end Stripe already has scheduled (`cancel_at`, else the period end of `cancel_at_period_end`); null = none. */
+      terminaEn: string | null
+    }
   >
   /**
    * Suscripciones con cambios PROGRAMADOS (`schedule`, `pending_update`): lo que venden mañana puede no ser lo de hoy, y
@@ -243,6 +252,11 @@ export async function inventarioDeObligaciones(
       variosItems,
       pausaDeCobranza: Boolean(s.pause_collection),
       metodoDeCobro: s.collection_method ?? null,
+      terminaEn: s.cancel_at
+        ? new Date(s.cancel_at * 1000).toISOString()
+        : s.cancel_at_period_end
+          ? (subscriptionPeriod(s).end?.toISOString() ?? null)
+          : null,
     }
   }
   return { vivas, detalle, conCambiosProgramados }

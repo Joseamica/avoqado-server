@@ -4855,13 +4855,23 @@ model HybridCampaign {
   revision       Int @default(1)
   status         LaunchCampaignStatus @default(DRAFT)
   startsAt       DateTime
-  endsAt         DateTime
-  capacity       Int
+  // SQL CHECK HybridCampaign_purpose_shape: PROMOTION requires endsAt + capacity and no listProductKey;
+  // LIST has neither, requires listProductKey and never belongs to a promotion group.
+  endsAt         DateTime?
+  capacity       Int?
   reservedCount  Int @default(0)
   redeemedCount  Int @default(0)
   audience       String
   eligibleOrganizationIds String[] @default([])
   listed         Boolean @default(false)
+  purpose              HybridCampaignPurpose @default(PROMOTION)
+  // SQL partial UNIQUE (listProductKey) WHERE purpose = 'LIST': one list price per product.
+  listProductKey       String?
+  promotionGroupId     String?
+  promotionGroup       HybridPromotionGroup? @relation(fields: [promotionGroupId], references: [id], onDelete: Restrict)
+  // Explicit "currently sold" publication; readers use this pointer, never the highest version.
+  currentPublicationId String?
+  pendingPublicationId String?
   createdById    String
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
@@ -4870,6 +4880,32 @@ model HybridCampaign {
 
   @@index([status, listed, startsAt, endsAt])
   @@index([createdAt, id])
+  @@index([purpose, status])
+  @@index([promotionGroupId])
+}
+
+enum HybridCampaignPurpose {
+  LIST
+  PROMOTION
+}
+
+/// "% off" generator: one PROMOTION campaign per listed feature, managed together.
+model HybridPromotionGroup {
+  id                 String               @id @default(cuid())
+  name               String
+  // SQL CHECK HybridPromotionGroup_percent: percentOff 1-90, capacityPerFeature >= 1, endsAt > startsAt.
+  percentOff         Int
+  target             Json
+  startsAt           DateTime
+  endsAt             DateTime
+  promotionCycles    Int?
+  capacityPerFeature Int
+  status             LaunchCampaignStatus @default(PAUSED)
+  revision           Int                  @default(1)
+  createdById        String
+  createdAt          DateTime             @default(now())
+  updatedAt          DateTime             @updatedAt
+  campaigns          HybridCampaign[]
 }
 
 /// Immutable commercial terms; provider references may be attached after publication.
