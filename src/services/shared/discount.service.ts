@@ -7,14 +7,15 @@
  * channel that lets a client attach a `Discount` row to an order/line item
  * applies the exact same rules.
  *
- * IMPORTANT: This is a byte-for-byte extraction of TPV's original inline
- * logic — do not change behavior here without re-validating every caller
- * (TPV's order.tpv.service.ts and mobile's order.mobile.service.ts both
- * depend on this being identical to what TPV shipped before the extraction).
+ * IMPORTANT: extracted from TPV's original inline logic. Since IVA B2 the rows
+ * also carry their `reparto` (and `filaDeDescuentoDeCuenta` is new), so it is no
+ * longer a verbatim copy — do not change behavior here without re-validating
+ * every caller (TPV's order.tpv.service.ts and mobile's order.mobile.service.ts).
  */
 
 import { Prisma } from '@prisma/client'
 import { BadRequestError } from '../../errors/AppError'
+import { comoJson, nuevoRepartoDeCuenta, nuevoRepartoDirigido } from './repartoDescuento'
 
 /**
  * Compute the peso amount a `Discount` reduces a given base (line or order)
@@ -134,26 +135,53 @@ export type ItemDiscountRowInput = {
 /**
  * Build the `OrderDiscount` create-input for a single item-scoped discount
  * application: one row per discounted item, `appliedToItemIds: [itemId]`.
- * This is the exact shape TPV writes in `order.tpv.service.ts
- * createOrderWithItems` (extracted verbatim) — used by both TPV and mobile
+ * This is the shape TPV writes in `order.tpv.service.ts createOrderWithItems`
+ * (plus its mirror `reparto` since IVA B2) — used by both TPV and mobile
  * so dashboard discount-breakdown reporting (which reads `OrderDiscount`)
  * reflects item discounts applied through either channel identically.
  */
 export function buildItemDiscountRow(input: ItemDiscountRowInput): Prisma.OrderDiscountUncheckedCreateInput {
   const { orderId, itemId, discount, discountAmountPesos, appliedById } = input
+  const amountPesos = roundPesos(discountAmountPesos)
   return {
     orderId,
     discountId: discount.id,
     type: discount.type,
     name: discount.name,
     value: discount.value,
-    amount: new Prisma.Decimal(roundPesos(discountAmountPesos)),
+    amount: new Prisma.Decimal(amountPesos),
     taxReduction: 0,
     isComp: discount.type === 'COMP',
     isManual: true,
     compReason: discount.type === 'COMP' ? discount.compReason || discount.name : null,
     appliedById,
     appliedToItemIds: [itemId],
+    // B2: el descuento ya vive en el renglón; la fila lo DUPLICA para cabecera y reportes ⇒ espejo (la factura no lo cuenta).
+    reparto: comoJson(nuevoRepartoDirigido(amountPesos, { [itemId]: amountPesos }, { espejo: true })),
+  }
+}
+
+/**
+ * B2 (founder, 27-sep): el descuento de CUENTA del POS (`discount` del móvil, el descuento libre de «Cobrar») es su propia
+ * fila, con su regla (la cuenta CON promociones). Vivía sólo en la cabecera y cualquier recálculo posterior lo borraba. Los
+ * centavos por renglón los pone `sincronizarRepartos`. Lo usan el móvil y la terminal: un solo literal.
+ */
+export function filaDeDescuentoDeCuenta(p: {
+  orderId: string
+  montoPesos: number
+  appliedById: string | null
+}): Prisma.OrderDiscountUncheckedCreateInput {
+  const monto = roundPesos(p.montoPesos)
+  return {
+    orderId: p.orderId,
+    type: 'FIXED_AMOUNT',
+    name: 'Descuento de la cuenta',
+    value: new Prisma.Decimal(monto),
+    amount: new Prisma.Decimal(monto),
+    taxReduction: 0,
+    isManual: true,
+    appliedById: p.appliedById,
+    reparto: comoJson(nuevoRepartoDeCuenta({ conPromociones: true })),
   }
 }
 

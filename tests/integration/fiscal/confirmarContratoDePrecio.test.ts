@@ -72,6 +72,9 @@ describe('confirmarContratoDePrecio (integración)', () => {
   afterAll(async () => {
     await prisma.activityLog.deleteMany({ where: { venueId: { in: [venueId, otroVenueId] } } })
     await prisma.order.deleteMany({ where: { venueId: { in: [venueId, otroVenueId] } } })
+    await prisma.discount.deleteMany({ where: { venueId } })
+    await prisma.product.deleteMany({ where: { venueId } })
+    await prisma.menuCategory.deleteMany({ where: { venueId } })
     await prisma.venue.deleteMany({ where: { id: { in: [venueId, otroVenueId] } } })
     await prisma.staff.deleteMany({ where: { id: staffId } })
     await prisma.organization.deleteMany({ where: { id: fixture } })
@@ -434,6 +437,29 @@ describe('confirmarContratoDePrecio (integración)', () => {
     const row = await ordenActual(orden.id)
     expect(row.contratoDePrecio).toBe('DESCONOCIDO')
     expect(await logDe(orden.id)).toHaveLength(0)
+  })
+
+  // B2b, Tarea 1 (§4.6, D16): el choque con «confirmar ventas viejas». Roja hasta que el motor deje de restar un
+  // 16 % inventado a una venta de contrato DESCONOCIDO (el caso 8 de arriba, taxAmount −5, se queda: ventas ya dañadas).
+  it('14. (D16) un descuento del motor «antes de impuestos» sobre una venta DESCONOCIDO ya no la vuelve inconfirmable', async () => {
+    const categoria = await prisma.menuCategory.create({ data: { venueId, name: 'Cat D16', slug: `d16-${fixture}` } })
+    const producto = await prisma.product.create({
+      data: { venueId, categoryId: categoria.id, name: 'Café D16', sku: `D16-${fixture}`, price: 100 },
+    })
+    const descuento = await prisma.discount.create({
+      data: { venueId, name: '10 % D16', type: 'PERCENTAGE', value: 10, scope: 'ORDER', applyBeforeTax: true },
+    })
+    const orden = await nuevaOrden({})
+    await prisma.orderItem.create({
+      data: { orderId: orden.id, productId: producto.id, productName: 'Café D16', quantity: 1, unitPrice: 100, total: 100, taxAmount: 0 },
+    })
+
+    const { applyDiscountToOrder } = await import('@/services/dashboard/discountEngine.service')
+    expect(await applyDiscountToOrder(orden.id, descuento.id, undefined, undefined, venueId)).toMatchObject({ success: true, amount: 10 })
+
+    expect(Number((await ordenActual(orden.id)).taxAmount)).toBe(0)
+    const preview = await vistaPreviaContrato(venueId, orden.id)
+    expect(preview!.confirmable).toBe(true)
   })
 
   // ─── B3b, Tarea 2: la huella de la vista previa ────────────────────────────────────────────

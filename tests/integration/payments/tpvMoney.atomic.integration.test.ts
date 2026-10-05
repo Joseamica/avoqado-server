@@ -287,7 +287,9 @@ describe('new atomic TPV money behavior', () => {
     const after = await snapshot(o.id)
     expect(after).toMatchObject(
       name === 'comp'
-        ? { total: 0, discount: 200 }
+        ? // B2c T4b (ronda 1): la cabecera es Σ filas SIN tope — los $20 releídos (su fila «Descuento anterior») + la cortesía de
+          // los $200 releídos —; el total lo topa en 0 `computeStoredOrderTotal`. (Antes, cabecera topada al subtotal: 200.)
+          { total: 0, discount: 220, remaining: 0 }
         : name === 'discount'
           ? { total: 160, discount: 40, remaining: 153 }
           : { subtotal: 60, total: 40, remaining: 33, status: o.status },
@@ -562,5 +564,35 @@ describe('round replay and modifier rollback', () => {
     expect(modifierObserved).toBe(true)
     expect(await prisma.orderItemModifier.count({ where: { orderItem: { orderId: o.id } } })).toBe(0)
     expect(await snapshot(o.id)).toEqual(before)
+  })
+})
+
+/**
+ * P12 (B2b Tarea 6) en los dos escritores de la terminal que guardan el total SIN pasar por la sincronización de repartos: la
+ * cortesía (`computeStoredOrderTotal` con el contrato, el IVA y el estado) y el artículo serializado (`impuestoQueSeCobraAparte`).
+ * Sin estas pruebas, quitar el término del IVA en cualquiera de los dos dejaba verde todo el bloque (revisión de la Tarea 6).
+ */
+describe('P12: la cortesía y el serializado guardan el total con el IVA aparte (B2b)', () => {
+  /** Producto $100 con IVA $16 aparte: cabecera IVA_APARTE, total y saldo $116. */
+  const conIvaAparte = async () => {
+    const o = await newOrder({ contratoDePrecio: 'IVA_APARTE', taxAmount: 16, total: 116, remainingBalance: 116, covers: 1 })
+    await prisma.orderItem.update({ where: { id: o.items[0].id }, data: { taxAmount: 16 } })
+    return o
+  }
+
+  it('🔴 cortesía de un renglón exento: total y saldo $116 = 150 − 50 de cortesía + 16 de IVA (sin el término: $100)', async () => {
+    const o = await conIvaAparte()
+    const agua = await prisma.orderItem.create({
+      data: { orderId: o.id, productName: 'Agua', quantity: 1, unitPrice: 50, taxAmount: 0, total: 50 },
+    })
+    await prisma.order.update({ where: { id: o.id }, data: { subtotal: 150, total: 166, remainingBalance: 166 } })
+    await compItems(venueId, o.id, { itemIds: [agua.id], reason: 'Invitación', staffId })
+    expect(await snapshot(o.id)).toMatchObject({ subtotal: 150, discount: 50, total: 116, remaining: 116 })
+  })
+
+  it('🔴 artículo serializado de $20: total y saldo $136 = 120 + 16 de IVA (sin el término: $120)', async () => {
+    const o = await conIvaAparte()
+    await addSerializedItemToOrder(venueId, o.id, { serialNumber: o.id, categoryId, price: 20 }, o.version, staffId)
+    expect(await snapshot(o.id)).toMatchObject({ subtotal: 120, total: 136, remaining: 136 })
   })
 })

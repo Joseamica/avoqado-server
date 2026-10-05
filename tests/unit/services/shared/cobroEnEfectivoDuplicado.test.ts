@@ -6,8 +6,22 @@ import {
   type PagoPrevio,
 } from '@/services/shared/cobroEnEfectivoDuplicado'
 
-const ORDEN_CERO = { subtotal: new Decimal(0), discountAmount: null, serviceChargeAmount: null }
-const ORDEN_100 = { subtotal: new Decimal(100), discountAmount: null, serviceChargeAmount: null }
+const ORDEN_CERO = {
+  subtotal: new Decimal(0),
+  discountAmount: null,
+  serviceChargeAmount: null,
+  contratoDePrecio: 'IVA_INCLUIDO',
+  taxAmount: 0,
+  status: 'PENDING',
+}
+const ORDEN_100 = {
+  subtotal: new Decimal(100),
+  discountAmount: null,
+  serviceChargeAmount: null,
+  contratoDePrecio: 'IVA_INCLUIDO',
+  taxAmount: 0,
+  status: 'PENDING',
+}
 
 /** El instante en que llega el cobro entrante. Fijo: la regla recibe el reloj por parámetro. */
 const AHORA = new Date('2026-09-04T00:18:10Z')
@@ -98,6 +112,21 @@ describe('cobroEnEfectivoSobreOrdenSaldada — la regla que separa un toque repe
     const cobro = pago('p1', 100)
     const reembolso = pago('r1', -40, { type: 'REFUND' })
     expect(cobroEnEfectivoSobreOrdenSaldada({ ...CANDIDATO_CASH, amount: 100 }, ORDEN_100, [cobro, reembolso], AHORA)).toBeNull()
+  })
+
+  // ── P12 (B2b): el IVA aparte cuenta en «¿la cuenta ya estaba cubierta?» ─────────
+  // Cuenta de $100 + $16 de IVA aparte: entraron $84 con tarjeta y $16 en efectivo ($100). Faltan los $16 del IVA, y el
+  // cliente los paga en efectivo desde la MISMA terminal: mismo dinero que el efectivo previo y dentro de la ventana. Sin el
+  // IVA en el saldo la cuenta se leería cubierta y ese cobro legítimo se descartaría como toque repetido.
+  const ORDEN_116 = { ...ORDEN_100, contratoDePrecio: 'IVA_APARTE', taxAmount: 16 }
+  it('🔴 P12: cuenta de $116 (IVA aparte) con $100 cobrados: un segundo efectivo de $16 NO es un duplicado (null)', () => {
+    const previos = [pago('tarjeta', 84, { method: 'CREDIT_CARD' }), pago('efectivo', 16)]
+    expect(cobroEnEfectivoSobreOrdenSaldada({ ...CANDIDATO_CASH, amount: 16 }, ORDEN_116, previos, AHORA)).toBeNull()
+  })
+  it('control — P12: la misma cuenta con el IVA ya cubierto ($116 cobrados) sí reconoce el toque repetido de $16', () => {
+    const efectivo = pago('efectivo', 16)
+    const previos = [pago('tarjeta', 100, { method: 'CREDIT_CARD' }), efectivo]
+    expect(cobroEnEfectivoSobreOrdenSaldada({ ...CANDIDATO_CASH, amount: 16 }, ORDEN_116, previos, AHORA)).toBe(efectivo)
   })
 
   // ── RONDA 2 — «firma de ráfaga» (auditoría de Codex, P1-1) ────────────────────────

@@ -43,10 +43,11 @@ async function waitingOnOrder(minimum = 1) {
   }
   throw new Error('No connection waited on Order')
 }
-async function newOrder(remove = false) {
+async function newOrder(remove = false, contrato?: 'IVA_APARTE') {
   return prisma.order.create({
     data: {
       venueId,
+      ...(contrato ? { contratoDePrecio: contrato } : {}),
       orderNumber: randomUUID(),
       subtotal: 100,
       taxAmount: 16,
@@ -76,7 +77,13 @@ async function snapshot(orderId: string, db: Prisma.TransactionClient = prisma) 
     charge: Number(o.serviceChargeAmount),
     remaining: Number(o.remainingBalance),
     version: o.version,
-    discounts: o.orderDiscounts.map(d => ({ id: d.id, amount: Number(d.amount), tax: Number(d.taxReduction), coupon: d.couponCodeId })),
+    discounts: o.orderDiscounts.map(d => ({
+      id: d.id,
+      amount: Number(d.amount),
+      tax: Number(d.taxReduction),
+      coupon: d.couponCodeId,
+      reparto: d.reparto,
+    })),
     charges: o.serviceCharges.map(c => ({ id: c.id, amount: Number(c.amount) })),
   }
 }
@@ -332,7 +339,26 @@ describe('new serialized discount behavior', () => {
       await writer
     }
     expect((await writer!).error).toBeUndefined()
-    expect((await snapshot(o.id)).discounts[0]).toMatchObject({ amount: 30, tax: 4.8 })
+    // D16: sin contrato declarado el descuento no baja el impuesto.
+    expect((await snapshot(o.id)).discounts[0]).toMatchObject({ amount: 30, tax: 0 })
+  })
+  it.each(['predefined', 'auto'] as const)('%s con impuesto aparte reduce lo cobrado en su reparto (30 × 16/100 = 4.80)', async name => {
+    const o = await newOrder(false, 'IVA_APARTE')
+    const fiscal = holdFiscal(o.id, tx => tx.discount.update({ where: { id: discountId }, data: { value: 30 } }))
+    let writer: ReturnType<typeof resultOf> | undefined
+    try {
+      await fiscal.entered
+      writer = resultOf(writers.find(w => w[0] === name)![1](o))
+      await waitingOnOrder()
+    } finally {
+      fiscal.release()
+      await fiscal.done
+      await writer
+    }
+    expect((await writer!).error).toBeUndefined()
+    const after = await snapshot(o.id)
+    expect(after.discounts[0]).toMatchObject({ amount: 30, tax: 4.8 })
+    expect(after.tax).toBe(11.2)
   })
   it.each(['predefined', 'coupon'] as const)('%s serializes duplicate concurrent application', async name => {
     const o = await newOrder(),
@@ -401,7 +427,11 @@ describe('new serialized discount behavior', () => {
         })
         await tx.order.update({ where: { id: o.id }, data: { subtotal: 400 } })
       },
-      expected: { amount: 25, tax: 4 },
+      // D16: sin contrato declarado el descuento no baja el impuesto.
+      expected: { amount: 25, tax: 0 },
+      // IVA_APARTE: el renglón queda en $250 con impuesto 16 ⇒ 25 × 16/250.
+      expectedAparte: { amount: 25, tax: 1.6 },
+      impuestoAparte: 14.4, // 16 − 1.60
     },
     BOGO: {
       rule: () => ({ scope: 'QUANTITY' as const, buyQuantity: 1, getQuantity: 1, getDiscountPercent: 100 }),
@@ -409,7 +439,11 @@ describe('new serialized discount behavior', () => {
         await tx.orderItem.update({ where: { id: o.items[0].id }, data: { quantity: 2, total: 200 } })
         await tx.order.update({ where: { id: o.id }, data: { subtotal: 200 } })
       },
-      expected: { amount: 100, tax: 16 },
+      // D16: sin contrato declarado el descuento no baja el impuesto.
+      expected: { amount: 100, tax: 0 },
+      // IVA_APARTE: 2 piezas, $200 con impuesto 16 ⇒ 100 × 16/200.
+      expectedAparte: { amount: 100, tax: 8 },
+      impuestoAparte: 8, // 16 − 8
     },
   }
   it.each([
@@ -436,6 +470,32 @@ describe('new serialized discount behavior', () => {
     const after = await snapshot(o.id)
     expect(after.discounts).toHaveLength(1)
     expect(after.discounts[0]).toMatchObject(expected)
+  })
+  it.each([
+    ['ITEM', 'predefined'],
+    ['ITEM', 'auto'],
+    ['BOGO', 'predefined'],
+    ['BOGO', 'auto'],
+  ] as const)('%s con impuesto aparte reduce sobre los renglones frescos para %s', async (scenario, name) => {
+    const { rule, change, expectedAparte, impuestoAparte } = itemScenarios[scenario]
+    await prisma.discount.update({ where: { id: discountId }, data: rule() })
+    const o = await newOrder(false, 'IVA_APARTE'),
+      fiscal = holdFiscal(o.id, tx => change(tx, o))
+    let writer: ReturnType<typeof resultOf> | undefined
+    try {
+      await fiscal.entered
+      writer = resultOf(writers.find(w => w[0] === name)![1](o))
+      await waitingOnOrder()
+    } finally {
+      fiscal.release()
+      await fiscal.done
+      await writer
+    }
+    expect((await writer!).error).toBeUndefined()
+    const after = await snapshot(o.id)
+    expect(after.discounts).toHaveLength(1)
+    expect(after.discounts[0]).toMatchObject(expectedAparte)
+    expect(after.tax).toBe(impuestoAparte)
   })
   it.each(['predefined', 'auto'] as const)('%s rereads customer-group eligibility after fiscal releases', async name => {
     await prisma.discount.update({ where: { id: discountId }, data: { customerGroupId: groupId } })
@@ -519,6 +579,97 @@ describe('new serialized discount behavior', () => {
     expect(await snapshot(o.id)).toEqual(before)
     for (const id of [discountId, secondDiscountId])
       expect((await prisma.discount.findUniqueOrThrow({ where: { id } })).currentUses).toBe(0)
+  })
+  /** A ($100, IVA 16) y B (exento, $100); una fila previa de cuenta de $10 sobre A con 1.60 de reducción y la marca de D16. */
+  async function escenarioIvaAparte() {
+    const o = await newOrder(false, 'IVA_APARTE')
+    const a = o.items[0]
+    await prisma.orderItem.create({
+      data: { orderId: o.id, productId: otherProductId, productName: 'Other', quantity: 1, unitPrice: 100, total: 100, taxAmount: 0 },
+    })
+    await prisma.orderDiscount.create({
+      data: {
+        orderId: o.id,
+        name: 'Previa',
+        type: 'FIXED_AMOUNT',
+        value: 10,
+        amount: 10,
+        taxReduction: 1.6,
+        isManual: true,
+        reparto: { v: 1, alcance: 'CUENTA', conPromociones: false, espejo: false, reduceImpuesto: true, renglones: { [a.id]: 1000 } },
+      },
+    })
+    await prisma.order.update({ where: { id: o.id }, data: { subtotal: 200, discountAmount: 10, taxAmount: 14.4 } })
+    // La regla: 100 % del producto de A, antes de impuestos ⇒ toma toda la capacidad de A y la previa se va a B.
+    await prisma.discount.update({
+      where: { id: discountId },
+      data: { scope: 'ITEM', targetItemIds: [productId], value: 100, applyBeforeTax: true },
+    })
+    return o
+  }
+
+  it('IVA_APARTE: reparto, reducción e impuesto devuelto retroceden juntos si falla la escritura de los totales', async () => {
+    const o = await escenarioIvaAparte()
+    const before = await snapshot(o.id)
+    const original = prisma.$transaction.bind(prisma)
+    let visto: Awaited<ReturnType<typeof snapshot>> | undefined
+    jest.spyOn(prisma, '$transaction').mockImplementation(((cb: any, opts: any) =>
+      original(
+        async tx =>
+          cb(
+            new Proxy(tx, {
+              get(target, key) {
+                if (key !== 'order') return Reflect.get(target, key)
+                return new Proxy(target.order, {
+                  get(model, method) {
+                    if (method !== 'update') return Reflect.get(model, method)
+                    return async (args: any) => {
+                      if (args?.data?.total === undefined) return Reflect.get(model, method).call(model, args) // el incremento del IVA pasa
+                      visto = await snapshot(o.id, tx)
+                      throw new Error('falla al escribir los totales')
+                    }
+                  },
+                })
+              },
+            }),
+          ),
+        opts,
+      )) as any)
+    await expect(writers.find(w => w[0] === 'predefined')![1](o)).rejects.toThrow('falla al escribir los totales')
+    // La sincronización ya había movido el impuesto (+1.60 de la previa − 16 de la nueva, su único escritor: Codex r3 V3).
+    expect(visto!.tax).toBe(0)
+    expect(visto!.discounts.map(x => x.tax).sort((x, y) => x - y)).toEqual([0, 16]) // la previa recalculada y la nueva
+    expect(await snapshot(o.id)).toEqual(before) // y todo retrocedió
+  })
+
+  it('IVA_APARTE: el lector fiscal espera y ve la operación completa (reparto, reducciones e impuesto final 0)', async () => {
+    const o = await escenarioIvaAparte()
+    const entered = barrier(),
+      finish = barrier()
+    const original = lock.lockExistingOrderForPayment
+    jest.spyOn(lock, 'lockExistingOrderForPayment').mockImplementationOnce(async (...args) => {
+      const value = await original(...args)
+      entered.release()
+      await finish.promise
+      return value
+    })
+    const writer = resultOf(writers.find(w => w[0] === 'predefined')![1](o))
+    let fiscal: Promise<Awaited<ReturnType<typeof snapshot>>> | undefined
+    try {
+      await entered.promise
+      fiscal = prisma.$transaction(async tx => {
+        await bloquearOrdenParaFacturar(tx, o.id)
+        return snapshot(o.id, tx)
+      })
+      await waitingOnOrder()
+    } finally {
+      finish.release()
+      await writer
+    }
+    expect((await writer).error).toBeUndefined()
+    const final = await snapshot(o.id)
+    expect(await fiscal!).toEqual(final)
+    expect(final.tax).toBe(0) // 14.40 + 1.60 devueltos − 16 de la nueva
   })
 })
 

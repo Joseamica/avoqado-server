@@ -38,12 +38,15 @@ jest.mock('@/communication/sockets/terminal-registry', () => ({
 jest.mock('@/services/alerts/opsAlert.service', () => ({ sendOpsAlert: jest.fn() }))
 
 const database = new URL(process.env.TEST_DATABASE_URL ?? '')
-// The fiscal test DB on this Mac, or CI's disposable one (ci-cd.yml adopts that name instead of relaxing guards): never another.
+// Local host only, and a disposable test DB: the fiscal one on this Mac, CI's (ci-cd.yml adopts that name instead of
+// relaxing guards), or any `avoqado_<x>_test_…` like the money suites. Never av-db-25.
 if (
   !['localhost', '127.0.0.1'].includes(database.hostname) ||
-  !['/av_db_25_iva_test', '/avoqado_h1a_test_20260808'].includes(database.pathname)
+  !(
+    ['/av_db_25_iva_test', '/avoqado_h1a_test_20260808'].includes(database.pathname) || /^\/avoqado_[a-z0-9]+_test_/.test(database.pathname)
+  )
 ) {
-  throw new Error("This suite requires the local av_db_25_iva_test database or CI's disposable avoqado_h1a_test_20260808.")
+  throw new Error('This suite requires a local disposable test database (av_db_25_iva_test, avoqado_<x>_test_…), never av-db-25.')
 }
 
 const fixture = `writer-capture-${randomUUID()}`

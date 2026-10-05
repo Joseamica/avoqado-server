@@ -147,4 +147,19 @@ describe('payCashOrder — lealtad al quedar pagada (paridad con la PAX)', () =>
 
     expect(awardMock).toHaveBeenCalledWith(expect.objectContaining({ orderId: 'order-1', legacyCustomer: null }))
   })
+
+  it('control — lealtad sobre lo pagado con el IVA aparte y sin propina (founder 5-oct)', async () => {
+    seedOrder({
+      contratoDePrecio: 'IVA_APARTE',
+      subtotal: new Decimal(100),
+      taxAmount: new Decimal(16),
+      total: new Decimal(116),
+      remainingBalance: new Decimal(116),
+    })
+
+    await payCashOrder('venue-1', 'order-1', { amount: 11600, tip: 1000, staffId: 'staff-1' })
+
+    // $100 + $16 de IVA aparte = $116; los $10 de propina no compran puntos (ni 100, ni 126).
+    expect(awardMock).toHaveBeenCalledWith(expect.objectContaining({ orderId: 'order-1', orderTotal: 116 }))
+  })
 })

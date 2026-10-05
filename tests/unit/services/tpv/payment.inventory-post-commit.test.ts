@@ -915,3 +915,28 @@ describe('recordOrderPayment — un pago que NO se capturó no salda la cuenta',
     expect(productInventoryService.deductInventoryForProduct).toHaveBeenCalled()
   })
 })
+
+describe('recordOrderPayment — base de lealtad con el IVA cobrado aparte', () => {
+  it('control — lealtad sobre lo pagado con el IVA aparte y sin propina (founder 5-oct)', async () => {
+    const order = makeOrder({ contratoDePrecio: 'IVA_APARTE', taxAmount: new Decimal(16), total: new Decimal(116) })
+    ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(order)
+    ;(prisma.order.update as jest.Mock).mockResolvedValue({ ...order, items: order.items })
+    ;(productInventoryService.getProductInventoryStatus as jest.Mock).mockResolvedValue(STOCK_OK)
+    // El Payment recién creado trae lo cobrado: $116 de venta con su IVA + $10 de propina.
+    ;(prisma.payment.create as jest.Mock).mockResolvedValue({
+      id: 'payment-1',
+      status: 'COMPLETED',
+      feeAmount: 0,
+      netAmount: 126,
+      amount: new Decimal(116),
+      tipAmount: new Decimal(10),
+      venueId: VENUE_ID,
+      orderId: ORDER_ID,
+    })
+
+    await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, { ...paymentData, amount: 11600, tip: 1000 }, 'user-1')
+
+    // $100 + $16 de IVA aparte = $116; los $10 de propina no compran puntos (ni 100, ni 126).
+    expect(awardLoyaltyForPaidOrder).toHaveBeenCalledWith(expect.objectContaining({ orderId: ORDER_ID, orderTotal: 116 }))
+  })
+})

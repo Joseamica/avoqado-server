@@ -24,6 +24,7 @@ import { addAreaTicketItems, openAreaTicket } from '@/services/mobile/areaTicket
 import { buildAreaTicketCode } from '@/lib/areaTicketCode'
 import * as featureAccess from '@/middlewares/checkFeatureAccess.middleware'
 import * as tableOwnership from '@/middlewares/checkTableOwnership.middleware'
+import * as activityLog from '@/services/dashboard/activity-log.service'
 
 jest.mock('@/communication/sockets', () => ({ __esModule: true, default: { getBroadcastingService: jest.fn(() => null) } }))
 jest.mock('@/services/wallet/notifyPassUpdated.service', () => ({ notifyCustomerPassUpdated: jest.fn() }))
@@ -116,10 +117,27 @@ async function snapshot(orderId: string, db: Prisma.TransactionClient = prisma) 
     subtotal: Number(o.subtotal),
     discount: Number(o.discountAmount),
     total: Number(o.total),
+    // B2b (Codex r2: r1 #9): la foto ve también el impuesto de la cabecera y la reducción de cada fila — las escrituras fiscales
+    // de D16 retroceden con todo lo demás.
+    tax: Number(o.taxAmount),
     paid: Number(o.paidAmount),
     remaining: Number(o.remainingBalance),
-    items: o.items.map(i => ({ id: i.id, total: Number(i.total), promo: i.orderPromotionId, seat: i.seat })),
-    discounts: o.orderDiscounts.map(d => ({ id: d.id, amount: Number(d.amount), loyalty: d.loyaltyTransactionId })),
+    // B2 (Codex r1 #8): la foto ve el descuento propio de cada renglón y el reparto de cada fila.
+    items: o.items.map(i => ({
+      id: i.id,
+      total: Number(i.total),
+      promo: i.orderPromotionId,
+      seat: i.seat,
+      discount: Number(i.discountAmount),
+      appliedDiscountId: i.appliedDiscountId,
+    })),
+    discounts: o.orderDiscounts.map(d => ({
+      id: d.id,
+      amount: Number(d.amount),
+      taxReduction: Number(d.taxReduction),
+      loyalty: d.loyaltyTransactionId,
+      reparto: d.reparto,
+    })),
     promotions: o.promotions.map(p => p.instanceId),
   }
 }
@@ -281,9 +299,11 @@ const NOT_FOUND_MESSAGE: Record<Name, string> = {
   redeemStamp: 'Orden no encontrada',
 }
 type State = Awaited<ReturnType<typeof state>>
+/** B2: el reparto de la fila nueva YA estaba escrito (con renglones) cuando falló la escritura de totales. */
+const repartida = (i: State) => Object.keys((i.order.discounts.at(-1)?.reparto as any)?.renglones ?? {}).length > 0
 /** Which Order-total write fails, and what must already be written in the SAME tx when it does. */
 const ROLLBACK: Record<Name, { nth: number; written: (inside: State, before: State) => boolean }> = {
-  applyDiscount: { nth: 1, written: (i, b) => i.order.discounts.length === b.order.discounts.length + 1 },
+  applyDiscount: { nth: 1, written: (i, b) => i.order.discounts.length === b.order.discounts.length + 1 && repartida(i) },
   removeDiscount: { nth: 1, written: (i, b) => i.points === b.points + 1000 && i.order.discounts.length === 0 },
   // The SECOND total write (the new check's) fails after the new check, the moved line and the source totals exist.
   split: { nth: 2, written: (i, b) => i.venueOrders === b.venueOrders + 1 && i.order.items.length === 1 && i.order.subtotal === 100 },
@@ -295,9 +315,9 @@ const ROLLBACK: Record<Name, { nth: number; written: (inside: State, before: Sta
   removePromotion: { nth: 1, written: i => i.order.promotions.length === 0 && i.order.items.length === 2 },
   redeemPoints: {
     nth: 1,
-    written: (i, b) => i.points === b.points - 1000 && i.order.discounts.length === 1 && i.loyaltyTransactions === 1,
+    written: (i, b) => i.points === b.points - 1000 && i.order.discounts.length === 1 && i.loyaltyTransactions === 1 && repartida(i),
   },
-  redeemStamp: { nth: 1, written: i => i.rewards[0]?.status === 'REDEEMED' && i.order.discounts.length === 1 },
+  redeemStamp: { nth: 1, written: i => i.rewards[0]?.status === 'REDEEMED' && i.order.discounts.length === 1 && repartida(i) },
 }
 
 /** Proxies every interactive transaction; `onOrderUpdate` / `onCreate` intercept the named calls on that tx. */
@@ -562,8 +582,11 @@ describe('fresh decisions after waiting', () => {
     expect(writer.error).toBeUndefined()
     // Fresh: min(200, 250) capped at 250 − 30 = 220 → 200. From the stale photo it would have been 150.
     const after = await snapshot(o.id)
-    expect(after.discounts.map(d => d.amount)).toEqual([200])
-    expect(after).toMatchObject({ subtotal: 250, discount: 200, total: 50 })
+    // Codex r1 P1 (revisión final de B2): the holder's $30 lives only in the header (no row). Before the new row it is frozen
+    // in its own row without reparto, so the recalculation keeps it (it used to drop it: discount 200, total 50).
+    expect(after.discounts.map(d => d.amount).sort((a, b) => a - b)).toEqual([30, 200])
+    expect(after.discounts.find(d => d.amount === 30)?.reparto).toBeNull()
+    expect(after).toMatchObject({ subtotal: 250, discount: 230, total: 20 })
   })
 
   it('split rereads the source lines: the line that was to stay was removed while it waited', async () => {
@@ -959,6 +982,94 @@ describe('the sync reducer classifies the locked writers as before', () => {
     expect(await persisted(id)).toBeNull()
     expect(await state(o)).toEqual(before)
   }, 60_000)
+
+  it('🔴 Codex r3 N5: el P2028 llega DESPUÉS de retirar el premio de la línea del combo ⇒ todo retrocede y el intent queda RETRY; el reintento real la termina (REJECTED)', async () => {
+    // La cuenta: Plato $100 + Bebida $50 y el combo del fixture (sus líneas de $60 y $30); un premio de cartilla DIRIGIDO a la
+    // línea del Plato del combo, ya canjeado. La ronda offline repite la promoción (mismo instanceId: idempotente) y trae un
+    // artículo inexistente: el alta normal falla en DEFINITIVO y el reducer compensa retirando la promoción del intent.
+    const o = await newOrder('promotion')
+    const { instanceId } = await prisma.orderPromotion.findUniqueOrThrow({ where: { id: o.orderPromotionId } })
+    const lineaDelCombo = await prisma.orderItem.findFirstOrThrow({
+      where: { orderId: o.id, orderPromotionId: o.orderPromotionId, productId: productA },
+    })
+    const premio = await prisma.orderDiscount.create({
+      data: {
+        orderId: o.id,
+        type: 'FIXED_AMOUNT',
+        name: 'Premio',
+        value: 60,
+        amount: 60,
+        isManual: true,
+        reparto: { v: 1, alcance: 'DIRIGIDO', conPromociones: null, espejo: false, renglones: { [lineaDelCombo.id]: 6000 } },
+      },
+    })
+    o.rewardIds.push((await newReward({ status: 'REDEEMED', redeemedAt: new Date(), orderDiscountId: premio.id })).id)
+    await prisma.order.update({ where: { id: o.id }, data: { discountAmount: 60, total: 180, remainingBalance: 180 } })
+    const antes = await state(o)
+    const ronda = (id: string) => ({
+      id,
+      type: 'ADD_ITEMS' as const,
+      payload: {
+        orderId: o.id,
+        items: [
+          { promotionRef: { promotionId, promotionInstanceId: instanceId, selections } },
+          { productId: `no-existe-${randomUUID()}`, quantity: 1 },
+        ],
+      },
+    })
+
+    // 1) La falla transitoria entra al BORRAR las líneas del combo: después de `recortarDescuentosDeRenglones`, que ya retiró la
+    //    fila del premio y lo devolvió a PENDING dentro de la misma transacción.
+    let visto: Awaited<ReturnType<typeof state>> | undefined
+    const original = prisma.$transaction.bind(prisma)
+    const espia = jest.spyOn(prisma, '$transaction').mockImplementation(((cb: any, opts: any) =>
+      typeof cb !== 'function'
+        ? original(cb, opts)
+        : original(
+            async tx =>
+              cb(
+                new Proxy(tx, {
+                  get(target, key) {
+                    if (key !== 'orderItem') return Reflect.get(target, key)
+                    return new Proxy(target.orderItem, {
+                      get(model, method) {
+                        if (method !== 'deleteMany') return Reflect.get(model, method)
+                        return async (args: any) => {
+                          if (!args?.where?.orderPromotionId) return model.deleteMany(args)
+                          visto = await state(o, tx)
+                          throw Object.assign(new Error('Transaction API error'), { code: 'P2028' })
+                        }
+                      },
+                    })
+                  },
+                }),
+              ),
+            opts,
+          )) as any)
+    const id = randomUUID()
+    let primero: Awaited<ReturnType<typeof replay>>
+    try {
+      primero = await replay(ronda(id))
+    } finally {
+      espia.mockRestore()
+    }
+    expect(primero![0]).toMatchObject({ id, status: 'RETRY', errorCode: 'P2028' })
+    // La devolución SÍ había ocurrido dentro de la transacción…
+    expect(visto!.rewards).toEqual([{ status: 'PENDING', orderDiscountId: null }])
+    expect(visto!.order.discounts).toEqual([])
+    // …y retrocedió entera: premio REDEEMED con su fila, promoción, líneas y cabecera como antes. RETRY no se persiste: el
+    // aparato la reintenta.
+    expect(await state(o)).toEqual(antes)
+    expect(await persisted(id)).toBeNull()
+
+    // 2) El reintento REAL (sin falla) termina la compensación y entonces sí va a cuarentena.
+    const [segundo] = await replay(ronda(id))
+    expect(segundo).toMatchObject({ id, status: 'REJECTED', errorCode: 'BUSINESS_RULE' })
+    expect(await persisted(id)).toMatchObject({ status: 'REJECTED' })
+    const despues = await state(o)
+    expect(despues.rewards).toEqual([{ status: 'PENDING', orderDiscountId: null }])
+    expect(despues.order).toMatchObject({ promotions: [], discounts: [], subtotal: 150, discount: 0, total: 150 })
+  })
 })
 
 describe('addAreaTicketItems decides and totals from the Order read under the lock (T5)', () => {
@@ -1130,5 +1241,49 @@ describe('addAreaTicketItems decides and totals from the Order read under the lo
     expect(observed).toBe(true)
     expect(await snapshot(t.id)).toEqual(before)
     expect(await modifiersOf(t.id)).toBe(0)
+  })
+
+  // B2c F2 (Codex r1 #4; ruling «P2 R5/R15, transición»): un vale VIEJO (abierto antes de B2c) trae el descuento del plato sólo en
+  // su renglón y en la cabecera, sin espejo. La cortesía del móvil congelaba esos $10 como «Descuento anterior» (no espejo) y el
+  // vale los volvía a sumar con el descuento propio del plato; ahora el plato gana su espejo y el vale lo deja fuera.
+  it('🔴 F2 (Codex r1 #4): vale viejo con $10 propios sin espejo → cortesía del móvil de la bebida → agregar $50: $140 (antes de F2, $130)', async () => {
+    jest.spyOn(activityLog, 'logAction').mockResolvedValue(undefined) // la bitácora de la cortesía no interesa aquí
+    const code = buildAreaTicketCode(47, ++ticketCounter)
+    const ticket = await openAreaTicket(venueId, {
+      code,
+      deviceUid: AREA_DEVICE,
+      staffId,
+      items: [
+        { productId: productA, quantity: 1 },
+        { productId: productB, quantity: 1 },
+      ],
+    })
+    const plato = await prisma.orderItem.findFirstOrThrow({ where: { orderId: ticket.orderId, productId: productA } })
+    const bebida = await prisma.orderItem.findFirstOrThrow({ where: { orderId: ticket.orderId, productId: productB } })
+    await prisma.orderItem.update({ where: { id: plato.id }, data: { discountAmount: 10 } })
+    await prisma.order.update({ where: { id: ticket.orderId }, data: { discountAmount: 10, total: 140, remainingBalance: 140 } })
+    const { compOrderItem } = await import('@/services/mobile/comp-item.mobile.service')
+    await compOrderItem({ venueId, orderId: ticket.orderId, itemId: bebida.id, reason: 'Invitación', staffId })
+    const tras = await prisma.order.findUniqueOrThrow({ where: { id: ticket.orderId } })
+    expect([Number(tras.subtotal), Number(tras.discountAmount), Number(tras.total)]).toEqual([100, 10, 90])
+    await addLine(code) // Bebida $50
+    const o = await prisma.order.findUniqueOrThrow({ where: { id: ticket.orderId } })
+    expect([Number(o.subtotal), Number(o.discountAmount), Number(o.total), Number(o.remainingBalance)]).toEqual([150, 10, 140, 140])
+  })
+
+  it('control — Codex r3 V7: vale → promoción → cortesía de la terminal → agregar: la promoción regalada sigue descontada ($150; la v3 de este plan, $240)', async () => {
+    const t = await openTicket() // Plato $100
+    // combo $90: líneas de $60 y $30
+    await applyPromotionToOrder({ venueId, orderId: t.id, promotionId, instanceId: randomUUID(), selections, soldAt: new Date() })
+    const lineas = await prisma.orderItem.findMany({
+      where: { orderId: t.id, orderPromotionId: { not: null } },
+      select: { id: true },
+      take: 10,
+    })
+    const { compItems } = await import('@/services/tpv/order.tpv.service')
+    await compItems(venueId, t.id, { itemIds: lineas.map(l => l.id), reason: 'Invitación', staffId })
+    await addLine(t.code) // Bebida $50
+    const o = await prisma.order.findUniqueOrThrow({ where: { id: t.id } })
+    expect([Number(o.subtotal), Number(o.discountAmount), Number(o.total)]).toEqual([240, 90, 150])
   })
 })

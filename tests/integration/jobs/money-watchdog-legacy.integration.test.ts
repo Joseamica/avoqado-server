@@ -15,6 +15,8 @@ const tables = {
   Payment:
     '"orderId" text, "venueId" text, amount numeric, "tipAmount" numeric, status text, type text, "originSystem" text, "createdAt" timestamp',
   OrderItem: 'id text, "orderId" text, "productId" text',
+  // B2c F2: «descuento excede el consumo» compara la cabecera con la suma de sus filas.
+  OrderDiscount: '"orderId" text, amount numeric',
   Product: 'id text, "venueId" text, "trackInventory" boolean, "inventoryMethod" text',
   Recipe: '"productId" text',
   OrderItemModifier: '"orderItemId" text, "modifierId" text',
@@ -216,6 +218,31 @@ describe.each(['UTC', 'America/Mexico_City'])('historical watchdog SQL under %s'
     await seedOrder({ status: row.orderStatus, origin: row.orderOrigin, tip: 500, tracked: false })
     await payment({ status: row.paymentStatus, origin: row.paymentOrigin, tip: 500 })
     expect(await checks()).toContain('PROPINA NO CUADRA')
+  })
+
+  // B2c F2 (ruling «pendiente 1 de F1»): desde B2/B2c la cabecera es Σ filas sin tope. Café $100 + pan $50, fijo $60 y la cortesía
+  // del café ⇒ cabecera 160 sobre un subtotal de 150, total 0: legítimo. Sólo alarma lo que las filas no explican.
+  async function cuentaRegaladaSobreUnFijo(filas: number[]) {
+    await seedOrder({ tracked: false })
+    await client.query(
+      `UPDATE pg_temp."Order" SET subtotal = 150, "discountAmount" = 160, total = 0, "paidAmount" = 0, "paymentStatus" = 'PENDING'`,
+    )
+    for (const monto of filas) await client.query(`INSERT INTO pg_temp."OrderDiscount" VALUES ('order', $1::numeric)`, [monto])
+  }
+
+  it('🔴 F2: una cabecera mayor que el subtotal que sus filas explican (cortesía sobre un fijo: 60 + 100 = 160) NO alarma', async () => {
+    await cuentaRegaladaSobreUnFijo([60, 100])
+    expect(await checks()).not.toContain('DESCUENTO EXCEDE EL CONSUMO')
+  })
+
+  it('control — F2: la misma cabecera SIN filas (el daño viejo tipo M13) sí alarma', async () => {
+    await cuentaRegaladaSobreUnFijo([])
+    expect(await checks()).toContain('DESCUENTO EXCEDE EL CONSUMO')
+  })
+
+  it('control — F2: una cabecera que no cuadra con sus filas (160 contra 100) sí alarma', async () => {
+    await cuentaRegaladaSobreUnFijo([100])
+    expect(await checks()).toContain('DESCUENTO EXCEDE EL CONSUMO')
   })
 
   it('does not hide a tip mismatch when an imported refund coexists with a completed payment', async () => {

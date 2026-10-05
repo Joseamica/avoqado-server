@@ -491,6 +491,9 @@ prismaMock.aggregatorVisit.findMany.mockResolvedValue([])
 // conexiones activas del venue. Casi ningún venue tiene: por default ninguna, para que esos tests no tengan que mockearlo.
 prismaMock.aggregatorConnection.findMany.mockResolvedValue([])
 prismaMock.orderItem.findMany.mockResolvedValue([])
+// IVA por producto B2: los escritores de descuentos sincronizan los repartos leyendo las filas de la orden
+// (`sincronizarRepartos`). Mismo patrón que `orderItem`: una orden sin filas, salvo que la prueba diga otra cosa.
+prismaMock.orderDiscount.findMany.mockResolvedValue([])
 prismaMock.inventoryPosting.create.mockResolvedValue({ id: 'posting-default', status: 'PENDING' })
 prismaMock.inventoryPosting.updateMany.mockResolvedValue({ count: 0 })
 // IVA por producto: por default el flag está APAGADO (ningún VenueIvaPorProducto sembrado) —

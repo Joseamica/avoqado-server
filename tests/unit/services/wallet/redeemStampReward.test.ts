@@ -49,6 +49,8 @@ describe('redeemStampReward', () => {
     prismaMock.stampReward.updateMany.mockResolvedValue({ count: 1 } as any)
     prismaMock.orderDiscount.create.mockResolvedValue({ id: 'od1' } as any)
     prismaMock.stampReward.update.mockResolvedValue({} as any)
+    // B2 (P11): el producto gratis topa el premio a lo que el renglón tiene disponible, leyendo las filas de la orden.
+    prismaMock.orderDiscount.findMany.mockResolvedValue([])
   })
 
   it('🔴 un premio de monto fijo crea el descuento en la cuenta', async () => {
@@ -105,8 +107,8 @@ describe('redeemStampReward', () => {
       rewardLabel: 'Un café gratis',
     } as any)
     prismaMock.orderItem.findMany.mockResolvedValue([
-      { id: 'oi1', unitPrice: 45, quantity: 1 },
-      { id: 'oi2', unitPrice: 90, quantity: 1 },
+      { id: 'oi1', unitPrice: 45, quantity: 1, total: 45, discountAmount: 0 },
+      { id: 'oi2', unitPrice: 90, quantity: 1, total: 90, discountAmount: 0 },
     ] as any)
 
     const r = await redeemStampReward('v1', 'o1', 'rw1')

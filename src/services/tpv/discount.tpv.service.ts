@@ -10,12 +10,15 @@
 import prisma from '@/utils/prismaClient'
 import { NotFoundError } from '@/errors/AppError'
 import logger from '@/config/logger'
-import { DiscountType } from '@prisma/client'
+import { DiscountType, Prisma } from '@prisma/client'
 import * as discountEngine from '@/services/dashboard/discountEngine.service'
 import * as couponService from '@/services/dashboard/coupon.dashboard.service'
 import { computeStoredOrderTotal } from '@/services/shared/orderBalance'
+import { rechazarSiEsImportada } from '../shared/ordenImportada'
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
 import { baseDeCargos, recalcularCargosPorServicio } from '../shared/serviceCharges'
+import { comoJson, nuevoRepartoDeCuenta } from '../shared/repartoDescuento'
+import { conservarDescuentoHistorico, sincronizarRepartos } from '../shared/repartoDescuentoTx'
 
 // ==========================================
 // TYPES & INTERFACES
@@ -275,6 +278,9 @@ export async function applyCouponCode(
     if (!order) {
       throw new NotFoundError('Order not found')
     }
+    // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
+    // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
+    rechazarSiEsImportada(order)
 
     if (order.paymentStatus === 'PAID') {
       return {
@@ -348,14 +354,16 @@ export async function applyCouponCode(
       discountAmount = remainingDiscountable
     }
 
-    // Apply max discount cap
-    if (discount.maxDiscountAmount) {
+    // Apply max discount cap — un tope que no es nulo cuenta, incluido 0 (Codex r1).
+    if (discount.maxDiscountAmount != null) {
       discountAmount = Math.min(discountAmount, Number(discount.maxDiscountAmount))
     }
 
     // Defensa final: nunca más de lo que queda por descontar.
     discountAmount = Math.min(Math.round(discountAmount * 100) / 100, remainingDiscountable)
 
+    // Codex r1 P1: lo que la cabecera trae fuera de toda fila (orden anterior a B2…) queda en su fila antes de crear ésta.
+    await conservarDescuentoHistorico(tx, orderId, order.discountAmount)
     // Create order discount record
     const orderDiscount = await tx.orderDiscount.create({
       data: {
@@ -370,8 +378,19 @@ export async function applyCouponCode(
         isAutomatic: false,
         isManual: false,
         appliedById: staffVenueId,
+        // B2: % de lo que queda (con promociones) ⇒ fila de CUENTA. R6: el tope del catálogo viaja en el reparto para que el
+        // siguiente recálculo lo respete (todo tope no nulo, incluido 0 — Codex r1 —, igual que el móvil y el motor).
+        reparto: comoJson(
+          nuevoRepartoDeCuenta({
+            conPromociones: true,
+            tope: discount.type === 'PERCENTAGE' && discount.maxDiscountAmount != null ? Number(discount.maxDiscountAmount) : null,
+          }),
+        ),
       },
     })
+    // Bajo el candado y ANTES de los totales: un fallo al escribirlos revierte también el reparto. B2b (D16): la
+    // sincronización ya escribió en `Order.taxAmount` lo que devolvió al re-repartir las filas marcadas.
+    const sincronizado = await sincronizarRepartos(tx, orderId)
 
     // Update order totals. El recorte de arriba ya garantiza newDiscountAmount <= subtotal;
     // el clamp de la mercancía es cinturón-y-tirantes.
@@ -388,7 +407,10 @@ export async function applyCouponCode(
     const newTotal = computeStoredOrderTotal({
       subtotal,
       discountAmount: newDiscountAmount,
-      taxAmount: order.taxAmount,
+      // P12: el IVA entra con la regla compartida (contrato y estado de la relectura bajo el candado).
+      contratoDePrecio: order.contratoDePrecio,
+      taxAmount: new Prisma.Decimal(order.taxAmount).plus(sincronizado.impuestoDevuelto),
+      status: order.status,
       serviceChargeAmount: newServiceChargeAmount,
       tipAmount: order.tipAmount,
     }).toNumber()

@@ -1192,6 +1192,9 @@ async function settleOrderForConfirmedCryptoPayment(
             subtotal: true,
             discountAmount: true,
             serviceChargeAmount: true,
+            // P12: el IVA que va aparte entra al saldo con la regla compartida (contrato, impuesto y estado).
+            contratoDePrecio: true,
+            taxAmount: true,
             paidAmount: true,
             remainingBalance: true,
             completedAt: true,

@@ -402,6 +402,31 @@ describe('recordOrderPayment — el posting nace atómico con la transición a P
     expect(createSalePostingInTxMock).toHaveBeenCalled()
   })
 
+  /**
+   * Tarea 6d (I-1): en una integrada (POS con `externalId`) el dueño del cierre es su POS. `recordOrderPayment` decide con
+   * `cierreDelCobroSaldaLaCuenta` —el mismo criterio que la reasignación de cobros— y no la salda en su transacción. Sin esta
+   * prueba, reemplazar ese criterio por `true` dejaba verdes todas las suites `payment.*`.
+   */
+  it('🔴 una integrada (POS con externalId) registra el cobro SIN saldarse en la transacción: ni PAID ni vale de inventario', async () => {
+    const orden = makeOrder({ source: 'POS', externalId: 'sr-123' })
+    ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(orden)
+
+    await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, paymentData, 'user-1')
+
+    expect(prisma.payment.create).toHaveBeenCalledTimes(1)
+    expect(createSalePostingInTxMock).not.toHaveBeenCalled()
+    const aPagada = (prisma.order.update as jest.Mock).mock.calls.filter(([a]: any[]) => a?.data?.paymentStatus === 'PAID')
+    expect(aPagada).toEqual([])
+  })
+
+  it('control — la MISMA cuenta nativa (sin externalId) sí se salda en la transacción del cobro: PAID y vale', async () => {
+    await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, paymentData, 'user-1')
+
+    expect(createSalePostingInTxMock).toHaveBeenCalled()
+    const aPagada = (prisma.order.update as jest.Mock).mock.calls.filter(([a]: any[]) => a?.data?.paymentStatus === 'PAID')
+    expect(aPagada).toHaveLength(1)
+  })
+
   it('si la transición a PAID falla, NO queda un posting huérfano', async () => {
     ;(prisma.order.update as jest.Mock).mockRejectedValue(new Error('deadlock en el update de la orden'))
 
