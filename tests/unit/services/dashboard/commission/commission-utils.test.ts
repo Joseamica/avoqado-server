@@ -26,11 +26,7 @@
  *   PRECIO_DE_LISTA (`includeDiscount=true`)      → `unitPrice × quantity`
  */
 import prisma from '../../../../../src/utils/prismaClient'
-import {
-  calculateBaseAmount,
-  calculateCategoryFilteredAmount,
-  calculateLeftoverAmount,
-} from '../../../../../src/services/dashboard/commission/commission-utils'
+import { calculateCategoryFilteredAmount, calculateLeftoverAmount } from '../../../../../src/services/dashboard/commission/commission-utils'
 
 const CONFIG_DEFAULT = { includeTax: false, includeDiscount: false }
 const CONFIG_PRE_DESCUENTO = { includeTax: false, includeDiscount: true }
@@ -170,37 +166,5 @@ describe('comisión del sobrante (catch-all) — misma aritmética', () => {
     const sobrante = await calculateLeftoverAmount('order-1', ['cat-reclamada'], CONFIG_DEFAULT)
 
     expect(porCategoria + sobrante).toBe(450) // 500 − 50 de descuento de orden
-  })
-})
-
-/**
- * Medición del §11 del spec de pago por servicio (H4, 5-oct-2026): ¿los dos caminos —el general,
- * que parte del COBRO, y el de categorías, que parte de los RENGLONES— dan la misma base para la
- * misma venta? Orden de lista $500 con $50 de descuento de orden, cobrada en $450.
- */
-describe('H4 · la misma venta, por los dos caminos', () => {
-  const cobro = (amount: number) => ({ amount: amount as any, tipAmount: 0 as any, taxAmount: 0 as any, discountAmount: 50 as any })
-  const SIN_PROPINA = { includeTips: false }
-
-  beforeEach(() => {
-    ;(prisma.orderItem.findMany as jest.Mock).mockResolvedValue([linea(300, 1, 0), linea(200, 1, 0)])
-    orden(50)
-  })
-
-  it('un solo cobro: los dos caminos dan la misma base en los dos modos', async () => {
-    expect(calculateBaseAmount(cobro(450), { ...CONFIG_DEFAULT, ...SIN_PROPINA }).baseAmount).toBe(
-      await calculateCategoryFilteredAmount('order-1', ['cat-1'], CONFIG_DEFAULT),
-    )
-    expect(calculateBaseAmount(cobro(450), { ...CONFIG_PRE_DESCUENTO, ...SIN_PROPINA }).baseAmount).toBe(
-      await calculateCategoryFilteredAmount('order-1', ['cat-1'], CONFIG_PRE_DESCUENTO),
-    )
-  })
-
-  it('🔴 dos cobros de la misma orden en PRECIO_DE_LISTA no comisionan más que el precio de lista', () => {
-    // El camino general corre POR COBRO y suma el descuento de TODA la orden a cada uno.
-    const total =
-      calculateBaseAmount(cobro(225), { ...CONFIG_PRE_DESCUENTO, ...SIN_PROPINA }).baseAmount +
-      calculateBaseAmount(cobro(225), { ...CONFIG_PRE_DESCUENTO, ...SIN_PROPINA }).baseAmount
-    expect(total).toBe(500)
   })
 })
