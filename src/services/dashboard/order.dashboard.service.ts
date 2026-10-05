@@ -22,6 +22,7 @@ import { assertOrderCancellableUnderLock, avisarOrdenCancelada } from '../shared
 // misma que usan los cuatro canales de cobro, para que la pantalla no pueda
 // contradecir al saldo persistido.
 import { summarizeRefunds } from '../shared/orderBalance'
+import { rechazarCobroNuevoSobreCancelada } from '../shared/cuentaCancelada'
 import { retirarComandasDeVentaAnulada } from '../kds/kitchenTicketAuthoring.service'
 
 /**
@@ -738,9 +739,13 @@ export async function settleOrder(
     await lockExistingOrderForPayment(tx, { venueId, orderId })
     const fresh = await tx.order.findFirst({
       where: { id: orderId, venueId },
-      select: { total: true, remainingBalance: true, tipAmount: true, paymentStatus: true, version: true },
+      select: { total: true, remainingBalance: true, tipAmount: true, paymentStatus: true, version: true, status: true },
     })
     if (!fresh) return null
+    // 🔴 Founder 3-oct / Codex r13 #3: «liquidar» crea en este momento un efectivo a nombre del negocio: es un cobro NUEVO. Sobre una
+    // cancelada o borrada ⇒ 400 con el texto del founder, dentro de la transacción y bajo el candado: nada se escribe. (No hay llave
+    // que resolver: la liquidación no la recibe.)
+    rechazarCobroNuevoSobreCancelada(fresh.status)
     const freshRemaining = Number(fresh.remainingBalance)
     if (freshRemaining <= 0 || fresh.paymentStatus === 'PAID') return null
 

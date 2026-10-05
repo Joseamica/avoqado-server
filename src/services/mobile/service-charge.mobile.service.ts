@@ -19,6 +19,7 @@ import { Prisma } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
+import { esOrdenImportada, rechazarSiEsImportada } from '../shared/ordenImportada'
 
 /** Resuelve StaffVenue.id: appliedById NO acepta un Staff.id (P2003). */
 async function resolveStaffVenueId(tx: Prisma.TransactionClient, venueId: string, staffId?: string): Promise<string | undefined> {
@@ -67,7 +68,7 @@ async function requireOpenOrder(tx: Prisma.TransactionClient, venueId: string, o
   if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Orden no encontrada')
   const order = await tx.order.findFirst({
     where: { id: orderId, venueId },
-    select: { id: true, subtotal: true, discountAmount: true, paymentStatus: true, paidAmount: true, covers: true },
+    select: { id: true, subtotal: true, discountAmount: true, paymentStatus: true, paidAmount: true, covers: true, originSystem: true },
   })
   if (!order) throw new NotFoundError('Orden no encontrada')
   if (order.paymentStatus === 'PAID' || order.paymentStatus === 'PARTIAL') {
@@ -87,6 +88,9 @@ export async function applyServiceCharge(venueId: string, orderId: string, servi
   const { charge, amount, totals } = await prisma
     .$transaction(async tx => {
       const order = await requireOpenOrder(tx, venueId, orderId)
+      // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
+      // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
+      rechazarSiEsImportada(order)
 
       const charge = await tx.serviceCharge.findFirst({ where: { id: serviceChargeId, venueId, active: true } })
       if (!charge) throw new NotFoundError('Cobro por servicio no encontrado')
@@ -137,6 +141,9 @@ export async function applyServiceCharge(venueId: string, orderId: string, servi
 export async function removeServiceCharge(venueId: string, orderId: string, orderServiceChargeId: string, staffId?: string) {
   const { row, totals } = await prisma.$transaction(async tx => {
     const order = await requireOpenOrder(tx, venueId, orderId)
+    // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
+    // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
+    rechazarSiEsImportada(order)
 
     const row = await tx.orderServiceCharge.findFirst({ where: { id: orderServiceChargeId, orderId } })
     if (!row) throw new NotFoundError('Cobro no aplicado a esta orden')
@@ -181,10 +188,13 @@ export async function syncAutomaticServiceCharges(venueId: string, orderId: stri
 async function syncAutomaticServiceChargesInTransaction(tx: Prisma.TransactionClient, venueId: string, orderId: string) {
   const order = await tx.order.findFirst({
     where: { id: orderId, venueId },
-    select: { id: true, subtotal: true, discountAmount: true, paymentStatus: true, paidAmount: true, covers: true },
+    select: { id: true, subtotal: true, discountAmount: true, paymentStatus: true, paidAmount: true, covers: true, originSystem: true },
   })
   if (!order) return null
   if (order.paymentStatus === 'PAID' || order.paymentStatus === 'PARTIAL') return null
+  // R11 (Codex r5): lo automático no truena sobre una importada de SoftRestaurant, pero tampoco la rearma (su cabecera manda y sus
+  // renglones traen el IVA dentro): como cuando la regla no aplica.
+  if (esOrdenImportada(order)) return null
 
   const covers = order.covers ?? 0
   const rules = await tx.serviceCharge.findMany({

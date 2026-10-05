@@ -400,6 +400,8 @@ export function calculateBaseAmount(
     tipAmount?: Decimal | null
     taxAmount?: Decimal | null
     discountAmount?: Decimal | null
+    /** `Order.subtotal`: tope del descuento EFECTIVO de mercancía (la cabecera nominal puede superarlo). */
+    subtotal?: Decimal | null
   },
   config: {
     includeTips: boolean
@@ -410,7 +412,11 @@ export function calculateBaseAmount(
   const paidAmount = decimalToNumber(payment.amount)
   const tipAmount = decimalToNumber(payment.tipAmount)
   const taxAmount = decimalToNumber(payment.taxAmount)
-  const discountAmount = decimalToNumber(payment.discountAmount)
+  // 🔴 Desde B2/B2c `Order.discountAmount` es la Σ de las filas, SIN tope: una cortesía encima de un fijo de cuenta la deja
+  // mayor que el subtotal (el cobro topa la mercancía en 0). Para reconstruir el precio de lista sólo cuenta lo que de verdad
+  // se descontó de la mercancía, min(cabecera, subtotal); con la nominal, «lista» comisionaría una venta que nunca existió.
+  const nominalDiscount = decimalToNumber(payment.discountAmount)
+  const discountAmount = payment.subtotal == null ? nominalDiscount : Math.min(nominalDiscount, decimalToNumber(payment.subtotal))
 
   let baseAmount = commissionableAmount([{ gross: paidAmount + discountAmount, lineDiscount: discountAmount, tax: taxAmount }], {
     base: resolveCommissionBase(config),

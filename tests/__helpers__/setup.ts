@@ -474,6 +474,9 @@ prismaMock.externalBusyBlock.findFirst.mockResolvedValue(null)
 // no in-flight migrations so the result is iterable and the "Migrando…" badge is off.
 prismaMock.tpvCommandQueue.findMany.mockResolvedValue([])
 prismaMock.orderItem.findMany.mockResolvedValue([])
+// IVA por producto B2: los escritores de descuentos sincronizan los repartos leyendo las filas de la orden
+// (`sincronizarRepartos`). Mismo patrón que `orderItem`: una orden sin filas, salvo que la prueba diga otra cosa.
+prismaMock.orderDiscount.findMany.mockResolvedValue([])
 prismaMock.inventoryPosting.create.mockResolvedValue({ id: 'posting-default', status: 'PENDING' })
 prismaMock.inventoryPosting.updateMany.mockResolvedValue({ count: 0 })
 // IVA por producto: por default el flag está APAGADO (ningún VenueIvaPorProducto sembrado) —

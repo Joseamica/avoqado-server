@@ -13,6 +13,7 @@ import { BadRequestError } from '@/errors/AppError'
 import * as tableService from '@/services/tpv/table.tpv.service'
 import * as orderTpvService from '@/services/tpv/order.tpv.service'
 import * as orderMobileService from '@/services/mobile/order.mobile.service'
+import * as compItemService from '@/services/mobile/comp-item.mobile.service'
 import * as promotionService from '@/services/promotions/promotion.service'
 import * as featureAccess from '@/middlewares/checkFeatureAccess.middleware'
 import * as tableOwnership from '@/middlewares/checkTableOwnership.middleware'
@@ -553,6 +554,45 @@ describe('sync.mobile.service processIntents', () => {
     expect(acks[0]).toMatchObject({ status: 'RETRY', errorCode: 'P2028' })
   })
 
+  // B2c (control de regresión): `compWholeOrder` ahora recorta descuentos de renglón y sincroniza repartos bajo el candado; un
+  // transitorio de esa transacción sale tal cual del escritor y el reducer lo deja en RETRY, nunca en cuarentena.
+  it('control — COMP_ORDER cuyo escritor truena con P2028 → RETRY, nunca cuarentena', async () => {
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 2, tableId: 't1', servedById: STAFF })
+    ;(compItemService.compWholeOrder as jest.Mock).mockRejectedValueOnce(
+      Object.assign(new Error('Transaction API error'), { code: 'P2028' }),
+    )
+    const acks = await processIntents(
+      baseParams([{ id: 'i-comp-p2028', type: 'COMP_ORDER', payload: { orderId: 'order-12', reason: 'x' } }]),
+    )
+    expect(compItemService.compWholeOrder).toHaveBeenCalled()
+    expect(acks[0]).toMatchObject({ status: 'RETRY', errorCode: 'P2028' })
+  })
+
+  // B2 (control de regresión — pasan hoy: los servicios están mockeados y no ven la sincronización de repartos). Un error
+  // transitorio de base que salga del escritor llega aquí tal cual y queda en RETRY; el sabotaje «P2028 ⇒ rechazo
+  // permanente» lo cazan `mobileWriters.atomic.test.ts` («…propaga el P2028…») y `repartoDescuentoTx.test.ts`.
+  it('control — APPLY_DISCOUNT cuyo escritor truena con P2028 (p. ej. al sincronizar repartos) → RETRY, nunca cuarentena', async () => {
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 2, tableId: 't1', servedById: STAFF })
+    ;(orderMobileService.applyOrderDiscount as jest.Mock).mockRejectedValueOnce(
+      Object.assign(new Error('Transaction API error'), { code: 'P2028' }),
+    )
+    const acks = await processIntents(
+      baseParams([{ id: 'i-desc-p2028', type: 'APPLY_DISCOUNT', payload: { orderId: 'order-12', discountId: 'disc-1' } }]),
+    )
+    expect(acks[0]).toMatchObject({ status: 'RETRY', errorCode: 'P2028' })
+  })
+
+  it('control — ADD_ITEMS cuyo escritor truena con P2034 (conflicto de transacción) → RETRY, nunca cuarentena', async () => {
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 5, status: 'PENDING' })
+    ;(orderTpvService.addItemsToOrder as jest.Mock).mockRejectedValueOnce(
+      Object.assign(new Error('Transaction failed due to a write conflict or a deadlock'), { code: 'P2034' }),
+    )
+    const acks = await processIntents(
+      baseParams([{ id: 'i-add-p2034', type: 'ADD_ITEMS', payload: { orderId: 'order-1', items: [{ productId: 'p1', quantity: 1 }] } }]),
+    )
+    expect(acks[0]).toMatchObject({ status: 'RETRY', errorCode: 'P2034' })
+  })
+
   // Auditoría Fable 11-sep (P3-4): un CANCEL_ORDER o MERGE_ORDERS bloqueado por un cobro de terminal vivo va a
   // cuarentena CON el `requestId` que lo bloquea (aditivo). Sin `details`, el POS no sabía qué cobro esperar.
   it('CANCEL_ORDER bloqueado por un cobro vivo → REJECTED con errorCode y details (requestId)', async () => {
@@ -583,6 +623,35 @@ describe('sync.mobile.service processIntents', () => {
       message: 'Cannot cancel a paid order',
     })
   })
+
+  // R11 (B2b T6c, Codex r5): una cuenta importada de SoftRestaurant no se rearma desde Avoqado. Sin red el rechazo es DEFINITIVO
+  // (cuarentena con la causa), nunca RETRY: reintentarlo no lo arreglaría jamás y cortaría el FIFO del aparato para siempre.
+  it.each([
+    ['APPLY_DISCOUNT', () => orderMobileService.applyOrderDiscount, { orderId: 'order-12', discountId: 'disc-1' }],
+    ['MERGE_ORDERS', () => orderMobileService.mergeOrders, { orderId: 'order-12', sourceOrderId: 'order-13' }],
+    ['ADD_ITEMS', () => orderTpvService.addItemsToOrder, { orderId: 'order-12', items: [{ productId: 'p1', quantity: 1 }] }],
+  ] as const)(
+    'control — R11: %s sobre una importada → REJECTED ORDEN_IMPORTADA_DEL_POS con la causa (no RETRY)',
+    async (type, escritor, payload) => {
+      ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 2, status: 'PENDING', tableId: 't1', servedById: STAFF })
+      const { rechazarSiEsImportada, MENSAJE_ORDEN_IMPORTADA } = jest.requireActual('@/services/shared/ordenImportada')
+      let rechazo: unknown
+      try {
+        rechazarSiEsImportada({ originSystem: 'POS_SOFTRESTAURANT' })
+      } catch (e) {
+        rechazo = e
+      }
+      ;(escritor() as jest.Mock).mockRejectedValueOnce(rechazo)
+      const acks = await processIntents(baseParams([{ id: `i-r11-${type}`, type, payload }]))
+      expect(acks[0]).toEqual({
+        id: `i-r11-${type}`,
+        status: 'REJECTED',
+        errorCode: 'ORDEN_IMPORTADA_DEL_POS',
+        message: MENSAJE_ORDEN_IMPORTADA,
+        details: { originSystem: 'POS_SOFTRESTAURANT' },
+      })
+    },
+  )
 
   it('UPDATE_DETAILS y CANCEL_ORDER delegan en el mismo servicio que online', async () => {
     ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 2, tableId: 't1', servedById: STAFF })
@@ -1079,6 +1148,26 @@ describe('ADD_ITEMS con promoción — clasificación tras el candado de la orde
     expect(prisma.posSyncIntent.delete).toHaveBeenCalled()
     expect(prisma.posSyncIntent.update).not.toHaveBeenCalled()
     expect(orderMobileService.applyOrderDiscount).not.toHaveBeenCalled()
+  })
+
+  // El reducer no cambia (hoy ya deja salir lo que lance la compensación): la mitad roja de N5 está en removeIntentPromotions.
+  it('control — Codex r2 N5: ronda mixta rechazada cuya compensación recibe un P2028 ⇒ RETRY (no REJECTED); el reintento la termina', async () => {
+    ;(promotionService.applyPromotionToOrder as jest.Mock).mockResolvedValue({ orderPromotionId: 'op-1', created: true })
+    ;(orderTpvService.addItemsToOrder as jest.Mock).mockRejectedValue(new BadRequestError('Producto inactivo'))
+    ;(promotionService.removeIntentPromotions as jest.Mock)
+      .mockRejectedValueOnce(Object.assign(new Error('Transaction API error'), { code: 'P2028' }))
+      .mockResolvedValueOnce(1)
+    const ronda = { id: 'i-mixta', type: 'ADD_ITEMS', payload: { orderId: 'order-1', items: [promo, { productId: 'p-1', quantity: 1 }] } }
+
+    const [primero] = await processIntents(baseParams([ronda]))
+    expect(primero).toMatchObject({ id: 'i-mixta', status: 'RETRY', errorCode: 'P2028' })
+    expect(prisma.posSyncIntent.update).not.toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: 'REJECTED' }) }),
+    )
+
+    const [segundo] = await processIntents(baseParams([ronda]))
+    expect(segundo).toMatchObject({ id: 'i-mixta', status: 'REJECTED' })
+    expect(promotionService.removeIntentPromotions).toHaveBeenCalledTimes(2)
   })
 })
 

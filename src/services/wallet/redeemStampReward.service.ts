@@ -5,6 +5,9 @@ import { recalculateOrderTotals } from '../mobile/comp-item.mobile.service'
 import { logAction } from '../dashboard/activity-log.service'
 import { notifyCustomerPassUpdated } from './notifyPassUpdated.service'
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
+import { rechazarSiEsImportada } from '../shared/ordenImportada'
+import { aCentavos, capacidadRestante, comoJson, leerReparto, nuevoRepartoDeCuenta, nuevoRepartoDirigido } from '../shared/repartoDescuento'
+import { RENGLON_PARA_REPARTO_SELECT, conservarDescuentoHistorico, filasDeLaOrden } from '../shared/repartoDescuentoTx'
 
 /**
  * Canjear el premio de una cartilla llena.
@@ -33,34 +36,47 @@ function money(n: number): number {
  * que ya se hizo en el canje de puntos (auditoría 2026-07-18).
  */
 async function calcularDescuento(
-  db: Pick<Prisma.TransactionClient, 'orderItem'>,
+  db: Prisma.TransactionClient,
   order: { id: string; subtotal: Prisma.Decimal | number; discountAmount: Prisma.Decimal | number | null },
   reward: { rewardType: StampRewardType; rewardValue: Prisma.Decimal | number | null },
-): Promise<number> {
+): Promise<{ monto: number; renglonPremiadoId: string | null }> {
   const base = Math.max(0, Number(order.subtotal) - Number(order.discountAmount ?? 0))
 
   if (reward.rewardType === StampRewardType.PERCENTAGE) {
     // 🔴 El porcentaje se aplica a la cuenta. Tratar el 20 como pesos cobra de menos
     // en una cuenta grande y de MÁS en una chica, y pasa desapercibido hasta el corte.
-    return money((base * Number(reward.rewardValue ?? 0)) / 100)
+    return { monto: money((base * Number(reward.rewardValue ?? 0)) / 100), renglonPremiadoId: null }
   }
 
   if (reward.rewardType === StampRewardType.FREE_PRODUCT) {
-    // 🔴 Se descuenta el artículo MÁS CARO de la cuenta, no el precio de catálogo del
-    // producto prometido. Decisión del founder (D10), tomada de Square: si el cliente
-    // pide algo más caro que su café gratis, no paga la diferencia. Con el precio de
-    // catálogo terminaría pagando parte de un premio que ya se ganó.
-    // Las líneas que se leen bajo el candado de la orden, con la MISMA transacción: un artículo agregado mientras el
-    // canje esperaba también cuenta.
-    const items = await db.orderItem.findMany({
+    // 🔴 P11 (founder, 2-oct; Square: «maximize the reward value in the buyer's favor»): UNA pieza del artículo que más le
+    // regala al cliente, sólo entre los renglones que todavía cobran algo, y nunca más de lo que ese renglón tiene disponible
+    // (su aportación —que ya descuenta lo que vive en el renglón, el mismo importe que duplica una fila espejo: el espejo no
+    // vuelve a consumir lugar— menos lo que ya le dieron las filas DIRIGIDAS). Antes tomaba el `unitPrice` más alto aunque fuera una cortesía
+    // ($0) o un artículo por peso que vale menos que su precio por kilo. Empate ⇒ el de mayor precio, luego el de id menor.
+    // Renglones y filas se leen bajo el candado de la orden, con la MISMA transacción: un artículo agregado mientras el
+    // canje esperaba también cuenta. Todo en centavos enteros.
+    const renglones = await db.orderItem.findMany({
       where: { orderId: order.id },
-      select: { unitPrice: true },
+      select: { ...RENGLON_PARA_REPARTO_SELECT, unitPrice: true },
     })
-    const masCaro = items.reduce((max, it) => Math.max(max, Number(it.unitPrice)), 0)
-    return money(masCaro)
+    // Las filas de CUENTA no restan: el cálculo canónico las re-reparte DESPUÉS de las dirigidas (pasos 3-4), así que no le
+    // quitan lugar al premio. Restarlas hacía depender el premio del orden (cuenta de $10 antes ⇒ $95 en vez de $100). El tope
+    // `min(monto, base)` del canje sigue protegiendo el total.
+    const dirigidas = (await filasDeLaOrden(db, order.id)).filter(f => leerReparto(f.reparto)?.alcance === 'DIRIGIDO')
+    const capacidad = capacidadRestante(renglones, dirigidas)
+    const [elegido] = renglones
+      .map(r => {
+        const precio = aCentavos(r.unitPrice)
+        return { id: r.id, precio, premio: Math.min(precio, capacidad.get(r.id) ?? 0) }
+      })
+      .filter(c => c.premio > 0)
+      .sort((a, b) => b.premio - a.premio || b.precio - a.precio || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+    // Sin renglón que todavía cobre, 0: la guarda del canje rechaza y el premio NO se quema.
+    return { monto: elegido ? elegido.premio / 100 : 0, renglonPremiadoId: elegido?.id ?? null }
   }
 
-  return money(Number(reward.rewardValue ?? 0))
+  return { monto: money(Number(reward.rewardValue ?? 0)), renglonPremiadoId: null }
 }
 
 export interface RedeemStampRewardOptions {
@@ -82,10 +98,21 @@ export async function redeemStampReward(
     if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Orden no encontrada')
     const order = await tx.order.findFirst({
       where: { id: orderId, venueId },
-      select: { id: true, customerId: true, subtotal: true, discountAmount: true, paymentStatus: true, paidAmount: true },
+      select: {
+        id: true,
+        customerId: true,
+        subtotal: true,
+        discountAmount: true,
+        paymentStatus: true,
+        paidAmount: true,
+        originSystem: true,
+      },
     })
 
     if (!order) throw new NotFoundError('Orden no encontrada')
+    // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
+    // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
+    rechazarSiEsImportada(order)
     // 🔴 El dinero ya entró: meter un descuento después deja el cobro y la cuenta
     // discrepando, y el corte no cuadra al cerrar el turno.
     if (order.paymentStatus === 'PAID' || order.paymentStatus === 'PARTIAL') {
@@ -115,7 +142,8 @@ export async function redeemStampReward(
     const base = Math.max(0, Number(order.subtotal) - Number(order.discountAmount ?? 0))
     // 🔴 Tope contra la BASE. Sin él, un premio de $500 sobre una cuenta de $250 deja
     // la orden en negativo: el negocio no sólo regala el consumo, queda debiendo.
-    const discountAmount = Math.min(await calcularDescuento(tx, order, reward), base)
+    const calculo = await calcularDescuento(tx, order, reward)
+    const discountAmount = Math.min(calculo.monto, base)
 
     // 🔴 Y sobre una cuenta en cero NO se quema. Canjear ahí gastaría el premio sin
     // darle nada al cliente: se pierde un café gratis ya ganado, y sin forma de
@@ -136,6 +164,8 @@ export async function redeemStampReward(
       throw new BadRequestError('Este premio ya fue canjeado.')
     }
 
+    // Codex r1 P1: lo que la cabecera trae fuera de toda fila (orden anterior a B2…) queda en su fila antes de crear ésta.
+    await conservarDescuentoHistorico(tx, order.id, order.discountAmount)
     const descuento = await tx.orderDiscount.create({
       data: {
         orderId: order.id,
@@ -144,6 +174,13 @@ export async function redeemStampReward(
         value: new Prisma.Decimal(discountAmount),
         amount: new Prisma.Decimal(discountAmount),
         isManual: true,
+        // B2: FREE_PRODUCT dirigido al renglón premiado (cabe por construcción: P11 ya lo topó a lo disponible); % y fijo,
+        // de CUENTA. Los centavos finales los pone el recálculo de abajo.
+        reparto: comoJson(
+          calculo.renglonPremiadoId
+            ? nuevoRepartoDirigido(discountAmount, { [calculo.renglonPremiadoId]: discountAmount }, { espejo: false })
+            : nuevoRepartoDeCuenta({ conPromociones: true }),
+        ),
       },
     })
 

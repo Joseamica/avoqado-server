@@ -23,9 +23,12 @@ import { mapDigitalReceiptResponse, resolveAutofacturaAvailable, type OrderInven
 import {
   buildItemDiscountRow,
   calculateDiscountPesos,
+  filaDeDescuentoDeCuenta,
   validateDiscountActive,
   validateDiscountScopeForItem,
 } from '../shared/discount.service'
+import { comoJson, nuevoRepartoDeCuenta } from '../shared/repartoDescuento'
+import { conservarDescuentoHistorico, revertirDescuentoDelRenglon, sincronizarRepartos } from '../shared/repartoDescuentoTx'
 import { applyPromotionToOrder } from '../promotions/promotion.service'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
 import { paymentCountsAsDrawerCash } from '../shared/tenderSemantics'
@@ -42,7 +45,17 @@ import {
 // La aritmética canónica del saldo: UNA sola definición de "cuánto se lleva
 // pagado y cuánto falta" para los cuatro caminos de cobro. Se extrajo de este
 // mismo archivo; volver a llamarla es lo que impide que se separen otra vez.
-import { computeOrderBalance, summarizeRefunds, type RefundState } from '../shared/orderBalance'
+import { claseDeEstado, computeOrderBalance, summarizeRefunds, type RefundState } from '../shared/orderBalance'
+import { rechazarSiEsImportada } from '../shared/ordenImportada'
+import {
+  CobroYaRegistrado,
+  assertIdempotentPaymentOrder,
+  cierreAutomaticoPermitido,
+  esCobroNuevo,
+  reabrirSiRecibeDinero,
+  rechazarCobroNuevoSobreCancelada,
+  salirSiLaLlaveYaTienePago,
+} from '../shared/cuentaCancelada'
 import { debeMarcarCocina } from '../kds/kitchenDisplayStations'
 import { armarComandasTrasCommit, retirarComandasDeVentaAnulada } from '../kds/kitchenTicketAuthoring.service'
 
@@ -949,30 +962,41 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
       // which reads OrderDiscount, also reflects mobile-applied item
       // discounts. One row per discounted item (same shape as TPV).
       const discountedItems = createdOrder.items.filter((item: any) => item.appliedDiscountId)
-      if (discountedItems.length > 0) {
-        const appliedByStaffVenue = validatedStaffId
+      const appliedByStaffVenue =
+        validatedStaffId && (discountedItems.length > 0 || (input.discount ?? 0) > 0)
           ? await tx.staffVenue.findFirst({
               where: { staffId: validatedStaffId, venueId },
               select: { id: true },
             })
           : null
-
-        for (const item of discountedItems) {
-          const discount = discounts.find(d => d.id === item.appliedDiscountId)
-          if (!discount) continue
-          await tx.orderDiscount.create({
-            data: buildItemDiscountRow({
-              orderId: createdOrder.id,
-              itemId: item.id,
-              discount,
-              discountAmountPesos: Number(item.discountAmount),
-              appliedById: appliedByStaffVenue?.id || null,
-            }),
-          })
-        }
+      for (const item of discountedItems) {
+        const discount = discounts.find(d => d.id === item.appliedDiscountId)
+        if (!discount) continue
+        await tx.orderDiscount.create({
+          data: buildItemDiscountRow({
+            orderId: createdOrder.id,
+            itemId: item.id,
+            discount,
+            discountAmountPesos: Number(item.discountAmount),
+            appliedById: appliedByStaffVenue?.id || null,
+          }),
+        })
       }
 
-      if (promocionesUnicas.length === 0) return { order: createdOrder, promotionTotals: null }
+      if (promocionesUnicas.length === 0) {
+        // B2 (founder, 27-sep): el descuento de CUENTA es su propia fila; la cabecera ya lo trae (`discountDecimal`).
+        if (orderLevelDiscountDecimal > 0) {
+          await tx.orderDiscount.create({
+            data: filaDeDescuentoDeCuenta({
+              orderId: createdOrder.id,
+              montoPesos: orderLevelDiscountDecimal,
+              appliedById: appliedByStaffVenue?.id ?? null,
+            }),
+          })
+          await sincronizarRepartos(tx, createdOrder.id)
+        }
+        return { order: createdOrder, promotionTotals: null }
+      }
 
       // Mismo servicio que usa el reducer offline (applyAddItems), con ESTA transacción: crea sus líneas, reparte el
       // descuento al centavo y recalcula los totales de la orden sin abrir otra transacción. Todo-o-nada: si la #2
@@ -1032,6 +1056,17 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
 
       const totalFinal = Math.round((Math.max(0, subtotalConPromociones - descuentoFinal) + serviceChargeAmount + tipDecimal) * 100) / 100
       const remainingFinal = Math.round(Math.max(0, totalFinal - Number(recalculada.paidAmount ?? 0)) * 100) / 100
+      // B2: la fila nace aquí, con el importe reafirmado contra el subtotal CON promociones, y se sincroniza sobre el combo.
+      if (descuentoDeOrdenFinal > 0) {
+        await tx.orderDiscount.create({
+          data: filaDeDescuentoDeCuenta({
+            orderId: createdOrder.id,
+            montoPesos: descuentoDeOrdenFinal,
+            appliedById: appliedByStaffVenue?.id ?? null,
+          }),
+        })
+        await sincronizarRepartos(tx, createdOrder.id)
+      }
       const reafirmada = await tx.order.update({
         where: { id: createdOrder.id },
         data: {
@@ -1451,9 +1486,12 @@ export async function applyOrderDiscount(venueId: string, orderId: string, disco
     if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Order not found')
     const order = await tx.order.findFirst({
       where: { id: orderId, venueId },
-      select: { id: true, paymentStatus: true, discountAmount: true, paidAmount: true, subtotal: true },
+      select: { id: true, paymentStatus: true, discountAmount: true, paidAmount: true, subtotal: true, originSystem: true },
     })
     if (!order) throw new NotFoundError('Order not found')
+    // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
+    // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
+    rechazarSiEsImportada(order)
     if (order.paymentStatus === 'PAID' || order.paymentStatus === 'PARTIAL') {
       throw new BadRequestError('No se puede descontar una orden ya pagada')
     }
@@ -1487,8 +1525,13 @@ export async function applyOrderDiscount(venueId: string, orderId: string, disco
     // discountEngine.service.ts.
     const remainingDiscountable = Math.max(0, subtotal - Number(order.discountAmount || 0))
     const rawAmount = discount.type === 'PERCENTAGE' ? Math.round(((subtotal * value) / 100) * 100) / 100 : Math.min(value, subtotal)
-    const amount = Math.min(rawAmount, remainingDiscountable)
+    // R6 (founder, 2-oct): el tope del catálogo vale al aplicar y, viajando en el reparto, al recalcular. Hoy el móvil lo
+    // ignoraba. Un tope que no es nulo cuenta, incluido 0 (Codex r1), igual que el cupón y el motor.
+    const tope = discount.type === 'PERCENTAGE' && discount.maxDiscountAmount != null ? Number(discount.maxDiscountAmount) : null
+    const amount = Math.min(rawAmount, tope ?? Infinity, remainingDiscountable)
 
+    // Codex r1 P1: lo que la cabecera trae fuera de toda fila (orden anterior a B2…) queda en su fila antes de crear ésta.
+    await conservarDescuentoHistorico(tx, orderId, order.discountAmount)
     const row = await tx.orderDiscount.create({
       data: {
         orderId,
@@ -1497,6 +1540,8 @@ export async function applyOrderDiscount(venueId: string, orderId: string, disco
         name: discount.name,
         value: discount.value,
         amount,
+        // Su recálculo, en esta misma tx, la sincroniza (y la vuelve regla de recálculo) respetando el tope.
+        reparto: comoJson(nuevoRepartoDeCuenta({ conPromociones: true, tope })),
       },
       select: { id: true, name: true, amount: true },
     })
@@ -1535,18 +1580,31 @@ export async function removeOrderDiscount(venueId: string, orderId: string, orde
     if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Order not found')
     const order = await tx.order.findFirst({
       where: { id: orderId, venueId },
-      select: { id: true, paymentStatus: true, paidAmount: true },
+      select: { id: true, paymentStatus: true, paidAmount: true, discountAmount: true, originSystem: true },
     })
     if (!order) throw new NotFoundError('Order not found')
+    // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
+    // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
+    rechazarSiEsImportada(order)
     if (order.paymentStatus === 'PAID' || order.paymentStatus === 'PARTIAL') {
       throw new BadRequestError('No se puede modificar una orden ya pagada')
     }
 
     const row = await tx.orderDiscount.findFirst({ where: { id: orderDiscountId, orderId } })
     if (!row) throw new NotFoundError('Descuento no aplicado a esta orden')
+    // R7-1 (ruling de B2 «al retirar un descuento, antes de borrarlo»): el recálculo de abajo es Σ filas, así que un resto de
+    // cabecera sin fila se perdería con ésta; se congela antes de devolver, revertir y borrar.
+    await conservarDescuentoHistorico(tx, orderId, order.discountAmount)
 
     const refunded = await refundLoyaltyForOrderDiscount(tx, venueId, row, staffId)
     const stamp = await refundStampRewardForOrderDiscount(tx, venueId, row)
+    // R3-2: si la fila era espejo, su renglón deja de traer el descuento; el recálculo de abajo sincroniza los repartos.
+    await revertirDescuentoDelRenglon(tx, orderId, row)
+    // D16 (Codex r1 #3): quitar una fila devuelve el impuesto que restó, igual que el motor. Una fila vieja del 16 % deja así
+    // de dejar la orden en impuesto negativo; una nueva IVA_APARTE recupera su impuesto. El recálculo de abajo no toca
+    // `taxAmount`; su sincronización mueve lo que cambie al re-repartir otras filas.
+    const impuestoDevuelto = new Prisma.Decimal(row.taxReduction ?? 0)
+    if (impuestoDevuelto.gt(0)) await tx.order.update({ where: { id: orderId }, data: { taxAmount: { increment: impuestoDevuelto } } })
     await tx.orderDiscount.delete({ where: { id: row.id } })
     const t = await recalculateOrderTotals(orderId, 0, Number(order.paidAmount || 0), tx)
     return { row, refund: refunded, stampRefund: stamp, totals: t }
@@ -1563,6 +1621,7 @@ export async function removeOrderDiscount(venueId: string, orderId: string, orde
       name: row.name,
       pointsRefunded: refund?.pointsRefunded ?? 0,
       stampRewardReturned: stampRefund?.rewardId ?? null,
+      taxReturned: Number(row.taxReduction ?? 0),
     },
   })
 
@@ -1608,12 +1667,16 @@ export async function splitOrderItems(venueId: string, orderId: string, itemIds:
         paidAmount: true,
         shiftId: true,
         contratoDePrecio: true,
+        originSystem: true,
         items: { select: { id: true, orderPromotionId: true } },
         orderDiscounts: { select: { id: true } },
         serviceCharges: { select: { id: true, isAutomatic: true } },
       },
     })
     if (!source) throw new NotFoundError('Order not found')
+    // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
+    // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
+    rechazarSiEsImportada(source)
     if (['COMPLETED', 'CANCELLED', 'DELETED'].includes(source.status)) {
       throw new BadRequestError('La cuenta ya está cerrada')
     }
@@ -1760,12 +1823,16 @@ export async function splitOrderBySeat(venueId: string, orderId: string, staffId
         paidAmount: true,
         shiftId: true,
         contratoDePrecio: true,
+        originSystem: true,
         items: { select: { id: true, seat: true } },
         orderDiscounts: { select: { id: true } },
         serviceCharges: { select: { id: true, isAutomatic: true } },
       },
     })
     if (!source) throw new NotFoundError('Order not found')
+    // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
+    // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
+    rechazarSiEsImportada(source)
     if (['COMPLETED', 'CANCELLED', 'DELETED'].includes(source.status)) {
       throw new BadRequestError('La cuenta ya está cerrada')
     }
@@ -1963,6 +2030,8 @@ export async function mergeOrders(venueId: string, targetOrderId: string, source
           id: true,
           specialRequests: true,
           contratoDePrecio: true,
+          originSystem: true,
+          taxAmount: true,
           _count: { select: { items: true } },
           orderDiscounts: { select: { id: true } },
           serviceCharges: { select: { id: true, isAutomatic: true } },
@@ -1975,11 +2044,15 @@ export async function mergeOrders(venueId: string, targetOrderId: string, source
           status: { notIn: ['COMPLETED', 'CANCELLED', 'DELETED'] },
           paymentStatus: { notIn: ['PAID', 'PARTIAL'] },
         },
-        select: { id: true, specialRequests: true, contratoDePrecio: true, paidAmount: true },
+        select: { id: true, specialRequests: true, contratoDePrecio: true, paidAmount: true, originSystem: true },
       })
       if (!freshSource || !freshTarget) {
         throw new BadRequestError('La cuenta cambió mientras se fusionaba — vuelve a intentar')
       }
+      // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; fusionarla (en
+      // cualquiera de los dos lados) rearmaría su dinero aquí y cobraría el IVA dos veces (P12). Se junta en el POS externo.
+      rechazarSiEsImportada(freshSource)
+      rechazarSiEsImportada(freshTarget)
       if (freshSource._count.items === 0) {
         throw new BadRequestError('La cuenta origen no tiene artículos')
       }
@@ -2006,6 +2079,10 @@ export async function mergeOrders(venueId: string, targetOrderId: string, source
       // los suyos por comensales en el recálculo.
       await tx.orderServiceCharge.deleteMany({ where: { orderId: source.id } })
 
+      // Codex r5 #3: el IVA aparte del origen viaja con sus renglones; el origen cancelado queda fiscalmente no cobrable. Sólo el
+      // positivo: un negativo viejo (el motor de antes de D16) no le baja la deuda al destino.
+      const impuestoDelOrigen = Prisma.Decimal.max(0, new Prisma.Decimal(freshSource.taxAmount))
+
       // El destino se queda con el contrato COMBINADO (spec v5, `combinarContratos`): si origen y
       // destino coinciden, se conserva; si difieren, pasa a DESCONOCIDO — la fusión NUNCA se
       // bloquea por esto. Las notas de cocina del origen, de paso, NO se pierden: se anexan.
@@ -2013,6 +2090,7 @@ export async function mergeOrders(venueId: string, targetOrderId: string, source
         where: { id: target.id },
         data: {
           contratoDePrecio: combinarContratos(freshTarget.contratoDePrecio, freshSource.contratoDePrecio),
+          ...(impuestoDelOrigen.gt(0) ? { taxAmount: { increment: impuestoDelOrigen } } : {}),
           ...(freshSource.specialRequests?.trim()
             ? { specialRequests: [freshTarget.specialRequests, freshSource.specialRequests].filter(Boolean).join(' · ') }
             : {}),
@@ -2027,6 +2105,7 @@ export async function mergeOrders(venueId: string, targetOrderId: string, source
           subtotal: 0,
           discountAmount: 0,
           serviceChargeAmount: 0,
+          taxAmount: 0,
           total: 0,
           // Los escritores con CAS de versión (anular, descontar, rondas) se enteran de que el origen cambió.
           version: { increment: 1 },
@@ -2128,9 +2207,13 @@ export interface CashPaymentInput {
   tenderTypeId?: string
   tenderRevision?: number
   /**
-   * `true` cuando la venta viene de la cola offline: ya ocurrió, así que se honra la
-   * revisión que el cajero vio al cobrar en vez de exigir la vigente. Lo pone el
-   * reducer (`sync.mobile.service`), NUNCA un cliente por HTTP.
+   * `true` cuando la venta viene de la cola offline: ya ocurrió. La ponen el reducer
+   * (`sync.mobile.service.ts`, intent `PAY_CASH`) y la cola HTTP de Android e iOS
+   * (`order.mobile.controller.ts`). Honra la revisión del tipo de pago que el cajero vio al
+   * cobrar en vez de exigir la vigente, y dice que el dinero ya se capturó: sobre una cuenta
+   * CANCELADA de Avoqado la reabre en vez de rechazarse (Tarea 6a). Es una declaración del
+   * cliente (R14 f): uno que mienta sólo consigue que su efectivo se registre y la cuenta se
+   * reabra, con rastro en `ORDER_REOPENED_BY_CAPTURED_PAYMENT`.
    */
   isOfflineReplay?: boolean
   /**
@@ -2226,15 +2309,6 @@ function pesosToCents(pesos: number): number {
  */
 function cambioDeReintento(pedidoCents: number, registrado: Prisma.Decimal | number | null | undefined): number {
   return Math.max(0, pedidoCents - pesosToCents(Number(registrado ?? 0)))
-}
-
-function assertIdempotentPaymentOrder(payment: { orderId?: string | null }, orderId: string): void {
-  if (payment.orderId && payment.orderId !== orderId) {
-    throw new ConflictError(
-      'La idempotencyKey ya pertenece a otra orden. Genera una llave nueva para este cobro.',
-      'IDEMPOTENCY_KEY_REUSED',
-    )
-  }
 }
 
 /**
@@ -2506,6 +2580,14 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
             subtotal: true,
             discountAmount: true,
             serviceChargeAmount: true,
+            // P12 (Codex r2, r5): el saldo suma el IVA que va aparte y una cancelada no lo debe; sin estas tres el cobro
+            // móvil daba por saldada con $100 una cuenta de $100 + $16.
+            status: true,
+            contratoDePrecio: true,
+            taxAmount: true,
+            // Tarea 6a: una cancelada de Avoqado se reabre con cualquier dinero ya capturado; una externa, sólo cuando hoy salía
+            // de CANCELADA (Codex r12 #5, r13 #1).
+            originSystem: true,
             version: true,
             areaTicketCode: true,
           },
@@ -2557,16 +2639,11 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
         // respuesta como `changeCents`. El pago manual del dashboard rechaza el
         // exceso con 400; aquí no se bloquea porque el dinero sí entró al cajón.
         //
-        // Con devoluciones previas el saldo NO revive (`orderBalance.ts`), pero un
-        // cobro nuevo sobre esa cuenta sí se registra (`payCashOrder.refund.test.ts`):
-        // lo devuelto se puede volver a cobrar. Por eso el tope es saldo + devuelto;
-        // sin devoluciones, es exactamente el saldo.
-        const saldoAntes = computeOrderBalance(fresh, previousPayments)
-        const saldoCents = Math.max(0, pesosToCents(saldoAntes.remainingBalance.plus(saldoAntes.refundedAmount).toNumber()))
-
         // Resolver la semántica ANTES de decidir si un exceso es cambio. Una
         // tarjeta/transferencia externa ya capturada no produjo efectivo para
         // devolver: recortarla escondería dinero real y rompería conciliación.
+        // (Tarea 6a: sube antes del saldo —sólo lee— porque la admisión de una cancelada
+        // también depende de si es efectivo de cajón.)
         const resolvedTender =
           input.tenderTypeId != null && input.tenderRevision != null
             ? await resolveTenderForCharge(
@@ -2587,6 +2664,53 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
           tenderTypeId: resolvedTender?.tenderTypeId ?? null,
           tenderCountsAsCash: resolvedTender?.tenderCountsAsCash ?? null,
         })
+
+        // 🔴 Founder 3-oct (núcleo del servidor; Codex r10 #2): el efectivo de cajón EN VIVO es un cobro NUEVO —la persona todavía
+        // puede no cobrar—: sobre una cancelada ⇒ 400 con el texto del founder. Lo ya capturado (la cola; en vivo, una tarjeta ajena
+        // o una transferencia ya hechas) nunca se rechaza por la cancelación: reabre una cuenta de Avoqado (una externa, sólo cuando
+        // hoy salía de CANCELADA; Codex r13 #1). El importe, como hoy (el recorte y el «ya está pagada» son defectos previos del plan
+        // de registro de cobros). Vales: su sesión decide.
+        const cobroNuevo = esCobroNuevo({ enVivo: !input.isOfflineReplay, efectivoDeCajon: countsAsDrawerCash })
+        if (cobroNuevo && claseDeEstado(fresh.status) === 'CANCELADA') {
+          // Codex r13 #2: antes del rechazo, la identidad del cobro otra vez, BAJO EL CANDADO. Si su llave ya tiene un Payment —el
+          // ganador de una carrera que la consulta rápida de arriba no vio—, sale por la red de la carrera (P2002, abajo).
+          await salirSiLaLlaveYaTienePago(tx, { venueId, orderId, idempotencyKey: input.idempotencyKey })
+          rechazarCobroNuevoSobreCancelada(fresh.status)
+        }
+        // Codex r13 #1: ¿lo cobrado cubre lo que la cuenta debe TAL COMO ESTÁ? Es lo que hoy decide el cierre. Con el importe bruto:
+        // el recorte al saldo (abajo) da el mismo `isFullyPaid`.
+        const cubreComoCancelada = computeOrderBalance(fresh, [
+          ...previousPayments,
+          { amount: amount / 100, tipAmount: tipDecimal, type: 'REGULAR' },
+        ]).isFullyPaid
+        // El `staffId` ya está validado contra el negocio (`validateStaffVenue`): la bitácora lo amarra por FK y un id inválido
+        // revertiría el cobro. Vales: lo que los excluye es la SESIÓN v7 (`lockedAreaCheckout`): su finalización decide y
+        // rechaza una orden cancelada (409 `CHECKOUT_ORDER_NOT_PAYABLE`, todo se revierte). NO `areaTicketCode`: ése sólo lo
+        // escriben los vales v6, que no tienen sesión y se cobran como cualquier cuenta (revisión de 6a-2, I-1).
+        const estado =
+          !cobroNuevo && !lockedAreaCheckout
+            ? await reabrirSiRecibeDinero(tx, {
+                venueId,
+                orderId,
+                status: fresh.status,
+                originSystem: fresh.originSystem,
+                cobrado: new Prisma.Decimal(amount + tip).dividedBy(100),
+                cubreComoCancelada,
+                canal: input.isOfflineReplay ? 'payCashOrder:cola' : 'payCashOrder:registro',
+                idempotencyKey: input.idempotencyKey ?? null,
+                staffId: effectiveStaffId ?? null,
+              })
+            : fresh.status
+        // La cuenta con el estado con el que RECIBE este dinero: los dos saldos y el cierre se calculan con él. La reapertura no toca
+        // `version`, así que la CAS de abajo sigue amarrada a la versión leída.
+        const cuenta = { ...fresh, status: estado }
+
+        // Con devoluciones previas el saldo NO revive (`orderBalance.ts`), pero un
+        // cobro nuevo sobre esa cuenta sí se registra (`payCashOrder.refund.test.ts`):
+        // lo devuelto se puede volver a cobrar. Por eso el tope es saldo + devuelto;
+        // sin devoluciones, es exactamente el saldo.
+        const saldoAntes = computeOrderBalance(cuenta, previousPayments)
+        const saldoCents = Math.max(0, pesosToCents(saldoAntes.remainingBalance.plus(saldoAntes.refundedAmount).toNumber()))
         const cambioCents = countsAsDrawerCash ? Math.max(0, amount - saldoCents) : 0
         const aplicadoCents = amount - cambioCents
         const amountDecimal = aplicadoCents / 100
@@ -2595,7 +2719,10 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
           throw new BadRequestError(`El tipo de pago "${resolvedTender.tenderLabel}" no acepta propina.`)
         }
 
-        const balance = computeOrderBalance(fresh, [...previousPayments, { amount: amountDecimal, tipAmount: tipDecimal, type: 'REGULAR' }])
+        const balance = computeOrderBalance(cuenta, [
+          ...previousPayments,
+          { amount: amountDecimal, tipAmount: tipDecimal, type: 'REGULAR' },
+        ])
 
         // No se BLOQUEA nada: el dinero es real y registrarlo siempre gana. Pero un
         // cobro que aterriza sobre una cuenta con devoluciones merece una mirada
@@ -2615,7 +2742,10 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
         const newTotal = balance.total.toNumber()
         const totalPaidIncludingTip = balance.paidAmount.toNumber()
         const remainingAfterPayment = balance.remainingBalance.toNumber()
-        const isFullyPaid = balance.isFullyPaid
+        // Founder 3-oct: una cancelada nunca queda saldada. Con lo que debía ya salió de CANCELADA arriba; aquí sólo llega cancelada
+        // la orden de una sesión de vales v7 (su finalización la rechaza y revierte todo) o una externa que no cubre (como hoy, no se
+        // cierra).
+        const isFullyPaid = balance.isFullyPaid && cierreAutomaticoPermitido(estado)
 
         // 4️⃣ TRANSICIÓN CONDICIONAL (CAS). `updateMany` con la versión leída: si otro
         //    dispositivo cobró entre la relectura y este write, PostgreSQL reevalúa el
@@ -2804,7 +2934,9 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
       // el findUnique de arriba (ninguna había commiteado aún), la segunda choca
       // en el índice único (P2002); la atrapamos y devolvemos el pago ganador —
       // nunca creamos un segundo Payment. ESTE CAMINO SE CONSERVA TAL CUAL.
-      if (err?.code === 'P2002' && input.idempotencyKey) {
+      // Codex r13 #2 (Tarea 6a): `CobroYaRegistrado` es el mismo caso visto ANTES de intentar crear —bajo el candado, la llave ya
+      // tenía su Payment—, así que sale por aquí y devuelve ese pago en vez de un 400 por una cuenta cancelada después.
+      if ((err?.code === 'P2002' || err instanceof CobroYaRegistrado) && input.idempotencyKey) {
         const winner = await prisma.payment.findUnique({
           where: { venueId_idempotencyKey: { venueId, idempotencyKey: input.idempotencyKey } },
           include: { receipts: true },
@@ -2829,6 +2961,17 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
             // arriba (previa a la transacción) quedó vieja.
             ...(await readOrderBalanceSnapshot(venueId, orderId)),
           }
+        }
+        // `CobroYaRegistrado` no es un AppError: sin esto saldría como 500. Bajo el candado el pago existía y ahora no se
+        // puede releer; el cliente reintenta con la MISMA llave y cae en el camino idempotente o en la regla de la cuenta.
+        if (err instanceof CobroYaRegistrado) {
+          logger.error('🚨 [ORDER.MOBILE] La llave tenía un pago bajo el candado y ya no se puede releer', {
+            venueId,
+            orderId,
+            paymentId: err.paymentId,
+            idempotencyKey: input.idempotencyKey,
+          })
+          throw new ConflictError('No se pudo confirmar el cobro con esta llave. Vuelve a intentar.', 'ORDER_PAYMENT_CONFLICT')
         }
       }
 

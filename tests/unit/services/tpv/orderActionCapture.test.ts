@@ -34,13 +34,22 @@ jest.mock('@/utils/prismaClient', () => {
       delete: jest.fn(),
       deleteMany: jest.fn(),
       update: jest.fn(),
+      // B2 (P2): `applyDiscount` crea su fila y sincroniza su reparto, que lee los renglones de la orden.
+      findMany: jest.fn(async () => []),
     },
     orderAction: {
       create: jest.fn(),
     },
     orderDiscount: {
-      findMany: jest.fn(),
+      findMany: jest.fn(async () => []),
+      create: jest.fn(async () => ({})),
+      update: jest.fn(),
+      delete: jest.fn(),
     },
+    // B2c T4 (P5): la cortesía de la terminal crea su fila espejo con quien la otorga (StaffVenue) y el recorte puede retirar filas.
+    staffVenue: { findFirst: jest.fn(async () => null) },
+    // Tarea 7a: retirar una fila dirigida busca su premio de cartilla.
+    stampReward: { findFirst: jest.fn(async () => null) },
     orderServiceCharge: {
       findMany: jest.fn(),
       update: jest.fn(),
@@ -252,6 +261,7 @@ describe('ActivityLog dual-write in order.tpv.service', () => {
           isCortesia: true,
           cortesiaReason: 'Food quality issue',
           discountAmount: order.items[0].total, // full line total, gross unchanged
+          appliedDiscountId: null, // B2c P5: el recorte retiró su espejo
         },
       })
       // OrderItem.total must NOT appear in the update payload — zeroing it
@@ -274,11 +284,11 @@ describe('ActivityLog dual-write in order.tpv.service', () => {
       expect(mockPrisma.orderItem.update).toHaveBeenCalledTimes(order.items.length)
       expect(mockPrisma.orderItem.update).toHaveBeenCalledWith({
         where: { id: 'item-1' },
-        data: { isCortesia: true, cortesiaReason: 'Long wait', discountAmount: order.items[0].total },
+        data: { isCortesia: true, cortesiaReason: 'Long wait', discountAmount: order.items[0].total, appliedDiscountId: null },
       })
       expect(mockPrisma.orderItem.update).toHaveBeenCalledWith({
         where: { id: 'item-2' },
-        data: { isCortesia: true, cortesiaReason: 'Long wait', discountAmount: order.items[1].total },
+        data: { isCortesia: true, cortesiaReason: 'Long wait', discountAmount: order.items[1].total, appliedDiscountId: null },
       })
     })
 
@@ -318,6 +328,100 @@ describe('ActivityLog dual-write in order.tpv.service', () => {
       await compItems(VENUE_ID, ORDER_ID, { itemIds: ['item-1'], reason: 'Food quality issue', staffId: STAFF_ID })
 
       expect(mockPrisma.$transaction).toHaveBeenCalledTimes(1)
+    })
+
+    // T-15 (B2c): una cortesía del MÓVIL guarda total 0 y discountAmount = lo regalado. Volver a regalarla desde la terminal le
+    // escribía discountAmount 0 y, con la fila espejo de P5, una fila de $0 sin renglones. Ya no se toca.
+    const conCortesiaDelMovil = () =>
+      makeOrder({
+        items: [
+          {
+            id: 'item-1',
+            productName: 'Burger',
+            product: { name: 'Burger' },
+            sentToKitchenAt: null,
+            total: new Decimal(0),
+            discountAmount: new Decimal(60),
+            isCortesia: true,
+          },
+          { id: 'item-2', productName: 'Fries', product: { name: 'Fries' }, sentToKitchenAt: null, total: new Decimal(40) },
+        ],
+      })
+
+    it('🔴 T-15: no vuelve a regalar una cortesía del móvil (total 0): responde 400 y no crea un espejo de $0', async () => {
+      mockPrisma.order.findUnique.mockResolvedValue(conCortesiaDelMovil())
+      mockPrisma.order.update.mockResolvedValue(makeUpdatedOrder())
+
+      await expect(compItems(VENUE_ID, ORDER_ID, { itemIds: ['item-1'], reason: 'Otra vez', staffId: STAFF_ID })).rejects.toThrow(
+        'No items found to comp',
+      )
+      expect(mockPrisma.orderItem.update).not.toHaveBeenCalled()
+      expect(mockPrisma.orderDiscount.create).not.toHaveBeenCalled()
+    })
+
+    it('🔴 T-15: la cortesía de toda la cuenta salta los renglones que ya son cortesía', async () => {
+      mockPrisma.order.findUnique.mockResolvedValue(conCortesiaDelMovil())
+      mockPrisma.order.update.mockResolvedValue(makeUpdatedOrder())
+
+      await compItems(VENUE_ID, ORDER_ID, { itemIds: [], reason: 'Long wait', staffId: STAFF_ID })
+
+      expect(mockPrisma.orderItem.update).toHaveBeenCalledTimes(1)
+      expect(mockPrisma.orderItem.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'item-2' } }))
+    })
+
+    it('🔴 (minor de la revisión de T4) regalar un renglón de total 0 lo marca pero no crea un espejo «Cortesía $0» que nunca se retira', async () => {
+      mockPrisma.order.findUnique.mockResolvedValue(
+        makeOrder({
+          items: [{ id: 'item-1', productName: 'Agua', product: { name: 'Agua' }, sentToKitchenAt: null, total: new Decimal(0) }],
+        }),
+      )
+      mockPrisma.order.update.mockResolvedValue(makeUpdatedOrder())
+
+      await compItems(VENUE_ID, ORDER_ID, { itemIds: ['item-1'], reason: 'Invitación', staffId: STAFF_ID })
+
+      expect(mockPrisma.orderItem.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'item-1' } }))
+      expect(mockPrisma.orderDiscount.create).not.toHaveBeenCalled()
+    })
+
+    // Tarea 7a (hueco del sabotaje «compItems sin restar lo recortado»): sin filas al final (cortesía de $0, su única dirigida
+    // retirada), la cabecera es la de antes MENOS lo que el recorte retiró; si no, esos $10 seguían restando sobre los demás.
+    it('control — respaldo sin filas: regalar un renglón de $0 que retira su única dirigida le quita esos $10 a la cabecera', async () => {
+      const dirigida = {
+        id: 'dir',
+        name: 'Fijo al agua',
+        type: 'FIXED_AMOUNT',
+        value: new Decimal(10),
+        amount: new Decimal(10),
+        taxReduction: new Decimal(0),
+        loyaltyTransactionId: null,
+        appliedToItemIds: [],
+        reparto: { v: 1, alcance: 'DIRIGIDO', conPromociones: null, espejo: false, renglones: { 'item-1': 0 } },
+        createdAt: null,
+      }
+      mockPrisma.order.findUnique.mockResolvedValue(
+        makeOrder({
+          total: new Decimal(90),
+          discountAmount: new Decimal(10),
+          items: [
+            { id: 'item-1', productName: 'Agua', product: { name: 'Agua' }, sentToKitchenAt: null, total: new Decimal(0) },
+            { id: 'item-2', productName: 'Burger', product: { name: 'Burger' }, sentToKitchenAt: null, total: new Decimal(100) },
+          ],
+        }),
+      )
+      // Lecturas de filas: conservar (Σ 10 = cabecera 10, nada que congelar) y el recorte la ven; después ya no hay filas.
+      mockPrisma.orderDiscount.findMany.mockResolvedValueOnce([dirigida]).mockResolvedValueOnce([dirigida])
+      mockPrisma.orderItem.findMany.mockResolvedValueOnce([
+        { id: 'item-1', appliedDiscountId: null, isCortesia: false, discountAmount: new Decimal(0) },
+      ])
+      mockPrisma.order.update.mockResolvedValue(makeUpdatedOrder())
+
+      await compItems(VENUE_ID, ORDER_ID, { itemIds: ['item-1'], reason: 'Invitación', staffId: STAFF_ID })
+
+      expect(mockPrisma.orderDiscount.delete).toHaveBeenCalledWith({ where: { id: 'dir' } })
+      expect(mockPrisma.orderDiscount.create).not.toHaveBeenCalled()
+      expect(mockPrisma.order.update).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ discountAmount: 0, total: 100 }) }),
+      )
     })
   })
 

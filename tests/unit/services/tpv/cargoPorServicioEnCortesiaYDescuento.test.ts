@@ -50,12 +50,22 @@ import { computeStoredOrderTotal } from '@/services/shared/orderBalance'
 jest.mock('@/utils/prismaClient', () => {
   const mockPrismaObj: any = {
     order: { findUnique: jest.fn(), update: jest.fn() },
-    orderItem: { update: jest.fn(), delete: jest.fn(), deleteMany: jest.fn() },
+    // B2 (P2): `applyDiscount` crea su fila y sincroniza su reparto, que lee los renglones de la orden.
+    orderItem: { update: jest.fn(), delete: jest.fn(), deleteMany: jest.fn(), findMany: jest.fn(async () => []) },
     orderAction: { create: jest.fn() },
-    orderDiscount: { findMany: jest.fn() },
+    orderDiscount: {
+      findMany: jest.fn(async () => []),
+      create: jest.fn(async () => ({})),
+      update: jest.fn(),
+      // B2b T6 (Codex r5): anular TODO cierra las reducciones de impuesto de sus filas.
+      updateMany: jest.fn(async () => ({ count: 0 })),
+      delete: jest.fn(),
+    },
     orderServiceCharge: { findMany: jest.fn(), update: jest.fn() },
     orderCustomer: { deleteMany: jest.fn() },
     staff: { findUnique: jest.fn() },
+    // B2c T4 (P5): la cortesía de la terminal crea su fila espejo con quien la otorga (StaffVenue) y el recorte puede retirar filas.
+    staffVenue: { findFirst: jest.fn(async () => null) },
     // Diseño §C.6: voidItems toma el candado de la orden y consulta el cobro de terminal vivo DENTRO de la tx.
     $queryRaw: jest.fn(async () => [{ id: 'order-bajo-candado' }]),
     terminalPaymentRequest: { findFirst: jest.fn(async () => null) },
@@ -293,14 +303,16 @@ describe('applyDiscount — descontar conserva el cargo por servicio y la propin
 })
 
 // ── La decisión del impuesto, fijada ──────────────────────────────────────────
-describe('🔴 `taxAmount` NO entra al total en estos dos caminos (decisión declarada)', () => {
+describe('🔴 con IVA INCLUIDO el `taxAmount` escrito NO entra al total en estos dos caminos (P12)', () => {
   /**
-   * Si alguien «unifica» esto con los tres caminos del dashboard pasándole
-   * `taxAmount: order.taxAmount`, estas dos pruebas fallan — que es el aviso de que el
-   * cambio mueve dinero y necesita su propia decisión, no un arreglo de consistencia.
+   * P12 (founder, 2-oct) tomó la decisión que esta prueba pedía: el IVA entra al total y al cobro SÓLO por la regla
+   * compartida (`impuestoQueSeCobraAparte`). Con IVA incluido el precio ya lo trae y un impuesto escrito no suma; el que va
+   * aparte sí, aquí y en el cobro, con la misma regla (integración «R4-2» y `orderBalance.test.ts`).
    */
-  it('una orden con impuesto guardado no lo suma al descontar', async () => {
-    mockPrisma.order.findUnique.mockResolvedValue(ordenConCargo({ taxAmount: new Decimal(16), total: new Decimal(131) }))
+  it('una orden con IVA incluido e impuesto guardado no lo suma al descontar', async () => {
+    mockPrisma.order.findUnique.mockResolvedValue(
+      ordenConCargo({ contratoDePrecio: 'IVA_INCLUIDO', taxAmount: new Decimal(16), total: new Decimal(131) }),
+    )
 
     await applyDiscount(VENUE_ID, ORDER_ID, { type: 'FIXED_AMOUNT', value: 20, reason: 'Promo', staffId: STAFF_ID, expectedVersion: 1 })
 
@@ -309,9 +321,9 @@ describe('🔴 `taxAmount` NO entra al total en estos dos caminos (decisión dec
   })
 
   it('lo guardado coincide con lo que el cobro calcularía — el cobro no tiene que ARREGLAR el total', async () => {
-    // Espejo de `recordOrderPayment`: max(0, subtotal − descuento) + cargo + propina, sin impuesto.
+    // Espejo de `recordOrderPayment`: max(0, subtotal − descuento) + IVA aparte (0 con IVA incluido) + cargo + propina.
     mockPrisma.order.findUnique.mockResolvedValue(
-      ordenConCargo({ taxAmount: new Decimal(16), tipAmount: new Decimal(20), total: new Decimal(151) }),
+      ordenConCargo({ contratoDePrecio: 'IVA_INCLUIDO', taxAmount: new Decimal(16), tipAmount: new Decimal(20), total: new Decimal(151) }),
     )
 
     await compItems(VENUE_ID, ORDER_ID, { itemIds: ['item-1'], reason: 'Comida fría', staffId: STAFF_ID })
@@ -320,6 +332,9 @@ describe('🔴 `taxAmount` NO entra al total en estos dos caminos (decisión dec
     const totalAlCobrar = computeStoredOrderTotal({
       subtotal: 100,
       discountAmount: guardado.discountAmount,
+      contratoDePrecio: 'IVA_INCLUIDO',
+      taxAmount: 16,
+      status: 'PENDING',
       serviceChargeAmount: 15,
       tipAmount: 20,
     }).toNumber()

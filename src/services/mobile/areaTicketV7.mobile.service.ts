@@ -3295,6 +3295,9 @@ export async function finalizeAreaTicketPaymentInTransaction(
       subtotal: true,
       discountAmount: true,
       serviceChargeAmount: true,
+      // P12: el saldo suma el IVA que va aparte, con la regla compartida.
+      contratoDePrecio: true,
+      taxAmount: true,
       servedById: true,
       createdById: true,
       areaTicketCode: true,

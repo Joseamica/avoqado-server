@@ -15,6 +15,9 @@ const order = {
   paymentStatus: 'PENDING',
   subtotal: 100,
   discountAmount: 20,
+  // B2b T6c: fusionar pasa el IVA aparte del origen al destino (`new Prisma.Decimal(freshSource.taxAmount)`); sin contrato de
+  // precio y sin IVA aparte, el impuesto guardado es 0.
+  taxAmount: 0,
   paidAmount: 7,
   covers: 8,
   orderNumber: '1',

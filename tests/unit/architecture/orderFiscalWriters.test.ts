@@ -209,6 +209,7 @@ const POS = 'tests/integration/pos-sync/posSyncWriters.atomic.integration.test.t
 const CAPTURE = 'tests/integration/fiscal/writerCapture.test.ts'
 const RECONCILE = 'tests/integration/payments/reconcileFromPayments.atomic.integration.test.ts'
 const PAYMENT_GUARD = 'tests/unit/services/shared/paymentShiftClaim.callers.guard.test.ts'
+const REPARTO = 'tests/integration/payments/repartoDescuento.integration.test.ts'
 const proof = (file: string, mentions: string, ...titles: string[]): Proof[] => titles.map(title => ({ file, title, mentions }))
 
 const LOCK = ['lockExistingOrderForPayment(']
@@ -272,6 +273,113 @@ const WRITERS: Record<string, Writer> = {
     proof: T3('applyPredefinedDiscount'),
   },
   'src/services/tpv/discount.tpv.service.ts#applyCouponCode': { class: 'LOCKED', lock: LOCK, proof: T3('applyCouponCode') },
+  // IVA por producto B2: la ÚNICA escritura de repartos, con el tx de quien ya tiene el candado. Cada tarea suma sus llamadores.
+  'src/services/shared/repartoDescuentoTx.ts#sincronizarRepartos': {
+    class: 'CALLER_LOCKED',
+    callers: [
+      'src/services/dashboard/discountEngine.service.ts#applyEvaluatedDiscount',
+      'src/services/dashboard/discountEngine.service.ts#applyManualDiscount',
+      'src/services/dashboard/discountEngine.service.ts#removeDiscountFromOrder',
+      'src/services/mobile/areaTicket.mobile.service.ts#addAreaTicketItems',
+      'src/services/mobile/comp-item.mobile.service.ts#recalculateOrderTotals',
+      'src/services/mobile/order.mobile.service.ts#createOrderWithItems',
+      'src/services/tpv/discount.tpv.service.ts#applyCouponCode',
+      'src/services/tpv/order.tpv.service.ts#addItemsToOrder',
+      'src/services/tpv/order.tpv.service.ts#applyDiscount',
+      'src/services/tpv/order.tpv.service.ts#compItems',
+      'src/services/tpv/order.tpv.service.ts#createOrderWithItems',
+      'src/services/tpv/order.tpv.service.ts#removeOrderItem',
+      'src/services/tpv/order.tpv.service.ts#voidItems',
+    ],
+    proof: proof(
+      REPARTO,
+      'sincronizarRepartos',
+      'agregar un artículo tras un % de cuenta re-deriva el importe como hoy y reescribe el reparto en la misma transacción',
+    ),
+  },
+  // B2b T6b (R9, Codex r4 R4-1): los renglones que se borran o se anulan se llevan su IVA de la cabecera, con el tx y el candado
+  // de quien los quita. La lista EXACTA de llamadores impide además que el evento del POS externo (`applyPosOrderItemEvent`)
+  // la llame sin que alguien lo decida: ahí la cabecera la reescribe el POS (D8).
+  'src/services/shared/repartoDescuentoTx.ts#retirarImpuestoDeRenglones': {
+    class: 'CALLER_LOCKED',
+    callers: ['src/services/tpv/order.tpv.service.ts#removeOrderItem', 'src/services/tpv/order.tpv.service.ts#voidItems'],
+    proof: proof(REPARTO, 'retirarImpuestoDeRenglones', 'R9: borrar el ÚLTIMO artículo de una cuenta con IVA aparte deja el impuesto en 0'),
+  },
+  // Revisión final de B2 (Codex r1 P1): el descuento histórico de cabecera se congela en su fila antes de la primera fila nueva,
+  // con el tx y el candado del escritor que la crea; desde B2c (R7-1) también antes de recortar o recalcular con los renglones
+  // que cambian (borrar y anular, quitar promoción, las tres cortesías) y antes de quitar una fila desde el móvil. B2c F2: con
+  // resto, además lee los renglones y crea los espejos de los descuentos de renglón viejos — por eso también necesita el candado.
+  'src/services/shared/repartoDescuentoTx.ts#conservarDescuentoHistorico': {
+    class: 'CALLER_LOCKED',
+    callers: [
+      'src/services/dashboard/discountEngine.service.ts#applyEvaluatedDiscount',
+      'src/services/dashboard/discountEngine.service.ts#applyManualDiscount',
+      'src/services/mobile/comp-item.mobile.service.ts#compOrderItem',
+      'src/services/mobile/comp-item.mobile.service.ts#compWholeOrder',
+      'src/services/mobile/loyalty.mobile.service.ts#redeemPointsToOrder',
+      'src/services/mobile/order.mobile.service.ts#applyOrderDiscount',
+      'src/services/mobile/order.mobile.service.ts#removeOrderDiscount',
+      'src/services/promotions/promotion.service.ts#removePromotionFromOrder',
+      'src/services/tpv/discount.tpv.service.ts#applyCouponCode',
+      'src/services/tpv/order.tpv.service.ts#applyDiscount',
+      'src/services/tpv/order.tpv.service.ts#compItems',
+      'src/services/tpv/order.tpv.service.ts#removeOrderItem',
+      'src/services/tpv/order.tpv.service.ts#voidItems',
+      'src/services/wallet/redeemStampReward.service.ts#redeemStampReward',
+    ],
+    proof: proof(
+      REPARTO,
+      'conservarDescuentoHistorico',
+      '🔴 P1 antes/después: $20 HISTÓRICOS de cabecera sobreviven al applyDiscount heredado y a agregar un artículo ($30/$120; B2 $10/$140)',
+    ),
+  },
+  // B2 T7 (R3-2): quitar una fila espejo limpia su renglón, con el tx y el candado de quien quita.
+  'src/services/shared/repartoDescuentoTx.ts#revertirDescuentoDelRenglon': {
+    class: 'CALLER_LOCKED',
+    callers: [
+      'src/services/mobile/order.mobile.service.ts#removeOrderDiscount',
+      'src/services/dashboard/discountEngine.service.ts#removeDiscountFromOrder',
+    ],
+    proof: proof(
+      REPARTO,
+      'revertirDescuentoDelRenglon',
+      'quitar un descuento de artículo deja el renglón sin descuento y la cuenta cobra completo (móvil)',
+    ),
+  },
+  // B2c T1 (P4, P5): recorta o retira las filas dirigidas a los renglones que salen o se regalan, y devuelve su reducción de
+  // impuesto a `Order.taxAmount`, con el tx y el candado de quien los toca. Llamadores: borrar y anular (T2), quitar promoción
+  // (T3) y las tres cortesías (T4).
+  'src/services/shared/repartoDescuentoTx.ts#recortarDescuentosDeRenglones': {
+    class: 'CALLER_LOCKED',
+    callers: [
+      'src/services/mobile/comp-item.mobile.service.ts#compOrderItem',
+      'src/services/mobile/comp-item.mobile.service.ts#compWholeOrder',
+      'src/services/promotions/promotion.service.ts#removePromotionFromOrder',
+      'src/services/tpv/order.tpv.service.ts#compItems',
+      'src/services/tpv/order.tpv.service.ts#removeOrderItem',
+      'src/services/tpv/order.tpv.service.ts#voidItems',
+    ],
+    proof: proof(
+      REPARTO,
+      'recortarDescuentosDeRenglones',
+      '🔴 P4: borrar un artículo con su propio descuento ya no deja ese descuento sobre los demás',
+    ),
+  },
+  // B2c T5 (P5): las filas ESPEJO de los descuentos de artículo del vale, con la transacción de quien abre el vale (creación
+  // privada) o le agrega renglones (bajo el candado de la orden).
+  'src/services/mobile/areaTicket.mobile.service.ts#crearEspejosDelVale': {
+    class: 'CALLER_LOCKED',
+    callers: [
+      'src/services/mobile/areaTicket.mobile.service.ts#addAreaTicketItems',
+      'src/services/mobile/areaTicket.mobile.service.ts#openAreaTicket',
+    ],
+    proof: proof(
+      'tests/unit/services/mobile/areaTicket.mobile.service.test.ts',
+      'orderDiscount.create',
+      'abrir un vale con descuento de artículo crea su fila ESPEJO',
+      'el renglón nuevo con descuento de artículo trae su fila ESPEJO',
+    ),
+  },
   'src/services/shared/serviceCharges.ts#recalcularCargosPorServicio': {
     class: 'CALLER_LOCKED',
     callers: [
@@ -465,7 +573,7 @@ const WRITERS: Record<string, Writer> = {
         'inputs changed again during the rerun: writes nothing and warns',
       ),
     ],
-    note: 'Direct branch (paid-order sweep, reasignarCobro, recordOrderPayment without in-tx settlement): Order lock, reread of the inputs, one rerun on a change, then skip + warn (Ruling T7-R1).',
+    note: 'Direct branch (paid-order sweep, recordOrderPayment without in-tx settlement): Order lock, reread of the inputs, one rerun on a change, then skip + warn (Ruling T7-R1).',
   },
   'src/services/mobile/areaTicketV7.mobile.service.ts#materializeAreaTicketCheckout': {
     class: 'PRIVATE_CREATION',
@@ -538,6 +646,8 @@ const LOCK_HOLDERS: Record<string, string[]> = {
   ],
   'src/services/mobile/kdsOutOfStock.mobile.service.ts#enviarYAplicar': ['withDeliveryOrderLock(', ...LOCK],
   'src/services/tpv/payment.tpv.service.ts#recordOrderPayment': LOCK,
+  // B2c T5: abrir el vale crea la orden en la MISMA transacción (creación privada, nadie más la ve) y ahí le escribe sus espejos.
+  'src/services/mobile/areaTicket.mobile.service.ts#openAreaTicket': ['.order.create('],
 }
 
 /** Optional-tx entry points: a call that passes the tx must come from a writer that already holds the Order lock. */
@@ -588,6 +698,11 @@ const NON_FISCAL_ORDER_WRITERS: Record<string, OrderWriter> = {
   'src/services/tpv/payment.tpv.service.ts#recordOrderPayment': {
     class: 'METADATA',
     why: 'splitType/loyalty marks; its money write is settleStandalonePaymentInTx under its Order lock',
+  },
+  'src/services/shared/cuentaCancelada.ts#reabrirSiRecibeDinero': {
+    class: 'METADATA',
+    why: 'status PENDING al recibir dinero ya capturado; lo llaman payCashOrder, settleStandalonePaymentInTx y updateOrderTotalsForStandalonePayment bajo su candado',
+    markers: ['ORDER_REOPENED_BY_CAPTURED_PAYMENT'],
   },
   'src/services/shared/loyaltyOnPaidOrder.ts#awardLoyaltyForPaidOrder': { class: 'METADATA', why: 'loyalty award marks' },
   'src/jobs/kitchen-tickets-reconciliation.job.ts#KitchenTicketsReconciliationJob.runNow': {
@@ -783,6 +898,18 @@ describe('locked-transaction helpers never receive the global client', () => {
   const GUARDED: Array<{ callee: string; txIndex: number; minimum: number }> = [
     { callee: 'recalculateOrderTotals', txIndex: 3, minimum: 16 },
     { callee: 'applyPromotionToOrder', txIndex: 1, minimum: 1 },
+    // B2: 11 sitios medidos al cerrar B2 (T2 3, T3 2, T4 2, T5 2, T6 1 —cupón—, T7 1); B2c T2 +1 (`voidItems`), T4 +1 (`compItems`),
+    // T5 +1 (`addAreaTicketItems`).
+    { callee: 'sincronizarRepartos', txIndex: 0, minimum: 14 },
+    // Codex r1 P1: los siete escritores que crean una fila sobre una orden existente; B2c T2 (R7-1) +2 (borrar y anular);
+    // B2c T3 (R7-1) +2 (quitar promoción, quitar una fila desde el móvil); B2c T4 (R7-1) +3 (las tres cortesías).
+    { callee: 'conservarDescuentoHistorico', txIndex: 0, minimum: 14 },
+    // B2b T6b (R9): borrar y anular renglones.
+    { callee: 'retirarImpuestoDeRenglones', txIndex: 0, minimum: 2 },
+    // B2c: borrar y anular (T2), quitar promoción (T3), las tres cortesías (T4).
+    { callee: 'recortarDescuentosDeRenglones', txIndex: 0, minimum: 6 },
+    // B2c T5 (P5): abrir el vale y agregarle renglones.
+    { callee: 'crearEspejosDelVale', txIndex: 0, minimum: 2 },
   ]
 
   it.each(GUARDED)('$callee gets a transaction client, never the autocommit prisma import', ({ callee, txIndex, minimum }) => {
@@ -946,5 +1073,28 @@ describe('every transaction that takes the canonical Order lock waits on ONE bud
     expect(code.get('src/services/delivery-channels/core/deliveryOrderLock.ts#CANDADO_TX_TIMEOUT_MS')).toMatch(
       /CANDADO_TX_TIMEOUT_MS = 15_?000\b/,
     )
+  })
+})
+
+describe('R11 (Codex r5): quien rearma el dinero de una orden desde sus renglones rechaza las importadas', () => {
+  const { calls, code } = scan()
+  const MARCAS = ['rechazarSiEsImportada(', 'esOrdenImportada(']
+  // Nacen en Avoqado en la misma transacción (nunca son importadas), o son el ayudante mismo, cuyos llamadores ya pasan la red.
+  const EXENTOS = new Set([
+    'src/services/tpv/order.tpv.service.ts#createOrderWithItems',
+    'src/services/mobile/order.mobile.service.ts#createOrderWithItems',
+    'src/services/mobile/comp-item.mobile.service.ts#recalculateOrderTotals',
+    // B2c T5: el vale nace en Avoqado (`openAreaTicket`): nunca es importado.
+    'src/services/mobile/areaTicket.mobile.service.ts#addAreaTicketItems',
+  ])
+  const rearman = [
+    ...new Set(calls.filter(c => c.callee === 'sincronizarRepartos' || c.callee === 'recalculateOrderTotals').map(c => c.owner)),
+  ].filter(o => !EXENTOS.has(o))
+  it('la red encuentra a los escritores (contados el 4-oct tras B2c T5: 23; si colapsa, se rompió el escáner)', () => {
+    expect(rearman.length).toBeGreaterThanOrEqual(23)
+  })
+  it.each([...rearman].sort())('%s rechaza (o, si es automático, salta) las órdenes importadas', key => {
+    const cuerpo = code.get(key) ?? ''
+    expect({ key, guarda: MARCAS.some(m => cuerpo.includes(m)) }).toEqual({ key, guarda: true })
   })
 })

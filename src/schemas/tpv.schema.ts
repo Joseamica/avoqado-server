@@ -179,6 +179,11 @@ export const recordPaymentBodySchema = z.object({
       // cajero no puede quitar. Un desenlace ya ocurrido es un hecho, no se re-litiga.
       // Lo que NO relaja: la revisión referenciada tiene que EXISTIR.
       isOfflineReplay: z.boolean().optional(),
+      // Founder 3-oct / Codex r10 #3: «este efectivo lo tiene el cajero en la mano y todavía lo puede devolver». Lo mandará el
+      // intento inmediato del flujo Cobrar de la TPV (plan de registro de cobros); su cola nunca. Booleano y opcional: un cobro
+      // jamás se rechaza por este campo. Codex r11 #2: sin declararlo aquí, `validateRequest` lo borra del cuerpo. `nullish()`, no
+      // `optional()` (revisión de 6a-1): un `null` explícito —como el `externalSource: null` de iOS— no puede tumbar un cobro.
+      cobroNuevo: z.boolean({ message: 'cobroNuevo debe ser verdadero o falso.' }).nullish(),
       // Detalle legible del cobro declarado a mano ("Tarjeta (terminal externa)").
       // nullable() NO es cosmético: iOS manda `externalSource: null` explícito en los
       // cobros normales, así que exigir string|undefined rechazaría cada cobro en

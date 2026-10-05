@@ -203,8 +203,8 @@ beforeEach(() => {
   }))
   // Recalculation reads the lines; FREE_PRODUCT reads their unit prices — both through the tx.
   tx.orderItem.findMany.mockResolvedValue([
-    { total: 100, orderPromotionId: null, unitPrice: 100 },
-    { total: 50, orderPromotionId: null, unitPrice: 50 },
+    { id: 'i1', total: 100, discountAmount: 0, orderPromotionId: null, unitPrice: 100 },
+    { id: 'i2', total: 50, discountAmount: 0, orderPromotionId: null, unitPrice: 50 },
   ])
   tx.orderItem.updateMany.mockResolvedValue({ count: 1 })
   tx.orderItem.createMany.mockResolvedValue({ count: 1 })
@@ -258,7 +258,7 @@ beforeEach(() => {
   for (const [name, ops] of Object.entries({
     order: ['findFirst', 'findUnique', 'update', 'updateMany', 'create'],
     orderItem: ['findMany', 'updateMany', 'createMany', 'deleteMany'],
-    orderDiscount: ['findFirst', 'create', 'delete'],
+    orderDiscount: ['findFirst', 'findMany', 'create', 'update', 'delete'],
     orderPromotion: ['findUnique', 'findFirst', 'create', 'delete', 'updateMany'],
     promotion: ['findFirst'],
     discount: ['findFirst'],
@@ -329,6 +329,9 @@ describe('locked mobile writers', () => {
 })
 
 describe('writer-specific fresh decisions', () => {
+  // Codex r1 P1: la cabecera genérica del doble ($20 sin ninguna fila) es la de una orden HISTÓRICA y gana antes su fila
+  // «Descuento anterior» (ver el describe de abajo). Las pruebas que miran la fila del escritor usan una cuenta sana.
+  const cuentaSana = () => tx.order.findFirst.mockResolvedValue({ ...ORDER, discountAmount: 0 })
   it('applyDiscount caps against the locked subtotal/discount and reads the catalog rule on the tx', async () => {
     tx.order.findFirst.mockResolvedValue({ ...ORDER, subtotal: 150, discountAmount: 145 })
 
@@ -337,6 +340,82 @@ describe('writer-specific fresh decisions', () => {
     expect(tx.discount.findFirst).toHaveBeenCalledWith({ where: { id: 'disc', venueId: 'venue' } })
     // 10 % of 150 = 15, but only 150 − 145 = 5 is still discountable on the locked photo.
     expect(tx.orderDiscount.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ amount: 5 }) }))
+  })
+
+  it('🔴 R6 antes/después: un 10 % del catálogo con tope de $5 no lo pasa desde el móvil, ni al aplicar ni al recalcular ($5; hoy $15)', async () => {
+    cuentaSana()
+    tx.discount.findFirst.mockResolvedValue({
+      id: 'disc',
+      venueId: 'venue',
+      name: 'Diez',
+      type: 'PERCENTAGE',
+      value: 10,
+      scope: 'ORDER',
+      active: true,
+      validFrom: null,
+      validUntil: null,
+      maxTotalUses: null,
+      currentUses: 0,
+      maxDiscountAmount: new Prisma.Decimal(5),
+    })
+    let creada: any = null
+    tx.orderDiscount.create.mockImplementation(
+      async ({ data }: any) => (creada = { id: 'od-new', createdAt: new Date(0), appliedToItemIds: [], ...data }),
+    )
+    tx.orderDiscount.findMany.mockImplementation(async () => (creada ? [creada] : []))
+    await applyOrderDiscount('venue', 'order', 'disc', 'staff')
+    expect(tx.orderDiscount.create.mock.calls[0][0].data).toMatchObject({ amount: 5, reparto: { alcance: 'CUENTA', tope: 5 } })
+    expect(tx.orderDiscount.update).toHaveBeenCalledWith({ where: { id: 'od-new' }, data: expect.objectContaining({ amount: 5 }) })
+  })
+  it('control — R6, venta sana: sin tope el % del móvil es el de hoy (10 % de $150 = $15)', async () => {
+    cuentaSana()
+    let creada: any = null
+    tx.orderDiscount.create.mockImplementation(
+      async ({ data }: any) => (creada = { id: 'od-new', createdAt: new Date(0), appliedToItemIds: [], ...data }),
+    )
+    tx.orderDiscount.findMany.mockImplementation(async () => (creada ? [creada] : []))
+    await applyOrderDiscount('venue', 'order', 'disc', 'staff')
+    expect(tx.orderDiscount.create.mock.calls[0][0].data).toMatchObject({ amount: 15 })
+  })
+  // Codex r1 (corrige el ruling anterior «tope 0 = sin tope»): un tope que no es nulo cuenta, incluido 0 — al aplicar y, viajando
+  // en el reparto, al recalcular. Así ya lo hacían el cupón (Decimal(0) es verdadero) y el motor (lo mapea a 0).
+  it('🔴 R6: un tope de $0 en el catálogo ES tope, como el cupón y el motor (10 % de $150 ⇒ $0; antes $15 y sin tope)', async () => {
+    cuentaSana()
+    tx.discount.findFirst.mockResolvedValue({
+      id: 'disc',
+      venueId: 'venue',
+      name: 'Diez',
+      type: 'PERCENTAGE',
+      value: 10,
+      scope: 'ORDER',
+      active: true,
+      validFrom: null,
+      validUntil: null,
+      maxTotalUses: null,
+      currentUses: 0,
+      maxDiscountAmount: new Prisma.Decimal(0),
+    })
+    let creada: any = null
+    tx.orderDiscount.create.mockImplementation(
+      async ({ data }: any) => (creada = { id: 'od-new', createdAt: new Date(0), appliedToItemIds: [], ...data }),
+    )
+    tx.orderDiscount.findMany.mockImplementation(async () => (creada ? [creada] : []))
+    await applyOrderDiscount('venue', 'order', 'disc', 'staff')
+    expect(tx.orderDiscount.create.mock.calls[0][0].data).toMatchObject({ amount: 0, reparto: { alcance: 'CUENTA', tope: 0 } })
+  })
+
+  /** B2: un P2028 al sincronizar repartos sale tal cual — nadie lo convierte en error de negocio (el reducer lo deja en RETRY). */
+  it('applyOrderDiscount propaga el P2028 de la sincronización y no deja nada escrito', async () => {
+    // Una fila re-derivable (% de cuenta): el recálculo de la misma tx la sincroniza, y esa escritura truena con P2028.
+    tx.orderDiscount.findMany.mockResolvedValue([
+      { id: 'od-new', type: 'PERCENTAGE', value: 10, amount: 15, appliedToItemIds: [], reparto: null, createdAt: new Date(0) },
+    ])
+    tx.orderDiscount.update.mockRejectedValue(Object.assign(new Error('Transaction API error'), { code: 'P2028' }))
+    await expect(applyOrderDiscount('venue', 'order', 'disc', 'staff')).rejects.toMatchObject({ code: 'P2028' })
+    expect(tx.orderDiscount.update).toHaveBeenCalled()
+    expect(tx.order.update).not.toHaveBeenCalled()
+    expect(committed).toBe(false)
+    expect(logAction).not.toHaveBeenCalled()
   })
 
   it('removeDiscount refunds points and returns the stamp reward on the locked tx, after the Order lock', async () => {
@@ -351,6 +430,80 @@ describe('writer-specific fresh decisions', () => {
     )
     expect(tx.stampReward.update.mock.invocationCallOrder[0]).toBeGreaterThan(lock)
     expect(tx.orderDiscount.delete).toHaveBeenCalledWith({ where: { id: 'od' } })
+  })
+
+  it('🔴 D16: quitar desde el móvil una fila con reducción de impuesto la devuelve a la orden, bajo el candado (hoy se perdía)', async () => {
+    tx.orderDiscount.findFirst.mockResolvedValue({
+      id: 'od',
+      orderId: 'order',
+      name: 'Motor',
+      amount: 10,
+      taxReduction: 1.6,
+      loyaltyTransactionId: null,
+      appliedToItemIds: [],
+      reparto: null,
+    })
+    await removeOrderDiscount('venue', 'order', 'od', 'staff')
+    const llamada = tx.order.update.mock.calls.findIndex(([a]: any) => a.data.taxAmount?.increment !== undefined)
+    expect(llamada).toBeGreaterThanOrEqual(0)
+    expect(tx.order.update.mock.calls[llamada][0].where).toEqual({ id: 'order' })
+    expect(Number(tx.order.update.mock.calls[llamada][0].data.taxAmount.increment)).toBe(1.6)
+    expect(tx.order.update.mock.invocationCallOrder[llamada]).toBeGreaterThan(tx.$queryRaw.mock.invocationCallOrder[0])
+    expect(tx.orderDiscount.delete).toHaveBeenCalledWith({ where: { id: 'od' } })
+  })
+
+  it('control — sin reducción guardada quitar desde el móvil no toca el impuesto (regresión)', async () => {
+    await removeOrderDiscount('venue', 'order', 'od', 'staff')
+    expect(tx.order.update.mock.calls.some(([a]: any) => a.data.taxAmount !== undefined)).toBe(false)
+  })
+
+  it('🔴 P4: quitar la promoción retira el premio dirigido a su línea y lo devuelve (hoy seguía restando sobre lo demás)', async () => {
+    tx.orderItem.findMany.mockImplementation(async ({ where }: any) => {
+      if (where.orderPromotionId) return [{ id: 'combo' }]
+      if (where.id) return [{ id: 'combo', appliedDiscountId: null, isCortesia: false, discountAmount: 10 }]
+      return [{ id: 'i1', total: 100, discountAmount: 0, orderPromotionId: null, unitPrice: 100, taxAmount: 0 }]
+    })
+    const premio = {
+      id: 'premio',
+      orderId: 'order',
+      name: 'Café gratis',
+      type: 'FIXED_AMOUNT',
+      value: 90,
+      amount: 90,
+      taxReduction: 0,
+      loyaltyTransactionId: null,
+      appliedToItemIds: [],
+      createdAt: new Date(0),
+      reparto: { v: 1, alcance: 'DIRIGIDO', conPromociones: null, espejo: false, renglones: { combo: 9000 } },
+    }
+    // R7-1: dos lecturas de filas antes del recálculo — `conservarDescuentoHistorico` y el recorte — y las dos ven el premio.
+    tx.orderDiscount.findMany.mockResolvedValueOnce([premio]).mockResolvedValueOnce([premio]).mockResolvedValue([])
+    tx.stampReward.findFirst.mockResolvedValue({ id: 'rw-premio', customerId: 'customer', rewardLabel: 'Café gratis' })
+
+    await promotionService.removePromotionFromOrder({ venueId: 'venue', orderId: 'order', orderPromotionId: 'op' })
+
+    // La cabecera del doble ($20) no pasa de su fila de $90: nada que conservar.
+    expect(tx.orderDiscount.create).not.toHaveBeenCalled()
+    expect(tx.orderDiscount.delete).toHaveBeenCalledWith({ where: { id: 'premio' } })
+    expect(tx.stampReward.update).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: 'rw-premio' }, data: expect.objectContaining({ status: 'PENDING' }) }),
+    )
+    expect(tx.orderDiscount.delete.mock.invocationCallOrder[0]).toBeLessThan(tx.orderItem.deleteMany.mock.invocationCallOrder[0])
+    expect(tx.orderDiscount.delete.mock.invocationCallOrder[0]).toBeGreaterThan(tx.$queryRaw.mock.invocationCallOrder[0])
+    // Importes y saldo (Codex r2): sin el premio, el café de $100 se cobra completo; lo cobrado en el doble es $7.
+    // Hoy: el premio de $90 seguía en la cabecera y la cuenta quedaba en $10 (saldo $3).
+    expect(tx.order.update.mock.calls.at(-1)[0].data).toMatchObject({ subtotal: 100, discountAmount: 0, total: 100, remainingBalance: 93 })
+    // Una bitácora DISCOUNT_REMOVED por fila retirada, después del commit.
+    expect(logAction).toHaveBeenCalledTimes(1)
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        venueId: 'venue',
+        action: 'DISCOUNT_REMOVED',
+        entity: 'Order',
+        entityId: 'order',
+        data: expect.objectContaining({ orderDiscountId: 'premio', motivo: 'promocion-retirada', stampRewardReturned: 'rw-premio' }),
+      }),
+    )
   })
 
   it('split decides "at least one item stays" from the locked lines', async () => {
@@ -462,14 +615,28 @@ describe('writer-specific fresh decisions', () => {
     expect(tx.order.update).not.toHaveBeenCalled()
   })
 
-  it('redeemStamp FREE_PRODUCT discounts the most expensive LOCKED line and burns after the Order lock', async () => {
+  it('redeemStamp FREE_PRODUCT gives one piece of the LOCKED line that gives the customer the most (P11) and burns after the Order lock', async () => {
     tx.stampReward.findFirst.mockResolvedValue({ ...REWARD, rewardType: 'FREE_PRODUCT', rewardValue: null })
 
     const result = await stampService.redeemStampReward('venue', 'order', 'rw', { staffId: 'staff' })
 
     // Locked lines are 100 and 50; the base is 150 − 20 = 130, so the whole 100 is given.
     expect(result.discountAmount).toBe(100)
-    expect(tx.orderItem.findMany).toHaveBeenCalledWith({ where: { orderId: 'order' }, select: { unitPrice: true } })
+    // B2 (P11): lee los renglones con lo que hace falta para elegir y topar el premio, no sólo su precio.
+    expect(tx.orderItem.findMany).toHaveBeenCalledWith({
+      where: { orderId: 'order' },
+      select: {
+        id: true,
+        total: true,
+        discountAmount: true,
+        orderPromotionId: true,
+        isCortesia: true,
+        taxAmount: true,
+        productId: true,
+        product: { select: { categoryId: true } },
+        unitPrice: true,
+      },
+    })
     expect(tx.stampReward.updateMany.mock.invocationCallOrder[0]).toBeGreaterThan(tx.$queryRaw.mock.invocationCallOrder[0])
     expect(tx.stampReward.update).toHaveBeenCalledWith({ where: { id: 'rw' }, data: { orderDiscountId: 'od-new' } })
   })
@@ -480,6 +647,175 @@ describe('writer-specific fresh decisions', () => {
     await expect(stampService.redeemStampReward('venue', 'order', 'rw')).rejects.toThrow('Este premio ya fue canjeado.')
     expect(tx.orderDiscount.create).not.toHaveBeenCalled()
     expect(tx.order.update).not.toHaveBeenCalled()
+  })
+
+  it('redeemPoints crea la fila de CUENTA con promociones; el recálculo de la misma tx la reparte', async () => {
+    await redeemPointsToOrder('venue', 'order', 'customer', 1000, 'staff')
+    expect(tx.orderDiscount.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        loyaltyTransactionId: 'lt-new',
+        reparto: { v: 1, alcance: 'CUENTA', conPromociones: true, espejo: false, renglones: {} },
+      }),
+    })
+  })
+  it('redeemStamp FREE_PRODUCT: la fila va DIRIGIDA al renglón premiado', async () => {
+    cuentaSana()
+    tx.stampReward.findFirst.mockResolvedValue({ ...REWARD, rewardType: 'FREE_PRODUCT', rewardValue: null })
+    await stampService.redeemStampReward('venue', 'order', 'rw', { staffId: 'staff' })
+    expect(tx.orderDiscount.create.mock.calls[0][0].data.reparto).toEqual({
+      v: 1,
+      alcance: 'DIRIGIDO',
+      conPromociones: null,
+      espejo: false,
+      renglones: { i1: 10000 },
+    })
+  })
+  it('redeemStamp FREE_PRODUCT con empate de precio: premia el renglón de id menor, importe de hoy', async () => {
+    cuentaSana()
+    tx.stampReward.findFirst.mockResolvedValue({ ...REWARD, rewardType: 'FREE_PRODUCT', rewardValue: null })
+    tx.orderItem.findMany.mockResolvedValue([
+      { id: 'zz', total: 50, discountAmount: 0, orderPromotionId: null, unitPrice: 50 },
+      { id: 'aa', total: 50, discountAmount: 0, orderPromotionId: null, unitPrice: 50 },
+    ])
+    expect((await stampService.redeemStampReward('venue', 'order', 'rw', { staffId: 'staff' })).discountAmount).toBe(50)
+    expect(tx.orderDiscount.create.mock.calls[0][0].data.reparto).toMatchObject({ alcance: 'DIRIGIDO', renglones: { aa: 5000 } })
+  })
+})
+
+describe('descuento histórico de cabecera (Codex r1 P1)', () => {
+  // El doble genérico ES una orden histórica: $20 de cabecera y ninguna fila. Antes de su propia fila, cada escritor que crea
+  // una sobre la orden congela esos $20 en una fila FIJA sin reparto, con el tx y después del candado.
+  it.each(['applyDiscount', 'redeemPoints', 'redeemStamp'] as const)(
+    '🔴 %s congela los $20 históricos en su fila antes de crear la suya',
+    async name => {
+      await writers[name]()
+      const creadas = tx.orderDiscount.create.mock.calls.map((c: any) => c[0].data)
+      expect(creadas).toHaveLength(2)
+      expect(creadas[0]).toMatchObject({ orderId: 'order', type: 'FIXED_AMOUNT', name: 'Descuento anterior', isManual: true })
+      expect([Number(creadas[0].amount), creadas[0].reparto]).toEqual([20, undefined])
+      expect(creadas[1].name).not.toBe('Descuento anterior')
+      expect(tx.orderDiscount.create.mock.invocationCallOrder[0]).toBeGreaterThan(tx.$queryRaw.mock.invocationCallOrder[0])
+    },
+  )
+  it('control — con la cabecera igual a sus filas no hay fila de descuento anterior', async () => {
+    tx.orderDiscount.findMany.mockResolvedValue([{ id: 'od-20', type: 'FIXED_AMOUNT', value: 20, amount: 20, appliedToItemIds: [] }])
+    await writers.applyDiscount()
+    expect(tx.orderDiscount.create.mock.calls.map((c: any) => c[0].data.name)).toEqual(['Diez'])
+  })
+})
+
+describe('P11 — el premio «producto gratis» regala UNA pieza del artículo que más le regala al cliente', () => {
+  const gratis = () => tx.stampReward.findFirst.mockResolvedValue({ ...REWARD, rewardType: 'FREE_PRODUCT', rewardValue: null })
+  // V1 (Codex r3): cada escenario de P11 trae una cuenta COHERENTE —subtotal = Σ renglones, descuento = Σ filas, sin pagos—,
+  // porque el servicio de hoy ya topa el premio a `subtotal − descuento` (`redeemStampReward.service.ts:118`): con la cabecera
+  // genérica del doble (150 / 20) los «hoy» de v3 no eran los de verdad. Las filas viven en un arreglo: la que crea el canje
+  // entra al `findMany` del recálculo y se pueden afirmar cabecera, total y saldo.
+  function cuentaCoherente(renglones: any[], previas: any[] = []) {
+    const filas = previas.map(f => ({ ...f }))
+    const subtotal = renglones.reduce((s, r) => s + r.total, 0)
+    const descuento = filas.reduce((s, f) => s + Number(f.amount), 0)
+    tx.order.findFirst.mockResolvedValue({ ...ORDER, subtotal, discountAmount: descuento, paidAmount: 0 })
+    tx.orderItem.findMany.mockResolvedValue(renglones)
+    tx.orderDiscount.findMany.mockImplementation(async () => filas.map(f => ({ ...f })))
+    tx.orderDiscount.create.mockImplementation(async ({ data }: any) => {
+      const fila = {
+        id: 'od-new',
+        createdAt: new Date(1),
+        appliedToItemIds: [],
+        discountId: null,
+        isComp: false,
+        ...data,
+        value: Number(data.value),
+        amount: Number(data.amount),
+      }
+      filas.push(fila)
+      return fila
+    })
+    tx.orderDiscount.update.mockImplementation(async ({ where, data }: any) => Object.assign(filas.find(f => f.id === where.id)!, data))
+  }
+  const R = (id: string, total: number, unitPrice: number, extra: Record<string, unknown> = {}) => ({
+    id,
+    total,
+    unitPrice,
+    discountAmount: 0,
+    orderPromotionId: null,
+    isCortesia: false,
+    taxAmount: 0,
+    quantity: 1,
+    ...extra,
+  })
+  const previaDirigida = (id: string, renglon: string, pesos: number) => ({
+    id,
+    type: 'FIXED_AMOUNT',
+    value: pesos,
+    amount: pesos,
+    taxReduction: 0,
+    appliedToItemIds: [],
+    createdAt: new Date(0),
+    reparto: { v: 1, alcance: 'DIRIGIDO', conPromociones: null, espejo: false, renglones: { [renglon]: pesos * 100 } },
+  })
+  const previaDeCuenta = (id: string, pesos: number, renglones: Record<string, number>) => ({
+    id,
+    type: 'FIXED_AMOUNT',
+    value: pesos,
+    amount: pesos,
+    taxReduction: 0,
+    appliedToItemIds: [],
+    createdAt: new Date(0),
+    reparto: { v: 1, alcance: 'CUENTA', conPromociones: true, espejo: false, renglones },
+  })
+  const canjear = () => stampService.redeemStampReward('venue', 'order', 'rw', { staffId: 'staff' })
+  const cabeceraEscrita = () => tx.order.update.mock.calls.at(-1)[0].data
+
+  it('🔴 P11 antes/después: cortesía del móvil de $200 + $100 + $50 ⇒ premio $100, cuenta $50 (hoy $150 y la cuenta en $0)', async () => {
+    gratis()
+    cuentaCoherente([R('cort', 0, 200, { discountAmount: 200, isCortesia: true }), R('b', 100, 100), R('c', 50, 50)]) // subtotal 150
+    // Hoy: el `unitPrice` más alto (la cortesía, 200) topado a la base 150 ⇒ $150.
+    expect((await canjear()).discountAmount).toBe(100)
+    expect(tx.orderDiscount.create.mock.calls[0][0].data.reparto).toMatchObject({ alcance: 'DIRIGIDO', renglones: { b: 10000 } })
+    expect(cabeceraEscrita()).toMatchObject({ subtotal: 150, discountAmount: 100, total: 50, remainingBalance: 50 })
+  })
+  it('🔴 P11 antes/después: un artículo por peso ($100/kg que vale $10) + uno de $50 ⇒ premio $50, cuenta $10 (hoy $60 y $0)', async () => {
+    gratis()
+    cuentaCoherente([R('kilo', 10, 100), R('b', 50, 50)]) // subtotal 60
+    // Hoy: el `unitPrice` del kilo (100) topado a la base 60 ⇒ $60.
+    expect((await canjear()).discountAmount).toBe(50)
+    expect(tx.orderDiscount.create.mock.calls[0][0].data.reparto).toMatchObject({ renglones: { b: 5000 } })
+    expect(cabeceraEscrita()).toMatchObject({ subtotal: 60, discountAmount: 50, total: 10, remainingBalance: 10 })
+  })
+  it('🔴 P11 antes/después: A ($100) ya trae $70 de otro descuento dirigido y B vale $50 ⇒ premio $50 en B, cuenta $30 (hoy $80 y $0)', async () => {
+    gratis()
+    cuentaCoherente([R('a', 100, 100), R('b', 50, 50)], [previaDirigida('previo', 'a', 70)]) // subtotal 150, descuento 70
+    // Hoy: el `unitPrice` de A (100) topado a la base 150 − 70 = 80 ⇒ $80. A sólo tiene $30 disponibles; B, $50.
+    expect((await canjear()).discountAmount).toBe(50)
+    expect(tx.orderDiscount.create.mock.calls[0][0].data.reparto).toMatchObject({ alcance: 'DIRIGIDO', renglones: { b: 5000 } })
+    expect(cabeceraEscrita()).toMatchObject({ subtotal: 150, discountAmount: 120, total: 30, remainingBalance: 30 })
+  })
+  it('control — P11: UNA pieza aunque el renglón traiga tres ($50, igual que hoy; cuenta $100)', async () => {
+    gratis()
+    cuentaCoherente([R('b', 150, 50, { quantity: 3 })])
+    expect((await canjear()).discountAmount).toBe(50)
+    expect(cabeceraEscrita()).toMatchObject({ subtotal: 150, discountAmount: 50, total: 100, remainingBalance: 100 })
+  })
+  it('control — P11, descuento de cuenta primero y premio después: $100 en A como hoy, y los $10 de cuenta se re-reparten enteros en B', async () => {
+    gratis()
+    // A y B de $100; un descuento de CUENTA de $10 ya repartido 5/5. Una fila de cuenta se re-reparte DESPUÉS de las dirigidas
+    // (pasos 3-4 del cálculo canónico): no le quita lugar al premio. Hoy: `unitPrice` 100 topado a la base 200 − 10 = 190 ⇒ $100.
+    cuentaCoherente([R('a', 100, 100), R('b', 100, 100)], [previaDeCuenta('cuenta', 10, { a: 500, b: 500 })])
+    expect((await canjear()).discountAmount).toBe(100)
+    expect(tx.orderDiscount.create.mock.calls[0][0].data.reparto).toMatchObject({ alcance: 'DIRIGIDO', renglones: { a: 10000 } })
+    expect(tx.orderDiscount.update).toHaveBeenCalledWith({
+      where: { id: 'cuenta' },
+      data: { reparto: expect.objectContaining({ alcance: 'CUENTA', renglones: { b: 1000 } }) },
+    })
+    expect(cabeceraEscrita()).toMatchObject({ subtotal: 200, discountAmount: 110, total: 90, remainingBalance: 90 })
+  })
+  it('control — P11: un único artículo con $30 disponibles da $30, igual que hoy (cuenta $0)', async () => {
+    gratis()
+    cuentaCoherente([R('a', 100, 100)], [previaDirigida('previo', 'a', 70)]) // subtotal 100, descuento 70: la base de hoy ya es 30
+    expect((await canjear()).discountAmount).toBe(30)
+    expect(tx.orderDiscount.create.mock.calls[0][0].data.reparto).toMatchObject({ renglones: { a: 3000 } })
+    expect(cabeceraEscrita()).toMatchObject({ subtotal: 100, discountAmount: 100, total: 0, remainingBalance: 0 })
   })
 })
 
@@ -507,9 +843,17 @@ describe('createOrderWithItems writes the sale money inside its creation transac
   } as any
   let apply: jest.SpyInstance
   let committedAtApply: boolean[]
+  let creadas: any[]
 
   beforeEach(() => {
     committedAtApply = []
+    creadas = []
+    tx.orderDiscount.create.mockImplementation(async ({ data }: any) => {
+      const f = { id: `od-${creadas.length + 1}`, createdAt: new Date(0), appliedToItemIds: [], ...data }
+      creadas.push(f)
+      return f
+    })
+    tx.orderDiscount.findMany.mockImplementation(async () => creadas)
     prismaMock.staffVenue.findFirst.mockResolvedValue({ staffId: 'staff' })
     prismaMock.product.findMany.mockResolvedValue([
       {
@@ -534,6 +878,10 @@ describe('createOrderWithItems writes the sale money inside its creation transac
   afterEach(() => apply.mockRestore())
 
   it('applies the promotion with the creation tx and reaffirms tip and order discount from that tx before commit', async () => {
+    tx.orderItem.findMany.mockResolvedValue([
+      { id: 'line', total: 100, discountAmount: 0, orderPromotionId: null },
+      { id: 'combo', total: 90, discountAmount: 10, orderPromotionId: 'op' },
+    ])
     const result = await createOrderWithItems('venue', input)
 
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
@@ -553,6 +901,30 @@ describe('createOrderWithItems writes the sale money inside its creation transac
       }),
     )
     expect(result.total).toBe(175)
+    expect(tx.orderDiscount.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ orderId: 'order-new', type: 'FIXED_AMOUNT', amount: new Prisma.Decimal(20) }),
+    })
+    expect(tx.orderDiscount.update).toHaveBeenCalledWith({
+      where: { id: 'od-1' },
+      data: { reparto: { v: 1, alcance: 'CUENTA', conPromociones: true, espejo: false, renglones: { line: 1053, combo: 947 } } },
+    })
+    expect(tx.orderDiscount.update.mock.invocationCallOrder[0]).toBeLessThan(tx.order.update.mock.invocationCallOrder[0])
+  })
+
+  it('venta de puras promociones: la fila de cuenta nace con el importe reafirmado y su reparto cae en el combo', async () => {
+    tx.order.create.mockResolvedValue({ ...CREATED, subtotal: new Prisma.Decimal(0), items: [] })
+    tx.order.findFirst.mockResolvedValue({ subtotal: new Prisma.Decimal(90), serviceChargeAmount: new Prisma.Decimal(0), paidAmount: 0 })
+    tx.orderItem.findMany.mockResolvedValue([{ id: 'combo', total: 90, discountAmount: 10, orderPromotionId: 'op' }])
+    await createOrderWithItems('venue', { staffId: 'staff', items: [input.items[1]], discount: 2000 } as any)
+    expect(tx.orderDiscount.create).toHaveBeenCalledTimes(1)
+    expect(tx.orderDiscount.create.mock.calls[0][0].data).toMatchObject({ amount: new Prisma.Decimal(20) })
+    expect(tx.orderDiscount.update).toHaveBeenCalledWith({
+      where: { id: 'od-1' },
+      data: { reparto: expect.objectContaining({ renglones: { combo: 2000 } }) },
+    })
+    expect(tx.order.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ discountAmount: new Prisma.Decimal(20) }) }),
+    )
   })
 
   it('a promotion failure rolls the sale back: no cancel, no compensation, no post-commit effects', async () => {
