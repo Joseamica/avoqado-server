@@ -849,31 +849,44 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
   // Calculate Core Metrics
   // ============================================================
 
-  // 1. Gross Sales - Total from valid orders (exclude drafts, cancelled, deleted, refunded)
+  // 1. Gross Sales, taxes and Discounts — ONE statement, ONE snapshot (exclude drafts, cancelled, deleted, refunded).
   // Skipped under a payment-method filter — orders can't be honestly split per bucket.
+  //
+  // Discounts are the EFFECTIVE merchandise discount PER ORDER, LEAST(discountAmount, subtotal): since B2/B2c the header is
+  // the Σ of the discount rows WITHOUT a cap (a cortesía on top of an account-level fixed discount leaves it above the
+  // subtotal); charging caps the merchandise at 0 (`computeStoredOrderTotal`), so subtracting the nominal header turned a $0
+  // account into a negative sale (Codex B2c r1, P2). The cap goes INSIDE the SUM: capping the period total would let one
+  // order's excess eat another order's sales.
+  // 🔴 The gross and the discount MUST come from the same statement (Codex B2c r2): read in two queries, a sale saved between
+  // them counted its discount but not its gross ($100 + an interleaved $200 − $150 ⇒ net −$50).
+  const orderTotalsParams: Array<string | Date> = merchantAccountId
+    ? [venueId, parsedStartDate, parsedEndDate, merchantAccountId]
+    : [venueId, parsedStartDate, parsedEndDate]
   const grossSalesResult = !isFiltered
-    ? await prisma.order.aggregate({
-        where: {
-          venueId,
-          ...dateFilter,
-          status: { notIn: ['PENDING', 'CANCELLED', 'DELETED'] },
-          paymentStatus: { notIn: ['REFUNDED'] },
-          ...merchantOrderFilter,
-        },
-        _sum: {
-          total: true,
-          subtotal: true,
-          taxAmount: true,
-          tipAmount: true,
-          discountAmount: true,
-        },
-        _count: true,
-      })
+    ? await prisma
+        .$queryRawUnsafe<Array<{ subtotal: Prisma.Decimal | null; tax: Prisma.Decimal | null; discounts: Prisma.Decimal | null }>>(
+          `
+      SELECT SUM(subtotal) AS subtotal, SUM("taxAmount") AS tax, SUM(LEAST("discountAmount", subtotal)) AS discounts
+      FROM "Order"
+      WHERE "venueId" = $1
+        AND "createdAt" >= ${utcTsParam(2)}
+        AND "createdAt" <= ${utcTsParam(3)}
+        AND status NOT IN ('PENDING', 'CANCELLED', 'DELETED')
+        AND "paymentStatus" NOT IN ('REFUNDED')
+        ${merchantAccountId ? 'AND id IN (SELECT "orderId" FROM "Payment" WHERE "merchantAccountId" = $4)' : ''}
+    `,
+          ...orderTotalsParams,
+        )
+        .then(rows => ({
+          subtotal: Number(rows[0]?.subtotal ?? 0),
+          taxAmount: Number(rows[0]?.tax ?? 0),
+          discounts: Number(rows[0]?.discounts ?? 0),
+        }))
     : null
 
   // 2. Items - Using Order.subtotal (more reliable than OrderItem aggregation
   // because some orders synced from POS don't have OrderItem records)
-  // NOTE: items = grossSalesResult._sum.subtotal (already queried above)
+  // NOTE: items = grossSalesResult.subtotal (already queried above)
 
   // 1b. Hidden giveaways (Square-style Discounts & Comps). Promotion lines and
   // mobile/TABLE_SERVICE cortesías follow the NET convention: their giveaway is
@@ -1017,14 +1030,14 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
   // Discounts — folding the SAME amount into both keeps netSales untouched.
   const { grossSales, items, discounts } = foldGiveawaysIntoSummary(
     {
-      grossSales: grossSalesResult ? Number(grossSalesResult._sum.subtotal || 0) : null,
-      items: grossSalesResult ? Number(grossSalesResult._sum.subtotal || 0) : null,
-      discounts: grossSalesResult ? Number(grossSalesResult._sum.discountAmount || 0) : null,
+      grossSales: grossSalesResult ? grossSalesResult.subtotal : null,
+      items: grossSalesResult ? grossSalesResult.subtotal : null,
+      discounts: grossSalesResult ? grossSalesResult.discounts : null,
     },
     promoDiscountCents,
     hiddenCompPesos,
   )
-  const taxes = grossSalesResult ? Number(grossSalesResult._sum.taxAmount || 0) : null
+  const taxes = grossSalesResult ? grossSalesResult.taxAmount : null
   const deferredSales = deferredResult ? Number(deferredResult._sum.remainingBalance || 0) : null
   // Service costs = any revenue beyond item sales (delivery fees, service charges, etc.)
   // Currently no separate serviceCharge field in Order schema, so this is derived
@@ -1646,7 +1659,8 @@ async function calculateTimePeriodMetrics(
       ${groupByExpression} as period,
       COALESCE(SUM(subtotal), 0) as gross_sales,
       COALESCE(SUM("taxAmount"), 0) as taxes,
-      COALESCE(SUM("discountAmount"), 0) as discounts,
+      -- EFFECTIVE discount per order (header can exceed the subtotal since B2/B2c); same rule as the summary cards.
+      COALESCE(SUM(LEAST("discountAmount", subtotal)), 0) as discounts,
       COALESCE(SUM(promo."discount_cents"), 0) as promo_discount_cents,
       COALESCE(SUM(comp."given_away"), 0) as comp_given_away,
       COUNT(*) as order_count

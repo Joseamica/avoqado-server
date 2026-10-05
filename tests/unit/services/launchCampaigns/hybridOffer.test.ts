@@ -1,4 +1,4 @@
-import { previewHybridOffer } from '@/services/launchCampaigns/hybridOffer.service'
+import { compileHybridPublication, previewHybridOffer } from '@/services/launchCampaigns/hybridOffer.service'
 
 const codes = ['CFDI', 'INVENTORY_TRACKING', 'LOYALTY_PROGRAM', 'RESERVATIONS']
 const terms = {
@@ -108,6 +108,23 @@ describe('Hybrid offer definitions and selection preview', () => {
     expect(inventory.selection.issues).toContainEqual(expect.objectContaining({ requiredFeatureCode: 'INVENTORY_TRACKING' }))
   })
 
+  it('pases de TotalPass requieren Reservas como cualquier otra dependencia (R36)', () => {
+    const offer = { ...choice(1), eligibleFeatureCodes: ['AGGREGATOR_PASSES', 'RESERVATIONS'] }
+    const missing = previewHybridOffer({ offer, selectedFeatureCodes: ['AGGREGATOR_PASSES'] })
+    expect(missing.selection.valid).toBe(false)
+    expect(missing.selection.issues).toContainEqual(
+      expect.objectContaining({ code: 'MISSING_DEPENDENCY', featureCode: 'AGGREGATOR_PASSES', requiredFeatureCode: 'RESERVATIONS' }),
+    )
+    expect(
+      previewHybridOffer({ offer, selectedFeatureCodes: ['AGGREGATOR_PASSES'], scenario: { grantedFeatureCodes: ['RESERVATIONS'] } })
+        .selection.valid,
+    ).toBe(true)
+    expect(
+      previewHybridOffer({ offer: { ...offer, choiceCount: 2 }, selectedFeatureCodes: ['AGGREGATOR_PASSES', 'RESERVATIONS'] }).selection
+        .valid,
+    ).toBe(true)
+  })
+
   it('reports operational prerequisites separately from the commercial selection', () => {
     const result = previewHybridOffer({
       offer: { ...choice(1), eligibleFeatureCodes: ['SERIALIZED_INVENTORY'] },
@@ -182,5 +199,32 @@ describe('Hybrid offer definitions and selection preview', () => {
       previewHybridOffer({ offer: { ...choice(), terms: { ...terms, promotionCycles: null, renewal: { kind: 'SAME_PRICE' } } } }).terms
         .renewal,
     ).toEqual({ kind: 'SAME_PRICE' })
+  })
+})
+
+// Spec §4.2 rule 1: a single function publishes without its dependency (the quote checks it, with dates, over the whole
+// purchase); a bundle and a choice still carry theirs inside the offer.
+describe('publishing an offer whose function depends on another', () => {
+  const features = (featureCodes: string[]) => ({ schemaVersion: 1, kind: 'FEATURES', featureCodes, terms })
+  it('a single dependent function publishes alone, with the same hash as its preview', () => {
+    for (const code of ['AUTO_REORDER', 'UPSELL_AI']) {
+      const compiled = compileHybridPublication(features([code]))
+      expect(compiled.includedFeatureCodes).toEqual([code])
+      expect(compiled.definitionHash).toBe(previewHybridOffer({ offer: features([code]) }).definitionHash)
+    }
+  })
+  it('a bundle without its dependency is still rejected; with it, it publishes', () => {
+    expect(() => compileHybridPublication(features(['AUTO_REORDER', 'UPSELL']))).toThrow(
+      expect.objectContaining({ code: 'HYBRID_OFFER_COMPOSITION' }),
+    )
+    expect(compileHybridPublication(features(['AUTO_REORDER', 'INVENTORY_TRACKING'])).includedFeatureCodes).toEqual([
+      'AUTO_REORDER',
+      'INVENTORY_TRACKING',
+    ])
+  })
+  it('a choice still needs the dependency among its eligible functions', () => {
+    expect(() => compileHybridPublication({ ...choice(1), eligibleFeatureCodes: ['AUTO_REORDER', 'CFDI'] })).toThrow(
+      expect.objectContaining({ code: 'HYBRID_OFFER_COMPOSITION' }),
+    )
   })
 })

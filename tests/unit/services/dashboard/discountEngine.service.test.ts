@@ -491,6 +491,36 @@ describe('Discount Engine Service', () => {
     })
   })
 
+  describe('R8 acotado (Codex r3 V6): sólo la base del % deja fuera lo regalado', () => {
+    const conRegalo = () =>
+      createMockOrderContext({
+        items: [
+          { id: 'cafe', productId: 'p1', categoryId: 'c1', quantity: 1, unitPrice: 100, total: 100, modifiers: [] },
+          { id: 'pan', productId: 'p2', categoryId: 'c1', quantity: 1, unitPrice: 50, total: 50, regalado: true, modifiers: [] },
+        ],
+        subtotal: 150,
+        subtotalRegalado: 50,
+      })
+    it('🔴 % de cuenta: $10 (hoy $15)', () => {
+      expect(calculateDiscountAmount(createMockEngineDiscount({ scope: 'ORDER', value: 10 }), conRegalo()).amount).toBe(10)
+    })
+    it('🔴 % de categoría: $10 (hoy $15)', () => {
+      expect(
+        calculateDiscountAmount(createMockEngineDiscount({ scope: 'CATEGORY', targetCategoryIds: ['c1'], value: 10 }), conRegalo()).amount,
+      ).toBe(10)
+    })
+    it('control — un FIJO conserva la base de hoy ($120 sobre $150, no topado a los $100 cobrables)', () => {
+      expect(
+        calculateDiscountAmount(createMockEngineDiscount({ scope: 'ORDER', type: 'FIXED_AMOUNT', value: 120 }), conRegalo()).amount,
+      ).toBe(120)
+    })
+    it('control — sin la marca nada cambia (un contexto armado a mano)', () => {
+      expect(
+        calculateDiscountAmount(createMockEngineDiscount({ scope: 'ORDER', value: 10 }), createMockOrderContext({ subtotal: 150 })).amount,
+      ).toBe(15)
+    })
+  })
+
   // ==========================================
   // BOGO CALCULATION
   // ==========================================
@@ -723,6 +753,270 @@ describe('Discount Engine Service', () => {
       const result = calculateDiscountAmount(discount, context)
 
       expect(result.amount).toBe(0)
+    })
+  })
+
+  describe('B2 — a qué renglones aplicó (spec §4.1, D7; Codex r1 #4)', () => {
+    it('2×1: guarda lo regalado POR ARTÍCULO', () => {
+      const result = calculateDiscountAmount(
+        createMockEngineDiscount({ type: 'PERCENTAGE', scope: 'QUANTITY', buyQuantity: 2, getQuantity: 1, getDiscountPercent: 100 }),
+        createMockOrderContext({
+          items: [
+            { id: 'item-1', productId: 'p1', categoryId: 'c1', quantity: 1, unitPrice: 30, total: 30, modifiers: [] },
+            { id: 'item-2', productId: 'p2', categoryId: 'c1', quantity: 1, unitPrice: 20, total: 20, modifiers: [] },
+            { id: 'item-3', productId: 'p3', categoryId: 'c1', quantity: 1, unitPrice: 10, total: 10, modifiers: [] },
+          ],
+          subtotal: 60,
+        }),
+      )
+      expect(result).toMatchObject({ amount: 10, alcance: 'DIRIGIDO', pesosPorRenglon: { 'item-3': 10 } })
+    })
+    it('categoría: DIRIGIDO con la base de cada renglón y su ámbito (P1 acotado)', () => {
+      expect(
+        calculateDiscountAmount(
+          createMockEngineDiscount({ scope: 'CATEGORY', targetCategoryIds: ['category-1'], value: 10 }),
+          createMockOrderContext(),
+        ),
+      ).toMatchObject({
+        amount: 5,
+        alcance: 'DIRIGIDO',
+        pesosPorRenglon: { 'item-1': 50 },
+        ambito: { productos: [], categorias: ['category-1'] },
+      })
+    })
+    // Revisión de T5: `toEqual` (no `toMatchObject`) — un renglón de más o de menos en los pesos cambia a quién le toca.
+    it('extras (MODIFIER): los pesos son lo de los extras elegidos de CADA renglón, ni más ni menos', () => {
+      const result = calculateDiscountAmount(
+        createMockEngineDiscount({ scope: 'MODIFIER', targetModifierIds: ['m1', 'm3'], value: 10 }),
+        createMockOrderContext({
+          items: [
+            {
+              id: 'item-1',
+              productId: 'p1',
+              categoryId: 'c1',
+              quantity: 1,
+              unitPrice: 50,
+              total: 68,
+              modifiers: [
+                { id: 'm1', modifierGroupId: 'g1', price: 10 },
+                { id: 'm2', modifierGroupId: 'g1', price: 5 },
+                { id: 'm3', modifierGroupId: 'g2', price: 3 },
+              ],
+            },
+            {
+              id: 'item-2',
+              productId: 'p2',
+              categoryId: 'c1',
+              quantity: 1,
+              unitPrice: 40,
+              total: 50,
+              modifiers: [{ id: 'm1', modifierGroupId: 'g1', price: 10 }],
+            },
+            { id: 'item-3', productId: 'p3', categoryId: 'c1', quantity: 1, unitPrice: 20, total: 20, modifiers: [] },
+          ],
+          subtotal: 138,
+        }),
+      )
+      expect(result.amount).toBe(2.3) // 10 % de (13 + 10)
+      expect(result.alcance).toBe('DIRIGIDO')
+      expect(result.pesosPorRenglon).toEqual({ 'item-1': 13, 'item-2': 10 })
+    })
+    it('artículo (ITEM): los pesos son el total de cada renglón del producto, y sólo de ésos', () => {
+      const result = calculateDiscountAmount(
+        createMockEngineDiscount({ scope: 'ITEM', targetItemIds: ['product-1'], type: 'FIXED_AMOUNT', value: 5 }),
+        createMockOrderContext({
+          items: [
+            { id: 'item-1', productId: 'product-1', categoryId: 'c1', quantity: 1, unitPrice: 50, total: 50, modifiers: [] },
+            { id: 'item-2', productId: 'product-2', categoryId: 'c1', quantity: 1, unitPrice: 40, total: 40, modifiers: [] },
+            { id: 'item-3', productId: 'product-1', categoryId: 'c1', quantity: 1, unitPrice: 30, total: 30, modifiers: [] },
+          ],
+          subtotal: 120,
+        }),
+      )
+      expect(result.amount).toBe(5)
+      expect(result.pesosPorRenglon).toEqual({ 'item-1': 50, 'item-3': 30 })
+    })
+    it('artículo %: su ámbito son los productos; un fijo, un 2×1 o un % de extras no llevan ámbito', () => {
+      expect(
+        calculateDiscountAmount(
+          createMockEngineDiscount({ scope: 'ITEM', targetItemIds: ['product-1'], value: 10, maxDiscountAmount: 3 }),
+          createMockOrderContext(),
+        ),
+      ).toMatchObject({ ambito: { productos: ['product-1'], categorias: [] }, tope: 3 })
+      expect(
+        calculateDiscountAmount(createMockEngineDiscount({ scope: 'ORDER', value: 10, maxDiscountAmount: 12 }), createMockOrderContext())
+          .tope,
+      ).toBe(12)
+      expect(
+        calculateDiscountAmount(
+          createMockEngineDiscount({ scope: 'CATEGORY', targetCategoryIds: ['category-1'], type: 'FIXED_AMOUNT', value: 5 }),
+          createMockOrderContext(),
+        ).ambito,
+      ).toBeNull()
+      expect(
+        calculateDiscountAmount(
+          createMockEngineDiscount({ scope: 'MODIFIER', targetModifierIds: ['m1'], value: 10 }),
+          createMockOrderContext(),
+        ).ambito,
+      ).toBeNull()
+    })
+    it('orden sin promociones: CUENTA sin base (toda la cuenta)', () => {
+      expect(calculateDiscountAmount(createMockEngineDiscount({ scope: 'ORDER', value: 10 }), createMockOrderContext())).toMatchObject({
+        amount: 10,
+        alcance: 'CUENTA',
+        idsBase: null,
+      })
+    })
+    it('🔴 C1: orden CON promoción: la base exacta es la que usó el evaluador (sin promociones)', () => {
+      const result = calculateDiscountAmount(
+        createMockEngineDiscount({ scope: 'ORDER', value: 10 }),
+        createMockOrderContext({
+          items: [
+            { id: 'cafe', productId: 'p1', categoryId: 'c1', quantity: 1, unitPrice: 100, total: 100, modifiers: [] },
+            {
+              id: 'combo',
+              productId: 'p2',
+              categoryId: 'c1',
+              quantity: 1,
+              unitPrice: 90,
+              total: 90,
+              orderPromotionId: 'op',
+              modifiers: [],
+            },
+          ],
+          subtotal: 290,
+        }),
+      )
+      expect(result).toMatchObject({ amount: 10, alcance: 'CUENTA', idsBase: ['cafe'] })
+    })
+    // Ruling (progress.md): la rama 2×1 devuelve los cinco campos (B2b consume `pesosPorRenglon`).
+    it('2×1: los cinco campos, sin base ni ámbito; su tope viaja', () => {
+      expect(
+        calculateDiscountAmount(
+          createMockEngineDiscount({ scope: 'QUANTITY', buyQuantity: 1, getQuantity: 1, getDiscountPercent: 100, maxDiscountAmount: 7 }),
+          createMockOrderContext(),
+        ),
+      ).toMatchObject({ amount: 7, alcance: 'DIRIGIDO', pesosPorRenglon: { 'item-1': 25 }, idsBase: null, ambito: null, tope: 7 })
+    })
+    // Codex r1 (corrige el ruling anterior): un tope que no es nulo cuenta, incluido 0 — el importe ya salía en 0 al aplicar;
+    // ahora el tope 0 viaja en el reparto y el recálculo también lo respeta.
+    it('🔴 R6: un % sin tope no lleva tope; con tope 0 lleva tope 0 (importe 0, como hoy); un fijo no lleva', () => {
+      expect(calculateDiscountAmount(createMockEngineDiscount({ scope: 'ORDER', value: 10 }), createMockOrderContext()).tope).toBeNull()
+      const conTopeCero = calculateDiscountAmount(
+        createMockEngineDiscount({ scope: 'ORDER', value: 10, maxDiscountAmount: 0 }),
+        createMockOrderContext(),
+      )
+      expect({ amount: conTopeCero.amount, tope: conTopeCero.tope }).toEqual({ amount: 0, tope: 0 })
+      expect(
+        calculateDiscountAmount(
+          createMockEngineDiscount({ scope: 'ORDER', type: 'FIXED_AMOUNT', value: 5, maxDiscountAmount: 3 }),
+          createMockOrderContext(),
+        ).tope,
+      ).toBeNull()
+    })
+  })
+
+  describe('D16 — el descuento sólo baja el impuesto que de verdad se cobró aparte (spec §4.8)', () => {
+    const conImpuesto = (contratoDePrecio: string | undefined) =>
+      createMockOrderContext({
+        contratoDePrecio,
+        items: [
+          {
+            id: 'item-1',
+            productId: 'product-1',
+            categoryId: 'category-1',
+            quantity: 2,
+            unitPrice: 25,
+            total: 50,
+            taxAmount: 8,
+            modifiers: [],
+          },
+          {
+            id: 'item-2',
+            productId: 'product-2',
+            categoryId: 'category-2',
+            quantity: 1,
+            unitPrice: 50,
+            total: 50,
+            taxAmount: 8,
+            modifiers: [],
+          },
+        ],
+      })
+
+    it.each([['IVA_INCLUIDO'], ['DESCONOCIDO'], [undefined]])('🔴 %s ⇒ taxReduction 0; el importe comercial no cambia', contrato => {
+      const result = calculateDiscountAmount(
+        createMockEngineDiscount({ scope: 'ORDER', value: 10, applyBeforeTax: true }),
+        conImpuesto(contrato),
+      )
+      expect(result).toMatchObject({ amount: 10, taxReduction: 0, reduceImpuesto: true })
+    })
+    // Preflight R-1: hoy pasa (10 × 0.16 = 1.60); cae con el sabotaje «reducción siempre 0». El rojo lo dan el 2×1 y la cabecera.
+    it('control — IVA_APARTE de cuenta: lo cobrado en cada renglón por su parte (0.80 + 0.80)', () => {
+      expect(calculateDiscountAmount(createMockEngineDiscount({ scope: 'ORDER', value: 10 }), conImpuesto('IVA_APARTE'))).toMatchObject({
+        amount: 10,
+        taxReduction: 1.6,
+      })
+    })
+    // Preflight R-1: hoy pasa (5 × 0.16 = 0.80); cae con el sabotaje «reducción siempre 0».
+    it('control — IVA_APARTE de categoría: sólo el renglón del alcance (5 × 8/50 = 0.80)', () => {
+      expect(
+        calculateDiscountAmount(
+          createMockEngineDiscount({ scope: 'CATEGORY', targetCategoryIds: ['category-1'], value: 10 }),
+          conImpuesto('IVA_APARTE'),
+        ),
+      ).toMatchObject({ amount: 5, taxReduction: 0.8 })
+    })
+    it('🔴 IVA_APARTE 2×1 con tasas distintas: el impuesto de lo regalado en cada renglón ($1.60)', () => {
+      const result = calculateDiscountAmount(
+        createMockEngineDiscount({ scope: 'QUANTITY', buyQuantity: 1, getQuantity: 1, getDiscountPercent: 100 }),
+        createMockOrderContext({
+          contratoDePrecio: 'IVA_APARTE',
+          items: [
+            { id: 'A', productId: 'pA', categoryId: 'c1', quantity: 1, unitPrice: 10, total: 10, taxAmount: 1.6, modifiers: [] },
+            { id: 'B', productId: 'pB', categoryId: 'c1', quantity: 3, unitPrice: 20, total: 60, taxAmount: 0, modifiers: [] },
+          ],
+          subtotal: 70,
+        }),
+      )
+      expect(result).toMatchObject({ amount: 30, pesosPorRenglon: { A: 10, B: 20 }, taxReduction: 1.6 })
+    })
+    it('IVA_APARTE con la cabecera en impuesto 0 (cuenta separada) ⇒ 0', () => {
+      expect(
+        calculateDiscountAmount(createMockEngineDiscount({ scope: 'ORDER', value: 10 }), { ...conImpuesto('IVA_APARTE'), taxAmount: 0 })
+          .taxReduction,
+      ).toBe(0)
+    })
+    it('applyBeforeTax = false ⇒ 0 aunque haya impuesto aparte (como hoy)', () => {
+      expect(
+        calculateDiscountAmount(createMockEngineDiscount({ scope: 'ORDER', value: 10, applyBeforeTax: false }), conImpuesto('IVA_APARTE')),
+      ).toMatchObject({
+        taxReduction: 0,
+        reduceImpuesto: false,
+      })
+    })
+    it('control — Codex r3 V2: el resultado final CONSERVA el ámbito y el tope que puso B2 (son opcionales: el compilador no avisa)', () => {
+      expect(
+        calculateDiscountAmount(
+          createMockEngineDiscount({ scope: 'ITEM', targetItemIds: ['product-1'], value: 10, maxDiscountAmount: 3 }),
+          conImpuesto('IVA_APARTE'),
+        ),
+      ).toMatchObject({ alcance: 'DIRIGIDO', ambito: { productos: ['product-1'], categorias: [] }, tope: 3, reduceImpuesto: true })
+      expect(
+        calculateDiscountAmount(createMockEngineDiscount({ scope: 'ORDER', value: 10, maxDiscountAmount: 12 }), conImpuesto('IVA_APARTE')),
+      ).toMatchObject({
+        alcance: 'CUENTA',
+        tope: 12,
+      })
+      expect(
+        calculateDiscountAmount(
+          createMockEngineDiscount({ scope: 'CATEGORY', targetCategoryIds: ['category-1'], value: 10 }),
+          conImpuesto('IVA_APARTE'),
+        ).ambito,
+      ).toEqual({
+        productos: [],
+        categorias: ['category-1'],
+      })
     })
   })
 

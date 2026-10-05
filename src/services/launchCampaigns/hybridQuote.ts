@@ -53,7 +53,9 @@ export function buildHybridQuote(input: {
         selectedFeatureCodes,
         scenario: { planTier: 'FREE', grantedFeatureCodes: [...new Set([...retained, ...planCodes])] },
       })
-      if (!preview.selection.valid) throw new BadRequestError(preview.selection.issues.map(issue => issue.message).join(' '))
+      // A missing dependency is not decided per line: the quote checks it, with dates, over the whole purchase (spec §4.2).
+      const issues = preview.selection.issues.filter(issue => issue.code !== 'MISSING_DEPENDENCY')
+      if (issues.length) throw new BadRequestError(issues.map(issue => issue.message).join(' '))
       featureCodes = preview.selection.featureCodes
     }
     for (const code of featureCodes) {

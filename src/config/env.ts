@@ -227,6 +227,12 @@ const envSchema = z.object({
   // 32-byte hex (64 chars) AES-256-GCM key encrypting MP seller refresh+access
   // tokens at rest. ROTATE-SEPARATELY from JWT_SECRET and GOOGLE_CALENDAR_TOKEN_KEY.
   MERCADO_PAGO_TOKEN_KEY: z.string().length(64, 'MERCADO_PAGO_TOKEN_KEY debe ser hex de 32 bytes (64 chars)').optional(),
+  // Conector de pases (TotalPass/Wellhub). Llave AES de 32 bytes en hex para la place_api_key de cada sucursal.
+  AGGREGATOR_TOKEN_KEY: z.string().length(64, 'AGGREGATOR_TOKEN_KEY debe ser hex de 32 bytes (64 chars)').optional(),
+  // Llave de Avoqado como integrador de TotalPass (portal developers.totalpass.com). Secreta.
+  TOTALPASS_PARTNER_API_KEY: z.string().min(1).optional(),
+  TOTALPASS_BOOKING_API_URL: z.string().url().default('https://booking-api.totalpass.com'),
+  TOTALPASS_CHECKIN_API_URL: z.string().url().default('https://gym-service-api.totalpass.com'),
   MP_API_BASE_URL: z.string().url().default('https://api.mercadopago.com'),
   MP_AUTH_BASE_URL: z.string().url().default('https://auth.mercadopago.com.mx'),
   // When 'true', append ?test_token=true to /oauth/token so MP emits sandbox

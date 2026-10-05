@@ -1,28 +1,29 @@
 /**
- * IVA por producto, plan 4 · Tarea 4 (Ruling R12) — una publicación de catálogo que choca con la barrera de IVA del trigger de
- * `Product` termina EN ESE MOMENTO, con su motivo: el lote y su registro de idempotencia pasan a `FAILED` (el mismo CAS doble
- * del watchdog), se CONFIRMA, y sólo después el confirm responde 409 con el código. Un choque de concurrencia en el paso de
- * aplicar se reintenta mientras la reserva siga vigente. Todo con la vista previa y el confirm REALES contra Postgres; las
- * carreras se pausan con un bloqueador y la espera se prueba en `pg_stat_activity` antes de soltar.
+ * IVA por producto · D15 (spec planes 6-7 §4.7 y §11): el catálogo maestro ya no administra el IVA. Publicar un artículo cuyo
+ * `taxRate` cambió, o revertir una publicación, NO toca el IVA del producto del negocio, en ninguna situación: bandera apagada,
+ * organización con contabilidad, producto con ajuste de delivery (regla C, también en plena carrera con la conciliación), o
+ * negocio encendido con el producto al 0 % y sin publicación previa (H11). Todo con la vista previa, el confirm y la reversión
+ * REALES contra Postgres.
+ *
+ * Hasta el bloque B4a este archivo probaba que esa publicación chocaba con la barrera de IVA del trigger de `Product` (R12, plan 4).
+ * Esa premisa ya no existe. El mapeo R12 se conserva como defensa y lo siguen probando las unitarias de
+ * `catalogPublicationConfirmation.service.test.ts` (describe «R12 · IVA por producto…»).
  *
  * Cada caso usa una organización NUEVA (Ruling PF7): la marca de IVA mixto nunca se regresa a falso.
  */
 import { DeliveryProvider, OrderSource, Prisma } from '@prisma/client'
 
-import { ConflictError } from '@/errors/AppError'
 import { CatalogPublicationWatchdogJob } from '@/jobs/catalog-publication-watchdog.job'
 import { ingestDeliveryOrder } from '@/services/delivery-channels/core/deliveryOrderIngestion.service'
 import { reconcileDeliveryOrderFromProvider } from '@/services/delivery-channels/core/deliveryReconciliation.service'
 import type { NormalizedDeliveryOrder, NormalizedDeliveryPayment } from '@/services/delivery-channels/core/types'
 import { uberAdapter } from '@/services/delivery-channels/providers/uber-eats/uber.adapter'
-import { seedBaseChart } from '@/services/fiscal/chartOfAccounts.service'
-import { createManualEntry } from '@/services/fiscal/journalEntry.service'
 import { acquireCatalogMutationLock } from '@/services/master-catalog/catalogMutationLock.service'
 import type { CatalogCommandContext } from '@/types/master-catalog'
 import prisma from '@/utils/prismaClient'
 import * as reintento from '@/utils/serializableRetry'
 import { apagarIvaPorProducto } from '@tests/__helpers__/iva-por-producto'
-import { desenlace, hastaQue, lineasDeVenta, marcada, nuevoRfc, polizaSuelta, retener } from '../fiscal/exclusionContable.fixtures'
+import { desenlace, hastaQue, marcada, nuevoRfc, polizaSuelta, retener } from '../fiscal/exclusionContable.fixtures'
 import {
   assertDisposableCatalogPublicationDatabase,
   cleanupCatalogPublicationFixture,
@@ -34,15 +35,8 @@ import {
 
 jest.setTimeout(240_000)
 
-const MENSAJE: Record<string, string> = {
-  IVA_POR_PRODUCTO_APAGADO:
-    'El IVA por producto no está activado para este negocio. Todos los productos se venden con IVA 16 %. Pídele a Avoqado que lo active.',
-  IVA_CONTABILIDAD_CON_HISTORIA:
-    'Este negocio ya lleva contabilidad en Avoqado (pólizas o periodos cerrados) y la contabilidad todavía no maneja IVA distinto de 16 %. Por eso este producto se queda en IVA 16 %. Escríbenos a hola@avoqado.io si lo necesitas.',
-  CATALOG_PUBLICATION_ATTEMPT_EXPIRED: 'El intento de publicación expiró.',
-  IVA_PRODUCTO_CON_AJUSTE_DE_DELIVERY:
-    'Este producto ya tuvo ajustes de delivery (Uber). Para venderlo con otro IVA, crea un producto nuevo con el IVA correcto.',
-}
+const MASCARA_V2 = ['cost', 'description', 'imageUrl', 'name', 'satProductKey', 'satUnitKey', 'type', 'unit']
+const MENSAJE: Record<string, string> = { CATALOG_PUBLICATION_ATTEMPT_EXPIRED: 'El intento de publicación expiró.' }
 
 let harness: CatalogPublicationIntegrationHarness | null = null
 const fixtures: CatalogPublicationFixture[] = []
@@ -95,18 +89,26 @@ const esperaDetrasDe = (pid: number, like: string, descripcion: string, plazoMs 
       LIMIT 1`,
   )
 
-/** Organización SIN marca (producto al 16 %) con su artículo corporativo ya vinculado; `publicar` usa la vista previa REAL. */
-async function negocioConCatalogo(suite: string, { bandera = true } = {}) {
-  const f = await createCatalogPublicationFixture(h().primary, suite, { productTaxRate: '0.1600' })
+/** Organización nueva con su artículo vinculado y sin publicación previa; `publicar` y `revertir` usan los servicios REALES. */
+async function negocioConCatalogo(suite: string, { bandera = true, productTaxRate = '0.1600' } = {}) {
+  const f = await createCatalogPublicationFixture(h().primary, suite, { productTaxRate })
   fixtures.push(f)
   if (!bandera) await apagarIvaPorProducto(f.venueId, h().primary)
   const { createCatalogPublicationPreviewService } = await import('@/services/master-catalog/catalogPublicationPreview.service')
   const { createCatalogPublicationConfirmationService } = await import('@/services/master-catalog/catalogPublicationConfirmation.service')
+  const { createCatalogPublicationReversionPreviewService } = await import('@/services/master-catalog/catalogPublicationReversion.service')
   const context: CatalogCommandContext = {
     organizationId: f.organizationId,
     actor: { type: 'HUMAN', staffId: f.staffId, impersonating: false },
     orgRole: 'OWNER',
   }
+  const confirmar = (preview: { publicationBatchId: string; previewToken: string }, idempotencyKey: string) =>
+    createCatalogPublicationConfirmationService({ prisma: h().writerOne as never }).confirm(context, {
+      publicationBatchId: preview.publicationBatchId,
+      previewToken: preview.previewToken,
+      idempotencyKey,
+      confirm: true,
+    })
   /** El artículo pasa a `taxRate` y se publica al negocio (vista previa nueva, key nueva). */
   const publicar = async (taxRate: string, etiqueta: string) => {
     await h().primary.catalogItem.update({
@@ -120,19 +122,21 @@ async function negocioConCatalogo(suite: string, { bandera = true } = {}) {
       targets: [{ catalogItemId: f.catalogItemId, venueId: f.venueId, productId: f.productId }],
     })
     expect(preview.canConfirm).toBe(true)
-    return {
-      batchId: preview.publicationBatchId,
-      idempotencyKey,
-      confirmar: () =>
-        createCatalogPublicationConfirmationService({ prisma: h().writerOne as never }).confirm(context, {
-          publicationBatchId: preview.publicationBatchId,
-          previewToken: preview.previewToken,
-          idempotencyKey,
-          confirm: true,
-        }),
-    }
+    return { batchId: preview.publicationBatchId, idempotencyKey, preview, confirmar: () => confirmar(preview, idempotencyKey) }
   }
-  return { f, publicar }
+  /** Revierte la línea APLICADA del lote `batchId` con la reversión REAL. */
+  const revertir = async (batchId: string, etiqueta: string) => {
+    const fuente = await h().observer.catalogPublicationLine.findFirstOrThrow({ where: { batchId }, select: { id: true } })
+    const idempotencyKey = `iva-catalogo-revertir-${etiqueta}-${f.key}`
+    const preview = await createCatalogPublicationReversionPreviewService({ prisma: h().primary as never }).preview(context, {
+      operation: 'CATALOG_FIELDS_REVERSION',
+      idempotencyKey,
+      targets: [{ catalogItemId: f.catalogItemId, venueId: f.venueId, productId: f.productId, sourceLineId: fuente.id }],
+    })
+    expect(preview.canConfirm).toBe(true)
+    return confirmar(preview, idempotencyKey)
+  }
+  return { f, publicar, revertir }
 }
 
 const lote = (batchId: string) =>
@@ -168,17 +172,15 @@ async function terminado(f: CatalogPublicationFixture, pub: { batchId: string; i
   }
 }
 
-const producto = (f: CatalogPublicationFixture) =>
-  h().observer.product.findUniqueOrThrow({ where: { id: f.productId }, select: { ivaTratamiento: true, name: true } })
-
-/** El 409 del IVA, con su código y el mensaje al cliente, como ConflictError (nunca un P2010 crudo). */
-function esElDeIva(r: unknown, code: string) {
-  expect(r).toMatchObject({ statusCode: 409, code, message: MENSAJE[code] })
-  expect(r).toBeInstanceOf(ConflictError)
+const producto = async (f: CatalogPublicationFixture) => {
+  const p = await h().observer.product.findUniqueOrThrow({
+    where: { id: f.productId },
+    select: { ivaTratamiento: true, taxRate: true, name: true, ajusteDeliveryAlgunaVez: true },
+  })
+  return { ivaTratamiento: p.ivaTratamiento, taxRate: p.taxRate.toFixed(4), name: p.name, ajuste: p.ajusteDeliveryAlgunaVez }
 }
 
-/** Un ajuste de delivery sobre el producto, como lo deja la conciliación (Tarea 5): la venta, el REFUND PROVIDER_ADJUSTMENT y la
- *  marca, en UNA transacción. Devuelve la orden, para borrarla al final. */
+/** Un ajuste de delivery sobre el producto, como lo deja la conciliación: la venta, el REFUND PROVIDER_ADJUSTMENT y la marca. */
 const ajusteDeDelivery = (f: CatalogPublicationFixture) =>
   h().primary.$transaction(async tx => {
     const orden = await tx.order.create({
@@ -279,36 +281,86 @@ async function borrarReparto(venueId: string) {
   await prisma.venueTenderType.deleteMany({ where: { venueId } })
 }
 
-describe('una publicación de catálogo rechazada por IVA termina en ese momento, con su motivo (R12)', () => {
-  it('plan 4b · regla C: un producto con la marca no cambia de IVA por catálogo; 409 y lote FAILED', async () => {
-    const { f, publicar } = await negocioConCatalogo('iva-ajuste-delivery')
-    const orden = await ajusteDeDelivery(f)
-    try {
-      const a0 = await publicar('0.0000', 'ajuste-delivery')
-      esElDeIva(await desenlace(a0.confirmar()), 'IVA_PRODUCTO_CON_AJUSTE_DE_DELIVERY')
-      await terminado(f, a0, 'IVA_PRODUCTO_CON_AJUSTE_DE_DELIVERY')
-      expect(await producto(f)).toEqual({ ivaTratamiento: 'IVA_16', name: 'Local name' })
-    } finally {
-      await borrarOrden(orden)
-    }
-  })
+describe('D15 · el catálogo maestro no toca el IVA del producto', () => {
+  it.each([
+    {
+      caso: 'bandera apagada',
+      suite: 'iva-apagada',
+      opciones: { bandera: false, productTaxRate: '0.1600' },
+      historia: false,
+      ajuste: false,
+      articulo: '0.0000',
+      esperado: { ivaTratamiento: 'IVA_16', taxRate: '0.1600', ajuste: false },
+    },
+    {
+      caso: 'organización con pólizas',
+      suite: 'iva-historia',
+      opciones: { bandera: true, productTaxRate: '0.1600' },
+      historia: true,
+      ajuste: false,
+      articulo: '0.0000',
+      esperado: { ivaTratamiento: 'IVA_16', taxRate: '0.1600', ajuste: false },
+    },
+    {
+      caso: 'producto con ajuste de delivery (regla C)',
+      suite: 'iva-ajuste-delivery',
+      opciones: { bandera: true, productTaxRate: '0.1600' },
+      historia: false,
+      ajuste: true,
+      articulo: '0.0000',
+      esperado: { ivaTratamiento: 'IVA_16', taxRate: '0.1600', ajuste: true },
+    },
+    {
+      caso: 'negocio encendido, producto al 0 % y sin publicación previa (H11)',
+      suite: 'iva-h11',
+      opciones: { bandera: true, productTaxRate: '0.0000' },
+      historia: false,
+      ajuste: false,
+      articulo: '0.1600',
+      esperado: { ivaTratamiento: 'IVA_0', taxRate: '0.0000', ajuste: false },
+    },
+  ])(
+    '$caso: APPLIED, el nombre se publica y el IVA del producto queda igual',
+    async ({ suite, opciones, historia, ajuste, articulo, esperado }) => {
+      const { f, publicar } = await negocioConCatalogo(suite, opciones)
+      if (historia) await polizaSuelta(f.organizationId, nuevoRfc(), f.venueId)
+      const orden = ajuste ? await ajusteDeDelivery(f) : null
+      try {
+        const marcaAntes = await marcada(f.organizationId)
+        const a = await publicar(articulo, suite)
+        expect(a.preview.lines[0].fields.map(field => field.field)).toEqual(MASCARA_V2)
 
-  // Review Focus 5b (Ruling 4b-R6): la aplicación fijó su foto ANTES del primer ajuste, y ese ajuste lo escribe la conciliación
-  // REAL (con su marca). La marca vive en la fila del producto: la foto vieja choca, no la esconde.
-  it('plan 4b · carrera D — la conciliación confirma el primer ajuste después de la foto de la aplicación; ésta choca (40001), reintenta, ve la marca y sale 409', async () => {
+        await expect(a.confirmar()).resolves.toMatchObject({ state: 'APPLIED' })
+        expect(await producto(f)).toEqual({ ...esperado, name: 'Corporate name' })
+        expect(await marcada(f.organizationId)).toBe(marcaAntes)
+        const linea = await h().observer.catalogPublicationLine.findFirstOrThrow({
+          where: { batchId: a.batchId },
+          select: { fieldMask: true },
+        })
+        expect(linea.fieldMask).toEqual(MASCARA_V2)
+      } finally {
+        if (orden) await borrarOrden(orden)
+      }
+    },
+  )
+
+  // Review Focus de 4b (Ruling 4b-R6), conservado: la aplicación fijó su foto ANTES del primer ajuste, y ese ajuste lo escribe la
+  // conciliación REAL. La fila del producto cambia después de la foto: la publicación choca (40001), reintenta desde una foto
+  // nueva y, como ya no escribe IVA, se APLICA.
+  it('carrera D: la conciliación confirma el primer ajuste después de la foto de la publicación; ésta choca (40001), reintenta y se aplica sin tocar el IVA ni la marca', async () => {
     const { f, publicar } = await negocioConCatalogo('iva-ajuste-foto-vieja')
     let publicacion: Promise<unknown> = Promise.resolve()
     try {
       const pedido = await pedidoDeUber(f)
       const a0 = await publicar('0.0000', 'ajuste-foto-vieja')
-      // Como en el caso del posteo: la aplicación toma su intento (y con él su foto) y se forma antes de Organization.
+      // La aplicación toma su intento (y con él su foto) y se forma detrás del candado de catálogo que retiene otra transacción.
       const antesala = await retener(h().writerTwo, tx => acquireCatalogMutationLock(tx, f.organizationId))
       try {
         publicacion = desenlace(a0.confirmar())
         await esperaDetrasDe(
           antesala.pid,
           '%pg_advisory_xact_lock%',
-          'la aplicación, con su foto ya fijada, formada antes de Organization',
+          'la aplicación, con su foto ya fijada, formada detrás del candado de catálogo',
           60_000,
           h().names.writerOne,
         )
@@ -319,9 +371,8 @@ describe('una publicación de catálogo rechazada por IVA termina en ese momento
       } finally {
         await antesala.soltar()
       }
-      esElDeIva(await publicacion, 'IVA_PRODUCTO_CON_AJUSTE_DE_DELIVERY')
-      await terminado(f, a0, 'IVA_PRODUCTO_CON_AJUSTE_DE_DELIVERY')
-      expect(await producto(f)).toEqual({ ivaTratamiento: 'IVA_16', name: 'Local name' })
+      expect(await publicacion).toMatchObject({ ok: { state: 'APPLIED' } })
+      expect(await producto(f)).toEqual({ ivaTratamiento: 'IVA_16', taxRate: '0.1600', name: 'Corporate name', ajuste: true })
       expect(huboUn40001()).toBe(true) // la fila del producto cambió después de su foto: chocó y se repitió
     } finally {
       await publicacion // ninguna aplicación queda viva detrás de la limpieza, ni con el rojo
@@ -329,148 +380,19 @@ describe('una publicación de catálogo rechazada por IVA termina en ese momento
     }
   })
 
-  it.each([
-    { caso: 'bandera apagada', bandera: false, historia: false, code: 'IVA_POR_PRODUCTO_APAGADO' },
-    { caso: 'bandera encendida y la organización ya tiene pólizas', bandera: true, historia: true, code: 'IVA_CONTABILIDAD_CON_HISTORIA' },
-  ])(
-    '$caso: 409 $code, lote y registro FAILED; al regresar el artículo a 16 % se publica de inmediato',
-    async ({ bandera, historia, code }) => {
-      const { f, publicar } = await negocioConCatalogo(historia ? 'iva-historia' : 'iva-apagada', { bandera })
-      if (historia) await polizaSuelta(f.organizationId, nuevoRfc(), f.venueId)
+  it('revertir tampoco toca el IVA: el negocio pasó el producto a 0 % después de publicar y la reversión regresa sólo el nombre', async () => {
+    const { f, publicar, revertir } = await negocioConCatalogo('iva-revertir')
+    const a = await publicar('0.1600', 'revertir')
+    await expect(a.confirmar()).resolves.toMatchObject({ state: 'APPLIED' })
+    await h().primary.product.update({ where: { id: f.productId }, data: { ivaTratamiento: 'IVA_0' } })
 
-      const a0 = await publicar('0.0000', 'a0')
-      esElDeIva(await desenlace(a0.confirmar()), code)
-      await terminado(f, a0, code)
-      expect(await producto(f)).toEqual({ ivaTratamiento: 'IVA_16', name: 'Local name' })
-      expect(await marcada(f.organizationId)).toBe(false)
-
-      // Sin esperar los 120 s de la reserva: una vista previa y un confirm NUEVOS funcionan ya.
-      const a16 = await publicar('0.1600', 'a16')
-      await expect(a16.confirmar()).resolves.toMatchObject({ state: 'APPLIED' })
-      expect(await producto(f)).toEqual({ ivaTratamiento: 'IVA_16', name: 'Corporate name' })
-    },
-  )
-
-  it('contra un posteo: la póliza confirma después de la foto de la aplicación; ésta choca (40001), reintenta, ve la póliza y sale 409 IVA_CONTABILIDAD_CON_HISTORIA', async () => {
-    const { f, publicar } = await negocioConCatalogo('iva-posteo')
-    const rfc = nuevoRfc()
-    await prisma.venue.update({ where: { id: f.venueId }, data: { rfc } })
-    await seedBaseChart(f.venueId, { staffId: null })
-    const lines = await lineasDeVenta(f.organizationId, rfc)
-    const a0 = await publicar('0.0000', 'posteo')
-
-    // La aplicación toma el candado de intento (y con él su foto) y se deja formada justo antes de Organization: su candado
-    // de catálogo lo retiene otra transacción. El posteo toma Organization FOR SHARE y se queda esperando su cuenta.
-    const antesala = await retener(h().writerTwo, tx => acquireCatalogMutationLock(tx, f.organizationId))
-    const cuenta = await retener(
-      h().blocker,
-      tx => tx.$queryRaw`SELECT id FROM "LedgerAccount" WHERE id = ${lines[0].ledgerAccountId} FOR UPDATE`,
-    )
-    let publicacion: Promise<unknown> = Promise.resolve()
-    let posteo: Promise<unknown> = Promise.resolve()
-    try {
-      publicacion = desenlace(a0.confirmar())
-      await esperaDetrasDe(
-        antesala.pid,
-        '%pg_advisory_xact_lock%',
-        'la aplicación, con su foto ya fijada, formada antes de Organization',
-        60_000,
-        h().names.writerOne,
-      )
-      posteo = desenlace(
-        createManualEntry(f.venueId, { date: '2026-06-15', concept: 'Póliza contra el catálogo', lines }, { staffId: null }),
-      )
-      const pidPosteo = await esperaDetrasDe(
-        cuenta.pid,
-        '%INSERT INTO "public"."JournalLine"%',
-        'el posteo, ya con Organization FOR SHARE, esperando la cuenta retenida',
-      )
-      await antesala.soltar()
-      await esperaDetrasDe(
-        pidPosteo,
-        '%FROM "Organization"%FOR NO KEY UPDATE%',
-        'la aplicación esperando la organización que retiene el posteo',
-        4_000,
-        h().names.writerOne,
-      )
-    } finally {
-      await antesala.soltar()
-      await cuenta.soltar()
-    }
-
-    const [p, q] = [await publicacion, await posteo]
-    expect(q).toMatchObject({ ok: { totalDebitCents: 11_600 } })
-    esElDeIva(p, 'IVA_CONTABILIDAD_CON_HISTORIA')
-    await terminado(f, a0, 'IVA_CONTABILIDAD_CON_HISTORIA')
-    expect(await producto(f)).toEqual({ ivaTratamiento: 'IVA_16', name: 'Local name' })
-    expect(await marcada(f.organizationId)).toBe(false)
-    expect(await prisma.journalEntry.count({ where: { organizationId: f.organizationId } })).toBe(1)
-    expect(huboUn40001()).toBe(true) // la aplicación chocó con la póliza confirmada tras su foto y se repitió
-  })
-
-  it('contra el watchdog: el watchdog termina antes el intento vencido; el cierre del confirm cambia 0/0 filas y responde el 409 de IVA sin 500', async () => {
-    const { f, publicar } = await negocioConCatalogo('iva-watchdog', { bandera: false })
-    const a0 = await publicar('0.0000', 'watchdog')
-    // Fuera de la ventana: el watchdog con el reloj real barre intentos vencidos de corridas viejas.
-    await new CatalogPublicationWatchdogJob({ prisma: h().writerTwo as never, cron: sinCron() }).runNow()
-
-    const articulo = await retener(h().blocker, tx => tx.$queryRaw`SELECT id FROM "CatalogItem" WHERE id = ${f.catalogItemId} FOR UPDATE`)
-    let fila: Awaited<ReturnType<typeof retener>> | null = null
-    let publicacion: Promise<unknown> = Promise.resolve()
-    let vigilancia: Promise<unknown> = Promise.resolve()
-    try {
-      publicacion = desenlace(a0.confirmar())
-      const pidAplicacion = await esperaDetrasDe(
-        articulo.pid,
-        '%FROM "CatalogItem"%',
-        'la aplicación, con el candado de intento, esperando el artículo retenido',
-        60_000,
-        h().names.writerOne,
-      )
-      const { leaseExpiresAt } = await lote(a0.batchId)
-      // La fila del lote retenida: el watchdog, ya con el candado de intento, se detiene antes de confirmar su FAILED.
-      fila = await retener(h().primary, tx => tx.$queryRaw`SELECT id FROM "CatalogPublicationBatch" WHERE id = ${a0.batchId} FOR UPDATE`)
-      // El watchdog REAL con su reloj un milisegundo después del vencimiento, en vez de esperar los 120 s.
-      const watchdog = new CatalogPublicationWatchdogJob({
-        prisma: h().writerTwo as never,
-        cron: sinCron(),
-        now: () => new Date((leaseExpiresAt as Date).getTime() + 1),
-      })
-      vigilancia = desenlace(watchdog.runNow())
-      const pidWatchdog = await esperaDetrasDe(
-        pidAplicacion,
-        '%pg_advisory_xact_lock%',
-        'el watchdog esperando el candado de intento que tiene la aplicación',
-        4_000,
-        h().names.writerTwo,
-      )
-      await articulo.soltar()
-      await esperaDetrasDe(
-        fila.pid,
-        '%CatalogPublicationBatch%',
-        'el watchdog, ya con el candado de intento, esperando la fila del lote',
-        4_000,
-        h().names.writerTwo,
-      )
-      await esperaDetrasDe(
-        pidWatchdog,
-        '%pg_advisory_xact_lock%',
-        'el cierre del confirm, con su foto ya fijada, esperando el candado de intento que tiene el watchdog',
-        4_000,
-        h().names.writerOne,
-      )
-    } finally {
-      await articulo.soltar()
-      await fila?.soltar()
-    }
-
-    const [p, w] = [await publicacion, await vigilancia]
-    expect(w).toMatchObject({ ok: { errors: 0 } })
-    expect((w as { ok: { failed: number } }).ok.failed).toBeGreaterThanOrEqual(1)
-    esElDeIva(p, 'IVA_POR_PRODUCTO_APAGADO')
-    await terminado(f, a0, 'CATALOG_PUBLICATION_ATTEMPT_EXPIRED') // ganó el watchdog; el confirm no pisó su motivo
-    expect(await producto(f)).toEqual({ ivaTratamiento: 'IVA_16', name: 'Local name' })
-    expect(huboUn40001()).toBe(true) // el cierre del confirm chocó con el FAILED del watchdog y se repitió
+    await expect(revertir(a.batchId, 'revertir')).resolves.toMatchObject({ state: 'APPLIED' })
+    expect(await producto(f)).toEqual({ ivaTratamiento: 'IVA_0', taxRate: '0.0000', name: 'Local name', ajuste: false })
+    const binding = await h().observer.catalogVenueBinding.findUniqueOrThrow({
+      where: { id: f.bindingId },
+      select: { managedFieldMask: true },
+    })
+    expect(binding.managedFieldMask).toEqual(MASCARA_V2)
   })
 
   it('regresión: otro error al aplicar sigue como hoy (queda APPLYING); el watchdog no toca el intento vivo y pasa a FAILED el vencido', async () => {

@@ -4,18 +4,19 @@ import prisma from '@/utils/prismaClient'
 import { BadRequestError, ConflictError, NotFoundError } from '@/errors/AppError'
 import { FEATURE_CATALOG } from '@/config/featureCatalog'
 import { elPlanConcede, PAID_PLAN_TIER_CODES, FREE_TIER_CODES } from '@/services/access/basePlan.service'
-import { inventarioDeObligaciones } from '@/services/access/inventarioDeObligaciones'
+import { inventarioDeObligaciones, type InventarioDeObligaciones } from '@/services/access/inventarioDeObligaciones'
 import { evaluarCompatibilidad, type Proyeccion } from '@/services/access/obligacionesDeCobro'
 import { getOrCreateStripeCustomer, stripe, STRIPE_DENTRO_DEL_CANDADO } from '@/services/stripe.service'
 import { autorizarObligacionNueva } from '@/services/access/autorizarObligacionNueva'
 import { fromStripeAmount } from '@/services/payments/providers/money'
 import { hybridOfferDefinition } from './hybridOffer.schema'
-import { planIncludes } from './hybridOffer.service'
-import { buildHybridQuote } from './hybridQuote'
+import { assertCartDependencyTerms, projectionCodes, retainedCoverage } from './hybridCoverage'
+import { buildHybridQuote, type QuoteLine } from './hybridQuote'
 import { hybridHash } from './hybridProvider'
 import { readHybridCreditSource } from './hybridSources'
 import { assertHybridBalanceUsable } from './hybridFundingGraph'
 import { audienceIncludes, hybridOfferBlocker, type HybridOfferBlocker } from './hybridOfferEligibility'
+import { lockProducts, productKeyOf, promotionWindow } from './hybridProduct'
 import { assertKeepSelection } from '@/services/dashboard/seatReconciliation.service'
 
 const errorMap: z.ZodErrorMap = () => ({ message: 'Valor requerido o formato no válido' })
@@ -69,15 +70,100 @@ export function hybridProjections(lines: ReturnType<typeof buildHybridQuote>['li
       : { tipo: 'PAQUETE', featureCodes: line.featureCodes },
   )
 }
-const projectionCodes = (projection: Proyeccion): string[] => {
-  if (projection.tipo === 'FUNCION') return [projection.featureCode]
-  if (projection.tipo === 'PAQUETE') return projection.featureCodes
-  if (projection.tipo === 'PLAN')
-    return (
-      projection.featureCodes ??
-      FEATURE_CATALOG.flatMap(entry => (entry.featureCode && planIncludes(projection.tier, entry) ? [entry.featureCode] : []))
-    )
-  return []
+
+const accessUnverified = () => new ConflictError('No pudimos revisar todos los accesos del negocio.', 'HYBRID_ACCESS_UNVERIFIED')
+const isPlanRow = (row: { feature: { code: string } }) => (PAID_PLAN_TIER_CODES as readonly string[]).includes(row.feature.code)
+
+/**
+ * Everything the venue keeps besides what it replaces: read for the quote and AGAIN under the purchase lock, where the
+ * dated dependency check is repeated (spec §4.2 rule 5) — a contract's `cancelAt` is not part of the inventory hash.
+ */
+async function readRetained(
+  db: Prisma.TransactionClient,
+  venueId: string,
+  inventory: InventarioDeObligaciones,
+  replaceSubscriptionIds: string[],
+  now: Date,
+) {
+  const keptIds = inventory.vivas.map(source => source.subscriptionId).filter(id => !replaceSubscriptionIds.includes(id))
+  const [legacy, replacedContracts, contracts] = await Promise.all([
+    db.venueFeature.findMany({
+      where: {
+        venueId,
+        active: true,
+        suspendedAt: null,
+        AND: [
+          { OR: [{ endDate: null }, { endDate: { gte: now } }] },
+          { OR: [{ stripeSubscriptionId: null }, { stripeSubscriptionId: { notIn: replaceSubscriptionIds } }] },
+        ],
+      },
+      select: { stripeSubscriptionId: true, endDate: true, feature: { select: { code: true } } },
+      orderBy: { id: 'asc' },
+      take: 201,
+    }),
+    db.hybridContract.findMany({
+      where: { venueId, stripeSubscriptionId: { in: replaceSubscriptionIds } },
+      select: { id: true, stripeSubscriptionId: true },
+      take: 65,
+      orderBy: { id: 'asc' },
+    }),
+    db.hybridContract.findMany({
+      where: { venueId, endedAt: null, stripeSubscriptionId: { in: keptIds } },
+      select: {
+        stripeSubscriptionId: true,
+        featureCodes: true,
+        startsAt: true,
+        cancelAt: true,
+        publication: { select: { definition: true } },
+      },
+      take: 65,
+      orderBy: { id: 'asc' },
+    }),
+  ])
+  if (legacy.length > 200 || replacedContracts.length > 64 || contracts.length > 64) throw accessUnverified()
+  const grants = await db.capabilityGrant.findMany({
+    where: {
+      venueId,
+      OR: [{ contractId: null }, { contractId: { notIn: replacedContracts.map(c => c.id) } }],
+      revokedAt: null,
+      startsAt: { lte: now },
+      endsAt: { gt: now },
+    },
+    select: { featureCode: true, endsAt: true, contractId: true },
+    take: 1001,
+    orderBy: { id: 'asc' },
+  })
+  if (grants.length > 1000) throw accessUnverified()
+  return { legacy, replacedContracts, contracts, grants }
+}
+
+/**
+ * Spec §4.5 (option A): a function of a new line that the venue paid in a REPLACED contract moves to today's offer. The
+ * quote says so: `from` is what that contract charged in its last paid period, `to` the line's price; equal is no change.
+ * Only one function against itself: a plan or bundle price is never a function's rate (a function that came inside a
+ * plan never had a standalone one), so both the paid line and the new line must cover exactly that one function.
+ */
+async function repricedFunctions(venueId: string, subscriptionIds: string[], lines: QuoteLine[]) {
+  const periods = await Promise.all(
+    subscriptionIds.map(stripeSubscriptionId =>
+      prisma.hybridPaymentPeriod.findFirst({
+        where: { venueId, stripeSubscriptionId },
+        orderBy: [{ endsAt: 'desc' }, { id: 'desc' }],
+        select: { composition: true },
+      }),
+    ),
+  )
+  const paid = new Map<string, Prisma.Decimal>()
+  for (const period of periods)
+    for (const line of Array.isArray(period?.composition) ? (period.composition as Array<{ featureCodes: string[]; amount: string }>) : [])
+      if (line.featureCodes.length === 1) paid.set(line.featureCodes[0], new Prisma.Decimal(line.amount))
+  return lines.flatMap(line => {
+    if (line.featureCodes.length !== 1) return []
+    const [featureCode] = line.featureCodes
+    const from = paid.get(featureCode)
+    const to = new Prisma.Decimal(line.terms.price)
+    return from && !from.eq(to) ? [{ featureCode, from: from.toFixed(2), to: to.toFixed(2) }] : []
+  })
 }
 
 function assertAudience(
@@ -94,6 +180,7 @@ const OFFER_BLOCKED: Record<HybridOfferBlocker, () => ConflictError> = {
   INELIGIBLE: () => new ConflictError('Esta oferta no está disponible para tu organización.', 'HYBRID_OFFER_INELIGIBLE'),
   PREPARING: () => new ConflictError('La oferta todavía está preparando su cobro.', 'HYBRID_OFFER_UNAVAILABLE'),
 }
+const offerChanged = () => new ConflictError('La oferta cambió; revisa una cotización nueva.', 'HYBRID_OFFER_UNAVAILABLE')
 
 /** Re-read at acceptance with the same effective timestamp; changes require a new human-reviewed quote. */
 export async function observeHybridQuote(venueId: string, body: z.output<typeof hybridQuoteBody>, effectiveAt: number) {
@@ -104,22 +191,40 @@ export async function observeHybridQuote(venueId: string, body: z.output<typeof 
     where: { id: { in: body.lines.map(line => line.publicationId) } },
     take: 8,
     orderBy: { id: 'asc' },
-    include: { campaign: { include: { publications: { select: { id: true }, orderBy: { version: 'desc' }, take: 1 } } } },
+    include: { campaign: true },
   })
   if (publications.length !== body.lines.length || new Set(publications.map(p => p.campaignId)).size !== publications.length)
     throw new BadRequestError('La selección contiene una oferta desconocida o repetida.')
+  const parentListKeys: string[] = []
   for (const publication of publications) {
     const definition = hybridOfferDefinition.parse(publication.definition)
     const blocker = hybridOfferBlocker(
-      { ...publication.campaign, latestPublicationId: publication.campaign.publications[0]?.id },
+      { ...publication.campaign, latestPublicationId: publication.campaign.currentPublicationId ?? undefined },
       { ...publication, renewalKind: definition.terms.renewal.kind },
       venue.organization,
       now,
     )
     if (blocker) throw OFFER_BLOCKED[blocker]()
+    if (publication.campaign.promotionGroupId) {
+      const key = productKeyOf(definition)
+      if (!key) throw OFFER_BLOCKED.UNAVAILABLE()
+      parentListKeys.push(key)
+    }
   }
+  // A generated promotion sells only while the LIST of its product does, also through its own link (spec §4.2).
+  if (
+    parentListKeys.length &&
+    (await prisma.hybridCampaign.count({ where: { purpose: 'LIST', status: 'ACTIVE', listProductKey: { in: parentListKeys } } })) !==
+      new Set(parentListKeys).size
+  )
+    throw OFFER_BLOCKED.UNAVAILABLE()
+  // Single use is a promotion rule: a LIST is bought again freely and never holds a redemption.
   const redeemed = await prisma.hybridRedemption.findMany({
-    where: { organizationId: venue.organizationId, campaignId: { in: publications.map(p => p.campaignId) }, status: { not: 'RELEASED' } },
+    where: {
+      organizationId: venue.organizationId,
+      campaignId: { in: publications.filter(p => p.campaign.purpose !== 'LIST').map(p => p.campaignId) },
+      status: { not: 'RELEASED' },
+    },
     take: 8,
     orderBy: { id: 'asc' },
   })
@@ -133,51 +238,15 @@ export async function observeHybridQuote(venueId: string, body: z.output<typeof 
     throw new BadRequestError('No encontramos una suscripción de origen en este negocio.')
   if (replaced.some(source => source.proyecciones.some(p => p.tipo === 'AJENO' || p.tipo === 'DESCONOCIDO')))
     throw new ConflictError('Una suscripción de origen requiere revisión.', 'OBLIGACION_DESCONOCIDA')
-  const [legacy, contracts] = await Promise.all([
-    prisma.venueFeature.findMany({
-      where: {
-        venueId,
-        active: true,
-        suspendedAt: null,
-        AND: [
-          { OR: [{ endDate: null }, { endDate: { gte: now } }] },
-          { OR: [{ stripeSubscriptionId: null }, { stripeSubscriptionId: { notIn: body.replaceSubscriptionIds } }] },
-        ],
-        feature: { code: { notIn: [...PAID_PLAN_TIER_CODES] } },
-      },
-      select: { feature: { select: { code: true } } },
-      orderBy: { id: 'asc' },
-      take: 201,
-    }),
-    prisma.hybridContract.findMany({
-      where: { venueId, stripeSubscriptionId: { in: body.replaceSubscriptionIds } },
-      select: { id: true },
-      take: 65,
-      orderBy: { id: 'asc' },
-    }),
-  ])
-  if (legacy.length > 200 || contracts.length > 64)
-    throw new ConflictError('No pudimos revisar todos los accesos del negocio.', 'HYBRID_ACCESS_UNVERIFIED')
-  const grants = await prisma.capabilityGrant.findMany({
-    where: {
-      venueId,
-      OR: [{ contractId: null }, { contractId: { notIn: contracts.map(c => c.id) } }],
-      revokedAt: null,
-      startsAt: { lte: now },
-      endsAt: { gt: now },
-    },
-    select: { featureCode: true },
-    take: 1001,
-    orderBy: { id: 'asc' },
-  })
-  if (grants.length > 1000) throw new ConflictError('No pudimos revisar todos los accesos del negocio.', 'HYBRID_ACCESS_UNVERIFIED')
+  const retained = await readRetained(prisma, venueId, inventory, body.replaceSubscriptionIds, now)
   const retainedCodes = [
     ...new Set([
       ...inventory.vivas
         .filter(source => !body.replaceSubscriptionIds.includes(source.subscriptionId))
         .flatMap(source => source.proyecciones.flatMap(projectionCodes)),
-      ...legacy.map(row => row.feature.code),
-      ...grants.map(grant => grant.featureCode),
+      // Plan rows only feed the dated coverage below; what counts as already paid stays as it was.
+      ...retained.legacy.filter(row => !isPlanRow(row)).map(row => row.feature.code),
+      ...retained.grants.map(grant => grant.featureCode),
     ]),
   ]
   const composition = buildHybridQuote({
@@ -195,6 +264,11 @@ export async function observeHybridQuote(venueId: string, body: z.output<typeof 
     })),
     dropFeatureCodes: body.dropFeatureCodes,
   })
+  assertCartDependencyTerms(
+    retainedCoverage({ inventory, replaceSubscriptionIds: body.replaceSubscriptionIds, ...retained }),
+    composition.lines,
+    now,
+  )
   const compatible = evaluarCompatibilidad(
     inventory.vivas,
     { tipo: 'HYBRID', proyecciones: hybridProjections(composition.lines), reemplaza: composition.replaces },
@@ -215,8 +289,16 @@ export async function observeHybridQuote(venueId: string, body: z.output<typeof 
   if (customer && !customer.deleted) await assertHybridBalanceUsable(venueId, customer.id, balance)
   const credit = sources.reduce((sum, source) => sum.add(source.amount), new Prisma.Decimal(0))
   const net = new Prisma.Decimal(composition.total).sub(credit).add(new Prisma.Decimal(balance).div(100))
+  const repriced = await repricedFunctions(
+    venueId,
+    [...new Set(retained.replacedContracts.map(contract => contract.stripeSubscriptionId))],
+    composition.lines,
+  )
   const quote = {
     ...composition,
+    // Hashed with the rest: acceptance re-derives it from the same rows. Omitted when empty, so a quote without a
+    // repricing keeps the hash shape it had before this field existed.
+    ...(repriced.length ? { repriced } : {}),
     input: body,
     effectiveAt,
     credit: credit.toFixed(2),
@@ -239,7 +321,10 @@ export async function createHybridQuote(venueId: string, staffId: string, input:
   if (!parsed.success) throw new BadRequestError(parsed.error.issues.map(issue => issue.message).join('. '))
   if (parsed.data.keepStaffVenueIds?.length) await assertKeepSelection(venueId, parsed.data.keepStaffVenueIds)
   const observed = await observeHybridQuote(venueId, parsed.data, Math.floor(Date.now() / 1000))
-  const quoteExpiresAt = new Date(Math.min(Date.now() + 5 * 60000, ...observed.publications.map(p => p.campaign.endsAt.getTime())))
+  // A LIST never ends: only promotion lines can cap the review window below five minutes.
+  const quoteExpiresAt = new Date(
+    Math.min(Date.now() + 5 * 60000, ...observed.publications.flatMap(p => promotionWindow(p.campaign)?.endsAt.getTime() ?? [])),
+  )
   return prisma.hybridPurchase.create({
     data: {
       venueId,
@@ -310,6 +395,10 @@ export async function acceptHybridQuote(venueId: string, staffId: string, quoteI
       )
         throw new ConflictError('Cambió una suscripción antes de aceptar. Revisa la cotización.', 'HYBRID_QUOTE_STALE')
       const now = new Date()
+      // Spec §4.2 rule 5: a cancellation scheduled after the re-observation above only shows up here, under the lock.
+      // Reads only: no campaign row is written before lockProducts below.
+      const retained = await readRetained(tx, venueId, inventory, saved.replaces, now)
+      assertCartDependencyTerms(retainedCoverage({ inventory, replaceSubscriptionIds: saved.replaces, ...retained }), saved.lines, now)
       const claimed = await tx.hybridPurchase.updateMany({
         where: { id: quoteId, venueId, status: 'QUOTED', quoteExpiresAt: { gt: now } },
         data: {
@@ -322,20 +411,49 @@ export async function acceptHybridQuote(venueId: string, staffId: string, quoteI
       })
       if (claimed.count !== 1)
         throw new ConflictError('La cotización cambió o ya fue aceptada. Consulta el mismo intento.', 'HYBRID_QUOTE_STALE')
+      // Invariant: every transaction that writes product-keyed campaign rows takes the sorted precio:<key> locks first, so
+      // mirror carts and catalog operations (list price, promotion group) never wait on each other in opposite orders.
+      await lockProducts(
+        tx,
+        observed.publications.flatMap(p => {
+          if (p.campaign.purpose === 'LIST') return p.campaign.listProductKey ?? []
+          return p.campaign.promotionGroupId ? (productKeyOf(hybridOfferDefinition.parse(p.definition)) ?? []) : []
+        }),
+      )
       for (const offer of [...observed.publications].sort((a, b) => a.campaignId.localeCompare(b.campaignId))) {
-        const campaign = await tx.hybridCampaign.findUniqueOrThrow({
-          where: { id: offer.campaignId },
-          include: { publications: { select: { id: true }, orderBy: { version: 'desc' }, take: 1 } },
-        })
+        const campaign = await tx.hybridCampaign.findUniqueOrThrow({ where: { id: offer.campaignId } })
+        const window = promotionWindow(campaign)
         if (
           campaign.status !== 'ACTIVE' ||
           campaign.startsAt > now ||
-          campaign.endsAt <= now ||
-          campaign.publications[0]?.id !== offer.id ||
-          campaign.reservedCount + campaign.redeemedCount >= campaign.capacity
+          (campaign.purpose !== 'LIST' && (!window || window.endsAt <= now)) ||
+          campaign.currentPublicationId !== offer.id
         )
+          throw offerChanged()
+        if (window && campaign.reservedCount + campaign.redeemedCount >= window.capacity)
           throw new ConflictError('La oferta ya no tiene lugares disponibles.', 'HYBRID_OFFER_FULL')
         assertAudience(campaign, observed.venue.organization)
+        if (campaign.promotionGroupId) {
+          // Its parent LIST must still be on sale; this write serializes the acceptance against pausing that list.
+          const key = productKeyOf(hybridOfferDefinition.parse(offer.definition))
+          const parent = key
+            ? await tx.hybridCampaign.updateMany({
+                where: { purpose: 'LIST', listProductKey: key, status: 'ACTIVE' },
+                data: { updatedAt: now },
+              })
+            : { count: 0 }
+          if (parent.count !== 1) throw offerChanged()
+        }
+        if (!window) {
+          // A LIST: no redemption and no capacity. Same revision, still ACTIVE and still pointing at the quoted price is
+          // what serializes this acceptance against a pause or a new price committed after the read above.
+          const touched = await tx.hybridCampaign.updateMany({
+            where: { id: campaign.id, revision: campaign.revision, status: 'ACTIVE', currentPublicationId: offer.id },
+            data: { updatedAt: now },
+          })
+          if (touched.count !== 1) throw offerChanged()
+          continue
+        }
         const held = await tx.hybridCampaign.updateMany({
           where: {
             id: campaign.id,
@@ -346,8 +464,7 @@ export async function acceptHybridQuote(venueId: string, staffId: string, quoteI
           },
           data: { reservedCount: { increment: 1 } },
         })
-        if (held.count !== 1)
-          throw new ConflictError('El cupo cambió; consulta el mismo intento antes de volver a aceptar.', 'HYBRID_OFFER_FULL')
+        if (held.count !== 1) throw offerChanged()
         const old = await tx.hybridRedemption.findUnique({
           where: { campaignId_organizationId: { campaignId: campaign.id, organizationId: observed.venue.organizationId } },
         })

@@ -21,6 +21,7 @@ jest.mock('@/services/dashboard/appointmentStaffAssignment.service', () => ({
 
 import {
   getClassSession,
+  getClassSessions,
   createClassSession,
   createClassSessionsBulk,
   updateClassSession,
@@ -32,6 +33,7 @@ import { BadRequestError, ConflictError, NotFoundError } from '@/errors/AppError
 import { publishPushNotification } from '@/communication/rabbitmq/gcal-push-consumer'
 import { assertOrganizationStaffAvailability, lockAppointmentVenue } from '@/services/dashboard/appointmentStaffAssignment.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
+import * as passCapacity from '@/services/aggregators/passCapacity.service'
 
 // ---- Constants ----
 
@@ -148,9 +150,115 @@ describe('ClassSession Dashboard Service', () => {
     })
     prismaMock.googleCalendarConnection.findFirst.mockResolvedValue(null)
     prismaMock.calendarSyncOutbox.create.mockResolvedValue({ id: 'outbox-default' })
+    prismaMock.venue.findUnique.mockReset()
+    // Los casos existentes no ejecutan la consulta real de pases; los de «pases» la sobrescriben con mockResolvedValueOnce.
+    jest.spyOn(passCapacity, 'passesForSessions').mockResolvedValue(null)
   })
 
   describe('getClassSession', () => {
+    const conPase = (overrides: Record<string, any> = {}) =>
+      makeSession({
+        reservations: [
+          { ...makeSession().reservations[0], id: 'res-pase', aggregatorBooking: { id: 'b1', provider: 'TOTALPASS' }, ...overrides },
+          makeSession().reservations[1],
+        ],
+      })
+
+    it('la reserva de pase trae su visita y si espera al estudio; la propia trae passVisit null', async () => {
+      const deadlineAt = new Date('2026-03-01T11:30:00Z')
+      prismaMock.classSession.findFirst.mockResolvedValue(conPase())
+      prismaMock.venue.findUnique.mockResolvedValue({ timezone: 'America/Mexico_City' } as any)
+      prismaMock.$queryRaw.mockResolvedValueOnce([
+        {
+          id: 'visita-1',
+          reservationId: 'res-pase',
+          status: 'PENDING',
+          deadlineAt,
+          confirmMode: 'ON_VENUE_CHECKIN',
+          lastError: null,
+          connectionStatus: 'ACTIVE',
+          provider: 'TOTALPASS',
+        },
+      ])
+
+      const result = await getClassSession(VENUE_ID, SESSION_ID)
+
+      expect(result.reservations.find((r: any) => r.id === 'res-pase')?.passVisit).toEqual({
+        id: 'visita-1',
+        status: 'PENDING',
+        deadlineAt,
+        awaitingVenue: true,
+        lastError: null,
+      })
+      expect(result.reservations.find((r: any) => r.id === 'res-b')?.passVisit).toBeNull()
+      expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(1)
+    })
+
+    it('en modo AUTO o con la reserva ya en CHECKED_IN, la visita viaja pero no espera al estudio', async () => {
+      const deadlineAt = new Date('2026-03-01T11:30:00Z')
+      prismaMock.venue.findUnique.mockResolvedValue({ timezone: 'America/Mexico_City' } as any)
+
+      prismaMock.classSession.findFirst.mockResolvedValueOnce(conPase())
+      prismaMock.$queryRaw.mockResolvedValueOnce([
+        { id: 'v', reservationId: 'res-pase', status: 'PENDING', deadlineAt, confirmMode: 'AUTO', lastError: 'No pudimos comunicarnos con TotalPass; lo reintentamos.' },
+      ])
+      const auto = await getClassSession(VENUE_ID, SESSION_ID)
+      expect(auto.reservations[0].passVisit?.awaitingVenue).toBe(false)
+      expect(auto.reservations[0].passVisit?.lastError).toBe('No pudimos comunicarnos con TotalPass; lo reintentamos.')
+
+      prismaMock.classSession.findFirst.mockResolvedValueOnce(conPase({ status: 'CHECKED_IN' }))
+      prismaMock.$queryRaw.mockResolvedValueOnce([
+        { id: 'v', reservationId: 'res-pase', status: 'EXPIRED', deadlineAt, confirmMode: 'ON_VENUE_CHECKIN', lastError: 'venció antes de validar' },
+      ])
+      const tarde = await getClassSession(VENUE_ID, SESSION_ID)
+      expect(tarde.reservations[0].passVisit).toEqual({ id: 'v', status: 'EXPIRED', deadlineAt, awaitingVenue: false, lastError: 'venció antes de validar' })
+    })
+
+    it('visita PENDING con la conexión revocada y sin lastError: dice que la conexión no está activa; con ACTIVE, null', async () => {
+      const deadlineAt = new Date('2026-03-01T11:30:00Z')
+      prismaMock.venue.findUnique.mockResolvedValue({ timezone: 'America/Mexico_City' } as any)
+      const fila = (connectionStatus: string, provider = 'TOTALPASS') => ({
+        id: 'v',
+        reservationId: 'res-pase',
+        status: 'PENDING',
+        deadlineAt,
+        confirmMode: 'AUTO',
+        lastError: null,
+        connectionStatus,
+        provider,
+      })
+
+      prismaMock.classSession.findFirst.mockResolvedValueOnce(conPase({ status: 'CHECKED_IN' }))
+      prismaMock.$queryRaw.mockResolvedValueOnce([fila('REVOKED')])
+      const revocada = await getClassSession(VENUE_ID, SESSION_ID)
+      expect(revocada.reservations[0].passVisit?.lastError).toBe(
+        'La conexión con TotalPass no está activa: revísala en el panel, en Configuración › Integraciones › Pases.',
+      )
+      expect(revocada.reservations[0].passVisit?.awaitingVenue).toBe(false)
+
+      prismaMock.classSession.findFirst.mockResolvedValueOnce(conPase({ status: 'CHECKED_IN' }))
+      prismaMock.$queryRaw.mockResolvedValueOnce([fila('PAUSED', 'WELLHUB')])
+      const pausada = await getClassSession(VENUE_ID, SESSION_ID)
+      expect(pausada.reservations[0].passVisit?.lastError).toBe(
+        'La conexión con Wellhub no está activa: revísala en el panel, en Configuración › Integraciones › Pases.',
+      )
+
+      prismaMock.classSession.findFirst.mockResolvedValueOnce(conPase({ status: 'CHECKED_IN' }))
+      prismaMock.$queryRaw.mockResolvedValueOnce([fila('ACTIVE')])
+      const activa = await getClassSession(VENUE_ID, SESSION_ID)
+      expect(activa.reservations[0].passVisit?.lastError).toBeNull()
+    })
+
+    it('sin reservas de pase no consulta visitas', async () => {
+      prismaMock.classSession.findFirst.mockResolvedValue(makeSession())
+      prismaMock.venue.findUnique.mockResolvedValue({ timezone: 'America/Mexico_City' } as any)
+
+      const result = await getClassSession(VENUE_ID, SESSION_ID)
+
+      expect(prismaMock.$queryRaw).not.toHaveBeenCalled()
+      expect(result.reservations.every((r: any) => r.passVisit === null)).toBe(true)
+    })
+
     it('should return session with enrolled and available computed fields', async () => {
       const session = makeSession()
       prismaMock.classSession.findFirst.mockResolvedValue(session)
@@ -177,11 +285,140 @@ describe('ClassSession Dashboard Service', () => {
       expect(result.available).toBe(10)
     })
 
+    it('trae passes en el detalle, con la zona del venue (una zona vacía cae a Ciudad de México)', async () => {
+      const session = makeSession()
+      prismaMock.classSession.findFirst.mockResolvedValue(session)
+      prismaMock.venue.findUnique.mockResolvedValue({ timezone: '' } as any)
+      const spy = jest
+        .spyOn(passCapacity, 'passesForSessions')
+        .mockResolvedValueOnce(new Map([[SESSION_ID, { taken: 1, cap: 3, sessionCap: 2 }]]))
+
+      const result = await getClassSession(VENUE_ID, SESSION_ID)
+
+      expect(result.passes).toEqual({ taken: 1, cap: 3, sessionCap: 2 })
+      expect(spy).toHaveBeenCalledWith(VENUE_ID, [session], 'America/Mexico_City')
+    })
+
+    it('el detalle trae passes: null cuando el venue no tiene conexión de pases', async () => {
+      prismaMock.classSession.findFirst.mockResolvedValue(makeSession())
+      prismaMock.venue.findUnique.mockResolvedValue({ timezone: 'America/Tijuana' } as any)
+      const spy = jest.spyOn(passCapacity, 'passesForSessions').mockResolvedValueOnce(null)
+
+      const result = await getClassSession(VENUE_ID, SESSION_ID)
+
+      expect(result.passes).toBeNull()
+      expect(spy).toHaveBeenCalledWith(VENUE_ID, expect.any(Array), 'America/Tijuana')
+    })
+
     it('should throw NotFoundError when session not found', async () => {
       prismaMock.classSession.findFirst.mockResolvedValue(null)
 
       await expect(getClassSession(VENUE_ID, SESSION_ID)).rejects.toThrow(NotFoundError)
       await expect(getClassSession(VENUE_ID, SESSION_ID)).rejects.toThrow('Sesión no encontrada')
+    })
+  })
+
+  // ============================================================
+  // getClassSessions — «Pases: X de Y» (Plan 2a, Tarea 6)
+  // ============================================================
+
+  describe('getClassSessions', () => {
+    const range = { dateFrom: new Date('2030-01-11'), dateTo: new Date('2030-01-11') } as any
+
+    it('agrega passes por sesión cuando hay una conexión de pases activa (una sola llamada, sin N+1)', async () => {
+      const spy = jest
+        .spyOn(passCapacity, 'passesForSessions')
+        .mockResolvedValueOnce(new Map([['s1', { taken: 1, cap: 3, sessionCap: null }]]))
+      prismaMock.classSession.findMany.mockResolvedValueOnce([
+        {
+          id: 's1',
+          productId: PRODUCT_ID,
+          status: 'SCHEDULED',
+          capacity: 10,
+          startsAt: new Date('2030-01-11T15:00:00Z'),
+          reservations: [{ partySize: 1, aggregatorBooking: { id: 'b' } }],
+        },
+        {
+          id: 's3',
+          productId: PRODUCT_ID,
+          status: 'SCHEDULED',
+          capacity: 10,
+          startsAt: new Date('2030-01-11T17:00:00Z'),
+          reservations: [],
+        },
+      ] as any)
+
+      const out = await getClassSessions(VENUE_ID, range, 'America/Mexico_City')
+
+      expect(out[0].passes).toEqual({ taken: 1, cap: 3, sessionCap: null })
+      expect(spy).toHaveBeenCalledTimes(1)
+      expect(spy).toHaveBeenCalledWith(VENUE_ID, expect.arrayContaining([expect.objectContaining({ id: 's1' })]), 'America/Mexico_City')
+    })
+
+    it('una sesión que no está en el mapa (p. ej. cancelada o sin liga) ⇒ passes: null', async () => {
+      jest.spyOn(passCapacity, 'passesForSessions').mockResolvedValueOnce(new Map([['s1', { taken: 0, cap: 2, sessionCap: null }]]))
+      prismaMock.classSession.findMany.mockResolvedValueOnce([
+        {
+          id: 's1',
+          productId: PRODUCT_ID,
+          status: 'SCHEDULED',
+          capacity: 10,
+          startsAt: new Date('2030-01-11T15:00:00Z'),
+          reservations: [],
+        },
+        {
+          id: 's2',
+          productId: PRODUCT_ID,
+          status: 'CANCELLED',
+          capacity: 10,
+          startsAt: new Date('2030-01-11T17:00:00Z'),
+          reservations: [],
+        },
+      ] as any)
+
+      const out = await getClassSessions(VENUE_ID, range, 'America/Mexico_City')
+
+      expect(out[0].passes).toEqual({ taken: 0, cap: 2, sessionCap: null })
+      expect(out[1].passes).toBeNull()
+    })
+
+    it('sin conexión de pases ⇒ passes: null en todas', async () => {
+      jest.spyOn(passCapacity, 'passesForSessions').mockResolvedValueOnce(null)
+      prismaMock.classSession.findMany.mockResolvedValueOnce([
+        { id: 's1', productId: PRODUCT_ID, status: 'SCHEDULED', capacity: 10, startsAt: new Date(), reservations: [] },
+      ] as any)
+
+      const out = await getClassSessions(VENUE_ID, range, 'America/Mexico_City')
+
+      expect(out[0].passes).toBeNull()
+    })
+
+    it('sigue calculando enrolled y available igual', async () => {
+      jest.spyOn(passCapacity, 'passesForSessions').mockResolvedValueOnce(null)
+      prismaMock.classSession.findMany.mockResolvedValueOnce([
+        {
+          id: 's1',
+          productId: PRODUCT_ID,
+          status: 'SCHEDULED',
+          capacity: 10,
+          startsAt: new Date(),
+          reservations: [{ partySize: 2, aggregatorBooking: null }],
+        },
+      ] as any)
+
+      const out = await getClassSessions(VENUE_ID, range, 'America/Mexico_City')
+
+      expect(out[0]).toMatchObject({ enrolled: 2, available: 8 })
+    })
+
+    it('el include pide sólo reservas vivas y el id y proveedor de su reserva de pase', async () => {
+      prismaMock.classSession.findMany.mockResolvedValueOnce([] as any)
+
+      await getClassSessions(VENUE_ID, range, 'America/Mexico_City')
+
+      const include = (prismaMock.classSession.findMany.mock.calls[0][0] as any).include
+      expect(include.reservations.where).toEqual({ status: { in: ['PENDING', 'CONFIRMED', 'CHECKED_IN'] } })
+      expect(include.reservations.select.aggregatorBooking).toEqual({ select: { id: true, provider: true } })
     })
   })
 

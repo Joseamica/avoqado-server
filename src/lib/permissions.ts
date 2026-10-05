@@ -426,6 +426,9 @@ export const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   'reservations:create': ['reservations:read', 'reservations:create'],
   'reservations:update': ['reservations:read', 'reservations:update'],
   'reservations:cancel': ['reservations:read', 'reservations:cancel'],
+  // Conector de pases (TotalPass/Wellhub): conectar la sucursal, ligar clases, modo de confirmación y lugares para pases.
+  // Ver y confirmar check-ins usa reservations:read / reservations:update.
+  'reservations:manage-passes': ['reservations:read', 'reservations:manage-passes'],
 
   // Fase 8 del kiosco — la vista de la instructora.
   //
@@ -1973,7 +1976,7 @@ export const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   'staff-documents': ['staff-documents:read', 'staff-documents:write'],
   attendance: ['attendance:read', 'attendance:manage'],
   tables: ['tables:read', 'tables:update', 'tables:manage-all', 'tables:pay-any'],
-  reservations: ['reservations:read', 'reservations:create', 'reservations:update', 'reservations:cancel'],
+  reservations: ['reservations:read', 'reservations:create', 'reservations:update', 'reservations:cancel', 'reservations:manage-passes'],
   'class-sessions': ['class-sessions:read-assigned'],
   settings: ['settings:read', 'settings:manage'],
   venues: ['venues:read', 'venues:update'],

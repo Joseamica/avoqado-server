@@ -381,6 +381,7 @@ describe('order.mobile.service', () => {
         compReason: null,
         appliedById: 'sv-1',
         appliedToItemIds: ['oi-1'],
+        reparto: { v: 1, alcance: 'DIRIGIDO', conPromociones: null, espejo: true, renglones: { 'oi-1': 2000 } },
       },
     })
   })

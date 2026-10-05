@@ -54,4 +54,22 @@ describe('removeIntentPromotions — compensación de una ronda rechazada, por i
     expect(removed).toBe(1)
     expect(prismaMock.orderItem.deleteMany).toHaveBeenCalledTimes(1)
   })
+
+  it('🔴 Codex r2 N5: un transitorio al compensar no se traga — termina las demás y lo relanza (el intent queda reintentable)', async () => {
+    prismaMock.orderPromotion.findFirst
+      .mockRejectedValueOnce(Object.assign(new Error('Transaction API error'), { code: 'P2028' }))
+      .mockResolvedValueOnce({ id: 'op-2', order: { paymentStatus: 'PENDING', discountAmount: 0, paidAmount: 0 } })
+    await expect(removeIntentPromotions('venue-1', 'order-1', ['inst-a', 'inst-b'])).rejects.toMatchObject({ code: 'P2028' })
+    expect(prismaMock.orderItem.deleteMany).toHaveBeenCalledTimes(1) // la segunda sí se compensó
+  })
+
+  it('🔴 N5: el transitorio se reconoce como lo clasifica el reducer (`errorCode ?? code`): un conflicto de versión también se relanza', async () => {
+    prismaMock.orderPromotion.findFirst
+      .mockResolvedValueOnce({ id: 'op-1', order: { paymentStatus: 'PENDING', discountAmount: 0, paidAmount: 0 } })
+      .mockRejectedValueOnce(Object.assign(new Error('version'), { errorCode: 'VERSION_CONFLICT' }))
+    await expect(removeIntentPromotions('venue-1', 'order-1', ['inst-a', 'inst-b'])).rejects.toMatchObject({
+      errorCode: 'VERSION_CONFLICT',
+    })
+    expect(prismaMock.orderItem.deleteMany).toHaveBeenCalledTimes(1)
+  })
 })

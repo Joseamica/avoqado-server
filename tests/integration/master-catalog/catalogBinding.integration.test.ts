@@ -309,6 +309,7 @@ describe('catalog binding — real PostgreSQL transaction', () => {
     ).resolves.toEqual(
       expect.objectContaining({
         productId: before.id,
+        managedFieldMask: ['cost', 'description', 'imageUrl', 'name', 'satProductKey', 'satUnitKey', 'type', 'unit'],
         lastPublishedCatalogRevision: null,
         lastPublishedManagedSnapshot: null,
         managedHashVersion: null,
@@ -358,6 +359,9 @@ describe('catalog binding — real PostgreSQL transaction', () => {
     expect(provenance).toEqual({ createdById: staffId })
     expect(product.price.toFixed(2)).toBe('20.00')
     expect(product.cost?.toFixed(2)).toBe('12.50')
+    // D15: nace al 16 % explícito; la instantánea y la máscara ya no llevan IVA.
+    expect(product.taxRate.toFixed(4)).toBe('0.1600')
+    expect(product).toMatchObject({ objetoImp: '02', ivaTratamiento: 'IVA_16' })
     await expect(
       Promise.all([
         client.inventory.count({ where: { productId } }),
@@ -370,11 +374,81 @@ describe('catalog binding — real PostgreSQL transaction', () => {
     ).resolves.toEqual(
       expect.objectContaining({
         productId,
+        managedFieldMask: ['cost', 'description', 'imageUrl', 'name', 'satProductKey', 'satUnitKey', 'type', 'unit'],
         lastPublishedCatalogRevision: 1,
         managedHashVersion: 1,
         lastPublishedManagedHash: expect.stringMatching(/^[a-f0-9]{64}$/),
       }),
     )
+    const creada = await client.catalogVenueBinding.findFirstOrThrow({
+      where: { organizationId, catalogItemId, venueId: createVenue.id },
+      select: { lastPublishedManagedSnapshot: true },
+    })
+    expect(creada.lastPublishedManagedSnapshot).not.toHaveProperty('taxRate')
+    expect(creada.lastPublishedManagedSnapshot).not.toHaveProperty('objetoImp')
+  })
+
+  it('D15: CREATE de un artículo al 8 % nace al 16 % explícito aunque el negocio no tenga IVA por producto', async () => {
+    const client = db()
+    const ochoId = `${catalogItemId}-ocho`
+    const ochoSku = `${corporateSku}-OCHO`
+    await client.catalogItem.create({
+      data: {
+        id: ochoId,
+        organizationId,
+        sku: ochoSku,
+        normalizedSku: ochoSku,
+        kind: 'RETAIL_PRODUCT',
+        name: 'Artículo al ocho',
+        description: 'Corporativo al 8 %',
+        imageUrl: 'https://cdn.example.test/ocho.jpg',
+        brandId,
+        manufacturerId,
+        familyId: familyLeafId,
+        presentationLabel: 'Piece',
+        unit: 'PIECE',
+        taxRate: '0.0800',
+        satProductKey: '50192100',
+        satUnitKey: 'H87',
+        objetoImp: '02',
+        productType: 'REGULAR',
+        iepsMode: 'NONE',
+        status: 'ACTIVE',
+        createdById: staffId,
+        updatedById: staffId,
+        businessTypes: { create: { businessType: 'RESTAURANT' } },
+        identifiers: { create: { code: ochoSku, normalizedCode: ochoSku, type: 'CORPORATE_SKU', status: 'ACTIVE', createdById: staffId } },
+        prices: {
+          create: [
+            { kind: 'SALE_PRICE', amount: '20.00', currency: 'MXN', active: true, createdById: staffId, updatedById: staffId },
+            { kind: 'PURCHASE_COST', amount: '12.50', currency: 'MXN', active: true, createdById: staffId, updatedById: staffId },
+          ],
+        },
+      },
+    })
+    const service = bindingService()
+    const preview = await service.preview(context, {
+      lines: [
+        {
+          catalogItemId: ochoId,
+          venueId: createVenue.id,
+          decision: {
+            decision: 'CREATE',
+            create: { categoryId: createVenue.categoryId, localSku: `ocho-${fixtureKey}`, initialPrice: '20.00' },
+          },
+        },
+      ],
+    })
+    const result = await service.confirm(context, {
+      bindingBatchId: preview.bindingBatchId as string,
+      previewToken: preview.previewToken as string,
+      confirm: true,
+      idempotencyKey: `binding-create-ocho-${fixtureKey}`,
+    })
+
+    const product = await client.product.findUniqueOrThrow({ where: { id: result.lines[0]?.productId as string } })
+    expect(product.taxRate.toFixed(4)).toBe('0.1600')
+    expect(product).toMatchObject({ objetoImp: '02', ivaTratamiento: 'IVA_16' })
   })
 
   it('rolls back Product, binding, line transition and idempotency when the real audit FK fails', async () => {

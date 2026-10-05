@@ -1277,7 +1277,8 @@ async function getDiscountAnalysisData(venueId: string, fromDate: Date, toDate: 
            COALESCE(SUM(t."total"), 0) AS "totalRevenue"
     FROM (
       SELECT o."total" AS "total",
-             o."discountAmount" AS "od",
+             -- EFECTIVO por orden: desde B2/B2c la cabecera es la Σ de las filas SIN tope y puede pasar el subtotal.
+             LEAST(o."discountAmount", o."subtotal") AS "od",
              COALESCE((SELECT SUM(oi."discountAmount") FROM "OrderItem" oi
                        WHERE oi."orderId" = o."id" AND ${Prisma.raw(isItemLevelDiscountSql('oi'))}), 0) AS "idisc"
       FROM "Order" o

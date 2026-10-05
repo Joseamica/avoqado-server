@@ -269,7 +269,11 @@ export async function createManualPayment(
           // Order total recomputed to include cumulative tips (TPV pattern).
           // Tax is left as-is; manual payments don't recompute tax.
           const orderTax = new Prisma.Decimal(order.taxAmount ?? 0)
-          anchorOrderTotal = orderSubtotal.plus(orderTax).minus(orderDiscount).plus(aggregatedTipAmount)
+          // 🔴 La mercancía se topa en 0 ANTES de sumar el impuesto y la propina (misma regla que `computeStoredOrderTotal`):
+          // desde B2/B2c la cabecera `discountAmount` es la Σ de las filas SIN tope y puede pasar el subtotal; restarla entera
+          // se comía el IVA aparte y daba por saldada una cuenta con un pago menor a lo que debe (Codex B2c r1, barrido F1).
+          const mercancia = Prisma.Decimal.max(new Prisma.Decimal(0), orderSubtotal.minus(orderDiscount))
+          anchorOrderTotal = mercancia.plus(orderTax).plus(aggregatedTipAmount)
 
           const grossThisPayment = amount.plus(tipAmount)
           const newTotalPaid = paidSoFar.plus(grossThisPayment)

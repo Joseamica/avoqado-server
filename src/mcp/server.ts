@@ -63,6 +63,7 @@ import { registerAnnouncementTools } from './tools/announcements'
 import { registerLandingLeadTools } from './tools/landingLeads'
 import { registerLaunchCampaignTools } from './tools/launchCampaigns'
 import { registerMerchantRoutingTools } from './tools/merchantRouting'
+import { registerPassIntegrationTools } from './tools/passIntegrations'
 import { registerPrinterTools } from './tools/printers'
 import { registerTenderTypeTools } from './tools/tenderTypes'
 import { registerAreaTicketTools } from './tools/areaTickets'
@@ -148,6 +149,7 @@ export function registerAllTools(server: McpServer, scope: McpScope, flags: Tool
   // de clientes para fijar que aquí no aparecen.
   if (scope.isSuperAdmin) registerLaunchCampaignTools(server, scope)
   registerMerchantRoutingTools(server, scope)
+  registerPassIntegrationTools(server, scope)
   registerPrinterTools(server, scope)
   registerTenderTypeTools(server, scope)
   registerAreaTicketTools(server, scope)

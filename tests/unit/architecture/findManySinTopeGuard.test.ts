@@ -395,7 +395,8 @@ const INVENTARIO: Record<string, number> = {
   'src/services/promoters/promoterLocation.service.ts': 3,
   'src/services/promoters/promoters.service.ts': 4,
   'src/services/promoters/terminalLocation.service.ts': 4,
-  'src/services/promotions/promotion.service.ts': 1,
+  // 1 → 2: las líneas de UNA promoción de UNA orden, bajo su candado (B2c P4).
+  'src/services/promotions/promotion.service.ts': 2,
   'src/services/promotions/promotionCatalog.service.ts': 1,
   'src/services/referrals/referralQualification.service.ts': 1,
   'src/services/referrals/referralRefund.service.ts': 1,
@@ -418,6 +419,9 @@ const INVENTARIO: Record<string, number> = {
   'src/services/serialized-inventory/serializedInventory.service.ts': 8,
   'src/services/serialized-inventory/simRegistration.service.ts': 5,
   'src/services/shared/loyaltyOnPaidOrder.ts': 1,
+  // B2: renglones y filas de UNA orden, bajo su candado; B2c F2: los renglones de UNA orden VIEJA que `conservarDescuentoHistorico`
+  // normaliza (sólo con resto de cabecera > 0). Cortarlos con `take` dejaría un descuento de renglón sin su espejo.
+  'src/services/shared/repartoDescuentoTx.ts': 3,
   'src/services/shared/serviceCharges.ts': 1,
   'src/services/shared/turnoDeCaja.ts': 1,
   'src/services/staffOrganization.service.ts': 1,

@@ -24,6 +24,7 @@ import { RESERVATION_INCLUDE } from '@/services/dashboard/reservation.dashboard.
 import { resolveServicesMany } from '@/services/reservation/reservation-services.resolver'
 import { createOrderFromReservation } from '@/services/reservation/createOrderFromReservation'
 import { withSerializableRetry } from '@/utils/serializableRetry'
+import { onVenueCheckIn } from '@/services/aggregators/core/visitHook'
 
 /**
  * Quién hace el check-in. NO lleva organizationId: el ActivityLog se estampa con la
@@ -33,7 +34,11 @@ import { withSerializableRetry } from '@/utils/serializableRetry'
  */
 export type CheckInActor = { type: 'HUMAN'; staffId: string } | { type: 'SERVICE'; servicePrincipalId: string }
 
-export type CheckInSource = 'DASHBOARD' | 'POS_ANDROID' | 'POS_IOS' | 'MCP' | 'KIOSK'
+/**
+ * `PASS` = el conector de pases (TotalPass/Wellhub) en modo `AUTO`, con actor SERVICE. Nace sólo en el servidor
+ * (`aggregators/core/visit.service`): ningún header ni credencial de cliente lo produce. Sin ventana, como DASHBOARD.
+ */
+export type CheckInSource = 'DASHBOARD' | 'POS_ANDROID' | 'POS_IOS' | 'MCP' | 'KIOSK' | 'PASS'
 
 export const RESERVATION_NOT_CHECKINABLE = 'RESERVATION_NOT_CHECKINABLE' as const
 export const CHECK_IN_OUTSIDE_WINDOW = 'CHECK_IN_OUTSIDE_WINDOW' as const
@@ -191,6 +196,10 @@ export async function checkInReservation(tx: Prisma.TransactionClient, cmd: Chec
     },
   })
 
+  // Conector de pases (modo ON_VENUE_CHECKIN): si el socio de un pase espera la confirmación del estudio, se encola
+  // su validación en esta MISMA tx. Sólo en la transición: un check-in repetido no vuelve a avisar.
+  await onVenueCheckIn(tx, cmd.reservationId, cmd.source)
+
   logger.info(`✅ [CHECK_IN] ${current.confirmationCode} ${current.status} → CHECKED_IN source=${cmd.source} by=${actorLabel(cmd.actor)}`)
   return finish(tx, cmd, 'CHECKED_IN')
 }
@@ -226,6 +235,11 @@ export interface CheckInAndOpenOrderResponse {
  */
 export async function checkInReservationAndOpenOrder(cmd: CheckInCommand): Promise<CheckInAndOpenOrderResponse> {
   const result = await prisma.$transaction(tx => checkInReservation(tx, cmd))
+
+  // Conector de pases: la visita la paga el agregador; abrir una orden al precio de lista le cobraría al socio algo
+  // que ya está pagado (spec §7). Misma respuesta plana, sin orden y sin error.
+  const passBooking = await prisma.aggregatorBooking.findUnique({ where: { reservationId: cmd.reservationId }, select: { id: true } })
+  if (passBooking) return { ...result.reservation, services: result.services, orderId: null, orderCreated: false }
 
   let orderId: string | null = null
   let orderCreated = false

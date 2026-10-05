@@ -301,6 +301,7 @@ export async function createCommissionForPayment(
           tipAmount: payment.tipAmount,
           taxAmount: payment.order?.taxAmount,
           discountAmount: payment.order?.discountAmount,
+          subtotal: payment.order?.subtotal,
         },
         generalConfig,
       )
@@ -1183,6 +1184,7 @@ export async function createSplitCommissionForPayment(paymentId: string, staffId
         tipAmount: payment.tipAmount,
         taxAmount: payment.order?.taxAmount,
         discountAmount: payment.order?.discountAmount,
+        subtotal: payment.order?.subtotal,
       },
       config,
     )

@@ -7,6 +7,7 @@ import {
   catalogExportGeneratedAt as generatedAt,
   readCatalogExportRows as readRows,
 } from './catalogExportTestHarness'
+import { CATALOG_IVA_HISTORIC_NOTE } from '@/services/master-catalog/catalogManagedMask.service'
 
 describe('catalogExport service grains and business filters', () => {
   it('exports tenant-scoped authoritative grains and live prepared-dish costs without cartesian rows', async () => {
@@ -40,6 +41,7 @@ describe('catalogExport service grains and business filters', () => {
       ['key', 'value'],
       ['filters', '{}'],
       ['generatedAt', generatedAt.toISOString()],
+      ['ivaNote', CATALOG_IVA_HISTORIC_NOTE],
       ['organizationId', 'org-pits'],
       ['profileVersion', '2,3,9'],
       ['schemaVersion', '1'],
@@ -190,5 +192,29 @@ describe('catalogExport service grains and business filters', () => {
       ]),
     )
     expect(readRows(file.buffer, 'RequiredFields').flat()).not.toContain('roleOnly')
+  })
+
+  it('D15: RequiredFields no presenta el IVA como requisito, ni del contrato ni de un perfil histórico', async () => {
+    const { prisma, tx } = buildCatalogExportDb()
+    tx.catalogValidationProfile.findMany.mockImplementation((async () => [
+      {
+        id: 'profile-restaurant',
+        profileVersion: 2,
+        rulesSchemaVersion: 1,
+        businessType: BusinessType.RESTAURANT,
+        operationalRole: null,
+        requiredFields: ['shelfLifeDays', 'taxRate', 'objetoImp'],
+        active: true,
+      },
+    ]) as never)
+    const service = createCatalogExportService({ prisma: prisma as never, now: () => generatedAt })
+
+    const file = await service.catalogByBusinessType(context, BusinessType.RESTAURANT)
+
+    const campos = readRows(file.buffer, 'RequiredFields').map(row => row[2])
+    expect(campos).toEqual(expect.arrayContaining(['sku', 'shelfLifeDays']))
+    expect(campos).not.toEqual(expect.arrayContaining(['taxRate']))
+    expect(campos).not.toEqual(expect.arrayContaining(['objetoImp']))
+    expect(readRows(file.buffer, 'Metadata')).toContainEqual(['ivaNote', CATALOG_IVA_HISTORIC_NOTE])
   })
 })

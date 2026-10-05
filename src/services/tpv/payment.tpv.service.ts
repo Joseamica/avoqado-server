@@ -378,7 +378,25 @@ import { paymentCountsAsDrawerCash, paymentIsAvoqadoSettled, type TenderSemantic
 import { STAFF_PUBLIC_SELECT } from '../../utils/staffPublicSelect'
 // La ÚNICA definición de "qué cuenta como pagado" — la comparten los cuatro
 // caminos de cobro, para que un reembolso no reabra saldo en ninguno.
-import { summarizeRefunds, computeOrderBalance, REFUND_PAYMENT_TYPE, type CompletedPaymentForBalance } from '../shared/orderBalance'
+import {
+  summarizeRefunds,
+  cierreDelCobroSaldaLaCuenta,
+  claseDeEstado,
+  computeOrderBalance,
+  computeStoredOrderTotal,
+  REFUND_PAYMENT_TYPE,
+  type CompletedPaymentForBalance,
+} from '../shared/orderBalance'
+// Founder 3-oct (Tarea 6a): cobrar una cuenta CANCELADA — el cobro nuevo se rechaza; lo ya capturado la reabre.
+import {
+  CobroYaRegistrado,
+  cierreAutomaticoPermitido,
+  esCobroNuevo,
+  estadoParaCobrar,
+  reabrirSiRecibeDinero,
+  rechazarCobroNuevoSobreCancelada,
+  salirSiLaLlaveYaTienePago,
+} from '../shared/cuentaCancelada'
 // El candado del toque repetido en «Efectivo». La regla vive AHÍ, pura y probada aparte.
 import { aplicaCandadoDeEfectivo, cobroEnEfectivoSobreOrdenSaldada } from '../shared/cobroEnEfectivoDuplicado'
 import { resolveTenderForCharge, computeTenderCommission, type ResolvedTenderCharge } from '../dashboard/tenderType.dashboard.service'
@@ -1328,14 +1346,17 @@ async function enqueueCommittedPaymentEffects(
 type CommittedStandaloneSettlement = { firstSettlement: boolean; postingId: string | null }
 
 /** Caller holds the Order lock; money and its inventory/loyalty obligation share one commit. */
-async function settleStandalonePaymentInTx(
+export async function settleStandalonePaymentInTx(
   tx: Prisma.TransactionClient,
   venueId: string,
   orderId: string,
-  payment: { amount: Prisma.Decimal; tipAmount: Prisma.Decimal },
+  /** `id` (Tarea 6a): la bitácora de la reapertura nombra el cobro; `newPayment` ya lo trae. */
+  payment: { id?: string; amount: Prisma.Decimal; tipAmount: Prisma.Decimal },
   staffId?: string,
   /** Etapa 3 del KDS: el negocio tiene pantalla ⇒ marca durable en la MISMA escritura que salda. */
   marcarCocina = false,
+  /** Codex r10 #6: `false` ⇒ sólo los totales, sin los efectos de saldar (lealtad, marca de cocina, vale de inventario). */
+  efectosDeCierre = true,
 ): Promise<CommittedStandaloneSettlement> {
   // One specific invoice, not a tenant list: its entire item snapshot is required
   // to preserve the stock obligation without silently truncating a paid invoice.
@@ -1350,9 +1371,30 @@ async function settleStandalonePaymentInTx(
   })
   const amount = paid._sum.amount ?? new Prisma.Decimal(0)
   const tipAmount = paid._sum.tipAmount ?? new Prisma.Decimal(0)
-  const balance = computeOrderBalance(order, [{ amount, tipAmount }])
-  const previous = computeOrderBalance(order, [{ amount: amount.minus(payment.amount), tipAmount: tipAmount.minus(payment.tipAmount) }])
-  const firstSettlement = balance.isFullyPaid && !(paid._count > 1 && previous.isFullyPaid)
+  // 🔴 Founder 3-oct / Codex r9 #2: el dinero de la terminal YA está capturado. Una cancelada de Avoqado se reabre y se calcula
+  // como la viva que es —con su IVA—, y estado y totales se guardan en esta misma transacción. Una cancelada de Avoqado nunca
+  // queda saldada; una de la plataforma o de SoftRestaurant, como hoy (Codex r12 #5).
+  // Codex r13 #1: `cubreComoCancelada` es el `isFullyPaid` de HOY —el saldo calculado con la orden tal como se leyó—.
+  const cubreComoCancelada = computeOrderBalance(order, [{ amount, tipAmount }]).isFullyPaid
+  // `staffId` llega validado (`validateStaffVenue`) o ausente: la bitácora lo amarra por FK.
+  const status = await reabrirSiRecibeDinero(tx, {
+    venueId,
+    orderId,
+    status: order.status,
+    originSystem: order.originSystem,
+    cobrado: amount.plus(tipAmount),
+    cubreComoCancelada,
+    canal: 'recordOrderPayment',
+    paymentId: payment.id ?? null,
+    staffId: staffId ?? null,
+  })
+  const cuenta = { ...order, status }
+  const balance = computeOrderBalance(cuenta, [{ amount, tipAmount }])
+  const previous = computeOrderBalance(cuenta, [{ amount: amount.minus(payment.amount), tipAmount: tipAmount.minus(payment.tipAmount) }])
+  const saldada = balance.isFullyPaid && cierreAutomaticoPermitido(status)
+  // Codex r10 #6: la reasignación guarda así los totales del ORIGEN dentro de su transacción (`efectosDeCierre = false`): ni
+  // lealtad, ni marca de cocina, ni vale de inventario — el origen ya los tuvo cuando se saldó.
+  const firstSettlement = efectosDeCierre && saldada && !(paid._count > 1 && previous.isFullyPaid)
   await tx.order.update({
     where: { id: orderId, venueId },
     data: {
@@ -1360,8 +1402,8 @@ async function settleStandalonePaymentInTx(
       remainingBalance: balance.remainingBalance,
       tipAmount: balance.tipAmount,
       total: balance.total,
-      paymentStatus: balance.isFullyPaid ? 'PAID' : balance.paidAmount.greaterThan(0) ? 'PARTIAL' : order.paymentStatus,
-      ...(balance.isFullyPaid && { status: 'COMPLETED', completedAt: order.completedAt ?? new Date() }),
+      paymentStatus: saldada ? 'PAID' : balance.paidAmount.greaterThan(0) ? 'PARTIAL' : order.paymentStatus,
+      ...(saldada && { status: 'COMPLETED', completedAt: order.completedAt ?? new Date() }),
       ...(!order.servedById && staffId && { servedById: staffId, createdById: order.createdById ?? staffId }),
       ...(firstSettlement && { loyaltyEligibleAt: new Date(), loyaltyStaffId: staffId }),
       ...(firstSettlement && marcarCocina && { kitchenPendingAt: new Date() }),
@@ -1372,11 +1414,18 @@ async function settleStandalonePaymentInTx(
   return { firstSettlement, postingId: posting?.id ?? null }
 }
 
-/** Everything the stored-totals arithmetic reads from the Order: two reads with the same key produce the same write. */
+/**
+ * Everything the stored-totals arithmetic reads from the Order: two reads with the same key produce the same write.
+ * Codex r6 #2 / r7 #2: P12 lee también IVA, contrato y la CLASE del estado; una huella sin ellos dejaba pisar lo que guardó otro
+ * escritor, y con el estado literal gastaba el reintento en cambios sin dinero.
+ */
 function standaloneTotalsInputs(order: {
   subtotal: Prisma.Decimal
   discountAmount: Prisma.Decimal | null
   serviceChargeAmount: Prisma.Decimal | null
+  taxAmount: Prisma.Decimal | null
+  contratoDePrecio: string
+  status: string
   paymentStatus: string
   servedById: string | null
   createdById: string | null
@@ -1387,6 +1436,9 @@ function standaloneTotalsInputs(order: {
     order.subtotal,
     order.discountAmount,
     order.serviceChargeAmount,
+    order.taxAmount,
+    order.contratoDePrecio,
+    claseDeEstado(order.status),
     order.paymentStatus,
     order.servedById,
     order.createdById,
@@ -1555,7 +1607,28 @@ async function updateOrderTotalsForStandalonePayment(
   //
   // El cargo por servicio va DESPUÉS del clamp, como la propina: un descuento excedente se
   // come la mercancía, no los cargos (mismo criterio que `computeOrderBalance`).
-  const newTotal = Math.max(0, orderSubtotal - orderDiscount) + orderServiceCharge + totalTip
+  //
+  // 🔴 P12 (Codex r2; founder 2-oct): el IVA que va aparte también es deuda de la cuenta. Con la
+  // fórmula a mano una cuenta de $100 + $16 de IVA aparte cobrada con $100 se cerraba PAGADA y el
+  // total se reescribía a $100. La regla es la compartida (`impuestoQueSeCobraAparte`, vía
+  // `computeStoredOrderTotal`): con IVA incluido nunca suma, y una cancelada no debe IVA.
+  const totalesDeLaOrden = (propinas: number, status: string) =>
+    computeStoredOrderTotal({
+      subtotal: orderSubtotal,
+      discountAmount: orderDiscount,
+      serviceChargeAmount: orderServiceCharge,
+      tipAmount: propinas,
+      contratoDePrecio: order.contratoDePrecio,
+      taxAmount: order.taxAmount,
+      status,
+    }).toNumber()
+  // 🔴 Founder 3-oct (Tarea 6a): el dinero ya capturado sobre una cancelada. Primero la aritmética de HOY, con el estado leído:
+  // ¿lo cobrado cubre lo que la cuenta debe tal como está? (Codex r13 #1). Con eso, el estado con el que la cuenta RECIBE este
+  // dinero (`estadoParaCobrar`): una de Avoqado se reabre con cualquier dinero; una externa, sólo si cubre. Todo lo de abajo
+  // —total, saldo, estado del pago, vale, lealtad y el cierre— se calcula con ESE estado, y la escritura lo persiste.
+  const cubreComoCancelada = Math.max(0, totalesDeLaOrden(totalTip, order.status) - totalPaid) <= 0.01
+  const estado = estadoParaCobrar(order, totalPaid, cubreComoCancelada)
+  const newTotal = totalesDeLaOrden(totalTip, estado)
 
   // Calculate remaining amount (based on new total)
   // 🔴 El clamp a 0 se CONSERVA a propósito: clientes viejos (TPV/Android/iOS) esperan
@@ -1565,7 +1638,8 @@ async function updateOrderTotalsForStandalonePayment(
   // $380, invisible 2 meses hasta que el watchdog lo pescó). La detección de abajo rompe
   // esa invisibilidad sin cambiar el contrato de la API.
   const remainingAmount = Math.max(0, newTotal - totalPaid)
-  const isFullyPaid = remainingAmount <= 0.01 // Account for floating point precision
+  // Account for floating point precision. Founder 3-oct: una cancelada nunca queda saldada (si cubría, ya salió de CANCELADA).
+  const isFullyPaid = remainingAmount <= 0.01 && cierreAutomaticoPermitido(estado)
 
   // 🔴 ¿La cuenta YA estaba saldada ANTES de este pago? (audit Codex 2026-08-12, P1)
   //
@@ -1582,7 +1656,7 @@ async function updateOrderTotalsForStandalonePayment(
   // pagos aún NO está saldada — su primer cobro de $0 sí debe deducir.
   const settledBeforeThisPayment = options?.committedSettlement
     ? !options.committedSettlement.firstSettlement
-    : order.payments.length > 0 && previousPayments >= Math.max(0, orderSubtotal - orderDiscount) + orderServiceCharge + previousTips - 0.01
+    : order.payments.length > 0 && previousPayments >= totalesDeLaOrden(previousTips, estado) - 0.01
   const coveredAreaTicketLines = isFullyPaid
     ? await getAreaTicketLineIdsCoveredByInventoryReservations(order.venueId, order.items)
     : new Set<string>()
@@ -1794,13 +1868,33 @@ async function updateOrderTotalsForStandalonePayment(
               subtotal: true,
               discountAmount: true,
               serviceChargeAmount: true,
+              // Codex r6 #2: P12 los lee; sin ellos en la huella, un IVA o un contrato que cambió se pisaba.
+              taxAmount: true,
+              contratoDePrecio: true,
               paymentStatus: true,
               servedById: true,
               createdById: true,
+              // Tarea 6a: la reapertura de abajo decide con el estado releído bajo el candado.
+              status: true,
               payments: summedPayments,
             },
           })
           if (!current || standaloneTotalsInputs(current) !== standaloneTotalsInputs(order)) return null
+
+          // Founder 3-oct / Codex r9 #2: la misma regla, bajo el candado y con lo que se acaba de releer, en la MISMA transacción
+          // que los totales. La huella compara la CLASE del estado (Tarea 6d): dentro de la misma clase la regla da lo mismo;
+          // `originSystem` no cambia. `staffId` llega validado (`validateStaffVenue`) o ausente: la bitácora lo amarra por FK.
+          await reabrirSiRecibeDinero(tx, {
+            venueId: order.venueId,
+            orderId,
+            status: current.status,
+            originSystem: order.originSystem,
+            cobrado: totalPaid,
+            cubreComoCancelada, // la huella garantiza que sus entradas de dinero no cambiaron desde que se calculó arriba
+            canal: currentPaymentId ? 'recordOrderPayment' : 'reconcileOrderFromPayments',
+            paymentId: currentPaymentId ?? null,
+            staffId: staffId ?? null,
+          })
 
           const updated = await tx.order.update({
             where: { id: orderId, ...(options?.venueId ? { venueId: options.venueId } : {}) },
@@ -2575,6 +2669,9 @@ interface PaymentCreationData {
   // Sólo la cola de reintentos del POS. Honra la revisión que el cajero vio al cobrar:
   // una venta ya ocurrida no se rechaza porque el catálogo cambió después.
   isOfflineReplay?: boolean
+  // Founder 3-oct / Codex r10 #3 (Tarea 6a): «este efectivo lo tiene el cajero en la mano y todavía lo puede devolver».
+  // Sólo `true` cambia algo; ausente, `null` o `false` es lo de hoy. La TPV todavía no lo manda.
+  cobroNuevo?: boolean | null
   // Detalle del cobro declarado a mano ("Tarjeta (terminal externa)"). Sólo aplica a
   // métodos que NO pasaron por Avoqado; en efectivo va null. iOS manda null explícito.
   externalSource?: string | null
@@ -3437,6 +3534,20 @@ export async function recordOrderPayment(
             staffId: validatedStaffId,
           })
         }
+        // 🔴 Founder 3-oct + Codex r10 #3: el EFECTIVO de la terminal con `cobroNuevo` es un cobro NUEVO: sobre una cancelada ⇒ 400
+        // antes de crear nada. La TPV todavía no lo manda (plan de registro de cobros, B1-B2): hasta entonces todo lo que registra
+        // es dinero ya capturado y reabre en los cierres. La tarjeta nunca: la aprobó el banco.
+        if (esCobroNuevo({ enVivo: paymentData.cobroNuevo === true, efectivoDeCajon: classicMethod === 'CASH' && !merchantAccountId })) {
+          const { status } = await tx.order.findUniqueOrThrow({ where: { id: activeOrder.id, venueId }, select: { status: true } })
+          if (claseDeEstado(status) === 'CANCELADA') {
+            // Codex r13 #2: la misma resolución, bajo el candado del intento (`candadoDeIntento`, la PRIMERA sentencia de esta
+            // transacción) y el de la orden: si la llave ya tiene un Payment, sale por la red de la carrera (P2002, abajo), que
+            // lo devuelve.
+            await salirSiLaLlaveYaTienePago(tx, { venueId, orderId: activeOrder.id, idempotencyKey: paymentData.idempotencyKey })
+            rechazarCobroNuevoSobreCancelada(status)
+          }
+        }
+
         // La PREPARACIÓN del intento de vales va después del arbitraje y sólo para quien sigue (ganador, cobro sin
         // solicitud o asociación inválida): una segunda captura ya salió arriba. Sin sesión de vales devuelve `null`.
         if (paymentStatusSnapshot === 'COMPLETED') {
@@ -3513,6 +3624,10 @@ export async function recordOrderPayment(
                 subtotal: true,
                 discountAmount: true,
                 serviceChargeAmount: true,
+                // P12 (Codex r7 #5): «saldada» incluye el IVA que va aparte, con la regla compartida.
+                contratoDePrecio: true,
+                taxAmount: true,
+                status: true,
                 items: { select: { areaTicketLineId: true } },
               },
             })
@@ -3523,6 +3638,9 @@ export async function recordOrderPayment(
                   subtotal: ordenBloqueada.subtotal,
                   discountAmount: ordenBloqueada.discountAmount,
                   serviceChargeAmount: ordenBloqueada.serviceChargeAmount,
+                  contratoDePrecio: ordenBloqueada.contratoDePrecio,
+                  taxAmount: ordenBloqueada.taxAmount,
+                  status: ordenBloqueada.status,
                 },
                 pagosCompletadosDeLaOrden,
               )
@@ -3752,13 +3870,9 @@ export async function recordOrderPayment(
           })
         }
 
-        const integratedOrder = activeOrder.source === OrderSource.POS && !!activeOrder.externalId?.trim()
-        if (
-          newPayment.status === 'COMPLETED' &&
-          !integratedOrder &&
-          !lockedAreaCheckout &&
-          !activeOrder.items.some(item => item.areaTicketLineId != null)
-        ) {
+        // Integradas y con vales por área conservan a su dueño del cierre (`cierreDelCobroSaldaLaCuenta`, el mismo criterio que la
+        // reasignación de cobros).
+        if (newPayment.status === 'COMPLETED' && !lockedAreaCheckout && cierreDelCobroSaldaLaCuenta(activeOrder)) {
           committedStandaloneSettlement = await settleStandalonePaymentInTx(
             tx,
             venueId,
@@ -3911,9 +4025,13 @@ export async function recordOrderPayment(
     // 🛡️ P2002 safety net: unique constraint violation on (venueId, idempotencyKey)
     // means another concurrent request already created this payment. Return the
     // winner as if this was a normal idempotent retry.
-    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
-      const target = (error.meta as { target?: string[] } | undefined)?.target
-      const isIdempotencyConflict = Array.isArray(target) && target.includes('idempotencyKey')
+    // Codex r13 #2 (Tarea 6a): `CobroYaRegistrado` es el mismo caso visto ANTES de intentar crear (bajo el candado, la llave ya
+    // tenía su Payment): sale por aquí y devuelve ese pago en vez de un 400 por una cuenta que cancelaron después.
+    const cobroYaRegistrado = error instanceof CobroYaRegistrado
+    if (cobroYaRegistrado || (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002')) {
+      const target =
+        error instanceof Prisma.PrismaClientKnownRequestError ? (error.meta as { target?: string[] } | undefined)?.target : undefined
+      const isIdempotencyConflict = cobroYaRegistrado || (Array.isArray(target) && target.includes('idempotencyKey'))
 
       if (isIdempotencyConflict && paymentData.idempotencyKey) {
         logger.warn('🛡️ [recordOrderPayment] Concurrent race blocked by unique index — returning winner', {
@@ -3950,6 +4068,10 @@ export async function recordOrderPayment(
           orderId,
           idempotencyKey: paymentData.idempotencyKey,
         })
+        // `CobroYaRegistrado` no es un AppError: relanzarlo saldría como 500. La terminal reintenta con la MISMA llave.
+        if (cobroYaRegistrado) {
+          throw new ConflictError('No se pudo confirmar el cobro con esta llave. Vuelve a intentar.', 'ORDER_PAYMENT_CONFLICT')
+        }
       }
     }
     throw error

@@ -14,7 +14,8 @@ import type { McpScope } from './scope'
  */
 export async function auditMcpWrite(
   scope: McpScope,
-  params: { action: string; entity: string; entityId: string; venueId: string; data?: Record<string, unknown> },
+  // `venueId: null` only for platform records that belong to no venue (superadmin price lists and promotions).
+  params: { action: string; entity: string; entityId: string; venueId: string | null; data?: Record<string, unknown> },
 ): Promise<void> {
   await logAction({
     staffId: scope.staffId,

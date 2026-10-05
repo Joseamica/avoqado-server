@@ -137,6 +137,21 @@ describe('settleOrder — la lealtad del cliente', () => {
   })
 })
 
+describe('Founder 3-oct / Codex r13 #3: «liquidar» es un cobro nuevo', () => {
+  it.each(['CANCELLED', 'DELETED'])(
+    '🔴 una cuenta %s ⇒ 400 con el texto del founder; ni transición, ni Payment, ni lealtad (hoy: crea un efectivo y la deja PAGADA y cancelada, fuera de los lectores)',
+    async status => {
+      const { updates } = armarOrden({ status })
+      await expect(settleOrder(VENUE, 'order-1', undefined, 'staff-7')).rejects.toMatchObject({
+        statusCode: 400,
+        code: 'ORDER_CANCELLED_NO_NEW_CHARGE',
+        message: 'Esta cuenta está cancelada, abre una nueva.',
+      })
+      expect([updates.length, (prismaMock as any).payment.create.mock.calls.length, award.mock.calls.length]).toEqual([0, 0, 0])
+    },
+  )
+})
+
 describe('settleCustomerBalance — la lealtad del cliente', () => {
   function armarCliente() {
     const orders = [

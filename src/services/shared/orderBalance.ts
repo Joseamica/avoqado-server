@@ -18,7 +18,7 @@ import { Prisma } from '@prisma/client'
  *
  * ── Las reglas ──────────────────────────────────────────────────────────────
  *   mercancía  = max(0, subtotal − descuento)    ← el clamp va ANTES de sumar
- *   total      = mercancía + cargo por servicio + propinas
+ *   total      = mercancía + IVA que va aparte (P12) + cargo por servicio + propinas
  *   pagado     = Σ (amount + tipAmount) de los COMPLETED que NO son REFUND
  *   restante   = total − pagado
  *   pagada     ⟺ restante <= 0.01
@@ -61,6 +61,13 @@ export interface OrderAmountsForBalance {
   subtotal: DecimalLike
   discountAmount?: DecimalLike
   serviceChargeAmount?: DecimalLike
+  /**
+   * P12 (Codex r2, r5): las tres OBLIGATORIAS. El IVA entra al saldo SÓLO por `impuestoQueSeCobraAparte`, que necesita el
+   * contrato, el impuesto y el estado (una cancelada no debe IVA). Olvidar una no compila.
+   */
+  contratoDePrecio: string | null | undefined
+  taxAmount: DecimalLike
+  status: string | null | undefined
 }
 
 /**
@@ -177,15 +184,72 @@ export interface StoredOrderTotalAmounts {
   subtotal: DecimalLike
   discountAmount?: DecimalLike
   /**
-   * 🔴 SÓLO para los caminos de descuento, que históricamente lo suman al total
-   * guardado. La aritmética canónica del SALDO (`computeOrderBalance`) NO lo pasa
-   * —y no debe—: en México el precio en pantalla ya trae el IVA, así que sumarlo
-   * otra vez lo cobraría dos veces. Se deja explícito, nunca por herencia del
-   * objeto `Order`.
+   * P12 (Codex r2, r6 #3): el IVA entra al total guardado SÓLO por `impuestoQueSeCobraAparte`, con la MISMA regla que el
+   * saldo (`computeOrderBalance`): con IVA incluido nunca suma; aparte (o desconocido con IVA > 0) sí; una cancelada no debe
+   * IVA. Las tres llaves son OBLIGATORIAS y siempre explícitas, nunca por herencia del objeto `Order`: el compilador enumera
+   * a cada llamador.
    */
-  taxAmount?: DecimalLike
+  contratoDePrecio: string | null | undefined
+  taxAmount: DecimalLike
+  status: string | null | undefined
   serviceChargeAmount?: DecimalLike
   tipAmount?: DecimalLike
+}
+
+/**
+ * Codex r7 #1/#2: la ÚNICA clasificación del estado de una orden para el dinero. Una CANCELADA o borrada no debe IVA (P12) y
+ * ningún cobro automático la cierra; los estados vivos (PENDING, CONFIRMED, PREPARING, READY, COMPLETED…) aportan lo mismo, así
+ * que cambiar entre ellos no es un cambio de dinero.
+ */
+export function claseDeEstado(status: string | null | undefined): 'VIVA' | 'CANCELADA' {
+  return status === 'CANCELLED' || status === 'DELETED' ? 'CANCELADA' : 'VIVA'
+}
+
+/**
+ * Founder, 3-oct-2026 («¿Avoqado debe dejar cobrar una cuenta que ya está cancelada?» → «No, como Square y Toast»). Una
+ * cancelada o borrada no admite un cobro NUEVO (`rechazarCobroNuevoSobreCancelada`), pero el dinero YA capturado nunca se
+ * rechaza: reabre la cuenta. Ésta es la regla del estado con el que esa cuenta RECIBE el dinero: cancelada con dinero > 0 ⇒
+ * PENDING (el mismo estado al que la reabre la reasignación); viva, o cancelada sin dinero, ⇒ la misma. Quien guarda totales
+ * calcula con ESTE estado y lo persiste en la misma transacción (Codex r9 #2); el IVA no se toca (Codex r9 #3).
+ */
+export function estadoAlRecibirDinero<S extends string>(status: S, cobrado: Prisma.Decimal | number): S | 'PENDING' {
+  return claseDeEstado(status) === 'CANCELADA' && dec(cobrado).greaterThan(0) ? 'PENDING' : status
+}
+
+/**
+ * ¿Es el cierre transaccional del cobro (`settleStandalonePaymentInTx`) el dueño de los efectos de saldar esta cuenta (vale de
+ * inventario, lealtad, marca de cocina)? No en una integrada (POS con `externalId`: la salda SoftRestaurant) ni en una con renglones
+ * de vale por área (sus reservas ya consumieron el stock y la finaliza otro camino). Un criterio, un lugar: lo usan
+ * `recordOrderPayment` y la reasignación de cobros (Tarea 6d, I-1).
+ */
+export function cierreDelCobroSaldaLaCuenta(o: {
+  source: string
+  externalId: string | null
+  items: ReadonlyArray<{ areaTicketLineId: string | null }>
+}): boolean {
+  const integrada = o.source === 'POS' && !!o.externalId?.trim()
+  return !integrada && !o.items.some(i => i.areaTicketLineId != null)
+}
+
+/**
+ * P12 (Codex r2; founder 2-oct): el IVA que SUMA al total y al saldo. IVA_INCLUIDO ⇒ nunca (el precio ya lo trae). IVA_APARTE
+ * ⇒ el declarado. DESCONOCIDO ⇒ la convención vigente del vigilante y de la factura (founder, 3-sep: «si el dueño puso IVA
+ * entonces se suma»): un IVA escrito > 0 va aparte — así nacieron las de SoftRestaurant de antes del contrato; las nativas
+ * nacen con 0. Siempre clampado: un impuesto negativo nunca baja lo que se debe. Y una cuenta CANCELADA o borrada no debe IVA
+ * (Codex r5): el origen de una fusión de antes del bloque quedó cancelado con su `taxAmount`. Los cobros SÍ leen `status` (Tarea
+ * 6a): un cobro nuevo sobre una cancelada se rechaza y el dinero ya capturado la reabre ANTES de calcular
+ * (`shared/cuentaCancelada.ts`), así que esta regla sólo ve canceladas que no recibieron dinero.
+ */
+export function impuestoQueSeCobraAparte(o: {
+  contratoDePrecio: string | null | undefined
+  taxAmount: DecimalLike | null | undefined
+  /** Obligatoria (Codex r6 #3): lo que se guarda y lo que se cobra siguen la MISMA regla; olvidarla no compila. */
+  status: string | null | undefined
+}): Prisma.Decimal {
+  if (claseDeEstado(o.status) === 'CANCELADA') return ZERO
+  if (o.contratoDePrecio === 'IVA_INCLUIDO') return ZERO
+  const impuesto = dec(o.taxAmount)
+  return impuesto.isNegative() ? ZERO : impuesto
 }
 
 /**
@@ -203,7 +267,7 @@ export interface StoredOrderTotalAmounts {
  *
  * ── La regla ────────────────────────────────────────────────────────────────
  *   mercancía = max(0, subtotal − descuento)   ← se clampa
- *   impuesto  = max(0, impuesto)               ← se clampa, POR SEPARADO
+ *   impuesto  = impuestoQueSeCobraAparte(…)    ← P12: 0 con IVA incluido o cancelada; si no, max(0, impuesto)
  *   total     = mercancía + impuesto + cargo por servicio + propina
  *
  * 🔴 Los dos conceptos que pueden llegar en negativo se clampan por separado, y
@@ -213,12 +277,14 @@ export interface StoredOrderTotalAmounts {
  *   existe en la base (cortesía de cuenta completa encima de un descuento previo)
  *   y sin clamp el total sale NEGATIVO y RESTA del corte del día (caso M13:
  *   subtotal 253.00 − descuento 278.30 = −25.30).
- * - **Impuesto.** `applyDiscountToOrder` calcula `taxAmount − taxReduction`, donde
- *   la reducción es `monto × 0.16` FIJO (`estimateAverageTaxRate` no mira la orden)
- *   y `applyBeforeTax` es `true` por default. Una cortesía de $253 sobre una cuenta
- *   con poco o ningún impuesto deja el impuesto en −40.48; ese valor además se
- *   PERSISTE, así que los otros dos caminos lo leen de la orden y lo arrastran. Un
- *   impuesto negativo nunca puede RESTAR de lo que se debe.
+ * - **Impuesto.** Hasta D16 (IVA por producto, B2b) el motor de descuentos restaba
+ *   `monto × 0.16` FIJO (`estimateAverageTaxRate`, que no miraba la orden, con
+ *   `applyBeforeTax` en `true` por default): una cortesía de $253 sobre una cuenta con
+ *   poco o ningún impuesto dejaba el impuesto en −40.48, y ese valor se PERSISTÍA.
+ *   Desde D16 el motor ya no resta un 16 % fijo (sólo con IVA aparte, el impuesto
+ *   realmente cobrado en lo que tocó, topado a la cabecera), pero las órdenes viejas
+ *   siguen guardadas en negativo y los otros caminos lo leen de la orden. Por ellas el
+ *   clamp se queda: un impuesto negativo nunca puede RESTAR de lo que se debe.
  *   ⚠️ Se clampa aquí la CONTRIBUCIÓN al total, no el `taxAmount` guardado:
  *   `removeDiscountFromOrder` devuelve `+ taxReduction` sin tope, así que clampar
  *   lo persistido haría que quitar el descuento inventara un impuesto que el
@@ -240,8 +306,8 @@ export function computeStoredOrderTotal(amounts: StoredOrderTotalAmounts): Prism
   const merchandiseRaw = dec(amounts.subtotal).minus(dec(amounts.discountAmount))
   const merchandise = merchandiseRaw.isNegative() ? ZERO : merchandiseRaw
 
-  const taxRaw = dec(amounts.taxAmount)
-  const tax = taxRaw.isNegative() ? ZERO : taxRaw
+  // P12: la MISMA regla que el saldo (clamp incluido); con IVA incluido un impuesto escrito ya no suma.
+  const tax = impuestoQueSeCobraAparte(amounts)
 
   return merchandise.plus(tax).plus(dec(amounts.serviceChargeAmount)).plus(dec(amounts.tipAmount))
 }
@@ -260,12 +326,15 @@ export function computeOrderBalance(order: OrderAmountsForBalance, completedPaym
   const tipAmount = refunds.netTipAmount
   const paidAmount = refunds.netPaidAmount
 
-  // 🔴 Campo por campo, NUNCA `...order`: pasar el objeto entero le colaría
-  // `taxAmount` al total del saldo y el cobro empezaría a cobrar el IVA dos veces.
+  // 🔴 Campo por campo, NUNCA `...order`: el IVA entra SÓLO por la regla de P12 (`impuestoQueSeCobraAparte`: con IVA
+  // incluido nunca, y una cancelada no debe IVA), con las tres llaves que la regla lee y nada más del objeto `Order`.
   const total = computeStoredOrderTotal({
     subtotal: order.subtotal,
     discountAmount: order.discountAmount,
     serviceChargeAmount: order.serviceChargeAmount,
+    contratoDePrecio: order.contratoDePrecio,
+    taxAmount: order.taxAmount,
+    status: order.status,
     tipAmount,
   })
   const remaining = total.minus(paidAmount)

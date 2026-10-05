@@ -1,0 +1,136 @@
+import { Prisma } from '@prisma/client'
+import prisma from '@/utils/prismaClient'
+import { Decimal } from '@prisma/client/runtime/library'
+import { ConflictError } from '@/errors/AppError'
+import { utcTs } from '@/utils/sqlDates'
+import { hybridOfferDefinition, type HybridOfferDefinition } from './hybridOffer.schema'
+import { productKeyOf, productKeySql, type ProductKey } from './hybridProduct'
+
+/** An ACTIVE promotion a list price would break, with what superadmin needs to pause it by conditional write. */
+export interface RuleViolation {
+  campaignId: string
+  campaignName: string
+  price: number
+  renewalPrice: number | null
+  listPrice: number
+  revision: number
+  promotionGroupId: string | null
+  groupRevision: number | null
+}
+
+/** Pure: the only inequality of spec §4.4 — initial price strictly below the list, a known renewal at most the list. */
+export function violatesListRule(terms: { price: number; renewal: { kind: string; price?: number } }, listPrice: number): boolean {
+  return new Decimal(terms.price).gte(listPrice) || (terms.renewal.kind === 'REPRICE' && new Decimal(terms.renewal.price!).gt(listPrice))
+}
+
+/**
+ * List price of a product: its LIST's current publication, ACTIVE or PAUSED (pausing never lifts the rule); null without a LIST.
+ * `onSaleOnly` reads only an ACTIVE list (the «% de descuento» generator discounts what is on sale, spec §4.3).
+ */
+export async function listPriceOf(tx: Prisma.TransactionClient, key: ProductKey, onSaleOnly = false): Promise<number | null> {
+  const list = await tx.hybridCampaign.findFirst({
+    where: { purpose: 'LIST', listProductKey: key, ...(onSaleOnly ? { status: 'ACTIVE' as const } : {}) },
+    select: { currentPublicationId: true },
+  })
+  if (!list?.currentPublicationId) return null
+  const publication = await tx.hybridOfferPublication.findUniqueOrThrow({
+    where: { id: list.currentPublicationId },
+    select: { definition: true },
+  })
+  return hybridOfferDefinition.parse(publication.definition).terms.price
+}
+
+/** Promotion side: throws HYBRID_PRICE_ABOVE_LIST if this single-product promotion breaks the rule. Caller holds the product lock. */
+export async function assertPromotionBelowList(tx: Prisma.TransactionClient, definition: HybridOfferDefinition): Promise<void> {
+  const key = productKeyOf(definition)
+  if (!key) return
+  const list = await listPriceOf(tx, key)
+  if (list === null) return
+  if (violatesListRule(definition.terms, list))
+    throw new ConflictError(
+      `Una promoción debe costar menos que su precio de lista (${list}) y renovar a lo más a ese precio.`,
+      'HYBRID_PRICE_ABOVE_LIST',
+    )
+}
+
+/**
+ * List side: the ACTIVE single-product promotions a list price would break (for the save dialog). Caller holds the product lock.
+ * Only promotions still in force count («vigentes», spec §4.4): one whose window already ended can never sell again.
+ */
+export async function promotionsBrokenByList(tx: Prisma.TransactionClient, key: ProductKey, listPrice: number): Promise<RuleViolation[]> {
+  // Filtered by product in SQL, so the set is one product's active promotions, never a global page (index purpose+status).
+  // endsAt holds UTC: compare against a bound UTC instant, never NOW() (the local session zone is America/Mexico_City).
+  const rows = await tx.$queryRaw<
+    { id: string; name: string; revision: number; promotionGroupId: string | null; groupRevision: number | null; definition: unknown }[]
+  >`
+    SELECT c.id, c.name, c.revision, c."promotionGroupId", g.revision AS "groupRevision", p.definition
+    FROM "HybridCampaign" c
+    JOIN "HybridOfferPublication" p ON p.id = c."currentPublicationId"
+    LEFT JOIN "HybridPromotionGroup" g ON g.id = c."promotionGroupId"
+    WHERE c.purpose = 'PROMOTION' AND c.status = 'ACTIVE' AND c."endsAt" > ${utcTs(new Date())} AND ${productKeySql('p')} = ${key}
+    ORDER BY c."createdAt", c.id`
+  return rows.flatMap(row => {
+    const { terms } = hybridOfferDefinition.parse(row.definition)
+    if (!violatesListRule(terms, listPrice)) return []
+    return [
+      {
+        campaignId: row.id,
+        campaignName: row.name,
+        price: terms.price,
+        renewalPrice: terms.renewal.kind === 'REPRICE' ? terms.renewal.price : null,
+        listPrice,
+        revision: row.revision,
+        promotionGroupId: row.promotionGroupId,
+        groupRevision: row.groupRevision,
+      },
+    ]
+  })
+}
+
+/** An ACTIVE promotion of the same product whose window meets a new one (spec §4.4: a warning, never a block). */
+export interface PromotionOverlap {
+  campaignId: string
+  name: string
+  price: number
+}
+
+/**
+ * The ACTIVE single-product promotions over these products whose window meets [startsAt, endsAt), by product key, in
+ * creation order (`excludeCampaignId`: the one under review). One bounded query, filtered by product in SQL.
+ * ponytail: LIMIT 1000, like the board's groups; page it per product if that ever gets close.
+ */
+export async function activePromotionOverlaps(
+  keys: string[],
+  startsAt: Date,
+  endsAt: Date,
+  excludeCampaignId?: string,
+): Promise<Map<string, PromotionOverlap[]>> {
+  const byKey = new Map<string, PromotionOverlap[]>()
+  if (!keys.length) return byKey
+  const rows = await prisma.$queryRaw<{ productKey: string; id: string; name: string; definition: unknown }[]>`
+    SELECT ${productKeySql('p')} AS "productKey", c.id, c.name, p.definition
+    FROM "HybridCampaign" c
+    JOIN "HybridOfferPublication" p ON p.id = c."currentPublicationId"
+    WHERE c.purpose = 'PROMOTION' AND c.status = 'ACTIVE'
+      AND c."startsAt" < ${utcTs(endsAt)} AND c."endsAt" > ${utcTs(startsAt)}
+      AND ${productKeySql('p')} IN (${Prisma.join(keys)})
+      ${excludeCampaignId ? Prisma.sql`AND c.id <> ${excludeCampaignId}` : Prisma.empty}
+    ORDER BY c."createdAt", c.id
+    LIMIT 1000`
+  for (const row of rows) {
+    const overlap = { campaignId: row.id, name: row.name, price: hybridOfferDefinition.parse(row.definition).terms.price }
+    byKey.set(row.productKey, [...(byKey.get(row.productKey) ?? []), overlap])
+  }
+  return byKey
+}
+
+/** List side guard: throws HYBRID_LIST_BREAKS_PROMOTIONS with details = RuleViolation[] when the list would break active promotions. */
+export async function assertPriceRuleForList(tx: Prisma.TransactionClient, key: ProductKey, listPrice: number): Promise<void> {
+  const broken = await promotionsBrokenByList(tx, key, listPrice)
+  if (broken.length)
+    throw new ConflictError(
+      'Hay promociones activas que costarían lo mismo o más que este precio de lista, o que renovarían por encima de él. Páusalas antes de guardarlo.',
+      'HYBRID_LIST_BREAKS_PROMOTIONS',
+      broken,
+    )
+}

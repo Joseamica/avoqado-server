@@ -17,12 +17,23 @@ import { logAction } from '../dashboard/activity-log.service'
 import {
   buildItemDiscountRow,
   calculateDiscountPesos,
+  filaDeDescuentoDeCuenta,
   validateDiscountActive,
   validateDiscountScopeForItem,
 } from '../shared/discount.service'
-import { computeStoredOrderTotal } from '../shared/orderBalance'
+import { computeStoredOrderTotal, impuestoQueSeCobraAparte } from '../shared/orderBalance'
 import { assertNoLiveTerminalCharge } from '../shared/orderCancelGuard'
+import { rechazarSiEsImportada } from '../shared/ordenImportada'
 import { lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
+import { comoJson, importesDeLasFilas, nuevoRepartoDeCuenta, nuevoRepartoDirigido } from '../shared/repartoDescuento'
+import {
+  conservarDescuentoHistorico,
+  filasDeLaOrden,
+  recortarDescuentosDeRenglones,
+  renglonesParaReparto,
+  retirarImpuestoDeRenglones,
+  sincronizarRepartos,
+} from '../shared/repartoDescuentoTx'
 import { baseDeCargos, recalcularCargosPorServicio } from '../shared/serviceCharges'
 import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
@@ -1251,6 +1262,12 @@ export async function createOrderWithItems(
                 .join('; ') || 'Cortesía',
             appliedById: activeStaffVenue.id,
             appliedToItemIds: cortesiaItems.map(item => item.id),
+            // B2: la cortesía ya vive en cada renglón (bruto + discountAmount = bruto); la fila la duplica ⇒ espejo.
+            reparto: comoJson(
+              nuevoRepartoDirigido(cortesiaAmountPesos, Object.fromEntries(cortesiaItems.map(i => [i.id, i.line.lineGrossPesos])), {
+                espejo: true,
+              }),
+            ),
           },
         })
       }
@@ -1282,8 +1299,21 @@ export async function createOrderWithItems(
             compReason: orderDiscount.type === 'COMP' ? orderDiscount.compReason || orderDiscount.name : null,
             appliedById: activeStaffVenue.id,
             appliedToItemIds: createdItems.filter(item => !item.line.input.isCortesia).map(item => item.id),
+            // B2: su base fue bruto − artículo − cortesías, sobre los renglones sin cortesía.
+            reparto: comoJson(
+              nuevoRepartoDeCuenta({ conPromociones: false, base: createdItems.filter(i => !i.line.input.isCortesia).map(i => i.id) }),
+            ),
           },
         })
+      }
+      if (!orderDiscount && orderDiscountPesos > 0) {
+        // P2 (founder, 1-oct): el descuento libre de la terminal tiene su fila; sólo en la cabecera, un recálculo lo borraba.
+        await tx.orderDiscount.create({
+          data: filaDeDescuentoDeCuenta({ orderId: order.id, montoPesos: orderDiscountPesos, appliedById: activeStaffVenue.id }),
+        })
+      }
+      if (cortesiaItems.length > 0 || createdItems.some(item => item.line.appliedDiscount) || orderDiscountPesos > 0) {
+        await sincronizarRepartos(tx, order.id)
       }
 
       const usedDiscountIds = [...new Set(createdItems.map(item => item.line.appliedDiscount?.id).filter(Boolean) as string[])]
@@ -1486,6 +1516,9 @@ export async function addItemsToOrder(
       if (!order) {
         throw new NotFoundError('Order not found')
       }
+      // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
+      // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
+      rechazarSiEsImportada(order)
 
       // Optimistic concurrency check
       // ✅ P1 FIX: Use 409 Conflict instead of 400 Bad Request for version mismatch
@@ -2030,15 +2063,12 @@ export async function addItemsToOrder(
       // ⭐ P0 FIX: Re-fetch all items from DB to avoid double-counting updated items
       // Previously we did [...order.items, ...newOrderItems] but this would duplicate
       // items that were UPDATED (old version + new version)
+      // B2: con la categoría de su producto — el ámbito de un % dirigido del motor (P1).
       const allItemsFromDb = await tx.orderItem.findMany({
         where: { orderId: order.id },
+        include: { product: { select: { categoryId: true } } },
       })
       const newSubtotal = allItemsFromDb.reduce((sum, item) => sum + Number(item.total), 0)
-      // 🔴 Las líneas de promoción NO entran a la base de los descuentos % de
-      // orden: la promo ya es un precio negociado — incluirla re-descuenta lo ya
-      // descontado ($20 → $39.80 al meter un combo de $99). Mismo criterio que el
-      // discountEngine y recalculateOrderTotals.
-      const discountBase = allItemsFromDb.filter(item => !(item as any).orderPromotionId).reduce((sum, item) => sum + Number(item.total), 0)
 
       // 🔄 Recalculate percentage-based discounts when items are added
       // Fetch any applied OrderDiscounts and recalculate PERCENTAGE discounts
@@ -2047,34 +2077,13 @@ export async function addItemsToOrder(
         include: { discount: true },
       })
 
-      let newDiscountAmount = 0
-      for (const orderDiscount of orderDiscounts) {
-        // 🔴 MONEY (auditoría 2026-07-18): filas con appliedToItemIds son descuentos
-        // POR ARTÍCULO — su % NO se re-deriva sobre el subtotal completo. Y el valor
-        // es el DENORMALIZADO de la fila, no el del catálogo vivo.
-        const isItemScoped = ((orderDiscount as any).appliedToItemIds?.length ?? 0) > 0
-        const discountType = orderDiscount.type
-        const discountValue = Number(orderDiscount.value || 0)
-
-        if (!isItemScoped && discountType === 'PERCENTAGE' && discountValue > 0) {
-          // Recalculate percentage based on NEW subtotal
-          const recalculatedAmount = (discountBase * discountValue) / 100
-          const roundedAmount = Math.round(recalculatedAmount * 100) / 100
-
-          logger.info(`  🔄 Recalculating PERCENTAGE discount: ${discountValue}% of $${newSubtotal} = $${roundedAmount}`)
-
-          // Update individual OrderDiscount record
-          await tx.orderDiscount.update({
-            where: { id: orderDiscount.id },
-            data: { amount: roundedAmount },
-          })
-
-          newDiscountAmount += roundedAmount
-        } else {
-          // FIXED_AMOUNT or COUPON - keep original amount
-          newDiscountAmount += Number(orderDiscount.amount)
-        }
-      }
+      // 🔴 MONEY (auditoría 2026-07-18): misma regla que los demás recalculadores (`importesDeLasFilas`, con P1 acotado):
+      // las filas con appliedToItemIds son POR ARTÍCULO y conservan su importe; las líneas de promoción quedan fuera de la
+      // base de un % de cuenta; el valor es el DENORMALIZADO de la fila. Repartos sincronizados en esta tx, antes del CAS.
+      const { montosRederivados, descuento } = importesDeLasFilas(allItemsFromDb, orderDiscounts)
+      let newDiscountAmount = descuento
+      // B2b (D16): la sincronización ya escribió en `Order.taxAmount` lo que devolvió al re-repartir las filas marcadas.
+      const sincronizado = await sincronizarRepartos(tx, orderId, { renglones: allItemsFromDb, filas: orderDiscounts, montosRederivados })
 
       // If no OrderDiscounts but order has discountAmount, preserve it (from comp/manual discount)
       if (orderDiscounts.length === 0 && Number(order.discountAmount) > 0) {
@@ -2088,7 +2097,19 @@ export async function addItemsToOrder(
       const baseForCharges = baseDeCargos(newSubtotal, newDiscountAmount)
       const newServiceChargeAmount = await recalcularCargosPorServicio(tx, orderId, baseForCharges)
 
-      const newTotal = baseForCharges.plus(newServiceChargeAmount).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP).toNumber()
+      // P12: el IVA que va aparte entra al total con la regla compartida, con el impuesto que la sincronización acaba de
+      // mover en esta transacción (la lectura de arriba es anterior a ella).
+      const newTotal = baseForCharges
+        .plus(
+          impuestoQueSeCobraAparte({
+            contratoDePrecio: order.contratoDePrecio,
+            taxAmount: new Prisma.Decimal(order.taxAmount ?? 0).plus(sincronizado.impuestoDevuelto),
+            status: order.status,
+          }),
+        )
+        .plus(newServiceChargeAmount)
+        .toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP)
+        .toNumber()
 
       // Calculate remaining balance (for partial payment tracking)
       const currentPaidAmount = Number(order.paidAmount || 0)
@@ -2350,7 +2371,7 @@ export async function removeOrderItem(
 ): Promise<Order & { tableName: string | null }> {
   logger.info(`🗑️ [ORDER SERVICE] Removing item ${orderItemId} from order ${orderId} (expected version: ${expectedVersion})`)
 
-  const { updatedOrder, itemToRemove } = await prisma.$transaction(
+  const { updatedOrder, itemToRemove, recorte } = await prisma.$transaction(
     async tx => {
       if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) {
         throw new NotFoundError('Order not found')
@@ -2370,6 +2391,9 @@ export async function removeOrderItem(
       if (!order) {
         throw new NotFoundError('Order not found')
       }
+      // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
+      // el IVA dos veces (P12). Esos cambios se hacen en el POS externo. Antes de R9 (`retirarImpuestoDeRenglones`).
+      rechazarSiEsImportada(order)
 
       // Optimistic concurrency check
       // ✅ P1 FIX: Use 409 Conflict instead of 400 Bad Request for version mismatch
@@ -2398,6 +2422,18 @@ export async function removeOrderItem(
         throw new NotFoundError('Order item not found in this order')
       }
 
+      // R9 (Codex r4 R4-1; entra con P12): el renglón que se borra se lleva su IVA de la cabecera ANTES de borrarlo y de
+      // re-repartir: con P12 ese IVA se cobraba sin artículo que lo respaldara (café $100 + IVA 16 y pan $50 + IVA 8: quitar el
+      // café dejaba $74 por cobrar en vez de $58).
+      const impuestoRetirado = await retirarImpuestoDeRenglones(tx, orderId, [itemToRemove])
+      // R7-1 (ruling de B2): el resto de cabecera que no está en ninguna fila se congela en la suya ANTES del recorte (después, el
+      // importe de un espejo ya retirado reaparecería como «Descuento anterior»); el recálculo de abajo es Σ filas.
+      await conservarDescuentoHistorico(tx, orderId, order.discountAmount)
+      // P4 (founder, 1-oct): lo dirigido al renglón que se borra —su descuento propio, su parte de un 2×1, un premio— se recorta
+      // o se retira con sus beneficios ANTES de borrarlo; si no, su importe se quedaba restando sobre los demás renglones. Va
+      // DESPUÉS de R9: la reducción que devuelva una fila retirada ya no encuentra en la cabecera el IVA del renglón que se fue.
+      const recorte = await recortarDescuentosDeRenglones(tx, orderId, { renglones: [orderItemId], venueId })
+
       // Delete the order item (Prisma will cascade delete modifiers)
       await tx.orderItem.delete({
         where: { id: orderItemId },
@@ -2408,8 +2444,6 @@ export async function removeOrderItem(
       // Calculate new totals
       const remainingItems = order.items.filter(item => item.id !== orderItemId)
       const newSubtotal = remainingItems.reduce((sum, item) => sum + Number(item.total), 0)
-      // Misma exclusión de líneas de promo que en addItemsToOrder (ver arriba).
-      const discountBase = remainingItems.filter(item => !(item as any).orderPromotionId).reduce((sum, item) => sum + Number(item.total), 0)
 
       // 🔄 Recalculate percentage-based discounts when items are removed
       // Fetch any applied OrderDiscounts and recalculate PERCENTAGE discounts
@@ -2418,38 +2452,16 @@ export async function removeOrderItem(
         include: { discount: true },
       })
 
-      let newDiscountAmount = 0
-      for (const orderDiscount of orderDiscounts) {
-        // 🔴 MONEY (auditoría 2026-07-18): filas con appliedToItemIds son descuentos
-        // POR ARTÍCULO — su % NO se re-deriva sobre el subtotal completo. Y el valor
-        // es el DENORMALIZADO de la fila, no el del catálogo vivo.
-        const isItemScoped = ((orderDiscount as any).appliedToItemIds?.length ?? 0) > 0
-        const discountType = orderDiscount.type
-        const discountValue = Number(orderDiscount.value || 0)
+      // 🔴 MONEY (auditoría 2026-07-18): misma regla que addItemsToOrder (`importesDeLasFilas`, con P1 acotado). Sus
+      // renglones ya traen el producto (y su categoría). Repartos sincronizados en esta tx, antes de escribir los totales.
+      const { montosRederivados, descuento } = importesDeLasFilas(remainingItems, orderDiscounts)
+      let newDiscountAmount = descuento
+      // B2b (D16): la sincronización ya escribió en `Order.taxAmount` lo que devolvió al re-repartir las filas marcadas.
+      const sincronizado = await sincronizarRepartos(tx, orderId, { renglones: remainingItems, filas: orderDiscounts, montosRederivados })
 
-        if (!isItemScoped && discountType === 'PERCENTAGE' && discountValue > 0) {
-          // Recalculate percentage based on NEW subtotal
-          const recalculatedAmount = (discountBase * discountValue) / 100
-          const roundedAmount = Math.round(recalculatedAmount * 100) / 100
-
-          logger.info(`  🔄 Recalculating PERCENTAGE discount: ${discountValue}% of $${newSubtotal} = $${roundedAmount}`)
-
-          // Update individual OrderDiscount record
-          await tx.orderDiscount.update({
-            where: { id: orderDiscount.id },
-            data: { amount: roundedAmount },
-          })
-
-          newDiscountAmount += roundedAmount
-        } else {
-          // FIXED_AMOUNT or COUPON - keep original amount
-          newDiscountAmount += Number(orderDiscount.amount)
-        }
-      }
-
-      // If no OrderDiscounts but order has discountAmount, preserve it (from comp/manual discount)
+      // Sin filas, la cabecera de antes menos lo recortado: un espejo retirado no puede volver por la cabecera.
       if (orderDiscounts.length === 0 && Number(order.discountAmount) > 0) {
-        newDiscountAmount = Number(order.discountAmount)
+        newDiscountAmount = Math.max(0, Math.round((Number(order.discountAmount) - recorte.recortadoPesos) * 100) / 100)
       }
 
       // Cobros por servicio (auditoría 2026-07-18): agregar una ronda NO debe tirar
@@ -2459,7 +2471,22 @@ export async function removeOrderItem(
       const baseForCharges = baseDeCargos(newSubtotal, newDiscountAmount)
       const newServiceChargeAmount = await recalcularCargosPorServicio(tx, orderId, baseForCharges)
 
-      const newTotal = baseForCharges.plus(newServiceChargeAmount).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP).toNumber()
+      // P12: el IVA que va aparte entra al total con la regla compartida, con el impuesto que R9, el recorte y la sincronización
+      // acaban de mover en esta transacción (la lectura de arriba es anterior a los tres).
+      const newTotal = baseForCharges
+        .plus(
+          impuestoQueSeCobraAparte({
+            contratoDePrecio: order.contratoDePrecio,
+            taxAmount: new Prisma.Decimal(order.taxAmount ?? 0)
+              .minus(impuestoRetirado)
+              .plus(recorte.impuestoDevuelto)
+              .plus(sincronizado.impuestoDevuelto),
+            status: order.status,
+          }),
+        )
+        .plus(newServiceChargeAmount)
+        .toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP)
+        .toNumber()
 
       // Calculate remaining balance (for partial payment tracking)
       const currentPaidAmount = Number(order.paidAmount || 0)
@@ -2532,7 +2559,7 @@ export async function removeOrderItem(
       logger.info(
         `✅ [ORDER SERVICE] Removed item from order ${order.orderNumber}. New total: $${newTotal} (version: ${order.version} → ${updatedOrder.version})`,
       )
-      return { updatedOrder, itemToRemove }
+      return { updatedOrder, itemToRemove, recorte }
     },
     { timeout: 15_000, maxWait: 5_000 },
   )
@@ -2543,7 +2570,11 @@ export async function removeOrderItem(
     action: 'ITEM_REMOVED',
     entity: 'Order',
     entityId: orderId,
-    data: { itemId: orderItemId, amount: Number(itemToRemove.total ?? 0) },
+    data: {
+      itemId: orderItemId,
+      amount: Number(itemToRemove.total ?? 0),
+      ...(recorte.retiradas.length > 0 ? { descuentosRetirados: recorte.retiradas } : {}),
+    },
   })
 
   // Emit Socket.IO event for real-time order updates
@@ -2614,7 +2645,7 @@ export function anulacionExigeOrdenSinCobroVivo(_input: { isVoidingAllItems: boo
 export async function compItems(venueId: string, orderId: string, input: CompItemsInput): Promise<Order & { tableName: string | null }> {
   logger.info(`🚫 [ORDER SERVICE] Comping items for order ${orderId} | reason: ${input.reason}`)
 
-  const { updatedOrder, compAmount, itemCount, newTotal } = await prisma.$transaction(
+  const { updatedOrder, compAmount, itemCount, newTotal, recorte } = await prisma.$transaction(
     async tx => {
       if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) {
         throw new NotFoundError('Order not found')
@@ -2630,6 +2661,9 @@ export async function compItems(venueId: string, orderId: string, input: CompIte
       if (!order) {
         throw new NotFoundError('Order not found')
       }
+      // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
+      // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
+      rechazarSiEsImportada(order)
 
       // Validate order is not already paid
       if (order.paymentStatus === 'PAID') {
@@ -2645,33 +2679,33 @@ export async function compItems(venueId: string, orderId: string, input: CompIte
         throw new NotFoundError('Staff member not found')
       }
 
-      // Determine which items to comp
-      const itemsToComp =
+      // Determine which items to comp. T-15 (B2c): lo que ya es cortesía no se vuelve a regalar — una del móvil guarda total 0, y
+      // regalarla otra vez le escribía discountAmount 0 y un espejo de $0 (como `compWholeOrder` del móvil, que ya la salta).
+      const itemsToComp = (
         input.itemIds.length === 0
           ? order.items // Comp entire order
           : order.items.filter(item => input.itemIds.includes(item.id))
+      ).filter(item => !item.isCortesia)
 
       if (itemsToComp.length === 0) {
         throw new BadRequestError('No items found to comp')
       }
 
+      // R7-1 (ruling de B2): el resto de cabecera sin fila se congela en la suya ANTES del recorte; si no, el siguiente recálculo
+      // (Σ filas, ahora que la cortesía tiene fila) lo perdía.
+      await conservarDescuentoHistorico(tx, orderId, order.discountAmount)
+      // P5 (founder, 1-oct): lo DIRIGIDO a los renglones que se regalan —su descuento propio, un 2×1, un premio— se recorta o
+      // retira con sus beneficios ANTES de marcarlos: la cortesía ya regala el renglón entero y no se le encima otro descuento.
+      const recorte = await recortarDescuentosDeRenglones(tx, orderId, {
+        renglones: itemsToComp.map(item => item.id),
+        venueId,
+        staffId: input.staffId,
+      })
+
       // Calculate discount amount (total of comped items)
-      const compAmount = itemsToComp.reduce((sum, item) => sum + Number(item.total), 0)
+      const compAmount = Math.round(itemsToComp.reduce((sum, item) => sum + Number(item.total), 0) * 100) / 100
 
       logger.info(`  💰 Comping ${itemsToComp.length} items | total discount: $${compAmount}`)
-
-      // Update order: increase discountAmount, decrease total.
-      // 🔴 MONEY: compAmount is the comped items' GROSS total (OrderItem.total never
-      // zeroes — see the transaction below). Adding it on top of a PRE-EXISTING
-      // order.discountAmount (an earlier applyDiscount, or a previous partial comp)
-      // double-counts whatever those items already gave away: a whole-order comp on
-      // an order that already carries a $25.30 discount produced discountAmount
-      // $278.30 > subtotal $253.00 and total -$25.30 (reproduced on hardware,
-      // order cmsetvfft0001c9jxv33p26gl). "Cortesía toda la cuenta" means the guest
-      // owes nothing — clamp so the comp absorbs at most the currently-remaining
-      // balance (subtotal - existing discount), never pushing discountAmount above
-      // subtotal or total below zero, no matter what was discounted before.
-      const newDiscountAmount = Math.min(Number(order.discountAmount) + compAmount, Number(order.subtotal))
 
       const currentPaidAmount = Number(order.paidAmount || 0)
       // El total se calcula DENTRO de la transacción, porque el cargo por servicio porcentual
@@ -2692,9 +2726,52 @@ export async function compItems(venueId: string, orderId: string, input: CompIte
             isCortesia: true,
             cortesiaReason: input.reason,
             discountAmount: item.total,
+            appliedDiscountId: null, // su espejo lo acaba de retirar el recorte
           },
         })
       }
+
+      // P5: la cortesía tiene su fila ESPEJO, como en «Cobrar». Sin ella vivía sólo en la cabecera y el siguiente recálculo
+      // (Σ filas) la borraba. Una cortesía de $0 no gana espejo: sería una «Cortesía $0» sin renglones que nadie retira.
+      if (compAmount > 0) {
+        const otorgadaPor = await tx.staffVenue.findFirst({ where: { staffId: input.staffId, venueId }, select: { id: true } })
+        await tx.orderDiscount.create({
+          data: {
+            orderId,
+            type: 'COMP',
+            name: 'Cortesía',
+            value: new Prisma.Decimal(100),
+            amount: new Prisma.Decimal(compAmount),
+            taxReduction: 0,
+            isComp: true,
+            isManual: true,
+            compReason: input.reason,
+            appliedById: otorgadaPor?.id ?? null,
+            appliedToItemIds: itemsToComp.map(item => item.id),
+            reparto: comoJson(
+              nuevoRepartoDirigido(compAmount, Object.fromEntries(itemsToComp.map(item => [item.id, Number(item.total)])), {
+                espejo: true,
+              }),
+            ),
+          },
+        })
+      }
+      // Ruling de la revisión de T4 (Tarea 4b): la cortesía también RECALCULA — los % (de cuenta y dirigidos con ámbito) se
+      // re-derivan sin lo ya regalado (R8), con la regla única de los recalculadores, sobre los renglones ya marcados. Sin esto la
+      // misma cortesía cobraba distinto en la terminal ($5) que en el móvil ($35).
+      const renglones = await renglonesParaReparto(tx, orderId)
+      const filas = await filasDeLaOrden(tx, orderId)
+      const { montosRederivados, descuento } = importesDeLasFilas(renglones, filas)
+      const sincronizado = await sincronizarRepartos(tx, orderId, { renglones, filas, montosRederivados })
+
+      // 🔴 MONEY: cabecera = Σ filas (con los % re-derivados), SIN tope, como `voidItems`. El total nunca queda negativo: lo topa
+      // `computeStoredOrderTotal` (caso de hardware cmsetvfft…: cortesía de toda la cuenta sobre un descuento previo). Topar aquí
+      // la cabecera hacía que quitar después una fila (cabecera − su importe) cobrara de más. Sin filas (sólo una cortesía de $0
+      // en una cuenta sin filas), la de antes − lo recortado + la cortesía, topada al subtotal.
+      const newDiscountAmount =
+        filas.length > 0
+          ? descuento
+          : Math.min(Math.max(0, Number(order.discountAmount) - recorte.recortadoPesos) + compAmount, Number(order.subtotal))
 
       // 🔴 MONEY: la cortesía baja la base, así que un cargo por servicio PORCENTUAL baja con
       // ella (auditoría 2026-09-03). El snapshot `order.serviceChargeAmount` está congelado:
@@ -2708,12 +2785,14 @@ export async function compItems(venueId: string, orderId: string, input: CompIte
       // schema) y la propina del mesero. El clamp de la mercancía que ya había aquí lo hace la
       // función, con el mismo criterio: un descuento excedente se come la mercancía, no los cargos.
       //
-      // `taxAmount` NO se pasa, a propósito: este camino no lo toca ni lo recalcula, y el cobro
-      // que le sigue (`recordOrderPayment`) tampoco lo suma — pasarlo haría que el total BAJARA al
-      // cobrar. Divergencia declarada con los tres caminos de descuento del dashboard, que sí lo suman.
+      // P12: el IVA aparte entra aquí y en el cobro, con la misma regla — con el impuesto que el recorte y la sincronización
+      // devolvieron a `Order.taxAmount` en esta transacción.
       newTotal = computeStoredOrderTotal({
         subtotal: order.subtotal,
         discountAmount: newDiscountAmount,
+        contratoDePrecio: order.contratoDePrecio,
+        taxAmount: new Prisma.Decimal(order.taxAmount ?? 0).plus(recorte.impuestoDevuelto).plus(sincronizado.impuestoDevuelto),
+        status: order.status,
         serviceChargeAmount: newServiceChargeAmount,
         tipAmount: order.tipAmount,
       }).toNumber()
@@ -2795,7 +2874,7 @@ export async function compItems(venueId: string, orderId: string, input: CompIte
         },
       })
 
-      return { updatedOrder: updated, compAmount, itemCount: itemsToComp.length, newTotal }
+      return { updatedOrder: updated, compAmount, itemCount: itemsToComp.length, newTotal, recorte }
     },
     { timeout: 15_000, maxWait: 5_000 },
   )
@@ -2806,7 +2885,12 @@ export async function compItems(venueId: string, orderId: string, input: CompIte
     action: 'ITEM_COMPED',
     entity: 'Order',
     entityId: orderId,
-    data: { itemIds: input.itemIds, amount: Number(compAmount), reason: input.reason ?? undefined },
+    data: {
+      itemIds: input.itemIds,
+      amount: Number(compAmount),
+      reason: input.reason ?? undefined,
+      ...(recorte.retiradas.length > 0 ? { descuentosRetirados: recorte.retiradas } : {}),
+    },
   })
 
   logger.info(`✅ [ORDER SERVICE] Comped ${itemCount} items | discount: $${compAmount} | new total: $${newTotal}`)
@@ -2851,7 +2935,7 @@ interface VoidItemsInput {
 export async function voidItems(venueId: string, orderId: string, input: VoidItemsInput): Promise<Order & { tableName: string | null }> {
   logger.info(`❌ [ORDER SERVICE] Voiding ${input.itemIds.length} items from order ${orderId} | reason: ${input.reason}`)
 
-  const { updatedOrder, isVoidingAllItems, voidAmount, itemsToVoid, newTotal } = await prisma.$transaction(
+  const { updatedOrder, isVoidingAllItems, voidAmount, itemsToVoid, newTotal, recorte } = await prisma.$transaction(
     async tx => {
       // El candado de comandas va PRIMERO (mismo orden que el armado: comandas → orden). Si esta anulación deja la cuenta
       // sin renglones, abajo retira sus comandas de la pantalla de cocina sin cruzarse con un armado en curso.
@@ -2874,6 +2958,9 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
       if (!order) {
         throw new NotFoundError('Order not found')
       }
+      // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
+      // el IVA dos veces (P12). Esos cambios se hacen en el POS externo. Antes de R9 y de las guardas de cobro.
+      rechazarSiEsImportada(order)
 
       // Optimistic concurrency check
       // ✅ P1 FIX: Use 409 Conflict instead of 400 Bad Request for version mismatch
@@ -2930,7 +3017,7 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
       // Anular TODO cancela la cuenta: la cocina deja de verla (el candado de comandas ya se tomó al inicio).
       if (isVoidingAllItems) await retirarComandasDeVentaAnulada(tx, venueId, orderId)
 
-      // 🔴 MONEY: el subtotal BAJA al anular, pero el descuento acumulado NO. La resta escrita
+      // 🔴 MONEY: el subtotal BAJA al anular, pero un descuento fijo NO. La resta escrita
       // a mano (`newSubtotal − discountAmount`, sin clamp) escribía un `Order.total` NEGATIVO que
       // RESTA del corte del día — el mecanismo del caso M13 por una tercera vía— y además tiraba
       // del total el cargo por servicio («INGRESO GRAVABLE del negocio», dice el schema) y la
@@ -2938,12 +3025,6 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
       //
       // Anular TODO cancela la orden: ahí el total va a 0 a propósito. Una orden CANCELLED con un
       // total > 0 sería dinero que nadie puede cobrar ensuciando los reportes.
-      //
-      // ⚠️ LÍMITE DECLARADO, el que QUEDA: este camino sigue SIN recalcular los DESCUENTOS por
-      // porcentaje sobre el subtotal nuevo — `removeOrderItem` (mismo archivo) sí lo hace. Un 30%
-      // calculado sobre $100 se queda en $30 aunque el subtotal baje a $40. Los CARGOS por
-      // porcentaje sí se recalculan desde el 2026-09-03 (`recalcularCargosPorServicio`); el clamp
-      // sigue impidiendo el daño contable de la desproporción que queda.
       // Lo cobrado ya NO se toma de esta prelectura: se relee bajo el candado dentro de la transacción (P2-8).
 
       if (isVoidingAllItems) {
@@ -2968,6 +3049,16 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
         )
       }
 
+      // R9 (Codex r4 R4-1): lo anulado se lleva su IVA de la cabecera ANTES de borrar los platos (y, desde B2c, antes del recorte
+      // y de la sincronización). Anular TODO ya deja el impuesto en 0 en la escritura con CAS (V5).
+      const impuestoRetirado = isVoidingAllItems ? new Prisma.Decimal(0) : await retirarImpuestoDeRenglones(tx, orderId, itemsToVoid)
+      // R7-1 (ruling de B2): el resto de cabecera sin fila se congela en la suya ANTES del recorte. Aquí es indispensable: P13
+      // pasa el descuento de la cabecera leída a Σ filas, y sin esto un resto sin fila se perdía.
+      await conservarDescuentoHistorico(tx, orderId, order.discountAmount)
+      // P4 (founder, 1-oct): lo dirigido a lo que se anula se recorta o se retira con sus beneficios ANTES de borrar los platos
+      // (y DESPUÉS de R9, como en `removeOrderItem`).
+      const recorte = await recortarDescuentosDeRenglones(tx, orderId, { renglones: input.itemIds, venueId, staffId: input.staffId })
+
       // Los platos se borran DENTRO de la transacción (antes corrían fuera): si el CAS de abajo
       // falla porque alguien movió la orden, los platos se quedan donde estaban. Antes quedaban
       // borrados con los totales viejos — un estado a medias en el dinero.
@@ -2981,19 +3072,30 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
         },
       })
 
+      // P13 (2-oct; Codex r2): anular recalcula igual que borrar — los % (de cuenta y dirigidos con ámbito) se re-derivan sobre
+      // lo que queda, con la regla única de los recalculadores; sin filas, la cabecera de antes menos lo recortado (P4).
+      const filas = await filasDeLaOrden(tx, orderId)
+      const { montosRederivados, descuento } = importesDeLasFilas(remainingItems, filas)
+      const sincronizado = await sincronizarRepartos(tx, orderId, { renglones: remainingItems, filas, montosRederivados })
+      const nuevoDescuento =
+        filas.length > 0
+          ? new Prisma.Decimal(descuento)
+          : Prisma.Decimal.max(0, new Prisma.Decimal(order.discountAmount).minus(recorte.recortadoPesos))
+
       // 🔴 MONEY: al anular baja el subtotal, así que un cargo por servicio PORCENTUAL baja con
-      // él (auditoría 2026-09-03). El descuento acumulado entra a la base, igual que en
-      // `removeOrderItem`.
+      // él (auditoría 2026-09-03). El descuento re-derivado (`nuevoDescuento`, P13) entra a la base,
+      // igual que en `removeOrderItem`.
       //
       // 🔴 Anular TODO cancela la orden, y ahí no basta con `total = 0` (auditoría de Codex,
-      // 2026-09-03): el cobro móvil selecciona `paymentStatus` y NI SIQUIERA lee `status`, así
-      // que una orden CANCELLED no se rechaza; después reconstruye el saldo con
-      // `computeOrderBalance`, que suma `Order.serviceChargeAmount`. Un snapshot superviviente
-      // de $15 vuelve a presentar $15 por cobrar sobre una cuenta cancelada.
+      // 2026-09-03): el saldo se reconstruye con `computeOrderBalance`, que suma
+      // `Order.serviceChargeAmount`. Desde la Tarea 6a el cobro móvil SÍ lee `status`: rechaza un
+      // efectivo en vivo sobre la cancelada, pero el dinero ya capturado (la cola, una tarjeta
+      // ajena) la REABRE y cobra lo que la cuenta guarda — un snapshot superviviente de $15
+      // volvería a presentar $15 por cobrar.
       //
       // Con la base en 0 los cargos porcentuales se recalculan a 0, y el snapshot se guarda en
       // 0: la orden queda en CERO COBRABLE, no sólo con el total en 0.
-      const baseParaCargos = isVoidingAllItems ? new Prisma.Decimal(0) : baseDeCargos(newSubtotal, order.discountAmount)
+      const baseParaCargos = isVoidingAllItems ? new Prisma.Decimal(0) : baseDeCargos(newSubtotal, nuevoDescuento)
       const cargosRecalculados = await recalcularCargosPorServicio(tx, orderId, baseParaCargos)
       const newServiceChargeAmount = isVoidingAllItems ? 0 : cargosRecalculados
 
@@ -3001,7 +3103,15 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
         ? 0
         : computeStoredOrderTotal({
             subtotal: newSubtotal,
-            discountAmount: order.discountAmount,
+            discountAmount: nuevoDescuento,
+            // P12: el IVA aparte entra aquí y en el cobro, con la misma regla; menos el que R9 acaba de retirar con lo anulado, más
+            // lo que devolvieron el recorte y la sincronización (los tres ya escritos en `Order.taxAmount`).
+            contratoDePrecio: order.contratoDePrecio,
+            taxAmount: new Prisma.Decimal(order.taxAmount ?? 0)
+              .minus(impuestoRetirado)
+              .plus(recorte.impuestoDevuelto)
+              .plus(sincronizado.impuestoDevuelto),
+            status: order.status,
             serviceChargeAmount: newServiceChargeAmount,
             // La propina de la relectura bajo el candado, no la de la prelectura: el registro de un cobro con propina
             // no sube la versión, así que la prelectura puede traer una propina vieja y el total perdería la ya cobrada.
@@ -3030,6 +3140,12 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
       }
       const newRemainingBalance = Math.max(0, newTotal - pagado.toNumber())
 
+      // 🔴 Codex r5: anular TODO cierra también las reducciones de impuesto que le queden (las de cuenta, y las del motor de antes
+      // de D16). Si no, quitar después ese descuento devolvía su `taxReduction` a una cuenta CANCELADA en impuesto 0 y P12 lo
+      // cobraba ($1.60 sobre una cuenta sin artículos): la cabecera es la base menos lo que restaron sus filas, y aquí las dos
+      // son 0.
+      if (isVoidingAllItems) await tx.orderDiscount.updateMany({ where: { orderId, taxReduction: { not: 0 } }, data: { taxReduction: 0 } })
+
       const updatedOrder = await tx.order
         .update({
           // 🔴 CAS: sólo se escribe si NADIE movió la orden desde que esta función la leyó. Sin la
@@ -3037,13 +3153,18 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
           where: { id: orderId, version: order.version },
           data: {
             subtotal: newSubtotal,
+            discountAmount: nuevoDescuento,
             serviceChargeAmount: newServiceChargeAmount,
             total: newTotal,
             remainingBalance: newRemainingBalance,
             // ⭐ If voiding all items, auto-close order (Toast/Square pattern)
             // Sin tocar `paymentStatus`: la relectura bajo el candado ya garantizó que no hay dinero (ni PAID ni PARTIAL).
             // Escribirlo a ciegas pisaba un PAID que había aterrizado sin subir la versión.
-            ...(isVoidingAllItems && { status: 'CANCELLED' }),
+            // 🔴 P12 (Codex r3 V5): anular TODO deja la orden en CERO COBRABLE también en el impuesto. Con P12 el saldo suma el
+            // IVA que va aparte, y el dinero ya capturado que llegue después REABRE la cancelada (Tarea 6a: el cobro lee
+            // `status` para rechazar o reabrir): un `taxAmount` superviviente volvía a presentar $16 por cobrar — el mismo
+            // antecedente que el cargo por servicio de arriba.
+            ...(isVoidingAllItems && { status: 'CANCELLED', taxAmount: 0 }),
             version: {
               increment: 1,
             },
@@ -3093,7 +3214,7 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
           },
         })
         .catch(conflictoSiLaMovieron)
-      return { updatedOrder, isVoidingAllItems, voidAmount, itemsToVoid, newTotal }
+      return { updatedOrder, isVoidingAllItems, voidAmount, itemsToVoid, newTotal, recorte }
     },
     { timeout: 15_000, maxWait: 5_000 },
   )
@@ -3133,7 +3254,12 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
     action: 'ITEM_VOIDED',
     entity: 'Order',
     entityId: orderId,
-    data: { itemIds: input.itemIds, amount: Number(voidAmount), reason: input.reason ?? undefined },
+    data: {
+      itemIds: input.itemIds,
+      amount: Number(voidAmount),
+      reason: input.reason ?? undefined,
+      ...(recorte.retiradas.length > 0 ? { descuentosRetirados: recorte.retiradas } : {}),
+    },
   })
 
   logger.info(`✅ [ORDER SERVICE] Voided ${itemsToVoid.length} items | voided amount: $${voidAmount} | new total: $${newTotal}`)
@@ -3215,6 +3341,9 @@ export async function applyDiscount(
       if (!order) {
         throw new NotFoundError('Order not found')
       }
+      // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
+      // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
+      rechazarSiEsImportada(order)
 
       // Optimistic concurrency check
       if (order.version !== input.expectedVersion) {
@@ -3298,6 +3427,42 @@ export async function applyDiscount(
 
       logger.info(`  💰 Calculated discount: $${discountAmount} (disponible: $${remainingDiscountable})`)
 
+      // P2 (founder, 1-oct): este descuento sólo vivía en la cabecera y el siguiente recálculo con filas lo borraba. Ahora es
+      // su fila, con el importe CONGELADO (`appliedToItemIds`), igual que «Cobrar»: hoy no se re-deriva y así sigue.
+      // Quién lo aplicó queda en `OrderAction` y `ActivityLog` (aquí sólo hay Staff, no StaffVenue). Sólo si descuenta algo Y
+      // la cuenta tiene renglones: sin destinos, la fila quedaría como % de cuenta y un recálculo la re-derivaría (ruling R-6;
+      // Codex r1: subtotal $100 sin renglones, 10 % = $10, al agregar $50 ⇒ $5). Sin renglones vive sólo en la cabecera, como
+      // hoy; si después llega otra fila, `conservarDescuentoHistorico` la congela.
+      // B2b (Codex r4 R4-2): lo que la sincronización devuelva a `Order.taxAmount` en ESTA transacción entra al total de abajo.
+      let impuestoDevuelto = new Prisma.Decimal(0)
+      if (discountAmount > 0 && order.items.length > 0) {
+        await conservarDescuentoHistorico(tx, orderId, order.discountAmount)
+        const conArticulos = !!input.itemIds && input.itemIds.length > 0
+        const elegidos = conArticulos ? order.items.filter(item => input.itemIds!.includes(item.id)) : order.items
+        await tx.orderDiscount.create({
+          data: {
+            orderId,
+            type: input.type,
+            name: input.reason || 'Descuento',
+            value: input.value,
+            amount: discountAmount,
+            taxReduction: 0,
+            isManual: true,
+            appliedToItemIds: elegidos.map(item => item.id),
+            reparto: comoJson(
+              conArticulos
+                ? nuevoRepartoDirigido(discountAmount, Object.fromEntries(elegidos.map(item => [item.id, Number(item.total)])), {
+                    espejo: false,
+                  })
+                : nuevoRepartoDeCuenta({ conPromociones: true, base: elegidos.map(item => item.id) }),
+            ),
+          },
+        })
+        // Re-repartir otra fila que participa en D16 mueve el impuesto en esta misma transacción.
+        const sincronizado = await sincronizarRepartos(tx, orderId)
+        impuestoDevuelto = sincronizado.impuestoDevuelto
+      }
+
       // Update order: add to existing discount
       const newDiscountAmount = Number(order.discountAmount) + discountAmount
 
@@ -3314,10 +3479,14 @@ export async function applyDiscount(
 
       // 🔴 MONEY: misma regla compartida que la cortesía de arriba y que los caminos de descuento
       // del dashboard. La resta escrita a mano se dejaba fuera el cargo por servicio y la propina.
-      // `taxAmount` queda fuera por la misma razón declarada en `compItems`.
+      // P12: el IVA aparte entra aquí y en el cobro, con la misma regla — con el impuesto que la sincronización de arriba
+      // movió en esta transacción (Codex r4 R4-2: la v4 guardaba el total con el de antes, $105.20 contra $106 reconstruidos).
       newTotal = computeStoredOrderTotal({
         subtotal: order.subtotal,
         discountAmount: newDiscountAmount,
+        contratoDePrecio: order.contratoDePrecio,
+        taxAmount: new Prisma.Decimal(order.taxAmount ?? 0).plus(impuestoDevuelto),
+        status: order.status,
         serviceChargeAmount: newServiceChargeAmount,
         tipAmount: order.tipAmount,
       }).toNumber()
@@ -3847,6 +4016,10 @@ export async function addSerializedItemToOrder(
           total: true,
           discountAmount: true,
           paymentStatus: true,
+          // P12: el IVA que va aparte entra al total con la regla compartida.
+          status: true,
+          contratoDePrecio: true,
+          taxAmount: true,
         },
       })
 
@@ -3911,7 +4084,11 @@ export async function addSerializedItemToOrder(
 
       // Calculate new totals
       const newSubtotal = Number(order.subtotal) + input.price
-      const newTotal = newSubtotal - Number(order.discountAmount)
+      // P12: más el IVA que va aparte (su omisión de cargos y propina es de hoy: residual R7).
+      const newTotal =
+        newSubtotal -
+        Number(order.discountAmount) +
+        impuestoQueSeCobraAparte({ contratoDePrecio: order.contratoDePrecio, taxAmount: order.taxAmount, status: order.status }).toNumber()
 
       // Update order totals and increment version
       const updatedOrder = await tx.order.update({

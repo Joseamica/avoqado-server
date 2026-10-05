@@ -19,6 +19,9 @@ import prisma from '../../utils/prismaClient'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { getOrCreateLoyaltyConfig } from '../dashboard/loyalty.dashboard.service'
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
+import { rechazarSiEsImportada } from '../shared/ordenImportada'
+import { comoJson, nuevoRepartoDeCuenta } from '../shared/repartoDescuento'
+import { conservarDescuentoHistorico } from '../shared/repartoDescuentoTx'
 
 /** Rounds to cents the way every other money path here does. */
 function money(value: number): number {
@@ -114,9 +117,12 @@ export async function redeemPointsToOrder(venueId: string, orderId: string, cust
     if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Orden no encontrada')
     const order = await tx.order.findFirst({
       where: { id: orderId, venueId },
-      select: { id: true, total: true, subtotal: true, discountAmount: true, paymentStatus: true, paidAmount: true },
+      select: { id: true, total: true, subtotal: true, discountAmount: true, paymentStatus: true, paidAmount: true, originSystem: true },
     })
     if (!order) throw new NotFoundError('Orden no encontrada')
+    // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
+    // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
+    rechazarSiEsImportada(order)
     if (order.paymentStatus === 'PAID' || order.paymentStatus === 'PARTIAL') {
       throw new BadRequestError('No se puede modificar una orden ya pagada')
     }
@@ -172,6 +178,8 @@ export async function redeemPointsToOrder(venueId: string, orderId: string, cust
       throw new BadRequestError('Puntos insuficientes (otro canje se procesó al mismo tiempo)')
     }
 
+    // Codex r1 P1: lo que la cabecera trae fuera de toda fila (orden anterior a B2…) queda en su fila antes de crear ésta.
+    await conservarDescuentoHistorico(tx, orderId, order.discountAmount)
     await tx.orderDiscount.create({
       data: {
         orderId,
@@ -182,6 +190,8 @@ export async function redeemPointsToOrder(venueId: string, orderId: string, cust
         isManual: true,
         appliedById: staffVenueId,
         loyaltyTransactionId: transaction.id,
+        // B2: fijo topado a subtotal − descuentos (con promociones) ⇒ fila de CUENTA; el recálculo de abajo la reparte.
+        reparto: comoJson(nuevoRepartoDeCuenta({ conPromociones: true })),
       },
     })
 

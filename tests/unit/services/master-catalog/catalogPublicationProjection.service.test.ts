@@ -135,30 +135,17 @@ describe('catalogPublicationProjection.service', () => {
     expect(first.canonicalTargetHash).not.toBe(second.canonicalTargetHash)
   })
 
-  it('projects exactly the ordered retail managed mask and every corporate value', () => {
+  it('projects exactly the ordered retail managed mask (V2, without VAT) and every corporate value', () => {
     const result = projectCatalogPublicationTarget(input() as never)
 
-    expect(result.fieldMask).toEqual([
-      'cost',
-      'description',
-      'imageUrl',
-      'name',
-      'objetoImp',
-      'satProductKey',
-      'satUnitKey',
-      'taxRate',
-      'type',
-      'unit',
-    ])
+    expect(result.fieldMask).toEqual(['cost', 'description', 'imageUrl', 'name', 'satProductKey', 'satUnitKey', 'type', 'unit'])
     expect(result.proposed).toEqual({
       cost: '12.50',
       description: 'Descripción corporativa',
       imageUrl: 'https://example.test/item.png',
       name: 'Nombre corporativo',
-      objetoImp: '02',
       satProductKey: '50192100',
       satUnitKey: 'H87',
-      taxRate: '0.1600',
       type: ProductType.REGULAR,
       unit: Unit.PIECE,
     })
@@ -274,5 +261,57 @@ describe('catalogPublicationProjection.service', () => {
       status: 'INVALID',
       diagnosticCode: 'CATALOG_PROFILE_REQUIRED_FIELD_MISSING',
     })
+  })
+
+  // H11: el producto del negocio está al 0 % y el artículo al 16 %. Antes de D15, sin publicación previa salía READY (y se
+  // publicaba el 16 % por default); con publicación previa salía LOCAL_DIVERGENCE (pedía decisión). Ahora el IVA no existe aquí.
+  const igualAlArticulo = (taxRate: string) =>
+    product({
+      name: 'Nombre corporativo',
+      description: 'Descripción corporativa',
+      imageUrl: 'https://example.test/item.png',
+      cost: new Decimal('12.50'),
+      satProductKey: '50192100',
+      satUnitKey: 'H87',
+      taxRate: new Decimal(taxRate),
+      objetoImp: '02',
+    })
+  const publicadoAl16 = {
+    cost: '12.50',
+    description: 'Descripción corporativa',
+    imageUrl: 'https://example.test/item.png',
+    name: 'Nombre corporativo',
+    objetoImp: '02',
+    satProductKey: '50192100',
+    satUnitKey: 'H87',
+    taxRate: '0.1600',
+    type: ProductType.REGULAR,
+    unit: Unit.PIECE,
+  }
+
+  it.each([
+    ['sin publicación previa (vinculada con LINK)', null],
+    ['con una publicación previa al 16 % (instantánea V1)', publicadoAl16],
+  ])('D15: producto al 0 %%, artículo al 16 %%, %s ⇒ NO_CHANGE y sin campos de IVA', (_caso, snapshot) => {
+    const result = projectCatalogPublicationTarget(
+      input({
+        product: igualAlArticulo('0.0000'),
+        binding: { ...input().binding, lastPublishedManagedSnapshot: snapshot, lastPublishedCatalogRevision: snapshot ? 5 : null },
+      }) as never,
+    )
+
+    expect(result.status).toBe('NO_CHANGE')
+    expect(result.fieldMask).not.toEqual(expect.arrayContaining(['taxRate']))
+    expect(result.fieldMask).not.toEqual(expect.arrayContaining(['objetoImp']))
+    expect(result.fields.map(field => field.field)).toEqual(result.fieldMask)
+    expect(result.proposed).not.toHaveProperty('taxRate')
+    expect(result.before).not.toHaveProperty('objetoImp')
+  })
+
+  it('D15: cambiar el IVA del producto no deja vieja la vista previa (el hash del destino no lo incluye)', () => {
+    const al0 = projectCatalogPublicationTarget(input({ product: igualAlArticulo('0.0000') }) as never)
+    const al16 = projectCatalogPublicationTarget(input({ product: igualAlArticulo('0.1600') }) as never)
+
+    expect(al0.canonicalTargetHash).toBe(al16.canonicalTargetHash)
   })
 })

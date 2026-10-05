@@ -13,7 +13,9 @@ import prisma from '../../utils/prismaClient'
 import { writeCatalogAudit } from './catalogAudit.service'
 import { acquireCatalogMutationLock } from './catalogMutationLock.service'
 import {
+  CATALOG_ITEM_DEFAULT_IVA,
   CATALOG_ITEM_DETAIL_SELECT,
+  type CatalogItemIvaOptional,
   type CatalogAuditOwnership,
   type CatalogItemAggregateCommand,
   type CatalogItemDetail,
@@ -445,16 +447,58 @@ export async function applyCatalogItemAggregateTx(
   }
 }
 
+/** D15: sin IVA en el cuerpo, el artículo nace al 16 % (02). Si viene (cliente viejo), se valida y se guarda como siempre. */
+function withCatalogItemIvaDefaults(input: CatalogItemIvaOptional<CreateCatalogItemInput>): CreateCatalogItemInput {
+  return {
+    ...input,
+    taxRate: input.taxRate ?? CATALOG_ITEM_DEFAULT_IVA.taxRate,
+    objetoImp: input.objetoImp ?? CATALOG_ITEM_DEFAULT_IVA.objetoImp,
+  }
+}
+
+/**
+ * D15: editar sin IVA conserva el del artículo (p. ej. uno importado por Excel). La lectura va antes del candado de catálogo,
+ * pero la CAS de `expectedRevision` la protege: si otro escritor cambió el artículo, la revisión ya no coincide y responde 409.
+ */
+async function withStoredCatalogItemIva(
+  tx: Prisma.TransactionClient,
+  organizationId: string,
+  input: CatalogItemIvaOptional<UpdateCatalogItemInput>,
+): Promise<UpdateCatalogItemInput> {
+  if (input.taxRate !== undefined && input.objetoImp !== undefined) {
+    return { ...input, taxRate: input.taxRate, objetoImp: input.objetoImp }
+  }
+  const stored =
+    typeof input.catalogItemId === 'string' && input.catalogItemId.length > 0 && input.catalogItemId.length <= 256
+      ? await tx.catalogItem.findFirst({ where: { id: input.catalogItemId, organizationId }, select: { taxRate: true, objetoImp: true } })
+      : null
+  return {
+    ...input,
+    taxRate: input.taxRate ?? stored?.taxRate.toFixed(4) ?? CATALOG_ITEM_DEFAULT_IVA.taxRate,
+    objetoImp: input.objetoImp ?? stored?.objetoImp ?? CATALOG_ITEM_DEFAULT_IVA.objetoImp,
+  }
+}
+
 // WHY: Direct public wrappers own one transaction and one audit; batch callers
 // bypass only these wrappers, never the aggregate command itself.
-export const createCatalogItem = (context: CatalogCommandContext, input: CreateCatalogItemInput) =>
+export const createCatalogItem = (context: CatalogCommandContext, input: CatalogItemIvaOptional<CreateCatalogItemInput>) =>
   prisma.$transaction(tx =>
-    applyCatalogItemAggregateTx(tx, context, { operation: 'CREATE', input }, { auditOwnership: { kind: 'DIRECT' } }),
+    applyCatalogItemAggregateTx(
+      tx,
+      context,
+      { operation: 'CREATE', input: withCatalogItemIvaDefaults(input) },
+      { auditOwnership: { kind: 'DIRECT' } },
+    ),
   )
 
-export const updateCatalogItem = (context: CatalogCommandContext, input: UpdateCatalogItemInput) =>
-  prisma.$transaction(tx =>
-    applyCatalogItemAggregateTx(tx, context, { operation: 'UPDATE', input }, { auditOwnership: { kind: 'DIRECT' } }),
+export const updateCatalogItem = (context: CatalogCommandContext, input: CatalogItemIvaOptional<UpdateCatalogItemInput>) =>
+  prisma.$transaction(async tx =>
+    applyCatalogItemAggregateTx(
+      tx,
+      context,
+      { operation: 'UPDATE', input: await withStoredCatalogItemIva(tx, context.organizationId, input) },
+      { auditOwnership: { kind: 'DIRECT' } },
+    ),
   )
 
 export const retireCatalogItem = (context: CatalogCommandContext, input: RetireCatalogItemInput) =>

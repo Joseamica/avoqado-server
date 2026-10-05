@@ -8,9 +8,11 @@ import {
   listCatalogVenueChanges,
   previewCatalogOverrideRequest,
 } from '@/services/master-catalog/catalogOverride.service'
+import { hashCanonicalJsonV1, hashCatalogManagedFieldsV1 } from '@/services/master-catalog/catalogHash.service'
 import {
   CATALOG_PREPARED_DISH_MANAGED_FIELD_MASK_V1,
   CATALOG_RETAIL_MANAGED_FIELD_MASK_V1,
+  CATALOG_RETAIL_MANAGED_FIELD_MASK_V2,
   type CatalogOverrideRequestLineInput,
   type CatalogVenueContext,
 } from '@/types/master-catalog'
@@ -230,6 +232,43 @@ describe('catalog venue override requests', () => {
       binding({ product: { ...(binding().product as object), name: 'Nombre corporativo' } }),
     )
     await expect(makePreview()).rejects.toMatchObject({ statusCode: 422, code: 'CATALOG_OVERRIDE_NO_CHANGE' })
+  })
+
+  it.each(['taxRate', 'objetoImp'] as const)(
+    'D15: pedir un override de %s se rechaza con «El IVA se configura en cada negocio» sin abrir transacción',
+    async field => {
+      await expect(makePreview([{ field, reason: 'IVA local' }] as any)).rejects.toMatchObject({
+        statusCode: 422,
+        code: 'CATALOG_IVA_NOT_MANAGED',
+        message: 'El IVA se configura en cada negocio',
+      })
+      expect(prisma.$transaction).not.toHaveBeenCalled()
+      expect(prisma.catalogIdempotencyRecord.create).not.toHaveBeenCalled()
+    },
+  )
+
+  it('D15: una solicitud de IVA preparada antes del despliegue ya no se confirma', async () => {
+    const preview = await makePreview()
+    const record = createdRecord()
+    const dependencies = {
+      ...record.dependencies,
+      requests: [{ field: 'taxRate', reason: 'IVA local', localValue: '0.0800', corporateValue: '0.1600' }],
+    }
+    ;(prisma.catalogIdempotencyRecord.findFirst as jest.Mock).mockResolvedValue({
+      ...record,
+      dependencies,
+      targetHash: hashCanonicalJsonV1('catalog-override-target', dependencies),
+    })
+
+    await expect(
+      confirmCatalogOverrideRequest(context, {
+        requestBatchId: preview.requestBatchId,
+        previewToken: preview.previewToken,
+        confirm: true,
+        idempotencyKey: 'override-key-1',
+      }),
+    ).rejects.toMatchObject({ statusCode: 422, code: 'CATALOG_IVA_NOT_MANAGED' })
+    expect(prisma.catalogVenueOverride.create).not.toHaveBeenCalled()
   })
 
   it('stores a SHA-only token, target-field dependencies and one coherent creation instant', async () => {
@@ -495,5 +534,76 @@ describe('catalog venue override requests', () => {
       { updatedAt: { lt: new Date('2026-08-08T10:00:00.000Z') } },
       { updatedAt: new Date('2026-08-08T10:00:00.000Z'), id: { lt: 'binding-1' } },
     ])
+  })
+
+  const soloLectura = () =>
+    (prisma.staffVenue.findFirst as jest.Mock).mockResolvedValue(
+      membership({ permissionSet: { venueId: 'venue-1', permissions: ['catalog-venue:read'] } }),
+    )
+
+  it('D15: la procedencia de una vinculación anterior (V1) conserva la máscara de su instantánea, dice la vigente aparte y el hash se sigue verificando', async () => {
+    const snapshot = {
+      cost: '7.50',
+      description: 'Descripción local',
+      imageUrl: 'https://local.test/image.png',
+      name: 'Nombre local',
+      objetoImp: '01',
+      satProductKey: '50100000',
+      satUnitKey: 'H87',
+      taxRate: '0.0800',
+      type: 'REGULAR',
+      unit: 'PIECE',
+    }
+    const hash = hashCatalogManagedFieldsV1({ hashVersion: 1, fieldMask: [...CATALOG_RETAIL_MANAGED_FIELD_MASK_V1], values: snapshot }).hash
+    soloLectura()
+    ;(prisma.catalogVenueBinding.findFirst as jest.Mock).mockResolvedValue(
+      binding({
+        managedFieldMask: CATALOG_RETAIL_MANAGED_FIELD_MASK_V1,
+        lastPublishedManagedSnapshot: snapshot,
+        lastPublishedManagedHash: hash,
+      }),
+    )
+
+    const result = await getCatalogVenueProvenance(context, { productId: 'product-1' })
+
+    expect(result.managedFieldMask).toEqual([...CATALOG_RETAIL_MANAGED_FIELD_MASK_V1])
+    expect(result.currentManagedFieldMask).toEqual([...CATALOG_RETAIL_MANAGED_FIELD_MASK_V2])
+    expect(
+      hashCatalogManagedFieldsV1({
+        hashVersion: 1,
+        fieldMask: result.managedFieldMask,
+        values: result.lastPublishedManagedSnapshot as Record<string, unknown>,
+      }).hash,
+    ).toBe(result.lastPublishedManagedHash)
+  })
+
+  it('D15: una vinculación nueva (V2) responde la V2 en las dos máscaras', async () => {
+    soloLectura()
+    ;(prisma.catalogVenueBinding.findFirst as jest.Mock).mockResolvedValue(
+      binding({ managedFieldMask: CATALOG_RETAIL_MANAGED_FIELD_MASK_V2 }),
+    )
+
+    await expect(getCatalogVenueProvenance(context, { productId: 'product-1' })).resolves.toMatchObject({
+      managedFieldMask: [...CATALOG_RETAIL_MANAGED_FIELD_MASK_V2],
+      currentManagedFieldMask: [...CATALOG_RETAIL_MANAGED_FIELD_MASK_V2],
+    })
+  })
+
+  it('una máscara que no es ni la V1 ni la V2 sigue respondiendo 409', async () => {
+    soloLectura()
+    ;(prisma.catalogVenueBinding.findFirst as jest.Mock).mockResolvedValue(
+      binding({ managedFieldMask: [...CATALOG_RETAIL_MANAGED_FIELD_MASK_V2, 'taxRate'] }),
+    )
+    await expect(getCatalogVenueProvenance(context, { productId: 'product-1' })).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'CATALOG_BINDING_MANAGED_MASK_INVALID',
+    })
+  })
+
+  it('D15: una vinculación nueva (máscara V2) acepta overrides de los campos administrados', async () => {
+    ;(prisma.catalogVenueBinding.findFirst as jest.Mock).mockResolvedValue(
+      binding({ managedFieldMask: CATALOG_RETAIL_MANAGED_FIELD_MASK_V2 }),
+    )
+    await expect(makePreview()).resolves.toMatchObject({ requests: [expect.objectContaining({ field: 'name' })] })
   })
 })

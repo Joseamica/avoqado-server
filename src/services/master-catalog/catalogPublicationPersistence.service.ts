@@ -43,6 +43,7 @@ async function writeProducts(tx: Prisma.TransactionClient, lines: CatalogPublica
     const values = chunk.map(({ line, patch }) => Prisma.sql`(${line.productId}, ${line.venueId}, ${json(patch)}::jsonb)`)
     // WHY: One VALUES-driven statement applies up to 500 heterogeneous Product
     // patches; it cannot degrade into 10,000 sequential Prisma updates.
+    // D15: el catálogo no administra el IVA; ni el SET lo nombra (el trigger de la tupla de IVA ni corre al publicar).
     const affected = await tx.$executeRaw(Prisma.sql`
       WITH changes("productId", "venueId", patch) AS (VALUES ${Prisma.join(values)})
       UPDATE "Product" AS product
@@ -51,10 +52,8 @@ async function writeProducts(tx: Prisma.TransactionClient, lines: CatalogPublica
         "description" = CASE WHEN changes.patch ? 'description' THEN changes.patch->>'description' ELSE product."description" END,
         "imageUrl" = CASE WHEN changes.patch ? 'imageUrl' THEN changes.patch->>'imageUrl' ELSE product."imageUrl" END,
         "name" = CASE WHEN changes.patch ? 'name' THEN changes.patch->>'name' ELSE product."name" END,
-        "objetoImp" = CASE WHEN changes.patch ? 'objetoImp' THEN changes.patch->>'objetoImp' ELSE product."objetoImp" END,
         "satProductKey" = CASE WHEN changes.patch ? 'satProductKey' THEN changes.patch->>'satProductKey' ELSE product."satProductKey" END,
         "satUnitKey" = CASE WHEN changes.patch ? 'satUnitKey' THEN changes.patch->>'satUnitKey' ELSE product."satUnitKey" END,
-        "taxRate" = CASE WHEN changes.patch ? 'taxRate' THEN (changes.patch->>'taxRate')::numeric ELSE product."taxRate" END,
         "type" = CASE WHEN changes.patch ? 'type' THEN (changes.patch->>'type')::"ProductType" ELSE product."type" END,
         "unit" = CASE WHEN changes.patch ? 'unit' THEN (changes.patch->>'unit')::"Unit" ELSE product."unit" END,
         "updatedAt" = CURRENT_TIMESTAMP
