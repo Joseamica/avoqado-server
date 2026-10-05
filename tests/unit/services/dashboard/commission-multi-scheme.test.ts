@@ -575,4 +575,28 @@ describe('🔴 comisión dividida entre tres: los centavos no se pierden (Codex 
     ])
     expect(Math.round(results.reduce((s, r) => s + r.netCommission, 0) * 100) / 100).toBe(22.53)
   })
+
+  it('🔴 una persona repetida en la liga es UNA persona: [A, B, A] con $100 son dos filas de $50, no tres', async () => {
+    prismaMock.payment.findUnique.mockResolvedValue(payment(100))
+    prismaMock.commissionConfig.findFirst.mockResolvedValue({ ...GENERAL, defaultRate: new Decimal(0.1) })
+
+    const results = await createSplitCommissionForPayment('pay-1', ['staff-a', 'staff-b', 'staff-a'])
+
+    expect(filas()).toEqual([
+      ['staff-a', 50, 5],
+      ['staff-b', 50, 5],
+    ])
+    expect(results).toHaveLength(2)
+  })
+
+  it('🔴 una base de basura binaria (~3e-14) no crea filas de $0.00: se decide sobre el total al centavo', async () => {
+    // La propina de 3e-14 hace las veces del residuo binario que llega a `totalBaseAmount` (0 + 3e-14 pasa un `<= 0`).
+    prismaMock.payment.findUnique.mockResolvedValue({ ...payment(0), tipAmount: new Decimal('3e-14') })
+    prismaMock.commissionConfig.findFirst.mockResolvedValue({ ...GENERAL, defaultRate: new Decimal(0.1), includeTips: true })
+
+    const results = await createSplitCommissionForPayment('pay-1', ['staff-a', 'staff-b'])
+
+    expect(results).toEqual([])
+    expect(prismaMock.commissionCalculation.create).not.toHaveBeenCalled()
+  })
 })

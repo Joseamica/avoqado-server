@@ -1142,15 +1142,17 @@ export async function createSplitCommissionForPayment(
   staffIds: string[],
   options: CommissionOptions = {},
 ): Promise<CommissionCalculationResult[]> {
-  logger.info('Creating SPLIT commission for payment', { paymentId, staffCount: staffIds.length })
+  // 🔴 MONEY: una persona repetida en la liga es UNA persona — ni divide entre N de más ni recibe dos filas.
+  const personas = [...new Set(staffIds)]
+  logger.info('Creating SPLIT commission for payment', { paymentId, staffCount: personas.length })
 
-  if (staffIds.length === 0) return []
-  if (staffIds.length === 1) {
+  if (personas.length === 0) return []
+  if (personas.length === 1) {
     // Caller should have routed through createCommissionForPayment; guard
     // anyway so this function is safe to call with any list length.
     return createCommissionForPayment(paymentId, options)
   }
-  if (!options.db) return prisma.$transaction(tx => createSplitCommissionForPayment(paymentId, staffIds, { ...options, db: tx }))
+  if (!options.db) return prisma.$transaction(tx => createSplitCommissionForPayment(paymentId, personas, { ...options, db: tx }))
   const db = options.db
 
   const payment = await db.payment.findUnique({
@@ -1220,20 +1222,22 @@ export async function createSplitCommissionForPayment(
     totalTaxAmount = result.taxAmount
   }
 
-  if (totalBaseAmount <= 0) {
+  // Al centavo ANTES de decidir y de repartir: los totales llegan como `number` (base + propina en binario: 225.1 + 0.2 =
+  // 225.29999999999998) y `redondearRepartido` exige un total que sus partes de centavos sumen exacto. Una base de basura
+  // binaria (3e-14) pasaría un `<= 0` en crudo y crearía N filas de $0.00.
+  const alCentavo = (n: number) => new Prisma.Decimal(n).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP)
+  if (alCentavo(totalBaseAmount).lte(0)) {
     logger.info('Skipping split commission: base amount zero or negative', { paymentId, totalBaseAmount })
     return []
   }
 
-  const splitCount = staffIds.length
+  const splitCount = personas.length
   // 🔴 MONEY (Codex plan r1-4): base, propina, descuento e IVA se reparten en CENTAVOS, con el centavo que sobra asignado en
   // un orden estable (por id de persona): las filas suman exacto lo cobrado. Antes cada una guardaba total/N y la base de
   // datos redondeaba cada fila por su cuenta.
-  const orden = [...staffIds].sort()
+  const orden = [...personas].sort()
   const enPartes = (total: number) => {
-    // Al centavo ANTES de repartir: el total llega como `number` (base + propina en binario: 225.1 + 0.2 =
-    // 225.29999999999998) y `redondearRepartido` exige un total que sus partes de centavos sumen exacto.
-    const t = new Prisma.Decimal(total).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP)
+    const t = alCentavo(total)
     return redondearRepartido(
       orden.map(() => t.div(splitCount)),
       t,
