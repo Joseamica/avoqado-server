@@ -163,3 +163,34 @@ describe('A1b · cada cobro comisiona su parte de la orden (spec §9-1, Codex r3
     expect(filas.map(f => f.discountAmount.toFixed(2)).sort()).toEqual(['0.01', '0.02'])
   })
 })
+
+describe('A1c · «con IVA» es lo que pagó el cliente; «sin el IVA registrado» le resta su parte (D5, spec §9-1)', () => {
+  it.each([
+    ['IVA aparte', 'IVA_APARTE', 100, true, ['58.00', '58.00']],
+    ['IVA aparte', 'IVA_APARTE', 100, false, ['50.00', '50.00']],
+    ['IVA incluido', 'IVA_INCLUIDO', 116, true, ['58.00', '58.00']],
+    ['IVA incluido', 'IVA_INCLUIDO', 116, false, ['50.00', '50.00']],
+  ] as const)(
+    '🔴 %s (%s), subtotal %d, con IVA=%s: dos cobros de $58 dan bases %j (nunca $132 en total)',
+    async (_n, contratoDePrecio, subtotal, includeTax, bases) => {
+      m = await crearMundoComisiones('iva', { includeTax })
+      const orderId = await orden(m, { subtotal, taxAmount: 16, contratoDePrecio })
+      const pagos = await cobrarEnPartes(orderId, [58, 58])
+      expect(await Promise.all(pagos.map(async p => (await filaDe(p)).baseAmount.toFixed(2)))).toEqual([...bases])
+    },
+  )
+
+  it('🔴 por categoría con el IVA incluido, «sin el IVA registrado» resta el IVA del renglón', async () => {
+    m = await crearMundoComisiones('cat-iva', { includeTax: false })
+    const cat = await categoria(m)
+    await prisma.commissionConfig.update({ where: { id: m.configId }, data: { filterByCategories: true, categoryIds: [cat] } })
+    const orderId = await orden(m, {
+      subtotal: 116,
+      taxAmount: 16,
+      contratoDePrecio: 'IVA_INCLUIDO',
+      renglones: [{ categoryId: cat, precio: 116, iva: 16 }],
+    })
+    const [p] = await cobrarEnPartes(orderId, [116])
+    expect((await filaDe(p)).baseAmount.toFixed(2)).toBe('100.00')
+  })
+})

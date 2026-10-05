@@ -81,7 +81,7 @@ export interface CommissionableLine {
   lineDiscount?: number
   /** La parte del descuento de ORDEN que le toca a esta línea. */
   orderDiscountShare?: number
-  /** Impuesto de la línea. Sólo entra si `includeTax`. */
+  /** IVA de la línea. «Con IVA» lo suma si se cobró aparte; «sin el IVA registrado» lo resta si el precio ya lo traía. */
   tax?: number
 }
 
@@ -92,20 +92,33 @@ function roundPesos(amount: number): number {
 /**
  * Importe comisionable de un conjunto de líneas para un esquema.
  *
+ * El IVA (D5, fase 3 de pago por servicio): `includeTax` = «con IVA» = lo que pagó el cliente; sin él, «sin el IVA
+ * registrado» = eso menos su IVA. Qué sumar o restar depende de si el precio de la línea YA traía el IVA
+ * (`ivaIncluidoEnPrecio`, el contrato de precio de la orden) o si se cobró aparte (ausente = aparte, lo de siempre):
+ *
+ * | precio       | con IVA     | sin el IVA registrado |
+ * | ------------ | ----------- | --------------------- |
+ * | IVA aparte   | neto + IVA  | neto                  |
+ * | IVA incluido | neto        | neto − IVA            |
+ *
  * El clamp a 0 es POR LÍNEA, nunca sobre el total: el descuento se calcula sobre
  * producto + modificadores y este bruto es `unitPrice × quantity` (sin
  * modificadores), así que una cortesía con modificadores caros puede traer un
  * descuento mayor que su propio bruto. Esa línea aporta 0 — jamás le resta a las
- * demás.
+ * demás. Restar el IVA tampoco deja una línea en negativo.
  */
-export function commissionableAmount(lines: CommissionableLine[], options: { base: CommissionBaseMode; includeTax?: boolean }): number {
+export function commissionableAmount(
+  lines: CommissionableLine[],
+  options: { base: CommissionBaseMode; includeTax?: boolean; ivaIncluidoEnPrecio?: boolean },
+): number {
   const listPrice = options.base === COMMISSION_BASE.PRECIO_DE_LISTA
 
   const total = lines.reduce((sum, line) => {
     const gross = line.gross
     const net = listPrice ? gross : Math.max(0, gross - (line.lineDiscount ?? 0) - (line.orderDiscountShare ?? 0))
-    const tax = options.includeTax ? (line.tax ?? 0) : 0
-    return sum + net + tax
+    const tax = line.tax ?? 0
+    const ajusteIva = options.ivaIncluidoEnPrecio ? (options.includeTax ? 0 : -tax) : options.includeTax ? tax : 0
+    return sum + Math.max(0, net + ajusteIva)
   }, 0)
 
   return roundPesos(total)

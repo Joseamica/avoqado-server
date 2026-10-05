@@ -216,3 +216,19 @@ describe('H4 · la misma venta, por los dos caminos', () => {
     expect(total).toBe(500)
   })
 })
+
+describe('🔴 D5 — renglones con el IVA incluido en el precio', () => {
+  it('«sin el IVA registrado» le resta el IVA al renglón; «con IVA» deja el precio', async () => {
+    ;(prisma.orderItem.findMany as jest.Mock).mockResolvedValue([linea(116, 1, 0, 16)])
+    ;(prisma.order.findUnique as jest.Mock).mockResolvedValue({ discountAmount: 0, contratoDePrecio: 'IVA_INCLUIDO' })
+    expect(await calculateCategoryFilteredAmount('order-1', ['cat-1'], { includeTax: false, includeDiscount: false })).toBe(100)
+    expect(await calculateCategoryFilteredAmount('order-1', ['cat-1'], { includeTax: true, includeDiscount: false })).toBe(116)
+  })
+
+  it('IVA aparte: lo de siempre (con IVA lo suma, sin IVA no)', async () => {
+    ;(prisma.orderItem.findMany as jest.Mock).mockResolvedValue([linea(100, 1, 0, 16)])
+    ;(prisma.order.findUnique as jest.Mock).mockResolvedValue({ discountAmount: 0, contratoDePrecio: 'IVA_APARTE' })
+    expect(await calculateCategoryFilteredAmount('order-1', ['cat-1'], { includeTax: false, includeDiscount: false })).toBe(100)
+    expect(await calculateCategoryFilteredAmount('order-1', ['cat-1'], { includeTax: true, includeDiscount: false })).toBe(116)
+  })
+})

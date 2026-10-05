@@ -195,3 +195,22 @@ describe('selectCommissionableLines', () => {
     expect(commissionableAmount(lines, { base: COMMISSION_BASE.LO_COBRADO })).toBe(0)
   })
 })
+
+describe('commissionableAmount — el IVA (D5, fase 3 de pago por servicio)', () => {
+  it('🔴 IVA incluido en el precio: «con IVA» es el precio; «sin el IVA registrado» le resta su IVA', () => {
+    const linea = [{ gross: 116, tax: 16 }]
+    expect(commissionableAmount(linea, { base: COMMISSION_BASE.LO_COBRADO, includeTax: true, ivaIncluidoEnPrecio: true })).toBe(116)
+    expect(commissionableAmount(linea, { base: COMMISSION_BASE.LO_COBRADO, includeTax: false, ivaIncluidoEnPrecio: true })).toBe(100)
+  })
+
+  it('IVA aparte: «con IVA» lo suma; «sin IVA», el neto (lo de siempre)', () => {
+    const linea = [{ gross: 100, tax: 16 }]
+    expect(commissionableAmount(linea, { base: COMMISSION_BASE.LO_COBRADO, includeTax: true })).toBe(116)
+    expect(commissionableAmount(linea, { base: COMMISSION_BASE.LO_COBRADO, includeTax: false })).toBe(100)
+  })
+
+  it('restar el IVA nunca deja una línea en negativo', () => {
+    const linea = [{ gross: 10, lineDiscount: 8, tax: 16 }]
+    expect(commissionableAmount(linea, { base: COMMISSION_BASE.LO_COBRADO, includeTax: false, ivaIncluidoEnPrecio: true })).toBe(0)
+  })
+})

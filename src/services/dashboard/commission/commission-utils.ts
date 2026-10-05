@@ -384,6 +384,10 @@ export function applyCommissionBounds(amount: number, config: { minAmount: Decim
  *
  *   LO_COBRADO      → `payment.amount` (lo que el cliente pagó de verdad)
  *   PRECIO_DE_LISTA → `payment.amount` + su parte del descuento
+ *   «Con IVA» (default)     → eso;  «Sin el IVA registrado» → eso − su parte del IVA
+ *
+ * El cobro SIEMPRE trae el IVA (incluido en el precio o cobrado aparte), por eso «con IVA» nunca lo suma otra vez
+ * (D5, decisión del founder del 5-oct: «si toda la plataforma se maneja como México, precios con IVA, que sea igual»).
  *
  * 🔴 La PROPINA no es parte de la base de la venta: se suma DESPUÉS y sólo si el esquema trae `includeTips`.
  */
@@ -410,6 +414,7 @@ export function calculateBaseAmount(
   let baseAmount = commissionableAmount([{ gross: paidAmount + discountAmount, lineDiscount: discountAmount, tax: taxAmount }], {
     base: resolveCommissionBase(config),
     includeTax: config.includeTax,
+    ivaIncluidoEnPrecio: true,
   })
 
   // Tips are NOT included by default (tips are already direct bonus for employees)
@@ -783,7 +788,7 @@ export async function findActiveCommissionConfigs(
 async function loadOrderCommissionLines(
   orderId: string,
   db: Prisma.TransactionClient = prisma,
-): Promise<{ lines: OrderLineForCommission[]; orderLevelDiscount: number }> {
+): Promise<{ lines: OrderLineForCommission[]; orderLevelDiscount: number; ivaIncluidoEnPrecio: boolean }> {
   const [orderItems, order] = await Promise.all([
     db.orderItem.findMany({
       where: { orderId },
@@ -795,7 +800,7 @@ async function loadOrderCommissionLines(
         product: { select: { categoryId: true } },
       },
     }),
-    db.order.findUnique({ where: { id: orderId }, select: { discountAmount: true } }),
+    db.order.findUnique({ where: { id: orderId }, select: { discountAmount: true, contratoDePrecio: true } }),
   ])
 
   const lines: OrderLineForCommission[] = orderItems.map(item => ({
@@ -811,6 +816,8 @@ async function loadOrderCommissionLines(
       decimalToNumber(order?.discountAmount),
       lines.map(line => line.lineDiscount),
     ),
+    // D5: con IVA incluido el precio del renglón ya lo trae; aparte (o desconocido, la regla de P12) se cobró encima.
+    ivaIncluidoEnPrecio: order?.contratoDePrecio === 'IVA_INCLUIDO',
   }
 }
 
@@ -833,7 +840,7 @@ export async function calculateCategoryFilteredAmount(
   config: { includeTax: boolean; includeDiscount: boolean },
   db: Prisma.TransactionClient = prisma,
 ): Promise<number> {
-  const { lines, orderLevelDiscount } = await loadOrderCommissionLines(orderId, db)
+  const { lines, orderLevelDiscount, ivaIncluidoEnPrecio } = await loadOrderCommissionLines(orderId, db)
 
   const selected = selectCommissionableLines({
     orderLines: lines,
@@ -841,7 +848,7 @@ export async function calculateCategoryFilteredAmount(
     include: line => line.categoryId !== null && categoryIds.includes(line.categoryId),
   })
 
-  return commissionableAmount(selected, { base: resolveCommissionBase(config), includeTax: config.includeTax })
+  return commissionableAmount(selected, { base: resolveCommissionBase(config), includeTax: config.includeTax, ivaIncluidoEnPrecio })
 }
 
 /**
@@ -857,7 +864,7 @@ export async function calculateLeftoverAmount(
   config: { includeTax: boolean; includeDiscount: boolean },
   db: Prisma.TransactionClient = prisma,
 ): Promise<number> {
-  const { lines, orderLevelDiscount } = await loadOrderCommissionLines(orderId, db)
+  const { lines, orderLevelDiscount, ivaIncluidoEnPrecio } = await loadOrderCommissionLines(orderId, db)
 
   const selected = selectCommissionableLines({
     orderLines: lines,
@@ -865,7 +872,7 @@ export async function calculateLeftoverAmount(
     include: line => line.categoryId === null || !claimedCategoryIds.includes(line.categoryId),
   })
 
-  return commissionableAmount(selected, { base: resolveCommissionBase(config), includeTax: config.includeTax })
+  return commissionableAmount(selected, { base: resolveCommissionBase(config), includeTax: config.includeTax, ivaIncluidoEnPrecio })
 }
 
 /**

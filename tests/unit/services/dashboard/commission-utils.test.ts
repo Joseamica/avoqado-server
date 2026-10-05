@@ -214,77 +214,50 @@ describe('applyCommissionBounds', () => {
 })
 
 // ============================================
-// calculateBaseAmount
+// calculateBaseAmount (D5 + reparto por cobro, fase 3)
 // ============================================
 
 describe('calculateBaseAmount', () => {
+  // Un cobro de $1,160 que trae $160 de IVA (su parte) y $50 de descuento (su parte); $100 de propina aparte.
   const payment = {
-    amount: new Decimal(1000),
+    amount: new Decimal(1160),
     tipAmount: new Decimal(100),
     taxAmount: new Decimal(160),
     discountAmount: new Decimal(50),
   }
+  const cfg = (o: Partial<{ includeTips: boolean; includeDiscount: boolean; includeTax: boolean }> = {}) => ({
+    includeTips: false,
+    includeDiscount: false,
+    includeTax: true,
+    ...o,
+  })
 
-  it('should return subtotal only by default (no tax, tips, or discount)', () => {
-    const result = calculateBaseAmount(payment, {
-      includeTips: false,
-      includeDiscount: false,
-      includeTax: false,
-    })
-    expect(result.baseAmount).toBe(1000)
-    expect(result.tipAmount).toBe(100)
+  it('«con IVA» (default): lo que pagó el cliente, sin sumar el IVA otra vez', () => {
+    const result = calculateBaseAmount(payment, cfg())
+    expect(result.baseAmount).toBe(1160)
     expect(result.taxAmount).toBe(160)
+    expect(result.tipAmount).toBe(100)
   })
 
-  it('should include tax (IVA 16%) when includeTax is true', () => {
-    const result = calculateBaseAmount(payment, {
-      includeTips: false,
-      includeDiscount: false,
-      includeTax: true,
-    })
-    expect(result.baseAmount).toBe(1160) // 1000 + 160
+  it('🔴 «sin el IVA registrado»: lo pagado menos su parte de IVA', () => {
+    expect(calculateBaseAmount(payment, cfg({ includeTax: false })).baseAmount).toBe(1000)
   })
 
-  it('should include tips when includeTips is true', () => {
-    const result = calculateBaseAmount(payment, {
-      includeTips: true,
-      includeDiscount: false,
-      includeTax: false,
-    })
-    expect(result.baseAmount).toBe(1100) // 1000 + 100
+  it('«precio de lista»: lo pagado más su parte del descuento', () => {
+    expect(calculateBaseAmount(payment, cfg({ includeDiscount: true })).baseAmount).toBe(1210)
   })
 
-  it('should include discount when includeDiscount is true', () => {
-    const result = calculateBaseAmount(payment, {
-      includeTips: false,
-      includeDiscount: true,
-      includeTax: false,
-    })
-    expect(result.baseAmount).toBe(1050) // 1000 + 50 (add back discount for pre-discount amount)
+  it('«precio de lista» sin IVA: más el descuento, menos el IVA', () => {
+    expect(calculateBaseAmount(payment, cfg({ includeDiscount: true, includeTax: false })).baseAmount).toBe(1050)
   })
 
-  it('should include all when all flags are true', () => {
-    const result = calculateBaseAmount(payment, {
-      includeTips: true,
-      includeDiscount: true,
-      includeTax: true,
-    })
-    expect(result.baseAmount).toBe(1310) // 1000 + 100 + 160 + 50
+  it('la propina sólo entra con includeTips', () => {
+    expect(calculateBaseAmount(payment, cfg({ includeTips: true })).baseAmount).toBe(1260)
   })
 
-  it('should handle null optional amounts', () => {
-    const paymentMinimal = {
-      amount: new Decimal(500),
-      tipAmount: null,
-      taxAmount: null,
-      discountAmount: null,
-    }
-    const result = calculateBaseAmount(paymentMinimal, {
-      includeTips: true,
-      includeDiscount: true,
-      includeTax: true,
-    })
-    expect(result.baseAmount).toBe(500) // All nulls treated as 0
+  it('los nulos cuentan como 0', () => {
+    const minimo = { amount: new Decimal(500), tipAmount: null, taxAmount: null, discountAmount: null }
+    expect(calculateBaseAmount(minimo, cfg({ includeTips: true, includeDiscount: true })).baseAmount).toBe(500)
   })
 })
 
