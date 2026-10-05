@@ -108,6 +108,23 @@ describe('Hybrid offer definitions and selection preview', () => {
     expect(inventory.selection.issues).toContainEqual(expect.objectContaining({ requiredFeatureCode: 'INVENTORY_TRACKING' }))
   })
 
+  it('pases de TotalPass requieren Reservas como cualquier otra dependencia (R36)', () => {
+    const offer = { ...choice(1), eligibleFeatureCodes: ['AGGREGATOR_PASSES', 'RESERVATIONS'] }
+    const missing = previewHybridOffer({ offer, selectedFeatureCodes: ['AGGREGATOR_PASSES'] })
+    expect(missing.selection.valid).toBe(false)
+    expect(missing.selection.issues).toContainEqual(
+      expect.objectContaining({ code: 'MISSING_DEPENDENCY', featureCode: 'AGGREGATOR_PASSES', requiredFeatureCode: 'RESERVATIONS' }),
+    )
+    expect(
+      previewHybridOffer({ offer, selectedFeatureCodes: ['AGGREGATOR_PASSES'], scenario: { grantedFeatureCodes: ['RESERVATIONS'] } })
+        .selection.valid,
+    ).toBe(true)
+    expect(
+      previewHybridOffer({ offer: { ...offer, choiceCount: 2 }, selectedFeatureCodes: ['AGGREGATOR_PASSES', 'RESERVATIONS'] }).selection
+        .valid,
+    ).toBe(true)
+  })
+
   it('reports operational prerequisites separately from the commercial selection', () => {
     const result = previewHybridOffer({
       offer: { ...choice(1), eligibleFeatureCodes: ['SERIALIZED_INVENTORY'] },

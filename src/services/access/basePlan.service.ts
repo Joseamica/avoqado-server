@@ -114,6 +114,7 @@ const LEGACY_PLAN_CODES = new Set([
   'WHITE_LABEL_DASHBOARD',
   'MASTER_CATALOG',
   'KITCHEN_DISPLAY', // Pro (founder D-A, 27-sep): kitchen display by station, offline included.
+  'AGGREGATOR_PASSES', // Pro (founder D4, 2-oct): pases de TotalPass y Wellhub; suelta $199/mes.
   ...PREMIUM_ONLY_CODES,
 ])
 

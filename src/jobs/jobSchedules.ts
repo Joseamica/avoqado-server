@@ -55,4 +55,8 @@ export const DATABASE_JOB_SCHEDULES = {
   // `Order.kitchenPendingAt`). Cada minuto en el segundo :22, libre entre el outbox de clientes (:20) y el
   // sweeper de gcal (:23); lejos del :04 de displayModeRequestExpiry. Máximo 50 órdenes por pasada.
   kitchenTicketsReconciliation: '22 * * * * *',
+  // Conector de pases (TotalPass/Wellhub): eventos, vencimiento de visitas, horizonte y bandeja de salida.
+  // Segundos :18/:48 y no :19/:49 como decía el plan: :49 ya es de cashClosePairReconciler. :18 queda entre el
+  // monitor de POS (:17, cada 5 min) y el outbox de clientes (:20); :48, entre los anuncios (:47, cada 5 min) y :49.
+  aggregatorPassWorker: '18,48 * * * * *',
 } as const

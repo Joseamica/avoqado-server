@@ -2,7 +2,7 @@ import { Request, Response, NextFunction } from 'express'
 import logger from '../config/logger' // Ajusta la ruta si es necesario
 import { runWithContext } from '../observability/executionContext'
 import { CORRELATION_HEADER, resolveCorrelationId } from '../observability/correlationId'
-import { normalizeEntrypoint } from '../observability/entrypoint'
+import { normalizeEntrypoint, redactPathSecrets } from '../observability/entrypoint'
 
 /** Parámetros de query cuyo VALOR nunca puede llegar a un log. */
 const PARAMS_SENSIBLES = new Set([
@@ -31,10 +31,11 @@ const PARAMS_SENSIBLES = new Set([
  * preferible a filtrar un secreto.
  */
 export function redactUrlSecrets(url: string): string {
+  // 🔴 Además del query: hay rutas cuyo SEGMENTO es el secreto (webhooks de pases, ver `redactPathSecrets`).
   const i = url.indexOf('?')
-  if (i === -1) return url
+  if (i === -1) return redactPathSecrets(url, '[redactado]')
 
-  const ruta = url.slice(0, i)
+  const ruta = redactPathSecrets(url.slice(0, i), '[redactado]')
   const query = url.slice(i + 1)
 
   try {
@@ -46,7 +47,7 @@ export function redactUrlSecrets(url: string): string {
         tocado = true
       }
     }
-    return tocado ? `${ruta}?${params.toString()}` : url
+    return tocado ? `${ruta}?${params.toString()}` : `${ruta}?${query}`
   } catch {
     return `${ruta}?[query-redactada]`
   }

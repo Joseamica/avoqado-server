@@ -20,6 +20,7 @@ describe('published hybrid offer composition', () => {
     )
     expect(publication.includedFeatureCodes).not.toContain('WHITE_LABEL_DASHBOARD')
     expect(publication.includedFeatureCodes).not.toContain('MASTER_CATALOG')
+    expect(publication.includedFeatureCodes).toContain('AGGREGATOR_PASSES') // pases de TotalPass/Wellhub: Pro (D4, 2-oct)
   })
   it('snapshots a fixed offer and its exact total without inventing per-feature prices', () => {
     const publication = compileHybridPublication(fixed)
@@ -29,6 +30,7 @@ describe('published hybrid offer composition', () => {
   })
   it('rejects a fixed offer missing its paid dependency', () => {
     expect(() => compileHybridPublication({ ...fixed, featureCodes: ['UPSELL_AI'] })).toThrow(/requiere|dependencia/i)
+    expect(() => compileHybridPublication({ ...fixed, featureCodes: ['AGGREGATOR_PASSES'] })).toThrow(/requiere|dependencia/i) // R36
   })
   it('rejects a choice pool containing a dependency that cannot fit in N', () => {
     expect(() =>
