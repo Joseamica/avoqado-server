@@ -74,4 +74,9 @@ describe('asistencia → comisiones en el config', () => {
     await createCommissionConfig('venue-1', { name: 'Meseros', defaultRate: 0.03 } as any, 'staff-1')
     expect(db.commissionConfig.create.mock.calls[0][0].data).toEqual(expect.objectContaining({ includeTax: true }))
   })
+
+  it('un «sin el IVA registrado» EXPLÍCITO se respeta (el default no lo pisa)', async () => {
+    await createCommissionConfig('venue-1', { name: 'Meseros', defaultRate: 0.03, includeTax: false } as any, 'staff-1')
+    expect(db.commissionConfig.create.mock.calls[0][0].data).toEqual(expect.objectContaining({ includeTax: false }))
+  })
 })

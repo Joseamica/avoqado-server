@@ -30,8 +30,10 @@ import {
 let m: MundoComisiones
 beforeAll(asegurarBaseDePrueba)
 afterEach(async () => {
-  await borrarMundoComisiones(m)
-  m = undefined as unknown as MundoComisiones // una prueba sin mundo propio no vuelve a borrar el de la anterior
+  // Se suelta ANTES de borrar: una prueba sin mundo propio no vuelve a borrar el de la anterior, ni uno a medio borrar.
+  const mundo = m
+  m = undefined as unknown as MundoComisiones
+  await borrarMundoComisiones(mundo)
 })
 
 /** Cobra la orden en estos montos, uno tras otro, y materializa cada comisión como lo hace la terminal. */

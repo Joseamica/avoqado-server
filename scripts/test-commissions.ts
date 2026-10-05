@@ -136,7 +136,7 @@ async function createCommissionConfig() {
       maxAmount: null,
       includeTips: false,
       includeDiscount: false,
-      includeTax: false,
+      includeTax: true,
       roleRates: {
         WAITER: 0.03,
         CASHIER: 0.025,
