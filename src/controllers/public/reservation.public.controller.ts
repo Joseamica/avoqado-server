@@ -35,6 +35,8 @@ import {
 import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
 import { buildReservationBookingCapabilities } from '@/services/reservation/publicReservationCapabilities'
 import { buildReservationCheckoutReturnUrls } from '@/services/reservation/reservationReturnUrl'
+import { lockClassSession, sumOccupiedSeats } from '@/services/reservation/classBooking.service'
+import { enqueuePassSessionSync } from '@/services/aggregators/core/sessionSync.service'
 
 // ==========================================
 // PUBLIC RESERVATION CONTROLLER (Unauthenticated)
@@ -1952,19 +1954,7 @@ async function createClassReservation(
     await assertCustomerCanCreateReservation(tx, { customerId: sessionCustomerId, venueId })
 
     // Lock the ClassSession row and verify it exists + belongs to venue
-    const sessions = await tx.$queryRaw<
-      { id: string; productId: string; startsAt: Date; endsAt: Date; duration: number; capacity: number; status: string }[]
-    >`
-      SELECT id, "productId", "startsAt", "endsAt", duration, capacity, status
-      FROM "ClassSession"
-      WHERE id = ${body.classSessionId}
-        AND "venueId" = ${venueId}
-      FOR UPDATE
-    `
-    if (sessions.length === 0) {
-      throw new NotFoundError('Sesion de clase no encontrada')
-    }
-    const session = sessions[0]
+    const session = await lockClassSession(tx, venueId, body.classSessionId)
 
     if (session.status !== 'SCHEDULED') {
       throw new BadRequestError('Esta sesion de clase ya no acepta reservaciones')
@@ -2034,16 +2024,8 @@ async function createClassReservation(
       )
     }
 
-    // Sum enrolled from active reservations
-    // Note: FOR UPDATE cannot be used with aggregate functions in PostgreSQL.
-    // The ClassSession row lock above + SERIALIZABLE isolation is sufficient.
-    const enrolledResult = await tx.$queryRaw<{ total: bigint }[]>`
-      SELECT COALESCE(SUM("partySize"), 0) as total
-      FROM "Reservation"
-      WHERE "classSessionId" = ${body.classSessionId}
-        AND status IN ('PENDING', 'CONFIRMED', 'CHECKED_IN')
-    `
-    const enrolled = Number(enrolledResult[0].total)
+    // Sum enrolled from active reservations (under the ClassSession lock + SERIALIZABLE)
+    const enrolled = await sumOccupiedSeats(tx, body.classSessionId)
     const effectiveCapacity = Math.floor((session.capacity * onlinePercent) / 100)
 
     if (enrolled + requestedPartySize > effectiveCapacity) {
@@ -2265,6 +2247,7 @@ async function createClassReservation(
         // Debounced — sweeper publishes after window. No immediate RMQ push.
       }
     }
+    await enqueuePassSessionSync(tx, venueId, body.classSessionId)
 
     return { ...reservation, creditRedeemed, creditsUsed, requiresUpfrontCash, owesAtVenue, upfrontAmount }
   })

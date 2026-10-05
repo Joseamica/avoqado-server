@@ -90,7 +90,11 @@ describe('spec §4.2 rule 2: a function never outlives its dependency', () => {
   })
 
   it('keeps the dependency map the offer hash was built from', () => {
-    expect(HYBRID_DEPENDENCIES).toEqual({ AUTO_REORDER: ['INVENTORY_TRACKING'], UPSELL_AI: ['UPSELL'] })
+    expect(HYBRID_DEPENDENCIES).toEqual({
+      AUTO_REORDER: ['INVENTORY_TRACKING'],
+      UPSELL_AI: ['UPSELL'],
+      AGGREGATOR_PASSES: ['RESERVATIONS'],
+    })
   })
 
   it('throws HYBRID_DEPENDENCY_TERM in Spanish, with the issues as details and dates serialized', () => {

@@ -6,6 +6,7 @@ import { ConflictError } from '@/errors/AppError'
 export const HYBRID_DEPENDENCIES: Readonly<Record<string, readonly string[]>> = {
   AUTO_REORDER: ['INVENTORY_TRACKING'],
   UPSELL_AI: ['UPSELL'],
+  AGGREGATOR_PASSES: ['RESERVATIONS'], // R36: los pases de TotalPass/Wellhub sólo sirven sobre clases.
 }
 
 /** The commercial unit that brings a function: a cart line (its publication) or something the venue keeps. */

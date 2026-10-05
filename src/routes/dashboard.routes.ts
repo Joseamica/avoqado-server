@@ -352,6 +352,7 @@ import areaTicketRoutes from './dashboard/areaTicket.routes'
 import * as areaTicketController from '../controllers/dashboard/areaTicket.dashboard.controller'
 import { updateAreaSettlementRouteSchema } from '../schemas/dashboard/areaTicket.schema'
 import classSessionRoutes from './dashboard/classSession.routes'
+import passIntegrationsRoutes from './dashboard/passIntegrations.routes'
 import googleCalendarStatusRoutes from './dashboard/googleCalendarStatus.routes'
 // @temporary - Serialized inventory demo routes (delete after final implementation)
 import serializedInventoryRoutes from './dashboard/serializedInventory.routes'
@@ -4537,6 +4538,10 @@ router.patch(
 // Class Sessions (group classes / workshops) — part of the reservations/appointments product
 // (uses reservations:* permissions; attendees ARE reservations), so it shares the RESERVATIONS gate.
 router.use('/venues/:venueId/class-sessions', authenticateTokenMiddleware, checkFeatureAccess('RESERVATIONS'), classSessionRoutes)
+
+// Conector de pases (TotalPass/Wellhub): conectar, ligar clases, lugares, check-ins. Gate AGGREGATOR_PASSES (Pro) y
+// permisos dentro del sub-router (permiso antes que plan).
+router.use('/venues/:venueId/pass-integrations', authenticateTokenMiddleware, passIntegrationsRoutes)
 
 // Google Calendar Sync — venue-scoped status / ops endpoints (Phase 3)
 router.use('/venues/:venueId/google-calendar', authenticateTokenMiddleware, googleCalendarStatusRoutes)

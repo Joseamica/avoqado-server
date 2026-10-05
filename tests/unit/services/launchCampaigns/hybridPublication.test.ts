@@ -20,6 +20,7 @@ describe('published hybrid offer composition', () => {
     )
     expect(publication.includedFeatureCodes).not.toContain('WHITE_LABEL_DASHBOARD')
     expect(publication.includedFeatureCodes).not.toContain('MASTER_CATALOG')
+    expect(publication.includedFeatureCodes).toContain('AGGREGATOR_PASSES') // pases de TotalPass/Wellhub: Pro (D4, 2-oct)
   })
   it('snapshots a fixed offer and its exact total without inventing per-feature prices', () => {
     const publication = compileHybridPublication(fixed)
@@ -30,6 +31,7 @@ describe('published hybrid offer composition', () => {
   // Spec §4.2 rule 1: a single function publishes alone (the quote checks its dependency, with dates); a bundle does not.
   it('rejects a fixed bundle missing its paid dependency, but publishes that function alone', () => {
     expect(() => compileHybridPublication({ ...fixed, featureCodes: ['UPSELL_AI', 'CFDI'] })).toThrow(/requiere|dependencia/i)
+    expect(() => compileHybridPublication({ ...fixed, featureCodes: ['AGGREGATOR_PASSES', 'CFDI'] })).toThrow(/requiere|dependencia/i) // R36
     expect(compileHybridPublication({ ...fixed, featureCodes: ['UPSELL_AI'] }).includedFeatureCodes).toEqual(['UPSELL_AI'])
   })
   it('rejects a choice pool containing a dependency that cannot fit in N', () => {

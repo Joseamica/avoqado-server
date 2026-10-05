@@ -27,6 +27,8 @@ export interface CoachClassAttendee {
   status: string
   checkedIn: boolean
   spotLabel: string | null
+  /** Socio de un pase (TotalPass/Wellhub): quien da la clase lo reconoce. null = cliente propio. */
+  passProvider: string | null
 }
 
 export interface CoachClassNow {
@@ -93,6 +95,7 @@ export async function getMyClassNow(args: { venueId: string; staffId: string; no
           customer: { select: { firstName: true, lastName: true } },
           // Reserva de invitado (sin cuenta): el nombre vive completo en la propia reserva.
           guestName: true,
+          aggregatorBooking: { select: { provider: true } },
         },
       },
     },
@@ -106,6 +109,7 @@ export async function getMyClassNow(args: { venueId: string; staffId: string; no
     status: r.status,
     checkedIn: r.status === 'CHECKED_IN',
     spotLabel: spotLabel(r.spotIds, session.product?.layoutConfig),
+    passProvider: r.aggregatorBooking?.provider ?? null,
   }))
 
   return {

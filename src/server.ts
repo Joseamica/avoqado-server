@@ -80,6 +80,7 @@ import { loyaltyReconciliationJob } from './jobs/loyalty-reconciliation.job'
 import { kitchenTicketsReconciliationJob } from './jobs/kitchen-tickets-reconciliation.job'
 import { paymentEffectsJob } from './jobs/payment-effects.job'
 import { angelpayEventWorkerJob } from './jobs/angelpay-event-worker.job'
+import { aggregatorPassWorkerJob } from './jobs/aggregator-pass-worker.job'
 import { cashDrawerReconcilerJob } from './jobs/cash-drawer-reconciler.job'
 import { planAccessReconciliationJob } from './jobs/plan-access-reconciliation.job'
 import { paidOrderReconcilerJob } from './jobs/paid-order-reconciler.job'
@@ -177,6 +178,7 @@ const gracefulShutdown = async (signal: string) => {
       kitchenTicketsReconciliationJob.stop()
       paymentEffectsJob.stop()
       angelpayEventWorkerJob.stop()
+      aggregatorPassWorkerJob.stop()
       cashDrawerReconcilerJob.stop()
       planAccessReconciliationJob.stop()
       paidOrderReconcilerJob.stop()
@@ -521,6 +523,8 @@ const startApplication = async (retries = 3) => {
       // S4: los eventos PENDING de AngelPay (webhook antes que el registro, vínculo tardío, caídas) los retoma un
       // worker propio con claim atómico y lease — nunca el vigía de 30 s.
       angelpayEventWorkerJob.start()
+      // Conector de pases (TotalPass/Wellhub): reintentos de webhooks, visitas, horizonte y bandeja de salida.
+      aggregatorPassWorkerJob.start()
       cashDrawerReconcilerJob.start()
       planAccessReconciliationJob.start()
       paidOrderReconcilerJob.start()

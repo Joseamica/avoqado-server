@@ -510,6 +510,15 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   GoogleCalendarWebhookInbox: 'Reservations & Booking',
   GoogleOAuthSession: 'Reservations & Booking',
   CalendarSyncOutbox: 'Reservations & Booking',
+  AggregatorConnection: 'Reservations & Booking',
+  AggregatorProductLink: 'Reservations & Booking',
+  AggregatorSessionLink: 'Reservations & Booking',
+  AggregatorCapacityRule: 'Reservations & Booking',
+  AggregatorBooking: 'Reservations & Booking',
+  AggregatorVisit: 'Reservations & Booking',
+  CustomerExternalIdentity: 'Customers, Consumers & Reviews',
+  AggregatorInboundEvent: 'Reservations & Booking',
+  AggregatorOutbox: 'Reservations & Booking',
 
   // 17. Terminals / TPV Fleet
   Terminal: 'Terminals / TPV Fleet',
