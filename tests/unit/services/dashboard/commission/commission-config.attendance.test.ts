@@ -70,13 +70,13 @@ describe('asistencia → comisiones en el config', () => {
     expect(db.commissionConfig.update.mock.calls[0][0].data).toEqual(expect.objectContaining({ attendanceLatePenaltyRate: 0.5 }))
   })
 
-  it('🔴 D5: crear un esquema sin mencionar el IVA lo deja «con IVA» (lo que pagó el cliente)', async () => {
+  it('🔴 D5: crear un esquema sin mencionar el IVA lo deja «sin IVA» (de fábrica)', async () => {
     await createCommissionConfig('venue-1', { name: 'Meseros', defaultRate: 0.03 } as any, 'staff-1')
-    expect(db.commissionConfig.create.mock.calls[0][0].data).toEqual(expect.objectContaining({ includeTax: true }))
+    expect(db.commissionConfig.create.mock.calls[0][0].data).toEqual(expect.objectContaining({ includeTax: false }))
   })
 
-  it('un «sin el IVA registrado» EXPLÍCITO se respeta (el default no lo pisa)', async () => {
-    await createCommissionConfig('venue-1', { name: 'Meseros', defaultRate: 0.03, includeTax: false } as any, 'staff-1')
-    expect(db.commissionConfig.create.mock.calls[0][0].data).toEqual(expect.objectContaining({ includeTax: false }))
+  it('un «con IVA» EXPLÍCITO se respeta (el default no lo pisa)', async () => {
+    await createCommissionConfig('venue-1', { name: 'Meseros', defaultRate: 0.03, includeTax: true } as any, 'staff-1')
+    expect(db.commissionConfig.create.mock.calls[0][0].data).toEqual(expect.objectContaining({ includeTax: true }))
   })
 })

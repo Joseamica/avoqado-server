@@ -4961,7 +4961,7 @@ async function main() {
           maxAmount: 500, // Maximum $500 commission
           includeTips: false,
           includeDiscount: false,
-          includeTax: true,
+          includeTax: false,
           roleRates: {
             WAITER: 0.03,
             CASHIER: 0.02,
@@ -4987,7 +4987,7 @@ async function main() {
           defaultRate: 0.02, // Default 2%
           includeTips: false,
           includeDiscount: false,
-          includeTax: true,
+          includeTax: false,
           effectiveFrom: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000), // 30 days ago
           active: false, // Inactive - just for testing
           createdById: ownerStaffVenue.staffId,
@@ -5033,7 +5033,7 @@ async function main() {
           defaultRate: 5, // $5 per payment
           includeTips: false,
           includeDiscount: false,
-          includeTax: true,
+          includeTax: false,
           effectiveFrom: new Date(Date.now() - 45 * 24 * 60 * 60 * 1000), // 45 days ago
           active: true,
           createdById: ownerStaffVenue.staffId,
