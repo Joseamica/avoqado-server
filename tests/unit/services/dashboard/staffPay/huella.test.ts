@@ -79,8 +79,16 @@ describe('huella del cierre (spec §6.3)', () => {
     otroMonto.ajuste({ id: 'e1', staffId: 's1', venueId: 'v1', amount: '50.00' })
     expect(otroMonto.digest()).not.toBe(dConAjuste)
   })
-  it('la fila canónica es texto plano con separadores fijos (no depende de JSON.stringify)', () => {
-    expect(filaCanonicaDeClase(c('c1', 570))).toBe('C|v1|c1|s1|2026-08-10|tv|l1|8|∅|∅|0|OK|570.00')
+  it('la fila canónica es texto plano con separadores fijos, y termina con el bono y la cancelación tardía (spec fase 3 §6.6)', () => {
+    expect(filaCanonicaDeClase(c('c1', 570))).toBe('C|v1|c1|s1|2026-08-10|tv|l1|8|∅|∅|0|OK|570.00|∅|0')
+    expect(filaCanonicaDeClase(c('c1', 670, { bonoSuplencia: '100.00' }))).toBe('C|v1|c1|s1|2026-08-10|tv|l1|8|∅|∅|0|OK|670.00|100.00|0')
+    expect(filaCanonicaDeClase(c('c1', 250, { conteo: 0, cancelada: true, canceladaTarde: true }))).toBe(
+      'C|v1|c1|s1|2026-08-10|tv|l1|0|∅|∅|0|OK|250.00|∅|1',
+    )
+  })
+  it('el bono o la cancelación tardía cambian la huella aunque el monto quede igual', () => {
+    expect(digest([c('c1', 570)])).not.toBe(digest([c('c1', 570, { bonoSuplencia: '100.00' })]))
+    expect(digest([c('c1', 250)])).not.toBe(digest([c('c1', 250, { canceladaTarde: true })]))
   })
 })
 

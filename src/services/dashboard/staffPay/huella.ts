@@ -23,6 +23,9 @@ export function filaCanonicaDeClase(c: ClaseValorada): string {
     val(c.excluida),
     c.estado,
     dinero(c.monto),
+    // Reglas de clase (spec fase 3 §6.6): cambian el monto, así que entran a la huella aunque el total coincida.
+    dinero(c.bonoSuplencia),
+    val(c.canceladaTarde),
   ].join('|')
 }
 
