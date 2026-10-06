@@ -11,12 +11,17 @@ import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { finalizePaymentLinkCheckout } from '@/services/dashboard/paymentLink.service'
 import { issueRefund } from '@/services/dashboard/refund.dashboard.service'
+import { enqueuePaymentCommissionInTx, enqueueRefundPaymentEffectsInTx } from '@/services/tpv/paymentEffects.service'
 import {
   asegurarBaseDePrueba,
+  barreraDeFila,
   borrarMundoComisiones,
+  cobro,
   crearMundoComisiones,
   MundoComisiones,
   netoVivo,
+  orden,
+  planear,
   procesarEfectos,
 } from './_mundoComisiones'
 
@@ -114,10 +119,99 @@ describe('A5 · la comisión de una liga de pago se congela con el cobro (spec �
     expect(fila.calculatedAt.getTime()).toBe(pago.createdAt.getTime())
   })
 
+  it('🔴 F1: con la fila de la persona bloqueada, el cobro se registra y su comisión queda para revisión sin esperar el candado', async () => {
+    // Codex bloque A r1 [P1]: congelar la comisión esperaba el `FOR UPDATE` de StaffVenue SIN tope; pasados los 10 s de la
+    // transacción se perdían el cobro y la orden con la tarjeta ya cobrada. Aquí el candado se suelta solo a los 4 s: sin el
+    // tope, la congelación lo espera, termina después y no deja efecto de revisión.
+    const fila = await prisma.staffVenue.findFirstOrThrow({ where: { venueId: m.venueId, staffId: m.bea }, select: { id: true } })
+    const barrera = await barreraDeFila('StaffVenue', fila.id)
+    const soltarSola = setTimeout(() => void barrera.soltar(), 4_000)
+    try {
+      const inicio = Date.now()
+      const pago = await ligaPagada([m.bea])
+      expect(Date.now() - inicio).toBeLessThan(4_000)
+      const efectos = await prisma.paymentEffect.findMany({
+        where: { venueId: m.venueId, paymentId: pago.id, kind: 'COMMISSION' },
+        take: 10,
+      })
+      expect(efectos.map(e => [e.dedupeKey, e.lastError])).toEqual([
+        [`commission:${pago.id}:policy-error:v1`, 'COMMISSION_SNAPSHOT_REQUIRES_REVIEW'],
+      ])
+    } finally {
+      clearTimeout(soltarSola)
+      await barrera.soltar()
+    }
+  })
+
   it('🔴 venta devuelta ANTES de que se materialice su comisión: el neto queda en $0', async () => {
     const pago = await ligaPagada([m.ana, m.bea])
     await issueRefund({ venueId: m.venueId, paymentId: pago.id, amount: 20_000, reason: 'RETURNED_GOODS', staffId: m.owner })
     await procesarEfectos(m)
     expect(await netoVivo({ venueId: m.venueId, orderId: pago.orderId! })).toBe('0.00')
+  })
+})
+
+describe('F1 · la espera acotada de la congelación no se queda en la transacción del cobro', () => {
+  /** El commit de la terminal con su propia espera de candados (la de `candadoDeIntento`); devuelve la que quedó al final. */
+  async function congelarConEspera(pagoId: string): Promise<string> {
+    return prisma.$transaction(async tx => {
+      await tx.$executeRawUnsafe(`SET LOCAL lock_timeout = '7s'`)
+      await enqueuePaymentCommissionInTx(tx, pagoId)
+      const [{ espera }] = await tx.$queryRaw<Array<{ espera: string }>>`SELECT current_setting('lock_timeout') AS espera`
+      return espera
+    })
+  }
+
+  it('congelada bien: la transacción recupera su espera de candados', async () => {
+    const pago = await cobro(m, await orden(m, { subtotal: 100 }), 100)
+    expect(await congelarConEspera(pago)).toBe('7s')
+    const efectos = await prisma.paymentEffect.findMany({ where: { venueId: m.venueId, paymentId: pago, kind: 'COMMISSION' }, take: 10 })
+    expect(efectos.map(e => e.lastError)).toEqual([null])
+  })
+
+  it('🔴 candado vencido (camino de la terminal): efecto de revisión y la transacción recupera su espera', async () => {
+    const pago = await cobro(m, await orden(m, { subtotal: 100 }), 100)
+    const fila = await prisma.staffVenue.findFirstOrThrow({ where: { venueId: m.venueId, staffId: m.ana }, select: { id: true } })
+    const barrera = await barreraDeFila('StaffVenue', fila.id)
+    try {
+      expect(await congelarConEspera(pago)).toBe('7s')
+    } finally {
+      await barrera.soltar()
+    }
+    const efectos = await prisma.paymentEffect.findMany({ where: { venueId: m.venueId, paymentId: pago, kind: 'COMMISSION' }, take: 10 })
+    expect(efectos.map(e => [e.dedupeKey, e.lastError])).toEqual([
+      [`commission:${pago}:policy-error:v1`, 'COMMISSION_SNAPSHOT_REQUIRES_REVIEW'],
+    ])
+  })
+
+  it('el reverso de una devolución también restaura la espera de la transacción', async () => {
+    const orderId = await orden(m, { subtotal: 100 })
+    const pago = await cobro(m, orderId, 100)
+    await planear(pago)
+    const espera = await prisma.$transaction(async tx => {
+      await tx.$executeRawUnsafe(`SET LOCAL lock_timeout = '7s'`)
+      const refund = await tx.payment.create({
+        data: {
+          venueId: m.venueId,
+          orderId,
+          amount: new Prisma.Decimal(-100),
+          tipAmount: new Prisma.Decimal(0),
+          method: 'CASH',
+          status: 'COMPLETED',
+          type: 'REFUND',
+          processedById: m.owner,
+          feePercentage: 0,
+          feeAmount: new Prisma.Decimal(0),
+          netAmount: new Prisma.Decimal(-100),
+          processorData: { originalPaymentId: pago },
+        },
+      })
+      await enqueueRefundPaymentEffectsInTx(tx, refund.id, pago)
+      const [{ espera }] = await tx.$queryRaw<Array<{ espera: string }>>`SELECT current_setting('lock_timeout') AS espera`
+      return espera
+    })
+    expect(espera).toBe('7s')
+    await procesarEfectos(m)
+    expect(await netoVivo({ venueId: m.venueId, orderId })).toBe('0.00')
   })
 })

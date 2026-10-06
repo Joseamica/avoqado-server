@@ -27,6 +27,26 @@ const ESPERA_DE_COMISION_ORIGINAL_VENCE_MS = 24 * 60 * 60_000
 const MAX_ATTEMPTS = 6
 const LEASE_MS = 120_000
 
+/**
+ * Codex bloque A r1 [P1]: congelar una comisión espera candados (la orden, la fila de StaffVenue de cada persona). Sin tope,
+ * esa espera podía comerse los 10 s de la transacción del cobro y entonces ni el ROLLBACK TO SAVEPOINT sirve: se perdían el
+ * cobro y la orden con la tarjeta ya cobrada. Con el tope, un candado vencido (55P03) cae al efecto de revisión.
+ */
+export const ESPERA_DE_CANDADO_DE_COMISION_MS = 2_000
+
+/**
+ * Va justo después del SAVEPOINT: acota la espera de candados SÓLO para la congelación y devuelve cómo restaurar la que
+ * traía la transacción. Si la congelación falla, el ROLLBACK TO SAVEPOINT la deshace solo; si sale bien hay que restaurarla,
+ * porque un `SET LOCAL` dentro de un savepoint liberado sigue vigente hasta el final de la transacción.
+ */
+async function acotarEsperaDeCandados(tx: Prisma.TransactionClient): Promise<() => Promise<void>> {
+  const [{ previo }] = await tx.$queryRaw<Array<{ previo: string }>>`SELECT current_setting('lock_timeout') AS previo`
+  await tx.$executeRawUnsafe(`SET LOCAL lock_timeout = '${ESPERA_DE_CANDADO_DE_COMISION_MS}ms'`)
+  return async () => {
+    await tx.$queryRaw`SELECT set_config('lock_timeout', ${previo}, true)`
+  }
+}
+
 /** Sólo nombre y código de un error: su mensaje puede traer datos del procesador o de la tarjeta. */
 const rastroDelError = (error: unknown) => ({
   errorName: error instanceof Error ? error.name : typeof error,
@@ -248,7 +268,9 @@ export async function enqueuePaymentCommissionInTx(
   // DB connection still fails the financial commit and is recovered by its caller.
   await tx.$executeRawUnsafe('SAVEPOINT payment_commission_snapshot')
   try {
+    const restaurarEspera = await acotarEsperaDeCandados(tx)
     await freezePaymentCommissionInTx(tx, paymentId, plan => enqueuePaymentEffect(tx, plan), repartirEntre)
+    await restaurarEspera()
     await tx.$executeRawUnsafe('RELEASE SAVEPOINT payment_commission_snapshot')
   } catch (error) {
     logger.warn('[PAYMENT_EFFECTS] Commission snapshot failed; review effect enqueued', { paymentId, ...rastroDelError(error) })
@@ -282,6 +304,7 @@ export async function enqueueRefundPaymentEffectsInTx(
   // el cobro. Una conexión perdida de verdad sigue tumbando el commit (la siguiente consulta falla igual).
   await tx.$executeRawUnsafe('SAVEPOINT refund_commission_snapshot')
   try {
+    const restaurarEspera = await acotarEsperaDeCandados(tx)
     await createRefundCommission(refundPaymentId, originalPaymentId, {
       db: tx,
       sink: async data => {
@@ -297,6 +320,7 @@ export async function enqueueRefundPaymentEffectsInTx(
         return { id: dedupeKey }
       },
     })
+    await restaurarEspera()
     await tx.$executeRawUnsafe('RELEASE SAVEPOINT refund_commission_snapshot')
   } catch (error) {
     logger.warn('[PAYMENT_EFFECTS] Refund commission reversal failed; review effect enqueued', {

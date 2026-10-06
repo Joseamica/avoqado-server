@@ -327,7 +327,7 @@ export async function sumadaAUnResumen(
  * UNA fila; las operaciones bajo prueba se quedan esperándolo; un observador cuenta las sesiones detenidas por ESTE
  * bloqueador (directo o en cadena, por su `pg_backend_pid()`); sólo entonces se suelta. Nada de `sleep`.
  */
-export async function barreraDeFila(tabla: 'Order' | 'CommissionCalculation', id: string) {
+export async function barreraDeFila(tabla: 'Order' | 'CommissionCalculation' | 'StaffVenue', id: string) {
   const url = process.env.DATABASE_URL
   const bloqueador = new PrismaClient({ datasources: { db: { url } } })
   const observador = new PrismaClient({ datasources: { db: { url } } })
