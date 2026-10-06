@@ -1408,8 +1408,14 @@ export async function createSplitCommissionForPayment(
       db,
     )
     // 🔴 MONEY: base DE ORDEN evaluada POR COBRO — su parte, y nunca más de lo que queda por comisionar (las N filas de un
-    // cobro dividido suman la base completa, que es lo que `alreadyCommissionedItemBase` ve).
-    totalBaseAmount = baseDelCobro(enLaOrden, orderBase, await alreadyCommissionedItemBase(payment.orderId, config.id, db), otros)
+    // cobro dividido suman la base completa, que es lo que `alreadyCommissionedItemBase` ve). Congelando (`sink`), también lo
+    // que sigue en cola.
+    totalBaseAmount = baseDelCobro(
+      enLaOrden,
+      orderBase,
+      await alreadyCommissionedItemBase(payment.orderId, config.id, db, !!options.sink),
+      otros,
+    )
     totalTipAmount = config.includeTips ? decimalToNumber(payment.tipAmount) : 0
     totalDiscountAmount = 0
     totalTaxAmount = 0
@@ -1419,7 +1425,7 @@ export async function createSplitCommissionForPayment(
     totalBaseAmount = baseDelCobro(
       enLaOrden,
       listaDeLaOrden(payment.order, config),
-      await alreadyCommissionedItemBase(payment.orderId, config.id, db),
+      await alreadyCommissionedItemBase(payment.orderId, config.id, db, !!options.sink),
       otros,
     )
     totalTipAmount = config.includeTips ? decimalToNumber(payment.tipAmount) : 0
@@ -1525,27 +1531,27 @@ export async function createSplitCommissionForPayment(
     )
     netCommission = applyAttendancePenalty(netCommission, attendancePenaltyRate)
 
-    const calc = await db.commissionCalculation.create({
-      data: {
-        venueId: payment.venueId,
-        staffId: e.staffId,
-        attendancePenaltyRate,
-        paymentId: payment.id,
-        orderId: payment.orderId,
-        shiftId: payment.shift?.id,
-        configId: config.id,
-        baseAmount: bases[e.i],
-        tipAmount: propinas[e.i],
-        discountAmount: descuentos[e.i],
-        taxAmount: impuestos[e.i],
-        effectiveRate: e.effectiveRate,
-        grossCommission,
-        netCommission,
-        calcType: config.calcType,
-        status: CommissionCalcStatus.CALCULATED,
-        calculatedAt: new Date(),
-      },
-    })
+    const data: Prisma.CommissionCalculationUncheckedCreateInput = {
+      venueId: payment.venueId,
+      staffId: e.staffId,
+      attendancePenaltyRate,
+      paymentId: payment.id,
+      orderId: payment.orderId,
+      shiftId: payment.shift?.id,
+      configId: config.id,
+      baseAmount: bases[e.i],
+      tipAmount: propinas[e.i],
+      discountAmount: descuentos[e.i],
+      taxAmount: impuestos[e.i],
+      effectiveRate: e.effectiveRate,
+      grossCommission,
+      netCommission,
+      calcType: config.calcType,
+      status: CommissionCalcStatus.CALCULATED,
+      // Congelada como efecto (A5) la fila lleva la fecha del cobro, como la de la terminal.
+      calculatedAt: options.sink ? payment.createdAt : new Date(),
+    }
+    const calc = options.sink ? await options.sink(data) : await db.commissionCalculation.create({ data })
 
     logger.info('Split commission row created', { calculationId: calc.id, paymentId, staffId: e.staffId, netCommission, splitCount })
 
@@ -1568,29 +1574,30 @@ export async function freezePaymentCommissionInTx(
   tx: Prisma.TransactionClient,
   paymentId: string,
   persist?: (plan: import('../../tpv/paymentEffects.service').PaymentEffectInput) => Promise<void>,
+  /** Liga de pago (A5): las personas atribuidas. Una sola = el esquema decide a quién; varias = se reparte entre ellas. */
+  repartirEntre?: string[],
 ) {
   const payment = await tx.payment.findUniqueOrThrow({ where: { id: paymentId }, select: { id: true, venueId: true, orderId: true } })
   await tx.$queryRaw(Prisma.sql`SELECT id FROM "Order" WHERE id = ${payment.orderId} AND "venueId" = ${payment.venueId} FOR UPDATE`)
   if (await tx.paymentEffect.findFirst({ where: { venueId: payment.venueId, paymentId, kind: 'COMMISSION' }, select: { id: true } }))
     return []
   const plans: import('../../tpv/paymentEffects.service').PaymentEffectInput[] = []
-  await createCommissionForPayment(paymentId, {
-    db: tx,
-    sink: async data => {
-      const dedupeKey = `commission:${paymentId}:${data.configId}:${data.staffId}:v1`
-      const plan: import('../../tpv/paymentEffects.service').PaymentEffectInput = {
-        venueId: payment.venueId,
-        paymentId,
-        orderId: payment.orderId,
-        kind: 'COMMISSION',
-        dedupeKey,
-        payload: JSON.parse(JSON.stringify(data)) as Prisma.InputJsonValue,
-      }
-      if (persist) await persist(plan)
-      else plans.push(plan)
-      return { id: dedupeKey }
-    },
-  })
+  const sink: CommissionSink = async data => {
+    const dedupeKey = `commission:${paymentId}:${data.configId}:${data.staffId}:v1`
+    const plan: import('../../tpv/paymentEffects.service').PaymentEffectInput = {
+      venueId: payment.venueId,
+      paymentId,
+      orderId: payment.orderId,
+      kind: 'COMMISSION',
+      dedupeKey,
+      payload: JSON.parse(JSON.stringify(data)) as Prisma.InputJsonValue,
+    }
+    if (persist) await persist(plan)
+    else plans.push(plan)
+    return { id: dedupeKey }
+  }
+  if (repartirEntre) await createSplitCommissionForPayment(paymentId, repartirEntre, { db: tx, sink })
+  else await createCommissionForPayment(paymentId, { db: tx, sink })
   return plans
 }
 

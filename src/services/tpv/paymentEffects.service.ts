@@ -238,13 +238,17 @@ export async function failClaimedPaymentEffect(
   return result.count === 1
 }
 
-export async function enqueuePaymentCommissionInTx(tx: Prisma.TransactionClient, paymentId: string): Promise<void> {
+export async function enqueuePaymentCommissionInTx(
+  tx: Prisma.TransactionClient,
+  paymentId: string,
+  repartirEntre?: string[],
+): Promise<void> {
   const { freezePaymentCommissionInTx } = await import('../dashboard/commission/commission-calculation.service')
   // Optional policy reads must not abort already-captured money; an actual lost
   // DB connection still fails the financial commit and is recovered by its caller.
   await tx.$executeRawUnsafe('SAVEPOINT payment_commission_snapshot')
   try {
-    await freezePaymentCommissionInTx(tx, paymentId, plan => enqueuePaymentEffect(tx, plan))
+    await freezePaymentCommissionInTx(tx, paymentId, plan => enqueuePaymentEffect(tx, plan), repartirEntre)
     await tx.$executeRawUnsafe('RELEASE SAVEPOINT payment_commission_snapshot')
   } catch (error) {
     logger.warn('[PAYMENT_EFFECTS] Commission snapshot failed; review effect enqueued', { paymentId, ...rastroDelError(error) })
