@@ -97,7 +97,8 @@ export async function cancelClassSession(req: Request, res: Response, next: Next
   try {
     const venueId = resolveVenueId(req)
     const { sessionId } = req.params
-    const session = await classSessionService.cancelClassSession(venueId, sessionId)
+    const { userId } = (req as any).authContext
+    const session = await classSessionService.cancelClassSession(venueId, sessionId, userId)
     res.json(session)
   } catch (error) {
     next(error)

@@ -194,6 +194,10 @@ export const barreraDelPeriodo = (periodId: string) =>
 /** La misma barrera sobre el candado de UNA clase (`lockClase`): quien llega ahí ya tiene SU periodo tomado (B2). */
 export const barreraDeLaClase = (classSessionId: string) => barrera(t => lockClase(t, classSessionId))
 
+/** La misma barrera sobre la FILA de la clase (`FOR UPDATE`): ahí esperan dos cancelaciones que compiten (spec fase 3 §7.2). */
+export const barreraDeLaFilaDeClase = (classSessionId: string) =>
+  barrera(t => t.$queryRaw`SELECT id FROM "ClassSession" WHERE id = ${classSessionId} FOR UPDATE`)
+
 /** La misma barrera sobre el candado de periodos de la ORGANIZACIÓN (activar, propinas, crear periodos). */
 export const barreraDeLaOrganizacion = (organizationId: string) => barrera(t => lockPeriodosDeOrganizacion(t, organizationId))
 

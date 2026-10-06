@@ -13,6 +13,7 @@ import type {
 } from '../../schemas/dashboard/classSession.schema'
 import { Prisma, ReservationStatus, AggregatorConfirmMode, AggregatorVisitStatus } from '@prisma/client'
 import { withSerializableRetry } from '@/utils/serializableRetry'
+import { utcTs } from '@/utils/sqlDates'
 import { createOrderFromReservation } from '../reservation/createOrderFromReservation'
 import { logAction } from './activity-log.service'
 import { writeLegacyActivityAuditTx } from '../activityAudit.service'
@@ -608,12 +609,21 @@ export async function updateClassSession(venueId: string, sessionId: string, dat
 
 // ---- Cancel ----
 
-export async function cancelClassSession(venueId: string, sessionId: string) {
+export async function cancelClassSession(venueId: string, sessionId: string, actorStaffId?: string) {
   const session = await prisma.classSession.findFirst({ where: { id: sessionId, venueId } })
   if (!session) throw new NotFoundError('Sesión no encontrada')
   if (session.status === 'CANCELLED') throw new ConflictError('La sesión ya está cancelada')
 
   const { cancelled, pushRowIds } = await prisma.$transaction(async tx => {
+    // Reclamar la transición (spec fase 3 §7.2): sólo UNA solicitud pasa la clase a CANCELLED y su instante es el que queda.
+    // Otra que llegó a la vez espera el candado de la fila, ya no cumple la condición y sale con 409 sin tocar nada.
+    const now = new Date()
+    const reclamadas = await tx.$executeRaw`
+      UPDATE "ClassSession"
+      SET status = 'CANCELLED', "cancelledAt" = ${utcTs(now)}, "updatedAt" = ${utcTs(now)}
+      WHERE id = ${sessionId} AND "venueId" = ${venueId} AND status <> 'CANCELLED'`
+    if (reclamadas === 0) throw new ConflictError('La sesión ya está cancelada')
+
     // Cancel all active reservations for this session
     await tx.reservation.updateMany({
       where: {
@@ -622,17 +632,13 @@ export async function cancelClassSession(venueId: string, sessionId: string) {
       },
       data: {
         status: 'CANCELLED',
-        cancelledAt: new Date(),
+        cancelledAt: now,
         cancelledBy: 'SYSTEM',
         cancellationReason: 'Sesión cancelada por el establecimiento',
       },
     })
 
-    const cancelled = await tx.classSession.update({
-      where: { id: sessionId },
-      data: { status: 'CANCELLED' },
-      include: SESSION_INCLUDE,
-    })
+    const cancelled = await tx.classSession.findUniqueOrThrow({ where: { id: sessionId }, include: SESSION_INCLUDE })
 
     // ---- Google Calendar push outbox (Phase 2 — spec §14.3) ----
     // ONE CANCEL row per target connection — NOT one per attendee reservation.
@@ -644,14 +650,14 @@ export async function cancelClassSession(venueId: string, sessionId: string) {
     })
     let pushRowIds: string[] = []
     if (targets.length > 0) {
-      const now = new Date()
+      const ahora = new Date()
       for (const target of targets) {
         const syncKey = buildSyncKey({
           kind: 'class',
           classSessionId: cancelled.id,
           connectionId: target.id,
         })
-        await collapseSupersededOps(tx, syncKey, now)
+        await collapseSupersededOps(tx, syncKey, ahora)
       }
       pushRowIds = await enqueuePush(tx, {
         source: { kind: 'class', classSessionId: cancelled.id },
@@ -661,6 +667,15 @@ export async function cancelClassSession(venueId: string, sessionId: string) {
       })
     }
     await enqueuePassSessionSync(tx, venueId, cancelled.id)
+    // Con quién canceló y dentro de la transacción (spec fase 3 §7.2): una cancelación nunca queda sin su rastro.
+    await writeLegacyActivityAuditTx(tx, {
+      staffId: actorStaffId ?? null,
+      venueId,
+      action: 'CLASS_SESSION_CANCELLED',
+      entity: 'ClassSession',
+      entityId: sessionId,
+      data: { cancelledAt: now.toISOString() },
+    })
 
     return { cancelled, pushRowIds }
   })
@@ -674,13 +689,6 @@ export async function cancelClassSession(venueId: string, sessionId: string) {
       }),
     )
   }
-
-  logAction({
-    venueId,
-    action: 'CLASS_SESSION_CANCELLED',
-    entity: 'ClassSession',
-    entityId: sessionId,
-  })
 
   return cancelled
 }

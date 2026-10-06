@@ -6,8 +6,14 @@ jest.mock('@/communication/rabbitmq/gcal-push-consumer', () => ({
 }))
 
 import prisma from '@/utils/prismaClient'
-import { createClassSession, createClassSessionsBulk, updateClassSession } from '@/services/dashboard/classSession.dashboard.service'
-import { borrarMundo, clase, crearMundo, Mundo, TZ } from '../staffPay/_mundo'
+import {
+  cancelClassSession,
+  createClassSession,
+  createClassSessionsBulk,
+  updateClassSession,
+} from '@/services/dashboard/classSession.dashboard.service'
+import * as activityAudit from '@/services/activityAudit.service'
+import { barreraDeLaFilaDeClase, borrarMundo, clase, crearMundo, Mundo, TZ } from '../staffPay/_mundo'
 
 const H = 3_600_000
 let m: Mundo
@@ -124,5 +130,68 @@ describe('estampas al crear y editar (spec fase 3 §7.2)', () => {
     const antes = await estampas(c.id)
     await updateClassSession(m.venueId, c.id, { capacity: 8, internalNotes: 'sin cambio de coach', assignedStaffId: m.ana }, m.owner)
     expect(await estampas(c.id)).toEqual(antes)
+  })
+})
+
+describe('cancelar (spec fase 3 §7.2)', () => {
+  it('estampa cancelledAt, su ActivityLog lleva a quien canceló, y una segunda cancelación es 409 sin pisar el instante', async () => {
+    const c = await nueva(m.ana)
+    const antes = Date.now()
+    const r = await cancelClassSession(m.venueId, c.id, m.owner)
+    const e = await estampas(c.id)
+    expect(e.status).toBe('CANCELLED')
+    expect(e.cancelledAt!.getTime()).toBeGreaterThanOrEqual(antes - 1000)
+    expect(r.cancelledAt).toEqual(e.cancelledAt)
+    const log = await prisma.activityLog.findFirstOrThrow({ where: { action: 'CLASS_SESSION_CANCELLED', entityId: c.id } })
+    expect(log.staffId).toBe(m.owner)
+    expect(log.data).toMatchObject({ cancelledAt: e.cancelledAt!.toISOString() })
+    await expect(cancelClassSession(m.venueId, c.id, m.owner)).rejects.toMatchObject({ statusCode: 409 })
+    expect((await estampas(c.id)).cancelledAt).toEqual(e.cancelledAt)
+  })
+
+  it('la auditoría va en la misma transacción: si falla, la clase sigue sin cancelar', async () => {
+    const c = await nueva(m.ana)
+    const spy = jest.spyOn(activityAudit, 'writeLegacyActivityAuditTx').mockRejectedValueOnce(new Error('auditoría caída'))
+    try {
+      await expect(cancelClassSession(m.venueId, c.id, m.owner)).rejects.toThrow('auditoría caída')
+    } finally {
+      spy.mockRestore()
+    }
+    expect(await estampas(c.id)).toMatchObject({ status: 'SCHEDULED', cancelledAt: null })
+  })
+
+  it('la auditoría se escribe con la transacción: si algo falla después de escribirla, no queda rastro de una cancelación que no pasó', async () => {
+    const c = await nueva(m.ana)
+    const real = activityAudit.writeLegacyActivityAuditTx
+    const spy = jest.spyOn(activityAudit, 'writeLegacyActivityAuditTx').mockImplementationOnce(async (db, input) => {
+      await real(db, input)
+      throw new Error('falla después de auditar')
+    })
+    try {
+      await expect(cancelClassSession(m.venueId, c.id, m.owner)).rejects.toThrow('falla después de auditar')
+    } finally {
+      spy.mockRestore()
+    }
+    expect(await estampas(c.id)).toMatchObject({ status: 'SCHEDULED', cancelledAt: null })
+    expect(await prisma.activityLog.count({ where: { action: 'CLASS_SESSION_CANCELLED', entityId: c.id } })).toBe(0)
+  })
+
+  it('dos cancelaciones simultáneas: una gana, la otra 409, y queda el instante de la que ganó (barrera real)', async () => {
+    const c = await nueva(m.ana)
+    const barrera = await barreraDeLaFilaDeClase(c.id)
+    const carrera = Promise.allSettled([cancelClassSession(m.venueId, c.id, m.owner), cancelClassSession(m.venueId, c.id, m.sofia)])
+    try {
+      await barrera.esperarA(2) // las dos detenidas en el UPDATE del reclamo
+    } finally {
+      await barrera.soltar()
+    }
+    const resultados = await carrera
+    const ganadoras = resultados.filter(
+      (x): x is PromiseFulfilledResult<Awaited<ReturnType<typeof cancelClassSession>>> => x.status === 'fulfilled',
+    )
+    expect(ganadoras).toHaveLength(1)
+    expect(resultados.find(x => x.status === 'rejected')).toMatchObject({ reason: { statusCode: 409 } })
+    expect((await estampas(c.id)).cancelledAt).toEqual(ganadoras[0].value.cancelledAt)
+    expect(await prisma.activityLog.count({ where: { action: 'CLASS_SESSION_CANCELLED', entityId: c.id } })).toBe(1)
   })
 })
