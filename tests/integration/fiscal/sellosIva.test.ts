@@ -9,13 +9,17 @@ import prisma from '@/utils/prismaClient'
 import { sellarRenglones, liberarSellosDe, renglonesSellados } from '@/services/fiscal/sellosIva'
 
 // Antes de registrar cualquier siembra o limpieza: nunca aceptar la base compartida.
+const { isDisposableH1Url } = require('../../../scripts/h1-test-database.cjs')
 const testDatabase = new URL(process.env.TEST_DATABASE_URL ?? '')
-// La base fiscal de esta Mac o la desechable de CI (ci-cd.yml adopta ese nombre en vez de relajar la guarda): nunca otra.
+// Sólo las bases fiscales locales existentes o una desechable H1 validada por el lanzador.
 if (
   !['localhost', '127.0.0.1'].includes(testDatabase.hostname) ||
-  !['/av_db_25_iva_test', '/av_db_25_iva_test_b3c', '/avoqado_h1a_test_20260808'].includes(testDatabase.pathname)
+  !(
+    ['/av_db_25_iva_test', '/av_db_25_iva_test_b3c', '/avoqado_h1a_test_20260808'].includes(testDatabase.pathname) ||
+    isDisposableH1Url(testDatabase)
+  )
 ) {
-  throw new Error('Esta suite exige la base local av_db_25_iva_test o la desechable de CI avoqado_h1a_test_20260808.')
+  throw new Error('Esta suite exige la base local av_db_25_iva_test o una base H1 desechable validada.')
 }
 
 describe('sellarRenglones / liberarSellosDe / renglonesSellados (integración)', () => {

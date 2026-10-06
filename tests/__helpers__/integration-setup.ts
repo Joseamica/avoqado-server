@@ -67,11 +67,16 @@ jest.mock('@/services/dashboard/activity-log.service', () => ({
 console.log('Integration test setup loaded (using REAL Prisma client)')
 
 if (typeof afterAll === 'function') {
-  afterAll(async () => {
-    // WHY: Jest creates a fresh module registry per integration file; without teardown, each imported singleton leaves its own pool alive.
+  // Fixture afterAll hooks may still use these clients. The environment closes
+  // them at run_finish, after every hook, while Jest's module runtime is alive.
+  ;(globalThis as typeof globalThis & { disposeIntegrationClients?: () => Promise<void> }).disposeIntegrationClients = async () => {
     const { default: prisma } = await import('@/utils/prismaClient')
-    if (typeof prisma.$disconnect === 'function') await prisma.$disconnect()
-  })
+    const { default: pgPool } = await import('@/config/database')
+    await Promise.all([
+      typeof prisma.$disconnect === 'function' ? prisma.$disconnect() : Promise.resolve(),
+      pgPool.ended ? Promise.resolve() : pgPool.end(),
+    ])
+  }
 }
 
 // Note: We do NOT mock Prisma for integration tests

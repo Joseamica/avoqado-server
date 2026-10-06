@@ -23,13 +23,17 @@ import { issueCfdiForOrder } from '@/services/fiscal/cfdi.service'
 import { huellaDeEntrada } from '@/services/fiscal/entradaDocumental'
 import { encenderIvaPorProducto } from '../../__helpers__/iva-por-producto'
 
+const { isDisposableH1Url } = require('../../../scripts/h1-test-database.cjs')
 const database = new URL(process.env.TEST_DATABASE_URL ?? '')
-// La base fiscal de esta Mac o la desechable de CI (ci-cd.yml adopta ese nombre en vez de relajar la guarda): nunca otra.
+// Sólo las bases fiscales locales existentes o una desechable H1 validada por el lanzador.
 if (
   !['localhost', '127.0.0.1'].includes(database.hostname) ||
-  !['/av_db_25_iva_test', '/av_db_25_iva_test_b3c', '/avoqado_h1a_test_20260808'].includes(database.pathname)
+  !(
+    ['/av_db_25_iva_test', '/av_db_25_iva_test_b3c', '/avoqado_h1a_test_20260808'].includes(database.pathname) ||
+    isDisposableH1Url(database)
+  )
 ) {
-  throw new Error('Esta suite exige la base local av_db_25_iva_test o la desechable de CI avoqado_h1a_test_20260808.')
+  throw new Error('Esta suite exige la base local av_db_25_iva_test o una base H1 desechable validada.')
 }
 
 const receptor = { rfc: 'EKU9003173C9', razonSocial: 'ESCUELA KEMPER URGATE', regimenFiscal: '601', codigoPostal: '64000', usoCfdi: 'G03' }
