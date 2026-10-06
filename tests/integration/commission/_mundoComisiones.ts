@@ -174,6 +174,10 @@ export async function devolver(
 ): Promise<string> {
   const original = await prisma.payment.findUniqueOrThrow({ where: { id: originalPaymentId } })
   return prisma.$transaction(async tx => {
+    // Como los dos canales (`refund.tpv.service`, `refund.dashboard.service`): el cobro original se bloquea ANTES de insertar
+    // la devolución. Sin esto, dos devoluciones simultáneas del mismo cobro toman a la vez el `KEY SHARE` de la orden (la
+    // llave foránea del insert) y luego chocan pidiendo su `FOR UPDATE`: bloqueo mutuo (A3).
+    await tx.$queryRaw(Prisma.sql`SELECT id FROM "Payment" WHERE id = ${originalPaymentId} AND "venueId" = ${m.venueId} FOR UPDATE`)
     const refund = await tx.payment.create({
       data: {
         venueId: m.venueId,

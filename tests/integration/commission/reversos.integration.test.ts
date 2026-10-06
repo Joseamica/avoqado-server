@@ -14,9 +14,11 @@ import * as calculo from '@/services/dashboard/commission/commission-calculation
 import { createCommissionForPayment, voidCommissionCalculation } from '@/services/dashboard/commission/commission-calculation.service'
 import {
   asegurarBaseDePrueba,
+  barreraDeFila,
   borrarMundoComisiones,
   cobro,
   crearMundoComisiones,
+  despues,
   devolver,
   MundoComisiones,
   netoVivo,
@@ -134,4 +136,121 @@ describe('A2 · el reverso de una devolución es durable (spec §9-2, §9-3; Cod
       expect(await netoVivo({ venueId: m.venueId, orderId })).toBe('6.00')
     })
   })
+})
+
+describe('A3 · los reversos parciales cuadran al centavo (spec §9-4; Codex r1-4 y plan r1-1, r1-2, r1-3; caso 14)', () => {
+  const reversosDe = (orderId: string, pago: string) =>
+    prisma.commissionCalculation.findMany({
+      where: { venueId: m.venueId, orderId, NOT: { paymentId: pago } },
+      orderBy: { calculatedAt: 'asc' },
+      take: 10,
+    })
+
+  it('🔴 tres devoluciones en cola de una comisión de $0.02, procesadas al final: se revierte exactamente $0.02', async () => {
+    const { orderId, pago, comision } = await ventaConComision(m, 0.21)
+    expect(comision.netCommission.toFixed(2)).toBe('0.02')
+    for (let i = 0; i < 3; i++) await devolver(m, pago, 0.07)
+    await procesarEfectos(m)
+    const filas = await reversosDe(orderId, pago)
+    expect(filas.map(r => r.netCommission.toFixed(2))).toEqual(['-0.01', '0.00', '-0.01'])
+    expect(filas.map(r => r.baseAmount.toFixed(2))).toEqual(['-0.07', '-0.07', '-0.07'])
+    expect(await netoVivo({ venueId: m.venueId, orderId })).toBe('0.00')
+  })
+
+  it('🔴 tres devoluciones procesadas una por una: también exactamente $0.02', async () => {
+    const { orderId, pago } = await ventaConComision(m, 0.21)
+    for (let i = 0; i < 3; i++) {
+      await devolver(m, pago, 0.07)
+      await procesarEfectos(m)
+    }
+    expect(await netoVivo({ venueId: m.venueId, orderId })).toBe('0.00')
+  })
+
+  it.each([
+    ['la de fecha MÁS NUEVA se confirma primero', true],
+    ['la de fecha más vieja se confirma primero', false],
+  ])(
+    '🔴 dos devoluciones del 50 %% de una comisión de $0.03 a la vez (%s): se revierte exactamente $0.03 (plan r1-1)',
+    async (_n, laNuevaPrimero) => {
+      const { orderId, pago, comision } = await ventaConComision(m, 0.3)
+      expect(comision.netCommission.toFixed(2)).toBe('0.03')
+      const vieja = despues()
+      const nueva = despues()
+      // Las dos esperan el candado de la orden; se confirma primero la que llegó primero, sin importar su fecha.
+      const barrera = await barreraDeFila('Order', orderId)
+      let primera!: Promise<string>
+      let segunda!: Promise<string>
+      try {
+        primera = devolver(m, pago, 0.15, 0, laNuevaPrimero ? nueva : vieja)
+        await barrera.esperarA(1)
+        segunda = devolver(m, pago, 0.15, 0, laNuevaPrimero ? vieja : nueva)
+        await barrera.esperarA(2)
+      } finally {
+        await barrera.soltar()
+      }
+      const [r1, r2] = await Promise.all([primera, segunda])
+      await procesarEfectos(m)
+      const neto = async (paymentId: string) =>
+        (await prisma.commissionCalculation.findFirstOrThrow({ where: { venueId: m.venueId, paymentId } })).netCommission.toFixed(2)
+      expect([await neto(r1), await neto(r2)]).toEqual(['-0.02', '-0.01'])
+      expect(await netoVivo({ venueId: m.venueId, orderId })).toBe('0.00')
+    },
+  )
+
+  it('con más de 500 reversos todavía en cola (worker detenido), el siguiente descuenta lo justo: nada se trunca (plan r1-2)', async () => {
+    const { orderId, pago, comision } = await ventaConComision(m, 50.2)
+    expect(comision.netCommission.toFixed(2)).toBe('5.02')
+    // 501 devoluciones de $0.10 cuyo reverso de $0.01 sigue en cola, como lo deja `createRefundCommission`.
+    const devoluciones = await prisma.payment.createManyAndReturn({
+      data: Array.from({ length: 501 }, () => ({
+        venueId: m.venueId,
+        orderId,
+        amount: -0.1,
+        tipAmount: 0,
+        method: 'CASH' as const,
+        status: 'COMPLETED' as const,
+        type: 'REFUND' as const,
+        processedById: m.owner,
+        feePercentage: 0,
+        feeAmount: 0,
+        netAmount: -0.1,
+        processorData: { originalPaymentId: pago },
+      })),
+      select: { id: true },
+    })
+    await prisma.paymentEffect.createMany({
+      data: devoluciones.map(d => ({
+        venueId: m.venueId,
+        paymentId: d.id,
+        orderId,
+        kind: 'COMMISSION',
+        dedupeKey: `commission:${d.id}:${m.configId}:${comision.staffId}:v1`,
+        payload: {
+          venueId: m.venueId,
+          staffId: comision.staffId,
+          paymentId: d.id,
+          orderId,
+          shiftId: null,
+          configId: m.configId,
+          baseAmount: '-0.10',
+          tipAmount: '0',
+          discountAmount: '0',
+          taxAmount: '0',
+          effectiveRate: '0.1',
+          grossCommission: '-0.01',
+          netCommission: '-0.01',
+          calcType: 'PERCENTAGE',
+          tier: null,
+          tierName: null,
+          status: 'CALCULATED',
+          calculatedAt: new Date().toISOString(),
+        },
+      })),
+    })
+    const ultima = await devolver(m, pago, 0.1)
+    const plan = await prisma.paymentEffect.findFirstOrThrow({ where: { venueId: m.venueId, paymentId: ultima, kind: 'COMMISSION' } })
+    const payload = plan.payload as { netCommission: string; baseAmount: string }
+    // 5.02 en total − 501 × 0.01 en cola = 0.01; con un tope de 500 filas leería 5.00 y descontaría 0.02 ($5.03 de $5.02).
+    expect([Number(payload.netCommission), Number(payload.baseAmount)]).toEqual([-0.01, -0.1])
+  }, 120_000)
 })

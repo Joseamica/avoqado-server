@@ -52,29 +52,71 @@ const fila = (staffId: string, base: number, tip: number, net: number) => ({
   status: 'CALCULATED',
 })
 
+const CAMPOS = ['baseAmount', 'tipAmount', 'discountAmount', 'taxAmount', 'grossCommission', 'netCommission']
+/** Lo devuelto en la prueba hasta ahora: la base suma TODAS las devoluciones confirmadas visibles (las anteriores + ésta). */
+let devuelto = { venta: 0, propina: 0 }
+/** Las filas de reverso que la prueba ya escribió: lo que la base devuelve como «ya revertido por las demás». */
+let revertidas: any[] = []
+
 /** Corre el reverso real y devuelve las filas que escribiría. */
 async function revertir(
   original: ReturnType<typeof cobro>,
   refund: ReturnType<typeof reembolso>,
   filas: ReturnType<typeof fila>[],
 ): Promise<any[]> {
+  devuelto = {
+    venta: devuelto.venta + Math.abs(Number(refund.amount)),
+    propina: devuelto.propina + Math.abs(Number(refund.tipAmount)),
+  }
   prismaMock.payment.findUnique.mockResolvedValue(refund as any)
   prismaMock.payment.findFirst.mockResolvedValue(original as any)
-  prismaMock.$queryRaw.mockResolvedValue([])
   prismaMock.commissionCalculation.findMany.mockResolvedValue(filas as any)
   prismaMock.paymentEffect.findMany.mockResolvedValue([])
   prismaMock.commissionCalculation.findFirst.mockResolvedValue(null)
+  prismaMock.payment.aggregate.mockResolvedValue({
+    _sum: { amount: new Decimal(-devuelto.venta), tipAmount: new Decimal(-devuelto.propina) },
+  } as any)
+  // `$queryRaw`: el candado de la orden (no devuelve nada) y la suma de «lo ya revertido» (positiva, por persona).
+  prismaMock.$queryRaw.mockImplementation(async (q: any) => {
+    if (!String(q?.strings?.join(' ') ?? '').includes('revertido')) return []
+    const suyas = revertidas.filter(r => (q.values as unknown[]).includes(r.staffId))
+    return [Object.fromEntries(CAMPOS.map(k => [k, new Decimal(-suyas.reduce((t: number, r: any) => t + Number(r[k]), 0))]))]
+  })
   prismaMock.commissionCalculation.create.mockImplementation(async (a: any) => ({ id: `rev-${a.data.staffId}`, ...a.data }))
   const antes = prismaMock.commissionCalculation.create.mock.calls.length
   await createRefundCommission(refund.id, original.id, { db: prismaMock as any })
-  return prismaMock.commissionCalculation.create.mock.calls.slice(antes).map((c: any) => c[0].data)
+  const nuevas = prismaMock.commissionCalculation.create.mock.calls.slice(antes).map((c: any) => c[0].data)
+  revertidas.push(...nuevas)
+  return nuevas
 }
 
 /** Al centavo; `|| 0` iguala -0 a 0 (Postgres guarda -0 como 0). */
 const n = (v: unknown) => Math.round(Number(v) * 100) / 100 || 0
 
 describe('reverso de comisión por reembolso — nunca más de lo pagado', () => {
-  beforeEach(() => jest.clearAllMocks())
+  beforeEach(() => {
+    jest.clearAllMocks()
+    devuelto = { venta: 0, propina: 0 }
+    revertidas = []
+  })
+
+  it('🔴 tres devoluciones de un tercio de una comisión de $0.02 revierten EXACTAMENTE $0.02, no $0.03 (Codex r1-4)', async () => {
+    const filas = [fila('staff-1', 0.21, 0, 0.02)]
+    const tercios = [
+      await revertir(cobro(0.21, 0), reembolso('ref-1', 0.07, 0), filas),
+      await revertir(cobro(0.21, 0), reembolso('ref-2', 0.07, 0), filas),
+      await revertir(cobro(0.21, 0), reembolso('ref-3', 0.07, 0), filas),
+    ].flat()
+    expect(tercios.map(r => n(r.netCommission))).toEqual([-0.01, 0, -0.01])
+    expect(n(tercios.reduce((s, r) => s + Number(r.baseAmount), 0))).toBe(-0.21)
+  })
+
+  it('🔴 la mitad de $2.01 es $1.01 (½ hacia arriba en decimal), no $1.00 de la aritmética binaria (Codex plan r1-3)', async () => {
+    const filas = [fila('staff-1', 20.1, 0, 2.01)]
+    const [primera] = await revertir(cobro(20.1, 0), reembolso('ref-1', 10.05, 0), filas)
+    const [segunda] = await revertir(cobro(20.1, 0), reembolso('ref-2', 10.05, 0), filas)
+    expect([n(primera.netCommission), n(segunda.netCommission)]).toEqual([-1.01, -1])
+  })
 
   it('P1: base SIN propina, reembolso total CON propina ⇒ revierte el 100%, no el 110%', async () => {
     const [rev] = await revertir(cobro(145, 14.5), reembolso('ref-1', 145, 14.5), [fila('staff-1', 145, 0, 14.5)])
@@ -140,6 +182,7 @@ describe('reverso de comisión por reembolso — nunca más de lo pagado', () =>
     prismaMock.$queryRaw.mockResolvedValue([])
     prismaMock.commissionCalculation.findMany.mockResolvedValue([fila('staff-1', 145, 0, 14.5)] as any)
     prismaMock.paymentEffect.findMany.mockResolvedValue([])
+    prismaMock.payment.aggregate.mockResolvedValue({ _sum: { amount: new Decimal(-145), tipAmount: new Decimal(0) } } as any)
 
     await createRefundCommission('ref-1', 'pay-orig', { db: prismaMock as any })
 

@@ -353,15 +353,79 @@ export async function createCommissionForPayment(
   return results
 }
 
+const CERO = new Prisma.Decimal(0)
+/** Un monto como venga —`Decimal` de la base, texto o número del efecto en cola, o nada— en `Prisma.Decimal`. */
+const dec = (v: unknown) => new Prisma.Decimal(v == null ? 0 : String(v))
+
+const CAMPOS_DEL_REVERSO = ['baseAmount', 'tipAmount', 'discountAmount', 'taxAmount', 'grossCommission', 'netCommission'] as const
+type CampoDelReverso = (typeof CAMPOS_DEL_REVERSO)[number]
+type CamposDelReverso = Record<CampoDelReverso, Prisma.Decimal>
+
+/** Las devoluciones COMPLETADAS de un cobro: la llave `processorData.originalPaymentId` que escriben los dos canales. */
+const devolucionesDe = (venueId: string, originalPaymentId: string): Prisma.PaymentWhereInput => ({
+  venueId,
+  type: PaymentType.REFUND,
+  status: 'COMPLETED',
+  processorData: { path: ['originalPaymentId'], equals: originalPaymentId },
+})
+
+/**
+ * Lo YA revertido de una fila original (persona + esquema) por las DEMÁS devoluciones del cobro, en positivo: lo
+ * materializado (en cualquier estado: anular un reverso es decidir que esa parte no se revierte) más lo que sigue en cola.
+ * Un efecto cuya fila ya existe —el enganche directo viejo de la terminal la creaba aparte— se cuenta una sola vez, por la
+ * fila. Todo en SQL: sin tope de filas que trunque la suma (Codex plan r1-2).
+ */
+async function revertidoPorLasOtras(
+  db: Prisma.TransactionClient,
+  w: { venueId: string; originalPaymentId: string; refundPaymentId: string; configId: string; staffId: string },
+): Promise<CamposDelReverso> {
+  const [fila] = await db.$queryRaw<Array<Record<CampoDelReverso, Prisma.Decimal | null>>>(Prisma.sql`
+    WITH devoluciones AS (
+      SELECT p.id FROM "Payment" p
+      WHERE p."venueId" = ${w.venueId}
+        AND p.type = 'REFUND'
+        AND p.status = 'COMPLETED'
+        AND p."processorData"->>'originalPaymentId' = ${w.originalPaymentId}
+        AND p.id <> ${w.refundPaymentId}
+    ),
+    revertido AS (
+      SELECT cc."baseAmount" AS b, cc."tipAmount" AS t, cc."discountAmount" AS d, cc."taxAmount" AS x,
+             cc."grossCommission" AS g, cc."netCommission" AS n
+      FROM "CommissionCalculation" cc
+      WHERE cc."venueId" = ${w.venueId} AND cc."configId" = ${w.configId} AND cc."staffId" = ${w.staffId}
+        AND cc."paymentId" IN (SELECT id FROM devoluciones)
+      UNION ALL
+      SELECT COALESCE((e.payload->>'baseAmount')::numeric, 0), COALESCE((e.payload->>'tipAmount')::numeric, 0),
+             COALESCE((e.payload->>'discountAmount')::numeric, 0), COALESCE((e.payload->>'taxAmount')::numeric, 0),
+             COALESCE((e.payload->>'grossCommission')::numeric, 0), COALESCE((e.payload->>'netCommission')::numeric, 0)
+      FROM "PaymentEffect" e
+      WHERE e."venueId" = ${w.venueId}
+        AND e.kind = 'COMMISSION'
+        AND e.status IN ('PENDING', 'PROCESSING', 'DEAD_LETTER')
+        AND e."paymentId" IN (SELECT id FROM devoluciones)
+        AND e.payload->>'configId' = ${w.configId}
+        AND e.payload->>'staffId' = ${w.staffId}
+        AND NOT EXISTS (
+          SELECT 1 FROM "CommissionCalculation" c
+          WHERE c."paymentId" = e."paymentId" AND c."configId" = ${w.configId} AND c."staffId" = ${w.staffId}
+        )
+    )
+    SELECT -COALESCE(SUM(b), 0) AS "baseAmount", -COALESCE(SUM(t), 0) AS "tipAmount", -COALESCE(SUM(d), 0) AS "discountAmount",
+           -COALESCE(SUM(x), 0) AS "taxAmount", -COALESCE(SUM(g), 0) AS "grossCommission", -COALESCE(SUM(n), 0) AS "netCommission"
+    FROM revertido`)
+  return Object.fromEntries(CAMPOS_DEL_REVERSO.map(c => [c, dec(fila?.[c])])) as CamposDelReverso
+}
+
 /**
  * Create negative commission records for a refund.
  *
- * Mirrors ALL original payment's commissions proportionally (one per config).
- * This ensures SUM(netCommission) reflects actual earnings after refunds.
+ * Mirrors ALL original payment's commissions proportionally (one per config and staff).
  *
- * @param refundPaymentId - The refund Payment ID
- * @param originalPaymentId - The original Payment that was refunded
- * @returns Array of commission calculation results (one per original calc)
+ * 🔴 MONEY (fase 3, A3; Codex r1-4 y plan r1-1/2/3): corre bajo el candado de la orden, el mismo que toma TODO el que crea un
+ * reverso (la terminal, el dashboard y el worker), así que las devoluciones confirmadas que se ven aquí son exactamente las
+ * que ya calcularon su reverso más ésta —sin importar su `createdAt`, que no es el orden en que se confirman—. El reverso de
+ * cada fila es «lo que debe quedar revertido con TODAS ellas, redondeado al centavo, menos lo que ya revirtieron las demás»,
+ * en decimal. Así N devoluciones parciales suman exactamente la comisión, en cualquier orden.
  */
 export async function createRefundCommission(
   refundPaymentId: string,
@@ -397,37 +461,72 @@ export async function createRefundCommission(
       originalCalcs.push(data)
   }
 
+  // Lo devuelto por TODAS las devoluciones confirmadas visibles del cobro (incluida ésta).
+  const devuelto = await db.payment.aggregate({
+    where: devolucionesDe(refundPayment.venueId, originalPaymentId),
+    _sum: { amount: true, tipAmount: true },
+  })
   // 🔴 MONEY: la parte devuelta se mide contra el COBRO original, venta y propina por separado — no
   // contra la base de cada fila. Dividir (venta + propina) entre la base revertía el 110% de una base
   // sin propina, y el 100% de CADA fila de una comisión dividida por una devolución de la mitad.
-  // El servidor ya topa lo reembolsado a lo cobrado, así que la suma de reversos no pasa del 100%.
-  const fraccion = (devuelto: Prisma.Decimal | null, cobrado: Prisma.Decimal | null) => {
-    const total = Math.abs(decimalToNumber(cobrado))
-    return total > 0 ? Math.min(1, Math.abs(decimalToNumber(devuelto)) / total) : 0
+  // El servidor ya topa lo reembolsado a lo cobrado, así que la fracción no pasa de 1.
+  const fraccion = (devueltoX: unknown, cobrado: unknown) => {
+    const total = dec(cobrado).abs()
+    return total.gt(0) ? Prisma.Decimal.min(1, dec(devueltoX).abs().div(total)) : CERO
   }
-  const saleRatio = fraccion(refundPayment.amount, originalPayment.amount)
-  const tipRatio = fraccion(refundPayment.tipAmount, originalPayment.tipAmount)
+  const saleRatio = fraccion(devuelto._sum.amount, originalPayment.amount)
+  const tipRatio = fraccion(devuelto._sum.tipAmount, originalPayment.tipAmount)
   const results: CommissionCalculationResult[] = []
 
   for (const originalCalc of originalCalcs) {
+    // Idempotente: esta devolución ya tiene su reverso para esta persona y esquema — una fila (en cualquier estado) o un
+    // efecto en cola. Recalcularlo con las devoluciones de después lo contaría dos veces.
     const existing = await db.commissionCalculation.findFirst({
-      where: {
-        paymentId: refundPaymentId,
-        configId: originalCalc.configId,
-        staffId: originalCalc.staffId,
-        status: { not: CommissionCalcStatus.VOIDED },
-      },
+      where: { paymentId: refundPaymentId, configId: originalCalc.configId, staffId: originalCalc.staffId },
       select: { id: true },
     })
     if (existing) continue
+    const enCola = await db.paymentEffect.findFirst({
+      where: {
+        venueId: refundPayment.venueId,
+        paymentId: refundPaymentId,
+        kind: 'COMMISSION',
+        AND: [
+          { payload: { path: ['configId'], equals: originalCalc.configId } },
+          { payload: { path: ['staffId'], equals: originalCalc.staffId } },
+        ],
+      },
+      select: { id: true },
+    })
+    if (enCola) continue
 
-    const originalBaseAmount = decimalToNumber(originalCalc.baseAmount)
+    const base = dec(originalCalc.baseAmount)
     // `tipAmount` de la fila = la propina que ENTRÓ a su base (0 si la config la excluye), así que la
     // propina devuelta sólo pesa en la comisión que la incluyó.
-    const tipInBase = Math.min(Math.max(decimalToNumber(originalCalc.tipAmount), 0), Math.max(originalBaseAmount, 0))
-    const refundRatio =
-      originalBaseAmount > 0 ? ((originalBaseAmount - tipInBase) * saleRatio + tipInBase * tipRatio) / originalBaseAmount : saleRatio
-    if (refundRatio <= 0) continue
+    const tipInBase = Prisma.Decimal.min(Prisma.Decimal.max(dec(originalCalc.tipAmount), CERO), Prisma.Decimal.max(base, CERO))
+    const refundRatio = base.gt(0) ? base.minus(tipInBase).mul(saleRatio).plus(tipInBase.mul(tipRatio)).div(base) : saleRatio
+    if (refundRatio.lte(0)) continue
+
+    const ya = await revertidoPorLasOtras(db, {
+      venueId: refundPayment.venueId,
+      originalPaymentId,
+      refundPaymentId,
+      configId: originalCalc.configId,
+      staffId: originalCalc.staffId,
+    })
+    // Lo que debe quedar revertido con TODAS las devoluciones, al centavo (½ hacia arriba, como redondea Postgres), menos lo
+    // que ya revirtieron las demás. Nunca negativo: un reverso de más que dejó el código anterior no se «regresa» aquí.
+    const tramo = (total: Prisma.Decimal, ratio: Prisma.Decimal, yaCampo: Prisma.Decimal) =>
+      Prisma.Decimal.max(CERO, total.mul(ratio).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP).minus(yaCampo))
+    const reverso: CamposDelReverso = {
+      baseAmount: tramo(base, refundRatio, ya.baseAmount),
+      tipAmount: tramo(tipInBase, tipRatio, ya.tipAmount),
+      discountAmount: tramo(dec(originalCalc.discountAmount), refundRatio, ya.discountAmount),
+      taxAmount: tramo(dec(originalCalc.taxAmount), refundRatio, ya.taxAmount),
+      grossCommission: tramo(dec(originalCalc.grossCommission), refundRatio, ya.grossCommission),
+      netCommission: tramo(dec(originalCalc.netCommission), refundRatio, ya.netCommission),
+    }
+    if (CAMPOS_DEL_REVERSO.every(campo => reverso[campo].isZero())) continue
 
     const data: Prisma.CommissionCalculationUncheckedCreateInput = {
       venueId: originalCalc.venueId,
@@ -438,13 +537,13 @@ export async function createRefundCommission(
       configId: originalCalc.configId,
       // La parte de SU base que se devolvió (no el reembolso completo): `alreadyCommissionedItemBase`
       // suma `baseAmount − tipAmount` de estas filas.
-      baseAmount: -originalBaseAmount * refundRatio,
-      tipAmount: -tipInBase * tipRatio,
-      discountAmount: -decimalToNumber(originalCalc.discountAmount) * refundRatio,
-      taxAmount: -decimalToNumber(originalCalc.taxAmount) * refundRatio,
+      baseAmount: reverso.baseAmount.negated(),
+      tipAmount: reverso.tipAmount.negated(),
+      discountAmount: reverso.discountAmount.negated(),
+      taxAmount: reverso.taxAmount.negated(),
       effectiveRate: originalCalc.effectiveRate,
-      grossCommission: -decimalToNumber(originalCalc.grossCommission) * refundRatio,
-      netCommission: -decimalToNumber(originalCalc.netCommission) * refundRatio,
+      grossCommission: reverso.grossCommission.negated(),
+      netCommission: reverso.netCommission.negated(),
       calcType: originalCalc.calcType,
       tier: originalCalc.tier,
       tierName: originalCalc.tierName,
