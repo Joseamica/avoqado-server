@@ -6,12 +6,17 @@
  * Correr: TZ=UTC TEST_DATABASE_URL="$PAGO_F3_DB" npx jest --selectProjects integration \
  *   --runTestsByPath tests/integration/commission/reversos.integration.test.ts --ci
  */
-import { CommissionCalculation, Prisma } from '@prisma/client'
+import { CommissionCalculation, Prisma, PrismaClient, TierPeriod } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { issueRefund } from '@/services/dashboard/refund.dashboard.service'
 import * as calculo from '@/services/dashboard/commission/commission-calculation.service'
-import { createCommissionForPayment, voidCommissionCalculation } from '@/services/dashboard/commission/commission-calculation.service'
+import {
+  anularComision,
+  createCommissionForPayment,
+  voidCommissionCalculation,
+} from '@/services/dashboard/commission/commission-calculation.service'
+import { aggregateVenueCommissions } from '@/services/dashboard/commission/commission-aggregation.service'
 import {
   asegurarBaseDePrueba,
   barreraDeFila,
@@ -25,6 +30,7 @@ import {
   orden,
   planear,
   procesarEfectos,
+  sumadaAUnResumen,
   ventaConComision,
 } from './_mundoComisiones'
 
@@ -436,5 +442,190 @@ describe('A3 Ronda 1 · el reverso espera a que exista la comisión original (hu
     } finally {
       aviso.mockRestore()
     }
+  })
+})
+
+describe('A4 · una sola operación de anulación (spec §6.4, §9-5; Codex r1-1, r2-1, r2-28 y plan r1-5)', () => {
+  /** Espera a ver una sesión detenida por el candado de la sesión `pid` (o a que `seguir()` diga que ya no hace falta). */
+  async function detenidaPor(observador: PrismaClient, pid: number, seguir: () => boolean = () => true): Promise<void> {
+    const limite = Date.now() + 15_000
+    while (seguir()) {
+      const [{ n }] = await observador.$queryRaw<Array<{ n: number }>>`
+        SELECT COUNT(*)::int AS n FROM pg_stat_activity a WHERE pg_blocking_pids(a.pid) @> ARRAY[${pid}::int]`
+      if (n > 0) return
+      if (Date.now() > limite) throw new Error(`Ninguna sesión quedó detenida por la sesión ${pid}`)
+      await new Promise(r => setTimeout(r, 10))
+    }
+  }
+
+  it('🔴 anular una comisión anula también su reverso ya materializado: el neto de la venta queda en $0 (caso 11)', async () => {
+    const { orderId, pago, comision } = await ventaConComision(m)
+    const devolucion = await devolver(m, pago, 40)
+    await procesarEfectos(m)
+    const reverso = await prisma.commissionCalculation.findFirstOrThrow({ where: { venueId: m.venueId, paymentId: devolucion } })
+    expect(reverso.netCommission.toFixed(2)).toBe('-4.00')
+
+    const r = await anularComision({
+      calculationId: comision.id,
+      venueId: m.venueId,
+      actorId: m.owner,
+      motivo: 'Venta capturada por error',
+    })
+
+    expect([...r.anuladas].sort()).toEqual([comision.id, reverso.id].sort())
+    expect(await netoVivo({ venueId: m.venueId, orderId })).toBe('0.00')
+    const rastro = await prisma.activityLog.findFirstOrThrow({
+      where: { venueId: m.venueId, action: 'COMMISSION_CALCULATION_VOIDED', entityId: comision.id },
+    })
+    expect(rastro.staffId).toBe(m.owner)
+    expect([...(rastro.data as { anuladas: string[] }).anuladas].sort()).toEqual([comision.id, reverso.id].sort())
+  })
+
+  it('devolver DESPUÉS de anular no crea reverso: el neto sigue en $0 (caso 11, el otro orden)', async () => {
+    const { orderId, pago, comision } = await ventaConComision(m)
+    await anularComision({ calculationId: comision.id, venueId: m.venueId, actorId: m.owner, motivo: 'Venta capturada por error' })
+    await devolver(m, pago, 40)
+    await procesarEfectos(m)
+    expect(await netoVivo({ venueId: m.venueId, orderId })).toBe('0.00')
+  })
+
+  it('🔴 devolución EN COLA + anulación antes del worker: el reverso no nace y el neto queda en $0 (caso 20)', async () => {
+    const { orderId, pago, comision } = await ventaConComision(m)
+    await devolver(m, pago, 40)
+    await anularComision({ calculationId: comision.id, venueId: m.venueId, actorId: m.owner, motivo: 'Venta capturada por error' })
+    await procesarEfectos(m)
+    expect(await netoVivo({ venueId: m.venueId, orderId })).toBe('0.00')
+  })
+
+  it('anular dos veces no repite nada', async () => {
+    const { comision } = await ventaConComision(m)
+    await anularComision({ calculationId: comision.id, venueId: m.venueId, actorId: m.owner, motivo: 'Una' })
+    expect(await anularComision({ calculationId: comision.id, venueId: m.venueId, actorId: m.owner, motivo: 'Otra' })).toEqual({
+      anuladas: [],
+    })
+    expect(await prisma.activityLog.count({ where: { venueId: m.venueId, action: 'COMMISSION_CALCULATION_VOIDED' } })).toBe(1)
+  })
+
+  it('una comisión de otra sede no se puede anular desde ésta', async () => {
+    const { comision } = await ventaConComision(m)
+    const otra = await crearMundoComisiones('otra-sede')
+    try {
+      await expect(
+        anularComision({ calculationId: comision.id, venueId: otra.venueId, actorId: otra.owner, motivo: 'X' }),
+      ).rejects.toMatchObject({
+        statusCode: 404,
+      })
+    } finally {
+      await borrarMundoComisiones(otra)
+    }
+  })
+
+  it('🔴 la anulación espera al worker que está creando el reverso: el candado de la orden no la deja colarse (contrato de A2)', async () => {
+    const { orderId, pago, comision } = await ventaConComision(m)
+    const devolucion = await devolver(m, pago, 40) // el reverso queda en cola
+    // El worker crea el reverso y se queda DENTRO de su transacción (con el candado de la orden) hasta que la prueba lo suelte.
+    const real = calculo.applyFrozenCommissionInTx
+    let avisarPid!: (pid: number) => void
+    const workerDentro = new Promise<number>(r => (avisarPid = r))
+    let soltarWorker!: () => void
+    const suelto = new Promise<void>(r => (soltarWorker = r))
+    const pausa = jest.spyOn(calculo, 'applyFrozenCommissionInTx').mockImplementation(async (tx, effect) => {
+      const hecho = await real(tx, effect)
+      const [{ pid }] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`
+      avisarPid(pid)
+      await suelto
+      return hecho
+    })
+    const observador = new PrismaClient({ datasources: { db: { url: process.env.DATABASE_URL } } })
+    let mirando = true
+    try {
+      const worker = procesarEfectos(m)
+      const pidWorker = await workerDentro
+      const anulacion = anularComision({
+        calculationId: comision.id,
+        venueId: m.venueId,
+        actorId: m.owner,
+        motivo: 'Venta capturada por error',
+      })
+      // Con el candado, la anulación queda detenida por el worker; sin él, termina sin esperarlo (y no ve el reverso).
+      await Promise.race([anulacion.catch(() => undefined), detenidaPor(observador, pidWorker, () => mirando)])
+      mirando = false
+      soltarWorker()
+      await Promise.all([worker, anulacion])
+    } finally {
+      mirando = false
+      soltarWorker()
+      pausa.mockRestore()
+      await observador.$disconnect()
+    }
+    const reverso = await prisma.commissionCalculation.findFirstOrThrow({ where: { venueId: m.venueId, paymentId: devolucion } })
+    expect(reverso.status).toBe('VOIDED')
+    expect(await netoVivo({ venueId: m.venueId, orderId })).toBe('0.00')
+  })
+
+  it('🔴 anulación y agregador a la vez: el bloqueo mutuo se resuelve solo y el resumen queda en $0 (plan r1-5)', async () => {
+    const { orderId, pago, comision } = await ventaConComision(m)
+    const resumen = await sumadaAUnResumen(m, comision.id, comision.staffId, 10)
+    const devolucion = await devolver(m, pago, 40)
+    await procesarEfectos(m)
+    // El reverso queda por agregar en el periodo EN CURSO: el agregador lo quiere marcar mientras la anulación lo anula.
+    const { id: reversoId } = await prisma.commissionCalculation.findFirstOrThrow({ where: { venueId: m.venueId, paymentId: devolucion } })
+    await prisma.commissionCalculation.update({ where: { id: reversoId }, data: { calculatedAt: new Date() } })
+
+    const barrera = await barreraDeFila('CommissionCalculation', reversoId)
+    let anulacion!: Promise<unknown>
+    let agregacion!: Promise<unknown>
+    try {
+      // La anulación toma la orden y se queda esperando el reverso…
+      anulacion = anularComision({ calculationId: comision.id, venueId: m.venueId, actorId: m.owner, motivo: 'Venta capturada por error' })
+      await barrera.esperarA(1)
+      // …y el agregador toma el resumen y espera el MISMO reverso. Al soltar, la anulación gana el reverso y pide el
+      // resumen, que tiene el agregador, que pide el reverso: bloqueo mutuo. Postgres aborta a la primera que cumple su
+      // `deadlock_timeout`, que puede ser cualquiera: por eso las DOS repiten su operación completa.
+      agregacion = aggregateVenueCommissions(m.venueId, TierPeriod.MONTHLY)
+      await barrera.esperarA(2)
+    } finally {
+      await barrera.soltar()
+    }
+    const desenlaces = await Promise.allSettled([anulacion, agregacion])
+    expect(desenlaces.map(d => d.status)).toEqual(['fulfilled', 'fulfilled'])
+    expect(await netoVivo({ venueId: m.venueId, orderId })).toBe('0.00')
+    expect((await prisma.commissionSummary.findUniqueOrThrow({ where: { id: resumen } })).netAmount.toFixed(2)).toBe('0.00')
+  })
+
+  describe('🔴 las dos repiten su operación COMPLETA cuando Postgres las elige víctima (deterministas: el choque real cae del lado que sea)', () => {
+    const bloqueoMutuo = () => Object.assign(new Error('deadlock detected'), { code: '40P01' })
+
+    it('la anulación', async () => {
+      const { comision } = await ventaConComision(m)
+      const tx = jest.spyOn(prisma, '$transaction').mockRejectedValueOnce(bloqueoMutuo())
+      try {
+        const r = await anularComision({
+          calculationId: comision.id,
+          venueId: m.venueId,
+          actorId: m.owner,
+          motivo: 'Venta capturada por error',
+        })
+        expect(r.anuladas).toEqual([comision.id])
+        expect(tx).toHaveBeenCalledTimes(2)
+      } finally {
+        tx.mockRestore()
+      }
+    })
+
+    it('el agregador: la segunda pasada vuelve a leer y suma una sola vez', async () => {
+      const { comision } = await ventaConComision(m)
+      await prisma.commissionCalculation.update({ where: { id: comision.id }, data: { calculatedAt: new Date() } })
+      const tx = jest.spyOn(prisma, '$transaction').mockRejectedValueOnce(bloqueoMutuo())
+      try {
+        const r = await aggregateVenueCommissions(m.venueId, TierPeriod.MONTHLY)
+        expect([r.summariesCreated, r.calculationsAggregated]).toEqual([1, 1])
+        expect(tx).toHaveBeenCalledTimes(2)
+      } finally {
+        tx.mockRestore()
+      }
+      const fila = await prisma.commissionCalculation.findUniqueOrThrow({ where: { id: comision.id }, include: { summary: true } })
+      expect([fila.status, fila.summary?.netAmount.toFixed(2)]).toEqual(['AGGREGATED', '10.00'])
+    })
   })
 })

@@ -18,6 +18,7 @@ import { startOfDay, endOfDay, startOfWeek, endOfWeek, startOfMonth, endOfMonth 
 import { toZonedTime, fromZonedTime } from 'date-fns-tz'
 import { DEFAULT_TIMEZONE } from '../../../utils/datetime'
 import { utcTs } from '../../../utils/sqlDates'
+import { isDeadlockError } from '../../../utils/serializableRetry'
 import {
   commissionableAmount,
   orderLevelDiscountOf,
@@ -949,4 +950,22 @@ export async function committedAndPendingCommissionProgress(
     ) obligations
   `)
   return { amount: decimalToNumber(total.amount), count: Number(total.count) }
+}
+
+/**
+ * Repite una operación COMPLETA —su transacción entera, que vuelve a leer todo— cuando Postgres la eligió víctima de un
+ * bloqueo mutuo (40P01). A lo más 3 intentos; cualquier otro error sale tal cual. La anulación (filas → resumen) y el
+ * agregador (resumen → filas) toman los mismos candados en orden contrario: la otra termina y el reintento lee lo que dejó
+ * (Codex plan r1-5). `withSerializableRetry` no sirve aquí: no reintenta 40P01 a propósito.
+ */
+export async function reintentarSiHayBloqueoMutuo<T>(contexto: string, operacion: () => Promise<T>): Promise<T> {
+  for (let intento = 1; ; intento++) {
+    try {
+      return await operacion()
+    } catch (error) {
+      if (!isDeadlockError(error) || intento >= 3) throw error
+      logger.warn('Bloqueo mutuo: se repite la operación completa', { contexto, intento })
+      await new Promise(resolve => setTimeout(resolve, 50 * intento))
+    }
+  }
 }

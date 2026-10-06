@@ -22,9 +22,11 @@
 
 import prisma from '../../../utils/prismaClient'
 import logger from '../../../config/logger'
-import { PaymentEffect, Prisma, CommissionCalcType, CommissionCalcStatus, PaymentType } from '@prisma/client'
+import { PaymentEffect, Prisma, CommissionCalcType, CommissionCalcStatus, CommissionSummaryStatus, PaymentType } from '@prisma/client'
 import { NotFoundError, BadRequestError } from '../../../errors/AppError'
 import { logAction } from '../activity-log.service'
+import { writeLegacyActivityAuditTx } from '@/services/activityAudit.service'
+import { recalculateSummary } from './commission-aggregation.service'
 import { applyAttendancePenalty, resolveAttendancePenaltyRate } from './commission-attendance'
 import {
   committedAndPendingCommissionProgress,
@@ -47,6 +49,7 @@ import {
   otrosCobros,
   baseDelCobro,
   ORDEN_PARA_REPARTO_SELECT,
+  reintentarSiHayBloqueoMutuo,
 } from './commission-utils'
 import { redondearRepartido, repartir } from './repartoPorCobro'
 import { subMonths, startOfMonth, endOfMonth } from 'date-fns'
@@ -585,54 +588,87 @@ export async function createRefundCommission(
 // ============================================
 
 /**
- * Void a commission calculation (mark as VOIDED with reason)
+ * 🔴 La ÚNICA forma de anular una comisión (fase 3, A4; spec §6.4; Codex r1-1, r2-1, r2-28). La usan
+ * `voidCommissionCalculation` (dashboard) y `createClawback`.
  *
- * Used when a calculation was created in error or needs to be excluded.
- * Does NOT delete the record - maintains audit trail.
+ * Bajo el candado de la orden —el mismo de `createRefundCommission` y del worker de efectos—:
+ *   1. anula la comisión;
+ *   2. anula sus reversos YA materializados (las filas de sus devoluciones, misma persona y esquema): así cada fila revierte
+ *      exactamente lo suyo y el neto de la venta queda en $0 en cualquier orden;
+ *   3. los reversos todavía EN COLA no se tocan: al procesarlos, el worker ve la original anulada y no crea la fila
+ *      (`applyFrozenCommissionInTx`).
+ * Si una anulada estaba sumada a un resumen, el resumen se recalcula para que la pantalla de Comisiones no la siga sumando
+ * (H2c). No mueve dinero: el sobre de pago al personal lee filas. Un resumen PAGADO por el flujo viejo no se reescribe.
+ * Si ya estaba todo anulado devuelve `anuladas: []` (idempotente).
+ *
+ * El agregador toma resumen → filas y esto filas → resumen: si chocan, Postgres aborta a una de las dos por bloqueo mutuo y
+ * las dos repiten su operación COMPLETA (`reintentarSiHayBloqueoMutuo`, Codex plan r1-5). Quien pase `db` es dueño de su
+ * transacción y de sus reintentos.
  */
-export async function voidCommissionCalculation(calculationId: string, venueId: string, voidedById: string, reason: string): Promise<void> {
-  const calculation = await prisma.commissionCalculation.findFirst({
-    where: {
-      id: calculationId,
-      venueId,
-      status: { not: CommissionCalcStatus.VOIDED },
-    },
+export async function anularComision(
+  input: { calculationId: string; venueId: string; actorId: string | null; motivo: string },
+  db?: Prisma.TransactionClient,
+): Promise<{ anuladas: string[] }> {
+  if (!db) return reintentarSiHayBloqueoMutuo('anularComision', () => prisma.$transaction(tx => anularComision(input, tx)))
+  const calc = await db.commissionCalculation.findFirst({
+    where: { id: input.calculationId, venueId: input.venueId },
+    select: { id: true, orderId: true, paymentId: true, configId: true, staffId: true },
   })
+  if (!calc) throw new NotFoundError(`Commission calculation ${input.calculationId} not found`)
+  if (calc.orderId)
+    await db.$queryRaw(Prisma.sql`SELECT id FROM "Order" WHERE id = ${calc.orderId} AND "venueId" = ${input.venueId} FOR UPDATE`)
 
-  if (!calculation) {
-    throw new NotFoundError(`Commission calculation ${calculationId} not found`)
-  }
+  // La comisión y sus reversos vivos, releídos y bloqueados DESPUÉS del candado de la orden.
+  const vivas = await db.$queryRaw<Array<{ id: string; status: string; summaryId: string | null }>>(Prisma.sql`
+    SELECT cc.id, cc.status::text AS status, cc."summaryId"
+    FROM "CommissionCalculation" cc
+    WHERE cc."venueId" = ${input.venueId}
+      AND cc.status <> 'VOIDED'
+      AND (
+        cc.id = ${calc.id}
+        OR (
+          cc."configId" = ${calc.configId}
+          AND cc."staffId" = ${calc.staffId}
+          AND cc."paymentId" IN (
+            SELECT p.id FROM "Payment" p
+            WHERE p."venueId" = ${input.venueId}
+              AND p.type = 'REFUND'
+              AND p."processorData"->>'originalPaymentId' = ${calc.paymentId ?? ''}
+          )
+        )
+      )
+    ORDER BY cc.id
+    FOR UPDATE OF cc`)
+  const anuladas = vivas.map(f => f.id)
+  if (anuladas.length === 0) return { anuladas }
 
-  // Cannot void if already aggregated into a summary
-  if (calculation.status === CommissionCalcStatus.AGGREGATED) {
-    throw new BadRequestError('Cannot void calculation that has been aggregated. Create a correction instead.')
-  }
-
-  await prisma.commissionCalculation.update({
-    where: { id: calculationId },
-    data: {
-      status: CommissionCalcStatus.VOIDED,
-      voidedAt: new Date(),
-      voidedBy: voidedById,
-      voidReason: reason,
-    },
+  await db.commissionCalculation.updateMany({
+    where: { id: { in: anuladas }, venueId: input.venueId },
+    data: { status: CommissionCalcStatus.VOIDED, voidedAt: new Date(), voidedBy: input.actorId, voidReason: input.motivo },
   })
-
-  logger.info('Commission calculation voided', {
-    calculationId,
-    venueId,
-    voidedById,
-    reason,
-  })
-
-  logAction({
-    staffId: voidedById,
-    venueId,
+  await writeLegacyActivityAuditTx(db, {
+    staffId: input.actorId,
+    venueId: input.venueId,
     action: 'COMMISSION_CALCULATION_VOIDED',
     entity: 'CommissionCalculation',
-    entityId: calculationId,
-    data: { reason, staffId: calculation.staffId },
+    entityId: calc.id,
+    data: { motivo: input.motivo, staffId: calc.staffId, anuladas },
   })
+
+  // H2c: lo que ya estaba sumado a un resumen sale de él.
+  const resumenes = [...new Set(vivas.filter(f => f.status === CommissionCalcStatus.AGGREGATED && f.summaryId).map(f => f.summaryId!))]
+  for (const summaryId of resumenes) {
+    const resumen = await db.commissionSummary.findFirst({ where: { id: summaryId, venueId: input.venueId }, select: { status: true } })
+    if (resumen && resumen.status !== CommissionSummaryStatus.PAID) await recalculateSummary(summaryId, input.venueId, db)
+  }
+
+  logger.info('Commission calculation voided', { calculationId: calc.id, venueId: input.venueId, anuladas })
+  return { anuladas }
+}
+
+/** Anular desde la pantalla de Comisiones: la operación única (también una comisión ya sumada a un resumen). */
+export async function voidCommissionCalculation(calculationId: string, venueId: string, voidedById: string, reason: string): Promise<void> {
+  await anularComision({ calculationId, venueId, actorId: voidedById ?? null, motivo: reason })
 }
 
 /**
@@ -1513,8 +1549,8 @@ export async function applyFrozenCommissionInTx(tx: Prisma.TransactionClient, ef
   if (existing) return true
   const original = await originalDelReverso(tx, effect, data.configId, data.staffId)
   // Fase 3 (A2, Codex r2-1): un REVERSO todavía en cola no revive cuando su comisión original ya se anuló. El worker tiene
-  // el candado de la orden; la anulación de hoy (`voidCommissionCalculation`) todavía no lo toma —A4 hace que la anulación
-  // lo tome—, y hasta entonces una anulación que entre justo entre esta lectura y el `create` no se ve aquí.
+  // el candado de la orden y la anulación (`anularComision`, A4) también lo toma: una anulación no puede entrar entre esta
+  // lectura y el `create`.
   if (original === 'ANULADA') return true
   // 🔴 MONEY (Ronda 1 de A3): un reverso cuya original no tiene fila —su efecto sigue en cola o quedó en DEAD_LETTER— espera.
   // Materializarlo le descontaría a la persona, en su recibo, una comisión que nunca cobró.

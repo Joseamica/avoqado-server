@@ -15,8 +15,9 @@ import prisma from '../../../utils/prismaClient'
 import logger from '../../../config/logger'
 import { Prisma, CommissionCalcStatus, CommissionSummaryStatus, TierPeriod } from '@prisma/client'
 import { BadRequestError, NotFoundError } from '../../../errors/AppError'
-import { decimalToNumber, getPeriodDateRange, getVenueTimezone } from './commission-utils'
+import { decimalToNumber, getPeriodDateRange, getVenueTimezone, reintentarSiHayBloqueoMutuo } from './commission-utils'
 import { logAction } from '../activity-log.service'
+import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
 import { retry, shouldRetryDbConnectionError } from '../../../utils/retry'
 
 // ============================================
@@ -45,8 +46,16 @@ export interface SummaryFilters {
  * Aggregate all pending calculations for a venue
  *
  * Creates or updates CommissionSummary records for each staff member.
+ *
+ * Fase 3 (A4, Codex plan r1-5): si Postgres la elige víctima de un bloqueo mutuo con una anulación (que toma las filas y luego
+ * el resumen), se repite la pasada COMPLETA: vuelve a sumar lo que siga CALCULATED; lo que ya marcó una transacción anterior
+ * no se suma dos veces y lo recién anulado ya no entra.
  */
 export async function aggregateVenueCommissions(venueId: string, period: TierPeriod = TierPeriod.WEEKLY): Promise<AggregationResult> {
+  return reintentarSiHayBloqueoMutuo('aggregateVenueCommissions', () => agregarUnaPasada(venueId, period))
+}
+
+async function agregarUnaPasada(venueId: string, period: TierPeriod): Promise<AggregationResult> {
   logger.info('Starting commission aggregation', { venueId, period })
 
   const timezone = await getVenueTimezone(venueId)
@@ -538,10 +547,11 @@ export async function disputeSummary(summaryId: string, venueId: string, dispute
 }
 
 /**
- * Recalculate a summary (for disputes/corrections)
+ * Recalculate a summary (for disputes/corrections). Con `db`, dentro de la transacción de quien llama (la anulación de una
+ * comisión ya sumada, fase 3 A4).
  */
-export async function recalculateSummary(summaryId: string, venueId: string): Promise<any> {
-  const summary = await prisma.commissionSummary.findFirst({
+export async function recalculateSummary(summaryId: string, venueId: string, db: Prisma.TransactionClient = prisma): Promise<any> {
+  const summary = await db.commissionSummary.findFirst({
     where: { id: summaryId, venueId },
     include: {
       calculations: {
@@ -568,7 +578,7 @@ export async function recalculateSummary(summaryId: string, venueId: string): Pr
   }
 
   // Get milestone bonuses
-  const bonuses = await prisma.milestoneAchievement.aggregate({
+  const bonuses = await db.milestoneAchievement.aggregate({
     where: { includedInSummaryId: summaryId },
     _sum: { bonusAmount: true },
   })
@@ -577,7 +587,7 @@ export async function recalculateSummary(summaryId: string, venueId: string): Pr
   const grossAmount = totalCommissions + totalBonuses
   const netAmount = grossAmount - decimalToNumber(summary.deductionAmount)
 
-  const updated = await prisma.commissionSummary.update({
+  const updated = await db.commissionSummary.update({
     where: { id: summaryId },
     data: {
       totalSales,
@@ -600,7 +610,7 @@ export async function recalculateSummary(summaryId: string, venueId: string): Pr
     netAmount,
   })
 
-  logAction({
+  await writeLegacyActivityAuditTx(db, {
     venueId,
     action: 'COMMISSION_SUMMARY_RECALCULATED',
     entity: 'CommissionSummary',

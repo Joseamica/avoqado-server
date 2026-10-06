@@ -190,7 +190,8 @@ const INVENTARIO: Record<string, number> = {
   // (`aggregate` + `DRAWER_CASH_WHERE`); ya no hidrata el efectivo desde el último corte.
   'src/services/dashboard/commission/commission-attendance.ts': 1,
   'src/services/dashboard/commission/commission-calculation.service.ts': 5,
-  'src/services/dashboard/commission/commission-clawback.service.ts': 3,
+  // 2026-10-05 (pago por servicio, fase 3 A4): 3 → 2. Se borró `applyClawbacksToSummary`, sin llamadores.
+  'src/services/dashboard/commission/commission-clawback.service.ts': 2,
   'src/services/dashboard/commission/commission-config.service.ts': 1,
   'src/services/dashboard/commission/commission-milestone.service.ts': 1,
   'src/services/dashboard/commission/commission-override.service.ts': 2,

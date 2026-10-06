@@ -25,6 +25,7 @@ import {
   calculateLeftoverAmount,
   findActiveCommissionConfigs,
   getPeriodDateRange,
+  reintentarSiHayBloqueoMutuo,
   CommissionConfigWithRelations,
   CommissionOverrideData,
 } from '../../../../src/services/dashboard/commission/commission-utils'
@@ -491,5 +492,24 @@ describe('findActiveCommissionConfigs', () => {
     prismaMock.venue.findUnique.mockResolvedValue({ organizationId: 'org' })
     const configs = await findActiveCommissionConfigs('venue-1')
     expect(configs.map(c => c.id)).toEqual(['org-1'])
+  })
+})
+
+describe('reintentarSiHayBloqueoMutuo (Codex plan r1-5)', () => {
+  const bloqueo = Object.assign(new Error('deadlock detected'), { code: '40P01' })
+
+  it('repite la operación completa tras un bloqueo mutuo', async () => {
+    const operacion = jest.fn().mockRejectedValueOnce(bloqueo).mockResolvedValueOnce('listo')
+    await expect(reintentarSiHayBloqueoMutuo('prueba', operacion)).resolves.toBe('listo')
+    expect(operacion).toHaveBeenCalledTimes(2)
+  })
+
+  it('a lo más tres intentos; cualquier otro error sale a la primera', async () => {
+    const siempre = jest.fn().mockRejectedValue(bloqueo)
+    await expect(reintentarSiHayBloqueoMutuo('prueba', siempre)).rejects.toBe(bloqueo)
+    expect(siempre).toHaveBeenCalledTimes(3)
+    const otro = jest.fn().mockRejectedValue(new Error('otro'))
+    await expect(reintentarSiHayBloqueoMutuo('prueba', otro)).rejects.toThrow('otro')
+    expect(otro).toHaveBeenCalledTimes(1)
   })
 })
