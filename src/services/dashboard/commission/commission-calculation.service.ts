@@ -353,9 +353,18 @@ export async function createCommissionForPayment(
   return results
 }
 
-const CERO = new Prisma.Decimal(0)
-/** Un monto como venga —`Decimal` de la base, texto o número del efecto en cola, o nada— en `Prisma.Decimal`. */
-const dec = (v: unknown) => new Prisma.Decimal(v == null ? 0 : String(v))
+/**
+ * `Decimal` con precisión de sobra (100 dígitos) para que los PRODUCTOS de montos sean exactos: el reverso multiplica hasta
+ * cuatro montos y divide UNA sola vez, al final, así que el ½↑ a centavos ve el valor exacto. Con la precisión de fábrica
+ * (20 dígitos) una fracción que no termina —2.50/12— se cortaba antes de multiplicar y un empate de medio centavo (0.375)
+ * se redondeaba hacia abajo (Ronda 1 de A3).
+ */
+const Exacto = Prisma.Decimal.clone({ precision: 100 })
+const CERO = new Exacto(0)
+/** Un monto como venga —`Decimal` de la base, texto o número del efecto en cola, o nada— en decimal exacto. */
+const dec = (v: unknown) => new Exacto(v == null ? 0 : String(v))
+/** Una fracción sin dividir: la división es la ÚLTIMA operación, en `tramo`. `den` siempre es positivo. */
+type Fraccion = { num: Prisma.Decimal; den: Prisma.Decimal }
 
 const CAMPOS_DEL_REVERSO = ['baseAmount', 'tipAmount', 'discountAmount', 'taxAmount', 'grossCommission', 'netCommission'] as const
 type CampoDelReverso = (typeof CAMPOS_DEL_REVERSO)[number]
@@ -395,9 +404,10 @@ async function revertidoPorLasOtras(
       WHERE cc."venueId" = ${w.venueId} AND cc."configId" = ${w.configId} AND cc."staffId" = ${w.staffId}
         AND cc."paymentId" IN (SELECT id FROM devoluciones)
       UNION ALL
-      SELECT COALESCE((e.payload->>'baseAmount')::numeric, 0), COALESCE((e.payload->>'tipAmount')::numeric, 0),
-             COALESCE((e.payload->>'discountAmount')::numeric, 0), COALESCE((e.payload->>'taxAmount')::numeric, 0),
-             COALESCE((e.payload->>'grossCommission')::numeric, 0), COALESCE((e.payload->>'netCommission')::numeric, 0)
+      -- Lo que guardaría el worker (Decimal(10,2)): un efecto viejo trae floats como -0.009999999999999998 o -0.015.
+      SELECT COALESCE(ROUND((e.payload->>'baseAmount')::numeric, 2), 0), COALESCE(ROUND((e.payload->>'tipAmount')::numeric, 2), 0),
+             COALESCE(ROUND((e.payload->>'discountAmount')::numeric, 2), 0), COALESCE(ROUND((e.payload->>'taxAmount')::numeric, 2), 0),
+             COALESCE(ROUND((e.payload->>'grossCommission')::numeric, 2), 0), COALESCE(ROUND((e.payload->>'netCommission')::numeric, 2), 0)
       FROM "PaymentEffect" e
       WHERE e."venueId" = ${w.venueId}
         AND e.kind = 'COMMISSION'
@@ -469,10 +479,10 @@ export async function createRefundCommission(
   // 🔴 MONEY: la parte devuelta se mide contra el COBRO original, venta y propina por separado — no
   // contra la base de cada fila. Dividir (venta + propina) entre la base revertía el 110% de una base
   // sin propina, y el 100% de CADA fila de una comisión dividida por una devolución de la mitad.
-  // El servidor ya topa lo reembolsado a lo cobrado, así que la fracción no pasa de 1.
-  const fraccion = (devueltoX: unknown, cobrado: unknown) => {
+  // El servidor ya topa lo reembolsado a lo cobrado, así que la fracción no pasa de 1. Sin dividir: ver `Fraccion`.
+  const fraccion = (devueltoX: unknown, cobrado: unknown): Fraccion => {
     const total = dec(cobrado).abs()
-    return total.gt(0) ? Prisma.Decimal.min(1, dec(devueltoX).abs().div(total)) : CERO
+    return total.gt(0) ? { num: Exacto.min(dec(devueltoX).abs(), total), den: total } : { num: CERO, den: dec(1) }
   }
   const saleRatio = fraccion(devuelto._sum.amount, originalPayment.amount)
   const tipRatio = fraccion(devuelto._sum.tipAmount, originalPayment.tipAmount)
@@ -503,9 +513,15 @@ export async function createRefundCommission(
     const base = dec(originalCalc.baseAmount)
     // `tipAmount` de la fila = la propina que ENTRÓ a su base (0 si la config la excluye), así que la
     // propina devuelta sólo pesa en la comisión que la incluyó.
-    const tipInBase = Prisma.Decimal.min(Prisma.Decimal.max(dec(originalCalc.tipAmount), CERO), Prisma.Decimal.max(base, CERO))
-    const refundRatio = base.gt(0) ? base.minus(tipInBase).mul(saleRatio).plus(tipInBase.mul(tipRatio)).div(base) : saleRatio
-    if (refundRatio.lte(0)) continue
+    const tipInBase = Exacto.min(Exacto.max(dec(originalCalc.tipAmount), CERO), Exacto.max(base, CERO))
+    // ((base − propina) × venta + propina × propina devuelta) / base, con las dos fracciones sobre un denominador común.
+    const refundRatio: Fraccion = base.gt(0)
+      ? {
+          num: base.minus(tipInBase).mul(saleRatio.num).mul(tipRatio.den).plus(tipInBase.mul(tipRatio.num).mul(saleRatio.den)),
+          den: base.mul(saleRatio.den).mul(tipRatio.den),
+        }
+      : saleRatio
+    if (refundRatio.num.lte(0)) continue
 
     const ya = await revertidoPorLasOtras(db, {
       venueId: refundPayment.venueId,
@@ -516,8 +532,8 @@ export async function createRefundCommission(
     })
     // Lo que debe quedar revertido con TODAS las devoluciones, al centavo (½ hacia arriba, como redondea Postgres), menos lo
     // que ya revirtieron las demás. Nunca negativo: un reverso de más que dejó el código anterior no se «regresa» aquí.
-    const tramo = (total: Prisma.Decimal, ratio: Prisma.Decimal, yaCampo: Prisma.Decimal) =>
-      Prisma.Decimal.max(CERO, total.mul(ratio).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP).minus(yaCampo))
+    const tramo = (total: Prisma.Decimal, f: Fraccion, yaCampo: Prisma.Decimal) =>
+      new Prisma.Decimal(Exacto.max(CERO, total.mul(f.num).div(f.den).toDecimalPlaces(2, Exacto.ROUND_HALF_UP).minus(yaCampo)).toFixed(2))
     const reverso: CamposDelReverso = {
       baseAmount: tramo(base, refundRatio, ya.baseAmount),
       tipAmount: tramo(tipInBase, tipRatio, ya.tipAmount),

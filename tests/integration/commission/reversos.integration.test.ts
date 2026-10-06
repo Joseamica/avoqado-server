@@ -253,4 +253,111 @@ describe('A3 · los reversos parciales cuadran al centavo (spec §9-4; Codex r1-
     // 5.02 en total − 501 × 0.01 en cola = 0.01; con un tope de 500 filas leería 5.00 y descontaría 0.02 ($5.03 de $5.02).
     expect([Number(payload.netCommission), Number(payload.baseAmount)]).toEqual([-0.01, -0.1])
   }, 120_000)
+
+  describe('Ronda 1 · las ramas nuevas del reverso acumulado', () => {
+    const filasDe = (paymentId: string) => prisma.commissionCalculation.findMany({ where: { venueId: m.venueId, paymentId }, take: 10 })
+    const reversoEnCola = async (paymentId: string) =>
+      (
+        await prisma.paymentEffect.findFirstOrThrow({
+          where: { venueId: m.venueId, paymentId, kind: 'COMMISSION', NOT: { dedupeKey: { endsWith: ':policy-error:v1' } } },
+        })
+      ).payload as { netCommission: string }
+
+    it('volver a correr una devolución cuyo reverso sigue EN COLA no crea nada (rama `enCola`)', async () => {
+      const { orderId, pago } = await ventaConComision(m)
+      const devolucion = await devolver(m, pago, 40)
+      expect(await calculo.createRefundCommission(devolucion, pago)).toEqual([])
+      expect(await filasDe(devolucion)).toHaveLength(0)
+      expect(await prisma.paymentEffect.count({ where: { venueId: m.venueId, paymentId: devolucion, kind: 'COMMISSION' } })).toBe(1)
+      await procesarEfectos(m)
+      expect(await netoVivo({ venueId: m.venueId, orderId })).toBe('6.00')
+    })
+
+    it('tras un `policy-error`, la siguiente devolución absorbe su parte y volver a correr la fallida da 0', async () => {
+      const { pago } = await ventaConComision(m)
+      const falla = jest.spyOn(calculo, 'createRefundCommission').mockRejectedValueOnce(new Error('cálculo forzado a fallar'))
+      let fallida: string
+      try {
+        fallida = await devolver(m, pago, 40)
+      } finally {
+        falla.mockRestore()
+      }
+      expect(await prisma.paymentEffect.count({ where: { venueId: m.venueId, paymentId: fallida, kind: 'COMMISSION' } })).toBe(1)
+      const siguiente = await devolver(m, pago, 60)
+      // Con TODA la venta devuelta, lo que debe quedar revertido son los $10 completos; nadie había revertido nada.
+      expect((await reversoEnCola(siguiente)).netCommission).toBe('-10')
+      expect(await calculo.createRefundCommission(fallida, pago)).toEqual([])
+      expect(await filasDe(fallida)).toHaveLength(0)
+    })
+
+    it('un reverso ANULADO cuenta como «ya revertido»: anularlo es decidir que esa parte no se revierte', async () => {
+      const { orderId, pago } = await ventaConComision(m)
+      const primera = await devolver(m, pago, 40)
+      await procesarEfectos(m)
+      const [reverso] = await filasDe(primera)
+      await voidCommissionCalculation(reverso.id, m.venueId, m.owner, 'La devolución se compensó a mano')
+      const segunda = await devolver(m, pago, 60)
+      await procesarEfectos(m)
+      expect((await filasDe(segunda)).map(r => r.netCommission.toFixed(2))).toEqual(['-6.00'])
+      expect(await netoVivo({ venueId: m.venueId, orderId })).toBe('4.00')
+    })
+
+    it('🔴 un reverso en cola con montos de punto flotante cuenta lo que guardaría el worker (ROUND a 2 decimales)', async () => {
+      const { orderId, pago, comision } = await ventaConComision(m, 0.3)
+      expect(comision.netCommission.toFixed(2)).toBe('0.03')
+      // Como lo dejaba el cálculo binario anterior: la mitad de $0.03 es -0.015, que el worker guarda como -0.02.
+      const vieja = await prisma.payment.create({
+        data: {
+          venueId: m.venueId,
+          orderId,
+          amount: -0.15,
+          tipAmount: 0,
+          method: 'CASH',
+          status: 'COMPLETED',
+          type: 'REFUND',
+          processedById: m.owner,
+          feePercentage: 0,
+          feeAmount: 0,
+          netAmount: -0.15,
+          processorData: { originalPaymentId: pago },
+          createdAt: despues(),
+        },
+      })
+      await prisma.paymentEffect.create({
+        data: {
+          venueId: m.venueId,
+          paymentId: vieja.id,
+          orderId,
+          kind: 'COMMISSION',
+          dedupeKey: `commission:${vieja.id}:${m.configId}:${comision.staffId}:v1`,
+          payload: {
+            venueId: m.venueId,
+            staffId: comision.staffId,
+            paymentId: vieja.id,
+            orderId,
+            shiftId: null,
+            configId: m.configId,
+            baseAmount: -0.15,
+            tipAmount: 0,
+            discountAmount: 0,
+            taxAmount: 0,
+            effectiveRate: '0.1',
+            grossCommission: -0.015,
+            netCommission: -0.015,
+            calcType: 'PERCENTAGE',
+            tier: null,
+            tierName: null,
+            status: 'CALCULATED',
+            calculatedAt: vieja.createdAt.toISOString(),
+          },
+        },
+      })
+      const nueva = await devolver(m, pago, 0.15)
+      await procesarEfectos(m)
+      expect((await filasDe(vieja.id)).map(r => r.netCommission.toFixed(2))).toEqual(['-0.02'])
+      // Sin ROUND contaría 0.015 y revertiría otros 0.015 (= -0.02 guardado): $0.04 de $0.03.
+      expect((await filasDe(nueva)).map(r => r.netCommission.toFixed(2))).toEqual(['-0.01'])
+      expect(await netoVivo({ venueId: m.venueId, orderId })).toBe('0.00')
+    })
+  })
 })

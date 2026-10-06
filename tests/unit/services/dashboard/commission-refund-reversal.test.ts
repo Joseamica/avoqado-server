@@ -118,6 +118,19 @@ describe('reverso de comisión por reembolso — nunca más de lo pagado', () =>
     expect([n(primera.netCommission), n(segunda.netCommission)]).toEqual([-1.01, -1])
   })
 
+  it('🔴 cobro de $12.00 con 15 % ($1.80) y devolución de $2.50: 0.375 exacto ⇒ $0.38 (divide al final; Ronda 1 de A3)', async () => {
+    // 2.50 / 12 no termina: dividir primero deja 0.37499999999999999994 y el ½↑ da 0.37.
+    const [rev] = await revertir(cobro(12, 0), reembolso('ref-1', 2.5, 0), [fila('staff-1', 12, 0, 1.8)])
+    expect([n(rev.netCommission), n(rev.grossCommission), n(rev.baseAmount)]).toEqual([-0.38, -0.38, -2.5])
+  })
+
+  it('🔴 con propina en la base, la fracción exacta también divide al final', async () => {
+    // Base 12 + 3 de propina = 15, comisión 2.25. Se devuelven $2.50 de venta y $1.00 de propina:
+    // (12 × 2.5/12 + 3 × 1/3) / 15 = 7/30 ⇒ 2.25 × 7/30 = 0.525 exacto ⇒ 0.53 (dividiendo antes: 0.52499…95 ⇒ 0.52).
+    const [rev] = await revertir(cobro(12, 3), reembolso('ref-1', 2.5, 1), [fila('staff-1', 15, 3, 2.25)])
+    expect([n(rev.netCommission), n(rev.baseAmount), n(rev.tipAmount)]).toEqual([-0.53, -3.5, -1])
+  })
+
   it('P1: base SIN propina, reembolso total CON propina ⇒ revierte el 100%, no el 110%', async () => {
     const [rev] = await revertir(cobro(145, 14.5), reembolso('ref-1', 145, 14.5), [fila('staff-1', 145, 0, 14.5)])
 

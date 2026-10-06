@@ -15,6 +15,7 @@ import {
   runClaimedPaymentEffect,
   type PaymentEffectKind,
 } from '@/services/tpv/paymentEffects.service'
+import { lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
 
 const D = (n: number) => new Prisma.Decimal(n)
 
@@ -174,9 +175,10 @@ export async function devolver(
 ): Promise<string> {
   const original = await prisma.payment.findUniqueOrThrow({ where: { id: originalPaymentId } })
   return prisma.$transaction(async tx => {
-    // Como los dos canales (`refund.tpv.service`, `refund.dashboard.service`): el cobro original se bloquea ANTES de insertar
-    // la devolución. Sin esto, dos devoluciones simultáneas del mismo cobro toman a la vez el `KEY SHARE` de la orden (la
-    // llave foránea del insert) y luego chocan pidiendo su `FOR UPDATE`: bloqueo mutuo (A3).
+    // Como los dos canales (`refund.tpv.service`, `bloquearCobroParaReembolso` del dashboard): PRIMERO la orden con
+    // `lockExistingOrderForPayment` y después el cobro original, ANTES de insertar la devolución. Sin esto, dos devoluciones
+    // simultáneas toman a la vez el `KEY SHARE` de la orden (la llave foránea del insert) y chocan pidiendo su `FOR UPDATE`.
+    if (original.orderId) await lockExistingOrderForPayment(tx, { venueId: m.venueId, orderId: original.orderId })
     await tx.$queryRaw(Prisma.sql`SELECT id FROM "Payment" WHERE id = ${originalPaymentId} AND "venueId" = ${m.venueId} FOR UPDATE`)
     const refund = await tx.payment.create({
       data: {
