@@ -4,7 +4,7 @@ import { ConflictError } from '../../../errors/AppError'
 import { alcanceLegibleDelPeriodo, periodoQueContieneFecha } from './periodosGuardados'
 import { ClaseValorada, contarPorEstado, FiltroValoracion, valoracionCte, valorarClases } from './valoracion'
 import { dbDateComoFecha, hoyLocal, periodoQueContiene, PeriodoCanonico, venuePeriodRange } from './periodos'
-import { sqlVentasDelPeriodo } from './fuentesVenta'
+import { nombreGuardadoSql, PERSONA_DADA_DE_BAJA, sqlVentasDelPeriodo } from './fuentesVenta'
 
 /** Los campos del ancla (A4) no salen en el desglose: la pantalla no los usa y `payAmountOverride` saldría sin formato. */
 type CamposDelAncla = 'fechaValoracion' | 'periodoOrigen' | 'cancelada' | 'payCountOverride' | 'payAmountOverride' | 'excluida'
@@ -89,8 +89,9 @@ async function fuentePorPersona(c: Contexto): Promise<Prisma.Sql | null> {
   )
   if (c.fila && c.venueIds.length) {
     partes.push(Prisma.sql`
-      SELECT e."staffId", NULLIF(TRIM(CONCAT(s."firstName", ' ', s."lastName")), '') AS "staffName", e."venueId",
-             0 AS clases, 0 AS lugares, e.amount AS monto, e.amount AS ajuste, 0::numeric AS comisiones, 0::numeric AS propinas
+      SELECT e."staffId", COALESCE(NULLIF(TRIM(CONCAT(s."firstName", ' ', s."lastName")), ''), e.descriptor->>'persona') AS "staffName",
+             e."venueId", 0 AS clases, 0 AS lugares, e.amount AS monto, e.amount AS ajuste, 0::numeric AS comisiones,
+             0::numeric AS propinas
       FROM "ServiceEarning" e
       LEFT JOIN "Staff" s ON s.id = e."staffId"
       WHERE e."periodId" = ${c.fila.id} AND e.concept IN ('RECONCILE', 'MANUAL') AND e."venueId" IN (${Prisma.join(c.venueIds)})`)
@@ -124,14 +125,18 @@ const sqlCuentaAbierto = (fuente: Prisma.Sql) => Prisma.sql`
 const sqlPaginaAbierto = (c: Contexto, fuente: Prisma.Sql, offset: number, limit: number) => Prisma.sql`
   SELECT g.*, nv.name AS "payLevelName"
   FROM (
-    SELECT u."staffId", MAX(u."staffName") AS "staffName",
-           -- Las sedes donde hubo dinero (clases o ajustes), la misma regla que el cerrado.
+    SELECT u."staffId",
+           -- Una persona borrada: un nombre real de sus ramas y si no, el que guardó (la regla del recibo); nunca gana
+           -- «Persona dada de baja» (lo que dice una venta en vivo sin fila de Staff) sobre su nombre.
+           COALESCE(MAX(NULLIF(u."staffName", ${PERSONA_DADA_DE_BAJA})), ${nombreGuardadoSql(c.organizationId, Prisma.sql`u."staffId"`)},
+                    MAX(u."staffName")) AS "staffName",
+           -- Las sedes donde hubo dinero (clases, ventas o ajustes), la misma regla que el cerrado.
            ARRAY_AGG(DISTINCT u."venueId") AS "venueIds",
            SUM(u.clases)::int AS clases, COALESCE(SUM(u.lugares), 0)::int AS "sumaLugares",
            SUM(u.ajuste) AS ajustes, SUM(u.comisiones) AS comisiones, SUM(u.propinas) AS propinas, SUM(u.monto) AS total
     FROM (${fuente}) u
     GROUP BY u."staffId"
-    ORDER BY MAX(u."staffName") ASC NULLS LAST, u."staffId" ASC
+    ORDER BY "staffName" ASC NULLS LAST, u."staffId" ASC
     OFFSET ${offset} LIMIT ${limit}
   ) g
   LEFT JOIN LATERAL (
@@ -157,9 +162,10 @@ const sqlTarjetasCerrado = (c: Contexto) => Prisma.sql`
 
 const sqlPaginaCerrado = (c: Contexto, offset: number, limit: number) => Prisma.sql`
     SELECT e."staffId",
-           -- Una persona borrada conserva el nombre que guardó su recibo (fase 3 §6.1).
+           -- Una persona borrada conserva el nombre que guardó (fase 3 §6.1), con la MISMA regla que su recibo (B5 r1).
            COALESCE(NULLIF(TRIM(CONCAT(s."firstName", ' ', s."lastName")), ''),
-                    MAX(COALESCE(e.descriptor->>'persona', e.descriptor->>'coach'))) AS "staffName",
+                    ${nombreGuardadoSql(c.organizationId, Prisma.sql`e."staffId"`)},
+                    CASE WHEN MAX(s.id) IS NULL THEN ${PERSONA_DADA_DE_BAJA} END) AS "staffName",
            MAX(e."payLevelName") FILTER (WHERE e.concept = 'SERVICE' AND e."sourceType" = 'CLASS_SESSION') AS "payLevelName",
            ARRAY_AGG(DISTINCT e."venueId") AS "venueIds",
            COUNT(*) FILTER (WHERE e.concept = 'SERVICE' AND e."sourceType" = 'CLASS_SESSION')::int AS clases,

@@ -12,6 +12,8 @@ import { reportePeriodo } from '@/services/dashboard/staffPay/reporte.service'
 import { cerrarPeriodo, previewCierre } from '@/services/dashboard/staffPay/cierre.service'
 import { agregarAjusteManual } from '@/services/dashboard/staffPay/ajustesManuales.service'
 import { anularComision } from '@/services/dashboard/commission/commission-calculation.service'
+import { hardDeleteTeamMember } from '@/services/dashboard/team.dashboard.service'
+import { fechaComoDbDate } from '@/services/dashboard/staffPay/periodos'
 import { borrarMundo, clase, confirmadas, crearMundo, Mundo, tablaMindform } from './_mundo'
 import { activar, cobro, comision, esquema, reembolso } from './_ventas'
 
@@ -275,6 +277,9 @@ describe('recibo de una persona dada de baja (spec fase 3 §6.1, Codex r1-17, r2
       data: { descriptor: { motivo: 'Bono de agosto', sede: 'PN', fecha: '2026-08-20', hora: '10:00' } },
     })
     expect(await recibo(id)).toMatchObject({ persona: 'Persona dada de baja', total: '300.00' })
+    // El reporte cerrado dice lo mismo que su recibo (B5 r1).
+    const reporte = await reportePeriodo({ userId: m.owner, venueId: m.venueId, fecha: '2026-08-15', offset: 0, limit: 50 })
+    expect(reporte.personas.items.find(i => i.staffId === id)).toMatchObject({ staffName: 'Persona dada de baja', total: '300.00' })
   })
 
   it('alguien que nunca trabajó aquí sigue sin recibo', async () => {
@@ -282,6 +287,144 @@ describe('recibo de una persona dada de baja (spec fase 3 §6.1, Codex r1-17, r2
       data: { email: `${m.key}-ajena@example.test`, firstName: 'Ajena', lastName: 'QA', active: true },
     })
     await expect(recibo(ajena.id)).rejects.toMatchObject({ statusCode: 404 })
+  })
+})
+
+describe('expulsada del equipo: su recibo abierto abre con lo que hoy le toca (B5 ronda 1)', () => {
+  /** Alguien del equipo con su sede (y, como la invitación real, su membresía de la organización si `membresia`). */
+  async function persona(nombre: string, o: { membresia: boolean; mundo?: Mundo }) {
+    const w = o.mundo ?? m
+    const s = await prisma.staff.create({
+      data: { email: `${w.key}-${nombre}@example.test`, firstName: nombre, lastName: 'QA', active: true },
+    })
+    const sv = await prisma.staffVenue.create({ data: { staffId: s.id, venueId: w.venueId, role: 'MANAGER', active: true } })
+    if (o.membresia) await prisma.staffOrganization.create({ data: { staffId: s.id, organizationId: w.orgId } })
+    return { staffId: s.id, staffVenueId: sv.id }
+  }
+  const expulsar = (x: { staffVenueId: string }) => hardDeleteTeamMember(m.venueId, x.staffVenueId, true, m.owner)
+
+  it('expulsada (borrado permanente de su sede) con una propina en vivo: su recibo abierto abre con esa propina', async () => {
+    const elena = await persona('Elena', { membresia: true })
+    await cobro(m, { iso: '2026-08-12T18:00:00Z', propina: 40, servedById: elena.staffId })
+    await expulsar(elena)
+    expect(await prisma.staffVenue.count({ where: { staffId: elena.staffId } })).toBe(0)
+    const r = await recibo(elena.staffId)
+    expect(r).toMatchObject({ persona: 'Elena QA', total: '40.00', periodo: { estado: 'OPEN' } })
+    expect(filas(r)).toEqual([['PROPINA', '2026-08-12', null, 'Propinas del 12 ago 2026 · 1 cobro', '40.00']])
+    // El reporte abierto ya la mostraba con ese total: ahora su recibo lo explica.
+    const rep = await reportePeriodo({ userId: m.owner, venueId: m.venueId, fecha: '2026-08-15', offset: 0, limit: 50 })
+    expect(rep.personas.items.find(i => i.staffId === elena.staffId)).toMatchObject({
+      staffName: 'Elena QA',
+      propinas: '40.00',
+      total: '40.00',
+    })
+  })
+
+  it('expulsada sin membresía guardada pero con su clase en vivo: su recibo abre con la clase', async () => {
+    const fer = await persona('Fer', { membresia: false })
+    await prisma.staffPayLevelAssignment.create({
+      data: {
+        organizationId: m.orgId,
+        staffId: fer.staffId,
+        payLevelId: m.coach,
+        effectiveFrom: fechaComoDbDate('2026-01-01'),
+        revision: 1,
+      },
+    })
+    await clase(m, { staffId: fer.staffId, inicioIso: '2026-08-04T14:00:00Z', reservas: confirmadas(8) })
+    await expulsar(fer)
+    expect(await recibo(fer.staffId)).toMatchObject({ persona: 'Fer QA', total: '480.00', cantidad: 1 })
+  })
+
+  it('quien sólo es del equipo y tiene clases en OTRA organización sigue sin recibo aquí (404)', async () => {
+    const otro = await crearMundo('recibo-ventas-otro')
+    try {
+      const ajena = await persona('Gaby', { membresia: true, mundo: otro })
+      await clase(otro, { staffId: ajena.staffId, inicioIso: '2026-08-04T14:00:00Z', reservas: confirmadas(8) })
+      await expect(recibo(ajena.staffId)).rejects.toMatchObject({ statusCode: 404 })
+    } finally {
+      await borrarMundo(otro)
+    }
+  })
+})
+
+describe('el nombre de respaldo de una persona borrada es el mismo en el recibo y en el reporte (B5 ronda 1)', () => {
+  it('borrada con un ajuste en el periodo ABIERTO: el reporte abierto la nombra con lo que guardó', async () => {
+    const diana = await prisma.staff.create({
+      data: { email: `${m.key}-diana@example.test`, firstName: 'Diana', lastName: 'QA', active: true },
+    })
+    await prisma.staffVenue.create({ data: { staffId: diana.id, venueId: m.venueId, role: 'MANAGER', active: true } })
+    await agregarAjusteManual({
+      userId: m.owner,
+      venueId: m.venueId,
+      sede: m.venueId,
+      staffId: diana.id,
+      amount: 300,
+      reason: 'Bono de agosto',
+      fecha: '2026-08-20',
+      clientKey: `${m.key}-diana-bono`,
+      ahora: SEP2,
+    })
+    await prisma.staffVenue.deleteMany({ where: { staffId: diana.id } })
+    await prisma.staff.delete({ where: { id: diana.id } })
+    const rep = await reportePeriodo({ userId: m.owner, venueId: m.venueId, fecha: '2026-08-15', offset: 0, limit: 50 })
+    expect(rep.periodo.estado).toBe('OPEN')
+    expect(rep.personas.items.find(i => i.staffId === diana.id)).toMatchObject({ staffName: 'Diana QA', ajustes: '300.00' })
+    expect(await recibo(diana.id)).toMatchObject({ persona: 'Diana QA', total: '300.00' })
+  })
+
+  it('con dos filas guardadas, «Diana QA» (agosto) y «Persona dada de baja» (la devolución congelada después): gana el nombre, en los dos', async () => {
+    const diana = await prisma.staff.create({
+      data: { email: `${m.key}-diana@example.test`, firstName: 'Diana', lastName: 'QA', active: true },
+    })
+    await prisma.staffVenue.create({ data: { staffId: diana.id, venueId: m.venueId, role: 'MANAGER', active: true } })
+    const v = await cobro(m, { iso: '2026-08-12T18:00:00Z', propina: 40, servedById: diana.id })
+    await cerrar() // agosto congela su propina con «Diana QA»
+    await prisma.staffVenue.deleteMany({ where: { staffId: diana.id } })
+    await prisma.staff.delete({ where: { id: diana.id } })
+    await reembolso(m, v, { iso: '2026-09-03T18:00:00Z', propina: 40 })
+    const septiembre = () => reportePeriodo({ userId: m.owner, venueId: m.venueId, fecha: '2026-09-15', offset: 0, limit: 50 })
+    const deDiana = (r: Awaited<ReturnType<typeof septiembre>>) => r.personas.items.find(i => i.staffId === diana.id)
+    // En vivo, la devolución dice «Persona dada de baja» (ya no hay fila de Staff); el reporte abierto usa el nombre guardado.
+    expect(deDiana(await septiembre())).toMatchObject({ staffName: 'Diana QA', propinas: '-40.00' })
+    await cerrar('2026-09-15', OCT2) // septiembre congela la devolución con «Persona dada de baja», la fila MÁS RECIENTE
+    const guardados = await prisma.serviceEarning.findMany({
+      where: { organizationId: m.orgId, staffId: diana.id },
+      orderBy: { createdAt: 'asc' },
+      select: { descriptor: true },
+      take: 10,
+    })
+    expect(guardados.map(g => (g.descriptor as { persona?: string }).persona)).toEqual(['Diana QA', 'Persona dada de baja'])
+    expect(await recibo(diana.id, '2026-09-15')).toMatchObject({ persona: 'Diana QA', total: '-40.00' })
+    expect(deDiana(await septiembre())).toMatchObject({ staffName: 'Diana QA', propinas: '-40.00' })
+  })
+
+  it('entre dos nombres reales guardados gana el MÁS RECIENTE, en el recibo y en el reporte cerrado', async () => {
+    const diana = await prisma.staff.create({
+      data: { email: `${m.key}-diana@example.test`, firstName: 'Diana', lastName: 'QA', active: true },
+    })
+    await prisma.staffVenue.create({ data: { staffId: diana.id, venueId: m.venueId, role: 'MANAGER', active: true } })
+    const bono = (fecha: string, ahora: Date) =>
+      agregarAjusteManual({
+        userId: m.owner,
+        venueId: m.venueId,
+        sede: m.venueId,
+        staffId: diana.id,
+        amount: 100,
+        reason: 'Bono',
+        fecha,
+        clientKey: `${m.key}-diana-${fecha}`,
+        ahora,
+      })
+    await bono('2026-08-20', SEP2) // guarda «Diana QA»
+    await cerrar()
+    await prisma.staff.update({ where: { id: diana.id }, data: { lastName: 'Ruiz' } })
+    await bono('2026-09-05', OCT2) // guarda «Diana Ruiz», más reciente
+    await prisma.staffVenue.deleteMany({ where: { staffId: diana.id } })
+    await prisma.staff.delete({ where: { id: diana.id } })
+    expect(await recibo(diana.id)).toMatchObject({ persona: 'Diana Ruiz', total: '100.00' })
+    const agosto = await reportePeriodo({ userId: m.owner, venueId: m.venueId, fecha: '2026-08-15', offset: 0, limit: 50 })
+    expect(agosto.personas.items.find(i => i.staffId === diana.id)).toMatchObject({ staffName: 'Diana Ruiz', total: '100.00' })
   })
 })
 

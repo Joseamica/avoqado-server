@@ -11,7 +11,7 @@ import { assertPermisoEnSedes, exigirPermisoEnSedes, sedesConPermiso, sedesConSe
 import { bloquearPeriodo, periodoQueContieneFecha } from './periodosGuardados'
 import { dbDateComoFecha, MESES_LARGOS, periodoQueContiene, venuePeriodRange } from './periodos'
 import { valoracionCte } from './valoracion'
-import { sqlVentasDelPeriodo } from './fuentesVenta'
+import { nombreGuardadoSql, PERSONA_DADA_DE_BAJA, sqlVentasDelPeriodo } from './fuentesVenta'
 
 /** Tope de UNA página del recibo (Codex R2-R1-20). El recibo entero no tiene tope: se recorre con cursor. */
 export const RECIBO_LIMITE_MAX = 500
@@ -273,27 +273,33 @@ const nombreDe = (s: { firstName: string; lastName: string }) => `${s.firstName}
 
 /**
  * Nombre visible de la persona del recibo, sólo si trabaja o trabajó en esta organización (nunca el de alguien de otro
- * negocio); «trabajó» lo acredita también un devengo suyo en la organización (Codex bloque A #4): eliminarla del equipo
- * borra su StaffVenue pero no su recibo cerrado, que tiene que seguir abriendo (pantalla, PDF y Excel). Si la borraron
- * físicamente, el nombre que guardó su recibo y, si no hay ninguno, «Persona dada de baja» con sus montos intactos (spec
- * fase 3 §6.1, Codex r1-17, r2-17). Mismo permiso de sedes que siempre: eso lo decide `alcanceEnLaFoto`.
+ * negocio). Mismo permiso de sedes que siempre: eso lo decide `alcanceEnLaFoto`.
+ * «Trabajó» sin sede viva (la expulsión dura borra su StaffVenue y sus comisiones de esa sede, pero le sobreviven
+ * propinas, clases y recibos) lo acredita, sólo con búsquedas por persona que tienen índice (B5 r1):
+ *   - un devengo suyo en la organización (Codex bloque A #4) — `ServiceEarning (organizationId, staffId)`;
+ *   - su membresía de la organización, activa o no — `StaffOrganization (staffId, organizationId)` único; la expulsión no
+ *     la borra, y es lo que cubre a quien sólo tiene propinas en vivo (`Order.servedById` y `Payment.processedById` no
+ *     tienen índice: no se recorren los cobros del negocio);
+ *   - una clase suya en una sede de la organización — `ClassSession (assignedStaffId, …)`.
+ *   (`CommissionCalculation` no: la expulsión borra las de esa sede, y con otra sede viva ya es `viva`.)
+ * Si la borraron físicamente, el nombre que guardó (`nombreGuardadoSql`, la misma regla que el reporte) y, si no hay
+ * ninguno, «Persona dada de baja» con sus montos intactos (spec fase 3 §6.1, Codex r1-17, r2-17).
  */
 async function personaDelRecibo(organizationId: string, staffId: string): Promise<string> {
   const select = { firstName: true, lastName: true } as const
   const viva = await prisma.staff.findFirst({ where: { id: staffId, venues: { some: { venue: { organizationId } } } }, select })
   if (viva) return nombreDe(viva)
-  const rastro = await prisma.serviceEarning.findFirst({ where: { organizationId, staffId }, select: { id: true } })
-  if (!rastro) throw new NotFoundError('Persona no encontrada')
+  const [devengo, membresia, clase] = await Promise.all([
+    prisma.serviceEarning.findFirst({ where: { organizationId, staffId }, select: { id: true } }),
+    prisma.staffOrganization.findUnique({ where: { staffId_organizationId: { staffId, organizationId } }, select: { id: true } }),
+    prisma.classSession.findFirst({ where: { assignedStaffId: staffId, venue: { organizationId } }, select: { id: true } }),
+  ])
+  if (!devengo && !membresia && !clase) throw new NotFoundError('Persona no encontrada')
   const fila = await prisma.staff.findUnique({ where: { id: staffId }, select })
   if (fila) return nombreDe(fila)
-  const [guardado] = await prisma.$queryRaw<Array<{ persona: string }>>`
-    SELECT COALESCE(e.descriptor->>'persona', e.descriptor->>'coach') AS persona
-    FROM "ServiceEarning" e
-    WHERE e."organizationId" = ${organizationId} AND e."staffId" = ${staffId}
-      AND COALESCE(e.descriptor->>'persona', e.descriptor->>'coach') IS NOT NULL
-    ORDER BY e."createdAt" DESC, e.id DESC
-    LIMIT 1`
-  return guardado?.persona ?? 'Persona dada de baja'
+  const [guardado] = await prisma.$queryRaw<Array<{ persona: string | null }>>`
+    SELECT ${nombreGuardadoSql(organizationId, Prisma.sql`${staffId}`)} AS persona`
+  return guardado?.persona ?? PERSONA_DADA_DE_BAJA
 }
 
 async function prepararRecibo(input: { userId: string; venueId: string; staffId: string; fecha: string }): Promise<ReciboPreparado> {
@@ -571,10 +577,6 @@ async function paginaDelRecibo(
   }
 }
 
-/**
- * Una diferencia dice de qué clase es (QA bloque B, defecto 3): «Diferencia · Yoga del 28 sep 2026 (clase de septiembre)».
- * La fecha es la local de la clase en su sede (la de su foto) y el mes, el de su periodo de origen.
- */
 const plural = (n: number, uno: string, varios: string) => `${n} ${n === 1 ? uno : varios}`
 const ventaDe = (r: FilaRecibo) => (r.orden ? `venta #${r.orden}` : null)
 
@@ -600,6 +602,8 @@ function conceptoDe(r: FilaRecibo): string {
   }
   const clase = r.clase ?? 'Clase'
   if (r.tipo === 'CLASE') return clase
+  // Una diferencia dice de qué clase es (QA bloque B, defecto 3): «Diferencia · Yoga del 28 sep 2026 (clase de septiembre)».
+  // La fecha es la local de la clase en su sede (la de su foto) y el mes, el de su periodo de origen.
   const mes = r.origen ? ` (clase de ${MESES_LARGOS[Number(r.origen.slice(5, 7)) - 1]})` : ''
   return `Diferencia · ${clase} del ${fechaMx(r.fecha)}${mes}`
 }

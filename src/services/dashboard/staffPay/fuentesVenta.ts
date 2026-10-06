@@ -108,7 +108,22 @@ const venueIdsDe = (a: AlcanceBarrido) => a.sedes.map(s => s.venueId)
 const tzSede = Prisma.sql`COALESCE(NULLIF(v.timezone, ''), ${TZ_DEFAULT})`
 const local = (instante: Prisma.Sql, formato: string) =>
   Prisma.sql`to_char(((${instante} AT TIME ZONE 'UTC') AT TIME ZONE ${tzSede}), ${formato})`
-const personaSql = Prisma.sql`COALESCE(NULLIF(TRIM(CONCAT(s."firstName", ' ', s."lastName")), ''), 'Persona dada de baja')`
+/** Lo que dice el nombre de alguien borrado físicamente sin ningún nombre guardado (spec fase 3 §6.1). */
+export const PERSONA_DADA_DE_BAJA = 'Persona dada de baja'
+const personaSql = Prisma.sql`COALESCE(NULLIF(TRIM(CONCAT(s."firstName", ' ', s."lastName")), ''), ${PERSONA_DADA_DE_BAJA})`
+
+/**
+ * El nombre que guardó una persona en la organización, para cuando ya no tiene fila de `Staff` (B5 r1): el de su devengo MÁS
+ * RECIENTE que lo traiga, sin contar «Persona dada de baja» (lo que escribe una venta congelada después de borrarla, que si
+ * no le ganaría a su nombre real). NULL si no hay ninguno. La MISMA regla en el recibo y en los dos reportes; usa el índice
+ * (organizationId, staffId) y, dentro de un COALESCE, sólo corre para quien no tiene nombre vivo.
+ */
+export const nombreGuardadoSql = (organizationId: string, staffId: Prisma.Sql) => Prisma.sql`(
+  SELECT COALESCE(g.descriptor->>'persona', g.descriptor->>'coach') FROM "ServiceEarning" g
+  WHERE g."organizationId" = ${organizationId} AND g."staffId" = ${staffId}
+    AND COALESCE(g.descriptor->>'persona', g.descriptor->>'coach') <> ${PERSONA_DADA_DE_BAJA}
+  ORDER BY g."createdAt" DESC, g.id DESC
+  LIMIT 1)`
 
 // ── Comisiones (spec §6.2) ──
 
