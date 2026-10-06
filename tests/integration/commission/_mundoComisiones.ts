@@ -235,6 +235,20 @@ export async function devolver(
   })
 }
 
+/**
+ * Un snapshot EN COLA como lo dejaba el código de antes de A6 F2: importes en binario sin redondear (base + propina =
+ * 2.3000000000000003). Los consumidores deben leerlo al centavo, igual que la columna `Decimal(10,2)` que lo materializa.
+ */
+export async function snapshotViejo(m: MundoComisiones, paymentId: string, importes: Record<string, number>): Promise<void> {
+  const efectos = await prisma.paymentEffect.findMany({
+    where: { venueId: m.venueId, paymentId, kind: 'COMMISSION', status: 'PENDING' },
+    take: 10,
+  })
+  if (efectos.length === 0) throw new Error(`El cobro ${paymentId} no tiene comisión en cola`)
+  for (const e of efectos)
+    await prisma.paymentEffect.update({ where: { id: e.id }, data: { payload: { ...(e.payload as Prisma.JsonObject), ...importes } } })
+}
+
 /** Los únicos motivos con los que el worker deja un reverso esperando a su comisión original (Ronda 2 de A3). */
 const MOTIVOS_DE_ESPERA = ['COMMISSION_AWAITS_ORIGINAL', 'COMMISSION_AWAITS_ORIGINAL_OVERDUE']
 

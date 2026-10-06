@@ -11,6 +11,7 @@ import prisma from '@/utils/prismaClient'
 import { enqueuePaymentCommissionInTx } from '@/services/tpv/paymentEffects.service'
 import { createSplitCommissionForPayment } from '@/services/dashboard/commission/commission-calculation.service'
 import { buildSaleLines } from '@/services/fiscal/autoPosting.service'
+import { committedAndPendingCommissionProgress, otrosCobros } from '@/services/dashboard/commission/commission-utils'
 import {
   asegurarBaseDePrueba,
   barreraDeFila,
@@ -25,6 +26,7 @@ import {
   orden,
   planear,
   procesarEfectos,
+  snapshotViejo,
 } from './_mundoComisiones'
 
 let m: MundoComisiones
@@ -435,5 +437,79 @@ describe('A1e · «sin IVA» usa el IVA de la póliza contable (D5 enmendada, sp
       ['50.00', '8.00', '5.00'],
       ['50.00', '8.00', '5.00'],
     ])
+  })
+})
+
+describe('A6 F2 · un importe congelado vale lo mismo en cola que materializado (Codex bloque A r1 [P2])', () => {
+  /**
+   * Orden exenta por categoría, esquema al 5 % con propina. Primer cobro `venta` + $0.20 de propina, que se queda en cola o se
+   * materializa; después el segundo, de $0.10, que completa la orden. Devuelve los dos cobros ya materializados.
+   *
+   * Los $2.10 de Codex NO reproducen contra Postgres: Prisma guarda el JSON con 16 cifras y 2.3000000000000003 llega como 2.3.
+   * Con $32.20 sí: 32.2 + 0.2 = 32.400000000000006 se guarda como 32.40000000000001 (lo que ya documentaba A3:
+   * «-0.009999999999999998»).
+   */
+  async function dosCobros(venta: number, primeroMaterializado: boolean, conSnapshotViejo = false) {
+    m = await crearMundoComisiones(`f2-${primeroMaterializado ? 'fila' : 'cola'}`, {
+      defaultRate: 0.05,
+      includeTips: true,
+      includeTax: false,
+    })
+    const cat = await categoria(m)
+    await prisma.commissionConfig.update({ where: { id: m.configId }, data: { filterByCategories: true, categoryIds: [cat] } })
+    const total = new Prisma.Decimal(venta).plus('0.10').toNumber()
+    const orderId = await orden(m, { subtotal: total, renglones: [{ categoryId: cat, precio: total, tratamiento: 'EXENTO' }] })
+    const p1 = await cobro(m, orderId, venta, { propina: 0.2 })
+    await planear(p1)
+    const snapshot = (await prisma.paymentEffect.findFirstOrThrow({ where: { venueId: m.venueId, paymentId: p1, kind: 'COMMISSION' } }))
+      .payload as Record<string, unknown>
+    if (conSnapshotViejo) await snapshotViejo(m, p1, { baseAmount: venta + 0.2 })
+    if (primeroMaterializado) await procesarEfectos(m)
+    const p2 = await cobro(m, orderId, 0.1)
+    await planear(p2)
+    await procesarEfectos(m)
+    return { p1, p2, snapshot }
+  }
+
+  it.each([
+    [2.1, 'en cola', false, '0.12'],
+    [2.1, 'materializado', true, '0.12'],
+    [32.2, 'en cola', false, '1.62'],
+    [32.2, 'materializado', true, '1.62'],
+  ])('🔴 $%d + $0.20 de propina con el primer cobro %s: el segundo ($0.10) comisiona $0.01', async (venta, _, materializado, primera) => {
+    const { p1, p2 } = await dosCobros(venta, materializado)
+    expect([(await filaDe(p1)).netCommission.toFixed(2), (await filaDe(p2)).netCommission.toFixed(2)]).toEqual([primera, '0.01'])
+  })
+
+  it('🔴 el snapshot se escribe al centavo: base $32.40, no 32.400000000000006', async () => {
+    const { snapshot } = await dosCobros(32.2, false)
+    expect([snapshot.baseAmount, snapshot.tipAmount, snapshot.grossCommission, snapshot.netCommission]).toEqual([32.4, 0.2, 1.62, 1.62])
+  })
+
+  it('🔴 un snapshot VIEJO en cola (base 32.400000000000006) también se lee al centavo', async () => {
+    const { p2 } = await dosCobros(32.2, false, true)
+    expect((await filaDe(p2)).netCommission.toFixed(2)).toBe('0.01')
+  })
+
+  it('🔴 lo que ya recibió un cobro en cola se lee al centavo aunque su snapshot sea VIEJO (base y descuento)', async () => {
+    m = await crearMundoComisiones('f2-otros', { includeTips: true, includeDiscount: true })
+    const orderId = await orden(m, { subtotal: 32.3 })
+    const p1 = await cobro(m, orderId, 32.2, { propina: 0.2 })
+    await planear(p1)
+    await snapshotViejo(m, p1, { baseAmount: 32.2 + 0.2, discountAmount: 0.02 + 0.07 })
+    const p2 = await cobro(m, orderId, 0.1)
+    const otros = await otrosCobros(prisma, { id: p2, venueId: m.venueId, orderId }, m.configId)
+    expect(otros.map(o => [o.monto.toFixed(2), o.base?.toString(), o.descuento?.toString()])).toEqual([['32.20', '32.2', '0.09']])
+  })
+
+  it('🔴 el avance de metas también lee la cola al centavo: dos snapshots viejos de $32.40 suman $64.80', async () => {
+    m = await crearMundoComisiones('f2-metas', { includeTips: true })
+    for (let i = 0; i < 2; i++) {
+      const pago = await cobro(m, await orden(m, { subtotal: 32.2 }), 32.2, { propina: 0.2 })
+      await planear(pago)
+      await snapshotViejo(m, pago, { baseAmount: 32.2 + 0.2 })
+    }
+    const avance = await committedAndPendingCommissionProgress(prisma, m.venueId, m.ana, new Date('2020-01-01T00:00:00Z'))
+    expect(avance).toEqual({ amount: 64.8, count: 2 })
   })
 })

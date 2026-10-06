@@ -101,12 +101,24 @@ type LoadedPayment = {
   shift: { id: string } | null
 }
 
+/** Un monto al centavo, ½↑ en decimal: lo que guarda una columna `Decimal(10,2)`. */
+const alCentavo = (n: number) => new Prisma.Decimal(n).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP).toNumber()
+
 async function createCalcForConfig(
   payment: LoadedPayment,
   config: CommissionConfigWithRelations,
-  amounts: { baseAmount: number; tipAmount: number; discountAmount: number; taxAmount: number },
+  importes: { baseAmount: number; tipAmount: number; discountAmount: number; taxAmount: number },
   options: CommissionOptions = {},
 ): Promise<CommissionCalculationResult | null> {
+  // A6 F2 (Codex bloque A r1 [P2]): la fila —también la congelada en cola— lleva sus importes al centavo, como su columna.
+  // Base + propina en binario (32.2 + 0.2 = 32.400000000000006) dejaba un snapshot que valía distinto en cola que
+  // materializado. La comisión sale de esa base en decimal: en binario 32.4 × 0.05 o 2.3 × 0.05 pierden el medio centavo.
+  const amounts = {
+    baseAmount: alCentavo(importes.baseAmount),
+    tipAmount: alCentavo(importes.tipAmount),
+    discountAmount: alCentavo(importes.discountAmount),
+    taxAmount: alCentavo(importes.taxAmount),
+  }
   const db = options.db ?? prisma
   const recipientStaffId = getRecipientStaffId({ processedById: payment.processedById }, payment.order, config.recipient)
   if (!recipientStaffId) {
@@ -161,11 +173,13 @@ async function createCalcForConfig(
   const effectiveRate = calculateFinalRate(config, override, staffInfo.role, tierRate)
 
   let grossCommission =
-    config.calcType === CommissionCalcType.FIXED ? decimalToNumber(config.defaultRate) : amounts.baseAmount * effectiveRate
+    config.calcType === CommissionCalcType.FIXED
+      ? decimalToNumber(config.defaultRate)
+      : new Prisma.Decimal(amounts.baseAmount).mul(effectiveRate).toNumber()
 
   let netCommission = applyCommissionBounds(grossCommission, config)
-  grossCommission = Math.round(grossCommission * 100) / 100
-  netCommission = Math.round(netCommission * 100) / 100
+  grossCommission = alCentavo(grossCommission)
+  netCommission = alCentavo(netCommission)
 
   // Asistencia → comisiones: sólo si el esquema la prendió; falla abierta (comisión completa).
   const attendancePenaltyRate = await resolveAttendancePenaltyRate(
@@ -503,8 +517,14 @@ export async function createRefundCommission(
   })
   for (const effect of pending) {
     const data = effect.payload as unknown as (typeof originalCalcs)[number]
+    // A6 F2: una original EN COLA se usa como la guardaría su columna, al centavo; las viejas traen binario (32.40000000000001).
     if (data.configId && data.staffId && !originalCalcs.some(c => c.configId === data.configId && c.staffId === data.staffId))
-      originalCalcs.push(data)
+      originalCalcs.push({
+        ...data,
+        ...Object.fromEntries(
+          CAMPOS_DEL_REVERSO.map(c => [c, new Prisma.Decimal(dec(data[c]).toDecimalPlaces(2, Exacto.ROUND_HALF_UP).toFixed(2))]),
+        ),
+      })
   }
 
   // Lo devuelto por TODAS las devoluciones confirmadas visibles del cobro (incluida ésta).

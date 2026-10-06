@@ -30,6 +30,7 @@ import {
   orden,
   planear,
   procesarEfectos,
+  snapshotViejo,
   sumadaAUnResumen,
   ventaConComision,
 } from './_mundoComisiones'
@@ -863,5 +864,36 @@ describe('A4 · una sola operación de anulación (spec §6.4, §9-5; Codex r1-1
       const s = await prisma.commissionSummary.findUniqueOrThrow({ where: { id: resumen } })
       expect([s.totalCommissions.toFixed(2), s.netAmount.toFixed(2), s.paymentCount]).toEqual(['20.00', '20.00', 2])
     })
+  })
+})
+
+describe('A6 F2 · el reverso no cambia si la comisión original está en cola o materializada (Codex bloque A r1 [P2])', () => {
+  /**
+   * `venta` + $0.20 de propina al 10 % con propina; se devuelven SÓLO $0.05 de propina. Devuelve el neto del reverso. Los
+   * $2.10 de Codex no reproducen contra Postgres (Prisma guarda 2.3); $32.20 sí (32.40000000000001), ver basePorCobro.
+   */
+  async function reversoDeLaPropina(venta: number, originalMaterializada: boolean, conSnapshotViejo = false): Promise<string> {
+    await prisma.commissionConfig.update({ where: { id: m.configId }, data: { includeTips: true } })
+    const orderId = await orden(m, { subtotal: venta })
+    const pago = await cobro(m, orderId, venta, { propina: 0.2 })
+    await planear(pago)
+    if (conSnapshotViejo) await snapshotViejo(m, pago, { baseAmount: venta + 0.2 })
+    if (originalMaterializada) await procesarEfectos(m)
+    const devolucion = await devolver(m, pago, 0, 0.05)
+    await procesarEfectos(m)
+    return netoVivo({ venueId: m.venueId, paymentId: devolucion })
+  }
+
+  it.each([
+    [2.1, 'en cola', false],
+    [2.1, 'materializada', true],
+    [32.2, 'en cola', false],
+    [32.2, 'materializada', true],
+  ])('🔴 $%d + $0.20 con la original %s: devolver $0.05 de propina revierte −$0.01', async (venta, _, materializada) => {
+    expect(await reversoDeLaPropina(venta, materializada)).toBe('-0.01')
+  })
+
+  it('🔴 con un snapshot VIEJO en cola (base 32.400000000000006) también es −$0.01', async () => {
+    expect(await reversoDeLaPropina(32.2, false, true)).toBe('-0.01')
   })
 })

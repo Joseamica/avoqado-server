@@ -581,9 +581,10 @@ export async function otrosCobros(
       WHERE cc."venueId" = ${payment.venueId} AND cc."configId" = ${configId} AND cc."voidedAt" IS NULL
         AND cc."paymentId" IN (SELECT id FROM otros_de_la_orden)
       UNION ALL
+      -- Al centavo, como lo guardaría el worker (Decimal(10,2)): un snapshot viejo trae binario (32.40000000000001). A6 F2.
       SELECT e."paymentId",
-             (e.payload->>'baseAmount')::numeric - COALESCE((e.payload->>'tipAmount')::numeric, 0),
-             COALESCE((e.payload->>'discountAmount')::numeric, 0)
+             ROUND((e.payload->>'baseAmount')::numeric, 2) - COALESCE(ROUND((e.payload->>'tipAmount')::numeric, 2), 0),
+             COALESCE(ROUND((e.payload->>'discountAmount')::numeric, 2), 0)
       FROM "PaymentEffect" e
       WHERE e."venueId" = ${payment.venueId} AND e.kind = 'COMMISSION' AND e.status IN ('PENDING', 'PROCESSING', 'DEAD_LETTER')
         AND e.payload->>'configId' = ${configId} AND e."paymentId" IN (SELECT id FROM otros_de_la_orden)
@@ -1000,7 +1001,7 @@ export async function alreadyCommissionedItemBase(
   })
   // DONE has a committed calculation above. Dead letters still reserve their obligation.
   const [pending] = await db.$queryRaw<Array<{ base: Prisma.Decimal }>>(Prisma.sql`
-    SELECT COALESCE(SUM((payload->>'baseAmount')::numeric - COALESCE((payload->>'tipAmount')::numeric, 0)), 0) AS base
+    SELECT COALESCE(SUM(ROUND((payload->>'baseAmount')::numeric, 2) - COALESCE(ROUND((payload->>'tipAmount')::numeric, 2), 0)), 0) AS base
     FROM "PaymentEffect" WHERE "orderId" = ${orderId} AND kind = 'COMMISSION'
       AND status IN ('PENDING', 'PROCESSING', 'DEAD_LETTER') AND payload->>'configId' = ${configId}
   `)
@@ -1025,7 +1026,7 @@ export async function committedAndPendingCommissionProgress(
         ${end ? Prisma.sql`AND "calculatedAt" <= ${utcTs(end)}` : Prisma.empty}
         ${configId ? Prisma.sql`AND "configId" = ${configId}` : Prisma.empty}
       UNION ALL
-      SELECT (payload->>'baseAmount')::numeric AS base FROM "PaymentEffect"
+      SELECT ROUND((payload->>'baseAmount')::numeric, 2) AS base FROM "PaymentEffect"
       WHERE "venueId" = ${venueId} AND kind = 'COMMISSION'
         AND status IN ('PENDING', 'PROCESSING', 'DEAD_LETTER')
         AND payload->>'staffId' = ${staffId} AND payload ? 'baseAmount'
