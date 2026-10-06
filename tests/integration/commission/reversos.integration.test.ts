@@ -21,6 +21,7 @@ import { activateReferralProgram } from '@/services/referrals/referralProgram.se
 import { captureReferral } from '@/services/referrals/referralCapture.service'
 import { onOrderPaid } from '@/services/referrals/referralQualification.service'
 import { runClaimedPaymentEffect } from '@/services/tpv/paymentEffects.service'
+import { hardDeleteTeamMember } from '@/services/dashboard/team.dashboard.service'
 import { cleanupReferralFixtureData } from '@tests/__helpers__/referral-fixture-cleanup'
 import {
   asegurarBaseDePrueba,
@@ -448,6 +449,19 @@ describe('A3 Ronda 1 · el reverso espera a que exista la comisión original (hu
     } finally {
       aviso.mockRestore()
     }
+  })
+
+  it('🔴 expulsada del equipo (borrado permanente) con un reverso EN COLA: su original sigue ahí y el reverso se aplica, no espera para siempre (Codex bloque B #2)', async () => {
+    const { orderId, pago } = await ventaConComision(m)
+    const devolucion = await devolver(m, pago, 40)
+    const sv = await prisma.staffVenue.findFirstOrThrow({ where: { staffId: m.ana, venueId: m.venueId }, select: { id: true } })
+    await hardDeleteTeamMember(m.venueId, sv.id, true, m.owner)
+    await procesarEfectos(m)
+    const reverso = await prisma.paymentEffect.findFirstOrThrow({
+      where: { venueId: m.venueId, paymentId: devolucion, kind: 'COMMISSION' },
+    })
+    expect([reverso.status, reverso.lastError]).toEqual(['DONE', null])
+    expect(await netoVivo({ venueId: m.venueId, orderId })).toBe('6.00')
   })
 })
 

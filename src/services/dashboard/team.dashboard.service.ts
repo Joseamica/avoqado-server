@@ -1100,11 +1100,14 @@ export async function removeTeamMember(venueId: string, teamMemberId: string): P
 
 /**
  * Hard delete team member - OWNER and SUPERADMIN
- * Permanently removes the member's venue access plus their commission data
- * (payouts, calculations, overrides, milestones).
+ * Permanently removes the member's venue access and their commission overrides
+ * (configuration).
  *
- * The Staff row and their orders/payments are intentionally kept: those are
- * financial history that must survive the person leaving. For the everyday
+ * The Staff row, their orders/payments and their commission money history
+ * (calculations, payouts, milestone achievements) are intentionally kept: a
+ * voided commission already frozen into a pay receipt still needs its row to be
+ * reversed at the next close, and a queued refund reversal needs its original
+ * (Codex bloque B #2, pago por servicio fase 3). For the everyday
  * "this person no longer works here" case use removeTeamMember, which
  * deactivates and keeps everything — the same call Square makes, since it has
  * no permanent delete for team members at all.
@@ -1209,34 +1212,10 @@ export async function hardDeleteTeamMember(
     // Track deleted records per attempt so rolled-back counts cannot leak.
     const deletedRecords: Record<string, number> = {}
 
-    // 1. Delete Commission Payouts for this staff in this venue
-    const deletedPayouts = await tx.commissionPayout.deleteMany({
-      where: {
-        staffId,
-        venueId,
-      },
-    })
-    deletedRecords['commissionPayouts'] = deletedPayouts.count
+    // 🔴 Commission money history (calculations, payouts, milestone achievements) is NOT deleted: the pay receipt reverses
+    // a voided commission against its row, and a queued refund reversal waits for its original (Codex bloque B #2).
 
-    // 2. Delete Commission Calculations for this staff in this venue
-    const deletedCalculations = await tx.commissionCalculation.deleteMany({
-      where: {
-        staffId,
-        venueId,
-      },
-    })
-    deletedRecords['commissionCalculations'] = deletedCalculations.count
-
-    // 3. Delete Milestone Achievements for this staff in this venue
-    const deletedMilestones = await tx.milestoneAchievement.deleteMany({
-      where: {
-        staffId,
-        venueId,
-      },
-    })
-    deletedRecords['milestoneAchievements'] = deletedMilestones.count
-
-    // 4. Delete Commission Overrides for this staff in this venue
+    // 1. Delete Commission Overrides (configuration, not money) for this staff in this venue
     const deletedOverrides = await tx.commissionOverride.deleteMany({
       where: {
         staffId,
@@ -1247,7 +1226,7 @@ export async function hardDeleteTeamMember(
     })
     deletedRecords['commissionOverrides'] = deletedOverrides.count
 
-    // 5. Finally, delete the StaffVenue record itself
+    // 2. Finally, delete the StaffVenue record itself
     await tx.staffVenue.delete({
       where: { id: teamMemberId },
     })
@@ -1256,7 +1235,7 @@ export async function hardDeleteTeamMember(
     // Note: We intentionally do NOT delete the Staff record even if this is the last venue.
     // The Staff record has many foreign key references (Invitations, Orders, Shifts, etc.)
     // that would cause cascade failures. The user is effectively removed from this venue
-    // by deleting StaffVenue and all their commission/milestone data.
+    // by deleting StaffVenue; their commission money history stays (see above).
     return { staffId, deletedRecords }
   })
 

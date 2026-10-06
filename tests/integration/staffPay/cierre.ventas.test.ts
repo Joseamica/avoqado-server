@@ -3,6 +3,7 @@ import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { cerrarPeriodo, previewCierre } from '@/services/dashboard/staffPay/cierre.service'
 import { anularComision } from '@/services/dashboard/commission/commission-calculation.service'
+import { hardDeleteTeamMember } from '@/services/dashboard/team.dashboard.service'
 import { agregarAjusteManual } from '@/services/dashboard/staffPay/ajustesManuales.service'
 import { fechaComoDbDate } from '@/services/dashboard/staffPay/periodos'
 import {
@@ -257,6 +258,30 @@ describe('el cierre con ventas (spec fase 3 §6)', () => {
       totalAjustes: '0.00',
       total: '-90.00',
     })
+  })
+
+  it('🔴 anulada y DESPUÉS expulsada del equipo (borrado permanente): el siguiente cierre igual le descuenta lo congelado; neto $0 (Codex bloque B #2)', async () => {
+    const venta = await cobro(m, { iso: '2026-09-10T18:00:00Z', monto: 3000 })
+    const c = await comision(m, { configId: cfg, staffId: m.sofia, iso: '2026-09-10T18:00:05Z', neto: 100, pago: venta })
+    const sep = await cerrar('2026-09-15', OCT2)
+    expect(await totalDe(sep.periodId, m.sofia)).toBe('100.00')
+    await anularComision({ calculationId: c.id, venueId: m.venueId, actorId: m.owner, motivo: 'Venta capturada por error' })
+    const sv = await prisma.staffVenue.findFirstOrThrow({ where: { staffId: m.sofia, venueId: m.venueId }, select: { id: true } })
+    await hardDeleteTeamMember(m.venueId, sv.id, true, m.owner)
+    const oct = await cerrar('2026-10-15', NOV2)
+    const neto = await prisma.staffPayStatement.aggregate({
+      where: { staffId: m.sofia, periodId: { in: [sep.periodId, oct.periodId] } },
+      _sum: { total: true },
+    })
+    expect(neto._sum.total?.toFixed(2)).toBe('0.00')
+    expect(await totalDe(oct.periodId, m.sofia)).toBe('-100.00')
+    const x = await prisma.serviceEarning.findFirstOrThrow({
+      where: { organizationId: m.orgId, concept: 'RECONCILE', sourceType: 'COMMISSION', sourceId: c.id },
+    })
+    expect(x).toMatchObject({ periodId: oct.periodId, staffId: m.sofia })
+    expect(x.amount.toFixed(2)).toBe('-100.00')
+    // La comisión es historial de dinero: sobrevive a la expulsión (la membresía no).
+    expect(await prisma.commissionCalculation.findUnique({ where: { id: c.id }, select: { status: true } })).toEqual({ status: 'VOIDED' })
   })
 
   it('un recibo sólo con devoluciones queda en negativo; la propina devuelta se descuenta a quien la cobró aunque el interruptor esté apagado (spec §13-7, Review Focus 4)', async () => {

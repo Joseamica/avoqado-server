@@ -7992,9 +7992,9 @@ router.put(
  *     tags: [Team]
  *     summary: Hard delete team member (OWNER and above)
  *     description: |
- *       **OWNER or SUPERADMIN**: Permanently deletes the member's venue access and commission data.
- *       This includes: commission calculations, commission payouts, milestone progress,
- *       tip distributions, commission overrides, and the staff venue record itself.
+ *       **OWNER or SUPERADMIN**: Permanently deletes the member's venue access (the staff venue record)
+ *       and their commission overrides. Commission money history (calculations, payouts, milestone
+ *       achievements), orders, payments and tips are kept.
  *
  *       WARNING: This action is IRREVERSIBLE. Use only for:
  *       - GDPR "right to be forgotten" requests

@@ -274,14 +274,15 @@ const nombreDe = (s: { firstName: string; lastName: string }) => `${s.firstName}
 /**
  * Nombre visible de la persona del recibo, sólo si trabaja o trabajó en esta organización (nunca el de alguien de otro
  * negocio). Mismo permiso de sedes que siempre: eso lo decide `alcanceEnLaFoto`.
- * «Trabajó» sin sede viva (la expulsión dura borra su StaffVenue y sus comisiones de esa sede, pero le sobreviven
- * propinas, clases y recibos) lo acredita, sólo con búsquedas por persona que tienen índice (B5 r1):
+ * «Trabajó» sin sede viva (la expulsión dura borra su StaffVenue; le sobreviven comisiones, propinas, clases y recibos)
+ * lo acredita, sólo con búsquedas por persona que tienen índice (B5 r1):
  *   - un devengo suyo en la organización (Codex bloque A #4) — `ServiceEarning (organizationId, staffId)`;
  *   - su membresía de la organización, activa o no — `StaffOrganization (staffId, organizationId)` único; la expulsión no
  *     la borra, y es lo que cubre a quien sólo tiene propinas en vivo (`Order.servedById` y `Payment.processedById` no
  *     tienen índice: no se recorren los cobros del negocio);
  *   - una clase suya en una sede de la organización — `ClassSession (assignedStaffId, …)`.
- *   (`CommissionCalculation` no: la expulsión borra las de esa sede, y con otra sede viva ya es `viva`.)
+ *   (`CommissionCalculation` no se consulta: sin membresía guardada, sus comisiones en vivo se ven en su recibo en
+ *   cuanto el cierre las congela como devengo.)
  * Si la borraron físicamente, el nombre que guardó (`nombreGuardadoSql`, la misma regla que el reporte) y, si no hay
  * ninguno, «Persona dada de baja» con sus montos intactos (spec fase 3 §6.1, Codex r1-17, r2-17).
  */
