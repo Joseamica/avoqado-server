@@ -5,6 +5,7 @@ import { validateRequest } from '../../middlewares/validation'
 import * as controller from '../../controllers/dashboard/staffPay.dashboard.controller'
 import { organizacionTieneServicePay, venueHasServicePayAccess } from '../../services/dashboard/staffPay/acceso'
 import {
+  activarSchema,
   ajusteClaseSchema,
   ajusteManualSchema,
   archivarTablaSchema,
@@ -26,6 +27,7 @@ import {
   pagadoPreviewQuerySchema,
   periodicidadSchema,
   periodParamsSchema,
+  propinasSchema,
   publicarVersionSchema,
   reciboQuerySchema,
   reporteQuerySchema,
@@ -205,6 +207,20 @@ router.patch(
   checkPermission('staffpay:close'),
   validateRequest(z.object({ params: venueParamsSchema, body: periodicidadSchema })),
   controller.patchPeriodicity,
+)
+// Fase 3 (spec §7.1, §6.3): activar pago al personal y el interruptor de propinas. Afectan a TODA la organización: el
+// service exige además staffpay:close en todas sus sedes (como la periodicidad).
+router.post(
+  '/activate',
+  checkPermission('staffpay:close'),
+  validateRequest(z.object({ params: venueParamsSchema, body: activarSchema })),
+  controller.postActivate,
+)
+router.put(
+  '/tips',
+  checkPermission('staffpay:close'),
+  validateRequest(z.object({ params: venueParamsSchema, body: propinasSchema })),
+  controller.putTips,
 )
 router.get(
   '/periods/close-preview',

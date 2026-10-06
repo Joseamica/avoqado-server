@@ -78,6 +78,16 @@ jest.mock('@/services/dashboard/staffPay/recibos.service', () => ({
 jest.mock('@/services/dashboard/staffPay/periodosGuardados', () => ({
   periodoQueContieneFecha: (...a: unknown[]) => mockPeriodoDeFecha(...a),
 }))
+const mockEstado = jest.fn()
+const mockActivar = jest.fn()
+const mockPropinas = jest.fn()
+const mockVentanas = jest.fn()
+jest.mock('@/services/dashboard/staffPay/activacion.service', () => ({
+  estadoActivacion: (...a: unknown[]) => mockEstado(...a),
+  activarPagoAlPersonal: (...a: unknown[]) => mockActivar(...a),
+  cambiarPropinas: (...a: unknown[]) => mockPropinas(...a),
+  ventanasDePropinas: (...a: unknown[]) => mockVentanas(...a),
+}))
 jest.mock('@/mcp/requireWriteScopeAlways', () => ({ requireWriteScopeAlways: (...a: unknown[]) => mockRequireWrite(...a) }))
 jest.mock('@/mcp/audit', () => ({ auditMcpWrite: jest.fn() }))
 jest.mock('@/utils/prismaClient', () => ({
@@ -109,6 +119,8 @@ beforeEach(() => {
   mockHasPermission.mockReturnValue(true)
   mockAccess.mockResolvedValue(true)
   mockOrgTiene.mockResolvedValue(true)
+  mockEstado.mockResolvedValue({ activado: false, startDate: null, propinasEncendidas: false })
+  mockVentanas.mockResolvedValue([])
 })
 
 // La forma REAL de `previewLiquidacion` (B2): filas de `diferenciasDeClase`, destino legible y `sedeEnDestino`.
@@ -181,6 +193,10 @@ describe('staff_service_pay — escritura (spec §9.3)', () => {
   it('cerrar sin confirm devuelve el preview y su huella; no cierra', async () => {
     mockPreview.mockResolvedValue({
       clases: 72,
+      comisiones: 0,
+      propinas: 0,
+      reversos: 0,
+      propinasSinDueno: { n: 0, total: '0.00' },
       personas: 4,
       total: '36620.00',
       huella: 'h'.repeat(64),
@@ -233,6 +249,10 @@ describe('staff_service_pay — escritura (spec §9.3)', () => {
   it('un periodo ya cerrado o bloqueado no ofrece confirmar (sin huella que confirmar)', async () => {
     mockPreview.mockResolvedValue({
       clases: 72,
+      comisiones: 0,
+      propinas: 0,
+      reversos: 0,
+      propinasSinDueno: { n: 0, total: '0.00' },
       personas: 4,
       total: '36620.00',
       huella: '',
@@ -248,6 +268,10 @@ describe('staff_service_pay — escritura (spec §9.3)', () => {
   it('con reservas sin horario, pide confirmarlas en la vista previa antes de ofrecer cerrar', async () => {
     mockPreview.mockResolvedValue({
       clases: 72,
+      comisiones: 0,
+      propinas: 0,
+      reversos: 0,
+      propinasSinDueno: { n: 0, total: '0.00' },
       personas: 4,
       total: '36620.00',
       huella: 'h'.repeat(64),
@@ -1166,5 +1190,210 @@ describe('reglas del service por MCP (full-testing)', () => {
     )
     expect(r).toMatchObject({ ok: true, sinCambios: true })
     expect(auditMcpWrite).not.toHaveBeenCalled()
+  })
+})
+
+describe('pago al personal con ventas por MCP (spec fase 3 §12)', () => {
+  it('el preview del cierre nombra clases, comisiones y propinas, las anulaciones y las propinas sin persona', async () => {
+    mockPreview.mockResolvedValue({
+      clases: 72,
+      comisiones: 41,
+      propinas: 230,
+      reversos: 1,
+      personas: 9,
+      total: '36620.00',
+      huella: 'h'.repeat(64),
+      puedeCerrar: true,
+      bloqueos: [],
+      huerfanas: 0,
+      propinasSinDueno: { n: 3, total: '240.00' },
+    })
+    const r = parse(await handlers.get('close_service_pay_period')!({ venueId: 'v1', fecha: '2026-09-15' }, {}))
+    expect(r).toMatchObject({ requiresConfirmation: true })
+    expect(r.message).toMatch(/72 clases, 41 comisiones y 230 propinas de 9 personas, \$36,620\.00/)
+    expect(r.message).toMatch(/1 anulación/)
+    expect(r.message).toMatch(/3 propina\(s\) sin persona \(\$240\.00\) no entran al recibo/)
+  })
+
+  it('el preview avisa de los cobros o devoluciones con comisión por revisar (resolución 16), sin bloquear', async () => {
+    mockPreview.mockResolvedValue({
+      clases: 2,
+      comisiones: 0,
+      propinas: 0,
+      reversos: 0,
+      personas: 1,
+      total: '200.00',
+      huella: 'h'.repeat(64),
+      puedeCerrar: true,
+      bloqueos: [],
+      huerfanas: 0,
+      propinasSinDueno: { n: 0, total: '0.00' },
+      comisionesPorRevisar: 2,
+    })
+    const r = parse(await handlers.get('close_service_pay_period')!({ venueId: 'v1', fecha: '2026-09-15' }, {}))
+    expect(r).toMatchObject({ requiresConfirmation: true })
+    expect(r.message).toMatch(/^Se congelan 2 clases de 1 personas/)
+    expect(r.message).toMatch(/2 cobro\(s\) o devolución\(es\) con comisión por revisar/)
+  })
+
+  it('config incluye si está activado, desde cuándo y las ventanas de propinas', async () => {
+    mockEstado.mockResolvedValue({ activado: true, startDate: '2026-10-01', propinasEncendidas: true })
+    mockVentanas.mockResolvedValue([{ desde: '2026-10-03T18:00:00.000Z', hasta: null }])
+    const r = parse(await handlers.get('staff_service_pay_config')!({ venueId: 'v1' }, {}))
+    expect(r.activacion).toEqual({
+      activado: true,
+      startDate: '2026-10-01',
+      propinasEncendidas: true,
+      ventanasDePropinas: [{ desde: '2026-10-03T18:00:00.000Z', hasta: null }],
+    })
+    expect(mockEstado).toHaveBeenCalledWith(expect.anything(), 'o1')
+    expect(mockVentanas).toHaveBeenCalledWith('o1')
+  })
+
+  it('el desglose de un periodo ABIERTO con vista «recibo» devuelve el recibo en vivo (con comisiones y propinas)', async () => {
+    mockPeriodoDeFecha.mockResolvedValue({ id: 'p9', status: 'OPEN' })
+    mockRecibo.mockResolvedValue({
+      persona: 'Carla',
+      renglones: [],
+      total: '170.00',
+      cantidad: 4,
+      siguiente: null,
+      totalesPorTipo: { PROPINA: '80.00' },
+    })
+    const r = parse(
+      await handlers.get('staff_service_pay_detail')!({ venueId: 'v1', staffId: 'c', fecha: '2026-08-15', vista: 'recibo' }, {}),
+    )
+    expect(r).toMatchObject({ cerrado: false, recibo: { total: '170.00', totalesPorTipo: { PROPINA: '80.00' } } })
+    expect(mockDetalle).not.toHaveBeenCalled()
+    // Sin `vista`, el periodo abierto sigue dando el desglose clase por clase.
+    mockDetalle.mockResolvedValue({ items: [], nextCursor: null })
+    parse(await handlers.get('staff_service_pay_detail')!({ venueId: 'v1', staffId: 'c', fecha: '2026-08-15' }, {}))
+    expect(mockDetalle).toHaveBeenCalledTimes(1)
+    expect(mockRecibo).toHaveBeenCalledTimes(1)
+  })
+
+  describe('configure_service_pay', () => {
+    const conf = (args: Record<string, unknown>) => handlers.get('configure_service_pay')!({ venueId: 'v1', ...args }, {})
+
+    it('activar: la vista previa dice actual → nuevo y no escribe; confirmar activa y audita una vez', async () => {
+      const p = parse(await conf({ accion: 'activar', periodicidad: 'SEMIMONTHLY' }))
+      expect(p).toMatchObject({ ok: false, requiresConfirmation: true, actual: { activado: false } })
+      expect(p.message).toMatch(/quincenal/)
+      expect(p.message).toMatch(/agrégalo como ajuste/)
+      expect(mockActivar).not.toHaveBeenCalled()
+      expect(auditMcpWrite).not.toHaveBeenCalled()
+      mockActivar.mockResolvedValue({ startDate: '2026-10-01', yaActivado: false })
+      const r = parse(await conf({ accion: 'activar', periodicidad: 'SEMIMONTHLY', confirm: true }))
+      expect(r).toMatchObject({ ok: true, startDate: '2026-10-01' })
+      expect(mockActivar).toHaveBeenCalledWith({ userId: 's1', venueId: 'v1', periodicidad: 'SEMIMONTHLY' })
+      expect(auditMcpWrite).toHaveBeenCalledTimes(1)
+      expect(auditMcpWrite).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ action: 'SERVICE_PAY_ACTIVATED', entityId: 'o1' }),
+      )
+      expect(mockRequireWrite).toHaveBeenCalledWith(expect.anything(), 'staffpay:close', expect.any(String))
+    })
+
+    it('si otra persona activó entre la vista previa y el confirmar (yaActivado), no se audita de nuevo', async () => {
+      mockActivar.mockResolvedValue({ startDate: '2026-09-01', yaActivado: true })
+      expect(parse(await conf({ accion: 'activar', periodicidad: 'MONTHLY', confirm: true }))).toMatchObject({ ok: true, yaActivado: true })
+      expect(auditMcpWrite).not.toHaveBeenCalled()
+    })
+
+    it('activar sin periodicidad la pide; ya activado no ofrece confirmar', async () => {
+      expect(parse(await conf({ accion: 'activar' }))).toMatchObject({ ok: false, needsInput: true, field: 'periodicidad' })
+      mockEstado.mockResolvedValue({ activado: true, startDate: '2026-09-01', propinasEncendidas: false })
+      const r = parse(await conf({ accion: 'activar', periodicidad: 'MONTHLY' }))
+      expect(r).toMatchObject({ ok: false, sinCambios: true })
+      expect(r.requiresConfirmation).toBeUndefined()
+    })
+
+    it('propinas: apagadas → encendidas; confirmar llama al service y audita; repetir el estado actual no ofrece confirmar', async () => {
+      mockEstado.mockResolvedValue({ activado: true, startDate: '2026-09-01', propinasEncendidas: false })
+      expect(parse(await conf({ accion: 'propinas' }))).toMatchObject({ needsInput: true, field: 'encender' })
+      const p = parse(await conf({ accion: 'propinas', encender: true }))
+      expect(p).toMatchObject({ requiresConfirmation: true })
+      expect(p.message).toMatch(/apagadas → encendidas/)
+      expect(mockPropinas).not.toHaveBeenCalled()
+      mockPropinas.mockResolvedValue({ encendidas: true })
+      expect(parse(await conf({ accion: 'propinas', encender: true, confirm: true }))).toMatchObject({ ok: true, encendidas: true })
+      expect(mockPropinas).toHaveBeenCalledWith({ userId: 's1', venueId: 'v1', encender: true })
+      expect(auditMcpWrite).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ action: 'SERVICE_PAY_TIPS_SET' }))
+      expect(parse(await conf({ accion: 'propinas', encender: false }))).toMatchObject({ sinCambios: true })
+    })
+
+    it('sin activar no se prenden las propinas; sin staffpay:close no hay ni vista previa', async () => {
+      expect(parse(await conf({ accion: 'propinas', encender: true }))).toMatchObject({
+        ok: false,
+        error: expect.stringMatching(/Activa primero/),
+      })
+      mockHasPermission.mockReturnValue(false)
+      expect(parse(await conf({ accion: 'activar', periodicidad: 'MONTHLY' }))).toMatchObject({
+        ok: false,
+        error: expect.stringMatching(/staffpay:close/),
+      })
+      expect(mockEstado).toHaveBeenCalledTimes(1)
+    })
+
+    it('una sede fuera del alcance de la conexión se rechaza antes de leer o escribir nada', async () => {
+      await expect(conf({ venueId: 'foreign', accion: 'activar', periodicidad: 'MONTHLY', confirm: true })).rejects.toThrow('out of scope')
+      expect(mockEstado).not.toHaveBeenCalled()
+      expect(mockActivar).not.toHaveBeenCalled()
+      expect(auditMcpWrite).not.toHaveBeenCalled()
+    })
+
+    it('un rechazo del service (falta el permiso en otra sede) es una respuesta, no un 500, y no audita', async () => {
+      mockActivar.mockRejectedValue(
+        Object.assign(new Error('Esta acción afecta a toda la organización: necesitas staffpay:close en todas las sedes'), {
+          statusCode: 403,
+        }),
+      )
+      const r = parse(await conf({ accion: 'activar', periodicidad: 'MONTHLY', confirm: true }))
+      expect(r).toMatchObject({ ok: false, error: expect.stringMatching(/todas las sedes/) })
+      expect(auditMcpWrite).not.toHaveBeenCalled()
+    })
+
+    it('por el catálogo real: confirm:true sin el token de la vista previa no escribe; con él, sí', async () => {
+      const server = new McpServer({ name: 'staffpay', version: '1' })
+      const s = { ...scope, scopes: ['mcp:read', 'mcp:write'] } as unknown as McpScope
+      configureToolCatalog(server, s)
+      registerStaffPayTools(server, s)
+      const client = new Client({ name: 'staffpay-test', version: '1' })
+      const [a, b] = InMemoryTransport.createLinkedPair()
+      await Promise.all([server.connect(a), client.connect(b)])
+      try {
+        const call = async (args: Record<string, unknown>) =>
+          JSON.parse(
+            ((await client.callTool({ name: 'configure_service_pay', arguments: args })).content as Array<{ text: string }>)[0].text,
+          )
+        mockActivar.mockResolvedValue({ startDate: '2026-10-01', yaActivado: false })
+        expect(await call({ venueId: 'v1', accion: 'activar', periodicidad: 'MONTHLY', confirm: true })).toMatchObject({
+          needsInput: true,
+          field: 'confirmationToken',
+        })
+        expect(mockActivar).not.toHaveBeenCalled()
+        const p = await call({ venueId: 'v1', accion: 'activar', periodicidad: 'MONTHLY' })
+        expect(p).toMatchObject({
+          requiresConfirmation: true,
+          confirmationArguments: { venueId: 'v1', accion: 'activar', periodicidad: 'MONTHLY' },
+        })
+        // El token es de ESTA periodicidad: con otra no sirve.
+        const otra = await call({
+          ...p.confirmationArguments,
+          periodicidad: 'SEMIMONTHLY',
+          confirm: true,
+          confirmationToken: p.confirmationToken,
+        })
+        expect(otra).toMatchObject({ needsInput: true, field: 'confirmationToken' })
+        expect(mockActivar).not.toHaveBeenCalled()
+        expect(await call({ ...p.confirmationArguments, confirm: true, confirmationToken: p.confirmationToken })).toMatchObject({
+          ok: true,
+        })
+        expect(mockActivar).toHaveBeenCalledTimes(1)
+      } finally {
+        await client.close()
+        await server.close()
+      }
+    })
   })
 })

@@ -79,6 +79,15 @@ export const ajusteClaseSchema = z.object({
 export const periodicidadSchema = z.object({
   periodicidad: z.enum(['MONTHLY', 'SEMIMONTHLY'], { errorMap: () => ({ message: 'Elige mensual o quincenal' }) }),
 })
+/** Fase 3 §7.1: activar pago al personal confirma la periodicidad (también la mensual de fábrica). Misma forma. */
+export const activarSchema = periodicidadSchema
+/** Fase 3 §6.3: «Pagar las propinas en el recibo», sí o no. */
+export const propinasSchema = z.object({
+  encender: z.boolean({
+    required_error: 'Indica si las propinas se pagan en el recibo',
+    invalid_type_error: 'Indica si las propinas se pagan en el recibo',
+  }),
+})
 export const fechaRequeridaQuerySchema = z.object({ fecha: fechaSchema })
 /** «Ver periodos anteriores»: el listado se pide por páginas de 24; nada se recorta en silencio. */
 export const listaPeriodosQuerySchema = z.object({ antesDe: fechaSchema.optional() })

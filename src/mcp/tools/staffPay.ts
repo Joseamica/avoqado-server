@@ -11,6 +11,12 @@ import { cerrarPeriodo, previewCierre, type Bloqueo } from '@/services/dashboard
 import { agregarAjusteManual, previewAjusteManual } from '@/services/dashboard/staffPay/ajustesManuales.service'
 import { marcarPagado, previewPagado, reciboDePersona } from '@/services/dashboard/staffPay/recibos.service'
 import { periodoQueContieneFecha } from '@/services/dashboard/staffPay/periodosGuardados'
+import {
+  activarPagoAlPersonal,
+  cambiarPropinas,
+  estadoActivacion,
+  ventanasDePropinas,
+} from '@/services/dashboard/staffPay/activacion.service'
 import { liquidarDiferencia, previewLiquidacion } from '@/services/dashboard/staffPay/liquidacion.service'
 import { diferenciasDelPeriodo, FilaDiferencia } from '@/services/dashboard/staffPay/diferencias.service'
 import {
@@ -112,7 +118,7 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'staff_service_pay_summary',
-    'Pay-per-service earnings for the current (open) pay period of a venue you can access: total, classes paid, staff count, exceptions (classes that cannot be valued yet and why) and a per-person total. Amounts in Mexican pesos. Covers every venue of the organization you can read; partial=true means some venues were left out for lack of permission. Requires staffpay:read.',
+    'Pay-per-service earnings for a pay period of a venue you can access (open: live; closed: frozen): total, classes paid, the sales commissions and tips that go into the pay receipt, staff count, exceptions (classes that cannot be valued yet and why) and a per-person total with its classes, commissions and tips. Amounts in Mexican pesos. Covers every venue of the organization you can read; partial=true means some venues were left out for lack of permission. This is what the business OWES each person this period. Requires staffpay:read.',
     {
       venueId: z.string().min(1).max(64).describe('Venue in your scope'),
       fecha,
@@ -131,7 +137,7 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'staff_service_pay_detail',
-    'Class-by-class breakdown of one staff member pay in a pay period: date, venue, class, seats counted, how they were counted, level, amount, or the exception that blocks it. For a closed period it returns the frozen receipt (classes, differences, adjustments, total for the whole receipt, paid date) with the same cursor, limit and venue filter. Paginated with a cursor. Amounts in Mexican pesos. Requires staffpay:read.',
+    'Line-by-line pay receipt of one staff member in a pay period: classes (date, venue, seats, level, amount or the exception that blocks it), sales commissions (one per sale), tips (grouped by day), refunds, voided commissions and manual adjustments, with the total of the whole receipt. For a closed period it returns the frozen receipt; for an open period it returns the class-by-class breakdown, or the live receipt with commissions and tips if you pass vista:"recibo". Use it to answer "¿cuánto se le debe a X?" or "¿cuánta propina le toca a X?". Paginated with a cursor. Amounts in Mexican pesos. Requires staffpay:read.',
     {
       venueId: z.string().min(1).max(64).describe('Venue in your scope'),
       staffId: z.string().min(1).max(64).describe('Staff member to break down'),
@@ -139,8 +145,12 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
       sede: sedeArg,
       cursor: z.string().optional().describe('nextCursor (open period) or siguiente (closed receipt) from the previous page'),
       limit: z.number().int().positive().max(100).optional().describe('Max rows (default 50)'),
+      vista: z
+        .enum(['clases', 'recibo'])
+        .optional()
+        .describe('Open period only: "recibo" returns the live receipt with commissions and tips instead of the class-by-class breakdown'),
     },
-    async ({ venueId, staffId, fecha: f, sede, cursor, limit }) => {
+    async ({ venueId, staffId, fecha: f, sede, cursor, limit, vista }) => {
       // PRIMERO el alcance de la CONEXIÓN (sede incluida), también para un periodo cerrado: `reciboDePersona` sólo conoce
       // al usuario.
       if (sede) guard.venueFilter(sede)
@@ -150,10 +160,10 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
       if (!v) return text({ ok: false, error: 'Sede no encontrada' })
       const dia = f ?? hoyLocal(v.timezone || 'America/Mexico_City')
       // El recibo congelado respeta cursor, límite y sede (Codex R2-R1-21).
-      const recibo = async () => {
+      const recibo = async (cerrado: boolean) => {
         try {
           return text({
-            cerrado: true,
+            cerrado,
             recibo: await reciboDePersona({ userId: scope.staffId, venueId, staffId, fecha: dia, sede, cursor, limit: limit ?? 50 }),
           })
         } catch (e) {
@@ -168,14 +178,16 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
           })
         }
       }
-      if ((await periodoQueContieneFecha(prisma, v.organizationId, dia))?.status === 'CLOSED') return recibo()
+      if ((await periodoQueContieneFecha(prisma, v.organizationId, dia))?.status === 'CLOSED') return recibo(true)
+      // Fase 3 §12: el recibo en vivo de un periodo abierto (clases + comisiones + propinas), lo que se le debe hoy.
+      if (vista === 'recibo') return recibo(false)
       try {
         return text(
           await detallePersona({ userId: scope.staffId, venueId, staffId, fecha: dia, sede, despuesDe: cursor, limit: limit ?? 50 }),
         )
       } catch (e) {
         // Se cerró entre la consulta y el desglose: el server responde PERIODO_CERRADO y se lee lo congelado.
-        if ((e as { code?: string })?.code === 'PERIODO_CERRADO') return recibo()
+        if ((e as { code?: string })?.code === 'PERIODO_CERRADO') return recibo(true)
         throw e
       }
     },
@@ -183,7 +195,7 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'staff_service_pay_config',
-    'How pay-per-service is configured: the pay levels of the organization, which level each person has and since when, and the pay tables of the venue (seats occupied × level = amount) with the version in force on the given date. Requires staffpay:read.',
+    'How pay-per-service is configured: whether pay for staff is turned on and since when, whether tips are paid inside the receipt (and the on/off windows), the pay levels of the organization, which level each person has and since when, and the pay tables of the venue (seats occupied × level = amount) with the version in force on the given date. Requires staffpay:read.',
     { venueId: z.string().min(1).max(64).describe('Venue in your scope'), fecha },
     async ({ venueId, fecha: f }) => {
       const no = await puedeLeer(venueId)
@@ -191,12 +203,14 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
       const v = await prisma.venue.findUnique({ where: { id: venueId }, select: { organizationId: true, timezone: true } })
       if (!v) return text({ ok: false, error: 'Sede no encontrada' })
       const dia = f ?? hoyLocal(v.timezone || 'America/Mexico_City')
-      const [niveles, asignaciones, tablas] = await Promise.all([
+      const [niveles, asignaciones, tablas, estado, ventanas] = await Promise.all([
         listarNiveles(v.organizationId),
         nivelesVigentes(v.organizationId, dia),
         listarTablas(venueId, dia),
+        estadoActivacion(prisma, v.organizationId),
+        ventanasDePropinas(v.organizationId),
       ])
-      return text({ fecha: dia, niveles, asignaciones, tablas })
+      return text({ fecha: dia, activacion: { ...estado, ventanasDePropinas: ventanas }, niveles, asignaciones, tablas })
     },
   )
 
@@ -235,7 +249,7 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'close_service_pay_period',
-    'Close a pay-per-service period for the whole organization: freezes the pay of every finished class into one receipt per person. Two steps: call without confirm to get the preview (classes, people, total, blockers) and its expectedSourceFingerprint; then call again with confirm:true and that fingerprint. If numbers changed in between it returns the new preview instead of closing. Requires staffpay:close in every venue of the period.',
+    'Close a pay-per-service period for the whole organization: freezes into one receipt per person the pay of every finished class, the sales commissions and (if the business pays them in the receipt) the tips that are due. Two steps: call without confirm to get the preview (classes, commissions, tips, people, total, blockers, tips without a person, sales or refunds whose commission is pending review) and its expectedSourceFingerprint; then call again with confirm:true and that fingerprint. If numbers changed in between it returns the new preview instead of closing. Requires staffpay:close in every venue of the period.',
     {
       venueId: z.string().min(1).max(64).describe('Venue in your scope'),
       fecha: z
@@ -273,14 +287,29 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
               question: `Hay ${p.huerfanas} reserva(s) de clase sin horario que no cuentan para ningún pago. Si el usuario lo acepta, vuelve a pedir la vista previa con confirmarHuerfanas:true.`,
             })
           }
+          // Fase 3 §12: el cierre nombra lo que congela (clases, comisiones, propinas), lo que descuenta y lo que deja fuera.
+          const lista = (xs: string[]) => (xs.length < 2 ? xs.join('') : `${xs.slice(0, -1).join(', ')} y ${xs[xs.length - 1]}`)
+          const que = lista([
+            `${p.clases} clases`,
+            ...(p.comisiones ? [`${p.comisiones} comisiones`] : []),
+            ...(p.propinas ? [`${p.propinas} propinas`] : []),
+          ])
+          const anulaciones = p.reversos ? ` Se descuentan ${p.reversos} anulación(es) de comisiones ya pagadas.` : ''
+          const sinDueno = p.propinasSinDueno.n
+            ? ` ${p.propinasSinDueno.n} propina(s) sin persona ($${pesos(p.propinasSinDueno.total)}) no entran al recibo: asigna quién atendió la orden y entrarán en el siguiente cierre.`
+            : ''
+          // Resolución 16: efectos de comisión en revisión de cobros o devoluciones. Avisa, no bloquea.
+          const porRevisar = p.comisionesPorRevisar
+            ? ` ${p.comisionesPorRevisar} cobro(s) o devolución(es) con comisión por revisar: su comisión no se aplicó todavía.`
+            : ''
           return text({
             ok: false,
             requiresConfirmation: true,
             preview: p,
             expectedSourceFingerprint: p.huella,
-            message: `Se congelan ${p.clases} clases de ${p.personas} personas, $${pesos(p.total)}.${
+            message: `Se congelan ${que} de ${p.personas} personas, $${pesos(p.total)}.${anulaciones}${sinDueno}${porRevisar}${
               p.huerfanas > 0 ? ` ${p.huerfanas} reserva(s) de clase sin horario no cuentan para ningún pago.` : ''
-            } Lo que cambie después aparecerá como diferencia pendiente.`,
+            } Lo que cambie después aparecerá como diferencia pendiente; una devolución o anulación de una venta entra sola en el siguiente recibo.`,
           })
         }
         const r = await cerrarPeriodo({
@@ -299,6 +328,98 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
             data: { total: r.total, personas: r.personas },
           })
         }
+        return text({ ok: true, ...r })
+      } catch (e) {
+        return fallo(e)
+      }
+    },
+  )
+
+  server.tool(
+    'configure_service_pay',
+    'Turn on pay for staff (pay-per-service) for the whole organization, or choose whether tips are paid inside the pay receipt. accion "activar": sales commissions (and tips, if on) start adding to the receipts from the start of the current period, and it fixes the period length (periodicidad MONTHLY or SEMIMONTHLY, ask the owner); earlier commissions are not added. accion "propinas": encender true pays tips inside the receipt, false hands them out separately; turning them off only affects future payments. Two steps: call without confirm to show current → new; then confirm:true. Requires staffpay:close in every venue of the organization.',
+    {
+      venueId: z.string().min(1).max(64).describe('Venue in your scope'),
+      accion: z.enum(['activar', 'propinas']).describe('activar | propinas'),
+      periodicidad: z.enum(['MONTHLY', 'SEMIMONTHLY']).optional().describe('For activar: MONTHLY or SEMIMONTHLY'),
+      encender: z.boolean().optional().describe('For propinas: true = tips inside the receipt; false = handed out separately'),
+      confirm: z.boolean().optional(),
+    },
+    async ({ venueId, accion, periodicidad, encender, confirm }) => {
+      const no = await puedeEscribir(venueId)
+      if (no) return text({ ok: false, error: no })
+      if (accion === 'activar' && !periodicidad)
+        return text({
+          ok: false,
+          needsInput: true,
+          field: 'periodicidad',
+          question: '¿El pago al personal se cierra cada mes (MONTHLY) o cada quincena (SEMIMONTHLY)?',
+        })
+      if (accion === 'propinas' && encender === undefined)
+        return text({
+          ok: false,
+          needsInput: true,
+          field: 'encender',
+          question: '¿Las propinas se pagan dentro del recibo (true) o se entregan aparte (false)?',
+        })
+      try {
+        const v = await prisma.venue.findUnique({ where: { id: venueId }, select: { organizationId: true } })
+        if (!v) return text({ ok: false, error: 'Sede no encontrada' })
+        const actual = await estadoActivacion(prisma, v.organizationId)
+        if (accion === 'activar') {
+          if (actual.activado)
+            return text({
+              ok: false,
+              sinCambios: true,
+              actual,
+              error: `Pago al personal ya está activado desde el ${actual.startDate}: no hay nada que cambiar.`,
+            })
+          if (confirm !== true)
+            return text({
+              ok: false,
+              requiresConfirmation: true,
+              actual,
+              message: `Pago al personal: sin activar → activado (${periodicidad === 'MONTHLY' ? 'mensual' : 'quincenal'}). Desde el inicio del periodo actual se suman al recibo las comisiones${actual.propinasEncendidas ? ' y las propinas' : ''}; las anteriores no se suman: si debes alguna, agrégalo como ajuste.`,
+            })
+          const r = await activarPagoAlPersonal({ userId: scope.staffId, venueId, periodicidad: periodicidad! })
+          if (!r.yaActivado)
+            await auditMcpWrite(scope, {
+              action: 'SERVICE_PAY_ACTIVATED',
+              entity: 'Organization',
+              entityId: v.organizationId,
+              venueId,
+              data: { startDate: r.startDate, periodicidad },
+            })
+          return text({ ok: true, ...r })
+        }
+        if (!actual.activado) return text({ ok: false, actual, error: 'Activa primero el pago al personal (accion "activar").' })
+        if (actual.propinasEncendidas === encender)
+          return text({
+            ok: false,
+            sinCambios: true,
+            actual,
+            error: `Las propinas ya están ${encender ? 'encendidas' : 'apagadas'}: no hay nada que cambiar.`,
+          })
+        const de = (x: boolean) => (x ? 'encendidas' : 'apagadas')
+        if (confirm !== true)
+          return text({
+            ok: false,
+            requiresConfirmation: true,
+            actual,
+            message: `Propinas en el recibo: ${de(actual.propinasEncendidas)} → ${de(encender!)}.${
+              encender
+                ? ' Si hoy las entregas aparte cada día, no las pagues dos veces.'
+                : ' Lo que ya entró no se pierde; sólo los cobros nuevos dejan de sumarse.'
+            }`,
+          })
+        const r = await cambiarPropinas({ userId: scope.staffId, venueId, encender: encender! })
+        await auditMcpWrite(scope, {
+          action: 'SERVICE_PAY_TIPS_SET',
+          entity: 'Organization',
+          entityId: v.organizationId,
+          venueId,
+          data: { encender },
+        })
         return text({ ok: true, ...r })
       } catch (e) {
         return fallo(e)

@@ -104,6 +104,7 @@ it('pago por servicio: liquidar una diferencia escribe; la lista de diferencias 
   expect(TOOL_EFFECTS.settle_service_pay_difference).toBe('write')
   expect(TOOL_EFFECTS.adjust_service_pay_class).toBe('write')
   expect(TOOL_EFFECTS.staff_service_pay_differences).toBe('read')
+  expect(TOOL_EFFECTS.configure_service_pay).toBe('write')
 })
 
 it('cada herramienta del código tiene exactamente una declaración de efectos', () => {

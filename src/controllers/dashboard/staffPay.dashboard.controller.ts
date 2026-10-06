@@ -2,6 +2,7 @@ import { NextFunction, Request, Response } from 'express'
 import { BadRequestError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { venueHasServicePayAccess } from '../../services/dashboard/staffPay/acceso'
+import * as activacion from '../../services/dashboard/staffPay/activacion.service'
 import * as niveles from '../../services/dashboard/staffPay/niveles.service'
 import * as tablas from '../../services/dashboard/staffPay/tablas.service'
 import * as reporte from '../../services/dashboard/staffPay/reporte.service'
@@ -25,7 +26,9 @@ export function ctx(req: Request): { venueId: string; userId: string } {
 export async function getAccess(req: Request, res: Response, next: NextFunction) {
   try {
     const { venueId } = ctx(req)
-    res.json({ enabled: await venueHasServicePayAccess(venueId) })
+    const { organizationId } = await orgDeVenue(venueId)
+    // Fase 3 §10: además del módulo, si el dueño ya activó pago al personal, desde cuándo y si las propinas van al recibo.
+    res.json({ enabled: await venueHasServicePayAccess(venueId), ...(await activacion.estadoActivacion(prisma, organizationId)) })
   } catch (error) {
     next(error)
   }
@@ -283,6 +286,9 @@ export const listPeriods = manejar(req =>
   periodos.listarPeriodos({ ...ctx(req), antesDe: req.query.antesDe ? String(req.query.antesDe) : undefined, limit: 24 }),
 )
 export const patchPeriodicity = manejar(req => periodos.cambiarPeriodicidad({ ...ctx(req), periodicidad: req.body.periodicidad }))
+// Fase 3 (spec §7.1, §6.3). Campo por campo: `ahora` es de pruebas y jamás sale de la petición.
+export const postActivate = manejar(req => activacion.activarPagoAlPersonal({ ...ctx(req), periodicidad: req.body.periodicidad }))
+export const putTips = manejar(req => activacion.cambiarPropinas({ ...ctx(req), encender: req.body.encender }))
 export const getClosePreview = manejar(req => cierre.previewCierre({ ...ctx(req), fecha: String(req.query.fecha) }))
 export const postClose = manejar(req => {
   const { fecha, huellaEsperada, confirmarHuerfanas } = req.body

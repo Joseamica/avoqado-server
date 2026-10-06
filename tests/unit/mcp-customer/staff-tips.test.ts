@@ -114,6 +114,7 @@ jest.mock('@/utils/prismaClient', () => ({
 type ZodLike = { safeParse: (v: unknown) => { success: boolean } }
 const handlers = new Map<string, (a: Record<string, unknown>, e: unknown) => Promise<{ content: Array<{ text: string }> }>>()
 const schemas = new Map<string, Record<string, ZodLike>>()
+const descripciones = new Map<string, string>()
 const scope = {
   staffId: 's1',
   activeOrg: 'o1',
@@ -129,6 +130,7 @@ beforeAll(() => {
       tool: (...a: unknown[]) => {
         handlers.set(a[0] as string, a[a.length - 1] as never)
         schemas.set(a[0] as string, a[2] as never)
+        descripciones.set(a[0] as string, a[1] as string)
       },
     } as never,
     scope,
@@ -206,5 +208,14 @@ describe('staff_tips tool', () => {
 
     expect(out.staff).toEqual([{ staffId: 'ana', name: 'Ana Sofia Gonzalez', tips: 10, payments: 1 }])
     expect(out.total).toBe(60)
+  })
+})
+
+describe('descripciones (spec fase 3 §6.3, Codex r1-16)', () => {
+  it('lo que se le DEBE a alguien en propinas lo contesta el recibo, no estas tools', () => {
+    for (const n of ['staff_tips', 'tips_over_time', 'staff_ranking']) {
+      expect(descripciones.get(n)).toMatch(/staff_service_pay_detail/)
+      expect(descripciones.get(n)).not.toMatch(/le toca a X/)
+    }
   })
 })
