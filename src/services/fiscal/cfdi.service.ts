@@ -22,6 +22,16 @@ import { clasificarOrden, hayBloqueados, impuestosSatDe, resolverTratamiento } f
 import { IvaTratamiento, tuplaDesdeTratamiento } from './ivaTratamiento'
 import { logAction, LogActionParams } from '../dashboard/activity-log.service'
 import { sendNewCfdiByEmail } from './cfdiEmail.service'
+import { conceptoDesdeElPayload, cotaDeRedondeoCents, cuadrarConElPac, totalSegunElPacCents, type TrasladoParaElPac } from './reglaDelPac'
+import {
+  descuentoDeCuentaPorRenglon,
+  descuentoPropioEnCabeceraCents,
+  DESCUENTOS_PARA_CONCEPTOS,
+  type FilaDeDescuento,
+  netoRenglonCents,
+} from './descuentoPorRenglon'
+import { filasDeDescuentoCompletas } from './filasDeDescuentoTx'
+import { leerReparto } from '../shared/repartoDescuento'
 
 // ─── List CFDIs ───────────────────────────────────────────────────────────────
 
@@ -184,7 +194,7 @@ export interface LoadedOrderBundle {
    */
   paidCents?: number
   /**
-   * Razones por las que ESTA orden queda fuera del sobre seguro (promoción, reserva con extras, cargo
+   * Razones por las que ESTA orden queda fuera del sobre seguro (reserva con extras, cargo
    * por servicio, IVA mixto con descuento general…). Con razones, el motor NO timbra: responde
    * VALIDATION_FAILED con el texto, y el ticket/recibo no ofrecen autofactura.
    */
@@ -430,7 +440,8 @@ export async function issueCfdiForOrder(
   // ticket es peor que ninguno — no se timbra, y la razón se le enseña a quien factura.
   // Se compara el DOCUMENTO que se manda (los conceptos como los calculará el PAC), no los agregados
   // de la orden: con precios NET el PAC suma el IVA encima, con precios IVA-incluido lo extrae.
-  const documentoCents = totalDelDocumentoCents(bundle.order)
+  // B3a Tarea 6b: el documento que SE MANDA, sumado como el PAC; tras el ajuste del cargador, la suma por concepto ya no es lo cobrado a propósito.
+  const documentoCents = totalSegunElPacCents(invoiceParams.items.map(conceptoDesdeElPayload))
   // Con razones del sobre el descuento pudo quedar sin repartir a propósito: el desajuste de importe ya
   // no dice nada nuevo y confundiría («no coincide con lo cobrado» cuando el cobro está bien).
   if (!bundle.unsupportedReasons?.length && bundle.paidCents !== undefined && bundle.paidCents !== documentoCents) {
@@ -476,12 +487,23 @@ export async function issueCfdiForOrder(
 }
 
 const PROCESANDO = 'La factura de esta venta se está procesando; intenta de nuevo en unos minutos.'
+/** D9 (B3a): no queda ningún concepto con importe que facturar. */
+export const MOTIVO_TODO_CORTESIA =
+  'Esta venta no tiene importe que facturar: todos sus artículos son cortesía o tienen descuento completo.'
 /** Venta MIXTA sin contrato: el dueño la desbloquea confirmando que el precio ya incluía IVA (§4.6). */
 export const MOTIVO_CONTRATO_DESCONOCIDO =
   'Esta venta tiene productos con IVA distinto de 16 % y no consta que se cobró con IVA incluido; confírmalo antes de facturar.'
 /** Venta MIXTA que separó el impuesto al cobrar: no se confirma (§4.2), se dice por qué. */
 export const MOTIVO_IVA_APARTE =
   'Esta venta cobró el IVA aparte y tiene productos con IVA distinto de 16 %; no se puede facturar desde Avoqado. Si necesitas factura, escríbenos a soporte.'
+// B3a: los motivos de la regla del PAC viven con ella (`reglaDelPac.ts`, para probar la decisión pura); se publican también aquí.
+export {
+  motivoNoCuadra,
+  MOTIVO_BUSQUEDA_LIMITADA,
+  MOTIVO_CONCEPTO_INVALIDO_ANTE_EL_SAT,
+  MOTIVO_OCHO_SIN_REGLA,
+  MOTIVO_MEDIO_CENTAVO_SIN_REGLA,
+} from './reglaDelPac'
 type IssueParams = Parameters<typeof issueCfdiForOrder>[0]
 
 /** Reservar y recapturar son las únicas rutas que leen la venta viva. El PAC sólo recibe la foto. */
@@ -555,7 +577,8 @@ export async function emitirConEntrada(
       isGlobal: false,
     })
     const reasons = motivosParaMostrar(validation.reasons, bundle.unsupportedReasons ?? [])
-    const documentoCents = totalDelDocumentoCents(bundle.order)
+    // B3a Tarea 6b: el documento que SE MANDA, sumado como el PAC; tras el ajuste del cargador, la suma por concepto ya no es lo cobrado a propósito.
+    const documentoCents = totalSegunElPacCents(entrada.params.items.map(conceptoDesdeElPayload))
     if (!bundle.unsupportedReasons?.length && bundle.paidCents !== undefined && bundle.paidCents !== documentoCents) {
       const pesos = (c: number) => `$${(c / 100).toFixed(2)}`
       reasons.push(
@@ -1002,6 +1025,8 @@ export function motivosParaMostrar(validacion: string[], delSobre: string[]): st
 }
 
 export type RenglonParaCfdi = {
+  /** `OrderItem.id`: la llave con que B2 guarda cada reparto. */
+  id?: string
   productName: string | null
   quantity: number
   unitPrice: any
@@ -1016,6 +1041,10 @@ export type RenglonParaCfdi = {
    * `taxRate` + `objetoImp` del producto, exactamente como antes del plan 3).
    */
   tratamiento?: IvaTratamiento
+  /** La promoción de la que nació (su total ya es neto; su descuento no está en la cabecera). */
+  orderPromotionId?: string | null
+  /** Cortesía (terminal o móvil): decide qué parte de su descuento vive en la cabecera. */
+  isCortesia?: boolean | null
 }
 
 const centavos = (d: any) => Math.round(Number(d ?? 0) * 100)
@@ -1071,9 +1100,12 @@ export interface ConceptosDeRenglon {
   items: RenglonParaCfdi[]
   /** Vacío = dentro del sobre seguro. Con texto = el motor lo BLOQUEA con esta razón, nunca timbra a ciegas. */
   motivos: string[]
+  /** B3a: lo que B3a desbloquea; el cargador lo calcula con la regla del PAC (`totalSegunElPacCents`). */
+  requiereReglaDelPac?: boolean
 }
 
-/** Reparte `cents` entre `pesos` en proporción, residuo de redondeo al último; Σ partes == cents. */
+/** Reparte `cents` entre `pesos` en proporción, residuo de redondeo al último; Σ partes == cents.
+ * B3a: se conserva DENTRO del renglón (producto y extras) por decisión del founder (1-oct): el proporcional movía centavos y, sin IVA incluido, el total. */
 function repartir(cents: number, pesos: number[]): number[] {
   if (pesos.length === 0) return []
   const suma = pesos.reduce((a, b) => a + b, 0)
@@ -1117,7 +1149,32 @@ const pesosTxt = (cents: number) => `$${(cents / 100).toFixed(2)}`
  * - El descuento del renglón (cortesía incluida) se reparte entre el producto y sus extras en proporción
  *   a su importe: ningún concepto queda con descuento > importe.
  */
-export function conceptosDesdeRenglon(it: RenglonParaCfdi, _orderId: string): ConceptosDeRenglon {
+/**
+ * Un renglón que va a la factura (bloque B3a): sus conceptos —producto y extras con precio— SIN descuento todavía, y lo que el
+ * renglón trae de suyo. El descuento se le pone después (`aplicarDescuentoAlRenglon`), cuando también se sabe lo que le toca de
+ * los descuentos de la cuenta.
+ */
+export interface RenglonExaminado {
+  /** `OrderItem.id` (lo que guardan los repartos de B2); sin id, su posición. */
+  llave: string
+  nombre: string
+  /** El IVA con que se agrupa para D8: el tratamiento, o la tupla vieja si es una entrada legacy. */
+  grupoIva: string
+  /** Lo que valen sus conceptos antes de cualquier descuento. */
+  brutoCents: number
+  /** Su descuento propio (`OrderItem.discountAmount`): de artículo, cortesía o promoción. */
+  propioCents: number
+  conceptos: RenglonParaCfdi[]
+  /** D9: el precio por kilo se derivó de lo cobrado (venta por peso con fracción de centavo); entra a `requiereReglaDelPac`. */
+  precioDerivado?: boolean
+}
+
+/** La llave del renglón: su id; sin id (entradas armadas a mano), su posición con ceros para que ordene igual que el arreglo. */
+export const llaveDeRenglon = (it: { id?: string | null }, indice: number): string => it.id ?? `#${String(indice).padStart(6, '0')}`
+
+const grupoIvaDe = (it: RenglonParaCfdi): string => it.tratamiento ?? `tasa:${Number(it.product?.taxRate ?? 0.16)}`
+
+export function examinarRenglon(it: RenglonParaCfdi, indice: number): RenglonExaminado | { omitido: true } | { motivos: string[] } {
   const extras = it.modifiers ?? []
   // El nombre guardado en la venta manda; si el camino de venta no lo guardó, el del catálogo (como en
   // el ticket y el inventario). «Producto» sólo si no hay ninguno de los dos.
@@ -1129,78 +1186,97 @@ export function conceptosDesdeRenglon(it: RenglonParaCfdi, _orderId: string): Co
   const productName = nombresSinPrecio.length > 0 ? `${nombreProducto} (${nombresSinPrecio.join(', ')})` : nombreProducto
   const porPeso = it.weightQuantity != null
   const unidades = porPeso ? Number(it.weightQuantity) : it.quantity
-  if (!(unidades > 0)) return { items: [], motivos: [`«${nombreProducto}»: cantidad inválida (${unidades}).`] }
-  const baseCents = importeConceptoCents({ unitPrice: it.unitPrice, quantity: unidades })
-  const totalCents = centavos(it.total)
-  const descuentoCents = centavos(it.discountAmount)
-  const extrasCents = totalCents - baseCents
-  const conPrecio = extras.filter(m => centavos(m.price) > 0)
-
-  if (extrasCents < 0) {
-    return {
-      items: [],
-      motivos: [
-        `«${nombreProducto}»: el importe cobrado (${pesosTxt(totalCents)}) es menor que precio × cantidad (${pesosTxt(baseCents)}); no se puede reconstruir el concepto (promoción o recálculo).`,
-      ],
-    }
-  }
+  if (!(unidades > 0)) return { motivos: [`«${nombreProducto}»: cantidad inválida (${unidades}).`] }
   // Con tratamiento (plan 3) el IVA del renglón ya está decidido sin ambigüedad; un tratamiento no
   // timbrable (objeto 03/04) se detiene con el motivo de `impuestosSatDe`, nombrando el producto (como
   // hacía el mensaje legacy de abajo) para que quien factura sepa CUÁL corregir.
   if (it.tratamiento) {
     const sat = impuestosSatDe(it.tratamiento)
-    if ('bloqueado' in sat) return { items: [], motivos: [`«${nombreProducto}»: ${sat.motivo}`] }
+    if ('bloqueado' in sat) return { motivos: [`«${nombreProducto}»: ${sat.motivo}`] }
+  }
+  // D9 (spec planes 6-7): un renglón que no cobra nada —cortesía de «Cobrar» o de la terminal (descuento = total, también sobre
+  // una promoción), cortesía del móvil o importe libre regalado (total 0), promoción regalada— no va a la factura: la base de un
+  // traslado debe ser mayor que cero. Va DESPUÉS del producto por revisar, que detiene aunque esté regalado. Sin `total`
+  // (entradas armadas a mano) no se omite.
+  if (it.total != null && netoRenglonCents(it) === 0) return { omitido: true }
+  const totalCents = centavos(it.total)
+  const descuentoCents = centavos(it.discountAmount)
+  // Promoción (spec §4.2): su línea guarda el total YA neto y su descuento aparte (`promotion.service.ts`), a precio de lista.
+  // Su bruto es la suma; los demás renglones guardan el bruto en `total`. (Una promoción regalada ya se omitió arriba.)
+  const brutoRenglonCents = it.orderPromotionId ? totalCents + descuentoCents : totalCents
+  const conPrecio = extras.filter(m => centavos(m.price) > 0)
+  // Los extras deben explicar EXACTAMENTE la diferencia: precio por unidad × cantidad del padre (así lo
+  // guardan TPV y mobile). Si no cuadra —p. ej. un cambio de precio a media cuenta que dejó `unitPrice`
+  // viejo— no se inventa un extra con la diferencia.
+  const extrasEsperadosCents = conPrecio.reduce((sum, m) => sum + centavos(m.price) * (m.quantity ?? 1), 0) * (porPeso ? 1 : it.quantity)
+  let precioUnitario = new Prisma.Decimal(String(it.unitPrice))
+  let precioDerivado = false
+  let baseCents = importeConceptoCents({ unitPrice: precioUnitario, quantity: unidades })
+  if (porPeso) {
+    const exacto = precioUnitario.mul(new Prisma.Decimal(String(unidades)))
+    if (!exacto.equals(exacto.toDecimalPlaces(2))) {
+      // D9: el POS cobró precio × kilos redondeado a centavos, con la MISMA cuenta que el escritor
+      // (`Math.round(precio × kilos × 100)`, order.tpv.service.ts:1738 y order.mobile.service.ts:666), que con flotante puede bajar
+      // donde el redondeo decimal sube. Sólo esos dos resultados se aceptan (Codex r1 #5): con ellos el concepto lleva los kilos
+      // reales y el precio por kilo que explica EXACTO lo cobrado, con hasta 6 decimales (experimento de la Tarea 1). Con
+      // cualquier otro, los motivos de abajo («menor que…» / «no cuadra…») lo dicen.
+      const cobradoCents = brutoRenglonCents - extrasEsperadosCents
+      const delEscritor = Math.round(Number(it.unitPrice) * Number(it.weightQuantity) * 100)
+      if (cobradoCents === baseCents || cobradoCents === delEscritor) {
+        const derivado = new Prisma.Decimal(cobradoCents)
+          .div(100)
+          .div(new Prisma.Decimal(String(unidades)))
+          .toDecimalPlaces(6, Prisma.Decimal.ROUND_HALF_UP)
+        if (importeConceptoCents({ unitPrice: derivado, quantity: unidades }) !== cobradoCents) {
+          return {
+            motivos: [`«${nombreProducto}»: precio × kilos no cae en centavos exactos; no se puede garantizar el importe ante el PAC.`],
+          }
+        }
+        precioUnitario = derivado
+        baseCents = cobradoCents
+        precioDerivado = true
+      }
+    }
+  }
+  const extrasCents = brutoRenglonCents - baseCents
+
+  if (extrasCents < 0) {
+    return {
+      motivos: [
+        `«${nombreProducto}»: el importe cobrado (${pesosTxt(brutoRenglonCents)}) es menor que precio × cantidad (${pesosTxt(baseCents)}); no se puede reconstruir el concepto (promoción o recálculo).`,
+      ],
+    }
   }
   // Tasa 0 con «sí objeto de impuesto» es ambigua (¿tasa cero o exento?) y el constructor la convierte en
   // exento: hasta distinguirlas, fuera del sobre.
   const tasa = Number(it.product?.taxRate ?? 0.16)
   const objeto = it.product?.objetoImp ?? '02'
   if (objeto !== '01' && objeto !== '02') {
-    return { items: [], motivos: [`«${nombreProducto}»: objeto de impuesto ${objeto} no soportado.`] }
+    return { motivos: [`«${nombreProducto}»: objeto de impuesto ${objeto} no soportado.`] }
   }
   if (objeto === '01' && tasa !== 0) {
-    return { items: [], motivos: [`«${nombreProducto}»: producto «no objeto de impuesto» (01) con tasa ${tasa}; catálogo inconsistente.`] }
+    return { motivos: [`«${nombreProducto}»: producto «no objeto de impuesto» (01) con tasa ${tasa}; catálogo inconsistente.`] }
   }
   // Sólo en la entrada LEGACY (sin tratamiento): con tratamiento, IVA_0 y EXENTO son distintos y válidos.
   if (!it.tratamiento && tasa === 0 && objeto === '02') {
     return {
-      items: [],
       motivos: [`«${nombreProducto}»: producto con tasa 0 y objeto de impuesto 02 (tasa cero vs exento sin distinguir).`],
     }
   }
-  if (porPeso) {
-    // El PAC calcula con hasta 6 decimales; si precio × kilos no cae en centavos exactos, la suma del
-    // documento puede diferir de lo cobrado (0.5 kg × $39.99 = 19.995): fuera del sobre.
-    const exacto = new Prisma.Decimal(String(it.unitPrice))
-      .mul(new Prisma.Decimal(String(unidades)))
-      .toDecimalPlaces(2)
-      .equals(new Prisma.Decimal(String(it.unitPrice)).mul(new Prisma.Decimal(String(unidades))))
-    if (!exacto)
-      return {
-        items: [],
-        motivos: [`«${nombreProducto}»: precio × kilos no cae en centavos exactos; no se puede garantizar el importe ante el PAC.`],
-      }
-    if (it.product?.satUnitKey !== 'KGM') {
-      return { items: [], motivos: [`«${nombreProducto}»: venta por peso sin clave SAT de unidad de peso (KGM) en el producto.`] }
-    }
+  if (porPeso && it.product?.satUnitKey !== 'KGM') {
+    return { motivos: [`«${nombreProducto}»: venta por peso sin clave SAT de unidad de peso (KGM) en el producto.`] }
   }
-  // Los extras deben explicar EXACTAMENTE la diferencia: precio por unidad × cantidad del padre (así lo
-  // guardan TPV y mobile). Si no cuadra —p. ej. un cambio de precio a media cuenta que dejó `unitPrice`
-  // viejo— no se inventa un extra con la diferencia.
-  const extrasEsperadosCents = conPrecio.reduce((sum, m) => sum + centavos(m.price) * (m.quantity ?? 1), 0) * (porPeso ? 1 : it.quantity)
   if (extrasCents !== extrasEsperadosCents) {
     return {
-      items: [],
       motivos: [
-        `«${nombreProducto}»: el importe del renglón (${pesosTxt(totalCents)}) no cuadra con precio × cantidad + extras (${pesosTxt(baseCents + extrasEsperadosCents)}).`,
+        `«${nombreProducto}»: el importe del renglón (${pesosTxt(brutoRenglonCents)}) no cuadra con precio × cantidad + extras (${pesosTxt(baseCents + extrasEsperadosCents)}).`,
       ],
     }
   }
-  if (descuentoCents > totalCents) {
+  if (descuentoCents > brutoRenglonCents) {
     return {
-      items: [],
       motivos: [
-        `«${nombreProducto}»: el descuento (${pesosTxt(descuentoCents)}) es mayor que el importe del renglón (${pesosTxt(totalCents)}).`,
+        `«${nombreProducto}»: el descuento (${pesosTxt(descuentoCents)}) es mayor que el importe del renglón (${pesosTxt(brutoRenglonCents)}).`,
       ],
     }
   }
@@ -1209,7 +1285,7 @@ export function conceptosDesdeRenglon(it: RenglonParaCfdi, _orderId: string): Co
     ...it,
     productName,
     quantity: unidades,
-    unitPrice: new Prisma.Decimal(String(it.unitPrice)),
+    unitPrice: precioUnitario,
     discountAmount: 0,
     modifiers: [],
   }
@@ -1227,46 +1303,56 @@ export function conceptosDesdeRenglon(it: RenglonParaCfdi, _orderId: string): Co
     product: it.product, // mismas claves SAT y misma tasa que el producto al que acompañan
     ...(it.tratamiento ? { tratamiento: it.tratamiento } : {}), // y el mismo IVA que su renglón
   }))
-  const items = [producto, ...conceptosExtras]
-  // El descuento del renglón se reparte en proporción al importe de cada concepto (cortesía = 100 % de cada uno).
-  const partesDescuento = repartir(
-    descuentoCents,
-    items.map(c => importeConceptoCents(c)),
-  )
-  return { items: items.map((c, i) => ({ ...c, discountAmount: new Prisma.Decimal(partesDescuento[i] / 100) })), motivos: [] }
+  return {
+    llave: llaveDeRenglon(it, indice),
+    nombre: nombreProducto,
+    grupoIva: grupoIvaDe(it),
+    brutoCents: brutoRenglonCents,
+    propioCents: descuentoCents,
+    conceptos: [producto, ...conceptosExtras],
+    precioDerivado,
+  }
 }
 
 /**
- * Reparte el descuento GENERAL de la orden entre los conceptos como descuento de concepto (el CFDI no
- * tiene descuento global), en proporción al neto de cada uno: Σ netos == lo cobrado. Sólo cuando todos
- * los conceptos llevan la MISMA tasa: repartirlo entre tasas distintas cuadra el total pero mueve base
- * gravable de una tasa a otra (Codex, pasada 4). Con tratamiento se agrupa por tratamiento: IVA_0 y
- * EXENTO son grupos DISTINTOS aunque los dos tengan tasa 0 (uno acredita y el otro no).
+ * Pone el descuento TOTAL del renglón (el suyo + lo que le toca de la cuenta) entre sus conceptos en proporción a su importe,
+ * con el repartidor de hoy (`repartir`, con topes: decisión del founder del 1-oct, excepción a D19 dentro del renglón).
  */
-export function repartirDescuentoDeOrden(items: RenglonParaCfdi[], orderDiscountCents: number): ConceptosDeRenglon {
-  if (orderDiscountCents <= 0) return { items, motivos: [] }
-  const grupos = new Set(items.map(it => it.tratamiento ?? `tasa:${Number(it.product?.taxRate ?? 0.16)}`))
-  if (grupos.size > 1) {
+export function aplicarDescuentoAlRenglon(r: RenglonExaminado, descuentoCents: number): ConceptosDeRenglon {
+  if (descuentoCents > r.brutoCents) {
     return {
-      items,
+      items: [],
       motivos: [
-        'La cuenta lleva un descuento general y productos con IVA distinto; el reparto del descuento entre tasas no está soportado todavía.',
+        `«${r.nombre}»: el descuento (${pesosTxt(descuentoCents)}) es mayor que el importe del renglón (${pesosTxt(r.brutoCents)}).`,
       ],
     }
   }
-  const netos = items.map(it => importeConceptoCents(it) - centavos(it.discountAmount))
-  const base = netos.reduce((a, b) => a + b, 0)
-  if (base < orderDiscountCents) {
-    return {
-      items,
-      motivos: [`El descuento general (${pesosTxt(orderDiscountCents)}) es mayor que el importe de la cuenta (${pesosTxt(base)}).`],
-    }
+  const partes = repartir(
+    descuentoCents,
+    r.conceptos.map(c => importeConceptoCents(c)),
+  )
+  return { items: r.conceptos.map((c, i) => ({ ...c, discountAmount: new Prisma.Decimal(partes[i] / 100) })), motivos: [] }
+}
+
+/** Un renglón suelto con sólo su descuento propio. Sólo lo usan las pruebas del nombre del concepto: un omitido (D9) devuelve vacío, sin motivo ni marca de la regla del PAC. */
+export function conceptosDesdeRenglon(it: RenglonParaCfdi, _orderId: string): ConceptosDeRenglon {
+  const r = examinarRenglon(it, 0)
+  if ('omitido' in r) return { items: [], motivos: [] }
+  return 'motivos' in r ? { items: [], motivos: r.motivos } : aplicarDescuentoAlRenglon(r, r.propioCents)
+}
+
+/** El traslado de IVA con que el PAC calculará el concepto: el mismo que arma `resolveItem` (`cfdiPayloadBuilder.ts`). */
+export function trasladoParaElPac(it: RenglonParaCfdi): TrasladoParaElPac {
+  if (it.tratamiento) {
+    const sat = impuestosSatDe(it.tratamiento)
+    if ('bloqueado' in sat) return null
+    const tax = sat.taxes[0]
+    if (!tax) return null
+    return tax.factor === 'Exento' ? { factor: 'Exento' } : { factor: 'Tasa', tasa: tax.rate }
   }
-  const partes = repartir(orderDiscountCents, netos)
-  return {
-    items: items.map((it, i) => ({ ...it, discountAmount: new Prisma.Decimal((centavos(it.discountAmount) + partes[i]) / 100) })),
-    motivos: [],
-  }
+  // Entrada legacy: tasa 0 va sin traslado (`resolveItem`: taxExempt ⇒ taxes []); sin producto, 16 %.
+  const tasa = it.product ? Number(it.product.taxRate) : 0.16
+  return tasa > 0 ? { factor: 'Tasa', tasa } : null
 }
 
 /** Última red antes del PAC: ningún concepto con importe negativo ni descuento mayor que su importe. */
@@ -1287,7 +1373,8 @@ export interface OrdenParaConceptos {
   items: RenglonParaCfdi[]
   discountAmount?: any
   serviceChargeAmount?: any
-  promotions?: Array<{ id: string }> | null
+  /** Filas `OrderDiscount` con su reparto (B2). Ausente = ninguna. */
+  orderDiscounts?: FilaDeDescuento[] | null
 }
 
 /**
@@ -1297,42 +1384,64 @@ export interface OrdenParaConceptos {
 /** Exclusiones a nivel ORDEN (aplican con y sin renglones). */
 export function motivosDeOrden(order: OrdenParaConceptos): string[] {
   const motivos: string[] = []
-  if ((order.promotions?.length ?? 0) > 0) {
-    motivos.push('La cuenta lleva una promoción; la facturación de cuentas con promoción llega en la siguiente versión.')
-  }
   if (centavos(order.serviceChargeAmount) > 0) {
     motivos.push('La cuenta lleva cargo por servicio; la facturación de cargos por servicio llega en la siguiente versión.')
   }
   return motivos
 }
 
-export function reconstruirConceptos(order: OrdenParaConceptos, orderId: string): ConceptosDeRenglon {
+/**
+ * Bloque B3a (spec §4.2): cada renglón suma su descuento propio + lo que consta para él en cada reparto (no las espejo); lo
+ * que no consta va por D8. Dentro del renglón, entre producto y extras, con el repartidor de hoy (founder, 1-oct). Nunca se
+ * decide con la cabecera A QUIÉN le toca un descuento.
+ */
+export function reconstruirConceptos(order: OrdenParaConceptos, _orderId: string): ConceptosDeRenglon {
   const motivos: string[] = motivosDeOrden(order)
-  const porRenglon = order.items.map(it => conceptosDesdeRenglon(it, orderId))
-  motivos.push(...porRenglon.flatMap(r => r.motivos))
-  let items = porRenglon.flatMap(r => r.items)
-  // `Order.discountAmount` en TPV/mobile = descuentos de renglón + descuento general; el general es lo que
-  // sobra tras restar lo que ya vive en cada renglón.
-  const descuentoRenglonesCents = order.items.reduce((sum, it) => sum + centavos(it.discountAmount), 0)
-  const descuentoOrdenCents = Math.max(0, centavos(order.discountAmount) - descuentoRenglonesCents)
-  // 🔴 El alcance de un descuento de orden NO se puede demostrar con los datos: TPV guarda el descuento
-  // dirigido a artículos sólo como total de orden, y el motor de descuentos de catálogo tampoco deja
-  // rastro por renglón (Codex, pasadas 6 y 7). Repartirlo entre varios renglones pondría el descuento
-  // en el producto equivocado con el total cuadrado. Con UN solo renglón el alcance es inequívoco.
-  // Se cuentan CONCEPTOS reconstruidos, no renglones: una línea con extras produce varios conceptos y el
-  // motor de descuentos admite descontar SÓLO un extra (MODIFIER / MODIFIER_GROUP) — también sin rastro.
-  if (descuentoOrdenCents > 0 && items.length > 1) {
-    motivos.push(
-      'La cuenta lleva un descuento general sobre varios artículos o extras; la facturación de descuentos generales llega en la siguiente versión.',
-    )
+  const examinados = order.items.map((it, i) => examinarRenglon(it, i))
+  const vivos = examinados.filter((r): r is RenglonExaminado => !('motivos' in r) && !('omitido' in r))
+  for (const r of examinados) if ('motivos' in r) motivos.push(...r.motivos)
+  // Con un motivo ya no se timbra: los conceptos que se enseñan llevan sólo su descuento propio (como hasta hoy).
+  const soloPropios = () => vivos.flatMap(v => aplicarDescuentoAlRenglon(v, v.propioCents).items)
+  if (motivos.length > 0) return { items: soloPropios(), motivos }
+  if (vivos.length === 0 && order.items.length > 0) return { items: [], motivos: [MOTIVO_TODO_CORTESIA] }
+  const cuenta = descuentoDeCuentaPorRenglon({
+    cabeceraCents: centavos(order.discountAmount),
+    // Con un motivo ya se regresó arriba: cada renglón examinado es vivo u omitido (D9: `vivo: null`, sus filas espejo no cuentan y un
+    // reparto que le dé parte es MOTIVO_REPARTO_FUERA_DE_LA_CUENTA). La llave es la del renglón examinado (Tarea 2), no el `id` que el
+    // concepto del producto hereda por spread.
+    renglones: examinados.map((r, i) => {
+      const propioEnCabeceraCents = descuentoPropioEnCabeceraCents(order.items[i])
+      if ('omitido' in r) return { llave: llaveDeRenglon(order.items[i], i), propioEnCabeceraCents, vivo: null }
+      const v = r as RenglonExaminado
+      return { llave: v.llave, propioEnCabeceraCents, vivo: { grupoIva: v.grupoIva, disponibleCents: v.brutoCents - v.propioCents } }
+    }),
+    filas: order.orderDiscounts ?? [],
+  })
+  if (cuenta.motivos.length > 0) return { items: soloPropios(), motivos: cuenta.motivos }
+  const items: RenglonParaCfdi[] = []
+  for (const v of vivos) {
+    const r = aplicarDescuentoAlRenglon(v, v.propioCents + (cuenta.porLlave[v.llave] ?? 0))
+    motivos.push(...r.motivos)
+    items.push(...r.items)
   }
-  if (motivos.length === 0) {
-    const repartido = repartirDescuentoDeOrden(items, descuentoOrdenCents)
-    items = repartido.items
-    motivos.push(...repartido.motivos)
-    motivos.push(...validarConceptos(items))
-  }
-  return { items, motivos }
+  if (motivos.length > 0) return { items, motivos }
+  // D9 también después de los descuentos de la cuenta (Codex r1 #3): un concepto que un premio o un descuento dejó sin cobrar
+  // nada no se manda al PAC (descuento = importe ⇒ base 0). Si no queda ninguno, no hay importe que facturar.
+  const cobrables = items.filter(c => importeConceptoCents(c) - centavos(c.discountAmount) > 0)
+  if (cobrables.length === 0) return { items: [], motivos: [MOTIVO_TODO_CORTESIA] }
+  // B3a (Codex r3 R3-1 y r4 R4-1): también es nuevo todo lo que se quita —un renglón omitido arriba o un concepto que quita este
+  // filtro— y quitar un concepto mueve el subtotal y el descuento que el PAC redondea: se calcula como el PAC. Ojo: el filtro
+  // quita conceptos aunque no haya descuento de cuenta, porque `repartir` le da el centavo sobrante al primer concepto con saldo
+  // (CAPUCCINO $65 + extra $5.04 con $70.03 propios ⇒ 6500 / 503: el producto queda en base 0).
+  // Y una promoción (Tarea 5): el primer concepto de cada renglón es el producto, que conserva los campos del renglón.
+  const requiereReglaDelPac =
+    (items.length > 1 && Object.values(cuenta.porLlave).some(c => c > 0)) ||
+    examinados.some(r => 'omitido' in r) ||
+    cobrables.length < items.length ||
+    vivos.some(v => !!v.conceptos[0]?.orderPromotionId) ||
+    // Tarea 6 (Codex r3 R3-1): un precio por kilo derivado de lo cobrado, aunque quede con 2 decimales ($2.16).
+    vivos.some(v => v.precioDerivado)
+  return { items: cobrables, motivos: validarConceptos(cobrables), requiereReglaDelPac }
 }
 
 /**
@@ -1383,7 +1492,8 @@ export async function loadOrderForCfdiFromDb(
       // Candados de la rama mixta (plan 3): cómo se cobró el precio y si la venta está liquidada.
       contratoDePrecio: true,
       paymentStatus: true,
-      promotions: { select: { id: true }, take: 1 },
+      // B3a: las filas de descuento con su reparto (una página y una de más; ver filasDeDescuentoCompletas).
+      orderDiscounts: DESCUENTOS_PARA_CONCEPTOS,
       venue: {
         select: {
           slug: true,
@@ -1410,6 +1520,8 @@ export async function loadOrderForCfdiFromDb(
           discountAmount: true,
           total: true,
           weightQuantity: true,
+          orderPromotionId: true,
+          isCortesia: true,
           modifiers: { select: { name: true, price: true, quantity: true } },
           product: {
             select: {
@@ -1541,9 +1653,14 @@ export async function loadOrderForCfdiFromDb(
   // ACT), so the CFDI has at least one line instead of failing with "no tiene conceptos".
   // 🔴 Lo pagado, no `order.total`: en varias fuentes `Order.total` ya trae la propina dentro, y la
   // propina jamás va en el CFDI.
+  const orderDiscounts = await filasDeDescuentoCompletas(db, orderId, order.orderDiscounts)
   const sinRenglones = order.items.length === 0
   const renglones = order.items.map(renglonConTratamiento)
-  const { items: itemsReconstruidos, motivos: unsupportedReasons } = sinRenglones
+  const {
+    items: itemsReconstruidos,
+    motivos: unsupportedReasons,
+    requiereReglaDelPac = false,
+  }: ConceptosDeRenglon = sinRenglones
     ? {
         items: [
           {
@@ -1555,10 +1672,10 @@ export async function loadOrderForCfdiFromDb(
             tratamiento: 'IVA_16',
           } as unknown as RenglonParaCfdi,
         ],
-        // Las exclusiones de ORDEN (promoción, cargo por servicio) aplican también sin renglones.
+        // Las exclusiones de ORDEN (cargo por servicio) aplican también sin renglones.
         motivos: motivosDeOrden(order as OrdenParaConceptos),
       }
-    : reconstruirConceptos({ ...order, items: renglones } as OrdenParaConceptos, orderId)
+    : reconstruirConceptos({ ...order, orderDiscounts, items: renglones } as OrdenParaConceptos, orderId)
   unsupportedReasons.push(...Array.from(new Set(motivosComercios)))
   const items = itemsReconstruidos as unknown as typeof order.items
 
@@ -1622,12 +1739,43 @@ export async function loadOrderForCfdiFromDb(
 
   // El documento que se mandaría al PAC tiene que cuadrar con lo cobrado. Se declara AQUÍ (y no sólo en
   // el motor) para que el ticket y el recibo tampoco ofrezcan una autofactura que después fallaría.
+  // Ronda final F2: una diferencia de REDONDEO (≤ `cotaDeRedondeoCents`, p. ej. la de D16) sigue a la búsqueda de abajo, que la
+  // cuadra o se detiene con su motivo; más que eso es error de armado y se detiene aquí.
+  // B3a Tarea 6b (founder, 5-oct: «la factura siempre coincide con el ticket»): TODA factura individual se calcula como el PAC y
+  // tiene que dar lo cobrado. Si le faltan o le sobran centavos, se mueven en los descuentos (`cuadrarConElPac`); si así no
+  // cuadra, se detiene con su motivo: nunca se timbra distinto. La marca de las Tareas 3-6 sólo decide la guarda del 8 %.
   if (unsupportedReasons.length === 0) {
+    const conceptos = items as RenglonParaCfdi[]
+    const paraElPac = conceptos.map(it => ({
+      precio: new Prisma.Decimal(String(it.unitPrice)),
+      cantidad: it.quantity,
+      descuentoCents: peso(it.discountAmount),
+      ivaIncluido: pricesIncludeIva,
+      traslado: trasladoParaElPac(it),
+      nombre: it.productName ?? undefined,
+    }))
     const documentoCents = totalDelDocumentoCents({ items: items as any, pricesIncludeIva })
-    if (documentoCents !== paidCents) {
-      unsupportedReasons.push(
-        `El total de la factura (${pesosTxt(documentoCents)}) no coincide con lo cobrado (${pesosTxt(paidCents)}). No se timbró; revisa la cuenta o repórtala a soporte.`,
-      )
+    // Ajuste 2 (Codex final r2): D16 redondea UNA VEZ POR FILA que participa (`sincronizarRepartos`), y sólo con IVA aparte.
+    const filasD16 =
+      order.contratoDePrecio === 'IVA_APARTE' ? orderDiscounts.filter(f => leerReparto(f.reparto)?.reduceImpuesto === true).length : 0
+    const cuadre =
+      Math.abs(documentoCents - paidCents) > cotaDeRedondeoCents(paraElPac, filasD16)
+        ? {
+            ok: false as const,
+            motivo: `El total de la factura (${pesosTxt(documentoCents)}) no coincide con lo cobrado (${pesosTxt(paidCents)}). No se timbró; revisa la cuenta o repórtala a soporte.`,
+          }
+        : cuadrarConElPac(paraElPac, paidCents, { desbloqueado: requiereReglaDelPac })
+    if (!cuadre.ok) unsupportedReasons.push(cuadre.motivo)
+    else {
+      for (const { indice, aCents } of cuadre.ajustes) {
+        conceptos[indice] = { ...conceptos[indice], discountAmount: new Prisma.Decimal(aCents / 100) }
+      }
+      // Lo que se guarda es lo que dirá el XML: base neta del descuento, el IVA de cada tasa y el total = lo cobrado. SIEMPRE, aun
+      // sin ajustes (ronda final F1, Codex final #1): con IVA aparte el escritor nativo guarda el subtotal BRUTO, y 20000 + 2880 ≠
+      // 20880 rechazaba en la validación una factura que el PAC cuadra exacto.
+      subtotalCents = cuadre.documento.subtotalCents - cuadre.documento.descuentoCents
+      taxCents = cuadre.documento.ivaCents
+      totalCents = cuadre.documento.totalCents
     }
   }
 

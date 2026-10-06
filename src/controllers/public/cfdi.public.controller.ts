@@ -104,7 +104,29 @@ export async function autofacturaController(req: Request<{ accessKey: string }>,
 
     // 6. Map service results to HTTP responses
     if (result.status === 'VALIDATION_FAILED') {
-      res.status(422).json({ error: 'No se pudo facturar', reasons: result.reasons })
+      // Los motivos del bloqueo FISCAL (venta que no se puede timbrar exacta) están escritos para el comercio
+      // («factúrala con tu contador», con importes): no viajan a este endpoint sin sesión (mismo criterio que el GET).
+      // Los errores del RECEPTOR (RFC, CP, régimen…) sí: el cliente los corrige. Si el cargador falla, se oculta
+      // (genérico) antes que filtrar.
+      const reasons = result.reasons ?? []
+      let internos: string[]
+      try {
+        const bundle = await loadOrderForCfdiFromDb(order.id)
+        internos = bundle?.unsupportedReasons ?? []
+      } catch {
+        internos = reasons
+      }
+      const fiscal = reasons.filter(r => internos.includes(r) || /no coincide con lo cobrado/i.test(r))
+      if (fiscal.length > 0) {
+        logger.info('[cfdi.public] autofactura rechazada por bloqueo fiscal', { orderId: order.id, venueId: order.venueId, motivos: fiscal })
+        res.status(422).json({
+          error: 'No se pudo facturar',
+          code: 'FISCAL_BLOCK',
+          message: 'Esta cuenta no se puede facturar en línea. Pide tu factura directamente al negocio.',
+        })
+        return
+      }
+      res.status(422).json({ error: 'No se pudo facturar', reasons })
       return
     }
 
@@ -228,9 +250,25 @@ export async function getAutofacturaStatusController(req: Request<{ accessKey: s
     // resolver (most-recent COMPLETED payment → merchant → MerchantFiscalConfig
     // → venue-matched emisor); it returns null when invoicing isn't possible.
     const bundle = await loadOrderForCfdiFromDb(order.id)
-    const autofacturaAvailable = !!bundle && bundle.facturacionEnabled && bundle.autofacturaEnabled && !bundle.unsupportedReasons?.length
+    const habilitada = !!bundle && bundle.facturacionEnabled && bundle.autofacturaEnabled
+    const motivos = bundle?.unsupportedReasons ?? []
+    const autofacturaAvailable = habilitada && motivos.length === 0
+    // B3a ronda final F3 (Codex final #3): campo NUEVO y opcional — nunca se quita ni se renombra uno de los de arriba. Distingue
+    // el bloqueo FISCAL (el comercio la habilitó, pero ESTA venta no se puede timbrar exacta: el recibo le dice al cliente que pida
+    // su factura al negocio) de la desactivación del comercio (DISABLED: el recibo no la ofrece). Sin él, una venta bloqueada
+    // escondía el panel sin explicación.
+    // Ajuste 4: los motivos NO viajan a este GET público (lo abre cualquiera con el QR del ticket y están escritos para el comercio:
+    // «factúrala con tu contador»). Van al log; el comercio los ve en su dashboard (422 al facturar, `lastError` del intento).
+    const autofacturaUnavailable = autofacturaAvailable
+      ? undefined
+      : habilitada
+        ? { kind: 'FISCAL_BLOCK' as const }
+        : { kind: 'DISABLED' as const }
+    if (autofacturaUnavailable?.kind === 'FISCAL_BLOCK') {
+      logger.info('[cfdi.public] autofactura no disponible por bloqueo fiscal', { orderId: order.id, venueId: order.venueId, motivos })
+    }
 
-    res.status(200).json({ cfdi: cfdi ?? null, autofacturaAvailable })
+    res.status(200).json({ cfdi: cfdi ?? null, autofacturaAvailable, ...(autofacturaUnavailable && { autofacturaUnavailable }) })
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)
     logger.error('[cfdi.public] get status error', { accessKey, error: message })

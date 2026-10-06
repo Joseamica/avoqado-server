@@ -56,7 +56,8 @@ describe('issueGlobalForEmisor — guardas sin efectos', () => {
 })
 
 // ── Extras y peso también en la GLOBAL (mismo defecto que la individual, Testarudo 21-sep-2026) ──
-import { globalLinesFromOrder } from '../../../../src/services/fiscal/cfdiGlobal.service'
+import { globalLinesFromOrder, ORDER_SELECT } from '../../../../src/services/fiscal/cfdiGlobal.service'
+import { DESCUENTOS_PARA_CONCEPTOS } from '../../../../src/services/fiscal/descuentoPorRenglon'
 
 describe('globalLinesFromOrder — la línea global cuadra con el ticket (misma verdad de dinero que la individual)', () => {
   const Dc = (n: number) => new Prisma.Decimal(n)
@@ -112,7 +113,7 @@ describe('globalLinesFromOrder — la línea global cuadra con el ticket (misma 
     expect(suma(lines)).toBe(8700)
   })
 
-  it('DESCUENTO de orden sobre varios renglones: la global la EXCLUYE (alcance del descuento indemostrable)', () => {
+  it('DESCUENTO de orden sin constancia sobre varios renglones del mismo IVA: la global la INCLUYE (D8, misma verdad que la individual)', () => {
     const lines = globalLinesFromOrder({
       ...base,
       subtotal: Dc(100),
@@ -121,7 +122,59 @@ describe('globalLinesFromOrder — la línea global cuadra con el ticket (misma 
       payments: pagos(90),
       items: [itemP({ unitPrice: Dc(60), total: Dc(60) }), itemP({ unitPrice: Dc(40), total: Dc(40) })],
     } as any)
-    expect(lines).toEqual([])
+    expect(suma(lines)).toBe(9000)
+  })
+
+  it('B3a (control): con una cortesía de «Cobrar» la global suma lo cobrado', () => {
+    const lines = globalLinesFromOrder({
+      ...base,
+      subtotal: Dc(150),
+      total: Dc(100),
+      discountAmount: Dc(50),
+      payments: pagos(100),
+      items: [
+        itemP({ unitPrice: Dc(100), total: Dc(100) }),
+        itemP({ productName: 'Pan', unitPrice: Dc(50), total: Dc(50), discountAmount: Dc(50), isCortesia: true }),
+      ],
+    } as any)
+    expect(suma(lines)).toBe(10000)
+  })
+
+  it('B3a: la global lee lo mismo que la individual (filas de descuento, liga a la promoción, marca de cortesía)', () => {
+    expect(ORDER_SELECT.orderDiscounts).toBe(DESCUENTOS_PARA_CONCEPTOS)
+    expect(ORDER_SELECT.items.select.orderPromotionId).toBe(true)
+    expect(ORDER_SELECT.items.select.isCortesia).toBe(true)
+    expect((ORDER_SELECT as any).promotions).toBeUndefined()
+  })
+
+  it('B3a: una venta con promoción entra a la global por lo cobrado', () => {
+    const lines = globalLinesFromOrder({
+      ...base,
+      subtotal: Dc(80),
+      total: Dc(80),
+      payments: pagos(80),
+      items: [itemP({ unitPrice: Dc(100), total: Dc(80), discountAmount: Dc(20), orderPromotionId: 'op1' })],
+    } as any)
+    expect(suma(lines)).toBe(8000)
+  })
+
+  it('B3a: una venta por peso con fracción de centavo entra a la global por lo cobrado', () => {
+    const lines = globalLinesFromOrder({
+      ...base,
+      subtotal: Dc(69.16),
+      total: Dc(69.16),
+      payments: pagos(69.16),
+      items: [
+        itemP({
+          productName: 'JAMÓN',
+          unitPrice: Dc(45),
+          total: Dc(69.16),
+          weightQuantity: Dc(1.537),
+          product: { taxRate: Dc(0.16), objetoImp: '02', satProductKey: '50112000', satUnitKey: 'KGM', category: null },
+        }),
+      ],
+    } as any)
+    expect(suma(lines)).toBe(6916)
   })
 
   it('BARRERA en la global: una orden cuyo documento ≠ lo cobrado se EXCLUYE (nunca se declara mal)', () => {

@@ -13,6 +13,7 @@ function makeP2002(): Prisma.PrismaClientKnownRequestError {
 }
 
 const D = (n: number) => new Prisma.Decimal(n)
+const PRODUCTO_16 = { satProductKey: '90101500', satUnitKey: 'E48', objetoImp: '02', taxRate: D(0.16), category: null }
 // Use a real individual RFC for the happy-path/default service tests.
 // XAXX010101000 ("Público en General") is only valid on the global CFDI; individual issuance blocks it.
 const receptor = {
@@ -287,6 +288,92 @@ describe('issueCfdiForOrder', () => {
     expect(res.status).toBe('VALIDATION_FAILED')
     expect(res.reasons?.join(' ')).toMatch(/\$116\.00.*\$120\.00/)
     expect(deps.resolveProvider).not.toHaveBeenCalled()
+  })
+
+  // B3a Tarea 6b: el motor compara el documento que SE MANDA sumado como el PAC (R5 del sandbox: $65 con 2.33 + $5 con 0.17 da
+  // $67.49), no la suma por concepto (que daba $67.50 y lo dejaba pasar). Aquí el bundle llega como si el cargador no lo cuadrara.
+  const r5 = (descuentoCafe: number) => ({
+    subtotalCents: 5819,
+    taxCents: 931,
+    totalCents: 6750,
+    paidCents: 6750,
+    order: {
+      clasificacion: 'TODO_16',
+      renglonesOrigen: [],
+      venueType: 'RESTAURANT',
+      tipAmount: D(0),
+      pricesIncludeIva: true,
+      items: [
+        { productName: 'CAPUCCINO', quantity: 1, unitPrice: D(65), discountAmount: D(descuentoCafe), product: PRODUCTO_16 },
+        { productName: 'Deslactosada (CAPUCCINO)', quantity: 1, unitPrice: D(5), discountAmount: D(0.17), product: PRODUCTO_16 },
+      ],
+    },
+  })
+  const MOTIVO_R5 =
+    'El total de la factura ($67.49) no coincide con lo cobrado ($67.50). No se timbró; revisa la cuenta o repórtala a soporte.'
+
+  it('6b, BARRERA de dinero con entrada: el documento del R5 sumado como el PAC da $67.49 contra $67.50 ⇒ no llama al PAC', async () => {
+    const createInvoice = jest.fn()
+    const deps = makeDeps({ resolveProvider: jest.fn().mockReturnValue({ name: 'facturapi', createInvoice } as any) })
+    const base = await (makeDeps().loadOrderForCfdi as jest.Mock)('o1')
+    deps.loadOrderForCfdi = jest.fn().mockResolvedValue({ ...base, ...r5(2.33) })
+    const res = await issueCfdiForOrder({ orderId: 'o1', receptor, sandbox: true }, deps)
+    expect(res.status).toBe('VALIDATION_FAILED')
+    expect(res.reasons).toEqual([MOTIVO_R5])
+    expect(createInvoice).not.toHaveBeenCalled()
+  })
+
+  it('6b, control con entrada: el R5 ya cuadrado (2.32) timbra', async () => {
+    const deps = makeDeps()
+    const base = await (makeDeps().loadOrderForCfdi as jest.Mock)('o1')
+    deps.loadOrderForCfdi = jest.fn().mockResolvedValue({ ...base, ...r5(2.32) })
+    const res = await issueCfdiForOrder({ orderId: 'o1', receptor, sandbox: true }, deps)
+    expect(res.status).toBe('STAMPED')
+  })
+
+  describe('6b, camino legado (fila sin protocolo)', () => {
+    const P2002 = Object.assign(new Error('unique'), { code: 'P2002', name: 'PrismaClientKnownRequestError' })
+    const legado = (
+      createInvoice = jest.fn().mockResolvedValue({
+        providerInvoiceId: 'fa1',
+        uuid: 'U',
+        serie: 'F',
+        folio: '2',
+        totalCents: 6750,
+        stampedAt: new Date(),
+        status: 'valid',
+      }),
+    ) =>
+      makeDeps({
+        reserveCfdi: jest.fn().mockRejectedValue(Object.setPrototypeOf(P2002, Prisma.PrismaClientKnownRequestError.prototype)),
+        findExistingCfdi: jest.fn().mockResolvedValue({ id: 'c1', status: 'STAMP_FAILED', updatedAt: new Date() }),
+        claimCfdi: jest.fn().mockResolvedValue(true),
+        resolveProvider: jest.fn().mockReturnValue({
+          name: 'facturapi',
+          createInvoice,
+          downloadXml: jest.fn().mockResolvedValue(Buffer.from('<Comprobante/>')),
+          downloadPdf: jest.fn().mockResolvedValue(Buffer.from('%PDF')),
+        } as any),
+      })
+
+    it('6b, BARRERA de dinero legado: el R5 sumado como el PAC da $67.49 contra $67.50 ⇒ no llama al PAC', async () => {
+      const createInvoice = jest.fn()
+      const deps = legado(createInvoice)
+      const base = await (makeDeps().loadOrderForCfdi as jest.Mock)('o1')
+      deps.loadOrderForCfdi = jest.fn().mockResolvedValue({ ...base, ...r5(2.33) })
+      const res = await issueCfdiForOrder({ orderId: 'o1', receptor, sandbox: true }, deps)
+      expect(res.status).toBe('VALIDATION_FAILED')
+      expect(res.reasons).toEqual([MOTIVO_R5])
+      expect(createInvoice).not.toHaveBeenCalled()
+    })
+
+    it('6b, control legado: el R5 ya cuadrado (2.32) timbra', async () => {
+      const deps = legado()
+      const base = await (makeDeps().loadOrderForCfdi as jest.Mock)('o1')
+      deps.loadOrderForCfdi = jest.fn().mockResolvedValue({ ...base, ...r5(2.32) })
+      const res = await issueCfdiForOrder({ orderId: 'o1', receptor, sandbox: true }, deps)
+      expect(res.status).toBe('STAMPED')
+    })
   })
 
   it('tenant isolation: un CFDI ya STAMPED de OTRO venue no se devuelve por idempotencia (404), y no se toca el PAC', async () => {

@@ -1,4 +1,5 @@
 import { LoadedRefundForCreditNote, buildCreditNoteLines, checkCreditNoteEligibility } from '@/services/fiscal/cfdiCreditNote.service'
+import { huellaDeEntrada } from '@/services/fiscal/entradaDocumental'
 function makeOriginal(over: Partial<LoadedRefundForCreditNote['original']> = {}) {
   return {
     id: 'cfdi-ingreso-1',
@@ -131,5 +132,136 @@ describe('precondiciones fiscales conservadas', () => {
     expect(checkCreditNoteEligibility(loaded).reason).toBe('ORIGINAL_ENTRADA_INVALIDA')
     loaded.original!.protocoloIva = null
     expect(checkCreditNoteEligibility(loaded).eligible).toBe(true)
+  })
+})
+
+describe('D9: la nota relee el precio por kilo de 6 decimales de la factura original', () => {
+  const entradaPeso = (unitPriceDecimal: string) => ({
+    version: 1,
+    orderId: 'o1',
+    fiscalEmisorId: 'e1',
+    replacesCfdiId: null,
+    contratoDePrecio: 'IVA_INCLUIDO',
+    paymentStatus: 'PAID',
+    clasificacion: 'TODO_16',
+    paidCents: 6916,
+    montos: { subtotalCents: 5962, taxCents: 954, totalCents: 6916 },
+    renglones: [{ orderItemId: 'oi-jamon', tratamiento: 'IVA_16' }],
+    params: {
+      receptor: {
+        rfc: 'EKU9003173C9',
+        razonSocial: 'ESCUELA KEMPER URGATE SA DE CV',
+        regimenFiscal: '601',
+        codigoPostal: '64000',
+        usoCfdi: 'G03',
+      },
+      items: [
+        {
+          satProductKey: '50112000',
+          satUnitKey: 'KGM',
+          description: 'Jamón',
+          quantity: 1.537,
+          unitPriceCents: 4500,
+          unitPriceDecimal,
+          discountCents: 0,
+          objetoImp: '02',
+          taxes: [{ type: 'IVA', factor: 'Tasa', rate: 0.16, withholding: false }],
+          taxIncluded: true,
+        },
+      ],
+      formaPago: '04',
+      metodoPago: 'PUE',
+      serie: 'F',
+      idempotencyKey: 'o1',
+    },
+  })
+  const conEntrada = (entrada: any) =>
+    makeLoaded({
+      refund: { ...makeLoaded().refund, salesRefundCents: 6916 },
+      original: makeOriginal({
+        protocoloIva: 1,
+        entrada,
+        entradaHuella: huellaDeEntrada(entrada),
+        subtotalCents: 5962,
+        taxCents: 954,
+        totalCents: 6916,
+      }),
+      grossByRate: [{ rate: 0.16, grossCents: 6916 }],
+    })
+
+  it('🔴 con el precio decimal, la entrada cuadra y la nota procede (con $45.00 daría 69.17 y la tomaría por inválida)', () => {
+    expect(checkCreditNoteEligibility(conEntrada(entradaPeso('44.996747')))).toEqual({ eligible: true, reason: null, message: null })
+  })
+  it('control: un precio decimal mal formado (7 decimales) invalida la entrada', () => {
+    expect(checkCreditNoteEligibility(conEntrada(entradaPeso('44.9967471'))).reason).toBe('ORIGINAL_ENTRADA_INVALIDA')
+  })
+})
+
+describe('6b: una factura ajustada guarda los montos del PAC (base neta, IVA por tasa, total = lo cobrado)', () => {
+  // $65 con $2.50 propios, IVA incluido: el PAC daba $62.49, el cargador bajó el descuento a $2.49 y guardó lo que dice el XML.
+  const entradaAjustada = (montos: { subtotalCents: number; taxCents: number; totalCents: number }) => ({
+    version: 1,
+    orderId: 'o1',
+    fiscalEmisorId: 'e1',
+    replacesCfdiId: null,
+    contratoDePrecio: 'IVA_INCLUIDO',
+    paymentStatus: 'PAID',
+    clasificacion: 'TODO_16',
+    paidCents: 6250,
+    montos,
+    renglones: [{ orderItemId: 'oi-latte', tratamiento: 'IVA_16' }],
+    params: {
+      receptor: {
+        rfc: 'EKU9003173C9',
+        razonSocial: 'ESCUELA KEMPER URGATE SA DE CV',
+        regimenFiscal: '601',
+        codigoPostal: '64000',
+        usoCfdi: 'G03',
+      },
+      items: [
+        {
+          satProductKey: '90101500',
+          satUnitKey: 'E48',
+          description: 'Latte',
+          quantity: 1,
+          unitPriceCents: 6500,
+          discountCents: 249,
+          objetoImp: '02',
+          taxes: [{ type: 'IVA', factor: 'Tasa', rate: 0.16, withholding: false }],
+          taxIncluded: true,
+        },
+      ],
+      formaPago: '04',
+      metodoPago: 'PUE',
+      serie: 'F',
+      idempotencyKey: 'o1',
+    },
+  })
+  const conMontos = (montos: { subtotalCents: number; taxCents: number; totalCents: number }) => {
+    const entrada = entradaAjustada(montos)
+    return makeLoaded({
+      refund: { ...makeLoaded().refund, salesRefundCents: 6250 },
+      original: makeOriginal({ protocoloIva: 1, entrada, entradaHuella: huellaDeEntrada(entrada), ...montos }),
+      grossByRate: [{ rate: 0.16, grossCents: 6250 }],
+    })
+  }
+
+  it('6b: una factura ajustada (montos del PAC) se puede acreditar', () => {
+    expect(checkCreditNoteEligibility(conMontos({ subtotalCents: 5388, taxCents: 862, totalCents: 6250 }))).toEqual({
+      eligible: true,
+      reason: null,
+      message: null,
+    })
+  })
+  it('6b: montos que suman bien pero no son ni por concepto ni del PAC ⇒ ORIGINAL_ENTRADA_INVALIDA', () => {
+    // 5389 + 861 = 6250: suman, así que sólo la regla nueva (Codex r2 N8) puede rechazarlos.
+    expect(checkCreditNoteEligibility(conMontos({ subtotalCents: 5389, taxCents: 861, totalCents: 6250 })).reason).toBe(
+      'ORIGINAL_ENTRADA_INVALIDA',
+    )
+  })
+  it('control: montos que ni siquiera suman ⇒ ORIGINAL_ENTRADA_INVALIDA', () => {
+    expect(checkCreditNoteEligibility(conMontos({ subtotalCents: 5388, taxCents: 862, totalCents: 6251 })).reason).toBe(
+      'ORIGINAL_ENTRADA_INVALIDA',
+    )
   })
 })

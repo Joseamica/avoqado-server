@@ -113,6 +113,16 @@ describe('FacturapiProvider', () => {
     expect(product.tax_included).toBe(true) // PAC back-computes base+IVA → stamped total stays 116
   })
 
+  it('D9: con `unitPriceDecimal` el precio al PAC lleva sus 6 decimales; sin él, los centavos de siempre', async () => {
+    mockCreate.mockResolvedValue(MOCK_INVOICE_RESPONSE)
+    const provider = new FacturapiProvider('sk_test_x')
+    await provider.createInvoice({
+      ...BASE_CREATE_PARAMS,
+      items: [{ ...BASE_CREATE_PARAMS.items[0], quantity: 1.537, unitPriceCents: 4500, unitPriceDecimal: '44.996747', taxIncluded: true }],
+    })
+    expect(mockCreate.mock.calls[0][0].items[0].product.price).toBe(44.996747)
+  })
+
   it('createInvoice envía `taxability` (ObjetoImp) por concepto: sin él facturapi asume 02 y un «no objeto» (01) se timbraría como objeto de impuesto', async () => {
     mockCreate.mockResolvedValue(MOCK_INVOICE_RESPONSE)
     const provider = new FacturapiProvider('sk_test_x')

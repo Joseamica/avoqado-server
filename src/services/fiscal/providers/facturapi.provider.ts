@@ -243,7 +243,7 @@ export class FacturapiProvider implements FiscalProvider {
           unit_key: it.satUnitKey,
           // IVA-included (gross) when taxIncluded → facturapi back-computes the base so the
           // stamped Total equals what the customer paid; NET (+IVA on top) otherwise.
-          price: toPesos(it.unitPriceCents),
+          price: it.unitPriceDecimal != null ? Number(it.unitPriceDecimal) : toPesos(it.unitPriceCents),
           tax_included: it.taxIncluded === true,
           // ObjetoImp del concepto: sin él facturapi asume 02 (sí objeto) y un exento/no objeto se timbraría mal.
           ...(it.objetoImp ? { taxability: it.objetoImp } : {}),
