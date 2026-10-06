@@ -39,7 +39,11 @@ export interface LineaBarrible {
 }
 
 const TZ_DEFAULT = 'America/Mexico_City'
-/** ponytail: periodos cerrados que se leen para los rangos (1,000 quincenas ≈ 41 años); paginar si algún día se acerca. */
+/**
+ * ponytail: periodos cerrados que se leen para los rangos (1,000 quincenas ≈ 41 años). Pasado el tope TRUENA en vez de
+ * truncar: con el orden ascendente que necesita la fusión, truncar perdería los cerrados más recientes y sus ventas
+ * tardías quedarían sin barrer para siempre. Paginar (o leer sólo los no contiguos) si algún día se acerca.
+ */
 const TOPE_PERIODOS_CERRADOS = 1000
 const acotar = (n: number) => Math.min(Math.max(Math.trunc(n) || 1, 1), 1000)
 
@@ -67,8 +71,9 @@ export async function rangosBarribles(db: Db, a: AlcanceBarrido): Promise<RangoS
     },
     select: { periodStart: true, periodEnd: true },
     orderBy: { periodStart: 'asc' },
-    take: TOPE_PERIODOS_CERRADOS,
+    take: TOPE_PERIODOS_CERRADOS + 1,
   })
+  if (cerrados.length > TOPE_PERIODOS_CERRADOS) throw new Error('STAFF_PAY_DEMASIADOS_PERIODOS_CERRADOS')
   const civiles: PeriodoCanonico[] = []
   const todos = [...cerrados.map(x => ({ start: dbDateComoFecha(x.periodStart), end: dbDateComoFecha(x.periodEnd) })), a.periodo]
   for (const c of todos) {
@@ -108,6 +113,8 @@ const personaSql = Prisma.sql`COALESCE(NULLIF(TRIM(CONCAT(s."firstName", ' ', s.
  * Puntos 1-6 sobre `cc`. «Ya congelada» por FUENTE, no por persona (B-D2). Un reverso de devolución (su pago es un
  * REFUND) sólo entra si la comisión que revierte —misma llave que `createRefundCommission`: `originalPaymentId` + esquema +
  * persona— ya está congelada o entra en este mismo cierre (Codex r1-18): nunca se descuenta lo que el sobre no pagó.
+ * Una original ANULADA no ampara a nadie en ninguna de las dos ramas: si estaba congelada, su anulación ya devuelve su
+ * monto completo (§6.4) y el reverso descontaría otra vez.
  */
 function comisionBarrible(r: RangoSede[]): Prisma.Sql {
   return Prisma.sql`
@@ -122,11 +129,11 @@ function comisionBarrible(r: RangoSede[]): Prisma.Sql {
         FROM "Payment" rp
         JOIN "CommissionCalculation" o
           ON o."paymentId" = rp."processorData"->>'originalPaymentId' AND o."configId" = cc."configId" AND o."staffId" = cc."staffId"
-        WHERE rp.id = cc."paymentId" AND rp.type = 'REFUND'
+        WHERE rp.id = cc."paymentId" AND rp.type = 'REFUND' AND o.status <> 'VOIDED'
           AND (
             EXISTS (
               SELECT 1 FROM "ServiceEarning" eo WHERE eo."sourceType" = 'COMMISSION' AND eo."sourceId" = o.id AND eo.concept = 'SERVICE')
-            OR (o.status <> 'VOIDED' AND ${enRangos('o', 'calculatedAt', r)})
+            OR ${enRangos('o', 'calculatedAt', r)}
           )
       )
     )`
@@ -157,12 +164,14 @@ const idsComisiones = (a: AlcanceBarrido, r: RangoSede[], despuesDe: string | un
 
 // ── Propinas (spec §6.3) ──
 
-/** Un cobro cuya propina entra al sobre (alias `p` o `op`): tipo, estado, fecha, ventana [startsAt, endsAt) y sin congelar. */
-function cobroConPropina(alias: 'p' | 'op', a: AlcanceBarrido, r: RangoSede[]): Prisma.Sql {
+/**
+ * Un cobro cuya propina entra al sobre (alias `p` o `op`): tipo, estado, ventana [startsAt, endsAt) y sin congelar. La
+ * FECHA (`enRangos`) va aparte: `propinasBase` la saca como factor común de cobros y reembolsos (índice venueId+createdAt).
+ */
+function reglaDelCobro(alias: 'p' | 'op', a: AlcanceBarrido): Prisma.Sql {
   const c = (col: string) => Prisma.raw(`${alias}.${col}`)
   return Prisma.sql`
     ${c('status')} = 'COMPLETED' AND COALESCE(${c('type')}, 'REGULAR') IN ('REGULAR', 'FAST') AND ${c('"tipAmount"')} > 0
-    AND ${enRangos(alias, 'createdAt', r)}
     AND EXISTS (
       SELECT 1 FROM "StaffPayTipWindow" w
       WHERE w."organizationId" = ${a.organizationId} AND ${c('"createdAt"')} >= w."startsAt"
@@ -198,13 +207,13 @@ function propinasBase(a: AlcanceBarrido, r: RangoSede[]): Prisma.Sql {
       LEFT JOIN "Order" oo ON oo.id = op."orderId"
       WHERE p.type = 'REFUND' AND congelada."staffId" IS NULL
         AND op.id = p."processorData"->>'originalPaymentId' AND op."venueId" = p."venueId"
-        AND ${cobroConPropina('op', a, r)}
+        AND ${enRangos('op', 'createdAt', r)} AND ${reglaDelCobro('op', a)}
     ) en_este ON true
     WHERE p."venueId" = ANY(${venueIdsDe(a)}::text[])
+      AND ${enRangos('p', 'createdAt', r)}
       AND (
-        (${cobroConPropina('p', a, r)})
+        (${reglaDelCobro('p', a)})
         OR (p.type = 'REFUND' AND p.status = 'COMPLETED' AND p."tipAmount" < 0
-            AND ${enRangos('p', 'createdAt', r)}
             AND NOT EXISTS (
               SELECT 1 FROM "ServiceEarning" er WHERE er."sourceType" = 'TIP' AND er."sourceId" = p.id AND er.concept = 'SERVICE'))
       )`

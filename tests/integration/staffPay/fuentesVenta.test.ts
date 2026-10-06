@@ -176,11 +176,24 @@ describe('comisiones barribles (spec §6.2)', () => {
     const rv6 = await com('2026-10-10T18:00:00Z', -90, r6)
     await comision(m, { configId: cfg, staffId: m.ana, iso: '2026-10-10T18:00:00Z', neto: -90, pago: r6 })
     await comision(m, { configId: cfg2, staffId: m.sofia, iso: '2026-10-10T18:00:00Z', neto: -90, pago: r6 })
+    // (g) original CONGELADA en agosto y después anulada, con un reverso que quedó vivo: la anulación ya devuelve −90;
+    // el reverso no descuenta otra vez.
+    const v7 = await cobro(m, { iso: '2026-08-06T18:00:00Z', monto: 3000 })
+    const c7 = await com('2026-08-06T18:00:05Z', 90, v7)
+    await congelar(m, agosto.id, { fuente: 'COMMISSION', sourceId: c7.id, staffId: m.sofia, monto: 90 })
+    await prisma.commissionCalculation.update({
+      where: { id: c7.id },
+      data: { status: 'VOIDED', voidedAt: new Date('2026-10-11T18:00:00Z') },
+    })
+    await com('2026-10-12T18:00:00Z', -36, await reembolso(m, v7, { iso: '2026-10-12T18:00:00Z', monto: 1200 }))
 
     const ls = await todas(comisionesBarribles, alcance(OCT))
     expect(ids(ls)).toEqual([c2.id, rv1.id, rv2.id, c6.id, rv6.id].sort())
     expect(por(ls)[rv1.id]).toEqual({ staffId: m.sofia, monto: '-36.00', fecha: '2026-10-03', concepto: 'SERVICE', motivo: 'DEVOLUCION' })
     expect(por(ls)[c2.id]).toMatchObject({ monto: '90.00', motivo: 'VENTA' })
+    expect(por(await todas(reversosPorAnulacion, alcance(OCT)))).toEqual({
+      [c7.id]: { staffId: m.sofia, monto: '-90.00', fecha: '2026-10-11', concepto: 'RECONCILE', motivo: 'ANULACION' },
+    })
   })
 
   it('un reverso entra si su original está CONGELADA aunque hoy su fecha ya no caiga en ningún rango (la sede corrigió su zona)', async () => {
@@ -261,6 +274,10 @@ describe('propinas (spec §6.3)', () => {
     const p5 = await cobro(m, { iso: '2026-08-22T18:00:00Z', propina: 15, servedById: m.ana })
     await congelar(m, agosto.id, { fuente: 'TIP', sourceId: p5.id, staffId: m.ana, monto: 15 })
     await reembolso(m, p5, { iso: '2026-10-02T18:00:00Z', propina: 15 })
+    // (f) propina de julio, con su ventana pero ANTES del inicio (se pagó por fuera), devuelta en septiembre: no se descuenta.
+    await ventana(m, '2026-07-01T06:00:00Z', '2026-07-31T06:00:00Z')
+    const p6 = await cobro(m, { iso: '2026-07-20T18:00:00Z', propina: 25, servedById: m.ana })
+    await reembolso(m, p6, { iso: '2026-09-07T18:00:00Z', propina: 25 })
     expect(por(await todas(propinasBarribles, alcance(SEP)))).toEqual({
       [r1.id]: { staffId: m.carla, monto: '-50.00', fecha: '2026-09-03', concepto: 'SERVICE', motivo: 'DEVOLUCION' },
       [p3.id]: { staffId: m.ana, monto: '40.00', fecha: '2026-08-20', concepto: 'SERVICE', motivo: 'VENTA' },
@@ -296,6 +313,35 @@ describe('reversos por anulación (spec §6.4)', () => {
     })
     // Un periodo que termina antes del inicio de pago al personal tampoco barre anulaciones (B-D5).
     expect(await todas(reversosPorAnulacion, alcance(JUL))).toEqual([])
+  })
+
+  it('el ejemplo del spec §6.4: $100 congelada, devolución −$40 congelada y después anulación ⇒ −$100 y +$40, neto $0', async () => {
+    const agosto = await periodoCerrado(m, '2026-08-01', '2026-08-31')
+    const v = await cobro(m, { iso: '2026-08-05T18:00:00Z', monto: 3000 })
+    const c = await comision(m, { configId: cfg, staffId: m.sofia, iso: '2026-08-05T18:00:05Z', neto: 100, pago: v })
+    const rv = await comision(m, {
+      configId: cfg,
+      staffId: m.sofia,
+      iso: '2026-08-20T18:00:00Z',
+      neto: -40,
+      pago: await reembolso(m, v, { iso: '2026-08-20T18:00:00Z', monto: 1200 }),
+    })
+    await congelar(m, agosto.id, { fuente: 'COMMISSION', sourceId: c.id, staffId: m.sofia, monto: 100 })
+    await congelar(m, agosto.id, { fuente: 'COMMISSION', sourceId: rv.id, staffId: m.sofia, monto: -40 })
+    // La anulación (anularComision, Bloque A) anula la comisión Y su reverso materializado.
+    await prisma.commissionCalculation.updateMany({
+      where: { id: { in: [c.id, rv.id] } },
+      data: { status: 'VOIDED', voidedAt: new Date('2026-09-03T18:00:00Z'), voidedBy: m.owner, voidReason: 'QA' },
+    })
+    expect(await todas(comisionesBarribles, alcance(SEP))).toEqual([])
+    const ls = await todas(reversosPorAnulacion, alcance(SEP))
+    expect(por(ls)).toEqual({
+      [c.id]: { staffId: m.sofia, monto: '-100.00', fecha: '2026-09-03', concepto: 'RECONCILE', motivo: 'ANULACION' },
+      [rv.id]: { staffId: m.sofia, monto: '40.00', fecha: '2026-09-03', concepto: 'RECONCILE', motivo: 'ANULACION' },
+    })
+    // Neto de Sofía: lo congelado en agosto (+100 − 40) más lo que barre este cierre (−100 + 40) = $0.
+    const congelado = await prisma.serviceEarning.aggregate({ where: { periodId: agosto.id, staffId: m.sofia }, _sum: { amount: true } })
+    expect(ls.reduce((s, l) => s.plus(l.monto), new Prisma.Decimal(congelado._sum.amount ?? 0)).toFixed(2)).toBe('0.00')
   })
 })
 
