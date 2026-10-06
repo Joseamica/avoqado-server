@@ -5,7 +5,7 @@ import { withSerializableRetry } from '../../../utils/serializableRetry'
 import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
 import { assertPermisoEnTodasLasSedes } from './acceso'
 import { lockPeriodosDeOrganizacion, periodoQueContieneFecha } from './periodosGuardados'
-import { dbDateComoFecha, fechaComoDbDate, hoyLocal, Periodicidad, periodoQueContiene } from './periodos'
+import { dbDateComoFecha, diaCivilSiguiente, fechaComoDbDate, hoyLocal, Periodicidad, periodoQueContiene } from './periodos'
 
 type Db = Prisma.TransactionClient | typeof prisma
 const TZ_DEFAULT = 'America/Mexico_City'
@@ -56,8 +56,14 @@ export async function activarPagoAlPersonal(input: {
         'PERIODICIDAD_FIJA',
       )
     }
+    // El inicio del periodo ABIERTO (spec §7.1). Si el que contiene «hoy» ya se cerró (otra sede, más al oeste, fuera de
+    // su alcance), se empieza el día siguiente a su fin: el siguiente cierre nunca barre lo que ya se cerró.
     const fila = await periodoQueContieneFecha(tx, v.organizationId, hoy)
-    const startDate = fila ? dbDateComoFecha(fila.periodStart) : periodoQueContiene(hoy, input.periodicidad).start
+    const startDate = !fila
+      ? periodoQueContiene(hoy, input.periodicidad).start
+      : fila.status === 'CLOSED'
+        ? diaCivilSiguiente(dbDateComoFecha(fila.periodEnd))
+        : dbDateComoFecha(fila.periodStart)
     await tx.organization.update({
       where: { id: v.organizationId },
       data: { staffPayStartDate: fechaComoDbDate(startDate), servicePayPeriodicity: input.periodicidad },
@@ -95,11 +101,14 @@ export async function cambiarPropinas(input: {
     if (!org.staffPayStartDate) throw new ConflictError('Activa primero el pago al personal', 'NO_ACTIVADO')
     const abierta = await tx.staffPayTipWindow.findFirst({
       where: { organizationId: v.organizationId, endsAt: null },
-      select: { id: true },
+      select: { id: true, startsAt: true },
     })
     if (input.encender === (abierta !== null)) return { encendidas: input.encender }
     if (abierta) {
-      await tx.staffPayTipWindow.update({ where: { id: abierta.id }, data: { endsAt: ahora, endedById: input.userId } })
+      // `ahora` se fija antes de la tx (lo reusa cada reintento) y el reloj de otra instancia puede ir atrás: nunca antes
+      // del inicio (CHECK StaffPayTipWindow_rango). Queda una ventana vacía [inicio, inicio), que no pesca nada.
+      const endsAt = ahora < abierta.startsAt ? abierta.startsAt : ahora
+      await tx.staffPayTipWindow.update({ where: { id: abierta.id }, data: { endsAt, endedById: input.userId } })
     } else {
       await tx.staffPayTipWindow.create({ data: { organizationId: v.organizationId, startsAt: ahora, startedById: input.userId } })
     }
@@ -121,7 +130,7 @@ export async function ventanasDePropinas(organizationId: string, limite = 20): P
     where: { organizationId },
     select: { startsAt: true, endsAt: true },
     orderBy: { startsAt: 'desc' },
-    take: Math.min(Math.max(limite, 1), 100),
+    take: Number.isInteger(limite) ? Math.min(Math.max(limite, 1), 100) : 20,
   })
   return vs.map(x => ({ desde: x.startsAt.toISOString(), hasta: x.endsAt?.toISOString() ?? null }))
 }

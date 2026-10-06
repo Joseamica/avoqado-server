@@ -65,6 +65,12 @@ describe('activar pago al personal (spec fase 3 §7.1, Codex r1-9)', () => {
     expect(await activar('MONTHLY', '2026-09-20T18:00:00Z')).toEqual({ startDate: '2026-09-01', yaActivado: false })
   })
 
+  it('si el periodo que contiene «hoy» ya está CERRADO, empieza el día siguiente a su fin: nunca promete barrer lo cerrado (spec §7.1)', async () => {
+    await periodoCerrado(m, '2026-09-01', '2026-09-30')
+    expect(await activar('MONTHLY', '2026-09-20T18:00:00Z')).toEqual({ startDate: '2026-10-01', yaActivado: false })
+    expect(await estadoActivacion(prisma, m.orgId)).toMatchObject({ activado: true, startDate: '2026-10-01' })
+  })
+
   it('sin staffpay:close en todas las sedes no activa nada', async () => {
     mockPermiso.mockRejectedValueOnce(
       new ForbiddenError('Esta acción afecta a toda la organización: necesitas staffpay:close en todas las sedes'),
@@ -146,5 +152,31 @@ describe('interruptor de propinas (spec fase 3 §7.1, Codex r1-5)', () => {
       { desde: '2026-09-20T18:00:00.000Z', hasta: null },
       { desde: '2026-09-03T18:00:00.000Z', hasta: '2026-09-10T18:00:00.000Z' },
     ])
+  })
+
+  it('apagar con un reloj anterior al inicio de la ventana (reintento o desfase entre instancias) no truena: queda vacía [inicio, inicio)', async () => {
+    await activar('MONTHLY', '2026-09-01T18:00:00Z')
+    await propinas(true, '2026-09-10T18:00:00Z')
+    expect(await propinas(false, '2026-09-10T17:59:59Z')).toEqual({ encendidas: false })
+    const v = await prisma.staffPayTipWindow.findMany({ where: { organizationId: m.orgId }, take: 10 })
+    expect(v).toHaveLength(1)
+    expect(v[0]).toMatchObject({ startsAt: new Date('2026-09-10T18:00:00Z'), endsAt: new Date('2026-09-10T18:00:00Z'), endedById: m.owner })
+  })
+
+  it('el límite de la lista: un número que no es entero usa 20 y el tope es 100', async () => {
+    const base = Date.parse('2026-01-01T00:00:00Z')
+    await prisma.staffPayTipWindow.createMany({
+      data: Array.from({ length: 101 }, (_, i) => ({
+        organizationId: m.orgId,
+        startsAt: new Date(base + i * 3_600_000),
+        endsAt: new Date(base + i * 3_600_000 + 60_000),
+        startedById: m.owner,
+        endedById: m.owner,
+      })),
+    })
+    expect(await ventanasDePropinas(m.orgId, NaN)).toHaveLength(20)
+    expect(await ventanasDePropinas(m.orgId, 2.5)).toHaveLength(20)
+    expect(await ventanasDePropinas(m.orgId, 1000)).toHaveLength(100)
+    expect(await ventanasDePropinas(m.orgId, 0)).toHaveLength(1)
   })
 })
