@@ -480,4 +480,16 @@ describe('cerrar el periodo (spec §6.3)', () => {
     acceso.sedesConPermiso.mockResolvedValueOnce([])
     await expect(cerrar(m)).rejects.toMatchObject(sinPermiso)
   })
+
+  it('D3a r1: con la cancelación tardía prendida, una cancelada tarde SIN coach queda en $0 y no bloquea el cierre', async () => {
+    m = await mundoConAgosto('cierre-cancelada-sin-coach')
+    await prisma.servicePayTableVersion.updateMany({ where: { table: { venueId: m.venueId } }, data: { lateCancelHours: 2 } })
+    await clase(m, { staffId: m.ana, inicioIso: '2026-08-04T14:00:00Z', reservas: confirmadas(8) })
+    // Cancelada 1 h antes, sin coach: no hay a quién pagarle el sueldo base.
+    await clase(m, { staffId: null, inicioIso: '2026-08-05T14:00:00Z', status: 'CANCELLED', cancelledAt: '2026-08-05T13:00:00Z' })
+    const p = await preview(m)
+    // Como cualquier cancelada que no se paga, ni siquiera entra al recorrido del cierre (excluidas cuenta las excluidas a mano).
+    expect(p).toMatchObject({ puedeCerrar: true, bloqueos: [], clases: 1, excluidas: 0, totalServicios: '570.00' })
+    expect(await cerrar(m, { huella: p.huella })).toMatchObject({ yaCerrado: false, total: '570.00' })
+  })
 })

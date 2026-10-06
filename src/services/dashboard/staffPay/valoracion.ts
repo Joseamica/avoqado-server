@@ -186,9 +186,10 @@ export function valoracionCte(f: FiltroValoracion): Prisma.Sql {
     ),
     -- Fase 3 (§6.6), límites estrictos: exactamente N horas antes NO cuenta. Suplencia: la coach de hoy no es la original
     -- (sin original no cuenta) y se le asignó con menos de N horas. Una cancelada no es suplencia: cobra sólo el sueldo base.
+    -- Cancelación tardía sólo con coach (D3a r1): sin coach no hay a quién pagarle; queda EXCLUIDA en $0 y no bloquea.
     con_flags AS (
       SELECT r.*,
-             (r.cancelada AND r.cancelada_en IS NOT NULL AND r.cancel_horas IS NOT NULL
+             (r.cancelada AND r."assignedStaffId" IS NOT NULL AND r.cancelada_en IS NOT NULL AND r.cancel_horas IS NOT NULL
               AND r."startsAt" - r.cancelada_en < make_interval(hours => r.cancel_horas)) AS cancelada_tarde,
              (NOT r.cancelada AND r."assignedStaffId" IS NOT NULL AND r.coach_original IS NOT NULL
               AND r."assignedStaffId" <> r.coach_original AND r.asignada_en IS NOT NULL AND r.cover_horas IS NOT NULL

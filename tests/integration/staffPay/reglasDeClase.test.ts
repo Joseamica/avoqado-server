@@ -142,6 +142,29 @@ describe('cancelación tardía (D4-b)', () => {
     expect(await vivo(aTiempo)).toBeUndefined()
   })
 
+  it('sin coach no hay a quién pagarle: queda EXCLUIDA en $0, nunca como excepción (D3a r1)', async () => {
+    await prender()
+    const id = await clase(m, { staffId: null, inicioIso: DIA(4), status: 'CANCELLED', cancelledAt: menos(DIA(4), H) })
+    expect(await vivo(id)).toBeUndefined()
+    const p = await periodoCerrado(m, '2026-08-01', '2026-08-31')
+    const [v] = await valorarClases(
+      prisma,
+      {
+        venueId: m.venueId,
+        organizationId: m.orgId,
+        tz: TZ,
+        desde: AGOSTO.from,
+        hasta: AGOSTO.to,
+        ahora: AHORA,
+        modo: 'periodo',
+        periodId: p.id,
+        claseIds: [id],
+      },
+      { limite: 10 },
+    )
+    expect(v).toMatchObject({ estado: 'EXCLUIDA', motivo: null, canceladaTarde: false, monto: null, regla: null })
+  })
+
   it('sin la celda de 0 lugares de su nivel es la excepción de siempre', async () => {
     await prender()
     await prisma.servicePayTableCell.deleteMany({ where: { versionId, count: 0, payLevelId: m.hc } })
