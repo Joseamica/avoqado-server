@@ -33,6 +33,25 @@ describe('CreateProductWithInventorySchema — códigos del producto', () => {
     expect(CreateProductWithInventorySchema.safeParse(peticion({ sku: 'X'.repeat(65) })).success).toBe(false)
   })
 
+  // Mismo defecto, mismos campos que el asistente manda y se tiraban: modificadores, venta por peso y claves SAT.
+  it('conserva modificadores, venta por peso y claves SAT', () => {
+    const extras = {
+      modifierGroupIds: [CUID],
+      soldByWeight: true,
+      satProductKey: '50181900',
+      satUnitKey: 'H87',
+      objetoImp: '02',
+    }
+    const result = CreateProductWithInventorySchema.safeParse(peticion(extras))
+    expect(result.success).toBe(true)
+    if (result.success) expect(result.data.body.product).toMatchObject(extras)
+  })
+
+  it('valida las claves SAT igual que el alta normal', () => {
+    expect(CreateProductWithInventorySchema.safeParse(peticion({ satProductKey: '123' })).success).toBe(false)
+    expect(CreateProductWithInventorySchema.safeParse(peticion({ objetoImp: '09' })).success).toBe(false)
+  })
+
   // Regresión: sin códigos sigue siendo válido (el servicio autogenera el SKU).
   it('sin SKU ni código de barras sigue siendo válido', () => {
     const result = CreateProductWithInventorySchema.safeParse(peticion({}))
