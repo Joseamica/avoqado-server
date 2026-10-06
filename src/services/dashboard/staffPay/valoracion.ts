@@ -6,6 +6,12 @@ export type EstadoValoracion = 'OK' | 'EXCLUIDA' | 'EXCEPCION'
 export type MotivoExcepcion = 'SIN_COACH' | 'COACH_SIN_NIVEL' | 'SIN_TABLA' | 'SIN_MONTO_PARA_ESE_CONTEO'
 type Db = Pick<Prisma.TransactionClient, '$queryRaw'>
 
+/** Tope de horas de las dos reglas de clase: el CHECK de `ServicePayTableVersion` (spec fase 3 §7.3). */
+export const MAX_HORAS_REGLA = 168
+
+/** La regla de clase que movió el pago (spec fase 3 §6.6). La calcula `valoracionCte`; el cierre la congela en el descriptor. */
+export type ReglaDeClase = { tipo: 'SUPLENCIA'; horas: number; bono: string } | { tipo: 'CANCELACION_TARDIA'; horas: number }
+
 export interface FiltroValoracion {
   venueId: string
   organizationId: string
@@ -50,6 +56,12 @@ export interface ClaseValorada {
   estado: EstadoValoracion
   motivo: MotivoExcepcion | null
   monto: Prisma.Decimal | null
+  /** Bono sumado por suplencia con poco aviso (spec fase 3 §6.6), «100.00»; null si no se sumó. */
+  bonoSuplencia: string | null
+  /** Cancelada con aviso tardío: se valora con conteo 0 (la celda del sueldo base de su nivel). */
+  canceladaTarde: boolean
+  /** La regla que movió el pago, con sus horas de aviso, para decir POR QUÉ; null si ninguna. */
+  regla: ReglaDeClase | null
 }
 
 export interface ResumenSede {
@@ -83,6 +95,7 @@ export function valoracionCte(f: FiltroValoracion): Prisma.Sql {
       ps."valuationVersionId" AS version_anclada,
       ps."originPeriodId" AS periodo_origen,
       (cs.status = 'CANCELLED') AS cancelada,
+      cs."cancelledAt" AS cancelada_en, cs."originalStaffId" AS coach_original, cs."staffAssignedAt" AS asignada_en,
       ps."payCountOverride", ps."payAmountOverride", COALESCE(ps."payExcluded", false) AS excluida`
   // Sin ancla, del rango de la sede ya terminadas (índice por sede + startsAt).
   const sinAnclaEnRango = (porEstado: Prisma.Sql) => Prisma.sql`
@@ -95,6 +108,10 @@ export function valoracionCte(f: FiltroValoracion): Prisma.Sql {
         AND ps."originPeriodId" IS NULL
         ${porClases}
         ${porCoach}`
+  // Fase 3 (§6.6): en modo vivo una cancelada sólo vale si su versión tiene la regla de cancelación tardía. Aquí entran las
+  // canceladas dentro del tope de CUALQUIER regla (MAX_HORAS_REGLA, el CHECK); `valoradas` saca las que su versión no paga.
+  const vivas = Prisma.sql`AND (cs.status <> 'CANCELLED'
+        OR (cs."cancelledAt" IS NOT NULL AND cs."cancelledAt" > cs."startsAt" - ${Prisma.raw(`interval '${MAX_HORAS_REGLA} hours'`)}))`
   // Modo periodo: dos SELECT completos y no un OR (un OR entre ps y el rango de cs recorre toda la sede). La rama de
   // anclas entra por el índice de originPeriodId; la otra, sin filtro de estado: una cancelada sin ancla sale EXCLUIDA.
   const clases =
@@ -109,7 +126,9 @@ export function valoracionCte(f: FiltroValoracion): Prisma.Sql {
         ${porCoach}
       UNION ALL
       ${sinAnclaEnRango(Prisma.empty)}`
-      : sinAnclaEnRango(Prisma.sql`AND cs.status <> 'CANCELLED'`)
+      : sinAnclaEnRango(vivas)
+  // Fase 3: en modo vivo una cancelada que su versión no paga no aparece (como en las fases 1 y 2).
+  const sinCanceladasQueNoSePagan = f.modo === 'periodo' ? Prisma.empty : Prisma.sql`WHERE NOT (cc.cancelada AND NOT cc.cancelada_tarde)`
   return Prisma.sql`
     WITH clases AS (${clases}
     ),
@@ -118,6 +137,10 @@ export function valoracionCte(f: FiltroValoracion): Prisma.Sql {
              COALESCE(va.id, tv.version_id) AS version_id,
              COALESCE(va."countMode", tv."countMode") AS "countMode",
              COALESCE(va."maxCount", tv."maxCount") AS "maxCount",
+             -- Fase 3 (§6.6): las reglas de la MISMA versión que da las celdas — la anclada si hay ancla, si no la vigente.
+             COALESCE(va."coverBonusHours", tv."coverBonusHours") AS cover_horas,
+             COALESCE(va."coverBonusAmount", tv."coverBonusAmount") AS cover_monto,
+             COALESCE(va."lateCancelHours", tv."lateCancelHours") AS cancel_horas,
              -- Si la persona YA tiene una línea, manda la PRIMERA aunque su nivel fuera NULL (Codex R1-5): un cierre por
              -- monto ajustado sin nivel no se convierte después en tarifa por una asignación retroactiva.
              CASE WHEN lp.existe THEN lp."payLevelId" ELSE lv."payLevelId" END AS "payLevelId",
@@ -125,10 +148,10 @@ export function valoracionCte(f: FiltroValoracion): Prisma.Sql {
       FROM clases c
       LEFT JOIN "ServicePayTableVersion" va ON va.id = c.version_anclada ${soloConAncla}
       LEFT JOIN LATERAL (
-        SELECT v.id AS version_id, v."countMode", v."maxCount"
+        SELECT v.id AS version_id, v."countMode", v."maxCount", v."coverBonusHours", v."coverBonusAmount", v."lateCancelHours"
         FROM "ServicePayTable" t
         JOIN LATERAL (
-          SELECT v2.id, v2."countMode", v2."maxCount"
+          SELECT v2.id, v2."countMode", v2."maxCount", v2."coverBonusHours", v2."coverBonusAmount", v2."lateCancelHours"
           FROM "ServicePayTableVersion" v2
           WHERE v2."tableId" = t.id AND v2."effectiveFrom" <= c.fecha_valoracion
           ORDER BY v2."effectiveFrom" DESC, v2.revision DESC
@@ -161,9 +184,23 @@ export function valoracionCte(f: FiltroValoracion): Prisma.Sql {
         LIMIT 1
       ) lv ON true
     ),
+    -- Fase 3 (§6.6), límites estrictos: exactamente N horas antes NO cuenta. Suplencia: la coach de hoy no es la original
+    -- (sin original no cuenta) y se le asignó con menos de N horas. Una cancelada no es suplencia: cobra sólo el sueldo base.
+    con_flags AS (
+      SELECT r.*,
+             (r.cancelada AND r.cancelada_en IS NOT NULL AND r.cancel_horas IS NOT NULL
+              AND r."startsAt" - r.cancelada_en < make_interval(hours => r.cancel_horas)) AS cancelada_tarde,
+             (NOT r.cancelada AND r."assignedStaffId" IS NOT NULL AND r.coach_original IS NOT NULL
+              AND r."assignedStaffId" <> r.coach_original AND r.asignada_en IS NOT NULL AND r.cover_horas IS NOT NULL
+              AND r."startsAt" - r.asignada_en < make_interval(hours => r.cover_horas)) AS suplencia_tarde
+      FROM con_regla r
+    ),
     con_conteo AS (
-      SELECT r0.*, cnt.n AS conteo_calculado, COALESCE(r0."payCountOverride", cnt.n) AS conteo
-      FROM con_regla r0
+      -- Fase 3: una cancelada tarde se paga como clase de 0 lugares (la celda del sueldo base), con o sin conteo corregido.
+      SELECT r0.*,
+             CASE WHEN r0.cancelada_tarde THEN 0 ELSE cnt.n END AS conteo_calculado,
+             CASE WHEN r0.cancelada_tarde THEN 0 ELSE COALESCE(r0."payCountOverride", cnt.n) END AS conteo
+      FROM con_flags r0
       LEFT JOIN LATERAL (
         SELECT COALESCE(SUM(r."partySize"), 0)::int AS n
         FROM "Reservation" r
@@ -188,7 +225,7 @@ export function valoracionCte(f: FiltroValoracion): Prisma.Sql {
              cc.conteo_calculado AS "conteoCalculado", cc.conteo,
              (cc."payCountOverride" IS NOT NULL OR cc."payAmountOverride" IS NOT NULL OR cc.excluida) AS "tieneAjuste",
              CASE
-               WHEN cc.cancelada OR cc.excluida THEN 'EXCLUIDA'
+               WHEN (cc.cancelada AND NOT cc.cancelada_tarde) OR cc.excluida THEN 'EXCLUIDA'
                WHEN cc."assignedStaffId" IS NULL THEN 'EXCEPCION'
                WHEN cc."payAmountOverride" IS NOT NULL THEN 'OK'
                WHEN cc."payLevelId" IS NULL THEN 'EXCEPCION'
@@ -197,7 +234,7 @@ export function valoracionCte(f: FiltroValoracion): Prisma.Sql {
                ELSE 'OK'
              END AS estado,
              CASE
-               WHEN cc.cancelada OR cc.excluida THEN NULL
+               WHEN (cc.cancelada AND NOT cc.cancelada_tarde) OR cc.excluida THEN NULL
                WHEN cc."assignedStaffId" IS NULL THEN 'SIN_COACH'
                WHEN cc."payAmountOverride" IS NOT NULL THEN NULL
                WHEN cc."payLevelId" IS NULL THEN 'COACH_SIN_NIVEL'
@@ -206,10 +243,27 @@ export function valoracionCte(f: FiltroValoracion): Prisma.Sql {
                ELSE NULL
              END AS motivo,
              CASE
-               WHEN cc.cancelada OR cc.excluida OR cc."assignedStaffId" IS NULL THEN NULL
+               WHEN (cc.cancelada AND NOT cc.cancelada_tarde) OR cc.excluida OR cc."assignedStaffId" IS NULL THEN NULL
                WHEN cc."payAmountOverride" IS NOT NULL THEN cc."payAmountOverride"
+               WHEN cc.suplencia_tarde THEN cell.amount + cc.cover_monto
                ELSE cell.amount
-             END AS monto
+             END AS monto,
+             -- Fase 3: el bono sólo cuando de verdad se sumó (sin monto acordado, sin excluir y con celda).
+             CASE
+               WHEN cc.suplencia_tarde AND NOT cc.excluida AND cc."payAmountOverride" IS NULL AND cell.amount IS NOT NULL
+                 THEN cc.cover_monto::text
+             END AS "bonoSuplencia",
+             cc.cancelada_tarde AS "canceladaTarde",
+             CASE
+               WHEN cc.excluida THEN NULL
+               WHEN cc.cancelada_tarde
+                 THEN jsonb_build_object('tipo', 'CANCELACION_TARDIA',
+                        'horas', GREATEST(0, floor(extract(epoch FROM cc."startsAt" - cc.cancelada_en) / 3600))::int)
+               WHEN cc.suplencia_tarde AND cc."payAmountOverride" IS NULL AND cell.amount IS NOT NULL
+                 THEN jsonb_build_object('tipo', 'SUPLENCIA',
+                        'horas', GREATEST(0, floor(extract(epoch FROM cc."startsAt" - cc.asignada_en) / 3600))::int,
+                        'bono', cc.cover_monto::text)
+             END AS regla
       FROM con_conteo cc
       JOIN "Product" p ON p.id = cc."productId"
       LEFT JOIN "Staff" s ON s.id = cc."assignedStaffId"
@@ -217,6 +271,7 @@ export function valoracionCte(f: FiltroValoracion): Prisma.Sql {
         ON cell."versionId" = cc.version_id
        AND cell."payLevelId" = cc."payLevelId"
        AND cell.count = LEAST(cc.conteo, cc."maxCount")
+      ${sinCanceladasQueNoSePagan}
     )`
 }
 

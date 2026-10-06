@@ -30,6 +30,9 @@ const c = (id: string, monto: number | null, extra: Partial<ClaseValorada> = {})
   estado: monto === null ? 'EXCLUIDA' : 'OK',
   motivo: null,
   monto: monto === null ? null : new Prisma.Decimal(monto),
+  bonoSuplencia: null,
+  canceladaTarde: false,
+  regla: null,
   ...extra,
 })
 const cab = { organizationId: 'o1', start: '2026-08-01', end: '2026-08-31', venueIds: ['v2', 'v1'] }
