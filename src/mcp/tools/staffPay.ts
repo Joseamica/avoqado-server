@@ -353,15 +353,16 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'configure_service_pay',
-    'Turn on pay for staff (pay-per-service) for the whole organization, or choose whether tips are paid inside the pay receipt. accion "activar": sales commissions (and tips, if on) start adding to the receipts from the start of the current period, and it fixes the period length (periodicidad MONTHLY or SEMIMONTHLY, ask the owner); earlier commissions are not added. accion "propinas": encender true pays tips inside the receipt, false hands them out separately; turning them off only affects future payments. Two steps: call without confirm to show current → new (for activar: the start date it would get and whether the period length is already fixed by saved periods; offer only that one); then confirm:true. Requires staffpay:close in every venue of the organization.',
+    'Turn on pay for staff (pay-per-service) for the whole organization, or choose whether tips are paid inside the pay receipt. accion "activar": sales commissions (and tips, if on) start adding to the receipts from the start of the current period, and it fixes the period length (periodicidad MONTHLY or SEMIMONTHLY, ask the owner); earlier commissions are not added. accion "propinas": encender true pays tips inside the receipt, false hands them out separately; turning them off only affects future payments. Two steps: call without confirm to show current → new (for activar: the start date it would get and whether the period length is already fixed by saved periods; offer only that one); then confirm:true (for activar, with the expectedSourceFingerprint the preview returned: it is that start date, and if it changed in between —for example the period changed at midnight— nothing is activated and it asks for a new preview). Requires staffpay:close in every venue of the organization.',
     {
       venueId: z.string().min(1).max(64).describe('Venue in your scope'),
       accion: z.enum(['activar', 'propinas']).describe('activar | propinas'),
       periodicidad: z.enum(['MONTHLY', 'SEMIMONTHLY']).optional().describe('For activar: MONTHLY or SEMIMONTHLY'),
       encender: z.boolean().optional().describe('For propinas: true = tips inside the receipt; false = handed out separately'),
+      expectedSourceFingerprint: z.string().max(128).optional().describe('For activar: the start date from the preview'),
       confirm: z.boolean().optional(),
     },
-    async ({ venueId, accion, periodicidad, encender, confirm }) => {
+    async ({ venueId, accion, periodicidad, encender, expectedSourceFingerprint, confirm }) => {
       // El motivo de esta escritura (puedeEscribir lo repite con el de los pagos, que aquí no aplica).
       requireWriteScopeAlways(scope, 'staffpay:close', 'configura el pago al personal')
       const no = await puedeEscribir(venueId)
@@ -409,12 +410,21 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
               requiresConfirmation: true,
               actual: conPlan,
               nuevo: { activado: true, periodicidad, startDate: plan.startDate },
+              // El catálogo la firma en el token: se confirma la fecha que se MOSTRÓ (Codex bloque B #3). No quitar.
+              expectedSourceFingerprint: plan.startDate,
               message: `Pago al personal: sin activar → activado (${nombrePeriodicidad(periodicidad!)}${
                 plan.periodicidadFija ? ', ya no cambia porque hay periodos guardados' : ''
               }). Desde el ${plan.startDate} se suman al recibo las comisiones${actual.propinasEncendidas ? ' y las propinas' : ''}; las anteriores no se suman: si debes alguna, agrégalo como ajuste.`,
             })
           }
-          const r = await activarPagoAlPersonal({ userId: scope.staffId, venueId, periodicidad: periodicidad! })
+          if (!expectedSourceFingerprint)
+            return text({ ok: false, needsInput: true, field: 'expectedSourceFingerprint', question: 'Pide primero la vista previa.' })
+          const r = await activarPagoAlPersonal({
+            userId: scope.staffId,
+            venueId,
+            periodicidad: periodicidad!,
+            inicioEsperado: expectedSourceFingerprint,
+          })
           if (!r.yaActivado)
             await auditMcpWrite(scope, {
               action: 'SERVICE_PAY_ACTIVATED',
@@ -459,7 +469,7 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
           })
         return text({ ok: true, ...r })
       } catch (e) {
-        return fallo(e)
+        return fallo(e, (e as { code?: string })?.code === 'INICIO_CAMBIO' ? ' Pide una vista previa nueva (sin confirm).' : '')
       }
     },
   )

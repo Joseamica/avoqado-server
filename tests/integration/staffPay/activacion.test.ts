@@ -94,6 +94,27 @@ describe('activar pago al personal (spec fase 3 §7.1, Codex r1-9)', () => {
       await b.soltar()
     }
   })
+
+  describe('🔴 la fecha de inicio que se mostró es la que se confirma (Codex bloque B #3)', () => {
+    // CDMX: la vista previa del 30-sep a las 23:59 anuncia el 1-sep; se confirma el 1-oct a las 00:01.
+    const VISTA = '2026-10-01T05:59:00Z'
+    const CONFIRMA = '2026-10-01T06:01:00Z'
+    const activarEsperando = (inicioEsperado: string, iso: string) =>
+      activarPagoAlPersonal({ userId: m.owner, venueId: m.venueId, periodicidad: 'MONTHLY', inicioEsperado, ahora: new Date(iso) })
+
+    it('si cambió entre la vista previa y el confirmar: 409 INICIO_CAMBIO y no escribe nada', async () => {
+      const { startDate } = await previewActivacion({ venueId: m.venueId, periodicidad: 'MONTHLY', ahora: new Date(VISTA) })
+      expect(startDate).toBe('2026-09-01')
+      await expect(activarEsperando(startDate, CONFIRMA)).rejects.toMatchObject({ statusCode: 409, code: 'INICIO_CAMBIO' })
+      expect(await estadoActivacion(prisma, m.orgId)).toMatchObject({ activado: false, startDate: null })
+      expect(await logs('SERVICE_PAY_ACTIVATED')).toBe(0)
+    })
+
+    it('si es la misma, activa con ella', async () => {
+      expect(await activarEsperando('2026-09-01', VISTA)).toEqual({ startDate: '2026-09-01', yaActivado: false })
+      expect(await estadoActivacion(prisma, m.orgId)).toMatchObject({ activado: true, startDate: '2026-09-01' })
+    })
+  })
 })
 
 describe('interruptor de propinas (spec fase 3 §7.1, Codex r1-5)', () => {

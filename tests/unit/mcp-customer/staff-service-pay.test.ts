@@ -5,6 +5,7 @@ import { configureToolCatalog } from '@/mcp/catalog'
 import { auditMcpWrite } from '@/mcp/audit'
 import { registerStaffPayTools } from '../../../src/mcp/tools/staffPay'
 import type { McpScope } from '../../../src/mcp/scope'
+import { ConflictError } from '@/errors/AppError'
 
 const mockReporte = jest.fn()
 const mockDetalle = jest.fn()
@@ -1300,6 +1301,8 @@ describe('pago al personal con ventas por MCP (spec fase 3 §12)', () => {
         requiresConfirmation: true,
         actual: { activado: false, periodicidad: 'MONTHLY', periodicidadFija: false },
         nuevo: { activado: true, periodicidad: 'SEMIMONTHLY', startDate: '2026-10-01' },
+        // La fecha que se muestra viaja firmada en el token (Codex bloque B #3).
+        expectedSourceFingerprint: '2026-10-01',
       })
       expect(mockPlan).toHaveBeenCalledWith({ venueId: 'v1', periodicidad: 'SEMIMONTHLY' })
       expect(mockTodas).toHaveBeenCalledWith('s1', 'o1', 'staffpay:close')
@@ -1309,9 +1312,16 @@ describe('pago al personal con ventas por MCP (spec fase 3 §12)', () => {
       expect(mockActivar).not.toHaveBeenCalled()
       expect(auditMcpWrite).not.toHaveBeenCalled()
       mockActivar.mockResolvedValue({ startDate: '2026-10-01', yaActivado: false })
-      const r = parse(await conf({ accion: 'activar', periodicidad: 'SEMIMONTHLY', confirm: true }))
+      const r = parse(
+        await conf({ accion: 'activar', periodicidad: 'SEMIMONTHLY', expectedSourceFingerprint: '2026-10-01', confirm: true }),
+      )
       expect(r).toMatchObject({ ok: true, startDate: '2026-10-01' })
-      expect(mockActivar).toHaveBeenCalledWith({ userId: 's1', venueId: 'v1', periodicidad: 'SEMIMONTHLY' })
+      expect(mockActivar).toHaveBeenCalledWith({
+        userId: 's1',
+        venueId: 'v1',
+        periodicidad: 'SEMIMONTHLY',
+        inicioEsperado: '2026-10-01',
+      })
       expect(auditMcpWrite).toHaveBeenCalledTimes(1)
       expect(auditMcpWrite).toHaveBeenCalledWith(
         expect.anything(),
@@ -1322,7 +1332,9 @@ describe('pago al personal con ventas por MCP (spec fase 3 §12)', () => {
 
     it('si otra persona activó entre la vista previa y el confirmar (yaActivado), no se audita de nuevo', async () => {
       mockActivar.mockResolvedValue({ startDate: '2026-09-01', yaActivado: true })
-      expect(parse(await conf({ accion: 'activar', periodicidad: 'MONTHLY', confirm: true }))).toMatchObject({ ok: true, yaActivado: true })
+      expect(
+        parse(await conf({ accion: 'activar', periodicidad: 'MONTHLY', expectedSourceFingerprint: '2026-10-01', confirm: true })),
+      ).toMatchObject({ ok: true, yaActivado: true })
       expect(auditMcpWrite).not.toHaveBeenCalled()
     })
 
@@ -1375,7 +1387,7 @@ describe('pago al personal con ventas por MCP (spec fase 3 §12)', () => {
           statusCode: 403,
         }),
       )
-      const r = parse(await conf({ accion: 'activar', periodicidad: 'MONTHLY', confirm: true }))
+      const r = parse(await conf({ accion: 'activar', periodicidad: 'MONTHLY', expectedSourceFingerprint: '2026-10-01', confirm: true }))
       expect(r).toMatchObject({ ok: false, error: expect.stringMatching(/todas las sedes/) })
       expect(auditMcpWrite).not.toHaveBeenCalled()
     })
@@ -1465,6 +1477,56 @@ describe('pago al personal con ventas por MCP (spec fase 3 §12)', () => {
           ok: true,
         })
         expect(mockActivar).toHaveBeenCalledTimes(1)
+      } finally {
+        await client.close()
+        await server.close()
+      }
+    })
+
+    it('confirmar activar sin la fecha de la vista previa la pide y no escribe', async () => {
+      expect(parse(await conf({ accion: 'activar', periodicidad: 'MONTHLY', confirm: true }))).toMatchObject({
+        ok: false,
+        needsInput: true,
+        field: 'expectedSourceFingerprint',
+      })
+      expect(mockActivar).not.toHaveBeenCalled()
+    })
+
+    it('🔴 vista previa el 30-sep a las 23:59 (inicio 1-sep) y confirmación el 1-oct a las 00:01: no escribe y pide otra vista previa (Codex bloque B #3)', async () => {
+      const server = new McpServer({ name: 'staffpay', version: '1' })
+      const s = { ...scope, scopes: ['mcp:read', 'mcp:write'] } as unknown as McpScope
+      configureToolCatalog(server, s)
+      registerStaffPayTools(server, s)
+      const client = new Client({ name: 'staffpay-test', version: '1' })
+      const [a, b] = InMemoryTransport.createLinkedPair()
+      await Promise.all([server.connect(a), client.connect(b)])
+      try {
+        const call = async (args: Record<string, unknown>) =>
+          JSON.parse(
+            ((await client.callTool({ name: 'configure_service_pay', arguments: args })).content as Array<{ text: string }>)[0].text,
+          )
+        mockPlan.mockResolvedValue({ periodicidad: 'MONTHLY', periodicidadFija: false, startDate: '2026-09-01' }) // 23:59
+        const p = await call({ venueId: 'v1', accion: 'activar', periodicidad: 'MONTHLY' })
+        expect(p.confirmationArguments).toMatchObject({ expectedSourceFingerprint: '2026-09-01' })
+        // La fecha va firmada: confirmar con otra no sirve.
+        expect(
+          await call({
+            ...p.confirmationArguments,
+            expectedSourceFingerprint: '2026-10-01',
+            confirm: true,
+            confirmationToken: p.confirmationToken,
+          }),
+        ).toMatchObject({ needsInput: true, field: 'confirmationToken' })
+        expect(mockActivar).not.toHaveBeenCalled()
+        // 00:01: el service ya calcularía el 1-oct y rechaza bajo su candado.
+        mockActivar.mockImplementation(async ({ inicioEsperado }: { inicioEsperado?: string }) => {
+          if (inicioEsperado !== '2026-10-01') throw new ConflictError('La fecha de inicio cambió; vuelve a revisar.', 'INICIO_CAMBIO')
+          return { startDate: '2026-10-01', yaActivado: false }
+        })
+        const r = await call({ ...p.confirmationArguments, confirm: true, confirmationToken: p.confirmationToken })
+        expect(r).toMatchObject({ ok: false, code: 'INICIO_CAMBIO', error: expect.stringMatching(/vista previa nueva/) })
+        expect(mockActivar).toHaveBeenCalledWith(expect.objectContaining({ inicioEsperado: '2026-09-01' }))
+        expect(auditMcpWrite).not.toHaveBeenCalled()
       } finally {
         await client.close()
         await server.close()

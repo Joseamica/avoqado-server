@@ -79,8 +79,9 @@ export const ajusteClaseSchema = z.object({
 export const periodicidadSchema = z.object({
   periodicidad: z.enum(['MONTHLY', 'SEMIMONTHLY'], { errorMap: () => ({ message: 'Elige mensual o quincenal' }) }),
 })
-/** Fase 3 §7.1: activar pago al personal confirma la periodicidad (también la mensual de fábrica). Misma forma. */
-export const activarSchema = periodicidadSchema
+/** Fase 3 §7.1: activar pago al personal confirma la periodicidad (también la mensual de fábrica) y, opcional, la fecha de
+ *  inicio que se mostró: si ya no es ésa, el service contesta 409 INICIO_CAMBIO (Codex bloque B #3). */
+export const activarSchema = periodicidadSchema.extend({ inicioEsperado: fechaSchema.optional() })
 /** Fase 3 §6.3: «Pagar las propinas en el recibo», sí o no. */
 export const propinasSchema = z.object({
   encender: z.boolean({

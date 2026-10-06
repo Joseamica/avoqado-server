@@ -29,11 +29,14 @@ export async function estadoActivacion(
  * HOY (zona de la sede que lo pide) y la periodicidad que confirmó el dueño, también la mensual de fábrica. Exige
  * `staffpay:close` en todas las sedes; candado de periodos de la organización (como `cambiarPeriodicidad`). Idempotente:
  * activado ya, devuelve su fecha y no cambia nada. Con periodos guardados la periodicidad ya no cambia (D3 de la fase 2).
+ * `inicioEsperado`: la fecha que el dueño vio en la vista previa; si bajo el candado sale otra (pasó la medianoche del
+ * cambio de periodo), 409 INICIO_CAMBIO sin escribir: la fecha ya no se cambia después (Codex bloque B #3).
  */
 export async function activarPagoAlPersonal(input: {
   userId: string
   venueId: string
   periodicidad: Periodicidad
+  inicioEsperado?: string
   ahora?: Date
 }): Promise<{ startDate: string; yaActivado: boolean }> {
   if (input.periodicidad !== 'MONTHLY' && input.periodicidad !== 'SEMIMONTHLY') throw new BadRequestError('Elige mensual o quincenal')
@@ -54,6 +57,8 @@ export async function activarPagoAlPersonal(input: {
       )
     }
     const startDate = await inicioAlActivar(tx, v.organizationId, hoy, input.periodicidad)
+    if (input.inicioEsperado !== undefined && input.inicioEsperado !== startDate)
+      throw new ConflictError('La fecha de inicio cambió; vuelve a revisar.', 'INICIO_CAMBIO')
     await tx.organization.update({
       where: { id: v.organizationId },
       data: { staffPayStartDate: fechaComoDbDate(startDate), servicePayPeriodicity: input.periodicidad },

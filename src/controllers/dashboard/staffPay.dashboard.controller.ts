@@ -287,7 +287,9 @@ export const listPeriods = manejar(req =>
 )
 export const patchPeriodicity = manejar(req => periodos.cambiarPeriodicidad({ ...ctx(req), periodicidad: req.body.periodicidad }))
 // Fase 3 (spec §7.1, §6.3). Campo por campo: `ahora` es de pruebas y jamás sale de la petición.
-export const postActivate = manejar(req => activacion.activarPagoAlPersonal({ ...ctx(req), periodicidad: req.body.periodicidad }))
+export const postActivate = manejar(req =>
+  activacion.activarPagoAlPersonal({ ...ctx(req), periodicidad: req.body.periodicidad, inicioEsperado: req.body.inicioEsperado }),
+)
 export const putTips = manejar(req => activacion.cambiarPropinas({ ...ctx(req), encender: req.body.encender }))
 export const getClosePreview = manejar(req => cierre.previewCierre({ ...ctx(req), fecha: String(req.query.fecha) }))
 export const postClose = manejar(req => {

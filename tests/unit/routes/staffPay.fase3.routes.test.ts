@@ -23,6 +23,12 @@ describe('Zod de la fase 3 (sólo forma, mensajes en español)', () => {
     expect(malo.success).toBe(false)
     if (!malo.success) expect(malo.error.errors.map(e => e.message)).toEqual(['Elige mensual o quincenal'])
   })
+  it('activar acepta, opcional, la fecha de inicio que se mostró (Codex bloque B #3)', () => {
+    expect(schemas.activarSchema.safeParse({ periodicidad: 'MONTHLY', inicioEsperado: '2026-09-01' }).success).toBe(true)
+    const mala = schemas.activarSchema.safeParse({ periodicidad: 'MONTHLY', inicioEsperado: '1-sep' })
+    expect(mala.success).toBe(false)
+    if (!mala.success) expect(mala.error.errors.map(e => e.message)).toEqual(['Fecha inválida (AAAA-MM-DD)'])
+  })
   it('las propinas en el recibo son sí o no', () => {
     expect(schemas.propinasSchema.safeParse({ encender: false }).success).toBe(true)
     const malo = schemas.propinasSchema.safeParse({ encender: 'si' })
@@ -75,6 +81,14 @@ describe('Controller de la fase 3', () => {
     await controller.postActivate(req({ body: { periodicidad: 'MONTHLY', ahora: '2020-01-01' } }), ra, jest.fn())
     expect(activacion.activarPagoAlPersonal).toHaveBeenCalledWith({ venueId: 'v1', userId: 'u1', periodicidad: 'MONTHLY' })
     expect(ra.json).toHaveBeenCalledWith({ startDate: '2026-10-01', yaActivado: false })
+    // La fecha que vio el dashboard llega al service, que la compara bajo el candado (Codex bloque B #3).
+    await controller.postActivate(req({ body: { periodicidad: 'MONTHLY', inicioEsperado: '2026-09-01' } }), res(), jest.fn())
+    expect(activacion.activarPagoAlPersonal).toHaveBeenLastCalledWith({
+      venueId: 'v1',
+      userId: 'u1',
+      periodicidad: 'MONTHLY',
+      inicioEsperado: '2026-09-01',
+    })
     const rt = res()
     await controller.putTips(req({ body: { encender: true, ahora: '2020-01-01' } }), rt, jest.fn())
     expect(activacion.cambiarPropinas).toHaveBeenCalledWith({ venueId: 'v1', userId: 'u1', encender: true })
