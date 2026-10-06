@@ -364,3 +364,38 @@ describe('ajustes a mano sobre una cancelada tarde (resolución 12)', () => {
     expect(await vivo(id)).toMatchObject({ estado: 'EXCLUIDA', monto: null, bonoSuplencia: null, regla: null })
   })
 })
+
+describe('una cancelada sin regla o sin estampa sigue EXCLUIDA en el modo periodo', () => {
+  const enPeriodo = async (periodId: string, id: string) =>
+    (
+      await valorarClases(
+        prisma,
+        {
+          venueId: m.venueId,
+          organizationId: m.orgId,
+          tz: TZ,
+          desde: AGOSTO.from,
+          hasta: AGOSTO.to,
+          ahora: AHORA,
+          modo: 'periodo',
+          periodId,
+          claseIds: [id],
+        },
+        { limite: 10 },
+      )
+    )[0]
+
+  it('reglas apagadas: cancelada con poco aviso, $0', async () => {
+    const id = await clase(m, { staffId: m.ana, inicioIso: DIA(4), status: 'CANCELLED', cancelledAt: menos(DIA(4), H) })
+    const p = await periodoCerrado(m, '2026-08-01', '2026-08-31')
+    expect(await enPeriodo(p.id, id)).toMatchObject({ estado: 'EXCLUIDA', canceladaTarde: false, monto: null, regla: null })
+  })
+
+  it('reglas prendidas pero sin `cancelledAt` (clase de antes de la estampa): $0, nunca el sueldo base', async () => {
+    await prender()
+    const id = await clase(m, { staffId: m.ana, inicioIso: DIA(4), status: 'CANCELLED' })
+    const p = await periodoCerrado(m, '2026-08-01', '2026-08-31')
+    expect(await enPeriodo(p.id, id)).toMatchObject({ estado: 'EXCLUIDA', canceladaTarde: false, monto: null, regla: null })
+    expect(await vivo(id)).toBeUndefined()
+  })
+})
