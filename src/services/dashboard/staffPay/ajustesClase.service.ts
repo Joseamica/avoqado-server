@@ -9,7 +9,7 @@ import { exigirPermisoEnSedes, sedesConPermiso } from './acceso'
 import { diferenciasDeClase, origenDeClase } from './diferencias.service'
 import { dbDateComoFecha } from './periodos'
 import { bloquearPeriodo, lockClase, lockPeriodosDeOrganizacion, periodoQueContieneFecha } from './periodosGuardados'
-import { valorarClases } from './valoracion'
+import { ReglaDeClase, valorarClases } from './valoracion'
 
 export interface AjusteDeClase {
   payCountOverride: number | null
@@ -40,6 +40,8 @@ export interface PagoDeClase {
   countMode: string | null
   staffName: string | null
   payLevelName: string | null
+  /** La regla de clase que movió el pago (spec fase 3 §6.6): «Suplencia avisada 3 h antes: +$100»; null si ninguna. */
+  regla: ReglaDeClase | null
   ajuste: AjusteDeClase | null
   anclada: boolean
   /** Sin ancla, ya terminada, no cancelada y su fecha cae en un periodo CERRADO: se paga como diferencia de ése (spec §6.4). */
@@ -210,14 +212,14 @@ export async function pagoDeClase(
     countMode: null,
     staffName: null,
     payLevelName: null,
+    regla: null,
     ajuste,
     anclada: !!ps?.originPeriodId,
     llegoTarde,
     periodoOrigen,
     lineas,
   }
-  if (cs.status === 'CANCELLED') return { ...base, estado: 'CANCELADA' }
-  if (cs.endsAt > ahora) return { ...base, estado: 'NO_TERMINADA' }
+  if (cs.endsAt > ahora) return { ...base, estado: cs.status === 'CANCELLED' ? 'CANCELADA' : 'NO_TERMINADA' }
   const [v] = await valorarClases(
     db,
     {
@@ -233,6 +235,8 @@ export async function pagoDeClase(
     },
     { limite: 1 },
   )
+  // Una cancelada sólo se paga con la regla de cancelación tardía de su versión (spec fase 3 §6.6); si no, es CANCELADA.
+  if (cs.status === 'CANCELLED' && !v?.canceladaTarde) return { ...base, estado: 'CANCELADA' }
   if (!v) return { ...base, estado: 'EXCEPCION', motivo: 'SIN_TABLA' }
   return {
     ...base,
@@ -245,6 +249,7 @@ export async function pagoDeClase(
     countMode: v.countMode,
     staffName: v.staffName,
     payLevelName: v.payLevelName,
+    regla: v.regla,
   }
 }
 

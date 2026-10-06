@@ -765,6 +765,16 @@ describe('staff_service_pay_differences (lista de lo pendiente de un periodo cer
     expect(r.items.map((i: { causa: string | null }) => i.causa)).toEqual(casos.map(([, texto]) => texto))
   })
 
+  it('la causa dice también la regla de clase que movió el monto (spec fase 3 §6.6)', async () => {
+    mockDiferencias.mockResolvedValue({
+      items: [filaCompleta({ causa: 'CANCELADA', regla: { tipo: 'CANCELACION_TARDIA', horas: 1 } })],
+      nextCursor: null,
+      parcial: false,
+    })
+    const r = parse(await handlers.get('staff_service_pay_differences')!({ venueId: 'v1', periodId: 'p8' }, {}))
+    expect(r.items[0].causa).toBe('Clase cancelada después del cierre · Cancelada 1 h antes: se paga el sueldo base')
+  })
+
   it('sin limit pide 50; sin staffpay:read no lee nada; con el módulo apagado lo explica', async () => {
     mockDiferencias.mockResolvedValue({ items: [], nextCursor: null, parcial: false })
     const vacio = parse(await handlers.get('staff_service_pay_differences')!({ venueId: 'v1', periodId: 'p8' }, {}))
@@ -1016,6 +1026,36 @@ describe('adjust_service_pay_class', () => {
     })
     expect(mockGuardarClase).not.toHaveBeenCalled()
     expect(auditMcpWrite).not.toHaveBeenCalled()
+  })
+
+  it('la vista previa dice la regla que trae el pago de la clase', async () => {
+    const regla = { tipo: 'SUPLENCIA', horas: 2, bono: '100.00' }
+    mockPreviewClase.mockResolvedValue(
+      efecto({ antes: tarjeta({ monto: '670.00', regla }), despues: tarjeta({ conteo: 9, monto: '710.00', regla }) }),
+    )
+    const r = parse(await ajustar({ payCountOverride: 9 }))
+    expect(r.message).toContain('pasa de $670.00 (Suplencia avisada 2 h antes: +$100) a $710.00 (Suplencia avisada 2 h antes: +$100)')
+  })
+
+  it('cancelada tarde con el conteo corregido a 8: el 8 no aplica y la vista previa no lo presenta como si aplicara (resolución 12)', async () => {
+    const regla = { tipo: 'CANCELACION_TARDIA', horas: 1 }
+    mockCard.mockResolvedValue(tarjeta({ monto: '250.00', conteo: 0, regla }))
+    mockPreviewClase.mockResolvedValue(
+      efecto({
+        antes: tarjeta({ monto: '250.00', conteo: 0, regla }),
+        despues: tarjeta({
+          monto: '250.00',
+          conteo: 0,
+          regla,
+          ajuste: { payCountOverride: 8, payAmountOverride: null, payExcluded: false },
+        }),
+        pendiente: '0.00',
+      }),
+    )
+    const r = parse(await ajustar({ payCountOverride: 8 }))
+    expect(r.message).toBe(
+      'La clase Yoga del 28 sep 2026 de Ana Martínez pasa de $250.00 (Cancelada 1 h antes: se paga el sueldo base) a $250.00 (Cancelada 1 h antes: se paga el sueldo base); el periodo de septiembre de 2026 ya se cerró y no queda diferencia por liquidar.',
+    )
   })
 
   it('lo que no se manda conserva su valor actual (null vuelve al cálculo)', async () => {

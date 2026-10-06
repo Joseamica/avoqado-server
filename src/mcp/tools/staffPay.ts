@@ -26,7 +26,7 @@ import {
   previewAjusteDeClase,
   type PagoDeClase,
 } from '@/services/dashboard/staffPay/ajustesClase.service'
-import type { MotivoExcepcion } from '@/services/dashboard/staffPay/valoracion'
+import { textoDeRegla, type MotivoExcepcion } from '@/services/dashboard/staffPay/valoracion'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
@@ -48,7 +48,7 @@ const MOTIVOS: Record<MotivoExcepcion, string> = {
   SIN_MONTO_PARA_ESE_CONTEO: 'Falta el monto para ese número de lugares',
 }
 /** Por qué existe cada diferencia, con las mismas palabras que el dashboard (QA bloque B, defecto 4). */
-function causaLegible(f: Pick<FilaDiferencia, 'causa' | 'conteo' | 'conteoCongelado' | 'coachActualNombre'>): string | null {
+function causaSinRegla(f: Pick<FilaDiferencia, 'causa' | 'conteo' | 'conteoCongelado' | 'coachActualNombre'>): string | null {
   switch (f.causa) {
     case 'CONTEO':
       return `Conteo corregido: ${f.conteoCongelado} → ${f.conteo}`
@@ -69,6 +69,11 @@ function causaLegible(f: Pick<FilaDiferencia, 'causa' | 'conteo' | 'conteoCongel
     default:
       return null
   }
+}
+/** La causa más la regla de clase que movió el monto (spec fase 3 §6.6): «Clase cancelada… · Cancelada 1 h antes: …». */
+function causaLegible(f: Pick<FilaDiferencia, 'causa' | 'conteo' | 'conteoCongelado' | 'coachActualNombre' | 'regla'>): string | null {
+  const causa = causaSinRegla(f)
+  return causa && f.regla ? `${causa} · ${textoDeRegla(f.regla)}` : causa
 }
 /** Qué hacer ante cada rechazo de «liquidar diferencia» (spec §6.4): el agente lo sigue sin adivinar. */
 const QUE_HACER_LIQUIDAR: Record<string, string> = {
@@ -795,7 +800,7 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
   /** Cómo se lee el pago de la clase en un estado: monto, o por qué no tiene. */
   const pagoLegible = (c: PagoDeClase) =>
     c.monto !== null
-      ? `$${pesos(c.monto)}`
+      ? `$${pesos(c.monto)}${c.regla ? ` (${textoDeRegla(c.regla)})` : ''}`
       : c.estado === 'EXCLUIDA'
         ? 'excluida ($0.00)'
         : c.estado === 'CANCELADA'

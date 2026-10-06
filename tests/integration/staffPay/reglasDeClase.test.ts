@@ -20,6 +20,9 @@ import { exportarRecibo, reciboDePersona } from '@/services/dashboard/staffPay/r
 import * as XLSX from 'xlsx'
 import { fechaComoDbDate, venuePeriodRange } from '@/services/dashboard/staffPay/periodos'
 import { createClassSession, updateClassSession } from '@/services/dashboard/classSession.dashboard.service'
+import { pagoDeClase } from '@/services/dashboard/staffPay/ajustesClase.service'
+import { diferenciasDeClase } from '@/services/dashboard/staffPay/diferencias.service'
+import * as staffPayController from '@/controllers/dashboard/staffPay.dashboard.controller'
 import { borrarMundo, clase, confirmadas, crearMundo, Mundo, periodoCerrado, tablaMindform, TZ } from './_mundo'
 
 const AHORA = new Date('2026-09-02T12:00:00Z')
@@ -570,5 +573,142 @@ describe('el motivo queda en lo congelado y en el recibo (spec fase 3 §6.6)', (
     expect(linea.descriptor).not.toHaveProperty('regla')
     expect((await recibo()).renglones.map(r => [r.concepto, r.monto])).toEqual([['Reformer', '500.00']])
     expect(await archivos()).toEqual(['Reformer'])
+  })
+})
+
+describe('la tarjeta y las diferencias dicen por qué (spec fase 3 §6.6)', () => {
+  it('la respuesta REAL de la tarjeta (la que lee el dashboard) trae `regla` con su bono y no los campos internos', async () => {
+    await prender()
+    const sup = await clase(m, {
+      staffId: m.ana,
+      inicioIso: DIA(6),
+      reservas: confirmadas(8),
+      originalStaffId: m.sofia,
+      staffAssignedAt: menos(DIA(6), 3 * H - SEG),
+    })
+    const res = { json: jest.fn() }
+    const next = jest.fn()
+    await staffPayController.getClassPay(
+      { params: { venueId: m.venueId, sessionId: sup }, authContext: { userId: m.owner } } as any,
+      res as any,
+      next,
+    )
+    expect(next).not.toHaveBeenCalled()
+    // Por el cable, como lo recibe el navegador.
+    const cuerpo = JSON.parse(JSON.stringify(res.json.mock.calls[0][0]))
+    expect(cuerpo).toMatchObject({ estado: 'OK', monto: '670.00', regla: { tipo: 'SUPLENCIA', horas: 2, bono: '100.00' } })
+    expect(cuerpo).not.toHaveProperty('bonoSuplencia')
+    expect(cuerpo).not.toHaveProperty('canceladaTarde')
+  })
+
+  it('tarjeta: la cancelada tarde dice cuánto y por qué; la cancelada a tiempo sigue CANCELADA; la suplencia dice su bono', async () => {
+    await prender()
+    const tarde = await clase(m, { staffId: m.ana, inicioIso: DIA(4), status: 'CANCELLED', cancelledAt: menos(DIA(4), H) })
+    const aTiempo = await clase(m, { staffId: m.ana, inicioIso: DIA(5), status: 'CANCELLED', cancelledAt: menos(DIA(5), 3 * H) })
+    const sup = await clase(m, {
+      staffId: m.ana,
+      inicioIso: DIA(6),
+      reservas: confirmadas(8),
+      originalStaffId: m.sofia,
+      staffAssignedAt: menos(DIA(6), 3 * H - SEG),
+    })
+    expect(await pagoDeClase(m.venueId, tarde)).toMatchObject({
+      estado: 'OK',
+      monto: '250.00',
+      conteo: 0,
+      regla: { tipo: 'CANCELACION_TARDIA', horas: 1 },
+    })
+    expect(await pagoDeClase(m.venueId, aTiempo)).toMatchObject({ estado: 'CANCELADA', monto: null, regla: null })
+    expect(await pagoDeClase(m.venueId, sup)).toMatchObject({
+      estado: 'OK',
+      monto: '670.00',
+      regla: { tipo: 'SUPLENCIA', horas: 2, bono: '100.00' },
+    })
+  })
+
+  it('cancelar tarde una clase ya cerrada deja la diferencia hasta el sueldo base, con su motivo', async () => {
+    await activar()
+    await prender()
+    const id = await clase(m, {
+      staffId: m.ana,
+      inicioIso: DIA(4),
+      reservas: confirmadas(8),
+      originalStaffId: m.ana,
+      staffAssignedAt: menos(DIA(4), 48 * H),
+    })
+    await cerrarAgosto()
+    // Después del cierre se registra que se canceló 1 h antes de empezar (la versión anclada pide menos de 2 h).
+    await prisma.classSession.update({ where: { id }, data: { status: 'CANCELLED', cancelledAt: new Date(menos(DIA(4), H)) } })
+    const { filas } = await diferenciasDeClase(prisma, { venueId: m.venueId, classSessionId: id }, { ahora: AHORA })
+    expect(filas).toHaveLength(1)
+    expect(filas[0]).toMatchObject({
+      persona: m.ana,
+      corresponde: '250.00',
+      congelado: '570.00',
+      pendiente: '-320.00',
+      causa: 'CANCELADA',
+      regla: { tipo: 'CANCELACION_TARDIA', horas: 1 },
+    })
+    expect(await pagoDeClase(m.venueId, id)).toMatchObject({
+      estado: 'OK',
+      monto: '250.00',
+      anclada: true,
+      regla: { tipo: 'CANCELACION_TARDIA' },
+    })
+  })
+
+  it('una sustitución con poco aviso después del cierre: la regla va sólo en la fila de la suplente', async () => {
+    await activar()
+    await prender()
+    const id = await clase(m, {
+      staffId: m.ana,
+      inicioIso: DIA(4),
+      reservas: confirmadas(8),
+      originalStaffId: m.ana,
+      staffAssignedAt: menos(DIA(4), 48 * H),
+    })
+    await cerrarAgosto()
+    await prisma.classSession.update({ where: { id }, data: { assignedStaffId: m.sofia, staffAssignedAt: new Date(menos(DIA(4), H)) } })
+    const { filas } = await diferenciasDeClase(prisma, { venueId: m.venueId, classSessionId: id }, { ahora: AHORA })
+    const de = new Map(filas.map(f => [f.persona, f]))
+    expect(de.get(m.ana)).toMatchObject({ causa: 'COACH_SALE', corresponde: '0.00', regla: null })
+    expect(de.get(m.sofia)).toMatchObject({
+      causa: 'COACH_ENTRA',
+      corresponde: '580.00',
+      regla: { tipo: 'SUPLENCIA', horas: 1, bono: '100.00' },
+    })
+  })
+
+  it('cancelada tarde con el conteo corregido a 8 (resolución 12): el 8 queda en el ajuste, pero se paga y se muestra el conteo 0', async () => {
+    await activar()
+    await prender()
+    const id = await clase(m, {
+      staffId: m.ana,
+      inicioIso: DIA(4),
+      reservas: confirmadas(8),
+      originalStaffId: m.ana,
+      staffAssignedAt: menos(DIA(4), 48 * H),
+    })
+    await cerrarAgosto()
+    await prisma.classSession.update({ where: { id }, data: { status: 'CANCELLED', cancelledAt: new Date(menos(DIA(4), H)) } })
+    await prisma.classSessionPayState.update({ where: { classSessionId: id }, data: { payCountOverride: 8, overrideReason: 'Corrección' } })
+    expect(await pagoDeClase(m.venueId, id)).toMatchObject({
+      estado: 'OK',
+      monto: '250.00',
+      conteo: 0,
+      conteoCalculado: 0,
+      ajuste: { payCountOverride: 8 },
+      regla: { tipo: 'CANCELACION_TARDIA', horas: 1 },
+    })
+    const { filas } = await diferenciasDeClase(prisma, { venueId: m.venueId, classSessionId: id }, { ahora: AHORA })
+    expect(filas).toHaveLength(1)
+    expect(filas[0]).toMatchObject({
+      corresponde: '250.00',
+      pendiente: '-320.00',
+      conteo: 0,
+      conteoCongelado: 8,
+      causa: 'CANCELADA',
+      regla: { tipo: 'CANCELACION_TARDIA', horas: 1 },
+    })
   })
 })

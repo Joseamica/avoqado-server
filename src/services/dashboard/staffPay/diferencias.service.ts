@@ -6,7 +6,7 @@ import { venueDayKey } from '../../../utils/venueDateKeys'
 import { sedesLegiblesDe } from './acceso'
 import { periodoQueContieneFecha } from './periodosGuardados'
 import { dbDateComoFecha, venuePeriodRange } from './periodos'
-import { FiltroValoracion, MotivoExcepcion, valoracionCte } from './valoracion'
+import { FiltroValoracion, MotivoExcepcion, ReglaDeClase, valoracionCte } from './valoracion'
 
 type Db = Prisma.TransactionClient | typeof prisma
 const TZ_DEFAULT = 'America/Mexico_City'
@@ -65,6 +65,8 @@ export interface FilaDiferencia {
   conteoCongelado?: number | null
   /** Por qué hay diferencia (QA bloque B, defecto 4); null sin pendiente o en excepción (ésta ya trae `motivo`). */
   causa?: CausaDiferencia | null
+  /** La regla de clase que movió «corresponde» (spec fase 3 §6.6); sólo en la fila de la coach de hoy. */
+  regla?: ReglaDeClase | null
 }
 
 type Fila = Omit<FilaDiferencia, 'corresponde' | 'congelado' | 'conciliado' | 'pendiente'> & {
@@ -185,6 +187,8 @@ export function diferenciasSql(f: FiltroValoracion, despues: CursorFila | null, 
       SELECT v."classSessionId", v."venueId", v."productName", v."startsAt", v."fechaLocal", v."fechaValoracion",
              v."periodoOrigen" AS "periodoOrigenId", p.persona, v."staffId" AS "coachActual",
              v.estado AS "estadoClase", v.motivo, v."payLevelId", v."payLevelName", v."tableVersionId", v."countMode", v.conteo,
+             -- Fase 3: la regla es de la coach de HOY; la que sale de la clase no la recibe.
+             CASE WHEN p.persona = v."staffId" THEN v.regla END AS regla,
              CASE WHEN v.estado = 'EXCEPCION' THEN NULL
                   WHEN v.estado = 'OK' AND p.persona = v."staffId" THEN v.monto
                   ELSE 0 END AS corresponde,
