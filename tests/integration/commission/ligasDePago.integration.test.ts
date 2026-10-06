@@ -85,6 +85,8 @@ describe('A5 · la comisión de una liga de pago se congela con el cobro (spec �
     await procesarEfectos(m)
     const filas = await prisma.commissionCalculation.findMany({ where: { venueId: m.venueId, paymentId: pago.id }, take: 10 })
     expect(filas.map(f => f.netCommission.toFixed(2))).toEqual(['10.00', '10.00'])
+    // A5 r1: congelada, cada fila lleva la fecha del COBRO (como la terminal), no la de cuando el worker la materializó.
+    expect(filas.map(f => f.calculatedAt.getTime())).toEqual([pago.createdAt.getTime(), pago.createdAt.getTime()])
   })
 
   it('🔴 dividida entre TRES: las filas suman exacto lo cobrado, con el centavo de más en orden estable (plan r1-4)', async () => {
@@ -109,6 +111,7 @@ describe('A5 · la comisión de una liga de pago se congela con el cobro (spec �
     await procesarEfectos(m)
     const fila = await prisma.commissionCalculation.findFirstOrThrow({ where: { venueId: m.venueId, paymentId: pago.id } })
     expect([fila.staffId, fila.netCommission.toFixed(2)]).toEqual([m.bea, '20.00'])
+    expect(fila.calculatedAt.getTime()).toBe(pago.createdAt.getTime())
   })
 
   it('🔴 venta devuelta ANTES de que se materialice su comisión: el neto queda en $0', async () => {

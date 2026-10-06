@@ -62,15 +62,6 @@ jest.mock('@/services/dashboard/customer.dashboard.service', () => ({
   updateCustomerMetrics: (...a: unknown[]) => mockUpdateCustomerMetrics(...a),
 }))
 
-// La comisión NO es objeto de esta suite, pero sí lo es la REGRESIÓN de que
-// siga disparándose después de colgarle lealtad al mismo enganche.
-const mockCreateCommissionForPayment = jest.fn()
-const mockCreateSplitCommissionForPayment = jest.fn()
-jest.mock('@/services/dashboard/commission/commission-calculation.service', () => ({
-  __esModule: true,
-  createCommissionForPayment: (...a: unknown[]) => mockCreateCommissionForPayment(...a),
-  createSplitCommissionForPayment: (...a: unknown[]) => mockCreateSplitCommissionForPayment(...a),
-}))
 // Fase 3 (A5): la comisión de la liga se encola DENTRO de la transacción del cobro. El resto del módulo queda real.
 const mockEnqueuePaymentCommissionInTx = jest.fn()
 jest.mock('@/services/tpv/paymentEffects.service', () => ({
@@ -91,6 +82,7 @@ import {
   getSessionStatus,
 } from '../../../../src/services/dashboard/paymentLink.service'
 import { prismaMock } from '../../../__helpers__/setup'
+import { OPCIONES_DE_TRANSACCION_DEL_INTENTO } from '../../../../src/services/tpv/candadoDeIntento'
 import { BadRequestError, NotFoundError, PaymentOutcomeUnknownError } from '../../../../src/errors/AppError'
 import { Decimal } from '@prisma/client/runtime/library'
 
@@ -215,8 +207,6 @@ describe('PaymentLink Service', () => {
     mockApplySalePosting.mockResolvedValue({ postingId: 'posting-pl-1', applied: true, issues: [] })
     mockEarnPoints.mockResolvedValue({ pointsEarned: 0, newBalance: 0 })
     mockUpdateCustomerMetrics.mockResolvedValue(undefined)
-    mockCreateCommissionForPayment.mockResolvedValue(undefined)
-    mockCreateSplitCommissionForPayment.mockResolvedValue(undefined)
     mockEnqueuePaymentCommissionInTx.mockResolvedValue(undefined)
   })
 
@@ -1255,8 +1245,6 @@ describe('PaymentLink Service', () => {
       expect(mockUpdateCustomerMetrics).toHaveBeenCalledWith(CUSTOMER_ID, 100, 'order-123', VENUE_ID)
     })
 
-    // ── REGRESIÓN: lo que ya funcionaba sigue funcionando ──
-
     it('🔴 la comisión nace con el cobro, en SU transacción, para la persona atribuida (A5)', async () => {
       prismaMock.checkoutSession.findUnique.mockResolvedValueOnce(
         createMockCheckoutSession({
@@ -1278,8 +1266,8 @@ describe('PaymentLink Service', () => {
       await completeCharge('abc12345', 'cs_pl_test123')
 
       expect(mockEnqueuePaymentCommissionInTx).toHaveBeenCalledWith(txClient, 'payment-123', [STAFF_ID])
-      expect(mockCreateCommissionForPayment).not.toHaveBeenCalled()
-      expect(mockCreateSplitCommissionForPayment).not.toHaveBeenCalled()
+      // A5 r1: la transacción del cobro lleva el tope de la terminal (10 s), no los 5 s de fábrica de Prisma.
+      expect(prismaMock.$transaction).toHaveBeenCalledWith(expect.any(Function), OPCIONES_DE_TRANSACCION_DEL_INTENTO)
     })
 
     it('🔴 sin cliente, la comisión dividida nace en la transacción y el vale de inventario sigue intacto (A5)', async () => {
@@ -1303,7 +1291,6 @@ describe('PaymentLink Service', () => {
       await completeCharge('abc12345', 'cs_pl_test123')
 
       expect(mockEnqueuePaymentCommissionInTx).toHaveBeenCalledWith(txClient, 'payment-123', [STAFF_ID, 'staff-2'])
-      expect(mockCreateSplitCommissionForPayment).not.toHaveBeenCalled()
       expect(mockCreateSalePostingInTx).toHaveBeenCalled()
       expect(mockApplySalePosting).toHaveBeenCalledWith('posting-pl-1', expect.anything())
     })
@@ -1331,8 +1318,7 @@ describe('PaymentLink Service', () => {
 
       expect(mockEnqueuePaymentCommissionInTx).toHaveBeenCalledTimes(1)
       expect(mockEnqueuePaymentCommissionInTx).toHaveBeenCalledWith(txClient, 'payment-123', [STAFF_ID, 'staff-2'])
-      expect(mockCreateCommissionForPayment).not.toHaveBeenCalled()
-      expect(mockCreateSplitCommissionForPayment).not.toHaveBeenCalled()
+      expect(prismaMock.$transaction).toHaveBeenCalledWith(expect.any(Function), OPCIONES_DE_TRANSACCION_DEL_INTENTO)
     })
   })
 

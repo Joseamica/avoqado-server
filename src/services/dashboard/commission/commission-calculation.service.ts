@@ -1408,14 +1408,9 @@ export async function createSplitCommissionForPayment(
       db,
     )
     // 🔴 MONEY: base DE ORDEN evaluada POR COBRO — su parte, y nunca más de lo que queda por comisionar (las N filas de un
-    // cobro dividido suman la base completa, que es lo que `alreadyCommissionedItemBase` ve). Congelando (`sink`), también lo
-    // que sigue en cola.
-    totalBaseAmount = baseDelCobro(
-      enLaOrden,
-      orderBase,
-      await alreadyCommissionedItemBase(payment.orderId, config.id, db, !!options.sink),
-      otros,
-    )
+    // cobro dividido suman la base completa, que es lo que `alreadyCommissionedItemBase` ve), contando también lo que sigue en
+    // cola, como la rama de una persona.
+    totalBaseAmount = baseDelCobro(enLaOrden, orderBase, await alreadyCommissionedItemBase(payment.orderId, config.id, db, true), otros)
     totalTipAmount = config.includeTips ? decimalToNumber(payment.tipAmount) : 0
     totalDiscountAmount = 0
     totalTaxAmount = 0
@@ -1425,7 +1420,7 @@ export async function createSplitCommissionForPayment(
     totalBaseAmount = baseDelCobro(
       enLaOrden,
       listaDeLaOrden(payment.order, config),
-      await alreadyCommissionedItemBase(payment.orderId, config.id, db, !!options.sink),
+      await alreadyCommissionedItemBase(payment.orderId, config.id, db, true),
       otros,
     )
     totalTipAmount = config.includeTips ? decimalToNumber(payment.tipAmount) : 0

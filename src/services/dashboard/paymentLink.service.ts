@@ -22,6 +22,7 @@ import emailService from '@/services/email.service'
 import { formatInTimeZone } from 'date-fns-tz'
 import { es as esLocale } from 'date-fns/locale'
 import { enqueuePaymentCommissionInTx } from '@/services/tpv/paymentEffects.service'
+import { OPCIONES_DE_TRANSACCION_DEL_INTENTO } from '@/services/tpv/candadoDeIntento'
 import { sendReceiptWhatsApp, sendPaymentLinkShareWhatsApp } from '@/services/whatsapp.service'
 import { assertVenueSalesEnabled } from '@/services/venueSalesGuard'
 import { earnPoints } from '@/services/dashboard/loyalty.dashboard.service'
@@ -1752,7 +1753,8 @@ export async function finalizePaymentLinkCheckout(args: {
     // devolvía antes de que apareciera, el reverso no la encontraba y se pagaba sobre una venta devuelta.
     if (attributedStaffIds.length > 0) await enqueuePaymentCommissionInTx(tx, createdPayment.id, attributedStaffIds)
     orderIdForReferral = order.id
-  })
+    // A5 r1: congelar la comisión le suma consultas a esta transacción; el mismo tope de 10 s que el cobro de la terminal.
+  }, OPCIONES_DE_TRANSACCION_DEL_INTENTO)
 
   // REFERRAL HOOK: trigger referral qualification if this paid order has a pending referral
   if (orderIdForReferral) {
@@ -2593,7 +2595,8 @@ export async function completeCharge(shortCode: string, sessionId: string, _thre
       if (attributedStaffIds.length > 0) await enqueuePaymentCommissionInTx(tx, createdPayment.id, attributedStaffIds)
       orderIdForReferral = order.id
     }
-  })
+    // A5 r1: el mismo tope de 10 s que el cobro de la terminal. Pasarse aquí deja la tarjeta YA cobrada sin registro (CHARGING).
+  }, OPCIONES_DE_TRANSACCION_DEL_INTENTO)
 
   // REFERRAL HOOK: trigger referral qualification if this paid order has a pending referral
   if (orderIdForReferral) {
