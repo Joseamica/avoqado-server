@@ -3,11 +3,21 @@ jest.mock('@/communication/rabbitmq/gcal-push-consumer', () => ({
   __esModule: true,
   publishPushNotification: jest.fn().mockResolvedValue(undefined),
 }))
+jest.mock('@/services/dashboard/staffPay/acceso', () => ({
+  ...jest.requireActual('@/services/dashboard/staffPay/acceso'),
+  sedesConServicePay: jest.fn(async () => (global as any).__sedes),
+  sedesLegiblesDe: jest.fn(async (_u: string, venueIds: string[]) => ({ venueIds, parcial: false })),
+  tienePermisoEn: jest.fn(async () => true),
+  sedesConPermiso: jest.fn(async (_u: string, venueIds: string[]) => venueIds),
+  assertPermisoEnSedes: jest.fn(async () => undefined),
+}))
 
 import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { ClaseValorada, valorarClases } from '@/services/dashboard/staffPay/valoracion'
-import { anclarClases } from '@/services/dashboard/staffPay/cierre.service'
+import { anclarClases, cerrarPeriodo, previewCierre } from '@/services/dashboard/staffPay/cierre.service'
+import { exportarRecibo, reciboDePersona } from '@/services/dashboard/staffPay/recibos.service'
+import * as XLSX from 'xlsx'
 import { fechaComoDbDate, venuePeriodRange } from '@/services/dashboard/staffPay/periodos'
 import { createClassSession, updateClassSession } from '@/services/dashboard/classSession.dashboard.service'
 import { borrarMundo, clase, confirmadas, crearMundo, Mundo, periodoCerrado, tablaMindform, TZ } from './_mundo'
@@ -451,5 +461,114 @@ describe('una cancelada sin regla o sin estampa sigue EXCLUIDA en el modo period
     const p = await periodoCerrado(m, '2026-08-01', '2026-08-31')
     expect(await enPeriodo(p.id, id)).toMatchObject({ estado: 'EXCLUIDA', canceladaTarde: false, monto: null, regla: null })
     expect(await vivo(id)).toBeUndefined()
+  })
+})
+
+/** El módulo prendido para el cierre (fase 2) y el pago al personal activado desde enero (Bloque B). */
+const activar = async () => {
+  ;(global as any).__sedes = [m.venueId]
+  await prisma.organization.update({ where: { id: m.orgId }, data: { staffPayStartDate: fechaComoDbDate('2026-01-01') } })
+}
+const cerrarAgosto = async () => {
+  const p = await previewCierre({ userId: m.owner, venueId: m.venueId, fecha: '2026-08-15', ahora: AHORA })
+  return cerrarPeriodo({
+    userId: m.owner,
+    venueId: m.venueId,
+    fecha: '2026-08-15',
+    ahora: AHORA,
+    huellaEsperada: p.huella,
+    confirmarHuerfanas: true,
+  })
+}
+
+describe('el motivo queda en lo congelado y en el recibo (spec fase 3 §6.6)', () => {
+  const recibo = () => reciboDePersona({ userId: m.owner, venueId: m.venueId, staffId: m.ana, fecha: '2026-08-15', limit: 50 })
+  const ESPERADOS = ['Reformer · Cancelada 1 h antes: se paga el sueldo base', 'Reformer · Suplencia avisada 2 h antes: +$100']
+  /**
+   * El PDF arma la fuente con el SELECT agrupado de propinas de B5 y el Excel sin agrupar: los dos `UNION ALL` se compilan
+   * aunque no haya propinas, así que una columna `regla` de más o de menos truena aquí (Codex plan r1, P1 B5/D3c). Del PDF
+   * sólo se comprueba que lo es (pdfkit comprime); el Excel lleva los mismos conceptos, celda por celda.
+   */
+  const archivos = async () => {
+    const pdf = await exportarRecibo({ userId: m.owner, venueId: m.venueId, staffId: m.ana, fecha: '2026-08-15', format: 'pdf' })
+    expect(pdf.encoded.buffer.subarray(0, 4).toString()).toBe('%PDF')
+    const xlsx = await exportarRecibo({ userId: m.owner, venueId: m.venueId, staffId: m.ana, fecha: '2026-08-15', format: 'xlsx' })
+    const libro = XLSX.read(xlsx.encoded.buffer)
+    return XLSX.utils
+      .sheet_to_json<Record<string, unknown>>(libro.Sheets[libro.SheetNames[0]])
+      .map(f => String(f.Concepto))
+      .filter(c => c.startsWith('Reformer'))
+      .sort()
+  }
+
+  it('el recibo abierto ya lo dice; el cierre lo congela en el renglón y el recibo cerrado lo sigue diciendo, también en PDF y Excel', async () => {
+    await activar()
+    await prender()
+    const sup = await clase(m, {
+      staffId: m.ana,
+      inicioIso: DIA(4),
+      reservas: confirmadas(8),
+      originalStaffId: m.sofia,
+      staffAssignedAt: menos(DIA(4), 3 * H - SEG),
+    })
+    const can = await clase(m, {
+      staffId: m.ana,
+      inicioIso: DIA(5),
+      reservas: confirmadas(8),
+      status: 'CANCELLED',
+      cancelledAt: menos(DIA(5), 2 * H - SEG),
+    })
+
+    const abierto = await recibo()
+    expect(abierto.periodo.estado).toBe('OPEN')
+    expect(abierto.renglones.map(r => r.concepto).sort()).toEqual(ESPERADOS)
+    expect(await archivos()).toEqual(ESPERADOS)
+
+    await cerrarAgosto()
+    const lineas = await prisma.serviceEarning.findMany({
+      where: { organizationId: m.orgId, concept: 'SERVICE', sourceType: 'CLASS_SESSION' },
+      take: 10,
+    })
+    const de = new Map(lineas.map(l => [l.sourceId, l]))
+    expect(de.get(sup)!.amount.toFixed(2)).toBe('670.00')
+    expect(de.get(sup)!.descriptor).toMatchObject({ regla: { tipo: 'SUPLENCIA', horas: 2, bono: '100.00' } })
+    expect(de.get(can)!.amount.toFixed(2)).toBe('250.00')
+    expect(de.get(can)!.count).toBe(0)
+    expect(de.get(can)!.descriptor).toMatchObject({ regla: { tipo: 'CANCELACION_TARDIA', horas: 1 } })
+
+    // Lo congelado no se mueve aunque después se apaguen las reglas de la tabla.
+    await prisma.servicePayTableVersion.update({
+      where: { id: versionId },
+      data: { coverBonusHours: null, coverBonusAmount: null, lateCancelHours: null },
+    })
+    const cerrado = await recibo()
+    expect(cerrado.periodo.estado).toBe('CLOSED')
+    expect(cerrado.renglones.map(r => r.concepto).sort()).toEqual(ESPERADOS)
+    expect(cerrado.total).toBe('920.00')
+    expect(await archivos()).toEqual(ESPERADOS)
+  })
+
+  it('con monto acordado la regla no decidió nada: el renglón no la dice y el descriptor no la congela (D3a r2)', async () => {
+    await activar()
+    await prender()
+    const id = await clase(m, {
+      staffId: m.ana,
+      inicioIso: DIA(5),
+      reservas: confirmadas(8),
+      status: 'CANCELLED',
+      cancelledAt: menos(DIA(5), H),
+    })
+    await prisma.classSessionPayState.create({
+      data: { classSessionId: id, payAmountOverride: new Prisma.Decimal(500), overrideReason: 'Acordado' },
+    })
+    const abierto = await recibo()
+    expect(abierto.renglones.map(r => [r.concepto, r.monto])).toEqual([['Reformer', '500.00']])
+
+    await cerrarAgosto()
+    const linea = await prisma.serviceEarning.findFirstOrThrow({ where: { organizationId: m.orgId, concept: 'SERVICE', sourceId: id } })
+    expect(linea.amount.toFixed(2)).toBe('500.00')
+    expect(linea.descriptor).not.toHaveProperty('regla')
+    expect((await recibo()).renglones.map(r => [r.concepto, r.monto])).toEqual([['Reformer', '500.00']])
+    expect(await archivos()).toEqual(['Reformer'])
   })
 })

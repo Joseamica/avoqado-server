@@ -10,7 +10,7 @@ import { runWithoutCancellation } from '../../../utils/requestCancellation'
 import { assertPermisoEnSedes, exigirPermisoEnSedes, sedesConPermiso, sedesConServicePay, sedesLegiblesDe } from './acceso'
 import { bloquearPeriodo, periodoQueContieneFecha } from './periodosGuardados'
 import { dbDateComoFecha, MESES_LARGOS, periodoQueContiene, venuePeriodRange } from './periodos'
-import { valoracionCte } from './valoracion'
+import { ReglaDeClase, textoDeRegla, valoracionCte } from './valoracion'
 import { nombreGuardadoSql, PERSONA_DADA_DE_BAJA, sqlVentasDelPeriodo } from './fuentesVenta'
 
 /** Tope de UNA página del recibo (Codex R2-R1-20). El recibo entero no tiene tope: se recorre con cursor. */
@@ -402,7 +402,7 @@ async function fuenteDelRecibo(
              COALESCE(e.descriptor->>'fecha', to_char(e."createdAt", 'YYYY-MM-DD')) AS fecha,
              e.descriptor->>'hora' AS hora, e.descriptor->>'clase' AS clase, e.descriptor->>'sede' AS "sedeFoto",
              e.reason, e.descriptor->'periodoOrigen'->>'start' AS origen, e.count AS lugares, e.amount AS monto,
-             NULL::jsonb AS regla, e.descriptor->>'orden' AS orden, e.descriptor->>'esquema' AS esquema,
+             e.descriptor->'regla' AS regla, e.descriptor->>'orden' AS orden, e.descriptor->>'esquema' AS esquema,
              (e.descriptor->>'base')::numeric AS base,
              CASE WHEN e."sourceType" IN ('COMMISSION', 'TIP') THEN e.descriptor->>'motivo' END AS motivo
       FROM "ServiceEarning" e
@@ -419,7 +419,7 @@ async function fuenteDelRecibo(
         SELECT 'CLASE'::text AS tipo, vv."startsAt" AS instante, vv."classSessionId" AS id, vv."venueId", vv."fechaLocal" AS fecha,
                to_char(((vv."startsAt" AT TIME ZONE 'UTC') AT TIME ZONE ${tz}), 'HH24:MI') AS hora,
                vv."productName" AS clase, NULL::text AS "sedeFoto", NULL::text AS reason, NULL::text AS origen,
-               vv.conteo AS lugares, vv.monto, NULL::jsonb AS regla, NULL::text AS orden, NULL::text AS esquema,
+               vv.conteo AS lugares, vv.monto, vv.regla AS regla, NULL::text AS orden, NULL::text AS esquema,
                NULL::numeric AS base, NULL::text AS motivo
         FROM (${valoracionCte(f)} SELECT * FROM valoradas) vv
         WHERE vv.estado = 'OK' AND vv.monto IS NOT NULL`)
@@ -602,7 +602,8 @@ function conceptoDe(r: FilaRecibo): string {
     return [r.esquema ? `${cabeza} ${r.esquema}` : cabeza, ventaDe(r), base].filter(Boolean).join(' · ')
   }
   const clase = r.clase ?? 'Clase'
-  if (r.tipo === 'CLASE') return clase
+  // `regla` sólo la llenan los brazos de clases, con la forma de `ReglaDeClase` (D3a).
+  if (r.tipo === 'CLASE') return r.regla ? `${clase} · ${textoDeRegla(r.regla as ReglaDeClase)}` : clase
   // Una diferencia dice de qué clase es (QA bloque B, defecto 3): «Diferencia · Yoga del 28 sep 2026 (clase de septiembre)».
   // La fecha es la local de la clase en su sede (la de su foto) y el mes, el de su periodo de origen.
   const mes = r.origen ? ` (clase de ${MESES_LARGOS[Number(r.origen.slice(5, 7)) - 1]})` : ''

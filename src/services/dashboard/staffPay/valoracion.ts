@@ -12,6 +12,19 @@ export const MAX_HORAS_REGLA = 168
 /** La regla de clase que movió el pago (spec fase 3 §6.6). La calcula `valoracionCte`; el cierre la congela en el descriptor. */
 export type ReglaDeClase = { tipo: 'SUPLENCIA'; horas: number; bono: string } | { tipo: 'CANCELACION_TARDIA'; horas: number }
 
+const horasAntes = (h: number) => (h < 1 ? 'menos de 1 h antes' : `${h} h antes`)
+/** «$100» si es entero, «$1,250.50» si no. */
+const pesosCortos = (s: string) => {
+  const d = new Prisma.Decimal(s)
+  return `$${d.toNumber().toLocaleString('es-MX', { minimumFractionDigits: d.isInteger() ? 0 : 2, maximumFractionDigits: 2 })}`
+}
+/** La regla en palabras (spec fase 3 §6.6). El recibo, su PDF/Excel y el MCP la dicen igual; el dashboard la traduce con `t()`. */
+export function textoDeRegla(r: ReglaDeClase): string {
+  return r.tipo === 'SUPLENCIA'
+    ? `Suplencia avisada ${horasAntes(r.horas)}: +${pesosCortos(r.bono)}`
+    : `Cancelada ${horasAntes(r.horas)}: se paga el sueldo base`
+}
+
 export interface FiltroValoracion {
   venueId: string
   organizationId: string

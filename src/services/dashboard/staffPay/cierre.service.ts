@@ -8,7 +8,7 @@ import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
 import { exigirPermisoEnSedes, sedesConPermiso, sedesConServicePay, tienePermisoEn } from './acceso'
 import { ampliarAlcance, asegurarPeriodo, bloquearPeriodo, lockPeriodosDeOrganizacion, periodoQueContieneFecha } from './periodosGuardados'
 import { dbDateComoFecha, PeriodoCanonico, periodoQueContiene, venuePeriodRange } from './periodos'
-import { ClaseValorada, contarPorEstado, FiltroValoracion, valorarClases } from './valoracion'
+import { ClaseValorada, contarPorEstado, FiltroValoracion, ReglaDeClase, valorarClases } from './valoracion'
 import { Huella } from './huella'
 import { estadoActivacion } from './activacion.service'
 import {
@@ -269,7 +269,7 @@ async function ajustesDelPeriodo(db: Db, organizationId: string, periodId: strin
 }
 
 export function descriptorDeClase(
-  c: Pick<ClaseValorada, 'productName' | 'fechaLocal' | 'startsAt' | 'staffName'>,
+  c: Pick<ClaseValorada, 'productName' | 'fechaLocal' | 'startsAt' | 'staffName'> & { regla?: ReglaDeClase | null },
   sede: { nombre: string; tz: string },
 ): Prisma.InputJsonObject {
   return {
@@ -278,6 +278,8 @@ export function descriptorDeClase(
     hora: formatInTimeZone(c.startsAt, sede.tz, 'HH:mm'),
     sede: sede.nombre,
     coach: c.staffName,
+    // La regla de clase que movió el monto (spec fase 3 §6.6): el recibo cerrado la dice aunque después cambie la tabla.
+    ...(c.regla ? { regla: c.regla } : {}),
   }
 }
 
