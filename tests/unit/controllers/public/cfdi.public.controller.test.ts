@@ -49,7 +49,9 @@ jest.mock('../../../../src/config/env', () => ({
 
 import prisma from '../../../../src/utils/prismaClient'
 import { issueCfdiForOrder, loadOrderForCfdiFromDb } from '../../../../src/services/fiscal/cfdi.service'
+import { motivoNoCuadra } from '../../../../src/services/fiscal/reglaDelPac'
 import { logAction } from '../../../../src/services/dashboard/activity-log.service'
+import logger from '../../../../src/config/logger'
 import { sendCfdiWhatsApp } from '../../../../src/services/whatsapp.service'
 import {
   autofacturaController,
@@ -312,6 +314,29 @@ describe('autofacturaController (POST /receipt/:accessKey/cfdi)', () => {
     expect(mockLogAction).not.toHaveBeenCalled()
   })
 
+  it('🔴 I-1: bloqueo fiscal (2 × NET $1.04, IVA $0.17 c/u, cobro $2.42): el 422 público NO lleva los motivos del comercio, que van al log', async () => {
+    const motivo = motivoNoCuadra(241, 242)
+    mockFindReceipt.mockResolvedValue(makeReceipt())
+    mockFindCfdi.mockResolvedValue(null)
+    mockIssueCfdi.mockResolvedValue({ status: 'VALIDATION_FAILED', cfdi: { id: 'cfdi-draft' }, reasons: [motivo] })
+    mockLoadOrder.mockResolvedValue({ ...makeBundle(), unsupportedReasons: [motivo] })
+
+    const res = makeRes()
+    await autofacturaController(makeReq({ accessKey: 'key-abc' }) as any, res as any)
+
+    expect(res.status).toHaveBeenCalledWith(422)
+    expect(res.json).toHaveBeenCalledWith({
+      error: 'No se pudo facturar',
+      code: 'FISCAL_BLOCK',
+      message: 'Esta cuenta no se puede facturar en línea. Pide tu factura directamente al negocio.',
+    })
+    expect(JSON.stringify((res.json as jest.Mock).mock.calls)).not.toContain(motivo)
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringContaining('bloqueo fiscal'),
+      expect.objectContaining({ orderId: 'order-1', venueId: expect.any(String), motivos: [motivo] }),
+    )
+  })
+
   it('returns 502 when service returns STAMP_FAILED', async () => {
     mockFindReceipt.mockResolvedValue(makeReceipt())
     mockFindCfdi.mockResolvedValue(null)
@@ -453,7 +478,12 @@ describe('getAutofacturaStatusController (GET /receipt/:accessKey/cfdi)', () => 
 
     await getAutofacturaStatusController(req as any, res as any)
 
-    expect(res.json).toHaveBeenCalledWith({ cfdi: null, autofacturaAvailable: false })
+    // B3a ronda final F3 (y ajuste 4): campo NUEVO y opcional con el TIPO de bloqueo, sin los motivos internos; los de antes no cambian.
+    expect(res.json).toHaveBeenCalledWith({
+      cfdi: null,
+      autofacturaAvailable: false,
+      autofacturaUnavailable: { kind: 'FISCAL_BLOCK' },
+    })
   })
 
   it('returns 200 with cfdi:null + autofacturaAvailable:true when no cfdi exists yet but the merchant allows self-invoicing', async () => {
@@ -483,7 +513,7 @@ describe('getAutofacturaStatusController (GET /receipt/:accessKey/cfdi)', () => 
     await getAutofacturaStatusController(req as any, res as any)
 
     expect(res.status).toHaveBeenCalledWith(200)
-    expect(res.json).toHaveBeenCalledWith({ cfdi: null, autofacturaAvailable: false })
+    expect(res.json).toHaveBeenCalledWith({ cfdi: null, autofacturaAvailable: false, autofacturaUnavailable: { kind: 'DISABLED' } })
   })
 
   it('returns autofacturaAvailable:false when facturación is on but autofactura is disabled', async () => {
@@ -497,7 +527,7 @@ describe('getAutofacturaStatusController (GET /receipt/:accessKey/cfdi)', () => 
     await getAutofacturaStatusController(req as any, res as any)
 
     expect(res.status).toHaveBeenCalledWith(200)
-    expect(res.json).toHaveBeenCalledWith({ cfdi: null, autofacturaAvailable: false })
+    expect(res.json).toHaveBeenCalledWith({ cfdi: null, autofacturaAvailable: false, autofacturaUnavailable: { kind: 'DISABLED' } })
   })
 
   it('returns autofacturaAvailable:false when no emisor is resolvable (loadOrder returns null)', async () => {
@@ -511,7 +541,29 @@ describe('getAutofacturaStatusController (GET /receipt/:accessKey/cfdi)', () => 
     await getAutofacturaStatusController(req as any, res as any)
 
     expect(res.status).toHaveBeenCalledWith(200)
-    expect(res.json).toHaveBeenCalledWith({ cfdi: null, autofacturaAvailable: false })
+    expect(res.json).toHaveBeenCalledWith({ cfdi: null, autofacturaAvailable: false, autofacturaUnavailable: { kind: 'DISABLED' } })
+  })
+
+  // B3a ronda final F3 (Codex final #3) y ajuste 4: el comercio SÍ habilitó la autofactura, pero esta venta no se puede timbrar exacta.
+  // Antes el GET sólo decía `false` y el recibo escondía el panel sin explicación; ahora dice que es un bloqueo FISCAL. Los motivos
+  // NO viajan a este GET público (están escritos para el comercio: «factúrala con tu contador»): se quedan en el log del servidor y
+  // el comercio los ve en su dashboard (422 al facturar, `lastError` del intento).
+  it('🔴 F3: 2 × $1.04 con IVA aparte (cobro $2.42, el PAC da $2.41): con los dos interruptores prendidos, el GET dice el bloqueo fiscal SIN los motivos, que van al log', async () => {
+    mockFindReceipt.mockResolvedValue(makeReceipt())
+    mockFindCfdi.mockResolvedValue(null)
+    // El motivo exacto que el cargador real da para esta venta (`loadOrderForCfdi.test.ts`, «F3: 2 × $1.04»).
+    mockLoadOrder.mockResolvedValue({ ...makeBundle(), unsupportedReasons: [motivoNoCuadra(241, 242)] })
+
+    const res = makeRes()
+    await getAutofacturaStatusController(makeReq({ accessKey: 'key-abc' }) as any, res as any)
+
+    expect(res.status).toHaveBeenCalledWith(200)
+    expect(res.json).toHaveBeenCalledWith({ cfdi: null, autofacturaAvailable: false, autofacturaUnavailable: { kind: 'FISCAL_BLOCK' } })
+    expect(JSON.stringify(res.json.mock.calls[0][0])).not.toContain('$2.41')
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringContaining('autofactura'),
+      expect.objectContaining({ orderId: 'order-1', motivos: [motivoNoCuadra(241, 242)] }),
+    )
   })
 
   it('returns 404 when receipt is not found', async () => {

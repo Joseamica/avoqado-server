@@ -12,7 +12,8 @@ jest.mock('../../../../src/config/logger', () => ({ error: jest.fn(), info: jest
 
 import { Prisma } from '@prisma/client'
 import { replaceCfdi, siguienteLlaveDeSustitucion } from '../../../../src/services/fiscal/cfdiReplacement.service'
-import { claimWhere } from '../../../../src/services/fiscal/cfdi.service'
+import { claimWhere, loadOrderForCfdiFromDb } from '../../../../src/services/fiscal/cfdi.service'
+import { CONFIG, orden, producto, renglon } from './fixtures/ivaPorProductoGoldenOrders'
 import type { ReplaceCfdiDeps } from '../../../../src/services/fiscal/cfdiReplacement.service'
 
 const D = (n: number) => new Prisma.Decimal(n)
@@ -318,6 +319,29 @@ describe('replaceCfdi — no se timbra un segundo documento equivocado', () => {
       expect.objectContaining({ status: 'VALIDATION_FAILED', attempts: 0, protocoloIva: 1 }),
       expect.anything(),
     )
+    expect(deps.resolveProvider).not.toHaveBeenCalled()
+  })
+
+  it('6b, barrera de dinero: el documento corregido del R5 sumado como el PAC da $67.49 contra $67.50 ⇒ NO toca el PAC', async () => {
+    const producto = { satProductKey: '90101500', satUnitKey: 'E48', objetoImp: '02', taxRate: D(0.16), category: null }
+    const r5 = bundle({
+      subtotalCents: 5819,
+      taxCents: 931,
+      totalCents: 6750,
+      paidCents: 6750,
+      order: {
+        ...bundle().order,
+        items: [
+          { productName: 'CAPUCCINO', quantity: 1, unitPrice: D(65), discountAmount: D(2.33), product: producto },
+          { productName: 'Deslactosada (CAPUCCINO)', quantity: 1, unitPrice: D(5), discountAmount: D(0.17), product: producto },
+        ],
+      },
+    })
+    const deps = makeDeps({ loadOrderForCfdi: jest.fn().mockResolvedValue(r5) })
+    const res = await replaceCfdi(params, deps)
+
+    expect(res.status).toBe('VALIDATION_FAILED')
+    expect(res.reasons?.join(' ')).toContain('El total de la factura corregida ($67.49) no coincide con lo cobrado ($67.50)')
     expect(deps.resolveProvider).not.toHaveBeenCalled()
   })
 
@@ -722,4 +746,39 @@ it('sustituir una autofactura sigue siendo acción del personal y permite efecti
   })
   expect((await replaceCfdi(params, deps)).status).toBe('REPLACED')
   expect(deps.loadOrderForCfdi).toHaveBeenCalledWith('o1', { permitirEfectivo: true }, expect.anything())
+})
+
+// B3a ronda final F1 (Codex final #1): la sustitución lee los importes del MISMO cargador, con el subtotal BRUTO del escritor nativo.
+it('🔴 F1: sustituir dos de $100 con IVA aparte y $20 de cuenta (cobro $208.80, cero ajustes) guarda lo que dirá el XML y timbra', async () => {
+  const pieza = (nombre: string) =>
+    renglon({ id: `oi-${nombre}`, productName: nombre, unitPrice: D(100), total: D(100), product: producto({ name: nombre }) })
+  const venta = orden(208.8, {
+    subtotal: D(200), // como lo guarda el escritor nativo: antes del descuento
+    taxAmount: D(28.8), // 32.00 − D16
+    total: D(208.8),
+    discountAmount: D(20),
+    contratoDePrecio: 'IVA_APARTE',
+    orderDiscounts: [
+      {
+        amount: D(20),
+        reparto: { v: 1, alcance: 'CUENTA', conPromociones: true, espejo: false, renglones: { 'oi-A': 1000, 'oi-B': 1000 } },
+      },
+    ],
+    items: [pieza('A'), pieza('B')],
+  })
+  const db = {
+    order: { findUnique: jest.fn().mockResolvedValue(venta) },
+    merchantFiscalConfig: { findUnique: jest.fn().mockResolvedValue(CONFIG) },
+    fiscalEmisor: { findMany: jest.fn().mockResolvedValue([]) },
+    orderDiscount: { findMany: jest.fn().mockResolvedValue([]) },
+  } as any
+  const deps = makeDeps({ loadOrderForCfdi: (id, opts) => loadOrderForCfdiFromDb(id, opts, db) })
+
+  const res = await replaceCfdi(params, deps)
+
+  expect(res.reasons ?? []).toEqual([])
+  expect(res.status).toBe('REPLACED')
+  const reservada = (deps.reserveCfdi as jest.Mock).mock.calls[0][0]
+  expect([reservada.subtotalCents, reservada.taxCents, reservada.totalCents]).toEqual([18000, 2880, 20880])
+  expect(providerDe(deps).createInvoice.mock.calls[0][0].items.map((i: any) => i.discountCents)).toEqual([1000, 1000])
 })

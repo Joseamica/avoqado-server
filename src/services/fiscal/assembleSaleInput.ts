@@ -73,10 +73,14 @@ export function assembleSaleInput(order: LoadedOrderForCfdi, opts: AssembleOptio
   const pricesIncludeIva = order.pricesIncludeIva === true
   const items: AvoqadoSaleItemInput[] = order.items.map(it => {
     const taxRate = it.product ? Number(it.product.taxRate) : DEFAULT_IVA
+    const precio = new Prisma.Decimal(String(it.unitPrice))
+    // D9: el precio por kilo derivado de lo cobrado (más de 2 decimales) viaja tal cual al PAC; todo lo demás va en centavos.
+    const conFraccion = !precio.equals(precio.toDecimalPlaces(2))
     return {
       description: it.productName ?? 'Producto',
       quantity: it.quantity,
       unitPriceCents: centsOf(it.unitPrice),
+      ...(conFraccion ? { unitPriceDecimal: precio.toDecimalPlaces(6, Prisma.Decimal.ROUND_HALF_UP).toFixed(6) } : {}),
       discountCents: centsOf(it.discountAmount),
       taxRate,
       taxExempt: taxRate === 0,

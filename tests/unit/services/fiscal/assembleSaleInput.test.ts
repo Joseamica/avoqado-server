@@ -91,4 +91,19 @@ describe('assembleSaleInput', () => {
     expect(input.items[0].taxRate).toBe(0.16) // default IVA when no product
     expect(input.items[0].satProductKey).toBeNull()
   })
+
+  it('D9: un precio con más de 2 decimales viaja también como `unitPriceDecimal`; uno en centavos, no', () => {
+    const opts = {
+      receptor: { rfc: 'EKU9003173C9', razonSocial: 'X', regimenFiscal: '601', codigoPostal: '42501', usoCfdi: 'G03' },
+      paymentMethod: 'CASH' as const,
+      metodoPago: 'PUE' as const,
+      idempotencyKey: 'k',
+    }
+    const conFraccion = assembleSaleInput(
+      { ...order, items: [{ ...order.items[0], quantity: 1.537, unitPrice: new Prisma.Decimal('44.996747') }] },
+      opts,
+    )
+    expect(conFraccion.items[0]).toMatchObject({ unitPriceCents: 4500, unitPriceDecimal: '44.996747' })
+    expect(assembleSaleInput(order, opts).items[0]).not.toHaveProperty('unitPriceDecimal')
+  })
 })

@@ -92,6 +92,12 @@ export interface CfdiItemInput {
    *   - taxIncluded=false → NET (sin IVA) — the PAC adds the IVA on top (separated-tax sources).
    */
   unitPriceCents: number
+  /**
+   * D9 (IVA por producto): precio unitario en PESOS con hasta 6 decimales, sólo cuando no cae en centavos (venta por peso cuyo
+   * cobro redondeó precio × kilos). Si viene, es el precio que se manda al PAC; `unitPriceCents` conserva el redondeo para los
+   * lectores de antes. Ausente en todo lo demás: las entradas viejas y su huella no cambian.
+   */
+  unitPriceDecimal?: string
   discountCents: number
   objetoImp: string // 01/02/03
   taxes: CfdiItemTax[]

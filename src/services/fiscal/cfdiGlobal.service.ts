@@ -36,6 +36,8 @@ import { CFDI_VIVO } from './exclusionGlobal'
 import { clasificarOrden, resolverTratamiento } from './ivaDeRenglon'
 import type { IvaTratamiento } from './ivaTratamiento'
 import { huellaDeEntrada } from './entradaDocumental'
+import { DESCUENTOS_PARA_CONCEPTOS } from './descuentoPorRenglon'
+import { filasDeDescuentoCompletas } from './filasDeDescuentoTx'
 
 export type IssueGlobalStatus = 'STAMPED' | 'NOTHING_TO_INVOICE' | 'SKIPPED' | 'VALIDATION_FAILED' | 'STAMP_FAILED'
 export interface IssueGlobalResult {
@@ -323,7 +325,7 @@ function candidateWhere(emisor: GlobalEmisor, period: ClosedPeriod): Prisma.Orde
   }
 }
 const COBRO_ELEGIBLE: Prisma.PaymentWhereInput = { OR: [{ type: { in: ['REGULAR', 'FAST'] } }, { type: null }] }
-const ORDER_SELECT = {
+export const ORDER_SELECT = {
   id: true,
   orderNumber: true,
   subtotal: true,
@@ -331,7 +333,8 @@ const ORDER_SELECT = {
   total: true,
   discountAmount: true,
   serviceChargeAmount: true,
-  promotions: { select: { id: true }, take: 1 },
+  // B3a: las filas de descuento con su reparto, como la individual (una página y una de más; ver filasDeDescuentoCompletas).
+  orderDiscounts: DESCUENTOS_PARA_CONCEPTOS,
   payments: {
     where: { status: 'COMPLETED' as const, ...COBRO_ELEGIBLE },
     orderBy: [{ createdAt: 'desc' as const }, { id: 'desc' as const }],
@@ -349,6 +352,8 @@ const ORDER_SELECT = {
       taxAmount: true,
       total: true,
       weightQuantity: true,
+      orderPromotionId: true,
+      isCortesia: true,
       modifiers: { select: { name: true, price: true, quantity: true } },
       product: { select: { ivaTratamiento: true, taxRate: true, objetoImp: true, satProductKey: true, satUnitKey: true } },
     },
@@ -384,7 +389,10 @@ async function capturarGlobal(tx: Prisma.TransactionClient, emisor: GlobalEmisor
         excluidasPorIvaMixto++
         continue
       }
-      const orderLines = globalLinesFromOrder(order)
+      const orderLines = globalLinesFromOrder({
+        ...order,
+        orderDiscounts: await filasDeDescuentoCompletas(tx, order.id, order.orderDiscounts),
+      })
       if (!orderLines.length) continue
       lines.push(...orderLines)
       ordenes.push({ orderId: order.id, huella: huellaDeEntrada({ renglones, lineas: orderLines }), renglones })
@@ -607,7 +615,8 @@ export interface GlobalCandidateOrder {
   total: any
   discountAmount?: any
   serviceChargeAmount?: any
-  promotions?: Array<{ id: string }> | null
+  /** B3a: filas `OrderDiscount` con su reparto (B2). Ausente = ninguna. */
+  orderDiscounts?: Array<{ amount: any; reparto?: unknown }> | null
   payments: Array<{ method: any; tenderSatFormaPago: string | null; amount?: any; type?: string | null }>
   items: Array<{
     id?: string
@@ -619,6 +628,8 @@ export interface GlobalCandidateOrder {
     taxAmount: any
     total?: any
     weightQuantity?: any
+    orderPromotionId?: string | null
+    isCortesia?: boolean | null
     modifiers?: Array<{ name?: string | null; price: any; quantity?: number }> | null
     product: { taxRate: any; objetoImp: string | null; ivaTratamiento?: IvaTratamiento | null } | null
   }>
