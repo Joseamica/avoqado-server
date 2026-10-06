@@ -20,13 +20,16 @@ import { DEFAULT_TIMEZONE } from '../../../utils/datetime'
 import { utcTs } from '../../../utils/sqlDates'
 import { isDeadlockError } from '../../../utils/serializableRetry'
 import {
+  baseSinIvaPorTasa,
   commissionableAmount,
   orderLevelDiscountOf,
+  precioTraeIva,
   resolveCommissionBase,
   selectCommissionableLines,
   OrderLineForCommission,
 } from './commission-base'
 import { computeStoredOrderTotal } from '../../shared/orderBalance'
+import { ivaDelCobroComoContabilidad, type OrderItemRow } from '../../fiscal/ivaMath'
 import { type CobroDeLaOrden, type OtroCobro, repartir } from './repartoPorCobro'
 
 // ============================================
@@ -385,10 +388,12 @@ export function applyCommissionBounds(amount: number, config: { minAmount: Decim
  *
  *   LO_COBRADO      → `payment.amount` (lo que el cliente pagó de verdad)
  *   PRECIO_DE_LISTA → `payment.amount` + su parte del descuento
- *   «Con IVA» (default)     → eso;  «Sin el IVA registrado» → eso − su parte del IVA
+ *   «Sin IVA» (default)     → eso − el IVA del cobro;  «Con IVA» → eso
  *
- * El cobro SIEMPRE trae el IVA (incluido en el precio o cobrado aparte), por eso «con IVA» nunca lo suma otra vez
- * (D5, decisión del founder del 5-oct: «si toda la plataforma se maneja como México, precios con IVA, que sea igual»).
+ * El cobro SIEMPRE trae el IVA (incluido en el precio o cobrado aparte), por eso «con IVA» nunca lo suma otra vez. El IVA del
+ * cobro (`taxAmount`) es el de su póliza contable (`ivaDelCobro`): en «Lo cobrado», con un solo cobro, sin categorías y antes
+ * de la propina, «sin IVA» es exactamente la venta neta de la póliza (D5 enmendada por el founder el 5-oct: sin IVA de
+ * fábrica, como Phorest y Mindbody). «Precio de lista» con orden no pasa por aquí: va por `listaDeLaOrden` (A1e).
  *
  * 🔴 La PROPINA no es parte de la base de la venta: se suma DESPUÉS y sólo si el esquema trae `includeTips`.
  */
@@ -396,7 +401,7 @@ export function calculateBaseAmount(
   payment: {
     amount: Decimal
     tipAmount?: Decimal | null
-    /** La parte de ESTE cobro del IVA registrado de la orden. */
+    /** El IVA de ESTE cobro según su póliza contable (`ivaDelCobro`). */
     taxAmount?: Decimal | null
     /** La parte de ESTE cobro del descuento efectivo de la orden. */
     discountAmount?: Decimal | null
@@ -441,6 +446,18 @@ export const ORDEN_PARA_REPARTO_SELECT = {
   serviceChargeAmount: true,
   contratoDePrecio: true,
   status: true,
+  // A1e: los renglones como los lee la póliza contable (`OrderItemRow`) más sus extras (la lista de la orden). Sin `take`: son
+  // los de UNA orden y truncarlos cambiaría dinero.
+  items: {
+    select: {
+      quantity: true,
+      unitPrice: true,
+      weightQuantity: true,
+      discountAmount: true,
+      modifiers: { select: { price: true, quantity: true } },
+      product: { select: { taxRate: true } },
+    },
+  },
 } satisfies Prisma.OrderSelect
 
 export type OrdenParaReparto = Prisma.OrderGetPayload<{ select: typeof ORDEN_PARA_REPARTO_SELECT }>
@@ -449,19 +466,18 @@ const CERO = new Prisma.Decimal(0)
 const dec = (v: Prisma.Decimal | number | string | null | undefined) => new Prisma.Decimal(v == null ? 0 : String(v))
 
 /**
- * ESTE cobro dentro de su orden: lo que la orden cobra sin propina (`computeStoredOrderTotal`, la regla del saldo) y los dos
- * valores de la orden que se reparten entre cobros:
+ * ESTE cobro dentro de su orden: lo que la orden cobra sin propina (`computeStoredOrderTotal`, la regla del saldo) y el valor de la
+ * orden que se reparte entre cobros:
  *
  * - `descuento`: el EFECTIVO de mercancía, min(cabecera, subtotal). Es el tope de B2/B2c que vivía en `calculateBaseAmount`
  *   (`origin/develop` `commission-utils.ts:419`): la cabecera es la Σ de las filas, sin tope, y puede pasar al subtotal.
- * - `iva`: el REGISTRADO en la orden, incluido en el precio o cobrado aparte.
  *
  * Sin orden (cobro suelto) el cobro es todo: no hay nada que repartir. Los OTROS cobros los lee `otrosCobros`, por esquema.
  */
 export function cobroDeLaOrden(payment: { amount: Decimal; orderId: string | null; order: OrdenParaReparto | null }): CobroDeLaOrden {
   const cobro = new Prisma.Decimal(payment.amount)
   const o = payment.order
-  if (!payment.orderId || !o) return { totalOrden: cobro, cobro, descuento: CERO, iva: CERO }
+  if (!payment.orderId || !o) return { totalOrden: cobro, cobro, descuento: CERO }
   const subtotal = Prisma.Decimal.max(CERO, new Prisma.Decimal(o.subtotal ?? 0))
   return {
     totalOrden: computeStoredOrderTotal({
@@ -475,8 +491,64 @@ export function cobroDeLaOrden(payment: { amount: Decimal; orderId: string | nul
     }),
     cobro,
     descuento: Prisma.Decimal.min(Prisma.Decimal.max(CERO, new Prisma.Decimal(o.discountAmount ?? 0)), subtotal),
-    iva: Prisma.Decimal.max(CERO, new Prisma.Decimal(o.taxAmount ?? 0)),
   }
+}
+
+/**
+ * El IVA de ESTE cobro con la regla de la póliza contable (A1e, D5 enmendada): `ivaDelCobroComoContabilidad`, la misma que
+ * `buildSaleLines` —lo cobrado repartido por la mezcla de tasas de los renglones de la orden; sin renglones, al 16 %—. Es lo
+ * que «sin IVA» le resta a «Lo cobrado».
+ */
+export function ivaDelCobro(payment: { amount: Decimal; order: { items?: OrderItemRow[] } | null }): Prisma.Decimal {
+  const centavos = new Prisma.Decimal(payment.amount).mul(100).toDecimalPlaces(0, Prisma.Decimal.ROUND_HALF_UP).toNumber()
+  return new Prisma.Decimal(ivaDelCobroComoContabilidad(centavos, payment.order?.items).taxCents).div(100)
+}
+
+/**
+ * Lo que el POS le cobró a UN renglón antes de descuentos (A1e, Codex r4-1): por peso, precio/kg × kilos redondeado al centavo
+ * —la expresión de `order.tpv.service.ts:1738` y `order.mobile.service.ts:666`; ninguno la exporta—; por pieza, precio ×
+ * cantidad; y los extras, por unidad × cantidad. Las ventas por peso guardan `quantity = 1` y los kilos en `weightQuantity`:
+ * multiplicar por `quantity` cobraba un kilo entero ($116 por 0.5 kg). Lo usan la lista de la orden y los renglones de
+ * categorías.
+ */
+function importeDelRenglon(it: {
+  quantity: number
+  unitPrice: Decimal | number
+  weightQuantity?: Decimal | number | null
+  modifiers?: Array<{ price: Decimal | number; quantity: number }>
+}): number {
+  const extras = (it.modifiers ?? []).reduce((s, m) => s + Number(m.price) * m.quantity, 0) * it.quantity
+  const base =
+    it.weightQuantity != null
+      ? Math.round(Number(it.unitPrice) * Number(it.weightQuantity) * 100) / 100
+      : Number(it.unitPrice) * it.quantity
+  return base + extras
+}
+
+/**
+ * «Precio de lista» de la ORDEN en el esquema general (A1e, Codex r3-2 y r3-3): sus RENGLONES —lo que el POS cobró por cada uno
+ * antes de descuentos (`importeDelRenglon`: kilos en la venta por peso, extras incluidos)— MÁS el cargo por servicio; sin
+ * renglones, la cabecera (subtotal + cargo). Es la MISMA mercancía con y sin IVA: la cabecera no siempre refleja los renglones
+ * (la cortesía del POS móvil deja el subtotal sin el descuento). «Sin IVA» le quita el IVA con la regla de la póliza
+ * (`ivaDelCobroComoContabilidad`, pesando los renglones sin sus descuentos). Con el IVA cobrado aparte los renglones ya vienen
+ * sin IVA: «sin IVA» es la lista y «con IVA» le suma el registrado (como A1c en categorías). Cada cobro se lleva su parte con
+ * `baseDelCobro`.
+ */
+export function listaDeLaOrden(order: OrdenParaReparto, config: { includeTax: boolean }): number {
+  const renglones = order.items ?? []
+  const lista = (renglones.length ? renglones.reduce((s, it) => s.plus(importeDelRenglon(it)), CERO) : dec(order.subtotal)).plus(
+    dec(order.serviceChargeAmount),
+  )
+  const pesos = (n: Prisma.Decimal) => n.toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP).toNumber()
+  if (!precioTraeIva(order)) return pesos(config.includeTax ? lista.plus(dec(order.taxAmount)) : lista)
+  if (config.includeTax) return pesos(lista)
+  const centavos = lista.mul(100).toDecimalPlaces(0, Prisma.Decimal.ROUND_HALF_UP).toNumber()
+  return (
+    ivaDelCobroComoContabilidad(
+      centavos,
+      renglones.map(it => ({ ...it, discountAmount: 0 })),
+    ).netCents / 100
+  )
 }
 
 /**
@@ -496,7 +568,7 @@ export async function otrosCobros(
 ): Promise<OtroCobro[]> {
   if (!payment.orderId) return []
   const filas = await db.$queryRaw<
-    Array<{ monto: Prisma.Decimal; registrado: boolean; base: Prisma.Decimal; descuento: Prisma.Decimal; iva: Prisma.Decimal }>
+    Array<{ monto: Prisma.Decimal; registrado: boolean; base: Prisma.Decimal; descuento: Prisma.Decimal }>
   >(Prisma.sql`
     WITH otros_de_la_orden AS (
       SELECT p.id, p.amount AS monto FROM "Payment" p
@@ -504,21 +576,20 @@ export async function otrosCobros(
         AND p.status = 'COMPLETED' AND (p.type IS NULL OR p.type NOT IN ('REFUND', 'TEST'))
     ),
     registrado AS (
-      SELECT cc."paymentId" AS id, cc."baseAmount" - cc."tipAmount" AS base, cc."discountAmount" AS descuento, cc."taxAmount" AS iva
+      SELECT cc."paymentId" AS id, cc."baseAmount" - cc."tipAmount" AS base, cc."discountAmount" AS descuento
       FROM "CommissionCalculation" cc
       WHERE cc."venueId" = ${payment.venueId} AND cc."configId" = ${configId} AND cc."voidedAt" IS NULL
         AND cc."paymentId" IN (SELECT id FROM otros_de_la_orden)
       UNION ALL
       SELECT e."paymentId",
              (e.payload->>'baseAmount')::numeric - COALESCE((e.payload->>'tipAmount')::numeric, 0),
-             COALESCE((e.payload->>'discountAmount')::numeric, 0),
-             COALESCE((e.payload->>'taxAmount')::numeric, 0)
+             COALESCE((e.payload->>'discountAmount')::numeric, 0)
       FROM "PaymentEffect" e
       WHERE e."venueId" = ${payment.venueId} AND e.kind = 'COMMISSION' AND e.status IN ('PENDING', 'PROCESSING', 'DEAD_LETTER')
         AND e.payload->>'configId' = ${configId} AND e."paymentId" IN (SELECT id FROM otros_de_la_orden)
     )
     SELECT o.monto, COUNT(r.id) > 0 AS registrado,
-           COALESCE(SUM(r.base), 0) AS base, COALESCE(SUM(r.descuento), 0) AS descuento, COALESCE(SUM(r.iva), 0) AS iva
+           COALESCE(SUM(r.base), 0) AS base, COALESCE(SUM(r.descuento), 0) AS descuento
     FROM otros_de_la_orden o LEFT JOIN registrado r ON r.id = o.id
     GROUP BY o.id, o.monto
   `)
@@ -526,7 +597,6 @@ export async function otrosCobros(
     monto: dec(f.monto),
     base: f.registrado ? dec(f.base) : null,
     descuento: f.registrado ? dec(f.descuento) : null,
-    iva: f.registrado ? dec(f.iva) : null,
   }))
 }
 
@@ -793,22 +863,28 @@ async function loadOrderCommissionLines(
   const [orderItems, order] = await Promise.all([
     db.orderItem.findMany({
       where: { orderId },
+      // A1e: en orden de `id`, para que el residuo de centavos de `baseSinIvaPorTasa` no dependa del orden de la consulta.
+      orderBy: { id: 'asc' },
       select: {
         quantity: true,
         unitPrice: true,
+        weightQuantity: true,
         taxAmount: true,
         discountAmount: true,
-        product: { select: { categoryId: true } },
+        modifiers: { select: { price: true, quantity: true } },
+        product: { select: { categoryId: true, taxRate: true } },
       },
     }),
-    db.order.findUnique({ where: { id: orderId }, select: { discountAmount: true, contratoDePrecio: true } }),
+    db.order.findUnique({ where: { id: orderId }, select: { discountAmount: true, contratoDePrecio: true, taxAmount: true } }),
   ])
 
   const lines: OrderLineForCommission[] = orderItems.map(item => ({
-    gross: decimalToNumber(item.unitPrice) * item.quantity,
+    // A1e: el renglón como lo cobró el POS: kilos en la venta por peso y extras con precio (Codex r4-1).
+    gross: importeDelRenglon(item),
     lineDiscount: decimalToNumber(item.discountAmount),
     tax: decimalToNumber(item.taxAmount),
     categoryId: item.product?.categoryId ?? null,
+    taxRate: item.product?.taxRate != null ? decimalToNumber(item.product.taxRate) : null,
   }))
 
   return {
@@ -817,8 +893,9 @@ async function loadOrderCommissionLines(
       decimalToNumber(order?.discountAmount),
       lines.map(line => line.lineDiscount),
     ),
-    // D5: con IVA incluido el precio del renglón ya lo trae; aparte (o desconocido, la regla de P12) se cobró encima.
-    ivaIncluidoEnPrecio: order?.contratoDePrecio === 'IVA_INCLUIDO',
+    // A1e: IVA_INCLUIDO, o DESCONOCIDO sin IVA registrado ⇒ los renglones traen el IVA y «sin IVA» lo separa por tasa; aparte
+    // (o DESCONOCIDO con IVA registrado, la regla P12) los renglones ya vienen sin IVA.
+    ivaIncluidoEnPrecio: precioTraeIva(order ?? {}),
   }
 }
 
@@ -849,7 +926,11 @@ export async function calculateCategoryFilteredAmount(
     include: line => line.categoryId !== null && categoryIds.includes(line.categoryId),
   })
 
-  return commissionableAmount(selected, { base: resolveCommissionBase(config), includeTax: config.includeTax, ivaIncluidoEnPrecio })
+  const base = resolveCommissionBase(config)
+  // A1e: «sin IVA» con los renglones trayendo el IVA ⇒ la regla de tasas de la póliza; lo demás, la aritmética de A1c.
+  return ivaIncluidoEnPrecio && !config.includeTax
+    ? baseSinIvaPorTasa(selected, base)
+    : commissionableAmount(selected, { base, includeTax: config.includeTax, ivaIncluidoEnPrecio })
 }
 
 /**
@@ -873,7 +954,11 @@ export async function calculateLeftoverAmount(
     include: line => line.categoryId === null || !claimedCategoryIds.includes(line.categoryId),
   })
 
-  return commissionableAmount(selected, { base: resolveCommissionBase(config), includeTax: config.includeTax, ivaIncluidoEnPrecio })
+  const base = resolveCommissionBase(config)
+  // A1e: «sin IVA» con los renglones trayendo el IVA ⇒ la regla de tasas de la póliza; lo demás, la aritmética de A1c.
+  return ivaIncluidoEnPrecio && !config.includeTax
+    ? baseSinIvaPorTasa(selected, base)
+    : commissionableAmount(selected, { base, includeTax: config.includeTax, ivaIncluidoEnPrecio })
 }
 
 /**

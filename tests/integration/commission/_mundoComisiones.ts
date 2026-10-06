@@ -6,8 +6,9 @@
  * por categoría, cobros, devoluciones y el worker de efectos corrido A MANO sobre los efectos de ESTE negocio — nunca
  * `claimPaymentEffects`, que reclama los de toda la base y se llevaría los de otra prueba.
  */
-import { Prisma, PrismaClient, TierPeriod } from '@prisma/client'
+import { Prisma, PrismaClient, TierPeriod, type IvaTratamiento } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
+import { encenderIvaPorProducto } from '@tests/__helpers__/iva-por-producto'
 import { getPeriodDateRange } from '@/services/dashboard/commission/commission-utils'
 import {
   enqueuePaymentCommissionInTx,
@@ -83,14 +84,30 @@ export interface VentaDePrueba {
   subtotal: number
   discountAmount?: number
   taxAmount?: number
-  contratoDePrecio?: 'IVA_INCLUIDO' | 'IVA_APARTE'
-  renglones?: Array<{ categoryId: string; precio: number; iva?: number }>
+  contratoDePrecio?: 'IVA_INCLUIDO' | 'IVA_APARTE' | 'DESCONOCIDO'
+  /** Cargo por servicio de la orden (`Order.serviceChargeAmount`, la copia que leen el saldo y la comisión). Suma al total. */
+  cargo?: number
+  renglones?: Array<{
+    categoryId: string
+    precio: number
+    /** `OrderItem.discountAmount`: el descuento del renglón. */
+    descuento?: number
+    /** `OrderItem.taxAmount`: el IVA registrado del renglón (lo lee la comisión sólo con el IVA cobrado aparte). */
+    iva?: number
+    /** El IVA del producto (default IVA_16). Otro valor enciende «IVA por producto» en el negocio de la prueba. */
+    tratamiento?: IvaTratamiento
+    /** Renglón de importe libre («Otro importe»): sin producto. */
+    sinProducto?: boolean
+    /** Venta por peso: los kilos (`OrderItem.weightQuantity`); `precio` es el precio por kilo y `quantity` se queda en 1. */
+    kilos?: number
+  }>
 }
 
 /** Una orden ya pagada con su total canónico (IVA aparte suma; incluido no). Sus cobros se crean con `cobro`. */
 export async function orden(m: MundoComisiones, v: VentaDePrueba): Promise<string> {
   const contratoDePrecio = v.contratoDePrecio ?? 'IVA_INCLUIDO'
-  const total = Math.max(0, v.subtotal - (v.discountAmount ?? 0)) + (contratoDePrecio === 'IVA_APARTE' ? (v.taxAmount ?? 0) : 0)
+  const total =
+    Math.max(0, v.subtotal - (v.discountAmount ?? 0)) + (contratoDePrecio === 'IVA_APARTE' ? (v.taxAmount ?? 0) : 0) + (v.cargo ?? 0)
   const order = await prisma.order.create({
     data: {
       venueId: m.venueId,
@@ -98,6 +115,7 @@ export async function orden(m: MundoComisiones, v: VentaDePrueba): Promise<strin
       subtotal: D(v.subtotal),
       discountAmount: D(v.discountAmount ?? 0),
       taxAmount: D(v.taxAmount ?? 0),
+      serviceChargeAmount: D(v.cargo ?? 0),
       contratoDePrecio,
       total: D(total),
       paidAmount: D(total),
@@ -106,21 +124,36 @@ export async function orden(m: MundoComisiones, v: VentaDePrueba): Promise<strin
       paymentStatus: 'PAID',
     },
   })
+  // Un producto ≠ IVA_16 exige «IVA por producto» encendido en el negocio (trigger `IVA_POR_PRODUCTO_APAGADO`).
+  if ((v.renglones ?? []).some(r => (r.tratamiento ?? 'IVA_16') !== 'IVA_16')) await encenderIvaPorProducto(m.venueId)
   for (const r of v.renglones ?? []) {
-    // Sin `taxRate`: el default (16 %) no exige «IVA por producto» encendido en el negocio (trigger `IVA_POR_PRODUCTO_APAGADO`).
-    // La comisión no lo lee: el IVA de la línea es `OrderItem.taxAmount`.
-    const product = await prisma.product.create({
-      data: { venueId: m.venueId, categoryId: r.categoryId, name: 'Producto', sku: `${m.key}-p${++seq}`, price: D(r.precio) },
-    })
+    // Sin `taxRate`: el tratamiento manda y los triggers derivan la tasa, que es lo que leen la póliza y la comisión (A1e).
+    const productId = r.sinProducto
+      ? null
+      : (
+          await prisma.product.create({
+            data: {
+              venueId: m.venueId,
+              categoryId: r.categoryId,
+              name: 'Producto',
+              sku: `${m.key}-p${++seq}`,
+              price: D(r.precio),
+              ...(r.tratamiento ? { ivaTratamiento: r.tratamiento } : {}),
+            },
+          })
+        ).id
     await prisma.orderItem.create({
       data: {
         orderId: order.id,
-        productId: product.id,
-        productName: 'Producto',
+        productId,
+        productName: r.sinProducto ? 'Otro importe' : 'Producto',
         quantity: 1,
         unitPrice: D(r.precio),
+        ...(r.kilos != null ? { weightQuantity: D(r.kilos) } : {}),
+        discountAmount: D(r.descuento ?? 0),
         taxAmount: D(r.iva ?? 0),
-        total: D(r.precio),
+        // Por peso, el importe del POS: precio/kg × kilos al centavo (`order.tpv.service.ts:1738`).
+        total: D(r.kilos != null ? Math.round(r.precio * r.kilos * 100) / 100 : r.precio),
       },
     })
   }

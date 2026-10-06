@@ -2,7 +2,8 @@
 /**
  * Reparto de un valor de la ORDEN entre sus COBROS — PURO, sin base de datos (fase 3 de pago por servicio, A1).
  *
- * La comisión corre POR COBRO, pero el descuento, el IVA y la base por categorías son de la ORDEN. Antes cada cobro
+ * La comisión corre POR COBRO, pero el descuento y la base de la orden (categorías, sobrante o lista) son de la ORDEN; el
+ * IVA no se reparte: cada cobro lleva el de su póliza (A1e). Antes cada cobro
  * recibía el descuento y el IVA de TODA la orden (dos cobros de $225 en «precio de lista» comisionaban $550 sobre una
  * venta de $500), y el camino de categorías le cargaba al PRIMER cobro toda la base (devolver ese cobro dejaba la
  * comisión en $0 aunque seguían cobrados $225). Aquí cada cobro se lleva la parte proporcional a lo que pagó; el que
@@ -16,7 +17,7 @@ const CERO = new Prisma.Decimal(0)
 export function parteDelCobro(input: {
   totalOrden: Prisma.Decimal // lo que se cobra en total por la orden, sin propina
   cobro: Prisma.Decimal // lo que pagó ESTE cobro (sin propina)
-  valor: Prisma.Decimal // lo que se reparte (descuento, IVA o base de categoría de la orden); debe ser ≥ 0 (con negativos la suma deja de ser `valor`)
+  valor: Prisma.Decimal // lo que se reparte (descuento o base de la orden); debe ser ≥ 0 (con negativos la suma deja de ser `valor`)
   yaRepartido: Prisma.Decimal // lo que ya se asignó a cobros anteriores de la misma orden
   esUltimo: boolean // el cobro que completa la orden se lleva el residuo de centavos
 }): Prisma.Decimal {
@@ -32,7 +33,6 @@ export interface CobroDeLaOrden {
   totalOrden: Prisma.Decimal // lo que se cobra por la orden, sin propina
   cobro: Prisma.Decimal // lo que pagó ESTE cobro, sin propina
   descuento: Prisma.Decimal // descuento efectivo de la orden (tope: subtotal)
-  iva: Prisma.Decimal // IVA registrado de la orden (incluido o aparte)
 }
 
 /**
@@ -43,7 +43,6 @@ export interface OtroCobro {
   monto: Prisma.Decimal // lo que pagó, sin propina
   base: Prisma.Decimal | null // su base de la orden (categorías o sobrante), sin propina
   descuento: Prisma.Decimal | null // su parte del descuento
-  iva: Prisma.Decimal | null // su parte del IVA
 }
 
 const completa = (acumulado: Prisma.Decimal, total: Prisma.Decimal) => acumulado.gte(total.minus(FULL_PAYMENT_TOLERANCE))
@@ -63,7 +62,7 @@ export function repartir(
   c: Pick<CobroDeLaOrden, 'totalOrden' | 'cobro'>,
   valor: Prisma.Decimal,
   otros: OtroCobro[] = [],
-  campo: 'base' | 'descuento' | 'iva' = 'base',
+  campo: 'base' | 'descuento' = 'base',
 ): Prisma.Decimal {
   let yaRepartido = CERO
   let acumulado = c.cobro

@@ -33,6 +33,9 @@
  * **La PROPINA nunca entra aquí.** Es dinero POR COBRO, no parte de la venta; el
  * llamador la suma aparte cuando el esquema trae `includeTips`.
  */
+import { Prisma } from '@prisma/client'
+import { splitIvaByRate } from '../../fiscal/ivaMath'
+import { redondearRepartido } from './repartoPorCobro'
 
 // ============================================
 // Modos
@@ -83,6 +86,8 @@ export interface CommissionableLine {
   orderDiscountShare?: number
   /** IVA de la línea. «Con IVA» lo suma si se cobró aparte; «sin el IVA registrado» lo resta si el precio ya lo traía. */
   tax?: number
+  /** Tasa del producto de la línea, como la lee la póliza (`product.taxRate`); `null` o ausente = 16 % (A1e). */
+  taxRate?: number | null
 }
 
 function roundPesos(amount: number): number {
@@ -124,6 +129,45 @@ export function commissionableAmount(
   return roundPesos(total)
 }
 
+/** La tasa de una línea sin producto o sin tasa: 16 %, como la póliza (`grossByRateForOrder`) y la factura. */
+const TASA_POR_DEFECTO = 0.16
+
+/**
+ * ¿Los renglones de la orden ya traen el IVA? (A1e, D5 enmendada). `IVA_INCLUIDO`, sí. `DESCONOCIDO`, sólo si no registró IVA:
+ * es la regla del saldo (P12, `impuestoQueSeCobraAparte`): un IVA escrito en una venta sin contrato se cobró aparte, y las
+ * ventas nativas de antes del contrato nacieron con 0 y con el precio con IVA. `IVA_APARTE`, nunca. La columna nunca es nula;
+ * un objeto sin contrato (sólo los dobles de prueba) se lee como aparte, lo de siempre. Lo usan las categorías, el sobrante y
+ * la lista del esquema general; «Lo cobrado» toma el IVA de la póliza, que trata cada cobro como un monto con IVA incluido.
+ */
+export function precioTraeIva(o: { contratoDePrecio?: string | null; taxAmount?: Prisma.Decimal | number | string | null }): boolean {
+  if (o.contratoDePrecio === 'IVA_INCLUIDO') return true
+  return o.contratoDePrecio === 'DESCONOCIDO' && !new Prisma.Decimal(o.taxAmount ?? 0).gt(0)
+}
+
+/**
+ * La base SIN IVA de unas líneas con el IVA incluido (A1e, D5 enmendada), con la regla de tasas de la póliza contable: el neto
+ * de cada línea —los mismos descuentos, clamp por línea y «precio de lista» que `commissionableAmount`— pasa a centavos
+ * CONSERVANDO el total (`redondearRepartido`, A1a), se agrupa por la tasa de su producto (sin tasa, 16 %) y se separa con
+ * `splitIvaByRate`, la división de la póliza. Redondear cada línea (Codex r1-2: tres renglones de $1 al 0 % menos $1 daban
+ * $2.01) o cada tasa por su lado (Codex r3-1: $0.01 al 16 % + $0.01 al 8 % menos $0.01 daban $0.02) inventaba centavos.
+ */
+export function baseSinIvaPorTasa(lines: CommissionableLine[], base: CommissionBaseMode): number {
+  const listPrice = base === COMMISSION_BASE.PRECIO_DE_LISTA
+  const netos = lines.map(line => {
+    const gross = new Prisma.Decimal(line.gross)
+    return listPrice ? gross : Prisma.Decimal.max(0, gross.minus(line.lineDiscount ?? 0).minus(line.orderDiscountShare ?? 0))
+  })
+  // El residuo de centavos va a los mayores restos y, en empate, al primero: las líneas llegan en orden de `id`.
+  const enCentavos = redondearRepartido(netos)
+  const porTasa = new Map<number, number>()
+  lines.forEach((line, i) => {
+    const tasa = line.taxRate ?? TASA_POR_DEFECTO
+    porTasa.set(tasa, (porTasa.get(tasa) ?? 0) + enCentavos[i].mul(100).toNumber())
+  })
+  const { netCents } = splitIvaByRate([...porTasa].map(([rate, grossCents]) => ({ rate, grossCents })))
+  return netCents / 100
+}
+
 // ============================================
 // Selección de líneas + prorrateo del descuento de orden
 // ============================================
@@ -138,6 +182,8 @@ export interface OrderLineForCommission {
   tax: number
   /** Categoría del producto. `null` = renglón de importe libre ("Otro importe"). */
   categoryId: string | null
+  /** `Product.taxRate`, como lo lee la póliza; `null` = sin producto (16 %). */
+  taxRate?: number | null
 }
 
 /**
@@ -181,5 +227,6 @@ export function selectCommissionableLines(input: {
     lineDiscount: line.lineDiscount,
     orderDiscountShare: orderNet > 0 ? (input.orderLevelDiscount * netOf(line)) / orderNet : 0,
     tax: line.tax,
+    taxRate: line.taxRate,
   }))
 }

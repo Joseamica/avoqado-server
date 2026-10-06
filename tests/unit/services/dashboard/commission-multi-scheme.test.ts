@@ -41,7 +41,7 @@ const baseCfg = {
   maxAmount: null,
   includeTips: false,
   includeDiscount: false,
-  includeTax: false,
+  includeTax: true, // A1e: estas pruebas miden categorías y sobrante, no el IVA: la base es lo cobrado
   roleRates: null,
   useGoalAsTier: false,
   goalBonusRate: null,
@@ -490,7 +490,10 @@ describe('precio de lista con la cabecera de descuento mayor que el subtotal', (
   const LISTA_10 = { ...GENERAL, defaultRate: new Decimal(0.1), includeDiscount: true }
   const cuentaRegalada = () => {
     const p = payment(20)
-    return { ...p, order: { ...p.order, subtotal: new Decimal(150), discountAmount: new Decimal(160) } }
+    return {
+      ...p,
+      order: { ...p.order, subtotal: new Decimal(150), discountAmount: new Decimal(160), serviceChargeAmount: new Decimal(20) },
+    }
   }
 
   it('MONEY: cobro completo comisiona $17 sobre $170 de lista, no $18', async () => {

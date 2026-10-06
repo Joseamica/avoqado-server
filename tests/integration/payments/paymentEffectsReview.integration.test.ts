@@ -117,6 +117,7 @@ async function config(extra: Partial<Prisma.CommissionConfigUncheckedCreateInput
       recipient: 'PROCESSOR',
       defaultRate: 0.1,
       categoryIds: [],
+      includeTax: true, // ídem: efectos, escalones y metas, no el IVA
       effectiveFrom: new Date('2020-01-01T00:00:00Z'),
       ...extra,
     },

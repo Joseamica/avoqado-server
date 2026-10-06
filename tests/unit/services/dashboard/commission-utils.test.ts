@@ -240,7 +240,7 @@ describe('calculateBaseAmount', () => {
     expect(result.tipAmount).toBe(100)
   })
 
-  it('🔴 «sin el IVA registrado»: lo pagado menos su parte de IVA', () => {
+  it('🔴 «sin IVA»: lo pagado menos su IVA', () => {
     expect(calculateBaseAmount(payment, cfg({ includeTax: false })).baseAmount).toBe(1000)
   })
 
@@ -312,15 +312,18 @@ describe('calculateCategoryFilteredAmount', () => {
     // invisible mientras el POS mandaba `discountAmount = 0` siempre.
     expect(result).toBe(390)
 
-    // La consulta trae la orden entera + la categoría de cada línea.
+    // La consulta trae la orden entera, en orden de id: cada línea con sus kilos, sus extras, su categoría y su tasa (A1e).
     expect(prismaMock.orderItem.findMany).toHaveBeenCalledWith({
       where: { orderId: 'order-1' },
+      orderBy: { id: 'asc' },
       select: {
         quantity: true,
         unitPrice: true,
+        weightQuantity: true,
         taxAmount: true,
         discountAmount: true,
-        product: { select: { categoryId: true } },
+        modifiers: { select: { price: true, quantity: true } },
+        product: { select: { categoryId: true, taxRate: true } },
       },
     })
   })

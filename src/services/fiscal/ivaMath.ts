@@ -130,6 +130,46 @@ export function grossByRateFromItems(
   return [...byRate.entries()].map(([rate, grossCents]) => ({ rate, grossCents }))
 }
 
+// ── La regla de la póliza contable: el IVA de UN cobro con la mezcla de tasas de su orden ─────────────────────────────
+
+/** Un renglón como lo lee la póliza contable (`autoPosting.service.ts`): precio, cantidad, descuento y la tasa del producto. */
+export interface OrderItemRow {
+  quantity: number
+  unitPrice: Numero
+  discountAmount: Numero
+  product: { taxRate: Numero | null } | null
+}
+
+/**
+ * Gross (IVA-included, cents) grouped by the item's REAL tax rate, from the order's line items.
+ * Thin Decimal→number adapter over the shared {@link grossByRateFromItems} — the single source of
+ * truth for reading each product's rate, so auto-posting, the income-statement read-model and the CFDI
+ * all group identically. Empty (custom-amount sale) → [], and callers fall back to flat 16%.
+ */
+export function grossByRateForOrder(items: OrderItemRow[] | undefined): { rate: number; grossCents: number }[] {
+  return grossByRateFromItems(
+    (items ?? []).map(it => ({
+      unitPrice: Number(it.unitPrice),
+      quantity: it.quantity,
+      discountAmount: Number(it.discountAmount),
+      taxRate: it.product?.taxRate != null ? Number(it.product.taxRate) : null,
+    })),
+    0.16,
+  )
+}
+
+/**
+ * La base y el IVA de UN cobro (IVA incluido, centavos) como los asienta la póliza (`buildSaleLines`): repartido por la mezcla de
+ * tasas de los renglones de su orden y separado a cada tasa; sin renglones, al 16 %. UNA regla para la póliza y para la comisión
+ * «sin IVA» (fase 3 de pago por servicio, D5 enmendada): las dos llaman aquí.
+ */
+export function ivaDelCobroComoContabilidad(
+  cobroCents: number,
+  items: OrderItemRow[] | undefined,
+): { netCents: number; taxCents: number; taxByRate: Record<string, number> } {
+  return splitPaymentIvaByOrderRates(cobroCents, grossByRateForOrder(items))
+}
+
 // ── Plan 4b: el desglose por TRATAMIENTO (spec 4b §4) ──────────────────────────────────────────────────────────────
 
 /** Base e IVA (centavos) por tratamiento. Un tratamiento ausente vale cero. */

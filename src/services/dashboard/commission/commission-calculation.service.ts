@@ -54,11 +54,14 @@ import {
   getVenueTimezone,
   CommissionConfigWithRelations,
   cobroDeLaOrden,
+  ivaDelCobro,
+  listaDeLaOrden,
   otrosCobros,
   baseDelCobro,
   ORDEN_PARA_REPARTO_SELECT,
   reintentarSiHayBloqueoMutuo,
 } from './commission-utils'
+import { COMMISSION_BASE, resolveCommissionBase } from './commission-base'
 import { redondearRepartido, repartir } from './repartoPorCobro'
 import { subMonths, startOfMonth, endOfMonth } from 'date-fns'
 import { toZonedTime, fromZonedTime } from 'date-fns-tz'
@@ -318,15 +321,37 @@ export async function createCommissionForPayment(
   const generalConfig = catchAll[0]
   if (generalConfig) {
     let amounts: { baseAmount: number; tipAmount: number; discountAmount: number; taxAmount: number } | null = null
-    if (claimed.length === 0) {
-      // A1: la parte de ESTE cobro del IVA registrado y del descuento efectivo de la orden, no los de toda la orden; lo que
-      // ya recibieron los otros cobros sale de SUS filas de este esquema, no del orden de las fechas.
+    const esLista = resolveCommissionBase(generalConfig) === COMMISSION_BASE.PRECIO_DE_LISTA
+    if (claimed.length === 0 && esLista && payment.orderId && payment.order) {
+      // A1e (Codex r3-2 y r3-3): «precio de lista» es la lista de la ORDEN —renglones más cargo, la misma con y sin IVA
+      // (`listaDeLaOrden`)— y cada cobro se lleva su parte, como la base de categorías. Sigue siendo el esquema GENERAL: el
+      // sobrante no lleva el cargo.
+      const otros = await otrosCobros(db, payment, generalConfig.id)
+      let base = baseDelCobro(
+        enLaOrden,
+        listaDeLaOrden(payment.order, generalConfig),
+        await alreadyCommissionedItemBase(payment.orderId, generalConfig.id, db, true),
+        otros,
+      )
+      const tip = generalConfig.includeTips ? decimalToNumber(payment.tipAmount) : 0
+      if (generalConfig.includeTips) base += tip
+      // La fila guarda, como en «Lo cobrado», su parte del descuento de la orden (A1b: los otros cobros la leen) y el IVA de su
+      // póliza.
+      amounts = {
+        baseAmount: base,
+        tipAmount: tip,
+        discountAmount: repartir(enLaOrden, enLaOrden.descuento, otros, 'descuento').toNumber(),
+        taxAmount: ivaDelCobro(payment).toNumber(),
+      }
+    } else if (claimed.length === 0) {
+      // A1: la parte de ESTE cobro del descuento efectivo de la orden, con lo que ya recibieron los otros cobros (sus filas de
+      // este esquema, no el orden de las fechas). A1e: el IVA es el de la póliza de ESTE cobro, no una parte del de la orden.
       const otros = await otrosCobros(db, payment, generalConfig.id)
       const r = calculateBaseAmount(
         {
           amount: payment.amount,
           tipAmount: payment.tipAmount,
-          taxAmount: repartir(enLaOrden, enLaOrden.iva, otros, 'iva'),
+          taxAmount: ivaDelCobro(payment),
           discountAmount: repartir(enLaOrden, enLaOrden.descuento, otros, 'descuento'),
         },
         generalConfig,
@@ -1389,12 +1414,25 @@ export async function createSplitCommissionForPayment(
     totalDiscountAmount = 0
     totalTaxAmount = 0
     if (config.includeTips) totalBaseAmount += totalTipAmount
+  } else if (resolveCommissionBase(config) === COMMISSION_BASE.PRECIO_DE_LISTA && payment.orderId && payment.order) {
+    // A1e (Codex r3-2): la lista de la orden con el cargo, la misma con y sin IVA; ESTE cobro se lleva su parte.
+    totalBaseAmount = baseDelCobro(
+      enLaOrden,
+      listaDeLaOrden(payment.order, config),
+      await alreadyCommissionedItemBase(payment.orderId, config.id, db),
+      otros,
+    )
+    totalTipAmount = config.includeTips ? decimalToNumber(payment.tipAmount) : 0
+    // Como en «Lo cobrado»: su parte del descuento de la orden y el IVA de su póliza.
+    totalDiscountAmount = repartir(enLaOrden, enLaOrden.descuento, otros, 'descuento').toNumber()
+    totalTaxAmount = ivaDelCobro(payment).toNumber()
+    if (config.includeTips) totalBaseAmount += totalTipAmount
   } else {
     const result = calculateBaseAmount(
       {
         amount: payment.amount,
         tipAmount: payment.tipAmount,
-        taxAmount: repartir(enLaOrden, enLaOrden.iva, otros, 'iva'),
+        taxAmount: ivaDelCobro(payment),
         discountAmount: repartir(enLaOrden, enLaOrden.descuento, otros, 'descuento'),
       },
       config,

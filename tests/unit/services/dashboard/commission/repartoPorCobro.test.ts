@@ -40,7 +40,6 @@ describe('repartir', () => {
     monto: D(monto),
     base: asignado,
     descuento: asignado,
-    iva: asignado,
   })
 
   it('🔴 dos cobros de $225 de una venta de lista $500 con $50 de descuento: $25 de descuento cada uno', () => {
@@ -48,9 +47,9 @@ describe('repartir', () => {
     expect([pesos(repartir(c, D(50))), pesos(repartir(c, D(50), [otro(225, D(25))], 'descuento'))]).toEqual(['25.00', '25.00'])
   })
 
-  it('🔴 $16 de IVA en dos cobros de $58: $8 cada uno', () => {
+  it('🔴 $16 en dos cobros de $58: $8 cada uno', () => {
     const c = { totalOrden: D(116), cobro: D(58) }
-    expect([pesos(repartir(c, D(16))), pesos(repartir(c, D(16), [otro(58, D(8))], 'iva'))]).toEqual(['8.00', '8.00'])
+    expect([pesos(repartir(c, D(16))), pesos(repartir(c, D(16), [otro(58, D(8))]))]).toEqual(['8.00', '8.00'])
   })
 
   it('tres tercios de $0.10 suman exacto: 0.03, 0.03 y 0.04', () => {
@@ -81,16 +80,13 @@ describe('repartir', () => {
     expect(pesos(repartir({ totalOrden: D(450), cobro: D(10) }, D(50), [otro(450, D(50))]))).toBe('0.00')
   })
 
-  it('🔴 cada `campo` lee SU valor del otro cobro; sin registro (null) cuenta con su parte proporcional', () => {
-    // El otro cobro (la mitad de la orden) ya recibió base 30 y descuento 20, y NO tiene registro de IVA. Este cobro completa la
-    // orden y se lleva lo que falta de 50: 50-30 = 20 (base), 50-20 = 30 (descuento), 50-25 = 25 (IVA: la mitad proporcional del otro).
+  it('🔴 cada `campo` lee SU valor REGISTRADO del otro cobro', () => {
+    // El otro cobro (la mitad de la orden) ya recibió base 30 y descuento 20. Este cobro completa la orden y se lleva lo que falta
+    // de 50 en cada campo: 50-30 = 20 (base), 50-20 = 30 (descuento). Leer el campo equivocado, o ignorar lo registrado y usar la
+    // mitad proporcional (25), da otros números (Codex r4-2). Sin registro (null) lo cubre «un cobro sin registro de este esquema…».
     const c = { totalOrden: D(450), cobro: D(225) }
-    const otroCobro = { monto: D(225), base: D(30), descuento: D(20), iva: null }
-    expect((['base', 'descuento', 'iva'] as const).map(campo => pesos(repartir(c, D(50), [otroCobro], campo)))).toEqual([
-      '20.00',
-      '30.00',
-      '25.00',
-    ])
+    const otroCobro = { monto: D(225), base: D(30), descuento: D(20) }
+    expect((['base', 'descuento'] as const).map(campo => pesos(repartir(c, D(50), [otroCobro], campo)))).toEqual(['20.00', '30.00'])
   })
 })
 
