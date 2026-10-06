@@ -1005,6 +1005,26 @@ export async function approvePurchaseOrder(venueId: string, purchaseOrderId: str
 /**
  * Receive a purchase order (mark items as received and update stock)
  */
+const preparedInvoiceSelection = {
+  where: { inventoryPreparedAt: { not: null } },
+  take: 1,
+  select: { id: true },
+} as const
+
+function assertInvoicePurchaseApproved(
+  order: Pick<PurchaseOrder, 'status' | 'approvedBy' | 'approvedAt'> & { invoices: { id: string }[] },
+) {
+  if (
+    order.invoices?.length &&
+    (!order.approvedBy ||
+      !order.approvedAt ||
+      ([PurchaseOrderStatus.DRAFT, PurchaseOrderStatus.PENDING_APPROVAL, PurchaseOrderStatus.REJECTED] as PurchaseOrderStatus[]).includes(
+        order.status,
+      ))
+  )
+    throw new AppError('La compra preparada desde XML debe ser autorizada antes de recibir mercancía.', 409)
+}
+
 export async function receivePurchaseOrder(
   venueId: string,
   purchaseOrderId: string,
@@ -1017,6 +1037,7 @@ export async function receivePurchaseOrder(
       venueId,
     },
     include: {
+      invoices: preparedInvoiceSelection,
       items: {
         include: {
           rawMaterial: true,
@@ -1031,6 +1052,8 @@ export async function receivePurchaseOrder(
   if (!order) {
     throw new AppError(`Purchase order not found`, 404)
   }
+
+  assertInvoicePurchaseApproved(order)
 
   const allowedStatuses = [PurchaseOrderStatus.CONFIRMED, PurchaseOrderStatus.SHIPPED, PurchaseOrderStatus.PARTIAL] as PurchaseOrderStatus[]
   if (!allowedStatuses.includes(order.status)) {
@@ -1093,6 +1116,16 @@ export async function receivePurchaseOrder(
   // bug que la firma #27 de adjustStock). La forma de callback mete lote +
   // renglón + saldo + kardex + metadata en la MISMA transacción.
   const createdBatches = await prisma.$transaction(async tx => {
+    if (order.invoices?.length) {
+      await tx.$queryRaw(Prisma.sql`SELECT id FROM "PurchaseOrder" WHERE id = ${purchaseOrderId} AND "venueId" = ${venueId} FOR UPDATE`)
+      const current = await tx.purchaseOrder.findFirst({
+        where: { id: purchaseOrderId, venueId },
+        include: { invoices: preparedInvoiceSelection },
+      })
+      if (!current || !allowedStatuses.includes(current.status))
+        throw new AppError('La orden cambió de estado. Revisa su autorización y recepción.', 409)
+      assertInvoicePurchaseApproved(current)
+    }
     const batches: any[] = []
 
     for (const { receivedItem, orderItem, totalReceived, expirationDate } of validatedItems) {
@@ -1680,22 +1713,35 @@ export async function applyItemReceiveStatusInTx(
   staffId?: string,
 ): Promise<void> {
   // Load item scoped to PO + venue, with raw material and batches
-  const item = await tx.purchaseOrderItem.findFirst({
-    where: {
-      id: itemId,
-      purchaseOrderId,
-      purchaseOrder: { venueId },
-    },
-    include: {
-      rawMaterial: true,
-      product: true,
-      batches: true,
-      purchaseOrder: { select: { orderNumber: true, id: true } },
-    },
-  })
+  const loadItem = () =>
+    tx.purchaseOrderItem.findFirst({
+      where: {
+        id: itemId,
+        purchaseOrderId,
+        purchaseOrder: { venueId },
+      },
+      include: {
+        rawMaterial: true,
+        product: true,
+        batches: true,
+        purchaseOrder: {
+          select: { orderNumber: true, id: true, status: true, approvedBy: true, approvedAt: true, invoices: preparedInvoiceSelection },
+        },
+      },
+    })
+
+  let item = await loadItem()
 
   if (!item) {
     throw new AppError('Item de orden de compra no encontrado', 404)
+  }
+
+  if (item.purchaseOrder.invoices?.length) {
+    // Serialize the XML receipt with approval/cancellation and refresh the item's real inventory footprint.
+    await tx.$queryRaw(Prisma.sql`SELECT id FROM "PurchaseOrder" WHERE id = ${purchaseOrderId} AND "venueId" = ${venueId} FOR UPDATE`)
+    item = await loadItem()
+    if (!item) throw new AppError('Item de orden de compra no encontrado', 404)
+    assertInvoicePurchaseApproved(item.purchaseOrder)
   }
 
   // ── Bifurcación por tipo de renglón ──────────────────────────────────────

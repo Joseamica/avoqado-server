@@ -40,11 +40,14 @@ export interface CfdiConcepto {
   valorUnitarioCents: number
   importeCents: number
   descuentoCents: number
+  iepsCents?: number
 }
 
 export interface CfdiReceived {
   expense: CreateExpenseInput
   conceptos: CfdiConcepto[]
+  currency: string
+  cfdiType: string
 }
 
 const pesos = (s: string | number | undefined): number => Math.round(parseFloat(String(s ?? '0')) * 100)
@@ -52,6 +55,7 @@ const toArray = <T>(x: T | T[] | undefined): T[] => (x == null ? [] : Array.isAr
 
 /** Comparte el lector del comprobante; nunca suma impuestos de cada concepto. */
 function comprobanteDesdeXml(xml: string): any {
+  if (typeof xml !== 'string') throw new BadRequestError('El XML del CFDI debe ser texto.')
   if (Buffer.byteLength(xml ?? '', 'utf8') > 2 * 1024 * 1024) throw new BadRequestError('El XML del CFDI excede 2 MiB.')
   // CFDI never needs a DTD. Refuse it before even the validator sees untrusted entities.
   if (/<!DOCTYPE|<!ENTITY/i.test(xml)) throw new BadRequestError('El CFDI no admite DTD ni declaraciones de entidades.')
@@ -145,6 +149,13 @@ export function parseCfdiReceived(xml: string, ourRfc: string): CfdiReceived {
     valorUnitarioCents: pesos(co['@_ValorUnitario']),
     importeCents: pesos(co['@_Importe']),
     descuentoCents: pesos(co['@_Descuento']),
+    ...(toArray<any>(co.Impuestos?.Traslados?.Traslado).some(tr => String(tr['@_Impuesto']) === IMP_IEPS)
+      ? {
+          iepsCents: toArray<any>(co.Impuestos?.Traslados?.Traslado)
+            .filter(tr => String(tr['@_Impuesto']) === IMP_IEPS)
+            .reduce((sum, tr) => sum + pesos(tr['@_Importe']), 0),
+        }
+      : {}),
   }))
 
   const expense: CreateExpenseInput = {
@@ -173,5 +184,14 @@ export function parseCfdiReceived(xml: string, ourRfc: string): CfdiReceived {
     source: 'XML_UPLOAD',
   }
 
-  return { expense, conceptos }
+  return {
+    expense,
+    conceptos,
+    cfdiType: String(c['@_TipoDeComprobante'] ?? '')
+      .trim()
+      .toUpperCase(),
+    currency: String(c['@_Moneda'] ?? '')
+      .trim()
+      .toUpperCase(),
+  }
 }

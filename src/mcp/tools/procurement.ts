@@ -8,6 +8,8 @@ import { createSupplier, getSuppliersPage } from '@/services/dashboard/supplier.
 import prisma from '@/utils/prismaClient'
 import { CreateSupplierSchema } from '@/schemas/dashboard/inventory.schema'
 import { getPurchaseOrders, getPurchaseOrder } from '@/services/dashboard/purchaseOrder.service'
+import { auditMcpWrite } from '../audit'
+import { invoiceLineIdentification } from '@/schemas/dashboard/supplierInvoiceInventory.schema'
 import { PurchaseOrderStatus } from '@prisma/client'
 
 // Procurement (suppliers + purchase orders) is part of inventory — gate it exactly like the
@@ -157,6 +159,126 @@ export function registerProcurementTools(server: McpServer, scope: McpScope) {
           unidentifiedLines: inv.lines.filter(l => !l.rawMaterialId && !l.productId && !l.purchaseOrderItemId).length,
         })),
       )
+    },
+  )
+
+  server.tool(
+    'import_supplier_invoice_xml',
+    'Register a supplier purchase XML in ONE branch and identify known supplier codes. Uploading records evidence only; stock is received separately with supplier_invoice_inventory after human review and purchase authorization. Requires inventory:update, mcp:write and Premium inventory plus CFDI. Only use an XML provided by the operator.',
+    {
+      venueId: z.string().min(1),
+      xml: z
+        .string()
+        .min(1)
+        .max(2 * 1024 * 1024),
+    },
+    async ({ venueId, xml }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('inventory:update', venueId)
+      guard.requirePermission('mcp:write', venueId)
+      for (const code of ['INVENTORY_TRACKING', 'CFDI']) {
+        const gate = await planGateMessage(venueId, code, 'Las compras desde XML')
+        if (gate) return text({ ok: false, planRequired: true, error: gate })
+      }
+      const { registerSupplierInvoice } = await import('../../services/dashboard/purchaseOrderInvoice.service')
+      const invoice = await registerSupplierInvoice({ venueId, xml, uploadedById: scope.staffId })
+      await auditMcpWrite(scope, { venueId, action: 'SUPPLIER_INVOICE_IMPORTED', entity: 'PurchaseOrderInvoice', entityId: invoice.id })
+      return text({
+        ok: true,
+        invoiceId: invoice.id,
+        uuid: invoice.uuid,
+        total: invoice.totalCents / 100,
+        lines: invoice.lines.map(l => ({
+          id: l.id,
+          description: l.descripcion,
+          quantity: Number(l.cantidad),
+          satUnit: l.claveUnidad,
+          rawMaterialId: l.rawMaterialId,
+          productId: l.productId,
+          purchaseUnit: l.purchaseUnit,
+          presentationName: l.presentationName,
+          netAmount: (l.importeCents - l.descuentoCents) / 100,
+        })),
+        message: 'XML registrado. Revisa los artículos y unidades antes de preparar la compra. El inventario todavía no cambió.',
+      })
+    },
+  )
+
+  server.tool(
+    'identify_supplier_invoice_line',
+    'Identify ONE supplier invoice line using the exact raw material OR resale product id selected by the operator. Optionally confirm the purchase unit or an existing purchase presentation. A box needs its actual presentation; never assume one box equals one base unit. The supplier code remembers the chosen item and presentation for future XMLs. Requires inventory:update, mcp:write and Premium inventory plus CFDI.',
+    { venueId: z.string().min(1), invoiceId: z.string().min(1), lineId: z.string().min(1), ...invoiceLineIdentification.shape },
+    async ({ venueId, invoiceId, lineId, ...fields }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('inventory:update', venueId)
+      guard.requirePermission('mcp:write', venueId)
+      for (const code of ['INVENTORY_TRACKING', 'CFDI']) {
+        const gate = await planGateMessage(venueId, code, 'Las compras desde XML')
+        if (gate) return text({ ok: false, planRequired: true, error: gate })
+      }
+      const { identifyInvoiceLine } = await import('../../services/dashboard/purchaseOrderInvoice.service')
+      const line = await identifyInvoiceLine({ venueId, invoiceId, lineId, ...fields, actorId: scope.staffId })
+      await auditMcpWrite(scope, {
+        venueId,
+        action: 'SUPPLIER_INVOICE_LINE_IDENTIFIED',
+        entity: 'PurchaseOrderInvoiceLine',
+        entityId: lineId,
+        data: fields,
+      })
+      return text({
+        ok: true,
+        lineId: line.id,
+        rawMaterialId: line.rawMaterialId,
+        productId: line.productId,
+        purchaseUnit: line.purchaseUnit,
+        presentationName: line.presentationName,
+      })
+    },
+  )
+
+  server.tool(
+    'supplier_invoice_inventory',
+    'Review a supplier XML purchase in ONE branch before changing inventory. An invoice without a purchase order prepares a purchase pending authorization; an authorized purchase can be received once. Shows actual base quantities, presentations and net costs in pesos. IVA is excluded; explicitly choose whether IEPS belongs in cost. First call returns a Spanish preview and confirmationToken. After operator approval call with confirm:true and that exact token. Ordinary order-attached invoices and already received purchases cannot add stock again. Requires inventory:create, inventory:update, mcp:write and Premium inventory plus CFDI.',
+    {
+      venueId: z.string().min(1),
+      invoiceId: z.string().min(1),
+      includeIeps: z.boolean().optional(),
+      confirm: z.boolean().optional(),
+      confirmationToken: z.string().optional(),
+    },
+    async ({ venueId, invoiceId, includeIeps = false, confirm: confirmed, confirmationToken }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('inventory:create', venueId)
+      guard.requirePermission('inventory:update', venueId)
+      guard.requirePermission('mcp:write', venueId)
+      for (const code of ['INVENTORY_TRACKING', 'CFDI']) {
+        const gate = await planGateMessage(venueId, code, 'Las compras desde XML')
+        if (gate) return text({ ok: false, planRequired: true, error: gate })
+      }
+      const { previewSupplierInvoiceInventory, confirmSupplierInvoiceInventory } = await import(
+        '../../services/dashboard/supplierInvoiceInventory.service'
+      )
+      if (!confirmed || !confirmationToken) {
+        const review = await previewSupplierInvoiceInventory(venueId, invoiceId, includeIeps)
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          review,
+          message:
+            review.action === 'PREPARE'
+              ? 'Confirma los artículos, unidades y costos. Se creará una compra pendiente de autorización; todavía no se sumará inventario.'
+              : 'Confirma las cantidades base y costos mostrados. La mercancía se sumará una sola vez al inventario.',
+        })
+      }
+      const result = await confirmSupplierInvoiceInventory(venueId, invoiceId, confirmationToken, scope.staffId, includeIeps)
+      await auditMcpWrite(scope, {
+        venueId,
+        action: 'SUPPLIER_INVOICE_INVENTORY_CONFIRMED',
+        entity: 'PurchaseOrderInvoice',
+        entityId: invoiceId,
+        data: result,
+      })
+      return text({ ok: true, ...result })
     },
   )
 

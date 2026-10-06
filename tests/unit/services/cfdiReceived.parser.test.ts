@@ -182,12 +182,31 @@ function cfdiConDescuentoWrap(concepto: string) {
   return cfdiConConceptos(concepto)
 }
 
-
 describe('frontera de XML no confiable', () => {
+  it('expone moneda e IEPS por renglón sin alterar los totales del buzón fiscal', () => {
+    const xml = cfdi().replace(
+      'Descripcion="Servicio" Importe="1000.00"/>',
+      'Descripcion="Servicio" Importe="1000.00"><cfdi:Impuestos><cfdi:Traslados><cfdi:Traslado Impuesto="003" Importe="80.00"/></cfdi:Traslados></cfdi:Impuestos></cfdi:Concepto>',
+    )
+    const parsed = parseCfdiReceived(xml, OUR_RFC)
+    expect(parsed.currency).toBe('MXN')
+    expect(parsed.conceptos[0].iepsCents).toBe(8000)
+    expect(parsed.expense).toEqual(parseCfdiXml(xml, OUR_RFC))
+  })
   it('rechaza DTD/entidades ANTES de procesarlas', () => {
     expect(() => parseCfdiXml('<!DOCTYPE Comprobante [<!ENTITY dato "contenido">]><Comprobante/>', 'AAA010101AAA')).toThrow(/DTD|entidades/)
   })
   it('rechaza documentos excesivos antes de validar XML', () => {
     expect(() => parseCfdiXml(' '.repeat(2 * 1024 * 1024 + 1), 'AAA010101AAA')).toThrow(/2 MiB/)
   })
+})
+
+it('rechaza cuerpos no textuales con un error de entrada', () => {
+  expect(() => parseCfdiReceived({ xml: 'invalid' } as any, 'AAA010101AAA')).toThrow(/texto/i)
+})
+
+it('conserva el tipo explícito del XML para impedir entradas de inventario de notas de crédito', () => {
+  const xml = cfdiConConceptos(CAFE).replace('TipoDeComprobante="I"', 'TipoDeComprobante="E"')
+  expect(parseCfdiReceived(xml, OUR_RFC).cfdiType).toBe('E')
+  expect(parseCfdiXml(xml, OUR_RFC).comprobanteTipo).toBe('EGRESO')
 })

@@ -248,7 +248,7 @@ const INVENTARIO: Record<string, number> = {
   'src/services/dashboard/productWizard.service.ts': 1,
   'src/services/dashboard/promotion.dashboard.service.ts': 3,
   'src/services/dashboard/purchaseOrder.service.ts': 6,
-  'src/services/dashboard/purchaseOrderInvoice.service.ts': 1,
+  // 2026-10-05: factura de proveedor 1 → 0; códigos observados llevan take y el inbox está paginado.
   'src/services/dashboard/rawMaterial.service.ts': 4,
   'src/services/dashboard/rawMaterialPresentation.service.ts': 2,
   // 2026-09-18: +1 al añadir orderItemModifier a la lista (no es código nuevo, es un

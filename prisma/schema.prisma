@@ -2712,6 +2712,15 @@ model PurchaseOrderInvoice {
   ivaCents       Int @default(0)
   totalCents     Int
 
+  /// Moneda y desglose para entradas nuevas desde XML. Null = XML antiguo sin moneda verificada.
+  currency              String?
+  /// Tipo explícito del XML (I/E/P/T/N). Null = documento anterior sin tipo verificado.
+  cfdiType              String?
+  iepsCents             Int       @default(0)
+  inventoryPreparedAt   DateTime?
+  inventoryReceivedAt   DateTime?
+  inventoryIncludeIeps  Boolean?
+
   xmlUrl String?
 
   matchStatus InvoiceMatchStatus @default(PENDING)
@@ -2729,6 +2738,7 @@ model PurchaseOrderInvoice {
   @@unique([venueId, uuid])
   @@index([purchaseOrderId])
   @@index([venueId, fechaEmision])
+  @@index([venueId, fechaEmision, id])
   @@index([supplierId])
   @@index([matchStatus])
 }
@@ -2768,6 +2778,9 @@ model PurchaseOrderInvoiceLine {
   valorUnitarioCents Int
   importeCents       Int
   descuentoCents     Int     @default(0)
+  iepsCents          Int     @default(0)
+  purchaseUnit       Unit?
+  presentationName   String?
 
   createdAt DateTime @default(now())
 
@@ -2798,6 +2811,11 @@ model SupplierItemCode {
 
   /// Ultima descripcion vista en una factura, para que la pantalla ayude a reconocerlo.
   lastDescription String?
+
+  /// La unidad SAT protege contra reutilizar un código que ahora se factura en otra presentación.
+  claveUnidad      String?
+  purchaseUnit     Unit?
+  presentationName String?
 
   createdById String?
   createdBy   Staff?  @relation(fields: [createdById], references: [id], onDelete: SetNull)

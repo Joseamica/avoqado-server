@@ -9,6 +9,7 @@
  * - Una entrega parcial NO es descuadre: el veredicto suma las facturas previas de la orden.
  */
 import { prismaMock } from '@tests/__helpers__/setup'
+import { Prisma } from '@prisma/client'
 
 const mockLogAction = jest.fn()
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: (...a: unknown[]) => mockLogAction(...(a as [])) }))
@@ -146,6 +147,52 @@ describe('registerSupplierInvoice — la factura sin orden', () => {
     prismaMock.purchaseOrderInvoice.findFirst.mockResolvedValue({ id: 'inv-existente' } as any)
     await expect(registerSupplierInvoice({ venueId: VENUE_ID, xml: cfdi() })).rejects.toThrow(/ya está registrada/)
   })
+
+  it.each(['999999999999999999', '-1000000000', '1.0001'])('rechaza cantidad %s antes de persistir, sin redondear', async quantity => {
+    await expect(
+      registerSupplierInvoice({ venueId: VENUE_ID, xml: cfdi().replace('Cantidad="10"', `Cantidad="${quantity}"`) }),
+    ).rejects.toMatchObject({ statusCode: 400 })
+    expect(prismaMock.purchaseOrderInvoice.create).not.toHaveBeenCalled()
+  })
+
+  it('preserva el máximo de Decimal(12,3) como evidencia sin tocar stock', async () => {
+    await registerSupplierInvoice({ venueId: VENUE_ID, xml: cfdi().replace('Cantidad="10"', 'Cantidad="999999999.999"') })
+    expect(prismaMock.purchaseOrderInvoice.create.mock.calls[0][0].data.lines.create[0].cantidad).toBe(999999999.999)
+    expect(prismaMock.stockBatch.create).not.toHaveBeenCalled()
+  })
+
+  it.each(['standalone', 'attached'])('UUID collision after precheck returns 409 for %s', async mode => {
+    prismaMock.purchaseOrderInvoice.create.mockRejectedValue(
+      new Prisma.PrismaClientKnownRequestError('Unique', {
+        code: 'P2002',
+        clientVersion: 'test',
+        meta: { target: ['venueId', 'uuid'] },
+      }),
+    )
+    prismaMock.purchaseOrder.findFirst.mockResolvedValue({
+      id: 'po',
+      total: 1160,
+      supplierId: 'sup-1',
+      supplier: { taxId: SUPPLIER_RFC },
+      items: [],
+    } as any)
+    const call =
+      mode === 'standalone'
+        ? registerSupplierInvoice({ venueId: VENUE_ID, xml: cfdi() })
+        : attachInvoiceToPurchaseOrder({ venueId: VENUE_ID, purchaseOrderId: 'po', xml: cfdi() })
+    await expect(call).rejects.toMatchObject({ statusCode: 409 })
+    expect(mockLogAction).not.toHaveBeenCalled()
+  })
+
+  it('does not disguise other database errors as a duplicate UUID', async () => {
+    const error = new Prisma.PrismaClientKnownRequestError('Other unique', {
+      code: 'P2002',
+      clientVersion: 'test',
+      meta: { target: ['id'] },
+    })
+    prismaMock.purchaseOrderInvoice.create.mockRejectedValue(error)
+    await expect(registerSupplierInvoice({ venueId: VENUE_ID, xml: cfdi() })).rejects.toBe(error)
+  })
 })
 
 describe('identifyInvoiceLine — una persona confirma, el sistema aprende', () => {
@@ -187,6 +234,42 @@ describe('identifyInvoiceLine — una persona confirma, el sistema aprende', () 
       }),
     )
     expect(mockLogAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'SUPPLIER_ITEM_CODE_LEARNED', staffId: 's1' }))
+  })
+
+  it('recuerda la presentación y la unidad SAT, para que 3 cajas no se conviertan en 3 kilos', async () => {
+    prismaMock.rawMaterial.findFirst.mockResolvedValue({ id: 'rm-cafe', unit: 'GRAM' } as any)
+    prismaMock.rawMaterialPresentation.findFirst.mockResolvedValue({ factorToBase: 12000 } as any)
+    prismaMock.purchaseOrderInvoiceLine.findFirst.mockResolvedValue({
+      id: 'line-1',
+      supplierItemCode: 'CAF-001',
+      descripcion: 'Café',
+      claveUnidad: 'XBX',
+      invoice: { id: 'inv-1', supplierId: 'sup-1', inventoryPreparedAt: null },
+    } as any)
+    await identifyInvoiceLine({
+      venueId: VENUE_ID,
+      invoiceId: 'inv-1',
+      lineId: 'line-1',
+      rawMaterialId: 'rm-cafe',
+      presentationName: 'caja',
+      actorId: 's1',
+    })
+    expect(prismaMock.supplierItemCode.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        update: expect.objectContaining({ presentationName: 'caja', purchaseUnit: 'GRAM', claveUnidad: 'XBX' }),
+      }),
+    )
+  })
+
+  it('no cambia la identificación de una factura que ya preparó una orden', async () => {
+    prismaMock.purchaseOrderInvoiceLine.findFirst.mockResolvedValue({
+      id: 'line-1',
+      invoice: { id: 'inv-1', supplierId: 'sup-1', inventoryPreparedAt: new Date() },
+    } as any)
+    await expect(
+      identifyInvoiceLine({ venueId: VENUE_ID, invoiceId: 'inv-1', lineId: 'line-1', rawMaterialId: 'rm-cafe' }),
+    ).rejects.toThrow(/prepar/i)
+    expect(prismaMock.purchaseOrderInvoiceLine.update).not.toHaveBeenCalled()
   })
 
   it('sin código del proveedor en el renglón: identifica pero NO puede aprender (nada que mapear)', async () => {
