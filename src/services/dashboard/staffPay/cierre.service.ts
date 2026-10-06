@@ -29,9 +29,10 @@ type Db = Tx | typeof prisma
  * 66 s con historial y en frío no terminaba. Fase 3 (B7, 2026-10-06, Mac con carga 13-20 en 10 núcleos): 50,000 clases +
  * 50,000 comisiones + 50,000 propinas: 43.2 s EN FRÍO y 42.0 s CON HISTORIAL (julio cerrado con otras 50,000 ventas) —
  * ~3 s las clases, ~15 s leer las ventas y ~24 s escribir 150,000 devengos y 50,000 anclas. El presupuesto es el doble del
- * peor, al minuto y con el mínimo de 60 s: 120 s. Mientras dura, activar y propinas (timeout de 10 s) esperan el candado
- * de la organización y truenan con P2028 (B7). No se baja sin volver a medir (spec §6.3 punto 3; fase 3 §6.5):
- * `tests/integration/staffPay/cierre.carga.test.ts`, con y sin MEDIR_EN_FRIO=1.
+ * peor, al minuto y con el mínimo de 60 s: 120 s. Mientras dura, activar, propinas, periodicidad y lo que cree un periodo
+ * esperan su candado de la organización con tope (`ESPERA_CANDADO_ORGANIZACION_MS`) y contestan 409 CIERRE_EN_CURSO
+ * (B7 r1). No se baja sin volver a medir (spec §6.3 punto 3; fase 3 §6.5): `tests/integration/staffPay/cierre.carga.test.ts`,
+ * con y sin MEDIR_EN_FRIO=1.
  */
 export const TIMEOUT_CIERRE_MS = 120_000
 export const LOTE_CIERRE = 500
@@ -588,7 +589,8 @@ export async function cerrarPeriodo(input: {
         // segundo espera al primero. Lo que lo hace correcto es SSI, no el candado: SERIALIZABLE toma la foto en la primera
         // sentencia —ésta, ANTES de esperar—, así que el segundo, al congelar lo que el primero ya congeló, aborta con 40001
         // y el reintento ve la huella nueva (HUELLA_CAMBIO). También ordena el cierre con activar y con las propinas.
-        await lockPeriodosDeOrganizacion(tx, organizationId)
+        // Sin tope (B7 r1): el cierre sí espera a quien tenga el candado; las operaciones cortas son las que no lo esperan a él.
+        await lockPeriodosDeOrganizacion(tx, organizationId, { sinTope: true })
         const fila = await asegurarPeriodo(tx, organizationId, input.fecha, activas)
         let p = await bloquearPeriodo(tx, fila.id)
         const sinPermiso = 'Para cerrar necesitas el permiso de cerrar periodos en todas las sedes del periodo'
@@ -638,7 +640,8 @@ export async function cerrarPeriodo(input: {
           ajustes,
           huerfanas,
           ventas: alcanceVentas,
-          // ponytail: memoria O(ventas), ~1 KB por línea (+100 MB con 100,000). Si hiciera falta, escribir por lote.
+          // ponytail: memoria O(ventas), ~1.5 KB por línea medido en B7 (pico del cierre +224/+263 MB con 50,000 clases y 100,000
+          // líneas, contra +78/+103 MB sólo con las clases). Si hiciera falta, escribir por lote.
           alVentas: lote => {
             for (const l of lote) {
               ventas.push({

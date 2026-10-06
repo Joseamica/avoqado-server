@@ -2,7 +2,18 @@
 import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { cerrarPeriodo, previewCierre } from '@/services/dashboard/staffPay/cierre.service'
-import { barreraDelPeriodo, borrarMundo, clase, confirmadas, crearMundo, crearSede, Mundo, tablaMindform, TZ } from './_mundo'
+import {
+  barreraDeLaOrganizacion,
+  barreraDelPeriodo,
+  borrarMundo,
+  clase,
+  confirmadas,
+  crearMundo,
+  crearSede,
+  Mundo,
+  tablaMindform,
+  TZ,
+} from './_mundo'
 import { fechaComoDbDate, venuePeriodRange } from '@/services/dashboard/staffPay/periodos'
 import { valorarClases } from '@/services/dashboard/staffPay/valoracion'
 import { agregarAjusteManual } from '@/services/dashboard/staffPay/ajustesManuales.service'
@@ -53,6 +64,24 @@ const cerrar = async (
 afterEach(async () => borrarMundo(m))
 
 describe('cerrar el periodo (spec §6.3)', () => {
+  it('B7 r1: el cierre SÍ espera sin tope el candado de la organización (el tope de 5 s es de las operaciones cortas)', async () => {
+    m = await mundoConAgosto('cierre-espera')
+    await clase(m, { staffId: m.ana, inicioIso: '2026-08-04T14:00:00Z', reservas: confirmadas(8) })
+    const huella = (await preview(m)).huella
+    const b = await barreraDeLaOrganizacion(m.orgId)
+    try {
+      const t = Date.now()
+      const enCurso = cerrar(m, { huella })
+      await b.esperarA(1)
+      await new Promise(r => setTimeout(r, 6_000)) // más que ESPERA_CANDADO_ORGANIZACION_MS
+      await b.soltar()
+      expect(await enCurso).toMatchObject({ yaCerrado: false, total: '570.00' })
+      expect(Date.now() - t).toBeGreaterThanOrEqual(6_000)
+    } finally {
+      await b.soltar()
+    }
+  }, 30_000)
+
   it('congela cada clase pagable, ancla también las excluidas y suma los recibos de lo persistido', async () => {
     m = await mundoConAgosto('cierre-feliz')
     const c8 = await clase(m, { staffId: m.ana, inicioIso: '2026-08-04T14:00:00Z', reservas: confirmadas(8) })

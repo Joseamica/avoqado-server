@@ -211,7 +211,9 @@ function propinasBase(a: AlcanceBarrido, r: RangoSede[]): Prisma.Sql {
            CASE WHEN p.type = 'REFUND' THEN COALESCE(congelada."staffId", en_este."staffId")
                 ELSE COALESCE(ord."servedById", p."processedById") END AS "staffId"
     FROM "Payment" p
-    LEFT JOIN "Order" ord ON ord.id = p."orderId"
+    -- B7 r1: LATERAL con LIMIT 1 y no LEFT JOIN (misma fila: Order.id es la llave). Con un join, el planeador estimaba 1 cobro
+    -- donde había 50,000 y unía con un Seq Scan de TODAS las órdenes por cobro: propinasSinDueno tardaba 132 s; así, 0.4 s.
+    LEFT JOIN LATERAL (SELECT o."servedById" FROM "Order" o WHERE o.id = p."orderId" LIMIT 1) ord ON true
     LEFT JOIN LATERAL (
       SELECT ef."staffId" FROM "ServiceEarning" ef
       WHERE p.type = 'REFUND' AND ef."sourceType" = 'TIP' AND ef.concept = 'SERVICE'
@@ -352,13 +354,14 @@ export async function reversosPorAnulacion(db: Db, a: AlcanceBarrido, o: { despu
 /** Propinas que entrarían pero no tienen persona (spec §6.3): no bloquean el cierre; el preview las dice. */
 export async function propinasSinDueno(db: Db, a: AlcanceBarrido): Promise<{ n: number; total: Prisma.Decimal }> {
   if (fueraDelSobre(a)) return { n: 0, total: new Prisma.Decimal(0) }
-  const r = await rangosBarribles(db, a)
-  const [x] = await db.$queryRaw<Array<{ n: number; total: Prisma.Decimal | null }>>`
-    SELECT COUNT(*)::int AS n, SUM(b.monto) AS total
-    FROM (${propinasBase(a, r)}) b
-    WHERE b."staffId" IS NULL AND b.motivo = 'VENTA'`
+  const [x] = await db.$queryRaw<Array<{ n: number; total: Prisma.Decimal | null }>>(sqlPropinasSinDueno(a, await rangosBarribles(db, a)))
   return { n: x.n, total: x.total ?? new Prisma.Decimal(0) }
 }
+
+const sqlPropinasSinDueno = (a: AlcanceBarrido, r: RangoSede[]) => Prisma.sql`
+  SELECT COUNT(*)::int AS n, SUM(b.monto) AS total
+  FROM (${propinasBase(a, r)}) b
+  WHERE b."staffId" IS NULL AND b.motivo = 'VENTA'`
 
 /**
  * Las tres fuentes como UNA consulta (sin paginar), para la vista EN VIVO del periodo abierto: el recibo y el reporte la
@@ -376,12 +379,16 @@ export async function sqlVentasDelPeriodo(db: Db, a: AlcanceBarrido, o: { staffI
     ${detalleReversos(a, Prisma.sql`true ${dePersona('e."staffId"')}`)}`
 }
 
-/** El primer lote de ids de cada fuente tal como lo pide el cierre, SÓLO para su `EXPLAIN` en la prueba de carga (B7). */
-export async function consultasDeVentas(db: Db, a: AlcanceBarrido, n = 500) {
+/**
+ * Un lote de ids de cada fuente (el primero, o el que sigue a `despuesDe`) y la cuenta de propinas sin dueño, tal como las
+ * pide el cierre, SÓLO para su `EXPLAIN` en la prueba de carga (B7).
+ */
+export async function consultasDeVentas(db: Db, a: AlcanceBarrido, n = 500, despuesDe: { comisiones?: string; propinas?: string } = {}) {
   const r = await rangosBarribles(db, a)
   return {
-    comisiones: idsComisiones(a, r, undefined, n),
-    propinas: idsPropinas(a, r, undefined, n),
+    comisiones: idsComisiones(a, r, despuesDe.comisiones, n),
+    propinas: idsPropinas(a, r, despuesDe.propinas, n),
     reversos: Prisma.sql`${detalleReversos(a, Prisma.sql`true`)} ORDER BY e."sourceId" ASC LIMIT ${n}`,
+    sinDueno: sqlPropinasSinDueno(a, r),
   }
 }

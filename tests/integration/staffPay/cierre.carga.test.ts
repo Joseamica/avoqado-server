@@ -13,6 +13,7 @@ import {
   consultasDeVentas,
   LineaBarrible,
   propinasBarribles,
+  propinasSinDueno,
 } from '@/services/dashboard/staffPay/fuentesVenta'
 import { activarPagoAlPersonal, cambiarPropinas } from '@/services/dashboard/staffPay/activacion.service'
 import { valoracionCte } from '@/services/dashboard/staffPay/valoracion'
@@ -316,6 +317,9 @@ describirSi('cierre con 50,000 clases (spec §6.3 punto 3)', () => {
     await explicar('ventas · ids del primer lote de comisiones', ventas.comisiones)
     await explicar('ventas · ids del primer lote de propinas', ventas.propinas)
     await explicar('ventas · reversos por anulación (primer lote)', ventas.reversos)
+    // B7 r1: la cuenta de propinas sin dueño del preview (antes de congelar). Con historial tardaba 102-132 s por un mal plan.
+    await explicar('ventas · propinas sin dueño (la cuenta del preview)', ventas.sinDueno)
+    expect(await medir('propinasSinDueno (antes de congelar)', () => propinasSinDueno(prisma, alcanceVentas))).toMatchObject({ n: 0 })
     // ¿El costo de un lote crece con el cursor, o cada lote recorre el rango entero? El mismo recorrido por lotes que hace
     // el cierre, por fuente, con el tiempo de cada lote (el primero, cada 20 y el último) y el total de la fuente.
     const recorrerFuente = async (
@@ -324,6 +328,7 @@ describirSi('cierre con 50,000 clases (spec §6.3 punto 3)', () => {
     ) => {
       const t = Date.now()
       let despuesDe: string | undefined
+      let mitad: string | undefined
       let n = 0
       let lineas = 0
       for (;;) {
@@ -334,17 +339,25 @@ describirSi('cierre con 50,000 clases (spec §6.3 punto 3)', () => {
         lineas += lote.length
         if (n === 1 || n % 20 === 0 || lote.length < 500) console.log(`${nombre} · lote ${n}: ${Date.now() - tl} ms`)
         despuesDe = lote[lote.length - 1].sourceId
+        if (n === 50) mitad = despuesDe
       }
       console.log(`${nombre} · ${n} lotes, ${lineas} líneas: ${Date.now() - t} ms`)
-      return lineas
+      return { lineas, mitad: mitad! }
     }
-    expect(await recorrerFuente('recorrido de comisiones', comisionesBarribles)).toBe(VENTAS)
-    expect(await recorrerFuente('recorrido de propinas', propinasBarribles)).toBe(VENTAS)
+    const rc = await recorrerFuente('recorrido de comisiones', comisionesBarribles)
+    const rp = await recorrerFuente('recorrido de propinas', propinasBarribles)
+    expect([rc.lineas, rp.lineas]).toEqual([VENTAS, VENTAS])
+    // B7 r1: el lote 51 de cada fuente (a medio cursor), su plan y su tiempo completo (ids + detalle + rangos).
+    const aMedias = await consultasDeVentas(prisma, alcanceVentas, 500, { comisiones: rc.mitad, propinas: rp.mitad })
+    await explicar('ventas · ids del lote 51 de comisiones (a medio cursor)', aMedias.comisiones)
+    await explicar('ventas · ids del lote 51 de propinas (a medio cursor)', aMedias.propinas)
+    await medir('lote 51 de propinas completo', () => propinasBarribles(prisma, alcanceVentas, { despuesDe: rp.mitad, limite: 500 }))
+    await medir('lote 51 de comisiones completo', () => comisionesBarribles(prisma, alcanceVentas, { despuesDe: rc.mitad, limite: 500 }))
 
-    // Revisión de B4: activar y cambiar las propinas usan el timeout POR DEFECTO de la transacción interactiva (10 s) y su
-    // primera sentencia espera el candado de la organización que el cierre retiene todo el tiempo. Se lanzan las dos —en su
-    // forma que no cambia nada: ya activado, ya encendidas— en cuanto el cierre termina su primer lote (ya tiene el candado).
-    // Sólo se mide y se imprime: si truenan (P2028) no es esta prueba la que decide qué hacer.
+    // Revisión de B4: activar y cambiar las propinas esperan el candado de la organización que el cierre retiene todo el
+    // tiempo. Se lanzan las dos —en su forma que no cambia nada: ya activado, ya encendidas— en cuanto el cierre termina su
+    // primer lote (ya tiene el candado). Sin tope truenan con P2028 a los ~41 s (medido en B7); desde B7 r1 esperan 5 s y
+    // contestan 409 CIERRE_EN_CURSO.
     const operacionCorta = (nombre: string, fn: () => Promise<unknown>) => {
       const t = Date.now()
       return fn().then(
@@ -398,8 +411,10 @@ describirSi('cierre con 50,000 clases (spec §6.3 punto 3)', () => {
     console.log(
       `cierre de ${N} clases + ${VENTAS} comisiones + ${VENTAS} propinas: ${ms} ms · heap +${Math.round((process.memoryUsage().heapUsed - memAntes) / 1e6)} MB al terminar · pico +${Math.round((heapMax - memAntes) / 1e6)} MB · total $${r.total}`,
     )
-    for (const linea of await Promise.all(cortas)) console.log(`OPERACIÓN CORTA · ${linea}`)
-    expect(cortas).toHaveLength(2)
+    const lineasCortas = await Promise.all(cortas)
+    for (const linea of lineasCortas) console.log(`OPERACIÓN CORTA · ${linea}`)
+    expect(lineasCortas).toHaveLength(2)
+    for (const linea of lineasCortas) expect(linea).toMatch(/FALLÓ en \d+ ms · CIERRE_EN_CURSO/)
     expect(r.total).toBe(
       new Prisma.Decimal(570)
         .plus(480)

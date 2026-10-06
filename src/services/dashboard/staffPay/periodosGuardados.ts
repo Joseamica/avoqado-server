@@ -19,10 +19,40 @@ import {
 type Tx = Prisma.TransactionClient
 type Db = Tx | typeof prisma
 
-/** Candado por organización para crear periodos y cambiar la periodicidad (spec §5.7). */
-export async function lockPeriodosDeOrganizacion(tx: Tx, organizationId: string): Promise<void> {
+/**
+ * Lo que una operación CORTA espera el candado de periodos de la organización (B7 r1). Un cierre lo retiene todo lo que
+ * dura (~42 s medidos con 150,000 líneas) y la transacción de una operación corta vence a los 10 s con un P2028 (un 500).
+ * Con el tope contesta 409 CIERRE_EN_CURSO; dos operaciones cortas que chocan se esperan de sobra.
+ */
+export const ESPERA_CANDADO_ORGANIZACION_MS = 5_000
+
+const esEsperaVencida = (e: unknown) => {
+  const x = e as { code?: string; meta?: { code?: string } } | null
+  return x?.code === '55P03' || (x?.code === 'P2010' && x.meta?.code === '55P03')
+}
+
+/**
+ * Candado por organización para crear periodos y cambiar la periodicidad (spec §5.7), también de activar y de las propinas.
+ * Por defecto con tope (`ESPERA_CANDADO_ORGANIZACION_MS`): sólo el CIERRE lo pide `sinTope` (el que espera es él, y su
+ * transacción tiene su propio presupuesto). El tope se restaura al tomarlo: el resto de la transacción no lo hereda.
+ */
+export async function lockPeriodosDeOrganizacion(tx: Tx, organizationId: string, o: { sinTope?: boolean } = {}): Promise<void> {
   const key = `avoqado:service-pay-periods:v1:${organizationId}`
-  await tx.$queryRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))::text`)
+  const tomar = () => tx.$queryRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))::text`)
+  if (o.sinTope) {
+    await tomar()
+    return
+  }
+  const [{ previo }] = await tx.$queryRaw<Array<{ previo: string }>>`SELECT current_setting('lock_timeout') AS previo`
+  await tx.$executeRawUnsafe(`SET LOCAL lock_timeout = '${ESPERA_CANDADO_ORGANIZACION_MS}ms'`)
+  try {
+    await tomar()
+  } catch (e) {
+    // 55P03 aborta la transacción: no hay nada que restaurar. Un ConflictError no lo reintenta `withSerializableRetry`.
+    if (esEsperaVencida(e)) throw new ConflictError('Hay un cierre de periodo en curso; intenta de nuevo en un momento', 'CIERRE_EN_CURSO')
+    throw e
+  }
+  await tx.$queryRaw`SELECT set_config('lock_timeout', ${previo}, true)`
 }
 
 export async function periodoQueContieneFecha(db: Db, organizationId: string, fecha: string): Promise<ServicePayPeriod | null> {
