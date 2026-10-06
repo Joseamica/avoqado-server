@@ -145,7 +145,7 @@ export const ProductSchema = z.object({
 })
 
 // Base object — shared between Create and Update (allows .partial())
-const ProductBodyBase = z.object({
+export const ProductBodyBase = z.object({
   sku: z.string().regex(SKU_REGEX, 'SKU must contain only letters, numbers, underscores, and hyphens'),
   gtin: z.string().max(14).optional().nullable(),
   name: z.string().min(1, 'Name is required').max(255),
