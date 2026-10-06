@@ -15,7 +15,9 @@ import { z } from 'zod'
 // ("rechazar rutas no servibles", spec v3).
 const CONNECTION_TYPES = ['NETWORK', 'BLUETOOTH', 'USB_SPOOLER', 'TERMINAL_INTERNAL', 'POS_INTERNAL'] as const
 
-const paperWidth = z.union([z.literal(58), z.literal(80)], { message: 'Ancho de papel inválido (58 o 80 mm)' })
+// 72 = rollo de 80 mm cuyo cabezal imprime 42 columnas (512 puntos), no 48: muchas de 180 dpi (Bixolon, La Galeterie
+// 5-oct). Con «80» la comanda sale encimada. El POS lo entiende desde 2.22.2; las versiones viejas e iOS lo tratan como 80.
+const paperWidth = z.union([z.literal(58), z.literal(72), z.literal(80)], { message: 'Ancho de papel inválido (58, 72 u 80 mm)' })
 
 // Corrimiento a la derecha, en columnas de fuente A (`GS L`). El tope son 16
 // porque ése es el desperdicio máximo posible: un cabezal de 80 mm imprime 48
