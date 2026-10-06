@@ -75,6 +75,17 @@ function causaLegible(f: Pick<FilaDiferencia, 'causa' | 'conteo' | 'conteoCongel
   const causa = causaSinRegla(f)
   return causa && f.regla ? `${causa} · ${textoDeRegla(f.regla)}` : causa
 }
+/** Las dos reglas de clase de la versión vigente (spec fase 3 §6.6, §12), en palabras. El MCP sólo las lee. */
+const reglasDeTabla = (r?: { coverBonusHours: number | null; coverBonusAmount: number | null; lateCancelHours: number | null }) => {
+  const out: string[] = []
+  if (r?.coverBonusHours != null && r.coverBonusAmount != null)
+    out.push(
+      `Suplencia asignada con menos de ${r.coverBonusHours} h antes de la clase: su nivel + $${r.coverBonusAmount.toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+    )
+  if (r?.lateCancelHours != null)
+    out.push(`Clase cancelada con menos de ${r.lateCancelHours} h antes: se paga el sueldo base (la celda de 0 lugares)`)
+  return out
+}
 /** Qué hacer ante cada rechazo de «liquidar diferencia» (spec §6.4): el agente lo sigue sin adivinar. */
 const QUE_HACER_LIQUIDAR: Record<string, string> = {
   HUELLA_CAMBIO: 'Pide de nuevo la vista previa (sin confirm) y muéstrasela al usuario antes de confirmar.',
@@ -204,7 +215,7 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'staff_service_pay_config',
-    'How pay-per-service is configured: whether pay for staff is turned on and since when, whether tips are paid inside the receipt (and the latest 20 on/off windows as UTC instants, with the venue timezone to show them locally; ventanasTruncadas=true means there are older ones), the pay levels of the organization, which level each person has and since when, and the pay tables of the venue (seats occupied × level = amount) with the version in force on the given date. Requires staffpay:read.',
+    'How pay-per-service is configured: whether pay for staff is turned on and since when, whether tips are paid inside the receipt (and the latest 20 on/off windows as UTC instants, with the venue timezone to show them locally; ventanasTruncadas=true means there are older ones), the pay levels of the organization, which level each person has and since when, and the pay tables of the venue (seats occupied × level = amount) with the version in force on the given date. Each table also lists its two class rules (reglasDeClase, read-only; they are edited in the dashboard): a bonus for a substitute assigned with short notice, and the base pay (the 0-seat cell) for a late cancellation. Requires staffpay:read.',
     { venueId: z.string().min(1).max(64).describe('Venue in your scope'), fecha },
     async ({ venueId, fecha: f }) => {
       const no = await puedeLeer(venueId)
@@ -230,7 +241,7 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
         },
         niveles,
         asignaciones,
-        tablas,
+        tablas: tablas.map(t => ({ ...t, reglasDeClase: reglasDeTabla(t.vigente?.reglas) })),
       })
     },
   )

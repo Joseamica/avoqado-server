@@ -150,7 +150,7 @@ export async function createTable(req: Request, res: Response, next: NextFunctio
 export async function publishVersion(req: Request, res: Response, next: NextFunction) {
   try {
     const { venueId, userId } = ctx(req)
-    const { effectiveFrom, countMode, maxCount, cells, simular } = req.body
+    const { effectiveFrom, countMode, maxCount, cells, simular, coverBonusHours, coverBonusAmount, lateCancelHours } = req.body
     res.json(
       await tablas.publicarVersion({
         venueId,
@@ -159,6 +159,9 @@ export async function publishVersion(req: Request, res: Response, next: NextFunc
         effectiveFrom,
         countMode,
         maxCount,
+        coverBonusHours,
+        coverBonusAmount,
+        lateCancelHours,
         // Sólo las tres llaves de cada celda: nada extra del body llega al createMany.
         cells: (cells as tablas.CeldaInput[]).map(({ payLevelId, count, amount }) => ({ payLevelId, count, amount })),
         actorId: userId,

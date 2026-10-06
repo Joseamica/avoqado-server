@@ -37,6 +37,22 @@ export const publicarVersionSchema = z.object({
       }),
     )
     .max(20_000, 'Demasiadas celdas'),
+  // Reglas de clase (spec fase 3 §7.3). Ausente = se hereda de la versión que rige; null = apagada. La pareja la revisa el service.
+  coverBonusHours: z
+    .number()
+    .int('Escribe horas enteras')
+    .min(1, 'Mínimo 1 hora')
+    .max(168, 'Máximo 168 horas (una semana)')
+    .nullable()
+    .optional(),
+  coverBonusAmount: z.number().gt(0, 'El bono debe ser mayor a $0').max(100_000, 'Máximo $100,000').nullable().optional(),
+  lateCancelHours: z
+    .number()
+    .int('Escribe horas enteras')
+    .min(1, 'Mínimo 1 hora')
+    .max(168, 'Máximo 168 horas (una semana)')
+    .nullable()
+    .optional(),
   simular: z.boolean().optional(),
 })
 export const archivarTablaSchema = z.object({ archivedFrom: fechaSchema })

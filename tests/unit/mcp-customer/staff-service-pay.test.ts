@@ -6,6 +6,7 @@ import { auditMcpWrite } from '@/mcp/audit'
 import { registerStaffPayTools } from '../../../src/mcp/tools/staffPay'
 import type { McpScope } from '../../../src/mcp/scope'
 import { ConflictError } from '@/errors/AppError'
+import { listarTablas } from '@/services/dashboard/staffPay/tablas.service'
 
 const mockReporte = jest.fn()
 const mockDetalle = jest.fn()
@@ -193,6 +194,40 @@ describe('staff_service_pay — regresión', () => {
     const r = parse(await handlers.get('staff_service_pay_config')!({ venueId: 'v1' }, {}))
     expect(r.ok).toBe(false)
     expect(r.error).toMatch(/no está activo/)
+  })
+  it('config dice las dos reglas de cada tabla en palabras, sólo lectura (spec fase 3 §12)', async () => {
+    const vigente = (reglas: Record<string, unknown>) => ({
+      id: 'tv',
+      effectiveFrom: '2026-01-01',
+      revision: 1,
+      countMode: 'BOOKED',
+      maxCount: 10,
+      cells: [],
+      reglas,
+    })
+    ;(listarTablas as jest.Mock).mockResolvedValueOnce([
+      {
+        id: 't1',
+        name: 'Todas',
+        productIds: [],
+        archivedFrom: null,
+        vigente: vigente({ coverBonusHours: 3, coverBonusAmount: 100, lateCancelHours: 2 }),
+      },
+      {
+        id: 't2',
+        name: 'Barre',
+        productIds: ['p'],
+        archivedFrom: null,
+        vigente: vigente({ coverBonusHours: null, coverBonusAmount: null, lateCancelHours: null }),
+      },
+    ])
+    const r = parse(await handlers.get('staff_service_pay_config')!({ venueId: 'v1' }, {}))
+    expect(r.tablas[0].reglasDeClase).toEqual([
+      'Suplencia asignada con menos de 3 h antes de la clase: su nivel + $100.00',
+      'Clase cancelada con menos de 2 h antes: se paga el sueldo base (la celda de 0 lugares)',
+    ])
+    expect(r.tablas[1].reglasDeClase).toEqual([])
+    expect(r.tablas[0].vigente.reglas).toEqual({ coverBonusHours: 3, coverBonusAmount: 100, lateCancelHours: 2 })
   })
 })
 
