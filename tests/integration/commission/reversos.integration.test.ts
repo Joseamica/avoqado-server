@@ -17,6 +17,11 @@ import {
   voidCommissionCalculation,
 } from '@/services/dashboard/commission/commission-calculation.service'
 import { aggregateVenueCommissions, recalculateSummary } from '@/services/dashboard/commission/commission-aggregation.service'
+import { activateReferralProgram } from '@/services/referrals/referralProgram.service'
+import { captureReferral } from '@/services/referrals/referralCapture.service'
+import { onOrderPaid } from '@/services/referrals/referralQualification.service'
+import { runClaimedPaymentEffect } from '@/services/tpv/paymentEffects.service'
+import { cleanupReferralFixtureData } from '@tests/__helpers__/referral-fixture-cleanup'
 import {
   asegurarBaseDePrueba,
   barreraDeFila,
@@ -895,5 +900,82 @@ describe('A6 F2 · el reverso no cambia si la comisión original está en cola o
 
   it('🔴 con un snapshot VIEJO en cola (base 32.400000000000006) también es −$0.01', async () => {
     expect(await reversoDeLaPropina(32.2, false, true)).toBe('-0.01')
+  })
+})
+
+describe('A6 F4 · la devolución revierte el referido sólo por su efecto durable (Codex bloque A r1, punto b)', () => {
+  /** Reclama y corre el efecto como el worker; correrlo otra vez simula la reentrega tras morir entre el consumidor y DONE. */
+  async function correrEfecto(id: string, vez: number): Promise<void> {
+    const e = await prisma.paymentEffect.findUniqueOrThrow({ where: { id } })
+    const claimToken = `prueba-f4-${vez}-${id}`
+    const leaseUntil = new Date(Date.now() + 60_000)
+    await prisma.paymentEffect.update({ where: { id }, data: { status: 'PROCESSING', claimToken, leaseUntil } })
+    const hecho = await runClaimedPaymentEffect({
+      id,
+      venueId: e.venueId,
+      paymentId: e.paymentId,
+      orderId: e.orderId,
+      kind: 'REFERRAL',
+      dedupeKey: e.dedupeKey,
+      payload: e.payload as Prisma.InputJsonValue,
+      attempts: e.attempts + 1,
+      claimToken,
+      leaseUntil,
+    })
+    expect(hecho).toBe(true)
+  }
+
+  it('🔴 sin enganche post-commit: al volver la devolución el referido sigue calificado y su efecto, corrido DOS veces, lo revierte UNA', async () => {
+    const { orderId, pago } = await ventaConComision(m)
+    try {
+      await activateReferralProgram({
+        venueId: m.venueId,
+        newCustomerDiscountPercent: 10,
+        tier1ReferralsRequired: 1,
+        tier2ReferralsRequired: 2,
+        tier3ReferralsRequired: 3,
+        tiers: [
+          { tierLevel: 1, rewardType: 'PERCENT_COUPON', rewardPercent: 15 },
+          { tierLevel: 2, rewardType: 'PERCENT_COUPON', rewardPercent: 20 },
+          { tierLevel: 3, rewardType: 'PERCENT_COUPON', rewardPercent: 25 },
+        ],
+        rewardCouponExpiryDays: 90,
+        codePrefix: 'TESTSMOKE',
+      })
+      const codigo = `TESTSMOKE-F4${process.pid}`
+      const referidor = await prisma.customer.create({
+        data: { venueId: m.venueId, firstName: 'Jose', lastName: 'F4', phone: '5599999401', referralCode: codigo },
+      })
+      const nuevo = await prisma.customer.create({ data: { venueId: m.venueId, firstName: 'María', lastName: 'F4', phone: '5599999402' } })
+      const mesero = await prisma.staffVenue.findFirstOrThrow({ where: { venueId: m.venueId, staffId: m.ana }, select: { id: true } })
+      const ref = await captureReferral({
+        venueId: m.venueId,
+        referralCode: codigo,
+        newCustomerId: nuevo.id,
+        capturedByStaffVenueId: mesero.id,
+      })
+      await prisma.order.update({ where: { id: orderId }, data: { customerId: nuevo.id } })
+      await prisma.referral.update({ where: { id: ref.id }, data: { qualifyingOrderId: orderId } })
+      await onOrderPaid({ orderId, venueId: m.venueId })
+      expect((await prisma.referral.findUniqueOrThrow({ where: { id: ref.id } })).status).toBe('QUALIFIED')
+
+      const r = await issueRefund({ venueId: m.venueId, paymentId: pago, amount: 10_000, reason: 'RETURNED_GOODS', staffId: m.owner })
+      // La única vía es la obligación durable que la devolución encoló en su transacción: nada la adelanta después del commit.
+      expect((await prisma.referral.findUniqueOrThrow({ where: { id: ref.id } })).status).toBe('QUALIFIED')
+      const efecto = await prisma.paymentEffect.findFirstOrThrow({ where: { venueId: m.venueId, paymentId: r.refundId, kind: 'REFERRAL' } })
+      await correrEfecto(efecto.id, 1)
+      await correrEfecto(efecto.id, 2)
+
+      const anulado = await prisma.referral.findUniqueOrThrow({ where: { id: ref.id } })
+      expect([anulado.status, anulado.voidReason]).toEqual(['VOID', 'ORDER_REFUNDED'])
+      const despuesDe = await prisma.customer.findUniqueOrThrow({ where: { id: referidor.id } })
+      expect([despuesDe.referralCount, despuesDe.referralTier]).toEqual([0, null])
+      expect(await prisma.activityLog.count({ where: { venueId: m.venueId, action: 'REFERRAL_TIER_REVERSED' } })).toBe(1)
+      const premio = await prisma.discount.findUniqueOrThrow({ where: { id: anulado.rewardDiscountId! } })
+      expect([premio.active, premio.deactivatedReason]).toEqual([false, 'TIER_REVERSED_BY_REFUND'])
+    } finally {
+      await prisma.order.update({ where: { id: orderId }, data: { customerId: null } })
+      await cleanupReferralFixtureData(prisma, m.venueId)
+    }
   })
 })

@@ -1172,16 +1172,9 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
     })
   }
 
-  // REFERRAL HOOK: trigger referral void if the original order had a QUALIFIED referral
-  // (idempotent: no-ops if no QUALIFIED Referral matches this orderId)
-  if (result.originalOrderId) {
-    try {
-      const { onOrderRefunded } = await import('@/services/referrals/referralRefund.service')
-      await onOrderRefunded({ orderId: result.originalOrderId, venueId: input.venueId })
-    } catch (err) {
-      console.error('[referral hook] onOrderRefunded failed for order', result.originalOrderId, err)
-    }
-  }
+  // El referido NO se revierte aquí: su obligación (`referral-refund:<devolución>`) ya quedó encolada en la transacción de la
+  // devolución (`enqueueRefundPaymentEffectsInTx`) y la cumple el worker. El enganche post-commit que vivía aquí era
+  // redundante y no durable (A6 F4, Codex bloque A r1).
 
   // Restock inventory for selected items (best-effort, outside the payment tx
   // because it touches multiple Inventory rows and a partial failure shouldn't

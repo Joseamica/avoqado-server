@@ -1177,16 +1177,8 @@ export async function recordRefund(
     },
   })
 
-  // REFERRAL HOOK: trigger referral void if the original order had a QUALIFIED referral
-  // (idempotent: no-ops if no QUALIFIED Referral matches this orderId)
-  if (postCommitAuthority.orderId) {
-    try {
-      const { onOrderRefunded } = await import('@/services/referrals/referralRefund.service')
-      await onOrderRefunded({ orderId: postCommitAuthority.orderId, venueId })
-    } catch (err) {
-      console.error('[referral hook] onOrderRefunded failed for order', postCommitAuthority.orderId, err)
-    }
-  }
+  // El referido NO se revierte aquí: su obligación ya quedó encolada en la transacción de la devolución
+  // (`enqueueRefundPaymentEffectsInTx`) y la cumple el worker (A6 F4, Codex bloque A r1).
 
   // ═══════════════════════════════════════════════════════════════════════════
   // STEP 4.5: Restock inventory when this refund fully reverses the order (Bug B)
