@@ -3,7 +3,19 @@ import prisma from '@/utils/prismaClient'
 import { agregarAjusteManual, previewAjusteManual } from '@/services/dashboard/staffPay/ajustesManuales.service'
 import { cerrarPeriodo, previewCierre } from '@/services/dashboard/staffPay/cierre.service'
 import { fechaComoDbDate } from '@/services/dashboard/staffPay/periodos'
-import { barreraDelPeriodo, borrarMundo, clase, confirmadas, crearMundo, crearSede, Mundo, tablaMindform } from './_mundo'
+import {
+  barreraDeLaOrganizacion,
+  barreraDelPeriodo,
+  borrarMundo,
+  CIERRE_EN_CURSO,
+  clase,
+  conCandadoRetenido,
+  confirmadas,
+  crearMundo,
+  crearSede,
+  Mundo,
+  tablaMindform,
+} from './_mundo'
 
 jest.mock('@/services/dashboard/staffPay/acceso', () => ({
   ...jest.requireActual('@/services/dashboard/staffPay/acceso'),
@@ -413,4 +425,34 @@ describe('ajustes manuales (spec §6.4)', () => {
     const recibos = await prisma.staffPayStatement.aggregate({ where: { periodId: agosto.id }, _sum: { total: true } })
     expect(recibos._sum.total?.toFixed(2)).toBe('870.00')
   })
+})
+
+/**
+ * B7 r2: un cierre retiene la FILA de su periodo (`bloquearPeriodo`) y el candado de la organización todo lo que dura
+ * (~40 s). Un ajuste manual espera con tope y contesta 409 CIERRE_EN_CURSO, nunca el P2028 (500) de su transacción de 10 s.
+ */
+describe('con un cierre en curso, el ajuste manual no espera sin tope (B7 r2)', () => {
+  it('sobre un periodo YA guardado: 409 CIERRE_EN_CURSO a los ~5 s y no escribe', async () => {
+    const agosto = await prisma.servicePayPeriod.create({
+      data: {
+        organizationId: m.orgId,
+        periodStart: fechaComoDbDate('2026-08-01'),
+        periodEnd: fechaComoDbDate('2026-08-31'),
+        venueIds: [m.venueId],
+      },
+    })
+    const r = await conCandadoRetenido(await barreraDelPeriodo(agosto.id), () => ajuste())
+    expect(r.error).toMatchObject(CIERRE_EN_CURSO)
+    expect(r.ms).toBeGreaterThanOrEqual(4_500)
+    expect(r.ms).toBeLessThan(7_500)
+    expect(await prisma.serviceEarning.count({ where: { organizationId: m.orgId, concept: 'MANUAL' } })).toBe(0)
+  }, 30_000)
+
+  it('con el periodo todavía POR CREAR (candado de la organización): también 409, y no crea el periodo', async () => {
+    const r = await conCandadoRetenido(await barreraDeLaOrganizacion(m.orgId), () => ajuste())
+    expect(r.error).toMatchObject(CIERRE_EN_CURSO)
+    expect(r.ms).toBeLessThan(7_500)
+    expect(await prisma.servicePayPeriod.count({ where: { organizationId: m.orgId } })).toBe(0)
+    expect(await prisma.serviceEarning.count({ where: { organizationId: m.orgId, concept: 'MANUAL' } })).toBe(0)
+  }, 30_000)
 })

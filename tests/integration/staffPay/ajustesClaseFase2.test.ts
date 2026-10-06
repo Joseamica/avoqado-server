@@ -206,7 +206,9 @@ describe('ajustes de una clase ya contabilizada (spec §5.4)', () => {
           update: { originPeriodId: agosto.id },
         }),
       )
-      await expect(conLimite(t => bloquearPeriodo(t, agosto.id))).rejects.toThrow(/lock timeout/)
+      // `sinTope`: aquí se prueba el candado de fila con el límite corto de esta prueba; la espera acotada de las operaciones
+      // cortas (5 s y 409 CIERRE_EN_CURSO, B7 r2) la prueban ajustesManuales y liquidacion.
+      await expect(conLimite(t => bloquearPeriodo(t, agosto.id, { sinTope: true }))).rejects.toThrow(/lock timeout/)
     } finally {
       soltar()
       await tieneElCandado

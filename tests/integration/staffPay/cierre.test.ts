@@ -73,7 +73,7 @@ describe('cerrar el periodo (spec §6.3)', () => {
       const t = Date.now()
       const enCurso = cerrar(m, { huella })
       await b.esperarA(1)
-      await new Promise(r => setTimeout(r, 6_000)) // más que ESPERA_CANDADO_ORGANIZACION_MS
+      await new Promise(r => setTimeout(r, 6_000)) // más que ESPERA_CANDADO_MS
       await b.soltar()
       expect(await enCurso).toMatchObject({ yaCerrado: false, total: '570.00' })
       expect(Date.now() - t).toBeGreaterThanOrEqual(6_000)

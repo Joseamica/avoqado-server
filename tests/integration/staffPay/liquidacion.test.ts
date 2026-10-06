@@ -13,7 +13,9 @@ import {
   barreraDeLaClase,
   barreraDelPeriodo,
   borrarMundo,
+  CIERRE_EN_CURSO,
   clase,
+  conCandadoRetenido,
   confirmadas,
   crearMundo,
   crearSede,
@@ -905,4 +907,38 @@ describe('liquidar una diferencia (spec §6.4)', () => {
     await prisma.classSession.update({ where: { id }, data: { status: 'CANCELLED' } })
     expect(await pendientes(id)).toEqual({ [m.ana]: '-610.00' })
   })
+})
+
+describe('con un cierre en curso, la liquidación no espera sin tope (B7 r2)', () => {
+  it('con el periodo destino retenido (como lo retiene su cierre): 409 CIERRE_EN_CURSO a los ~5 s y no liquida', async () => {
+    const id = await clase(m, { staffId: m.ana, inicioIso: '2026-08-04T14:00:00Z', reservas: confirmadas(8) })
+    await cerrarAgosto()
+    await prisma.classSessionPayState.update({ where: { classSessionId: id }, data: { payCountOverride: 9 } })
+    const sept = await prisma.servicePayPeriod.create({
+      data: {
+        organizationId: m.orgId,
+        periodStart: fechaComoDbDate('2026-09-01'),
+        periodEnd: fechaComoDbDate('2026-09-30'),
+        venueIds: [m.venueId],
+      },
+    })
+    const pv = await previewLiquidacion({ userId: m.owner, venueId: m.venueId, classSessionId: id, destinoFecha: DESTINO, ahora: AHORA })
+    const r = await conCandadoRetenido(await barreraDelPeriodo(sept.id), () =>
+      liquidarDiferencia({
+        userId: m.owner,
+        venueId: m.venueId,
+        classSessionId: id,
+        destinoFecha: DESTINO,
+        ahora: AHORA,
+        periodoOrigenId: pv.periodoOrigen!.id,
+        huellaEsperada: pv.huella,
+        solicitudId: `${m.key}-cierre-en-curso`,
+      }),
+    )
+    expect(r.error).toMatchObject(CIERRE_EN_CURSO)
+    expect(r.ms).toBeGreaterThanOrEqual(4_500)
+    expect(r.ms).toBeLessThan(7_500)
+    expect(await reconcile(id)).toBe(0)
+    expect(await pendientes(id)).toEqual({ [m.ana]: '40.00' })
+  }, 30_000)
 })

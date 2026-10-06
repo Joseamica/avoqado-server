@@ -181,6 +181,36 @@ export const barreraDeLaClase = (classSessionId: string) => barrera(t => lockCla
 /** La misma barrera sobre el candado de periodos de la ORGANIZACIÓN (activar, propinas, crear periodos). */
 export const barreraDeLaOrganizacion = (organizationId: string) => barrera(t => lockPeriodosDeOrganizacion(t, organizationId))
 
+/**
+ * B7 r1-r2: corre `operacion` con un candado retenido por la barrera (lo que hace un cierre de ~40 s) y la suelta sola a
+ * los `soltarEn` ms: una espera SIN tope termina (y la prueba cae) en vez de colgarse. Devuelve el resultado y cuánto tardó.
+ */
+export async function conCandadoRetenido(
+  b: Awaited<ReturnType<typeof barreraDelPeriodo>>,
+  operacion: () => Promise<unknown>,
+  soltarEn = 8_000,
+): Promise<{ valor: unknown; error: unknown; ms: number }> {
+  const soltarTarde = setTimeout(() => void b.soltar(), soltarEn)
+  const t = Date.now()
+  try {
+    const r = await operacion().then(
+      valor => ({ valor, error: null as unknown }),
+      (error: unknown) => ({ valor: null as unknown, error }),
+    )
+    return { ...r, ms: Date.now() - t }
+  } finally {
+    clearTimeout(soltarTarde)
+    await b.soltar()
+  }
+}
+
+/** Lo que contesta una operación corta cuando un cierre retiene su candado (B7 r1-r2). */
+export const CIERRE_EN_CURSO = {
+  statusCode: 409,
+  code: 'CIERRE_EN_CURSO',
+  message: 'Hay un cierre de periodo en curso; intenta de nuevo en un momento',
+}
+
 async function barrera(tomar: (t: Prisma.TransactionClient) => Promise<unknown>) {
   const url = process.env.DATABASE_URL
   const bloqueador = new PrismaClient({ datasources: { db: { url } } })

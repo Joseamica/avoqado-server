@@ -29,10 +29,10 @@ type Db = Tx | typeof prisma
  * 66 s con historial y en frío no terminaba. Fase 3 (B7, 2026-10-06, Mac con carga 13-20 en 10 núcleos): 50,000 clases +
  * 50,000 comisiones + 50,000 propinas: 43.2 s EN FRÍO y 42.0 s CON HISTORIAL (julio cerrado con otras 50,000 ventas) —
  * ~3 s las clases, ~15 s leer las ventas y ~24 s escribir 150,000 devengos y 50,000 anclas. El presupuesto es el doble del
- * peor, al minuto y con el mínimo de 60 s: 120 s. Mientras dura, activar, propinas, periodicidad y lo que cree un periodo
- * esperan su candado de la organización con tope (`ESPERA_CANDADO_ORGANIZACION_MS`) y contestan 409 CIERRE_EN_CURSO
- * (B7 r1). No se baja sin volver a medir (spec §6.3 punto 3; fase 3 §6.5): `tests/integration/staffPay/cierre.carga.test.ts`,
- * con y sin MEDIR_EN_FRIO=1.
+ * peor, al minuto y con el mínimo de 60 s: 120 s. Mientras dura, activar, propinas, periodicidad, ajustes, liquidaciones y
+ * marcar pagado esperan su candado (el de la organización o la fila del periodo) con tope (`ESPERA_CANDADO_MS`) y contestan
+ * 409 CIERRE_EN_CURSO (B7 r1-r2). No se baja sin volver a medir (spec §6.3 punto 3; fase 3 §6.5):
+ * `tests/integration/staffPay/cierre.carga.test.ts`, con y sin MEDIR_EN_FRIO=1.
  */
 export const TIMEOUT_CIERRE_MS = 120_000
 export const LOTE_CIERRE = 500
@@ -591,8 +591,13 @@ export async function cerrarPeriodo(input: {
         // y el reintento ve la huella nueva (HUELLA_CAMBIO). También ordena el cierre con activar y con las propinas.
         // Sin tope (B7 r1): el cierre sí espera a quien tenga el candado; las operaciones cortas son las que no lo esperan a él.
         await lockPeriodosDeOrganizacion(tx, organizationId, { sinTope: true })
+        // B7 r2: los lotes reusan el MISMO statement preparado con otro cursor, y desde la sexta ejecución Postgres le pone un
+        // plan GENÉRICO que no conoce el cursor y vuelve a recorrer todo el resto del rango en cada lote. Medido: los 100 lotes
+        // de propinas, 11.7 s con el genérico y 3.3 s con el personalizado. Va DESPUÉS del candado: SET no toma la foto de
+        // SERIALIZABLE, pero así la primera sentencia sigue siendo el candado, como dice el comentario de arriba.
+        await tx.$executeRawUnsafe('SET LOCAL plan_cache_mode = force_custom_plan')
         const fila = await asegurarPeriodo(tx, organizationId, input.fecha, activas)
-        let p = await bloquearPeriodo(tx, fila.id)
+        let p = await bloquearPeriodo(tx, fila.id, { sinTope: true })
         const sinPermiso = 'Para cerrar necesitas el permiso de cerrar periodos en todas las sedes del periodo'
         // Permiso también ANTES del retorno idempotente (Codex R1-8): un «ya estaba cerrado» no regala los totales.
         if (p.status === 'CLOSED') {

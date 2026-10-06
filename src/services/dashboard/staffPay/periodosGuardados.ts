@@ -20,11 +20,12 @@ type Tx = Prisma.TransactionClient
 type Db = Tx | typeof prisma
 
 /**
- * Lo que una operación CORTA espera el candado de periodos de la organización (B7 r1). Un cierre lo retiene todo lo que
- * dura (~42 s medidos con 150,000 líneas) y la transacción de una operación corta vence a los 10 s con un P2028 (un 500).
- * Con el tope contesta 409 CIERRE_EN_CURSO; dos operaciones cortas que chocan se esperan de sobra.
+ * Lo que una operación CORTA espera un candado que un cierre puede tener tomado (B7 r1-r2): el de periodos de la
+ * organización y la fila de su periodo. El cierre los retiene todo lo que dura (~42 s medidos con 150,000 líneas) y la
+ * transacción de una operación corta vence a los 10 s con un P2028 (un 500). Con el tope contesta 409 CIERRE_EN_CURSO; dos
+ * operaciones cortas que chocan se esperan de sobra.
  */
-export const ESPERA_CANDADO_ORGANIZACION_MS = 5_000
+export const ESPERA_CANDADO_MS = 5_000
 
 const esEsperaVencida = (e: unknown) => {
   const x = e as { code?: string; meta?: { code?: string } } | null
@@ -32,27 +33,33 @@ const esEsperaVencida = (e: unknown) => {
 }
 
 /**
- * Candado por organización para crear periodos y cambiar la periodicidad (spec §5.7), también de activar y de las propinas.
- * Por defecto con tope (`ESPERA_CANDADO_ORGANIZACION_MS`): sólo el CIERRE lo pide `sinTope` (el que espera es él, y su
- * transacción tiene su propio presupuesto). El tope se restaura al tomarlo: el resto de la transacción no lo hereda.
+ * La ÚNICA pieza de la espera acotada (B7 r1-r2): fija `lock_timeout`, toma el candado con `tomar` y restaura el valor
+ * previo, para que el resto de la transacción no herede el tope. Sólo el CIERRE pide `sinTope`: el que espera es él, y su
+ * transacción tiene su propio presupuesto.
  */
-export async function lockPeriodosDeOrganizacion(tx: Tx, organizationId: string, o: { sinTope?: boolean } = {}): Promise<void> {
-  const key = `avoqado:service-pay-periods:v1:${organizationId}`
-  const tomar = () => tx.$queryRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))::text`)
-  if (o.sinTope) {
-    await tomar()
-    return
-  }
+async function tomarCandado<T>(tx: Tx, tomar: () => Promise<T>, sinTope = false): Promise<T> {
+  if (sinTope) return tomar()
   const [{ previo }] = await tx.$queryRaw<Array<{ previo: string }>>`SELECT current_setting('lock_timeout') AS previo`
-  await tx.$executeRawUnsafe(`SET LOCAL lock_timeout = '${ESPERA_CANDADO_ORGANIZACION_MS}ms'`)
+  await tx.$executeRawUnsafe(`SET LOCAL lock_timeout = '${ESPERA_CANDADO_MS}ms'`)
+  let r: T
   try {
-    await tomar()
+    r = await tomar()
   } catch (e) {
     // 55P03 aborta la transacción: no hay nada que restaurar. Un ConflictError no lo reintenta `withSerializableRetry`.
     if (esEsperaVencida(e)) throw new ConflictError('Hay un cierre de periodo en curso; intenta de nuevo en un momento', 'CIERRE_EN_CURSO')
     throw e
   }
   await tx.$queryRaw`SELECT set_config('lock_timeout', ${previo}, true)`
+  return r
+}
+
+/**
+ * Candado por organización para crear periodos y cambiar la periodicidad (spec §5.7), también de activar y de las propinas.
+ * Con el tope de `tomarCandado`, salvo el cierre (`sinTope`).
+ */
+export async function lockPeriodosDeOrganizacion(tx: Tx, organizationId: string, o: { sinTope?: boolean } = {}): Promise<void> {
+  const key = `avoqado:service-pay-periods:v1:${organizationId}`
+  await tomarCandado(tx, () => tx.$queryRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))::text`), o.sinTope)
 }
 
 export async function periodoQueContieneFecha(db: Db, organizationId: string, fecha: string): Promise<ServicePayPeriod | null> {
@@ -107,9 +114,12 @@ export async function lockClase(tx: Tx, classSessionId: string): Promise<void> {
  * sólo apunta al periodo (anclar una clase, un devengo). Con `FOR UPDATE`, un ajuste con el periodo tomado esperando la
  * clase y una liquidación con la clase tomada anclándola en el periodo se bloqueaban mutuamente (40P01, sin reintento).
  */
-export async function bloquearPeriodo(tx: Tx, periodId: string): Promise<ServicePayPeriod> {
-  const filas = await tx.$queryRaw<Array<{ id: string }>>(
-    Prisma.sql`SELECT id FROM "ServicePayPeriod" WHERE id = ${periodId} FOR NO KEY UPDATE`,
+export async function bloquearPeriodo(tx: Tx, periodId: string, o: { sinTope?: boolean } = {}): Promise<ServicePayPeriod> {
+  // B7 r2: con el tope de `tomarCandado` (el cierre retiene esta fila todo lo que dura); sólo el cierre pide `sinTope`.
+  const filas = await tomarCandado(
+    tx,
+    () => tx.$queryRaw<Array<{ id: string }>>(Prisma.sql`SELECT id FROM "ServicePayPeriod" WHERE id = ${periodId} FOR NO KEY UPDATE`),
+    o.sinTope,
   )
   if (!filas.length) throw new NotFoundError('Periodo no encontrado')
   return tx.servicePayPeriod.findUniqueOrThrow({ where: { id: periodId } })

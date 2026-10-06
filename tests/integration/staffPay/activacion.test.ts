@@ -9,7 +9,7 @@ import {
   ventanasDePropinas,
 } from '@/services/dashboard/staffPay/activacion.service'
 import { cambiarPeriodicidad, lockPeriodosDeOrganizacion } from '@/services/dashboard/staffPay/periodosGuardados'
-import { barreraDeLaOrganizacion, borrarMundo, crearMundo, Mundo, periodoCerrado } from './_mundo'
+import { barreraDeLaOrganizacion, borrarMundo, CIERRE_EN_CURSO, conCandadoRetenido, crearMundo, Mundo, periodoCerrado } from './_mundo'
 
 const mockPermiso = jest.fn()
 jest.mock('@/services/dashboard/staffPay/acceso', () => ({
@@ -221,26 +221,8 @@ describe('vista previa de activar (B6 ronda 1): lo mismo que haría activar, sin
  * (y la prueba caiga) en vez de colgarse.
  */
 describe('con un cierre en curso, las operaciones cortas no esperan sin tope (B7 r1)', () => {
-  const conCierreEnCurso = async (operacion: () => Promise<unknown>) => {
-    const b = await barreraDeLaOrganizacion(m.orgId)
-    const soltarTarde = setTimeout(() => void b.soltar(), 8_000)
-    const t = Date.now()
-    try {
-      const r = await operacion().then(
-        valor => ({ valor, error: null as unknown }),
-        (error: unknown) => ({ valor: null, error }),
-      )
-      return { ...r, ms: Date.now() - t }
-    } finally {
-      clearTimeout(soltarTarde)
-      await b.soltar()
-    }
-  }
-  const CIERRE_EN_CURSO = {
-    statusCode: 409,
-    code: 'CIERRE_EN_CURSO',
-    message: 'Hay un cierre de periodo en curso; intenta de nuevo en un momento',
-  }
+  const conCierreEnCurso = async (operacion: () => Promise<unknown>) =>
+    conCandadoRetenido(await barreraDeLaOrganizacion(m.orgId), operacion)
 
   it('activar contesta 409 CIERRE_EN_CURSO a los ~5 s y no activa nada', async () => {
     const r = await conCierreEnCurso(() => activar('MONTHLY', '2026-09-20T18:00:00Z'))
