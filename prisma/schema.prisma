@@ -147,6 +147,10 @@ model Organization {
   staffPayLevels           StaffPayLevel[]
   staffPayLevelAssignments StaffPayLevelAssignment[]
   servicePayPeriods        ServicePayPeriod[]
+  /// Fase 3 (spec 2026-10-05 §7.1): activación explícita de pago al personal. Fecha CIVIL de inicio del periodo abierto al
+  /// activar, que se lee en la zona de cada sede. null = sin activar (el cierre no barre ventas). No vuelve a cambiar.
+  staffPayStartDate        DateTime?                 @db.Date
+  staffPayTipWindows       StaffPayTipWindow[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -13133,6 +13137,7 @@ model CommissionCalculation {
   @@index([status])
   @@index([summaryId])
   @@index([staffId, calculatedAt])
+  @@index([venueId, calculatedAt]) // fase 3: el barrido del cierre recorre las comisiones de cada sede por fecha
 }
 
 /// Aggregated commission summary per period
@@ -19021,6 +19026,8 @@ enum ServiceEarningConcept {
 
 enum ServiceEarningSource {
   CLASS_SESSION
+  COMMISSION // fase 3: una fila de CommissionCalculation (netCommission; negativa si es el reverso de un reembolso)
+  TIP // fase 3: la propina de un Payment (tipAmount; negativa en un REFUND)
 }
 
 /// Periodo de pago de una organización (spec §5.7). Intervalos canónicos sin traslape; periodEnd inclusivo.
@@ -19090,4 +19097,19 @@ model StaffPayStatement {
   createdAt DateTime         @default(now())
 
   @@unique([periodId, staffId])
+}
+
+/// Interruptor de propinas en el recibo (spec fase 3 §7.1). Cada ventana es [startsAt, endsAt): prender abre una, apagar la
+/// cierra. A lo más una abierta por organización (índice único parcial en la migración). Apagar sólo afecta cobros futuros.
+model StaffPayTipWindow {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  startsAt       DateTime
+  endsAt         DateTime?
+  startedById    String
+  endedById      String?
+  createdAt      DateTime     @default(now())
+
+  @@index([organizationId, startsAt])
 }

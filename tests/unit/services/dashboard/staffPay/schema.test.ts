@@ -29,6 +29,25 @@ describe('schema fase 2 — periodo, devengo y recibo', () => {
     const e = (n: string) => Prisma.dmmf.datamodel.enums.find(x => x.name === n)!.values.map(v => v.name)
     expect(e('ServicePayPeriodStatus')).toEqual(['OPEN', 'CLOSED'])
     expect(e('ServiceEarningConcept')).toEqual(['SERVICE', 'RECONCILE', 'MANUAL'])
-    expect(e('ServiceEarningSource')).toEqual(['CLASS_SESSION'])
+    expect(e('ServiceEarningSource')).toEqual(['CLASS_SESSION', 'COMMISSION', 'TIP'])
+  })
+})
+
+describe('schema fase 3 — el sobre (spec fase 3 §7.1, §7.4)', () => {
+  const modelo = (n: string) => Prisma.dmmf.datamodel.models.find(m => m.name === n)
+
+  it('Organization.staffPayStartDate es una fecha civil opcional: null = pago al personal sin activar', () => {
+    // Que sea DATE (sin hora) lo prueba `schemaChecks.test.ts` contra la base.
+    expect(modelo('Organization')!.fields.find(x => x.name === 'staffPayStartDate')).toMatchObject({ type: 'DateTime', isRequired: false })
+  })
+
+  it('StaffPayTipWindow guarda cada ventana del interruptor de propinas como [startsAt, endsAt)', () => {
+    const m = modelo('StaffPayTipWindow')
+    expect(m).toBeDefined()
+    const campo = (n: string) => m!.fields.find(x => x.name === n)!
+    expect(campo('startsAt')).toMatchObject({ type: 'DateTime', isRequired: true })
+    expect(campo('endsAt')).toMatchObject({ type: 'DateTime', isRequired: false })
+    expect(campo('startedById').isRequired).toBe(true)
+    expect(campo('endedById').isRequired).toBe(false)
   })
 })
