@@ -215,6 +215,9 @@ export async function createClassSession(venueId: string, data: CreateClassSessi
         duration,
         capacity: data.capacity,
         assignedStaffId: data.assignedStaffId ?? null,
+        // Pago por servicio (spec fase 3 §7.2): la coach con la que nace es la original y se le asignó ahora.
+        originalStaffId: data.assignedStaffId ?? null,
+        staffAssignedAt: data.assignedStaffId ? checkedAt : null,
         internalNotes: data.internalNotes ?? null,
         createdById,
       },
@@ -402,6 +405,8 @@ export async function createClassSessionsBulk(
           duration: i.duration,
           capacity: data.capacity,
           assignedStaffId: data.assignedStaffId ?? null,
+          originalStaffId: data.assignedStaffId ?? null,
+          staffAssignedAt: data.assignedStaffId ? checkedAt : null,
           internalNotes: data.internalNotes ?? null,
           createdById,
         },
@@ -462,12 +467,13 @@ interface LockedClassSessionRow {
   endsAt: Date
   status: string
   assignedStaffId: string | null
+  originalStaffId: string | null
 }
 
 export async function updateClassSession(venueId: string, sessionId: string, data: UpdateClassSessionDto, actorStaffId?: string) {
   const { updated, pushRowIds } = await withSerializableRetry(async tx => {
     const sessions = await tx.$queryRaw<LockedClassSessionRow[]>(Prisma.sql`
-      SELECT id, "startsAt", "endsAt", status, "assignedStaffId"
+      SELECT id, "startsAt", "endsAt", status, "assignedStaffId", "originalStaffId"
       FROM "ClassSession"
       WHERE id = ${sessionId}
         AND "venueId" = ${venueId}
@@ -526,6 +532,8 @@ export async function updateClassSession(venueId: string, sessionId: string, dat
       duration?: number
       capacity?: number
       assignedStaffId?: string | null
+      originalStaffId?: string
+      staffAssignedAt?: Date
       internalNotes?: string | null
     } = {}
     if (data.startsAt !== undefined) updateData.startsAt = effectiveStartsAt
@@ -534,7 +542,14 @@ export async function updateClassSession(venueId: string, sessionId: string, dat
       updateData.duration = Math.round((effectiveEndsAt.getTime() - effectiveStartsAt.getTime()) / 60000)
     }
     if (data.capacity !== undefined) updateData.capacity = data.capacity
-    if (hasStaffUpdate) updateData.assignedStaffId = effectiveStaffId
+    if (hasStaffUpdate) {
+      updateData.assignedStaffId = effectiveStaffId
+      // Spec fase 3 §7.2: cambiar a ALGUIEN (no a nadie) renueva la asignación; la original se fija una sola vez.
+      if (effectiveStaffId && effectiveStaffId !== session.assignedStaffId) {
+        updateData.staffAssignedAt = checkedAt
+        if (!session.originalStaffId) updateData.originalStaffId = effectiveStaffId
+      }
+    }
     if ('internalNotes' in data) updateData.internalNotes = data.internalNotes ?? null
 
     const updated = await tx.classSession.update({
