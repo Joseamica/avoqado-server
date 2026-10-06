@@ -18,7 +18,7 @@ import { planKitchenTickets, type KitchenLine } from './kitchenTicketPlanning'
 export type KitchenTrigger = 'PAID' | 'ROUND' | 'LEGACY_POST' | 'SWEEP'
 export type KitchenMarkAction = 'BUMP' | 'FALLBACK_PRINTED'
 
-/** Tope de renglones leídos por orden: una cuenta real no se acerca; si se llega, queda en el log. */
+/** Renglones por página: recorrer la cuenta completa sin una lectura sin tope. */
 const MAX_RENGLONES = 500
 /** Los `OrderSource` que pone la ingesta de reparto (`deliveryOrderIngestion.service.ts`). */
 const ORIGENES_DE_AGREGADOR = new Set<string>(['UBER_EATS', 'RAPPI', 'DIDI_FOOD', 'DELIVERY_PLATFORM'])
@@ -76,108 +76,106 @@ export async function authorKitchenTickets(params: {
     const vigente = await tx.order.findFirst({ where: { id: orderId, venueId }, select: { status: true } })
     if (!vigente || vigente.status === 'CANCELLED' || vigente.status === 'DELETED') return [] as string[]
 
-    const renglones = await tx.orderItem.findMany({
-      where: { orderId },
-      select: {
-        id: true,
-        productId: true,
-        productName: true,
-        quantity: true,
-        notes: true,
-        externalId: true,
-        sentToKitchenAt: true,
-        createdAt: true,
-        areaTicketLineId: true,
-        weightQuantity: true,
-        weightUnit: true,
-        product: { select: { name: true, categoryId: true, printStationId: true, category: { select: { printStationId: true } } } },
-        modifiers: { select: { name: true, quantity: true, modifier: { select: { name: true } } } },
-      },
-      orderBy: [{ sequence: 'asc' }, { createdAt: 'asc' }],
-      take: MAX_RENGLONES,
-    })
-    if (renglones.length === MAX_RENGLONES) {
-      logger.warn('[KDS] orden con demasiados renglones; la comanda se arma con los primeros', { venueId, orderId })
-    }
-    // Vale por área (V7): sus renglones traen `areaTicketLineId` y tienen su propio flujo de entrega — se
-    // excluyen UNO POR UNO, no toda la orden, porque una cuenta puede mezclar el vale con productos sueltos
-    // (I1, revisión final fase 3.3). Si TODOS los renglones son de vale no queda nada que cocinar aquí: se
-    // limpia la marca igual que antes, o el barrido dispara un 🚨 falso a los 15 min.
-    const normales = renglones.filter(r => !r.areaTicketLineId)
-    if (normales.length === 0) {
-      await tx.order.updateMany({
-        where: { id: orderId, venueId, kitchenPendingAt: { lte: startedAt } },
-        data: { kitchenPendingAt: null },
+    let cursor: string | undefined
+    let rondaSinComanda = false
+    const ids = new Set<string>()
+    while (true) {
+      const renglones = await tx.orderItem.findMany({
+        where: { orderId },
+        select: {
+          id: true,
+          productId: true,
+          productName: true,
+          quantity: true,
+          notes: true,
+          externalId: true,
+          sentToKitchenAt: true,
+          createdAt: true,
+          areaTicketLineId: true,
+          weightQuantity: true,
+          weightUnit: true,
+          product: { select: { name: true, categoryId: true, printStationId: true, category: { select: { printStationId: true } } } },
+          modifiers: { select: { name: true, quantity: true, modifier: { select: { name: true } } } },
+        },
+        orderBy: [{ sequence: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
+        ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+        take: MAX_RENGLONES,
       })
-      return [] as string[]
-    }
+      if (renglones.length === 0) break
+      cursor = renglones[renglones.length - 1].id
+      // Vale por área (V7): sus renglones traen `areaTicketLineId` y tienen su propio flujo de entrega — se
+      // excluyen UNO POR UNO, no toda la orden, porque una cuenta puede mezclar el vale con productos sueltos
+      // (I1, revisión final fase 3.3). Si TODOS los renglones son de vale no queda nada que cocinar aquí: se
+      // limpia la marca igual que antes, o el barrido dispara un 🚨 falso a los 15 min.
+      const normales = renglones.filter(r => !r.areaTicketLineId)
+      if (normales.length === 0) continue
 
-    const cubiertos = await tx.kdsOrderItem.findMany({
-      where: { orderItemId: { in: normales.map(r => r.id) }, kdsOrder: { venueId } },
-      select: { orderItemId: true },
-      take: MAX_RENGLONES * 4,
-    })
-
-    const lines: KitchenLine[] = normales.map(r => ({
-      id: r.id,
-      productId: r.productId,
-      categoryId: r.product?.categoryId ?? null,
-      productStationId: r.product?.printStationId ?? null,
-      categoryStationId: r.product?.category?.printStationId ?? null,
-      // Codex 3.6 (S6): la venta por peso lleva `quantity = 1`; sin el peso la cocina no sabe cuánto servir.
-      productName: nombreEnCocina(r.productName ?? r.product?.name ?? 'Producto', r.weightQuantity, r.weightUnit),
-      quantity: r.quantity,
-      modifiers: toKdsModifierLabels(r.modifiers.map(m => ({ name: m.name ?? m.modifier?.name ?? null, quantity: m.quantity }))),
-      notes: r.notes,
-      externalId: r.externalId,
-      sentToKitchenAt: r.sentToKitchenAt,
-      createdAt: r.createdAt,
-    }))
-
-    const soloSinEnviar = trigger === 'PAID' || trigger === 'LEGACY_POST'
-    const entrada = {
-      order: { id: order.id, externalId: order.externalId, tableId: order.tableId },
-      lines,
-      coveredLineIds: new Set(cubiertos.map(c => c.orderItemId).filter((id): id is string => Boolean(id))),
-      routing,
-      screens,
-      stampedAt: startedAt,
-    }
-    const plans = planKitchenTickets({ ...entrada, soloSinEnviar })
-    // El pago no arma rondas ya enviadas, pero si una se quedó sin comanda (su gancho falló) la marca se queda:
-    // sin ella el barrido ya no la ve nunca (Codex 3.6).
-    const rondaSinComanda =
-      soloSinEnviar && planKitchenTickets({ ...entrada, soloSinEnviar: false }).some(p => p.lines.some(l => l.sentToKitchenAt))
-
-    const ids: string[] = []
-    for (const plan of plans) {
-      const kdsOrderId = await cabeceraPorFolio(tx, {
-        venueId,
-        sourceKey: plan.sourceKey,
-        stationId: plan.stationId,
-        orderId,
-        orderNumber: order.orderNumber,
-        orderType: order.type,
+      const cubiertos = await tx.kdsOrderItem.findMany({
+        where: { orderItemId: { in: normales.map(r => r.id) }, kdsOrder: { venueId } },
+        select: { orderItemId: true },
+        take: MAX_RENGLONES * 4,
       })
-      await tx.kdsOrderItem.createMany({
-        data: plan.lines.map(l => ({
-          kdsOrderId,
-          productName: l.productName,
-          quantity: l.quantity,
-          modifiers: l.modifiers.length ? JSON.stringify(l.modifiers) : null,
-          notes: l.notes,
-          orderItemId: l.id,
-          productId: l.productId,
-          categoryId: l.categoryId,
-        })),
-      })
-      if (plan.toStamp.length > 0) {
-        await tx.orderItem.updateMany({
-          where: { id: { in: plan.toStamp }, sentToKitchenAt: null },
-          data: { sentToKitchenAt: startedAt },
-        })
+
+      const lines: KitchenLine[] = normales.map(r => ({
+        id: r.id,
+        productId: r.productId,
+        categoryId: r.product?.categoryId ?? null,
+        productStationId: r.product?.printStationId ?? null,
+        categoryStationId: r.product?.category?.printStationId ?? null,
+        // Codex 3.6 (S6): la venta por peso lleva `quantity = 1`; sin el peso la cocina no sabe cuánto servir.
+        productName: nombreEnCocina(r.productName ?? r.product?.name ?? 'Producto', r.weightQuantity, r.weightUnit),
+        quantity: r.quantity,
+        modifiers: toKdsModifierLabels(r.modifiers.map(m => ({ name: m.name ?? m.modifier?.name ?? null, quantity: m.quantity }))),
+        notes: r.notes,
+        externalId: r.externalId,
+        sentToKitchenAt: r.sentToKitchenAt,
+        createdAt: r.createdAt,
+      }))
+
+      const soloSinEnviar = trigger === 'PAID' || trigger === 'LEGACY_POST'
+      const entrada = {
+        order: { id: order.id, externalId: order.externalId, tableId: order.tableId },
+        lines,
+        coveredLineIds: new Set(cubiertos.map(c => c.orderItemId).filter((id): id is string => Boolean(id))),
+        routing,
+        screens,
+        stampedAt: startedAt,
       }
-      ids.push(kdsOrderId)
+      const plans = planKitchenTickets({ ...entrada, soloSinEnviar })
+      // El pago no arma rondas ya enviadas, pero si una se quedó sin comanda (su gancho falló) la marca se queda:
+      // sin ella el barrido ya no la ve nunca (Codex 3.6).
+      rondaSinComanda ||=
+        soloSinEnviar && planKitchenTickets({ ...entrada, soloSinEnviar: false }).some(p => p.lines.some(l => l.sentToKitchenAt))
+
+      for (const plan of plans) {
+        const kdsOrderId = await cabeceraPorFolio(tx, {
+          venueId,
+          sourceKey: plan.sourceKey,
+          stationId: plan.stationId,
+          orderId,
+          orderNumber: order.orderNumber,
+          orderType: order.type,
+        })
+        await tx.kdsOrderItem.createMany({
+          data: plan.lines.map(l => ({
+            kdsOrderId,
+            productName: l.productName,
+            quantity: l.quantity,
+            modifiers: l.modifiers.length ? JSON.stringify(l.modifiers) : null,
+            notes: l.notes,
+            orderItemId: l.id,
+            productId: l.productId,
+            categoryId: l.categoryId,
+          })),
+        })
+        if (plan.toStamp.length > 0) {
+          await tx.orderItem.updateMany({
+            where: { id: { in: plan.toStamp }, sentToKitchenAt: null },
+            data: { sentToKitchenAt: startedAt },
+          })
+        }
+        ids.add(kdsOrderId)
+      }
     }
 
     // Sólo si nadie la volvió a poner mientras se armaba (una ronda que entró en medio).
@@ -187,7 +185,7 @@ export async function authorKitchenTickets(params: {
         data: { kitchenPendingAt: null },
       })
     }
-    return ids
+    return [...ids]
   }, ORDER_LOCK_WAIT_BUDGET)
 
   if (ticketIds.length > 0) {

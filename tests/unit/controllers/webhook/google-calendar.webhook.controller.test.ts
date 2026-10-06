@@ -65,10 +65,17 @@ const VALID_HEADERS = {
   'X-Goog-Message-Number': '42',
 }
 
+const originalEnv = process.env
+
 beforeEach(() => {
+  process.env = { ...originalEnv, DEMO_MODE: 'false', DISABLE_RABBITMQ: 'false' }
   rabbitPublishMock.mockReset().mockReturnValue(true)
   ;(prisma.googleCalendarChannel.findMany as jest.Mock).mockReset()
   ;(prisma.googleCalendarWebhookInbox.create as jest.Mock).mockReset().mockResolvedValue({})
+})
+
+afterEach(() => {
+  process.env = originalEnv
 })
 
 // ============================================================
@@ -263,25 +270,24 @@ describe('happy path', () => {
     expect(status).toHaveBeenCalledWith(200)
     // Inbox row still written → sweeper will retry.
     expect(prisma.googleCalendarWebhookInbox.create).toHaveBeenCalledTimes(1)
+    expect(rabbitPublishMock).toHaveBeenCalledTimes(1)
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('failed to enqueue pull'), {
+      err: 'rabbitmq_publish_buffer_full',
+      connectionId: 'conn-1',
+    })
   })
 
-  it('30-sep · con RabbitMQ deshabilitado por config (DISABLE_RABBITMQ, como arranca producción) no intenta encolar ni avisa: el sweeper toma el pull', async () => {
-    const previo = process.env.DISABLE_RABBITMQ
-    process.env.DISABLE_RABBITMQ = 'true'
-    try {
-      ;(prisma.googleCalendarChannel.findMany as jest.Mock).mockResolvedValue([VALID_CHANNEL])
-      const { res, status } = mockRes()
+  it.each(['DISABLE_RABBITMQ', 'DEMO_MODE'])('con %s=true no intenta encolar ni avisa: el sweeper toma el pull', async flag => {
+    process.env[flag] = 'true'
+    ;(prisma.googleCalendarChannel.findMany as jest.Mock).mockResolvedValue([VALID_CHANNEL])
+    const { res, status } = mockRes()
 
-      await handleGoogleCalendarWebhook(mockReq(VALID_HEADERS), res)
+    await handleGoogleCalendarWebhook(mockReq(VALID_HEADERS), res)
 
-      expect(status).toHaveBeenCalledWith(200)
-      expect(prisma.googleCalendarWebhookInbox.create).toHaveBeenCalledTimes(1)
-      expect(rabbitPublishMock).not.toHaveBeenCalled()
-      expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining('failed to enqueue pull'), expect.anything())
-    } finally {
-      if (previo === undefined) delete process.env.DISABLE_RABBITMQ
-      else process.env.DISABLE_RABBITMQ = previo
-    }
+    expect(status).toHaveBeenCalledWith(200)
+    expect(prisma.googleCalendarWebhookInbox.create).toHaveBeenCalledTimes(1)
+    expect(rabbitPublishMock).not.toHaveBeenCalled()
+    expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining('failed to enqueue pull'), expect.anything())
   })
 })
 

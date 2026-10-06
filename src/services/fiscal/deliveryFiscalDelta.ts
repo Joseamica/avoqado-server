@@ -177,6 +177,7 @@ export async function processorDataDeDevoluciones(venueId: string, ids: string[]
     where: { venueId, id: { in: ids } },
     select: { id: true, processorData: true },
     take: ids.length,
+    orderBy: { id: 'asc' },
   })
   return new Map(filas.map(f => [f.id, f.processorData]))
 }

@@ -19,14 +19,20 @@ jest.mock('../../../src/utils/prismaClient', () => ({
 jest.mock('../../../src/services/fiscal/chartOfAccounts.service', () => ({ resolveScopeOrNull: jest.fn() }))
 jest.mock('../../../src/services/fiscal/accountMapping.service', () => ({ getMappings: jest.fn() }))
 jest.mock('../../../src/services/fiscal/journalEntry.service', () => ({ postJournalEntry: jest.fn() }))
-jest.mock('date-fns-tz', () => ({ formatInTimeZone: () => '2026-06-15' }))
+jest.mock('date-fns-tz', () => ({ ...jest.requireActual('date-fns-tz'), formatInTimeZone: () => '2026-06-15' }))
 
 import prisma from '../../../src/utils/prismaClient'
 import logger from '../../../src/config/logger'
 import { resolveScopeOrNull } from '../../../src/services/fiscal/chartOfAccounts.service'
 import { getMappings } from '../../../src/services/fiscal/accountMapping.service'
 import { postJournalEntry } from '../../../src/services/fiscal/journalEntry.service'
-import { buildRefundLines, buildSaleLines, generatePoliciesForVenue } from '../../../src/services/fiscal/autoPosting.service'
+import { BadRequestError } from '../../../src/errors/AppError'
+import {
+  buildRefundLines,
+  buildSaleLines,
+  generatePoliciesForVenue,
+  grossByRateForOrder,
+} from '../../../src/services/fiscal/autoPosting.service'
 
 const p = prisma as unknown as {
   venue: { findUnique: jest.Mock }
@@ -62,6 +68,7 @@ const pay = (o: Partial<Record<string, unknown>>) => ({
 
 beforeEach(() => {
   jest.clearAllMocks()
+  p.payment.findMany.mockReset()
   mockScope.mockResolvedValue({ organizationId: 'o1', rfc: 'RFC', venueType: 'X' })
   mockMappings.mockResolvedValue(fullMappings())
   p.venue.findUnique.mockResolvedValue({ timezone: 'America/Mexico_City' })
@@ -78,6 +85,184 @@ const lastEntry = () => mockPost.mock.calls[mockPost.mock.calls.length - 1][1]
 const sum = (lines: { debitCents: number; creditCents: number }[], k: 'debitCents' | 'creditCents') => lines.reduce((s, l) => s + l[k], 0)
 const acctOf = (lines: { ledgerAccountId: string; debitCents: number; creditCents: number }[], id: string) =>
   lines.find(l => l.ledgerAccountId === id)
+
+describe('generatePoliciesForVenue: validación del periodo', () => {
+  it.each(['2026-00', '2026-13'])('rechaza %s con 400 sin leer cobros ni postear', async period => {
+    const attempt = generatePoliciesForVenue('v1', { period })
+    await expect(attempt).rejects.toBeInstanceOf(BadRequestError)
+    await expect(attempt).rejects.toMatchObject({ statusCode: 400, isOperational: true })
+    expect(p.payment.findMany).not.toHaveBeenCalled()
+    expect(mockPost).not.toHaveBeenCalled()
+  })
+
+  it.each(['2026-01', '2026-12'])('conserva la generación de un periodo válido: %s', async period => {
+    p.payment.findMany.mockResolvedValue([])
+    await expect(generatePoliciesForVenue('v1', { period })).resolves.toMatchObject({ period, candidates: 0, posted: 0 })
+    expect(p.payment.findMany).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('IVA por cobro: importes persistidos, B2, cargos y sellos', () => {
+  const item = (id: string, total: number, rate = 0.16, extra = {}) => ({
+    id,
+    quantity: 1,
+    unitPrice: new Prisma.Decimal(total),
+    total: new Prisma.Decimal(total),
+    discountAmount: new Prisma.Decimal(0),
+    ivaTratamiento: null,
+    product: { taxRate: new Prisma.Decimal(rate), ivaTratamiento: rate === 0 ? ('EXENTO' as const) : ('IVA_16' as const) },
+    ...extra,
+  })
+  const order = (items: ReturnType<typeof item>[], extra = {}) => ({
+    status: OrderStatus.COMPLETED,
+    orderNumber: 'iva',
+    items,
+    discountAmount: new Prisma.Decimal(0),
+    orderDiscounts: [],
+    serviceCharges: [],
+    ...extra,
+  })
+  const payment = (amount: number, o: ReturnType<typeof order>) =>
+    ({
+      ...pay({}),
+      amount: new Prisma.Decimal(amount),
+      tipAmount: new Prisma.Decimal(0),
+      feeAmount: new Prisma.Decimal(0),
+      merchantAccount: null,
+      ecommerceMerchant: null,
+      order: o,
+    }) as unknown as Parameters<typeof buildSaleLines>[0]
+  const split = (amount: number, o: ReturnType<typeof order>) => {
+    const { lines } = buildSaleLines(payment(amount, o), m => m)!
+    expect(sum(lines, 'debitCents')).toBe(sum(lines, 'creditCents'))
+    return { base: acctOf(lines, 'SALES_REVENUE')?.creditCents ?? 0, iva: acctOf(lines, 'IVA_OUTPUT')?.creditCents ?? 0 }
+  }
+  const directed = (id: string, cents: number, espejo = false) => ({
+    amount: new Prisma.Decimal(cents / 100),
+    reparto: { v: 1, alcance: 'DIRIGIDO', conPromociones: null, espejo, renglones: { [id]: cents } },
+  })
+
+  it('cortesía móvil con extra: total cero nunca deja un peso negativo en la mezcla', () => {
+    const items = [
+      item('a', 0, 0.16, { unitPrice: new Prisma.Decimal(116), discountAmount: new Prisma.Decimal(174), isCortesia: true }),
+      item('b', 100, 0),
+    ]
+    expect(grossByRateForOrder(items)).toEqual([{ rate: 0, grossCents: 10000 }])
+    expect(split(100, order(items))).toEqual({ base: 10000, iva: 0 })
+    // Con otro artículo de la misma tasa, el peso negativo anterior diluía el IVA de la venta viva.
+    expect(split(216, order([...items, item('c', 116)]))).toEqual({ base: 20000, iva: 1600 })
+  })
+
+  it('B2: descuento de $50 sólo al exento conserva los $16 de IVA', () => {
+    expect(
+      split(
+        166,
+        order([item('a', 116), item('b', 100, 0)], {
+          discountAmount: new Prisma.Decimal(50),
+          orderDiscounts: [directed('b', 5000)],
+        }),
+      ),
+    ).toEqual({ base: 15000, iva: 1600 })
+  })
+
+  it('total persistido 232 prevalece sobre unitPrice 116, también con otra tasa', () => {
+    const a = item('a', 232, 0.16, { unitPrice: new Prisma.Decimal(116) })
+    expect(grossByRateForOrder([a])).toEqual([{ rate: 0.16, grossCents: 23200 }])
+    expect(split(332, order([a, item('b', 100, 0)]))).toEqual({ base: 30000, iva: 3200 })
+  })
+
+  it('cargo no gravable de $11.60: base $111.60 e IVA $16', () => {
+    expect(split(127.6, order([item('a', 116)], { serviceCharges: [{ amount: new Prisma.Decimal(11.6), taxable: false }] }))).toEqual({
+      base: 11160,
+      iva: 1600,
+    })
+  })
+
+  it.each([false, true])('mercancía toda regalada: cargo gravable al 16 %, orden invertido=%s', reverse => {
+    const items = [
+      item('a', 0, 0, { unitPrice: new Prisma.Decimal(100), discountAmount: new Prisma.Decimal(150), isCortesia: true }),
+      item('b', 0, 0.16, { unitPrice: new Prisma.Decimal(116), discountAmount: new Prisma.Decimal(174), isCortesia: true }),
+    ]
+    if (reverse) items.reverse()
+    expect(split(11.6, order(items, { serviceCharges: [{ amount: new Prisma.Decimal(11.6), taxable: true }] }))).toEqual({
+      base: 1000,
+      iva: 160,
+    })
+  })
+
+  it('el sello del renglón prevalece sobre la tasa viva del producto', () => {
+    expect(split(116, order([item('a', 116, 0, { ivaTratamiento: 'IVA_16' })]))).toEqual({ base: 10000, iva: 1600 })
+  })
+
+  it('promoción: total ya neto, no restar otra vez su descuento informativo', () => {
+    expect(
+      split(
+        216,
+        order([
+          item('a', 116, 0.16, { unitPrice: new Prisma.Decimal(174), discountAmount: new Prisma.Decimal(58), orderPromotionId: 'promo' }),
+          item('b', 100, 0),
+        ]),
+      ),
+    ).toEqual({ base: 20000, iva: 1600 })
+  })
+
+  it('B2 espejo: no vuelve a restar el descuento propio del artículo', () => {
+    expect(
+      split(
+        158,
+        order([item('a', 116, 0.16, { discountAmount: new Prisma.Decimal(58) }), item('b', 100, 0)], {
+          discountAmount: new Prisma.Decimal(58),
+          orderDiscounts: [directed('a', 5800, true)],
+        }),
+      ),
+    ).toEqual({ base: 15000, iva: 800 })
+  })
+
+  it('lecturas fiscales incluyen los datos canónicos y desempates estables', async () => {
+    p.payment.findMany.mockResolvedValue([])
+    await generatePoliciesForVenue('v1')
+    const query = p.payment.findMany.mock.calls[0][0]
+    expect(query.orderBy).toEqual([{ createdAt: 'asc' }, { id: 'asc' }])
+    expect(query.select.order.select.items).toMatchObject({
+      orderBy: { id: 'asc' },
+      select: {
+        id: true,
+        total: true,
+        isCortesia: true,
+        orderPromotionId: true,
+        ivaTratamiento: true,
+        product: { select: { ivaTratamiento: true } },
+      },
+    })
+    expect(query.select.order.select.orderDiscounts).toMatchObject({ orderBy: { id: 'asc' }, select: { amount: true, reparto: true } })
+    expect(query.select.order.select.serviceCharges).toMatchObject({ orderBy: { id: 'asc' }, select: { amount: true, taxable: true } })
+  })
+
+  it('recorre todos los cobros por páginas sin truncar las pólizas', async () => {
+    p.payment.findMany
+      .mockResolvedValueOnce(Array.from({ length: 200 }, (_, i) => pay({ id: `p${i}`, amount: 116 })))
+      .mockResolvedValueOnce([pay({ id: 'p200', amount: 116 })])
+    const result = await generatePoliciesForVenue('v1')
+    expect(result).toMatchObject({ candidates: 201, posted: 201 })
+    expect(p.payment.findMany).toHaveBeenCalledTimes(2)
+    expect(p.payment.findMany.mock.calls[0][0].take).toBe(200)
+    expect(p.payment.findMany.mock.calls[1][0]).toMatchObject({ take: 200, skip: 1, cursor: { id: 'p199' } })
+  })
+
+  it('reembolso manual comparte B2, cargos y sello con la venta', () => {
+    const o = order([item('a', 116), item('b', 100, 0)], {
+      discountAmount: new Prisma.Decimal(50),
+      orderDiscounts: [directed('b', 5000)],
+      serviceCharges: [{ amount: new Prisma.Decimal(11.6), taxable: false }],
+    })
+    expect(split(177.6, o)).toEqual({ base: 16160, iva: 1600 })
+    const { lines } = buildRefundLines(payment(-177.6, o), m => m)!
+    expect(acctOf(lines, 'IVA_OUTPUT')?.debitCents).toBe(1600)
+    expect(sum(lines, 'debitCents')).toBe(17760)
+    expect(sum(lines, 'creditCents')).toBe(17760)
+    expect(split(88.8, o)).toEqual({ base: 8080, iva: 800 })
+  })
+})
 
 it('sin RFC → needsFiscalSetup, no postea', async () => {
   mockScope.mockResolvedValue(null)
@@ -235,7 +420,7 @@ describe('R9 · reparto por tasa (aritmética movida de las pruebas de integraci
     quantity: 1,
     unitPrice: new Prisma.Decimal(unitPrice),
     discountAmount: new Prisma.Decimal(discountAmount),
-    product: { taxRate: new Prisma.Decimal(taxRate) },
+    product: { taxRate: new Prisma.Decimal(taxRate), ivaTratamiento: taxRate === 0 ? ('IVA_0' as const) : ('IVA_16' as const) },
   })
   const fila = (o: Partial<Fila>): Fila => ({
     id: 'p1',

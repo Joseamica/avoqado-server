@@ -3208,7 +3208,7 @@ export async function executeMercadoPagoPaymentForPaymentLink(
   shortCode: string,
   sessionId: string,
   input: {
-    token: string
+    token?: string
     paymentMethodId: string
     installments: number
     issuerId?: string
@@ -3221,7 +3221,7 @@ export async function executeMercadoPagoPaymentForPaymentLink(
   },
 ) {
   const { loadCredentials } = await import('@/services/mercado-pago/connection.service')
-  const { createPayment } = await import('@/services/mercado-pago/payment.service')
+  const { createPayment, mpToCheckoutStatus } = await import('@/services/mercado-pago/payment.service')
 
   const session = await prisma.checkoutSession.findUnique({
     where: { sessionId },
@@ -3270,12 +3270,7 @@ export async function executeMercadoPagoPaymentForPaymentLink(
 
   // Map MP status → our CheckoutStatus for the optimistic update. The
   // webhook will confirm the authoritative state later.
-  const optimisticStatus =
-    payment.status === 'approved' || payment.status === 'authorized'
-      ? 'COMPLETED'
-      : payment.status === 'rejected' || payment.status === 'cancelled'
-        ? 'CANCELLED'
-        : 'PENDING'
+  const optimisticStatus = mpToCheckoutStatus(payment.status)
 
   await prisma.checkoutSession.update({
     where: { id: session.id },

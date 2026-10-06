@@ -70,7 +70,7 @@ export function registerPrinterTools(server: McpServer, scope: McpScope): void {
     async ({ venueId }) => {
       guard.venueFilter(venueId)
       guard.requirePermission('printers:read', venueId)
-      const [stations, routing] = await Promise.all([listStations(venueId), getRouting(venueId)])
+      const [stations, routing] = await Promise.all([listStations(venueId), getRouting(venueId, { section: 'summary' })])
       return text({
         ok: true,
         stations: stations.map(s => ({

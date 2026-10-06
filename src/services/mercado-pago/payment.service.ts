@@ -37,7 +37,7 @@ export interface CreatePaymentParams {
   accessToken: string
 
   /** Card token from the MP Brick frontend (one-time use, tokenized in-iframe). */
-  token: string
+  token?: string
   /** Payment method id from Brick (e.g. 'visa', 'master', 'amex'). */
   paymentMethodId: string
   /** Installments selected by buyer in the Brick UI. */
@@ -124,12 +124,40 @@ export interface RefundResult {
   status: string
 }
 
+/**
+ * Map MP payment statuses to our internal CheckoutStatus enum.
+ *   approved → COMPLETED
+ *   authorized | pending | in_process | in_mediation → PENDING
+ *   rejected | cancelled → CANCELLED
+ *   refunded | charged_back → FAILED (was successful, now reversed)
+ */
+export function mpToCheckoutStatus(mpStatus: string): 'PENDING' | 'COMPLETED' | 'FAILED' | 'CANCELLED' {
+  switch (mpStatus) {
+    case 'approved':
+      return 'COMPLETED'
+    case 'authorized':
+    case 'pending':
+    case 'in_process':
+    case 'in_mediation':
+      return 'PENDING'
+    case 'rejected':
+    case 'cancelled':
+      return 'CANCELLED'
+    case 'refunded':
+    case 'charged_back':
+      return 'FAILED'
+    default:
+      // Unknown status — preserve PENDING so caller can investigate
+      return 'PENDING'
+  }
+}
+
 export async function createPayment(p: CreatePaymentParams): Promise<PaymentResult> {
   try {
     const { data } = await axios.post<PaymentResult>(
       `${API_BASE}/v1/payments`,
       {
-        token: p.token,
+        ...(p.token !== undefined ? { token: p.token } : {}),
         payment_method_id: p.paymentMethodId,
         installments: p.installments,
         issuer_id: p.issuerId,

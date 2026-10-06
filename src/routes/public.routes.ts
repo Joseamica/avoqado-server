@@ -29,6 +29,7 @@ import * as customerEmailController from '../controllers/public/customerEmail.pu
 import { getPublicPrivacyNotice } from '../controllers/public/privacyNotice.public.controller'
 import { assignSerialsPublicSchema, rejectSpeiSchema } from '../schemas/public/tpvOrder.public.schema'
 import { validateRequest } from '../middlewares/validation'
+import { paymentLinkMpPaySchema } from '../schemas/public/mercadoPagoPaymentIntent.schema'
 import { authenticateCustomer, authenticateCustomerOptional } from '../middlewares/customerAuth.middleware'
 import { resolveVenueBySlug } from '../middlewares/resolveVenueBySlug.middleware'
 import * as kioskCheckInController from '../controllers/kiosk/kioskCheckIn.controller'
@@ -369,7 +370,12 @@ router.post('/payment-links/:shortCode/mp-payment-intent', writeLimit, paymentLi
 
 // Brick onSubmit callback — receives the tokenized card from the Brick frontend
 // and creates the MP payment with application_fee on the seller's account.
-router.post('/payment-links/:shortCode/mp-pay', writeLimit, paymentLinkPublicController.executeMercadoPagoPayment)
+router.post(
+  '/payment-links/:shortCode/mp-pay',
+  writeLimit,
+  validateRequest(paymentLinkMpPaySchema),
+  paymentLinkPublicController.executeMercadoPagoPayment,
+)
 
 router.post('/payment-links/:shortCode/charge', writeLimit, validateRequest(publicChargeSchema), paymentLinkPublicController.completeCharge)
 

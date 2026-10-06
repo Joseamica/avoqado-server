@@ -164,6 +164,29 @@ export const upsertGatewaySchema = z.object({
   query: z.object({}).passthrough().optional(),
 })
 
+// ── Routing lists (opt-in pages; released clients may omit section) ──
+export const getRoutingSchema = z.object({
+  params: z.object({ venueId: z.string().min(1, 'El venue es requerido') }).passthrough(),
+  query: z.object({
+    section: z.enum(['categories', 'products', 'summary'], { message: 'Sección de ruteo inválida' }).optional(),
+    page: z.coerce
+      .number({ invalid_type_error: 'La página debe ser un número' })
+      .int('La página debe ser un entero')
+      .min(1, 'La página mínima es 1')
+      .max(Number.MAX_SAFE_INTEGER, 'Página fuera de rango')
+      .default(1),
+    pageSize: z.coerce
+      .number({ invalid_type_error: 'El tamaño debe ser un número' })
+      .int('El tamaño debe ser un entero')
+      .min(1, 'El tamaño mínimo es 1')
+      .max(100, 'Máximo 100 registros por página')
+      .default(50),
+    search: z.string({ invalid_type_error: 'La búsqueda debe ser texto' }).max(100, 'Máximo 100 caracteres en la búsqueda').optional(),
+    categoryId: z.string({ invalid_type_error: 'La categoría debe ser texto' }).min(1, 'La categoría es requerida').optional(),
+  }),
+})
+export type RoutingQuery = Partial<z.infer<typeof getRoutingSchema>['query']>
+
 // ── Routing assignment (bulk category/product → station) ────────────
 const assignmentEntry = z
   .object({

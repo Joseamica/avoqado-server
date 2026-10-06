@@ -109,12 +109,11 @@ export function splitPaymentIvaByOrderRates(
 }
 
 /**
- * Group an order's line items into gross (IVA-included, integer cents) per REAL tax rate — the single
- * source of truth for "how do we read each product's rate". An item with no `taxRate` defaults to
- * `defaultRate` (16%, same as the CFDI); 0-gross lines are skipped. The result feeds
- * {@link splitPaymentIvaByOrderRates} so IVA is computed per rate (16% central / 8% frontera / 0% exempt
- * / mixed) instead of assuming a flat rate on the whole amount. Empty items → `[]` (custom-amount sale →
- * callers fall back to the flat rate). Pure: item money arrives as NUMBER pesos (callers convert Decimals).
+ * Agrupa importes YA NORMALIZADOS y tasas YA RESUELTAS (primitiva aritmética).
+ * Para una Order persistida usar `grossByRateFromOrder` en ivaDeOrden: total, cortesías, B2, cargos y
+ * tratamiento sellado no se pueden reconstruir sólo con unitPrice y taxRate. El resultado alimenta
+ * {@link splitPaymentIvaByOrderRates}. Sin importes devuelve []; el llamador conserva el 16 % de
+ * ventas de importe libre. Los valores de entrada son pesos numéricos, la salida es en centavos.
  */
 export function grossByRateFromItems(
   items: { unitPrice: number; quantity: number; discountAmount: number; taxRate: number | null }[],

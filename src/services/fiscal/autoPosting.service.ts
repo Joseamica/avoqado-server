@@ -1,12 +1,14 @@
 import { JournalEntrySource, JournalEntryType, OrderStatus, PaymentMethod, PaymentType, Prisma, TransactionStatus } from '@prisma/client'
 import { formatInTimeZone } from 'date-fns-tz'
 
+import { BadRequestError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { parseDbDateRange } from '../../utils/datetime'
 import { getMappings } from './accountMapping.service'
 import { resolveScopeOrNull } from './chartOfAccounts.service'
 import { postJournalEntry } from './journalEntry.service'
-import { splitPaymentIvaByOrderRates, grossByRateFromItems, mezclaDesdeTasas } from './ivaMath'
+import { splitPaymentIvaByOrderRates, mezclaDesdeTasas } from './ivaMath'
+import { grossByRateFromOrder, ordenParaIvaSelect, type OrdenParaIva, type RenglonParaIva } from './ivaDeOrden'
 import { paymentInFiscalScope, metodoParaAlcanceFiscal } from './fiscalScope'
 import { generateCogsPolicyForVenue } from './cogs.service'
 import { ivaDeDevolucion, processorDataDeDevoluciones } from './deliveryFiscalDelta'
@@ -33,7 +35,6 @@ import logger from '../../config/logger'
  * Gated PREMIUM (CFDI) en la ruta/MCP. NO bloqueante: corre fuera del path del pago.
  */
 
-const IVA_RATE = 0.16
 const DEFAULT_TZ = 'America/Mexico_City'
 const PERIOD_RE = /^\d{4}-(0[1-9]|1[0-2])$/
 
@@ -68,12 +69,7 @@ export interface GenerateResult {
   cogsCents?: number
 }
 
-export interface OrderItemRow {
-  quantity: number
-  unitPrice: Prisma.Decimal
-  discountAmount: Prisma.Decimal
-  product: { taxRate: Prisma.Decimal | null } | null
-}
+export type OrderItemRow = RenglonParaIva
 
 interface PaymentRow {
   id: string
@@ -85,25 +81,17 @@ interface PaymentRow {
   createdAt: Date
   merchantAccount: { fiscalConfig: { includeInAccounting: boolean } | null } | null
   ecommerceMerchant: { fiscalConfig: { includeInAccounting: boolean } | null } | null
-  order: { status: OrderStatus; orderNumber: string | null; items: OrderItemRow[] } | null
+  order: (OrdenParaIva & { status: OrderStatus; orderNumber: string | null }) | null
 }
 
 /**
- * Gross (IVA-included, cents) grouped by the item's REAL tax rate, from the order's line items.
- * Thin Decimal→number adapter over the shared {@link grossByRateFromItems} — the single source of
- * truth for reading each product's rate, so auto-posting, the income-statement read-model and the CFDI
- * all group identically. Empty (custom-amount sale) → [], and callers fall back to flat 16%.
+ * Adaptador de compatibilidad para llamadores con sólo renglones. Un cobro debe pasar la orden completa
+ * a `grossByRateFromOrder`: también necesita descuentos B2 y cargos por servicio. El CFDI comparte
+ * `resolverTratamiento`, pero valida y construye sus propios conceptos SAT (B3a); no usa este reparto.
+ * @deprecated Para cobros o comisiones usar grossByRateFromOrder con la orden completa.
  */
 export function grossByRateForOrder(items: OrderItemRow[] | undefined): { rate: number; grossCents: number }[] {
-  return grossByRateFromItems(
-    (items ?? []).map(it => ({
-      unitPrice: Number(it.unitPrice),
-      quantity: it.quantity,
-      discountAmount: Number(it.discountAmount),
-      taxRate: it.product?.taxRate != null ? Number(it.product.taxRate) : null,
-    })),
-    IVA_RATE,
-  )
+  return grossByRateFromOrder({ items })
 }
 
 /** Construye las líneas BALANCEADAS de una póliza de VENTA. null si es una anomalía no posteable. */
@@ -116,7 +104,7 @@ export function buildSaleLines(
   const F = Math.abs(toCents(p.feeAmount))
   // IVA por la tasa REAL de los productos de la orden (16%/8%/exento/mixto), no un 16% plano.
   // net + tax === G exacto, así la póliza sigue cuadrando al centavo.
-  const { netCents, taxCents } = splitPaymentIvaByOrderRates(G, grossByRateForOrder(p.order?.items))
+  const { netCents, taxCents } = splitPaymentIvaByOrderRates(G, grossByRateFromOrder(p.order))
   const isCash = p.method === PaymentMethod.CASH
   // Efectivo ignora comisión; tarjeta neta la comisión del depósito.
   const depositCents = isCash ? G + T : G + T - F
@@ -146,8 +134,8 @@ export function buildRefundLines(
   const rT = Math.abs(toCents(p.tipAmount))
   const rF = Math.abs(toCents(p.feeAmount)) // normalmente 0: el procesador conserva la comisión
   // Plan 4b: la mezcla por tasa de la póliza, como tratamientos (cada parte con su tasa: la misma aritmética), para que
-  // `ivaDeDevolucion` lea las dos formas del mapa congelado. La aritmética de la venta no se toca (pausada con IVA mixto, plan 4).
-  const { netCents, taxCents } = ivaDeDevolucion(p.id, rG, processorData, mezclaDesdeTasas(grossByRateForOrder(p.order?.items)))
+  // `ivaDeDevolucion` lea las dos formas del mapa congelado. Su respaldo usa la misma mezcla corregida de la venta.
+  const { netCents, taxCents } = ivaDeDevolucion(p.id, rG, processorData, mezclaDesdeTasas(grossByRateFromOrder(p.order)))
   const isCash = p.method === PaymentMethod.CASH
   const refundCents = rG + rT - rF
   if (refundCents < 0) return null
@@ -214,7 +202,7 @@ export async function generatePoliciesForVenue(
   // postea salvo que el venue lo active; el gerencial lo sigue mostrando.
   const emisorScope = await prisma.fiscalEmisor.findFirst({
     where: { venueId },
-    orderBy: { createdAt: 'asc' },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
     select: { includeCashInAccounting: true },
   })
   const includeCashInAccounting = emisorScope?.includeCashInAccounting ?? false
@@ -222,103 +210,113 @@ export async function generatePoliciesForVenue(
   // Rango por periodo (tz-safe) si se pidió.
   let createdAt: { gte: Date; lte: Date } | undefined
   if (period) {
-    if (!PERIOD_RE.test(period)) throw new Error('Periodo inválido')
+    if (!PERIOD_RE.test(period)) throw new BadRequestError('El periodo debe tener formato AAAA-MM (mes 01-12).')
     const [y, m] = period.split('-').map(Number)
     const lastDay = new Date(Date.UTC(y, m, 0)).getUTCDate()
     const { from, to } = parseDbDateRange(`${period}-01`, `${period}-${String(lastDay).padStart(2, '0')}`, tz)
     createdAt = { gte: from, lte: to }
   }
 
-  const payments = (await prisma.payment.findMany({
-    where: {
-      venueId,
-      status: TransactionStatus.COMPLETED,
-      ...(createdAt ? { createdAt } : {}),
-      order: { status: { not: OrderStatus.CANCELLED } },
-    },
-    select: {
-      id: true,
-      amount: true,
-      tipAmount: true,
-      feeAmount: true,
-      method: true,
-      type: true,
-      createdAt: true,
-      // Toggle por-merchant: excluir un merchant de los libros fiscales (no del gerencial).
-      merchantAccount: { select: { fiscalConfig: { select: { includeInAccounting: true } } } },
-      ecommerceMerchant: { select: { fiscalConfig: { select: { includeInAccounting: true } } } },
-      order: {
-        select: {
-          status: true,
-          orderNumber: true,
-          // Item-level tax rate → per-rate IVA (8% frontera / mixed / exempt) instead of flat 16%.
-          items: { select: { quantity: true, unitPrice: true, discountAmount: true, product: { select: { taxRate: true } } } },
+  const pageSize = 200
+  let cursor: string | undefined
+  while (true) {
+    const payments = (await prisma.payment.findMany({
+      take: pageSize,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+      where: {
+        venueId,
+        status: TransactionStatus.COMPLETED,
+        ...(createdAt ? { createdAt } : {}),
+        order: { status: { not: OrderStatus.CANCELLED } },
+      },
+      select: {
+        id: true,
+        amount: true,
+        tipAmount: true,
+        feeAmount: true,
+        method: true,
+        type: true,
+        createdAt: true,
+        // Toggle por-merchant: excluir un merchant de los libros fiscales (no del gerencial).
+        merchantAccount: { select: { fiscalConfig: { select: { includeInAccounting: true } } } },
+        ecommerceMerchant: { select: { fiscalConfig: { select: { includeInAccounting: true } } } },
+        order: {
+          select: {
+            status: true,
+            orderNumber: true,
+            ...ordenParaIvaSelect,
+          },
         },
       },
-    },
-    orderBy: { createdAt: 'asc' },
-  })) as PaymentRow[]
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    })) as PaymentRow[]
 
-  const eligible = payments.filter(isEligible)
-  base.candidates = eligible.length
-  base.skipped = payments.length - eligible.length // TEST/ajuste/cripto/cero (cancelados ya filtrados por la query)
+    const eligible = payments.filter(isEligible)
+    base.candidates += eligible.length
+    base.skipped += payments.length - eligible.length // TEST/ajuste/cripto/cero (cancelados ya filtrados por la query)
 
-  // Idempotencia: precarga las claves ya posteadas para no re-postear ni recontar.
-  const keys = eligible.map(p => (p.type === PaymentType.REFUND ? `refund:${p.id}:v1` : `pay:${p.id}:v1`))
-  const existing = new Set(
-    (
-      await prisma.journalEntry.findMany({
-        where: { organizationId: scope.organizationId, rfc: scope.rfc, idempotencyKey: { in: keys } },
-        select: { idempotencyKey: true },
-      })
-    ).map(e => e.idempotencyKey),
-  )
-
-  const processorDataDeAjustes = await processorDataDeDevoluciones(
-    venueId,
-    eligible.filter(p => (toCents(p.amount) < 0 || p.type === PaymentType.REFUND) && !existing.has(`refund:${p.id}:v1`)).map(p => p.id),
-  )
-
-  for (const p of eligible) {
-    // Alcance fiscal configurable: merchant excluido o efectivo sin opt-in → no se postea a los libros
-    // (el gerencial lo sigue mostrando). Mismo predicado que el read-model de ingresos.
-    const merchantFlag = p.merchantAccount?.fiscalConfig?.includeInAccounting ?? p.ecommerceMerchant?.fiscalConfig?.includeInAccounting
-    // Una devolución es type=REFUND O cualquier pago con monto NEGATIVO (voids/ajustes legacy que el
-    // read-model de ingresos también resta). Enrutar por SIGNO evita contar un negativo como venta positiva.
-    const isRefund = toCents(p.amount) < 0 || p.type === PaymentType.REFUND
-    // Una devolución sigue el alcance de su VENTA (`originalMethod`), no el medio con que salió el dinero.
-    const metodoAlcance = isRefund ? metodoParaAlcanceFiscal(p.method, processorDataDeAjustes.get(p.id)) : p.method
-    if (!paymentInFiscalScope(metodoAlcance, merchantFlag, includeCashInAccounting)) {
-      base.skipped++
-      continue
-    }
-    const key = isRefund ? `refund:${p.id}:v1` : `pay:${p.id}:v1`
-    if (existing.has(key)) {
-      base.alreadyPosted++
-      continue
-    }
-    const built = isRefund ? buildRefundLines(p, acct, processorDataDeAjustes.get(p.id)) : buildSaleLines(p, acct)
-    if (!built) {
-      base.skipped++ // anomalía no balanceable (ej. comisión > cobro)
-      continue
-    }
-    const date = formatInTimeZone(p.createdAt, tz, 'yyyy-MM-dd')
-    const num = p.order?.orderNumber != null ? `#${p.order.orderNumber} ` : ''
-    await postJournalEntry(
-      venueId,
-      {
-        date,
-        type: isRefund ? JournalEntryType.EGRESO : JournalEntryType.INGRESO,
-        source: isRefund ? JournalEntrySource.REFUND : JournalEntrySource.PAYMENT,
-        sourceId: p.id,
-        idempotencyKey: key,
-        concept: `${isRefund ? 'Devolución' : 'Venta'} ${num}· ${p.method}`,
-        venueId,
-        lines: built.lines,
-      },
-      { staffId: opts.actorStaffId ?? null },
+    // Idempotencia: precarga las claves ya posteadas para no re-postear ni recontar.
+    const keys = eligible.map(p => (p.type === PaymentType.REFUND ? `refund:${p.id}:v1` : `pay:${p.id}:v1`))
+    const existing = new Set(
+      (
+        await prisma.journalEntry.findMany({
+          where: { organizationId: scope.organizationId, rfc: scope.rfc, idempotencyKey: { in: keys } },
+          select: { idempotencyKey: true },
+          take: keys.length,
+          orderBy: { id: 'asc' },
+        })
+      ).map(e => e.idempotencyKey),
     )
-    base.posted++
+
+    const processorDataDeAjustes = await processorDataDeDevoluciones(
+      venueId,
+      eligible.filter(p => (toCents(p.amount) < 0 || p.type === PaymentType.REFUND) && !existing.has(`refund:${p.id}:v1`)).map(p => p.id),
+    )
+
+    for (const p of eligible) {
+      // Alcance fiscal configurable: merchant excluido o efectivo sin opt-in → no se postea a los libros
+      // (el gerencial lo sigue mostrando). Mismo predicado que el read-model de ingresos.
+      const merchantFlag = p.merchantAccount?.fiscalConfig?.includeInAccounting ?? p.ecommerceMerchant?.fiscalConfig?.includeInAccounting
+      // Una devolución es type=REFUND O cualquier pago con monto NEGATIVO (voids/ajustes legacy que el
+      // read-model de ingresos también resta). Enrutar por SIGNO evita contar un negativo como venta positiva.
+      const isRefund = toCents(p.amount) < 0 || p.type === PaymentType.REFUND
+      // Una devolución sigue el alcance de su VENTA (`originalMethod`), no el medio con que salió el dinero.
+      const metodoAlcance = isRefund ? metodoParaAlcanceFiscal(p.method, processorDataDeAjustes.get(p.id)) : p.method
+      if (!paymentInFiscalScope(metodoAlcance, merchantFlag, includeCashInAccounting)) {
+        base.skipped++
+        continue
+      }
+      const key = isRefund ? `refund:${p.id}:v1` : `pay:${p.id}:v1`
+      if (existing.has(key)) {
+        base.alreadyPosted++
+        continue
+      }
+      const built = isRefund ? buildRefundLines(p, acct, processorDataDeAjustes.get(p.id)) : buildSaleLines(p, acct)
+      if (!built) {
+        base.skipped++ // anomalía no balanceable (ej. comisión > cobro)
+        continue
+      }
+      const date = formatInTimeZone(p.createdAt, tz, 'yyyy-MM-dd')
+      const num = p.order?.orderNumber != null ? `#${p.order.orderNumber} ` : ''
+      await postJournalEntry(
+        venueId,
+        {
+          date,
+          type: isRefund ? JournalEntryType.EGRESO : JournalEntryType.INGRESO,
+          source: isRefund ? JournalEntrySource.REFUND : JournalEntrySource.PAYMENT,
+          sourceId: p.id,
+          idempotencyKey: key,
+          concept: `${isRefund ? 'Devolución' : 'Venta'} ${num}· ${p.method}`,
+          venueId,
+          lines: built.lines,
+        },
+        { staffId: opts.actorStaffId ?? null },
+      )
+      base.posted++
+    }
+
+    if (payments.length < pageSize) break
+    cursor = payments[payments.length - 1].id
   }
 
   // Costo de ventas del periodo (best-effort): traspasa el costo del inventario consumido a la cuenta de

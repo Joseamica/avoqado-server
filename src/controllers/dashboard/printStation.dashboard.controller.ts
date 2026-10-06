@@ -114,7 +114,7 @@ export async function upsertGateway(req: Request, res: Response, next: NextFunct
 // ── Routing ──
 export async function getRouting(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const data = await printStationService.getRouting(req.params.venueId)
+    const data = await printStationService.getRouting(req.params.venueId, req.query)
     res.status(200).json({ success: true, data })
   } catch (error) {
     next(error)

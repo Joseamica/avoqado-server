@@ -17,13 +17,14 @@
  * working (a sibling exists → repoint, don't release a table that's still in
  * use).
  */
-jest.mock('../../../../src/utils/prismaClient', () => ({
-  __esModule: true,
-  default: {
+jest.mock('../../../../src/utils/prismaClient', () => {
+  const client = {
     order: { findFirst: jest.fn() },
     table: { findFirst: jest.fn(), update: jest.fn() },
-  },
-}))
+    $queryRaw: jest.fn().mockResolvedValue([]),
+  }
+  return { __esModule: true, default: { ...client, $transaction: jest.fn((fn: any) => fn(client)) } }
+})
 jest.mock('../../../../src/communication/sockets', () => ({
   __esModule: true,
   default: { getBroadcastingService: jest.fn(() => null) },

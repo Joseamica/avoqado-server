@@ -363,7 +363,7 @@ export async function pauseChannelLink(
   // cómo el dueño vuelve indefinida una pausa del POS.
   const previo = await prisma.deliveryChannelLink.findFirst({
     where: { id: linkId, venueId },
-    select: { status: true, snoozedUntil: true },
+    select: { status: true, snoozedUntil: true, provider: true },
   })
   if (!previo) throw new NotFoundError('Canal de delivery no encontrado')
   const desde: DeliveryChannelStatus[] = paused
@@ -386,6 +386,25 @@ export async function pauseChannelLink(
     if (soloSnooze === 'VENCIDO' && previo.snoozedUntil > new Date()) {
       throw new ConflictError('La pausa de este canal se extendió; se reanudará cuando venza.')
     }
+  }
+
+  // Resolver capacidad ANTES del CAS: sin adaptador nunca se simula una pausa local.
+  let canPause = false
+  if (hasAdapter(previo.provider)) {
+    canPause = typeof adapterFor(previo.provider).setStoreStatus === 'function'
+  } else {
+    try {
+      canPause = typeof getAdapter(previo.provider).setChannelPaused === 'function'
+    } catch {
+      // Proveedor aún sin integrar: conservar status y reloj tal como estaban.
+    }
+  }
+  if (!canPause) {
+    throw new ConflictError(
+      paused
+        ? `Pausar ${previo.provider} desde Avoqado todavía no está disponible: páusalo en su portal; el canal sigue recibiendo pedidos.`
+        : `Reanudar ${previo.provider} desde Avoqado todavía no está disponible: reactívalo en su portal; Avoqado no cambió el canal.`,
+    )
   }
 
   // CAS sobre ese estado exacto. 🔴 `snoozedUntil: null` SIEMPRE, en las dos direcciones. Esta

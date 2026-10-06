@@ -151,9 +151,25 @@ describe('sync.mobile.service processIntents', () => {
 
     const acks = await processIntents(baseParams([{ id: 'i-stale-seq', seq: 12, type: 'OPEN_TABLE', payload: { tableId: 't1' } }]))
 
-    expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'STALE_DEVICE_SEQUENCE' })
+    expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'STALE_DEVICE_SEQUENCE', details: { latestSeq: 12 } })
     expect(tableService.assignTable).not.toHaveBeenCalled()
     expect(prisma.posSyncIntent.create).not.toHaveBeenCalled()
+  })
+
+  it('colisión de secuencia al reservar informa el máximo actual del mismo aparato', async () => {
+    ;(prisma.posSyncIntent.findFirst as jest.Mock)
+      .mockResolvedValue({ seq: 42 })
+      .mockResolvedValueOnce(null) // fence antes de la carrera
+      .mockResolvedValueOnce({ idempotencyKey: 'another-intent' })
+    ;(prisma.posSyncIntent.create as jest.Mock).mockRejectedValueOnce({ code: 'P2002' })
+    const acks = await processIntents(baseParams([{ id: 'race-seq', seq: 12, type: 'OPEN_TABLE', payload: { tableId: 't1' } }]))
+    expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'STALE_DEVICE_SEQUENCE', details: { latestSeq: 42 } })
+    expect(prisma.posSyncIntent.findFirst).toHaveBeenLastCalledWith({
+      where: { venueId: VENUE, deviceId: DEVICE, seq: { not: null } },
+      orderBy: { seq: 'desc' },
+      select: { seq: true },
+    })
+    expect(tableService.assignTable).not.toHaveBeenCalled()
   })
 
   it('permiso faltante → REJECTED PERMISSION_DENIED sin aplicar el efecto', async () => {
