@@ -1392,7 +1392,8 @@ export async function applyFrozenCommissionInTx(tx: Prisma.TransactionClient, ef
   })
   if (existing) return
   // Fase 3 (A2, Codex r2-1): un REVERSO todavía en cola no revive cuando su comisión original ya se anuló. El worker tiene
-  // el candado de la orden —el mismo que toma la anulación—, así que lo que se lee aquí no cambia hasta que termina.
+  // el candado de la orden; la anulación de hoy (`voidCommissionCalculation`) todavía no lo toma —A4 hace que la anulación
+  // lo tome—, y hasta entonces una anulación que entre justo entre esta lectura y el `create` no se ve aquí.
   if (await esReversoDeUnaComisionAnulada(tx, effect, data.configId, data.staffId)) return
   await tx.commissionCalculation.create({ data })
 }

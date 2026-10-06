@@ -3,6 +3,7 @@ import { PaymentEffect, Prisma, PrismaClient } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { utcTs } from '@/utils/sqlDates'
 import { retry, shouldRetryDbConnectionError } from '@/utils/retry'
+import logger from '@/config/logger'
 
 export type PaymentEffectKind = 'REVIEW' | 'RECEIPT' | 'REFERRAL' | 'COMMISSION' | 'TRANSACTION_COST'
 export type PaymentEffectInput = {
@@ -19,6 +20,12 @@ export type PaymentEffectClaim = PaymentEffectInput & { id: string; attempts: nu
 const COMMISSION_REVIEW_REASON = 'COMMISSION_SNAPSHOT_REQUIRES_REVIEW'
 const MAX_ATTEMPTS = 6
 const LEASE_MS = 120_000
+
+/** Sólo nombre y código de un error: su mensaje puede traer datos del procesador o de la tarjeta. */
+const rastroDelError = (error: unknown) => ({
+  errorName: error instanceof Error ? error.name : typeof error,
+  errorCode: (error as { code?: unknown } | null)?.code,
+})
 
 /** Must be invoked from the financial transaction; dedupe never rewrites its snapshot. */
 export async function enqueuePaymentEffect(tx: Prisma.TransactionClient, input: PaymentEffectInput): Promise<void> {
@@ -205,7 +212,8 @@ export async function enqueuePaymentCommissionInTx(tx: Prisma.TransactionClient,
   try {
     await freezePaymentCommissionInTx(tx, paymentId, plan => enqueuePaymentEffect(tx, plan))
     await tx.$executeRawUnsafe('RELEASE SAVEPOINT payment_commission_snapshot')
-  } catch {
+  } catch (error) {
+    logger.warn('[PAYMENT_EFFECTS] Commission snapshot failed; review effect enqueued', { paymentId, ...rastroDelError(error) })
     await tx.$executeRawUnsafe('ROLLBACK TO SAVEPOINT payment_commission_snapshot')
     const payment = await tx.payment.findUniqueOrThrow({ where: { id: paymentId }, select: { venueId: true, orderId: true } })
     await enqueuePaymentEffect(tx, {
@@ -252,7 +260,12 @@ export async function enqueueRefundPaymentEffectsInTx(
       },
     })
     await tx.$executeRawUnsafe('RELEASE SAVEPOINT refund_commission_snapshot')
-  } catch {
+  } catch (error) {
+    logger.warn('[PAYMENT_EFFECTS] Refund commission reversal failed; review effect enqueued', {
+      refundPaymentId,
+      originalPaymentId,
+      ...rastroDelError(error),
+    })
     await tx.$executeRawUnsafe('ROLLBACK TO SAVEPOINT refund_commission_snapshot')
     const refund = await tx.payment.findUniqueOrThrow({ where: { id: refundPaymentId }, select: { venueId: true, orderId: true } })
     const dedupeKey = 'commission:' + refundPaymentId + ':policy-error:v1'
