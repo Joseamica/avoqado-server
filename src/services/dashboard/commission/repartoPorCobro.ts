@@ -13,6 +13,8 @@ import { Prisma } from '@prisma/client'
 import { FULL_PAYMENT_TOLERANCE } from '@/services/shared/orderBalance'
 
 const CERO = new Prisma.Decimal(0)
+/** Precisión de sobra para multiplicar y dividir UNA vez al final, como el reverso de A3 (`commission-calculation.service`). */
+const Exacto = Prisma.Decimal.clone({ precision: 100 })
 
 export function parteDelCobro(input: {
   totalOrden: Prisma.Decimal // lo que se cobra en total por la orden, sin propina
@@ -24,8 +26,11 @@ export function parteDelCobro(input: {
   const resto = Prisma.Decimal.max(CERO, input.valor.minus(input.yaRepartido))
   // Orden de total cero (cortesía completa): no hay proporción posible; el cobro se lleva lo que quede.
   if (input.esUltimo || input.totalOrden.lte(0)) return resto
-  const proporcion = Prisma.Decimal.min(1, Prisma.Decimal.max(0, input.cobro.div(input.totalOrden)))
-  return Prisma.Decimal.min(resto, input.valor.mul(proporcion).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP))
+  // Multiplicar ANTES de dividir, con una sola división y ½↑ al final (Codex bloque A r1 [P2]): $1.33 × 3 ÷ 14 = 0.285 → 0.29.
+  // Dividir primero cortaba 3/14 a 20 cifras y daba 0.28499… → 0.28, y eso cambiaba la comisión total ($0.14 en vez de $0.13).
+  const cobro = Prisma.Decimal.min(input.totalOrden, Prisma.Decimal.max(0, input.cobro))
+  const parte = new Exacto(input.valor).mul(cobro).div(input.totalOrden).toDecimalPlaces(2, Exacto.ROUND_HALF_UP)
+  return Prisma.Decimal.min(resto, new Prisma.Decimal(parte.toFixed(2)))
 }
 
 /** Un cobro dentro de su orden: lo que cobra la orden, lo que pagó este cobro y los valores de la orden que se reparten. */

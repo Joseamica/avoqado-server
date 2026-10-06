@@ -29,6 +29,10 @@ describe('parteDelCobro', () => {
     expect(pesos(parteDelCobro({ totalOrden: D(450), cobro: D(500), valor: D(50), yaRepartido: D(0), esUltimo: false }))).toBe('50.00')
   })
 
+  it('🔴 multiplica antes de dividir (Codex bloque A r1 [P2]): $1.33 × 3 ÷ 14 = 0.285 → $0.29, no $0.28', () => {
+    expect(pesos(parteDelCobro({ totalOrden: D(14), cobro: D(3), valor: D('1.33'), yaRepartido: D(0), esUltimo: false }))).toBe('0.29')
+  })
+
   it('una orden de total cero (cortesía completa) le da todo al cobro', () => {
     expect(pesos(parteDelCobro({ totalOrden: D(0), cobro: D(20), valor: D(150), yaRepartido: D(0), esUltimo: false }))).toBe('150.00')
   })
@@ -50,6 +54,14 @@ describe('repartir', () => {
   it('🔴 $16 en dos cobros de $58: $8 cada uno', () => {
     const c = { totalOrden: D(116), cobro: D(58) }
     expect([pesos(repartir(c, D(16))), pesos(repartir(c, D(16), [otro(58, D(8))]))]).toEqual(['8.00', '8.00'])
+  })
+
+  it('🔴 $1.33 entre cobros de $3 y $11 de una orden de $14: $0.29 + $1.04, y las partes suman exacto en cualquier orden', () => {
+    const tres = { totalOrden: D(14), cobro: D(3) }
+    const once = { totalOrden: D(14), cobro: D(11) }
+    expect([pesos(repartir(tres, D('1.33'))), pesos(repartir(once, D('1.33'), [otro(3, D('0.29'))]))]).toEqual(['0.29', '1.04'])
+    const primeroOnce = repartir(once, D('1.33'))
+    expect(pesos(primeroOnce.plus(repartir(tres, D('1.33'), [otro(11, primeroOnce)])))).toBe('1.33')
   })
 
   it('tres tercios de $0.10 suman exacto: 0.03, 0.03 y 0.04', () => {

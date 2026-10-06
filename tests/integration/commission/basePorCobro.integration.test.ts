@@ -9,7 +9,7 @@
 import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { enqueuePaymentCommissionInTx } from '@/services/tpv/paymentEffects.service'
-import { createSplitCommissionForPayment } from '@/services/dashboard/commission/commission-calculation.service'
+import { createCommissionForPayment, createSplitCommissionForPayment } from '@/services/dashboard/commission/commission-calculation.service'
 import { buildSaleLines } from '@/services/fiscal/autoPosting.service'
 import { committedAndPendingCommissionProgress, otrosCobros } from '@/services/dashboard/commission/commission-utils'
 import {
@@ -511,5 +511,32 @@ describe('A6 F2 · un importe congelado vale lo mismo en cola que materializado 
     }
     const avance = await committedAndPendingCommissionProgress(prisma, m.venueId, m.ana, new Date('2020-01-01T00:00:00Z'))
     expect(avance).toEqual({ amount: 64.8, count: 2 })
+  })
+})
+
+describe('A6 F3 · el reparto multiplica antes de dividir (Codex bloque A r1 [P2])', () => {
+  it('🔴 orden de $14 con $1.33 comisionable, cobros de $3 y $11 al 10 %: bases $0.29 + $1.04 y comisión $0.13, no $0.14', async () => {
+    m = await crearMundoComisiones('f3-reparto')
+    const [cat, otra] = [await categoria(m), await categoria(m)]
+    await prisma.commissionConfig.update({ where: { id: m.configId }, data: { filterByCategories: true, categoryIds: [cat] } })
+    const orderId = await orden(m, {
+      subtotal: 14,
+      renglones: [
+        { categoryId: cat, precio: 1.33 },
+        { categoryId: otra, precio: 12.67 },
+      ],
+    })
+    const pagos: string[] = []
+    for (const monto of [3, 11]) {
+      const pago = await cobro(m, orderId, monto)
+      await createCommissionForPayment(pago)
+      pagos.push(pago)
+    }
+    const filas = await Promise.all(pagos.map(p => filaDe(p)))
+    expect(filas.map(f => [f.baseAmount.toFixed(2), f.netCommission.toFixed(2)])).toEqual([
+      ['0.29', '0.03'],
+      ['1.04', '0.10'],
+    ])
+    expect(await netoVivo({ venueId: m.venueId, orderId })).toBe('0.13')
   })
 })
