@@ -51,6 +51,12 @@ describe('ajustes manuales (spec §6.4)', () => {
     ).toBe(2)
   })
 
+  it('un ajuste nuevo guarda el nombre visible de la persona: su recibo abre aunque después la borren (spec fase 3 §6.1)', async () => {
+    const bono = await ajuste()
+    const e = await prisma.serviceEarning.findUniqueOrThrow({ where: { id: bono.id } })
+    expect(e.descriptor).toMatchObject({ persona: 'Carla QA', motivo: 'Bono de septiembre' })
+  })
+
   it('el mismo clientKey no crea una segunda línea; con otro contenido es un error, no el éxito del primero', async () => {
     const a = await ajuste({ clientKey: `${m.key}-fijo` })
     const b = await ajuste({ clientKey: `${m.key}-fijo` })

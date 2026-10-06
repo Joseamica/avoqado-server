@@ -163,7 +163,7 @@ export async function agregarAjusteManual(input: AjusteManualInput): Promise<Aju
     'staffpay:close',
     'Para agregar un ajuste necesitas el permiso de cerrar periodos en esa sede',
   )
-  await personaDeLaOrg(input.staffId, organizationId)
+  const persona = await personaDeLaOrg(input.staffId, organizationId)
   const fecha = input.fecha ?? hoyLocal(tz, input.ahora)
   fechaComoDbDate(fecha) // valida la forma ANTES de compararla como texto con el periodo de un reintento
   assertFechaDelAjuste(fecha, tz, sede.organization.servicePayPeriodicity, input.ahora)
@@ -227,7 +227,8 @@ export async function agregarAjusteManual(input: AjusteManualInput): Promise<Aju
         amount: monto,
         reason,
         // Fecha y hora LOCALES (Codex R1-24): el recibo no puede leer `createdAt` en UTC y fecharlo al día siguiente.
-        descriptor: { motivo: reason, sede: sede.name, fecha: ahoraLocal.slice(0, 10), hora: ahoraLocal.slice(11) },
+        // El nombre visible de la persona: su recibo abre aunque la borren (spec fase 3 §6.1, Codex r1-17).
+        descriptor: { motivo: reason, sede: sede.name, persona, fecha: ahoraLocal.slice(0, 10), hora: ahoraLocal.slice(11) },
         clientKey: input.clientKey,
         createdById: input.userId,
       },

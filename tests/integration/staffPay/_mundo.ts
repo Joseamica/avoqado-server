@@ -2,7 +2,7 @@
 import { Prisma, PrismaClient } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { fechaComoDbDate } from '@/services/dashboard/staffPay/periodos'
-import { lockClase } from '@/services/dashboard/staffPay/periodosGuardados'
+import { lockClase, lockPeriodosDeOrganizacion } from '@/services/dashboard/staffPay/periodosGuardados'
 
 export const TZ = 'America/Mexico_City'
 export const PN_HC = [0, 430, 430, 430, 430, 460, 490, 530, 570, 610, 650]
@@ -170,6 +170,9 @@ export const barreraDelPeriodo = (periodId: string) =>
 
 /** La misma barrera sobre el candado de UNA clase (`lockClase`): quien llega ahí ya tiene SU periodo tomado (B2). */
 export const barreraDeLaClase = (classSessionId: string) => barrera(t => lockClase(t, classSessionId))
+
+/** La misma barrera sobre el candado de periodos de la ORGANIZACIÓN (activar, propinas, crear periodos). */
+export const barreraDeLaOrganizacion = (organizationId: string) => barrera(t => lockPeriodosDeOrganizacion(t, organizationId))
 
 async function barrera(tomar: (t: Prisma.TransactionClient) => Promise<unknown>) {
   const url = process.env.DATABASE_URL
