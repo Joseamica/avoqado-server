@@ -25,11 +25,15 @@ type Db = Tx | typeof prisma
 
 /**
  * Medido 2026-10-03 (A13, ronda 1), 50,000 clases: 9.0 s EN FRÍO (primer cierre: devengos y anclas vacíos y sin
- * estadísticas) y 9.2 s CON HISTORIAL; el doble del peor (18.5 s), al minuto y con el mínimo: 60 s. Antes del arreglo
- * (lectura de todo el resto en cada lote y escrituras entre lotes): 66 s con historial y en frío no terminaba. No se baja
- * sin volver a medir (spec §6.3 punto 3): `tests/integration/staffPay/cierre.carga.test.ts`, con y sin MEDIR_EN_FRIO=1.
+ * estadísticas) y 9.2 s CON HISTORIAL. Antes del arreglo (lectura de todo el resto en cada lote y escrituras entre lotes):
+ * 66 s con historial y en frío no terminaba. Fase 3 (B7, 2026-10-06, Mac con carga 13-20 en 10 núcleos): 50,000 clases +
+ * 50,000 comisiones + 50,000 propinas: 43.2 s EN FRÍO y 42.0 s CON HISTORIAL (julio cerrado con otras 50,000 ventas) —
+ * ~3 s las clases, ~15 s leer las ventas y ~24 s escribir 150,000 devengos y 50,000 anclas. El presupuesto es el doble del
+ * peor, al minuto y con el mínimo de 60 s: 120 s. Mientras dura, activar y propinas (timeout de 10 s) esperan el candado
+ * de la organización y truenan con P2028 (B7). No se baja sin volver a medir (spec §6.3 punto 3; fase 3 §6.5):
+ * `tests/integration/staffPay/cierre.carga.test.ts`, con y sin MEDIR_EN_FRIO=1.
  */
-export const TIMEOUT_CIERRE_MS = 60_000
+export const TIMEOUT_CIERRE_MS = 120_000
 export const LOTE_CIERRE = 500
 const BLOQUE_ESCRITURA = 1000
 const TZ_DEFAULT = 'America/Mexico_City'
