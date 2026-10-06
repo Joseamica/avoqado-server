@@ -265,7 +265,11 @@ it('goal policy lookup does not run report sales aggregates for unrelated active
   statements = []
   await other.$transaction(tx => enqueuePaymentCommissionInTx(tx, paymentId))
   expect(await prisma.paymentEffect.count({ where: { venueId, paymentId, kind: 'COMMISSION' } })).toBe(1)
-  expect(statements.filter(sql => /SUM\(/i.test(sql) && sql.includes('"Payment"'))).toHaveLength(0)
+  // A6 F5: lo prohibido es un agregado de REPORTE sobre Payment (por sede y fechas). El reparto por cobro suma los otros
+  // cobros de UNA orden (`otros_de_la_orden`, acotada por `"orderId" = $n`) y eso sí debe pasar.
+  const agregadoDeReporte = (sql: string) => /SUM\(/i.test(sql) && sql.includes('"Payment"') && !/"orderId"\s*=\s*\$\d+/.test(sql)
+  expect(agregadoDeReporte('SELECT SUM(p.amount) FROM "Payment" p WHERE p."venueId" = $1 AND p."createdAt" >= $2')).toBe(true)
+  expect(statements.filter(agregadoDeReporte)).toHaveLength(0)
 })
 
 it('real PostgreSQL statement failure rolls back to savepoint and still commits the captured payment and recovery obligation', async () => {
