@@ -540,3 +540,54 @@ describe('A6 F3 · el reparto multiplica antes de dividir (Codex bloque A r1 [P2
     expect(await netoVivo({ venueId: m.venueId, orderId })).toBe('0.13')
   })
 })
+
+describe('caracterización: el total de la comisión depende del orden de llegada en un empate (spec §9-1)', () => {
+  // Es inherente a comisionar cobro por cobro (se reparte la BASE al centavo y la comisión se redondea por cobro), no un
+  // defecto: el empate de medio centavo cae distinto según qué cobro llega primero. Quitarlo exigiría repartir el IMPORTE
+  // de la comisión en vez de la base, que es otro contrato; por eso queda fijado aquí y nadie debe «arreglarlo» a solas.
+  async function comisionarEnOrden(montos: number[]) {
+    m = await crearMundoComisiones('f3-empate')
+    const [cat, otra] = [await categoria(m), await categoria(m)]
+    await prisma.commissionConfig.update({ where: { id: m.configId }, data: { filterByCategories: true, categoryIds: [cat] } })
+    const orderId = await orden(m, {
+      subtotal: 14,
+      renglones: [
+        { categoryId: cat, precio: 1.33 },
+        { categoryId: otra, precio: 12.67 },
+      ],
+    })
+    const pagos: string[] = []
+    for (const monto of montos) {
+      const pago = await cobro(m, orderId, monto)
+      await createCommissionForPayment(pago)
+      pagos.push(pago)
+    }
+    const filas = await Promise.all(pagos.map(p => filaDe(p)))
+    const bases = filas.map(f => f.baseAmount)
+    return {
+      filas: filas.map(f => [f.baseAmount.toFixed(2), f.netCommission.toFixed(2)]),
+      sumaBases: bases.reduce((a, b) => a.plus(b), new Prisma.Decimal(0)).toFixed(2),
+      neto: await netoVivo({ venueId: m.venueId, orderId }),
+    }
+  }
+
+  it('🔴 llega primero el cobro de $3: bases $0.29 + $1.04 y comisión total $0.13', async () => {
+    const r = await comisionarEnOrden([3, 11])
+    expect(r.filas).toEqual([
+      ['0.29', '0.03'],
+      ['1.04', '0.10'],
+    ])
+    expect(r.sumaBases).toBe('1.33')
+    expect(r.neto).toBe('0.13')
+  })
+
+  it('🔴 llega primero el cobro de $11: bases $1.05 + $0.28 y comisión total $0.14 (mismo pedido, otro orden)', async () => {
+    const r = await comisionarEnOrden([11, 3])
+    expect(r.filas).toEqual([
+      ['1.05', '0.11'],
+      ['0.28', '0.03'],
+    ])
+    expect(r.sumaBases).toBe('1.33')
+    expect(r.neto).toBe('0.14')
+  })
+})
