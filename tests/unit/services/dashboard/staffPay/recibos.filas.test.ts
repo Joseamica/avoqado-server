@@ -69,6 +69,13 @@ describe('columnasDelRecibo — cómo se ve cada celda (QA 2026-10-03, defectos 
     }
   })
 
+  it('una comisión o una propina llevan la fecha de la VENTA, sin «(captura)» (spec fase 3 §11)', () => {
+    for (const tipo of ['COMISION', 'PROPINA'] as const) {
+      expect(celdas('pdf', renglon({ tipo, hora: null })).Fecha).toBe('29 sep 2026')
+      expect(celdas('xlsx', renglon({ tipo, monto: '-20.00' })).Monto).toBe(-20)
+    }
+  })
+
   it('el Excel deja el monto como NÚMERO con formato de moneda', () => {
     const monto = columnasDelRecibo('xlsx').find(c => c.id === 'monto')!
     expect(monto.value(renglon({ monto: '-150.00' }))).toBe(-150)

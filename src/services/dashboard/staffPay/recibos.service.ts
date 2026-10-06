@@ -11,6 +11,7 @@ import { assertPermisoEnSedes, exigirPermisoEnSedes, sedesConPermiso, sedesConSe
 import { bloquearPeriodo, periodoQueContieneFecha } from './periodosGuardados'
 import { dbDateComoFecha, MESES_LARGOS, periodoQueContiene, venuePeriodRange } from './periodos'
 import { valoracionCte } from './valoracion'
+import { sqlVentasDelPeriodo } from './fuentesVenta'
 
 /** Tope de UNA página del recibo (Codex R2-R1-20). El recibo entero no tiene tope: se recorre con cursor. */
 export const RECIBO_LIMITE_MAX = 500
@@ -20,7 +21,7 @@ const MUESTRA_PAGO = 100
 const TZ_DEFAULT = 'America/Mexico_City'
 
 export interface RenglonRecibo {
-  tipo: 'CLASE' | 'DIFERENCIA' | 'AJUSTE'
+  tipo: 'CLASE' | 'DIFERENCIA' | 'AJUSTE' | 'COMISION' | 'PROPINA'
   fecha: string
   hora: string | null
   sede: string
@@ -41,6 +42,8 @@ export interface Recibo {
   siguiente: string | null
   pagadoEn: string | null
   parcial: boolean
+  /** Del recibo ENTERO, por tipo (SUM en la base); sólo los tipos que tienen renglones (spec fase 3 §11). */
+  totalesPorTipo: Partial<Record<RenglonRecibo['tipo'], string>>
 }
 
 type Db = Prisma.TransactionClient | typeof prisma
@@ -196,7 +199,7 @@ export async function marcarPagado(input: {
 
 /** Una fila de la fuente del recibo: la misma forma para lo congelado y para lo valorado en vivo. */
 interface FilaRecibo {
-  tipo: 'CLASE' | 'DIFERENCIA' | 'AJUSTE'
+  tipo: RenglonRecibo['tipo']
   instante: Date
   id: string
   venueId: string
@@ -209,6 +212,20 @@ interface FilaRecibo {
   origen: string | null
   lugares: number | null
   monto: Prisma.Decimal
+  /**
+   * Columna 13 de la fuente, justo después de `monto`, en TODOS los brazos (contrato con el Bloque D, D3c): la regla de
+   * clase que movió el monto (suplencia, cancelación tardía). B5 la deja `NULL::jsonb` en todos; D3c sólo la llena en las
+   * ramas de CLASES (en vivo y congeladas). Ventas, ajustes, diferencias y filas agrupadas la dejan en NULL.
+   */
+  regla: Prisma.JsonValue | null
+  /** De una venta (comisión o propina): número de orden, esquema, base y motivo (VENTA | DEVOLUCION | ANULACION). */
+  orden: string | null
+  esquema: string | null
+  base: Prisma.Decimal | null
+  motivo: string | null
+  /** Propinas de un día juntas (pantalla y PDF): `cobros` dice cuántas. */
+  agrupada: boolean
+  cobros: number
 }
 
 interface FuenteRecibo {
@@ -252,24 +269,36 @@ interface ReciboPreparado {
   sedes: Map<string, { nombre: string }>
 }
 
+const nombreDe = (s: { firstName: string; lastName: string }) => `${s.firstName} ${s.lastName}`.trim()
+
+/**
+ * Nombre visible de la persona del recibo, sólo si trabaja o trabajó en esta organización (nunca el de alguien de otro
+ * negocio); «trabajó» lo acredita también un devengo suyo en la organización (Codex bloque A #4): eliminarla del equipo
+ * borra su StaffVenue pero no su recibo cerrado, que tiene que seguir abriendo (pantalla, PDF y Excel). Si la borraron
+ * físicamente, el nombre que guardó su recibo y, si no hay ninguno, «Persona dada de baja» con sus montos intactos (spec
+ * fase 3 §6.1, Codex r1-17, r2-17). Mismo permiso de sedes que siempre: eso lo decide `alcanceEnLaFoto`.
+ */
+async function personaDelRecibo(organizationId: string, staffId: string): Promise<string> {
+  const select = { firstName: true, lastName: true } as const
+  const viva = await prisma.staff.findFirst({ where: { id: staffId, venues: { some: { venue: { organizationId } } } }, select })
+  if (viva) return nombreDe(viva)
+  const rastro = await prisma.serviceEarning.findFirst({ where: { organizationId, staffId }, select: { id: true } })
+  if (!rastro) throw new NotFoundError('Persona no encontrada')
+  const fila = await prisma.staff.findUnique({ where: { id: staffId }, select })
+  if (fila) return nombreDe(fila)
+  const [guardado] = await prisma.$queryRaw<Array<{ persona: string }>>`
+    SELECT COALESCE(e.descriptor->>'persona', e.descriptor->>'coach') AS persona
+    FROM "ServiceEarning" e
+    WHERE e."organizationId" = ${organizationId} AND e."staffId" = ${staffId}
+      AND COALESCE(e.descriptor->>'persona', e.descriptor->>'coach') IS NOT NULL
+    ORDER BY e."createdAt" DESC, e.id DESC
+    LIMIT 1`
+  return guardado?.persona ?? 'Persona dada de baja'
+}
+
 async function prepararRecibo(input: { userId: string; venueId: string; staffId: string; fecha: string }): Promise<ReciboPreparado> {
   const v = await prisma.venue.findUniqueOrThrow({ where: { id: input.venueId }, select: { organizationId: true } })
-  // La persona, sólo si trabaja (o trabajó) en esta organización: nunca el nombre de alguien de otro negocio. «Trabajó» lo
-  // acredita también un devengo en la organización (Codex bloque A #4): eliminarla del equipo borra su StaffVenue pero no
-  // su recibo cerrado, que tiene que seguir abriendo (pantalla, PDF y Excel).
-  const select = { firstName: true, lastName: true } as const
-  const staff =
-    (await prisma.staff.findFirst({
-      where: { id: input.staffId, venues: { some: { venue: { organizationId: v.organizationId } } } },
-      select,
-    })) ??
-    ((await prisma.serviceEarning.findFirst({
-      where: { organizationId: v.organizationId, staffId: input.staffId },
-      select: { id: true },
-    }))
-      ? await prisma.staff.findUnique({ where: { id: input.staffId }, select })
-      : null)
-  if (!staff) throw new NotFoundError('Persona no encontrada')
+  const persona = await personaDelRecibo(v.organizationId, input.staffId)
   const filaAhora = await periodoQueContieneFecha(prisma, v.organizationId, input.fecha)
   const activas = await sedesConServicePay(v.organizationId)
   const candidatas = [...new Set([...(filaAhora?.venueIds ?? []), ...activas])]
@@ -284,7 +313,7 @@ async function prepararRecibo(input: { userId: string; venueId: string; staffId:
     : []
   return {
     organizationId: v.organizationId,
-    persona: `${staff.firstName} ${staff.lastName}`.trim(),
+    persona,
     activas,
     permitidas: new Set(permitidas),
     sedes: new Map(sedes.map(x => [x.id, { nombre: x.name }])),
@@ -328,19 +357,24 @@ export function enUnaFoto<T>(fn: (tx: Db) => Promise<T>): Promise<T> {
 /**
  * Qué renglones forman el recibo, como UNA fuente SQL (Codex R2-R1-20): los `ServiceEarning` (SERVICE, RECONCILE,
  * MANUAL) del periodo y la persona y, si el periodo está ABIERTO, además la valoración en vivo de cada sede (cada
- * subconsulta con su propio WITH). Todas las ramas llevan la misma llave de orden: (instante de servicio, id).
+ * subconsulta con su propio WITH) y las comisiones y propinas que hoy entrarían al cierre. Todas las ramas llevan la misma
+ * llave de orden: (instante de servicio o de venta, id).
  * Corre dentro de `enUnaFoto`: sólo `db` (el `tx`) y los datos de `prep` (Codex R4-Nuevo 1).
  */
 async function fuenteDelRecibo(
   db: Db,
   prep: ReciboPreparado,
   input: { staffId: string; fecha: string; sede?: string },
+  o: { agruparPropinas: boolean },
 ): Promise<FuenteRecibo> {
   const fila = await periodoQueContieneFecha(db, prep.organizationId, input.fecha)
   // El MISMO alcance legible que el reporte (Codex R1-1, R3-Nuevo 2), con el filtro de `sede` (R2-R1-21).
   const { venueIds, parcial } = alcanceEnLaFoto(prep, fila, input.sede)
   // Codex R5: periodicidad y zona horaria deciden QUÉ clases entran, así que salen de la MISMA instantánea que los montos.
-  const org = await db.organization.findUniqueOrThrow({ where: { id: prep.organizationId }, select: { servicePayPeriodicity: true } })
+  const org = await db.organization.findUniqueOrThrow({
+    where: { id: prep.organizationId },
+    select: { servicePayPeriodicity: true, staffPayStartDate: true },
+  })
   const zonas = venueIds.length
     ? await db.venue.findMany({
         where: { id: { in: venueIds }, organizationId: prep.organizationId },
@@ -352,14 +386,18 @@ async function fuenteDelRecibo(
   const canon = fila
     ? { start: dbDateComoFecha(fila.periodStart), end: dbDateComoFecha(fila.periodEnd) }
     : periodoQueContiene(input.fecha, org.servicePayPeriodicity)
-  const partes: Prisma.Sql[] = []
+  const crudo: Prisma.Sql[] = []
   if (fila && venueIds.length) {
-    partes.push(Prisma.sql`
-      SELECT CASE e.concept WHEN 'SERVICE' THEN 'CLASE' WHEN 'RECONCILE' THEN 'DIFERENCIA' ELSE 'AJUSTE' END AS tipo,
+    crudo.push(Prisma.sql`
+      SELECT CASE WHEN e."sourceType" = 'COMMISSION' THEN 'COMISION' WHEN e."sourceType" = 'TIP' THEN 'PROPINA'
+                  WHEN e.concept = 'SERVICE' THEN 'CLASE' WHEN e.concept = 'RECONCILE' THEN 'DIFERENCIA' ELSE 'AJUSTE' END AS tipo,
              COALESCE(e."occurredAt", e."createdAt") AS instante, e.id, e."venueId",
              COALESCE(e.descriptor->>'fecha', to_char(e."createdAt", 'YYYY-MM-DD')) AS fecha,
              e.descriptor->>'hora' AS hora, e.descriptor->>'clase' AS clase, e.descriptor->>'sede' AS "sedeFoto",
-             e.reason, e.descriptor->'periodoOrigen'->>'start' AS origen, e.count AS lugares, e.amount AS monto
+             e.reason, e.descriptor->'periodoOrigen'->>'start' AS origen, e.count AS lugares, e.amount AS monto,
+             NULL::jsonb AS regla, e.descriptor->>'orden' AS orden, e.descriptor->>'esquema' AS esquema,
+             (e.descriptor->>'base')::numeric AS base,
+             CASE WHEN e."sourceType" IN ('COMMISSION', 'TIP') THEN e.descriptor->>'motivo' END AS motivo
       FROM "ServiceEarning" e
       WHERE e."periodId" = ${fila.id} AND e."staffId" = ${input.staffId} AND e."venueId" IN (${Prisma.join(venueIds)})
         ${fila.status === 'CLOSED' ? Prisma.empty : Prisma.sql`AND e.concept IN ('RECONCILE', 'MANUAL')`}`)
@@ -370,13 +408,35 @@ async function fuenteDelRecibo(
       const tz = tzDe.get(venueId) ?? TZ_DEFAULT
       const { from, to } = venuePeriodRange(canon, tz)
       const f = { venueId, organizationId: prep.organizationId, tz, desde: from, hasta: to, ahora, staffId: input.staffId }
-      partes.push(Prisma.sql`
+      crudo.push(Prisma.sql`
         SELECT 'CLASE'::text AS tipo, vv."startsAt" AS instante, vv."classSessionId" AS id, vv."venueId", vv."fechaLocal" AS fecha,
                to_char(((vv."startsAt" AT TIME ZONE 'UTC') AT TIME ZONE ${tz}), 'HH24:MI') AS hora,
                vv."productName" AS clase, NULL::text AS "sedeFoto", NULL::text AS reason, NULL::text AS origen,
-               vv.conteo AS lugares, vv.monto
+               vv.conteo AS lugares, vv.monto, NULL::jsonb AS regla, NULL::text AS orden, NULL::text AS esquema,
+               NULL::numeric AS base, NULL::text AS motivo
         FROM (${valoracionCte(f)} SELECT * FROM valoradas) vv
         WHERE vv.estado = 'OK' AND vv.monto IS NOT NULL`)
+    }
+    // Spec fase 3 §11: el periodo abierto muestra en vivo las comisiones y propinas que hoy entrarían al cierre (las MISMAS
+    // reglas que el cierre, B3). Sin activar no hay nada que mostrar.
+    if (org.staffPayStartDate && venueIds.length) {
+      const ventas = await sqlVentasDelPeriodo(
+        db,
+        {
+          organizationId: prep.organizationId,
+          periodo: { id: fila?.id ?? null, ...canon },
+          sedes: venueIds.map(id => ({ venueId: id, tz: tzDe.get(id) ?? TZ_DEFAULT })),
+          startDate: dbDateComoFecha(org.staffPayStartDate),
+        },
+        { staffId: input.staffId },
+      )
+      if (ventas) {
+        crudo.push(Prisma.sql`
+          SELECT CASE v.fuente WHEN 'COMMISSION' THEN 'COMISION' ELSE 'PROPINA' END AS tipo, v.instante, v."sourceId" AS id,
+                 v."venueId", v."fechaLocal" AS fecha, v.hora, NULL::text AS clase, v.sede AS "sedeFoto", NULL::text AS reason,
+                 NULL::text AS origen, NULL::int AS lugares, v.monto, NULL::jsonb AS regla, v.orden, v.esquema, v.base, v.motivo
+          FROM (${ventas}) v`)
+      }
     }
   }
   const pagado =
@@ -391,13 +451,58 @@ async function fuenteDelRecibo(
     periodo: { id: fila?.id ?? null, ...canon, estado: fila?.status ?? 'OPEN' },
     parcial,
     nombreSede: new Map([...prep.sedes].map(([id, x]) => [id, x.nombre])),
-    sql: partes.length ? Prisma.join(partes, ' UNION ALL ') : null,
+    sql: armarFuente(crudo, o.agruparPropinas),
     pagadoEn: pagado?.paidAt?.toISOString() ?? null,
     llave: createHash('sha256')
       .update([prep.organizationId, canon.start, input.staffId, input.sede ?? ''].join('|'))
       .digest('hex')
       .slice(0, 12),
   }
+}
+
+/** El orden de las columnas de la fuente del recibo (contrato con D3c; lo fija la prueba de B5). */
+export const COLUMNAS_FUENTE_RECIBO = [
+  'tipo',
+  'instante',
+  'id',
+  'venueId',
+  'fecha',
+  'hora',
+  'clase',
+  'sedeFoto',
+  'reason',
+  'origen',
+  'lugares',
+  'monto',
+  'regla',
+  'orden',
+  'esquema',
+  'base',
+  'motivo',
+  'agrupada',
+  'cobros',
+] as const
+
+/**
+ * B-D6: en pantalla y PDF las propinas se juntan por día, sede y signo («Propinas del 3 oct 2026 · 18 cobros»); el Excel
+ * lleva cada cobro. El total, la cuenta y el cursor salen de ESTA fuente, así que siempre cuadran con lo que se ve.
+ * 🔴 Columnas en ORDEN FIJO (el segundo brazo es posicional): `COLUMNAS_FUENTE_RECIBO`. Quien agregue una columna a las
+ * fuentes crudas la agrega también aquí, en la misma posición; `regla` (13) ya está.
+ */
+function armarFuente(crudo: Prisma.Sql[], agruparPropinas: boolean): Prisma.Sql | null {
+  if (!crudo.length) return null
+  const union = Prisma.join(crudo, ' UNION ALL ')
+  if (!agruparPropinas) return Prisma.sql`SELECT c.*, false AS agrupada, 1 AS cobros FROM (${union}) c`
+  return Prisma.sql`
+    WITH crudo AS (${union})
+    SELECT c.*, false AS agrupada, 1 AS cobros FROM crudo c WHERE c.tipo <> 'PROPINA'
+    UNION ALL
+    SELECT 'PROPINA', MIN(c.instante), 'T:' || c."venueId" || ':' || c.fecha || ':' || c.motivo, c."venueId", c.fecha,
+           NULL::text, NULL::text, MAX(c."sedeFoto"), NULL::text, NULL::text, NULL::int, SUM(c.monto),
+           NULL::jsonb, NULL::text, NULL::text, NULL::numeric, c.motivo, true, COUNT(*)::int
+    FROM crudo c
+    WHERE c.tipo = 'PROPINA'
+    GROUP BY c."venueId", c.fecha, c.motivo`
 }
 
 /**
@@ -423,11 +528,24 @@ function leerCursor(s: string, f: Pick<FuenteRecibo, 'periodo' | 'llave'>): { in
   return { instante, id: m[4] }
 }
 
-async function totalDelRecibo(db: Db, f: FuenteRecibo): Promise<{ total: Prisma.Decimal; cantidad: number }> {
-  if (!f.sql) return { total: new Prisma.Decimal(0), cantidad: 0 }
-  const [r] = await db.$queryRaw<Array<{ total: Prisma.Decimal | null; cantidad: number }>>`
-    SELECT SUM(r.monto) AS total, COUNT(*)::int AS cantidad FROM (${f.sql}) r`
-  return { total: r.total ?? new Prisma.Decimal(0), cantidad: r.cantidad }
+/** Total, cuenta y totales por tipo del recibo ENTERO, en UNA consulta sobre la MISMA fuente que las páginas. */
+async function totalDelRecibo(
+  db: Db,
+  f: FuenteRecibo,
+): Promise<{ total: Prisma.Decimal; cantidad: number; porTipo: Partial<Record<RenglonRecibo['tipo'], string>> }> {
+  if (!f.sql) return { total: new Prisma.Decimal(0), cantidad: 0, porTipo: {} }
+  const filas = await db.$queryRaw<Array<{ tipo: RenglonRecibo['tipo']; total: Prisma.Decimal | null; cantidad: number }>>`
+    SELECT r.tipo, SUM(r.monto) AS total, COUNT(*)::int AS cantidad FROM (${f.sql}) r GROUP BY r.tipo`
+  let total = new Prisma.Decimal(0)
+  let cantidad = 0
+  const porTipo: Partial<Record<RenglonRecibo['tipo'], string>> = {}
+  for (const x of filas) {
+    const t = new Prisma.Decimal(x.total ?? 0)
+    total = total.plus(t)
+    cantidad += x.cantidad
+    porTipo[x.tipo] = t.toFixed(2)
+  }
+  return { total, cantidad, porTipo }
 }
 
 function sqlPaginaDelRecibo(fuente: Prisma.Sql, c: { instante: Date; id: string } | null, limite: number): Prisma.Sql {
@@ -457,8 +575,29 @@ async function paginaDelRecibo(
  * Una diferencia dice de qué clase es (QA bloque B, defecto 3): «Diferencia · Yoga del 28 sep 2026 (clase de septiembre)».
  * La fecha es la local de la clase en su sede (la de su foto) y el mes, el de su periodo de origen.
  */
+const plural = (n: number, uno: string, varios: string) => `${n} ${n === 1 ? uno : varios}`
+const ventaDe = (r: FilaRecibo) => (r.orden ? `venta #${r.orden}` : null)
+
+/**
+ * Una comisión dice su esquema, su venta y su base (spec fase 3 §11): «Comisión Lagree 3 % · venta #1042 · base
+ * $3,000.00»; una devolución o una anulación lo dicen al frente. Las propinas de un día van juntas en pantalla y PDF
+ * («Propinas del 12 ago 2026 · 2 cobros») y una por cobro en el Excel («Propina · venta #1042»).
+ */
 function conceptoDe(r: FilaRecibo): string {
   if (r.tipo === 'AJUSTE') return r.reason ?? 'Ajuste'
+  if (r.tipo === 'PROPINA') {
+    if (r.agrupada) {
+      return r.motivo === 'DEVOLUCION'
+        ? `Propinas devueltas del ${fechaMx(r.fecha)} · ${plural(r.cobros, 'devolución', 'devoluciones')}`
+        : `Propinas del ${fechaMx(r.fecha)} · ${plural(r.cobros, 'cobro', 'cobros')}`
+    }
+    return [r.motivo === 'DEVOLUCION' ? 'Devolución de propina' : 'Propina', ventaDe(r)].filter(Boolean).join(' · ')
+  }
+  if (r.tipo === 'COMISION') {
+    const cabeza = r.motivo === 'ANULACION' ? 'Anulación · comisión' : r.motivo === 'DEVOLUCION' ? 'Devolución · comisión' : 'Comisión'
+    const base = r.motivo === 'VENTA' && r.base !== null ? `base ${pesos.format(Number(r.base))}` : null
+    return [r.esquema ? `${cabeza} ${r.esquema}` : cabeza, ventaDe(r), base].filter(Boolean).join(' · ')
+  }
   const clase = r.clase ?? 'Clase'
   if (r.tipo === 'CLASE') return clase
   const mes = r.origen ? ` (clase de ${MESES_LARGOS[Number(r.origen.slice(5, 7)) - 1]})` : ''
@@ -471,7 +610,8 @@ const aRenglon =
     tipo: r.tipo,
     // Un ajuste no es de un día de servicio: su fecha es la de CAPTURA y no lleva hora (QA 2026-10-03, defecto 9).
     fecha: r.fecha,
-    hora: r.tipo === 'AJUSTE' ? null : r.hora,
+    // Un día de propinas tampoco tiene una hora.
+    hora: r.tipo === 'AJUSTE' || r.agrupada ? null : r.hora,
     // Lo congelado manda (spec §5.6; Codex bloque A #8): renombrar la sede no reescribe un recibo cerrado. El nombre de
     // hoy sólo para lo valorado en vivo, que no trae foto.
     sede: r.sedeFoto ?? f.nombreSede.get(r.venueId) ?? '',
@@ -487,8 +627,8 @@ export async function reciboDePersona(input: EntradaRecibo): Promise<Recibo> {
   const prep = await prepararRecibo(input) // cliente global ANTES de la instantánea (Codex R4-Nuevo 1)
   await input.trasPreparar?.()
   return enUnaFoto(async tx => {
-    const f = await fuenteDelRecibo(tx, prep, input)
-    const { total, cantidad } = await totalDelRecibo(tx, f)
+    const f = await fuenteDelRecibo(tx, prep, input, { agruparPropinas: true })
+    const { total, cantidad, porTipo } = await totalDelRecibo(tx, f)
     const pagina = await paginaDelRecibo(tx, f, input.cursor, acotar(input.limit))
     return {
       persona: f.persona,
@@ -499,13 +639,14 @@ export async function reciboDePersona(input: EntradaRecibo): Promise<Recibo> {
       siguiente: pagina.siguiente,
       pagadoEn: f.pagadoEn,
       parcial: f.parcial,
+      totalesPorTipo: porTipo,
     }
   })
 }
 
 /** La consulta de UNA página del recibo tal como se ejecuta, para su `EXPLAIN` en A13 (Codex R3-R1-12). Nada más la usa. */
 export async function consultaDePaginaDelRecibo(input: EntradaRecibo): Promise<Prisma.Sql | null> {
-  const f = await fuenteDelRecibo(prisma, await prepararRecibo(input), input)
+  const f = await fuenteDelRecibo(prisma, await prepararRecibo(input), input, { agruparPropinas: true })
   return f.sql ? sqlPaginaDelRecibo(f.sql, input.cursor ? leerCursor(input.cursor, f) : null, acotar(input.limit)) : null
 }
 
@@ -570,7 +711,8 @@ export async function exportarRecibo(input: {
   // Fuente, total y TODAS las páginas en UNA instantánea de sólo lectura (Codex R3-Nuevo 1); el archivo se genera
   // DESPUÉS de cerrar la transacción (codificar no retiene la conexión).
   const { f, total, renglones } = await enUnaFoto(async tx => {
-    const f = await fuenteDelRecibo(tx, prep, input)
+    // El Excel lleva cada cobro por separado; la pantalla y el PDF, las propinas de un día juntas (B-D6).
+    const f = await fuenteDelRecibo(tx, prep, input, { agruparPropinas: input.format === 'pdf' })
     const { total, cantidad } = await totalDelRecibo(tx, f)
     // El tope del ARCHIVO (export.helpers: 1,000 en PDF, 10,000 en Excel) se revisa con la cuenta de la base ANTES de
     // leer los renglones: arriba del tope se explica, nunca se trunca (D6).
