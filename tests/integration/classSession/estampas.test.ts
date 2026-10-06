@@ -7,7 +7,7 @@ jest.mock('@/communication/rabbitmq/gcal-push-consumer', () => ({
 
 import prisma from '@/utils/prismaClient'
 import { createClassSession, createClassSessionsBulk, updateClassSession } from '@/services/dashboard/classSession.dashboard.service'
-import { borrarMundo, crearMundo, Mundo, TZ } from '../staffPay/_mundo'
+import { borrarMundo, clase, crearMundo, Mundo, TZ } from '../staffPay/_mundo'
 
 const H = 3_600_000
 let m: Mundo
@@ -107,6 +107,16 @@ describe('estampas al crear y editar (spec fase 3 §7.2)', () => {
       originalStaffId: m.carla,
       staffAssignedAt: conCarla.staffAssignedAt,
     })
+  })
+
+  it('clase con coach pero sin original (escrita directo, sin estampas): el cambio deja como original a la PRIMERA coach', async () => {
+    const id = await clase(m, { staffId: m.ana, inicioIso: new Date(Date.now() + 48 * H).toISOString() })
+    expect(await estampas(id)).toMatchObject({ assignedStaffId: m.ana, originalStaffId: null, staffAssignedAt: null })
+    const antesDelCambio = Date.now()
+    await updateClassSession(m.venueId, id, { assignedStaffId: m.sofia }, m.owner)
+    const e = await estampas(id)
+    expect(e).toMatchObject({ assignedStaffId: m.sofia, originalStaffId: m.ana })
+    expect(e.staffAssignedAt!.getTime()).toBeGreaterThanOrEqual(antesDelCambio)
   })
 
   it('cambiar capacidad o notas, o «asignar» a la misma coach, no toca las estampas', async () => {

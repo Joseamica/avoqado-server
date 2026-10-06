@@ -544,10 +544,11 @@ export async function updateClassSession(venueId: string, sessionId: string, dat
     if (data.capacity !== undefined) updateData.capacity = data.capacity
     if (hasStaffUpdate) {
       updateData.assignedStaffId = effectiveStaffId
-      // Spec fase 3 §7.2: cambiar a ALGUIEN (no a nadie) renueva la asignación; la original se fija una sola vez.
+      // Spec fase 3 §7.2: cambiar a ALGUIEN (no a nadie) renueva la asignación; la original se fija una sola vez y es
+      // la PRIMERA coach que tuvo la clase (si faltara la estampa, la que tenía antes de este cambio), nunca la que llega.
       if (effectiveStaffId && effectiveStaffId !== session.assignedStaffId) {
         updateData.staffAssignedAt = checkedAt
-        if (!session.originalStaffId) updateData.originalStaffId = effectiveStaffId
+        if (!session.originalStaffId) updateData.originalStaffId = session.assignedStaffId ?? effectiveStaffId
       }
     }
     if ('internalNotes' in data) updateData.internalNotes = data.internalNotes ?? null
