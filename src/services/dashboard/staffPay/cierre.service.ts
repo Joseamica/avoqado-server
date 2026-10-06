@@ -26,10 +26,11 @@ type Db = Tx | typeof prisma
 /**
  * Medido 2026-10-03 (A13, ronda 1), 50,000 clases: 9.0 s EN FRÍO (primer cierre: devengos y anclas vacíos y sin
  * estadísticas) y 9.2 s CON HISTORIAL. Antes del arreglo (lectura de todo el resto en cada lote y escrituras entre lotes):
- * 66 s con historial y en frío no terminaba. Fase 3 (B7, 2026-10-06, Mac con carga 13-20 en 10 núcleos): 50,000 clases +
- * 50,000 comisiones + 50,000 propinas: 43.2 s EN FRÍO y 42.0 s CON HISTORIAL (julio cerrado con otras 50,000 ventas) —
- * ~3 s las clases, ~15 s leer las ventas y ~24 s escribir 150,000 devengos y 50,000 anclas. El presupuesto es el doble del
- * peor, al minuto y con el mínimo de 60 s: 120 s. Mientras dura, activar, propinas, periodicidad, ajustes, liquidaciones y
+ * 66 s con historial y en frío no terminaba. Fase 3 (B7, 2026-10-06, Mac con carga 13-20 en 10 núcleos), con el código
+ * actual: 50,000 clases + 50,000 comisiones + 50,000 propinas: 34.5 s CON HISTORIAL (julio cerrado con otras 50,000 ventas,
+ * con `plan_cache_mode = force_custom_plan`) y 38.1 s EN FRÍO (medido antes de ese ajuste). El peor por dos da ~76 s, que al
+ * minuto son 120 s (con el mínimo de 60 s). `TIMEOUT_CIERRE_MS` acota UN intento: con reintentos de SSI o un HUELLA_CAMBIO,
+ * la petición completa puede tardar más. Mientras dura, activar, propinas, periodicidad, ajustes, liquidaciones y
  * marcar pagado esperan su candado (el de la organización o la fila del periodo) con tope (`ESPERA_CANDADO_MS`) y contestan
  * 409 CIERRE_EN_CURSO (B7 r1-r2). No se baja sin volver a medir (spec §6.3 punto 3; fase 3 §6.5):
  * `tests/integration/staffPay/cierre.carga.test.ts`, con y sin MEDIR_EN_FRIO=1.

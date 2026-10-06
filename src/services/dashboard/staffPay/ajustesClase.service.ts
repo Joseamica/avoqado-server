@@ -372,8 +372,9 @@ async function guardarDentro(input: GuardarAjusteInput, permitidas: Set<string>)
     const fechaLocal = venueDayKey(info.startsAt, info.venue.timezone || 'America/Mexico_City')
     const periodo = info.payState?.originPeriodId ?? (await periodoQueContieneFecha(tx, info.venue.organizationId, fechaLocal))?.id
     // Si todavía no existe, el candado de periodos de la organización: un cierre que lo está creando lo tiene hasta su
-    // commit, así que el ajuste lo espera en vez de cruzarse con él (Codex R1-6: sin esto, ajuste y cierre podían
-    // bloquearse mutuamente sobre ClassSession / ClassSessionPayState, y 40P01 no se reintenta).
+    // commit, así que el ajuste lo espera hasta 5 s y, si sigue retenido, contesta 409 CIERRE_EN_CURSO, en vez de cruzarse
+    // con él (Codex R1-6: sin esto, ajuste y cierre podían bloquearse mutuamente sobre ClassSession / ClassSessionPayState,
+    // y 40P01 no se reintenta).
     if (periodo) await bloquearPeriodo(tx, periodo)
     else await lockPeriodosDeOrganizacion(tx, info.venue.organizationId)
     // 2) Luego la clase: el candado compartido con la liquidación, y su fila. `FOR NO KEY UPDATE`: serializa las ediciones

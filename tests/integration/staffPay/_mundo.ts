@@ -182,13 +182,16 @@ export const barreraDeLaClase = (classSessionId: string) => barrera(t => lockCla
 export const barreraDeLaOrganizacion = (organizationId: string) => barrera(t => lockPeriodosDeOrganizacion(t, organizationId))
 
 /**
- * B7 r1-r2: corre `operacion` con un candado retenido por la barrera (lo que hace un cierre de ~40 s) y la suelta sola a
- * los `soltarEn` ms: una espera SIN tope termina (y la prueba cae) en vez de colgarse. Devuelve el resultado y cuánto tardó.
+ * B7 r1-r2: corre `operacion` con un candado retenido por la barrera (lo que hace un cierre de ~40 s). La retiene MUCHO más
+ * que el tope de 5 s de las operaciones cortas (30 s por default): así el resultado no depende del reloj (una Mac saturada
+ * que tarde unos segundos en el trabajo previo sigue chocando con el candado). La suelta sola a los `soltarEn` ms para que
+ * una espera SIN tope termine (y la prueba cae por `ms`) en vez de colgarse, y siempre en el `finally`, aunque la prueba falle.
+ * Quien la usa pone un timeout de prueba mayor que `soltarEn`. Devuelve el resultado y cuánto tardó.
  */
 export async function conCandadoRetenido(
   b: Awaited<ReturnType<typeof barreraDelPeriodo>>,
   operacion: () => Promise<unknown>,
-  soltarEn = 8_000,
+  soltarEn = 30_000,
 ): Promise<{ valor: unknown; error: unknown; ms: number }> {
   const soltarTarde = setTimeout(() => void b.soltar(), soltarEn)
   const t = Date.now()

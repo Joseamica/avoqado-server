@@ -217,8 +217,8 @@ describe('vista previa de activar (B6 ronda 1): lo mismo que haría activar, sin
 /**
  * B7 ronda 1: un cierre retiene el candado de periodos de la organización todo lo que dura (~42 s con 150,000 líneas). Las
  * operaciones CORTAS que lo piden esperan con tope y, si vence, contestan 409 CIERRE_EN_CURSO: nunca el P2028 de su
- * transacción de 10 s (un 500). La barrera hace de cierre; se suelta sola a los 8 s para que una espera SIN tope termine
- * (y la prueba caiga) en vez de colgarse.
+ * transacción de 10 s (un 500). La barrera hace de cierre y retiene el candado 30 s (mucho más que el tope de 5 s); si una
+ * espera SIN tope la dejara pasar, `ms` rebasaría el techo y la prueba caería en vez de colgarse.
  */
 describe('con un cierre en curso, las operaciones cortas no esperan sin tope (B7 r1)', () => {
   const conCierreEnCurso = async (operacion: () => Promise<unknown>) =>
@@ -228,27 +228,28 @@ describe('con un cierre en curso, las operaciones cortas no esperan sin tope (B7
     const r = await conCierreEnCurso(() => activar('MONTHLY', '2026-09-20T18:00:00Z'))
     expect(r.error).toMatchObject(CIERRE_EN_CURSO)
     expect(r.ms).toBeGreaterThanOrEqual(4_500)
-    expect(r.ms).toBeLessThan(7_500)
+    expect(r.ms).toBeLessThan(25_000)
     expect(await estadoActivacion(prisma, m.orgId)).toMatchObject({ activado: false })
     expect(await logs('SERVICE_PAY_ACTIVATED')).toBe(0)
-  }, 30_000)
+  }, 60_000)
 
   it('cambiar las propinas contesta 409 CIERRE_EN_CURSO a los ~5 s y no abre ventana', async () => {
     await activar('MONTHLY', '2026-09-01T18:00:00Z')
     const r = await conCierreEnCurso(() => propinas(true, '2026-09-03T18:00:00Z'))
     expect(r.error).toMatchObject(CIERRE_EN_CURSO)
     expect(r.ms).toBeGreaterThanOrEqual(4_500)
-    expect(r.ms).toBeLessThan(7_500)
+    expect(r.ms).toBeLessThan(25_000)
     expect(await prisma.staffPayTipWindow.count({ where: { organizationId: m.orgId } })).toBe(0)
     expect(await logs('SERVICE_PAY_TIPS_SET')).toBe(0)
-  }, 30_000)
+  }, 60_000)
 
   it('cambiar la periodicidad también (el mismo candado)', async () => {
     const r = await conCierreEnCurso(() => cambiarPeriodicidad({ userId: m.owner, venueId: m.venueId, periodicidad: 'SEMIMONTHLY' }))
     expect(r.error).toMatchObject(CIERRE_EN_CURSO)
-    expect(r.ms).toBeLessThan(7_500)
+    expect(r.ms).toBeGreaterThanOrEqual(4_500)
+    expect(r.ms).toBeLessThan(25_000)
     expect(await periodicidad()).toBe('MONTHLY')
-  }, 30_000)
+  }, 60_000)
 
   it('después, la espera queda como estaba: el resto de la transacción no hereda el tope', async () => {
     // Activa con el candado libre y, dentro de la misma tx, el `lock_timeout` vuelve al de la sesión (0 = sin tope).
