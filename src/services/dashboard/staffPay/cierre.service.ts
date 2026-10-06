@@ -154,15 +154,22 @@ async function alcanceDeVentas(db: Db, a: Alcance): Promise<AlcanceBarrido | nul
 
 const sinDuenoDe = async (db: Db, v: AlcanceBarrido | null) => (v ? propinasSinDueno(db, v) : { n: 0, total: new Prisma.Decimal(0) })
 
-/** Resolución 16: efectos de comisión en revisión (`…:policy-error:v1`) sin resolver de las sedes del alcance. */
+/**
+ * Resolución 16: efectos de comisión en revisión (`…:policy-error:v1`) sin resolver de las sedes del alcance. Sólo de cobros
+ * desde el inicio de pago al personal en la zona de SU sede (B4 r1): lo de antes nunca entra al sobre, y su aviso sería
+ * falso para siempre.
+ */
 const comisionesPorRevisar = (db: Db, v: AlcanceBarrido | null) =>
   v
     ? db.paymentEffect.count({
         where: {
-          venueId: { in: v.sedes.map(s => s.venueId) },
           kind: 'COMMISSION',
           dedupeKey: { endsWith: ':policy-error:v1' },
           status: { not: 'DONE' },
+          OR: v.sedes.map(s => ({
+            venueId: s.venueId,
+            payment: { createdAt: { gte: venuePeriodRange({ start: v.startDate, end: v.startDate }, s.tz).from } },
+          })),
         },
       })
     : Promise.resolve(0)
@@ -673,8 +680,10 @@ export async function cerrarPeriodo(input: {
         })
         // Antes de escribir: si la huella cambió, se aborta sin haber tocado nada (el resultado es el mismo que abortar después).
         if (r.huella !== input.huellaEsperada) throw new HuellaCambio()
-        // Los índices únicos de SERVICE y de RECONCILE de venta son la red final: si el anti-join fallara alguna vez,
-        // `createMany` revienta y la transacción entera se revierte.
+        // Ningún índice impide congelar una venta dos veces: `ServiceEarning_service_unico` (y el de RECONCILE de venta)
+        // incluyen `staffId`, así que la misma propina a otra persona (la orden cambió de quien la atiende) sí entraría. Lo
+        // que lo impide es el anti-join por fuente + `sourceId` de fuentesVenta, más SSI: un cierre concurrente que ya la
+        // congeló hace abortar a éste con 40001 y su reintento ya no la ve.
         for (const filas of [servicios, ventas])
           for (let i = 0; i < filas.length; i += BLOQUE_ESCRITURA)
             await tx.serviceEarning.createMany({ data: filas.slice(i, i + BLOQUE_ESCRITURA) })
@@ -715,6 +724,7 @@ export async function cerrarPeriodo(input: {
             reversos: r.reversos,
             totalVentas: r.totalVentas.toFixed(2),
             propinasSinDueno: { n: sinDueno.n, total: sinDueno.total.toFixed(2) },
+            comisionesPorRevisar: await comisionesPorRevisar(tx, alcanceVentas),
             personas: sumas.length,
             total: total.toFixed(2),
             huella: r.huella,

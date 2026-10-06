@@ -32,6 +32,7 @@ jest.mock('@/services/dashboard/staffPay/acceso', () => ({
 const SEP2 = new Date('2026-09-02T12:00:00Z')
 const OCT2 = new Date('2026-10-02T12:00:00Z')
 const NOV2 = new Date('2026-11-02T12:00:00Z')
+const DIC2 = new Date('2026-12-02T12:00:00Z')
 let m: Mundo
 let cfg: string
 
@@ -302,32 +303,76 @@ describe('el cierre con ventas (spec fase 3 §6)', () => {
     expect(await lineas({ concept: 'RECONCILE' })).toBe(0)
   })
 
-  it('las devoluciones con comisión por revisar se cuentan en el preview y no bloquean el cierre (resolución 16)', async () => {
+  it('una sede que entra tarde sólo barre desde el periodo en que entró: lo de los periodos cerrados SIN ella no se paga (B4 r1)', async () => {
+    await prisma.organization.update({ where: { id: m.orgId }, data: { staffPayStartDate: fechaComoDbDate('2026-09-01') } })
+    const b = await crearSede(m.orgId, m.key, 'bsf')
+    const cfgB = await esquema(m, b.venueId, 'Esquema BSF')
+    // Lo que BSF vendió mientras NO tenía el plan (septiembre y octubre se cierran sólo con PN).
+    const ventaSepB = await cobro(m, { iso: '2026-09-10T18:00:00Z', monto: 1000, propina: 40, servedById: m.carla, venueId: b.venueId })
+    await comision(m, { configId: cfgB, staffId: m.sofia, iso: '2026-09-10T18:00:05Z', neto: 30, pago: ventaSepB, venueId: b.venueId })
+    const ventaOctB = await cobro(m, { iso: '2026-10-10T18:00:00Z', monto: 1000, propina: 60, servedById: m.carla, venueId: b.venueId })
+    await comision(m, { configId: cfgB, staffId: m.sofia, iso: '2026-10-10T18:00:05Z', neto: 30, pago: ventaOctB, venueId: b.venueId })
+    await cerrar('2026-09-15', OCT2)
+    await cerrar('2026-10-15', NOV2)
+    // En noviembre BSF entra al plan. Una venta tardía de PN con fecha de septiembre (cerrado CON PN) sí entra.
+    ;(global as any).__sedes = [m.venueId, b.venueId]
+    const tardiaA = await comision(m, { configId: cfg, staffId: m.ana, iso: '2026-09-20T18:00:00Z', neto: 45 })
+    // La devolución en noviembre de la venta de octubre de BSF (que el sobre nunca pagó): ni su reverso ni su propina.
+    const devB = await reembolso(m, ventaOctB, { iso: '2026-11-05T18:00:00Z', monto: 1000, propina: 60 })
+    await comision(m, { configId: cfgB, staffId: m.sofia, iso: '2026-11-05T18:00:05Z', neto: -30, pago: devB, venueId: b.venueId })
+    // Lo de BSF de noviembre sí entra.
+    const ventaNovB = await cobro(m, { iso: '2026-11-10T18:00:00Z', monto: 1000, propina: 20, servedById: m.carla, venueId: b.venueId })
+    const comNovB = await comision(m, {
+      configId: cfgB,
+      staffId: m.sofia,
+      iso: '2026-11-10T18:00:05Z',
+      neto: 30,
+      pago: ventaNovB,
+      venueId: b.venueId,
+    })
+    const p = await preview('2026-11-15', DIC2)
+    expect(p).toMatchObject({ comisiones: 2, propinas: 1, reversos: 0, totalVentas: '95.00' })
+    const nov = await cerrar('2026-11-15', DIC2, p.huella)
+    const deNov = await prisma.serviceEarning.findMany({
+      where: { periodId: nov.periodId },
+      select: { sourceType: true, sourceId: true },
+      take: 10,
+    })
+    expect(deNov.map(x => `${x.sourceType}|${x.sourceId}`).sort()).toEqual(
+      [`COMMISSION|${tardiaA.id}`, `COMMISSION|${comNovB.id}`, `TIP|${ventaNovB.id}`].sort(),
+    )
+    expect(await lineas({ venueId: b.venueId })).toBe(2)
+  })
+
+  it('los cobros y devoluciones con comisión por revisar desde el inicio se cuentan, no bloquean el cierre y quedan en el log (resolución 16, B4 r1)', async () => {
+    type Pago = { id: string; orderId: string; venueId: string }
+    const efecto = (
+      pago: Pago,
+      status: string,
+      dedupeKey = `commission:${pago.id}:policy-error:v1`,
+      payload: Prisma.InputJsonObject = revisar,
+    ) =>
+      prisma.paymentEffect.create({
+        data: { venueId: pago.venueId, paymentId: pago.id, orderId: pago.orderId, kind: 'COMMISSION', dedupeKey, payload, status },
+      })
+    const revisar = { policyError: 'COMMISSION_SNAPSHOT_REQUIRES_REVIEW' }
     const venta = await cobro(m, { iso: '2026-08-10T18:00:00Z', monto: 3000 })
     const dev = await reembolso(m, venta, { iso: '2026-08-12T18:00:00Z', monto: 1200 })
-    const efecto = (paymentId: string, venueId: string, dedupeKey: string, status: string, payload: Prisma.InputJsonObject) =>
-      prisma.paymentEffect.create({ data: { venueId, paymentId, orderId: venta.orderId, kind: 'COMMISSION', dedupeKey, payload, status } })
-    const revisar = { policyError: 'COMMISSION_SNAPSHOT_REQUIRES_REVIEW', originalPaymentId: venta.id }
-    await efecto(dev.id, m.venueId, `commission:${dev.id}:policy-error:v1`, 'DEAD_LETTER', revisar) // cuenta
-    await efecto(venta.id, m.venueId, `commission:${venta.id}:policy-error:v1`, 'DONE', revisar) // ya resuelto: no
-    await efecto(dev.id, m.venueId, `commission:${dev.id}:${cfg}:${m.sofia}:v1`, 'PENDING', { configId: cfg }) // reverso normal: no
+    await efecto(dev, 'DEAD_LETTER', undefined, { ...revisar, originalPaymentId: venta.id }) // cuenta
+    await efecto(venta, 'DONE') // ya resuelto: no
+    await efecto(dev, 'PENDING', `commission:${dev.id}:${cfg}:${m.sofia}:v1`, { configId: cfg }) // reverso normal: no
     // Otra sede de la organización, fuera del alcance del periodo: no.
     const otra = await crearSede(m.orgId, m.key, 'bsf')
-    const ajena = await cobro(m, { iso: '2026-08-10T18:00:00Z', venueId: otra.venueId })
-    await prisma.paymentEffect.create({
-      data: {
-        venueId: otra.venueId,
-        paymentId: ajena.id,
-        orderId: ajena.orderId,
-        kind: 'COMMISSION',
-        dedupeKey: `commission:${ajena.id}:policy-error:v1`,
-        payload: revisar,
-        status: 'PENDING',
-      },
-    })
+    await efecto(await cobro(m, { iso: '2026-08-10T18:00:00Z', venueId: otra.venueId }), 'PENDING')
+    // El inicio (1-ago) se lee en la zona de la sede, CDMX: 1-ago 05:30 UTC todavía es el 31-jul (no avisa); 06:30 UTC ya
+    // es el 1-ago (sí avisa).
+    await efecto(await cobro(m, { iso: '2026-08-01T05:30:00Z' }), 'DEAD_LETTER')
+    await efecto(await cobro(m, { iso: '2026-08-01T06:30:00Z' }), 'PENDING')
     const p = await preview('2026-08-15', SEP2)
-    expect(p).toMatchObject({ puedeCerrar: true, comisionesPorRevisar: 1 })
-    await cerrar('2026-08-15', SEP2, p.huella)
+    expect(p).toMatchObject({ puedeCerrar: true, comisionesPorRevisar: 2 })
+    const r = await cerrar('2026-08-15', SEP2, p.huella)
+    const log = await prisma.activityLog.findFirstOrThrow({ where: { action: 'SERVICE_PAY_PERIOD_CLOSED', entityId: r.periodId } })
+    expect(log.data).toMatchObject({ comisionesPorRevisar: 2 })
   })
 
   it('sin activar pago al personal el cierre no barre ventas (B-D5)', async () => {

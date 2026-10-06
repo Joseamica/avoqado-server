@@ -60,6 +60,9 @@ const fueraDelSobre = (a: AlcanceBarrido) => !a.sedes.length || a.periodo.end < 
  * Spec §6.2 puntos 3 y 4 (B-D1): una venta «ya cae» en este cierre si su fecha civil —en la zona de SU sede— está en P o en
  * un periodo anterior GUARDADO como CLOSED, y nunca antes de `startDate`. Un canónico sin fila no aparece aquí: cuenta
  * como abierto y lo suyo espera a su propio cierre (Codex r1-10). Los rangos civiles contiguos se juntan en uno.
+ * B4 r1: los rangos de los periodos cerrados son POR SEDE: un periodo cerrado sólo aporta su rango a las sedes de SU
+ * `venueIds`; P, a todas las del alcance. Así una sede que entra tarde al plan barre desde el periodo en que entró, nunca
+ * lo que vendió mientras no lo tenía (sus propinas ya se entregaron por fuera: se pagarían dos veces).
  */
 export async function rangosBarribles(db: Db, a: AlcanceBarrido): Promise<RangoSede[]> {
   if (fueraDelSobre(a)) return []
@@ -69,25 +72,25 @@ export async function rangosBarribles(db: Db, a: AlcanceBarrido): Promise<RangoS
       status: 'CLOSED',
       periodEnd: { gte: fechaComoDbDate(a.startDate), lt: fechaComoDbDate(a.periodo.start) },
     },
-    select: { periodStart: true, periodEnd: true },
+    select: { periodStart: true, periodEnd: true, venueIds: true },
     orderBy: { periodStart: 'asc' },
     take: TOPE_PERIODOS_CERRADOS + 1,
   })
   if (cerrados.length > TOPE_PERIODOS_CERRADOS) throw new Error('STAFF_PAY_DEMASIADOS_PERIODOS_CERRADOS')
-  const civiles: PeriodoCanonico[] = []
-  const todos = [...cerrados.map(x => ({ start: dbDateComoFecha(x.periodStart), end: dbDateComoFecha(x.periodEnd) })), a.periodo]
-  for (const c of todos) {
-    const start = c.start < a.startDate ? a.startDate : c.start
-    const u = civiles[civiles.length - 1]
-    if (u && diaCivilSiguiente(u.end) === start) u.end = c.end
-    else civiles.push({ start, end: c.end })
-  }
-  return a.sedes.flatMap(s =>
-    civiles.map(c => {
+  return a.sedes.flatMap(s => {
+    const civiles: PeriodoCanonico[] = []
+    const suyos = cerrados.filter(x => x.venueIds.includes(s.venueId))
+    for (const c of [...suyos.map(x => ({ start: dbDateComoFecha(x.periodStart), end: dbDateComoFecha(x.periodEnd) })), a.periodo]) {
+      const start = c.start < a.startDate ? a.startDate : c.start
+      const u = civiles[civiles.length - 1]
+      if (u && diaCivilSiguiente(u.end) === start) u.end = c.end
+      else civiles.push({ start, end: c.end })
+    }
+    return civiles.map(c => {
       const { from, to } = venuePeriodRange(c, s.tz)
       return { venueId: s.venueId, desde: from, hasta: to }
-    }),
-  )
+    })
+  })
 }
 
 /** `(sede = X AND col en [desde, hasta)) OR …` sobre las columnas de `alias` (alias fijos del código, nunca del usuario). */

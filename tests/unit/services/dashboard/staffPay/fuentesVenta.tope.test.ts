@@ -9,7 +9,11 @@ describe('rangosBarribles — tope de periodos cerrados («nada se trunca»)', (
     sedes: [{ venueId: 'v', tz: 'America/Mexico_City' }],
     startDate: '2026-08-01',
   }
-  const cerrado = { periodStart: new Date('2026-08-01T00:00:00.000Z'), periodEnd: new Date('2026-08-31T00:00:00.000Z') }
+  const cerrado = {
+    periodStart: new Date('2026-08-01T00:00:00.000Z'),
+    periodEnd: new Date('2026-08-31T00:00:00.000Z'),
+    venueIds: ['v'],
+  }
   const db = (n: number) => ({ servicePayPeriod: { findMany: jest.fn().mockResolvedValue(Array.from({ length: n }, () => cerrado)) } })
 
   it('pide uno más que el tope y, si llega, truena en vez de truncar', async () => {
