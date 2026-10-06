@@ -6,10 +6,19 @@ import { withSerializableRetry } from '../../../utils/serializableRetry'
 import { utcTs } from '../../../utils/sqlDates'
 import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
 import { exigirPermisoEnSedes, sedesConPermiso, sedesConServicePay, tienePermisoEn } from './acceso'
-import { ampliarAlcance, asegurarPeriodo, bloquearPeriodo, periodoQueContieneFecha } from './periodosGuardados'
+import { ampliarAlcance, asegurarPeriodo, bloquearPeriodo, lockPeriodosDeOrganizacion, periodoQueContieneFecha } from './periodosGuardados'
 import { dbDateComoFecha, PeriodoCanonico, periodoQueContiene, venuePeriodRange } from './periodos'
 import { ClaseValorada, contarPorEstado, FiltroValoracion, valorarClases } from './valoracion'
 import { Huella } from './huella'
+import { estadoActivacion } from './activacion.service'
+import {
+  AlcanceBarrido,
+  comisionesBarribles,
+  LineaBarrible,
+  propinasBarribles,
+  propinasSinDueno,
+  reversosPorAnulacion,
+} from './fuentesVenta'
 
 type Tx = Prisma.TransactionClient
 type Db = Tx | typeof prisma
@@ -39,12 +48,27 @@ export interface PreviewCierre {
   clases: number
   excluidas: number
   personas: number
+  /** Sólo clases. */
   totalServicios: string
   totalAjustes: string
+  /** Spec fase 3 §6.2-§6.4: lo que el cierre congela además de las clases (las devoluciones cuentan en su fuente). */
+  comisiones: number
+  propinas: number
+  /** Comisiones ya congeladas que hoy están anuladas: se descuentan UNA vez (RECONCILE). */
+  reversos: number
+  /** Comisiones + propinas + reversos. `total = totalServicios + totalVentas + totalAjustes`. */
+  totalVentas: string
+  /** Propinas que no entran por no tener persona (no bloquean el cierre). Fuera de la huella. */
+  propinasSinDueno: { n: number; total: string }
+  /**
+   * Resolución 16: cobros o devoluciones de las sedes del periodo cuya comisión no se pudo calcular (efecto en revisión
+   * sin resolver). Un aviso: no bloquea el cierre y no entra en la huella.
+   */
+  comisionesPorRevisar: number
   total: string
   huerfanas: number
   huella: string
-  /** Las sedes de `periodo.venueIds` con clases pagables o ajustes, en su mismo orden (QA 2026-10-03, defecto 8: el
+  /** Las sedes de `periodo.venueIds` con clases pagables, ventas o ajustes, en su mismo orden (QA 2026-10-03, defecto 8: el
    *  modal nombraba sedes sin una sola clase). No entra en la huella. */
   sedesConDinero: string[]
 }
@@ -115,6 +139,33 @@ async function alcanceSinCandado(organizationId: string, fecha: string): Promise
     sedes: await sedesDe(prisma, organizationId, venueIds),
   }
 }
+
+/** El alcance de las ventas, o null si el negocio no ha activado pago al personal: entonces no se barre nada (B-D5). */
+async function alcanceDeVentas(db: Db, a: Alcance): Promise<AlcanceBarrido | null> {
+  const { startDate } = await estadoActivacion(db, a.organizationId)
+  if (!startDate) return null
+  return {
+    organizationId: a.organizationId,
+    periodo: { id: a.periodId, start: a.periodo.start, end: a.periodo.end },
+    sedes: a.sedes.map(s => ({ venueId: s.venueId, tz: s.tz })),
+    startDate,
+  }
+}
+
+const sinDuenoDe = async (db: Db, v: AlcanceBarrido | null) => (v ? propinasSinDueno(db, v) : { n: 0, total: new Prisma.Decimal(0) })
+
+/** Resolución 16: efectos de comisión en revisión (`…:policy-error:v1`) sin resolver de las sedes del alcance. */
+const comisionesPorRevisar = (db: Db, v: AlcanceBarrido | null) =>
+  v
+    ? db.paymentEffect.count({
+        where: {
+          venueId: { in: v.sedes.map(s => s.venueId) },
+          kind: 'COMMISSION',
+          dedupeKey: { endsWith: ':policy-error:v1' },
+          status: { not: 'DONE' },
+        },
+      })
+    : Promise.resolve(0)
 
 async function alcanceDe(tx: Tx, p: ServicePayPeriod): Promise<Alcance> {
   const venueIds = [...p.venueIds].sort()
@@ -255,18 +306,23 @@ export const consultaIdsDelLote = (f: FiltroValoracion, despuesDe: string | unde
 interface Recorrido {
   clases: number
   excluidas: number
+  comisiones: number
+  propinas: number
+  reversos: number
   personas: Set<string>
   sedesConDinero: Set<string>
   totalServicios: Prisma.Decimal
+  totalVentas: Prisma.Decimal
   totalAjustes: Prisma.Decimal
   huella: string
 }
 
 /**
- * El ÚNICO recorrido de la huella (spec §6.3 puntos 2 y 4), el mismo para el preview y el cierre: cabecera → clases
- * (sede → clase, por lotes con cursor `classSessionId > último`) → ajustes por id → huérfanas por id. Cada lote pasa
- * por la huella ANTES de `alLote`. No escribe nada: el cierre guarda lo de cada lote y escribe al terminar (A13). Todo
- * nace dentro de cada llamada: un reintento de `withSerializableRetry` empieza de cero. `digest()` se llama una sola vez.
+ * El ÚNICO recorrido de la huella (spec §6.3 puntos 2 y 4; fase 3 §6.5), el mismo para el preview y el cierre: cabecera →
+ * clases (sede → clase, por lotes con cursor `classSessionId > último`) → comisiones (M) → propinas (T) → reversos por
+ * anulación (X), cada fuente por lotes ordenados por id → ajustes por id → huérfanas por id. Cada lote pasa por la huella
+ * ANTES de `alLote` / `alVentas`. No escribe nada: el cierre guarda lo de cada lote y escribe al terminar (A13). Todo nace
+ * dentro de cada llamada: un reintento de `withSerializableRetry` empieza de cero. `digest()` se llama una sola vez.
  */
 async function recorrer(
   db: Db,
@@ -276,7 +332,10 @@ async function recorrer(
     tamLote: number
     ajustes: AjusteGuardado[]
     huerfanas: string[]
+    /** null: sin activar, no se barren ventas (B-D5). */
+    ventas: AlcanceBarrido | null
     alLote?: (lote: ClaseValorada[], sede: Sede) => Promise<void>
+    alVentas?: (lote: LineaBarrible[]) => void
   },
 ): Promise<Recorrido> {
   const huella = new Huella()
@@ -284,9 +343,13 @@ async function recorrer(
   const r = {
     clases: 0,
     excluidas: 0,
+    comisiones: 0,
+    propinas: 0,
+    reversos: 0,
     personas: new Set<string>(),
     sedesConDinero: new Set<string>(),
     totalServicios: new Prisma.Decimal(0),
+    totalVentas: new Prisma.Decimal(0),
     totalAjustes: new Prisma.Decimal(0),
   }
   // El mismo tope que `valorarClases`: con más ids que su LIMIT se perderían clases del lote.
@@ -311,6 +374,29 @@ async function recorrer(
       }
       if (o.alLote) await o.alLote(lote, s)
       despuesDe = ids[ids.length - 1]
+    }
+  }
+  if (o.ventas) {
+    const fuentes = [
+      { leer: comisionesBarribles, hashear: (l: LineaBarrible) => huella.comision(l), contar: () => r.comisiones++ },
+      { leer: propinasBarribles, hashear: (l: LineaBarrible) => huella.propina(l), contar: () => r.propinas++ },
+      { leer: reversosPorAnulacion, hashear: (l: LineaBarrible) => huella.reverso(l), contar: () => r.reversos++ },
+    ]
+    for (const f of fuentes) {
+      let despuesDe: string | undefined
+      for (;;) {
+        const lote = await f.leer(db, o.ventas, { despuesDe, limite: tam })
+        if (!lote.length) break
+        for (const l of lote) {
+          f.hashear(l)
+          f.contar()
+          r.totalVentas = r.totalVentas.plus(l.monto)
+          r.personas.add(l.staffId)
+          r.sedesConDinero.add(l.venueId)
+        }
+        o.alVentas?.(lote)
+        despuesDe = lote[lote.length - 1].sourceId
+      }
     }
   }
   for (const aj of o.ajustes) {
@@ -345,9 +431,15 @@ export async function previewCierre(input: {
         bloqueos: [{ codigo: 'SIN_PERMISO' }],
         clases: 0,
         excluidas: 0,
+        comisiones: 0,
+        propinas: 0,
+        reversos: 0,
         personas: 0,
         totalServicios: '0.00',
+        totalVentas: '0.00',
         totalAjustes: '0.00',
+        propinasSinDueno: { n: 0, total: '0.00' },
+        comisionesPorRevisar: 0,
         total: '0.00',
         huerfanas: 0,
         huella: '',
@@ -359,17 +451,25 @@ export async function previewCierre(input: {
   const bloqueos = await bloqueosDe(prisma, a, ahora)
   const ajustes = await ajustesDelPeriodo(prisma, a.organizationId, a.periodId)
   const huerfanas = await idsHuerfanas(prisma, a, ahora)
-  const r = await recorrer(prisma, a, ahora, { tamLote: input.tamLote ?? LOTE_CIERRE, ajustes, huerfanas })
+  const ventas = await alcanceDeVentas(prisma, a)
+  const r = await recorrer(prisma, a, ahora, { tamLote: input.tamLote ?? LOTE_CIERRE, ajustes, huerfanas, ventas })
+  const sinDueno = await sinDuenoDe(prisma, ventas)
   return {
     periodo: { id: a.periodId, start: a.periodo.start, end: a.periodo.end, venueIds: a.venueIds },
     puedeCerrar: bloqueos.length === 0,
     bloqueos,
     clases: r.clases,
     excluidas: r.excluidas,
+    comisiones: r.comisiones,
+    propinas: r.propinas,
+    reversos: r.reversos,
     personas: r.personas.size,
     totalServicios: r.totalServicios.toFixed(2),
+    totalVentas: r.totalVentas.toFixed(2),
     totalAjustes: r.totalAjustes.toFixed(2),
-    total: r.totalServicios.plus(r.totalAjustes).toFixed(2),
+    propinasSinDueno: { n: sinDueno.n, total: sinDueno.total.toFixed(2) },
+    comisionesPorRevisar: await comisionesPorRevisar(prisma, ventas),
+    total: r.totalServicios.plus(r.totalVentas).plus(r.totalAjustes).toFixed(2),
     huerfanas: huerfanas.length,
     huella: r.huella,
     sedesConDinero: a.venueIds.filter(v => r.sedesConDinero.has(v)),
@@ -402,31 +502,44 @@ async function resultadoGuardado(db: Db, p: ServicePayPeriod, yaCerrado: boolean
 
 /**
  * Preview de un periodo CERRADO: lo guardado, nunca el recorrido en vivo (que sólo vería lo que llegó tarde y
- * mostraría otro total). `clases` y `totalServicios` salen de sus SERVICE; `excluidas` no se reconstruye (0): el
- * detalle de un periodo cerrado se lee en el recibo.
+ * mostraría otro total). Clases, comisiones, propinas y reversos salen de lo congelado, por concepto × fuente (desde la
+ * fase 3 un SERVICE ya no es siempre una clase); `excluidas` no se reconstruye (0): el detalle se lee en el recibo.
  */
 async function previewCerrado(a: Alcance & { periodId: string }): Promise<PreviewCierre> {
-  const [g, servicios, porSede] = await Promise.all([
+  const [g, porTipo, porSede] = await Promise.all([
     recibosGuardados(prisma, a.organizationId, a.periodId),
-    prisma.serviceEarning.aggregate({
-      where: { organizationId: a.organizationId, periodId: a.periodId, concept: 'SERVICE' },
+    // A lo más una fila por concepto × fuente.
+    prisma.serviceEarning.groupBy({
+      by: ['concept', 'sourceType'],
+      where: { organizationId: a.organizationId, periodId: a.periodId },
       _count: { _all: true },
       _sum: { amount: true },
     }),
     // Una fila por sede (GROUP BY): acotado por el número de sedes del alcance.
     prisma.serviceEarning.groupBy({ by: ['venueId'], where: { organizationId: a.organizationId, periodId: a.periodId } }),
   ])
+  const de = (concept: string, sourceType: string) => porTipo.find(x => x.concept === concept && x.sourceType === sourceType)
+  const clases = de('SERVICE', 'CLASS_SESSION')
+  const totalServicios = clases?._sum.amount ?? new Prisma.Decimal(0)
+  const totalVentas = porTipo
+    .filter(x => x.sourceType === 'COMMISSION' || x.sourceType === 'TIP')
+    .reduce((acc, x) => acc.plus(x._sum.amount ?? 0), new Prisma.Decimal(0))
   const conDinero = new Set(porSede.map(x => x.venueId))
-  const totalServicios = servicios._sum.amount ?? new Prisma.Decimal(0)
   return {
     periodo: { id: a.periodId, start: a.periodo.start, end: a.periodo.end, venueIds: a.venueIds },
     puedeCerrar: false,
     bloqueos: [{ codigo: 'YA_CERRADO' }],
-    clases: servicios._count._all,
+    clases: clases?._count._all ?? 0,
     excluidas: 0,
+    comisiones: de('SERVICE', 'COMMISSION')?._count._all ?? 0,
+    propinas: de('SERVICE', 'TIP')?._count._all ?? 0,
+    reversos: de('RECONCILE', 'COMMISSION')?._count._all ?? 0,
     personas: g.personas,
     totalServicios: totalServicios.toFixed(2),
-    totalAjustes: g.total.minus(totalServicios).toFixed(2),
+    totalVentas: totalVentas.toFixed(2),
+    totalAjustes: g.total.minus(totalServicios).minus(totalVentas).toFixed(2),
+    propinasSinDueno: { n: 0, total: '0.00' },
+    comisionesPorRevisar: 0,
     total: g.total.toFixed(2),
     huerfanas: 0,
     huella: '',
@@ -459,6 +572,12 @@ export async function cerrarPeriodo(input: {
   try {
     return await withSerializableRetry(
       async tx => {
+        // B-D3: el candado de la ORGANIZACIÓN primero (mismo orden que `asegurarPeriodo`: organización → periodo). Dos
+        // cierres de periodos DISTINTOS pueden barrer la MISMA venta tardía de un periodo ya cerrado: con el candado el
+        // segundo espera al primero. Lo que lo hace correcto es SSI, no el candado: SERIALIZABLE toma la foto en la primera
+        // sentencia —ésta, ANTES de esperar—, así que el segundo, al congelar lo que el primero ya congeló, aborta con 40001
+        // y el reintento ve la huella nueva (HUELLA_CAMBIO). También ordena el cierre con activar y con las propinas.
+        await lockPeriodosDeOrganizacion(tx, organizationId)
         const fila = await asegurarPeriodo(tx, organizationId, input.fecha, activas)
         let p = await bloquearPeriodo(tx, fila.id)
         const sinPermiso = 'Para cerrar necesitas el permiso de cerrar periodos en todas las sedes del periodo'
@@ -498,13 +617,34 @@ export async function cerrarPeriodo(input: {
         // tras lote. Aquí se guarda sólo lo que se va a escribir.
         // ponytail: memoria O(clases), ~1-2 KB por clase (pico +78/+103 MB con 50,000). Si hiciera falta bajarla, los SERVICE
         // pueden escribirse por lote (la lectura en vivo ya no toca ServiceEarning) y dejar sólo las anclas para el final.
+        const alcanceVentas = await alcanceDeVentas(tx, a)
         const servicios: Prisma.ServiceEarningCreateManyInput[] = []
+        const ventas: Prisma.ServiceEarningCreateManyInput[] = []
         const anclas: Parameters<typeof anclarClases>[2] = []
         let lotes = 0
         const r = await recorrer(tx, a, ahora, {
           tamLote,
           ajustes,
           huerfanas,
+          ventas: alcanceVentas,
+          // ponytail: memoria O(ventas), ~1 KB por línea (+100 MB con 100,000). Si hiciera falta, escribir por lote.
+          alVentas: lote => {
+            for (const l of lote) {
+              ventas.push({
+                organizationId,
+                venueId: l.venueId,
+                periodId: p.id,
+                staffId: l.staffId,
+                concept: l.concepto,
+                sourceType: l.fuente,
+                sourceId: l.sourceId,
+                occurredAt: l.instante,
+                amount: l.monto,
+                descriptor: { ...l.descriptor },
+                createdById: input.userId,
+              })
+            }
+          },
           alLote: async (lote, sede) => {
             for (const c of lote) {
               anclas.push({ classSessionId: c.classSessionId, fechaValoracion: c.fechaValoracion, tableVersionId: c.tableVersionId })
@@ -533,11 +673,15 @@ export async function cerrarPeriodo(input: {
         })
         // Antes de escribir: si la huella cambió, se aborta sin haber tocado nada (el resultado es el mismo que abortar después).
         if (r.huella !== input.huellaEsperada) throw new HuellaCambio()
-        for (let i = 0; i < servicios.length; i += BLOQUE_ESCRITURA)
-          await tx.serviceEarning.createMany({ data: servicios.slice(i, i + BLOQUE_ESCRITURA) })
+        // Los índices únicos de SERVICE y de RECONCILE de venta son la red final: si el anti-join fallara alguna vez,
+        // `createMany` revienta y la transacción entera se revierte.
+        for (const filas of [servicios, ventas])
+          for (let i = 0; i < filas.length; i += BLOQUE_ESCRITURA)
+            await tx.serviceEarning.createMany({ data: filas.slice(i, i + BLOQUE_ESCRITURA) })
         for (let i = 0; i < anclas.length; i += BLOQUE_ESCRITURA) await anclarClases(tx, p.id, anclas.slice(i, i + BLOQUE_ESCRITURA))
 
-        // Recibos: suma de lo YA ESCRITO del periodo (servicios y ajustes), uno por persona — quien sólo tiene un bono también.
+        // Recibos: suma de lo YA ESCRITO del periodo (clases, ventas y ajustes), uno por persona — quien sólo tiene un bono o sólo
+        // vende también.
         const sumas = await tx.serviceEarning.groupBy({
           by: ['staffId'],
           where: { organizationId, periodId: p.id },
@@ -554,6 +698,7 @@ export async function cerrarPeriodo(input: {
         })
         if (cerrado.count !== 1) throw new ConflictError('El periodo cambió mientras se cerraba: revisa de nuevo')
         const total = sumas.reduce((acc, s) => acc.plus(s._sum.amount ?? 0), new Prisma.Decimal(0))
+        const sinDueno = await sinDuenoDe(tx, alcanceVentas)
         await writeLegacyActivityAuditTx(tx, {
           staffId: input.userId,
           venueId: input.venueId,
@@ -565,6 +710,11 @@ export async function cerrarPeriodo(input: {
             venueIds: a.venueIds,
             clases: r.clases,
             excluidas: r.excluidas,
+            comisiones: r.comisiones,
+            propinas: r.propinas,
+            reversos: r.reversos,
+            totalVentas: r.totalVentas.toFixed(2),
+            propinasSinDueno: { n: sinDueno.n, total: sinDueno.total.toFixed(2) },
             personas: sumas.length,
             total: total.toFixed(2),
             huella: r.huella,
