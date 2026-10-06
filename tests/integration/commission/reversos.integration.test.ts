@@ -380,6 +380,7 @@ describe('A3 Ronda 1 · el reverso espera a que exista la comisión original (hu
     expect(await prisma.commissionCalculation.count({ where: { venueId: m.venueId, orderId } })).toBe(0)
     const esperando = await prisma.paymentEffect.findUniqueOrThrow({ where: { id: enCola.id } })
     expect([esperando.status, esperando.attempts, esperando.claimToken]).toEqual(['PENDING', enCola.attempts, null])
+    expect(esperando.lastError).toBe('COMMISSION_AWAITS_ORIGINAL')
     expect(esperando.nextAttemptAt.getTime()).toBeGreaterThan(Date.now())
 
     // Alguien reintenta la original: se materializa y, en la siguiente pasada, el reverso se aplica.
@@ -387,5 +388,53 @@ describe('A3 Ronda 1 · el reverso espera a que exista la comisión original (hu
     await procesarEfectos(m)
     expect((await prisma.paymentEffect.findUniqueOrThrow({ where: { id: enCola.id } })).status).toBe('DONE')
     expect(await netoVivo({ venueId: m.venueId, orderId })).toBe('6.00')
+  })
+
+  it('🔴 a las 24 h la espera escala a COMMISSION_AWAITS_ORIGINAL_OVERDUE con UN aviso; la siguiente pasada no lo repite (Ronda 2)', async () => {
+    const orderId = await orden(m, { subtotal: 100 })
+    const pago = await cobro(m, orderId, 100)
+    await planear(pago)
+    await prisma.paymentEffect.updateMany({
+      where: { venueId: m.venueId, paymentId: pago, kind: 'COMMISSION' },
+      data: { status: 'DEAD_LETTER', attempts: 6, lastError: 'PAYMENT_EFFECT_EXECUTION_FAILED' },
+    })
+    const devolucion = await devolver(m, pago, 40)
+    const enCola = await prisma.paymentEffect.findFirstOrThrow({ where: { venueId: m.venueId, paymentId: devolucion, kind: 'COMMISSION' } })
+    // El reverso nació hace 25 h: ya pasó el umbral de 24 h.
+    await prisma.paymentEffect.update({ where: { id: enCola.id }, data: { createdAt: new Date(Date.now() - 25 * 3_600_000) } })
+    const aviso = jest.spyOn(logger, 'warn')
+    try {
+      const avisosDelEfecto = () =>
+        (aviso.mock.calls as unknown as Array<[string, { effectId?: string } | undefined]>).filter(
+          ([, meta]) => meta?.effectId === enCola.id,
+        )
+
+      await procesarEfectos(m)
+      const vencido = await prisma.paymentEffect.findUniqueOrThrow({ where: { id: enCola.id } })
+      expect([vencido.status, vencido.attempts, vencido.lastError]).toEqual([
+        'PENDING',
+        enCola.attempts,
+        'COMMISSION_AWAITS_ORIGINAL_OVERDUE',
+      ])
+      expect(vencido.nextAttemptAt.getTime()).toBeGreaterThan(Date.now())
+      expect(await prisma.commissionCalculation.count({ where: { venueId: m.venueId, orderId } })).toBe(0)
+      const [[, meta]] = avisosDelEfecto()
+      expect(avisosDelEfecto()).toHaveLength(1)
+      // Ids y motivo; nada de montos ni datos de personas.
+      expect(meta).toEqual({
+        effectId: enCola.id,
+        venueId: m.venueId,
+        paymentId: devolucion,
+        orderId,
+        motivo: 'COMMISSION_AWAITS_ORIGINAL_OVERDUE',
+      })
+
+      await procesarEfectos(m)
+      const sigue = await prisma.paymentEffect.findUniqueOrThrow({ where: { id: enCola.id } })
+      expect([sigue.status, sigue.attempts, sigue.lastError]).toEqual(['PENDING', enCola.attempts, 'COMMISSION_AWAITS_ORIGINAL_OVERDUE'])
+      expect(avisosDelEfecto()).toHaveLength(1)
+    } finally {
+      aviso.mockRestore()
+    }
   })
 })

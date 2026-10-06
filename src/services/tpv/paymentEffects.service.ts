@@ -20,6 +20,10 @@ export type PaymentEffectClaim = PaymentEffectInput & { id: string; attempts: nu
 const COMMISSION_REVIEW_REASON = 'COMMISSION_SNAPSHOT_REQUIRES_REVIEW'
 /** Un reverso de comisión cuya comisión original todavía no tiene fila: espera sin gastar intentos. */
 const COMMISSION_AWAITS_ORIGINAL = 'COMMISSION_AWAITS_ORIGINAL'
+/** La misma espera pasado el umbral: sigue sin tope y sin DEAD_LETTER, pero ya pide revisar la comisión del cobro original. */
+const COMMISSION_AWAITS_ORIGINAL_OVERDUE = 'COMMISSION_AWAITS_ORIGINAL_OVERDUE'
+/** Desde que nace el efecto: a partir de aquí la espera de la comisión original se escala (como el costo diferido). */
+const ESPERA_DE_COMISION_ORIGINAL_VENCE_MS = 24 * 60 * 60_000
 const MAX_ATTEMPTS = 6
 const LEASE_MS = 120_000
 
@@ -172,6 +176,19 @@ export async function runClaimedPaymentEffect(claim: PaymentEffectClaim, db: Pri
       if (!(await applyFrozenCommissionInTx(tx, effect))) {
         // Ronda 1 de A3: el reverso espera a que exista su comisión original. Esperar NO es un fallo (mismo patrón que el costo
         // diferido): vuelve a PENDING devolviendo el intento que gastó el reclamo, así nunca llega a DEAD_LETTER por esperar.
+        // Ronda 2: pasadas 24 h desde que nació, el motivo se escala a OVERDUE y se avisa UNA vez, al cruzar el umbral.
+        const motivo =
+          Date.now() - new Date(effect.createdAt).getTime() >= ESPERA_DE_COMISION_ORIGINAL_VENCE_MS
+            ? COMMISSION_AWAITS_ORIGINAL_OVERDUE
+            : COMMISSION_AWAITS_ORIGINAL
+        if (motivo === COMMISSION_AWAITS_ORIGINAL_OVERDUE && effect.lastError !== COMMISSION_AWAITS_ORIGINAL_OVERDUE)
+          logger.warn('[PAYMENT_EFFECTS] El reverso de una comisión lleva 24 h esperando su comisión original; revisar su efecto', {
+            effectId: effect.id,
+            venueId: effect.venueId,
+            paymentId: effect.paymentId,
+            orderId: effect.orderId,
+            motivo,
+          })
         await tx.paymentEffect.update({
           where: { id: effect.id },
           data: {
@@ -180,7 +197,7 @@ export async function runClaimedPaymentEffect(claim: PaymentEffectClaim, db: Pri
             claimToken: null,
             leaseUntil: null,
             attempts: { decrement: 1 },
-            lastError: COMMISSION_AWAITS_ORIGINAL,
+            lastError: motivo,
           },
         })
         return false

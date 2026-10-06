@@ -202,6 +202,9 @@ export async function devolver(
   })
 }
 
+/** Los únicos motivos con los que el worker deja un reverso esperando a su comisión original (Ronda 2 de A3). */
+const MOTIVOS_DE_ESPERA = ['COMMISSION_AWAITS_ORIGINAL', 'COMMISSION_AWAITS_ORIGINAL_OVERDUE']
+
 /** El worker de efectos, sólo sobre las comisiones pendientes de ESTE negocio, en el orden en que nacieron. */
 export async function procesarEfectos(m: MundoComisiones): Promise<void> {
   const pendientes = await prisma.paymentEffect.findMany({
@@ -228,9 +231,13 @@ export async function procesarEfectos(m: MundoComisiones): Promise<void> {
       claimToken,
       leaseUntil,
     })
-    // Un efecto que debe esperar (el reverso cuya comisión original aún no existe) vuelve a PENDING sin gastar intentos.
-    if (!hecho && (await prisma.paymentEffect.findUniqueOrThrow({ where: { id: e.id } })).status !== 'PENDING')
-      throw new Error(`El efecto ${e.id} no se pudo procesar`)
+    // Sólo el reverso que espera a su comisión original vuelve a PENDING, con uno de sus DOS motivos y sin gastar intentos.
+    // Cualquier otro `false` es una falla.
+    if (!hecho) {
+      const fila = await prisma.paymentEffect.findUniqueOrThrow({ where: { id: e.id } })
+      if (fila.status !== 'PENDING' || !MOTIVOS_DE_ESPERA.includes(fila.lastError ?? ''))
+        throw new Error(`El efecto ${e.id} no se pudo procesar`)
+    }
   }
 }
 
