@@ -15,15 +15,12 @@
  * tablet). The endpoint's own response admits it (`tableFreed: false`).
  *
  * `mergeOrders` is SHARED: /mobile (avoqado-android/ios), /tpv
- * (order-table.tpv.controller.ts explicitly re-exports the SAME function so
- * "/mobile stays byte-identical"), and the offline sync reducer
- * (MERGE_ORDERS intent) all call this exact function in
- * src/services/mobile/order.mobile.service.ts — which is FROZEN for this
- * change (iOS/Android are developed against it in parallel by other
- * sessions). So this test is written to PIN the desired behavior but is
- * EXPECTED TO FAIL (red) until someone authorized to touch that frozen file
- * ships the fix described in the accompanying report — the red result here
- * IS the proof of the defect, not a mistake.
+ * (order-table.tpv.controller.ts) and the offline sync reducer (MERGE_ORDERS
+ * intent) all call this exact function. The /tpv controller already
+ * reconciled from its own layer (`reconcileTableAfterOrderRemoved`, 2026-08-07);
+ * R2-TABLE-01 (auditoría Mesas 40, 2026-10-05) closes the same gap for /mobile
+ * and the reducer: when the pointer lookup misses, the shared service calls
+ * the same idempotent helper by the order's own `tableId`.
  */
 
 jest.mock('@/services/venueSalesGuard', () => ({
@@ -78,6 +75,8 @@ describe('mergeOrders frees the source table even when the source order came fro
           paidAmount: new Decimal(0),
           tableId: 'table-2',
           specialRequests: null,
+          contratoDePrecio: 'IVA_INCLUIDO',
+          originSystem: null,
         })
       }
       if (where.id === SPLIT_CHILD_SOURCE_ID) {
@@ -89,6 +88,9 @@ describe('mergeOrders frees the source table even when the source order came fro
           tableId: SOURCE_TABLE_ID,
           customerName: null,
           specialRequests: null,
+          contratoDePrecio: 'IVA_INCLUIDO',
+          originSystem: null,
+          taxAmount: new Decimal(0),
           items: [{ id: 'item-1' }],
           _count: { items: 1 },
           orderDiscounts: [],
@@ -129,39 +131,9 @@ describe('mergeOrders frees the source table even when the source order came fro
     })
   })
 
-  // ⏸️ SKIP DELIBERADO — este test sigue fallando hoy, A PROPÓSITO.
-  //
-  // No es un test roto: fija el defecto de la "mesa fantasma" en `mergeOrders`
-  // MISMO (esta función, `src/services/mobile/`, sigue CONGELADA — iOS/Android
-  // se desarrollan contra ese namespace en paralelo). Sigue en skip porque este
-  // archivo llama a `mergeOrders` DIRECTAMENTE — nunca se puede arreglar sin
-  // tocar la zona congelada.
-  //
-  // FIX 2026-08-07: el hueco se cerró del lado `/tpv` (el único lado que la
-  // TPV usa), NO acá. Ver `table.tpv.service.ts::reconcileTableAfterOrderRemoved`
-  // (reconcilia por `tableId` sin condicionar a `currentOrderId`, igual que
-  // `moveOrderToTable`) y su prueba:
-  // `tests/unit/services/tpv/table.tpv.service.reconcileTableAfterOrderRemoved.test.ts`
-  // — más la prueba de wiring en
-  // `tests/unit/controllers/tpv/order-table.tpv.controller.test.ts` (describe
-  // "mergeOrders", casos de `reconcileTableAfterOrderRemoved`). El mismo hueco
-  // SIGUE abierto en `/mobile` (única superficie congelada, sin caller
-  // no-congelado donde reconciliar) — ver el reporte de Fix 1 para el detalle.
-  // Este test se queda en skip como prueba viva de que el hueco de `/mobile`
-  // sigue ahí.
-  //
-  // 🔴 `cancelOrder` (el otro caller de la MISMA release-de-mesa con el MISMO
-  // hueco — busca `Table.currentOrderId === orderId`) SÍ se cerró del lado
-  // `/tpv`, 2026-08-07: hasta entonces `cancelOrder` no tenía NINGUNA ruta
-  // online bajo `/tpv` (viajaba siempre como intent, ver KDoc de
-  // `TablesRepository.cancelOrder` en avoqado-tpv), así que no había
-  // superficie no-congelada donde reconciliar. Se agregó
-  // `POST /tpv/venues/:venueId/orders/:orderId/cancel`
-  // (`order-table.tpv.controller.ts::cancelOrder`), que delega en el MISMO
-  // `orderMobileService.cancelOrder` de este archivo y reconcilia después con
-  // `reconcileTableAfterOrderRemoved` — mismo patrón que `mergeOrders` arriba.
-  // Ver `.superpowers/sdd/2026-07-24-tpv-plan-b-superficie-tpv-server/tpv-cancel-order-route.md`.
-  it.skip('releases table-1 (AVAILABLE, currentOrderId: null) after merging away its only order, a split child', async () => {
+  // R2-TABLE-01: este caso estuvo en skip mientras `/mobile` estaba congelado (sólo `/tpv` reconciliaba). Ahora el
+  // servicio compartido reconcilia por el `tableId` propio de la orden cuando el puntero no la encuentra.
+  it('releases table-1 (AVAILABLE, currentOrderId: null) after merging away its only order, a split child', async () => {
     const result = await mergeOrders(VENUE_ID, TARGET_ID, SPLIT_CHILD_SOURCE_ID, 'staff-1')
 
     expect(prismaMock.table.update).toHaveBeenCalledWith(
@@ -170,6 +142,23 @@ describe('mergeOrders frees the source table even when the source order came fro
         data: expect.objectContaining({ status: 'AVAILABLE', currentOrderId: null }),
       }),
     )
+    expect(result.tableFreed).toBe(true)
+  })
+
+  it('regression: when the table pointer DOES point at the source, repoints/frees through the pointer path as before', async () => {
+    prismaMock.table.findFirst.mockImplementation((args: any) => {
+      const where = args?.where ?? {}
+      if (where.currentOrderId === SPLIT_CHILD_SOURCE_ID) return Promise.resolve({ id: SOURCE_TABLE_ID, number: 7 })
+      return Promise.resolve(null)
+    })
+
+    const result = await mergeOrders(VENUE_ID, TARGET_ID, SPLIT_CHILD_SOURCE_ID, 'staff-1')
+
+    expect(prismaMock.table.update).toHaveBeenCalledTimes(1)
+    expect(prismaMock.table.update).toHaveBeenCalledWith({
+      where: { id: SOURCE_TABLE_ID },
+      data: { status: 'AVAILABLE', currentOrderId: null },
+    })
     expect(result.tableFreed).toBe(true)
   })
 })

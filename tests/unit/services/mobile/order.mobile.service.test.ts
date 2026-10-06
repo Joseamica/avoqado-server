@@ -1257,3 +1257,88 @@ describe('cancelOrder — guard against live terminal charges', () => {
     expect(ops.indexOf('payment.create')).toBeLessThan(ops.indexOf('activityLog.create'))
   })
 })
+
+describe('cancelOrder — libera la mesa aunque la cuenta sea el último hijo de una división (R2-TABLE-01)', () => {
+  // Un hijo de SPLIT_ORDER nunca recibe `Table.currentOrderId`: tras pagar el padre, el puntero sigue en el padre PAID.
+  // Cancelar ese último hijo buscaba la mesa sólo por `currentOrderId = hijo` y la dejaba OCCUPIED apuntando al padre.
+  const CHILD = 'split-child-1'
+  const TABLE = 'table-9'
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    prismaMock.order.findUnique.mockResolvedValue({ id: CHILD, paymentStatus: 'PENDING', status: 'CONFIRMED' })
+    prismaMock.order.update.mockResolvedValue({ id: CHILD, status: 'CANCELLED' })
+    prismaMock.terminalPaymentRequest.findFirst.mockResolvedValue(null)
+    prismaMock.table.update.mockResolvedValue({})
+    prismaMock.order.findFirst.mockImplementation((args: any) => {
+      const where = args?.where ?? {}
+      if (where.id === CHILD) return Promise.resolve({ tableId: TABLE })
+      // Ninguna otra cuenta viva en la mesa: el padre ya está COMPLETED.
+      return Promise.resolve(null)
+    })
+  })
+
+  it('el puntero apunta al padre pagado → reconcilia por el tableId del hijo y libera la mesa', async () => {
+    prismaMock.table.findFirst.mockImplementation((args: any) => {
+      const where = args?.where ?? {}
+      if (where.currentOrderId === CHILD) return Promise.resolve(null)
+      if (where.id === TABLE) return Promise.resolve({ id: TABLE, number: '9' })
+      return Promise.resolve(null)
+    })
+
+    await cancelOrder('venue-1', CHILD, 'cliente se fue', 'staff-1')
+
+    expect(prismaMock.table.update).toHaveBeenCalledWith({
+      where: { id: TABLE },
+      data: { status: 'AVAILABLE', currentOrderId: null },
+    })
+  })
+
+  it('si aún queda otra cuenta viva en la mesa, re-apunta a ella en vez de liberar', async () => {
+    prismaMock.table.findFirst.mockImplementation((args: any) => {
+      const where = args?.where ?? {}
+      if (where.currentOrderId === CHILD) return Promise.resolve(null)
+      if (where.id === TABLE) return Promise.resolve({ id: TABLE, number: '9' })
+      return Promise.resolve(null)
+    })
+    prismaMock.order.findFirst.mockImplementation((args: any) => {
+      const where = args?.where ?? {}
+      if (where.id === CHILD) return Promise.resolve({ tableId: TABLE })
+      if (where.tableId === TABLE) return Promise.resolve({ id: 'sibling-1' })
+      return Promise.resolve(null)
+    })
+
+    await cancelOrder('venue-1', CHILD)
+
+    expect(prismaMock.table.update).toHaveBeenCalledWith({
+      where: { id: TABLE },
+      data: { status: 'OCCUPIED', currentOrderId: 'sibling-1' },
+    })
+  })
+
+  it('regresión: una orden sin mesa no escribe ninguna mesa', async () => {
+    prismaMock.table.findFirst.mockResolvedValue(null)
+    prismaMock.order.findFirst.mockResolvedValue({ tableId: null })
+
+    await cancelOrder('venue-1', CHILD)
+
+    expect(prismaMock.order.update).toHaveBeenCalledWith(expect.objectContaining({ data: { status: 'CANCELLED' } }))
+    expect(prismaMock.table.update).not.toHaveBeenCalled()
+  })
+
+  it('regresión: cuando el puntero SÍ apunta a la cuenta, libera por el camino de siempre (una sola escritura)', async () => {
+    prismaMock.table.findFirst.mockImplementation((args: any) => {
+      const where = args?.where ?? {}
+      if (where.currentOrderId === CHILD) return Promise.resolve({ id: TABLE, number: '9' })
+      return Promise.resolve(null)
+    })
+
+    await cancelOrder('venue-1', CHILD)
+
+    expect(prismaMock.table.update).toHaveBeenCalledTimes(1)
+    expect(prismaMock.table.update).toHaveBeenCalledWith({
+      where: { id: TABLE },
+      data: { status: 'AVAILABLE', currentOrderId: null },
+    })
+  })
+})
