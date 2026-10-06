@@ -1487,8 +1487,13 @@ export async function freezePaymentCommissionInTx(
   return plans
 }
 
-/** Effect and calculation are committed together by the caller holding the Order/effect locks. */
-export async function applyFrozenCommissionInTx(tx: Prisma.TransactionClient, effect: PaymentEffect): Promise<void> {
+/**
+ * Effect and calculation are committed together by the caller holding the Order/effect locks.
+ *
+ * Devuelve `false` cuando el efecto todavía NO se puede aplicar —el reverso de una devolución cuya comisión original aún no
+ * tiene fila— y el worker debe volver a intentarlo más tarde sin gastar intentos. `true` = atendido (creado o descartado).
+ */
+export async function applyFrozenCommissionInTx(tx: Prisma.TransactionClient, effect: PaymentEffect): Promise<boolean> {
   const data = effect.payload as unknown as Prisma.CommissionCalculationUncheckedCreateInput
   if (
     data.venueId !== effect.venueId ||
@@ -1505,33 +1510,41 @@ export async function applyFrozenCommissionInTx(tx: Prisma.TransactionClient, ef
     where: { venueId: effect.venueId, paymentId: effect.paymentId, configId: data.configId, staffId: data.staffId },
     select: { id: true },
   })
-  if (existing) return
+  if (existing) return true
+  const original = await originalDelReverso(tx, effect, data.configId, data.staffId)
   // Fase 3 (A2, Codex r2-1): un REVERSO todavía en cola no revive cuando su comisión original ya se anuló. El worker tiene
   // el candado de la orden; la anulación de hoy (`voidCommissionCalculation`) todavía no lo toma —A4 hace que la anulación
   // lo tome—, y hasta entonces una anulación que entre justo entre esta lectura y el `create` no se ve aquí.
-  if (await esReversoDeUnaComisionAnulada(tx, effect, data.configId, data.staffId)) return
+  if (original === 'ANULADA') return true
+  // 🔴 MONEY (Ronda 1 de A3): un reverso cuya original no tiene fila —su efecto sigue en cola o quedó en DEAD_LETTER— espera.
+  // Materializarlo le descontaría a la persona, en su recibo, una comisión que nunca cobró.
+  if (original === 'SIN_FILA') return false
   await tx.commissionCalculation.create({ data })
+  return true
 }
 
-/** ¿El efecto es el reverso de una devolución cuya comisión original (misma persona y esquema) está toda anulada? */
-async function esReversoDeUnaComisionAnulada(
+/**
+ * Si el efecto es el reverso de una devolución, en qué estado está la comisión original de la misma persona y esquema:
+ * `SIN_FILA` (todavía no se materializa), `ANULADA` (todas sus filas anuladas) o `VIVA`. `NO_ES_REVERSO` para todo lo demás.
+ */
+async function originalDelReverso(
   tx: Prisma.TransactionClient,
   effect: PaymentEffect,
   configId: string,
   staffId: string,
-): Promise<boolean> {
+): Promise<'NO_ES_REVERSO' | 'SIN_FILA' | 'ANULADA' | 'VIVA'> {
   const devolucion = await tx.payment.findFirst({
     where: { id: effect.paymentId, venueId: effect.venueId },
     select: { type: true, processorData: true },
   })
-  if (devolucion?.type !== PaymentType.REFUND) return false
+  if (devolucion?.type !== PaymentType.REFUND) return 'NO_ES_REVERSO'
   const originalPaymentId = (devolucion.processorData as { originalPaymentId?: unknown } | null)?.originalPaymentId
-  if (typeof originalPaymentId !== 'string') return false
+  if (typeof originalPaymentId !== 'string') return 'NO_ES_REVERSO'
   const originales = await tx.commissionCalculation.findMany({
     where: { venueId: effect.venueId, paymentId: originalPaymentId, configId, staffId },
     select: { status: true },
     take: 10,
   })
-  // Sin original materializada todavía (su efecto sigue en cola) el reverso se crea: la original llegará después.
-  return originales.length > 0 && originales.every(o => o.status === CommissionCalcStatus.VOIDED)
+  if (originales.length === 0) return 'SIN_FILA'
+  return originales.every(o => o.status === CommissionCalcStatus.VOIDED) ? 'ANULADA' : 'VIVA'
 }

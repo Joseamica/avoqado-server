@@ -18,6 +18,8 @@ export type PaymentEffectInput = {
 }
 export type PaymentEffectClaim = PaymentEffectInput & { id: string; attempts: number; claimToken: string; leaseUntil: Date }
 const COMMISSION_REVIEW_REASON = 'COMMISSION_SNAPSHOT_REQUIRES_REVIEW'
+/** Un reverso de comisión cuya comisión original todavía no tiene fila: espera sin gastar intentos. */
+const COMMISSION_AWAITS_ORIGINAL = 'COMMISSION_AWAITS_ORIGINAL'
 const MAX_ATTEMPTS = 6
 const LEASE_MS = 120_000
 
@@ -167,7 +169,22 @@ export async function runClaimedPaymentEffect(claim: PaymentEffectClaim, db: Pri
       })
     } else if (effect.kind === 'COMMISSION') {
       const { applyFrozenCommissionInTx } = await import('../dashboard/commission/commission-calculation.service')
-      await applyFrozenCommissionInTx(tx, effect)
+      if (!(await applyFrozenCommissionInTx(tx, effect))) {
+        // Ronda 1 de A3: el reverso espera a que exista su comisión original. Esperar NO es un fallo (mismo patrón que el costo
+        // diferido): vuelve a PENDING devolviendo el intento que gastó el reclamo, así nunca llega a DEAD_LETTER por esperar.
+        await tx.paymentEffect.update({
+          where: { id: effect.id },
+          data: {
+            status: 'PENDING',
+            nextAttemptAt: new Date(Date.now() + 5 * 60_000),
+            claimToken: null,
+            leaseUntil: null,
+            attempts: { decrement: 1 },
+            lastError: COMMISSION_AWAITS_ORIGINAL,
+          },
+        })
+        return false
+      }
     } else {
       throw new Error('UNSUPPORTED_PAYMENT_EFFECT')
     }

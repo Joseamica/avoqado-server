@@ -361,3 +361,31 @@ describe('A3 · los reversos parciales cuadran al centavo (spec §9-4; Codex r1-
     })
   })
 })
+
+describe('A3 Ronda 1 · el reverso espera a que exista la comisión original (hueco de A2)', () => {
+  it('🔴 con la comisión original en DEAD_LETTER, el reverso no se materializa ni gasta intentos; cuando la original llega, se aplica', async () => {
+    const orderId = await orden(m, { subtotal: 100 })
+    const pago = await cobro(m, orderId, 100)
+    await planear(pago)
+    const comisionOriginal = { venueId: m.venueId, paymentId: pago, kind: 'COMMISSION' }
+    await prisma.paymentEffect.updateMany({
+      where: comisionOriginal,
+      data: { status: 'DEAD_LETTER', attempts: 6, lastError: 'PAYMENT_EFFECT_EXECUTION_FAILED' },
+    })
+    const devolucion = await devolver(m, pago, 40) // su reverso nace del snapshot de la original en DEAD_LETTER
+    const enCola = await prisma.paymentEffect.findFirstOrThrow({ where: { venueId: m.venueId, paymentId: devolucion, kind: 'COMMISSION' } })
+
+    await procesarEfectos(m)
+    // Nada se descuenta: la persona nunca cobró esa comisión.
+    expect(await prisma.commissionCalculation.count({ where: { venueId: m.venueId, orderId } })).toBe(0)
+    const esperando = await prisma.paymentEffect.findUniqueOrThrow({ where: { id: enCola.id } })
+    expect([esperando.status, esperando.attempts, esperando.claimToken]).toEqual(['PENDING', enCola.attempts, null])
+    expect(esperando.nextAttemptAt.getTime()).toBeGreaterThan(Date.now())
+
+    // Alguien reintenta la original: se materializa y, en la siguiente pasada, el reverso se aplica.
+    await prisma.paymentEffect.updateMany({ where: comisionOriginal, data: { status: 'PENDING', attempts: 0, nextAttemptAt: new Date() } })
+    await procesarEfectos(m)
+    expect((await prisma.paymentEffect.findUniqueOrThrow({ where: { id: enCola.id } })).status).toBe('DONE')
+    expect(await netoVivo({ venueId: m.venueId, orderId })).toBe('6.00')
+  })
+})

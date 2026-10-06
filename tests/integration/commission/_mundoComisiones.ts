@@ -228,7 +228,9 @@ export async function procesarEfectos(m: MundoComisiones): Promise<void> {
       claimToken,
       leaseUntil,
     })
-    if (!hecho) throw new Error(`El efecto ${e.id} no se pudo procesar`)
+    // Un efecto que debe esperar (el reverso cuya comisión original aún no existe) vuelve a PENDING sin gastar intentos.
+    if (!hecho && (await prisma.paymentEffect.findUniqueOrThrow({ where: { id: e.id } })).status !== 'PENDING')
+      throw new Error(`El efecto ${e.id} no se pudo procesar`)
   }
 }
 
