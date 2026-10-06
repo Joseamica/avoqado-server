@@ -167,8 +167,8 @@ export async function getPendingClawbacksForStaff(staffId: string, venueId: stri
 
 /**
  * «Clawback» desde el dashboard (fase 3, A4; spec §8): SIEMPRE anula la comisión con la operación única `anularComision`
- * —también con motivo CORRECTION y aunque su resumen ya se haya pagado por el flujo viejo— y ya no crea
- * `CommissionClawback` (nadie lo aplicaba: H2b). Si la comisión ya estaba en un recibo de Pago al personal, el siguiente
+ * —también con motivo CORRECTION y aunque su resumen ya se haya pagado por el flujo viejo; se rechaza sólo si ese resumen
+ * tiene un pago EN CURSO— y ya no crea `CommissionClawback` (nadie lo aplicaba: H2b). Si la comisión ya estaba en un recibo de Pago al personal, el siguiente
  * cierre le resta su monto solo (spec §6.4). `data.refundPaymentId` se acepta por compatibilidad y no se usa.
  */
 export async function createClawback(

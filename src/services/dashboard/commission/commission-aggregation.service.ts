@@ -48,8 +48,10 @@ export interface SummaryFilters {
  * Creates or updates CommissionSummary records for each staff member.
  *
  * Fase 3 (A4, Codex plan r1-5): si Postgres la elige víctima de un bloqueo mutuo con una anulación (que toma las filas y luego
- * el resumen), se repite la pasada COMPLETA: vuelve a sumar lo que siga CALCULATED; lo que ya marcó una transacción anterior
- * no se suma dos veces y lo recién anulado ya no entra.
+ * el resumen), se repite la pasada COMPLETA: vuelve a sumar lo que siga CALCULATED y lo que ya marcó una transacción anterior
+ * no se suma dos veces. 🔴 No garantiza que lo recién anulado quede fuera: la pasada suma ANTES de marcar y fuera de la
+ * transacción (H3, aparcado; sólo la pantalla de Comisiones), así que si relee antes de que la anulación confirme, le suma
+ * al resumen una fila que ya no marcará. El sobre de Pago al personal lee filas, no resúmenes.
  */
 export async function aggregateVenueCommissions(venueId: string, period: TierPeriod = TierPeriod.WEEKLY): Promise<AggregationResult> {
   return reintentarSiHayBloqueoMutuo('aggregateVenueCommissions', () => agregarUnaPasada(venueId, period))
@@ -548,9 +550,15 @@ export async function disputeSummary(summaryId: string, venueId: string, dispute
 
 /**
  * Recalculate a summary (for disputes/corrections). Con `db`, dentro de la transacción de quien llama (la anulación de una
- * comisión ya sumada, fase 3 A4).
+ * comisión ya sumada, fase 3 A4); sin ella, en su propia transacción, con su auditoría.
+ *
+ * 🔴 Ronda 1: escribe totales ABSOLUTOS, así que antes de leer bloquea el resumen. Sin el candado, una lectura que cae entre
+ * el `increment` del agregador y su COMMIT no ve las filas que éste acaba de marcar y las borra del resumen al escribir.
+ * El orden de candados no cambia: quien llama ya tiene las filas; el resumen va después.
  */
-export async function recalculateSummary(summaryId: string, venueId: string, db: Prisma.TransactionClient = prisma): Promise<any> {
+export async function recalculateSummary(summaryId: string, venueId: string, db?: Prisma.TransactionClient): Promise<any> {
+  if (!db) return prisma.$transaction(tx => recalculateSummary(summaryId, venueId, tx))
+  await db.$queryRaw(Prisma.sql`SELECT id FROM "CommissionSummary" WHERE id = ${summaryId} AND "venueId" = ${venueId} FOR UPDATE`)
   const summary = await db.commissionSummary.findFirst({
     where: { id: summaryId, venueId },
     include: {

@@ -22,10 +22,18 @@
 
 import prisma from '../../../utils/prismaClient'
 import logger from '../../../config/logger'
-import { PaymentEffect, Prisma, CommissionCalcType, CommissionCalcStatus, CommissionSummaryStatus, PaymentType } from '@prisma/client'
+import {
+  PaymentEffect,
+  Prisma,
+  CommissionCalcType,
+  CommissionCalcStatus,
+  CommissionPayoutStatus,
+  CommissionSummaryStatus,
+  PaymentType,
+} from '@prisma/client'
 import { NotFoundError, BadRequestError } from '../../../errors/AppError'
 import { logAction } from '../activity-log.service'
-import { writeLegacyActivityAuditTx } from '@/services/activityAudit.service'
+import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
 import { recalculateSummary } from './commission-aggregation.service'
 import { applyAttendancePenalty, resolveAttendancePenaltyRate } from './commission-attendance'
 import {
@@ -599,6 +607,9 @@ export async function createRefundCommission(
  *      (`applyFrozenCommissionInTx`).
  * Si una anulada estaba sumada a un resumen, el resumen se recalcula para que la pantalla de Comisiones no la siga sumando
  * (H2c). No mueve dinero: el sobre de pago al personal lee filas. Un resumen PAGADO por el flujo viejo no se reescribe.
+ * 🔴 Ronda 1: si el resumen de alguna de esas filas tiene un pago del flujo viejo EN CURSO (PENDING, APPROVED o
+ * PROCESSING), se RECHAZA sin tocar nada: el pago copió el monto del resumen y lo pagaría completo aunque la comisión ya
+ * no exista. Primero se cancela ese pago.
  * Si ya estaba todo anulado devuelve `anuladas: []` (idempotente).
  *
  * El agregador toma resumen → filas y esto filas → resumen: si chocan, Postgres aborta a una de las dos por bloqueo mutuo y
@@ -642,6 +653,28 @@ export async function anularComision(
   const anuladas = vivas.map(f => f.id)
   if (anuladas.length === 0) return { anuladas }
 
+  // Ronda 1: sus resúmenes, bloqueados (filas → resumen, el mismo orden del recálculo) para que un pago no se cuele a medias.
+  const resumenes = [...new Set(vivas.flatMap(f => (f.summaryId ? [f.summaryId] : [])))]
+  if (resumenes.length > 0) {
+    await db.$queryRaw(Prisma.sql`
+      SELECT id FROM "CommissionSummary"
+      WHERE id IN (${Prisma.join(resumenes)}) AND "venueId" = ${input.venueId}
+      ORDER BY id
+      FOR UPDATE`)
+    const pagoEnCurso = await db.commissionPayout.findFirst({
+      where: {
+        venueId: input.venueId,
+        summaryId: { in: resumenes },
+        status: { in: [CommissionPayoutStatus.PENDING, CommissionPayoutStatus.APPROVED, CommissionPayoutStatus.PROCESSING] },
+      },
+      select: { id: true },
+    })
+    if (pagoEnCurso)
+      throw new BadRequestError(
+        'No se puede anular: la comisión está en un pago de comisiones en curso. Cancela ese pago y vuelve a intentarlo.',
+      )
+  }
+
   await db.commissionCalculation.updateMany({
     where: { id: { in: anuladas }, venueId: input.venueId },
     data: { status: CommissionCalcStatus.VOIDED, voidedAt: new Date(), voidedBy: input.actorId, voidReason: input.motivo },
@@ -656,8 +689,8 @@ export async function anularComision(
   })
 
   // H2c: lo que ya estaba sumado a un resumen sale de él.
-  const resumenes = [...new Set(vivas.filter(f => f.status === CommissionCalcStatus.AGGREGATED && f.summaryId).map(f => f.summaryId!))]
-  for (const summaryId of resumenes) {
+  const sumadas = [...new Set(vivas.filter(f => f.status === CommissionCalcStatus.AGGREGATED && f.summaryId).map(f => f.summaryId!))]
+  for (const summaryId of sumadas) {
     const resumen = await db.commissionSummary.findFirst({ where: { id: summaryId, venueId: input.venueId }, select: { status: true } })
     if (resumen && resumen.status !== CommissionSummaryStatus.PAID) await recalculateSummary(summaryId, input.venueId, db)
   }
