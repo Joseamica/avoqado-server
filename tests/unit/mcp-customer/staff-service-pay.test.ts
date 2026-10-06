@@ -22,9 +22,11 @@ jest.mock('@/mcp/guard', () => ({
 }))
 jest.mock('@/services/access/access.service', () => ({ hasPermission: (...a: unknown[]) => mockHasPermission(...a) }))
 const mockOrgTiene = jest.fn()
+const mockTodas = jest.fn()
 jest.mock('@/services/dashboard/staffPay/acceso', () => ({
   venueHasServicePayAccess: (...a: unknown[]) => mockAccess(...a),
   organizacionTieneServicePay: (...a: unknown[]) => mockOrgTiene(...a),
+  assertPermisoEnTodasLasSedes: (...a: unknown[]) => mockTodas(...a),
 }))
 const mockPreviewLiq = jest.fn()
 const mockLiquidar = jest.fn()
@@ -82,8 +84,10 @@ const mockEstado = jest.fn()
 const mockActivar = jest.fn()
 const mockPropinas = jest.fn()
 const mockVentanas = jest.fn()
+const mockPlan = jest.fn()
 jest.mock('@/services/dashboard/staffPay/activacion.service', () => ({
   estadoActivacion: (...a: unknown[]) => mockEstado(...a),
+  previewActivacion: (...a: unknown[]) => mockPlan(...a),
   activarPagoAlPersonal: (...a: unknown[]) => mockActivar(...a),
   cambiarPropinas: (...a: unknown[]) => mockPropinas(...a),
   ventanasDePropinas: (...a: unknown[]) => mockVentanas(...a),
@@ -121,6 +125,8 @@ beforeEach(() => {
   mockOrgTiene.mockResolvedValue(true)
   mockEstado.mockResolvedValue({ activado: false, startDate: null, propinasEncendidas: false })
   mockVentanas.mockResolvedValue([])
+  mockTodas.mockResolvedValue(undefined)
+  mockPlan.mockResolvedValue({ periodicidad: 'MONTHLY', periodicidadFija: false, startDate: '2026-10-01' })
 })
 
 // La forma REAL de `previewLiquidacion` (B2): filas de `diferenciasDeClase`, destino legible y `sedeEnDestino`.
@@ -1245,9 +1251,21 @@ describe('pago al personal con ventas por MCP (spec fase 3 §12)', () => {
       startDate: '2026-10-01',
       propinasEncendidas: true,
       ventanasDePropinas: [{ desde: '2026-10-03T18:00:00.000Z', hasta: null }],
+      ventanasTruncadas: false,
+      timezone: 'America/Mexico_City',
     })
     expect(mockEstado).toHaveBeenCalledWith(expect.anything(), 'o1')
-    expect(mockVentanas).toHaveBeenCalledWith('o1')
+    // Pide una de más para saber si hay más de las que devuelve.
+    expect(mockVentanas).toHaveBeenCalledWith('o1', 21)
+  })
+
+  it('config: con más ventanas de propinas de las que caben, devuelve las 20 más nuevas y avisa que hay más', async () => {
+    mockVentanas.mockResolvedValue(
+      Array.from({ length: 21 }, (_, i) => ({ desde: `2026-09-${String(i + 1).padStart(2, '0')}T18:00:00.000Z`, hasta: null })),
+    )
+    const r = parse(await handlers.get('staff_service_pay_config')!({ venueId: 'v1' }, {}))
+    expect(r.activacion.ventanasDePropinas).toHaveLength(20)
+    expect(r.activacion.ventanasTruncadas).toBe(true)
   })
 
   it('el desglose de un periodo ABIERTO con vista «recibo» devuelve el recibo en vivo (con comisiones y propinas)', async () => {
@@ -1277,8 +1295,16 @@ describe('pago al personal con ventas por MCP (spec fase 3 §12)', () => {
 
     it('activar: la vista previa dice actual → nuevo y no escribe; confirmar activa y audita una vez', async () => {
       const p = parse(await conf({ accion: 'activar', periodicidad: 'SEMIMONTHLY' }))
-      expect(p).toMatchObject({ ok: false, requiresConfirmation: true, actual: { activado: false } })
+      expect(p).toMatchObject({
+        ok: false,
+        requiresConfirmation: true,
+        actual: { activado: false, periodicidad: 'MONTHLY', periodicidadFija: false },
+        nuevo: { activado: true, periodicidad: 'SEMIMONTHLY', startDate: '2026-10-01' },
+      })
+      expect(mockPlan).toHaveBeenCalledWith({ venueId: 'v1', periodicidad: 'SEMIMONTHLY' })
+      expect(mockTodas).toHaveBeenCalledWith('s1', 'o1', 'staffpay:close')
       expect(p.message).toMatch(/quincenal/)
+      expect(p.message).toMatch(/Desde el 2026-10-01/)
       expect(p.message).toMatch(/agrégalo como ajuste/)
       expect(mockActivar).not.toHaveBeenCalled()
       expect(auditMcpWrite).not.toHaveBeenCalled()
@@ -1315,7 +1341,8 @@ describe('pago al personal con ventas por MCP (spec fase 3 §12)', () => {
       expect(p).toMatchObject({ requiresConfirmation: true })
       expect(p.message).toMatch(/apagadas → encendidas/)
       expect(mockPropinas).not.toHaveBeenCalled()
-      mockPropinas.mockResolvedValue({ encendidas: true })
+      expect(mockTodas).toHaveBeenCalledWith('s1', 'o1', 'staffpay:close')
+      mockPropinas.mockResolvedValue({ encendidas: true, cambio: true })
       expect(parse(await conf({ accion: 'propinas', encender: true, confirm: true }))).toMatchObject({ ok: true, encendidas: true })
       expect(mockPropinas).toHaveBeenCalledWith({ userId: 's1', venueId: 'v1', encender: true })
       expect(auditMcpWrite).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ action: 'SERVICE_PAY_TIPS_SET' }))
@@ -1351,6 +1378,54 @@ describe('pago al personal con ventas por MCP (spec fase 3 §12)', () => {
       const r = parse(await conf({ accion: 'activar', periodicidad: 'MONTHLY', confirm: true }))
       expect(r).toMatchObject({ ok: false, error: expect.stringMatching(/todas las sedes/) })
       expect(auditMcpWrite).not.toHaveBeenCalled()
+    })
+
+    it('con periodos guardados la periodicidad es fija: otra no se ofrece (daría 409); la misma, sí, y lo dice', async () => {
+      mockPlan.mockResolvedValue({ periodicidad: 'MONTHLY', periodicidadFija: true, startDate: '2026-10-01' })
+      const otra = parse(await conf({ accion: 'activar', periodicidad: 'SEMIMONTHLY' }))
+      expect(otra).toMatchObject({ ok: false, code: 'PERIODICIDAD_FIJA', actual: { periodicidad: 'MONTHLY', periodicidadFija: true } })
+      expect(otra.requiresConfirmation).toBeUndefined()
+      expect(otra.error).toMatch(/mensual/)
+      const misma = parse(await conf({ accion: 'activar', periodicidad: 'MONTHLY' }))
+      expect(misma).toMatchObject({ requiresConfirmation: true, actual: { periodicidadFija: true }, nuevo: { startDate: '2026-10-01' } })
+      expect(misma.message).toMatch(/ya no cambia/)
+      expect(mockActivar).not.toHaveBeenCalled()
+    })
+
+    it('sin staffpay:close en OTRA sede, la vista previa ya lo rechaza (activar y propinas), antes de que el humano confirme', async () => {
+      const sinPermiso = Object.assign(
+        new Error('Esta acción afecta a toda la organización: necesitas staffpay:close en todas las sedes'),
+        {
+          statusCode: 403,
+        },
+      )
+      mockTodas.mockRejectedValue(sinPermiso)
+      const a = parse(await conf({ accion: 'activar', periodicidad: 'MONTHLY' }))
+      expect(a).toMatchObject({ ok: false, error: expect.stringMatching(/todas las sedes/) })
+      expect(a.requiresConfirmation).toBeUndefined()
+      expect(mockPlan).not.toHaveBeenCalled()
+      mockEstado.mockResolvedValue({ activado: true, startDate: '2026-09-01', propinasEncendidas: false })
+      const p = parse(await conf({ accion: 'propinas', encender: true }))
+      expect(p).toMatchObject({ ok: false, error: expect.stringMatching(/todas las sedes/) })
+      expect(p.requiresConfirmation).toBeUndefined()
+      expect(mockTodas).toHaveBeenCalledTimes(2)
+      expect(mockActivar).not.toHaveBeenCalled()
+      expect(mockPropinas).not.toHaveBeenCalled()
+    })
+
+    it('propinas: si el service no cambió nada (otra persona ya lo hizo), no se audita', async () => {
+      mockEstado.mockResolvedValue({ activado: true, startDate: '2026-09-01', propinasEncendidas: false })
+      mockPropinas.mockResolvedValue({ encendidas: true, cambio: false })
+      expect(parse(await conf({ accion: 'propinas', encender: true, confirm: true }))).toMatchObject({ ok: true, cambio: false })
+      expect(auditMcpWrite).not.toHaveBeenCalled()
+    })
+
+    it('sin mcp:write el motivo dice que configura el pago al personal, no que registra pagos', async () => {
+      mockRequireWrite.mockImplementationOnce((_s: unknown, _p: string, motivo: string) => {
+        throw new Error(`ScopeError: ${motivo}`)
+      })
+      await expect(conf({ accion: 'activar', periodicidad: 'MONTHLY' })).rejects.toThrow(/configura el pago al personal/)
+      expect(mockEstado).not.toHaveBeenCalled()
     })
 
     it('por el catálogo real: confirm:true sin el token de la vista previa no escribe; con él, sí', async () => {

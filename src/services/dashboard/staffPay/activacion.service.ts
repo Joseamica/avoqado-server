@@ -47,23 +47,13 @@ export async function activarPagoAlPersonal(input: {
       select: { staffPayStartDate: true, servicePayPeriodicity: true },
     })
     if (org.staffPayStartDate) return { startDate: dbDateComoFecha(org.staffPayStartDate), yaActivado: true }
-    if (
-      org.servicePayPeriodicity !== input.periodicidad &&
-      (await tx.servicePayPeriod.count({ where: { organizationId: v.organizationId } })) > 0
-    ) {
+    if (org.servicePayPeriodicity !== input.periodicidad && (await hayPeriodos(tx, v.organizationId))) {
       throw new ConflictError(
         'La periodicidad ya no se puede cambiar: ya hay periodos guardados. Activa con la que ya tienes.',
         'PERIODICIDAD_FIJA',
       )
     }
-    // El inicio del periodo ABIERTO (spec §7.1). Si el que contiene «hoy» ya se cerró (otra sede, más al oeste, fuera de
-    // su alcance), se empieza el día siguiente a su fin: el siguiente cierre nunca barre lo que ya se cerró.
-    const fila = await periodoQueContieneFecha(tx, v.organizationId, hoy)
-    const startDate = !fila
-      ? periodoQueContiene(hoy, input.periodicidad).start
-      : fila.status === 'CLOSED'
-        ? diaCivilSiguiente(dbDateComoFecha(fila.periodEnd))
-        : dbDateComoFecha(fila.periodStart)
+    const startDate = await inicioAlActivar(tx, v.organizationId, hoy, input.periodicidad)
     await tx.organization.update({
       where: { id: v.organizationId },
       data: { staffPayStartDate: fechaComoDbDate(startDate), servicePayPeriodicity: input.periodicidad },
@@ -80,6 +70,44 @@ export async function activarPagoAlPersonal(input: {
   })
 }
 
+/** Con periodos guardados la periodicidad ya no cambia (D3 de la fase 2). */
+async function hayPeriodos(db: Db, organizationId: string): Promise<boolean> {
+  return (await db.servicePayPeriod.count({ where: { organizationId } })) > 0
+}
+
+/**
+ * El inicio del periodo ABIERTO hoy (spec §7.1). Si el que contiene «hoy» ya se cerró (otra sede, más al oeste, fuera de
+ * su alcance), se empieza el día siguiente a su fin: el siguiente cierre nunca barre lo que ya se cerró.
+ */
+async function inicioAlActivar(db: Db, organizationId: string, hoy: string, periodicidad: Periodicidad): Promise<string> {
+  const fila = await periodoQueContieneFecha(db, organizationId, hoy)
+  if (!fila) return periodoQueContiene(hoy, periodicidad).start
+  return fila.status === 'CLOSED' ? diaCivilSiguiente(dbDateComoFecha(fila.periodEnd)) : dbDateComoFecha(fila.periodStart)
+}
+
+/**
+ * Lo que haría «activar» hoy, sin escribir ni tomar candados (vista previa del MCP, B6 ronda 1): la periodicidad guardada,
+ * si ya es fija y el inicio que tendría con la pedida. Misma regla que `activarPagoAlPersonal`, que la vuelve a revisar
+ * bajo candado al confirmar.
+ */
+export async function previewActivacion(input: {
+  venueId: string
+  periodicidad: Periodicidad
+  ahora?: Date
+}): Promise<{ periodicidad: Periodicidad; periodicidadFija: boolean; startDate: string }> {
+  const v = await prisma.venue.findUniqueOrThrow({ where: { id: input.venueId }, select: { organizationId: true, timezone: true } })
+  const org = await prisma.organization.findUniqueOrThrow({
+    where: { id: v.organizationId },
+    select: { servicePayPeriodicity: true },
+  })
+  const hoy = hoyLocal(v.timezone || TZ_DEFAULT, input.ahora)
+  return {
+    periodicidad: org.servicePayPeriodicity,
+    periodicidadFija: await hayPeriodos(prisma, v.organizationId),
+    startDate: await inicioAlActivar(prisma, v.organizationId, hoy, input.periodicidad),
+  }
+}
+
 /**
  * Interruptor «Pagar las propinas en el recibo» (spec fase 3 §6.3, §7.1, D2): prender abre una ventana [ahora, ∞);
  * apagar cierra la abierta en `ahora`. Lo que ya ganó el derecho a entrar no se pierde (Codex r1-5). Repetir el estado
@@ -90,7 +118,7 @@ export async function cambiarPropinas(input: {
   venueId: string
   encender: boolean
   ahora?: Date
-}): Promise<{ encendidas: boolean }> {
+}): Promise<{ encendidas: boolean; cambio: boolean }> {
   if (typeof input.encender !== 'boolean') throw new BadRequestError('Indica si las propinas se pagan en el recibo')
   const v = await prisma.venue.findUniqueOrThrow({ where: { id: input.venueId }, select: { organizationId: true } })
   await assertPermisoEnTodasLasSedes(input.userId, v.organizationId, 'staffpay:close')
@@ -103,7 +131,8 @@ export async function cambiarPropinas(input: {
       where: { organizationId: v.organizationId, endsAt: null },
       select: { id: true, startsAt: true },
     })
-    if (input.encender === (abierta !== null)) return { encendidas: input.encender }
+    // `cambio`: el MCP audita sólo lo que de verdad cambió (otra persona pudo hacerlo entre la vista previa y el confirmar).
+    if (input.encender === (abierta !== null)) return { encendidas: input.encender, cambio: false }
     if (abierta) {
       // `ahora` se fija antes de la tx (lo reusa cada reintento) y el reloj de otra instancia puede ir atrás: nunca antes
       // del inicio (CHECK StaffPayTipWindow_rango). Queda una ventana vacía [inicio, inicio), que no pesca nada.
@@ -120,7 +149,7 @@ export async function cambiarPropinas(input: {
       entityId: v.organizationId,
       data: { antes: abierta !== null, despues: input.encender, en: ahora.toISOString() },
     })
-    return { encendidas: input.encender }
+    return { encendidas: input.encender, cambio: true }
   })
 }
 

@@ -5,6 +5,7 @@ import {
   activarPagoAlPersonal,
   cambiarPropinas,
   estadoActivacion,
+  previewActivacion,
   ventanasDePropinas,
 } from '@/services/dashboard/staffPay/activacion.service'
 import { barreraDeLaOrganizacion, borrarMundo, crearMundo, Mundo, periodoCerrado } from './_mundo'
@@ -119,7 +120,7 @@ describe('interruptor de propinas (spec fase 3 §7.1, Codex r1-5)', () => {
       await b.esperarA(1)
       expect((await estadoActivacion(prisma, m.orgId)).propinasEncendidas).toBe(false)
       await b.soltar()
-      expect(await enCurso).toEqual({ encendidas: true })
+      expect(await enCurso).toEqual({ encendidas: true, cambio: true })
     } finally {
       await b.soltar()
     }
@@ -127,11 +128,11 @@ describe('interruptor de propinas (spec fase 3 §7.1, Codex r1-5)', () => {
 
   it('prender, prender, apagar, apagar: UNA ventana [inicio, fin) con quién y cuándo, y sólo dos ActivityLog', async () => {
     await activar('MONTHLY', '2026-09-01T18:00:00Z')
-    expect(await propinas(true, '2026-09-03T18:00:00Z')).toEqual({ encendidas: true })
-    expect(await propinas(true, '2026-09-04T18:00:00Z')).toEqual({ encendidas: true })
+    expect(await propinas(true, '2026-09-03T18:00:00Z')).toEqual({ encendidas: true, cambio: true })
+    expect(await propinas(true, '2026-09-04T18:00:00Z')).toEqual({ encendidas: true, cambio: false })
     expect((await estadoActivacion(prisma, m.orgId)).propinasEncendidas).toBe(true)
-    expect(await propinas(false, '2026-09-10T18:00:00Z')).toEqual({ encendidas: false })
-    expect(await propinas(false, '2026-09-11T18:00:00Z')).toEqual({ encendidas: false })
+    expect(await propinas(false, '2026-09-10T18:00:00Z')).toEqual({ encendidas: false, cambio: true })
+    expect(await propinas(false, '2026-09-11T18:00:00Z')).toEqual({ encendidas: false, cambio: false })
     const v = await prisma.staffPayTipWindow.findMany({ where: { organizationId: m.orgId }, take: 10 })
     expect(v).toHaveLength(1)
     expect(v[0]).toMatchObject({
@@ -157,7 +158,7 @@ describe('interruptor de propinas (spec fase 3 §7.1, Codex r1-5)', () => {
   it('apagar con un reloj anterior al inicio de la ventana (reintento o desfase entre instancias) no truena: queda vacía [inicio, inicio)', async () => {
     await activar('MONTHLY', '2026-09-01T18:00:00Z')
     await propinas(true, '2026-09-10T18:00:00Z')
-    expect(await propinas(false, '2026-09-10T17:59:59Z')).toEqual({ encendidas: false })
+    expect(await propinas(false, '2026-09-10T17:59:59Z')).toEqual({ encendidas: false, cambio: true })
     const v = await prisma.staffPayTipWindow.findMany({ where: { organizationId: m.orgId }, take: 10 })
     expect(v).toHaveLength(1)
     expect(v[0]).toMatchObject({ startsAt: new Date('2026-09-10T18:00:00Z'), endsAt: new Date('2026-09-10T18:00:00Z'), endedById: m.owner })
@@ -178,5 +179,36 @@ describe('interruptor de propinas (spec fase 3 §7.1, Codex r1-5)', () => {
     expect(await ventanasDePropinas(m.orgId, 2.5)).toHaveLength(20)
     expect(await ventanasDePropinas(m.orgId, 1000)).toHaveLength(100)
     expect(await ventanasDePropinas(m.orgId, 0)).toHaveLength(1)
+  })
+})
+
+describe('vista previa de activar (B6 ronda 1): lo mismo que haría activar, sin escribir', () => {
+  const plan = (periodicidad: 'MONTHLY' | 'SEMIMONTHLY', iso: string) =>
+    previewActivacion({ venueId: m.venueId, periodicidad, ahora: new Date(iso) })
+
+  it('sin periodos guardados: la periodicidad no es fija, el inicio es el del periodo de hoy y no escribe nada', async () => {
+    expect(await plan('SEMIMONTHLY', '2026-09-20T18:00:00Z')).toEqual({
+      periodicidad: 'MONTHLY',
+      periodicidadFija: false,
+      startDate: '2026-09-16',
+    })
+    expect(await estadoActivacion(prisma, m.orgId)).toEqual({ activado: false, startDate: null, propinasEncendidas: false })
+    expect(await periodicidad()).toBe('MONTHLY')
+    expect(await logs('SERVICE_PAY_ACTIVATED')).toBe(0)
+  })
+
+  it('con periodos guardados en MONTHLY dice que la periodicidad ya es fija', async () => {
+    await periodoCerrado(m, '2026-08-01', '2026-08-31')
+    expect(await plan('SEMIMONTHLY', '2026-09-20T18:00:00Z')).toMatchObject({ periodicidad: 'MONTHLY', periodicidadFija: true })
+  })
+
+  it('si el periodo de hoy ya está cerrado, la fecha es la del día siguiente a su fin: la misma que da activar', async () => {
+    await periodoCerrado(m, '2026-09-01', '2026-09-30')
+    expect(await plan('MONTHLY', '2026-09-20T18:00:00Z')).toEqual({
+      periodicidad: 'MONTHLY',
+      periodicidadFija: true,
+      startDate: '2026-10-01',
+    })
+    expect(await activar('MONTHLY', '2026-09-20T18:00:00Z')).toEqual({ startDate: '2026-10-01', yaActivado: false })
   })
 })
