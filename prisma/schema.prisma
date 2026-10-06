@@ -14334,7 +14334,13 @@ model ClassSession {
   assignedStaffId String?
   assignedStaff   Staff?  @relation("ClassSessionStaff", fields: [assignedStaffId], references: [id], onDelete: SetNull)
 
-  status ClassSessionStatus @default(SCHEDULED)
+  status          ClassSessionStatus @default(SCHEDULED)
+  /// Pago por servicio (spec fase 3 §6.6): el PRIMER instante en que pasó a CANCELLED. Sólo lo escribe cancelClassSession.
+  cancelledAt     DateTime?
+  /// La primera coach que tuvo la clase; no vuelve a cambiar. Sin FK a propósito: borrar a la persona no cambia el pago.
+  originalStaffId String?
+  /// Cuándo se asignó a la coach ACTUAL (`assignedStaffId`).
+  staffAssignedAt DateTime?
 
   // Internal notes
   internalNotes String? @db.Text
@@ -18962,16 +18968,21 @@ model ServicePayTable {
 
 /// Versión inmutable de una tabla. Editar = publicar otra versión.
 model ServicePayTableVersion {
-  id            String              @id @default(cuid())
-  tableId       String
-  table         ServicePayTable     @relation(fields: [tableId], references: [id], onDelete: Cascade)
-  effectiveFrom DateTime            @db.Date
-  revision      Int
-  kind          ServicePayTableKind @default(TOTAL_BY_COUNT)
-  countMode     ServicePayCountMode @default(BOOKED)
-  maxCount      Int
-  createdById   String?
-  createdAt     DateTime            @default(now())
+  id               String              @id @default(cuid())
+  tableId          String
+  table            ServicePayTable     @relation(fields: [tableId], references: [id], onDelete: Cascade)
+  effectiveFrom    DateTime            @db.Date
+  revision         Int
+  kind             ServicePayTableKind @default(TOTAL_BY_COUNT)
+  countMode        ServicePayCountMode @default(BOOKED)
+  maxCount         Int
+  /// Reglas de clase (spec fase 3 §6.6), apagadas (null) de fábrica. Suplencia con poco aviso: horas y bono van juntos.
+  coverBonusHours  Int?
+  coverBonusAmount Decimal?            @db.Decimal(12, 2)
+  /// Cancelación tardía: se paga la celda de 0 lugares de su nivel.
+  lateCancelHours  Int?
+  createdById      String?
+  createdAt        DateTime            @default(now())
 
   cells  ServicePayTableCell[]
   anclas ClassSessionPayState[]

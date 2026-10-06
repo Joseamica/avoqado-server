@@ -114,6 +114,10 @@ export async function clase(
     venueId?: string
     productId?: string
     status?: 'CANCELLED'
+    /** Estampas de la fase 3 (spec §7.2), ISO. Sin ellas la clase queda como una de antes de la migración. */
+    originalStaffId?: string | null
+    staffAssignedAt?: string
+    cancelledAt?: string
   },
 ) {
   const venueId = o.venueId ?? m.venueId
@@ -121,7 +125,19 @@ export async function clase(
   const startsAt = new Date(o.inicioIso)
   const endsAt = new Date(startsAt.getTime() + 50 * 60000)
   const cs = await prisma.classSession.create({
-    data: { venueId, productId, startsAt, endsAt, duration: 50, capacity: 12, assignedStaffId: o.staffId, status: o.status ?? 'SCHEDULED' },
+    data: {
+      venueId,
+      productId,
+      startsAt,
+      endsAt,
+      duration: 50,
+      capacity: 12,
+      assignedStaffId: o.staffId,
+      status: o.status ?? 'SCHEDULED',
+      originalStaffId: o.originalStaffId ?? null,
+      staffAssignedAt: o.staffAssignedAt ? new Date(o.staffAssignedAt) : null,
+      cancelledAt: o.cancelledAt ? new Date(o.cancelledAt) : null,
+    },
   })
   const reservas = o.reservas ?? []
   if (reservas.length) {
