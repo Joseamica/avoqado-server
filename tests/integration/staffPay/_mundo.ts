@@ -72,6 +72,13 @@ export async function borrarMundo(m: Mundo | undefined) {
   if (!m?.orgId) return
   await prisma.serviceEarning.deleteMany({ where: { organizationId: m.orgId } })
   await prisma.staffPayStatement.deleteMany({ where: { period: { organizationId: m.orgId } } })
+  // Fase 3: ventas de las pruebas del sobre. `Payment` frena el borrado de la sede (Restrict) y las comisiones y sus
+  // esquemas el de la persona: van antes que las sedes y que el staff.
+  const deLaOrg = { venue: { organizationId: m.orgId } }
+  await prisma.commissionCalculation.deleteMany({ where: deLaOrg })
+  await prisma.commissionConfig.deleteMany({ where: deLaOrg })
+  await prisma.payment.deleteMany({ where: deLaOrg })
+  await prisma.order.deleteMany({ where: deLaOrg })
   await prisma.venue.deleteMany({ where: { organizationId: m.orgId } })
   await prisma.servicePayPeriod.deleteMany({ where: { organizationId: m.orgId } })
   await prisma.staffPayLevelAssignment.deleteMany({ where: { organizationId: m.orgId } })
