@@ -925,6 +925,9 @@ export const CreateProductWithInventorySchema = z.object({
       price: z.number().min(0),
       categoryId: z.string().cuid(),
       imageUrl: z.union([z.string().url(), z.literal('')]).optional(),
+      // Los mismos códigos que el paso 1. Sin declararlos zod los tira y el SKU se autogenera (La Galeterie, 5-oct).
+      sku: z.string().max(64).optional(),
+      gtin: z.string().max(32).optional(),
       type: z
         .enum([
           'FOOD',
