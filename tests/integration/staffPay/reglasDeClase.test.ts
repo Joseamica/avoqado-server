@@ -169,7 +169,14 @@ describe('cancelación tardía (D4-b)', () => {
     await prender()
     await prisma.servicePayTableCell.deleteMany({ where: { versionId, count: 0, payLevelId: m.hc } })
     const id = await clase(m, { staffId: m.ana, inicioIso: DIA(4), status: 'CANCELLED', cancelledAt: menos(DIA(4), H) })
-    expect(await vivo(id)).toMatchObject({ estado: 'EXCEPCION', motivo: 'SIN_MONTO_PARA_ESE_CONTEO', canceladaTarde: true, monto: null })
+    // `regla` sólo dice lo que la regla decidió (D3a r2): sin celda no hubo sueldo base que pagar.
+    expect(await vivo(id)).toMatchObject({
+      estado: 'EXCEPCION',
+      motivo: 'SIN_MONTO_PARA_ESE_CONTEO',
+      canceladaTarde: true,
+      monto: null,
+      regla: null,
+    })
   })
 
   it('una suplencia con poco aviso que después se cancela tarde cobra sólo el sueldo base (sin bono)', async () => {
@@ -359,6 +366,30 @@ describe('fronteras en la zona de la sede (horas de reloj, cruzando la medianoch
   })
 })
 
+describe('después del inicio cuenta como 0 h de aviso (D3a r2)', () => {
+  it('cambio de coach DESPUÉS de empezar: suplencia con 0 h, su celda + el bono', async () => {
+    await prender()
+    const id = await clase(m, {
+      staffId: m.ana,
+      inicioIso: DIA(4),
+      reservas: confirmadas(8),
+      originalStaffId: m.sofia,
+      staffAssignedAt: menos(DIA(4), -H), // una hora DESPUÉS del inicio
+    })
+    const v = await vivo(id)
+    expect(v).toMatchObject({ estado: 'OK', bonoSuplencia: '100.00', regla: { tipo: 'SUPLENCIA', horas: 0, bono: '100.00' } })
+    expect(pesos(v!.monto)).toBe('670.00')
+  })
+
+  it('cancelación DESPUÉS de empezar: cancelada tarde con 0 h, paga el sueldo base', async () => {
+    await prender()
+    const id = await clase(m, { staffId: m.ana, inicioIso: DIA(4), status: 'CANCELLED', cancelledAt: menos(DIA(4), -H) })
+    const v = await vivo(id)
+    expect(v).toMatchObject({ estado: 'OK', conteo: 0, canceladaTarde: true, regla: { tipo: 'CANCELACION_TARDIA', horas: 0 } })
+    expect(pesos(v!.monto)).toBe('250.00')
+  })
+})
+
 describe('ajustes a mano sobre una cancelada tarde (resolución 12)', () => {
   it('el conteo corregido se ignora: vale la celda de 0 lugares', async () => {
     await prender()
@@ -369,14 +400,14 @@ describe('ajustes a mano sobre una cancelada tarde (resolución 12)', () => {
     expect(pesos(v!.monto)).toBe('250.00')
   })
 
-  it('el monto acordado manda, y la regla sigue diciendo por qué se paga', async () => {
+  it('el monto acordado manda, y entonces la regla no decidió nada: `regla` null (D3a r2)', async () => {
     await prender()
     const id = await clase(m, { staffId: m.ana, inicioIso: DIA(4), status: 'CANCELLED', cancelledAt: menos(DIA(4), H) })
     await prisma.classSessionPayState.create({
       data: { classSessionId: id, payAmountOverride: new Prisma.Decimal(500), overrideReason: 'Acordado' },
     })
     const v = await vivo(id)
-    expect(v).toMatchObject({ estado: 'OK', canceladaTarde: true, bonoSuplencia: null, regla: { tipo: 'CANCELACION_TARDIA', horas: 1 } })
+    expect(v).toMatchObject({ estado: 'OK', canceladaTarde: true, bonoSuplencia: null, regla: null })
     expect(pesos(v!.monto)).toBe('500.00')
   })
 

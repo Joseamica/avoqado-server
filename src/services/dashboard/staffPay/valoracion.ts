@@ -255,9 +255,10 @@ export function valoracionCte(f: FiltroValoracion): Prisma.Sql {
                  THEN cc.cover_monto::text
              END AS "bonoSuplencia",
              cc.cancelada_tarde AS "canceladaTarde",
+             -- regla dice sólo lo que la regla decidió (D3a r2): el monto acordado manda y sin celda no hay sueldo base.
              CASE
                WHEN cc.excluida THEN NULL
-               WHEN cc.cancelada_tarde
+               WHEN cc.cancelada_tarde AND cc."payAmountOverride" IS NULL AND cell.amount IS NOT NULL
                  THEN jsonb_build_object('tipo', 'CANCELACION_TARDIA',
                         'horas', GREATEST(0, floor(extract(epoch FROM cc."startsAt" - cc.cancelada_en) / 3600))::int)
                WHEN cc.suplencia_tarde AND cc."payAmountOverride" IS NULL AND cell.amount IS NOT NULL
