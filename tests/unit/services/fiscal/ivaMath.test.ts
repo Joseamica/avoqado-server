@@ -7,12 +7,12 @@ import {
   grossByRateFromItems,
   desglosePorTratamiento,
   mezclaDesdeTasas,
-  mezclaPorTratamiento,
   sumarDesglose,
   tasasDe,
   type DesglosePorTratamiento,
   type MezclaPorTratamiento,
 } from '../../../../src/services/fiscal/ivaMath'
+import { mezclaPorTratamiento } from '../../../../src/services/fiscal/mezclaDeOrden'
 import type { IvaTratamiento } from '../../../../src/services/fiscal/ivaTratamiento'
 
 describe('splitIvaIncluded (IVA-included → base + tax)', () => {

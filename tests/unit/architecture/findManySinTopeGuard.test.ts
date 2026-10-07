@@ -157,7 +157,8 @@ const INVENTARIO: Record<string, number> = {
   'src/services/cleanup/liveDemoCleanup.service.ts': 2,
   'src/services/command-center/commandCenter.service.ts': 6,
   'src/services/consumer/reservation.consumer.service.ts': 3,
-  'src/services/dashboard/accounting.dashboard.service.ts': 2,
+  // accounting.dashboard.service.ts: 2 → 0 (B4b, 2026-10-05/06). El estado de resultados enumera con un SELECT con LIMIT
+  // (Tarea 4) y el Resumen y Bancos suman en Postgres con groupBy (Tarea 5): ya no traen una fila por cobro del periodo.
   'src/services/dashboard/activity-log.service.ts': 9,
   'src/services/dashboard/ai-learning.service.ts': 1,
   'src/services/dashboard/alert.service.ts': 4,

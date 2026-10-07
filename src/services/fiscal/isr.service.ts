@@ -1,7 +1,13 @@
 import { BadRequestError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
-import { getIncomeStatement } from '../dashboard/accounting.dashboard.service'
+import {
+  conFotoDeReporte,
+  estadoDeResultadosEnFoto,
+  LIMITES_DEL_REPORTE,
+  MENSAJE_MES_NO_CALCULADO,
+} from '../dashboard/accounting.dashboard.service'
 import { getSalesRetentionCents } from './salesRetention.service'
+import { comoErrorDelMes } from './errorDelMes'
 import { computePeriodCogsCentsRange } from './cogs.service'
 import { getYearDepreciationCents } from './fixedAssetDepreciation.service'
 import { getPendingLossCents } from './fiscalLoss.service'
@@ -122,16 +128,32 @@ export interface IsrProvisionalResult {
   isEstimate: boolean
 }
 
-/** Locales del contribuyente por RFC (de Venue.rfc O FiscalEmisor.rfc), case-insensitive. */
-async function venuesOfRfc(venueId: string, rfc: string): Promise<{ id: string; organizationId: string }[]> {
+/**
+ * B4b (fallo 1 de la ronda 8; Codex r7 R7-1; T7-I1): cuánto puede durar la foto del ISR. El peor mes permitido debe correr en ≤ 60 s
+ * (Tarea 8) ⇒ ≥ 5,000 órdenes/s; 90 s alcanzan 450,000 órdenes en el ejercicio, 1.25 veces el año de 30,000 órdenes al mes.
+ * Queda bajo el corte de 100 s del proxy de Cloudflare, para que `REPORT_TIMEOUT` llegue al navegador (un 524 nunca trae nuestro código).
+ */
+export const TIEMPO_MAXIMO_DEL_ISR_MS = 90_000
+
+/**
+ * Locales del contribuyente por RFC (de Venue.rfc O FiscalEmisor.rfc), case-insensitive. B4b: trae también `name` y `timezone`, que
+ * pide el estado de resultados dentro de la foto del ISR (`estadoDeResultadosEnFoto`) y el aviso del log.
+ */
+async function venuesOfRfc(
+  venueId: string,
+  rfc: string,
+): Promise<{ id: string; organizationId: string; name: string; timezone: string | null }[]> {
   const venues = await prisma.venue.findMany({
     where: {
       OR: [{ rfc: { equals: rfc, mode: 'insensitive' } }, { fiscalEmisors: { some: { rfc: { equals: rfc, mode: 'insensitive' } } } }],
     },
-    select: { id: true, organizationId: true },
+    select: { id: true, organizationId: true, name: true, timezone: true },
   })
   if (!venues.some(v => v.id === venueId)) {
-    const self = await prisma.venue.findUnique({ where: { id: venueId }, select: { id: true, organizationId: true } })
+    const self = await prisma.venue.findUnique({
+      where: { id: venueId },
+      select: { id: true, organizationId: true, name: true, timezone: true },
+    })
     if (self) venues.push(self)
   }
   return venues
@@ -144,19 +166,52 @@ const monthRange = (period: string) => {
 }
 
 /**
- * Σ ingreso cobrado SIN IVA de TODOS los locales del RFC en un rango. La base de ISR excluye el IVA (LISR 113-E; en régimen
- * general el IVA trasladado no es ingreso acumulable) y, desde el plan 4b (criterio 3), incluye TODOS los tratamientos:
- * gravado, tasa 0, exento y no objeto (`ingresosSinIvaCents`). Sacar lo exento de la base gravable del IVA no lo saca del
- * ISR. Las deducciones se toman del `subtotalCents` (sin IVA) de los gastos: los dos lados quedan consistentes.
+ * B4b (fallo 2 de la ronda 7, fallo 1 de la ronda 8; Codex r6 R6-2, r7 R7-1): el ingreso sin IVA de cada mes del ejercicio hasta
+ * `period`, de enero en adelante, UNO TRAS OTRO y, en cada mes, local por local, TODO dentro de UNA foto. El acumulado es su suma:
+ * exacto (misma versión de los datos para todos los meses; la parte de cada movimiento no depende del cierre del reporte) y cada mes
+ * dentro de los topes. Un rango de enero a diciembre podría pasar de 300,000 órdenes aunque cada mes quepa. Base de ISR sin IVA: el
+ * campo de 4b (`ingresosSinIvaCents`) o, sin él, la base gravable.
+ *
+ * La base de ISR excluye el IVA (LISR 113-E; en régimen general el IVA trasladado no es ingreso acumulable) y, desde el plan 4b
+ * (criterio 3), incluye TODOS los tratamientos: gravado, tasa 0, exento y no objeto. Sacar lo exento de la base gravable del IVA no
+ * lo saca del ISR. Las deducciones se toman del `subtotalCents` (sin IVA) de los gastos: los dos lados quedan consistentes.
+ *
+ * Una sola conexión: los locales NO se reparten con `enParaleloAcotado` (una transacción corre sus consultas una tras otra). Un mes
+ * que pasa un tope da `REPORT_TOO_LARGE` y detiene todo el ISR; si la foto vence, `REPORT_TIMEOUT` con el texto mensual.
  */
-async function ingresoNetoRfc(venueIds: string[], from: string, to: string): Promise<{ netCents: number; sales: number }> {
-  const incomes = await Promise.all(venueIds.map(id => getIncomeStatement(id, { from, to })))
-  return {
-    // Sin el campo (Ruling 4b-R9) la base gravable, que con todo al 16 % es la misma cifra.
-    netCents: incomes.reduce((s, r) => s + (r.fiscalRevenue.ingresosSinIvaCents ?? r.fiscalRevenue.taxableBaseCents), 0),
-    sales: incomes.reduce((s, r) => s + r.metrics.salesCount, 0),
-  }
+async function ingresosPorMes(
+  venues: Array<{ id: string; name: string; timezone: string | null }>,
+  period: string,
+  quien: { venueName: string },
+): Promise<Array<{ netCents: number; sales: number }>> {
+  const { year, month, to } = monthRange(period)
+  return conFotoDeReporte(
+    {
+      venueName: quien.venueName,
+      from: `${year}-01-01`,
+      to,
+      tiempoMaximoMs: TIEMPO_MAXIMO_DEL_ISR_MS,
+      mensajeDeTiempo: MENSAJE_MES_NO_CALCULADO,
+    },
+    async tx => {
+      const meses: Array<{ netCents: number; sales: number }> = []
+      for (let m = 1; m <= month; m++) {
+        const rango = monthRange(`${year}-${String(m).padStart(2, '0')}`)
+        let netCents = 0
+        let sales = 0
+        for (const v of venues) {
+          const r = await estadoDeResultadosEnFoto(tx, v, { from: rango.from, to: rango.to }, LIMITES_DEL_REPORTE)
+          // Sin el campo (Ruling 4b-R9) la base gravable, que con todo al 16 % es la misma cifra.
+          netCents += r.fiscalRevenue.ingresosSinIvaCents ?? r.fiscalRevenue.taxableBaseCents
+          sales += r.metrics.salesCount
+        }
+        meses.push({ netCents, sales })
+      }
+      return meses
+    },
+  )
 }
+const sumaDeIngresos = (meses: Array<{ netCents: number }>) => meses.reduce((s, x) => s + x.netCents, 0)
 
 /** Σ base deducible de gastos PAGADOS (cash-basis) del RFC en [year-01, period]. */
 async function deduccionesAcum(rfc: string, year: number, period: string): Promise<number> {
@@ -180,14 +235,22 @@ async function deducInversionesAcum(organizationId: string, rfc: string, period:
   return getYearDepreciationCents(organizationId, rfc, Number(period.slice(0, 4)), period)
 }
 
-/** ISR causado acumulado del ejercicio (GENERAL) hasta `period` (recursión para los pagos previos). */
-async function isrCausadoGeneralAcum(venueIds: string[], organizationId: string, rfc: string, period: string): Promise<number> {
+/**
+ * ISR causado acumulado del ejercicio (GENERAL) hasta `period` (también para los pagos previos). B4b (fallo 2 de la ronda 7): recibe
+ * el ingreso acumulado ya sumado mes por mes (`ingresosPorMes`), así el mes y el mes anterior salen de la MISMA lista, sin pedir otro.
+ */
+async function isrCausadoGeneralAcum(
+  ingresoAcumCents: number,
+  venueIds: string[],
+  organizationId: string,
+  rfc: string,
+  period: string,
+): Promise<number> {
   const { year, month, to } = monthRange(period)
-  const { netCents } = await ingresoNetoRfc(venueIds, `${year}-01-01`, to)
   const ded = await deduccionesAcum(rfc, year, period)
   const cogs = await cogsAcumRfc(venueIds, year, to)
   const deprec = await deducInversionesAcum(organizationId, rfc, period)
-  const utilAntes = Math.max(0, netCents - ded - cogs - deprec)
+  const utilAntes = Math.max(0, ingresoAcumCents - ded - cogs - deprec)
   const perdidas = Math.min(await getPendingLossCents(organizationId, rfc), utilAntes) // topada, no la vuelve negativa
   const utilidad = utilAntes - perdidas
   // Tarifa acumulada = tarifa mensual con límInf y cuotaFija × número de meses.
@@ -232,9 +295,16 @@ export async function getIsrProvisional(venueId: string, period: string, regime:
   base.venueIds = venueIds
   base.rfcSpansMultipleOrgs = new Set(venues.map(v => v.organizationId)).size > 1
 
-  const { year, month, from, to } = monthRange(period)
-  const mes = await ingresoNetoRfc(venueIds, from, to)
-  const acumIngreso = await ingresoNetoRfc(venueIds, `${year}-01-01`, to)
+  const { year, month, to } = monthRange(period)
+  // B4b: cada mes del ejercicio, uno tras otro, en UNA foto; el mes pedido es el último y el acumulado, la suma. T6 M5: si no se
+  // puede calcular, el texto es el mensual (aquí no hay rango que acortar), salvo el de una venta que pasa un tope (nombra su folio).
+  const meses = await ingresosPorMes(venues, period, { venueName: venues.find(v => v.id === venueId)?.name ?? venueId }).catch(
+    (e: unknown) => {
+      throw comoErrorDelMes(e)
+    },
+  )
+  const mes = meses[meses.length - 1]
+  const acumIngreso = { netCents: sumaDeIngresos(meses) }
   base.ingresosMesCents = mes.netCents
   base.ingresosAcumCents = acumIngreso.netCents
   base.zeroActivity = mes.sales === 0
@@ -255,11 +325,17 @@ export async function getIsrProvisional(venueId: string, period: string, regime:
     const utilAntesPerdidas = Math.max(0, acumIngreso.netCents - ded - cogsAcum - deprecAcum)
     base.perdidasFiscalesAplicadaCents = Math.min(await getPendingLossCents(scope.organizationId, scope.rfc), utilAntesPerdidas)
     base.utilidadFiscalCents = utilAntesPerdidas - base.perdidasFiscalesAplicadaCents
-    base.isrCausadoCents = await isrCausadoGeneralAcum(venueIds, scope.organizationId, scope.rfc, period)
-    // Pagos provisionales previos = ISR causado acumulado al mes ANTERIOR (si lo hay).
+    base.isrCausadoCents = await isrCausadoGeneralAcum(acumIngreso.netCents, venueIds, scope.organizationId, scope.rfc, period)
+    // Pagos provisionales previos = ISR causado acumulado al mes ANTERIOR (si lo hay), con los mismos meses menos el último.
     base.pagosProvisionalesPreviosCents =
       month > 1
-        ? await isrCausadoGeneralAcum(venueIds, scope.organizationId, scope.rfc, `${year}-${String(month - 1).padStart(2, '0')}`)
+        ? await isrCausadoGeneralAcum(
+            sumaDeIngresos(meses.slice(0, -1)),
+            venueIds,
+            scope.organizationId,
+            scope.rfc,
+            `${year}-${String(month - 1).padStart(2, '0')}`,
+          )
         : 0
     base.isrAPagarCents = Math.max(0, base.isrCausadoCents - base.pagosProvisionalesPreviosCents)
   }

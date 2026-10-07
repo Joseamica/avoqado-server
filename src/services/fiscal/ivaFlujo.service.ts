@@ -1,11 +1,18 @@
 import { CfdiStatus } from '@prisma/client'
 
-import { BadRequestError } from '../../errors/AppError'
+import { BadRequestError, ServiceUnavailableError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
+import { ESTADOS_DE_RESULTADOS_A_LA_VEZ, enParaleloAcotado } from '../../utils/concurrencyLimiter'
 import { parseDbDateRange } from '../../utils/datetime'
-import { getIncomeStatement } from '../dashboard/accounting.dashboard.service'
+import {
+  getIncomeStatement,
+  LIMITES_DEL_REPORTE,
+  MENSAJE_MES_NO_CALCULADO,
+  TIEMPO_MAXIMO_DEL_REPORTE_MS,
+} from '../dashboard/accounting.dashboard.service'
 import { resolveScopeOrNull } from './chartOfAccounts.service'
 import { getAcreditablePagado } from './expense.service'
+import { comoErrorDelMes } from './errorDelMes'
 import { getSalesRetentionCents } from './salesRetention.service'
 
 /**
@@ -36,6 +43,13 @@ import { getSalesRetentionCents } from './salesRetention.service'
 
 const PERIOD_RE = /^\d{4}-(0[1-9]|1[0-2])$/ // AAAA-MM con mes real 01-12
 
+/**
+ * I2 (revisión final): con menos de esto del presupuesto de la petición no se arranca otro estado de resultados. Una foto necesita
+ * buscar el local, tomar una conexión y enumerar el mes antes de leer un solo libro; con menos de un segundo casi seguro vence, ocupa
+ * una conexión para nada y el dueño ve el mismo REPORT_TIMEOUT. Fallar antes da el mismo mensaje sin esa carga.
+ */
+export const MINIMO_PARA_UN_ESTADO_DE_RESULTADOS_MS = 1_000
+
 const DIOT_DISPONIBLE_MOTIVO =
   'La DIOT lista el IVA pagado a tus PROVEEDORES (lado gastos) por proveedor y tasa. Disponible en su propia vista (Buzón de CFDIs / Gastos).'
 
@@ -54,6 +68,11 @@ export interface IvaCashflowResult {
   exentoBaseCents?: number
   /** Plan 4b · base no objeto de IVA del periodo (fuera de baseGravableCents). */
   noObjetoBaseCents?: number
+  /**
+   * B4b (D17) · ventas y devoluciones del periodo, dentro de lo fiscal, con IVA aproximado (su orden mezcla IVA y algo no se pudo
+   * atribuir). 0 = todo se pudo atribuir; ausente = no se sabe (algún local no lo informó).
+   */
+  movimientosConIvaAproximado?: number
   /** IVA trasladado efectivamente cobrado en el periodo (LIVA art 1-B). */
   ivaTrasladadoCobradoCents: number
   /** IVA trasladado cobrado DESGLOSADO por tasa (clave = tasa string "0.16"/"0.08"); la declaración lo pide separado. */
@@ -82,8 +101,10 @@ export interface IvaCashflowResult {
   incompletoPorFaltaDeGastos: boolean
   /** El RFC opera en venues de más de una organización Avoqado (igual se suman). */
   rfcSpansMultipleOrgs: boolean
-  /** Sin ventas cobradas en el periodo → recordar declaración en ceros. */
+  /** Sin ventas cobradas NI devoluciones en el periodo → recordar declaración en ceros (B4b, R5-10). */
   zeroActivity: boolean
+  /** B4b (R5-10) · devoluciones del periodo en todos los locales del RFC. */
+  refundCount?: number
   /** DIOT (lado proveedores) — stub honesto, no se genera. */
   diot: { disponible: boolean; motivo: string }
 }
@@ -119,6 +140,9 @@ const emptyResult = (period: string, scope: { organizationId: string; rfc: strin
  */
 export async function getIvaCashflow(venueId: string, period: string): Promise<IvaCashflowResult> {
   if (!PERIOD_RE.test(period)) throw new BadRequestError('El periodo debe tener formato AAAA-MM (mes 01-12).')
+  // I2 (revisión final): UN plazo para toda la petición. Los estados de resultados corren de dos en dos y cada foto puede durar
+  // `TIEMPO_MAXIMO_DEL_REPORTE_MS`; sin un plazo común, un RFC con varios locales grandes pasaría el corte de 100 s del proxy.
+  const plazo = Date.now() + TIEMPO_MAXIMO_DEL_REPORTE_MS
 
   const scope = await resolveScopeOrNull(venueId)
   if (!scope) return emptyResult(period, null)
@@ -152,8 +176,19 @@ export async function getIvaCashflow(venueId: string, period: string): Promise<I
 
   // IVA trasladado cobrado = suma del split de cada local (getIncomeStatement ya desglosa por el tratamiento
   // de cada renglón y reconcilia con las pólizas). Base y IVA se suman; el desglose por tasa se mergea.
-  const incomes = await Promise.all(venues.map(v => getIncomeStatement(v.id, { from: fromStr, to: toStr })))
+  // B4b (Codex r5 R5-9): cada estado de resultados ocupa una conexión toda su foto ⇒ de dos en dos, nunca todos a la vez, y si uno
+  // falla no arranca otro. El límite es por petición, no global del pool. I2: cada uno recibe como tiempo máximo lo que le QUEDA al
+  // plazo de la petición; si ya no alcanza, no arranca y la petición falla con el texto mensual.
+  // T6 M5: el IVA en flujo es de UN mes; si no se puede calcular, el texto es el mensual (salvo el de una venta, que nombra su folio).
+  const incomes = await enParaleloAcotado(venues, ESTADOS_DE_RESULTADOS_A_LA_VEZ, async v => {
+    const queda = plazo - Date.now()
+    if (queda < MINIMO_PARA_UN_ESTADO_DE_RESULTADOS_MS) throw new ServiceUnavailableError(MENSAJE_MES_NO_CALCULADO, 'REPORT_TIMEOUT')
+    return getIncomeStatement(v.id, { from: fromStr, to: toStr }, { ...LIMITES_DEL_REPORTE, tiempoMaximoMs: queda })
+  }).catch((e: unknown) => {
+    throw comoErrorDelMes(e)
+  })
   const totalSalesCount = incomes.reduce((s, r) => s + r.metrics.salesCount, 0)
+  const totalRefundCount = incomes.reduce((s, r) => s + r.metrics.refundCount, 0)
   const baseGravableCents = incomes.reduce((s, r) => s + r.fiscalRevenue.taxableBaseCents, 0)
   const sumaDe = (campo: 'tasa0BaseCents' | 'exentoBaseCents' | 'noObjetoBaseCents') =>
     incomes.reduce((s, r) => s + (r.fiscalRevenue[campo] ?? 0), 0)
@@ -195,6 +230,10 @@ export async function getIvaCashflow(venueId: string, period: string): Promise<I
     tasa0BaseCents: sumaDe('tasa0BaseCents'),
     exentoBaseCents: sumaDe('exentoBaseCents'),
     noObjetoBaseCents: sumaDe('noObjetoBaseCents'),
+    // B4b (D17): desconocido ≠ 0. Sólo se suma si TODOS los locales lo informan; si uno no, no se afirma nada.
+    movimientosConIvaAproximado: incomes.every(r => r.fiscalRevenue.movimientosConIvaAproximado != null)
+      ? incomes.reduce((s, r) => s + (r.fiscalRevenue.movimientosConIvaAproximado ?? 0), 0)
+      : undefined,
     ivaTrasladadoCobradoCents,
     ivaTrasladadoPorTasaCents,
     ivaAmparadoPorCfdiCents: cfdiAgg._sum.taxCents ?? 0,
@@ -211,7 +250,9 @@ export async function getIvaCashflow(venueId: string, period: string): Promise<I
     diotDisponible: true,
     incompletoPorFaltaDeGastos: false,
     rfcSpansMultipleOrgs,
-    zeroActivity: totalSalesCount === 0,
+    // B4b (R5-10): «sin ventas» no es «sin movimientos». Un mes sólo con devoluciones tiene su flujo (negativo) y no es actividad cero.
+    zeroActivity: totalSalesCount === 0 && totalRefundCount === 0,
+    refundCount: totalRefundCount,
     diot: { disponible: true, motivo: DIOT_DISPONIBLE_MOTIVO },
   }
 }

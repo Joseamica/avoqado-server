@@ -3,7 +3,12 @@
  * reparto que se congela, por tratamiento.
  */
 import logger from '@/config/logger'
-import { congelarPorTratamiento, enLibrosPorTratamiento, ivaDeDevolucion } from '../../../../src/services/fiscal/deliveryFiscalDelta'
+import {
+  congelarPorTratamiento,
+  desgloseCongelado,
+  enLibrosPorTratamiento,
+  ivaDeDevolucion,
+} from '../../../../src/services/fiscal/deliveryFiscalDelta'
 import type { MezclaPorTratamiento } from '../../../../src/services/fiscal/ivaMath'
 
 describe('ivaDeDevolucion — el 🚨 sólo lo da la póliza', () => {
@@ -177,5 +182,44 @@ describe('plan 4b · el mapa que se congela en un ajuste nuevo', () => {
         mezcla,
       ),
     ).toEqual({ IVA_16: { baseCents: 7759, ivaCents: 1241 }, IVA_0: { baseCents: -1000, ivaCents: 0 } })
+  })
+})
+
+// ─── Bloque B4b: el reparto congelado, sin gritar; y la conciliación de Uber conserva la regla de 4b (respuesta 2 del controlador) ───
+describe('B4b · desgloseCongelado y la regla de la conciliación', () => {
+  const mezcla: MezclaPorTratamiento = [
+    { tratamiento: 'IVA_16', tasa: 0.16, grossCents: 11600 },
+    { tratamiento: 'IVA_0', tasa: 0, grossCents: 10000 },
+  ]
+
+  it('🔴 un ajuste del proveedor válido da su reparto; uno inválido o una devolución manual, null', () => {
+    const v2 = {
+      provenance: 'PROVIDER_ADJUSTMENT',
+      fiscalByRateCents: { v: 2, porTratamiento: { IVA_16: { baseCents: 10000, ivaCents: 1600 } } },
+    }
+    expect(desgloseCongelado(v2, 11600)).toEqual({
+      netCents: 10000,
+      taxCents: 1600,
+      taxByRate: { '0.16': 1600 },
+      porTratamiento: { IVA_16: { baseCents: 10000, ivaCents: 1600 } },
+    })
+    expect(desgloseCongelado({ provenance: 'PROVIDER_ADJUSTMENT', fiscalByRateCents: 'x' }, 11600)).toBeNull()
+    expect(desgloseCongelado({ provenance: 'MANUAL' }, 11600)).toBeNull()
+  })
+
+  it('control · respuesta 2: la conciliación sigue repartiendo una devolución manual por artículos con la mezcla de la orden (H20 no entra)', () => {
+    const cobros = [
+      { id: 'p1', type: 'REGULAR', amountCents: 21600, processorData: null },
+      {
+        id: 'r1',
+        type: 'REFUND',
+        amountCents: -10000,
+        processorData: { provenance: 'MANUAL', refundedItems: [{ orderItemId: 'oi-grano', amountCents: 10000 }] },
+      },
+    ]
+    expect(enLibrosPorTratamiento(cobros, mezcla)).toEqual({
+      IVA_16: { baseCents: 5371, ivaCents: 859 },
+      IVA_0: { baseCents: 5370, ivaCents: 0 },
+    })
   })
 })
