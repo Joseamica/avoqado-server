@@ -10,6 +10,7 @@ import {
   descuentoDeCuentaPorRenglon,
   descuentoPropioEnCabeceraCents,
   netoRenglonCents,
+  partesDeLaCuenta,
 } from '@/services/fiscal/descuentoPorRenglon'
 import { MOTIVO_SIN_REPARTO_IVA_MEZCLADO } from '@/services/shared/repartoDescuento'
 
@@ -202,4 +203,89 @@ describe('netoRenglonCents — lo que el renglón cobra', () => {
     expect(netoRenglonCents({ total: 50, discountAmount: 50, orderPromotionId: 'op1' })).toBe(5000))
   it('dato roto (descuento mayor que un total no cero): negativo, para que lo detenga su motivo', () =>
     expect(netoRenglonCents({ total: 30, discountAmount: 50 })).toBe(-2000))
+})
+
+// ─── Bloque B4b (Codex r1 P1 #3): lo que consta se separa de lo que falta. La factura sigue igual; el reporte conserva lo guardado ───
+describe('B4b · partesDeLaCuenta', () => {
+  const R = (llave: string, disponibleCents: number, grupoIva = 'IVA_16') => ({
+    llave,
+    propioEnCabeceraCents: 0,
+    vivo: { grupoIva, disponibleCents },
+  })
+  const dir = (renglones: Record<string, number>) => ({ v: 1, alcance: 'DIRIGIDO', conPromociones: null, espejo: false, renglones })
+  const cafeYGrano = [R('cafe', 11600), R('grano', 10000, 'IVA_0')]
+
+  it('🔴 una fila con reparto y otra vieja sin él: lo que consta se conserva y lo demás queda para D8', () => {
+    expect(
+      partesDeLaCuenta({
+        cabeceraCents: 3000,
+        renglones: cafeYGrano,
+        filas: [
+          { amount: 20, reparto: dir({ grano: 2000 }) },
+          { amount: 10, reparto: null },
+        ],
+      }),
+    ).toEqual({
+      porLlave: { grano: 2000 },
+      d8Cents: 1000,
+      quedan: [
+        { id: 'cafe', importeCents: 11600, grupoIva: 'IVA_16' },
+        { id: 'grano', importeCents: 8000, grupoIva: 'IVA_0' },
+      ],
+      motivos: [],
+    })
+  })
+
+  it('🔴 un reparto incompleto (guardó 20 de 30): lo guardado se conserva y lo que le falta entra a D8 hasta la capacidad (M1)', () => {
+    const p = partesDeLaCuenta({ cabeceraCents: 3000, renglones: cafeYGrano, filas: [{ amount: 30, reparto: dir({ grano: 2000 }) }] })
+    expect(p).toMatchObject({ porLlave: { grano: 2000 }, d8Cents: 1000, motivos: [] })
+  })
+
+  it('🔴 un reparto sobre un renglón que ya no cobra: el motivo de la factura, y lo que sí consta se conserva', () => {
+    const p = partesDeLaCuenta({
+      cabeceraCents: 3000,
+      renglones: cafeYGrano,
+      filas: [{ amount: 30, reparto: dir({ grano: 2000, regalo: 1000 }) }],
+    })
+    expect(p).toMatchObject({ porLlave: { grano: 2000 }, d8Cents: 0, motivos: [MOTIVO_REPARTO_FUERA_DE_LA_CUENTA] })
+  })
+
+  it('🔴 lo guardado suma más que la cabecera: el motivo, y lo que consta se conserva', () => {
+    const p = partesDeLaCuenta({ cabeceraCents: 1000, renglones: cafeYGrano, filas: [{ amount: 20, reparto: dir({ grano: 2000 }) }] })
+    expect(p).toMatchObject({ porLlave: { grano: 2000 }, d8Cents: 0, motivos: [MOTIVO_DESCUENTOS_NO_CUADRAN] })
+  })
+
+  it('🔴 dos motivos a la vez (M3): salen los dos, en el orden de la factura (fuera de la cuenta, luego no cuadran)', () => {
+    const p = partesDeLaCuenta({ cabeceraCents: 500, renglones: cafeYGrano, filas: [{ amount: 10, reparto: dir({ borrado: 1000 }) }] })
+    expect(p).toMatchObject({ porLlave: {}, d8Cents: 0, motivos: [MOTIVO_REPARTO_FUERA_DE_LA_CUENTA, MOTIVO_DESCUENTOS_NO_CUADRAN] })
+  })
+
+  it('control — la factura (descuentoDeCuentaPorRenglon) dice lo mismo que antes con IVA mezclado sin constancia', () => {
+    expect(
+      descuentoDeCuentaPorRenglon({
+        cabeceraCents: 3000,
+        renglones: cafeYGrano,
+        filas: [
+          { amount: 20, reparto: dir({ grano: 2000 }) },
+          { amount: 10, reparto: null },
+        ],
+      }),
+    ).toEqual({ porLlave: {}, motivos: [MOTIVO_SIN_REPARTO_IVA_MEZCLADO] })
+  })
+
+  it('control — M3: con dos motivos posibles la factura se detiene SÓLO con el primero (reparto fuera de la cuenta)', () => {
+    expect(
+      descuentoDeCuentaPorRenglon({ cabeceraCents: 500, renglones: cafeYGrano, filas: [{ amount: 10, reparto: dir({ borrado: 1000 }) }] }),
+    ).toEqual({ porLlave: {}, motivos: [MOTIVO_REPARTO_FUERA_DE_LA_CUENTA] })
+  })
+
+  it('control — la factura con un reparto fuera de la cuenta no conserva nada (porLlave vacío), aunque otro renglón sí conste', () => {
+    expect(
+      descuentoDeCuentaPorRenglon({
+        cabeceraCents: 3000,
+        renglones: cafeYGrano,
+        filas: [{ amount: 30, reparto: dir({ grano: 2000, regalo: 1000 }) }],
+      }),
+    ).toEqual({ porLlave: {}, motivos: [MOTIVO_REPARTO_FUERA_DE_LA_CUENTA] })
+  })
 })

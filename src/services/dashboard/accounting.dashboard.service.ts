@@ -1,19 +1,15 @@
-import { CfdiStatus, OrderStatus, PaymentMethod, PaymentType, TransactionStatus } from '@prisma/client'
+import { CfdiStatus, OrderStatus, PaymentMethod, PaymentType, Prisma, TransactionStatus } from '@prisma/client'
 
-import { NotFoundError } from '../../errors/AppError'
+import AppError, { NotFoundError, ServiceUnavailableError, ValidationError } from '../../errors/AppError'
+import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
 import { parseDbDateRange } from '../../utils/datetime'
-import {
-  desglosePorTratamiento,
-  mezclaPorTratamiento,
-  sumarDesglose,
-  type DesgloseDeCobro,
-  type DesglosePorTratamiento,
-} from '../fiscal/ivaMath'
+import { sumarDesglose, type DesgloseDeCobro, type DesglosePorTratamiento } from '../fiscal/ivaMath'
 import type { IvaTratamiento } from '../fiscal/ivaTratamiento'
-import { ivaDeDevolucion, processorDataDeDevoluciones } from '../fiscal/deliveryFiscalDelta'
 import { paymentInFiscalScope, metodoParaAlcanceFiscal } from '../fiscal/fiscalScope'
 import { computePeriodCogsCents } from '../fiscal/cogs.service'
+import { MAX_ORDENES_POR_REPORTE, recorrerLibros, sqlDeOrdenesDelPeriodo, type MovimientoLeido } from '../fiscal/librosDeOrdenes'
+import type { ParteDelLibro } from '../fiscal/libroDeLaOrden'
 
 /**
  * Accounting — Capa A (gerencial, read-model)
@@ -31,14 +27,89 @@ import { computePeriodCogsCents } from '../fiscal/cogs.service'
  * Limitación conocida (v1): no hay costo de venta capturado para retail (QUANTITY) ni
  * serializado, por eso este read-model reporta INGRESOS, no utilidad bruta.
  *
- * IVA por el tratamiento de CADA renglón (sellado > producto > 16 %) vía `desglosePorTratamiento` —el mismo reparto de
- * la póliza, cada parte a su tasa—. La base gravable es la de 16 %, 8 % y 0 % (y la de un BLOQUEADO, como hoy); exento y
- * no objeto van aparte (plan 4b). `taxByRate` reporta el IVA separado por tasa (la declaración de IVA del SAT reporta 16% y
- * 8% por separado). Ventas de importe libre (sin items) caen al 16% por defecto. `taxRateAssumed` (0.16) queda como
- * nominal informativo.
+ * B4b (D17): cada movimiento lleva la parte que le da el libro de su orden (`libroDeLaOrden`). La composición es la de la
+ * factura; los cobros se acumulan, así que la suma de la orden es exacta. Una devolución por artículos baja la tasa de lo
+ * devuelto; una por importe sale de lo que queda; ninguna deja base ni IVA negativos. Lo que no se puede atribuir se cuenta en
+ * `movimientosConIvaAproximado`. Todo el reporte es una foto (una transacción REPEATABLE READ) y sólo lee: un SELECT enumera las
+ * órdenes del periodo una vez cada una, y `recorrerLibros` lee su historia con topes por orden y por lote. Si el periodo o una
+ * venta pasa un tope, o se acaba el tiempo, el reporte falla con código (REPORT_TOO_LARGE, REPORT_TIMEOUT) y nunca da cifras a
+ * medias.
+ *
+ * La base gravable es la de 16 %, 8 % y 0 % (y la de un BLOQUEADO, como hoy); exento y no objeto van aparte (plan 4b).
+ * `taxByRate` reporta el IVA separado por tasa (la declaración de IVA del SAT reporta 16% y 8% por separado). Ventas de importe
+ * libre (sin items) caen al 16% por defecto. `taxRateAssumed` (0.16) queda como nominal informativo.
  */
 
 const DEFAULT_IVA_RATE = 0.16
+/** B4b (Codex r5 R5-3): de cuántas en cuántas órdenes se leen los libros dentro de la foto del reporte. */
+export const LOTE_DE_ORDENES = 500
+/**
+ * B4b (respuesta 14; T7-I1): lo más que puede durar la foto de un estado de resultados.
+ * Queda bajo el corte de 100 s del proxy de Cloudflare, para que `REPORT_TIMEOUT` llegue al navegador (un 524 nunca trae nuestro código).
+ */
+export const TIEMPO_MAXIMO_DEL_REPORTE_MS = 90_000
+
+/** B4b (respuesta 14; fallo 1 de la ronda 6): lo más que puede durar y cuántas órdenes puede tener un estado de resultados. */
+export type LimitesDelReporte = { tiempoMaximoMs: number; maxOrdenes: number }
+export const LIMITES_DEL_REPORTE: LimitesDelReporte = { tiempoMaximoMs: TIEMPO_MAXIMO_DEL_REPORTE_MS, maxOrdenes: MAX_ORDENES_POR_REPORTE }
+const MENSAJE_TIEMPO_AGOTADO = 'El periodo es muy grande para calcularlo de una vez; elige un rango más corto.'
+/** Fallo 1 de la ronda 8: el texto de las pantallas de UN mes (IVA e ISR), también cuando vence la foto del ISR. */
+export const MENSAJE_MES_NO_CALCULADO =
+  'No pudimos calcular este mes de una vez; vuelve a intentarlo en unos minutos o escríbenos a soporte.'
+
+/**
+ * Codex r5 R5-8, r6 R6-4, r7 R7-5: es el tiempo máximo sólo si la transacción EMPEZÓ (su callback corrió) Y Prisma dice que EXPIRÓ
+ * («… cannot be executed on an expired transaction. The timeout for this transaction was N ms…», `@prisma/client/runtime`). Pasan tal
+ * cual: el P2028 de la adquisición (el pool, `maxWait`), el de una transacción ya confirmada o revertida, y cualquier otro error
+ * (también la cancelación del freno). «Expired» no se decide con el reloj: el de Prisma empieza al abrir la transacción, no al pedirla.
+ *
+ * Hallazgo T8-B (Tarea 8, 7-oct): con consultas concurrentes (el Resumen en el tope), el vencimiento también puede llegar como P2028
+ * «Transaction not found…» (la consulta pidió la transacción mientras Prisma la cerraba por tiempo). Ése sólo es el tiempo máximo si
+ * la foto EMPEZÓ y, desde que corrió su callback, ya pasó `tiempoMaximoMs`; antes del límite pasa tal cual (R7-5: un «not found» de
+ * una transacción cerrada por otra causa no se disfraza).
+ */
+function errorDelReporte(e: unknown, empezo: number | null, c: { tiempoMaximoMs: number; mensajeDeTiempo: string }): unknown {
+  if (!(e instanceof Prisma.PrismaClientKnownRequestError) || e.code !== 'P2028' || empezo === null) return e
+  const expiro = /expired transaction/i.test(e.message)
+  const noEncontradaTrasElLimite = /Transaction not found/i.test(e.message) && Date.now() - empezo >= c.tiempoMaximoMs
+  return expiro || noEncontradaTrasElLimite ? new ServiceUnavailableError(c.mensajeDeTiempo, 'REPORT_TIMEOUT') : e
+}
+
+/**
+ * La foto (Codex r7 R7-1): una transacción REPEATABLE READ con su tiempo máximo. Anota cuándo empezó, traduce el vencimiento y avisa
+ * en el log. Una por estado de resultados (`getIncomeStatement`); una para TODOS los meses del ISR (`isr.service.ts`), para que el
+ * acumulado se lea en una sola versión de los datos.
+ */
+export async function conFotoDeReporte<T>(
+  c: { venueName: string; from: string; to: string; tiempoMaximoMs: number; mensajeDeTiempo: string },
+  fn: (tx: Prisma.TransactionClient) => Promise<T>,
+): Promise<T> {
+  const inicio = Date.now()
+  let empezo: number | null = null // R6-4: cuándo corrió el callback (null = la transacción nunca empezó)
+  try {
+    return await prisma.$transaction(
+      async tx => {
+        empezo = Date.now()
+        return fn(tx)
+      },
+      { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead, timeout: c.tiempoMaximoMs },
+    )
+  } catch (e) {
+    const error = errorDelReporte(e, empezo, c)
+    if (error instanceof AppError && (error.code === 'REPORT_TOO_LARGE' || error.code === 'REPORT_TIMEOUT')) {
+      logger.warn('Estado de resultados sin calcular', {
+        code: error.code,
+        venueName: c.venueName,
+        from: c.from,
+        to: c.to,
+        ms: Date.now() - inicio,
+        msEjecucion: empezo === null ? null : Date.now() - empezo,
+        details: error.details,
+      })
+    }
+    throw error
+  }
+}
 
 export interface IncomeStatementFilters {
   /** Fecha inicial en zona horaria del local, formato 'YYYY-MM-DD'. */
@@ -72,6 +143,14 @@ export interface IncomeStatement {
     noObjetoBaseCents?: number
     /** Plan 4b · todo el ingreso sin IVA (gravado + exento + no objeto): la base del ISR. */
     ingresosSinIvaCents?: number
+    /**
+     * B4b (D17; Codex B4b r1 P2 #6, r2 N5, N8, r3 R3-3, r4 R4-3) · cuántas ventas y devoluciones del periodo tienen IVA aproximado. Su
+     * orden mezcla IVA y algo no se pudo atribuir —un descuento que no dice a qué artículo le tocó, un artículo devuelto que no está en
+     * la orden o que se devolvió de más—, o es un ajuste del proveedor sin reparto válido o que no cabe, o se devolvió más de lo que la
+     * orden cobró, o un movimiento anterior de la misma orden ya fue aproximado, o es «IVA aparte» de un origen que no declara qué
+     * guarda. 0 = todo se pudo atribuir. (El tamaño de una orden nunca la vuelve aproximada: pasar un tope detiene el reporte.)
+     */
+    movimientosConIvaAproximado?: number
     /** IVA trasladado embebido en el ingreso neto (neto de devoluciones). */
     ivaCents: number
     /** IVA trasladado NETO desglosado por tasa (clave = tasa como string, p.ej. "0.16", "0.08"). */
@@ -97,6 +176,14 @@ export interface IncomeStatement {
     noObjetoBaseCents?: number
     /** Plan 4b · todo el ingreso sin IVA (gravado + exento + no objeto): la base del ISR. */
     ingresosSinIvaCents?: number
+    /**
+     * B4b (D17; Codex B4b r1 P2 #6, r2 N5, N8, r3 R3-3, r4 R4-3) · cuántas ventas y devoluciones del periodo tienen IVA aproximado. Su
+     * orden mezcla IVA y algo no se pudo atribuir —un descuento que no dice a qué artículo le tocó, un artículo devuelto que no está en
+     * la orden o que se devolvió de más—, o es un ajuste del proveedor sin reparto válido o que no cabe, o se devolvió más de lo que la
+     * orden cobró, o un movimiento anterior de la misma orden ya fue aproximado, o es «IVA aparte» de un origen que no declara qué
+     * guarda. 0 = todo se pudo atribuir. (El tamaño de una orden nunca la vuelve aproximada: pasar un tope detiene el reporte.)
+     */
+    movimientosConIvaAproximado?: number
     ivaCents: number
     taxByRate: Record<string, number>
   }
@@ -109,20 +196,42 @@ export interface IncomeStatement {
 const toCents = (d: { toString(): string } | number | null): number => (d == null ? 0 : Math.round(Number(d) * 100))
 
 /**
- * Calcula el estado de resultados (ingresos) de un local para [from, to].
+ * Calcula el estado de resultados (ingresos) de un local para [from, to], en UNA foto (`conFotoDeReporte`).
  *
  * @param venueId  Local (tenant). Toda query se aísla por este id.
  * @param filters  Rango de fechas en zona horaria del local.
+ * @param limites  Sólo lo cambian las pruebas, para probar un tiempo máximo de verdad sin esperar minuto y medio.
  */
-export async function getIncomeStatement(venueId: string, filters: IncomeStatementFilters): Promise<IncomeStatement> {
-  const venue = await prisma.venue.findUnique({
-    where: { id: venueId },
-    select: { name: true, timezone: true },
-  })
-  if (!venue) {
-    throw new NotFoundError(`Venue with ID ${venueId} not found`)
-  }
+export async function getIncomeStatement(
+  venueId: string,
+  filters: IncomeStatementFilters,
+  limites: LimitesDelReporte = LIMITES_DEL_REPORTE,
+): Promise<IncomeStatement> {
+  const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { name: true, timezone: true } })
+  if (!venue) throw new NotFoundError(`Venue with ID ${venueId} not found`)
+  return conFotoDeReporte(
+    {
+      venueName: venue.name,
+      from: filters.from,
+      to: filters.to,
+      tiempoMaximoMs: limites.tiempoMaximoMs,
+      mensajeDeTiempo: MENSAJE_TIEMPO_AGOTADO,
+    },
+    tx => estadoDeResultadosEnFoto(tx, { id: venueId, ...venue }, filters, limites),
+  )
+}
 
+/**
+ * El estado de resultados dentro de una foto ya abierta (fallo 1 de la ronda 8: el ISR corre todos sus meses en una sola). Sólo lee
+ * con `tx`: la foto la abre quien llama. Nunca abre otra transacción.
+ */
+export async function estadoDeResultadosEnFoto(
+  tx: Prisma.TransactionClient,
+  venue: { id: string; name: string; timezone: string | null },
+  filters: IncomeStatementFilters,
+  limites: LimitesDelReporte = LIMITES_DEL_REPORTE,
+): Promise<IncomeStatement> {
+  const venueId = venue.id
   const timezone = venue.timezone || 'America/Mexico_City'
   // Payment es data creada por Prisma → UTC real. parseDbDateRange convierte los límites
   // del día en zona del local a UTC real (fromZonedTime), NO "fake UTC".
@@ -130,52 +239,12 @@ export async function getIncomeStatement(venueId: string, filters: IncomeStateme
 
   // Opt-in del efectivo en los libros fiscales (per contribuyente). El estado gerencial NO depende de
   // esto; solo el subconjunto `fiscalRevenue`. Sin emisor → cash fuera de lo fiscal (default false).
-  const emisorScope = await prisma.fiscalEmisor.findFirst({
+  const emisorScope = await tx.fiscalEmisor.findFirst({
     where: { venueId },
     orderBy: { createdAt: 'asc' },
     select: { includeCashInAccounting: true },
   })
   const includeCashInAccounting = emisorScope?.includeCashInAccounting ?? false
-
-  const rows = await prisma.payment.findMany({
-    where: {
-      venueId,
-      status: TransactionStatus.COMPLETED,
-      createdAt: { gte: from, lte: to },
-      order: { status: { not: OrderStatus.CANCELLED } },
-    },
-    select: {
-      id: true,
-      amount: true,
-      tipAmount: true,
-      type: true,
-      method: true,
-      // Toggle por-merchant: excluir un merchant de los libros fiscales (no del gerencial).
-      merchantAccount: { select: { fiscalConfig: { select: { includeInAccounting: true } } } },
-      ecommerceMerchant: { select: { fiscalConfig: { select: { includeInAccounting: true } } } },
-      // Renglones con su tratamiento: el sellado (factura) manda; si no, el del producto; sin producto, IVA 16 %.
-      order: {
-        select: {
-          items: {
-            select: {
-              quantity: true,
-              unitPrice: true,
-              discountAmount: true,
-              ivaTratamiento: true,
-              product: { select: { taxRate: true, ivaTratamiento: true } },
-            },
-          },
-        },
-      },
-    },
-  })
-
-  // El IVA de una devolución sigue la MISMA regla que la póliza (`ivaDeDevolucion`): el ajuste del proveedor
-  // de reparto trae su propio reparto por tasa. Su processorData se lee aparte, sólo de las devoluciones.
-  const processorDataDeAjustes = await processorDataDeDevoluciones(
-    venueId,
-    rows.filter(r => r.type === PaymentType.REFUND).map(r => r.id),
-  )
 
   // Acumuladores GERENCIALES (todo) y FISCALES (subconjunto en alcance). Cada pago suma al gerencial
   // siempre, y al fiscal solo si `paymentInFiscalScope` lo permite.
@@ -186,6 +255,8 @@ export async function getIncomeStatement(venueId: string, filters: IncomeStateme
     iva: 0,
     byRate: {} as Record<string, number>,
     porTratamiento: {} as DesglosePorTratamiento,
+    /** B4b: ventas y devoluciones del periodo cuyo IVA se aproximó (`movimientosConIvaAproximado`). */
+    aproximados: 0,
   })
   const ger = acumulador()
   const fis = acumulador()
@@ -203,43 +274,75 @@ export async function getIncomeStatement(venueId: string, filters: IncomeStateme
     sumarDesglose(acc.porTratamiento, s.porTratamiento, sign)
   }
 
-  for (const r of rows) {
-    // Pagos de prueba del superadmin no son ingreso.
-    if (r.type === PaymentType.TEST) continue
-
-    const amountCents = toCents(r.amount) // con signo: las devoluciones ya vienen negativas
-    const mezcla = mezclaPorTratamiento(r.order?.items ?? [])
-    const merchantFlag = r.merchantAccount?.fiscalConfig?.includeInAccounting ?? r.ecommerceMerchant?.fiscalConfig?.includeInAccounting
+  // B4b (D17; Codex B4b r2 N4, r3 R3-2, R3-5, r4 R4-4, r5 R5-2, R5-3, R5-8): UNA foto para todo el reporte. Un solo SELECT junta, una
+  // vez y ordenados, los ids de las órdenes con cobros del periodo (del negocio del cobro Y de la orden, sin canceladas, con las fechas
+  // por utcTs); de 500 en 500 se suma cada lote con TODOS sus movimientos (`recorrerLibros`). Sólo lecturas: el freno del MCP puede
+  // cortar entre dos consultas. Las cifras salen de esa lectura, nunca de la enumeración.
+  const sumarMovimiento = (m: MovimientoLeido, parte: ParteDelLibro) => {
+    // Un movimiento de antes del periodo construye el libro de su orden; no es de este periodo.
+    if (m.createdAt < from || m.createdAt > to) return
+    const esDevolucion = m.type === PaymentType.REFUND
+    // Ruling M3 (revisión de la Tarea 3): un movimiento de 0 centavos no cuenta como aproximado. Una devolución de $0 hereda
+    // `aproximada` del libro, pero su IVA es 0, no aproximado.
+    const cuentaComoAproximado = parte.aproximada && m.amountCents !== 0
     const inFiscal = paymentInFiscalScope(
-      r.type === PaymentType.REFUND ? metodoParaAlcanceFiscal(r.method, processorDataDeAjustes.get(r.id)) : r.method,
-      merchantFlag,
+      esDevolucion ? metodoParaAlcanceFiscal(m.method, m.processorData) : m.method,
+      m.incluirEnContabilidad,
       includeCashInAccounting,
     )
-
-    if (r.type === PaymentType.REFUND) {
-      const magnitudeCents = Math.abs(amountCents)
-      const s = ivaDeDevolucion(r.id, magnitudeCents, processorDataDeAjustes.get(r.id), mezcla, { avisar: false })
+    if (esDevolucion) {
+      const magnitudeCents = Math.abs(m.amountCents)
       ger.refunds += magnitudeCents
-      sumar(ger, s, -1)
+      sumar(ger, parte, 1) // la parte ya viene con signo (resta)
+      if (cuentaComoAproximado) ger.aproximados += 1
       if (inFiscal) {
         fis.refunds += magnitudeCents
-        sumar(fis, s, -1)
+        sumar(fis, parte, 1)
+        if (cuentaComoAproximado) fis.aproximados += 1
       }
       refundCount += 1
-      continue
+      return
     }
-
     // REGULAR / FAST / ADJUSTMENT / null (legacy) → venta real
-    const s = desglosePorTratamiento(amountCents, mezcla)
-    ger.gross += amountCents
-    sumar(ger, s, 1)
+    ger.gross += m.amountCents
+    sumar(ger, parte, 1)
+    if (cuentaComoAproximado) ger.aproximados += 1
     if (inFiscal) {
-      fis.gross += amountCents
-      sumar(fis, s, 1)
+      fis.gross += m.amountCents
+      sumar(fis, parte, 1)
+      if (cuentaComoAproximado) fis.aproximados += 1
     }
-    tipsCents += toCents(r.tipAmount)
+    tipsCents += m.tipCents
     salesCount += 1
   }
+
+  const inicio = Date.now()
+  const ids = await tx.$queryRaw<Array<{ orderId: string }>>(sqlDeOrdenesDelPeriodo(venue.id, from, to, limites.maxOrdenes + 1))
+  if (ids.length > limites.maxOrdenes) {
+    throw new ValidationError(
+      `El periodo tiene más de ${limites.maxOrdenes.toLocaleString('es-MX')} ventas y no se puede calcular de una vez; elige un rango más corto.`,
+      'REPORT_TOO_LARGE',
+      { motivo: 'PERIODO', limite: limites.maxOrdenes },
+    )
+  }
+  const ordenes = ids.length
+  let consultas = 1 // la enumeración
+  let filasLeidas = ids.length
+  for (let i = 0; i < ids.length; i += LOTE_DE_ORDENES) {
+    const lote = ids.slice(i, i + LOTE_DE_ORDENES).map(r => r.orderId)
+    const leido = await recorrerLibros(tx, { venueId: venue.id, orderIds: lote, hasta: to }, sumarMovimiento)
+    consultas += leido.consultas
+    filasLeidas += leido.filas
+  }
+  logger.debug('Estado de resultados calculado', {
+    venueName: venue.name,
+    from: filters.from,
+    to: filters.to,
+    ms: Date.now() - inicio,
+    ordenes,
+    consultas,
+    filasLeidas,
+  })
 
   // Poda claves de tasa en 0 tras netear devoluciones (no aportan a la declaración).
   for (const b of [ger.byRate, fis.byRate]) for (const rate of Object.keys(b)) if (b[rate] === 0) delete b[rate]
@@ -274,12 +377,21 @@ export async function getIncomeStatement(venueId: string, filters: IncomeStateme
     timezone,
     period: { from: filters.from, to: filters.to },
     taxRateAssumed: DEFAULT_IVA_RATE,
-    revenue: { grossSalesCents, refundsCents, netRevenueCents, ...bases(ger), ivaCents, taxByRate },
+    revenue: {
+      grossSalesCents,
+      refundsCents,
+      netRevenueCents,
+      ...bases(ger),
+      movimientosConIvaAproximado: ger.aproximados,
+      ivaCents,
+      taxByRate,
+    },
     fiscalRevenue: {
       grossSalesCents: fis.gross,
       refundsCents: fis.refunds,
       netRevenueCents: fis.gross - fis.refunds,
       ...bases(fis),
+      movimientosConIvaAproximado: fis.aproximados,
       ivaCents: fis.iva,
       taxByRate: fis.byRate,
     },
@@ -334,24 +446,29 @@ async function resolvePeriod(venueId: string, filters: { from: string; to: strin
  * Agrega los pagos COMPLETADOS del periodo por método de cobro, separando
  * efectivo (caja) de electrónico (banco) y sumando las comisiones de procesamiento.
  * Las devoluciones (type=REFUND, monto negativo) restan del método correspondiente.
+ * B4b: suma en la base (una fila por método y tipo) y sólo cuenta cobros de órdenes de ESTE negocio.
  */
 async function aggregatePeriodPayments(venueId: string, from: Date, to: Date): Promise<PeriodPaymentAgg> {
-  const rows = await prisma.payment.findMany({
+  // B4b (regla de consultas acotadas): sumas en la base, una fila por (método, tipo); nunca los cobros del periodo.
+  const grupos = await prisma.payment.groupBy({
+    by: ['method', 'type'],
     where: {
       venueId,
       status: TransactionStatus.COMPLETED,
       createdAt: { gte: from, lte: to },
-      order: { status: { not: OrderStatus.CANCELLED } },
+      // Codex r3 R3-5 (respuesta 9): también la orden debe ser de este negocio, como en la enumeración del estado de resultados.
+      order: { venueId, status: { not: OrderStatus.CANCELLED } },
     },
-    select: { amount: true, tipAmount: true, type: true, method: true, feeAmount: true },
+    _sum: { amount: true, tipAmount: true, feeAmount: true },
+    _count: { _all: true },
   })
 
   const buckets = new Map<string, PeriodAccount>()
   let feesCents = 0
 
-  for (const r of rows) {
-    if (r.type === PaymentType.TEST) continue // pagos de prueba no cuentan
-    const method = r.method ?? PaymentMethod.OTHER
+  for (const g of grupos) {
+    if (g.type === PaymentType.TEST) continue // pagos de prueba no cuentan
+    const method = g.method ?? PaymentMethod.OTHER
     const def = METHOD_BUCKET[method] ?? METHOD_BUCKET.OTHER
     let acc = buckets.get(def.key)
     if (!acc) {
@@ -360,12 +477,11 @@ async function aggregatePeriodPayments(venueId: string, from: Date, to: Date): P
     }
     if (!acc.methods.includes(method)) acc.methods.push(method)
 
-    const amountCents = toCents(r.amount) // devoluciones ya vienen negativas
-    acc.inflowCents += amountCents
-    acc.tipCents += toCents(r.tipAmount) // propina con signo (las devoluciones traen propina negativa)
-    if (r.type === PaymentType.REFUND) continue // no suma conteo ni comisión
-    acc.count += 1
-    feesCents += toCents(r.feeAmount)
+    acc.inflowCents += toCents(g._sum.amount) // devoluciones ya vienen negativas
+    acc.tipCents += toCents(g._sum.tipAmount) // propina con signo (las devoluciones traen propina negativa)
+    if (g.type === PaymentType.REFUND) continue // no suma conteo ni comisión
+    acc.count += g._count._all
+    feesCents += toCents(g._sum.feeAmount)
   }
 
   const accounts = [...buckets.values()].sort((a, b) => b.inflowCents - a.inflowCents)

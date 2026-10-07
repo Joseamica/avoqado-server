@@ -18,7 +18,8 @@ import { OrderStatus, PaymentSource, Prisma, TransactionStatus } from '@prisma/c
 import logger from '@/config/logger'
 import { congelarPorTratamiento, enLibrosPorTratamiento } from '@/services/fiscal/deliveryFiscalDelta'
 import { hayBloqueados, resolverTratamiento } from '@/services/fiscal/ivaDeRenglon'
-import { desglosePorTratamiento, mezclaPorTratamiento, sumarDesglose, tasasDe } from '@/services/fiscal/ivaMath'
+import { desglosePorTratamiento, sumarDesglose, tasasDe } from '@/services/fiscal/ivaMath'
+import { mezclaPorTratamiento } from '@/services/fiscal/mezclaDeOrden'
 import { lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
 import { bloquearCobroParaReembolso, writeRefundInTx } from '@/services/shared/writeRefundInTx'
 
@@ -153,6 +154,10 @@ export async function reconcileDeliveryOrderFromProvider(
         total: true,
         unitPrice: true,
         discountAmount: true,
+        // B4b (D17): el peso de cada renglón es el de la factura (`mezclaDeOrden`): una promoción pesa su total y una cortesía no pesa.
+        // La conciliación no le pasa la cuenta: delivery escribe su descuento de cabecera sin reparto (D8), y H20 no entra aquí.
+        orderPromotionId: true,
+        isCortesia: true,
         ivaTratamiento: true,
         product: { select: { taxRate: true, ivaTratamiento: true } },
       },
