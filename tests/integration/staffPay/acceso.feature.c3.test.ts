@@ -138,7 +138,7 @@ describe('C3 — migración: del módulo SERVICE_PAY a la función del plan (spe
   it.each([
     ['VENUE_ONLY' as const, 'la fila propia, sí; la de la organización no se hereda'],
     ['ORGANIZATION_ONLY' as const, 'ni la fila propia ni la de la organización le daban acceso a una sede'],
-  ])('módulo con scope %s: %s (la misma regla que el resolver de módulos)', async scope => {
+  ])('módulo con scope %s: %s (la misma regla que el resolver de módulos)', async (scope, _regla) => {
     const key = `pf3s${scope === 'VENUE_ONLY' ? 'v' : 'o'}${stamp}`
     const modulo = await crearModulo(true, scope)
     const orgId = await crearOrg(key)
