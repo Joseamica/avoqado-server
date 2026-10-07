@@ -112,6 +112,21 @@ export function ivaDeDevolucion(
 }
 
 /**
+ * B4b (spec §4.9: «los ajustes de delivery siguen con su fiscalByRateCents»): el reparto congelado de un ajuste del proveedor como
+ * desglose, si es válido y su IVA cae en [0, venta devuelta]; si no, `null`. La misma lectura que `ivaDeDevolucion`, sin gritar: el
+ * libro de la orden decide qué hacer con lo que no es válido.
+ */
+export function desgloseCongelado(processorData: unknown, salesCents: number): DesgloseDeCobro | null {
+  const pd = processorData as { provenance?: unknown; fiscalByRateCents?: unknown } | null | undefined
+  if (pd?.provenance !== 'PROVIDER_ADJUSTMENT') return null
+  const congelado = leerCongelado(pd.fiscalByRateCents, salesCents)
+  if (!congelado) return null
+  const taxCents = Object.values(congelado.porTratamiento).reduce((s, v) => s + (v?.ivaCents ?? 0), 0)
+  if (taxCents < 0 || taxCents > salesCents) return null
+  return { netCents: salesCents - taxCents, taxCents, taxByRate: congelado.taxByRate, porTratamiento: congelado.porTratamiento }
+}
+
+/**
  * Base e IVA por tratamiento QUE HOY ESTÁN EN LIBROS para los cobros de una orden: cada venta con la mezcla de la orden (como
  * el estado de resultados) menos cada devolución (`ivaDeDevolucion`: mezcla para las manuales, su reparto congelado —en
  * cualquiera de sus dos formas— para los ajustes del proveedor). Es el saldo del que un retiro nuevo descuenta.

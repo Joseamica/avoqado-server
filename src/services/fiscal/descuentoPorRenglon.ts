@@ -82,21 +82,33 @@ function constanciaDe(fila: FilaDeDescuento, r: RepartoDescuento | null): { reng
 }
 
 /**
- * Descuento de cuenta por renglón:
+ * B4b (spec §4.9; Codex r1 P1 #3): lo que se sabe de los descuentos de la cuenta ANTES de D8. Devuelve:
+ *  - `porLlave`: lo que consta por renglón;
+ *  - `d8Cents`: lo que queda sin constancia y entra a D8, con la regla M1;
+ *  - `quedan`: sobre qué capacidad se reparte;
+ *  - `motivos`: los que la factura no deja pasar.
+ * Un reparto sobre un renglón que ya no cobra, o lo guardado que suma más que la cabecera, se anotan como motivo SIN perder lo
+ * demás. La factura (`descuentoDeCuentaPorRenglon`) se detiene con el primer motivo, como siempre; el reporte conserva lo que consta
+ * y sólo aproxima el resto. Puro.
+ *
+ * Por renglón:
  *  1. lo que consta de cada fila va a sus renglones (las espejo no: ya viven en el renglón; un destino en 0 no se mira);
  *  2. lo que la cabecera trae SIN constancia = cabecera − descuentos propios que viven en ella − lo que consta;
- *  3. eso se reparte por D8 sobre lo que le queda a cada renglón vivo. Lo que no tiene reparto entra ENTERO (si no cabe, D8 lo
+ *  3. eso es lo que D8 repartirá sobre lo que le queda a cada renglón vivo. Lo que no tiene reparto entra ENTERO (si no cabe, D8 lo
  *     dice); lo que le FALTA a un reparto válido entra sólo hasta la capacidad que queda (M1: la cabecera de B2c es nominal, Σ
  *     filas sin tope, y lo que no cupo nunca se cobró — el cobro es LEAST(cabecera, subtotal)).
  * Si lo sin constancia sale NEGATIVO: con alguna fila con reparto (escritor nativo, coherente) es su motivo; sin ninguna (las
  * importadas de pos-sync escriben renglón y cabecera por separado) se trata como 0, igual que antes de B3a (M2).
  */
-export function descuentoDeCuentaPorRenglon(p: { cabeceraCents: number; renglones: RenglonParaDescuento[]; filas: FilaDeDescuento[] }): {
+export function partesDeLaCuenta(p: { cabeceraCents: number; renglones: RenglonParaDescuento[]; filas: FilaDeDescuento[] }): {
   porLlave: Record<string, number>
+  d8Cents: number
+  quedan: Array<{ id: string; importeCents: number; grupoIva: string }>
   motivos: string[]
 } {
   const vivos = new Map(p.renglones.flatMap(r => (r.vivo ? [[r.llave, r.vivo] as const] : [])))
   const porLlave: Record<string, number> = {}
+  const motivos: string[] = []
   let constaCents = 0
   let faltaCents = 0
   let hayReparto = false
@@ -109,24 +121,43 @@ export function descuentoDeCuentaPorRenglon(p: { cabeceraCents: number; renglone
     faltaCents += centavos(fila.amount) - c.sumaCents
     for (const [llave, cents] of Object.entries(c.renglones)) {
       if (cents === 0) continue
-      if (!vivos.has(llave)) return { porLlave: {}, motivos: [MOTIVO_REPARTO_FUERA_DE_LA_CUENTA] }
+      if (!vivos.has(llave)) {
+        if (!motivos.includes(MOTIVO_REPARTO_FUERA_DE_LA_CUENTA)) motivos.push(MOTIVO_REPARTO_FUERA_DE_LA_CUENTA)
+        continue
+      }
       porLlave[llave] = (porLlave[llave] ?? 0) + cents
     }
   }
+  const quedan = Array.from(vivos, ([llave, v]) => ({
+    id: llave,
+    importeCents: v.disponibleCents - (porLlave[llave] ?? 0),
+    grupoIva: v.grupoIva,
+  }))
   const sinConstanciaCents = p.cabeceraCents - p.renglones.reduce((s, r) => s + r.propioEnCabeceraCents, 0) - constaCents
-  if (sinConstanciaCents < 0) return hayReparto ? { porLlave: {}, motivos: [MOTIVO_DESCUENTOS_NO_CUADRAN] } : { porLlave, motivos: [] }
-  if (sinConstanciaCents > 0) {
-    const quedan = Array.from(vivos, ([llave, v]) => ({
-      id: llave,
-      importeCents: v.disponibleCents - (porLlave[llave] ?? 0),
-      grupoIva: v.grupoIva,
-    }))
-    const capacidadCents = quedan.reduce((s, x) => s + Math.max(0, x.importeCents), 0)
-    const falta = Math.min(faltaCents, sinConstanciaCents)
-    const resto = sinConstanciaCents - falta
-    const d8 = repartirSinConstancia(resto + Math.min(falta, Math.max(0, capacidadCents - resto)), quedan)
-    if (!d8.ok) return { porLlave: {}, motivos: [d8.motivo] }
-    for (const [llave, cents] of Object.entries(d8.porRenglon)) porLlave[llave] = (porLlave[llave] ?? 0) + cents
+  if (sinConstanciaCents < 0) {
+    if (hayReparto) motivos.push(MOTIVO_DESCUENTOS_NO_CUADRAN)
+    return { porLlave, d8Cents: 0, quedan, motivos }
   }
+  const capacidadCents = quedan.reduce((s, x) => s + Math.max(0, x.importeCents), 0)
+  const falta = Math.min(faltaCents, sinConstanciaCents)
+  const resto = sinConstanciaCents - falta
+  return { porLlave, d8Cents: sinConstanciaCents > 0 ? resto + Math.min(falta, Math.max(0, capacidadCents - resto)) : 0, quedan, motivos }
+}
+
+/**
+ * Descuento de cuenta por renglón para la FACTURA: lo que consta de cada reparto y, lo que no consta, por D8. Se detiene con el
+ * primer motivo (el mismo orden de siempre: reparto fuera de la cuenta, luego descuentos que no cuadran, luego D8).
+ */
+export function descuentoDeCuentaPorRenglon(p: { cabeceraCents: number; renglones: RenglonParaDescuento[]; filas: FilaDeDescuento[] }): {
+  porLlave: Record<string, number>
+  motivos: string[]
+} {
+  const partes = partesDeLaCuenta(p)
+  if (partes.motivos.length > 0) return { porLlave: {}, motivos: [partes.motivos[0]] }
+  if (partes.d8Cents <= 0) return { porLlave: partes.porLlave, motivos: [] }
+  const d8 = repartirSinConstancia(partes.d8Cents, partes.quedan)
+  if (!d8.ok) return { porLlave: {}, motivos: [d8.motivo] }
+  const porLlave = { ...partes.porLlave }
+  for (const [llave, cents] of Object.entries(d8.porRenglon)) porLlave[llave] = (porLlave[llave] ?? 0) + cents
   return { porLlave, motivos: [] }
 }

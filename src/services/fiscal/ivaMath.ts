@@ -8,7 +8,6 @@
 // customer actually paid. So before handing a gross price to the PAC we either tell it the
 // price is tax-included (preferred) or split it ourselves for our own stored breakdown.
 
-import { hayBloqueados, resolverTratamiento } from './ivaDeRenglon'
 import { tratamientoDesdeTupla, tuplaDesdeTratamiento, type IvaTratamiento } from './ivaTratamiento'
 
 /**
@@ -157,30 +156,6 @@ export type RenglonConIva = {
 }
 
 type Entrada = [IvaTratamiento, { baseCents: number; ivaCents: number }]
-
-/**
- * La mezcla de una orden por tratamiento: el ÚNICO mapeo de renglón a IVA que usan el estado de resultados y el conciliador
- * de reparto. Cada renglón resuelve su tratamiento con `resolverTratamiento` (sellado > producto > IVA_16) y lleva la tasa de
- * ese tratamiento; un BLOQUEADO, la de su producto sin tocar (hoy la reporta así: Ruling 4b-R4). El importe de cada renglón se
- * calcula como en `grossByRateFromItems`.
- */
-export function mezclaPorTratamiento(items: RenglonConIva[]): MezclaPorTratamiento {
-  const por = new Map<string, MezclaPorTratamiento[number]>()
-  for (const it of items) {
-    const tratamiento = resolverTratamiento({
-      selladoIva: it.ivaTratamiento,
-      productoIva: it.product?.ivaTratamiento,
-      tieneProducto: it.product != null,
-    })
-    const tasa = hayBloqueados([tratamiento]) ? Number(it.product?.taxRate ?? 0.16) : tuplaDesdeTratamiento(tratamiento, 0).taxRate
-    const grossCents = Math.round((Number(it.unitPrice) * it.quantity - Number(it.discountAmount)) * 100)
-    if (grossCents === 0) continue
-    const parte = por.get(`${tratamiento}|${tasa}`)
-    if (parte) parte.grossCents += grossCents
-    else por.set(`${tratamiento}|${tasa}`, { tratamiento, tasa, grossCents })
-  }
-  return [...por.values()]
-}
 
 /**
  * Una mezcla por tasa (la de la póliza, `grossByRateForOrder`) como mezcla por tratamiento, cada parte con SU tasa: 0.16 →
