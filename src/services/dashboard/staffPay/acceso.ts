@@ -74,9 +74,14 @@ export async function tienePermisoEn(userId: string, venueId: string, permiso: s
   return tienePermiso(userId, venueId, permiso)
 }
 
+/** Lo que contesta `getUserAccess` cuando la persona de verdad no tiene acceso a la sede (o la sede no existe). */
+const SIN_ACCESO = /has no access to venue|^Venue \S+ not found$/
+
 /**
  * Los permisos de `userId` en cada sede, con UNA resolución de acceso por sede para varios permisos (B13: la pantalla de sedes
- * pregunta leer y cerrar en cada una). Sin acceso a una sede: conjunto vacío. Cliente global: va ANTES de una foto.
+ * pregunta leer y cerrar en cada una). Cliente global: va ANTES de una foto. Ronda 1 (R4): sólo un sin-acceso REAL cuenta como
+ * «sin permisos» (conjunto vacío); cualquier otro error (la base caída, un defecto) se propaga, para que una caída no se lea como
+ * «esta persona no ve ninguna sede».
  */
 export async function permisosPorSede(userId: string, venueIds: string[], permisos: string[]): Promise<Map<string, Set<string>>> {
   const out = new Map<string, Set<string>>()
@@ -84,7 +89,8 @@ export async function permisosPorSede(userId: string, venueIds: string[], permis
     try {
       const access = await getUserAccess(userId, v)
       out.set(v, new Set(permisos.filter(p => hasPermission(access, p))))
-    } catch {
+    } catch (e) {
+      if (!(e instanceof Error && SIN_ACCESO.test(e.message))) throw e
       out.set(v, new Set())
     }
   }

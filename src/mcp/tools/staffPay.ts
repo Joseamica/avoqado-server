@@ -27,8 +27,8 @@ import { text } from '../respond'
 import { requireWriteScopeAlways } from '../requireWriteScopeAlways'
 import { auditMcpWrite } from '../audit'
 import { activarOrganizacion, type Herramientas, motivoDeBloqueo, participacionDeSede } from './staffPay.participacion'
-import { estadoSedes } from '@/services/dashboard/staffPay/sedes.service'
-import { acotarAlAlcance, avisoDePendientes, detalleDelCierre, diaLegible, periodoLegible } from './staffPay.sedes'
+import { acotarAlAlcance, avisoDePendientes, detalleDelCierre, sedesDeLaConfig } from './staffPay.sedes'
+import { conSigno, diaLegible, diferencia, lista, periodoLegible, pesos } from './staffPay.formato'
 
 const sedeArg = z.string().min(1).max(64).optional().describe('Only this venue of the organization (default: all venues you can read)')
 const fecha = z
@@ -212,8 +212,8 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
         estadoActivacion(prisma, v.organizationId),
         // Una de más: así se sabe si hay más ventanas de las que se devuelven.
         ventanasDePropinas(v.organizationId, VENTANAS + 1),
-        // B13 (r3.7(1)): la pantalla de sedes, sólo de las sedes de esta conexión (revisión de B12 #7).
-        estadoSedes({ userId: scope.staffId, venueId, soloSedes: scope.allowedVenueIds }),
+        // B13 (r3.7(1)): la pantalla de sedes, de las sedes de esta conexión; por volumen, `sedes: null` con motivo (R1).
+        sedesDeLaConfig(scope, venueId),
       ])
       return text({
         fecha: dia,
@@ -226,8 +226,7 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
         niveles,
         asignaciones,
         tablas: tablas.map(t => ({ ...t, reglasDeClase: reglasDeTabla(t.vigente?.reglas) })),
-        sedes: sedes.sedes,
-        periodoDeLasSedes: sedes.periodo,
+        ...sedes,
       })
     },
   )
@@ -255,8 +254,6 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
     return text({ ok: false, error: `${err.message}${extra}`, code: err.code ?? null, preview: err.details?.preview ?? null })
   }
   const herramientas: Herramientas = { scope, guard, puedeEscribir, fallo }
-  const pesos = (s: string) => Number(s).toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-  const conSigno = (s: string, moneda: string) => `${Number(s) < 0 ? '-' : '+'}$${pesos(String(Math.abs(Number(s))))} ${moneda}`
 
   server.tool(
     'close_service_pay_period',
@@ -287,7 +284,7 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
               ok: false,
               preview: p,
               error: yaCerrado
-                ? `Este periodo ya está cerrado: ${p.personas} recibo(s) por $${pesos(p.total)}.`
+                ? `Este periodo ya está cerrado: ${p.personas} recibo(s) por ${conSigno(p.total)}.`
                 : `Todavía no se puede cerrar: ${p.bloqueos.map(b => motivoDeBloqueo(b, crudo)).join('; ')}.${detalleDelCierre(p)}`,
             })
           }
@@ -302,7 +299,6 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
             })
           }
           // Fase 3 §12: el cierre nombra lo que congela (clases, comisiones, propinas), lo que descuenta y lo que deja fuera.
-          const lista = (xs: string[]) => (xs.length < 2 ? xs.join('') : `${xs.slice(0, -1).join(', ')} y ${xs[xs.length - 1]}`)
           const que = lista([
             `${p.clases} clases`,
             ...(p.comisiones ? [`${p.comisiones} comisiones`] : []),
@@ -321,7 +317,7 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
             requiresConfirmation: true,
             preview: p,
             expectedSourceFingerprint: p.huella,
-            message: `Se congelan ${que} de ${p.personas} personas, $${pesos(p.total)}.${anulaciones}${sinDueno}${porRevisar}${
+            message: `Se congelan ${que} de ${p.personas} personas, ${conSigno(p.total)}.${anulaciones}${sinDueno}${porRevisar}${
               p.huerfanas > 0 ? ` ${p.huerfanas} reserva(s) de clase sin horario no cuentan para ningún pago.` : ''
             } Lo que cambie después aparecerá como diferencia pendiente; una devolución o anulación de una venta entra sola en el siguiente recibo.${detalleDelCierre(p)}`,
           })
@@ -500,7 +496,7 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
             // en ESTE periodo (con «hoy» respondería CLAVE_REUTILIZADA y el humano recapturaría un bono doble).
             fecha: f ?? pv.periodo.start,
             // A quién y en qué sede: con dos «Ana» en el estudio, esta pantalla es lo que evita pagarle a la equivocada.
-            message: `${amount >= 0 ? 'Se agrega un bono de' : 'Se descuentan'} $${pesos(String(Math.abs(amount)))} a ${pv.persona} en ${pv.sedeNombre} con el motivo «${reason}» al periodo del ${pv.periodo.start} al ${pv.periodo.end}.${avisoDePendientes(pv.persona, pv.avisoPendientes)}`,
+            message: `${amount >= 0 ? 'Se agrega un bono de' : 'Se descuentan'} $${pesos(String(Math.abs(amount)))} a ${pv.persona} en ${pv.sedeNombre} con el motivo «${reason}» al periodo del ${pv.periodo.start} al ${pv.periodo.end}.${avisoDePendientes(pv.persona, pv.avisoPendientes, amount)}`,
           })
         }
         if (!expectedSourceFingerprint)
@@ -708,7 +704,7 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
           }
           // A quién, cuánto, de qué clase y en qué sede: con dos «Ana» en el estudio, esto evita pagarle a la equivocada (A12).
           const c = conMonto[0]
-          const quien = conMonto.map(f => `${conSigno(f.pendiente!, moneda)} a ${f.personaNombre ?? 'una persona sin nombre'}`).join(', ')
+          const quien = conMonto.map(f => `${diferencia(f.pendiente!, moneda)} a ${f.personaNombre ?? 'una persona sin nombre'}`).join(', ')
           const varias = conMonto.length > 1
           return text({
             ok: false,
@@ -857,7 +853,7 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
             : pv.pendiente === null
               ? `; ${cerrado} ya se cerró y la clase sigue sin resolver: todavía no se puede liquidar`
               : Number(pv.pendiente) !== 0
-                ? `; como ${cerrado} ya se cerró, queda una diferencia de ${conSigno(pv.pendiente, moneda)} por liquidar (settle_service_pay_difference)`
+                ? `; como ${cerrado} ya se cerró, queda una diferencia de ${diferencia(pv.pendiente, moneda)} por liquidar (settle_service_pay_difference)`
                 : `; ${cerrado} ya se cerró y no queda diferencia por liquidar`
           return text({
             ok: false,

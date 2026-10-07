@@ -5,26 +5,9 @@ import { Prisma } from '@prisma/client'
 import type { Cuenta } from '@/services/dashboard/staffPay/participacion.vistaPrevia'
 import type { Destino, DevolucionesPendientes } from '@/services/dashboard/staffPay/devolucionesPendientes'
 import type { EstadoSede } from '@/services/dashboard/staffPay/estadoSede'
-
-const pesos = (s: string) => Number(s).toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-/** «−$50.00» (con el signo de menos) o «$50.00». Sólo para mostrar: las sumas van con `Prisma.Decimal`. */
-const conSigno = (s: string) => `${Number(s) < 0 ? '−' : ''}$${pesos(String(Math.abs(Number(s))))}`
-const lista = (xs: string[]) => (xs.length < 2 ? xs.join('') : `${xs.slice(0, -1).join(', ')} y ${xs[xs.length - 1]}`)
-
-/** `YYYY-MM-DD` (fecha local) como fecha UTC: sólo para darle formato, nunca como instante. */
-const diaUTC = (f: string) => {
-  const [y, m, d] = f.split('-').map(Number)
-  return new Date(Date.UTC(y, m - 1, d))
-}
-export const diaLegible = (f: string) =>
-  diaUTC(f).toLocaleDateString('es-MX', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' })
-/** «de septiembre de 2026» si es el mes completo; si no, «del 1 sep 2026 al 15 sep 2026». */
-export const periodoLegible = (p: { start: string; end: string }) =>
-  p.start.endsWith('-01') &&
-  p.start.slice(0, 7) === p.end.slice(0, 7) &&
-  diaUTC(p.end).getUTCMonth() !== new Date(diaUTC(p.end).getTime() + 86_400_000).getUTCMonth()
-    ? `de ${diaUTC(p.start).toLocaleDateString('es-MX', { month: 'long', year: 'numeric', timeZone: 'UTC' })}`
-    : `del ${diaLegible(p.start)} al ${diaLegible(p.end)}`
+import { estadoSedes } from '@/services/dashboard/staffPay/sedes.service'
+import type { McpScope } from '../scope'
+import { conSigno, lista, periodoLegible } from './staffPay.formato'
 
 type PorDestino = DevolucionesPendientes['porDestino']
 type Pendientes = { n: number; total: string; porDestino: PorDestino }
@@ -70,9 +53,9 @@ const ESTADO: Record<EstadoSede, string> = {
 }
 /** Lo que tiene una cuenta, sólo lo que no es cero: «3 clase(s) ($1,500.00) y 1 comisión(es) ($100.00)». */
 const partes = (c: Cuenta) => [
-  ...(c.clases.n ? [`${c.clases.n} clase(s) ($${pesos(c.clases.total)})`] : []),
-  ...(c.comisiones.n ? [`${c.comisiones.n} comisión(es) ($${pesos(c.comisiones.total)})`] : []),
-  ...(c.propinas.n ? [`${c.propinas.n} propina(s) ($${pesos(c.propinas.total)})`] : []),
+  ...(c.clases.n ? [`${c.clases.n} clase(s) (${conSigno(c.clases.total)})`] : []),
+  ...(c.comisiones.n ? [`${c.comisiones.n} comisión(es) (${conSigno(c.comisiones.total)})`] : []),
+  ...(c.propinas.n ? [`${c.propinas.n} propina(s) (${conSigno(c.propinas.total)})`] : []),
   ...(c.clases.pendientesDeValoracion ? [`${c.clases.pendientesDeValoracion} clase(s) que todavía no se pueden valorar`] : []),
 ]
 const sedeEnPalabras = (s: SedeConCuentas) => {
@@ -101,13 +84,46 @@ export function detalleDelCierre(p: { porSede?: SedeConCuentas[]; pendientes?: P
 
 /**
  * El aviso del ajuste manual (r5.1): «Ana tiene −$50.00 en devoluciones que se descontarán solas al cerrar el periodo de
- * octubre de 2026. Si este ajuste es por eso, no lo registres.» Con varios destinos los nombra. Vacío sin pendientes.
+ * octubre de 2026. Si este ajuste es por eso, no lo registres.» Con varios destinos los nombra. Vacío sin pendientes y,
+ * ronda 1 (R6), con un ajuste que no es un descuento: un bono no puede ser «por eso».
  */
-export function avisoDePendientes(persona: string, a: Pendientes | undefined): string {
-  if (!a?.n || !a.porDestino.length) return ''
+export function avisoDePendientes(persona: string, a: Pendientes | undefined, monto: number): string {
+  if (!(monto < 0) || !a?.n || !a.porDestino.length) return ''
   const cuando =
     a.porDestino.length === 1
       ? ` ${destinoLegible(a.porDestino[0].seDescuenta)}`
       : `: ${lista(a.porDestino.map(d => `${conSigno(d.total)} ${destinoLegible(d.seDescuenta)}`))}`
   return ` ${persona} tiene ${conSigno(a.total)} en devoluciones que se descontarán solas${cuando}. Si este ajuste es por eso, no lo registres.`
+}
+
+/** Topes de volumen y una foto vencida: la configuración responde igual, sin la pantalla de sedes (ronda 1, R1). */
+const DE_VOLUMEN = new Set(['DEMASIADAS_SEDES', 'STAFF_PAY_DEMASIADAS_VENTANAS', 'LECTURA_VENCIDA'])
+
+/**
+ * La pantalla de sedes para `staff_service_pay_config` (r3.7(1)), acotada a las sedes de la conexión (revisión de B12 #7).
+ * - R1: si no se puede leer por volumen (`DEMASIADAS_SEDES`, `STAFF_PAY_DEMASIADAS_VENTANAS`) o la foto vence, `sedes: null` con el
+ *   motivo en palabras; el resto de la configuración sale igual. Cualquier otro error se propaga.
+ * - R5: una conexión sin `mcp:write` no puede activar ni desactivar nada: `puedeActivar`/`puedeDesactivar` en false (la ruta HTTP
+ *   no cambia: ahí manda el permiso de la persona).
+ */
+export async function sedesDeLaConfig(
+  scope: McpScope,
+  venueId: string,
+): Promise<{
+  sedes: Awaited<ReturnType<typeof estadoSedes>>['sedes'] | null
+  periodoDeLasSedes: { start: string; end: string } | null
+  sedesMotivo?: string
+}> {
+  try {
+    const e = await estadoSedes({ userId: scope.staffId, venueId, soloSedes: scope.allowedVenueIds })
+    const escribe = scope.scopes?.includes('mcp:write') === true
+    return {
+      sedes: escribe ? e.sedes : e.sedes.map(s => ({ ...s, puedeActivar: false, puedeDesactivar: false })),
+      periodoDeLasSedes: e.periodo,
+    }
+  } catch (err) {
+    const code = (err as { code?: string } | null)?.code
+    if (!code || !DE_VOLUMEN.has(code)) throw err
+    return { sedes: null, periodoDeLasSedes: null, sedesMotivo: `No se pudo leer el estado de las sedes: ${(err as Error).message}` }
+  }
 }

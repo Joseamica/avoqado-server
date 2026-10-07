@@ -11,6 +11,7 @@ import type { McpScope } from '../scope'
 import type { createGuard } from '../guard'
 import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
+import { conSigno, diaLegible, lista } from './staffPay.formato'
 
 type Respuesta = ReturnType<typeof text>
 /** Lo que el registro de las herramientas ya tiene y estas acciones reusan (alcance de la conexión, permisos, errores). */
@@ -30,6 +31,9 @@ export const huellaDeSede = (sede: string, activa: boolean, fecha: string) => sh
 /**
  * Un bloqueo del cierre en palabras para `close_service_pay_period`. `SEDE_ACTIVA_SIN_PLAN` dice lo MISMO que el cierre
  * (`textoSedeActivaSinPlan`, revisión de B11 #5), con los nombres de las sedes que trae la vista previa (`porSede`).
+ * Ruling de B13 ronda 1: estos textos PUEDEN nombrar sedes del alcance del periodo que están fuera de la conexión (se les pasa la
+ * vista previa completa, no la acotada): para verlos hay que tener `staffpay:close` en TODO el alcance, sus ids ya salían antes y
+ * el cierre es de toda la organización. Lo que sí se acota a la conexión es `porSede`, las pendientes, el aviso y las sedes.
  */
 export const motivoDeBloqueo = (b: Bloqueo, p: { porSede?: Array<{ venueId: string; nombre: string }> }): string =>
   b.codigo === 'NO_HA_TERMINADO'
@@ -47,19 +51,13 @@ export const motivoDeBloqueo = (b: Bloqueo, p: { porSede?: Array<{ venueId: stri
               )}${b.otrasConPlan ? ' (accion "sede" con activa:false)' : ''}`
             : 'ya está cerrado'
 
-const pesos = (s: string) => Number(s).toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-const dia = (f: string) => {
-  const [y, m, d] = f.split('-').map(Number)
-  return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString('es-MX', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' })
-}
-const lista = (xs: string[]) => (xs.length < 2 ? xs.join('') : `${xs.slice(0, -1).join(', ')} y ${xs[xs.length - 1]}`)
 const nombrePeriodicidad = (p: 'MONTHLY' | 'SEMIMONTHLY') => (p === 'MONTHLY' ? 'mensual' : 'quincenal')
 /** «2 clases ($1,000.00), 1 comisión ($100.00) y 0 propinas ($0.00)», más las clases que todavía no se pueden valorar. */
 const cuentaLegible = (c: Cuenta) => {
   const partes = lista([
-    `${c.clases.n} clase(s) ($${pesos(c.clases.total)})`,
-    `${c.comisiones.n} comisión(es) ($${pesos(c.comisiones.total)})`,
-    `${c.propinas.n} propina(s) ($${pesos(c.propinas.total)})`,
+    `${c.clases.n} clase(s) (${conSigno(c.clases.total)})`,
+    `${c.comisiones.n} comisión(es) (${conSigno(c.comisiones.total)})`,
+    `${c.propinas.n} propina(s) (${conSigno(c.propinas.total)})`,
   ])
   const pendientes = c.clases.pendientesDeValoracion
   return pendientes ? `${partes}; además ${pendientes} clase(s) que todavía no se pueden valorar` : partes
@@ -234,8 +232,8 @@ export async function participacionDeSede(
       const nombre = (await prisma.venue.findUnique({ where: { id: sede }, select: { name: true } }))?.name ?? sede
       const message =
         pv.accion === 'activar'
-          ? `${nombre} se activa en pago al personal desde el ${dia(pv.fecha)} a las 00:00 (${pv.zona}). Entran, de los periodos sin cerrar: ${cuentaLegible(pv.entran)}. Quedan fuera: ${cuentaLegible(pv.quedanFuera)}; lo que quede fuera no se paga: si debes algo, agrégalo como ajuste.`
-          : `${nombre} se desactiva: el ${dia(pv.fecha)} es su último día en pago al personal. Dejan de entrar, de los periodos sin cerrar: ${cuentaLegible(pv.dejanDeEntrar)}. Siguen entrando: ${cuentaLegible(pv.permanecen)}.`
+          ? `${nombre} se activa en pago al personal desde el ${diaLegible(pv.fecha)} a las 00:00 (${pv.zona}). Entran, de los periodos sin cerrar: ${cuentaLegible(pv.entran)}. Quedan fuera: ${cuentaLegible(pv.quedanFuera)}; lo que quede fuera no se paga: si debes algo, agrégalo como ajuste.`
+          : `${nombre} se desactiva: el ${diaLegible(pv.fecha)} es su último día en pago al personal. Dejan de entrar, de los periodos sin cerrar: ${cuentaLegible(pv.dejanDeEntrar)}. Siguen entrando: ${cuentaLegible(pv.permanecen)}.`
       return text({
         ok: false,
         requiresConfirmation: true,
@@ -243,7 +241,7 @@ export async function participacionDeSede(
         // El catálogo la firma en el token: se confirma la fecha que se MOSTRÓ, nunca «hoy» otra vez (r4.6). No quitar.
         fecha: pv.fecha,
         expectedSourceFingerprint: huellaDeSede(sede, activa, pv.fecha),
-        message: `${message} Se puede elegir del ${dia(pv.minimo)} al ${dia(pv.maximo)}.`,
+        message: `${message} Se puede elegir del ${diaLegible(pv.minimo)} al ${diaLegible(pv.maximo)}.`,
       })
     }
     if (!args.fecha)

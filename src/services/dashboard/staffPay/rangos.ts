@@ -3,6 +3,7 @@ import type { Prisma } from '@prisma/client'
 import type prisma from '../../../utils/prismaClient'
 import { dbDateComoFecha, diaCivilSiguiente, fechaComoDbDate, PeriodoCanonico, venuePeriodRange } from './periodos'
 import type { AlcanceBarrido } from './fuentesVenta'
+import { ConflictError } from '../../../errors/AppError'
 
 type Db = Prisma.TransactionClient | typeof prisma
 
@@ -21,6 +22,12 @@ export type Ventana = { venueId: string; desde: string; hasta: string | null }
 export type Rangos = { periodo: RangoSede[]; participacion: RangoSede[] }
 /** ponytail: ventanas que se leen por operación (500 sedes × 10). Pasado el tope TRUENA (nunca recorta); se sube la constante. */
 export const TOPE_VENTANAS = 5000
+/** B13 ronda 1 (R1): pasar el tope es volumen de datos, no un error de quien pregunta ⇒ 409 con texto (antes un Error crudo: 500). */
+export const demasiadasVentanas = () =>
+  new ConflictError(
+    'Esta organización tiene demasiadas fechas de activación de sedes para leerlas; pide ayuda a Avoqado.',
+    'STAFF_PAY_DEMASIADAS_VENTANAS',
+  )
 
 /** Un periodo que termina antes del inicio de pago al personal no barre nada: ni ventas ni anulaciones (B-D5). */
 export const fueraDelSobre = (a: AlcanceBarrido) => !a.sedes.length || a.periodo.end < a.startDate
@@ -140,6 +147,6 @@ export async function ventanasDeSedes(db: Db, organizationId: string, venueIds: 
     orderBy: [{ venueId: 'asc' }, { desde: 'asc' }],
     take: TOPE_VENTANAS + 1,
   })
-  if (filas.length > TOPE_VENTANAS) throw new Error('STAFF_PAY_DEMASIADAS_VENTANAS')
+  if (filas.length > TOPE_VENTANAS) throw demasiadasVentanas()
   return filas.map(w => ({ venueId: w.venueId, desde: dbDateComoFecha(w.desde), hasta: w.hasta ? dbDateComoFecha(w.hasta) : null }))
 }

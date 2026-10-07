@@ -53,7 +53,11 @@ describe('rangosConParticipacion — tope de ventanas («nada se trunca»)', () 
 
   it('pide una más que el tope, de las sedes del alcance y de la organización, y si llega truena', async () => {
     const d = db(TOPE_VENTANAS + 1)
-    await expect(rangosConParticipacion(d as any, alcance)).rejects.toThrow('STAFF_PAY_DEMASIADAS_VENTANAS')
+    // B13 ronda 1 (R1): un tope de volumen es 409 con texto, no un Error crudo (500).
+    await expect(rangosConParticipacion(d as any, alcance)).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'STAFF_PAY_DEMASIADAS_VENTANAS',
+    })
     expect(d.staffPayVenueWindow.findMany).toHaveBeenCalledTimes(1)
     expect(d.staffPayVenueWindow.findMany).toHaveBeenCalledWith(
       expect.objectContaining({ where: { organizationId: 'org', venueId: { in: ['v'] } }, take: TOPE_VENTANAS + 1 }),

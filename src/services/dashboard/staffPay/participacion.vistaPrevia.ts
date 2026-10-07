@@ -6,8 +6,8 @@ import { ConflictError } from '../../../errors/AppError'
 import { sedesConServicePay } from './acceso'
 import { AlcanceBarrido, TotalVentas, totalesVentas } from './fuentesVenta'
 import { prepararSede, reglasDeSede, SedePreparada } from './participacion'
-import { dbDateComoFecha, fechaComoDbDate, sumarDias, venuePeriodRange } from './periodos'
-import { TOPE_VENTANAS, Ventana } from './rangos'
+import { fechaComoDbDate, sumarDias, venuePeriodRange } from './periodos'
+import { Ventana, ventanasDeSedes } from './rangos'
 import { enUnaFoto } from './foto'
 import { Participacion, valoracionCte } from './valoracion'
 
@@ -119,17 +119,8 @@ export async function alActivar(
   return out
 }
 
-/** Las ventanas reales de UNA sede, con el mismo tope que el barrido (nunca recorta). */
-async function ventanasDe(db: Db, organizationId: string, venueId: string): Promise<Ventana[]> {
-  const filas = await db.staffPayVenueWindow.findMany({
-    where: { organizationId, venueId },
-    select: { venueId: true, desde: true, hasta: true },
-    orderBy: { desde: 'asc' },
-    take: TOPE_VENTANAS + 1,
-  })
-  if (filas.length > TOPE_VENTANAS) throw new Error('STAFF_PAY_DEMASIADAS_VENTANAS')
-  return filas.map(w => ({ venueId: w.venueId, desde: dbDateComoFecha(w.desde), hasta: w.hasta ? dbDateComoFecha(w.hasta) : null }))
-}
+/** Las ventanas reales de UNA sede, con el mismo tope (y el mismo 409) que el barrido: nunca recorta. */
+const ventanasDe = (db: Db, organizationId: string, venueId: string) => ventanasDeSedes(db, organizationId, [venueId])
 
 /**
  * La vista previa CON MONTOS de activar o desactivar UNA sede (diseño r7.3, r5.4), en UNA foto (`enUnaFoto`), sobre el

@@ -3,7 +3,7 @@
 // r4.5, r4.7, r5.4; ruling de la revisión de B12). SÓLO LECTURA: no cambia qué se paga.
 import { Prisma } from '@prisma/client'
 import prisma from '../../../utils/prismaClient'
-import { BadRequestError, NotFoundError } from '../../../errors/AppError'
+import { ConflictError, NotFoundError } from '../../../errors/AppError'
 import { permisosPorSede, sedesConServicePay, TOPE_SEDES_CON_MODULO } from './acceso'
 import { estadoDeSede, EstadoSede, SituacionDeSede, situacionDeLasSedes } from './estadoSede'
 import { enUnaFoto } from './foto'
@@ -73,7 +73,8 @@ export async function estadoSedes(input: {
     take: TOPE_SEDES_CON_MODULO + 1,
   })
   if (todas.length > TOPE_SEDES_CON_MODULO) {
-    throw new BadRequestError(
+    // Ronda 1 (R2; ruling de B12 #6): un tope de volumen no es un error de quien pregunta ⇒ 409.
+    throw new ConflictError(
       `Esta organización tiene más de ${TOPE_SEDES_CON_MODULO} sedes: no se pueden mostrar todas; contacta a Avoqado.`,
       'DEMASIADAS_SEDES',
     )
