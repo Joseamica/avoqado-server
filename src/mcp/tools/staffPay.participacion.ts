@@ -18,7 +18,15 @@ import type { createGuard } from '../guard'
 import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
 import { conSigno, diaLegible, lista } from './staffPay.formato'
-import { camposFuera, conAviso, huellaDePropinas, revisarConexion, sedesFueraCambiaron } from './staffPay.conexion'
+import {
+  baseDeLaHuella,
+  camposFuera,
+  conAviso,
+  huellaConFuera,
+  huellaDePropinas,
+  revisarConexion,
+  sedesFueraCambiaron,
+} from './staffPay.conexion'
 import { sedesDeLasPropinas } from './staffPay.alcanceDeLaAccion'
 
 type Respuesta = ReturnType<typeof text>
@@ -33,12 +41,15 @@ export interface Herramientas {
 const sha256 = (s: string) => createHash('sha256').update(s).digest('hex')
 /**
  * La huella de activar la organización (r4.6): la fecha de inicio Y las sedes elegidas, ordenadas. 64 caracteres. B14-fix2: con
- * sedes fuera de la conexión lleva además su lista ordenada (sin ellas, la de siempre).
+ * sedes fuera de la conexión lleva además su lista ordenada (sin ellas, la de siempre). Ronda 1 (M3): esa lista va APARTE, tras
+ * `~` (`huellaConFuera`, como la del cierre), para que al confirmar se sepa QUÉ cambió: la fecha o las sedes con el plan
+ * (INICIO_CAMBIO), o sólo las sedes fuera de la conexión (SEDES_FUERA_CAMBIARON).
  */
-export const huellaDeActivar = (startDate: string, sedes: string[], fuera: ReadonlyArray<{ venueId: string }> = []) => {
-  const idsFuera = fuera.map(s => s.venueId).sort()
-  return sha256(`activar|${startDate}|${[...sedes].sort().join(',')}${idsFuera.length ? `|fuera:${idsFuera.join(',')}` : ''}`)
-}
+export const huellaDeActivar = (startDate: string, sedes: string[], fuera: ReadonlyArray<{ venueId: string }> = []) =>
+  huellaConFuera(
+    sha256(`activar|${startDate}|${[...sedes].sort().join(',')}`),
+    [...fuera].sort((a, b) => (a.venueId < b.venueId ? -1 : a.venueId > b.venueId ? 1 : 0)),
+  )
 /** La huella de activar o desactivar UNA sede (r4.6): la sede, la acción y la fecha EXPLÍCITA (nunca «hoy»). */
 export const huellaDeSede = (sede: string, activa: boolean, fecha: string) => sha256(`sede|${sede}|${activa}|${fecha}`)
 
@@ -196,15 +207,17 @@ export async function activarOrganizacion(
   if (!args.fecha)
     return text({ ok: false, needsInput: true, field: 'fecha', question: 'Confirma con la fecha que devolvió la vista previa.' })
   const { ids, sinPlan } = await elegidas()
-  // B14-fix2: se revalida quién pide y qué sedes quedan fuera AHORA; la huella lleva esa lista (si cambió, INICIO_CAMBIO).
+  // B14-fix2: se revalida quién pide y qué sedes quedan fuera AHORA; la huella lleva esa lista. Ronda 1 (M3): si cambió la fecha o
+  // las sedes con el plan, INICIO_CAMBIO; si sólo cambiaron las sedes fuera de la conexión, SEDES_FUERA_CAMBIARON.
   const rev = await revisarConexion(h.scope, 'activar', ids)
   if (rev.negada) return rev.negada
-  if (sinPlan.length || huellaDeActivar(args.fecha, ids, rev.fuera) !== args.expectedSourceFingerprint)
+  if (sinPlan.length || baseDeLaHuella(args.expectedSourceFingerprint) !== huellaDeActivar(args.fecha, ids))
     return text({
       ok: false,
       code: 'INICIO_CAMBIO',
       error: 'La fecha de inicio o las sedes con el plan cambiaron desde la vista previa. Pide una vista previa nueva (sin confirm).',
     })
+  if (huellaDeActivar(args.fecha, ids, rev.fuera) !== args.expectedSourceFingerprint) return sedesFueraCambiaron(rev.fuera)
   try {
     const r = await activarPagoAlPersonal({ userId: h.scope.staffId, venueId, periodicidad, inicioEsperado: args.fecha, sedes: ids })
     if (!r.yaActivado)

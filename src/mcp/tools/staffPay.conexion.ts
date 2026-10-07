@@ -4,11 +4,14 @@
 // AVISA al inicio, trae `sedesFueraDeLaConexion` y la confirmación queda atada a esa lista; a los demás, FUERA_DE_LA_CONEXION sin
 // un dato ni un monto de esas sedes. Al confirmar se revalida todo (rol y sedes fuera de AHORA). Sin sedes fuera, nada cambia.
 // Ronda 1 (R5): DUEÑO es también quien tiene rol OWNER en TODAS las sedes que la acción abarca (`esDueno`).
+// Ronda 1 de B14-fix2 (I1): lo que el cierre devuelve DESPUÉS de esa validación —un rechazo con su vista previa nueva o un «ya
+// cerrado» de otra persona— se revisa otra vez contra SUS sedes (`falloDelCierre`, `yaCerradoRevisado`).
 import { createHash } from 'crypto'
 import type { McpScope } from '../scope'
 import { text } from '../respond'
 import { esDueno, nombresDeSedes } from './staffPay.alcanceDeLaAccion'
 import { lista } from './staffPay.formato'
+import { cuerpoDelFallo } from './staffPay.sedes'
 
 type Respuesta = ReturnType<typeof text>
 export interface SedeFuera {
@@ -85,13 +88,18 @@ export const conAviso = (r: RevisionDeConexion, mensaje: string) => (r.aviso ? `
 /** `sedesFueraDeLaConexion` para la vista previa del dueño y el ActivityLog; nada sin sedes fuera (igual que antes). */
 export const camposFuera = (r: RevisionDeConexion) => (r.fuera.length ? { sedesFueraDeLaConexion: r.fuera } : {})
 
-const firma = (prefijo: string, fuera: SedeFuera[]) =>
+const firma = (prefijo: string, fuera: ReadonlyArray<{ venueId: string }>) =>
   createHash('sha256')
     .update(`${prefijo}|${fuera.map(s => s.venueId).join(',')}`)
     .digest('hex')
 /** La huella que se confirma: la del service y, con sedes fuera, `~` y la firma de su lista ordenada (≤ 105 de 128). */
-export const huellaConFuera = (huella: string, fuera: SedeFuera[]) =>
+export const huellaConFuera = (huella: string, fuera: ReadonlyArray<{ venueId: string }>) =>
   fuera.length ? `${huella}~${firma('fuera', fuera).slice(0, 40)}` : huella
+/** La parte de la huella confirmada que no es la firma de las sedes fuera (la del service, o la de activar). */
+export const baseDeLaHuella = (confirmada: string) => {
+  const i = confirmada.indexOf('~')
+  return i < 0 ? confirmada : confirmada.slice(0, i)
+}
 /** La de cambiar las propinas: sin sedes fuera no hay (como antes); con ellas, la firma de la acción y de su lista. */
 export const huellaDePropinas = (encender: boolean, fuera: SedeFuera[]) => (fuera.length ? firma(`propinas|${encender}`, fuera) : null)
 
@@ -115,7 +123,45 @@ export async function confirmarConexion(
 ): Promise<{ respuesta: null; huella: string; rev: RevisionDeConexion } | { respuesta: Respuesta }> {
   const rev = await revisarConexion(scope, accion, venueIds)
   if (rev.negada) return { respuesta: rev.negada }
-  const i = confirmada.indexOf('~')
-  const huella = i < 0 ? confirmada : confirmada.slice(0, i)
+  const huella = baseDeLaHuella(confirmada)
   return huellaConFuera(huella, rev.fuera) === confirmada ? { respuesta: null, huella, rev } : { respuesta: sedesFueraCambiaron(rev.fuera) }
+}
+
+/** Las sedes de la vista previa que trae un rechazo (`details.preview.periodo.venueIds`); null si no la trae legible. */
+const sedesDeLaVistaDelRechazo = (e: unknown): string[] | null => {
+  const ids = (e as { details?: { preview?: { periodo?: { venueIds?: unknown } } } } | null)?.details?.preview?.periodo?.venueIds
+  return Array.isArray(ids) && ids.every(v => typeof v === 'string') ? ids : null
+}
+
+/**
+ * I1 (ronda 1 de B14-fix2): un 4xx del cierre (sobre todo al CONFIRMAR) trae datos recalculados DESPUÉS de `confirmarConexion`: si una
+ * sede fuera de la conexión entró al alcance entretanto, `HUELLA_CAMBIO` manda una vista previa nueva con ella (total, personas,
+ * propinas sin dueño… de toda la organización) y los demás rechazos cuentan sus clases. Se revisa contra las sedes de ESE rechazo: las
+ * de su vista previa o, si no la trae legible, las del cierre de AHORA (`sedesAhora`). Quien no es dueño ⇒ FUERA_DE_LA_CONEXION, sin
+ * la vista previa; el dueño ⇒ el rechazo de siempre (vista previa acotada, B14-fix F1) con el aviso al inicio y la lista; sin sedes
+ * fuera, igual que antes. Un 500 se propaga sin leer nada; si la relectura falla, el rechazo de siempre.
+ */
+export async function falloDelCierre(scope: McpScope, e: unknown, sedesAhora: () => Promise<string[]>): Promise<Respuesta> {
+  const cuerpo = cuerpoDelFallo(scope, e) // lanza si no es un 4xx
+  let sedes = sedesDeLaVistaDelRechazo(e)
+  if (!sedes) {
+    try {
+      sedes = await sedesAhora()
+    } catch {
+      return text(cuerpo)
+    }
+  }
+  const rev = await revisarConexion(scope, 'cierre', sedes)
+  if (rev.negada) return rev.negada
+  return text(rev.fuera.length ? { ...cuerpo, error: conAviso(rev, cuerpo.error), ...camposFuera(rev) } : cuerpo)
+}
+
+/**
+ * I1: el «ya estaba cerrado» (otra persona lo cerró entre la validación y la transacción) trae el total, las personas y las sedes
+ * de ESE cierre: el mismo chequeo sobre sus sedes. Quien no es dueño ⇒ la negativa; el dueño, con la lista (sin aviso: no hay
+ * nada que confirmar); sin sedes fuera, igual que antes.
+ */
+export async function yaCerradoRevisado(scope: McpScope, r: { venueIds: string[] }): Promise<Respuesta> {
+  const rev = await revisarConexion(scope, 'cierre', r.venueIds)
+  return rev.negada ?? text({ ok: true, ...r, ...camposFuera(rev) })
 }

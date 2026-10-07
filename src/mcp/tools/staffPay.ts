@@ -41,7 +41,15 @@ import {
 import { acotarAlAlcance, avisoDePendientes, detalleDelCierre, falloDelServicio, sedesDeLaConfig } from './staffPay.sedes'
 import { conSigno, diaLegible, diferencia, lista, periodoLegible, pesos } from './staffPay.formato'
 import { sedesDelCierre, sedesDelPagado } from './staffPay.alcanceDeLaAccion'
-import { camposFuera, conAviso, confirmarConexion, huellaConFuera, revisarConexion } from './staffPay.conexion'
+import {
+  camposFuera,
+  conAviso,
+  confirmarConexion,
+  falloDelCierre,
+  huellaConFuera,
+  revisarConexion,
+  yaCerradoRevisado,
+} from './staffPay.conexion'
 
 const sedeArg = z.string().min(1).max(64).optional().describe('Only this venue of the organization (default: all venues you can read)')
 const fecha = z
@@ -369,18 +377,19 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
           huellaEsperada: ok.huella,
           confirmarHuerfanas: confirmarHuerfanas ?? false,
         })
-        if (!r.yaCerrado) {
-          await auditMcpWrite(scope, {
-            action: 'SERVICE_PAY_PERIOD_CLOSED',
-            entity: 'ServicePayPeriod',
-            entityId: r.periodId,
-            venueId,
-            data: { total: r.total, personas: r.personas, ...camposFuera(ok.rev) },
-          })
-        }
+        // Ronda 1 (I1): otra persona lo cerró entretanto, quizá con sedes fuera de la conexión: se revisan las de ESE cierre.
+        if (r.yaCerrado) return await yaCerradoRevisado(scope, r)
+        await auditMcpWrite(scope, {
+          action: 'SERVICE_PAY_PERIOD_CLOSED',
+          entity: 'ServicePayPeriod',
+          entityId: r.periodId,
+          venueId,
+          data: { total: r.total, personas: r.personas, ...camposFuera(ok.rev) },
+        })
         return text({ ok: true, ...r })
       } catch (e) {
-        return fallo(e)
+        // Ronda 1 (I1): el rechazo trae datos recalculados después de validar la conexión: se revisan contra SUS sedes.
+        return await falloDelCierre(scope, e, () => sedesDelCierre(venueId, f))
       }
     },
   )
@@ -407,7 +416,13 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
         .describe(
           'For sede: the day, YYYY-MM-DD venue-local (default today). For activar and sede, when confirming, the fecha the preview returned',
         ),
-      expectedSourceFingerprint: z.string().max(128).optional().describe('For activar and sede: the fingerprint from the preview'),
+      expectedSourceFingerprint: z
+        .string()
+        .max(128)
+        .optional()
+        .describe(
+          'For activar, sede and propinas: the fingerprint from the preview (propinas returns one only when this connection does not include every venue)',
+        ),
       confirm: z.boolean().optional(),
     },
     async ({ venueId, accion, periodicidad, encender, sedes, sede, activa, fecha: f, expectedSourceFingerprint, confirm }) => {

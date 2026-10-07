@@ -65,13 +65,17 @@ export function acotarAlAlcance<T extends { porSede?: Array<{ venueId: string }>
  */
 export const falloDelServicio =
   (scope: McpScope) =>
-  (e: unknown, extra = '') => {
-    const err = e as { statusCode?: number; message?: string; code?: string; details?: { preview?: unknown } }
-    if (!err?.statusCode || err.statusCode >= 500) throw e
-    const p = err.details?.preview
-    const preview = p && typeof p === 'object' ? acotarAlAlcance(p as Parameters<typeof acotarAlAlcance>[0], scope.allowedVenueIds) : null
-    return text({ ok: false, error: `${err.message}${extra}`, code: err.code ?? null, preview })
-  }
+  (e: unknown, extra = '') =>
+    text(cuerpoDelFallo(scope, e, extra))
+
+/** Lo que responde `falloDelServicio`, sin envolver (B14-fix2 ronda 1, I1: el cierre le agrega el aviso de la conexión). */
+export function cuerpoDelFallo(scope: McpScope, e: unknown, extra = '') {
+  const err = e as { statusCode?: number; message?: string; code?: string; details?: { preview?: unknown } }
+  if (!err?.statusCode || err.statusCode >= 500) throw e
+  const p = err.details?.preview
+  const preview = p && typeof p === 'object' ? acotarAlAlcance(p as Parameters<typeof acotarAlAlcance>[0], scope.allowedVenueIds) : null
+  return { ok: false as const, error: `${err.message}${extra}`, code: err.code ?? null, preview }
+}
 
 /** Cuándo se descuenta una pendiente, en palabras: «al cerrar el periodo de octubre de 2026». */
 export const destinoLegible = (d: Destino) =>

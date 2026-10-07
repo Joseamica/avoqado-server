@@ -2,7 +2,8 @@
 // avise»), contra la base REAL: la cuenta vieja de Mindform (rol OWNER en `StaffVenue`, SIN membresía de la organización) es dueña
 // para las acciones de toda la organización desde una conexión limitada si es OWNER en TODAS las sedes que la acción abarca. El
 // dueño del mundo es OWNER sólo en A y no tiene membresía: conexión de A, acción sobre A y B ⇒ negativa; OWNER también en B ⇒
-// aviso; esa fila inactiva o con otro rol ⇒ negativa otra vez. Al confirmar se vuelve a leer.
+// aviso; esa fila inactiva o con otro rol ⇒ negativa otra vez. Al confirmar se vuelve a leer. Ronda 1 de B14-fix2 (M4): una fila
+// OWNER en una sede de OTRA organización no cuenta como dueño.
 import prisma from '@/utils/prismaClient'
 import type { McpScope } from '@/mcp/scope'
 import { confirmarConexion, huellaConFuera, revisarConexion } from '@/mcp/tools/staffPay.conexion'
@@ -46,5 +47,19 @@ describe('R5: dueño de sucursal en la base real', () => {
     expect('respuesta' in c && codigo(c.respuesta)).toBe('FUERA_DE_LA_CONEXION')
     await prisma.staffVenue.update({ where: { id: (await filaEnB())!.id }, data: { active: true, role: 'MANAGER' } })
     expect(codigo((await revisarConexion(scope, 'cierre', [m.venueId, b])).negada)).toBe('FUERA_DE_LA_CONEXION')
+  })
+
+  it('M4: OWNER en A y en una sede de OTRA organización (p. ej. trasladada, aún en el periodo) ⇒ no es dueño: FUERA_DE_LA_CONEXION', async () => {
+    const m2 = await crearMundo('mcp-dueno-otra')
+    try {
+      await prisma.staffVenue.create({ data: { staffId: m.owner, venueId: m2.venueId, role: 'OWNER', active: true } })
+      // Las dos filas existen y son OWNER activas: sólo acotar a la organización de la conexión hace que no sean «todas».
+      const owner = { staffId: m.owner, role: 'OWNER' as const, active: true, venueId: { in: [m.venueId, m2.venueId] } }
+      expect(await prisma.staffVenue.count({ where: owner })).toBe(2)
+      expect(codigo((await revisarConexion(scope, 'cierre', [m.venueId, m2.venueId])).negada)).toBe('FUERA_DE_LA_CONEXION')
+    } finally {
+      await prisma.staffVenue.deleteMany({ where: { staffId: m.owner, venueId: m2.venueId } })
+      await borrarMundo(m2)
+    }
   })
 })
