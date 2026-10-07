@@ -151,6 +151,7 @@ model Organization {
   /// activar, que se lee en la zona de cada sede. null = sin activar (el cierre no barre ventas). No vuelve a cambiar.
   staffPayStartDate        DateTime?                 @db.Date
   staffPayTipWindows       StaffPayTipWindow[]
+  staffPayVenueWindows     StaffPayVenueWindow[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -19093,6 +19094,8 @@ model ServiceEarning {
   @@index([periodId, staffId])
   @@index([sourceType, sourceId, staffId])
   @@index([organizationId, staffId])
+  // La barrera de traslado, borrado y limpieza de demos pregunta «¿esta sede tiene devengos?» (fase 3, B9).
+  @@index([venueId])
 }
 
 /// Recibo de una persona en un periodo cerrado. Avoqado REGISTRA un pago hecho fuera; no mueve dinero.
@@ -19123,4 +19126,25 @@ model StaffPayTipWindow {
   createdAt      DateTime     @default(now())
 
   @@index([organizationId, startsAt])
+}
+
+/// Días en que la sede está ACTIVA en pago al personal (decisión del dueño). Fechas civiles en la zona de la sede.
+/// La escriben SÓLO la activación de la organización y activar/desactivar por sede. venueId sin llave foránea.
+/// Restricciones a mano en la migración: `hasta >= desde`, cerrada ⇔ con quién la cerró, y sin traslapes por sede
+/// (EXCLUDE gist, también entre organizaciones).
+model StaffPayVenueWindow {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  venueId        String
+  /// Primer día que entra.
+  desde          DateTime     @db.Date
+  /// Último día que entra (incluido); null = sin fin.
+  hasta          DateTime?    @db.Date
+  activadaPor    String
+  desactivadaPor String?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@index([organizationId, venueId, desde])
 }

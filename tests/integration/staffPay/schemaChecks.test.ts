@@ -1,6 +1,6 @@
 import { readdirSync, readFileSync } from 'fs'
 import path from 'path'
-import { Prisma } from '@prisma/client'
+import { Prisma, PrismaClient } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { fechaComoDbDate } from '@/services/dashboard/staffPay/periodos'
 import { borrarMundo, clase, crearMundo, Mundo, periodoCerrado } from './_mundo'
@@ -78,6 +78,149 @@ describe('CHECK e índices de la fase 3 (spec fase 3 §6.1, §6.4, §7.1)', () =
     await expect(ventana({ endsAt: new Date('2026-08-01T06:00:00Z'), endedById: m.owner })).rejects.toThrow()
     await expect(ventana({ endsAt: new Date('2026-08-03T06:00:00Z') })).rejects.toThrow()
     await expect(ventana({ endsAt: new Date('2026-08-03T06:00:00Z'), endedById: m.owner })).resolves.toBeDefined()
+  })
+})
+
+describe('ventanas de participación por sede (fase 3, B9; diseño r3.2)', () => {
+  const MIGRACIONES = path.resolve(__dirname, '../../../prisma/migrations')
+  class Revertir extends Error {}
+  const d = (fecha: string) => fechaComoDbDate(fecha)
+  const ventana = (venueId: string, desde: string, extra: Record<string, unknown> = {}, organizationId = m.orgId) =>
+    prisma.staffPayVenueWindow.create({ data: { organizationId, venueId, desde: d(desde), activadaPor: m.owner, ...extra } as any })
+  const otraOrg = async (s: string) =>
+    prisma.organization.create({ data: { name: `${m.key}-${s}`, slug: `${m.key}-${s}`, email: `${m.key}-${s}@example.test`, phone: '1' } })
+
+  it('una ventana nueva no se encima en una cerrada; la contigua sí entra (días inclusivos)', async () => {
+    const v = `${m.key}-sede-traslape`
+    await ventana(v, '2026-09-01', { hasta: d('2026-09-30'), desactivadaPor: m.owner })
+    await expect(ventana(v, '2026-09-30')).rejects.toThrow(/StaffPayVenueWindow_sin_traslape/)
+    await expect(ventana(v, '2026-09-15', { hasta: d('2026-09-20'), desactivadaPor: m.owner })).rejects.toThrow(
+      /StaffPayVenueWindow_sin_traslape/,
+    )
+    await expect(ventana(v, '2026-10-01')).resolves.toBeDefined()
+    await expect(ventana(v, '2027-01-01')).rejects.toThrow(/StaffPayVenueWindow_sin_traslape/) // la abierta no tiene fin
+  })
+
+  it('la misma sede no puede estar activa en dos organizaciones a la vez', async () => {
+    const z = await otraOrg('z-traslape')
+    try {
+      const v = `${m.key}-sede-dos-orgs`
+      await ventana(v, '2026-09-01')
+      await expect(ventana(v, '2026-10-01', {}, z.id)).rejects.toThrow(/StaffPayVenueWindow_sin_traslape/)
+      // Con la de A cerrada antes, Z sí puede abrir después.
+      await prisma.staffPayVenueWindow.updateMany({
+        where: { venueId: v },
+        data: { hasta: d('2026-09-30'), desactivadaPor: m.owner },
+      })
+      await expect(ventana(v, '2026-10-01', {}, z.id)).resolves.toBeDefined()
+    } finally {
+      await prisma.organization.delete({ where: { id: z.id } })
+    }
+  })
+
+  it('dos inserciones concurrentes encimadas: la segunda espera a la primera y, al confirmarse ésta, se rechaza', async () => {
+    const v = `${m.key}-sede-concurrente`
+    const url = process.env.DATABASE_URL
+    const [uno, dos, observador] = [1, 2, 3].map(() => new PrismaClient({ datasources: { db: { url } } }))
+    let soltar!: () => void
+    const suelto = new Promise<void>(r => (soltar = r))
+    let pidUno = 0
+    let listo!: () => void
+    const tomado = new Promise<void>(r => (listo = r))
+    try {
+      const primera = uno.$transaction(
+        async t => {
+          ;[{ pid: pidUno }] = await t.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`
+          await t.staffPayVenueWindow.create({
+            data: { organizationId: m.orgId, venueId: v, desde: d('2026-09-01'), activadaPor: m.owner },
+          })
+          listo()
+          await suelto
+        },
+        { timeout: 30_000 },
+      )
+      await Promise.race([tomado, primera]) // si la primera no pudo insertar, falla aquí en vez de colgarse
+      const segunda = dos.staffPayVenueWindow
+        .create({ data: { organizationId: m.orgId, venueId: v, desde: d('2026-09-10'), activadaPor: m.owner } })
+        .then(
+          () => null,
+          (e: unknown) => e,
+        )
+      // La segunda queda DETENIDA por la primera (la restricción de exclusión espera a que se decida).
+      for (let i = 0; ; i++) {
+        const [{ n }] = await observador.$queryRaw<Array<{ n: number }>>`
+          SELECT COUNT(*)::int AS n FROM pg_stat_activity WHERE pg_blocking_pids(pid) @> ARRAY[${pidUno}::int]`
+        if (n > 0) break
+        if (i > 1500) throw new Error('la segunda inserción nunca esperó a la primera')
+        await new Promise(r => setTimeout(r, 10))
+      }
+      soltar()
+      await primera
+      expect(String(await segunda)).toMatch(/StaffPayVenueWindow_sin_traslape/)
+      expect(await prisma.staffPayVenueWindow.count({ where: { venueId: v } })).toBe(1)
+    } finally {
+      soltar()
+      await Promise.all([uno.$disconnect(), dos.$disconnect(), observador.$disconnect()])
+    }
+  })
+
+  it('las dos CHECK: nunca termina antes de empezar, y cerrada ⇔ con quién la cerró', async () => {
+    const v = `${m.key}-sede-checks`
+    await expect(ventana(v, '2026-09-10', { hasta: d('2026-09-09'), desactivadaPor: m.owner })).rejects.toThrow(/StaffPayVenueWindow_rango/)
+    await expect(ventana(v, '2026-09-10', { hasta: d('2026-09-20') })).rejects.toThrow(/StaffPayVenueWindow_cierre_completo/)
+    await expect(ventana(v, '2026-09-10', { desactivadaPor: m.owner })).rejects.toThrow(/StaffPayVenueWindow_cierre_completo/)
+    // Un solo día (hasta = desde) sí es una ventana válida.
+    await expect(ventana(v, '2026-09-10', { hasta: d('2026-09-10'), desactivadaPor: m.owner })).resolves.toBeDefined()
+  })
+
+  it('borrar la organización borra sus ventanas', async () => {
+    const z = await otraOrg('z-cascada')
+    const v = `${m.key}-sede-cascada`
+    await ventana(v, '2026-09-01', {}, z.id)
+    await prisma.organization.delete({ where: { id: z.id } })
+    expect(await prisma.staffPayVenueWindow.count({ where: { venueId: v } })).toBe(0)
+  })
+
+  it('la migración ABORTA si una organización ya activada no tiene ninguna ventana, y la nombra (sin backfill)', async () => {
+    const carpeta = readdirSync(MIGRACIONES).find(x => x === '20261006000230_staff_pay_venue_windows')
+    expect(carpeta).toBeDefined()
+    const sql = readFileSync(path.join(MIGRACIONES, carpeta!, 'migration.sql'), 'utf8')
+    const aborto = sql.split('-- ABORTO:INICIO')[1].split('-- ABORTO:FIN')[0].trim()
+    expect(aborto).toMatch(/^DO \$\$/)
+    const z = await otraOrg('z-activada')
+    let error: unknown = null
+    let conVentana: unknown = 'no corrió'
+    try {
+      // En transacciones que se revierten: la base de pruebas es compartida.
+      await prisma
+        .$transaction(async tx => {
+          await tx.organization.update({ where: { id: z.id }, data: { staffPayStartDate: d('2026-09-01') } })
+          await tx.$executeRawUnsafe(aborto)
+          throw new Revertir()
+        })
+        .catch(e => {
+          if (!(e instanceof Revertir)) error = e
+        })
+      // Con al menos una ventana ya no la nombra (otra organización de otra prueba sí podría salir; ésta no).
+      await prisma
+        .$transaction(async tx => {
+          await tx.organization.update({ where: { id: z.id }, data: { staffPayStartDate: d('2026-09-01') } })
+          await tx.staffPayVenueWindow.create({
+            data: { organizationId: z.id, venueId: `${m.key}-sede-aborto`, desde: d('2026-09-01'), activadaPor: m.owner },
+          })
+          await tx.$executeRawUnsafe(aborto)
+          throw new Revertir()
+        })
+        .then(
+          () => (conVentana = null),
+          e => (conVentana = e instanceof Revertir ? null : e),
+        )
+    } finally {
+      await prisma.organization.delete({ where: { id: z.id } })
+    }
+    expect(String(error)).toMatch(new RegExp(`${z.id} \\(«${m.key}-z-activada»\\)`))
+    expect(String(error)).toMatch(/nunca borres "staffPayStartDate"/)
+    expect(String(conVentana ?? '')).not.toContain(z.id)
   })
 })
 
