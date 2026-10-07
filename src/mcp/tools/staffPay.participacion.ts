@@ -6,6 +6,7 @@ import { assertPermisoEnTodasLasSedes } from '@/services/dashboard/staffPay/acce
 import { activarPagoAlPersonal, previewActivacion, sedesParaActivar } from '@/services/dashboard/staffPay/activacion.service'
 import { activarSede, desactivarSede } from '@/services/dashboard/staffPay/participacion'
 import { vistaPreviaParticipacion, type Cuenta } from '@/services/dashboard/staffPay/participacion.vistaPrevia'
+import { textoSedeActivaSinPlan, type Bloqueo } from '@/services/dashboard/staffPay/cierre.alcance'
 import type { McpScope } from '../scope'
 import type { createGuard } from '../guard'
 import { text } from '../respond'
@@ -25,6 +26,26 @@ const sha256 = (s: string) => createHash('sha256').update(s).digest('hex')
 export const huellaDeActivar = (startDate: string, sedes: string[]) => sha256(`activar|${startDate}|${[...sedes].sort().join(',')}`)
 /** La huella de activar o desactivar UNA sede (r4.6): la sede, la acción y la fecha EXPLÍCITA (nunca «hoy»). */
 export const huellaDeSede = (sede: string, activa: boolean, fecha: string) => sha256(`sede|${sede}|${activa}|${fecha}`)
+
+/**
+ * Un bloqueo del cierre en palabras para `close_service_pay_period`. `SEDE_ACTIVA_SIN_PLAN` dice lo MISMO que el cierre
+ * (`textoSedeActivaSinPlan`, revisión de B11 #5), con los nombres de las sedes que trae la vista previa (`porSede`).
+ */
+export const motivoDeBloqueo = (b: Bloqueo, p: { porSede?: Array<{ venueId: string; nombre: string }> }): string =>
+  b.codigo === 'NO_HA_TERMINADO'
+    ? `el periodo termina el ${b.hasta}`
+    : b.codigo === 'CLASES_EN_CURSO'
+      ? `${b.n} clase(s) en curso`
+      : b.codigo === 'EXCEPCIONES'
+        ? `${b.n} clase(s) con excepción por resolver`
+        : b.codigo === 'SIN_PERMISO'
+          ? 'te falta staffpay:close en alguna sede del periodo'
+          : b.codigo === 'SEDE_ACTIVA_SIN_PLAN'
+            ? `${textoSedeActivaSinPlan(
+                b.venueIds.map(v => p.porSede?.find(x => x.venueId === v)?.nombre ?? v),
+                b.otrasConPlan,
+              )}${b.otrasConPlan ? ' (accion "sede" con activa:false)' : ''}`
+            : 'ya está cerrado'
 
 const pesos = (s: string) => Number(s).toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 const dia = (f: string) => {

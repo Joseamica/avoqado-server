@@ -37,11 +37,31 @@ describe('alcanceDelPeriodo (B10, r5.2)', () => {
     ).toEqual(['y', 'z'])
   })
 
-  it('un periodo ABIERTO que cruza el inicio truena en vez de adivinar', () => {
-    expect(() => alcanceDelPeriodo({ ...base, periodo: periodo('2026-08-16', '2026-09-15') })).toThrow('STAFF_PAY_PERIODO_CRUZA_EL_INICIO')
-    expect(() => alcanceDelPeriodo({ ...base, startDate: '2026-09-16', periodo: periodo('2026-09-01', '2026-09-30') })).toThrow(
-      'STAFF_PAY_PERIODO_CRUZA_EL_INICIO',
+  it('un periodo ABIERTO que cruza el inicio truena en vez de adivinar: 409 en español (revisión de B11 #2), nunca un 500', () => {
+    const error = (f: () => unknown) => {
+      try {
+        f()
+      } catch (e) {
+        return e
+      }
+      throw new Error('no tronó')
+    }
+    const cruza = {
+      statusCode: 409,
+      code: 'STAFF_PAY_PERIODO_CRUZA_EL_INICIO',
+      details: { periodo: { start: '2026-08-16', end: '2026-09-15' }, inicio: '2026-09-01' },
+    }
+    const e = error(() => alcanceDelPeriodo({ ...base, periodo: periodo('2026-08-16', '2026-09-15') }))
+    expect(e).toMatchObject(cruza)
+    expect((e as Error).message).toBe(
+      'El periodo cruza el inicio de pago al personal; el periodo del 16 ago 2026 al 15 sep 2026 empieza antes del 1 sep 2026 y termina después. Pide ayuda a Avoqado para corregirlo.',
     )
+    expect(
+      error(() => alcanceDelPeriodo({ ...base, startDate: '2026-09-16', periodo: periodo('2026-09-01', '2026-09-30') })),
+    ).toMatchObject({
+      statusCode: 409,
+      code: 'STAFF_PAY_PERIODO_CRUZA_EL_INICIO',
+    })
   })
 })
 

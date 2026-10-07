@@ -77,7 +77,7 @@ export async function rangosConParticipacion(
   o: { ventanas?: Ventana[]; soloElPeriodo?: boolean } = {},
 ): Promise<Rangos> {
   if (fueraDelSobre(a)) return { periodo: [], participacion: [] }
-  const civiles = juntarContiguos([...(o.soloElPeriodo ? [] : await cerradosAnteriores(db, a)), a.periodo], a.startDate)
+  const civiles = await civilesDelPeriodo(db, a, o.soloElPeriodo)
   const porSede = new Map<string, Ventana[]>()
   for (const v of o.ventanas ?? (await ventanasDelAlcance(db, a))) {
     const suyas = porSede.get(v.venueId)
@@ -101,6 +101,28 @@ export async function rangosConParticipacion(
   }
   return { periodo, participacion }
 }
+
+/** P y los cerrados anteriores a P desde `startDate` (o sólo P), como tramos civiles contiguos. */
+async function civilesDelPeriodo(db: Db, a: AlcanceBarrido, soloElPeriodo?: boolean): Promise<PeriodoCanonico[]> {
+  return juntarContiguos([...(soloElPeriodo ? [] : await cerradosAnteriores(db, a)), a.periodo], a.startDate)
+}
+
+/**
+ * Sólo `rp` (B12): los días que el cierre de P barre en cada sede —P y sus cerrados anteriores desde `startDate`—, sin leer
+ * ventanas. Las devoluciones pendientes lo usan para quitar las que ya entran como línea en el cierre de P (r6.2).
+ */
+export async function periodoBarrido(db: Db, a: AlcanceBarrido): Promise<RangoSede[]> {
+  if (fueraDelSobre(a)) return []
+  const civiles = await civilesDelPeriodo(db, a)
+  return a.sedes.flatMap(s => enSuZona(s, civiles))
+}
+
+/**
+ * Los rangos con la ventana COMPLETA `[startDate, ∞)` en cada sede (B12, r5.4: «fuera» = completa − reales). Como los tramos
+ * de `periodo` ya empiezan en `startDate`, intersectarlos con esa ventana los deja iguales: la participación completa ES el
+ * periodo. Lo fija `rangos.completos.test.ts` contra `rangosConParticipacion` con esas ventanas simuladas.
+ */
+export const rangosCompletos = (r: Rangos): Rangos => ({ periodo: r.periodo, participacion: r.periodo })
 
 /** Las ventanas de las sedes del alcance en esta organización, en una consulta y con tope (nunca recorta). */
 async function ventanasDelAlcance(db: Db, a: AlcanceBarrido): Promise<Ventana[]> {

@@ -1,8 +1,7 @@
 // src/services/dashboard/staffPay/cierre.alcance.ts — el alcance de un cierre, sus ventas y sus bloqueos (fases 2-3; B11).
 import { Prisma, ServicePayPeriod } from '@prisma/client'
 import prisma from '../../../utils/prismaClient'
-import { sedesConServicePay } from './acceso'
-import { alcanceDelPeriodo, sedesConVentana } from './participacion'
+import { alcanceDelPeriodo } from './participacion'
 import { periodoQueContieneFecha } from './periodosGuardados'
 import { dbDateComoFecha, PeriodoCanonico, periodoQueContiene, venuePeriodRange } from './periodos'
 import { contarPorEstado, FiltroValoracion } from './valoracion'
@@ -61,13 +60,17 @@ async function sedesDe(db: Db, organizationId: string, venueIds: string[]): Prom
 /**
  * Alcance de un periodo sin tomar candados (preview). Anticipa el crecimiento del cierre para que la huella coincida: la
  * MISMA regla (`alcanceDelPeriodo`, B11): cerrado = su alcance; abierto = guardadas ∪ con plan (D2) y, desde el inicio de
- * pago al personal, ∪ las sedes con alguna ventana (su historia). `activas`: las sedes con el plan, para los bloqueos.
+ * pago al personal, ∪ las sedes con alguna ventana (su historia). B12 (r4.5): se lee DENTRO de la foto de la vista previa con
+ * `db`; `activas` (las sedes con el plan) y `conVentana` llegan resueltas antes, con el cliente global.
  */
-export async function alcanceSinCandado(organizationId: string, fecha: string): Promise<{ a: Alcance; activas: string[] }> {
-  const fila = await periodoQueContieneFecha(prisma, organizationId, fecha)
-  const activas = await sedesConServicePay(organizationId)
-  const conVentana = await sedesConVentana(prisma, organizationId)
-  const org = await prisma.organization.findUniqueOrThrow({
+export async function alcanceDelPreview(
+  db: Db,
+  organizationId: string,
+  fecha: string,
+  o: { activas: string[]; conVentana: string[] },
+): Promise<Alcance> {
+  const fila = await periodoQueContieneFecha(db, organizationId, fecha)
+  const org = await db.organization.findUniqueOrThrow({
     where: { id: organizationId },
     select: { servicePayPeriodicity: true, staffPayStartDate: true },
   })
@@ -78,14 +81,11 @@ export async function alcanceSinCandado(organizationId: string, fecha: string): 
   const venueIds = alcanceDelPeriodo({
     periodo: { ...periodo, estado },
     guardadas: fila?.venueIds ?? [],
-    activas,
-    conVentana,
+    activas: o.activas,
+    conVentana: o.conVentana,
     startDate: org.staffPayStartDate ? dbDateComoFecha(org.staffPayStartDate) : null,
   })
-  return {
-    a: { organizationId, periodo, periodId: fila?.id ?? null, estado, venueIds, sedes: await sedesDe(prisma, organizationId, venueIds) },
-    activas,
-  }
+  return { organizationId, periodo, periodId: fila?.id ?? null, estado, venueIds, sedes: await sedesDe(db, organizationId, venueIds) }
 }
 
 /**

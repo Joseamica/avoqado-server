@@ -9,6 +9,7 @@ import { ConflictError } from '@/errors/AppError'
 import { listarTablas } from '@/services/dashboard/staffPay/tablas.service'
 import { createHash } from 'crypto'
 import { huellaDeActivar } from '@/mcp/tools/staffPay.participacion'
+import { textoSedeActivaSinPlan } from '@/services/dashboard/staffPay/cierre.alcance'
 
 const mockReporte = jest.fn()
 const mockDetalle = jest.fn()
@@ -1326,6 +1327,32 @@ describe('pago al personal con ventas por MCP (spec fase 3 §12)', () => {
     expect(r).toMatchObject({ requiresConfirmation: true })
     expect(r.message).toMatch(/^Se congelan 2 clases de 1 personas/)
     expect(r.message).toMatch(/2 cobro\(s\) o devolución\(es\) con comisión por revisar/)
+  })
+
+  it('el bloqueo SEDE_ACTIVA_SIN_PLAN dice lo MISMO que el cierre (revisión de B11 #5): `textoSedeActivaSinPlan` con los nombres de las sedes', async () => {
+    const base = {
+      clases: 0,
+      comisiones: 0,
+      propinas: 0,
+      reversos: 0,
+      personas: 0,
+      total: '0.00',
+      huella: 'h'.repeat(64),
+      puedeCerrar: false,
+      huerfanas: 0,
+      propinasSinDueno: { n: 0, total: '0.00' },
+      porSede: [
+        { venueId: 'v1', nombre: 'Prado Norte' },
+        { venueId: 'v2', nombre: 'Polanco' },
+      ],
+    }
+    mockPreview.mockResolvedValue({ ...base, bloqueos: [{ codigo: 'SEDE_ACTIVA_SIN_PLAN', venueIds: ['v2'], otrasConPlan: true }] })
+    const r = parse(await handlers.get('close_service_pay_period')!({ venueId: 'v1', fecha: '2026-09-15' }, {}))
+    expect(r.error).toContain(textoSedeActivaSinPlan(['Polanco'], true))
+    expect(r.error).toContain('accion "sede" con activa:false')
+    mockPreview.mockResolvedValue({ ...base, bloqueos: [{ codigo: 'SEDE_ACTIVA_SIN_PLAN', venueIds: ['v1', 'v2'], otrasConPlan: false }] })
+    const r2 = parse(await handlers.get('close_service_pay_period')!({ venueId: 'v1', fecha: '2026-09-15' }, {}))
+    expect(r2.error).toContain(textoSedeActivaSinPlan(['Prado Norte', 'Polanco'], false))
   })
 
   it('config incluye si está activado, desde cuándo y las ventanas de propinas', async () => {

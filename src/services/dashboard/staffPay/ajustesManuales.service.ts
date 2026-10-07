@@ -4,10 +4,12 @@ import { formatInTimeZone } from 'date-fns-tz'
 import prisma from '../../../utils/prismaClient'
 import { BadRequestError, ConflictError, NotFoundError } from '../../../errors/AppError'
 import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
-import { assertPermisoEnSedes, sedesConPermiso, sedesConServicePay } from './acceso'
+import { assertPermisoEnSedes, sedesConPermiso, sedesConServicePay, sedesLegiblesDe } from './acceso'
 import { ampliarAlcance, asegurarPeriodo, assertFechaEnRango, bloquearPeriodo, periodoQueContieneFecha } from './periodosGuardados'
 import { transaccionConPresupuesto } from '../../../utils/esperaDeCandados'
-import { bloquearSedesDeLaOrganizacion } from './participacion'
+import { bloquearSedesDeLaOrganizacion, sedesConVentana } from './participacion'
+import { enUnaFoto } from './foto'
+import { devolucionesPendientes } from './devolucionesPendientes'
 import { dbDateComoFecha, fechaComoDbDate, hoyLocal, Periodicidad, periodoQueContiene, sumarMeses } from './periodos'
 
 const TZ_DEFAULT = 'America/Mexico_City'
@@ -109,9 +111,18 @@ export async function previewAjusteManual(input: Omit<AjusteManualInput, 'client
   const persona = await personaDeLaOrg(input.staffId, sede.organizationId)
   const fecha = input.fecha ?? hoyLocal(sede.timezone || TZ_DEFAULT, input.ahora)
   assertFechaDelAjuste(fecha, sede.timezone || TZ_DEFAULT, sede.organization.servicePayPeriodicity, input.ahora)
-  const fila = await periodoQueContieneFecha(prisma, sede.organizationId, fecha)
+  // B12 (r6.2, r5.1): el aviso de devoluciones pendientes de esta persona, de las sedes donde quien pregunta tiene
+  // `staffpay:read` (las candidatas: con el plan, con historia de pago al personal y la del ajuste), resueltas ANTES; el periodo
+  // destino y las pendientes se leen en la MISMA foto.
+  const activas = await sedesConServicePay(sede.organizationId)
+  const candidatas = [...activas, ...(await sedesConVentana(prisma, sede.organizationId)), input.sede]
+  const { venueIds: legibles } = await sedesLegiblesDe(input.userId, candidatas)
+  const { fila, avisoPendientes } = await enUnaFoto(async tx => ({
+    fila: await periodoQueContieneFecha(tx, sede.organizationId, fecha),
+    avisoPendientes: await devolucionesPendientes(tx, { organizationId: sede.organizationId, sedes: legibles, staffId: input.staffId }),
+  }))
   // Lo mismo que exigirá `ampliarAlcance` al confirmar: la sede ya está en el alcance guardado o hoy tiene el módulo.
-  if (!fila?.venueIds.includes(input.sede) && !(await sedesConServicePay(sede.organizationId)).includes(input.sede)) {
+  if (!fila?.venueIds.includes(input.sede) && !activas.includes(input.sede)) {
     throw new BadRequestError('Esa sede no tiene Pago por servicio activo', 'SEDE_SIN_MODULO')
   }
   const periodo = fila
@@ -126,6 +137,8 @@ export async function previewAjusteManual(input: Omit<AjusteManualInput, 'client
     amount: monto.toFixed(2),
     reason,
     huella: huellaDeAjuste({ start: periodo.start, end: periodo.end, staffId: input.staffId, sede: input.sede, amount: monto, reason }),
+    /** «Ana tiene −$50 en devoluciones que se descontarán solas al cerrar octubre»: no entra a la huella del ajuste. */
+    avisoPendientes,
   }
 }
 

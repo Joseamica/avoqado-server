@@ -10,6 +10,7 @@ import { activarPagoAlPersonal } from '@/services/dashboard/staffPay/activacion.
 import { diferenciasDeClase } from '@/services/dashboard/staffPay/diferencias.service'
 import { previewLiquidacion } from '@/services/dashboard/staffPay/liquidacion.service'
 import { reciboDePersona } from '@/services/dashboard/staffPay/recibos.service'
+import { reportePeriodo } from '@/services/dashboard/staffPay/reporte.service'
 import { activarSede, desactivarSede } from '@/services/dashboard/staffPay/participacion'
 import { fechaComoDbDate } from '@/services/dashboard/staffPay/periodos'
 import { borrarMundo, clase, confirmadas, crearMundo, crearSede, Mundo, tablaFija, tablaMindform } from './_mundo'
@@ -169,7 +170,7 @@ describe('bloqueo SEDE_ACTIVA_SIN_PLAN (r3.4, r4.7)', () => {
     expect((await cerrar('2026-09-15', OCT2)).venueIds).toEqual([A, B].sort())
   })
 
-  it('también bloquea el cierre de un periodo VIEJO: agosto, todavía abierto, cuando ya es octubre', async () => {
+  it('también bloquea el cierre de un periodo atrasado DESDE el inicio: agosto (inicio el 1-ago), todavía abierto, cuando ya es octubre', async () => {
     await activar(m, { desde: '2026-08-01', sedes: [A, B], propinasDesde: null })
     ;(global as any).__sedes = [A]
     expect(await preview('2026-08-15', OCT2)).toMatchObject({
@@ -177,5 +178,35 @@ describe('bloqueo SEDE_ACTIVA_SIN_PLAN (r3.4, r4.7)', () => {
       bloqueos: [{ codigo: 'SEDE_ACTIVA_SIN_PLAN', venueIds: [B], otrasConPlan: true }],
     })
     await expect(cerrar('2026-08-15', OCT2)).rejects.toMatchObject({ code: 'SEDE_ACTIVA_SIN_PLAN' })
+  })
+
+  it('NO bloquea un periodo que termina ANTES del inicio (D2): agosto con inicio el 1-sep, aunque B siga activa sin el plan', async () => {
+    await activar(m, { desde: '2026-09-01', sedes: [A, B], propinasDesde: null })
+    ;(global as any).__sedes = [A] // B perdió el plan; su ventana sigue abierta desde el 1-sep
+    // Agosto rige D2 (guardadas ∪ con el plan): B no está en su alcance, así que su ventana abierta no lo bloquea.
+    const p = await preview('2026-08-15', OCT2)
+    expect(p).toMatchObject({ puedeCerrar: true, bloqueos: [], periodo: { venueIds: [A] } })
+    expect((await cerrar('2026-08-15', OCT2)).venueIds).toEqual([A])
+    // Septiembre (desde el inicio) sí: ahí B entra por su historia.
+    expect((await preview('2026-09-15', OCT2)).bloqueos).toEqual([{ codigo: 'SEDE_ACTIVA_SIN_PLAN', venueIds: [B], otrasConPlan: true }])
+  })
+})
+
+describe('un periodo que CRUZA el inicio (revisión de B11 #2): 409 en español, no un 500', () => {
+  it('el reporte, el recibo y la vista previa del cierre dicen qué pasó', async () => {
+    await activar(m, { desde: '2026-09-01', sedes: [A], propinasDesde: null })
+    // Datos de antes del candado de periodicidad: un inicio a media quincena del mes (mensual) que ningún periodo respeta.
+    await prisma.organization.update({ where: { id: m.orgId }, data: { staffPayStartDate: fechaComoDbDate('2026-09-16') } })
+    const cruza = {
+      statusCode: 409,
+      code: 'STAFF_PAY_PERIODO_CRUZA_EL_INICIO',
+      message: expect.stringMatching(/^El periodo cruza el inicio de pago al personal; /),
+    }
+    await expect(reportePeriodo({ userId: m.owner, venueId: A, fecha: '2026-09-10', offset: 0, limit: 50 })).rejects.toMatchObject(cruza)
+    await expect(reciboDePersona({ userId: m.owner, venueId: A, staffId: m.carla, fecha: '2026-09-10', limit: 50 })).rejects.toMatchObject(
+      cruza,
+    )
+    await expect(preview('2026-09-10', OCT2)).rejects.toMatchObject(cruza)
+    await expect(cerrar('2026-09-10', OCT2)).rejects.toMatchObject(cruza)
   })
 })

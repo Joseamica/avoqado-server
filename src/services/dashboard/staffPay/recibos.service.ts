@@ -5,7 +5,6 @@ import { BadRequestError, ConflictError, NotFoundError } from '../../../errors/A
 import { utcTs } from '../../../utils/sqlDates'
 import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
 import { encodeExport, EncodedExport, ExportColumnDef, fechaMx, getRowCapForFormat } from '../export.helpers'
-import { runWithoutCancellation } from '../../../utils/requestCancellation'
 import { assertPermisoEnSedes, exigirPermisoEnSedes, sedesConPermiso, sedesConServicePay, sedesLegiblesDe } from './acceso'
 import { bloquearPeriodo, periodoQueContieneFecha } from './periodosGuardados'
 import { transaccionConPresupuesto } from '../../../utils/esperaDeCandados'
@@ -13,6 +12,8 @@ import { dbDateComoFecha, MESES_LARGOS, periodoQueContiene, venuePeriodRange } f
 import { ReglaDeClase, textoDeRegla, valoracionCte } from './valoracion'
 import { AlcanceBarrido, sqlVentasDelPeriodo } from './fuentesVenta'
 import { personaDelRecibo } from './recibos.persona'
+import { enUnaFoto } from './foto'
+import { DevolucionesPendientes, devolucionesPendientes } from './devolucionesPendientes'
 import { alcanceDelPeriodo, sedesConVentana } from './alcance'
 import { rangosConParticipacion } from './rangos'
 
@@ -47,6 +48,8 @@ export interface Recibo {
   parcial: boolean
   /** Del recibo ENTERO, por tipo (SUM en la base); sólo los tipos que tienen renglones (spec fase 3 §11). */
   totalesPorTipo: Partial<Record<RenglonRecibo['tipo'], string>>
+  /** B12 (r6.2, r5.1): devoluciones de esta persona que se descontarán solas en OTRO cierre; null en un recibo cerrado. */
+  pendientes: DevolucionesPendientes | null
 }
 
 type Db = Prisma.TransactionClient | typeof prisma
@@ -238,6 +241,8 @@ interface FuenteRecibo {
   nombreSede: Map<string, string>
   /** UNA consulta (UNION ALL) con todos los renglones; null si el usuario no puede leer ninguna sede. */
   sql: Prisma.Sql | null
+  /** El alcance legible ya filtrado por `sede` (B12: las pendientes se leen sobre el mismo). */
+  venueIds: string[]
   pagadoEn: string | null
   /** De QUÉ recibo es un cursor (organización, inicio del periodo, persona y sede): ver `leerCursor`. */
   llave: string
@@ -327,26 +332,8 @@ function alcanceEnLaFoto(
   return { venueIds, parcial: legibles.length < alcance.length || (sede !== undefined && venueIds.length === 0) }
 }
 
-/**
- * UNA instantánea de sólo lectura (Codex R3-Nuevo 1): la fuente, el total y las páginas del recibo se leen del MISMO
- * instante. Sin esto, un cierre entre dos lecturas deja renglones que no suman el total (la valoración en vivo pierde
- * las clases recién ancladas y la fuente del periodo abierto no incluye los SERVICE nuevos).
- * 🔴 Regla (Codex R4-Nuevo 1): dentro de `fn` SÓLO se lee con `tx` —periodo, total y páginas—; nunca `prisma.` global
- * ni un helper que lo use (`sedesConServicePay`, `sedesLegiblesDe`, `alcanceLegibleDelPeriodo`, permisos): eso va en
- * `prepararRecibo`, antes.
- * Exportada sólo para su prueba de cancelación.
- */
-export function enUnaFoto<T>(fn: (tx: Db) => Promise<T>): Promise<T> {
-  return prisma.$transaction(
-    async tx => {
-      // Codex R4-Nuevo 2: el freno de lecturas del MCP trata todo `$executeRaw` como escritura (`hasWritten = true`) y
-      // dejaría de cortar las lecturas que siguen. Este SET no escribe nada: va fuera del freno, y SÓLO él.
-      await runWithoutCancellation(() => tx.$executeRaw`SET TRANSACTION READ ONLY`)
-      return fn(tx)
-    },
-    { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead, maxWait: 10_000, timeout: 60_000 },
-  )
-}
+/** La instantánea vive en `foto.ts` (B12: también la usa la vista previa del cierre); se re-exporta para su prueba. */
+export { enUnaFoto } from './foto'
 
 /**
  * Qué renglones forman el recibo, como UNA fuente SQL (Codex R2-R1-20): los `ServiceEarning` (SERVICE, RECONCILE,
@@ -445,6 +432,7 @@ async function fuenteDelRecibo(
     parcial,
     nombreSede: new Map([...prep.sedes].map(([id, x]) => [id, x.nombre])),
     sql: armarFuente(crudo, o.agruparPropinas),
+    venueIds,
     pagadoEn: pagado?.paidAt?.toISOString() ?? null,
     llave: createHash('sha256')
       .update([prep.organizationId, canon.start, input.staffId, input.sede ?? ''].join('|'))
@@ -622,6 +610,16 @@ export async function reciboDePersona(input: EntradaRecibo): Promise<Recibo> {
     const f = await fuenteDelRecibo(tx, prep, input, { agruparPropinas: true })
     const { total, cantidad, porTipo } = await totalDelRecibo(tx, f)
     const pagina = await paginaDelRecibo(tx, f, input.cursor, acotar(input.limit))
+    // B12: en la MISMA foto; sólo el recibo abierto (lo de su periodo ya es renglón: `excluirPeriodo`).
+    const pendientes =
+      f.periodo.estado === 'CLOSED'
+        ? null
+        : await devolucionesPendientes(tx, {
+            organizationId: prep.organizationId,
+            sedes: f.venueIds,
+            staffId: input.staffId,
+            excluirPeriodo: f.periodo,
+          })
     return {
       persona: f.persona,
       periodo: f.periodo,
@@ -632,6 +630,7 @@ export async function reciboDePersona(input: EntradaRecibo): Promise<Recibo> {
       pagadoEn: f.pagadoEn,
       parcial: f.parcial,
       totalesPorTipo: porTipo,
+      pendientes,
     }
   })
 }

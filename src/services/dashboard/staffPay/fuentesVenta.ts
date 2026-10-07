@@ -42,7 +42,7 @@ const TZ_DEFAULT = 'America/Mexico_City'
 const acotar = (n: number) => Math.min(Math.max(Math.trunc(n) || 1, 1), 1000)
 
 /** `(sede = X AND col en [desde, hasta)) OR …` sobre las columnas de `alias` (alias fijos del código, nunca del usuario). */
-function enRangos(alias: 'cc' | 'o' | 'p' | 'op', columna: 'calculatedAt' | 'createdAt', r: RangoSede[]): Prisma.Sql {
+export function enRangos(alias: 'cc' | 'o' | 'p' | 'op', columna: 'calculatedAt' | 'createdAt', r: RangoSede[]): Prisma.Sql {
   if (!r.length) return Prisma.sql`false`
   const venue = Prisma.raw(`${alias}."venueId"`)
   const t = Prisma.raw(`${alias}."${columna}"`)
@@ -390,15 +390,16 @@ export type TotalVentas = { venueId: string; fuente: FuenteVenta; n: number; tot
  * (`comisionBarrible`, `propinasBase` con persona) sobre las ventanas reales o SIMULADAS (`o.ventanas`). «Entran» y «quedan
  * fuera» salen por DIFERENCIA de estas sumas, nunca de los positivos: una devolución entra o sale con su original (+$60 y
  * −$60 alrededor de la fecha ⇒ $0). Las anulaciones (§6.4) no dependen de las ventanas: no van aquí. Agregado en la base:
- * nunca trae las filas a memoria.
+ * nunca trae las filas a memoria. Con `o.rangos` no lee nada más (las ventanas ya van en ellos).
  */
 export async function totalesVentas(
   db: Db,
   a: AlcanceBarrido,
-  o: { ventanas?: Ventana[]; soloElPeriodo?: boolean } = {},
+  o: { ventanas?: Ventana[]; soloElPeriodo?: boolean; rangos?: Rangos } = {},
 ): Promise<TotalVentas[]> {
   if (fueraDelSobre(a)) return []
-  const { periodo: rp, participacion: rv } = await rangosConParticipacion(db, a, o)
+  // `o.rangos`: los que la operación ya calculó (B12: la vista previa del cierre reusa los de su recorrido, una vez).
+  const { periodo: rp, participacion: rv } = o.rangos ?? (await rangosConParticipacion(db, a, o))
   const filas = await db.$queryRaw<Array<{ venueId: string; fuente: FuenteVenta; n: number; total: Prisma.Decimal | null }>>`
     SELECT x."venueId", x.fuente, COUNT(*)::int AS n, SUM(x.monto) AS total
     FROM (

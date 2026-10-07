@@ -2,30 +2,31 @@ import { Prisma, ServicePayPeriod } from '@prisma/client'
 import { formatInTimeZone } from 'date-fns-tz'
 import prisma from '../../../utils/prismaClient'
 import { BadRequestError, ConflictError } from '../../../errors/AppError'
-import { utcTs } from '../../../utils/sqlDates'
 import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
-import { exigirPermisoEnSedes, sedesConPermiso, sedesConServicePay, tienePermisoEn } from './acceso'
+import { exigirPermisoEnSedes, sedesConPermiso, sedesConServicePay } from './acceso'
 import { ampliarAlcance, asegurarPeriodo, bloquearPeriodo, lockPeriodosDeOrganizacion, periodoQueContieneFecha } from './periodosGuardados'
 import { transaccionConPresupuesto } from '../../../utils/esperaDeCandados'
 import { alcanceDelPeriodo, bloquearSedesDeLaOrganizacion, sedesConVentana } from './participacion'
-import { dbDateComoFecha, venuePeriodRange } from './periodos'
-import { ClaseValorada, FiltroValoracion, ReglaDeClase, valorarClases } from './valoracion'
-import { Huella } from './huella'
-import { comisionesBarribles, LineaBarrible, propinasBarribles, propinasSinDueno, reversosPorAnulacion } from './fuentesVenta'
+import { dbDateComoFecha } from './periodos'
+import { ClaseValorada, ReglaDeClase } from './valoracion'
+import { alcanceDe, alcanceDeVentas, Bloqueo, bloqueosDe, textoSedeActivaSinPlan } from './cierre.alcance'
 import {
-  Alcance,
-  alcanceDe,
-  alcanceDeVentas,
-  alcanceSinCandado,
-  Barrido,
-  Bloqueo,
-  bloqueosDe,
-  filtroDe,
-  Sede,
-  textoSedeActivaSinPlan,
-} from './cierre.alcance'
+  ajustesDelPeriodo,
+  comisionesPorRevisar,
+  idsHuerfanas,
+  LOTE_CIERRE,
+  organizacionDe,
+  recibosGuardados,
+  recorrer,
+  sinDuenoDe,
+} from './cierre.recorrido'
+import { previewCierre } from './cierre.preview'
 
 export type { Bloqueo } from './cierre.alcance'
+// B12: la vista previa vive en `cierre.preview.ts` y el recorrido en `cierre.recorrido.ts`; se re-exportan para sus llamadores.
+export { previewCierre } from './cierre.preview'
+export type { PreviewCierre } from './cierre.preview'
+export { consultaIdsDelLote, LOTE_CIERRE } from './cierre.recorrido'
 
 type Tx = Prisma.TransactionClient
 type Db = Tx | typeof prisma
@@ -48,40 +49,7 @@ type Db = Tx | typeof prisma
 // 76 + 30 < 120. Y aunque el cálculo tarde más, ninguna espera empuja la transacción más allá de su timeout: el presupuesto
 // se acota también por el reloj de la transacción menos 1 s (F3, `esperaDeCandados.ts`) y contesta 409 en vez del P2028.
 export const TIMEOUT_CIERRE_MS = 120_000
-export const LOTE_CIERRE = 500
 const BLOQUE_ESCRITURA = 1000
-
-export interface PreviewCierre {
-  periodo: { id: string | null; start: string; end: string; venueIds: string[] }
-  puedeCerrar: boolean
-  bloqueos: Bloqueo[]
-  clases: number
-  excluidas: number
-  personas: number
-  /** Sólo clases. */
-  totalServicios: string
-  totalAjustes: string
-  /** Spec fase 3 §6.2-§6.4: lo que el cierre congela además de las clases (las devoluciones cuentan en su fuente). */
-  comisiones: number
-  propinas: number
-  /** Comisiones ya congeladas que hoy están anuladas: se descuentan UNA vez (RECONCILE). */
-  reversos: number
-  /** Comisiones + propinas + reversos. `total = totalServicios + totalVentas + totalAjustes`. */
-  totalVentas: string
-  /** Propinas que no entran por no tener persona (no bloquean el cierre). Fuera de la huella. */
-  propinasSinDueno: { n: number; total: string }
-  /**
-   * Resolución 16: cobros o devoluciones de las sedes del periodo cuya comisión no se pudo calcular (efecto en revisión
-   * sin resolver). Un aviso: no bloquea el cierre y no entra en la huella.
-   */
-  comisionesPorRevisar: number
-  total: string
-  huerfanas: number
-  huella: string
-  /** Las sedes de `periodo.venueIds` con clases pagables, ventas o ajustes, en su mismo orden (QA 2026-10-03, defecto 8: el
-   *  modal nombraba sedes sin una sola clase). No entra en la huella. */
-  sedesConDinero: string[]
-}
 
 export interface ResultadoCierre {
   periodId: string
@@ -92,76 +60,6 @@ export interface ResultadoCierre {
   total: string
   huella: string
   yaCerrado: boolean
-}
-
-const sinDuenoDe = async (db: Db, v: Barrido | null) => (v ? propinasSinDueno(db, v.a, v.r) : { n: 0, total: new Prisma.Decimal(0) })
-
-/**
- * Resolución 16: efectos de comisión en revisión (`…:policy-error:v1`) sin resolver de las sedes del alcance. Sólo de cobros
- * desde el inicio de pago al personal en la zona de SU sede (B4 r1): lo de antes nunca entra al sobre, y su aviso sería
- * falso para siempre.
- */
-const comisionesPorRevisar = (db: Db, v: Barrido | null) =>
-  v
-    ? db.paymentEffect.count({
-        where: {
-          kind: 'COMMISSION',
-          dedupeKey: { endsWith: ':policy-error:v1' },
-          status: { not: 'DONE' },
-          OR: v.a.sedes.map(s => ({
-            venueId: s.venueId,
-            payment: { createdAt: { gte: venuePeriodRange({ start: v.a.startDate, end: v.a.startDate }, s.tz).from } },
-          })),
-        },
-      })
-    : Promise.resolve(0)
-
-/** IDs de las reservas de clase sin horario del periodo (spec §5.5), en orden fijo: sede → id. */
-async function idsHuerfanas(db: Db, a: Alcance, ahora: Date): Promise<string[]> {
-  const ids: string[] = []
-  for (const s of a.sedes) {
-    const f = filtroDe(a, s, ahora)
-    let despuesDe: string | undefined
-    for (;;) {
-      const page = await db.reservation.findMany({
-        where: {
-          venueId: s.venueId,
-          startsAt: { gte: f.desde, lt: f.hasta },
-          classSessionId: null,
-          status: { notIn: ['CANCELLED', 'PENDING'] },
-          product: { type: 'CLASS' },
-          ...(despuesDe ? { id: { gt: despuesDe } } : {}),
-        },
-        select: { id: true },
-        orderBy: { id: 'asc' },
-        take: 1000,
-      })
-      if (!page.length) break
-      ids.push(...page.map(r => r.id))
-      despuesDe = page[page.length - 1].id
-    }
-  }
-  return ids
-}
-
-type AjusteGuardado = { id: string; staffId: string; venueId: string; amount: Prisma.Decimal }
-
-/** TODOS los ajustes del periodo, por páginas con cursor: un tope de página nunca es un tope contable (Codex R1-3). */
-async function ajustesDelPeriodo(db: Db, organizationId: string, periodId: string | null): Promise<AjusteGuardado[]> {
-  if (!periodId) return []
-  const todos: AjusteGuardado[] = []
-  let despuesDe: string | undefined
-  for (;;) {
-    const page = await db.serviceEarning.findMany({
-      where: { organizationId, periodId, concept: { in: ['RECONCILE', 'MANUAL'] }, ...(despuesDe ? { id: { gt: despuesDe } } : {}) },
-      select: { id: true, staffId: true, venueId: true, amount: true },
-      orderBy: { id: 'asc' },
-      take: 1000,
-    })
-    if (!page.length) return todos
-    todos.push(...page)
-    despuesDe = page[page.length - 1].id
-  }
 }
 
 export function descriptorDeClase(
@@ -202,201 +100,6 @@ export async function anclarClases(
     WHERE "ClassSessionPayState"."originPeriodId" IS NULL`
 }
 
-/**
- * Los siguientes `n` ids de clase de la sede en el rango, por llave (A13): se pagina ANTES de los joins pesados y sólo
- * esos ids se valoran. Sin los demás filtros de la valoración (terminada, no cancelada, sin ancla): ésos los aplica la
- * valoración, así que un lote puede valorar menos de `n` clases, nunca otras.
- */
-export const consultaIdsDelLote = (f: FiltroValoracion, despuesDe: string | undefined, n: number): Prisma.Sql => Prisma.sql`
-  SELECT cs.id FROM "ClassSession" cs
-  WHERE cs."venueId" = ${f.venueId} AND cs."startsAt" >= ${utcTs(f.desde)} AND cs."startsAt" < ${utcTs(f.hasta)}
-    ${despuesDe ? Prisma.sql`AND cs.id > ${despuesDe}` : Prisma.empty}
-  ORDER BY cs.id ASC
-  LIMIT ${n}`
-
-interface Recorrido {
-  clases: number
-  excluidas: number
-  comisiones: number
-  propinas: number
-  reversos: number
-  personas: Set<string>
-  sedesConDinero: Set<string>
-  totalServicios: Prisma.Decimal
-  totalVentas: Prisma.Decimal
-  totalAjustes: Prisma.Decimal
-  huella: string
-}
-
-/**
- * El ÚNICO recorrido de la huella (spec §6.3 puntos 2 y 4; fase 3 §6.5), el mismo para el preview y el cierre: cabecera →
- * clases (sede → clase, por lotes con cursor `classSessionId > último`) → comisiones (M) → propinas (T) → reversos por
- * anulación (X), cada fuente por lotes ordenados por id → ajustes por id → huérfanas por id. Cada lote pasa por la huella
- * ANTES de `alLote` / `alVentas`. No escribe nada: el cierre guarda lo de cada lote y escribe al terminar (A13). Todo nace
- * dentro de cada llamada: un reintento de `withSerializableRetry` empieza de cero. `digest()` se llama una sola vez.
- */
-async function recorrer(
-  db: Db,
-  a: Alcance,
-  ahora: Date,
-  o: {
-    tamLote: number
-    ajustes: AjusteGuardado[]
-    huerfanas: string[]
-    /** null: sin activar, no se barren ventas (B-D5). Con sus rangos, calculados UNA vez por operación (B11). */
-    ventas: Barrido | null
-    alLote?: (lote: ClaseValorada[], sede: Sede) => Promise<void>
-    alVentas?: (lote: LineaBarrible[]) => void
-  },
-): Promise<Recorrido> {
-  const huella = new Huella()
-  huella.cabecera({ organizationId: a.organizationId, ...a.periodo, venueIds: a.venueIds })
-  const r = {
-    clases: 0,
-    excluidas: 0,
-    comisiones: 0,
-    propinas: 0,
-    reversos: 0,
-    personas: new Set<string>(),
-    sedesConDinero: new Set<string>(),
-    totalServicios: new Prisma.Decimal(0),
-    totalVentas: new Prisma.Decimal(0),
-    totalAjustes: new Prisma.Decimal(0),
-  }
-  // El mismo tope que `valorarClases`: con más ids que su LIMIT se perderían clases del lote.
-  const tam = Math.min(Math.max(o.tamLote, 1), 1000)
-  for (const s of a.sedes) {
-    const f = filtroDe(a, s, ahora)
-    let despuesDe: string | undefined
-    for (;;) {
-      // A13: primero los ids del lote (por llave), luego la valoración de SÓLO esos ids. Antes cada lote valoraba todo lo
-      // que quedaba del periodo para quedarse con 500 (O(N²/lote)). El orden sigue siendo por classSessionId.
-      const ids = (await db.$queryRaw<Array<{ id: string }>>(consultaIdsDelLote(f, despuesDe, tam))).map(x => x.id)
-      if (!ids.length) break
-      const lote = await valorarClases(db, { ...f, claseIds: ids }, { limite: tam })
-      for (const c of lote) {
-        huella.clase(c)
-        if (c.estado === 'OK' && c.staffId && c.monto !== null) {
-          r.clases++
-          r.personas.add(c.staffId)
-          r.sedesConDinero.add(s.venueId)
-          r.totalServicios = r.totalServicios.plus(c.monto)
-        } else if (c.estado === 'EXCLUIDA') r.excluidas++
-      }
-      if (o.alLote) await o.alLote(lote, s)
-      despuesDe = ids[ids.length - 1]
-    }
-  }
-  if (o.ventas) {
-    const fuentes = [
-      { leer: comisionesBarribles, hashear: (l: LineaBarrible) => huella.comision(l), contar: () => r.comisiones++ },
-      { leer: propinasBarribles, hashear: (l: LineaBarrible) => huella.propina(l), contar: () => r.propinas++ },
-      { leer: reversosPorAnulacion, hashear: (l: LineaBarrible) => huella.reverso(l), contar: () => r.reversos++ },
-    ]
-    for (const f of fuentes) {
-      let despuesDe: string | undefined
-      for (;;) {
-        const lote = await f.leer(db, o.ventas.a, o.ventas.r, { despuesDe, limite: tam })
-        if (!lote.length) break
-        for (const l of lote) {
-          f.hashear(l)
-          f.contar()
-          r.totalVentas = r.totalVentas.plus(l.monto)
-          r.personas.add(l.staffId)
-          r.sedesConDinero.add(l.venueId)
-        }
-        o.alVentas?.(lote)
-        despuesDe = lote[lote.length - 1].sourceId
-      }
-    }
-  }
-  for (const aj of o.ajustes) {
-    huella.ajuste(aj)
-    r.totalAjustes = r.totalAjustes.plus(aj.amount)
-    r.personas.add(aj.staffId)
-    r.sedesConDinero.add(aj.venueId)
-  }
-  for (const id of o.huerfanas) huella.huerfana(id)
-  return { ...r, huella: huella.digest() }
-}
-
-async function organizacionDe(venueId: string): Promise<string> {
-  return (await prisma.venue.findUniqueOrThrow({ where: { id: venueId }, select: { organizationId: true } })).organizationId
-}
-
-export async function previewCierre(input: {
-  userId: string
-  venueId: string
-  fecha: string
-  ahora?: Date
-  tamLote?: number
-}): Promise<PreviewCierre> {
-  const ahora = input.ahora ?? new Date()
-  const { a, activas } = await alcanceSinCandado(await organizacionDe(input.venueId), input.fecha)
-  // Permiso ANTES de calcular nada (Codex R1-8): quien no puede cerrar todo el alcance no recibe ni un número de él.
-  for (const v of a.venueIds) {
-    if (!(await tienePermisoEn(input.userId, v, 'staffpay:close'))) {
-      return {
-        periodo: { id: a.periodId, start: a.periodo.start, end: a.periodo.end, venueIds: [] },
-        puedeCerrar: false,
-        bloqueos: [{ codigo: 'SIN_PERMISO' }],
-        clases: 0,
-        excluidas: 0,
-        comisiones: 0,
-        propinas: 0,
-        reversos: 0,
-        personas: 0,
-        totalServicios: '0.00',
-        totalVentas: '0.00',
-        totalAjustes: '0.00',
-        propinasSinDueno: { n: 0, total: '0.00' },
-        comisionesPorRevisar: 0,
-        total: '0.00',
-        huerfanas: 0,
-        huella: '',
-        sedesConDinero: [],
-      }
-    }
-  }
-  if (a.estado === 'CLOSED' && a.periodId) return previewCerrado({ ...a, periodId: a.periodId })
-  const bloqueos = await bloqueosDe(prisma, a, ahora, activas)
-  const ajustes = await ajustesDelPeriodo(prisma, a.organizationId, a.periodId)
-  const huerfanas = await idsHuerfanas(prisma, a, ahora)
-  const ventas = await alcanceDeVentas(prisma, a)
-  const r = await recorrer(prisma, a, ahora, { tamLote: input.tamLote ?? LOTE_CIERRE, ajustes, huerfanas, ventas })
-  const sinDueno = await sinDuenoDe(prisma, ventas)
-  return {
-    periodo: { id: a.periodId, start: a.periodo.start, end: a.periodo.end, venueIds: a.venueIds },
-    puedeCerrar: bloqueos.length === 0,
-    bloqueos,
-    clases: r.clases,
-    excluidas: r.excluidas,
-    comisiones: r.comisiones,
-    propinas: r.propinas,
-    reversos: r.reversos,
-    personas: r.personas.size,
-    totalServicios: r.totalServicios.toFixed(2),
-    totalVentas: r.totalVentas.toFixed(2),
-    totalAjustes: r.totalAjustes.toFixed(2),
-    propinasSinDueno: { n: sinDueno.n, total: sinDueno.total.toFixed(2) },
-    comisionesPorRevisar: await comisionesPorRevisar(prisma, ventas),
-    total: r.totalServicios.plus(r.totalVentas).plus(r.totalAjustes).toFixed(2),
-    huerfanas: huerfanas.length,
-    huella: r.huella,
-    sedesConDinero: a.venueIds.filter(v => r.sedesConDinero.has(v)),
-  }
-}
-
-/** Lo GUARDADO de un periodo cerrado: personas y total de los recibos (lo mismo que el retorno idempotente). */
-async function recibosGuardados(db: Db, organizationId: string, periodId: string) {
-  const agg = await db.staffPayStatement.aggregate({
-    where: { periodId, period: { organizationId } },
-    _count: { _all: true },
-    _sum: { total: true },
-  })
-  return { personas: agg._count._all, total: agg._sum.total ?? new Prisma.Decimal(0) }
-}
-
 async function resultadoGuardado(db: Db, p: ServicePayPeriod, yaCerrado: boolean): Promise<ResultadoCierre> {
   const g = await recibosGuardados(db, p.organizationId, p.id)
   return {
@@ -408,53 +111,6 @@ async function resultadoGuardado(db: Db, p: ServicePayPeriod, yaCerrado: boolean
     total: g.total.toFixed(2),
     huella: p.closeFingerprint ?? '',
     yaCerrado,
-  }
-}
-
-/**
- * Preview de un periodo CERRADO: lo guardado, nunca el recorrido en vivo (que sólo vería lo que llegó tarde y
- * mostraría otro total). Clases, comisiones, propinas y reversos salen de lo congelado, por concepto × fuente (desde la
- * fase 3 un SERVICE ya no es siempre una clase); `excluidas` no se reconstruye (0): el detalle se lee en el recibo.
- */
-async function previewCerrado(a: Alcance & { periodId: string }): Promise<PreviewCierre> {
-  const [g, porTipo, porSede] = await Promise.all([
-    recibosGuardados(prisma, a.organizationId, a.periodId),
-    // A lo más una fila por concepto × fuente.
-    prisma.serviceEarning.groupBy({
-      by: ['concept', 'sourceType'],
-      where: { organizationId: a.organizationId, periodId: a.periodId },
-      _count: { _all: true },
-      _sum: { amount: true },
-    }),
-    // Una fila por sede (GROUP BY): acotado por el número de sedes del alcance.
-    prisma.serviceEarning.groupBy({ by: ['venueId'], where: { organizationId: a.organizationId, periodId: a.periodId } }),
-  ])
-  const de = (concept: string, sourceType: string) => porTipo.find(x => x.concept === concept && x.sourceType === sourceType)
-  const clases = de('SERVICE', 'CLASS_SESSION')
-  const totalServicios = clases?._sum.amount ?? new Prisma.Decimal(0)
-  const totalVentas = porTipo
-    .filter(x => x.sourceType === 'COMMISSION' || x.sourceType === 'TIP')
-    .reduce((acc, x) => acc.plus(x._sum.amount ?? 0), new Prisma.Decimal(0))
-  const conDinero = new Set(porSede.map(x => x.venueId))
-  return {
-    periodo: { id: a.periodId, start: a.periodo.start, end: a.periodo.end, venueIds: a.venueIds },
-    puedeCerrar: false,
-    bloqueos: [{ codigo: 'YA_CERRADO' }],
-    clases: clases?._count._all ?? 0,
-    excluidas: 0,
-    comisiones: de('SERVICE', 'COMMISSION')?._count._all ?? 0,
-    propinas: de('SERVICE', 'TIP')?._count._all ?? 0,
-    reversos: de('RECONCILE', 'COMMISSION')?._count._all ?? 0,
-    personas: g.personas,
-    totalServicios: totalServicios.toFixed(2),
-    totalVentas: totalVentas.toFixed(2),
-    totalAjustes: g.total.minus(totalServicios).minus(totalVentas).toFixed(2),
-    propinasSinDueno: { n: 0, total: '0.00' },
-    comisionesPorRevisar: 0,
-    total: g.total.toFixed(2),
-    huerfanas: 0,
-    huella: '',
-    sedesConDinero: a.venueIds.filter(v => conDinero.has(v)),
   }
 }
 

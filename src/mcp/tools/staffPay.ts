@@ -7,7 +7,7 @@ import { detallePersona, reportePeriodo } from '@/services/dashboard/staffPay/re
 import { listarNiveles, nivelesVigentes } from '@/services/dashboard/staffPay/niveles.service'
 import { listarTablas } from '@/services/dashboard/staffPay/tablas.service'
 import { hoyLocal } from '@/services/dashboard/staffPay/periodos'
-import { cerrarPeriodo, previewCierre, type Bloqueo } from '@/services/dashboard/staffPay/cierre.service'
+import { cerrarPeriodo, previewCierre } from '@/services/dashboard/staffPay/cierre.service'
 import { agregarAjusteManual, previewAjusteManual } from '@/services/dashboard/staffPay/ajustesManuales.service'
 import { marcarPagado, previewPagado, reciboDePersona } from '@/services/dashboard/staffPay/recibos.service'
 import { periodoQueContieneFecha } from '@/services/dashboard/staffPay/periodosGuardados'
@@ -26,7 +26,7 @@ import { createGuard } from '../guard'
 import { text } from '../respond'
 import { requireWriteScopeAlways } from '../requireWriteScopeAlways'
 import { auditMcpWrite } from '../audit'
-import { activarOrganizacion, type Herramientas, participacionDeSede } from './staffPay.participacion'
+import { activarOrganizacion, type Herramientas, motivoDeBloqueo, participacionDeSede } from './staffPay.participacion'
 
 const sedeArg = z.string().min(1).max(64).optional().describe('Only this venue of the organization (default: all venues you can read)')
 const fecha = z
@@ -265,20 +265,6 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
   const herramientas: Herramientas = { scope, guard, puedeEscribir, fallo }
   const pesos = (s: string) => Number(s).toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
   const conSigno = (s: string, moneda: string) => `${Number(s) < 0 ? '-' : '+'}$${pesos(String(Math.abs(Number(s))))} ${moneda}`
-  const motivo = (b: Bloqueo) =>
-    b.codigo === 'NO_HA_TERMINADO'
-      ? `el periodo termina el ${b.hasta}`
-      : b.codigo === 'CLASES_EN_CURSO'
-        ? `${b.n} clase(s) en curso`
-        : b.codigo === 'EXCEPCIONES'
-          ? `${b.n} clase(s) con excepción por resolver`
-          : b.codigo === 'SIN_PERMISO'
-            ? 'te falta staffpay:close en alguna sede del periodo'
-            : b.codigo === 'SEDE_ACTIVA_SIN_PLAN'
-              ? b.otrasConPlan
-                ? `${b.venueIds.length} sede(s) siguen activas en pago al personal sin el plan: desactívalas indicando su último día (accion "sede" con activa:false)`
-                : `${b.venueIds.length} sede(s) siguen activas sin el plan y ninguna sede lo tiene: renueva el plan para cerrar (desactivarlas no lo libera)`
-              : 'ya está cerrado'
 
   server.tool(
     'close_service_pay_period',
@@ -307,7 +293,7 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
               preview: p,
               error: yaCerrado
                 ? `Este periodo ya está cerrado: ${p.personas} recibo(s) por $${pesos(p.total)}.`
-                : `Todavía no se puede cerrar: ${p.bloqueos.map(motivo).join('; ')}.`,
+                : `Todavía no se puede cerrar: ${p.bloqueos.map(b => motivoDeBloqueo(b, p)).join('; ')}.`,
             })
           }
           // La confirmación de las huérfanas entra a la huella (D7): se pide aquí, para que el token ya la lleve.

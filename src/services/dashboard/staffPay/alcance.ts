@@ -1,6 +1,7 @@
 // src/services/dashboard/staffPay/alcance.ts — el alcance de un periodo con participación por sede (fase 3, B10-B11).
 import { Prisma } from '@prisma/client'
-import { BadRequestError } from '../../../errors/AppError'
+import { BadRequestError, ConflictError } from '../../../errors/AppError'
+import { fechaMx } from '../export.helpers'
 import { TOPE_SEDES_CON_MODULO } from './acceso'
 
 type Tx = Prisma.TransactionClient
@@ -10,7 +11,7 @@ type Tx = Prisma.TransactionClient
  * se compara). CERRADO ⇒ su alcance congelado. Sin activar, o un periodo que termina antes del inicio ⇒ la regla D2 de la
  * fase 2 (`guardadas ∪ activas`), sin ampliar por historia. Desde el inicio ⇒ también las sedes con ventana: toda sede que
  * alguna vez estuvo en el sobre entra a cada cierre y sus devoluciones se descuentan solas (r4.2). Un periodo abierto que
- * CRUZA el inicio no debería existir (`startDate` es un inicio canónico y la periodicidad queda fija al activar): truena.
+ * CRUZA el inicio no debería existir (`startDate` es un inicio canónico y la periodicidad queda fija al activar): 409.
  */
 export function alcanceDelPeriodo(input: {
   periodo: { start: string; end: string; estado: 'OPEN' | 'CLOSED' }
@@ -24,7 +25,12 @@ export function alcanceDelPeriodo(input: {
   if (p.estado === 'CLOSED') return unir(input.guardadas)
   if (startDate === null || p.end < startDate) return unir(input.guardadas, input.activas)
   if (p.start >= startDate) return unir(input.guardadas, input.activas, input.conVentana)
-  throw new Error(`STAFF_PAY_PERIODO_CRUZA_EL_INICIO: el periodo ${p.start} a ${p.end} cruza el inicio ${startDate}`)
+  // B12 (revisión de B11 #2): 409 en español para el reporte, el recibo, la vista previa y el cierre; antes salía como 500.
+  throw new ConflictError(
+    `El periodo cruza el inicio de pago al personal; el periodo del ${fechaMx(p.start)} al ${fechaMx(p.end)} empieza antes del ${fechaMx(startDate)} y termina después. Pide ayuda a Avoqado para corregirlo.`,
+    'STAFF_PAY_PERIODO_CRUZA_EL_INICIO',
+    { periodo: { start: p.start, end: p.end }, inicio: startDate },
+  )
 }
 
 /**

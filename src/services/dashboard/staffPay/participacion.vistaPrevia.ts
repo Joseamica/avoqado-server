@@ -8,7 +8,7 @@ import { AlcanceBarrido, TotalVentas, totalesVentas } from './fuentesVenta'
 import { prepararSede, reglasDeSede, SedePreparada } from './participacion'
 import { dbDateComoFecha, fechaComoDbDate, sumarDias, venuePeriodRange } from './periodos'
 import { TOPE_VENTANAS, Ventana } from './rangos'
-import { enUnaFoto } from './recibos.service'
+import { enUnaFoto } from './foto'
 import { Participacion, valoracionCte } from './valoracion'
 
 type Db = Prisma.TransactionClient | typeof prisma
@@ -28,19 +28,19 @@ export type VistaPreviaParticipacion =
   | (Base & { accion: 'activar'; entran: Cuenta; quedanFuera: Cuenta })
   | (Base & { accion: 'desactivar'; dejanDeEntrar: Cuenta; permanecen: Cuenta })
 
-type Suma = { n: number; total: Prisma.Decimal }
-type CuentaCruda = { clases: Suma & { pendientes: number }; comisiones: Suma; propinas: Suma }
-const cero = (): Suma => ({ n: 0, total: new Prisma.Decimal(0) })
-const restar = (x: Suma, y: Suma): Suma => ({ n: x.n - y.n, total: x.total.minus(y.total) })
+export type Suma = { n: number; total: Prisma.Decimal }
+export type CuentaCruda = { clases: Suma & { pendientes: number }; comisiones: Suma; propinas: Suma }
+export const cero = (): Suma => ({ n: 0, total: new Prisma.Decimal(0) })
+export const restar = (x: Suma, y: Suma): Suma => ({ n: x.n - y.n, total: x.total.minus(y.total) })
 const monto = (x: Suma): Monto => ({ n: x.n, total: x.total.toFixed(2) })
-const aCuenta = (c: CuentaCruda): Cuenta => ({
+export const aCuenta = (c: CuentaCruda): Cuenta => ({
   clases: { ...monto(c.clases), pendientesDeValoracion: c.clases.pendientes },
   comisiones: monto(c.comisiones),
   propinas: monto(c.propinas),
 })
 
 /** Las sumas de ventas de UNA sede, por fuente. */
-function porFuente(filas: TotalVentas[]): { comisiones: Suma; propinas: Suma } {
+export function porFuente(filas: TotalVentas[]): { comisiones: Suma; propinas: Suma } {
   const de = (f: 'COMMISSION' | 'TIP') => filas.find(x => x.fuente === f) ?? cero()
   return { comisiones: { n: de('COMMISSION').n, total: de('COMMISSION').total }, propinas: { n: de('TIP').n, total: de('TIP').total } }
 }
@@ -49,9 +49,9 @@ function porFuente(filas: TotalVentas[]): { comisiones: Suma; propinas: Suma } {
  * Las clases de UNA sede en los días civiles `[desde, hasta]` con `participacion` ('real' = entran hoy; 'fuera' = las que la
  * ventana real deja fuera), AGREGADAS en la base sobre `valoracionCte` (r5.4: nunca las filas a memoria). Una clase que hoy
  * no se puede valuar no suma $0: va en `pendientes`. El cambio de ventana es contiguo, así que el rango de fechas hace la
- * simulación.
+ * simulación. Cuenta como el recibo (revisión de B11 #1): sólo las OK CON monto; la vista previa del cierre (B12) la reusa.
  */
-async function clasesDe(
+export async function clasesDe(
   db: Db,
   s: { organizationId: string; venueId: string; tz: string },
   dias: { desde: string; hasta: string },
@@ -63,7 +63,8 @@ async function clasesDe(
   const f = { ...s, desde: from, hasta: to, ahora, participacion }
   const [r] = await db.$queryRaw<Array<{ n: number; total: Prisma.Decimal | null; pendientes: number }>>`
     ${valoracionCte(f)}
-    SELECT COUNT(*) FILTER (WHERE estado = 'OK')::int AS n, SUM(monto) FILTER (WHERE estado = 'OK') AS total,
+    SELECT COUNT(*) FILTER (WHERE estado = 'OK' AND monto IS NOT NULL)::int AS n,
+           SUM(monto) FILTER (WHERE estado = 'OK' AND monto IS NOT NULL) AS total,
            COUNT(*) FILTER (WHERE estado = 'EXCEPCION')::int AS pendientes
     FROM valoradas`
   return { n: r.n, total: new Prisma.Decimal(r.total ?? 0), pendientes: r.pendientes }
