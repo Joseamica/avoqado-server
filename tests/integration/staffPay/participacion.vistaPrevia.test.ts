@@ -93,7 +93,9 @@ describe('activar: entran y quedan fuera (r7.3)', () => {
     // Producto que ninguna tabla de B cubre (la de B tiene `productIds` vacío = todas; ésta la restringe).
     await prisma.servicePayTable.updateMany({ where: { venueId: B }, data: { productIds: [productoB] } })
     await clase(m, { staffId: m.ana, inicioIso: '2026-10-22T15:00:00Z', venueId: B, productId: m.productId, reservas: confirmadas(5) })
-    expect((await vista('activar', '2026-10-01', NOV1)).entran).toEqual(cuenta({ clases: [2, '1000.00', 1], comisiones: [1, '100.00'] }))
+    expect(await vista('activar', '2026-10-01', NOV1)).toMatchObject({
+      entran: cuenta({ clases: [2, '1000.00', 1], comisiones: [1, '100.00'] }),
+    })
   })
 })
 
