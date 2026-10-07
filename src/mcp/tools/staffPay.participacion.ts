@@ -4,6 +4,7 @@
 import { createHash } from 'crypto'
 import prisma from '@/utils/prismaClient'
 import { assertPermisoEnTodasLasSedes } from '@/services/dashboard/staffPay/acceso'
+import { COMO_SE_CONSIGUE_EL_PLAN } from '@/services/dashboard/staffPay/textos'
 import {
   activarPagoAlPersonal,
   cambiarPropinas,
@@ -95,7 +96,7 @@ const QUE_HACER_SEDE: Record<string, string> = {
   YA_ACTIVA: 'La sede ya está activa: para cambiar su fecha, desactívala primero indicando su último día.',
   NO_ACTIVA: 'La sede no está activa: no hay nada que desactivar.',
   NO_ACTIVADO: 'Activa primero el pago al personal de la organización (accion "activar").',
-  SEDE_SIN_PLAN: 'La sede necesita Pago al personal en su plan para activarla: viene en el plan Pro o se contrata suelto por sucursal.',
+  SEDE_SIN_PLAN: `La sede necesita Pago al personal en su plan para activarla: ${COMO_SE_CONSIGUE_EL_PLAN}.`,
   VENTANA_SE_CRUZA:
     'Esas fechas se cruzan con días en que la sede ya estuvo activa (quizá cuando era de otra organización): elige otra fecha o pide ayuda a Avoqado.',
   CIERRE_EN_CURSO: 'Hay un cierre de periodo en curso: intenta de nuevo en un momento.',

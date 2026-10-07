@@ -1,5 +1,14 @@
 // src/mcp/tools/staffPay.formato.ts — el ÚNICO formato de las herramientas de pago al personal (fase 3, B13 ronda 1, R3): pesos,
-// listas, montos con signo y fechas civiles. Sólo para MOSTRAR: las sumas van con `Prisma.Decimal`, nunca con estos textos.
+// listas, montos con signo y fechas civiles, y los textos de «sin el plan» y «sin activar» (revisión de C2). Sólo para MOSTRAR:
+// las sumas van con `Prisma.Decimal`, nunca con estos textos.
+import { MENSAJE_SIN_ACTIVAR } from '@/services/dashboard/staffPay/acceso'
+import { COMO_SE_CONSIGUE_EL_PLAN } from '@/services/dashboard/staffPay/textos'
+
+/** Sin el plan (spec fase 3 §10): qué falta y cómo se consigue, con las mismas palabras que la ruta. */
+export const SIN_PLAN_SEDE = `Pago por servicio no está activo en este negocio: ${COMO_SE_CONSIGUE_EL_PLAN}.`
+export const SIN_PLAN_ORGANIZACION = `Pago por servicio no está activo en ninguna sede de este negocio: ${COMO_SE_CONSIGUE_EL_PLAN}.`
+/** Con el plan pero sin activar (spec fase 3 §7.1, §10): lo del dashboard y, aquí, la herramienta que lo activa. */
+export const sinActivar = () => `${MENSAJE_SIN_ACTIVAR} Desde aquí también se activa: configure_service_pay con accion "activar".`
 
 /** «1,500.00» (pesos 1:1, dos decimales). */
 export const pesos = (s: string | number) => Number(s).toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })

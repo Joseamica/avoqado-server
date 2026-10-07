@@ -35,7 +35,8 @@ jest.mock('@/services/dashboard/staffPay/acceso', () => ({
   organizacionTieneServicePay: (...a: unknown[]) => mockOrgTiene(...a),
   organizacionDeLaSedeActivada: (...a: unknown[]) => mockActivada(...a),
   assertPermisoEnTodasLasSedes: (...a: unknown[]) => mockTodas(...a),
-  MENSAJE_SIN_ACTIVAR: 'Pago al personal todavía no está activado: actívalo en Pago por servicio → Periodos.',
+  MENSAJE_SIN_ACTIVAR:
+    'Pago al personal todavía no está activado: actívalo en Pago al personal → Periodos. Activarlo pide el permiso de cerrar periodos en todas las sucursales; si no lo tienes, pídeselo al dueño del negocio.',
 }))
 jest.mock('@/services/dashboard/staffPay/reporte.service', () => ({
   reportePeriodo: (...a: unknown[]) => mockReporte(...a),

@@ -2,9 +2,7 @@ import prisma from '../../../utils/prismaClient'
 import { BadRequestError, ForbiddenError } from '../../../errors/AppError'
 import { getUserAccess, hasPermission } from '../../access/access.service'
 import { venueHasFeatureAccess, venuesWithFeatureAccess } from '../../access/basePlan.service'
-
-/** Cómo se consigue el plan: las mismas palabras que las rutas, el MCP y los servicios (spec fase 3 §10, decisión D3). */
-const COMO_SE_CONSIGUE = 'viene en el plan Pro o se contrata suelto por sucursal'
+import { COMO_SE_CONSIGUE_EL_PLAN } from './textos'
 
 /**
  * El PLAN: la función SERVICE_PAY (plan Pro, suelta por sucursal, sede exenta o demo), con el resolver de funciones del
@@ -33,7 +31,12 @@ export async function organizacionDeLaSedeActivada(venueId: string): Promise<boo
   return !!v && (await organizacionActivada(v.organizationId))
 }
 
-export const MENSAJE_SIN_ACTIVAR = 'Pago al personal todavía no está activado: actívalo en Pago por servicio → Periodos.'
+/**
+ * Con el plan pero sin activar. Activar pide `staffpay:close` en TODAS las sedes con el plan (`activacion.service`), así que el
+ * texto dice a quién pedírselo (feature-gating.md: «apagado se ve y se explica»). Un solo nombre: «Pago al personal».
+ */
+export const MENSAJE_SIN_ACTIVAR =
+  'Pago al personal todavía no está activado: actívalo en Pago al personal → Periodos. Activarlo pide el permiso de cerrar periodos en todas las sucursales; si no lo tienes, pídeselo al dueño del negocio.'
 
 /** Tope de sedes con el plan por organización: el alcance de un periodo (y sus permisos) se resuelve completo en memoria. */
 export const TOPE_SEDES_CON_MODULO = 500
@@ -83,7 +86,7 @@ async function tienePermiso(userId: string, venueId: string, permiso: string): P
 export async function assertPermisoEnTodasLasSedes(userId: string, organizationId: string, permiso: string): Promise<void> {
   const sedes = await sedesConServicePay(organizationId)
   if (sedes.length === 0)
-    throw new ForbiddenError(`Pago por servicio no está activo en ninguna sede de esta organización: ${COMO_SE_CONSIGUE}.`)
+    throw new ForbiddenError(`Pago por servicio no está activo en ninguna sede de esta organización: ${COMO_SE_CONSIGUE_EL_PLAN}.`)
   for (const venueId of sedes) {
     if (!(await tienePermiso(userId, venueId, permiso))) {
       throw new ForbiddenError(`Esta acción afecta a toda la organización: necesitas ${permiso} en todas las sedes`)

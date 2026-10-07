@@ -47,7 +47,8 @@ export const modulos = {
     assertPermisoEnTodasLasSedes: (...a: unknown[]) => mocks.todas(...a),
     // C2: lo de dinero exige además la activación (sus pruebas, en `staff-service-pay.activacion.test.ts`).
     organizacionDeLaSedeActivada: jest.fn().mockResolvedValue(true),
-    MENSAJE_SIN_ACTIVAR: 'Pago al personal todavía no está activado: actívalo en Pago por servicio → Periodos.',
+    MENSAJE_SIN_ACTIVAR:
+      'Pago al personal todavía no está activado: actívalo en Pago al personal → Periodos. Activarlo pide el permiso de cerrar periodos en todas las sucursales; si no lo tienes, pídeselo al dueño del negocio.',
   },
   alcanceDeLaAccion: {
     sedesDelCierre: (...a: unknown[]) => mocks.sedesDelCierre(...a),

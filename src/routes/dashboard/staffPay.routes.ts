@@ -9,6 +9,7 @@ import {
   organizacionTieneServicePay,
   venueHasServicePayAccess,
 } from '../../services/dashboard/staffPay/acceso'
+import { COMO_SE_CONSIGUE_EL_PLAN } from '../../services/dashboard/staffPay/textos'
 import {
   activarSchema,
   activarSedeSchema,
@@ -58,7 +59,7 @@ export async function servicePayGate(req: Request, res: Response, next: NextFunc
     if (await venueHasServicePayAccess(req.params.venueId)) return next()
     return res.status(403).json({
       error: 'module_disabled',
-      message: 'Pago por servicio no está activo en este negocio: viene en el plan Pro o se contrata suelto por sucursal.',
+      message: `Pago por servicio no está activo en este negocio: ${COMO_SE_CONSIGUE_EL_PLAN}.`,
     })
   } catch (error) {
     return next(error)
@@ -74,7 +75,7 @@ export async function servicePayGateOrganizacion(req: Request, res: Response, ne
     if (await organizacionTieneServicePay(req.params.venueId)) return next()
     return res.status(403).json({
       error: 'module_disabled',
-      message: 'Pago por servicio no está activo en ninguna sede de este negocio: viene en el plan Pro o se contrata suelto por sucursal.',
+      message: `Pago por servicio no está activo en ninguna sede de este negocio: ${COMO_SE_CONSIGUE_EL_PLAN}.`,
     })
   } catch (error) {
     return next(error)

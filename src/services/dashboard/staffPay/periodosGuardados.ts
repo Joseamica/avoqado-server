@@ -4,6 +4,7 @@ import { BadRequestError, ConflictError, NotFoundError } from '../../../errors/A
 import { PresupuestoDeEspera, tomarCandado, transaccionConPresupuesto } from '../../../utils/esperaDeCandados'
 import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
 import { assertPermisoEnSedes, assertPermisoEnTodasLasSedes, exigirPermisoEnSedes, sedesConServicePay, sedesLegiblesDe } from './acceso'
+import { COMO_SE_CONSIGUE_EL_PLAN } from './textos'
 import { fechaMx } from '../export.helpers'
 import {
   dbDateComoFecha,
@@ -131,10 +132,7 @@ export async function ampliarAlcance(
   if (o.exigirModulo !== false) {
     const activas = o.activas ?? (await sedesConServicePay(p.organizationId))
     if (nuevas.some(v => !activas.includes(v)))
-      throw new BadRequestError(
-        'Esa sede no tiene Pago por servicio en su plan: viene en el plan Pro o se contrata suelto por sucursal.',
-        'SEDE_SIN_MODULO',
-      )
+      throw new BadRequestError(`Esa sede no tiene Pago por servicio en su plan: ${COMO_SE_CONSIGUE_EL_PLAN}.`, 'SEDE_SIN_MODULO')
   }
   const union = [...p.venueIds, ...nuevas].sort()
   const explicacion = 'Para sumar una sede al periodo necesitas el permiso de cerrar periodos en todas sus sedes'

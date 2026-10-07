@@ -2,12 +2,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 import prisma from '@/utils/prismaClient'
 import { hasPermission } from '@/services/access/access.service'
-import {
-  MENSAJE_SIN_ACTIVAR,
-  organizacionDeLaSedeActivada,
-  organizacionTieneServicePay,
-  venueHasServicePayAccess,
-} from '@/services/dashboard/staffPay/acceso'
+import { organizacionDeLaSedeActivada, organizacionTieneServicePay, venueHasServicePayAccess } from '@/services/dashboard/staffPay/acceso'
 import { detallePersona, reportePeriodo } from '@/services/dashboard/staffPay/reporte.service'
 import { listarNiveles, nivelesVigentes } from '@/services/dashboard/staffPay/niveles.service'
 import { listarTablas } from '@/services/dashboard/staffPay/tablas.service'
@@ -39,7 +34,17 @@ import {
   propinasDeLaOrganizacion,
 } from './staffPay.participacion'
 import { acotarAlAlcance, avisoDePendientes, detalleDelCierre, falloDelServicio, sedesDeLaConfig } from './staffPay.sedes'
-import { conSigno, diaLegible, diferencia, lista, periodoLegible, pesos } from './staffPay.formato'
+import {
+  conSigno,
+  diaLegible,
+  diferencia,
+  lista,
+  periodoLegible,
+  pesos,
+  SIN_PLAN_ORGANIZACION,
+  SIN_PLAN_SEDE,
+  sinActivar,
+} from './staffPay.formato'
 import { sedesDelCierre, sedesDelPagado } from './staffPay.alcanceDeLaAccion'
 import {
   camposFuera,
@@ -126,12 +131,6 @@ const QUE_HACER_AJUSTE_CLASE: Record<string, string> = {
 const CLAVE_LIQUIDACION = /^[A-Za-z0-9_.-]{4,96}$/
 /** La del ajuste manual viaja en `clientKey` (`mcp-` + ella): 4 a 100, cabe en la clave del service (8 a 120). */
 const CLAVE_AJUSTE = /^[A-Za-z0-9_.-]{4,100}$/
-/** Sin el plan (spec fase 3 §10): qué falta y cómo se consigue, con las mismas palabras que la ruta. */
-const SIN_PLAN_SEDE = 'Pago por servicio no está activo en este negocio: viene en el plan Pro o se contrata suelto por sucursal.'
-const SIN_PLAN_ORGANIZACION =
-  'Pago por servicio no está activo en ninguna sede de este negocio: viene en el plan Pro o se contrata suelto por sucursal.'
-/** Con el plan pero sin activar (spec fase 3 §7.1, §10): lo del dashboard y, aquí, la herramienta que lo activa. */
-const sinActivar = () => `${MENSAJE_SIN_ACTIVAR} Desde aquí también se activa: configure_service_pay con accion "activar".`
 /** Cuántas ventanas del interruptor de propinas enseña la configuración (las más nuevas). */
 const VENTANAS = 20
 

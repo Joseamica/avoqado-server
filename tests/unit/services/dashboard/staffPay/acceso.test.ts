@@ -1,4 +1,7 @@
+import fs from 'fs'
+import path from 'path'
 import { prismaMock } from '@tests/__helpers__/setup'
+import { COMO_SE_CONSIGUE_EL_PLAN } from '@/services/dashboard/staffPay/textos'
 
 const mockPlan = jest.fn()
 const mockLote = jest.fn()
@@ -165,9 +168,27 @@ describe('acceso — fase 3: el plan en lote y la activación (spec §7.1, §10)
     await expect(organizacionDeLaSedeActivada('nadie')).resolves.toBe(false)
   })
 
-  it('el mensaje de «sin activar» dice qué falta y dónde se prende', () => {
+  it('el mensaje de «sin activar» dice qué falta, dónde se prende y a quién pedírselo, con un solo nombre', () => {
     expect(MENSAJE_SIN_ACTIVAR).toMatch(/no está activado/)
     expect(MENSAJE_SIN_ACTIVAR).toMatch(/Periodos/)
+    // Activar pide staffpay:close en TODAS las sedes con el plan (activacion.service): quien no lo tiene sabe a quién ir.
+    expect(MENSAJE_SIN_ACTIVAR).toMatch(/cerrar periodos en todas las sucursales/)
+    expect(MENSAJE_SIN_ACTIVAR).toMatch(/pídeselo al dueño del negocio/)
+    expect(MENSAJE_SIN_ACTIVAR).not.toMatch(/Pago por servicio/) // el nombre visible es «Pago al personal» (resolución 14)
+  })
+
+  it('«cómo se consigue el plan» se escribe UNA sola vez en el server (revisión de C2): las rutas, el MCP y los servicios la importan', () => {
+    const SRC = path.join(__dirname, '../../../../../src')
+    const archivos = (dir: string): string[] =>
+      fs.readdirSync(dir, { withFileTypes: true }).flatMap(e => {
+        const full = path.join(dir, e.name)
+        return e.isDirectory() ? archivos(full) : e.name.endsWith('.ts') ? [full] : []
+      })
+    const conLaFrase = archivos(SRC)
+      .filter(f => fs.readFileSync(f, 'utf8').includes('se contrata suelto por sucursal'))
+      .map(f => path.relative(SRC, f))
+    expect(conLaFrase).toEqual(['services/dashboard/staffPay/textos.ts'])
+    expect(COMO_SE_CONSIGUE_EL_PLAN).toBe('viene en el plan Pro o se contrata suelto por sucursal')
   })
 
   it('sin ninguna sede con el plan, una operación de organización se niega y dice cómo se consigue', async () => {

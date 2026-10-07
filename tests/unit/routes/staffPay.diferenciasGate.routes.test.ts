@@ -11,7 +11,8 @@ jest.mock('@/services/dashboard/staffPay/acceso', () => ({
   venueHasServicePayAccess: (...a: unknown[]) => mockSedeTiene(...a),
   organizacionTieneServicePay: (...a: unknown[]) => mockOrgTiene(...a),
   organizacionDeLaSedeActivada: (...a: unknown[]) => mockActivada(...a),
-  MENSAJE_SIN_ACTIVAR: 'Pago al personal todavía no está activado: actívalo en Pago por servicio → Periodos.',
+  MENSAJE_SIN_ACTIVAR:
+    'Pago al personal todavía no está activado: actívalo en Pago al personal → Periodos. Activarlo pide el permiso de cerrar periodos en todas las sucursales; si no lo tienes, pídeselo al dueño del negocio.',
 }))
 // El permiso no es lo que se prueba aquí: pasa siempre.
 jest.mock('@/middlewares/checkPermission.middleware', () => ({ checkPermission: () => (_req: any, _res: any, next: any) => next() }))

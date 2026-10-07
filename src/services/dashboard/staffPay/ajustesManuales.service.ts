@@ -5,6 +5,7 @@ import prisma from '../../../utils/prismaClient'
 import { BadRequestError, ConflictError, NotFoundError } from '../../../errors/AppError'
 import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
 import { assertPermisoEnSedes, sedesConPermiso, sedesConServicePay, sedesLegiblesDe } from './acceso'
+import { COMO_SE_CONSIGUE_EL_PLAN } from './textos'
 import { ampliarAlcance, asegurarPeriodo, assertFechaEnRango, bloquearPeriodo, periodoQueContieneFecha } from './periodosGuardados'
 import { transaccionConPresupuesto } from '../../../utils/esperaDeCandados'
 import { bloquearSedesDeLaOrganizacion, sedesConVentana } from './participacion'
@@ -126,10 +127,7 @@ export async function previewAjusteManual(input: Omit<AjusteManualInput, 'client
   }))
   // Lo mismo que exigirá `ampliarAlcance` al confirmar: la sede ya está en el alcance guardado o hoy tiene el módulo.
   if (!fila?.venueIds.includes(input.sede) && !activas.includes(input.sede)) {
-    throw new BadRequestError(
-      'Esa sede no tiene Pago por servicio en su plan: viene en el plan Pro o se contrata suelto por sucursal.',
-      'SEDE_SIN_MODULO',
-    )
+    throw new BadRequestError(`Esa sede no tiene Pago por servicio en su plan: ${COMO_SE_CONSIGUE_EL_PLAN}.`, 'SEDE_SIN_MODULO')
   }
   const periodo = fila
     ? { start: dbDateComoFecha(fila.periodStart), end: dbDateComoFecha(fila.periodEnd), estado: fila.status }
