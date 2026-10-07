@@ -3,7 +3,12 @@ import { z } from 'zod'
 import { checkPermission } from '../../middlewares/checkPermission.middleware'
 import { validateRequest } from '../../middlewares/validation'
 import * as controller from '../../controllers/dashboard/staffPay.dashboard.controller'
-import { organizacionTieneServicePay, venueHasServicePayAccess } from '../../services/dashboard/staffPay/acceso'
+import {
+  MENSAJE_SIN_ACTIVAR,
+  organizacionDeLaSedeActivada,
+  organizacionTieneServicePay,
+  venueHasServicePayAccess,
+} from '../../services/dashboard/staffPay/acceso'
 import {
   activarSchema,
   activarSedeSchema,
@@ -44,15 +49,17 @@ import {
 
 const router = Router({ mergeParams: true })
 
-// Antes del gate: la pantalla necesita saber si está apagado para explicarlo (spec §7.3).
+// Antes de las puertas: la pantalla necesita saber si está apagado (sin plan o sin activar) para explicarlo (spec §7.3, §10).
 router.get('/access', checkPermission('staffpay:read'), validateRequest(z.object({ params: venueParamsSchema })), controller.getAccess)
 
+/** El PLAN de la sede del URL (la función SERVICE_PAY: Pro o suelta por sucursal; spec fase 3 §10). */
 export async function servicePayGate(req: Request, res: Response, next: NextFunction) {
   try {
     if (await venueHasServicePayAccess(req.params.venueId)) return next()
-    return res
-      .status(403)
-      .json({ error: 'module_disabled', message: 'Pago por servicio no está activo en este negocio. Pídelo a Avoqado.' })
+    return res.status(403).json({
+      error: 'module_disabled',
+      message: 'Pago por servicio no está activo en este negocio: viene en el plan Pro o se contrata suelto por sucursal.',
+    })
   } catch (error) {
     return next(error)
   }
@@ -65,18 +72,34 @@ export async function servicePayGate(req: Request, res: Response, next: NextFunc
 export async function servicePayGateOrganizacion(req: Request, res: Response, next: NextFunction) {
   try {
     if (await organizacionTieneServicePay(req.params.venueId)) return next()
-    return res
-      .status(403)
-      .json({ error: 'module_disabled', message: 'Pago por servicio no está activo en ninguna sede de este negocio. Pídelo a Avoqado.' })
+    return res.status(403).json({
+      error: 'module_disabled',
+      message: 'Pago por servicio no está activo en ninguna sede de este negocio: viene en el plan Pro o se contrata suelto por sucursal.',
+    })
+  } catch (error) {
+    return next(error)
+  }
+}
+
+/**
+ * Lo de DINERO (spec fase 3 §10): además del plan, la organización activó pago al personal («un negocio PRO no ve el módulo
+ * encendido sólo por tener el plan»). Configurar niveles y tablas, elegir la periodicidad y activar NO lo exigen: el dueño
+ * prepara su tabla y después activa. Es de la ORGANIZACIÓN (pre-flight C2, fila 13): no pide la ventana de la sede del URL.
+ */
+export async function servicePayActivadoGate(req: Request, res: Response, next: NextFunction) {
+  try {
+    if (await organizacionDeLaSedeActivada(req.params.venueId)) return next()
+    return res.status(403).json({ error: 'not_activated', message: MENSAJE_SIN_ACTIVAR })
   } catch (error) {
     return next(error)
   }
 }
 // La sede del URL es la de la clase: el preview pide leer ahí; liquidar, `staffpay:close` ahí, y el service lo exige
-// además en todas las sedes del periodo destino (spec §9.2).
+// además en todas las sedes del periodo destino (spec §9.2). Mueven dinero: exigen además la activación (fase 3 §10).
 router.get(
   '/class-sessions/:sessionId/difference',
   servicePayGateOrganizacion,
+  servicePayActivadoGate,
   checkPermission('staffpay:read'),
   validateRequest(z.object({ params: sessionPayParamsSchema, query: destinoQuerySchema })),
   controller.getClassDifference,
@@ -84,6 +107,7 @@ router.get(
 router.post(
   '/class-sessions/:sessionId/difference/settle',
   servicePayGateOrganizacion,
+  servicePayActivadoGate,
   checkPermission('staffpay:close'),
   validateRequest(z.object({ params: sessionPayParamsSchema, body: liquidarSchema })),
   controller.postSettleDifference,
@@ -94,6 +118,7 @@ router.post(
 router.get(
   '/class-sessions/:sessionId/pay',
   servicePayGateOrganizacion,
+  servicePayActivadoGate,
   checkPermission('staffpay:read'),
   validateRequest(z.object({ params: sessionPayParamsSchema })),
   controller.getClassPay,
@@ -101,6 +126,7 @@ router.get(
 router.put(
   '/class-sessions/:sessionId/pay-adjustments',
   servicePayGateOrganizacion,
+  servicePayActivadoGate,
   checkPermission('staffpay:manage'),
   validateRequest(z.object({ params: sessionPayParamsSchema, body: ajusteClaseSchema })),
   controller.putClassPayAdjustments,
@@ -201,6 +227,25 @@ router.get(
   controller.tableHistory,
 )
 
+// Fase 3 (spec §7.1): activar pago al personal y su periodicidad. Exigen el plan pero NO estar activado (sería imposible
+// activar). Afectan a TODA la organización: el service exige además staffpay:close en todas sus sedes. La periodicidad se
+// elige antes de activar; después la fija el service (409 PERIODICIDAD_FIJA, B9; pre-flight C2, fila 6).
+router.patch(
+  '/periodicity',
+  checkPermission('staffpay:close'),
+  validateRequest(z.object({ params: venueParamsSchema, body: periodicidadSchema })),
+  controller.patchPeriodicity,
+)
+router.post(
+  '/activate',
+  checkPermission('staffpay:close'),
+  validateRequest(z.object({ params: venueParamsSchema, body: activarSchema })),
+  controller.postActivate,
+)
+
+// Desde aquí, todo es dinero: exige además la activación (spec fase 3 §10). `POST /activate` va ARRIBA de esta línea.
+router.use(servicePayActivadoGate)
+
 // Reporte del periodo abierto (spec §6.2, §9.2): multi-sede; el service junta sólo las sedes que el usuario puede leer
 // y marca la vista como parcial.
 router.get(
@@ -235,20 +280,8 @@ router.get(
   validateRequest(z.object({ params: venueParamsSchema, query: listaPeriodosQuerySchema })),
   controller.listPeriods,
 )
-router.patch(
-  '/periodicity',
-  checkPermission('staffpay:close'),
-  validateRequest(z.object({ params: venueParamsSchema, body: periodicidadSchema })),
-  controller.patchPeriodicity,
-)
-// Fase 3 (spec §7.1, §6.3): activar pago al personal y el interruptor de propinas. Afectan a TODA la organización: el
-// service exige además staffpay:close en todas sus sedes (como la periodicidad).
-router.post(
-  '/activate',
-  checkPermission('staffpay:close'),
-  validateRequest(z.object({ params: venueParamsSchema, body: activarSchema })),
-  controller.postActivate,
-)
+// Fase 3 (spec §6.3): el interruptor de propinas. Afecta a TODA la organización (el service exige staffpay:close en todas sus
+// sedes) y mueve dinero: exige la activación (si no, el service respondería 409 NO_ACTIVADO).
 router.put(
   '/tips',
   checkPermission('staffpay:close'),

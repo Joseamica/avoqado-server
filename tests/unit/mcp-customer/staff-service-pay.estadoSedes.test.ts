@@ -26,6 +26,9 @@ jest.mock('@/services/dashboard/staffPay/acceso', () => ({
   venueHasServicePayAccess: jest.fn().mockResolvedValue(true),
   organizacionTieneServicePay: jest.fn().mockResolvedValue(true),
   assertPermisoEnTodasLasSedes: jest.fn(),
+  // C2: lo de dinero exige además la activación (sus pruebas, en `staff-service-pay.activacion.test.ts`).
+  organizacionDeLaSedeActivada: jest.fn().mockResolvedValue(true),
+  MENSAJE_SIN_ACTIVAR: 'Pago al personal todavía no está activado: actívalo en Pago por servicio → Periodos.',
 }))
 jest.mock('@/services/dashboard/staffPay/sedes.service', () => ({ estadoSedes: (...a: unknown[]) => mockEstadoSedes(...a) }))
 jest.mock('@/mcp/tools/staffPay.alcanceDeLaAccion', () => ({

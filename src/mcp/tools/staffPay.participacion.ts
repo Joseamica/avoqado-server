@@ -26,7 +26,7 @@ type Respuesta = ReturnType<typeof text>
 export interface Herramientas {
   scope: McpScope
   guard: ReturnType<typeof createGuard>
-  puedeEscribir: (venueId: string, modulo?: 'sede' | 'organizacion' | 'ninguno') => Promise<string | null>
+  puedeEscribir: (venueId: string, modulo?: 'sede' | 'organizacion' | 'ninguno', exigirActivacion?: boolean) => Promise<string | null>
   fallo: (e: unknown, extra?: string) => Respuesta
 }
 
@@ -84,7 +84,7 @@ const QUE_HACER_SEDE: Record<string, string> = {
   YA_ACTIVA: 'La sede ya está activa: para cambiar su fecha, desactívala primero indicando su último día.',
   NO_ACTIVA: 'La sede no está activa: no hay nada que desactivar.',
   NO_ACTIVADO: 'Activa primero el pago al personal de la organización (accion "activar").',
-  SEDE_SIN_PLAN: 'La sede necesita el plan con Pago al personal para activarla; pídelo a Avoqado.',
+  SEDE_SIN_PLAN: 'La sede necesita Pago al personal en su plan para activarla: viene en el plan Pro o se contrata suelto por sucursal.',
   VENTANA_SE_CRUZA:
     'Esas fechas se cruzan con días en que la sede ya estuvo activa (quizá cuando era de otra organización): elige otra fecha o pide ayuda a Avoqado.',
   CIERRE_EN_CURSO: 'Hay un cierre de periodo en curso: intenta de nuevo en un momento.',
@@ -291,7 +291,8 @@ export async function propinasDeLaOrganizacion(
  * `fecha`, incluido) UNA sede. La vista previa resuelve «hoy» a una fecha EXPLÍCITA, la devuelve en `fecha` y trae los
  * montos (los de la ruta `participation-preview`); la huella es `huellaDeSede`. Al confirmar se usa esa fecha (pasar la
  * medianoche no reinterpreta «hoy») y el service la revalida bajo candado. Exige `staffpay:close` en la sede; desactivar no
- * pide plan (`modulo: 'ninguno'`), activar sí (en la organización y, el service, en la sede).
+ * pide plan (`modulo: 'ninguno'`), activar sí (en la organización y, el service, en la sede). Ninguna de las dos pasa por la
+ * puerta de activación (C2): si la organización no activó, el service responde NO_ACTIVADO y el agente lee «accion "activar"».
  */
 export async function participacionDeSede(
   h: Herramientas,
@@ -307,7 +308,7 @@ export async function participacionDeSede(
       question: '¿Activar la sede en pago al personal (true, desde qué día) o desactivarla (false, hasta qué día entra)?',
     })
   const activa = args.activa
-  const no = await h.puedeEscribir(args.venueId, activa ? 'organizacion' : 'ninguno')
+  const no = await h.puedeEscribir(args.venueId, activa ? 'organizacion' : 'ninguno', false)
   if (no) return text({ ok: false, error: no })
   if (!h.guard.tienePermiso('staffpay:close', sede)) return text({ ok: false, error: 'Necesitas el permiso staffpay:close en esa sede.' })
   try {

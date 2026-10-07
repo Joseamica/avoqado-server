@@ -130,7 +130,11 @@ export async function ampliarAlcance(
   if (deLaOrg !== nuevas.length) throw new NotFoundError('Sede no encontrada')
   if (o.exigirModulo !== false) {
     const activas = o.activas ?? (await sedesConServicePay(p.organizationId))
-    if (nuevas.some(v => !activas.includes(v))) throw new BadRequestError('Esa sede no tiene Pago por servicio activo', 'SEDE_SIN_MODULO')
+    if (nuevas.some(v => !activas.includes(v)))
+      throw new BadRequestError(
+        'Esa sede no tiene Pago por servicio en su plan: viene en el plan Pro o se contrata suelto por sucursal.',
+        'SEDE_SIN_MODULO',
+      )
   }
   const union = [...p.venueIds, ...nuevas].sort()
   const explicacion = 'Para sumar una sede al periodo necesitas el permiso de cerrar periodos en todas sus sedes'

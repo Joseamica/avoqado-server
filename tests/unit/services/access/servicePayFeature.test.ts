@@ -15,6 +15,8 @@ jest.mock('../../../../src/utils/prismaClient', () => ({
   },
 }))
 
+import fs from 'fs'
+import path from 'path'
 import prisma from '../../../../src/utils/prismaClient'
 import { FEATURE_CATALOG } from '../../../../src/config/featureCatalog'
 import { elPlanConcede, FREE_TIER_CODES, PREMIUM_ONLY_CODES, venueHasFeatureAccess } from '../../../../src/services/access/basePlan.service'
@@ -74,5 +76,34 @@ describe('SERVICE_PAY es función del plan Pro (D3)', () => {
       renewal: { kind: 'SAME_PRICE' },
     } as const
     expect(compileHybridPublication({ schemaVersion: 1, kind: 'PLAN', planTier, terms }).includedFeatureCodes).toContain('SERVICE_PAY')
+  })
+})
+
+describe('🔴 SERVICE_PAY tiene UN solo resolver: el de funciones del plan (spec fase 3 §10)', () => {
+  const SRC = path.join(__dirname, '../../../../src')
+  const archivos = (dir: string): string[] =>
+    fs.readdirSync(dir, { withFileTypes: true }).flatMap(e => {
+      const full = path.join(dir, e.name)
+      return e.isDirectory() ? archivos(full) : e.name.endsWith('.ts') ? [full] : []
+    })
+
+  it('ningún archivo resuelve SERVICE_PAY con el resolver de módulos', () => {
+    const MODULO =
+      /MODULE_CODES\.SERVICE_PAY|(?:isModuleEnabled|venuesWithModule|anyVenueHasModule|getModuleConfig|enableModule|disableModule)\([^)]*['"]SERVICE_PAY['"]/
+    const culpables = archivos(SRC)
+      .filter(f => MODULO.test(fs.readFileSync(f, 'utf8')))
+      .map(f => path.relative(SRC, f))
+    expect(culpables).toEqual([])
+  })
+
+  it('el código del módulo ya no existe', () => {
+    const { MODULE_CODES } = jest.requireActual('../../../../src/services/modules/module.service')
+    expect(Object.keys(MODULE_CODES)).not.toContain('SERVICE_PAY')
+  })
+
+  it('las puertas de pago al personal (una sede y el lote) usan la función del plan', () => {
+    const acceso = fs.readFileSync(path.join(SRC, 'services/dashboard/staffPay/acceso.ts'), 'utf8')
+    expect(acceso).toMatch(/venueHasFeatureAccess\(venueId, 'SERVICE_PAY'\)/)
+    expect(acceso).toMatch(/venuesWithFeatureAccess\(ids, 'SERVICE_PAY'\)/)
   })
 })

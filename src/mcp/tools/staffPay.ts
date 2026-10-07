@@ -2,7 +2,12 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 import prisma from '@/utils/prismaClient'
 import { hasPermission } from '@/services/access/access.service'
-import { organizacionTieneServicePay, venueHasServicePayAccess } from '@/services/dashboard/staffPay/acceso'
+import {
+  MENSAJE_SIN_ACTIVAR,
+  organizacionDeLaSedeActivada,
+  organizacionTieneServicePay,
+  venueHasServicePayAccess,
+} from '@/services/dashboard/staffPay/acceso'
 import { detallePersona, reportePeriodo } from '@/services/dashboard/staffPay/reporte.service'
 import { listarNiveles, nivelesVigentes } from '@/services/dashboard/staffPay/niveles.service'
 import { listarTablas } from '@/services/dashboard/staffPay/tablas.service'
@@ -113,6 +118,12 @@ const QUE_HACER_AJUSTE_CLASE: Record<string, string> = {
 const CLAVE_LIQUIDACION = /^[A-Za-z0-9_.-]{4,96}$/
 /** La del ajuste manual viaja en `clientKey` (`mcp-` + ella): 4 a 100, cabe en la clave del service (8 a 120). */
 const CLAVE_AJUSTE = /^[A-Za-z0-9_.-]{4,100}$/
+/** Sin el plan (spec fase 3 §10): qué falta y cómo se consigue, con las mismas palabras que la ruta. */
+const SIN_PLAN_SEDE = 'Pago por servicio no está activo en este negocio: viene en el plan Pro o se contrata suelto por sucursal.'
+const SIN_PLAN_ORGANIZACION =
+  'Pago por servicio no está activo en ninguna sede de este negocio: viene en el plan Pro o se contrata suelto por sucursal.'
+/** Con el plan pero sin activar (spec fase 3 §7.1, §10): lo del dashboard y, aquí, la herramienta que lo activa. */
+const sinActivar = () => `${MENSAJE_SIN_ACTIVAR} Desde aquí también se activa: configure_service_pay con accion "activar".`
 /** Cuántas ventanas del interruptor de propinas enseña la configuración (las más nuevas). */
 const VENTANAS = 20
 
@@ -120,11 +131,14 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
   // B14-fix F1: quién pregunta y el alcance de SU conexión; toda lectura de varias sedes se acota a ella antes de agregar.
   const conexion = { userId: scope.staffId, soloSedes: scope.allowedVenueIds }
-  const puedeLeer = async (venueId: string): Promise<string | null> => {
+  // Lo de dinero exige además la activación (spec fase 3 §10); la configuración no (`exigirActivacion = false`). Orden: alcance,
+  // permiso, plan y activación (sin el plan, la activación ni se pregunta).
+  const puedeLeer = async (venueId: string, exigirActivacion = true): Promise<string | null> => {
     guard.venueFilter(venueId) // lanza si la sede está fuera del alcance
     const access = scope.perVenueAccess.get(venueId)
     if (!access || !hasPermission(access, 'staffpay:read')) return 'Necesitas el permiso staffpay:read en esta sede.'
-    if (!(await venueHasServicePayAccess(venueId))) return 'Pago por servicio no está activo en este negocio; pídelo a Avoqado.'
+    if (!(await venueHasServicePayAccess(venueId))) return SIN_PLAN_SEDE
+    if (exigirActivacion && !(await organizacionDeLaSedeActivada(venueId))) return sinActivar()
     return null
   }
 
@@ -208,7 +222,8 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
     'How pay-per-service is configured: whether pay for staff is turned on and since when, whether tips are paid inside the receipt (and the latest 20 on/off windows as UTC instants, with the venue timezone to show them locally; ventanasTruncadas=true means there are older ones), the pay levels of the organization, which level each person has and since when, and the pay tables of the venue (seats occupied × level = amount) with the version in force on the given date. Each table also lists its two class rules (reglasDeClase, read-only; they are edited in the dashboard): a bonus for a substitute assigned with short notice, and the base pay (the 0-seat cell) for a late cancellation. It also lists each venue of the organization you can read (sedes): its state in pay for staff (ACTIVA; SIN_ACTIVAR; ACTIVA_SIN_PLAN = turned on without the plan, which blocks closing; SIN_PLAN), the days it is on (desde/hasta, venue-local), the earliest day it can be turned on (minimo), whether you can turn it on or off, and what it sold in periods not closed yet that does not go into the receipts (fueraEstePeriodo, in pesos). Requires staffpay:read.',
     { venueId: z.string().min(1).max(64).describe('Venue in your scope'), fecha },
     async ({ venueId, fecha: f }) => {
-      const no = await puedeLeer(venueId)
+      // La configuración se lee sin activar: dice si está activado y el agente puede explicar cómo activarlo (fase 3 §10).
+      const no = await puedeLeer(venueId, false)
       if (no) return text({ ok: false, error: no })
       const v = await prisma.venue.findUnique({ where: { id: venueId }, select: { organizationId: true, timezone: true } })
       if (!v) return text({ ok: false, error: 'Sede no encontrada' })
@@ -244,15 +259,24 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
   // que alguna sede de la organización lo tenga. Las demás escrituras lo exigen en su sede.
   // `modulo: 'ninguno'` (B11, r4.7): desactivar una sede no pide el plan —es la salida del bloqueo de una sede activa que
   // lo perdió—; conserva el alcance de la conexión y el permiso.
-  const puedeEscribir = async (venueId: string, modulo: 'sede' | 'organizacion' | 'ninguno' = 'sede'): Promise<string | null> => {
+  // `exigirActivacion` (C2, spec fase 3 §10): lo que mueve dinero exige además que la organización activó pago al personal;
+  // `configure_service_pay` pasa `false` en sus tres acciones (activar no puede exigir estar activado; la acción «sede» y las
+  // propinas responden con su propio NO_ACTIVADO). Orden: alcance, permiso, plan y activación; DESPUÉS, la revisión de la
+  // conexión de B14-fix2 que hace cada herramienta.
+  const puedeEscribir = async (
+    venueId: string,
+    modulo: 'sede' | 'organizacion' | 'ninguno' = 'sede',
+    exigirActivacion = true,
+  ): Promise<string | null> => {
     guard.venueFilter(venueId) // lanza si la sede está fuera del alcance
     requireWriteScopeAlways(scope, 'staffpay:close', 'registra pagos al staff')
     if (!guard.tienePermiso('staffpay:close', venueId)) return 'Necesitas el permiso staffpay:close en esta sede.'
     if (modulo === 'sede') {
-      if (!(await venueHasServicePayAccess(venueId))) return 'Pago por servicio no está activo en este negocio; pídelo a Avoqado.'
+      if (!(await venueHasServicePayAccess(venueId))) return SIN_PLAN_SEDE
     } else if (modulo === 'organizacion' && !(await organizacionTieneServicePay(venueId))) {
-      return 'Pago por servicio no está activo en ninguna sede de este negocio; pídelo a Avoqado.'
+      return SIN_PLAN_ORGANIZACION
     }
+    if (exigirActivacion && !(await organizacionDeLaSedeActivada(venueId))) return sinActivar()
     return null
   }
   // Un 4xx del service (huella cambió, periodo cerrado, sin permiso…) es una respuesta, no un 500; su vista previa, acotada (F1).
@@ -392,7 +416,8 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
       // Activar o desactivar UNA sede (B11): su propio módulo y su propia puerta de plan (desactivar no la pide).
       if (accion === 'sede')
         return participacionDeSede(herramientas, { venueId, sede, activa, fecha: f, expectedSourceFingerprint, confirm })
-      const no = await puedeEscribir(venueId)
+      // Activar no puede exigir estar activado (NOTA de B6); las propinas responden con su propio «activa primero» (C2).
+      const no = await puedeEscribir(venueId, 'sede', false)
       if (no) return text({ ok: false, error: no })
       if (accion === 'activar' && !periodicidad)
         return text({
@@ -804,9 +829,10 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
       requireWriteScopeAlways(scope, 'staffpay:manage', 'corrige el pago de una clase')
       if (!guard.tienePermiso('staffpay:manage', venueId))
         return text({ ok: false, error: 'Necesitas el permiso staffpay:manage en esta sede.' })
-      // Como la ruta (M-2): el módulo en la ORGANIZACIÓN, para que una sede que lo apagó pueda resolver sus clases (spec §5.6).
-      if (!(await organizacionTieneServicePay(venueId)))
-        return text({ ok: false, error: 'Pago por servicio no está activo en ninguna sede de este negocio; pídelo a Avoqado.' })
+      // Como la ruta (M-2): el plan en la ORGANIZACIÓN, para que una sede que lo perdió pueda resolver sus clases (spec §5.6); y,
+      // como mueve dinero, la activación (C2, spec fase 3 §10).
+      if (!(await organizacionTieneServicePay(venueId))) return text({ ok: false, error: SIN_PLAN_ORGANIZACION })
+      if (!(await organizacionDeLaSedeActivada(venueId))) return text({ ok: false, error: sinActivar() })
       if (!idempotencyKey || !CLAVE_AJUSTE.test(idempotencyKey))
         return text({
           ok: false,

@@ -28,10 +28,14 @@ jest.mock('@/mcp/guard', () => ({
 jest.mock('@/services/access/access.service', () => ({ hasPermission: (...a: unknown[]) => mockHasPermission(...a) }))
 const mockOrgTiene = jest.fn()
 const mockTodas = jest.fn()
+const mockActivada = jest.fn()
 jest.mock('@/services/dashboard/staffPay/acceso', () => ({
   venueHasServicePayAccess: (...a: unknown[]) => mockAccess(...a),
   organizacionTieneServicePay: (...a: unknown[]) => mockOrgTiene(...a),
   assertPermisoEnTodasLasSedes: (...a: unknown[]) => mockTodas(...a),
+  // C2: lo de dinero exige además la activación (sus pruebas, en `staff-service-pay.activacion.test.ts`).
+  organizacionDeLaSedeActivada: (...a: unknown[]) => mockActivada(...a),
+  MENSAJE_SIN_ACTIVAR: 'Pago al personal todavía no está activado: actívalo en Pago por servicio → Periodos.',
 }))
 const mockPreviewLiq = jest.fn()
 const mockLiquidar = jest.fn()
@@ -144,6 +148,7 @@ beforeEach(() => {
   mockHasPermission.mockReturnValue(true)
   mockAccess.mockResolvedValue(true)
   mockOrgTiene.mockResolvedValue(true)
+  mockActivada.mockResolvedValue(true)
   mockEstado.mockResolvedValue({ activado: false, startDate: null, propinasEncendidas: false })
   mockVentanas.mockResolvedValue([])
   mockTodas.mockResolvedValue(undefined)

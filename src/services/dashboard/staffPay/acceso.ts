@@ -1,21 +1,50 @@
 import prisma from '../../../utils/prismaClient'
 import { BadRequestError, ForbiddenError } from '../../../errors/AppError'
 import { getUserAccess, hasPermission } from '../../access/access.service'
-import { MODULE_CODES, moduleService } from '../../modules/module.service'
+import { venueHasFeatureAccess, venuesWithFeatureAccess } from '../../access/basePlan.service'
 
+/** Cómo se consigue el plan: las mismas palabras que las rutas, el MCP y los servicios (spec fase 3 §10, decisión D3). */
+const COMO_SE_CONSIGUE = 'viene en el plan Pro o se contrata suelto por sucursal'
+
+/**
+ * El PLAN: la función SERVICE_PAY (plan Pro, suelta por sucursal, sede exenta o demo), con el resolver de funciones del
+ * plan (spec fase 3 §10, decisión D3). 🔴 Nunca el de módulos: el módulo SERVICE_PAY ya no existe (Bloque C) y cruzar
+ * resolvers falla en silencio (`.claude/rules/feature-gating.md`).
+ */
 export async function venueHasServicePayAccess(venueId: string): Promise<boolean> {
-  return moduleService.isModuleEnabled(venueId, MODULE_CODES.SERVICE_PAY)
+  return venueHasFeatureAccess(venueId, 'SERVICE_PAY')
 }
 
-/** Tope de sedes con el módulo por organización: el alcance de un periodo (y sus permisos) se resuelve completo en memoria. */
+/**
+ * La activación explícita (spec fase 3 §7.1): el dueño apretó «Activar pago al personal» (`staffPayStartDate`). Se lee aquí y
+ * no con `estadoActivacion` porque `activacion.service` importa este archivo.
+ */
+export async function organizacionActivada(organizationId: string): Promise<boolean> {
+  const org = await prisma.organization.findUnique({ where: { id: organizationId }, select: { staffPayStartDate: true } })
+  return org?.staffPayStartDate != null
+}
+
+/**
+ * La misma pregunta desde una sede: el gate de las rutas y el MCP sólo conocen la sede del URL. La puerta de dinero es de la
+ * ORGANIZACIÓN (pre-flight C2, fila 13): NO pregunta si esta sede tiene su ventana de participación (`activarSede`, B11).
+ */
+export async function organizacionDeLaSedeActivada(venueId: string): Promise<boolean> {
+  const v = await prisma.venue.findUnique({ where: { id: venueId }, select: { organizationId: true } })
+  return !!v && (await organizacionActivada(v.organizationId))
+}
+
+export const MENSAJE_SIN_ACTIVAR = 'Pago al personal todavía no está activado: actívalo en Pago por servicio → Periodos.'
+
+/** Tope de sedes con el plan por organización: el alcance de un periodo (y sus permisos) se resuelve completo en memoria. */
 export const TOPE_SEDES_CON_MODULO = 500
 const LOTE_SEDES = 500
 
 /**
- * Sedes de la organización con el módulo activo: el alcance de toda operación de organización (spec §5.7, §9.2).
- * Recorre TODAS las sedes por páginas (cursor por id) y resuelve el módulo en lote (`venuesWithModule`, misma precedencia
- * que `isModuleEnabled`). Con más del tope se NIEGA (Codex bloque A #2): un recorte dejaba fuera del cierre, del alcance
- * guardado y del recibo el dinero de la sede 501 sin avisar.
+ * Sedes de la organización con pago al personal en su plan: el alcance de toda operación de organización (spec §5.7, §9.2).
+ * Recorre TODAS las sedes por páginas (cursor por id) y resuelve el plan en lote (`venuesWithFeatureAccess`, la misma regla
+ * que `venueHasFeatureAccess`: exentas y demos también lo tienen). Con más del tope se NIEGA (Codex bloque A #2): un recorte
+ * dejaba fuera del cierre, del alcance guardado y del recibo el dinero de la sede 501 sin avisar. Usa el cliente GLOBAL: quien
+ * lo necesite dentro de una foto o una transacción lo resuelve ANTES y lo pasa como dato (nunca un `tx` al resolver).
  */
 export async function sedesConServicePay(organizationId: string): Promise<string[]> {
   const activas: string[] = []
@@ -28,14 +57,12 @@ export async function sedesConServicePay(organizationId: string): Promise<string
       take: LOTE_SEDES,
     })
     if (!page.length) break
-    const conModulo = await moduleService.venuesWithModule(
-      page.map(v => v.id),
-      MODULE_CODES.SERVICE_PAY,
-    )
-    for (const v of page) if (conModulo.has(v.id)) activas.push(v.id)
+    const ids = page.map(v => v.id)
+    const conPlan = await venuesWithFeatureAccess(ids, 'SERVICE_PAY')
+    for (const id of ids) if (conPlan.has(id)) activas.push(id)
     if (activas.length > TOPE_SEDES_CON_MODULO) {
       throw new BadRequestError(
-        `Esta organización tiene más de ${TOPE_SEDES_CON_MODULO} sedes con el módulo: el cierre no puede continuar; contacta a Avoqado.`,
+        `Esta organización tiene más de ${TOPE_SEDES_CON_MODULO} sedes con Pago por servicio en su plan: el cierre no puede continuar; contacta a Avoqado.`,
         'DEMASIADAS_SEDES',
       )
     }
@@ -55,7 +82,8 @@ async function tienePermiso(userId: string, venueId: string, permiso: string): P
 
 export async function assertPermisoEnTodasLasSedes(userId: string, organizationId: string, permiso: string): Promise<void> {
   const sedes = await sedesConServicePay(organizationId)
-  if (sedes.length === 0) throw new ForbiddenError('Pago por servicio no está activo en ninguna sede de esta organización')
+  if (sedes.length === 0)
+    throw new ForbiddenError(`Pago por servicio no está activo en ninguna sede de esta organización: ${COMO_SE_CONSIGUE}.`)
   for (const venueId of sedes) {
     if (!(await tienePermiso(userId, venueId, permiso))) {
       throw new ForbiddenError(`Esta acción afecta a toda la organización: necesitas ${permiso} en todas las sedes`)
@@ -98,8 +126,8 @@ export async function permisosPorSede(userId: string, venueIds: string[], permis
 }
 
 /**
- * Lo HISTÓRICO se lee sobre el alcance del periodo, no sobre las sedes que hoy tienen el módulo (Codex R1-1): apagar
- * BSF no puede cambiar el recibo cerrado de Ana ni esconder sus diferencias.
+ * Lo HISTÓRICO se lee sobre el alcance del periodo, no sobre las sedes que hoy tienen el plan (Codex R1-1): que BSF lo
+ * pierda no puede cambiar el recibo cerrado de Ana ni esconder sus diferencias.
  */
 export async function sedesLegiblesDe(userId: string, venueIds: string[]): Promise<{ venueIds: string[]; parcial: boolean }> {
   const todas = [...new Set(venueIds)].sort()
@@ -132,8 +160,8 @@ export async function assertPermisoEnSedes(userId: string, venueIds: string[], p
 }
 
 /**
- * ¿ALGUNA sede de la organización de esta sede tiene el módulo? (Codex R2-R1-1, spec §5.6) Las diferencias de UNA clase
- * se leen y se liquidan aunque la sede de la clase ya lo haya apagado: su deuda siempre tiene dónde caer.
+ * ¿ALGUNA sede de la organización de esta sede tiene el plan? (Codex R2-R1-1, spec §5.6) Las diferencias de UNA clase
+ * se leen y se liquidan aunque la sede de la clase ya lo haya perdido: su deuda siempre tiene dónde caer.
  */
 export async function organizacionTieneServicePay(venueId: string): Promise<boolean> {
   const v = await prisma.venue.findUnique({ where: { id: venueId }, select: { organizationId: true } })
