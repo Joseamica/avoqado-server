@@ -2,7 +2,9 @@
 // pago al personal NO devuelve datos ni montos de sedes fuera del alcance de la CONEXIÓN, aunque el usuario tenga permiso en
 // ellas. Conexión limitada a A; el usuario lee A y B. Los servicios van simulados (su acotamiento se prueba en integración,
 // `alcanceConexion.test.ts`): aquí se fija que el MCP les pasa el alcance y que la vista previa de un RECHAZO (`HUELLA_CAMBIO`)
-// sale acotada igual que la normal. Ruling de B13 intacto: los TEXTOS de bloqueo pueden nombrar sedes del periodo.
+// sale acotada igual que la normal. Ruling de B13 intacto: los TEXTOS de bloqueo pueden nombrar sedes del periodo. B14-fix2: un
+// cierre con B fuera de la conexión ya no se acota: al dueño se le avisa y a los demás se les niega (sus pruebas, en
+// `staff-service-pay.fueraDeLaConexion.test.ts`); aquí queda lo que no cambió.
 import { registerStaffPayTools } from '../../../src/mcp/tools/staffPay'
 import type { McpScope } from '../../../src/mcp/scope'
 import { ConflictError } from '@/errors/AppError'
@@ -16,6 +18,8 @@ const mockCerrar = jest.fn()
 const mockDiferencias = jest.fn()
 const mockLiquidar = jest.fn()
 const mockPreviewLiq = jest.fn()
+const mockSedesDelCierre = jest.fn()
+const mockEsDueno = jest.fn()
 
 jest.mock('@/mcp/guard', () => ({
   createGuard: () => ({
@@ -31,6 +35,13 @@ jest.mock('@/services/dashboard/staffPay/acceso', () => ({
   venueHasServicePayAccess: jest.fn().mockResolvedValue(true),
   organizacionTieneServicePay: jest.fn().mockResolvedValue(true),
   assertPermisoEnTodasLasSedes: jest.fn(),
+}))
+jest.mock('@/mcp/tools/staffPay.alcanceDeLaAccion', () => ({
+  sedesDelCierre: (...a: unknown[]) => mockSedesDelCierre(...a),
+  sedesDelPagado: jest.fn(),
+  sedesDeLasPropinas: jest.fn(),
+  esDueno: (...a: unknown[]) => mockEsDueno(...a),
+  nombresDeSedes: async (_o: string, ids: string[]) => new Map(ids.map(id => [id, id] as const)),
 }))
 jest.mock('@/services/dashboard/staffPay/reporte.service', () => ({
   reportePeriodo: (...a: unknown[]) => mockReporte(...a),
@@ -161,27 +172,28 @@ beforeEach(() => {
   jest.clearAllMocks()
   mockPeriodoDeFecha.mockResolvedValue({ id: 'p10', status: 'OPEN' })
   mockPreview.mockResolvedValue(VISTA_COMPLETA)
+  mockSedesDelCierre.mockResolvedValue(['A'])
+  mockEsDueno.mockResolvedValue(true)
 })
 
 describe('B14-fix F1: el MCP acota a la conexión TODO lo de varias sedes', () => {
-  it('cierre: la vista previa normal excluye B en filas y agregados (B13, regresión)', async () => {
+  it('cierre con B en el periodo: quien no es dueño no recibe ni un número de B (B14-fix2: FUERA_DE_LA_CONEXION)', async () => {
+    mockEsDueno.mockResolvedValue(false)
     const r = await llamar('close_service_pay_period', { venueId: 'A', fecha: '2026-10-15' })
-    expect(r.requiresConfirmation).toBe(true)
-    sinB(r.preview)
+    expect(r).toMatchObject({ ok: false, code: 'FUERA_DE_LA_CONEXION' })
+    expect(r).not.toHaveProperty('preview')
+    expect(JSON.stringify(r)).not.toMatch(/100\.00|-50\.00/)
   })
 
-  it('cierre: la vista previa que trae HUELLA_CAMBIO sale acotada IGUAL (antes: B con $100 y −$50)', async () => {
+  it('cierre: la vista previa que trae HUELLA_CAMBIO sale acotada IGUAL (antes: B con $100 y −$50), también al dueño', async () => {
+    const { expectedSourceFingerprint } = await llamar('close_service_pay_period', { venueId: 'A', fecha: '2026-10-15' })
+    mockSedesDelCierre.mockResolvedValue(['A', 'B'])
     mockCerrar.mockRejectedValue(
       new ConflictError('Los números cambiaron desde que los revisaste: revisa el cierre de nuevo', 'HUELLA_CAMBIO', {
         preview: VISTA_COMPLETA,
       }),
     )
-    const r = await llamar('close_service_pay_period', {
-      venueId: 'A',
-      fecha: '2026-10-15',
-      confirm: true,
-      expectedSourceFingerprint: 'x'.repeat(64),
-    })
+    const r = await llamar('close_service_pay_period', { venueId: 'A', fecha: '2026-10-15', confirm: true, expectedSourceFingerprint })
     expect(r).toMatchObject({ ok: false, code: 'HUELLA_CAMBIO' })
     sinB(r.preview)
   })

@@ -2,7 +2,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 import prisma from '@/utils/prismaClient'
 import { hasPermission } from '@/services/access/access.service'
-import { assertPermisoEnTodasLasSedes, organizacionTieneServicePay, venueHasServicePayAccess } from '@/services/dashboard/staffPay/acceso'
+import { organizacionTieneServicePay, venueHasServicePayAccess } from '@/services/dashboard/staffPay/acceso'
 import { detallePersona, reportePeriodo } from '@/services/dashboard/staffPay/reporte.service'
 import { listarNiveles, nivelesVigentes } from '@/services/dashboard/staffPay/niveles.service'
 import { listarTablas } from '@/services/dashboard/staffPay/tablas.service'
@@ -11,7 +11,7 @@ import { cerrarPeriodo, previewCierre } from '@/services/dashboard/staffPay/cier
 import { agregarAjusteManual, previewAjusteManual } from '@/services/dashboard/staffPay/ajustesManuales.service'
 import { marcarPagado, previewPagado, reciboDePersona } from '@/services/dashboard/staffPay/recibos.service'
 import { periodoQueContieneFecha } from '@/services/dashboard/staffPay/periodosGuardados'
-import { cambiarPropinas, estadoActivacion, ventanasDePropinas } from '@/services/dashboard/staffPay/activacion.service'
+import { estadoActivacion, ventanasDePropinas } from '@/services/dashboard/staffPay/activacion.service'
 import { liquidarDiferencia, previewLiquidacion } from '@/services/dashboard/staffPay/liquidacion.service'
 import { diferenciasDelPeriodo, FilaDiferencia } from '@/services/dashboard/staffPay/diferencias.service'
 import {
@@ -26,9 +26,17 @@ import { createGuard } from '../guard'
 import { text } from '../respond'
 import { requireWriteScopeAlways } from '../requireWriteScopeAlways'
 import { auditMcpWrite } from '../audit'
-import { activarOrganizacion, type Herramientas, motivoDeBloqueo, participacionDeSede } from './staffPay.participacion'
+import {
+  activarOrganizacion,
+  type Herramientas,
+  motivoDeBloqueo,
+  participacionDeSede,
+  propinasDeLaOrganizacion,
+} from './staffPay.participacion'
 import { acotarAlAlcance, avisoDePendientes, detalleDelCierre, falloDelServicio, sedesDeLaConfig } from './staffPay.sedes'
 import { conSigno, diaLegible, diferencia, lista, periodoLegible, pesos } from './staffPay.formato'
+import { sedesDelCierre, sedesDelPagado } from './staffPay.alcanceDeLaAccion'
+import { camposFuera, conAviso, confirmarConexion, huellaConFuera, revisarConexion } from './staffPay.conexion'
 
 const sedeArg = z.string().min(1).max(64).optional().describe('Only this venue of the organization (default: all venues you can read)')
 const fecha = z
@@ -253,7 +261,7 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'close_service_pay_period',
-    'Close a pay-per-service period for the whole organization: freezes into one receipt per person the pay of every finished class, the sales commissions and (if the business pays them in the receipt) the tips that are due. Two steps: call without confirm to get the preview (classes, commissions, tips, people, total, blockers, tips without a person, sales or refunds whose commission is pending review; per venue, what goes in and what stays out; and the pending refunds this close does not deduct, with when they will be) and its expectedSourceFingerprint; then call again with confirm:true and that fingerprint. If numbers changed in between it returns the new preview instead of closing. Requires staffpay:close in every venue of the period.',
+    'Close a pay-per-service period for the whole organization: freezes into one receipt per person the pay of every finished class, the sales commissions and (if the business pays them in the receipt) the tips that are due. Two steps: call without confirm to get the preview (classes, commissions, tips, people, total, blockers, tips without a person, sales or refunds whose commission is pending review; per venue, what goes in and what stays out; and the pending refunds this close does not deduct, with when they will be) and its expectedSourceFingerprint; then call again with confirm:true and that fingerprint. If numbers changed in between it returns the new preview instead of closing. Requires staffpay:close in every venue of the period. If this connection does not include every venue of the period, the organization owner gets a warning first in the preview (sedesFueraDeLaConexion) and the confirmation is tied to those venues; anyone else is refused (FUERA_DE_LA_CONEXION) and should close it from the dashboard.',
     {
       venueId: z.string().min(1).max(64).describe('Venue in your scope'),
       fecha: z
@@ -270,15 +278,19 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
       try {
         if (confirm !== true) {
           // B13: por sede y pendientes, sólo de las sedes de esta conexión (revisión de B12 #7), y en palabras. Los bloqueos son
-          // del cierre ENTERO: nombran sus sedes con la vista previa completa (`crudo`).
+          // del cierre ENTERO: nombran sus sedes con la vista previa completa (`crudo`). B14-fix2: el cierre es de TODAS las sedes
+          // de su periodo; si alguna está fuera de la conexión, el dueño ve el aviso y todo lo que confirma, los demás la negativa.
           const crudo = await previewCierre({ userId: scope.staffId, venueId, fecha: f })
-          const p = acotarAlAlcance(crudo, scope.allowedVenueIds)
+          const rev = await revisarConexion(scope, 'cierre', crudo.periodo.venueIds)
+          if (rev.negada) return rev.negada
+          const p = rev.fuera.length ? crudo : acotarAlAlcance(crudo, scope.allowedVenueIds)
           // Cerrado o bloqueado: no se ofrece confirmar (su huella es '' o no cerraría).
           if (!p.puedeCerrar) {
             const yaCerrado = p.bloqueos.some(b => b.codigo === 'YA_CERRADO')
             return text({
               ok: false,
               preview: p,
+              ...camposFuera(rev),
               error: yaCerrado
                 ? `Este periodo ya está cerrado: ${p.personas} recibo(s) por ${conSigno(p.total)}.`
                 : `Todavía no se puede cerrar: ${p.bloqueos.map(b => motivoDeBloqueo(b, crudo)).join('; ')}.${detalleDelCierre(p)}`,
@@ -291,6 +303,7 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
               needsInput: true,
               field: 'confirmarHuerfanas',
               preview: p,
+              ...camposFuera(rev),
               question: `Hay ${p.huerfanas} reserva(s) de clase sin horario que no cuentan para ningún pago. Si el usuario lo acepta, vuelve a pedir la vista previa con confirmarHuerfanas:true.`,
             })
           }
@@ -312,17 +325,24 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
             ok: false,
             requiresConfirmation: true,
             preview: p,
-            expectedSourceFingerprint: p.huella,
-            message: `Se congelan ${que} de ${p.personas} personas, ${conSigno(p.total)}.${anulaciones}${sinDueno}${porRevisar}${
-              p.huerfanas > 0 ? ` ${p.huerfanas} reserva(s) de clase sin horario no cuentan para ningún pago.` : ''
-            } Lo que cambie después aparecerá como diferencia pendiente; una devolución o anulación de una venta entra sola en el siguiente recibo.${detalleDelCierre(p)}`,
+            ...camposFuera(rev),
+            expectedSourceFingerprint: huellaConFuera(p.huella, rev.fuera),
+            message: conAviso(
+              rev,
+              `Se congelan ${que} de ${p.personas} personas, ${conSigno(p.total)}.${anulaciones}${sinDueno}${porRevisar}${
+                p.huerfanas > 0 ? ` ${p.huerfanas} reserva(s) de clase sin horario no cuentan para ningún pago.` : ''
+              } Lo que cambie después aparecerá como diferencia pendiente; una devolución o anulación de una venta entra sola en el siguiente recibo.${detalleDelCierre(p)}`,
+            ),
           })
         }
+        // B14-fix2: al confirmar se revalida TODO —quién pide y qué sedes del periodo quedan fuera AHORA— antes de cerrar.
+        const ok = await confirmarConexion(scope, 'cierre', await sedesDelCierre(venueId, f), expectedSourceFingerprint ?? '')
+        if (ok.respuesta) return ok.respuesta
         const r = await cerrarPeriodo({
           userId: scope.staffId,
           venueId,
           fecha: f,
-          huellaEsperada: expectedSourceFingerprint ?? '',
+          huellaEsperada: ok.huella,
           confirmarHuerfanas: confirmarHuerfanas ?? false,
         })
         if (!r.yaCerrado) {
@@ -331,7 +351,7 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
             entity: 'ServicePayPeriod',
             entityId: r.periodId,
             venueId,
-            data: { total: r.total, personas: r.personas },
+            data: { total: r.total, personas: r.personas, ...camposFuera(ok.rev) },
           })
         }
         return text({ ok: true, ...r })
@@ -343,7 +363,7 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'configure_service_pay',
-    'Turn on pay for staff (pay-per-service) for the organization, turn ONE venue on or off in it, or choose whether tips are paid inside the pay receipt. accion "activar": sales commissions (and tips, if on) start adding to the receipts from the start of the current period, for the chosen venues (sedes; default: every venue with the plan — the preview lists venues with and without it), and it fixes the period length (periodicidad MONTHLY or SEMIMONTHLY, ask the owner); earlier commissions are not added. accion "sede": activa true turns the venue on from the day in fecha (default today) or activa false turns it off with fecha as its last day (default today); the preview says, with amounts, which classes, commissions and tips enter or stay out. accion "propinas": encender true pays tips inside the receipt, false hands them out separately; turning them off only affects future payments. Two steps: call without confirm to show current → new and the amounts; then confirm:true with the fecha and expectedSourceFingerprint the preview returned (if the date or the venues changed in between —for example the period changed at midnight— nothing is written and it asks for a new preview). Requires staffpay:close in every venue of the organization (activar, propinas) or in the venue (sede).',
+    'Turn on pay for staff (pay-per-service) for the organization, turn ONE venue on or off in it, or choose whether tips are paid inside the pay receipt. accion "activar": sales commissions (and tips, if on) start adding to the receipts from the start of the current period, for the chosen venues (sedes; default: every venue with the plan — the preview lists venues with and without it), and it fixes the period length (periodicidad MONTHLY or SEMIMONTHLY, ask the owner); earlier commissions are not added. accion "sede": activa true turns the venue on from the day in fecha (default today) or activa false turns it off with fecha as its last day (default today); the preview says, with amounts, which classes, commissions and tips enter or stay out. accion "propinas": encender true pays tips inside the receipt, false hands them out separately; turning them off only affects future payments. Two steps: call without confirm to show current → new and the amounts; then confirm:true with the fecha and expectedSourceFingerprint the preview returned (if the date or the venues changed in between —for example the period changed at midnight— nothing is written and it asks for a new preview). Requires staffpay:close in every venue of the organization (activar, propinas) or in the venue (sede). activar without sedes and propinas affect every venue of the organization: if this connection does not include some of them, the organization owner gets a warning first in the preview (sedesFueraDeLaConexion) and the confirmation is tied to those venues; anyone else is refused (FUERA_DE_LA_CONEXION).',
     {
       venueId: z.string().min(1).max(64).describe('Venue in your scope'),
       accion: z.enum(['activar', 'propinas', 'sede']).describe('activar | propinas | sede'),
@@ -396,39 +416,8 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
           const datos = { venueId, organizationId: v.organizationId, actual, periodicidad: periodicidad!, sedes }
           return await activarOrganizacion(herramientas, { ...datos, fecha: f, expectedSourceFingerprint, confirm })
         }
-        if (!actual.activado) return text({ ok: false, actual, error: 'Activa primero el pago al personal (accion "activar").' })
-        if (actual.propinasEncendidas === encender)
-          return text({
-            ok: false,
-            sinCambios: true,
-            actual,
-            error: `Las propinas ya están ${encender ? 'encendidas' : 'apagadas'}: no hay nada que cambiar.`,
-          })
-        const de = (x: boolean) => (x ? 'encendidas' : 'apagadas')
-        if (confirm !== true) {
-          await assertPermisoEnTodasLasSedes(scope.staffId, v.organizationId, 'staffpay:close')
-          return text({
-            ok: false,
-            requiresConfirmation: true,
-            actual,
-            message: `Propinas en el recibo: ${de(actual.propinasEncendidas)} → ${de(encender!)}.${
-              encender
-                ? ' Si hoy las entregas aparte cada día, no las pagues dos veces.'
-                : ' Lo que ya entró no se pierde; sólo los cobros nuevos dejan de sumarse.'
-            }`,
-          })
-        }
-        const r = await cambiarPropinas({ userId: scope.staffId, venueId, encender: encender! })
-        // Si otra persona lo cambió entre la vista previa y el confirmar, aquí no se escribió nada: no se audita.
-        if (r.cambio)
-          await auditMcpWrite(scope, {
-            action: 'SERVICE_PAY_TIPS_SET',
-            entity: 'Organization',
-            entityId: v.organizationId,
-            venueId,
-            data: { encender },
-          })
-        return text({ ok: true, ...r })
+        const datos = { venueId, organizationId: v.organizationId, actual, encender: encender!, expectedSourceFingerprint, confirm }
+        return await propinasDeLaOrganizacion(herramientas, datos)
       } catch (e) {
         return fallo(e)
       }
@@ -528,7 +517,7 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'mark_service_pay_paid',
-    'Record that closed pay-per-service receipts were paid outside Avoqado (Avoqado does not move money). With staffId marks that person; without it marks everyone still pending in the period. Two steps: the preview lists exactly which receipts and totals will be marked and returns expectedSourceFingerprint; confirm:true with it. Requires staffpay:close in every venue of those receipts.',
+    'Record that closed pay-per-service receipts were paid outside Avoqado (Avoqado does not move money). With staffId marks that person; without it marks everyone still pending in the period. Two steps: the preview lists exactly which receipts and totals will be marked and returns expectedSourceFingerprint; confirm:true with it. Requires staffpay:close in every venue of those receipts. A receipt is marked whole, with its lines from every venue: if this connection does not include some of them, the organization owner gets a warning first in the preview (sedesFueraDeLaConexion) and the confirmation is tied to those venues; anyone else is refused (FUERA_DE_LA_CONEXION).',
     {
       venueId: z.string().min(1).max(64).describe('Venue in your scope'),
       periodId: z.string().min(1).max(64).describe('Closed period'),
@@ -541,8 +530,12 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
       const no = await puedeEscribir(venueId)
       if (no) return text({ ok: false, error: no })
       try {
+        // B14-fix2: los recibos se marcan ENTEROS, con sus renglones de todas sus sedes (las del permiso del service).
+        const sedes = () => sedesDelPagado(venueId, periodId, staffId)
         if (confirm !== true) {
           const pv = await previewPagado({ userId: scope.staffId, venueId, periodId, staffId })
+          const rev = await revisarConexion(scope, 'pagado', await sedes())
+          if (rev.negada) return rev.negada
           if (pv.periodo.estado !== 'CLOSED') {
             return text({ ok: false, preview: pv, error: 'Ese periodo todavía está abierto: sólo se marca pagado un periodo cerrado.' })
           }
@@ -553,20 +546,26 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
             ok: false,
             requiresConfirmation: true,
             preview: pv,
-            expectedSourceFingerprint: pv.huella,
-            message: `Se registran como pagados ${pv.cantidad} recibo(s) (${staffId ? 'esa persona' : 'todos los pendientes'}) por $${pesos(pv.total)}: ${nombres}${resto}.`,
+            ...camposFuera(rev),
+            expectedSourceFingerprint: huellaConFuera(pv.huella, rev.fuera),
+            message: conAviso(
+              rev,
+              `Se registran como pagados ${pv.cantidad} recibo(s) (${staffId ? 'esa persona' : 'todos los pendientes'}) por $${pesos(pv.total)}: ${nombres}${resto}.`,
+            ),
           })
         }
         if (!expectedSourceFingerprint)
           return text({ ok: false, needsInput: true, field: 'expectedSourceFingerprint', question: 'Pide primero la vista previa.' })
-        const r = await marcarPagado({ userId: scope.staffId, venueId, periodId, staffId, nota, huellaEsperada: expectedSourceFingerprint })
+        const ok = await confirmarConexion(scope, 'pagado', await sedes(), expectedSourceFingerprint)
+        if (ok.respuesta) return ok.respuesta
+        const r = await marcarPagado({ userId: scope.staffId, venueId, periodId, staffId, nota, huellaEsperada: ok.huella })
         if (r.marcados) {
           await auditMcpWrite(scope, {
             action: 'SERVICE_PAY_MARKED_PAID',
             entity: 'ServicePayPeriod',
             entityId: periodId,
             venueId,
-            data: { staffId: staffId ?? 'todos', marcados: r.marcados },
+            data: { staffId: staffId ?? 'todos', marcados: r.marcados, ...camposFuera(ok.rev) },
           })
         }
         return text({ ok: true, ...r })

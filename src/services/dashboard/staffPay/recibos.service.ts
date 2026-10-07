@@ -86,8 +86,11 @@ async function pendientesDePago(db: Db, p: { id: string; status: string }, staff
 
 const TOPE_SEDES_RECIBO = 500
 
-/** Las sedes de un recibo, para su permiso. Nunca recorta: con más del tope se niega en vez de revisar sólo una parte. */
-async function sedesDeRecibo(db: Db, periodId: string, staffId: string): Promise<string[]> {
+/**
+ * Las sedes de un recibo, para su permiso. Nunca recorta: con más del tope se niega en vez de revisar sólo una parte. B14-fix2:
+ * exportada para que el MCP sepa qué sedes abarca marcar pagado ESE recibo (las mismas del permiso), sin una segunda copia.
+ */
+export async function sedesDeRecibo(db: Db, periodId: string, staffId: string): Promise<string[]> {
   const sedes = await db.serviceEarning.findMany({
     where: { periodId, staffId },
     select: { venueId: true },

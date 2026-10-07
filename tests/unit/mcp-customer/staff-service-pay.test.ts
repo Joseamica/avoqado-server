@@ -66,7 +66,8 @@ const mockAjuste = jest.fn()
 const mockPagado = jest.fn()
 const mockRequireWrite = jest.fn()
 jest.mock('@/services/dashboard/staffPay/cierre.service', () => ({
-  previewCierre: (...a: unknown[]) => mockPreview(...a),
+  // B14-fix2: la vista previa real SIEMPRE trae su periodo con las sedes del alcance (aquí, sólo v1: la de la conexión).
+  previewCierre: async (...a: unknown[]) => ({ periodo: { id: null, start: '', end: '', venueIds: ['v1'] }, ...(await mockPreview(...a)) }),
   cerrarPeriodo: (...a: unknown[]) => mockCerrar(...a),
 }))
 const mockPreviewAjuste = jest.fn()
@@ -102,6 +103,11 @@ jest.mock('@/services/dashboard/staffPay/activacion.service', () => ({
 // B11: activar o desactivar UNA sede y su vista previa (sus pruebas, en `staff-service-pay.sedes.test.ts`).
 jest.mock('@/services/dashboard/staffPay/participacion', () => ({ activarSede: jest.fn(), desactivarSede: jest.fn() }))
 jest.mock('@/services/dashboard/staffPay/participacion.vistaPrevia', () => ({ vistaPreviaParticipacion: jest.fn() }))
+// B14-fix2: qué sedes abarcan cerrar, marcar pagado y propinas: aquí sólo v1 (sus pruebas, en `staff-service-pay.fueraDeLaConexion.test.ts`).
+jest.mock('@/mcp/tools/staffPay.alcanceDeLaAccion', () => {
+  const soloV1 = async () => ['v1']
+  return { sedesDelCierre: soloV1, sedesDelPagado: soloV1, sedesDeLasPropinas: soloV1, esDueno: jest.fn(), nombresDeSedes: jest.fn() }
+})
 // B13: la pantalla de sedes en `staff_service_pay_config` (sus pruebas, en `staff-service-pay.estadoSedes.test.ts`).
 jest.mock('@/services/dashboard/staffPay/sedes.service', () => ({
   estadoSedes: jest.fn().mockResolvedValue({ activado: false, startDate: null, periodo: null, sedes: [] }),
@@ -134,6 +140,7 @@ beforeAll(() =>
 )
 beforeEach(() => {
   jest.clearAllMocks()
+  scope.allowedVenueIds = ['v1']
   mockHasPermission.mockReturnValue(true)
   mockAccess.mockResolvedValue(true)
   mockOrgTiene.mockResolvedValue(true)
@@ -1700,6 +1707,7 @@ describe('pago al personal con ventas por MCP (spec fase 3 §12)', () => {
 
     it('B11: 5 sedes ⇒ una huella de 64 caracteres (cabe en el máximo de 128); si cambian las sedes con plan antes de confirmar ⇒ INICIO_CAMBIO sin escribir', async () => {
       const cinco = ['v5', 'v1', 'v4', 'v2', 'v3']
+      scope.allowedVenueIds = cinco // B14-fix2: las cinco en la conexión (sin sedes fuera), la huella de r4.6 tal cual
       mockSedesParaActivar.mockResolvedValue({
         conPlan: cinco.map(v => ({ venueId: v, nombre: v.toUpperCase() })),
         sinPlan: [],

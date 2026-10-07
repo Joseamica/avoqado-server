@@ -1,7 +1,8 @@
 // tests/unit/mcp-customer/staff-service-pay.estadoSedes.test.ts — fase 3, B13 (diseño r5.1, r3.7(1); revisión de B12 #7): lo que
 // el MCP ya devolvía crudo (`porSede`, `pendientes`, `avisoPendientes`) se dice en palabras del dueño, `staff_service_pay_config`
 // trae las sedes de la pantalla 1, y TODO eso se acota a las sedes del alcance de la CONEXIÓN (además del permiso del usuario).
-// Los servicios van simulados (sus reglas se prueban en integración).
+// Los servicios van simulados (sus reglas se prueban en integración). B14-fix2: el cierre con una sede fuera de la conexión ya no se
+// acota: al dueño se le avisa y ve todo lo que confirma; a los demás se les niega (`staff-service-pay.fueraDeLaConexion.test.ts`).
 import { registerStaffPayTools } from '../../../src/mcp/tools/staffPay'
 import type { McpScope } from '../../../src/mcp/scope'
 
@@ -9,6 +10,7 @@ const mockTiene = jest.fn()
 const mockPreview = jest.fn()
 const mockPreviewAjuste = jest.fn()
 const mockEstadoSedes = jest.fn()
+const mockEsDueno = jest.fn()
 
 jest.mock('@/mcp/guard', () => ({
   createGuard: () => ({
@@ -26,6 +28,11 @@ jest.mock('@/services/dashboard/staffPay/acceso', () => ({
   assertPermisoEnTodasLasSedes: jest.fn(),
 }))
 jest.mock('@/services/dashboard/staffPay/sedes.service', () => ({ estadoSedes: (...a: unknown[]) => mockEstadoSedes(...a) }))
+jest.mock('@/mcp/tools/staffPay.alcanceDeLaAccion', () => ({
+  esDueno: (...a: unknown[]) => mockEsDueno(...a),
+  nombresDeSedes: async (_o: string, ids: string[]) =>
+    new Map(ids.map(id => [id, ({ v1: 'PN', b: 'Bosques', c: 'Condesa' } as Record<string, string>)[id]] as const)),
+}))
 jest.mock('@/services/dashboard/staffPay/participacion', () => ({ activarSede: jest.fn(), desactivarSede: jest.fn() }))
 jest.mock('@/services/dashboard/staffPay/participacion.vistaPrevia', () => ({ vistaPreviaParticipacion: jest.fn() }))
 jest.mock('@/services/dashboard/staffPay/activacion.service', () => ({
@@ -86,6 +93,7 @@ beforeAll(() =>
 beforeEach(() => {
   jest.clearAllMocks()
   mockTiene.mockReturnValue(true)
+  mockEsDueno.mockResolvedValue(true)
 })
 
 const monto = (n: number, total: string) => ({ n, total })
@@ -157,18 +165,13 @@ describe('close_service_pay_period: por sede y pendientes en palabras, acotados 
     },
   }
 
-  it('la sede fuera de la conexión (b) no sale ni en porSede ni en las pendientes; los totales se rehacen con lo que queda', async () => {
+  it('B14-fix2: con b fuera de la conexión, quien no es dueño no recibe ni porSede ni pendientes ni un monto de b', async () => {
+    mockEsDueno.mockResolvedValue(false)
     mockPreview.mockResolvedValue(structuredClone(preview))
     const r = parse(await handlers.get('close_service_pay_period')!({ venueId: 'v1', fecha: '2026-11-15' }, {}))
-    expect(r).toMatchObject({ requiresConfirmation: true, expectedSourceFingerprint: 'h'.repeat(64) })
-    expect(r.preview.porSede.map((s: { venueId: string }) => s.venueId)).toEqual(['v1', 'c'])
-    expect(r.preview.pendientes).toEqual({
-      n: 1,
-      total: '-50.00',
-      porDestino: [{ seDescuenta: OCTUBRE, n: 1, total: '-50.00', porSede: [{ venueId: 'v1', n: 1, total: '-50.00' }] }],
-    })
-    expect(r.message).not.toMatch(/Bosques/)
-    expect(r.message).not.toMatch(/30\.00|20\.00/)
+    expect(r).toMatchObject({ ok: false, code: 'FUERA_DE_LA_CONEXION' })
+    expect(r).not.toHaveProperty('preview')
+    expect(JSON.stringify(r)).not.toMatch(/1000\.00|30\.00|20\.00/)
   })
 
   it('dice por sede qué entra y qué queda fuera, y cuándo se descuenta cada pendiente', async () => {
@@ -178,8 +181,9 @@ describe('close_service_pay_period: por sede y pendientes en palabras, acotados 
     expect(r.message).toContain(
       'Condesa (sin activar): no entra nada; quedan fuera 1 propina(s) ($70.00) y 1 clase(s) que todavía no se pueden valorar',
     )
+    // B14-fix2: el dueño ve también lo de b (fuera de la conexión): −$80.00 = −$50.00 de PN y −$30.00 de Bosques.
     expect(r.message).toContain(
-      'Devoluciones pendientes que este cierre no descuenta: −$50.00 se descontará solo al cerrar el periodo de octubre de 2026.',
+      'Devoluciones pendientes que este cierre no descuenta: −$80.00 se descontará solo al cerrar el periodo de octubre de 2026;',
     )
   })
 

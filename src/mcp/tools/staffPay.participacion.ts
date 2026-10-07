@@ -1,9 +1,15 @@
 // src/mcp/tools/staffPay.participacion.ts — `configure_service_pay`: activar la organización eligiendo sedes y activar o
-// desactivar UNA sede «desde / hasta qué día», en dos pasos y con los montos de lo que entra (fase 3, B11; diseño r4.6, r7.3).
+// desactivar UNA sede «desde / hasta qué día», en dos pasos y con los montos de lo que entra (fase 3, B11; diseño r4.6, r7.3), y
+// cambiar las propinas del recibo (B14-fix2 la trae aquí desde `staffPay.ts`, junto a sus hermanas).
 import { createHash } from 'crypto'
 import prisma from '@/utils/prismaClient'
 import { assertPermisoEnTodasLasSedes } from '@/services/dashboard/staffPay/acceso'
-import { activarPagoAlPersonal, previewActivacion, sedesParaActivar } from '@/services/dashboard/staffPay/activacion.service'
+import {
+  activarPagoAlPersonal,
+  cambiarPropinas,
+  previewActivacion,
+  sedesParaActivar,
+} from '@/services/dashboard/staffPay/activacion.service'
 import { activarSede, desactivarSede } from '@/services/dashboard/staffPay/participacion'
 import { vistaPreviaParticipacion, type Cuenta } from '@/services/dashboard/staffPay/participacion.vistaPrevia'
 import { textoSedeActivaSinPlan, type Bloqueo } from '@/services/dashboard/staffPay/cierre.alcance'
@@ -12,6 +18,8 @@ import type { createGuard } from '../guard'
 import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
 import { conSigno, diaLegible, lista } from './staffPay.formato'
+import { camposFuera, conAviso, huellaDePropinas, revisarConexion, sedesFueraCambiaron } from './staffPay.conexion'
+import { sedesDeLasPropinas } from './staffPay.alcanceDeLaAccion'
 
 type Respuesta = ReturnType<typeof text>
 /** Lo que el registro de las herramientas ya tiene y estas acciones reusan (alcance de la conexión, permisos, errores). */
@@ -23,8 +31,14 @@ export interface Herramientas {
 }
 
 const sha256 = (s: string) => createHash('sha256').update(s).digest('hex')
-/** La huella de activar la organización (r4.6): la fecha de inicio Y las sedes elegidas, ordenadas. 64 caracteres. */
-export const huellaDeActivar = (startDate: string, sedes: string[]) => sha256(`activar|${startDate}|${[...sedes].sort().join(',')}`)
+/**
+ * La huella de activar la organización (r4.6): la fecha de inicio Y las sedes elegidas, ordenadas. 64 caracteres. B14-fix2: con
+ * sedes fuera de la conexión lleva además su lista ordenada (sin ellas, la de siempre).
+ */
+export const huellaDeActivar = (startDate: string, sedes: string[], fuera: ReadonlyArray<{ venueId: string }> = []) => {
+  const idsFuera = fuera.map(s => s.venueId).sort()
+  return sha256(`activar|${startDate}|${[...sedes].sort().join(',')}${idsFuera.length ? `|fuera:${idsFuera.join(',')}` : ''}`)
+}
 /** La huella de activar o desactivar UNA sede (r4.6): la sede, la acción y la fecha EXPLÍCITA (nunca «hoy»). */
 export const huellaDeSede = (sede: string, activa: boolean, fecha: string) => sha256(`sede|${sede}|${activa}|${fecha}`)
 
@@ -142,6 +156,9 @@ export async function activarOrganizacion(
         sedes: l,
         error: `Estas sedes no tienen Pago al personal en su plan y no se pueden activar: ${sinPlan.join(', ')}. Elige sólo sedes con el plan.`,
       })
+    // B14-fix2: sin `sedes` se activan TODAS las del plan, también las de fuera de esta conexión: aviso al dueño, negativa al resto.
+    const rev = await revisarConexion(h.scope, 'activar', ids)
+    if (rev.negada) return rev.negada
     const nombre = new Map(l.conPlan.map(x => [x.venueId, x.nombre]))
     const fuera = l.conPlan.filter(x => !ids.includes(x.venueId)).map(x => x.nombre)
     const sinElPlan = l.sinPlanTotal
@@ -158,16 +175,20 @@ export async function activarOrganizacion(
         sedes: ids.map(id => ({ venueId: id, nombre: nombre.get(id) ?? id })),
       },
       sedes: l,
+      ...camposFuera(rev),
       // El catálogo firma la fecha y la huella en el token: se confirma lo que se MOSTRÓ (Codex bloque B #3, r4.6). No quitar.
       fecha: plan.startDate,
-      expectedSourceFingerprint: huellaDeActivar(plan.startDate, ids),
-      message: `Pago al personal: sin activar → activado (${nombrePeriodicidad(periodicidad)}${
-        plan.periodicidadFija ? ', ya no cambia porque hay periodos guardados' : '; la periodicidad queda fija al activar'
-      }). Desde el ${plan.startDate} se suman al recibo las comisiones${actual.propinasEncendidas ? ' y las propinas' : ''} de ${lista(
-        ids.map(id => nombre.get(id) ?? id),
-      )}; las anteriores no se suman: si debes alguna, agrégalo como ajuste.${
-        fuera.length ? ` Quedan sin activar: ${lista(fuera)} (se activan después, sede por sede).` : ''
-      }${sinElPlan}`,
+      expectedSourceFingerprint: huellaDeActivar(plan.startDate, ids, rev.fuera),
+      message: conAviso(
+        rev,
+        `Pago al personal: sin activar → activado (${nombrePeriodicidad(periodicidad)}${
+          plan.periodicidadFija ? ', ya no cambia porque hay periodos guardados' : '; la periodicidad queda fija al activar'
+        }). Desde el ${plan.startDate} se suman al recibo las comisiones${actual.propinasEncendidas ? ' y las propinas' : ''} de ${lista(
+          ids.map(id => nombre.get(id) ?? id),
+        )}; las anteriores no se suman: si debes alguna, agrégalo como ajuste.${
+          fuera.length ? ` Quedan sin activar: ${lista(fuera)} (se activan después, sede por sede).` : ''
+        }${sinElPlan}`,
+      ),
     })
   }
   if (!args.expectedSourceFingerprint)
@@ -175,7 +196,10 @@ export async function activarOrganizacion(
   if (!args.fecha)
     return text({ ok: false, needsInput: true, field: 'fecha', question: 'Confirma con la fecha que devolvió la vista previa.' })
   const { ids, sinPlan } = await elegidas()
-  if (sinPlan.length || huellaDeActivar(args.fecha, ids) !== args.expectedSourceFingerprint)
+  // B14-fix2: se revalida quién pide y qué sedes quedan fuera AHORA; la huella lleva esa lista (si cambió, INICIO_CAMBIO).
+  const rev = await revisarConexion(h.scope, 'activar', ids)
+  if (rev.negada) return rev.negada
+  if (sinPlan.length || huellaDeActivar(args.fecha, ids, rev.fuera) !== args.expectedSourceFingerprint)
     return text({
       ok: false,
       code: 'INICIO_CAMBIO',
@@ -189,12 +213,77 @@ export async function activarOrganizacion(
         entity: 'Organization',
         entityId: organizationId,
         venueId,
-        data: { startDate: r.startDate, periodicidad, sedes: ids },
+        data: { startDate: r.startDate, periodicidad, sedes: ids, ...camposFuera(rev) },
       })
     return text({ ok: true, ...r })
   } catch (e) {
     return h.fallo(e, (e as { code?: string })?.code === 'INICIO_CAMBIO' ? ' Pide una vista previa nueva (sin confirm).' : '')
   }
+}
+
+/**
+ * `accion: 'propinas'` (B9): si las propinas se pagan dentro del recibo. Es de TODA la organización: B14-fix2 (hermano de las tres
+ * del founder) le aplica la misma regla que al cierre —con sedes con el plan fuera de esta conexión, aviso al dueño y la huella de
+ * esa lista; negativa a los demás— y la revalida al confirmar. Sin sedes fuera, igual que antes (sin huella).
+ */
+export async function propinasDeLaOrganizacion(
+  h: Herramientas,
+  args: {
+    venueId: string
+    organizationId: string
+    actual: { activado: boolean; startDate: string | null; propinasEncendidas: boolean }
+    encender: boolean
+    expectedSourceFingerprint?: string
+    confirm?: boolean
+  },
+): Promise<Respuesta> {
+  const { venueId, organizationId, actual, encender, expectedSourceFingerprint, confirm } = args
+  if (!actual.activado) return text({ ok: false, actual, error: 'Activa primero el pago al personal (accion "activar").' })
+  if (actual.propinasEncendidas === encender)
+    return text({
+      ok: false,
+      sinCambios: true,
+      actual,
+      error: `Las propinas ya están ${encender ? 'encendidas' : 'apagadas'}: no hay nada que cambiar.`,
+    })
+  const de = (x: boolean) => (x ? 'encendidas' : 'apagadas')
+  // B14-fix2 (hermano): las propinas son de toda la organización (las sedes con el plan, las del permiso del service).
+  const revisar = async () => revisarConexion(h.scope, 'propinas', await sedesDeLasPropinas(organizationId))
+  if (confirm !== true) {
+    await assertPermisoEnTodasLasSedes(h.scope.staffId, organizationId, 'staffpay:close')
+    const rev = await revisar()
+    if (rev.negada) return rev.negada
+    const huella = huellaDePropinas(encender, rev.fuera)
+    return text({
+      ok: false,
+      requiresConfirmation: true,
+      actual,
+      ...camposFuera(rev),
+      ...(huella ? { expectedSourceFingerprint: huella } : {}),
+      message: conAviso(
+        rev,
+        `Propinas en el recibo: ${de(actual.propinasEncendidas)} → ${de(encender)}.${
+          encender
+            ? ' Si hoy las entregas aparte cada día, no las pagues dos veces.'
+            : ' Lo que ya entró no se pierde; sólo los cobros nuevos dejan de sumarse.'
+        }`,
+      ),
+    })
+  }
+  const rev = await revisar()
+  if (rev.negada) return rev.negada
+  if ((expectedSourceFingerprint ?? null) !== huellaDePropinas(encender, rev.fuera)) return sedesFueraCambiaron(rev.fuera)
+  const r = await cambiarPropinas({ userId: h.scope.staffId, venueId, encender })
+  // Si otra persona lo cambió entre la vista previa y el confirmar, aquí no se escribió nada: no se audita.
+  if (r.cambio)
+    await auditMcpWrite(h.scope, {
+      action: 'SERVICE_PAY_TIPS_SET',
+      entity: 'Organization',
+      entityId: organizationId,
+      venueId,
+      data: { encender, ...camposFuera(rev) },
+    })
+  return text({ ok: true, ...r })
 }
 
 /**
