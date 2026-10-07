@@ -44,7 +44,10 @@ export interface PagoDeClase {
   regla: ReglaDeClase | null
   ajuste: AjusteDeClase | null
   anclada: boolean
-  /** Sin ancla, ya terminada, no cancelada y su fecha cae en un periodo CERRADO: se paga como diferencia de ése (spec §6.4). */
+  /**
+   * Sin ancla, ya terminada y su fecha cae en un periodo CERRADO: se paga como diferencia de ése (spec §6.4). Una cancelada
+   * cuenta si se paga (cancelación tardía), y está terminada desde que se canceló (D5-fix).
+   */
   llegoTarde: boolean
   /** El periodo donde la clase se contabilizó por primera vez (su ancla), o null si aún no. */
   periodoOrigen: { id: string; start: string; end: string; estado: 'OPEN' | 'CLOSED' } | null
@@ -167,6 +170,8 @@ export async function pagoDeClase(
   venueId: string,
   classSessionId: string,
   db: Prisma.TransactionClient | typeof prisma = prisma,
+  /** Sólo pruebas (como `diferenciasDeClase`): el instante de «ahora». La ruta y el MCP no lo pasan. */
+  opts: { ahora?: Date } = {},
 ): Promise<PagoDeClase> {
   const cs = await db.classSession.findFirst({
     where: { id: classSessionId, venueId },
@@ -200,8 +205,8 @@ export async function pagoDeClase(
     ? { id: origen.id, start: dbDateComoFecha(origen.periodStart), end: dbDateComoFecha(origen.periodEnd), estado: origen.status }
     : null
   const lineas = origen ? await lineasDeClase(db, cs.venue.organizationId, cs.id) : []
-  const ahora = new Date()
-  const llegoTarde = !ps?.originPeriodId && cs.status !== 'CANCELLED' && !!(await origenDeClase(db, venueId, cs, ahora))
+  const ahora = opts.ahora ?? new Date()
+  const cancelada = cs.status === 'CANCELLED'
   const base = {
     classSessionId: cs.id,
     motivo: null,
@@ -215,11 +220,13 @@ export async function pagoDeClase(
     regla: null,
     ajuste,
     anclada: !!ps?.originPeriodId,
-    llegoTarde,
+    llegoTarde: false,
     periodoOrigen,
     lineas,
   }
-  if (cs.endsAt > ahora) return { ...base, estado: cs.status === 'CANCELLED' ? 'CANCELADA' : 'NO_TERMINADA' }
+  // Una cancelada está terminada desde que se canceló (D5-fix, Codex D-1): lo que paga ya no cambia, así que su tarjeta es la
+  // misma antes y después de su horario. Sólo una clase viva espera a que termine.
+  if (!cancelada && cs.endsAt > ahora) return { ...base, estado: 'NO_TERMINADA' }
   const [v] = await valorarClases(
     db,
     {
@@ -236,10 +243,14 @@ export async function pagoDeClase(
     { limite: 1 },
   )
   // Una cancelada sólo se paga con la regla de cancelación tardía de su versión (spec fase 3 §6.6); si no, es CANCELADA.
-  if (cs.status === 'CANCELLED' && !v?.canceladaTarde) return { ...base, estado: 'CANCELADA' }
-  if (!v) return { ...base, estado: 'EXCEPCION', motivo: 'SIN_TABLA' }
+  if (cancelada && !v?.canceladaTarde) return { ...base, estado: 'CANCELADA' }
+  // Sin ancla, terminada y con su fecha en un periodo CERRADO: se paga como diferencia de ése (spec §6.4). Una cancelada llega
+  // aquí sólo si se paga (D5-fix: antes nunca «llegaba tarde» y la tarjeta escondía su pendiente).
+  const llegoTarde = !ps?.originPeriodId && !!(await origenDeClase(db, venueId, cs, ahora))
+  if (!v) return { ...base, llegoTarde, estado: 'EXCEPCION', motivo: 'SIN_TABLA' }
   return {
     ...base,
+    llegoTarde,
     estado: v.estado,
     motivo: v.motivo,
     monto: v.monto !== null ? new Prisma.Decimal(v.monto).toFixed(2) : null,

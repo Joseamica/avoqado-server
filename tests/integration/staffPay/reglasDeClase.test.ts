@@ -10,6 +10,8 @@ jest.mock('@/services/dashboard/staffPay/acceso', () => ({
   tienePermisoEn: jest.fn(async () => true),
   sedesConPermiso: jest.fn(async (_u: string, venueIds: string[]) => venueIds),
   assertPermisoEnSedes: jest.fn(async () => undefined),
+  // La herramienta REAL del MCP (D5-fix F2) pregunta si la sede tiene el módulo.
+  venueHasServicePayAccess: jest.fn(async () => true),
 }))
 
 import { Prisma } from '@prisma/client'
@@ -19,10 +21,13 @@ import { anclarClases, cerrarPeriodo, previewCierre } from '@/services/dashboard
 import { exportarRecibo, reciboDePersona } from '@/services/dashboard/staffPay/recibos.service'
 import * as XLSX from 'xlsx'
 import { fechaComoDbDate, venuePeriodRange } from '@/services/dashboard/staffPay/periodos'
-import { createClassSession, updateClassSession } from '@/services/dashboard/classSession.dashboard.service'
+import { cancelClassSession, createClassSession, updateClassSession } from '@/services/dashboard/classSession.dashboard.service'
 import { pagoDeClase } from '@/services/dashboard/staffPay/ajustesClase.service'
-import { diferenciasDeClase } from '@/services/dashboard/staffPay/diferencias.service'
+import { diferenciasDeClase, diferenciasDelPeriodo } from '@/services/dashboard/staffPay/diferencias.service'
+import { liquidarDiferencia, previewLiquidacion } from '@/services/dashboard/staffPay/liquidacion.service'
 import * as staffPayController from '@/controllers/dashboard/staffPay.dashboard.controller'
+import { registerStaffPayTools } from '@/mcp/tools/staffPay'
+import type { McpScope } from '@/mcp/scope'
 import { borrarMundo, clase, confirmadas, crearMundo, Mundo, periodoCerrado, tablaMindform, TZ } from './_mundo'
 
 const AHORA = new Date('2026-09-02T12:00:00Z')
@@ -484,6 +489,23 @@ const cerrarAgosto = async () => {
   })
 }
 
+/**
+ * La herramienta REAL `staff_service_pay_differences` del MCP sobre el servicio y la base reales (D5-fix F2): es lo que el
+ * agente le repite al dueño. La prueba unitaria del MCP simula el servicio, así que no ve de dónde sale la causa.
+ */
+const diferenciasDelMcp = async (periodId: string) => {
+  const herramientas = new Map<string, (a: Record<string, unknown>, e: unknown) => Promise<{ content: Array<{ text: string }> }>>()
+  const scope = {
+    staffId: m.owner,
+    activeOrg: m.orgId,
+    allowedVenueIds: [m.venueId],
+    perVenueAccess: new Map([[m.venueId, { role: 'OWNER', corePermissions: ['staffpay:read'] }]]),
+  } as unknown as McpScope
+  registerStaffPayTools({ tool: (...a: unknown[]) => herramientas.set(a[0] as string, a[a.length - 1] as never) } as never, scope)
+  const r = await herramientas.get('staff_service_pay_differences')!({ venueId: m.venueId, periodId }, {})
+  return JSON.parse(r.content[0].text)
+}
+
 describe('el motivo queda en lo congelado y en el recibo (spec fase 3 §6.6)', () => {
   const recibo = () => reciboDePersona({ userId: m.owner, venueId: m.venueId, staffId: m.ana, fecha: '2026-08-15', limit: 50 })
   const ESPERADOS = ['Reformer · Cancelada 1 h antes: se paga el sueldo base', 'Reformer · Suplencia avisada 2 h antes: +$100']
@@ -626,7 +648,7 @@ describe('la tarjeta y las diferencias dicen por qué (spec fase 3 §6.6)', () =
     })
   })
 
-  it('cancelar tarde una clase ya cerrada deja la diferencia hasta el sueldo base, con su motivo', async () => {
+  it('cancelar tarde una clase ya cerrada deja la diferencia hasta el sueldo base, con su motivo (sigue CANCELADA: D5-fix F2)', async () => {
     await activar()
     await prender()
     const id = await clase(m, {
@@ -636,9 +658,10 @@ describe('la tarjeta y las diferencias dicen por qué (spec fase 3 §6.6)', () =
       originalStaffId: m.ana,
       staffAssignedAt: menos(DIA(4), 48 * H),
     })
-    await cerrarAgosto()
-    // Después del cierre se registra que se canceló 1 h antes de empezar (la versión anclada pide menos de 2 h).
-    await prisma.classSession.update({ where: { id }, data: { status: 'CANCELLED', cancelledAt: new Date(menos(DIA(4), H)) } })
+    const { periodId } = await cerrarAgosto()
+    // Se cancela DESPUÉS del cierre, con la estampa real (ya había empezado: 0 h de aviso; la versión anclada pide menos de
+    // 2 h). Antes del D5-fix la prueba fechaba la cancelación antes del cierre, lo que ningún camino de src/ puede hacer.
+    await cancelClassSession(m.venueId, id, m.owner)
     const { filas } = await diferenciasDeClase(prisma, { venueId: m.venueId, classSessionId: id }, { ahora: AHORA })
     expect(filas).toHaveLength(1)
     expect(filas[0]).toMatchObject({
@@ -647,8 +670,16 @@ describe('la tarjeta y las diferencias dicen por qué (spec fase 3 §6.6)', () =
       congelado: '570.00',
       pendiente: '-320.00',
       causa: 'CANCELADA',
-      regla: { tipo: 'CANCELACION_TARDIA', horas: 1 },
+      regla: { tipo: 'CANCELACION_TARDIA', horas: 0 },
     })
+    // Y el MCP lo dice con su texto, porque esta vez la cancelación sí fue después del cierre.
+    expect((await diferenciasDelMcp(periodId)).items).toEqual([
+      expect.objectContaining({
+        classSessionId: id,
+        pendiente: '-320.00',
+        causa: 'Clase cancelada después del cierre · Cancelada menos de 1 h antes: se paga el sueldo base',
+      }),
+    ])
     expect(await pagoDeClase(m.venueId, id)).toMatchObject({
       estado: 'OK',
       monto: '250.00',
@@ -690,7 +721,8 @@ describe('la tarjeta y las diferencias dicen por qué (spec fase 3 §6.6)', () =
       staffAssignedAt: menos(DIA(4), 48 * H),
     })
     await cerrarAgosto()
-    await prisma.classSession.update({ where: { id }, data: { status: 'CANCELLED', cancelledAt: new Date(menos(DIA(4), H)) } })
+    // Cancelada después del cierre con la estampa real (D5-fix F2: así sigue siendo CANCELADA), ya empezada: 0 h de aviso.
+    await cancelClassSession(m.venueId, id, m.owner)
     await prisma.classSessionPayState.update({ where: { classSessionId: id }, data: { payCountOverride: 8, overrideReason: 'Corrección' } })
     expect(await pagoDeClase(m.venueId, id)).toMatchObject({
       estado: 'OK',
@@ -698,7 +730,7 @@ describe('la tarjeta y las diferencias dicen por qué (spec fase 3 §6.6)', () =
       conteo: 0,
       conteoCalculado: 0,
       ajuste: { payCountOverride: 8 },
-      regla: { tipo: 'CANCELACION_TARDIA', horas: 1 },
+      regla: { tipo: 'CANCELACION_TARDIA', horas: 0 },
     })
     const { filas } = await diferenciasDeClase(prisma, { venueId: m.venueId, classSessionId: id }, { ahora: AHORA })
     expect(filas).toHaveLength(1)
@@ -708,7 +740,226 @@ describe('la tarjeta y las diferencias dicen por qué (spec fase 3 §6.6)', () =
       conteo: 0,
       conteoCongelado: 8,
       causa: 'CANCELADA',
-      regla: { tipo: 'CANCELACION_TARDIA', horas: 1 },
+      regla: { tipo: 'CANCELACION_TARDIA', horas: 0 },
     })
+  })
+})
+
+describe('auditoría de Codex del Bloque D (D5-fix)', () => {
+  // Codex D-1 (2026, CDMX): una clase que cruza la medianoche del 30 de septiembre (termina a las 00:20 del 1 de octubre),
+  // cancelada a las 23:00 (30 min de aviso; la regla pide menos de 2 h), y el cierre de septiembre a las 00:05.
+  const INICIO_SEP = '2026-09-30T23:30:00-06:00'
+  const CANCELADA_SEP = '2026-09-30T23:00:00-06:00'
+  const CIERRE_SEP = new Date('2026-10-01T00:05:00-06:00')
+  const cerrarSeptiembre = async () => {
+    const pv = await previewCierre({ userId: m.owner, venueId: m.venueId, fecha: '2026-09-15', ahora: CIERRE_SEP })
+    const r = await cerrarPeriodo({
+      userId: m.owner,
+      venueId: m.venueId,
+      fecha: '2026-09-15',
+      ahora: CIERRE_SEP,
+      huellaEsperada: pv.huella,
+      confirmarHuerfanas: true,
+    })
+    return { pv, r }
+  }
+
+  it('F1 (Codex): una cancelada tarde cuyo horario termina DESPUÉS del cierre entra al cierre por $250 y queda anclada; la huella del preview es la del cierre', async () => {
+    await activar()
+    await prender()
+    const id = await clase(m, {
+      staffId: m.ana,
+      inicioIso: INICIO_SEP,
+      reservas: confirmadas(8),
+      status: 'CANCELLED',
+      cancelledAt: CANCELADA_SEP,
+    })
+    const { pv, r } = await cerrarSeptiembre()
+    expect(pv).toMatchObject({ puedeCerrar: true, bloqueos: [], clases: 1, personas: 1, totalServicios: '250.00', total: '250.00' })
+    expect(r).toMatchObject({ yaCerrado: false, personas: 1, total: '250.00', huella: pv.huella })
+    const linea = await prisma.serviceEarning.findFirstOrThrow({ where: { organizationId: m.orgId, concept: 'SERVICE', sourceId: id } })
+    expect([linea.staffId, linea.amount.toFixed(2), linea.count, linea.periodId]).toEqual([m.ana, '250.00', 0, r.periodId])
+    expect(linea.descriptor).toMatchObject({ regla: { tipo: 'CANCELACION_TARDIA', horas: 0 } })
+    expect(await prisma.classSessionPayState.findUnique({ where: { classSessionId: id } })).toMatchObject({
+      originPeriodId: r.periodId,
+      valuationVersionId: versionId,
+    })
+    // La tarjeta, todavía antes de las 00:20: congelada en $250 y nada pendiente que buscar.
+    expect(await pagoDeClase(m.venueId, id, prisma, { ahora: CIERRE_SEP })).toMatchObject({
+      estado: 'OK',
+      monto: '250.00',
+      anclada: true,
+      llegoTarde: false,
+      periodoOrigen: { id: r.periodId, estado: 'CLOSED' },
+      regla: { tipo: 'CANCELACION_TARDIA', horas: 0 },
+    })
+  })
+
+  it('F1: una cancelada tarde de un periodo YA cerrado, creada después del cierre: la tarjeta avisa antes y después de su horario, la diferencia es +$250 y se liquida una vez', async () => {
+    await activar()
+    await prender()
+    const { periodId } = await cerrarAgosto()
+    const id = await clase(m, { staffId: m.ana, inicioIso: DIA(20) })
+    // La estampa real: después del cierre y ya empezada (0 h de aviso).
+    await cancelClassSession(m.venueId, id, m.owner)
+    const durante = new Date(new Date(DIA(20)).getTime() + 20 * 60_000)
+    const hoy = await pagoDeClase(m.venueId, id)
+    expect(hoy).toMatchObject({
+      estado: 'OK',
+      monto: '250.00',
+      conteo: 0,
+      anclada: false,
+      llegoTarde: true,
+      // Sin ancla no hay periodo de origen en la tarjeta (es el de su ancla); el cerrado lo da la diferencia.
+      periodoOrigen: null,
+      regla: { tipo: 'CANCELACION_TARDIA', horas: 0 },
+    })
+    expect(await pagoDeClase(m.venueId, id, prisma, { ahora: durante })).toEqual(hoy)
+    for (const ahora of [durante, undefined]) {
+      const { origen, filas } = await diferenciasDeClase(prisma, { venueId: m.venueId, classSessionId: id }, { ahora })
+      expect(origen?.id).toBe(periodId)
+      expect(filas).toEqual([
+        expect.objectContaining({ persona: m.ana, corresponde: '250.00', congelado: '0.00', pendiente: '250.00', causa: 'CANCELADA' }),
+      ])
+    }
+    const pv = await previewLiquidacion({ userId: m.owner, venueId: m.venueId, classSessionId: id })
+    expect(pv).toMatchObject({ periodoOrigen: { id: periodId }, total: '250.00', bloqueada: false })
+    const liquidar = () =>
+      liquidarDiferencia({
+        userId: m.owner,
+        venueId: m.venueId,
+        classSessionId: id,
+        periodoOrigenId: periodId,
+        huellaEsperada: pv.huella,
+        solicitudId: 'd5fix-cancelada-tarde',
+      })
+    expect(await liquidar()).toEqual({ lineas: [{ staffId: m.ana, amount: '250.00' }], yaLiquidada: false })
+    expect(await liquidar()).toEqual({ lineas: [{ staffId: m.ana, amount: '250.00' }], yaLiquidada: true })
+    const lineas = await prisma.serviceEarning.findMany({
+      where: { organizationId: m.orgId, sourceId: id },
+      select: { concept: true, amount: true },
+      take: 10,
+    })
+    expect(lineas.map(e => [e.concept, e.amount.toFixed(2)])).toEqual([['RECONCILE', '250.00']])
+    expect((await diferenciasDeClase(prisma, { venueId: m.venueId, classSessionId: id })).filas).toEqual([
+      expect.objectContaining({ pendiente: '0.00', causa: null }),
+    ])
+    expect(await pagoDeClase(m.venueId, id)).toMatchObject({ anclada: true, llegoTarde: false, periodoOrigen: { id: periodId } })
+  })
+
+  it.each([
+    ['con aviso suficiente', true, '2026-09-30T21:00:00-06:00'],
+    ['sin la regla', false, CANCELADA_SEP],
+  ])(
+    'F1: una cancelada que NO se paga (%s) sigue fuera: CANCELADA en la tarjeta, sin diferencia y EXCLUIDA en $0',
+    async (_caso, reglas, cancelledAt) => {
+      await activar()
+      if (reglas) await prender()
+      const id = await clase(m, { staffId: m.ana, inicioIso: INICIO_SEP, reservas: confirmadas(8), status: 'CANCELLED', cancelledAt })
+      const { pv, r } = await cerrarSeptiembre()
+      expect(pv).toMatchObject({ puedeCerrar: true, clases: 0, totalServicios: '0.00', total: '0.00' })
+      expect(r.total).toBe('0.00')
+      expect(await prisma.serviceEarning.count({ where: { organizationId: m.orgId, sourceId: id } })).toBe(0)
+      for (const ahora of [CIERRE_SEP, undefined]) {
+        expect(await pagoDeClase(m.venueId, id, prisma, { ahora })).toMatchObject({
+          estado: 'CANCELADA',
+          monto: null,
+          anclada: false,
+          llegoTarde: false,
+        })
+        const { origen, filas } = await diferenciasDeClase(prisma, { venueId: m.venueId, classSessionId: id }, { ahora })
+        expect(origen?.id).toBe(r.periodId)
+        expect(filas).toEqual([
+          expect.objectContaining({ persona: m.ana, estadoClase: 'EXCLUIDA', corresponde: '0.00', pendiente: '0.00', causa: null }),
+        ])
+      }
+      const lista = await diferenciasDelPeriodo(
+        { userId: m.owner, venueId: m.venueId, periodId: r.periodId, limit: 50 },
+        { ahora: CIERRE_SEP },
+      )
+      expect(lista.items).toEqual([])
+    },
+  )
+
+  it('F1: la tarjeta de una cancelada tarde es la misma antes de empezar, a media clase y después de su horario', async () => {
+    await prender()
+    const id = await clase(m, {
+      staffId: m.ana,
+      inicioIso: INICIO_SEP,
+      reservas: confirmadas(8),
+      status: 'CANCELLED',
+      cancelledAt: CANCELADA_SEP,
+    })
+    const tarjetas = []
+    for (const iso of ['2026-09-30T23:10:00-06:00', '2026-09-30T23:45:00-06:00', '2026-10-01T02:00:00-06:00'])
+      tarjetas.push(await pagoDeClase(m.venueId, id, prisma, { ahora: new Date(iso) }))
+    const [antes, durante, despues] = tarjetas
+    expect(despues).toMatchObject({
+      estado: 'OK',
+      monto: '250.00',
+      conteo: 0,
+      llegoTarde: false,
+      periodoOrigen: null,
+      regla: { tipo: 'CANCELACION_TARDIA', horas: 0 },
+    })
+    expect(antes).toEqual(despues)
+    expect(durante).toEqual(despues)
+  })
+
+  it('F1 regresión: una clase NO cancelada que no ha terminado sigue bloqueando el cierre y es NO_TERMINADA; la cancelada tarde no suma al bloqueo', async () => {
+    await activar()
+    await prender()
+    const enCurso = await clase(m, { staffId: m.ana, inicioIso: INICIO_SEP, reservas: confirmadas(8) })
+    await clase(m, { staffId: m.sofia, inicioIso: INICIO_SEP, status: 'CANCELLED', cancelledAt: CANCELADA_SEP })
+    const pv = await previewCierre({ userId: m.owner, venueId: m.venueId, fecha: '2026-09-15', ahora: CIERRE_SEP })
+    expect(pv).toMatchObject({ puedeCerrar: false, bloqueos: [{ codigo: 'CLASES_EN_CURSO', n: 1 }] })
+    await expect(
+      cerrarPeriodo({
+        userId: m.owner,
+        venueId: m.venueId,
+        fecha: '2026-09-15',
+        ahora: CIERRE_SEP,
+        huellaEsperada: pv.huella,
+        confirmarHuerfanas: true,
+      }),
+    ).rejects.toMatchObject({ code: 'CLASES_EN_CURSO' })
+    expect(await pagoDeClase(m.venueId, enCurso, prisma, { ahora: CIERRE_SEP })).toMatchObject({
+      estado: 'NO_TERMINADA',
+      monto: null,
+      llegoTarde: false,
+    })
+  })
+
+  it('F2 (Codex): cancelada tarde ANTES del cierre, congelada en $250 y acordada después en $500: la causa es MONTO y el MCP no inventa una cancelación posterior', async () => {
+    await activar()
+    await prender()
+    const id = await clase(m, {
+      staffId: m.ana,
+      inicioIso: DIA(5),
+      reservas: confirmadas(8),
+      status: 'CANCELLED',
+      cancelledAt: menos(DIA(5), H),
+    })
+    const { periodId } = await cerrarAgosto()
+    const congelada = await prisma.serviceEarning.findFirstOrThrow({ where: { organizationId: m.orgId, concept: 'SERVICE', sourceId: id } })
+    expect(congelada.amount.toFixed(2)).toBe('250.00')
+    await prisma.classSessionPayState.update({
+      where: { classSessionId: id },
+      data: { payAmountOverride: new Prisma.Decimal(500), overrideReason: 'Acordado después del cierre' },
+    })
+    const { filas } = await diferenciasDeClase(prisma, { venueId: m.venueId, classSessionId: id })
+    expect(filas).toEqual([
+      expect.objectContaining({
+        persona: m.ana,
+        corresponde: '500.00',
+        congelado: '250.00',
+        pendiente: '250.00',
+        regla: null,
+        causa: 'MONTO',
+      }),
+    ])
+    expect((await diferenciasDelMcp(periodId)).items).toEqual([
+      expect.objectContaining({ classSessionId: id, pendiente: '250.00', causa: 'Monto de la clase corregido' }),
+    ])
   })
 })

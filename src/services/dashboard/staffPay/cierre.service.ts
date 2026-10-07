@@ -194,8 +194,9 @@ async function alcanceDe(tx: Tx, p: ServicePayPeriod): Promise<Alcance> {
 
 /**
  * Modo 'vivo' a propósito, en el preview y en el cierre: un periodo OPEN no tiene clases ancladas (sólo se ancla al
- * cerrar o al liquidar contra un periodo ya cerrado), y el preview puede no tener `periodId`. Una clase CANCELADA no se
- * valora ni se ancla: si después se reactiva, aparece como diferencia de su periodo (spec §6.4).
+ * cerrar o al liquidar contra un periodo ya cerrado), y el preview puede no tener `periodId`. Una clase CANCELADA que no se
+ * paga no se valora ni se ancla: si después se reactiva, aparece como diferencia de su periodo (spec §6.4). Una cancelada
+ * tarde sí, aunque su horario termine después del cierre: terminó al cancelarse (D5-fix, Codex D-1).
  */
 const filtroDe = (a: Alcance, s: Sede, ahora: Date): FiltroValoracion => {
   const { from, to } = venuePeriodRange(a.periodo, s.tz)
@@ -210,6 +211,7 @@ async function bloqueosDe(db: Db, a: Alcance, ahora: Date): Promise<Bloqueo[]> {
   let excepciones = 0
   for (const s of a.sedes) {
     const f = filtroDe(a, s, ahora)
+    // Sin canceladas: una cancelada ya terminó (lo que paga no cambia), así que no hay que esperar su horario (D5-fix).
     enCurso += await db.classSession.count({
       where: { venueId: s.venueId, startsAt: { gte: f.desde, lt: f.hasta }, endsAt: { gt: ahora }, status: { not: 'CANCELLED' } },
     })

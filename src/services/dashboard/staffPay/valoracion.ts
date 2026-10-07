@@ -35,9 +35,10 @@ export interface FiltroValoracion {
   claseIds?: string[]
   staffId?: string
   /**
-   * 'vivo' (default): clases terminadas SIN ancla del rango (la fase 1, intacta).
+   * 'vivo' (default): clases terminadas SIN ancla del rango (la fase 1, intacta). Una cancelada está terminada desde que se
+   * canceló (D5-fix).
    * 'periodo': candidatas de un periodo (spec §6.4) — las ancladas en `periodId` por id, sin importar fecha ni estado,
-   * más las sin ancla del rango ya terminadas. Se valoran con su ancla; una cancelada vale $0 (EXCLUIDA).
+   * más las sin ancla del rango ya terminadas. Se valoran con su ancla; una cancelada que no se paga vale $0 (EXCLUIDA).
    */
   modo?: 'vivo' | 'periodo'
   periodId?: string
@@ -110,13 +111,16 @@ export function valoracionCte(f: FiltroValoracion): Prisma.Sql {
       (cs.status = 'CANCELLED') AS cancelada,
       cs."cancelledAt" AS cancelada_en, cs."originalStaffId" AS coach_original, cs."staffAssignedAt" AS asignada_en,
       ps."payCountOverride", ps."payAmountOverride", COALESCE(ps."payExcluded", false) AS excluida`
-  // Sin ancla, del rango de la sede ya terminadas (índice por sede + startsAt).
+  // Sin ancla, del rango de la sede ya terminadas (índice por sede + startsAt). Terminada = su horario pasó o está CANCELADA:
+  // una cancelada terminó al cancelarse, lo que paga ya no cambia (D5-fix, Codex D-1: una cancelada tarde que terminaba
+  // después del cierre quedaba fuera de él, sin devengo ni ancla). La misma regla en `origenDeClase` y en la tarjeta.
   const sinAnclaEnRango = (porEstado: Prisma.Sql) => Prisma.sql`
       SELECT ${columnas}
       FROM "ClassSession" cs
       LEFT JOIN "ClassSessionPayState" ps ON ps."classSessionId" = cs.id
       WHERE cs."venueId" = ${f.venueId}
-        AND cs."startsAt" >= ${utcTs(f.desde)} AND cs."startsAt" < ${utcTs(f.hasta)} AND cs."endsAt" <= ${utcTs(f.ahora)}
+        AND cs."startsAt" >= ${utcTs(f.desde)} AND cs."startsAt" < ${utcTs(f.hasta)}
+        AND (cs."endsAt" <= ${utcTs(f.ahora)} OR cs.status = 'CANCELLED')
         ${porEstado}
         AND ps."originPeriodId" IS NULL
         ${porClases}
