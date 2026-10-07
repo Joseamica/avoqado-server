@@ -9,6 +9,7 @@ import { prepararSede, reglasDeSede, SedePreparada } from './participacion'
 import { fechaComoDbDate, sumarDias, venuePeriodRange } from './periodos'
 import { Ventana, ventanasDeSedes } from './rangos'
 import { enUnaFoto } from './foto'
+import { zonasEnLaFoto } from './lectura'
 import { Participacion, valoracionCte } from './valoracion'
 
 type Db = Prisma.TransactionClient | typeof prisma
@@ -152,9 +153,14 @@ export async function vistaPreviaParticipacion(input: {
 
 async function calcular(
   tx: Db,
-  sede: SedePreparada,
+  preparada: SedePreparada,
   input: { sedeId: string; accion: 'activar' | 'desactivar'; fecha?: string; ahora?: Date },
 ): Promise<VistaPreviaParticipacion> {
+  // B14-fix F2 (Codex participación r1 #2): la sede se preparó ANTES de la foto; si un traslado la sacó de la organización
+  // entretanto, lo que vende ahora es de OTRA: «sede ajena» (409), nunca sus montos. La zona, también de la foto.
+  const zona = (await zonasEnLaFoto(tx, preparada.organizationId, [input.sedeId])).get(input.sedeId)
+  if (!zona) throw new ConflictError(`La sede ${preparada.nombre} ya no pertenece a esta organización`, 'SEDE_EN_OTRA_ORGANIZACION')
+  const sede = { ...preparada, tz: zona }
   const ahora = input.ahora ?? new Date()
   const hoy = reglasDeSede.hoyBajoCandado(sede.tz, ahora, undefined)
   const s = { organizationId: sede.organizationId, venueId: input.sedeId, tz: sede.tz }

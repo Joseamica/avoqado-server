@@ -75,6 +75,7 @@ const QUE_HACER_SEDE: Record<string, string> = {
     'Esas fechas se cruzan con días en que la sede ya estuvo activa (quizá cuando era de otra organización): elige otra fecha o pide ayuda a Avoqado.',
   CIERRE_EN_CURSO: 'Hay un cierre de periodo en curso: intenta de nuevo en un momento.',
   OPERACION_EN_CURSO: 'Otra operación está cambiando la sede o la organización: intenta de nuevo en un momento.',
+  SEDE_EN_OTRA_ORGANIZACION: 'La sede ya es de otra organización: aquí no se activa ni se desactiva; revisa la lista de sedes.',
 }
 const conQueHacer = (h: Herramientas, e: unknown) => {
   const code = (e as { code?: string })?.code

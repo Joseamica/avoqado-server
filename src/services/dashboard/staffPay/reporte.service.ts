@@ -1,11 +1,15 @@
 import { Prisma, ServicePayPeriod } from '@prisma/client'
 import prisma from '../../../utils/prismaClient'
 import { ConflictError } from '../../../errors/AppError'
-import { alcanceLegibleDelPeriodo, periodoQueContieneFecha } from './periodosGuardados'
+import { periodoQueContieneFecha } from './periodosGuardados'
 import { ClaseValorada, contarPorEstado, FiltroValoracion, valoracionCte, valorarClases } from './valoracion'
 import { dbDateComoFecha, hoyLocal, periodoQueContiene, PeriodoCanonico, venuePeriodRange } from './periodos'
 import { AlcanceBarrido, nombreGuardadoSql, PERSONA_DADA_DE_BAJA, sqlVentasDelPeriodo } from './fuentesVenta'
 import { rangosConParticipacion } from './rangos'
+import { alcanceEnLaFoto, LecturaPreparada, prepararLectura, zonasEnLaFoto } from './lectura'
+import { enUnaFoto } from './foto'
+
+type Db = Prisma.TransactionClient | typeof prisma
 
 /** Los campos del ancla (A4) no salen en el desglose: la pantalla no los usa y `payAmountOverride` saldría sin formato. */
 type CamposDelAncla = 'fechaValoracion' | 'periodoOrigen' | 'cancelada' | 'payCountOverride' | 'payAmountOverride' | 'excluida'
@@ -33,46 +37,50 @@ interface Contexto {
   startDate: string | null
 }
 
+/** Quién pregunta y por qué sedes (`soloSedes`: el alcance de una conexión MCP, B14-fix F1). */
+type EntradaReporte = { userId: string; venueId: string; fecha?: string; sede?: string; soloSedes?: readonly string[] }
+/** Lo resuelto con el cliente GLOBAL antes de leer (`prepararLectura`) y el día que se pidió (o «hoy» de quien pregunta). */
+type ReportePreparado = { dia: string; lectura: LecturaPreparada }
+
+async function preparar(input: EntradaReporte): Promise<ReportePreparado> {
+  const v = await prisma.venue.findUniqueOrThrow({ where: { id: input.venueId }, select: { organizationId: true, timezone: true } })
+  const dia = input.fecha ?? hoyLocal(v.timezone || 'America/Mexico_City')
+  return { dia, lectura: await prepararLectura({ ...input, organizationId: v.organizationId, fecha: dia }) }
+}
+
 /**
  * Alcance del reporte: las sedes con el módulo que el usuario puede leer (spec §9.2) y, si pidió `sede` (filtro de sede,
  * spec §7.3), sólo la intersección con esa sede. Una sede no legible o sin el módulo da alcance VACÍO, nunca otras sedes,
- * y entonces `parcial` es true: el usuario no está viendo lo que pidió.
+ * y entonces `parcial` es true: el usuario no está viendo lo que pidió. 🔴 El MISMO alcance legible que el recibo (Codex R1-1,
+ * R3-Nuevo 2; `alcanceEnLaFoto`): CERRADO = su alcance guardado; ABIERTO = guardadas ∪ con módulo ∪ con ventana.
+ * B14-fix: con `db` = la foto del reporte (F3) se lee TODO del mismo instante —periodicidad, periodo, sedes y sus zonas— y
+ * una sede que ya no es de la organización no entra (F2). Permisos y módulos llegan resueltos (`preparar`).
  */
-async function contexto(userId: string, venueId: string, fecha?: string, sede?: string): Promise<Contexto> {
-  const v = await prisma.venue.findUniqueOrThrow({
-    where: { id: venueId },
-    select: {
-      organizationId: true,
-      timezone: true,
-      organization: { select: { servicePayPeriodicity: true, staffPayStartDate: true } },
-    },
+async function contextoEn(db: Db, p: ReportePreparado, sede?: string): Promise<Contexto> {
+  const organizationId = p.lectura.organizationId
+  const org = await db.organization.findUniqueOrThrow({
+    where: { id: organizationId },
+    select: { servicePayPeriodicity: true, staffPayStartDate: true },
   })
-  const tzBase = v.timezone || 'America/Mexico_City'
-  const periodicidad = v.organization.servicePayPeriodicity
-  const canonico = periodoQueContiene(fecha ?? hoyLocal(tzBase), periodicidad)
-  const fila = await periodoQueContieneFecha(prisma, v.organizationId, canonico.start)
+  const periodicidad = org.servicePayPeriodicity
+  const canonico = periodoQueContiene(p.dia, periodicidad)
+  const fila = await periodoQueContieneFecha(db, organizationId, canonico.start)
   const periodo: PeriodoCanonico = fila ? { start: dbDateComoFecha(fila.periodStart), end: dbDateComoFecha(fila.periodEnd) } : canonico
-  // 🔴 El MISMO alcance legible que el recibo (Codex R1-1, R3-Nuevo 2): CERRADO = su alcance guardado; ABIERTO = sus
-  // sedes guardadas ∪ las que hoy tienen el módulo (una diferencia liquidada desde una sede que ya lo apagó NO
-  // desaparece). Filtrado por permiso y por `sede`.
-  const startDate = v.organization.staffPayStartDate ? dbDateComoFecha(v.organization.staffPayStartDate) : null
-  const { venueIds, parcial } = await alcanceLegibleDelPeriodo(userId, v.organizationId, fila, sede, { periodo, startDate })
-  const venues = venueIds.length
-    ? await prisma.venue.findMany({
-        where: { id: { in: venueIds }, organizationId: v.organizationId },
-        select: { id: true, timezone: true },
-        take: venueIds.length,
-      })
-    : []
-  const tzDe = new Map(venues.map(x => [x.id, x.timezone || 'America/Mexico_City']))
+  const startDate = org.staffPayStartDate ? dbDateComoFecha(org.staffPayStartDate) : null
+  const legible = alcanceEnLaFoto(p.lectura, fila, periodo, startDate, sede)
+  const tzDe = await zonasEnLaFoto(db, organizationId, legible.venueIds)
+  const venueIds = legible.venueIds.filter(v => tzDe.has(v))
   const ahora = new Date()
   const filtros = venueIds.map(id => {
     const tz = tzDe.get(id)!
     const { from, to } = venuePeriodRange(periodo, tz)
-    return { venueId: id, organizationId: v.organizationId, tz, desde: from, hasta: to, ahora }
+    return { venueId: id, organizationId, tz, desde: from, hasta: to, ahora }
   })
-  return { organizationId: v.organizationId, periodicidad, periodo, venueIds, parcial, filtros, fila, startDate }
+  return { organizationId, periodicidad, periodo, venueIds, parcial: legible.parcial, filtros, fila, startDate }
 }
+
+/** Con el cliente global, sin foto: el desglose en vivo, las excepciones, las huérfanas y el `EXPLAIN` de A13. */
+const contexto = async (input: EntradaReporte) => contextoEn(prisma, await preparar(input), input.sede)
 
 /**
  * La fuente de personas del periodo ABIERTO, en UNA consulta (Codex R2-R1-12): la valoración en vivo de cada sede (cada
@@ -80,7 +88,7 @@ async function contexto(userId: string, venueId: string, fecha?: string, sede?: 
  * y propinas que hoy entrarían al cierre (las MISMAS reglas que el cierre, B3), con `UNION ALL`. Cada rama trae
  * `comisiones` y `propinas` aparte (0 donde no aplica). Devuelve null si no hay ninguna sede legible.
  */
-async function fuentePorPersona(c: Contexto): Promise<Prisma.Sql | null> {
+async function fuentePorPersona(db: Db, c: Contexto): Promise<Prisma.Sql | null> {
   const partes = c.filtros.map(
     f => Prisma.sql`
       SELECT vv."staffId", vv."staffName", vv."venueId", 1 AS clases, vv.conteo AS lugares, vv.monto, 0::numeric AS ajuste,
@@ -107,7 +115,7 @@ async function fuentePorPersona(c: Contexto): Promise<Prisma.Sql | null> {
           startDate: c.startDate,
         }
       : null
-  const ventas = a ? sqlVentasDelPeriodo(a, await rangosConParticipacion(prisma, a)) : null
+  const ventas = a ? sqlVentasDelPeriodo(a, await rangosConParticipacion(db, a)) : null
   if (ventas) {
     partes.push(Prisma.sql`
       SELECT v."staffId", v.persona AS "staffName", v."venueId", 0 AS clases, 0 AS lugares, v.monto, 0::numeric AS ajuste,
@@ -192,43 +200,48 @@ const sqlPaginaCerrado = (c: Contexto, offset: number, limit: number) => Prisma.
  * A13 (Codex R3-R1-12). null si no hay sedes legibles.
  */
 export async function consultasDelReporte(input: { userId: string; venueId: string; fecha?: string; offset: number; limit: number }) {
-  const c = await contexto(input.userId, input.venueId, input.fecha)
+  const c = await contexto(input)
   if (c.fila?.status === 'CLOSED') {
     return c.venueIds.length ? { cuenta: sqlTarjetasCerrado(c), pagina: sqlPaginaCerrado(c, input.offset, input.limit) } : null
   }
-  const fuente = await fuentePorPersona(c)
+  const fuente = await fuentePorPersona(prisma, c)
   return fuente ? { cuenta: sqlCuentaAbierto(fuente), pagina: sqlPaginaAbierto(c, fuente, input.offset, input.limit) } : null
 }
 
 const pesosDe = (d: Prisma.Decimal | null | undefined) => new Prisma.Decimal(d ?? 0).toFixed(2)
 
-export async function reportePeriodo(input: {
-  userId: string
-  venueId: string
-  fecha?: string
-  sede?: string
-  offset: number
-  limit: number
-}) {
-  const c = await contexto(input.userId, input.venueId, input.fecha, input.sede)
+/**
+ * B14-fix F3 (Codex participación r1 #3): el reporte ENTERO —periodo, alcance, contadores, rangos, total, personas, página y
+ * huérfanas— en UNA foto (`enUnaFoto`: su tope de 60 s, también en la base). Antes leía con el cliente global y una
+ * desactivación que confirmaba entre los rangos de ventas y la valoración de clases dejaba un total imposible ($100 de una
+ * comisión sin la clase de $500 del mismo día: ni el $600 de antes ni el $0 de después). Permisos y módulos, antes.
+ */
+export async function reportePeriodo(input: EntradaReporte & { offset: number; limit: number }) {
+  const p = await preparar(input)
   // El MCP llama sin la validación de la ruta: el offset se acota aquí también.
   const offset = Math.max(0, Math.trunc(input.offset) || 0)
   const limit = Math.min(Math.max(input.limit, 1), 100)
-  if (c.fila?.status === 'CLOSED') return reporteCerrado(c, offset, limit)
+  return enUnaFoto(async tx => {
+    const c = await contextoEn(tx, p, input.sede)
+    return c.fila?.status === 'CLOSED' ? reporteCerrado(tx, c, offset, limit) : reporteAbierto(tx, c, offset, limit)
+  })
+}
+
+async function reporteAbierto(db: Db, c: Contexto, offset: number, limit: number) {
   // Contadores de clases: agregados en la base (fase 1), sede por sede. El dinero sale de `cuenta`, abajo.
   let clases = 0,
     excepciones = 0,
     excluidas = 0
   for (const f of c.filtros) {
-    const e = await contarPorEstado(prisma, f)
+    const e = await contarPorEstado(db, f)
     clases += e.ok
     excepciones += e.excepciones
     excluidas += e.excluidas
   }
-  const fuente = await fuentePorPersona(c)
+  const fuente = await fuentePorPersona(db, c)
   // Total de personas y de dinero: un COUNT(DISTINCT) y un SUM aparte (Codex R2-R1-12).
   const [cuenta] = fuente
-    ? await prisma.$queryRaw<
+    ? await db.$queryRaw<
         Array<{ personas: number; total: Prisma.Decimal | null; comisiones: Prisma.Decimal | null; propinas: Prisma.Decimal | null }>
       >(sqlCuentaAbierto(fuente))
     : [{ personas: 0, total: null, comisiones: null, propinas: null }]
@@ -236,7 +249,7 @@ export async function reportePeriodo(input: {
   // La página: agrupada por persona, ordenada por nombre e id, con OFFSET/LIMIT en SQL; el nivel vigente al final del
   // periodo sólo para las personas de ESTA página.
   const pagina = fuente
-    ? await prisma.$queryRaw<
+    ? await db.$queryRaw<
         Array<{
           staffId: string
           staffName: string | null
@@ -280,11 +293,11 @@ export async function reportePeriodo(input: {
       propinas: pesosDe(cuenta.propinas),
     },
     personas: { items, total: cuenta.personas, offset, limit },
-    huerfanas: await contarHuerfanas(c),
+    huerfanas: await contarHuerfanas(db, c),
   }
 }
 
-async function reporteCerrado(c: Contexto, offset: number, limit: number) {
+async function reporteCerrado(db: Db, c: Contexto, offset: number, limit: number) {
   const periodo = { ...c.periodo, periodicidad: c.periodicidad, id: c.fila!.id, estado: 'CLOSED' as const }
   const vacio = { periodo, parcial: c.parcial, venueIds: c.venueIds, truncado: false, huerfanas: 0 }
   if (!c.venueIds.length) {
@@ -294,7 +307,7 @@ async function reporteCerrado(c: Contexto, offset: number, limit: number) {
       personas: { items: [], total: 0, offset, limit },
     }
   }
-  const [t] = await prisma.$queryRaw<
+  const [t] = await db.$queryRaw<
     Array<{
       total: Prisma.Decimal | null
       clases: number
@@ -304,7 +317,7 @@ async function reporteCerrado(c: Contexto, offset: number, limit: number) {
       pagadas: number
     }>
   >(sqlTarjetasCerrado(c))
-  const filas = await prisma.$queryRaw<
+  const filas = await db.$queryRaw<
     Array<{
       staffId: string
       staffName: string | null
@@ -385,34 +398,18 @@ async function recorrer(
 }
 
 /** Codex R2-R1-21: lo EN VIVO (desglose, excepciones, huérfanas) excluye las clases ancladas: de un periodo cerrado mentiría. */
-async function contextoEnVivo(userId: string, venueId: string, fecha?: string, sede?: string): Promise<Contexto> {
-  const c = await contexto(userId, venueId, fecha, sede)
+async function contextoEnVivo(input: EntradaReporte): Promise<Contexto> {
+  const c = await contexto(input)
   if (c.fila?.status === 'CLOSED') throw new ConflictError('Este periodo ya se cerró: consulta el recibo.', 'PERIODO_CERRADO')
   return c
 }
 
-export async function detallePersona(input: {
-  userId: string
-  venueId: string
-  staffId: string
-  fecha?: string
-  sede?: string
-  despuesDe?: string
-  limit: number
-}) {
-  const c = await contextoEnVivo(input.userId, input.venueId, input.fecha, input.sede)
-  return recorrer(c, { staffId: input.staffId }, input.despuesDe, input.limit)
+export async function detallePersona(input: EntradaReporte & { staffId: string; despuesDe?: string; limit: number }) {
+  return recorrer(await contextoEnVivo(input), { staffId: input.staffId }, input.despuesDe, input.limit)
 }
 
-export async function excepcionesPeriodo(input: {
-  userId: string
-  venueId: string
-  fecha?: string
-  sede?: string
-  despuesDe?: string
-  limit: number
-}) {
-  return recorrer(await contextoEnVivo(input.userId, input.venueId, input.fecha, input.sede), {}, input.despuesDe, input.limit, true)
+export async function excepcionesPeriodo(input: EntradaReporte & { despuesDe?: string; limit: number }) {
+  return recorrer(await contextoEnVivo(input), {}, input.despuesDe, input.limit, true)
 }
 
 function whereHuerfanas(c: Contexto): Prisma.ReservationWhereInput {
@@ -424,20 +421,13 @@ function whereHuerfanas(c: Contexto): Prisma.ReservationWhereInput {
   }
 }
 
-async function contarHuerfanas(c: Contexto): Promise<number> {
+async function contarHuerfanas(db: Db, c: Contexto): Promise<number> {
   if (!c.filtros.length) return 0
-  return prisma.reservation.count({ where: whereHuerfanas(c) })
+  return db.reservation.count({ where: whereHuerfanas(c) })
 }
 
-export async function huerfanasPeriodo(input: {
-  userId: string
-  venueId: string
-  fecha?: string
-  sede?: string
-  offset: number
-  limit: number
-}) {
-  const c = await contextoEnVivo(input.userId, input.venueId, input.fecha, input.sede)
+export async function huerfanasPeriodo(input: EntradaReporte & { offset: number; limit: number }) {
+  const c = await contextoEnVivo(input)
   if (!c.filtros.length) return { items: [], total: 0 }
   const where = whereHuerfanas(c)
   const [rows, total] = await Promise.all([

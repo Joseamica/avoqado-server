@@ -49,13 +49,13 @@ export interface FiltroValoracion {
    * reporte y recibo): antes de `staffPayStartDate` (o sin activar) la regla D2 de la fase 2; desde el inicio, la sede activa
    * (`StaffPayVenueWindow`) en la fecha local de la clase.
    * 'fuera': exactamente las que 'real' deja fuera; sólo en modo vivo (las ancladas siempre entran). La usan la tarjeta
-   * (`FUERA_DEL_SOBRE`) y la vista previa de una sede.
-   * 'ninguna': sin filtro (lo de antes de B11); ningún camino de producción la pasa.
+   * (`FUERA_DEL_SOBRE`) y la vista previa de una sede. (B14-fix F6: ya no hay un modo sin filtro; las pruebas contrastan
+   * 'real' y 'fuera' contra los montos conocidos de su fixture.)
    */
   participacion?: Participacion
 }
 
-export type Participacion = 'ninguna' | 'real' | 'fuera'
+export type Participacion = 'real' | 'fuera'
 
 export interface ClaseValorada {
   classSessionId: string
@@ -127,7 +127,7 @@ export function valoracionCte(f: FiltroValoracion): Prisma.Sql {
       ps."payCountOverride", ps."payAmountOverride", COALESCE(ps."payExcluded", false) AS excluida`
   // Participación por sede (B10-B11, r4.1), sobre la fecha civil LOCAL de la clase (la de `fecha_local`): antes del inicio de
   // pago al personal (o sin activar) entra como en la fase 2 (regla D2); desde el inicio, sólo si su sede está activa ESE día
-  // en ESTA organización. 'fuera' es la negación exacta; 'ninguna', sin filtro. `fl` es una EXPRESIÓN de SQL
+  // en ESTA organización. 'fuera' es la negación exacta. `fl` es una EXPRESIÓN de SQL
   // (columna de la clase), no un `Date` atado: va a la izquierda para que la guarda de binds de fecha no la confunda con uno.
   const fl = Prisma.sql`(((cs."startsAt" AT TIME ZONE 'UTC') AT TIME ZONE ${f.tz}))::date`
   const participa = Prisma.sql`(
@@ -135,9 +135,7 @@ export function valoracionCte(f: FiltroValoracion): Prisma.Sql {
                       AND og."staffPayStartDate" IS NOT NULL AND ${fl} >= og."staffPayStartDate")
           OR EXISTS (SELECT 1 FROM "StaffPayVenueWindow" w WHERE w."organizationId" = ${f.organizationId}
                      AND w."venueId" = cs."venueId" AND w.desde <= ${fl} AND (w.hasta IS NULL OR w.hasta >= ${fl})))`
-  const participacion = f.participacion ?? 'real'
-  const porParticipacion =
-    participacion === 'real' ? Prisma.sql`AND ${participa}` : participacion === 'fuera' ? Prisma.sql`AND NOT ${participa}` : Prisma.empty
+  const porParticipacion = f.participacion === 'fuera' ? Prisma.sql`AND NOT ${participa}` : Prisma.sql`AND ${participa}`
   // Sin ancla, del rango de la sede ya terminadas (índice por sede + startsAt). Terminada = su horario pasó o está CANCELADA:
   // una cancelada terminó al cancelarse, lo que paga ya no cambia (D5-fix, Codex D-1: una cancelada tarde que terminaba
   // después del cierre quedaba fuera de él, sin devengo ni ancla). La misma regla en `origenDeClase` y en la tarjeta.

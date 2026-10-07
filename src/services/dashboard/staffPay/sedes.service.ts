@@ -7,6 +7,7 @@ import { ConflictError, NotFoundError } from '../../../errors/AppError'
 import { permisosPorSede, sedesConServicePay, TOPE_SEDES_CON_MODULO } from './acceso'
 import { estadoDeSede, EstadoSede, SituacionDeSede, situacionDeLasSedes } from './estadoSede'
 import { enUnaFoto } from './foto'
+import { zonasEnLaFoto } from './lectura'
 import { minimoDeLaOrganizacion, minimoEfectivo } from './participacion'
 import { aCuenta, alActivar, cero, Cuenta, CuentaCruda, SedeQueSeActiva } from './participacion.vistaPrevia'
 import { periodoQueContieneFecha } from './periodosGuardados'
@@ -113,7 +114,15 @@ async function leer(
   })
   // SÓLO pruebas: tras la primera lectura (la que fija la foto), algo cambia afuera; todo lo que sigue lo debe ignorar.
   await d.entreLecturas?.()
-  const situacion = await situacionDeLasSedes(tx, organizationId, d.legibles, ahora)
+  // B14-fix F2 (Codex participación r1 #2): las sedes se prepararon ANTES de la foto; una que un traslado sacó de la organización
+  // entretanto no se muestra (ni lo que vendió después, ya en OTRA organización). Su zona, también de la foto.
+  const zonas = await zonasEnLaFoto(
+    tx,
+    organizationId,
+    d.legibles.map(s => s.venueId),
+  )
+  const legibles = d.legibles.flatMap(s => (zonas.has(s.venueId) ? [{ ...s, tz: zonas.get(s.venueId)! }] : []))
+  const situacion = await situacionDeLasSedes(tx, organizationId, legibles, ahora)
   const sit = (venueId: string): SituacionDeSede & { ventanas: SedeQueSeActiva['reales'] } =>
     situacion.get(venueId) ?? { abierta: false, cubreHoy: false, vigente: null, ultimoDiaCerrado: null, ventanas: [] }
   const startDate = org.staffPayStartDate ? dbDateComoFecha(org.staffPayStartDate) : null
@@ -129,7 +138,7 @@ async function leer(
     minimoOrg = (await minimoDeLaOrganizacion(tx, organizationId)).minimo
     // «Fuera» = el `entran` de activar cada sede desde su mínimo efectivo, por grupos de sedes con el mismo «hoy».
     const porHoy = new Map<string, SedeQueSeActiva[]>()
-    for (const s of d.legibles) {
+    for (const s of legibles) {
       const hoyDeLaSede = hoyLocal(s.tz, ahora)
       const desde = minimoEfectivo(minimoOrg, sit(s.venueId).ultimoDiaCerrado).desde
       if (desde > hoyDeLaSede) continue // ya no queda ningún día sin cerrar que pueda entrar
@@ -142,7 +151,7 @@ async function leer(
       for (const [venueId, x] of r) fuera.set(venueId, x.entran)
     }
   }
-  const sedes = d.legibles.map((s): SedeEnPagoAlPersonal => {
+  const sedes = legibles.map((s): SedeEnPagoAlPersonal => {
     const st = sit(s.venueId)
     const tienePlan = d.conPlan.has(s.venueId)
     const efectivo = minimoOrg === null ? null : minimoEfectivo(minimoOrg, st.ultimoDiaCerrado).desde

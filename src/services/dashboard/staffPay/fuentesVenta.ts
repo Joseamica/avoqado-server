@@ -2,7 +2,7 @@
 import { Prisma } from '@prisma/client'
 import prisma from '../../../utils/prismaClient'
 import { utcTs } from '../../../utils/sqlDates'
-import { fueraDelSobre, RangoSede, Rangos, rangosConParticipacion, Ventana } from './rangos'
+import { fueraDelSobre, limitesPorSede, RangoSede, Rangos, rangosConParticipacion, Ventana } from './rangos'
 
 type Db = Prisma.TransactionClient | typeof prisma
 
@@ -41,15 +41,38 @@ export interface LineaBarrible {
 const TZ_DEFAULT = 'America/Mexico_City'
 const acotar = (n: number) => Math.min(Math.max(Math.trunc(n) || 1, 1), 1000)
 
-/** `(sede = X AND col en [desde, hasta)) OR …` sobre las columnas de `alias` (alias fijos del código, nunca del usuario). */
+/**
+ * La fila (`alias`) cae en ALGÚN rango de su sede: `col ∈ [desde, hasta)` de un rango con `venueId` = el de la fila (alias fijos
+ * del código, nunca del usuario).
+ * B14-fix F4 (Codex participación r1 #4): con `(sede = X AND col en [desde, hasta)) OR …` cada rango eran tres parámetros y, con
+ * 500 sedes × 4 ventanas, el reporte pasaba los 32,767 que admite Prisma y tronaba dentro de los topes. Ahora son CINCO por
+ * llamada, con o sin 5,000 ventanas (`limitesPorSede`): los límites de todas las sedes en UN arreglo ordenado, la posición de
+ * cada sede en UN objeto, y el sobre. Por fila: busca su sede (búsqueda binaria en el objeto), toma SUS límites y
+ * `width_bucket` (búsqueda binaria) dice en qué tramo cae; impar = dentro. Medido con 120 sedes × 4 ventanas (480 rangos):
+ * las sumas de ventas 309 → 95 ms; con `unnest` + `EXISTS` (la primera forma probada) subían a 606 ms, porque bajo un OR cada
+ * fila recorría los 480 rangos.
+ * Arreglo y objeto van dentro de `(SELECT …)`: Postgres los convierte UNA vez por consulta (InitPlan), nunca por fila. Las fechas
+ * llegan como texto ISO a `timestamp[]`: el texto pierde la `Z` al convertirse, así que llega la hora de pared UTC (lo que guarda
+ * la columna), igual que `utcTs` y sin depender de la zona de la sesión. Sede sin rangos ⇒ NULL ⇒ 0 ⇒ `false`, como antes. El
+ * sobre `col ∈ [mínimo, máximo)` deja un límite que el índice (venueId, fecha) puede usar y descarta sin buscar lo que cae fuera.
+ * 🔴 `… % 2 <> 0` y no `= 1`: el planeador no ve dentro de la expresión y a un `= ` le da 0.5 % de selectividad (`<>`, 99.5 %).
+ * Con `= 1` estimó 31 propinas donde había 38,333 (una sede con 50,000 ventas) y las unió con un Seq Scan de todas las sedes:
+ * 2.4 s contra 0.3 s. Sobreestimar es lo seguro aquí: casi todo el periodo suele estar dentro de la participación.
+ */
 export function enRangos(alias: 'cc' | 'o' | 'p' | 'op', columna: 'calculatedAt' | 'createdAt', r: RangoSede[]): Prisma.Sql {
-  if (!r.length) return Prisma.sql`false`
+  const l = limitesPorSede(r)
+  if (!l) return Prisma.sql`false`
   const venue = Prisma.raw(`${alias}."venueId"`)
   const t = Prisma.raw(`${alias}."${columna}"`)
-  return Prisma.sql`(${Prisma.join(
-    r.map(x => Prisma.sql`(${venue} = ${x.venueId} AND ${t} >= ${utcTs(x.desde)} AND ${t} < ${utcTs(x.hasta)})`),
-    ' OR ',
-  )})`
+  const sobre = Prisma.sql`${t} >= ${utcTs(l.desde)} AND ${t} < ${utcTs(l.hasta)}`
+  const limites = Prisma.sql`(SELECT ${l.limites}::timestamp[])`
+  const sedes = Object.keys(l.tramos)
+  // UNA sede (una organización chica, o la sede pesada): la igualdad le da al planeador la llave de la sede, como el OR de antes
+  // (con 50,000 ventas de una sede, sin ella unía las propinas con TODAS las sedes: 1.7 s contra 0.3 s), y sus límites son el
+  // arreglo entero.
+  if (sedes.length === 1) return Prisma.sql`(${venue} = ${sedes[0]} AND ${sobre} AND width_bucket(${t}, ${limites}) % 2 <> 0)`
+  const tramo = (k: 0 | 1) => Prisma.sql`((SELECT ${JSON.stringify(l.tramos)}::jsonb) -> ${venue} ->> ${Prisma.raw(String(k))})::int`
+  return Prisma.sql`(${sobre} AND COALESCE(width_bucket(${t}, ${limites}[${tramo(0)} : ${tramo(1)}]), 0) % 2 <> 0)`
 }
 
 const venueIdsDe = (a: AlcanceBarrido) => a.sedes.map(s => s.venueId)

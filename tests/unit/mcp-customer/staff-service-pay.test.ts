@@ -775,8 +775,8 @@ describe('staff_service_pay_differences (lista de lo pendiente de un periodo cer
     const r = parse(
       await handlers.get('staff_service_pay_differences')!({ venueId: 'v1', periodId: 'p8', cursor: 'v1:c0:a', limit: 20 }, {}),
     )
-    // Un solo argumento: las opciones de prueba (ahora, tamLote, topeSinAncla) nunca salen del MCP.
-    expect(mockDiferencias.mock.calls[0]).toEqual([{ userId: 's1', venueId: 'v1', periodId: 'p8', cursor: 'v1:c0:a', limit: 20 }])
+    const conexion = { userId: 's1', soloSedes: ['v1'] } // B14-fix F1. Un solo argumento: las opciones de prueba nunca salen del MCP.
+    expect(mockDiferencias.mock.calls[0]).toEqual([{ ...conexion, venueId: 'v1', periodId: 'p8', cursor: 'v1:c0:a', limit: 20 }])
     expect(r.items[0]).toEqual({
       classSessionId: 'c1',
       clase: 'Yoga',

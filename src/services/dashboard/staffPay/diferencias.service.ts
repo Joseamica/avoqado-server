@@ -333,6 +333,8 @@ export async function diferenciasDelPeriodo(
     periodId: string
     cursor?: string
     limit: number
+    /** B14-fix F1: el alcance de la conexión MCP; las sedes fuera de él no se leen (la respuesta dice `parcial`). */
+    soloSedes?: readonly string[]
   },
   /** Sólo pruebas y medición (fuera de `input` para que una ruta que reenvíe `req.query` no pueda meterlos). */
   opts: { ahora?: Date; tamLote?: number; topeSinAncla?: number } = {},
@@ -342,8 +344,10 @@ export async function diferenciasDelPeriodo(
   const p = await prisma.servicePayPeriod.findFirst({ where: { id: input.periodId, organizationId: v.organizationId } })
   if (!p) throw new NotFoundError('Periodo no encontrado')
   if (p.status !== 'CLOSED') return { items: [], nextCursor: null, parcial: false }
-  // Alcance histórico del periodo (Codex R1-1): apagar una sede no esconde sus diferencias.
-  const legibles = await sedesLegiblesDe(input.userId, p.venueIds)
+  // Alcance histórico del periodo (Codex R1-1): apagar una sede no esconde sus diferencias. B14-fix F1: ∩ la conexión.
+  const enConexion = input.soloSedes ? p.venueIds.filter(v => input.soloSedes!.includes(v)) : p.venueIds
+  const legibles = await sedesLegiblesDe(input.userId, enConexion)
+  const parcial = legibles.parcial || new Set(enConexion).size < new Set(p.venueIds).size
   const sedes = (
     await prisma.venue.findMany({
       where: { id: { in: legibles.venueIds }, organizationId: v.organizationId },
@@ -386,12 +390,12 @@ export async function diferenciasDelPeriodo(
           return {
             items: await conCausa(prisma, v.organizationId, p.closedAt, items.slice(0, limite)),
             nextCursor: `${u.venueId}:${u.classSessionId}:${u.persona ?? ''}`,
-            parcial: legibles.parcial,
+            parcial,
           }
         }
       }
       desde = { id: ids[ids.length - 1], incluido: false }
     }
   }
-  return { items: await conCausa(prisma, v.organizationId, p.closedAt, items), nextCursor: null, parcial: legibles.parcial }
+  return { items: await conCausa(prisma, v.organizationId, p.closedAt, items), nextCursor: null, parcial }
 }

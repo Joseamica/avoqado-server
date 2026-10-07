@@ -5,7 +5,6 @@ import { PresupuestoDeEspera, tomarCandado, transaccionConPresupuesto } from '..
 import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
 import { assertPermisoEnSedes, assertPermisoEnTodasLasSedes, exigirPermisoEnSedes, sedesConServicePay, sedesLegiblesDe } from './acceso'
 import { fechaMx } from '../export.helpers'
-import { alcanceDelPeriodo, sedesConVentana } from './alcance'
 import {
   dbDateComoFecha,
   diaCivilSiguiente,
@@ -138,32 +137,6 @@ export async function ampliarAlcance(
   if (o.permitidas) exigirPermisoEnSedes(o.permitidas, union, explicacion)
   else await assertPermisoEnSedes(userId, union, 'staffpay:close', explicacion)
   return tx.servicePayPeriod.update({ where: { id: p.id }, data: { venueIds: union } })
-}
-
-/**
- * Alcance LEGIBLE de un periodo, el MISMO para el reporte y el recibo (Codex R1-1, R3-Nuevo 2): uno CERRADO se lee sobre
- * SU alcance guardado; uno ABIERTO (o aún sin guardar) sobre sus sedes guardadas ∪ las que hoy tienen el módulo —así una
- * diferencia liquidada desde una sede que ya lo apagó no desaparece del reporte— y, desde el inicio de pago al personal,
- * ∪ las sedes con alguna ventana (B11, `alcanceDelPeriodo`). Siempre filtrado por el permiso de quien lee y, si viene, por
- * `sede` (si no es legible: vacío y `parcial`). `o.periodo`: el canónico (guardado o no); `o.startDate`: el inicio.
- */
-export async function alcanceLegibleDelPeriodo(
-  userId: string,
-  organizationId: string,
-  fila: { status: 'OPEN' | 'CLOSED'; venueIds: string[] } | null,
-  sede: string | undefined,
-  o: { periodo: { start: string; end: string }; startDate: string | null },
-): Promise<{ venueIds: string[]; parcial: boolean }> {
-  const alcance = alcanceDelPeriodo({
-    periodo: { ...o.periodo, estado: fila?.status ?? 'OPEN' },
-    guardadas: fila?.venueIds ?? [],
-    activas: fila?.status === 'CLOSED' ? [] : await sedesConServicePay(organizationId),
-    conVentana: fila?.status === 'CLOSED' ? [] : await sedesConVentana(prisma, organizationId),
-    startDate: o.startDate,
-  })
-  const legibles = await sedesLegiblesDe(userId, alcance)
-  const venueIds = sede ? legibles.venueIds.filter(id => id === sede) : legibles.venueIds
-  return { venueIds, parcial: legibles.parcial || (sede !== undefined && venueIds.length === 0) }
 }
 
 /**

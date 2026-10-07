@@ -8,8 +8,7 @@ import { cerrarPeriodo, previewCierre } from '@/services/dashboard/staffPay/cier
 import { activarSede, desactivarSede } from '@/services/dashboard/staffPay/participacion'
 import { AlcanceBarrido, sqlVentasDelPeriodo } from '@/services/dashboard/staffPay/fuentesVenta'
 import { rangosConParticipacion } from '@/services/dashboard/staffPay/rangos'
-import { contarPorEstado } from '@/services/dashboard/staffPay/valoracion'
-import { fechaComoDbDate, venuePeriodRange } from '@/services/dashboard/staffPay/periodos'
+import { fechaComoDbDate } from '@/services/dashboard/staffPay/periodos'
 import { borrarMundo, clase, confirmadas, crearMundo, crearSede, Mundo, tablaFija, TZ } from './_mundo'
 import { activar, cobro, comision, esquema, reembolso } from './_ventas'
 
@@ -199,7 +198,6 @@ describe('entra + fuera = el barrido con la ventana COMPLETA, por neto, por sede
     const filas = await prisma.$queryRaw<Array<{ venueId: string; fuente: string; n: number; total: Prisma.Decimal }>>`
       SELECT v."venueId", v.fuente, COUNT(*)::int AS n, SUM(v.monto) AS total FROM (${sqlVentasDelPeriodo(a, completas)!}) v
       GROUP BY v."venueId", v.fuente`
-    const { from, to } = venuePeriodRange({ start: '2026-10-01', end: '2026-10-31' }, TZ)
     for (const s of p.porSede) {
       for (const [campo, fuente] of [
         ['comisiones', 'COMMISSION'],
@@ -213,17 +211,10 @@ describe('entra + fuera = el barrido con la ventana COMPLETA, por neto, por sede
           new Prisma.Decimal(f?.total ?? 0).toFixed(2),
         ])
       }
-      const c = await contarPorEstado(prisma, {
-        venueId: s.venueId,
-        organizationId: m.orgId,
-        tz: TZ,
-        desde: from,
-        hasta: to,
-        ahora: NOV2,
-        participacion: 'ninguna',
-      })
+      // B14-fix F6: entra + fuera de clases = TODAS las de la sede, con su monto conocido del fixture (A: una de $300; B: dos
+      // de $500, una de cada lado del 15-oct).
       expect([s.entra.clases.n + s.fuera.clases.n, new Prisma.Decimal(s.entra.clases.total).plus(s.fuera.clases.total).toFixed(2)]).toEqual(
-        [c.ok, c.total.toFixed(2)],
+        s.venueId === A ? [1, '300.00'] : [2, '1000.00'],
       )
     }
     expect(sedeDe(p, B)).toMatchObject({

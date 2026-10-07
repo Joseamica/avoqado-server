@@ -1,6 +1,7 @@
 // tests/integration/staffPay/participacion.lectura.test.ts — participación por sede, fase 3 B10 (diseño r6.1, r4.1, r3.4,
 // r2 §6): las piezas que LEEN la participación, preparadas SIN CONECTAR. Ningún camino de producción las usa todavía: aquí se
-// prueban directo. La suite vieja (con `'ninguna'` y `rv = rp`) es la que fija que los montos de hoy no cambian.
+// prueban directo. La suite vieja (con `rv = rp`) es la que fija que los montos de hoy no cambian (B14-fix F6: sin el modo
+// `'ninguna'`; 'real' y 'fuera' se contrastan contra los montos conocidos del fixture).
 // Fechas de 2026 en UTC; CDMX = UTC−6, Tijuana = UTC−7 hasta el 1-nov (a las 2:00) y UTC−8 después.
 import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
@@ -72,7 +73,7 @@ const iso = (r: RangoSede[]) => r.map(x => [x.venueId, x.desde.toISOString(), x.
 // ── 1. Clases: `valoracionCte` con `participacion` (r6.1, r4.1) ──────────────────────────────────────────────────────────
 
 describe('valoracionCte con participación (B10, r4.1)', () => {
-  it("'real' (el default desde B11) exige la ventana de la sede en la fecha local de la clase desde el inicio; 'fuera' es justo lo contrario; 'ninguna', sin filtro", async () => {
+  it("'real' (el default desde B11) exige la ventana de la sede en la fecha local de la clase desde el inicio; 'fuera' es justo lo contrario", async () => {
     const b = await crearSede(m.orgId, m.key, 'b')
     await tabla500(m.venueId)
     await tabla500(b.venueId)
@@ -90,7 +91,7 @@ describe('valoracionCte con participación (B10, r4.1)', () => {
     // Una ventana de B en OTRA organización (historia de antes de un traslado) no cuenta para ésta.
     await ventana(b.venueId, '2026-10-01', '2026-10-31', await otraOrg('z'))
 
-    const f = (venueId: string, participacion?: 'ninguna' | 'real' | 'fuera') => ({
+    const f = (venueId: string, participacion?: 'real' | 'fuera') => ({
       venueId,
       organizationId: m.orgId,
       tz: TZ,
@@ -99,15 +100,15 @@ describe('valoracionCte con participación (B10, r4.1)', () => {
       ahora: new Date('2026-11-10T00:00:00Z'),
       participacion,
     })
-    const valoradas = async (venueId: string, participacion?: 'ninguna' | 'real' | 'fuera') =>
+    const valoradas = async (venueId: string, participacion?: 'real' | 'fuera') =>
       Object.fromEntries(
         (await valorarClases(prisma, f(venueId, participacion), { limite: 100 })).map(c => [c.classSessionId, c.monto?.toFixed(2)]),
       )
     const sorted = (o: Record<string, unknown>) => Object.keys(o).sort()
 
-    // B11: sin el campo es 'real' (todo llamador de producción); 'ninguna' ya sólo lo pasa quien lo pide.
-    expect(sorted(await valoradas(b.venueId))).toEqual([ago20, nov01, nov05].sort())
-    expect(sorted(await valoradas(b.venueId, 'ninguna'))).toEqual([ago20, oct20, oct31, nov01, nov05].sort())
+    // B11: sin el campo es 'real' (todo llamador de producción). B14-fix F6: contra el monto conocido de cada clase del fixture
+    // ($500 con cualquier conteo): la del 20-oct de B (activa desde noviembre) vale $0 en 'real' y $500 en 'fuera'.
+    expect(await valoradas(b.venueId)).toEqual({ [ago20]: '500.00', [nov01]: '500.00', [nov05]: '500.00' })
     expect(await valoradas(b.venueId, 'real')).toEqual({ [ago20]: '500.00', [nov01]: '500.00', [nov05]: '500.00' })
     expect(await valoradas(b.venueId, 'fuera')).toEqual({ [oct20]: '500.00', [oct31]: '500.00' })
     expect(await valoradas(m.venueId, 'real')).toEqual({ [deA]: '500.00' })
@@ -129,7 +130,7 @@ describe('valoracionCte con participación (B10, r4.1)', () => {
     const anclada = await deB('2026-10-21T15:00:00Z')
     await prisma.classSessionPayState.create({ data: { classSessionId: anclada, originPeriodId: oct.id } })
     const sinAncla = await deB('2026-10-20T15:00:00Z')
-    const f = (participacion: 'ninguna' | 'real' | 'fuera') => ({
+    const f = (participacion: 'real' | 'fuera') => ({
       venueId: b.venueId,
       organizationId: m.orgId,
       tz: TZ,
@@ -140,9 +141,12 @@ describe('valoracionCte con participación (B10, r4.1)', () => {
       periodId: oct.id,
       participacion,
     })
-    const ids = async (p: 'ninguna' | 'real') => (await valorarClases(prisma, f(p), { limite: 100 })).map(c => c.classSessionId).sort()
-    expect(await ids('ninguna')).toEqual([anclada, sinAncla].sort())
+    const ids = async (p: 'real') => (await valorarClases(prisma, f(p), { limite: 100 })).map(c => c.classSessionId).sort()
     expect(await ids('real')).toEqual([anclada])
+    // B14-fix F6: la sin ancla del 20-oct es la que 'real' deja fuera; en modo vivo 'fuera' la valora con su monto conocido.
+    const vivo = { ...f('fuera'), modo: undefined, periodId: undefined }
+    const fuera = await valorarClases(prisma, vivo, { limite: 100 })
+    expect(fuera.map(c => [c.classSessionId, c.monto?.toFixed(2)])).toEqual([[sinAncla, '500.00']])
     expect(() => valoracionCte(f('fuera'))).toThrow("'fuera' sólo se usa en modo vivo")
   })
 })

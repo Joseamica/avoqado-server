@@ -31,7 +31,10 @@ export async function estadoActivacion(
  * `staffpay:close` en todas las sedes; candado de periodos de la organización (como `cambiarPeriodicidad`). Idempotente:
  * activado ya, devuelve su fecha y no cambia nada. Con periodos guardados la periodicidad ya no cambia (D3 de la fase 2).
  * `inicioEsperado`: la fecha que el dueño vio en la vista previa; si bajo el candado sale otra (pasó la medianoche del
- * cambio de periodo), 409 INICIO_CAMBIO sin escribir: la fecha ya no se cambia después (Codex bloque B #3).
+ * cambio de periodo), 409 INICIO_CAMBIO sin escribir: la fecha ya no se cambia después (Codex bloque B #3). B14-fix F5
+ * (Codex participación r1 #5): «hoy» se calcula DESPUÉS de tomar el candado, como `activarSede` (B11): calculado antes, una
+ * confirmación del 30-sep a las 23:59:59 que obtiene el candado el 1-oct conservaba septiembre y abría las ventanas desde
+ * el 1-sep.
  *
  * B9 (diseño r6.1, r6.6.2) + B11 (r3.3): al activar de verdad abre una ventana `[startDate, ∞)` por cada sede ELEGIDA
  * (`sedes`; sin ellas, todas las que hoy tienen el plan, resueltas antes de la transacción con el mismo resolver del
@@ -51,11 +54,12 @@ export async function activarPagoAlPersonal(input: {
   if (input.periodicidad !== 'MONTHLY' && input.periodicidad !== 'SEMIMONTHLY') throw new BadRequestError('Elige mensual o quincenal')
   const v = await prisma.venue.findUniqueOrThrow({ where: { id: input.venueId }, select: { organizationId: true, timezone: true } })
   await assertPermisoEnTodasLasSedes(input.userId, v.organizationId, 'staffpay:close')
-  const hoy = hoyLocal(v.timezone || TZ_DEFAULT, input.ahora)
   // Con el cliente GLOBAL, antes de la transacción (como el cierre): dentro sólo se bloquean y se revalidan.
   const sedes = await sedesElegidas(v.organizationId, input.sedes)
   return transaccionConPresupuesto(async (tx, presupuesto) => {
     await lockPeriodosDeOrganizacion(tx, v.organizationId, presupuesto)
+    // F5: el día BAJO el candado (cada reintento lo vuelve a tomar); `ahora`, sólo pruebas.
+    const hoy = hoyLocal(v.timezone || TZ_DEFAULT, input.ahora ?? new Date())
     const org = await tx.organization.findUniqueOrThrow({
       where: { id: v.organizationId },
       select: { staffPayStartDate: true, servicePayPeriodicity: true },
@@ -195,7 +199,9 @@ export async function previewActivacion(input: {
 /**
  * Interruptor «Pagar las propinas en el recibo» (spec fase 3 §6.3, §7.1, D2): prender abre una ventana [ahora, ∞);
  * apagar cierra la abierta en `ahora`. Lo que ya ganó el derecho a entrar no se pierde (Codex r1-5). Repetir el estado
- * actual no escribe ni audita. Mismo permiso y candado que activar.
+ * actual no escribe ni audita. Mismo permiso y candado que activar. B14-fix F5 (hermano): `ahora` es el instante en que se
+ * OBTIENE el candado, no el de la petición: dos cambios se escriben en el orden del candado, nunca con un instante anterior al
+ * del cambio que ya confirmó (una ventana que empezara antes de que la otra cerrara).
  */
 export async function cambiarPropinas(input: {
   userId: string
@@ -206,9 +212,9 @@ export async function cambiarPropinas(input: {
   if (typeof input.encender !== 'boolean') throw new BadRequestError('Indica si las propinas se pagan en el recibo')
   const v = await prisma.venue.findUniqueOrThrow({ where: { id: input.venueId }, select: { organizationId: true } })
   await assertPermisoEnTodasLasSedes(input.userId, v.organizationId, 'staffpay:close')
-  const ahora = input.ahora ?? new Date()
   return transaccionConPresupuesto(async (tx, presupuesto) => {
     await lockPeriodosDeOrganizacion(tx, v.organizationId, presupuesto)
+    const ahora = input.ahora ?? new Date() // F5: bajo el candado (cada reintento lo vuelve a tomar); `input.ahora`, sólo pruebas
     const org = await tx.organization.findUniqueOrThrow({ where: { id: v.organizationId }, select: { staffPayStartDate: true } })
     if (!org.staffPayStartDate) throw new ConflictError('Activa primero el pago al personal', 'NO_ACTIVADO')
     const abierta = await tx.staffPayTipWindow.findFirst({
@@ -218,8 +224,8 @@ export async function cambiarPropinas(input: {
     // `cambio`: el MCP audita sólo lo que de verdad cambió (otra persona pudo hacerlo entre la vista previa y el confirmar).
     if (input.encender === (abierta !== null)) return { encendidas: input.encender, cambio: false }
     if (abierta) {
-      // `ahora` se fija antes de la tx (lo reusa cada reintento) y el reloj de otra instancia puede ir atrás: nunca antes
-      // del inicio (CHECK StaffPayTipWindow_rango). Queda una ventana vacía [inicio, inicio), que no pesca nada.
+      // El reloj de otra instancia puede ir atrás: nunca antes del inicio (CHECK StaffPayTipWindow_rango). Queda una ventana
+      // vacía [inicio, inicio), que no pesca nada.
       const endsAt = ahora < abierta.startsAt ? abierta.startsAt : ahora
       await tx.staffPayTipWindow.update({ where: { id: abierta.id }, data: { endsAt, endedById: input.userId } })
     } else {

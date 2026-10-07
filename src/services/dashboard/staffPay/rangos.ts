@@ -18,6 +18,46 @@ const TOPE_PERIODOS_CERRADOS = 1000
 export type RangoSede = { venueId: string; desde: Date; hasta: Date }
 /** Una ventana de participación (`StaffPayVenueWindow`) en días civiles de la zona de su sede; `hasta` null = sin fin. */
 export type Ventana = { venueId: string; desde: string; hasta: string | null }
+/**
+ * Los rangos de varias sedes como lo pide `enRangos` (B14-fix F4): por sede, sus tramos ordenados y unidos (los que se
+ * tocan o se encimen quedan en uno: la unión es la misma que el OR de antes), en UN arreglo de límites `[d1, h1, d2, h2, …]`
+ * (ISO) estrictamente creciente dentro de cada sede; `tramos[sede] = [primero, último]` (índices de PostgreSQL, desde 1) y el
+ * sobre `[desde, hasta)`. PURA. null si no queda ningún rango con duración (todo `false`).
+ */
+export function limitesPorSede(
+  r: RangoSede[],
+): { limites: string[]; tramos: Record<string, [number, number]>; desde: Date; hasta: Date } | null {
+  const porSede = new Map<string, Array<[number, number]>>()
+  for (const x of r) {
+    const d = x.desde.getTime()
+    const h = x.hasta.getTime()
+    if (!(h > d)) continue
+    const suyos = porSede.get(x.venueId)
+    if (suyos) suyos.push([d, h])
+    else porSede.set(x.venueId, [[d, h]])
+  }
+  if (!porSede.size) return null
+  const limites: string[] = []
+  const tramos: Record<string, [number, number]> = {}
+  let desde = Infinity
+  let hasta = -Infinity
+  for (const [sede, suyos] of porSede) {
+    suyos.sort((a, b) => a[0] - b[0])
+    const unidos: Array<[number, number]> = []
+    for (const [d, h] of suyos) {
+      const u = unidos[unidos.length - 1]
+      if (u && d <= u[1]) u[1] = Math.max(u[1], h)
+      else unidos.push([d, h])
+    }
+    const primero = limites.length + 1
+    for (const [d, h] of unidos) limites.push(new Date(d).toISOString(), new Date(h).toISOString())
+    tramos[sede] = [primero, limites.length]
+    desde = Math.min(desde, unidos[0][0])
+    hasta = Math.max(hasta, unidos[unidos.length - 1][1])
+  }
+  return { limites, tramos, desde: new Date(desde), hasta: new Date(hasta) }
+}
+
 /** Lo que barre UNA operación (cierre, vista previa, recibo, reporte): se calcula una vez y se pasa a cada lote (B11). */
 export type Rangos = { periodo: RangoSede[]; participacion: RangoSede[] }
 /** ponytail: ventanas que se leen por operación (500 sedes × 10). Pasado el tope TRUENA (nunca recorta); se sube la constante. */

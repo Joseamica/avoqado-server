@@ -5,7 +5,7 @@ import { BadRequestError, ConflictError, NotFoundError } from '../../../errors/A
 import { utcTs } from '../../../utils/sqlDates'
 import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
 import { encodeExport, EncodedExport, ExportColumnDef, fechaMx, getRowCapForFormat } from '../export.helpers'
-import { assertPermisoEnSedes, exigirPermisoEnSedes, sedesConPermiso, sedesConServicePay, sedesLegiblesDe } from './acceso'
+import { assertPermisoEnSedes, exigirPermisoEnSedes, sedesConPermiso } from './acceso'
 import { bloquearPeriodo, periodoQueContieneFecha } from './periodosGuardados'
 import { transaccionConPresupuesto } from '../../../utils/esperaDeCandados'
 import { dbDateComoFecha, MESES_LARGOS, periodoQueContiene, venuePeriodRange } from './periodos'
@@ -14,7 +14,7 @@ import { AlcanceBarrido, sqlVentasDelPeriodo } from './fuentesVenta'
 import { personaDelRecibo } from './recibos.persona'
 import { enUnaFoto } from './foto'
 import { DevolucionesPendientes, devolucionesPendientes } from './devolucionesPendientes'
-import { alcanceDelPeriodo, sedesConVentana } from './alcance'
+import { alcanceEnLaFoto, LecturaPreparada, prepararLectura, zonasEnLaFoto } from './lectura'
 import { rangosConParticipacion } from './rangos'
 
 /** Tope de UNA página del recibo (Codex R2-R1-20). El recibo entero no tiene tope: se recorre con cursor. */
@@ -256,80 +256,38 @@ type EntradaRecibo = {
   sede?: string
   cursor?: string
   limit: number
+  /** B14-fix F1: el alcance de la conexión MCP (sus sedes); se intersecta con el permiso antes de leer nada. */
+  soloSedes?: readonly string[]
   /** SÓLO para pruebas (como `entreLotes`): corre entre la preparación y la instantánea (Codex R5). */
   trasPreparar?: () => Promise<void>
 }
 
 /**
- * Todo lo que se consulta con el cliente GLOBAL —la sede y la persona, los MÓDULOS (`sedesConServicePay`) y los
- * PERMISOS (`sedesLegiblesDe`)—, resuelto ANTES de abrir la instantánea y pasado como datos (Codex R4-Nuevo 1). Si se
- * consultara dentro, cada transacción retendría su conexión esperando OTRA del pool: 18 recibos simultáneos ocupaban las
- * 18 conexiones y ninguno terminaba.
- * El permiso se resuelve para TODAS las sedes candidatas: las del periodo como está ahora ∪ las que hoy tienen el módulo ∪
- * las que tienen alguna ventana de participación (B11, r4.4: su historia las mete al alcance).
+ * Lo que el recibo resuelve con el cliente GLOBAL antes de su instantánea (`prepararLectura`, Codex R4-Nuevo 1), más la
+ * persona y el NOMBRE de cada sede para mostrar. La zona horaria y la periodicidad deciden qué clases entran: se leen DENTRO
+ * de la instantánea, en `fuenteDelRecibo` (Codex R5: una zona leída antes mezclaba el día de ayer con el monto de hoy).
  */
-interface ReciboPreparado {
-  organizationId: string
+interface ReciboPreparado extends LecturaPreparada {
   persona: string
-  activas: string[]
-  /** Las sedes con alguna ventana (B11): dentro de la foto sólo se comparan. */
-  conVentana: string[]
-  permitidas: Set<string>
-  /** Sólo el NOMBRE para mostrar. La zona horaria y la periodicidad deciden qué clases entran: se leen DENTRO de la
-   *  instantánea, en `fuenteDelRecibo` (Codex R5: una zona leída antes mezclaba el día de ayer con el monto de hoy). */
   sedes: Map<string, { nombre: string }>
 }
 
-async function prepararRecibo(input: { userId: string; venueId: string; staffId: string; fecha: string }): Promise<ReciboPreparado> {
+async function prepararRecibo(
+  input: Pick<EntradaRecibo, 'userId' | 'venueId' | 'staffId' | 'fecha' | 'soloSedes'>,
+): Promise<ReciboPreparado> {
   const v = await prisma.venue.findUniqueOrThrow({ where: { id: input.venueId }, select: { organizationId: true } })
   const persona = await personaDelRecibo(v.organizationId, input.staffId)
-  const filaAhora = await periodoQueContieneFecha(prisma, v.organizationId, input.fecha)
-  const activas = await sedesConServicePay(v.organizationId)
-  const conVentana = await sedesConVentana(prisma, v.organizationId)
-  const candidatas = [...new Set([...(filaAhora?.venueIds ?? []), ...activas, ...conVentana])]
-  const { venueIds: permitidas } = await sedesLegiblesDe(input.userId, candidatas)
-  const sedes = candidatas.length
+  const lectura = await prepararLectura({ ...input, organizationId: v.organizationId })
+  const ids = [...lectura.permitidas] // sólo se muestran renglones de sedes legibles
+  const sedes = ids.length
     ? await prisma.venue.findMany({
-        where: { id: { in: candidatas }, organizationId: v.organizationId },
+        where: { id: { in: ids }, organizationId: v.organizationId },
         select: { id: true, name: true },
         orderBy: { id: 'asc' },
-        take: candidatas.length,
+        take: ids.length,
       })
     : []
-  return {
-    organizationId: v.organizationId,
-    persona,
-    activas,
-    conVentana,
-    permitidas: new Set(permitidas),
-    sedes: new Map(sedes.map(x => [x.id, { nombre: x.name }])),
-  }
-}
-
-/**
- * La MISMA regla que `alcanceLegibleDelPeriodo` (`alcanceDelPeriodo`, B11: cerrado = su alcance; abierto = guardadas ∪
- * activas y, desde el inicio de pago al personal, ∪ las sedes con ventana; filtrado por permiso y por `sede`), pero con
- * módulos, ventanas y permisos ya resueltos: es pura y corre dentro de la instantánea. Una sede que entró al periodo entre
- * la preparación y la instantánea no tiene permiso resuelto: no se lee y el recibo dice `parcial` (conservador; la
- * siguiente lectura ya la incluye).
- */
-function alcanceEnLaFoto(
-  p: ReciboPreparado,
-  fila: { status: 'OPEN' | 'CLOSED'; venueIds: string[] } | null,
-  periodo: { start: string; end: string },
-  startDate: string | null,
-  sede?: string,
-) {
-  const alcance = alcanceDelPeriodo({
-    periodo: { ...periodo, estado: fila?.status ?? 'OPEN' },
-    guardadas: fila?.venueIds ?? [],
-    activas: p.activas,
-    conVentana: p.conVentana,
-    startDate,
-  })
-  const legibles = alcance.filter(v => p.permitidas.has(v)).sort()
-  const venueIds = sede ? legibles.filter(id => id === sede) : legibles
-  return { venueIds, parcial: legibles.length < alcance.length || (sede !== undefined && venueIds.length === 0) }
+  return { ...lectura, persona, sedes: new Map(sedes.map(x => [x.id, { nombre: x.name }])) }
 }
 
 /** La instantánea vive en `foto.ts` (B12: también la usa la vista previa del cierre); se re-exporta para su prueba. */
@@ -359,15 +317,11 @@ async function fuenteDelRecibo(
     : periodoQueContiene(input.fecha, org.servicePayPeriodicity)
   const startDate = org.staffPayStartDate ? dbDateComoFecha(org.staffPayStartDate) : null
   // El MISMO alcance legible que el reporte (Codex R1-1, R3-Nuevo 2), con el filtro de `sede` (R2-R1-21).
-  const { venueIds, parcial } = alcanceEnLaFoto(prep, fila, canon, startDate, input.sede)
-  const zonas = venueIds.length
-    ? await db.venue.findMany({
-        where: { id: { in: venueIds }, organizationId: prep.organizationId },
-        select: { id: true, timezone: true },
-        take: venueIds.length,
-      })
-    : []
-  const tzDe = new Map(zonas.map(x => [x.id, x.timezone || TZ_DEFAULT]))
+  const legible = alcanceEnLaFoto(prep, fila, canon, startDate, input.sede)
+  // B14-fix F2: sólo las sedes que SIGUEN siendo de la organización en ESTA foto (un traslado entre la preparación y la foto).
+  const tzDe = await zonasEnLaFoto(db, prep.organizationId, legible.venueIds)
+  const venueIds = legible.venueIds.filter(v => tzDe.has(v))
+  const parcial = legible.parcial
   const crudo: Prisma.Sql[] = []
   if (fila && venueIds.length) {
     crudo.push(Prisma.sql`

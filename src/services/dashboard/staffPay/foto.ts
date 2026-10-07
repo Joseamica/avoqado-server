@@ -15,7 +15,7 @@ export const MENSAJE_LECTURA_VENCIDA = 'La consulta tardó demasiado y se cancel
  * de las sedes (B13)— sale del MISMO instante. Sin esto, un cierre o una ventana que cambia entre dos lecturas deja números
  * que no cuadran.
  * 🔴 Regla (Codex R4-Nuevo 1): dentro de `fn` SÓLO se lee con `tx`; nunca `prisma.` global ni un helper que lo use
- * (`sedesConServicePay`, `sedesLegiblesDe`, `alcanceLegibleDelPeriodo`, permisos): eso se resuelve ANTES y entra como datos.
+ * (`sedesConServicePay`, `sedesLegiblesDe`, `prepararLectura`, permisos): eso se resuelve ANTES y entra como datos.
  * `o.planPersonalizado` (la vista previa del cierre, B12): los lotes reusan el MISMO statement con otro cursor y, en UNA
  * conexión, Postgres les pondría un plan genérico desde la sexta ejecución (B7 r2: 11.7 s contra 3.3 s); como el cierre, se
  * fuerza el plan personalizado.

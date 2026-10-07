@@ -27,7 +27,7 @@ import { text } from '../respond'
 import { requireWriteScopeAlways } from '../requireWriteScopeAlways'
 import { auditMcpWrite } from '../audit'
 import { activarOrganizacion, type Herramientas, motivoDeBloqueo, participacionDeSede } from './staffPay.participacion'
-import { acotarAlAlcance, avisoDePendientes, detalleDelCierre, sedesDeLaConfig } from './staffPay.sedes'
+import { acotarAlAlcance, avisoDePendientes, detalleDelCierre, falloDelServicio, sedesDeLaConfig } from './staffPay.sedes'
 import { conSigno, diaLegible, diferencia, lista, periodoLegible, pesos } from './staffPay.formato'
 
 const sedeArg = z.string().min(1).max(64).optional().describe('Only this venue of the organization (default: all venues you can read)')
@@ -110,6 +110,8 @@ const VENTANAS = 20
 
 export function registerStaffPayTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
+  // B14-fix F1: quién pregunta y el alcance de SU conexión; toda lectura de varias sedes se acota a ella antes de agregar.
+  const conexion = { userId: scope.staffId, soloSedes: scope.allowedVenueIds }
   const puedeLeer = async (venueId: string): Promise<string | null> => {
     guard.venueFilter(venueId) // lanza si la sede está fuera del alcance
     const access = scope.perVenueAccess.get(venueId)
@@ -133,7 +135,7 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
       if (sede) guard.venueFilter(sede)
       const no = await puedeLeer(venueId)
       if (no) return text({ ok: false, error: no })
-      return text(await reportePeriodo({ userId: scope.staffId, venueId, fecha: f, sede, offset: offset ?? 0, limit: limit ?? 50 }))
+      return text(await reportePeriodo({ ...conexion, venueId, fecha: f, sede, offset: offset ?? 0, limit: limit ?? 50 }))
     },
   )
 
@@ -166,7 +168,7 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
         try {
           return text({
             cerrado,
-            recibo: await reciboDePersona({ userId: scope.staffId, venueId, staffId, fecha: dia, sede, cursor, limit: limit ?? 50 }),
+            recibo: await reciboDePersona({ ...conexion, venueId, staffId, fecha: dia, sede, cursor, limit: limit ?? 50 }),
           })
         } catch (e) {
           // Codex R3-Nuevo 3: el cursor es de antes de un cierre (o del desglose en vivo): se pide de nuevo SIN cursor.
@@ -184,9 +186,7 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
       // Fase 3 §12: el recibo en vivo de un periodo abierto (clases + comisiones + propinas), lo que se le debe hoy.
       if (vista === 'recibo') return recibo(false)
       try {
-        return text(
-          await detallePersona({ userId: scope.staffId, venueId, staffId, fecha: dia, sede, despuesDe: cursor, limit: limit ?? 50 }),
-        )
+        return text(await detallePersona({ ...conexion, venueId, staffId, fecha: dia, sede, despuesDe: cursor, limit: limit ?? 50 }))
       } catch (e) {
         // Se cerró entre la consulta y el desglose: el server responde PERIODO_CERRADO y se lee lo congelado.
         if ((e as { code?: string })?.code === 'PERIODO_CERRADO') return recibo(true)
@@ -247,12 +247,8 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
     }
     return null
   }
-  // Un 4xx del service (huella cambió, periodo cerrado, sin permiso…) es una respuesta, no un 500.
-  const fallo = (e: unknown, extra = '') => {
-    const err = e as { statusCode?: number; message?: string; code?: string; details?: { preview?: unknown } }
-    if (!err?.statusCode || err.statusCode >= 500) throw e
-    return text({ ok: false, error: `${err.message}${extra}`, code: err.code ?? null, preview: err.details?.preview ?? null })
-  }
+  // Un 4xx del service (huella cambió, periodo cerrado, sin permiso…) es una respuesta, no un 500; su vista previa, acotada (F1).
+  const fallo = falloDelServicio(scope)
   const herramientas: Herramientas = { scope, guard, puedeEscribir, fallo }
 
   server.tool(
@@ -594,7 +590,7 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
       const no = await puedeLeer(venueId)
       if (no) return text({ ok: false, error: no })
       try {
-        const r = await diferenciasDelPeriodo({ userId: scope.staffId, venueId, periodId, cursor, limit: limit ?? 50 })
+        const r = await diferenciasDelPeriodo({ ...conexion, venueId, periodId, cursor, limit: limit ?? 50 })
         const ids = [...new Set(r.items.map(f => f.venueId))]
         const sedes = new Map(
           (

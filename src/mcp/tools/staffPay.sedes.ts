@@ -7,6 +7,7 @@ import type { Destino, DevolucionesPendientes } from '@/services/dashboard/staff
 import type { EstadoSede } from '@/services/dashboard/staffPay/estadoSede'
 import { estadoSedes } from '@/services/dashboard/staffPay/sedes.service'
 import type { McpScope } from '../scope'
+import { text } from '../respond'
 import { conSigno, lista, periodoLegible } from './staffPay.formato'
 
 type PorDestino = DevolucionesPendientes['porDestino']
@@ -38,6 +39,21 @@ export function acotarAlAlcance<T extends { porSede?: Array<{ venueId: string }>
   }
   return out
 }
+
+/**
+ * Un 4xx del service (la huella cambió, periodo cerrado, sin permiso…) es una respuesta, no un 500. B14-fix F1 (Codex
+ * participación r1 #1): la vista previa que trae un rechazo —el cierre la manda entera con `HUELLA_CAMBIO`— se acota a la
+ * conexión IGUAL que la normal (`acotarAlAlcance`): antes este camino devolvía `porSede` y las pendientes de sedes fuera de ella.
+ */
+export const falloDelServicio =
+  (scope: McpScope) =>
+  (e: unknown, extra = '') => {
+    const err = e as { statusCode?: number; message?: string; code?: string; details?: { preview?: unknown } }
+    if (!err?.statusCode || err.statusCode >= 500) throw e
+    const p = err.details?.preview
+    const preview = p && typeof p === 'object' ? acotarAlAlcance(p as Parameters<typeof acotarAlAlcance>[0], scope.allowedVenueIds) : null
+    return text({ ok: false, error: `${err.message}${extra}`, code: err.code ?? null, preview })
+  }
 
 /** Cuándo se descuenta una pendiente, en palabras: «al cerrar el periodo de octubre de 2026». */
 export const destinoLegible = (d: Destino) =>
