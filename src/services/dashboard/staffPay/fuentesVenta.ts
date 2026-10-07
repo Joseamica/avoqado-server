@@ -47,25 +47,18 @@ const TZ_DEFAULT = 'America/Mexico_City'
 const TOPE_PERIODOS_CERRADOS = 1000
 const acotar = (n: number) => Math.min(Math.max(Math.trunc(n) || 1, 1), 1000)
 
-interface RangoSede {
-  venueId: string
-  desde: Date
-  hasta: Date
-}
+/** Un rango de instantes [desde, hasta) de UNA sede: un tramo de días civiles ya convertido en su zona. */
+export type RangoSede = { venueId: string; desde: Date; hasta: Date }
+/** Una ventana de participación (`StaffPayVenueWindow`) en días civiles de la zona de su sede; `hasta` null = sin fin. */
+export type Ventana = { venueId: string; desde: string; hasta: string | null }
+/** ponytail: ventanas que se leen por operación (500 sedes × 10). Pasado el tope TRUENA (nunca recorta); se sube la constante. */
+export const TOPE_VENTANAS = 5000
 
 /** Un periodo que termina antes del inicio de pago al personal no barre nada: ni ventas ni anulaciones (B-D5). */
 const fueraDelSobre = (a: AlcanceBarrido) => !a.sedes.length || a.periodo.end < a.startDate
 
-/**
- * Spec §6.2 puntos 3 y 4 (B-D1): una venta «ya cae» en este cierre si su fecha civil —en la zona de SU sede— está en P o en
- * un periodo anterior GUARDADO como CLOSED, y nunca antes de `startDate`. Un canónico sin fila no aparece aquí: cuenta
- * como abierto y lo suyo espera a su propio cierre (Codex r1-10). Los rangos civiles contiguos se juntan en uno.
- * B4 r1: los rangos de los periodos cerrados son POR SEDE: un periodo cerrado sólo aporta su rango a las sedes de SU
- * `venueIds`; P, a todas las del alcance. Así una sede que entra tarde al plan barre desde el periodo en que entró, nunca
- * lo que vendió mientras no lo tenía (sus propinas ya se entregaron por fuera: se pagarían dos veces).
- */
-export async function rangosBarribles(db: Db, a: AlcanceBarrido): Promise<RangoSede[]> {
-  if (fueraDelSobre(a)) return []
+/** Los periodos CERRADOS ANTERIORES a P desde `startDate`, en días civiles y en orden (B-D1). Pasado el tope truena. */
+async function cerradosAnteriores(db: Db, a: AlcanceBarrido): Promise<Array<PeriodoCanonico & { venueIds: string[] }>> {
   const cerrados = await db.servicePayPeriod.findMany({
     where: {
       organizationId: a.organizationId,
@@ -77,20 +70,93 @@ export async function rangosBarribles(db: Db, a: AlcanceBarrido): Promise<RangoS
     take: TOPE_PERIODOS_CERRADOS + 1,
   })
   if (cerrados.length > TOPE_PERIODOS_CERRADOS) throw new Error('STAFF_PAY_DEMASIADOS_PERIODOS_CERRADOS')
-  return a.sedes.flatMap(s => {
-    const civiles: PeriodoCanonico[] = []
-    const suyos = cerrados.filter(x => x.venueIds.includes(s.venueId))
-    for (const c of [...suyos.map(x => ({ start: dbDateComoFecha(x.periodStart), end: dbDateComoFecha(x.periodEnd) })), a.periodo]) {
-      const start = c.start < a.startDate ? a.startDate : c.start
-      const u = civiles[civiles.length - 1]
-      if (u && diaCivilSiguiente(u.end) === start) u.end = c.end
-      else civiles.push({ start, end: c.end })
-    }
-    return civiles.map(c => {
-      const { from, to } = venuePeriodRange(c, s.tz)
-      return { venueId: s.venueId, desde: from, hasta: to }
-    })
+  return cerrados.map(x => ({ start: dbDateComoFecha(x.periodStart), end: dbDateComoFecha(x.periodEnd), venueIds: x.venueIds }))
+}
+
+/** Tramos civiles ordenados por inicio: recorta al inicio y junta los contiguos (y los encimados de unas simuladas). */
+function juntarContiguos(tramos: PeriodoCanonico[], startDate: string): PeriodoCanonico[] {
+  const civiles: PeriodoCanonico[] = []
+  for (const c of tramos) {
+    const start = c.start < startDate ? startDate : c.start
+    const u = civiles[civiles.length - 1]
+    if (u && start <= diaCivilSiguiente(u.end)) u.end = c.end > u.end ? c.end : u.end
+    else civiles.push({ start, end: c.end })
+  }
+  return civiles
+}
+
+/** Los tramos civiles de una sede como instantes, en SU zona (`venuePeriodRange`). */
+const enSuZona = (s: { venueId: string; tz: string }, civiles: PeriodoCanonico[]): RangoSede[] =>
+  civiles.map(c => {
+    const { from, to } = venuePeriodRange(c, s.tz)
+    return { venueId: s.venueId, desde: from, hasta: to }
   })
+
+/**
+ * Spec §6.2 puntos 3 y 4 (B-D1): una venta «ya cae» en este cierre si su fecha civil —en la zona de SU sede— está en P o en
+ * un periodo anterior GUARDADO como CLOSED, y nunca antes de `startDate`. Un canónico sin fila no aparece aquí: cuenta
+ * como abierto y lo suyo espera a su propio cierre (Codex r1-10). Los rangos civiles contiguos se juntan en uno.
+ * B4 r1: los rangos de los periodos cerrados son POR SEDE: un periodo cerrado sólo aporta su rango a las sedes de SU
+ * `venueIds`; P, a todas las del alcance. Así una sede que entra tarde al plan barre desde el periodo en que entró, nunca
+ * lo que vendió mientras no lo tenía (sus propinas ya se entregaron por fuera: se pagarían dos veces).
+ */
+export async function rangosBarribles(db: Db, a: AlcanceBarrido): Promise<RangoSede[]> {
+  if (fueraDelSobre(a)) return []
+  const cerrados = await cerradosAnteriores(db, a)
+  return a.sedes.flatMap(s =>
+    enSuZona(s, juntarContiguos([...cerrados.filter(x => x.venueIds.includes(s.venueId)), a.periodo], a.startDate)),
+  )
+}
+
+/**
+ * Participación por sede (fase 3, B10; diseño r3.4 + r4 + r4.5), SIN CONECTAR (B11 reemplaza con esto a `rangosBarribles`).
+ * `periodo` (rp) = P más los CERRADOS ANTERIORES a P desde `startDate`, IGUAL para todas las sedes (sin el filtro por
+ * `venueIds` de B4 r1: lo reemplaza la ventana); misma lectura, tope y fusión. `participacion` (rv) = `periodo ∩ ventanas`
+ * de cada sede, intersectado en DÍAS CIVILES y convertido después en su zona («desde el 1-nov» = 00:00 del 1-nov allá).
+ * Ventanas: UNA consulta de las sedes del alcance, con tope (`TOPE_VENTANAS`: truena); `o.ventanas` (simuladas, para las
+ * vistas previas de «entran / quedan fuera») reemplaza esa lectura.
+ */
+export async function rangosConParticipacion(
+  db: Db,
+  a: AlcanceBarrido,
+  o: { ventanas?: Ventana[] } = {},
+): Promise<{ periodo: RangoSede[]; participacion: RangoSede[] }> {
+  if (fueraDelSobre(a)) return { periodo: [], participacion: [] }
+  const civiles = juntarContiguos([...(await cerradosAnteriores(db, a)), a.periodo], a.startDate)
+  const porSede = new Map<string, Ventana[]>()
+  for (const v of o.ventanas ?? (await ventanasDelAlcance(db, a))) {
+    const suyas = porSede.get(v.venueId)
+    if (suyas) suyas.push(v)
+    else porSede.set(v.venueId, [v])
+  }
+  const periodo: RangoSede[] = []
+  const participacion: RangoSede[] = []
+  for (const s of a.sedes) {
+    periodo.push(...enSuZona(s, civiles))
+    const dias = civiles
+      .flatMap(c =>
+        (porSede.get(s.venueId) ?? []).map(v => ({
+          start: v.desde > c.start ? v.desde : c.start,
+          end: v.hasta !== null && v.hasta < c.end ? v.hasta : c.end,
+        })),
+      )
+      .filter(d => d.start <= d.end)
+      .sort((x, y) => x.start.localeCompare(y.start))
+    participacion.push(...enSuZona(s, juntarContiguos(dias, a.startDate)))
+  }
+  return { periodo, participacion }
+}
+
+/** Las ventanas de las sedes del alcance en esta organización, en una consulta y con tope (nunca recorta). */
+async function ventanasDelAlcance(db: Db, a: AlcanceBarrido): Promise<Ventana[]> {
+  const filas = await db.staffPayVenueWindow.findMany({
+    where: { organizationId: a.organizationId, venueId: { in: venueIdsDe(a) } },
+    select: { venueId: true, desde: true, hasta: true },
+    orderBy: [{ venueId: 'asc' }, { desde: 'asc' }],
+    take: TOPE_VENTANAS + 1,
+  })
+  if (filas.length > TOPE_VENTANAS) throw new Error('STAFF_PAY_DEMASIADAS_VENTANAS')
+  return filas.map(w => ({ venueId: w.venueId, desde: dbDateComoFecha(w.desde), hasta: w.hasta ? dbDateComoFecha(w.hasta) : null }))
 }
 
 /** `(sede = X AND col en [desde, hasta)) OR …` sobre las columnas de `alias` (alias fijos del código, nunca del usuario). */
@@ -127,33 +193,64 @@ export const nombreGuardadoSql = (organizationId: string, staffId: Prisma.Sql) =
 
 // ── Comisiones (spec §6.2) ──
 
+/** Una comisión que no está anulada ni congelada (sin su propio `SERVICE`): «ya congelada» por FUENTE, no por persona (B-D2). */
+const comisionViva = (a: 'cc') => Prisma.sql`
+  ${Prisma.raw(a)}.status <> 'VOIDED'
+  AND NOT EXISTS (
+    SELECT 1 FROM "ServiceEarning" e WHERE e."sourceType" = 'COMMISSION' AND e."sourceId" = ${Prisma.raw(a)}.id AND e.concept = 'SERVICE')`
+
+/** La comisión original `o` —no anulada— de un reverso de devolución: la llave de `createRefundCommission` (`originalPaymentId` + esquema + persona). */
+const originalDelReverso = (a: 'cc') => Prisma.sql`
+  FROM "Payment" rf
+  JOIN "CommissionCalculation" o
+    ON o."paymentId" = rf."processorData"->>'originalPaymentId' AND o."configId" = ${Prisma.raw(a)}."configId"
+   AND o."staffId" = ${Prisma.raw(a)}."staffId"
+  WHERE rf.id = ${Prisma.raw(a)}."paymentId" AND rf.type = 'REFUND' AND o.status <> 'VOIDED'`
+
+/** Una devolución de propina (alias `p`) que todavía no tiene su propio `SERVICE`. */
+const reembolsoDePropina = (a: 'p') => Prisma.sql`(
+  ${Prisma.raw(a)}.type = 'REFUND' AND ${Prisma.raw(a)}.status = 'COMPLETED' AND ${Prisma.raw(a)}."tipAmount" < 0
+  AND NOT EXISTS (
+    SELECT 1 FROM "ServiceEarning" er WHERE er."sourceType" = 'TIP' AND er."sourceId" = ${Prisma.raw(a)}.id AND er.concept = 'SERVICE'))`
+
+/** La propina ORIGINAL de la devolución `a` ya está congelada (`SERVICE`). */
+const propinaOriginalCongelada = (a: 'p') => Prisma.sql`EXISTS (
+  SELECT 1 FROM "ServiceEarning" ef
+  WHERE ef."sourceType" = 'TIP' AND ef.concept = 'SERVICE' AND ef."sourceId" = ${Prisma.raw(a)}."processorData"->>'originalPaymentId')`
+
 /**
- * Puntos 1-6 sobre `cc`. «Ya congelada» por FUENTE, no por persona (B-D2). Un reverso de devolución (su pago es un
- * REFUND) sólo entra si la comisión que revierte —misma llave que `createRefundCommission`: `originalPaymentId` + esquema +
- * persona— ya está congelada o entra en este mismo cierre (Codex r1-18): nunca se descuenta lo que el sobre no pagó.
- * Una original ANULADA no ampara a nadie en ninguna de las dos ramas: si estaba congelada, su anulación ya devuelve su
- * monto completo (§6.4) y el reverso descontaría otra vez.
+ * El reverso de algo que el sobre YA pagó (B10; r6.2): no anulado y sin su propio `SERVICE`, con su original congelada
+ * (`SERVICE`) y no anulada. La rama de reversos del barrido: sin ventana, sólo su fecha en `rp`. B12 lo reusa para las
+ * pendientes. `'COMMISSION'` sobre `CommissionCalculation` (alias `cc`); `'TIP'` sobre `Payment` (alias `p`).
  */
-function comisionBarrible(r: RangoSede[]): Prisma.Sql {
+export function reversoDeLoCongelado(fuente: 'COMMISSION', a: 'cc'): Prisma.Sql
+export function reversoDeLoCongelado(fuente: 'TIP', a: 'p'): Prisma.Sql
+export function reversoDeLoCongelado(fuente: FuenteVenta, a: 'cc' | 'p'): Prisma.Sql {
+  if (fuente === 'TIP') return Prisma.sql`(${reembolsoDePropina(a as 'p')} AND ${propinaOriginalCongelada(a as 'p')})`
+  return Prisma.sql`(
+    ${comisionViva(a as 'cc')}
+    AND EXISTS (
+      SELECT 1 ${originalDelReverso(a as 'cc')}
+        AND EXISTS (
+          SELECT 1 FROM "ServiceEarning" eo WHERE eo."sourceType" = 'COMMISSION' AND eo."sourceId" = o.id AND eo.concept = 'SERVICE')))`
+}
+
+/**
+ * Puntos 1-6 sobre `cc` (r2 §6; B10: `rp` = periodo, `rv` = participación; hoy todos pasan `rv = rp`). Toda fila cae en
+ * `rp` (factor común del índice venueId + fecha); una VENTA exige además `rv`. Un reverso de devolución (su pago es un
+ * REFUND) sólo entra si la comisión que revierte ya está congelada (`reversoDeLoCongelado`) o entra en este mismo cierre
+ * (su original en `rv`) (Codex r1-18): nunca se descuenta lo que el sobre no pagó. Una original ANULADA no ampara a nadie:
+ * si estaba congelada, su anulación ya devuelve su monto completo (§6.4) y el reverso descontaría otra vez.
+ */
+export function comisionBarrible(rp: RangoSede[], rv: RangoSede[]): Prisma.Sql {
   return Prisma.sql`
-    cc.status <> 'VOIDED'
-    AND ${enRangos('cc', 'calculatedAt', r)}
-    AND NOT EXISTS (
-      SELECT 1 FROM "ServiceEarning" e WHERE e."sourceType" = 'COMMISSION' AND e."sourceId" = cc.id AND e.concept = 'SERVICE')
+    ${comisionViva('cc')}
+    AND ${enRangos('cc', 'calculatedAt', rp)}
     AND (
-      NOT EXISTS (SELECT 1 FROM "Payment" rp WHERE rp.id = cc."paymentId" AND rp.type = 'REFUND')
-      OR EXISTS (
-        SELECT 1
-        FROM "Payment" rp
-        JOIN "CommissionCalculation" o
-          ON o."paymentId" = rp."processorData"->>'originalPaymentId' AND o."configId" = cc."configId" AND o."staffId" = cc."staffId"
-        WHERE rp.id = cc."paymentId" AND rp.type = 'REFUND' AND o.status <> 'VOIDED'
-          AND (
-            EXISTS (
-              SELECT 1 FROM "ServiceEarning" eo WHERE eo."sourceType" = 'COMMISSION' AND eo."sourceId" = o.id AND eo.concept = 'SERVICE')
-            OR ${enRangos('o', 'calculatedAt', r)}
-          )
-      )
+      (NOT EXISTS (SELECT 1 FROM "Payment" rf WHERE rf.id = cc."paymentId" AND rf.type = 'REFUND')
+       AND ${enRangos('cc', 'calculatedAt', rv)})
+      OR ${reversoDeLoCongelado('COMMISSION', 'cc')}
+      OR EXISTS (SELECT 1 ${originalDelReverso('cc')} AND ${enRangos('o', 'calculatedAt', rv)})
     )`
 }
 
@@ -173,9 +270,9 @@ function detalleComisiones(where: Prisma.Sql): Prisma.Sql {
     WHERE ${where}`
 }
 
-const idsComisiones = (a: AlcanceBarrido, r: RangoSede[], despuesDe: string | undefined, n: number) => Prisma.sql`
+const idsComisiones = (a: AlcanceBarrido, rp: RangoSede[], rv: RangoSede[], despuesDe: string | undefined, n: number) => Prisma.sql`
   SELECT cc.id FROM "CommissionCalculation" cc
-  WHERE cc."venueId" = ANY(${venueIdsDe(a)}::text[]) AND ${comisionBarrible(r)}
+  WHERE cc."venueId" = ANY(${venueIdsDe(a)}::text[]) AND ${comisionBarrible(rp, rv)}
     ${despuesDe ? Prisma.sql`AND cc.id > ${despuesDe}` : Prisma.empty}
   ORDER BY cc.id ASC
   LIMIT ${n}`
@@ -203,8 +300,11 @@ function reglaDelCobro(alias: 'p' | 'op', a: AlcanceBarrido): Prisma.Sql {
  * entra). Cobro: `Order.servedById`, si no `Payment.processedById`. Reembolso: la persona de la propina ORIGINAL ya
  * congelada, o —si la original entra en este mismo cierre— la que le toca hoy a la original; nunca quien reembolsó ni
  * quien atiende hoy la orden (Codex r1-18). Un reembolso no necesita ventana: lo que el sobre pagó siempre se descuenta.
+ * B10 (r2 §6): toda fila cae en `rp`; un COBRO, y la original de un reembolso que entra en este cierre (`en_este`), exigen
+ * además `rv` (hoy `rv = rp`). Reembolsos en dos ramas disjuntas: de una propina ya congelada (`reversoDeLoCongelado`,
+ * dueño de `congelada`) y de una que no (dueño de `en_este`; si no entra, NULL y ningún consumidor la toma).
  */
-function propinasBase(a: AlcanceBarrido, r: RangoSede[]): Prisma.Sql {
+export function propinasBase(a: AlcanceBarrido, rp: RangoSede[], rv: RangoSede[]): Prisma.Sql {
   return Prisma.sql`
     SELECT p.id, p."venueId", p."orderId", p."createdAt" AS instante, p."tipAmount" AS monto,
            CASE WHEN p.type = 'REFUND' THEN 'DEVOLUCION' ELSE 'VENTA' END AS motivo,
@@ -227,33 +327,32 @@ function propinasBase(a: AlcanceBarrido, r: RangoSede[]): Prisma.Sql {
       LEFT JOIN "Order" oo ON oo.id = op."orderId"
       WHERE p.type = 'REFUND' AND congelada."staffId" IS NULL
         AND op.id = p."processorData"->>'originalPaymentId' AND op."venueId" = p."venueId"
-        AND ${enRangos('op', 'createdAt', r)} AND ${reglaDelCobro('op', a)}
+        AND ${enRangos('op', 'createdAt', rv)} AND ${reglaDelCobro('op', a)}
     ) en_este ON true
     WHERE p."venueId" = ANY(${venueIdsDe(a)}::text[])
-      AND ${enRangos('p', 'createdAt', r)}
+      AND ${enRangos('p', 'createdAt', rp)}
       AND (
-        (${reglaDelCobro('p', a)})
-        OR (p.type = 'REFUND' AND p.status = 'COMPLETED' AND p."tipAmount" < 0
-            AND NOT EXISTS (
-              SELECT 1 FROM "ServiceEarning" er WHERE er."sourceType" = 'TIP' AND er."sourceId" = p.id AND er.concept = 'SERVICE'))
+        (${reglaDelCobro('p', a)} AND ${enRangos('p', 'createdAt', rv)})
+        OR ${reversoDeLoCongelado('TIP', 'p')}
+        OR (${reembolsoDePropina('p')} AND NOT ${propinaOriginalCongelada('p')})
       )`
 }
 
-function detallePropinas(a: AlcanceBarrido, r: RangoSede[], where: Prisma.Sql): Prisma.Sql {
+function detallePropinas(a: AlcanceBarrido, rp: RangoSede[], rv: RangoSede[], where: Prisma.Sql): Prisma.Sql {
   return Prisma.sql`
     SELECT 'TIP'::text AS fuente, 'SERVICE'::text AS concepto, b.id AS "sourceId", b."staffId", b."venueId", b.instante,
            ${local(Prisma.sql`b.instante`, 'YYYY-MM-DD')} AS "fechaLocal", ${local(Prisma.sql`b.instante`, 'HH24:MI')} AS hora,
            b.monto, v.name AS sede, ${personaSql} AS persona, ord."orderNumber" AS orden, NULL::text AS esquema,
            NULL::numeric AS base, b.motivo
-    FROM (${propinasBase(a, r)}) b
+    FROM (${propinasBase(a, rp, rv)}) b
     JOIN "Venue" v ON v.id = b."venueId"
     LEFT JOIN "Staff" s ON s.id = b."staffId"
     LEFT JOIN "Order" ord ON ord.id = b."orderId"
     WHERE b."staffId" IS NOT NULL AND ${where}`
 }
 
-const idsPropinas = (a: AlcanceBarrido, r: RangoSede[], despuesDe: string | undefined, n: number) => Prisma.sql`
-  SELECT b.id FROM (${propinasBase(a, r)}) b
+const idsPropinas = (a: AlcanceBarrido, rp: RangoSede[], rv: RangoSede[], despuesDe: string | undefined, n: number) => Prisma.sql`
+  SELECT b.id FROM (${propinasBase(a, rp, rv)}) b
   WHERE b."staffId" IS NOT NULL ${despuesDe ? Prisma.sql`AND b.id > ${despuesDe}` : Prisma.empty}
   ORDER BY b.id ASC
   LIMIT ${n}`
@@ -326,7 +425,7 @@ const aLinea = (f: FilaVenta): LineaBarrible => ({
 export async function comisionesBarribles(db: Db, a: AlcanceBarrido, o: { despuesDe?: string; limite: number }): Promise<LineaBarrible[]> {
   if (fueraDelSobre(a)) return []
   const r = await rangosBarribles(db, a)
-  const ids = (await db.$queryRaw<Array<{ id: string }>>(idsComisiones(a, r, o.despuesDe, acotar(o.limite)))).map(x => x.id)
+  const ids = (await db.$queryRaw<Array<{ id: string }>>(idsComisiones(a, r, r, o.despuesDe, acotar(o.limite)))).map(x => x.id)
   if (!ids.length) return []
   const filas = await db.$queryRaw<FilaVenta[]>`
     ${detalleComisiones(Prisma.sql`cc.id = ANY(${ids}::text[])`)} ORDER BY cc.id ASC`
@@ -336,10 +435,10 @@ export async function comisionesBarribles(db: Db, a: AlcanceBarrido, o: { despue
 export async function propinasBarribles(db: Db, a: AlcanceBarrido, o: { despuesDe?: string; limite: number }): Promise<LineaBarrible[]> {
   if (fueraDelSobre(a)) return []
   const r = await rangosBarribles(db, a)
-  const ids = (await db.$queryRaw<Array<{ id: string }>>(idsPropinas(a, r, o.despuesDe, acotar(o.limite)))).map(x => x.id)
+  const ids = (await db.$queryRaw<Array<{ id: string }>>(idsPropinas(a, r, r, o.despuesDe, acotar(o.limite)))).map(x => x.id)
   if (!ids.length) return []
   const filas = await db.$queryRaw<FilaVenta[]>`
-    ${detallePropinas(a, r, Prisma.sql`b.id = ANY(${ids}::text[])`)} ORDER BY b.id ASC`
+    ${detallePropinas(a, r, r, Prisma.sql`b.id = ANY(${ids}::text[])`)} ORDER BY b.id ASC`
   return filas.map(aLinea)
 }
 
@@ -354,13 +453,14 @@ export async function reversosPorAnulacion(db: Db, a: AlcanceBarrido, o: { despu
 /** Propinas que entrarían pero no tienen persona (spec §6.3): no bloquean el cierre; el preview las dice. */
 export async function propinasSinDueno(db: Db, a: AlcanceBarrido): Promise<{ n: number; total: Prisma.Decimal }> {
   if (fueraDelSobre(a)) return { n: 0, total: new Prisma.Decimal(0) }
-  const [x] = await db.$queryRaw<Array<{ n: number; total: Prisma.Decimal | null }>>(sqlPropinasSinDueno(a, await rangosBarribles(db, a)))
+  const r = await rangosBarribles(db, a)
+  const [x] = await db.$queryRaw<Array<{ n: number; total: Prisma.Decimal | null }>>(sqlPropinasSinDueno(a, r, r))
   return { n: x.n, total: x.total ?? new Prisma.Decimal(0) }
 }
 
-const sqlPropinasSinDueno = (a: AlcanceBarrido, r: RangoSede[]) => Prisma.sql`
+const sqlPropinasSinDueno = (a: AlcanceBarrido, rp: RangoSede[], rv: RangoSede[]) => Prisma.sql`
   SELECT COUNT(*)::int AS n, SUM(b.monto) AS total
-  FROM (${propinasBase(a, r)}) b
+  FROM (${propinasBase(a, rp, rv)}) b
   WHERE b."staffId" IS NULL AND b.motivo = 'VENTA'`
 
 /**
@@ -372,9 +472,9 @@ export async function sqlVentasDelPeriodo(db: Db, a: AlcanceBarrido, o: { staffI
   const r = await rangosBarribles(db, a)
   const dePersona = (col: string) => (o.staffId ? Prisma.sql`AND ${Prisma.raw(col)} = ${o.staffId}` : Prisma.empty)
   return Prisma.sql`
-    ${detalleComisiones(Prisma.sql`cc."venueId" = ANY(${venueIdsDe(a)}::text[]) AND ${comisionBarrible(r)} ${dePersona('cc."staffId"')}`)}
+    ${detalleComisiones(Prisma.sql`cc."venueId" = ANY(${venueIdsDe(a)}::text[]) AND ${comisionBarrible(r, r)} ${dePersona('cc."staffId"')}`)}
     UNION ALL
-    ${detallePropinas(a, r, Prisma.sql`true ${dePersona('b."staffId"')}`)}
+    ${detallePropinas(a, r, r, Prisma.sql`true ${dePersona('b."staffId"')}`)}
     UNION ALL
     ${detalleReversos(a, Prisma.sql`true ${dePersona('e."staffId"')}`)}`
 }
@@ -386,9 +486,9 @@ export async function sqlVentasDelPeriodo(db: Db, a: AlcanceBarrido, o: { staffI
 export async function consultasDeVentas(db: Db, a: AlcanceBarrido, n = 500, despuesDe: { comisiones?: string; propinas?: string } = {}) {
   const r = await rangosBarribles(db, a)
   return {
-    comisiones: idsComisiones(a, r, despuesDe.comisiones, n),
-    propinas: idsPropinas(a, r, despuesDe.propinas, n),
+    comisiones: idsComisiones(a, r, r, despuesDe.comisiones, n),
+    propinas: idsPropinas(a, r, r, despuesDe.propinas, n),
     reversos: Prisma.sql`${detalleReversos(a, Prisma.sql`true`)} ORDER BY e."sourceId" ASC LIMIT ${n}`,
-    sinDueno: sqlPropinasSinDueno(a, r),
+    sinDueno: sqlPropinasSinDueno(a, r, r),
   }
 }

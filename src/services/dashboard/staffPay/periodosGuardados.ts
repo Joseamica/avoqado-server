@@ -180,7 +180,7 @@ export async function hoyDeLaSede(venueId: string, ahora?: Date): Promise<string
 }
 
 /** «Septiembre» si es el mes completo; si no, «La quincena del 1 sep 2026 al 15 sep 2026». */
-function nombreDelPeriodo(start: string, end: string): string {
+export function nombreDelPeriodo(start: string, end: string): string {
   const mes = MESES_LARGOS[Number(start.slice(5, 7)) - 1]
   return start.endsWith('-01') && diaCivilSiguiente(end).endsWith('-01')
     ? `${mes[0].toUpperCase()}${mes.slice(1)}`

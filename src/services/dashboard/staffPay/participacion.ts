@@ -1,6 +1,13 @@
 import { Prisma } from '@prisma/client'
-import { ConflictError } from '../../../errors/AppError'
-import { PresupuestoDeEspera, tomarCandado } from '../../../utils/esperaDeCandados'
+import prisma from '../../../utils/prismaClient'
+import { BadRequestError, ConflictError, NotFoundError } from '../../../errors/AppError'
+import { PresupuestoDeEspera, tomarCandado, transaccionConPresupuesto } from '../../../utils/esperaDeCandados'
+import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
+import { fechaMx } from '../export.helpers'
+import { assertPermisoEnSedes, sedesConServicePay, TOPE_SEDES_CON_MODULO } from './acceso'
+import type { Ventana } from './fuentesVenta'
+import { hoyDeLaSede, lockPeriodosDeOrganizacion, nombreDelPeriodo } from './periodosGuardados'
+import { dbDateComoFecha, diaCivilAnterior, diaCivilSiguiente, fechaComoDbDate } from './periodos'
 
 /**
  * Participación por sede (fase 3, B9; diseño r7.1 + r6.3): el dueño activa «Pago al personal» POR SEDE y elige desde qué
@@ -22,7 +29,8 @@ import { PresupuestoDeEspera, tomarCandado } from '../../../utils/esperaDeCandad
  * Venue; escrituras de ventanas, candado de periodos de la organización → fila de `Organization` → Venue; traslado,
  * `Organization` (por id) → Venue. Todos con el presupuesto ÚNICO de su transacción (`PresupuestoDeEspera`).
  *
- * Todavía NINGÚN lector de dinero usa las ventanas (eso llega en B11-B13).
+ * B10 prepara, SIN CONECTAR, lo que lee y escribe la participación (`alcanceDelPeriodo`, `sedesConVentana`, `activarSede`,
+ * `desactivarSede`): ningún camino de producción —ruta, MCP o lector de dinero— los usa todavía (eso llega en B11-B13).
  */
 
 type Tx = Prisma.TransactionClient
@@ -109,3 +117,217 @@ export function sedeConPagoAlPersonalError(accion: 'trasladar' | 'borrar'): Conf
 export const LIVE_DEMO_CON_PAGO_AL_PERSONAL = 'LIVE_DEMO_CON_PAGO_AL_PERSONAL'
 export const demoConPagoAlPersonalError = (): ConflictError =>
   new ConflictError('Esta sucursal demo tiene historial de pago al personal: la limpieza la omite completa', LIVE_DEMO_CON_PAGO_AL_PERSONAL)
+
+// ── B10: alcance y sedes con ventana (diseño r5.2, r4.2) ──
+
+/**
+ * El alcance de un periodo (diseño r5.2). PURA: lo que compara llega resuelto ANTES (dentro de la foto o la transacción sólo
+ * se compara). CERRADO ⇒ su alcance congelado. Sin activar, o un periodo que termina antes del inicio ⇒ la regla D2 de la
+ * fase 2 (`guardadas ∪ activas`), sin ampliar por historia. Desde el inicio ⇒ también las sedes con ventana: toda sede que
+ * alguna vez estuvo en el sobre entra a cada cierre y sus devoluciones se descuentan solas (r4.2). Un periodo abierto que
+ * CRUZA el inicio no debería existir (`startDate` es un inicio canónico y la periodicidad queda fija al activar): truena.
+ */
+export function alcanceDelPeriodo(input: {
+  periodo: { start: string; end: string; estado: 'OPEN' | 'CLOSED' }
+  guardadas: string[]
+  activas: string[]
+  conVentana: string[]
+  startDate: string | null
+}): string[] {
+  const unir = (...listas: string[][]) => [...new Set(listas.flat())].sort()
+  const { periodo: p, startDate } = input
+  if (p.estado === 'CLOSED') return unir(input.guardadas)
+  if (startDate === null || p.end < startDate) return unir(input.guardadas, input.activas)
+  if (p.start >= startDate) return unir(input.guardadas, input.activas, input.conVentana)
+  throw new Error(`STAFF_PAY_PERIODO_CRUZA_EL_INICIO: el periodo ${p.start} a ${p.end} cruza el inicio ${startDate}`)
+}
+
+/**
+ * Las sedes con ALGUNA ventana (abierta o cerrada) en la organización (r4.2): su historia en el sobre. Con el mismo tope de
+ * sedes que `sedesConServicePay`; pasado, truena (un recorte dejaría a la sede 501 fuera del alcance sin avisar).
+ */
+export async function sedesConVentana(db: Pick<Tx, '$queryRaw'>, organizationId: string): Promise<string[]> {
+  const tope = TOPE_SEDES_CON_MODULO
+  const filas = await db.$queryRaw<Array<{ venueId: string }>>(Prisma.sql`
+    SELECT DISTINCT "venueId" FROM "StaffPayVenueWindow" WHERE "organizationId" = ${organizationId}
+    ORDER BY "venueId" LIMIT ${tope + 1}`)
+  if (filas.length > tope) {
+    throw new BadRequestError(
+      `Esta organización tiene más de ${tope} sedes con pago al personal: el cierre no puede continuar; contacta a Avoqado.`,
+      'DEMASIADAS_SEDES',
+    )
+  }
+  return filas.map(f => f.venueId)
+}
+
+// ── B10: activar y desactivar UNA sede (diseño r3.3, r4.6, r4.7, r4.8, r5.3) — servicios SIN rutas ni MCP hasta B11 ──
+
+const SIN_PERMISO = 'Para activar o desactivar una sede necesitas el permiso de cerrar periodos en esa sede'
+const futura = (hoy: string) => `La fecha no puede ser futura: lo más adelante es hoy, ${fechaMx(hoy)}`
+const fueraDeRango = (mensaje: string, rango: { desde: string; hasta: string }) =>
+  new BadRequestError(mensaje, 'FECHA_FUERA_DE_RANGO', rango)
+
+/**
+ * Lo que se resuelve ANTES de la transacción, con el cliente global: la sede es de la organización de quien pide (si no,
+ * 404 como en los ajustes), el permiso de cerrar periodos EN ESA SEDE y su «hoy». Dentro sólo se bloquea y se compara.
+ */
+async function prepararSede(input: { userId: string; venueId: string; sedeId: string; ahora?: Date }) {
+  const quien = await prisma.venue.findUnique({ where: { id: input.venueId }, select: { organizationId: true } })
+  const sede = await prisma.venue.findUnique({ where: { id: input.sedeId }, select: { organizationId: true, name: true } })
+  if (!quien || !sede || quien.organizationId !== sede.organizationId) throw new NotFoundError('Sede no encontrada')
+  await assertPermisoEnSedes(input.userId, [input.sedeId], 'staffpay:close', SIN_PERMISO)
+  return { organizationId: sede.organizationId, nombre: sede.name, hoy: await hoyDeLaSede(input.sedeId, input.ahora) }
+}
+
+/** El orden de las escrituras de ventanas (r5.3, el de la activación): periodos de la organización → su fila → la sede. */
+async function bloquearParaVentanas(tx: Tx, organizationId: string, sedeId: string, presupuesto: PresupuestoDeEspera) {
+  await lockPeriodosDeOrganizacion(tx, organizationId, presupuesto)
+  await bloquearOrganizacion(tx, organizationId, presupuesto)
+  await bloquearSedesDeLaOrganizacion(tx, organizationId, [sedeId], presupuesto)
+}
+
+/**
+ * `mínimo` (r3.3, r4): el mayor entre `staffPayStartDate` y el día siguiente al MAYOR `periodEnd` CERRADO de la organización
+ * (aunque se haya cerrado fuera de orden: nunca se toca un cerrado ni lo anterior a uno). Se lee DENTRO de la transacción,
+ * después de los candados: con SERIALIZABLE, un cierre que confirmó mientras se esperaba hace repetir la transacción (SSI).
+ * `porQue`: por qué ése es el mínimo (el periodo cerrado que lo fija, o el inicio). Sin activar ⇒ 409 NO_ACTIVADO.
+ */
+async function minimoDeLaOrganizacion(tx: Tx, organizationId: string) {
+  const org = await tx.organization.findUniqueOrThrow({ where: { id: organizationId }, select: { staffPayStartDate: true } })
+  if (!org.staffPayStartDate) throw new ConflictError('Activa primero el pago al personal', 'NO_ACTIVADO')
+  const startDate = dbDateComoFecha(org.staffPayStartDate)
+  const ultimo = await tx.servicePayPeriod.findFirst({
+    where: { organizationId, status: 'CLOSED' },
+    orderBy: { periodEnd: 'desc' },
+    select: { periodStart: true, periodEnd: true },
+  })
+  const tras = ultimo ? diaCivilSiguiente(dbDateComoFecha(ultimo.periodEnd)) : null
+  if (!ultimo || !tras || tras <= startDate) return { minimo: startDate, porQue: 'Es antes del inicio de pago al personal' }
+  return { minimo: tras, porQue: `${nombreDelPeriodo(dbDateComoFecha(ultimo.periodStart), dbDateComoFecha(ultimo.periodEnd))} ya se cerró` }
+}
+
+/** El `EXCLUDE` de la tabla (23P01) como 409: un traslape que aun así llegue (otra organización, datos viejos) nunca es un 500. */
+async function sinTraslape<T>(escribir: () => Promise<T>): Promise<T> {
+  try {
+    return await escribir()
+  } catch (e) {
+    const x = e as { code?: string; meta?: { code?: string }; message?: string } | null
+    const traslape =
+      x?.code === '23P01' || x?.meta?.code === '23P01' || /23P01|StaffPayVenueWindow_sin_traslape/.test(String(x?.message ?? ''))
+    if (traslape)
+      throw new ConflictError('Esas fechas se cruzan con otros días activos de la sede; revisa y vuelve a intentar', 'VENTANA_SE_CRUZA')
+    throw e
+  }
+}
+
+/**
+ * Activa UNA sede «desde» un día (r3.3; por defecto hoy en su zona). Exige `staffpay:close` en la sede, la organización
+ * activada (409 NO_ACTIVADO), el plan HOY en la sede (`sedesConServicePay`, resuelto antes; 409 SEDE_SIN_PLAN) y ninguna
+ * ventana abierta (409 YA_ACTIVA). `desde ∈ [mínimo', hoy]`, con `mínimo'` = max(mínimo, día siguiente al `hasta` de su
+ * última ventana cerrada); fuera ⇒ 400 FECHA_FUERA_DE_RANGO `{ desde, hasta }` con el porqué. `minimo`: el de la organización.
+ */
+export async function activarSede(input: {
+  userId: string
+  venueId: string
+  sedeId: string
+  desde?: string
+  ahora?: Date
+}): Promise<{ ventana: Ventana; minimo: string }> {
+  if (input.desde !== undefined) fechaComoDbDate(input.desde) // la forma, antes de comparar como texto
+  const { organizationId, nombre, hoy } = await prepararSede(input)
+  const activas = await sedesConServicePay(organizationId)
+  return transaccionConPresupuesto(async (tx, presupuesto) => {
+    await bloquearParaVentanas(tx, organizationId, input.sedeId, presupuesto)
+    const { minimo, porQue } = await minimoDeLaOrganizacion(tx, organizationId)
+    if (!activas.includes(input.sedeId)) {
+      throw new ConflictError(`La sede ${nombre} no tiene Pago al personal en su plan: contrátalo para activarla`, 'SEDE_SIN_PLAN')
+    }
+    const donde = { organizationId, venueId: input.sedeId }
+    const abierta = await tx.staffPayVenueWindow.findFirst({ where: { ...donde, hasta: null }, select: { desde: true } })
+    if (abierta) {
+      throw new ConflictError(`La sede ${nombre} ya está activa desde el ${fechaMx(dbDateComoFecha(abierta.desde))}`, 'YA_ACTIVA')
+    }
+    const cerrada = await tx.staffPayVenueWindow.findFirst({
+      where: { ...donde, hasta: { not: null } },
+      orderBy: { hasta: 'desc' },
+      select: { hasta: true },
+    })
+    const ultimoDia = cerrada?.hasta ? dbDateComoFecha(cerrada.hasta) : null
+    const porLaVentana = ultimoDia !== null && diaCivilSiguiente(ultimoDia) > minimo
+    const rango = { desde: porLaVentana ? diaCivilSiguiente(ultimoDia) : minimo, hasta: hoy }
+    const fecha = input.desde ?? hoy
+    if (fecha < rango.desde) {
+      const motivo = porLaVentana ? `La sede ya estuvo activa hasta el ${fechaMx(ultimoDia)}` : porQue
+      throw fueraDeRango(`${motivo}; lo más atrás es el ${fechaMx(rango.desde)}`, rango)
+    }
+    if (fecha > hoy) throw fueraDeRango(futura(hoy), rango)
+    const w = await sinTraslape(() =>
+      tx.staffPayVenueWindow.create({ data: { ...donde, desde: fechaComoDbDate(fecha), activadaPor: input.userId }, select: { id: true } }),
+    )
+    await writeLegacyActivityAuditTx(tx, {
+      staffId: input.userId,
+      venueId: input.sedeId,
+      action: 'SERVICE_PAY_VENUE_ACTIVATED',
+      entity: 'StaffPayVenueWindow',
+      entityId: w.id,
+      data: { desde: fecha, minimo },
+    })
+    return { ventana: { venueId: input.sedeId, desde: fecha, hasta: null }, minimo }
+  })
+}
+
+/**
+ * Desactiva UNA sede «hasta» un día que todavía entra (r3.3; por defecto hoy). NO exige plan (r4.7: es la salida del
+ * bloqueo de una sede activa sin plan). Exige una ventana abierta (409 NO_ACTIVA). `hasta ∈ [max(ventana.desde, mínimo) − 1
+ * día, hoy]`; fuera ⇒ 400 FECHA_FUERA_DE_RANGO. `hasta = desde − 1` BORRA la ventana (sólo si nunca tocó un cerrado);
+ * si no, la cierra con `hasta` y `desactivadaPor`. `ventana`: la que quedó, o null si se borró.
+ */
+export async function desactivarSede(input: {
+  userId: string
+  venueId: string
+  sedeId: string
+  hasta?: string
+  ahora?: Date
+}): Promise<{ ventana: Ventana | null; minimo: string }> {
+  if (input.hasta !== undefined) fechaComoDbDate(input.hasta)
+  const { organizationId, nombre, hoy } = await prepararSede(input)
+  return transaccionConPresupuesto(async (tx, presupuesto) => {
+    await bloquearParaVentanas(tx, organizationId, input.sedeId, presupuesto)
+    const { minimo, porQue } = await minimoDeLaOrganizacion(tx, organizationId)
+    const abierta = await tx.staffPayVenueWindow.findFirst({
+      where: { organizationId, venueId: input.sedeId, hasta: null },
+      select: { id: true, desde: true },
+    })
+    if (!abierta) throw new ConflictError(`La sede ${nombre} no está activa en pago al personal`, 'NO_ACTIVA')
+    const desde = dbDateComoFecha(abierta.desde)
+    const porElCierre = minimo > desde
+    const rango = { desde: diaCivilAnterior(porElCierre ? minimo : desde), hasta: hoy }
+    const fecha = input.hasta ?? hoy
+    if (fecha < rango.desde) {
+      throw fueraDeRango(
+        porElCierre
+          ? `${porQue}; lo más atrás es el ${fechaMx(rango.desde)}`
+          : `La sede se activó el ${fechaMx(desde)}; lo más atrás es el ${fechaMx(rango.desde)} (así se borra la activación)`,
+        rango,
+      )
+    }
+    if (fecha > hoy) throw fueraDeRango(futura(hoy), rango)
+    const borrada = fecha === diaCivilAnterior(desde)
+    if (borrada) await tx.staffPayVenueWindow.delete({ where: { id: abierta.id } })
+    else {
+      await tx.staffPayVenueWindow.update({
+        where: { id: abierta.id },
+        data: { hasta: fechaComoDbDate(fecha), desactivadaPor: input.userId },
+      })
+    }
+    await writeLegacyActivityAuditTx(tx, {
+      staffId: input.userId,
+      venueId: input.sedeId,
+      action: 'SERVICE_PAY_VENUE_DEACTIVATED',
+      entity: 'StaffPayVenueWindow',
+      entityId: abierta.id,
+      data: { hasta: fecha, minimo, borrada },
+    })
+    return { ventana: borrada ? null : { venueId: input.sedeId, desde, hasta: fecha }, minimo }
+  })
+}

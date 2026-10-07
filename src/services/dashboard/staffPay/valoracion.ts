@@ -42,7 +42,18 @@ export interface FiltroValoracion {
    */
   modo?: 'vivo' | 'periodo'
   periodId?: string
+  /**
+   * Participación por sede (fase 3, B10; diseño r6.1, r4.1). Filtra SÓLO las clases sin ancla (la rama de anclas no se toca:
+   * una clase congelada sigue corrigiéndose aunque su sede ya no esté activa).
+   * 'ninguna' (default): lo de hoy, sin filtro. Ningún camino de producción pasa otra cosa hasta B11.
+   * 'real': antes de `staffPayStartDate` (o sin activar) la regla D2 de la fase 2; desde el inicio, la sede activa
+   * (`StaffPayVenueWindow`) en la fecha local de la clase.
+   * 'fuera': exactamente las que 'real' deja fuera; sólo en modo vivo (las ancladas siempre entran).
+   */
+  participacion?: Participacion
 }
+
+export type Participacion = 'ninguna' | 'real' | 'fuera'
 
 export interface ClaseValorada {
   classSessionId: string
@@ -93,6 +104,7 @@ export interface ResumenSede {
  */
 export function valoracionCte(f: FiltroValoracion): Prisma.Sql {
   if (f.modo === 'periodo' && !f.periodId) throw new Error('valoracionCte: el modo periodo exige periodId')
+  if (f.participacion === 'fuera' && f.modo === 'periodo') throw new Error("valoracionCte: 'fuera' sólo se usa en modo vivo")
   // UN arreglo como parámetro, no `IN ($1…$500)`: Prisma reusa la sentencia preparada y, a la sexta, Postgres pasa al plan
   // genérico. Con la lista suelta, desde el 6.º lote cada uno pasaba de ~15 ms a 275 ms con 20,000 clases (~800 con 50,000),
   // y volvía a 15 con `plan_cache_mode = force_custom_plan` (A13). Con `= ANY($1)` se queda en ~15-20 ms sin forzar nada.
@@ -111,6 +123,22 @@ export function valoracionCte(f: FiltroValoracion): Prisma.Sql {
       (cs.status = 'CANCELLED') AS cancelada,
       cs."cancelledAt" AS cancelada_en, cs."originalStaffId" AS coach_original, cs."staffAssignedAt" AS asignada_en,
       ps."payCountOverride", ps."payAmountOverride", COALESCE(ps."payExcluded", false) AS excluida`
+  // Participación por sede (B10, r4.1), sobre la fecha civil LOCAL de la clase (la de `fecha_local`): antes del inicio de
+  // pago al personal (o sin activar) entra como en la fase 2 (regla D2); desde el inicio, sólo si su sede está activa ESE día
+  // en ESTA organización. 'fuera' es la negación exacta; 'ninguna', sin filtro (lo de hoy). `fl` es una EXPRESIÓN de SQL
+  // (columna de la clase), no un `Date` atado: va a la izquierda para que la guarda de binds de fecha no la confunda con uno.
+  const fl = Prisma.sql`(((cs."startsAt" AT TIME ZONE 'UTC') AT TIME ZONE ${f.tz}))::date`
+  const participa = Prisma.sql`(
+          NOT EXISTS (SELECT 1 FROM "Organization" og WHERE og.id = ${f.organizationId}
+                      AND og."staffPayStartDate" IS NOT NULL AND ${fl} >= og."staffPayStartDate")
+          OR EXISTS (SELECT 1 FROM "StaffPayVenueWindow" w WHERE w."organizationId" = ${f.organizationId}
+                     AND w."venueId" = cs."venueId" AND w.desde <= ${fl} AND (w.hasta IS NULL OR w.hasta >= ${fl})))`
+  const porParticipacion =
+    f.participacion === 'real'
+      ? Prisma.sql`AND ${participa}`
+      : f.participacion === 'fuera'
+        ? Prisma.sql`AND NOT ${participa}`
+        : Prisma.empty
   // Sin ancla, del rango de la sede ya terminadas (índice por sede + startsAt). Terminada = su horario pasó o está CANCELADA:
   // una cancelada terminó al cancelarse, lo que paga ya no cambia (D5-fix, Codex D-1: una cancelada tarde que terminaba
   // después del cierre quedaba fuera de él, sin devengo ni ancla). La misma regla en `origenDeClase` y en la tarjeta.
@@ -123,6 +151,7 @@ export function valoracionCte(f: FiltroValoracion): Prisma.Sql {
         AND (cs."endsAt" <= ${utcTs(f.ahora)} OR cs.status = 'CANCELLED')
         ${porEstado}
         AND ps."originPeriodId" IS NULL
+        ${porParticipacion}
         ${porClases}
         ${porCoach}`
   // Fase 3 (§6.6): en modo vivo una cancelada sólo vale si su versión tiene la regla de cancelación tardía. Aquí entran las

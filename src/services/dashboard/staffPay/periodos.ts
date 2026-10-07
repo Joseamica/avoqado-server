@@ -48,6 +48,12 @@ export function diaCivilSiguiente(fecha: string): string {
   return `${t.getUTCFullYear()}-${pad(t.getUTCMonth() + 1)}-${pad(t.getUTCDate())}`
 }
 
+export function diaCivilAnterior(fecha: string): string {
+  const [y, mo, d] = partes(fecha)
+  const t = new Date(Date.UTC(y, mo - 1, d - 1))
+  return `${t.getUTCFullYear()}-${pad(t.getUTCMonth() + 1)}-${pad(t.getUTCDate())}`
+}
+
 /** La misma fecha `n` meses después (o antes, con `n` negativo); el día se recorta al último del mes (31-mar − 1 = 28-feb). */
 export function sumarMeses(fecha: string, n: number): string {
   const [y, mo, d] = partes(fecha)
