@@ -21,6 +21,31 @@ describe('enUnaFoto: timeout y vencimiento', () => {
     expect(prismaMock.$transaction).toHaveBeenLastCalledWith(expect.any(Function), expect.objectContaining({ timeout: 120_000 }))
   })
 
+  it('B14: el mismo tope corta en la base (statement_timeout de la transacción), después de READ ONLY', async () => {
+    tx.$executeRawUnsafe.mockClear()
+    await enUnaFoto(async () => 1)
+    expect(tx.$executeRawUnsafe).toHaveBeenCalledWith('SET LOCAL statement_timeout = 60000')
+    tx.$executeRawUnsafe.mockClear()
+    await enUnaFoto(async () => 1, { timeoutMs: 120_000, planPersonalizado: true })
+    expect(tx.$executeRawUnsafe.mock.calls.map(c => c[0])).toEqual([
+      'SET LOCAL statement_timeout = 120000',
+      'SET LOCAL plan_cache_mode = force_custom_plan',
+    ])
+  })
+
+  it('B14: una sentencia cancelada por el tope (57014) también es 409 LECTURA_VENCIDA', async () => {
+    const cancelada = Object.assign(new Error('Raw query failed. Code: `57014`. Message: `canceling statement due to statement timeout`'), {
+      code: 'P2010',
+      meta: { code: '57014' },
+    })
+    prismaMock.$transaction = jest.fn().mockRejectedValue(cancelada) as any
+    await expect(enUnaFoto(async () => 1)).rejects.toMatchObject({ statusCode: 409, code: 'LECTURA_VENCIDA' })
+    // Otra cancelación (no por tiempo) o un error de la consulta pasan tal cual.
+    const otra = Object.assign(new Error('Raw query failed. Code: `42P01`'), { code: 'P2010', meta: { code: '42P01' } })
+    prismaMock.$transaction = jest.fn().mockRejectedValue(otra) as any
+    await expect(enUnaFoto(async () => 1)).rejects.toBe(otra)
+  })
+
   it('una foto vencida (P2028) es 409 LECTURA_VENCIDA en español; cualquier otro error pasa tal cual', async () => {
     const vencida = Object.assign(new Error('Transaction already closed: A query cannot be executed on an expired transaction'), {
       code: 'P2028',
