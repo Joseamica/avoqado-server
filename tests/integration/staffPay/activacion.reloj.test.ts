@@ -3,9 +3,11 @@
 // 30-sep a las 23:59:59.7 (CDMX) con `inicioEsperado` = 1-sep que obtiene el candado el 1-oct a las 00:00:02 ⇒ 409 INICIO_CAMBIO y
 // nada escrito (antes: activaba desde el 1-sep). Hermano, las propinas: la ventana empieza o termina en el instante en que se
 // obtuvo el candado, no en el de la petición. Reloj simulado SÓLO en `Date` (los temporizadores reales: la barrera los usa).
+// Ronda 1 (R1): lo mismo detenida en la fila de la organización (como la retiene un traslado, sin el candado de periodos) y en
+// la de la sede: «hoy» va después de los TRES candados.
 import prisma from '@/utils/prismaClient'
 import { activarPagoAlPersonal, cambiarPropinas, estadoActivacion } from '@/services/dashboard/staffPay/activacion.service'
-import { barreraDeLaOrganizacion, borrarMundo, crearMundo, Mundo } from './_mundo'
+import { barreraDeLaOrganizacion, barreraDeLaSede, barreraDelTrasladoEnLaOrganizacion, borrarMundo, crearMundo, Mundo } from './_mundo'
 
 jest.mock('@/services/dashboard/staffPay/acceso', () => ({
   ...jest.requireActual('@/services/dashboard/staffPay/acceso'),
@@ -51,12 +53,22 @@ const resultado = <T>(p: Promise<T>) =>
   )
 const logs = (action: string) => prisma.activityLog.count({ where: { action, entityId: m.orgId } })
 
-/** Corre `operacion` detenida en el candado de periodos de la organización; con ella esperando, el reloj pasa a `despues`. */
-async function conElRelojMoviendoseEnElCandado<T>(operacion: () => Promise<T>, despues: string) {
-  const b = await barreraDeLaOrganizacion(m.orgId)
+type Barrera = Awaited<ReturnType<typeof barreraDeLaOrganizacion>>
+/**
+ * Corre `operacion` detenida en un candado (por defecto, el de periodos de la organización); con ella esperando, el reloj pasa
+ * a `despues`.
+ */
+async function conElRelojMoviendoseEnElCandado<T>(
+  operacion: () => Promise<T>,
+  despues: string,
+  tomar: () => Promise<Barrera> = () => barreraDeLaOrganizacion(m.orgId),
+) {
+  const b = await tomar()
   try {
-    const enCurso = resultado(operacion())
-    await b.esperarA(1)
+    let terminada = false
+    const enCurso = resultado(operacion()).finally(() => (terminada = true))
+    // Si contesta sin llegar al candado (decidió antes), se deja de esperar: la prueba cae por su resultado, no por tiempo.
+    await b.esperarA(1, { mientras: () => !terminada })
     jest.setSystemTime(new Date(despues))
     await b.soltar()
     return await enCurso
@@ -88,6 +100,52 @@ describe('B14-fix F5: el reloj se lee bajo el candado', () => {
     )
     expect(r.error).toBeNull()
     expect(r.valor).toEqual({ startDate: '2026-10-01', yaActivado: false })
+  }, 60_000)
+
+  // B14-fix ronda 1 (R1): «hoy» va después de los TRES candados (periodos → fila de la organización → sedes). Un traslado toma la
+  // fila de la organización SIN el candado de periodos: la activación ya pasó ése y se detiene en la fila mientras pasa la medianoche.
+  it('R1 · detenida en la FILA de la organización (un traslado la tiene FOR NO KEY UPDATE) al cruzar la medianoche ⇒ 409 INICIO_CAMBIO y nada escrito', async () => {
+    relojEn('2026-10-01T05:59:59.700Z')
+    const r = await conElRelojMoviendoseEnElCandado(
+      () => activarPagoAlPersonal({ userId: m.owner, venueId: m.venueId, periodicidad: 'MONTHLY', inicioEsperado: '2026-09-01' }),
+      '2026-10-01T06:00:02.000Z',
+      () => barreraDelTrasladoEnLaOrganizacion(m.orgId),
+    )
+    expect(r.valor).toBeNull()
+    expect(r.error).toMatchObject({ statusCode: 409, code: 'INICIO_CAMBIO' })
+    jest.useRealTimers()
+    expect(await estadoActivacion(prisma, m.orgId)).toEqual({ activado: false, startDate: null, propinasEncendidas: false })
+    expect(await prisma.staffPayVenueWindow.count({ where: { organizationId: m.orgId } })).toBe(0)
+    expect(await logs('SERVICE_PAY_ACTIVATED')).toBe(0)
+  }, 60_000)
+
+  it('R1 · detenida en la fila de la organización, con la fecha del día del candado (1-oct) ⇒ activa desde el 1-oct', async () => {
+    relojEn('2026-10-01T05:59:59.700Z')
+    const r = await conElRelojMoviendoseEnElCandado(
+      () => activarPagoAlPersonal({ userId: m.owner, venueId: m.venueId, periodicidad: 'MONTHLY', inicioEsperado: '2026-10-01' }),
+      '2026-10-01T06:00:02.000Z',
+      () => barreraDelTrasladoEnLaOrganizacion(m.orgId),
+    )
+    expect(r.error).toBeNull()
+    expect(r.valor).toEqual({ startDate: '2026-10-01', yaActivado: false })
+    jest.useRealTimers()
+    const w = await prisma.staffPayVenueWindow.findMany({ where: { organizationId: m.orgId }, select: { desde: true }, take: 5 })
+    expect(w.map(x => x.desde.toISOString().slice(0, 10))).toEqual(['2026-10-01'])
+  }, 60_000)
+
+  it('R1 · detenida en la fila de la SEDE (el tercer candado) al cruzar la medianoche ⇒ 409 INICIO_CAMBIO y nada escrito', async () => {
+    relojEn('2026-10-01T05:59:59.700Z')
+    const r = await conElRelojMoviendoseEnElCandado(
+      () => activarPagoAlPersonal({ userId: m.owner, venueId: m.venueId, periodicidad: 'MONTHLY', inicioEsperado: '2026-09-01' }),
+      '2026-10-01T06:00:02.000Z',
+      () => barreraDeLaSede(m.venueId),
+    )
+    expect(r.valor).toBeNull()
+    expect(r.error).toMatchObject({ statusCode: 409, code: 'INICIO_CAMBIO' })
+    jest.useRealTimers()
+    expect(await estadoActivacion(prisma, m.orgId)).toEqual({ activado: false, startDate: null, propinasEncendidas: false })
+    expect(await prisma.staffPayVenueWindow.count({ where: { organizationId: m.orgId } })).toBe(0)
+    expect(await logs('SERVICE_PAY_ACTIVATED')).toBe(0)
   }, 60_000)
 
   it('propinas: la ventana se abre en el instante en que se obtuvo el candado, no en el de la petición', async () => {

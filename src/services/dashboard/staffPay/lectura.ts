@@ -41,7 +41,9 @@ export async function prepararLectura(input: {
   const activas = await sedesConServicePay(input.organizationId)
   const conVentana = await sedesConVentana(prisma, input.organizationId)
   const candidatas = [...new Set([...(filaAhora?.venueIds ?? []), ...activas, ...conVentana])]
-  const enConexion = input.soloSedes ? candidatas.filter(v => input.soloSedes!.includes(v)) : candidatas
+  // Ronda 1 (R2): un Set; con SUPERADMIN la conexión trae TODAS las sedes de la plataforma (`includes` sería n·m).
+  const conexion = input.soloSedes ? new Set(input.soloSedes) : null
+  const enConexion = conexion ? candidatas.filter(v => conexion.has(v)) : candidatas
   const { venueIds: permitidas } = await sedesLegiblesDe(input.userId, enConexion)
   return { organizationId: input.organizationId, activas, conVentana, permitidas: new Set(permitidas) }
 }

@@ -80,7 +80,8 @@ export async function estadoSedes(input: {
       'DEMASIADAS_SEDES',
     )
   }
-  const pedidas = input.soloSedes ? todas.filter(v => input.soloSedes!.includes(v.id)) : todas
+  const conexion = input.soloSedes ? new Set(input.soloSedes) : null // ronda 1 (R2): con SUPERADMIN, todas las sedes
+  const pedidas = conexion ? todas.filter(v => conexion.has(v.id)) : todas
   const permisos = await permisosPorSede(
     input.userId,
     pedidas.map(v => v.id),

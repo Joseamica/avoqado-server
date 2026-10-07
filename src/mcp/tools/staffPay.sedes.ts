@@ -14,26 +14,44 @@ type PorDestino = DevolucionesPendientes['porDestino']
 type Pendientes = { n: number; total: string; porDestino: PorDestino }
 type SedeConCuentas = { venueId: string; nombre: string; estado: EstadoSede; entra: Cuenta; fuera: Cuenta }
 
+const esObjeto = (x: unknown): x is Record<string, unknown> => typeof x === 'object' && x !== null && !Array.isArray(x)
+const MONTO = /^-?\d+(\.\d+)?$/
+/** Un renglón de pendientes por sede que se puede sumar: con su sede, un `n` entero y un monto en pesos legible. */
+const renglonSumable = (x: unknown): x is { venueId: string; n: number; total: string } =>
+  esObjeto(x) && typeof x.venueId === 'string' && Number.isInteger(x.n) && typeof x.total === 'string' && MONTO.test(x.total)
+
 /**
  * Revisión de B12 #7: `porSede` y las pendientes de una vista previa, acotadas a `permitidas` (las sedes del alcance de la
  * conexión). Las pendientes se rehacen con lo que queda: cada destino suma SUS sedes permitidas (agregados exactos de la base,
  * en `Prisma.Decimal`); un destino sin ninguna se quita. Lo demás de la vista previa no se toca.
+ * B14-fix ronda 1 (R3): no SUPONE la forma (la de un rechazo del service puede venir parcial). Lo que no se puede atribuir a una
+ * sede de la conexión no sale: `pendientes` sin lista `porDestino` se quita entera, un destino sin lista `porSede` también, y un
+ * renglón sin sede o sin monto legible no se suma; `porSede` que no es lista, fuera. Nunca un TypeError (500) en vez del 4xx.
  */
 export function acotarAlAlcance<T extends { porSede?: Array<{ venueId: string }>; pendientes?: Pendientes }>(
   p: T,
   permitidas: readonly string[],
 ): T {
-  const en = (v: string) => permitidas.includes(v)
+  const enConexion = new Set(permitidas) // ronda 1 (R2): con SUPERADMIN, todas las sedes de la plataforma
+  const en = (v: unknown) => typeof v === 'string' && enConexion.has(v)
   const out: T = { ...p }
-  if (p.porSede) out.porSede = p.porSede.filter(s => en(s.venueId))
+  if (p.porSede !== undefined) {
+    if (Array.isArray(p.porSede)) out.porSede = p.porSede.filter(s => esObjeto(s) && en(s.venueId))
+    else delete out.porSede
+  }
   if (p.pendientes) {
+    if (!esObjeto(p.pendientes) || !Array.isArray(p.pendientes.porDestino)) {
+      delete out.pendientes
+      return out
+    }
     const sumar = (xs: Array<{ n: number; total: string }>) => ({
       n: xs.reduce((a, x) => a + x.n, 0),
       total: xs.reduce((a, x) => a.plus(x.total), new Prisma.Decimal(0)).toFixed(2),
     })
-    const porDestino = p.pendientes.porDestino.flatMap(d => {
-      const porSede = d.porSede.filter(x => en(x.venueId))
-      return porSede.length ? [{ ...d, ...sumar(porSede), porSede }] : []
+    const porDestino = (p.pendientes.porDestino as unknown[]).flatMap(d => {
+      if (!esObjeto(d) || !Array.isArray(d.porSede)) return []
+      const porSede = d.porSede.filter(renglonSumable).filter(x => en(x.venueId))
+      return porSede.length ? [{ ...(d as unknown as PorDestino[number]), ...sumar(porSede), porSede }] : []
     })
     out.pendientes = { ...p.pendientes, ...sumar(porDestino), porDestino }
   }

@@ -345,7 +345,8 @@ export async function diferenciasDelPeriodo(
   if (!p) throw new NotFoundError('Periodo no encontrado')
   if (p.status !== 'CLOSED') return { items: [], nextCursor: null, parcial: false }
   // Alcance histórico del periodo (Codex R1-1): apagar una sede no esconde sus diferencias. B14-fix F1: ∩ la conexión.
-  const enConexion = input.soloSedes ? p.venueIds.filter(v => input.soloSedes!.includes(v)) : p.venueIds
+  const conexion = input.soloSedes ? new Set(input.soloSedes) : null // ronda 1 (R2): con SUPERADMIN, todas las sedes
+  const enConexion = conexion ? p.venueIds.filter(v => conexion.has(v)) : p.venueIds
   const legibles = await sedesLegiblesDe(input.userId, enConexion)
   const parcial = legibles.parcial || new Set(enConexion).size < new Set(p.venueIds).size
   const sedes = (

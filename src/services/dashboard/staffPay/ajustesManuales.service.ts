@@ -117,7 +117,8 @@ export async function previewAjusteManual(input: Omit<AjusteManualInput, 'client
   // destino y las pendientes se leen en la MISMA foto.
   const activas = await sedesConServicePay(sede.organizationId)
   const candidatas = [...activas, ...(await sedesConVentana(prisma, sede.organizationId)), input.sede]
-  const enAlcance = input.soloSedes ? candidatas.filter(v => input.soloSedes!.includes(v)) : candidatas
+  const conexion = input.soloSedes ? new Set(input.soloSedes) : null // ronda 1 (R2): con SUPERADMIN, todas las sedes
+  const enAlcance = conexion ? candidatas.filter(v => conexion.has(v)) : candidatas
   const { venueIds: legibles } = await sedesLegiblesDe(input.userId, enAlcance)
   const { fila, avisoPendientes } = await enUnaFoto(async tx => ({
     fila: await periodoQueContieneFecha(tx, sede.organizationId, fecha),

@@ -32,9 +32,9 @@ export async function estadoActivacion(
  * activado ya, devuelve su fecha y no cambia nada. Con periodos guardados la periodicidad ya no cambia (D3 de la fase 2).
  * `inicioEsperado`: la fecha que el dueño vio en la vista previa; si bajo el candado sale otra (pasó la medianoche del
  * cambio de periodo), 409 INICIO_CAMBIO sin escribir: la fecha ya no se cambia después (Codex bloque B #3). B14-fix F5
- * (Codex participación r1 #5): «hoy» se calcula DESPUÉS de tomar el candado, como `activarSede` (B11): calculado antes, una
- * confirmación del 30-sep a las 23:59:59 que obtiene el candado el 1-oct conservaba septiembre y abría las ventanas desde
- * el 1-sep.
+ * (Codex participación r1 #5) y su ronda 1 (R1): «hoy» se calcula DESPUÉS de tomar los TRES candados, como `activarSede` (B11):
+ * calculado antes, una confirmación del 30-sep a las 23:59:59 que obtiene un candado el 1-oct conservaba septiembre y abría las
+ * ventanas desde el 1-sep (también esperando la fila de la organización, que un traslado retiene sin el candado de periodos).
  *
  * B9 (diseño r6.1, r6.6.2) + B11 (r3.3): al activar de verdad abre una ventana `[startDate, ∞)` por cada sede ELEGIDA
  * (`sedes`; sin ellas, todas las que hoy tienen el plan, resueltas antes de la transacción con el mismo resolver del
@@ -57,9 +57,9 @@ export async function activarPagoAlPersonal(input: {
   // Con el cliente GLOBAL, antes de la transacción (como el cierre): dentro sólo se bloquean y se revalidan.
   const sedes = await sedesElegidas(v.organizationId, input.sedes)
   return transaccionConPresupuesto(async (tx, presupuesto) => {
+    // Candados en el orden de siempre: periodos de la organización → su fila → cada sede.
     await lockPeriodosDeOrganizacion(tx, v.organizationId, presupuesto)
-    // F5: el día BAJO el candado (cada reintento lo vuelve a tomar); `ahora`, sólo pruebas.
-    const hoy = hoyLocal(v.timezone || TZ_DEFAULT, input.ahora ?? new Date())
+    await bloquearOrganizacion(tx, v.organizationId, presupuesto)
     const org = await tx.organization.findUniqueOrThrow({
       where: { id: v.organizationId },
       select: { staffPayStartDate: true, servicePayPeriodicity: true },
@@ -71,11 +71,14 @@ export async function activarPagoAlPersonal(input: {
         'PERIODICIDAD_FIJA',
       )
     }
+    await bloquearSedesDeLaOrganizacion(tx, v.organizationId, sedes, presupuesto)
+    // F5 + ronda 1 (R1): el día DESPUÉS de los TRES candados (cada reintento los vuelve a tomar), como `activarSede`. Un traslado
+    // retiene la fila de la organización sin el candado de periodos: calculado antes de ella, una espera que cruza la medianoche
+    // activaba desde el mes anterior. `ahora`, sólo pruebas.
+    const hoy = hoyLocal(v.timezone || TZ_DEFAULT, input.ahora ?? new Date())
     const startDate = await inicioAlActivar(tx, v.organizationId, hoy, input.periodicidad)
     if (input.inicioEsperado !== undefined && input.inicioEsperado !== startDate)
       throw new ConflictError('La fecha de inicio cambió; vuelve a revisar.', 'INICIO_CAMBIO')
-    await bloquearOrganizacion(tx, v.organizationId, presupuesto)
-    await bloquearSedesDeLaOrganizacion(tx, v.organizationId, sedes, presupuesto)
     await tx.organization.update({
       where: { id: v.organizationId },
       data: { staffPayStartDate: fechaComoDbDate(startDate), servicePayPeriodicity: input.periodicidad },

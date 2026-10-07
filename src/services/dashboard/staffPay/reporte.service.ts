@@ -221,10 +221,18 @@ export async function reportePeriodo(input: EntradaReporte & { offset: number; l
   // El MCP llama sin la validación de la ruta: el offset se acota aquí también.
   const offset = Math.max(0, Math.trunc(input.offset) || 0)
   const limit = Math.min(Math.max(input.limit, 1), 100)
-  return enUnaFoto(async tx => {
-    const c = await contextoEn(tx, p, input.sede)
-    return c.fila?.status === 'CLOSED' ? reporteCerrado(tx, c, offset, limit) : reporteAbierto(tx, c, offset, limit)
-  })
+  // B14-fix ronda 1 (R4): plan personalizado LOCAL a la foto, como la vista previa del cierre (que con él baja de 6.7 a 5.2 s con
+  // 120 sedes). El mismo texto de consulta repetido —el contador por sede en una llamada, la consulta grande de llamada en
+  // llamada— recibe un plan GENÉRICO desde su sexta ejecución en una conexión; con una sede pesada (50,000 ventas) ese plan es el
+  // lento: el reporte abierto, 2.1 → 1.7 s (×0.82; en otra corrida 1.7 → 1.2 s). Con 120 sedes cuesta planear cada vez: 2.1 →
+  // 3.0 s (×1.43), lejos del tope de 60 s y acotado por el tope de sedes; un plan genérico malo crece con los datos, no con un tope.
+  return enUnaFoto(
+    async tx => {
+      const c = await contextoEn(tx, p, input.sede)
+      return c.fila?.status === 'CLOSED' ? reporteCerrado(tx, c, offset, limit) : reporteAbierto(tx, c, offset, limit)
+    },
+    { planPersonalizado: true },
+  )
 }
 
 async function reporteAbierto(db: Db, c: Contexto, offset: number, limit: number) {

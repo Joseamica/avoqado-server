@@ -4,6 +4,7 @@
 // Justo DESPUÉS de leer las ventanas, otra transacción desactiva B hasta el 5-oct y confirma: el reporte en curso dice $600 (el
 // estado de antes) y el siguiente $0 (el de después); nunca $100 (la comisión sin su clase). Fechas de 2026 en UTC; CDMX = UTC−6.
 import * as rangos from '@/services/dashboard/staffPay/rangos'
+import * as foto from '@/services/dashboard/staffPay/foto'
 import { reportePeriodo } from '@/services/dashboard/staffPay/reporte.service'
 import { desactivarSede } from '@/services/dashboard/staffPay/participacion'
 import { borrarMundo, clase, confirmadas, crearMundo, crearSede, Mundo, tablaFija } from './_mundo'
@@ -61,5 +62,13 @@ describe('B14-fix F3: el reporte abierto en UNA foto', () => {
     expect(desactivada).toBe(true)
     expect(enCurso.tarjetas).toMatchObject({ total: '600.00', comisiones: '100.00', clases: 1 })
     expect((await reporte()).tarjetas).toMatchObject({ total: '0.00', comisiones: '0.00', clases: 0 })
+  })
+
+  // Ronda 1 (R4): como la vista previa del cierre, plan personalizado LOCAL a la foto (medido: sede pesada 2.1 → 1.7 s).
+  it('la foto del reporte fuerza el plan personalizado (y conserva el tope de 60 s por defecto)', async () => {
+    const espia = jest.spyOn(foto, 'enUnaFoto')
+    await reporte()
+    expect(espia).toHaveBeenCalledTimes(1)
+    expect(espia.mock.calls[0][1]).toEqual({ planPersonalizado: true })
   })
 })

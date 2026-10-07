@@ -223,6 +223,13 @@ export const barreraDeLaOrganizacion = (organizationId: string) =>
 export const barreraDeLaFilaDeOrganizacion = (organizationId: string) =>
   barrera(t => t.$queryRaw`SELECT id FROM "Organization" WHERE id = ${organizationId} FOR UPDATE`)
 
+/**
+ * B14-fix ronda 1 (R1): la FILA de la organización `FOR NO KEY UPDATE`, como la retiene un TRASLADO (`bloquearOrganizacion`), que
+ * no pasa por el candado de periodos: quien activa ya lo tiene y se detiene aquí.
+ */
+export const barreraDelTrasladoEnLaOrganizacion = (organizationId: string) =>
+  barrera(t => t.$queryRaw`SELECT id FROM "Organization" WHERE id = ${organizationId} FOR NO KEY UPDATE`)
+
 /** B9: la FILA de una sede (`FOR UPDATE`, como la retienen el traslado y los borrados): ahí esperan los escritores. */
 export const barreraDeLaSede = (venueId: string) => barrera(t => t.$queryRaw`SELECT id FROM "Venue" WHERE id = ${venueId} FOR UPDATE`)
 
