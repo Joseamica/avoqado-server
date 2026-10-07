@@ -42,17 +42,14 @@ export function periodoQueContiene(fecha: string, periodicidad: Periodicidad): P
   return d <= 15 ? { start: `${base}-01`, end: `${base}-15` } : { start: `${base}-16`, end: fin }
 }
 
-export function diaCivilSiguiente(fecha: string): string {
+/** El día civil `n` días después (o antes, con `n` negativo). */
+export function sumarDias(fecha: string, n: number): string {
   const [y, mo, d] = partes(fecha)
-  const t = new Date(Date.UTC(y, mo - 1, d + 1))
+  const t = new Date(Date.UTC(y, mo - 1, d + n))
   return `${t.getUTCFullYear()}-${pad(t.getUTCMonth() + 1)}-${pad(t.getUTCDate())}`
 }
 
-export function diaCivilAnterior(fecha: string): string {
-  const [y, mo, d] = partes(fecha)
-  const t = new Date(Date.UTC(y, mo - 1, d - 1))
-  return `${t.getUTCFullYear()}-${pad(t.getUTCMonth() + 1)}-${pad(t.getUTCDate())}`
-}
+export const diaCivilSiguiente = (fecha: string): string => sumarDias(fecha, 1)
 
 /** La misma fecha `n` meses después (o antes, con `n` negativo); el día se recorta al último del mes (31-mar − 1 = 28-feb). */
 export function sumarMeses(fecha: string, n: number): string {

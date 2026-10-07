@@ -1,6 +1,6 @@
 import { Prisma } from '@prisma/client'
 import prisma from '../../../utils/prismaClient'
-import { BadRequestError, ConflictError } from '../../../errors/AppError'
+import { BadRequestError, ConflictError, NotFoundError } from '../../../errors/AppError'
 import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
 import { assertPermisoEnTodasLasSedes, sedesConServicePay } from './acceso'
 import { bloquearOrganizacion, bloquearSedesDeLaOrganizacion } from './participacion'
@@ -33,16 +33,19 @@ export async function estadoActivacion(
  * `inicioEsperado`: la fecha que el dueño vio en la vista previa; si bajo el candado sale otra (pasó la medianoche del
  * cambio de periodo), 409 INICIO_CAMBIO sin escribir: la fecha ya no se cambia después (Codex bloque B #3).
  *
- * B9 (diseño r6.1, r6.6.2): al activar de verdad abre una ventana `[startDate, ∞)` por CADA sede que hoy tiene el plan
- * (resueltas antes de la transacción con el mismo resolver del cierre); las sin plan, ninguna. Candados: el de periodos
- * de la organización → su fila → cada sede (`FOR KEY SHARE`, revalidando que siga siendo de la organización), todos con
- * el presupuesto de la transacción. Si un traslado ganó la sede, 409 SEDE_EN_OTRA_ORGANIZACION completo: no se salta.
+ * B9 (diseño r6.1, r6.6.2) + B11 (r3.3): al activar de verdad abre una ventana `[startDate, ∞)` por cada sede ELEGIDA
+ * (`sedes`; sin ellas, todas las que hoy tienen el plan, resueltas antes de la transacción con el mismo resolver del
+ * cierre). Elegidas: al menos una (400 FALTA_SEDE), todas de la organización (404) y con el plan hoy (409 SEDE_SIN_PLAN).
+ * Las demás no reciben ventana: se activan después, sede por sede, con su fecha. Candados: el de periodos de la
+ * organización → su fila → cada sede (`FOR KEY SHARE`, revalidando que siga siendo de la organización), todos con el
+ * presupuesto de la transacción. Si un traslado ganó la sede, 409 SEDE_EN_OTRA_ORGANIZACION completo: no se salta.
  */
 export async function activarPagoAlPersonal(input: {
   userId: string
   venueId: string
   periodicidad: Periodicidad
   inicioEsperado?: string
+  sedes?: string[]
   ahora?: Date
 }): Promise<{ startDate: string; yaActivado: boolean }> {
   if (input.periodicidad !== 'MONTHLY' && input.periodicidad !== 'SEMIMONTHLY') throw new BadRequestError('Elige mensual o quincenal')
@@ -50,7 +53,7 @@ export async function activarPagoAlPersonal(input: {
   await assertPermisoEnTodasLasSedes(input.userId, v.organizationId, 'staffpay:close')
   const hoy = hoyLocal(v.timezone || TZ_DEFAULT, input.ahora)
   // Con el cliente GLOBAL, antes de la transacción (como el cierre): dentro sólo se bloquean y se revalidan.
-  const sedes = [...new Set(await sedesConServicePay(v.organizationId))].sort()
+  const sedes = await sedesElegidas(v.organizationId, input.sedes)
   return transaccionConPresupuesto(async (tx, presupuesto) => {
     await lockPeriodosDeOrganizacion(tx, v.organizationId, presupuesto)
     const org = await tx.organization.findUniqueOrThrow({
@@ -94,6 +97,62 @@ export async function activarPagoAlPersonal(input: {
     return { startDate, yaActivado: false }
   })
 }
+
+/**
+ * Las sedes que reciben ventana al activar (B11, r3.3): las elegidas —al menos una, todas de la organización y con el plan
+ * hoy— o, sin elegir, todas las que tienen el plan (lo de B9). Ordenadas y sin repetidos.
+ */
+async function sedesElegidas(organizationId: string, elegidas: string[] | undefined): Promise<string[]> {
+  const activas = [...new Set(await sedesConServicePay(organizationId))].sort()
+  if (elegidas === undefined) return activas
+  const pedidas = [...new Set(elegidas)].sort()
+  if (!pedidas.length) throw new BadRequestError('Elige al menos una sede para activar', 'FALTA_SEDE')
+  const sinPlan = pedidas.filter(id => !activas.includes(id))
+  if (sinPlan.length) {
+    const deLaOrg = await prisma.venue.findMany({
+      where: { id: { in: sinPlan }, organizationId },
+      select: { id: true, name: true },
+      orderBy: { id: 'asc' },
+      take: sinPlan.length,
+    })
+    if (deLaOrg.length !== sinPlan.length) throw new NotFoundError('Sede no encontrada')
+    const nombres = deLaOrg.map(x => x.name).join(', ')
+    throw new ConflictError(
+      `${deLaOrg.length === 1 ? 'La sede' : 'Las sedes'} ${nombres} no ${deLaOrg.length === 1 ? 'tiene' : 'tienen'} Pago al personal en su plan: contrátalo para activarla`,
+      'SEDE_SIN_PLAN',
+      { venueIds: sinPlan },
+    )
+  }
+  return pedidas
+}
+
+/** Las sedes de la organización con y sin el plan, para la vista previa de activar (MCP): los nombres, con tope. */
+export async function sedesParaActivar(organizationId: string): Promise<{
+  conPlan: Array<{ venueId: string; nombre: string }>
+  sinPlan: Array<{ venueId: string; nombre: string }>
+  sinPlanTotal: number
+}> {
+  const activas = [...new Set(await sedesConServicePay(organizationId))].sort()
+  const nombre = (x: { id: string; name: string }) => ({ venueId: x.id, nombre: x.name })
+  const [conPlan, sinPlan, sinPlanTotal] = await Promise.all([
+    prisma.venue.findMany({
+      where: { id: { in: activas }, organizationId },
+      select: { id: true, name: true },
+      orderBy: { id: 'asc' },
+      take: activas.length,
+    }),
+    prisma.venue.findMany({
+      where: { organizationId, id: { notIn: activas } },
+      select: { id: true, name: true },
+      orderBy: { id: 'asc' },
+      take: TOPE_SIN_PLAN,
+    }),
+    prisma.venue.count({ where: { organizationId, id: { notIn: activas } } }),
+  ])
+  return { conPlan: conPlan.map(nombre), sinPlan: sinPlan.map(nombre), sinPlanTotal }
+}
+/** Cuántas sedes SIN plan nombra la vista previa (el total va aparte: nunca se esconde cuántas hay). */
+const TOPE_SIN_PLAN = 50
 
 /** Con periodos guardados la periodicidad ya no cambia (D3 de la fase 2). */
 async function hayPeriodos(db: Db, organizationId: string): Promise<boolean> {

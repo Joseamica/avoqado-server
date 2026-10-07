@@ -7,6 +7,8 @@ import { registerStaffPayTools } from '../../../src/mcp/tools/staffPay'
 import type { McpScope } from '../../../src/mcp/scope'
 import { ConflictError } from '@/errors/AppError'
 import { listarTablas } from '@/services/dashboard/staffPay/tablas.service'
+import { createHash } from 'crypto'
+import { huellaDeActivar } from '@/mcp/tools/staffPay.participacion'
 
 const mockReporte = jest.fn()
 const mockDetalle = jest.fn()
@@ -87,13 +89,18 @@ const mockActivar = jest.fn()
 const mockPropinas = jest.fn()
 const mockVentanas = jest.fn()
 const mockPlan = jest.fn()
+const mockSedesParaActivar = jest.fn()
 jest.mock('@/services/dashboard/staffPay/activacion.service', () => ({
   estadoActivacion: (...a: unknown[]) => mockEstado(...a),
   previewActivacion: (...a: unknown[]) => mockPlan(...a),
   activarPagoAlPersonal: (...a: unknown[]) => mockActivar(...a),
   cambiarPropinas: (...a: unknown[]) => mockPropinas(...a),
   ventanasDePropinas: (...a: unknown[]) => mockVentanas(...a),
+  sedesParaActivar: (...a: unknown[]) => mockSedesParaActivar(...a),
 }))
+// B11: activar o desactivar UNA sede y su vista previa (sus pruebas, en `staff-service-pay.sedes.test.ts`).
+jest.mock('@/services/dashboard/staffPay/participacion', () => ({ activarSede: jest.fn(), desactivarSede: jest.fn() }))
+jest.mock('@/services/dashboard/staffPay/participacion.vistaPrevia', () => ({ vistaPreviaParticipacion: jest.fn() }))
 jest.mock('@/mcp/requireWriteScopeAlways', () => ({ requireWriteScopeAlways: (...a: unknown[]) => mockRequireWrite(...a) }))
 jest.mock('@/mcp/audit', () => ({ auditMcpWrite: jest.fn() }))
 jest.mock('@/utils/prismaClient', () => ({
@@ -129,7 +136,10 @@ beforeEach(() => {
   mockVentanas.mockResolvedValue([])
   mockTodas.mockResolvedValue(undefined)
   mockPlan.mockResolvedValue({ periodicidad: 'MONTHLY', periodicidadFija: false, startDate: '2026-10-01' })
+  mockSedesParaActivar.mockResolvedValue({ conPlan: [{ venueId: 'v1', nombre: 'Avoqado Wellness' }], sinPlan: [], sinPlanTotal: 0 })
 })
+/** La huella de activar con la sede de las pruebas (B11: la fecha Y las sedes, sha256). */
+const HUELLA_OCT = huellaDeActivar('2026-10-01', ['v1'])
 
 // La forma REAL de `previewLiquidacion` (B2): filas de `diferenciasDeClase`, destino legible y `sedeEnDestino`.
 const fila = (persona: string | null, personaNombre: string | null, pendiente: string | null, extra: Record<string, unknown> = {}) => ({
@@ -1375,10 +1385,17 @@ describe('pago al personal con ventas por MCP (spec fase 3 §12)', () => {
         ok: false,
         requiresConfirmation: true,
         actual: { activado: false, periodicidad: 'MONTHLY', periodicidadFija: false },
-        nuevo: { activado: true, periodicidad: 'SEMIMONTHLY', startDate: '2026-10-01' },
-        // La fecha que se muestra viaja firmada en el token (Codex bloque B #3).
-        expectedSourceFingerprint: '2026-10-01',
+        nuevo: {
+          activado: true,
+          periodicidad: 'SEMIMONTHLY',
+          startDate: '2026-10-01',
+          sedes: [{ venueId: 'v1', nombre: 'Avoqado Wellness' }],
+        },
+        // La fecha que se muestra y las sedes viajan firmadas en el token (Codex bloque B #3; B11, r4.6).
+        fecha: '2026-10-01',
+        expectedSourceFingerprint: HUELLA_OCT,
       })
+      expect(p.expectedSourceFingerprint).toMatch(/^[a-f0-9]{64}$/)
       expect(mockPlan).toHaveBeenCalledWith({ venueId: 'v1', periodicidad: 'SEMIMONTHLY' })
       expect(mockTodas).toHaveBeenCalledWith('s1', 'o1', 'staffpay:close')
       expect(p.message).toMatch(/quincenal/)
@@ -1388,7 +1405,13 @@ describe('pago al personal con ventas por MCP (spec fase 3 §12)', () => {
       expect(auditMcpWrite).not.toHaveBeenCalled()
       mockActivar.mockResolvedValue({ startDate: '2026-10-01', yaActivado: false })
       const r = parse(
-        await conf({ accion: 'activar', periodicidad: 'SEMIMONTHLY', expectedSourceFingerprint: '2026-10-01', confirm: true }),
+        await conf({
+          accion: 'activar',
+          periodicidad: 'SEMIMONTHLY',
+          fecha: '2026-10-01',
+          expectedSourceFingerprint: HUELLA_OCT,
+          confirm: true,
+        }),
       )
       expect(r).toMatchObject({ ok: true, startDate: '2026-10-01' })
       expect(mockActivar).toHaveBeenCalledWith({
@@ -1396,6 +1419,7 @@ describe('pago al personal con ventas por MCP (spec fase 3 §12)', () => {
         venueId: 'v1',
         periodicidad: 'SEMIMONTHLY',
         inicioEsperado: '2026-10-01',
+        sedes: ['v1'],
       })
       expect(auditMcpWrite).toHaveBeenCalledTimes(1)
       expect(auditMcpWrite).toHaveBeenCalledWith(
@@ -1408,7 +1432,15 @@ describe('pago al personal con ventas por MCP (spec fase 3 §12)', () => {
     it('si otra persona activó entre la vista previa y el confirmar (yaActivado), no se audita de nuevo', async () => {
       mockActivar.mockResolvedValue({ startDate: '2026-09-01', yaActivado: true })
       expect(
-        parse(await conf({ accion: 'activar', periodicidad: 'MONTHLY', expectedSourceFingerprint: '2026-10-01', confirm: true })),
+        parse(
+          await conf({
+            accion: 'activar',
+            periodicidad: 'MONTHLY',
+            fecha: '2026-10-01',
+            expectedSourceFingerprint: HUELLA_OCT,
+            confirm: true,
+          }),
+        ),
       ).toMatchObject({ ok: true, yaActivado: true })
       expect(auditMcpWrite).not.toHaveBeenCalled()
     })
@@ -1462,7 +1494,15 @@ describe('pago al personal con ventas por MCP (spec fase 3 §12)', () => {
           statusCode: 403,
         }),
       )
-      const r = parse(await conf({ accion: 'activar', periodicidad: 'MONTHLY', expectedSourceFingerprint: '2026-10-01', confirm: true }))
+      const r = parse(
+        await conf({
+          accion: 'activar',
+          periodicidad: 'MONTHLY',
+          fecha: '2026-10-01',
+          expectedSourceFingerprint: HUELLA_OCT,
+          confirm: true,
+        }),
+      )
       expect(r).toMatchObject({ ok: false, error: expect.stringMatching(/todas las sedes/) })
       expect(auditMcpWrite).not.toHaveBeenCalled()
     })
@@ -1558,7 +1598,7 @@ describe('pago al personal con ventas por MCP (spec fase 3 §12)', () => {
       }
     })
 
-    it('🔴 B9: antes de B11 no se eligen sedes ni existe la acción «sede»: error de validación, nunca se ignora', async () => {
+    it('B11: `sedes` y la acción «sede» se publican con tipo; con `sedes` sólo entran las elegidas (y la huella las cubre)', async () => {
       const server = new McpServer({ name: 'staffpay', version: '1' })
       const s = { ...scope, scopes: ['mcp:read', 'mcp:write'] } as unknown as McpScope
       configureToolCatalog(server, s)
@@ -1567,31 +1607,95 @@ describe('pago al personal con ventas por MCP (spec fase 3 §12)', () => {
       const [a, b] = InMemoryTransport.createLinkedPair()
       await Promise.all([server.connect(a), client.connect(b)])
       try {
-        // El parámetro se publica CON tipo (el portal del directorio marca los que no lo tienen).
+        // Los parámetros se publican CON tipo (el portal del directorio marca los que no lo tienen).
         const tool = (await client.listTools()).tools.find(t => t.name === 'configure_service_pay')
-        expect((tool?.inputSchema.properties as Record<string, { type?: string }>).sedes).toMatchObject({ type: 'array' })
-        const call = (args: Record<string, unknown>) => client.callTool({ name: 'configure_service_pay', arguments: args })
-        const texto = (r: Awaited<ReturnType<typeof call>>) => (r.content as Array<{ text: string }>)[0].text
-        const conSedes = await call({ venueId: 'v1', accion: 'activar', periodicidad: 'MONTHLY', sedes: ['v1'] })
-        expect(conSedes.isError).toBe(true)
-        expect(texto(conSedes)).toMatch(/sedes/)
-        expect(texto(conSedes)).toMatch(/Todavía no se pueden elegir sedes al activar/)
-        const conSedesConfirm = await call({ venueId: 'v1', accion: 'activar', periodicidad: 'MONTHLY', sedes: [], confirm: true })
-        expect(conSedesConfirm.isError).toBe(true)
-        const sede = await call({ venueId: 'v1', accion: 'sede', periodicidad: 'MONTHLY' })
-        expect(sede.isError).toBe(true)
-        expect(texto(sede)).toMatch(/accion/)
-        expect(mockEstado).not.toHaveBeenCalled()
-        expect(mockPlan).not.toHaveBeenCalled()
-        expect(mockActivar).not.toHaveBeenCalled()
-        // Sin `sedes`, la vista previa de siempre (y dice que la periodicidad queda fija al activar, diseño r6.4).
-        const p = JSON.parse(texto(await call({ venueId: 'v1', accion: 'activar', periodicidad: 'MONTHLY' })))
-        expect(p).toMatchObject({ requiresConfirmation: true })
-        expect(p.message).toMatch(/queda fija al activar/)
+        const props = tool?.inputSchema.properties as Record<string, { type?: string; enum?: string[] }>
+        expect(props.sedes).toMatchObject({ type: 'array' })
+        expect(props.fecha).toMatchObject({ type: 'string' })
+        expect(props.activa).toMatchObject({ type: 'boolean' })
+        expect(props.accion.enum).toEqual(['activar', 'propinas', 'sede'])
+        const call = async (args: Record<string, unknown>) =>
+          JSON.parse(
+            ((await client.callTool({ name: 'configure_service_pay', arguments: args })).content as Array<{ text: string }>)[0].text,
+          )
+        mockSedesParaActivar.mockResolvedValue({
+          conPlan: [
+            { venueId: 'v1', nombre: 'Prado Norte' },
+            { venueId: 'v2', nombre: 'Polanco' },
+          ],
+          sinPlan: [{ venueId: 'v3', nombre: 'Satélite' }],
+          sinPlanTotal: 1,
+        })
+        const p = await call({ venueId: 'v1', accion: 'activar', periodicidad: 'MONTHLY', sedes: ['v1'] })
+        expect(p).toMatchObject({
+          requiresConfirmation: true,
+          fecha: '2026-10-01',
+          expectedSourceFingerprint: huellaDeActivar('2026-10-01', ['v1']),
+          nuevo: { sedes: [{ venueId: 'v1', nombre: 'Prado Norte' }] },
+          confirmationArguments: { sedes: ['v1'], fecha: '2026-10-01' },
+        })
+        expect(p.message).toMatch(/Quedan sin activar: Polanco/)
+        expect(p.message).toMatch(/1 sede\(s\) no tienen el plan: Satélite/)
+        // El token es de ESAS sedes: con otras no sirve.
+        expect(
+          await call({ ...p.confirmationArguments, sedes: ['v1', 'v2'], confirm: true, confirmationToken: p.confirmationToken }),
+        ).toMatchObject({
+          needsInput: true,
+          field: 'confirmationToken',
+        })
+        mockActivar.mockResolvedValue({ startDate: '2026-10-01', yaActivado: false })
+        expect(await call({ ...p.confirmationArguments, confirm: true, confirmationToken: p.confirmationToken })).toMatchObject({
+          ok: true,
+        })
+        expect(mockActivar).toHaveBeenCalledWith(expect.objectContaining({ sedes: ['v1'], inicioEsperado: '2026-10-01' }))
+        // Una sede sin el plan no se ofrece confirmar; una lista vacía pide al menos una.
+        expect(await call({ venueId: 'v1', accion: 'activar', periodicidad: 'MONTHLY', sedes: ['v3'] })).toMatchObject({
+          ok: false,
+          code: 'SEDE_SIN_PLAN',
+        })
+        expect(await call({ venueId: 'v1', accion: 'activar', periodicidad: 'MONTHLY', sedes: [] })).toMatchObject({
+          ok: false,
+          code: 'FALTA_SEDE',
+        })
+        expect(mockActivar).toHaveBeenCalledTimes(1)
       } finally {
         await client.close()
         await server.close()
       }
+    })
+
+    it('B11: 5 sedes ⇒ una huella de 64 caracteres (cabe en el máximo de 128); si cambian las sedes con plan antes de confirmar ⇒ INICIO_CAMBIO sin escribir', async () => {
+      const cinco = ['v5', 'v1', 'v4', 'v2', 'v3']
+      mockSedesParaActivar.mockResolvedValue({
+        conPlan: cinco.map(v => ({ venueId: v, nombre: v.toUpperCase() })),
+        sinPlan: [],
+        sinPlanTotal: 0,
+      })
+      const p = parse(await conf({ accion: 'activar', periodicidad: 'MONTHLY' }))
+      expect(p.expectedSourceFingerprint).toHaveLength(64)
+      // El formato del diseño (r4.6), calculado aparte: sha256('activar|' + inicio + '|' + sedes ordenadas).
+      expect(p.expectedSourceFingerprint).toBe(createHash('sha256').update('activar|2026-10-01|v1,v2,v3,v4,v5').digest('hex'))
+      // Otra fecha o otras sedes dan otra huella (ni la fecha sola ni las sedes solas bastan).
+      expect(huellaDeActivar('2026-10-01', ['v1', 'v2'])).not.toBe(p.expectedSourceFingerprint)
+      expect(huellaDeActivar('2026-09-01', cinco)).not.toBe(p.expectedSourceFingerprint)
+      // Entre la vista previa y el confirmar, v5 perdió el plan: lo elegido por defecto cambió.
+      mockSedesParaActivar.mockResolvedValue({
+        conPlan: cinco.slice(1).map(v => ({ venueId: v, nombre: v })),
+        sinPlan: [],
+        sinPlanTotal: 0,
+      })
+      const r = parse(
+        await conf({
+          accion: 'activar',
+          periodicidad: 'MONTHLY',
+          fecha: p.fecha,
+          expectedSourceFingerprint: p.expectedSourceFingerprint,
+          confirm: true,
+        }),
+      )
+      expect(r).toMatchObject({ ok: false, code: 'INICIO_CAMBIO', error: expect.stringMatching(/vista previa nueva/) })
+      expect(mockActivar).not.toHaveBeenCalled()
+      expect(auditMcpWrite).not.toHaveBeenCalled()
     })
 
     it('confirmar activar sin la fecha de la vista previa la pide y no escribe', async () => {
@@ -1618,12 +1722,18 @@ describe('pago al personal con ventas por MCP (spec fase 3 §12)', () => {
           )
         mockPlan.mockResolvedValue({ periodicidad: 'MONTHLY', periodicidadFija: false, startDate: '2026-09-01' }) // 23:59
         const p = await call({ venueId: 'v1', accion: 'activar', periodicidad: 'MONTHLY' })
-        expect(p.confirmationArguments).toMatchObject({ expectedSourceFingerprint: '2026-09-01' })
-        // La fecha va firmada: confirmar con otra no sirve.
+        expect(p.confirmationArguments).toMatchObject({
+          fecha: '2026-09-01',
+          expectedSourceFingerprint: huellaDeActivar('2026-09-01', ['v1']),
+        })
+        // La fecha va firmada: confirmar con otra no sirve (ni la fecha ni la huella).
+        expect(
+          await call({ ...p.confirmationArguments, fecha: '2026-10-01', confirm: true, confirmationToken: p.confirmationToken }),
+        ).toMatchObject({ needsInput: true, field: 'confirmationToken' })
         expect(
           await call({
             ...p.confirmationArguments,
-            expectedSourceFingerprint: '2026-10-01',
+            expectedSourceFingerprint: HUELLA_OCT,
             confirm: true,
             confirmationToken: p.confirmationToken,
           }),

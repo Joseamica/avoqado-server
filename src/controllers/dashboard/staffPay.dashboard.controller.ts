@@ -14,6 +14,8 @@ import * as manuales from '../../services/dashboard/staffPay/ajustesManuales.ser
 import * as recibos from '../../services/dashboard/staffPay/recibos.service'
 import * as dif from '../../services/dashboard/staffPay/diferencias.service'
 import * as liq from '../../services/dashboard/staffPay/liquidacion.service'
+import * as participacion from '../../services/dashboard/staffPay/participacion'
+import { vistaPreviaParticipacion } from '../../services/dashboard/staffPay/participacion.vistaPrevia'
 import { sendExport } from '../../services/dashboard/export.helpers'
 
 export function ctx(req: Request): { venueId: string; userId: string } {
@@ -290,9 +292,23 @@ export const listPeriods = manejar(req =>
 )
 export const patchPeriodicity = manejar(req => periodos.cambiarPeriodicidad({ ...ctx(req), periodicidad: req.body.periodicidad }))
 // Fase 3 (spec §7.1, §6.3). Campo por campo: `ahora` es de pruebas y jamás sale de la petición.
-export const postActivate = manejar(req =>
-  activacion.activarPagoAlPersonal({ ...ctx(req), periodicidad: req.body.periodicidad, inicioEsperado: req.body.inicioEsperado }),
-)
+export const postActivate = manejar(req => {
+  const { periodicidad, inicioEsperado, sedes } = req.body
+  return activacion.activarPagoAlPersonal({ ...ctx(req), periodicidad, inicioEsperado, ...(sedes !== undefined ? { sedes } : {}) })
+})
+// B11: activar o desactivar UNA sede y su vista previa con montos. Campo por campo: `ahora` es de pruebas.
+export const postActivateSede = manejar(req => {
+  const { desde, fechaEsperada } = req.body
+  return participacion.activarSede({ ...ctx(req), sedeId: req.params.sedeId, desde, fechaEsperada })
+})
+export const postDeactivateSede = manejar(req => {
+  const { hasta, fechaEsperada } = req.body
+  return participacion.desactivarSede({ ...ctx(req), sedeId: req.params.sedeId, hasta, fechaEsperada })
+})
+export const getParticipationPreview = manejar(req => {
+  const q = req.query as { accion: 'activar' | 'desactivar'; fecha?: string }
+  return vistaPreviaParticipacion({ ...ctx(req), sedeId: req.params.sedeId, accion: q.accion, fecha: q.fecha })
+})
 export const putTips = manejar(req => activacion.cambiarPropinas({ ...ctx(req), encender: req.body.encender }))
 export const getClosePreview = manejar(req => cierre.previewCierre({ ...ctx(req), fecha: String(req.query.fecha) }))
 export const postClose = manejar(req => {

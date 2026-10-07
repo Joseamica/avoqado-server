@@ -7,19 +7,25 @@ import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
 import { exigirPermisoEnSedes, sedesConPermiso, sedesConServicePay, tienePermisoEn } from './acceso'
 import { ampliarAlcance, asegurarPeriodo, bloquearPeriodo, lockPeriodosDeOrganizacion, periodoQueContieneFecha } from './periodosGuardados'
 import { transaccionConPresupuesto } from '../../../utils/esperaDeCandados'
-import { bloquearSedesDeLaOrganizacion } from './participacion'
-import { dbDateComoFecha, PeriodoCanonico, periodoQueContiene, venuePeriodRange } from './periodos'
-import { ClaseValorada, contarPorEstado, FiltroValoracion, ReglaDeClase, valorarClases } from './valoracion'
+import { alcanceDelPeriodo, bloquearSedesDeLaOrganizacion, sedesConVentana } from './participacion'
+import { dbDateComoFecha, venuePeriodRange } from './periodos'
+import { ClaseValorada, FiltroValoracion, ReglaDeClase, valorarClases } from './valoracion'
 import { Huella } from './huella'
-import { estadoActivacion } from './activacion.service'
+import { comisionesBarribles, LineaBarrible, propinasBarribles, propinasSinDueno, reversosPorAnulacion } from './fuentesVenta'
 import {
-  AlcanceBarrido,
-  comisionesBarribles,
-  LineaBarrible,
-  propinasBarribles,
-  propinasSinDueno,
-  reversosPorAnulacion,
-} from './fuentesVenta'
+  Alcance,
+  alcanceDe,
+  alcanceDeVentas,
+  alcanceSinCandado,
+  Barrido,
+  Bloqueo,
+  bloqueosDe,
+  filtroDe,
+  Sede,
+  textoSedeActivaSinPlan,
+} from './cierre.alcance'
+
+export type { Bloqueo } from './cierre.alcance'
 
 type Tx = Prisma.TransactionClient
 type Db = Tx | typeof prisma
@@ -44,14 +50,6 @@ type Db = Tx | typeof prisma
 export const TIMEOUT_CIERRE_MS = 120_000
 export const LOTE_CIERRE = 500
 const BLOQUE_ESCRITURA = 1000
-const TZ_DEFAULT = 'America/Mexico_City'
-
-export type Bloqueo =
-  | { codigo: 'NO_HA_TERMINADO'; hasta: string }
-  | { codigo: 'CLASES_EN_CURSO'; n: number }
-  | { codigo: 'EXCEPCIONES'; n: number }
-  | { codigo: 'SIN_PERMISO' }
-  | { codigo: 'YA_CERRADO' }
 
 export interface PreviewCierre {
   periodo: { id: string | null; start: string; end: string; venueIds: string[] }
@@ -96,137 +94,27 @@ export interface ResultadoCierre {
   yaCerrado: boolean
 }
 
-interface Sede {
-  venueId: string
-  tz: string
-  nombre: string
-}
-interface Alcance {
-  organizationId: string
-  periodo: PeriodoCanonico
-  periodId: string | null
-  estado: 'OPEN' | 'CLOSED'
-  venueIds: string[]
-  sedes: Sede[]
-}
-
-/** Sedes en el orden de `[...venueIds].sort()`: el mismo para la cabecera de la huella y para el recorrido. */
-async function sedesDe(db: Db, organizationId: string, venueIds: string[]): Promise<Sede[]> {
-  if (!venueIds.length) return []
-  const vs = await db.venue.findMany({
-    where: { id: { in: venueIds }, organizationId },
-    select: { id: true, timezone: true, name: true },
-    take: venueIds.length,
-  })
-  const porId = new Map(vs.map(v => [v.id, v]))
-  return [...venueIds].sort().flatMap(id => {
-    const v = porId.get(id)
-    return v ? [{ venueId: v.id, tz: v.timezone || TZ_DEFAULT, nombre: v.name }] : []
-  })
-}
-
-/** Alcance de un periodo sin tomar candados (preview). Anticipa el crecimiento de D2 para que la huella coincida. */
-async function alcanceSinCandado(organizationId: string, fecha: string): Promise<Alcance> {
-  const fila = await periodoQueContieneFecha(prisma, organizationId, fecha)
-  const activas = await sedesConServicePay(organizationId)
-  if (fila) {
-    const venueIds = fila.status === 'OPEN' ? [...new Set([...fila.venueIds, ...activas])].sort() : [...fila.venueIds].sort()
-    return {
-      organizationId,
-      periodo: { start: dbDateComoFecha(fila.periodStart), end: dbDateComoFecha(fila.periodEnd) },
-      periodId: fila.id,
-      estado: fila.status,
-      venueIds,
-      sedes: await sedesDe(prisma, organizationId, venueIds),
-    }
-  }
-  const org = await prisma.organization.findUniqueOrThrow({ where: { id: organizationId }, select: { servicePayPeriodicity: true } })
-  const venueIds = [...activas].sort()
-  return {
-    organizationId,
-    periodo: periodoQueContiene(fecha, org.servicePayPeriodicity),
-    periodId: null,
-    estado: 'OPEN',
-    venueIds,
-    sedes: await sedesDe(prisma, organizationId, venueIds),
-  }
-}
-
-/** El alcance de las ventas, o null si el negocio no ha activado pago al personal: entonces no se barre nada (B-D5). */
-async function alcanceDeVentas(db: Db, a: Alcance): Promise<AlcanceBarrido | null> {
-  const { startDate } = await estadoActivacion(db, a.organizationId)
-  if (!startDate) return null
-  return {
-    organizationId: a.organizationId,
-    periodo: { id: a.periodId, start: a.periodo.start, end: a.periodo.end },
-    sedes: a.sedes.map(s => ({ venueId: s.venueId, tz: s.tz })),
-    startDate,
-  }
-}
-
-const sinDuenoDe = async (db: Db, v: AlcanceBarrido | null) => (v ? propinasSinDueno(db, v) : { n: 0, total: new Prisma.Decimal(0) })
+const sinDuenoDe = async (db: Db, v: Barrido | null) => (v ? propinasSinDueno(db, v.a, v.r) : { n: 0, total: new Prisma.Decimal(0) })
 
 /**
  * Resolución 16: efectos de comisión en revisión (`…:policy-error:v1`) sin resolver de las sedes del alcance. Sólo de cobros
  * desde el inicio de pago al personal en la zona de SU sede (B4 r1): lo de antes nunca entra al sobre, y su aviso sería
  * falso para siempre.
  */
-const comisionesPorRevisar = (db: Db, v: AlcanceBarrido | null) =>
+const comisionesPorRevisar = (db: Db, v: Barrido | null) =>
   v
     ? db.paymentEffect.count({
         where: {
           kind: 'COMMISSION',
           dedupeKey: { endsWith: ':policy-error:v1' },
           status: { not: 'DONE' },
-          OR: v.sedes.map(s => ({
+          OR: v.a.sedes.map(s => ({
             venueId: s.venueId,
-            payment: { createdAt: { gte: venuePeriodRange({ start: v.startDate, end: v.startDate }, s.tz).from } },
+            payment: { createdAt: { gte: venuePeriodRange({ start: v.a.startDate, end: v.a.startDate }, s.tz).from } },
           })),
         },
       })
     : Promise.resolve(0)
-
-async function alcanceDe(tx: Tx, p: ServicePayPeriod): Promise<Alcance> {
-  const venueIds = [...p.venueIds].sort()
-  return {
-    organizationId: p.organizationId,
-    periodo: { start: dbDateComoFecha(p.periodStart), end: dbDateComoFecha(p.periodEnd) },
-    periodId: p.id,
-    estado: p.status,
-    venueIds,
-    sedes: await sedesDe(tx, p.organizationId, venueIds),
-  }
-}
-
-/**
- * Modo 'vivo' a propósito, en el preview y en el cierre: un periodo OPEN no tiene clases ancladas (sólo se ancla al
- * cerrar o al liquidar contra un periodo ya cerrado), y el preview puede no tener `periodId`. Una clase CANCELADA que no se
- * paga no se valora ni se ancla: si después se reactiva, aparece como diferencia de su periodo (spec §6.4). Una cancelada
- * tarde sí, aunque su horario termine después del cierre: terminó al cancelarse (D5-fix, Codex D-1).
- */
-const filtroDe = (a: Alcance, s: Sede, ahora: Date): FiltroValoracion => {
-  const { from, to } = venuePeriodRange(a.periodo, s.tz)
-  return { venueId: s.venueId, organizationId: a.organizationId, tz: s.tz, desde: from, hasta: to, ahora }
-}
-
-async function bloqueosDe(db: Db, a: Alcance, ahora: Date): Promise<Bloqueo[]> {
-  const bloqueos: Bloqueo[] = []
-  if (a.estado === 'CLOSED') return [{ codigo: 'YA_CERRADO' }]
-  if (a.sedes.some(s => ahora < venuePeriodRange(a.periodo, s.tz).to)) bloqueos.push({ codigo: 'NO_HA_TERMINADO', hasta: a.periodo.end })
-  let enCurso = 0
-  let excepciones = 0
-  for (const s of a.sedes) {
-    const f = filtroDe(a, s, ahora)
-    // Sin canceladas: una cancelada ya terminó (lo que paga no cambia), así que no hay que esperar su horario (D5-fix).
-    enCurso += await db.classSession.count({
-      where: { venueId: s.venueId, startsAt: { gte: f.desde, lt: f.hasta }, endsAt: { gt: ahora }, status: { not: 'CANCELLED' } },
-    })
-    excepciones += (await contarPorEstado(db, f)).excepciones
-  }
-  if (enCurso) bloqueos.push({ codigo: 'CLASES_EN_CURSO', n: enCurso })
-  if (excepciones) bloqueos.push({ codigo: 'EXCEPCIONES', n: excepciones })
-  return bloqueos
-}
 
 /** IDs de las reservas de clase sin horario del periodo (spec §5.5), en orden fijo: sede → id. */
 async function idsHuerfanas(db: Db, a: Alcance, ahora: Date): Promise<string[]> {
@@ -355,8 +243,8 @@ async function recorrer(
     tamLote: number
     ajustes: AjusteGuardado[]
     huerfanas: string[]
-    /** null: sin activar, no se barren ventas (B-D5). */
-    ventas: AlcanceBarrido | null
+    /** null: sin activar, no se barren ventas (B-D5). Con sus rangos, calculados UNA vez por operación (B11). */
+    ventas: Barrido | null
     alLote?: (lote: ClaseValorada[], sede: Sede) => Promise<void>
     alVentas?: (lote: LineaBarrible[]) => void
   },
@@ -408,7 +296,7 @@ async function recorrer(
     for (const f of fuentes) {
       let despuesDe: string | undefined
       for (;;) {
-        const lote = await f.leer(db, o.ventas, { despuesDe, limite: tam })
+        const lote = await f.leer(db, o.ventas.a, o.ventas.r, { despuesDe, limite: tam })
         if (!lote.length) break
         for (const l of lote) {
           f.hashear(l)
@@ -444,7 +332,7 @@ export async function previewCierre(input: {
   tamLote?: number
 }): Promise<PreviewCierre> {
   const ahora = input.ahora ?? new Date()
-  const a = await alcanceSinCandado(await organizacionDe(input.venueId), input.fecha)
+  const { a, activas } = await alcanceSinCandado(await organizacionDe(input.venueId), input.fecha)
   // Permiso ANTES de calcular nada (Codex R1-8): quien no puede cerrar todo el alcance no recibe ni un número de él.
   for (const v of a.venueIds) {
     if (!(await tienePermisoEn(input.userId, v, 'staffpay:close'))) {
@@ -471,7 +359,7 @@ export async function previewCierre(input: {
     }
   }
   if (a.estado === 'CLOSED' && a.periodId) return previewCerrado({ ...a, periodId: a.periodId })
-  const bloqueos = await bloqueosDe(prisma, a, ahora)
+  const bloqueos = await bloqueosDe(prisma, a, ahora, activas)
   const ajustes = await ajustesDelPeriodo(prisma, a.organizationId, a.periodId)
   const huerfanas = await idsHuerfanas(prisma, a, ahora)
   const ventas = await alcanceDeVentas(prisma, a)
@@ -587,11 +475,14 @@ export async function cerrarPeriodo(input: {
   const ahora = input.ahora ?? new Date()
   const tamLote = input.tamLote ?? LOTE_CIERRE
   // Módulos y permisos con el cliente GLOBAL, ANTES de la transacción: dentro retendrían su conexión mientras piden otra
-  // (la familia de Codex R4-Nuevo 1). Candidatas: el alcance del periodo como está ahora ∪ las sedes con el módulo. Dentro
-  // sólo se COMPARA contra lo resuelto; una sede que entró al alcance entretanto no tiene permiso resuelto y se niega.
+  // (la familia de Codex R4-Nuevo 1). Candidatas: el alcance del periodo como está ahora ∪ las sedes con el módulo ∪ las
+  // sedes con alguna ventana (B11, r4.4: su historia las mete al alcance). Dentro sólo se COMPARA contra lo resuelto; una
+  // sede que entró al alcance entretanto no tiene permiso resuelto y se niega.
   const activas = await sedesConServicePay(organizationId)
+  const conVentana = await sedesConVentana(prisma, organizationId)
   const filaAntes = await periodoQueContieneFecha(prisma, organizationId, input.fecha)
-  const permitidas = new Set(await sedesConPermiso(input.userId, [...(filaAntes?.venueIds ?? []), ...activas], 'staffpay:close'))
+  const candidatas = [...(filaAntes?.venueIds ?? []), ...activas, ...conVentana]
+  const permitidas = new Set(await sedesConPermiso(input.userId, candidatas, 'staffpay:close'))
   try {
     return await transaccionConPresupuesto(
       async (tx, presupuesto) => {
@@ -616,11 +507,26 @@ export async function cerrarPeriodo(input: {
           exigirPermisoEnSedes(permitidas, p.venueIds, sinPermiso)
           return resultadoGuardado(tx, p, true)
         }
-        // D2: el cierre suma las sedes que hoy tienen el módulo, con permiso en cada una (`ampliarAlcance`).
-        p = await ampliarAlcance(tx, p, activas, input.userId, { activas, permitidas })
+        // B11 (revisión de B10 #1): las ventanas de TODA la organización, leídas DENTRO de esta transacción SERIALIZABLE. Es lo
+        // que le da a SSI el ciclo con una escritura de ventana concurrente (`activarSede`/`desactivarSede` leen el último
+        // cerrado; este cierre lee sus ventanas): una de las dos se repite y nunca queda una ventana dentro de un periodo ya
+        // cerrado. Si cambiaron desde lo resuelto antes, el dueño vuelve a ver la vista previa (HUELLA_CAMBIO).
+        if ((await sedesConVentana(tx, organizationId)).join('|') !== conVentana.join('|')) throw new HuellaCambio()
+        // D2 + B11 (r5.2): el alcance del periodo abierto —guardadas ∪ con el plan, y desde el inicio de pago al personal ∪ las
+        // sedes con ventana (sin pedirles el plan)—, con permiso en cada una (`ampliarAlcance`). Un periodo que termina antes del
+        // inicio no se amplía ni se persiste por historia.
+        const org = await tx.organization.findUniqueOrThrow({ where: { id: organizationId }, select: { staffPayStartDate: true } })
+        const alcance = alcanceDelPeriodo({
+          periodo: { start: dbDateComoFecha(p.periodStart), end: dbDateComoFecha(p.periodEnd), estado: p.status },
+          guardadas: p.venueIds,
+          activas,
+          conVentana,
+          startDate: org.staffPayStartDate ? dbDateComoFecha(org.staffPayStartDate) : null,
+        })
+        p = await ampliarAlcance(tx, p, alcance, input.userId, { exigirModulo: false, permitidas })
         exigirPermisoEnSedes(permitidas, p.venueIds, sinPermiso)
         const a = await alcanceDe(tx, p)
-        const bloqueos = await bloqueosDe(tx, a, ahora)
+        const bloqueos = await bloqueosDe(tx, a, ahora, activas)
         const b = (codigo: Bloqueo['codigo']) => bloqueos.find(x => x.codigo === codigo)
         if (b('NO_HA_TERMINADO'))
           throw new BadRequestError(`El periodo termina el ${a.periodo.end}: todavía no se puede cerrar`, 'PERIODO_NO_TERMINA')
@@ -632,6 +538,14 @@ export async function cerrarPeriodo(input: {
             `Quedan ${exc.n} clase(s) que no se pueden pagar todavía: resuélvelas antes de cerrar`,
             'HAY_EXCEPCIONES',
           )
+        const sinPlan = b('SEDE_ACTIVA_SIN_PLAN') as Extract<Bloqueo, { codigo: 'SEDE_ACTIVA_SIN_PLAN' }> | undefined
+        if (sinPlan) {
+          const nombres = sinPlan.venueIds.map(v => a.sedes.find(x => x.venueId === v)?.nombre ?? v)
+          throw new ConflictError(textoSedeActivaSinPlan(nombres, sinPlan.otrasConPlan), 'SEDE_ACTIVA_SIN_PLAN', {
+            venueIds: sinPlan.venueIds,
+            otrasConPlan: sinPlan.otrasConPlan,
+          })
+        }
         const huerfanas = await idsHuerfanas(tx, a, ahora)
         if (huerfanas.length && !input.confirmarHuerfanas) {
           throw new BadRequestError(

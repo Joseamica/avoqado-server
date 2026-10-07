@@ -11,15 +11,17 @@ import {
   reversosPorAnulacion,
   sqlVentasDelPeriodo,
 } from '@/services/dashboard/staffPay/fuentesVenta'
+import { rangosConParticipacion } from '@/services/dashboard/staffPay/rangos'
 import { fechaComoDbDate } from '@/services/dashboard/staffPay/periodos'
 import { borrarMundo, crearMundo, crearSede, Mundo, periodoCerrado, TZ } from './_mundo'
-import { activar, cobro, comision, congelar, esquema, reembolso, ventana } from './_ventas'
+import { activar, cobro, comision, congelar, esquema, reembolso, sedeActiva, ventana } from './_ventas'
 
 let m: Mundo
 let cfg: string
 beforeEach(async () => {
   m = await crearMundo('fuentes')
-  await activar(m, { propinasDesde: null }) // inicio 1-ago; cada prueba abre sus ventanas
+  // Inicio 1-ago y la sede activa desde ese día (B11: sin su ventana no barre nada); cada prueba abre sus ventanas de propinas.
+  await activar(m, { propinasDesde: null })
   cfg = await esquema(m)
 })
 afterEach(() => borrarMundo(m))
@@ -35,7 +37,11 @@ const alcance = (periodo: { start: string; end: string }, sedes = [{ venueId: m.
   sedes,
   startDate: '2026-08-01',
 })
-const todas = (fn: typeof comisionesBarribles, a: AlcanceBarrido) => fn(prisma, a, { limite: 1000 })
+/** Un recorrido entero, con los rangos (periodo y participación) calculados UNA vez, como el cierre (B11). */
+const todas = async (fn: typeof comisionesBarribles, a: AlcanceBarrido) =>
+  fn(prisma, a, await rangosConParticipacion(prisma, a), { limite: 1000 })
+const sqlVentas = async (a: AlcanceBarrido, o: { staffId?: string } = {}) =>
+  sqlVentasDelPeriodo(a, await rangosConParticipacion(prisma, a), o)
 const ids = (ls: LineaBarrible[]) => ls.map(l => l.sourceId).sort()
 const por = (ls: LineaBarrible[]) =>
   Object.fromEntries(
@@ -119,6 +125,7 @@ describe('comisiones barribles (spec §6.2)', () => {
   it('el inicio de pago al personal se lee en la zona de CADA sede (Codex r1-19, spec §13-6)', async () => {
     const tij = await crearSede(m.orgId, m.key, 'tij')
     await prisma.venue.update({ where: { id: tij.venueId }, data: { timezone: 'America/Tijuana' } })
+    await sedeActiva(m, tij.venueId, '2026-08-01') // activa desde el inicio: lo que la deja fuera es SU zona
     const cfgTij = await esquema(m, tij.venueId)
     // 1-ago 06:30 UTC: 00:30 del 1-ago en CDMX (ya cuenta); 23:30 del 31-jul en Tijuana (todavía no).
     const cdmx = await comision(m, { configId: cfg, staffId: m.sofia, iso: '2026-08-01T06:30:00Z', neto: 90 })
@@ -224,7 +231,7 @@ describe('propinas (spec §6.3)', () => {
       [p2.id]: { staffId: m.ana, monto: '30.00', fecha: '2026-08-11', concepto: 'SERVICE', motivo: 'VENTA' },
       [p7.id]: { staffId: m.sofia, monto: '10.00', fecha: '2026-08-16', concepto: 'SERVICE', motivo: 'VENTA' },
     })
-    const sin = await propinasSinDueno(prisma, alcance(AGO))
+    const sin = await propinasSinDueno(prisma, alcance(AGO), await rangosConParticipacion(prisma, alcance(AGO)))
     expect({ n: sin.n, total: sin.total.toFixed(2) }).toEqual({ n: 1, total: '20.00' })
   })
 
@@ -367,7 +374,7 @@ describe('la vista en vivo (B5) y las consultas del EXPLAIN (B7)', () => {
       ...(await todas(propinasBarribles, alcance(SEP))),
       ...(await todas(reversosPorAnulacion, alcance(SEP))),
     ]
-    const sql = await sqlVentasDelPeriodo(prisma, alcance(SEP))
+    const sql = await sqlVentas(alcance(SEP))
     const filas = await prisma.$queryRaw<Array<Record<string, any>>>(sql!)
     expect(filas.map(f => clave(f as Parameters<typeof clave>[0])).sort()).toEqual(recorridos.map(clave).sort())
     expect(recorridos.map(clave).sort()).toEqual(
@@ -395,11 +402,9 @@ describe('la vista en vivo (B5) y las consultas del EXPLAIN (B7)', () => {
       'base',
       'motivo',
     ])
-    const deCarla = await prisma.$queryRaw<Array<{ sourceId: string }>>(
-      (await sqlVentasDelPeriodo(prisma, alcance(SEP), { staffId: m.carla }))!,
-    )
+    const deCarla = await prisma.$queryRaw<Array<{ sourceId: string }>>((await sqlVentas(alcance(SEP), { staffId: m.carla }))!)
     expect(deCarla.map(f => f.sourceId)).toEqual([p1.id])
-    expect(await sqlVentasDelPeriodo(prisma, alcance(JUL))).toBeNull()
+    expect(await sqlVentas(alcance(JUL))).toBeNull()
 
     const q = await consultasDeVentas(prisma, alcance(SEP))
     expect((await prisma.$queryRaw<Array<{ id: string }>>(q.comisiones)).map(x => x.id)).toEqual([c2.id])
@@ -415,7 +420,10 @@ describe('recorrido por lotes (spec §6.5)', () => {
     const lotes: LineaBarrible[] = []
     let despuesDe: string | undefined
     for (;;) {
-      const l = await comisionesBarribles(prisma, alcance(AGO), { despuesDe, limite: 2 })
+      const l = await comisionesBarribles(prisma, alcance(AGO), await rangosConParticipacion(prisma, alcance(AGO)), {
+        despuesDe,
+        limite: 2,
+      })
       if (!l.length) break
       lotes.push(...l)
       despuesDe = l[l.length - 1].sourceId

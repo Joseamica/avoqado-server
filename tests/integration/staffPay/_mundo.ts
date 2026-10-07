@@ -101,6 +101,23 @@ export async function tablaMindform(m: Mundo, venueId = m.venueId, desde = '2026
   return { tableId: t.id, versionId: v.id }
 }
 
+/**
+ * Una tabla que paga `monto` a los dos niveles con cualquier conteo (0 a 10 lugares), vigente desde el 1-ene. `productIds`
+ * vacío = todas las clases de la sede; `lateCancelHours` prende la regla de cancelación tardía (paga la celda de 0).
+ */
+export async function tablaFija(m: Mundo, venueId: string, monto: number, o: { productIds?: string[]; lateCancelHours?: number } = {}) {
+  const t = await prisma.servicePayTable.create({ data: { venueId, name: `Fija ${monto}`, productIds: o.productIds ?? [] } })
+  const v = await prisma.servicePayTableVersion.create({
+    data: { tableId: t.id, effectiveFrom: fechaComoDbDate('2026-01-01'), revision: 1, maxCount: 10, lateCancelHours: o.lateCancelHours },
+  })
+  await prisma.servicePayTableCell.createMany({
+    data: [m.hc, m.coach].flatMap(payLevelId =>
+      Array.from({ length: 11 }, (_, count) => ({ versionId: v.id, payLevelId, count, amount: new Prisma.Decimal(monto) })),
+    ),
+  })
+  return { tableId: t.id, versionId: v.id }
+}
+
 let seq = 0
 export const confirmadas = (n: number) => Array.from({ length: n }, () => ({ status: 'CONFIRMED' }))
 

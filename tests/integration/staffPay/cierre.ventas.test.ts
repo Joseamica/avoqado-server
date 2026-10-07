@@ -18,7 +18,7 @@ import {
   periodoCerrado,
   tablaMindform,
 } from './_mundo'
-import { activar, cobro, comision, esquema, reembolso } from './_ventas'
+import { activar, cobro, comision, esquema, reembolso, sedeActiva } from './_ventas'
 
 jest.mock('@/services/dashboard/staffPay/acceso', () => ({
   ...jest.requireActual('@/services/dashboard/staffPay/acceso'),
@@ -328,7 +328,7 @@ describe('el cierre con ventas (spec fase 3 §6)', () => {
     expect(await lineas({ concept: 'RECONCILE' })).toBe(0)
   })
 
-  it('una sede que entra tarde sólo barre desde el periodo en que entró: lo de los periodos cerrados SIN ella no se paga (B4 r1)', async () => {
+  it('una sede que entra tarde sólo barre desde el día en que se ACTIVÓ: lo de los periodos cerrados sin ella no se paga (B4 r1, ahora con su ventana: B11)', async () => {
     await prisma.organization.update({ where: { id: m.orgId }, data: { staffPayStartDate: fechaComoDbDate('2026-09-01') } })
     const b = await crearSede(m.orgId, m.key, 'bsf')
     const cfgB = await esquema(m, b.venueId, 'Esquema BSF')
@@ -339,8 +339,11 @@ describe('el cierre con ventas (spec fase 3 §6)', () => {
     await comision(m, { configId: cfgB, staffId: m.sofia, iso: '2026-10-10T18:00:05Z', neto: 30, pago: ventaOctB, venueId: b.venueId })
     await cerrar('2026-09-15', OCT2)
     await cerrar('2026-10-15', NOV2)
-    // En noviembre BSF entra al plan. Una venta tardía de PN con fecha de septiembre (cerrado CON PN) sí entra.
+    // En noviembre BSF entra al plan y el dueño la activa desde el 1-nov (lo más atrás que deja: octubre ya se cerró). Desde
+    // B11 la que lo decide es su ventana, no el alcance de cada cerrado. Una venta tardía de PN con fecha de septiembre (PN
+    // activa desde el inicio) sí entra.
     ;(global as any).__sedes = [m.venueId, b.venueId]
+    await sedeActiva(m, b.venueId, '2026-11-01')
     const tardiaA = await comision(m, { configId: cfg, staffId: m.ana, iso: '2026-09-20T18:00:00Z', neto: 45 })
     // La devolución en noviembre de la venta de octubre de BSF (que el sobre nunca pagó): ni su reverso ni su propina.
     const devB = await reembolso(m, ventaOctB, { iso: '2026-11-05T18:00:00Z', monto: 1000, propina: 60 })

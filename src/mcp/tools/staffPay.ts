@@ -11,13 +11,7 @@ import { cerrarPeriodo, previewCierre, type Bloqueo } from '@/services/dashboard
 import { agregarAjusteManual, previewAjusteManual } from '@/services/dashboard/staffPay/ajustesManuales.service'
 import { marcarPagado, previewPagado, reciboDePersona } from '@/services/dashboard/staffPay/recibos.service'
 import { periodoQueContieneFecha } from '@/services/dashboard/staffPay/periodosGuardados'
-import {
-  activarPagoAlPersonal,
-  cambiarPropinas,
-  estadoActivacion,
-  previewActivacion,
-  ventanasDePropinas,
-} from '@/services/dashboard/staffPay/activacion.service'
+import { cambiarPropinas, estadoActivacion, ventanasDePropinas } from '@/services/dashboard/staffPay/activacion.service'
 import { liquidarDiferencia, previewLiquidacion } from '@/services/dashboard/staffPay/liquidacion.service'
 import { diferenciasDelPeriodo, FilaDiferencia } from '@/services/dashboard/staffPay/diferencias.service'
 import {
@@ -32,6 +26,7 @@ import { createGuard } from '../guard'
 import { text } from '../respond'
 import { requireWriteScopeAlways } from '../requireWriteScopeAlways'
 import { auditMcpWrite } from '../audit'
+import { activarOrganizacion, type Herramientas, participacionDeSede } from './staffPay.participacion'
 
 const sedeArg = z.string().min(1).max(64).optional().describe('Only this venue of the organization (default: all venues you can read)')
 const fecha = z
@@ -118,7 +113,6 @@ const diaUTC = (f: string) => {
 const diaLegible = (f: string) =>
   diaUTC(f).toLocaleDateString('es-MX', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' })
 /** «de septiembre de 2026» si es el mes completo; si no, «del 1 sep 2026 al 15 sep 2026». */
-const nombrePeriodicidad = (p: 'MONTHLY' | 'SEMIMONTHLY') => (p === 'MONTHLY' ? 'mensual' : 'quincenal')
 const periodoLegible = (p: { start: string; end: string }) =>
   p.start.endsWith('-01') &&
   p.start.slice(0, 7) === p.end.slice(0, 7) &&
@@ -249,13 +243,15 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
   // ── Fase 2: escritura. Dos pasos (el catálogo emite y valida el confirmationToken). ──
   // `modulo: 'organizacion'` (sólo liquidar, Codex R2-R1-1, spec §5.6): la sede de la clase pudo apagar el módulo; basta con
   // que alguna sede de la organización lo tenga. Las demás escrituras lo exigen en su sede.
-  const puedeEscribir = async (venueId: string, modulo: 'sede' | 'organizacion' = 'sede'): Promise<string | null> => {
+  // `modulo: 'ninguno'` (B11, r4.7): desactivar una sede no pide el plan —es la salida del bloqueo de una sede activa que
+  // lo perdió—; conserva el alcance de la conexión y el permiso.
+  const puedeEscribir = async (venueId: string, modulo: 'sede' | 'organizacion' | 'ninguno' = 'sede'): Promise<string | null> => {
     guard.venueFilter(venueId) // lanza si la sede está fuera del alcance
     requireWriteScopeAlways(scope, 'staffpay:close', 'registra pagos al staff')
     if (!guard.tienePermiso('staffpay:close', venueId)) return 'Necesitas el permiso staffpay:close en esta sede.'
     if (modulo === 'sede') {
       if (!(await venueHasServicePayAccess(venueId))) return 'Pago por servicio no está activo en este negocio; pídelo a Avoqado.'
-    } else if (!(await organizacionTieneServicePay(venueId))) {
+    } else if (modulo === 'organizacion' && !(await organizacionTieneServicePay(venueId))) {
       return 'Pago por servicio no está activo en ninguna sede de este negocio; pídelo a Avoqado.'
     }
     return null
@@ -266,6 +262,7 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
     if (!err?.statusCode || err.statusCode >= 500) throw e
     return text({ ok: false, error: `${err.message}${extra}`, code: err.code ?? null, preview: err.details?.preview ?? null })
   }
+  const herramientas: Herramientas = { scope, guard, puedeEscribir, fallo }
   const pesos = (s: string) => Number(s).toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
   const conSigno = (s: string, moneda: string) => `${Number(s) < 0 ? '-' : '+'}$${pesos(String(Math.abs(Number(s))))} ${moneda}`
   const motivo = (b: Bloqueo) =>
@@ -277,7 +274,11 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
           ? `${b.n} clase(s) con excepción por resolver`
           : b.codigo === 'SIN_PERMISO'
             ? 'te falta staffpay:close en alguna sede del periodo'
-            : 'ya está cerrado'
+            : b.codigo === 'SEDE_ACTIVA_SIN_PLAN'
+              ? b.otrasConPlan
+                ? `${b.venueIds.length} sede(s) siguen activas en pago al personal sin el plan: desactívalas indicando su último día (accion "sede" con activa:false)`
+                : `${b.venueIds.length} sede(s) siguen activas sin el plan y ninguna sede lo tiene: renueva el plan para cerrar (desactivarlas no lo libera)`
+              : 'ya está cerrado'
 
   server.tool(
     'close_service_pay_period',
@@ -369,26 +370,35 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'configure_service_pay',
-    'Turn on pay for staff (pay-per-service) for the whole organization, or choose whether tips are paid inside the pay receipt. accion "activar": sales commissions (and tips, if on) start adding to the receipts from the start of the current period, and it fixes the period length (periodicidad MONTHLY or SEMIMONTHLY, ask the owner); earlier commissions are not added. accion "propinas": encender true pays tips inside the receipt, false hands them out separately; turning them off only affects future payments. Two steps: call without confirm to show current → new (for activar: the start date it would get and whether the period length is already fixed by saved periods; offer only that one); then confirm:true (for activar, with the expectedSourceFingerprint the preview returned: it is that start date, and if it changed in between —for example the period changed at midnight— nothing is activated and it asks for a new preview). Requires staffpay:close in every venue of the organization.',
+    'Turn on pay for staff (pay-per-service) for the organization, turn ONE venue on or off in it, or choose whether tips are paid inside the pay receipt. accion "activar": sales commissions (and tips, if on) start adding to the receipts from the start of the current period, for the chosen venues (sedes; default: every venue with the plan — the preview lists venues with and without it), and it fixes the period length (periodicidad MONTHLY or SEMIMONTHLY, ask the owner); earlier commissions are not added. accion "sede": activa true turns the venue on from the day in fecha (default today) or activa false turns it off with fecha as its last day (default today); the preview says, with amounts, which classes, commissions and tips enter or stay out. accion "propinas": encender true pays tips inside the receipt, false hands them out separately; turning them off only affects future payments. Two steps: call without confirm to show current → new and the amounts; then confirm:true with the fecha and expectedSourceFingerprint the preview returned (if the date or the venues changed in between —for example the period changed at midnight— nothing is written and it asks for a new preview). Requires staffpay:close in every venue of the organization (activar, propinas) or in the venue (sede).',
     {
       venueId: z.string().min(1).max(64).describe('Venue in your scope'),
-      accion: z.enum(['activar', 'propinas']).describe('activar | propinas'),
+      accion: z.enum(['activar', 'propinas', 'sede']).describe('activar | propinas | sede'),
       periodicidad: z.enum(['MONTHLY', 'SEMIMONTHLY']).optional().describe('For activar: MONTHLY or SEMIMONTHLY'),
       encender: z.boolean().optional().describe('For propinas: true = tips inside the receipt; false = handed out separately'),
-      expectedSourceFingerprint: z.string().max(128).optional().describe('For activar: the start date from the preview'),
-      // B9 (diseño r7.4): elegir sedes llega en B11. Hasta entonces un `sedes` (aun vacío) es un error de validación, nunca
-      // se ignora. Lleva tipo para que el esquema publicado diga qué es (un `never` sale sin tipo).
       sedes: z
         .array(z.string().max(64))
         .max(500)
         .optional()
-        .refine(v => v === undefined, { message: 'Todavía no se pueden elegir sedes al activar: se activan todas las que tienen el plan' })
-        .describe('Not available yet: activar always includes every venue with the plan; sending it is rejected.'),
+        .describe('For activar: the venues that enter from the start date (default: every venue with the plan)'),
+      sede: z.string().min(1).max(64).optional().describe('For sede: the venue to turn on or off (default: venueId)'),
+      activa: z.boolean().optional().describe('For sede: true = turn it on from fecha; false = turn it off, fecha is its last day'),
+      fecha: z
+        .string()
+        .regex(/^\d{4}-\d{2}-\d{2}$/)
+        .optional()
+        .describe(
+          'For sede: the day, YYYY-MM-DD venue-local (default today). For activar and sede, when confirming, the fecha the preview returned',
+        ),
+      expectedSourceFingerprint: z.string().max(128).optional().describe('For activar and sede: the fingerprint from the preview'),
       confirm: z.boolean().optional(),
     },
-    async ({ venueId, accion, periodicidad, encender, expectedSourceFingerprint, confirm }) => {
+    async ({ venueId, accion, periodicidad, encender, sedes, sede, activa, fecha: f, expectedSourceFingerprint, confirm }) => {
       // El motivo de esta escritura (puedeEscribir lo repite con el de los pagos, que aquí no aplica).
       requireWriteScopeAlways(scope, 'staffpay:close', 'configura el pago al personal')
+      // Activar o desactivar UNA sede (B11): su propio módulo y su propia puerta de plan (desactivar no la pide).
+      if (accion === 'sede')
+        return participacionDeSede(herramientas, { venueId, sede, activa, fecha: f, expectedSourceFingerprint, confirm })
       const no = await puedeEscribir(venueId)
       if (no) return text({ ok: false, error: no })
       if (accion === 'activar' && !periodicidad)
@@ -410,54 +420,8 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
         if (!v) return text({ ok: false, error: 'Sede no encontrada' })
         const actual = await estadoActivacion(prisma, v.organizationId)
         if (accion === 'activar') {
-          if (actual.activado)
-            return text({
-              ok: false,
-              sinCambios: true,
-              actual,
-              error: `Pago al personal ya está activado desde el ${actual.startDate}: no hay nada que cambiar.`,
-            })
-          if (confirm !== true) {
-            // La vista previa ya rechaza lo que el confirmar rechazaría: el permiso en TODAS las sedes y la periodicidad fija.
-            await assertPermisoEnTodasLasSedes(scope.staffId, v.organizationId, 'staffpay:close')
-            const plan = await previewActivacion({ venueId, periodicidad: periodicidad! })
-            const conPlan = { ...actual, periodicidad: plan.periodicidad, periodicidadFija: plan.periodicidadFija }
-            if (plan.periodicidadFija && plan.periodicidad !== periodicidad)
-              return text({
-                ok: false,
-                code: 'PERIODICIDAD_FIJA',
-                actual: conPlan,
-                error: `La periodicidad ya no se puede cambiar: ya hay periodos guardados. Activa con la que ya tienes (${nombrePeriodicidad(plan.periodicidad)}).`,
-              })
-            return text({
-              ok: false,
-              requiresConfirmation: true,
-              actual: conPlan,
-              nuevo: { activado: true, periodicidad, startDate: plan.startDate },
-              // El catálogo la firma en el token: se confirma la fecha que se MOSTRÓ (Codex bloque B #3). No quitar.
-              expectedSourceFingerprint: plan.startDate,
-              message: `Pago al personal: sin activar → activado (${nombrePeriodicidad(periodicidad!)}${
-                plan.periodicidadFija ? ', ya no cambia porque hay periodos guardados' : '; la periodicidad queda fija al activar'
-              }). Desde el ${plan.startDate} se suman al recibo las comisiones${actual.propinasEncendidas ? ' y las propinas' : ''}; las anteriores no se suman: si debes alguna, agrégalo como ajuste.`,
-            })
-          }
-          if (!expectedSourceFingerprint)
-            return text({ ok: false, needsInput: true, field: 'expectedSourceFingerprint', question: 'Pide primero la vista previa.' })
-          const r = await activarPagoAlPersonal({
-            userId: scope.staffId,
-            venueId,
-            periodicidad: periodicidad!,
-            inicioEsperado: expectedSourceFingerprint,
-          })
-          if (!r.yaActivado)
-            await auditMcpWrite(scope, {
-              action: 'SERVICE_PAY_ACTIVATED',
-              entity: 'Organization',
-              entityId: v.organizationId,
-              venueId,
-              data: { startDate: r.startDate, periodicidad },
-            })
-          return text({ ok: true, ...r })
+          const datos = { venueId, organizationId: v.organizationId, actual, periodicidad: periodicidad!, sedes }
+          return await activarOrganizacion(herramientas, { ...datos, fecha: f, expectedSourceFingerprint, confirm })
         }
         if (!actual.activado) return text({ ok: false, actual, error: 'Activa primero el pago al personal (accion "activar").' })
         if (actual.propinasEncendidas === encender)
@@ -493,7 +457,7 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
           })
         return text({ ok: true, ...r })
       } catch (e) {
-        return fallo(e, (e as { code?: string })?.code === 'INICIO_CAMBIO' ? ' Pide una vista previa nueva (sin confirm).' : '')
+        return fallo(e)
       }
     },
   )
@@ -826,7 +790,10 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
           ? 'cancelada ($0.00)'
           : c.estado === 'NO_TERMINADA'
             ? 'sin pago todavía (no ha terminado)'
-            : `sin pago (${c.motivo ? MOTIVOS[c.motivo as MotivoExcepcion] : 'algo sin resolver'})`
+            : c.estado === 'FUERA_DEL_SOBRE'
+              ? // B11 (r5.5): su sede no estaba activa en pago al personal ese día; no es una excepción por resolver.
+                `fuera del pago al personal ($0.00: ${c.sede ? `la sede ${c.sede.nombre} no estaba activa el ${diaLegible(c.sede.fecha)}` : 'su sede no estaba activa ese día'}${c.montoSiEntrara ? `; pagaría $${pesos(c.montoSiEntrara)}` : ''})`
+              : `sin pago (${c.motivo ? MOTIVOS[c.motivo as MotivoExcepcion] : 'algo sin resolver'})`
 
   server.tool(
     'adjust_service_pay_class',

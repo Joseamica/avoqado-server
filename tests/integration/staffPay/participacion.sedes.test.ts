@@ -1,5 +1,5 @@
-// tests/integration/staffPay/participacion.sedes.test.ts — activar y desactivar UNA sede, fase 3 B10 (diseño r3.3, r4.6,
-// r4.8, r5.3): los servicios existen SIN rutas ni MCP (B11 los publica). Rangos de fechas por sede, candados, errores y
+// tests/integration/staffPay/participacion.sedes.test.ts — activar y desactivar UNA sede, fase 3 B10-B11 (diseño r3.3, r4.6,
+// r4.8, r5.3): los servicios (B11 los publica por ruta y MCP; sus pruebas, en `participacion.integracion*.test.ts`). Rangos de fechas por sede, candados, errores y
 // ActivityLog. Fechas de 2026 en UTC; CDMX = UTC−6, Tijuana = UTC−7 hasta el 1-nov (a las 2:00) y UTC−8 después.
 import { PrismaClient } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
@@ -65,11 +65,17 @@ describe('activarSede: desde qué día (B10, r3.3, r4.8)', () => {
     expect(await activar(b, { desde: '2026-10-01' })).toEqual({
       ventana: { venueId: b, desde: '2026-10-01', hasta: null },
       minimo: '2026-10-01',
+      minimoEfectivo: '2026-10-01',
     })
     expect(await ventanasDe(b)).toEqual([['2026-10-01', null, m.owner, null]])
     const [w] = await prisma.staffPayVenueWindow.findMany({ where: { venueId: b }, select: { id: true }, take: 1 })
     expect(await logs('SERVICE_PAY_VENUE_ACTIVATED', b)).toEqual([
-      { staffId: m.owner, entity: 'StaffPayVenueWindow', entityId: w.id, data: { desde: '2026-10-01', minimo: '2026-10-01' } },
+      {
+        staffId: m.owner,
+        entity: 'StaffPayVenueWindow',
+        entityId: w.id,
+        data: { desde: '2026-10-01', minimo: '2026-10-01', minimoEfectivo: '2026-10-01' },
+      },
     ])
     // El permiso es el de cerrar periodos EN LA SEDE que se activa (no en la que pide).
     expect(acceso.assertPermisoEnSedes).toHaveBeenLastCalledWith(m.owner, [b], 'staffpay:close', expect.any(String))
@@ -95,6 +101,7 @@ describe('activarSede: desde qué día (B10, r3.3, r4.8)', () => {
     expect(await activar(b, { desde: '2026-11-01', ahora })).toEqual({
       ventana: { venueId: b, desde: '2026-11-01', hasta: null },
       minimo: '2026-11-01',
+      minimoEfectivo: '2026-11-01',
     })
   })
 
@@ -125,9 +132,11 @@ describe('desactivarSede: hasta qué día entra (B10, r3.3, r4.7)', () => {
     )
     await expect(desactivar(b, { hasta: '2026-10-21' })).rejects.toMatchObject(FUERA('2026-09-30', '2026-10-20', FUTURA('20 oct 2026')))
 
+    // `minimo`: el de la organización; `minimoEfectivo`: lo que el diálogo deja elegir para ESTA sede (B11, revisión de B10 #3).
     expect(await desactivar(b, { hasta: '2026-10-15' })).toEqual({
       ventana: { venueId: b, desde: '2026-09-01', hasta: '2026-10-15' },
       minimo: '2026-10-01',
+      minimoEfectivo: '2026-09-30',
     })
     expect(await ventanasDe(b)).toEqual([['2026-09-01', '2026-10-15', m.owner, m.owner]])
     const [w] = await prisma.staffPayVenueWindow.findMany({ where: { venueId: b }, select: { id: true }, take: 1 })
@@ -136,7 +145,7 @@ describe('desactivarSede: hasta qué día entra (B10, r3.3, r4.7)', () => {
         staffId: m.owner,
         entity: 'StaffPayVenueWindow',
         entityId: w.id,
-        data: { hasta: '2026-10-15', minimo: '2026-10-01', borrada: false },
+        data: { hasta: '2026-10-15', minimo: '2026-10-01', minimoEfectivo: '2026-09-30', borrada: false },
       },
     ])
     await expect(desactivar(b)).rejects.toMatchObject({ statusCode: 409, code: 'NO_ACTIVA' })
@@ -160,14 +169,14 @@ describe('desactivarSede: hasta qué día entra (B10, r3.3, r4.7)', () => {
     await expect(desactivar(b, { hasta: '2026-10-03' })).rejects.toMatchObject(
       FUERA('2026-10-04', '2026-10-20', 'La sede se activó el 5 oct 2026; lo más atrás es el 4 oct 2026 (así se borra la activación)'),
     )
-    expect(await desactivar(b, { hasta: '2026-10-04' })).toEqual({ ventana: null, minimo: '2026-10-01' })
+    expect(await desactivar(b, { hasta: '2026-10-04' })).toEqual({ ventana: null, minimo: '2026-10-01', minimoEfectivo: '2026-10-04' })
     expect(await prisma.staffPayVenueWindow.count({ where: { venueId: b } })).toBe(0)
     expect(await logs('SERVICE_PAY_VENUE_DEACTIVATED', b)).toEqual([
       {
         staffId: m.owner,
         entity: 'StaffPayVenueWindow',
         entityId: w.id,
-        data: { hasta: '2026-10-04', minimo: '2026-10-01', borrada: true },
+        data: { hasta: '2026-10-04', minimo: '2026-10-01', minimoEfectivo: '2026-10-04', borrada: true },
       },
     ])
   })
@@ -261,8 +270,9 @@ describe('activarSede lee el mínimo DENTRO de su transacción, después de los 
       const r = await op
       expect(r.error).toMatchObject(FUERA('2026-10-01', '2026-10-20', 'Septiembre ya se cerró; lo más atrás es el 1 oct 2026'))
       expect(await ventanasDe(b)).toEqual([])
-      // El primer intento vio el septiembre de antes (su foto es de antes de esperar); SSI lo repitió con la foto nueva.
-      expect(intentos).toHaveBeenCalledTimes(2)
+      // El primer intento vio el septiembre de antes (su foto es de antes de esperar); SSI lo repitió con la foto nueva (al
+      // menos una vez: el número exacto de reintentos no es parte del contrato).
+      expect(intentos.mock.calls.length).toBeGreaterThanOrEqual(2)
     } finally {
       soltar()
       await tx.catch(() => undefined)

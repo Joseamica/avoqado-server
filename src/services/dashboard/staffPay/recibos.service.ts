@@ -11,7 +11,10 @@ import { bloquearPeriodo, periodoQueContieneFecha } from './periodosGuardados'
 import { transaccionConPresupuesto } from '../../../utils/esperaDeCandados'
 import { dbDateComoFecha, MESES_LARGOS, periodoQueContiene, venuePeriodRange } from './periodos'
 import { ReglaDeClase, textoDeRegla, valoracionCte } from './valoracion'
-import { nombreGuardadoSql, PERSONA_DADA_DE_BAJA, sqlVentasDelPeriodo } from './fuentesVenta'
+import { AlcanceBarrido, sqlVentasDelPeriodo } from './fuentesVenta'
+import { personaDelRecibo } from './recibos.persona'
+import { alcanceDelPeriodo, sedesConVentana } from './alcance'
+import { rangosConParticipacion } from './rangos'
 
 /** Tope de UNA página del recibo (Codex R2-R1-20). El recibo entero no tiene tope: se recorre con cursor. */
 export const RECIBO_LIMITE_MAX = 500
@@ -257,50 +260,19 @@ type EntradaRecibo = {
  * PERMISOS (`sedesLegiblesDe`)—, resuelto ANTES de abrir la instantánea y pasado como datos (Codex R4-Nuevo 1). Si se
  * consultara dentro, cada transacción retendría su conexión esperando OTRA del pool: 18 recibos simultáneos ocupaban las
  * 18 conexiones y ninguno terminaba.
- * El permiso se resuelve para TODAS las sedes candidatas: las del periodo como está ahora ∪ las que hoy tienen el módulo.
+ * El permiso se resuelve para TODAS las sedes candidatas: las del periodo como está ahora ∪ las que hoy tienen el módulo ∪
+ * las que tienen alguna ventana de participación (B11, r4.4: su historia las mete al alcance).
  */
 interface ReciboPreparado {
   organizationId: string
   persona: string
   activas: string[]
+  /** Las sedes con alguna ventana (B11): dentro de la foto sólo se comparan. */
+  conVentana: string[]
   permitidas: Set<string>
   /** Sólo el NOMBRE para mostrar. La zona horaria y la periodicidad deciden qué clases entran: se leen DENTRO de la
    *  instantánea, en `fuenteDelRecibo` (Codex R5: una zona leída antes mezclaba el día de ayer con el monto de hoy). */
   sedes: Map<string, { nombre: string }>
-}
-
-const nombreDe = (s: { firstName: string; lastName: string }) => `${s.firstName} ${s.lastName}`.trim()
-
-/**
- * Nombre visible de la persona del recibo, sólo si trabaja o trabajó en esta organización (nunca el de alguien de otro
- * negocio). Mismo permiso de sedes que siempre: eso lo decide `alcanceEnLaFoto`.
- * «Trabajó» sin sede viva (la expulsión dura borra su StaffVenue; le sobreviven comisiones, propinas, clases y recibos)
- * lo acredita, sólo con búsquedas por persona que tienen índice (B5 r1):
- *   - un devengo suyo en la organización (Codex bloque A #4) — `ServiceEarning (organizationId, staffId)`;
- *   - su membresía de la organización, activa o no — `StaffOrganization (staffId, organizationId)` único; la expulsión no
- *     la borra, y es lo que cubre a quien sólo tiene propinas en vivo (`Order.servedById` y `Payment.processedById` no
- *     tienen índice: no se recorren los cobros del negocio);
- *   - una clase suya en una sede de la organización — `ClassSession (assignedStaffId, …)`.
- *   (`CommissionCalculation` no se consulta: sin membresía guardada, sus comisiones en vivo se ven en su recibo en
- *   cuanto el cierre las congela como devengo.)
- * Si la borraron físicamente, el nombre que guardó (`nombreGuardadoSql`, la misma regla que el reporte) y, si no hay
- * ninguno, «Persona dada de baja» con sus montos intactos (spec fase 3 §6.1, Codex r1-17, r2-17).
- */
-async function personaDelRecibo(organizationId: string, staffId: string): Promise<string> {
-  const select = { firstName: true, lastName: true } as const
-  const viva = await prisma.staff.findFirst({ where: { id: staffId, venues: { some: { venue: { organizationId } } } }, select })
-  if (viva) return nombreDe(viva)
-  const [devengo, membresia, clase] = await Promise.all([
-    prisma.serviceEarning.findFirst({ where: { organizationId, staffId }, select: { id: true } }),
-    prisma.staffOrganization.findUnique({ where: { staffId_organizationId: { staffId, organizationId } }, select: { id: true } }),
-    prisma.classSession.findFirst({ where: { assignedStaffId: staffId, venue: { organizationId } }, select: { id: true } }),
-  ])
-  if (!devengo && !membresia && !clase) throw new NotFoundError('Persona no encontrada')
-  const fila = await prisma.staff.findUnique({ where: { id: staffId }, select })
-  if (fila) return nombreDe(fila)
-  const [guardado] = await prisma.$queryRaw<Array<{ persona: string | null }>>`
-    SELECT ${nombreGuardadoSql(organizationId, Prisma.sql`${staffId}`)} AS persona`
-  return guardado?.persona ?? PERSONA_DADA_DE_BAJA
 }
 
 async function prepararRecibo(input: { userId: string; venueId: string; staffId: string; fecha: string }): Promise<ReciboPreparado> {
@@ -308,7 +280,8 @@ async function prepararRecibo(input: { userId: string; venueId: string; staffId:
   const persona = await personaDelRecibo(v.organizationId, input.staffId)
   const filaAhora = await periodoQueContieneFecha(prisma, v.organizationId, input.fecha)
   const activas = await sedesConServicePay(v.organizationId)
-  const candidatas = [...new Set([...(filaAhora?.venueIds ?? []), ...activas])]
+  const conVentana = await sedesConVentana(prisma, v.organizationId)
+  const candidatas = [...new Set([...(filaAhora?.venueIds ?? []), ...activas, ...conVentana])]
   const { venueIds: permitidas } = await sedesLegiblesDe(input.userId, candidatas)
   const sedes = candidatas.length
     ? await prisma.venue.findMany({
@@ -322,19 +295,33 @@ async function prepararRecibo(input: { userId: string; venueId: string; staffId:
     organizationId: v.organizationId,
     persona,
     activas,
+    conVentana,
     permitidas: new Set(permitidas),
     sedes: new Map(sedes.map(x => [x.id, { nombre: x.name }])),
   }
 }
 
 /**
- * La MISMA regla que `alcanceLegibleDelPeriodo` (A3: cerrado = su alcance; abierto = guardadas ∪ activas; filtrado por
- * permiso y por `sede`), pero con módulos y permisos ya resueltos: es pura y corre dentro de la instantánea. Una sede
- * que entró al periodo entre la preparación y la instantánea no tiene permiso resuelto: no se lee y el recibo dice
- * `parcial` (conservador; la siguiente lectura ya la incluye).
+ * La MISMA regla que `alcanceLegibleDelPeriodo` (`alcanceDelPeriodo`, B11: cerrado = su alcance; abierto = guardadas ∪
+ * activas y, desde el inicio de pago al personal, ∪ las sedes con ventana; filtrado por permiso y por `sede`), pero con
+ * módulos, ventanas y permisos ya resueltos: es pura y corre dentro de la instantánea. Una sede que entró al periodo entre
+ * la preparación y la instantánea no tiene permiso resuelto: no se lee y el recibo dice `parcial` (conservador; la
+ * siguiente lectura ya la incluye).
  */
-function alcanceEnLaFoto(p: ReciboPreparado, fila: { status: string; venueIds: string[] } | null, sede?: string) {
-  const alcance = fila?.status === 'CLOSED' ? [...new Set(fila.venueIds)] : [...new Set([...(fila?.venueIds ?? []), ...p.activas])]
+function alcanceEnLaFoto(
+  p: ReciboPreparado,
+  fila: { status: 'OPEN' | 'CLOSED'; venueIds: string[] } | null,
+  periodo: { start: string; end: string },
+  startDate: string | null,
+  sede?: string,
+) {
+  const alcance = alcanceDelPeriodo({
+    periodo: { ...periodo, estado: fila?.status ?? 'OPEN' },
+    guardadas: fila?.venueIds ?? [],
+    activas: p.activas,
+    conVentana: p.conVentana,
+    startDate,
+  })
   const legibles = alcance.filter(v => p.permitidas.has(v)).sort()
   const venueIds = sede ? legibles.filter(id => id === sede) : legibles
   return { venueIds, parcial: legibles.length < alcance.length || (sede !== undefined && venueIds.length === 0) }
@@ -375,13 +362,17 @@ async function fuenteDelRecibo(
   o: { agruparPropinas: boolean },
 ): Promise<FuenteRecibo> {
   const fila = await periodoQueContieneFecha(db, prep.organizationId, input.fecha)
-  // El MISMO alcance legible que el reporte (Codex R1-1, R3-Nuevo 2), con el filtro de `sede` (R2-R1-21).
-  const { venueIds, parcial } = alcanceEnLaFoto(prep, fila, input.sede)
   // Codex R5: periodicidad y zona horaria deciden QUÉ clases entran, así que salen de la MISMA instantánea que los montos.
   const org = await db.organization.findUniqueOrThrow({
     where: { id: prep.organizationId },
     select: { servicePayPeriodicity: true, staffPayStartDate: true },
   })
+  const canon = fila
+    ? { start: dbDateComoFecha(fila.periodStart), end: dbDateComoFecha(fila.periodEnd) }
+    : periodoQueContiene(input.fecha, org.servicePayPeriodicity)
+  const startDate = org.staffPayStartDate ? dbDateComoFecha(org.staffPayStartDate) : null
+  // El MISMO alcance legible que el reporte (Codex R1-1, R3-Nuevo 2), con el filtro de `sede` (R2-R1-21).
+  const { venueIds, parcial } = alcanceEnLaFoto(prep, fila, canon, startDate, input.sede)
   const zonas = venueIds.length
     ? await db.venue.findMany({
         where: { id: { in: venueIds }, organizationId: prep.organizationId },
@@ -390,9 +381,6 @@ async function fuenteDelRecibo(
       })
     : []
   const tzDe = new Map(zonas.map(x => [x.id, x.timezone || TZ_DEFAULT]))
-  const canon = fila
-    ? { start: dbDateComoFecha(fila.periodStart), end: dbDateComoFecha(fila.periodEnd) }
-    : periodoQueContiene(input.fecha, org.servicePayPeriodicity)
   const crudo: Prisma.Sql[] = []
   if (fila && venueIds.length) {
     crudo.push(Prisma.sql`
@@ -426,17 +414,15 @@ async function fuenteDelRecibo(
     }
     // Spec fase 3 §11: el periodo abierto muestra en vivo las comisiones y propinas que hoy entrarían al cierre (las MISMAS
     // reglas que el cierre, B3). Sin activar no hay nada que mostrar.
-    if (org.staffPayStartDate && venueIds.length) {
-      const ventas = await sqlVentasDelPeriodo(
-        db,
-        {
-          organizationId: prep.organizationId,
-          periodo: { id: fila?.id ?? null, ...canon },
-          sedes: venueIds.map(id => ({ venueId: id, tz: tzDe.get(id) ?? TZ_DEFAULT })),
-          startDate: dbDateComoFecha(org.staffPayStartDate),
-        },
-        { staffId: input.staffId },
-      )
+    if (startDate && venueIds.length) {
+      const a: AlcanceBarrido = {
+        organizationId: prep.organizationId,
+        periodo: { id: fila?.id ?? null, ...canon },
+        sedes: venueIds.map(id => ({ venueId: id, tz: tzDe.get(id) ?? TZ_DEFAULT })),
+        startDate,
+      }
+      // B11: con la participación por sede; los rangos, una vez para el recibo entero (en la MISMA foto).
+      const ventas = sqlVentasDelPeriodo(a, await rangosConParticipacion(db, a), { staffId: input.staffId })
       if (ventas) {
         crudo.push(Prisma.sql`
           SELECT CASE v.fuente WHEN 'COMMISSION' THEN 'COMISION' ELSE 'PROPINA' END AS tipo, v.instante, v."sourceId" AS id,

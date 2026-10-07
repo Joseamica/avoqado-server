@@ -7,11 +7,30 @@ import type { Mundo } from './_mundo'
 let n = 0
 type PagoRef = { id: string; orderId: string; venueId: string }
 
-/** Activa pago al personal desde `desde` y, salvo `propinasDesde: null`, abre una ventana de propinas (1-ago 00:00 CDMX). */
-export async function activar(m: Mundo, o: { desde?: string; propinasDesde?: string | null } = {}) {
-  await prisma.organization.update({ where: { id: m.orgId }, data: { staffPayStartDate: fechaComoDbDate(o.desde ?? '2026-08-01') } })
+/**
+ * Activa pago al personal desde `desde` como lo hace la activación real (B9-B11): las sedes (`sedes`, por defecto la del
+ * mundo) quedan ACTIVAS desde ese día (`StaffPayVenueWindow [desde, ∞)`) y, salvo `propinasDesde: null`, abre una ventana de
+ * propinas (1-ago 00:00 CDMX). Desde B11 una venta o clase sin ancla desde el inicio exige que su sede esté activa ese día.
+ */
+export async function activar(m: Mundo, o: { desde?: string; propinasDesde?: string | null; sedes?: string[] } = {}) {
+  const desde = o.desde ?? '2026-08-01'
+  await prisma.organization.update({ where: { id: m.orgId }, data: { staffPayStartDate: fechaComoDbDate(desde) } })
+  for (const venueId of o.sedes ?? [m.venueId]) await sedeActiva(m, venueId, desde)
   if (o.propinasDesde !== null) await ventana(m, o.propinasDesde ?? '2026-08-01T06:00:00Z', null)
 }
+
+/** Una ventana de participación de la sede: activa del día `desde` al `hasta` (incluido; null = sin fin). */
+export const sedeActiva = (m: Mundo, venueId: string, desde: string, hasta: string | null = null) =>
+  prisma.staffPayVenueWindow.create({
+    data: {
+      organizationId: m.orgId,
+      venueId,
+      desde: fechaComoDbDate(desde),
+      hasta: hasta ? fechaComoDbDate(hasta) : null,
+      activadaPor: m.owner,
+      desactivadaPor: hasta ? m.owner : null,
+    },
+  })
 
 export const ventana = (m: Mundo, desdeIso: string, hastaIso: string | null) =>
   prisma.staffPayTipWindow.create({

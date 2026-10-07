@@ -4,7 +4,8 @@ import { ConflictError } from '../../../errors/AppError'
 import { alcanceLegibleDelPeriodo, periodoQueContieneFecha } from './periodosGuardados'
 import { ClaseValorada, contarPorEstado, FiltroValoracion, valoracionCte, valorarClases } from './valoracion'
 import { dbDateComoFecha, hoyLocal, periodoQueContiene, PeriodoCanonico, venuePeriodRange } from './periodos'
-import { nombreGuardadoSql, PERSONA_DADA_DE_BAJA, sqlVentasDelPeriodo } from './fuentesVenta'
+import { AlcanceBarrido, nombreGuardadoSql, PERSONA_DADA_DE_BAJA, sqlVentasDelPeriodo } from './fuentesVenta'
+import { rangosConParticipacion } from './rangos'
 
 /** Los campos del ancla (A4) no salen en el desglose: la pantalla no los usa y `payAmountOverride` saldría sin formato. */
 type CamposDelAncla = 'fechaValoracion' | 'periodoOrigen' | 'cancelada' | 'payCountOverride' | 'payAmountOverride' | 'excluida'
@@ -54,7 +55,8 @@ async function contexto(userId: string, venueId: string, fecha?: string, sede?: 
   // 🔴 El MISMO alcance legible que el recibo (Codex R1-1, R3-Nuevo 2): CERRADO = su alcance guardado; ABIERTO = sus
   // sedes guardadas ∪ las que hoy tienen el módulo (una diferencia liquidada desde una sede que ya lo apagó NO
   // desaparece). Filtrado por permiso y por `sede`.
-  const { venueIds, parcial } = await alcanceLegibleDelPeriodo(userId, v.organizationId, fila, sede)
+  const startDate = v.organization.staffPayStartDate ? dbDateComoFecha(v.organization.staffPayStartDate) : null
+  const { venueIds, parcial } = await alcanceLegibleDelPeriodo(userId, v.organizationId, fila, sede, { periodo, startDate })
   const venues = venueIds.length
     ? await prisma.venue.findMany({
         where: { id: { in: venueIds }, organizationId: v.organizationId },
@@ -69,7 +71,6 @@ async function contexto(userId: string, venueId: string, fecha?: string, sede?: 
     const { from, to } = venuePeriodRange(periodo, tz)
     return { venueId: id, organizationId: v.organizationId, tz, desde: from, hasta: to, ahora }
   })
-  const startDate = v.organization.staffPayStartDate ? dbDateComoFecha(v.organization.staffPayStartDate) : null
   return { organizationId: v.organizationId, periodicidad, periodo, venueIds, parcial, filtros, fila, startDate }
 }
 
@@ -96,15 +97,17 @@ async function fuentePorPersona(c: Contexto): Promise<Prisma.Sql | null> {
       LEFT JOIN "Staff" s ON s.id = e."staffId"
       WHERE e."periodId" = ${c.fila.id} AND e.concept IN ('RECONCILE', 'MANUAL') AND e."venueId" IN (${Prisma.join(c.venueIds)})`)
   }
-  const ventas =
+  // B11: con la participación por sede; los rangos, una vez para el reporte entero.
+  const a: AlcanceBarrido | null =
     c.startDate && c.filtros.length
-      ? await sqlVentasDelPeriodo(prisma, {
+      ? {
           organizationId: c.organizationId,
           periodo: { id: c.fila?.id ?? null, ...c.periodo },
           sedes: c.filtros.map(f => ({ venueId: f.venueId, tz: f.tz })),
           startDate: c.startDate,
-        })
+        }
       : null
+  const ventas = a ? sqlVentasDelPeriodo(a, await rangosConParticipacion(prisma, a)) : null
   if (ventas) {
     partes.push(Prisma.sql`
       SELECT v."staffId", v.persona AS "staffName", v."venueId", 0 AS clases, 0 AS lugares, v.monto, 0::numeric AS ajuste,

@@ -2,6 +2,7 @@ import { z } from 'zod'
 
 export const venueParamsSchema = z.object({ venueId: z.string().cuid('Venue ID inválido') })
 export const fechaSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Fecha inválida (AAAA-MM-DD)')
+const sedeSchema = z.string().cuid('Sede inválida')
 
 export const levelParamsSchema = venueParamsSchema.extend({ levelId: z.string().cuid('Nivel inválido') })
 export const staffParamsSchema = venueParamsSchema.extend({ staffId: z.string().cuid('Persona inválida') })
@@ -58,7 +59,6 @@ export const publicarVersionSchema = z.object({
 export const archivarTablaSchema = z.object({ archivedFrom: fechaSchema })
 
 // Reporte del periodo abierto (spec §6.2): renglones paginados con tope duro de 100.
-const sedeSchema = z.string().cuid('Sede inválida')
 export const reporteQuerySchema = z.object({
   fecha: fechaSchema.optional(),
   sede: sedeSchema.optional(),
@@ -97,16 +97,27 @@ export const periodicidadSchema = z.object({
 })
 /** Fase 3 §7.1: activar pago al personal confirma la periodicidad (también la mensual de fábrica) y, opcional, la fecha de
  *  inicio que se mostró: si ya no es ésa, el service contesta 409 INICIO_CAMBIO (Codex bloque B #3).
- *  B9 (diseño r7.4): estricto. Antes de B11 activar abre TODAS las sedes con plan; elegir sedes todavía no existe, y un
- *  `sedes` (o cualquier campo de más) es un 400, nunca se ignora en silencio. */
+ *  B11 (diseño r3.3): `sedes` opcional, las que entran desde el inicio (sin ella, todas las que tienen el plan). Que haya
+ *  al menos una y que tengan el plan lo revisa el service (FALTA_SEDE, SEDE_SIN_PLAN). Estricto: un campo de más es 400. */
 export const activarSchema = periodicidadSchema
   .extend({
     inicioEsperado: fechaSchema.optional(),
-    sedes: z
-      .never({ errorMap: () => ({ message: 'Todavía no se pueden elegir sedes al activar: se activan todas las que tienen el plan' }) })
-      .optional(),
+    sedes: z.array(sedeSchema).max(500, 'Demasiadas sedes').optional(),
   })
   .strict('Hay un campo que activar no acepta')
+/** B11 (diseño r3.3, r4.6, r4.7): activar o desactivar UNA sede, con la fecha que se eligió (por defecto hoy en su zona) y,
+ *  opcional, el «hoy» que se vio en la vista previa (`fechaEsperada`: si ya es otro día, 409 FECHA_CAMBIO). */
+export const sedeParamsSchema = venueParamsSchema.extend({ sedeId: z.string().cuid('Sede inválida') })
+export const activarSedeSchema = z
+  .object({ desde: fechaSchema.optional(), fechaEsperada: fechaSchema.optional() })
+  .strict('Hay un campo que activar la sede no acepta')
+export const desactivarSedeSchema = z
+  .object({ hasta: fechaSchema.optional(), fechaEsperada: fechaSchema.optional() })
+  .strict('Hay un campo que desactivar la sede no acepta')
+export const vistaPreviaSedeQuerySchema = z.object({
+  accion: z.enum(['activar', 'desactivar'], { errorMap: () => ({ message: 'Elige activar o desactivar' }) }),
+  fecha: fechaSchema.optional(),
+})
 /** Fase 3 §6.3: «Pagar las propinas en el recibo», sí o no. */
 export const propinasSchema = z.object({
   encender: z.boolean({

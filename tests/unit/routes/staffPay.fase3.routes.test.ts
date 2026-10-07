@@ -29,14 +29,13 @@ describe('Zod de la fase 3 (sólo forma, mensajes en español)', () => {
     expect(mala.success).toBe(false)
     if (!mala.success) expect(mala.error.errors.map(e => e.message)).toEqual(['Fecha inválida (AAAA-MM-DD)'])
   })
-  it('🔴 B9: activar no acepta `sedes` (ni ningún campo de más) antes de B11: se rechaza en español, nunca se ignora', () => {
-    const conSedes = schemas.activarSchema.safeParse({ periodicidad: 'MONTHLY', sedes: ['v1'] })
-    expect(conSedes.success).toBe(false)
-    if (!conSedes.success)
-      expect(conSedes.error.errors.map(e => e.message)).toEqual([
-        'Todavía no se pueden elegir sedes al activar: se activan todas las que tienen el plan',
-      ])
-    expect(schemas.activarSchema.safeParse({ periodicidad: 'MONTHLY', sedes: [] }).success).toBe(false)
+  it('B11: activar acepta `sedes` (ids de sede), vacío lo decide el service (FALTA_SEDE); un campo de más sigue siendo 400', () => {
+    const sede = 'ckvenue00000000000000000001'
+    expect(schemas.activarSchema.safeParse({ periodicidad: 'MONTHLY', sedes: [sede] }).success).toBe(true)
+    expect(schemas.activarSchema.safeParse({ periodicidad: 'MONTHLY', sedes: [] }).success).toBe(true)
+    const mala = schemas.activarSchema.safeParse({ periodicidad: 'MONTHLY', sedes: ['v1'] })
+    expect(mala.success).toBe(false)
+    if (!mala.success) expect(mala.error.errors.map(e => e.message)).toEqual(['Sede inválida'])
     const deMas = schemas.activarSchema.safeParse({ periodicidad: 'MONTHLY', ahora: '2020-01-01' })
     expect(deMas.success).toBe(false)
     if (!deMas.success) expect(deMas.error.errors.map(e => e.message)).toEqual(['Hay un campo que activar no acepta'])
@@ -65,7 +64,7 @@ describe('Rutas de la fase 3', () => {
     expect(i).toBeGreaterThan(gate)
     expect(stack[i].route.stack.map((l: any) => l.handle?.requiredPermission).find(Boolean)).toBe('staffpay:close')
   })
-  it('🔴 B9: POST /activate con `sedes` contesta 400 en la validación de la ruta, antes del controller', async () => {
+  it('B11: POST /activate valida `sedes` en la ruta, antes del controller (una sede mal formada es 400; bien formada, pasa)', async () => {
     const capa = stack[ruta('post', '/activate')]
     // La capa que sigue a `checkPermission` es la validación de Zod (`validateRequest`).
     const capas = capa.route.stack.map((l: any) => l.handle)
@@ -73,9 +72,9 @@ describe('Rutas de la fase 3', () => {
     const next = jest.fn()
     const req = { params: { venueId: 'ckvenue00000000000000000001' }, query: {}, body: { periodicidad: 'MONTHLY', sedes: ['x'] } }
     await validar(req, {}, next)
-    expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 400, message: expect.stringMatching(/elegir sedes/) }))
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 400, message: expect.stringMatching(/Sede inválida/) }))
     const ok = jest.fn()
-    await validar({ ...req, body: { periodicidad: 'MONTHLY' } }, {}, ok)
+    await validar({ ...req, body: { periodicidad: 'MONTHLY', sedes: ['ckvenue00000000000000000002'] } }, {}, ok)
     expect(ok).toHaveBeenCalledWith()
   })
   it('GET /access sigue ANTES del gate: la pantalla tiene que poder explicar el módulo apagado', () => {
@@ -105,6 +104,7 @@ describe('Controller de la fase 3', () => {
     const ra = res()
     await controller.postActivate(req({ body: { periodicidad: 'MONTHLY', ahora: '2020-01-01' } }), ra, jest.fn())
     expect(activacion.activarPagoAlPersonal).toHaveBeenCalledWith({ venueId: 'v1', userId: 'u1', periodicidad: 'MONTHLY' })
+    expect((activacion.activarPagoAlPersonal as jest.Mock).mock.calls[0][0]).not.toHaveProperty('sedes')
     expect(ra.json).toHaveBeenCalledWith({ startDate: '2026-10-01', yaActivado: false })
     // La fecha que vio el dashboard llega al service, que la compara bajo el candado (Codex bloque B #3).
     await controller.postActivate(req({ body: { periodicidad: 'MONTHLY', inicioEsperado: '2026-09-01' } }), res(), jest.fn())
@@ -113,6 +113,15 @@ describe('Controller de la fase 3', () => {
       userId: 'u1',
       periodicidad: 'MONTHLY',
       inicioEsperado: '2026-09-01',
+    })
+    // B11: las sedes elegidas llegan tal cual (el service exige al menos una y que tengan el plan).
+    await controller.postActivate(req({ body: { periodicidad: 'MONTHLY', sedes: ['s1', 's2'] } }), res(), jest.fn())
+    expect(activacion.activarPagoAlPersonal).toHaveBeenLastCalledWith({
+      venueId: 'v1',
+      userId: 'u1',
+      periodicidad: 'MONTHLY',
+      inicioEsperado: undefined,
+      sedes: ['s1', 's2'],
     })
     const rt = res()
     await controller.putTips(req({ body: { encender: true, ahora: '2020-01-01' } }), rt, jest.fn())

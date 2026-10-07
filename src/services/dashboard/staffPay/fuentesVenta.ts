@@ -2,7 +2,7 @@
 import { Prisma } from '@prisma/client'
 import prisma from '../../../utils/prismaClient'
 import { utcTs } from '../../../utils/sqlDates'
-import { dbDateComoFecha, diaCivilSiguiente, fechaComoDbDate, PeriodoCanonico, venuePeriodRange } from './periodos'
+import { fueraDelSobre, RangoSede, Rangos, rangosConParticipacion, Ventana } from './rangos'
 
 type Db = Prisma.TransactionClient | typeof prisma
 
@@ -39,125 +39,7 @@ export interface LineaBarrible {
 }
 
 const TZ_DEFAULT = 'America/Mexico_City'
-/**
- * ponytail: periodos cerrados que se leen para los rangos (1,000 quincenas ≈ 41 años). Pasado el tope TRUENA en vez de
- * truncar: con el orden ascendente que necesita la fusión, truncar perdería los cerrados más recientes y sus ventas
- * tardías quedarían sin barrer para siempre. Paginar (o leer sólo los no contiguos) si algún día se acerca.
- */
-const TOPE_PERIODOS_CERRADOS = 1000
 const acotar = (n: number) => Math.min(Math.max(Math.trunc(n) || 1, 1), 1000)
-
-/** Un rango de instantes [desde, hasta) de UNA sede: un tramo de días civiles ya convertido en su zona. */
-export type RangoSede = { venueId: string; desde: Date; hasta: Date }
-/** Una ventana de participación (`StaffPayVenueWindow`) en días civiles de la zona de su sede; `hasta` null = sin fin. */
-export type Ventana = { venueId: string; desde: string; hasta: string | null }
-/** ponytail: ventanas que se leen por operación (500 sedes × 10). Pasado el tope TRUENA (nunca recorta); se sube la constante. */
-export const TOPE_VENTANAS = 5000
-
-/** Un periodo que termina antes del inicio de pago al personal no barre nada: ni ventas ni anulaciones (B-D5). */
-const fueraDelSobre = (a: AlcanceBarrido) => !a.sedes.length || a.periodo.end < a.startDate
-
-/** Los periodos CERRADOS ANTERIORES a P desde `startDate`, en días civiles y en orden (B-D1). Pasado el tope truena. */
-async function cerradosAnteriores(db: Db, a: AlcanceBarrido): Promise<Array<PeriodoCanonico & { venueIds: string[] }>> {
-  const cerrados = await db.servicePayPeriod.findMany({
-    where: {
-      organizationId: a.organizationId,
-      status: 'CLOSED',
-      periodEnd: { gte: fechaComoDbDate(a.startDate), lt: fechaComoDbDate(a.periodo.start) },
-    },
-    select: { periodStart: true, periodEnd: true, venueIds: true },
-    orderBy: { periodStart: 'asc' },
-    take: TOPE_PERIODOS_CERRADOS + 1,
-  })
-  if (cerrados.length > TOPE_PERIODOS_CERRADOS) throw new Error('STAFF_PAY_DEMASIADOS_PERIODOS_CERRADOS')
-  return cerrados.map(x => ({ start: dbDateComoFecha(x.periodStart), end: dbDateComoFecha(x.periodEnd), venueIds: x.venueIds }))
-}
-
-/** Tramos civiles ordenados por inicio: recorta al inicio y junta los contiguos (y los encimados de unas simuladas). */
-function juntarContiguos(tramos: PeriodoCanonico[], startDate: string): PeriodoCanonico[] {
-  const civiles: PeriodoCanonico[] = []
-  for (const c of tramos) {
-    const start = c.start < startDate ? startDate : c.start
-    const u = civiles[civiles.length - 1]
-    if (u && start <= diaCivilSiguiente(u.end)) u.end = c.end > u.end ? c.end : u.end
-    else civiles.push({ start, end: c.end })
-  }
-  return civiles
-}
-
-/** Los tramos civiles de una sede como instantes, en SU zona (`venuePeriodRange`). */
-const enSuZona = (s: { venueId: string; tz: string }, civiles: PeriodoCanonico[]): RangoSede[] =>
-  civiles.map(c => {
-    const { from, to } = venuePeriodRange(c, s.tz)
-    return { venueId: s.venueId, desde: from, hasta: to }
-  })
-
-/**
- * Spec §6.2 puntos 3 y 4 (B-D1): una venta «ya cae» en este cierre si su fecha civil —en la zona de SU sede— está en P o en
- * un periodo anterior GUARDADO como CLOSED, y nunca antes de `startDate`. Un canónico sin fila no aparece aquí: cuenta
- * como abierto y lo suyo espera a su propio cierre (Codex r1-10). Los rangos civiles contiguos se juntan en uno.
- * B4 r1: los rangos de los periodos cerrados son POR SEDE: un periodo cerrado sólo aporta su rango a las sedes de SU
- * `venueIds`; P, a todas las del alcance. Así una sede que entra tarde al plan barre desde el periodo en que entró, nunca
- * lo que vendió mientras no lo tenía (sus propinas ya se entregaron por fuera: se pagarían dos veces).
- */
-export async function rangosBarribles(db: Db, a: AlcanceBarrido): Promise<RangoSede[]> {
-  if (fueraDelSobre(a)) return []
-  const cerrados = await cerradosAnteriores(db, a)
-  return a.sedes.flatMap(s =>
-    enSuZona(s, juntarContiguos([...cerrados.filter(x => x.venueIds.includes(s.venueId)), a.periodo], a.startDate)),
-  )
-}
-
-/**
- * Participación por sede (fase 3, B10; diseño r3.4 + r4 + r4.5), SIN CONECTAR (B11 reemplaza con esto a `rangosBarribles`).
- * `periodo` (rp) = P más los CERRADOS ANTERIORES a P desde `startDate`, IGUAL para todas las sedes (sin el filtro por
- * `venueIds` de B4 r1: lo reemplaza la ventana); misma lectura, tope y fusión. `participacion` (rv) = `periodo ∩ ventanas`
- * de cada sede, intersectado en DÍAS CIVILES y convertido después en su zona («desde el 1-nov» = 00:00 del 1-nov allá).
- * Ventanas: UNA consulta de las sedes del alcance, con tope (`TOPE_VENTANAS`: truena); `o.ventanas` (simuladas, para las
- * vistas previas de «entran / quedan fuera») reemplaza esa lectura.
- */
-export async function rangosConParticipacion(
-  db: Db,
-  a: AlcanceBarrido,
-  o: { ventanas?: Ventana[] } = {},
-): Promise<{ periodo: RangoSede[]; participacion: RangoSede[] }> {
-  if (fueraDelSobre(a)) return { periodo: [], participacion: [] }
-  const civiles = juntarContiguos([...(await cerradosAnteriores(db, a)), a.periodo], a.startDate)
-  const porSede = new Map<string, Ventana[]>()
-  for (const v of o.ventanas ?? (await ventanasDelAlcance(db, a))) {
-    const suyas = porSede.get(v.venueId)
-    if (suyas) suyas.push(v)
-    else porSede.set(v.venueId, [v])
-  }
-  const periodo: RangoSede[] = []
-  const participacion: RangoSede[] = []
-  for (const s of a.sedes) {
-    periodo.push(...enSuZona(s, civiles))
-    const dias = civiles
-      .flatMap(c =>
-        (porSede.get(s.venueId) ?? []).map(v => ({
-          start: v.desde > c.start ? v.desde : c.start,
-          end: v.hasta !== null && v.hasta < c.end ? v.hasta : c.end,
-        })),
-      )
-      .filter(d => d.start <= d.end)
-      .sort((x, y) => x.start.localeCompare(y.start))
-    participacion.push(...enSuZona(s, juntarContiguos(dias, a.startDate)))
-  }
-  return { periodo, participacion }
-}
-
-/** Las ventanas de las sedes del alcance en esta organización, en una consulta y con tope (nunca recorta). */
-async function ventanasDelAlcance(db: Db, a: AlcanceBarrido): Promise<Ventana[]> {
-  const filas = await db.staffPayVenueWindow.findMany({
-    where: { organizationId: a.organizationId, venueId: { in: venueIdsDe(a) } },
-    select: { venueId: true, desde: true, hasta: true },
-    orderBy: [{ venueId: 'asc' }, { desde: 'asc' }],
-    take: TOPE_VENTANAS + 1,
-  })
-  if (filas.length > TOPE_VENTANAS) throw new Error('STAFF_PAY_DEMASIADAS_VENTANAS')
-  return filas.map(w => ({ venueId: w.venueId, desde: dbDateComoFecha(w.desde), hasta: w.hasta ? dbDateComoFecha(w.hasta) : null }))
-}
 
 /** `(sede = X AND col en [desde, hasta)) OR …` sobre las columnas de `alias` (alias fijos del código, nunca del usuario). */
 function enRangos(alias: 'cc' | 'o' | 'p' | 'op', columna: 'calculatedAt' | 'createdAt', r: RangoSede[]): Prisma.Sql {
@@ -236,7 +118,7 @@ export function reversoDeLoCongelado(fuente: FuenteVenta, a: 'cc' | 'p'): Prisma
 }
 
 /**
- * Puntos 1-6 sobre `cc` (r2 §6; B10: `rp` = periodo, `rv` = participación; hoy todos pasan `rv = rp`). Toda fila cae en
+ * Puntos 1-6 sobre `cc` (r2 §6; `rp` = periodo, `rv` = participación, de `rangosConParticipacion`). Toda fila cae en
  * `rp` (factor común del índice venueId + fecha); una VENTA exige además `rv`. Un reverso de devolución (su pago es un
  * REFUND) sólo entra si la comisión que revierte ya está congelada (`reversoDeLoCongelado`) o entra en este mismo cierre
  * (su original en `rv`) (Codex r1-18): nunca se descuenta lo que el sobre no pagó. Una original ANULADA no ampara a nadie:
@@ -301,7 +183,7 @@ function reglaDelCobro(alias: 'p' | 'op', a: AlcanceBarrido): Prisma.Sql {
  * congelada, o —si la original entra en este mismo cierre— la que le toca hoy a la original; nunca quien reembolsó ni
  * quien atiende hoy la orden (Codex r1-18). Un reembolso no necesita ventana: lo que el sobre pagó siempre se descuenta.
  * B10 (r2 §6): toda fila cae en `rp`; un COBRO, y la original de un reembolso que entra en este cierre (`en_este`), exigen
- * además `rv` (hoy `rv = rp`). Reembolsos en dos ramas disjuntas: de una propina ya congelada (`reversoDeLoCongelado`,
+ * además `rv` (la participación de su sede). Reembolsos en dos ramas disjuntas: de una propina ya congelada (`reversoDeLoCongelado`,
  * dueño de `congelada`) y de una que no (dueño de `en_este`; si no entra, NULL y ningún consumidor la toma).
  */
 export function propinasBase(a: AlcanceBarrido, rp: RangoSede[], rv: RangoSede[]): Prisma.Sql {
@@ -421,28 +303,50 @@ const aLinea = (f: FilaVenta): LineaBarrible => ({
   },
 })
 
-/** Un lote de comisiones barribles en orden de id: primero los ids (por llave), después el detalle de SÓLO ésos (§6.5). */
-export async function comisionesBarribles(db: Db, a: AlcanceBarrido, o: { despuesDe?: string; limite: number }): Promise<LineaBarrible[]> {
+/**
+ * Un lote de comisiones barribles en orden de id: primero los ids (por llave), después el detalle de SÓLO ésos (§6.5).
+ * B11 (r4.5): `r` (periodo y participación) lo calcula UNA vez la operación (cierre, vista previa, recibo, reporte) y lo pasa
+ * a cada lote; antes cada lote volvía a leer los cerrados.
+ */
+export async function comisionesBarribles(
+  db: Db,
+  a: AlcanceBarrido,
+  r: Rangos,
+  o: { despuesDe?: string; limite: number },
+): Promise<LineaBarrible[]> {
   if (fueraDelSobre(a)) return []
-  const r = await rangosBarribles(db, a)
-  const ids = (await db.$queryRaw<Array<{ id: string }>>(idsComisiones(a, r, r, o.despuesDe, acotar(o.limite)))).map(x => x.id)
+  const ids = (await db.$queryRaw<Array<{ id: string }>>(idsComisiones(a, r.periodo, r.participacion, o.despuesDe, acotar(o.limite)))).map(
+    x => x.id,
+  )
   if (!ids.length) return []
   const filas = await db.$queryRaw<FilaVenta[]>`
     ${detalleComisiones(Prisma.sql`cc.id = ANY(${ids}::text[])`)} ORDER BY cc.id ASC`
   return filas.map(aLinea)
 }
 
-export async function propinasBarribles(db: Db, a: AlcanceBarrido, o: { despuesDe?: string; limite: number }): Promise<LineaBarrible[]> {
+export async function propinasBarribles(
+  db: Db,
+  a: AlcanceBarrido,
+  r: Rangos,
+  o: { despuesDe?: string; limite: number },
+): Promise<LineaBarrible[]> {
   if (fueraDelSobre(a)) return []
-  const r = await rangosBarribles(db, a)
-  const ids = (await db.$queryRaw<Array<{ id: string }>>(idsPropinas(a, r, r, o.despuesDe, acotar(o.limite)))).map(x => x.id)
+  const ids = (await db.$queryRaw<Array<{ id: string }>>(idsPropinas(a, r.periodo, r.participacion, o.despuesDe, acotar(o.limite)))).map(
+    x => x.id,
+  )
   if (!ids.length) return []
   const filas = await db.$queryRaw<FilaVenta[]>`
-    ${detallePropinas(a, r, r, Prisma.sql`b.id = ANY(${ids}::text[])`)} ORDER BY b.id ASC`
+    ${detallePropinas(a, r.periodo, r.participacion, Prisma.sql`b.id = ANY(${ids}::text[])`)} ORDER BY b.id ASC`
   return filas.map(aLinea)
 }
 
-export async function reversosPorAnulacion(db: Db, a: AlcanceBarrido, o: { despuesDe?: string; limite: number }): Promise<LineaBarrible[]> {
+/** Anulaciones de comisiones congeladas (§6.4): no dependen de rangos ni de ventanas (r4.2); `r` sólo por la misma firma. */
+export async function reversosPorAnulacion(
+  db: Db,
+  a: AlcanceBarrido,
+  _r: Rangos,
+  o: { despuesDe?: string; limite: number },
+): Promise<LineaBarrible[]> {
   if (fueraDelSobre(a)) return []
   const cursor = o.despuesDe ? Prisma.sql`e."sourceId" > ${o.despuesDe}` : Prisma.sql`true`
   const filas = await db.$queryRaw<FilaVenta[]>`
@@ -451,10 +355,9 @@ export async function reversosPorAnulacion(db: Db, a: AlcanceBarrido, o: { despu
 }
 
 /** Propinas que entrarían pero no tienen persona (spec §6.3): no bloquean el cierre; el preview las dice. */
-export async function propinasSinDueno(db: Db, a: AlcanceBarrido): Promise<{ n: number; total: Prisma.Decimal }> {
+export async function propinasSinDueno(db: Db, a: AlcanceBarrido, r: Rangos): Promise<{ n: number; total: Prisma.Decimal }> {
   if (fueraDelSobre(a)) return { n: 0, total: new Prisma.Decimal(0) }
-  const r = await rangosBarribles(db, a)
-  const [x] = await db.$queryRaw<Array<{ n: number; total: Prisma.Decimal | null }>>(sqlPropinasSinDueno(a, r, r))
+  const [x] = await db.$queryRaw<Array<{ n: number; total: Prisma.Decimal | null }>>(sqlPropinasSinDueno(a, r.periodo, r.participacion))
   return { n: x.n, total: x.total ?? new Prisma.Decimal(0) }
 }
 
@@ -467,16 +370,46 @@ const sqlPropinasSinDueno = (a: AlcanceBarrido, rp: RangoSede[], rv: RangoSede[]
  * Las tres fuentes como UNA consulta (sin paginar), para la vista EN VIVO del periodo abierto: el recibo y el reporte la
  * envuelven en su propio `UNION ALL` (B5). Mismas reglas y mismas columnas que las líneas del cierre. null si no barre.
  */
-export async function sqlVentasDelPeriodo(db: Db, a: AlcanceBarrido, o: { staffId?: string } = {}): Promise<Prisma.Sql | null> {
+export function sqlVentasDelPeriodo(a: AlcanceBarrido, r: Rangos, o: { staffId?: string } = {}): Prisma.Sql | null {
   if (fueraDelSobre(a)) return null
-  const r = await rangosBarribles(db, a)
   const dePersona = (col: string) => (o.staffId ? Prisma.sql`AND ${Prisma.raw(col)} = ${o.staffId}` : Prisma.empty)
+  const { periodo: rp, participacion: rv } = r
   return Prisma.sql`
-    ${detalleComisiones(Prisma.sql`cc."venueId" = ANY(${venueIdsDe(a)}::text[]) AND ${comisionBarrible(r, r)} ${dePersona('cc."staffId"')}`)}
+    ${detalleComisiones(Prisma.sql`cc."venueId" = ANY(${venueIdsDe(a)}::text[]) AND ${comisionBarrible(rp, rv)} ${dePersona('cc."staffId"')}`)}
     UNION ALL
-    ${detallePropinas(a, r, r, Prisma.sql`true ${dePersona('b."staffId"')}`)}
+    ${detallePropinas(a, rp, rv, Prisma.sql`true ${dePersona('b."staffId"')}`)}
     UNION ALL
     ${detalleReversos(a, Prisma.sql`true ${dePersona('e."staffId"')}`)}`
+}
+
+/** Comisiones y propinas que entran, NETAS (devoluciones con su signo), por sede y fuente: una fila por par. */
+export type TotalVentas = { venueId: string; fuente: FuenteVenta; n: number; total: Prisma.Decimal }
+
+/**
+ * La suma de lo que el barrido tomaría, por sede y fuente (B11, diseño r5.4, r7.3): los MISMOS constructores
+ * (`comisionBarrible`, `propinasBase` con persona) sobre las ventanas reales o SIMULADAS (`o.ventanas`). «Entran» y «quedan
+ * fuera» salen por DIFERENCIA de estas sumas, nunca de los positivos: una devolución entra o sale con su original (+$60 y
+ * −$60 alrededor de la fecha ⇒ $0). Las anulaciones (§6.4) no dependen de las ventanas: no van aquí. Agregado en la base:
+ * nunca trae las filas a memoria.
+ */
+export async function totalesVentas(
+  db: Db,
+  a: AlcanceBarrido,
+  o: { ventanas?: Ventana[]; soloElPeriodo?: boolean } = {},
+): Promise<TotalVentas[]> {
+  if (fueraDelSobre(a)) return []
+  const { periodo: rp, participacion: rv } = await rangosConParticipacion(db, a, o)
+  const filas = await db.$queryRaw<Array<{ venueId: string; fuente: FuenteVenta; n: number; total: Prisma.Decimal | null }>>`
+    SELECT x."venueId", x.fuente, COUNT(*)::int AS n, SUM(x.monto) AS total
+    FROM (
+      SELECT cc."venueId", 'COMMISSION'::text AS fuente, cc."netCommission" AS monto
+      FROM "CommissionCalculation" cc
+      WHERE cc."venueId" = ANY(${venueIdsDe(a)}::text[]) AND ${comisionBarrible(rp, rv)}
+      UNION ALL
+      SELECT b."venueId", 'TIP'::text AS fuente, b.monto FROM (${propinasBase(a, rp, rv)}) b WHERE b."staffId" IS NOT NULL
+    ) x
+    GROUP BY x."venueId", x.fuente`
+  return filas.map(f => ({ ...f, total: new Prisma.Decimal(f.total ?? 0) }))
 }
 
 /**
@@ -484,11 +417,11 @@ export async function sqlVentasDelPeriodo(db: Db, a: AlcanceBarrido, o: { staffI
  * pide el cierre, SÓLO para su `EXPLAIN` en la prueba de carga (B7).
  */
 export async function consultasDeVentas(db: Db, a: AlcanceBarrido, n = 500, despuesDe: { comisiones?: string; propinas?: string } = {}) {
-  const r = await rangosBarribles(db, a)
+  const { periodo: rp, participacion: rv } = await rangosConParticipacion(db, a)
   return {
-    comisiones: idsComisiones(a, r, r, despuesDe.comisiones, n),
-    propinas: idsPropinas(a, r, r, despuesDe.propinas, n),
+    comisiones: idsComisiones(a, rp, rv, despuesDe.comisiones, n),
+    propinas: idsPropinas(a, rp, rv, despuesDe.propinas, n),
     reversos: Prisma.sql`${detalleReversos(a, Prisma.sql`true`)} ORDER BY e."sourceId" ASC LIMIT ${n}`,
-    sinDueno: sqlPropinasSinDueno(a, r, r),
+    sinDueno: sqlPropinasSinDueno(a, rp, rv),
   }
 }

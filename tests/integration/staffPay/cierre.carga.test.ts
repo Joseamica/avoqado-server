@@ -15,6 +15,7 @@ import {
   propinasBarribles,
   propinasSinDueno,
 } from '@/services/dashboard/staffPay/fuentesVenta'
+import { Rangos, rangosConParticipacion } from '@/services/dashboard/staffPay/rangos'
 import { activarPagoAlPersonal, cambiarPropinas } from '@/services/dashboard/staffPay/activacion.service'
 import { valoracionCte } from '@/services/dashboard/staffPay/valoracion'
 import { fechaComoDbDate, venuePeriodRange } from '@/services/dashboard/staffPay/periodos'
@@ -154,6 +155,10 @@ describirSi('cierre con 50,000 clases (spec §6.3 punto 3)', () => {
     ).id
     await sembrarVentas('v', '2026-08-01 12:00:00', 30)
     await prisma.organization.update({ where: { id: m.orgId }, data: { staffPayStartDate: fechaComoDbDate('2026-07-01') } })
+    // B11: la sede, activa en pago al personal desde el inicio (como la deja la activación real).
+    await prisma.staffPayVenueWindow.create({
+      data: { organizationId: m.orgId, venueId: m.venueId, desde: fechaComoDbDate('2026-07-01'), activadaPor: m.owner },
+    })
     await prisma.staffPayTipWindow.create({
       data: { organizationId: m.orgId, startsAt: new Date('2026-07-01T06:00:00Z'), startedById: m.owner },
     })
@@ -224,7 +229,7 @@ describirSi('cierre con 50,000 clases (spec §6.3 punto 3)', () => {
       SELECT cs.id, ${julio.id}::text, cs."startsAt"::date, false, NOW()
       FROM "ClassSession" cs WHERE cs."venueId" = ${m.venueId}::text AND cs.id LIKE 'cjul%'`
     // Fase 3 (revisiones de B3-B5): julio CERRADO con sus 50,000 ventas YA congeladas (comisión y propina de cada cobro).
-    // `rangosBarribles` junta julio con agosto (cerrados contiguos): el cierre, el preview y la vista en vivo de agosto
+    // `rangosConParticipacion` junta julio con agosto (cerrados contiguos): el cierre, el preview y la vista en vivo de agosto
     // recorren también lo cobrado en julio y lo descartan por el anti-join de lo congelado. Eso es lo que se mide aquí.
     const t = Date.now()
     await sembrarVentas('j', '2026-07-01 12:00:00', 30)
@@ -314,17 +319,21 @@ describirSi('cierre con 50,000 clases (spec §6.3 punto 3)', () => {
       startDate: '2026-07-01',
     }
     const ventas = await consultasDeVentas(prisma, alcanceVentas)
+    // B11: los rangos (periodo y participación), una vez por recorrido, como el cierre.
+    const rangos = await rangosConParticipacion(prisma, alcanceVentas)
     await explicar('ventas · ids del primer lote de comisiones', ventas.comisiones)
     await explicar('ventas · ids del primer lote de propinas', ventas.propinas)
     await explicar('ventas · reversos por anulación (primer lote)', ventas.reversos)
     // B7 r1: la cuenta de propinas sin dueño del preview (antes de congelar). Con historial tardaba 102-132 s por un mal plan.
     await explicar('ventas · propinas sin dueño (la cuenta del preview)', ventas.sinDueno)
-    expect(await medir('propinasSinDueno (antes de congelar)', () => propinasSinDueno(prisma, alcanceVentas))).toMatchObject({ n: 0 })
+    expect(await medir('propinasSinDueno (antes de congelar)', () => propinasSinDueno(prisma, alcanceVentas, rangos))).toMatchObject({
+      n: 0,
+    })
     // ¿El costo de un lote crece con el cursor, o cada lote recorre el rango entero? El mismo recorrido por lotes que hace
     // el cierre, por fuente, con el tiempo de cada lote (el primero, cada 20 y el último) y el total de la fuente.
     const recorrerFuente = async (
       nombre: string,
-      leer: (db: typeof prisma, a: AlcanceBarrido, o: { despuesDe?: string; limite: number }) => Promise<LineaBarrible[]>,
+      leer: (db: typeof prisma, a: AlcanceBarrido, rg: Rangos, o: { despuesDe?: string; limite: number }) => Promise<LineaBarrible[]>,
     ) => {
       const t = Date.now()
       let despuesDe: string | undefined
@@ -333,7 +342,7 @@ describirSi('cierre con 50,000 clases (spec §6.3 punto 3)', () => {
       let lineas = 0
       for (;;) {
         const tl = Date.now()
-        const lote = await leer(prisma, alcanceVentas, { despuesDe, limite: 500 })
+        const lote = await leer(prisma, alcanceVentas, rangos, { despuesDe, limite: 500 })
         if (!lote.length) break
         n++
         lineas += lote.length
@@ -351,8 +360,12 @@ describirSi('cierre con 50,000 clases (spec §6.3 punto 3)', () => {
     const aMedias = await consultasDeVentas(prisma, alcanceVentas, 500, { comisiones: rc.mitad, propinas: rp.mitad })
     await explicar('ventas · ids del lote 51 de comisiones (a medio cursor)', aMedias.comisiones)
     await explicar('ventas · ids del lote 51 de propinas (a medio cursor)', aMedias.propinas)
-    await medir('lote 51 de propinas completo', () => propinasBarribles(prisma, alcanceVentas, { despuesDe: rp.mitad, limite: 500 }))
-    await medir('lote 51 de comisiones completo', () => comisionesBarribles(prisma, alcanceVentas, { despuesDe: rc.mitad, limite: 500 }))
+    await medir('lote 51 de propinas completo', () =>
+      propinasBarribles(prisma, alcanceVentas, rangos, { despuesDe: rp.mitad, limite: 500 }),
+    )
+    await medir('lote 51 de comisiones completo', () =>
+      comisionesBarribles(prisma, alcanceVentas, rangos, { despuesDe: rc.mitad, limite: 500 }),
+    )
 
     // Revisión de B4: activar y cambiar las propinas esperan el candado de la organización que el cierre retiene todo el
     // tiempo. Se lanzan las dos —en su forma que no cambia nada: ya activado, ya encendidas— en cuanto el cierre termina su

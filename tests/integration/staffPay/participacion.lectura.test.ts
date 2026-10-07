@@ -5,15 +5,8 @@
 import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { valoracionCte, valorarClases } from '@/services/dashboard/staffPay/valoracion'
-import {
-  AlcanceBarrido,
-  comisionBarrible,
-  propinasBase,
-  RangoSede,
-  rangosBarribles,
-  rangosConParticipacion,
-  reversoDeLoCongelado,
-} from '@/services/dashboard/staffPay/fuentesVenta'
+import { AlcanceBarrido, comisionBarrible, propinasBase, reversoDeLoCongelado } from '@/services/dashboard/staffPay/fuentesVenta'
+import { RangoSede, rangosConParticipacion } from '@/services/dashboard/staffPay/rangos'
 import { sedesConVentana } from '@/services/dashboard/staffPay/participacion'
 import { fechaComoDbDate } from '@/services/dashboard/staffPay/periodos'
 import { borrarMundo, clase, confirmadas, crearMundo, crearSede, Mundo, TZ } from './_mundo'
@@ -79,7 +72,7 @@ const iso = (r: RangoSede[]) => r.map(x => [x.venueId, x.desde.toISOString(), x.
 // ── 1. Clases: `valoracionCte` con `participacion` (r6.1, r4.1) ──────────────────────────────────────────────────────────
 
 describe('valoracionCte con participación (B10, r4.1)', () => {
-  it("'real' exige la ventana de la sede en la fecha local de la clase desde el inicio; 'fuera' es justo lo contrario; 'ninguna' es lo de hoy", async () => {
+  it("'real' (el default desde B11) exige la ventana de la sede en la fecha local de la clase desde el inicio; 'fuera' es justo lo contrario; 'ninguna', sin filtro", async () => {
     const b = await crearSede(m.orgId, m.key, 'b')
     await tabla500(m.venueId)
     await tabla500(b.venueId)
@@ -112,7 +105,8 @@ describe('valoracionCte con participación (B10, r4.1)', () => {
       )
     const sorted = (o: Record<string, unknown>) => Object.keys(o).sort()
 
-    expect(sorted(await valoradas(b.venueId))).toEqual([ago20, oct20, oct31, nov01, nov05].sort())
+    // B11: sin el campo es 'real' (todo llamador de producción); 'ninguna' ya sólo lo pasa quien lo pide.
+    expect(sorted(await valoradas(b.venueId))).toEqual([ago20, nov01, nov05].sort())
     expect(sorted(await valoradas(b.venueId, 'ninguna'))).toEqual([ago20, oct20, oct31, nov01, nov05].sort())
     expect(await valoradas(b.venueId, 'real')).toEqual({ [ago20]: '500.00', [nov01]: '500.00', [nov05]: '500.00' })
     expect(await valoradas(b.venueId, 'fuera')).toEqual({ [oct20]: '500.00', [oct31]: '500.00' })
@@ -193,8 +187,8 @@ describe('rangosConParticipacion (B10, r3.4)', () => {
       [A, '2026-11-01T06:00:00.000Z', '2026-11-11T06:00:00.000Z'],
       [T, '2026-11-01T07:00:00.000Z', '2026-12-01T08:00:00.000Z'],
     ])
-    // `rangosBarribles` no cambia en B10: sigue con el filtro por el alcance de cada cerrado (B4 r1).
-    expect(iso(await rangosBarribles(prisma, a)).filter(x => x[0] === T)).toEqual([
+    // `soloElPeriodo` (la vista previa de una sede, B11): sin los cerrados.
+    expect(iso((await rangosConParticipacion(prisma, a, { soloElPeriodo: true })).periodo).filter(x => x[0] === T)).toEqual([
       [T, '2026-11-01T07:00:00.000Z', '2026-12-01T08:00:00.000Z'],
     ])
 
@@ -214,7 +208,7 @@ describe('rangosConParticipacion (B10, r3.4)', () => {
       [T, '2026-10-01T07:00:00.000Z', '2026-12-01T08:00:00.000Z'],
     ])
 
-    // Ventanas simuladas (las vistas previas de B11-B12): reemplazan la lectura.
+    // Ventanas simuladas (las vistas previas de B11): reemplazan la lectura.
     r = await rangosConParticipacion(prisma, a, { ventanas: [{ venueId: C, desde: '2026-11-05', hasta: null }] })
     expect(iso(r.participacion)).toEqual([[C, '2026-11-05T06:00:00.000Z', '2026-12-01T06:00:00.000Z']])
 
@@ -266,7 +260,7 @@ describe('constructores de ventas con (rp, rv) (B10, r2 §6)', () => {
       sedes: [{ venueId: m.venueId, tz: TZ }],
       startDate: '2026-08-01',
     }
-    const rp = await rangosBarribles(prisma, a)
+    const rp = (await rangosConParticipacion(prisma, a)).periodo
     const rv: RangoSede[] = [{ venueId: m.venueId, desde: new Date('2026-09-16T06:00:00Z'), hasta: new Date('2026-10-01T06:00:00Z') }]
     const comisiones = async (x: RangoSede[], y: RangoSede[]) =>
       (

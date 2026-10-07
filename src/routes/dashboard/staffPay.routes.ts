@@ -6,6 +6,7 @@ import * as controller from '../../controllers/dashboard/staffPay.dashboard.cont
 import { organizacionTieneServicePay, venueHasServicePayAccess } from '../../services/dashboard/staffPay/acceso'
 import {
   activarSchema,
+  activarSedeSchema,
   ajusteClaseSchema,
   ajusteManualSchema,
   archivarTablaSchema,
@@ -14,6 +15,7 @@ import {
   crearNivelSchema,
   crearTablaSchema,
   cursorQuerySchema,
+  desactivarSedeSchema,
   destinoQuerySchema,
   differencesQuerySchema,
   editarNivelSchema,
@@ -31,10 +33,12 @@ import {
   publicarVersionSchema,
   reciboQuerySchema,
   reporteQuerySchema,
+  sedeParamsSchema,
   sessionPayParamsSchema,
   staffParamsSchema,
   tableParamsSchema,
   venueParamsSchema,
+  vistaPreviaSedeQuerySchema,
 } from '../../schemas/dashboard/staffPay.schema'
 
 const router = Router({ mergeParams: true })
@@ -99,6 +103,31 @@ router.put(
   checkPermission('staffpay:manage'),
   validateRequest(z.object({ params: sessionPayParamsSchema, body: ajusteClaseSchema })),
   controller.putClassPayAdjustments,
+)
+
+// B11 (diseño r3.7, r4.7, r7.3): activar o desactivar UNA sede «desde / hasta qué día», y su vista previa con montos. La
+// ruta pide el permiso en la sede del URL; el service, además, en la sede que se cambia (`staffpay:close` para escribir,
+// `staffpay:read` para ver). Activar exige el plan en ALGUNA sede (como liquidar) y el service, en la sede que se activa
+// (SEDE_SIN_PLAN). Desactivar y la vista previa NO llevan puerta de plan: desactivar es la salida del bloqueo de una sede
+// activa que perdió el plan (SEDE_ACTIVA_SIN_PLAN).
+router.get(
+  '/sedes/:sedeId/participation-preview',
+  checkPermission('staffpay:read'),
+  validateRequest(z.object({ params: sedeParamsSchema, query: vistaPreviaSedeQuerySchema })),
+  controller.getParticipationPreview,
+)
+router.post(
+  '/sedes/:sedeId/activate',
+  servicePayGateOrganizacion,
+  checkPermission('staffpay:close'),
+  validateRequest(z.object({ params: sedeParamsSchema, body: activarSedeSchema })),
+  controller.postActivateSede,
+)
+router.post(
+  '/sedes/:sedeId/deactivate',
+  checkPermission('staffpay:close'),
+  validateRequest(z.object({ params: sedeParamsSchema, body: desactivarSedeSchema })),
+  controller.postDeactivateSede,
 )
 
 router.use(servicePayGate)

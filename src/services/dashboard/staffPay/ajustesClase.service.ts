@@ -31,7 +31,8 @@ export interface LineaContabilizada {
 
 export interface PagoDeClase {
   classSessionId: string
-  estado: 'OK' | 'EXCLUIDA' | 'EXCEPCION' | 'NO_TERMINADA' | 'CANCELADA'
+  /** `FUERA_DEL_SOBRE` (fase 3, B11; diseño r5.5): sin ancla y su sede no estaba activa en pago al personal ese día. */
+  estado: 'OK' | 'EXCLUIDA' | 'EXCEPCION' | 'NO_TERMINADA' | 'CANCELADA' | 'FUERA_DEL_SOBRE'
   motivo: string | null
   monto: string | null
   conteo: number | null
@@ -52,6 +53,13 @@ export interface PagoDeClase {
   /** El periodo donde la clase se contabilizó por primera vez (su ancla), o null si aún no. */
   periodoOrigen: { id: string; start: string; end: string; estado: 'OPEN' | 'CLOSED' } | null
   lineas: LineaContabilizada[]
+  /**
+   * Sólo en `FUERA_DEL_SOBRE`: lo que pagaría si su sede hubiera estado activa ese día (null si tampoco se puede calcular:
+   * sin coach, nivel, tabla o monto) y la sede con la fecha local de la clase, para decir «La sede X no estaba activa en pago
+   * al personal el 20 oct». null en los demás estados.
+   */
+  montoSiEntrara: string | null
+  sede: { nombre: string; fecha: string } | null
 }
 
 export interface GuardarAjusteInput {
@@ -180,7 +188,7 @@ export async function pagoDeClase(
       startsAt: true,
       endsAt: true,
       status: true,
-      venue: { select: { organizationId: true, timezone: true } },
+      venue: { select: { organizationId: true, timezone: true, name: true } },
       payState: true,
     },
   })
@@ -223,30 +231,49 @@ export async function pagoDeClase(
     llegoTarde: false,
     periodoOrigen,
     lineas,
+    montoSiEntrara: null,
+    sede: null,
   }
   // Una cancelada está terminada desde que se canceló (D5-fix, Codex D-1): lo que paga ya no cambia, así que su tarjeta es la
   // misma antes y después de su horario. Sólo una clase viva espera a que termine.
   if (!cancelada && cs.endsAt > ahora) return { ...base, estado: 'NO_TERMINADA' }
-  const [v] = await valorarClases(
-    db,
-    {
-      venueId,
-      organizationId: cs.venue.organizationId,
-      tz: cs.venue.timezone || 'America/Mexico_City',
-      desde: new Date(cs.startsAt.getTime() - 1),
-      hasta: new Date(cs.startsAt.getTime() + 1),
-      ahora,
-      claseIds: [cs.id],
-      // Una clase anclada se valora con su ancla (spec §5.4): «lo que corresponde hoy» con la versión y fecha congeladas.
-      ...(origen ? { modo: 'periodo' as const, periodId: origen.id } : {}),
-    },
-    { limite: 1 },
-  )
+  const filtro = {
+    venueId,
+    organizationId: cs.venue.organizationId,
+    tz: cs.venue.timezone || 'America/Mexico_City',
+    desde: new Date(cs.startsAt.getTime() - 1),
+    hasta: new Date(cs.startsAt.getTime() + 1),
+    ahora,
+    claseIds: [cs.id],
+    // Una clase anclada se valora con su ancla (spec §5.4): «lo que corresponde hoy» con la versión y fecha congeladas.
+    ...(origen ? { modo: 'periodo' as const, periodId: origen.id } : {}),
+  }
+  // Con la participación REAL (el default, B11): lo que de verdad entra al sobre.
+  const [v] = await valorarClases(db, filtro, { limite: 1 })
+  // B11 (diseño r5.5): sin ancla y sin aparecer, se repite con la participación 'fuera'. Si ahí aparece, su sede no estaba
+  // activa ese día: FUERA_DEL_SOBRE, nunca SIN_TABLA (la tabla puede estar bien).
+  const fuera = !origen && !v ? (await valorarClases(db, { ...filtro, participacion: 'fuera' }, { limite: 1 }))[0] : undefined
   // Una cancelada sólo se paga con la regla de cancelación tardía de su versión (spec fase 3 §6.6); si no, es CANCELADA.
-  if (cancelada && !v?.canceladaTarde) return { ...base, estado: 'CANCELADA' }
-  // Sin ancla, terminada y con su fecha en un periodo CERRADO: se paga como diferencia de ése (spec §6.4). Una cancelada llega
-  // aquí sólo si se paga (D5-fix: antes nunca «llegaba tarde» y la tarjeta escondía su pendiente).
-  const llegoTarde = !ps?.originPeriodId && !!(await origenDeClase(db, venueId, cs, ahora))
+  if (cancelada && !(v ?? fuera)?.canceladaTarde) return { ...base, estado: 'CANCELADA' }
+  if (!v && fuera) {
+    return {
+      ...base,
+      estado: 'FUERA_DEL_SOBRE',
+      conteo: fuera.conteo,
+      conteoCalculado: fuera.conteoCalculado,
+      maxCount: fuera.maxCount,
+      countMode: fuera.countMode,
+      staffName: fuera.staffName,
+      payLevelName: fuera.payLevelName,
+      regla: fuera.regla,
+      montoSiEntrara: fuera.monto !== null ? new Prisma.Decimal(fuera.monto).toFixed(2) : null,
+      sede: { nombre: cs.venue.name, fecha: fuera.fechaLocal },
+    }
+  }
+  // Sin ancla, terminada y con su fecha en un periodo CERRADO: se paga como diferencia de ése (spec §6.4). Sólo si PARTICIPA
+  // (aparece con la participación real, B11) y, si está cancelada, sólo si se paga (D5-fix: una cancelada que llega aquí
+  // ya se paga). Nunca para FUERA_DEL_SOBRE: la diferencia sería de $0.
+  const llegoTarde = !!v && !ps?.originPeriodId && !!(await origenDeClase(db, venueId, cs, ahora))
   if (!v) return { ...base, llegoTarde, estado: 'EXCEPCION', motivo: 'SIN_TABLA' }
   return {
     ...base,

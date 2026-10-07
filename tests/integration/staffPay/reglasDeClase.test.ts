@@ -472,10 +472,14 @@ describe('una cancelada sin regla o sin estampa sigue EXCLUIDA en el modo period
   })
 })
 
-/** El módulo prendido para el cierre (fase 2) y el pago al personal activado desde enero (Bloque B). */
+/** El módulo prendido para el cierre (fase 2) y el pago al personal activado desde enero, con la sede ACTIVA desde ese día
+ *  (como la deja la activación real; desde B11 una clase sin ancla desde el inicio exige su ventana). */
 const activar = async () => {
   ;(global as any).__sedes = [m.venueId]
   await prisma.organization.update({ where: { id: m.orgId }, data: { staffPayStartDate: fechaComoDbDate('2026-01-01') } })
+  await prisma.staffPayVenueWindow.create({
+    data: { organizationId: m.orgId, venueId: m.venueId, desde: fechaComoDbDate('2026-01-01'), activadaPor: m.owner },
+  })
 }
 const cerrarAgosto = async () => {
   const p = await previewCierre({ userId: m.owner, venueId: m.venueId, fecha: '2026-08-15', ahora: AHORA })
