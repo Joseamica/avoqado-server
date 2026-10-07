@@ -212,6 +212,38 @@ describe('🔴 B9: una demo con historial de pago al personal se omite completa 
     expect(logger.error).not.toHaveBeenCalledWith(expect.stringContaining('session-uuid-1'), expect.anything())
   })
 
+  it.each([
+    ['cleanupExpiredLiveDemos', cleanupExpiredLiveDemos],
+    ['cleanupAllLiveDemos', cleanupAllLiveDemos],
+  ])(
+    '%s (ronda 1, F1): la fila del venue retenida por otra operación agota el presupuesto: warn y sigue con las demás',
+    async (_n, limpiar) => {
+      prismaMock.liveDemoSession.findMany.mockResolvedValue([makeSession(1), makeSession(2)])
+      mockCascadeAlreadyDeletedSession()
+      const lockTimeout = new Prisma.PrismaClientKnownRequestError('canceling statement due to lock timeout', {
+        code: 'P2010',
+        clientVersion: '6.14.0',
+        meta: { code: '55P03' },
+      })
+      prismaMock.$queryRaw.mockImplementation(async (sql: Prisma.Sql) => {
+        const texto = JSON.stringify(sql)
+        if (texto.includes('FOR UPDATE') && sql.values?.includes('venue-1')) throw lockTimeout
+        if (texto.includes('StaffPayVenueWindow')) return [{ hay: false }]
+        return [{ id: sql.values?.[0], status: 'LIVE_DEMO', name: 'Live Demo' }]
+      })
+
+      expect(await limpiar()).toBe(1)
+
+      expect(prismaMock.venue.delete).toHaveBeenCalledTimes(1)
+      expect(prismaMock.venue.delete).toHaveBeenCalledWith({ where: { id: 'venue-2' } })
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('ocupada'),
+        expect.objectContaining({ sessionId: 'session-uuid-1', venueId: 'venue-1', code: 'OPERACION_EN_CURSO' }),
+      )
+      expect(logger.error).not.toHaveBeenCalledWith(expect.stringContaining('session-uuid-1'), expect.anything())
+    },
+  )
+
   it('la historia se pregunta DESPUÉS del FOR UPDATE del venue (otra sentencia), nunca antes', async () => {
     prismaMock.liveDemoSession.findMany.mockResolvedValue([makeSession(1)])
     mockCascadeAlreadyDeletedSession()

@@ -7,8 +7,8 @@ import {
   assertFechaNoCerrada,
   cambiarPeriodicidad,
   listarPeriodos,
-  transaccionConPresupuesto,
 } from '@/services/dashboard/staffPay/periodosGuardados'
+import { transaccionConPresupuesto } from '@/utils/esperaDeCandados'
 import { asignarNivel } from '@/services/dashboard/staffPay/niveles.service'
 import { publicarVersion, archivarTabla } from '@/services/dashboard/staffPay/tablas.service'
 import { efectoDelCambio } from '@/services/dashboard/staffPay/efecto'

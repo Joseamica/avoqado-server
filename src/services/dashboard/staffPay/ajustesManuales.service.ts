@@ -5,14 +5,8 @@ import prisma from '../../../utils/prismaClient'
 import { BadRequestError, ConflictError, NotFoundError } from '../../../errors/AppError'
 import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
 import { assertPermisoEnSedes, sedesConPermiso, sedesConServicePay } from './acceso'
-import {
-  ampliarAlcance,
-  asegurarPeriodo,
-  assertFechaEnRango,
-  bloquearPeriodo,
-  periodoQueContieneFecha,
-  transaccionConPresupuesto,
-} from './periodosGuardados'
+import { ampliarAlcance, asegurarPeriodo, assertFechaEnRango, bloquearPeriodo, periodoQueContieneFecha } from './periodosGuardados'
+import { transaccionConPresupuesto } from '../../../utils/esperaDeCandados'
 import { bloquearSedesDeLaOrganizacion } from './participacion'
 import { dbDateComoFecha, fechaComoDbDate, hoyLocal, Periodicidad, periodoQueContiene, sumarMeses } from './periodos'
 

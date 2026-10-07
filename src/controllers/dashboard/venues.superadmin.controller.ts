@@ -12,7 +12,7 @@ import {
   historiaDeSede,
   sedeConPagoAlPersonalError,
 } from '../../services/dashboard/staffPay/participacion'
-import { PresupuestoDeEspera } from '../../services/dashboard/staffPay/periodosGuardados'
+import { PresupuestoDeEspera } from '../../utils/esperaDeCandados'
 import {
   bulkCreateVenues as bulkCreateVenuesService,
   ValidationError as BulkValidationError,

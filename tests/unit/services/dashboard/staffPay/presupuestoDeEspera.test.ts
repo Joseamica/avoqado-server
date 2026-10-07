@@ -4,7 +4,7 @@
  * 10 s; dos sedes de 4 s ⇒ 409 a los ~6 s); aquí, la aritmética y el contrato de `tomarCandado`.
  */
 import { Prisma } from '@prisma/client'
-import { PresupuestoDeEspera, tomarCandado } from '@/services/dashboard/staffPay/periodosGuardados'
+import { PresupuestoDeEspera, tomarCandado } from '@/utils/esperaDeCandados'
 
 const txFalsa = () => {
   const tx = {
@@ -31,6 +31,53 @@ describe('PresupuestoDeEspera', () => {
     expect(p.restanteMs()).toBe(1_500)
     p.descontar(9_000)
     expect(p.restanteMs()).toBe(0)
+  })
+})
+
+/**
+ * B9 ronda 1, F3 (ruling del controlador): el presupuesto también respeta el reloj de SU transacción.
+ * `restanteMs = min(tope − esperado, timeout − transcurrido − 1 s)`: sigue midiendo la espera (no un plazo desde la
+ * entrada), pero una espera nunca empuja la transacción más allá de su timeout (P2028).
+ */
+describe('el presupuesto respeta el reloj de su transacción (F3)', () => {
+  let reloj = 0
+  beforeEach(() => {
+    reloj = 1_000_000
+    jest.spyOn(Date, 'now').mockImplementation(() => reloj)
+  })
+  afterEach(() => jest.restoreAllMocks())
+
+  it('un cierre que ya consumió 100 s de sus 120 ⇒ le quedan 19 s de espera aunque el presupuesto diga 30', async () => {
+    const p = PresupuestoDeEspera.para(120_000)
+    reloj += 100_000
+    expect(p.restanteMs()).toBe(19_000)
+    const tx = txFalsa()
+    await tomarCandado(tx, async () => 'tomado', { presupuesto: p })
+    expect(tx.$executeRawUnsafe).toHaveBeenCalledWith(`SET LOCAL lock_timeout = '19000ms'`)
+  })
+
+  it('una transacción corta que ya consumió 9,5 s de sus 10 ⇒ 409 SIN intentar', async () => {
+    const p = PresupuestoDeEspera.para(10_000)
+    reloj += 9_500
+    expect(p.restanteMs()).toBe(0)
+    const tx = txFalsa()
+    const tomar = jest.fn()
+    await expect(tomarCandado(tx, tomar, { presupuesto: p })).rejects.toMatchObject({ statusCode: 409, code: 'OPERACION_EN_CURSO' })
+    expect(tomar).not.toHaveBeenCalled()
+    expect(tx.$executeRawUnsafe).not.toHaveBeenCalled()
+  })
+
+  it('con holgura en el reloj manda la espera: 4,5 s esperados a los 5 s de una tx de 10 ⇒ quedan 1,5 s', () => {
+    const p = PresupuestoDeEspera.para(10_000)
+    p.descontar(4_500)
+    reloj += 5_000
+    expect(p.restanteMs()).toBe(1_500)
+  })
+
+  it('un presupuesto creado sin timeout (pruebas, barreras) sólo mide la espera', () => {
+    const p = new PresupuestoDeEspera(6_000)
+    reloj += 3_600_000
+    expect(p.restanteMs()).toBe(6_000)
   })
 })
 
@@ -64,7 +111,7 @@ describe('tomarCandado({ presupuesto })', () => {
     const tomar = jest.fn()
     const p = new PresupuestoDeEspera(6_000)
     p.descontar(6_000)
-    await expect(tomarCandado(tx, tomar, { presupuesto: p })).rejects.toMatchObject({ statusCode: 409, code: 'CIERRE_EN_CURSO' })
+    await expect(tomarCandado(tx, tomar, { presupuesto: p })).rejects.toMatchObject({ statusCode: 409, code: 'OPERACION_EN_CURSO' })
     expect(tomar).not.toHaveBeenCalled()
     expect(tx.$executeRawUnsafe).not.toHaveBeenCalled()
   })

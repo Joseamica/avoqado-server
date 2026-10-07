@@ -190,11 +190,21 @@ describe('ventanas de participación por sede (fase 3, B9; diseño r3.2)', () =>
     const z = await otraOrg('z-activada')
     let error: unknown = null
     let conVentana: unknown = 'no corrió'
+    // Ronda 1, F6: la base es compartida y puede traer otras organizaciones activadas sin ventanas (restos de otras
+    // pruebas). Lo que el bloque DEBE decir se lee dentro de la MISMA transacción, con su misma regla: el total y las 20
+    // primeras por id. Así la prueba no depende de que la de esta prueba salga entre las 20.
+    let esperado: { total: number; nombradas: string[] } = { total: 0, nombradas: [] }
     try {
       // En transacciones que se revierten: la base de pruebas es compartida.
       await prisma
         .$transaction(async tx => {
           await tx.organization.update({ where: { id: z.id }, data: { staffPayStartDate: d('2026-09-01') } })
+          const sinVentanas = Prisma.sql`FROM "Organization" org WHERE org."staffPayStartDate" IS NOT NULL
+            AND NOT EXISTS (SELECT 1 FROM "StaffPayVenueWindow" w WHERE w."organizationId" = org.id)`
+          const [{ total }] = await tx.$queryRaw<Array<{ total: number }>>`SELECT COUNT(*)::int AS total ${sinVentanas}`
+          const primeras = await tx.$queryRaw<Array<{ id: string; name: string }>>`
+            SELECT org.id, org.name ${sinVentanas} ORDER BY org.id LIMIT 20`
+          esperado = { total, nombradas: primeras.map(o => `${o.id} («${o.name}»)`) }
           await tx.$executeRawUnsafe(aborto)
           throw new Revertir()
         })
@@ -218,7 +228,11 @@ describe('ventanas de participación por sede (fase 3, B9; diseño r3.2)', () =>
     } finally {
       await prisma.organization.delete({ where: { id: z.id } })
     }
-    expect(String(error)).toMatch(new RegExp(`${z.id} \\(«${m.key}-z-activada»\\)`))
+    // Aborta, con el total y las primeras 20 tal cual las lee su regla (la de esta prueba incluida si cabe, lo normal).
+    expect(esperado.total).toBeGreaterThanOrEqual(1)
+    expect(String(error)).toContain(`Pago al personal: ${esperado.total} organización(es) ya activadas sin ninguna sede activa`)
+    for (const nombrada of esperado.nombradas) expect(String(error)).toContain(nombrada)
+    if (esperado.nombradas.some(x => x.startsWith(z.id))) expect(String(error)).toContain(`${z.id} («${m.key}-z-activada»)`)
     expect(String(error)).toMatch(/nunca borres "staffPayStartDate"/)
     expect(String(conVentana ?? '')).not.toContain(z.id)
   })

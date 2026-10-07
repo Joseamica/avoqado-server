@@ -8,12 +8,8 @@ import {
   previewActivacion,
   ventanasDePropinas,
 } from '@/services/dashboard/staffPay/activacion.service'
-import {
-  cambiarPeriodicidad,
-  listarPeriodos,
-  lockPeriodosDeOrganizacion,
-  PresupuestoDeEspera,
-} from '@/services/dashboard/staffPay/periodosGuardados'
+import { cambiarPeriodicidad, listarPeriodos, lockPeriodosDeOrganizacion } from '@/services/dashboard/staffPay/periodosGuardados'
+import { PresupuestoDeEspera } from '@/utils/esperaDeCandados'
 import { barreraDeLaOrganizacion, borrarMundo, CIERRE_EN_CURSO, conCandadoRetenido, crearMundo, Mundo, periodoCerrado } from './_mundo'
 
 const mockPermiso = jest.fn()

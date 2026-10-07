@@ -15,6 +15,7 @@ import { ConflictError } from '@/errors/AppError'
 import { deleteOrRetainStaffWithH1ProvenanceTx, isH1ProvenanceConstraint } from '@/services/superadmin/staffDeletion.service'
 import { retry, shouldRetryDbConnectionError } from '@/utils/retry'
 import { demoConPagoAlPersonalError, historiaDeSede, LIVE_DEMO_CON_PAGO_AL_PERSONAL } from '@/services/dashboard/staffPay/participacion'
+import { OPERACION_EN_CURSO, PresupuestoDeEspera, tomarCandado } from '@/utils/esperaDeCandados'
 
 const INACTIVITY_THRESHOLD_HOURS = 5
 
@@ -33,8 +34,12 @@ const INACTIVITY_THRESHOLD_HOURS = 5
  * una transición LIVE_DEMO → negocio real ocurra a media limpieza (hay prueba de integración de
  * esa carrera). Se sube el presupuesto y se deja acotado, para que un cuelgue siga fallando fuerte
  * en vez de retener el lock para siempre.
+ *
+ * Pago al personal (fase 3, B9 ronda 1): la espera del `FOR UPDATE` tiene su presupuesto (30 s de estos 60, compartido y
+ * acotado por el reloj de la transacción): si otra operación retiene la fila del venue —un cierre que le escribe devengos,
+ * un traslado—, la limpieza contesta 409 OPERACION_EN_CURSO, el bucle lo avisa con `warn` y sigue con las demás demos.
  */
-const DELETION_TIMEOUT_MS = 60_000
+export const DELETION_TIMEOUT_MS = 60_000
 
 /** Espera por un lugar en el pool: en el minuto :00 este job compite con ~40 crones. */
 const DELETION_MAX_WAIT_MS = 10_000
@@ -55,13 +60,20 @@ export function createDisposableDemoSessionDeletion(
     try {
       return await db.$transaction(
         async tx => {
+          // B9 ronda 1: el presupuesto de espera de la transacción, creado al entrar.
+          const presupuesto = PresupuestoDeEspera.para(DELETION_TIMEOUT_MS)
           // WHY: Venue disposition, Staff provenance classification, and every
           // destructive write share one transaction. The row lock makes a
           // concurrent LIVE_DEMO -> real venue transition wait until cleanup has
           // atomically committed or rolled back.
-          const venues = await tx.$queryRaw<Array<{ id: string; name: string; status: string }>>(Prisma.sql`
+          const venues = await tomarCandado(
+            tx,
+            () =>
+              tx.$queryRaw<Array<{ id: string; name: string; status: string }>>(Prisma.sql`
         SELECT id, name, status FROM "Venue" WHERE id = ${session.venueId} FOR UPDATE
-      `)
+      `),
+            { presupuesto },
+          )
           const venue = venues[0]
           if (!venue || venue.status !== 'LIVE_DEMO') {
             throw new ConflictError('La sucursal ya no es un demo desechable', 'LIVE_DEMO_VENUE_NOT_DISPOSABLE')
@@ -104,16 +116,21 @@ export function createDisposableDemoSessionDeletion(
 export const deleteDisposableDemoSession = createDisposableDemoSessionDeletion()
 
 /**
- * Una demo con historia de pago al personal no se borra (B9): no es un fallo de la limpieza sino una omisión esperada, así
- * que va a `warn` (no dispara alertas) y la corrida sigue con las demás. `true` si la omitió.
+ * Omisiones ESPERADAS de una demo, que no son fallos de la limpieza: van a `warn` (no disparan alertas) y la corrida sigue
+ * con las demás. `true` si la omitió.
+ * - Con historia de pago al personal (B9): se omite completa, en cada corrida.
+ * - Con su fila retenida por otra operación más allá del presupuesto (B9 ronda 1): se reintenta en la siguiente corrida.
  */
-function omitidaPorPagoAlPersonal(error: unknown, session: { sessionId: string; venue: { id: string; name: string } }): boolean {
-  if ((error as { code?: string } | null)?.code !== LIVE_DEMO_CON_PAGO_AL_PERSONAL) return false
-  logger.warn(`⚠️ La demo ${session.venue.name} tiene historial de pago al personal: la limpieza la omite completa`, {
-    sessionId: session.sessionId,
-    venueId: session.venue.id,
-    code: LIVE_DEMO_CON_PAGO_AL_PERSONAL,
-  })
+function omitidaSinError(error: unknown, session: { sessionId: string; venue: { id: string; name: string } }): boolean {
+  const code = (error as { code?: string } | null)?.code
+  const motivo =
+    code === LIVE_DEMO_CON_PAGO_AL_PERSONAL
+      ? `⚠️ La demo ${session.venue.name} tiene historial de pago al personal: la limpieza la omite completa`
+      : code === OPERACION_EN_CURSO.codigo
+        ? `⚠️ La demo ${session.venue.name} está ocupada por otra operación: se reintenta en la siguiente corrida`
+        : null
+  if (!motivo) return false
+  logger.warn(motivo, { sessionId: session.sessionId, venueId: session.venue.id, code })
   return true
 }
 
@@ -208,7 +225,7 @@ export async function cleanupExpiredLiveDemos(): Promise<number> {
 
         cleanedCount++
       } catch (error) {
-        if (omitidaPorPagoAlPersonal(error, session)) continue
+        if (omitidaSinError(error, session)) continue
         logger.error(`❌ Error cleaning up session ${session.sessionId}:`, error)
         // Continue with other sessions even if one fails
       }
@@ -260,7 +277,7 @@ export async function cleanupAllLiveDemos(): Promise<number> {
         logger.info(`✅ Cleaned up session ${session.sessionId}`)
         cleanedCount++
       } catch (error) {
-        if (omitidaPorPagoAlPersonal(error, session)) continue
+        if (omitidaSinError(error, session)) continue
         logger.error(`❌ Error cleaning up session ${session.sessionId}:`, error)
       }
     }

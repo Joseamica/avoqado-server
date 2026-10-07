@@ -33,7 +33,7 @@ import { generateSlug, validateSlug } from '../../utils/slugify'
 import logger from '../../config/logger'
 import { deleteVenueFolder, deleteFileFromStorage } from '../storage.service'
 import { historiaDeSede, sedeConPagoAlPersonalError } from './staffPay/participacion'
-import { OPERACION_EN_CURSO, PresupuestoDeEspera, tomarCandado } from './staffPay/periodosGuardados'
+import { PresupuestoDeEspera, tomarCandado } from '../../utils/esperaDeCandados'
 import {
   exigirSinObligacionViva,
   getOrCreateStripeCustomer,
@@ -425,7 +425,7 @@ export async function deleteVenue(orgId: string, venueId: string, options?: { sk
       tx,
       () => tx.$queryRaw<{ stripeCustomerId: string | null }[]>`
       SELECT "stripeCustomerId" FROM "Venue" WHERE id = ${venueId} FOR UPDATE /* B9:sede:exclusivo */`,
-      { presupuesto, codigo: OPERACION_EN_CURSO.codigo, mensaje: OPERACION_EN_CURSO.mensaje },
+      { presupuesto },
     )
     if (bloqueada?.stripeCustomerId) throw negocioConCuentaDeCobro()
     // Pago al personal (fase 3, B9): con la fila ya bloqueada, en OTRA sentencia, ve el primer devengo que confirmó quien

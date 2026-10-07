@@ -5,14 +5,8 @@ import { BadRequestError, ConflictError } from '../../../errors/AppError'
 import { utcTs } from '../../../utils/sqlDates'
 import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
 import { exigirPermisoEnSedes, sedesConPermiso, sedesConServicePay, tienePermisoEn } from './acceso'
-import {
-  ampliarAlcance,
-  asegurarPeriodo,
-  bloquearPeriodo,
-  lockPeriodosDeOrganizacion,
-  periodoQueContieneFecha,
-  transaccionConPresupuesto,
-} from './periodosGuardados'
+import { ampliarAlcance, asegurarPeriodo, bloquearPeriodo, lockPeriodosDeOrganizacion, periodoQueContieneFecha } from './periodosGuardados'
+import { transaccionConPresupuesto } from '../../../utils/esperaDeCandados'
 import { bloquearSedesDeLaOrganizacion } from './participacion'
 import { dbDateComoFecha, PeriodoCanonico, periodoQueContiene, venuePeriodRange } from './periodos'
 import { ClaseValorada, contarPorEstado, FiltroValoracion, ReglaDeClase, valorarClases } from './valoracion'
@@ -43,6 +37,10 @@ type Db = Tx | typeof prisma
  * tope). No se baja sin volver a medir (spec §6.3 punto 3; fase 3 §6.5):
  * `tests/integration/staffPay/cierre.carga.test.ts`, con y sin MEDIR_EN_FRIO=1.
  */
+// B9 (ronda 1, F5): el margen. El cálculo medido es ~76 s en el peor caso (el peor por dos de lo medido arriba); el
+// presupuesto de espera de candados del cierre es de 30 s (`PresupuestoDeEspera.para(TIMEOUT_CIERRE_MS)`), así que
+// 76 + 30 < 120. Y aunque el cálculo tarde más, ninguna espera empuja la transacción más allá de su timeout: el presupuesto
+// se acota también por el reloj de la transacción menos 1 s (F3, `esperaDeCandados.ts`) y contesta 409 en vez del P2028.
 export const TIMEOUT_CIERRE_MS = 120_000
 export const LOTE_CIERRE = 500
 const BLOQUE_ESCRITURA = 1000

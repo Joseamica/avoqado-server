@@ -4,7 +4,8 @@ import { BadRequestError, ConflictError } from '../../../errors/AppError'
 import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
 import { assertPermisoEnTodasLasSedes, sedesConServicePay } from './acceso'
 import { bloquearOrganizacion, bloquearSedesDeLaOrganizacion } from './participacion'
-import { lockPeriodosDeOrganizacion, periodoQueContieneFecha, transaccionConPresupuesto } from './periodosGuardados'
+import { lockPeriodosDeOrganizacion, periodoQueContieneFecha } from './periodosGuardados'
+import { transaccionConPresupuesto } from '../../../utils/esperaDeCandados'
 import { dbDateComoFecha, diaCivilSiguiente, fechaComoDbDate, hoyLocal, Periodicidad, periodoQueContiene } from './periodos'
 
 type Db = Prisma.TransactionClient | typeof prisma

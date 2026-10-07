@@ -1,6 +1,11 @@
 import * as schemas from '@/schemas/dashboard/staffPay.schema'
 
-jest.mock('@/services/dashboard/staffPay/periodosGuardados', () => ({ listarPeriodos: jest.fn(), cambiarPeriodicidad: jest.fn() }))
+// El resto del módulo, real: un mock parcial sin el resto dejaba `undefined` lo que otros módulos importan de aquí.
+jest.mock('@/services/dashboard/staffPay/periodosGuardados', () => ({
+  ...jest.requireActual('@/services/dashboard/staffPay/periodosGuardados'),
+  listarPeriodos: jest.fn(),
+  cambiarPeriodicidad: jest.fn(),
+}))
 jest.mock('@/services/dashboard/staffPay/cierre.service', () => ({ previewCierre: jest.fn(), cerrarPeriodo: jest.fn() }))
 jest.mock('@/services/dashboard/staffPay/ajustesManuales.service', () => ({ agregarAjusteManual: jest.fn() }))
 jest.mock('@/services/dashboard/staffPay/recibos.service', () => ({

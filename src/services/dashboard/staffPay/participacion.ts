@@ -1,6 +1,6 @@
 import { Prisma } from '@prisma/client'
 import { ConflictError } from '../../../errors/AppError'
-import { OPERACION_EN_CURSO, PresupuestoDeEspera, tomarCandado } from './periodosGuardados'
+import { PresupuestoDeEspera, tomarCandado } from '../../../utils/esperaDeCandados'
 
 /**
  * Participación por sede (fase 3, B9; diseño r7.1 + r6.3): el dueño activa «Pago al personal» POR SEDE y elige desde qué
@@ -9,8 +9,12 @@ import { OPERACION_EN_CURSO, PresupuestoDeEspera, tomarCandado } from './periodo
  * Dos lados sobre la MISMA fila de `Venue`:
  * - **Escritores** (los únicos que insertan `ServiceEarning` —cierre, ajuste manual, liquidación— y las escrituras de
  *   ventanas): `FOR KEY SHARE` de cada sede a la que le van a escribir, una por una por id, y revalidan bajo el candado que
- *   sigue siendo de la organización. `FOR KEY SHARE` no estorba a un cambio normal de la sede (nombre, horario): sólo a los
- *   de clave (`organizationId`, parte del índice único `Venue(id, organizationId)`) y al DELETE.
+ *   sigue siendo de la organización. `FOR KEY SHARE` no estorba a un cambio normal de la sede (nombre, horario): sólo a
+ *   los cambios de una columna LLAVE de `Venue` —`organizationId` (índice único `Venue(id, organizationId)`), y también
+ *   `slug`, `liveDemoSessionId` y `stripeCustomerId`, que son únicos (p. ej. el UPDATE condicional de
+ *   `stripe.service.ts:133`)— y al DELETE. Esos cambios esperan al escritor (que toma las sedes al final, justo antes de
+ *   escribir); y uno CONFIRMADO después de la foto de un escritor SERIALIZABLE (el cierre) le da 40001 al tomar la fila: el
+ *   escritor se repite entero con `withSerializableRetry`. Es correcto y raro.
  * - **Exclusivos** (traslado, `deleteVenue`, limpieza de demos): `FOR UPDATE` de la sede ANTES de mirar la historia, y la
  *   historia es OTRA sentencia, después: en READ COMMITTED ve lo que confirmó el escritor al que esperó.
  *
@@ -23,9 +27,6 @@ import { OPERACION_EN_CURSO, PresupuestoDeEspera, tomarCandado } from './periodo
 
 type Tx = Prisma.TransactionClient
 
-/** Se lee al usarse, no al cargar el módulo: un `jest.mock` parcial de `periodosGuardados` no tumba a quien importa éste. */
-const ocupado = () => ({ codigo: OPERACION_EN_CURSO.codigo, mensaje: OPERACION_EN_CURSO.mensaje })
-
 /**
  * La fila de la organización, `FOR NO KEY UPDATE` (r5.3 paso 2): la toman las escrituras de ventanas y el traslado (éste las
  * dos organizaciones, por id), así que activar y trasladar se ordenan aquí y nunca se cruzan en la sede.
@@ -34,7 +35,7 @@ export async function bloquearOrganizacion(tx: Tx, organizationId: string, presu
   await tomarCandado(
     tx,
     () => tx.$queryRaw(Prisma.sql`SELECT id FROM "Organization" WHERE id = ${organizationId} FOR NO KEY UPDATE /* B9:organizacion */`),
-    { presupuesto, ...ocupado() },
+    { presupuesto },
   )
 }
 
@@ -58,7 +59,7 @@ export async function bloquearSedesDeLaOrganizacion(
         tx.$queryRaw<Array<{ id: string; organizationId: string; name: string }>>(
           Prisma.sql`SELECT id, "organizationId", name FROM "Venue" WHERE id = ${venueId} FOR KEY SHARE /* B9:sede:escritor */`,
         ),
-      { presupuesto, ...ocupado() },
+      { presupuesto },
     )
     if (!fila || fila.organizationId !== organizationId) {
       throw new ConflictError(`La sede ${fila?.name ?? venueId} ya no pertenece a esta organización`, 'SEDE_EN_OTRA_ORGANIZACION')
@@ -81,7 +82,7 @@ export async function bloquearSedeExclusiva(
       tx.$queryRaw<Array<{ organizationId: string }>>(
         Prisma.sql`SELECT "organizationId" FROM "Venue" WHERE id = ${venueId} FOR UPDATE /* B9:sede:exclusivo */`,
       ),
-    { presupuesto, ...ocupado() },
+    { presupuesto },
   )
   return fila ?? null
 }

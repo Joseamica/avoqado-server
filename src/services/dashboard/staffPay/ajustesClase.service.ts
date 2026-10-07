@@ -7,13 +7,8 @@ import { venueDayKey } from '../../../utils/venueDateKeys'
 import { exigirPermisoEnSedes, sedesConPermiso } from './acceso'
 import { diferenciasDeClase, origenDeClase } from './diferencias.service'
 import { dbDateComoFecha } from './periodos'
-import {
-  bloquearPeriodo,
-  lockClase,
-  lockPeriodosDeOrganizacion,
-  periodoQueContieneFecha,
-  transaccionConPresupuesto,
-} from './periodosGuardados'
+import { bloquearPeriodo, lockClase, lockPeriodosDeOrganizacion, periodoQueContieneFecha } from './periodosGuardados'
+import { tomarCandado, transaccionConPresupuesto } from '../../../utils/esperaDeCandados'
 import { ReglaDeClase, valorarClases } from './valoracion'
 
 export interface AjusteDeClase {
@@ -401,8 +396,14 @@ async function guardarDentro(input: GuardarAjusteInput, permitidas: Set<string>)
     // 2) Luego la clase: el candado compartido con la liquidación, y su fila. `FOR NO KEY UPDATE`: serializa las ediciones
     // de la clase sin chocar con el `FOR KEY SHARE` de la llave foránea cuando el cierre la ancla (misma familia que el periodo).
     await lockClase(tx, input.classSessionId, presupuesto)
-    await tx.$queryRaw(
-      Prisma.sql`SELECT id FROM "ClassSession" WHERE id = ${input.classSessionId} AND "venueId" = ${input.venueId} FOR NO KEY UPDATE`,
+    // B9 ronda 1: también la fila, con el MISMO presupuesto (409 OPERACION_EN_CURSO, nunca el P2028 de su transacción).
+    await tomarCandado(
+      tx,
+      () =>
+        tx.$queryRaw(
+          Prisma.sql`SELECT id FROM "ClassSession" WHERE id = ${input.classSessionId} AND "venueId" = ${input.venueId} FOR NO KEY UPDATE`,
+        ),
+      { presupuesto },
     )
     // 3) Releer el ancla DENTRO: si un cierre ganó la carrera, el reintento la ve y exige staffpay:close.
     const antes = await tx.classSessionPayState.findUnique({ where: { classSessionId: input.classSessionId } })

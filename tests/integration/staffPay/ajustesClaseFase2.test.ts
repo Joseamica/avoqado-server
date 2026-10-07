@@ -4,7 +4,8 @@ import prisma from '@/utils/prismaClient'
 import { guardarAjusteDeClase, pagoDeClase, previewAjusteDeClase } from '@/services/dashboard/staffPay/ajustesClase.service'
 import { cerrarPeriodo, previewCierre } from '@/services/dashboard/staffPay/cierre.service'
 import { fechaComoDbDate } from '@/services/dashboard/staffPay/periodos'
-import { bloquearPeriodo, PresupuestoDeEspera } from '@/services/dashboard/staffPay/periodosGuardados'
+import { bloquearPeriodo } from '@/services/dashboard/staffPay/periodosGuardados'
+import { PresupuestoDeEspera } from '@/utils/esperaDeCandados'
 import { barreraDelPeriodo, borrarMundo, clase, confirmadas, crearMundo, Mundo, tablaMindform } from './_mundo'
 
 // `__admin` (Sofía, ADMIN) no tiene staffpay:close; el OWNER sí. Los permisos de escribir se resuelven ANTES de la
