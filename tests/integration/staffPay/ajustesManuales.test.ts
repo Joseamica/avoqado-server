@@ -432,7 +432,7 @@ describe('ajustes manuales (spec §6.4)', () => {
  * (~40 s). Un ajuste manual espera con tope y contesta 409 CIERRE_EN_CURSO, nunca el P2028 (500) de su transacción de 10 s.
  */
 describe('con un cierre en curso, el ajuste manual no espera sin tope (B7 r2)', () => {
-  it('sobre un periodo YA guardado: 409 CIERRE_EN_CURSO a los ~5 s y no escribe', async () => {
+  it('sobre un periodo YA guardado: 409 CIERRE_EN_CURSO a los ~6 s (su presupuesto de espera, B9) y no escribe', async () => {
     const agosto = await prisma.servicePayPeriod.create({
       data: {
         organizationId: m.orgId,
@@ -443,16 +443,16 @@ describe('con un cierre en curso, el ajuste manual no espera sin tope (B7 r2)', 
     })
     const r = await conCandadoRetenido(await barreraDelPeriodo(agosto.id), () => ajuste())
     expect(r.error).toMatchObject(CIERRE_EN_CURSO)
-    expect(r.ms).toBeGreaterThanOrEqual(4_500)
-    expect(r.ms).toBeLessThan(25_000)
+    expect(r.ms).toBeGreaterThanOrEqual(5_500)
+    expect(r.ms).toBeLessThan(10_000)
     expect(await prisma.serviceEarning.count({ where: { organizationId: m.orgId, concept: 'MANUAL' } })).toBe(0)
   }, 60_000)
 
   it('con el periodo todavía POR CREAR (candado de la organización): también 409, y no crea el periodo', async () => {
     const r = await conCandadoRetenido(await barreraDeLaOrganizacion(m.orgId), () => ajuste())
     expect(r.error).toMatchObject(CIERRE_EN_CURSO)
-    expect(r.ms).toBeGreaterThanOrEqual(4_500)
-    expect(r.ms).toBeLessThan(25_000)
+    expect(r.ms).toBeGreaterThanOrEqual(5_500)
+    expect(r.ms).toBeLessThan(10_000)
     expect(await prisma.servicePayPeriod.count({ where: { organizationId: m.orgId } })).toBe(0)
     expect(await prisma.serviceEarning.count({ where: { organizationId: m.orgId, concept: 'MANUAL' } })).toBe(0)
   }, 60_000)

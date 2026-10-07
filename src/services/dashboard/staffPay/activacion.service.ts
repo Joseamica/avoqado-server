@@ -1,10 +1,10 @@
 import { Prisma } from '@prisma/client'
 import prisma from '../../../utils/prismaClient'
 import { BadRequestError, ConflictError } from '../../../errors/AppError'
-import { withSerializableRetry } from '../../../utils/serializableRetry'
 import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
-import { assertPermisoEnTodasLasSedes } from './acceso'
-import { lockPeriodosDeOrganizacion, periodoQueContieneFecha } from './periodosGuardados'
+import { assertPermisoEnTodasLasSedes, sedesConServicePay } from './acceso'
+import { bloquearOrganizacion, bloquearSedesDeLaOrganizacion } from './participacion'
+import { lockPeriodosDeOrganizacion, periodoQueContieneFecha, transaccionConPresupuesto } from './periodosGuardados'
 import { dbDateComoFecha, diaCivilSiguiente, fechaComoDbDate, hoyLocal, Periodicidad, periodoQueContiene } from './periodos'
 
 type Db = Prisma.TransactionClient | typeof prisma
@@ -31,6 +31,11 @@ export async function estadoActivacion(
  * activado ya, devuelve su fecha y no cambia nada. Con periodos guardados la periodicidad ya no cambia (D3 de la fase 2).
  * `inicioEsperado`: la fecha que el dueño vio en la vista previa; si bajo el candado sale otra (pasó la medianoche del
  * cambio de periodo), 409 INICIO_CAMBIO sin escribir: la fecha ya no se cambia después (Codex bloque B #3).
+ *
+ * B9 (diseño r6.1, r6.6.2): al activar de verdad abre una ventana `[startDate, ∞)` por CADA sede que hoy tiene el plan
+ * (resueltas antes de la transacción con el mismo resolver del cierre); las sin plan, ninguna. Candados: el de periodos
+ * de la organización → su fila → cada sede (`FOR KEY SHARE`, revalidando que siga siendo de la organización), todos con
+ * el presupuesto de la transacción. Si un traslado ganó la sede, 409 SEDE_EN_OTRA_ORGANIZACION completo: no se salta.
  */
 export async function activarPagoAlPersonal(input: {
   userId: string
@@ -43,8 +48,10 @@ export async function activarPagoAlPersonal(input: {
   const v = await prisma.venue.findUniqueOrThrow({ where: { id: input.venueId }, select: { organizationId: true, timezone: true } })
   await assertPermisoEnTodasLasSedes(input.userId, v.organizationId, 'staffpay:close')
   const hoy = hoyLocal(v.timezone || TZ_DEFAULT, input.ahora)
-  return withSerializableRetry(async tx => {
-    await lockPeriodosDeOrganizacion(tx, v.organizationId)
+  // Con el cliente GLOBAL, antes de la transacción (como el cierre): dentro sólo se bloquean y se revalidan.
+  const sedes = [...new Set(await sedesConServicePay(v.organizationId))].sort()
+  return transaccionConPresupuesto(async (tx, presupuesto) => {
+    await lockPeriodosDeOrganizacion(tx, v.organizationId, presupuesto)
     const org = await tx.organization.findUniqueOrThrow({
       where: { id: v.organizationId },
       select: { staffPayStartDate: true, servicePayPeriodicity: true },
@@ -59,17 +66,29 @@ export async function activarPagoAlPersonal(input: {
     const startDate = await inicioAlActivar(tx, v.organizationId, hoy, input.periodicidad)
     if (input.inicioEsperado !== undefined && input.inicioEsperado !== startDate)
       throw new ConflictError('La fecha de inicio cambió; vuelve a revisar.', 'INICIO_CAMBIO')
+    await bloquearOrganizacion(tx, v.organizationId, presupuesto)
+    await bloquearSedesDeLaOrganizacion(tx, v.organizationId, sedes, presupuesto)
     await tx.organization.update({
       where: { id: v.organizationId },
       data: { staffPayStartDate: fechaComoDbDate(startDate), servicePayPeriodicity: input.periodicidad },
     })
+    if (sedes.length) {
+      await tx.staffPayVenueWindow.createMany({
+        data: sedes.map(venueId => ({
+          organizationId: v.organizationId,
+          venueId,
+          desde: fechaComoDbDate(startDate),
+          activadaPor: input.userId,
+        })),
+      })
+    }
     await writeLegacyActivityAuditTx(tx, {
       staffId: input.userId,
       venueId: input.venueId,
       action: 'SERVICE_PAY_ACTIVATED',
       entity: 'Organization',
       entityId: v.organizationId,
-      data: { startDate, periodicidad: input.periodicidad, periodicidadAntes: org.servicePayPeriodicity },
+      data: { startDate, periodicidad: input.periodicidad, periodicidadAntes: org.servicePayPeriodicity, sedes },
     })
     return { startDate, yaActivado: false }
   })
@@ -93,7 +112,7 @@ async function inicioAlActivar(db: Db, organizationId: string, hoy: string, peri
 /**
  * Lo que haría «activar» hoy, sin escribir ni tomar candados (vista previa del MCP, B6 ronda 1): la periodicidad guardada,
  * si ya es fija y el inicio que tendría con la pedida. Misma regla que `activarPagoAlPersonal`, que la vuelve a revisar
- * bajo candado al confirmar.
+ * bajo candado al confirmar. B9 (r6.4): la periodicidad es fija con periodos guardados O ya activado.
  */
 export async function previewActivacion(input: {
   venueId: string
@@ -103,12 +122,12 @@ export async function previewActivacion(input: {
   const v = await prisma.venue.findUniqueOrThrow({ where: { id: input.venueId }, select: { organizationId: true, timezone: true } })
   const org = await prisma.organization.findUniqueOrThrow({
     where: { id: v.organizationId },
-    select: { servicePayPeriodicity: true },
+    select: { servicePayPeriodicity: true, staffPayStartDate: true },
   })
   const hoy = hoyLocal(v.timezone || TZ_DEFAULT, input.ahora)
   return {
     periodicidad: org.servicePayPeriodicity,
-    periodicidadFija: await hayPeriodos(prisma, v.organizationId),
+    periodicidadFija: org.staffPayStartDate !== null || (await hayPeriodos(prisma, v.organizationId)),
     startDate: await inicioAlActivar(prisma, v.organizationId, hoy, input.periodicidad),
   }
 }
@@ -128,8 +147,8 @@ export async function cambiarPropinas(input: {
   const v = await prisma.venue.findUniqueOrThrow({ where: { id: input.venueId }, select: { organizationId: true } })
   await assertPermisoEnTodasLasSedes(input.userId, v.organizationId, 'staffpay:close')
   const ahora = input.ahora ?? new Date()
-  return withSerializableRetry(async tx => {
-    await lockPeriodosDeOrganizacion(tx, v.organizationId)
+  return transaccionConPresupuesto(async (tx, presupuesto) => {
+    await lockPeriodosDeOrganizacion(tx, v.organizationId, presupuesto)
     const org = await tx.organization.findUniqueOrThrow({ where: { id: v.organizationId }, select: { staffPayStartDate: true } })
     if (!org.staffPayStartDate) throw new ConflictError('Activa primero el pago al personal', 'NO_ACTIVADO')
     const abierta = await tx.staffPayTipWindow.findFirst({

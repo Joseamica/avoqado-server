@@ -2,11 +2,18 @@ import { Prisma, ServicePayPeriod } from '@prisma/client'
 import { formatInTimeZone } from 'date-fns-tz'
 import prisma from '../../../utils/prismaClient'
 import { BadRequestError, ConflictError } from '../../../errors/AppError'
-import { withSerializableRetry } from '../../../utils/serializableRetry'
 import { utcTs } from '../../../utils/sqlDates'
 import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
 import { exigirPermisoEnSedes, sedesConPermiso, sedesConServicePay, tienePermisoEn } from './acceso'
-import { ampliarAlcance, asegurarPeriodo, bloquearPeriodo, lockPeriodosDeOrganizacion, periodoQueContieneFecha } from './periodosGuardados'
+import {
+  ampliarAlcance,
+  asegurarPeriodo,
+  bloquearPeriodo,
+  lockPeriodosDeOrganizacion,
+  periodoQueContieneFecha,
+  transaccionConPresupuesto,
+} from './periodosGuardados'
+import { bloquearSedesDeLaOrganizacion } from './participacion'
 import { dbDateComoFecha, PeriodoCanonico, periodoQueContiene, venuePeriodRange } from './periodos'
 import { ClaseValorada, contarPorEstado, FiltroValoracion, ReglaDeClase, valorarClases } from './valoracion'
 import { Huella } from './huella'
@@ -31,8 +38,9 @@ type Db = Tx | typeof prisma
  * con `plan_cache_mode = force_custom_plan`) y 38.1 s EN FRÍO (medido antes de ese ajuste). El peor por dos da ~76 s, que al
  * minuto son 120 s (con el mínimo de 60 s). `TIMEOUT_CIERRE_MS` acota UN intento: con reintentos de SSI o un HUELLA_CAMBIO,
  * la petición completa puede tardar más. Mientras dura, activar, propinas, periodicidad, ajustes, liquidaciones y
- * marcar pagado esperan su candado (el de la organización o la fila del periodo) con tope (`ESPERA_CANDADO_MS`) y contestan
- * 409 CIERRE_EN_CURSO (B7 r1-r2). No se baja sin volver a medir (spec §6.3 punto 3; fase 3 §6.5):
+ * marcar pagado esperan su candado (el de la organización o la fila del periodo) con su presupuesto de espera (6 s,
+ * `PresupuestoDeEspera`) y contestan 409 CIERRE_EN_CURSO (B7 r1-r2, B9). El cierre mismo espera hasta 30 s (B9: ya no sin
+ * tope). No se baja sin volver a medir (spec §6.3 punto 3; fase 3 §6.5):
  * `tests/integration/staffPay/cierre.carga.test.ts`, con y sin MEDIR_EN_FRIO=1.
  */
 export const TIMEOUT_CIERRE_MS = 120_000
@@ -587,22 +595,23 @@ export async function cerrarPeriodo(input: {
   const filaAntes = await periodoQueContieneFecha(prisma, organizationId, input.fecha)
   const permitidas = new Set(await sedesConPermiso(input.userId, [...(filaAntes?.venueIds ?? []), ...activas], 'staffpay:close'))
   try {
-    return await withSerializableRetry(
-      async tx => {
+    return await transaccionConPresupuesto(
+      async (tx, presupuesto) => {
         // B-D3: el candado de la ORGANIZACIÓN primero (mismo orden que `asegurarPeriodo`: organización → periodo). Dos
         // cierres de periodos DISTINTOS pueden barrer la MISMA venta tardía de un periodo ya cerrado: con el candado el
         // segundo espera al primero. Lo que lo hace correcto es SSI, no el candado: SERIALIZABLE toma la foto en la primera
         // sentencia —ésta, ANTES de esperar—, así que el segundo, al congelar lo que el primero ya congeló, aborta con 40001
         // y el reintento ve la huella nueva (HUELLA_CAMBIO). También ordena el cierre con activar y con las propinas.
-        // Sin tope (B7 r1): el cierre sí espera a quien tenga el candado; las operaciones cortas son las que no lo esperan a él.
-        await lockPeriodosDeOrganizacion(tx, organizationId, { sinTope: true })
+        // B9: con el presupuesto del cierre (30 s de sus 120 s), compartido con la fila del periodo y las de las sedes. Antes
+        // esperaba sin tope (B7 r1) y un segundo o tercer cierre simultáneo acababa en P2028; ahora contesta 409.
+        await lockPeriodosDeOrganizacion(tx, organizationId, presupuesto)
         // B7 r2: los lotes reusan el MISMO statement preparado con otro cursor, y desde la sexta ejecución Postgres le pone un
         // plan GENÉRICO que no conoce el cursor y vuelve a recorrer todo el resto del rango en cada lote. Medido: los 100 lotes
         // de propinas, 11.7 s con el genérico y 3.3 s con el personalizado. Va DESPUÉS del candado: SET no toma la foto de
         // SERIALIZABLE, pero así la primera sentencia sigue siendo el candado, como dice el comentario de arriba.
         await tx.$executeRawUnsafe('SET LOCAL plan_cache_mode = force_custom_plan')
-        const fila = await asegurarPeriodo(tx, organizationId, input.fecha, activas)
-        let p = await bloquearPeriodo(tx, fila.id, { sinTope: true })
+        const fila = await asegurarPeriodo(tx, organizationId, input.fecha, presupuesto, activas)
+        let p = await bloquearPeriodo(tx, fila.id, presupuesto)
         const sinPermiso = 'Para cerrar necesitas el permiso de cerrar periodos en todas las sedes del periodo'
         // Permiso también ANTES del retorno idempotente (Codex R1-8): un «ya estaba cerrado» no regala los totales.
         if (p.status === 'CLOSED') {
@@ -701,6 +710,15 @@ export async function cerrarPeriodo(input: {
         // incluyen `staffId`, así que la misma propina a otra persona (la orden cambió de quien la atiende) sí entraría. Lo
         // que lo impide es el anti-join por fuente + `sourceId` de fuentesVenta, más SSI: un cierre concurrente que ya la
         // congeló hace abortar a éste con 40001 y su reintento ya no la ve.
+        // B9 (r7.1): antes de escribir, la fila de CADA sede que recibe devengos en `FOR KEY SHARE` (periodo → sede) y que
+        // siga siendo de la organización. Sólo las sedes de las filas que se insertan: una del alcance sin dinero no
+        // necesita protegerse, y una demo sin datos borrada a tiempo no tumba el cierre.
+        await bloquearSedesDeLaOrganizacion(
+          tx,
+          organizationId,
+          [...servicios, ...ventas].map(f => f.venueId),
+          presupuesto,
+        )
         for (const filas of [servicios, ventas])
           for (let i = 0; i < filas.length; i += BLOQUE_ESCRITURA)
             await tx.serviceEarning.createMany({ data: filas.slice(i, i + BLOQUE_ESCRITURA) })

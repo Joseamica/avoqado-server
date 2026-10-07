@@ -4,7 +4,7 @@ import prisma from '@/utils/prismaClient'
 import { guardarAjusteDeClase, pagoDeClase, previewAjusteDeClase } from '@/services/dashboard/staffPay/ajustesClase.service'
 import { cerrarPeriodo, previewCierre } from '@/services/dashboard/staffPay/cierre.service'
 import { fechaComoDbDate } from '@/services/dashboard/staffPay/periodos'
-import { bloquearPeriodo } from '@/services/dashboard/staffPay/periodosGuardados'
+import { bloquearPeriodo, PresupuestoDeEspera } from '@/services/dashboard/staffPay/periodosGuardados'
 import { barreraDelPeriodo, borrarMundo, clase, confirmadas, crearMundo, Mundo, tablaMindform } from './_mundo'
 
 // `__admin` (Sofía, ADMIN) no tiene staffpay:close; el OWNER sí. Los permisos de escribir se resuelven ANTES de la
@@ -185,7 +185,7 @@ describe('ajustes de una clase ya contabilizada (spec §5.4)', () => {
     const listo = new Promise<void>(r => (tomado = r))
     const tieneElCandado = prisma.$transaction(
       async t => {
-        await bloquearPeriodo(t, agosto.id)
+        await bloquearPeriodo(t, agosto.id, new PresupuestoDeEspera(6_000))
         tomado()
         await suelto
       },
@@ -206,9 +206,12 @@ describe('ajustes de una clase ya contabilizada (spec §5.4)', () => {
           update: { originPeriodId: agosto.id },
         }),
       )
-      // `sinTope`: aquí se prueba el candado de fila con el límite corto de esta prueba; la espera acotada de las operaciones
-      // cortas (5 s y 409 CIERRE_EN_CURSO, B7 r2) la prueban ajustesManuales y liquidacion.
-      await expect(conLimite(t => bloquearPeriodo(t, agosto.id, { sinTope: true }))).rejects.toThrow(/lock timeout/)
+      // Con un presupuesto corto (1,5 s): aquí se prueba que el candado de fila sigue serializando a otro escritor; la espera
+      // acotada de las operaciones cortas (6 s y 409 CIERRE_EN_CURSO, B7 r2 y B9) la prueban ajustesManuales y liquidacion.
+      await expect(conLimite(t => bloquearPeriodo(t, agosto.id, new PresupuestoDeEspera(1_500)))).rejects.toMatchObject({
+        statusCode: 409,
+        code: 'CIERRE_EN_CURSO',
+      })
     } finally {
       soltar()
       await tieneElCandado

@@ -2,10 +2,17 @@ import { createHash } from 'crypto'
 import { Prisma, ServicePayCountMode, ServicePayPeriod } from '@prisma/client'
 import prisma from '../../../utils/prismaClient'
 import { BadRequestError, ConflictError, NotFoundError } from '../../../errors/AppError'
-import { withSerializableRetry } from '../../../utils/serializableRetry'
 import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
 import { exigirPermisoEnSedes, sedesConPermiso, sedesConServicePay, sedesLegiblesDe } from './acceso'
-import { ampliarAlcance, asegurarPeriodo, bloquearPeriodo, lockClase, periodoQueContieneFecha } from './periodosGuardados'
+import {
+  ampliarAlcance,
+  asegurarPeriodo,
+  bloquearPeriodo,
+  lockClase,
+  periodoQueContieneFecha,
+  transaccionConPresupuesto,
+} from './periodosGuardados'
+import { bloquearSedesDeLaOrganizacion } from './participacion'
 import { dbDateComoFecha, hoyLocal, periodoQueContiene } from './periodos'
 import { anclarClases, descriptorDeClase } from './cierre.service'
 import { diferenciasDeClase, FilaDiferencia } from './diferencias.service'
@@ -215,7 +222,7 @@ async function liquidar(input: LiquidarInput): Promise<ResultadoLiquidacion> {
   const candidatas = [input.venueId, ...(destinoAntes?.venueIds ?? []), ...activas, ...guardadosAntes.flatMap(p => p.venueIds)]
   const permitidas = new Set(await sedesConPermiso(input.userId, candidatas, 'staffpay:close'))
   try {
-    return await withSerializableRetry(async tx => {
+    return await transaccionConPresupuesto(async (tx, presupuesto) => {
       // 0) Idempotencia PRIMERO (Codex R2-R1-4 / R2-Nuevo 4), por organización (la clave es única por organización): una
       // repetición se reconoce aunque su destino ya se haya cerrado. La restricción única sigue siendo la red ante la carrera.
       const previas = await tx.serviceEarning.findMany({
@@ -266,13 +273,13 @@ async function liquidar(input: LiquidarInput): Promise<ResultadoLiquidacion> {
         return { lineas: previas.map(p => ({ staffId: p.staffId, amount: p.amount.toFixed(2) })), yaLiquidada: true }
       }
       // 1) Periodo destino (por default el de hoy): sólo una inserción NUEVA exige que esté abierto.
-      const fila = await asegurarPeriodo(tx, organizationId, fecha, activas)
-      let destino = await bloquearPeriodo(tx, fila.id)
+      const fila = await asegurarPeriodo(tx, organizationId, fecha, presupuesto, activas)
+      let destino = await bloquearPeriodo(tx, fila.id, presupuesto)
       if (destino.status !== 'OPEN') {
         throw new ConflictError('El periodo destino ya está cerrado: liquida en el periodo abierto', 'PERIODO_CERRADO')
       }
       // 2) Candado de la clase (el mismo que el ajuste de clase — Codex R1-6).
-      await lockClase(tx, input.classSessionId)
+      await lockClase(tx, input.classSessionId, presupuesto)
       // 3) Permisos, ANTES de calcular o devolver cualquier cosa.
       exigirPermisoEnSedes(permitidas, [input.venueId, ...destino.venueIds], SIN_PERMISO)
       // 5) y 6) Revalidar la fuente y recalcular TODO dentro: el origen de hoy es el del preview y está cerrado. Una clase
@@ -337,7 +344,12 @@ async function liquidar(input: LiquidarInput): Promise<ResultadoLiquidacion> {
           createdById: input.userId,
         })
       }
-      if (lineas.length) await tx.serviceEarning.createMany({ data: lineas })
+      // B9 (r7.1): periodo destino → clase → sede. La fila de la sede en `FOR KEY SHARE` y revalidar que sigue siendo de la
+      // organización: un borrado o un traslado que ganó la fila no deja la diferencia en una sede que ya no es suya.
+      if (lineas.length) {
+        await bloquearSedesDeLaOrganizacion(tx, organizationId, [input.venueId], presupuesto)
+        await tx.serviceEarning.createMany({ data: lineas })
+      }
       // 10) Ancla: si no tenía, en el origen revalidado; si tenía sin versión y hoy hay regla, la versión UNA vez.
       const clase = filas[0]
       let ancla: { periodoOrigen?: string; version: string | null } | null = null

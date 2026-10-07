@@ -8,7 +8,12 @@ import {
   previewActivacion,
   ventanasDePropinas,
 } from '@/services/dashboard/staffPay/activacion.service'
-import { cambiarPeriodicidad, lockPeriodosDeOrganizacion } from '@/services/dashboard/staffPay/periodosGuardados'
+import {
+  cambiarPeriodicidad,
+  listarPeriodos,
+  lockPeriodosDeOrganizacion,
+  PresupuestoDeEspera,
+} from '@/services/dashboard/staffPay/periodosGuardados'
 import { barreraDeLaOrganizacion, borrarMundo, CIERRE_EN_CURSO, conCandadoRetenido, crearMundo, Mundo, periodoCerrado } from './_mundo'
 
 const mockPermiso = jest.fn()
@@ -204,6 +209,45 @@ describe('interruptor de propinas (spec fase 3 §7.1, Codex r1-5)', () => {
   })
 })
 
+describe('🔴 la periodicidad queda fija al activar (B9, diseño r6.4)', () => {
+  // Sin ningún periodo guardado: antes de B9 la periodicidad se podía cambiar después de activar, y un cambio de quincenal
+  // a mensual dejaba el inicio de pago al personal a media quincena.
+  it('quincenal activada el 20-sep: no se puede cambiar (409 PERIODICIDAD_FIJA), la lista y la vista previa lo dicen', async () => {
+    expect(await activar('SEMIMONTHLY', '2026-09-20T18:00:00Z')).toEqual({ startDate: '2026-09-16', yaActivado: false })
+    expect(await prisma.servicePayPeriod.count({ where: { organizationId: m.orgId } })).toBe(0)
+    const lista = await listarPeriodos({ userId: m.owner, venueId: m.venueId, limit: 24 })
+    expect(lista).toMatchObject({ periodicidad: 'SEMIMONTHLY', puedeCambiarPeriodicidad: false })
+    expect(
+      await previewActivacion({ venueId: m.venueId, periodicidad: 'SEMIMONTHLY', ahora: new Date('2026-09-20T18:00:00Z') }),
+    ).toMatchObject({
+      periodicidad: 'SEMIMONTHLY',
+      periodicidadFija: true,
+    })
+    await expect(cambiarPeriodicidad({ userId: m.owner, venueId: m.venueId, periodicidad: 'MONTHLY' })).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'PERIODICIDAD_FIJA',
+      message: 'La periodicidad quedó fija al activar el pago al personal (quincenal)',
+    })
+    expect(await periodicidad()).toBe('SEMIMONTHLY')
+    expect(await logs('SERVICE_PAY_PERIODICITY_SET')).toBe(0)
+  })
+
+  it('mensual activada: el texto dice «(mensual)»', async () => {
+    await activar('MONTHLY', '2026-09-20T18:00:00Z')
+    await expect(cambiarPeriodicidad({ userId: m.owner, venueId: m.venueId, periodicidad: 'SEMIMONTHLY' })).rejects.toMatchObject({
+      code: 'PERIODICIDAD_FIJA',
+      message: 'La periodicidad quedó fija al activar el pago al personal (mensual)',
+    })
+  })
+
+  it('sin activar y sin periodos todavía se puede cambiar (como siempre)', async () => {
+    expect((await listarPeriodos({ userId: m.owner, venueId: m.venueId, limit: 24 })).puedeCambiarPeriodicidad).toBe(true)
+    expect(await cambiarPeriodicidad({ userId: m.owner, venueId: m.venueId, periodicidad: 'SEMIMONTHLY' })).toEqual({
+      periodicidad: 'SEMIMONTHLY',
+    })
+  })
+})
+
 describe('vista previa de activar (B6 ronda 1): lo mismo que haría activar, sin escribir', () => {
   const plan = (periodicidad: 'MONTHLY' | 'SEMIMONTHLY', iso: string) =>
     previewActivacion({ venueId: m.venueId, periodicidad, ahora: new Date(iso) })
@@ -245,21 +289,21 @@ describe('con un cierre en curso, las operaciones cortas no esperan sin tope (B7
   const conCierreEnCurso = async (operacion: () => Promise<unknown>) =>
     conCandadoRetenido(await barreraDeLaOrganizacion(m.orgId), operacion)
 
-  it('activar contesta 409 CIERRE_EN_CURSO a los ~5 s y no activa nada', async () => {
+  it('activar contesta 409 CIERRE_EN_CURSO a los ~6 s (su presupuesto de espera, B9) y no activa nada', async () => {
     const r = await conCierreEnCurso(() => activar('MONTHLY', '2026-09-20T18:00:00Z'))
     expect(r.error).toMatchObject(CIERRE_EN_CURSO)
-    expect(r.ms).toBeGreaterThanOrEqual(4_500)
-    expect(r.ms).toBeLessThan(25_000)
+    expect(r.ms).toBeGreaterThanOrEqual(5_500)
+    expect(r.ms).toBeLessThan(10_000)
     expect(await estadoActivacion(prisma, m.orgId)).toMatchObject({ activado: false })
     expect(await logs('SERVICE_PAY_ACTIVATED')).toBe(0)
   }, 60_000)
 
-  it('cambiar las propinas contesta 409 CIERRE_EN_CURSO a los ~5 s y no abre ventana', async () => {
+  it('cambiar las propinas contesta 409 CIERRE_EN_CURSO a los ~6 s (su presupuesto de espera, B9) y no abre ventana', async () => {
     await activar('MONTHLY', '2026-09-01T18:00:00Z')
     const r = await conCierreEnCurso(() => propinas(true, '2026-09-03T18:00:00Z'))
     expect(r.error).toMatchObject(CIERRE_EN_CURSO)
-    expect(r.ms).toBeGreaterThanOrEqual(4_500)
-    expect(r.ms).toBeLessThan(25_000)
+    expect(r.ms).toBeGreaterThanOrEqual(5_500)
+    expect(r.ms).toBeLessThan(10_000)
     expect(await prisma.staffPayTipWindow.count({ where: { organizationId: m.orgId } })).toBe(0)
     expect(await logs('SERVICE_PAY_TIPS_SET')).toBe(0)
   }, 60_000)
@@ -267,8 +311,8 @@ describe('con un cierre en curso, las operaciones cortas no esperan sin tope (B7
   it('cambiar la periodicidad también (el mismo candado)', async () => {
     const r = await conCierreEnCurso(() => cambiarPeriodicidad({ userId: m.owner, venueId: m.venueId, periodicidad: 'SEMIMONTHLY' }))
     expect(r.error).toMatchObject(CIERRE_EN_CURSO)
-    expect(r.ms).toBeGreaterThanOrEqual(4_500)
-    expect(r.ms).toBeLessThan(25_000)
+    expect(r.ms).toBeGreaterThanOrEqual(5_500)
+    expect(r.ms).toBeLessThan(10_000)
     expect(await periodicidad()).toBe('MONTHLY')
   }, 60_000)
 
@@ -276,7 +320,7 @@ describe('con un cierre en curso, las operaciones cortas no esperan sin tope (B7
     // Activa con el candado libre y, dentro de la misma tx, el `lock_timeout` vuelve al de la sesión (0 = sin tope).
     await activar('MONTHLY', '2026-09-20T18:00:00Z')
     const [{ lt }] = await prisma.$transaction(async tx => {
-      await lockPeriodosDeOrganizacion(tx, m.orgId)
+      await lockPeriodosDeOrganizacion(tx, m.orgId, new PresupuestoDeEspera(6_000))
       return tx.$queryRaw<Array<{ lt: string }>>`SELECT current_setting('lock_timeout') AS lt`
     })
     expect(lt).toBe('0')

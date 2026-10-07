@@ -1,7 +1,7 @@
 import { Prisma, ServicePayPeriod } from '@prisma/client'
 import prisma from '../../../utils/prismaClient'
 import { BadRequestError, ConflictError, NotFoundError } from '../../../errors/AppError'
-import { withSerializableRetry } from '../../../utils/serializableRetry'
+import { isModelLockTimeoutError, withSerializableRetry } from '../../../utils/serializableRetry'
 import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
 import { assertPermisoEnSedes, assertPermisoEnTodasLasSedes, exigirPermisoEnSedes, sedesConServicePay, sedesLegiblesDe } from './acceso'
 import { fechaMx } from '../export.helpers'
@@ -19,47 +19,104 @@ import {
 type Tx = Prisma.TransactionClient
 type Db = Tx | typeof prisma
 
+/** El timeout de las transacciones CORTAS de pago al personal (el default de `withSerializableRetry`). */
+export const TIMEOUT_TX_CORTA_MS = 10_000
+/** El tope de espera más alto que puede tener una transacción: el del cierre (120 s ⇒ 30 s). */
+export const TOPE_ESPERA_MAX_MS = 30_000
+
 /**
- * Lo que una operación CORTA espera un candado que un cierre puede tener tomado (B7 r1-r2): el de periodos de la
- * organización y la fila de su periodo. El cierre los retiene todo lo que dura (~42 s medidos con 150,000 líneas) y la
- * transacción de una operación corta vence a los 10 s con un P2028 (un 500). Con el tope contesta 409 CIERRE_EN_CURSO; dos
- * operaciones cortas que chocan se esperan de sobra.
+ * Presupuesto ÚNICO de espera de candados de UNA transacción (fase 3, B9; diseño r6.3 + r7.2). Lo comparten todas sus
+ * adquisiciones —el candado de periodos de la organización, la fila del periodo, el candado de la clase y las filas de
+ * `Organization` y `Venue`—, así que varias esperas seguidas nunca suman más que el tope (antes cada candado tenía su
+ * propio reloj de 5 s y 4,5 s + 6 s llegaban al P2028 de una transacción de 10 s).
+ *
+ * Se mide el tiempo ESPERANDO candados, no el reloj desde la entrada: el cierre toma las sedes después de calcular (hasta
+ * ~76 s medidos) y un plazo de 30 s desde la entrada le daría 409 a todo cierre largo aunque nadie le estorbara.
+ *
+ * Se crea en la PRIMERA línea de la transacción (`transaccionConPresupuesto` lo hace), nunca a mitad: un reloj nuevo
+ * borraría lo ya esperado. Un reintento de `withSerializableRetry` es otra transacción, con su presupuesto nuevo.
  */
-export const ESPERA_CANDADO_MS = 5_000
+export class PresupuestoDeEspera {
+  private esperadoMs = 0
+  constructor(readonly topeMs: number) {}
+
+  /** El tope que le cabe a una transacción de `timeoutMs`: 6 s de 10 s y 30 s del cierre de 120 s (el 60 %, hasta 30 s). */
+  static para(timeoutMs: number): PresupuestoDeEspera {
+    return new PresupuestoDeEspera(Math.min(Math.floor(timeoutMs * 0.6), TOPE_ESPERA_MAX_MS))
+  }
+
+  /** Lo que queda, en ms enteros (`lock_timeout = 0` sería «sin tope»: con menos de 1 ms no se intenta). */
+  restanteMs(): number {
+    return Math.max(0, Math.floor(this.topeMs - this.esperadoMs))
+  }
+
+  /** Sólo `tomarCandado`: lo que tardó una adquisición. */
+  descontar(ms: number): void {
+    this.esperadoMs += Math.max(0, ms)
+  }
+}
+
+/** Una transacción SERIALIZABLE (con los reintentos de siempre) que recibe su presupuesto de espera al entrar. */
+export function transaccionConPresupuesto<T>(
+  fn: (tx: Tx, presupuesto: PresupuestoDeEspera) => Promise<T>,
+  o: { timeoutMs?: number } = {},
+): Promise<T> {
+  const timeoutMs = o.timeoutMs ?? TIMEOUT_TX_CORTA_MS
+  return withSerializableRetry(tx => fn(tx, PresupuestoDeEspera.para(timeoutMs)), { timeoutMs })
+}
+
+export const MENSAJE_CIERRE_EN_CURSO = 'Hay un cierre de periodo en curso; intenta de nuevo en un momento'
+/** Los candados nuevos de B9 (filas de `Organization` y `Venue`, la clase): no los retiene un cierre sino otra operación. */
+export const OPERACION_EN_CURSO = {
+  codigo: 'OPERACION_EN_CURSO',
+  mensaje: 'Otra operación está cambiando esta sede o su organización; intenta de nuevo en un momento',
+} as const
 
 const esEsperaVencida = (e: unknown) => {
   const x = e as { code?: string; meta?: { code?: string } } | null
-  return x?.code === '55P03' || (x?.code === 'P2010' && x.meta?.code === '55P03')
+  return x?.code === '55P03' || (x?.code === 'P2010' && x.meta?.code === '55P03') || isModelLockTimeoutError(e)
 }
 
 /**
- * La ÚNICA pieza de la espera acotada (B7 r1-r2): fija `lock_timeout`, toma el candado con `tomar` y restaura el valor
- * previo, para que el resto de la transacción no herede el tope. Sólo el CIERRE pide `sinTope`: el que espera es él, y su
- * transacción tiene su propio presupuesto.
+ * La ÚNICA pieza de la espera acotada (B7 r1-r2; B9): fija `lock_timeout` = lo que le queda al presupuesto de la
+ * transacción, toma el candado con `tomar`, descuenta lo que tardó y restaura el valor previo, para que el resto de la
+ * transacción no herede el tope. Sin presupuesto, o con `55P03`, contesta 409 con `codigo` (por defecto
+ * `CIERRE_EN_CURSO`, el de los candados que retiene un cierre) y nunca llega al P2028 de su transacción.
  */
-async function tomarCandado<T>(tx: Tx, tomar: () => Promise<T>, sinTope = false): Promise<T> {
-  if (sinTope) return tomar()
+export async function tomarCandado<T>(
+  tx: Tx,
+  tomar: () => Promise<T>,
+  o: { presupuesto: PresupuestoDeEspera; codigo?: string; mensaje?: string },
+): Promise<T> {
+  const vencido = () => new ConflictError(o.mensaje ?? MENSAJE_CIERRE_EN_CURSO, o.codigo ?? 'CIERRE_EN_CURSO')
+  const restante = o.presupuesto.restanteMs()
+  if (restante < 1) throw vencido()
   const [{ previo }] = await tx.$queryRaw<Array<{ previo: string }>>`SELECT current_setting('lock_timeout') AS previo`
-  await tx.$executeRawUnsafe(`SET LOCAL lock_timeout = '${ESPERA_CANDADO_MS}ms'`)
+  await tx.$executeRawUnsafe(`SET LOCAL lock_timeout = '${restante}ms'`)
+  const t0 = Date.now()
   let r: T
   try {
     r = await tomar()
   } catch (e) {
+    o.presupuesto.descontar(Date.now() - t0)
     // 55P03 aborta la transacción: no hay nada que restaurar. Un ConflictError no lo reintenta `withSerializableRetry`.
-    if (esEsperaVencida(e)) throw new ConflictError('Hay un cierre de periodo en curso; intenta de nuevo en un momento', 'CIERRE_EN_CURSO')
+    if (esEsperaVencida(e)) throw vencido()
     throw e
   }
+  o.presupuesto.descontar(Date.now() - t0)
   await tx.$queryRaw`SELECT set_config('lock_timeout', ${previo}, true)`
   return r
 }
 
 /**
  * Candado por organización para crear periodos y cambiar la periodicidad (spec §5.7), también de activar y de las propinas.
- * Con el tope de `tomarCandado`, salvo el cierre (`sinTope`).
+ * Con el presupuesto de la transacción (B9: también el cierre, que ya no espera sin tope).
  */
-export async function lockPeriodosDeOrganizacion(tx: Tx, organizationId: string, o: { sinTope?: boolean } = {}): Promise<void> {
+export async function lockPeriodosDeOrganizacion(tx: Tx, organizationId: string, presupuesto: PresupuestoDeEspera): Promise<void> {
   const key = `avoqado:service-pay-periods:v1:${organizationId}`
-  await tomarCandado(tx, () => tx.$queryRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))::text`), o.sinTope)
+  await tomarCandado(tx, () => tx.$queryRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))::text`), {
+    presupuesto,
+  })
 }
 
 export async function periodoQueContieneFecha(db: Db, organizationId: string, fecha: string): Promise<ServicePayPeriod | null> {
@@ -71,13 +128,19 @@ export async function periodoQueContieneFecha(db: Db, organizationId: string, fe
  * El periodo que contiene `fecha`; si no existe, se deriva de la periodicidad y se crea. Con SERIALIZABLE la foto se toma en la
  * primera sentencia, antes de esperar el candado: lo que hace correcta la carrera es SSI + el índice único
  * (organizationId, periodStart) + el reintento de `withSerializableRetry`, no el candado.
- * `activas`: las sedes con el módulo, ya resueltas ANTES de la transacción (el cierre las pasa para no consultar el
- * cliente global aquí dentro). Sin ellas se consultan, como siempre.
+ * `presupuesto`: el de la transacción que lo llama (B9). `activas`: las sedes con el módulo, ya resueltas ANTES de la
+ * transacción (el cierre las pasa para no consultar el cliente global aquí dentro). Sin ellas se consultan, como siempre.
  */
-export async function asegurarPeriodo(tx: Tx, organizationId: string, fecha: string, activas?: string[]): Promise<ServicePayPeriod> {
+export async function asegurarPeriodo(
+  tx: Tx,
+  organizationId: string,
+  fecha: string,
+  presupuesto: PresupuestoDeEspera,
+  activas?: string[],
+): Promise<ServicePayPeriod> {
   const existente = await periodoQueContieneFecha(tx, organizationId, fecha)
   if (existente) return existente
-  await lockPeriodosDeOrganizacion(tx, organizationId)
+  await lockPeriodosDeOrganizacion(tx, organizationId, presupuesto)
   const ganador = await periodoQueContieneFecha(tx, organizationId, fecha)
   if (ganador) return ganador
   const org = await tx.organization.findUniqueOrThrow({ where: { id: organizationId }, select: { servicePayPeriodicity: true } })
@@ -102,9 +165,14 @@ export async function asegurarPeriodo(tx: Tx, organizationId: string, fecha: str
  * toma (serían 50,000 candados): el cierre se protege con el candado del periodo —o el de la organización mientras crea
  * el periodo—, que el ajuste toma ANTES que éste. Orden único: periodo (u organización) → clase.
  */
-export async function lockClase(tx: Tx, classSessionId: string): Promise<void> {
+export async function lockClase(tx: Tx, classSessionId: string, presupuesto: PresupuestoDeEspera): Promise<void> {
   const key = `avoqado:service-pay-class:v1:${classSessionId}`
-  await tx.$queryRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))::text`)
+  // B9: antes sin tope; ahora con el presupuesto de la transacción (lo retiene otro ajuste o una liquidación, no un cierre).
+  await tomarCandado(tx, () => tx.$queryRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))::text`), {
+    presupuesto,
+    codigo: OPERACION_EN_CURSO.codigo,
+    mensaje: OPERACION_EN_CURSO.mensaje,
+  })
 }
 
 /**
@@ -114,12 +182,12 @@ export async function lockClase(tx: Tx, classSessionId: string): Promise<void> {
  * sólo apunta al periodo (anclar una clase, un devengo). Con `FOR UPDATE`, un ajuste con el periodo tomado esperando la
  * clase y una liquidación con la clase tomada anclándola en el periodo se bloqueaban mutuamente (40P01, sin reintento).
  */
-export async function bloquearPeriodo(tx: Tx, periodId: string, o: { sinTope?: boolean } = {}): Promise<ServicePayPeriod> {
-  // B7 r2: con el tope de `tomarCandado` (el cierre retiene esta fila todo lo que dura); sólo el cierre pide `sinTope`.
+export async function bloquearPeriodo(tx: Tx, periodId: string, presupuesto: PresupuestoDeEspera): Promise<ServicePayPeriod> {
+  // B7 r2 / B9: con el presupuesto de la transacción (el cierre retiene esta fila todo lo que dura).
   const filas = await tomarCandado(
     tx,
     () => tx.$queryRaw<Array<{ id: string }>>(Prisma.sql`SELECT id FROM "ServicePayPeriod" WHERE id = ${periodId} FOR NO KEY UPDATE`),
-    o.sinTope,
+    { presupuesto },
   )
   if (!filas.length) throw new NotFoundError('Periodo no encontrado')
   return tx.servicePayPeriod.findUniqueOrThrow({ where: { id: periodId } })
@@ -265,7 +333,7 @@ function canonicosHastaHoy(hoy: string, periodicidad: Periodicidad, n: number) {
 export async function listarPeriodos(input: { userId: string; venueId: string; antesDe?: string; limit: number }): Promise<ListaPeriodos> {
   const v = await prisma.venue.findUniqueOrThrow({
     where: { id: input.venueId },
-    select: { organizationId: true, timezone: true, organization: { select: { servicePayPeriodicity: true } } },
+    select: { organizationId: true, timezone: true, organization: { select: { servicePayPeriodicity: true, staffPayStartDate: true } } },
   })
   const limit = Math.min(Math.max(input.limit, 1), 60)
   const periodicidad = v.organization.servicePayPeriodicity
@@ -309,23 +377,37 @@ export async function listarPeriodos(input: { userId: string; venueId: string; a
   const totalGuardados = input.antesDe ? 1 : await prisma.servicePayPeriod.count({ where: { organizationId: v.organizationId } })
   return {
     periodicidad,
-    puedeCambiarPeriodicidad: !input.antesDe && totalGuardados === 0,
+    // B9 (diseño r6.4): tampoco después de activar el pago al personal, aunque no haya ningún periodo guardado.
+    puedeCambiarPeriodicidad: !input.antesDe && totalGuardados === 0 && v.organization.staffPayStartDate === null,
     items,
     antesDe: hayMas ? dbDateComoFecha(guardados[guardados.length - 1].periodStart) : null,
   }
 }
 
-/** D3: mensual o quincenal, sólo mientras no haya ningún periodo guardado (spec §5.7). */
+/**
+ * D3: mensual o quincenal, sólo mientras no haya ningún periodo guardado (spec §5.7) y —B9, diseño r6.4— mientras no se
+ * haya activado el pago al personal: `staffPayStartDate` es el inicio de un periodo canónico y ningún periodo puede cruzarlo.
+ * Las dos cosas se miran bajo el candado de la organización (activar también lo toma).
+ */
 export async function cambiarPeriodicidad(input: { userId: string; venueId: string; periodicidad: Periodicidad }) {
   if (input.periodicidad !== 'MONTHLY' && input.periodicidad !== 'SEMIMONTHLY') throw new BadRequestError('Periodicidad inválida')
   const v = await prisma.venue.findUniqueOrThrow({ where: { id: input.venueId }, select: { organizationId: true } })
   await assertPermisoEnTodasLasSedes(input.userId, v.organizationId, 'staffpay:close')
-  return withSerializableRetry(async tx => {
-    await lockPeriodosDeOrganizacion(tx, v.organizationId)
+  return transaccionConPresupuesto(async (tx, presupuesto) => {
+    await lockPeriodosDeOrganizacion(tx, v.organizationId, presupuesto)
+    const antes = await tx.organization.findUniqueOrThrow({
+      where: { id: v.organizationId },
+      select: { servicePayPeriodicity: true, staffPayStartDate: true },
+    })
+    if (antes.staffPayStartDate) {
+      throw new ConflictError(
+        `La periodicidad quedó fija al activar el pago al personal (${antes.servicePayPeriodicity === 'SEMIMONTHLY' ? 'quincenal' : 'mensual'})`,
+        'PERIODICIDAD_FIJA',
+      )
+    }
     if ((await tx.servicePayPeriod.count({ where: { organizationId: v.organizationId } })) > 0) {
       throw new ConflictError('La periodicidad ya no se puede cambiar: ya hay periodos guardados')
     }
-    const antes = await tx.organization.findUniqueOrThrow({ where: { id: v.organizationId }, select: { servicePayPeriodicity: true } })
     await tx.organization.update({ where: { id: v.organizationId }, data: { servicePayPeriodicity: input.periodicidad } })
     await writeLegacyActivityAuditTx(tx, {
       staffId: input.userId,

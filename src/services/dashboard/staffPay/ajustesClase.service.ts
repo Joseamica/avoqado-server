@@ -2,13 +2,18 @@ import { createHash } from 'crypto'
 import { ClassSessionPayState, Prisma } from '@prisma/client'
 import prisma from '../../../utils/prismaClient'
 import { BadRequestError, ConflictError, NotFoundError } from '../../../errors/AppError'
-import { withSerializableRetry } from '../../../utils/serializableRetry'
 import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
 import { venueDayKey } from '../../../utils/venueDateKeys'
 import { exigirPermisoEnSedes, sedesConPermiso } from './acceso'
 import { diferenciasDeClase, origenDeClase } from './diferencias.service'
 import { dbDateComoFecha } from './periodos'
-import { bloquearPeriodo, lockClase, lockPeriodosDeOrganizacion, periodoQueContieneFecha } from './periodosGuardados'
+import {
+  bloquearPeriodo,
+  lockClase,
+  lockPeriodosDeOrganizacion,
+  periodoQueContieneFecha,
+  transaccionConPresupuesto,
+} from './periodosGuardados'
 import { ReglaDeClase, valorarClases } from './valoracion'
 
 export interface AjusteDeClase {
@@ -372,7 +377,7 @@ const datosDelAjuste = (input: GuardarAjusteInput | Omit<GuardarAjusteInput, 'cl
 })
 
 async function guardarDentro(input: GuardarAjusteInput, permitidas: Set<string>): Promise<ResultadoAjuste> {
-  return withSerializableRetry(async tx => {
+  return transaccionConPresupuesto(async (tx, presupuesto) => {
     // Primero la sede: a otra sede se le contesta «no encontrada» antes de revisar nada más.
     const info = await tx.classSession.findFirst({
       where: { id: input.classSessionId, venueId: input.venueId },
@@ -388,14 +393,14 @@ async function guardarDentro(input: GuardarAjusteInput, permitidas: Set<string>)
     const fechaLocal = venueDayKey(info.startsAt, info.venue.timezone || 'America/Mexico_City')
     const periodo = info.payState?.originPeriodId ?? (await periodoQueContieneFecha(tx, info.venue.organizationId, fechaLocal))?.id
     // Si todavía no existe, el candado de periodos de la organización: un cierre que lo está creando lo tiene hasta su
-    // commit, así que el ajuste lo espera hasta 5 s y, si sigue retenido, contesta 409 CIERRE_EN_CURSO, en vez de cruzarse
-    // con él (Codex R1-6: sin esto, ajuste y cierre podían bloquearse mutuamente sobre ClassSession / ClassSessionPayState,
-    // y 40P01 no se reintenta).
-    if (periodo) await bloquearPeriodo(tx, periodo)
-    else await lockPeriodosDeOrganizacion(tx, info.venue.organizationId)
+    // commit, así que el ajuste lo espera con su presupuesto (6 s, B9) y, si sigue retenido, contesta 409 CIERRE_EN_CURSO,
+    // en vez de cruzarse con él (Codex R1-6: sin esto, ajuste y cierre podían bloquearse mutuamente sobre ClassSession /
+    // ClassSessionPayState, y 40P01 no se reintenta).
+    if (periodo) await bloquearPeriodo(tx, periodo, presupuesto)
+    else await lockPeriodosDeOrganizacion(tx, info.venue.organizationId, presupuesto)
     // 2) Luego la clase: el candado compartido con la liquidación, y su fila. `FOR NO KEY UPDATE`: serializa las ediciones
     // de la clase sin chocar con el `FOR KEY SHARE` de la llave foránea cuando el cierre la ancla (misma familia que el periodo).
-    await lockClase(tx, input.classSessionId)
+    await lockClase(tx, input.classSessionId, presupuesto)
     await tx.$queryRaw(
       Prisma.sql`SELECT id FROM "ClassSession" WHERE id = ${input.classSessionId} AND "venueId" = ${input.venueId} FOR NO KEY UPDATE`,
     )

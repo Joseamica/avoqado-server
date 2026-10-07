@@ -2,13 +2,12 @@ import { Prisma } from '@prisma/client'
 import prisma from '../../../utils/prismaClient'
 import { createHash } from 'crypto'
 import { BadRequestError, ConflictError, NotFoundError } from '../../../errors/AppError'
-import { withSerializableRetry } from '../../../utils/serializableRetry'
 import { utcTs } from '../../../utils/sqlDates'
 import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
 import { encodeExport, EncodedExport, ExportColumnDef, fechaMx, getRowCapForFormat } from '../export.helpers'
 import { runWithoutCancellation } from '../../../utils/requestCancellation'
 import { assertPermisoEnSedes, exigirPermisoEnSedes, sedesConPermiso, sedesConServicePay, sedesLegiblesDe } from './acceso'
-import { bloquearPeriodo, periodoQueContieneFecha } from './periodosGuardados'
+import { bloquearPeriodo, periodoQueContieneFecha, transaccionConPresupuesto } from './periodosGuardados'
 import { dbDateComoFecha, MESES_LARGOS, periodoQueContiene, venuePeriodRange } from './periodos'
 import { ReglaDeClase, textoDeRegla, valoracionCte } from './valoracion'
 import { nombreGuardadoSql, PERSONA_DADA_DE_BAJA, sqlVentasDelPeriodo } from './fuentesVenta'
@@ -147,8 +146,8 @@ export async function marcarPagado(input: {
   if (!antes) throw new NotFoundError('Periodo no encontrado')
   const candidatas = input.staffId ? [...antes.venueIds, ...(await sedesDeRecibo(prisma, input.periodId, input.staffId))] : antes.venueIds
   const permitidas = new Set(await sedesConPermiso(input.userId, candidatas, 'staffpay:close'))
-  return withSerializableRetry(async tx => {
-    const p = await bloquearPeriodo(tx, input.periodId)
+  return transaccionConPresupuesto(async (tx, presupuesto) => {
+    const p = await bloquearPeriodo(tx, input.periodId, presupuesto)
     if (p.organizationId !== v.organizationId) throw new NotFoundError('Periodo no encontrado')
     if (p.status !== 'CLOSED') throw new BadRequestError('Sólo se marca pagado un periodo cerrado')
     // Permiso ANTES de recorrer nada (como el cierre, Codex R1-8), sobre el periodo ya bloqueado (spec §6.5, §9.2).

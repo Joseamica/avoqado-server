@@ -64,7 +64,7 @@ const cerrar = async (
 afterEach(async () => borrarMundo(m))
 
 describe('cerrar el periodo (spec §6.3)', () => {
-  it('B7 r1: el cierre SÍ espera sin tope el candado de la organización (el tope de 5 s es de las operaciones cortas)', async () => {
+  it('el cierre espera el candado de la organización más que una operación corta (B9: su presupuesto es de 30 s, no 6)', async () => {
     m = await mundoConAgosto('cierre-espera')
     await clase(m, { staffId: m.ana, inicioIso: '2026-08-04T14:00:00Z', reservas: confirmadas(8) })
     const huella = (await preview(m)).huella
@@ -73,7 +73,7 @@ describe('cerrar el periodo (spec §6.3)', () => {
       const t = Date.now()
       const enCurso = cerrar(m, { huella })
       await b.esperarA(1)
-      await new Promise(r => setTimeout(r, 6_000)) // más que ESPERA_CANDADO_MS
+      await new Promise(r => setTimeout(r, 6_000)) // más que el presupuesto de 6 s de una operación corta
       await b.soltar()
       expect(await enCurso).toMatchObject({ yaCerrado: false, total: '570.00' })
       expect(Date.now() - t).toBeGreaterThanOrEqual(6_000)
