@@ -16,6 +16,7 @@ import * as dif from '../../services/dashboard/staffPay/diferencias.service'
 import * as liq from '../../services/dashboard/staffPay/liquidacion.service'
 import * as participacion from '../../services/dashboard/staffPay/participacion'
 import { vistaPreviaParticipacion } from '../../services/dashboard/staffPay/participacion.vistaPrevia'
+import { estadoSedes } from '../../services/dashboard/staffPay/sedes.service'
 import { sendExport } from '../../services/dashboard/export.helpers'
 
 export function ctx(req: Request): { venueId: string; userId: string } {
@@ -309,6 +310,8 @@ export const getParticipationPreview = manejar(req => {
   const q = req.query as { accion: 'activar' | 'desactivar'; fecha?: string }
   return vistaPreviaParticipacion({ ...ctx(req), sedeId: req.params.sedeId, accion: q.accion, fecha: q.fecha })
 })
+// B13: la pantalla de sedes. Sólo quién pregunta: `ahora`, `soloSedes` y `entreLecturas` jamás salen de la petición.
+export const getSedes = manejar(req => estadoSedes(ctx(req)))
 export const putTips = manejar(req => activacion.cambiarPropinas({ ...ctx(req), encender: req.body.encender }))
 export const getClosePreview = manejar(req => cierre.previewCierre({ ...ctx(req), fecha: String(req.query.fecha) }))
 export const postClose = manejar(req => {
@@ -332,6 +335,17 @@ export const getPaidPreview = manejar(req =>
     ...(req.query.staffId ? { staffId: String(req.query.staffId) } : {}),
   }),
 )
+// B13 (r5.1): la vista previa del ajuste con su aviso de pendientes. Campo por campo (el monto ya viene como número).
+export const getAdjustmentPreview = manejar(req => {
+  const { sede, staffId, amount, reason, fecha } = req.query as unknown as {
+    sede: string
+    staffId: string
+    amount: number
+    reason: string
+    fecha?: string
+  }
+  return manuales.previewAjusteManual({ ...ctx(req), sede, staffId, amount, reason, fecha })
+})
 export const postAdjustment = manejar(req => {
   // Campos explícitos: nada extra del body (p. ej. una huellaEsperada) llega al service.
   const { sede, staffId, amount, reason, fecha, clientKey } = req.body

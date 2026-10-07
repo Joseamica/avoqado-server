@@ -70,6 +70,55 @@ export async function clasesDe(
   return { n: r.n, total: new Prisma.Decimal(r.total ?? 0), pendientes: r.pendientes }
 }
 
+/** Una sede que se simula activar desde `fecha`, con sus ventanas reales. */
+export interface SedeQueSeActiva {
+  venueId: string
+  tz: string
+  fecha: string
+  reales: Ventana[]
+}
+
+/**
+ * Lo que ENTRA al activar cada sede desde su `fecha` (r5.4, r7.3): simuladas = reales ∪ `[fecha, ∞)`; `entran` = simuladas −
+ * reales en ventas (netos, por diferencia de `totalesVentas`) y las clases que hoy quedan fuera en `[fecha, hoy]` (agregadas en
+ * la base). Sobre el pseudoperiodo `[mínimo de la organización, hoy]`: sólo lo que todavía no se cierra. La vista previa de
+ * activar (B11) y la pantalla de sedes (B13: `fueraEstePeriodo`, desde el mínimo efectivo) usan ESTA función: el mismo número
+ * en las dos. Varias sedes con el mismo «hoy» van en UNA suma de ventas por lado. Devuelve también las ventas simuladas (la
+ * vista previa sigue con `quedanFuera`).
+ */
+export async function alActivar(
+  tx: Db,
+  base: { organizationId: string; startDate: string; minimo: string; hoy: string; ahora: Date },
+  sedes: SedeQueSeActiva[],
+): Promise<Map<string, { entran: CuentaCruda; simuladas: { comisiones: Suma; propinas: Suma } }>> {
+  const out = new Map<string, { entran: CuentaCruda; simuladas: { comisiones: Suma; propinas: Suma } }>()
+  if (!sedes.length) return out
+  const a: AlcanceBarrido = {
+    organizationId: base.organizationId,
+    periodo: { id: null, start: base.minimo, end: base.hoy },
+    sedes: sedes.map(s => ({ venueId: s.venueId, tz: s.tz })),
+    startDate: base.startDate,
+  }
+  const reales = sedes.flatMap(s => s.reales)
+  const desdeFecha = sedes.map(s => ({ venueId: s.venueId, desde: s.fecha, hasta: null }))
+  const real = await totalesVentas(tx, a, { ventanas: reales, soloElPeriodo: true })
+  const simuladas = await totalesVentas(tx, a, { ventanas: [...reales, ...desdeFecha], soloElPeriodo: true })
+  for (const s of sedes) {
+    const r = porFuente(real.filter(x => x.venueId === s.venueId))
+    const sim = porFuente(simuladas.filter(x => x.venueId === s.venueId))
+    const donde = { organizationId: base.organizationId, venueId: s.venueId, tz: s.tz }
+    out.set(s.venueId, {
+      entran: {
+        clases: await clasesDe(tx, donde, { desde: s.fecha, hasta: base.hoy }, 'fuera', base.ahora),
+        comisiones: restar(sim.comisiones, r.comisiones),
+        propinas: restar(sim.propinas, r.propinas),
+      },
+      simuladas: sim,
+    })
+  }
+  return out
+}
+
 /** Las ventanas reales de UNA sede, con el mismo tope que el barrido (nunca recorta). */
 async function ventanasDe(db: Db, organizationId: string, venueId: string): Promise<Ventana[]> {
   const filas = await db.staffPayVenueWindow.findMany({
@@ -133,18 +182,16 @@ async function calcular(
   }
   const ventas = async (ventanas: Ventana[]) => porFuente(await totalesVentas(tx, a, { ventanas, soloElPeriodo: true }))
   const base = { fecha, minimo: regla.rango.desde, maximo: hoy, zona: sede.tz }
-  const real = await ventas(reales)
   if (input.accion === 'activar') {
-    const simuladas = await ventas([...reales, { venueId: input.sedeId, desde: fecha, hasta: null }])
+    const datos = { organizationId: sede.organizationId, startDate: regla.startDate, minimo: regla.minimo, hoy, ahora }
+    const al = (await alActivar(tx, datos, [{ venueId: input.sedeId, tz: sede.tz, fecha, reales }])).get(input.sedeId)
+    if (!al) throw new Error('STAFF_PAY_SIN_VISTA_PREVIA')
+    const { entran, simuladas } = al
     const completa = await ventas([{ venueId: input.sedeId, desde: regla.startDate, hasta: null }])
     return {
       accion: 'activar',
       ...base,
-      entran: aCuenta({
-        clases: await clasesDe(tx, s, { desde: fecha, hasta: hoy }, 'fuera', ahora),
-        comisiones: restar(simuladas.comisiones, real.comisiones),
-        propinas: restar(simuladas.propinas, real.propinas),
-      }),
+      entran: aCuenta(entran),
       quedanFuera: aCuenta({
         clases: await clasesDe(tx, s, { desde: regla.minimo, hasta: sumarDias(fecha, -1) }, 'fuera', ahora),
         comisiones: restar(completa.comisiones, simuladas.comisiones),
@@ -152,6 +199,7 @@ async function calcular(
       }),
     }
   }
+  const real = await ventas(reales)
   // La abierta, cortada en `fecha`; si `fecha` es el día antes de su inicio, la activación se borra.
   const cortadas = reales.flatMap(w => (w.hasta !== null ? [w] : fecha < w.desde ? [] : [{ ...w, hasta: fecha }]))
   const simuladas = await ventas(cortadas)

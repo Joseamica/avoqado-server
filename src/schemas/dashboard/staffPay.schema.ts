@@ -145,18 +145,24 @@ export const marcarPagadoSchema = z.object({
     .regex(/^[a-f0-9]{64}$/, 'Revisa la vista previa antes de confirmar')
     .optional(),
 })
+const montoDeAjuste = (n: z.ZodNumber) =>
+  n
+    .refine(x => x !== 0, 'El monto no puede ser cero')
+    .refine(x => Math.abs(x) <= 1_000_000, 'Monto demasiado grande')
+    .refine(x => Math.round(x * 100) / 100 === x, 'El monto admite hasta 2 decimales')
 export const ajusteManualSchema = z.object({
   sede: sedeSchema,
   staffId: z.string().cuid('Persona inválida'),
-  amount: z
-    .number({ invalid_type_error: 'Escribe un monto' })
-    .refine(n => n !== 0, 'El monto no puede ser cero')
-    .refine(n => Math.abs(n) <= 1_000_000, 'Monto demasiado grande')
-    .refine(n => Math.round(n * 100) / 100 === n, 'El monto admite hasta 2 decimales'),
+  amount: montoDeAjuste(z.number({ invalid_type_error: 'Escribe un monto' })),
   reason: z.string().trim().min(3, 'Escribe el motivo (mínimo 3 letras)').max(300, 'Máximo 300 caracteres'),
   fecha: fechaSchema.optional(),
   clientKey: z.string().regex(/^[A-Za-z0-9_.-]{8,120}$/, 'Clave de solicitud inválida'),
 })
+/** B13 (diseño r5.1): la vista previa del ajuste manual —su periodo destino y el aviso de devoluciones pendientes de esa
+ *  persona— por la URL: lo mismo que el ajuste sin su clave; el monto llega como texto. */
+export const ajustePreviewQuerySchema = ajusteManualSchema
+  .omit({ clientKey: true, amount: true })
+  .extend({ amount: montoDeAjuste(z.coerce.number({ invalid_type_error: 'Escribe un monto' })) })
 export const exportReciboQuerySchema = z.object({
   fecha: fechaSchema,
   format: z.enum(['pdf', 'xlsx'], { errorMap: () => ({ message: 'Formato inválido (pdf o xlsx)' }) }),

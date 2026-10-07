@@ -207,6 +207,16 @@ describe('un periodo que CRUZA el inicio (revisión de B11 #2): 409 en español,
       cruza,
     )
     await expect(preview('2026-09-10', OCT2)).rejects.toMatchObject(cruza)
-    await expect(cerrar('2026-09-10', OCT2)).rejects.toMatchObject(cruza)
+    // B13 (revisión de B12 #2): el cierre MISMO, con una huella cualquiera; el helper `cerrar` truena antes, en su vista previa.
+    await expect(
+      cerrarPeriodo({
+        userId: m.owner,
+        venueId: A,
+        fecha: '2026-09-10',
+        ahora: OCT2,
+        confirmarHuerfanas: true,
+        huellaEsperada: 'f'.repeat(64),
+      }),
+    ).rejects.toMatchObject(cruza)
   })
 })

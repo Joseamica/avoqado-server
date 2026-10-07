@@ -8,6 +8,7 @@ import { contarPorEstado, FiltroValoracion } from './valoracion'
 import { estadoActivacion } from './activacion.service'
 import type { AlcanceBarrido } from './fuentesVenta'
 import { Rangos, rangosConParticipacion } from './rangos'
+import { estadoDeSede, situacionDeLasSedes } from './estadoSede'
 
 type Tx = Prisma.TransactionClient
 type Db = Tx | typeof prisma
@@ -148,16 +149,19 @@ export async function bloqueosDe(db: Db, a: Alcance, ahora: Date, activas: strin
   }
   if (enCurso) bloqueos.push({ codigo: 'CLASES_EN_CURSO', n: enCurso })
   if (excepciones) bloqueos.push({ codigo: 'EXCEPCIONES', n: excepciones })
-  // A lo más una ventana abierta por sede (el EXCLUDE no deja dos encimadas): acotado por el alcance.
-  const abiertas = a.venueIds.length
-    ? await db.staffPayVenueWindow.findMany({
-        where: { organizationId: a.organizationId, hasta: null, venueId: { in: a.venueIds } },
-        select: { venueId: true },
-        orderBy: { venueId: 'asc' },
-        take: a.venueIds.length,
-      })
-    : []
-  const sinPlan = [...new Set(abiertas.map(w => w.venueId))].filter(v => !activas.includes(v)).sort()
+  // B13 (revisión de B12 #3): la sede del bloqueo es la de estado ACTIVA_SIN_PLAN, con la MISMA definición que la pantalla de
+  // sedes y la vista previa por sede (`estadoSede.ts`): ventana abierta y sin plan.
+  const situacion = await situacionDeLasSedes(db, a.organizationId, a.sedes, ahora)
+  const sinPlan = a.sedes
+    .map(s => s.venueId)
+    .filter(v => {
+      const st = situacion.get(v)
+      return (
+        estadoDeSede({ tienePlan: activas.includes(v), abierta: st?.abierta ?? false, cubreHoy: st?.cubreHoy ?? false }) ===
+        'ACTIVA_SIN_PLAN'
+      )
+    })
+    .sort()
   if (sinPlan.length) bloqueos.push({ codigo: 'SEDE_ACTIVA_SIN_PLAN', venueIds: sinPlan, otrasConPlan: activas.length > 0 })
   return bloqueos
 }

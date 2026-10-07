@@ -48,7 +48,7 @@ export interface Recibo {
   parcial: boolean
   /** Del recibo ENTERO, por tipo (SUM en la base); sólo los tipos que tienen renglones (spec fase 3 §11). */
   totalesPorTipo: Partial<Record<RenglonRecibo['tipo'], string>>
-  /** B12 (r6.2, r5.1): devoluciones de esta persona que se descontarán solas en OTRO cierre; null en un recibo cerrado. */
+  /** B12 (r6.2, r5.1): devoluciones de esta persona que se descontarán solas en OTRO cierre; null en uno cerrado o pág. 2+. */
   pendientes: DevolucionesPendientes | null
 }
 
@@ -610,9 +610,9 @@ export async function reciboDePersona(input: EntradaRecibo): Promise<Recibo> {
     const f = await fuenteDelRecibo(tx, prep, input, { agruparPropinas: true })
     const { total, cantidad, porTipo } = await totalDelRecibo(tx, f)
     const pagina = await paginaDelRecibo(tx, f, input.cursor, acotar(input.limit))
-    // B12: en la MISMA foto; sólo el recibo abierto (lo de su periodo ya es renglón: `excluirPeriodo`).
+    // B12: en la MISMA foto; sólo el recibo abierto (lo de su periodo ya es renglón) y, B13, sólo su primera página.
     const pendientes =
-      f.periodo.estado === 'CLOSED'
+      f.periodo.estado === 'CLOSED' || input.cursor
         ? null
         : await devolucionesPendientes(tx, {
             organizationId: prep.organizationId,

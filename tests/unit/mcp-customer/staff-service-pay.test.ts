@@ -102,6 +102,10 @@ jest.mock('@/services/dashboard/staffPay/activacion.service', () => ({
 // B11: activar o desactivar UNA sede y su vista previa (sus pruebas, en `staff-service-pay.sedes.test.ts`).
 jest.mock('@/services/dashboard/staffPay/participacion', () => ({ activarSede: jest.fn(), desactivarSede: jest.fn() }))
 jest.mock('@/services/dashboard/staffPay/participacion.vistaPrevia', () => ({ vistaPreviaParticipacion: jest.fn() }))
+// B13: la pantalla de sedes en `staff_service_pay_config` (sus pruebas, en `staff-service-pay.estadoSedes.test.ts`).
+jest.mock('@/services/dashboard/staffPay/sedes.service', () => ({
+  estadoSedes: jest.fn().mockResolvedValue({ activado: false, startDate: null, periodo: null, sedes: [] }),
+}))
 jest.mock('@/mcp/requireWriteScopeAlways', () => ({ requireWriteScopeAlways: (...a: unknown[]) => mockRequireWrite(...a) }))
 jest.mock('@/mcp/audit', () => ({ auditMcpWrite: jest.fn() }))
 jest.mock('@/utils/prismaClient', () => ({
@@ -1330,6 +1334,8 @@ describe('pago al personal con ventas por MCP (spec fase 3 §12)', () => {
   })
 
   it('el bloqueo SEDE_ACTIVA_SIN_PLAN dice lo MISMO que el cierre (revisión de B11 #5): `textoSedeActivaSinPlan` con los nombres de las sedes', async () => {
+    const cero = { n: 0, total: '0.00' }
+    const vacia = { clases: { ...cero, pendientesDeValoracion: 0 }, comisiones: cero, propinas: cero }
     const base = {
       clases: 0,
       comisiones: 0,
@@ -1341,9 +1347,10 @@ describe('pago al personal con ventas por MCP (spec fase 3 §12)', () => {
       puedeCerrar: false,
       huerfanas: 0,
       propinasSinDueno: { n: 0, total: '0.00' },
+      // B13: la forma completa de `porSede` (el MCP ya la dice en palabras); v2 queda fuera de esta conexión.
       porSede: [
-        { venueId: 'v1', nombre: 'Prado Norte' },
-        { venueId: 'v2', nombre: 'Polanco' },
+        { venueId: 'v1', nombre: 'Prado Norte', estado: 'ACTIVA', entra: vacia, fuera: vacia, pendientes: { n: 0, total: '0.00' } },
+        { venueId: 'v2', nombre: 'Polanco', estado: 'ACTIVA_SIN_PLAN', entra: vacia, fuera: vacia, pendientes: { n: 0, total: '0.00' } },
       ],
     }
     mockPreview.mockResolvedValue({ ...base, bloqueos: [{ codigo: 'SEDE_ACTIVA_SIN_PLAN', venueIds: ['v2'], otrasConPlan: true }] })

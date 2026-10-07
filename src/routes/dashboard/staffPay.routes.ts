@@ -9,6 +9,7 @@ import {
   activarSedeSchema,
   ajusteClaseSchema,
   ajusteManualSchema,
+  ajustePreviewQuerySchema,
   archivarTablaSchema,
   asignarNivelSchema,
   cerrarPeriodoSchema,
@@ -129,6 +130,9 @@ router.post(
   validateRequest(z.object({ params: sedeParamsSchema, body: desactivarSedeSchema })),
   controller.postDeactivateSede,
 )
+// B13 (diseño r3.7(1), r4.7): Configuración › Sedes. Sin puerta de plan, como la vista previa: una sede que perdió el plan (o
+// nunca lo tuvo) también se ve, con su estado y qué le falta. El service muestra sólo las sedes que el usuario puede leer.
+router.get('/sedes', checkPermission('staffpay:read'), validateRequest(z.object({ params: venueParamsSchema })), controller.getSedes)
 
 router.use(servicePayGate)
 
@@ -276,6 +280,14 @@ router.get(
   checkPermission('staffpay:read'),
   validateRequest(z.object({ params: periodParamsSchema, query: pagadoPreviewQuerySchema })),
   controller.getPaidPreview,
+)
+// B13 (diseño r5.1): lo que registraría el ajuste (periodo destino y huella) y el aviso de devoluciones pendientes de esa persona.
+// Sólo lectura (GET: también durante una suplantación). La ruta pide leer; el service exige cerrar en la sede del ajuste.
+router.get(
+  '/adjustments/preview',
+  checkPermission('staffpay:read'),
+  validateRequest(z.object({ params: venueParamsSchema, query: ajustePreviewQuerySchema })),
+  controller.getAdjustmentPreview,
 )
 router.post(
   '/adjustments',

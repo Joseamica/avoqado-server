@@ -167,7 +167,7 @@ async function bloquearParaVentanas(tx: Tx, organizationId: string, sedeId: stri
  * después de los candados: con SERIALIZABLE, un cierre que confirmó mientras se esperaba hace repetir la transacción (SSI).
  * `porQue`: por qué ése es el mínimo (el periodo cerrado que lo fija, o el inicio). Sin activar ⇒ 409 NO_ACTIVADO.
  */
-async function minimoDeLaOrganizacion(tx: Db, organizationId: string) {
+export async function minimoDeLaOrganizacion(tx: Db, organizationId: string) {
   const org = await tx.organization.findUniqueOrThrow({ where: { id: organizationId }, select: { staffPayStartDate: true } })
   if (!org.staffPayStartDate) throw new ConflictError('Activa primero el pago al personal', 'NO_ACTIVADO')
   const startDate = dbDateComoFecha(org.staffPayStartDate)
@@ -198,10 +198,19 @@ async function reglaDeActivar(tx: Db, organizationId: string, sedeId: string, no
     select: { hasta: true },
   })
   const ultimoDia = cerrada?.hasta ? dbDateComoFecha(cerrada.hasta) : null
-  const porLaVentana = ultimoDia !== null && diaCivilSiguiente(ultimoDia) > minimo
-  const rango = { desde: porLaVentana ? diaCivilSiguiente(ultimoDia) : minimo, hasta: hoy }
-  const motivo = porLaVentana ? `La sede ya estuvo activa hasta el ${fechaMx(ultimoDia)}` : porQue
+  const { desde, porLaVentana } = minimoEfectivo(minimo, ultimoDia)
+  const rango = { desde, hasta: hoy }
+  const motivo = porLaVentana && ultimoDia ? `La sede ya estuvo activa hasta el ${fechaMx(ultimoDia)}` : porQue
   return { startDate, minimo, rango, motivo }
+}
+
+/**
+ * El mínimo EFECTIVO para activar una sede (r3.3): el de la organización o, si es posterior, el día siguiente al último de su
+ * ventana cerrada más reciente. Pura: la comparten la regla de activar (bajo candado o en la foto) y la pantalla de sedes (B13).
+ */
+export function minimoEfectivo(minimo: string, ultimoDiaCerrado: string | null): { desde: string; porLaVentana: boolean } {
+  const tras = ultimoDiaCerrado === null ? null : diaCivilSiguiente(ultimoDiaCerrado)
+  return tras !== null && tras > minimo ? { desde: tras, porLaVentana: true } : { desde: minimo, porLaVentana: false }
 }
 
 /**

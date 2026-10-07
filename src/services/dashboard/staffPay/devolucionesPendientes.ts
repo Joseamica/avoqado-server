@@ -1,7 +1,7 @@
 // src/services/dashboard/staffPay/devolucionesPendientes.ts — lo que el sobre ya pagó y se descontará solo (fase 3, B12; r6.2).
 import { Prisma } from '@prisma/client'
 import prisma from '../../../utils/prismaClient'
-import { BadRequestError } from '../../../errors/AppError'
+import { ConflictError } from '../../../errors/AppError'
 import { utcTs } from '../../../utils/sqlDates'
 import { enRangos, nombreGuardadoSql, PERSONA_DADA_DE_BAJA, reversoDeLoCongelado } from './fuentesVenta'
 import { dbDateComoFecha, venuePeriodRange } from './periodos'
@@ -163,7 +163,8 @@ export async function devolucionesPendientes(
     ORDER BY d.ini ASC NULLS FIRST, d.fin ASC, d.estado ASC, d."venueId" ASC NULLS FIRST
     LIMIT ${TOPE_GRUPOS + 2}`
   if (grupos.length > TOPE_GRUPOS + 1) {
-    throw new BadRequestError(
+    // B13 (revisión de B12 #6): volumen de datos, no un error de quien pregunta ⇒ 409.
+    throw new ConflictError(
       'Hay demasiadas devoluciones pendientes para mostrarlas por periodo y sede; pide ayuda a Avoqado.',
       'DEMASIADAS_PENDIENTES',
     )

@@ -125,9 +125,17 @@ export async function periodoBarrido(db: Db, a: AlcanceBarrido): Promise<RangoSe
 export const rangosCompletos = (r: Rangos): Rangos => ({ periodo: r.periodo, participacion: r.periodo })
 
 /** Las ventanas de las sedes del alcance en esta organización, en una consulta y con tope (nunca recorta). */
-async function ventanasDelAlcance(db: Db, a: AlcanceBarrido): Promise<Ventana[]> {
+const ventanasDelAlcance = (db: Db, a: AlcanceBarrido) =>
+  ventanasDeSedes(
+    db,
+    a.organizationId,
+    a.sedes.map(s => s.venueId),
+  )
+
+/** Las ventanas de esas sedes en la organización, en UNA consulta, por sede e inicio; con tope (truena, nunca recorta). B13. */
+export async function ventanasDeSedes(db: Db, organizationId: string, venueIds: string[]): Promise<Ventana[]> {
   const filas = await db.staffPayVenueWindow.findMany({
-    where: { organizationId: a.organizationId, venueId: { in: a.sedes.map(s => s.venueId) } },
+    where: { organizationId, venueId: { in: venueIds } },
     select: { venueId: true, desde: true, hasta: true },
     orderBy: [{ venueId: 'asc' }, { desde: 'asc' }],
     take: TOPE_VENTANAS + 1,

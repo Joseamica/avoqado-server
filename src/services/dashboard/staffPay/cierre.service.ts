@@ -19,6 +19,7 @@ import {
   recibosGuardados,
   recorrer,
   sinDuenoDe,
+  TIMEOUT_CIERRE_MS,
 } from './cierre.recorrido'
 import { previewCierre } from './cierre.preview'
 
@@ -26,7 +27,7 @@ export type { Bloqueo } from './cierre.alcance'
 // B12: la vista previa vive en `cierre.preview.ts` y el recorrido en `cierre.recorrido.ts`; se re-exportan para sus llamadores.
 export { previewCierre } from './cierre.preview'
 export type { PreviewCierre } from './cierre.preview'
-export { consultaIdsDelLote, LOTE_CIERRE } from './cierre.recorrido'
+export { consultaIdsDelLote, LOTE_CIERRE, TIMEOUT_CIERRE_MS } from './cierre.recorrido'
 
 type Tx = Prisma.TransactionClient
 type Db = Tx | typeof prisma
@@ -48,7 +49,7 @@ type Db = Tx | typeof prisma
 // presupuesto de espera de candados del cierre es de 30 s (`PresupuestoDeEspera.para(TIMEOUT_CIERRE_MS)`), así que
 // 76 + 30 < 120. Y aunque el cálculo tarde más, ninguna espera empuja la transacción más allá de su timeout: el presupuesto
 // se acota también por el reloj de la transacción menos 1 s (F3, `esperaDeCandados.ts`) y contesta 409 en vez del P2028.
-export const TIMEOUT_CIERRE_MS = 120_000
+// B13: la constante vive en `cierre.recorrido.ts` (la vista previa del cierre la usa para su foto, sin ciclo de imports).
 const BLOQUE_ESCRITURA = 1000
 
 export interface ResultadoCierre {

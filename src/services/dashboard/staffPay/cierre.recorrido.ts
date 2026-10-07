@@ -14,6 +14,11 @@ import { cero, CuentaCruda, Suma } from './participacion.vistaPrevia'
 type Db = Prisma.TransactionClient | typeof prisma
 
 export const LOTE_CIERRE = 500
+/**
+ * El timeout de UN intento de cierre (medido y explicado en `cierre.service.ts`). B13 (revisión de B12 #1): también el de la foto
+ * de su vista previa, que corre el MISMO recorrido y es la única que da la huella con la que se cierra.
+ */
+export const TIMEOUT_CIERRE_MS = 120_000
 
 export const sinDuenoDe = async (db: Db, v: Barrido | null) => (v ? propinasSinDueno(db, v.a, v.r) : { n: 0, total: new Prisma.Decimal(0) })
 

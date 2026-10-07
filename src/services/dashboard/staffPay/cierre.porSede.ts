@@ -7,14 +7,11 @@ import { Alcance, Barrido } from './cierre.alcance'
 import { rangosCompletos } from './rangos'
 import type { DevolucionesPendientes } from './devolucionesPendientes'
 import { aCuenta, cero, clasesDe, Cuenta, CuentaCruda, Monto, porFuente, restar } from './participacion.vistaPrevia'
+import { estadoDeSede, EstadoSede, situacionDeLasSedes } from './estadoSede'
 
 type Db = Prisma.TransactionClient | typeof prisma
 
-/**
- * Como r3.7(1), evaluado para ESTE cierre con su foto y el plan resuelto antes: «activa» = tiene su ventana abierta (sin
- * `hasta`), la misma que mira el bloqueo. ACTIVA_SIN_PLAN es exactamente la sede del bloqueo `SEDE_ACTIVA_SIN_PLAN`.
- */
-export type EstadoSede = 'ACTIVA' | 'SIN_ACTIVAR' | 'ACTIVA_SIN_PLAN' | 'SIN_PLAN'
+export type { EstadoSede } from './estadoSede'
 export interface SedeDelCierre {
   venueId: string
   nombre: string
@@ -39,17 +36,9 @@ export async function porSedeDelCierre(
   o: { ventas: Barrido | null; entra: Map<string, CuentaCruda>; activas: string[]; ahora: Date; pendientes: DevolucionesPendientes },
 ): Promise<SedeDelCierre[]> {
   if (!a.sedes.length) return []
-  // A lo más una ventana abierta por sede (el EXCLUDE no deja dos encimadas): acotado por el alcance.
-  const abiertas = new Set(
-    (
-      await db.staffPayVenueWindow.findMany({
-        where: { organizationId: a.organizationId, hasta: null, venueId: { in: a.venueIds } },
-        select: { venueId: true },
-        orderBy: { venueId: 'asc' },
-        take: a.venueIds.length,
-      })
-    ).map(w => w.venueId),
-  )
+  // B13 (revisión de B12 #3): el estado con la MISMA definición que la pantalla de sedes y el bloqueo (`estadoSede.ts`), con
+  // las ventanas de la foto y el «hoy» de cada sede en `ahora`.
+  const situacion = await situacionDeLasSedes(db, a.organizationId, a.sedes, o.ahora)
   const reales = o.ventas ? await totalesVentas(db, o.ventas.a, { rangos: o.ventas.r }) : []
   const completa = o.ventas ? await totalesVentas(db, o.ventas.a, { rangos: rangosCompletos(o.ventas.r) }) : []
   const pendientes = new Map<string, { n: number; total: Prisma.Decimal }>()
@@ -65,12 +54,12 @@ export async function porSedeDelCierre(
     const real = porFuente(reales.filter(x => x.venueId === s.venueId))
     const comp = porFuente(completa.filter(x => x.venueId === s.venueId))
     const tienePlan = o.activas.includes(s.venueId)
-    const activa = abiertas.has(s.venueId)
+    const st = situacion.get(s.venueId)
     const p = pendientes.get(s.venueId) ?? cero()
     out.push({
       venueId: s.venueId,
       nombre: s.nombre,
-      estado: activa ? (tienePlan ? 'ACTIVA' : 'ACTIVA_SIN_PLAN') : tienePlan ? 'SIN_ACTIVAR' : 'SIN_PLAN',
+      estado: estadoDeSede({ tienePlan, abierta: st?.abierta ?? false, cubreHoy: st?.cubreHoy ?? false }),
       entra: aCuenta(o.entra.get(s.venueId) ?? vacia()),
       fuera: aCuenta({
         clases: await clasesDe(

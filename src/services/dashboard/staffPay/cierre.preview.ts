@@ -16,12 +16,17 @@ import {
   recibosGuardados,
   recorrer,
   sinDuenoDe,
+  TIMEOUT_CIERRE_MS,
 } from './cierre.recorrido'
 import { porSedeDelCierre, SedeDelCierre } from './cierre.porSede'
-import { DevolucionesPendientes, devolucionesPendientes } from './devolucionesPendientes'
+import { DevolucionesPendientes, devolucionesPendientes, sinPendientes } from './devolucionesPendientes'
 
 type Db = Prisma.TransactionClient | typeof prisma
-const SIN_PENDIENTES = { n: 0, total: '0.00', porDestino: [] }
+/** B13 (revisión de B12 #4): una fábrica, nunca un objeto de módulo compartido entre respuestas. */
+const sinPendientesDelCierre = (): PreviewCierre['pendientes'] => {
+  const { n, total, porDestino } = sinPendientes()
+  return { n, total, porDestino }
+}
 
 export interface PreviewCierre {
   periodo: { id: string | null; start: string; end: string; venueIds: string[] }
@@ -127,7 +132,8 @@ export async function previewCierre(input: {
         pendientes: { n: pend.n, total: pend.total, porDestino: pend.porDestino },
       }
     },
-    { planPersonalizado: true },
+    // B13 (revisión de B12 #1): el timeout de su cierre (corre el mismo recorrido); si vence, 409 LECTURA_VENCIDA.
+    { planPersonalizado: true, timeoutMs: TIMEOUT_CIERRE_MS },
   )
 }
 
@@ -152,7 +158,7 @@ const sinPermiso = (a: Alcance): PreviewCierre => ({
   huella: '',
   sedesConDinero: [],
   porSede: [],
-  pendientes: SIN_PENDIENTES,
+  pendientes: sinPendientesDelCierre(),
 })
 
 /**
@@ -200,6 +206,6 @@ async function previewCerrado(db: Db, a: Alcance & { periodId: string }): Promis
     huella: '',
     sedesConDinero: a.venueIds.filter(v => conDinero.has(v)),
     porSede: [],
-    pendientes: SIN_PENDIENTES,
+    pendientes: sinPendientesDelCierre(),
   }
 }

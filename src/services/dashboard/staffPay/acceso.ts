@@ -75,6 +75,23 @@ export async function tienePermisoEn(userId: string, venueId: string, permiso: s
 }
 
 /**
+ * Los permisos de `userId` en cada sede, con UNA resolución de acceso por sede para varios permisos (B13: la pantalla de sedes
+ * pregunta leer y cerrar en cada una). Sin acceso a una sede: conjunto vacío. Cliente global: va ANTES de una foto.
+ */
+export async function permisosPorSede(userId: string, venueIds: string[], permisos: string[]): Promise<Map<string, Set<string>>> {
+  const out = new Map<string, Set<string>>()
+  for (const v of [...new Set(venueIds)].sort()) {
+    try {
+      const access = await getUserAccess(userId, v)
+      out.set(v, new Set(permisos.filter(p => hasPermission(access, p))))
+    } catch {
+      out.set(v, new Set())
+    }
+  }
+  return out
+}
+
+/**
  * Lo HISTÓRICO se lee sobre el alcance del periodo, no sobre las sedes que hoy tienen el módulo (Codex R1-1): apagar
  * BSF no puede cambiar el recibo cerrado de Ana ni esconder sus diferencias.
  */

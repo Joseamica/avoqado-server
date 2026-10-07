@@ -93,7 +93,8 @@ async function personaDeLaOrg(staffId: string, organizationId: string): Promise<
   return `${staff.firstName} ${staff.lastName}`.trim()
 }
 
-export async function previewAjusteManual(input: Omit<AjusteManualInput, 'clientKey' | 'huellaEsperada'>) {
+/** `soloSedes` (B13, revisión de B12 #7): el aviso se acota además a esas sedes (el alcance de una conexión MCP). */
+export async function previewAjusteManual(input: Omit<AjusteManualInput, 'clientKey' | 'huellaEsperada'> & { soloSedes?: string[] }) {
   const { monto, reason } = validarForma({ ...input, clientKey: 'preview-sin-clave' })
   const sede = await prisma.venue.findUnique({
     where: { id: input.sede },
@@ -116,7 +117,8 @@ export async function previewAjusteManual(input: Omit<AjusteManualInput, 'client
   // destino y las pendientes se leen en la MISMA foto.
   const activas = await sedesConServicePay(sede.organizationId)
   const candidatas = [...activas, ...(await sedesConVentana(prisma, sede.organizationId)), input.sede]
-  const { venueIds: legibles } = await sedesLegiblesDe(input.userId, candidatas)
+  const enAlcance = input.soloSedes ? candidatas.filter(v => input.soloSedes!.includes(v)) : candidatas
+  const { venueIds: legibles } = await sedesLegiblesDe(input.userId, enAlcance)
   const { fila, avisoPendientes } = await enUnaFoto(async tx => ({
     fila: await periodoQueContieneFecha(tx, sede.organizationId, fecha),
     avisoPendientes: await devolucionesPendientes(tx, { organizationId: sede.organizationId, sedes: legibles, staffId: input.staffId }),
