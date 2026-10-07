@@ -75,6 +75,50 @@ describe('parseCfdiXml', () => {
   it('XML vacío → BadRequestError', () => {
     expect(() => parseCfdiXml('', OUR_RFC)).toThrow(BadRequestError)
   })
+
+  it.each(['2026-00-10', '2026-13-10', '2026-02-29', '2026-02-31', '2026-04-31'])('rechaza la fecha imposible %s', fecha => {
+    const xml = cfdi().replace('2026-06-10', fecha)
+    expect(() => parseCfdiXml(xml, OUR_RFC)).toThrow(BadRequestError)
+    expect(() => parseCfdiReceived(xml, OUR_RFC)).toThrow(BadRequestError)
+  })
+
+  it.each(['2024-02-29', '2026-12-31'])('conserva la fecha válida %s sin moverla por timezone', fecha => {
+    expect(parseCfdiXml(cfdi().replace('2026-06-10', fecha), OUR_RFC).fechaEmision).toBe(fecha)
+  })
+
+  it.each(['abc', '10abc', 'NaN', 'Infinity', '', '0x10', '1e3', '-1', '21474836.48'])(
+    'rechaza el importe inválido %s antes de persistir',
+    valor => {
+      const xml = cfdi().replace('SubTotal="1000.00"', `SubTotal="${valor}"`)
+      expect(() => parseCfdiXml(xml, OUR_RFC)).toThrow(BadRequestError)
+      expect(() => parseCfdiReceived(xml, OUR_RFC)).toThrow(BadRequestError)
+    },
+  )
+
+  it.each(['ValorUnitario', 'Importe', 'Descuento'])('valida el importe de concepto %s', atributo => {
+    const concepto = '<cfdi:Concepto Cantidad="1" Descripcion="Servicio" ValorUnitario="10" Importe="10" Descuento="0"/>'
+    const xml = cfdiConConceptos(concepto.replace(new RegExp(`${atributo}="[^"]*"`), `${atributo}="abc"`))
+    expect(() => parseCfdiReceived(xml, OUR_RFC)).toThrow(BadRequestError)
+  })
+
+  it.each(['Base="1000.00"', 'Importe="160.00"'])('valida el importe de traslado %s', atributo => {
+    expect(() => parseCfdiXml(cfdi().replace(atributo, atributo.replace(/=".*"/, '="abc"')), OUR_RFC)).toThrow(BadRequestError)
+  })
+
+  it.each(['3cajas', 'abc', '3e2', 'Infinity', '0x03', '3,5', ''])('rechaza el formato de cantidad %s', cantidad => {
+    const xml = cfdi().replace('Cantidad="1"', `Cantidad="${cantidad}"`)
+    expect(() => parseCfdiReceived(xml, OUR_RFC)).toThrow(BadRequestError)
+    expect(() => parseCfdiXml(xml, OUR_RFC)).toThrow(BadRequestError)
+  })
+
+  it.each([0, -3, 0.0001])('conserva la cantidad decimal %s para la revisión de inventario', cantidad => {
+    const xml = cfdi().replace('Cantidad="1"', `Cantidad="${cantidad}"`)
+    expect(parseCfdiReceived(xml, OUR_RFC).conceptos[0].cantidad).toBe(cantidad)
+  })
+
+  it('no toma el prefijo de una tasa mal formada como IVA válido', () => {
+    expect(() => parseCfdiXml(cfdi().replace('TasaOCuota="0.160000"', 'TasaOCuota="0.16texto"'), OUR_RFC)).toThrow(BadRequestError)
+  })
 })
 
 /**

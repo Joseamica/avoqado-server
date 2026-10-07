@@ -238,7 +238,7 @@ export function registerProcurementTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'supplier_invoice_inventory',
-    'Review a supplier XML purchase in ONE branch before changing inventory. An invoice without a purchase order prepares a purchase pending authorization; an authorized purchase can be received once. Shows actual base quantities, presentations and net costs in pesos. IVA is excluded; explicitly choose whether IEPS belongs in cost. First call returns a Spanish preview and confirmationToken. After operator approval call with confirm:true and that exact token. Ordinary order-attached invoices and already received purchases cannot add stock again. Requires inventory:create, inventory:update, mcp:write and Premium inventory plus CFDI.',
+    'Review a supplier XML purchase in ONE branch before changing inventory. No manual supplier registration is needed: preparation reuses the XML issuer by RFC or registers it automatically, as shown in the preview. An invoice without a purchase order prepares a purchase pending authorization; an authorized purchase can be received once. Shows actual base quantities, explicit presentations and net costs in pesos. IVA is excluded; explicitly choose whether IEPS belongs in cost. First call returns a Spanish preview and confirmationToken. After operator approval call with confirm:true and that exact token. Ordinary order-attached invoices and already received purchases cannot add stock again. Requires inventory:create, inventory:update, mcp:write and Premium inventory plus CFDI.',
     {
       venueId: z.string().min(1),
       invoiceId: z.string().min(1),
@@ -266,7 +266,7 @@ export function registerProcurementTools(server: McpServer, scope: McpScope) {
           review,
           message:
             review.action === 'PREPARE'
-              ? 'Confirma los artículos, unidades y costos. Se creará una compra pendiente de autorización; todavía no se sumará inventario.'
+              ? `Confirma los artículos, unidades y costos. ${review.supplierWillBeCreated ? `El proveedor se registrará automáticamente con el RFC ${review.supplierRfc} del XML. ` : ''}Se creará una compra pendiente de autorización; todavía no se sumará inventario.`
               : 'Confirma las cantidades base y costos mostrados. La mercancía se sumará una sola vez al inventario.',
         })
       }

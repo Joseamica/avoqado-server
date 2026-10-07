@@ -8,6 +8,7 @@ import { areUnitsCompatible, convertUnit } from '../../utils/unitConversion'
 import { applyItemReceiveStatusInTx } from './purchaseOrder.service'
 import { invoicePurchaseUnit } from './invoicePurchaseUnit'
 import { logAction } from './activity-log.service'
+import { createSupplierInTx } from './supplier.service'
 
 const MAX_LINES = 200
 const receiveStatuses: PurchaseOrderStatus[] = [PurchaseOrderStatus.APPROVED, PurchaseOrderStatus.CONFIRMED, PurchaseOrderStatus.SHIPPED]
@@ -51,16 +52,32 @@ async function buildReview(db: Prisma.TransactionClient, venueId: string, invoic
   if (!invoice.lines.length || invoice.lines.length > MAX_LINES)
     throw new BadRequestError(`La recepción admite de 1 a ${MAX_LINES} renglones. Divide la compra en órdenes si excede este límite.`)
 
-  const supplier =
-    invoice.supplier ??
-    (await db.supplier.findFirst({
-      where: { venueId, taxId: { equals: invoice.emisorRfc, mode: 'insensitive' } },
-    }))
-  if (!supplier || supplier.venueId !== venueId || supplier.taxId?.trim().toUpperCase() !== invoice.emisorRfc.trim().toUpperCase()) {
-    throw new BadRequestError('Da de alta al proveedor con el RFC de esta factura antes de preparar la compra.')
+  const supplierRfc = invoice.emisorRfc.trim().toUpperCase()
+  if (!supplierRfc) throw new BadRequestError('El XML no tiene RFC del emisor. Revisa el comprobante.')
+  const suppliers = await db.supplier.findMany({
+    where: { venueId, taxId: { equals: supplierRfc, mode: 'insensitive' } },
+    take: 2,
+    orderBy: { id: 'asc' },
+  })
+  if (suppliers.length > 1)
+    throw new ConflictError('Hay varios proveedores con el RFC de esta factura. Revisa sus registros en Proveedores.')
+  const supplier = invoice.supplier ?? suppliers[0]
+  if (supplier && (supplier.venueId !== venueId || supplier.taxId?.trim().toUpperCase() !== supplierRfc)) {
+    throw new BadRequestError('El proveedor ligado a esta factura no corresponde al negocio o al RFC del emisor. Revisa su registro.')
   }
-  if (!supplier.active || supplier.deletedAt)
+  if (supplier && (!supplier.active || supplier.deletedAt))
     throw new BadRequestError('El proveedor está dado de baja. Reactívalo en Proveedores para recibir esta compra.')
+  let supplierName = supplier?.name ?? (invoice.emisorNombre.trim() || supplierRfc)
+  if (!supplier) {
+    if (invoice.purchaseOrder) throw new ConflictError('La orden ya no tiene un proveedor válido. Revisa su historial.')
+    const sameName = await db.supplier.findFirst({ where: { venueId, name: { equals: supplierName, mode: 'insensitive' } } })
+    // A name alone cannot identify an issuer: preserve vendors with no RFC or a different RFC.
+    if (sameName) supplierName = `${supplierName} (${supplierRfc})`
+    if (sameName && (await db.supplier.findFirst({ where: { venueId, name: { equals: supplierName, mode: 'insensitive' } } })))
+      throw new ConflictError(
+        'El nombre y RFC del emisor coinciden con otro registro. Revisa los proveedores antes de preparar esta compra.',
+      )
+  }
 
   // A prepared order freezes the cost policy and presentation, like every existing purchase order.
   const includeIepsInCost = invoice.inventoryPreparedAt ? invoice.inventoryIncludeIeps === true : includeIeps
@@ -183,7 +200,7 @@ async function buildReview(db: Prisma.TransactionClient, venueId: string, invoic
   const total = new Decimal(invoice.totalCents).div(100)
   if (
     invoice.purchaseOrder &&
-    (invoice.purchaseOrder.supplierId !== supplier.id ||
+    (invoice.purchaseOrder.supplierId !== supplier?.id ||
       !invoice.purchaseOrder.subtotal.eq(subtotal) ||
       !invoice.purchaseOrder.total.eq(total) ||
       !invoice.purchaseOrder.taxAmount.eq(total.sub(subtotal)))
@@ -192,8 +209,10 @@ async function buildReview(db: Prisma.TransactionClient, venueId: string, invoic
   const review = {
     invoiceId,
     uuid: invoice.uuid,
-    supplierId: supplier.id,
-    supplier: supplier.name,
+    supplierId: supplier?.id ?? null,
+    supplier: supplierName,
+    supplierRfc,
+    supplierWillBeCreated: !supplier,
     action: invoice.purchaseOrder ? ('RECEIVE' as const) : ('PREPARE' as const),
     purchaseOrderId: invoice.purchaseOrderId,
     orderStatus: invoice.purchaseOrder?.status ?? null,
@@ -224,7 +243,7 @@ export async function confirmSupplierInvoiceInventory(
   staffId: string,
   includeIeps = false,
 ) {
-  const result = await prisma.$transaction(
+  const { createdSupplier, ...result } = await prisma.$transaction(
     async tx => {
       await tx.$queryRaw(Prisma.sql`SELECT id FROM "PurchaseOrderInvoice" WHERE id = ${invoiceId} AND "venueId" = ${venueId} FOR UPDATE`)
       const review = await buildReview(tx, venueId, invoiceId, includeIeps)
@@ -247,13 +266,30 @@ export async function confirmSupplierInvoiceInventory(
       })
       if (claim.count !== 1) throw new ConflictError('Otra persona ya procesó esta factura. Actualiza la pantalla para ver su estado.')
       if (review.action === 'PREPARE') {
+        let supplierId = review.supplierId
+        let createdSupplier: Awaited<ReturnType<typeof createSupplierInTx>> | null = null
+        if (!supplierId) {
+          // Different invoices for one issuer must not create duplicate suppliers.
+          await tx.$executeRaw(
+            Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${`supplier:xml:${venueId}:${review.supplierRfc}`}, 0))`,
+          )
+          const existing = await tx.supplier.findFirst({ where: { venueId, taxId: { equals: review.supplierRfc, mode: 'insensitive' } } })
+          if (existing) throw new ConflictError('El proveedor cambió desde la revisión. Vuelve a revisar la compra antes de confirmar.')
+          createdSupplier = await createSupplierInTx(tx, venueId, {
+            name: review.supplier,
+            taxId: review.supplierRfc,
+            country: 'MX',
+            leadTimeDays: 3,
+          })
+          supplierId = createdSupplier.id
+        }
         const subtotal = new Decimal(review.subtotal),
           total = new Decimal(review.total)
         const itemIds = review.lines.map(() => cuid())
         const order = await tx.purchaseOrder.create({
           data: {
             venueId,
-            supplierId: review.supplierId,
+            supplierId,
             orderNumber: `XML-${invoiceId}`,
             status: PurchaseOrderStatus.PENDING_APPROVAL,
             orderDate: now,
@@ -281,17 +317,17 @@ export async function confirmSupplierInvoiceInventory(
         })
         await tx.purchaseOrderInvoice.update({
           where: { id: invoiceId, venueId },
-          data: { purchaseOrderId: order.id, supplierId: review.supplierId },
+          data: { purchaseOrderId: order.id, supplierId },
         })
         for (let index = 0; index < review.lines.length; index++) {
           const line = review.lines[index]
           await tx.purchaseOrderInvoiceLine.update({ where: { id: line.lineId, invoiceId }, data: { purchaseOrderItemId: itemIds[index] } })
           if (line.supplierItemCode)
             await tx.supplierItemCode.upsert({
-              where: { venueId_supplierId_code: { venueId, supplierId: review.supplierId, code: line.supplierItemCode } },
+              where: { venueId_supplierId_code: { venueId, supplierId, code: line.supplierItemCode } },
               create: {
                 venueId,
-                supplierId: review.supplierId,
+                supplierId,
                 code: line.supplierItemCode,
                 rawMaterialId: line.rawMaterialId,
                 productId: line.productId,
@@ -311,14 +347,14 @@ export async function confirmSupplierInvoiceInventory(
               },
             })
         }
-        return { purchaseOrderId: order.id, status: order.status, action: review.action }
+        return { purchaseOrderId: order.id, status: order.status, action: review.action, createdSupplier }
       }
       const orderClaim = await tx.purchaseOrder.updateMany({
         where: {
           id: review.purchaseOrderId!,
           venueId,
           status: { in: receiveStatuses },
-          supplierId: review.supplierId,
+          supplierId: review.supplierId!,
           subtotal: new Decimal(review.subtotal),
           total: new Decimal(review.total),
           taxAmount: new Decimal(review.total).sub(review.subtotal),
@@ -340,10 +376,25 @@ export async function confirmSupplierInvoiceInventory(
           staffId,
         )
       }
-      return { purchaseOrderId: review.purchaseOrderId!, status: PurchaseOrderStatus.RECEIVED, action: review.action }
+      return {
+        purchaseOrderId: review.purchaseOrderId!,
+        status: PurchaseOrderStatus.RECEIVED,
+        action: review.action,
+        createdSupplier: null,
+      }
     },
     { timeout: 30000 },
   )
+  if (createdSupplier) {
+    void logAction({
+      staffId,
+      venueId,
+      action: 'SUPPLIER_CREATED',
+      entity: 'Supplier',
+      entityId: createdSupplier.id,
+      data: { name: createdSupplier.name, taxId: createdSupplier.taxId, source: 'supplier-xml', invoiceId },
+    })
+  }
   void logAction({
     staffId,
     venueId,

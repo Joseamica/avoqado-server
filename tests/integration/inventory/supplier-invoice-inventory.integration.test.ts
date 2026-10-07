@@ -4,6 +4,23 @@ import { previewSupplierInvoiceInventory, confirmSupplierInvoiceInventory } from
 import { approvePurchaseOrder } from '@/services/dashboard/purchaseOrderWorkflow.service'
 import { updatePurchaseOrderItemStatus } from '@/services/dashboard/purchaseOrder.service'
 
+// Integration setup mocks auditing globally; this suite verifies the real rows.
+const auditWrites: Promise<unknown>[] = []
+jest.mock('@/services/dashboard/activity-log.service', () => {
+  const actual = jest.requireActual('@/services/dashboard/activity-log.service')
+  return {
+    ...actual,
+    logAction: (...args: unknown[]) => {
+      const result = actual.logAction(...args)
+      auditWrites.push(result)
+      return result
+    },
+  }
+})
+afterEach(async () => {
+  await Promise.all(auditWrites.splice(0))
+})
+
 // The existing disposable-DB launcher migrates and drops this database. Never run on av-db-25.
 beforeAll(() => {
   const url = new URL(process.env.TEST_DATABASE_URL!)
@@ -76,6 +93,118 @@ async function prepare(f: Awaited<ReturnType<typeof seed>>) {
   const preview = await previewSupplierInvoiceInventory(f.venue.id, f.invoice.id)
   return confirmSupplierInvoiceInventory(f.venue.id, f.invoice.id, preview.confirmationToken, f.staff.id)
 }
+
+async function unknownSupplier() {
+  const f = await seed()
+  await prisma.supplier.delete({ where: { id: f.supplier.id } })
+  return f
+}
+
+it.each([
+  ['KGM', 'KILOGRAM', 'GRAM', 'WEIGHT', null, '3000', '0.3'],
+  ['LTR', 'LITER', 'MILLILITER', 'VOLUME', null, '3000', '0.3'],
+  ['H87', 'PIECE', 'PIECE', 'COUNT', null, '3', '300'],
+  ['XBX', 'GRAM', 'GRAM', 'WEIGHT', 'caja de 12 kg', '36000', '0.025'],
+])(
+  'automatic supplier + actual receipt preserves %s quantities and costs',
+  async (sat, unit, baseUnit, unitType, presentationName, baseQuantity, cost) => {
+    const f = await unknownSupplier()
+    await prisma.rawMaterial.update({ where: { id: f.raws[0].id }, data: { unit: baseUnit as any, unitType: unitType as any } })
+    if (presentationName)
+      await prisma.rawMaterialPresentation.create({
+        data: { venueId: f.venue.id, rawMaterialId: f.raws[0].id, name: presentationName, factorToBase: 12000 },
+      })
+    await prisma.purchaseOrderInvoiceLine.update({
+      where: { id: f.invoice.lines[0].id },
+      data: { claveUnidad: sat, purchaseUnit: unit as any, presentationName },
+    })
+    const preview = await previewSupplierInvoiceInventory(f.venue.id, f.invoice.id)
+    expect(preview.supplierWillBeCreated).toBe(true)
+    expect(preview.lines[0].baseQuantity).toBe(baseQuantity)
+    expect(await prisma.supplier.count({ where: { venueId: f.venue.id } })).toBe(0)
+    const order = await confirmSupplierInvoiceInventory(f.venue.id, f.invoice.id, preview.confirmationToken, f.staff.id)
+    const supplier = await prisma.supplier.findFirstOrThrow({ where: { venueId: f.venue.id } })
+    expect(supplier.taxId).toBe('AAA010101AAA')
+    expect((await prisma.purchaseOrder.findUniqueOrThrow({ where: { id: order.purchaseOrderId } })).supplierId).toBe(supplier.id)
+    expect((await prisma.rawMaterial.findUniqueOrThrow({ where: { id: f.raws[0].id } })).currentStock.toString()).toBe('0')
+    const learned = await prisma.supplierItemCode.findFirstOrThrow({ where: { supplierId: supplier.id } })
+    expect(learned.purchaseUnit).toBe(unit)
+    expect(learned.presentationName).toBe(presentationName)
+    if (presentationName)
+      await prisma.rawMaterialPresentation.updateMany({ where: { rawMaterialId: f.raws[0].id }, data: { factorToBase: 24000 } })
+    await approvePurchaseOrder(f.venue.id, order.purchaseOrderId, f.staff.id)
+    const receipt = await previewSupplierInvoiceInventory(f.venue.id, f.invoice.id)
+    expect(receipt.lines[0].baseQuantity).toBe(baseQuantity)
+    await confirmSupplierInvoiceInventory(f.venue.id, f.invoice.id, receipt.confirmationToken, f.staff.id)
+    expect((await prisma.rawMaterial.findUniqueOrThrow({ where: { id: f.raws[0].id } })).currentStock.toString()).toBe(baseQuantity)
+    const batch = await prisma.stockBatch.findFirstOrThrow({ where: { venueId: f.venue.id } })
+    expect(batch.initialQuantity.toString()).toBe(baseQuantity)
+    expect(batch.costPerUnit.toString()).toBe(cost)
+    expect(await prisma.rawMaterialMovement.count({ where: { venueId: f.venue.id } })).toBe(1)
+    await Promise.all(auditWrites)
+    const audit = await prisma.activityLog.findFirstOrThrow({
+      where: { venueId: f.venue.id, action: 'SUPPLIER_CREATED', entityId: supplier.id },
+    })
+    expect(audit.staffId).toBe(f.staff.id)
+    expect(audit.data).toMatchObject({ source: 'supplier-xml', invoiceId: f.invoice.id })
+  },
+)
+
+it('two XMLs for one unregistered issuer cannot create two suppliers; retry reuses it', async () => {
+  const f = await unknownSupplier()
+  const second = await prisma.purchaseOrderInvoice.create({
+    data: {
+      venueId: f.venue.id,
+      uuid: randomUUID(),
+      emisorRfc: f.invoice.emisorRfc,
+      emisorNombre: f.invoice.emisorNombre,
+      fechaEmision: new Date(),
+      currency: 'MXN',
+      cfdiType: 'I',
+      subtotalCents: 100000,
+      descuentoCents: 10000,
+      ivaCents: 14400,
+      totalCents: 104400,
+      matchStatus: 'NO_ORDER',
+      lines: {
+        create: {
+          rawMaterialId: f.raws[0].id,
+          cantidad: 3,
+          claveUnidad: 'KGM',
+          purchaseUnit: 'KILOGRAM',
+          descripcion: 'Harina',
+          valorUnitarioCents: 33333,
+          importeCents: 100000,
+          descuentoCents: 10000,
+        },
+      },
+    },
+  })
+  const previews = await Promise.all([f.invoice.id, second.id].map(id => previewSupplierInvoiceInventory(f.venue.id, id)))
+  const results = await Promise.allSettled(
+    previews.map(p => confirmSupplierInvoiceInventory(f.venue.id, p.invoiceId, p.confirmationToken, f.staff.id)),
+  )
+  expect(results.filter(r => r.status === 'fulfilled')).toHaveLength(1)
+  const lost = previews[results.findIndex(r => r.status === 'rejected')]
+  const refreshed = await previewSupplierInvoiceInventory(f.venue.id, lost.invoiceId)
+  expect(refreshed.supplierWillBeCreated).toBe(false)
+  await confirmSupplierInvoiceInventory(f.venue.id, lost.invoiceId, refreshed.confirmationToken, f.staff.id)
+  expect(await prisma.supplier.count({ where: { venueId: f.venue.id } })).toBe(1)
+  expect(await prisma.purchaseOrder.count({ where: { venueId: f.venue.id } })).toBe(2)
+  expect(await prisma.stockBatch.count({ where: { venueId: f.venue.id } })).toBe(0)
+})
+
+it('a failed preparation rolls back the automatic supplier, learned codes and invoice claim', async () => {
+  const f = await unknownSupplier()
+  const preview = await previewSupplierInvoiceInventory(f.venue.id, f.invoice.id)
+  // The actual staff FK fails AFTER the supplier has been created inside the transaction.
+  await expect(confirmSupplierInvoiceInventory(f.venue.id, f.invoice.id, preview.confirmationToken, 'missing-staff')).rejects.toThrow()
+  expect(await prisma.supplier.count({ where: { venueId: f.venue.id } })).toBe(0)
+  expect(await prisma.purchaseOrder.count({ where: { venueId: f.venue.id } })).toBe(0)
+  expect(await prisma.supplierItemCode.count({ where: { venueId: f.venue.id } })).toBe(0)
+  expect((await prisma.purchaseOrderInvoice.findUniqueOrThrow({ where: { id: f.invoice.id } })).inventoryPreparedAt).toBeNull()
+  expect(await prisma.activityLog.count({ where: { venueId: f.venue.id, action: 'SUPPLIER_CREATED' } })).toBe(0)
+})
 
 it('the existing item route cannot receive a prepared XML before approval', async () => {
   const f = await seed()

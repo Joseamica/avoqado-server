@@ -16,6 +16,7 @@ const invoice = () => ({
   uuid: 'UUID-1',
   supplierId: 'supplier',
   emisorRfc: 'AAA010101AAA',
+  emisorNombre: 'Proveedor',
   currency: 'MXN',
   cfdiType: 'I' as string | null,
   subtotalCents: 100000,
@@ -53,6 +54,9 @@ beforeEach(() => {
   prismaMock.purchaseOrderInvoice.updateMany.mockResolvedValue({ count: 1 })
   prismaMock.purchaseOrder.updateMany.mockResolvedValue({ count: 1 })
   prismaMock.rawMaterialPresentation.findMany.mockResolvedValue([])
+  prismaMock.supplier.findMany.mockResolvedValue([])
+  prismaMock.supplier.findFirst.mockResolvedValue(null)
+  prismaMock.supplier.create.mockImplementation(async ({ data }: any) => ({ id: 'auto-supplier', ...data }))
   prismaMock.purchaseOrder.create.mockImplementation(async ({ data }: any) => ({
     id: 'po',
     ...data,
@@ -305,4 +309,91 @@ it('no prepara una compra con una relación de proveedor de otro negocio', async
   prismaMock.purchaseOrderInvoice.findFirst.mockResolvedValue(inv)
   await expect(previewSupplierInvoiceInventory('venue', 'inv')).rejects.toThrow(/proveedor/)
   expect(prismaMock.purchaseOrder.create).not.toHaveBeenCalled()
+})
+
+describe('proveedor automático desde el XML', () => {
+  const unknown = () => ({ ...invoice(), supplierId: null, supplier: null })
+
+  it('la revisión anuncia el alta sin escribir; confirmar crea proveedor y compra juntos, sin stock', async () => {
+    prismaMock.purchaseOrderInvoice.findFirst.mockResolvedValue(unknown())
+    const review = await previewSupplierInvoiceInventory('venue', 'inv')
+    expect(review).toMatchObject({ supplier: 'Proveedor', supplierId: null, supplierRfc: 'AAA010101AAA', supplierWillBeCreated: true })
+    expect(prismaMock.supplier.create).not.toHaveBeenCalled()
+    await confirmSupplierInvoiceInventory('venue', 'inv', review.confirmationToken, 'staff')
+    expect(prismaMock.supplier.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ venueId: 'venue', name: 'Proveedor', taxId: 'AAA010101AAA' }),
+    })
+    expect(prismaMock.purchaseOrder.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ supplierId: 'auto-supplier', status: 'PENDING_APPROVAL' }) }),
+    )
+    expect(applyReceive).not.toHaveBeenCalled()
+  })
+
+  it('reutiliza el proveedor por RFC, aunque su nombre comercial difiera del XML', async () => {
+    prismaMock.purchaseOrderInvoice.findFirst.mockResolvedValue(unknown())
+    prismaMock.supplier.findMany.mockResolvedValue([{ ...invoice().supplier, name: 'Nombre comercial' }])
+    const review = await previewSupplierInvoiceInventory('venue', 'inv')
+    expect(review).toMatchObject({ supplierId: 'supplier', supplier: 'Nombre comercial', supplierWillBeCreated: false })
+    await confirmSupplierInvoiceInventory('venue', 'inv', review.confirmationToken, 'staff')
+    expect(prismaMock.supplier.create).not.toHaveBeenCalled()
+  })
+
+  it.each([null, 'BBB010101BBB'])('no sobrescribe a un proveedor del mismo nombre con RFC %s', async taxId => {
+    prismaMock.purchaseOrderInvoice.findFirst.mockResolvedValue(unknown())
+    prismaMock.supplier.findFirst.mockImplementation(async ({ where }: any) =>
+      where.name?.equals === 'Proveedor' ? { ...invoice().supplier, taxId } : null,
+    )
+    const review = await previewSupplierInvoiceInventory('venue', 'inv')
+    expect(review.supplier).toBe('Proveedor (AAA010101AAA)')
+    await confirmSupplierInvoiceInventory('venue', 'inv', review.confirmationToken, 'staff')
+    expect(prismaMock.supplier.update).not.toHaveBeenCalled()
+    expect(prismaMock.supplier.create).toHaveBeenCalledWith({ data: expect.objectContaining({ name: 'Proveedor (AAA010101AAA)' }) })
+  })
+
+  it.each([{ active: false }, { deletedAt: new Date() }])('no reactiva automáticamente a un proveedor dado de baja: %j', async fields => {
+    prismaMock.purchaseOrderInvoice.findFirst.mockResolvedValue(unknown())
+    prismaMock.supplier.findMany.mockResolvedValue([{ ...invoice().supplier, ...fields }])
+    await expect(previewSupplierInvoiceInventory('venue', 'inv')).rejects.toThrow(/baja|Reactívalo/i)
+    expect(prismaMock.supplier.create).not.toHaveBeenCalled()
+  })
+
+  it('un RFC ambiguo exige revisión y nunca elige un proveedor arbitrariamente', async () => {
+    prismaMock.purchaseOrderInvoice.findFirst.mockResolvedValue(unknown())
+    prismaMock.supplier.findMany.mockResolvedValue([invoice().supplier, { ...invoice().supplier, id: 'duplicate' }])
+    await expect(previewSupplierInvoiceInventory('venue', 'inv')).rejects.toThrow(/varios|más de un/i)
+    expect(prismaMock.supplier.create).not.toHaveBeenCalled()
+  })
+
+  it('otro XML que crea el proveedor entre revisión y confirmación obliga a revisar, sin duplicarlo', async () => {
+    prismaMock.purchaseOrderInvoice.findFirst.mockResolvedValue(unknown())
+    const review = await previewSupplierInvoiceInventory('venue', 'inv')
+    prismaMock.supplier.findMany.mockResolvedValue([invoice().supplier])
+    await expect(confirmSupplierInvoiceInventory('venue', 'inv', review.confirmationToken, 'staff')).rejects.toMatchObject({
+      statusCode: 409,
+    })
+    expect(prismaMock.supplier.create).not.toHaveBeenCalled()
+    expect(prismaMock.purchaseOrder.create).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['LTR', 'LITER', 'MILLILITER', '3000'],
+    ['H87', 'PIECE', 'PIECE', '3'],
+  ])('con proveedor nuevo conserva %s → %s y su cantidad base', async (sat, purchase, base, expected) => {
+    const inv = unknown()
+    inv.lines[0].claveUnidad = sat
+    inv.lines[0].purchaseUnit = purchase
+    inv.lines[0].rawMaterial.unit = base
+    prismaMock.purchaseOrderInvoice.findFirst.mockResolvedValue(inv)
+    const review = await previewSupplierInvoiceInventory('venue', 'inv')
+    expect(review.lines[0]).toMatchObject({ baseQuantity: expected, baseUnit: base })
+  })
+
+  it.each(['XBX', 'XBG', 'ZZ', null])('no da de alta al proveedor si falta equivalencia explícita para %s', async claveUnidad => {
+    const inv = unknown()
+    inv.lines[0].claveUnidad = claveUnidad as any
+    prismaMock.purchaseOrderInvoice.findFirst.mockResolvedValue(inv)
+    await expect(confirmSupplierInvoiceInventory('venue', 'inv', 'a'.repeat(64), 'staff')).rejects.toThrow(/presentación/i)
+    expect(prismaMock.supplier.create).not.toHaveBeenCalled()
+    expect(prismaMock.purchaseOrderInvoice.updateMany).not.toHaveBeenCalled()
+  })
 })

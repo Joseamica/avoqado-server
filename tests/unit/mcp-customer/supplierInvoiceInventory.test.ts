@@ -38,6 +38,21 @@ beforeEach(() => {
 const call = async (a: any) => JSON.parse((await handlers.get('supplier_invoice_inventory')!(a)).content[0].text)
 
 describe('recepción por MCP', () => {
+  it('avisa que el proveedor nuevo se registrará al confirmar, junto con cantidades base', async () => {
+    preview.mockResolvedValue({
+      action: 'PREPARE',
+      supplier: 'Distribuidora',
+      supplierRfc: 'AAA010101AAA',
+      supplierWillBeCreated: true,
+      confirmationToken: 'a'.repeat(64),
+      lines: [{ quantity: '3', baseQuantity: '3000', baseUnit: 'GRAM' }],
+    })
+    const out = await call({ venueId: 'venue', invoiceId: 'invoice' })
+    expect(out.message).toMatch(/proveedor.*automáticamente/i)
+    expect(out.message).toContain('AAA010101AAA')
+    expect(out.review.lines[0].baseQuantity).toBe('3000')
+    expect(confirm).not.toHaveBeenCalled()
+  })
   it('previsualiza en pesos y unidades reales sin ejecutar una recepción', async () => {
     const out = await call({ venueId: 'venue', invoiceId: 'invoice' })
     expect(out.requiresConfirmation).toBe(true)
