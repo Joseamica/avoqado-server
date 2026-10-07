@@ -7,6 +7,13 @@ import { logAction } from '../../services/dashboard/activity-log.service'
 import { negocioCambioDeOrganizacionError } from '../../services/fiscal/exclusionContable'
 import { traducirErrorDeIva } from '../../services/fiscal/normalizarIvaDeProducto'
 import {
+  bloquearOrganizacion,
+  bloquearSedeExclusiva,
+  historiaDeSede,
+  sedeConPagoAlPersonalError,
+} from '../../services/dashboard/staffPay/participacion'
+import { PresupuestoDeEspera } from '../../services/dashboard/staffPay/periodosGuardados'
+import {
   bulkCreateVenues as bulkCreateVenuesService,
   ValidationError as BulkValidationError,
 } from '../../services/superadmin/bulkVenueCreation.service'
@@ -83,6 +90,10 @@ export async function createVenue(req: Request, res: Response, next: NextFunctio
   }
 }
 
+/** El traslado declara su timeout (antes heredaba los 5 s de Prisma); su presupuesto de espera sale de él (B9: 6 s). */
+const TIMEOUT_TRASLADO_MS = 10_000
+const OPCIONES_TRASLADO = { timeout: TIMEOUT_TRASLADO_MS }
+
 /**
  * PATCH /venues/:venueId/transfer
  * Transfer a venue to a different organization.
@@ -90,6 +101,10 @@ export async function createVenue(req: Request, res: Response, next: NextFunctio
  * IVA por producto, plan 4: el trigger `Venue_trasladoIva_guard` impone la barrera (un negocio con pólizas no se mueve; uno
  * con IVA mixto no entra a una organización con contabilidad). Aquí se toman los candados en el orden global —las dos
  * organizaciones por id, luego el negocio—, se relee dentro de la transacción y se responde con lo que ésta devolvió.
+ *
+ * Pago al personal (fase 3, B9; diseño r7.1): el negocio se toma `FOR UPDATE` ANTES de mirar su historia, y una sede con
+ * historia de pago al personal (ventanas o devengos) no se traslada: 409 SEDE_CON_PAGO_AL_PERSONAL. `FOR NO KEY UPDATE`
+ * no bastaba: no choca con el `FOR KEY SHARE` de quien está escribiendo su primer devengo.
  */
 export async function transferVenue(req: Request, res: Response, next: NextFunction) {
   try {
@@ -130,20 +145,25 @@ export async function transferVenue(req: Request, res: Response, next: NextFunct
     const sourceOrgName = venue.organization.name
 
     const resultado = await prisma.$transaction(async tx => {
+      // B9: el presupuesto de espera de TODA la transacción, creado al entrar (las dos organizaciones y el negocio).
+      const presupuesto = PresupuestoDeEspera.para(TIMEOUT_TRASLADO_MS)
       // 1. El origen, ya dentro de la transacción: sigue donde se validó, o alguien lo movió.
       const [antes] = await tx.$queryRaw<Array<{ organizationId: string }>>`
         SELECT "organizationId" FROM "Venue" WHERE id = ${venueId}`
       if (antes?.organizationId !== venue.organizationId) throw negocioCambioDeOrganizacionError()
       const fromOrganizationId = antes.organizationId
 
-      // 2. Las dos organizaciones en orden de id (el orden global: organización → negocio).
-      await tx.$queryRaw`
-        SELECT id FROM "Organization" WHERE id IN (${fromOrganizationId}, ${targetOrganizationId}) ORDER BY id FOR NO KEY UPDATE`
+      // 2. Las dos organizaciones en orden de id (el orden global: organización → negocio), una por una con el presupuesto.
+      for (const organizationId of [fromOrganizationId, targetOrganizationId as string].sort()) {
+        await bloquearOrganizacion(tx, organizationId, presupuesto)
+      }
 
-      // 3. El negocio bajo candado: si ya no está en el origen, otro traslado ganó.
-      const [relectura] = await tx.$queryRaw<Array<{ organizationId: string }>>`
-        SELECT "organizationId" FROM "Venue" WHERE id = ${venueId} FOR NO KEY UPDATE`
+      // 3. El negocio bajo candado EXCLUSIVO: si ya no está en el origen, otro traslado ganó.
+      const relectura = await bloquearSedeExclusiva(tx, venueId, presupuesto)
       if (relectura?.organizationId !== fromOrganizationId) throw negocioCambioDeOrganizacionError()
+
+      // 3b. Su historia de pago al personal, en OTRA sentencia y ya con el candado: ve lo que confirmó quien esperaba.
+      if (await historiaDeSede(tx, venueId)) throw sedeConPagoAlPersonalError('trasladar')
 
       // 4. Quién trabaja en el negocio, leído dentro de la transacción.
       const staffIds = (await tx.staffVenue.findMany({ where: { venueId }, select: { staffId: true } })).map(sv => sv.staffId)
@@ -195,7 +215,7 @@ export async function transferVenue(req: Request, res: Response, next: NextFunct
         ivaMixtoDestino: destino.ivaMixtoAlgunaVez,
         venue: updatedVenue,
       }
-    })
+    }, OPCIONES_TRASLADO)
 
     logger.info(`[VENUES_SUPERADMIN] Transferred venue "${venue.name}" from "${sourceOrgName}" to "${targetOrg.name}"`, {
       venueId,

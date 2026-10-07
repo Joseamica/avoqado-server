@@ -29,6 +29,18 @@ describe('Zod de la fase 3 (sólo forma, mensajes en español)', () => {
     expect(mala.success).toBe(false)
     if (!mala.success) expect(mala.error.errors.map(e => e.message)).toEqual(['Fecha inválida (AAAA-MM-DD)'])
   })
+  it('🔴 B9: activar no acepta `sedes` (ni ningún campo de más) antes de B11: se rechaza en español, nunca se ignora', () => {
+    const conSedes = schemas.activarSchema.safeParse({ periodicidad: 'MONTHLY', sedes: ['v1'] })
+    expect(conSedes.success).toBe(false)
+    if (!conSedes.success)
+      expect(conSedes.error.errors.map(e => e.message)).toEqual([
+        'Todavía no se pueden elegir sedes al activar: se activan todas las que tienen el plan',
+      ])
+    expect(schemas.activarSchema.safeParse({ periodicidad: 'MONTHLY', sedes: [] }).success).toBe(false)
+    const deMas = schemas.activarSchema.safeParse({ periodicidad: 'MONTHLY', ahora: '2020-01-01' })
+    expect(deMas.success).toBe(false)
+    if (!deMas.success) expect(deMas.error.errors.map(e => e.message)).toEqual(['Hay un campo que activar no acepta'])
+  })
   it('las propinas en el recibo son sí o no', () => {
     expect(schemas.propinasSchema.safeParse({ encender: false }).success).toBe(true)
     const malo = schemas.propinasSchema.safeParse({ encender: 'si' })
@@ -52,6 +64,19 @@ describe('Rutas de la fase 3', () => {
     expect(gate).toBeGreaterThan(-1)
     expect(i).toBeGreaterThan(gate)
     expect(stack[i].route.stack.map((l: any) => l.handle?.requiredPermission).find(Boolean)).toBe('staffpay:close')
+  })
+  it('🔴 B9: POST /activate con `sedes` contesta 400 en la validación de la ruta, antes del controller', async () => {
+    const capa = stack[ruta('post', '/activate')]
+    // La capa que sigue a `checkPermission` es la validación de Zod (`validateRequest`).
+    const capas = capa.route.stack.map((l: any) => l.handle)
+    const validar = capas[capas.findIndex((h: any) => h.requiredPermission) + 1]
+    const next = jest.fn()
+    const req = { params: { venueId: 'ckvenue00000000000000000001' }, query: {}, body: { periodicidad: 'MONTHLY', sedes: ['x'] } }
+    await validar(req, {}, next)
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 400, message: expect.stringMatching(/elegir sedes/) }))
+    const ok = jest.fn()
+    await validar({ ...req, body: { periodicidad: 'MONTHLY' } }, {}, ok)
+    expect(ok).toHaveBeenCalledWith()
   })
   it('GET /access sigue ANTES del gate: la pantalla tiene que poder explicar el módulo apagado', () => {
     expect(ruta('get', '/access')).toBeGreaterThan(-1)

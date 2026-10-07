@@ -14,6 +14,7 @@ import logger from '@/config/logger'
 import { ConflictError } from '@/errors/AppError'
 import { deleteOrRetainStaffWithH1ProvenanceTx, isH1ProvenanceConstraint } from '@/services/superadmin/staffDeletion.service'
 import { retry, shouldRetryDbConnectionError } from '@/utils/retry'
+import { demoConPagoAlPersonalError, historiaDeSede, LIVE_DEMO_CON_PAGO_AL_PERSONAL } from '@/services/dashboard/staffPay/participacion'
 
 const INACTIVITY_THRESHOLD_HOURS = 5
 
@@ -66,6 +67,10 @@ export function createDisposableDemoSessionDeletion(
             throw new ConflictError('La sucursal ya no es un demo desechable', 'LIVE_DEMO_VENUE_NOT_DISPOSABLE')
           }
           await overrides.afterVenueLock?.(session.venueId)
+          // Pago al personal (fase 3, B9): con la fila ya bloqueada y ANTES de borrar Staff o cualquier dato, en OTRA
+          // sentencia (ve el devengo que confirmó quien esperábamos). Con historia, la demo se omite COMPLETA: la
+          // transacción se revierte entera y el bucle de la limpieza lo avisa con `warn` y sigue con las demás.
+          if (await historiaDeSede(tx, session.venueId)) throw demoConPagoAlPersonalError()
           let mermaBorrada = 0
           const result = await deleteOrRetainStaffWithH1ProvenanceTx(tx, session.staffId, async () => {
             // 🔴 La merma del demo haría del visitante «provenance H1» (autor del folio y su
@@ -97,6 +102,20 @@ export function createDisposableDemoSessionDeletion(
 }
 
 export const deleteDisposableDemoSession = createDisposableDemoSessionDeletion()
+
+/**
+ * Una demo con historia de pago al personal no se borra (B9): no es un fallo de la limpieza sino una omisión esperada, así
+ * que va a `warn` (no dispara alertas) y la corrida sigue con las demás. `true` si la omitió.
+ */
+function omitidaPorPagoAlPersonal(error: unknown, session: { sessionId: string; venue: { id: string; name: string } }): boolean {
+  if ((error as { code?: string } | null)?.code !== LIVE_DEMO_CON_PAGO_AL_PERSONAL) return false
+  logger.warn(`⚠️ La demo ${session.venue.name} tiene historial de pago al personal: la limpieza la omite completa`, {
+    sessionId: session.sessionId,
+    venueId: session.venue.id,
+    code: LIVE_DEMO_CON_PAGO_AL_PERSONAL,
+  })
+  return true
+}
 
 /**
  * Borra la merma de un venue LIVE_DEMO: movimientos, auditoría de merma y folios (de la hoja a
@@ -189,6 +208,7 @@ export async function cleanupExpiredLiveDemos(): Promise<number> {
 
         cleanedCount++
       } catch (error) {
+        if (omitidaPorPagoAlPersonal(error, session)) continue
         logger.error(`❌ Error cleaning up session ${session.sessionId}:`, error)
         // Continue with other sessions even if one fails
       }
@@ -240,6 +260,7 @@ export async function cleanupAllLiveDemos(): Promise<number> {
         logger.info(`✅ Cleaned up session ${session.sessionId}`)
         cleanedCount++
       } catch (error) {
+        if (omitidaPorPagoAlPersonal(error, session)) continue
         logger.error(`❌ Error cleaning up session ${session.sessionId}:`, error)
       }
     }

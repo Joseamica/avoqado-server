@@ -96,8 +96,17 @@ export const periodicidadSchema = z.object({
   periodicidad: z.enum(['MONTHLY', 'SEMIMONTHLY'], { errorMap: () => ({ message: 'Elige mensual o quincenal' }) }),
 })
 /** Fase 3 §7.1: activar pago al personal confirma la periodicidad (también la mensual de fábrica) y, opcional, la fecha de
- *  inicio que se mostró: si ya no es ésa, el service contesta 409 INICIO_CAMBIO (Codex bloque B #3). */
-export const activarSchema = periodicidadSchema.extend({ inicioEsperado: fechaSchema.optional() })
+ *  inicio que se mostró: si ya no es ésa, el service contesta 409 INICIO_CAMBIO (Codex bloque B #3).
+ *  B9 (diseño r7.4): estricto. Antes de B11 activar abre TODAS las sedes con plan; elegir sedes todavía no existe, y un
+ *  `sedes` (o cualquier campo de más) es un 400, nunca se ignora en silencio. */
+export const activarSchema = periodicidadSchema
+  .extend({
+    inicioEsperado: fechaSchema.optional(),
+    sedes: z
+      .never({ errorMap: () => ({ message: 'Todavía no se pueden elegir sedes al activar: se activan todas las que tienen el plan' }) })
+      .optional(),
+  })
+  .strict('Hay un campo que activar no acepta')
 /** Fase 3 §6.3: «Pagar las propinas en el recibo», sí o no. */
 export const propinasSchema = z.object({
   encender: z.boolean({

@@ -376,6 +376,14 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
       periodicidad: z.enum(['MONTHLY', 'SEMIMONTHLY']).optional().describe('For activar: MONTHLY or SEMIMONTHLY'),
       encender: z.boolean().optional().describe('For propinas: true = tips inside the receipt; false = handed out separately'),
       expectedSourceFingerprint: z.string().max(128).optional().describe('For activar: the start date from the preview'),
+      // B9 (diseño r7.4): elegir sedes llega en B11. Hasta entonces un `sedes` (aun vacío) es un error de validación, nunca
+      // se ignora. Lleva tipo para que el esquema publicado diga qué es (un `never` sale sin tipo).
+      sedes: z
+        .array(z.string().max(64))
+        .max(500)
+        .optional()
+        .refine(v => v === undefined, { message: 'Todavía no se pueden elegir sedes al activar: se activan todas las que tienen el plan' })
+        .describe('Not available yet: activar always includes every venue with the plan; sending it is rejected.'),
       confirm: z.boolean().optional(),
     },
     async ({ venueId, accion, periodicidad, encender, expectedSourceFingerprint, confirm }) => {
@@ -429,7 +437,7 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
               // El catálogo la firma en el token: se confirma la fecha que se MOSTRÓ (Codex bloque B #3). No quitar.
               expectedSourceFingerprint: plan.startDate,
               message: `Pago al personal: sin activar → activado (${nombrePeriodicidad(periodicidad!)}${
-                plan.periodicidadFija ? ', ya no cambia porque hay periodos guardados' : ''
+                plan.periodicidadFija ? ', ya no cambia porque hay periodos guardados' : '; la periodicidad queda fija al activar'
               }). Desde el ${plan.startDate} se suman al recibo las comisiones${actual.propinasEncendidas ? ' y las propinas' : ''}; las anteriores no se suman: si debes alguna, agrégalo como ajuste.`,
             })
           }

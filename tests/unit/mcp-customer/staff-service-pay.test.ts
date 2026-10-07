@@ -1558,6 +1558,42 @@ describe('pago al personal con ventas por MCP (spec fase 3 §12)', () => {
       }
     })
 
+    it('🔴 B9: antes de B11 no se eligen sedes ni existe la acción «sede»: error de validación, nunca se ignora', async () => {
+      const server = new McpServer({ name: 'staffpay', version: '1' })
+      const s = { ...scope, scopes: ['mcp:read', 'mcp:write'] } as unknown as McpScope
+      configureToolCatalog(server, s)
+      registerStaffPayTools(server, s)
+      const client = new Client({ name: 'staffpay-test', version: '1' })
+      const [a, b] = InMemoryTransport.createLinkedPair()
+      await Promise.all([server.connect(a), client.connect(b)])
+      try {
+        // El parámetro se publica CON tipo (el portal del directorio marca los que no lo tienen).
+        const tool = (await client.listTools()).tools.find(t => t.name === 'configure_service_pay')
+        expect((tool?.inputSchema.properties as Record<string, { type?: string }>).sedes).toMatchObject({ type: 'array' })
+        const call = (args: Record<string, unknown>) => client.callTool({ name: 'configure_service_pay', arguments: args })
+        const texto = (r: Awaited<ReturnType<typeof call>>) => (r.content as Array<{ text: string }>)[0].text
+        const conSedes = await call({ venueId: 'v1', accion: 'activar', periodicidad: 'MONTHLY', sedes: ['v1'] })
+        expect(conSedes.isError).toBe(true)
+        expect(texto(conSedes)).toMatch(/sedes/)
+        expect(texto(conSedes)).toMatch(/Todavía no se pueden elegir sedes al activar/)
+        const conSedesConfirm = await call({ venueId: 'v1', accion: 'activar', periodicidad: 'MONTHLY', sedes: [], confirm: true })
+        expect(conSedesConfirm.isError).toBe(true)
+        const sede = await call({ venueId: 'v1', accion: 'sede', periodicidad: 'MONTHLY' })
+        expect(sede.isError).toBe(true)
+        expect(texto(sede)).toMatch(/accion/)
+        expect(mockEstado).not.toHaveBeenCalled()
+        expect(mockPlan).not.toHaveBeenCalled()
+        expect(mockActivar).not.toHaveBeenCalled()
+        // Sin `sedes`, la vista previa de siempre (y dice que la periodicidad queda fija al activar, diseño r6.4).
+        const p = JSON.parse(texto(await call({ venueId: 'v1', accion: 'activar', periodicidad: 'MONTHLY' })))
+        expect(p).toMatchObject({ requiresConfirmation: true })
+        expect(p.message).toMatch(/queda fija al activar/)
+      } finally {
+        await client.close()
+        await server.close()
+      }
+    })
+
     it('confirmar activar sin la fecha de la vista previa la pide y no escribe', async () => {
       expect(parse(await conf({ accion: 'activar', periodicidad: 'MONTHLY', confirm: true }))).toMatchObject({
         ok: false,

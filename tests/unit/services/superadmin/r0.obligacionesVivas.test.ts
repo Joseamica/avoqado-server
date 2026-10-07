@@ -329,8 +329,10 @@ describe('borrar un venue', () => {
     prismaMock.$queryRaw.mockResolvedValue([{ stripeCustomerId: 'cus_tarde' }] as never)
 
     await expect(deleteVenue('org-1', 'cven1')).rejects.toMatchObject({ statusCode: 409, code: 'VENUE_HAS_BILLING_CUSTOMER' })
-    const sql = (prismaMock.$queryRaw.mock.calls[0][0] as string[]).join('?')
-    expect(sql).toMatch(/FOR UPDATE/)
+    // B9: antes de la fila se lee el `lock_timeout` vigente (el presupuesto de espera); lo que importa es que la fila se
+    // relee BLOQUEADA.
+    const sentencias = prismaMock.$queryRaw.mock.calls.map((c: unknown[]) => (Array.isArray(c[0]) ? (c[0] as string[]).join('?') : ''))
+    expect(sentencias.some((sql: string) => /"stripeCustomerId" FROM "Venue"[\s\S]*FOR UPDATE/.test(sql))).toBe(true)
     expect(prismaMock.venue.delete).not.toHaveBeenCalled()
     expect(mockBorrarCarpeta).not.toHaveBeenCalled()
     expect((logAction as jest.Mock).mock.calls.map((c: any[]) => c[0].action)).not.toContain('VENUE_DELETED')
