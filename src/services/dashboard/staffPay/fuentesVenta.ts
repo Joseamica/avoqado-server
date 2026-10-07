@@ -136,6 +136,15 @@ export function comisionBarrible(rp: RangoSede[], rv: RangoSede[]): Prisma.Sql {
     )`
 }
 
+/**
+ * B14 (medición de carga): el número de orden del descriptor, POR LLAVE (`Order.id`, una fila), como el dueño en `propinasBase`
+ * (B7 r1). Con un `LEFT JOIN "Order"` suelto, el planeador estimaba 1 propina donde había 250 y unía con un `Seq Scan` de TODAS
+ * las órdenes de la base por cada una: el recibo abierto de quien vende descartaba 6.27 M filas (~0.5 s con 120,000 órdenes, y
+ * crece con las órdenes de todas las sedes). Mismo resultado: `ord."orderNumber"`, NULL sin orden.
+ */
+const ordenDe = (orderId: Prisma.Sql) =>
+  Prisma.sql`LEFT JOIN LATERAL (SELECT o4."orderNumber" FROM "Order" o4 WHERE o4.id = ${orderId} LIMIT 1) ord ON true`
+
 function detalleComisiones(where: Prisma.Sql): Prisma.Sql {
   return Prisma.sql`
     SELECT 'COMMISSION'::text AS fuente, 'SERVICE'::text AS concepto, cc.id AS "sourceId", cc."staffId", cc."venueId",
@@ -146,7 +155,7 @@ function detalleComisiones(where: Prisma.Sql): Prisma.Sql {
     FROM "CommissionCalculation" cc
     JOIN "Venue" v ON v.id = cc."venueId"
     LEFT JOIN "Staff" s ON s.id = cc."staffId"
-    LEFT JOIN "Order" ord ON ord.id = cc."orderId"
+    ${ordenDe(Prisma.sql`cc."orderId"`)}
     LEFT JOIN "CommissionConfig" cfg ON cfg.id = cc."configId"
     LEFT JOIN "Payment" rp ON rp.id = cc."paymentId" AND rp.type = 'REFUND'
     WHERE ${where}`
@@ -229,7 +238,7 @@ function detallePropinas(a: AlcanceBarrido, rp: RangoSede[], rv: RangoSede[], wh
     FROM (${propinasBase(a, rp, rv)}) b
     JOIN "Venue" v ON v.id = b."venueId"
     LEFT JOIN "Staff" s ON s.id = b."staffId"
-    LEFT JOIN "Order" ord ON ord.id = b."orderId"
+    ${ordenDe(Prisma.sql`b."orderId"`)}
     WHERE b."staffId" IS NOT NULL AND ${where}`
 }
 
