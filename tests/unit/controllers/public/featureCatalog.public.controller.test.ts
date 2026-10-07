@@ -16,7 +16,7 @@ describe('Catálogo público y MCP', () => {
   it('entrega el mismo catálogo paginado sin autenticación ni datos internos', async () => {
     const res = await request(app).get('/catalog?page=2&pageSize=12').expect(200)
     expect(res.body).toEqual({ success: true, data: listFeatureCatalog({ page: 2, pageSize: 12 }) })
-    expect(res.body.data.total).toBe(41)
+    expect(res.body.data.total).toBe(42)
     expect(JSON.stringify(res.body)).not.toMatch(/stripe|venueId|customerId|PriceCents/)
   })
 

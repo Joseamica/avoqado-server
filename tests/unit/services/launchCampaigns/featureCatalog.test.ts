@@ -3,10 +3,10 @@ import { listFeatureCatalog, featureCatalogQuery } from '@/services/launchCampai
 import { FREE_TIER_CODES, PREMIUM_ONLY_CODES } from '@/services/access/basePlan.service'
 
 describe('Catálogo completo para planes y funciones', () => {
-  it('representa las 41 capacidades, sin inventar precios ni revivir funciones retiradas', () => {
-    expect(FEATURE_CATALOG).toHaveLength(41)
-    expect(new Set(FEATURE_CATALOG.map(f => f.id)).size).toBe(41)
-    expect(FEATURE_CATALOG.filter(f => f.featureCode)).toHaveLength(35)
+  it('representa las 42 capacidades, sin inventar precios ni revivir funciones retiradas', () => {
+    expect(FEATURE_CATALOG).toHaveLength(42)
+    expect(new Set(FEATURE_CATALOG.map(f => f.id)).size).toBe(42)
+    expect(FEATURE_CATALOG.filter(f => f.featureCode)).toHaveLength(36)
     expect(FEATURE_CATALOG.some(f => f.featureCode === 'ADVANCED_ANALYTICS')).toBe(false)
     expect(FEATURE_CATALOG.every(f => !('price' in f) && !('monthlyPrice' in f))).toBe(true)
   })
@@ -26,10 +26,10 @@ describe('Catálogo completo para planes y funciones', () => {
 
   it('permite recorrer el total en páginas estables sin duplicar ni ocultar registros', () => {
     const first = listFeatureCatalog({ pageSize: 12 })
-    expect(first.total).toBe(41)
+    expect(first.total).toBe(42)
     expect(first.totalPages).toBe(4)
     const ids = [1, 2, 3, 4].flatMap(page => listFeatureCatalog({ page, pageSize: 12 }).items.map(f => f.id))
-    expect(new Set(ids).size).toBe(41)
+    expect(new Set(ids).size).toBe(42)
     expect(listFeatureCatalog({ page: 5, pageSize: 12 }).items).toEqual([])
     expect(listFeatureCatalog({}).catalogVersion).toBe(first.catalogVersion)
   })
@@ -53,6 +53,6 @@ describe('Catálogo completo para planes y funciones', () => {
   it('acepta parámetros HTTP y limita el catálogo también fuera del controller', () => {
     expect(featureCatalogQuery.parse({ page: '2', pageSize: '12' })).toMatchObject({ page: 2, pageSize: 12 })
     expect(listFeatureCatalog({}).items).toHaveLength(25)
-    expect(listFeatureCatalog({ pageSize: 100 }).items).toHaveLength(41)
+    expect(listFeatureCatalog({ pageSize: 100 }).items).toHaveLength(42)
   })
 })

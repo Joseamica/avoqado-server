@@ -477,6 +477,18 @@ export const FEATURE_CATALOG: readonly FeatureCatalogEntry[] = Object.freeze(
         },
       },
       {
+        id: 'SERVICE_PAY',
+        featureCode: 'SERVICE_PAY',
+        name: 'Pago al personal',
+        description: 'Un recibo por persona con sus clases, comisiones y propinas del periodo.',
+        category: 'team',
+        minimumTier: 'PRO',
+        offering: 'CONFIGURABLE',
+        requirement: null,
+        // `fr` lo exige el tipo `FeatureCatalogEntry`; la plataforma sólo da soporte en es/en.
+        names: { es: 'Pago al personal', en: 'Staff pay', fr: 'Paie du personnel' },
+      },
+      {
         id: 'ATTENDANCE_TRACKING',
         featureCode: 'ATTENDANCE_TRACKING',
         name: 'Checador de asistencia',
