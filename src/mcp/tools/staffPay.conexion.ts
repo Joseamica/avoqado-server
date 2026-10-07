@@ -3,6 +3,7 @@
 // cambiar las propinas) pedidas desde una conexión que no tiene todas sus sedes. Al DUEÑO no se le niegan: su vista previa lo
 // AVISA al inicio, trae `sedesFueraDeLaConexion` y la confirmación queda atada a esa lista; a los demás, FUERA_DE_LA_CONEXION sin
 // un dato ni un monto de esas sedes. Al confirmar se revalida todo (rol y sedes fuera de AHORA). Sin sedes fuera, nada cambia.
+// Ronda 1 (R5): DUEÑO es también quien tiene rol OWNER en TODAS las sedes que la acción abarca (`esDueno`).
 import { createHash } from 'crypto'
 import type { McpScope } from '../scope'
 import { text } from '../respond'
@@ -46,7 +47,8 @@ const ACCIONES: Record<AccionDeOrganizacion, { que: string; siConfirmas: (fuera:
 
 /** Las sedes de `venueIds` que NO están en la conexión, con su nombre leído acotado a la organización; sin consulta si no hay. */
 export async function sedesFueraDeLaConexion(scope: McpScope, venueIds: readonly string[]): Promise<SedeFuera[]> {
-  const ids = [...new Set(venueIds)].filter(v => !scope.allowedVenueIds.includes(v)).sort()
+  const enConexion = new Set(scope.allowedVenueIds) // ronda 1 (R2): con SUPERADMIN, todas las sedes de la plataforma
+  const ids = [...new Set(venueIds)].filter(v => !enConexion.has(v)).sort()
   if (!ids.length) return []
   const nombres = await nombresDeSedes(scope.activeOrg, ids)
   return ids.map(venueId => ({ venueId, nombre: nombres.get(venueId) ?? venueId }))
@@ -63,7 +65,8 @@ export async function revisarConexion(
 ): Promise<RevisionDeConexion> {
   const fuera = await sedesFueraDeLaConexion(scope, venueIds)
   if (!fuera.length) return { fuera, negada: null, aviso: '' }
-  if (!(await esDueno(scope))) {
+  // R5: dueño de la organización, o OWNER en TODAS las sedes que abarca la acción (las de la conexión y las de fuera).
+  if (!(await esDueno(scope, venueIds))) {
     const error = `Esta acción incluye ${nombresDe(fuera)}, que no ${fuera.length > 1 ? 'están' : 'está'} en esta conexión. Hazla desde el dashboard o con una conexión que incluya todas las sedes.`
     return { fuera, aviso: '', negada: text({ ok: false, code: 'FUERA_DE_LA_CONEXION', error }) }
   }

@@ -251,7 +251,7 @@ describe('close_service_pay_period desde una conexión que no tiene todas las se
     expect(r.message).toContain('Bosques (activa): entran 1 comisión(es) ($100.00)')
     // La huella del service y la firma de la lista de sedes fuera: cabe en el máximo de 128 del parámetro.
     expect(r.expectedSourceFingerprint).toMatch(new RegExp(`^${HUELLA}~[0-9a-f]{40}$`))
-    expect(mockEsDueno).toHaveBeenCalledWith(expect.objectContaining({ staffId: 's1', activeOrg: 'o1' }))
+    expect(mockEsDueno).toHaveBeenCalledWith(expect.objectContaining({ staffId: 's1', activeOrg: 'o1' }), ['A', 'B']) // R5: todas
   })
 
   it('dueño: confirmar con esa huella revalida, cierra A y B con la huella del service y audita la lista', async () => {

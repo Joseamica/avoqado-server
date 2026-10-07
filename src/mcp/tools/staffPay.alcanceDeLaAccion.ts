@@ -49,11 +49,25 @@ export async function nombresDeSedes(organizationId: string, ids: string[]): Pro
 }
 
 /**
- * ¿Es DUEÑO? SUPERADMIN, o dueño de la organización activa de la conexión con la regla ÚNICA de la plataforma
- * (`esDuenoDeLaOrganizacion`: `StaffOrganization` OWNER activa, o una sucursal propia OWNER en ella). No basta el `orgRole`
- * del scope: deja fuera a las cuentas viejas con sucursal propia. Se lee en cada llamada: al confirmar se revalida.
+ * ¿Es DUEÑO para una acción que abarca `venueIds`? SUPERADMIN; o dueño de la organización activa de la conexión con la regla
+ * ÚNICA de la plataforma (`esDuenoDeLaOrganizacion`: `StaffOrganization` OWNER activa, o una sucursal propia OWNER en ella); o
+ * —B14-fix ronda 1 (R5), intención del founder «si es owner, que avise»— OWNER activa en TODAS las sedes que la acción abarca, aunque
+ * no tenga membresía de la organización (las cuentas viejas sólo de sucursal, como la de Mindform). No basta el `orgRole` del
+ * scope. Se lee en cada llamada: al confirmar se revalida.
  */
-export async function esDueno(scope: McpScope): Promise<boolean> {
+export async function esDueno(scope: McpScope, venueIds: readonly string[]): Promise<boolean> {
   if (scope.isSuperAdmin === true) return true
-  return esDuenoDeLaOrganizacion(scope.staffId, scope.activeOrg)
+  if (await esDuenoDeLaOrganizacion(scope.staffId, scope.activeOrg)) return true
+  return ownerEnTodas(scope.staffId, scope.activeOrg, venueIds)
+}
+
+/** R5: rol OWNER activo en cada una de `venueIds`, todas de la organización. Una lista vacía nunca cuenta como «todas». */
+async function ownerEnTodas(staffId: string, organizationId: string, venueIds: readonly string[]): Promise<boolean> {
+  const ids = [...new Set(venueIds)]
+  if (!ids.length) return false
+  // `@@unique([staffId, venueId])`: una fila por sede, así que contar = cuántas de ellas tiene como OWNER.
+  const n = await prisma.staffVenue.count({
+    where: { staffId, active: true, role: 'OWNER', venueId: { in: ids }, venue: { organizationId } },
+  })
+  return n === ids.length
 }

@@ -20,12 +20,14 @@ const mockConVentana = jest.fn()
 const mockAlcance = jest.fn()
 const mockDeRecibo = jest.fn()
 const mockDueno = jest.fn()
+const mockStaffVenueCount = jest.fn()
 
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
     venue: { findUnique: (...a: unknown[]) => mockVenue(...a), findMany: (...a: unknown[]) => mockVenues(...a) },
     servicePayPeriod: { findFirst: (...a: unknown[]) => mockPeriodo(...a) },
+    staffVenue: { count: (...a: unknown[]) => mockStaffVenueCount(...a) },
   },
 }))
 jest.mock('@/services/dashboard/staffPay/acceso', () => ({ sedesConServicePay: (...a: unknown[]) => mockConPlan(...a) }))
@@ -94,12 +96,13 @@ describe('nombres y dueño', () => {
 
   it('dueño = OWNER de la organización activa de la conexión (regla única) o SUPERADMIN, leído en cada llamada', async () => {
     const scope = { staffId: 's1', activeOrg: 'o1', allowedVenueIds: ['A'] } as unknown as McpScope
+    mockStaffVenueCount.mockResolvedValue(0) // R5: y sin ser OWNER en las sedes de la acción
     mockDueno.mockResolvedValueOnce(true).mockResolvedValueOnce(false)
-    expect(await esDueno(scope)).toBe(true)
-    expect(await esDueno(scope)).toBe(false)
+    expect(await esDueno(scope, ['A', 'B'])).toBe(true)
+    expect(await esDueno(scope, ['A', 'B'])).toBe(false)
     expect(mockDueno).toHaveBeenCalledWith('s1', 'o1')
     mockDueno.mockClear()
-    expect(await esDueno({ ...scope, isSuperAdmin: true } as McpScope)).toBe(true)
+    expect(await esDueno({ ...scope, isSuperAdmin: true } as McpScope, ['A', 'B'])).toBe(true)
     expect(mockDueno).not.toHaveBeenCalled()
   })
 })
