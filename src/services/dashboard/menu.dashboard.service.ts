@@ -21,6 +21,7 @@ import logger from '../../config/logger'
 import socketManager from '../../communication/sockets'
 import { logAction } from './activity-log.service'
 import { archivarProductos } from './product.dashboard.service'
+import { inventoryMethodForNewProduct, isNonInventoriable, NON_INVENTORIABLE_MESSAGE } from './quantityInventoryRow'
 import type { CatalogActor } from '../../types/master-catalog'
 import {
   assertLegacyCatalogGovernanceComputedForVenue,
@@ -1294,6 +1295,7 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
   let modifiersCreated = 0
   let productsArchived = 0
   let productsRestored = 0
+  let productsKeptOnRecipe = 0
 
   await prisma.$transaction(
     async tx => {
@@ -1446,7 +1448,17 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
           // Check if product exists by SKU (merge mode)
           const existingProduct = await tx.product.findFirst({
             where: { venueId, sku: productData.sku },
+            include: { recipe: { select: { id: true } } },
           })
+          // Una clase, una cita, algo digital o un donativo no llevan existencias: se rechaza el archivo entero (misma regla y
+          // mensaje que el alta y la edición de producto en el dashboard y en Artículos de Android/iOS).
+          if (isNonInventoriable(productData.type || 'FOOD', productData.trackInventory)) throw new AppError(NON_INVENTORIABLE_MESSAGE, 400)
+          // `trackInventory` ⇒ el producto se cuenta «por cantidad», como el importador de Shopify. Antes sólo se escribía la fila
+          // de Inventory y el producto no se configuraba: tenía existencias y sus ventas NO descontaban. Un producto con receta
+          // NO se convierte desde un archivo (se descontaría el producto en vez de sus insumos): se queda como está y se cuenta.
+          const conReceta = existingProduct?.inventoryMethod === 'RECIPE' || Boolean(existingProduct?.recipe)
+          const porCantidad = productData.trackInventory === true && !conReceta
+          if (productData.trackInventory === true && conReceta) productsKeptOnRecipe++
 
           let product
           if (existingProduct) {
@@ -1476,6 +1488,9 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
                 // Ausente ≠ null: re-importar precios no puede borrar la duración
                 // ya configurada y desconfigurar la agenda del local.
                 ...(productData.duration !== undefined ? { duration: productData.duration } : {}),
+                // Sin `trackInventory` (undefined) la columna no se toca: re-importar no apaga lo que ya se contaba.
+                trackInventory: porCantidad ? true : undefined,
+                inventoryMethod: porCantidad ? 'QUANTITY' : undefined,
                 ...(archivado ? { deletedAt: null, deletedBy: null, active: true } : {}),
                 // Codex C5-2: the file adopts it (same id) ⇒ the owner's, no longer demo: converting the venue must not delete it.
                 isDemo: false,
@@ -1501,6 +1516,8 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
                 allergens: productData.allergens || [],
                 // Nulo es válido: el motor de reservas cae al default del venue.
                 duration: productData.duration ?? null,
+                trackInventory: porCantidad,
+                inventoryMethod: inventoryMethodForNewProduct(porCantidad, undefined),
               },
             })
             if (actor.type === 'SERVICE') {
@@ -1689,6 +1706,7 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
       products: productsCreated + productsUpdated,
       productsArchived,
       productsRestored,
+      productsKeptOnRecipe,
     },
   })
 
@@ -1703,6 +1721,8 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
       // Plan 5: nuevos y aditivos (los clientes de hoy los ignoran)
       productsArchived,
       productsRestored,
+      // Filas con `trackInventory` cuyo producto se descuenta por receta: no se convirtieron.
+      productsKeptOnRecipe,
     },
   }
 }
