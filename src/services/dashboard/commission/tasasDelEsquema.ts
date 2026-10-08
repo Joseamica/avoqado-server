@@ -3,7 +3,8 @@
  *
  * `CommissionConfig.defaultRate` es una TASA (0.0300 = 3 %) en porcentaje, niveles y los demás tipos, pero en un esquema de
  * MONTO FIJO es el monto en pesos que se paga por venta (`commission-calculation.service.ts:177-179`). Por eso la regla de
- * 0-100 % NO aplica al fijo. La columna es Decimal(5,4): el monto de un fijo cabe hasta $9.9999.
+ * 0-100 % NO aplica al fijo. D-FIJO (8-oct): la columna pasó de Decimal(5,4) (un fijo cabía hasta $9.9999) a Decimal(12,4), y un
+ * fijo va de más de $0 a $999,999.99 (`20261008130000_comision_fija_en_pesos`).
  *
  * Medido el 8-oct contra Postgres: el asistente del dashboard, con «Monto fijo» y niveles, mandaba TIERED con
  * `defaultRate = fixedAmount`; por la ruta de la organización (que no validaba nada) un fijo de $5 quedaba como tasa de 500 % y
@@ -14,8 +15,8 @@
  */
 import { BadRequestError } from '../../../errors/AppError'
 
-/** Decimal(5,4): 9.99995 ya se redondea a 10.0000 y no cabe. Se mide en diezmilésimas para no depender del redondeo. */
-const DIEZMILESIMAS_MAXIMAS_DEL_FIJO = 99_999
+/** El monto máximo de un fijo, en centavos ($999,999.99). Se mide en centavos para no depender del redondeo del flotante. */
+const CENTAVOS_MAXIMOS_DEL_FIJO = 99_999_999
 
 const enPorcentaje = (tasa: number) => `${Number((tasa * 100).toFixed(2))} %`
 const esNumero = (x: unknown): x is number => typeof x === 'number' && Number.isFinite(x)
@@ -30,9 +31,9 @@ export function validarTasa(tasa: unknown, que = 'La tasa de comisión', pista =
 export function validarTasaDelEsquema(calcType: string | null | undefined, defaultRate: unknown): void {
   if (calcType === 'FIXED') {
     if (!esNumero(defaultRate)) throw new BadRequestError('El monto fijo por venta debe ser un número.')
-    if (defaultRate < 0) throw new BadRequestError('El monto fijo por venta no puede ser negativo.')
-    if (Math.round(defaultRate * 10_000) > DIEZMILESIMAS_MAXIMAS_DEL_FIJO) {
-      throw new BadRequestError('Por ahora el monto fijo por venta puede ser de hasta $9.99.')
+    if (defaultRate <= 0) throw new BadRequestError('El monto fijo por venta debe ser mayor que $0.')
+    if (Math.round(defaultRate * 100) > CENTAVOS_MAXIMOS_DEL_FIJO) {
+      throw new BadRequestError('El monto fijo por venta puede ser de hasta $999,999.99.')
     }
     return
   }

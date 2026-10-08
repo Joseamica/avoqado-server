@@ -36,11 +36,12 @@ describe('validarTasaDelEsquema', () => {
     expect(mensaje(() => validarTasaDelEsquema(undefined, 2))).toContain('200 % no es válida') // sin tipo = porcentaje
     expect(() => validarTasaDelEsquema('TIERED', 0.04)).not.toThrow()
   })
-  it('🔴 FIJO: el monto en pesos, de $0 a lo que cabe en la columna ($9.9999)', () => {
-    for (const monto of [0, 1, 5, 9.99, 9.9999]) expect(() => validarTasaDelEsquema('FIXED', monto)).not.toThrow()
-    for (const monto of [10, 9.99995, 50])
-      expect(mensaje(() => validarTasaDelEsquema('FIXED', monto))).toBe('Por ahora el monto fijo por venta puede ser de hasta $9.99.')
-    expect(mensaje(() => validarTasaDelEsquema('FIXED', -1))).toBe('El monto fijo por venta no puede ser negativo.')
+  it('🔴 D-FIJO: el monto en pesos, de más de $0 a $999,999.99 (la columna es Decimal(12,4))', () => {
+    for (const monto of [0.01, 2, 10, 5000, 999_999.99]) expect(() => validarTasaDelEsquema('FIXED', monto)).not.toThrow()
+    for (const monto of [1_000_000, 999_999.995])
+      expect(mensaje(() => validarTasaDelEsquema('FIXED', monto))).toBe('El monto fijo por venta puede ser de hasta $999,999.99.')
+    for (const monto of [0, -1])
+      expect(mensaje(() => validarTasaDelEsquema('FIXED', monto))).toBe('El monto fijo por venta debe ser mayor que $0.')
     expect(mensaje(() => validarTasaDelEsquema('FIXED', '5'))).toBe('El monto fijo por venta debe ser un número.')
   })
 })
@@ -62,7 +63,7 @@ describe('validarTasasDelEsquema (crear y actualizar)', () => {
   it('🔴 actualizar: se valida lo que QUEDA (tipo nuevo con la tasa de antes, o tasa nueva con el tipo de antes)', () => {
     const fijo5 = { calcType: 'FIXED', defaultRate: { toString: () => '5' } }
     expect(mensaje(() => validarTasasDelEsquema({ calcType: 'TIERED' }, fijo5))).toContain('500 % no es válida')
-    expect(() => validarTasasDelEsquema({ defaultRate: 7 }, fijo5)).not.toThrow() // sigue siendo fijo: $7
+    expect(() => validarTasasDelEsquema({ defaultRate: 70 }, fijo5)).not.toThrow() // sigue siendo fijo: $70
     expect(mensaje(() => validarTasasDelEsquema({ defaultRate: 2 }, { calcType: 'PERCENTAGE', defaultRate: 0.03 }))).toContain('200 %')
     // Lo que no toca la tasa no la revalida (un esquema viejo con un dato raro se puede seguir renombrando).
     expect(() => validarTasasDelEsquema({ name: 'Otro' } as any, { calcType: 'TIERED', defaultRate: 5 })).not.toThrow()

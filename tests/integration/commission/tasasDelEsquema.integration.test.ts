@@ -16,7 +16,16 @@ import jwt from 'jsonwebtoken'
 import request from 'supertest'
 import app from '@/app'
 import prisma from '@/utils/prismaClient'
-import { asegurarBaseDePrueba, borrarMundoComisiones, crearMundoComisiones, MundoComisiones } from './_mundoComisiones'
+import {
+  asegurarBaseDePrueba,
+  borrarMundoComisiones,
+  cobro,
+  crearMundoComisiones,
+  MundoComisiones,
+  orden,
+  planear,
+  procesarEfectos,
+} from './_mundoComisiones'
 
 // El plan (Comisiones es Premium) va simulado: aquí se prueba la validación de lo que se guarda.
 jest.mock('@/services/access/basePlan.service', () => ({
@@ -41,6 +50,8 @@ afterEach(async () => {
   const mundo = m
   m = undefined as unknown as MundoComisiones
   if (mundo) {
+    // Las comisiones de las ventas de la prueba apuntan también a los esquemas de la organización: van primero.
+    await prisma.commissionCalculation.deleteMany({ where: { venueId: mundo.venueId } })
     await prisma.commissionTier.deleteMany({ where: { config: { orgId: mundo.orgId } } })
     await prisma.commissionOverride.deleteMany({ where: { venueId: mundo.venueId } })
     await prisma.commissionConfig.deleteMany({ where: { orgId: mundo.orgId, venueId: null } })
@@ -53,8 +64,8 @@ const token = () =>
     expiresIn: '15m',
   })
 const ruta = (r: string) => `/api/v1/dashboard/commissions/venues/${m.venueId}${r}`
-const post = (r: string, cuerpo: unknown) => request(server).post(ruta(r)).set('Authorization', `Bearer ${token()}`).send(cuerpo)
-const put = (r: string, cuerpo: unknown) => request(server).put(ruta(r)).set('Authorization', `Bearer ${token()}`).send(cuerpo)
+const post = (r: string, cuerpo: object) => request(server).post(ruta(r)).set('Authorization', `Bearer ${token()}`).send(cuerpo)
+const put = (r: string, cuerpo: object) => request(server).put(ruta(r)).set('Authorization', `Bearer ${token()}`).send(cuerpo)
 
 /**
  * El cuerpo EXACTO que mandaba el asistente (`CreateCommissionWizard.tsx:180-208`, dashboard `7024d9b5`) con «Monto fijo» de
@@ -84,6 +95,16 @@ const fijoConNiveles = (monto: number) => ({
 const fijo = (monto: number) => ({ ...fijoConNiveles(monto), name: `Fijo $${monto}`, calcType: 'FIXED' })
 const porcentaje = (tasa: number) => ({ ...fijoConNiveles(tasa), name: `Porcentaje ${tasa}`, calcType: 'PERCENTAGE' })
 
+/** Una venta de `monto` cobrada ahora y su comisión materializada como en la terminal; devuelve los netos de ESE cobro. */
+async function comisionDeUnaVenta(monto: number): Promise<string[]> {
+  const pago = await cobro(m, await orden(m, { subtotal: monto }), monto, { createdAt: new Date() })
+  await planear(pago)
+  await procesarEfectos(m)
+  return (await prisma.commissionCalculation.findMany({ where: { paymentId: pago }, select: { netCommission: true } })).map(c =>
+    c.netCommission.toFixed(2),
+  )
+}
+
 /** Los esquemas que crearon las llamadas de la prueba: de la sede (`orgId` null) y de la organización (`venueId` null). */
 const esquemasNuevos = () =>
   prisma.commissionConfig.count({ where: { OR: [{ venueId: m.venueId }, { orgId: m.orgId }], NOT: { id: m.configId } } })
@@ -100,28 +121,39 @@ describe('final-fijo-niveles · la API rechaza una tasa de más de 100 % (400, t
           'La tasa de comisión va de 0 % a 100 %: 1000 % no es válida. Si querías pagar un monto fijo por venta, elige «Monto fijo».',
       })
     }
+    const pct150 = await post('/configs', porcentaje(1.5))
+    expect([pct150.status, pct150.body.message]).toEqual([400, expect.stringContaining('150 % no es válida')])
     // Un fijo de $5 con niveles cabe en la columna: en la organización se guardaba como una tasa de 500 %.
     expect((await post('/org-configs', fijoConNiveles(5))).status).toBe(400)
     expect(await esquemasNuevos()).toBe(0)
   })
 
-  it('🔴 el monto de un esquema FIJO no es una tasa: $5 se guarda (en pesos); más de lo que cabe, 400 con el límite', async () => {
-    const cinco = await post('/configs', fijo(5))
-    expect(cinco.status).toBe(201)
-    expect(Number(cinco.body.defaultRate)).toBe(5)
-    const deOrganizacion = await post('/org-configs', fijo(7.5))
-    expect(deOrganizacion.status).toBe(201)
+  it('🔴 D-FIJO: un fijo de $10 y uno de $2 se guardan EN PESOS por la sede y por la organización, y la venta paga $10 / $2', async () => {
+    const sede10 = await post('/configs', fijo(10))
+    expect([sede10.status, Number(sede10.body.defaultRate)]).toEqual([201, 10])
+    const org2 = await post('/org-configs', fijo(2))
+    expect([org2.status, Number(org2.body.data.defaultRate)]).toEqual([201, 2])
 
+    // La venta, por el camino de la terminal (efecto durable + worker). Sólo el fijo de la sede está activo en la sede.
+    await prisma.commissionConfig.update({ where: { id: m.configId }, data: { active: false } })
+    expect(await comisionDeUnaVenta(116)).toEqual(['10.00'])
+    // Sin esquemas activos propios, la sede usa los de su organización: el fijo de $2.
+    await prisma.commissionConfig.update({ where: { id: sede10.body.id }, data: { active: false } })
+    expect(await comisionDeUnaVenta(116)).toEqual(['2.00'])
+
+    // Los límites del monto: de más de $0 a $999,999.99, con 400 y texto humano (nunca 500).
     for (const r of ['/configs', '/org-configs']) {
-      const diez = await post(r, fijo(10))
-      expect({ r, status: diez.status, message: diez.body.message }).toEqual({
-        r,
-        status: 400,
-        message: 'Por ahora el monto fijo por venta puede ser de hasta $9.99.',
-      })
+      for (const [monto, message] of [
+        [1_000_000, 'El monto fijo por venta puede ser de hasta $999,999.99.'],
+        [0, 'El monto fijo por venta debe ser mayor que $0.'],
+        [-1, 'El monto fijo por venta debe ser mayor que $0.'],
+      ] as const) {
+        const res = await post(r, fijo(monto))
+        expect({ r, monto, status: res.status, message: res.body.message }).toEqual({ r, monto, status: 400, message })
+      }
     }
-    expect((await post('/configs', fijo(-1))).body.message).toBe('El monto fijo por venta no puede ser negativo.')
-    expect(await esquemasNuevos()).toBe(2)
+    expect((await post('/configs', fijo(999_999.99))).status).toBe(201)
+    expect(await esquemasNuevos()).toBe(3)
   })
 
   it('🔴 actualizar: pasar un fijo de $5 a niveles sin cambiar el monto, o subir la tasa a más de 100 %, se rechaza (sede y organización)', async () => {

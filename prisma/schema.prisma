@@ -12878,7 +12878,9 @@ model CommissionConfig {
   recipient   CommissionRecipient @default(SERVER)
   trigger     CommissionTrigger   @default(PER_PAYMENT)
   calcType    CommissionCalcType  @default(PERCENTAGE)
-  defaultRate Decimal             @db.Decimal(5, 4) // 0.0300 = 3%
+  // 0.0300 = 3 % en porcentaje y niveles; en un esquema FIXED son PESOS por venta (D-FIJO, 8-oct-2026: era Decimal(5,4) y un
+  // fijo no pasaba de $9.9999). La API valida por tipo: tasa de 0 a 100 %, o monto de más de $0 a $999,999.99.
+  defaultRate Decimal             @db.Decimal(12, 4)
   minAmount   Decimal?            @db.Decimal(10, 2) // Min commission per transaction
   maxAmount   Decimal?            @db.Decimal(10, 2) // Max commission per transaction
 
@@ -13120,7 +13122,7 @@ model CommissionCalculation {
   taxAmount      Decimal @default(0) @db.Decimal(10, 2) // Tax (if included)
 
   // Commission calculation
-  effectiveRate   Decimal @db.Decimal(5, 4) // Rate that was applied
+  effectiveRate   Decimal @db.Decimal(12, 4) // Rate that was applied; en un FIXED, el monto en pesos (D-FIJO: era Decimal(5,4))
   grossCommission Decimal @db.Decimal(10, 2) // Before any deductions
   netCommission   Decimal @db.Decimal(10, 2) // Final commission amount
 
