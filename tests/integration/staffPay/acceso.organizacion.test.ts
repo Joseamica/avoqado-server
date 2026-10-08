@@ -18,6 +18,7 @@ let wellness: string
 let lejana: string
 let parcial: string
 let dueno: string
+let trio: string
 
 const TEXTO = (falta: string) =>
   `Para esto necesitas el permiso «Cerrar periodos y registrar pagos» en todas las sedes de la organización (te falta en: ${falta}). Pídeselo al dueño del negocio.`
@@ -42,11 +43,13 @@ beforeAll(async () => {
     (await prisma.staff.create({ data: { email: `${key}-${n}@example.test`, firstName: n, lastName: 'QA', active: true } })).id
   parcial = await persona('parcial')
   dueno = await persona('dueno')
+  trio = await persona('trio')
   // El caso de la QA: ADMIN en las dos sedes; sólo en Wellness el rol ADMIN trae además «Cerrar periodos y registrar pagos».
   await prisma.staffVenue.createMany({
     data: [
       { staffId: parcial, venueId: full, role: 'ADMIN', active: true },
       { staffId: parcial, venueId: wellness, role: 'ADMIN', active: true },
+      ...[full, wellness, lejana].map(venueId => ({ staffId: trio, venueId, role: 'ADMIN' as const, active: true })),
       ...[full, wellness, lejana].map(venueId => ({ staffId: dueno, venueId, role: 'OWNER' as const, active: true })),
     ],
   })
@@ -141,6 +144,28 @@ describe('C2 · permiso de cierre en una sede y no en otra (entrando desde la se
   })
 })
 
+describe('E6a-fix3 · puedeConfigurarOrganizacion (staffpay:manage en TODAS las sedes: niveles y asignaciones)', () => {
+  it('manage en las sedes que ve pero no en una a la que no entra ⇒ false, y es la regla del 403 de niveles', async () => {
+    expect(await access(parcial, wellness)).toMatchObject({ puedeConfigurarOrganizacion: false })
+    await expect(crearNivel({ organizationId: orgId, name: 'Coach', actorId: parcial, venueId: wellness })).rejects.toMatchObject({
+      statusCode: 403,
+      code: 'FALTA_PERMISO_EN_SEDES',
+    })
+  })
+
+  it('el 403 de crear un nivel sin manage en todas dice «Configurar pago al personal», nunca staffpay:manage', async () => {
+    const e = await crearNivel({ organizationId: orgId, name: 'Coach', actorId: parcial, venueId: wellness }).catch(x => x)
+    expect(e.message).toContain('«Configurar pago al personal»')
+    expect(e.message).toContain('Pídeselo al dueño del negocio')
+    expect(e.message).not.toMatch(/staffpay:/)
+  })
+
+  it('manage en TODAS ⇒ true, aunque NO tenga close (son dos permisos, dos booleanos)', async () => {
+    expect(await access(trio, full)).toMatchObject({ puedeConfigurarOrganizacion: true, puedeAdministrarOrganizacion: false })
+    expect(await access(dueno, full)).toMatchObject({ puedeConfigurarOrganizacion: true })
+  })
+})
+
 describe('C2 · regresión: con el permiso en TODAS las sedes', () => {
   it('GET /access dice que sí puede, y el permiso deja pasar (lo que sigue es la regla de la acción, no un 403)', async () => {
     expect(await access(dueno, wellness)).toMatchObject({ puedeAdministrarOrganizacion: true })
@@ -163,6 +188,7 @@ describe('C2 · regresión: con el permiso en TODAS las sedes', () => {
         'periodicidadFija',
         'propinasEncendidas',
         'puedeAdministrarOrganizacion',
+        'puedeConfigurarOrganizacion',
         'startDate',
       ].sort(),
     )

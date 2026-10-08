@@ -1,7 +1,11 @@
 import { NextFunction, Request, Response } from 'express'
 import { BadRequestError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
-import { puedeAdministrarLaOrganizacion, venueHasServicePayAccess } from '../../services/dashboard/staffPay/acceso'
+import {
+  puedeAdministrarLaOrganizacion,
+  puedeConfigurarLaOrganizacion,
+  venueHasServicePayAccess,
+} from '../../services/dashboard/staffPay/acceso'
 import * as activacion from '../../services/dashboard/staffPay/activacion.service'
 import * as niveles from '../../services/dashboard/staffPay/niveles.service'
 import * as tablas from '../../services/dashboard/staffPay/tablas.service'
@@ -40,6 +44,8 @@ export async function getAccess(req: Request, res: Response, next: NextFunction)
       ...(await activacion.estadoActivacion(prisma, organizationId)),
       ...(await activacion.accesoActivacion({ venueId })),
       puedeAdministrarOrganizacion: await puedeAdministrarLaOrganizacion(userId, organizationId),
+      // E6a-fix3 (aditivo): lo mismo con `staffpay:manage` (niveles, asignar nivel, tablas de organización).
+      puedeConfigurarOrganizacion: await puedeConfigurarLaOrganizacion(userId, organizationId),
     })
   } catch (error) {
     next(error)

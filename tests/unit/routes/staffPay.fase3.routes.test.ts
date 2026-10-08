@@ -11,6 +11,7 @@ jest.mock('@/services/dashboard/staffPay/acceso', () => ({
   venueHasServicePayAccess: jest.fn(),
   organizacionTieneServicePay: jest.fn(),
   puedeAdministrarLaOrganizacion: jest.fn(),
+  puedeConfigurarLaOrganizacion: jest.fn(),
 }))
 
 import * as activacion from '@/services/dashboard/staffPay/activacion.service'
@@ -94,6 +95,7 @@ describe('Controller de la fase 3', () => {
     prismaMock.venue.findUniqueOrThrow.mockResolvedValue({ organizationId: 'o1', timezone: 'America/Mexico_City' })
     ;(acceso.venueHasServicePayAccess as jest.Mock).mockResolvedValue(true)
     ;(acceso.puedeAdministrarLaOrganizacion as jest.Mock).mockResolvedValue(false)
+    ;(acceso.puedeConfigurarLaOrganizacion as jest.Mock).mockResolvedValue(true)
     ;(activacion.estadoActivacion as jest.Mock).mockResolvedValue({ activado: true, startDate: '2026-10-01', propinasEncendidas: false })
     ;(activacion.accesoActivacion as jest.Mock).mockResolvedValue({
       periodicidad: 'SEMIMONTHLY',
@@ -112,7 +114,10 @@ describe('Controller de la fase 3', () => {
       inicioAlActivar: null,
       // E6a-fix2 C2 (aditivo): quien pregunta, en la organización de la sede, con la regla del 403 de activar y propinas.
       puedeAdministrarOrganizacion: false,
+      // E6a-fix3 (aditivo): staffpay:manage en todas las sedes (niveles, asignar nivel, tablas de organización).
+      puedeConfigurarOrganizacion: true,
     })
+    expect(acceso.puedeConfigurarLaOrganizacion).toHaveBeenCalledWith('u1', 'o1')
     expect(acceso.puedeAdministrarLaOrganizacion).toHaveBeenCalledWith('u1', 'o1')
     expect(activacion.estadoActivacion).toHaveBeenCalledWith(expect.anything(), 'o1')
     expect(activacion.accesoActivacion).toHaveBeenCalledWith({ venueId: 'v1' })

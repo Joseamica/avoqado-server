@@ -180,6 +180,14 @@ export async function puedeAdministrarLaOrganizacion(userId: string, organizatio
   return (await negativaDeOrganizacion(userId, organizationId, 'staffpay:close')) === null
 }
 
+/**
+ * `GET /access` (E6a-fix3): ¿puede esta persona configurar lo de la organización que pide `staffpay:manage` en TODAS las sedes
+ * (niveles: crear, editar, asignar; tablas de organización)? La MISMA regla que el 403 de esas acciones.
+ */
+export async function puedeConfigurarLaOrganizacion(userId: string, organizationId: string): Promise<boolean> {
+  return (await negativaDeOrganizacion(userId, organizationId, 'staffpay:manage')) === null
+}
+
 export async function sedesLegibles(userId: string, organizationId: string): Promise<{ venueIds: string[]; parcial: boolean }> {
   const sedes = await sedesConServicePay(organizationId)
   const venueIds: string[] = []
