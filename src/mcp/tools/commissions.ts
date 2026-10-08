@@ -36,6 +36,7 @@ interface SchemeRow {
   calcType: string
   defaultRate: { toString(): string }
   includeDiscount: boolean
+  includeTax: boolean
   filterByCategories: boolean
   categoryIds: string[]
   useGoalAsTier: boolean
@@ -71,6 +72,9 @@ export function formatScheme(config: SchemeRow, categoryName: Map<string, string
     defaultRate: Number(config.defaultRate),
     // LO_COBRADO = neto de descuentos y promociones; PRECIO_DE_LISTA = catálogo.
     commissionBase: resolveCommissionBase(config),
+    // Decisión D5 enmendada (spec §9-1): SIN_IVA (de fábrica) = la venta sin IVA, separada con la regla de tasas de la
+    // contabilidad (la tasa de cada producto); CON_IVA = lo que pagó el cliente.
+    taxBase: config.includeTax ? 'CON_IVA' : 'SIN_IVA',
     appliesTo: config.filterByCategories ? config.categoryIds.map(id => categoryName.get(id) ?? id) : 'ALL_CATEGORIES',
     useGoalAsTier: config.useGoalAsTier,
     goalBonusRate: config.goalBonusRate == null ? null : Number(config.goalBonusRate),
@@ -240,7 +244,7 @@ export function registerCommissionTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'list_commission_schemes',
-    'List active staff commission schemes for your venues — the CONFIG only (rates, tiers, categories), NOT what anyone earned. Each scheme shows how commission is calculated (flat %, tiered, or fixed amount), which product categories it applies to (multiple schemes can run per venue, each on its own categories), and its tiers. `commissionBase` says what the commission is calculated ON: "LO_COBRADO" (default — net of order AND line discounts/promotions, i.e. what the customer actually paid; tips never count) or "PRECIO_DE_LISTA" (the catalog price, ignoring discounts). A tier boundary can be a fixed amount or "EMPLOYEE_GOAL" — the staff member\'s own sales goal. ⚠️ Do NOT use these rates to hand-compute a person\'s commission by multiplying their sales — that is wrong (only some categories carry a scheme, commission is attributed to the SERVER not the order creator, and tiers are monthly-cumulative). To answer "¿cuánto de comisión ganó X?" use the staff_commission tool, which reads the real engine. Requires commissions:read.',
+    'List active staff commission schemes for your venues — the CONFIG only (rates, tiers, categories), NOT what anyone earned. Each scheme shows how commission is calculated (flat %, tiered, or fixed amount), which product categories it applies to (multiple schemes can run per venue, each on its own categories), and its tiers. `commissionBase` says what the commission is calculated ON: "LO_COBRADO" (default — net of order AND line discounts/promotions, i.e. what the customer actually paid; tips never count) or "PRECIO_DE_LISTA" (the catalog price, ignoring discounts). `taxBase` says whether IVA counts: "SIN_IVA" (default — the sale without IVA, split at each product\'s rate with the same rule as the accounting entry: 16 %, 8 %, nothing for 0 % or exempt) or "CON_IVA" (what the customer paid, IVA included). With "PRECIO_DE_LISTA" the base is the list price of the order lines plus the service charge. A tier boundary can be a fixed amount or "EMPLOYEE_GOAL" — the staff member\'s own sales goal. ⚠️ Do NOT use these rates to hand-compute a person\'s commission by multiplying their sales — that is wrong (only some categories carry a scheme, commission is attributed to the SERVER not the order creator, and tiers are monthly-cumulative). To answer "¿cuánto de comisión ganó X?" use the staff_commission tool, which reads the real engine. Requires commissions:read.',
     { venueId: z.string().optional().describe('Focus one venue (must be in your scope); omit for all your venues') },
     async ({ venueId }) => {
       const venueIds = await readableVenues(venueId)
@@ -313,19 +317,20 @@ export function registerCommissionTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'commission_payouts',
-    'Staff commission payouts for your venues: each shows the staff member, amount, payment method (cash/transfer/payroll), status (pending/approved/processing/paid/failed/cancelled) and when it was paid — plus totals already paid vs still pending. Defaults to all statuses. Answers "¿cuánto he pagado de comisiones? ¿qué comisiones están pendientes? ¿cuánto le debo a X?". Requires commissions:read. Pass venueId to focus one venue; optionally status.',
+    'History of staff commission payouts registered with the PREVIOUS payout flow (most businesses have none): staff member, amount, payment method, status and paid date, plus totals paid and pending. Since October 2026 commissions are paid inside each person\'s staff pay statement («Pago al personal»): to answer "¿cuánto le pagué / le debo de comisiones a X?" use staff_service_pay_summary or staff_service_pay_detail, which include commissions and tips. Requires commissions:payout. Pass venueId to focus one venue; optionally status.',
     {
       venueId: z.string().optional().describe('Focus one venue (must be in your scope); omit for all your venues'),
       status: z.enum(['pending', 'paid', 'all']).optional().describe("Filter: 'pending' (not yet paid), 'paid', or 'all' (default)"),
       limit: z.number().int().positive().max(100).optional().describe('Max payouts to list (default 50, newest first)'),
     },
     async ({ venueId, status, limit }) => {
-      const venueIds = await readableVenues(venueId)
+      // El historial de pagos viejos exige `commissions:payout` como su API, también al consultar varias sedes (spec §8).
+      const venueIds = (await readableVenues(venueId)).filter(id => hasPermission(scope.perVenueAccess.get(id)!, 'commissions:payout'))
       if (venueIds.length === 0)
         return text({
           venuesInScope: 0,
           payouts: [],
-          note: 'Ningún venue en tu alcance tiene commissions:read Y el plan/módulo de comisiones (requiere Premium o el módulo COMMISSIONS).',
+          note: 'Ningún venue en tu alcance tiene commissions:payout Y el plan/módulo de comisiones. Desde octubre de 2026 las comisiones se pagan en el recibo de Pago al personal.',
         })
 
       const statusFilter =

@@ -92,11 +92,11 @@ export const DIRECTORY_DESCRIPTIONS: Record<string, string> = {
   birthday_automation_status:
     'Automatic birthday greeting of a branch: whether it is on, paused or not yet set up, how many days in advance it is sent, its subject and the last date evaluated. Requires marketing:manage.',
   list_commission_schemes:
-    'Active staff commission schemes of accessible branches (configuration only, not earnings): calculation type (percentage, tiered or fixed), commissionable product categories, tiers and commission base (amount collected or list price). Requires commissions:read.',
+    'Active staff commission schemes of accessible branches (configuration only, not earnings): calculation type (percentage, tiered or fixed), commissionable product categories, tiers, commission base (amount collected or list price) and whether that base is without IVA (the default) or with IVA. Requires commissions:read.',
   list_commission_goals:
     'Staff sales goals of accessible branches, per employee or branch-wide, with their period (daily, weekly or monthly); goals can define commission tier boundaries. Requires commissions:read.',
   commission_payouts:
-    'Staff commission payouts of accessible branches: staff member, amount, payment method, status and paid date, plus totals paid and pending. Optional venueId and status. Requires commissions:read.',
+    "History of staff commission payouts registered with the previous payout flow: staff member, amount, payment method, status and paid date, plus totals paid and pending. Commissions are now paid inside each person's staff pay statement. Optional venueId and status. Requires commissions:payout.",
   staff_commission:
     'Commission earned by each staff member in one branch over a date range (default: current month, branch timezone), as calculated by the commission engine: total commission, commissionable base and breakdown by scheme and tier. Optional staffId and fromDate/toDate (YYYY-MM-DD). Requires commissions:read.',
   list_credit_packs:
