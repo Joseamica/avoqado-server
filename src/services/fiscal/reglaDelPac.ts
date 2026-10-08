@@ -17,6 +17,11 @@ export type ConceptoParaElPac = {
   traslado: TrasladoParaElPac
   /** Sólo desempata: el mismo resultado con los renglones en cualquier orden. No entra a la cuenta. */
   nombre?: string
+  /**
+   * C1 (D4): parte de un concepto de la global con varias tasas. Su descuento no se mueve: Facturapi restaría un descuento de CADA
+   * base (variante 4, 1-oct; reconfirmado en el sandbox el 7-oct, G5). Cuenta igual para el documento.
+   */
+  ajustable?: false
 }
 
 /** B3a Tarea 6b (founder, 5-oct): lo que dirá el XML, en centavos: SubTotal, Descuento, la suma del IVA de cada tasa y Total. */
@@ -243,6 +248,9 @@ export function cuadrarConElPac(
   const lineales = new Map<string, number[]>()
   const noLineales: number[] = []
   for (const i of preferencia) {
+    // C1 (D4): lo no ajustable (una parte de un concepto con varias bases) no entra a ningún grupo lineal, a ninguna clase de no
+    // lineales ni a ninguna `capacidad`; sigue en aportes, sumas, documento, residuo y tasasConIva (cuenta para el total).
+    if (conceptos[i].ajustable === false) continue
     if (!esLineal(conceptos[i])) noLineales.push(i)
     else lineales.set(tasaDe(conceptos[i]).toFixed(6), [...(lineales.get(tasaDe(conceptos[i]).toFixed(6)) ?? []), i])
   }
@@ -431,6 +439,10 @@ export function conceptoDesdeElPayload(
     'description' | 'unitPriceCents' | 'unitPriceDecimal' | 'quantity' | 'discountCents' | 'taxIncluded' | 'objetoImp' | 'taxes'
   >,
 ): ConceptoParaElPac {
+  // C1: un concepto con varias bases o con más de un traslado de IVA no es UN concepto de la 6b: leerlo con el primer traslado lo
+  // sumaría mal en silencio.
+  if (i.taxes.some(t => t.base !== undefined) || i.taxes.filter(t => t.type === 'IVA' && !t.withholding).length > 1)
+    throw new Error('conceptoDesdeElPayload: un concepto con varias tasas se lee con conceptosDesdeElPayload')
   const iva = i.taxes.find(t => t.type === 'IVA' && !t.withholding)
   return {
     // Revisión Men-3: la MISMA condición y conversión que el proveedor (`facturapi.provider.ts`: `!= null ? Number(…)`).
@@ -441,4 +453,58 @@ export function conceptoDesdeElPayload(
     traslado: i.objetoImp !== '02' || !iva ? null : iva.factor === 'Exento' ? { factor: 'Exento' } : { factor: 'Tasa', tasa: iva.rate },
     nombre: i.description,
   }
+}
+
+/**
+ * C1 (D4): un concepto de la global con varias tasas (precio = Σ bases, sin descuento) como lo suma el PAC: una parte por base, sin
+ * IVA incluido y no ajustable. Medido el 1-oct (variantes 2, 3 y 5): el importe del concepto es el precio y cada traslado,
+ * r6(base × tasa). Cualquier otro concepto, como `conceptoDesdeElPayload` (6b).
+ */
+export function conceptosDesdeElPayload(i: Parameters<typeof conceptoDesdeElPayload>[0]): ConceptoParaElPac[] {
+  if (!i.taxes.some(t => t.base !== undefined)) return [conceptoDesdeElPayload(i)]
+  return i.taxes
+    .filter(t => t.type === 'IVA' && !t.withholding)
+    .map(t => ({
+      precio: new D(t.base!),
+      cantidad: 1,
+      descuentoCents: 0,
+      ivaIncluido: false,
+      traslado: t.factor === 'Exento' ? { factor: 'Exento' as const } : { factor: 'Tasa' as const, tasa: t.rate },
+      nombre: i.description,
+      ajustable: false as const,
+    }))
+}
+
+/** C1: lo que el SAT acepta de un concepto con varias tasas: cantidad 1, sin descuento, ≥ 2 traslados distintos, bases > 0 a 6 decimales que suman el precio, cada parte válida. */
+export function conceptoMultitasaValido(i: Parameters<typeof conceptoDesdeElPayload>[0] & { quantity: number }): boolean {
+  const ts = i.taxes.filter(t => t.type === 'IVA' && !t.withholding)
+  if (i.quantity !== 1 || i.discountCents !== 0 || i.taxIncluded || i.objetoImp !== '02' || ts.length < 2 || ts.length !== i.taxes.length)
+    return false
+  if (!ts.every(t => typeof t.base === 'string' && /^\d+\.\d{6}$/.test(t.base) && new D(t.base).gt(0))) return false
+  if (new Set(ts.map(t => `${t.factor}:${t.rate}`)).size !== ts.length) return false
+  const precio = i.unitPriceDecimal ? new D(i.unitPriceDecimal) : new D(i.unitPriceCents).div(100)
+  if (!ts.reduce((s, t) => s.plus(t.base!), cero).equals(precio)) return false
+  return conceptosDesdeElPayload(i).every(c => conceptoValidoAnteElSat(c))
+}
+
+/** C1/C2: el resumen de traslados del documento como lo escribirá el PAC, en centavos y con la forma de `Cfdi.taxBreakdown`. */
+export type TrasladoDelResumen = { tipoFactor: 'Tasa' | 'Exento'; tasa: string | null; baseCents: number; importeCents: number | null }
+export function resumenSegunElPac(conceptos: ConceptoParaElPac[]): TrasladoDelResumen[] {
+  const grupos = new Map<string, { tipoFactor: 'Tasa' | 'Exento'; tasa: string | null; base: Prisma.Decimal; importe: Prisma.Decimal }>()
+  for (const c of conceptos) {
+    if (!c.traslado) continue
+    const x = conceptoSegunElPac(c)
+    if (x.base.isZero()) continue // un concepto de base 0 sale sin traslado y no entra al resumen (igual que en `aporteDe`)
+    const tasa = c.traslado.factor === 'Exento' ? null : new D(c.traslado.tasa).toFixed(6)
+    const k = tasa ?? 'Exento'
+    const g = grupos.get(k) ?? { tipoFactor: c.traslado.factor, tasa, base: cero, importe: cero }
+    grupos.set(k, { ...g, base: g.base.plus(x.base), importe: g.importe.plus(x.traslado) })
+  }
+  const enCentavos = (d: Prisma.Decimal) => a2(d).mul(100).toNumber() // mitad hacia arriba, como `aCentavos` sobre millonésimas
+  return [...grupos.values()].map(g => ({
+    tipoFactor: g.tipoFactor,
+    tasa: g.tasa,
+    baseCents: enCentavos(g.base),
+    importeCents: g.tipoFactor === 'Exento' ? null : enCentavos(g.importe),
+  }))
 }

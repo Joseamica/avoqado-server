@@ -12,6 +12,8 @@ import {
   MOTIVO_MEDIO_CENTAVO_SIN_REGLA,
   MOTIVO_OCHO_SIN_REGLA,
   conceptoDesdeElPayload,
+  conceptoMultitasaValido,
+  conceptosDesdeElPayload,
   conceptoSegunElPac,
   conceptoValidoAnteElSat,
   confirmarCuadre,
@@ -19,6 +21,7 @@ import {
   cuadrarConElPac,
   documentoSegunElPac,
   motivoNoCuadra,
+  resumenSegunElPac,
   totalSegunElPacCents,
   type ConceptoParaElPac,
   type TrasladoParaElPac,
@@ -732,5 +735,91 @@ describe('cotaDeRedondeoCents (ronda final, ajuste 2)', () => {
   it('control — con UN solo concepto no lineal (IVA incluido con tasa), la cota medida aunque haya muchos lineales', () => {
     expect(cotaDeRedondeoCents([...veces(20, aparte(10)), c(10, 1, tasa(0.16))], 0)).toBe(6)
     expect(cotaDeRedondeoCents(veces(8, c(10, 1, tasa(0.16))), 0)).toBe(6)
+  })
+})
+
+describe('C1 · el concepto con varias tasas sobre el contrato de la 6b', () => {
+  const iva = (factor: 'Tasa' | 'Exento', rate: number, base?: string) => ({
+    type: 'IVA' as const,
+    factor,
+    rate,
+    withholding: false,
+    ...(base ? { base } : {}),
+  })
+  const v5 = {
+    description: 'Venta',
+    satProductKey: '01010101',
+    satUnitKey: 'ACT',
+    quantity: 1,
+    unitPriceCents: 23793,
+    unitPriceDecimal: '237.931034',
+    discountCents: 0,
+    objetoImp: '02',
+    taxIncluded: false,
+    taxes: [iva('Tasa', 0.16, '137.931034'), iva('Tasa', 0, '100.000000')],
+  }
+  it('1-oct variante 5 (6abe97ee6b2cff1f649088c0): una parte por base, no ajustable; el documento da 237.93 + 22.07 = 260.00', () => {
+    const cs = conceptosDesdeElPayload(v5)
+    expect(cs.map(x => [x.precio.toFixed(6), x.traslado, x.ajustable])).toEqual([
+      ['137.931034', { factor: 'Tasa', tasa: 0.16 }, false],
+      ['100.000000', { factor: 'Tasa', tasa: 0 }, false],
+    ])
+    expect(documentoSegunElPac(cs)).toEqual({ subtotalCents: 23793, descuentoCents: 0, ivaCents: 2207, totalCents: 26000 })
+  })
+  it('1-oct variante 3 (6abe97b19a5e43e785b5d783): 16 % + exento ⇒ 260.00; el exento no suma IVA y sale en el resumen sin importe', () => {
+    const it3 = {
+      ...v5,
+      unitPriceCents: 23793,
+      unitPriceDecimal: '237.930000',
+      taxes: [iva('Tasa', 0.16, '137.930000'), iva('Exento', 0, '100.000000')],
+    }
+    expect(documentoSegunElPac(conceptosDesdeElPayload(it3)).totalCents).toBe(26000)
+    expect(resumenSegunElPac(conceptosDesdeElPayload(it3))).toEqual([
+      { tipoFactor: 'Tasa', tasa: '0.160000', baseCents: 13793, importeCents: 2207 },
+      { tipoFactor: 'Exento', tasa: null, baseCents: 10000, importeCents: null },
+    ])
+  })
+  it('🔴 conceptoDesdeElPayload no acepta un concepto con varias tasas (nadie lo suma mal en silencio)', () => {
+    expect(() => conceptoDesdeElPayload(v5)).toThrow(/varias tasas/)
+  })
+  it('conceptoMultitasaValido: bases que suman el precio, sin descuento, cantidad 1, dos o más tratamientos', () => {
+    expect(conceptoMultitasaValido(v5)).toBe(true)
+    expect(conceptoMultitasaValido({ ...v5, discountCents: 1 })).toBe(false) // variante 4: el PAC lo restaría de cada base
+    expect(conceptoMultitasaValido({ ...v5, unitPriceDecimal: '237.931035' })).toBe(false)
+    expect(conceptoMultitasaValido({ ...v5, taxes: [iva('Tasa', 0.16, '237.931034')] })).toBe(false)
+    expect(conceptoMultitasaValido({ ...v5, taxes: [iva('Tasa', 0.16, '137.93103'), iva('Tasa', 0, '100.000004')] })).toBe(false) // 6 decimales exactos
+  })
+  it('🔴 cuadrarConElPac nunca mueve el descuento de un concepto con ajustable: false (sigue contando para el documento)', () => {
+    // El caso del founder ($65 con $2.50 propios ⇒ 62.49) se arregla bajando a $2.49; marcado como no ajustable, se detiene.
+    expect(cuadrarConElPac([c(65, 1, tasa(0.16), { descuentoCents: 250 })], 6250, { desbloqueado: false })).toMatchObject({
+      ok: true,
+      ajustes: [{ indice: 0, deCents: 250, aCents: 249 }],
+    })
+    expect(
+      cuadrarConElPac([{ ...c(65, 1, tasa(0.16), { descuentoCents: 250 }), ajustable: false }], 6250, { desbloqueado: false }),
+    ).toMatchObject({ ok: false })
+  })
+  it('🔴 tampoco en un grupo LINEAL: 10 × $10.03 sin IVA incluido (la v4 pone +0.01 a cuatro) marcados no ajustables ⇒ se detiene', () => {
+    const diez = veces(10, c(10.03, 1, tasa(0.16), { ivaIncluido: false })) // ajuste M4 del pre-flight: `veces` recibe un concepto
+    expect(cuadrarConElPac(diez, 11630, { desbloqueado: false })).toMatchObject({ ok: true })
+    expect(
+      cuadrarConElPac(
+        diez.map(x => ({ ...x, ajustable: false as const })),
+        11630,
+        { desbloqueado: false },
+      ),
+    ).toMatchObject({ ok: false })
+  })
+  it('control — las partes no ajustables siguen contando: con una parte fija al 0 % y un concepto ajustable, el centavo va al ajustable', () => {
+    const parte = {
+      precio: new Prisma.Decimal('100.000000'),
+      cantidad: 1,
+      descuentoCents: 0,
+      ivaIncluido: false,
+      traslado: { factor: 'Tasa' as const, tasa: 0 },
+      ajustable: false as const,
+    }
+    const r = cuadrarConElPac([parte, c(65, 1, tasa(0.16), { descuentoCents: 250 })], 16250, { desbloqueado: false })
+    expect(r).toMatchObject({ ok: true, ajustes: [{ indice: 1, deCents: 250, aCents: 249 }] })
   })
 })

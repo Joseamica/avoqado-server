@@ -95,7 +95,6 @@ const INVENTARIO: Record<string, number> = {
   'src/jobs/auto-clockout.job.ts': 4,
   'src/jobs/blumon-webhook-reconciliation.job.ts': 1,
   'src/jobs/cash-drawer-reconciler.job.ts': 1,
-  'src/jobs/cfdiGlobal.job.ts': 1,
   'src/jobs/delivery-webhook-reconciliation.job.ts': 1,
   'src/jobs/gcal-health-check.job.ts': 1,
   'src/jobs/gcal-horizon-refresh.job.ts': 1,

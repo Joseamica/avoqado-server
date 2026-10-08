@@ -317,7 +317,8 @@ describe('result shape', () => {
     const result = await listCfdisForVenue({ venueId: VENUE_ID, page: 2, pageSize: 10 })
 
     expect(result).toEqual({
-      cfdis: [SAMPLE_CFDI],
+      // C1 · Tarea 11 (S6): cada fila gana `complementariaDe` (null en una individual); nada se quita.
+      cfdis: [{ ...SAMPLE_CFDI, complementariaDe: null }],
       total: 42,
       page: 2,
       pageSize: 10,
@@ -343,5 +344,61 @@ describe('result shape', () => {
 
     expect(findMany).toHaveBeenCalledTimes(1)
     expect(count).toHaveBeenCalledTimes(1)
+  })
+})
+
+// ─── C1 · Tarea 11 (contrato S6 del dashboard): el emisor y la principal de cada fila ──────────────────────────────
+
+describe('C1 · Tarea 11 — `fiscalEmisorId` y `complementariaDe` en cada fila (aditivos)', () => {
+  const global = (id: string, idempotencyKey: string) => ({
+    ...SAMPLE_CFDI,
+    id,
+    isGlobal: true,
+    orderId: null,
+    flow: 'GLOBAL_C',
+    fiscalEmisorId: 'e1',
+    idempotencyKey,
+  })
+  it('🔴 la consulta trae el emisor; la llave sólo se lee por dentro (no sale en la respuesta)', async () => {
+    findMany.mockResolvedValueOnce([global('g1', 'cfdi-global-e1-2026-05-04')])
+    const r = await listCfdisForVenue({ venueId: VENUE_ID, page: 1, pageSize: 20 })
+    const select = findMany.mock.calls[0][0].select
+    expect(select).toMatchObject({ fiscalEmisorId: true, idempotencyKey: true })
+    expect(r.cfdis[0]).toMatchObject({ id: 'g1', fiscalEmisorId: 'e1', complementariaDe: null })
+    expect(r.cfdis[0]).not.toHaveProperty('idempotencyKey')
+  })
+  it('🔴 una complementaria trae el id de SU principal (buscada por su llave, acotada a la página); una principal e individual, null', async () => {
+    findMany
+      .mockResolvedValueOnce([
+        global('g-c2', 'cfdi-global-e1-2026-05-04-c2'),
+        global('g1', 'cfdi-global-e1-2026-05-04'),
+        { ...SAMPLE_CFDI, fiscalEmisorId: 'e1', idempotencyKey: 'cfdi-o1' },
+      ])
+      .mockResolvedValueOnce([{ id: 'g1', idempotencyKey: 'cfdi-global-e1-2026-05-04' }])
+    const r = await listCfdisForVenue({ venueId: VENUE_ID, page: 1, pageSize: 20 })
+    expect(r.cfdis.map((c: any) => [c.id, c.complementariaDe])).toEqual([
+      ['g-c2', 'g1'],
+      ['g1', null],
+      ['c1', null],
+    ])
+    const busqueda = findMany.mock.calls[1][0]
+    expect(busqueda.where).toMatchObject({ venueId: VENUE_ID, isGlobal: true, idempotencyKey: { in: ['cfdi-global-e1-2026-05-04'] } })
+    expect(busqueda.take).toBe(1)
+  })
+  it('control (ronda 1, m6) — una complementaria cuya principal no aparece lee el dato de su propia entrada (acotado a esas filas)', async () => {
+    findMany
+      .mockResolvedValueOnce([global('g-c2', 'cfdi-global-e1-2026-05-04-c2')])
+      .mockResolvedValueOnce([]) // la principal no apareció por su llave
+      .mockResolvedValueOnce([{ id: 'g-c2', entrada: { complementariaDe: 'g-principal' } }])
+    const r = await listCfdisForVenue({ venueId: VENUE_ID, page: 1, pageSize: 20 })
+    expect(r.cfdis.map((c: any) => [c.id, c.complementariaDe])).toEqual([['g-c2', 'g-principal']])
+    const respaldo = findMany.mock.calls[2][0]
+    expect(respaldo.where).toMatchObject({ venueId: VENUE_ID, id: { in: ['g-c2'] } })
+    expect(respaldo.take).toBe(1)
+  })
+  it('control — una página sin complementarias no hace consultas de más', async () => {
+    findMany.mockResolvedValueOnce([global('g1', 'cfdi-global-e1-2026-05-04')])
+    await listCfdisForVenue({ venueId: VENUE_ID, page: 1, pageSize: 20 })
+    expect(findMany).toHaveBeenCalledTimes(1)
   })
 })

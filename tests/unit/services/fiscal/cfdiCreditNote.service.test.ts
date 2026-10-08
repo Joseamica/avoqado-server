@@ -265,3 +265,60 @@ describe('6b: una factura ajustada guarda los montos del PAC (base neta, IVA por
     )
   })
 })
+
+// ─── Bloque C1, Tarea 2: control de la factura con IVA aparte y ajuste de la 6b (B3a F1; v9, C1-46) ───
+describe('C1 · control — una factura con IVA aparte ajustada por la 6b guarda los montos del PAC y se puede acreditar', () => {
+  // R1 de la 6b: 2 × $2.03 con $1 c/u, IVA APARTE. El PAC daría $2.39 y se cobró $2.38 ⇒ uno de los descuentos pasa a $1.01.
+  // Lo que se guarda es lo que dice el XML (2.05 + 0.33 = 2.38), no el subtotal bruto de la cabecera (4.06).
+  const pieza = (discountCents: number) => ({
+    satProductKey: '90101500',
+    satUnitKey: 'E48',
+    description: 'PIEZA',
+    quantity: 1,
+    unitPriceCents: 203,
+    discountCents,
+    objetoImp: '02',
+    taxes: [{ type: 'IVA', factor: 'Tasa', rate: 0.16, withholding: false }],
+    taxIncluded: false,
+  })
+  const entradaIvaAparte = () => ({
+    version: 1,
+    orderId: 'o1',
+    fiscalEmisorId: 'e1',
+    replacesCfdiId: null,
+    contratoDePrecio: 'IVA_APARTE',
+    paymentStatus: 'PAID',
+    clasificacion: 'TODO_16',
+    paidCents: 238,
+    montos: { subtotalCents: 205, taxCents: 33, totalCents: 238 },
+    renglones: [
+      { orderItemId: 'oi-a', tratamiento: 'IVA_16' },
+      { orderItemId: 'oi-b', tratamiento: 'IVA_16' },
+    ],
+    params: {
+      receptor: {
+        rfc: 'EKU9003173C9',
+        razonSocial: 'ESCUELA KEMPER URGATE SA DE CV',
+        regimenFiscal: '601',
+        codigoPostal: '64000',
+        usoCfdi: 'G03',
+      },
+      items: [pieza(101), pieza(100)],
+      formaPago: '04',
+      metodoPago: 'PUE',
+      serie: 'F',
+      idempotencyKey: 'o1',
+    },
+  })
+
+  it('control — entrada TODO_16 con IVA aparte y ajuste (2.05 + 0.33 = 2.38), reembolso de $1 ⇒ elegible, sin motivo ni mensaje', () => {
+    const entrada = entradaIvaAparte()
+    const montos = { subtotalCents: 205, taxCents: 33, totalCents: 238 }
+    const loaded = makeLoaded({
+      refund: { ...makeLoaded().refund, salesRefundCents: 100 },
+      original: makeOriginal({ protocoloIva: 1, entrada, entradaHuella: huellaDeEntrada(entrada), ...montos }),
+      grossByRate: [{ rate: 0.16, grossCents: 238 }],
+    })
+    expect(checkCreditNoteEligibility(loaded)).toEqual({ eligible: true, reason: null, message: null })
+  })
+})
