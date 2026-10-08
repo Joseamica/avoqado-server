@@ -278,4 +278,45 @@ describe('manualSale.service — bulkManualSales', () => {
       expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
     })
   })
+
+  // ── Una celda obligatoria vacía (Isaac, PlayTelecom, 8-oct-2026) ────────
+  // Antes, el middleware validaba el arreglo ENTERO: una fila sin «Nombre de la Tienda»
+  // devolvía 400 y las 237 ventas del archivo se quedaban sin subir, con el mensaje
+  // «Fila 0: rows.38.storeName: Required». Una fila mala es un error DE ESA FILA.
+  describe('fila con una celda obligatoria vacía', () => {
+    const sinTienda = (): Record<string, unknown> => {
+      const { storeName: _omitida, ...resto } = row({ iccid: '8952140064323812099F' })
+      return resto
+    }
+
+    it('preview: la fila va a error con motivo en español y las demás siguen', async () => {
+      stubResolversHappy()
+
+      const result = await bulkManualSales(ORG_ID, ACTOR_STAFF_ID, [row(), sinTienda()], false)
+
+      expect(result.crear).toHaveLength(1)
+      expect(result.error).toEqual([{ index: 1, iccid: '8952140064323812099F', storeName: '', motivo: 'Falta el nombre de la tienda' }])
+      expect(resolveIccidMock).toHaveBeenCalledTimes(1)
+    })
+
+    it('apply: la fila inválida no abre transacción y las válidas sí se crean', async () => {
+      wireTxPerCall()
+      stubResolversHappy()
+
+      const result = await bulkManualSales(ORG_ID, ACTOR_STAFF_ID, [sinTienda(), row()], true)
+
+      expect(result.created).toBe(1)
+      expect(result.error.map(e => e.index)).toEqual([0])
+      expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
+    })
+
+    it('el monto vacío también es error de la fila, en español', async () => {
+      stubResolversHappy()
+      const { amount: _omitido, ...sinMonto } = row()
+
+      const result = await bulkManualSales(ORG_ID, ACTOR_STAFF_ID, [sinMonto], false)
+
+      expect(result.error[0].motivo).toBe('Falta el monto de venta')
+    })
+  })
 })
