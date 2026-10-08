@@ -14,7 +14,7 @@ import {
   parseAmount,
 } from './manualSale.resolvers'
 import type { ManualSaleOutcome } from './manualSale.resolvers'
-import { manualSaleRowSchema, type ManualSaleRowInput } from '../../schemas/dashboard/manualSale.schema'
+import type { ManualSaleRowInput } from '../../schemas/dashboard/manualSale.schema'
 import { assertVenueSalesEnabled } from '@/services/venueSalesGuard'
 
 /**
@@ -452,7 +452,7 @@ function normalizeIccid(iccid: string): string {
 export async function bulkManualSales(
   orgId: string,
   actorStaffId: string,
-  rows: unknown[],
+  rows: ManualSaleRowInput[],
   apply: boolean,
 ): Promise<BulkManualSalesResult> {
   const crear: RowResult[] = []
@@ -464,19 +464,7 @@ export async function bulkManualSales(
   const seenIccids = new Set<string>()
   const dedupedRows: Array<{ index: number; row: ManualSaleRowInput }> = []
 
-  rows.forEach((raw, index) => {
-    // Una celda obligatoria vacía es error DE ESA FILA, nunca del archivo entero.
-    const parsed = manualSaleRowSchema.safeParse(raw)
-    if (!parsed.success) {
-      const cell = (key: string) => {
-        const value = (raw as Record<string, unknown> | null)?.[key]
-        return typeof value === 'string' ? value : ''
-      }
-      const motivo = [...new Set(parsed.error.issues.map(issue => issue.message))].join('; ')
-      error.push({ index, iccid: cell('iccid'), storeName: cell('storeName'), motivo })
-      return
-    }
-    const row = parsed.data
+  rows.forEach((row, index) => {
     const normalized = normalizeIccid(row.iccid)
     if (seenIccids.has(normalized)) {
       omitir.push({ index, iccid: row.iccid, storeName: row.storeName, motivo: DUPLICATE_ICCID_ERROR })

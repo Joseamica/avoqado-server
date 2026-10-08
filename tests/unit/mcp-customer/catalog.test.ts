@@ -169,6 +169,8 @@ const NUNCA_EN_DIRECTORIO = [
   'electronic_accounting_balance',
   'electronic_accounting_catalog',
   'electronic_accounting_polizas',
+  'emit_global_invoice', // C1 · Tarea 11: timbra una factura global ante el SAT
+  'global_invoice_excluded_sales', // C1 · Tarea 12: lee ventas y su situación fiscal (lectura, pero CFDI)
   'emit_refund_credit_note',
   'employees',
   'expenses',
@@ -325,4 +327,14 @@ it('el directorio filtra identificadores fiscales de la respuesta y el manual la
     await directory.close()
     await manual.close()
   }
+})
+
+it('control — C1 · Tarea 11: `emit_global_invoice` es una escritura (timbra ante el SAT) y nunca se publica en el directorio', () => {
+  expect(TOOL_EFFECTS.emit_global_invoice).toBe('write')
+  expect(NUNCA_EN_DIRECTORIO).toContain('emit_global_invoice')
+})
+
+it('🔴 C1 · Tarea 12: `global_invoice_excluded_sales` es una LECTURA (no pide confirmación) y nunca se publica en el directorio', () => {
+  expect(TOOL_EFFECTS.global_invoice_excluded_sales).toBe('read')
+  expect(NUNCA_EN_DIRECTORIO).toContain('global_invoice_excluded_sales')
 })

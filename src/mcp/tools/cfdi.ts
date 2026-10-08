@@ -12,6 +12,14 @@ import { hasPermission } from '@/services/access/access.service'
 import { emitRefundCreditNote, getRefundCreditNoteStatus } from '@/services/fiscal/cfdiCreditNote.service'
 import { sendCfdiByEmail } from '@/services/fiscal/cfdiEmail.service'
 import { vistaPreviaContrato, confirmarContratoIvaIncluido } from '@/services/fiscal/confirmarContratoDePrecio.service'
+import {
+  emitirGlobalComplementaria,
+  issueGlobalForEmisor,
+  listarExcluidasDeLaGlobal,
+  vistaPreviaComplementaria,
+  vistaPreviaPrincipal,
+  type IssueGlobalResult,
+} from '@/services/fiscal/cfdiGlobal.service'
 import { DEFAULT_TIMEZONE } from '@/utils/datetime'
 
 export function registerCfdiTools(server: McpServer, scope: McpScope) {
@@ -309,6 +317,243 @@ export function registerCfdiTools(server: McpServer, scope: McpScope) {
           data: { folio: result.folio, destination: result.destination },
         })
         return text({ ok: true, folio: result.folio, destino: result.destination })
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
+    },
+  )
+
+  // ─── Emitir la factura GLOBAL a mano: la principal de un periodo reciente, o la complementaria de una principal (C1, Tarea 11) ─────────
+  server.tool(
+    'emit_global_invoice',
+    'Emite una factura global (CFDI a público en general). PRINCIPAL: la de un periodo cerrado RECIENTE (desde = su inicio). COMPLEMENTARIA: la de las ventas que ninguna global vigente de su periodo documenta, por el id de su global principal. Pide confirmación en dos pasos.',
+    {
+      venueId: z.string().describe('El local (debe estar en tu alcance)'),
+      emisorId: z.string().optional().describe('El RFC emisor; sin él, el único del local'),
+      tipo: z.enum(['PRINCIPAL', 'COMPLEMENTARIA']).describe('PRINCIPAL o COMPLEMENTARIA'),
+      desde: z.string().optional().describe('PRINCIPAL: el inicio del periodo (ISO, tal como lo da el panel de periodos)'),
+      principalCfdiId: z.string().optional().describe('COMPLEMENTARIA: el id de la factura global principal'),
+      confirm: z.boolean().optional().describe('true para emitir; sin él sólo devuelve la vista previa'),
+    },
+    async ({ venueId, emisorId, tipo, desde, principalCfdiId, confirm }) => {
+      guard.venueFilter(venueId)
+      // Mismo permiso que el botón «Emitir» del panel de la factura global (OWNER/ADMIN).
+      guard.requirePermission('cfdi:configure', venueId)
+      // CFDI es feature de pago — el MCP no puede ser un atajo al paywall.
+      const entitled = await venuesWithFeatureAccess([venueId], 'CFDI')
+      if (!entitled.has(venueId)) {
+        return text({
+          ok: false,
+          planRequired: true,
+          feature: 'CFDI',
+          error: 'CFDI (facturación) no está activo en este local. Requiere la feature CFDI o un plan Avoqado activo.',
+        })
+      }
+      if (tipo === 'COMPLEMENTARIA' && !principalCfdiId)
+        return text({ ok: false, error: 'Para una complementaria indica principalCfdiId (el id de la factura global principal).' })
+      if (tipo === 'PRINCIPAL' && !desde)
+        return text({ ok: false, error: 'Para la principal indica desde: el inicio del periodo, tal como lo da el panel de periodos.' })
+      // El RFC: el indicado, o el único del local (con varios, se pregunta cuál).
+      const emisores = await prisma.fiscalEmisor.findMany({
+        where: { venueId, ...(emisorId ? { id: emisorId } : {}) },
+        select: { id: true, rfc: true, legalName: true },
+        orderBy: { id: 'asc' },
+        take: 20,
+      })
+      if (!emisores.length)
+        return text({ ok: false, error: emisorId ? 'No encontré ese RFC emisor en este local.' : 'Este local no tiene RFC emisor.' })
+      if (emisores.length > 1)
+        return text({
+          ok: false,
+          needsInput: true,
+          field: 'emisorId',
+          question: '¿Con cuál RFC emisor?',
+          opciones: emisores.map(e => ({ emisorId: e.id, rfc: e.rfc, nombre: e.legalName })),
+        })
+      const emisor = emisores[0]
+      const now = new Date()
+      // La vista previa sale del mismo servicio que la emisión: el periodo GUARDADO de la principal (complementaria) o uno reciente (principal).
+      let vista: { periodo: unknown; estado: string; ventas: { n: number; completo: boolean }; motivo: string | null; tope?: boolean }
+      try {
+        if (tipo === 'COMPLEMENTARIA') {
+          const v = await vistaPreviaComplementaria({ venueId, emisorId: emisor.id, principalId: principalCfdiId!, now })
+          vista = {
+            periodo: v.periodo,
+            estado: v.estadoPrincipal,
+            ventas: v.corregidasPendientes,
+            motivo: v.motivo,
+            tope: !v.siguienteLlave,
+          }
+        } else {
+          const v = await vistaPreviaPrincipal({ venueId, emisorId: emisor.id, desde: desde!, now })
+          // Ronda 1 de la T11 (I3): el periodo ya tiene su principal (timbrada o cancelada): emitirla otra vez no timbra nada (o se queda
+          // «procesando»); lo que falta va en una COMPLEMENTARIA. Ni vista previa ni emisión.
+          if (v.estado === 'TIMBRADA' || v.estado === 'CANCELADA')
+            return text({
+              ok: false,
+              error:
+                'Ese periodo ya tiene su factura global principal; para las ventas que no entraron usa tipo COMPLEMENTARIA con principalCfdiId.',
+              principalCfdiId: v.cfdiId,
+            })
+          vista = { periodo: v.periodo, estado: v.estado, ventas: v.ventas, motivo: v.motivo }
+        }
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
+      if (vista.motivo) return text({ ok: false, error: vista.motivo })
+      if (vista.tope) return text({ ok: false, error: 'Este periodo ya tiene 20 facturas globales complementarias; pide ayuda a soporte.' })
+      if (!confirm) {
+        const cuantas = vista.ventas.completo ? `${vista.ventas.n}` : `al menos ${vista.ventas.n}`
+        return text({
+          ok: true,
+          requiresConfirmation: true,
+          tipo,
+          periodo: vista.periodo,
+          estado: vista.estado,
+          ventas: vista.ventas,
+          confirmationArgs: {
+            venueId,
+            ...(emisorId ? { emisorId } : {}),
+            tipo,
+            ...(desde ? { desde } : {}),
+            ...(principalCfdiId ? { principalCfdiId } : {}),
+            confirm: true,
+          },
+          message:
+            `Se timbrará ante el SAT una factura global ${tipo === 'COMPLEMENTARIA' ? 'COMPLEMENTARIA' : 'principal'} del RFC ${emisor.rfc} ` +
+            `con ${cuantas} venta(s) de su periodo. Es irreversible (sólo se cancela ante el SAT) y es tardía: el periodo ya cerró.`,
+        })
+      }
+      let r: IssueGlobalResult
+      try {
+        r =
+          tipo === 'COMPLEMENTARIA'
+            ? await emitirGlobalComplementaria({
+                venueId,
+                emisorId: emisor.id,
+                principalId: principalCfdiId!,
+                now,
+                // `process.env` y no `@/config/env`: ver la nota de emit_refund_credit_note.
+                sandbox: process.env.NODE_ENV !== 'production',
+              })
+            : await issueGlobalForEmisor({ emisorId: emisor.id, now, sandbox: process.env.NODE_ENV !== 'production', desde: desde! })
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
+      const excluidas = r.excluidas ?? {}
+      // Ronda 1 (m4): ya estaba timbrada (otra solicitud llegó antes): no se audita ni se reporta como emisión nueva.
+      if (r.status === 'STAMPED' && r.yaTimbrada)
+        return text({
+          ok: true,
+          status: r.status,
+          yaTimbrada: true,
+          folio: `${r.cfdi.serie ?? ''}${r.cfdi.folio ?? ''}` || null,
+          uuid: r.cfdi.uuid,
+          message: 'Esta factura global ya estaba timbrada; no se emitió otra.',
+          excluidas,
+          ...(r.complementariaDe ? { complementariaDe: r.complementariaDe } : {}),
+        })
+      if (r.status !== 'STAMPED') {
+        const motivo =
+          r.status === 'NOTHING_TO_INVOICE'
+            ? 'No hay ventas por facturar en este periodo.'
+            : r.status === 'STAMP_FAILED'
+              ? (r.cfdi?.lastError ?? 'El PAC rechazó el timbrado.')
+              : (r.reasons?.join(' | ') ?? r.reason ?? null)
+        return text({ ok: r.status === 'NOTHING_TO_INVOICE', status: r.status, motivo, excluidas })
+      }
+      await auditMcpWrite(scope, {
+        action: 'CFDI_GLOBAL_ISSUED',
+        entity: 'Cfdi',
+        entityId: r.cfdi.id,
+        venueId,
+        data: {
+          emisorId: emisor.id,
+          period: r.period ? `${r.period.meses}/${r.period.anio}` : null,
+          count: r.candidateCount ?? 0,
+          uuid: r.cfdi.uuid,
+          excluidas,
+          ajustes: r.cfdi.entrada?.ajustes ?? [],
+          complementariaDe: r.cfdi.entrada?.complementariaDe ?? r.complementariaDe ?? null,
+        },
+      })
+      return text({
+        ok: true,
+        status: r.status,
+        folio: `${r.cfdi.serie ?? ''}${r.cfdi.folio ?? ''}` || null,
+        uuid: r.cfdi.uuid,
+        excluidas,
+        ...(r.complementariaDe ? { complementariaDe: r.complementariaDe } : {}),
+      })
+    },
+  )
+
+  // ─── Las ventas que no entraron a la factura global, y por qué (C1, Tarea 12) ─────────
+  server.tool(
+    'global_invoice_excluded_sales',
+    'Lista las ventas de un periodo que NO entraron a la factura global (CFDI a público en general) y por qué (motivo, texto y detalle de cada una, con su folio y lo cobrado). Periodo: el de una global que ya existe (principalCfdiId, aunque la periodicidad haya cambiado), uno reciente (desde = su inicio, tal como lo da el panel de periodos) o, sin nada, el último cerrado. totales y corregidasPendientes (las que irían en una complementaria) sólo en la primera página; completo: false = «al menos N». ultimaCaptura es la estadística de cuando se capturó la global, aparte. globalApagada: true = la factura global de Avoqado está apagada para este RFC (ningún comercio suyo con «Incluir en la factura global» y el interruptor de ventas fuera de la terminal apagado): normal si su contador la emite por su cuenta. Sólo lectura.',
+    {
+      venueId: z.string().describe('El local (debe estar en tu alcance)'),
+      emisorId: z.string().optional().describe('El RFC emisor; sin él, el único del local'),
+      principalCfdiId: z.string().optional().describe('El id de una factura global principal que ya existe (su periodo guardado)'),
+      desde: z.string().optional().describe('El inicio de un periodo reciente (ISO, tal como lo da el panel de periodos)'),
+      cursor: z.string().optional().describe('El `siguiente` de la página anterior'),
+      limite: z.number().int().min(1).max(50).optional().describe('Ventas por página (1 a 50; por omisión 50)'),
+    },
+    async ({ venueId, emisorId, principalCfdiId, desde, cursor, limite }) => {
+      guard.venueFilter(venueId)
+      // Mismo permiso que la lista del panel de la factura global (lectura).
+      guard.requirePermission('cfdi:view', venueId)
+      // CFDI es feature de pago — el MCP no puede ser un atajo al paywall.
+      const entitled = await venuesWithFeatureAccess([venueId], 'CFDI')
+      if (!entitled.has(venueId)) {
+        return text({
+          ok: false,
+          planRequired: true,
+          feature: 'CFDI',
+          error: 'CFDI (facturación) no está activo en este local. Requiere la feature CFDI o un plan Avoqado activo.',
+        })
+      }
+      // El RFC: el indicado, o el único del local (con varios, se pregunta cuál).
+      const emisores = await prisma.fiscalEmisor.findMany({
+        where: { venueId, ...(emisorId ? { id: emisorId } : {}) },
+        select: { id: true, rfc: true, legalName: true },
+        orderBy: { id: 'asc' },
+        take: 20,
+      })
+      if (!emisores.length)
+        return text({ ok: false, error: emisorId ? 'No encontré ese RFC emisor en este local.' : 'Este local no tiene RFC emisor.' })
+      if (emisores.length > 1)
+        return text({
+          ok: false,
+          needsInput: true,
+          field: 'emisorId',
+          question: '¿Con cuál RFC emisor?',
+          opciones: emisores.map(e => ({ emisorId: e.id, rfc: e.rfc, nombre: e.legalName })),
+        })
+      try {
+        const r = await listarExcluidasDeLaGlobal({
+          venueId,
+          emisorId: emisores[0].id,
+          now: new Date(),
+          ...(principalCfdiId ? { principalId: principalCfdiId } : {}),
+          ...(desde ? { desde } : {}),
+          ...(cursor ? { cursor } : {}),
+          ...(limite !== undefined ? { limite } : {}),
+        })
+        return text({
+          ok: true,
+          periodo: r.periodo,
+          estadoDelPeriodo: r.estadoDelPeriodo,
+          totales: r.totales,
+          corregidasPendientes: r.corregidasPendientes,
+          ultimaCaptura: r.ultimaCaptura,
+          ventas: r.excluidas.map(x => ({ ...x, cobradoMxn: x.cobradoCents / 100 })),
+          siguiente: r.siguiente,
+          // Ola final de C1: true ⇒ la factura global de Avoqado está APAGADA para este RFC (ningún comercio suyo en la global y el
+          // interruptor de las ventas fuera de la terminal apagado): lo que no entró es por eso, no un error.
+          globalApagada: r.globalApagada,
+        })
       } catch (err) {
         return text({ ok: false, error: (err as Error).message })
       }

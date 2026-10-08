@@ -246,6 +246,61 @@ export function groupOrderIntoGlobalLines(
 }
 
 /**
+ * C1 (H3): el concepto de UNA línea de la global (la de hoy, sin cambiar dinero ni impuestos) con el folio del ticket en `sku`
+ * (NoIdentificacion); sin folio, el id de la orden.
+ */
+export function itemDeLineaGlobal(line: GlobalInvoiceLine): CfdiItemInput {
+  const taxIncluded = line.priceIncludesIva === true
+  const rate = line.taxRate ?? 0.16 // legacy lines (no rate) default to 16%
+  const exempt = rate <= 0 || line.objetoImp === '01'
+  return {
+    satProductKey: '01010101', // ClaveProdServ genérico — SAT requires this for factura global
+    satUnitKey: 'ACT', // Actividad — ClaveUnidad genérico para global
+    description: 'Venta',
+    quantity: 1,
+    // Gross order → send the IVA-included total (PAC extracts IVA). Net order → send the base (PAC adds IVA).
+    unitPriceCents: taxIncluded ? line.totalCents : line.subtotalCents,
+    discountCents: 0,
+    // ObjetoImp + traslado come from the products' real tax treatment, not an assumed 16%.
+    objetoImp: exempt ? '01' : '02',
+    taxes: exempt ? [] : [{ type: 'IVA', factor: 'Tasa', rate, withholding: false }],
+    taxIncluded,
+    sku: line.orderNumber ?? line.orderId,
+  }
+}
+
+/**
+ * H4 (Guía de llenado del CFDI global, FormaPago: «la forma de pago con la que se liquida la mayor cantidad del pago»; empate «cuando se reciban
+ * dos o más formas de pago con el mismo importe»). Ronda 1 de la T6 (I3): se suma `paidCents` de los tickets POR FORMA y gana la de mayor suma;
+ * a igual suma, la forma con el ticket mayor; si también empata, la forma del ticket mayor de menor `orderId` (la guía deja elegir). Antes era la
+ * forma del ticket de mayor monto: con dos tickets de $300 con tarjeta y uno de $500 en efectivo daba 01; ahora 04. '99' SÓLO con la lista vacía.
+ */
+export function formaPagoDeLaGlobal(tickets: Array<{ orderId: string; paidCents: number; formaPago: string }>): string {
+  // C1 (Tarea 7; re-revisión de la T6): un ticket «por definir» ('99') no es una forma de pago, así que nunca decide la global si hay otra
+  // forma: se deja fuera de la suma (su dinero sigue en la global). Con TODOS en '99' sale '99' y la validación previa la detiene («La forma
+  // de pago no está definida»). La captura v2 ya no deja entrar esos tickets (`ticketParaGlobal`); esto es la segunda capa.
+  const conForma = tickets.filter(t => t.formaPago !== '99')
+  const grupos = new Map<string, { sumaCents: number; mayorCents: number; idDelMayor: string }>()
+  for (const t of conForma.length ? conForma : tickets) {
+    const g = grupos.get(t.formaPago)
+    if (!g) grupos.set(t.formaPago, { sumaCents: t.paidCents, mayorCents: t.paidCents, idDelMayor: t.orderId })
+    else {
+      const mayor = t.paidCents > g.mayorCents || (t.paidCents === g.mayorCents && t.orderId < g.idDelMayor)
+      grupos.set(t.formaPago, {
+        sumaCents: g.sumaCents + t.paidCents,
+        mayorCents: mayor ? t.paidCents : g.mayorCents,
+        idDelMayor: mayor ? t.orderId : g.idDelMayor,
+      })
+    }
+  }
+  const [ganadora] = [...grupos].sort(
+    ([, a], [, b]) =>
+      b.sumaCents - a.sumaCents || b.mayorCents - a.mayorCents || (a.idDelMayor < b.idDelMayor ? -1 : a.idDelMayor > b.idDelMayor ? 1 : 0),
+  )
+  return ganadora?.[0] ?? '99'
+}
+
+/**
  * Pure. Builds the GlobalInvoiceParams for the PAC call.
  *
  * One item per (order, tax-rate group) — see groupOrderIntoGlobalLines — with:
@@ -256,7 +311,8 @@ export function groupOrderIntoGlobalLines(
  *   - tax  = the group's REAL rate (16/8/0); exento groups carry objetoImp 01 and no traslado
  *   - quantity = 1
  *
- * payment_form: if all orders share the same formaPago code, use it; otherwise use '99' (por definir).
+ * payment_form (C1, H4; round 1 of T6, I3): the formaPago whose tickets add up to the most (see `formaPagoDeLaGlobal`), never '99'
+ * just because the tickets used different methods. Each item carries its ticket folio in `sku` (H3, NoIdentificacion).
  *
  * Money: integer-cents end-to-end (the provider adapter converts to pesos for the PAC payload).
  */
@@ -267,28 +323,15 @@ export function buildGlobalInvoiceParams(
 ): GlobalInvoiceParams {
   if (lines.length === 0) throw new Error('buildGlobalInvoiceParams requires at least one line')
 
-  const items: CfdiItemInput[] = lines.map(line => {
-    const taxIncluded = line.priceIncludesIva === true
-    const rate = line.taxRate ?? 0.16 // legacy lines (no rate) default to 16%
-    const exempt = rate <= 0 || line.objetoImp === '01'
-    return {
-      satProductKey: '01010101', // ClaveProdServ genérico — SAT requires this for factura global
-      satUnitKey: 'ACT', // Actividad — ClaveUnidad genérico para global
-      description: 'Venta',
-      quantity: 1,
-      // Gross order → send the IVA-included total (PAC extracts IVA). Net order → send the base (PAC adds IVA).
-      unitPriceCents: taxIncluded ? line.totalCents : line.subtotalCents,
-      discountCents: 0,
-      // ObjetoImp + traslado come from the products' real tax treatment, not an assumed 16%.
-      objetoImp: exempt ? '01' : '02',
-      taxes: exempt ? [] : [{ type: 'IVA', factor: 'Tasa', rate, withholding: false }],
-      taxIncluded,
-    }
-  })
+  const items: CfdiItemInput[] = lines.map(itemDeLineaGlobal)
 
-  // Pick a single payment_form: unanimous → that code; mixed → '99' (por definir)
-  const formaCodes = [...new Set(lines.map(l => l.formaPago))]
-  const payment_form = formaCodes.length === 1 ? formaCodes[0] : '99'
+  // H4 (ronda 1 de la T6, I3): la forma que suma más entre los tickets (sus líneas sumadas por orden), nunca «99» por tener formas distintas.
+  const porOrden = new Map<string, { orderId: string; paidCents: number; formaPago: string }>()
+  for (const l of lines) {
+    const t = porOrden.get(l.orderId) ?? { orderId: l.orderId, paidCents: 0, formaPago: l.formaPago }
+    porOrden.set(l.orderId, { ...t, paidCents: t.paidCents + l.totalCents })
+  }
+  const payment_form = formaPagoDeLaGlobal([...porOrden.values()])
 
   return {
     receptor: {

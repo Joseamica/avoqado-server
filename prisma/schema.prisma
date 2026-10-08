@@ -17006,6 +17006,11 @@ model FiscalEmisor {
   // AND the month-end factura global / Flow C). Many venues do NOT declare cash income, so invoicing it
   // would force declaring sales they never meant to. Off by default; a venue turns it on explicitly.
   invoiceCashSales        Boolean           @default(false)
+  // OPT-IN (default false; founder 7-oct-2026, IVA C1): whether the month/period FACTURA GLOBAL may take sales paid ONLY
+  // outside the terminal (no payment with a merchant: cash, transfer, vouchers, custom tender types). Only applies with ONE
+  // RFC in the venue (with several, nobody knows whose they are). Off => those sales are excluded with motive SIN_TERMINAL;
+  // on => they enter (cash still needs invoiceCashSales). Sales WITH a merchant are governed by MerchantFiscalConfig.
+  includeOffTerminalSalesInGlobal Boolean           @default(false)
   // OPT-IN (default false): whether CASH-paid sales count in the FISCAL numbers (pólizas / IVA flujo /
   // ISR / reportes contables). Separate from invoicing: the gerencial "¿cuánto gané?" ALWAYS shows the
   // full total; this flag only governs whether cash reaches the fiscal books. Off by default → cash is

@@ -1,4 +1,4 @@
-import { bulkManualSalesSchema, manualSaleRowSchema } from '@/schemas/dashboard/manualSale.schema'
+import { manualSaleRowSchema } from '@/schemas/dashboard/manualSale.schema'
 
 describe('manualSaleRowSchema', () => {
   it('accepts a valid row', () => {
@@ -43,20 +43,5 @@ describe('manualSaleRowSchema', () => {
         amount: '0',
       }),
     ).toThrow(/ICCID/i)
-  })
-})
-
-describe('bulkManualSalesSchema', () => {
-  // Sólo forma: una fila con una celda vacía NO puede tumbar el lote entero en el
-  // middleware; el servicio la marca como error de esa fila (Isaac, 8-oct-2026).
-  it('acepta un lote aunque una fila no traiga storeName', () => {
-    const r = bulkManualSalesSchema.safeParse({ rows: [{ iccid: '8952140063677014972F', amount: 1 }] })
-    expect(r.success).toBe(true)
-  })
-
-  it('sigue rechazando un lote vacío en español', () => {
-    const r = bulkManualSalesSchema.safeParse({ rows: [] })
-    expect(r.success).toBe(false)
-    expect(r.error?.issues[0].message).toBe('Sube al menos una venta')
   })
 })

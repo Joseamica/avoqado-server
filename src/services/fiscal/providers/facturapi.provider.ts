@@ -4,6 +4,7 @@ import logger from '../../../config/logger'
 import {
   CancelInvoiceParams,
   CancelInvoiceResult,
+  CfdiItemInput,
   CreateInvoiceParams,
   CreateOrgParams,
   CreateOrgResult,
@@ -214,6 +215,40 @@ export class FacturapiProvider implements FiscalProvider {
     return inv
   }
 
+  /**
+   * El concepto como lo recibe Facturapi. UNO solo para factura, nota y global (antes eran tres copias del mismo mapeo).
+   *
+   * 🔴 Sin `sku` ni `base` el JSON sale idéntico, llave por llave y en el mismo orden, al de antes de la Tarea 4 de C1:
+   * `sku` y `base` sólo se agregan cuando el concepto los trae (probado byte a byte en las tres pruebas del proveedor).
+   */
+  private itemFacturapi(it: CfdiItemInput) {
+    return {
+      quantity: it.quantity,
+      discount: toPesos(it.discountCents),
+      product: {
+        description: it.description,
+        product_key: it.satProductKey,
+        unit_key: it.satUnitKey,
+        // IVA-included (gross) when taxIncluded → facturapi back-computes the base so the stamped Total equals what the
+        // customer paid; NET (+IVA on top) otherwise. Con hasta 6 decimales sólo cuando el precio no cae en centavos (B3a/C1).
+        price: it.unitPriceDecimal != null ? Number(it.unitPriceDecimal) : toPesos(it.unitPriceCents),
+        tax_included: it.taxIncluded === true,
+        // ObjetoImp del concepto: sin él facturapi asume 02 (sí objeto) y un exento/no objeto se timbraría mal.
+        ...(it.objetoImp ? { taxability: it.objetoImp } : {}),
+        // NoIdentificacion (H3: el folio del ticket en la global).
+        ...(it.sku ? { sku: it.sku } : {}),
+        taxes: it.taxes.map(t => ({
+          type: t.type,
+          rate: t.rate,
+          factor: t.factor,
+          withholding: t.withholding,
+          // Base en pesos que manda Avoqado (D4); sin ella el PAC la calcula del precio.
+          ...(t.base !== undefined ? { base: Number(t.base) } : {}),
+        })),
+      },
+    }
+  }
+
   async createInvoice(params: CreateInvoiceParams): Promise<StampedInvoice> {
     const payload = {
       customer: {
@@ -234,27 +269,7 @@ export class FacturapiProvider implements FiscalProvider {
       ...(params.relation
         ? { related_documents: [{ relationship: params.relation.tipoRelacion, documents: params.relation.relatedUuids }] }
         : {}),
-      items: params.items.map(it => ({
-        quantity: it.quantity,
-        discount: toPesos(it.discountCents),
-        product: {
-          description: it.description,
-          product_key: it.satProductKey,
-          unit_key: it.satUnitKey,
-          // IVA-included (gross) when taxIncluded → facturapi back-computes the base so the
-          // stamped Total equals what the customer paid; NET (+IVA on top) otherwise.
-          price: it.unitPriceDecimal != null ? Number(it.unitPriceDecimal) : toPesos(it.unitPriceCents),
-          tax_included: it.taxIncluded === true,
-          // ObjetoImp del concepto: sin él facturapi asume 02 (sí objeto) y un exento/no objeto se timbraría mal.
-          ...(it.objetoImp ? { taxability: it.objetoImp } : {}),
-          taxes: it.taxes.map(t => ({
-            type: t.type,
-            rate: t.rate,
-            factor: t.factor,
-            withholding: t.withholding,
-          })),
-        },
-      })),
+      items: params.items.map(it => this.itemFacturapi(it)),
     }
     try {
       const inv = await this.postInvoice(payload)
@@ -433,25 +448,7 @@ export class FacturapiProvider implements FiscalProvider {
       ...(params.serie ? { series: params.serie } : {}),
       ...(params.externalId ? { external_id: params.externalId } : {}),
       related_documents: [{ relationship: params.relationship, documents: params.relatedUuids }],
-      items: params.items.map(it => ({
-        quantity: it.quantity,
-        discount: toPesos(it.discountCents),
-        product: {
-          description: it.description,
-          product_key: it.satProductKey,
-          unit_key: it.satUnitKey,
-          price: toPesos(it.unitPriceCents),
-          tax_included: it.taxIncluded === true,
-          // ObjetoImp del concepto: sin él facturapi asume 02 (sí objeto) y un exento/no objeto se timbraría mal.
-          ...(it.objetoImp ? { taxability: it.objetoImp } : {}),
-          taxes: it.taxes.map(t => ({
-            type: t.type,
-            rate: t.rate,
-            factor: t.factor,
-            withholding: t.withholding,
-          })),
-        },
-      })),
+      items: params.items.map(it => this.itemFacturapi(it)),
     }
     try {
       const inv = await this.postInvoice(payload)
@@ -505,27 +502,7 @@ export class FacturapiProvider implements FiscalProvider {
         months: params.global.months,
         year: params.global.year,
       },
-      items: params.items.map(it => ({
-        quantity: it.quantity,
-        discount: toPesos(it.discountCents),
-        product: {
-          description: it.description,
-          product_key: it.satProductKey,
-          unit_key: it.satUnitKey,
-          // IVA-included (gross) when taxIncluded → facturapi back-computes the base so the
-          // stamped Total equals what the customer paid; NET (+IVA on top) otherwise.
-          price: toPesos(it.unitPriceCents),
-          tax_included: it.taxIncluded === true,
-          // ObjetoImp del concepto: sin él facturapi asume 02 (sí objeto) y un exento/no objeto se timbraría mal.
-          ...(it.objetoImp ? { taxability: it.objetoImp } : {}),
-          taxes: it.taxes.map(t => ({
-            type: t.type,
-            rate: t.rate,
-            factor: t.factor,
-            withholding: t.withholding,
-          })),
-        },
-      })),
+      items: params.items.map(it => this.itemFacturapi(it)),
     }
     try {
       const inv = await this.postInvoice(payload)

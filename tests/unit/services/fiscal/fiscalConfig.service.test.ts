@@ -6,6 +6,8 @@ import {
   getFiscalConfig,
   FiscalConfigDeps,
 } from '../../../../src/services/fiscal/fiscalConfig.service'
+import { BadRequestError } from '../../../../src/errors/AppError'
+import { MOTIVO_BIMESTRAL_SOLO_621 } from '../../../../src/services/fiscal/globalPeriod'
 
 function deps(over: Partial<FiscalConfigDeps> = {}): FiscalConfigDeps {
   return {
@@ -78,6 +80,62 @@ describe('upsertEmisor', () => {
     const d = deps()
     await upsertEmisor({ venueId: 'v1', rfc: 'EKU9003173C9', legalName: 'X', regimenFiscal: '601', lugarExpedicion: '64000' }, d)
     expect((d.upsertEmisorRow as jest.Mock).mock.calls[0][0].globalPeriodicity).toBe('MENSUAL')
+  })
+
+  // ── C1 · Tarea 9 (Codex C1-4): la bimestral sólo con el régimen 621; la configuración la rechaza antes de escribir ──
+  describe('C1 · bimestral sólo con régimen 621', () => {
+    const base = { venueId: 'v1', rfc: 'EKU9003173C9', legalName: 'X', lugarExpedicion: '64000' }
+    it('🔴 alta BIMESTRAL con régimen 601 ⇒ BadRequestError con el motivo, sin escribir', async () => {
+      const d = deps()
+      const r = upsertEmisor({ ...base, regimenFiscal: '601', globalPeriodicity: 'BIMESTRAL' }, d)
+      await expect(r).rejects.toBeInstanceOf(BadRequestError)
+      await expect(r).rejects.toThrow(MOTIVO_BIMESTRAL_SOLO_621)
+      expect(d.upsertEmisorRow).not.toHaveBeenCalled()
+    })
+    it('🔴 cambio de un emisor existente a BIMESTRAL con régimen 601 ⇒ BadRequestError (400, nunca «not found»), sin escribir', async () => {
+      const d = deps()
+      const r = upsertEmisor({ ...base, emisorId: 'e1', regimenFiscal: '601', globalPeriodicity: 'BIMESTRAL' }, d)
+      await expect(r).rejects.toMatchObject({ statusCode: 400, message: MOTIVO_BIMESTRAL_SOLO_621 })
+      expect(d.upsertEmisorRow).not.toHaveBeenCalled()
+    })
+    it('🔴 un emisor BIMESTRAL que cambia su régimen a 612 (sin tocar la periodicidad) ⇒ rechazado, sin escribir', async () => {
+      const d = deps()
+      // El dashboard manda la periodicidad que tiene guardada junto con el régimen nuevo.
+      await expect(upsertEmisor({ ...base, emisorId: 'e1', regimenFiscal: '612', globalPeriodicity: 'BIMESTRAL' }, d)).rejects.toThrow(
+        MOTIVO_BIMESTRAL_SOLO_621,
+      )
+      expect(d.upsertEmisorRow).not.toHaveBeenCalled()
+    })
+    it('control — BIMESTRAL con régimen 621 ⇒ escribe', async () => {
+      const d = deps()
+      await upsertEmisor({ ...base, regimenFiscal: '621', globalPeriodicity: 'BIMESTRAL' }, d)
+      expect((d.upsertEmisorRow as jest.Mock).mock.calls[0][0]).toMatchObject({ regimenFiscal: '621', globalPeriodicity: 'BIMESTRAL' })
+    })
+    it('control — MENSUAL (o sin periodicidad) con régimen 601 ⇒ escribe', async () => {
+      const d = deps()
+      await upsertEmisor({ ...base, regimenFiscal: '601', globalPeriodicity: 'MENSUAL' }, d)
+      await upsertEmisor({ ...base, emisorId: 'e1', regimenFiscal: '601' }, d)
+      expect(d.upsertEmisorRow).toHaveBeenCalledTimes(2)
+    })
+  })
+
+  // Ajuste del founder (7-oct): «Incluir en la factura global las ventas cobradas fuera de la terminal», por RFC, apagado de fábrica.
+  describe('C1 · includeOffTerminalSalesInGlobal (la configuración del dueño manda)', () => {
+    const base = { venueId: 'v1', rfc: 'EKU9003173C9', legalName: 'X', regimenFiscal: '601', lugarExpedicion: '64000' }
+    it('🔴 al encenderlo (alta o cambio) se escribe tal cual', async () => {
+      const d = deps()
+      await upsertEmisor({ ...base, includeOffTerminalSalesInGlobal: true }, d)
+      await upsertEmisor({ ...base, emisorId: 'e1', includeOffTerminalSalesInGlobal: false }, d)
+      const llamadas = (d.upsertEmisorRow as jest.Mock).mock.calls
+      expect(llamadas[0][0]).toMatchObject({ includeOffTerminalSalesInGlobal: true })
+      expect(llamadas[1][0]).toMatchObject({ includeOffTerminalSalesInGlobal: false })
+    })
+    it('control — si no viene, no se escribe: el alta toma el default false de la base y un cambio no lo resetea', async () => {
+      const d = deps()
+      await upsertEmisor(base, d)
+      await upsertEmisor({ ...base, emisorId: 'e1' }, d)
+      for (const [data] of (d.upsertEmisorRow as jest.Mock).mock.calls) expect(data).not.toHaveProperty('includeOffTerminalSalesInGlobal')
+    })
   })
 })
 

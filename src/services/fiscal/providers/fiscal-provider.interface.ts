@@ -78,6 +78,8 @@ export interface CfdiItemTax {
   factor: 'Tasa' | 'Cuota' | 'Exento'
   rate: number // e.g. 0.16
   withholding: boolean // true = retención, false = traslado
+  /** Base del traslado en pesos con 6 decimales (concepto de la global con varias tasas, D4). Sin ella, el PAC la calcula del precio. */
+  base?: string
 }
 
 export interface CfdiItemInput {
@@ -103,6 +105,8 @@ export interface CfdiItemInput {
   taxes: CfdiItemTax[]
   /** When true, `unitPriceCents` is IVA-included and the PAC must back-compute the base (tax_included). Default false. */
   taxIncluded?: boolean
+  /** NoIdentificacion (H3: el folio del ticket en la global; C2/C3: el ticket en la nota). */
+  sku?: string
 }
 
 export interface CreateInvoiceParams {
