@@ -173,6 +173,7 @@ async function main() {
       console.log('   costo y descripción → vacíos · etiquetas y alérgenos → vacíos · orden en su categoría → el del archivo.')
       console.log('   La imagen y el código de barras se reemplazan cuando el archivo los trae. El inventario queda por pieza;')
       console.log('   su stock no se toca.')
+      console.log('   Los que se descuentan por receta y los que se apagaron a mano (con su inventario) se quedan como están.')
     }
 
     if (!apply) {
@@ -193,7 +194,11 @@ async function main() {
     for (const [index, chunk] of chunks.entries()) {
       try {
         const result = await importMenu(venueId, chunk, actor)
-        console.log(`  lote ${index + 1}/${chunks.length}: ${result.stats.products} productos`)
+        const kept = result.stats.productsKeptOnRecipe + result.stats.productsKeptUntracked
+        console.log(
+          `  lote ${index + 1}/${chunks.length}: ${result.stats.products} productos` +
+            (kept ? ` (${kept} se quedaron como estaban: receta o apagado a mano)` : ''),
+        )
       } catch (error) {
         console.error(`\n🔴 Falló el lote ${index + 1}/${chunks.length}; los ${index} anteriores sí quedaron cargados.`)
         console.error('   Corre de nuevo el MISMO comando: lo ya cargado sale como YA_EXISTE y se carga lo que faltó.')

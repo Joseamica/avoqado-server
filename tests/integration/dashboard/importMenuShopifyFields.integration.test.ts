@@ -39,6 +39,7 @@ async function clearProducts(): Promise<void> {
   if (!venueId) return
   await prisma.inventoryMovement.deleteMany({ where: { inventory: { venueId } } })
   await prisma.inventory.deleteMany({ where: { venueId } })
+  await prisma.recipe.deleteMany({ where: { product: { venueId } } })
   await prisma.product.deleteMany({ where: { venueId } })
 }
 
@@ -253,5 +254,44 @@ describe('Shopify loader: only NEW SKUs unless told to update the existing ones'
     const after = await read('IQ-OLD')
     expect(after).toMatchObject({ name: 'Camisa Shopify', cost: null, description: null, tags: [], type: 'REGULAR', trackInventory: true })
     expect(after.price.toString()).toBe('600')
+  })
+})
+
+describe("inventoryByQuantity follows the same guards as the sheet's trackInventory (#131)", () => {
+  it('keeps a product on its recipe as it is (no unit, no Inventory row) and counts it', async () => {
+    const latte = await existing({ sku: 'LATTE', trackInventory: true, inventoryMethod: 'RECIPE' })
+    await prisma.recipe.create({ data: { productId: latte.id, portionYield: 1, totalCost: new Prisma.Decimal(12) } })
+
+    const r = await importMenu(venueId, merge({ name: 'Latte', sku: 'LATTE', price: 60, inventoryByQuantity: { unit: 'PIECE' } }), actor())
+
+    expect(await read('LATTE')).toMatchObject({ trackInventory: true, inventoryMethod: 'RECIPE', unit: null, inventory: null })
+    expect(await prisma.recipe.count({ where: { productId: latte.id } })).toBe(1)
+    expect(r.stats).toMatchObject({ productsKeptOnRecipe: 1, productsKeptUntracked: 0 })
+  })
+
+  it('keeps OFF a product turned off with its Inventory row, with its stock, and counts it', async () => {
+    const bolsa = await existing({ sku: 'BOLSA', trackInventory: false })
+    await prisma.inventory.create({ data: { productId: bolsa.id, venueId, currentStock: new Prisma.Decimal(7) } })
+
+    const r = await importMenu(venueId, merge({ name: 'Bolsa', sku: 'BOLSA', price: 40, inventoryByQuantity: { unit: 'PIECE' } }), actor())
+
+    const after = await read('BOLSA')
+    expect(after).toMatchObject({ trackInventory: false, inventoryMethod: null, unit: null })
+    expect(after.inventory?.currentStock.toString()).toBe('7')
+    expect(r.stats).toMatchObject({ productsKeptOnRecipe: 0, productsKeptUntracked: 1 })
+  })
+
+  it('rejects the whole file for a type without stock BEFORE writing, naming the SKU', async () => {
+    await expect(
+      importMenu(
+        venueId,
+        merge(
+          { name: 'Gorra', sku: 'GORRA', price: 250, type: 'REGULAR', inventoryByQuantity: { unit: 'PIECE' } },
+          { name: 'Yoga', sku: 'YOGA', price: 150, type: 'CLASS', inventoryByQuantity: { unit: 'PIECE' } },
+        ),
+        actor(),
+      ),
+    ).rejects.toMatchObject({ statusCode: 400, message: expect.stringContaining('(SKU YOGA)') })
+    expect(await prisma.product.count({ where: { venueId } })).toBe(0)
   })
 })
