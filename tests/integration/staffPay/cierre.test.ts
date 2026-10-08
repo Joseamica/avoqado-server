@@ -233,6 +233,21 @@ describe('cerrar el periodo (spec §6.3)', () => {
     expect(await prisma.serviceEarning.count({ where: { organizationId: m.orgId } })).toBe(0)
   })
 
+  it('E6a-fix5 K-n3: el 400 PERIODO_NO_TERMINA dice la fecha como los demás mensajes («31 ago 2026»), no en ISO', async () => {
+    m = await mundoConAgosto('cierre-no-termina-fecha')
+    const p = await preview(m, { ahora: new Date('2026-08-20T12:00:00Z') })
+    await expect(
+      cerrarPeriodo({
+        userId: m.owner,
+        venueId: m.venueId,
+        fecha: '2026-08-15',
+        ahora: new Date('2026-08-20T12:00:00Z'),
+        confirmarHuerfanas: true,
+        huellaEsperada: p.huella,
+      }),
+    ).rejects.toMatchObject({ code: 'PERIODO_NO_TERMINA', message: 'El periodo termina el 31 ago 2026: todavía no se puede cerrar' })
+  })
+
   it('las reservas de clase sin horario se confirman explícitamente y sus IDs quedan en el ActivityLog', async () => {
     m = await mundoConAgosto('cierre-huerfanas')
     await clase(m, { staffId: m.ana, inicioIso: '2026-08-04T14:00:00Z', reservas: confirmadas(8) })

@@ -386,7 +386,7 @@ describe('staff_service_pay — escritura (spec §9.3)', () => {
       ),
     )
     expect(pv).toMatchObject({ requiresConfirmation: true, expectedSourceFingerprint: 'a'.repeat(64), fecha: '2026-09-01' })
-    expect(pv.message).toMatch(/Se agrega un bono de \$100\.00 a Ana López en Polanco con el motivo «Bono» al periodo del 2026-09-01/)
+    expect(pv.message).toMatch(/Se agrega un bono de \$100\.00 a Ana López en Polanco con el motivo «Bono» al periodo del 1 sep 2026 al /)
     const desc = parse(
       await handlers.get('add_service_pay_adjustment')!(
         { venueId: 'v1', staffId: 's1', amount: -50, reason: 'Bono', idempotencyKey: 'clave-5678' },

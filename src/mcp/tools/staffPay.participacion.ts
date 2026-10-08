@@ -63,7 +63,7 @@ export const huellaDeSede = (sede: string, activa: boolean, fecha: string) => sh
  */
 export const motivoDeBloqueo = (b: Bloqueo, p: { porSede?: Array<{ venueId: string; nombre: string }> }): string =>
   b.codigo === 'NO_HA_TERMINADO'
-    ? `el periodo termina el ${b.hasta}`
+    ? `el periodo termina el ${diaLegible(b.hasta)}`
     : b.codigo === 'CLASES_EN_CURSO'
       ? `${b.n} clase(s) en curso`
       : b.codigo === 'EXCEPCIONES'
@@ -106,7 +106,10 @@ const QUE_HACER_SEDE: Record<string, string> = {
 const conQueHacer = (h: Herramientas, e: unknown) => {
   const code = (e as { code?: string })?.code
   const rango = (e as { details?: { desde?: string; hasta?: string } })?.details
-  const extra = code === 'FECHA_FUERA_DE_RANGO' && rango?.desde ? ` Rango: del ${rango.desde} al ${rango.hasta}.` : ''
+  const extra =
+    code === 'FECHA_FUERA_DE_RANGO' && rango?.desde
+      ? ` Rango: del ${diaLegible(rango.desde)} al ${diaLegible(rango.hasta ?? rango.desde)}.`
+      : ''
   return h.fallo(e, code && QUE_HACER_SEDE[code] ? `.${extra} ${QUE_HACER_SEDE[code]}` : '')
 }
 
@@ -135,7 +138,7 @@ export async function activarOrganizacion(
       ok: false,
       sinCambios: true,
       actual,
-      error: `Pago al personal ya está activado desde el ${actual.startDate}: no hay nada que cambiar.`,
+      error: `Pago al personal ya está activado desde el ${actual.startDate ? diaLegible(actual.startDate) : 'su inicio'}: no hay nada que cambiar.`,
     })
   // Cada sede elegida, por el alcance de la conexión antes de consultar nada.
   for (const s of args.sedes ?? []) h.guard.venueFilter(s)

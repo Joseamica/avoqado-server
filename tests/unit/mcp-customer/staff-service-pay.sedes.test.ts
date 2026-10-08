@@ -259,7 +259,7 @@ describe('configure_service_pay · accion «sede» (B11)', () => {
     expect(rango).toMatchObject({
       ok: false,
       code: 'FECHA_FUERA_DE_RANGO',
-      error: expect.stringMatching(/Rango: del 2026-10-01 al 2026-10-20/),
+      error: expect.stringMatching(/Rango: del 1 oct 2026 al 20 oct 2026/),
     })
     expect(auditMcpWrite).not.toHaveBeenCalled()
   })

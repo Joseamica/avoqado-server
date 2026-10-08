@@ -15,6 +15,7 @@ import {
 import { transaccionConPresupuesto } from '../../../utils/esperaDeCandados'
 import { alcanceDelPeriodo, bloquearSedesDeLaOrganizacion, sedesConVentana } from './participacion'
 import { dbDateComoFecha } from './periodos'
+import { fechaMx } from '../export.helpers'
 import { ClaseValorada, ReglaDeClase } from './valoracion'
 import { alcanceDe, alcanceDeVentas, Bloqueo, bloqueosDe, textoSedeActivaSinPlan } from './cierre.alcance'
 import {
@@ -195,7 +196,7 @@ export async function cerrarPeriodo(input: {
         const bloqueos = await bloqueosDe(tx, a, ahora, activas)
         const b = (codigo: Bloqueo['codigo']) => bloqueos.find(x => x.codigo === codigo)
         if (b('NO_HA_TERMINADO'))
-          throw new BadRequestError(`El periodo termina el ${a.periodo.end}: todavía no se puede cerrar`, 'PERIODO_NO_TERMINA')
+          throw new BadRequestError(`El periodo termina el ${fechaMx(a.periodo.end)}: todavía no se puede cerrar`, 'PERIODO_NO_TERMINA')
         const enCurso = b('CLASES_EN_CURSO') as { n: number } | undefined
         if (enCurso) throw new BadRequestError(`Hay ${enCurso.n} clase(s) en curso: espera a que terminen`, 'CLASES_EN_CURSO')
         const exc = b('EXCEPCIONES') as { n: number } | undefined

@@ -511,7 +511,7 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
             return text({
               ok: false,
               preview: pv,
-              error: `El periodo del ${pv.periodo.start} al ${pv.periodo.end} ya está cerrado: elige una fecha del periodo abierto.`,
+              error: `El periodo del ${diaLegible(pv.periodo.start)} al ${diaLegible(pv.periodo.end)} ya está cerrado: elige una fecha del periodo abierto.`,
             })
           }
           return text({
@@ -523,7 +523,7 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
             // en ESTE periodo (con «hoy» respondería CLAVE_REUTILIZADA y el humano recapturaría un bono doble).
             fecha: f ?? pv.periodo.start,
             // A quién y en qué sede: con dos «Ana» en el estudio, esta pantalla es lo que evita pagarle a la equivocada.
-            message: `${amount >= 0 ? 'Se agrega un bono de' : 'Se descuentan'} $${pesos(String(Math.abs(amount)))} a ${pv.persona} en ${pv.sedeNombre} con el motivo «${reason}» al periodo del ${pv.periodo.start} al ${pv.periodo.end}.${avisoDePendientes(pv.persona, pv.avisoPendientes, amount)}`,
+            message: `${amount >= 0 ? 'Se agrega un bono de' : 'Se descuentan'} $${pesos(String(Math.abs(amount)))} a ${pv.persona} en ${pv.sedeNombre} con el motivo «${reason}» al periodo del ${diaLegible(pv.periodo.start)} al ${diaLegible(pv.periodo.end)}.${avisoDePendientes(pv.persona, pv.avisoPendientes, amount)}`,
           })
         }
         if (!expectedSourceFingerprint)
