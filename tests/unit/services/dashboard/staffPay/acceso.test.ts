@@ -16,6 +16,8 @@ jest.mock('@/services/access/basePlan.service', () => ({
     return s
   },
 }))
+const mockAuditar = jest.fn()
+jest.mock('@/services/dashboard/accesoNegado', () => ({ auditarAccesoNegado: (...a: unknown[]) => mockAuditar(...a) }))
 jest.mock('@/services/access/access.service', () => ({
   getUserAccess: (...a: unknown[]) => mockGetUserAccess(...a),
   hasPermission: (access: { corePermissions: string[] }, p: string) => access.corePermissions.includes(p),
@@ -251,5 +253,29 @@ describe('acceso — E6a-fix2 C2: dónde falta el permiso, en palabras', () => {
     mockPlan.mockResolvedValue(true)
     mockGetUserAccess.mockImplementation(async () => ({ corePermissions: ['staffpay:close'] }))
     await expect(puedeAdministrarLaOrganizacion('u1', 'org1')).resolves.toBe(true)
+  })
+  it('sólo una ESCRITURA (con su sede) deja PERMISSION_DENIED; una vista previa (el MCP) no', async () => {
+    const prepara = () => {
+      prismaMock.venue.findMany.mockReset()
+      prismaMock.venue.findMany.mockResolvedValueOnce([{ id: 'pn' }, { id: 'bsf' }]).mockResolvedValue([])
+    }
+    mockPlan.mockResolvedValue(true)
+    mockGetUserAccess.mockImplementation(async (_u: string, v: string) => ({ corePermissions: v === 'pn' ? ['staffpay:close'] : [] }))
+    mockAuditar.mockClear()
+    prepara()
+    await expect(assertPermisoEnTodasLasSedes('u1', 'org1', 'staffpay:close')).rejects.toMatchObject({ statusCode: 403 })
+    expect(mockAuditar).not.toHaveBeenCalled()
+    prepara()
+    await expect(assertPermisoEnTodasLasSedes('u1', 'org1', 'staffpay:close', { venueId: 'pn' })).rejects.toMatchObject({ statusCode: 403 })
+    expect(mockAuditar).toHaveBeenCalledWith(
+      expect.objectContaining({ staffId: 'u1', venueId: 'pn', organizationId: 'org1', entityId: 'staffpay:close' }),
+    )
+    // Sin el plan en ninguna sede no es una negativa de PERMISO: no se audita como tal.
+    mockAuditar.mockClear()
+    prismaMock.venue.findMany.mockReset()
+    prismaMock.venue.findMany.mockResolvedValueOnce([{ id: 'pn' }]).mockResolvedValue([])
+    mockPlan.mockResolvedValue(false)
+    await expect(assertPermisoEnTodasLasSedes('u1', 'org1', 'staffpay:close', { venueId: 'pn' })).rejects.toMatchObject({ statusCode: 403 })
+    expect(mockAuditar).not.toHaveBeenCalled()
   })
 })

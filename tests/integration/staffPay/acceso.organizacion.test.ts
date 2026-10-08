@@ -106,17 +106,23 @@ describe('C2 · permiso de cierre en una sede y no en otra (entrando desde la se
 
   it('cada 403 de una ESCRITURA deja PERMISSION_DENIED en la bitácora, como los del middleware', async () => {
     const antes = negaciones(parcial, wellness).length
-    await expect(cambiarPeriodicidad({ userId: parcial, venueId: wellness, periodicidad: 'SEMIMONTHLY' })).rejects.toMatchObject({
-      statusCode: 403,
-    })
-    const filas = negaciones(parcial, wellness)
-    expect(filas.length).toBe(antes + 1)
-    expect(filas[filas.length - 1]).toMatchObject({
+    // Una tras otra (no en paralelo): el orden de la bitácora es el de las llamadas.
+    const escrituras = [
+      () => cambiarPropinas({ userId: parcial, venueId: wellness, encender: true }),
+      () => activarPagoAlPersonal({ userId: parcial, venueId: wellness, periodicidad: 'MONTHLY' }),
+      () => cambiarPeriodicidad({ userId: parcial, venueId: wellness, periodicidad: 'SEMIMONTHLY' }),
+      () => crearNivel({ organizationId: orgId, name: 'Coach', actorId: parcial, venueId: wellness }),
+    ]
+    for (const e of escrituras) await expect(e()).rejects.toMatchObject({ statusCode: 403 })
+    const filas = negaciones(parcial, wellness).slice(antes)
+    expect(filas.map(f => f.entityId)).toEqual(['staffpay:close', 'staffpay:close', 'staffpay:close', 'staffpay:manage'])
+    expect(filas[0]).toMatchObject({
       organizationId: orgId,
       entity: 'permission',
       entityId: 'staffpay:close',
       data: { permission: 'staffpay:close', reason: 'FALTA_PERMISO_EN_SEDES', faltanEn: expect.arrayContaining([full, lejana]) },
     })
+    expect(filas[0].data.faltanEn).toHaveLength(2)
   })
 
   it('el booleano de GET /access es una LECTURA: no deja nada en la bitácora', async () => {
