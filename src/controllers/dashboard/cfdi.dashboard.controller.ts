@@ -1,4 +1,4 @@
-import AppError, { ConflictError } from '../../errors/AppError'
+import AppError, { BadRequestError, ConflictError } from '../../errors/AppError'
 /**
  * CFDI Dashboard Controller
  *
@@ -21,15 +21,25 @@ import {
   getCfdiStatus,
   listCfdisForVenue,
   MOTIVO_CONTRATO_DESCONOCIDO,
+  PROCESANDO,
 } from '@/services/fiscal/cfdi.service'
 import { vistaPreviaContrato, confirmarContratoIvaIncluido, VistaPreviaContrato } from '@/services/fiscal/confirmarContratoDePrecio.service'
 import { replaceCfdi } from '@/services/fiscal/cfdiReplacement.service'
 import { emitRefundCreditNote, getRefundCreditNoteStatus } from '@/services/fiscal/cfdiCreditNote.service'
 import { searchSatCatalog } from '@/services/fiscal/satCatalogLookup.service'
 import { SatCatalogUnavailableError } from '@/errors/AppError'
-import { issueGlobalForEmisor } from '@/services/fiscal/cfdiGlobal.service'
+import {
+  emitirGlobalComplementaria,
+  issueGlobalForEmisor,
+  listarExcluidasDeLaGlobal,
+  periodosDeLaGlobal,
+  vistaPreviaComplementaria,
+  type IssueGlobalResult,
+} from '@/services/fiscal/cfdiGlobal.service'
+import { MOTIVO_ANIO_FUERA } from '@/services/fiscal/globalPeriod'
 import { upsertEmisor, upsertMerchantFiscalConfig, getFiscalConfig } from '@/services/fiscal/fiscalConfig.service'
 import { provisionEmisor, uploadEmisorCsd, syncEmisorLogo, getEmisorProviderStatus } from '@/services/fiscal/fiscalOnboarding.service'
+import { emisorSeguro } from '@/services/fiscal/emisorSeguro'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { sendCfdiByEmail } from '@/services/fiscal/cfdiEmail.service'
 import { fetchStorageObject } from '@/services/storage.service'
@@ -686,6 +696,7 @@ export async function upsertEmisorController(req: Request, res: Response): Promi
     defaultUsoCfdi,
     globalPeriodicity,
     invoiceCashSales,
+    includeOffTerminalSalesInGlobal,
     includeCashInAccounting,
     isnRate,
   } = req.body
@@ -709,6 +720,7 @@ export async function upsertEmisorController(req: Request, res: Response): Promi
       defaultUsoCfdi,
       globalPeriodicity,
       invoiceCashSales,
+      includeOffTerminalSalesInGlobal,
       includeCashInAccounting,
       isnRate,
     })
@@ -719,14 +731,32 @@ export async function upsertEmisorController(req: Request, res: Response): Promi
       action: 'FISCAL_EMISOR_UPSERTED',
       entity: 'FiscalEmisor',
       entityId: emisor.id,
-      data: { rfc, legalName, regimenFiscal, lugarExpedicion, invoiceCashSales, includeCashInAccounting, isnRate, isUpdate: !!emisorId },
+      data: {
+        rfc,
+        legalName,
+        regimenFiscal,
+        lugarExpedicion,
+        invoiceCashSales,
+        includeOffTerminalSalesInGlobal,
+        includeCashInAccounting,
+        isnRate,
+        isUpdate: !!emisorId,
+      },
     })
 
-    res.status(200).json({ emisor })
+    // I1 (ola final C1): nunca la fila entera — sin la llave del PAC ni el secreto del webhook.
+    res.status(200).json({ emisor: emisorSeguro(emisor) })
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)
     // warn si la respuesta es un caso esperado (4xx); error sólo si termina en 5xx.
     const aviso = `[cfdi.controller] upsertEmisor failed for venue ${venueId}: ${message}`
+
+    // C1 · Tarea 9: una regla de negocio del servicio (p. ej. la bimestral sólo con el régimen 621) llega con su código y su texto.
+    if (err instanceof AppError && err.statusCode < 500) {
+      logger.warn(aviso)
+      res.status(err.statusCode).json({ error: err.message })
+      return
+    }
 
     if (/not found/i.test(message)) {
       logger.warn(aviso)
@@ -851,7 +881,8 @@ export async function provisionEmisorController(req: Request, res: Response): Pr
       data: { providerOrgId: emisor.providerOrgId },
     })
 
-    res.status(200).json({ emisor })
+    // I1 (ola final C1): nunca la fila entera — sin la llave del PAC ni el secreto del webhook.
+    res.status(200).json({ emisor: emisorSeguro(emisor) })
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)
     // warn si la respuesta es un caso esperado (4xx); error sólo si termina en 5xx.
@@ -909,7 +940,8 @@ export async function uploadEmisorCsdController(req: Request, res: Response): Pr
       data: { csdStatus: emisor.csdStatus, csdExpiresAt: emisor.csdExpiresAt ?? null },
     })
 
-    res.status(200).json({ emisor })
+    // I1 (ola final C1): nunca la fila entera — sin la llave del PAC ni el secreto del webhook.
+    res.status(200).json({ emisor: emisorSeguro(emisor) })
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)
     // warn si la respuesta es un caso esperado (4xx); error sólo si termina en 5xx.
@@ -1031,13 +1063,19 @@ export async function searchSatCatalogController(req: Request, res: Response): P
  *
  * Admin manual trigger for Flow C: issues the most-recent closed-period factura global for the
  * given FiscalEmisor. Gated by checkFeatureAccess('CFDI') + checkPermission('cfdi:configure').
+ * C1 (Tarea 8, C1-P16 = B): body `{ desde? }` = the ISO start of one of the RECENT closed periods the job reviews; an older period
+ * (or a date that is not a period start) → 400 «pídelo a soporte».
  *
- * Status mapping:
- *   STAMPED           → 201 { cfdi: { id, uuid, serie, folio, globalPeriod, pdfUrl } }
- *   NOTHING_TO_INVOICE → 200 { status, message }
- *   SKIPPED           → 409 (inactive CSD)
- *   VALIDATION_FAILED → 422 { error, reasons }
- *   STAMP_FAILED      → 502 { error, message }
+ * Status mapping (every body also carries `excluidasPorIvaMixto` and, C1 · T10, `excluidas` by motive):
+ *   STAMPED (emitted now)   → 201 { excluidasPorIvaMixto, excluidas, cfdi: { id, uuid, serie, folio, globalPeriod, pdfUrl } } + CFDI_GLOBAL_ISSUED
+ *   STAMPED (already was)   → 200 { status: 'YA_TIMBRADA', yaTimbrada: true, message, excluidasPorIvaMixto, excluidas, cfdi } (T11 r1 m4; no audit)
+ *   NOTHING_TO_INVOICE      → 200 { status, message, excluidasPorIvaMixto, excluidas }
+ *   SKIPPED (inactive CSD)  → 409 { error, reason }
+ *   SKIPPED (year, C1-33)   → 400 { error: MOTIVO_ANIO_FUERA }
+ *   VALIDATION_FAILED       → 422 { error, reasons, excluidasPorIvaMixto, excluidas } (also the C1 guards: bimestral/621, period covered by
+ *                             another pending global of another periodicity — MOTIVO_PERIODO_CUBIERTO)
+ *   STAMP_FAILED            → 502 { error, message, excluidasPorIvaMixto, excluidas }
+ *   `desde` not a recent period start → 400 { error: MOTIVO_PERIODO_VIEJO }; emisor of another venue → 404; in progress / other conflict → 409
  */
 export async function triggerGlobalCfdiController(req: Request, res: Response): Promise<void> {
   const { emisorId } = req.params
@@ -1064,7 +1102,11 @@ export async function triggerGlobalCfdiController(req: Request, res: Response): 
       return
     }
 
-    const result = await issueGlobalForEmisor({ emisorId, now: new Date(), sandbox })
+    // C1 (Tarea 8): `desde` (opcional, ya validado por triggerGlobalCfdiSchema) elige un periodo reciente; sin él, el último cerrado.
+    const desde: string | undefined = req.body?.desde
+    const result = await issueGlobalForEmisor({ emisorId, now: new Date(), sandbox, ...(desde !== undefined ? { desde } : {}) })
+    // C1 (Tarea 10): cada respuesta que lleva `excluidasPorIvaMixto` (se conserva) lleva además `excluidas` por motivo (nuevo; v1 ⇒ `{}`).
+    const excluidas = result.excluidas ?? {}
 
     switch (result.status) {
       case 'NOTHING_TO_INVOICE':
@@ -1072,10 +1114,16 @@ export async function triggerGlobalCfdiController(req: Request, res: Response): 
           status: 'NOTHING_TO_INVOICE',
           message: 'No hay tickets por facturar en el periodo.',
           excluidasPorIvaMixto: result.excluidasPorIvaMixto,
+          excluidas,
         })
         return
 
       case 'SKIPPED':
+        // C1 (Tarea 11): un periodo cuyo año ya no admite el SAT (C1-33) no es un CSD inactivo: 400 con su motivo («pídela a soporte»).
+        if (result.reason === MOTIVO_ANIO_FUERA) {
+          res.status(400).json({ error: result.reason })
+          return
+        }
         res.status(409).json({ error: 'El sello digital (CSD) del emisor no está activo.', reason: result.reason })
         return
 
@@ -1084,6 +1132,7 @@ export async function triggerGlobalCfdiController(req: Request, res: Response): 
           error: 'No se pudo generar la factura global',
           reasons: result.reasons,
           excluidasPorIvaMixto: result.excluidasPorIvaMixto,
+          excluidas,
         })
         return
 
@@ -1092,10 +1141,30 @@ export async function triggerGlobalCfdiController(req: Request, res: Response): 
           error: 'El PAC rechazó el timbrado de la factura global',
           message: result.cfdi?.lastError,
           excluidasPorIvaMixto: result.excluidasPorIvaMixto,
+          excluidas,
         })
         return
 
       case 'STAMPED': {
+        // Ronda 1 de la T11 (m4): ya estaba timbrada; no se emitió nada ahora ⇒ 200 sin auditoría.
+        if (result.yaTimbrada) {
+          res.status(200).json({
+            status: 'YA_TIMBRADA',
+            yaTimbrada: true,
+            message: 'La factura global de este periodo ya estaba timbrada; no se emitió otra.',
+            excluidasPorIvaMixto: result.excluidasPorIvaMixto,
+            excluidas,
+            cfdi: {
+              id: result.cfdi.id,
+              uuid: result.cfdi.uuid,
+              serie: result.cfdi.serie,
+              folio: result.cfdi.folio,
+              globalPeriod: result.cfdi.globalPeriod,
+              pdfUrl: result.cfdi.pdfUrl,
+            },
+          })
+          return
+        }
         // ActivityLog: CFDI_GLOBAL_ISSUED — audit mutation (critical-warnings rule)
         logAction({
           staffId: userId,
@@ -1108,11 +1177,16 @@ export async function triggerGlobalCfdiController(req: Request, res: Response): 
             period: result.period ? `${result.period.meses}/${result.period.anio}` : null,
             count: result.candidateCount ?? 0,
             uuid: result.cfdi.uuid,
+            // C1 (Tarea 10): lo que quedó fuera (por motivo), los centavos que puso la regla del PAC y, si aplica, su principal (Tarea 11).
+            excluidas,
+            ajustes: result.cfdi.entrada?.ajustes ?? [],
+            complementariaDe: result.cfdi.entrada?.complementariaDe ?? null,
           },
         })
 
         res.status(201).json({
           excluidasPorIvaMixto: result.excluidasPorIvaMixto,
+          excluidas,
           cfdi: {
             id: result.cfdi.id,
             uuid: result.cfdi.uuid,
@@ -1130,6 +1204,13 @@ export async function triggerGlobalCfdiController(req: Request, res: Response): 
     // warn si la respuesta es un caso esperado (4xx); error sólo si termina en 5xx.
     const aviso = `[cfdi.controller] triggerGlobalCfdi failed for emisor ${emisorId}: ${message}`
 
+    // C1 (Tarea 8): un periodo fuera de la ventana reciente (MOTIVO_PERIODO_VIEJO, «pídelo a soporte»).
+    if (err instanceof BadRequestError) {
+      logger.warn(aviso)
+      res.status(400).json({ error: message })
+      return
+    }
+
     if (/not found/i.test(message)) {
       logger.warn(aviso)
       res.status(404).json({ error: 'Emisor fiscal no encontrado' })
@@ -1145,6 +1226,286 @@ export async function triggerGlobalCfdiController(req: Request, res: Response): 
 
     logger.error(aviso)
     res.status(500).json({ error: 'Error interno al generar la factura global' })
+  }
+}
+
+/**
+ * GET /api/v1/dashboard/venues/:venueId/fiscal/emisores/:emisorId/global/periodos
+ *
+ * C1 (Tarea 8, C1-P16 = B): los periodos cerrados RECIENTES del emisor (los que revisa el job) con el estado de su global principal.
+ * Sin paginación hacia atrás: un periodo más viejo se pide a soporte. Gated by checkFeatureAccess('CFDI') + checkPermission('cfdi:view').
+ */
+export async function listGlobalPeriodosController(req: Request, res: Response): Promise<void> {
+  const { emisorId } = req.params
+  const authContext = (req as any).authContext ?? {}
+  const venueId = resolveRequestVenueId(req, authContext)
+  if (!venueId) {
+    res.status(400).json({ error: 'Venue ID requerido' })
+    return
+  }
+  try {
+    // Tenant guard: el emisor tiene que ser del negocio de quien pregunta.
+    const emisor = await prisma.fiscalEmisor.findFirst({ where: { id: emisorId, venueId }, select: { id: true } })
+    if (!emisor) {
+      res.status(404).json({ error: 'Emisor fiscal no encontrado' })
+      return
+    }
+    res.status(200).json(await periodosDeLaGlobal({ venueId, emisorId, now: new Date() }))
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err)
+    if (/not found/i.test(message)) {
+      logger.warn(`[cfdi.controller] listGlobalPeriodos: ${message}`)
+      res.status(404).json({ error: 'Emisor fiscal no encontrado' })
+      return
+    }
+    logger.error(`[cfdi.controller] listGlobalPeriodos failed for emisor ${emisorId}: ${message}`)
+    res.status(500).json({ error: 'Error interno al consultar los periodos de la factura global' })
+  }
+}
+
+/**
+ * GET /api/v1/dashboard/venues/:venueId/fiscal/emisores/:emisorId/global/excluidas?principalId=&desde=&cursor=&limite=
+ *
+ * C1 (Tarea 12): las ventas de un periodo que no entraron a la global, y por qué. Gated by checkFeatureAccess('CFDI') + checkPermission('cfdi:view').
+ */
+export async function listGlobalExcluidasController(req: Request, res: Response): Promise<void> {
+  const { emisorId } = req.params
+  const authContext = (req as any).authContext ?? {}
+  const venueId = resolveRequestVenueId(req, authContext)
+  if (!venueId) {
+    res.status(400).json({ error: 'Venue ID requerido' })
+    return
+  }
+  // Ya validada por `listGlobalExcluidasSchema` (`limite` llega como número).
+  const { principalId, desde, cursor, limite } = req.query as { principalId?: string; desde?: string; cursor?: string; limite?: number }
+  try {
+    // Tenant guard: el emisor tiene que ser del negocio de quien pregunta.
+    const emisor = await prisma.fiscalEmisor.findFirst({ where: { id: emisorId, venueId }, select: { id: true } })
+    if (!emisor) {
+      res.status(404).json({ error: 'Emisor fiscal no encontrado' })
+      return
+    }
+    const listado = await listarExcluidasDeLaGlobal({
+      venueId,
+      emisorId,
+      now: new Date(),
+      ...(principalId ? { principalId } : {}),
+      ...(desde ? { desde } : {}),
+      ...(cursor ? { cursor } : {}),
+      ...(limite !== undefined ? { limite } : {}),
+    })
+    res.status(200).json(listado)
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err)
+    const aviso = `[cfdi.controller] listGlobalExcluidas failed for emisor ${emisorId}: ${message}`
+    // Un periodo viejo, una global que no es principal de este emisor, una heredada timbrada: 400 con su texto (dicen qué hacer).
+    if (err instanceof BadRequestError) {
+      logger.warn(aviso)
+      res.status(400).json({ error: message })
+      return
+    }
+    if (/not found/i.test(message)) {
+      logger.warn(aviso)
+      res.status(404).json({ error: 'Emisor fiscal no encontrado' })
+      return
+    }
+    logger.error(aviso)
+    res.status(500).json({ error: 'Error interno al consultar las ventas que no entraron a la factura global' })
+  }
+}
+
+/**
+ * GET /api/v1/dashboard/venues/:venueId/fiscal/emisores/:emisorId/global/:principalId/complementaria
+ *
+ * C1 (Tarea 11): la vista previa de la complementaria de una global principal. Gated by checkFeatureAccess('CFDI') + checkPermission('cfdi:view').
+ */
+export async function previewGlobalComplementariaController(req: Request, res: Response): Promise<void> {
+  const { emisorId, principalId } = req.params
+  const authContext = (req as any).authContext ?? {}
+  const venueId = resolveRequestVenueId(req, authContext)
+  if (!venueId) {
+    res.status(400).json({ error: 'Venue ID requerido' })
+    return
+  }
+  try {
+    // Tenant guard: el emisor tiene que ser del negocio de quien pregunta.
+    const emisor = await prisma.fiscalEmisor.findFirst({ where: { id: emisorId, venueId }, select: { id: true } })
+    if (!emisor) {
+      res.status(404).json({ error: 'Emisor fiscal no encontrado' })
+      return
+    }
+    res.status(200).json(await vistaPreviaComplementaria({ venueId, emisorId, principalId, now: new Date() }))
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err)
+    const aviso = `[cfdi.controller] previewGlobalComplementaria failed for emisor ${emisorId}, principal ${principalId}: ${message}`
+    // No es una principal de este emisor, todavía no está timbrada, o su periodo no se puede demostrar: 400 con su texto.
+    if (err instanceof BadRequestError) {
+      logger.warn(aviso)
+      res.status(400).json({ error: message })
+      return
+    }
+    if (/not found/i.test(message)) {
+      logger.warn(aviso)
+      res.status(404).json({ error: 'Emisor fiscal no encontrado' })
+      return
+    }
+    logger.error(aviso)
+    res.status(500).json({ error: 'Error interno al consultar la complementaria de la factura global' })
+  }
+}
+
+/**
+ * POST /api/v1/dashboard/venues/:venueId/fiscal/emisores/:emisorId/global/:principalId/complementaria
+ *
+ * C1 (Tarea 11): emite (o retoma) la complementaria de una global principal. Gated by checkFeatureAccess('CFDI') + checkPermission('cfdi:configure').
+ *
+ * Status mapping (every body also carries `excluidasPorIvaMixto`, `excluidas` and `complementariaDe`):
+ *   STAMPED (emitted now)   → 201 { excluidasPorIvaMixto, excluidas, complementariaDe, cfdi } + CFDI_GLOBAL_ISSUED (data.complementariaDe)
+ *   STAMPED (already was)   → 200 { status: 'YA_TIMBRADA', yaTimbrada: true, message, …, cfdi } (no audit)
+ *   NOTHING_TO_INVOICE      → 200 { status, message, excluidasPorIvaMixto, excluidas, complementariaDe }
+ *   SKIPPED (inactive CSD)  → 409 { error, reason }; SKIPPED (year) → 400 { error: MOTIVO_ANIO_FUERA }
+ *   VALIDATION_FAILED       → 422 { error, reasons, … } (also the C1 guards, e.g. MOTIVO_PERIODO_CUBIERTO)
+ *   STAMP_FAILED            → 502 { error, message, … }
+ *   400 { error }: not a principal of this emisor, MOTIVO_SIN_PRINCIPAL, principal in cancellation, inherited principal, period not
+ *   demonstrable, the cap of 20 complementarias; 404 emisor; 409 «Se está emitiendo…» (in progress) or the conflict's own text.
+ */
+export async function emitGlobalComplementariaController(req: Request, res: Response): Promise<void> {
+  const { emisorId, principalId } = req.params
+  const authContext = (req as any).authContext ?? {}
+  const venueId = resolveRequestVenueId(req, authContext)
+  if (!venueId) {
+    res.status(400).json({ error: 'Venue ID requerido' })
+    return
+  }
+  const { userId } = authContext
+  // Sandbox in dev/staging; live key in production.
+  const sandbox = env.NODE_ENV !== 'production'
+  try {
+    const emisor = await prisma.fiscalEmisor.findFirst({ where: { id: emisorId, venueId }, select: { id: true } })
+    if (!emisor) {
+      res.status(404).json({ error: 'Emisor fiscal no encontrado' })
+      return
+    }
+    const result: IssueGlobalResult = await emitirGlobalComplementaria({ venueId, emisorId, principalId, now: new Date(), sandbox })
+    const excluidas = result.excluidas ?? {}
+    const complementariaDe = result.complementariaDe ?? principalId
+    switch (result.status) {
+      case 'NOTHING_TO_INVOICE':
+        res.status(200).json({
+          status: 'NOTHING_TO_INVOICE',
+          message: 'No hay ventas de este periodo por facturar en una global complementaria.',
+          excluidasPorIvaMixto: result.excluidasPorIvaMixto,
+          excluidas,
+          complementariaDe,
+        })
+        return
+      case 'SKIPPED':
+        // El año del periodo ya no lo admite el SAT (C1-33): 400 con su motivo. Un CSD inactivo, como el disparo de la principal.
+        if (result.reason === 'CSD inactivo') {
+          res.status(409).json({ error: 'El sello digital (CSD) del emisor no está activo.', reason: result.reason })
+          return
+        }
+        res.status(400).json({ error: result.reason })
+        return
+      case 'VALIDATION_FAILED':
+        res.status(422).json({
+          error: 'No se pudo generar la factura global complementaria',
+          reasons: result.reasons,
+          excluidasPorIvaMixto: result.excluidasPorIvaMixto,
+          excluidas,
+          complementariaDe,
+        })
+        return
+      case 'STAMP_FAILED':
+        res.status(502).json({
+          error: 'El PAC rechazó el timbrado de la factura global complementaria',
+          message: result.cfdi?.lastError,
+          excluidasPorIvaMixto: result.excluidasPorIvaMixto,
+          excluidas,
+          complementariaDe,
+        })
+        return
+      case 'STAMPED': {
+        // Ronda 1 (m4): ya estaba timbrada (otro clic llegó antes); no se emitió nada ahora ⇒ 200 sin auditoría.
+        if (result.yaTimbrada) {
+          res.status(200).json({
+            status: 'YA_TIMBRADA',
+            yaTimbrada: true,
+            message: 'Esta factura global complementaria ya estaba timbrada; no se emitió otra.',
+            excluidasPorIvaMixto: result.excluidasPorIvaMixto,
+            excluidas,
+            complementariaDe,
+            cfdi: {
+              id: result.cfdi.id,
+              uuid: result.cfdi.uuid,
+              serie: result.cfdi.serie,
+              folio: result.cfdi.folio,
+              globalPeriod: result.cfdi.globalPeriod,
+              pdfUrl: result.cfdi.pdfUrl,
+            },
+          })
+          return
+        }
+        // ActivityLog: CFDI_GLOBAL_ISSUED — audit mutation (critical-warnings rule), con la principal que complementa.
+        logAction({
+          staffId: userId,
+          venueId,
+          action: 'CFDI_GLOBAL_ISSUED',
+          entity: 'Cfdi',
+          entityId: result.cfdi.id,
+          data: {
+            emisorId,
+            period: result.period ? `${result.period.meses}/${result.period.anio}` : null,
+            count: result.candidateCount ?? 0,
+            uuid: result.cfdi.uuid,
+            excluidas,
+            ajustes: result.cfdi.entrada?.ajustes ?? [],
+            complementariaDe: result.cfdi.entrada?.complementariaDe ?? complementariaDe,
+          },
+        })
+        res.status(201).json({
+          excluidasPorIvaMixto: result.excluidasPorIvaMixto,
+          excluidas,
+          complementariaDe,
+          cfdi: {
+            id: result.cfdi.id,
+            uuid: result.cfdi.uuid,
+            serie: result.cfdi.serie,
+            folio: result.cfdi.folio,
+            globalPeriod: result.cfdi.globalPeriod,
+            pdfUrl: result.cfdi.pdfUrl,
+          },
+        })
+        return
+      }
+      default:
+        logger.error(`[cfdi.controller] emitGlobalComplementaria: estado inesperado ${result.status}`)
+        res.status(500).json({ error: 'Error interno al emitir la factura global complementaria' })
+        return
+    }
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err)
+    const aviso = `[cfdi.controller] emitGlobalComplementaria failed for emisor ${emisorId}, principal ${principalId}: ${message}`
+    // No es una principal timbrada/cancelada de este emisor, periodo sin demostrar o el tope de 20: 400 con su texto.
+    if (err instanceof BadRequestError) {
+      logger.warn(aviso)
+      res.status(400).json({ error: message })
+      return
+    }
+    if (/not found/i.test(message)) {
+      logger.warn(aviso)
+      res.status(404).json({ error: 'Emisor fiscal no encontrado' })
+      return
+    }
+    // M9 (revisión de la T13): sólo «en proceso» (el texto EXACTO del motor) es «se está emitiendo»; cualquier otro conflicto («revisión de
+    // soporte», «cancelada en el PAC») dice el suyo.
+    if (err instanceof ConflictError) {
+      logger.warn(aviso)
+      res.status(409).json({ error: message === PROCESANDO ? 'Se está emitiendo; intenta en un minuto' : message })
+      return
+    }
+    logger.error(aviso)
+    res.status(500).json({ error: 'Error interno al emitir la factura global complementaria' })
   }
 }
 

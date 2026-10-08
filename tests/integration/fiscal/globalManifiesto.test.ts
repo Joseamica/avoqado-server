@@ -124,7 +124,6 @@ describe('global con manifiesto y entrada congelada', () => {
         subtotal: amount,
         taxAmount: 0,
         total: amount,
-        updatedAt: new Date('2026-05-15T12:00:00Z'),
         paymentStatus: 'PAID',
         contratoDePrecio: 'IVA_INCLUIDO',
         items: { create: { productId, productName: 'Producto', quantity: 1, unitPrice: amount, taxAmount: 0, total: amount } },
@@ -138,6 +137,8 @@ describe('global con manifiesto y entrada congelada', () => {
             netAmount: amount,
             method: 'CREDIT_CARD',
             status: 'COMPLETED',
+            // C1 (Codex C1-5): el periodo de la venta es el de su último cobro, no `Order.updatedAt`.
+            createdAt: new Date('2026-05-15T12:00:00Z'),
           },
         },
       },
@@ -155,7 +156,13 @@ describe('global con manifiesto y entrada congelada', () => {
       expect(await prisma.orderItemSelloIva.count({ where: { cfdiId: c.id } })).toBe(2)
       expect(params).toEqual({
         receptor: { legal_name: 'PÚBLICO EN GENERAL', tax_id: 'XAXX010101000', tax_system: '616', address: { zip: '01000' } },
-        items: [11600, 5800].map(unitPriceCents => ({
+        // H3 (Tarea 3): cada concepto lleva su folio como NoIdentificacion (`sku` = `orderNumber`).
+        items: (
+          [
+            [11600, a.orderNumber],
+            [5800, b.orderNumber],
+          ] as const
+        ).map(([unitPriceCents, sku]) => ({
           satProductKey: '01010101',
           satUnitKey: 'ACT',
           description: 'Venta',
@@ -165,6 +172,7 @@ describe('global con manifiesto y entrada congelada', () => {
           objetoImp: '02',
           taxes: [{ type: 'IVA', factor: 'Tasa', rate: 0.16, withholding: false }],
           taxIncluded: true,
+          sku,
         })),
         payment_form: '04',
         use: 'S01',
@@ -180,11 +188,21 @@ describe('global con manifiesto y entrada congelada', () => {
     expect(await prisma.cfdiGlobalOrden.count({ where: { cfdiId: (await row()).id } })).toBe(2)
     expect((await issue(b.id)).status).toBe('STAMPED')
   })
-  it('MIXTA se excluye y se cuenta; ningún PAC ni reserva vacía', async () => {
-    await order()
+  it('🔴 C1: el ticket mezclado ya entra (antes se excluía en silencio)', async () => {
+    // Para la v1, «MIXTA» era todo lo que no fuera todo al 16 % (aquí el producto pasó al 0 % antes de sellarse): se excluía y sólo se
+    // contaba. Con C1 entra con su IVA real (§4.3) y ya no cuenta como excluida.
+    const o = await order()
     await prisma.product.update({ where: { id: productId }, data: { ivaTratamiento: 'IVA_0' } })
-    expect(await global()).toMatchObject({ status: 'NOTHING_TO_INVOICE', excluidasPorIvaMixto: 1 })
-    expect(provider.createGlobalInvoice).not.toHaveBeenCalled()
+    expect(await global()).toMatchObject({ status: 'STAMPED', candidateCount: 1, excluidasPorIvaMixto: 0, excluidas: {} })
+    expect(provider.createGlobalInvoice.mock.calls[0][0].items).toEqual([
+      expect.objectContaining({
+        sku: o.orderNumber,
+        unitPriceCents: 11600,
+        taxIncluded: true,
+        taxes: [{ type: 'IVA', factor: 'Tasa', rate: 0, withholding: false }],
+      }),
+    ])
+    expect(await row()).toMatchObject({ subtotalCents: 11600, taxCents: 0, totalCents: 11600 })
   })
   it('individual incierta y manifiesto global incierto excluyen la venta', async () => {
     const o = await order()
@@ -232,16 +250,24 @@ describe('global con manifiesto y entrada congelada', () => {
     expect((await global()).status).toBe('STAMPED')
     expect(provider.getInvoice).toHaveBeenCalledWith('pending-global')
   })
-  it('rechazo confirmado recaptura y reemplaza miembros; conserva otra factura viva', async () => {
+  it('🔴 decisión A del founder (7-oct; antes C1-38): un rechazo confirmado se recaptura con identidad NUEVA después de consultar al PAC; la individual de su venta sí se emite', async () => {
+    // Como producción: el siguiente intento pregunta al PAC por el intento rechazado (`#1`); si no lo tiene, recaptura con los tickets de
+    // ese momento (la venta que ya se facturó aparte queda fuera) y manda `#2`. Nunca se reenvía la MISMA identidad.
     const first = await order()
     provider.createGlobalInvoice.mockRejectedValueOnce(new ProviderHttpError(400, 'invalid_request', 'bad'))
     await global()
     const before = await row()
-    expect(before.falloDefinitivo).toBe(true)
-    await issue(first.id)
+    expect(before).toMatchObject({ falloDefinitivo: true, attempts: 1, enviadoAt: expect.any(Date) })
+    expect((await issue(first.id)).status).toBe('STAMPED')
     const second = await order(58)
+    provider.findByExternalId.mockClear()
     expect((await global()).status).toBe('STAMPED')
-    expect((await row()).attempts).toBe(2)
+    expect(provider.findByExternalId).toHaveBeenCalledWith(`${before.idempotencyKey}#1`)
+    expect(provider.createGlobalInvoice.mock.calls.map(c => c[0].externalId)).toEqual([
+      `${before.idempotencyKey}#1`,
+      `${before.idempotencyKey}#2`,
+    ])
+    expect(await row()).toMatchObject({ status: 'STAMPED', attempts: 2, falloDefinitivo: false })
     expect(await prisma.cfdiGlobalOrden.findMany({ where: { cfdiId: before.id }, take: 10, select: { orderId: true } })).toEqual([
       { orderId: second.id },
     ])
@@ -261,13 +287,13 @@ describe('global con manifiesto y entrada congelada', () => {
     expect(await row()).toEqual(rejected)
     expect(await prisma.cfdiGlobalOrden.count({ where: { cfdiId: rejected.id } })).toBe(2)
   })
-  it('rechazo individual no impone IVA16 a una global posterior: excluye y cuenta la mixta', async () => {
+  it('rechazo individual no impone IVA16 a una global posterior: la global la captura con su IVA actual (C1: al 0 %, ya no se excluye)', async () => {
     const o = await order()
     provider.createInvoice.mockRejectedValueOnce(new ProviderHttpError(400, 'invalid_request', 'bad'))
     await issue(o.id)
     await prisma.product.update({ where: { id: productId }, data: { ivaTratamiento: 'IVA_0' } })
-    expect(await global()).toMatchObject({ status: 'NOTHING_TO_INVOICE', candidateCount: 0, excluidasPorIvaMixto: 1 })
-    expect(provider.createGlobalInvoice).not.toHaveBeenCalled()
+    expect(await global()).toMatchObject({ status: 'STAMPED', candidateCount: 1, excluidasPorIvaMixto: 0 })
+    expect(provider.createGlobalInvoice.mock.calls[0][0].items.map((i: any) => i.taxes[0].rate)).toEqual([0])
   })
   it('relee elegibilidad bajo lock: una individual entre selección y reserva gana', async () => {
     const o = await order()
@@ -296,7 +322,9 @@ describe('global con manifiesto y entrada congelada', () => {
     expect((await global()).status).toBe('STAMPED')
     expect((await row()).attempts).toBe(1)
   })
-  it('hash correcto no autoriza params cuyo importe diverge de la foto', async () => {
+  it('hash correcto no autoriza params cuyo importe diverge de la foto: ENVIADA e incierta, sólo se consulta al PAC por su identidad y nunca se reenvía', async () => {
+    // Ronda 1 de la T7 (M4): con `enviadoAt` la fila se consulta al PAC ANTES de leerla (lo que el PAC timbró manda). Sin respuesta: «procesando»,
+    // y la entrada alterada nunca se manda (antes se rechazaba al leerla, sin consultar).
     await order()
     provider.createGlobalInvoice.mockRejectedValueOnce(new Error('timeout'))
     await global()
@@ -304,8 +332,30 @@ describe('global con manifiesto y entrada congelada', () => {
     const entrada = c.entrada as any
     entrada.params.items[0].unitPriceCents += 11600
     await prisma.cfdi.update({ where: { id: c.id }, data: { entrada, entradaHuella: huellaDeEntrada(entrada) } })
-    await expect(global()).rejects.toThrow(/entrada fiscal/)
-    expect(provider.findByExternalId).not.toHaveBeenCalled()
+    await expect(global()).rejects.toThrow(/procesando/)
+    expect(provider.findByExternalId).toHaveBeenCalledWith(`${c.idempotencyKey}#1`)
+    expect(provider.createGlobalInvoice).toHaveBeenCalledTimes(1)
+  })
+  it('🔴 ronda 1 de la T7 (M4): una reserva NUNCA enviada con params alterados no se manda: se recaptura y sale lo que dice la venta', async () => {
+    await order()
+    await expect(
+      issueGlobalForEmisor(
+        { emisorId: fiscalEmisorId, now: NOW, sandbox: true },
+        {
+          resolveProvider: () => {
+            throw new Error('sin proveedor')
+          },
+        },
+      ),
+    ).rejects.toThrow('sin proveedor')
+    const c = await row()
+    expect(c).toMatchObject({ status: 'STAMPING', enviadoAt: null })
+    const entrada = c.entrada as any
+    entrada.params.items[0].unitPriceCents += 11600
+    await prisma.cfdi.update({ where: { id: c.id }, data: { entrada, entradaHuella: huellaDeEntrada(entrada) } })
+    await expect(global()).resolves.toMatchObject({ status: 'STAMPED' })
+    expect(provider.createGlobalInvoice.mock.calls.map(([p]) => p.items.map((i: any) => i.unitPriceCents))).toEqual([[11600]])
+    expect(await row()).toMatchObject({ attempts: 2, totalCents: 11600 })
   })
   it('respeta el opt-in de efectivo en la selección real', async () => {
     const o = await order()

@@ -118,6 +118,10 @@ import {
   sendCfdiEmailController,
   getEmisorProviderStatusController,
   triggerGlobalCfdiController,
+  listGlobalPeriodosController,
+  listGlobalExcluidasController,
+  previewGlobalComplementariaController,
+  emitGlobalComplementariaController,
   searchSatCatalogController,
 } from '../controllers/dashboard/cfdi.dashboard.controller'
 import {
@@ -326,6 +330,9 @@ import {
   upsertMerchantConfigSchema,
   uploadCsdSchema,
   satCatalogSchema,
+  triggerGlobalCfdiSchema,
+  emitGlobalComplementariaSchema,
+  listGlobalExcluidasSchema,
 } from '../schemas/dashboard/cfdi.schema'
 import inventoryRoutes from './dashboard/inventory.routes'
 import superadminRoutes from './dashboard/superadmin.routes'
@@ -3808,9 +3815,45 @@ router.get(
 router.post(
   '/venues/:venueId/fiscal/emisores/:emisorId/global',
   authenticateTokenMiddleware,
+  validateRequest(triggerGlobalCfdiSchema), // C1 (Tarea 8): `desde` opcional (un periodo reciente); sin cuerpo sigue valiendo
   checkFeatureAccess('CFDI'),
   checkPermission('cfdi:configure'),
   triggerGlobalCfdiController,
+)
+// C1 (Tarea 8, C1-P16 = B): los periodos recientes del emisor con el estado de su global principal (sólo lectura).
+router.get(
+  '/venues/:venueId/fiscal/emisores/:emisorId/global/periodos',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('CFDI'),
+  checkPermission('cfdi:view'),
+  listGlobalPeriodosController,
+)
+// C1 (Tarea 12, Codex C1-9/C1-18/C1-32): las ventas de un periodo que no entraron a la global y por qué (sólo lectura). El periodo: el
+// GUARDADO de una global que ya existe (`principalId`), uno reciente (`desde`) o, sin nada, el último cerrado.
+router.get(
+  '/venues/:venueId/fiscal/emisores/:emisorId/global/excluidas',
+  authenticateTokenMiddleware,
+  validateRequest(listGlobalExcluidasSchema),
+  checkFeatureAccess('CFDI'),
+  checkPermission('cfdi:view'),
+  listGlobalExcluidasController,
+)
+// C1 (Tarea 11, C1-P7/C1-P12): la complementaria de una global principal, por su id: vista previa (cfdi:view) y emisión (cfdi:configure, como
+// el disparo). La emite SÓLO una persona; el job nunca (la guarda vive en el motor).
+router.get(
+  '/venues/:venueId/fiscal/emisores/:emisorId/global/:principalId/complementaria',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('CFDI'),
+  checkPermission('cfdi:view'),
+  previewGlobalComplementariaController,
+)
+router.post(
+  '/venues/:venueId/fiscal/emisores/:emisorId/global/:principalId/complementaria',
+  authenticateTokenMiddleware,
+  validateRequest(emitGlobalComplementariaSchema),
+  checkFeatureAccess('CFDI'),
+  checkPermission('cfdi:configure'),
+  emitGlobalComplementariaController,
 )
 
 // ---- Facturación CFDI 4.0 — SAT catalog lookup (spec §20.3 add-on #2) ----

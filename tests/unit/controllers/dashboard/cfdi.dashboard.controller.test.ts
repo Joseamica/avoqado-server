@@ -12,6 +12,7 @@ jest.mock('../../../../src/services/fiscal/cfdi.service', () => ({
   // Literales distintos a propósito del texto real: una constante `undefined` no puede pasar las pruebas.
   MOTIVO_CONTRATO_DESCONOCIDO: 'MOTIVO-CONTRATO-DESCONOCIDO',
   MOTIVO_IVA_APARTE: 'MOTIVO-IVA-APARTE',
+  PROCESANDO: 'PROCESANDO-LITERAL', // C1 · Tarea 11 (M9): «en proceso» se reconoce por este texto exacto
 }))
 
 const mockVistaPrevia = jest.fn()
@@ -46,6 +47,7 @@ import {
   NotFoundError,
   ProviderUnavailableError,
 } from '../../../../src/errors/AppError'
+import { MOTIVO_ANIO_FUERA, MOTIVO_BIMESTRAL_SOLO_621 } from '../../../../src/services/fiscal/globalPeriod'
 
 const mockSearchSatCatalog = jest.fn()
 jest.mock('../../../../src/services/fiscal/satCatalogLookup.service', () => ({
@@ -58,8 +60,16 @@ jest.mock('../../../../src/services/fiscal/cfdiReplacement.service', () => ({
 }))
 
 const mockIssueGlobal = jest.fn()
+const mockPeriodosDeLaGlobal = jest.fn()
+const mockVistaPreviaComplementaria = jest.fn()
+const mockEmitirComplementaria = jest.fn()
+const mockListarExcluidas = jest.fn()
 jest.mock('../../../../src/services/fiscal/cfdiGlobal.service', () => ({
+  listarExcluidasDeLaGlobal: (...a: any[]) => mockListarExcluidas(...a),
   issueGlobalForEmisor: (...a: any[]) => mockIssueGlobal(...a),
+  periodosDeLaGlobal: (...a: any[]) => mockPeriodosDeLaGlobal(...a),
+  vistaPreviaComplementaria: (...a: any[]) => mockVistaPreviaComplementaria(...a),
+  emitirGlobalComplementaria: (...a: any[]) => mockEmitirComplementaria(...a),
 }))
 
 // Mock prisma for tenant guards (triggerGlobalCfdiController + listCfdisController).
@@ -121,6 +131,10 @@ import {
   provisionEmisorController,
   uploadEmisorCsdController,
   triggerGlobalCfdiController,
+  listGlobalPeriodosController,
+  listGlobalExcluidasController,
+  previewGlobalComplementariaController,
+  emitGlobalComplementariaController,
   searchSatCatalogController,
   syncEmisorLogoController,
   downloadCfdiFileController,
@@ -877,6 +891,47 @@ describe('upsertEmisorController', () => {
     expect(res.status).toHaveBeenCalledWith(500)
     expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ error: 'Error interno al guardar el emisor fiscal' }))
   })
+
+  // ── C1 · Tarea 9 (Codex C1-4): la regla del SAT llega al dashboard con su código y su texto ──
+  describe('C1 · bimestral sólo con régimen 621', () => {
+    const log = jest.requireMock('../../../../src/config/logger') as { error: jest.Mock; warn: jest.Mock }
+    it('🔴 un AppError 4xx del servicio (bimestral con régimen 601) ⇒ su código y su texto, como warn; sin ActivityLog', async () => {
+      mockUpsertEmisor.mockRejectedValue(new BadRequestError(MOTIVO_BIMESTRAL_SOLO_621))
+      const res = mockRes()
+      await upsertEmisorController(emisorReq({ body: { ...emisorReq().body, globalPeriodicity: 'BIMESTRAL' } }), res)
+
+      expect(res.status).toHaveBeenCalledWith(400)
+      expect(res.json).toHaveBeenCalledWith({ error: MOTIVO_BIMESTRAL_SOLO_621 })
+      expect(log.warn).toHaveBeenCalledWith(expect.stringContaining('[cfdi.controller] upsertEmisor failed'))
+      expect(log.error).not.toHaveBeenCalled()
+      expect(mockLogAction).not.toHaveBeenCalled()
+    })
+    it('control — un AppError 5xx no expone su texto: 500 genérico, como error', async () => {
+      mockUpsertEmisor.mockRejectedValue(new ProviderUnavailableError('detalle interno del proveedor'))
+      const res = mockRes()
+      await upsertEmisorController(emisorReq(), res)
+
+      expect(res.status).toHaveBeenCalledWith(500)
+      expect(res.json).toHaveBeenCalledWith({ error: 'Error interno al guardar el emisor fiscal' })
+      expect(log.error).toHaveBeenCalled()
+    })
+  })
+
+  // Ajuste del founder (7-oct): el interruptor «Incluir en la factura global las ventas cobradas fuera de la terminal», por RFC.
+  it('🔴 founder: pasa `includeOffTerminalSalesInGlobal` al servicio, lo deja en el ActivityLog y devuelve el emisor con el campo', async () => {
+    mockUpsertEmisor.mockResolvedValue({ id: 'e1', rfc: 'EKU9003173C9', includeOffTerminalSalesInGlobal: true })
+    const res = mockRes()
+    await upsertEmisorController(emisorReq({ body: { ...emisorReq().body, includeOffTerminalSalesInGlobal: true } }), res)
+
+    expect(mockUpsertEmisor).toHaveBeenCalledWith(expect.objectContaining({ includeOffTerminalSalesInGlobal: true }))
+    expect(mockLogAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'FISCAL_EMISOR_UPSERTED',
+        data: expect.objectContaining({ includeOffTerminalSalesInGlobal: true }),
+      }),
+    )
+    expect(res.json).toHaveBeenCalledWith({ emisor: expect.objectContaining({ includeOffTerminalSalesInGlobal: true }) })
+  })
 })
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1143,6 +1198,103 @@ describe('uploadEmisorCsdController', () => {
   })
 })
 
+// ──────────────────────────────────────────────────────────────────────────────
+// I1 (ola final C1): ningún controlador responde la fila entera del emisor
+// ──────────────────────────────────────────────────────────────────────────────
+
+describe('I1 — la respuesta del emisor nunca lleva la llave del PAC ni el secreto del webhook', () => {
+  // La fila tal como la devuelve Prisma (`update`/`create`/`findUnique` sin `select`): con los dos secretos cifrados.
+  const filaEntera = {
+    id: 'e1',
+    venueId: 'v1',
+    rfc: 'EKU9003173C9',
+    legalName: 'Empresa Ejemplo SA de CV',
+    regimenFiscal: '601',
+    lugarExpedicion: '64000',
+    provider: 'FACTURAPI',
+    providerOrgId: 'org1',
+    providerKeyEnc: 'CIFRADO-LLAVE-DEL-PAC',
+    webhookId: 'wh1',
+    webhookSecretEnc: 'CIFRADO-SECRETO-WEBHOOK',
+    webhookUrl: 'https://api.avoqado.io/webhooks/facturapi/e1',
+    webhookConfiguredAt: new Date('2026-09-24T00:00:00Z'),
+    csdStatus: 'ACTIVE',
+    csdExpiresAt: new Date('2030-01-01T00:00:00Z'),
+    csdLastCheckedAt: new Date('2026-10-01T00:00:00Z'),
+    serie: 'A',
+    defaultUsoCfdi: 'G03',
+    globalPeriodicity: 'MENSUAL',
+    invoiceCashSales: true,
+    includeOffTerminalSalesInGlobal: false,
+    includeCashInAccounting: false,
+    isnRate: '0.03',
+    createdAt: new Date('2026-06-01T00:00:00Z'),
+    updatedAt: new Date('2026-10-08T00:00:00Z'),
+  }
+  // Lo que el dashboard lee del emisor (tipo `Emisor` de `cfdi.service.ts`, `CfdiConfiguracion`, `EmisorFormModal`) + el interruptor nuevo.
+  const camposDelDashboard = [
+    'id',
+    'venueId',
+    'rfc',
+    'legalName',
+    'regimenFiscal',
+    'lugarExpedicion',
+    'provider',
+    'providerOrgId',
+    'csdStatus',
+    'csdExpiresAt',
+    'csdLastCheckedAt',
+    'serie',
+    'defaultUsoCfdi',
+    'globalPeriodicity',
+    'invoiceCashSales',
+    'includeOffTerminalSalesInGlobal',
+    'includeCashInAccounting',
+    'isnRate',
+    'createdAt',
+    'updatedAt',
+  ]
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockLogAction.mockResolvedValue(undefined)
+  })
+
+  it.each([
+    [
+      'upsertEmisorController',
+      async (res: any) => {
+        mockUpsertEmisor.mockResolvedValue({ ...filaEntera })
+        await upsertEmisorController(emisorReq({ params: { venueId: 'v1', emisorId: 'e1' } }), res)
+      },
+    ],
+    [
+      'provisionEmisorController',
+      async (res: any) => {
+        mockProvisionEmisor.mockResolvedValue({ ...filaEntera })
+        await provisionEmisorController(provisionReq(), res)
+      },
+    ],
+    [
+      'uploadEmisorCsdController',
+      async (res: any) => {
+        mockUploadEmisorCsd.mockResolvedValue({ ...filaEntera })
+        await uploadEmisorCsdController(csdReq(), res)
+      },
+    ],
+  ])('%s: sin providerKeyEnc ni webhookSecretEnc, con lo que lee el dashboard', async (_nombre, llamar) => {
+    const res = mockRes()
+    await llamar(res)
+
+    expect(res.status).toHaveBeenCalledWith(200)
+    const cuerpo = res.json.mock.calls[0][0]
+    expect(cuerpo.emisor).not.toHaveProperty('providerKeyEnc')
+    expect(cuerpo.emisor).not.toHaveProperty('webhookSecretEnc')
+    expect(JSON.stringify(cuerpo)).not.toContain('CIFRADO')
+    for (const campo of camposDelDashboard) expect(cuerpo.emisor[campo]).toEqual((filaEntera as Record<string, unknown>)[campo])
+  })
+})
+
 // ==========================================
 // triggerGlobalCfdiController
 // ==========================================
@@ -1199,6 +1351,69 @@ describe('triggerGlobalCfdiController', () => {
         venueId: 'v1',
       }),
     )
+  })
+
+  // ── C1 · Tarea 10: cada respuesta que lleva `excluidasPorIvaMixto` lleva además `excluidas` (por motivo); nada se quita ──
+  describe('C1 · Tarea 10 — `excluidas` por motivo en cada respuesta y en el ActivityLog', () => {
+    const excluidas = { SIN_TERMINAL: 3, EFECTIVO: 1, PRODUCTO_POR_REVISAR: 1 }
+    it.each([
+      ['NOTHING_TO_INVOICE', 200, { status: 'NOTHING_TO_INVOICE', excluidasPorIvaMixto: 1, excluidas }],
+      ['VALIDATION_FAILED', 422, { status: 'VALIDATION_FAILED', reasons: ['x'], excluidasPorIvaMixto: 1, excluidas }],
+      ['STAMP_FAILED', 502, { status: 'STAMP_FAILED', cfdi: { lastError: 'PAC' }, excluidasPorIvaMixto: 1, excluidas }],
+      [
+        'STAMPED',
+        201,
+        {
+          status: 'STAMPED',
+          cfdi: { id: 'g1', uuid: 'U', entrada: {} },
+          period: { meses: '05', anio: 2026 },
+          excluidasPorIvaMixto: 1,
+          excluidas,
+        },
+      ],
+    ])('🔴 %s ⇒ `excluidas` junto a `excluidasPorIvaMixto` (que se conserva)', async (_n, codigo, resultado) => {
+      mockIssueGlobal.mockResolvedValue(resultado)
+      const res = mockRes()
+      await triggerGlobalCfdiController(globalReq(), res)
+      expect(res.status).toHaveBeenCalledWith(codigo)
+      expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ excluidasPorIvaMixto: 1, excluidas }))
+    })
+    it('🔴 sin conteo por motivo (una global v1) ⇒ `excluidas: {}`, nunca ausente', async () => {
+      mockIssueGlobal.mockResolvedValue({ status: 'NOTHING_TO_INVOICE', excluidasPorIvaMixto: 0 })
+      const res = mockRes()
+      await triggerGlobalCfdiController(globalReq(), res)
+      expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ excluidas: {} }))
+    })
+    it('🔴 CFDI_GLOBAL_ISSUED lleva `excluidas`, `ajustes` y `complementariaDe` (de la entrada de la global) en `data`', async () => {
+      const ajustes = [{ indice: 0, deCents: 0, aCents: 1 }]
+      mockIssueGlobal.mockResolvedValue({
+        status: 'STAMPED',
+        cfdi: { id: 'g1', uuid: 'U', entrada: { version: 2, ajustes, complementariaDe: 'g0' } },
+        period: { meses: '05', anio: 2026 },
+        candidateCount: 2,
+        excluidasPorIvaMixto: 0,
+        excluidas,
+      })
+      await triggerGlobalCfdiController(globalReq(), mockRes())
+      expect(mockLogAction).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: 'CFDI_GLOBAL_ISSUED',
+          data: expect.objectContaining({ excluidas, ajustes, complementariaDe: 'g0', count: 2, uuid: 'U' }),
+        }),
+      )
+    })
+    it('🔴 una global v1 (sin ajustes ni complementaria en su entrada) ⇒ `ajustes: []` y `complementariaDe: null`', async () => {
+      mockIssueGlobal.mockResolvedValue({
+        status: 'STAMPED',
+        cfdi: { id: 'g1', uuid: 'U', entrada: { version: 1 } },
+        period: { meses: '05', anio: 2026 },
+        excluidasPorIvaMixto: 0,
+      })
+      await triggerGlobalCfdiController(globalReq(), mockRes())
+      expect(mockLogAction).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ excluidas: {}, ajustes: [], complementariaDe: null }) }),
+      )
+    })
   })
 
   it('returns 200 with NOTHING_TO_INVOICE message when no candidates in period', async () => {
@@ -1278,6 +1493,50 @@ describe('triggerGlobalCfdiController', () => {
     expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ error: 'Error interno al generar la factura global' }))
   })
 
+  it('🔴 C1 (Tarea 8): pasa `desde` (un periodo reciente) al servicio; sin él, nada', async () => {
+    mockIssueGlobal.mockResolvedValue({ status: 'NOTHING_TO_INVOICE', excluidasPorIvaMixto: 0 })
+    await triggerGlobalCfdiController(globalReq({ body: { desde: '2026-10-09T06:00:00.000Z' } }), mockRes())
+    expect(mockIssueGlobal).toHaveBeenLastCalledWith(expect.objectContaining({ emisorId: 'e1', desde: '2026-10-09T06:00:00.000Z' }))
+    await triggerGlobalCfdiController(globalReq(), mockRes())
+    expect(mockIssueGlobal.mock.calls.at(-1)[0].desde).toBeUndefined()
+  })
+
+  it('🔴 C1 (Tarea 8, C1-P16 = B): un periodo fuera de la ventana responde 400 con «pídelo a soporte», sin auditoría', async () => {
+    mockIssueGlobal.mockRejectedValueOnce(new BadRequestError('Ese periodo ya no se emite desde aquí; pídelo a soporte.'))
+    const res = mockRes()
+    await triggerGlobalCfdiController(globalReq({ body: { desde: '2026-09-01T06:00:00.000Z' } }), res)
+    expect(res.status).toHaveBeenCalledWith(400)
+    expect(res.json).toHaveBeenCalledWith({ error: 'Ese periodo ya no se emite desde aquí; pídelo a soporte.' })
+    expect(mockLogAction).not.toHaveBeenCalled()
+  })
+
+  it('🔴 ronda 1 de la T11 (m4): una principal que YA estaba timbrada ⇒ 200 `yaTimbrada`, sin auditar una emisión nueva', async () => {
+    mockIssueGlobal.mockResolvedValue({
+      status: 'STAMPED',
+      yaTimbrada: true,
+      cfdi: { id: 'g1', uuid: 'U', serie: 'G', folio: '1', globalPeriod: { meses: '05', anio: 2026 }, pdfUrl: null, entrada: {} },
+      period: { meses: '05', anio: 2026 },
+      excluidasPorIvaMixto: 0,
+      excluidas: {},
+    })
+    const res = mockRes()
+    await triggerGlobalCfdiController(globalReq(), res)
+    expect(res.status).toHaveBeenCalledWith(200)
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 'YA_TIMBRADA', yaTimbrada: true, cfdi: expect.objectContaining({ id: 'g1' }) }),
+    )
+    expect(mockLogAction).not.toHaveBeenCalled()
+  })
+
+  it('🔴 C1 (Tarea 11): un periodo cuyo año ya no se admite responde 400 con su motivo (no «CSD inactivo»)', async () => {
+    mockIssueGlobal.mockResolvedValue({ status: 'SKIPPED', reason: MOTIVO_ANIO_FUERA })
+    const res = mockRes()
+    await triggerGlobalCfdiController(globalReq(), res)
+    expect(res.status).toHaveBeenCalledWith(400)
+    expect(res.json).toHaveBeenCalledWith({ error: MOTIVO_ANIO_FUERA })
+    expect(mockLogAction).not.toHaveBeenCalled()
+  })
+
   it('returns 409 when issueGlobalForEmisor throws "Global en proceso" (concurrent in-flight)', async () => {
     mockIssueGlobal.mockRejectedValue(new Error('Global en proceso para este emisor y periodo'))
 
@@ -1287,6 +1546,319 @@ describe('triggerGlobalCfdiController', () => {
     expect(res.status).toHaveBeenCalledWith(409)
     expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ error: 'Global en proceso para este emisor y periodo' }))
     expect(mockLogAction).not.toHaveBeenCalled()
+  })
+})
+
+// ==========================================
+// listGlobalPeriodosController (C1, Tarea 8)
+// ==========================================
+
+describe('listGlobalPeriodosController', () => {
+  const req = (overrides: Partial<any> = {}): any => ({
+    params: { venueId: 'v1', emisorId: 'e1' },
+    query: {},
+    authContext: { venueId: 'v1', userId: 'u1' },
+    ...overrides,
+  })
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockPrismaFiscalEmisorFindFirst.mockResolvedValue({ id: 'e1' })
+  })
+
+  it('🔴 200 con los periodos recientes del emisor tal como los da el servicio', async () => {
+    const periodos = [
+      {
+        desde: '2026-10-04T06:00:00.000Z',
+        hasta: '2026-10-05T06:00:00.000Z',
+        meses: '10',
+        anio: 2026,
+        estado: 'SIN_GLOBAL',
+        cfdiId: null,
+        folio: null,
+        motivo: null,
+        corregidasPendientes: null,
+        complementarias: [],
+      },
+    ]
+    mockPeriodosDeLaGlobal.mockResolvedValue({ periodos })
+    const res = mockRes()
+    await listGlobalPeriodosController(req(), res)
+    expect(res.status).toHaveBeenCalledWith(200)
+    expect(res.json).toHaveBeenCalledWith({ periodos })
+    expect(mockPeriodosDeLaGlobal).toHaveBeenCalledWith(expect.objectContaining({ venueId: 'v1', emisorId: 'e1', now: expect.any(Date) }))
+  })
+
+  it('control — ola final: `globalApagada` llega al dashboard con ese nombre exacto (lo consume el panel en paralelo)', async () => {
+    const respuesta = { periodos: [], otrasPeriodicidades: { globales: [], completo: true }, globalApagada: true }
+    mockPeriodosDeLaGlobal.mockResolvedValue(respuesta)
+    const res = mockRes()
+    await listGlobalPeriodosController(req(), res)
+    expect(res.status).toHaveBeenCalledWith(200)
+    expect(res.json.mock.calls[0][0]).toHaveProperty('globalApagada', true)
+  })
+
+  it('🔴 404 si el emisor no es del negocio (no se consulta nada)', async () => {
+    mockPrismaFiscalEmisorFindFirst.mockResolvedValue(null)
+    const res = mockRes()
+    await listGlobalPeriodosController(req(), res)
+    expect(res.status).toHaveBeenCalledWith(404)
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ error: 'Emisor fiscal no encontrado' }))
+    expect(mockPeriodosDeLaGlobal).not.toHaveBeenCalled()
+  })
+
+  it('🔴 500 con mensaje en español si el servicio truena', async () => {
+    mockPeriodosDeLaGlobal.mockRejectedValue(new Error('db down'))
+    const res = mockRes()
+    await listGlobalPeriodosController(req(), res)
+    expect(res.status).toHaveBeenCalledWith(500)
+    expect(res.json).toHaveBeenCalledWith({ error: 'Error interno al consultar los periodos de la factura global' })
+  })
+})
+
+// ==========================================
+// listGlobalExcluidasController (C1, Tarea 12)
+// ==========================================
+
+describe('listGlobalExcluidasController', () => {
+  const req = (query: Record<string, unknown> = {}): any => ({
+    params: { venueId: 'v1', emisorId: 'e1' },
+    query,
+    authContext: { venueId: 'v1', userId: 'u1' },
+  })
+  const listado = {
+    periodo: { meses: '05', anio: 2026, desde: new Date('2026-05-01T06:00:00.000Z'), hasta: new Date('2026-06-01T06:00:00.000Z') },
+    estadoDelPeriodo: 'TIMBRADA',
+    totales: { porMotivo: { EFECTIVO: 1 }, total: 1, completo: true, revisadas: 0 },
+    corregidasPendientes: { n: 0, completo: true },
+    ultimaCaptura: null,
+    excluidas: [{ orderId: 'o1', folio: 'A-1', cobradoCents: 11600, motivo: 'EFECTIVO', texto: 't', detalle: 't' }],
+    siguiente: null,
+    revisadas: 1,
+  }
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockPrismaFiscalEmisorFindFirst.mockResolvedValue({ id: 'e1' })
+    mockListarExcluidas.mockResolvedValue(listado)
+  })
+
+  it('🔴 200 con el listado tal como lo da el servicio, con lo que pidió la consulta (ya validada por el esquema)', async () => {
+    const res = mockRes()
+    await listGlobalExcluidasController(req({ principalId: 'g1', desde: '2026-05-01T06:00:00.000Z', cursor: 'o0', limite: 10 }), res)
+    expect(res.status).toHaveBeenCalledWith(200)
+    expect(res.json).toHaveBeenCalledWith(listado)
+    expect(mockListarExcluidas).toHaveBeenCalledWith({
+      venueId: 'v1',
+      emisorId: 'e1',
+      principalId: 'g1',
+      desde: '2026-05-01T06:00:00.000Z',
+      cursor: 'o0',
+      limite: 10,
+      now: expect.any(Date),
+    })
+  })
+
+  it('🔴 sin consulta: el último periodo cerrado (no se inventa nada)', async () => {
+    const res = mockRes()
+    await listGlobalExcluidasController(req(), res)
+    expect(res.status).toHaveBeenCalledWith(200)
+    expect(mockListarExcluidas).toHaveBeenCalledWith({ venueId: 'v1', emisorId: 'e1', now: expect.any(Date) })
+  })
+
+  it('🔴 404 si el emisor no es del negocio (no se consulta nada)', async () => {
+    mockPrismaFiscalEmisorFindFirst.mockResolvedValue(null)
+    const res = mockRes()
+    await listGlobalExcluidasController(req(), res)
+    expect(res.status).toHaveBeenCalledWith(404)
+    expect(res.json).toHaveBeenCalledWith({ error: 'Emisor fiscal no encontrado' })
+    expect(mockListarExcluidas).not.toHaveBeenCalled()
+  })
+
+  it('🔴 un periodo viejo o una global que no es principal de este emisor (BadRequestError) ⇒ 400 con su texto', async () => {
+    mockListarExcluidas.mockRejectedValue(new BadRequestError('Ese periodo ya no se emite desde aquí; pídelo a soporte.'))
+    const res = mockRes()
+    await listGlobalExcluidasController(req({ desde: '2020-01-01T06:00:00.000Z' }), res)
+    expect(res.status).toHaveBeenCalledWith(400)
+    expect(res.json).toHaveBeenCalledWith({ error: 'Ese periodo ya no se emite desde aquí; pídelo a soporte.' })
+  })
+
+  it('🔴 «not found» del servicio ⇒ 404; cualquier otro error ⇒ 500 en español', async () => {
+    mockListarExcluidas.mockRejectedValueOnce(new Error('Emisor fiscal not found'))
+    const res = mockRes()
+    await listGlobalExcluidasController(req(), res)
+    expect(res.status).toHaveBeenCalledWith(404)
+    expect(res.json).toHaveBeenCalledWith({ error: 'Emisor fiscal no encontrado' })
+    mockListarExcluidas.mockRejectedValueOnce(new Error('db down'))
+    const res2 = mockRes()
+    await listGlobalExcluidasController(req(), res2)
+    expect(res2.status).toHaveBeenCalledWith(500)
+    expect(res2.json).toHaveBeenCalledWith({ error: 'Error interno al consultar las ventas que no entraron a la factura global' })
+  })
+})
+
+// ==========================================
+// C1 · Tarea 11: la complementaria de una global principal (vista previa y emisión)
+// ==========================================
+
+describe('previewGlobalComplementariaController / emitGlobalComplementariaController', () => {
+  const req = (overrides: Partial<any> = {}): any => ({
+    params: { venueId: 'v1', emisorId: 'e1', principalId: 'g-principal' },
+    body: {},
+    authContext: { venueId: 'v1', userId: 'u1' },
+    ...overrides,
+  })
+  const excluidas = { PRODUCTO_POR_REVISAR: 1 }
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockLogAction.mockResolvedValue(undefined)
+    mockPrismaFiscalEmisorFindFirst.mockResolvedValue({ id: 'e1' })
+  })
+
+  it('🔴 vista previa: 200 con lo que da el servicio, pedido por el id de la principal (ruta)', async () => {
+    const vista = {
+      periodo: { desde: '2026-05-01T06:00:00.000Z', hasta: '2026-06-01T06:00:00.000Z', meses: '05', anio: 2026 },
+      estadoPrincipal: 'TIMBRADA',
+      corregidasPendientes: { n: 2, completo: true },
+      siguienteLlave: 'k-c2',
+      motivo: null,
+    }
+    mockVistaPreviaComplementaria.mockResolvedValue(vista)
+    const res = mockRes()
+    await previewGlobalComplementariaController(req(), res)
+    expect(res.status).toHaveBeenCalledWith(200)
+    expect(res.json).toHaveBeenCalledWith(vista)
+    expect(mockVistaPreviaComplementaria).toHaveBeenCalledWith(
+      expect.objectContaining({ venueId: 'v1', emisorId: 'e1', principalId: 'g-principal', now: expect.any(Date) }),
+    )
+  })
+  it('🔴 vista previa: no es una principal timbrada ⇒ 400 con su texto; emisor ajeno ⇒ 404 sin consultar', async () => {
+    mockVistaPreviaComplementaria.mockRejectedValue(
+      new BadRequestError('La factura global principal de este periodo todavía no está timbrada; emítela primero.'),
+    )
+    const res = mockRes()
+    await previewGlobalComplementariaController(req(), res)
+    expect(res.status).toHaveBeenCalledWith(400)
+    expect(res.json).toHaveBeenCalledWith({ error: expect.stringMatching(/principal/) })
+    mockPrismaFiscalEmisorFindFirst.mockResolvedValue(null)
+    const res2 = mockRes()
+    await previewGlobalComplementariaController(req(), res2)
+    expect(res2.status).toHaveBeenCalledWith(404)
+    expect(mockVistaPreviaComplementaria).toHaveBeenCalledTimes(1)
+  })
+
+  it('🔴 emisión timbrada: 201 con la forma del disparo + `complementariaDe`, y CFDI_GLOBAL_ISSUED con su principal', async () => {
+    mockEmitirComplementaria.mockResolvedValue({
+      status: 'STAMPED',
+      complementariaDe: 'g-principal',
+      cfdi: {
+        id: 'g-c2',
+        uuid: 'U2',
+        serie: 'G',
+        folio: '7',
+        globalPeriod: { meses: '05', anio: 2026 },
+        pdfUrl: 'https://cdn/c2.pdf',
+        entrada: { version: 2, ajustes: [], complementariaDe: 'g-principal' },
+      },
+      period: { meses: '05', anio: 2026 },
+      candidateCount: 1,
+      excluidasPorIvaMixto: 0,
+      excluidas,
+    })
+    const res = mockRes()
+    await emitGlobalComplementariaController(req(), res)
+    expect(mockEmitirComplementaria).toHaveBeenCalledWith(
+      expect.objectContaining({ venueId: 'v1', emisorId: 'e1', principalId: 'g-principal', now: expect.any(Date), sandbox: true }),
+    )
+    expect(res.status).toHaveBeenCalledWith(201)
+    expect(res.json).toHaveBeenCalledWith({
+      excluidasPorIvaMixto: 0,
+      excluidas,
+      complementariaDe: 'g-principal',
+      cfdi: { id: 'g-c2', uuid: 'U2', serie: 'G', folio: '7', globalPeriod: { meses: '05', anio: 2026 }, pdfUrl: 'https://cdn/c2.pdf' },
+    })
+    expect(mockLogAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'CFDI_GLOBAL_ISSUED',
+        entityId: 'g-c2',
+        staffId: 'u1',
+        venueId: 'v1',
+        data: expect.objectContaining({ complementariaDe: 'g-principal', count: 1, excluidas, ajustes: [] }),
+      }),
+    )
+  })
+  it.each([
+    ['NOTHING_TO_INVOICE', 200, { status: 'NOTHING_TO_INVOICE', excluidasPorIvaMixto: 0, excluidas }],
+    ['VALIDATION_FAILED', 422, { status: 'VALIDATION_FAILED', reasons: ['no cuadra'], excluidasPorIvaMixto: 0, excluidas }],
+    ['STAMP_FAILED', 502, { status: 'STAMP_FAILED', cfdi: { lastError: 'rechazo del PAC' }, excluidasPorIvaMixto: 0, excluidas }],
+  ])('🔴 %s ⇒ %i con `excluidas`, sin auditoría de emisión', async (_n, codigo, r) => {
+    mockEmitirComplementaria.mockResolvedValue({ ...r, complementariaDe: 'g-principal' })
+    const res = mockRes()
+    await emitGlobalComplementariaController(req(), res)
+    expect(res.status).toHaveBeenCalledWith(codigo)
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ excluidas }))
+    expect(mockLogAction).not.toHaveBeenCalled()
+  })
+  it('🔴 ronda 1 (m4): una complementaria que YA estaba timbrada ⇒ 200 `yaTimbrada`, sin auditar una emisión nueva', async () => {
+    mockEmitirComplementaria.mockResolvedValue({
+      status: 'STAMPED',
+      yaTimbrada: true,
+      complementariaDe: 'g-principal',
+      cfdi: { id: 'g-c2', uuid: 'U2', serie: 'G', folio: '7', globalPeriod: { meses: '05', anio: 2026 }, pdfUrl: null, entrada: {} },
+      excluidasPorIvaMixto: 0,
+      excluidas: {},
+    })
+    const res = mockRes()
+    await emitGlobalComplementariaController(req(), res)
+    expect(res.status).toHaveBeenCalledWith(200)
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: 'YA_TIMBRADA',
+        yaTimbrada: true,
+        complementariaDe: 'g-principal',
+        message: expect.stringMatching(/ya estaba timbrada/),
+        cfdi: expect.objectContaining({ id: 'g-c2', folio: '7' }),
+      }),
+    )
+    expect(mockLogAction).not.toHaveBeenCalled()
+  })
+  it('🔴 el año ya no se admite (SKIPPED) ⇒ 400 con su motivo; el tope de 20 o «no es principal» (BadRequestError) ⇒ 400 con su texto', async () => {
+    mockEmitirComplementaria.mockResolvedValue({ status: 'SKIPPED', reason: MOTIVO_ANIO_FUERA, complementariaDe: 'g-principal' })
+    const res = mockRes()
+    await emitGlobalComplementariaController(req(), res)
+    expect(res.status).toHaveBeenCalledWith(400)
+    expect(res.json).toHaveBeenCalledWith({ error: MOTIVO_ANIO_FUERA })
+    mockEmitirComplementaria.mockRejectedValue(
+      new BadRequestError('Este periodo ya tiene 20 facturas globales complementarias; pide ayuda a soporte.'),
+    )
+    const res2 = mockRes()
+    await emitGlobalComplementariaController(req(), res2)
+    expect(res2.status).toHaveBeenCalledWith(400)
+    expect(res2.json).toHaveBeenCalledWith({ error: expect.stringMatching(/20 facturas/) })
+    expect(mockLogAction).not.toHaveBeenCalled()
+  })
+  it('🔴 M9: «en proceso» (el texto EXACTO) ⇒ 409 «Se está emitiendo…»; otro ConflictError ⇒ 409 con SU texto', async () => {
+    mockEmitirComplementaria.mockRejectedValue(new ConflictError('PROCESANDO-LITERAL'))
+    const res = mockRes()
+    await emitGlobalComplementariaController(req(), res)
+    expect(res.status).toHaveBeenCalledWith(409)
+    expect(res.json).toHaveBeenCalledWith({ error: 'Se está emitiendo; intenta en un minuto' })
+    mockEmitirComplementaria.mockRejectedValue(new ConflictError('La entrada fiscal de esta factura requiere revisión de soporte.'))
+    const res2 = mockRes()
+    await emitGlobalComplementariaController(req(), res2)
+    expect(res2.status).toHaveBeenCalledWith(409)
+    expect(res2.json).toHaveBeenCalledWith({ error: 'La entrada fiscal de esta factura requiere revisión de soporte.' })
+  })
+  it('🔴 emisor ajeno ⇒ 404 sin emitir; error inesperado ⇒ 500 en español', async () => {
+    mockPrismaFiscalEmisorFindFirst.mockResolvedValue(null)
+    const res = mockRes()
+    await emitGlobalComplementariaController(req(), res)
+    expect(res.status).toHaveBeenCalledWith(404)
+    expect(mockEmitirComplementaria).not.toHaveBeenCalled()
+    mockPrismaFiscalEmisorFindFirst.mockResolvedValue({ id: 'e1' })
+    mockEmitirComplementaria.mockRejectedValue(new Error('db down'))
+    const res2 = mockRes()
+    await emitGlobalComplementariaController(req(), res2)
+    expect(res2.status).toHaveBeenCalledWith(500)
+    expect(res2.json).toHaveBeenCalledWith({ error: 'Error interno al emitir la factura global complementaria' })
   })
 })
 

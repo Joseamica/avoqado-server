@@ -113,6 +113,8 @@ const upsertEmisorBodyShape = z.object({
     .optional(),
   // Opt-in: permitir facturar ventas en efectivo (QR + global). Default false en el servicio.
   invoiceCashSales: z.boolean().optional(),
+  // Opt-in (ajuste del founder, 7-oct): incluir en la factura global las ventas cobradas fuera de la terminal. Default false.
+  includeOffTerminalSalesInGlobal: z.boolean({ invalid_type_error: 'Incluir las ventas fuera de la terminal debe ser sí o no' }).optional(),
   // Opt-in: que el efectivo cuente en los libros fiscales (IVA/ISR/pólizas). Default false.
   includeCashInAccounting: z.boolean().optional(),
   // Tasa de ISN (impuesto sobre nómina, estatal), fracción 0-0.10 (0.03 = 3%). Default 0.
@@ -165,6 +167,74 @@ export const uploadCsdSchema = z.object({
     cerBase64: z.string({ required_error: 'El archivo .cer en base64 es requerido' }).min(1, 'El archivo .cer no puede estar vacío'),
     keyBase64: z.string({ required_error: 'El archivo .key en base64 es requerido' }).min(1, 'El archivo .key no puede estar vacío'),
     password: z.string({ required_error: 'La contraseña del CSD es requerida' }).min(1, 'La contraseña del CSD no puede estar vacía'),
+  }),
+})
+
+// ── Flow C: disparo manual de la factura global ───────────────────────────────
+
+/**
+ * Schema passed to validateRequest() for:
+ *   POST /venues/:venueId/fiscal/emisores/:emisorId/global
+ *
+ * C1 (Tarea 8, C1-P16 = B): `desde` opcional = el inicio (ISO) de uno de los periodos cerrados RECIENTES que revisa el job; sin él, el
+ * último periodo cerrado (como siempre). Un periodo más viejo lo rechaza el servicio («pídelo a soporte»). Sin cuerpo sigue valiendo.
+ */
+export const triggerGlobalCfdiSchema = z.object({
+  body: z
+    .object({
+      desde: z
+        .string({ invalid_type_error: '`desde` debe ser el inicio del periodo en formato ISO (2026-10-09T06:00:00.000Z)' })
+        .datetime({ message: '`desde` debe ser el inicio del periodo en formato ISO (2026-10-09T06:00:00.000Z)' })
+        .optional(),
+    })
+    .strict('Sólo se acepta `desde` (el inicio de un periodo reciente).')
+    .default({}),
+})
+
+export type TriggerGlobalCfdiBody = z.infer<typeof triggerGlobalCfdiSchema.shape.body>
+
+/**
+ * C1 (Tarea 11): `POST /venues/:venueId/fiscal/emisores/:emisorId/global/:principalId/complementaria` — la complementaria de una global
+ * principal se pide por el id de la principal (ruta); sin cuerpo.
+ */
+export const emitGlobalComplementariaSchema = z.object({
+  params: z
+    .object({
+      venueId: z.string().min(1),
+      emisorId: z.string().min(1),
+      principalId: z.string().min(1, 'Falta el id de la factura global principal.'),
+    })
+    .passthrough(),
+  body: z
+    .object({})
+    .strict('La complementaria se pide por el id de su factura global principal; no lleva datos (su periodo es el de la principal).')
+    .default({}),
+})
+
+/**
+ * C1 (Tarea 12): `GET /venues/:venueId/fiscal/emisores/:emisorId/global/excluidas?principalId=&desde=&cursor=&limite=` — las ventas de un
+ * periodo que no entraron a la global.
+ */
+export const listGlobalExcluidasSchema = z.object({
+  query: z.object({
+    /** Una global que ya existe: su periodo GUARDADO (C1-32), en cualquier estado (C1-41). Si viene, manda sobre `desde`. */
+    principalId: z
+      .string({ invalid_type_error: 'El id de la factura global no es válido' })
+      .min(1, 'Falta el id de la factura global.')
+      .optional(),
+    /** El inicio (ISO) de un periodo reciente; uno viejo lo rechaza el servicio («pídelo a soporte»). */
+    desde: z
+      .string({ invalid_type_error: '`desde` debe ser el inicio del periodo en formato ISO (2026-10-09T06:00:00.000Z)' })
+      .datetime({ message: '`desde` debe ser el inicio del periodo en formato ISO (2026-10-09T06:00:00.000Z)' })
+      .optional(),
+    /** El `siguiente` de la página anterior. */
+    cursor: z.string({ invalid_type_error: 'El cursor no es válido' }).min(1, 'El cursor no es válido.').optional(),
+    limite: z.coerce
+      .number({ invalid_type_error: '`limite` debe ser un número entre 1 y 50' })
+      .int('`limite` debe ser un número entero entre 1 y 50')
+      .min(1, '`limite` debe ser un número entre 1 y 50')
+      .max(50, '`limite` debe ser un número entre 1 y 50')
+      .optional(),
   }),
 })
 
