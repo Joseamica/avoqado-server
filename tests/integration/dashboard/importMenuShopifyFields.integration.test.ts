@@ -123,6 +123,19 @@ describe('importMenu — gtin, imageUrl and inventoryByQuantity (additive)', () 
     expect(after.inventory?.minimumStock.toString()).toBe('2')
   })
 
+  it('a gtin another product of the venue holds aborts the WHOLE import (why the Shopify converter drops it first)', async () => {
+    await existing({ sku: 'HOLDER', gtin: '999' })
+
+    await expect(
+      importMenu(
+        venueId,
+        merge({ name: 'Antes', sku: 'BEFORE', price: 10 }, { name: 'Choca', sku: 'CLASH', price: 10, gtin: '999' }),
+        actor(),
+      ),
+    ).rejects.toMatchObject({ code: 'P2002' })
+    expect(await prisma.product.count({ where: { venueId, sku: { in: ['BEFORE', 'CLASH'] } } })).toBe(0)
+  })
+
   // ── Regression: imports made today (no gtin / imageUrl / inventoryByQuantity) ──
 
   it('an import WITHOUT those fields keeps the barcode, image and inventory configuration a product already has', async () => {
