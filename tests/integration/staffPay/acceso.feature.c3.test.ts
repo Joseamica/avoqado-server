@@ -3,12 +3,13 @@
 // MÓDULO SERVICE_PAY prendido (propio o heredado de la organización) recibe un acceso de FUNCIÓN que no vence, y el módulo
 // desaparece (spec fase 3 §10, Codex r2-8; pre-flight filas 17-18). Corre el archivo REAL de la migración y compara contra lo
 // que contestaba el resolver de módulos ANTES de migrar (`moduleService.venuesWithModule`, module.service.ts:139-185).
+// C5-fix: la misma migración con superadmin cambiando el módulo a la vez (Codex Bloque C r1-1), al final del archivo.
 import fs from 'fs'
 import path from 'path'
 import { Client } from 'pg'
-import { ModuleScope } from '@prisma/client'
+import { ModuleScope, Prisma, PrismaClient } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
-import { ModuleCode, moduleService } from '@/services/modules/module.service'
+import { ModuleCode, ModuleService, moduleService } from '@/services/modules/module.service'
 import { organizacionDeLaSedeActivada, venueHasServicePayAccess } from '@/services/dashboard/staffPay/acceso'
 
 const MIGRACION = path.join(__dirname, '../../../prisma/migrations/20261006090000_service_pay_feature_grants/migration.sql')
@@ -207,5 +208,130 @@ describe('C3 — migración: del módulo SERVICE_PAY a la función del plan (spe
     await migrar()
     expect(await accesos([venueId])).toEqual(primero)
     expect(await prisma.module.findUnique({ where: { code: 'SERVICE_PAY' } })).toBeNull()
+  })
+})
+
+/**
+ * Superadmin cambiando el módulo con el código REAL de la plataforma (`ModuleService`, que toma `lockModuleScope`), pero con
+ * su transacción ABIERTA: escribe y no confirma hasta `soltar()`.
+ */
+function superadminSinConfirmar() {
+  let soltar!: () => void
+  const suelto = new Promise<void>(resolve => (soltar = resolve))
+  let escrito!: () => void
+  const yaEscribio = new Promise<void>(resolve => (escrito = resolve))
+  const db = {
+    $transaction: (fn: (tx: Prisma.TransactionClient) => Promise<unknown>) =>
+      prisma.$transaction(
+        async tx => {
+          const r = await fn(tx)
+          escrito()
+          await suelto
+          return r
+        },
+        { timeout: 60000 },
+      ),
+  }
+  return { servicio: new ModuleService(db as unknown as PrismaClient), soltar, yaEscribio }
+}
+
+/** La migración en otra conexión, sin esperarla. `pid` es su proceso en Postgres, para ver en qué se queda esperando. */
+async function migrarEnParalelo() {
+  const client = new Client({ connectionString: process.env.TEST_DATABASE_URL })
+  await client.connect()
+  const { rows } = await client.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')
+  const hecho = client.query(fs.readFileSync(MIGRACION, 'utf8')).finally(() => client.end())
+  hecho.catch(() => undefined) // la prueba la espera en su `finally`; aquí sólo evita un rechazo sin manejar
+  return { pid: rows[0].pid, hecho }
+}
+
+async function esperandoUnCandado(pid: number) {
+  for (let i = 0; i < 400; i++) {
+    const [{ n }] = await prisma.$queryRaw<Array<{ n: number }>>`
+      SELECT count(*)::int AS n FROM pg_stat_activity WHERE pid = ${pid} AND wait_event_type = 'Lock'`
+    if (n > 0) return true
+    await new Promise(resolve => setTimeout(resolve, 50))
+  }
+  return false
+}
+
+/** Un INSERT toma su candado de tabla al empezar, escriba o no filas: si la migración ya lo tiene, ya leyó los módulos. */
+const yaLeyoLosModulos = async (pid: number) => {
+  const [{ n }] = await prisma.$queryRaw<Array<{ n: number }>>`
+    SELECT count(*)::int AS n FROM pg_locks l JOIN pg_class c ON c.oid = l.relation
+    WHERE l.pid = ${pid} AND c.relname = 'CapabilityGrant'`
+  return n > 0
+}
+
+/**
+ * Codex Bloque C r1-1: la migración toma el candado de los escritores del módulo ANTES de leerlo. Sin él, el INSERT leía el
+ * «prendido» viejo de un cambio de superadmin todavía sin confirmar, creaba el acceso que no vence, y su DELETE esperaba al
+ * cambio: superadmin recibía éxito y la sede conservaba el acceso (o, al revés, perdía una habilitación).
+ */
+describe('C5-fix — la migración y superadmin cambiando el módulo al mismo tiempo (Codex Bloque C r1-1)', () => {
+  async function carrera(cambiar: (s: ModuleService) => Promise<unknown>) {
+    const superadmin = superadminSinConfirmar()
+    const cambio = cambiar(superadmin.servicio)
+    cambio.catch(() => undefined)
+    let migracion: Awaited<ReturnType<typeof migrarEnParalelo>> | undefined
+    try {
+      await superadmin.yaEscribio // escribió y no ha confirmado
+      migracion = await migrarEnParalelo()
+      expect(await esperandoUnCandado(migracion.pid)).toBe(true)
+      // Espera ANTES de leer los módulos: todavía no llega al INSERT de los accesos.
+      expect(await yaLeyoLosModulos(migracion.pid)).toBe(false)
+      superadmin.soltar()
+      const resultado = await cambio
+      await migracion.hecho
+      return resultado
+    } finally {
+      superadmin.soltar()
+      await cambio.catch(() => undefined)
+      await migracion?.hecho.catch(() => undefined)
+    }
+  }
+
+  it('superadmin apaga la sede sin confirmar: la migración espera, y al confirmar el apagado la sede NO recibe el acceso', async () => {
+    const key = `pf3ca${stamp}`
+    const modulo = await crearModulo()
+    const venueId = await crearSede(await crearOrg(key), key)
+    await prisma.venueModule.create({ data: { venueId, moduleId: modulo.id, enabled: true, enabledBy: 'qa' } })
+    await expect(conElModulo([venueId])).resolves.toEqual([venueId])
+
+    const apagado = await carrera(s => s.disableModule(venueId, 'SERVICE_PAY' as ModuleCode))
+
+    expect(apagado).toMatchObject({ venueId, enabled: false }) // superadmin recibió éxito…
+    expect(await accesos([venueId])).toEqual([]) // …y la sede no conserva el acceso
+    await expect(venueHasServicePayAccess(venueId)).resolves.toBe(false)
+    expect(await prisma.module.findUnique({ where: { code: 'SERVICE_PAY' } })).toBeNull()
+  })
+
+  it('superadmin apaga la organización sin confirmar: la sede que heredaba NO recibe el acceso', async () => {
+    const key = `pf3co${stamp}`
+    const modulo = await crearModulo()
+    const organizationId = await crearOrg(key)
+    const heredada = await crearSede(organizationId, key)
+    await prisma.organizationModule.create({ data: { organizationId, moduleId: modulo.id, enabled: true, enabledBy: 'qa' } })
+    await expect(conElModulo([heredada])).resolves.toEqual([heredada])
+
+    const apagado = await carrera(s => s.disableModuleForOrganization(organizationId, 'SERVICE_PAY' as ModuleCode))
+
+    expect(apagado).toMatchObject({ organizationId, enabled: false })
+    expect(await accesos([heredada])).toEqual([])
+    await expect(venueHasServicePayAccess(heredada)).resolves.toBe(false)
+  })
+
+  it('al revés: superadmin prende la sede sin confirmar y la migración no pierde esa habilitación', async () => {
+    const key = `pf3cp${stamp}`
+    const modulo = await crearModulo()
+    const venueId = await crearSede(await crearOrg(key), key)
+    await prisma.venueModule.create({ data: { venueId, moduleId: modulo.id, enabled: false, enabledBy: 'qa' } })
+    await expect(conElModulo([venueId])).resolves.toEqual([])
+
+    const prendido = await carrera(s => s.enableModule(venueId, 'SERVICE_PAY' as ModuleCode, 'qa'))
+
+    expect(prendido).toMatchObject({ venueId, enabled: true })
+    expect((await accesos([venueId])).map(a => a.venueId)).toEqual([venueId])
+    await expect(venueHasServicePayAccess(venueId)).resolves.toBe(true)
   })
 })

@@ -13,6 +13,14 @@
 --   al este de UTC el acceso empezaría horas en el futuro).
 -- · Id con formato cuid ('c' + 24 hex), determinista por sede. Idempotente: si se vuelve a correr con el módulo sembrado otra
 --   vez, ON CONFLICT no duplica el acceso. Todo el archivo va en un solo envío (una transacción implícita).
+-- · Antes de leer, el candado de los escritores del módulo (`lockModuleScope`, module.service.ts:44; Codex Bloque C r1-1). Sin
+--   él, superadmin apagando una sede a media migración (enabled=false sin confirmar) dejaba que el INSERT leyera el «prendido»
+--   viejo y creara el acceso que no vence; el DELETE esperaba al apagado y la sede se quedaba con el acceso (y al revés se
+--   perdía una habilitación). Con él, quien escribe espera a la migración (y luego ya no encuentra el módulo) o la migración
+--   espera a quien escribe; en READ COMMITTED cada sentencia toma su foto al empezar, DESPUÉS de este candado, así que el
+--   INSERT ve lo que superadmin ya confirmó. El candado vive hasta el final de la transacción implícita del archivo.
+SELECT id FROM "Module" WHERE code = 'SERVICE_PAY' FOR UPDATE;
+
 WITH modulo AS (
   SELECT id, scope FROM "Module" WHERE code = 'SERVICE_PAY' AND active = true
 ), con_modulo AS (

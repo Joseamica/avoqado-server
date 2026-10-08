@@ -2,7 +2,8 @@
 // Pago al personal por plan (fase 3, C1b, ronda 1). El catch-up de SERVICE_PAY en los contratos comerciales:
 //   - sólo toca compras COMPLETED: a una compra a medio pagar le cambiaría los contratos y `provisionHybridPurchase`
 //     («Reanudar pago») respondería 409 HYBRID_CONTRACT_MISMATCH para siempre (hybridProvision.service.ts:164);
-//   - un contrato inconsistente se reporta y se salta: no aborta la corrida de los demás.
+//   - un contrato inconsistente se reporta y se salta: no aborta la corrida de los demás;
+//   - (C5-fix) las ofertas por republicar se buscan en TODAS las campañas vivas, por páginas (Codex Bloque C r1-2).
 import prisma from '@/utils/prismaClient'
 
 const subscriptions = new Map<string, any>()
@@ -12,7 +13,7 @@ jest.mock('@/services/stripe.service', () => ({
 }))
 
 import { provisionHybridPurchase } from '@/services/launchCampaigns/hybridProvision.service'
-import { addServicePayToLivePlanContracts } from '@/services/launchCampaigns/hybridPlanCatchUp'
+import { addServicePayToLivePlanContracts, staleCampaigns } from '@/services/launchCampaigns/hybridPlanCatchUp'
 import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
 
 const DIA = 86400
@@ -266,6 +267,81 @@ describe('C1b ronda 1 — compras en curso y contratos inconsistentes', () => {
       expect(await prisma.capabilityGrant.count({ where: { venueId: bueno.venueId, featureCode: 'SERVICE_PAY', revokedAt: null } })).toBe(1)
     } finally {
       await terminar(malo)
+    }
+  })
+})
+
+/** Campañas en venta (ACTIVE) con su publicación vigente. Con `ids`, en ese lugar del orden por id. */
+async function ofertasEnVenta(kind: 'PLAN' | 'FEATURES', incluidas: string[], ids: string[]) {
+  const terms = {
+    currency: 'MXN',
+    interval: 'MONTHLY',
+    price: 199,
+    taxIncluded: true,
+    promotionCycles: null,
+    renewal: { kind: 'SAME_PRICE' },
+  }
+  const definition =
+    kind === 'PLAN' ? { schemaVersion: 1, kind, planTier: 'PRO', terms } : { schemaVersion: 1, kind, featureCodes: incluidas, terms }
+  const filas = ids.map(id => ({ id, code: `${id}-x`.slice(0, 60), publicationId: `${id}p` }))
+  await prisma.hybridCampaign.createMany({
+    data: filas.map(f => ({
+      id: f.id,
+      code: f.code,
+      slug: f.code,
+      name: f.code,
+      draftDefinition: definition,
+      startsAt: new Date(),
+      endsAt: new Date(Date.now() + DIA * 1000),
+      capacity: 5,
+      audience: 'ALL',
+      createdById: staffId,
+      status: 'ACTIVE' as const,
+      currentPublicationId: f.publicationId,
+    })),
+  })
+  await prisma.hybridOfferPublication.createMany({
+    data: filas.map(f => ({
+      id: f.publicationId,
+      campaignId: f.id,
+      version: 1,
+      name: f.code,
+      definition,
+      definitionHash: 'd'.repeat(64),
+      includedFeatureCodes: incluidas,
+      createdById: staffId,
+    })),
+  })
+  return filas.map(f => ({ id: f.id, code: f.code }))
+}
+
+describe('C5-fix — las ofertas por republicar salen de TODAS las campañas vivas (Codex Bloque C r1-2)', () => {
+  it('500 campañas ajenas antes por id no esconden una oferta PRO vieja: se recorren por páginas', async () => {
+    // Las ajenas van ANTES que cualquier cuid por id ('c0…' < 'cm…'): son las primeras 500 que se leían. La oferta PRO vieja
+    // (sin SERVICE_PAY en su publicación vigente) va DESPUÉS de todas ellas.
+    const base = `c0${BigInt(stamp).toString(36)}`
+    const ajenas = await ofertasEnVenta(
+      'FEATURES',
+      ['LOYALTY_PROGRAM'],
+      Array.from({ length: 500 }, (_, i) => `${base}${String(i).padStart(4, '0')}`),
+    )
+    const [vieja] = await ofertasEnVenta('PLAN', ANTES, [`czz${BigInt(stamp).toString(36)}`])
+    try {
+      const antes = await prisma.hybridCampaign.count({
+        where: { status: { in: ['ACTIVE', 'PAUSED'] }, currentPublicationId: { not: null }, id: { lt: vieja.id } },
+      })
+      expect(antes).toBeGreaterThanOrEqual(500) // el escenario: al menos 500 campañas vivas van antes que la oferta vieja
+
+      // La misma función que `addServicePayToLivePlanContracts` devuelve en `staleCampaigns` (sin recorrer los contratos).
+      const porRepublicar = await staleCampaigns()
+
+      expect(porRepublicar).toContainEqual(vieja)
+      const ajenasIds = new Set(ajenas.map(a => a.id))
+      expect(porRepublicar.filter(c => ajenasIds.has(c.id))).toEqual([]) // las de funciones sueltas no se republican
+      expect(new Set(porRepublicar.map(c => c.id)).size).toBe(porRepublicar.length) // las páginas no se enciman: cada una, una vez
+    } finally {
+      // Las publicaciones no se pueden borrar (trigger) y la campaña no se borra con publicaciones: se terminan.
+      await prisma.hybridCampaign.updateMany({ where: { id: { in: [...ajenas, vieja].map(c => c.id) } }, data: { status: 'ENDED' } })
     }
   })
 })

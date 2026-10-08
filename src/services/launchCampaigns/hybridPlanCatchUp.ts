@@ -159,22 +159,34 @@ async function countInFlightPurchases(): Promise<Array<{ status: string; purchas
   return rows.map(row => ({ status: row.status, purchases: row._count._all }))
 }
 
-/** Ofertas de plan en venta o pausadas cuya publicación vigente no trae la función: se republican en superadmin. */
-async function staleCampaigns(): Promise<Array<{ id: string; code: string }>> {
-  // ponytail: 500 campañas vivas a la vez; paginar por id si algún día se acerca.
-  const campaigns = await prisma.hybridCampaign.findMany({
-    where: { status: { in: ['ACTIVE', 'PAUSED'] }, currentPublicationId: { not: null } },
-    select: { id: true, code: true, currentPublicationId: true },
-    orderBy: { id: 'asc' },
-    take: 500,
-  })
-  const ids = campaigns.map(c => c.currentPublicationId!)
-  if (!ids.length) return []
-  const stale = await prisma.hybridOfferPublication.findMany({
-    where: { id: { in: ids }, definition: { path: ['kind'], equals: 'PLAN' }, NOT: { includedFeatureCodes: { has: CODE } } },
-    select: { id: true },
-    take: ids.length,
-  })
-  const set = new Set(stale.map(p => p.id))
-  return campaigns.filter(c => set.has(c.currentPublicationId!)).map(c => ({ id: c.id, code: c.code }))
+/**
+ * Ofertas de plan en venta o pausadas cuya publicación vigente no trae la función: se republican en superadmin. Recorre TODAS
+ * las campañas vivas en páginas de `LOTE` ordenadas por id, como los contratos de arriba (Codex Bloque C r1-2): con un solo
+ * `take` sin seguir, 500 campañas ajenas (funciones sueltas, listas de precios) antes por id escondían una oferta PRO vieja y
+ * el script terminaba sin pedir republicarla. `currentPublicationId` no es relación, así que el filtro de plan va por página.
+ */
+export async function staleCampaigns(): Promise<Array<{ id: string; code: string }>> {
+  const stale: Array<{ id: string; code: string }> = []
+  let after: string | undefined
+  for (;;) {
+    const page = await prisma.hybridCampaign.findMany({
+      where: { status: { in: ['ACTIVE', 'PAUSED'] }, currentPublicationId: { not: null }, ...(after ? { id: { gt: after } } : {}) },
+      select: { id: true, code: true, currentPublicationId: true },
+      orderBy: { id: 'asc' },
+      take: LOTE,
+    })
+    if (page.length) {
+      const ids = page.map(c => c.currentPublicationId!)
+      const viejas = await prisma.hybridOfferPublication.findMany({
+        where: { id: { in: ids }, definition: { path: ['kind'], equals: 'PLAN' }, NOT: { includedFeatureCodes: { has: CODE } } },
+        select: { id: true },
+        take: ids.length,
+      })
+      const set = new Set(viejas.map(p => p.id))
+      for (const c of page) if (set.has(c.currentPublicationId!)) stale.push({ id: c.id, code: c.code })
+    }
+    if (page.length < LOTE) break
+    after = page[page.length - 1].id
+  }
+  return stale
 }
