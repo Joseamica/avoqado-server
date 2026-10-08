@@ -189,8 +189,11 @@ describe('las fases de la sucursal', () => {
 
   it('PAUSED sin pausedFrom se trata como ACTIVE', async () => {
     const e = await escenario({ linkStatus: 'PAUSED' })
+    const sinPareja = await agregarProductoShopify(e, { pareja: false })
     await restarUno(e.inventoryId)
+    await restarUno(sinPareja.inventoryId)
     expect(await deltas(e.productId)).toEqual(['-1'])
+    expect(await filas(sinPareja.productId)).toHaveLength(0)
   })
 
   it('DISCONNECTED: no encola nada', async () => {
