@@ -124,4 +124,26 @@ describe('KPI «Pagado» de Comisiones: lo pagado en recibos (spec §8)', () => 
     await recibo(agosto.id, m.ana, 90, true)
     expect(await getVenueCommissionStats(otra.venueId)).toMatchObject({ staffPayActive: true, totalPaid: 90 })
   })
+
+  it('sede trasladada a otra organización activada, sin ventana en la nueva: la ventana de la anterior no cuenta (E1b-fix)', async () => {
+    const otra = await crearSede(m.orgId, m.key, 'tr')
+    await sedeActiva(m, otra.venueId, '2026-08-01') // ventana en O1
+    const key2 = `${m.key}-o2`
+    const org2 = await prisma.organization.create({
+      data: {
+        name: key2,
+        slug: key2,
+        email: `${key2}@example.test`,
+        phone: '5500000000',
+        staffPayStartDate: fechaComoDbDate('2026-08-01'),
+      },
+    })
+    try {
+      await prisma.venue.update({ where: { id: otra.venueId }, data: { organizationId: org2.id } }) // O2 activada; la sede nunca, en O2
+      expect(await getVenueCommissionStats(otra.venueId)).toMatchObject({ staffPayActive: false, totalPaid: 0 })
+    } finally {
+      await prisma.venue.update({ where: { id: otra.venueId }, data: { organizationId: m.orgId } })
+      await prisma.organization.delete({ where: { id: org2.id } })
+    }
+  })
 })

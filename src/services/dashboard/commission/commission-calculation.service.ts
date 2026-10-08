@@ -1115,7 +1115,7 @@ async function comisionesPagadasEnRecibos(venueId: string): Promise<{ activo: bo
   const activo =
     (await venueHasServicePayAccess(venueId)) &&
     (await organizacionDeLaSedeActivada(venueId)) &&
-    !!(await prisma.staffPayVenueWindow.findFirst({ where: { venueId }, select: { id: true } }))
+    !!(await prisma.staffPayVenueWindow.findFirst({ where: { organizationId: venue.organizationId, venueId }, select: { id: true } }))
   if (!activo) return { activo, total: cero }
   const [r] = await prisma.$queryRaw<Array<{ total: Prisma.Decimal | null }>>(Prisma.sql`
     SELECT SUM(e.amount) AS total
