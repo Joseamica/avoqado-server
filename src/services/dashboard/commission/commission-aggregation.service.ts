@@ -31,15 +31,6 @@ export interface AggregationResult {
   calculationsAggregated: number
 }
 
-export interface SummaryFilters {
-  staffId?: string
-  status?: CommissionSummaryStatus
-  periodStart?: Date
-  periodEnd?: Date
-  /** Máximo de renglones (el servidor lo acota a `TOPE_RESUMENES`). */
-  limite?: number
-}
-
 // ============================================
 // Aggregation Operations
 // ============================================
@@ -310,13 +301,9 @@ export async function aggregateAllPendingCommissions(): Promise<{
 // ============================================
 
 /**
- * «Resumen de Comisiones»: lo CALCULADO por persona y periodo, con la fuente del KPI «Calculado» (E6a-fix2 C6). Los montos
- * ya no salen de lo que guarda este job (ver `resumenesCalculados.ts`): la forma de la respuesta es la misma.
+ * «Resumen de Comisiones»: lo CALCULADO por persona y periodo, con la fuente del KPI «Calculado» (E6a-fix2 C6), y el total
+ * antes del tope (`GET /summaries` lo manda, aditivo, junto a `data`). Ver `resumenesCalculados.ts`.
  */
-export async function getCommissionSummaries(venueId: string, filters: SummaryFilters = {}): Promise<any[]> {
-  return (await resumenesCalculados(venueId, filters)).filas
-}
-/** Con el total antes del tope (`GET /summaries` lo manda, aditivo, junto a `data`). */
 export { resumenesCalculados }
 
 /**

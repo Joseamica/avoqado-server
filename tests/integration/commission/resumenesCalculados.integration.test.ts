@@ -21,7 +21,7 @@
  */
 import { Prisma, TierPeriod } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
-import { getCommissionSummaries, resumenesCalculados } from '@/services/dashboard/commission/commission-aggregation.service'
+import { resumenesCalculados } from '@/services/dashboard/commission/commission-aggregation.service'
 import { getStaffCommissions, getVenueCommissionStats } from '@/services/dashboard/commission/commission-calculation.service'
 import { getPeriodDateRange } from '@/services/dashboard/commission/commission-utils'
 import { getSummaries } from '@/controllers/dashboard/commission.dashboard.controller'
@@ -29,6 +29,8 @@ import { asegurarBaseDePrueba, borrarMundoComisiones, crearMundoComisiones, Mund
 
 const D = (n: number) => new Prisma.Decimal(n)
 let m: MundoComisiones
+/** Los renglones de la tabla (lo que antes devolvía `getCommissionSummaries`, retirado en final-fix M4: sólo lo usaban pruebas). */
+const renglones = async (...a: Parameters<typeof resumenesCalculados>) => (await resumenesCalculados(...a)).filas
 
 beforeAll(asegurarBaseDePrueba)
 beforeEach(async () => {
@@ -128,7 +130,7 @@ const AGO = '2026-08-01T06:00:00.000Z'
 describe('C6 · la tabla «Resumen de Comisiones» dice lo CALCULADO, con la fuente del KPI', () => {
   it('cada persona y periodo: comisiones vivas, sin anuladas, con sus reversos; no lo que guardó el job', async () => {
     const r = await mundoDeLaQa()
-    const filas = await getCommissionSummaries(m.venueId)
+    const filas = await renglones(m.venueId)
     const montos = (f: any) => f && { comision: f.totalCommissions.toFixed(2), neto: f.netAmount.toFixed(2), pagos: f.paymentCount }
     expect(montos(fila(filas, m.ana, SEP))).toEqual({ comision: '64.63', neto: '64.63', pagos: 3 }) // redondeo por renglón
     expect(montos(fila(filas, m.bea, SEP))).toEqual({ comision: '22.62', neto: '22.62', pagos: 3 }) // sin la doble suma
@@ -148,7 +150,7 @@ describe('C6 · la tabla «Resumen de Comisiones» dice lo CALCULADO, con la fue
 
   it('la suma de la tabla es EXACTAMENTE el KPI «Calculado» (misma fuente, mismo redondeo)', async () => {
     await mundoDeLaQa()
-    const filas = await getCommissionSummaries(m.venueId)
+    const filas = await renglones(m.venueId)
     const suma = filas.reduce((s: Prisma.Decimal, f: any) => s.plus(f.netAmount), D(0))
     const kpi = await getVenueCommissionStats(m.venueId)
     expect(suma.toFixed(2)).toBe(D(kpi.totalCalculated).toFixed(2))
@@ -157,7 +159,7 @@ describe('C6 · la tabla «Resumen de Comisiones» dice lo CALCULADO, con la fue
 
   it('la forma de la respuesta no cambia: los mismos campos, la persona con su staffVenueId, orden por periodo y apellido', async () => {
     await mundoDeLaQa()
-    const filas = await getCommissionSummaries(m.venueId)
+    const filas = await renglones(m.venueId)
     const campos = [...Object.values(Prisma.CommissionSummaryScalarFieldEnum), 'staff', 'approvedBy', '_count'].sort()
     for (const f of filas) expect(Object.keys(f).sort()).toEqual(campos)
     const sv = await prisma.staffVenue.findFirstOrThrow({ where: { staffId: m.owner, venueId: m.venueId }, select: { id: true } })
@@ -175,21 +177,21 @@ describe('C6 · la tabla «Resumen de Comisiones» dice lo CALCULADO, con la fue
 
   it('filtros de siempre: persona y periodo', async () => {
     await mundoDeLaQa()
-    expect((await getCommissionSummaries(m.venueId, { staffId: m.owner })).map(f => f.periodStart.toISOString())).toEqual([OCT, SEP])
-    const desdeSep = await getCommissionSummaries(m.venueId, { periodStart: new Date(SEP) })
+    expect((await renglones(m.venueId, { staffId: m.owner })).map(f => f.periodStart.toISOString())).toEqual([OCT, SEP])
+    const desdeSep = await renglones(m.venueId, { periodStart: new Date(SEP) })
     expect(desdeSep.map(f => f.periodStart.toISOString())).toEqual([OCT, SEP, SEP, SEP])
-    expect(await getCommissionSummaries(m.venueId, { status: 'PAID' as any })).toHaveLength(1)
+    expect(await renglones(m.venueId, { status: 'PAID' as any })).toHaveLength(1)
   })
 
   it('acotada en el servidor: un tope por encima de lo que pidan, y el total verdadero en la respuesta', async () => {
     await mundoDeLaQa()
-    expect(await getCommissionSummaries(m.venueId, { limite: 2 })).toHaveLength(2)
+    expect(await renglones(m.venueId, { limite: 2 })).toHaveLength(2)
     // El total es el de ANTES del tope: un recorte nunca es silencioso.
     expect(await resumenesCalculados(m.venueId, { limite: 2 })).toMatchObject({ total: 5, filas: expect.any(Array) })
     // Un límite hostil no pasa del tope (500): el LIMIT de la consulta es el último parámetro.
     const espia = jest.spyOn(prisma, '$queryRaw')
     try {
-      await getCommissionSummaries(m.venueId, { limite: 1_000_000 })
+      await renglones(m.venueId, { limite: 1_000_000 })
       const sql = espia.mock.calls[espia.mock.calls.length - 1][0] as unknown as Prisma.Sql
       expect(sql.values[sql.values.length - 1]).toBe(500)
     } finally {
@@ -225,7 +227,7 @@ describe('C6 · la tabla «Resumen de Comisiones» dice lo CALCULADO, con la fue
       await prisma.commissionConfig.update({ where: { id: m.configId }, data: { aggregationPeriod: periodo } })
       const instantes = ['2026-10-05T06:30:00Z', '2026-01-01T07:00:00Z', '2026-12-31T23:00:00Z', '2026-03-15T12:00:00Z']
       for (const iso of instantes) await comision(m.ana, iso, 1)
-      const filas = await getCommissionSummaries(m.venueId)
+      const filas = await renglones(m.venueId)
       for (const iso of instantes) {
         const { start, end } = getPeriodDateRange(periodo, new Date(iso), 'America/Mexico_City')
         const f = filas.find(x => x.periodStart.getTime() === start.getTime())
