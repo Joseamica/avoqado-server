@@ -18,6 +18,7 @@ import { BadRequestError, NotFoundError } from '../../../errors/AppError'
 import { decimalToNumber, getPeriodDateRange, getVenueTimezone, reintentarSiHayBloqueoMutuo } from './commission-utils'
 import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
 import { retry, shouldRetryDbConnectionError } from '../../../utils/retry'
+import { periodoDeAgregacion, resumenesCalculados } from './resumenesCalculados'
 
 // ============================================
 // Type Definitions
@@ -35,6 +36,8 @@ export interface SummaryFilters {
   status?: CommissionSummaryStatus
   periodStart?: Date
   periodEnd?: Date
+  /** Máximo de renglones (el servidor lo acota a `TOPE_RESUMENES`). */
+  limite?: number
 }
 
 // ============================================
@@ -283,19 +286,8 @@ export async function aggregateAllPendingCommissions(): Promise<{
 
   for (const { venueId } of venuesWithPending) {
     try {
-      // Get the active commission config for this venue to read aggregationPeriod
-      const activeConfig = await prisma.commissionConfig.findFirst({
-        where: {
-          venueId,
-          active: true,
-          deletedAt: null,
-        },
-        orderBy: { priority: 'desc' },
-        select: { aggregationPeriod: true },
-      })
-
-      // Use config's aggregationPeriod, fallback to MONTHLY if no config exists
-      const period = activeConfig?.aggregationPeriod ?? TierPeriod.MONTHLY
+      // El periodo del esquema activo de mayor prioridad (mensual sin esquema): la MISMA regla con la que la tabla agrupa.
+      const period = await periodoDeAgregacion(venueId)
 
       const result = await aggregateVenueCommissions(venueId, period)
       totalSummarized += result.calculationsAggregated
@@ -318,68 +310,14 @@ export async function aggregateAllPendingCommissions(): Promise<{
 // ============================================
 
 /**
- * Get commission summaries for a venue
+ * «Resumen de Comisiones»: lo CALCULADO por persona y periodo, con la fuente del KPI «Calculado» (E6a-fix2 C6). Los montos
+ * ya no salen de lo que guarda este job (ver `resumenesCalculados.ts`): la forma de la respuesta es la misma.
  */
 export async function getCommissionSummaries(venueId: string, filters: SummaryFilters = {}): Promise<any[]> {
-  const where: Prisma.CommissionSummaryWhereInput = { venueId }
-
-  if (filters.staffId) where.staffId = filters.staffId
-  if (filters.status) where.status = filters.status
-
-  if (filters.periodStart || filters.periodEnd) {
-    if (filters.periodStart) {
-      where.periodStart = { gte: filters.periodStart }
-    }
-    if (filters.periodEnd) {
-      where.periodEnd = { lte: filters.periodEnd }
-    }
-  }
-
-  const summaries = await prisma.commissionSummary.findMany({
-    where,
-    include: {
-      staff: {
-        select: {
-          id: true,
-          firstName: true,
-          lastName: true,
-          email: true,
-          venues: {
-            where: { venueId },
-            select: { id: true },
-            take: 1,
-          },
-        },
-      },
-      approvedBy: {
-        select: {
-          id: true,
-          firstName: true,
-          lastName: true,
-        },
-      },
-      _count: {
-        select: {
-          calculations: true,
-          payouts: true,
-        },
-      },
-    },
-    orderBy: [{ periodStart: 'desc' }, { staff: { lastName: 'asc' } }],
-  })
-
-  // Transform to include staffVenueId at top level of staff object
-  return summaries.map(summary => ({
-    ...summary,
-    staff: {
-      id: summary.staff.id,
-      firstName: summary.staff.firstName,
-      lastName: summary.staff.lastName,
-      email: summary.staff.email,
-      staffVenueId: summary.staff.venues[0]?.id || null,
-    },
-  }))
+  return (await resumenesCalculados(venueId, filters)).filas
 }
+/** Con el total antes del tope (`GET /summaries` lo manda, aditivo, junto a `data`). */
+export { resumenesCalculados }
 
 /**
  * Get a single summary by ID

@@ -683,14 +683,14 @@ export async function getSummaries(req: Request, res: Response, next: NextFuncti
     const { venueId } = req.params
     const { staffId, status, periodStart, periodEnd } = req.query
 
-    const summaries = await aggregationService.getCommissionSummaries(venueId, {
+    const { filas, total } = await aggregationService.resumenesCalculados(venueId, {
       staffId: staffId as string,
       status: status as any,
       periodStart: periodStart ? new Date(periodStart as string) : undefined,
       periodEnd: periodEnd ? new Date(periodEnd as string) : undefined,
     })
 
-    res.json({ data: summaries })
+    res.json({ data: filas, total })
   } catch (error) {
     next(error)
   }

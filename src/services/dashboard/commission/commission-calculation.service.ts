@@ -36,6 +36,7 @@ import { NotFoundError, BadRequestError } from '../../../errors/AppError'
 import { logAction } from '../activity-log.service'
 import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
 import { recalculateSummary } from './commission-aggregation.service'
+import { resumenesCalculados } from './resumenesCalculados'
 import { applyAttendancePenalty, resolveAttendancePenaltyRate } from './commission-attendance'
 import {
   committedAndPendingCommissionProgress,
@@ -921,15 +922,8 @@ export async function getStaffCommissions(
     }),
     // Total count
     prisma.commissionCalculation.count({ where }),
-    // Summaries for this staff member
-    prisma.commissionSummary.findMany({
-      where: {
-        staffId,
-        venueId,
-      },
-      orderBy: { periodEnd: 'desc' },
-      take: 12, // Last 12 periods
-    }),
+    // Sus últimos 12 periodos, con lo CALCULADO (la fuente del KPI), no lo que guardó el job (E6a-fix2 C6, hermano).
+    resumenesCalculados(venueId, { staffId, limite: 12 }).then(r => r.filas),
     // This month stats
     prisma.commissionCalculation.aggregate({
       where: {
