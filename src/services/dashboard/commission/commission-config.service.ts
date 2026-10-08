@@ -507,8 +507,15 @@ export async function copyCommissionConfig(
   createdById: string,
   overrides?: Partial<CreateCommissionConfigInput>,
 ): Promise<any> {
-  const source = await prisma.commissionConfig.findUnique({
-    where: { id: sourceConfigId },
+  // El origen se busca CON el filtro del negocio de quien pide: uno de su sede, o uno del grupo (nivel organización) al que
+  // pertenece. Cualquier otro id —de otro negocio o ya borrado— es un 404, nunca una copia.
+  const venue = await prisma.venue.findUnique({ where: { id: targetVenueId }, select: { organizationId: true } })
+  const source = await prisma.commissionConfig.findFirst({
+    where: {
+      id: sourceConfigId,
+      deletedAt: null,
+      OR: [{ venueId: targetVenueId }, ...(venue?.organizationId ? [{ venueId: null, orgId: venue.organizationId }] : [])],
+    },
     include: {
       tiers: { where: { active: true } },
     },

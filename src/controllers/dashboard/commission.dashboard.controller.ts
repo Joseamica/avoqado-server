@@ -122,7 +122,12 @@ export async function copyConfig(req: Request, res: Response, next: NextFunction
     const authContext = (req as any).authContext
     const { name } = req.body
 
-    const config = await configService.copyCommissionConfig(configId, venueId, authContext?.userId, name)
+    const config = await configService.copyCommissionConfig(
+      configId,
+      venueId,
+      authContext?.userId,
+      typeof name === 'string' && name.trim() ? { name: name.trim() } : undefined,
+    )
 
     res.status(201).json(config)
   } catch (error) {
