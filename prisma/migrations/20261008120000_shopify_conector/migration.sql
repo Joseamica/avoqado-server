@@ -313,3 +313,74 @@ ALTER TABLE "ShopifyVariantLink" ADD CONSTRAINT "ShopifyVariantLink_productId_fk
 -- AddForeignKey
 ALTER TABLE "ShopifyReviewItem" ADD CONSTRAINT "ShopifyReviewItem_productId_fkey" FOREIGN KEY ("productId") REFERENCES "Product"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
+
+-- ═══ Guardia de stock para Shopify (spec §4 ③, ajustes 12 bis.2 y 12 bis.6) ════════════════════════════════════
+-- Cada cambio de "Inventory"."currentStock" de una sucursal ligada a Shopify deja su delta en "ShopifyStockOutbox", en la
+-- MISMA transacción. Ve todos los caminos que escriben stock (Prisma y SQL crudo) y los que se agreguen.
+-- 🔴 Es la primera vez que este repo le pasa contexto a un trigger: quien aplica un cambio que VINO de Shopify hace
+--    SELECT set_config('avoqado.stock_origen', 'shopify', true) en su transacción, y aquí no se encola (sin eco).
+-- 🔴 Si este INSERT fallara, fallaría la venta que lo disparó: por eso no hace nada más que leer dos índices e insertar.
+-- Una sucursal sin Shopify paga una búsqueda por el índice único de "venueId".
+-- Reversión (no se ejecuta aquí):
+--   DROP TRIGGER IF EXISTS "Inventory_guardia_shopify" ON "Inventory";
+--   DROP FUNCTION IF EXISTS "shopifyGuardiaInventario"();
+-- CREATE TRIGGER pide candado sobre "Inventory": si tarda, la migración falla en vez de formar fila delante de las ventas.
+SET LOCAL lock_timeout = '5s';
+
+-- Fase efectiva: si la sucursal está PAUSED, manda la fase de antes (pausedFrom).
+--  · CONNECTING / REVIEWING ⇒ se encola CUALQUIER producto de la sucursal (aún sin pareja): ajuste 12 bis.2.
+--  · ACTIVE ⇒ sólo productos con pareja iniciada y no suspendida.
+--  · DISCONNECTED o sin enlace ⇒ nada.
+-- No encola: marca de origen 'shopify'; delta 0; DELETE de la fila (lo maneja switchInventoryMethod, ajuste 12 bis.5).
+CREATE OR REPLACE FUNCTION "shopifyGuardiaInventario"() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+  v_delta  numeric(12,3);
+  v_link   text;
+  v_fase   text;
+  v_gen    int;
+  v_ok     boolean;
+BEGIN
+  IF current_setting('avoqado.stock_origen', true) = 'shopify' THEN
+    RETURN NEW;
+  END IF;
+  IF TG_OP = 'INSERT' THEN
+    v_delta := NEW."currentStock";
+  ELSE
+    v_delta := NEW."currentStock" - OLD."currentStock";
+  END IF;
+  IF v_delta = 0 THEN
+    RETURN NEW;
+  END IF;
+
+  SELECT l.id,
+         CASE WHEN l.status = 'PAUSED' THEN COALESCE(l."pausedFrom"::text, 'ACTIVE') ELSE l.status::text END,
+         l.generation
+    INTO v_link, v_fase, v_gen
+    FROM "ShopifyLocationLink" l
+   WHERE l."venueId" = NEW."venueId";
+  IF v_link IS NULL OR v_fase = 'DISCONNECTED' THEN
+    RETURN NEW;
+  END IF;
+
+  IF v_fase = 'ACTIVE' THEN
+    SELECT TRUE INTO v_ok
+      FROM "ShopifyVariantLink" v
+     WHERE v."productId" = NEW."productId" AND v."locationLinkId" = v_link
+       AND v."initializedAt" IS NOT NULL AND v."suspendedReason" IS NULL;
+    IF v_ok IS NOT TRUE THEN
+      RETURN NEW;
+    END IF;
+  END IF;
+
+  INSERT INTO "ShopifyStockOutbox"
+    (id, "venueId", "locationLinkId", generation, "productId", delta, status, ambiguous, attempts, "scheduledAt", "createdAt")
+  VALUES ('c' || substr(md5(gen_random_uuid()::text), 1, 24), NEW."venueId", v_link, v_gen, NEW."productId", v_delta,
+          'PENDING', false, 0, (NOW() AT TIME ZONE 'UTC'), (NOW() AT TIME ZONE 'UTC'));
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS "Inventory_guardia_shopify" ON "Inventory";
+CREATE TRIGGER "Inventory_guardia_shopify"
+AFTER INSERT OR UPDATE OF "currentStock" ON "Inventory"
+FOR EACH ROW EXECUTE FUNCTION "shopifyGuardiaInventario"();
