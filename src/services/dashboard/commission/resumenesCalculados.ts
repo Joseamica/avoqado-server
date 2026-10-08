@@ -119,6 +119,11 @@ export async function resumenesCalculados(venueId: string, f: FiltrosDeResumen =
   const limite = Math.min(Math.max(Math.trunc(f.limite ?? TOPE_RESUMENES), 1), TOPE_RESUMENES)
   const inicio = inicioDelPeriodo(periodo, localWallClock(tz, Prisma.raw('cc."calculatedAt"')))
   const deLaPersona = f.staffId ? Prisma.sql`AND cc."staffId" = ${f.staffId}` : Prisma.empty
+  // M6: recorte NECESARIO antes de agrupar (índice `venueId, calculatedAt`). Un periodo empieza a más tardar en su fila y
+  // termina no antes de ella, así que una fila fuera de [periodStart, periodEnd] nunca cae en un periodo que pase el filtro
+  // exacto de abajo (`p`). Mismo resultado, sin agrupar toda la historia de la sede.
+  const filasDesde = f.periodStart ? Prisma.sql`AND cc."calculatedAt" >= ${utcTs(f.periodStart)}` : Prisma.empty
+  const filasHasta = f.periodEnd ? Prisma.sql`AND cc."calculatedAt" <= ${utcTs(f.periodEnd)}` : Prisma.empty
   const desde = f.periodStart ? Prisma.sql`AND p."periodStart" >= ${utcTs(f.periodStart)}` : Prisma.empty
   const hasta = f.periodEnd ? Prisma.sql`AND p."periodEnd" <= ${utcTs(f.periodEnd)}` : Prisma.empty
   const estado = f.status
@@ -128,7 +133,7 @@ export async function resumenesCalculados(venueId: string, f: FiltrosDeResumen =
     WITH vivas AS (
       SELECT cc."staffId", ${inicio} AS b, cc."netCommission", cc."baseAmount", cc."orderId", cc."calculatedAt"
       FROM "CommissionCalculation" cc
-      WHERE cc."venueId" = ${venueId} AND cc.status <> 'VOIDED'::"CommissionCalcStatus" ${deLaPersona}
+      WHERE cc."venueId" = ${venueId} AND cc.status <> 'VOIDED'::"CommissionCalcStatus" ${deLaPersona} ${filasDesde} ${filasHasta}
     ),
     grupos AS (
       SELECT "staffId", b, sum("netCommission") AS comisiones, sum("baseAmount") AS ventas, count(*)::int AS n,

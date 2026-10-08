@@ -236,3 +236,59 @@ describe('C6 · la tabla «Resumen de Comisiones» dice lo CALCULADO, con la fue
     },
   )
 })
+
+/**
+ * final-fix M6: las fechas se aplican ANTES de agrupar. Con `periodStart`/`periodEnd` la consulta ya no agrupa toda la historia
+ * de la sede para luego tirarla: recorta las filas por `calculatedAt` (índice `venueId, calculatedAt`). Es un recorte
+ * NECESARIO: el inicio del periodo de una fila nunca es posterior a su `calculatedAt` y su fin nunca es anterior, así que una
+ * fila fuera de ese rango jamás cae en un periodo que pase el filtro. El filtro exacto por periodo se queda donde estaba.
+ */
+describe('M6 · el filtro de fechas va antes de agrupar, con el mismo resultado', () => {
+  const ms = (d: Date, delta: number) => new Date(d.getTime() + delta)
+
+  it('la consulta recorta por calculatedAt dentro de las filas vivas, antes de agrupar', async () => {
+    const espia = jest.spyOn(prisma, '$queryRaw')
+    try {
+      await resumenesCalculados(m.venueId, { periodStart: new Date(SEP), periodEnd: new Date('2026-10-01T05:59:59.999Z') })
+      const sql = (espia.mock.calls[espia.mock.calls.length - 1][0] as unknown as Prisma.Sql).text
+      const vivas = sql.slice(sql.indexOf('WITH vivas AS ('), sql.indexOf('grupos AS'))
+      expect(vivas).toMatch(/cc\."calculatedAt" >= \(\$\d+ AT TIME ZONE 'UTC'\)/)
+      expect(vivas).toMatch(/cc\."calculatedAt" <= \(\$\d+ AT TIME ZONE 'UTC'\)/)
+    } finally {
+      espia.mockRestore()
+    }
+  })
+
+  it.each(['America/Mexico_City', 'America/Santiago'])(
+    'equivalencia con «agrupar todo y filtrar después», en cada periodo, en las orillas (%s)',
+    async tz => {
+      await prisma.venue.update({ where: { id: m.venueId }, data: { timezone: tz } })
+      // Orillas de mes, de año y los dos cambios de horario de Santiago (que ocurren a medianoche).
+      const instantes = ['2026-01-01T03:30:00Z', '2026-04-05T02:30:00Z', '2026-04-05T03:30:00Z', '2026-04-05T04:30:00Z']
+      instantes.push('2026-09-06T03:30:00Z', '2026-09-06T04:30:00Z', '2026-10-01T05:30:00Z', '2026-10-01T06:30:00Z')
+      for (const [i, iso] of instantes.entries()) await comision(i % 2 ? m.ana : m.bea, iso, i + 1)
+      for (const periodo of Object.values(TierPeriod)) {
+        await prisma.commissionConfig.update({ where: { id: m.configId }, data: { aggregationPeriod: periodo } })
+        const todo = await renglones(m.venueId)
+        const inicios = [...new Set(todo.map(f => f.periodStart.getTime()))].sort((a, b) => a - b).map(t => new Date(t))
+        const fines = [...new Set(todo.map(f => f.periodEnd.getTime()))].sort((a, b) => a - b).map(t => new Date(t))
+        const x = inicios[1] ?? inicios[0]
+        const y = fines[fines.length - 2] ?? fines[0]
+        const desdes = [undefined, x, ms(x, 1), ms(x, -1), new Date(instantes[3])]
+        const hastas = [undefined, y, ms(y, -1), ms(y, 1), new Date(instantes[5])]
+        for (const periodStart of desdes)
+          for (const periodEnd of hastas) {
+            const esperado = todo.filter(f => (!periodStart || f.periodStart >= periodStart) && (!periodEnd || f.periodEnd <= periodEnd))
+            const r = await resumenesCalculados(m.venueId, { periodStart, periodEnd })
+            const caso = { tz, periodo, periodStart: periodStart?.toISOString(), periodEnd: periodEnd?.toISOString() }
+            const resumen = (fs: any[]) => fs.map(f => `${f.id}|${f.netAmount.toFixed(2)}|${f.paymentCount}`)
+            expect({ ...caso, filas: resumen(r.filas), total: r.total }).toEqual({
+              ...caso,
+              filas: resumen(esperado),
+              total: esperado.length,
+            })
+          }
+      }
+    },
+  )
+})
