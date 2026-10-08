@@ -677,6 +677,9 @@ export async function getCommissionByPayment(req: Request, res: Response, next: 
 /**
  * GET /api/v1/dashboard/venues/:venueId/commission-summaries
  * Get all commission summaries for venue
+ *
+ * Final-fix M6: sin `periodStart` ni `periodEnd` (así la pide la pantalla Comisiones) lee los últimos 12 meses
+ * (`ventanaPorDefecto`), no toda la historia de la sede.
  */
 export async function getSummaries(req: Request, res: Response, next: NextFunction) {
   try {
@@ -686,8 +689,10 @@ export async function getSummaries(req: Request, res: Response, next: NextFuncti
     const { filas, total } = await aggregationService.resumenesCalculados(venueId, {
       staffId: staffId as string,
       status: status as any,
-      periodStart: periodStart ? new Date(periodStart as string) : undefined,
-      periodEnd: periodEnd ? new Date(periodEnd as string) : undefined,
+      ...aggregationService.ventanaPorDefecto({
+        periodStart: periodStart ? new Date(periodStart as string) : undefined,
+        periodEnd: periodEnd ? new Date(periodEnd as string) : undefined,
+      }),
     })
 
     res.json({ data: filas, total })

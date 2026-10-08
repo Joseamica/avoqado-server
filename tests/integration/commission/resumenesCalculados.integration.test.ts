@@ -20,6 +20,7 @@
  *   --runTestsByPath tests/integration/commission/resumenesCalculados.integration.test.ts --ci
  */
 import { Prisma, TierPeriod } from '@prisma/client'
+import { subMonths } from 'date-fns'
 import prisma from '@/utils/prismaClient'
 import { resumenesCalculados } from '@/services/dashboard/commission/commission-aggregation.service'
 import { getStaffCommissions, getVenueCommissionStats } from '@/services/dashboard/commission/commission-calculation.service'
@@ -198,7 +199,9 @@ describe('C6 · la tabla «Resumen de Comisiones» dice lo CALCULADO, con la fue
       espia.mockRestore()
     }
     let cuerpo: any
-    await getSummaries({ params: { venueId: m.venueId }, query: {} } as any, { json: (b: any) => (cuerpo = b) } as any, jest.fn())
+    // Con su fecha: sin fechas la ruta lee los últimos 12 meses (final-fix M6) y estos datos fijos de 2026 saldrían de la ventana.
+    const query = { periodStart: '2026-01-01T06:00:00.000Z' }
+    await getSummaries({ params: { venueId: m.venueId }, query } as any, { json: (b: any) => (cuerpo = b) } as any, jest.fn())
     expect(cuerpo.data).toHaveLength(5)
     expect(cuerpo.total).toBe(5)
   })
@@ -291,4 +294,47 @@ describe('M6 · el filtro de fechas va antes de agrupar, con el mismo resultado'
       }
     },
   )
+})
+
+describe('final-fix M6 · sin fechas, «Resumen de Comisiones» lee los últimos 12 meses', () => {
+  const llamar = async (query: Record<string, string>) => {
+    let cuerpo: any
+    const next = jest.fn()
+    await getSummaries({ params: { venueId: m.venueId }, query } as any, { json: (b: any) => (cuerpo = b) } as any, next)
+    expect(next).not.toHaveBeenCalled()
+    return cuerpo
+  }
+
+  it('🔴 GET /summaries sin fechas no trae ni recorre lo de hace más de 12 meses; con fechas, lo pedido', async () => {
+    const DIA = 86_400_000
+    const ahora = Date.now()
+    await comision(m.ana, new Date(ahora - 400 * DIA).toISOString(), 7) // hace ~13 meses
+    await comision(m.ana, new Date(ahora - 20 * DIA).toISOString(), 3)
+    const espia = jest.spyOn(prisma, '$queryRaw')
+    let cuerpo: any
+    try {
+      const orilla = subMonths(new Date(), 12).getTime()
+      cuerpo = await llamar({})
+      const sql = espia.mock.calls[espia.mock.calls.length - 1][0] as unknown as Prisma.Sql
+      const fechas = sql.values.filter((v): v is Date => v instanceof Date)
+      // La orilla llega a la consulta: recorta las filas (`vivas`, índice venueId+calculatedAt) y los periodos.
+      expect(fechas).toHaveLength(2)
+      for (const f of fechas) expect(Math.abs(f.getTime() - orilla)).toBeLessThan(60_000)
+      expect(sql.text).toMatch(/cc\."calculatedAt" >= \(\$\d+ AT TIME ZONE 'UTC'\)/)
+    } finally {
+      espia.mockRestore()
+    }
+    expect(cuerpo.data.map((f: any) => f.netAmount.toFixed(2))).toEqual(['3.00'])
+    expect(cuerpo.total).toBe(1)
+    // Con una fecha explícita manda lo pedido, sin la ventana.
+    const todo = await llamar({ periodStart: new Date(ahora - 500 * DIA).toISOString() })
+    expect(todo.data.map((f: any) => f.netAmount.toFixed(2)).sort()).toEqual(['3.00', '7.00'])
+    expect(todo.total).toBe(2)
+  })
+
+  it('el historial de la persona en Equipo no cambia: sus últimos 12 periodos, aunque pasen de 12 meses (anuales)', async () => {
+    await prisma.commissionConfig.update({ where: { id: m.configId }, data: { aggregationPeriod: TierPeriod.YEARLY } })
+    for (const anio of [2024, 2025, 2026]) await comision(m.ana, `${anio}-06-15T18:00:00Z`, 10)
+    expect((await getStaffCommissions(m.ana, m.venueId)).summaries).toHaveLength(3)
+  })
 })

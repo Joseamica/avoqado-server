@@ -18,7 +18,7 @@ import { BadRequestError, NotFoundError } from '../../../errors/AppError'
 import { decimalToNumber, getPeriodDateRange, getVenueTimezone, reintentarSiHayBloqueoMutuo } from './commission-utils'
 import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
 import { retry, shouldRetryDbConnectionError } from '../../../utils/retry'
-import { periodoDeAgregacion, resumenesCalculados } from './resumenesCalculados'
+import { periodoDeAgregacion, resumenesCalculados, ventanaPorDefecto } from './resumenesCalculados'
 
 // ============================================
 // Type Definitions
@@ -304,7 +304,7 @@ export async function aggregateAllPendingCommissions(): Promise<{
  * «Resumen de Comisiones»: lo CALCULADO por persona y periodo, con la fuente del KPI «Calculado» (E6a-fix2 C6), y el total
  * antes del tope (`GET /summaries` lo manda, aditivo, junto a `data`). Ver `resumenesCalculados.ts`.
  */
-export { resumenesCalculados }
+export { resumenesCalculados, ventanaPorDefecto }
 
 /**
  * Get a single summary by ID

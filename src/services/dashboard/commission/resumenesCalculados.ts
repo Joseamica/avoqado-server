@@ -17,6 +17,7 @@
  * hitos no son parte de lo calculado (tampoco del KPI ni del recibo): `totalBonuses` y las deducciones van en 0.
  */
 import { CommissionSummaryStatus, Prisma, TierPeriod } from '@prisma/client'
+import { subMonths } from 'date-fns'
 import prisma from '../../../utils/prismaClient'
 import { BadRequestError } from '../../../errors/AppError'
 import { localWallClock, utcTs } from '../../../utils/sqlDates'
@@ -36,6 +37,22 @@ export interface FiltrosDeResumen {
  * año. La respuesta trae el total verdadero, para que un recorte nunca sea silencioso.
  */
 export const TOPE_RESUMENES = 500
+
+/**
+ * Final-fix M6: la pantalla Comisiones pide «Resumen de Comisiones» sin fechas, y sin fechas la consulta recorría toda la historia
+ * de la sede. Sin ninguna de las dos, la tabla lee los últimos 12 meses: los periodos que EMPIEZAN desde hace 12 meses (en mensual,
+ * los 12 meses del actual hacia atrás). La orilla recorta las filas por el índice (`venueId, calculatedAt`) antes de agrupar. Con
+ * cualquier fecha manda la que se pidió. El historial de la persona en Equipo no pasa por aquí: lleva su propio tope de 12 periodos.
+ */
+export const MESES_POR_DEFECTO = 12
+
+export function ventanaPorDefecto(
+  f: Pick<FiltrosDeResumen, 'periodStart' | 'periodEnd'>,
+  ahora: Date = new Date(),
+): Pick<FiltrosDeResumen, 'periodStart' | 'periodEnd'> {
+  if (f.periodStart || f.periodEnd) return { periodStart: f.periodStart, periodEnd: f.periodEnd }
+  return { periodStart: subMonths(ahora, MESES_POR_DEFECTO) }
+}
 
 /** El periodo con el que el job diario agrupa la sede: el de su esquema activo de mayor prioridad; sin esquema, mensual. */
 export async function periodoDeAgregacion(venueId: string): Promise<TierPeriod> {
