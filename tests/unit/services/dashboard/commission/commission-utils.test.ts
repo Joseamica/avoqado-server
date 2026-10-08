@@ -39,7 +39,7 @@ import { repartir } from '../../../../../src/services/dashboard/commission/repar
 
 const CONFIG_DEFAULT = { includeTax: false, includeDiscount: false }
 /** El tratamiento que los triggers del producto dejan para su tasa (la póliza lee el tratamiento, no la tasa). */
-const tratamientoDe = (taxRate: number) => (taxRate === 0.08 ? 'IVA_8' : taxRate === 0 ? 'IVA_0' : 'IVA_16')
+const tratamientoDe = (taxRate: number) => (taxRate === 0.08 ? 'IVA_8' : taxRate === 0 ? 'IVA_0' : 'IVA_16') as 'IVA_8' | 'IVA_0' | 'IVA_16'
 const CONFIG_PRE_DESCUENTO = { includeTax: false, includeDiscount: true }
 
 /** Un renglón como lo devuelve la consulta: `categoryId = null` ⇒ "Otro importe". */
