@@ -43,7 +43,11 @@ export const ventana = (m: Mundo, desdeIso: string, hastaIso: string | null) =>
     },
   })
 
-export async function esquema(m: Mundo, venueId = m.venueId, name = 'Lagree + Merch 3 %') {
+/**
+ * Un esquema de 3 %. E6a-fix F13: el nombre ya no trae la tasa («Lagree + Merch 3 %»): el recibo la lee de la comisión, así
+ * que «Comisión Lagree + Merch 3 % · …» prueba que llegó de ahí y no del nombre.
+ */
+export async function esquema(m: Mundo, venueId = m.venueId, name = 'Lagree + Merch') {
   return (await prisma.commissionConfig.create({ data: { venueId, orgId: m.orgId, name, defaultRate: 0.03, createdById: m.owner } })).id
 }
 

@@ -23,6 +23,11 @@ export interface DescriptorVenta {
   orden: string | null
   esquema: string | null
   base: string | null
+  /**
+   * E6a-fix F13 (QA E6a H11): la tasa de una comisión por porcentaje (o por niveles) tal como se aplicó, «0.0300»; null en una
+   * fija, manual o de meta (ahí el número no es un porcentaje) y en una propina. El recibo dice «3 %» (spec fase 3 §11).
+   */
+  tasa: string | null
   motivo: 'VENTA' | 'DEVOLUCION' | 'ANULACION'
 }
 export interface LineaBarrible {
@@ -192,6 +197,7 @@ function detalleComisiones(where: Prisma.Sql): Prisma.Sql {
            cc."calculatedAt" AS instante, ${local(Prisma.sql`cc."calculatedAt"`, 'YYYY-MM-DD')} AS "fechaLocal",
            ${local(Prisma.sql`cc."calculatedAt"`, 'HH24:MI')} AS hora, cc."netCommission" AS monto, v.name AS sede,
            ${personaSql} AS persona, ord."orderNumber" AS orden, cfg.name AS esquema, cc."baseAmount" AS base,
+           CASE WHEN cc."calcType" IN ('PERCENTAGE', 'TIERED') THEN cc."effectiveRate" END AS tasa,
            CASE WHEN rp.id IS NULL THEN 'VENTA' ELSE 'DEVOLUCION' END AS motivo
     FROM "CommissionCalculation" cc
     JOIN "Venue" v ON v.id = cc."venueId"
@@ -275,7 +281,7 @@ function detallePropinas(a: AlcanceBarrido, rp: RangoSede[], rv: RangoSede[], wh
     SELECT 'TIP'::text AS fuente, 'SERVICE'::text AS concepto, b.id AS "sourceId", b."staffId", b."venueId", b.instante,
            ${local(Prisma.sql`b.instante`, 'YYYY-MM-DD')} AS "fechaLocal", ${local(Prisma.sql`b.instante`, 'HH24:MI')} AS hora,
            b.monto, v.name AS sede, ${personaSql} AS persona, ord."orderNumber" AS orden, NULL::text AS esquema,
-           NULL::numeric AS base, b.motivo
+           NULL::numeric AS base, NULL::numeric AS tasa, b.motivo
     FROM (${propinasBase(a, rp, rv)}) b
     JOIN "Venue" v ON v.id = b."venueId"
     LEFT JOIN "Staff" s ON s.id = b."staffId"
@@ -299,7 +305,8 @@ function detalleReversos(a: AlcanceBarrido, where: Prisma.Sql): Prisma.Sql {
            ${cuando} AS instante, ${local(cuando, 'YYYY-MM-DD')} AS "fechaLocal", ${local(cuando, 'HH24:MI')} AS hora,
            -e.amount AS monto, COALESCE(e.descriptor->>'sede', v.name) AS sede,
            COALESCE(e.descriptor->>'persona', ${personaSql}) AS persona, e.descriptor->>'orden' AS orden,
-           e.descriptor->>'esquema' AS esquema, (e.descriptor->>'base')::numeric AS base, 'ANULACION'::text AS motivo
+           e.descriptor->>'esquema' AS esquema, (e.descriptor->>'base')::numeric AS base,
+           (e.descriptor->>'tasa')::numeric AS tasa, 'ANULACION'::text AS motivo
     FROM "ServiceEarning" e
     JOIN "CommissionCalculation" cc ON cc.id = e."sourceId"
     JOIN "Venue" v ON v.id = e."venueId"
@@ -329,6 +336,7 @@ interface FilaVenta {
   orden: string | null
   esquema: string | null
   base: Prisma.Decimal | null
+  tasa: Prisma.Decimal | null
   motivo: DescriptorVenta['motivo']
 }
 
@@ -349,6 +357,7 @@ const aLinea = (f: FilaVenta): LineaBarrible => ({
     orden: f.orden,
     esquema: f.esquema,
     base: f.base === null ? null : new Prisma.Decimal(f.base).toFixed(2),
+    tasa: f.tasa === null ? null : new Prisma.Decimal(f.tasa).toFixed(4),
     motivo: f.motivo,
   },
 })

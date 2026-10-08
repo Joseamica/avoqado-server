@@ -1,6 +1,8 @@
 import PDFDocument from 'pdfkit'
 import { encodeExport } from '@/services/dashboard/export.helpers'
-import { columnasDelRecibo, filasDelRecibo, RenglonRecibo } from '@/services/dashboard/staffPay/recibos.service'
+import { Prisma } from '@prisma/client'
+import { columnasDelRecibo, filasDelRecibo, RenglonRecibo, totalesPorTipoDelRecibo } from '@/services/dashboard/staffPay/recibos.service'
+import { conceptoDe, FilaRecibo } from '@/services/dashboard/staffPay/recibos.formato'
 
 const r = (tipo: RenglonRecibo['tipo'], concepto: string, monto: string): RenglonRecibo => ({
   tipo,
@@ -116,5 +118,55 @@ describe('el PDF del recibo no corta lo que importa (QA bloque B: la diferencia 
     } finally {
       fragment.mockRestore()
     }
+  })
+})
+
+describe('totalesPorTipoDelRecibo — la línea de arriba del PDF, como la pantalla (E6a-fix F13, QA E6a H13)', () => {
+  it('en el orden fijo de la pantalla (clases, comisiones, propinas, diferencias, ajustes), con su signo', () => {
+    expect(totalesPorTipoDelRecibo({ AJUSTE: '-50.00', PROPINA: '220.92', CLASE: '6210.00', COMISION: '222.38' })).toEqual([
+      'Clases $6,210.00 · Comisiones $222.38 · Propinas $220.92 · Ajustes -$50.00',
+    ])
+  })
+  it('con un solo tipo, o ninguno, no repite el total', () => {
+    expect(totalesPorTipoDelRecibo({ CLASE: '480.00' })).toEqual([])
+    expect(totalesPorTipoDelRecibo({})).toEqual([])
+  })
+})
+
+describe('conceptoDe — una comisión dice su esquema UNA vez y su tasa (E6a-fix F13, QA E6a H11)', () => {
+  const fila = (x: Partial<FilaRecibo>): FilaRecibo => ({
+    tipo: 'COMISION',
+    instante: new Date('2026-09-29T18:00:00Z'),
+    id: 'c1',
+    venueId: 'v1',
+    fecha: '2026-09-29',
+    hora: '12:00',
+    clase: null,
+    sedeFoto: null,
+    reason: null,
+    origen: null,
+    lugares: null,
+    monto: new Prisma.Decimal(90),
+    regla: null,
+    orden: '1042',
+    esquema: 'Comisión Estándar Meseros',
+    base: new Prisma.Decimal(3000),
+    tasa: new Prisma.Decimal('0.0300'),
+    motivo: 'VENTA',
+    agrupada: false,
+    cobros: 1,
+    ...x,
+  })
+  it.each([
+    [{}, 'Comisión Estándar Meseros 3 % · venta #1042 · base $3,000.00'],
+    [{ esquema: 'comisiones de barra' }, 'Comisión de barra 3 % · venta #1042 · base $3,000.00'],
+    [{ esquema: 'Lagree', tasa: new Prisma.Decimal('0.1250') }, 'Comisión Lagree 12.5 % · venta #1042 · base $3,000.00'],
+    [{ esquema: null }, 'Comisión 3 % · venta #1042 · base $3,000.00'],
+    [{ esquema: 'Comisión' }, 'Comisión 3 % · venta #1042 · base $3,000.00'],
+    [{ tasa: null }, 'Comisión Estándar Meseros · venta #1042 · base $3,000.00'], // fija, o congelada antes de F13
+    [{ motivo: 'DEVOLUCION' }, 'Devolución · comisión Estándar Meseros 3 % · venta #1042'],
+    [{ motivo: 'ANULACION', orden: null }, 'Anulación · comisión Estándar Meseros 3 %'],
+  ] as Array<[Partial<FilaRecibo>, string]>)('%o ⇒ %s', (x, esperado) => {
+    expect(conceptoDe(fila(x))).toBe(esperado)
   })
 })

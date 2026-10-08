@@ -4,18 +4,22 @@ import { createHash } from 'crypto'
 import { BadRequestError, ConflictError, NotFoundError } from '../../../errors/AppError'
 import { utcTs } from '../../../utils/sqlDates'
 import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
-import { encodeExport, EncodedExport, ExportColumnDef, fechaMx, getRowCapForFormat } from '../export.helpers'
+import { encodeExport, EncodedExport, fechaMx, getRowCapForFormat } from '../export.helpers'
 import { assertPermisoEnSedes, exigirPermisoEnSedes, sedesConPermiso } from './acceso'
 import { bloquearPeriodo, periodoQueContieneFecha } from './periodosGuardados'
 import { transaccionConPresupuesto } from '../../../utils/esperaDeCandados'
-import { dbDateComoFecha, MESES_LARGOS, periodoQueContiene, venuePeriodRange } from './periodos'
-import { ReglaDeClase, textoDeRegla, valoracionCte } from './valoracion'
+import { dbDateComoFecha, periodoQueContiene, venuePeriodRange } from './periodos'
+import { valoracionCte } from './valoracion'
 import { AlcanceBarrido, sqlVentasDelPeriodo } from './fuentesVenta'
 import { personaDelRecibo } from './recibos.persona'
 import { enUnaFoto } from './foto'
 import { DevolucionesPendientes, devolucionesPendientes } from './devolucionesPendientes'
 import { alcanceEnLaFoto, LecturaPreparada, prepararLectura, zonasEnLaFoto } from './lectura'
 import { rangosConParticipacion } from './rangos'
+import { columnasDelRecibo, conceptoDe, FilaRecibo, filasDelRecibo, RenglonRecibo, slug, totalesPorTipoDelRecibo } from './recibos.formato'
+
+export type { FilaRecibo, RenglonRecibo } from './recibos.formato'
+export { columnasDelRecibo, filasDelRecibo, totalesPorTipoDelRecibo } from './recibos.formato'
 
 /** Tope de UNA página del recibo (Codex R2-R1-20). El recibo entero no tiene tope: se recorre con cursor. */
 export const RECIBO_LIMITE_MAX = 500
@@ -24,15 +28,6 @@ const LOTE_PAGO = 1000
 const MUESTRA_PAGO = 100
 const TZ_DEFAULT = 'America/Mexico_City'
 
-export interface RenglonRecibo {
-  tipo: 'CLASE' | 'DIFERENCIA' | 'AJUSTE' | 'COMISION' | 'PROPINA'
-  fecha: string
-  hora: string | null
-  sede: string
-  concepto: string
-  lugares: number | null
-  monto: string
-}
 export interface Recibo {
   persona: string
   periodo: { id: string | null; start: string; end: string; estado: 'OPEN' | 'CLOSED' }
@@ -206,37 +201,6 @@ export async function marcarPagado(input: {
   })
 }
 
-/** Una fila de la fuente del recibo: la misma forma para lo congelado y para lo valorado en vivo. */
-interface FilaRecibo {
-  tipo: RenglonRecibo['tipo']
-  instante: Date
-  id: string
-  venueId: string
-  fecha: string
-  hora: string | null
-  clase: string | null
-  sedeFoto: string | null
-  reason: string | null
-  /** De una DIFERENCIA: el inicio del periodo de origen de su clase (`descriptor.periodoOrigen.start`, B2). */
-  origen: string | null
-  lugares: number | null
-  monto: Prisma.Decimal
-  /**
-   * Columna 13 de la fuente, justo después de `monto`, en TODOS los brazos (contrato con el Bloque D, D3c): la regla de
-   * clase que movió el monto (suplencia, cancelación tardía). B5 la deja `NULL::jsonb` en todos; D3c sólo la llena en las
-   * ramas de CLASES (en vivo y congeladas). Ventas, ajustes, diferencias y filas agrupadas la dejan en NULL.
-   */
-  regla: Prisma.JsonValue | null
-  /** De una venta (comisión o propina): número de orden, esquema, base y motivo (VENTA | DEVOLUCION | ANULACION). */
-  orden: string | null
-  esquema: string | null
-  base: Prisma.Decimal | null
-  motivo: string | null
-  /** Propinas de un día juntas (pantalla y PDF): `cobros` dice cuántas. */
-  agrupada: boolean
-  cobros: number
-}
-
 interface FuenteRecibo {
   persona: string
   periodo: Recibo['periodo']
@@ -335,7 +299,7 @@ async function fuenteDelRecibo(
              e.descriptor->>'hora' AS hora, e.descriptor->>'clase' AS clase, e.descriptor->>'sede' AS "sedeFoto",
              e.reason, e.descriptor->'periodoOrigen'->>'start' AS origen, e.count AS lugares, e.amount AS monto,
              e.descriptor->'regla' AS regla, e.descriptor->>'orden' AS orden, e.descriptor->>'esquema' AS esquema,
-             (e.descriptor->>'base')::numeric AS base,
+             (e.descriptor->>'base')::numeric AS base, (e.descriptor->>'tasa')::numeric AS tasa,
              CASE WHEN e."sourceType" IN ('COMMISSION', 'TIP') THEN e.descriptor->>'motivo' END AS motivo
       FROM "ServiceEarning" e
       WHERE e."periodId" = ${fila.id} AND e."staffId" = ${input.staffId} AND e."venueId" IN (${Prisma.join(venueIds)})
@@ -352,7 +316,7 @@ async function fuenteDelRecibo(
                to_char(((vv."startsAt" AT TIME ZONE 'UTC') AT TIME ZONE ${tz}), 'HH24:MI') AS hora,
                vv."productName" AS clase, NULL::text AS "sedeFoto", NULL::text AS reason, NULL::text AS origen,
                vv.conteo AS lugares, vv.monto, vv.regla AS regla, NULL::text AS orden, NULL::text AS esquema,
-               NULL::numeric AS base, NULL::text AS motivo
+               NULL::numeric AS base, NULL::numeric AS tasa, NULL::text AS motivo
         FROM (${valoracionCte(f)} SELECT * FROM valoradas) vv
         WHERE vv.estado = 'OK' AND vv.monto IS NOT NULL`)
     }
@@ -371,7 +335,8 @@ async function fuenteDelRecibo(
         crudo.push(Prisma.sql`
           SELECT CASE v.fuente WHEN 'COMMISSION' THEN 'COMISION' ELSE 'PROPINA' END AS tipo, v.instante, v."sourceId" AS id,
                  v."venueId", v."fechaLocal" AS fecha, v.hora, NULL::text AS clase, v.sede AS "sedeFoto", NULL::text AS reason,
-                 NULL::text AS origen, NULL::int AS lugares, v.monto, NULL::jsonb AS regla, v.orden, v.esquema, v.base, v.motivo
+                 NULL::text AS origen, NULL::int AS lugares, v.monto, NULL::jsonb AS regla, v.orden, v.esquema, v.base, v.tasa,
+                 v.motivo
           FROM (${ventas}) v`)
       }
     }
@@ -416,6 +381,7 @@ export const COLUMNAS_FUENTE_RECIBO = [
   'orden',
   'esquema',
   'base',
+  'tasa',
   'motivo',
   'agrupada',
   'cobros',
@@ -437,7 +403,7 @@ function armarFuente(crudo: Prisma.Sql[], agruparPropinas: boolean): Prisma.Sql 
     UNION ALL
     SELECT 'PROPINA', MIN(c.instante), 'T:' || c."venueId" || ':' || c.fecha || ':' || c.motivo, c."venueId", c.fecha,
            NULL::text, NULL::text, MAX(c."sedeFoto"), NULL::text, NULL::text, NULL::int, SUM(c.monto),
-           NULL::jsonb, NULL::text, NULL::text, NULL::numeric, c.motivo, true, COUNT(*)::int
+           NULL::jsonb, NULL::text, NULL::text, NULL::numeric, NULL::numeric, c.motivo, true, COUNT(*)::int
     FROM crudo c
     WHERE c.tipo = 'PROPINA'
     GROUP BY c."venueId", c.fecha, c.motivo`
@@ -509,38 +475,6 @@ async function paginaDelRecibo(
   }
 }
 
-const plural = (n: number, uno: string, varios: string) => `${n} ${n === 1 ? uno : varios}`
-const ventaDe = (r: FilaRecibo) => (r.orden ? `venta #${r.orden}` : null)
-
-/**
- * Una comisión dice su esquema, su venta y su base (spec fase 3 §11): «Comisión Lagree 3 % · venta #1042 · base
- * $3,000.00»; una devolución o una anulación lo dicen al frente. Las propinas de un día van juntas en pantalla y PDF
- * («Propinas del 12 ago 2026 · 2 cobros») y una por cobro en el Excel («Propina · venta #1042»).
- */
-function conceptoDe(r: FilaRecibo): string {
-  if (r.tipo === 'AJUSTE') return r.reason ?? 'Ajuste'
-  if (r.tipo === 'PROPINA') {
-    if (r.agrupada) {
-      return r.motivo === 'DEVOLUCION'
-        ? `Propinas devueltas del ${fechaMx(r.fecha)} · ${plural(r.cobros, 'devolución', 'devoluciones')}`
-        : `Propinas del ${fechaMx(r.fecha)} · ${plural(r.cobros, 'cobro', 'cobros')}`
-    }
-    return [r.motivo === 'DEVOLUCION' ? 'Devolución de propina' : 'Propina', ventaDe(r)].filter(Boolean).join(' · ')
-  }
-  if (r.tipo === 'COMISION') {
-    const cabeza = r.motivo === 'ANULACION' ? 'Anulación · comisión' : r.motivo === 'DEVOLUCION' ? 'Devolución · comisión' : 'Comisión'
-    const base = r.motivo === 'VENTA' && r.base !== null ? `base ${pesos.format(Number(r.base))}` : null
-    return [r.esquema ? `${cabeza} ${r.esquema}` : cabeza, ventaDe(r), base].filter(Boolean).join(' · ')
-  }
-  const clase = r.clase ?? 'Clase'
-  // `regla` sólo la llenan los brazos de clases, con la forma de `ReglaDeClase` (D3a).
-  if (r.tipo === 'CLASE') return r.regla ? `${clase} · ${textoDeRegla(r.regla as ReglaDeClase)}` : clase
-  // Una diferencia dice de qué clase es (QA bloque B, defecto 3): «Diferencia · Yoga del 28 sep 2026 (clase de septiembre)».
-  // La fecha es la local de la clase en su sede (la de su foto) y el mes, el de su periodo de origen.
-  const mes = r.origen ? ` (clase de ${MESES_LARGOS[Number(r.origen.slice(5, 7)) - 1]})` : ''
-  return `Diferencia · ${clase} del ${fechaMx(r.fecha)}${mes}`
-}
-
 const aRenglon =
   (f: FuenteRecibo) =>
   (r: FilaRecibo): RenglonRecibo => ({
@@ -598,51 +532,6 @@ export async function consultaDePaginaDelRecibo(input: EntradaRecibo): Promise<P
   return f.sql ? sqlPaginaDelRecibo(f.sql, input.cursor ? leerCursor(input.cursor, f) : null, acotar(input.limit)) : null
 }
 
-/** Las filas que reciben LOS DOS formatos, PDF y Excel (Codex R2-R1-14): cada renglón con su signo + el total. Pura. */
-export function filasDelRecibo(r: Pick<Recibo, 'renglones' | 'total' | 'parcial'>): RenglonRecibo[] {
-  return [
-    ...r.renglones,
-    {
-      tipo: 'AJUSTE',
-      fecha: '',
-      hora: null,
-      sede: '',
-      concepto: r.parcial ? 'Total (vista parcial)' : 'Total',
-      lugares: null,
-      monto: r.total,
-    },
-  ]
-}
-
-const pesos = new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN' })
-/** «29 sep 2026»; un ajuste se fecha cuando se capturó y lo dice. La fila del total va sin fecha. */
-const fechaDelRenglon = (r: RenglonRecibo) => (r.fecha ? `${fechaMx(r.fecha)}${r.tipo === 'AJUSTE' ? ' (captura)' : ''}` : '')
-/**
- * `pdfAncho`: el Concepto se lleva casi la mitad de la hoja para que una diferencia se lea entera en el PDF («Diferencia ·
- * Yoga (clase grupal) del 28 sep 2026 (clase de septiembre)», ~280 pt a 9 pt) sin cortar fecha de captura, sede ni monto.
- */
-const COLUMNAS: ExportColumnDef<RenglonRecibo>[] = [
-  { id: 'fecha', label: 'Fecha', value: fechaDelRenglon, pdfAncho: 1.3 },
-  { id: 'hora', label: 'Hora', value: r => r.hora, pdfAncho: 0.6 },
-  { id: 'sede', label: 'Sede', value: r => r.sede, pdfAncho: 1.5 },
-  { id: 'concepto', label: 'Concepto', value: r => r.concepto, pdfAncho: 4 },
-  { id: 'lugares', label: 'Lugares', value: r => r.lugares, pdfAncho: 0.7 },
-  { id: 'monto', label: 'Monto', value: r => pesos.format(Number(r.monto)), pdfAncho: 1 },
-]
-/** El Excel lleva el monto como NÚMERO con formato de moneda (el dueño lo suma); `monto` ya viene con 2 decimales. */
-const COLUMNAS_EXCEL: ExportColumnDef<RenglonRecibo>[] = COLUMNAS.map(c =>
-  c.id === 'monto' ? { ...c, value: r => Number(r.monto), numFmt: '$#,##0.00' } : c,
-)
-/** Las columnas de cada formato (exportada para su prueba). */
-export const columnasDelRecibo = (formato: 'pdf' | 'xlsx') => (formato === 'xlsx' ? COLUMNAS_EXCEL : COLUMNAS)
-const slug = (s: string) =>
-  s
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/(^-|-$)/g, '')
-
 export async function exportarRecibo(input: {
   userId: string
   venueId: string
@@ -658,10 +547,10 @@ export async function exportarRecibo(input: {
   const prep = await prepararRecibo(input) // cliente global ANTES de la instantánea (Codex R4-Nuevo 1)
   // Fuente, total y TODAS las páginas en UNA instantánea de sólo lectura (Codex R3-Nuevo 1); el archivo se genera
   // DESPUÉS de cerrar la transacción (codificar no retiene la conexión).
-  const { f, total, renglones } = await enUnaFoto(async tx => {
+  const { f, total, porTipo, renglones } = await enUnaFoto(async tx => {
     // El Excel lleva cada cobro por separado; la pantalla y el PDF, las propinas de un día juntas (B-D6).
     const f = await fuenteDelRecibo(tx, prep, input, { agruparPropinas: input.format === 'pdf' })
-    const { total, cantidad } = await totalDelRecibo(tx, f)
+    const { total, cantidad, porTipo } = await totalDelRecibo(tx, f)
     // El tope del ARCHIVO (export.helpers: 1,000 en PDF, 10,000 en Excel) se revisa con la cuenta de la base ANTES de
     // leer los renglones: arriba del tope se explica, nunca se trunca (D6).
     if (cantidad + 1 > tope) {
@@ -679,7 +568,7 @@ export async function exportarRecibo(input: {
       cursor = p.siguiente
       await input.entreLotes?.()
     }
-    return { f, total, renglones }
+    return { f, total, porTipo, renglones }
   })
   const columnas = columnasDelRecibo(input.format)
   const encoded = await encodeExport(input.format, {
@@ -688,6 +577,7 @@ export async function exportarRecibo(input: {
     rows: filasDelRecibo({ renglones, total: total.toFixed(2), parcial: f.parcial }),
     title: `Recibo de ${f.persona} · ${fechaMx(f.periodo.start)} al ${fechaMx(f.periodo.end)}`,
     sheetName: `Recibo de ${f.persona}`,
+    resumen: totalesPorTipoDelRecibo(porTipo),
   })
   return { encoded, nombre: `recibo-${slug(f.persona)}-${f.periodo.start}` }
 }

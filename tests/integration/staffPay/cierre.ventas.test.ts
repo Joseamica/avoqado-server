@@ -92,8 +92,9 @@ describe('el cierre con ventas (spec fase 3 §6)', () => {
     expect(com.descriptor).toMatchObject({
       fecha: '2026-08-10',
       hora: '12:00',
-      esquema: 'Lagree + Merch 3 %',
+      esquema: 'Lagree + Merch',
       base: '3000.00',
+      tasa: '0.0300', // E6a-fix F13: la foto guarda la tasa para que el recibo cerrado diga «3 %»
       motivo: 'VENTA',
       persona: 'Sofia QA',
     })

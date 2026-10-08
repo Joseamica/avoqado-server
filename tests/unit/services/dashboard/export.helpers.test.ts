@@ -118,6 +118,48 @@ describe('encodeExport · PDF: una tabla que se lee', () => {
     expect((await dibujado(COLS, [{ a: 'x', b: 1, c: largo }])).fragmentos.some(f => f.endsWith('…'))).toBe(true)
   })
 
+  it('con `pdfAjustar` (E6a-fix F13) un texto que no cabe se parte en líneas sin «…» y su fila crece; sin él, se corta como siempre', async () => {
+    const largo = 'Comisión Estándar Meseros Turno Vespertino 3 % · venta #ORD-20260929-000123 · base $3,000.00'
+    const ajustada = COLS.map(c => (c.id === 'c' ? { ...c, pdfAjustar: true } : c))
+    const text = jest.spyOn(PDFDocument.prototype, 'text')
+    const proto = PDFDocument.prototype as unknown as { _fragment: (texto: string, ...resto: unknown[]) => unknown }
+    const fragment = jest.spyOn(proto, '_fragment')
+    try {
+      const rows = [
+        { a: 'x', b: 1, c: largo },
+        { a: 'y', b: 2, c: 'corto' },
+      ]
+      await encodeExport('pdf', { allColumns: ajustada, requestedColumnIds: ['a', 'b', 'c'], rows, title: 'Prueba' })
+      const ys = new Map(text.mock.calls.filter(a => typeof a[2] === 'number').map(a => [String(a[0]), a[2] as unknown as number]))
+      const lineas = fragment.mock.calls.map(a => String(a[0]))
+      expect(lineas.some(l => l.includes('…'))).toBe(false)
+      expect(lineas.join(' ')).toContain('base $3,000.00')
+      expect(lineas.filter(l => largo.includes(l.trim()) && l.trim().length > 0).length).toBeGreaterThan(1) // varias líneas
+      // La fila del texto largo mide más de 16: la siguiente empieza más abajo que una fila normal.
+      expect(ys.get('y')! - ys.get('x')!).toBeGreaterThan(16)
+    } finally {
+      text.mockRestore()
+      fragment.mockRestore()
+    }
+    // Sin `pdfAjustar` (todas las demás exportaciones), el mismo texto se corta con «…» en una sola línea.
+    expect((await dibujado(COLS, [{ a: 'x', b: 1, c: largo }])).fragmentos.some(f => f.endsWith('…'))).toBe(true)
+  })
+
+  it('`resumen` (E6a-fix F13) se dibuja bajo el título y antes del encabezado de la tabla; sin él, nada extra', async () => {
+    const text = jest.spyOn(PDFDocument.prototype, 'text')
+    try {
+      const resumen = ['Clases $480.00 · Comisiones $90.00 · Propinas $80.00']
+      await encodeExport('pdf', { allColumns: COLS, requestedColumnIds: ['a', 'b', 'c'], rows: filas(1), title: 'Prueba', resumen })
+      const orden = text.mock.calls.map(a => String(a[0]))
+      expect(orden.indexOf(resumen[0])).toBeGreaterThan(orden.indexOf('Prueba'))
+      expect(orden.indexOf(resumen[0])).toBeLessThan(orden.indexOf('Col A'))
+    } finally {
+      text.mockRestore()
+    }
+    const { sueltos } = await celdasDelPdf(filas(1))
+    expect(sueltos).toHaveLength(2) // el título y «Generado:», como siempre
+  })
+
   it('«Generado:» en formato de México (día mes año, 24 h), no el de EE. UU.', async () => {
     const { sueltos } = await celdasDelPdf(filas(1))
     expect(sueltos).toContainEqual(

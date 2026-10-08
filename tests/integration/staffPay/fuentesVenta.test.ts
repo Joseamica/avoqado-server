@@ -103,7 +103,7 @@ describe('comisiones barribles (spec §6.2)', () => {
     expect(ids(await todas(comisionesBarribles, conInicio(SEP)))).toEqual([desde.id, sep.id].sort())
   })
 
-  it('el descriptor guarda fecha y hora locales, sede, persona, orden, esquema, base y motivo', async () => {
+  it('el descriptor guarda fecha y hora locales, sede, persona, orden, esquema, base, tasa y motivo', async () => {
     const venta = await cobro(m, { iso: '2026-08-10T18:00:00Z', monto: 3000 })
     await comision(m, { configId: cfg, staffId: m.sofia, iso: '2026-08-10T18:00:05Z', neto: 90, pago: venta })
     const orden = (await prisma.order.findUniqueOrThrow({ where: { id: venta.orderId } })).orderNumber
@@ -116,8 +116,9 @@ describe('comisiones barribles (spec §6.2)', () => {
       sede: `${m.key}-pn`,
       persona: 'Sofia QA',
       orden,
-      esquema: 'Lagree + Merch 3 %',
+      esquema: 'Lagree + Merch',
       base: '3000.00',
+      tasa: '0.0300', // E6a-fix F13
       motivo: 'VENTA',
     })
   })
@@ -400,6 +401,7 @@ describe('la vista en vivo (B5) y las consultas del EXPLAIN (B7)', () => {
       'orden',
       'esquema',
       'base',
+      'tasa', // E6a-fix F13: aditiva; el recibo y el reporte leen por nombre
       'motivo',
     ])
     const deCarla = await prisma.$queryRaw<Array<{ sourceId: string }>>((await sqlVentas(alcance(SEP), { staffId: m.carla }))!)
