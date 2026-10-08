@@ -299,6 +299,20 @@ it('el directorio publica descripciones propias, sin nombrar herramientas ni dar
   }
 })
 
+// final-fix M9: el directorio no expone las herramientas de Pago al personal, así que no puede mandar a «each person's staff pay
+// statement» como si se pudiera consultar ahí: dice dónde verlo de verdad, la pantalla del dashboard.
+it('el directorio no manda a recibos de Pago al personal que no expone: dice la pantalla del dashboard', () => {
+  const { DIRECTORY_TIERS } = require('@/mcp/directory/catalog')
+  const { DIRECTORY_DESCRIPTIONS } = require('@/mcp/directory/descriptions')
+  const expone = DIRECTORY_TIERS.some((t: { tools: string[] }) => t.tools.some(n => n.startsWith('staff_service_pay')))
+  expect(expone).toBe(false) // si una tanda las publica, esta prueba se revisa con ella
+  const pantalla = '«Pago al personal» screen of the Avoqado dashboard'
+  for (const [name, description] of Object.entries(DIRECTORY_DESCRIPTIONS) as Array<[string, string]>)
+    if (/staff pay|pago al personal/i.test(description))
+      expect({ name, apuntaAlDashboard: description.includes(pantalla) }).toEqual({ name, apuntaAlDashboard: true })
+  expect(DIRECTORY_DESCRIPTIONS.commission_payouts).toContain(pantalla)
+})
+
 it('el perfil de directorio usa su descripción y el manual conserva la original', async () => {
   const { DIRECTORY_DESCRIPTIONS } = require('@/mcp/directory/descriptions')
   const directory = await connected(['mcp:read'], 'directory')

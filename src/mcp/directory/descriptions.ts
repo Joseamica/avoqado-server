@@ -96,7 +96,7 @@ export const DIRECTORY_DESCRIPTIONS: Record<string, string> = {
   list_commission_goals:
     'Staff sales goals of accessible branches, per employee or branch-wide, with their period (daily, weekly or monthly); goals can define commission tier boundaries. Requires commissions:read.',
   commission_payouts:
-    "History of staff commission payouts registered with the previous payout flow: staff member, amount, payment method, status and paid date, plus totals paid and pending. Commissions are now paid inside each person's staff pay statement. Optional venueId and status. Requires commissions:payout.",
+    "History of staff commission payouts registered with the previous payout flow: staff member, amount, payment method, status and paid date, plus totals paid and pending. Since October 2026 commissions are paid inside each person's statement in the «Pago al personal» screen of the Avoqado dashboard, which this connector does not expose. Optional venueId and status. Requires commissions:payout.",
   staff_commission:
     'Commission earned by each staff member in one branch over a date range (default: current month, branch timezone), as calculated by the commission engine: total commission, commissionable base and breakdown by scheme and tier. Optional staffId and fromDate/toDate (YYYY-MM-DD). Requires commissions:read.',
   list_credit_packs:
