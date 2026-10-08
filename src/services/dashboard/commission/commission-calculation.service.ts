@@ -21,6 +21,7 @@
  */
 
 import prisma from '../../../utils/prismaClient'
+import { organizacionDeLaSedeActivada, venueHasServicePayAccess } from '../staffPay/acceso'
 import logger from '../../../config/logger'
 import {
   PaymentEffect,
@@ -1102,10 +1103,38 @@ export async function getPendingCalculations(venueId: string, staffId?: string):
 }
 
 /**
+ * Lo pagado en comisiones de una sede (spec §8): renglones de comisión del sobre —ventas, devoluciones y reversos por
+ * anulación— de recibos marcados como pagados. Activo = plan Y organización activada Y la sede tuvo ALGUNA ventana de
+ * participación (abierta o cerrada: con historia, lo pagado sigue siendo verdad aunque hoy esté desactivada). Sin eso el
+ * KPI se oculta (`staffPayActive: false`, 0). Filtra por organización primero (índice `ServiceEarning(organizationId, staffId)`).
+ */
+async function comisionesPagadasEnRecibos(venueId: string): Promise<{ activo: boolean; total: Prisma.Decimal }> {
+  const cero = new Prisma.Decimal(0)
+  const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { organizationId: true } })
+  if (!venue) return { activo: false, total: cero }
+  const activo =
+    (await venueHasServicePayAccess(venueId)) &&
+    (await organizacionDeLaSedeActivada(venueId)) &&
+    !!(await prisma.staffPayVenueWindow.findFirst({ where: { venueId }, select: { id: true } }))
+  if (!activo) return { activo, total: cero }
+  const [r] = await prisma.$queryRaw<Array<{ total: Prisma.Decimal | null }>>(Prisma.sql`
+    SELECT SUM(e.amount) AS total
+    FROM "ServiceEarning" e
+    JOIN "StaffPayStatement" s ON s."periodId" = e."periodId" AND s."staffId" = e."staffId"
+    WHERE e."organizationId" = ${venue.organizationId}
+      AND e."venueId" = ${venueId}
+      AND e."sourceType" = 'COMMISSION'
+      AND s."paidAt" IS NOT NULL`)
+  return { activo, total: r?.total ?? cero }
+}
+
+/**
  * Get venue-wide commission statistics
  */
 export async function getVenueCommissionStats(venueId: string): Promise<{
   totalPaid: number
+  staffPayActive: boolean
+  totalCalculated: number
   totalPending: number
   totalApproved: number
   staffWithCommissions: number
@@ -1124,7 +1153,8 @@ export async function getVenueCommissionStats(venueId: string): Promise<{
     _sum: { netAmount: true },
   })
 
-  const totalPaid = decimalToNumber(summaryStats.find(s => s.status === 'PAID')?._sum.netAmount)
+  // «Pagado» = lo pagado en recibos de Pago al personal (spec §8); un resumen ya no se paga.
+  const pagado = await comisionesPagadasEnRecibos(venueId)
   const totalPending = decimalToNumber(summaryStats.find(s => s.status === 'PENDING_APPROVAL')?._sum.netAmount)
   const totalApproved = decimalToNumber(summaryStats.find(s => s.status === 'APPROVED')?._sum.netAmount)
 
@@ -1144,6 +1174,7 @@ export async function getVenueCommissionStats(venueId: string): Promise<{
       status: { not: CommissionCalcStatus.VOIDED },
     },
     _avg: { netCommission: true },
+    _sum: { netCommission: true },
   })
 
   // Get top earners
@@ -1179,7 +1210,9 @@ export async function getVenueCommissionStats(venueId: string): Promise<{
   })
 
   return {
-    totalPaid,
+    totalPaid: decimalToNumber(pagado.total),
+    staffPayActive: pagado.activo,
+    totalCalculated: decimalToNumber(avgStats._sum.netCommission),
     totalPending,
     totalApproved,
     staffWithCommissions: staffCount.length,
