@@ -41,6 +41,7 @@ jest.mock('@/services/dashboard/staffPay/participacion', () => ({ activarSede: j
 jest.mock('@/services/dashboard/staffPay/participacion.vistaPrevia', () => ({ vistaPreviaParticipacion: jest.fn() }))
 jest.mock('@/services/dashboard/staffPay/activacion.service', () => ({
   estadoActivacion: jest.fn().mockResolvedValue({ activado: true, startDate: '2026-09-01', propinasEncendidas: true }),
+  accesoActivacion: jest.fn().mockResolvedValue({ periodicidad: 'MONTHLY', periodicidadFija: false, inicioAlActivar: '2026-10-01' }),
   previewActivacion: jest.fn(),
   activarPagoAlPersonal: jest.fn(),
   cambiarPropinas: jest.fn(),

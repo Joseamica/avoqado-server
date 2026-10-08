@@ -21,6 +21,7 @@ const mockPreviewClase = jest.fn()
 const mockVista = jest.fn()
 const mockEstado = jest.fn()
 const mockPlan = jest.fn()
+const mockAcceso = jest.fn()
 const mockSedesParaActivar = jest.fn()
 
 jest.mock('@/mcp/guard', () => ({
@@ -76,6 +77,7 @@ jest.mock('@/services/dashboard/staffPay/ajustesClase.service', () => ({
 jest.mock('@/services/dashboard/staffPay/activacion.service', () => ({
   estadoActivacion: (...a: unknown[]) => mockEstado(...a),
   previewActivacion: (...a: unknown[]) => mockPlan(...a),
+  accesoActivacion: (...a: unknown[]) => mockAcceso(...a),
   activarPagoAlPersonal: jest.fn(),
   cambiarPropinas: jest.fn(),
   ventanasDePropinas: jest.fn().mockResolvedValue([]),
@@ -140,6 +142,7 @@ beforeEach(() => {
   mockTodas.mockResolvedValue(undefined)
   mockEstado.mockResolvedValue({ activado: false, startDate: null, propinasEncendidas: false })
   mockPlan.mockResolvedValue({ periodicidad: 'SEMIMONTHLY', periodicidadFija: false, startDate: '2026-10-01' })
+  mockAcceso.mockResolvedValue({ periodicidad: 'SEMIMONTHLY', periodicidadFija: false, inicioAlActivar: '2026-10-01' })
   mockSedesParaActivar.mockResolvedValue({ conPlan: [{ venueId: 'v1', nombre: 'PN' }], sinPlan: [], sinPlanTotal: 0 })
   mockVista.mockImplementation(async (i: { accion: string }) => ({ ...VISTA, accion: i.accion }))
 })
@@ -216,6 +219,18 @@ describe('activación (spec fase 3 §10): los datos de dinero la exigen; la conf
     expect(r.ok).not.toBe(false)
     expect(r.activacion).toMatchObject({ activado: false })
     expect(mockActivada).not.toHaveBeenCalled()
+  })
+
+  it('la configuración dice la periodicidad, si ya es fija y el inicio al activar (lo mismo que GET /access)', async () => {
+    mockAcceso.mockResolvedValue({ periodicidad: 'SEMIMONTHLY', periodicidadFija: false, inicioAlActivar: '2026-10-01' })
+    const sin = parse(await handlers.get('staff_service_pay_config')!({ venueId: 'v1' }, {}))
+    expect(sin.activacion).toMatchObject({ periodicidad: 'SEMIMONTHLY', periodicidadFija: false, inicioAlActivar: '2026-10-01' })
+    expect(mockAcceso).toHaveBeenCalledWith({ venueId: 'v1' })
+
+    mockEstado.mockResolvedValue({ activado: true, startDate: '2026-10-01', propinasEncendidas: false })
+    mockAcceso.mockResolvedValue({ periodicidad: 'MONTHLY', periodicidadFija: true, inicioAlActivar: null })
+    const act = parse(await handlers.get('staff_service_pay_config')!({ venueId: 'v1' }, {}))
+    expect(act.activacion).toMatchObject({ activado: true, periodicidad: 'MONTHLY', periodicidadFija: true, inicioAlActivar: null })
   })
 
   it('la configuración sí exige el plan', async () => {

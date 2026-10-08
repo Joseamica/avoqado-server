@@ -99,6 +99,7 @@ const mockPlan = jest.fn()
 const mockSedesParaActivar = jest.fn()
 jest.mock('@/services/dashboard/staffPay/activacion.service', () => ({
   estadoActivacion: (...a: unknown[]) => mockEstado(...a),
+  accesoActivacion: jest.fn().mockResolvedValue({ periodicidad: 'MONTHLY', periodicidadFija: false, inicioAlActivar: '2026-10-01' }),
   previewActivacion: (...a: unknown[]) => mockPlan(...a),
   activarPagoAlPersonal: (...a: unknown[]) => mockActivar(...a),
   cambiarPropinas: (...a: unknown[]) => mockPropinas(...a),
@@ -1383,6 +1384,9 @@ describe('pago al personal con ventas por MCP (spec fase 3 §12)', () => {
       activado: true,
       startDate: '2026-10-01',
       propinasEncendidas: true,
+      periodicidad: 'MONTHLY',
+      periodicidadFija: false,
+      inicioAlActivar: '2026-10-01',
       ventanasDePropinas: [{ desde: '2026-10-03T18:00:00.000Z', hasta: null }],
       ventanasTruncadas: false,
       timezone: 'America/Mexico_City',

@@ -11,7 +11,7 @@ import { cerrarPeriodo, previewCierre } from '@/services/dashboard/staffPay/cier
 import { agregarAjusteManual, previewAjusteManual } from '@/services/dashboard/staffPay/ajustesManuales.service'
 import { marcarPagado, previewPagado, reciboDePersona } from '@/services/dashboard/staffPay/recibos.service'
 import { periodoQueContieneFecha } from '@/services/dashboard/staffPay/periodosGuardados'
-import { estadoActivacion, ventanasDePropinas } from '@/services/dashboard/staffPay/activacion.service'
+import { accesoActivacion, estadoActivacion, ventanasDePropinas } from '@/services/dashboard/staffPay/activacion.service'
 import { liquidarDiferencia, previewLiquidacion } from '@/services/dashboard/staffPay/liquidacion.service'
 import { diferenciasDelPeriodo, FilaDiferencia } from '@/services/dashboard/staffPay/diferencias.service'
 import {
@@ -226,7 +226,7 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'staff_service_pay_config',
-    'How pay-per-service is configured: whether pay for staff is turned on and since when, whether tips are paid inside the receipt (and the latest 20 on/off windows as UTC instants, with the venue timezone to show them locally; ventanasTruncadas=true means there are older ones), the pay levels of the organization, which level each person has and since when, and the pay tables of the venue (seats occupied × level = amount) with the version in force on the given date. Each table also lists its two class rules (reglasDeClase, read-only; they are edited in the dashboard): a bonus for a substitute assigned with short notice, and the base pay (the 0-seat cell) for a late cancellation. It also lists each venue of the organization you can read (sedes): its state in pay for staff (ACTIVA; SIN_ACTIVAR; ACTIVA_SIN_PLAN = turned on without the plan, which blocks closing; SIN_PLAN), the days it is on (desde/hasta, venue-local), the earliest day it can be turned on (minimo), whether you can turn it on or off, and what it sold in periods not closed yet that does not go into the receipts (fueraEstePeriodo, in pesos). Requires staffpay:read.',
+    'How pay-per-service is configured: whether pay for staff is turned on and since when, whether tips are paid inside the receipt, the pay period length (periodicidad: MONTHLY or SEMIMONTHLY), whether it can still change (periodicidadFija: fixed once activated or once a period is saved) and, while not activated, the first day that would count if it were activated today (inicioAlActivar, venue-local) (and the latest 20 on/off windows as UTC instants, with the venue timezone to show them locally; ventanasTruncadas=true means there are older ones), the pay levels of the organization, which level each person has and since when, and the pay tables of the venue (seats occupied × level = amount) with the version in force on the given date. Each table also lists its two class rules (reglasDeClase, read-only; they are edited in the dashboard): a bonus for a substitute assigned with short notice, and the base pay (the 0-seat cell) for a late cancellation. It also lists each venue of the organization you can read (sedes): its state in pay for staff (ACTIVA; SIN_ACTIVAR; ACTIVA_SIN_PLAN = turned on without the plan, which blocks closing; SIN_PLAN), the days it is on (desde/hasta, venue-local), the earliest day it can be turned on (minimo), whether you can turn it on or off, and what it sold in periods not closed yet that does not go into the receipts (fueraEstePeriodo, in pesos). Requires staffpay:read.',
     { venueId: z.string().min(1).max(64).describe('Venue in your scope'), fecha },
     async ({ venueId, fecha: f }) => {
       // La configuración se lee sin activar: dice si está activado y el agente puede explicar cómo activarlo (fase 3 §10).
@@ -235,11 +235,13 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
       const v = await prisma.venue.findUnique({ where: { id: venueId }, select: { organizationId: true, timezone: true } })
       if (!v) return text({ ok: false, error: 'Sede no encontrada' })
       const dia = f ?? hoyLocal(v.timezone || 'America/Mexico_City')
-      const [niveles, asignaciones, tablas, estado, ventanas, sedes] = await Promise.all([
+      const [niveles, asignaciones, tablas, estado, acceso, ventanas, sedes] = await Promise.all([
         listarNiveles(v.organizationId),
         nivelesVigentes(v.organizationId, dia),
         listarTablas(venueId, dia),
         estadoActivacion(prisma, v.organizationId),
+        // Lo mismo que dice GET /access: periodicidad, si ya es fija e inicio que tendría al activar hoy.
+        accesoActivacion({ venueId }),
         // Una de más: así se sabe si hay más ventanas de las que se devuelven.
         ventanasDePropinas(v.organizationId, VENTANAS + 1),
         // B13 (r3.7(1)): la pantalla de sedes, de las sedes de esta conexión; por volumen, `sedes: null` con motivo (R1).
@@ -249,6 +251,7 @@ export function registerStaffPayTools(server: McpServer, scope: McpScope) {
         fecha: dia,
         activacion: {
           ...estado,
+          ...acceso,
           ventanasDePropinas: ventanas.slice(0, VENTANAS),
           ventanasTruncadas: ventanas.length > VENTANAS,
           timezone: v.timezone || 'America/Mexico_City',
