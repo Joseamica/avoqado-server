@@ -7,7 +7,8 @@ import { Alcance, Barrido } from './cierre.alcance'
 import { rangosCompletos } from './rangos'
 import type { DevolucionesPendientes } from './devolucionesPendientes'
 import { aCuenta, cero, clasesDe, Cuenta, CuentaCruda, Monto, porFuente, restar } from './participacion.vistaPrevia'
-import { estadoDeSede, EstadoSede, situacionDeLasSedes } from './estadoSede'
+import { estadoDeSede, estadoEnElPeriodo, EstadoSede, situacionDeLasSedes } from './estadoSede'
+import { venuePeriodRange } from './periodos'
 
 type Db = Prisma.TransactionClient | typeof prisma
 
@@ -15,6 +16,7 @@ export type { EstadoSede } from './estadoSede'
 export interface SedeDelCierre {
   venueId: string
   nombre: string
+  /** En un periodo en curso, el de hoy; en uno ya terminado, si participó EN ÉL (`estadoEnElPeriodo`, E6a-fix F10). */
   estado: EstadoSede
   /** Lo que el recorrido pone en el cierre (clases, comisiones —con sus anulaciones— y propinas), neto. */
   entra: Cuenta
@@ -56,10 +58,13 @@ export async function porSedeDelCierre(
     const tienePlan = o.activas.includes(s.venueId)
     const st = situacion.get(s.venueId)
     const p = pendientes.get(s.venueId) ?? cero()
+    const hoy = estadoDeSede({ tienePlan, abierta: st?.abierta ?? false, cubreHoy: st?.cubreHoy ?? false })
+    // E6a-fix F10: un periodo que ya terminó en la zona de la sede dice si ella participó EN ÉL; uno en curso, su estado de hoy.
+    const terminado = o.ahora >= venuePeriodRange(a.periodo, s.tz).to
     out.push({
       venueId: s.venueId,
       nombre: s.nombre,
-      estado: estadoDeSede({ tienePlan, abierta: st?.abierta ?? false, cubreHoy: st?.cubreHoy ?? false }),
+      estado: terminado ? estadoEnElPeriodo(hoy, st?.ventanas ?? [], a.periodo) : hoy,
       entra: aCuenta(o.entra.get(s.venueId) ?? vacia()),
       fuera: aCuenta({
         clases: await clasesDe(

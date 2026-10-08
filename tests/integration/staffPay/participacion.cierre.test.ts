@@ -183,6 +183,16 @@ describe('bloqueo SEDE_ACTIVA_SIN_PLAN (r3.4, r4.7)', () => {
   it('NO bloquea un periodo que termina ANTES del inicio (D2): agosto con inicio el 1-sep, aunque B siga activa sin el plan', async () => {
     await activar(m, { desde: '2026-09-01', sedes: [A, B], propinasDesde: null })
     ;(global as any).__sedes = [A] // B perdió el plan; su ventana sigue abierta desde el 1-sep
+    // E6a-fix F10: un agosto SIN GUARDAR ya no se cierra (409 ANTES_DEL_INICIO); el que se cierra con D2 es uno GUARDADO, la
+    // historia de la fase 2 (como el «caso agosto» de arriba).
+    await prisma.servicePayPeriod.create({
+      data: {
+        organizationId: m.orgId,
+        periodStart: fechaComoDbDate('2026-08-01'),
+        periodEnd: fechaComoDbDate('2026-08-31'),
+        venueIds: [A],
+      },
+    })
     // Agosto rige D2 (guardadas ∪ con el plan): B no está en su alcance, así que su ventana abierta no lo bloquea.
     const p = await preview('2026-08-15', OCT2)
     expect(p).toMatchObject({ puedeCerrar: true, bloqueos: [], periodo: { venueIds: [A] } })

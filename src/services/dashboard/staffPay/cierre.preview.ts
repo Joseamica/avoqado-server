@@ -3,7 +3,7 @@
 import { Prisma } from '@prisma/client'
 import prisma from '../../../utils/prismaClient'
 import { sedesConServicePay, tienePermisoEn } from './acceso'
-import { periodoQueContieneFecha } from './periodosGuardados'
+import { exigirDesdeElInicio, periodoQueContieneFecha } from './periodosGuardados'
 import { sedesConVentana } from './participacion'
 import { enUnaFoto } from './foto'
 import { Alcance, alcanceDelPreview, alcanceDeVentas, Bloqueo, bloqueosDe } from './cierre.alcance'
@@ -85,6 +85,7 @@ export async function previewCierre(input: {
 }): Promise<PreviewCierre> {
   const ahora = input.ahora ?? new Date()
   const organizationId = await organizacionDe(input.venueId)
+  await exigirDesdeElInicio(prisma, organizationId, input.fecha) // E6a-fix F10: lo anterior al inicio no se cierra (409)
   const activas = await sedesConServicePay(organizationId)
   const conVentana = await sedesConVentana(prisma, organizationId)
   const filaAntes = await periodoQueContieneFecha(prisma, organizationId, input.fecha)

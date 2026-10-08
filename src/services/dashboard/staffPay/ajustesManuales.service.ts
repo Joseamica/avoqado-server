@@ -6,7 +6,14 @@ import { BadRequestError, ConflictError, NotFoundError } from '../../../errors/A
 import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
 import { assertPermisoEnSedes, sedesConPermiso, sedesConServicePay, sedesLegiblesDe } from './acceso'
 import { COMO_SE_CONSIGUE_EL_PLAN } from './textos'
-import { ampliarAlcance, asegurarPeriodo, assertFechaEnRango, bloquearPeriodo, periodoQueContieneFecha } from './periodosGuardados'
+import {
+  ampliarAlcance,
+  asegurarPeriodo,
+  assertFechaEnRango,
+  bloquearPeriodo,
+  exigirDesdeElInicio,
+  periodoQueContieneFecha,
+} from './periodosGuardados'
 import { transaccionConPresupuesto } from '../../../utils/esperaDeCandados'
 import { bloquearSedesDeLaOrganizacion, sedesConVentana } from './participacion'
 import { enUnaFoto } from './foto'
@@ -113,6 +120,7 @@ export async function previewAjusteManual(input: Omit<AjusteManualInput, 'client
   const persona = await personaDeLaOrg(input.staffId, sede.organizationId)
   const fecha = input.fecha ?? hoyLocal(sede.timezone || TZ_DEFAULT, input.ahora)
   assertFechaDelAjuste(fecha, sede.timezone || TZ_DEFAULT, sede.organization.servicePayPeriodicity, input.ahora)
+  await exigirDesdeElInicio(prisma, sede.organizationId, fecha) // E6a-fix F10: lo mismo que exigirá confirmar
   // B12 (r6.2, r5.1): el aviso de devoluciones pendientes de esta persona, de las sedes donde quien pregunta tiene
   // `staffpay:read` (las candidatas: con el plan, con historia de pago al personal y la del ajuste), resueltas ANTES; el periodo
   // destino y las pendientes se leen en la MISMA foto.
@@ -185,6 +193,8 @@ export async function agregarAjusteManual(input: AjusteManualInput): Promise<Aju
   const fecha = input.fecha ?? hoyLocal(tz, input.ahora)
   fechaComoDbDate(fecha) // valida la forma ANTES de compararla como texto con el periodo de un reintento
   assertFechaDelAjuste(fecha, tz, sede.organization.servicePayPeriodicity, input.ahora)
+  // E6a-fix F10: un ajuste a un periodo anterior al inicio de pago al personal no se acepta (409), antes de crear el periodo.
+  await exigirDesdeElInicio(prisma, organizationId, fecha)
   // Módulos y permisos con el cliente GLOBAL, ANTES de la transacción, como el cierre (Codex bloque A #3): dentro, con el
   // pool lleno, la ganadora del candado esperaría otra conexión mientras las demás esperan su candado. Candidatas: el
   // alcance del periodo como está ahora ∪ las sedes con el módulo ∪ la sede del ajuste. Dentro sólo se COMPARA; una sede

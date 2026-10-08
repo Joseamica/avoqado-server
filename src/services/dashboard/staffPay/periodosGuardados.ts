@@ -152,6 +152,30 @@ export function assertFechaEnRango(fecha: string, rango: { desde: string; hasta:
   }
 }
 
+/** E6a-fix F10: el 409 de un periodo anterior al inicio, con el texto que la pantalla muestra tal cual y `details.inicio`. */
+export const antesDelInicio = (inicio: string) =>
+  new ConflictError(`Pago al personal está activo desde el ${fechaMx(inicio)}: ese periodo es anterior`, 'ANTES_DEL_INICIO', { inicio })
+
+/**
+ * E6a-fix F10 (QA E6a H5): un periodo SIN GUARDAR que TERMINA antes del inicio de pago al personal no se cierra, no se
+ * previsualiza para cerrarse y no recibe ajustes: «lo anterior no se suma», como promete la activación. 409 ANTES_DEL_INICIO.
+ * Uno GUARDADO (historia de la fase 2) sigue como siempre: cerrado se lee cerrado y abierto se cierra con la regla D2 (spec
+ * §6.2 punto 3, «caso agosto» del diseño r5.2); la lista lo enseña, así que tiene salida. Sin activar no hay inicio que revisar.
+ * Lo usan el cierre, el ajuste manual y la liquidación, con sus vistas previas: los únicos que crean periodos (`asegurarPeriodo`).
+ * Va ANTES de crear nada. El inicio no cambia una vez activado y la periodicidad queda fija: leerlo fuera de la transacción no
+ * tiene carrera (y un periodo anterior al inicio ya no se puede guardar: nadie más lo crea).
+ */
+export async function exigirDesdeElInicio(db: Db, organizationId: string, fecha: string): Promise<void> {
+  const org = await db.organization.findUniqueOrThrow({
+    where: { id: organizationId },
+    select: { staffPayStartDate: true, servicePayPeriodicity: true },
+  })
+  if (!org.staffPayStartDate) return
+  if (await periodoQueContieneFecha(db, organizationId, fecha)) return
+  const inicio = dbDateComoFecha(org.staffPayStartDate)
+  if (periodoQueContiene(fecha, org.servicePayPeriodicity).end < inicio) throw antesDelInicio(inicio)
+}
+
 /** Vigencia de una tabla o un nivel (y la fecha de archivo de una tabla): de hoy − 24 meses a hoy + 24 meses. */
 export const rangoDeVigencia = (hoy: string) => ({ desde: sumarMeses(hoy, -24), hasta: sumarMeses(hoy, 24) })
 
@@ -227,8 +251,16 @@ function canonicosHastaHoy(hoy: string, periodicidad: Periodicidad, n: number) {
  * Lista de periodos (spec §7.3). La primera página mezcla los últimos 12 periodos canónicos (aunque no estén guardados:
  * septiembre se puede cerrar el 1 de octubre sin que nadie lo haya «creado») con los guardados; las siguientes traen
  * sólo guardados más viejos. Los números salen de las sedes del alcance de cada periodo que el usuario puede leer.
+ * E6a-fix F10 (QA E6a H5): un canónico SIN GUARDAR que termina antes del inicio de pago al personal no se ofrece (no se
+ * puede cerrar ni recibir ajustes: `exigirDesdeElInicio`); los guardados (fase 2) se listan siempre. `ahora`: sólo pruebas.
  */
-export async function listarPeriodos(input: { userId: string; venueId: string; antesDe?: string; limit: number }): Promise<ListaPeriodos> {
+export async function listarPeriodos(input: {
+  userId: string
+  venueId: string
+  antesDe?: string
+  limit: number
+  ahora?: Date
+}): Promise<ListaPeriodos> {
   const v = await prisma.venue.findUniqueOrThrow({
     where: { id: input.venueId },
     select: { organizationId: true, timezone: true, organization: { select: { servicePayPeriodicity: true, staffPayStartDate: true } } },
@@ -266,7 +298,9 @@ export async function listarPeriodos(input: { userId: string; venueId: string; a
     total: (porId.get(f.id)?.total ?? new Prisma.Decimal(0)).toFixed(2),
   }))
   if (!input.antesDe) {
-    for (const c of canonicosHastaHoy(hoyLocal(v.timezone || 'America/Mexico_City'), periodicidad, PERIODOS_CANONICOS)) {
+    const inicio = v.organization.staffPayStartDate ? dbDateComoFecha(v.organization.staffPayStartDate) : null
+    for (const c of canonicosHastaHoy(hoyLocal(v.timezone || 'America/Mexico_City', input.ahora), periodicidad, PERIODOS_CANONICOS)) {
+      if (inicio !== null && c.end < inicio) continue
       const cubierto = guardados.some(f => dbDateComoFecha(f.periodStart) <= c.end && dbDateComoFecha(f.periodEnd) >= c.start)
       if (!cubierto) items.push({ id: null, start: c.start, end: c.end, estado: 'OPEN', personas: 0, pagadas: 0, total: '0.00' })
     }

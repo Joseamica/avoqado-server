@@ -24,6 +24,18 @@ export function estadoDeSede(s: { tienePlan: boolean; abierta: boolean; cubreHoy
   return 'SIN_PLAN'
 }
 
+/**
+ * E6a-fix F10 (QA E6a H5): el estado de una sede para un periodo YA TERMINADO, PURO. Dice si la sede participó EN ESE periodo
+ * —alguna de sus ventanas toca `[start, end]`— y no su estado de hoy: participó ⇒ `ACTIVA`; no participó ⇒ `SIN_ACTIVAR` (o
+ * `SIN_PLAN`, si hoy tampoco tiene el plan). `ACTIVA_SIN_PLAN` se conserva: es el bloqueo del cierre (también de un periodo
+ * viejo) y lo que la pantalla deja desactivar desde ahí. Un periodo en curso usa `estadoDeSede` (el de hoy).
+ */
+export function estadoEnElPeriodo(hoy: EstadoSede, ventanas: Ventana[], periodo: { start: string; end: string }): EstadoSede {
+  if (hoy === 'ACTIVA_SIN_PLAN') return hoy
+  if (ventanas.some(w => w.desde <= periodo.end && (w.hasta === null || w.hasta >= periodo.start))) return 'ACTIVA'
+  return hoy === 'ACTIVA' ? 'SIN_ACTIVAR' : hoy
+}
+
 export interface SituacionDeSede {
   /** Tiene una ventana ABIERTA (sin `hasta`): la que mira el bloqueo SEDE_ACTIVA_SIN_PLAN. A lo más una (el EXCLUDE). */
   abierta: boolean

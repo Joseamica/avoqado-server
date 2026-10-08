@@ -131,7 +131,8 @@ describe('«fuera» por sede (r5.8.8)', () => {
     await activarSede({ userId: m.owner, venueId: A, sedeId: B, ahora: new Date('2026-11-03T18:00:00Z') })
     const p = await preview('2026-09-15', new Date('2026-11-05T18:00:00Z'))
     expect(p).toMatchObject({ propinas: 0, totalVentas: '0.00' })
-    expect(sedeDe(p, B)).toMatchObject({ estado: 'ACTIVA', entra: cuenta({}), fuera: cuenta({ propinas: [1, '100.00'] }) })
+    // E6a-fix F10: septiembre ya terminó y B no participó en él (activa desde el 3-nov) ⇒ SIN_ACTIVAR, no su ACTIVA de hoy.
+    expect(sedeDe(p, B)).toMatchObject({ estado: 'SIN_ACTIVAR', entra: cuenta({}), fuera: cuenta({ propinas: [1, '100.00'] }) })
   })
 
   it('tercer escenario (r3.5): $100 de propina + $30 de comisión del 20-oct en B, activada el 1-nov ⇒ octubre: B entra $0 y fuera $130', async () => {
@@ -240,10 +241,11 @@ describe('una sola foto (r4.5, r5.4)', () => {
     expect(corrio).toBe(true)
     expect(p).toMatchObject({ propinas: 2, totalVentas: '130.00' })
     expect(sedeDe(p, B)).toMatchObject({ estado: 'ACTIVA', entra: cuenta({ propinas: [2, '130.00'] }), fuera: cuenta({}) })
-    // Después: B quedó activa hasta el 15-oct ($60 y la nueva de $5 entran; la de $70 del 17-oct queda fuera).
+    // Después: B quedó activa hasta el 15-oct ($60 y la nueva de $5 entran; la de $70 del 17-oct queda fuera). E6a-fix F10:
+    // octubre ya terminó y B participó en él (del 1 al 15) ⇒ ACTIVA, aunque hoy esté sin activar.
     const despues = sedeDe(await preview(OCT, NOV2), B)
     expect(despues).toMatchObject({
-      estado: 'SIN_ACTIVAR',
+      estado: 'ACTIVA',
       entra: cuenta({ propinas: [2, '65.00'] }),
       fuera: cuenta({ propinas: [1, '70.00'] }),
     })

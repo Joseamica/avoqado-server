@@ -4,7 +4,14 @@ import prisma from '../../../utils/prismaClient'
 import { BadRequestError, ConflictError, NotFoundError } from '../../../errors/AppError'
 import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
 import { exigirPermisoEnSedes, sedesConPermiso, sedesConServicePay, sedesLegiblesDe } from './acceso'
-import { ampliarAlcance, asegurarPeriodo, bloquearPeriodo, lockClase, periodoQueContieneFecha } from './periodosGuardados'
+import {
+  ampliarAlcance,
+  asegurarPeriodo,
+  bloquearPeriodo,
+  exigirDesdeElInicio,
+  lockClase,
+  periodoQueContieneFecha,
+} from './periodosGuardados'
 import { transaccionConPresupuesto } from '../../../utils/esperaDeCandados'
 import { bloquearSedesDeLaOrganizacion } from './participacion'
 import { dbDateComoFecha, hoyLocal, periodoQueContiene } from './periodos'
@@ -125,7 +132,9 @@ export async function previewLiquidacion(input: {
 }): Promise<PreviewLiquidacion> {
   const ctx = await contextoClase(input.venueId, input.classSessionId)
   const ahora = input.ahora ?? new Date()
-  const destino = await destinoSinCandado(ctx.organizationId, input.destinoFecha ?? hoyLocal(ctx.tz, ahora))
+  const fecha = input.destinoFecha ?? hoyLocal(ctx.tz, ahora)
+  await exigirDesdeElInicio(prisma, ctx.organizationId, fecha) // E6a-fix F10: lo mismo que exigirá liquidar
+  const destino = await destinoSinCandado(ctx.organizationId, fecha)
   const { origen, filas } = await diferenciasDeClase(prisma, { venueId: input.venueId, classSessionId: input.classSessionId }, { ahora })
   const previas = await devengosDeClase(prisma, ctx.organizationId, input.classSessionId)
   // Lo que se muestra se filtra a lo legible (patrón del Bloque A); la huella va sobre el alcance completo, que es lo que la
@@ -197,6 +206,8 @@ async function liquidar(input: LiquidarInput): Promise<ResultadoLiquidacion> {
   const { organizationId } = ctx
   const ahora = input.ahora ?? new Date()
   const fecha = input.destinoFecha ?? hoyLocal(ctx.tz, ahora)
+  // E6a-fix F10: el destino no puede ser un periodo sin guardar anterior al inicio de pago al personal (409), antes de crearlo.
+  await exigirDesdeElInicio(prisma, organizationId, fecha)
   const prefijo = `${input.solicitudId}:`
   // `startsWith` viaja como `LIKE 'prefijo%'` SIN escapar (medido: el parámetro llega tal cual) y la clave admite «_», que
   // en LIKE es comodín: se escapa (`\` es el ESCAPE por default de PostgreSQL). Sin esto, `a_b` tomaba como suyas las

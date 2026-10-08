@@ -4,7 +4,14 @@ import prisma from '../../../utils/prismaClient'
 import { BadRequestError, ConflictError } from '../../../errors/AppError'
 import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
 import { exigirPermisoEnSedes, sedesConPermiso, sedesConServicePay } from './acceso'
-import { ampliarAlcance, asegurarPeriodo, bloquearPeriodo, lockPeriodosDeOrganizacion, periodoQueContieneFecha } from './periodosGuardados'
+import {
+  ampliarAlcance,
+  asegurarPeriodo,
+  bloquearPeriodo,
+  exigirDesdeElInicio,
+  lockPeriodosDeOrganizacion,
+  periodoQueContieneFecha,
+} from './periodosGuardados'
 import { transaccionConPresupuesto } from '../../../utils/esperaDeCandados'
 import { alcanceDelPeriodo, bloquearSedesDeLaOrganizacion, sedesConVentana } from './participacion'
 import { dbDateComoFecha } from './periodos'
@@ -129,6 +136,8 @@ export async function cerrarPeriodo(input: {
   alTerminarLote?: (n: number) => void
 }): Promise<ResultadoCierre> {
   const organizationId = await organizacionDe(input.venueId)
+  // E6a-fix F10: un periodo anterior al inicio de pago al personal no se cierra (409 ANTES_DEL_INICIO), antes de crear nada.
+  await exigirDesdeElInicio(prisma, organizationId, input.fecha)
   const ahora = input.ahora ?? new Date()
   const tamLote = input.tamLote ?? LOTE_CIERRE
   // Módulos y permisos con el cliente GLOBAL, ANTES de la transacción: dentro retendrían su conexión mientras piden otra
