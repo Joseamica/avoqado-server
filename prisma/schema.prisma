@@ -147,6 +147,11 @@ model Organization {
   staffPayLevels           StaffPayLevel[]
   staffPayLevelAssignments StaffPayLevelAssignment[]
   servicePayPeriods        ServicePayPeriod[]
+  /// Fase 3 (spec 2026-10-05 §7.1): activación explícita de pago al personal. Fecha CIVIL de inicio del periodo abierto al
+  /// activar, que se lee en la zona de cada sede. null = sin activar (el cierre no barre ventas). No vuelve a cambiar.
+  staffPayStartDate        DateTime?                 @db.Date
+  staffPayTipWindows       StaffPayTipWindow[]
+  staffPayVenueWindows     StaffPayVenueWindow[]
 
   // Conector Shopify (spec 2026-10-07)
   shopifyStores ShopifyStore[]
@@ -12886,14 +12891,16 @@ model CommissionConfig {
   recipient   CommissionRecipient @default(SERVER)
   trigger     CommissionTrigger   @default(PER_PAYMENT)
   calcType    CommissionCalcType  @default(PERCENTAGE)
-  defaultRate Decimal             @db.Decimal(5, 4) // 0.0300 = 3%
+  // 0.0300 = 3 % en porcentaje y niveles; en un esquema FIXED son PESOS por venta (D-FIJO, 8-oct-2026: era Decimal(5,4) y un
+  // fijo no pasaba de $9.9999). La API valida por tipo: tasa de 0 a 100 %, o monto de más de $0 a $999,999.99.
+  defaultRate Decimal             @db.Decimal(12, 4)
   minAmount   Decimal?            @db.Decimal(10, 2) // Min commission per transaction
   maxAmount   Decimal?            @db.Decimal(10, 2) // Max commission per transaction
 
   // Base calculation settings
   includeTips     Boolean @default(false) // Tips are already direct bonus, exclude by default
   includeDiscount Boolean @default(false) // Calculate on pre/post-discount amount
-  includeTax      Boolean @default(false) // Include tax in calculation base
+  includeTax      Boolean @default(false) // D5 enmendada (fase 3): false = «sin IVA», de fábrica; true = «con IVA», lo que pagó el cliente
 
   // Role-based rates (JSON object: { "WAITER": 0.03, "CASHIER": 0.02 })
   roleRates Json?
@@ -12901,6 +12908,11 @@ model CommissionConfig {
   // Category filtering — only calculate commissions for items in specific categories
   filterByCategories Boolean  @default(false)
   categoryIds        String[] // Array of MenuCategory IDs
+
+  // D-ELEGIDOS (8-oct-2026): «sólo personas elegidas». Con filterByStaff, SÓLO cobra de este esquema quien está en staffIds
+  // (Staff IDs), el mismo patrón que las categorías. Las excepciones por persona (CommissionOverride) siguen igual.
+  filterByStaff Boolean  @default(false)
+  staffIds      String[] @default([])
 
   // Asistencia → comisiones (decisión del founder 2026-08-26): regla POR ESQUEMA, apagada de
   // fábrica. Prendida, un día con llegada TARDE (fuera de tolerancia) recorta la comisión de
@@ -13128,7 +13140,7 @@ model CommissionCalculation {
   taxAmount      Decimal @default(0) @db.Decimal(10, 2) // Tax (if included)
 
   // Commission calculation
-  effectiveRate   Decimal @db.Decimal(5, 4) // Rate that was applied
+  effectiveRate   Decimal @db.Decimal(12, 4) // Rate that was applied; en un FIXED, el monto en pesos (D-FIJO: era Decimal(5,4))
   grossCommission Decimal @db.Decimal(10, 2) // Before any deductions
   netCommission   Decimal @db.Decimal(10, 2) // Final commission amount
 
@@ -13164,6 +13176,7 @@ model CommissionCalculation {
   @@index([status])
   @@index([summaryId])
   @@index([staffId, calculatedAt])
+  @@index([venueId, calculatedAt]) // fase 3: el barrido del cierre recorre las comisiones de cada sede por fecha
 }
 
 /// Aggregated commission summary per period
@@ -14360,7 +14373,13 @@ model ClassSession {
   assignedStaffId String?
   assignedStaff   Staff?  @relation("ClassSessionStaff", fields: [assignedStaffId], references: [id], onDelete: SetNull)
 
-  status ClassSessionStatus @default(SCHEDULED)
+  status          ClassSessionStatus @default(SCHEDULED)
+  /// Pago por servicio (spec fase 3 §6.6): el PRIMER instante en que pasó a CANCELLED. Sólo lo escribe cancelClassSession.
+  cancelledAt     DateTime?
+  /// La primera coach que tuvo la clase; no vuelve a cambiar. Sin FK a propósito: borrar a la persona no cambia el pago.
+  originalStaffId String?
+  /// Cuándo se asignó a la coach ACTUAL (`assignedStaffId`).
+  staffAssignedAt DateTime?
 
   // Internal notes
   internalNotes String? @db.Text
@@ -17019,6 +17038,11 @@ model FiscalEmisor {
   // AND the month-end factura global / Flow C). Many venues do NOT declare cash income, so invoicing it
   // would force declaring sales they never meant to. Off by default; a venue turns it on explicitly.
   invoiceCashSales        Boolean           @default(false)
+  // OPT-IN (default false; founder 7-oct-2026, IVA C1): whether the month/period FACTURA GLOBAL may take sales paid ONLY
+  // outside the terminal (no payment with a merchant: cash, transfer, vouchers, custom tender types). Only applies with ONE
+  // RFC in the venue (with several, nobody knows whose they are). Off => those sales are excluded with motive SIN_TERMINAL;
+  // on => they enter (cash still needs invoiceCashSales). Sales WITH a merchant are governed by MerchantFiscalConfig.
+  includeOffTerminalSalesInGlobal Boolean           @default(false)
   // OPT-IN (default false): whether CASH-paid sales count in the FISCAL numbers (pólizas / IVA flujo /
   // ISR / reportes contables). Separate from invoicing: the gerencial "¿cuánto gané?" ALWAYS shows the
   // full total; this flag only governs whether cash reaches the fiscal books. Off by default → cash is
@@ -18988,16 +19012,21 @@ model ServicePayTable {
 
 /// Versión inmutable de una tabla. Editar = publicar otra versión.
 model ServicePayTableVersion {
-  id            String              @id @default(cuid())
-  tableId       String
-  table         ServicePayTable     @relation(fields: [tableId], references: [id], onDelete: Cascade)
-  effectiveFrom DateTime            @db.Date
-  revision      Int
-  kind          ServicePayTableKind @default(TOTAL_BY_COUNT)
-  countMode     ServicePayCountMode @default(BOOKED)
-  maxCount      Int
-  createdById   String?
-  createdAt     DateTime            @default(now())
+  id               String              @id @default(cuid())
+  tableId          String
+  table            ServicePayTable     @relation(fields: [tableId], references: [id], onDelete: Cascade)
+  effectiveFrom    DateTime            @db.Date
+  revision         Int
+  kind             ServicePayTableKind @default(TOTAL_BY_COUNT)
+  countMode        ServicePayCountMode @default(BOOKED)
+  maxCount         Int
+  /// Reglas de clase (spec fase 3 §6.6), apagadas (null) de fábrica. Suplencia con poco aviso: horas y bono van juntos.
+  coverBonusHours  Int?
+  coverBonusAmount Decimal?            @db.Decimal(12, 2)
+  /// Cancelación tardía: se paga la celda de 0 lugares de su nivel.
+  lateCancelHours  Int?
+  createdById      String?
+  createdAt        DateTime            @default(now())
 
   cells  ServicePayTableCell[]
   anclas ClassSessionPayState[]
@@ -19052,6 +19081,8 @@ enum ServiceEarningConcept {
 
 enum ServiceEarningSource {
   CLASS_SESSION
+  COMMISSION // fase 3: una fila de CommissionCalculation (netCommission; negativa si es el reverso de un reembolso)
+  TIP // fase 3: la propina de un Payment (tipAmount; negativa en un REFUND)
 }
 
 /// Periodo de pago de una organización (spec §5.7). Intervalos canónicos sin traslape; periodEnd inclusivo.
@@ -19106,6 +19137,8 @@ model ServiceEarning {
   @@index([periodId, staffId])
   @@index([sourceType, sourceId, staffId])
   @@index([organizationId, staffId])
+  // La barrera de traslado, borrado y limpieza de demos pregunta «¿esta sede tiene devengos?» (fase 3, B9).
+  @@index([venueId])
 }
 
 /// Recibo de una persona en un periodo cerrado. Avoqado REGISTRA un pago hecho fuera; no mueve dinero.
@@ -19439,4 +19472,40 @@ model ShopifyImportIssue {
 
   @@unique([venueId, shopifyVariantId])
   @@index([venueId, createdAt])
+}
+
+/// Interruptor de propinas en el recibo (spec fase 3 §7.1). Cada ventana es [startsAt, endsAt): prender abre una, apagar la
+/// cierra. A lo más una abierta por organización (índice único parcial en la migración). Apagar sólo afecta cobros futuros.
+model StaffPayTipWindow {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  startsAt       DateTime
+  endsAt         DateTime?
+  startedById    String
+  endedById      String?
+  createdAt      DateTime     @default(now())
+
+  @@index([organizationId, startsAt])
+}
+
+/// Días en que la sede está ACTIVA en pago al personal (decisión del dueño). Fechas civiles en la zona de la sede.
+/// La escriben SÓLO la activación de la organización y activar/desactivar por sede. venueId sin llave foránea.
+/// Restricciones a mano en la migración: `hasta >= desde`, cerrada ⇔ con quién la cerró, y sin traslapes por sede
+/// (EXCLUDE gist, también entre organizaciones).
+model StaffPayVenueWindow {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  venueId        String
+  /// Primer día que entra.
+  desde          DateTime     @db.Date
+  /// Último día que entra (incluido); null = sin fin.
+  hasta          DateTime?    @db.Date
+  activadaPor    String
+  desactivadaPor String?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@index([organizationId, venueId, desde])
 }

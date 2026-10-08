@@ -377,6 +377,9 @@ async function seed(force: boolean) {
           duration: dur,
           capacity: cls.maxParticipants ?? 16,
           assignedStaffId: instructor,
+          // Estampas de pago por servicio (spec fase 3 §7.2): la coach con la que nace es la original, asignada al crearla.
+          originalStaffId: instructor,
+          staffAssignedAt: new Date(),
           createdById: STAFF.owner,
           status: ClassSessionStatus.SCHEDULED,
         },

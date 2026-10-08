@@ -1,6 +1,5 @@
 import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
-import { withSerializableRetry } from '@/utils/serializableRetry'
 import {
   ampliarAlcance,
   asegurarPeriodo,
@@ -9,6 +8,7 @@ import {
   cambiarPeriodicidad,
   listarPeriodos,
 } from '@/services/dashboard/staffPay/periodosGuardados'
+import { transaccionConPresupuesto } from '@/utils/esperaDeCandados'
 import { asignarNivel } from '@/services/dashboard/staffPay/niveles.service'
 import { publicarVersion, archivarTabla } from '@/services/dashboard/staffPay/tablas.service'
 import { efectoDelCambio } from '@/services/dashboard/staffPay/efecto'
@@ -36,28 +36,28 @@ afterAll(() => borrarMundo(m))
 
 describe('periodos guardados (spec §5.7)', () => {
   it('asegurarPeriodo crea el intervalo canónico con el alcance actual, y la segunda vez devuelve el mismo', async () => {
-    const a = await withSerializableRetry(tx => asegurarPeriodo(tx, m.orgId, '2026-03-17'))
+    const a = await transaccionConPresupuesto((tx, p) => asegurarPeriodo(tx, m.orgId, '2026-03-17', p))
     expect([dbDateComoFecha(a.periodStart), dbDateComoFecha(a.periodEnd)]).toEqual(['2026-03-01', '2026-03-31'])
     expect(a.venueIds).toEqual([m.venueId])
-    const b = await withSerializableRetry(tx => asegurarPeriodo(tx, m.orgId, '2026-03-31'))
+    const b = await transaccionConPresupuesto((tx, p) => asegurarPeriodo(tx, m.orgId, '2026-03-31', p))
     expect(b.id).toBe(a.id)
   })
 
   it('dos aseguramientos concurrentes del mismo mes dejan UNA fila', async () => {
-    await Promise.all([1, 2, 3].map(() => withSerializableRetry(tx => asegurarPeriodo(tx, m.orgId, '2026-04-10'))))
+    await Promise.all([1, 2, 3].map(() => transaccionConPresupuesto((tx, p) => asegurarPeriodo(tx, m.orgId, '2026-04-10', p))))
     expect(await prisma.servicePayPeriod.count({ where: { organizationId: m.orgId, periodStart: new Date('2026-04-01T00:00:00Z') } })).toBe(
       1,
     )
   })
 
   it('bloquear no amplía; ampliar exige permiso en TODA la unión; un periodo CLOSED no se amplía', async () => {
-    const abierto = await withSerializableRetry(tx => asegurarPeriodo(tx, m.orgId, '2026-05-05'))
+    const abierto = await transaccionConPresupuesto((tx, p) => asegurarPeriodo(tx, m.orgId, '2026-05-05', p))
     const nueva = await crearSede(m.orgId, m.key, 'bsf')
     ;(global as any).__sedes = [m.venueId, nueva.venueId]
-    const igual = await withSerializableRetry(tx => bloquearPeriodo(tx, abierto.id))
+    const igual = await transaccionConPresupuesto((tx, p) => bloquearPeriodo(tx, abierto.id, p))
     expect(igual.venueIds).toEqual([m.venueId])
     const ampliar = () =>
-      withSerializableRetry(async tx => ampliarAlcance(tx, await bloquearPeriodo(tx, abierto.id), [nueva.venueId], m.owner))
+      transaccionConPresupuesto(async (tx, p) => ampliarAlcance(tx, await bloquearPeriodo(tx, abierto.id, p), [nueva.venueId], m.owner))
     ;(global as any).__cierre = [m.venueId] // sin permiso de cerrar en BSF
     await expect(ampliar()).rejects.toThrow(/cerrar periodos en todas sus sedes/)
     // Codex R2-R1-9: con permiso SÓLO en BSF tampoco se amplía un periodo de PN a PN+BSF (se exige la unión).
@@ -65,13 +65,13 @@ describe('periodos guardados (spec §5.7)', () => {
     await expect(ampliar()).rejects.toThrow(/cerrar periodos en todas sus sedes/)
     expect((await prisma.servicePayPeriod.findUniqueOrThrow({ where: { id: abierto.id } })).venueIds).toEqual([m.venueId])
     ;(global as any).__cierre = [m.venueId, nueva.venueId]
-    const crecido = await withSerializableRetry(async tx =>
-      ampliarAlcance(tx, await bloquearPeriodo(tx, abierto.id), [nueva.venueId], m.owner),
+    const crecido = await transaccionConPresupuesto(async (tx, p) =>
+      ampliarAlcance(tx, await bloquearPeriodo(tx, abierto.id, p), [nueva.venueId], m.owner),
     )
     expect([...crecido.venueIds].sort()).toEqual([m.venueId, nueva.venueId].sort())
     const cerrado = await periodoCerrado(m, '2026-02-01', '2026-02-28')
     await expect(
-      withSerializableRetry(async tx => ampliarAlcance(tx, await bloquearPeriodo(tx, cerrado.id), [nueva.venueId], m.owner)),
+      transaccionConPresupuesto(async (tx, p) => ampliarAlcance(tx, await bloquearPeriodo(tx, cerrado.id, p), [nueva.venueId], m.owner)),
     ).rejects.toMatchObject({ code: 'PERIODO_CERRADO' })
     ;(global as any).__sedes = [m.venueId]
   })

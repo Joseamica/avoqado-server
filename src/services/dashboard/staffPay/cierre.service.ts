@@ -2,52 +2,63 @@ import { Prisma, ServicePayPeriod } from '@prisma/client'
 import { formatInTimeZone } from 'date-fns-tz'
 import prisma from '../../../utils/prismaClient'
 import { BadRequestError, ConflictError } from '../../../errors/AppError'
-import { withSerializableRetry } from '../../../utils/serializableRetry'
-import { utcTs } from '../../../utils/sqlDates'
 import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
-import { exigirPermisoEnSedes, sedesConPermiso, sedesConServicePay, tienePermisoEn } from './acceso'
-import { ampliarAlcance, asegurarPeriodo, bloquearPeriodo, periodoQueContieneFecha } from './periodosGuardados'
-import { dbDateComoFecha, PeriodoCanonico, periodoQueContiene, venuePeriodRange } from './periodos'
-import { ClaseValorada, contarPorEstado, FiltroValoracion, valorarClases } from './valoracion'
-import { Huella } from './huella'
+import { exigirPermisoEnSedes, sedesConPermiso, sedesConServicePay } from './acceso'
+import {
+  ampliarAlcance,
+  asegurarPeriodo,
+  bloquearPeriodo,
+  exigirDesdeElInicio,
+  lockPeriodosDeOrganizacion,
+  periodoQueContieneFecha,
+} from './periodosGuardados'
+import { transaccionConPresupuesto } from '../../../utils/esperaDeCandados'
+import { alcanceDelPeriodo, bloquearSedesDeLaOrganizacion, sedesConVentana } from './participacion'
+import { dbDateComoFecha } from './periodos'
+import { fechaMx } from '../export.helpers'
+import { ClaseValorada, ReglaDeClase } from './valoracion'
+import { alcanceDe, alcanceDeVentas, Bloqueo, bloqueosDe, textoSedeActivaSinPlan } from './cierre.alcance'
+import {
+  ajustesDelPeriodo,
+  comisionesPorRevisar,
+  idsHuerfanas,
+  LOTE_CIERRE,
+  organizacionDe,
+  recibosGuardados,
+  recorrer,
+  sinDuenoDe,
+  TIMEOUT_CIERRE_MS,
+} from './cierre.recorrido'
+import { previewCierre } from './cierre.preview'
+
+export type { Bloqueo } from './cierre.alcance'
+// B12: la vista previa vive en `cierre.preview.ts` y el recorrido en `cierre.recorrido.ts`; se re-exportan para sus llamadores.
+export { previewCierre } from './cierre.preview'
+export type { PreviewCierre } from './cierre.preview'
+export { consultaIdsDelLote, LOTE_CIERRE, TIMEOUT_CIERRE_MS } from './cierre.recorrido'
 
 type Tx = Prisma.TransactionClient
 type Db = Tx | typeof prisma
 
 /**
  * Medido 2026-10-03 (A13, ronda 1), 50,000 clases: 9.0 s EN FRÍO (primer cierre: devengos y anclas vacíos y sin
- * estadísticas) y 9.2 s CON HISTORIAL; el doble del peor (18.5 s), al minuto y con el mínimo: 60 s. Antes del arreglo
- * (lectura de todo el resto en cada lote y escrituras entre lotes): 66 s con historial y en frío no terminaba. No se baja
- * sin volver a medir (spec §6.3 punto 3): `tests/integration/staffPay/cierre.carga.test.ts`, con y sin MEDIR_EN_FRIO=1.
+ * estadísticas) y 9.2 s CON HISTORIAL. Antes del arreglo (lectura de todo el resto en cada lote y escrituras entre lotes):
+ * 66 s con historial y en frío no terminaba. Fase 3 (B7, 2026-10-06, Mac con carga 13-20 en 10 núcleos), con el código
+ * actual: 50,000 clases + 50,000 comisiones + 50,000 propinas: 34.5 s CON HISTORIAL (julio cerrado con otras 50,000 ventas,
+ * con `plan_cache_mode = force_custom_plan`) y 38.1 s EN FRÍO (medido antes de ese ajuste). El peor por dos da ~76 s, que al
+ * minuto son 120 s (con el mínimo de 60 s). `TIMEOUT_CIERRE_MS` acota UN intento: con reintentos de SSI o un HUELLA_CAMBIO,
+ * la petición completa puede tardar más. Mientras dura, activar, propinas, periodicidad, ajustes, liquidaciones y
+ * marcar pagado esperan su candado (el de la organización o la fila del periodo) con su presupuesto de espera (6 s,
+ * `PresupuestoDeEspera`) y contestan 409 CIERRE_EN_CURSO (B7 r1-r2, B9). El cierre mismo espera hasta 30 s (B9: ya no sin
+ * tope). No se baja sin volver a medir (spec §6.3 punto 3; fase 3 §6.5):
+ * `tests/integration/staffPay/cierre.carga.test.ts`, con y sin MEDIR_EN_FRIO=1.
  */
-export const TIMEOUT_CIERRE_MS = 60_000
-export const LOTE_CIERRE = 500
+// B9 (ronda 1, F5): el margen. El cálculo medido es ~76 s en el peor caso (el peor por dos de lo medido arriba); el
+// presupuesto de espera de candados del cierre es de 30 s (`PresupuestoDeEspera.para(TIMEOUT_CIERRE_MS)`), así que
+// 76 + 30 < 120. Y aunque el cálculo tarde más, ninguna espera empuja la transacción más allá de su timeout: el presupuesto
+// se acota también por el reloj de la transacción menos 1 s (F3, `esperaDeCandados.ts`) y contesta 409 en vez del P2028.
+// B13: la constante vive en `cierre.recorrido.ts` (la vista previa del cierre la usa para su foto, sin ciclo de imports).
 const BLOQUE_ESCRITURA = 1000
-const TZ_DEFAULT = 'America/Mexico_City'
-
-export type Bloqueo =
-  | { codigo: 'NO_HA_TERMINADO'; hasta: string }
-  | { codigo: 'CLASES_EN_CURSO'; n: number }
-  | { codigo: 'EXCEPCIONES'; n: number }
-  | { codigo: 'SIN_PERMISO' }
-  | { codigo: 'YA_CERRADO' }
-
-export interface PreviewCierre {
-  periodo: { id: string | null; start: string; end: string; venueIds: string[] }
-  puedeCerrar: boolean
-  bloqueos: Bloqueo[]
-  clases: number
-  excluidas: number
-  personas: number
-  totalServicios: string
-  totalAjustes: string
-  total: string
-  huerfanas: number
-  huella: string
-  /** Las sedes de `periodo.venueIds` con clases pagables o ajustes, en su mismo orden (QA 2026-10-03, defecto 8: el
-   *  modal nombraba sedes sin una sola clase). No entra en la huella. */
-  sedesConDinero: string[]
-}
 
 export interface ResultadoCierre {
   periodId: string
@@ -60,152 +71,8 @@ export interface ResultadoCierre {
   yaCerrado: boolean
 }
 
-interface Sede {
-  venueId: string
-  tz: string
-  nombre: string
-}
-interface Alcance {
-  organizationId: string
-  periodo: PeriodoCanonico
-  periodId: string | null
-  estado: 'OPEN' | 'CLOSED'
-  venueIds: string[]
-  sedes: Sede[]
-}
-
-/** Sedes en el orden de `[...venueIds].sort()`: el mismo para la cabecera de la huella y para el recorrido. */
-async function sedesDe(db: Db, organizationId: string, venueIds: string[]): Promise<Sede[]> {
-  if (!venueIds.length) return []
-  const vs = await db.venue.findMany({
-    where: { id: { in: venueIds }, organizationId },
-    select: { id: true, timezone: true, name: true },
-    take: venueIds.length,
-  })
-  const porId = new Map(vs.map(v => [v.id, v]))
-  return [...venueIds].sort().flatMap(id => {
-    const v = porId.get(id)
-    return v ? [{ venueId: v.id, tz: v.timezone || TZ_DEFAULT, nombre: v.name }] : []
-  })
-}
-
-/** Alcance de un periodo sin tomar candados (preview). Anticipa el crecimiento de D2 para que la huella coincida. */
-async function alcanceSinCandado(organizationId: string, fecha: string): Promise<Alcance> {
-  const fila = await periodoQueContieneFecha(prisma, organizationId, fecha)
-  const activas = await sedesConServicePay(organizationId)
-  if (fila) {
-    const venueIds = fila.status === 'OPEN' ? [...new Set([...fila.venueIds, ...activas])].sort() : [...fila.venueIds].sort()
-    return {
-      organizationId,
-      periodo: { start: dbDateComoFecha(fila.periodStart), end: dbDateComoFecha(fila.periodEnd) },
-      periodId: fila.id,
-      estado: fila.status,
-      venueIds,
-      sedes: await sedesDe(prisma, organizationId, venueIds),
-    }
-  }
-  const org = await prisma.organization.findUniqueOrThrow({ where: { id: organizationId }, select: { servicePayPeriodicity: true } })
-  const venueIds = [...activas].sort()
-  return {
-    organizationId,
-    periodo: periodoQueContiene(fecha, org.servicePayPeriodicity),
-    periodId: null,
-    estado: 'OPEN',
-    venueIds,
-    sedes: await sedesDe(prisma, organizationId, venueIds),
-  }
-}
-
-async function alcanceDe(tx: Tx, p: ServicePayPeriod): Promise<Alcance> {
-  const venueIds = [...p.venueIds].sort()
-  return {
-    organizationId: p.organizationId,
-    periodo: { start: dbDateComoFecha(p.periodStart), end: dbDateComoFecha(p.periodEnd) },
-    periodId: p.id,
-    estado: p.status,
-    venueIds,
-    sedes: await sedesDe(tx, p.organizationId, venueIds),
-  }
-}
-
-/**
- * Modo 'vivo' a propósito, en el preview y en el cierre: un periodo OPEN no tiene clases ancladas (sólo se ancla al
- * cerrar o al liquidar contra un periodo ya cerrado), y el preview puede no tener `periodId`. Una clase CANCELADA no se
- * valora ni se ancla: si después se reactiva, aparece como diferencia de su periodo (spec §6.4).
- */
-const filtroDe = (a: Alcance, s: Sede, ahora: Date): FiltroValoracion => {
-  const { from, to } = venuePeriodRange(a.periodo, s.tz)
-  return { venueId: s.venueId, organizationId: a.organizationId, tz: s.tz, desde: from, hasta: to, ahora }
-}
-
-async function bloqueosDe(db: Db, a: Alcance, ahora: Date): Promise<Bloqueo[]> {
-  const bloqueos: Bloqueo[] = []
-  if (a.estado === 'CLOSED') return [{ codigo: 'YA_CERRADO' }]
-  if (a.sedes.some(s => ahora < venuePeriodRange(a.periodo, s.tz).to)) bloqueos.push({ codigo: 'NO_HA_TERMINADO', hasta: a.periodo.end })
-  let enCurso = 0
-  let excepciones = 0
-  for (const s of a.sedes) {
-    const f = filtroDe(a, s, ahora)
-    enCurso += await db.classSession.count({
-      where: { venueId: s.venueId, startsAt: { gte: f.desde, lt: f.hasta }, endsAt: { gt: ahora }, status: { not: 'CANCELLED' } },
-    })
-    excepciones += (await contarPorEstado(db, f)).excepciones
-  }
-  if (enCurso) bloqueos.push({ codigo: 'CLASES_EN_CURSO', n: enCurso })
-  if (excepciones) bloqueos.push({ codigo: 'EXCEPCIONES', n: excepciones })
-  return bloqueos
-}
-
-/** IDs de las reservas de clase sin horario del periodo (spec §5.5), en orden fijo: sede → id. */
-async function idsHuerfanas(db: Db, a: Alcance, ahora: Date): Promise<string[]> {
-  const ids: string[] = []
-  for (const s of a.sedes) {
-    const f = filtroDe(a, s, ahora)
-    let despuesDe: string | undefined
-    for (;;) {
-      const page = await db.reservation.findMany({
-        where: {
-          venueId: s.venueId,
-          startsAt: { gte: f.desde, lt: f.hasta },
-          classSessionId: null,
-          status: { notIn: ['CANCELLED', 'PENDING'] },
-          product: { type: 'CLASS' },
-          ...(despuesDe ? { id: { gt: despuesDe } } : {}),
-        },
-        select: { id: true },
-        orderBy: { id: 'asc' },
-        take: 1000,
-      })
-      if (!page.length) break
-      ids.push(...page.map(r => r.id))
-      despuesDe = page[page.length - 1].id
-    }
-  }
-  return ids
-}
-
-type AjusteGuardado = { id: string; staffId: string; venueId: string; amount: Prisma.Decimal }
-
-/** TODOS los ajustes del periodo, por páginas con cursor: un tope de página nunca es un tope contable (Codex R1-3). */
-async function ajustesDelPeriodo(db: Db, organizationId: string, periodId: string | null): Promise<AjusteGuardado[]> {
-  if (!periodId) return []
-  const todos: AjusteGuardado[] = []
-  let despuesDe: string | undefined
-  for (;;) {
-    const page = await db.serviceEarning.findMany({
-      where: { organizationId, periodId, concept: { in: ['RECONCILE', 'MANUAL'] }, ...(despuesDe ? { id: { gt: despuesDe } } : {}) },
-      select: { id: true, staffId: true, venueId: true, amount: true },
-      orderBy: { id: 'asc' },
-      take: 1000,
-    })
-    if (!page.length) return todos
-    todos.push(...page)
-    despuesDe = page[page.length - 1].id
-  }
-}
-
 export function descriptorDeClase(
-  c: Pick<ClaseValorada, 'productName' | 'fechaLocal' | 'startsAt' | 'staffName'>,
+  c: Pick<ClaseValorada, 'productName' | 'fechaLocal' | 'startsAt' | 'staffName'> & { regla?: ReglaDeClase | null },
   sede: { nombre: string; tz: string },
 ): Prisma.InputJsonObject {
   return {
@@ -214,6 +81,8 @@ export function descriptorDeClase(
     hora: formatInTimeZone(c.startsAt, sede.tz, 'HH:mm'),
     sede: sede.nombre,
     coach: c.staffName,
+    // La regla de clase que movió el monto (spec fase 3 §6.6): el recibo cerrado la dice aunque después cambie la tabla.
+    ...(c.regla ? { regla: c.regla } : {}),
   }
 }
 
@@ -240,152 +109,6 @@ export async function anclarClases(
     WHERE "ClassSessionPayState"."originPeriodId" IS NULL`
 }
 
-/**
- * Los siguientes `n` ids de clase de la sede en el rango, por llave (A13): se pagina ANTES de los joins pesados y sólo
- * esos ids se valoran. Sin los demás filtros de la valoración (terminada, no cancelada, sin ancla): ésos los aplica la
- * valoración, así que un lote puede valorar menos de `n` clases, nunca otras.
- */
-export const consultaIdsDelLote = (f: FiltroValoracion, despuesDe: string | undefined, n: number): Prisma.Sql => Prisma.sql`
-  SELECT cs.id FROM "ClassSession" cs
-  WHERE cs."venueId" = ${f.venueId} AND cs."startsAt" >= ${utcTs(f.desde)} AND cs."startsAt" < ${utcTs(f.hasta)}
-    ${despuesDe ? Prisma.sql`AND cs.id > ${despuesDe}` : Prisma.empty}
-  ORDER BY cs.id ASC
-  LIMIT ${n}`
-
-interface Recorrido {
-  clases: number
-  excluidas: number
-  personas: Set<string>
-  sedesConDinero: Set<string>
-  totalServicios: Prisma.Decimal
-  totalAjustes: Prisma.Decimal
-  huella: string
-}
-
-/**
- * El ÚNICO recorrido de la huella (spec §6.3 puntos 2 y 4), el mismo para el preview y el cierre: cabecera → clases
- * (sede → clase, por lotes con cursor `classSessionId > último`) → ajustes por id → huérfanas por id. Cada lote pasa
- * por la huella ANTES de `alLote`. No escribe nada: el cierre guarda lo de cada lote y escribe al terminar (A13). Todo
- * nace dentro de cada llamada: un reintento de `withSerializableRetry` empieza de cero. `digest()` se llama una sola vez.
- */
-async function recorrer(
-  db: Db,
-  a: Alcance,
-  ahora: Date,
-  o: {
-    tamLote: number
-    ajustes: AjusteGuardado[]
-    huerfanas: string[]
-    alLote?: (lote: ClaseValorada[], sede: Sede) => Promise<void>
-  },
-): Promise<Recorrido> {
-  const huella = new Huella()
-  huella.cabecera({ organizationId: a.organizationId, ...a.periodo, venueIds: a.venueIds })
-  const r = {
-    clases: 0,
-    excluidas: 0,
-    personas: new Set<string>(),
-    sedesConDinero: new Set<string>(),
-    totalServicios: new Prisma.Decimal(0),
-    totalAjustes: new Prisma.Decimal(0),
-  }
-  // El mismo tope que `valorarClases`: con más ids que su LIMIT se perderían clases del lote.
-  const tam = Math.min(Math.max(o.tamLote, 1), 1000)
-  for (const s of a.sedes) {
-    const f = filtroDe(a, s, ahora)
-    let despuesDe: string | undefined
-    for (;;) {
-      // A13: primero los ids del lote (por llave), luego la valoración de SÓLO esos ids. Antes cada lote valoraba todo lo
-      // que quedaba del periodo para quedarse con 500 (O(N²/lote)). El orden sigue siendo por classSessionId.
-      const ids = (await db.$queryRaw<Array<{ id: string }>>(consultaIdsDelLote(f, despuesDe, tam))).map(x => x.id)
-      if (!ids.length) break
-      const lote = await valorarClases(db, { ...f, claseIds: ids }, { limite: tam })
-      for (const c of lote) {
-        huella.clase(c)
-        if (c.estado === 'OK' && c.staffId && c.monto !== null) {
-          r.clases++
-          r.personas.add(c.staffId)
-          r.sedesConDinero.add(s.venueId)
-          r.totalServicios = r.totalServicios.plus(c.monto)
-        } else if (c.estado === 'EXCLUIDA') r.excluidas++
-      }
-      if (o.alLote) await o.alLote(lote, s)
-      despuesDe = ids[ids.length - 1]
-    }
-  }
-  for (const aj of o.ajustes) {
-    huella.ajuste(aj)
-    r.totalAjustes = r.totalAjustes.plus(aj.amount)
-    r.personas.add(aj.staffId)
-    r.sedesConDinero.add(aj.venueId)
-  }
-  for (const id of o.huerfanas) huella.huerfana(id)
-  return { ...r, huella: huella.digest() }
-}
-
-async function organizacionDe(venueId: string): Promise<string> {
-  return (await prisma.venue.findUniqueOrThrow({ where: { id: venueId }, select: { organizationId: true } })).organizationId
-}
-
-export async function previewCierre(input: {
-  userId: string
-  venueId: string
-  fecha: string
-  ahora?: Date
-  tamLote?: number
-}): Promise<PreviewCierre> {
-  const ahora = input.ahora ?? new Date()
-  const a = await alcanceSinCandado(await organizacionDe(input.venueId), input.fecha)
-  // Permiso ANTES de calcular nada (Codex R1-8): quien no puede cerrar todo el alcance no recibe ni un número de él.
-  for (const v of a.venueIds) {
-    if (!(await tienePermisoEn(input.userId, v, 'staffpay:close'))) {
-      return {
-        periodo: { id: a.periodId, start: a.periodo.start, end: a.periodo.end, venueIds: [] },
-        puedeCerrar: false,
-        bloqueos: [{ codigo: 'SIN_PERMISO' }],
-        clases: 0,
-        excluidas: 0,
-        personas: 0,
-        totalServicios: '0.00',
-        totalAjustes: '0.00',
-        total: '0.00',
-        huerfanas: 0,
-        huella: '',
-        sedesConDinero: [],
-      }
-    }
-  }
-  if (a.estado === 'CLOSED' && a.periodId) return previewCerrado({ ...a, periodId: a.periodId })
-  const bloqueos = await bloqueosDe(prisma, a, ahora)
-  const ajustes = await ajustesDelPeriodo(prisma, a.organizationId, a.periodId)
-  const huerfanas = await idsHuerfanas(prisma, a, ahora)
-  const r = await recorrer(prisma, a, ahora, { tamLote: input.tamLote ?? LOTE_CIERRE, ajustes, huerfanas })
-  return {
-    periodo: { id: a.periodId, start: a.periodo.start, end: a.periodo.end, venueIds: a.venueIds },
-    puedeCerrar: bloqueos.length === 0,
-    bloqueos,
-    clases: r.clases,
-    excluidas: r.excluidas,
-    personas: r.personas.size,
-    totalServicios: r.totalServicios.toFixed(2),
-    totalAjustes: r.totalAjustes.toFixed(2),
-    total: r.totalServicios.plus(r.totalAjustes).toFixed(2),
-    huerfanas: huerfanas.length,
-    huella: r.huella,
-    sedesConDinero: a.venueIds.filter(v => r.sedesConDinero.has(v)),
-  }
-}
-
-/** Lo GUARDADO de un periodo cerrado: personas y total de los recibos (lo mismo que el retorno idempotente). */
-async function recibosGuardados(db: Db, organizationId: string, periodId: string) {
-  const agg = await db.staffPayStatement.aggregate({
-    where: { periodId, period: { organizationId } },
-    _count: { _all: true },
-    _sum: { total: true },
-  })
-  return { personas: agg._count._all, total: agg._sum.total ?? new Prisma.Decimal(0) }
-}
-
 async function resultadoGuardado(db: Db, p: ServicePayPeriod, yaCerrado: boolean): Promise<ResultadoCierre> {
   const g = await recibosGuardados(db, p.organizationId, p.id)
   return {
@@ -397,40 +120,6 @@ async function resultadoGuardado(db: Db, p: ServicePayPeriod, yaCerrado: boolean
     total: g.total.toFixed(2),
     huella: p.closeFingerprint ?? '',
     yaCerrado,
-  }
-}
-
-/**
- * Preview de un periodo CERRADO: lo guardado, nunca el recorrido en vivo (que sólo vería lo que llegó tarde y
- * mostraría otro total). `clases` y `totalServicios` salen de sus SERVICE; `excluidas` no se reconstruye (0): el
- * detalle de un periodo cerrado se lee en el recibo.
- */
-async function previewCerrado(a: Alcance & { periodId: string }): Promise<PreviewCierre> {
-  const [g, servicios, porSede] = await Promise.all([
-    recibosGuardados(prisma, a.organizationId, a.periodId),
-    prisma.serviceEarning.aggregate({
-      where: { organizationId: a.organizationId, periodId: a.periodId, concept: 'SERVICE' },
-      _count: { _all: true },
-      _sum: { amount: true },
-    }),
-    // Una fila por sede (GROUP BY): acotado por el número de sedes del alcance.
-    prisma.serviceEarning.groupBy({ by: ['venueId'], where: { organizationId: a.organizationId, periodId: a.periodId } }),
-  ])
-  const conDinero = new Set(porSede.map(x => x.venueId))
-  const totalServicios = servicios._sum.amount ?? new Prisma.Decimal(0)
-  return {
-    periodo: { id: a.periodId, start: a.periodo.start, end: a.periodo.end, venueIds: a.venueIds },
-    puedeCerrar: false,
-    bloqueos: [{ codigo: 'YA_CERRADO' }],
-    clases: servicios._count._all,
-    excluidas: 0,
-    personas: g.personas,
-    totalServicios: totalServicios.toFixed(2),
-    totalAjustes: g.total.minus(totalServicios).toFixed(2),
-    total: g.total.toFixed(2),
-    huerfanas: 0,
-    huella: '',
-    sedesConDinero: a.venueIds.filter(v => conDinero.has(v)),
   }
 }
 
@@ -448,33 +137,66 @@ export async function cerrarPeriodo(input: {
   alTerminarLote?: (n: number) => void
 }): Promise<ResultadoCierre> {
   const organizationId = await organizacionDe(input.venueId)
+  // E6a-fix F10: un periodo anterior al inicio de pago al personal no se cierra (409 ANTES_DEL_INICIO), antes de crear nada.
+  await exigirDesdeElInicio(prisma, organizationId, input.fecha)
   const ahora = input.ahora ?? new Date()
   const tamLote = input.tamLote ?? LOTE_CIERRE
   // Módulos y permisos con el cliente GLOBAL, ANTES de la transacción: dentro retendrían su conexión mientras piden otra
-  // (la familia de Codex R4-Nuevo 1). Candidatas: el alcance del periodo como está ahora ∪ las sedes con el módulo. Dentro
-  // sólo se COMPARA contra lo resuelto; una sede que entró al alcance entretanto no tiene permiso resuelto y se niega.
+  // (la familia de Codex R4-Nuevo 1). Candidatas: el alcance del periodo como está ahora ∪ las sedes con el módulo ∪ las
+  // sedes con alguna ventana (B11, r4.4: su historia las mete al alcance). Dentro sólo se COMPARA contra lo resuelto; una
+  // sede que entró al alcance entretanto no tiene permiso resuelto y se niega.
   const activas = await sedesConServicePay(organizationId)
+  const conVentana = await sedesConVentana(prisma, organizationId)
   const filaAntes = await periodoQueContieneFecha(prisma, organizationId, input.fecha)
-  const permitidas = new Set(await sedesConPermiso(input.userId, [...(filaAntes?.venueIds ?? []), ...activas], 'staffpay:close'))
+  const candidatas = [...(filaAntes?.venueIds ?? []), ...activas, ...conVentana]
+  const permitidas = new Set(await sedesConPermiso(input.userId, candidatas, 'staffpay:close'))
   try {
-    return await withSerializableRetry(
-      async tx => {
-        const fila = await asegurarPeriodo(tx, organizationId, input.fecha, activas)
-        let p = await bloquearPeriodo(tx, fila.id)
+    return await transaccionConPresupuesto(
+      async (tx, presupuesto) => {
+        // B-D3: el candado de la ORGANIZACIÓN primero (mismo orden que `asegurarPeriodo`: organización → periodo). Dos
+        // cierres de periodos DISTINTOS pueden barrer la MISMA venta tardía de un periodo ya cerrado: con el candado el
+        // segundo espera al primero. Lo que lo hace correcto es SSI, no el candado: SERIALIZABLE toma la foto en la primera
+        // sentencia —ésta, ANTES de esperar—, así que el segundo, al congelar lo que el primero ya congeló, aborta con 40001
+        // y el reintento ve la huella nueva (HUELLA_CAMBIO). También ordena el cierre con activar y con las propinas.
+        // B9: con el presupuesto del cierre (30 s de sus 120 s), compartido con la fila del periodo y las de las sedes. Antes
+        // esperaba sin tope (B7 r1) y un segundo o tercer cierre simultáneo acababa en P2028; ahora contesta 409.
+        await lockPeriodosDeOrganizacion(tx, organizationId, presupuesto)
+        // B7 r2: los lotes reusan el MISMO statement preparado con otro cursor, y desde la sexta ejecución Postgres le pone un
+        // plan GENÉRICO que no conoce el cursor y vuelve a recorrer todo el resto del rango en cada lote. Medido: los 100 lotes
+        // de propinas, 11.7 s con el genérico y 3.3 s con el personalizado. Va DESPUÉS del candado: SET no toma la foto de
+        // SERIALIZABLE, pero así la primera sentencia sigue siendo el candado, como dice el comentario de arriba.
+        await tx.$executeRawUnsafe('SET LOCAL plan_cache_mode = force_custom_plan')
+        const fila = await asegurarPeriodo(tx, organizationId, input.fecha, presupuesto, activas)
+        let p = await bloquearPeriodo(tx, fila.id, presupuesto)
         const sinPermiso = 'Para cerrar necesitas el permiso de cerrar periodos en todas las sedes del periodo'
         // Permiso también ANTES del retorno idempotente (Codex R1-8): un «ya estaba cerrado» no regala los totales.
         if (p.status === 'CLOSED') {
           exigirPermisoEnSedes(permitidas, p.venueIds, sinPermiso)
           return resultadoGuardado(tx, p, true)
         }
-        // D2: el cierre suma las sedes que hoy tienen el módulo, con permiso en cada una (`ampliarAlcance`).
-        p = await ampliarAlcance(tx, p, activas, input.userId, { activas, permitidas })
+        // B11 (revisión de B10 #1): las ventanas de TODA la organización, leídas DENTRO de esta transacción SERIALIZABLE. Es lo
+        // que le da a SSI el ciclo con una escritura de ventana concurrente (`activarSede`/`desactivarSede` leen el último
+        // cerrado; este cierre lee sus ventanas): una de las dos se repite y nunca queda una ventana dentro de un periodo ya
+        // cerrado. Si cambiaron desde lo resuelto antes, el dueño vuelve a ver la vista previa (HUELLA_CAMBIO).
+        if ((await sedesConVentana(tx, organizationId)).join('|') !== conVentana.join('|')) throw new HuellaCambio()
+        // D2 + B11 (r5.2): el alcance del periodo abierto —guardadas ∪ con el plan, y desde el inicio de pago al personal ∪ las
+        // sedes con ventana (sin pedirles el plan)—, con permiso en cada una (`ampliarAlcance`). Un periodo que termina antes del
+        // inicio no se amplía ni se persiste por historia.
+        const org = await tx.organization.findUniqueOrThrow({ where: { id: organizationId }, select: { staffPayStartDate: true } })
+        const alcance = alcanceDelPeriodo({
+          periodo: { start: dbDateComoFecha(p.periodStart), end: dbDateComoFecha(p.periodEnd), estado: p.status },
+          guardadas: p.venueIds,
+          activas,
+          conVentana,
+          startDate: org.staffPayStartDate ? dbDateComoFecha(org.staffPayStartDate) : null,
+        })
+        p = await ampliarAlcance(tx, p, alcance, input.userId, { exigirModulo: false, permitidas })
         exigirPermisoEnSedes(permitidas, p.venueIds, sinPermiso)
         const a = await alcanceDe(tx, p)
-        const bloqueos = await bloqueosDe(tx, a, ahora)
+        const bloqueos = await bloqueosDe(tx, a, ahora, activas)
         const b = (codigo: Bloqueo['codigo']) => bloqueos.find(x => x.codigo === codigo)
         if (b('NO_HA_TERMINADO'))
-          throw new BadRequestError(`El periodo termina el ${a.periodo.end}: todavía no se puede cerrar`, 'PERIODO_NO_TERMINA')
+          throw new BadRequestError(`El periodo termina el ${fechaMx(a.periodo.end)}: todavía no se puede cerrar`, 'PERIODO_NO_TERMINA')
         const enCurso = b('CLASES_EN_CURSO') as { n: number } | undefined
         if (enCurso) throw new BadRequestError(`Hay ${enCurso.n} clase(s) en curso: espera a que terminen`, 'CLASES_EN_CURSO')
         const exc = b('EXCEPCIONES') as { n: number } | undefined
@@ -483,6 +205,14 @@ export async function cerrarPeriodo(input: {
             `Quedan ${exc.n} clase(s) que no se pueden pagar todavía: resuélvelas antes de cerrar`,
             'HAY_EXCEPCIONES',
           )
+        const sinPlan = b('SEDE_ACTIVA_SIN_PLAN') as Extract<Bloqueo, { codigo: 'SEDE_ACTIVA_SIN_PLAN' }> | undefined
+        if (sinPlan) {
+          const nombres = sinPlan.venueIds.map(v => a.sedes.find(x => x.venueId === v)?.nombre ?? v)
+          throw new ConflictError(textoSedeActivaSinPlan(nombres, sinPlan.otrasConPlan), 'SEDE_ACTIVA_SIN_PLAN', {
+            venueIds: sinPlan.venueIds,
+            otrasConPlan: sinPlan.otrasConPlan,
+          })
+        }
         const huerfanas = await idsHuerfanas(tx, a, ahora)
         if (huerfanas.length && !input.confirmarHuerfanas) {
           throw new BadRequestError(
@@ -498,13 +228,35 @@ export async function cerrarPeriodo(input: {
         // tras lote. Aquí se guarda sólo lo que se va a escribir.
         // ponytail: memoria O(clases), ~1-2 KB por clase (pico +78/+103 MB con 50,000). Si hiciera falta bajarla, los SERVICE
         // pueden escribirse por lote (la lectura en vivo ya no toca ServiceEarning) y dejar sólo las anclas para el final.
+        const alcanceVentas = await alcanceDeVentas(tx, a)
         const servicios: Prisma.ServiceEarningCreateManyInput[] = []
+        const ventas: Prisma.ServiceEarningCreateManyInput[] = []
         const anclas: Parameters<typeof anclarClases>[2] = []
         let lotes = 0
         const r = await recorrer(tx, a, ahora, {
           tamLote,
           ajustes,
           huerfanas,
+          ventas: alcanceVentas,
+          // ponytail: memoria O(ventas), ~1.5 KB por línea medido en B7 (pico del cierre +224/+263 MB con 50,000 clases y 100,000
+          // líneas, contra +78/+103 MB sólo con las clases). Si hiciera falta, escribir por lote.
+          alVentas: lote => {
+            for (const l of lote) {
+              ventas.push({
+                organizationId,
+                venueId: l.venueId,
+                periodId: p.id,
+                staffId: l.staffId,
+                concept: l.concepto,
+                sourceType: l.fuente,
+                sourceId: l.sourceId,
+                occurredAt: l.instante,
+                amount: l.monto,
+                descriptor: { ...l.descriptor },
+                createdById: input.userId,
+              })
+            }
+          },
           alLote: async (lote, sede) => {
             for (const c of lote) {
               anclas.push({ classSessionId: c.classSessionId, fechaValoracion: c.fechaValoracion, tableVersionId: c.tableVersionId })
@@ -533,11 +285,26 @@ export async function cerrarPeriodo(input: {
         })
         // Antes de escribir: si la huella cambió, se aborta sin haber tocado nada (el resultado es el mismo que abortar después).
         if (r.huella !== input.huellaEsperada) throw new HuellaCambio()
-        for (let i = 0; i < servicios.length; i += BLOQUE_ESCRITURA)
-          await tx.serviceEarning.createMany({ data: servicios.slice(i, i + BLOQUE_ESCRITURA) })
+        // Ningún índice impide congelar una venta dos veces: `ServiceEarning_service_unico` (y el de RECONCILE de venta)
+        // incluyen `staffId`, así que la misma propina a otra persona (la orden cambió de quien la atiende) sí entraría. Lo
+        // que lo impide es el anti-join por fuente + `sourceId` de fuentesVenta, más SSI: un cierre concurrente que ya la
+        // congeló hace abortar a éste con 40001 y su reintento ya no la ve.
+        // B9 (r7.1): antes de escribir, la fila de CADA sede que recibe devengos en `FOR KEY SHARE` (periodo → sede) y que
+        // siga siendo de la organización. Sólo las sedes de las filas que se insertan: una del alcance sin dinero no
+        // necesita protegerse, y una demo sin datos borrada a tiempo no tumba el cierre.
+        await bloquearSedesDeLaOrganizacion(
+          tx,
+          organizationId,
+          [...servicios, ...ventas].map(f => f.venueId),
+          presupuesto,
+        )
+        for (const filas of [servicios, ventas])
+          for (let i = 0; i < filas.length; i += BLOQUE_ESCRITURA)
+            await tx.serviceEarning.createMany({ data: filas.slice(i, i + BLOQUE_ESCRITURA) })
         for (let i = 0; i < anclas.length; i += BLOQUE_ESCRITURA) await anclarClases(tx, p.id, anclas.slice(i, i + BLOQUE_ESCRITURA))
 
-        // Recibos: suma de lo YA ESCRITO del periodo (servicios y ajustes), uno por persona — quien sólo tiene un bono también.
+        // Recibos: suma de lo YA ESCRITO del periodo (clases, ventas y ajustes), uno por persona — quien sólo tiene un bono o sólo
+        // vende también.
         const sumas = await tx.serviceEarning.groupBy({
           by: ['staffId'],
           where: { organizationId, periodId: p.id },
@@ -554,6 +321,7 @@ export async function cerrarPeriodo(input: {
         })
         if (cerrado.count !== 1) throw new ConflictError('El periodo cambió mientras se cerraba: revisa de nuevo')
         const total = sumas.reduce((acc, s) => acc.plus(s._sum.amount ?? 0), new Prisma.Decimal(0))
+        const sinDueno = await sinDuenoDe(tx, alcanceVentas)
         await writeLegacyActivityAuditTx(tx, {
           staffId: input.userId,
           venueId: input.venueId,
@@ -565,6 +333,12 @@ export async function cerrarPeriodo(input: {
             venueIds: a.venueIds,
             clases: r.clases,
             excluidas: r.excluidas,
+            comisiones: r.comisiones,
+            propinas: r.propinas,
+            reversos: r.reversos,
+            totalVentas: r.totalVentas.toFixed(2),
+            propinasSinDueno: { n: sinDueno.n, total: sinDueno.total.toFixed(2) },
+            comisionesPorRevisar: await comisionesPorRevisar(tx, alcanceVentas),
             personas: sumas.length,
             total: total.toFixed(2),
             huella: r.huella,

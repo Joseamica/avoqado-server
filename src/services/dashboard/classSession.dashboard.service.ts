@@ -13,6 +13,7 @@ import type {
 } from '../../schemas/dashboard/classSession.schema'
 import { Prisma, ReservationStatus, AggregatorConfirmMode, AggregatorVisitStatus } from '@prisma/client'
 import { withSerializableRetry } from '@/utils/serializableRetry'
+import { utcTs } from '@/utils/sqlDates'
 import { createOrderFromReservation } from '../reservation/createOrderFromReservation'
 import { logAction } from './activity-log.service'
 import { writeLegacyActivityAuditTx } from '../activityAudit.service'
@@ -215,6 +216,9 @@ export async function createClassSession(venueId: string, data: CreateClassSessi
         duration,
         capacity: data.capacity,
         assignedStaffId: data.assignedStaffId ?? null,
+        // Pago por servicio (spec fase 3 §7.2): la coach con la que nace es la original y se le asignó ahora.
+        originalStaffId: data.assignedStaffId ?? null,
+        staffAssignedAt: data.assignedStaffId ? checkedAt : null,
         internalNotes: data.internalNotes ?? null,
         createdById,
       },
@@ -402,6 +406,8 @@ export async function createClassSessionsBulk(
           duration: i.duration,
           capacity: data.capacity,
           assignedStaffId: data.assignedStaffId ?? null,
+          originalStaffId: data.assignedStaffId ?? null,
+          staffAssignedAt: data.assignedStaffId ? checkedAt : null,
           internalNotes: data.internalNotes ?? null,
           createdById,
         },
@@ -462,12 +468,13 @@ interface LockedClassSessionRow {
   endsAt: Date
   status: string
   assignedStaffId: string | null
+  originalStaffId: string | null
 }
 
 export async function updateClassSession(venueId: string, sessionId: string, data: UpdateClassSessionDto, actorStaffId?: string) {
   const { updated, pushRowIds } = await withSerializableRetry(async tx => {
     const sessions = await tx.$queryRaw<LockedClassSessionRow[]>(Prisma.sql`
-      SELECT id, "startsAt", "endsAt", status, "assignedStaffId"
+      SELECT id, "startsAt", "endsAt", status, "assignedStaffId", "originalStaffId"
       FROM "ClassSession"
       WHERE id = ${sessionId}
         AND "venueId" = ${venueId}
@@ -526,6 +533,8 @@ export async function updateClassSession(venueId: string, sessionId: string, dat
       duration?: number
       capacity?: number
       assignedStaffId?: string | null
+      originalStaffId?: string
+      staffAssignedAt?: Date
       internalNotes?: string | null
     } = {}
     if (data.startsAt !== undefined) updateData.startsAt = effectiveStartsAt
@@ -534,7 +543,15 @@ export async function updateClassSession(venueId: string, sessionId: string, dat
       updateData.duration = Math.round((effectiveEndsAt.getTime() - effectiveStartsAt.getTime()) / 60000)
     }
     if (data.capacity !== undefined) updateData.capacity = data.capacity
-    if (hasStaffUpdate) updateData.assignedStaffId = effectiveStaffId
+    if (hasStaffUpdate) {
+      updateData.assignedStaffId = effectiveStaffId
+      // Spec fase 3 §7.2: cambiar a ALGUIEN (no a nadie) renueva la asignación; la original se fija una sola vez y es
+      // la PRIMERA coach que tuvo la clase (si faltara la estampa, la que tenía antes de este cambio), nunca la que llega.
+      if (effectiveStaffId && effectiveStaffId !== session.assignedStaffId) {
+        updateData.staffAssignedAt = checkedAt
+        if (!session.originalStaffId) updateData.originalStaffId = session.assignedStaffId ?? effectiveStaffId
+      }
+    }
     if ('internalNotes' in data) updateData.internalNotes = data.internalNotes ?? null
 
     const updated = await tx.classSession.update({
@@ -592,12 +609,21 @@ export async function updateClassSession(venueId: string, sessionId: string, dat
 
 // ---- Cancel ----
 
-export async function cancelClassSession(venueId: string, sessionId: string) {
+export async function cancelClassSession(venueId: string, sessionId: string, actorStaffId?: string) {
   const session = await prisma.classSession.findFirst({ where: { id: sessionId, venueId } })
   if (!session) throw new NotFoundError('Sesión no encontrada')
   if (session.status === 'CANCELLED') throw new ConflictError('La sesión ya está cancelada')
 
   const { cancelled, pushRowIds } = await prisma.$transaction(async tx => {
+    // Reclamar la transición (spec fase 3 §7.2): sólo UNA solicitud pasa la clase a CANCELLED y su instante es el que queda.
+    // Otra que llegó a la vez espera el candado de la fila, ya no cumple la condición y sale con 409 sin tocar nada.
+    const now = new Date()
+    const reclamadas = await tx.$executeRaw`
+      UPDATE "ClassSession"
+      SET status = 'CANCELLED', "cancelledAt" = ${utcTs(now)}, "updatedAt" = ${utcTs(now)}
+      WHERE id = ${sessionId} AND "venueId" = ${venueId} AND status <> 'CANCELLED'`
+    if (reclamadas === 0) throw new ConflictError('La sesión ya está cancelada')
+
     // Cancel all active reservations for this session
     await tx.reservation.updateMany({
       where: {
@@ -606,17 +632,13 @@ export async function cancelClassSession(venueId: string, sessionId: string) {
       },
       data: {
         status: 'CANCELLED',
-        cancelledAt: new Date(),
+        cancelledAt: now,
         cancelledBy: 'SYSTEM',
         cancellationReason: 'Sesión cancelada por el establecimiento',
       },
     })
 
-    const cancelled = await tx.classSession.update({
-      where: { id: sessionId },
-      data: { status: 'CANCELLED' },
-      include: SESSION_INCLUDE,
-    })
+    const cancelled = await tx.classSession.findUniqueOrThrow({ where: { id: sessionId }, include: SESSION_INCLUDE })
 
     // ---- Google Calendar push outbox (Phase 2 — spec §14.3) ----
     // ONE CANCEL row per target connection — NOT one per attendee reservation.
@@ -628,14 +650,14 @@ export async function cancelClassSession(venueId: string, sessionId: string) {
     })
     let pushRowIds: string[] = []
     if (targets.length > 0) {
-      const now = new Date()
+      const ahora = new Date()
       for (const target of targets) {
         const syncKey = buildSyncKey({
           kind: 'class',
           classSessionId: cancelled.id,
           connectionId: target.id,
         })
-        await collapseSupersededOps(tx, syncKey, now)
+        await collapseSupersededOps(tx, syncKey, ahora)
       }
       pushRowIds = await enqueuePush(tx, {
         source: { kind: 'class', classSessionId: cancelled.id },
@@ -645,6 +667,15 @@ export async function cancelClassSession(venueId: string, sessionId: string) {
       })
     }
     await enqueuePassSessionSync(tx, venueId, cancelled.id)
+    // Con quién canceló y dentro de la transacción (spec fase 3 §7.2): una cancelación nunca queda sin su rastro.
+    await writeLegacyActivityAuditTx(tx, {
+      staffId: actorStaffId ?? null,
+      venueId,
+      action: 'CLASS_SESSION_CANCELLED',
+      entity: 'ClassSession',
+      entityId: sessionId,
+      data: { cancelledAt: now.toISOString() },
+    })
 
     return { cancelled, pushRowIds }
   })
@@ -658,13 +689,6 @@ export async function cancelClassSession(venueId: string, sessionId: string) {
       }),
     )
   }
-
-  logAction({
-    venueId,
-    action: 'CLASS_SESSION_CANCELLED',
-    entity: 'ClassSession',
-    entityId: sessionId,
-  })
 
   return cancelled
 }

@@ -1168,37 +1168,42 @@ describe('ClassSession Dashboard Service', () => {
   // ============================================================
 
   describe('cancelClassSession', () => {
-    it('should cancel session and its active reservations in a transaction', async () => {
-      const session = makeSession()
+    it('reclama la transición con un UPDATE condicionado, cancela las reservas y audita con el actor dentro de la transacción', async () => {
       const cancelledSession = makeSession({ status: 'CANCELLED' })
-
-      prismaMock.classSession.findFirst.mockResolvedValue(session)
+      prismaMock.classSession.findFirst.mockResolvedValue(makeSession())
+      prismaMock.$executeRaw.mockResolvedValueOnce(1)
       prismaMock.reservation.updateMany.mockResolvedValue({ count: 2 })
-      prismaMock.classSession.update.mockResolvedValue(cancelledSession)
+      prismaMock.classSession.findUniqueOrThrow.mockResolvedValue(cancelledSession)
+      prismaMock.activityLog.create.mockResolvedValue({ id: 'log-1' })
 
-      const result = await cancelClassSession(VENUE_ID, SESSION_ID)
+      const result = await cancelClassSession(VENUE_ID, SESSION_ID, STAFF_ID)
 
       expect(prismaMock.$transaction).toHaveBeenCalled()
+      const [textos, ...valores] = prismaMock.$executeRaw.mock.calls[0]
+      expect((textos as string[]).join('?')).toMatch(/UPDATE "ClassSession"[\s\S]*"cancelledAt"[\s\S]*status <> 'CANCELLED'/)
+      expect(valores).toEqual(expect.arrayContaining([SESSION_ID, VENUE_ID]))
+      expect(prismaMock.classSession.update).not.toHaveBeenCalled()
       expect(prismaMock.reservation.updateMany).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: expect.objectContaining({
-            classSessionId: SESSION_ID,
-            status: { in: ['PENDING', 'CONFIRMED'] },
-          }),
-          data: expect.objectContaining({
-            status: 'CANCELLED',
-            cancelledBy: 'SYSTEM',
-            cancellationReason: 'Sesión cancelada por el establecimiento',
-          }),
+          where: expect.objectContaining({ classSessionId: SESSION_ID, status: { in: ['PENDING', 'CONFIRMED'] } }),
+          data: expect.objectContaining({ status: 'CANCELLED', cancelledBy: 'SYSTEM' }),
         }),
       )
-      expect(prismaMock.classSession.update).toHaveBeenCalledWith(
+      expect(prismaMock.activityLog.create).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: { id: SESSION_ID },
-          data: expect.objectContaining({ status: 'CANCELLED' }),
+          data: expect.objectContaining({ action: 'CLASS_SESSION_CANCELLED', staffId: STAFF_ID, entityId: SESSION_ID }),
         }),
       )
+      expect(logActionMock).not.toHaveBeenCalled()
       expect(result.status).toBe('CANCELLED')
+    })
+
+    it('si otra solicitud ya la canceló (el reclamo no toca filas): 409 y no toca reservas ni audita', async () => {
+      prismaMock.classSession.findFirst.mockResolvedValue(makeSession())
+      prismaMock.$executeRaw.mockResolvedValueOnce(0)
+      await expect(cancelClassSession(VENUE_ID, SESSION_ID, STAFF_ID)).rejects.toThrow(ConflictError)
+      expect(prismaMock.reservation.updateMany).not.toHaveBeenCalled()
+      expect(prismaMock.activityLog.create).not.toHaveBeenCalled()
     })
 
     it('should throw NotFoundError when session not found', async () => {

@@ -18,7 +18,7 @@ export async function listarNiveles(organizationId: string) {
 }
 
 export async function crearNivel(input: { organizationId: string; name: string; actorId: string; venueId: string }) {
-  await assertPermisoEnTodasLasSedes(input.actorId, input.organizationId, 'staffpay:manage')
+  await assertPermisoEnTodasLasSedes(input.actorId, input.organizationId, 'staffpay:manage', { venueId: input.venueId })
   const name = input.name.trim()
   try {
     return await withSerializableRetry(async tx => {
@@ -53,7 +53,7 @@ export async function editarNivel(input: {
   actorId: string
   venueId: string
 }) {
-  await assertPermisoEnTodasLasSedes(input.actorId, input.organizationId, 'staffpay:manage')
+  await assertPermisoEnTodasLasSedes(input.actorId, input.organizationId, 'staffpay:manage', { venueId: input.venueId })
   try {
     return await editarNivelTx(input)
   } catch (e) {
@@ -141,7 +141,7 @@ export async function asignarNivel(input: {
   /** Sólo pruebas: el «hoy» de la simulación (la ruta no lo pasa). */
   ahora?: Date
 }): Promise<EfectoDelCambio & { asignacionId?: string }> {
-  await assertPermisoEnTodasLasSedes(input.actorId, input.organizationId, 'staffpay:manage')
+  await assertPermisoEnTodasLasSedes(input.actorId, input.organizationId, 'staffpay:manage', { venueId: input.venueId })
   // full-testing A11: primero el rango (±24 meses, hoy en la zona de la sede); dentro de él, un periodo cerrado gana.
   assertFechaEnRango(input.effectiveFrom, rangoDeVigencia(await hoyDeLaSede(input.venueId, input.ahora)), 'La fecha de inicio')
   await assertFechaNoCerrada(prisma, input.organizationId, input.effectiveFrom, NO_EMPIEZA)

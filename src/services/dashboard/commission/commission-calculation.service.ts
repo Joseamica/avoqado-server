@@ -21,10 +21,22 @@
  */
 
 import prisma from '../../../utils/prismaClient'
+import { organizacionDeLaSedeActivada, venueHasServicePayAccess } from '../staffPay/acceso'
 import logger from '../../../config/logger'
-import { PaymentEffect, Prisma, CommissionCalcType, CommissionCalcStatus, PaymentType } from '@prisma/client'
+import {
+  PaymentEffect,
+  Prisma,
+  CommissionCalcType,
+  CommissionCalcStatus,
+  CommissionPayoutStatus,
+  CommissionSummaryStatus,
+  PaymentType,
+} from '@prisma/client'
 import { NotFoundError, BadRequestError } from '../../../errors/AppError'
 import { logAction } from '../activity-log.service'
+import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
+import { recalculateSummary } from './commission-aggregation.service'
+import { resumenesCalculados } from './resumenesCalculados'
 import { applyAttendancePenalty, resolveAttendancePenaltyRate } from './commission-attendance'
 import {
   committedAndPendingCommissionProgress,
@@ -43,7 +55,17 @@ import {
   decimalToNumber,
   getVenueTimezone,
   CommissionConfigWithRelations,
+  cobroDeLaOrden,
+  ivaDelCobro,
+  listaDeLaOrden,
+  otrosCobros,
+  baseDelCobro,
+  ORDEN_PARA_REPARTO_SELECT,
+  reintentarSiHayBloqueoMutuo,
 } from './commission-utils'
+import { COMMISSION_BASE, resolveCommissionBase } from './commission-base'
+import { redondearRepartido, repartir } from './repartoPorCobro'
+import { aplicaALaPersona } from './personasElegidas'
 import { subMonths, startOfMonth, endOfMonth } from 'date-fns'
 import { toZonedTime, fromZonedTime } from 'date-fns-tz'
 import { getApplicableTierRate, resolveGoalBasedTier } from './commission-tier.service'
@@ -82,18 +104,32 @@ type LoadedPayment = {
   shift: { id: string } | null
 }
 
+/** Un monto al centavo, ½↑ en decimal: lo que guarda una columna `Decimal(10,2)`. */
+const alCentavo = (n: number) => new Prisma.Decimal(n).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP).toNumber()
+
 async function createCalcForConfig(
   payment: LoadedPayment,
   config: CommissionConfigWithRelations,
-  amounts: { baseAmount: number; tipAmount: number; discountAmount: number; taxAmount: number },
+  importes: { baseAmount: number; tipAmount: number; discountAmount: number; taxAmount: number },
   options: CommissionOptions = {},
 ): Promise<CommissionCalculationResult | null> {
+  // A6 F2 (Codex bloque A r1 [P2]): la fila —también la congelada en cola— lleva sus importes al centavo, como su columna.
+  // Base + propina en binario (32.2 + 0.2 = 32.400000000000006) dejaba un snapshot que valía distinto en cola que
+  // materializado. La comisión sale de esa base en decimal: en binario 32.4 × 0.05 o 2.3 × 0.05 pierden el medio centavo.
+  const amounts = {
+    baseAmount: alCentavo(importes.baseAmount),
+    tipAmount: alCentavo(importes.tipAmount),
+    discountAmount: alCentavo(importes.discountAmount),
+    taxAmount: alCentavo(importes.taxAmount),
+  }
   const db = options.db ?? prisma
   const recipientStaffId = getRecipientStaffId({ processedById: payment.processedById }, payment.order, config.recipient)
   if (!recipientStaffId) {
     logger.warn('Could not determine commission recipient', { paymentId: payment.id, configId: config.id })
     return null
   }
+  // D-ELEGIDOS (fase 3): un esquema de «sólo personas elegidas» no le calcula nada a quien no está en su lista.
+  if (!aplicaALaPersona(config, recipientStaffId)) return null
 
   const staffInfo = await validateStaffForCommission(recipientStaffId, payment.venueId, db)
   if (!staffInfo) return null
@@ -142,11 +178,13 @@ async function createCalcForConfig(
   const effectiveRate = calculateFinalRate(config, override, staffInfo.role, tierRate)
 
   let grossCommission =
-    config.calcType === CommissionCalcType.FIXED ? decimalToNumber(config.defaultRate) : amounts.baseAmount * effectiveRate
+    config.calcType === CommissionCalcType.FIXED
+      ? decimalToNumber(config.defaultRate)
+      : new Prisma.Decimal(amounts.baseAmount).mul(effectiveRate).toNumber()
 
   let netCommission = applyCommissionBounds(grossCommission, config)
-  grossCommission = Math.round(grossCommission * 100) / 100
-  netCommission = Math.round(netCommission * 100) / 100
+  grossCommission = alCentavo(grossCommission)
+  netCommission = alCentavo(netCommission)
 
   // Asistencia → comisiones: sólo si el esquema la prendió; falla abierta (comisión completa).
   const attendancePenaltyRate = await resolveAttendancePenaltyRate(
@@ -222,7 +260,7 @@ export async function createCommissionForPayment(
   const payment = await db.payment.findUnique({
     where: { id: paymentId },
     include: {
-      order: { select: { id: true, createdById: true, servedById: true, subtotal: true, discountAmount: true, taxAmount: true } },
+      order: { select: ORDEN_PARA_REPARTO_SELECT },
       shift: { select: { id: true } },
       venue: { select: { id: true, timezone: true } },
     },
@@ -259,6 +297,10 @@ export async function createCommissionForPayment(
       )
   }
 
+  // A1 (Codex r3-14): el descuento, el IVA y la base por categorías son de la ORDEN; cada cobro comisiona SU parte. Los
+  // otros cobros se leen por esquema (`otrosCobros`) con el candado de la orden ya tomado arriba.
+  const enLaOrden = cobroDeLaOrden(payment)
+
   const categoryScoped = configs.filter(c => c.filterByCategories && c.categoryIds.length > 0)
   const catchAll = configs.filter(c => !(c.filterByCategories && c.categoryIds.length > 0))
   const claimed = [...new Set(categoryScoped.flatMap(c => c.categoryIds))]
@@ -277,11 +319,15 @@ export async function createCommissionForPayment(
       },
       db,
     )
-    // 🔴 MONEY: la base viene de los ITEMS DE LA ORDEN pero esto corre POR COBRO. Sin
-    // descontar lo ya comisionado, una orden con N cobros paga la misma venta N veces
-    // (bug real: Mindform, $34.20 sobre una venta de $380). Misma defensa del fix de
-    // descuentos apilados (268c5fc6): cobrar contra el REMANENTE, no contra el total.
-    let base = Math.max(0, Math.round((orderBase - (await alreadyCommissionedItemBase(payment.orderId, config.id, db, true))) * 100) / 100)
+    // 🔴 MONEY: la base viene de los ITEMS DE LA ORDEN pero esto corre POR COBRO. Cada cobro se lleva su parte proporcional
+    // (antes el PRIMERO se llevaba toda: devolverlo dejaba la comisión en $0 aunque seguía cobrada la otra mitad) y nunca más
+    // de lo que queda por comisionar (Mindform, $34.20 sobre una venta de $380; 268c5fc6).
+    let base = baseDelCobro(
+      enLaOrden,
+      orderBase,
+      await alreadyCommissionedItemBase(payment.orderId, config.id, db, true),
+      await otrosCobros(db, payment, config.id),
+    )
     const tip = config.includeTips ? decimalToNumber(payment.tipAmount) : 0
     if (config.includeTips) base += tip
     if (base <= 0) continue
@@ -294,14 +340,38 @@ export async function createCommissionForPayment(
   const generalConfig = catchAll[0]
   if (generalConfig) {
     let amounts: { baseAmount: number; tipAmount: number; discountAmount: number; taxAmount: number } | null = null
-    if (claimed.length === 0) {
+    const esLista = resolveCommissionBase(generalConfig) === COMMISSION_BASE.PRECIO_DE_LISTA
+    if (claimed.length === 0 && esLista && payment.orderId && payment.order) {
+      // A1e (Codex r3-2 y r3-3): «precio de lista» es la lista de la ORDEN —renglones más cargo, la misma con y sin IVA
+      // (`listaDeLaOrden`)— y cada cobro se lleva su parte, como la base de categorías. Sigue siendo el esquema GENERAL: el
+      // sobrante no lleva el cargo.
+      const otros = await otrosCobros(db, payment, generalConfig.id)
+      let base = baseDelCobro(
+        enLaOrden,
+        listaDeLaOrden(payment.order, generalConfig),
+        await alreadyCommissionedItemBase(payment.orderId, generalConfig.id, db, true),
+        otros,
+      )
+      const tip = generalConfig.includeTips ? decimalToNumber(payment.tipAmount) : 0
+      if (generalConfig.includeTips) base += tip
+      // La fila guarda, como en «Lo cobrado», su parte del descuento de la orden (A1b: los otros cobros la leen) y el IVA de su
+      // póliza.
+      amounts = {
+        baseAmount: base,
+        tipAmount: tip,
+        discountAmount: repartir(enLaOrden, enLaOrden.descuento, otros, 'descuento').toNumber(),
+        taxAmount: ivaDelCobro(payment).toNumber(),
+      }
+    } else if (claimed.length === 0) {
+      // A1: la parte de ESTE cobro del descuento efectivo de la orden, con lo que ya recibieron los otros cobros (sus filas de
+      // este esquema, no el orden de las fechas). A1e: el IVA es el de la póliza de ESTE cobro, no una parte del de la orden.
+      const otros = await otrosCobros(db, payment, generalConfig.id)
       const r = calculateBaseAmount(
         {
           amount: payment.amount,
           tipAmount: payment.tipAmount,
-          taxAmount: payment.order?.taxAmount,
-          discountAmount: payment.order?.discountAmount,
-          subtotal: payment.order?.subtotal,
+          taxAmount: ivaDelCobro(payment),
+          discountAmount: repartir(enLaOrden, enLaOrden.descuento, otros, 'descuento'),
         },
         generalConfig,
       )
@@ -317,11 +387,12 @@ export async function createCommissionForPayment(
         },
         db,
       )
-      // 🔴 MONEY: mismo defecto que la rama category-scoped — el sobrante también es
-      // base DE ORDEN evaluada POR COBRO. Se descuenta lo que esta config ya cobró.
-      let base = Math.max(
-        0,
-        Math.round((orderLeftover - (await alreadyCommissionedItemBase(payment.orderId, generalConfig.id, db, true))) * 100) / 100,
+      // 🔴 MONEY: mismo reparto que la rama por categorías — el sobrante también es base DE ORDEN evaluada POR COBRO.
+      let base = baseDelCobro(
+        enLaOrden,
+        orderLeftover,
+        await alreadyCommissionedItemBase(payment.orderId, generalConfig.id, db, true),
+        await otrosCobros(db, payment, generalConfig.id),
       )
       const tip = generalConfig.includeTips ? decimalToNumber(payment.tipAmount) : 0
       if (generalConfig.includeTips) base += tip
@@ -338,14 +409,88 @@ export async function createCommissionForPayment(
 }
 
 /**
+ * `Decimal` con precisión de sobra (100 dígitos) para que los PRODUCTOS de montos sean exactos: el reverso multiplica hasta
+ * cuatro montos y divide UNA sola vez, al final, así que el ½↑ a centavos ve el valor exacto. Con la precisión de fábrica
+ * (20 dígitos) una fracción que no termina —2.50/12— se cortaba antes de multiplicar y un empate de medio centavo (0.375)
+ * se redondeaba hacia abajo (Ronda 1 de A3).
+ */
+const Exacto = Prisma.Decimal.clone({ precision: 100 })
+const CERO = new Exacto(0)
+/** Un monto como venga —`Decimal` de la base, texto o número del efecto en cola, o nada— en decimal exacto. */
+const dec = (v: unknown) => new Exacto(v == null ? 0 : String(v))
+/** Una fracción sin dividir: la división es la ÚLTIMA operación, en `tramo`. `den` siempre es positivo. */
+type Fraccion = { num: Prisma.Decimal; den: Prisma.Decimal }
+
+const CAMPOS_DEL_REVERSO = ['baseAmount', 'tipAmount', 'discountAmount', 'taxAmount', 'grossCommission', 'netCommission'] as const
+type CampoDelReverso = (typeof CAMPOS_DEL_REVERSO)[number]
+type CamposDelReverso = Record<CampoDelReverso, Prisma.Decimal>
+
+/** Las devoluciones COMPLETADAS de un cobro: la llave `processorData.originalPaymentId` que escriben los dos canales. */
+const devolucionesDe = (venueId: string, originalPaymentId: string): Prisma.PaymentWhereInput => ({
+  venueId,
+  type: PaymentType.REFUND,
+  status: 'COMPLETED',
+  processorData: { path: ['originalPaymentId'], equals: originalPaymentId },
+})
+
+/**
+ * Lo YA revertido de una fila original (persona + esquema) por las DEMÁS devoluciones del cobro, en positivo: lo
+ * materializado (en cualquier estado: anular un reverso es decidir que esa parte no se revierte) más lo que sigue en cola.
+ * Un efecto cuya fila ya existe —el enganche directo viejo de la terminal la creaba aparte— se cuenta una sola vez, por la
+ * fila. Todo en SQL: sin tope de filas que trunque la suma (Codex plan r1-2).
+ */
+async function revertidoPorLasOtras(
+  db: Prisma.TransactionClient,
+  w: { venueId: string; originalPaymentId: string; refundPaymentId: string; configId: string; staffId: string },
+): Promise<CamposDelReverso> {
+  const [fila] = await db.$queryRaw<Array<Record<CampoDelReverso, Prisma.Decimal | null>>>(Prisma.sql`
+    WITH devoluciones AS (
+      SELECT p.id FROM "Payment" p
+      WHERE p."venueId" = ${w.venueId}
+        AND p.type = 'REFUND'
+        AND p.status = 'COMPLETED'
+        AND p."processorData"->>'originalPaymentId' = ${w.originalPaymentId}
+        AND p.id <> ${w.refundPaymentId}
+    ),
+    revertido AS (
+      SELECT cc."baseAmount" AS b, cc."tipAmount" AS t, cc."discountAmount" AS d, cc."taxAmount" AS x,
+             cc."grossCommission" AS g, cc."netCommission" AS n
+      FROM "CommissionCalculation" cc
+      WHERE cc."venueId" = ${w.venueId} AND cc."configId" = ${w.configId} AND cc."staffId" = ${w.staffId}
+        AND cc."paymentId" IN (SELECT id FROM devoluciones)
+      UNION ALL
+      -- Lo que guardaría el worker (Decimal(10,2)): un efecto viejo trae floats como -0.009999999999999998 o -0.015.
+      SELECT COALESCE(ROUND((e.payload->>'baseAmount')::numeric, 2), 0), COALESCE(ROUND((e.payload->>'tipAmount')::numeric, 2), 0),
+             COALESCE(ROUND((e.payload->>'discountAmount')::numeric, 2), 0), COALESCE(ROUND((e.payload->>'taxAmount')::numeric, 2), 0),
+             COALESCE(ROUND((e.payload->>'grossCommission')::numeric, 2), 0), COALESCE(ROUND((e.payload->>'netCommission')::numeric, 2), 0)
+      FROM "PaymentEffect" e
+      WHERE e."venueId" = ${w.venueId}
+        AND e.kind = 'COMMISSION'
+        AND e.status IN ('PENDING', 'PROCESSING', 'DEAD_LETTER')
+        AND e."paymentId" IN (SELECT id FROM devoluciones)
+        AND e.payload->>'configId' = ${w.configId}
+        AND e.payload->>'staffId' = ${w.staffId}
+        AND NOT EXISTS (
+          SELECT 1 FROM "CommissionCalculation" c
+          WHERE c."paymentId" = e."paymentId" AND c."configId" = ${w.configId} AND c."staffId" = ${w.staffId}
+        )
+    )
+    SELECT -COALESCE(SUM(b), 0) AS "baseAmount", -COALESCE(SUM(t), 0) AS "tipAmount", -COALESCE(SUM(d), 0) AS "discountAmount",
+           -COALESCE(SUM(x), 0) AS "taxAmount", -COALESCE(SUM(g), 0) AS "grossCommission", -COALESCE(SUM(n), 0) AS "netCommission"
+    FROM revertido`)
+  return Object.fromEntries(CAMPOS_DEL_REVERSO.map(c => [c, dec(fila?.[c])])) as CamposDelReverso
+}
+
+/**
  * Create negative commission records for a refund.
  *
- * Mirrors ALL original payment's commissions proportionally (one per config).
- * This ensures SUM(netCommission) reflects actual earnings after refunds.
+ * Mirrors ALL original payment's commissions proportionally (one per config and staff).
  *
- * @param refundPaymentId - The refund Payment ID
- * @param originalPaymentId - The original Payment that was refunded
- * @returns Array of commission calculation results (one per original calc)
+ * 🔴 MONEY (fase 3, A3; Codex r1-4 y plan r1-1/2/3): corre bajo el candado de la orden, el mismo que toma TODO el que crea un
+ * reverso (la terminal, el dashboard y el worker), así que las devoluciones confirmadas que se ven aquí son exactamente las
+ * que ya calcularon su reverso más ésta —sin importar su `createdAt`, que no es el orden en que se confirman—. El reverso de
+ * cada fila es «lo que debe quedar revertido con TODAS ellas, redondeado al centavo, menos lo que ya revirtieron las demás»,
+ * en decimal. Así N devoluciones parciales suman exactamente la comisión, en cualquier orden.
  */
 export async function createRefundCommission(
   refundPaymentId: string,
@@ -377,41 +522,88 @@ export async function createRefundCommission(
   })
   for (const effect of pending) {
     const data = effect.payload as unknown as (typeof originalCalcs)[number]
+    // A6 F2: una original EN COLA se usa como la guardaría su columna, al centavo; las viejas traen binario (32.40000000000001).
     if (data.configId && data.staffId && !originalCalcs.some(c => c.configId === data.configId && c.staffId === data.staffId))
-      originalCalcs.push(data)
+      originalCalcs.push({
+        ...data,
+        ...Object.fromEntries(
+          CAMPOS_DEL_REVERSO.map(c => [c, new Prisma.Decimal(dec(data[c]).toDecimalPlaces(2, Exacto.ROUND_HALF_UP).toFixed(2))]),
+        ),
+      })
   }
 
+  // Lo devuelto por TODAS las devoluciones confirmadas visibles del cobro (incluida ésta).
+  const devuelto = await db.payment.aggregate({
+    where: devolucionesDe(refundPayment.venueId, originalPaymentId),
+    _sum: { amount: true, tipAmount: true },
+  })
   // 🔴 MONEY: la parte devuelta se mide contra el COBRO original, venta y propina por separado — no
   // contra la base de cada fila. Dividir (venta + propina) entre la base revertía el 110% de una base
   // sin propina, y el 100% de CADA fila de una comisión dividida por una devolución de la mitad.
-  // El servidor ya topa lo reembolsado a lo cobrado, así que la suma de reversos no pasa del 100%.
-  const fraccion = (devuelto: Prisma.Decimal | null, cobrado: Prisma.Decimal | null) => {
-    const total = Math.abs(decimalToNumber(cobrado))
-    return total > 0 ? Math.min(1, Math.abs(decimalToNumber(devuelto)) / total) : 0
+  // El servidor ya topa lo reembolsado a lo cobrado, así que la fracción no pasa de 1. Sin dividir: ver `Fraccion`.
+  const fraccion = (devueltoX: unknown, cobrado: unknown): Fraccion => {
+    const total = dec(cobrado).abs()
+    return total.gt(0) ? { num: Exacto.min(dec(devueltoX).abs(), total), den: total } : { num: CERO, den: dec(1) }
   }
-  const saleRatio = fraccion(refundPayment.amount, originalPayment.amount)
-  const tipRatio = fraccion(refundPayment.tipAmount, originalPayment.tipAmount)
+  const saleRatio = fraccion(devuelto._sum.amount, originalPayment.amount)
+  const tipRatio = fraccion(devuelto._sum.tipAmount, originalPayment.tipAmount)
   const results: CommissionCalculationResult[] = []
 
   for (const originalCalc of originalCalcs) {
+    // Idempotente: esta devolución ya tiene su reverso para esta persona y esquema — una fila (en cualquier estado) o un
+    // efecto en cola. Recalcularlo con las devoluciones de después lo contaría dos veces.
     const existing = await db.commissionCalculation.findFirst({
-      where: {
-        paymentId: refundPaymentId,
-        configId: originalCalc.configId,
-        staffId: originalCalc.staffId,
-        status: { not: CommissionCalcStatus.VOIDED },
-      },
+      where: { paymentId: refundPaymentId, configId: originalCalc.configId, staffId: originalCalc.staffId },
       select: { id: true },
     })
     if (existing) continue
+    const enCola = await db.paymentEffect.findFirst({
+      where: {
+        venueId: refundPayment.venueId,
+        paymentId: refundPaymentId,
+        kind: 'COMMISSION',
+        AND: [
+          { payload: { path: ['configId'], equals: originalCalc.configId } },
+          { payload: { path: ['staffId'], equals: originalCalc.staffId } },
+        ],
+      },
+      select: { id: true },
+    })
+    if (enCola) continue
 
-    const originalBaseAmount = decimalToNumber(originalCalc.baseAmount)
+    const base = dec(originalCalc.baseAmount)
     // `tipAmount` de la fila = la propina que ENTRÓ a su base (0 si la config la excluye), así que la
     // propina devuelta sólo pesa en la comisión que la incluyó.
-    const tipInBase = Math.min(Math.max(decimalToNumber(originalCalc.tipAmount), 0), Math.max(originalBaseAmount, 0))
-    const refundRatio =
-      originalBaseAmount > 0 ? ((originalBaseAmount - tipInBase) * saleRatio + tipInBase * tipRatio) / originalBaseAmount : saleRatio
-    if (refundRatio <= 0) continue
+    const tipInBase = Exacto.min(Exacto.max(dec(originalCalc.tipAmount), CERO), Exacto.max(base, CERO))
+    // ((base − propina) × venta + propina × propina devuelta) / base, con las dos fracciones sobre un denominador común.
+    const refundRatio: Fraccion = base.gt(0)
+      ? {
+          num: base.minus(tipInBase).mul(saleRatio.num).mul(tipRatio.den).plus(tipInBase.mul(tipRatio.num).mul(saleRatio.den)),
+          den: base.mul(saleRatio.den).mul(tipRatio.den),
+        }
+      : saleRatio
+    if (refundRatio.num.lte(0)) continue
+
+    const ya = await revertidoPorLasOtras(db, {
+      venueId: refundPayment.venueId,
+      originalPaymentId,
+      refundPaymentId,
+      configId: originalCalc.configId,
+      staffId: originalCalc.staffId,
+    })
+    // Lo que debe quedar revertido con TODAS las devoluciones, al centavo (½ hacia arriba, como redondea Postgres), menos lo
+    // que ya revirtieron las demás. Nunca negativo: un reverso de más que dejó el código anterior no se «regresa» aquí.
+    const tramo = (total: Prisma.Decimal, f: Fraccion, yaCampo: Prisma.Decimal) =>
+      new Prisma.Decimal(Exacto.max(CERO, total.mul(f.num).div(f.den).toDecimalPlaces(2, Exacto.ROUND_HALF_UP).minus(yaCampo)).toFixed(2))
+    const reverso: CamposDelReverso = {
+      baseAmount: tramo(base, refundRatio, ya.baseAmount),
+      tipAmount: tramo(tipInBase, tipRatio, ya.tipAmount),
+      discountAmount: tramo(dec(originalCalc.discountAmount), refundRatio, ya.discountAmount),
+      taxAmount: tramo(dec(originalCalc.taxAmount), refundRatio, ya.taxAmount),
+      grossCommission: tramo(dec(originalCalc.grossCommission), refundRatio, ya.grossCommission),
+      netCommission: tramo(dec(originalCalc.netCommission), refundRatio, ya.netCommission),
+    }
+    if (CAMPOS_DEL_REVERSO.every(campo => reverso[campo].isZero())) continue
 
     const data: Prisma.CommissionCalculationUncheckedCreateInput = {
       venueId: originalCalc.venueId,
@@ -422,13 +614,13 @@ export async function createRefundCommission(
       configId: originalCalc.configId,
       // La parte de SU base que se devolvió (no el reembolso completo): `alreadyCommissionedItemBase`
       // suma `baseAmount − tipAmount` de estas filas.
-      baseAmount: -originalBaseAmount * refundRatio,
-      tipAmount: -tipInBase * tipRatio,
-      discountAmount: -decimalToNumber(originalCalc.discountAmount) * refundRatio,
-      taxAmount: -decimalToNumber(originalCalc.taxAmount) * refundRatio,
+      baseAmount: reverso.baseAmount.negated(),
+      tipAmount: reverso.tipAmount.negated(),
+      discountAmount: reverso.discountAmount.negated(),
+      taxAmount: reverso.taxAmount.negated(),
       effectiveRate: originalCalc.effectiveRate,
-      grossCommission: -decimalToNumber(originalCalc.grossCommission) * refundRatio,
-      netCommission: -decimalToNumber(originalCalc.netCommission) * refundRatio,
+      grossCommission: reverso.grossCommission.negated(),
+      netCommission: reverso.netCommission.negated(),
       calcType: originalCalc.calcType,
       tier: originalCalc.tier,
       tierName: originalCalc.tierName,
@@ -454,54 +646,112 @@ export async function createRefundCommission(
 // ============================================
 
 /**
- * Void a commission calculation (mark as VOIDED with reason)
+ * 🔴 La ÚNICA forma de anular una comisión (fase 3, A4; spec §6.4; Codex r1-1, r2-1, r2-28). La usan
+ * `voidCommissionCalculation` (dashboard) y `createClawback`.
  *
- * Used when a calculation was created in error or needs to be excluded.
- * Does NOT delete the record - maintains audit trail.
+ * Bajo el candado de la orden —el mismo de `createRefundCommission` y del worker de efectos—:
+ *   1. anula la comisión;
+ *   2. anula sus reversos YA materializados (las filas de sus devoluciones, misma persona y esquema): así cada fila revierte
+ *      exactamente lo suyo y el neto de la venta queda en $0 en cualquier orden;
+ *   3. los reversos todavía EN COLA no se tocan: al procesarlos, el worker ve la original anulada y no crea la fila
+ *      (`applyFrozenCommissionInTx`).
+ * Si una anulada estaba sumada a un resumen, el resumen se recalcula para que la pantalla de Comisiones no la siga sumando
+ * (H2c). No mueve dinero: el sobre de pago al personal lee filas. Un resumen PAGADO por el flujo viejo no se reescribe.
+ * 🔴 Ronda 1: si el resumen de alguna de esas filas tiene un pago del flujo viejo EN CURSO (PENDING, APPROVED o
+ * PROCESSING), se RECHAZA sin tocar nada: el pago copió el monto del resumen y lo pagaría completo aunque la comisión ya
+ * no exista. Primero se cancela ese pago.
+ * Si ya estaba todo anulado devuelve `anuladas: []` (idempotente).
+ *
+ * El agregador toma resumen → filas y esto filas → resumen: si chocan, Postgres aborta a una de las dos por bloqueo mutuo y
+ * las dos repiten su operación COMPLETA (`reintentarSiHayBloqueoMutuo`, Codex plan r1-5). Quien pase `db` es dueño de su
+ * transacción y de sus reintentos.
  */
-export async function voidCommissionCalculation(calculationId: string, venueId: string, voidedById: string, reason: string): Promise<void> {
-  const calculation = await prisma.commissionCalculation.findFirst({
-    where: {
-      id: calculationId,
-      venueId,
-      status: { not: CommissionCalcStatus.VOIDED },
-    },
+export async function anularComision(
+  input: { calculationId: string; venueId: string; actorId: string | null; motivo: string },
+  db?: Prisma.TransactionClient,
+): Promise<{ anuladas: string[] }> {
+  if (!db) return reintentarSiHayBloqueoMutuo('anularComision', () => prisma.$transaction(tx => anularComision(input, tx)))
+  const calc = await db.commissionCalculation.findFirst({
+    where: { id: input.calculationId, venueId: input.venueId },
+    select: { id: true, orderId: true, paymentId: true, configId: true, staffId: true },
   })
+  if (!calc) throw new NotFoundError(`Commission calculation ${input.calculationId} not found`)
+  if (calc.orderId)
+    await db.$queryRaw(Prisma.sql`SELECT id FROM "Order" WHERE id = ${calc.orderId} AND "venueId" = ${input.venueId} FOR UPDATE`)
 
-  if (!calculation) {
-    throw new NotFoundError(`Commission calculation ${calculationId} not found`)
+  // La comisión y sus reversos vivos, releídos y bloqueados DESPUÉS del candado de la orden.
+  const vivas = await db.$queryRaw<Array<{ id: string; status: string; summaryId: string | null }>>(Prisma.sql`
+    SELECT cc.id, cc.status::text AS status, cc."summaryId"
+    FROM "CommissionCalculation" cc
+    WHERE cc."venueId" = ${input.venueId}
+      AND cc.status <> 'VOIDED'
+      AND (
+        cc.id = ${calc.id}
+        OR (
+          cc."configId" = ${calc.configId}
+          AND cc."staffId" = ${calc.staffId}
+          AND cc."paymentId" IN (
+            SELECT p.id FROM "Payment" p
+            WHERE p."venueId" = ${input.venueId}
+              AND p.type = 'REFUND'
+              AND p."processorData"->>'originalPaymentId' = ${calc.paymentId ?? ''}
+          )
+        )
+      )
+    ORDER BY cc.id
+    FOR UPDATE OF cc`)
+  const anuladas = vivas.map(f => f.id)
+  if (anuladas.length === 0) return { anuladas }
+
+  // Ronda 1: sus resúmenes, bloqueados (filas → resumen, el mismo orden del recálculo) para que un pago no se cuele a medias.
+  const resumenes = [...new Set(vivas.flatMap(f => (f.summaryId ? [f.summaryId] : [])))]
+  if (resumenes.length > 0) {
+    await db.$queryRaw(Prisma.sql`
+      SELECT id FROM "CommissionSummary"
+      WHERE id IN (${Prisma.join(resumenes)}) AND "venueId" = ${input.venueId}
+      ORDER BY id
+      FOR UPDATE`)
+    const pagoEnCurso = await db.commissionPayout.findFirst({
+      where: {
+        venueId: input.venueId,
+        summaryId: { in: resumenes },
+        status: { in: [CommissionPayoutStatus.PENDING, CommissionPayoutStatus.APPROVED, CommissionPayoutStatus.PROCESSING] },
+      },
+      select: { id: true },
+    })
+    if (pagoEnCurso)
+      throw new BadRequestError(
+        'No se puede anular: la comisión está en un pago de comisiones en curso. Cancela ese pago y vuelve a intentarlo.',
+      )
   }
 
-  // Cannot void if already aggregated into a summary
-  if (calculation.status === CommissionCalcStatus.AGGREGATED) {
-    throw new BadRequestError('Cannot void calculation that has been aggregated. Create a correction instead.')
-  }
-
-  await prisma.commissionCalculation.update({
-    where: { id: calculationId },
-    data: {
-      status: CommissionCalcStatus.VOIDED,
-      voidedAt: new Date(),
-      voidedBy: voidedById,
-      voidReason: reason,
-    },
+  await db.commissionCalculation.updateMany({
+    where: { id: { in: anuladas }, venueId: input.venueId },
+    data: { status: CommissionCalcStatus.VOIDED, voidedAt: new Date(), voidedBy: input.actorId, voidReason: input.motivo },
   })
-
-  logger.info('Commission calculation voided', {
-    calculationId,
-    venueId,
-    voidedById,
-    reason,
-  })
-
-  logAction({
-    staffId: voidedById,
-    venueId,
+  await writeLegacyActivityAuditTx(db, {
+    staffId: input.actorId,
+    venueId: input.venueId,
     action: 'COMMISSION_CALCULATION_VOIDED',
     entity: 'CommissionCalculation',
-    entityId: calculationId,
-    data: { reason, staffId: calculation.staffId },
+    entityId: calc.id,
+    data: { motivo: input.motivo, staffId: calc.staffId, anuladas },
   })
+
+  // H2c: lo que ya estaba sumado a un resumen sale de él.
+  const sumadas = [...new Set(vivas.filter(f => f.status === CommissionCalcStatus.AGGREGATED && f.summaryId).map(f => f.summaryId!))]
+  for (const summaryId of sumadas) {
+    const resumen = await db.commissionSummary.findFirst({ where: { id: summaryId, venueId: input.venueId }, select: { status: true } })
+    if (resumen && resumen.status !== CommissionSummaryStatus.PAID) await recalculateSummary(summaryId, input.venueId, db)
+  }
+
+  logger.info('Commission calculation voided', { calculationId: calc.id, venueId: input.venueId, anuladas })
+  return { anuladas }
+}
+
+/** Anular desde la pantalla de Comisiones: la operación única (también una comisión ya sumada a un resumen). */
+export async function voidCommissionCalculation(calculationId: string, venueId: string, voidedById: string, reason: string): Promise<void> {
+  await anularComision({ calculationId, venueId, actorId: voidedById ?? null, motivo: reason })
 }
 
 /**
@@ -600,6 +850,8 @@ export async function getStaffCommissions(
   calculations: any[]
   total: number
   summaries: any[]
+  /** Cuántos periodos tiene la persona en total (`summaries` trae sólo los últimos 12). Aditivo (E6a-fix4). */
+  summariesTotal: number
   stats: {
     thisMonth: number
     lastMonth: number
@@ -641,7 +893,7 @@ export async function getStaffCommissions(
   const lastMonthStart = fromZonedTime(startOfMonth(lastMonthVenue), timezone)
   const lastMonthEnd = fromZonedTime(endOfMonth(lastMonthVenue), timezone)
 
-  const [calculations, total, summaries, thisMonthStats, lastMonthStats, totalStats] = await Promise.all([
+  const [calculations, total, resumenes, thisMonthStats, lastMonthStats, totalStats] = await Promise.all([
     // Calculations
     prisma.commissionCalculation.findMany({
       where,
@@ -675,15 +927,8 @@ export async function getStaffCommissions(
     }),
     // Total count
     prisma.commissionCalculation.count({ where }),
-    // Summaries for this staff member
-    prisma.commissionSummary.findMany({
-      where: {
-        staffId,
-        venueId,
-      },
-      orderBy: { periodEnd: 'desc' },
-      take: 12, // Last 12 periods
-    }),
+    // Sus últimos 12 periodos, con lo CALCULADO (la fuente del KPI), no lo que guardó el job (E6a-fix2 C6, hermano).
+    resumenesCalculados(venueId, { staffId, limite: 12 }),
     // This month stats
     prisma.commissionCalculation.aggregate({
       where: {
@@ -784,7 +1029,7 @@ export async function getStaffCommissions(
     }
   }
 
-  return { calculations, total, summaries, stats, tierProgress }
+  return { calculations, total, summaries: resumenes.filas, summariesTotal: resumenes.total, stats, tierProgress }
 }
 
 /**
@@ -857,10 +1102,38 @@ export async function getPendingCalculations(venueId: string, staffId?: string):
 }
 
 /**
+ * Lo pagado en comisiones de una sede (spec §8): renglones de comisión del sobre —ventas, devoluciones y reversos por
+ * anulación— de recibos marcados como pagados. Activo = plan Y organización activada Y la sede tuvo ALGUNA ventana de
+ * participación (abierta o cerrada: con historia, lo pagado sigue siendo verdad aunque hoy esté desactivada). Sin eso el
+ * KPI se oculta (`staffPayActive: false`, 0). Filtra por organización primero (índice `ServiceEarning(organizationId, staffId)`).
+ */
+export async function comisionesPagadasEnRecibos(venueId: string): Promise<{ activo: boolean; total: Prisma.Decimal }> {
+  const cero = new Prisma.Decimal(0)
+  const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { organizationId: true } })
+  if (!venue) return { activo: false, total: cero }
+  const activo =
+    (await venueHasServicePayAccess(venueId)) &&
+    (await organizacionDeLaSedeActivada(venueId)) &&
+    !!(await prisma.staffPayVenueWindow.findFirst({ where: { organizationId: venue.organizationId, venueId }, select: { id: true } }))
+  if (!activo) return { activo, total: cero }
+  const [r] = await prisma.$queryRaw<Array<{ total: Prisma.Decimal | null }>>(Prisma.sql`
+    SELECT SUM(e.amount) AS total
+    FROM "ServiceEarning" e
+    JOIN "StaffPayStatement" s ON s."periodId" = e."periodId" AND s."staffId" = e."staffId"
+    WHERE e."organizationId" = ${venue.organizationId}
+      AND e."venueId" = ${venueId}
+      AND e."sourceType" = 'COMMISSION'
+      AND s."paidAt" IS NOT NULL`)
+  return { activo, total: r?.total ?? cero }
+}
+
+/**
  * Get venue-wide commission statistics
  */
 export async function getVenueCommissionStats(venueId: string): Promise<{
   totalPaid: number
+  staffPayActive: boolean
+  totalCalculated: number
   totalPending: number
   totalApproved: number
   staffWithCommissions: number
@@ -879,7 +1152,8 @@ export async function getVenueCommissionStats(venueId: string): Promise<{
     _sum: { netAmount: true },
   })
 
-  const totalPaid = decimalToNumber(summaryStats.find(s => s.status === 'PAID')?._sum.netAmount)
+  // «Pagado» = lo pagado en recibos de Pago al personal (spec §8); un resumen ya no se paga.
+  const pagado = await comisionesPagadasEnRecibos(venueId)
   const totalPending = decimalToNumber(summaryStats.find(s => s.status === 'PENDING_APPROVAL')?._sum.netAmount)
   const totalApproved = decimalToNumber(summaryStats.find(s => s.status === 'APPROVED')?._sum.netAmount)
 
@@ -899,6 +1173,7 @@ export async function getVenueCommissionStats(venueId: string): Promise<{
       status: { not: CommissionCalcStatus.VOIDED },
     },
     _avg: { netCommission: true },
+    _sum: { netCommission: true },
   })
 
   // Get top earners
@@ -934,7 +1209,9 @@ export async function getVenueCommissionStats(venueId: string): Promise<{
   })
 
   return {
-    totalPaid,
+    totalPaid: decimalToNumber(pagado.total),
+    staffPayActive: pagado.activo,
+    totalCalculated: decimalToNumber(avgStats._sum.netCommission),
     totalPending,
     totalApproved,
     staffWithCommissions: staffCount.length,
@@ -1121,22 +1398,29 @@ export async function getCommissionByPaymentId(
  * @returns Array of created calculations (one per eligible staff). May be
  *          shorter than the input if some staff were filtered out.
  */
-export async function createSplitCommissionForPayment(paymentId: string, staffIds: string[]): Promise<CommissionCalculationResult[]> {
-  logger.info('Creating SPLIT commission for payment', { paymentId, staffCount: staffIds.length })
+export async function createSplitCommissionForPayment(
+  paymentId: string,
+  staffIds: string[],
+  options: CommissionOptions = {},
+): Promise<CommissionCalculationResult[]> {
+  // 🔴 MONEY: una persona repetida en la liga es UNA persona — ni divide entre N de más ni recibe dos filas.
+  const personas = [...new Set(staffIds)]
+  logger.info('Creating SPLIT commission for payment', { paymentId, staffCount: personas.length })
 
-  if (staffIds.length === 0) return []
-  if (staffIds.length === 1) {
+  if (personas.length === 0) return []
+  if (personas.length === 1) {
     // Caller should have routed through createCommissionForPayment; guard
     // anyway so this function is safe to call with any list length.
-    return createCommissionForPayment(paymentId)
+    return createCommissionForPayment(paymentId, options)
   }
+  if (!options.db) return prisma.$transaction(tx => createSplitCommissionForPayment(paymentId, personas, { ...options, db: tx }))
+  const db = options.db
 
-  const payment = await prisma.payment.findUnique({
+  const payment = await db.payment.findUnique({
     where: { id: paymentId },
     include: {
-      order: { select: { id: true, subtotal: true, discountAmount: true, taxAmount: true } },
+      order: { select: ORDEN_PARA_REPARTO_SELECT },
       shift: { select: { id: true } },
-      venue: { select: { id: true, timezone: true } },
     },
   })
 
@@ -1150,41 +1434,59 @@ export async function createSplitCommissionForPayment(paymentId: string, staffId
     return []
   }
 
-  const config = await findActiveCommissionConfig(payment.venueId, payment.createdAt)
+  const config = await findActiveCommissionConfig(payment.venueId, payment.createdAt, db)
   if (!config) {
     logger.info('No active commission config for venue (split)', { paymentId, venueId: payment.venueId })
     return []
   }
 
-  // Compute the FULL base amount once — same path as the single-recipient
-  // function uses for non-category configs. We then divide it equally
-  // before writing each row.
+  // A1: la base de la venta que le toca a ESTE cobro (su parte del descuento, del IVA o de la base por categorías). Se
+  // calcula UNA vez y se divide entre las personas de la liga. Bajo el candado de la orden, como `createCommissionForPayment`:
+  // los otros cobros se leen ya confirmados (Codex plan r2). Congelando (A5) ya lo tomó `freezePaymentCommissionInTx`.
+  if (payment.orderId)
+    await db.$queryRaw(Prisma.sql`SELECT id FROM "Order" WHERE id = ${payment.orderId} AND "venueId" = ${payment.venueId} FOR UPDATE`)
+  const enLaOrden = cobroDeLaOrden(payment)
+  const otros = await otrosCobros(db, payment, config.id)
   let totalBaseAmount: number
   let totalTipAmount: number
   let totalDiscountAmount: number
   let totalTaxAmount: number
 
   if (config.filterByCategories && config.categoryIds.length > 0 && payment.orderId) {
-    const orderBase = await calculateCategoryFilteredAmount(payment.orderId, config.categoryIds, {
-      includeTax: config.includeTax,
-      includeDiscount: config.includeDiscount,
-    })
-    // 🔴 MONEY: mismo defecto que `createCommissionForPayment` — base DE ORDEN evaluada POR
-    // COBRO. Aquí las filas se reparten entre varios destinatarios, así que la suma de lo ya
-    // comisionado por esta config sobre esta orden ES la base ya cobrada.
-    totalBaseAmount = Math.max(0, Math.round((orderBase - (await alreadyCommissionedItemBase(payment.orderId, config.id))) * 100) / 100)
+    const orderBase = await calculateCategoryFilteredAmount(
+      payment.orderId,
+      config.categoryIds,
+      { includeTax: config.includeTax, includeDiscount: config.includeDiscount },
+      db,
+    )
+    // 🔴 MONEY: base DE ORDEN evaluada POR COBRO — su parte, y nunca más de lo que queda por comisionar (las N filas de un
+    // cobro dividido suman la base completa, que es lo que `alreadyCommissionedItemBase` ve), contando también lo que sigue en
+    // cola, como la rama de una persona.
+    totalBaseAmount = baseDelCobro(enLaOrden, orderBase, await alreadyCommissionedItemBase(payment.orderId, config.id, db, true), otros)
     totalTipAmount = config.includeTips ? decimalToNumber(payment.tipAmount) : 0
     totalDiscountAmount = 0
     totalTaxAmount = 0
+    if (config.includeTips) totalBaseAmount += totalTipAmount
+  } else if (resolveCommissionBase(config) === COMMISSION_BASE.PRECIO_DE_LISTA && payment.orderId && payment.order) {
+    // A1e (Codex r3-2): la lista de la orden con el cargo, la misma con y sin IVA; ESTE cobro se lleva su parte.
+    totalBaseAmount = baseDelCobro(
+      enLaOrden,
+      listaDeLaOrden(payment.order, config),
+      await alreadyCommissionedItemBase(payment.orderId, config.id, db, true),
+      otros,
+    )
+    totalTipAmount = config.includeTips ? decimalToNumber(payment.tipAmount) : 0
+    // Como en «Lo cobrado»: su parte del descuento de la orden y el IVA de su póliza.
+    totalDiscountAmount = repartir(enLaOrden, enLaOrden.descuento, otros, 'descuento').toNumber()
+    totalTaxAmount = ivaDelCobro(payment).toNumber()
     if (config.includeTips) totalBaseAmount += totalTipAmount
   } else {
     const result = calculateBaseAmount(
       {
         amount: payment.amount,
         tipAmount: payment.tipAmount,
-        taxAmount: payment.order?.taxAmount,
-        discountAmount: payment.order?.discountAmount,
-        subtotal: payment.order?.subtotal,
+        taxAmount: ivaDelCobro(payment),
+        discountAmount: repartir(enLaOrden, enLaOrden.descuento, otros, 'descuento'),
       },
       config,
     )
@@ -1195,23 +1497,44 @@ export async function createSplitCommissionForPayment(paymentId: string, staffId
     totalTaxAmount = result.taxAmount
   }
 
-  if (totalBaseAmount <= 0) {
+  // Al centavo ANTES de decidir y de repartir: los totales llegan como `number` (base + propina en binario: 225.1 + 0.2 =
+  // 225.29999999999998) y `redondearRepartido` exige un total que sus partes de centavos sumen exacto. Una base de basura
+  // binaria (3e-14) pasaría un `<= 0` en crudo y crearía N filas de $0.00.
+  const alCentavo = (n: number) => new Prisma.Decimal(n).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP)
+  if (alCentavo(totalBaseAmount).lte(0)) {
     logger.info('Skipping split commission: base amount zero or negative', { paymentId, totalBaseAmount })
     return []
   }
 
-  const splitCount = staffIds.length
-  const splitBase = totalBaseAmount / splitCount
-  const splitTip = totalTipAmount / splitCount
-  const splitDiscount = totalDiscountAmount / splitCount
-  const splitTax = totalTaxAmount / splitCount
+  const splitCount = personas.length
+  // 🔴 MONEY (Codex plan r1-4): base, propina, descuento e IVA se reparten en CENTAVOS, con el centavo que sobra asignado en
+  // un orden estable (por id de persona): las filas suman exacto lo cobrado. Antes cada una guardaba total/N y la base de
+  // datos redondeaba cada fila por su cuenta.
+  const orden = [...personas].sort()
+  const enPartes = (total: number) => {
+    const t = alCentavo(total)
+    return redondearRepartido(
+      orden.map(() => t.div(splitCount)),
+      t,
+    )
+  }
+  const bases = enPartes(totalBaseAmount)
+  const propinas = enPartes(totalTipAmount)
+  const descuentos = enPartes(totalDiscountAmount)
+  const impuestos = enPartes(totalTaxAmount)
 
-  const results: CommissionCalculationResult[] = []
-
-  for (const staffId of staffIds) {
+  // 1) Quién cobra y con qué tasa: las reglas de cada persona que deciden SI cobra.
+  const elegibles: Array<{ i: number; staffId: string; effectiveRate: number }> = []
+  for (const [i, staffId] of orden.entries()) {
+    // D-ELEGIDOS (fase 3): en un esquema de «sólo personas elegidas», quien no está en la lista no recibe su parte (como una
+    // excepción que excluye: la parte de los demás no cambia).
+    if (!aplicaALaPersona(config, staffId)) {
+      logger.info('Staff not chosen by the scheme, skipping split row', { paymentId, staffId })
+      continue
+    }
     // Per-staff idempotency: skip if a calc already exists for this
     // (paymentId, staffId). Lets webhooks retry without creating duplicates.
-    const existing = await prisma.commissionCalculation.findFirst({
+    const existing = await db.commissionCalculation.findFirst({
       where: { paymentId, staffId, status: { not: CommissionCalcStatus.VOIDED } },
       select: { id: true },
     })
@@ -1220,13 +1543,13 @@ export async function createSplitCommissionForPayment(paymentId: string, staffId
       continue
     }
 
-    const staffInfo = await validateStaffForCommission(staffId, payment.venueId)
+    const staffInfo = await validateStaffForCommission(staffId, payment.venueId, db)
     if (!staffInfo) {
       logger.info('Staff not eligible for split commission, skipping', { paymentId, staffId })
       continue
     }
 
-    const override = await findActiveOverride(config.id, staffId, payment.createdAt)
+    const override = await findActiveOverride(config.id, staffId, payment.createdAt, db)
     if (override?.excludeFromCommissions) {
       logger.info('Staff excluded via override, skipping split row', { paymentId, staffId })
       continue
@@ -1235,72 +1558,62 @@ export async function createSplitCommissionForPayment(paymentId: string, staffId
     // Splits intentionally skip TIERED rate calculation — see function-level
     // docstring. Pass tierRate=null so the cascade falls back to override →
     // role-based → default.
-    const effectiveRate = calculateFinalRate(config, override, staffInfo.role, null)
+    elegibles.push({ i, staffId, effectiveRate: calculateFinalRate(config, override, staffInfo.role, null) })
+  }
 
-    let grossCommission: number
-    switch (config.calcType) {
-      case CommissionCalcType.FIXED:
-        // Fixed amount is per transaction — divide so the total still
-        // equals the configured fixed amount, not staffCount × it.
-        grossCommission = decimalToNumber(config.defaultRate) / splitCount
-        break
-      case CommissionCalcType.PERCENTAGE:
-      case CommissionCalcType.TIERED:
-      default:
-        grossCommission = splitBase * effectiveRate
-        break
-    }
+  // 2) 🔴 MONEY (Codex plan r1-4): la comisión de cada una sobre SU parte, con los centavos repartidos sobre el total exacto:
+  // $10 entre tres son 3.34 + 3.33 + 3.33, nunca $9.99. Un FIXED se divide entre las N personas de la liga, como siempre.
+  const brutas = redondearRepartido(
+    elegibles.map(e =>
+      config.calcType === CommissionCalcType.FIXED
+        ? new Prisma.Decimal(config.defaultRate).div(splitCount)
+        : bases[e.i].mul(e.effectiveRate),
+    ),
+  )
 
-    let netCommission = applyCommissionBounds(grossCommission, config)
-    grossCommission = Math.round(grossCommission * 100) / 100
-    netCommission = Math.round(netCommission * 100) / 100
+  // 3) Las reglas de cada persona que quedan: topes y asistencia.
+  const results: CommissionCalculationResult[] = []
+  for (const [k, e] of elegibles.entries()) {
+    const grossCommission = brutas[k].toNumber()
+    let netCommission = Math.round(applyCommissionBounds(grossCommission, config) * 100) / 100
 
     // Cada persona del split se juzga con SU asistencia — el retardo de una no toca a la otra.
-    const attendancePenaltyRate = await resolveAttendancePenaltyRate({
-      config,
-      staffId,
-      venueId: payment.venueId,
-      at: payment.createdAt,
-    })
+    const attendancePenaltyRate = await resolveAttendancePenaltyRate(
+      { config, staffId: e.staffId, venueId: payment.venueId, at: payment.createdAt },
+      db,
+    )
     netCommission = applyAttendancePenalty(netCommission, attendancePenaltyRate)
 
-    const calc = await prisma.commissionCalculation.create({
-      data: {
-        venueId: payment.venueId,
-        staffId,
-        attendancePenaltyRate,
-        paymentId: payment.id,
-        orderId: payment.orderId,
-        shiftId: payment.shift?.id,
-        configId: config.id,
-        baseAmount: splitBase,
-        tipAmount: splitTip,
-        discountAmount: splitDiscount,
-        taxAmount: splitTax,
-        effectiveRate,
-        grossCommission,
-        netCommission,
-        calcType: config.calcType,
-        status: CommissionCalcStatus.CALCULATED,
-        calculatedAt: new Date(),
-      },
-    })
-
-    logger.info('Split commission row created', {
-      calculationId: calc.id,
-      paymentId,
-      staffId,
-      splitBase,
+    const data: Prisma.CommissionCalculationUncheckedCreateInput = {
+      venueId: payment.venueId,
+      staffId: e.staffId,
+      attendancePenaltyRate,
+      paymentId: payment.id,
+      orderId: payment.orderId,
+      shiftId: payment.shift?.id,
+      configId: config.id,
+      baseAmount: bases[e.i],
+      tipAmount: propinas[e.i],
+      discountAmount: descuentos[e.i],
+      taxAmount: impuestos[e.i],
+      effectiveRate: e.effectiveRate,
+      grossCommission,
       netCommission,
-      splitCount,
-    })
+      calcType: config.calcType,
+      status: CommissionCalcStatus.CALCULATED,
+      // Congelada como efecto (A5) la fila lleva la fecha del cobro, como la de la terminal.
+      calculatedAt: options.sink ? payment.createdAt : new Date(),
+    }
+    const calc = options.sink ? await options.sink(data) : await db.commissionCalculation.create({ data })
+
+    logger.info('Split commission row created', { calculationId: calc.id, paymentId, staffId: e.staffId, netCommission, splitCount })
 
     results.push({
       calculationId: calc.id,
       paymentId,
-      staffId,
-      baseAmount: splitBase,
-      effectiveRate,
+      staffId: e.staffId,
+      baseAmount: bases[e.i].toNumber(),
+      effectiveRate: e.effectiveRate,
       grossCommission,
       netCommission,
     })
@@ -1314,34 +1627,40 @@ export async function freezePaymentCommissionInTx(
   tx: Prisma.TransactionClient,
   paymentId: string,
   persist?: (plan: import('../../tpv/paymentEffects.service').PaymentEffectInput) => Promise<void>,
+  /** Liga de pago (A5): las personas atribuidas. Una sola = el esquema decide a quién; varias = se reparte entre ellas. */
+  repartirEntre?: string[],
 ) {
   const payment = await tx.payment.findUniqueOrThrow({ where: { id: paymentId }, select: { id: true, venueId: true, orderId: true } })
   await tx.$queryRaw(Prisma.sql`SELECT id FROM "Order" WHERE id = ${payment.orderId} AND "venueId" = ${payment.venueId} FOR UPDATE`)
   if (await tx.paymentEffect.findFirst({ where: { venueId: payment.venueId, paymentId, kind: 'COMMISSION' }, select: { id: true } }))
     return []
   const plans: import('../../tpv/paymentEffects.service').PaymentEffectInput[] = []
-  await createCommissionForPayment(paymentId, {
-    db: tx,
-    sink: async data => {
-      const dedupeKey = `commission:${paymentId}:${data.configId}:${data.staffId}:v1`
-      const plan: import('../../tpv/paymentEffects.service').PaymentEffectInput = {
-        venueId: payment.venueId,
-        paymentId,
-        orderId: payment.orderId,
-        kind: 'COMMISSION',
-        dedupeKey,
-        payload: JSON.parse(JSON.stringify(data)) as Prisma.InputJsonValue,
-      }
-      if (persist) await persist(plan)
-      else plans.push(plan)
-      return { id: dedupeKey }
-    },
-  })
+  const sink: CommissionSink = async data => {
+    const dedupeKey = `commission:${paymentId}:${data.configId}:${data.staffId}:v1`
+    const plan: import('../../tpv/paymentEffects.service').PaymentEffectInput = {
+      venueId: payment.venueId,
+      paymentId,
+      orderId: payment.orderId,
+      kind: 'COMMISSION',
+      dedupeKey,
+      payload: JSON.parse(JSON.stringify(data)) as Prisma.InputJsonValue,
+    }
+    if (persist) await persist(plan)
+    else plans.push(plan)
+    return { id: dedupeKey }
+  }
+  if (repartirEntre) await createSplitCommissionForPayment(paymentId, repartirEntre, { db: tx, sink })
+  else await createCommissionForPayment(paymentId, { db: tx, sink })
   return plans
 }
 
-/** Effect and calculation are committed together by the caller holding the Order/effect locks. */
-export async function applyFrozenCommissionInTx(tx: Prisma.TransactionClient, effect: PaymentEffect): Promise<void> {
+/**
+ * Effect and calculation are committed together by the caller holding the Order/effect locks.
+ *
+ * Devuelve `false` cuando el efecto todavía NO se puede aplicar —el reverso de una devolución cuya comisión original aún no
+ * tiene fila— y el worker debe volver a intentarlo más tarde sin gastar intentos. `true` = atendido (creado o descartado).
+ */
+export async function applyFrozenCommissionInTx(tx: Prisma.TransactionClient, effect: PaymentEffect): Promise<boolean> {
   const data = effect.payload as unknown as Prisma.CommissionCalculationUncheckedCreateInput
   if (
     data.venueId !== effect.venueId ||
@@ -1352,9 +1671,47 @@ export async function applyFrozenCommissionInTx(tx: Prisma.TransactionClient, ef
   ) {
     throw new Error('INVALID_COMMISSION_SNAPSHOT')
   }
+  // Fase 3 (A2, Codex r1-3): una fila existente en CUALQUIER estado —también VOIDED— ya está materializada. Antes se buscaba
+  // excluyendo VOIDED y un efecto pendiente revivía una comisión que alguien anuló.
   const existing = await tx.commissionCalculation.findFirst({
-    where: { paymentId: effect.paymentId, configId: data.configId, staffId: data.staffId, status: { not: CommissionCalcStatus.VOIDED } },
+    where: { venueId: effect.venueId, paymentId: effect.paymentId, configId: data.configId, staffId: data.staffId },
     select: { id: true },
   })
-  if (!existing) await tx.commissionCalculation.create({ data })
+  if (existing) return true
+  const original = await originalDelReverso(tx, effect, data.configId, data.staffId)
+  // Fase 3 (A2, Codex r2-1): un REVERSO todavía en cola no revive cuando su comisión original ya se anuló. El worker tiene
+  // el candado de la orden y la anulación (`anularComision`, A4) también lo toma: una anulación no puede entrar entre esta
+  // lectura y el `create`.
+  if (original === 'ANULADA') return true
+  // 🔴 MONEY (Ronda 1 de A3): un reverso cuya original no tiene fila —su efecto sigue en cola o quedó en DEAD_LETTER— espera.
+  // Materializarlo le descontaría a la persona, en su recibo, una comisión que nunca cobró.
+  if (original === 'SIN_FILA') return false
+  await tx.commissionCalculation.create({ data })
+  return true
+}
+
+/**
+ * Si el efecto es el reverso de una devolución, en qué estado está la comisión original de la misma persona y esquema:
+ * `SIN_FILA` (todavía no se materializa), `ANULADA` (todas sus filas anuladas) o `VIVA`. `NO_ES_REVERSO` para todo lo demás.
+ */
+async function originalDelReverso(
+  tx: Prisma.TransactionClient,
+  effect: PaymentEffect,
+  configId: string,
+  staffId: string,
+): Promise<'NO_ES_REVERSO' | 'SIN_FILA' | 'ANULADA' | 'VIVA'> {
+  const devolucion = await tx.payment.findFirst({
+    where: { id: effect.paymentId, venueId: effect.venueId },
+    select: { type: true, processorData: true },
+  })
+  if (devolucion?.type !== PaymentType.REFUND) return 'NO_ES_REVERSO'
+  const originalPaymentId = (devolucion.processorData as { originalPaymentId?: unknown } | null)?.originalPaymentId
+  if (typeof originalPaymentId !== 'string') return 'NO_ES_REVERSO'
+  const originales = await tx.commissionCalculation.findMany({
+    where: { venueId: effect.venueId, paymentId: originalPaymentId, configId, staffId },
+    select: { status: true },
+    take: 10,
+  })
+  if (originales.length === 0) return 'SIN_FILA'
+  return originales.every(o => o.status === CommissionCalcStatus.VOIDED) ? 'ANULADA' : 'VIVA'
 }

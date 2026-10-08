@@ -1,19 +1,23 @@
+import fs from 'fs'
+import path from 'path'
 import { prismaMock } from '@tests/__helpers__/setup'
+import { COMO_SE_CONSIGUE_EL_PLAN } from '@/services/dashboard/staffPay/textos'
 
-const mockIsModuleEnabled = jest.fn()
+const mockPlan = jest.fn()
+const mockLote = jest.fn()
 const mockGetUserAccess = jest.fn()
-jest.mock('@/services/modules/module.service', () => ({
-  MODULE_CODES: { SERVICE_PAY: 'SERVICE_PAY' },
-  moduleService: {
-    isModuleEnabled: (...a: unknown[]) => mockIsModuleEnabled(...a),
-    // La versión en lote replica la precedencia de isModuleEnabled (module.service): aquí, sobre el mismo mock.
-    venuesWithModule: async (ids: string[]) => {
-      const s = new Set<string>()
-      for (const id of ids) if (await mockIsModuleEnabled(id, 'SERVICE_PAY')) s.add(id)
-      return s
-    },
+jest.mock('@/services/access/basePlan.service', () => ({
+  venueHasFeatureAccess: (...a: unknown[]) => mockPlan(...a),
+  // El lote replica la regla de una sede (basePlan.service): aquí, sobre el mismo mock.
+  venuesWithFeatureAccess: async (ids: string[], code: string) => {
+    mockLote(ids, code)
+    const s = new Set<string>()
+    for (const id of ids) if (await mockPlan(id, code)) s.add(id)
+    return s
   },
 }))
+const mockAuditar = jest.fn()
+jest.mock('@/services/dashboard/accesoNegado', () => ({ auditarAccesoNegado: (...a: unknown[]) => mockAuditar(...a) }))
 jest.mock('@/services/access/access.service', () => ({
   getUserAccess: (...a: unknown[]) => mockGetUserAccess(...a),
   hasPermission: (access: { corePermissions: string[] }, p: string) => access.corePermissions.includes(p),
@@ -23,6 +27,11 @@ import {
   assertPermisoEnSedes,
   assertPermisoEnTodasLasSedes,
   exigirPermisoEnSedes,
+  listaDeSedes,
+  MENSAJE_SIN_ACTIVAR,
+  puedeAdministrarLaOrganizacion,
+  organizacionActivada,
+  organizacionDeLaSedeActivada,
   sedesConPermiso,
   sedesConServicePay,
   sedesLegibles,
@@ -33,13 +42,13 @@ import {
 describe('acceso — feature nueva', () => {
   beforeEach(() => {
     prismaMock.venue.findMany.mockResolvedValue([{ id: 'pn' }, { id: 'bsf' }])
-    mockIsModuleEnabled.mockResolvedValue(true)
+    mockPlan.mockResolvedValue(true)
   })
 
-  it('el gate es el módulo SERVICE_PAY', async () => {
-    mockIsModuleEnabled.mockResolvedValueOnce(false)
+  it('el gate es la función SERVICE_PAY del plan, nunca el módulo', async () => {
+    mockPlan.mockResolvedValueOnce(false)
     await expect(venueHasServicePayAccess('pn')).resolves.toBe(false)
-    expect(mockIsModuleEnabled).toHaveBeenCalledWith('pn', 'SERVICE_PAY')
+    expect(mockPlan).toHaveBeenCalledWith('pn', 'SERVICE_PAY')
   })
 
   it('una operación de organización exige el permiso en TODAS las sedes con el módulo', async () => {
@@ -89,7 +98,7 @@ describe('acceso — fase 2: assertPermisoEnSedes y sedesLegiblesDe', () => {
   })
   it('sedesLegiblesDe filtra el alcance del PERIODO por permiso, aunque la sede ya no tenga el módulo (Codex R1-1)', async () => {
     // Lo histórico no depende del módulo de hoy: el módulo «apagado» no cambia el resultado.
-    mockIsModuleEnabled.mockResolvedValue(false)
+    mockPlan.mockResolvedValue(false)
     mockGetUserAccess.mockImplementation(async (_u: string, v: string) => ({ corePermissions: v === 'pn' ? ['staffpay:read'] : [] }))
     await expect(sedesLegiblesDe('u', ['bsf', 'pn'])).resolves.toEqual({ venueIds: ['pn'], parcial: true })
   })
@@ -115,25 +124,158 @@ describe('acceso — tope de sedes con el módulo (Codex bloque A #2): nunca rec
   const ids = (n: number, desde = 0) => Array.from({ length: n }, (_, i) => ({ id: `v${String(desde + i).padStart(4, '0')}` }))
   beforeEach(() => {
     prismaMock.venue.findMany.mockReset()
-    mockIsModuleEnabled.mockReset()
+    mockPlan.mockReset()
   })
 
   it('con más de 500 sedes con el módulo se niega con la explicación, en vez de cerrar sin la 501', async () => {
     prismaMock.venue.findMany.mockResolvedValueOnce(ids(500)).mockResolvedValueOnce(ids(1, 500)).mockResolvedValue([])
-    mockIsModuleEnabled.mockResolvedValue(true)
+    mockPlan.mockResolvedValue(true)
     await expect(sedesConServicePay('org1')).rejects.toMatchObject({
       statusCode: 400,
       code: 'DEMASIADAS_SEDES',
-      message: expect.stringMatching(/más de 500 sedes con el módulo.*contacta a Avoqado/),
+      message: expect.stringMatching(/más de 500 sedes con Pago por servicio en su plan.*contacta a Avoqado/),
     })
   })
 
   it('más de 500 sedes en la organización pero pocas con el módulo: las recorre todas y devuelve sólo esas', async () => {
     prismaMock.venue.findMany.mockResolvedValueOnce(ids(500)).mockResolvedValueOnce(ids(100, 500)).mockResolvedValue([])
-    mockIsModuleEnabled.mockImplementation(async (id: string) => ['v0003', 'v0560'].includes(id))
+    mockPlan.mockImplementation(async (id: string) => ['v0003', 'v0560'].includes(id))
     await expect(sedesConServicePay('org1')).resolves.toEqual(['v0003', 'v0560'])
     // Por páginas con cursor (id), cada una acotada; sin una consulta de módulo por sede.
     expect(prismaMock.venue.findMany.mock.calls[1][0]).toMatchObject({ where: { organizationId: 'org1', id: { gt: 'v0499' } } })
     for (const [arg] of prismaMock.venue.findMany.mock.calls) expect(arg?.take).toBeLessThanOrEqual(501)
+  })
+})
+
+describe('acceso — fase 3: el plan en lote y la activación (spec §7.1, §10)', () => {
+  it('las sedes del alcance salen del plan, resuelto en UN lote por página', async () => {
+    mockLote.mockClear()
+    prismaMock.venue.findMany.mockReset()
+    prismaMock.venue.findMany.mockResolvedValueOnce([{ id: 'bsf' }, { id: 'pn' }]).mockResolvedValue([])
+    mockPlan.mockImplementation(async (id: string) => id === 'pn')
+    await expect(sedesConServicePay('org1')).resolves.toEqual(['pn'])
+    expect(mockLote).toHaveBeenCalledTimes(1)
+    expect(mockLote).toHaveBeenCalledWith(['bsf', 'pn'], 'SERVICE_PAY')
+  })
+
+  it('activada = la organización tiene fecha de inicio; desde una sede se resuelve su organización', async () => {
+    prismaMock.organization.findUnique.mockResolvedValueOnce({ staffPayStartDate: null })
+    await expect(organizacionActivada('org1')).resolves.toBe(false)
+    prismaMock.organization.findUnique.mockResolvedValueOnce({ staffPayStartDate: new Date('2026-10-01T06:00:00Z') })
+    await expect(organizacionActivada('org1')).resolves.toBe(true)
+    expect(prismaMock.organization.findUnique).toHaveBeenLastCalledWith({ where: { id: 'org1' }, select: { staffPayStartDate: true } })
+
+    prismaMock.venue.findUnique.mockResolvedValueOnce({ organizationId: 'org1' })
+    prismaMock.organization.findUnique.mockResolvedValueOnce({ staffPayStartDate: new Date('2026-10-01T06:00:00Z') })
+    await expect(organizacionDeLaSedeActivada('pn')).resolves.toBe(true)
+    prismaMock.venue.findUnique.mockResolvedValueOnce(null)
+    await expect(organizacionDeLaSedeActivada('nadie')).resolves.toBe(false)
+  })
+
+  it('el mensaje de «sin activar» dice qué falta, dónde se prende y a quién pedírselo, con un solo nombre', () => {
+    expect(MENSAJE_SIN_ACTIVAR).toMatch(/no está activado/)
+    expect(MENSAJE_SIN_ACTIVAR).toMatch(/Periodos/)
+    // Activar pide staffpay:close en TODAS las sedes con el plan (activacion.service): quien no lo tiene sabe a quién ir.
+    expect(MENSAJE_SIN_ACTIVAR).toMatch(/cerrar periodos en todas las sucursales/)
+    expect(MENSAJE_SIN_ACTIVAR).toMatch(/pídeselo al dueño del negocio/)
+    expect(MENSAJE_SIN_ACTIVAR).not.toMatch(/Pago por servicio/) // el nombre visible es «Pago al personal» (resolución 14)
+  })
+
+  it('«cómo se consigue el plan» se escribe UNA sola vez en el server (revisión de C2): las rutas, el MCP y los servicios la importan', () => {
+    const SRC = path.join(__dirname, '../../../../../src')
+    const archivos = (dir: string): string[] =>
+      fs.readdirSync(dir, { withFileTypes: true }).flatMap(e => {
+        const full = path.join(dir, e.name)
+        return e.isDirectory() ? archivos(full) : e.name.endsWith('.ts') ? [full] : []
+      })
+    const conLaFrase = archivos(SRC)
+      .filter(f => fs.readFileSync(f, 'utf8').includes('se contrata suelto por sucursal'))
+      .map(f => path.relative(SRC, f))
+    expect(conLaFrase).toEqual(['services/dashboard/staffPay/textos.ts'])
+    expect(COMO_SE_CONSIGUE_EL_PLAN).toBe('viene en el plan Pro o se contrata suelto por sucursal')
+  })
+
+  it('sin ninguna sede con el plan, una operación de organización se niega y dice cómo se consigue', async () => {
+    prismaMock.venue.findMany.mockReset()
+    prismaMock.venue.findMany.mockResolvedValueOnce([{ id: 'pn' }]).mockResolvedValue([])
+    mockPlan.mockResolvedValue(false)
+    await expect(assertPermisoEnTodasLasSedes('u1', 'org1', 'staffpay:close')).rejects.toMatchObject({
+      statusCode: 403,
+      message: expect.stringMatching(/viene en el plan Pro o se contrata suelto por sucursal/),
+    })
+  })
+})
+
+describe('acceso — E6a-fix2 C2: dónde falta el permiso, en palabras', () => {
+  it('nombra las sedes en orden alfabético, con «y» antes de la última', () => {
+    expect(listaDeSedes(['Wellness'], 0)).toBe('Wellness')
+    expect(listaDeSedes(['Wellness', 'Full'], 0)).toBe('Full y Wellness')
+    expect(listaDeSedes(['Ñandú', 'Centro', 'Álamo'], 0)).toBe('Álamo, Centro y Ñandú')
+  })
+  it('las que no puede ver van en número, sin nombre (singular y plural)', () => {
+    expect(listaDeSedes(['Full'], 1)).toBe('Full y 1 sede donde no tienes acceso')
+    expect(listaDeSedes([], 2)).toBe('2 sedes donde no tienes acceso')
+  })
+  it('más de 5 nombres: los 5 primeros y el resto en número', () => {
+    expect(listaDeSedes(['F', 'E', 'D', 'C', 'B', 'A', 'G'], 1)).toBe('A, B, C, D, E, 2 más y 1 sede donde no tienes acceso')
+  })
+  it('el 403 usa el NOMBRE del permiso, no su código, y dice a quién pedírselo', async () => {
+    prismaMock.venue.findMany.mockReset()
+    prismaMock.venue.findMany
+      .mockResolvedValueOnce([{ id: 'pn' }, { id: 'bsf' }])
+      .mockResolvedValueOnce([{ id: 'bsf', name: 'Bosques' }])
+      .mockResolvedValue([])
+    mockPlan.mockResolvedValue(true)
+    mockGetUserAccess.mockImplementation(async (_u: string, v: string) => ({ corePermissions: v === 'pn' ? ['staffpay:close'] : [] }))
+    await expect(assertPermisoEnTodasLasSedes('u1', 'org1', 'staffpay:close')).rejects.toMatchObject({
+      statusCode: 403,
+      code: 'FALTA_PERMISO_EN_SEDES',
+      message:
+        'Para esto necesitas el permiso «Cerrar periodos y registrar pagos» en todas las sedes de la organización (te falta en: Bosques). Pídeselo al dueño del negocio.',
+    })
+  })
+  it('más de 500 sedes con el plan: la acción sigue dando su 400 y el booleano dice que no (sin tumbar GET /access)', async () => {
+    const ids = (n: number, desde = 0) => Array.from({ length: n }, (_, i) => ({ id: `v${String(desde + i).padStart(4, '0')}` }))
+    prismaMock.venue.findMany.mockReset()
+    prismaMock.venue.findMany.mockResolvedValueOnce(ids(500)).mockResolvedValueOnce(ids(1, 500)).mockResolvedValue([])
+    mockPlan.mockResolvedValue(true)
+    await expect(puedeAdministrarLaOrganizacion('u1', 'org1')).resolves.toBe(false)
+    prismaMock.venue.findMany.mockReset()
+    prismaMock.venue.findMany.mockResolvedValueOnce(ids(500)).mockResolvedValueOnce(ids(1, 500)).mockResolvedValue([])
+    await expect(assertPermisoEnTodasLasSedes('u1', 'org1', 'staffpay:close')).rejects.toMatchObject({
+      statusCode: 400,
+      code: 'DEMASIADAS_SEDES',
+    })
+  })
+  it('con el permiso en todas, el booleano dice que sí', async () => {
+    prismaMock.venue.findMany.mockReset()
+    prismaMock.venue.findMany.mockResolvedValueOnce([{ id: 'pn' }, { id: 'bsf' }]).mockResolvedValue([])
+    mockPlan.mockResolvedValue(true)
+    mockGetUserAccess.mockImplementation(async () => ({ corePermissions: ['staffpay:close'] }))
+    await expect(puedeAdministrarLaOrganizacion('u1', 'org1')).resolves.toBe(true)
+  })
+  it('sólo una ESCRITURA (con su sede) deja PERMISSION_DENIED; una vista previa (el MCP) no', async () => {
+    const prepara = () => {
+      prismaMock.venue.findMany.mockReset()
+      prismaMock.venue.findMany.mockResolvedValueOnce([{ id: 'pn' }, { id: 'bsf' }]).mockResolvedValue([])
+    }
+    mockPlan.mockResolvedValue(true)
+    mockGetUserAccess.mockImplementation(async (_u: string, v: string) => ({ corePermissions: v === 'pn' ? ['staffpay:close'] : [] }))
+    mockAuditar.mockClear()
+    prepara()
+    await expect(assertPermisoEnTodasLasSedes('u1', 'org1', 'staffpay:close')).rejects.toMatchObject({ statusCode: 403 })
+    expect(mockAuditar).not.toHaveBeenCalled()
+    prepara()
+    await expect(assertPermisoEnTodasLasSedes('u1', 'org1', 'staffpay:close', { venueId: 'pn' })).rejects.toMatchObject({ statusCode: 403 })
+    expect(mockAuditar).toHaveBeenCalledWith(
+      expect.objectContaining({ staffId: 'u1', venueId: 'pn', organizationId: 'org1', entityId: 'staffpay:close' }),
+    )
+    // Sin el plan en ninguna sede no es una negativa de PERMISO: no se audita como tal.
+    mockAuditar.mockClear()
+    prismaMock.venue.findMany.mockReset()
+    prismaMock.venue.findMany.mockResolvedValueOnce([{ id: 'pn' }]).mockResolvedValue([])
+    mockPlan.mockResolvedValue(false)
+    await expect(assertPermisoEnTodasLasSedes('u1', 'org1', 'staffpay:close', { venueId: 'pn' })).rejects.toMatchObject({ statusCode: 403 })
+    expect(mockAuditar).not.toHaveBeenCalled()
   })
 })

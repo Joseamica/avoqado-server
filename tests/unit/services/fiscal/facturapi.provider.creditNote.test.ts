@@ -148,4 +148,94 @@ describe('FacturapiProvider.createCreditNote — contrato con el PAC', () => {
     )
     await expect(new FacturapiProvider('sk_test_x').createCreditNote(baseParams)).rejects.toThrow(/related uuid not found/)
   })
+
+  // ── C1 (Tarea 4): sku, base y precio a 6 decimales también en la nota ────────────────────────────────────
+
+  // 🔴 «Los payloads de hoy no cambian»: el cuerpo CRUDO (texto, con el orden de las llaves) de una nota sin sku ni base
+  // es el de antes de la Tarea 4. El esperado se escribió contra el código SIN tocar.
+  it('control — el cuerpo de la nota de hoy sale byte a byte igual (IVA incluido, y un concepto exento)', async () => {
+    await new FacturapiProvider('sk_test_x').createCreditNote({
+      ...baseParams,
+      items: [
+        baseParams.items[0],
+        { ...baseParams.items[0], description: 'Devolución exenta', unitPriceCents: 5000, objetoImp: '01', taxes: [] },
+      ],
+    })
+    const esperado = {
+      type: 'E',
+      customer: {
+        legal_name: 'ESCUELA KEMPER URGATE SA DE CV',
+        tax_id: 'EKU9003173C9',
+        tax_system: '601',
+        address: { zip: '64000' },
+        email: 'cliente@example.com',
+      },
+      use: 'G02',
+      payment_form: '04',
+      payment_method: 'PUE',
+      series: 'F',
+      external_id: 'cfdi-refund-pay1',
+      related_documents: [{ relationship: '01', documents: ['UUID-INGRESO-1'] }],
+      items: [
+        {
+          quantity: 1,
+          discount: 0,
+          product: {
+            description: 'Devolución sobre factura F12',
+            product_key: '01010101',
+            unit_key: 'ACT',
+            price: 116,
+            tax_included: true,
+            taxability: '02',
+            taxes: [{ type: 'IVA', rate: 0.16, factor: 'Tasa', withholding: false }],
+          },
+        },
+        {
+          quantity: 1,
+          discount: 0,
+          product: {
+            description: 'Devolución exenta',
+            product_key: '01010101',
+            unit_key: 'ACT',
+            price: 50,
+            tax_included: true,
+            taxability: '01',
+            taxes: [],
+          },
+        },
+      ],
+    }
+    expect(fetchMock.mock.calls[0][1].body).toBe(JSON.stringify(esperado))
+  })
+
+  it('🔴 C1: la nota manda sku, la base de cada traslado y el precio con 6 decimales', async () => {
+    await new FacturapiProvider('sk_test_x').createCreditNote({
+      ...baseParams,
+      items: [
+        {
+          ...baseParams.items[0],
+          unitPriceCents: 28793,
+          unitPriceDecimal: '287.931034',
+          taxIncluded: false,
+          sku: 'F-9',
+          taxes: [
+            { type: 'IVA', factor: 'Tasa', rate: 0.16, withholding: false, base: '137.931034' },
+            { type: 'IVA', factor: 'Exento', rate: 0, withholding: false, base: '50.000000' },
+          ],
+        },
+      ],
+    })
+    const product = payload().items[0].product
+    expect(product.sku).toBe('F-9')
+    expect(product.price).toBe(287.931034)
+    expect(product.taxes).toEqual([
+      { type: 'IVA', rate: 0.16, factor: 'Tasa', withholding: false, base: 137.931034 },
+      { type: 'IVA', rate: 0, factor: 'Exento', withholding: false, base: 50 },
+    ])
+  })
+
+  it('control — la nota sin `unitPriceDecimal` sigue mandando los centavos', async () => {
+    await new FacturapiProvider('sk_test_x').createCreditNote({ ...baseParams, items: [{ ...baseParams.items[0], unitPriceCents: 4500 }] })
+    expect(payload().items[0].product.price).toBe(45)
+  })
 })

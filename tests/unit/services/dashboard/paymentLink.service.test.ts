@@ -62,14 +62,11 @@ jest.mock('@/services/dashboard/customer.dashboard.service', () => ({
   updateCustomerMetrics: (...a: unknown[]) => mockUpdateCustomerMetrics(...a),
 }))
 
-// La comisión NO es objeto de esta suite, pero sí lo es la REGRESIÓN de que
-// siga disparándose después de colgarle lealtad al mismo enganche.
-const mockCreateCommissionForPayment = jest.fn()
-const mockCreateSplitCommissionForPayment = jest.fn()
-jest.mock('@/services/dashboard/commission/commission-calculation.service', () => ({
-  __esModule: true,
-  createCommissionForPayment: (...a: unknown[]) => mockCreateCommissionForPayment(...a),
-  createSplitCommissionForPayment: (...a: unknown[]) => mockCreateSplitCommissionForPayment(...a),
+// Fase 3 (A5): la comisión de la liga se encola DENTRO de la transacción del cobro. El resto del módulo queda real.
+const mockEnqueuePaymentCommissionInTx = jest.fn()
+jest.mock('@/services/tpv/paymentEffects.service', () => ({
+  ...jest.requireActual('@/services/tpv/paymentEffects.service'),
+  enqueuePaymentCommissionInTx: (...a: unknown[]) => mockEnqueuePaymentCommissionInTx(...a),
 }))
 
 import {
@@ -85,6 +82,7 @@ import {
   getSessionStatus,
 } from '../../../../src/services/dashboard/paymentLink.service'
 import { prismaMock } from '../../../__helpers__/setup'
+import { OPCIONES_DE_TRANSACCION_DEL_INTENTO } from '../../../../src/services/tpv/candadoDeIntento'
 import { BadRequestError, NotFoundError, PaymentOutcomeUnknownError } from '../../../../src/errors/AppError'
 import { Decimal } from '@prisma/client/runtime/library'
 
@@ -209,8 +207,7 @@ describe('PaymentLink Service', () => {
     mockApplySalePosting.mockResolvedValue({ postingId: 'posting-pl-1', applied: true, issues: [] })
     mockEarnPoints.mockResolvedValue({ pointsEarned: 0, newBalance: 0 })
     mockUpdateCustomerMetrics.mockResolvedValue(undefined)
-    mockCreateCommissionForPayment.mockResolvedValue(undefined)
-    mockCreateSplitCommissionForPayment.mockResolvedValue(undefined)
+    mockEnqueuePaymentCommissionInTx.mockResolvedValue(undefined)
   })
 
   // ─── CREATE ──────────────────────────────────────
@@ -1248,9 +1245,7 @@ describe('PaymentLink Service', () => {
       expect(mockUpdateCustomerMetrics).toHaveBeenCalledWith(CUSTOMER_ID, 100, 'order-123', VENUE_ID)
     })
 
-    // ── REGRESIÓN: lo que ya funcionaba sigue funcionando ──
-
-    it('REGRESIÓN: la comisión se sigue disparando igual con lealtad colgada del mismo enganche', async () => {
+    it('🔴 la comisión nace con el cobro, en SU transacción, para la persona atribuida (A5)', async () => {
       prismaMock.checkoutSession.findUnique.mockResolvedValueOnce(
         createMockCheckoutSession({
           paymentLink: {
@@ -1265,14 +1260,17 @@ describe('PaymentLink Service', () => {
       )
       prismaMock.customer.findFirst.mockResolvedValueOnce({ id: CUSTOMER_ID })
       armarCobro()
+      const txClient: any = { ...prismaMock, __tx: true }
+      prismaMock.$transaction.mockImplementationOnce((cb: any) => cb(txClient))
 
       await completeCharge('abc12345', 'cs_pl_test123')
 
-      expect(mockCreateCommissionForPayment).toHaveBeenCalledWith('payment-123')
-      expect(mockCreateSplitCommissionForPayment).not.toHaveBeenCalled()
+      expect(mockEnqueuePaymentCommissionInTx).toHaveBeenCalledWith(txClient, 'payment-123', [STAFF_ID])
+      // A5 r1: la transacción del cobro lleva el tope de la terminal (10 s), no los 5 s de fábrica de Prisma.
+      expect(prismaMock.$transaction).toHaveBeenCalledWith(expect.any(Function), OPCIONES_DE_TRANSACCION_DEL_INTENTO)
     })
 
-    it('REGRESIÓN: sin cliente, la comisión y el vale de inventario siguen intactos', async () => {
+    it('🔴 sin cliente, la comisión dividida nace en la transacción y el vale de inventario sigue intacto (A5)', async () => {
       prismaMock.checkoutSession.findUnique.mockResolvedValueOnce(
         createMockCheckoutSession({
           paymentLink: {
@@ -1287,12 +1285,40 @@ describe('PaymentLink Service', () => {
       )
       prismaMock.customer.findFirst.mockResolvedValue(null)
       armarCobro()
+      const txClient: any = { ...prismaMock, __tx: true }
+      prismaMock.$transaction.mockImplementationOnce((cb: any) => cb(txClient))
 
       await completeCharge('abc12345', 'cs_pl_test123')
 
-      expect(mockCreateSplitCommissionForPayment).toHaveBeenCalledWith('payment-123', [STAFF_ID, 'staff-2'])
+      expect(mockEnqueuePaymentCommissionInTx).toHaveBeenCalledWith(txClient, 'payment-123', [STAFF_ID, 'staff-2'])
       expect(mockCreateSalePostingInTx).toHaveBeenCalled()
       expect(mockApplySalePosting).toHaveBeenCalledWith('posting-pl-1', expect.anything())
+    })
+
+    it('🔴 Stripe: la comisión dividida nace en la transacción del cobro, no después del commit (A5)', async () => {
+      prismaMock.checkoutSession.findUnique.mockResolvedValueOnce(
+        createMockCheckoutSession({
+          ecommerceMerchant: { id: 'merchant-123', providerCredentials: {}, provider: { code: 'STRIPE_CONNECT' } },
+          paymentLink: {
+            id: 'pl-123',
+            shortCode: 'abc12345',
+            venueId: VENUE_ID,
+            purpose: 'PAYMENT',
+            createdById: STAFF_ID,
+            attributions: [{ staffId: STAFF_ID }, { staffId: 'staff-2' }],
+          },
+        }),
+      )
+      prismaMock.customer.findFirst.mockResolvedValue(null)
+      armarCobro('order-stripe-1')
+      const txClient: any = { ...prismaMock, __tx: true }
+      prismaMock.$transaction.mockImplementationOnce((cb: any) => cb(txClient))
+
+      await finalizePaymentLinkCheckout({ stripeSessionId: 'cs_pl_test123', paymentIntentId: 'pi_1' })
+
+      expect(mockEnqueuePaymentCommissionInTx).toHaveBeenCalledTimes(1)
+      expect(mockEnqueuePaymentCommissionInTx).toHaveBeenCalledWith(txClient, 'payment-123', [STAFF_ID, 'staff-2'])
+      expect(prismaMock.$transaction).toHaveBeenCalledWith(expect.any(Function), OPCIONES_DE_TRANSACCION_DEL_INTENTO)
     })
   })
 

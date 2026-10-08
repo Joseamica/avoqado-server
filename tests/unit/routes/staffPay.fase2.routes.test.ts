@@ -1,6 +1,11 @@
 import * as schemas from '@/schemas/dashboard/staffPay.schema'
 
-jest.mock('@/services/dashboard/staffPay/periodosGuardados', () => ({ listarPeriodos: jest.fn(), cambiarPeriodicidad: jest.fn() }))
+// El resto del módulo, real: un mock parcial sin el resto dejaba `undefined` lo que otros módulos importan de aquí.
+jest.mock('@/services/dashboard/staffPay/periodosGuardados', () => ({
+  ...jest.requireActual('@/services/dashboard/staffPay/periodosGuardados'),
+  listarPeriodos: jest.fn(),
+  cambiarPeriodicidad: jest.fn(),
+}))
 jest.mock('@/services/dashboard/staffPay/cierre.service', () => ({ previewCierre: jest.fn(), cerrarPeriodo: jest.fn() }))
 jest.mock('@/services/dashboard/staffPay/ajustesManuales.service', () => ({ agregarAjusteManual: jest.fn() }))
 jest.mock('@/services/dashboard/staffPay/recibos.service', () => ({
@@ -23,7 +28,7 @@ import * as dif from '@/services/dashboard/staffPay/diferencias.service'
 import * as liq from '@/services/dashboard/staffPay/liquidacion.service'
 import * as ajustesClase from '@/services/dashboard/staffPay/ajustesClase.service'
 import * as controller from '@/controllers/dashboard/staffPay.dashboard.controller'
-import router, { servicePayGateOrganizacion } from '@/routes/dashboard/staffPay.routes'
+import router, { servicePayActivadoGate, servicePayGate, servicePayGateOrganizacion } from '@/routes/dashboard/staffPay.routes'
 
 const CUID = 'ckxxxxxxxxxxxxxxxxxxxxxxx'
 
@@ -163,6 +168,73 @@ describe('Rutas de la fase 2: método, ruta y permiso', () => {
       expect(stack[i].route.stack[0].handle).toBe(servicePayGateOrganizacion)
     }
     expect(ruta('get', '/periods/:periodId/differences')).toBeGreaterThan(gate)
+  })
+
+  it('fase 3: sólo la configuración va antes del gate de activación; todo lo de dinero, después (spec fase 3 §10)', () => {
+    const stack: any[] = (router as any).stack
+    const plan = stack.findIndex(l => !l.route && l.handle?.name === 'servicePayGate')
+    const activado = stack.findIndex(l => !l.route && l.handle?.name === 'servicePayActivadoGate')
+    expect(plan).toBeGreaterThan(-1)
+    expect(activado).toBeGreaterThan(plan)
+    // Ni plan de la sede ni activación (pre-flight C2 fila 5): la pantalla que explica, y la participación por sede (B11/B13).
+    // `POST /sedes/:sedeId/activate` conserva el plan de la ORGANIZACIÓN y el service exige la activación (409 NO_ACTIVADO).
+    const SIN_PUERTAS = new Set([
+      'get /access',
+      'get /sedes/:sedeId/participation-preview',
+      'post /sedes/:sedeId/activate',
+      'post /sedes/:sedeId/deactivate',
+      'get /sedes',
+    ])
+    // Si B o D agregaron otra ruta de CONFIGURACIÓN, decide si exige activar y, si no, agrégala aquí con su razón.
+    const SIN_ACTIVAR = new Set([
+      'get /levels',
+      'post /levels',
+      'patch /levels/:levelId',
+      'post /assignments',
+      'get /assignments',
+      'get /assignments/:staffId/history',
+      'get /tables',
+      'post /tables',
+      'post /tables/:tableId/versions',
+      'post /tables/:tableId/archive',
+      'get /tables/:tableId/versions',
+      'post /activate',
+      // Pre-flight C2 fila 6: se elige antes de activar; después el service responde 409 PERIODICIDAD_FIJA.
+      'patch /periodicity',
+    ])
+    const DE_UNA_CLASE = new Set([
+      'get /class-sessions/:sessionId/difference',
+      'post /class-sessions/:sessionId/difference/settle',
+      'get /class-sessions/:sessionId/pay',
+      'put /class-sessions/:sessionId/pay-adjustments',
+    ])
+    const vistas = new Set<string>()
+    stack.forEach((l, i) => {
+      if (!l.route) return
+      const ruta = `${Object.keys(l.route.methods)[0]} ${l.route.path}`
+      vistas.add(ruta)
+      const capas = l.route.stack.map((s: any) => s.handle)
+      if (SIN_PUERTAS.has(ruta)) {
+        expect({ ruta, antesDelPlan: i < plan, activacion: capas.includes(servicePayActivadoGate) }).toEqual({
+          ruta,
+          antesDelPlan: true,
+          activacion: false,
+        })
+        return expect({ ruta, organizacion: capas.includes(servicePayGateOrganizacion) }).toEqual({
+          ruta,
+          organizacion: ruta === 'post /sedes/:sedeId/activate',
+        })
+      }
+      if (DE_UNA_CLASE.has(ruta))
+        return expect({ ruta, gates: capas.slice(0, 2) }).toEqual({ ruta, gates: [servicePayGateOrganizacion, servicePayActivadoGate] })
+      if (SIN_ACTIVAR.has(ruta)) return expect({ ruta, entre: i > plan && i < activado }).toEqual({ ruta, entre: true })
+      expect({ ruta, despues: i > activado }).toEqual({ ruta, despues: true })
+    })
+    // Cada ruta nombrada existe (un nombre mal escrito no puede esconder una ruta que se movió).
+    for (const r of [...SIN_PUERTAS, ...SIN_ACTIVAR, ...DE_UNA_CLASE]) expect({ r, existe: vistas.has(r) }).toEqual({ r, existe: true })
+    // Ninguna ruta de dinero se quedó sin las dos puertas: el gate de la sede corre antes que el de activación.
+    expect(stack[plan].handle).toBe(servicePayGate)
+    expect(stack[activado].handle).toBe(servicePayActivadoGate)
   })
 })
 

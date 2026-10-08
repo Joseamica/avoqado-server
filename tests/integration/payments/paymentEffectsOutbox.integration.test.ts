@@ -232,6 +232,7 @@ async function commissionConfig(categoryIds: string[] = []) {
       defaultRate: 0.1,
       categoryIds,
       filterByCategories: categoryIds.length > 0,
+      includeTax: true, // estas pruebas miden la cola de efectos, no el IVA: la base es lo cobrado
       effectiveFrom: new Date('2020-01-01T00:00:00Z'),
     },
   })

@@ -8,7 +8,7 @@ const perezosa = (operacion: string, args?: unknown) => ({
   then(ok: (v: unknown) => void, ko: (e: unknown) => void) {
     try {
       checkCancellation(operacion, getContext()?.cancellation, args)
-      ok(operacion === '$executeRaw' ? 0 : [])
+      ok(operacion.startsWith('$executeRaw') ? 0 : [])
     } catch (e) {
       ko(e)
     }
@@ -16,11 +16,13 @@ const perezosa = (operacion: string, args?: unknown) => ({
 })
 
 describe('enUnaFoto y el freno de lecturas del MCP (Codex R4-Nuevo 2)', () => {
-  it('el SET TRANSACTION READ ONLY no cuenta como escritura: cancelar después del SET corta la siguiente lectura', async () => {
+  // B14: también el `SET LOCAL statement_timeout` del tope de la foto (`$executeRawUnsafe`).
+  it('los SET de la foto (READ ONLY y el tope) no cuentan como escritura: cancelar después corta la siguiente lectura', async () => {
     const controller = new AbortController()
     const c: RequestCancellation = { signal: controller.signal, hasWritten: false, refused: false }
     const tx = {
       $executeRaw: () => perezosa('$executeRaw'),
+      $executeRawUnsafe: (sql: string) => perezosa('$executeRawUnsafe', { strings: [sql], values: [] }),
       $queryRaw: () => perezosa('$queryRaw', { strings: ['SELECT 1'], values: [] }),
     }
     prismaMock.$transaction = jest.fn(async (fn: (t: unknown) => Promise<unknown>) => fn(tx))

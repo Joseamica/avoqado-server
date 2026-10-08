@@ -32,6 +32,8 @@ import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppE
 import { generateSlug, validateSlug } from '../../utils/slugify'
 import logger from '../../config/logger'
 import { deleteVenueFolder, deleteFileFromStorage } from '../storage.service'
+import { historiaDeSede, sedeConPagoAlPersonalError } from './staffPay/participacion'
+import { PresupuestoDeEspera, tomarCandado } from '../../utils/esperaDeCandados'
 import {
   exigirSinObligacionViva,
   getOrCreateStripeCustomer,
@@ -351,6 +353,10 @@ export async function updateVenue(orgId: string, venueId: string, updateData: an
   return updatedVenue
 }
 
+/** El borrado declara su timeout (antes heredaba los 5 s de Prisma); su presupuesto de espera sale de él (B9: 6 s). */
+const TIMEOUT_BORRADO_MS = 10_000
+const OPCIONES_BORRADO = { timeout: TIMEOUT_BORRADO_MS }
+
 const negocioConCuentaDeCobro = () =>
   new ConflictError(
     'Este negocio ya tiene una cuenta de cobro en Stripe: no se borra, se cierra (conserva su historial de cobros).',
@@ -411,11 +417,20 @@ export async function deleteVenue(orgId: string, venueId: string, options?: { sk
 
   // Use a transaction to delete all related data in the correct order
   await prisma.$transaction(async tx => {
+    // B9: el presupuesto de espera de la transacción, creado al entrar.
+    const presupuesto = PresupuestoDeEspera.para(TIMEOUT_BORRADO_MS)
     // La fila del negocio queda BLOQUEADA hasta confirmar: quien quiera ligarle un cliente de Stripe
     // (`getOrCreateStripeCustomer` lo reclama con un UPDATE condicional) espera, y ya no encuentra el negocio.
-    const [bloqueada] = await tx.$queryRaw<{ stripeCustomerId: string | null }[]>`
-      SELECT "stripeCustomerId" FROM "Venue" WHERE id = ${venueId} FOR UPDATE`
+    const [bloqueada] = await tomarCandado(
+      tx,
+      () => tx.$queryRaw<{ stripeCustomerId: string | null }[]>`
+      SELECT "stripeCustomerId" FROM "Venue" WHERE id = ${venueId} FOR UPDATE /* B9:sede:exclusivo */`,
+      { presupuesto },
+    )
     if (bloqueada?.stripeCustomerId) throw negocioConCuentaDeCobro()
+    // Pago al personal (fase 3, B9): con la fila ya bloqueada, en OTRA sentencia, ve el primer devengo que confirmó quien
+    // esperábamos. Una sede con historia de pago al personal no se borra.
+    if (await historiaDeSede(tx, venueId)) throw sedeConPagoAlPersonalError('borrar')
 
     logger.info(`🗑️  Starting venue deletion for venueId: ${venueId}`)
 
@@ -660,7 +675,7 @@ export async function deleteVenue(orgId: string, venueId: string, options?: { sk
       where: { id: venueId },
     })
     logger.info(`  ✅ Venue ${venueId} deleted successfully`)
-  })
+  }, OPCIONES_BORRADO)
 
   logger.info(`🎉 Venue deletion complete for venueId: ${venueId}`)
 

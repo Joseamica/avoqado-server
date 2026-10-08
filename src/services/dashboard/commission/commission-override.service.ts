@@ -195,7 +195,7 @@ export async function createCommissionOverride(
 
   // Validate rate if provided
   if (data.customRate !== undefined && data.customRate !== null) {
-    validateRate(data.customRate)
+    validateRate(data.customRate, 'La tasa propia de una persona')
   }
 
   // Must have either customRate or excludeFromCommissions
@@ -286,7 +286,7 @@ export async function updateCommissionOverride(overrideId: string, venueId: stri
 
   // Validate rate if provided
   if (data.customRate !== undefined && data.customRate !== null) {
-    validateRate(data.customRate)
+    validateRate(data.customRate, 'La tasa propia de una persona')
   }
 
   // Check for date overlap if dates are changing

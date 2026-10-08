@@ -3,7 +3,19 @@ import prisma from '@/utils/prismaClient'
 import { agregarAjusteManual, previewAjusteManual } from '@/services/dashboard/staffPay/ajustesManuales.service'
 import { cerrarPeriodo, previewCierre } from '@/services/dashboard/staffPay/cierre.service'
 import { fechaComoDbDate } from '@/services/dashboard/staffPay/periodos'
-import { barreraDelPeriodo, borrarMundo, clase, confirmadas, crearMundo, crearSede, Mundo, tablaMindform } from './_mundo'
+import {
+  barreraDeLaOrganizacion,
+  barreraDelPeriodo,
+  borrarMundo,
+  CIERRE_EN_CURSO,
+  clase,
+  conCandadoRetenido,
+  confirmadas,
+  crearMundo,
+  crearSede,
+  Mundo,
+  tablaMindform,
+} from './_mundo'
 
 jest.mock('@/services/dashboard/staffPay/acceso', () => ({
   ...jest.requireActual('@/services/dashboard/staffPay/acceso'),
@@ -51,6 +63,12 @@ describe('ajustes manuales (spec §6.4)', () => {
     ).toBe(2)
   })
 
+  it('un ajuste nuevo guarda el nombre visible de la persona: su recibo abre aunque después la borren (spec fase 3 §6.1)', async () => {
+    const bono = await ajuste()
+    const e = await prisma.serviceEarning.findUniqueOrThrow({ where: { id: bono.id } })
+    expect(e.descriptor).toMatchObject({ persona: 'Carla QA', motivo: 'Bono de septiembre' })
+  })
+
   it('el mismo clientKey no crea una segunda línea; con otro contenido es un error, no el éxito del primero', async () => {
     const a = await ajuste({ clientKey: `${m.key}-fijo` })
     const b = await ajuste({ clientKey: `${m.key}-fijo` })
@@ -60,13 +78,34 @@ describe('ajustes manuales (spec §6.4)', () => {
     expect(await prisma.serviceEarning.count({ where: { organizationId: m.orgId, concept: 'MANUAL' } })).toBe(1)
   })
 
+  // E6a-fix5 C-n2: tras una respuesta perdida, el dueño cambia el monto y reintenta: el 409 debe decir que el primero SÍ se guardó.
+  it('C-n2: CLAVE_REUTILIZADA dice que el primer ajuste SÍ se guardó y trae sus datos en details.guardado', async () => {
+    const a = await ajuste({ clientKey: `${m.key}-cn2`, amount: -125.5, reason: 'Llegó tarde' })
+    await expect(ajuste({ clientKey: `${m.key}-cn2`, amount: 10, reason: 'Llegó tarde' })).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'CLAVE_REUTILIZADA',
+      message:
+        'Ya se guardó un ajuste con esta solicitud: -$125.50 para Carla QA (Llegó tarde). Si querías otro distinto, ábrelo de nuevo.',
+      details: {
+        guardado: {
+          staffNombre: 'Carla QA',
+          amount: '-125.50',
+          reason: 'Llegó tarde',
+          periodo: { start: '2026-08-01', end: '2026-08-31' },
+        },
+      },
+    })
+    expect(a.yaExistia).toBe(false)
+  })
+
   it('la misma clave hacia OTRO periodo destino es un error: un bono idéntico para septiembre no devuelve el de agosto (Codex R2-R1-4)', async () => {
     const agosto = await ajuste({ clientKey: `${m.key}-destino` })
     expect(agosto.periodo).toEqual({ start: '2026-08-01', end: '2026-08-31' })
     await expect(ajuste({ clientKey: `${m.key}-destino`, fecha: '2026-09-10' })).rejects.toMatchObject({
       code: 'CLAVE_REUTILIZADA',
       statusCode: 409,
-      message: 'Esta solicitud ya se usó para otro ajuste. Vuelve a abrir el formulario.',
+      message:
+        'Ya se guardó un ajuste con esta solicitud: $300 para Carla QA (Bono de septiembre). Si querías otro distinto, ábrelo de nuevo.',
     })
     // Otro día del MISMO periodo es la misma operación: devuelve la guardada.
     await expect(ajuste({ clientKey: `${m.key}-destino`, fecha: '2026-08-25' })).resolves.toMatchObject({ id: agosto.id, yaExistia: true })
@@ -248,6 +287,23 @@ describe('ajustes manuales (spec §6.4)', () => {
     await expect(ajuste()).rejects.toMatchObject({ code: 'PERIODO_CERRADO' })
   })
 
+  // E6a-fix5 K4 (resto): el rango que dice el texto del API arranca en el inicio de pago al personal, no antes.
+  it('K4: con inicio de pago al personal, el 400 FECHA_FUERA_DE_RANGO arranca en max(hoy − 12 meses, inicio)', async () => {
+    // AHORA = 2 sep 2026 ⇒ hoy − 12 meses = 2 sep 2025; el inicio (15 oct 2025) es posterior.
+    await prisma.organization.update({ where: { id: m.orgId }, data: { staffPayStartDate: fechaComoDbDate('2025-10-15') } })
+    const fuera = {
+      statusCode: 400,
+      code: 'FECHA_FUERA_DE_RANGO',
+      message: 'La fecha del ajuste debe estar entre 15 oct 2025 y 30 sep 2026',
+      details: { desde: '2025-10-15', hasta: '2026-09-30' },
+    }
+    const base = { userId: m.owner, venueId: m.venueId, sede: m.venueId, staffId: m.carla, amount: 300, reason: 'Bono', ahora: AHORA }
+    for (const fecha of ['1900-01-01', '2026-10-01']) {
+      await expect(ajuste({ fecha })).rejects.toMatchObject(fuera)
+      await expect(previewAjusteManual({ ...base, fecha })).rejects.toMatchObject(fuera)
+    }
+  })
+
   // full-testing A6: aceptaba 1900 y 2999 y creaba esos periodos (el de 2999 salía primero en el selector como «Abierto»).
   it('la fecha va de hoy − 12 meses al fin del periodo de hoy: fuera, 400 con el rango y SIN crear ningún periodo', async () => {
     const periodos = () => prisma.servicePayPeriod.count({ where: { organizationId: m.orgId } })
@@ -407,4 +463,35 @@ describe('ajustes manuales (spec §6.4)', () => {
     const recibos = await prisma.staffPayStatement.aggregate({ where: { periodId: agosto.id }, _sum: { total: true } })
     expect(recibos._sum.total?.toFixed(2)).toBe('870.00')
   })
+})
+
+/**
+ * B7 r2: un cierre retiene la FILA de su periodo (`bloquearPeriodo`) y el candado de la organización todo lo que dura
+ * (~40 s). Un ajuste manual espera con tope y contesta 409 CIERRE_EN_CURSO, nunca el P2028 (500) de su transacción de 10 s.
+ */
+describe('con un cierre en curso, el ajuste manual no espera sin tope (B7 r2)', () => {
+  it('sobre un periodo YA guardado: 409 CIERRE_EN_CURSO a los ~6 s (su presupuesto de espera, B9) y no escribe', async () => {
+    const agosto = await prisma.servicePayPeriod.create({
+      data: {
+        organizationId: m.orgId,
+        periodStart: fechaComoDbDate('2026-08-01'),
+        periodEnd: fechaComoDbDate('2026-08-31'),
+        venueIds: [m.venueId],
+      },
+    })
+    const r = await conCandadoRetenido(await barreraDelPeriodo(agosto.id), () => ajuste())
+    expect(r.error).toMatchObject(CIERRE_EN_CURSO)
+    expect(r.ms).toBeGreaterThanOrEqual(5_500)
+    expect(r.ms).toBeLessThan(10_000)
+    expect(await prisma.serviceEarning.count({ where: { organizationId: m.orgId, concept: 'MANUAL' } })).toBe(0)
+  }, 60_000)
+
+  it('con el periodo todavía POR CREAR (candado de la organización): también 409, y no crea el periodo', async () => {
+    const r = await conCandadoRetenido(await barreraDeLaOrganizacion(m.orgId), () => ajuste())
+    expect(r.error).toMatchObject(CIERRE_EN_CURSO)
+    expect(r.ms).toBeGreaterThanOrEqual(5_500)
+    expect(r.ms).toBeLessThan(10_000)
+    expect(await prisma.servicePayPeriod.count({ where: { organizationId: m.orgId } })).toBe(0)
+    expect(await prisma.serviceEarning.count({ where: { organizationId: m.orgId, concept: 'MANUAL' } })).toBe(0)
+  }, 60_000)
 })

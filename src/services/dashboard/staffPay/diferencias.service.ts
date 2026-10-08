@@ -6,7 +6,7 @@ import { venueDayKey } from '../../../utils/venueDateKeys'
 import { sedesLegiblesDe } from './acceso'
 import { periodoQueContieneFecha } from './periodosGuardados'
 import { dbDateComoFecha, venuePeriodRange } from './periodos'
-import { FiltroValoracion, MotivoExcepcion, valoracionCte } from './valoracion'
+import { FiltroValoracion, MotivoExcepcion, ReglaDeClase, valoracionCte } from './valoracion'
 
 type Db = Prisma.TransactionClient | typeof prisma
 const TZ_DEFAULT = 'America/Mexico_City'
@@ -24,6 +24,7 @@ export type CausaDiferencia =
   | 'CONTEO'
   | 'COACH_SALE'
   | 'COACH_ENTRA'
+  /** Se canceló DESPUÉS del cierre de su periodo (D5-fix); una cancelada desde antes cae en las demás causas. */
   | 'CANCELADA'
   | 'EXCLUIDA'
   /** Se creó DESPUÉS del cierre de su periodo. */
@@ -65,6 +66,8 @@ export interface FilaDiferencia {
   conteoCongelado?: number | null
   /** Por qué hay diferencia (QA bloque B, defecto 4); null sin pendiente o en excepción (ésta ya trae `motivo`). */
   causa?: CausaDiferencia | null
+  /** La regla de clase que movió «corresponde» (spec fase 3 §6.6); sólo en la fila de la coach de hoy. */
+  regla?: ReglaDeClase | null
 }
 
 type Fila = Omit<FilaDiferencia, 'corresponde' | 'congelado' | 'conciliado' | 'pendiente'> & {
@@ -88,17 +91,25 @@ type CursorFila = { classSessionId: string; persona: string }
 /**
  * Por qué existe cada diferencia (QA bloque B, defecto 4), con UNA consulta para las filas que se devuelven (≤ una página o
  * una clase), nunca dentro del recorrido: sumarle columnas al SQL del recorrido le quitaba a Postgres su plan genérico rápido
- * (medido con 50,000 clases: la página sin diferencias pasaba de 2.0 s a 3.6 s). Por clase: si está cancelada, el nombre de
- * su coach, cuándo se creó y, por persona, el conteo de su ÚLTIMA línea (SERVICE o RECONCILE: tras una liquidación compara
- * contra ésa). `cerradoEn`: el `closedAt` del periodo de origen de TODAS las filas (el listado o el de la clase).
+ * (medido con 50,000 clases: la página sin diferencias pasaba de 2.0 s a 3.6 s). Por clase: si está cancelada y cuándo, el
+ * nombre de su coach, cuándo se creó y, por persona, el conteo de su ÚLTIMA línea (SERVICE o RECONCILE: tras una liquidación
+ * compara contra ésa). `cerradoEn`: el `closedAt` del periodo de origen de TODAS las filas (el listado o el de la clase).
  */
 async function conCausa(db: Db, organizationId: string, cerradoEn: Date | null, filas: FilaDiferencia[]): Promise<FilaDiferencia[]> {
   const ids = [...new Set(filas.map(f => f.classSessionId))]
   if (!ids.length) return filas
   const info = await db.$queryRaw<
-    Array<{ cid: string; cancelada: boolean; creada: Date; coach: string | null; staffId: string | null; conteo: number | null }>
+    Array<{
+      cid: string
+      cancelada: boolean
+      canceladaEn: Date | null
+      creada: Date
+      coach: string | null
+      staffId: string | null
+      conteo: number | null
+    }>
   >`
-    SELECT cs.id AS cid, (cs.status = 'CANCELLED') AS cancelada, cs."createdAt" AS creada,
+    SELECT cs.id AS cid, (cs.status = 'CANCELLED') AS cancelada, cs."cancelledAt" AS "canceladaEn", cs."createdAt" AS creada,
            NULLIF(TRIM(CONCAT(s."firstName", ' ', s."lastName")), '') AS coach, u."staffId", u.count AS conteo
     FROM "ClassSession" cs
     JOIN "Venue" v ON v.id = cs."venueId" AND v."organizationId" = ${organizationId}
@@ -115,7 +126,11 @@ async function conCausa(db: Db, organizationId: string, cerradoEn: Date | null, 
   for (const r of info) {
     // Existía al cerrar: createdAt y closedAt son instantes UTC (ver `utcTs`), así que se comparan directo.
     const antes = cerradoEn !== null && r.creada <= cerradoEn
-    const c = clases.get(r.cid) ?? { cancelada: r.cancelada, existiaAlCerrar: antes, coach: r.coach, lineas: new Map() }
+    // D5-fix (Codex D-2): «cancelada después del cierre» sólo si se canceló DESPUÉS de cerrar su periodo de origen. Desde el
+    // Bloque D una cancelada tarde se congela al cerrar, así que estar cancelada hoy ya no lo implica. Sin estampa
+    // (`cancelledAt` nulo; el backfill de D1 la llena) o sin `closedAt`, se queda como antes: CANCELADA.
+    const canceladaDespues = r.cancelada && (r.canceladaEn === null || cerradoEn === null || r.canceladaEn > cerradoEn)
+    const c = clases.get(r.cid) ?? { canceladaDespues, existiaAlCerrar: antes, coach: r.coach, lineas: new Map() }
     if (r.staffId) c.lineas.set(r.staffId, r.conteo)
     clases.set(r.cid, c)
   }
@@ -132,16 +147,17 @@ async function conCausa(db: Db, organizationId: string, cerradoEn: Date | null, 
   })
 }
 
-type InfoClase = { cancelada: boolean; existiaAlCerrar: boolean; lineas: Map<string, number | null> }
+type InfoClase = { canceladaDespues: boolean; existiaAlCerrar: boolean; lineas: Map<string, number | null> }
 
 /**
- * La regla, fila por fila. Sin pendiente o en excepción (ésta ya trae `motivo`) no hay causa. Si nadie tiene líneas de la
- * clase: REINCLUIDA si ya contaba para ese cierre y no se pagó (anclada sin SERVICE, o creada antes del cierre — una
- * cancelada al cerrar no se ancla); TARDIA sólo si se creó después.
+ * La regla, fila por fila. Sin pendiente o en excepción (ésta ya trae `motivo`) no hay causa. CANCELADA sólo si se canceló
+ * después del cierre; una que ya lo estaba al cerrar cae en las causas de siempre (MONTO, CONTEO, EXCLUIDA, COACH_*). Si nadie
+ * tiene líneas de la clase: REINCLUIDA si ya contaba para ese cierre y no se pagó (anclada sin SERVICE, o creada antes del
+ * cierre — una cancelada que no se paga no se ancla al cerrar); TARDIA sólo si se creó después.
  */
 function causaDe(f: FilaDiferencia, c: InfoClase | undefined, propia: boolean, conteoCongelado: number | null): CausaDiferencia | null {
   if (f.pendiente === null || new Prisma.Decimal(f.pendiente).isZero()) return null
-  if (c?.cancelada) return 'CANCELADA'
+  if (c?.canceladaDespues) return 'CANCELADA'
   if (f.estadoClase === 'EXCLUIDA') return 'EXCLUIDA'
   if (f.persona !== f.coachActual) return 'COACH_SALE'
   if (!propia) {
@@ -185,6 +201,8 @@ export function diferenciasSql(f: FiltroValoracion, despues: CursorFila | null, 
       SELECT v."classSessionId", v."venueId", v."productName", v."startsAt", v."fechaLocal", v."fechaValoracion",
              v."periodoOrigen" AS "periodoOrigenId", p.persona, v."staffId" AS "coachActual",
              v.estado AS "estadoClase", v.motivo, v."payLevelId", v."payLevelName", v."tableVersionId", v."countMode", v.conteo,
+             -- Fase 3: la regla es de la coach de HOY; la que sale de la clase no la recibe.
+             CASE WHEN p.persona = v."staffId" THEN v.regla END AS regla,
              CASE WHEN v.estado = 'EXCEPCION' THEN NULL
                   WHEN v.estado = 'OK' AND p.persona = v."staffId" THEN v.monto
                   ELSE 0 END AS corresponde,
@@ -250,6 +268,7 @@ export const idsCandidatas = (f: FiltroDelPeriodo, desde: Desde, n: number, sinA
  * El periodo cerrado del que una clase es candidata: su ancla (por id, siempre), o —sin ancla, ya terminada— el cerrado que
  * contiene su fecha (llegó tarde) SÓLO si su sede está en el alcance de ese periodo: los cerrados conservan su alcance y
  * toda línea pertenece al alcance de su periodo (spec §5.6). Así coincide con lo que lista `diferenciasDelPeriodo`.
+ * Terminada = su horario pasó o está CANCELADA (una cancelada terminó al cancelarse: D5-fix, la regla de `valoracionCte`).
  */
 export async function origenDeClase(
   db: Db,
@@ -257,6 +276,7 @@ export async function origenDeClase(
   cs: {
     startsAt: Date
     endsAt: Date
+    status: string
     venue: { organizationId: string; timezone: string | null }
     payState: { originPeriodId: string | null } | null
   },
@@ -265,7 +285,7 @@ export async function origenDeClase(
   if (cs.payState?.originPeriodId) {
     return db.servicePayPeriod.findFirst({ where: { id: cs.payState.originPeriodId, organizationId: cs.venue.organizationId } })
   }
-  if (cs.endsAt > ahora) return null
+  if (cs.status !== 'CANCELLED' && cs.endsAt > ahora) return null
   const p = await periodoQueContieneFecha(db, cs.venue.organizationId, venueDayKey(cs.startsAt, cs.venue.timezone || TZ_DEFAULT))
   return p?.status === 'CLOSED' && p.venueIds.includes(venueId) ? p : null
 }
@@ -287,6 +307,7 @@ export async function diferenciasDeClase(
     select: {
       startsAt: true,
       endsAt: true,
+      status: true,
       venue: { select: { organizationId: true, timezone: true } },
       payState: { select: { originPeriodId: true } },
     },
@@ -312,6 +333,8 @@ export async function diferenciasDelPeriodo(
     periodId: string
     cursor?: string
     limit: number
+    /** B14-fix F1: el alcance de la conexión MCP; las sedes fuera de él no se leen (la respuesta dice `parcial`). */
+    soloSedes?: readonly string[]
   },
   /** Sólo pruebas y medición (fuera de `input` para que una ruta que reenvíe `req.query` no pueda meterlos). */
   opts: { ahora?: Date; tamLote?: number; topeSinAncla?: number } = {},
@@ -321,8 +344,11 @@ export async function diferenciasDelPeriodo(
   const p = await prisma.servicePayPeriod.findFirst({ where: { id: input.periodId, organizationId: v.organizationId } })
   if (!p) throw new NotFoundError('Periodo no encontrado')
   if (p.status !== 'CLOSED') return { items: [], nextCursor: null, parcial: false }
-  // Alcance histórico del periodo (Codex R1-1): apagar una sede no esconde sus diferencias.
-  const legibles = await sedesLegiblesDe(input.userId, p.venueIds)
+  // Alcance histórico del periodo (Codex R1-1): apagar una sede no esconde sus diferencias. B14-fix F1: ∩ la conexión.
+  const conexion = input.soloSedes ? new Set(input.soloSedes) : null // ronda 1 (R2): con SUPERADMIN, todas las sedes
+  const enConexion = conexion ? p.venueIds.filter(v => conexion.has(v)) : p.venueIds
+  const legibles = await sedesLegiblesDe(input.userId, enConexion)
+  const parcial = legibles.parcial || new Set(enConexion).size < new Set(p.venueIds).size
   const sedes = (
     await prisma.venue.findMany({
       where: { id: { in: legibles.venueIds }, organizationId: v.organizationId },
@@ -365,12 +391,12 @@ export async function diferenciasDelPeriodo(
           return {
             items: await conCausa(prisma, v.organizationId, p.closedAt, items.slice(0, limite)),
             nextCursor: `${u.venueId}:${u.classSessionId}:${u.persona ?? ''}`,
-            parcial: legibles.parcial,
+            parcial,
           }
         }
       }
       desde = { id: ids[ids.length - 1], incluido: false }
     }
   }
-  return { items: await conCausa(prisma, v.organizationId, p.closedAt, items), nextCursor: null, parcial: legibles.parcial }
+  return { items: await conCausa(prisma, v.organizationId, p.closedAt, items), nextCursor: null, parcial }
 }

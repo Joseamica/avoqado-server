@@ -8,6 +8,7 @@ import type { NextFunction, Request, Response } from 'express'
 import logger from '@/config/logger'
 import { transferVenue } from '@/controllers/dashboard/venues.superadmin.controller'
 import { negocioCambioDeOrganizacionError } from '@/services/fiscal/exclusionContable'
+import { sedeConPagoAlPersonalError } from '@/services/dashboard/staffPay/participacion'
 import { prismaMock } from '@tests/__helpers__/setup'
 
 const req = { params: { venueId: 'v1' }, body: { targetOrganizationId: 'org-b' }, authContext: { userId: 's1' } } as unknown as Request
@@ -31,6 +32,22 @@ describe('transferVenue — qué se registra cuando falla', () => {
     expect(logger.warn).toHaveBeenCalledWith(
       '[VENUES_SUPERADMIN] Transfer rejected',
       expect.objectContaining({ venueId: 'v1', code: 'IVA_NEGOCIO_CAMBIO_DE_ORGANIZACION' }),
+    )
+  })
+
+  it('B9: una sede con historial de pago al personal es un 409 esperado: va a next con su código y no se registra como error', async () => {
+    const conHistoria = sedeConPagoAlPersonalError('trasladar')
+    prismaMock.$transaction.mockRejectedValueOnce(conHistoria)
+    const next = jest.fn() as NextFunction
+
+    await transferVenue(req, res, next)
+
+    expect(next).toHaveBeenCalledWith(conHistoria)
+    expect(conHistoria).toMatchObject({ statusCode: 409, code: 'SEDE_CON_PAGO_AL_PERSONAL' })
+    expect(logger.error).not.toHaveBeenCalled()
+    expect(logger.warn).toHaveBeenCalledWith(
+      '[VENUES_SUPERADMIN] Transfer rejected',
+      expect.objectContaining({ venueId: 'v1', code: 'SEDE_CON_PAGO_AL_PERSONAL' }),
     )
   })
 

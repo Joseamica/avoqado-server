@@ -1,7 +1,7 @@
 // src/services/fiscal/cfdi.service.ts
 import { ConflictError } from '../../errors/AppError'
 import { bloquearOrdenParaFacturar, bloquearOrdenesParaFacturar, tomarAdmisionCompartida } from './admisionIva'
-import { excluirSiEstaEnGlobal, CFDI_VIVO } from './exclusionGlobal'
+import { excluirSiEstaEnGlobal, CFDI_VIVO, llavePrincipalDe } from './exclusionGlobal'
 import { capturarEntrada, huellaDeEntrada, leerEntrada, EntradaDocumentalV1 } from './entradaDocumental'
 import { finalizarTimbre, completarArchivos, escalarIntentoIncierto, ArchivosCfdi } from './finalizadorCfdi'
 import { sellarRenglones, liberarSellosDe } from './sellosIva'
@@ -90,6 +90,10 @@ const CFDI_LIST_SELECT = {
     orderBy: { createdAt: 'desc' as const },
     take: 5,
   },
+  // C1 · Tarea 11 (contrato S6 del dashboard): el RFC emisor, para pedir la complementaria de una global desde la lista. La llave sólo se lee
+  // por dentro (dice si la global es complementaria y de cuál principal) y NO sale en la respuesta.
+  fiscalEmisorId: true,
+  idempotencyKey: true,
 } as const
 
 /**
@@ -144,7 +148,7 @@ export async function listCfdisForVenue(params: ListCfdisParams): Promise<ListCf
   const skip = (page - 1) * pageSize
   const take = pageSize
 
-  const [cfdis, total] = await Promise.all([
+  const [filas, total] = await Promise.all([
     prisma.cfdi.findMany({
       where,
       // 🔴 H23: por fecha de timbrado. Lo no timbrado (en proceso o fallido) va ARRIBA: una factura que acaba de fallar no
@@ -157,7 +161,56 @@ export async function listCfdisForVenue(params: ListCfdisParams): Promise<ListCf
     prisma.cfdi.count({ where }),
   ])
 
-  return { cfdis, total, page, pageSize }
+  return { cfdis: await conSuPrincipal(venueId, filas), total, page, pageSize }
+}
+
+/**
+ * C1 · Tarea 11 (S6): a cada fila de la lista, `complementariaDe` = el id de la global principal si la fila es una complementaria (su llave
+ * `<llave de la principal>-c<n>`), o null (principal o individual). Las principales se buscan por su llave, UNA consulta acotada a la página.
+ * La llave no sale en la respuesta. Una complementaria cuya principal no aparece (no debería pasar: las globales no se borran) lee el dato de su
+ * propia entrada, también acotado.
+ */
+async function conSuPrincipal<T extends { id: string; isGlobal: boolean; idempotencyKey: string | null }>(
+  venueId: string,
+  filas: T[],
+): Promise<Array<Omit<T, 'idempotencyKey'> & { complementariaDe: string | null }>> {
+  const llaves = [
+    ...new Set(
+      filas
+        .filter(f => f.isGlobal && f.idempotencyKey)
+        .map(f => llavePrincipalDe(f.idempotencyKey as string))
+        .filter((k): k is string => k !== null),
+    ),
+  ]
+  const porLlave = new Map<string, string>()
+  if (llaves.length) {
+    const principales = await prisma.cfdi.findMany({
+      where: { venueId, isGlobal: true, idempotencyKey: { in: llaves } },
+      select: { id: true, idempotencyKey: true },
+      take: llaves.length,
+    })
+    for (const p of principales) if (p.idempotencyKey) porLlave.set(p.idempotencyKey, p.id)
+  }
+  const deLaEntrada = new Map<string, string>()
+  const sinPrincipal = filas.filter(f => {
+    const k = f.isGlobal && f.idempotencyKey ? llavePrincipalDe(f.idempotencyKey) : null
+    return k !== null && !porLlave.has(k)
+  })
+  if (sinPrincipal.length) {
+    const propias = await prisma.cfdi.findMany({
+      where: { venueId, id: { in: sinPrincipal.map(f => f.id) } },
+      select: { id: true, entrada: true },
+      take: sinPrincipal.length,
+    })
+    for (const f of propias) {
+      const de = (f.entrada as { complementariaDe?: unknown } | null)?.complementariaDe
+      if (typeof de === 'string' && de) deLaEntrada.set(f.id, de)
+    }
+  }
+  return filas.map(({ idempotencyKey, ...resto }) => {
+    const k = resto.isGlobal && idempotencyKey ? llavePrincipalDe(idempotencyKey) : null
+    return { ...resto, complementariaDe: k === null ? null : (porLlave.get(k) ?? deLaEntrada.get(resto.id) ?? null) }
+  })
 }
 
 export interface IssueReceptor {
@@ -486,7 +539,8 @@ export async function issueCfdiForOrder(
   return finalizarEmision(legacyReservation, stamped, provider, bundle.venueSlug, deps)
 }
 
-const PROCESANDO = 'La factura de esta venta se está procesando; intenta de nuevo en unos minutos.'
+/** «Otra solicitud lo tiene en proceso». La global (`cfdiGlobal.service.ts`) la importa: el job lo distingue de un periodo detenido por el texto EXACTO. */
+export const PROCESANDO = 'La factura de esta venta se está procesando; intenta de nuevo en unos minutos.'
 /** D9 (B3a): no queda ningún concepto con importe que facturar. */
 export const MOTIVO_TODO_CORTESIA =
   'Esta venta no tiene importe que facturar: todos sus artículos son cortesía o tienen descuento completo.'
@@ -1045,6 +1099,8 @@ export type RenglonParaCfdi = {
   orderPromotionId?: string | null
   /** Cortesía (terminal o móvil): decide qué parte de su descuento vive en la cabecera. */
   isCortesia?: boolean | null
+  /** C1/C2: el OrderItem del que nace el concepto (también sus extras). No viaja al PAC. */
+  origen?: string
 }
 
 const centavos = (d: any) => Math.round(Number(d ?? 0) * 100)
@@ -1157,6 +1213,8 @@ const pesosTxt = (cents: number) => `$${(cents / 100).toFixed(2)}`
 export interface RenglonExaminado {
   /** `OrderItem.id` (lo que guardan los repartos de B2); sin id, su posición. */
   llave: string
+  /** C1: el `OrderItem.id` del renglón, que heredan TODOS sus conceptos como `origen`; sin id, ausente (nunca la posición). */
+  orderItemId?: string
   nombre: string
   /** El IVA con que se agrupa para D8: el tratamiento, o la tupla vieja si es una entrada legacy. */
   grupoIva: string
@@ -1305,6 +1363,7 @@ export function examinarRenglon(it: RenglonParaCfdi, indice: number): RenglonExa
   }))
   return {
     llave: llaveDeRenglon(it, indice),
+    ...(it.id ? { orderItemId: it.id } : {}),
     nombre: nombreProducto,
     grupoIva: grupoIvaDe(it),
     brutoCents: brutoRenglonCents,
@@ -1331,7 +1390,10 @@ export function aplicarDescuentoAlRenglon(r: RenglonExaminado, descuentoCents: n
     descuentoCents,
     r.conceptos.map(c => importeConceptoCents(c)),
   )
-  return { items: r.conceptos.map((c, i) => ({ ...c, discountAmount: new Prisma.Decimal(partes[i] / 100) })), motivos: [] }
+  // C1/C2: cada concepto —el producto y cada extra— sabe de qué OrderItem nace (`origen`); no viaja al PAC (`assembleSaleInput` arma el
+  // item campo por campo). Un renglón sin id no lo pone: la posición no identifica nada fuera de esta cuenta.
+  const origen = r.orderItemId ? { origen: r.orderItemId } : {}
+  return { items: r.conceptos.map((c, i) => ({ ...c, discountAmount: new Prisma.Decimal(partes[i] / 100), ...origen })), motivos: [] }
 }
 
 /** Un renglón suelto con sólo su descuento propio. Sólo lo usan las pruebas del nombre del concepto: un omitido (D9) devuelve vacío, sin motivo ni marca de la regla del PAC. */

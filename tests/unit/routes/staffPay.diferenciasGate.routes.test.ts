@@ -6,9 +6,13 @@ import request from 'supertest'
 
 const mockSedeTiene = jest.fn()
 const mockOrgTiene = jest.fn()
+const mockActivada = jest.fn()
 jest.mock('@/services/dashboard/staffPay/acceso', () => ({
   venueHasServicePayAccess: (...a: unknown[]) => mockSedeTiene(...a),
   organizacionTieneServicePay: (...a: unknown[]) => mockOrgTiene(...a),
+  organizacionDeLaSedeActivada: (...a: unknown[]) => mockActivada(...a),
+  MENSAJE_SIN_ACTIVAR:
+    'Pago al personal todavía no está activado: actívalo en Pago al personal → Periodos. Activarlo pide el permiso de cerrar periodos en todas las sucursales; si no lo tienes, pídeselo al dueño del negocio.',
 }))
 // El permiso no es lo que se prueba aquí: pasa siempre.
 jest.mock('@/middlewares/checkPermission.middleware', () => ({ checkPermission: () => (_req: any, _res: any, next: any) => next() }))
@@ -44,7 +48,10 @@ beforeAll(() => {
 afterAll(done => {
   server.close(done)
 })
-beforeEach(() => jest.clearAllMocks())
+beforeEach(() => {
+  jest.clearAllMocks()
+  mockActivada.mockResolvedValue(true) // las pruebas de la fase 2 hablan del plan; la activación se prueba abajo
+})
 
 describe('diferencias de UNA clase: gate de organización (Codex R2-R1-1, spec §5.6)', () => {
   it('sede con el módulo APAGADO + organización con el módulo en otra sede ⇒ 200 (preview y liquidar)', async () => {
@@ -163,5 +170,76 @@ describe('las tres rutas nuevas validan su entrada (cada una con su validateRequ
       .post(`${base}/class-sessions/${CLASE}/difference/settle`)
       .send({ ...CUERPO, ampliarAlcance: true })
     expect(ok.body).toMatchObject({ handler: 'postSettleDifference', body: { ...CUERPO, ampliarAlcance: true } })
+  })
+})
+
+describe('activación (spec fase 3 §10): el plan abre la configuración; el dinero exige además activar', () => {
+  beforeEach(() => {
+    mockSedeTiene.mockResolvedValue(true)
+    mockOrgTiene.mockResolvedValue(true)
+    mockActivada.mockResolvedValue(false)
+  })
+
+  it('PRO sin activar: niveles, asignaciones y tablas sí; el reporte y los periodos no (403 not_activated)', async () => {
+    for (const ruta of ['/levels', '/assignments', '/tables']) {
+      const r = await request(server).get(`${base}${ruta}`)
+      expect({ ruta, status: r.status }).toEqual({ ruta, status: 200 })
+    }
+    for (const ruta of ['/report', '/periods']) {
+      const r = await request(server).get(`${base}${ruta}`)
+      expect({ ruta, status: r.status, error: r.body.error }).toEqual({ ruta, status: 403, error: 'not_activated' })
+      expect(r.body.message).toMatch(/no está activado/)
+    }
+    expect(mockActivada).toHaveBeenCalledWith(SEDE)
+  })
+
+  it('PRO sin activar: tampoco la tarjeta de una clase, sus diferencias ni las propinas', async () => {
+    for (const ruta of [`/class-sessions/${CLASE}/pay`, `/class-sessions/${CLASE}/difference`]) {
+      const r = await request(server).get(`${base}${ruta}`)
+      expect({ ruta, status: r.status, error: r.body.error }).toEqual({ ruta, status: 403, error: 'not_activated' })
+    }
+    const tips = await request(server).put(`${base}/tips`).send({ encender: true })
+    expect(tips.body.error).toBe('not_activated')
+    // Ni liquidar ni ajustar una clase: también mueven dinero.
+    const liq = await request(server).post(`${base}/class-sessions/${CLASE}/difference/settle`).send(CUERPO)
+    expect(liq.body.error).toBe('not_activated')
+    const ajuste = await request(server)
+      .put(`${base}/class-sessions/${CLASE}/pay-adjustments`)
+      .send({ payCountOverride: null, payAmountOverride: 600, payExcluded: false, reason: 'Monto acordado' })
+    expect(ajuste.body.error).toBe('not_activated')
+  })
+
+  it('activar exige el plan pero no estar activado', async () => {
+    const r = await request(server).post(`${base}/activate`).send({ periodicidad: 'SEMIMONTHLY' })
+    expect(r.status).toBe(200)
+    mockSedeTiene.mockResolvedValue(false)
+    const sinPlan = await request(server).post(`${base}/activate`).send({ periodicidad: 'SEMIMONTHLY' })
+    expect(sinPlan.status).toBe(403)
+    expect(sinPlan.body.error).toBe('module_disabled')
+    expect(sinPlan.body.message).toMatch(/viene en el plan Pro o se contrata suelto por sucursal/)
+  })
+
+  it('la periodicidad se cambia ANTES de activar (después la fija el service: PERIODICIDAD_FIJA)', async () => {
+    const r = await request(server).patch(`${base}/periodicity`).send({ periodicidad: 'SEMIMONTHLY' })
+    expect(r.status).toBe(200)
+    expect(r.body).toMatchObject({ handler: 'patchPeriodicity' })
+  })
+
+  it('activado: el reporte pasa', async () => {
+    mockActivada.mockResolvedValue(true)
+    expect((await request(server).get(`${base}/report`)).status).toBe(200)
+  })
+
+  it('sin plan, /access sigue contestando: la pantalla explica cómo prenderlo', async () => {
+    mockSedeTiene.mockResolvedValue(false)
+    const r = await request(server).get(`${base}/access`)
+    expect(r.status).toBe(200)
+    expect(r.body).toMatchObject({ handler: 'getAccess' })
+  })
+
+  it('el gate de activación falla hacia next (500), no deja pasar', async () => {
+    mockActivada.mockRejectedValue(new Error('se cayó la base'))
+    const r = await request(server).get(`${base}/report`)
+    expect(r.status).toBe(500)
   })
 })

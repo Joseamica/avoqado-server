@@ -4,20 +4,19 @@
  * Handles clawback of commissions after payout.
  * Clawbacks occur when refunds happen after commission was already paid.
  *
- * Key Business Rules:
- * - Clawbacks only apply to PAID commissions
- * - Creates negative adjustments for future payouts
- * - Tracks reason (REFUND, CHARGEBACK, CORRECTION, FRAUD)
- * - Maintains full audit trail
+ * Fase 3 (A4): un clawback nuevo ANULA la comisión con `anularComision` (con sus reversos y su resumen) y ya no crea
+ * `CommissionClawback`; lo ya pagado lo descuenta el siguiente sobre de Pago al personal. Aquí quedan las lecturas y la
+ * anulación de los `CommissionClawback` históricos.
  */
 
 import prisma from '../../../utils/prismaClient'
 import { STAFF_PUBLIC_SELECT } from '../../../utils/staffPublicSelect'
 import logger from '../../../config/logger'
-import { Prisma, ClawbackReason, CommissionCalcStatus } from '@prisma/client'
+import { Prisma, ClawbackReason } from '@prisma/client'
 import { BadRequestError, NotFoundError } from '../../../errors/AppError'
 import { decimalToNumber } from './commission-utils'
 import { logAction } from '../activity-log.service'
+import { anularComision } from './commission-calculation.service'
 
 // ============================================
 // Type Definitions
@@ -167,272 +166,24 @@ export async function getPendingClawbacksForStaff(staffId: string, venueId: stri
 // ============================================
 
 /**
- * Create a clawback for a commission calculation
- *
- * Called when:
- * - A refund occurs after commission was paid
- * - A chargeback is received
- * - A manual correction is needed
- * - Fraud is detected
+ * «Clawback» desde el dashboard (fase 3, A4; spec §8): SIEMPRE anula la comisión con la operación única `anularComision`
+ * —también con motivo CORRECTION y aunque su resumen ya se haya pagado por el flujo viejo; se rechaza sólo si ese resumen
+ * tiene un pago EN CURSO— y ya no crea `CommissionClawback` (nadie lo aplicaba: H2b). Si la comisión ya estaba en un recibo de Pago al personal, el siguiente
+ * cierre le resta su monto solo (spec §6.4). `data.refundPaymentId` se acepta por compatibilidad y no se usa.
  */
-export async function createClawback(calculationId: string, venueId: string, data: CreateClawbackInput, createdById: string): Promise<any> {
-  // Verify calculation exists and was paid
-  const calculation = await prisma.commissionCalculation.findFirst({
-    where: {
-      id: calculationId,
-      venueId,
-    },
-    include: {
-      summary: {
-        include: {
-          payouts: {
-            where: { status: 'PAID' },
-          },
-        },
-      },
-    },
-  })
-
-  if (!calculation) {
-    throw new NotFoundError(`Commission calculation ${calculationId} not found`)
-  }
-
-  // Check if commission was already paid out
-  const wasPaid = calculation.summary?.payouts?.some(p => p.status === 'PAID')
-
-  if (!wasPaid && data.reason !== ClawbackReason.CORRECTION) {
-    // If not paid, we can just void the calculation instead of clawback
-    logger.info('Commission not yet paid, voiding instead of clawback', {
-      calculationId,
-      reason: data.reason,
-    })
-
-    await prisma.commissionCalculation.update({
-      where: { id: calculationId },
-      data: {
-        status: CommissionCalcStatus.VOIDED,
-        voidedAt: new Date(),
-        voidedBy: createdById,
-        voidReason: `${data.reason}: ${data.notes ?? 'No notes'}`,
-      },
-    })
-
-    return { voided: true, calculationId }
-  }
-
-  // Calculate clawback amount (same as original commission)
-  const clawbackAmount = decimalToNumber(calculation.netCommission)
-
-  // Check for existing clawback
-  const existingClawback = await prisma.commissionClawback.findFirst({
-    where: {
-      calculationId,
-      reason: data.reason,
-    },
-  })
-
-  if (existingClawback) {
-    throw new BadRequestError(`Clawback already exists for this calculation with reason ${data.reason}`)
-  }
-
-  // summaryId is required - use calculation's summaryId
-  if (!calculation.summaryId) {
-    throw new BadRequestError('Commission calculation does not have an associated summary yet')
-  }
-
-  const clawback = await prisma.commissionClawback.create({
-    data: {
-      calculationId,
-      summaryId: calculation.summaryId,
-      amount: clawbackAmount,
-      reason: data.reason,
-      notes: data.notes,
-      refundPaymentId: data.refundPaymentId,
-      createdById,
-    },
-    include: {
-      calculation: {
-        select: {
-          staffId: true,
-          netCommission: true,
-        },
-      },
-    },
-  })
-
-  logger.info('Commission clawback created', {
-    clawbackId: clawback.id,
-    calculationId,
-    staffId: calculation.staffId,
-    amount: clawbackAmount,
-    reason: data.reason,
-    createdById,
-  })
-
-  logAction({
-    staffId: createdById,
-    venueId,
-    action: 'COMMISSION_CLAWBACK_CREATED',
-    entity: 'CommissionClawback',
-    entityId: clawback.id,
-    data: { calculationId, amount: clawbackAmount, reason: data.reason },
-  })
-
-  return clawback
-}
-
-/**
- * Create clawback for a refund (called from refund hook)
- */
-export async function createRefundClawback(
-  originalPaymentId: string,
-  refundPaymentId: string,
-  refundAmount: number,
+export async function createClawback(
+  calculationId: string,
+  venueId: string,
+  data: CreateClawbackInput,
   createdById: string,
-): Promise<any | null> {
-  // Find commission calculation for original payment
-  const calculation = await prisma.commissionCalculation.findFirst({
-    where: {
-      paymentId: originalPaymentId,
-      status: { not: CommissionCalcStatus.VOIDED },
-    },
-    include: {
-      summary: {
-        include: {
-          payouts: {
-            where: { status: 'PAID' },
-          },
-        },
-      },
-    },
+): Promise<{ voided: true; calculationId: string; anuladas: string[] }> {
+  const { anuladas } = await anularComision({
+    calculationId,
+    venueId,
+    actorId: createdById ?? null,
+    motivo: `${data.reason}: ${data.notes ?? 'Sin notas'}`,
   })
-
-  if (!calculation) {
-    logger.info('No commission found for refunded payment', {
-      originalPaymentId,
-      refundPaymentId,
-    })
-    return null
-  }
-
-  const wasPaid = calculation.summary?.payouts?.some(p => p.status === 'PAID')
-
-  if (!wasPaid) {
-    logger.info('Commission not yet paid, skipping clawback', {
-      originalPaymentId,
-      calculationId: calculation.id,
-    })
-    return null
-  }
-
-  // summaryId is required
-  if (!calculation.summaryId) {
-    logger.warn('Commission calculation has no summary, cannot create clawback', {
-      originalPaymentId,
-      calculationId: calculation.id,
-    })
-    return null
-  }
-
-  // Calculate proportional clawback
-  const originalAmount = decimalToNumber(calculation.baseAmount)
-  const refundRatio = originalAmount > 0 ? refundAmount / originalAmount : 1
-  const clawbackAmount = decimalToNumber(calculation.netCommission) * refundRatio
-
-  const clawback = await prisma.commissionClawback.create({
-    data: {
-      calculationId: calculation.id,
-      summaryId: calculation.summaryId,
-      amount: clawbackAmount,
-      reason: ClawbackReason.REFUND,
-      notes: `Refund of ${refundAmount} (${(refundRatio * 100).toFixed(1)}% of original)`,
-      refundPaymentId,
-      createdById,
-    },
-  })
-
-  logger.info('Refund clawback created', {
-    clawbackId: clawback.id,
-    calculationId: calculation.id,
-    originalPaymentId,
-    refundPaymentId,
-    refundRatio,
-    clawbackAmount,
-  })
-
-  return clawback
-}
-
-// ============================================
-// Apply Operations
-// ============================================
-
-/**
- * Apply pending clawbacks to a summary
- * Called during aggregation or payout creation
- */
-export async function applyClawbacksToSummary(summaryId: string, venueId: string): Promise<number> {
-  const summary = await prisma.commissionSummary.findFirst({
-    where: { id: summaryId, venueId },
-  })
-
-  if (!summary) {
-    throw new NotFoundError(`Summary ${summaryId} not found`)
-  }
-
-  // Get pending clawbacks for this staff
-  const pendingClawbacks = await prisma.commissionClawback.findMany({
-    where: {
-      calculation: {
-        staffId: summary.staffId,
-        venueId,
-      },
-      appliedAt: null,
-    },
-  })
-
-  if (pendingClawbacks.length === 0) {
-    return 0
-  }
-
-  const totalClawback = pendingClawbacks.reduce((sum, c) => sum + decimalToNumber(c.amount), 0)
-
-  // Apply clawbacks as deduction
-  await prisma.$transaction(async tx => {
-    // Update summary with deduction
-    const currentDeduction = decimalToNumber(summary.deductionAmount)
-    const newDeduction = currentDeduction + totalClawback
-    const newNetAmount = decimalToNumber(summary.grossAmount) - newDeduction
-
-    await tx.commissionSummary.update({
-      where: { id: summaryId },
-      data: {
-        deductionAmount: newDeduction,
-        netAmount: Math.max(0, newNetAmount), // Don't go negative
-        notes: summary.notes ? `${summary.notes}\nClawbacks applied: ${totalClawback}` : `Clawbacks applied: ${totalClawback}`,
-        version: { increment: 1 },
-      },
-    })
-
-    // Mark clawbacks as applied
-    await tx.commissionClawback.updateMany({
-      where: {
-        id: { in: pendingClawbacks.map(c => c.id) },
-      },
-      data: {
-        appliedAt: new Date(),
-        appliedToSummaryId: summaryId,
-      },
-    })
-  })
-
-  logger.info('Clawbacks applied to summary', {
-    summaryId,
-    clawbackCount: pendingClawbacks.length,
-    totalClawback,
-  })
-
-  return totalClawback
+  return { voided: true, calculationId, anuladas }
 }
 
 // ============================================

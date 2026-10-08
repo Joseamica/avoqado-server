@@ -50,6 +50,19 @@ export const ordenParaIvaSelect = {
 } as const satisfies Prisma.OrderSelect
 
 /**
+ * La tasa de UN renglón, como la lee la póliza: sello > tratamiento del producto > IVA_16; un BLOQUEADO conserva la tasa de su
+ * producto. La comparten la mezcla de la cuenta y la base «sin IVA» de la comisión por categorías (fase 3 de Pago al personal).
+ */
+export function tasaDelRenglon(it: Pick<RenglonParaIva, 'ivaTratamiento' | 'product'>): number {
+  const tratamiento = resolverTratamiento({
+    selladoIva: it.ivaTratamiento,
+    productoIva: it.product?.ivaTratamiento,
+    tieneProducto: it.product != null,
+  })
+  return hayBloqueados([tratamiento]) ? Number(it.product?.taxRate ?? 0.16) : tuplaDesdeTratamiento(tratamiento, 0).taxRate
+}
+
+/**
  * Mezcla monetaria de la cuenta para repartir un cobro (pólizas y comisión sin IVA).
  * `total` conserva extras, peso y precio aplicado; B2 aporta el neto propio y su reparto dirigido.
  * La tasa sigue al CFDI: sello > tratamiento del producto > IVA_16. Esto NO construye conceptos SAT.
@@ -66,12 +79,7 @@ export function grossByRateFromOrder(order: OrdenParaIva | null | undefined): { 
       // Compatibilidad con llamadores antiguos sin total. Las lecturas de cobros siempre traen total e id.
       const total = it.total ?? new Prisma.Decimal(String(it.unitPrice)).mul(it.quantity)
       const id = it.id ?? String(index)
-      const tratamiento = resolverTratamiento({
-        selladoIva: it.ivaTratamiento,
-        productoIva: it.product?.ivaTratamiento,
-        tieneProducto: it.product != null,
-      })
-      const rate = hayBloqueados([tratamiento]) ? Number(it.product?.taxRate ?? 0.16) : tuplaDesdeTratamiento(tratamiento, 0).taxRate
+      const rate = tasaDelRenglon(it)
       return {
         id,
         rate,

@@ -34,7 +34,6 @@ import prisma from '../../utils/prismaClient'
 import { generateDigitalReceipt } from './digitalReceipt.tpv.service'
 import { Decimal } from '@prisma/client/runtime/library'
 import { asegurarObligacionDeCostoNegativo, costearYProyectarReembolso } from '../payments/deferredTransactionCost.service'
-import { createRefundCommission } from '../dashboard/commission/commission-calculation.service'
 import { restockOrderItems } from '../dashboard/inventoryRestock.service'
 import { logAction } from '../dashboard/activity-log.service'
 import { resolveAutofacturaAvailable } from './payment.tpv.service'
@@ -1178,16 +1177,8 @@ export async function recordRefund(
     },
   })
 
-  // REFERRAL HOOK: trigger referral void if the original order had a QUALIFIED referral
-  // (idempotent: no-ops if no QUALIFIED Referral matches this orderId)
-  if (postCommitAuthority.orderId) {
-    try {
-      const { onOrderRefunded } = await import('@/services/referrals/referralRefund.service')
-      await onOrderRefunded({ orderId: postCommitAuthority.orderId, venueId })
-    } catch (err) {
-      console.error('[referral hook] onOrderRefunded failed for order', postCommitAuthority.orderId, err)
-    }
-  }
+  // El referido NO se revierte aquí: su obligación ya quedó encolada en la transacción de la devolución
+  // (`enqueueRefundPaymentEffectsInTx`) y la cumple el worker (A6 F4, Codex bloque A r1).
 
   // ═══════════════════════════════════════════════════════════════════════════
   // STEP 4.5: Restock inventory when this refund fully reverses the order (Bug B)
@@ -1254,18 +1245,6 @@ export async function recordRefund(
     // Don't fail the refund if TransactionCost creation fails
     logger.error('Failed to create refund TransactionCost', { error, refundPaymentId: result.id })
   }
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // STEP 5b: Create negative CommissionCalculation for refund (non-blocking)
-  // ═══════════════════════════════════════════════════════════════════════════
-  createRefundCommission(result.id, refundData.originalPaymentId).catch(error => {
-    // Don't fail the refund if commission reversal fails
-    logger.error('Failed to create refund commission', {
-      refundPaymentId: result.id,
-      originalPaymentId: refundData.originalPaymentId,
-      error: error instanceof Error ? error.message : String(error),
-    })
-  })
 
   // ═══════════════════════════════════════════════════════════════════════════
   // STEP 6: Revertir el sello que esta venta había otorgado

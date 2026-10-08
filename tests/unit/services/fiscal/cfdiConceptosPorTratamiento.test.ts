@@ -1721,3 +1721,107 @@ describe('B3a · ronda final, ajuste 2 (r2): la cota cuenta también las filas d
     )
   })
 })
+
+// ─── Bloque C1, Tarea 2: la fila guarda SIEMPRE lo que suma el PAC (controles de B3a F1; v9, C1-46) ───
+describe('C1 · control — la fila guarda lo que suma el PAC, con o sin ajuste de la 6b y con o sin descuento (B3a F1)', () => {
+  const capuccino = (descuento: number) =>
+    renglon({
+      id: 'oi-cap',
+      productName: 'CAPUCCINO',
+      unitPrice: D(65),
+      total: D(70),
+      discountAmount: D(descuento),
+      modifiers: [{ name: 'Deslactosada', price: D(5), quantity: 1 }],
+      product: producto({ name: 'CAPUCCINO' }),
+    })
+
+  it('control — IVA aparte, sin ajuste (el PAC da lo cobrado): $65 + $5 con $1.11 ⇒ se timbra y guarda 68.89 + 11.02 = 79.91', async () => {
+    const r = await resultadoDe(
+      orden(79.91, {
+        subtotal: D(70),
+        taxAmount: D(11.02),
+        total: D(79.91),
+        discountAmount: D(1.11),
+        contratoDePrecio: 'IVA_APARTE',
+        items: [capuccino(1.11)],
+      }),
+    )
+    expect(r.motivos).toEqual([])
+    expect(r.status).toBe('STAMPED')
+    expect(r.guardado).toEqual({ subtotalCents: 6889, taxCents: 1102, totalCents: 7991 })
+  })
+
+  it('control — IVA aparte, con ajuste (R1 de la 6b: 2 × $2.03 con $1 c/u; el PAC daría 2.39 y se cobró 2.38) ⇒ uno pasa a $1.01 y guarda 2.05 + 0.33 = 2.38', async () => {
+    const pieza = (id: string) => renglon({ id, productName: 'PIEZA', unitPrice: D(2.03), total: D(2.03), discountAmount: D(1) })
+    const r = await resultadoDe(
+      orden(2.38, {
+        subtotal: D(4.06),
+        taxAmount: D(0.32),
+        total: D(2.38),
+        discountAmount: D(2),
+        contratoDePrecio: 'IVA_APARTE',
+        items: [pieza('oi-a'), pieza('oi-b')],
+      }),
+    )
+    expect(r.status).toBe('STAMPED')
+    expect(r.guardado).toEqual({ subtotalCents: 205, taxCents: 33, totalCents: 238 })
+    // Ajuste M2 del controlador: `resultadoDe` no devuelve `items`; los descuentos se leen del payload que recibe el proveedor.
+    expect(r.payload.items.map((i: any) => i.discountCents).sort()).toEqual([100, 101])
+  })
+
+  it('control — IVA aparte SIN descuento guarda los montos de la cabecera, como hoy', async () => {
+    const r = await resultadoDe(
+      orden(116, {
+        subtotal: D(100),
+        taxAmount: D(16),
+        total: D(116),
+        contratoDePrecio: 'IVA_APARTE',
+        items: [renglon({ unitPrice: D(100), total: D(100) })],
+      }),
+    )
+    expect(r.status).toBe('STAMPED')
+    expect(r.guardado).toEqual({ subtotalCents: 10000, taxCents: 1600, totalCents: 11600 })
+  })
+
+  // v9 (Codex C1-46): el contraejemplo que la condición «sólo si hubo ajustes o descuento con IVA aparte» de la v8 habría regresado. `orden()` trae
+  // IVA INCLUIDO por omisión; sin descuentos y sin ajustes, el cargador igual guarda lo que suma el PAC (el `else` incondicional de B3a F1).
+  it('control — 🔴 regresión (C1-46): IVA incluido 16 %, sin descuentos, dos conceptos de $65 cobrados $130 ⇒ guarda base 112.07 + IVA 17.93 = 130.00 (no 112.06 + 17.94)', async () => {
+    const r = await resultadoDe(
+      orden(130, {
+        items: [
+          renglon({ id: 'oi-a', productName: 'PIEZA A', unitPrice: D(65), total: D(65) }),
+          renglon({ id: 'oi-b', productName: 'PIEZA B', unitPrice: D(65), total: D(65) }),
+        ],
+      }),
+    )
+    expect(r.motivos).toEqual([])
+    expect(r.status).toBe('STAMPED')
+    expect(r.guardado).toEqual({ subtotalCents: 11207, taxCents: 1793, totalCents: 13000 })
+  })
+})
+
+// ─── C1 Tarea 6: cada concepto sabe de qué OrderItem nace (`origen`), y eso nunca viaja al PAC ───────────────────────────────
+describe('C1 · `origen` de cada concepto', () => {
+  it('🔴 cada concepto —también el del extra— trae el id del OrderItem del que nace; uno sin id no lo inventa', () => {
+    const { items, motivos } = reconstruirConceptos(
+      { ...CASOS.extras, items: CASOS.extras.items.map((i: any) => ({ ...i, tratamiento: 'IVA_16' })) } as any,
+      'o1',
+    )
+    expect(motivos).toEqual([])
+    expect(items.map(i => [i.productName, i.origen])).toEqual([
+      ['CAPUCCINO (Canela)', 'oi-cap'],
+      ['Deslactosada (CAPUCCINO)', 'oi-cap'],
+      ['Pan dulce', 'oi-pan'],
+    ])
+    const sinId = reconstruirConceptos({ items: [renglon({ id: undefined })] } as any, 'o1')
+    expect(sinId.items).toHaveLength(1)
+    expect(sinId.items[0]).not.toHaveProperty('origen')
+  })
+  it('control — `origen` no llega al payload del PAC: con un renglón con extra, ningún item lo trae (las doradas individuales no cambian)', async () => {
+    const r = await resultadoDe(CASOS.extras)
+    expect(r.status).toBe('STAMPED') // y `resultadoDe` comprueba que el motor manda EXACTAMENTE este payload
+    expect(r.payload.items).toHaveLength(3)
+    for (const i of r.payload.items) expect(i).not.toHaveProperty('origen')
+    expect(JSON.stringify(r.payload)).not.toMatch(/origen|oi-cap/)
+  })
+})

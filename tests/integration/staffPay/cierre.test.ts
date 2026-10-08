@@ -2,7 +2,18 @@
 import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { cerrarPeriodo, previewCierre } from '@/services/dashboard/staffPay/cierre.service'
-import { barreraDelPeriodo, borrarMundo, clase, confirmadas, crearMundo, crearSede, Mundo, tablaMindform, TZ } from './_mundo'
+import {
+  barreraDeLaOrganizacion,
+  barreraDelPeriodo,
+  borrarMundo,
+  clase,
+  confirmadas,
+  crearMundo,
+  crearSede,
+  Mundo,
+  tablaMindform,
+  TZ,
+} from './_mundo'
 import { fechaComoDbDate, venuePeriodRange } from '@/services/dashboard/staffPay/periodos'
 import { valorarClases } from '@/services/dashboard/staffPay/valoracion'
 import { agregarAjusteManual } from '@/services/dashboard/staffPay/ajustesManuales.service'
@@ -53,6 +64,24 @@ const cerrar = async (
 afterEach(async () => borrarMundo(m))
 
 describe('cerrar el periodo (spec §6.3)', () => {
+  it('el cierre espera el candado de la organización más que una operación corta (B9: su presupuesto es de 30 s, no 6)', async () => {
+    m = await mundoConAgosto('cierre-espera')
+    await clase(m, { staffId: m.ana, inicioIso: '2026-08-04T14:00:00Z', reservas: confirmadas(8) })
+    const huella = (await preview(m)).huella
+    const b = await barreraDeLaOrganizacion(m.orgId)
+    try {
+      const t = Date.now()
+      const enCurso = cerrar(m, { huella })
+      await b.esperarA(1)
+      await new Promise(r => setTimeout(r, 6_000)) // más que el presupuesto de 6 s de una operación corta
+      await b.soltar()
+      expect(await enCurso).toMatchObject({ yaCerrado: false, total: '570.00' })
+      expect(Date.now() - t).toBeGreaterThanOrEqual(6_000)
+    } finally {
+      await b.soltar()
+    }
+  }, 30_000)
+
   it('congela cada clase pagable, ancla también las excluidas y suma los recibos de lo persistido', async () => {
     m = await mundoConAgosto('cierre-feliz')
     const c8 = await clase(m, { staffId: m.ana, inicioIso: '2026-08-04T14:00:00Z', reservas: confirmadas(8) })
@@ -202,6 +231,21 @@ describe('cerrar el periodo (spec §6.3)', () => {
     expect(conExcepcion.bloqueos).toEqual(expect.arrayContaining([{ codigo: 'EXCEPCIONES', n: 1 }]))
     await expect(cerrar(m, { huella: conExcepcion.huella })).rejects.toMatchObject({ code: 'HAY_EXCEPCIONES' })
     expect(await prisma.serviceEarning.count({ where: { organizationId: m.orgId } })).toBe(0)
+  })
+
+  it('E6a-fix5 K-n3: el 400 PERIODO_NO_TERMINA dice la fecha como los demás mensajes («31 ago 2026»), no en ISO', async () => {
+    m = await mundoConAgosto('cierre-no-termina-fecha')
+    const p = await preview(m, { ahora: new Date('2026-08-20T12:00:00Z') })
+    await expect(
+      cerrarPeriodo({
+        userId: m.owner,
+        venueId: m.venueId,
+        fecha: '2026-08-15',
+        ahora: new Date('2026-08-20T12:00:00Z'),
+        confirmarHuerfanas: true,
+        huellaEsperada: p.huella,
+      }),
+    ).rejects.toMatchObject({ code: 'PERIODO_NO_TERMINA', message: 'El periodo termina el 31 ago 2026: todavía no se puede cerrar' })
   })
 
   it('las reservas de clase sin horario se confirman explícitamente y sus IDs quedan en el ActivityLog', async () => {
@@ -450,5 +494,17 @@ describe('cerrar el periodo (spec §6.3)', () => {
     await cerrar(m)
     acceso.sedesConPermiso.mockResolvedValueOnce([])
     await expect(cerrar(m)).rejects.toMatchObject(sinPermiso)
+  })
+
+  it('D3a r1: con la cancelación tardía prendida, una cancelada tarde SIN coach queda en $0 y no bloquea el cierre', async () => {
+    m = await mundoConAgosto('cierre-cancelada-sin-coach')
+    await prisma.servicePayTableVersion.updateMany({ where: { table: { venueId: m.venueId } }, data: { lateCancelHours: 2 } })
+    await clase(m, { staffId: m.ana, inicioIso: '2026-08-04T14:00:00Z', reservas: confirmadas(8) })
+    // Cancelada 1 h antes, sin coach: no hay a quién pagarle el sueldo base.
+    await clase(m, { staffId: null, inicioIso: '2026-08-05T14:00:00Z', status: 'CANCELLED', cancelledAt: '2026-08-05T13:00:00Z' })
+    const p = await preview(m)
+    // Como cualquier cancelada que no se paga, ni siquiera entra al recorrido del cierre (excluidas cuenta las excluidas a mano).
+    expect(p).toMatchObject({ puedeCerrar: true, bloqueos: [], clases: 1, excluidas: 0, totalServicios: '570.00' })
+    expect(await cerrar(m, { huella: p.huella })).toMatchObject({ yaCerrado: false, total: '570.00' })
   })
 })

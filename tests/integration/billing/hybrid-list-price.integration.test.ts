@@ -1,6 +1,7 @@
 import prisma from '@/utils/prismaClient'
 // Preparing Stripe prices runs outside the transaction; the cases below control when it fails or resolves.
 jest.mock('@/services/launchCampaigns/hybridPrices', () => ({ ensureHybridPublicationPrices: jest.fn(async () => undefined) }))
+import { getHybridFeatureGrid } from '@/services/launchCampaigns/hybridFeatureGrid.service'
 import { ensureHybridPublicationPrices } from '@/services/launchCampaigns/hybridPrices'
 import { compileHybridPublication } from '@/services/launchCampaigns/hybridOffer.service'
 import { hybridOfferDefinition } from '@/services/launchCampaigns/hybridOffer.schema'
@@ -22,7 +23,8 @@ const PAUSE = 'CASH_RECONCILIATION'
 const EXPIRY = 'AREA_TICKETS'
 const LOCKED = 'BANKING_HUB'
 const RACE = 'OFFLINE_LAN_HUB'
-const OURS = [MAIN, PAUSE, EXPIRY, LOCKED, RACE]
+const STAFF_PAY = 'SERVICE_PAY'
+const OURS = [MAIN, PAUSE, EXPIRY, LOCKED, RACE, STAFF_PAY]
 const hour = 3600000
 let staffId: string
 
@@ -306,11 +308,13 @@ it('(6) an ACTIVE promotion whose window already ended never blocks a lower list
 
 it('(7) the board lists every catalog function plus both plans, each saying why it is not editable', async () => {
   const board = await listPriceBoard()
-  expect(LISTABLE_FEATURE_CODES).toHaveLength(32)
-  expect(board).toHaveLength(43)
+  expect(LISTABLE_FEATURE_CODES).toHaveLength(33)
+  expect(board).toHaveLength(44)
   expect(board.filter(row => row.editable).map(row => row.featureCode)).toEqual(LISTABLE_FEATURE_CODES)
   const byKey = new Map(board.map(row => [row.productKey, row]))
   expect(byKey.get('FEATURE:AGGREGATOR_PASSES')).toMatchObject({ editable: true, notEditableReason: null })
+  // Pago al personal (fase 3, D3): Pro, y suelta con su precio de lista ($199, lo captura superadmin aquí).
+  expect(byKey.get('FEATURE:SERVICE_PAY')).toMatchObject({ editable: true, notEditableReason: null })
   expect(byKey.get('FEATURE:BASE_POS')).toMatchObject({ editable: false, notEditableReason: 'SYSTEM', featureCode: null })
   expect(byKey.get('FEATURE:CHATBOT')).toMatchObject({ editable: false, notEditableReason: 'FREE' })
   expect(byKey.get('FEATURE:WHITE_LABEL_DASHBOARD')).toMatchObject({ editable: false, notEditableReason: 'CONTACT' })
@@ -423,4 +427,29 @@ it('(9) a pending price finalizes under the product lock: a promotion activated 
   expect(activated.error).toBeNull()
   expect(lowered.error).toMatchObject({ code: 'HYBRID_LIST_BREAKS_PROMOTIONS' })
   expect(await boardRow(RACE)).toMatchObject({ price: 299, pendingPrice: 249 })
+})
+
+it('(10) SERVICE_PAY se vende suelta a su precio de lista SIN fila Feature: la cuadrícula comercial la trae con su precio', async () => {
+  await saveListPrice({ productKey: `FEATURE:${STAFF_PAY}`, price: 199, expectedRevision: null }, staffId)
+  // Lo que deja `ensureHybridPublicationPrices` (simulado en esta suite): sin precio de Stripe, la oferta no es comprable.
+  const listed = await list(STAFF_PAY)
+  await prisma.hybridOfferPublication.update({
+    where: { id: listed.currentPublicationId! },
+    data: { stripeProductId: `prod_svcpay_${stamp}`, stripePriceId: `price_svcpay_${stamp}` },
+  })
+  const org = await prisma.organization.create({ data: { name: `svcpay-${stamp}`, email: `svcpay-${stamp}@example.test`, phone: '5550000000' } })
+  const venueId = (await prisma.venue.create({ data: { name: `svcpay-${stamp}`, slug: `svcpay-${stamp}`, organizationId: org.id } })).id
+  process.env.HYBRID_BILLING_ENABLED = 'true'
+  try {
+    const grid = await getHybridFeatureGrid(venueId)
+    expect(grid.entries.find(e => e.featureCode === STAFF_PAY)).toMatchObject({
+      minimumTier: 'PRO',
+      access: { source: 'NONE' },
+      offer: { kind: 'FEATURES', price: 199, listPrice: 199, includedFeatureCodes: [STAFF_PAY] },
+    })
+  } finally {
+    delete process.env.HYBRID_BILLING_ENABLED
+  }
+  // El precio NO vive en la tabla vieja `Feature`: por eso el dashboard lo lee de la cuadrícula, no de `availableFeatures`.
+  expect(await prisma.feature.count({ where: { code: STAFF_PAY } })).toBe(0)
 })

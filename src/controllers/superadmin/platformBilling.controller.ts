@@ -9,6 +9,7 @@ import {
   uploadPlatformEmisorCsd,
   PlatformBillingError,
 } from '@/services/superadmin/platform-billing/platformEmisor.service'
+import { platformEmisorSeguro } from '@/services/superadmin/platform-billing/platformEmisorSeguro'
 import {
   upsertBillingTaxProfile,
   getBillingTaxProfileById,
@@ -53,9 +54,8 @@ export async function getEmisor(_req: Request, res: Response, next: NextFunction
       res.json({ success: true, data: null })
       return
     }
-    // Never leak the encrypted live key to the browser — expose only a boolean indicator.
-    const { providerKeyEnc, ...safe } = emisor
-    res.json({ success: true, data: { ...safe, keyConfigured: Boolean(providerKeyEnc) } })
+    // Never leak the encrypted live key to the browser — expose only a boolean indicator (`keyConfigured`).
+    res.json({ success: true, data: platformEmisorSeguro(emisor) })
   } catch (error) {
     next(error)
   }
@@ -75,7 +75,8 @@ export async function upsertEmisor(req: Request, res: Response, next: NextFuncti
         data: { rfc: emisor.rfc },
       },
     })
-    res.json({ success: true, data: emisor })
+    // 🔒 Misma forma que GET: nunca la fila entera (lleva `providerKeyEnc`).
+    res.json({ success: true, data: platformEmisorSeguro(emisor) })
   } catch (error) {
     handleBillingError(error, res, next)
   }
@@ -103,7 +104,8 @@ export async function provisionEmisor(req: Request, res: Response, next: NextFun
         data: { manual: Boolean(providerOrgId && liveKey), providerOrgId: updated.providerOrgId },
       },
     })
-    res.json({ success: true, data: updated })
+    // 🔒 La llave se acaba de cifrar y guardar: nunca viaja de regreso, ni cifrada.
+    res.json({ success: true, data: platformEmisorSeguro(updated) })
   } catch (error) {
     handleBillingError(error, res, next)
   }
@@ -125,7 +127,7 @@ export async function uploadCsd(req: Request, res: Response, next: NextFunction)
         data: { csdExpiresAt: updated.csdExpiresAt },
       },
     })
-    res.json({ success: true, data: updated })
+    res.json({ success: true, data: platformEmisorSeguro(updated) })
   } catch (error) {
     handleBillingError(error, res, next)
   }

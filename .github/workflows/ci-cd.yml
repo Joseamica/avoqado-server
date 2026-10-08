@@ -24,7 +24,9 @@ name: 🚀 Avoqado Server CI/CD Pipeline
 
 on:
   push:
-    branches: [main, develop]
+    # 'ci/**' = carril de verificación por sesión (regla del workspace, 8-oct-2026): corre TODAS las pruebas y nunca
+    # publica (los deploys sólo corren en main). La concurrencia es por rama: un carril no cancela a otro ni a develop.
+    branches: [main, develop, 'ci/**']
   pull_request:
     branches: [main, develop]
   workflow_dispatch:

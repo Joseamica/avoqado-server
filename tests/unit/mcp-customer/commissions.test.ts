@@ -123,4 +123,63 @@ describe('formatScheme', () => {
     expect(scheme(false).commissionBase).toBe('LO_COBRADO')
     expect(scheme(true).commissionBase).toBe('PRECIO_DE_LISTA')
   })
+
+  it('dice si la base lleva IVA, ya traducido, nunca la bandera cruda `includeTax` (decisión D5 enmendada, spec §9-1)', () => {
+    const scheme = (includeTax: boolean) =>
+      formatScheme(
+        {
+          id: 'c4',
+          venueId: 'v1',
+          name: 'IVA',
+          priority: 0,
+          recipient: 'SERVER',
+          calcType: 'PERCENTAGE',
+          defaultRate: '0.03',
+          includeDiscount: false,
+          includeTax,
+          filterByCategories: false,
+          categoryIds: [],
+          useGoalAsTier: false,
+          goalBonusRate: null,
+          tiers: [],
+        } as never,
+        categoryName,
+      )
+    expect(scheme(false).taxBase).toBe('SIN_IVA')
+    expect(scheme(true).taxBase).toBe('CON_IVA')
+    expect(scheme(false)).not.toHaveProperty('includeTax')
+  })
+
+  it('🔴 D-ELEGIDOS: dice si el esquema aplica sólo a personas elegidas (con sus nombres), nunca las banderas crudas', () => {
+    const scheme = (filterByStaff: boolean, staffIds: string[]) =>
+      formatScheme(
+        {
+          id: 'c5',
+          venueId: 'v1',
+          name: 'Sólo algunos',
+          priority: 0,
+          recipient: 'SERVER',
+          calcType: 'PERCENTAGE',
+          defaultRate: '0.03',
+          includeDiscount: false,
+          includeTax: true,
+          filterByCategories: false,
+          categoryIds: [],
+          filterByStaff,
+          staffIds,
+          useGoalAsTier: false,
+          goalBonusRate: null,
+          tiers: [],
+        } as never,
+        categoryName,
+        new Map([
+          ['s-1', 'Ana López'],
+          ['s-2', 'Carla Ruiz'],
+        ]),
+      )
+    expect(scheme(true, ['s-1', 's-2']).appliesToStaff).toEqual(['Ana López', 'Carla Ruiz'])
+    expect(scheme(false, []).appliesToStaff).toBe('ALL_STAFF')
+    expect(scheme(true, ['s-1'])).not.toHaveProperty('filterByStaff')
+    expect(scheme(true, ['s-1'])).not.toHaveProperty('staffIds')
+  })
 })

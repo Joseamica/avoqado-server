@@ -76,4 +76,50 @@ describe('contrato HTTP de timbrado', () => {
     })
     expect(JSON.parse(fetchMock.mock.calls[0][1].body).idempotency_key).toBeUndefined()
   })
+
+  // C1 (Tarea 4): lo que viaja por el cable. Se lee el TEXTO del cuerpo, no el objeto: ahí se ve que `base` y `price` van como
+  // NÚMEROS (137.931034, 50) y no como cadenas («137.931034», «50.000000»), y que sin sku ni base no aparece ni la llave.
+  const itemSimple = {
+    satProductKey: '01010101',
+    satUnitKey: 'ACT',
+    description: 'Venta',
+    quantity: 1,
+    unitPriceCents: 11600,
+    discountCents: 0,
+    objetoImp: '02',
+    taxIncluded: true,
+    taxes: [{ type: 'IVA' as const, factor: 'Tasa' as const, rate: 0.16, withholding: false }],
+  }
+  it('control — una global de hoy (sin sku ni base) no lleva ni la llave `sku` ni la llave `base` en el cuerpo HTTP', async () => {
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ id: 'pending', status: 'pending' }), { status: 202 }))
+    await new FacturapiProvider('sk_test_fake').createGlobalInvoice({ ...globalParams, items: [itemSimple] })
+    const cuerpo: string = fetchMock.mock.calls[0][1].body
+    expect(cuerpo).not.toContain('"sku"')
+    expect(cuerpo).not.toContain('"base"')
+    expect(cuerpo).toContain('"price":116,')
+  })
+  it('🔴 C1: la global con varias bases manda `sku`, `base` y `price` como números en el cuerpo HTTP', async () => {
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ id: 'pending', status: 'pending' }), { status: 202 }))
+    await new FacturapiProvider('sk_test_fake').createGlobalInvoice({
+      ...globalParams,
+      items: [
+        {
+          ...itemSimple,
+          unitPriceCents: 28793,
+          unitPriceDecimal: '287.931034',
+          taxIncluded: false,
+          sku: 'F-9',
+          taxes: [
+            { type: 'IVA' as const, factor: 'Tasa' as const, rate: 0.16, withholding: false, base: '137.931034' },
+            { type: 'IVA' as const, factor: 'Exento' as const, rate: 0, withholding: false, base: '50.000000' },
+          ],
+        },
+      ],
+    })
+    const cuerpo: string = fetchMock.mock.calls[0][1].body
+    expect(cuerpo).toContain('"sku":"F-9"')
+    expect(cuerpo).toContain('"price":287.931034,')
+    expect(cuerpo).toContain('"factor":"Tasa","withholding":false,"base":137.931034}')
+    expect(cuerpo).toContain('"factor":"Exento","withholding":false,"base":50}')
+  })
 })

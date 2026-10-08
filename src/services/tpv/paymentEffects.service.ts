@@ -3,6 +3,7 @@ import { PaymentEffect, Prisma, PrismaClient } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { utcTs } from '@/utils/sqlDates'
 import { retry, shouldRetryDbConnectionError } from '@/utils/retry'
+import logger from '@/config/logger'
 
 export type PaymentEffectKind = 'REVIEW' | 'RECEIPT' | 'REFERRAL' | 'COMMISSION' | 'TRANSACTION_COST'
 export type PaymentEffectInput = {
@@ -17,8 +18,40 @@ export type PaymentEffectInput = {
 }
 export type PaymentEffectClaim = PaymentEffectInput & { id: string; attempts: number; claimToken: string; leaseUntil: Date }
 const COMMISSION_REVIEW_REASON = 'COMMISSION_SNAPSHOT_REQUIRES_REVIEW'
+/** Un reverso de comisión cuya comisión original todavía no tiene fila: espera sin gastar intentos. */
+const COMMISSION_AWAITS_ORIGINAL = 'COMMISSION_AWAITS_ORIGINAL'
+/** La misma espera pasado el umbral: sigue sin tope y sin DEAD_LETTER, pero ya pide revisar la comisión del cobro original. */
+const COMMISSION_AWAITS_ORIGINAL_OVERDUE = 'COMMISSION_AWAITS_ORIGINAL_OVERDUE'
+/** Desde que nace el efecto: a partir de aquí la espera de la comisión original se escala (como el costo diferido). */
+const ESPERA_DE_COMISION_ORIGINAL_VENCE_MS = 24 * 60 * 60_000
 const MAX_ATTEMPTS = 6
 const LEASE_MS = 120_000
+
+/**
+ * Codex bloque A r1 [P1]: congelar una comisión espera candados (la orden, la fila de StaffVenue de cada persona). Sin tope,
+ * esa espera podía comerse los 10 s de la transacción del cobro y entonces ni el ROLLBACK TO SAVEPOINT sirve: se perdían el
+ * cobro y la orden con la tarjeta ya cobrada. Con el tope, un candado vencido (55P03) cae al efecto de revisión.
+ */
+export const ESPERA_DE_CANDADO_DE_COMISION_MS = 2_000
+
+/**
+ * Va justo después del SAVEPOINT: acota la espera de candados SÓLO para la congelación y devuelve cómo restaurar la que
+ * traía la transacción. Si la congelación falla, el ROLLBACK TO SAVEPOINT la deshace solo; si sale bien hay que restaurarla,
+ * porque un `SET LOCAL` dentro de un savepoint liberado sigue vigente hasta el final de la transacción.
+ */
+async function acotarEsperaDeCandados(tx: Prisma.TransactionClient): Promise<() => Promise<void>> {
+  const [{ previo }] = await tx.$queryRaw<Array<{ previo: string }>>`SELECT current_setting('lock_timeout') AS previo`
+  await tx.$executeRawUnsafe(`SET LOCAL lock_timeout = '${ESPERA_DE_CANDADO_DE_COMISION_MS}ms'`)
+  return async () => {
+    await tx.$queryRaw`SELECT set_config('lock_timeout', ${previo}, true)`
+  }
+}
+
+/** Sólo nombre y código de un error: su mensaje puede traer datos del procesador o de la tarjeta. */
+const rastroDelError = (error: unknown) => ({
+  errorName: error instanceof Error ? error.name : typeof error,
+  errorCode: (error as { code?: unknown } | null)?.code,
+})
 
 /** Must be invoked from the financial transaction; dedupe never rewrites its snapshot. */
 export async function enqueuePaymentEffect(tx: Prisma.TransactionClient, input: PaymentEffectInput): Promise<void> {
@@ -160,7 +193,35 @@ export async function runClaimedPaymentEffect(claim: PaymentEffectClaim, db: Pri
       })
     } else if (effect.kind === 'COMMISSION') {
       const { applyFrozenCommissionInTx } = await import('../dashboard/commission/commission-calculation.service')
-      await applyFrozenCommissionInTx(tx, effect)
+      if (!(await applyFrozenCommissionInTx(tx, effect))) {
+        // Ronda 1 de A3: el reverso espera a que exista su comisión original. Esperar NO es un fallo (mismo patrón que el costo
+        // diferido): vuelve a PENDING devolviendo el intento que gastó el reclamo, así nunca llega a DEAD_LETTER por esperar.
+        // Ronda 2: pasadas 24 h desde que nació, el motivo se escala a OVERDUE y se avisa UNA vez, al cruzar el umbral.
+        const motivo =
+          Date.now() - new Date(effect.createdAt).getTime() >= ESPERA_DE_COMISION_ORIGINAL_VENCE_MS
+            ? COMMISSION_AWAITS_ORIGINAL_OVERDUE
+            : COMMISSION_AWAITS_ORIGINAL
+        if (motivo === COMMISSION_AWAITS_ORIGINAL_OVERDUE && effect.lastError !== COMMISSION_AWAITS_ORIGINAL_OVERDUE)
+          logger.warn('[PAYMENT_EFFECTS] El reverso de una comisión lleva 24 h esperando su comisión original; revisar su efecto', {
+            effectId: effect.id,
+            venueId: effect.venueId,
+            paymentId: effect.paymentId,
+            orderId: effect.orderId,
+            motivo,
+          })
+        await tx.paymentEffect.update({
+          where: { id: effect.id },
+          data: {
+            status: 'PENDING',
+            nextAttemptAt: new Date(Date.now() + 5 * 60_000),
+            claimToken: null,
+            leaseUntil: null,
+            attempts: { decrement: 1 },
+            lastError: motivo,
+          },
+        })
+        return false
+      }
     } else {
       throw new Error('UNSUPPORTED_PAYMENT_EFFECT')
     }
@@ -197,15 +258,22 @@ export async function failClaimedPaymentEffect(
   return result.count === 1
 }
 
-export async function enqueuePaymentCommissionInTx(tx: Prisma.TransactionClient, paymentId: string): Promise<void> {
+export async function enqueuePaymentCommissionInTx(
+  tx: Prisma.TransactionClient,
+  paymentId: string,
+  repartirEntre?: string[],
+): Promise<void> {
   const { freezePaymentCommissionInTx } = await import('../dashboard/commission/commission-calculation.service')
   // Optional policy reads must not abort already-captured money; an actual lost
   // DB connection still fails the financial commit and is recovered by its caller.
   await tx.$executeRawUnsafe('SAVEPOINT payment_commission_snapshot')
   try {
-    await freezePaymentCommissionInTx(tx, paymentId, plan => enqueuePaymentEffect(tx, plan))
+    const restaurarEspera = await acotarEsperaDeCandados(tx)
+    await freezePaymentCommissionInTx(tx, paymentId, plan => enqueuePaymentEffect(tx, plan), repartirEntre)
+    await restaurarEspera()
     await tx.$executeRawUnsafe('RELEASE SAVEPOINT payment_commission_snapshot')
-  } catch {
+  } catch (error) {
+    logger.warn('[PAYMENT_EFFECTS] Commission snapshot failed; review effect enqueued', { paymentId, ...rastroDelError(error) })
     await tx.$executeRawUnsafe('ROLLBACK TO SAVEPOINT payment_commission_snapshot')
     const payment = await tx.payment.findUniqueOrThrow({ where: { id: paymentId }, select: { venueId: true, orderId: true } })
     await enqueuePaymentEffect(tx, {
@@ -231,21 +299,52 @@ export async function enqueueRefundPaymentEffectsInTx(
   originalPaymentId: string,
 ): Promise<void> {
   const { createRefundCommission } = await import('../dashboard/commission/commission-calculation.service')
-  await createRefundCommission(refundPaymentId, originalPaymentId, {
-    db: tx,
-    sink: async data => {
-      const dedupeKey = `commission:${refundPaymentId}:${data.configId}:${data.staffId}:v1`
-      await enqueuePaymentEffect(tx, {
-        venueId: data.venueId,
-        paymentId: refundPaymentId,
-        orderId: data.orderId ?? null,
-        kind: 'COMMISSION',
-        dedupeKey,
-        payload: JSON.parse(JSON.stringify(data)),
-      })
-      return { id: dedupeKey }
-    },
-  })
+  // Fase 3 (A2, resolución del ensamblaje): una falla al CALCULAR el reverso de la comisión nunca bloquea la devolución —el
+  // dinero ya salió o está saliendo—. Se revierte sólo ese cálculo y queda una obligación visible para revisión, igual que en
+  // el cobro. Una conexión perdida de verdad sigue tumbando el commit (la siguiente consulta falla igual).
+  await tx.$executeRawUnsafe('SAVEPOINT refund_commission_snapshot')
+  try {
+    const restaurarEspera = await acotarEsperaDeCandados(tx)
+    await createRefundCommission(refundPaymentId, originalPaymentId, {
+      db: tx,
+      sink: async data => {
+        const dedupeKey = `commission:${refundPaymentId}:${data.configId}:${data.staffId}:v1`
+        await enqueuePaymentEffect(tx, {
+          venueId: data.venueId,
+          paymentId: refundPaymentId,
+          orderId: data.orderId ?? null,
+          kind: 'COMMISSION',
+          dedupeKey,
+          payload: JSON.parse(JSON.stringify(data)),
+        })
+        return { id: dedupeKey }
+      },
+    })
+    await restaurarEspera()
+    await tx.$executeRawUnsafe('RELEASE SAVEPOINT refund_commission_snapshot')
+  } catch (error) {
+    logger.warn('[PAYMENT_EFFECTS] Refund commission reversal failed; review effect enqueued', {
+      refundPaymentId,
+      originalPaymentId,
+      ...rastroDelError(error),
+    })
+    await tx.$executeRawUnsafe('ROLLBACK TO SAVEPOINT refund_commission_snapshot')
+    const refund = await tx.payment.findUniqueOrThrow({ where: { id: refundPaymentId }, select: { venueId: true, orderId: true } })
+    const dedupeKey = 'commission:' + refundPaymentId + ':policy-error:v1'
+    await enqueuePaymentEffect(tx, {
+      venueId: refund.venueId,
+      paymentId: refundPaymentId,
+      orderId: refund.orderId,
+      kind: 'COMMISSION',
+      dedupeKey,
+      payload: { policyError: COMMISSION_REVIEW_REASON, originalPaymentId },
+    })
+    await tx.paymentEffect.updateMany({
+      where: { venueId: refund.venueId, paymentId: refundPaymentId, dedupeKey },
+      data: { lastError: COMMISSION_REVIEW_REASON },
+    })
+    await tx.$executeRawUnsafe('RELEASE SAVEPOINT refund_commission_snapshot')
+  }
   const payment = await tx.payment.findUniqueOrThrow({ where: { id: refundPaymentId }, select: { venueId: true, orderId: true } })
   await enqueuePaymentEffect(tx, {
     venueId: payment.venueId,
