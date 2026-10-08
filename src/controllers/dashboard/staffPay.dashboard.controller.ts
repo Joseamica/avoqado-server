@@ -31,7 +31,13 @@ export async function getAccess(req: Request, res: Response, next: NextFunction)
     const { venueId } = ctx(req)
     const { organizationId } = await orgDeVenue(venueId)
     // Fase 3 §10: `enabled` = el plan lo incluye; además, si el dueño ya activó, desde cuándo y si las propinas van al recibo.
-    res.json({ enabled: await venueHasServicePayAccess(venueId), ...(await activacion.estadoActivacion(prisma, organizationId)) })
+    // E1d: además, la periodicidad guardada, si ya es fija y el inicio que se guardaría al activar (la pantalla de activar
+    // lo necesita antes de activar, cuando GET /periods da 403).
+    res.json({
+      enabled: await venueHasServicePayAccess(venueId),
+      ...(await activacion.estadoActivacion(prisma, organizationId)),
+      ...(await activacion.accesoActivacion({ venueId })),
+    })
   } catch (error) {
     next(error)
   }

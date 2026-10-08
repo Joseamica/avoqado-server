@@ -200,6 +200,28 @@ export async function previewActivacion(input: {
 }
 
 /**
+ * `GET /access` (fase 3, E1d): lo que la pantalla de activar necesita ANTES de activar, cuando `GET /periods` aún da 403:
+ * la periodicidad guardada, si ya es fija y la fecha de inicio que el servidor guardaría al activar (`null` si ya activó).
+ * Reusa `previewActivacion` con la periodicidad guardada: una sola regla, no tres. Sin escribir ni tomar candados.
+ */
+export async function accesoActivacion(input: {
+  venueId: string
+  ahora?: Date
+}): Promise<{ periodicidad: Periodicidad; periodicidadFija: boolean; inicioAlActivar: string | null }> {
+  const v = await prisma.venue.findUniqueOrThrow({ where: { id: input.venueId }, select: { organizationId: true } })
+  const org = await prisma.organization.findUniqueOrThrow({
+    where: { id: v.organizationId },
+    select: { servicePayPeriodicity: true, staffPayStartDate: true },
+  })
+  const p = await previewActivacion({ venueId: input.venueId, periodicidad: org.servicePayPeriodicity, ahora: input.ahora })
+  return {
+    periodicidad: p.periodicidad,
+    periodicidadFija: p.periodicidadFija,
+    inicioAlActivar: org.staffPayStartDate !== null ? null : p.startDate,
+  }
+}
+
+/**
  * Interruptor «Pagar las propinas en el recibo» (spec fase 3 §6.3, §7.1, D2): prender abre una ventana [ahora, ∞);
  * apagar cierra la abierta en `ahora`. Lo que ya ganó el derecho a entrar no se pierde (Codex r1-5). Repetir el estado
  * actual no escribe ni audita. Mismo permiso y candado que activar. B14-fix F5 (hermano): `ahora` es el instante en que se

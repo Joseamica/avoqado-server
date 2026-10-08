@@ -3,6 +3,7 @@ import { prismaMock } from '@tests/__helpers__/setup'
 
 jest.mock('@/services/dashboard/staffPay/activacion.service', () => ({
   estadoActivacion: jest.fn(),
+  accesoActivacion: jest.fn(),
   activarPagoAlPersonal: jest.fn(),
   cambiarPropinas: jest.fn(),
 }))
@@ -88,14 +89,28 @@ describe('Controller de la fase 3', () => {
     ({ params: { venueId: 'v1' }, query: {}, body: {}, authContext: { userId: 'u1' }, ...extra }) as any
   const res = () => ({ json: jest.fn() }) as any
 
-  it('GET /access suma la activación al estado del módulo', async () => {
+  it('GET /access suma la activación al estado del módulo y la periodicidad (E1d); los campos viejos siguen iguales', async () => {
     prismaMock.venue.findUniqueOrThrow.mockResolvedValue({ organizationId: 'o1', timezone: 'America/Mexico_City' })
     ;(acceso.venueHasServicePayAccess as jest.Mock).mockResolvedValue(true)
     ;(activacion.estadoActivacion as jest.Mock).mockResolvedValue({ activado: true, startDate: '2026-10-01', propinasEncendidas: false })
+    ;(activacion.accesoActivacion as jest.Mock).mockResolvedValue({
+      periodicidad: 'SEMIMONTHLY',
+      periodicidadFija: true,
+      inicioAlActivar: null,
+    })
     const r = res()
     await controller.getAccess(req(), r, jest.fn())
-    expect(r.json).toHaveBeenCalledWith({ enabled: true, activado: true, startDate: '2026-10-01', propinasEncendidas: false })
+    expect(r.json).toHaveBeenCalledWith({
+      enabled: true,
+      activado: true,
+      startDate: '2026-10-01',
+      propinasEncendidas: false,
+      periodicidad: 'SEMIMONTHLY',
+      periodicidadFija: true,
+      inicioAlActivar: null,
+    })
     expect(activacion.estadoActivacion).toHaveBeenCalledWith(expect.anything(), 'o1')
+    expect(activacion.accesoActivacion).toHaveBeenCalledWith({ venueId: 'v1' })
   })
 
   it('activar y propinas pasan SÓLO sus campos al service (nada de `ahora` desde la petición)', async () => {

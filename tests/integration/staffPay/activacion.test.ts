@@ -4,6 +4,7 @@ import { ForbiddenError } from '@/errors/AppError'
 import {
   activarPagoAlPersonal,
   cambiarPropinas,
+  accesoActivacion,
   estadoActivacion,
   previewActivacion,
   ventanasDePropinas,
@@ -320,5 +321,44 @@ describe('con un cierre en curso, las operaciones cortas no esperan sin tope (B7
       return tx.$queryRaw<Array<{ lt: string }>>`SELECT current_setting('lock_timeout') AS lt`
     })
     expect(lt).toBe('0')
+  })
+})
+
+describe('GET /access: periodicidad guardada, si es fija e inicio al activar (fase 3, E1d)', () => {
+  const acceso = (iso: string) => accesoActivacion({ venueId: m.venueId, ahora: new Date(iso) })
+  const guardar = (p: 'MONTHLY' | 'SEMIMONTHLY') =>
+    prisma.organization.update({ where: { id: m.orgId }, data: { servicePayPeriodicity: p } })
+
+  it('sin activar y sin periodos: la guardada tal cual, NO fija, e inicio = el del periodo de hoy', async () => {
+    await guardar('SEMIMONTHLY')
+    expect(await acceso('2026-09-20T18:00:00Z')).toEqual({
+      periodicidad: 'SEMIMONTHLY',
+      periodicidadFija: false,
+      inicioAlActivar: '2026-09-16',
+    })
+  })
+
+  it('mensual de fábrica: mensual, no fija', async () => {
+    expect(await acceso('2026-09-20T18:00:00Z')).toEqual({
+      periodicidad: 'MONTHLY',
+      periodicidadFija: false,
+      inicioAlActivar: '2026-09-01',
+    })
+  })
+
+  it('con un periodo guardado: fija; si el que contiene hoy está CERRADO, el inicio es el día siguiente a su fin', async () => {
+    await periodoCerrado(m, '2026-09-01', '2026-09-30')
+    expect(await acceso('2026-09-20T18:00:00Z')).toEqual({ periodicidad: 'MONTHLY', periodicidadFija: true, inicioAlActivar: '2026-10-01' })
+  })
+
+  it('el inicio que dice es el que guarda activar (misma regla, una sola lectura)', async () => {
+    await periodoCerrado(m, '2026-09-01', '2026-09-30')
+    const { inicioAlActivar } = await acceso('2026-09-20T18:00:00Z')
+    expect((await activar('MONTHLY', '2026-09-20T18:00:00Z')).startDate).toBe(inicioAlActivar)
+  })
+
+  it('activada: fija y inicioAlActivar null', async () => {
+    await activar('SEMIMONTHLY', '2026-09-20T18:00:00Z')
+    expect(await acceso('2026-09-25T18:00:00Z')).toEqual({ periodicidad: 'SEMIMONTHLY', periodicidadFija: true, inicioAlActivar: null })
   })
 })
