@@ -149,4 +149,37 @@ describe('formatScheme', () => {
     expect(scheme(true).taxBase).toBe('CON_IVA')
     expect(scheme(false)).not.toHaveProperty('includeTax')
   })
+
+  it('🔴 D-ELEGIDOS: dice si el esquema aplica sólo a personas elegidas (con sus nombres), nunca las banderas crudas', () => {
+    const scheme = (filterByStaff: boolean, staffIds: string[]) =>
+      formatScheme(
+        {
+          id: 'c5',
+          venueId: 'v1',
+          name: 'Sólo algunos',
+          priority: 0,
+          recipient: 'SERVER',
+          calcType: 'PERCENTAGE',
+          defaultRate: '0.03',
+          includeDiscount: false,
+          includeTax: true,
+          filterByCategories: false,
+          categoryIds: [],
+          filterByStaff,
+          staffIds,
+          useGoalAsTier: false,
+          goalBonusRate: null,
+          tiers: [],
+        } as never,
+        categoryName,
+        new Map([
+          ['s-1', 'Ana López'],
+          ['s-2', 'Carla Ruiz'],
+        ]),
+      )
+    expect(scheme(true, ['s-1', 's-2']).appliesToStaff).toEqual(['Ana López', 'Carla Ruiz'])
+    expect(scheme(false, []).appliesToStaff).toBe('ALL_STAFF')
+    expect(scheme(true, ['s-1'])).not.toHaveProperty('filterByStaff')
+    expect(scheme(true, ['s-1'])).not.toHaveProperty('staffIds')
+  })
 })

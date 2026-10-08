@@ -58,6 +58,9 @@ export interface CommissionConfigWithRelations {
   roleRates: RoleRates | null
   filterByCategories: boolean
   categoryIds: string[]
+  /** D-ELEGIDOS: «sólo personas elegidas» (`personasElegidas.ts`). Opcionales para los datos de prueba anteriores. */
+  filterByStaff?: boolean
+  staffIds?: string[]
   useGoalAsTier: boolean
   goalBonusRate: Decimal | null
   attendanceLinked: boolean

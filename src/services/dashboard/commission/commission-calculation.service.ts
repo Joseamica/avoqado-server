@@ -65,6 +65,7 @@ import {
 } from './commission-utils'
 import { COMMISSION_BASE, resolveCommissionBase } from './commission-base'
 import { redondearRepartido, repartir } from './repartoPorCobro'
+import { aplicaALaPersona } from './personasElegidas'
 import { subMonths, startOfMonth, endOfMonth } from 'date-fns'
 import { toZonedTime, fromZonedTime } from 'date-fns-tz'
 import { getApplicableTierRate, resolveGoalBasedTier } from './commission-tier.service'
@@ -127,6 +128,8 @@ async function createCalcForConfig(
     logger.warn('Could not determine commission recipient', { paymentId: payment.id, configId: config.id })
     return null
   }
+  // D-ELEGIDOS (fase 3): un esquema de «sólo personas elegidas» no le calcula nada a quien no está en su lista.
+  if (!aplicaALaPersona(config, recipientStaffId)) return null
 
   const staffInfo = await validateStaffForCommission(recipientStaffId, payment.venueId, db)
   if (!staffInfo) return null
@@ -1523,6 +1526,12 @@ export async function createSplitCommissionForPayment(
   // 1) Quién cobra y con qué tasa: las reglas de cada persona que deciden SI cobra.
   const elegibles: Array<{ i: number; staffId: string; effectiveRate: number }> = []
   for (const [i, staffId] of orden.entries()) {
+    // D-ELEGIDOS (fase 3): en un esquema de «sólo personas elegidas», quien no está en la lista no recibe su parte (como una
+    // excepción que excluye: la parte de los demás no cambia).
+    if (!aplicaALaPersona(config, staffId)) {
+      logger.info('Staff not chosen by the scheme, skipping split row', { paymentId, staffId })
+      continue
+    }
     // Per-staff idempotency: skip if a calc already exists for this
     // (paymentId, staffId). Lets webhooks retry without creating duplicates.
     const existing = await db.commissionCalculation.findFirst({

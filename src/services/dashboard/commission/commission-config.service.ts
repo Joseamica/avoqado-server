@@ -17,6 +17,7 @@ import { Prisma, CommissionRecipient, CommissionTrigger, CommissionCalcType } fr
 import { BadRequestError, NotFoundError } from '../../../errors/AppError'
 import { RoleRates } from './commission-utils'
 import { validarTasasDelEsquema } from './tasasDelEsquema'
+import { personasElegidasAGuardar } from './personasElegidas'
 import { logAction } from '../activity-log.service'
 
 // ============================================
@@ -53,6 +54,9 @@ export interface CreateCommissionConfigInput {
   roleRates?: RoleRates
   filterByCategories?: boolean
   categoryIds?: string[]
+  // D-ELEGIDOS: «sólo personas elegidas» (`personasElegidas.ts`).
+  filterByStaff?: boolean
+  staffIds?: string[] | null
   useGoalAsTier?: boolean
   goalBonusRate?: number | null
   effectiveFrom?: Date
@@ -78,6 +82,9 @@ export interface UpdateCommissionConfigInput {
   roleRates?: RoleRates | null
   filterByCategories?: boolean
   categoryIds?: string[]
+  // D-ELEGIDOS: «sólo personas elegidas» (`personasElegidas.ts`).
+  filterByStaff?: boolean
+  staffIds?: string[] | null
   useGoalAsTier?: boolean
   goalBonusRate?: number | null
   effectiveFrom?: Date
@@ -224,6 +231,8 @@ export async function createCommissionConfig(venueId: string, data: CreateCommis
   // La tasa según el tipo (en un FIJO, el monto en pesos), las tasas por rol y la de meta superada: 400 en español
   // (final-fijo-niveles, fase 3; `tasasDelEsquema.ts`).
   validarTasasDelEsquema(data)
+  // D-ELEGIDOS: a quién aplica (todo el equipo, de fábrica, o sólo las personas elegidas de ESTA sede).
+  const elegidos = await personasElegidasAGuardar(data, { venueId })
 
   // Validate date range
   if (data.effectiveTo && data.effectiveFrom) {
@@ -260,6 +269,8 @@ export async function createCommissionConfig(venueId: string, data: CreateCommis
       roleRates: data.roleRates ?? Prisma.JsonNull,
       filterByCategories: data.filterByCategories ?? false,
       categoryIds: data.categoryIds ?? [],
+      filterByStaff: elegidos.filterByStaff ?? false,
+      staffIds: elegidos.staffIds ?? [],
       useGoalAsTier: data.useGoalAsTier ?? false,
       goalBonusRate: data.goalBonusRate ?? null,
       attendanceLinked: data.attendanceLinked ?? false,
@@ -346,6 +357,7 @@ export async function updateCommissionConfig(configId: string, venueId: string, 
   // Lo que QUEDA: un tipo nuevo con la tasa de antes (un fijo de $5 que pasa a niveles sería 500 %) o una tasa nueva con el
   // tipo de antes; y las tasas por rol y de meta superada (final-fijo-niveles, fase 3).
   validarTasasDelEsquema(data, existing)
+  const elegidos = await personasElegidasAGuardar(data, { venueId }, existing)
 
   // Validate date range
   const effectiveFrom = data.effectiveFrom ?? existing.effectiveFrom
@@ -375,6 +387,8 @@ export async function updateCommissionConfig(configId: string, venueId: string, 
   if (data.roleRates !== undefined) updateData.roleRates = data.roleRates ?? Prisma.JsonNull
   if (data.filterByCategories !== undefined) updateData.filterByCategories = data.filterByCategories
   if (data.categoryIds !== undefined) updateData.categoryIds = data.categoryIds
+  if (elegidos.filterByStaff !== undefined) updateData.filterByStaff = elegidos.filterByStaff
+  if (elegidos.staffIds !== undefined) updateData.staffIds = elegidos.staffIds
   if (data.useGoalAsTier !== undefined) updateData.useGoalAsTier = data.useGoalAsTier
   if (data.goalBonusRate !== undefined) updateData.goalBonusRate = data.goalBonusRate
   if (data.attendanceLinked !== undefined) updateData.attendanceLinked = data.attendanceLinked
@@ -527,6 +541,8 @@ export async function copyCommissionConfig(
         roleRates: source.roleRates ?? Prisma.JsonNull,
         filterByCategories: source.filterByCategories,
         categoryIds: source.categoryIds,
+        filterByStaff: source.filterByStaff,
+        staffIds: source.staffIds,
         useGoalAsTier: source.useGoalAsTier,
         goalBonusRate: source.goalBonusRate,
         effectiveFrom: overrides?.effectiveFrom ?? new Date(),

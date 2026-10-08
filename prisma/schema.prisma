@@ -12896,6 +12896,11 @@ model CommissionConfig {
   filterByCategories Boolean  @default(false)
   categoryIds        String[] // Array of MenuCategory IDs
 
+  // D-ELEGIDOS (8-oct-2026): «sólo personas elegidas». Con filterByStaff, SÓLO cobra de este esquema quien está en staffIds
+  // (Staff IDs), el mismo patrón que las categorías. Las excepciones por persona (CommissionOverride) siguen igual.
+  filterByStaff Boolean  @default(false)
+  staffIds      String[] @default([])
+
   // Asistencia → comisiones (decisión del founder 2026-08-26): regla POR ESQUEMA, apagada de
   // fábrica. Prendida, un día con llegada TARDE (fuera de tolerancia) recorta la comisión de
   // ese día en attendanceLatePenaltyRate (0.2500 = pierde el 25%). Sólo retardo: una falta no

@@ -39,6 +39,9 @@ interface SchemeRow {
   includeTax: boolean
   filterByCategories: boolean
   categoryIds: string[]
+  /** D-ELEGIDOS: «sólo personas elegidas». Opcionales: un esquema anterior se lee como «todo el equipo». */
+  filterByStaff?: boolean
+  staffIds?: string[]
   useGoalAsTier: boolean
   goalBonusRate: { toString(): string } | null
   attendanceLinked: boolean
@@ -57,7 +60,7 @@ interface SchemeRow {
  * `includeDiscount` y significa lo contrario de lo que suena, así que el MCP
  * nunca la expone cruda. Traducción única en `commission-base.ts`.
  */
-export function formatScheme(config: SchemeRow, categoryName: Map<string, string>) {
+export function formatScheme(config: SchemeRow, categoryName: Map<string, string>, staffName: Map<string, string> = new Map()) {
   const boundary = (value: { toString(): string } | null, type: string): number | 'EMPLOYEE_GOAL' | null => {
     if (type === 'STAFF_GOAL') return 'EMPLOYEE_GOAL'
     return value == null ? null : Number(value)
@@ -76,6 +79,8 @@ export function formatScheme(config: SchemeRow, categoryName: Map<string, string
     // contabilidad (final-fix I1: la tasa de cada renglón, ya facturado o la de su producto); CON_IVA = lo que pagó el cliente.
     taxBase: config.includeTax ? 'CON_IVA' : 'SIN_IVA',
     appliesTo: config.filterByCategories ? config.categoryIds.map(id => categoryName.get(id) ?? id) : 'ALL_CATEGORIES',
+    // D-ELEGIDOS: a quién le paga el esquema — todo el equipo, o SÓLO las personas elegidas (por nombre).
+    appliesToStaff: config.filterByStaff ? (config.staffIds ?? []).map(id => staffName.get(id) ?? id) : 'ALL_STAFF',
     useGoalAsTier: config.useGoalAsTier,
     goalBonusRate: config.goalBonusRate == null ? null : Number(config.goalBonusRate),
     // Asistencia → comisiones: prendida, un día con retardo pierde este porcentaje del día.
@@ -89,6 +94,18 @@ export function formatScheme(config: SchemeRow, categoryName: Map<string, string
       rate: Number(t.rate),
     })),
   }
+}
+
+/** D-ELEGIDOS: el nombre de cada persona elegida por algún esquema «sólo personas elegidas» (una consulta, acotada por ids). */
+async function nombresDeLasPersonasElegidas(configs: SchemeRow[]): Promise<Map<string, string>> {
+  const elegidos = [...new Set(configs.flatMap(c => (c.filterByStaff ? (c.staffIds ?? []) : [])))]
+  if (elegidos.length === 0) return new Map()
+  const personas = await prisma.staff.findMany({
+    where: { id: { in: elegidos } },
+    select: { id: true, firstName: true, lastName: true },
+    take: elegidos.length,
+  })
+  return new Map(personas.map(p => [p.id, `${p.firstName} ${p.lastName ?? ''}`.trim()]))
 }
 
 /**
@@ -244,7 +261,7 @@ export function registerCommissionTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'list_commission_schemes',
-    'List active staff commission schemes for your venues — the CONFIG only (rates, tiers, categories), NOT what anyone earned. Each scheme shows how commission is calculated (flat %, tiered, or fixed amount — with calcType FIXED, `defaultRate` is the fixed amount in PESOS paid per sale, not a rate), which product categories it applies to (multiple schemes can run per venue, each on its own categories), and its tiers. `commissionBase` says what the commission is calculated ON: "LO_COBRADO" (default — net of order AND line discounts/promotions, i.e. what the customer actually paid; tips never count) or "PRECIO_DE_LISTA" (the catalog price, ignoring discounts). `taxBase` says whether IVA counts: "SIN_IVA" (default — the sale without IVA, exactly the net sale of the accounting entry: each line at its own rate — 16 %, 8 %, nothing for 0 % or exempt — after line-targeted discounts and courtesies, with non-taxable service charges carrying no IVA) or "CON_IVA" (what the customer paid, IVA included). With "PRECIO_DE_LISTA" the base is the list price of the order lines plus the service charge. A tier boundary can be a fixed amount or "EMPLOYEE_GOAL" — the staff member\'s own sales goal. ⚠️ Do NOT use these rates to hand-compute a person\'s commission by multiplying their sales — that is wrong (only some categories carry a scheme, commission is attributed to the SERVER not the order creator, and tiers are monthly-cumulative). To answer "¿cuánto de comisión ganó X?" use the staff_commission tool, which reads the real engine. Requires commissions:read.',
+    'List active staff commission schemes for your venues — the CONFIG only (rates, tiers, categories), NOT what anyone earned. Each scheme shows how commission is calculated (flat %, tiered, or fixed amount — with calcType FIXED, `defaultRate` is the fixed amount in PESOS paid per sale, not a rate), which product categories it applies to (multiple schemes can run per venue, each on its own categories), who earns from it (`appliesToStaff`: "ALL_STAFF" or the names of the only people the scheme pays), and its tiers. `commissionBase` says what the commission is calculated ON: "LO_COBRADO" (default — net of order AND line discounts/promotions, i.e. what the customer actually paid; tips never count) or "PRECIO_DE_LISTA" (the catalog price, ignoring discounts). `taxBase` says whether IVA counts: "SIN_IVA" (default — the sale without IVA, exactly the net sale of the accounting entry: each line at its own rate — 16 %, 8 %, nothing for 0 % or exempt — after line-targeted discounts and courtesies, with non-taxable service charges carrying no IVA) or "CON_IVA" (what the customer paid, IVA included). With "PRECIO_DE_LISTA" the base is the list price of the order lines plus the service charge. A tier boundary can be a fixed amount or "EMPLOYEE_GOAL" — the staff member\'s own sales goal. ⚠️ Do NOT use these rates to hand-compute a person\'s commission by multiplying their sales — that is wrong (only some categories carry a scheme, commission is attributed to the SERVER not the order creator, and tiers are monthly-cumulative). To answer "¿cuánto de comisión ganó X?" use the staff_commission tool, which reads the real engine. Requires commissions:read.',
     { venueId: z.string().optional().describe('Focus one venue (must be in your scope); omit for all your venues') },
     async ({ venueId }) => {
       const venueIds = await readableVenues(venueId)
@@ -265,8 +282,9 @@ export function registerCommissionTools(server: McpServer, scope: McpScope) {
         ? await prisma.menuCategory.findMany({ where: { id: { in: catIds } }, select: { id: true, name: true } })
         : []
       const categoryName = new Map(cats.map(c => [c.id, c.name]))
+      const staffName = await nombresDeLasPersonasElegidas(configs)
 
-      return text({ venuesInScope: venueIds.length, schemes: configs.map(c => formatScheme(c, categoryName)) })
+      return text({ venuesInScope: venueIds.length, schemes: configs.map(c => formatScheme(c, categoryName, staffName)) })
     },
   )
 
