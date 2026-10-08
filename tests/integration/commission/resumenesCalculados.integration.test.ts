@@ -210,6 +210,15 @@ describe('C6 · la tabla «Resumen de Comisiones» dice lo CALCULADO, con la fue
     ])
   })
 
+  it('E6a-fix4: con 13 periodos el historial trae 12 renglones y summariesTotal dice 13 (y con pocos, el total real)', async () => {
+    for (let mes = 0; mes < 13; mes++) await comision(m.ana, new Date(Date.UTC(2025, 8 + mes, 15, 18)).toISOString(), 10)
+    const r = await getStaffCommissions(m.ana, m.venueId)
+    expect(r.summaries).toHaveLength(12)
+    expect(r.summariesTotal).toBe(13)
+    await mundoDeLaQa()
+    expect((await getStaffCommissions(m.bea, m.venueId)).summariesTotal).toBe(2)
+  })
+
   it.each(Object.values(TierPeriod))(
     'el periodo de cada renglón es el MISMO que usa el job (%s, en la zona de la sede, en las orillas)',
     async periodo => {

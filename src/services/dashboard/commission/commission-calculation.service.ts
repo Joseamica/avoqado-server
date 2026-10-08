@@ -847,6 +847,8 @@ export async function getStaffCommissions(
   calculations: any[]
   total: number
   summaries: any[]
+  /** Cuántos periodos tiene la persona en total (`summaries` trae sólo los últimos 12). Aditivo (E6a-fix4). */
+  summariesTotal: number
   stats: {
     thisMonth: number
     lastMonth: number
@@ -888,7 +890,7 @@ export async function getStaffCommissions(
   const lastMonthStart = fromZonedTime(startOfMonth(lastMonthVenue), timezone)
   const lastMonthEnd = fromZonedTime(endOfMonth(lastMonthVenue), timezone)
 
-  const [calculations, total, summaries, thisMonthStats, lastMonthStats, totalStats] = await Promise.all([
+  const [calculations, total, resumenes, thisMonthStats, lastMonthStats, totalStats] = await Promise.all([
     // Calculations
     prisma.commissionCalculation.findMany({
       where,
@@ -923,7 +925,7 @@ export async function getStaffCommissions(
     // Total count
     prisma.commissionCalculation.count({ where }),
     // Sus últimos 12 periodos, con lo CALCULADO (la fuente del KPI), no lo que guardó el job (E6a-fix2 C6, hermano).
-    resumenesCalculados(venueId, { staffId, limite: 12 }).then(r => r.filas),
+    resumenesCalculados(venueId, { staffId, limite: 12 }),
     // This month stats
     prisma.commissionCalculation.aggregate({
       where: {
@@ -1024,7 +1026,7 @@ export async function getStaffCommissions(
     }
   }
 
-  return { calculations, total, summaries, stats, tierProgress }
+  return { calculations, total, summaries: resumenes.filas, summariesTotal: resumenes.total, stats, tierProgress }
 }
 
 /**
