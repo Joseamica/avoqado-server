@@ -152,6 +152,7 @@ describe('conceptoDe — una comisión dice su esquema UNA vez y su tasa (E6a-fi
     esquema: 'Comisión Estándar Meseros',
     base: new Prisma.Decimal(3000),
     tasa: new Prisma.Decimal('0.0300'),
+    limite: null,
     motivo: 'VENTA',
     agrupada: false,
     cobros: 1,
@@ -166,6 +167,18 @@ describe('conceptoDe — una comisión dice su esquema UNA vez y su tasa (E6a-fi
     [{ tasa: null }, 'Comisión Estándar Meseros · venta #1042 · base $3,000.00'], // fija, o congelada antes de F13
     [{ motivo: 'DEVOLUCION' }, 'Devolución · comisión Estándar Meseros 3 % · venta #1042'],
     [{ motivo: 'ANULACION', orden: null }, 'Anulación · comisión Estándar Meseros 3 %'],
+    // Final-fix G6: el 3 % de la base no da el monto porque el esquema lo subió a su mínimo o lo bajó a su tope; lo dice.
+    [
+      { base: new Prisma.Decimal(1), monto: new Prisma.Decimal(5), limite: 'MINIMO' },
+      'Comisión Estándar Meseros 3 % · venta #1042 · base $1.00 → mínimo $5.00',
+    ],
+    [
+      { base: new Prisma.Decimal(10000), monto: new Prisma.Decimal(200), limite: 'TOPE' },
+      'Comisión Estándar Meseros 3 % · venta #1042 · base $10,000.00 → tope $200.00',
+    ],
+    // Sólo la venta: la devolución y la anulación dicen su monto en la columna, sin base que explicar.
+    [{ motivo: 'DEVOLUCION', limite: 'MINIMO' }, 'Devolución · comisión Estándar Meseros 3 % · venta #1042'],
+    [{ motivo: 'ANULACION', orden: null, limite: 'TOPE' }, 'Anulación · comisión Estándar Meseros 3 %'],
   ] as Array<[Partial<FilaRecibo>, string]>)('%o ⇒ %s', (x, esperado) => {
     expect(conceptoDe(fila(x))).toBe(esperado)
   })

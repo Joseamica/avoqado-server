@@ -28,6 +28,12 @@ export interface DescriptorVenta {
    * fija, manual o de meta (ahí el número no es un porcentaje) y en una propina. El recibo dice «3 %» (spec fase 3 §11).
    */
   tasa: string | null
+  /**
+   * Final-fix G6 (guía E6c): una VENTA por porcentaje cuyo monto no es su tasa × base porque el esquema la subió a su mínimo
+   * (`MINIMO`) o la bajó a su tope (`TOPE`); el recibo lo dice («base $1.00 → mínimo $5.00»). Null en todo lo demás, también
+   * con castigo por retardo (ahí el monto ya no es el mínimo ni el tope). Una foto anterior no lo trae y se lee como null.
+   */
+  limite: 'MINIMO' | 'TOPE' | null
   motivo: 'VENTA' | 'DEVOLUCION' | 'ANULACION'
 }
 export interface LineaBarrible {
@@ -198,6 +204,11 @@ function detalleComisiones(where: Prisma.Sql): Prisma.Sql {
            ${local(Prisma.sql`cc."calculatedAt"`, 'HH24:MI')} AS hora, cc."netCommission" AS monto, v.name AS sede,
            ${personaSql} AS persona, ord."orderNumber" AS orden, cfg.name AS esquema, cc."baseAmount" AS base,
            CASE WHEN cc."calcType" IN ('PERCENTAGE', 'TIERED') THEN cc."effectiveRate" END AS tasa,
+           -- Final-fix G6: el motor guarda la bruta (base × tasa) ANTES del mínimo y el tope y el neto después (sin castigo).
+           CASE WHEN cc."calcType" IN ('PERCENTAGE', 'TIERED') AND rp.id IS NULL AND COALESCE(cc."attendancePenaltyRate", 0) = 0 THEN
+             CASE WHEN cc."netCommission" > cc."grossCommission" THEN 'MINIMO'
+                  WHEN cc."netCommission" < cc."grossCommission" THEN 'TOPE' END
+           END AS limite,
            CASE WHEN rp.id IS NULL THEN 'VENTA' ELSE 'DEVOLUCION' END AS motivo
     FROM "CommissionCalculation" cc
     JOIN "Venue" v ON v.id = cc."venueId"
@@ -281,7 +292,7 @@ function detallePropinas(a: AlcanceBarrido, rp: RangoSede[], rv: RangoSede[], wh
     SELECT 'TIP'::text AS fuente, 'SERVICE'::text AS concepto, b.id AS "sourceId", b."staffId", b."venueId", b.instante,
            ${local(Prisma.sql`b.instante`, 'YYYY-MM-DD')} AS "fechaLocal", ${local(Prisma.sql`b.instante`, 'HH24:MI')} AS hora,
            b.monto, v.name AS sede, ${personaSql} AS persona, ord."orderNumber" AS orden, NULL::text AS esquema,
-           NULL::numeric AS base, NULL::numeric AS tasa, b.motivo
+           NULL::numeric AS base, NULL::numeric AS tasa, NULL::text AS limite, b.motivo
     FROM (${propinasBase(a, rp, rv)}) b
     JOIN "Venue" v ON v.id = b."venueId"
     LEFT JOIN "Staff" s ON s.id = b."staffId"
@@ -306,7 +317,7 @@ function detalleReversos(a: AlcanceBarrido, where: Prisma.Sql): Prisma.Sql {
            -e.amount AS monto, COALESCE(e.descriptor->>'sede', v.name) AS sede,
            COALESCE(e.descriptor->>'persona', ${personaSql}) AS persona, e.descriptor->>'orden' AS orden,
            e.descriptor->>'esquema' AS esquema, (e.descriptor->>'base')::numeric AS base,
-           (e.descriptor->>'tasa')::numeric AS tasa, 'ANULACION'::text AS motivo
+           (e.descriptor->>'tasa')::numeric AS tasa, e.descriptor->>'limite' AS limite, 'ANULACION'::text AS motivo
     FROM "ServiceEarning" e
     JOIN "CommissionCalculation" cc ON cc.id = e."sourceId"
     JOIN "Venue" v ON v.id = e."venueId"
@@ -337,6 +348,7 @@ interface FilaVenta {
   esquema: string | null
   base: Prisma.Decimal | null
   tasa: Prisma.Decimal | null
+  limite: DescriptorVenta['limite']
   motivo: DescriptorVenta['motivo']
 }
 
@@ -358,6 +370,7 @@ const aLinea = (f: FilaVenta): LineaBarrible => ({
     esquema: f.esquema,
     base: f.base === null ? null : new Prisma.Decimal(f.base).toFixed(2),
     tasa: f.tasa === null ? null : new Prisma.Decimal(f.tasa).toFixed(4),
+    limite: f.limite,
     motivo: f.motivo,
   },
 })

@@ -119,6 +119,7 @@ describe('comisiones barribles (spec §6.2)', () => {
       esquema: 'Lagree + Merch',
       base: '3000.00',
       tasa: '0.0300', // E6a-fix F13
+      limite: null, // final-fix G6: ni mínimo ni tope
       motivo: 'VENTA',
     })
   })
@@ -402,6 +403,7 @@ describe('la vista en vivo (B5) y las consultas del EXPLAIN (B7)', () => {
       'esquema',
       'base',
       'tasa', // E6a-fix F13: aditiva; el recibo y el reporte leen por nombre
+      'limite', // final-fix G6: aditiva, como la tasa
       'motivo',
     ])
     const deCarla = await prisma.$queryRaw<Array<{ sourceId: string }>>((await sqlVentas(alcance(SEP), { staffId: m.carla }))!)

@@ -43,6 +43,8 @@ export interface FilaRecibo {
   base: Prisma.Decimal | null
   /** De una comisión por porcentaje: la tasa aplicada («0.0300»), de su foto o en vivo (E6a-fix F13); null en lo demás. */
   tasa: Prisma.Decimal | null
+  /** Final-fix G6: una venta que el esquema subió a su mínimo o bajó a su tope (`DescriptorVenta.limite`); null en lo demás. */
+  limite: 'MINIMO' | 'TOPE' | null
   motivo: string | null
   /** Propinas de un día juntas (pantalla y PDF): `cobros` dice cuántas. */
   agrupada: boolean
@@ -76,7 +78,10 @@ export function conceptoDe(r: FilaRecibo): string {
   }
   if (r.tipo === 'COMISION') {
     const cabeza = r.motivo === 'ANULACION' ? 'Anulación · comisión' : r.motivo === 'DEVOLUCION' ? 'Devolución · comisión' : 'Comisión'
-    const base = r.motivo === 'VENTA' && r.base !== null ? `base ${pesos.format(Number(r.base))}` : null
+    const venta = r.motivo === 'VENTA' && r.base !== null
+    // Final-fix G6: «base $1.00 → mínimo $5.00»: el 3 % de la base no da el monto porque el esquema lo subió o lo bajó.
+    const limite = venta && r.limite ? ` → ${r.limite === 'MINIMO' ? 'mínimo' : 'tope'} ${pesos.format(Number(r.monto))}` : ''
+    const base = venta ? `base ${pesos.format(Number(r.base))}${limite}` : null
     const quien = [cabeza, esquemaSinPrefijo(r.esquema), tasaDe(r)].filter(Boolean).join(' ')
     return [quien, ventaDe(r), base].filter(Boolean).join(' · ')
   }

@@ -46,8 +46,14 @@ const comisiones = async (staffId: string) =>
     .sort()
 const numero = async (p: { orderId: string }) => (await prisma.order.findUniqueOrThrow({ where: { id: p.orderId } })).orderNumber
 
-/** Una comisión con su tipo de cálculo y su tasa (la de `_ventas.comision` es siempre 3 % por porcentaje). */
-async function comisionCon(configId: string, o: { iso: string; neto: number; base: number; tasa: number; tipo: 'PERCENTAGE' | 'FIXED' }) {
+/**
+ * Una comisión con su tipo de cálculo y su tasa (la de `_ventas.comision` es siempre 3 % por porcentaje). Como la guarda el
+ * motor (`createCalcForConfig`): `bruta` = base × tasa ANTES del mínimo o el tope, `neto` después, y luego el castigo por retardo.
+ */
+async function comisionCon(
+  configId: string,
+  o: { iso: string; neto: number; base: number; tasa: number; tipo: 'PERCENTAGE' | 'FIXED'; bruta?: number; castigo?: number },
+) {
   const pago = await cobro(m, { iso: o.iso, monto: o.base })
   await prisma.commissionCalculation.create({
     data: {
@@ -58,9 +64,10 @@ async function comisionCon(configId: string, o: { iso: string; neto: number; bas
       orderId: pago.orderId,
       baseAmount: o.base,
       effectiveRate: o.tasa,
-      grossCommission: o.neto,
+      grossCommission: o.bruta ?? o.neto,
       netCommission: o.neto,
       calcType: o.tipo,
+      attendancePenaltyRate: o.castigo ?? null,
       calculatedAt: new Date(o.iso),
     },
   })
@@ -98,6 +105,33 @@ describe('F13 — el concepto de una comisión (QA E6a H11)', () => {
     expect(await comisiones(m.sofia)).toEqual(esperado)
     await cerrar()
     expect(await comisiones(m.sofia)).toEqual(esperado) // lo congelado dice lo mismo (la tasa va en su foto)
+  })
+})
+
+describe('final-fix G6 — la comisión dice cuándo el esquema la subió a su mínimo o la bajó a su tope', () => {
+  it('🔴 «3 % · base $1.00 → mínimo $5.00» y «→ tope $200.00»; con retardo no lo afirma; abierto = cerrado, y la foto lo guarda', async () => {
+    const meseros = await esquema(m, m.venueId, 'Comisión Estándar Meseros')
+    const pct = { tasa: 0.03, tipo: 'PERCENTAGE' as const }
+    const minimo = await comisionCon(meseros, { ...pct, iso: '2026-08-11T18:00:00Z', base: 1, bruta: 0.03, neto: 5 })
+    const tope = await comisionCon(meseros, { ...pct, iso: '2026-08-12T18:00:00Z', base: 10000, bruta: 300, neto: 200 })
+    const normal = await comisionCon(meseros, { ...pct, iso: '2026-08-13T18:00:00Z', base: 1000, bruta: 30, neto: 30 })
+    // Con castigo por retardo, el monto ya no es «el mínimo»: no se afirma ninguno de los dos.
+    const conRetardo = await comisionCon(meseros, { ...pct, iso: '2026-08-14T18:00:00Z', base: 1, bruta: 0.03, neto: 4, castigo: 0.2 })
+    const esperado = [
+      `Comisión Estándar Meseros 3 % · venta #${minimo} · base $1.00 → mínimo $5.00`,
+      `Comisión Estándar Meseros 3 % · venta #${tope} · base $10,000.00 → tope $200.00`,
+      `Comisión Estándar Meseros 3 % · venta #${normal} · base $1,000.00`,
+      `Comisión Estándar Meseros 3 % · venta #${conRetardo} · base $1.00`,
+    ].sort()
+    expect(await comisiones(m.sofia)).toEqual(esperado)
+    await cerrar()
+    expect(await comisiones(m.sofia)).toEqual(esperado)
+    const fotos = await prisma.serviceEarning.findMany({
+      where: { organizationId: m.orgId, sourceType: 'COMMISSION' },
+      select: { descriptor: true },
+      take: 10,
+    })
+    expect(fotos.map(f => (f.descriptor as { limite: string | null }).limite).sort()).toEqual(['MINIMO', 'TOPE', null, null].sort())
   })
 })
 
