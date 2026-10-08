@@ -1104,7 +1104,7 @@ export async function getPendingCalculations(venueId: string, staffId?: string):
  * participación (abierta o cerrada: con historia, lo pagado sigue siendo verdad aunque hoy esté desactivada). Sin eso el
  * KPI se oculta (`staffPayActive: false`, 0). Filtra por organización primero (índice `ServiceEarning(organizationId, staffId)`).
  */
-async function comisionesPagadasEnRecibos(venueId: string): Promise<{ activo: boolean; total: Prisma.Decimal }> {
+export async function comisionesPagadasEnRecibos(venueId: string): Promise<{ activo: boolean; total: Prisma.Decimal }> {
   const cero = new Prisma.Decimal(0)
   const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { organizationId: true } })
   if (!venue) return { activo: false, total: cero }

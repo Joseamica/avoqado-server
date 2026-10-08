@@ -6587,6 +6587,7 @@ Los datos que encontré muestran: ${JSON.stringify(finalExecution.result)}
     }
 
     const paymentsHelpSignal =
+      !/\b(comision(?:es)?|commissions?)\b/.test(normalizedMessage) &&
       /\b(pagos?|payments?|cobros?|transacciones?|liquidaciones?|settlements?)\b/.test(normalizedMessage) &&
       /\b(donde|ver|veo|revis(?:a|ar|o)|consult(?:a|ar|o)|encuentro|mostrar|muestrame|how|where|review|see|find)\b/.test(normalizedMessage)
     if (paymentsHelpSignal) {
@@ -6696,12 +6697,11 @@ Los datos que encontré muestran: ${JSON.stringify(finalExecution.result)}
       }
     }
 
-    const commissionsSignal = /\b(comision(?:es)?|commission|payout|meta)\b/.test(normalizedMessage)
-    if (commissionsSignal) {
+    if (/\b(comision(?:es)?|commission|payout|meta)\b/.test(normalizedMessage)) {
       return {
         topic: 'commissions',
-        response: 'Para comisiones entra a `Comisiones`: define reglas, asigna staff, configura periodos y revisa payouts antes de cerrar.',
-        suggestions: ['¿Cómo creo una regla de comisión?', '¿Cómo se calcula un payout?', 'Muéstrame el ranking de comisiones del mes'],
+        response: 'Para comisiones entra a `Comisiones`: reglas y staff. Lo que pagas a cada quien va en su recibo de `Pago al personal`.',
+        suggestions: ['¿Cómo creo una regla de comisión?', '¿Cuánto pagué de comisiones?', 'Muéstrame el ranking de comisiones del mes'],
       }
     }
 

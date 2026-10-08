@@ -69,9 +69,6 @@ export interface AccessValidationResult {
  * Table Access Control Service
  */
 export class TableAccessControlService {
-  /**
-   * Define access policies for all tables
-   */
   /** All roles for PUBLIC tables */
   private static readonly ALL_ROLES = [
     UserRole.SUPERADMIN,
@@ -250,6 +247,8 @@ export class TableAccessControlService {
       table: 'CommissionSummary',
       accessLevel: AccessLevel.RESTRICTED,
       allowedRoles: TableAccessControlService.MANAGER_AND_ABOVE,
+      // Approval/payment state of the previous flow: nobody writes it since staff pay statements (Pago al personal, Oct 2026).
+      forbiddenColumns: ['status', 'approvedAt', 'approvedById'],
       reason: 'Commission summaries contain staff compensation data',
     },
     {
@@ -262,6 +261,7 @@ export class TableAccessControlService {
       table: 'CommissionPayout',
       accessLevel: AccessLevel.RESTRICTED,
       allowedRoles: TableAccessControlService.MANAGER_AND_ABOVE,
+      forbiddenColumns: ['status', 'amount', 'paidAt', 'processedAt'], // previous flow; what is paid lives in staff pay statements
       reason: 'Commission payouts contain staff compensation data',
     },
     {
