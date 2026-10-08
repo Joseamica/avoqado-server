@@ -78,13 +78,34 @@ describe('ajustes manuales (spec §6.4)', () => {
     expect(await prisma.serviceEarning.count({ where: { organizationId: m.orgId, concept: 'MANUAL' } })).toBe(1)
   })
 
+  // E6a-fix5 C-n2: tras una respuesta perdida, el dueño cambia el monto y reintenta: el 409 debe decir que el primero SÍ se guardó.
+  it('C-n2: CLAVE_REUTILIZADA dice que el primer ajuste SÍ se guardó y trae sus datos en details.guardado', async () => {
+    const a = await ajuste({ clientKey: `${m.key}-cn2`, amount: -125.5, reason: 'Llegó tarde' })
+    await expect(ajuste({ clientKey: `${m.key}-cn2`, amount: 10, reason: 'Llegó tarde' })).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'CLAVE_REUTILIZADA',
+      message:
+        'Ya se guardó un ajuste con esta solicitud: -$125.50 para Carla QA (Llegó tarde). Si querías otro distinto, ábrelo de nuevo.',
+      details: {
+        guardado: {
+          staffNombre: 'Carla QA',
+          amount: '-125.50',
+          reason: 'Llegó tarde',
+          periodo: { start: '2026-08-01', end: '2026-08-31' },
+        },
+      },
+    })
+    expect(a.yaExistia).toBe(false)
+  })
+
   it('la misma clave hacia OTRO periodo destino es un error: un bono idéntico para septiembre no devuelve el de agosto (Codex R2-R1-4)', async () => {
     const agosto = await ajuste({ clientKey: `${m.key}-destino` })
     expect(agosto.periodo).toEqual({ start: '2026-08-01', end: '2026-08-31' })
     await expect(ajuste({ clientKey: `${m.key}-destino`, fecha: '2026-09-10' })).rejects.toMatchObject({
       code: 'CLAVE_REUTILIZADA',
       statusCode: 409,
-      message: 'Esta solicitud ya se usó para otro ajuste. Vuelve a abrir el formulario.',
+      message:
+        'Ya se guardó un ajuste con esta solicitud: $300 para Carla QA (Bono de septiembre). Si querías otro distinto, ábrelo de nuevo.',
     })
     // Otro día del MISMO periodo es la misma operación: devuelve la guardada.
     await expect(ajuste({ clientKey: `${m.key}-destino`, fecha: '2026-08-25' })).resolves.toMatchObject({ id: agosto.id, yaExistia: true })
@@ -264,6 +285,23 @@ describe('ajustes manuales (spec §6.4)', () => {
       confirmarHuerfanas: true,
     })
     await expect(ajuste()).rejects.toMatchObject({ code: 'PERIODO_CERRADO' })
+  })
+
+  // E6a-fix5 K4 (resto): el rango que dice el texto del API arranca en el inicio de pago al personal, no antes.
+  it('K4: con inicio de pago al personal, el 400 FECHA_FUERA_DE_RANGO arranca en max(hoy − 12 meses, inicio)', async () => {
+    // AHORA = 2 sep 2026 ⇒ hoy − 12 meses = 2 sep 2025; el inicio (15 oct 2025) es posterior.
+    await prisma.organization.update({ where: { id: m.orgId }, data: { staffPayStartDate: fechaComoDbDate('2025-10-15') } })
+    const fuera = {
+      statusCode: 400,
+      code: 'FECHA_FUERA_DE_RANGO',
+      message: 'La fecha del ajuste debe estar entre 15 oct 2025 y 30 sep 2026',
+      details: { desde: '2025-10-15', hasta: '2026-09-30' },
+    }
+    const base = { userId: m.owner, venueId: m.venueId, sede: m.venueId, staffId: m.carla, amount: 300, reason: 'Bono', ahora: AHORA }
+    for (const fecha of ['1900-01-01', '2026-10-01']) {
+      await expect(ajuste({ fecha })).rejects.toMatchObject(fuera)
+      await expect(previewAjusteManual({ ...base, fecha })).rejects.toMatchObject(fuera)
+    }
   })
 
   // full-testing A6: aceptaba 1900 y 2999 y creaba esos periodos (el de 2999 salía primero en el selector como «Abierto»).

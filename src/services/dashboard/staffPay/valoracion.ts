@@ -14,7 +14,7 @@ export type ReglaDeClase = { tipo: 'SUPLENCIA'; horas: number; bono: string } | 
 
 const horasAntes = (h: number) => (h < 1 ? 'menos de 1 h antes' : `${h} h antes`)
 /** «$100» si es entero, «$1,250.50» si no. */
-const pesosCortos = (s: string) => {
+export const pesosCortos = (s: string) => {
   const d = new Prisma.Decimal(s)
   return `$${d.toNumber().toLocaleString('es-MX', { minimumFractionDigits: d.isInteger() ? 0 : 2, maximumFractionDigits: 2 })}`
 }
