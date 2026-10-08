@@ -7,6 +7,7 @@ import { exportarRecibo, reciboDePersona } from '@/services/dashboard/staffPay/r
 import { cerrarPeriodo, previewCierre } from '@/services/dashboard/staffPay/cierre.service'
 import { borrarMundo, clase, confirmadas, crearMundo, Mundo, tablaMindform } from './_mundo'
 import { activar, cobro, comision, esquema, reembolso } from './_ventas'
+import { planear, procesarEfectos, type MundoComisiones } from '../commission/_mundoComisiones'
 
 jest.mock('@/services/dashboard/staffPay/acceso', () => ({
   ...jest.requireActual('@/services/dashboard/staffPay/acceso'),
@@ -132,6 +133,69 @@ describe('final-fix G6 — la comisión dice cuándo el esquema la subió a su m
       take: 10,
     })
     expect(fotos.map(f => (f.descriptor as { limite: string | null }).limite).sort()).toEqual(['MINIMO', 'TOPE', null, null].sort())
+  })
+})
+
+describe('final-server-cierre G7 — un cierre NUEVO con la comisión que guarda el motor real conserva su tasa', () => {
+  /**
+   * Guía E6c, G7: un recibo CERRADO decía «Comisión Estándar Meseros · venta…» sin «3 %». Aquí la comisión NO es una fila
+   * hecha a mano: la guarda el motor por el camino de la terminal (efecto durable + worker, `calculatedAt` = la hora del
+   * cobro), con un esquema por porcentaje y otro por niveles, y luego se cierra el periodo. Si la tasa se perdiera al
+   * congelar, el recibo cerrado no la diría y la foto no la traería.
+   */
+  it.each([
+    ['PERCENTAGE' as const, '3 %', '0.0300', 30],
+    ['TIERED' as const, '5 %', '0.0500', 50],
+  ])('🔴 esquema %s: el recibo dice «%s» abierto y cerrado, y la foto guarda la tasa %s', async (calcType, tasa, foto, neto) => {
+    const cfg = await prisma.commissionConfig.create({
+      data: {
+        venueId: m.venueId,
+        orgId: m.orgId,
+        name: 'Comisión Estándar Meseros',
+        calcType,
+        defaultRate: 0.03,
+        recipient: 'SERVER',
+        includeTax: true,
+        categoryIds: [],
+        effectiveFrom: new Date('2020-01-01T00:00:00Z'),
+        createdById: m.owner,
+      },
+    })
+    if (calcType === 'TIERED') {
+      await prisma.commissionTier.create({
+        data: {
+          configId: cfg.id,
+          tierLevel: 1,
+          tierName: 'Base',
+          tierType: 'BY_AMOUNT',
+          tierPeriod: 'MONTHLY',
+          minThreshold: 0,
+          rate: 0.05,
+        },
+      })
+    }
+    const venta = await cobro(m, { iso: '2026-08-12T18:00:00Z', monto: 1000, servedById: m.sofia })
+    await planear(venta.id)
+    await procesarEfectos({ venueId: m.venueId } as MundoComisiones)
+    const calc = await prisma.commissionCalculation.findFirstOrThrow({ where: { paymentId: venta.id } })
+    expect([calc.staffId, calc.calcType, Number(calc.netCommission), calc.calculatedAt.toISOString()]).toEqual([
+      m.sofia,
+      calcType,
+      neto,
+      '2026-08-12T18:00:00.000Z',
+    ])
+
+    const esperado = [`Comisión Estándar Meseros ${tasa} · venta #${await numero(venta)} · base $1,000.00`]
+    expect(await comisiones(m.sofia)).toEqual(esperado)
+    await cerrar()
+    expect(await comisiones(m.sofia)).toEqual(esperado)
+    const fotos = await prisma.serviceEarning.findMany({
+      where: { organizationId: m.orgId, sourceType: 'COMMISSION' },
+      select: { descriptor: true },
+      take: 10,
+    })
+    expect(fotos.map(f => (f.descriptor as { tasa: string | null }).tasa)).toEqual([foto])
+    await prisma.commissionTier.deleteMany({ where: { configId: cfg.id } })
   })
 })
 
