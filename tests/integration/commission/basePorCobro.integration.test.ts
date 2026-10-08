@@ -10,7 +10,6 @@ import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { enqueuePaymentCommissionInTx } from '@/services/tpv/paymentEffects.service'
 import { createCommissionForPayment, createSplitCommissionForPayment } from '@/services/dashboard/commission/commission-calculation.service'
-import { buildSaleLines } from '@/services/fiscal/autoPosting.service'
 import { committedAndPendingCommissionProgress, otrosCobros } from '@/services/dashboard/commission/commission-utils'
 import {
   asegurarBaseDePrueba,
@@ -27,6 +26,7 @@ import {
   planear,
   procesarEfectos,
   snapshotViejo,
+  ventaNetaDeLaPoliza,
 } from './_mundoComisiones'
 
 let m: MundoComisiones
@@ -211,24 +211,6 @@ describe('A1d · la columna nace «sin IVA» (D5 enmendada, spec §9-1)', () => 
     expect(col.d).toBe('false')
   })
 })
-
-/** La venta neta (HABER ventas) que la póliza contable asienta para un cobro: `buildSaleLines` con los renglones REALES de su orden. */
-async function ventaNetaDeLaPoliza(paymentId: string): Promise<string> {
-  const { orderId, ...cobroContable } = await prisma.payment.findUniqueOrThrow({
-    where: { id: paymentId },
-    select: { id: true, amount: true, tipAmount: true, feeAmount: true, method: true, type: true, createdAt: true, orderId: true },
-  })
-  const items = await prisma.orderItem.findMany({
-    where: { orderId },
-    select: { quantity: true, unitPrice: true, discountAmount: true, product: { select: { taxRate: true } } },
-    take: 100,
-  })
-  const poliza = buildSaleLines(
-    { ...cobroContable, merchantAccount: null, ecommerceMerchant: null, order: { status: 'COMPLETED', orderNumber: null, items } },
-    cuenta => cuenta,
-  )
-  return ((poliza?.lines.find(l => l.ledgerAccountId === 'SALES_REVENUE')?.creditCents ?? 0) / 100).toFixed(2)
-}
 
 describe('A1e · «sin IVA» usa el IVA de la póliza contable (D5 enmendada, spec §9-1)', () => {
   it.each([

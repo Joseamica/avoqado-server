@@ -38,6 +38,8 @@ import {
 import { repartir } from '../../../../../src/services/dashboard/commission/repartoPorCobro'
 
 const CONFIG_DEFAULT = { includeTax: false, includeDiscount: false }
+/** El tratamiento que los triggers del producto dejan para su tasa (la póliza lee el tratamiento, no la tasa). */
+const tratamientoDe = (taxRate: number) => (taxRate === 0.08 ? 'IVA_8' : taxRate === 0 ? 'IVA_0' : 'IVA_16')
 const CONFIG_PRE_DESCUENTO = { includeTax: false, includeDiscount: true }
 
 /** Un renglón como lo devuelve la consulta: `categoryId = null` ⇒ "Otro importe". */
@@ -248,7 +250,8 @@ describe('A1e · «sin IVA» con la regla de la póliza contable (D5 enmendada, 
     weightQuantity: o.kilos == null ? null : D(o.kilos),
     discountAmount: D(o.descuento ?? 0),
     modifiers: (o.extras ?? []).map(price => ({ price: D(price), quantity: 1 })),
-    product: taxRate === null ? null : { taxRate: D(taxRate) },
+    // El tratamiento manda (final-fix I1, la regla de la póliza de develop); los triggers del producto lo dejan igual a su tasa.
+    product: taxRate === null ? null : { taxRate: D(taxRate), ivaTratamiento: tratamientoDe(taxRate) },
   })
   /** Una orden con el precio con IVA incluido, como la trae `ORDEN_PARA_REPARTO_SELECT`. */
   const ordenDe = (items: ReturnType<typeof item>[], o: { subtotal: number; descuento?: number; cargo?: number }): OrdenParaReparto =>
@@ -317,7 +320,7 @@ describe('A1e · «sin IVA» con la regla de la póliza contable (D5 enmendada, 
       taxAmount: 0,
       discountAmount: o.descuento ?? 0,
       modifiers: (o.extras ?? []).map(price => ({ price, quantity: 1 })),
-      product: { categoryId: 'cat-1', taxRate },
+      product: { categoryId: 'cat-1', taxRate, ivaTratamiento: tratamientoDe(taxRate) },
     })
     const contrato = (contratoDePrecio: string, discountAmount = 0, taxAmount = 0) =>
       (prisma.order.findUnique as jest.Mock).mockResolvedValue({ discountAmount, contratoDePrecio, taxAmount })

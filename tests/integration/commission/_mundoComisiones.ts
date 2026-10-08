@@ -17,6 +17,8 @@ import {
   type PaymentEffectKind,
 } from '@/services/tpv/paymentEffects.service'
 import { lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
+import { buildSaleLines } from '@/services/fiscal/autoPosting.service'
+import { ordenParaIvaSelect } from '@/services/fiscal/ivaDeOrden'
 
 const D = (n: number) => new Prisma.Decimal(n)
 
@@ -100,14 +102,22 @@ export interface VentaDePrueba {
     sinProducto?: boolean
     /** Venta por peso: los kilos (`OrderItem.weightQuantity`); `precio` es el precio por kilo y `quantity` se queda en 1. */
     kilos?: number
+    /** `OrderItem.ivaTratamiento`: el renglón ya se facturó con este tratamiento (final-fix I1). */
+    sellado?: IvaTratamiento
+    /** Cortesía del POS móvil: `isCortesia` y total 0 (final-fix I1). */
+    cortesia?: boolean
   }>
+  /** Cargos por servicio aplicados (`OrderServiceCharge`), gravables o no; suman a la cabecera (final-fix I1). */
+  cargos?: Array<{ monto: number; gravable: boolean }>
+  /** Descuentos B2 DIRIGIDOS enteros a un renglón (por su posición), sin espejo. El llamador pone la cabecera (final-fix I1). */
+  dirigidos?: Array<{ monto: number; renglon: number }>
 }
 
 /** Una orden ya pagada con su total canónico (IVA aparte suma; incluido no). Sus cobros se crean con `cobro`. */
 export async function orden(m: MundoComisiones, v: VentaDePrueba): Promise<string> {
   const contratoDePrecio = v.contratoDePrecio ?? 'IVA_INCLUIDO'
-  const total =
-    Math.max(0, v.subtotal - (v.discountAmount ?? 0)) + (contratoDePrecio === 'IVA_APARTE' ? (v.taxAmount ?? 0) : 0) + (v.cargo ?? 0)
+  const cargo = (v.cargo ?? 0) + (v.cargos ?? []).reduce((s, c) => s + c.monto, 0)
+  const total = Math.max(0, v.subtotal - (v.discountAmount ?? 0)) + (contratoDePrecio === 'IVA_APARTE' ? (v.taxAmount ?? 0) : 0) + cargo
   const order = await prisma.order.create({
     data: {
       venueId: m.venueId,
@@ -115,7 +125,7 @@ export async function orden(m: MundoComisiones, v: VentaDePrueba): Promise<strin
       subtotal: D(v.subtotal),
       discountAmount: D(v.discountAmount ?? 0),
       taxAmount: D(v.taxAmount ?? 0),
-      serviceChargeAmount: D(v.cargo ?? 0),
+      serviceChargeAmount: D(cargo),
       contratoDePrecio,
       total: D(total),
       paidAmount: D(total),
@@ -126,6 +136,7 @@ export async function orden(m: MundoComisiones, v: VentaDePrueba): Promise<strin
   })
   // Un producto ≠ IVA_16 exige «IVA por producto» encendido en el negocio (trigger `IVA_POR_PRODUCTO_APAGADO`).
   if ((v.renglones ?? []).some(r => (r.tratamiento ?? 'IVA_16') !== 'IVA_16')) await encenderIvaPorProducto(m.venueId)
+  const ids: string[] = []
   for (const r of v.renglones ?? []) {
     // Sin `taxRate`: el tratamiento manda y los triggers derivan la tasa, que es lo que leen la póliza y la comisión (A1e).
     const productId = r.sinProducto
@@ -142,7 +153,7 @@ export async function orden(m: MundoComisiones, v: VentaDePrueba): Promise<strin
             },
           })
         ).id
-    await prisma.orderItem.create({
+    const item = await prisma.orderItem.create({
       data: {
         orderId: order.id,
         productId,
@@ -152,11 +163,36 @@ export async function orden(m: MundoComisiones, v: VentaDePrueba): Promise<strin
         ...(r.kilos != null ? { weightQuantity: D(r.kilos) } : {}),
         discountAmount: D(r.descuento ?? 0),
         taxAmount: D(r.iva ?? 0),
-        // Por peso, el importe del POS: precio/kg × kilos al centavo (`order.tpv.service.ts:1738`).
-        total: D(r.kilos != null ? Math.round(r.precio * r.kilos * 100) / 100 : r.precio),
+        // Por peso, el importe del POS: precio/kg × kilos al centavo (`order.tpv.service.ts:1738`). Cortesía móvil: 0.
+        total: D(r.cortesia ? 0 : r.kilos != null ? Math.round(r.precio * r.kilos * 100) / 100 : r.precio),
+        ...(r.cortesia ? { isCortesia: true } : {}),
+        ...(r.sellado ? { ivaTratamiento: r.sellado } : {}),
       },
     })
+    ids.push(item.id)
   }
+  for (const c of v.cargos ?? [])
+    await prisma.orderServiceCharge.create({
+      data: { orderId: order.id, name: 'Servicio', type: 'FIXED_AMOUNT', value: D(c.monto), amount: D(c.monto), taxable: c.gravable },
+    })
+  for (const d of v.dirigidos ?? [])
+    await prisma.orderDiscount.create({
+      data: {
+        orderId: order.id,
+        type: 'FIXED_AMOUNT',
+        name: 'Descuento dirigido',
+        value: D(d.monto),
+        amount: D(d.monto),
+        appliedToItemIds: [ids[d.renglon]],
+        reparto: {
+          v: 1,
+          alcance: 'DIRIGIDO',
+          conPromociones: null,
+          espejo: false,
+          renglones: { [ids[d.renglon]]: Math.round(d.monto * 100) },
+        },
+      },
+    })
   return order.id
 }
 
@@ -413,4 +449,27 @@ export async function borrarMundoComisiones(m: MundoComisiones | undefined): Pro
   await prisma.venue.delete({ where: { id: m.venueId } })
   await prisma.staff.deleteMany({ where: { email: { startsWith: m.key } } })
   await prisma.organization.delete({ where: { id: m.orgId } })
+}
+
+/**
+ * La venta neta (HABER ventas) que la póliza contable asienta para un cobro: `buildSaleLines` con su orden leída como la lee
+ * `generatePoliciesForVenue` (`ordenParaIvaSelect`: renglones con total, sello y cortesía, descuentos B2 y cargos). Final-fix I1:
+ * antes leía sólo `unitPrice`, `discountAmount` y `product.taxRate`, la regla vieja.
+ */
+export async function ventaNetaDeLaPoliza(paymentId: string): Promise<string> {
+  const { order, ...cobroContable } = await prisma.payment.findUniqueOrThrow({
+    where: { id: paymentId },
+    select: {
+      id: true,
+      amount: true,
+      tipAmount: true,
+      feeAmount: true,
+      method: true,
+      type: true,
+      createdAt: true,
+      order: { select: { status: true, orderNumber: true, ...ordenParaIvaSelect } },
+    },
+  })
+  const poliza = buildSaleLines({ ...cobroContable, merchantAccount: null, ecommerceMerchant: null, order }, cuenta => cuenta)
+  return ((poliza?.lines.find(l => l.ledgerAccountId === 'SALES_REVENUE')?.creditCents ?? 0) / 100).toFixed(2)
 }

@@ -312,7 +312,8 @@ describe('calculateCategoryFilteredAmount', () => {
     // invisible mientras el POS mandaba `discountAmount = 0` siempre.
     expect(result).toBe(390)
 
-    // La consulta trae la orden entera, en orden de id: cada línea con sus kilos, sus extras, su categoría y su tasa (A1e).
+    // La consulta trae la orden entera, en orden de id: cada línea con sus kilos, sus extras, su categoría y su tasa (A1e), que es
+    // la de la póliza: el sello del renglón y el tratamiento de su producto (final-fix I1).
     expect(prismaMock.orderItem.findMany).toHaveBeenCalledWith({
       where: { orderId: 'order-1' },
       orderBy: { id: 'asc' },
@@ -322,8 +323,9 @@ describe('calculateCategoryFilteredAmount', () => {
         weightQuantity: true,
         taxAmount: true,
         discountAmount: true,
+        ivaTratamiento: true,
         modifiers: { select: { price: true, quantity: true } },
-        product: { select: { categoryId: true, taxRate: true } },
+        product: { select: { categoryId: true, taxRate: true, ivaTratamiento: true } },
       },
     })
   })

@@ -86,7 +86,7 @@ export interface CommissionableLine {
   orderDiscountShare?: number
   /** IVA de la línea. «Con IVA» lo suma si se cobró aparte; «sin el IVA registrado» lo resta si el precio ya lo traía. */
   tax?: number
-  /** Tasa del producto de la línea, como la lee la póliza (`product.taxRate`); `null` o ausente = 16 % (A1e). */
+  /** Tasa de la línea como la lee la póliza (`tasaDelRenglon`: sello > tratamiento del producto > 16 %); ausente = 16 % (A1e). */
   taxRate?: number | null
 }
 
@@ -129,7 +129,7 @@ export function commissionableAmount(
   return roundPesos(total)
 }
 
-/** La tasa de una línea sin producto o sin tasa: 16 %, como la póliza (`grossByRateForOrder`) y la factura. */
+/** La tasa de una línea sin tasa: 16 %, como la póliza (`grossByRateFromOrder`) y la factura. */
 const TASA_POR_DEFECTO = 0.16
 
 /**
@@ -147,7 +147,7 @@ export function precioTraeIva(o: { contratoDePrecio?: string | null; taxAmount?:
 /**
  * La base SIN IVA de unas líneas con el IVA incluido (A1e, D5 enmendada), con la regla de tasas de la póliza contable: el neto
  * de cada línea —los mismos descuentos, clamp por línea y «precio de lista» que `commissionableAmount`— pasa a centavos
- * CONSERVANDO el total (`redondearRepartido`, A1a), se agrupa por la tasa de su producto (sin tasa, 16 %) y se separa con
+ * CONSERVANDO el total (`redondearRepartido`, A1a), se agrupa por la tasa de su renglón (sin tasa, 16 %) y se separa con
  * `splitIvaByRate`, la división de la póliza. Redondear cada línea (Codex r1-2: tres renglones de $1 al 0 % menos $1 daban
  * $2.01) o cada tasa por su lado (Codex r3-1: $0.01 al 16 % + $0.01 al 8 % menos $0.01 daban $0.02) inventaba centavos.
  */
@@ -182,7 +182,7 @@ export interface OrderLineForCommission {
   tax: number
   /** Categoría del producto. `null` = renglón de importe libre ("Otro importe"). */
   categoryId: string | null
-  /** `Product.taxRate`, como lo lee la póliza; `null` = sin producto (16 %). */
+  /** La tasa del renglón como la lee la póliza (`tasaDelRenglon`, final-fix I1): sello > tratamiento del producto > 16 %. */
   taxRate?: number | null
 }
 
