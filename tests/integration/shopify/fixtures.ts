@@ -8,6 +8,7 @@ import { randomUUID } from 'crypto'
 import { Prisma, ShopifyLinkStatus } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { createTokenCipher } from '@/lib/token-encryption'
+import type { ShopifyResult } from '@/services/commerce-channels/shopify/shopify.graphql'
 
 // Llave de prueba (32 bytes en hex) sólo si el entorno no trae una: el cifrado es el real, no un mock.
 if (!process.env.SHOPIFY_TOKEN_KEY) process.env.SHOPIFY_TOKEN_KEY = 'a'.repeat(64)
@@ -252,4 +253,19 @@ export async function limpiarEscenarioShopify(e: EscenarioShopify): Promise<void
   await prisma.venue.deleteMany({ where: { id: venueId } })
   await prisma.staff.deleteMany({ where: { id: { in: gente } } })
   await prisma.organization.deleteMany({ where: { id: e.organizationId } })
+}
+
+/**
+ * Doble de `shopifyGraphql` para `deps.graphql`. Respeta `validate` igual que el cliente real: una respuesta con forma
+ * inesperada sale como BAD_RESPONSE (reintentable y ambigua). Cada llamada queda en `.mock.calls`:
+ * `[shop, token, query, variables, opts]`.
+ */
+export function graphqlFalso(responder: (query: string, vars: any) => ShopifyResult<any>): jest.Mock {
+  return jest.fn(async (_shop: string, _token: string, query: string, vars: any = {}, opts?: { validate?: (d: unknown) => boolean }) => {
+    const r = responder(query, vars)
+    if (r.ok && opts?.validate && !opts.validate(r.data)) {
+      return { ok: false, code: 'BAD_RESPONSE', retryable: true, ambiguous: true, message: 'respuesta con forma inesperada (graphqlFalso)' }
+    }
+    return r
+  })
 }
