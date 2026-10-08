@@ -6,8 +6,10 @@
  */
 import { randomUUID } from 'crypto'
 import { Prisma } from '@prisma/client'
+import Papa from 'papaparse'
 
 import { importMenu, type ImportMenuData } from '@/services/dashboard/menu.dashboard.service'
+import { chunkImportMenuData, convertShopifyCsv } from '@/services/dashboard/shopifyCatalogImport'
 import prisma from '@/utils/prismaClient'
 
 jest.setTimeout(120_000)
@@ -194,5 +196,62 @@ describe('importMenu — gtin, imageUrl and inventoryByQuantity (additive)', () 
     expect(after).toMatchObject({ name: 'Blusa', gtin: '444', imageUrl: 'https://cdn/b.jpg', trackInventory: false, deletedAt: null })
     expect(after.price.toString()).toBe('321')
     expect(after.updatedAt).toEqual(other.updatedAt)
+  })
+})
+
+describe('Shopify loader: only NEW SKUs unless told to update the existing ones', () => {
+  const headers = ['Handle', 'Title', 'Type', 'Status', 'Option1 Value', 'Variant SKU', 'Variant Price']
+  const shopifyCsv = Papa.unparse({
+    fields: headers,
+    data: [
+      ['camisa', 'Camisa Shopify', 'Camisas', 'active', 'Default Title', 'IQ-OLD', '30.00'],
+      ['blusa', 'Blusa Shopify', 'Camisas', 'active', 'Default Title', 'IQ-NEW', '40.00'],
+    ],
+  })
+
+  /** What the script does: read the venue's SKUs and barcode holders, convert, import in chunks. */
+  async function load(updateExisting: boolean) {
+    const existing = await prisma.product.findMany({ where: { venueId }, select: { sku: true, gtin: true, deletedAt: true } })
+    const { data, variants } = convertShopifyCsv(
+      shopifyCsv,
+      { factor: '20' },
+      {
+        barcodeOwners: new Map(existing.filter(p => p.gtin).map(p => [p.gtin!, p.sku])),
+        existingSkus: new Map(existing.map(p => [p.sku, { archived: p.deletedAt !== null }])),
+        updateExisting,
+      },
+    )
+    for (const chunk of chunkImportMenuData(data, 50)) await importMenu(venueId, chunk, actor())
+    return variants
+  }
+
+  it('by default leaves an existing SKU exactly as it was (YA_EXISTE) and creates the new one', async () => {
+    const before = await existing({
+      sku: 'IQ-OLD',
+      name: 'Camisa a mano',
+      cost: new Prisma.Decimal(200),
+      description: 'Lino, hecha a mano',
+      tags: ['verano'],
+    })
+
+    const variants = await load(false)
+
+    expect(variants.find(v => v.sku === 'IQ-OLD')!.problems.map(p => p.code)).toEqual(['YA_EXISTE'])
+    const after = await prisma.product.findUniqueOrThrow({ where: { id: before.id } })
+    expect(after).toMatchObject({ name: 'Camisa a mano', description: 'Lino, hecha a mano', tags: ['verano'], trackInventory: false })
+    expect(after.price.toString()).toBe('500')
+    expect(after.cost?.toString()).toBe('200')
+    expect(after.updatedAt).toEqual(before.updatedAt)
+    expect((await read('IQ-NEW')).price.toString()).toBe('800')
+  })
+
+  it('with updateExisting overwrites it, resetting what merge always resets (cost, description, tags)', async () => {
+    await existing({ sku: 'IQ-OLD', name: 'Camisa a mano', cost: new Prisma.Decimal(200), description: 'Lino', tags: ['verano'] })
+
+    await load(true)
+
+    const after = await read('IQ-OLD')
+    expect(after).toMatchObject({ name: 'Camisa Shopify', cost: null, description: null, tags: [], type: 'REGULAR', trackInventory: true })
+    expect(after.price.toString()).toBe('600')
   })
 })

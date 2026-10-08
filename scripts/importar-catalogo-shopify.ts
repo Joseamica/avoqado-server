@@ -1,7 +1,11 @@
 /**
  * Loads a Shopify product CSV (Shopify admin → Products → Export → CSV) into ONE Avoqado venue. Operator tool, run by us
- * (IQ Collection, Lomas): each collection is loaded on top of the previous ones — merge mode, it adds and updates by SKU
- * and never archives what the file does not bring. The conversion lives in `src/services/dashboard/shopifyCatalogImport.ts`.
+ * (IQ Collection, Lomas): each collection is loaded on top of the previous ones and nothing the file does not bring is
+ * archived. The conversion lives in `src/services/dashboard/shopifyCatalogImport.ts`.
+ *
+ * 🔴 By default ONLY NEW SKUs are loaded: a SKU the venue already has is reported as YA_EXISTE and not sent, because
+ * importMenu's merge resets its cost, description, tags, allergens, type, order and category. `--actualizar-existentes`
+ * sends them anyway (it prints what gets reset first). Same result whether Spain exports one collection or the catalog.
  *
  *   export DATABASE_URL=<target>   # REQUIRED for production: dotenv never overrides an exported value; without it the run uses .env
  *
@@ -19,7 +23,7 @@
  * elsewhere. The Prisma client is loaded only after that check, from that same DATABASE_URL.
  *
  * Applying runs `importMenu` in chunks of CHUNK_SIZE products (one transaction each): re-running the same command after
- * a failure is safe — what was loaded is updated, nothing is duplicated.
+ * a failure is safe — what was already loaded is reported as YA_EXISTE, the rest is loaded, nothing is duplicated.
  */
 import fs from 'node:fs'
 import Papa from 'papaparse'
@@ -41,13 +45,15 @@ const PROBLEMS: Record<ShopifyProblemCode, string> = {
   NO_ACTIVO: 'omitido: el producto no está activo en Shopify (borrador o archivado)',
   PACK: 'omitido: parece un pack/kit/lote (se decidirá si se arma como combo)',
   SIN_SKU: 'omitido: la variante no tiene SKU',
+  SKU_FORMATO: 'omitido: el SKU trae caracteres que la plataforma no acepta (sólo letras sin acento, números, - y _)',
   SKU_REPETIDO: 'omitido: el SKU se repite en el archivo',
+  YA_EXISTE: 'omitido: el SKU ya existe en el negocio y no se toca (--actualizar-existentes para actualizarlo)',
   SIN_PRECIO: 'omitido: el SKU no está en la lista de precios',
   PRECIO_INVALIDO: 'omitido: precio ilegible',
   PRECIO_CERO: 'omitido: el precio en pesos es 0 o menos',
   CODIGO_REPETIDO: 'se importa SIN código de barras: varias variantes comparten el mismo',
   CODIGO_EN_OTRO_PRODUCTO: 'se importa SIN código de barras: otro producto del negocio ya lo tiene',
-  CODIGO_INVALIDO: 'se importa SIN código de barras: lo dañó una hoja de cálculo (notación científica)',
+  CODIGO_INVALIDO: 'se importa SIN código de barras: notación científica (lo dañó una hoja de cálculo) o más de 14 caracteres',
   VARIOS_CODIGOS: 'se importa con el PRIMER código de barras: traía varios',
 }
 
@@ -73,6 +79,7 @@ function database(): { host: string; name: string } {
 async function main() {
   await import('dotenv/config')
   const apply = process.argv.includes('--aplicar')
+  const updateExisting = process.argv.includes('--actualizar-existentes')
   const file = flag('--archivo')
   const venueId = flag('--venue')
   const factor = flag('--factor')
@@ -106,23 +113,27 @@ async function main() {
     const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { name: true, slug: true } })
     if (!venue) throw new Refusal(`No existe el negocio ${venueId} en esta base.`)
     console.log(`Negocio: ${venue.name} (${venue.slug})`)
-    if (apply && !(await prisma.staff.findUnique({ where: { id: staffId! }, select: { id: true } })))
-      throw new Refusal(`No existe el staff ${staffId} en esta base.`)
+    if (apply && !(await prisma.staffVenue.findFirst({ where: { staffId: staffId!, venueId, active: true }, select: { id: true } })))
+      throw new Refusal(`🔴 No se escribió NADA. El staff ${staffId} no existe o no está activo en el negocio ${venue.name}.`)
 
     // gtin is unique per venue (archived products included): a barcode another SKU holds would abort the import.
     const barcodes = [...new Set(firstPass.variants.map(variant => variant.barcode).filter((code): code is string => Boolean(code)))]
     const holders = await prisma.product.findMany({ where: { venueId, gtin: { in: barcodes } }, select: { sku: true, gtin: true } })
-    const { data, variants } = convertShopifyCsv(csv, pricing, new Map(holders.map(holder => [holder.gtin!, holder.sku])))
-
-    const skus = variants.filter(variant => !variant.omitted).map(variant => variant.sku)
+    // Archived ones too: importMenu would restore them (same product), so they are not new either.
+    const skus = [...new Set(firstPass.variants.map(variant => variant.sku).filter(Boolean))]
     const known = new Map(
       (await prisma.product.findMany({ where: { venueId, sku: { in: skus } }, select: { sku: true, deletedAt: true } })).map(p => [
         p.sku,
-        p.deletedAt,
+        { archived: p.deletedAt !== null },
       ]),
     )
+    const { data, variants } = convertShopifyCsv(csv, pricing, {
+      barcodeOwners: new Map(holders.map(holder => [holder.gtin!, holder.sku])),
+      existingSkus: known,
+      updateExisting,
+    })
     const outcome = (sku: string, omitted: boolean) =>
-      omitted ? 'OMITIDO' : !known.has(sku) ? 'CREAR' : known.get(sku) ? 'RESTAURAR' : 'ACTUALIZAR'
+      omitted ? 'OMITIDO' : !known.has(sku) ? 'CREAR' : known.get(sku)!.archived ? 'RESTAURAR' : 'ACTUALIZAR'
 
     const reportPath = `${file.replace(/\.csv$/i, '')}.reporte.csv`
     fs.writeFileSync(
@@ -156,6 +167,14 @@ async function main() {
     for (const [code, total] of byCode) console.log(`  ${code.padEnd(24)} ${String(total).padStart(5)}  ${PROBLEMS[code]}`)
     console.log(`\nReporte (una fila por variante): ${reportPath}`)
 
+    if (updateExisting && count('ACTUALIZAR') + count('RESTAURAR') > 0) {
+      console.log(`\n⚠️  --actualizar-existentes: ${count('ACTUALIZAR') + count('RESTAURAR')} producto(s) que YA existen se sobrescriben.`)
+      console.log('   Toman nombre, precio, categoría y tipo (REGULAR) del archivo, y se REINICIAN:')
+      console.log('   costo y descripción → vacíos · etiquetas y alérgenos → vacíos · orden en su categoría → el del archivo.')
+      console.log('   La imagen y el código de barras se reemplazan cuando el archivo los trae. El inventario queda por pieza;')
+      console.log('   su stock no se toca.')
+    }
+
     if (!apply) {
       console.log('\nSIMULACIÓN: no se escribió nada. Revisa el reporte y, para aplicar, repite el comando con:')
       console.log(`  --aplicar --staff <staffId> --confirm-host ${host} --confirm-db ${name}`)
@@ -177,7 +196,7 @@ async function main() {
         console.log(`  lote ${index + 1}/${chunks.length}: ${result.stats.products} productos`)
       } catch (error) {
         console.error(`\n🔴 Falló el lote ${index + 1}/${chunks.length}; los ${index} anteriores sí quedaron cargados.`)
-        console.error('   Corre de nuevo el MISMO comando: lo ya cargado se actualiza, nada se duplica.')
+        console.error('   Corre de nuevo el MISMO comando: lo ya cargado sale como YA_EXISTE y se carga lo que faltó.')
         throw error
       }
     }
