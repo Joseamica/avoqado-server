@@ -1,7 +1,7 @@
 import { NextFunction, Request, Response } from 'express'
 import { BadRequestError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
-import { venueHasServicePayAccess } from '../../services/dashboard/staffPay/acceso'
+import { puedeAdministrarLaOrganizacion, venueHasServicePayAccess } from '../../services/dashboard/staffPay/acceso'
 import * as activacion from '../../services/dashboard/staffPay/activacion.service'
 import * as niveles from '../../services/dashboard/staffPay/niveles.service'
 import * as tablas from '../../services/dashboard/staffPay/tablas.service'
@@ -28,15 +28,18 @@ export function ctx(req: Request): { venueId: string; userId: string } {
 
 export async function getAccess(req: Request, res: Response, next: NextFunction) {
   try {
-    const { venueId } = ctx(req)
+    const { venueId, userId } = ctx(req)
     const { organizationId } = await orgDeVenue(venueId)
     // Fase 3 §10: `enabled` = el plan lo incluye; además, si el dueño ya activó, desde cuándo y si las propinas van al recibo.
     // E1d: además, la periodicidad guardada, si ya es fija y el inicio que se guardaría al activar (la pantalla de activar
     // lo necesita antes de activar, cuando GET /periods da 403).
+    // E6a-fix2 C2 (aditivo): si quien pregunta puede activar y prender las propinas (el permiso en TODAS las sedes), con la
+    // MISMA regla que el 403 de esas acciones.
     res.json({
       enabled: await venueHasServicePayAccess(venueId),
       ...(await activacion.estadoActivacion(prisma, organizationId)),
       ...(await activacion.accesoActivacion({ venueId })),
+      puedeAdministrarOrganizacion: await puedeAdministrarLaOrganizacion(userId, organizationId),
     })
   } catch (error) {
     next(error)

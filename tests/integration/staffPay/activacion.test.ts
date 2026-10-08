@@ -44,7 +44,7 @@ describe('activar pago al personal (spec fase 3 §7.1, Codex r1-9)', () => {
     expect(await periodicidad()).toBe('SEMIMONTHLY')
     expect(await estadoActivacion(prisma, m.orgId)).toEqual({ activado: true, startDate: '2026-09-16', propinasEncendidas: false })
     expect(await logs('SERVICE_PAY_ACTIVATED')).toBe(1)
-    expect(mockPermiso).toHaveBeenCalledWith(m.owner, m.orgId, 'staffpay:close')
+    expect(mockPermiso).toHaveBeenCalledWith(m.owner, m.orgId, 'staffpay:close', { venueId: m.venueId })
   })
 
   it('elegir la mensual de fábrica TAMBIÉN activa (antes elegir «mensual» no activaba nada)', async () => {
@@ -131,7 +131,7 @@ describe('interruptor de propinas (spec fase 3 §7.1, Codex r1-5)', () => {
       new ForbiddenError('Esta acción afecta a toda la organización: necesitas staffpay:close en todas las sedes'),
     )
     await expect(propinas(true, '2026-09-03T18:00:00Z')).rejects.toBeInstanceOf(ForbiddenError)
-    expect(mockPermiso).toHaveBeenLastCalledWith(m.owner, m.orgId, 'staffpay:close')
+    expect(mockPermiso).toHaveBeenLastCalledWith(m.owner, m.orgId, 'staffpay:close', { venueId: m.venueId })
     expect(await prisma.staffPayTipWindow.count({ where: { organizationId: m.orgId } })).toBe(0)
     expect(await logs('SERVICE_PAY_TIPS_SET')).toBe(0)
   })

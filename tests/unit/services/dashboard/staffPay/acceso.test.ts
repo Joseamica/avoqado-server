@@ -25,7 +25,9 @@ import {
   assertPermisoEnSedes,
   assertPermisoEnTodasLasSedes,
   exigirPermisoEnSedes,
+  listaDeSedes,
   MENSAJE_SIN_ACTIVAR,
+  puedeAdministrarLaOrganizacion,
   organizacionActivada,
   organizacionDeLaSedeActivada,
   sedesConPermiso,
@@ -199,5 +201,55 @@ describe('acceso — fase 3: el plan en lote y la activación (spec §7.1, §10)
       statusCode: 403,
       message: expect.stringMatching(/viene en el plan Pro o se contrata suelto por sucursal/),
     })
+  })
+})
+
+describe('acceso — E6a-fix2 C2: dónde falta el permiso, en palabras', () => {
+  it('nombra las sedes en orden alfabético, con «y» antes de la última', () => {
+    expect(listaDeSedes(['Wellness'], 0)).toBe('Wellness')
+    expect(listaDeSedes(['Wellness', 'Full'], 0)).toBe('Full y Wellness')
+    expect(listaDeSedes(['Ñandú', 'Centro', 'Álamo'], 0)).toBe('Álamo, Centro y Ñandú')
+  })
+  it('las que no puede ver van en número, sin nombre (singular y plural)', () => {
+    expect(listaDeSedes(['Full'], 1)).toBe('Full y 1 sede donde no tienes acceso')
+    expect(listaDeSedes([], 2)).toBe('2 sedes donde no tienes acceso')
+  })
+  it('más de 5 nombres: los 5 primeros y el resto en número', () => {
+    expect(listaDeSedes(['F', 'E', 'D', 'C', 'B', 'A', 'G'], 1)).toBe('A, B, C, D, E, 2 más y 1 sede donde no tienes acceso')
+  })
+  it('el 403 usa el NOMBRE del permiso, no su código, y dice a quién pedírselo', async () => {
+    prismaMock.venue.findMany.mockReset()
+    prismaMock.venue.findMany
+      .mockResolvedValueOnce([{ id: 'pn' }, { id: 'bsf' }])
+      .mockResolvedValueOnce([{ id: 'bsf', name: 'Bosques' }])
+      .mockResolvedValue([])
+    mockPlan.mockResolvedValue(true)
+    mockGetUserAccess.mockImplementation(async (_u: string, v: string) => ({ corePermissions: v === 'pn' ? ['staffpay:close'] : [] }))
+    await expect(assertPermisoEnTodasLasSedes('u1', 'org1', 'staffpay:close')).rejects.toMatchObject({
+      statusCode: 403,
+      code: 'FALTA_PERMISO_EN_SEDES',
+      message:
+        'Para esto necesitas el permiso «Cerrar periodos y registrar pagos» en todas las sedes de la organización (te falta en: Bosques). Pídeselo al dueño del negocio.',
+    })
+  })
+  it('más de 500 sedes con el plan: la acción sigue dando su 400 y el booleano dice que no (sin tumbar GET /access)', async () => {
+    const ids = (n: number, desde = 0) => Array.from({ length: n }, (_, i) => ({ id: `v${String(desde + i).padStart(4, '0')}` }))
+    prismaMock.venue.findMany.mockReset()
+    prismaMock.venue.findMany.mockResolvedValueOnce(ids(500)).mockResolvedValueOnce(ids(1, 500)).mockResolvedValue([])
+    mockPlan.mockResolvedValue(true)
+    await expect(puedeAdministrarLaOrganizacion('u1', 'org1')).resolves.toBe(false)
+    prismaMock.venue.findMany.mockReset()
+    prismaMock.venue.findMany.mockResolvedValueOnce(ids(500)).mockResolvedValueOnce(ids(1, 500)).mockResolvedValue([])
+    await expect(assertPermisoEnTodasLasSedes('u1', 'org1', 'staffpay:close')).rejects.toMatchObject({
+      statusCode: 400,
+      code: 'DEMASIADAS_SEDES',
+    })
+  })
+  it('con el permiso en todas, el booleano dice que sí', async () => {
+    prismaMock.venue.findMany.mockReset()
+    prismaMock.venue.findMany.mockResolvedValueOnce([{ id: 'pn' }, { id: 'bsf' }]).mockResolvedValue([])
+    mockPlan.mockResolvedValue(true)
+    mockGetUserAccess.mockImplementation(async () => ({ corePermissions: ['staffpay:close'] }))
+    await expect(puedeAdministrarLaOrganizacion('u1', 'org1')).resolves.toBe(true)
   })
 })

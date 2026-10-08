@@ -53,7 +53,7 @@ export async function activarPagoAlPersonal(input: {
 }): Promise<{ startDate: string; yaActivado: boolean }> {
   if (input.periodicidad !== 'MONTHLY' && input.periodicidad !== 'SEMIMONTHLY') throw new BadRequestError('Elige mensual o quincenal')
   const v = await prisma.venue.findUniqueOrThrow({ where: { id: input.venueId }, select: { organizationId: true, timezone: true } })
-  await assertPermisoEnTodasLasSedes(input.userId, v.organizationId, 'staffpay:close')
+  await assertPermisoEnTodasLasSedes(input.userId, v.organizationId, 'staffpay:close', { venueId: input.venueId })
   // Con el cliente GLOBAL, antes de la transacción (como el cierre): dentro sólo se bloquean y se revalidan.
   const sedes = await sedesElegidas(v.organizationId, input.sedes)
   return transaccionConPresupuesto(async (tx, presupuesto) => {
@@ -236,7 +236,7 @@ export async function cambiarPropinas(input: {
 }): Promise<{ encendidas: boolean; cambio: boolean }> {
   if (typeof input.encender !== 'boolean') throw new BadRequestError('Indica si las propinas se pagan en el recibo')
   const v = await prisma.venue.findUniqueOrThrow({ where: { id: input.venueId }, select: { organizationId: true } })
-  await assertPermisoEnTodasLasSedes(input.userId, v.organizationId, 'staffpay:close')
+  await assertPermisoEnTodasLasSedes(input.userId, v.organizationId, 'staffpay:close', { venueId: input.venueId })
   return transaccionConPresupuesto(async (tx, presupuesto) => {
     await lockPeriodosDeOrganizacion(tx, v.organizationId, presupuesto)
     const ahora = input.ahora ?? new Date() // F5: bajo el candado (cada reintento lo vuelve a tomar); `input.ahora`, sólo pruebas

@@ -324,7 +324,7 @@ export async function listarPeriodos(input: {
 export async function cambiarPeriodicidad(input: { userId: string; venueId: string; periodicidad: Periodicidad }) {
   if (input.periodicidad !== 'MONTHLY' && input.periodicidad !== 'SEMIMONTHLY') throw new BadRequestError('Periodicidad inválida')
   const v = await prisma.venue.findUniqueOrThrow({ where: { id: input.venueId }, select: { organizationId: true } })
-  await assertPermisoEnTodasLasSedes(input.userId, v.organizationId, 'staffpay:close')
+  await assertPermisoEnTodasLasSedes(input.userId, v.organizationId, 'staffpay:close', { venueId: input.venueId })
   return transaccionConPresupuesto(async (tx, presupuesto) => {
     await lockPeriodosDeOrganizacion(tx, v.organizationId, presupuesto)
     const antes = await tx.organization.findUniqueOrThrow({

@@ -2,6 +2,7 @@ import prisma from '../../../utils/prismaClient'
 import { BadRequestError, ForbiddenError } from '../../../errors/AppError'
 import { getUserAccess, hasPermission } from '../../access/access.service'
 import { venueHasFeatureAccess, venuesWithFeatureAccess } from '../../access/basePlan.service'
+import { auditarAccesoNegado } from '../accesoNegado'
 import { COMO_SE_CONSIGUE_EL_PLAN } from './textos'
 
 /**
@@ -76,22 +77,107 @@ export async function sedesConServicePay(organizationId: string): Promise<string
 }
 
 async function tienePermiso(userId: string, venueId: string, permiso: string): Promise<boolean> {
+  return (await permisoYAcceso(userId, venueId, permiso)).tiene
+}
+
+/** El permiso y si la persona entra a la sede (para nombrarla). Cualquier error cuenta como «sin permiso», como siempre. */
+async function permisoYAcceso(userId: string, venueId: string, permiso: string): Promise<{ tiene: boolean; entra: boolean }> {
   try {
-    return hasPermission(await getUserAccess(userId, venueId), permiso)
+    return { tiene: hasPermission(await getUserAccess(userId, venueId), permiso), entra: true }
   } catch {
-    return false
+    return { tiene: false, entra: false }
   }
 }
 
-export async function assertPermisoEnTodasLasSedes(userId: string, organizationId: string, permiso: string): Promise<void> {
-  const sedes = await sedesConServicePay(organizationId)
-  if (sedes.length === 0)
-    throw new ForbiddenError(`Pago por servicio no está activo en ninguna sede de esta organización: ${COMO_SE_CONSIGUE_EL_PLAN}.`)
-  for (const venueId of sedes) {
-    if (!(await tienePermiso(userId, venueId, permiso))) {
-      throw new ForbiddenError(`Esta acción afecta a toda la organización: necesitas ${permiso} en todas las sedes`)
-    }
+/** El nombre que ve el dueño en el editor de roles (dashboard, `settings.permissionLabels`): nunca el código interno. */
+const NOMBRE_DEL_PERMISO: Record<string, string> = {
+  'staffpay:read': 'Ver pago al personal',
+  'staffpay:manage': 'Configurar pago al personal',
+  'staffpay:close': 'Cerrar periodos y registrar pagos',
+}
+
+/**
+ * «A, B y 2 sedes donde no tienes acceso». Sólo se nombran las sedes a las que la persona entra (las demás, igual que en la
+ * pantalla de sedes, no se le muestran); hasta `max` nombres y el resto en número.
+ */
+export function listaDeSedes(nombres: string[], sinAcceso: number, max = 5): string {
+  const vistos = [...nombres].sort((a, b) => a.localeCompare(b, 'es'))
+  const partes = vistos.slice(0, max)
+  if (vistos.length > max) partes.push(`${vistos.length - max} más`)
+  if (sinAcceso > 0) partes.push(`${sinAcceso} ${sinAcceso === 1 ? 'sede donde no tienes acceso' : 'sedes donde no tienes acceso'}`)
+  return partes.length <= 1 ? (partes[0] ?? '') : `${partes.slice(0, -1).join(', ')} y ${partes[partes.length - 1]}`
+}
+
+/**
+ * E6a-fix2 C2: LA regla de las acciones de organización (activar, propinas, periodicidad, niveles): el permiso en TODAS las
+ * sedes con el plan. Devuelve la negativa que daría la acción, o `null` si puede. La usan el 403 (`assertPermisoEnTodasLasSedes`)
+ * y el booleano de `GET /access` (`puedeAdministrarLaOrganizacion`): una sola regla, no dos. El texto dice qué falta, dónde y a
+ * quién pedírselo, con el nombre del permiso y no su código.
+ */
+export async function negativaDeOrganizacion(
+  userId: string,
+  organizationId: string,
+  permiso: string,
+): Promise<{ error: ForbiddenError | BadRequestError; faltanEn: string[] } | null> {
+  let sedes: string[]
+  try {
+    sedes = await sedesConServicePay(organizationId)
+  } catch (e) {
+    if (e instanceof BadRequestError && e.code === 'DEMASIADAS_SEDES') return { error: e, faltanEn: [] }
+    throw e
   }
+  if (sedes.length === 0) {
+    const sinPlan = `Pago por servicio no está activo en ninguna sede de esta organización: ${COMO_SE_CONSIGUE_EL_PLAN}.`
+    return { error: new ForbiddenError(sinPlan), faltanEn: [] }
+  }
+  const faltan: Array<{ venueId: string; entra: boolean }> = []
+  for (const venueId of sedes) {
+    const r = await permisoYAcceso(userId, venueId, permiso)
+    if (!r.tiene) faltan.push({ venueId, entra: r.entra })
+  }
+  if (faltan.length === 0) return null
+  const visibles = faltan.filter(f => f.entra).map(f => f.venueId)
+  const filas = visibles.length
+    ? await prisma.venue.findMany({ where: { id: { in: visibles } }, select: { id: true, name: true }, take: visibles.length })
+    : []
+  const nombres = filas.filter(v => visibles.includes(v.id) && typeof v.name === 'string').map(v => v.name)
+  // Lo que no se nombra (sin acceso, o una sede que ya no se encontró) va en número: nunca se pierde de la cuenta.
+  const lista = listaDeSedes(nombres, faltan.length - nombres.length)
+  const nombre = NOMBRE_DEL_PERMISO[permiso] ?? permiso
+  const texto = `Para esto necesitas el permiso «${nombre}» en todas las sedes de la organización (te falta en: ${lista}). Pídeselo al dueño del negocio.`
+  return { error: new ForbiddenError(texto, 'FALTA_PERMISO_EN_SEDES'), faltanEn: faltan.map(f => f.venueId) }
+}
+
+/**
+ * `auditoria`: la sede desde la que se intenta una ESCRITURA. Con ella, la negativa por permiso deja `PERMISSION_DENIED` en la
+ * bitácora, como los 403 de escritura del middleware (`checkPermission`). Las vistas previas (el MCP) no la pasan: una lectura
+ * rebotada no se audita.
+ */
+export async function assertPermisoEnTodasLasSedes(
+  userId: string,
+  organizationId: string,
+  permiso: string,
+  auditoria?: { venueId: string },
+): Promise<void> {
+  const negativa = await negativaDeOrganizacion(userId, organizationId, permiso)
+  if (!negativa) return
+  if (auditoria && negativa.error.code === 'FALTA_PERMISO_EN_SEDES') {
+    auditarAccesoNegado({
+      staffId: userId,
+      venueId: auditoria.venueId,
+      organizationId,
+      entity: 'permission',
+      entityId: permiso,
+      reason: 'FALTA_PERMISO_EN_SEDES',
+      datos: { permission: permiso, faltanEn: negativa.faltanEn },
+    })
+  }
+  throw negativa.error
+}
+
+/** `GET /access` (E6a-fix2 C2): ¿esta persona puede activar y prender las propinas? La MISMA regla que su 403. */
+export async function puedeAdministrarLaOrganizacion(userId: string, organizationId: string): Promise<boolean> {
+  return (await negativaDeOrganizacion(userId, organizationId, 'staffpay:close')) === null
 }
 
 export async function sedesLegibles(userId: string, organizationId: string): Promise<{ venueIds: string[]; parcial: boolean }> {
