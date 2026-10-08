@@ -10,10 +10,12 @@ import {
   initializePair,
   levelKey,
   liveOutboxSum,
+  marcarFaltaPermiso,
   NivelLeido,
   productBlocked,
   suspendPair,
 } from '@/services/commerce-channels/shopify/shopify.mirror.service'
+import * as avisos from '@/services/commerce-channels/shopify/shopify.notify.service'
 import {
   agregarProductoShopify,
   assertTestDatabase,
@@ -756,5 +758,145 @@ describe('liveOutboxSum, productBlocked y suspendPair', () => {
       'FAILED',
       'IN_PROGRESS',
     ])
+  })
+})
+
+/** Barrera: espera a que alguna sesión de esta base quede esperando un candado sobre `tabla`. */
+async function esperarCandado(tabla: string): Promise<void> {
+  for (let i = 0; i < 200; i++) {
+    const [r] = await prisma.$queryRaw<Array<{ n: number }>>`
+      SELECT count(*)::int AS n FROM pg_stat_activity
+       WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE ${`%${tabla}%`}`
+    if (r.n > 0) return
+    await new Promise(res => setTimeout(res, 25))
+  }
+  throw new Error(`nadie se quedó esperando un candado de ${tabla}`)
+}
+
+describe('una fila que se cuela entre la primera revisión de bloqueo y el candado de filas (Minor 1 de A6)', () => {
+  const CASOS: Array<[string, (e: EscenarioShopify) => Promise<unknown>, (e: EscenarioShopify) => Promise<string>]> = [
+    [
+      'COMPARAR',
+      e => prisma.shopifyVariantLink.update({ where: { id: e.variantLinkId }, data: { initializedAt: null } }),
+      e => iniciar(e.variantLinkId, ok(7), 'COMPARAR'),
+    ],
+    [
+      'TOMAR_SHOPIFY',
+      async e => {
+        await prisma.shopifyLocationLink.update({
+          where: { id: e.locationLinkId },
+          data: { status: 'REVIEWING', applyRequestedAt: new Date() },
+        })
+        await prisma.shopifyVariantLink.update({ where: { id: e.variantLinkId }, data: { initializedAt: null } })
+      },
+      e => iniciar(e.variantLinkId, ok(7), 'TOMAR_SHOPIFY'),
+    ],
+    ['aplicar', async () => undefined, e => aplicar(e, ok(7))],
+  ]
+  it.each(CASOS)(
+    '🔴 %s: un envío que pasó a IN_PROGRESS justo ahí ⇒ REINTENTAR, sin ningún efecto',
+    async (_caso, preparar, correr) => {
+      const e = await escenario()
+      await preparar(e)
+      const viva = await nuevaFila(e, -1) // PENDING, no ambigua: la primera revisión ve el producto LIBRE
+      const antes = await pareja(e.variantLinkId)
+      let tomado!: () => void
+      const inventarioTomado = new Promise<void>(r => (tomado = r))
+      let soltar!: () => void
+      const terminar = new Promise<void>(r => (soltar = r))
+      // Detiene la operación en su candado de Inventory: después de la primera revisión, antes del candado de filas.
+      const freno = prisma.$transaction(
+        async tx => {
+          await tx.$queryRaw`SELECT id FROM "Inventory" WHERE id = ${e.inventoryId} FOR UPDATE`
+          tomado()
+          await terminar
+        },
+        { timeout: 20_000 },
+      )
+      await inventarioTomado
+      const corrida = correr(e)
+      try {
+        await esperarCandado('Inventory')
+        // Alguien que no respeta el orden (pareja → fila) reclama la fila en ese hueco.
+        await prisma.shopifyStockOutbox.update({
+          where: { id: viva.id },
+          data: { status: 'IN_PROGRESS', claimToken: 'colado', leaseUntil: new Date(Date.now() + 60_000) },
+        })
+      } finally {
+        soltar()
+      }
+      await freno
+      expect(await corrida).toBe('REINTENTAR')
+      expect(await stock(e.inventoryId)).toBe('10')
+      expect(await pareja(e.variantLinkId)).toMatchObject({
+        mirrorAvailable: antes.mirrorAvailable,
+        initializedAt: antes.initializedAt,
+        suspendedReason: null,
+      })
+      expect((await prisma.shopifyStockOutbox.findUniqueOrThrow({ where: { id: viva.id } })).status).toBe('IN_PROGRESS')
+      expect(await prisma.shopifyReviewItem.count({ where: { productId: e.productId } })).toBe(0)
+      expect(await prisma.inventoryMovement.count({ where: { inventoryId: e.inventoryId } })).toBe(0)
+    },
+    30_000,
+  )
+})
+
+describe('marcarFaltaPermiso (§11.3, Minor 2 de A6)', () => {
+  const sucursal = (e: EscenarioShopify) => prisma.shopifyLocationLink.findUniqueOrThrow({ where: { id: e.locationLinkId } })
+  const marcar = (e: EscenarioShopify, o: { tokenVersion: number; locationLinkId?: string; generation?: number }) =>
+    prisma.$transaction(tx => marcarFaltaPermiso(tx, { storeId: e.storeId, ...o }), { timeout: 15_000 })
+
+  it('una credencial vieja ⇒ false, sin marca ni aviso', async () => {
+    const e = await escenario()
+    expect(await marcar(e, { tokenVersion: 2, locationLinkId: e.locationLinkId, generation: 1 })).toBe(false)
+    expect((await sucursal(e)).importError).toBeNull()
+    expect(await avisosDe(e, 'FALTA_PERMISO')).toBe(0)
+  })
+
+  it('una generación vieja de la sucursal ⇒ false, sin marca ni aviso', async () => {
+    const e = await escenario()
+    expect(await marcar(e, { tokenVersion: 1, locationLinkId: e.locationLinkId, generation: 2 })).toBe(false)
+    expect((await sucursal(e)).importError).toBeNull()
+    expect(await avisosDe(e, 'FALTA_PERMISO')).toBe(0)
+  })
+
+  it('la credencial vigente ⇒ true: marca una vez y avisa una vez; la segunda llamada ⇒ true sin avisar otra vez', async () => {
+    const e = await escenario()
+    const espia = jest.spyOn(avisos, 'notifyShopify')
+    try {
+      expect(await marcar(e, { tokenVersion: 1, locationLinkId: e.locationLinkId, generation: 1 })).toBe(true)
+      expect((await sucursal(e)).importError).toBe('FALTA_PERMISO')
+      expect(espia.mock.calls.filter(c => c[1] === 'FALTA_PERMISO')).toEqual([[e.venueId, 'FALTA_PERMISO']])
+      expect(await avisosDe(e, 'FALTA_PERMISO')).toBe(1)
+      expect(await marcar(e, { tokenVersion: 1, locationLinkId: e.locationLinkId, generation: 1 })).toBe(true)
+      expect(espia.mock.calls.filter(c => c[1] === 'FALTA_PERMISO')).toHaveLength(1)
+      expect(await avisosDe(e, 'FALTA_PERMISO')).toBe(1)
+    } finally {
+      espia.mockRestore()
+    }
+  })
+
+  it('🔴 con la sucursal dada sólo bloquea ésa, y FOR NO KEY UPDATE: otra sucursal de la tienda y el FOR KEY SHARE de una llave foránea no esperan', async () => {
+    const e = await escenario()
+    const vecina = await escenario()
+    await prisma.shopifyLocationLink.update({
+      where: { id: vecina.locationLinkId },
+      data: { storeId: e.storeId, shopifyLocationId: OTRA_UBICACION },
+    })
+    const sinEsperar = (id: string, modo: 'FOR UPDATE' | 'FOR KEY SHARE' | 'FOR SHARE') =>
+      prisma.$queryRawUnsafe<Array<{ id: string }>>(`SELECT id FROM "ShopifyLocationLink" WHERE id = $1 ${modo} NOWAIT`, id)
+    await prisma.$transaction(
+      async tx => {
+        expect(await marcarFaltaPermiso(tx, { storeId: e.storeId, tokenVersion: 1, locationLinkId: e.locationLinkId, generation: 1 })).toBe(
+          true,
+        )
+        // Desde otra conexión, con la tx de arriba todavía abierta y su candado puesto.
+        expect(await sinEsperar(vecina.locationLinkId, 'FOR UPDATE')).toHaveLength(1)
+        expect(await sinEsperar(e.locationLinkId, 'FOR KEY SHARE')).toHaveLength(1)
+        await expect(sinEsperar(e.locationLinkId, 'FOR SHARE')).rejects.toThrow() // la marcada sí está bloqueada
+      },
+      { timeout: 15_000 },
+    )
+    expect((await prisma.shopifyLocationLink.findUniqueOrThrow({ where: { id: vecina.locationLinkId } })).importError).toBeNull()
   })
 })

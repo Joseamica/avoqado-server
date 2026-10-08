@@ -361,7 +361,9 @@ export async function productBlocked(
  * vigente de esa sucursal). Pone `importError = 'FALTA_PERMISO'` en los enlaces afectados —el reclamo del buzón y el
  * worker de B dejan de trabajarlos hasta reautorizar— y avisa una sola vez (sólo a los que no estaban marcados).
  * Devuelve `false` si la falla es de una credencial o generación vieja: el llamador la trata como reintentable.
- * Candados: enlaces de la tienda FOR UPDATE por id → tienda FOR SHARE (§10.3).
+ * Candados: con `locationLinkId`, SÓLO ese enlace; sin él, los de la tienda por id. FOR NO KEY UPDATE (no toca llaves):
+ * no frena el FOR KEY SHARE de quien inserte con una llave foránea al enlace; después, la tienda FOR SHARE (§10.3).
+ * Quien la llame lo hace antes de cualquier candado de pareja, fila o cerco en esa tx, o en una tx propia (A7-6).
  * El aviso sale dentro de la tx del llamador por la firma del contrato: si esa tx se deshace, el aviso pudo salir de más
  * (repetición, nunca pérdida).
  */
@@ -369,19 +371,24 @@ export async function marcarFaltaPermiso(
   tx: Prisma.TransactionClient,
   o: { storeId: string; tokenVersion: number; locationLinkId?: string; generation?: number },
 ): Promise<boolean> {
-  // ponytail: las sucursales de UNA tienda son un puñado; el tope es defensa. Por tandas si alguna organización pasa de 1000.
-  const enlaces = await tx.$queryRaw<Array<{ id: string; venueId: string; generation: number; importError: string | null }>>`
-    SELECT id, "venueId", generation, "importError" FROM "ShopifyLocationLink"
-     WHERE "storeId" = ${o.storeId} AND status <> 'DISCONNECTED'
-     ORDER BY id
-     LIMIT 1000
-     FOR UPDATE`
+  type Enlace = { id: string; venueId: string; generation: number; importError: string | null }
+  const enlaces =
+    o.locationLinkId !== undefined
+      ? await tx.$queryRaw<Enlace[]>`
+          SELECT id, "venueId", generation, "importError" FROM "ShopifyLocationLink"
+           WHERE id = ${o.locationLinkId} AND "storeId" = ${o.storeId} AND status <> 'DISCONNECTED'
+           FOR NO KEY UPDATE`
+      : // ponytail: las sucursales de UNA tienda son un puñado; el tope es defensa. Por tandas si alguna organización pasa de 1000.
+        await tx.$queryRaw<Enlace[]>`
+          SELECT id, "venueId", generation, "importError" FROM "ShopifyLocationLink"
+           WHERE "storeId" = ${o.storeId} AND status <> 'DISCONNECTED'
+           ORDER BY id
+           LIMIT 1000
+           FOR NO KEY UPDATE`
   const [s] = await tx.$queryRaw<Array<{ status: string; tokenVersion: number }>>`
     SELECT status::text AS status, "tokenVersion" FROM "ShopifyStore" WHERE id = ${o.storeId} FOR SHARE`
   if (!s || s.status !== 'ACTIVE' || s.tokenVersion !== o.tokenVersion) return false
-  const afectados = enlaces.filter(
-    l => o.locationLinkId === undefined || (l.id === o.locationLinkId && (o.generation === undefined || l.generation === o.generation)),
-  )
+  const afectados = enlaces.filter(l => o.locationLinkId === undefined || o.generation === undefined || l.generation === o.generation)
   if (afectados.length === 0) return false
   const nuevos = afectados.filter(l => l.importError !== 'FALTA_PERMISO')
   if (nuevos.length === 0) return true
@@ -513,6 +520,11 @@ export async function applyShopifyLevel(
     if (bloqueo === 'INCIERTO') return { outcome: 'INCIERTO' }
     const inv = await bloquearInventario(tx, p.productId)
     await bloquearFilasDelProducto(tx, p, false) // suspender puede descartar las que nunca salieron
+    // Otra vez, ya con las filas bloqueadas: una que alguien pasó a IN_PROGRESS (o marcó ambigua) entre la primera
+    // revisión y este candado se quedó fuera de él, y aplicar ahora la contaría dos veces.
+    const bloqueoBajoCandado = await productBlocked(tx, p.productId, p.locationLinkId, p.generation)
+    if (bloqueoBajoCandado === 'EN_VUELO') return { outcome: 'REINTENTAR' }
+    if (bloqueoBajoCandado === 'INCIERTO') return { outcome: 'INCIERTO' }
     if (!(await eventoVigente(tx, deps.cerco?.evento))) return { outcome: 'CONTEXTO_CAMBIO' }
     if (input.nivel.kind !== 'OK') {
       await suspendPair(tx, p.id, MOTIVO_DE_NIVEL[input.nivel.kind])
@@ -600,6 +612,9 @@ export async function initializePair(
     if ((await productBlocked(tx, p.productId, p.locationLinkId, p.generation)) !== 'LIBRE') return { outcome: 'REINTENTAR' }
     const inv = await bloquearInventario(tx, p.productId)
     await bloquearFilasDelProducto(tx, p, !tomar) // COMPARAR descarta filas y abre o cierra la revisión
+    // Otra vez, ya con las filas bloqueadas (ver applyShopifyLevel): una fila en vuelo que se coló aquí no se descarta y
+    // su envío movería el espejo encima del offset nuevo.
+    if ((await productBlocked(tx, p.productId, p.locationLinkId, p.generation)) !== 'LIBRE') return { outcome: 'REINTENTAR' }
     if (!(await eventoVigente(tx, deps.cerco?.evento))) return { outcome: 'CONTEXTO_CAMBIO' }
     if (input.nivel.kind !== 'OK') {
       await suspendPair(tx, p.id, MOTIVO_DE_NIVEL[input.nivel.kind])
