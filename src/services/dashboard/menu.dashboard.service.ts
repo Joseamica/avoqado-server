@@ -1,5 +1,5 @@
 import prisma from '../../utils/prismaClient'
-import { Menu, MenuCategory, Prisma, ModifierGroup, Modifier, ProductModifierGroup } from '@prisma/client'
+import { Menu, MenuCategory, Prisma, ModifierGroup, Modifier, ProductModifierGroup, Unit } from '@prisma/client'
 import { CreateMenuCategoryDto, UpdateMenuCategoryDto, ReorderMenuCategoriesDto } from '../../schemas/dashboard/menuCategory.schema'
 import {
   CreateMenuDto,
@@ -21,6 +21,7 @@ import logger from '../../config/logger'
 import socketManager from '../../communication/sockets'
 import { logAction } from './activity-log.service'
 import { archivarProductos } from './product.dashboard.service'
+import { ensureQuantityInventoryRow } from './quantityInventoryRow'
 import type { CatalogActor } from '../../types/master-catalog'
 import {
   assertLegacyCatalogGovernanceComputedForVenue,
@@ -1222,7 +1223,7 @@ export async function reorderProducts(venueId: string, reorderData: ReorderProdu
   return prisma.$transaction(transactions)
 }
 
-interface ImportMenuData {
+export interface ImportMenuData {
   mode: 'merge' | 'replace'
   categories: {
     name: string
@@ -1230,6 +1231,14 @@ interface ImportMenuData {
     products: {
       name: string
       sku: string
+      // Additive (Shopify importer). Absent ⇒ the column is not touched, on create or update: today's imports never
+      // brought them. `gtin` is unique per venue — the caller must not send one another product of the venue already has.
+      gtin?: string
+      imageUrl?: string
+      // Additive (Shopify importer): the product is counted BY QUANTITY in this unit, and gets its Inventory row in 0 if
+      // it has none (an existing row and its stock are never touched). The legacy `trackInventory` below only writes the
+      // Inventory row and never configured the product; it keeps doing exactly that.
+      inventoryByQuantity?: { unit: Unit }
       price: number
       cost?: number
       description?: string
@@ -1447,6 +1456,23 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
           const existingProduct = await tx.product.findFirst({
             where: { venueId, sku: productData.sku },
           })
+          // Additive fields (Shopify importer): written only when present, on create AND update — an import without them
+          // (every import before them) writes exactly what it wrote before. A blank gtin is absent: '' would collide on
+          // @@unique([venueId, gtin]) with the next blank one.
+          const gtin = productData.gtin?.trim()
+          const shopifyImportFields: {
+            gtin?: string
+            imageUrl?: string
+            trackInventory?: true
+            inventoryMethod?: 'QUANTITY'
+            unit?: Unit
+          } = {
+            ...(gtin ? { gtin } : {}),
+            ...(productData.imageUrl ? { imageUrl: productData.imageUrl } : {}),
+            ...(productData.inventoryByQuantity
+              ? { trackInventory: true, inventoryMethod: 'QUANTITY', unit: productData.inventoryByQuantity.unit }
+              : {}),
+          }
 
           let product
           if (existingProduct) {
@@ -1476,6 +1502,7 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
                 // Ausente ≠ null: re-importar precios no puede borrar la duración
                 // ya configurada y desconfigurar la agenda del local.
                 ...(productData.duration !== undefined ? { duration: productData.duration } : {}),
+                ...shopifyImportFields,
                 ...(archivado ? { deletedAt: null, deletedBy: null, active: true } : {}),
                 // Codex C5-2: the file adopts it (same id) ⇒ the owner's, no longer demo: converting the venue must not delete it.
                 isDemo: false,
@@ -1501,6 +1528,7 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
                 allergens: productData.allergens || [],
                 // Nulo es válido: el motor de reservas cae al default del venue.
                 duration: productData.duration ?? null,
+                ...shopifyImportFields,
               },
             })
             if (actor.type === 'SERVICE') {
@@ -1574,6 +1602,9 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
               })
             }
           }
+
+          // Counted by piece ⇒ it must have its Inventory row (born in 0, no kardex; an existing one is never touched).
+          if (productData.inventoryByQuantity) await ensureQuantityInventoryRow(tx, product)
 
           // Handle modifier groups
           if (productData.modifierGroups && productData.modifierGroups.length > 0) {
