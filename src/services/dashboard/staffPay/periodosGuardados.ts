@@ -1,9 +1,10 @@
 import { Prisma, ServicePayPeriod } from '@prisma/client'
 import prisma from '../../../utils/prismaClient'
 import { BadRequestError, ConflictError, NotFoundError } from '../../../errors/AppError'
-import { withSerializableRetry } from '../../../utils/serializableRetry'
+import { PresupuestoDeEspera, tomarCandado, transaccionConPresupuesto } from '../../../utils/esperaDeCandados'
 import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
 import { assertPermisoEnSedes, assertPermisoEnTodasLasSedes, exigirPermisoEnSedes, sedesConServicePay, sedesLegiblesDe } from './acceso'
+import { COMO_SE_CONSIGUE_EL_PLAN } from './textos'
 import { fechaMx } from '../export.helpers'
 import {
   dbDateComoFecha,
@@ -19,10 +20,21 @@ import {
 type Tx = Prisma.TransactionClient
 type Db = Tx | typeof prisma
 
-/** Candado por organización para crear periodos y cambiar la periodicidad (spec §5.7). */
-export async function lockPeriodosDeOrganizacion(tx: Tx, organizationId: string): Promise<void> {
+/** Los dos candados que retiene un CIERRE (el de periodos de la organización y la fila de su periodo): quien los espera y
+ *  agota su presupuesto contesta 409 CIERRE_EN_CURSO (B7 r1-r2). Los demás candados usan `OPERACION_EN_CURSO`. */
+export const MENSAJE_CIERRE_EN_CURSO = 'Hay un cierre de periodo en curso; intenta de nuevo en un momento'
+const CIERRE_EN_CURSO = { codigo: 'CIERRE_EN_CURSO', mensaje: MENSAJE_CIERRE_EN_CURSO }
+
+/**
+ * Candado por organización para crear periodos y cambiar la periodicidad (spec §5.7), también de activar y de las propinas.
+ * Con el presupuesto de la transacción (B9: también el cierre, que ya no espera sin tope).
+ */
+export async function lockPeriodosDeOrganizacion(tx: Tx, organizationId: string, presupuesto: PresupuestoDeEspera): Promise<void> {
   const key = `avoqado:service-pay-periods:v1:${organizationId}`
-  await tx.$queryRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))::text`)
+  await tomarCandado(tx, () => tx.$queryRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))::text`), {
+    presupuesto,
+    ...CIERRE_EN_CURSO,
+  })
 }
 
 export async function periodoQueContieneFecha(db: Db, organizationId: string, fecha: string): Promise<ServicePayPeriod | null> {
@@ -34,13 +46,19 @@ export async function periodoQueContieneFecha(db: Db, organizationId: string, fe
  * El periodo que contiene `fecha`; si no existe, se deriva de la periodicidad y se crea. Con SERIALIZABLE la foto se toma en la
  * primera sentencia, antes de esperar el candado: lo que hace correcta la carrera es SSI + el índice único
  * (organizationId, periodStart) + el reintento de `withSerializableRetry`, no el candado.
- * `activas`: las sedes con el módulo, ya resueltas ANTES de la transacción (el cierre las pasa para no consultar el
- * cliente global aquí dentro). Sin ellas se consultan, como siempre.
+ * `presupuesto`: el de la transacción que lo llama (B9). `activas`: las sedes con el módulo, ya resueltas ANTES de la
+ * transacción (el cierre las pasa para no consultar el cliente global aquí dentro). Sin ellas se consultan, como siempre.
  */
-export async function asegurarPeriodo(tx: Tx, organizationId: string, fecha: string, activas?: string[]): Promise<ServicePayPeriod> {
+export async function asegurarPeriodo(
+  tx: Tx,
+  organizationId: string,
+  fecha: string,
+  presupuesto: PresupuestoDeEspera,
+  activas?: string[],
+): Promise<ServicePayPeriod> {
   const existente = await periodoQueContieneFecha(tx, organizationId, fecha)
   if (existente) return existente
-  await lockPeriodosDeOrganizacion(tx, organizationId)
+  await lockPeriodosDeOrganizacion(tx, organizationId, presupuesto)
   const ganador = await periodoQueContieneFecha(tx, organizationId, fecha)
   if (ganador) return ganador
   const org = await tx.organization.findUniqueOrThrow({ where: { id: organizationId }, select: { servicePayPeriodicity: true } })
@@ -65,9 +83,12 @@ export async function asegurarPeriodo(tx: Tx, organizationId: string, fecha: str
  * toma (serían 50,000 candados): el cierre se protege con el candado del periodo —o el de la organización mientras crea
  * el periodo—, que el ajuste toma ANTES que éste. Orden único: periodo (u organización) → clase.
  */
-export async function lockClase(tx: Tx, classSessionId: string): Promise<void> {
+export async function lockClase(tx: Tx, classSessionId: string, presupuesto: PresupuestoDeEspera): Promise<void> {
   const key = `avoqado:service-pay-class:v1:${classSessionId}`
-  await tx.$queryRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))::text`)
+  // B9: antes sin tope; ahora con el presupuesto de la transacción (lo retiene otro ajuste o una liquidación, no un cierre).
+  await tomarCandado(tx, () => tx.$queryRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))::text`), {
+    presupuesto,
+  })
 }
 
 /**
@@ -77,9 +98,12 @@ export async function lockClase(tx: Tx, classSessionId: string): Promise<void> {
  * sólo apunta al periodo (anclar una clase, un devengo). Con `FOR UPDATE`, un ajuste con el periodo tomado esperando la
  * clase y una liquidación con la clase tomada anclándola en el periodo se bloqueaban mutuamente (40P01, sin reintento).
  */
-export async function bloquearPeriodo(tx: Tx, periodId: string): Promise<ServicePayPeriod> {
-  const filas = await tx.$queryRaw<Array<{ id: string }>>(
-    Prisma.sql`SELECT id FROM "ServicePayPeriod" WHERE id = ${periodId} FOR NO KEY UPDATE`,
+export async function bloquearPeriodo(tx: Tx, periodId: string, presupuesto: PresupuestoDeEspera): Promise<ServicePayPeriod> {
+  // B7 r2 / B9: con el presupuesto de la transacción (el cierre retiene esta fila todo lo que dura).
+  const filas = await tomarCandado(
+    tx,
+    () => tx.$queryRaw<Array<{ id: string }>>(Prisma.sql`SELECT id FROM "ServicePayPeriod" WHERE id = ${periodId} FOR NO KEY UPDATE`),
+    { presupuesto, ...CIERRE_EN_CURSO },
   )
   if (!filas.length) throw new NotFoundError('Periodo no encontrado')
   return tx.servicePayPeriod.findUniqueOrThrow({ where: { id: periodId } })
@@ -107,32 +131,14 @@ export async function ampliarAlcance(
   if (deLaOrg !== nuevas.length) throw new NotFoundError('Sede no encontrada')
   if (o.exigirModulo !== false) {
     const activas = o.activas ?? (await sedesConServicePay(p.organizationId))
-    if (nuevas.some(v => !activas.includes(v))) throw new BadRequestError('Esa sede no tiene Pago por servicio activo', 'SEDE_SIN_MODULO')
+    if (nuevas.some(v => !activas.includes(v)))
+      throw new BadRequestError(`Esa sede no tiene Pago por servicio en su plan: ${COMO_SE_CONSIGUE_EL_PLAN}.`, 'SEDE_SIN_MODULO')
   }
   const union = [...p.venueIds, ...nuevas].sort()
   const explicacion = 'Para sumar una sede al periodo necesitas el permiso de cerrar periodos en todas sus sedes'
   if (o.permitidas) exigirPermisoEnSedes(o.permitidas, union, explicacion)
   else await assertPermisoEnSedes(userId, union, 'staffpay:close', explicacion)
   return tx.servicePayPeriod.update({ where: { id: p.id }, data: { venueIds: union } })
-}
-
-/**
- * Alcance LEGIBLE de un periodo, el MISMO para el reporte y el recibo (Codex R1-1, R3-Nuevo 2): uno CERRADO se lee sobre
- * SU alcance guardado; uno ABIERTO (o aún sin guardar) sobre sus sedes guardadas ∪ las que hoy tienen el módulo —así una
- * diferencia liquidada desde una sede que ya lo apagó no desaparece del reporte—. Siempre filtrado por el permiso de
- * quien lee y, si viene, por `sede` (si no es legible: vacío y `parcial`).
- */
-export async function alcanceLegibleDelPeriodo(
-  userId: string,
-  organizationId: string,
-  fila: { status: string; venueIds: string[] } | null,
-  sede?: string,
-): Promise<{ venueIds: string[]; parcial: boolean }> {
-  const alcance =
-    fila?.status === 'CLOSED' ? fila.venueIds : [...new Set([...(fila?.venueIds ?? []), ...(await sedesConServicePay(organizationId))])]
-  const legibles = await sedesLegiblesDe(userId, alcance)
-  const venueIds = sede ? legibles.venueIds.filter(id => id === sede) : legibles.venueIds
-  return { venueIds, parcial: legibles.parcial || (sede !== undefined && venueIds.length === 0) }
 }
 
 /**
@@ -146,6 +152,30 @@ export function assertFechaEnRango(fecha: string, rango: { desde: string; hasta:
   }
 }
 
+/** E6a-fix F10: el 409 de un periodo anterior al inicio, con el texto que la pantalla muestra tal cual y `details.inicio`. */
+export const antesDelInicio = (inicio: string) =>
+  new ConflictError(`Pago al personal está activo desde el ${fechaMx(inicio)}: ese periodo es anterior`, 'ANTES_DEL_INICIO', { inicio })
+
+/**
+ * E6a-fix F10 (QA E6a H5): un periodo SIN GUARDAR que TERMINA antes del inicio de pago al personal no se cierra, no se
+ * previsualiza para cerrarse y no recibe ajustes: «lo anterior no se suma», como promete la activación. 409 ANTES_DEL_INICIO.
+ * Uno GUARDADO (historia de la fase 2) sigue como siempre: cerrado se lee cerrado y abierto se cierra con la regla D2 (spec
+ * §6.2 punto 3, «caso agosto» del diseño r5.2); la lista lo enseña, así que tiene salida. Sin activar no hay inicio que revisar.
+ * Lo usan el cierre, el ajuste manual y la liquidación, con sus vistas previas: los únicos que crean periodos (`asegurarPeriodo`).
+ * Va ANTES de crear nada. El inicio no cambia una vez activado y la periodicidad queda fija: leerlo fuera de la transacción no
+ * tiene carrera (y un periodo anterior al inicio ya no se puede guardar: nadie más lo crea).
+ */
+export async function exigirDesdeElInicio(db: Db, organizationId: string, fecha: string): Promise<void> {
+  const org = await db.organization.findUniqueOrThrow({
+    where: { id: organizationId },
+    select: { staffPayStartDate: true, servicePayPeriodicity: true },
+  })
+  if (!org.staffPayStartDate) return
+  if (await periodoQueContieneFecha(db, organizationId, fecha)) return
+  const inicio = dbDateComoFecha(org.staffPayStartDate)
+  if (periodoQueContiene(fecha, org.servicePayPeriodicity).end < inicio) throw antesDelInicio(inicio)
+}
+
 /** Vigencia de una tabla o un nivel (y la fecha de archivo de una tabla): de hoy − 24 meses a hoy + 24 meses. */
 export const rangoDeVigencia = (hoy: string) => ({ desde: sumarMeses(hoy, -24), hasta: sumarMeses(hoy, 24) })
 
@@ -157,7 +187,7 @@ export async function hoyDeLaSede(venueId: string, ahora?: Date): Promise<string
 }
 
 /** «Septiembre» si es el mes completo; si no, «La quincena del 1 sep 2026 al 15 sep 2026». */
-function nombreDelPeriodo(start: string, end: string): string {
+export function nombreDelPeriodo(start: string, end: string): string {
   const mes = MESES_LARGOS[Number(start.slice(5, 7)) - 1]
   return start.endsWith('-01') && diaCivilSiguiente(end).endsWith('-01')
     ? `${mes[0].toUpperCase()}${mes.slice(1)}`
@@ -221,11 +251,19 @@ function canonicosHastaHoy(hoy: string, periodicidad: Periodicidad, n: number) {
  * Lista de periodos (spec §7.3). La primera página mezcla los últimos 12 periodos canónicos (aunque no estén guardados:
  * septiembre se puede cerrar el 1 de octubre sin que nadie lo haya «creado») con los guardados; las siguientes traen
  * sólo guardados más viejos. Los números salen de las sedes del alcance de cada periodo que el usuario puede leer.
+ * E6a-fix F10 (QA E6a H5): un canónico SIN GUARDAR que termina antes del inicio de pago al personal no se ofrece (no se
+ * puede cerrar ni recibir ajustes: `exigirDesdeElInicio`); los guardados (fase 2) se listan siempre. `ahora`: sólo pruebas.
  */
-export async function listarPeriodos(input: { userId: string; venueId: string; antesDe?: string; limit: number }): Promise<ListaPeriodos> {
+export async function listarPeriodos(input: {
+  userId: string
+  venueId: string
+  antesDe?: string
+  limit: number
+  ahora?: Date
+}): Promise<ListaPeriodos> {
   const v = await prisma.venue.findUniqueOrThrow({
     where: { id: input.venueId },
-    select: { organizationId: true, timezone: true, organization: { select: { servicePayPeriodicity: true } } },
+    select: { organizationId: true, timezone: true, organization: { select: { servicePayPeriodicity: true, staffPayStartDate: true } } },
   })
   const limit = Math.min(Math.max(input.limit, 1), 60)
   const periodicidad = v.organization.servicePayPeriodicity
@@ -260,7 +298,9 @@ export async function listarPeriodos(input: { userId: string; venueId: string; a
     total: (porId.get(f.id)?.total ?? new Prisma.Decimal(0)).toFixed(2),
   }))
   if (!input.antesDe) {
-    for (const c of canonicosHastaHoy(hoyLocal(v.timezone || 'America/Mexico_City'), periodicidad, PERIODOS_CANONICOS)) {
+    const inicio = v.organization.staffPayStartDate ? dbDateComoFecha(v.organization.staffPayStartDate) : null
+    for (const c of canonicosHastaHoy(hoyLocal(v.timezone || 'America/Mexico_City', input.ahora), periodicidad, PERIODOS_CANONICOS)) {
+      if (inicio !== null && c.end < inicio) continue
       const cubierto = guardados.some(f => dbDateComoFecha(f.periodStart) <= c.end && dbDateComoFecha(f.periodEnd) >= c.start)
       if (!cubierto) items.push({ id: null, start: c.start, end: c.end, estado: 'OPEN', personas: 0, pagadas: 0, total: '0.00' })
     }
@@ -269,23 +309,37 @@ export async function listarPeriodos(input: { userId: string; venueId: string; a
   const totalGuardados = input.antesDe ? 1 : await prisma.servicePayPeriod.count({ where: { organizationId: v.organizationId } })
   return {
     periodicidad,
-    puedeCambiarPeriodicidad: !input.antesDe && totalGuardados === 0,
+    // B9 (diseño r6.4): tampoco después de activar el pago al personal, aunque no haya ningún periodo guardado.
+    puedeCambiarPeriodicidad: !input.antesDe && totalGuardados === 0 && v.organization.staffPayStartDate === null,
     items,
     antesDe: hayMas ? dbDateComoFecha(guardados[guardados.length - 1].periodStart) : null,
   }
 }
 
-/** D3: mensual o quincenal, sólo mientras no haya ningún periodo guardado (spec §5.7). */
+/**
+ * D3: mensual o quincenal, sólo mientras no haya ningún periodo guardado (spec §5.7) y —B9, diseño r6.4— mientras no se
+ * haya activado el pago al personal: `staffPayStartDate` es el inicio de un periodo canónico y ningún periodo puede cruzarlo.
+ * Las dos cosas se miran bajo el candado de la organización (activar también lo toma).
+ */
 export async function cambiarPeriodicidad(input: { userId: string; venueId: string; periodicidad: Periodicidad }) {
   if (input.periodicidad !== 'MONTHLY' && input.periodicidad !== 'SEMIMONTHLY') throw new BadRequestError('Periodicidad inválida')
   const v = await prisma.venue.findUniqueOrThrow({ where: { id: input.venueId }, select: { organizationId: true } })
-  await assertPermisoEnTodasLasSedes(input.userId, v.organizationId, 'staffpay:close')
-  return withSerializableRetry(async tx => {
-    await lockPeriodosDeOrganizacion(tx, v.organizationId)
+  await assertPermisoEnTodasLasSedes(input.userId, v.organizationId, 'staffpay:close', { venueId: input.venueId })
+  return transaccionConPresupuesto(async (tx, presupuesto) => {
+    await lockPeriodosDeOrganizacion(tx, v.organizationId, presupuesto)
+    const antes = await tx.organization.findUniqueOrThrow({
+      where: { id: v.organizationId },
+      select: { servicePayPeriodicity: true, staffPayStartDate: true },
+    })
+    if (antes.staffPayStartDate) {
+      throw new ConflictError(
+        `La periodicidad quedó fija al activar el pago al personal (${antes.servicePayPeriodicity === 'SEMIMONTHLY' ? 'quincenal' : 'mensual'})`,
+        'PERIODICIDAD_FIJA',
+      )
+    }
     if ((await tx.servicePayPeriod.count({ where: { organizationId: v.organizationId } })) > 0) {
       throw new ConflictError('La periodicidad ya no se puede cambiar: ya hay periodos guardados')
     }
-    const antes = await tx.organization.findUniqueOrThrow({ where: { id: v.organizationId }, select: { servicePayPeriodicity: true } })
     await tx.organization.update({ where: { id: v.organizationId }, data: { servicePayPeriodicity: input.periodicidad } })
     await writeLegacyActivityAuditTx(tx, {
       staffId: input.userId,

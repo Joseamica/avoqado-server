@@ -2,6 +2,7 @@ import { z } from 'zod'
 
 export const venueParamsSchema = z.object({ venueId: z.string().cuid('Venue ID inválido') })
 export const fechaSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Fecha inválida (AAAA-MM-DD)')
+const sedeSchema = z.string().cuid('Sede inválida')
 
 export const levelParamsSchema = venueParamsSchema.extend({ levelId: z.string().cuid('Nivel inválido') })
 export const staffParamsSchema = venueParamsSchema.extend({ staffId: z.string().cuid('Persona inválida') })
@@ -37,12 +38,27 @@ export const publicarVersionSchema = z.object({
       }),
     )
     .max(20_000, 'Demasiadas celdas'),
+  // Reglas de clase (spec fase 3 §7.3). Ausente = se hereda de la versión que rige; null = apagada. La pareja la revisa el service.
+  coverBonusHours: z
+    .number()
+    .int('Escribe horas enteras')
+    .min(1, 'Mínimo 1 hora')
+    .max(168, 'Máximo 168 horas (una semana)')
+    .nullable()
+    .optional(),
+  coverBonusAmount: z.number().gt(0, 'El bono debe ser mayor a $0').max(100_000, 'Máximo $100,000').nullable().optional(),
+  lateCancelHours: z
+    .number()
+    .int('Escribe horas enteras')
+    .min(1, 'Mínimo 1 hora')
+    .max(168, 'Máximo 168 horas (una semana)')
+    .nullable()
+    .optional(),
   simular: z.boolean().optional(),
 })
 export const archivarTablaSchema = z.object({ archivedFrom: fechaSchema })
 
 // Reporte del periodo abierto (spec §6.2): renglones paginados con tope duro de 100.
-const sedeSchema = z.string().cuid('Sede inválida')
 export const reporteQuerySchema = z.object({
   fecha: fechaSchema.optional(),
   sede: sedeSchema.optional(),
@@ -79,6 +95,36 @@ export const ajusteClaseSchema = z.object({
 export const periodicidadSchema = z.object({
   periodicidad: z.enum(['MONTHLY', 'SEMIMONTHLY'], { errorMap: () => ({ message: 'Elige mensual o quincenal' }) }),
 })
+/** Fase 3 §7.1: activar pago al personal confirma la periodicidad (también la mensual de fábrica) y, opcional, la fecha de
+ *  inicio que se mostró: si ya no es ésa, el service contesta 409 INICIO_CAMBIO (Codex bloque B #3).
+ *  B11 (diseño r3.3): `sedes` opcional, las que entran desde el inicio (sin ella, todas las que tienen el plan). Que haya
+ *  al menos una y que tengan el plan lo revisa el service (FALTA_SEDE, SEDE_SIN_PLAN). Estricto: un campo de más es 400. */
+export const activarSchema = periodicidadSchema
+  .extend({
+    inicioEsperado: fechaSchema.optional(),
+    sedes: z.array(sedeSchema).max(500, 'Demasiadas sedes').optional(),
+  })
+  .strict('Hay un campo que activar no acepta')
+/** B11 (diseño r3.3, r4.6, r4.7): activar o desactivar UNA sede, con la fecha que se eligió (por defecto hoy en su zona) y,
+ *  opcional, el «hoy» que se vio en la vista previa (`fechaEsperada`: si ya es otro día, 409 FECHA_CAMBIO). */
+export const sedeParamsSchema = venueParamsSchema.extend({ sedeId: z.string().cuid('Sede inválida') })
+export const activarSedeSchema = z
+  .object({ desde: fechaSchema.optional(), fechaEsperada: fechaSchema.optional() })
+  .strict('Hay un campo que activar la sede no acepta')
+export const desactivarSedeSchema = z
+  .object({ hasta: fechaSchema.optional(), fechaEsperada: fechaSchema.optional() })
+  .strict('Hay un campo que desactivar la sede no acepta')
+export const vistaPreviaSedeQuerySchema = z.object({
+  accion: z.enum(['activar', 'desactivar'], { errorMap: () => ({ message: 'Elige activar o desactivar' }) }),
+  fecha: fechaSchema.optional(),
+})
+/** Fase 3 §6.3: «Pagar las propinas en el recibo», sí o no. */
+export const propinasSchema = z.object({
+  encender: z.boolean({
+    required_error: 'Indica si las propinas se pagan en el recibo',
+    invalid_type_error: 'Indica si las propinas se pagan en el recibo',
+  }),
+})
 export const fechaRequeridaQuerySchema = z.object({ fecha: fechaSchema })
 /** «Ver periodos anteriores»: el listado se pide por páginas de 24; nada se recorta en silencio. */
 export const listaPeriodosQuerySchema = z.object({ antesDe: fechaSchema.optional() })
@@ -99,18 +145,24 @@ export const marcarPagadoSchema = z.object({
     .regex(/^[a-f0-9]{64}$/, 'Revisa la vista previa antes de confirmar')
     .optional(),
 })
+const montoDeAjuste = (n: z.ZodNumber) =>
+  n
+    .refine(x => x !== 0, 'El monto no puede ser cero')
+    .refine(x => Math.abs(x) <= 1_000_000, 'Monto demasiado grande')
+    .refine(x => Math.round(x * 100) / 100 === x, 'El monto admite hasta 2 decimales')
 export const ajusteManualSchema = z.object({
   sede: sedeSchema,
   staffId: z.string().cuid('Persona inválida'),
-  amount: z
-    .number({ invalid_type_error: 'Escribe un monto' })
-    .refine(n => n !== 0, 'El monto no puede ser cero')
-    .refine(n => Math.abs(n) <= 1_000_000, 'Monto demasiado grande')
-    .refine(n => Math.round(n * 100) / 100 === n, 'El monto admite hasta 2 decimales'),
+  amount: montoDeAjuste(z.number({ invalid_type_error: 'Escribe un monto' })),
   reason: z.string().trim().min(3, 'Escribe el motivo (mínimo 3 letras)').max(300, 'Máximo 300 caracteres'),
   fecha: fechaSchema.optional(),
   clientKey: z.string().regex(/^[A-Za-z0-9_.-]{8,120}$/, 'Clave de solicitud inválida'),
 })
+/** B13 (diseño r5.1): la vista previa del ajuste manual —su periodo destino y el aviso de devoluciones pendientes de esa
+ *  persona— por la URL: lo mismo que el ajuste sin su clave; el monto llega como texto. */
+export const ajustePreviewQuerySchema = ajusteManualSchema
+  .omit({ clientKey: true, amount: true })
+  .extend({ amount: montoDeAjuste(z.coerce.number({ invalid_type_error: 'Escribe un monto' })) })
 export const exportReciboQuerySchema = z.object({
   fecha: fechaSchema,
   format: z.enum(['pdf', 'xlsx'], { errorMap: () => ({ message: 'Formato inválido (pdf o xlsx)' }) }),

@@ -11,7 +11,7 @@ const mockSedesLegibles = jest.fn()
 jest.mock('@/services/dashboard/staffPay/acceso', () => ({
   ...jest.requireActual('@/services/dashboard/staffPay/acceso'),
   sedesLegibles: (...a: unknown[]) => mockSedesLegibles(...a),
-  // Codex R3-Nuevo 2: el reporte ya no llama `sedesLegibles`; lee el alcance con `alcanceLegibleDelPeriodo`
+  // Codex R3-Nuevo 2: el reporte ya no llama `sedesLegibles`; lee el alcance con `prepararLectura` + `alcanceEnLaFoto`
   // (sedes guardadas ∪ activas, filtradas por permiso). Para no reescribir los casos de la fase 1, `mockSedesLegibles`
   // sigue diciendo QUÉ puede leer el usuario y, si `__sedes` no está puesto, también qué sedes tienen el módulo.
   sedesConServicePay: jest.fn(async () => (global as any).__sedes ?? (await mockSedesLegibles())?.venueIds ?? []),
@@ -173,11 +173,19 @@ describe('reporte — feature nueva', () => {
 
 describe('reporte — regresión (Review Focus 3)', () => {
   it('permiso en una sola sede: vista parcial con sólo esa sede', async () => {
-    mockSedesLegibles.mockResolvedValue({ venueIds: [pn], parcial: true })
-    const r = await reportePeriodo({ userId: ana, venueId: pn, fecha: FECHA, offset: 0, limit: 50 })
-    expect(r.parcial).toBe(true)
-    expect(r.venueIds).toEqual([pn])
-    expect(r.tarjetas.total).toBe('200.00')
+    // B14-fix: el reporte ya calcula `parcial` como el recibo (`alcanceEnLaFoto`: legibles contra el alcance), no con el
+    // `parcial` que declara el mock de permisos. Así que el alcance tiene que traer las DOS sedes con el módulo (sin
+    // `__sedes`, el mock daba como «con módulo» sólo las legibles y el alcance era [pn]): BSF lo tiene, Ana no la puede leer.
+    ;(global as any).__sedes = [pn, bsf]
+    try {
+      mockSedesLegibles.mockResolvedValue({ venueIds: [pn], parcial: true })
+      const r = await reportePeriodo({ userId: ana, venueId: pn, fecha: FECHA, offset: 0, limit: 50 })
+      expect(r.parcial).toBe(true)
+      expect(r.venueIds).toEqual([pn])
+      expect(r.tarjetas.total).toBe('200.00')
+    } finally {
+      ;(global as any).__sedes = undefined
+    }
   })
   it('sin ninguna sede legible responde vacío y parcial, sin consultar valoración', async () => {
     mockSedesLegibles.mockResolvedValue({ venueIds: [], parcial: true })

@@ -25,6 +25,11 @@ export interface ExportColumnDef<TRow> {
   numFmt?: string
   /** Sólo PDF: peso relativo de su ancho (default 1). Si ninguna columna lo trae, columnas iguales, como siempre. */
   pdfAncho?: number
+  /**
+   * Sólo PDF: el texto que no cabe se parte en varias líneas y la fila crece, en vez de cortarse con «…» (recibo de pago al
+   * personal, QA E6a H13). Sin él, una sola línea por celda, como siempre.
+   */
+  pdfAjustar?: boolean
 }
 
 export interface EncodeExportOptions<TRow> {
@@ -38,6 +43,8 @@ export interface EncodeExportOptions<TRow> {
   title: string
   /** Nombre de la hoja de Excel si no debe ser el título (se limpia igual). */
   sheetName?: string
+  /** Sólo PDF: líneas bajo el título, antes de la tabla (p. ej. los totales por tipo del recibo, QA E6a H13). */
+  resumen?: string[]
 }
 
 export interface EncodedExport {
@@ -78,7 +85,15 @@ export function fechaMx(ymd: string): string {
 /** «3 oct 2026, 20:48» (24 h, hora de CDMX: la ayuda no conoce la zona de cada sede). */
 function fechaHoraMx(instante: Date): string {
   const p = Object.fromEntries(
-    new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Mexico_City', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
+    new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/Mexico_City',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+    })
       .formatToParts(instante)
       .map(x => [x.type, x.value]),
   )
@@ -90,7 +105,10 @@ function fechaHoraMx(instante: Date): string {
  * palabra y sin separador colgando («Recibo de Carlos Rodríguez ·» → «Recibo de Carlos Rodríguez»).
  */
 function nombreDeHoja(title: string): string {
-  let s = title.replace(/[\\/?*[\]:]/g, '').replace(/\s+/g, ' ').trim()
+  let s = title
+    .replace(/[\\/?*[\]:]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
   if (s.length > 31) {
     const corte = s.slice(0, 32).lastIndexOf(' ')
     s = s.slice(0, corte > 0 ? corte : 31)
@@ -145,7 +163,12 @@ function encodeXlsx<TRow>(columns: ExportColumnDef<TRow>[], rows: TRow[], title:
   }
 }
 
-async function encodePdf<TRow>(columns: ExportColumnDef<TRow>[], rows: TRow[], title: string): Promise<EncodedExport> {
+async function encodePdf<TRow>(
+  columns: ExportColumnDef<TRow>[],
+  rows: TRow[],
+  title: string,
+  resumen: string[] = [],
+): Promise<EncodedExport> {
   // PDFKit is stream-based; we collect chunks then resolve.
   const doc = new PDFDocument({ size: 'A4', layout: 'landscape', margin: 32 })
   const chunks: Buffer[] = []
@@ -156,7 +179,15 @@ async function encodePdf<TRow>(columns: ExportColumnDef<TRow>[], rows: TRow[], t
 
   doc.fontSize(16).text(title, { align: 'left' })
   doc.moveDown(0.5)
-  doc.fontSize(8).fillColor('#666').text(`Generado: ${fechaHoraMx(new Date())}`)
+  doc
+    .fontSize(8)
+    .fillColor('#666')
+    .text(`Generado: ${fechaHoraMx(new Date())}`)
+  if (resumen.length) {
+    doc.moveDown(0.5)
+    doc.fontSize(10).fillColor('#000')
+    for (const linea of resumen) doc.text(linea)
+  }
   doc.moveDown(1)
   doc.fillColor('#000')
 
@@ -173,30 +204,47 @@ async function encodePdf<TRow>(columns: ExportColumnDef<TRow>[], rows: TRow[], t
   const fontSize = columns.length > 8 ? 7 : 9
   let y = doc.y
 
-  const drawRow = (cells: string[], fondo: string | null, color: string) => {
-    if (fondo) doc.rect(left, y, pageWidth, rowHeight).fill(fondo)
-    doc.fontSize(fontSize).fillColor(color)
-    // `height` + `ellipsis`: una sola línea por celda, cortada con «…» si no cabe; con `height` pdfkit nunca abre página.
-    cells.forEach((texto, i) => doc.text(texto, xs[i] + 4, y + 4, { width: anchos[i] - 8, height: rowHeight, ellipsis: true }))
-    y += rowHeight
+  // El alto de una fila: 16, o lo que pida la celda `pdfAjustar` más alta (sus líneas + el mismo margen de 4 arriba y abajo).
+  const altoDe = (cells: string[]) => {
+    doc.fontSize(fontSize)
+    const altos = cells.map((texto, i) => (columns[i].pdfAjustar ? doc.heightOfString(texto, { width: anchos[i] - 8 }) + 8 : 0))
+    return Math.max(rowHeight, Math.ceil(Math.max(...altos)))
   }
-  const drawHeader = () => drawRow(columns.map(c => c.label), '#374151', '#fff')
+  const drawRow = (cells: string[], fondo: string | null, color: string, alto = rowHeight) => {
+    if (fondo) doc.rect(left, y, pageWidth, alto).fill(fondo)
+    doc.fontSize(fontSize).fillColor(color)
+    // `height` + `ellipsis`: una sola línea por celda, cortada con «…» si no cabe; con `height` pdfkit nunca abre página. Una
+    // celda `pdfAjustar` se parte en líneas dentro del alto de SU fila (medido con `altoDe`), sin «…».
+    cells.forEach((texto, i) =>
+      doc.text(
+        texto,
+        xs[i] + 4,
+        y + 4,
+        columns[i].pdfAjustar ? { width: anchos[i] - 8, height: alto } : { width: anchos[i] - 8, height: rowHeight, ellipsis: true },
+      ),
+    )
+    y += alto
+  }
+  const drawHeader = () =>
+    drawRow(
+      columns.map(c => c.label),
+      '#374151',
+      '#fff',
+    )
 
   drawHeader()
   rows.forEach((row, idx) => {
-    if (y + rowHeight > doc.page.height - doc.page.margins.bottom) {
+    const cells = columns.map(c => {
+      const v = c.value(row)
+      return v === null || v === undefined ? '' : String(v)
+    })
+    const alto = altoDe(cells)
+    if (y + alto > doc.page.height - doc.page.margins.bottom) {
       doc.addPage({ size: 'A4', layout: 'landscape', margin: 32 })
       y = doc.page.margins.top
       drawHeader()
     }
-    drawRow(
-      columns.map(c => {
-        const v = c.value(row)
-        return v === null || v === undefined ? '' : String(v)
-      }),
-      idx % 2 === 0 ? '#f3f4f6' : null, // zebra stripes for readability
-      '#000',
-    )
+    drawRow(cells, idx % 2 === 0 ? '#f3f4f6' : null, '#000', alto) // zebra stripes for readability
   })
   doc.fillColor('#000')
   doc.x = left
@@ -218,7 +266,7 @@ async function encodePdf<TRow>(columns: ExportColumnDef<TRow>[], rows: TRow[], t
  */
 export async function encodeExport<TRow>(
   format: ExportFormat,
-  { allColumns, requestedColumnIds, rows, title, sheetName }: EncodeExportOptions<TRow>,
+  { allColumns, requestedColumnIds, rows, title, sheetName, resumen }: EncodeExportOptions<TRow>,
 ): Promise<EncodedExport> {
   const columns = pickColumns(allColumns, requestedColumnIds)
   if (columns.length === 0) {
@@ -226,7 +274,7 @@ export async function encodeExport<TRow>(
   }
   if (format === 'csv') return encodeCsv(columns, rows)
   if (format === 'xlsx') return encodeXlsx(columns, rows, sheetName ?? title)
-  return encodePdf(columns, rows, title)
+  return encodePdf(columns, rows, title, resumen)
 }
 
 /**

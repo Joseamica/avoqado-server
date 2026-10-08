@@ -496,6 +496,8 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   ServicePayPeriod: 'Commissions & Sales Goals',
   ServiceEarning: 'Commissions & Sales Goals',
   StaffPayStatement: 'Commissions & Sales Goals',
+  StaffPayTipWindow: 'Commissions & Sales Goals',
+  StaffPayVenueWindow: 'Commissions & Sales Goals',
 
   // 16. Reservations & Booking
   Reservation: 'Reservations & Booking',

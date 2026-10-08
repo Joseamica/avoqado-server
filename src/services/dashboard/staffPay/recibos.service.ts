@@ -2,15 +2,24 @@ import { Prisma } from '@prisma/client'
 import prisma from '../../../utils/prismaClient'
 import { createHash } from 'crypto'
 import { BadRequestError, ConflictError, NotFoundError } from '../../../errors/AppError'
-import { withSerializableRetry } from '../../../utils/serializableRetry'
 import { utcTs } from '../../../utils/sqlDates'
 import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
-import { encodeExport, EncodedExport, ExportColumnDef, fechaMx, getRowCapForFormat } from '../export.helpers'
-import { runWithoutCancellation } from '../../../utils/requestCancellation'
-import { assertPermisoEnSedes, exigirPermisoEnSedes, sedesConPermiso, sedesConServicePay, sedesLegiblesDe } from './acceso'
+import { encodeExport, EncodedExport, fechaMx, getRowCapForFormat } from '../export.helpers'
+import { assertPermisoEnSedes, exigirPermisoEnSedes, sedesConPermiso } from './acceso'
 import { bloquearPeriodo, periodoQueContieneFecha } from './periodosGuardados'
-import { dbDateComoFecha, MESES_LARGOS, periodoQueContiene, venuePeriodRange } from './periodos'
+import { transaccionConPresupuesto } from '../../../utils/esperaDeCandados'
+import { dbDateComoFecha, periodoQueContiene, venuePeriodRange } from './periodos'
 import { valoracionCte } from './valoracion'
+import { AlcanceBarrido, sqlVentasDelPeriodo } from './fuentesVenta'
+import { personaDelRecibo } from './recibos.persona'
+import { enUnaFoto } from './foto'
+import { DevolucionesPendientes, devolucionesPendientes } from './devolucionesPendientes'
+import { alcanceEnLaFoto, LecturaPreparada, prepararLectura, zonasEnLaFoto } from './lectura'
+import { rangosConParticipacion } from './rangos'
+import { columnasDelRecibo, conceptoDe, FilaRecibo, filasDelRecibo, RenglonRecibo, slug, totalesPorTipoDelRecibo } from './recibos.formato'
+
+export type { FilaRecibo, RenglonRecibo } from './recibos.formato'
+export { columnasDelRecibo, filasDelRecibo, totalesPorTipoDelRecibo } from './recibos.formato'
 
 /** Tope de UNA página del recibo (Codex R2-R1-20). El recibo entero no tiene tope: se recorre con cursor. */
 export const RECIBO_LIMITE_MAX = 500
@@ -19,15 +28,6 @@ const LOTE_PAGO = 1000
 const MUESTRA_PAGO = 100
 const TZ_DEFAULT = 'America/Mexico_City'
 
-export interface RenglonRecibo {
-  tipo: 'CLASE' | 'DIFERENCIA' | 'AJUSTE'
-  fecha: string
-  hora: string | null
-  sede: string
-  concepto: string
-  lugares: number | null
-  monto: string
-}
 export interface Recibo {
   persona: string
   periodo: { id: string | null; start: string; end: string; estado: 'OPEN' | 'CLOSED' }
@@ -41,6 +41,10 @@ export interface Recibo {
   siguiente: string | null
   pagadoEn: string | null
   parcial: boolean
+  /** Del recibo ENTERO, por tipo (SUM en la base); sólo los tipos que tienen renglones (spec fase 3 §11). */
+  totalesPorTipo: Partial<Record<RenglonRecibo['tipo'], string>>
+  /** B12 (r6.2, r5.1): devoluciones de esta persona que se descontarán solas en OTRO cierre; null en uno cerrado o pág. 2+. */
+  pendientes: DevolucionesPendientes | null
 }
 
 type Db = Prisma.TransactionClient | typeof prisma
@@ -77,8 +81,11 @@ async function pendientesDePago(db: Db, p: { id: string; status: string }, staff
 
 const TOPE_SEDES_RECIBO = 500
 
-/** Las sedes de un recibo, para su permiso. Nunca recorta: con más del tope se niega en vez de revisar sólo una parte. */
-async function sedesDeRecibo(db: Db, periodId: string, staffId: string): Promise<string[]> {
+/**
+ * Las sedes de un recibo, para su permiso. Nunca recorta: con más del tope se niega en vez de revisar sólo una parte. B14-fix2:
+ * exportada para que el MCP sepa qué sedes abarca marcar pagado ESE recibo (las mismas del permiso), sin una segunda copia.
+ */
+export async function sedesDeRecibo(db: Db, periodId: string, staffId: string): Promise<string[]> {
   const sedes = await db.serviceEarning.findMany({
     where: { periodId, staffId },
     select: { venueId: true },
@@ -144,8 +151,8 @@ export async function marcarPagado(input: {
   if (!antes) throw new NotFoundError('Periodo no encontrado')
   const candidatas = input.staffId ? [...antes.venueIds, ...(await sedesDeRecibo(prisma, input.periodId, input.staffId))] : antes.venueIds
   const permitidas = new Set(await sedesConPermiso(input.userId, candidatas, 'staffpay:close'))
-  return withSerializableRetry(async tx => {
-    const p = await bloquearPeriodo(tx, input.periodId)
+  return transaccionConPresupuesto(async (tx, presupuesto) => {
+    const p = await bloquearPeriodo(tx, input.periodId, presupuesto)
     if (p.organizationId !== v.organizationId) throw new NotFoundError('Periodo no encontrado')
     if (p.status !== 'CLOSED') throw new BadRequestError('Sólo se marca pagado un periodo cerrado')
     // Permiso ANTES de recorrer nada (como el cierre, Codex R1-8), sobre el periodo ya bloqueado (spec §6.5, §9.2).
@@ -194,23 +201,6 @@ export async function marcarPagado(input: {
   })
 }
 
-/** Una fila de la fuente del recibo: la misma forma para lo congelado y para lo valorado en vivo. */
-interface FilaRecibo {
-  tipo: 'CLASE' | 'DIFERENCIA' | 'AJUSTE'
-  instante: Date
-  id: string
-  venueId: string
-  fecha: string
-  hora: string | null
-  clase: string | null
-  sedeFoto: string | null
-  reason: string | null
-  /** De una DIFERENCIA: el inicio del periodo de origen de su clase (`descriptor.periodoOrigen.start`, B2). */
-  origen: string | null
-  lugares: number | null
-  monto: Prisma.Decimal
-}
-
 interface FuenteRecibo {
   persona: string
   periodo: Recibo['periodo']
@@ -218,6 +208,8 @@ interface FuenteRecibo {
   nombreSede: Map<string, string>
   /** UNA consulta (UNION ALL) con todos los renglones; null si el usuario no puede leer ninguna sede. */
   sql: Prisma.Sql | null
+  /** El alcance legible ya filtrado por `sede` (B12: las pendientes se leen sobre el mismo). */
+  venueIds: string[]
   pagadoEn: string | null
   /** De QUÉ recibo es un cursor (organización, inicio del periodo, persona y sede): ver `leerCursor`. */
   llave: string
@@ -231,135 +223,84 @@ type EntradaRecibo = {
   sede?: string
   cursor?: string
   limit: number
+  /** B14-fix F1: el alcance de la conexión MCP (sus sedes); se intersecta con el permiso antes de leer nada. */
+  soloSedes?: readonly string[]
   /** SÓLO para pruebas (como `entreLotes`): corre entre la preparación y la instantánea (Codex R5). */
   trasPreparar?: () => Promise<void>
 }
 
 /**
- * Todo lo que se consulta con el cliente GLOBAL —la sede y la persona, los MÓDULOS (`sedesConServicePay`) y los
- * PERMISOS (`sedesLegiblesDe`)—, resuelto ANTES de abrir la instantánea y pasado como datos (Codex R4-Nuevo 1). Si se
- * consultara dentro, cada transacción retendría su conexión esperando OTRA del pool: 18 recibos simultáneos ocupaban las
- * 18 conexiones y ninguno terminaba.
- * El permiso se resuelve para TODAS las sedes candidatas: las del periodo como está ahora ∪ las que hoy tienen el módulo.
+ * Lo que el recibo resuelve con el cliente GLOBAL antes de su instantánea (`prepararLectura`, Codex R4-Nuevo 1), más la
+ * persona y el NOMBRE de cada sede para mostrar. La zona horaria y la periodicidad deciden qué clases entran: se leen DENTRO
+ * de la instantánea, en `fuenteDelRecibo` (Codex R5: una zona leída antes mezclaba el día de ayer con el monto de hoy).
  */
-interface ReciboPreparado {
-  organizationId: string
+interface ReciboPreparado extends LecturaPreparada {
   persona: string
-  activas: string[]
-  permitidas: Set<string>
-  /** Sólo el NOMBRE para mostrar. La zona horaria y la periodicidad deciden qué clases entran: se leen DENTRO de la
-   *  instantánea, en `fuenteDelRecibo` (Codex R5: una zona leída antes mezclaba el día de ayer con el monto de hoy). */
   sedes: Map<string, { nombre: string }>
 }
 
-async function prepararRecibo(input: { userId: string; venueId: string; staffId: string; fecha: string }): Promise<ReciboPreparado> {
+async function prepararRecibo(
+  input: Pick<EntradaRecibo, 'userId' | 'venueId' | 'staffId' | 'fecha' | 'soloSedes'>,
+): Promise<ReciboPreparado> {
   const v = await prisma.venue.findUniqueOrThrow({ where: { id: input.venueId }, select: { organizationId: true } })
-  // La persona, sólo si trabaja (o trabajó) en esta organización: nunca el nombre de alguien de otro negocio. «Trabajó» lo
-  // acredita también un devengo en la organización (Codex bloque A #4): eliminarla del equipo borra su StaffVenue pero no
-  // su recibo cerrado, que tiene que seguir abriendo (pantalla, PDF y Excel).
-  const select = { firstName: true, lastName: true } as const
-  const staff =
-    (await prisma.staff.findFirst({
-      where: { id: input.staffId, venues: { some: { venue: { organizationId: v.organizationId } } } },
-      select,
-    })) ??
-    ((await prisma.serviceEarning.findFirst({
-      where: { organizationId: v.organizationId, staffId: input.staffId },
-      select: { id: true },
-    }))
-      ? await prisma.staff.findUnique({ where: { id: input.staffId }, select })
-      : null)
-  if (!staff) throw new NotFoundError('Persona no encontrada')
-  const filaAhora = await periodoQueContieneFecha(prisma, v.organizationId, input.fecha)
-  const activas = await sedesConServicePay(v.organizationId)
-  const candidatas = [...new Set([...(filaAhora?.venueIds ?? []), ...activas])]
-  const { venueIds: permitidas } = await sedesLegiblesDe(input.userId, candidatas)
-  const sedes = candidatas.length
+  const persona = await personaDelRecibo(v.organizationId, input.staffId)
+  const lectura = await prepararLectura({ ...input, organizationId: v.organizationId })
+  const ids = [...lectura.permitidas] // sólo se muestran renglones de sedes legibles
+  const sedes = ids.length
     ? await prisma.venue.findMany({
-        where: { id: { in: candidatas }, organizationId: v.organizationId },
+        where: { id: { in: ids }, organizationId: v.organizationId },
         select: { id: true, name: true },
         orderBy: { id: 'asc' },
-        take: candidatas.length,
+        take: ids.length,
       })
     : []
-  return {
-    organizationId: v.organizationId,
-    persona: `${staff.firstName} ${staff.lastName}`.trim(),
-    activas,
-    permitidas: new Set(permitidas),
-    sedes: new Map(sedes.map(x => [x.id, { nombre: x.name }])),
-  }
+  return { ...lectura, persona, sedes: new Map(sedes.map(x => [x.id, { nombre: x.name }])) }
 }
 
-/**
- * La MISMA regla que `alcanceLegibleDelPeriodo` (A3: cerrado = su alcance; abierto = guardadas ∪ activas; filtrado por
- * permiso y por `sede`), pero con módulos y permisos ya resueltos: es pura y corre dentro de la instantánea. Una sede
- * que entró al periodo entre la preparación y la instantánea no tiene permiso resuelto: no se lee y el recibo dice
- * `parcial` (conservador; la siguiente lectura ya la incluye).
- */
-function alcanceEnLaFoto(p: ReciboPreparado, fila: { status: string; venueIds: string[] } | null, sede?: string) {
-  const alcance = fila?.status === 'CLOSED' ? [...new Set(fila.venueIds)] : [...new Set([...(fila?.venueIds ?? []), ...p.activas])]
-  const legibles = alcance.filter(v => p.permitidas.has(v)).sort()
-  const venueIds = sede ? legibles.filter(id => id === sede) : legibles
-  return { venueIds, parcial: legibles.length < alcance.length || (sede !== undefined && venueIds.length === 0) }
-}
-
-/**
- * UNA instantánea de sólo lectura (Codex R3-Nuevo 1): la fuente, el total y las páginas del recibo se leen del MISMO
- * instante. Sin esto, un cierre entre dos lecturas deja renglones que no suman el total (la valoración en vivo pierde
- * las clases recién ancladas y la fuente del periodo abierto no incluye los SERVICE nuevos).
- * 🔴 Regla (Codex R4-Nuevo 1): dentro de `fn` SÓLO se lee con `tx` —periodo, total y páginas—; nunca `prisma.` global
- * ni un helper que lo use (`sedesConServicePay`, `sedesLegiblesDe`, `alcanceLegibleDelPeriodo`, permisos): eso va en
- * `prepararRecibo`, antes.
- * Exportada sólo para su prueba de cancelación.
- */
-export function enUnaFoto<T>(fn: (tx: Db) => Promise<T>): Promise<T> {
-  return prisma.$transaction(
-    async tx => {
-      // Codex R4-Nuevo 2: el freno de lecturas del MCP trata todo `$executeRaw` como escritura (`hasWritten = true`) y
-      // dejaría de cortar las lecturas que siguen. Este SET no escribe nada: va fuera del freno, y SÓLO él.
-      await runWithoutCancellation(() => tx.$executeRaw`SET TRANSACTION READ ONLY`)
-      return fn(tx)
-    },
-    { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead, maxWait: 10_000, timeout: 60_000 },
-  )
-}
+/** La instantánea vive en `foto.ts` (B12: también la usa la vista previa del cierre); se re-exporta para su prueba. */
+export { enUnaFoto } from './foto'
 
 /**
  * Qué renglones forman el recibo, como UNA fuente SQL (Codex R2-R1-20): los `ServiceEarning` (SERVICE, RECONCILE,
  * MANUAL) del periodo y la persona y, si el periodo está ABIERTO, además la valoración en vivo de cada sede (cada
- * subconsulta con su propio WITH). Todas las ramas llevan la misma llave de orden: (instante de servicio, id).
+ * subconsulta con su propio WITH) y las comisiones y propinas que hoy entrarían al cierre. Todas las ramas llevan la misma
+ * llave de orden: (instante de servicio o de venta, id).
  * Corre dentro de `enUnaFoto`: sólo `db` (el `tx`) y los datos de `prep` (Codex R4-Nuevo 1).
  */
 async function fuenteDelRecibo(
   db: Db,
   prep: ReciboPreparado,
   input: { staffId: string; fecha: string; sede?: string },
+  o: { agruparPropinas: boolean },
 ): Promise<FuenteRecibo> {
   const fila = await periodoQueContieneFecha(db, prep.organizationId, input.fecha)
-  // El MISMO alcance legible que el reporte (Codex R1-1, R3-Nuevo 2), con el filtro de `sede` (R2-R1-21).
-  const { venueIds, parcial } = alcanceEnLaFoto(prep, fila, input.sede)
   // Codex R5: periodicidad y zona horaria deciden QUÉ clases entran, así que salen de la MISMA instantánea que los montos.
-  const org = await db.organization.findUniqueOrThrow({ where: { id: prep.organizationId }, select: { servicePayPeriodicity: true } })
-  const zonas = venueIds.length
-    ? await db.venue.findMany({
-        where: { id: { in: venueIds }, organizationId: prep.organizationId },
-        select: { id: true, timezone: true },
-        take: venueIds.length,
-      })
-    : []
-  const tzDe = new Map(zonas.map(x => [x.id, x.timezone || TZ_DEFAULT]))
+  const org = await db.organization.findUniqueOrThrow({
+    where: { id: prep.organizationId },
+    select: { servicePayPeriodicity: true, staffPayStartDate: true },
+  })
   const canon = fila
     ? { start: dbDateComoFecha(fila.periodStart), end: dbDateComoFecha(fila.periodEnd) }
     : periodoQueContiene(input.fecha, org.servicePayPeriodicity)
-  const partes: Prisma.Sql[] = []
+  const startDate = org.staffPayStartDate ? dbDateComoFecha(org.staffPayStartDate) : null
+  // El MISMO alcance legible que el reporte (Codex R1-1, R3-Nuevo 2), con el filtro de `sede` (R2-R1-21).
+  const legible = alcanceEnLaFoto(prep, fila, canon, startDate, input.sede)
+  // B14-fix F2: sólo las sedes que SIGUEN siendo de la organización en ESTA foto (un traslado entre la preparación y la foto).
+  const tzDe = await zonasEnLaFoto(db, prep.organizationId, legible.venueIds)
+  const venueIds = legible.venueIds.filter(v => tzDe.has(v))
+  const parcial = legible.parcial
+  const crudo: Prisma.Sql[] = []
   if (fila && venueIds.length) {
-    partes.push(Prisma.sql`
-      SELECT CASE e.concept WHEN 'SERVICE' THEN 'CLASE' WHEN 'RECONCILE' THEN 'DIFERENCIA' ELSE 'AJUSTE' END AS tipo,
+    crudo.push(Prisma.sql`
+      SELECT CASE WHEN e."sourceType" = 'COMMISSION' THEN 'COMISION' WHEN e."sourceType" = 'TIP' THEN 'PROPINA'
+                  WHEN e.concept = 'SERVICE' THEN 'CLASE' WHEN e.concept = 'RECONCILE' THEN 'DIFERENCIA' ELSE 'AJUSTE' END AS tipo,
              COALESCE(e."occurredAt", e."createdAt") AS instante, e.id, e."venueId",
              COALESCE(e.descriptor->>'fecha', to_char(e."createdAt", 'YYYY-MM-DD')) AS fecha,
              e.descriptor->>'hora' AS hora, e.descriptor->>'clase' AS clase, e.descriptor->>'sede' AS "sedeFoto",
-             e.reason, e.descriptor->'periodoOrigen'->>'start' AS origen, e.count AS lugares, e.amount AS monto
+             e.reason, e.descriptor->'periodoOrigen'->>'start' AS origen, e.count AS lugares, e.amount AS monto,
+             e.descriptor->'regla' AS regla, e.descriptor->>'orden' AS orden, e.descriptor->>'esquema' AS esquema,
+             (e.descriptor->>'base')::numeric AS base, (e.descriptor->>'tasa')::numeric AS tasa, e.descriptor->>'limite' AS limite,
+             CASE WHEN e."sourceType" IN ('COMMISSION', 'TIP') THEN e.descriptor->>'motivo' END AS motivo
       FROM "ServiceEarning" e
       WHERE e."periodId" = ${fila.id} AND e."staffId" = ${input.staffId} AND e."venueId" IN (${Prisma.join(venueIds)})
         ${fila.status === 'CLOSED' ? Prisma.empty : Prisma.sql`AND e.concept IN ('RECONCILE', 'MANUAL')`}`)
@@ -370,13 +311,34 @@ async function fuenteDelRecibo(
       const tz = tzDe.get(venueId) ?? TZ_DEFAULT
       const { from, to } = venuePeriodRange(canon, tz)
       const f = { venueId, organizationId: prep.organizationId, tz, desde: from, hasta: to, ahora, staffId: input.staffId }
-      partes.push(Prisma.sql`
+      crudo.push(Prisma.sql`
         SELECT 'CLASE'::text AS tipo, vv."startsAt" AS instante, vv."classSessionId" AS id, vv."venueId", vv."fechaLocal" AS fecha,
                to_char(((vv."startsAt" AT TIME ZONE 'UTC') AT TIME ZONE ${tz}), 'HH24:MI') AS hora,
                vv."productName" AS clase, NULL::text AS "sedeFoto", NULL::text AS reason, NULL::text AS origen,
-               vv.conteo AS lugares, vv.monto
+               vv.conteo AS lugares, vv.monto, vv.regla AS regla, NULL::text AS orden, NULL::text AS esquema,
+               NULL::numeric AS base, NULL::numeric AS tasa, NULL::text AS limite, NULL::text AS motivo
         FROM (${valoracionCte(f)} SELECT * FROM valoradas) vv
         WHERE vv.estado = 'OK' AND vv.monto IS NOT NULL`)
+    }
+    // Spec fase 3 §11: el periodo abierto muestra en vivo las comisiones y propinas que hoy entrarían al cierre (las MISMAS
+    // reglas que el cierre, B3). Sin activar no hay nada que mostrar.
+    if (startDate && venueIds.length) {
+      const a: AlcanceBarrido = {
+        organizationId: prep.organizationId,
+        periodo: { id: fila?.id ?? null, ...canon },
+        sedes: venueIds.map(id => ({ venueId: id, tz: tzDe.get(id) ?? TZ_DEFAULT })),
+        startDate,
+      }
+      // B11: con la participación por sede; los rangos, una vez para el recibo entero (en la MISMA foto).
+      const ventas = sqlVentasDelPeriodo(a, await rangosConParticipacion(db, a), { staffId: input.staffId })
+      if (ventas) {
+        crudo.push(Prisma.sql`
+          SELECT CASE v.fuente WHEN 'COMMISSION' THEN 'COMISION' ELSE 'PROPINA' END AS tipo, v.instante, v."sourceId" AS id,
+                 v."venueId", v."fechaLocal" AS fecha, v.hora, NULL::text AS clase, v.sede AS "sedeFoto", NULL::text AS reason,
+                 NULL::text AS origen, NULL::int AS lugares, v.monto, NULL::jsonb AS regla, v.orden, v.esquema, v.base, v.tasa,
+                 v.limite, v.motivo
+          FROM (${ventas}) v`)
+      }
     }
   }
   const pagado =
@@ -391,13 +353,61 @@ async function fuenteDelRecibo(
     periodo: { id: fila?.id ?? null, ...canon, estado: fila?.status ?? 'OPEN' },
     parcial,
     nombreSede: new Map([...prep.sedes].map(([id, x]) => [id, x.nombre])),
-    sql: partes.length ? Prisma.join(partes, ' UNION ALL ') : null,
+    sql: armarFuente(crudo, o.agruparPropinas),
+    venueIds,
     pagadoEn: pagado?.paidAt?.toISOString() ?? null,
     llave: createHash('sha256')
       .update([prep.organizationId, canon.start, input.staffId, input.sede ?? ''].join('|'))
       .digest('hex')
       .slice(0, 12),
   }
+}
+
+/** El orden de las columnas de la fuente del recibo (contrato con D3c; lo fija la prueba de B5). */
+export const COLUMNAS_FUENTE_RECIBO = [
+  'tipo',
+  'instante',
+  'id',
+  'venueId',
+  'fecha',
+  'hora',
+  'clase',
+  'sedeFoto',
+  'reason',
+  'origen',
+  'lugares',
+  'monto',
+  'regla',
+  'orden',
+  'esquema',
+  'base',
+  'tasa',
+  'limite',
+  'motivo',
+  'agrupada',
+  'cobros',
+] as const
+
+/**
+ * B-D6: en pantalla y PDF las propinas se juntan por día, sede y signo («Propinas del 3 oct 2026 · 18 cobros»); el Excel
+ * lleva cada cobro. El total, la cuenta y el cursor salen de ESTA fuente, así que siempre cuadran con lo que se ve.
+ * 🔴 Columnas en ORDEN FIJO (el segundo brazo es posicional): `COLUMNAS_FUENTE_RECIBO`. Quien agregue una columna a las
+ * fuentes crudas la agrega también aquí, en la misma posición; `regla` (13) ya está.
+ */
+function armarFuente(crudo: Prisma.Sql[], agruparPropinas: boolean): Prisma.Sql | null {
+  if (!crudo.length) return null
+  const union = Prisma.join(crudo, ' UNION ALL ')
+  if (!agruparPropinas) return Prisma.sql`SELECT c.*, false AS agrupada, 1 AS cobros FROM (${union}) c`
+  return Prisma.sql`
+    WITH crudo AS (${union})
+    SELECT c.*, false AS agrupada, 1 AS cobros FROM crudo c WHERE c.tipo <> 'PROPINA'
+    UNION ALL
+    SELECT 'PROPINA', MIN(c.instante), 'T:' || c."venueId" || ':' || c.fecha || ':' || c.motivo, c."venueId", c.fecha,
+           NULL::text, NULL::text, MAX(c."sedeFoto"), NULL::text, NULL::text, NULL::int, SUM(c.monto),
+           NULL::jsonb, NULL::text, NULL::text, NULL::numeric, NULL::numeric, NULL::text, c.motivo, true, COUNT(*)::int
+    FROM crudo c
+    WHERE c.tipo = 'PROPINA'
+    GROUP BY c."venueId", c.fecha, c.motivo`
 }
 
 /**
@@ -423,11 +433,24 @@ function leerCursor(s: string, f: Pick<FuenteRecibo, 'periodo' | 'llave'>): { in
   return { instante, id: m[4] }
 }
 
-async function totalDelRecibo(db: Db, f: FuenteRecibo): Promise<{ total: Prisma.Decimal; cantidad: number }> {
-  if (!f.sql) return { total: new Prisma.Decimal(0), cantidad: 0 }
-  const [r] = await db.$queryRaw<Array<{ total: Prisma.Decimal | null; cantidad: number }>>`
-    SELECT SUM(r.monto) AS total, COUNT(*)::int AS cantidad FROM (${f.sql}) r`
-  return { total: r.total ?? new Prisma.Decimal(0), cantidad: r.cantidad }
+/** Total, cuenta y totales por tipo del recibo ENTERO, en UNA consulta sobre la MISMA fuente que las páginas. */
+async function totalDelRecibo(
+  db: Db,
+  f: FuenteRecibo,
+): Promise<{ total: Prisma.Decimal; cantidad: number; porTipo: Partial<Record<RenglonRecibo['tipo'], string>> }> {
+  if (!f.sql) return { total: new Prisma.Decimal(0), cantidad: 0, porTipo: {} }
+  const filas = await db.$queryRaw<Array<{ tipo: RenglonRecibo['tipo']; total: Prisma.Decimal | null; cantidad: number }>>`
+    SELECT r.tipo, SUM(r.monto) AS total, COUNT(*)::int AS cantidad FROM (${f.sql}) r GROUP BY r.tipo`
+  let total = new Prisma.Decimal(0)
+  let cantidad = 0
+  const porTipo: Partial<Record<RenglonRecibo['tipo'], string>> = {}
+  for (const x of filas) {
+    const t = new Prisma.Decimal(x.total ?? 0)
+    total = total.plus(t)
+    cantidad += x.cantidad
+    porTipo[x.tipo] = t.toFixed(2)
+  }
+  return { total, cantidad, porTipo }
 }
 
 function sqlPaginaDelRecibo(fuente: Prisma.Sql, c: { instante: Date; id: string } | null, limite: number): Prisma.Sql {
@@ -453,25 +476,14 @@ async function paginaDelRecibo(
   }
 }
 
-/**
- * Una diferencia dice de qué clase es (QA bloque B, defecto 3): «Diferencia · Yoga del 28 sep 2026 (clase de septiembre)».
- * La fecha es la local de la clase en su sede (la de su foto) y el mes, el de su periodo de origen.
- */
-function conceptoDe(r: FilaRecibo): string {
-  if (r.tipo === 'AJUSTE') return r.reason ?? 'Ajuste'
-  const clase = r.clase ?? 'Clase'
-  if (r.tipo === 'CLASE') return clase
-  const mes = r.origen ? ` (clase de ${MESES_LARGOS[Number(r.origen.slice(5, 7)) - 1]})` : ''
-  return `Diferencia · ${clase} del ${fechaMx(r.fecha)}${mes}`
-}
-
 const aRenglon =
   (f: FuenteRecibo) =>
   (r: FilaRecibo): RenglonRecibo => ({
     tipo: r.tipo,
     // Un ajuste no es de un día de servicio: su fecha es la de CAPTURA y no lleva hora (QA 2026-10-03, defecto 9).
     fecha: r.fecha,
-    hora: r.tipo === 'AJUSTE' ? null : r.hora,
+    // Un día de propinas tampoco tiene una hora.
+    hora: r.tipo === 'AJUSTE' || r.agrupada ? null : r.hora,
     // Lo congelado manda (spec §5.6; Codex bloque A #8): renombrar la sede no reescribe un recibo cerrado. El nombre de
     // hoy sólo para lo valorado en vivo, que no trae foto.
     sede: r.sedeFoto ?? f.nombreSede.get(r.venueId) ?? '',
@@ -487,9 +499,19 @@ export async function reciboDePersona(input: EntradaRecibo): Promise<Recibo> {
   const prep = await prepararRecibo(input) // cliente global ANTES de la instantánea (Codex R4-Nuevo 1)
   await input.trasPreparar?.()
   return enUnaFoto(async tx => {
-    const f = await fuenteDelRecibo(tx, prep, input)
-    const { total, cantidad } = await totalDelRecibo(tx, f)
+    const f = await fuenteDelRecibo(tx, prep, input, { agruparPropinas: true })
+    const { total, cantidad, porTipo } = await totalDelRecibo(tx, f)
     const pagina = await paginaDelRecibo(tx, f, input.cursor, acotar(input.limit))
+    // B12: en la MISMA foto; sólo el recibo abierto (lo de su periodo ya es renglón) y, B13, sólo su primera página.
+    const pendientes =
+      f.periodo.estado === 'CLOSED' || input.cursor
+        ? null
+        : await devolucionesPendientes(tx, {
+            organizationId: prep.organizationId,
+            sedes: f.venueIds,
+            staffId: input.staffId,
+            excluirPeriodo: f.periodo,
+          })
     return {
       persona: f.persona,
       periodo: f.periodo,
@@ -499,60 +521,17 @@ export async function reciboDePersona(input: EntradaRecibo): Promise<Recibo> {
       siguiente: pagina.siguiente,
       pagadoEn: f.pagadoEn,
       parcial: f.parcial,
+      totalesPorTipo: porTipo,
+      pendientes,
     }
   })
 }
 
 /** La consulta de UNA página del recibo tal como se ejecuta, para su `EXPLAIN` en A13 (Codex R3-R1-12). Nada más la usa. */
 export async function consultaDePaginaDelRecibo(input: EntradaRecibo): Promise<Prisma.Sql | null> {
-  const f = await fuenteDelRecibo(prisma, await prepararRecibo(input), input)
+  const f = await fuenteDelRecibo(prisma, await prepararRecibo(input), input, { agruparPropinas: true })
   return f.sql ? sqlPaginaDelRecibo(f.sql, input.cursor ? leerCursor(input.cursor, f) : null, acotar(input.limit)) : null
 }
-
-/** Las filas que reciben LOS DOS formatos, PDF y Excel (Codex R2-R1-14): cada renglón con su signo + el total. Pura. */
-export function filasDelRecibo(r: Pick<Recibo, 'renglones' | 'total' | 'parcial'>): RenglonRecibo[] {
-  return [
-    ...r.renglones,
-    {
-      tipo: 'AJUSTE',
-      fecha: '',
-      hora: null,
-      sede: '',
-      concepto: r.parcial ? 'Total (vista parcial)' : 'Total',
-      lugares: null,
-      monto: r.total,
-    },
-  ]
-}
-
-const pesos = new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN' })
-/** «29 sep 2026»; un ajuste se fecha cuando se capturó y lo dice. La fila del total va sin fecha. */
-const fechaDelRenglon = (r: RenglonRecibo) => (r.fecha ? `${fechaMx(r.fecha)}${r.tipo === 'AJUSTE' ? ' (captura)' : ''}` : '')
-/**
- * `pdfAncho`: el Concepto se lleva casi la mitad de la hoja para que una diferencia se lea entera en el PDF («Diferencia ·
- * Yoga (clase grupal) del 28 sep 2026 (clase de septiembre)», ~280 pt a 9 pt) sin cortar fecha de captura, sede ni monto.
- */
-const COLUMNAS: ExportColumnDef<RenglonRecibo>[] = [
-  { id: 'fecha', label: 'Fecha', value: fechaDelRenglon, pdfAncho: 1.3 },
-  { id: 'hora', label: 'Hora', value: r => r.hora, pdfAncho: 0.6 },
-  { id: 'sede', label: 'Sede', value: r => r.sede, pdfAncho: 1.5 },
-  { id: 'concepto', label: 'Concepto', value: r => r.concepto, pdfAncho: 4 },
-  { id: 'lugares', label: 'Lugares', value: r => r.lugares, pdfAncho: 0.7 },
-  { id: 'monto', label: 'Monto', value: r => pesos.format(Number(r.monto)), pdfAncho: 1 },
-]
-/** El Excel lleva el monto como NÚMERO con formato de moneda (el dueño lo suma); `monto` ya viene con 2 decimales. */
-const COLUMNAS_EXCEL: ExportColumnDef<RenglonRecibo>[] = COLUMNAS.map(c =>
-  c.id === 'monto' ? { ...c, value: r => Number(r.monto), numFmt: '$#,##0.00' } : c,
-)
-/** Las columnas de cada formato (exportada para su prueba). */
-export const columnasDelRecibo = (formato: 'pdf' | 'xlsx') => (formato === 'xlsx' ? COLUMNAS_EXCEL : COLUMNAS)
-const slug = (s: string) =>
-  s
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/(^-|-$)/g, '')
 
 export async function exportarRecibo(input: {
   userId: string
@@ -569,9 +548,10 @@ export async function exportarRecibo(input: {
   const prep = await prepararRecibo(input) // cliente global ANTES de la instantánea (Codex R4-Nuevo 1)
   // Fuente, total y TODAS las páginas en UNA instantánea de sólo lectura (Codex R3-Nuevo 1); el archivo se genera
   // DESPUÉS de cerrar la transacción (codificar no retiene la conexión).
-  const { f, total, renglones } = await enUnaFoto(async tx => {
-    const f = await fuenteDelRecibo(tx, prep, input)
-    const { total, cantidad } = await totalDelRecibo(tx, f)
+  const { f, total, porTipo, renglones } = await enUnaFoto(async tx => {
+    // El Excel lleva cada cobro por separado; la pantalla y el PDF, las propinas de un día juntas (B-D6).
+    const f = await fuenteDelRecibo(tx, prep, input, { agruparPropinas: input.format === 'pdf' })
+    const { total, cantidad, porTipo } = await totalDelRecibo(tx, f)
     // El tope del ARCHIVO (export.helpers: 1,000 en PDF, 10,000 en Excel) se revisa con la cuenta de la base ANTES de
     // leer los renglones: arriba del tope se explica, nunca se trunca (D6).
     if (cantidad + 1 > tope) {
@@ -589,7 +569,7 @@ export async function exportarRecibo(input: {
       cursor = p.siguiente
       await input.entreLotes?.()
     }
-    return { f, total, renglones }
+    return { f, total, porTipo, renglones }
   })
   const columnas = columnasDelRecibo(input.format)
   const encoded = await encodeExport(input.format, {
@@ -598,6 +578,7 @@ export async function exportarRecibo(input: {
     rows: filasDelRecibo({ renglones, total: total.toFixed(2), parcial: f.parcial }),
     title: `Recibo de ${f.persona} · ${fechaMx(f.periodo.start)} al ${fechaMx(f.periodo.end)}`,
     sheetName: `Recibo de ${f.persona}`,
+    resumen: totalesPorTipoDelRecibo(porTipo),
   })
   return { encoded, nombre: `recibo-${slug(f.persona)}-${f.periodo.start}` }
 }

@@ -56,10 +56,10 @@ afterEach(() => {
 })
 
 describe('feature grid', () => {
-  it('lists all 41 catalog entries, in catalog order', async () => {
+  it('lists all 42 catalog entries, in catalog order', async () => {
     const grid = await getHybridFeatureGrid('venue')
     expect(grid.entries.map(e => e.id)).toEqual(FEATURE_CATALOG.map(e => e.id))
-    expect(grid.entries).toHaveLength(41)
+    expect(grid.entries).toHaveLength(42)
   })
 
   it('with sales off shows every function without prices and never reads offers', async () => {

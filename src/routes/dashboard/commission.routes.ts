@@ -5,8 +5,8 @@
  * - Commission configs (OWNER/ADMIN)
  * - Staff overrides (OWNER/ADMIN)
  * - Tiers and milestones (OWNER/ADMIN)
- * - Summaries approval (OWNER/ADMIN)
- * - Payouts (OWNER only)
+ * - Summaries: de consulta. Aprobar, disputar y deducir se retiraron (fase 3 de pago por servicio): responden 410
+ * - Payouts: sólo el historial. Las escrituras responden 410: las comisiones se pagan en el recibo de Pago al personal
  * - Staff self-service (view own commissions)
  */
 
@@ -19,6 +19,16 @@ import * as commissionResolution from '@/services/dashboard/commission/commissio
 import * as payoutResolution from '@/services/dashboard/commission/payout-resolution.service'
 
 const router = express.Router()
+
+/**
+ * Escrituras del flujo viejo de pagos de comisiones, retiradas en la fase 3 de pago por servicio (spec §8): las
+ * comisiones se pagan en el recibo de Pago al personal. Durante una versión responden 410 con un código estable para
+ * que un cliente viejo diga qué pasó; detrás no queda nada del motor viejo. Se conserva el `checkPermission` de cada
+ * ruta: quien no tenía el permiso sigue recibiendo 403.
+ */
+function movidoAPagoAlPersonal(_req: Request, res: Response) {
+  res.status(410).json({ code: 'MOVIDO_A_PAGO_AL_PERSONAL', message: 'Las comisiones ahora se pagan en el recibo de Pago al personal' })
+}
 
 // ==========================================
 // PLAN GATE — whole commission namespace
@@ -342,15 +352,17 @@ router.get('/venues/:venueId/summaries/:summaryId', checkPermission('commissions
  * POST /venues/:venueId/summaries/:summaryId/approve
  * Approve a summary
  * @permission commissions:approve
+ * @retirada 410 MOVIDO_A_PAGO_AL_PERSONAL (fase 3 de pago por servicio)
  */
-router.post('/venues/:venueId/summaries/:summaryId/approve', checkPermission('commissions:approve'), controller.approveSummary)
+router.post('/venues/:venueId/summaries/:summaryId/approve', checkPermission('commissions:approve'), movidoAPagoAlPersonal)
 
 /**
  * POST /venues/:venueId/summaries/:summaryId/dispute
  * Dispute a summary
  * @permission commissions:view_own
+ * @retirada 410 MOVIDO_A_PAGO_AL_PERSONAL (fase 3 de pago por servicio)
  */
-router.post('/venues/:venueId/summaries/:summaryId/dispute', checkPermission('commissions:view_own'), controller.disputeSummary)
+router.post('/venues/:venueId/summaries/:summaryId/dispute', checkPermission('commissions:view_own'), movidoAPagoAlPersonal)
 
 /**
  * POST /venues/:venueId/summaries/:summaryId/recalculate
@@ -363,15 +375,17 @@ router.post('/venues/:venueId/summaries/:summaryId/recalculate', checkPermission
  * POST /venues/:venueId/summaries/:summaryId/deduction
  * Apply deduction to summary
  * @permission commissions:update
+ * @retirada 410 MOVIDO_A_PAGO_AL_PERSONAL (fase 3 de pago por servicio)
  */
-router.post('/venues/:venueId/summaries/:summaryId/deduction', checkPermission('commissions:update'), controller.applyDeduction)
+router.post('/venues/:venueId/summaries/:summaryId/deduction', checkPermission('commissions:update'), movidoAPagoAlPersonal)
 
 /**
  * POST /venues/:venueId/summaries/bulk-approve
  * Bulk approve summaries
  * @permission commissions:approve
+ * @retirada 410 MOVIDO_A_PAGO_AL_PERSONAL (fase 3 de pago por servicio)
  */
-router.post('/venues/:venueId/summaries/bulk-approve', checkPermission('commissions:approve'), controller.bulkApproveSummaries)
+router.post('/venues/:venueId/summaries/bulk-approve', checkPermission('commissions:approve'), movidoAPagoAlPersonal)
 
 /**
  * POST /venues/:venueId/aggregate
@@ -417,43 +431,49 @@ router.get('/venues/:venueId/staff/:staffId/payouts', checkPermission('commissio
  * POST /venues/:venueId/payouts
  * Create payout
  * @permission commissions:payout
+ * @retirada 410 MOVIDO_A_PAGO_AL_PERSONAL (fase 3 de pago por servicio)
  */
-router.post('/venues/:venueId/payouts', checkPermission('commissions:payout'), controller.createPayout)
+router.post('/venues/:venueId/payouts', checkPermission('commissions:payout'), movidoAPagoAlPersonal)
 
 /**
  * POST /venues/:venueId/payouts/:payoutId/approve
  * Approve payout
  * @permission commissions:payout
+ * @retirada 410 MOVIDO_A_PAGO_AL_PERSONAL (fase 3 de pago por servicio)
  */
-router.post('/venues/:venueId/payouts/:payoutId/approve', checkPermission('commissions:payout'), controller.approvePayout)
+router.post('/venues/:venueId/payouts/:payoutId/approve', checkPermission('commissions:payout'), movidoAPagoAlPersonal)
 
 /**
  * POST /venues/:venueId/payouts/:payoutId/process
  * Start processing payout
  * @permission commissions:payout
+ * @retirada 410 MOVIDO_A_PAGO_AL_PERSONAL (fase 3 de pago por servicio)
  */
-router.post('/venues/:venueId/payouts/:payoutId/process', checkPermission('commissions:payout'), controller.startPayoutProcessing)
+router.post('/venues/:venueId/payouts/:payoutId/process', checkPermission('commissions:payout'), movidoAPagoAlPersonal)
 
 /**
  * POST /venues/:venueId/payouts/:payoutId/complete
  * Complete payout
  * @permission commissions:payout
+ * @retirada 410 MOVIDO_A_PAGO_AL_PERSONAL (fase 3 de pago por servicio)
  */
-router.post('/venues/:venueId/payouts/:payoutId/complete', checkPermission('commissions:payout'), controller.completePayout)
+router.post('/venues/:venueId/payouts/:payoutId/complete', checkPermission('commissions:payout'), movidoAPagoAlPersonal)
 
 /**
  * POST /venues/:venueId/payouts/:payoutId/fail
  * Mark payout as failed
  * @permission commissions:payout
+ * @retirada 410 MOVIDO_A_PAGO_AL_PERSONAL (fase 3 de pago por servicio)
  */
-router.post('/venues/:venueId/payouts/:payoutId/fail', checkPermission('commissions:payout'), controller.failPayout)
+router.post('/venues/:venueId/payouts/:payoutId/fail', checkPermission('commissions:payout'), movidoAPagoAlPersonal)
 
 /**
  * POST /venues/:venueId/payouts/:payoutId/cancel
  * Cancel payout
  * @permission commissions:payout
+ * @retirada 410 MOVIDO_A_PAGO_AL_PERSONAL (fase 3 de pago por servicio)
  */
-router.post('/venues/:venueId/payouts/:payoutId/cancel', checkPermission('commissions:payout'), controller.cancelPayout)
+router.post('/venues/:venueId/payouts/:payoutId/cancel', checkPermission('commissions:payout'), movidoAPagoAlPersonal)
 
 // ==========================================
 // CLAWBACKS

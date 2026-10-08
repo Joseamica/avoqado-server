@@ -2,7 +2,6 @@
 import { Prisma, PrismaClient } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { fechaComoDbDate } from '@/services/dashboard/staffPay/periodos'
-import { lockClase } from '@/services/dashboard/staffPay/periodosGuardados'
 
 export const TZ = 'America/Mexico_City'
 export const PN_HC = [0, 430, 430, 430, 430, 460, 490, 530, 570, 610, 650]
@@ -72,6 +71,16 @@ export async function borrarMundo(m: Mundo | undefined) {
   if (!m?.orgId) return
   await prisma.serviceEarning.deleteMany({ where: { organizationId: m.orgId } })
   await prisma.staffPayStatement.deleteMany({ where: { period: { organizationId: m.orgId } } })
+  // Fase 3: ventas de las pruebas del sobre. `Payment` frena el borrado de la sede (Restrict) y las comisiones y sus
+  // esquemas el de la persona: van antes que las sedes y que el staff.
+  const deLaOrg = { venue: { organizationId: m.orgId } }
+  await prisma.commissionCalculation.deleteMany({ where: deLaOrg })
+  // E6a-fix F6: los pagos y resúmenes del flujo VIEJO (las pruebas de «ya pagada por el flujo viejo») antes que su sede y su persona.
+  await prisma.commissionPayout.deleteMany({ where: deLaOrg })
+  await prisma.commissionSummary.deleteMany({ where: deLaOrg })
+  await prisma.commissionConfig.deleteMany({ where: deLaOrg })
+  await prisma.payment.deleteMany({ where: deLaOrg })
+  await prisma.order.deleteMany({ where: deLaOrg })
   await prisma.venue.deleteMany({ where: { organizationId: m.orgId } })
   await prisma.servicePayPeriod.deleteMany({ where: { organizationId: m.orgId } })
   await prisma.staffPayLevelAssignment.deleteMany({ where: { organizationId: m.orgId } })
@@ -95,6 +104,23 @@ export async function tablaMindform(m: Mundo, venueId = m.venueId, desde = '2026
   return { tableId: t.id, versionId: v.id }
 }
 
+/**
+ * Una tabla que paga `monto` a los dos niveles con cualquier conteo (0 a 10 lugares), vigente desde el 1-ene. `productIds`
+ * vacío = todas las clases de la sede; `lateCancelHours` prende la regla de cancelación tardía (paga la celda de 0).
+ */
+export async function tablaFija(m: Mundo, venueId: string, monto: number, o: { productIds?: string[]; lateCancelHours?: number } = {}) {
+  const t = await prisma.servicePayTable.create({ data: { venueId, name: `Fija ${monto}`, productIds: o.productIds ?? [] } })
+  const v = await prisma.servicePayTableVersion.create({
+    data: { tableId: t.id, effectiveFrom: fechaComoDbDate('2026-01-01'), revision: 1, maxCount: 10, lateCancelHours: o.lateCancelHours },
+  })
+  await prisma.servicePayTableCell.createMany({
+    data: [m.hc, m.coach].flatMap(payLevelId =>
+      Array.from({ length: 11 }, (_, count) => ({ versionId: v.id, payLevelId, count, amount: new Prisma.Decimal(monto) })),
+    ),
+  })
+  return { tableId: t.id, versionId: v.id }
+}
+
 let seq = 0
 export const confirmadas = (n: number) => Array.from({ length: n }, () => ({ status: 'CONFIRMED' }))
 
@@ -107,6 +133,10 @@ export async function clase(
     venueId?: string
     productId?: string
     status?: 'CANCELLED'
+    /** Estampas de la fase 3 (spec §7.2), ISO. Sin ellas la clase queda como una de antes de la migración. */
+    originalStaffId?: string | null
+    staffAssignedAt?: string
+    cancelledAt?: string
   },
 ) {
   const venueId = o.venueId ?? m.venueId
@@ -114,7 +144,19 @@ export async function clase(
   const startsAt = new Date(o.inicioIso)
   const endsAt = new Date(startsAt.getTime() + 50 * 60000)
   const cs = await prisma.classSession.create({
-    data: { venueId, productId, startsAt, endsAt, duration: 50, capacity: 12, assignedStaffId: o.staffId, status: o.status ?? 'SCHEDULED' },
+    data: {
+      venueId,
+      productId,
+      startsAt,
+      endsAt,
+      duration: 50,
+      capacity: 12,
+      assignedStaffId: o.staffId,
+      status: o.status ?? 'SCHEDULED',
+      originalStaffId: o.originalStaffId ?? null,
+      staffAssignedAt: o.staffAssignedAt ? new Date(o.staffAssignedAt) : null,
+      cancelledAt: o.cancelledAt ? new Date(o.cancelledAt) : null,
+    },
   })
   const reservas = o.reservas ?? []
   if (reservas.length) {
@@ -169,7 +211,63 @@ export const barreraDelPeriodo = (periodId: string) =>
   barrera(t => t.$queryRaw`SELECT id FROM "ServicePayPeriod" WHERE id = ${periodId} FOR UPDATE`)
 
 /** La misma barrera sobre el candado de UNA clase (`lockClase`): quien llega ahí ya tiene SU periodo tomado (B2). */
-export const barreraDeLaClase = (classSessionId: string) => barrera(t => lockClase(t, classSessionId))
+export const barreraDeLaClase = (classSessionId: string) =>
+  barrera(t => t.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`avoqado:service-pay-class:v1:${classSessionId}`}, 0))::text`)
+
+/** La misma barrera sobre la FILA de la clase (`FOR UPDATE`): ahí esperan dos cancelaciones que compiten (spec fase 3 §7.2). */
+export const barreraDeLaFilaDeClase = (classSessionId: string) =>
+  barrera(t => t.$queryRaw`SELECT id FROM "ClassSession" WHERE id = ${classSessionId} FOR UPDATE`)
+
+/** La misma barrera sobre el candado de periodos de la ORGANIZACIÓN (activar, propinas, crear periodos). */
+export const barreraDeLaOrganizacion = (organizationId: string) =>
+  barrera(t => t.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`avoqado:service-pay-periods:v1:${organizationId}`}, 0))::text`)
+
+/** B9: la FILA de la organización (`FOR UPDATE`), la que toman las escrituras de ventanas y el traslado de una sede. */
+export const barreraDeLaFilaDeOrganizacion = (organizationId: string) =>
+  barrera(t => t.$queryRaw`SELECT id FROM "Organization" WHERE id = ${organizationId} FOR UPDATE`)
+
+/**
+ * B14-fix ronda 1 (R1): la FILA de la organización `FOR NO KEY UPDATE`, como la retiene un TRASLADO (`bloquearOrganizacion`), que
+ * no pasa por el candado de periodos: quien activa ya lo tiene y se detiene aquí.
+ */
+export const barreraDelTrasladoEnLaOrganizacion = (organizationId: string) =>
+  barrera(t => t.$queryRaw`SELECT id FROM "Organization" WHERE id = ${organizationId} FOR NO KEY UPDATE`)
+
+/** B9: la FILA de una sede (`FOR UPDATE`, como la retienen el traslado y los borrados): ahí esperan los escritores. */
+export const barreraDeLaSede = (venueId: string) => barrera(t => t.$queryRaw`SELECT id FROM "Venue" WHERE id = ${venueId} FOR UPDATE`)
+
+/**
+ * B7 r1-r2: corre `operacion` con un candado retenido por la barrera (lo que hace un cierre de ~40 s). La retiene MUCHO más
+ * que el presupuesto de 6 s de las operaciones cortas (B9; 30 s por default): así el resultado no depende del reloj (una Mac saturada
+ * que tarde unos segundos en el trabajo previo sigue chocando con el candado). La suelta sola a los `soltarEn` ms para que
+ * una espera SIN tope termine (y la prueba cae por `ms`) en vez de colgarse, y siempre en el `finally`, aunque la prueba falle.
+ * Quien la usa pone un timeout de prueba mayor que `soltarEn`. Devuelve el resultado y cuánto tardó.
+ */
+export async function conCandadoRetenido(
+  b: Awaited<ReturnType<typeof barreraDelPeriodo>>,
+  operacion: () => Promise<unknown>,
+  soltarEn = 30_000,
+): Promise<{ valor: unknown; error: unknown; ms: number }> {
+  const soltarTarde = setTimeout(() => void b.soltar(), soltarEn)
+  const t = Date.now()
+  try {
+    const r = await operacion().then(
+      valor => ({ valor, error: null as unknown }),
+      (error: unknown) => ({ valor: null as unknown, error }),
+    )
+    return { ...r, ms: Date.now() - t }
+  } finally {
+    clearTimeout(soltarTarde)
+    await b.soltar()
+  }
+}
+
+/** Lo que contesta una operación corta cuando un cierre retiene su candado (B7 r1-r2). */
+export const CIERRE_EN_CURSO = {
+  statusCode: 409,
+  code: 'CIERRE_EN_CURSO',
+  message: 'Hay un cierre de periodo en curso; intenta de nuevo en un momento',
+}
 
 async function barrera(tomar: (t: Prisma.TransactionClient) => Promise<unknown>) {
   const url = process.env.DATABASE_URL
@@ -192,10 +290,14 @@ async function barrera(tomar: (t: Prisma.TransactionClient) => Promise<unknown>)
   if (pidBloqueador < 0) throw new Error('La barrera no pudo tomar su candado')
   let cerrada = false
   return {
-    /** Espera hasta ver `n` sesiones detenidas por el candado de ESTE bloqueador (directa o en cadena). */
-    async esperarA(n: number) {
+    /**
+     * Espera hasta ver `n` sesiones detenidas por el candado de ESTE bloqueador (directa o en cadena). Con `mientras`, deja
+     * de esperar (y devuelve false) en cuanto deja de cumplirse: la operación ya terminó sin llegar a este candado.
+     */
+    async esperarA(n: number, o: { mientras?: () => boolean } = {}): Promise<boolean> {
       const limite = Date.now() + 15_000
       for (;;) {
+        if (o.mientras && !o.mientras()) return false
         const [{ esperando }] = await observador.$queryRaw<Array<{ esperando: number }>>`
           WITH RECURSIVE espera(pid) AS (
             SELECT a.pid FROM pg_stat_activity a WHERE pg_blocking_pids(a.pid) @> ARRAY[${pidBloqueador}::int]
@@ -203,7 +305,7 @@ async function barrera(tomar: (t: Prisma.TransactionClient) => Promise<unknown>)
             SELECT a.pid FROM pg_stat_activity a JOIN espera e ON pg_blocking_pids(a.pid) @> ARRAY[e.pid]
           )
           SELECT COUNT(*)::int AS esperando FROM espera`
-        if (esperando >= n) return
+        if (esperando >= n) return true
         if (Date.now() > limite) throw new Error(`La barrera esperaba ${n} sesiones detenidas por su candado y vio ${esperando}`)
         await new Promise(r => setTimeout(r, 10))
       }

@@ -16,7 +16,7 @@ import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppE
 import prisma from '../../utils/prismaClient'
 import { restockItem } from './inventoryRestock.service'
 import { generateAndStoreReceipt } from './receipt.dashboard.service'
-import { createRefundCommission } from './commission/commission-calculation.service'
+import { enqueueRefundPaymentEffectsInTx } from '../tpv/paymentEffects.service'
 import { asegurarObligacionDeCostoNegativo, costearYProyectarReembolso } from '../payments/deferredTransactionCost.service'
 import { logAction } from './activity-log.service'
 import type { FiscalCongelado } from '../fiscal/deliveryFiscalDelta'
@@ -1040,7 +1040,7 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
 
       // El tramo que ESCRIBE —turno, fila REFUND, acumulado del original, VenueTransaction y
       // obligación de costo— es el núcleo compartido con el ajuste de reparto. El dashboard lo
-      // llama con los defaults de siempre: no revierte comisión, reclama el turno vivo, MANUAL.
+      // llama con los defaults de siempre: no revierte la comisión del TIPO DE PAGO, reclama el turno vivo, MANUAL.
       const { refundPaymentId } = await writeRefundInTx(tx, {
         originalPaymentId: original.id,
         venueId: input.venueId,
@@ -1063,6 +1063,11 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
         bloqueado: cobro,
         devolverCon: devolverConEfectivo(original, input.refundMethod),
       })
+      // Fase 3 (A2, Codex r1-2): el reverso de la comisión del personal y la reconciliación del referido se ENCOLAN en esta
+      // misma transacción, como en la terminal. Antes se disparaban después del commit sin esperarlos: si el proceso moría
+      // ahí, la devolución quedaba sin reverso para siempre y el sobre de pago al personal pagaría la comisión de una venta
+      // devuelta. Cubre también la devolución ligada de las apps (`refund.mobile.controller.ts`), que llega aquí.
+      await enqueueRefundPaymentEffectsInTx(tx, refundPaymentId, original.id)
       const devolverCon = devolverConEfectivo(original, input.refundMethod)
 
       return {
@@ -1159,16 +1164,9 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
     })
   }
 
-  // REFERRAL HOOK: trigger referral void if the original order had a QUALIFIED referral
-  // (idempotent: no-ops if no QUALIFIED Referral matches this orderId)
-  if (result.originalOrderId) {
-    try {
-      const { onOrderRefunded } = await import('@/services/referrals/referralRefund.service')
-      await onOrderRefunded({ orderId: result.originalOrderId, venueId: input.venueId })
-    } catch (err) {
-      console.error('[referral hook] onOrderRefunded failed for order', result.originalOrderId, err)
-    }
-  }
+  // El referido NO se revierte aquí: su obligación (`referral-refund:<devolución>`) ya quedó encolada en la transacción de la
+  // devolución (`enqueueRefundPaymentEffectsInTx`) y la cumple el worker. El enganche post-commit que vivía aquí era
+  // redundante y no durable (A6 F4, Codex bloque A r1).
 
   // Restock inventory for selected items (best-effort, outside the payment tx
   // because it touches multiple Inventory rows and a partial failure shouldn't
@@ -1202,17 +1200,6 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
   generateAndStoreReceipt(input.venueId, result.refundPaymentId).catch(err => {
     logger.error('[REFUND.DASHBOARD] Failed to auto-generate refund receipt', {
       refundPaymentId: result.refundPaymentId,
-      error: err instanceof Error ? err.message : String(err),
-    })
-  })
-
-  // Reverse the staff commission that was earned on the original payment.
-  // Same fire-and-forget pattern — commission ledger can catch up if this
-  // fails, but the refund itself must succeed.
-  createRefundCommission(result.refundPaymentId, result.originalPaymentId).catch(err => {
-    logger.error('[REFUND.DASHBOARD] Failed to create refund commission', {
-      refundPaymentId: result.refundPaymentId,
-      originalPaymentId: result.originalPaymentId,
       error: err instanceof Error ? err.message : String(err),
     })
   })

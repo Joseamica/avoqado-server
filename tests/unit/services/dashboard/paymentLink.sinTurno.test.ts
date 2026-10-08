@@ -46,10 +46,9 @@ jest.mock('@/services/dashboard/customer.dashboard.service', () => ({
   __esModule: true,
   updateCustomerMetrics: jest.fn().mockResolvedValue(undefined),
 }))
-jest.mock('@/services/dashboard/commission/commission-calculation.service', () => ({
-  __esModule: true,
-  createCommissionForPayment: jest.fn().mockResolvedValue(undefined),
-  createSplitCommissionForPayment: jest.fn().mockResolvedValue(undefined),
+jest.mock('@/services/tpv/paymentEffects.service', () => ({
+  ...jest.requireActual('@/services/tpv/paymentEffects.service'),
+  enqueuePaymentCommissionInTx: jest.fn().mockResolvedValue(undefined),
 }))
 
 import { completeCharge } from '@/services/dashboard/paymentLink.service'

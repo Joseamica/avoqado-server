@@ -2,14 +2,14 @@ import { createHash } from 'crypto'
 import { ClassSessionPayState, Prisma } from '@prisma/client'
 import prisma from '../../../utils/prismaClient'
 import { BadRequestError, ConflictError, NotFoundError } from '../../../errors/AppError'
-import { withSerializableRetry } from '../../../utils/serializableRetry'
 import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
 import { venueDayKey } from '../../../utils/venueDateKeys'
 import { exigirPermisoEnSedes, sedesConPermiso } from './acceso'
 import { diferenciasDeClase, origenDeClase } from './diferencias.service'
 import { dbDateComoFecha } from './periodos'
 import { bloquearPeriodo, lockClase, lockPeriodosDeOrganizacion, periodoQueContieneFecha } from './periodosGuardados'
-import { valorarClases } from './valoracion'
+import { tomarCandado, transaccionConPresupuesto } from '../../../utils/esperaDeCandados'
+import { ReglaDeClase, valorarClases } from './valoracion'
 
 export interface AjusteDeClase {
   payCountOverride: number | null
@@ -31,7 +31,8 @@ export interface LineaContabilizada {
 
 export interface PagoDeClase {
   classSessionId: string
-  estado: 'OK' | 'EXCLUIDA' | 'EXCEPCION' | 'NO_TERMINADA' | 'CANCELADA'
+  /** `FUERA_DEL_SOBRE` (fase 3, B11; diseño r5.5): sin ancla y su sede no estaba activa en pago al personal ese día. */
+  estado: 'OK' | 'EXCLUIDA' | 'EXCEPCION' | 'NO_TERMINADA' | 'CANCELADA' | 'FUERA_DEL_SOBRE'
   motivo: string | null
   monto: string | null
   conteo: number | null
@@ -40,13 +41,25 @@ export interface PagoDeClase {
   countMode: string | null
   staffName: string | null
   payLevelName: string | null
+  /** La regla de clase que movió el pago (spec fase 3 §6.6): «Suplencia avisada 3 h antes: +$100»; null si ninguna. */
+  regla: ReglaDeClase | null
   ajuste: AjusteDeClase | null
   anclada: boolean
-  /** Sin ancla, ya terminada, no cancelada y su fecha cae en un periodo CERRADO: se paga como diferencia de ése (spec §6.4). */
+  /**
+   * Sin ancla, ya terminada y su fecha cae en un periodo CERRADO: se paga como diferencia de ése (spec §6.4). Una cancelada
+   * cuenta si se paga (cancelación tardía), y está terminada desde que se canceló (D5-fix).
+   */
   llegoTarde: boolean
   /** El periodo donde la clase se contabilizó por primera vez (su ancla), o null si aún no. */
   periodoOrigen: { id: string; start: string; end: string; estado: 'OPEN' | 'CLOSED' } | null
   lineas: LineaContabilizada[]
+  /**
+   * Sólo en `FUERA_DEL_SOBRE`: lo que pagaría si su sede hubiera estado activa ese día (null si tampoco se puede calcular:
+   * sin coach, nivel, tabla o monto) y la sede con la fecha local de la clase, para decir «La sede X no estaba activa en pago
+   * al personal el 20 oct». null en los demás estados.
+   */
+  montoSiEntrara: string | null
+  sede: { nombre: string; fecha: string } | null
 }
 
 export interface GuardarAjusteInput {
@@ -165,6 +178,8 @@ export async function pagoDeClase(
   venueId: string,
   classSessionId: string,
   db: Prisma.TransactionClient | typeof prisma = prisma,
+  /** Sólo pruebas (como `diferenciasDeClase`): el instante de «ahora». La ruta y el MCP no lo pasan. */
+  opts: { ahora?: Date } = {},
 ): Promise<PagoDeClase> {
   const cs = await db.classSession.findFirst({
     where: { id: classSessionId, venueId },
@@ -173,7 +188,7 @@ export async function pagoDeClase(
       startsAt: true,
       endsAt: true,
       status: true,
-      venue: { select: { organizationId: true, timezone: true } },
+      venue: { select: { organizationId: true, timezone: true, name: true } },
       payState: true,
     },
   })
@@ -198,8 +213,8 @@ export async function pagoDeClase(
     ? { id: origen.id, start: dbDateComoFecha(origen.periodStart), end: dbDateComoFecha(origen.periodEnd), estado: origen.status }
     : null
   const lineas = origen ? await lineasDeClase(db, cs.venue.organizationId, cs.id) : []
-  const ahora = new Date()
-  const llegoTarde = !ps?.originPeriodId && cs.status !== 'CANCELLED' && !!(await origenDeClase(db, venueId, cs, ahora))
+  const ahora = opts.ahora ?? new Date()
+  const cancelada = cs.status === 'CANCELLED'
   const base = {
     classSessionId: cs.id,
     motivo: null,
@@ -210,32 +225,59 @@ export async function pagoDeClase(
     countMode: null,
     staffName: null,
     payLevelName: null,
+    regla: null,
     ajuste,
     anclada: !!ps?.originPeriodId,
-    llegoTarde,
+    llegoTarde: false,
     periodoOrigen,
     lineas,
+    montoSiEntrara: null,
+    sede: null,
   }
-  if (cs.status === 'CANCELLED') return { ...base, estado: 'CANCELADA' }
-  if (cs.endsAt > ahora) return { ...base, estado: 'NO_TERMINADA' }
-  const [v] = await valorarClases(
-    db,
-    {
-      venueId,
-      organizationId: cs.venue.organizationId,
-      tz: cs.venue.timezone || 'America/Mexico_City',
-      desde: new Date(cs.startsAt.getTime() - 1),
-      hasta: new Date(cs.startsAt.getTime() + 1),
-      ahora,
-      claseIds: [cs.id],
-      // Una clase anclada se valora con su ancla (spec §5.4): «lo que corresponde hoy» con la versión y fecha congeladas.
-      ...(origen ? { modo: 'periodo' as const, periodId: origen.id } : {}),
-    },
-    { limite: 1 },
-  )
-  if (!v) return { ...base, estado: 'EXCEPCION', motivo: 'SIN_TABLA' }
+  // Una cancelada está terminada desde que se canceló (D5-fix, Codex D-1): lo que paga ya no cambia, así que su tarjeta es la
+  // misma antes y después de su horario. Sólo una clase viva espera a que termine.
+  if (!cancelada && cs.endsAt > ahora) return { ...base, estado: 'NO_TERMINADA' }
+  const filtro = {
+    venueId,
+    organizationId: cs.venue.organizationId,
+    tz: cs.venue.timezone || 'America/Mexico_City',
+    desde: new Date(cs.startsAt.getTime() - 1),
+    hasta: new Date(cs.startsAt.getTime() + 1),
+    ahora,
+    claseIds: [cs.id],
+    // Una clase anclada se valora con su ancla (spec §5.4): «lo que corresponde hoy» con la versión y fecha congeladas.
+    ...(origen ? { modo: 'periodo' as const, periodId: origen.id } : {}),
+  }
+  // Con la participación REAL (el default, B11): lo que de verdad entra al sobre.
+  const [v] = await valorarClases(db, filtro, { limite: 1 })
+  // B11 (diseño r5.5): sin ancla y sin aparecer, se repite con la participación 'fuera'. Si ahí aparece, su sede no estaba
+  // activa ese día: FUERA_DEL_SOBRE, nunca SIN_TABLA (la tabla puede estar bien).
+  const fuera = !origen && !v ? (await valorarClases(db, { ...filtro, participacion: 'fuera' }, { limite: 1 }))[0] : undefined
+  // Una cancelada sólo se paga con la regla de cancelación tardía de su versión (spec fase 3 §6.6); si no, es CANCELADA.
+  if (cancelada && !(v ?? fuera)?.canceladaTarde) return { ...base, estado: 'CANCELADA' }
+  if (!v && fuera) {
+    return {
+      ...base,
+      estado: 'FUERA_DEL_SOBRE',
+      conteo: fuera.conteo,
+      conteoCalculado: fuera.conteoCalculado,
+      maxCount: fuera.maxCount,
+      countMode: fuera.countMode,
+      staffName: fuera.staffName,
+      payLevelName: fuera.payLevelName,
+      regla: fuera.regla,
+      montoSiEntrara: fuera.monto !== null ? new Prisma.Decimal(fuera.monto).toFixed(2) : null,
+      sede: { nombre: cs.venue.name, fecha: fuera.fechaLocal },
+    }
+  }
+  // Sin ancla, terminada y con su fecha en un periodo CERRADO: se paga como diferencia de ése (spec §6.4). Sólo si PARTICIPA
+  // (aparece con la participación real, B11) y, si está cancelada, sólo si se paga (D5-fix: una cancelada que llega aquí
+  // ya se paga). Nunca para FUERA_DEL_SOBRE: la diferencia sería de $0.
+  const llegoTarde = !!v && !ps?.originPeriodId && !!(await origenDeClase(db, venueId, cs, ahora))
+  if (!v) return { ...base, llegoTarde, estado: 'EXCEPCION', motivo: 'SIN_TABLA' }
   return {
     ...base,
+    llegoTarde,
     estado: v.estado,
     motivo: v.motivo,
     monto: v.monto !== null ? new Prisma.Decimal(v.monto).toFixed(2) : null,
@@ -245,6 +287,7 @@ export async function pagoDeClase(
     countMode: v.countMode,
     staffName: v.staffName,
     payLevelName: v.payLevelName,
+    regla: v.regla,
   }
 }
 
@@ -356,7 +399,7 @@ const datosDelAjuste = (input: GuardarAjusteInput | Omit<GuardarAjusteInput, 'cl
 })
 
 async function guardarDentro(input: GuardarAjusteInput, permitidas: Set<string>): Promise<ResultadoAjuste> {
-  return withSerializableRetry(async tx => {
+  return transaccionConPresupuesto(async (tx, presupuesto) => {
     // Primero la sede: a otra sede se le contesta «no encontrada» antes de revisar nada más.
     const info = await tx.classSession.findFirst({
       where: { id: input.classSessionId, venueId: input.venueId },
@@ -372,15 +415,22 @@ async function guardarDentro(input: GuardarAjusteInput, permitidas: Set<string>)
     const fechaLocal = venueDayKey(info.startsAt, info.venue.timezone || 'America/Mexico_City')
     const periodo = info.payState?.originPeriodId ?? (await periodoQueContieneFecha(tx, info.venue.organizationId, fechaLocal))?.id
     // Si todavía no existe, el candado de periodos de la organización: un cierre que lo está creando lo tiene hasta su
-    // commit, así que el ajuste lo espera en vez de cruzarse con él (Codex R1-6: sin esto, ajuste y cierre podían
-    // bloquearse mutuamente sobre ClassSession / ClassSessionPayState, y 40P01 no se reintenta).
-    if (periodo) await bloquearPeriodo(tx, periodo)
-    else await lockPeriodosDeOrganizacion(tx, info.venue.organizationId)
+    // commit, así que el ajuste lo espera con su presupuesto (6 s, B9) y, si sigue retenido, contesta 409 CIERRE_EN_CURSO,
+    // en vez de cruzarse con él (Codex R1-6: sin esto, ajuste y cierre podían bloquearse mutuamente sobre ClassSession /
+    // ClassSessionPayState, y 40P01 no se reintenta).
+    if (periodo) await bloquearPeriodo(tx, periodo, presupuesto)
+    else await lockPeriodosDeOrganizacion(tx, info.venue.organizationId, presupuesto)
     // 2) Luego la clase: el candado compartido con la liquidación, y su fila. `FOR NO KEY UPDATE`: serializa las ediciones
     // de la clase sin chocar con el `FOR KEY SHARE` de la llave foránea cuando el cierre la ancla (misma familia que el periodo).
-    await lockClase(tx, input.classSessionId)
-    await tx.$queryRaw(
-      Prisma.sql`SELECT id FROM "ClassSession" WHERE id = ${input.classSessionId} AND "venueId" = ${input.venueId} FOR NO KEY UPDATE`,
+    await lockClase(tx, input.classSessionId, presupuesto)
+    // B9 ronda 1: también la fila, con el MISMO presupuesto (409 OPERACION_EN_CURSO, nunca el P2028 de su transacción).
+    await tomarCandado(
+      tx,
+      () =>
+        tx.$queryRaw(
+          Prisma.sql`SELECT id FROM "ClassSession" WHERE id = ${input.classSessionId} AND "venueId" = ${input.venueId} FOR NO KEY UPDATE`,
+        ),
+      { presupuesto },
     )
     // 3) Releer el ancla DENTRO: si un cierre ganó la carrera, el reintento la ve y exige staffpay:close.
     const antes = await tx.classSessionPayState.findUnique({ where: { classSessionId: input.classSessionId } })

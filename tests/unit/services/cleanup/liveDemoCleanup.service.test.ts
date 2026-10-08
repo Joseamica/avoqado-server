@@ -173,6 +173,94 @@ describe('cleanupExpiredLiveDemos — merchant account cleanup (no orphaned demo
   })
 })
 
+/**
+ * Pago al personal (fase 3, B9): una demo con historia de pago al personal (ventanas o devengos) no se borra — ni su Staff
+ * ni ningún dato: el rechazo llega con la fila del venue ya bloqueada y ANTES de clasificar al Staff. No es un fallo de la
+ * limpieza: va a `warn` (no dispara alertas) y la corrida sigue con las demás demos. Contra Postgres lo prueba
+ * `tests/integration/staffPay/participacion.test.ts`.
+ */
+describe('🔴 B9: una demo con historial de pago al personal se omite completa y la corrida sigue', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+  })
+  afterEach(() => {
+    prismaMock.$queryRaw.mockReset()
+  })
+
+  it.each([
+    ['cleanupExpiredLiveDemos', cleanupExpiredLiveDemos],
+    ['cleanupAllLiveDemos', cleanupAllLiveDemos],
+  ])('%s: avisa con warn, no toca la demo con historia y borra la otra', async (_nombre, limpiar) => {
+    prismaMock.liveDemoSession.findMany.mockResolvedValue([makeSession(1), makeSession(2)])
+    mockCascadeAlreadyDeletedSession()
+    // venue-1 tiene historia de pago al personal; venue-2 no.
+    prismaMock.$queryRaw.mockImplementation(async (sql: Prisma.Sql) => {
+      if (JSON.stringify(sql).includes('StaffPayVenueWindow')) return [{ hay: sql.values.includes('venue-1') }]
+      return [{ id: sql.values[0], status: 'LIVE_DEMO', name: 'Live Demo' }]
+    })
+
+    expect(await limpiar()).toBe(1)
+
+    expect(deleteOrRetainStaffWithH1ProvenanceTx).toHaveBeenCalledTimes(1)
+    expect(deleteOrRetainStaffWithH1ProvenanceTx).toHaveBeenCalledWith(prismaMock, 'staff-2', expect.any(Function))
+    expect(prismaMock.venue.delete).toHaveBeenCalledTimes(1)
+    expect(prismaMock.venue.delete).toHaveBeenCalledWith({ where: { id: 'venue-2' } })
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('historial de pago al personal'),
+      expect.objectContaining({ sessionId: 'session-uuid-1', venueId: 'venue-1', code: 'LIVE_DEMO_CON_PAGO_AL_PERSONAL' }),
+    )
+    expect(logger.error).not.toHaveBeenCalledWith(expect.stringContaining('session-uuid-1'), expect.anything())
+  })
+
+  it.each([
+    ['cleanupExpiredLiveDemos', cleanupExpiredLiveDemos],
+    ['cleanupAllLiveDemos', cleanupAllLiveDemos],
+  ])(
+    '%s (ronda 1, F1): la fila del venue retenida por otra operación agota el presupuesto: warn y sigue con las demás',
+    async (_n, limpiar) => {
+      prismaMock.liveDemoSession.findMany.mockResolvedValue([makeSession(1), makeSession(2)])
+      mockCascadeAlreadyDeletedSession()
+      const lockTimeout = new Prisma.PrismaClientKnownRequestError('canceling statement due to lock timeout', {
+        code: 'P2010',
+        clientVersion: '6.14.0',
+        meta: { code: '55P03' },
+      })
+      prismaMock.$queryRaw.mockImplementation(async (sql: Prisma.Sql) => {
+        const texto = JSON.stringify(sql)
+        if (texto.includes('FOR UPDATE') && sql.values?.includes('venue-1')) throw lockTimeout
+        if (texto.includes('StaffPayVenueWindow')) return [{ hay: false }]
+        return [{ id: sql.values?.[0], status: 'LIVE_DEMO', name: 'Live Demo' }]
+      })
+
+      expect(await limpiar()).toBe(1)
+
+      expect(prismaMock.venue.delete).toHaveBeenCalledTimes(1)
+      expect(prismaMock.venue.delete).toHaveBeenCalledWith({ where: { id: 'venue-2' } })
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('ocupada'),
+        expect.objectContaining({ sessionId: 'session-uuid-1', venueId: 'venue-1', code: 'OPERACION_EN_CURSO' }),
+      )
+      expect(logger.error).not.toHaveBeenCalledWith(expect.stringContaining('session-uuid-1'), expect.anything())
+    },
+  )
+
+  it('la historia se pregunta DESPUÉS del FOR UPDATE del venue (otra sentencia), nunca antes', async () => {
+    prismaMock.liveDemoSession.findMany.mockResolvedValue([makeSession(1)])
+    mockCascadeAlreadyDeletedSession()
+    prismaMock.$queryRaw.mockImplementation(async (sql: Prisma.Sql) =>
+      JSON.stringify(sql).includes('StaffPayVenueWindow') ? [{ hay: true }] : [{ id: 'venue-1', status: 'LIVE_DEMO', name: 'Live Demo' }],
+    )
+
+    await cleanupExpiredLiveDemos()
+
+    const sentencias = prismaMock.$queryRaw.mock.calls.map((c: unknown[]) => JSON.stringify(c[0]))
+    const candado = sentencias.findIndex((x: string) => x.includes('FOR UPDATE'))
+    const historia = sentencias.findIndex((x: string) => x.includes('StaffPayVenueWindow'))
+    expect(candado).toBeGreaterThanOrEqual(0)
+    expect(historia).toBeGreaterThan(candado)
+  })
+})
+
 describe('cleanupAllLiveDemos — cascade-tolerant session delete', () => {
   beforeEach(() => {
     jest.clearAllMocks()

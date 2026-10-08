@@ -6,6 +6,7 @@ import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
 import { EfectoDelCambio, efectoDelCambio } from './efecto'
 import { dbDateComoFecha, fechaComoDbDate } from './periodos'
 import { assertFechaEnRango, assertFechaNoCerrada, hoyDeLaSede, rangoDeVigencia } from './periodosGuardados'
+import { MAX_HORAS_REGLA } from './valoracion'
 
 export interface CeldaInput {
   payLevelId: string
@@ -15,8 +16,17 @@ export interface CeldaInput {
 
 type CountMode = 'BOOKED' | 'ATTENDED'
 
+/** Reglas de clase de una versión (spec fase 3 §6.6). `undefined` = hereda la de la versión que rige; `null` = apagada. */
+export interface ReglasInput {
+  coverBonusHours?: number | null
+  coverBonusAmount?: number | null
+  lateCancelHours?: number | null
+}
+type Reglas = { coverBonusHours: number | null; coverBonusAmount: number | null; lateCancelHours: number | null }
+
 const MAX_TECHO = 500
 const MAX_MONTO = 1_000_000
+const MAX_BONO = 100_000
 
 const vigenteEn = (fecha: Date) => ({ OR: [{ archivedFrom: null }, { archivedFrom: { gt: fecha } }] })
 
@@ -41,6 +51,9 @@ export async function listarTablas(venueId: string, fecha: string) {
           revision: true,
           countMode: true,
           maxCount: true,
+          coverBonusHours: true,
+          coverBonusAmount: true,
+          lateCancelHours: true,
           cells: {
             select: { payLevelId: true, count: true, amount: true },
             orderBy: [{ payLevelId: 'asc' }, { count: 'asc' }],
@@ -67,6 +80,12 @@ export async function listarTablas(venueId: string, fecha: string) {
             countMode: v.countMode,
             maxCount: v.maxCount,
             cells: v.cells.map(c => ({ payLevelId: c.payLevelId, count: c.count, amount: Number(c.amount) })),
+            // Reglas de clase (spec fase 3 §6.6), pesos 1:1 como las celdas.
+            reglas: {
+              coverBonusHours: v.coverBonusHours,
+              coverBonusAmount: v.coverBonusAmount === null ? null : Number(v.coverBonusAmount),
+              lateCancelHours: v.lateCancelHours,
+            },
           }
         : null,
     }
@@ -144,7 +163,7 @@ export async function crearTabla(input: { venueId: string; organizationId: strin
 
 const NO_EMPIEZA = 'la tabla no puede empezar'
 
-interface VersionInput {
+interface VersionInput extends ReglasInput {
   venueId: string
   organizationId: string
   tableId: string
@@ -173,6 +192,47 @@ function validarForma(input: VersionInput) {
   }
 }
 
+/**
+ * Lo que no se manda se hereda de la versión que rige en `effectiveFrom` (decisión D-5 del Bloque D): una pantalla vieja que
+ * sólo edita celdas no apaga en silencio el bono de nadie.
+ */
+async function reglasDeLaVersion(tx: Prisma.TransactionClient, tableId: string, effectiveFrom: Date, input: ReglasInput): Promise<Reglas> {
+  const falta = input.coverBonusHours === undefined || input.coverBonusAmount === undefined || input.lateCancelHours === undefined
+  const previa = falta
+    ? await tx.servicePayTableVersion.findFirst({
+        where: { tableId, effectiveFrom: { lte: effectiveFrom } },
+        orderBy: [{ effectiveFrom: 'desc' }, { revision: 'desc' }],
+        select: { coverBonusHours: true, coverBonusAmount: true, lateCancelHours: true },
+      })
+    : null
+  return {
+    coverBonusHours: input.coverBonusHours !== undefined ? input.coverBonusHours : (previa?.coverBonusHours ?? null),
+    coverBonusAmount:
+      input.coverBonusAmount !== undefined
+        ? input.coverBonusAmount
+        : previa?.coverBonusAmount != null
+          ? previa.coverBonusAmount.toNumber()
+          : null,
+    lateCancelHours: input.lateCancelHours !== undefined ? input.lateCancelHours : (previa?.lateCancelHours ?? null),
+  }
+}
+
+/** La misma regla que el CHECK de la base (spec fase 3 §7.3), con el mensaje en español (el MCP no pasa por Zod). */
+function validarReglas(r: Reglas) {
+  const horas = (h: number | null, que: string) => {
+    if (h !== null && (typeof h !== 'number' || !Number.isInteger(h) || h < 1 || h > MAX_HORAS_REGLA))
+      throw new BadRequestError(`${que}: escribe horas enteras de 1 a ${MAX_HORAS_REGLA}`)
+  }
+  horas(r.coverBonusHours, 'Suplencia con poco aviso')
+  horas(r.lateCancelHours, 'Cancelación tardía')
+  const m = r.coverBonusAmount
+  if (m !== null && (typeof m !== 'number' || !Number.isFinite(m) || m <= 0 || m > MAX_BONO))
+    throw new BadRequestError('El bono de suplencia debe ser mayor a $0 y de hasta $100,000')
+  if (m !== null && new Prisma.Decimal(m).decimalPlaces() > 2) throw new BadRequestError('El bono de suplencia admite hasta 2 decimales')
+  if ((r.coverBonusHours === null) !== (m === null))
+    throw new BadRequestError('La suplencia con poco aviso necesita las horas y el bono (o ninguno de los dos)')
+}
+
 async function validarYCrearVersion(tx: Prisma.TransactionClient, input: VersionInput) {
   validarForma(input)
   const effectiveFrom = fechaComoDbDate(input.effectiveFrom)
@@ -186,6 +246,8 @@ async function validarYCrearVersion(tx: Prisma.TransactionClient, input: Version
     },
   })
   if (!tabla) throw new NotFoundError('Tabla no encontrada')
+  const reglas = await reglasDeLaVersion(tx, tabla.id, effectiveFrom, input)
+  validarReglas(reglas)
   const niveles = [...new Set(input.cells.map(c => c.payLevelId))]
   if (niveles.length) {
     const validos = await tx.staffPayLevel.count({ where: { id: { in: niveles }, organizationId: input.organizationId } })
@@ -212,6 +274,9 @@ async function validarYCrearVersion(tx: Prisma.TransactionClient, input: Version
       revision: (ultima?.revision ?? 0) + 1,
       countMode: input.countMode,
       maxCount: input.maxCount,
+      coverBonusHours: reglas.coverBonusHours,
+      coverBonusAmount: reglas.coverBonusAmount === null ? null : new Prisma.Decimal(reglas.coverBonusAmount),
+      lateCancelHours: reglas.lateCancelHours,
       createdById: input.actorId,
     },
     select: { id: true, revision: true },
@@ -221,7 +286,7 @@ async function validarYCrearVersion(tx: Prisma.TransactionClient, input: Version
       data: input.cells.map(c => ({ versionId: v.id, payLevelId: c.payLevelId, count: c.count, amount: new Prisma.Decimal(c.amount) })),
     })
   }
-  return v
+  return { ...v, reglas }
 }
 
 /** `ahora`: sólo pruebas, el «hoy» de la simulación (la ruta no lo pasa). */
@@ -259,6 +324,11 @@ export async function publicarVersion(
           countMode: input.countMode,
           maxCount: input.maxCount,
           celdas: input.cells.length,
+          reglas: {
+            ...creada.reglas,
+            coverBonusAmount:
+              creada.reglas.coverBonusAmount === null ? null : new Prisma.Decimal(creada.reglas.coverBonusAmount).toFixed(2),
+          },
           clasesQueCambian,
         },
       })
@@ -318,8 +388,22 @@ export async function historialDeTabla(venueId: string, tableId: string) {
   const vs = await prisma.servicePayTableVersion.findMany({
     where: { tableId },
     orderBy: [{ effectiveFrom: 'desc' }, { revision: 'desc' }],
-    select: { id: true, effectiveFrom: true, revision: true, maxCount: true, countMode: true, createdAt: true },
+    select: {
+      id: true,
+      effectiveFrom: true,
+      revision: true,
+      maxCount: true,
+      countMode: true,
+      createdAt: true,
+      coverBonusHours: true,
+      coverBonusAmount: true,
+      lateCancelHours: true,
+    },
     take: 100,
   })
-  return vs.map(v => ({ ...v, effectiveFrom: dbDateComoFecha(v.effectiveFrom) }))
+  return vs.map(v => ({
+    ...v,
+    effectiveFrom: dbDateComoFecha(v.effectiveFrom),
+    coverBonusAmount: v.coverBonusAmount === null ? null : Number(v.coverBonusAmount),
+  }))
 }

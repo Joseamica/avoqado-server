@@ -2,6 +2,7 @@ import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { pagoDeClase, guardarAjusteDeClase } from '@/services/dashboard/staffPay/ajustesClase.service'
 import { fechaComoDbDate } from '@/services/dashboard/staffPay/periodos'
+import { barreraDeLaFilaDeClase, conCandadoRetenido } from './_mundo'
 
 const key = `ajustes-${process.pid}-${Date.now()}`
 let org: string, venue: string, product: string, ana: string, claseId: string
@@ -170,6 +171,31 @@ describe('ajustes de clase — feature nueva', () => {
       actorId: ana,
     })
   })
+})
+
+describe('ajustes de clase — la fila de la clase con presupuesto (B9 ronda 1, F1)', () => {
+  it('con la FILA de la clase retenida: 409 OPERACION_EN_CURSO a los ~6 s (su presupuesto), nunca el P2028; no guarda nada', async () => {
+    const antes = await prisma.classSessionPayState.findUnique({ where: { classSessionId: claseId } })
+    const r = await conCandadoRetenido(await barreraDeLaFilaDeClase(claseId), () =>
+      guardarAjusteDeClase({
+        venueId: venue,
+        classSessionId: claseId,
+        payCountOverride: 9,
+        payAmountOverride: null,
+        payExcluded: false,
+        reason: 'eran 9 (retenida)',
+        actorId: ana,
+      }),
+    )
+    expect(r.error).toMatchObject({
+      statusCode: 409,
+      code: 'OPERACION_EN_CURSO',
+      message: 'Otra operación está cambiando esta sede o su organización; intenta de nuevo en un momento',
+    })
+    expect(r.ms).toBeGreaterThanOrEqual(5_500)
+    expect(r.ms).toBeLessThan(10_000)
+    expect(await prisma.classSessionPayState.findUnique({ where: { classSessionId: claseId } })).toEqual(antes)
+  }, 60_000)
 })
 
 describe('ajustes de clase — regresión', () => {

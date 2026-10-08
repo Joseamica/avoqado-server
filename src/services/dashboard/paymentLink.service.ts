@@ -21,7 +21,8 @@ import { getVatRateBps } from '@/services/superadmin/platformSettings.service'
 import emailService from '@/services/email.service'
 import { formatInTimeZone } from 'date-fns-tz'
 import { es as esLocale } from 'date-fns/locale'
-import { createCommissionForPayment, createSplitCommissionForPayment } from '@/services/dashboard/commission/commission-calculation.service'
+import { enqueuePaymentCommissionInTx } from '@/services/tpv/paymentEffects.service'
+import { OPCIONES_DE_TRANSACCION_DEL_INTENTO } from '@/services/tpv/candadoDeIntento'
 import { sendReceiptWhatsApp, sendPaymentLinkShareWhatsApp } from '@/services/whatsapp.service'
 import { assertVenueSalesEnabled } from '@/services/venueSalesGuard'
 import { earnPoints } from '@/services/dashboard/loyalty.dashboard.service'
@@ -1511,7 +1512,8 @@ export async function finalizePaymentLinkCheckout(args: {
   }
 
   if (session.status === 'COMPLETED') {
-    // Already processed — webhook retry. No-op.
+    // Already processed — webhook retry. No-op: la comisión quedó encolada en la MISMA transacción que marcó la sesión
+    // (fase 3, A5), así que salir aquí ya no la pierde.
     return
   }
 
@@ -1562,13 +1564,10 @@ export async function finalizePaymentLinkCheckout(args: {
   const subtotal = session.amount.sub(tipAmount) // session.amount already includes tip
   const stripePaymentIntentId = args.paymentIntentId ?? null
 
-  // Capture the Payment we create inside the transaction so we can fire the
-  // commission calculation AFTER the tx commits. Doing it inside the tx is
-  // risky — the commission service does its own DB writes and we'd nest
-  // transactions / hold locks longer than needed.
+  // Commission attribution: the first attributed staff is the "named seller" on Payment.processedById; the commission is
+  // frozen INSIDE the payment transaction (fase 3, A5).
   const attributedStaffIds = session.paymentLink.attributions.map(a => a.staffId)
   const primaryStaffId = attributedStaffIds[0] ?? null // for Payment.processedById
-  let paymentIdForCommission: string | null = null
   let orderIdForReferral: string | null = null
   let postingId: string | null = null
   // Cliente registrado detrás del cobro (si lo hay). Se resuelve ANTES de la
@@ -1716,8 +1715,8 @@ export async function finalizePaymentLinkCheckout(args: {
         // Commission attribution. Payment.processedById gets the FIRST
         // attributed staff (used by receipts/reports as the "named seller").
         // The full split — 1/N per staff when there are multiple — is
-        // applied later by createSplitCommissionForPayment, which reads
-        // the attributions join table directly. When the link has no
+        // frozen with this payment, right below (fase 3, A5), from the
+        // attributions join table. When the link has no
         // attributions we leave processedById NULL and skip commission.
         processedById: primaryStaffId ?? undefined,
         // Link to the EcommerceMerchant channel so the dashboard's "Cuenta
@@ -1749,9 +1748,13 @@ export async function finalizePaymentLinkCheckout(args: {
       },
       select: { id: true },
     })
-    paymentIdForCommission = createdPayment.id
+    // Fase 3 (A5, Codex r3-12): la comisión se CONGELA con el cobro, en esta misma transacción, como en la terminal. Antes
+    // se calculaba después del commit sin esperarla: si el proceso moría ahí se perdía para siempre, y si la venta se
+    // devolvía antes de que apareciera, el reverso no la encontraba y se pagaba sobre una venta devuelta.
+    if (attributedStaffIds.length > 0) await enqueuePaymentCommissionInTx(tx, createdPayment.id, attributedStaffIds)
     orderIdForReferral = order.id
-  })
+    // A5 r1: congelar la comisión le suma consultas a esta transacción; el mismo tope de 10 s que el cobro de la terminal.
+  }, OPCIONES_DE_TRANSACCION_DEL_INTENTO)
 
   // REFERRAL HOOK: trigger referral qualification if this paid order has a pending referral
   if (orderIdForReferral) {
@@ -1764,7 +1767,7 @@ export async function finalizePaymentLinkCheckout(args: {
   }
 
   // LEALTAD + MÉTRICAS DEL CLIENTE. Fuera de la transacción y a prueba de fallos,
-  // igual que comisión / referidos / vale de inventario: el cobro ya está hecho.
+  // igual que referidos / vale de inventario: el cobro ya está hecho.
   if (loyaltyCustomerId && orderIdForReferral) {
     await creditPaymentLinkCustomer({
       venueId,
@@ -1772,31 +1775,6 @@ export async function finalizePaymentLinkCheckout(args: {
       orderId: orderIdForReferral,
       amount: loyaltyBase,
       channel: 'stripe',
-    })
-  }
-
-  // Fire-and-forget commission calculation. Mirrors how the TPV flow does it
-  // (payment.tpv.service.ts:1813) — async so the webhook ack isn't blocked
-  // by commission logic, and errors are logged but never bubble up to fail
-  // the webhook. Branching:
-  //   • 0 attributions → skip entirely.
-  //   • 1 attribution  → regular createCommissionForPayment (reads
-  //     processedById, respects config.recipient enum). Keeps the single
-  //     -recipient code path identical to TPV.
-  //   • 2+ attributions → createSplitCommissionForPayment writes N rows
-  //     directly, bypassing the recipient enum + the paymentId idempotency
-  //     guard (which only allows 1 calc per payment).
-  if (paymentIdForCommission && attributedStaffIds.length > 0) {
-    const target = paymentIdForCommission
-    const promise =
-      attributedStaffIds.length === 1 ? createCommissionForPayment(target) : createSplitCommissionForPayment(target, attributedStaffIds)
-    promise.catch(err => {
-      logger.error('Failed to create commission for payment-link payment', {
-        paymentId: target,
-        staffCount: attributedStaffIds.length,
-        shortCode: session.paymentLink?.shortCode,
-        error: err instanceof Error ? err.message : String(err),
-      })
     })
   }
 
@@ -2436,11 +2414,10 @@ export async function completeCharge(shortCode: string, sessionId: string, _thre
   const venueId = session.paymentLink!.venueId
 
   // Commission attribution (parallels finalizePaymentLinkCheckout). The first
-  // attributed staff is the "named seller" on Payment.processedById; if 2+
-  // attributions the commission gets split equally after the tx commits.
+  // attributed staff is the "named seller" on Payment.processedById; the commission
+  // is frozen INSIDE the payment transaction (fase 3, A5).
   const attributedStaffIds = session.paymentLink!.attributions.map(a => a.staffId)
   const primaryStaffId = attributedStaffIds[0] ?? null
-  let paymentIdForCommission: string | null = null
   let orderIdForReferral: string | null = null
   let postingId: string | null = null
   // Cliente registrado detrás del cobro (si lo hay). Se resuelve ANTES de la
@@ -2614,10 +2591,12 @@ export async function completeCharge(shortCode: string, sessionId: string, _thre
         },
         select: { id: true },
       })
-      paymentIdForCommission = createdPayment.id
+      // Fase 3 (A5): la comisión se congela con el cobro, en esta transacción.
+      if (attributedStaffIds.length > 0) await enqueuePaymentCommissionInTx(tx, createdPayment.id, attributedStaffIds)
       orderIdForReferral = order.id
     }
-  })
+    // A5 r1: el mismo tope de 10 s que el cobro de la terminal. Pasarse aquí deja la tarjeta YA cobrada sin registro (CHARGING).
+  }, OPCIONES_DE_TRANSACCION_DEL_INTENTO)
 
   // REFERRAL HOOK: trigger referral qualification if this paid order has a pending referral
   if (orderIdForReferral) {
@@ -2630,7 +2609,7 @@ export async function completeCharge(shortCode: string, sessionId: string, _thre
   }
 
   // LEALTAD + MÉTRICAS DEL CLIENTE. Fuera de la transacción y a prueba de fallos,
-  // igual que comisión / referidos / vale de inventario: el cobro ya está hecho.
+  // igual que referidos / vale de inventario: el cobro ya está hecho.
   if (loyaltyCustomerId && orderIdForReferral && loyaltyBase) {
     await creditPaymentLinkCustomer({
       venueId,
@@ -2638,23 +2617,6 @@ export async function completeCharge(shortCode: string, sessionId: string, _thre
       orderId: orderIdForReferral,
       amount: loyaltyBase,
       channel: 'blumon',
-    })
-  }
-
-  // Fire-and-forget commission calculation (matches the Stripe webhook flow).
-  // 0 attributions → skip · 1 → regular createCommissionForPayment · 2+ →
-  // createSplitCommissionForPayment.
-  if (paymentIdForCommission && attributedStaffIds.length > 0) {
-    const target = paymentIdForCommission
-    const promise =
-      attributedStaffIds.length === 1 ? createCommissionForPayment(target) : createSplitCommissionForPayment(target, attributedStaffIds)
-    promise.catch(err => {
-      logger.error('Failed to create commission for Blumon payment-link', {
-        paymentId: target,
-        staffCount: attributedStaffIds.length,
-        shortCode: session.paymentLink?.shortCode,
-        error: err instanceof Error ? err.message : String(err),
-      })
     })
   }
 

@@ -98,4 +98,31 @@ describe('commission_payouts', () => {
     expect(out.byStatus.PAID).toEqual({ count: 3, amount: 900 })
     expect(out.payouts[0]).toMatchObject({ staff: 'Luis Gómez', amount: 300, method: 'BANK_TRANSFER', status: 'PAID' })
   })
+
+  it('sin commissions:payout no ve nada aunque tenga commissions:read (spec §8, Codex r1-15)', async () => {
+    mockHasPermission.mockImplementation((_acc: unknown, p: string) => p === 'commissions:read')
+    const out = parse(await call({ venueId: 'v1' }))
+    expect(out.venuesInScope).toBe(0)
+    expect(mockGroupBy).not.toHaveBeenCalled()
+    expect(mockFindMany).not.toHaveBeenCalled()
+  })
+
+  it('al consultar varias sedes, sólo lee las que tienen commissions:payout', async () => {
+    const multi = {
+      ...scope,
+      allowedVenueIds: ['v1', 'v2'],
+      perVenueAccess: new Map([
+        ['v1', { role: 'OWNER' }],
+        ['v2', { role: 'MANAGER' }],
+      ]),
+    } as unknown as McpScope
+    const hs = new Map<string, (a: Record<string, unknown>, e: unknown) => Promise<{ content: Array<{ text: string }> }>>()
+    registerCommissionTools({ tool: (...a: unknown[]) => hs.set(a[0] as string, a[a.length - 1] as never) } as never, multi)
+    mockHasPermission.mockImplementation((acc: { role: string }, p: string) => p === 'commissions:read' || acc.role === 'OWNER')
+    mockGroupBy.mockResolvedValueOnce([])
+    mockFindMany.mockResolvedValueOnce([])
+    const out = parse(await hs.get('commission_payouts')!({}, {}))
+    expect(out.venuesInScope).toBe(1)
+    expect(mockGroupBy.mock.calls[0][0].where).toEqual({ venueId: { in: ['v1'] } })
+  })
 })

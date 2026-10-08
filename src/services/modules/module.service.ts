@@ -14,7 +14,7 @@ export const MODULE_CODES = {
   WHITE_LABEL_DASHBOARD: 'WHITE_LABEL_DASHBOARD',
   COMMISSIONS: 'COMMISSIONS',
   MASTER_CATALOG: 'MASTER_CATALOG',
-  SERVICE_PAY: 'SERVICE_PAY',
+  // SERVICE_PAY ya NO es módulo: es la función del plan (fase 3, Bloque C; `staffPay/acceso.ts`, `venueHasFeatureAccess`).
 } as const
 
 export type ModuleCode = (typeof MODULE_CODES)[keyof typeof MODULE_CODES]

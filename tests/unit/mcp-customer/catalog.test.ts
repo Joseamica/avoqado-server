@@ -104,6 +104,7 @@ it('pago por servicio: liquidar una diferencia escribe; la lista de diferencias 
   expect(TOOL_EFFECTS.settle_service_pay_difference).toBe('write')
   expect(TOOL_EFFECTS.adjust_service_pay_class).toBe('write')
   expect(TOOL_EFFECTS.staff_service_pay_differences).toBe('read')
+  expect(TOOL_EFFECTS.configure_service_pay).toBe('write')
 })
 
 it('cada herramienta del código tiene exactamente una declaración de efectos', () => {
@@ -298,6 +299,20 @@ it('el directorio publica descripciones propias, sin nombrar herramientas ni dar
       order: null,
     })
   }
+})
+
+// final-fix M9: el directorio no expone las herramientas de Pago al personal, así que no puede mandar a «each person's staff pay
+// statement» como si se pudiera consultar ahí: dice dónde verlo de verdad, la pantalla del dashboard.
+it('el directorio no manda a recibos de Pago al personal que no expone: dice la pantalla del dashboard', () => {
+  const { DIRECTORY_TIERS } = require('@/mcp/directory/catalog')
+  const { DIRECTORY_DESCRIPTIONS } = require('@/mcp/directory/descriptions')
+  const expone = DIRECTORY_TIERS.some((t: { tools: string[] }) => t.tools.some(n => n.startsWith('staff_service_pay')))
+  expect(expone).toBe(false) // si una tanda las publica, esta prueba se revisa con ella
+  const pantalla = '«Pago al personal» screen of the Avoqado dashboard'
+  for (const [name, description] of Object.entries(DIRECTORY_DESCRIPTIONS) as Array<[string, string]>)
+    if (/staff pay|pago al personal/i.test(description))
+      expect({ name, apuntaAlDashboard: description.includes(pantalla) }).toEqual({ name, apuntaAlDashboard: true })
+  expect(DIRECTORY_DESCRIPTIONS.commission_payouts).toContain(pantalla)
 })
 
 it('el perfil de directorio usa su descripción y el manual conserva la original', async () => {

@@ -1,7 +1,12 @@
 import { NextFunction, Request, Response } from 'express'
 import { BadRequestError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
-import { venueHasServicePayAccess } from '../../services/dashboard/staffPay/acceso'
+import {
+  puedeAdministrarLaOrganizacion,
+  puedeConfigurarLaOrganizacion,
+  venueHasServicePayAccess,
+} from '../../services/dashboard/staffPay/acceso'
+import * as activacion from '../../services/dashboard/staffPay/activacion.service'
 import * as niveles from '../../services/dashboard/staffPay/niveles.service'
 import * as tablas from '../../services/dashboard/staffPay/tablas.service'
 import * as reporte from '../../services/dashboard/staffPay/reporte.service'
@@ -13,6 +18,9 @@ import * as manuales from '../../services/dashboard/staffPay/ajustesManuales.ser
 import * as recibos from '../../services/dashboard/staffPay/recibos.service'
 import * as dif from '../../services/dashboard/staffPay/diferencias.service'
 import * as liq from '../../services/dashboard/staffPay/liquidacion.service'
+import * as participacion from '../../services/dashboard/staffPay/participacion'
+import { vistaPreviaParticipacion } from '../../services/dashboard/staffPay/participacion.vistaPrevia'
+import { estadoSedes } from '../../services/dashboard/staffPay/sedes.service'
 import { sendExport } from '../../services/dashboard/export.helpers'
 
 export function ctx(req: Request): { venueId: string; userId: string } {
@@ -24,8 +32,21 @@ export function ctx(req: Request): { venueId: string; userId: string } {
 
 export async function getAccess(req: Request, res: Response, next: NextFunction) {
   try {
-    const { venueId } = ctx(req)
-    res.json({ enabled: await venueHasServicePayAccess(venueId) })
+    const { venueId, userId } = ctx(req)
+    const { organizationId } = await orgDeVenue(venueId)
+    // Fase 3 §10: `enabled` = el plan lo incluye; además, si el dueño ya activó, desde cuándo y si las propinas van al recibo.
+    // E1d: además, la periodicidad guardada, si ya es fija y el inicio que se guardaría al activar (la pantalla de activar
+    // lo necesita antes de activar, cuando GET /periods da 403).
+    // E6a-fix2 C2 (aditivo): si quien pregunta puede activar y prender las propinas (el permiso en TODAS las sedes), con la
+    // MISMA regla que el 403 de esas acciones.
+    res.json({
+      enabled: await venueHasServicePayAccess(venueId),
+      ...(await activacion.estadoActivacion(prisma, organizationId)),
+      ...(await activacion.accesoActivacion({ venueId })),
+      puedeAdministrarOrganizacion: await puedeAdministrarLaOrganizacion(userId, organizationId),
+      // E6a-fix3 (aditivo): lo mismo con `staffpay:manage` (niveles, asignar nivel, tablas de organización).
+      puedeConfigurarOrganizacion: await puedeConfigurarLaOrganizacion(userId, organizationId),
+    })
   } catch (error) {
     next(error)
   }
@@ -147,7 +168,7 @@ export async function createTable(req: Request, res: Response, next: NextFunctio
 export async function publishVersion(req: Request, res: Response, next: NextFunction) {
   try {
     const { venueId, userId } = ctx(req)
-    const { effectiveFrom, countMode, maxCount, cells, simular } = req.body
+    const { effectiveFrom, countMode, maxCount, cells, simular, coverBonusHours, coverBonusAmount, lateCancelHours } = req.body
     res.json(
       await tablas.publicarVersion({
         venueId,
@@ -156,6 +177,9 @@ export async function publishVersion(req: Request, res: Response, next: NextFunc
         effectiveFrom,
         countMode,
         maxCount,
+        coverBonusHours,
+        coverBonusAmount,
+        lateCancelHours,
         // Sólo las tres llaves de cada celda: nada extra del body llega al createMany.
         cells: (cells as tablas.CeldaInput[]).map(({ payLevelId, count, amount }) => ({ payLevelId, count, amount })),
         actorId: userId,
@@ -283,6 +307,27 @@ export const listPeriods = manejar(req =>
   periodos.listarPeriodos({ ...ctx(req), antesDe: req.query.antesDe ? String(req.query.antesDe) : undefined, limit: 24 }),
 )
 export const patchPeriodicity = manejar(req => periodos.cambiarPeriodicidad({ ...ctx(req), periodicidad: req.body.periodicidad }))
+// Fase 3 (spec §7.1, §6.3). Campo por campo: `ahora` es de pruebas y jamás sale de la petición.
+export const postActivate = manejar(req => {
+  const { periodicidad, inicioEsperado, sedes } = req.body
+  return activacion.activarPagoAlPersonal({ ...ctx(req), periodicidad, inicioEsperado, ...(sedes !== undefined ? { sedes } : {}) })
+})
+// B11: activar o desactivar UNA sede y su vista previa con montos. Campo por campo: `ahora` es de pruebas.
+export const postActivateSede = manejar(req => {
+  const { desde, fechaEsperada } = req.body
+  return participacion.activarSede({ ...ctx(req), sedeId: req.params.sedeId, desde, fechaEsperada })
+})
+export const postDeactivateSede = manejar(req => {
+  const { hasta, fechaEsperada } = req.body
+  return participacion.desactivarSede({ ...ctx(req), sedeId: req.params.sedeId, hasta, fechaEsperada })
+})
+export const getParticipationPreview = manejar(req => {
+  const q = req.query as { accion: 'activar' | 'desactivar'; fecha?: string }
+  return vistaPreviaParticipacion({ ...ctx(req), sedeId: req.params.sedeId, accion: q.accion, fecha: q.fecha })
+})
+// B13: la pantalla de sedes. Sólo quién pregunta: `ahora`, `soloSedes` y `entreLecturas` jamás salen de la petición.
+export const getSedes = manejar(req => estadoSedes(ctx(req)))
+export const putTips = manejar(req => activacion.cambiarPropinas({ ...ctx(req), encender: req.body.encender }))
 export const getClosePreview = manejar(req => cierre.previewCierre({ ...ctx(req), fecha: String(req.query.fecha) }))
 export const postClose = manejar(req => {
   const { fecha, huellaEsperada, confirmarHuerfanas } = req.body
@@ -305,6 +350,17 @@ export const getPaidPreview = manejar(req =>
     ...(req.query.staffId ? { staffId: String(req.query.staffId) } : {}),
   }),
 )
+// B13 (r5.1): la vista previa del ajuste con su aviso de pendientes. Campo por campo (el monto ya viene como número).
+export const getAdjustmentPreview = manejar(req => {
+  const { sede, staffId, amount, reason, fecha } = req.query as unknown as {
+    sede: string
+    staffId: string
+    amount: number
+    reason: string
+    fecha?: string
+  }
+  return manuales.previewAjusteManual({ ...ctx(req), sede, staffId, amount, reason, fecha })
+})
 export const postAdjustment = manejar(req => {
   // Campos explícitos: nada extra del body (p. ej. una huellaEsperada) llega al service.
   const { sede, staffId, amount, reason, fecha, clientKey } = req.body

@@ -234,13 +234,13 @@ const QUERY_CAPABILITY_METADATA: Record<string, Pick<AssistantCapability, 'permi
     permissions: ['commissions:read'],
     riskLevel: 'medium',
     examples: ['como van mis comisiones', 'commission summary'],
-    notes: ['Read-only commission aggregate for the active venue.'],
+    notes: ['Read-only commission aggregate for the active venue; paid comes from staff pay statements, never from old statuses.'],
   },
   'commissions.payouts': {
     permissions: ['commissions:payout'],
     riskLevel: 'medium',
     examples: ['resumen de payouts de comisiones', 'commission payouts'],
-    notes: ['Read-only payout summary; chatbot response omits staff emails, notes, and payment references.'],
+    notes: ['Read-only: paid in staff pay statements plus the previous-flow history; omits staff emails, notes and payment references.'],
   },
   adHocAnalytics: {
     permissions: [],
