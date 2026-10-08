@@ -98,9 +98,26 @@ export const nombreGuardadoSql = (organizationId: string, staffId: Prisma.Sql) =
 
 // ── Comisiones (spec §6.2) ──
 
-/** Una comisión que no está anulada ni congelada (sin su propio `SERVICE`): «ya congelada» por FUENTE, no por persona (B-D2). */
+/**
+ * E6a-fix F6 (QA E6a H1, dinero): la comisión `a` ya la pagó el flujo VIEJO de pagos —su resumen está PAID o tiene un pago
+ * PAID (el agregador viejo vuelve a poner CALCULATED un resumen ya pagado cuando le suma comisiones nuevas: el pago PAID
+ * manda)—. Nunca vuelve a entrar al sobre: si entrara, la persona cobraría dos veces. Un pago apenas PENDING/APPROVED/PROCESSING
+ * no cuenta: desde E1a (410) ya no puede terminar de pagarse por la app. Sin resumen (`summaryId` NULL) no hay fila que case.
+ * Un `EXISTS` suelto a propósito: negado (`NOT EXISTS`), el planeador lo puede volver anti-join en vez de subplan por fila.
+ */
+const pagadaPorElFlujoViejo = (a: 'cc' | 'o') => Prisma.sql`EXISTS (
+  SELECT 1 FROM "CommissionSummary" cs
+  WHERE cs.id = ${Prisma.raw(a)}."summaryId"
+    AND (cs.status = 'PAID' OR EXISTS (SELECT 1 FROM "CommissionPayout" cp WHERE cp."summaryId" = cs.id AND cp.status = 'PAID')))`
+
+/**
+ * Una comisión que no está anulada, ni congelada (sin su propio `SERVICE`), ni pagada por el flujo viejo (F6): «ya congelada»
+ * por FUENTE, no por persona (B-D2). La comparten el barrido, el recibo y el reporte en vivo, las sumas de las vistas previas
+ * y las pendientes: ningún lector del sobre la ve.
+ */
 const comisionViva = (a: 'cc') => Prisma.sql`
   ${Prisma.raw(a)}.status <> 'VOIDED'
+  AND NOT ${pagadaPorElFlujoViejo(a)}
   AND NOT EXISTS (
     SELECT 1 FROM "ServiceEarning" e WHERE e."sourceType" = 'COMMISSION' AND e."sourceId" = ${Prisma.raw(a)}.id AND e.concept = 'SERVICE')`
 
@@ -145,7 +162,8 @@ export function reversoDeLoCongelado(fuente: FuenteVenta, a: 'cc' | 'p'): Prisma
  * `rp` (factor común del índice venueId + fecha); una VENTA exige además `rv`. Un reverso de devolución (su pago es un
  * REFUND) sólo entra si la comisión que revierte ya está congelada (`reversoDeLoCongelado`) o entra en este mismo cierre
  * (su original en `rv`) (Codex r1-18): nunca se descuenta lo que el sobre no pagó. Una original ANULADA no ampara a nadie:
- * si estaba congelada, su anulación ya devuelve su monto completo (§6.4) y el reverso descontaría otra vez.
+ * si estaba congelada, su anulación ya devuelve su monto completo (§6.4) y el reverso descontaría otra vez. Tampoco ampara una
+ * original que pagó el flujo viejo (F6): este cierre no la toma, así que su reverso tampoco.
  */
 export function comisionBarrible(rp: RangoSede[], rv: RangoSede[]): Prisma.Sql {
   return Prisma.sql`
@@ -155,7 +173,7 @@ export function comisionBarrible(rp: RangoSede[], rv: RangoSede[]): Prisma.Sql {
       (NOT EXISTS (SELECT 1 FROM "Payment" rf WHERE rf.id = cc."paymentId" AND rf.type = 'REFUND')
        AND ${enRangos('cc', 'calculatedAt', rv)})
       OR ${reversoDeLoCongelado('COMMISSION', 'cc')}
-      OR EXISTS (SELECT 1 ${originalDelReverso('cc')} AND ${enRangos('o', 'calculatedAt', rv)})
+      OR EXISTS (SELECT 1 ${originalDelReverso('cc')} AND NOT ${pagadaPorElFlujoViejo('o')} AND ${enRangos('o', 'calculatedAt', rv)})
     )`
 }
 

@@ -75,6 +75,9 @@ export async function borrarMundo(m: Mundo | undefined) {
   // esquemas el de la persona: van antes que las sedes y que el staff.
   const deLaOrg = { venue: { organizationId: m.orgId } }
   await prisma.commissionCalculation.deleteMany({ where: deLaOrg })
+  // E6a-fix F6: los pagos y resúmenes del flujo VIEJO (las pruebas de «ya pagada por el flujo viejo») antes que su sede y su persona.
+  await prisma.commissionPayout.deleteMany({ where: deLaOrg })
+  await prisma.commissionSummary.deleteMany({ where: deLaOrg })
   await prisma.commissionConfig.deleteMany({ where: deLaOrg })
   await prisma.payment.deleteMany({ where: deLaOrg })
   await prisma.order.deleteMany({ where: deLaOrg })
