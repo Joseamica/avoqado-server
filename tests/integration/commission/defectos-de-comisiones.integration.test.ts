@@ -9,8 +9,9 @@
  *   H2c  anular una comisión ya sumada la dejaba en el resumen. Ahora el resumen se recalcula.
  *
  * Lo que ya no se mide aquí:
- *   H1, H5  pago duplicado y pago a medio periodo del flujo viejo de pagos: el Bloque E retira esas rutas (410
- *           `MOVIDO_A_PAGO_AL_PERSONAL`) y sus pruebas viven con él.
+ *   H1, H5  se fueron con el flujo de pagos viejo (fase 3, E1a): sus rutas responden 410 MOVIDO_A_PAGO_AL_PERSONAL. La prueba
+ *           vive en tests/unit/routes/commissionRoutes.retiradas.test.ts; el sobre paga cada fila una sola vez (índice único
+ *           de ServiceEarning, Bloque B).
  *   H3      el agregador suma antes de marcar: queda documentado (spec §5); ya no mueve dinero porque el sobre lee filas.
  *
  * Correr: TZ=UTC TEST_DATABASE_URL="$PAGO_F3_DB" npx jest --selectProjects integration \

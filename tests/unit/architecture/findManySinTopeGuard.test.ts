@@ -195,7 +195,9 @@ const INVENTARIO: Record<string, number> = {
   'src/services/dashboard/commission/commission-config.service.ts': 1,
   'src/services/dashboard/commission/commission-milestone.service.ts': 1,
   'src/services/dashboard/commission/commission-override.service.ts': 2,
-  'src/services/dashboard/commission/commission-payout.service.ts': 2,
+  // commission-payout.service.ts: 2 → 0 (fase 3 de pago por servicio, E1a): se fueron los dos findMany de `createPayouts`.
+  // `getPayouts` sigue sin `take` propio (la ventana del barrido ve el `take: 50` de `getPayoutById`); lo acota que ya no
+  // nacen pagos: el historial es el que hay (0 filas en producción).
   'src/services/dashboard/commission/commission-resolution.service.ts': 3,
   'src/services/dashboard/commission/commission-tier.service.ts': 2,
   'src/services/dashboard/commission/commission-utils.ts': 4,
