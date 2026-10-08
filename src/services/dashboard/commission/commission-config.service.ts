@@ -15,7 +15,8 @@ import prisma from '../../../utils/prismaClient'
 import logger from '../../../config/logger'
 import { Prisma, CommissionRecipient, CommissionTrigger, CommissionCalcType } from '@prisma/client'
 import { BadRequestError, NotFoundError } from '../../../errors/AppError'
-import { validateRate, RoleRates } from './commission-utils'
+import { RoleRates } from './commission-utils'
+import { validarTasasDelEsquema } from './tasasDelEsquema'
 import { logAction } from '../activity-log.service'
 
 // ============================================
@@ -220,15 +221,9 @@ export async function getCommissionConfigById(configId: string, venueId: string)
  * Create a new commission config
  */
 export async function createCommissionConfig(venueId: string, data: CreateCommissionConfigInput, createdById: string): Promise<any> {
-  // Validate rate
-  validateRate(data.defaultRate)
-
-  // Validate role rates if provided
-  if (data.roleRates) {
-    for (const [_role, rate] of Object.entries(data.roleRates)) {
-      validateRate(rate)
-    }
-  }
+  // La tasa según el tipo (en un FIJO, el monto en pesos), las tasas por rol y la de meta superada: 400 en español
+  // (final-fijo-niveles, fase 3; `tasasDelEsquema.ts`).
+  validarTasasDelEsquema(data)
 
   // Validate date range
   if (data.effectiveTo && data.effectiveFrom) {
@@ -348,17 +343,9 @@ export async function updateCommissionConfig(configId: string, venueId: string, 
     }
   }
 
-  // Validate new rate if provided
-  if (data.defaultRate !== undefined) {
-    validateRate(data.defaultRate)
-  }
-
-  // Validate role rates if provided
-  if (data.roleRates) {
-    for (const [_role, rate] of Object.entries(data.roleRates)) {
-      validateRate(rate)
-    }
-  }
+  // Lo que QUEDA: un tipo nuevo con la tasa de antes (un fijo de $5 que pasa a niveles sería 500 %) o una tasa nueva con el
+  // tipo de antes; y las tasas por rol y de meta superada (final-fijo-niveles, fase 3).
+  validarTasasDelEsquema(data, existing)
 
   // Validate date range
   const effectiveFrom = data.effectiveFrom ?? existing.effectiveFrom

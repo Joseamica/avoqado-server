@@ -11,6 +11,7 @@
 import prisma from '../../../utils/prismaClient'
 import { NotFoundError } from '../../../errors/AppError'
 import { logAction } from '../activity-log.service'
+import { validarTasasDelEsquema } from './tasasDelEsquema'
 
 export type CommissionConfigSource = 'venue' | 'organization'
 
@@ -86,6 +87,8 @@ export async function getOrgCommissionConfigs(venueId: string) {
  * Create an org-level commission config
  */
 export async function createOrgCommissionConfig(venueId: string, data: any, createdById: string) {
+  // Final-fijo-niveles (fase 3): esta ruta no validaba ninguna tasa — un fijo de $5 con niveles quedaba como 500 %.
+  validarTasasDelEsquema(data)
   const organizationId = await getOrgIdFromVenue(venueId)
 
   const result = await prisma.commissionConfig.create({
@@ -121,6 +124,7 @@ export async function updateOrgCommissionConfig(venueId: string, configId: strin
     where: { id: configId, orgId: organizationId, venueId: null },
   })
   if (!existing) throw new NotFoundError('Org commission config not found')
+  validarTasasDelEsquema(data, existing) // lo que QUEDA (final-fijo-niveles, fase 3)
 
   const result = await prisma.commissionConfig.update({
     where: { id: configId },

@@ -44,20 +44,20 @@ describe('validateRate', () => {
   })
 
   it('should reject negative rates', () => {
-    expect(() => validateRate(-0.01)).toThrow('Must be between 0 and 1')
+    expect(() => validateRate(-0.01)).toThrow('va de 0 % a 100 %')
   })
 
   it('should reject rates above 1', () => {
-    expect(() => validateRate(1.01)).toThrow('Must be between 0 and 1')
-    expect(() => validateRate(100)).toThrow('Must be between 0 and 1')
+    expect(() => validateRate(1.01)).toThrow('va de 0 % a 100 %')
+    expect(() => validateRate(100)).toThrow('va de 0 % a 100 %')
   })
 
   it('should reject NaN', () => {
-    expect(() => validateRate(NaN)).toThrow('must be a number')
+    expect(() => validateRate(NaN)).toThrow('debe ser un número')
   })
 
   it('should reject non-numbers', () => {
-    expect(() => validateRate('0.03' as any)).toThrow('must be a number')
+    expect(() => validateRate('0.03' as any)).toThrow('debe ser un número')
   })
 })
 

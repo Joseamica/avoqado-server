@@ -32,6 +32,7 @@ import { computeStoredOrderTotal } from '../../shared/orderBalance'
 import { splitPaymentIvaByOrderRates } from '../../fiscal/ivaMath'
 import { grossByRateFromOrder, ordenParaIvaSelect, tasaDelRenglon, type OrdenParaIva } from '../../fiscal/ivaDeOrden'
 import { type CobroDeLaOrden, type OtroCobro, repartir } from './repartoPorCobro'
+import { validarTasa } from './tasasDelEsquema'
 
 // ============================================
 // Type Definitions
@@ -96,16 +97,14 @@ export interface CommissionOverrideData {
  * Validate that a rate is within valid bounds (0-1 inclusive)
  * Commission rates should be between 0% and 100%
  *
+ * Final-fijo-niveles (fase 3): 400 en español (`BadRequestError`), no un `Error` suelto que salía como 500 sin explicar
+ * nada. `que` nombra la tasa en el mensaje («La tasa de un nivel…»). Ver `tasasDelEsquema.ts`.
+ *
  * @param rate - Rate to validate (as decimal, e.g., 0.03 for 3%)
- * @throws Error if rate is invalid
+ * @throws BadRequestError if rate is invalid
  */
-export function validateRate(rate: number): void {
-  if (typeof rate !== 'number' || isNaN(rate)) {
-    throw new Error(`Invalid commission rate: must be a number, got ${typeof rate}`)
-  }
-  if (rate < 0 || rate > 1) {
-    throw new Error(`Invalid commission rate: ${rate}. Must be between 0 and 1 (0% to 100%)`)
-  }
+export function validateRate(rate: number, que?: string): void {
+  validarTasa(rate, que)
 }
 
 /**
