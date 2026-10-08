@@ -348,10 +348,12 @@ describe('convertShopifyCsv — barcode → gtin', () => {
         first('b', 'Blusa', { 'Variant SKU': 'B', 'Variant Barcode': '222' }),
       ]),
       FACTOR,
-      new Map([
-        ['111', 'OTRO-SKU'],
-        ['222', 'B'],
-      ]),
+      {
+        barcodeOwners: new Map([
+          ['111', 'OTRO-SKU'],
+          ['222', 'B'],
+        ]),
+      },
     )
     expect(products(result).map(p => [p.sku, p.gtin])).toEqual([
       ['A', undefined],
@@ -361,10 +363,79 @@ describe('convertShopifyCsv — barcode → gtin', () => {
     expect(bySku(result, 'A').problems[0].detail).toContain('OTRO-SKU')
   })
 
-  it('drops a barcode mangled by a spreadsheet into scientific notation (CODIGO_INVALIDO)', () => {
-    const result = convertShopifyCsv(csv([first('a', 'Camisa', { 'Variant SKU': 'A', 'Variant Barcode': '8.44512E+12' })]), FACTOR)
-    expect(products(result)[0]).not.toHaveProperty('gtin')
+  it('drops a barcode mangled by a spreadsheet into scientific notation (CODIGO_INVALIDO), Spanish decimal comma too', () => {
+    for (const mangled of ['8.44512E+12', '8,44512E+12', '8,44512e12']) {
+      const result = convertShopifyCsv(csv([first('a', 'Camisa', { 'Variant SKU': 'A', 'Variant Barcode': mangled })]), FACTOR)
+      expect(products(result)[0]).not.toHaveProperty('gtin')
+      expect(codes(result, 'A')).toEqual(['CODIGO_INVALIDO'])
+    }
+  })
+
+  it('imports WITHOUT barcode one longer than the 14 characters the product page accepts (CODIGO_INVALIDO)', () => {
+    const result = convertShopifyCsv(
+      csv([
+        first('a', 'Camisa', { 'Variant SKU': 'A', 'Variant Barcode': '123456789012345' }),
+        first('b', 'Blusa', { 'Variant SKU': 'B', 'Variant Barcode': '12345678901234' }),
+      ]),
+      FACTOR,
+    )
+    expect(products(result).map(p => [p.sku, p.gtin])).toEqual([
+      ['A', undefined],
+      ['B', '12345678901234'],
+    ])
+    expect(bySku(result, 'A')).toMatchObject({ omitted: false, barcode: null })
     expect(codes(result, 'A')).toEqual(['CODIGO_INVALIDO'])
+  })
+})
+
+describe('convertShopifyCsv — SKUs the platform would reject, and SKUs the venue already has', () => {
+  it('skips a SKU outside the platform format (letters, digits, - and _) as SKU_FORMATO: the product page would 400 on save', () => {
+    const result = convertShopifyCsv(
+      csv([
+        first('a', 'Camisa', { 'Variant SKU': 'CL M/AZ' }),
+        first('b', 'Blusa', { 'Variant SKU': 'BLUSA-Ñ' }),
+        first('c', 'Falda', { 'Variant SKU': 'FA_01-x' }),
+      ]),
+      FACTOR,
+    )
+    expect(products(result).map(p => p.sku)).toEqual(['FA_01-x'])
+    expect(bySku(result, 'CL M/AZ')).toMatchObject({ omitted: true })
+    expect(codes(result, 'CL M/AZ')).toEqual(['SKU_FORMATO'])
+    expect(codes(result, 'BLUSA-Ñ')).toEqual(['SKU_FORMATO'])
+  })
+
+  it('by default does NOT send a SKU the venue already has (YA_EXISTE): merge would reset its cost, description and tags', () => {
+    const result = convertShopifyCsv(
+      csv([first('a', 'Camisa', { 'Variant SKU': 'A' }), first('b', 'Blusa', { 'Variant SKU': 'B' })]),
+      FACTOR,
+      {
+        existingSkus: new Map([['A', { archived: false }]]),
+      },
+    )
+    expect(products(result).map(p => p.sku)).toEqual(['B'])
+    expect(bySku(result, 'A')).toMatchObject({ omitted: true, barcode: null })
+    expect(codes(result, 'A')).toEqual(['YA_EXISTE'])
+  })
+
+  it('counts an archived SKU as existing too, and says so', () => {
+    const result = convertShopifyCsv(csv([first('a', 'Camisa', { 'Variant SKU': 'A' })]), FACTOR, {
+      existingSkus: new Map([['A', { archived: true }]]),
+    })
+    expect(products(result)).toHaveLength(0)
+    expect(bySku(result, 'A').problems[0]).toMatchObject({ code: 'YA_EXISTE', detail: expect.stringContaining('archivado') })
+  })
+
+  it('sends the existing SKUs too when told to update them', () => {
+    const result = convertShopifyCsv(
+      csv([first('a', 'Camisa', { 'Variant SKU': 'A' }), first('b', 'Blusa', { 'Variant SKU': 'B' })]),
+      FACTOR,
+      {
+        existingSkus: new Map([['A', { archived: false }]]),
+        updateExisting: true,
+      },
+    )
+    expect(products(result).map(p => p.sku)).toEqual(['A', 'B'])
+    expect(codes(result, 'A')).toEqual([])
   })
 })
 
@@ -410,5 +481,9 @@ describe('chunkImportMenuData', () => {
         ],
       ],
     ])
+  })
+
+  it('refuses a replace payload: replace archives what each chunk does not bring, so chunks would archive each other', () => {
+    expect(() => chunkImportMenuData({ mode: 'replace', categories: [] }, 2)).toThrow(/merge/)
   })
 })

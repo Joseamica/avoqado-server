@@ -12,6 +12,10 @@
  *   that are not active, packs, variants without SKU, a SKU the file repeats, a price that is missing or not positive.
  * - `gtin` is unique per venue (`@@unique([venueId, gtin])`): a barcode two variants share, or one another SKU of the
  *   venue already has, would abort the whole import transaction — those products are imported WITHOUT barcode, reported.
+ * - What the product page would reject on its next save (it re-sends sku and gtin): a SKU outside `SKU_REGEX` is not
+ *   imported; a barcode longer than `GTIN_MAX_LENGTH` is dropped. Both reported.
+ * - A SKU the venue already has is NOT sent by default (YA_EXISTE): importMenu's merge resets its cost, description,
+ *   tags… `updateExisting` sends it anyway, for an operator who asked for that.
  *
  * Both the legacy export headers (`Handle`, `Variant SKU`, `Variant Price`, `Variant Barcode`, `Image Src`,
  * `Variant Image`) and the current ones (`URL handle`, `SKU`, `Price`, `Barcodes`, `Product image URL`,
@@ -20,6 +24,7 @@
 import { Prisma } from '@prisma/client'
 import Papa from 'papaparse'
 
+import { GTIN_MAX_LENGTH, SKU_REGEX } from '../../schemas/dashboard/menu.schema'
 import { generateSlug } from '../../utils/slugify'
 import type { ImportMenuData } from './menu.dashboard.service'
 
@@ -31,7 +36,9 @@ export type ShopifyProblemCode =
   | 'NO_ACTIVO'
   | 'PACK'
   | 'SIN_SKU'
+  | 'SKU_FORMATO'
   | 'SKU_REPETIDO'
+  | 'YA_EXISTE'
   | 'SIN_PRECIO'
   | 'PRECIO_INVALIDO'
   | 'PRECIO_CERO'
@@ -62,6 +69,15 @@ export interface ShopifyVariant {
   problems: ShopifyProblem[]
 }
 
+export interface ShopifyContext {
+  /** gtin → SKU of the venue's products that already hold it (archived ones too: the unique index counts them). */
+  barcodeOwners?: ReadonlyMap<string, string>
+  /** SKUs the venue already has (archived ones too: importMenu would restore them). */
+  existingSkus?: ReadonlyMap<string, { archived: boolean }>
+  /** Send the existing SKUs too (importMenu merge updates them, resetting cost, description, tags…). Default false. */
+  updateExisting?: boolean
+}
+
 export interface ShopifyConversion {
   data: ImportMenuData
   variants: ShopifyVariant[]
@@ -90,8 +106,9 @@ const DEFAULT_TITLE = 'Default Title'
 // Whole words: «Pack 3 calcetines», «Bundles», «Kit» and «lote» are packs; a «Backpack» or a «kitten» tag is not.
 const PACK = /\b(pack|bundle|kit|lote)(s|es)?\b/i
 const PLAIN_NUMBER = /^\d+(\.\d+)?$/
-// What a spreadsheet leaves of a long barcode it opened as a number: «8.44512E+12». The digits are gone for good.
-const SCIENTIFIC = /^\d+(\.\d+)?e\+?\d+$/i
+// What a spreadsheet leaves of a long barcode it opened as a number: «8.44512E+12», or «8,44512E+12» in a Spanish
+// locale. The digits are gone for good.
+const SCIENTIFIC = /^\d+([.,]\d+)?e\+?\d+$/i
 // Product.price is Decimal(10, 2).
 const MAX_PRICE = new Prisma.Decimal('99999999.99')
 
@@ -136,15 +153,9 @@ function countBy<T>(items: T[], key: (item: T) => string): Map<string, number> {
   return counts
 }
 
-/**
- * @param barcodeOwners gtin → SKU of the venue's products that already hold it (archived ones too: the unique index
- *   counts them). A barcode owned by ANOTHER SKU is dropped; the script reads them from the database.
- */
-export function convertShopifyCsv(
-  csvText: string,
-  pricing: ShopifyPricing,
-  barcodeOwners: ReadonlyMap<string, string> = new Map(),
-): ShopifyConversion {
+/** `context` comes from the venue's database (the script reads it); without it every SKU and barcode counts as new. */
+export function convertShopifyCsv(csvText: string, pricing: ShopifyPricing, context: ShopifyContext = {}): ShopifyConversion {
+  const { barcodeOwners = new Map(), existingSkus = new Map(), updateExisting = false } = context
   let factor: Prisma.Decimal | null = null
   const priceList = 'priceList' in pricing ? pricing.priceList : null
   if ('factor' in pricing) {
@@ -196,6 +207,8 @@ export function convertShopifyCsv(
       else if (PACK.test(type) || PACK.test(tags))
         problems.push({ code: 'PACK', detail: `Type «${type}» / Tags «${tags}»: se decidirá si se arma como combo` })
       else if (!get(row, 'sku')) problems.push({ code: 'SIN_SKU', detail: 'La variante no tiene SKU' })
+      else if (!SKU_REGEX.test(get(row, 'sku')))
+        problems.push({ code: 'SKU_FORMATO', detail: 'El SKU sólo admite letras sin acento, números, guion y guion bajo' })
       variants.push({
         handle,
         sku: get(row, 'sku'),
@@ -223,6 +236,16 @@ export function convertShopifyCsv(
     const count = skuCounts.get(variant.sku)!
     if (count > 1) omit(variant, { code: 'SKU_REPETIDO', detail: `El SKU aparece ${count} veces en el archivo` })
   }
+
+  if (!updateExisting)
+    for (const variant of live()) {
+      const existing = existingSkus.get(variant.sku)
+      if (existing)
+        omit(variant, {
+          code: 'YA_EXISTE',
+          detail: `Ya existe en el negocio${existing.archived ? ' (archivado)' : ''}: no se toca sin --actualizar-existentes`,
+        })
+    }
 
   for (const variant of live()) {
     let mxn: Prisma.Decimal
@@ -259,6 +282,12 @@ export function convertShopifyCsv(
     if (ignored.length > 0) variant.problems.push({ code: 'VARIOS_CODIGOS', detail: `Se usó ${code}; se ignoraron: ${ignored.join(', ')}` })
     if (code && SCIENTIFIC.test(code)) {
       variant.problems.push({ code: 'CODIGO_INVALIDO', detail: `«${code}» lo dañó una hoja de cálculo; se importa sin código` })
+      variant.barcode = null
+    } else if (code && code.length > GTIN_MAX_LENGTH) {
+      variant.problems.push({
+        code: 'CODIGO_INVALIDO',
+        detail: `«${code}» pasa de ${GTIN_MAX_LENGTH} caracteres (la ficha del producto no lo acepta); se importa sin código`,
+      })
       variant.barcode = null
     }
   }
@@ -307,6 +336,8 @@ export function convertShopifyCsv(
  * fit, and would block the venue's product writes meanwhile. Each chunk is merge, so re-running after a failure is safe.
  */
 export function chunkImportMenuData(data: ImportMenuData, maxProducts: number): ImportMenuData[] {
+  // Replace archives what the payload does not bring: each chunk would archive the products of the others.
+  if (data.mode !== 'merge') throw new Error('chunkImportMenuData sólo parte cargas en modo merge.')
   const chunks: ImportMenuData[] = []
   let current: ImportMenuData | null = null
   let count = 0
