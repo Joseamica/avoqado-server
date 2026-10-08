@@ -107,8 +107,9 @@ const venta = (extra: Partial<LineaBarrible>): LineaBarrible => ({
     sede: 'PN',
     persona: 'Sofía',
     orden: '1234',
-    esquema: 'Lagree 3 %',
+    esquema: 'Lagree',
     base: '3000.00',
+    tasa: '0.0300', // E6a-fix F13: el descriptor guarda la tasa (no entra a la huella)
     motivo: 'VENTA',
   },
   ...extra,
