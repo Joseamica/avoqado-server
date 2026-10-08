@@ -36,6 +36,7 @@ import type {
   CreatePrinterInput,
   CreateStationInput,
   PreviewRoutingInput,
+  RoutingQuery,
   UpdatePrinterInput,
   UpdateStationInput,
   UpsertGatewayInput,
@@ -353,27 +354,73 @@ export async function upsertGateway(venueId: string, input: UpsertGatewayInput, 
 }
 
 // ── Routing (category/product → station) ────────────────────────────
-export async function getRouting(venueId: string) {
+export async function getRouting(venueId: string, query: RoutingQuery = {}) {
   await assertVenue(venueId)
-  const [categories, products] = await Promise.all([
-    prisma.menuCategory.findMany({
-      where: { venueId },
-      select: { id: true, name: true, printStationId: true },
-      orderBy: { displayOrder: 'asc' },
-    }),
+  const hasDefault = (await prisma.printStation.count({ where: { venueId, active: true, isDefault: true } })) > 0
+  // Misma cascada del motor: sólo una estación activa del propio venue resuelve la categoría.
+  const unroutedCategories = hasDefault
+    ? 0
+    : await prisma.menuCategory.count({
+        where: { venueId, OR: [{ printStationId: null }, { printStation: { isNot: { venueId, active: true } } }] },
+      })
+  const summary = { unroutedCategories, hasDefault }
+  if (query.section === 'summary') return { categories: [], products: [], ...summary }
+
+  const categoryWhere: Prisma.MenuCategoryWhereInput = {
+    venueId,
+    ...(query.section && query.search ? { name: { contains: query.search, mode: 'insensitive' } } : {}),
+  }
+  const productWhere: Prisma.ProductWhereInput = {
+    venueId,
+    deletedAt: null,
+    ...(query.section && query.search ? { name: { contains: query.search, mode: 'insensitive' } } : {}),
+    ...(query.section && query.categoryId ? { categoryId: query.categoryId } : {}),
+  }
+  const categoryPage = (skip: number, take: number) =>
+    prisma.menuCategory
+      .findMany({
+        where: categoryWhere,
+        select: { id: true, name: true, printStationId: true, _count: { select: { products: { where: { venueId, deletedAt: null } } } } },
+        orderBy: [{ displayOrder: 'asc' }, { id: 'asc' }],
+        skip: skip,
+        take: take,
+      })
+      .then(rows => rows.map(({ _count, ...category }) => ({ ...category, productCount: _count.products })))
+  const productPage = (skip: number, take: number) =>
     prisma.product.findMany({
-      where: { venueId },
+      where: productWhere,
       select: { id: true, name: true, categoryId: true, printStationId: true },
-      orderBy: { name: 'asc' },
-    }),
-  ])
-  const stations = await prisma.printStation.findMany({ where: { venueId, active: true }, select: { id: true, isDefault: true } })
-  const hasDefault = stations.some(s => s.isDefault)
-  const activeStationIds = new Set(stations.map(s => s.id))
-  // "Sin ruta" = categorías sin estación ACTIVA propia Y sin default del venue (mismo criterio que el motor:
-  // una categoría apuntando a una estación desactivada/borrada también cuenta como sin ruta).
-  const unroutedCategories = hasDefault ? 0 : categories.filter(c => !c.printStationId || !activeStationIds.has(c.printStationId)).length
-  return { categories, products, unroutedCategories, hasDefault }
+      orderBy: [{ name: 'asc' }, { id: 'asc' }],
+      skip: skip,
+      take: take,
+    })
+
+  if (query.section) {
+    const page = Math.max(1, Math.floor(query.page ?? 1))
+    const pageSize = Math.min(100, Math.max(1, Math.floor(query.pageSize ?? 50)))
+    const skip = (page - 1) * pageSize
+    if (query.section === 'categories') {
+      const [categories, total] = await Promise.all([categoryPage(skip, pageSize), prisma.menuCategory.count({ where: categoryWhere })])
+      return { categories, products: [], ...summary, pagination: { page, pageSize, total, totalPages: Math.ceil(total / pageSize) } }
+    }
+    const [products, total] = await Promise.all([productPage(skip, pageSize), prisma.product.count({ where: productWhere })])
+    return { categories: [], products, ...summary, pagination: { page, pageSize, total, totalPages: Math.ceil(total / pageSize) } }
+  }
+
+  // ponytail: legacy O(catálogo), páginas internas de 100; retirar tras desplegar backend → dashboard y migrar clientes viejos.
+  const categories = [],
+    products = []
+  for (let skip = 0; ; skip += 100) {
+    const rows = await categoryPage(skip, 100)
+    categories.push(...rows)
+    if (rows.length < 100) break
+  }
+  for (let skip = 0; ; skip += 100) {
+    const rows = await productPage(skip, 100)
+    products.push(...rows)
+    if (rows.length < 100) break
+  }
+  return { categories, products, ...summary }
 }
 
 export async function assignRouting(venueId: string, input: AssignRoutingInput, performedBy?: string) {

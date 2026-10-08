@@ -56,8 +56,8 @@ const PROVIDER_CODE = 'MERCADO_PAGO'
 function mapMpStatus(mpStatus: string): PaymentStatus['status'] {
   switch (mpStatus) {
     case 'approved':
-    case 'authorized':
       return 'PAID'
+    case 'authorized':
     case 'pending':
     case 'in_process':
     case 'in_mediation':

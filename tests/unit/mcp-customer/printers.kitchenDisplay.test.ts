@@ -4,6 +4,7 @@
  */
 import { registerPrinterTools } from '../../../src/mcp/tools/printers'
 import type { McpScope } from '../../../src/mcp/scope'
+import { getRouting } from '../../../src/services/dashboard/printStation.dashboard.service'
 import { ForbiddenError } from '../../../src/errors/AppError'
 
 const mockList = jest.fn()
@@ -183,5 +184,15 @@ describe('list_kitchen_tickets (etapa 3)', () => {
     const r = parse(await cliente('list_kitchen_tickets', { venueId: 'v1', status: 'BOGUS' }))
     expect(r.ok).toBe(true)
     expect(mockListKds).toHaveBeenCalledWith('v1', 'BOGUS', undefined)
+  })
+})
+
+describe('list_print_stations routing summary', () => {
+  it('requests only aggregates and preserves the response', async () => {
+    const r = parse(await cliente('list_print_stations', { venueId: 'v1' }))
+    expect(getRouting).toHaveBeenCalledWith('v1', { section: 'summary' })
+    expect(r.hasDefault).toBe(true)
+    expect(r.unroutedCategories).toBe(0)
+    expect(r.stations[0].id).toBe('s1')
   })
 })

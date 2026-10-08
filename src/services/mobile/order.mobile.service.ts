@@ -2133,6 +2133,7 @@ export async function mergeOrders(venueId: string, targetOrderId: string, source
     where: { venueId, currentOrderId: source.id },
     select: { id: true, number: true },
   })
+  let tableFreed = Boolean(boundTable)
   if (boundTable) {
     const sibling = await prisma.order.findFirst({
       where: {
@@ -2148,6 +2149,9 @@ export async function mergeOrders(venueId: string, targetOrderId: string, source
       where: { id: boundTable.id },
       data: sibling ? { status: 'OCCUPIED', currentOrderId: sibling.id } : { status: 'AVAILABLE', currentOrderId: null },
     })
+  } else {
+    const { reconcileTableAfterOrderRemoved } = await import('../tpv/table.tpv.service')
+    ;({ tableFreed } = await reconcileTableAfterOrderRemoved(venueId, source.id))
   }
 
   void (await import('../dashboard/activity-log.service')).logAction({
@@ -2167,7 +2171,7 @@ export async function mergeOrders(venueId: string, targetOrderId: string, source
       version: totals.version,
     },
     merged: { id: source.id, orderNumber: source.orderNumber, items: itemsCount },
-    tableFreed: Boolean(boundTable),
+    tableFreed,
   }
 }
 
@@ -3505,6 +3509,9 @@ export async function cancelOrder(venueId: string, orderId: string, reason?: str
         ? `✅ [ORDER.MOBILE] Table ${boundTable.number} repointed to sibling check after cancellation`
         : `✅ [ORDER.MOBILE] Table ${boundTable.number} released after order cancellation`,
     )
+  } else {
+    const { reconcileTableAfterOrderRemoved } = await import('../tpv/table.tpv.service')
+    await reconcileTableAfterOrderRemoved(venueId, orderId)
   }
 
   const { logAction } = await import('../dashboard/activity-log.service')

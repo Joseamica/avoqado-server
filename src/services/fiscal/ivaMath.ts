@@ -8,7 +8,6 @@
 // customer actually paid. So before handing a gross price to the PAC we either tell it the
 // price is tax-included (preferred) or split it ourselves for our own stored breakdown.
 
-import { hayBloqueados, resolverTratamiento } from './ivaDeRenglon'
 import { tratamientoDesdeTupla, tuplaDesdeTratamiento, type IvaTratamiento } from './ivaTratamiento'
 
 /**
@@ -109,12 +108,11 @@ export function splitPaymentIvaByOrderRates(
 }
 
 /**
- * Group an order's line items into gross (IVA-included, integer cents) per REAL tax rate — the single
- * source of truth for "how do we read each product's rate". An item with no `taxRate` defaults to
- * `defaultRate` (16%, same as the CFDI); 0-gross lines are skipped. The result feeds
- * {@link splitPaymentIvaByOrderRates} so IVA is computed per rate (16% central / 8% frontera / 0% exempt
- * / mixed) instead of assuming a flat rate on the whole amount. Empty items → `[]` (custom-amount sale →
- * callers fall back to the flat rate). Pure: item money arrives as NUMBER pesos (callers convert Decimals).
+ * Agrupa importes YA NORMALIZADOS y tasas YA RESUELTAS (primitiva aritmética).
+ * Para una Order persistida usar `grossByRateFromOrder` en ivaDeOrden: total, cortesías, B2, cargos y
+ * tratamiento sellado no se pueden reconstruir sólo con unitPrice y taxRate. El resultado alimenta
+ * {@link splitPaymentIvaByOrderRates}. Sin importes devuelve []; el llamador conserva el 16 % de
+ * ventas de importe libre. Los valores de entrada son pesos numéricos, la salida es en centavos.
  */
 export function grossByRateFromItems(
   items: { unitPrice: number; quantity: number; discountAmount: number; taxRate: number | null }[],
@@ -198,30 +196,6 @@ export type RenglonConIva = {
 }
 
 type Entrada = [IvaTratamiento, { baseCents: number; ivaCents: number }]
-
-/**
- * La mezcla de una orden por tratamiento: el ÚNICO mapeo de renglón a IVA que usan el estado de resultados y el conciliador
- * de reparto. Cada renglón resuelve su tratamiento con `resolverTratamiento` (sellado > producto > IVA_16) y lleva la tasa de
- * ese tratamiento; un BLOQUEADO, la de su producto sin tocar (hoy la reporta así: Ruling 4b-R4). El importe de cada renglón se
- * calcula como en `grossByRateFromItems`.
- */
-export function mezclaPorTratamiento(items: RenglonConIva[]): MezclaPorTratamiento {
-  const por = new Map<string, MezclaPorTratamiento[number]>()
-  for (const it of items) {
-    const tratamiento = resolverTratamiento({
-      selladoIva: it.ivaTratamiento,
-      productoIva: it.product?.ivaTratamiento,
-      tieneProducto: it.product != null,
-    })
-    const tasa = hayBloqueados([tratamiento]) ? Number(it.product?.taxRate ?? 0.16) : tuplaDesdeTratamiento(tratamiento, 0).taxRate
-    const grossCents = Math.round((Number(it.unitPrice) * it.quantity - Number(it.discountAmount)) * 100)
-    if (grossCents === 0) continue
-    const parte = por.get(`${tratamiento}|${tasa}`)
-    if (parte) parte.grossCents += grossCents
-    else por.set(`${tratamiento}|${tasa}`, { tratamiento, tasa, grossCents })
-  }
-  return [...por.values()]
-}
 
 /**
  * Una mezcla por tasa (la de la póliza, `grossByRateForOrder`) como mezcla por tratamiento, cada parte con SU tasa: 0.16 →

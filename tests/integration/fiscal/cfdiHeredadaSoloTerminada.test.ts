@@ -11,14 +11,18 @@ import { issueCfdiForOrder, cancelCfdi, refreshPendingCancellation, sincronizarC
 import { replaceCfdi } from '@/services/fiscal/cfdiReplacement.service'
 import { encenderIvaPorProducto } from '../../__helpers__/iva-por-producto'
 
+const { isDisposableH1Url } = require('../../../scripts/h1-test-database.cjs')
 const database = new URL(process.env.TEST_DATABASE_URL ?? '')
 // Misma guarda que emisionIndividualSellada: base local desechable (o la de CI), nunca otra. Se admite además la base
 // desechable propia de este bloque (av_db_25_iva_test_b3c).
 if (
   !['localhost', '127.0.0.1'].includes(database.hostname) ||
-  !['/av_db_25_iva_test', '/av_db_25_iva_test_b3c', '/avoqado_h1a_test_20260808'].includes(database.pathname)
+  !(
+    ['/av_db_25_iva_test', '/av_db_25_iva_test_b3c', '/avoqado_h1a_test_20260808'].includes(database.pathname) ||
+    isDisposableH1Url(database)
+  )
 ) {
-  throw new Error('Esta suite exige la base local av_db_25_iva_test(_b3c) o la desechable de CI avoqado_h1a_test_20260808.')
+  throw new Error('Esta suite exige la base local av_db_25_iva_test(_b3c) o una base H1 desechable validada.')
 }
 
 type Extra = { protocoloIva: number | null; status: CfdiStatus }

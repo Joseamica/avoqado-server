@@ -100,6 +100,45 @@ const comandasDe = (orderId: string) =>
   prisma.kdsOrder.findMany({ where: { venueId, orderId }, include: { items: true }, orderBy: { sourceKey: 'asc' }, take: 20 })
 
 describe('authorKitchenTickets', () => {
+  it('F06: fallo en la segunda página revierte comandas y conserva la marca para reintentar', async () => {
+    const v = await nuevaVenta({ items: { create: Array.from({ length: 501 }, () => renglon(taco, 'Taco', 1)) } })
+    const originalTx = prisma.$transaction.bind(prisma) as any
+    const spy = jest.spyOn(prisma, '$transaction').mockImplementation(((callback: any, options: any) =>
+      originalTx(async (tx: any) => {
+        const create = tx.kdsOrderItem.createMany.bind(tx.kdsOrderItem)
+        let pages = 0
+        tx.kdsOrderItem.createMany = (args: any) => {
+          if (++pages === 2) throw new Error('F06 page fault')
+          return create(args)
+        }
+        return callback(tx)
+      }, options)) as any)
+    try {
+      await expect(authorKitchenTickets({ venueId, orderId: v.id, trigger: 'PAID' })).rejects.toThrow('F06 page fault')
+    } finally {
+      spy.mockRestore()
+    }
+    expect(await comandasDe(v.id)).toHaveLength(0)
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: v.id } })).kitchenPendingAt).not.toBeNull()
+    expect(await prisma.orderItem.count({ where: { orderId: v.id, sentToKitchenAt: { not: null } } })).toBe(0)
+    await authorKitchenTickets({ venueId, orderId: v.id, trigger: 'SWEEP' })
+    expect((await comandasDe(v.id)).flatMap(c => c.items)).toHaveLength(501)
+  })
+
+  it.each([501, 1001])('F06: %i renglones empatados llegan completos, sin duplicarse al repetir', async total => {
+    const createdAt = new Date()
+    const v = await nuevaVenta({
+      items: { create: Array.from({ length: total }, (_, i) => renglon(taco, `Taco ${i}`, 1, { createdAt, sequence: 0 })) },
+    })
+    await authorKitchenTickets({ venueId, orderId: v.id, trigger: 'PAID' })
+    const ids = (await comandasDe(v.id)).flatMap(c => c.items.map(i => i.orderItemId))
+    expect(ids).toHaveLength(total)
+    expect(new Set(ids).size).toBe(total)
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: v.id } })).kitchenPendingAt).toBeNull()
+    await authorKitchenTickets({ venueId, orderId: v.id, trigger: 'SWEEP' })
+    expect((await comandasDe(v.id)).flatMap(c => c.items)).toHaveLength(total)
+  })
+
   it('arma una comanda por estación con pantalla, con los ids para rutear, sella el envío y limpia la marca', async () => {
     const v = await nuevaVenta()
     const { ticketIds } = await authorKitchenTickets({ venueId, orderId: v.id, trigger: 'PAID' })

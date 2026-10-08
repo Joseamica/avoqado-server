@@ -23,6 +23,12 @@ export interface AvoqadoSaleItemInput {
    *   - taxIncluded=false → NET (sin IVA) — separated-tax sources (reservations, pos-sync)
    */
   unitPriceCents: number
+  /**
+   * D9 (IVA por producto): precio unitario en PESOS con hasta 6 decimales, sólo cuando no cae en centavos (venta por peso cuyo
+   * cobro redondeó precio × kilos). Si viene, es el precio que se manda al PAC; `unitPriceCents` conserva el redondeo para los
+   * lectores de antes. Ausente en todo lo demás: las entradas viejas y su huella no cambian.
+   */
+  unitPriceDecimal?: string
   discountCents: number
   taxRate: number // 0.16 / 0.08 / 0
   taxExempt: boolean
@@ -78,6 +84,7 @@ function resolveItem(it: AvoqadoSaleItemInput, venueType: VenueType): CfdiItemIn
     description: it.description,
     quantity: it.quantity,
     unitPriceCents: it.unitPriceCents, // gross or net per taxIncluded — straight through
+    ...(it.unitPriceDecimal ? { unitPriceDecimal: it.unitPriceDecimal } : {}),
     discountCents: it.discountCents,
     objetoImp,
     taxes,

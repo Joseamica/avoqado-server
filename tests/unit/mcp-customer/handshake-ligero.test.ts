@@ -24,6 +24,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import prisma from '@/utils/prismaClient'
 import { buildMcpInstructions } from '../../../src/mcp/instructions'
+import { MCP_RESOURCE_URL } from '../../../src/mcp/oauth/config'
 import { resolveScope, type McpScope } from '../../../src/mcp/scope'
 import { buildHandshakeServer, createMcpServer, registerAllTools } from '../../../src/mcp/server'
 
@@ -90,7 +91,7 @@ describe('handleMcpRequest elige el servidor ligero sólo para el saludo', () =>
       '/mcp',
       express.json(),
       (req: { auth?: unknown }, _res: unknown, next: () => void) => {
-        req.auth = { resource: new URL('http://localhost:12344/mcp'), extra: { staffId: 'staff-1', activeOrg: 'org-1' } }
+        req.auth = { resource: MCP_RESOURCE_URL, extra: { staffId: 'staff-1', activeOrg: 'org-1' } }
         next()
       },
       handleMcpRequest,

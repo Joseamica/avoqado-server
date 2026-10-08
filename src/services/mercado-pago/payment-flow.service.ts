@@ -19,7 +19,7 @@
  */
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
-import { getPayment } from './payment.service'
+import { getPayment, mpToCheckoutStatus } from './payment.service'
 import { loadCredentials } from './connection.service'
 import type { MercadoPagoWebhookPayload } from './types'
 
@@ -34,34 +34,6 @@ export type HandleIpnResult =
   | { status: 'duplicate' }
   | { status: 'ignored'; reason: string }
   | { status: 'error'; reason: string }
-
-/**
- * Map MP payment statuses to our internal CheckoutStatus enum.
- *   approved | authorized → COMPLETED
- *   pending | in_process | in_mediation → PENDING
- *   rejected | cancelled → CANCELLED
- *   refunded | charged_back → FAILED (was successful, now reversed)
- */
-function mpToCheckoutStatus(mpStatus: string): 'PENDING' | 'COMPLETED' | 'FAILED' | 'CANCELLED' {
-  switch (mpStatus) {
-    case 'approved':
-    case 'authorized':
-      return 'COMPLETED'
-    case 'pending':
-    case 'in_process':
-    case 'in_mediation':
-      return 'PENDING'
-    case 'rejected':
-    case 'cancelled':
-      return 'CANCELLED'
-    case 'refunded':
-    case 'charged_back':
-      return 'FAILED'
-    default:
-      // Unknown status — preserve PENDING so caller can investigate
-      return 'PENDING'
-  }
-}
 
 export async function handleIpn(p: HandleIpnParams): Promise<HandleIpnResult> {
   const mpUserId = String(p.payload.user_id)

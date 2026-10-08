@@ -1,7 +1,11 @@
+import { Prisma, Unit } from '@prisma/client'
+import { Decimal } from '@prisma/client/runtime/library'
+import { areUnitsCompatible } from '../../utils/unitConversion'
+import { invoicePurchaseUnit } from './invoicePurchaseUnit'
 import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
 import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
-import { parseCfdiReceived } from '../fiscal/cfdiReceived.parser'
+import { parseCfdiReceived, type CfdiConcepto } from '../fiscal/cfdiReceived.parser'
 import { resolveScopeOrNull } from '../fiscal/chartOfAccounts.service'
 import { logAction } from './activity-log.service'
 import { decideMatchVerdict } from './invoiceMatchVerdict'
@@ -28,6 +32,30 @@ export interface AttachInvoiceParams {
   uploadedById?: string | null
 }
 
+/** The invoice evidence column is Decimal(12,3); reject overflow or rounding before either import writes. */
+function validateInvoiceQuantities(conceptos: CfdiConcepto[]) {
+  for (const concepto of conceptos) {
+    const quantity = new Decimal(concepto.cantidad)
+    if (!quantity.isFinite() || quantity.abs().gt('999999999.999') || quantity.decimalPlaces() > 3) {
+      throw new BadRequestError(
+        `La cantidad de "${concepto.descripcion}" excede la precisión admitida: máximo 999999999.999 y tres decimales.`,
+      )
+    }
+  }
+}
+
+function invoiceCreationError(error: unknown): never {
+  if (
+    error instanceof Prisma.PrismaClientKnownRequestError &&
+    error.code === 'P2002' &&
+    Array.isArray(error.meta?.target) &&
+    error.meta.target.includes('venueId') &&
+    error.meta.target.includes('uuid')
+  )
+    throw new ConflictError('Esta factura ya está registrada en este negocio.')
+  throw error
+}
+
 export async function attachInvoiceToPurchaseOrder(params: AttachInvoiceParams) {
   const { venueId, purchaseOrderId, xml, xmlUrl, uploadedById } = params
 
@@ -37,7 +65,8 @@ export async function attachInvoiceToPurchaseOrder(params: AttachInvoiceParams) 
   }
 
   // Valida de paso que el RECEPTOR seamos nosotros: no se importa un CFDI ajeno.
-  const { expense, conceptos } = parseCfdiReceived(xml, scope.rfc)
+  const { expense, conceptos, currency, cfdiType } = parseCfdiReceived(xml, scope.rfc)
+  validateInvoiceQuantities(conceptos)
 
   // Una nota de crédito no es una factura de compra: reduce lo que debes. Tratarla como
   // factura sumaría dos veces. Se rechaza con un mensaje claro en vez de conciliarla mal.
@@ -86,7 +115,11 @@ export async function attachInvoiceToPurchaseOrder(params: AttachInvoiceParams) 
   // Los códigos que este proveedor ya usó, traducidos a NUESTRO catálogo (fase 2:
   // `SupplierItemCode`, código → insumo/producto). El mapeo es del proveedor, no de una
   // orden — por eso aquí se traduce a los renglones de ESTA orden por su material.
-  const knownMaterials = await loadKnownSupplierCodes(venueId, order.supplierId)
+  const knownMaterials = await loadKnownSupplierCodes(
+    venueId,
+    order.supplierId,
+    conceptos.map(c => c.supplierItemCode),
+  )
   const knownCodes: Record<string, string> = {}
   const claimed = new Set<string>()
   for (const [code, target] of knownMaterials) {
@@ -119,50 +152,56 @@ export async function attachInvoiceToPurchaseOrder(params: AttachInvoiceParams) 
     unmatchedOrderItemIds: match.unmatchedOrderItemIds,
   })
 
-  const invoice = await prisma.purchaseOrderInvoice.create({
-    data: {
-      purchaseOrderId,
-      venueId,
-      // Se guarda el proveedor de la ORDEN aunque el emisor no coincida: el desajuste vive
-      // en `matchStatus`, y perder la referencia haría más difícil verlo.
-      supplierId: order.supplierId,
-      uuid: expense.uuid ?? '',
-      serie: expense.serie ?? null,
-      folio: expense.folio ?? null,
-      emisorRfc: expense.proveedorRfc,
-      emisorNombre: expense.proveedorNombre,
-      fechaEmision: new Date(`${expense.fechaEmision}T00:00:00.000Z`),
-      subtotalCents: expense.subtotalCents,
-      descuentoCents: expense.descuentoCents ?? 0,
-      ivaCents: expense.ivaCents ?? 0,
-      totalCents: expense.totalCents,
-      xmlUrl: xmlUrl ?? null,
-      matchStatus: verdict.status,
-      matchNotes: verdict.notes as unknown as object,
-      uploadedById: uploadedById ?? null,
-      lines: {
-        create: match.lines.map(line => {
-          const item = line.purchaseOrderItemId ? order.items.find(i => i.id === line.purchaseOrderItemId) : null
-          const known = line.concepto.supplierItemCode ? knownMaterials.get(line.concepto.supplierItemCode) : null
-          return {
-            purchaseOrderItemId: line.purchaseOrderItemId,
-            // Qué ES el renglón: del renglón casado, o del código ya aprendido. Nunca por texto.
-            rawMaterialId: item?.rawMaterialId ?? known?.rawMaterialId ?? null,
-            productId: item?.rawMaterialId ? null : (item?.productId ?? (known?.rawMaterialId ? null : (known?.productId ?? null))),
-            supplierItemCode: line.concepto.supplierItemCode,
-            descripcion: line.concepto.descripcion,
-            claveProdServ: line.concepto.claveProdServ,
-            claveUnidad: line.concepto.claveUnidad,
-            cantidad: line.concepto.cantidad,
-            valorUnitarioCents: line.concepto.valorUnitarioCents,
-            importeCents: line.concepto.importeCents,
-            descuentoCents: line.concepto.descuentoCents,
-          }
-        }),
+  const invoice = await prisma.purchaseOrderInvoice
+    .create({
+      data: {
+        purchaseOrderId,
+        venueId,
+        // Se guarda el proveedor de la ORDEN aunque el emisor no coincida: el desajuste vive
+        // en `matchStatus`, y perder la referencia haría más difícil verlo.
+        supplierId: order.supplierId,
+        uuid: expense.uuid ?? '',
+        serie: expense.serie ?? null,
+        folio: expense.folio ?? null,
+        emisorRfc: expense.proveedorRfc,
+        emisorNombre: expense.proveedorNombre,
+        fechaEmision: new Date(`${expense.fechaEmision}T00:00:00.000Z`),
+        subtotalCents: expense.subtotalCents,
+        descuentoCents: expense.descuentoCents ?? 0,
+        ivaCents: expense.ivaCents ?? 0,
+        totalCents: expense.totalCents,
+        currency,
+        cfdiType,
+        iepsCents: expense.iepsCents ?? 0,
+        xmlUrl: xmlUrl ?? null,
+        matchStatus: verdict.status,
+        matchNotes: verdict.notes as unknown as object,
+        uploadedById: uploadedById ?? null,
+        lines: {
+          create: match.lines.map(line => {
+            const item = line.purchaseOrderItemId ? order.items.find(i => i.id === line.purchaseOrderItemId) : null
+            const known = line.concepto.supplierItemCode ? knownMaterials.get(line.concepto.supplierItemCode) : null
+            return {
+              purchaseOrderItemId: line.purchaseOrderItemId,
+              // Qué ES el renglón: del renglón casado, o del código ya aprendido. Nunca por texto.
+              rawMaterialId: item?.rawMaterialId ?? known?.rawMaterialId ?? null,
+              productId: item?.rawMaterialId ? null : (item?.productId ?? (known?.rawMaterialId ? null : (known?.productId ?? null))),
+              supplierItemCode: line.concepto.supplierItemCode,
+              descripcion: line.concepto.descripcion,
+              claveProdServ: line.concepto.claveProdServ,
+              claveUnidad: line.concepto.claveUnidad,
+              cantidad: line.concepto.cantidad,
+              valorUnitarioCents: line.concepto.valorUnitarioCents,
+              importeCents: line.concepto.importeCents,
+              descuentoCents: line.concepto.descuentoCents,
+              iepsCents: line.concepto.iepsCents ?? 0,
+            }
+          }),
+        },
       },
-    },
-    include: { lines: true },
-  })
+      include: { lines: true },
+    })
+    .catch(invoiceCreationError)
 
   // Aprender: cada renglón que casó con un renglón de la orden que SÍ sabe qué es, y que
   // traía código del proveedor, alimenta `SupplierItemCode`. Es lo que hace que la próxima
@@ -185,8 +224,11 @@ export async function attachInvoiceToPurchaseOrder(params: AttachInvoiceParams) 
           lastDescription: line.concepto.descripcion,
           createdById: uploadedById ?? null,
         },
-        // El más reciente gana: si el proveedor reasignó el código, la última verdad manda.
+        // Evidence matching proves the target only, not a purchase-unit conversion. Clear the old conversion.
         update: {
+          purchaseUnit: null,
+          presentationName: null,
+          claveUnidad: line.concepto.claveUnidad,
           rawMaterialId: item.rawMaterialId,
           productId: item.rawMaterialId ? null : item.productId,
           lastDescription: line.concepto.descripcion,
@@ -220,15 +262,26 @@ export async function attachInvoiceToPurchaseOrder(params: AttachInvoiceParams) 
  * nuevas. El mapeo estable es código → insumo/producto; a qué renglón corresponde se decide
  * orden por orden.
  */
+type KnownSupplierCode = {
+  rawMaterialId: string | null
+  productId: string | null
+  claveUnidad?: string | null
+  purchaseUnit?: Unit | null
+  presentationName?: string | null
+}
 async function loadKnownSupplierCodes(
   venueId: string,
   supplierId: string,
-): Promise<Map<string, { rawMaterialId: string | null; productId: string | null }>> {
+  codes: Array<string | null>,
+): Promise<Map<string, KnownSupplierCode>> {
+  const wanted = [...new Set(codes.filter((c): c is string => !!c))]
+  if (!wanted.length) return new Map()
   const rows = await prisma.supplierItemCode.findMany({
-    where: { venueId, supplierId },
-    select: { code: true, rawMaterialId: true, productId: true },
+    where: { venueId, supplierId, code: { in: wanted } },
+    select: { code: true, rawMaterialId: true, productId: true, claveUnidad: true, purchaseUnit: true, presentationName: true },
+    take: wanted.length,
   })
-  return new Map(rows.map(r => [r.code, { rawMaterialId: r.rawMaterialId, productId: r.productId }]))
+  return new Map(rows.map(row => [row.code, row]))
 }
 
 export interface RegisterSupplierInvoiceParams {
@@ -253,7 +306,8 @@ export async function registerSupplierInvoice(params: RegisterSupplierInvoicePar
     throw new BadRequestError('Este negocio aún no tiene un RFC configurado. Configura la facturación (CFDI) primero.')
   }
 
-  const { expense, conceptos } = parseCfdiReceived(xml, scope.rfc)
+  const { expense, conceptos, currency, cfdiType } = parseCfdiReceived(xml, scope.rfc)
+  validateInvoiceQuantities(conceptos)
   if (expense.comprobanteTipo !== 'INGRESO') {
     throw new BadRequestError(
       `Este CFDI es de tipo ${expense.comprobanteTipo}, no una factura de compra. Las notas de crédito todavía no se pueden asociar.`,
@@ -274,8 +328,12 @@ export async function registerSupplierInvoice(params: RegisterSupplierInvoicePar
   })
 
   const knownMaterials = supplier
-    ? await loadKnownSupplierCodes(venueId, supplier.id)
-    : new Map<string, { rawMaterialId: string | null; productId: string | null }>()
+    ? await loadKnownSupplierCodes(
+        venueId,
+        supplier.id,
+        conceptos.map(c => c.supplierItemCode),
+      )
+    : new Map<string, KnownSupplierCode>()
 
   let unidentifiedLines = 0
   const lines = conceptos.map(concepto => {
@@ -293,36 +351,44 @@ export async function registerSupplierInvoice(params: RegisterSupplierInvoicePar
       valorUnitarioCents: concepto.valorUnitarioCents,
       importeCents: concepto.importeCents,
       descuentoCents: concepto.descuentoCents,
+      iepsCents: concepto.iepsCents ?? 0,
+      purchaseUnit: known?.claveUnidad === concepto.claveUnidad ? (known.purchaseUnit ?? null) : null,
+      presentationName: known?.claveUnidad === concepto.claveUnidad ? (known.presentationName ?? null) : null,
     }
   })
 
-  const invoice = await prisma.purchaseOrderInvoice.create({
-    data: {
-      purchaseOrderId: null,
-      venueId,
-      supplierId: supplier?.id ?? null,
-      uuid: expense.uuid ?? '',
-      serie: expense.serie ?? null,
-      folio: expense.folio ?? null,
-      emisorRfc: expense.proveedorRfc,
-      emisorNombre: expense.proveedorNombre,
-      fechaEmision: new Date(`${expense.fechaEmision}T00:00:00.000Z`),
-      subtotalCents: expense.subtotalCents,
-      descuentoCents: expense.descuentoCents ?? 0,
-      ivaCents: expense.ivaCents ?? 0,
-      totalCents: expense.totalCents,
-      xmlUrl: xmlUrl ?? null,
-      matchStatus: 'NO_ORDER',
-      matchNotes: {
-        unidentifiedLines,
-        totalLines: conceptos.length,
-        ...(supplier ? {} : { supplierUnknown: true }),
-      } as unknown as object,
-      uploadedById: uploadedById ?? null,
-      lines: { create: lines },
-    },
-    include: { lines: true },
-  })
+  const invoice = await prisma.purchaseOrderInvoice
+    .create({
+      data: {
+        purchaseOrderId: null,
+        venueId,
+        supplierId: supplier?.id ?? null,
+        uuid: expense.uuid ?? '',
+        serie: expense.serie ?? null,
+        folio: expense.folio ?? null,
+        emisorRfc: expense.proveedorRfc,
+        emisorNombre: expense.proveedorNombre,
+        fechaEmision: new Date(`${expense.fechaEmision}T00:00:00.000Z`),
+        subtotalCents: expense.subtotalCents,
+        descuentoCents: expense.descuentoCents ?? 0,
+        ivaCents: expense.ivaCents ?? 0,
+        totalCents: expense.totalCents,
+        currency,
+        cfdiType,
+        iepsCents: expense.iepsCents ?? 0,
+        xmlUrl: xmlUrl ?? null,
+        matchStatus: 'NO_ORDER',
+        matchNotes: {
+          unidentifiedLines,
+          totalLines: conceptos.length,
+          ...(supplier ? {} : { supplierUnknown: true }),
+        } as unknown as object,
+        uploadedById: uploadedById ?? null,
+        lines: { create: lines },
+      },
+      include: { lines: true },
+    })
+    .catch(invoiceCreationError)
 
   logAction({
     staffId: uploadedById ?? undefined,
@@ -343,6 +409,8 @@ export interface IdentifyInvoiceLineParams {
   rawMaterialId?: string | null
   productId?: string | null
   actorId?: string | null
+  purchaseUnit?: Unit | null
+  presentationName?: string | null
 }
 
 /**
@@ -359,24 +427,55 @@ export async function identifyInvoiceLine(params: IdentifyInvoiceLineParams) {
     throw new BadRequestError('Un renglón es un insumo O un producto: exactamente uno de los dos.')
   }
 
-  const line = await prisma.purchaseOrderInvoiceLine.findFirst({
-    where: { id: lineId, invoiceId, invoice: { venueId } }, // acotado al negocio
-    select: { id: true, supplierItemCode: true, descripcion: true, invoice: { select: { id: true, supplierId: true } } },
-  })
-  if (!line) throw new NotFoundError('Renglón de factura no encontrado en este negocio')
-
-  // El destino tiene que existir EN ESTE negocio: un id ajeno no identifica nada.
-  if (rawMaterialId) {
-    const exists = await prisma.rawMaterial.findFirst({ where: { id: rawMaterialId, venueId }, select: { id: true } })
-    if (!exists) throw new NotFoundError('Ese insumo no existe en este negocio')
-  } else if (productId) {
-    const exists = await prisma.product.findFirst({ where: { id: productId, venueId }, select: { id: true } })
-    if (!exists) throw new NotFoundError('Ese producto no existe en este negocio')
-  }
-
-  const updated = await prisma.purchaseOrderInvoiceLine.update({
-    where: { id: line.id },
-    data: { rawMaterialId, productId },
+  const { line, updated, purchaseFields } = await prisma.$transaction(async tx => {
+    // Same invoice lock as preparation: an identification cannot slip in after the order is sealed.
+    await tx.$queryRaw(Prisma.sql`SELECT id FROM "PurchaseOrderInvoice" WHERE id = ${invoiceId} AND "venueId" = ${venueId} FOR UPDATE`)
+    const line = await tx.purchaseOrderInvoiceLine.findFirst({
+      where: { id: lineId, invoiceId, invoice: { venueId } },
+      select: {
+        id: true,
+        supplierItemCode: true,
+        descripcion: true,
+        claveUnidad: true,
+        purchaseUnit: true,
+        presentationName: true,
+        invoice: { select: { id: true, supplierId: true, inventoryPreparedAt: true, inventoryReceivedAt: true } },
+      },
+    })
+    if (!line) throw new NotFoundError('Renglón de factura no encontrado en este negocio')
+    if (line.invoice.inventoryPreparedAt || line.invoice.inventoryReceivedAt)
+      throw new ConflictError('La factura ya preparó una orden. Revisa su autorización antes de cambiarla.')
+    const target = rawMaterialId
+      ? await tx.rawMaterial.findFirst({ where: { id: rawMaterialId, venueId }, select: { id: true, unit: true } })
+      : await tx.product.findFirst({ where: { id: productId!, venueId }, select: { id: true, unit: true } })
+    if (!target) throw new NotFoundError(rawMaterialId ? 'Ese insumo no existe en este negocio' : 'Ese producto no existe en este negocio')
+    const presentationName = params.presentationName?.trim() || null
+    let purchaseUnit = params.purchaseUnit ?? invoicePurchaseUnit(line.claveUnidad)
+    if (presentationName) {
+      if (!rawMaterialId) throw new BadRequestError('Las presentaciones de compra sólo aplican a insumos.')
+      const presentation = await tx.rawMaterialPresentation.findFirst({ where: { venueId, rawMaterialId, name: presentationName } })
+      if (!presentation || new Decimal(presentation.factorToBase).lte(0))
+        throw new BadRequestError('La presentación no existe o tiene un factor inválido. Configúrala en el insumo.')
+      purchaseUnit = target.unit
+    } else if (purchaseUnit && invoicePurchaseUnit(line.claveUnidad) && purchaseUnit !== invoicePurchaseUnit(line.claveUnidad)) {
+      throw new BadRequestError('La unidad de compra no coincide con el XML. Usa una presentación explícita para otra equivalencia.')
+    } else if (
+      purchaseUnit &&
+      (!target.unit || !areUnitsCompatible(purchaseUnit, target.unit) || (productId && purchaseUnit !== target.unit))
+    ) {
+      throw new BadRequestError('La unidad de compra no coincide con la unidad del artículo. Elige una presentación o la unidad correcta.')
+    }
+    const purchaseFields = { purchaseUnit, presentationName, claveUnidad: line.claveUnidad ?? null }
+    const hasPurchaseFields =
+      params.purchaseUnit !== undefined ||
+      params.presentationName !== undefined ||
+      line.purchaseUnit !== undefined ||
+      line.presentationName !== undefined
+    const updated = await tx.purchaseOrderInvoiceLine.update({
+      where: { id: line.id, invoiceId },
+      data: { rawMaterialId, productId, ...(hasPurchaseFields ? { purchaseUnit, presentationName } : {}) },
+    })
+    return { line, updated, purchaseFields }
   })
 
   // Aprender, si hay con qué: código del proveedor + proveedor conocido.
@@ -390,9 +489,10 @@ export async function identifyInvoiceLine(params: IdentifyInvoiceLineParams) {
         rawMaterialId,
         productId,
         lastDescription: line.descripcion,
+        ...purchaseFields,
         createdById: actorId ?? null,
       },
-      update: { rawMaterialId, productId, lastDescription: line.descripcion },
+      update: { rawMaterialId, productId, lastDescription: line.descripcion, ...purchaseFields },
     })
     logAction({
       staffId: actorId ?? undefined,

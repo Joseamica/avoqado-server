@@ -13,6 +13,7 @@ import {
 import { Decimal } from '@prisma/client/runtime/library'
 import { WASTE_REASON_CODES } from '../../services/shared/wasteReasons'
 import { WASTE_KEY_PATTERN } from '../../services/shared/wasteKey'
+import { ProductBodyBase } from './menu.schema'
 
 // Some legacy products and raw materials in production use non-cuid-v1 IDs
 // (e.g. "rb44l0fgk30kp0soskrlys5c", "prod_ad_blanq_003"). Strict z.cuid()
@@ -925,6 +926,12 @@ export const CreateProductWithInventorySchema = z.object({
       price: z.number().min(0),
       categoryId: z.string().cuid(),
       imageUrl: z.union([z.string().url(), z.literal('')]).optional(),
+      // Los mismos códigos que el paso 1. Sin declararlos zod los tira y el SKU se autogenera (La Galeterie, 5-oct).
+      sku: z.string().max(64).optional(),
+      gtin: z.string().max(32).optional(),
+      // Lo demás que el asistente manda al crear, con las reglas del alta normal: antes también se tiraba.
+      ...ProductBodyBase.pick({ modifierGroupIds: true, soldByWeight: true, satProductKey: true, satUnitKey: true, objetoImp: true })
+        .shape,
       type: z
         .enum([
           'FOOD',

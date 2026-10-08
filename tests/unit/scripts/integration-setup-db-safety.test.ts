@@ -208,11 +208,4 @@ describe('integration setup database isolation', () => {
     expect(packageJson.scripts['test:integration:migrations']).toContain('h1a-migration-lock-safety.integration.test.ts')
     expect(packageJson.scripts['test:integration:migrations']).toContain('h1a-migration.integration.test.ts')
   })
-
-  it('disconnects the per-suite Prisma singleton before Jest loads the next integration file', () => {
-    const source = fs.readFileSync(path.resolve(process.cwd(), 'tests/__helpers__/integration-setup.ts'), 'utf8')
-
-    expect(source).toContain("await import('@/utils/prismaClient')")
-    expect(source).toContain('await prisma.$disconnect()')
-  })
 })

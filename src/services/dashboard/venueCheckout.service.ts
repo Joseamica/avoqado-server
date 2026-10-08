@@ -331,7 +331,7 @@ export async function executeMercadoPagoPaymentForVenue(
   venueSlug: string,
   sessionId: string,
   input: {
-    token: string
+    token?: string
     paymentMethodId: string
     installments: number
     issuerId?: string
@@ -339,7 +339,7 @@ export async function executeMercadoPagoPaymentForVenue(
   },
 ) {
   const { loadCredentials } = await import('@/services/mercado-pago/connection.service')
-  const { createPayment } = await import('@/services/mercado-pago/payment.service')
+  const { createPayment, mpToCheckoutStatus } = await import('@/services/mercado-pago/payment.service')
 
   const venue = await prisma.venue.findUnique({ where: { slug: venueSlug }, select: { id: true } })
   if (!venue) throw new NotFoundError('Venue no encontrado')
@@ -379,12 +379,7 @@ export async function executeMercadoPagoPaymentForVenue(
     idempotencyKey: session.sessionId,
   })
 
-  const optimisticStatus =
-    payment.status === 'approved' || payment.status === 'authorized'
-      ? 'COMPLETED'
-      : payment.status === 'rejected' || payment.status === 'cancelled'
-        ? 'CANCELLED'
-        : 'PENDING'
+  const optimisticStatus = mpToCheckoutStatus(payment.status)
 
   await prisma.checkoutSession.update({
     where: { id: session.id },

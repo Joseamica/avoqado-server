@@ -26,6 +26,14 @@ const armarApp = () => {
   api.get('/prohibido', (_req: Request, res: Response) => res.status(401).json({}))
   api.get('/truena', (_req: Request, res: Response) => res.status(500).json({}))
   api.get('/ok', (_req: Request, res: Response) => res.json({}))
+  api.get('/cancelado', (_req: Request, res: Response) => {
+    res.locals.requestEndLevel = 'info'
+    res.status(504).json({})
+  })
+  api.get('/nivel-raro', (_req: Request, res: Response) => {
+    res.locals.requestEndLevel = 'debug'
+    res.status(500).json({})
+  })
   app.use('/api/v1', api)
   return app
 }
@@ -64,4 +72,19 @@ it('regresión: 401 en warn, 500 en error y 200 en info', async () => {
   expect(await nivelDe('/api/v1/prohibido')).toBe('warn')
   expect(await nivelDe('/api/v1/truena')).toBe('error')
   expect(await nivelDe('/api/v1/ok')).toBe('info')
+})
+
+/**
+ * 3-oct-2026 · Los 9 «Error 504» de `terminal-payment` de un día en producción eran TODOS un cajero tocando «Cancelar»: la
+ * espera del cobro se cierra con 504 a propósito (el POS debe confirmar en la terminal), pero no es una falla del sistema.
+ * El handler lo declara en `res.locals.requestEndLevel` y la línea baja de nivel; el status HTTP no cambia.
+ */
+it('un 5xx que su handler declaró esperado (`res.locals.requestEndLevel = info`) cierra en info', async () => {
+  await request(armarApp()).get('/api/v1/cancelado').expect(504)
+  expect(await nivelDe('/api/v1/cancelado')).toBe('info')
+})
+
+it('🔴 un nivel declarado que no sea info/warn se ignora: el 5xx sigue en error', async () => {
+  await request(armarApp()).get('/api/v1/nivel-raro').expect(500)
+  expect(await nivelDe('/api/v1/nivel-raro')).toBe('error')
 })

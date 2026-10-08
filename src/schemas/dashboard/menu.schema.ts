@@ -145,7 +145,7 @@ export const ProductSchema = z.object({
 })
 
 // Base object — shared between Create and Update (allows .partial())
-const ProductBodyBase = z.object({
+export const ProductBodyBase = z.object({
   sku: z.string().regex(SKU_REGEX, 'SKU must contain only letters, numbers, underscores, and hyphens'),
   gtin: z.string().max(14).optional().nullable(),
   name: z.string().min(1, 'Name is required').max(255),
@@ -421,6 +421,14 @@ export const CreateModifierSchema = z.object({
     price: z.number().min(0).multipleOf(0.01).default(0),
     active: z.boolean().optional(),
     sku: ModifierSkuSchema,
+    durationMin: z.number().int().min(0).max(480).nullable().optional(),
+    rawMaterialId: z.string().cuid('Invalid raw material ID format').nullable().optional(),
+    quantityPerUnit: z.number().positive('Quantity must be positive').nullable().optional(),
+    unit: z
+      .enum(['UNIT', 'KILOGRAM', 'GRAM', 'LITER', 'MILLILITER', 'OUNCE', 'POUND', 'CUP', 'TABLESPOON', 'TEASPOON'])
+      .nullable()
+      .optional(),
+    inventoryMode: z.enum(['ADDITION', 'SUBSTITUTION']).nullable().optional(),
   }),
   params: z.object({
     venueId: z.string().cuid('Invalid venue ID format'),
@@ -430,16 +438,7 @@ export const CreateModifierSchema = z.object({
 export type CreateModifierDto = z.infer<typeof CreateModifierSchema>['body']
 
 export const UpdateModifierSchema = z.object({
-  body: CreateModifierSchema.shape.body.partial().extend({
-    // ✅ WORLD-CLASS: Inventory configuration for modifiers (Toast/Square pattern)
-    rawMaterialId: z.string().cuid('Invalid raw material ID format').nullable().optional(),
-    quantityPerUnit: z.number().positive('Quantity must be positive').nullable().optional(),
-    unit: z
-      .enum(['UNIT', 'KILOGRAM', 'GRAM', 'LITER', 'MILLILITER', 'OUNCE', 'POUND', 'CUP', 'TABLESPOON', 'TEASPOON'])
-      .nullable()
-      .optional(),
-    inventoryMode: z.enum(['ADDITION', 'SUBSTITUTION']).nullable().optional(),
-  }),
+  body: CreateModifierSchema.shape.body.partial(),
   params: z.object({
     venueId: z.string().cuid('Invalid venue ID format'),
     modifierGroupId: z.string().cuid('Invalid modifier group ID format'),

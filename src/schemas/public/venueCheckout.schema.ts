@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { payRequestSchema } from './mercadoPagoPaymentIntent.schema'
 
 /**
  * Request schemas for the public venue-checkout endpoints (embeddable widget).
@@ -28,25 +29,8 @@ export const venueMpIntentSchema = z.object({
 })
 
 export const venueMpPaySchema = z.object({
-  params: z.object({ venueSlug: z.string().min(1) }),
-  body: z.object({
-    sessionId: z.string().min(1, 'Sesión requerida'),
-    token: z.string().min(1, 'Token requerido'),
-    paymentMethodId: z.string().min(1),
-    installments: z.number().int().positive(),
-    issuerId: z.string().optional(),
-    payer: z.object({
-      email: z.string().email(),
-      firstName: z.string().optional(),
-      lastName: z.string().optional(),
-      identification: z
-        .object({
-          type: z.string(),
-          number: z.string(),
-        })
-        .optional(),
-    }),
-  }),
+  params: z.object({ venueSlug: z.string().min(1, 'Venue inválido') }),
+  body: payRequestSchema,
 })
 
 export const venueCheckoutSessionSchema = z.object({

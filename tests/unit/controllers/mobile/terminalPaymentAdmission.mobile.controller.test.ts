@@ -197,3 +197,41 @@ describe('getTerminalPaymentStatus — una lápida sale FAILED con su failureCod
     expect(res.payload).toMatchObject({ success: true, inProgress: false, status: 'FAILED', failureCode: 'REJECTED_TERMINAL_BUSY' })
   })
 })
+
+/**
+ * 3-oct-2026 · Cuando el cajero cancela, el servicio cierra la espera del cobro con `timeout` y la marca `cancelRequested`.
+ * El HTTP sigue siendo el 504 de siempre (las apps publicadas lo leen como «confirma en la terminal»), pero la línea del log
+ * baja a info: no es una falla del sistema. La marca es interna y NO viaja en la respuesta.
+ */
+describe('sendTerminalPayment — espera cerrada por la cancelación del cajero', () => {
+  it('conserva el 504 y el cuerpo de siempre, pide nivel info al log y no expone la marca', async () => {
+    sendPaymentToTerminalMock.mockResolvedValue({
+      requestId,
+      status: 'timeout',
+      errorMessage: 'Cancelación solicitada. Confirma el resultado en la terminal antes de volver a cobrar.',
+      cancelRequested: true,
+    })
+    const res = Object.assign(buildRes(), { locals: {} as Record<string, unknown> })
+
+    await sendTerminalPayment(buildReq(), res)
+
+    expect(res.statusCode).toBe(504)
+    expect(res.locals.requestEndLevel).toBe('info')
+    expect(res.payload).toEqual({
+      success: false,
+      requestId,
+      status: 'timeout',
+      errorMessage: 'Cancelación solicitada. Confirma el resultado en la terminal antes de volver a cobrar.',
+    })
+  })
+
+  it('regresión: un timeout SIN cancelación (la terminal no contestó) sigue en 504 y el log decide su nivel normal', async () => {
+    sendPaymentToTerminalMock.mockResolvedValue({ requestId, status: 'timeout', errorMessage: 'La terminal no respondió a tiempo' })
+    const res = Object.assign(buildRes(), { locals: {} as Record<string, unknown> })
+
+    await sendTerminalPayment(buildReq(), res)
+
+    expect(res.statusCode).toBe(504)
+    expect(res.locals.requestEndLevel).toBeUndefined()
+  })
+})

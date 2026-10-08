@@ -12,6 +12,7 @@ import {
   assignRoutingSchema,
   createPrinterSchema,
   createStationSchema,
+  getRoutingSchema,
   previewRoutingSchema,
   printerParamSchema,
   setKitchenDisplaySchema,
@@ -35,7 +36,7 @@ router.get('/gateway', checkPermission('printers:read'), validateRequest(venuePa
 router.put('/gateway', checkPermission('printers:manage'), validateRequest(upsertGatewaySchema), controller.upsertGateway)
 
 // ---- Routing (category/product → station) + simulator ----
-router.get('/routing', checkPermission('printers:read'), validateRequest(venueParamSchema), controller.getRouting)
+router.get('/routing', checkPermission('printers:read'), validateRequest(getRoutingSchema), controller.getRouting)
 router.put('/routing', checkPermission('printers:manage'), validateRequest(assignRoutingSchema), controller.assignRouting)
 router.post('/routing/preview', checkPermission('printers:read'), validateRequest(previewRoutingSchema), controller.previewRouting)
 

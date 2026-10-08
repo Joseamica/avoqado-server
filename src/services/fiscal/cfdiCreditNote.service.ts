@@ -37,6 +37,7 @@ import {
 import { ConflictError } from '../../errors/AppError'
 import { bloquearOrdenParaFacturar, tomarAdmisionCompartida } from './admisionIva'
 import { huellaDeEntrada, leerEntrada } from './entradaDocumental'
+import { conceptoDesdeElPayload, documentoSegunElPac } from './reglaDelPac'
 import { CFDI_VIVO } from './exclusionGlobal'
 import { correoCapturado } from './cfdiEmail.service'
 import type { CreditNoteParams } from './providers/fiscal-provider.interface'
@@ -46,6 +47,8 @@ const ENTRADA_INVALIDA = 'La entrada fiscal de esta factura requiere revisión d
 const IVA_MIXTO =
   'La factura original tiene productos con IVA distinto de 16 %; la nota de crédito para esas ventas todavía no está disponible aquí. Emítela desde el portal del SAT o de tu PAC.'
 const cents = (v: unknown) => Number.isSafeInteger(v) && Number(v) >= 0
+/** D9: precio por kilo con hasta 6 decimales, como lo congela la entrada. */
+const PRECIO_DECIMAL = /^\d{1,10}(\.\d{1,6})?$/
 
 // ─── Tipos ────────────────────────────────────────────────────────────────────
 
@@ -224,6 +227,7 @@ export function checkCreditNoteEligibility(loaded: LoadedRefundForCreditNote): C
             i &&
             cents(i.unitPriceCents) &&
             cents(i.discountCents) &&
+            (i.unitPriceDecimal === undefined || (typeof i.unitPriceDecimal === 'string' && PRECIO_DECIMAL.test(i.unitPriceDecimal))) &&
             typeof i.taxIncluded === 'boolean' &&
             Number.isFinite(i.quantity) &&
             i.quantity > 0 &&
@@ -256,29 +260,39 @@ export function checkCreditNoteEligibility(loaded: LoadedRefundForCreditNote): C
           isGlobal: false,
         }).valid
       if (valid && e!.clasificacion === 'TODO_16') {
+        let cuadraPorConcepto = true
         let subtotalCents = 0
         let totalCents = 0
         for (const item of e!.params.items) {
+          const precio =
+            item.unitPriceDecimal !== undefined
+              ? new Prisma.Decimal(item.unitPriceDecimal)
+              : new Prisma.Decimal(item.unitPriceCents).div(100)
           // Mismo half-up por concepto y descuento por línea que la captura individual.
-          const lineCents =
-            importeConceptoCents({ unitPrice: new Prisma.Decimal(item.unitPriceCents).div(100), quantity: item.quantity }) -
-            item.discountCents
+          const lineCents = importeConceptoCents({ unitPrice: precio, quantity: item.quantity }) - item.discountCents
           const total = item.taxIncluded ? lineCents : Math.round(lineCents * (1 + 0.16))
           const subtotal = item.taxIncluded ? splitIvaIncluded(lineCents, 0.16).netCents : lineCents
           if (![lineCents, subtotal, total].every(cents)) {
-            valid = false
+            cuadraPorConcepto = false
             break
           }
           subtotalCents += subtotal
           totalCents += total
         }
-        valid =
-          valid &&
+        cuadraPorConcepto =
+          cuadraPorConcepto &&
           cents(subtotalCents) &&
           cents(totalCents) &&
           subtotalCents === e!.montos.subtotalCents &&
           totalCents - subtotalCents === e!.montos.taxCents &&
           totalCents === e!.montos.totalCents
+        // B3a Tarea 6b: una factura ajustada guarda los montos del PAC (base neta del descuento, IVA por tasa, total = lo cobrado).
+        const pac = documentoSegunElPac(e!.params.items.map(conceptoDesdeElPayload))
+        const cuadraConElPac =
+          pac.subtotalCents - pac.descuentoCents === e!.montos.subtotalCents &&
+          pac.ivaCents === e!.montos.taxCents &&
+          pac.totalCents === e!.montos.totalCents
+        valid = cuadraPorConcepto || cuadraConElPac
       }
     } catch {
       valid = false

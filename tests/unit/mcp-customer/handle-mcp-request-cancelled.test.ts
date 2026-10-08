@@ -22,6 +22,7 @@ import type { Request, Response } from 'express'
 import logger from '@/config/logger'
 import { getContext, runWithContext, type RequestCancellation } from '@/observability/executionContext'
 import { RequestCancelledError } from '@/utils/requestCancellation'
+import { MCP_RESOURCE_URL } from '../../../src/mcp/oauth/config'
 import { handleMcpRequest } from '../../../src/mcp/server'
 import { recordCancelledToolCall } from '../../../src/mcp/instrument'
 import { resolveScope } from '../../../src/mcp/scope'
@@ -31,7 +32,7 @@ const mockResolveScope = resolveScope as jest.Mock
 
 function makeReq(body: unknown) {
   return {
-    auth: { resource: new URL('http://localhost:12344/mcp'), extra: { staffId: 'staff-1', activeOrg: 'org-1' } },
+    auth: { resource: MCP_RESOURCE_URL, extra: { staffId: 'staff-1', activeOrg: 'org-1' } },
     body,
     headers: {},
   } as unknown as Request

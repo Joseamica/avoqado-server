@@ -62,7 +62,7 @@ module.exports = {
       // syntax in their dist. Without transforming them, ts-jest
       // chokes on the import statement at runtime.
       transformIgnorePatterns: ['node_modules/(?!(@scure|@noble|otplib|@otplib|satori|satori-html|ultrahtml))'],
-      setupFilesAfterEnv: ['<rootDir>/tests/__helpers__/setup.ts'],
+      setupFilesAfterEnv: ['<rootDir>/tests/__helpers__/supertest-loopback-setup.ts', '<rootDir>/tests/__helpers__/setup.ts'],
       moduleNameMapper: {
         // Resolve the generated client from THIS checkout. Jest's nested package-import resolution
         // can otherwise load .prisma/client from the primary checkout in an isolated worktree.
@@ -99,7 +99,7 @@ module.exports = {
         '^.+\\.(ts|tsx|js|jsx|mjs)$': ['ts-jest', { isolatedModules: true }],
       },
       transformIgnorePatterns: ['node_modules/(?!(@scure|@noble|otplib|@otplib|satori|satori-html|ultrahtml))'],
-      setupFilesAfterEnv: ['<rootDir>/tests/__helpers__/setup.ts'],
+      setupFilesAfterEnv: ['<rootDir>/tests/__helpers__/supertest-loopback-setup.ts', '<rootDir>/tests/__helpers__/setup.ts'],
       moduleNameMapper: {
         // Resolve the generated client from THIS checkout. Jest's nested package-import resolution
         // can otherwise load .prisma/client from the primary checkout in an isolated worktree.
@@ -136,7 +136,7 @@ module.exports = {
         '^.+\\.(ts|tsx|js|jsx|mjs)$': ['ts-jest', { isolatedModules: true }],
       },
       transformIgnorePatterns: ['node_modules/(?!(@scure|@noble|otplib|@otplib|satori|satori-html|ultrahtml))'],
-      setupFilesAfterEnv: ['<rootDir>/tests/__helpers__/setup.ts'],
+      setupFilesAfterEnv: ['<rootDir>/tests/__helpers__/supertest-loopback-setup.ts', '<rootDir>/tests/__helpers__/setup.ts'],
       moduleNameMapper: {
         // Resolve the generated client from THIS checkout. Jest's nested package-import resolution
         // can otherwise load .prisma/client from the primary checkout in an isolated worktree.
@@ -160,6 +160,7 @@ module.exports = {
     },
     {
       displayName: 'integration',
+      testEnvironment: '<rootDir>/tests/__helpers__/integration-environment.cjs',
       testMatch: ['<rootDir>/tests/integration/**/*.test.ts'],
       transform: {
         // isolatedModules: transpile-only (no per-file type-checking) in tests.
@@ -173,7 +174,7 @@ module.exports = {
         '^.+\\.(ts|tsx|js|jsx|mjs)$': ['ts-jest', { isolatedModules: true }],
       },
       transformIgnorePatterns: ['node_modules/(?!(@scure|@noble|otplib|@otplib|satori|satori-html|ultrahtml))'],
-      setupFilesAfterEnv: ['<rootDir>/tests/__helpers__/integration-setup.ts'],
+      setupFilesAfterEnv: ['<rootDir>/tests/__helpers__/supertest-loopback-setup.ts', '<rootDir>/tests/__helpers__/integration-setup.ts'],
       moduleNameMapper: {
         // Resolve the generated client from THIS checkout. Jest's nested package-import resolution
         // can otherwise load .prisma/client from the primary checkout in an isolated worktree.

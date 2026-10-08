@@ -16,7 +16,8 @@ import type { NormalizedDeliveryItem, NormalizedDeliveryOrder, NormalizedDeliver
 import { CANDADO_TX_TIMEOUT_MS } from '@/services/delivery-channels/core/deliveryOrderLock'
 import { grossByRateForOrder } from '@/services/fiscal/autoPosting.service'
 import { ivaDeDevolucion } from '@/services/fiscal/deliveryFiscalDelta'
-import { mezclaDesdeTasas, mezclaPorTratamiento, splitPaymentIvaByOrderRates, tasasDe } from '@/services/fiscal/ivaMath'
+import { mezclaDesdeTasas, splitPaymentIvaByOrderRates, tasasDe } from '@/services/fiscal/ivaMath'
+import { mezclaPorTratamiento } from '@/services/fiscal/mezclaDeOrden'
 import { liberarSellosDe, sellarRenglones } from '@/services/fiscal/sellosIva'
 import { updateProduct } from '@/services/dashboard/product.dashboard.service'
 import { getIncomeStatement } from '@/services/dashboard/accounting.dashboard.service'
@@ -272,7 +273,19 @@ describe('reconcileDeliveryOrderFromProvider (Tarea 13)', () => {
     // guardados (con su tasa y su marca de retiro) y el IVA que la póliza toma de cada REFUND.
     const renglones = await prisma.orderItem.findMany({
       where: { orderId: order.id },
-      select: { quantity: true, unitPrice: true, discountAmount: true, removedAt: true, product: { select: { taxRate: true } } },
+      orderBy: { id: 'asc' },
+      select: {
+        id: true,
+        quantity: true,
+        unitPrice: true,
+        total: true,
+        discountAmount: true,
+        removedAt: true,
+        isCortesia: true,
+        orderPromotionId: true,
+        ivaTratamiento: true,
+        product: { select: { taxRate: true, ivaTratamiento: true } },
+      },
     })
     const mezcla = grossByRateForOrder(renglones)
     const ivaOriginal = splitPaymentIvaByOrderRates(20000, mezcla).taxCents
@@ -326,7 +339,19 @@ describe('reconcileDeliveryOrderFromProvider (Tarea 13)', () => {
     // IVA en libros = el de la venta − el de cada devolución, cada uno como lo postea la póliza.
     const renglones = await prisma.orderItem.findMany({
       where: { orderId: order.id },
-      select: { quantity: true, unitPrice: true, discountAmount: true, removedAt: true, product: { select: { taxRate: true } } },
+      orderBy: { id: 'asc' },
+      select: {
+        id: true,
+        quantity: true,
+        unitPrice: true,
+        total: true,
+        discountAmount: true,
+        removedAt: true,
+        isCortesia: true,
+        orderPromotionId: true,
+        ivaTratamiento: true,
+        product: { select: { taxRate: true, ivaTratamiento: true } },
+      },
     })
     const mezcla = grossByRateForOrder(renglones)
     const ivaVenta = splitPaymentIvaByOrderRates(30000, mezcla).taxCents
@@ -365,7 +390,18 @@ describe('reconcileDeliveryOrderFromProvider (Tarea 13)', () => {
       // no sacó ya, no el de la foto entera.
       const renglones = await prisma.orderItem.findMany({
         where: { orderId: order.id },
-        select: { quantity: true, unitPrice: true, discountAmount: true, product: { select: { taxRate: true } } },
+        orderBy: { id: 'asc' },
+        select: {
+          id: true,
+          quantity: true,
+          unitPrice: true,
+          total: true,
+          discountAmount: true,
+          isCortesia: true,
+          orderPromotionId: true,
+          ivaTratamiento: true,
+          product: { select: { taxRate: true, ivaTratamiento: true } },
+        },
       })
       const mezcla = grossByRateForOrder(renglones)
       const ivaDevuelto = refunds.reduce(

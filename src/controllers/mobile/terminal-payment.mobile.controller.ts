@@ -124,11 +124,15 @@ export async function sendTerminalPayment(req: Request, res: Response) {
       customerId: relayCustomerId,
     })
 
+    const { cancelRequested, ...resultado } = result
     const httpStatus = result.status === 'success' ? 200 : result.status === 'timeout' ? 504 : result.status === 'cancelled' ? 409 : 422
+    // El 504 de una espera que el cajero canceló es el de siempre (las apps lo leen como «confirma en la terminal»), pero no es
+    // una falla del sistema: el log lo anota en info. Si el dinero se movió pese a la cancelación, su alerta 🚨 sale aparte.
+    if (cancelRequested) res.locals.requestEndLevel = 'info'
 
     return res.status(httpStatus).json({
       success: result.status === 'success',
-      ...result,
+      ...resultado,
     })
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Error desconocido'

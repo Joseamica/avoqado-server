@@ -184,14 +184,14 @@ describe('lectores con un renglón retirado por el proveedor', () => {
     expect(await prisma.journalEntry.count({ where: { organizationId } })).toBe(0)
   })
 
-  it('estado de resultados: el IVA de la compensacion es el que postearia la poliza (4191, de los constructores)', async () => {
-    // Venta A 2122 + venta B 2759 − reembolso B 690; retirar el Pan al 0 % no devuelve IVA.
-    const ivaDeLasPolizas = 4191
+  it('estado de resultados: el IVA de la compensacion sale del libro de cada orden (4138; la póliza, pausada, sigue con 4191)', async () => {
+    // B4b (D17): el Pan es línea de promoción y su total ya es neto (B3a): la venta A pesa 15000 / 5000 ⇒ 2069 (la póliza, pausada con IVA mixto, sigue con el peso viejo: 2122). 2069 + 2759 − 690 = 4138.
+    const ivaDelReporte = 4138
     const e = await getIncomeStatement(venueId, { from: ayer, to: manana })
-    expect(e.revenue.ivaCents).toBe(ivaDeLasPolizas)
-    expect(e.fiscalRevenue.ivaCents).toBe(ivaDeLasPolizas)
+    expect(e.revenue.ivaCents).toBe(ivaDelReporte)
+    expect(e.fiscalRevenue.ivaCents).toBe(ivaDelReporte)
     // Todo el IVA es del 16 % (el Pan era 0 % y B no tiene renglones).
-    expect(e.revenue.taxByRate).toEqual({ '0.16': ivaDeLasPolizas })
+    expect(e.revenue.taxByRate).toEqual({ '0.16': ivaDelReporte })
   })
 
   // ── Cada familia de consultas por renglón: el retirado no aporta unidades, costo, descuento ni venta ──

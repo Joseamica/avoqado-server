@@ -157,7 +157,8 @@ const INVENTARIO: Record<string, number> = {
   'src/services/cleanup/liveDemoCleanup.service.ts': 2,
   'src/services/command-center/commandCenter.service.ts': 6,
   'src/services/consumer/reservation.consumer.service.ts': 3,
-  'src/services/dashboard/accounting.dashboard.service.ts': 2,
+  // accounting.dashboard.service.ts: 2 → 0 (B4b, 2026-10-05/06). El estado de resultados enumera con un SELECT con LIMIT
+  // (Tarea 4) y el Resumen y Bancos suman en Postgres con groupBy (Tarea 5): ya no traen una fila por cobro del periodo.
   'src/services/dashboard/activity-log.service.ts': 9,
   'src/services/dashboard/ai-learning.service.ts': 1,
   'src/services/dashboard/alert.service.ts': 4,
@@ -243,7 +244,7 @@ const INVENTARIO: Record<string, number> = {
   'src/services/dashboard/paymentSummary.dashboard.service.ts': 2,
   'src/services/dashboard/permissionSet.service.ts': 1,
   'src/services/dashboard/pricing.service.ts': 2,
-  'src/services/dashboard/printStation.dashboard.service.ts': 7,
+  'src/services/dashboard/printStation.dashboard.service.ts': 4,
   'src/services/dashboard/product.dashboard.service.ts': 2,
   'src/services/dashboard/productInventoryIntegration.service.ts': 1,
   'src/services/dashboard/productLabel.service.ts': 1,
@@ -251,7 +252,7 @@ const INVENTARIO: Record<string, number> = {
   'src/services/dashboard/productWizard.service.ts': 1,
   'src/services/dashboard/promotion.dashboard.service.ts': 3,
   'src/services/dashboard/purchaseOrder.service.ts': 6,
-  'src/services/dashboard/purchaseOrderInvoice.service.ts': 1,
+  // 2026-10-05: factura de proveedor 1 → 0; códigos observados llevan take y el inbox está paginado.
   'src/services/dashboard/rawMaterial.service.ts': 4,
   'src/services/dashboard/rawMaterialPresentation.service.ts': 2,
   // 2026-09-18: +1 al añadir orderItemModifier a la lista (no es código nuevo, es un
@@ -317,7 +318,6 @@ const INVENTARIO: Record<string, number> = {
   'src/services/fiscal/accountingPeriodLock.service.ts': 1,
   'src/services/fiscal/accountingReports.service.ts': 1,
   'src/services/fiscal/accountsPayable.service.ts': 1,
-  'src/services/fiscal/autoPosting.service.ts': 2,
   'src/services/fiscal/cfdi.service.ts': 1,
   'src/services/fiscal/chartOfAccounts.service.ts': 2,
   'src/services/fiscal/cogs.service.ts': 1,

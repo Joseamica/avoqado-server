@@ -68,7 +68,7 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'accounting_income_statement',
-    'Estado de resultados (ingresos) de un local en un periodo — Capa A, gerencial (no fiscal). Devuelve: ventas brutas, devoluciones, ingreso neto cobrado, base gravable e IVA trasladado (precios IVA-incluido). La base gravable es la de 16 %, 8 % y 0 %; lo exento y lo no objeto de IVA se reportan aparte (baseExenta, baseNoObjeto). También: propinas (informativas, NO son ingreso) y conteo de ventas. Responde "¿cuánto gané este mes/periodo?". Pasa venueId y el rango from/to en formato YYYY-MM-DD (zona horaria del local).',
+    'Estado de resultados (ingresos) de un local en un periodo — Capa A, gerencial (no fiscal). Devuelve: ventas brutas, devoluciones, ingreso neto cobrado, base gravable e IVA trasladado (precios IVA-incluido). La base gravable es la de 16 %, 8 % y 0 %; lo exento y lo no objeto de IVA se reportan aparte (baseExenta, baseNoObjeto). Si una venta o devolución mezcla productos de distinto IVA y no se sabe a qué producto le tocó un descuento o una devolución, o viene de un sistema que no dice si su precio ya incluía el IVA, su IVA se calcula en proporción; movimientosConIvaAproximado dice cuántos fueron (0 = todo se pudo atribuir; null = no se sabe). El IVA se calcula por tasa sobre lo cobrado y puede diferir por centavos del desglose de las facturas. También: propinas (informativas, NO son ingreso) y conteo de ventas. Responde "¿cuánto gané este mes/periodo?". Pasa venueId y el rango from/to en formato YYYY-MM-DD (zona horaria del local).',
     {
       venueId: z.string().describe('Local a reportar (debe estar en tu alcance)'),
       from: z
@@ -101,6 +101,7 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
           ivaTrasladado: pesos(data.revenue.ivaCents),
           ivaPorTasa: porTasa(data.revenue.taxByRate), // IVA por tasa (16 %/8 %); tasa 0, exento y no objeto no llevan IVA
           ...basesAparte(data.revenue),
+          movimientosConIvaAproximado: data.revenue.movimientosConIvaAproximado ?? null, // conteo (no dinero); null = no se sabe
         },
         // Subconjunto que SÍ entra a los libros fiscales (respeta los toggles: efectivo/merchant excluidos).
         // `ingresos` arriba es el TOTAL gerencial; esto es lo que realmente se declara.
@@ -110,6 +111,7 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
           ivaTrasladado: pesos(data.fiscalRevenue.ivaCents),
           ivaPorTasa: porTasa(data.fiscalRevenue.taxByRate),
           ...basesAparte(data.fiscalRevenue),
+          movimientosConIvaAproximado: data.fiscalRevenue.movimientosConIvaAproximado ?? null, // conteo; null = no se sabe
         },
         propinas: pesos(data.tips.totalCents),
         metricas: {
@@ -123,7 +125,7 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'accounting_business_summary',
-    'Resumen del negocio (Capa A, gerencial — portada de Contabilidad) de un local en un periodo. Reúne: ingreso neto cobrado (base + IVA), facturación del periodo (CFDIs timbrados, % del ingreso ya facturado y cuánto falta por facturar), cómo cobró (efectivo/caja vs banco/electrónico), comisiones de procesamiento, propinas y el estatus de la conciliación bancaria. Responde "¿cómo me fue este mes/periodo?". Pasa venueId y el rango from/to en formato YYYY-MM-DD (zona horaria del local).',
+    'Resumen del negocio (Capa A, gerencial — portada de Contabilidad) de un local en un periodo. Reúne: ingreso neto cobrado (base + IVA), facturación del periodo (CFDIs timbrados, % del ingreso ya facturado y cuánto falta por facturar), cómo cobró (efectivo/caja vs banco/electrónico), comisiones de procesamiento, propinas y el estatus de la conciliación bancaria. Responde "¿cómo me fue este mes/periodo?". Si una venta o devolución mezcla productos de distinto IVA y no se sabe a qué producto le tocó un descuento o una devolución, o viene de un sistema que no dice si su precio ya incluía el IVA, su IVA se calcula en proporción; movimientosConIvaAproximado dice cuántos fueron (0 = todo se pudo atribuir; null = no se sabe). El IVA se calcula por tasa sobre lo cobrado y puede diferir por centavos del desglose de las facturas. Pasa venueId y el rango from/to en formato YYYY-MM-DD (zona horaria del local).',
     {
       venueId: z.string().describe('Local a reportar (debe estar en tu alcance)'),
       from: z
@@ -153,6 +155,7 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
           ivaTrasladado: pesos(d.revenue.ivaCents),
           ivaPorTasa: porTasa(d.revenue.taxByRate), // IVA por tasa (16 %/8 %); tasa 0, exento y no objeto no llevan IVA
           ...basesAparte(d.revenue),
+          movimientosConIvaAproximado: d.revenue.movimientosConIvaAproximado ?? null, // conteo (no dinero); null = no se sabe
         },
         facturacion: {
           cfdisTimbrados: d.invoicing.stampedCount,
@@ -581,7 +584,7 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'accounting_iva_cashflow',
-    'IVA en flujo de efectivo de un contribuyente (Capa B, PREMIUM): el IVA del mes calculado sobre flujo (LIVA art 1-B), sumando TODOS los locales del mismo RFC. Da el IVA TRASLADADO COBRADO (ventas) MENOS el IVA ACREDITABLE PAGADO (gastos del Buzón de CFDIs) = IVA a pagar (o saldo a favor). Responde "¿cuánto IVA debo este mes?". Reporta APARTE el IVA que retuviste a proveedores (obligación a enterar). ⚠️ Sigue siendo preliminar: NO incluye retenciones de IVA que clientes te hayan hecho en ventas. El IVA sale de la tasa de cada venta (16 %, 8 %, 0 %); lo exento y lo no objeto no llevan IVA y se reportan aparte. Pasa venueId y opcionalmente period (YYYY-MM; default = mes actual).',
+    'IVA en flujo de efectivo de un contribuyente (Capa B, PREMIUM): el IVA del mes calculado sobre flujo (LIVA art 1-B), sumando TODOS los locales del mismo RFC. Da el IVA TRASLADADO COBRADO (ventas) MENOS el IVA ACREDITABLE PAGADO (gastos del Buzón de CFDIs) = IVA a pagar (o saldo a favor). Responde "¿cuánto IVA debo este mes?". Reporta APARTE el IVA que retuviste a proveedores (obligación a enterar). ⚠️ Sigue siendo preliminar: NO incluye retenciones de IVA que clientes te hayan hecho en ventas. El IVA sale de la tasa de cada venta (16 %, 8 %, 0 %); lo exento y lo no objeto no llevan IVA y se reportan aparte. Si una venta o devolución mezcla productos de distinto IVA y no se sabe a qué producto le tocó un descuento o una devolución, o viene de un sistema que no dice si su precio ya incluía el IVA, su IVA se calcula en proporción; movimientosConIvaAproximado dice cuántos fueron (0 = todo se pudo atribuir; null = no se sabe). El IVA se calcula por tasa sobre lo cobrado y puede diferir por centavos del desglose de las facturas. devoluciones dice cuántas devoluciones hubo en el periodo (un conteo, no pesos; null = no se sabe). Pasa venueId y opcionalmente period (YYYY-MM; default = mes actual).',
     {
       venueId: z.string().describe('Local del contribuyente (debe estar en tu alcance)'),
       period: z
@@ -616,6 +619,8 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
         saldoAFavorDelPeriodo: pesos(r.saldoAFavorDelPeriodoCents),
         // Banderas de honestidad fiscal
         estimadoAl16Pct: r.computedAt16Percent, // false: IVA por tasa real (solo importe-libre/sin-taxRate cae al 16%)
+        movimientosConIvaAproximado: r.movimientosConIvaAproximado ?? null, // conteo (no dinero); null = no se sabe
+        devoluciones: r.refundCount ?? null, // conteo; null = no se sabe
         acreditableDisponible: r.acreditableDisponible,
         sinVentasRecuerdaDeclararEnCeros: r.zeroActivity,
         diotDisponible: r.diotDisponible,

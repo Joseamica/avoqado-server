@@ -36,11 +36,11 @@ import {
   type CancelCfdiDeps,
   claimWhere,
   loadOrderForCfdiFromDb,
-  totalDelDocumentoCents,
   STAMPING_TTL_MS,
   type LoadedOrderBundle,
   type IssueReceptor,
 } from './cfdi.service'
+import { conceptoDesdeElPayload, totalSegunElPacCents } from './reglaDelPac'
 
 export interface ReplaceCfdiDeps {
   /** La factura ORIGINAL, con su `fiscalEmisor` incluido (lo necesita el conector). */
@@ -230,7 +230,8 @@ export async function replaceCfdi(
     isGlobal: false,
   })
   const reasons = [...validation.reasons, ...(bundle.unsupportedReasons ?? [])]
-  const documentoCents = totalDelDocumentoCents(bundle.order)
+  // B3a Tarea 6b: el documento que SE MANDA, sumado como el PAC (tras el ajuste del cargador, la suma por concepto ya no es lo cobrado).
+  const documentoCents = totalSegunElPacCents(invoiceParams.items.map(conceptoDesdeElPayload))
   if (!bundle.unsupportedReasons?.length && bundle.paidCents !== undefined && bundle.paidCents !== documentoCents) {
     const pesos = (c: number) => `$${(c / 100).toFixed(2)}`
     reasons.push(

@@ -5,6 +5,7 @@
  */
 import { registerAccountingTools } from '../../../src/mcp/tools/accounting'
 import type { McpScope } from '../../../src/mcp/scope'
+import { getBusinessSummary, getIncomeStatement } from '@/services/dashboard/accounting.dashboard.service'
 
 const mockRequirePermission = jest.fn()
 const mockPlanGate = jest.fn()
@@ -81,12 +82,21 @@ jest.mock('@/services/fiscal/fixedAsset.service', () => ({
 }))
 
 const handlers = new Map<string, (a: Record<string, unknown>, e: unknown) => Promise<{ content: Array<{ text: string }> }>>()
+const descripciones = new Map<string, string>()
 const scope = { staffId: 'staff-1', activeOrg: 'o1', allowedVenueIds: ['v1'], perVenueAccess: new Map() } as McpScope
 const call = (n: string, args: Record<string, unknown>) => handlers.get(n)!(args, {})
 const parse = (r: { content: Array<{ text: string }> }) => JSON.parse(r.content[0].text)
 
 beforeAll(() => {
-  registerAccountingTools({ tool: (...a: unknown[]) => handlers.set(a[0] as string, a[a.length - 1] as never) } as never, scope)
+  registerAccountingTools(
+    {
+      tool: (...a: unknown[]) => {
+        handlers.set(a[0] as string, a[a.length - 1] as never)
+        descripciones.set(a[0] as string, typeof a[1] === 'string' ? a[1] : '')
+      },
+    } as never,
+    scope,
+  )
 })
 beforeEach(() => jest.clearAllMocks())
 
@@ -475,6 +485,7 @@ describe('accounting_iva_cashflow (read) — gated CFDI + accounting:read', () =
       rfcSpansMultipleOrgs: false,
       zeroActivity: false,
       diot: { disponible: true, motivo: 'DIOT' },
+      movimientosConIvaAproximado: 3,
     })
     const out = parse(await call('accounting_iva_cashflow', { venueId: 'v1', period: '2026-06' }))
     expect(mockRequirePermission).toHaveBeenCalledWith('accounting:read', 'v1')
@@ -489,6 +500,7 @@ describe('accounting_iva_cashflow (read) — gated CFDI + accounting:read', () =
     expect(out.estimadoAl16Pct).toBe(false) // IVA por tasa real
     expect(out.acreditableDisponible).toBe(true)
     expect(out.diotDisponible).toBe(true)
+    expect(out.movimientosConIvaAproximado).toBe(3)
   })
 
   it('sin period usa el mes actual (currentPeriod)', async () => {
@@ -774,5 +786,123 @@ describe('activos fijos con la contabilidad pausada por IVA mixto', () => {
     expect(out).toMatchObject({ ok: true, polizaBaja: false, gananciaOPerdida: 2_000 })
     expect(out.nota).toContain('Ganancia contable')
     expect(out.nota).toContain(MOTIVO)
+  })
+})
+
+describe('B4b · los movimientos con IVA aproximado llegan al MCP (desconocido ≠ 0)', () => {
+  const ingresos = (o: Record<string, unknown> = {}) => ({
+    grossSalesCents: 18600,
+    refundsCents: 0,
+    netRevenueCents: 18600,
+    taxableBaseCents: 17082,
+    tasa0BaseCents: 7592,
+    exentoBaseCents: 0,
+    noObjetoBaseCents: 0,
+    ingresosSinIvaCents: 17082,
+    ivaCents: 1518,
+    taxByRate: { '0.16': 1518 },
+    ...o,
+  })
+  const base = {
+    venueName: 'X',
+    venueId: 'v1',
+    currency: 'MXN',
+    timezone: 'America/Mexico_City',
+    period: { from: '2026-06-01', to: '2026-06-30' },
+    taxRateAssumed: 0.16,
+  }
+  const metricas = { salesCount: 1, refundCount: 0, averageTicketCents: 18600 }
+  const periodo = { venueId: 'v1', from: '2026-06-01', to: '2026-06-30' }
+
+  it('🔴 accounting_income_statement los cuenta en ingresos e ingresoFiscal; el campo de siempre se queda', async () => {
+    ;(getIncomeStatement as jest.Mock).mockResolvedValue({
+      ...base,
+      revenue: ingresos({ movimientosConIvaAproximado: 2 }),
+      fiscalRevenue: ingresos({ movimientosConIvaAproximado: 1 }),
+      tips: { totalCents: 0 },
+      metrics: metricas,
+    })
+    const out = parse(await call('accounting_income_statement', periodo))
+    expect(out.ingresos.movimientosConIvaAproximado).toBe(2)
+    expect(out.ingresoFiscal.movimientosConIvaAproximado).toBe(1)
+    expect(out.ivaRateAssumed).toBe(0.16)
+  })
+
+  it('🔴 un servicio que no manda el campo responde null, no 0 (no se afirma exactitud)', async () => {
+    ;(getIncomeStatement as jest.Mock).mockResolvedValue({
+      ...base,
+      revenue: ingresos(),
+      fiscalRevenue: ingresos(),
+      tips: { totalCents: 0 },
+      metrics: metricas,
+    })
+    const out = parse(await call('accounting_income_statement', periodo))
+    expect(out.ingresos.movimientosConIvaAproximado).toBeNull()
+    expect(out.ingresoFiscal.movimientosConIvaAproximado).toBeNull()
+  })
+
+  it('🔴 accounting_business_summary también', async () => {
+    ;(getBusinessSummary as jest.Mock).mockResolvedValue({
+      ...base,
+      revenue: ingresos({ movimientosConIvaAproximado: 3 }),
+      invoicing: {
+        stampedCount: 0,
+        stampedTotalCents: 0,
+        nominativeCount: 0,
+        globalCount: 0,
+        invoicedApproxCents: 0,
+        uninvoicedApproxCents: 18600,
+        invoicedPct: 0,
+      },
+      collection: { cashCents: 0, electronicCents: 18600, cashPct: 0 },
+      costs: { processingFeesCents: 0 },
+      result: { netAfterFeesCents: 18600, cogsCents: 0, grossProfitCents: 18600 },
+      tips: { totalCents: 0 },
+      reconciliation: { statements: 0, lineCount: 0, matchedCount: 0 },
+      metrics: metricas,
+    })
+    expect(parse(await call('accounting_business_summary', periodo)).ingresos.movimientosConIvaAproximado).toBe(3)
+  })
+
+  // Tarea 6 (prueba extra, no venía en el brief): `devoluciones` es parte del contrato del IVA en flujo y nada la vigilaba.
+  it('🔴 accounting_iva_cashflow dice cuántas devoluciones tuvo el periodo (R5-10) y responde null, no 0, si el servicio no lo trae', async () => {
+    mockPlanGate.mockResolvedValue(null)
+    const flujo = {
+      needsFiscalSetup: false,
+      rfc: 'EKU9003173C9',
+      period: '2026-06',
+      venueIds: ['v1'],
+      baseGravableCents: 0,
+      ivaTrasladadoCobradoCents: 0,
+      ivaTrasladadoPorTasaCents: {},
+      ivaAmparadoPorCfdiCents: 0,
+      cfdiCount: 0,
+      acreditablePagadoCents: 0,
+      retencionesCents: null,
+      ivaRetenidoTercerosCents: 0,
+      saldoAFavorAplicadoCents: null,
+      ivaAPagarPreliminarCents: 0,
+      saldoAFavorDelPeriodoCents: 0,
+      computedAt16Percent: false,
+      acreditableDisponible: true,
+      diotDisponible: true,
+      incompletoPorFaltaDeGastos: false,
+      rfcSpansMultipleOrgs: false,
+      zeroActivity: false,
+      diot: { disponible: true, motivo: 'DIOT' },
+    }
+    mockIva.mockResolvedValueOnce({ ...flujo, refundCount: 2, movimientosConIvaAproximado: 0 })
+    const con = parse(await call('accounting_iva_cashflow', { venueId: 'v1', period: '2026-06' }))
+    expect(con).toMatchObject({ devoluciones: 2, movimientosConIvaAproximado: 0, sinVentasRecuerdaDeclararEnCeros: false })
+    mockIva.mockResolvedValueOnce(flujo)
+    const sin = parse(await call('accounting_iva_cashflow', { venueId: 'v1', period: '2026-06' }))
+    expect(sin.devoluciones).toBeNull()
+    expect(sin.movimientosConIvaAproximado).toBeNull()
+  })
+
+  it('🔴 T6 M3 (revisión final) · la descripción de accounting_iva_cashflow dice que devoluciones es CUÁNTAS (un conteo, no pesos)', () => {
+    const desc = descripciones.get('accounting_iva_cashflow')!
+    expect(desc).toMatch(/devoluciones dice cu[aá]ntas devoluciones/i)
+    expect(desc).toMatch(/un conteo, no pesos/i)
   })
 })

@@ -436,6 +436,11 @@ export function globalErrorHandler(err: Error, req: ExpressRequest, res: Express
 
   const bodyParseError = err as Error & { status?: number; type?: string; body?: unknown }
 
+  if (bodyParseError.status === 413 && bodyParseError.type === 'entity.too.large') {
+    logger.warn(`Request body exceeds size limit, CorrelationID: ${correlationId}`, { statusCode: 413, correlationId })
+    return res.status(413).json({ message: 'La solicitud excede el tamaño máximo permitido.', code: 'PAYLOAD_TOO_LARGE' })
+  }
+
   if (isJsonBodyParseError(bodyParseError)) {
     logger.warn(`Invalid JSON body: ${bodyParseError.message}, CorrelationID: ${correlationId}`, {
       name: bodyParseError.name,

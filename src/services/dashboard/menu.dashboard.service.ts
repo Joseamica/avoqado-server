@@ -983,11 +983,31 @@ export async function deleteModifierGroup(venueId: string, modifierGroupId: stri
   logAction({ venueId, action: 'MODIFIER_GROUP_DELETED', entity: 'ModifierGroup', entityId: existing.id, data: { name: existing.name } })
 }
 
+async function findVenueRawMaterialForModifier(venueId: string, rawMaterialId: string) {
+  const rawMaterial = await prisma.rawMaterial.findFirst({
+    where: { id: rawMaterialId, venueId },
+    select: { id: true, avgCostPerUnit: true },
+  })
+  if (!rawMaterial) {
+    throw new NotFoundError(`Raw material with ID ${rawMaterialId} not found in venue ${venueId}.`)
+  }
+  return rawMaterial
+}
+
+function modifierCost(
+  rawMaterial: { avgCostPerUnit: Prisma.Decimal } | null,
+  quantityPerUnit: Prisma.Decimal | number | null | undefined,
+): Prisma.Decimal | null {
+  return rawMaterial && quantityPerUnit ? rawMaterial.avgCostPerUnit.mul(quantityPerUnit) : null
+}
+
 export async function createModifier(venueId: string, modifierGroupId: string, data: CreateModifierDto): Promise<Modifier> {
   const group = await prisma.modifierGroup.findFirst({ where: { id: modifierGroupId, venueId } })
   if (!group) {
     throw new NotFoundError(`Modifier group with ID ${modifierGroupId} not found in venue ${venueId}.`)
   }
+
+  const rawMaterial = data.rawMaterialId ? await findVenueRawMaterialForModifier(venueId, data.rawMaterialId) : null
 
   const modifier = await prisma.modifier.create({
     data: {
@@ -996,6 +1016,16 @@ export async function createModifier(venueId: string, modifierGroupId: string, d
       price: data.price,
       active: data.active ?? true,
       sku: data.sku ?? null,
+      durationMin: data.durationMin ?? null,
+      ...(rawMaterial
+        ? {
+            rawMaterial: { connect: { id: rawMaterial.id } },
+            quantityPerUnit: data.quantityPerUnit ?? null,
+            unit: data.unit ?? null,
+            ...(data.inventoryMode ? { inventoryMode: data.inventoryMode } : {}),
+            cost: modifierCost(rawMaterial, data.quantityPerUnit),
+          }
+        : {}),
     },
   })
 
@@ -1045,6 +1075,7 @@ export async function updateModifier(
   if (data.price !== undefined) updateData.price = data.price
   if (data.active !== undefined) updateData.active = data.active
   if (data.sku !== undefined) updateData.sku = data.sku
+  if (data.durationMin !== undefined) updateData.durationMin = data.durationMin
 
   // ✅ WORLD-CLASS: Inventory configuration for modifiers (Toast/Square pattern)
   let needsCostRecalculation = false
@@ -1053,14 +1084,7 @@ export async function updateModifier(
   if (data.rawMaterialId !== undefined) {
     // Validate raw material exists in the venue if provided
     if (data.rawMaterialId !== null) {
-      const rawMaterial = await prisma.rawMaterial.findFirst({
-        where: { id: data.rawMaterialId, venueId },
-        select: { id: true, avgCostPerUnit: true },
-      })
-      if (!rawMaterial) {
-        throw new NotFoundError(`Raw material with ID ${data.rawMaterialId} not found in venue ${venueId}.`)
-      }
-      rawMaterialForCost = rawMaterial
+      rawMaterialForCost = await findVenueRawMaterialForModifier(venueId, data.rawMaterialId)
       needsCostRecalculation = true
     } else {
       // rawMaterialId is being set to null - clear cost
@@ -1090,9 +1114,8 @@ export async function updateModifier(
     // Calculate cost if we have both raw material and quantity
     // null = la cantidad se borró en esta misma petición: NO cae a la guardada.
     const effectiveQuantity = data.quantityPerUnit === undefined ? existing.quantityPerUnit : data.quantityPerUnit
-    if (rawMaterialForCost && effectiveQuantity) {
-      updateData.cost = rawMaterialForCost.avgCostPerUnit.mul(effectiveQuantity)
-    }
+    const cost = modifierCost(rawMaterialForCost, effectiveQuantity)
+    if (cost) updateData.cost = cost
   }
 
   const updatedModifier = await prisma.modifier.update({

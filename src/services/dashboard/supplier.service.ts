@@ -151,16 +151,7 @@ export async function createSupplier(
   data: CreateSupplierDto,
   actor?: { staffId?: string; source?: string },
 ): Promise<Supplier> {
-  const name = data.name.trim()
-  const supplier = await prisma.$transaction(async tx => {
-    // Serialize equal normalized names, including simultaneous MCP/dashboard requests.
-    await tx.$executeRaw(
-      Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${`supplier:create:${venueId}:${name.toLowerCase()}`}, 0))`,
-    )
-    const existing = await tx.supplier.findFirst({ where: { venueId, name: { equals: name, mode: 'insensitive' } } })
-    if (existing) throw new AppError(`Ya existe un proveedor llamado "${name}". Consulta list_suppliers antes de volver a crearlo.`, 400)
-    return tx.supplier.create({ data: { ...data, name, venueId } })
-  })
+  const supplier = await prisma.$transaction(tx => createSupplierInTx(tx, venueId, data))
 
   logAction({
     venueId,
@@ -172,6 +163,16 @@ export async function createSupplier(
   })
 
   return supplier
+}
+
+/** The XML purchase creates its supplier in the SAME transaction as its order. */
+export async function createSupplierInTx(tx: Prisma.TransactionClient, venueId: string, data: CreateSupplierDto): Promise<Supplier> {
+  const name = data.name.trim()
+  // Serialize equal normalized names, including simultaneous MCP/dashboard/XML requests.
+  await tx.$executeRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${`supplier:create:${venueId}:${name.toLowerCase()}`}, 0))`)
+  const existing = await tx.supplier.findFirst({ where: { venueId, name: { equals: name, mode: 'insensitive' } } })
+  if (existing) throw new AppError(`Ya existe un proveedor llamado "${name}". Consulta list_suppliers antes de volver a crearlo.`, 400)
+  return tx.supplier.create({ data: { ...data, name, venueId } })
 }
 
 /**

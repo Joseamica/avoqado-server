@@ -13,6 +13,8 @@ import {
   assertLegacyProductReferencesForVenue,
   writeLegacyServiceProductCreationAuditForVenue,
 } from '../master-catalog/catalogGovernance.service'
+import { normalizarIvaDeProducto, traducirErrorDeIva } from '../fiscal/normalizarIvaDeProducto'
+import { bloquearParaCambiarIva } from '../fiscal/exclusionContable'
 
 /**
  * Product Creation Wizard Service
@@ -38,6 +40,12 @@ export interface WizardStep1Data {
   layoutConfig?: Record<string, unknown> | null
   // Estación de impresión (ruteo de comandas)
   printStationId?: string | null
+  // Lo mismo que guarda el alta normal (product.dashboard.service.createProduct)
+  modifierGroupIds?: string[]
+  soldByWeight?: boolean
+  satProductKey?: string | null
+  satUnitKey?: string | null
+  objetoImp?: '01' | '02' | '03' | '04'
 }
 
 export interface WizardStep2Data {
@@ -89,6 +97,9 @@ export async function createProductStep1(venueId: string, data: WizardStep1Data,
   // GTIN: optional; pass through if provided, omit (NULL) otherwise.
   const providedSku = data.sku?.trim()
   const providedGtin = data.gtin?.trim()
+  const modifierGroupIds = [...new Set(data.modifierGroupIds ?? [])]
+  // Como el alta normal: con un campo de IVA, la organización se bloquea PRIMERO (orden del catálogo).
+  const traeIva = data.objetoImp !== undefined && data.objetoImp !== null
 
   // Create product. Handle unique-constraint collisions (P2002) with a
   // user-friendly Spanish message identifying WHICH column collided, so the
@@ -97,12 +108,18 @@ export async function createProductStep1(venueId: string, data: WizardStep1Data,
   let product
   try {
     product = await prisma.$transaction(async tx => {
+      if (traeIva) await bloquearParaCambiarIva(tx, { venueId })
       await assertLegacyCatalogGovernanceForVenue(tx, { venueId, operation: 'CREATE', willBeVendable: true, actor })
       await assertLegacyProductReferencesForVenue(tx, {
         venueId,
         categoryId: data.categoryId,
         printStationId: data.printStationId,
       })
+      if (modifierGroupIds.length > 0) {
+        const propios = await tx.modifierGroup.count({ where: { id: { in: modifierGroupIds }, venueId } })
+        if (propios !== modifierGroupIds.length) throw new AppError('Grupo de modificadores no encontrado', 404)
+      }
+      const encendido = traeIva && (await tx.venueIvaPorProducto.count({ where: { venueId } })) > 0
       const created = await tx.product.create({
         data: {
           venueId,
@@ -122,6 +139,16 @@ export async function createProductStep1(venueId: string, data: WizardStep1Data,
           ...(data.layoutConfig !== undefined && {
             layoutConfig: data.layoutConfig ? (data.layoutConfig as Prisma.InputJsonValue) : Prisma.JsonNull,
           }),
+          // Venta por peso: price es el precio POR KG; la unidad se fija en KILOGRAM.
+          soldByWeight: data.soldByWeight ?? false,
+          ...(data.soldByWeight ? { unit: Unit.KILOGRAM } : {}),
+          ...(data.satProductKey !== undefined && { satProductKey: data.satProductKey }),
+          ...(data.satUnitKey !== undefined && { satUnitKey: data.satUnitKey }),
+          // IVA: sólo `ivaTratamiento`; el trigger de Product deriva la tupla.
+          ...normalizarIvaDeProducto({ objetoImp: data.objetoImp }, null, encendido),
+          modifierGroups: modifierGroupIds.length
+            ? { create: modifierGroupIds.map((groupId, index) => ({ groupId, displayOrder: index })) }
+            : undefined,
           externalData: {
             wizardCompleted: false,
             inventoryConfigured: false,
@@ -149,6 +176,7 @@ export async function createProductStep1(venueId: string, data: WizardStep1Data,
       }
       throw new AppError('Ya existe un producto con esos datos en esta sucursal.', 409)
     }
+    traducirErrorDeIva(error)
     throw error
   }
 

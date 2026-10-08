@@ -7,6 +7,7 @@ import { SocketEventType } from '../../communication/sockets/types'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
 import { logAction } from '../dashboard/activity-log.service'
 import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
+import { ORDER_LOCK_WAIT_BUDGET } from '../shared/paymentShiftClaim'
 
 interface TableStatusResponse {
   id: string
@@ -206,118 +207,157 @@ export async function assignTable(
 ): Promise<{ order: Order; isNewOrder: boolean }> {
   logger.info(`🪑 [TABLE SERVICE] Assigning table ${tableId} with ${covers} covers (staff: ${staffId}, terminal: ${terminalId || 'none'})`)
 
-  // Verify table exists and belongs to venue
-  const table = await prisma.table.findFirst({
-    where: { id: tableId, venueId },
-    include: {
-      currentOrder: {
-        include: {
-          items: {
-            include: {
-              product: {
-                select: { id: true, name: true },
+  const result = await prisma.$transaction(async tx => {
+    // Serialize admission before reading occupancy; creation and pointer commit together.
+    // The venue key-share also orders FK locks before table ownership when a venue is deleted.
+    await tx.$queryRaw`SELECT id FROM "Venue" WHERE id = ${venueId} FOR KEY SHARE`
+    await tx.$queryRaw`SELECT id FROM "Table" WHERE id = ${tableId} AND "venueId" = ${venueId} FOR UPDATE`
+    // Verify table exists and belongs to venue
+    const table = await tx.table.findFirst({
+      where: { id: tableId, venueId },
+      include: {
+        currentOrder: {
+          include: {
+            items: {
+              include: {
+                product: {
+                  select: { id: true, name: true },
+                },
               },
             },
           },
         },
       },
-    },
-  })
+    })
 
-  if (!table) {
-    throw new NotFoundError(`Table not found or does not belong to this venue`)
-  }
-
-  // Verify staff exists and belongs to venue
-  const staffVenue = await prisma.staffVenue.findFirst({
-    where: { staffId, venueId },
-    include: { staff: true },
-  })
-
-  if (!staffVenue) {
-    throw new BadRequestError(`Staff member not found or not assigned to this venue`)
-  }
-
-  // Reserved tables can only be opened through reservation check-in flow
-  if (table.status === TableStatus.RESERVED) {
-    throw new BadRequestError('Mesa reservada para una reservacion proxima')
-  }
-
-  // If table already has an active order, return it
-  if (table.currentOrder && table.status === 'OCCUPIED') {
-    logger.info(`✅ [TABLE SERVICE] Table ${table.number} already has order ${table.currentOrder.orderNumber}`)
-
-    return {
-      order: table.currentOrder,
-      isNewOrder: false,
+    if (!table) {
+      throw new NotFoundError(`Table not found or does not belong to this venue`)
     }
-  }
 
-  await assertVenueSalesEnabled(venueId)
+    // Verify staff exists and belongs to venue
+    const staffVenue = await tx.staffVenue.findFirst({
+      where: { staffId, venueId },
+      include: { staff: true },
+    })
 
-  // Multi-cheque invariant: "open orders bound to this tableId" must mean
-  // "checks of the CURRENT seating". Opening a table from AVAILABLE detaches
-  // any zombie open orders left bound to it by older flows/abandoned data,
-  // otherwise they would block clearTable and hijack the sibling repoint.
-  // The orders themselves survive (reports); they just leave the table.
-  await prisma.order.updateMany({
-    where: {
-      venueId,
-      tableId: table.id,
-      status: { notIn: ['COMPLETED', 'CANCELLED', 'DELETED'] },
-    },
-    data: { tableId: null },
-  })
+    if (!staffVenue) {
+      throw new BadRequestError(`Staff member not found or not assigned to this venue`)
+    }
 
-  // Create new order
-  const orderNumber = `ORD-${Date.now()}`
+    // Reserved tables can only be opened through reservation check-in flow
+    if (table.status === TableStatus.RESERVED) {
+      throw new BadRequestError('Mesa reservada para una reservacion proxima')
+    }
 
-  // 🔴 Abrir mesa ocurre EN el mostrador, dentro del turno de caja abierto ahora
-  // (`../shared/turnoDeCaja.ts`). Desde la fase 1, `getActiveShifts` cuenta las órdenes del
-  // turno agrupando por `Order.shiftId`: sin esto, un restaurante entero salía con «0 órdenes».
-  // Opcional a propósito — un negocio que no abrió caja sigue atendiendo mesas.
-  const currentShift = await turnoAbiertoDelNegocio(prisma, venueId)
+    // If table already has an active order, return it
+    if (
+      table.currentOrder &&
+      table.status === 'OCCUPIED' &&
+      !['COMPLETED', 'CANCELLED', 'DELETED'].includes(table.currentOrder.status) &&
+      table.currentOrder.paymentStatus !== 'PAID'
+    ) {
+      logger.info(`✅ [TABLE SERVICE] Table ${table.number} already has order ${table.currentOrder.orderNumber}`)
 
-  const newOrder = await prisma.order.create({
-    data: {
-      venueId,
-      shiftId: currentShift?.id ?? null,
-      tableId: table.id,
-      covers,
-      orderNumber,
-      servedById: staffId,
-      terminalId: terminalId || null, // Track which terminal created this order
-      status: 'PENDING',
-      paymentStatus: PaymentStatus.PENDING,
-      kitchenStatus: 'PENDING',
-      subtotal: 0,
-      discountAmount: 0,
-      taxAmount: 0,
-      total: 0,
-      contratoDePrecio: 'IVA_INCLUIDO', // nace vacía; todo renglón que entra después trae IVA incluido (plan 2)
-      version: 1,
-    },
-    include: {
-      items: {
-        include: {
-          product: {
-            select: { id: true, name: true },
+      return {
+        order: table.currentOrder,
+        isNewOrder: false,
+        table,
+        staffVenue,
+      }
+    }
+
+    if (table.status === 'OCCUPIED') {
+      const sibling = await tx.order.findFirst({
+        where: { venueId, tableId: table.id, status: { notIn: ['COMPLETED', 'CANCELLED', 'DELETED'] }, paymentStatus: { not: 'PAID' } },
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        include: { items: { include: { product: { select: { id: true, name: true } } } } },
+      })
+      if (sibling) {
+        await tx.table.update({ where: { id: table.id }, data: { currentOrderId: sibling.id } })
+        return { order: sibling, isNewOrder: false, table, staffVenue }
+      }
+    }
+
+    await assertVenueSalesEnabled(venueId, tx)
+
+    // Multi-cheque invariant: "open orders bound to this tableId" must mean
+    // "checks of the CURRENT seating". Opening a table from AVAILABLE detaches
+    // any zombie open orders left bound to it by older flows/abandoned data,
+    // otherwise they would block clearTable and hijack the sibling repoint.
+    // The orders themselves survive (reports); they just leave the table.
+    await tx.order.updateMany({
+      where: {
+        venueId,
+        tableId: table.id,
+        status: { notIn: ['COMPLETED', 'CANCELLED', 'DELETED'] },
+      },
+      data: { tableId: null },
+    })
+
+    // Create new order
+    const orderNumber = `ORD-${Date.now()}`
+
+    // 🔴 Abrir mesa ocurre EN el mostrador, dentro del turno de caja abierto ahora
+    // (`../shared/turnoDeCaja.ts`). Desde la fase 1, `getActiveShifts` cuenta las órdenes del
+    // turno agrupando por `Order.shiftId`: sin esto, un restaurante entero salía con «0 órdenes».
+    // Opcional a propósito — un negocio que no abrió caja sigue atendiendo mesas.
+    const currentShift = await turnoAbiertoDelNegocio(tx, venueId)
+
+    const newOrder = await tx.order.create({
+      data: {
+        venueId,
+        shiftId: currentShift?.id ?? null,
+        tableId: table.id,
+        covers,
+        orderNumber,
+        servedById: staffId,
+        terminalId: terminalId || null, // Track which terminal created this order
+        status: 'PENDING',
+        paymentStatus: PaymentStatus.PENDING,
+        kitchenStatus: 'PENDING',
+        subtotal: 0,
+        discountAmount: 0,
+        taxAmount: 0,
+        total: 0,
+        contratoDePrecio: 'IVA_INCLUIDO', // nace vacía; todo renglón que entra después trae IVA incluido (plan 2)
+        version: 1,
+      },
+      include: {
+        items: {
+          include: {
+            product: {
+              select: { id: true, name: true },
+            },
           },
         },
       },
-    },
-  })
+    })
 
-  // Update table status and link to order
-  await prisma.table.update({
-    where: { id: tableId },
-    data: {
-      status: 'OCCUPIED',
-      currentOrderId: newOrder.id,
-    },
-  })
+    // Update table status and link to order
+    await tx.table.update({
+      where: { id: tableId },
+      data: {
+        status: 'OCCUPIED',
+        currentOrderId: newOrder.id,
+      },
+    })
 
-  logger.info(`✅ [TABLE SERVICE] Created order ${orderNumber} for table ${table.number}`)
+    logger.info(`✅ [TABLE SERVICE] Created order ${orderNumber} for table ${table.number}`)
+
+    return { order: newOrder, isNewOrder: true, table, staffVenue }
+  }, ORDER_LOCK_WAIT_BUDGET)
+
+  if (!result.isNewOrder) return { order: result.order, isNewOrder: false }
+  const { order: newOrder, table, staffVenue } = result
+
+  void logAction({
+    action: 'TABLE_OPENED',
+    entity: 'Table',
+    entityId: table.id,
+    staffId,
+    venueId,
+    data: { orderId: newOrder.id, covers },
+  })
 
   // Emit Socket.IO event for real-time table status update
   const broadcastingService = socketManager.getBroadcastingService()
@@ -642,25 +682,33 @@ export async function reconcileTableAfterOrderRemoved(venueId: string, removedOr
   const tableId = removedOrder?.tableId
   if (!tableId) return { tableFreed: false }
 
-  // Tenant isolation: re-verify the table belongs to THIS venue before writing
-  // to it — never trust a bare tableId, even one read off an order already
-  // scoped to venueId.
-  const table = await prisma.table.findFirst({
-    where: { id: tableId, venueId },
-    select: { id: true, number: true },
-  })
-  if (!table) return { tableFreed: false }
+  // Usa el mismo candado que assignTable: una conciliación vieja no puede liberar una apertura nueva.
+  const reconciled = await prisma.$transaction(async tx => {
+    await tx.$queryRaw`SELECT id FROM "Venue" WHERE id = ${venueId} FOR KEY SHARE`
+    await tx.$queryRaw`SELECT id FROM "Table" WHERE id = ${tableId} AND "venueId" = ${venueId} FOR UPDATE`
+    // Tenant isolation: re-verify the table belongs to THIS venue before writing
+    // to it — never trust a bare tableId, even one read off an order already
+    // scoped to venueId.
+    const table = await tx.table.findFirst({
+      where: { id: tableId, venueId },
+      select: { id: true, number: true },
+    })
+    if (!table) return null
 
-  const sibling = await prisma.order.findFirst({
-    where: { venueId, tableId: table.id, id: { not: removedOrderId }, status: { notIn: ['COMPLETED', 'CANCELLED', 'DELETED'] } },
-    select: { id: true },
-    orderBy: { createdAt: 'asc' },
-  })
+    const sibling = await tx.order.findFirst({
+      where: { venueId, tableId: table.id, id: { not: removedOrderId }, status: { notIn: ['COMPLETED', 'CANCELLED', 'DELETED'] } },
+      select: { id: true },
+      orderBy: { createdAt: 'asc' },
+    })
 
-  await prisma.table.update({
-    where: { id: table.id },
-    data: sibling ? { status: 'OCCUPIED', currentOrderId: sibling.id } : { status: 'AVAILABLE', currentOrderId: null },
-  })
+    await tx.table.update({
+      where: { id: table.id },
+      data: sibling ? { status: 'OCCUPIED', currentOrderId: sibling.id } : { status: 'AVAILABLE', currentOrderId: null },
+    })
+    return { table, sibling }
+  }, ORDER_LOCK_WAIT_BUDGET)
+  if (!reconciled) return { tableFreed: false }
+  const { table, sibling } = reconciled
 
   logger.info(
     sibling

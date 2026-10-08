@@ -262,7 +262,7 @@ describe('MercadoPagoProvider.getPaymentStatus', () => {
   it('maps MP status to PaymentStatus enum correctly', async () => {
     const mappings = [
       ['approved', 'PAID'],
-      ['authorized', 'PAID'],
+      ['authorized', 'PENDING'],
       ['pending', 'PENDING'],
       ['in_process', 'PENDING'],
       ['in_mediation', 'PENDING'],

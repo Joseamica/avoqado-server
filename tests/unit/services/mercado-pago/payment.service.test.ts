@@ -63,6 +63,43 @@ describe('createPayment', () => {
     expect(result.status_detail).toBe('accredited')
   })
 
+  it.each(['oxxo', 'clabe'])('omits token for %s and preserves the marketplace request', async paymentMethodId => {
+    const scope = nock('https://api.mercadopago.com', {
+      reqheaders: { authorization: `Bearer ${SELLER_TOKEN}`, 'x-idempotency-key': 'offline-cs-1' },
+    })
+      .post('/v1/payments', body => {
+        expect(body).not.toHaveProperty('token')
+        expect(body).toMatchObject({
+          payment_method_id: paymentMethodId,
+          installments: 1,
+          transaction_amount: 275,
+          application_fee: 5,
+          external_reference: 'offline-cs-1',
+          binary_mode: false,
+          payer: { email: 'buyer@example.com', first_name: 'Ana', last_name: 'Pérez', identification: { type: 'CURP', number: 'ABC' } },
+        })
+        return true
+      })
+      .reply(201, { id: 9999, status: 'pending', status_detail: 'pending_waiting_payment' })
+    const result = await createPayment({
+      accessToken: SELLER_TOKEN,
+      paymentMethodId,
+      installments: 1,
+      orderId: 'offline-cs-1',
+      amountMxn: 275,
+      applicationFeeMxn: 5,
+      description: 'Pago',
+      payerEmail: 'buyer@example.com',
+      payerFirstName: 'Ana',
+      payerLastName: 'Pérez',
+      payerIdentificationType: 'CURP',
+      payerIdentificationNumber: 'ABC',
+      idempotencyKey: 'offline-cs-1',
+    })
+    expect(result.status).toBe('pending')
+    expect(scope.isDone()).toBe(true)
+  })
+
   it('includes issuer_id when provided', async () => {
     nock('https://api.mercadopago.com')
       .post('/v1/payments', body => {

@@ -395,6 +395,7 @@ export async function processIntents(params: {
           status: 'REJECTED',
           errorCode: 'STALE_DEVICE_SEQUENCE',
           message: 'La secuencia del dispositivo ya fue utilizada. Requiere revisión antes de repetir la operación.',
+          details: { latestSeq: latestForDevice.seq },
         })
         continue
       }
@@ -432,11 +433,17 @@ export async function processIntents(params: {
             select: { idempotencyKey: true },
           })
           if (sequenceWinner) {
+            const latestForDevice = await prisma.posSyncIntent.findFirst({
+              where: { venueId, deviceId, seq: { not: null } },
+              orderBy: { seq: 'desc' },
+              select: { seq: true },
+            })
             acks.push({
               id: intent.id,
               status: 'REJECTED',
               errorCode: 'STALE_DEVICE_SEQUENCE',
               message: 'La secuencia del dispositivo pertenece a otra operación. Requiere revisión.',
+              details: { latestSeq: latestForDevice?.seq ?? intent.seq },
             })
             continue
           }

@@ -18,6 +18,7 @@ import { issueCfdiForOrder, loadOrderForCfdiFromDb } from '@/services/fiscal/cfd
 import { capturarEntrada, huellaDeEntrada, leerEntrada, paramsDesdeEntrada } from '@/services/fiscal/entradaDocumental'
 import { addCustomerToOrder, addItemsToOrder, compItems } from '@/services/tpv/order.tpv.service'
 import { applyManualDiscount } from '@/services/tpv/discount.tpv.service'
+import { createOrderWithItems } from '@/services/mobile/order.mobile.service'
 import { applyPromotionToOrder } from '@/services/promotions/promotion.service'
 import { applyServiceCharge } from '@/services/mobile/service-charge.mobile.service'
 import { cleanupPaymentCache, processPosOrderEvent } from '@/services/pos-sync/posSyncOrder.service'
@@ -367,7 +368,7 @@ const CASES: Array<[string, Case]> = [
         montos: { subtotalCents: 8621, taxCents: 1379, totalCents: 10000 },
         paidCents: 5000,
         renglones: 2,
-        conceptos: [PLATO, ['Refresco', ...SECTOR_KEYS, 1, 5000, 5000, true]],
+        conceptos: [PLATO],
       },
       because: 'no coincide con lo cobrado',
     },
@@ -378,8 +379,19 @@ const CASES: Array<[string, Case]> = [
       build: () => nativeOrder(),
       run: o => applyManualDiscount(venueId, o.id, 'PERCENTAGE', 10, 'Manual', staffVenueId),
       money: { subtotal: 150, discount: 15, charge: 0, tax: 0, total: 135, paid: 50, remaining: 85, paymentStatus: 'PARTIAL' },
-      document: { status: 'VALIDATION_FAILED', montos: BASE_MONTOS, paidCents: 5000, renglones: 2, conceptos: [PLATO, REFRESCO] },
-      because: 'descuento general sobre varios artículos',
+      // 🔴 B3a (spec §4.2, D7): cambia A PROPÓSITO. El 10 % ya no bloquea: consta en su reparto (1000 a Plato, 500 a Refresco).
+      // Sigue sin timbrar porque la venta está a medio pagar.
+      document: {
+        status: 'VALIDATION_FAILED',
+        montos: { subtotalCents: 11638, taxCents: 1862, totalCents: 13500 },
+        paidCents: 5000,
+        renglones: 2,
+        conceptos: [
+          ['Plato', ...CATEGORY_KEYS, 1, 10000, 1000, true],
+          ['Refresco', ...SECTOR_KEYS, 1, 5000, 500, true],
+        ],
+      },
+      because: 'no coincide con lo cobrado',
     },
   ],
   [
@@ -388,8 +400,16 @@ const CASES: Array<[string, Case]> = [
       build: () => nativeOrder(),
       run: o => applyPromotionToOrder({ venueId, orderId: o.id, promotionId, instanceId: randomUUID(), selections, soldAt: new Date() }),
       money: { subtotal: 240, discount: 0, charge: 0, tax: 0, total: 240, paid: 50, remaining: 190, paymentStatus: 'PARTIAL' },
-      document: { status: 'VALIDATION_FAILED', montos: BASE_MONTOS, paidCents: 5000, renglones: 4, conceptos: [PLATO, REFRESCO] },
-      because: 'lleva una promoción',
+      // 🔴 B3a (Tarea 5): cambia A PROPÓSITO. Las dos líneas del combo ya son conceptos a precio de lista con su descuento de
+      // promoción; sigue sin timbrar porque la venta está a medio pagar.
+      document: {
+        status: 'VALIDATION_FAILED',
+        montos: { subtotalCents: 20690, taxCents: 3310, totalCents: 24000 },
+        paidCents: 5000,
+        renglones: 4,
+        conceptos: [PLATO, REFRESCO, ['Plato', ...CATEGORY_KEYS, 1, 10000, 2500, true], ['Postre', ...POSTRE_KEYS, 1, 2000, 500, true]],
+      },
+      because: 'no coincide con lo cobrado',
     },
   ],
   [
@@ -646,6 +666,126 @@ describe('writer first: the capture waits and freezes the complete operation (mo
       }),
     )
     expect(cfdi.lastError).toContain('cargo por servicio')
+  })
+})
+
+describe('B3a: promociones con los escritores reales (B2 → B3a)', () => {
+  it('promoción + 10 % de la cuenta (B2 → B3a): cada renglón lleva lo que dice su reparto y la factura sale', async () => {
+    const o = await nativeOrder()
+    await applyPromotionToOrder({ venueId, orderId: o.id, promotionId, instanceId: randomUUID(), selections, soldAt: new Date() })
+    await applyManualDiscount(venueId, o.id, 'PERCENTAGE', 10, 'Manual', staffVenueId)
+    expect(await money(o.id)).toMatchObject({ subtotal: 240, discount: 24, total: 216 })
+    await payRest(o.id)
+    expect((await issue(o.id)).status).toBe('STAMPED')
+    const { document } = await frozen(o.id)
+    expect(sorted(document)).toEqual(
+      sorted({
+        status: 'STAMPED',
+        montos: { subtotalCents: 18621, taxCents: 2979, totalCents: 21600 },
+        paidCents: 21600,
+        renglones: 4,
+        conceptos: [
+          ['Plato', ...CATEGORY_KEYS, 1, 10000, 1000, true],
+          ['Refresco', ...SECTOR_KEYS, 1, 5000, 500, true],
+          ['Plato', ...CATEGORY_KEYS, 1, 10000, 3250, true],
+          ['Postre', ...POSTRE_KEYS, 1, 2000, 650, true],
+        ],
+      }),
+    )
+  })
+
+  it('🔴 promoción → 10 % de la cuenta → cortesía de la terminal sobre la línea del combo → factura (B2 N1 + B3a)', async () => {
+    const o = await nativeOrder()
+    await applyPromotionToOrder({ venueId, orderId: o.id, promotionId, instanceId: randomUUID(), selections, soldAt: new Date() })
+    await applyManualDiscount(venueId, o.id, 'PERCENTAGE', 10, 'Manual', staffVenueId)
+    const lineaDelCombo = await prisma.orderItem.findFirstOrThrow({
+      where: { orderId: o.id, productId: platoId, orderPromotionId: { not: null } },
+    })
+    await compItems(venueId, o.id, { itemIds: [lineaDelCombo.id], reason: 'Cortesía', staffId })
+    // Desde B2c `compItems` es recalculador y vuelve a sacar el 10 % sólo sobre lo que no es promoción ni regalado (R8):
+    // 10 % de $150 = $15; cabecera 15 + 75 del espejo COMP = 90.
+    expect(await money(o.id)).toMatchObject({ subtotal: 240, discount: 90, total: 150 })
+    // B2 (N1): el reparto del 10 % ya no le da parte a la línea regalada.
+    const delDiez = await prisma.orderDiscount.findFirstOrThrow({ where: { orderId: o.id, isComp: false } })
+    expect((delDiez.reparto as { renglones: Record<string, number> }).renglones[lineaDelCombo.id] ?? 0).toBe(0)
+    await payRest(o.id)
+    expect((await issue(o.id)).status).toBe('STAMPED')
+    const { document } = await frozen(o.id)
+    expect(document.conceptos.map(c => c[0]).sort()).toEqual(['Plato', 'Postre', 'Refresco'])
+    // Modelo del PAC: Plato 10000/1000 + Refresco 5000/500 + Postre 2000/500 ⇒ montos { 12931, 2069, 15000 } = cobrado.
+    expect(document.montos.totalCents).toBe(15000)
+    expect(document.paidCents).toBe(15000)
+  })
+})
+
+// B3a ronda final, ajuste 6 (`applyManualDiscount` guarda `taxReduction: 0`): ¿una venta con descuento manual timbra exacto lo cobrado?
+// El POS móvil crea TODA venta con IVA incluido (`createOrderWithItems`), así que su descuento manual no baja IVA: es el D16 correcto,
+// porque en México el precio ya lo trae. La única venta NET nativa es la importada de SoftRestaurant, y ésa no acepta descuentos.
+describe('B3a ronda final (6): descuento manual del POS móvil → factura', () => {
+  it('control — 🔴 venta del POS móvil (Plato $100 + Postre $20) con $15 de descuento tecleado por el cajero: IVA incluido, el descuento no toca el IVA y la factura timbra exacto lo cobrado ($105)', async () => {
+    const venta = await createOrderWithItems(venueId, {
+      items: [
+        { productId: platoId, quantity: 1 },
+        { productId: postreId, quantity: 1 },
+      ],
+      staffId,
+      discount: 1500,
+      source: 'AVOQADO_ANDROID',
+    })
+    const orden = await prisma.order.findUniqueOrThrow({ where: { id: venta.id } })
+    expect(orden.contratoDePrecio).toBe('IVA_INCLUIDO')
+    expect(await money(venta.id)).toMatchObject({ subtotal: 120, discount: 15, tax: 0, total: 105 })
+    const filas = await prisma.orderDiscount.findMany({ where: { orderId: venta.id }, take: 5 })
+    expect(filas.map(f => [Number(f.amount), Number(f.taxReduction)])).toEqual([[15, 0]])
+    await payRest(venta.id)
+    expect((await issue(venta.id)).status).toBe('STAMPED')
+    const { cfdi, entrada, document } = await frozen(venta.id)
+    expect(document.paidCents).toBe(10500)
+    expect(document.conceptos.reduce((s, c) => s + Number(c[5]), 0)).toBe(1500)
+    // Lo que dirá el XML (regla del PAC): subtotal 103.45 − descuento 12.93, IVA 14.48, total 105.00 = lo cobrado.
+    expect(document.montos).toEqual({ subtotalCents: 9052, taxCents: 1448, totalCents: 10500 })
+    expect(provider.createInvoice).toHaveBeenCalledWith(sentToPac(entrada, `${cfdi.idempotencyKey}#1`))
+  })
+
+  it('control — la única venta NET nativa (importada de SoftRestaurant) no acepta descuento manual: no hay NET con descuento manual que facturar', async () => {
+    const pos = await posOrder()
+    await expect(applyManualDiscount(venueId, pos.id, 'PERCENTAGE', 10, 'Manual', staffVenueId)).rejects.toMatchObject({
+      code: 'ORDEN_IMPORTADA_DEL_POS',
+    })
+    expect(await prisma.orderDiscount.count({ where: { orderId: pos.id } })).toBe(0)
+  })
+
+  // HIPOTÉTICA: ningún escritor nativo crea hoy una venta NET sin pagar que no sea importada (el móvil, la terminal, ligas, reservas y
+  // delivery nacen con IVA incluido; SoftRestaurant se rechaza arriba; el demo y el cobro manual nacen pagados). Se arma a mano para
+  // fijar qué pasaría: el descuento manual no marca `reduceImpuesto`, `sincronizarRepartos` no le baja el IVA, y la factura NO timbra
+  // un total distinto: se detiene con su motivo. Si algún día se decide que el descuento manual baje el IVA aparte (spec §4.8, D16),
+  // esta prueba cambia a propósito.
+  it('control — hipotética: venta NET nativa sin pagar + 10 % manual ⇒ el IVA cobrado no baja y la factura se detiene con su motivo (nunca timbra distinto)', async () => {
+    const o = await prisma.order.create({
+      data: {
+        venueId,
+        orderNumber: `${fixture}-${++sequence}`,
+        subtotal: 120,
+        taxAmount: 19.2,
+        total: 139.2,
+        remainingBalance: 139.2,
+        paymentStatus: 'PENDING',
+        contratoDePrecio: 'IVA_APARTE',
+        items: {
+          create: [
+            { productId: platoId, productName: 'Plato', quantity: 1, unitPrice: 100, taxAmount: 16, total: 100 },
+            { productId: postreId, productName: 'Postre', quantity: 1, unitPrice: 20, taxAmount: 3.2, total: 20 },
+          ],
+        },
+      },
+    })
+    await applyManualDiscount(venueId, o.id, 'PERCENTAGE', 10, 'Manual', staffVenueId)
+    expect(await money(o.id)).toMatchObject({ subtotal: 120, discount: 12, tax: 19.2, total: 127.2 })
+    expect((await prisma.orderDiscount.findMany({ where: { orderId: o.id }, take: 5 })).map(f => Number(f.taxReduction))).toEqual([0])
+    await payRest(o.id)
+    expect((await issue(o.id)).status).toBe('VALIDATION_FAILED')
+    expect(provider.createInvoice).not.toHaveBeenCalled()
+    expect((await cfdiOf(o.id)).lastError).toContain('El total de la factura ($125.28) no coincide con lo cobrado ($127.20)')
   })
 })
 

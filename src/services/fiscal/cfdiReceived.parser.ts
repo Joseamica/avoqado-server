@@ -40,18 +40,37 @@ export interface CfdiConcepto {
   valorUnitarioCents: number
   importeCents: number
   descuentoCents: number
+  iepsCents?: number
 }
 
 export interface CfdiReceived {
   expense: CreateExpenseInput
   conceptos: CfdiConcepto[]
+  currency: string
+  cfdiType: string
 }
 
-const pesos = (s: string | number | undefined): number => Math.round(parseFloat(String(s ?? '0')) * 100)
+const decimal = (s: string | number | undefined): number => {
+  const text = String(s ?? '0').trim()
+  const value = Number(text)
+  if (!/^-?\d+(?:\.\d+)?$/.test(text) || !Number.isFinite(value)) {
+    throw new BadRequestError('El CFDI contiene un valor numérico inválido.')
+  }
+  return value
+}
+const pesos = (s: string | number | undefined): number => {
+  const value = decimal(s)
+  const cents = Math.round(value * 100)
+  if (value < 0 || !Number.isSafeInteger(cents) || cents > 2_147_483_647) {
+    throw new BadRequestError('El CFDI contiene un importe inválido o fuera de rango.')
+  }
+  return cents
+}
 const toArray = <T>(x: T | T[] | undefined): T[] => (x == null ? [] : Array.isArray(x) ? x : [x])
 
 /** Comparte el lector del comprobante; nunca suma impuestos de cada concepto. */
 function comprobanteDesdeXml(xml: string): any {
+  if (typeof xml !== 'string') throw new BadRequestError('El XML del CFDI debe ser texto.')
   if (Buffer.byteLength(xml ?? '', 'utf8') > 2 * 1024 * 1024) throw new BadRequestError('El XML del CFDI excede 2 MiB.')
   // CFDI never needs a DTD. Refuse it before even the validator sees untrusted entities.
   if (/<!DOCTYPE|<!ENTITY/i.test(xml)) throw new BadRequestError('El CFDI no admite DTD ni declaraciones de entidades.')
@@ -91,7 +110,10 @@ export function parseCfdiReceived(xml: string, ourRfc: string): CfdiReceived {
 
   // Fecha de emisión = parte de fecha del atributo Fecha (ISO sin zona).
   const fechaEmision = String(c['@_Fecha'] ?? '').slice(0, 10)
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(fechaEmision)) throw new BadRequestError('El CFDI no tiene una fecha de emisión válida.')
+  const fecha = new Date(`${fechaEmision}T00:00:00.000Z`)
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(fechaEmision) || !Number.isFinite(fecha.getTime()) || fecha.toISOString().slice(0, 10) !== fechaEmision) {
+    throw new BadRequestError('El CFDI no tiene una fecha de emisión válida.')
+  }
 
   // Impuestos: traslados (IVA por tasa, IEPS) + retenciones (ISR, IVA).
   let iva16 = 0
@@ -107,7 +129,7 @@ export function parseCfdiReceived(xml: string, ourRfc: string): CfdiReceived {
     const code = String(tr['@_Impuesto'] ?? '')
     const importe = pesos(tr['@_Importe'])
     const base = pesos(tr['@_Base'])
-    const tasa = parseFloat(String(tr['@_TasaOCuota'] ?? '0'))
+    const tasa = decimal(tr['@_TasaOCuota'])
     const factor = String(tr['@_TipoFactor'] ?? '')
     if (code === IMP_IVA) {
       if (factor === 'Exento') exentoBase += base
@@ -141,10 +163,17 @@ export function parseCfdiReceived(xml: string, ourRfc: string): CfdiReceived {
     descripcion: String(co['@_Descripcion'] ?? '').trim(),
     claveProdServ: co['@_ClaveProdServ'] != null ? String(co['@_ClaveProdServ']).trim() : null,
     claveUnidad: co['@_ClaveUnidad'] != null ? String(co['@_ClaveUnidad']).trim() : null,
-    cantidad: parseFloat(String(co['@_Cantidad'] ?? '0')) || 0,
+    cantidad: decimal(co['@_Cantidad']),
     valorUnitarioCents: pesos(co['@_ValorUnitario']),
     importeCents: pesos(co['@_Importe']),
     descuentoCents: pesos(co['@_Descuento']),
+    ...(toArray<any>(co.Impuestos?.Traslados?.Traslado).some(tr => String(tr['@_Impuesto']) === IMP_IEPS)
+      ? {
+          iepsCents: toArray<any>(co.Impuestos?.Traslados?.Traslado)
+            .filter(tr => String(tr['@_Impuesto']) === IMP_IEPS)
+            .reduce((sum, tr) => sum + pesos(tr['@_Importe']), 0),
+        }
+      : {}),
   }))
 
   const expense: CreateExpenseInput = {
@@ -173,5 +202,14 @@ export function parseCfdiReceived(xml: string, ourRfc: string): CfdiReceived {
     source: 'XML_UPLOAD',
   }
 
-  return { expense, conceptos }
+  return {
+    expense,
+    conceptos,
+    cfdiType: String(c['@_TipoDeComprobante'] ?? '')
+      .trim()
+      .toUpperCase(),
+    currency: String(c['@_Moneda'] ?? '')
+      .trim()
+      .toUpperCase(),
+  }
 }

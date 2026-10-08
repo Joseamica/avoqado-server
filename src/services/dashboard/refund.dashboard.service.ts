@@ -22,6 +22,7 @@ import { logAction } from './activity-log.service'
 import type { FiscalCongelado } from '../fiscal/deliveryFiscalDelta'
 import { devolverConEfectivo, sePuedeEscogerComoDevolver, type DevolverCon } from '../tpv/terminalRefundTarget'
 import { postCashRefundToDrawer } from '../shared/cashDrawerPosting'
+import { parteDeUnidades as getUnitRefundCents } from '../shared/parteDeUnidades'
 import { computeTenderCommission } from './tenderType.dashboard.service'
 import {
   ORDER_LOCK_WAIT_BUDGET,
@@ -208,15 +209,6 @@ function centsToDecimal(cents: number): Prisma.Decimal {
 function asRecord(value: Prisma.JsonValue | Record<string, unknown> | null | undefined): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
   return value as Record<string, unknown>
-}
-
-function getUnitRefundCents(totalCents: number, quantity: number, offset: number, count: number): number {
-  if (quantity <= 0 || count <= 0) return 0
-  const baseUnit = Math.floor(totalCents / quantity)
-  const remainder = totalCents % quantity
-  const end = offset + count
-  const bonusUnits = Math.max(0, Math.min(remainder, end) - Math.min(remainder, offset))
-  return baseUnit * count + bonusUnits
 }
 
 function collectExistingRefundedItems(refundRows: RefundPaymentRow[]): Map<string, ExistingRefundedItem> {
