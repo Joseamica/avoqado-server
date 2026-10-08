@@ -399,8 +399,9 @@ async function confirmar(row: ShopifyStockOutbox, claimToken: string, now: Date,
     return 'CONTEXTO_CAMBIO'
   }
   if (r === 'AJENA') {
-    logger.warn(`[SHOPIFY] buzón: fila ${row.id} confirmada por Shopify pero ya no era nuestra`)
-    return 'DISCARDED'
+    // Otro reclamo la tiene y la resuelve con la misma llave: para este worker no pasó nada.
+    logger.warn(`[SHOPIFY] buzón: fila ${row.id} confirmada por Shopify pero ya no era nuestra; la resuelve quien la tiene`)
+    return 'SKIPPED'
   }
   if (r.espejo !== null && r.espejo < 0) await avisarSobreventa(row.venueId, row.productId)
   return 'SENT'

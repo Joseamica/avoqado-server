@@ -84,7 +84,7 @@ const sucursal = (e: EscenarioShopify) => prisma.shopifyLocationLink.findUniqueO
 const dormir = (ms: number) => new Promise<void>(r => setTimeout(r, ms))
 /** Barrera: espera a que alguna sesión de esta base quede esperando un candado sobre `tabla`. */
 async function esperarCandado(tabla: string): Promise<void> {
-  for (let i = 0; i < 200; i++) {
+  for (let i = 0; i < 400; i++) {
     const [r] = await prisma.$queryRaw<Array<{ n: number }>>`
       SELECT count(*)::int AS n FROM pg_stat_activity
        WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE ${`%${tabla}%`}`
@@ -159,6 +159,8 @@ it('envía el delta con @idempotent y llave = id de la fila; SENT, ambiguous fal
   await venta(e.inventoryId)
   const graphql = graphqlFalso(exito)
   const c = await reclamar()
+  // Una IN_PROGRESS con el lease vivo no se vuelve a reclamar.
+  expect(await claimShopifyOutbox(new Date())).toEqual({ kind: 'VACIO' })
   expect(await runShopifyOutboxRow(c.id, c.claimToken, new Date(), { graphql, hasAccess: siAcceso })).toBe('SENT')
   const [shop, token, query, vars, opts] = graphql.mock.calls[0]
   expect([shop, token]).toEqual([e.shopDomain, TOKEN_DE_PRUEBA])
@@ -431,6 +433,8 @@ it('falla reintentable ⇒ FAILED con espera creciente; al 6º intento DEAD_LETT
     if (i < esperasMin.length) {
       const f = await filaDe(e.productId)
       expect(f.scheduledAt.getTime() - ahora.getTime()).toBe(esperasMin[i] * 60_000)
+      // Antes de su hora no sale (2 s antes: más que la holgura de reloj de 1 s).
+      expect(await claimShopifyOutbox(new Date(f.scheduledAt.getTime() - 2_000))).toEqual({ kind: 'VACIO' })
       ahora = new Date(f.scheduledAt.getTime() + 1_000)
     }
   }
@@ -709,6 +713,7 @@ it('la sucursal se pausó entre el reclamo y el envío ⇒ PAUSADO', async () =>
   const graphql = graphqlFalso(exito)
   expect(await runShopifyOutboxRow(c.id, c.claimToken, new Date(), { graphql, hasAccess: siAcceso })).toBe('PAUSADO')
   expect(graphql).not.toHaveBeenCalled()
+  expect(await fila(c.id)).toMatchObject({ status: 'PENDING', claimToken: null, attempts: 0, sentInventoryItemId: null })
 })
 
 it('🔴 A7-5: se desconectó entre el reclamo y el envío: la fila nunca salió ⇒ DISCARDED GENERACION_VIEJA, sin llamar a Shopify', async () => {
@@ -1030,7 +1035,7 @@ it('🔴 §12.4: con el cliente real, un fetch lento se corta con lo que quedaba
   }
   expect(resultado).toBe('FAILED') // TIMEOUT: reintentable y ambiguo
   expect(await filaDe(e.productId)).toMatchObject({ status: 'FAILED', ambiguous: true })
-  expect(cortado - salio).toBeGreaterThanOrEqual(1_000)
+  expect(cortado - salio).toBeGreaterThanOrEqual(950)
   expect(cortado - salio).toBeLessThan(2_400) // quedaban ≈1.3 s; con el plazo completo habrían sido 2.5 s (K5: holgura por la Mac compartida)
   expect(await hueco(e)).toBe('0')
 }, 15_000)

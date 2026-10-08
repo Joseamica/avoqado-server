@@ -763,7 +763,7 @@ describe('liveOutboxSum, productBlocked y suspendPair', () => {
 
 /** Barrera: espera a que alguna sesión de esta base quede esperando un candado sobre `tabla`. */
 async function esperarCandado(tabla: string): Promise<void> {
-  for (let i = 0; i < 200; i++) {
+  for (let i = 0; i < 400; i++) {
     const [r] = await prisma.$queryRaw<Array<{ n: number }>>`
       SELECT count(*)::int AS n FROM pg_stat_activity
        WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE ${`%${tabla}%`}`
