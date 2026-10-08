@@ -1296,6 +1296,13 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
   let productsArchived = 0
   let productsRestored = 0
   let productsKeptOnRecipe = 0
+  let productsKeptUntracked = 0
+
+  // Una clase, una cita, algo digital o un donativo no llevan existencias: se rechaza el archivo entero ANTES de escribir nada
+  // (misma regla y mensaje que el alta y la edición de producto en el dashboard y en Artículos de Android/iOS).
+  const sinExistencias = data.categories.flatMap(c => c.products).find(p => isNonInventoriable(p.type || 'FOOD', p.trackInventory))
+  if (sinExistencias)
+    throw new AppError(`${NON_INVENTORIABLE_MESSAGE} (SKU ${boundedGovernanceDiagnosticSku(sinExistencias.sku).sku})`, 400)
 
   await prisma.$transaction(
     async tx => {
@@ -1448,17 +1455,18 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
           // Check if product exists by SKU (merge mode)
           const existingProduct = await tx.product.findFirst({
             where: { venueId, sku: productData.sku },
-            include: { recipe: { select: { id: true } } },
+            include: { recipe: { select: { id: true } }, inventory: { select: { id: true } } },
           })
-          // Una clase, una cita, algo digital o un donativo no llevan existencias: se rechaza el archivo entero (misma regla y
-          // mensaje que el alta y la edición de producto en el dashboard y en Artículos de Android/iOS).
-          if (isNonInventoriable(productData.type || 'FOOD', productData.trackInventory)) throw new AppError(NON_INVENTORIABLE_MESSAGE, 400)
-          // `trackInventory` ⇒ el producto se cuenta «por cantidad», como el importador de Shopify. Antes sólo se escribía la fila
-          // de Inventory y el producto no se configuraba: tenía existencias y sus ventas NO descontaban. Un producto con receta
-          // NO se convierte desde un archivo (se descontaría el producto en vez de sus insumos): se queda como está y se cuenta.
+          // `trackInventory` ⇒ el producto se cuenta «por cantidad». Antes sólo se escribía la fila de Inventory y el producto
+          // no se configuraba: tenía existencias y sus ventas NO descontaban. Dos excepciones, que se quedan como están y se
+          // cuentan: un producto con receta (se descontaría el producto en vez de sus insumos), y uno que se apagó conservando
+          // su fila — el export del dashboard escribe `track_inventory` según si EXISTE la fila, así que exportar y volver a
+          // importar lo prendería sin que nadie lo pidiera. Los que dañó la importación vieja los repara su script, no esto.
           const conReceta = existingProduct?.inventoryMethod === 'RECIPE' || Boolean(existingProduct?.recipe)
-          const porCantidad = productData.trackInventory === true && !conReceta
+          const apagadoConFila = existingProduct?.trackInventory === false && Boolean(existingProduct?.inventory)
+          const porCantidad = productData.trackInventory === true && !conReceta && !apagadoConFila
           if (productData.trackInventory === true && conReceta) productsKeptOnRecipe++
+          else if (productData.trackInventory === true && apagadoConFila) productsKeptUntracked++
 
           let product
           if (existingProduct) {
@@ -1707,6 +1715,7 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
       productsArchived,
       productsRestored,
       productsKeptOnRecipe,
+      productsKeptUntracked,
     },
   })
 
@@ -1723,6 +1732,8 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
       productsRestored,
       // Filas con `trackInventory` cuyo producto se descuenta por receta: no se convirtieron.
       productsKeptOnRecipe,
+      // Filas con `trackInventory` de un producto que se apagó conservando su inventario: no se volvieron a prender.
+      productsKeptUntracked,
     },
   }
 }

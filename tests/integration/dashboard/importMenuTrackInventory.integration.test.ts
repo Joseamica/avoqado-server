@@ -106,19 +106,52 @@ describe('importMenu con trackInventory: true', () => {
     expect(r.stats.productsKeptOnRecipe).toBe(1)
   })
 
-  it('un tipo que no lleva existencias (clase) rechaza el archivo entero, como el resto de la plataforma', async () => {
+  it('un tipo que no lleva existencias (clase) rechaza el archivo entero ANTES de escribir, con su SKU', async () => {
     const x = await negocio()
     const r = (await desenlace(
       importMenu(
         x.venueId,
-        archivo([{ name: 'Yoga', sku: 'YOGA', price: 150, type: 'CLASS', trackInventory: true, currentStock: 8 }]),
+        archivo([
+          { name: 'Gorra', sku: 'GORRA', price: 250, type: 'RETAIL', trackInventory: true, currentStock: 3 },
+          { name: 'Yoga', sku: 'YOGA', price: 150, type: 'CLASS', trackInventory: true, currentStock: 8 },
+        ]),
         SERVICIO,
       ),
     )) as { statusCode?: number; message?: string }
 
-    expect({ statusCode: r.statusCode, message: r.message }).toEqual({ statusCode: 400, message: NON_INVENTORIABLE_MESSAGE })
+    expect({ statusCode: r.statusCode, message: r.message }).toEqual({
+      statusCode: 400,
+      message: `${NON_INVENTORIABLE_MESSAGE} (SKU YOGA)`,
+    })
+    expect(await prisma.menuCategory.count({ where: { venueId: x.venueId } })).toBe(0)
     expect(await prisma.product.count({ where: { venueId: x.venueId } })).toBe(0)
     expect(await prisma.inventory.count({ where: { venueId: x.venueId } })).toBe(0)
+  })
+})
+
+describe('importMenu: exportar y volver a importar no prende lo que el dueño apagó', () => {
+  it('un producto apagado que conserva su fila de Inventory se queda apagado, con su saldo, y el resumen lo cuenta', async () => {
+    const x = await negocio()
+    await importMenu(x.venueId, archivo([{ name: 'Bolsa', sku: 'BOLSA', price: 40, type: 'RETAIL' }]), SERVICIO)
+    const antes = await producto(x.venueId, 'BOLSA')
+    // Lo que deja apagar el conteo hoy: el producto sin «por cantidad» y su fila de Inventory intacta.
+    await prisma.inventory.create({ data: { productId: antes.id, venueId: x.venueId, currentStock: 7 } })
+
+    // El export del dashboard marca `track_inventory=true` porque la fila EXISTE.
+    const r = await importMenu(
+      x.venueId,
+      archivo([{ name: 'Bolsa', sku: 'BOLSA', price: 40, type: 'RETAIL', trackInventory: true, currentStock: 7 }]),
+      SERVICIO,
+    )
+
+    const p = await producto(x.venueId, 'BOLSA')
+    expect({ trackInventory: p.trackInventory, inventoryMethod: p.inventoryMethod }).toEqual({
+      trackInventory: false,
+      inventoryMethod: null,
+    })
+    expect(Number(p.inventory?.currentStock)).toBe(7)
+    expect(r.stats.productsKeptUntracked).toBe(1)
+    expect(r.stats.productsKeptOnRecipe).toBe(0)
   })
 })
 
@@ -134,6 +167,7 @@ describe('importMenu sin trackInventory (compatibilidad)', () => {
       inventory: null,
     })
     expect(r.stats.productsKeptOnRecipe).toBe(0)
+    expect(r.stats.productsKeptUntracked).toBe(0)
   })
 
   it('re-importar SIN trackInventory no apaga un producto que ya se contaba por cantidad ni toca su saldo', async () => {

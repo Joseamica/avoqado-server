@@ -8,7 +8,7 @@ import { Prisma } from '@prisma/client'
 import { deductInventoryForProduct } from '@/services/dashboard/productInventoryIntegration.service'
 import prisma from '@/utils/prismaClient'
 import { limpiarNegocios, nuevoNegocio } from '../fiscal/exclusionContable.fixtures'
-import { ACCION, buscarDanados, clasificar, reparar } from '../../../scripts/lib/importTrackInventory'
+import { ACCION, buscarDanados, clasificar, escribirIds, LOTE, leerIds, reparar } from '../../../scripts/lib/importTrackInventory'
 
 jest.setTimeout(120_000)
 
@@ -81,7 +81,7 @@ describe('diagnóstico y reparación de lo que la importación ya dejó dañado 
 
   it('el diagnóstico lista por negocio, con nombre, sólo los que tienen inventario y no se cuentan, y los clasifica', async () => {
     const { x, ids } = await negocioDanado()
-    const { filas, truncado } = await buscarDanados(prisma, x.venueId)
+    const { filas, truncado } = await buscarDanados(prisma, { venueId: x.venueId })
 
     expect(truncado).toBe(false)
     expect(Object.fromEntries(filas.map(f => [f.sku, clasificar(f)]))).toEqual({
@@ -99,9 +99,12 @@ describe('diagnóstico y reparación de lo que la importación ya dejó dañado 
 
   it('la reparación prende «por cantidad» SÓLO los reparables, deja bitácora, no toca existencias, y la venta ya descuenta', async () => {
     const { x, ids } = await negocioDanado()
-    const { filas } = await buscarDanados(prisma, x.venueId)
+    const { filas } = await buscarDanados(prisma, { venueId: x.venueId })
 
-    expect(await reparar(prisma, filas)).toBe(2)
+    // La lista que escribe el diagnóstico (`--salida`) y lee la reparación (`--ids`): sólo los REPARABLE.
+    const lista = leerIds(escribirIds(filas))
+    expect([...lista].sort()).toEqual([ids.apagado, ids.sinMetodo].sort())
+    expect(await reparar(prisma, filas, lista)).toBe(2)
 
     const estado = async (id: string) =>
       prisma.product.findUniqueOrThrow({
@@ -118,15 +121,53 @@ describe('diagnóstico y reparación de lo que la importación ya dejó dañado 
 
     await deductInventoryForProduct(x.venueId, ids.apagado, 1, 'orden-prueba', undefined)
     expect(Number((await estado(ids.apagado)).inventory?.currentStock)).toBe(9)
-    expect((await buscarDanados(prisma, x.venueId)).filas.filter(f => clasificar(f) === 'REPARABLE')).toEqual([])
+    expect((await buscarDanados(prisma, { venueId: x.venueId })).filas.filter(f => clasificar(f) === 'REPARABLE')).toEqual([])
+  })
+
+  it('repara SÓLO los ids de la lista revisada: un REPARABLE que no está en ella, o uno que no es reparable, no se toca', async () => {
+    const { x, ids } = await negocioDanado()
+    const { filas } = await buscarDanados(prisma, { venueId: x.venueId })
+
+    // El founder borró «SIN-METODO» de la lista; alguien coló el id de la clase.
+    expect(await reparar(prisma, filas, leerIds(`# revisada\n${ids.apagado}  # Gorra\n${ids.clase}\n`))).toBe(1)
+
+    const estado = (id: string) =>
+      prisma.product.findUniqueOrThrow({ where: { id }, select: { trackInventory: true, inventoryMethod: true } })
+    expect(await estado(ids.apagado)).toEqual({ trackInventory: true, inventoryMethod: 'QUANTITY' })
+    expect(await estado(ids.sinMetodo)).toEqual({ trackInventory: true, inventoryMethod: null })
+    expect(await estado(ids.clase)).toEqual({ trackInventory: false, inventoryMethod: null })
+    expect(await prisma.activityLog.count({ where: { venueId: x.venueId, action: ACCION } })).toBe(1)
+  })
+
+  it('más de un lote: repara todos (UPDATE y bitácora por lotes de LOTE)', async () => {
+    const x = await negocio()
+    const { id: categoryId } = await prisma.menuCategory.create({ data: { venueId: x.venueId, name: 'Muchos', slug: 'muchos' } })
+    const n = LOTE + 1
+    await prisma.product.createMany({
+      data: Array.from({ length: n }, (_, i) => ({
+        venueId: x.venueId,
+        categoryId,
+        name: `P${i}`,
+        sku: `P${i}`,
+        price: 10,
+        type: 'RETAIL' as const,
+      })),
+    })
+    const productos = await prisma.product.findMany({ where: { venueId: x.venueId }, select: { id: true } })
+    await prisma.inventory.createMany({ data: productos.map(p => ({ productId: p.id, venueId: x.venueId, currentStock: 1 })) })
+
+    const { filas } = await buscarDanados(prisma, { venueId: x.venueId })
+    expect(await reparar(prisma, filas, leerIds(escribirIds(filas)))).toBe(n)
+    expect(await prisma.product.count({ where: { venueId: x.venueId, trackInventory: true, inventoryMethod: 'QUANTITY' } })).toBe(n)
+    expect(await prisma.activityLog.count({ where: { venueId: x.venueId, action: ACCION } })).toBe(n)
   })
 
   it('si un producto cambió desde que se listó, no repara NADA (CAS en una sola transacción)', async () => {
     const { x, ids } = await negocioDanado()
-    const { filas } = await buscarDanados(prisma, x.venueId)
+    const { filas } = await buscarDanados(prisma, { venueId: x.venueId })
     await prisma.product.update({ where: { id: ids.sinMetodo }, data: { inventoryMethod: 'RECIPE' } })
 
-    await expect(reparar(prisma, filas)).rejects.toThrow('cambió desde que se listó')
+    await expect(reparar(prisma, filas, new Set([ids.apagado, ids.sinMetodo]))).rejects.toThrow('desde que se listaron')
     expect(await prisma.product.findUniqueOrThrow({ where: { id: ids.apagado } })).toMatchObject({
       trackInventory: false,
       inventoryMethod: null,

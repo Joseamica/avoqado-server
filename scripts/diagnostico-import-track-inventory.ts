@@ -6,11 +6,14 @@
  *   npx tsx scripts/diagnostico-import-track-inventory.ts                       # base local (DATABASE_URL)
  *   npx tsx scripts/diagnostico-import-track-inventory.ts --base render         # RENDER_DATABASE_URL
  *   npx tsx scripts/diagnostico-import-track-inventory.ts --venue <slug o id>   # un solo negocio
+ *   npx tsx scripts/diagnostico-import-track-inventory.ts --salida ids.txt      # + la lista de REPARABLE para revisar
  *
- * No escribe nada. Reparar es otro script (`reparar-import-track-inventory.ts`) y la decisión es del founder.
+ * No escribe en la base. `--salida` escribe un ARCHIVO local con los ids REPARABLE (uno por renglón, con nombre para leerlo):
+ * es la lista que se revisa y se le pasa a `reparar-import-track-inventory.ts --ids`. Reparar lo decide el founder.
  */
 import 'dotenv/config'
-import { buscarDanados, destino, elegirBase, imprimir, leerValor } from './lib/importTrackInventory'
+import { writeFileSync } from 'node:fs'
+import { buscarDanados, clasificar, destino, elegirBase, escribirIds, imprimir, leerValor } from './lib/importTrackInventory'
 
 async function main(): Promise<void> {
   elegirBase(process.argv)
@@ -25,8 +28,13 @@ async function main(): Promise<void> {
       ? await prisma.venue.findFirst({ where: { OR: [{ slug: venueRef }, { id: venueRef }] }, select: { id: true } })
       : null
     if (venueRef && !venue) throw new Error(`No existe un venue con slug o id «${venueRef}».`)
-    const { filas, truncado } = await buscarDanados(prisma, venue?.id)
+    const { filas, truncado } = await buscarDanados(prisma, { venueId: venue?.id })
     imprimir(filas, truncado)
+    const salida = leerValor(process.argv, '--salida')
+    if (salida) {
+      writeFileSync(salida, escribirIds(filas))
+      console.log(`\nLista para revisar: ${salida} (${filas.filter(f => clasificar(f) === 'REPARABLE').length} id(s) REPARABLE)`)
+    }
   } finally {
     await prisma.$disconnect().catch(() => undefined)
   }

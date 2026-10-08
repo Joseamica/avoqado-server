@@ -10,6 +10,8 @@ import { isNonInventoriable } from '../../src/services/dashboard/quantityInvento
 
 /** Tope de productos por corrida; si se llega, se avisa (se corre de nuevo por negocio con `--venue`). */
 export const TOPE = 20_000
+/** Productos por UPDATE / INSERT al reparar: unos miles contra Render caben holgados en el timeout de la transacción. */
+export const LOTE = 500
 export const ACCION = 'PRODUCT_INVENTORY_TRACKING_REPAIRED'
 
 /**
@@ -45,10 +47,18 @@ export function clasificar(p: Pick<Danado, 'type' | 'trackInventory' | 'inventor
   return 'REPARABLE'
 }
 
-/** Productos con fila de Inventory que no se cuentan «por cantidad». Sólo lee. */
-export async function buscarDanados(db: Pick<PrismaClient, 'product'>, venueId?: string): Promise<{ filas: Danado[]; truncado: boolean }> {
+/** Productos con fila de Inventory que no se cuentan «por cantidad» (de un negocio y/o de una lista de ids). Sólo lee. */
+export async function buscarDanados(
+  db: Pick<PrismaClient, 'product'>,
+  filtro: { venueId?: string; ids?: Set<string> } = {},
+): Promise<{ filas: Danado[]; truncado: boolean }> {
   const rows = await db.product.findMany({
-    where: { ...(venueId ? { venueId } : {}), inventory: { isNot: null }, OR: [{ trackInventory: false }, { inventoryMethod: null }] },
+    where: {
+      ...(filtro.venueId ? { venueId: filtro.venueId } : {}),
+      ...(filtro.ids ? { id: { in: [...filtro.ids] } } : {}),
+      inventory: { isNot: null },
+      OR: [{ trackInventory: false }, { inventoryMethod: null }],
+    },
     select: {
       id: true,
       venueId: true,
@@ -102,49 +112,83 @@ export function imprimir(filas: Danado[], truncado: boolean): void {
     }
     const estado = `trackInventory=${f.trackInventory} método=${f.inventoryMethod ?? 'nulo'}`
     console.log(
-      `  ${clasificar(f).padEnd(22)} ${f.name} [${f.sku}] ${f.type} · ${estado} · existencias ${f.existencias} · ventas descontadas ${f.ventasDescontadas}${f.archivado ? ' · archivado' : ''}`,
+      `  ${clasificar(f).padEnd(22)} ${f.productId}  ${f.name} [${f.sku}] ${f.type} · ${estado} · existencias ${f.existencias} · ventas descontadas ${f.ventasDescontadas}${f.archivado ? ' · archivado' : ''}`,
     )
   }
 }
 
 /**
- * Prende «por cantidad» los REPARABLE, en UNA transacción: cada producto se escribe sólo si sigue EXACTAMENTE como se
- * listó (CAS); si uno cambió por debajo, se aborta entera y no se repara nada. Deja bitácora por producto.
+ * La lista que revisa el founder: un id por renglón (lo que va antes de `#` es el id; lo demás es para leerla). Sólo los
+ * REPARABLE. Borrar un renglón = ese producto no se repara.
  */
-export async function reparar(prisma: Pick<PrismaClient, '$transaction'>, filas: Danado[]): Promise<number> {
-  const reparables = filas.filter(f => clasificar(f) === 'REPARABLE')
+export function escribirIds(filas: Danado[]): string {
+  const una = (t: string) => t.replace(/\s+/g, ' ')
+  const renglones = filas
+    .filter(f => clasificar(f) === 'REPARABLE')
+    .map(f => `${f.productId}  # ${una(f.venueName)} · ${una(f.name)} [${una(f.sku)}] · existencias ${f.existencias}`)
+  return ['# Productos a reparar (prender «por cantidad»). Borra el renglón de los que NO quieras tocar.', ...renglones, ''].join('\n')
+}
+
+export function leerIds(texto: string): Set<string> {
+  return new Set(
+    texto
+      .split('\n')
+      .map(r => r.split('#')[0].trim())
+      .filter(Boolean),
+  )
+}
+
+/**
+ * Prende «por cantidad» los REPARABLE que están en la lista revisada (`ids`), en UNA transacción. Por lotes y por estado
+ * esperado: cada UPDATE sólo escribe los productos que siguen EXACTAMENTE como se listaron (CAS); si en un lote no
+ * coinciden todos, se aborta y no se repara NADA. Deja bitácora por producto.
+ */
+export async function reparar(prisma: Pick<PrismaClient, '$transaction'>, filas: Danado[], ids: Set<string>): Promise<number> {
+  const reparables = filas.filter(f => clasificar(f) === 'REPARABLE' && ids.has(f.productId))
   if (reparables.length === 0) return 0
+  const grupos = new Map<string, Danado[]>()
+  for (const f of reparables) {
+    const clave = `${f.trackInventory}|${f.inventoryMethod}|${f.type}`
+    grupos.set(clave, [...(grupos.get(clave) ?? []), f])
+  }
+  const lotes = <T>(xs: T[]) => Array.from({ length: Math.ceil(xs.length / LOTE) }, (_, i) => xs.slice(i * LOTE, (i + 1) * LOTE))
   return prisma.$transaction(
     async (tx: Prisma.TransactionClient) => {
-      // ponytail: un UPDATE por producto (cada uno con su propio estado esperado); por lotes si la lista crece a miles.
-      for (const f of reparables) {
-        const { count } = await tx.product.updateMany({
-          where: {
-            id: f.productId,
-            venueId: f.venueId,
-            trackInventory: f.trackInventory,
-            inventoryMethod: f.inventoryMethod,
-            type: f.type,
-            recipe: { is: null },
-            inventory: { isNot: null },
-          },
-          data: { trackInventory: true, inventoryMethod: 'QUANTITY' },
-        })
-        if (count !== 1) throw new Error(`«${f.name}» [${f.sku}] cambió desde que se listó: NO se reparó nada. Corre de nuevo.`)
+      for (const grupo of grupos.values()) {
+        const { trackInventory, inventoryMethod, type } = grupo[0]
+        for (const lote of lotes(grupo)) {
+          const { count } = await tx.product.updateMany({
+            where: {
+              id: { in: lote.map(f => f.productId) },
+              trackInventory,
+              inventoryMethod,
+              type,
+              recipe: { is: null },
+              inventory: { isNot: null },
+            },
+            data: { trackInventory: true, inventoryMethod: 'QUANTITY' },
+          })
+          if (count !== lote.length)
+            throw new Error(
+              `${lote.length - count} de ${lote.length} producto(s) (trackInventory=${trackInventory} método=${inventoryMethod ?? 'nulo'} ${type}) ` +
+                'cambiaron desde que se listaron: NO se reparó nada. Corre de nuevo el diagnóstico.',
+            )
+        }
       }
-      await tx.activityLog.createMany({
-        data: reparables.map(f => ({
-          venueId: f.venueId,
-          action: ACCION,
-          entity: 'Product',
-          entityId: f.productId,
-          data: {
-            antes: { trackInventory: f.trackInventory, inventoryMethod: f.inventoryMethod },
-            despues: { trackInventory: true, inventoryMethod: 'QUANTITY' },
-            motivo: 'La importación por hoja de cálculo creó su inventario sin prenderlo: sus ventas no descontaban.',
-          },
-        })),
-      })
+      for (const lote of lotes(reparables))
+        await tx.activityLog.createMany({
+          data: lote.map(f => ({
+            venueId: f.venueId,
+            action: ACCION,
+            entity: 'Product',
+            entityId: f.productId,
+            data: {
+              antes: { trackInventory: f.trackInventory, inventoryMethod: f.inventoryMethod },
+              despues: { trackInventory: true, inventoryMethod: 'QUANTITY' },
+              motivo: 'La importación por hoja de cálculo creó su inventario sin prenderlo: sus ventas no descontaban.',
+            },
+          })),
+        })
       return reparables.length
     },
     { timeout: 120_000, maxWait: 30_000 },
