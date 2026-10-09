@@ -71,9 +71,10 @@ const tableSchema = z
         .trim()
         .min(1, 'La mesa necesita un número')
         .max(20, 'El número de mesa es muy largo'),
+      // 0 = «sin dato» (la sincronización de SoftRestaurant crea mesas así); el editor nunca lo ofrece al capturar.
       capacity: num('las personas')
         .int('Las personas deben ser un número entero')
-        .min(1, 'La mesa debe tener al menos 1 lugar')
+        .min(0, 'Las personas no pueden ser negativas')
         .max(99, 'Máximo 99 personas por mesa'),
       shape: z.enum(['SQUARE', 'ROUND', 'RECTANGLE'], { errorMap: () => ({ message: 'Forma de mesa no válida' }) }),
       rotation,

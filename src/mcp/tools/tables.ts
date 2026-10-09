@@ -164,10 +164,11 @@ export function registerTableTools(server: McpServer, scope: McpScope) {
         return {
           name: a.name,
           shape: SHAPE[a.floorShape ?? 'WIDE'],
-          seats: tables.reduce((sum, t) => sum + t.capacity, 0),
+          // capacity 0 = «sin dato»: no suma lugares.
+          seats: tables.reduce((sum, t) => sum + (t.capacity > 0 ? t.capacity : 0), 0),
           tables: tables.map(t => ({
             number: t.number,
-            seats: t.capacity,
+            seats: t.capacity > 0 ? t.capacity : null,
             shape: TABLE_SHAPE[t.shape],
             placed: isPlaced(t),
           })),

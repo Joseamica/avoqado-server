@@ -103,6 +103,14 @@ describe('floor_plan', () => {
     expect(out.unplacedTables).toEqual(['2'])
   })
 
+  it('una mesa con capacity 0 («sin dato») no suma lugares y sale con seats null', async () => {
+    const sinDato = { ...plan.tables[0], id: 't4', number: '4', capacity: 0 }
+    mockGetFloorPlan.mockResolvedValueOnce({ ...plan, tables: [plan.tables[0], sinDato] })
+    const out = parse(await call({ venueId: 'v1' }))
+    expect(out.areas[0].seats).toBe(4)
+    expect(out.areas[0].tables).toContainEqual({ number: '4', seats: null, shape: 'cuadrada', placed: true })
+  })
+
   it('una mesa con una sola coordenada no está acomodada (misma regla que «placed»)', async () => {
     const mediaMesa = { ...plan.tables[0], id: 't3', number: '3', positionX: 0.4, positionY: null }
     mockGetFloorPlan.mockResolvedValueOnce({ ...plan, tables: [...plan.tables, mediaMesa] })
