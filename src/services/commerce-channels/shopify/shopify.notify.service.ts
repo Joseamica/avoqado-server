@@ -6,7 +6,8 @@ import logger from '@/config/logger'
 import { sendNotification } from '@/services/dashboard/notification.service'
 
 export type ShopifyAviso = 'REVOCADA' | 'ATORADOS' | 'RETRASO' | 'SOBREVENTA' | 'POR_REVISAR' | 'FALTA_PERMISO' | 'CONTEO_NO_APLICADO'
-type Datos = { productName?: string; count?: number; productId?: string }
+/** `motivo` (sólo CONTEO_NO_APLICADO): por qué no se aplicó la línea del conteo (§12.1); cambia lo que hay que hacer. */
+type Datos = { productName?: string; count?: number; productId?: string; motivo?: 'ENVIO_EN_CAMINO' | 'DUDA_POR_REVISAR' }
 
 const TANDA = 50
 /** Avisos que se deduplican por producto además de por día (§12.1): un conteo no aplicado de otro producto sí avisa. */
@@ -53,7 +54,10 @@ const TEXTOS: Record<ShopifyAviso, (d: Datos) => { title: string; message: strin
   }),
   CONTEO_NO_APLICADO: d => ({
     title: 'Un conteo no se aplicó',
-    message: `El conteo de ${d.productName ?? 'un producto'} no se aplicó: había un cambio en camino a Shopify. Vuelve a contarlo en unos minutos.`,
+    message:
+      d.motivo === 'DUDA_POR_REVISAR'
+        ? `El conteo de ${d.productName ?? 'un producto'} no se aplicó: Shopify tiene una revisión pendiente de este producto. Resuélvela en Integraciones → Shopify → Por revisar y después vuelve a contarlo.`
+        : `El conteo de ${d.productName ?? 'un producto'} no se aplicó: había un cambio en camino a Shopify. Vuelve a contarlo en unos minutos.`,
     priority: NotificationPriority.HIGH,
   }),
 }
@@ -71,7 +75,11 @@ export async function notifyShopify(venueId: string, aviso: ShopifyAviso, data: 
     const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { slug: true, timezone: true } })
     if (!venue) return
     const dia = formatInTimeZone(new Date(), venue.timezone || 'America/Mexico_City', 'yyyy-MM-dd')
-    const llave = POR_PRODUCTO.has(aviso) && data.productId ? `${aviso}:${venueId}:${data.productId}:${dia}` : `${aviso}:${venueId}:${dia}`
+    // Una duda por revisar lleva su motivo en la llave: el aviso de «en unos minutos» de la mañana no esconde que hay que
+    // ir a «Por revisar». El envío en camino conserva la llave de siempre.
+    const motivo = data.motivo === 'DUDA_POR_REVISAR' ? `:${data.motivo}` : ''
+    const llave =
+      POR_PRODUCTO.has(aviso) && data.productId ? `${aviso}:${venueId}:${data.productId}${motivo}:${dia}` : `${aviso}:${venueId}:${dia}`
     const texto = TEXTOS[aviso](data)
     let cursor: string | undefined
     for (;;) {

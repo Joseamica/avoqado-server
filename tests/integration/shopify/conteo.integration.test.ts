@@ -9,6 +9,7 @@
 import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { logAction } from '@/services/dashboard/activity-log.service'
+import * as avisos from '@/services/commerce-channels/shopify/shopify.notify.service'
 import { confirmStockCount } from '@/services/mobile/inventory.mobile.service'
 import {
   apartadasBajoCandado,
@@ -18,8 +19,15 @@ import {
 import { applyShopifyLevel } from '@/services/commerce-channels/shopify/shopify.mirror.service'
 import { claimShopifyOutbox, runShopifyOutboxRow } from '@/services/commerce-channels/shopify/shopify.outbox.service'
 import { resumeShopifyLink } from '@/services/commerce-channels/shopify/shopify.connect.service'
-import { assertTestDatabase, crearEscenarioShopify, EscenarioShopify, huecoDelInvariante, limpiarEscenarioShopify } from './fixtures'
-import { conPlan, falla, nivel, nivelesFalsos, tiendaFalsa } from './fixturesB'
+import {
+  agregarProductoShopify,
+  assertTestDatabase,
+  crearEscenarioShopify,
+  EscenarioShopify,
+  huecoDelInvariante,
+  limpiarEscenarioShopify,
+} from './fixtures'
+import { conPlan, dormir, falla, nivel, nivelesFalsos, tiendaFalsa } from './fixturesB'
 
 jest.setTimeout(120_000)
 
@@ -70,6 +78,10 @@ const movimientosDeConteo = (e: EscenarioShopify) =>
   prisma.inventoryMovement.count({ where: { inventoryId: e.inventoryId, type: 'COUNT' } })
 const avisosDeConteo = (e: EscenarioShopify) =>
   prisma.notification.count({ where: { venueId: e.venueId, entityType: 'ShopifyAviso', entityId: { startsWith: 'CONTEO_NO_APLICADO:' } } })
+const avisoDeConteo = (e: EscenarioShopify) =>
+  prisma.notification.findFirstOrThrow({
+    where: { venueId: e.venueId, entityType: 'ShopifyAviso', entityId: { startsWith: 'CONTEO_NO_APLICADO:' } },
+  })
 /** El mensajero manda TODO lo que haya en el buzón a la Shopify falsa. */
 async function enviar(t: ReturnType<typeof tiendaFalsa>) {
   for (let i = 0; i < 20; i++) {
@@ -98,7 +110,10 @@ it('12 bis.14: 9 en el estante con 2 apartadas vigentes ⇒ Avoqado 7 y viaja �
   const t = tiendaFalsa(10, 2)
   const id = await contar(e, '9', { fetchLevels: t.fetchLevels, hasAccess: conPlan })
   expect(t.fetchLevels).toHaveBeenCalledTimes(1)
-  expect(t.fetchLevels.mock.calls[0][2]).toMatchObject({ timeoutMs: 4_000 })
+  // `leerNiveles` (B1) le pasa lo que queda de los 4 s de TODA la lectura.
+  const plazo = (t.fetchLevels.mock.calls[0][2] as { timeoutMs: number }).timeoutMs
+  expect(plazo).toBeGreaterThan(3_000)
+  expect(plazo).toBeLessThanOrEqual(4_000)
   expect(await stock(e)).toBe('7')
   expect(await deltas(e)).toEqual(['-3'])
   expect(await razon(e)).toBe(`Conteo de inventario #${id} (menos 2 apartadas en línea)`)
@@ -158,6 +173,7 @@ it('N02 (ej. 2, §12.1): con una venta local EN VUELO la línea no se aplica, ni
     shopifyHeldReason: 'ENVIO_EN_CAMINO',
   })
   expect(await avisosDeConteo(e)).toBe(1)
+  expect((await avisoDeConteo(e)).message).toContain('había un cambio en camino a Shopify. Vuelve a contarlo en unos minutos.')
   // Llega la venta a Shopify y después el aviso del pedido; se vuelve a contar.
   expect(await runShopifyOutboxRow(enVuelo.id, enVuelo.claimToken, new Date(), { graphql: t.graphql as never, hasAccess: conPlan })).toBe(
     'SENT',
@@ -282,7 +298,7 @@ it('N20 (§11.3): sin permiso, el primer conteo marca FALTA_PERMISO y el segundo
   expect(sinPermiso).toHaveBeenCalledTimes(1) // mientras dure la marca, no se vuelve a llamar a Shopify
   expect(await stock(e)).toBe('6')
   expect(await razon(e)).toBe(
-    `Conteo de inventario #${id} (menos 1 apartadas según Shopify a las ${await horaDe(e)}; falta un permiso en Shopify)`,
+    `Conteo de inventario #${id} (menos 1 apartada según Shopify a las ${await horaDe(e)}; falta un permiso en Shopify)`,
   )
   expect(
     await prisma.notification.count({
@@ -295,10 +311,12 @@ it('12 bis.14: Shopify no contesta en su presupuesto ⇒ resta las del espejo y 
   const e = await escenario({ mirrorCommitted: 1 })
   await prisma.shopifyVariantLink.update({ where: { id: e.variantLinkId }, data: { committedAt: new Date('2026-10-08T16:05:00Z') } })
   const lento = jest.fn(async () => falla('TIMEOUT', true, true))
-  await contar(e, '9', { fetchLevels: lento as never, esperaMs: 50, hasAccess: conPlan })
-  expect((lento.mock.calls[0] as unknown[])[2]).toMatchObject({ timeoutMs: 50 })
+  await contar(e, '9', { fetchLevels: lento as never, esperaMs: 2_500, hasAccess: conPlan })
+  const plazo = ((lento.mock.calls[0] as unknown[])[2] as { timeoutMs: number }).timeoutMs
+  expect(plazo).toBeGreaterThan(2_000) // lo que queda de los 2.5 s; sin el mínimo de B1 (2 s) no se habría llamado
+  expect(plazo).toBeLessThanOrEqual(2_500)
   expect(await stock(e)).toBe('8')
-  expect(await razon(e)).toContain('menos 1 apartadas según Shopify a las 10:05')
+  expect(await razon(e)).toContain('menos 1 apartada según Shopify a las 10:05; Shopify no respondió')
 })
 
 it('sin plan (el escenario del guardia de A) ⇒ nada sale a la red y se restan las del espejo; sin pareja o sin apartadas, la razón de siempre', async () => {
@@ -361,6 +379,173 @@ it('K18: las líneas retenidas quedan en la bitácora del conteo (STOCK_COUNT_CO
   await contar(libre, '9', { fetchLevels: nivelesFalsos(() => nivel(10, 0)), hasAccess: conPlan })
   const confirmado = (logAction as jest.Mock).mock.calls.find(c => c[0].action === 'STOCK_COUNT_CONFIRMED')![0]
   expect(confirmado.data).not.toHaveProperty('noAplicados')
+})
+
+it('Fix 1: una línea retenida sigue en noAplicados y en la bitácora después de un reintento (sin otro aviso)', async () => {
+  const e = await escenario({ stock: 9, mirrorAvailable: 9, mirrorCommitted: 1 })
+  const otro = await agregarProductoShopify(e) // libre, 10 en Avoqado y en el espejo
+  await ventaEnVuelo(e)
+  const c = await prisma.stockCount.create({
+    data: {
+      venueId: e.venueId,
+      type: 'CYCLE',
+      status: 'IN_PROGRESS',
+      createdById: e.staffId,
+      items: {
+        create: [
+          { productId: e.productId, expected: new Prisma.Decimal(9), counted: new Prisma.Decimal(9), countedAt: new Date() },
+          { productId: otro.productId, expected: new Prisma.Decimal(10), counted: new Prisma.Decimal(9), countedAt: new Date() },
+        ],
+      },
+    },
+  })
+  const deps = { fetchLevels: jest.fn(async () => falla('HTTP_5XX', true, false)) as never, hasAccess: conPlan }
+  // 1.ª tx: el claim del conteo · 2.ª: la línea retenida · 3.ª: la del otro producto, que truena una vez.
+  const real = prisma.$transaction.bind(prisma) as (...a: unknown[]) => unknown
+  let n = 0
+  const tx = jest
+    .spyOn(prisma, '$transaction')
+    .mockImplementation(((...a: unknown[]) => (++n === 3 ? Promise.reject(new Error('la segunda línea truena')) : real(...a))) as never)
+  await expect(confirmStockCount(c.id, e.venueId, e.staffId, 0, deps)).rejects.toThrow('la segunda línea truena')
+  tx.mockRestore()
+  const items = await prisma.stockCountItem.findMany({ where: { stockCountId: c.id }, take: 2 })
+  expect(items.find(i => i.productId === e.productId)).toMatchObject({ appliedAt: expect.any(Date), shopifyHeldReason: 'ENVIO_EN_CAMINO' })
+  expect(items.find(i => i.productId === otro.productId)).toMatchObject({ appliedAt: null })
+
+  const avisar = jest.spyOn(avisos, 'notifyShopify')
+  ;(logAction as jest.Mock).mockClear()
+  const r = await confirmStockCount(c.id, e.venueId, e.staffId, 0, deps)
+  const noAplicados = [{ productId: e.productId, motivo: 'ENVIO_EN_CAMINO' }]
+  expect(r).toEqual({ success: true, revision: 1, noAplicados })
+  expect(logAction).toHaveBeenCalledWith(
+    expect.objectContaining({ action: 'STOCK_COUNT_CONFIRMED', data: expect.objectContaining({ adjustmentsCount: 1, noAplicados }) }),
+  )
+  expect(avisar).not.toHaveBeenCalled() // el aviso salió en el primer intento
+  avisar.mockRestore()
+  expect((await prisma.inventory.findUniqueOrThrow({ where: { id: otro.inventoryId } })).currentStock.toString()).toBe('9')
+  expect(await stock(e)).toBe('8')
+})
+
+it('Fix 2: una duda muerta (DEAD_LETTER ambigua) retiene la línea con DUDA_POR_REVISAR y el aviso manda a «Por revisar»', async () => {
+  const e = await escenario({ mirrorCommitted: 1 })
+  await prisma.shopifyStockOutbox.create({
+    data: {
+      venueId: e.venueId,
+      locationLinkId: e.locationLinkId,
+      generation: 1,
+      productId: e.productId,
+      delta: -1,
+      status: 'DEAD_LETTER',
+      ambiguous: true,
+      lastError: 'prueba',
+    },
+  })
+  const t = tiendaFalsa(10, 1)
+  const id = await contar(e, '9', { fetchLevels: t.fetchLevels, hasAccess: conPlan })
+  expect(t.fetchLevels).not.toHaveBeenCalled()
+  expect(await stock(e)).toBe('10')
+  expect(ultima).toEqual({ success: true, revision: 1, noAplicados: [{ productId: e.productId, motivo: 'DUDA_POR_REVISAR' }] })
+  expect(await prisma.stockCountItem.findFirstOrThrow({ where: { stockCountId: id } })).toMatchObject({
+    shopifyHeldAt: expect.any(Date),
+    shopifyHeldReason: 'DUDA_POR_REVISAR',
+  })
+  const aviso = await avisoDeConteo(e)
+  expect(aviso.entityId).toContain(`:${e.productId}:DUDA_POR_REVISAR:`)
+  expect(aviso.message).toBe(
+    'El conteo de Camisa · M no se aplicó: Shopify tiene una revisión pendiente de este producto. Resuélvela en Integraciones → Shopify → Por revisar y después vuelve a contarlo.',
+  )
+  expect(aviso.message).not.toContain('unos minutos')
+})
+
+it('Fix 2: un envío en camino con una revisión abierta del producto también es DUDA_POR_REVISAR', async () => {
+  const e = await escenario({ stock: 9, mirrorAvailable: 9, mirrorCommitted: 1 })
+  await ventaEnVuelo(e)
+  await prisma.shopifyReviewItem.create({
+    data: {
+      venueId: e.venueId,
+      productId: e.productId,
+      reason: 'INCIERTO',
+      avoqadoQty: new Prisma.Decimal(8),
+      shopifyQty: 9,
+      suggestion: 'SHOPIFY',
+    },
+  })
+  await contar(e, '9', { fetchLevels: tiendaFalsa(8, 1).fetchLevels, hasAccess: conPlan })
+  expect(ultima).toMatchObject({ noAplicados: [{ productId: e.productId, motivo: 'DUDA_POR_REVISAR' }] })
+})
+
+it('Minor 1 (§12.8): sin tiempo para aplicar lo leído, la línea usa el espejo y lo dice', async () => {
+  const e = await escenario({ mirrorCommitted: 2 })
+  const rapida = nivelesFalsos(() => nivel(10, 0))
+  const lenta = jest.fn(async (store: unknown, items: unknown) => {
+    await dormir(1_800) // de 2.5 s quedan ~0.7: menos que una escritura
+    return rapida(store as never, items as never)
+  })
+  await contar(e, '9', { fetchLevels: lenta as never, esperaMs: 2_500, hasAccess: conPlan })
+  expect(lenta).toHaveBeenCalledTimes(1)
+  expect(await stock(e)).toBe('7') // 9 − 2 del espejo: lo leído (0 apartadas) no alcanzó a aplicarse
+  expect((await espejo(e)).mirrorCommitted).toBe(2)
+  expect(await razon(e)).toContain('; Shopify tardó en responder')
+})
+
+it('Minor 6: un error pasajero de la base al leer las parejas de la tanda no tumba el conteo: usa el espejo', async () => {
+  const e = await escenario({ mirrorCommitted: 2 })
+  const fetchLevels = nivelesFalsos(() => nivel(10, 0))
+  const lectura = jest
+    .spyOn(prisma.shopifyVariantLink, 'findMany')
+    .mockRejectedValueOnce(Object.assign(new Error('Timed out fetching a new connection from the connection pool.'), { code: 'P2024' }))
+  await contar(e, '9', { fetchLevels, hasAccess: conPlan })
+  lectura.mockRestore()
+  expect(ultima).toEqual({ success: true, revision: 1 })
+  expect(fetchLevels).not.toHaveBeenCalled()
+  expect(await stock(e)).toBe('7')
+  expect(await razon(e)).toContain('menos 2 apartadas según Shopify a las')
+  expect(await razon(e)).toContain('; Shopify no respondió')
+})
+
+it('Minor 8: contado menor que lo apartado ⇒ objetivo negativo (sobreventa real); al enviar, los dos lados en −2 y SOBREVENTA', async () => {
+  // 3 piezas en el estante pero 5 apartadas en línea: faltan 2 para surtir. Avoqado no inventa piezas ni las esconde.
+  const e = await escenario({ mirrorCommitted: 5 })
+  const t = tiendaFalsa(10, 5)
+  await contar(e, '3', { fetchLevels: t.fetchLevels, hasAccess: conPlan })
+  expect(await stock(e)).toBe('-2')
+  expect(await deltas(e)).toEqual(['-12'])
+  const sobreventas = () =>
+    prisma.notification.count({ where: { venueId: e.venueId, entityType: 'ShopifyAviso', entityId: { startsWith: 'SOBREVENTA:' } } })
+  expect(await sobreventas()).toBe(0) // el conteo no avisa; avisa el mensajero cuando Shopify ya lo tiene
+  await enviar(t)
+  expect([await stock(e), t.s.available]).toEqual(['-2', -2])
+  expect(await sobreventas()).toBe(1)
+  expect(await huecoDelInvariante(e.productId)).toBe('0')
+})
+
+it('N22: más de 200 productos van en tandas de 200 (dos lecturas) y todos se aplican', async () => {
+  const e = await escenario()
+  const ids = [e.productId]
+  for (let i = 0; i < 200; i++) ids.push((await agregarProductoShopify(e)).productId)
+  const c = await prisma.stockCount.create({
+    data: {
+      venueId: e.venueId,
+      type: 'CYCLE',
+      status: 'IN_PROGRESS',
+      createdById: e.staffId,
+      items: {
+        create: ids.map(productId => ({
+          productId,
+          expected: new Prisma.Decimal(10),
+          counted: new Prisma.Decimal(10),
+          countedAt: new Date(),
+        })),
+      },
+    },
+  })
+  const fetchLevels = nivelesFalsos(() => nivel(10, 1))
+  expect(await confirmStockCount(c.id, e.venueId, e.staffId, 0, { fetchLevels, hasAccess: conPlan, esperaMs: 120_000 })).toEqual({
+    success: true,
+    revision: 1,
+  })
+  expect(fetchLevels.mock.calls.map(x => x[1].length).sort((a, b) => a - b)).toEqual([1, 200])
+  expect(await prisma.inventory.count({ where: { venueId: e.venueId, currentStock: 9 } })).toBe(201) // 10 − 1 apartada
 })
 
 /** La hora local (CDMX) del `committedAt` del espejo, o de `mirrorAt` si no hay, como la escribe el conteo. */

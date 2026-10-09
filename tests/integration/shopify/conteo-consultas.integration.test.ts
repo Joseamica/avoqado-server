@@ -8,7 +8,9 @@ jest.mock('@/utils/prismaClient', () => {
   return { __esModule: true, default: new PrismaClient({ log: [{ emit: 'event', level: 'query' }] }) }
 })
 
+import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
+import { confirmStockCount } from '@/services/mobile/inventory.mobile.service'
 import { refrescarEspejoParaConteo } from '@/services/commerce-channels/shopify/shopify.count.service'
 import { agregarProductoShopify, assertTestDatabase, crearEscenarioShopify, EscenarioShopify, limpiarEscenarioShopify } from './fixtures'
 import { conPlan, falla } from './fixturesB'
@@ -59,4 +61,38 @@ it('§12.1: lo bloqueado se pregunta con UNA consulta por tanda: la tanda cuesta
   expect(diez.total).toBe(dos.total) // constante por tanda, no por producto
   expect([...diez.r.bloqueados]).toEqual([e.productId])
   expect(sinRespuesta.fetchLevels).toHaveBeenCalledTimes(2) // lo libre sí se pidió (y Shopify no contestó)
+})
+
+it('Minor 5: un negocio SIN Shopify paga una sola consulta (¿tiene sucursal ligada?) y ninguna línea pregunta por parejas', async () => {
+  const s = await crearEscenarioShopify()
+  try {
+    const otro = await agregarProductoShopify(s, { pareja: false })
+    await prisma.shopifyVariantLink.deleteMany({ where: { venueId: s.venueId } })
+    await prisma.shopifyLocationLink.deleteMany({ where: { venueId: s.venueId } })
+    const c = await prisma.stockCount.create({
+      data: {
+        venueId: s.venueId,
+        type: 'CYCLE',
+        status: 'IN_PROGRESS',
+        createdById: s.staffId,
+        items: {
+          create: [s.productId, otro.productId].map(productId => ({
+            productId,
+            expected: new Prisma.Decimal(10),
+            counted: new Prisma.Decimal(9),
+            countedAt: new Date(),
+          })),
+        },
+      },
+    })
+    const antes = consultas.length
+    expect(await confirmStockCount(c.id, s.venueId, s.staffId, 0)).toEqual({ success: true, revision: 1 })
+    const deShopify = consultas.slice(antes).filter(q => q.includes('"Shopify'))
+    expect(deShopify).toHaveLength(1)
+    expect(deShopify[0]).toContain('"ShopifyLocationLink"')
+    const movimientos = await prisma.inventoryMovement.findMany({ where: { inventory: { venueId: s.venueId }, type: 'COUNT' }, take: 5 })
+    expect(movimientos.map(m => m.reason)).toEqual([`Conteo de inventario #${c.id}`, `Conteo de inventario #${c.id}`])
+  } finally {
+    await limpiarEscenarioShopify(s)
+  }
 })

@@ -16,9 +16,9 @@ import { computeInventoryAvailability } from '../dashboard/product.dashboard.ser
 import { resumirConteo, estadoParaClientes } from '../shared/stockCountSummary'
 import {
   apartadasBajoCandado,
-  ENVIO_EN_CAMINO,
   refrescarEspejoParaConteo,
   type DepsConteo,
+  type MotivoRetenido,
 } from '../commerce-channels/shopify/shopify.count.service'
 import { notifyShopify } from '../commerce-channels/shopify/shopify.notify.service'
 
@@ -653,8 +653,8 @@ export async function confirmStockCount(
     counted: number
     difference: number
   }> = []
-  // §12.1: líneas que NO se aplicaron por un envío en camino a Shopify (aditivo en la respuesta).
-  const noAplicados: Array<{ productId: string; motivo: typeof ENVIO_EN_CAMINO }> = []
+  // §12.1: líneas que NO se aplicaron por Shopify (un envío en camino o una duda por revisar); aditivo en la respuesta.
+  const noAplicados: Array<{ productId: string; motivo: MotivoRetenido }> = []
 
   try {
     // ── Insumos: la verdad es el conteo físico → SET contra relectura ────────
@@ -848,7 +848,11 @@ export async function confirmStockCount(
     for (const item of countedItems) {
       if (!item.product) continue
       // Idempotencia por línea: ya aplicada en un intento anterior (ver arriba).
-      if (item.appliedAt) continue
+      if (item.appliedAt) {
+        // Una retenida en un intento anterior sigue sin aplicarse: se vuelve a decir (su aviso ya salió).
+        if (item.shopifyHeldAt) noAplicados.push({ productId: item.product.id, motivo: item.shopifyHeldReason as MotivoRetenido })
+        continue
+      }
 
       const inventory = item.product.inventory
       if (!inventory) continue
@@ -866,13 +870,13 @@ export async function confirmStockCount(
 
         // §11.1: sucursal → tienda → pareja ANTES de Inventory; las apartadas son las del espejo en este momento.
         const ajuste = await apartadasBajoCandado(tx, item.product!.id, shopify)
-        if (ajuste === ENVIO_EN_CAMINO) {
+        if (typeof ajuste === 'string') {
           // §12.1: no se aplica. La línea queda sellada (el claim de arriba) y marcada; el stock no cambia.
           await tx.stockCountItem.update({
             where: { id: item.id },
-            data: { shopifyHeldAt: new Date(), shopifyHeldReason: ENVIO_EN_CAMINO },
+            data: { shopifyHeldAt: new Date(), shopifyHeldReason: ajuste },
           })
-          return ENVIO_EN_CAMINO
+          return ajuste
         }
         // N26: la resta y la comparación en Decimal. Sin pareja (o sin apartadas) el objetivo es el contado, como siempre.
         const objetivo = new Prisma.Decimal(String(item.counted)).minus(ajuste?.apartadas ?? 0)
@@ -908,10 +912,10 @@ export async function confirmStockCount(
         return { previousStock: previousStock.toNumber(), difference: objetivo.toNumber() - previousStock.toNumber() }
       })
 
-      if (applied === ENVIO_EN_CAMINO) {
-        // §12.1: se dice en la respuesta y con un aviso («Vuelve a contarlo en unos minutos»). `notifyShopify` no lanza.
-        noAplicados.push({ productId: item.product.id, motivo: ENVIO_EN_CAMINO })
-        await notifyShopify(venueId, 'CONTEO_NO_APLICADO', { productId: item.product.id, productName: item.product.name })
+      if (typeof applied === 'string') {
+        // §12.1: se dice en la respuesta y con un aviso que dice qué hacer según el motivo. `notifyShopify` no lanza.
+        noAplicados.push({ productId: item.product.id, motivo: applied })
+        await notifyShopify(venueId, 'CONTEO_NO_APLICADO', { productId: item.product.id, productName: item.product.name, motivo: applied })
         continue
       }
       if (applied) {

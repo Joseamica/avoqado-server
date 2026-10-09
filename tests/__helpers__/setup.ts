@@ -425,7 +425,9 @@ const prismaMock: any = {
   googleOAuthSession: createMockModel(),
   // Google Calendar Sync (Phase 2 — push)
   calendarSyncOutbox: createMockModel(),
-  // Conector Shopify: el conteo (B6) y el paso a receta (B7) preguntan por la pareja del producto.
+  // Conector Shopify: el conteo (B6) pregunta si el negocio tiene sucursal ligada, y él y el paso a receta (B7) por la
+  // pareja del producto.
+  shopifyLocationLink: createMockModel(),
   shopifyVariantLink: createMockModel(),
   aggregatorConnection: createMockModel(),
   aggregatorProductLink: createMockModel(),
@@ -504,6 +506,7 @@ prismaMock.aggregatorVisit.findMany.mockResolvedValue([])
 prismaMock.aggregatorConnection.findMany.mockResolvedValue([])
 // Conector Shopify: casi ningún producto tiene pareja. Sin estos defaults, los tests del conteo y del asistente que no
 // saben de Shopify reventarían con «parejas is not iterable» o leerían `undefined` como pareja.
+prismaMock.shopifyLocationLink.findUnique.mockResolvedValue(null)
 prismaMock.shopifyVariantLink.findMany.mockResolvedValue([])
 prismaMock.shopifyVariantLink.findUnique.mockResolvedValue(null)
 prismaMock.orderItem.findMany.mockResolvedValue([])
