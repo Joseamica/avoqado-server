@@ -1148,7 +1148,10 @@ describe('decisiones vinculantes de B3', () => {
     await agregarProductoShopify(e, { stock: 3, initialized: false })
     await agregarProductoShopify(e, { stock: 4, initialized: false })
     const hasAccess = jest.fn(async () => true)
-    expect(await applyConnectPage(e.locationLinkId, { fetchLevels: nivelesFalsos(() => nivel(5)), hasAccess })).toEqual({ done: false, procesadas: 3 })
+    expect(await applyConnectPage(e.locationLinkId, { fetchLevels: nivelesFalsos(() => nivel(5)), hasAccess })).toEqual({
+      done: false,
+      procesadas: 3,
+    })
     expect(hasAccess).toHaveBeenCalledTimes(1)
   })
 
