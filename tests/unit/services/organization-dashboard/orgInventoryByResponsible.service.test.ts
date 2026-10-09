@@ -104,7 +104,8 @@ describe('buildInventoryByResponsible', () => {
       expect(result.total).toMatchObject({
         assigned: 8,
         receptionApproved: 7, // el PROMOTER_PENDING no lo aceptó
-        inHandToday: 2,
+        inHandToday: 3, // PENDING + 2 HELD: aceptar en la TPV no es lo que lo pone en su mano
+
         saleApproved: 1,
         saleInAdminReview: 2, // PENDING + PROCESSING
         saleInPromoterReview: 1, // FAILED = "Revisar" del promotor
@@ -120,6 +121,20 @@ describe('buildInventoryByResponsible', () => {
 
       expect(result.total.saleRejected).toBe(1)
       expect(result.total.inHandToday).toBe(0)
+    })
+
+    it('🔴 promotor SIN TPV: lo asignado y no vendido cuenta "en mano" aunque nunca lo aceptara (Isaac, 9-oct)', () => {
+      // Pilar Guzmán en prod: 135 asignados, 0 aceptados (no tiene TPV para aceptar), 69 vendidos.
+      // La tabla decía 0 en mano; en la tienda trae 66.
+      const result = buildInventoryByResponsible({
+        items: [
+          item({ custodyState: 'PROMOTER_PENDING', promoterAcceptedAt: null, weight: 66 } as any),
+          item({ custodyState: 'SOLD', promoterAcceptedAt: null, saleVerificationStatus: 'COMPLETED', weight: 69 } as any),
+        ],
+        staff: [staff(), SUP_1],
+      })
+
+      expect(result.total).toMatchObject({ assigned: 135, receptionApproved: 0, saleApproved: 69, inHandToday: 66 })
     })
 
     it('"en mano HOY" ignora los rechazados por el promotor y los del supervisor', () => {
