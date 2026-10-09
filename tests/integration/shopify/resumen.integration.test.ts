@@ -32,7 +32,7 @@ const conexion = async (e: EscenarioShopify) => (await getShopifyOverview(e.venu
 const fila = (
   e: EscenarioShopify,
   status: 'PENDING' | 'IN_PROGRESS' | 'FAILED' | 'DEAD_LETTER' | 'SENT' | 'DISCARDED',
-  o: { generation?: number; createdAt?: Date; processedAt?: Date | null } = {},
+  o: { generation?: number; createdAt?: Date; processedAt?: Date | null; ambiguous?: boolean } = {},
 ) =>
   prisma.shopifyStockOutbox.create({
     data: {
@@ -42,6 +42,7 @@ const fila = (
       productId: e.productId,
       delta: 1,
       status,
+      ambiguous: o.ambiguous ?? false,
       createdAt: o.createdAt,
       processedAt: o.processedAt ?? null,
     },
@@ -204,7 +205,8 @@ it('Y1: una sucursal DETENIDA (tienda revocada o error terminal) se enseña dete
 it('T3: lo «pendiente» se cuenta y se enseña sólo de la generación vigente del enlace', async () => {
   const e = await escenario({ generation: 2 })
   await fila(e, 'PENDING', { generation: 1, createdAt: hace(600) })
-  await fila(e, 'DEAD_LETTER', { generation: 1, processedAt: hace(10) })
+  // Ambigua a propósito: sin eso `inciertos: 0` no dependería del filtro de generación (nada que contar aunque faltara).
+  await fila(e, 'DEAD_LETTER', { generation: 1, processedAt: hace(10), ambiguous: true })
   await fila(e, 'PENDING', { generation: 2, createdAt: hace(30) })
   const c = await conexion(e)
   expect(c.conteos).toMatchObject({ pendientes: 1, atorados: 0, inciertos: 0 })
@@ -213,18 +215,21 @@ it('T3: lo «pendiente» se cuenta y se enseña sólo de la generación vigente 
   // Una elección en camino cuya fila es de una generación anterior ya no es de esta conexión.
   const vieja = await fila(e, 'PENDING', { generation: 1 })
   const vieja2 = await fila(e, 'DEAD_LETTER', { generation: 1, processedAt: hace(1) })
+  const vieja3 = await fila(e, 'SENT', { generation: 1, processedAt: hace(1) })
   const vigente = await fila(e, 'PENDING', { generation: 2 })
   const r1 = await revisionResuelta(e, vieja.id)
   const r2 = await revisionResuelta(e, vieja2.id)
+  const r4 = await revisionResuelta(e, vieja3.id)
   const r3 = await revisionResuelta(e, vigente.id)
   const lista = await listShopifyReviews(e.venueId, {})
   expect(lista.items.map(i => [i.id, i.envio])).toEqual([[r3.id, 'PENDIENTE']])
-  const envios = await getShopifyReviewEnvios(e.venueId, [r1.id, r2.id, r3.id])
+  const envios = await getShopifyReviewEnvios(e.venueId, [r1.id, r2.id, r3.id, r4.id])
   expect(new Map(envios.items.map(i => [i.id, i.envio]))).toEqual(
     new Map([
       [r1.id, null],
       [r2.id, null],
       [r3.id, 'PENDIENTE'],
+      [r4.id, null], // enviada, pero en la conexión anterior: tampoco es ENVIADO de ésta
     ]),
   )
 })
@@ -369,6 +374,22 @@ it('paginación estable: con la misma fecha en todas, recorrer las páginas no r
   const problemas = await recorrer(offset => listShopifyIssues(e.venueId, { offset, limit: 7 }))
   expect(problemas).toHaveLength(150)
   expect(new Set(problemas).size).toBe(150)
+
+  // El tope de 50 sólo muerde con más de 50 filas (el lazo de «entradas hostiles» tiene 2): aquí hay 150 de cada.
+  for (const limit of [51, 1000, 10 ** 12]) {
+    expect((await listShopifyReviews(e.venueId, { limit })).items).toHaveLength(50)
+    expect((await listShopifyIssues(e.venueId, { limit })).items).toHaveLength(50)
+  }
+
+  // El desempate por `id` no se puede forzar a fallar con datos (el índice devuelve siempre el mismo orden físico): se fija mirando la consulta.
+  const espia = jest.spyOn(prisma.shopifyImportIssue, 'findMany')
+  try {
+    await listShopifyIssues(e.venueId, { limit: 7 })
+    expect(espia).toHaveBeenCalledTimes(1)
+    expect(espia.mock.calls[0][0]?.orderBy).toEqual([{ createdAt: 'desc' }, { id: 'desc' }])
+  } finally {
+    espia.mockRestore()
+  }
 })
 
 it('entradas hostiles: límite y desplazamiento absurdos se acotan; un motivo desconocido no revienta; % y _ se buscan tal cual', async () => {
@@ -410,6 +431,11 @@ it('entradas hostiles: límite y desplazamiento absurdos se acotan; un motivo de
   expect((await listShopifyReviews(e.venueId, { q: '%' })).total).toBe(0)
   expect((await listShopifyReviews(e.venueId, { q: '_' })).total).toBe(0)
   await expect(listShopifyReviews(e.venueId, { q: 'x'.repeat(5000) })).resolves.toMatchObject({ total: 0 })
+  // Postgres no guarda NUL en un texto: un `q` con \u0000 era un 500. Se quita y la búsqueda sigue (B9, Minor 1).
+  expect((await listShopifyReviews(e.venueId, { q: 'cam\u0000isa' })).total).toBe(1)
+  expect((await listShopifyIssues(e.venueId, { q: 'go\u0000rra' })).items.map(i => i.title)).toEqual(['Gorra'])
+  await expect(listShopifyReviews(e.venueId, { q: '\u0000' })).resolves.toMatchObject({ total: 1 }) // sólo NUL ⇒ sin filtro
+  await expect(listShopifyIssues(e.venueId, { q: '\u0000' })).resolves.toMatchObject({ total: 2 })
 })
 
 it('una lista vacía es vacía, con su forma: sin elementos, total 0 y sin siguiente página', async () => {
@@ -650,5 +676,8 @@ describe('envíos de «Por revisar» (C2 GET /reviews/envios)', () => {
     expect((await getShopifyReviewEnvios(e.venueId, [])).items).toEqual([])
     const r = await getShopifyReviewEnvios(e.venueId, [creadas[0], creadas[0], '', 7 as never, null as never])
     expect(r.items.map(i => i.id)).toEqual([creadas[0]])
+    // Un id con NUL no puede existir y Postgres lo rechaza (500): no cuenta, como lo que no es texto (mismo defecto que `q`).
+    const hostil = await getShopifyReviewEnvios(e.venueId, ['a\u0000b', creadas[1]])
+    expect(hostil.items.map(i => i.id)).toEqual([creadas[1]])
   })
 })

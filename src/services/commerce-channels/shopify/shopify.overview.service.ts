@@ -16,7 +16,7 @@
  * - Nada interno sale: ni `mirrorAt` (una pareja sin iniciar guarda 1970, R10) ni `payload._avoqadoAvance` de un evento
  *   (S8) ni el texto crudo de un error.
  */
-import { Prisma, ShopifyIssueReason, type ShopifyLinkStatus } from '@prisma/client'
+import { Prisma, ShopifyIssueReason, type ShopifyLinkStatus, type ShopifyReviewChoice, type ShopifyReviewReason } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
 import { utcTs } from '@/utils/sqlDates'
@@ -170,7 +170,8 @@ function pagina(offset: unknown, limit: unknown): { skip: number; take: number }
     take: Number.isFinite(l) && l >= 1 ? Math.min(LIMITE_MAX, Math.floor(l)) : LIMITE_DEFECTO,
   }
 }
-const texto = (q?: unknown) => (typeof q === 'string' ? q.trim().slice(0, 100) : '')
+/** Postgres no guarda `\u0000` en un texto: un `q` hostil que lo trajera daba 500 (B9, Minor 1). Se quita antes de buscar. */
+const texto = (q?: unknown) => (typeof q === 'string' ? q.split('\u0000').join('').trim().slice(0, 100) : '')
 /** `%` y `_` del usuario se buscan literales (Postgres los escapa con la barra invertida; el `contains` de Prisma NO los escapa solo). */
 const literal = (q: string) => q.replace(/[\\%_]/g, c => `\\${c}`)
 const patron = (q: string) => `%${literal(q)}%`
@@ -180,13 +181,13 @@ export type ShopifyEnvio = 'PENDIENTE' | 'ATORADO' | 'ENVIADO'
 export type ShopifyReviewListItem = {
   id: string
   status: 'OPEN' | 'RESOLVED'
-  reason: string
+  reason: ShopifyReviewReason
   /** Decimal en texto (`"5"`, `"2.5"`): vuelve tal cual al resolver (C, punto 7). */
   avoqadoQty: string
   shopifyQty: number
   atorados: number
-  suggestion: string
-  choice: string | null
+  suggestion: ShopifyReviewChoice
+  choice: ShopifyReviewChoice | null
   envio: ShopifyEnvio | null
   createdAt: string
   product: { id: string; name: string; sku: string | null }
@@ -211,7 +212,7 @@ const ENVIO = Prisma.sql`
   CASE WHEN r.status = 'OPEN' OR o.id IS NULL THEN NULL
        WHEN o.status IN (${VIVAS}) AND o.generation = l.generation THEN 'PENDIENTE'
        WHEN o.status = 'DEAD_LETTER' AND o.generation = l.generation THEN 'ATORADO'
-       WHEN o.status = 'SENT' THEN 'ENVIADO'
+       WHEN o.status = 'SENT' AND o.generation = l.generation THEN 'ENVIADO'
        ELSE NULL END`
 /** La revisión, su fila del buzón (del MISMO negocio) y el enlace del negocio. */
 const REVISION_Y_ENVIO = Prisma.sql`
@@ -277,7 +278,7 @@ export async function listShopifyReviews(
 export type ShopifyReviewEnvio = {
   id: string
   status: 'OPEN' | 'RESOLVED'
-  choice: 'AVOQADO' | 'SHOPIFY' | null
+  choice: ShopifyReviewChoice | null
   envio: ShopifyEnvio | null
 }
 const MAX_IDS_ENVIOS = 50
@@ -289,10 +290,9 @@ const MAX_IDS_ENVIOS = 50
  * pantalla ya tiene la revisión y sólo pregunta cómo va su envío. Una fila ya purgada (30 días) da null, nunca PENDIENTE.
  */
 export async function getShopifyReviewEnvios(venueId: string, ids: string[]): Promise<{ items: ShopifyReviewEnvio[] }> {
-  const pedidos = [...new Set((Array.isArray(ids) ? ids : []).filter(id => typeof id === 'string' && id.length > 0))].slice(
-    0,
-    MAX_IDS_ENVIOS,
-  )
+  const pedidos = [
+    ...new Set((Array.isArray(ids) ? ids : []).filter(id => typeof id === 'string' && id.length > 0 && !id.includes('\u0000'))),
+  ].slice(0, MAX_IDS_ENVIOS)
   if (pedidos.length === 0) return { items: [] }
   const items = await prisma.$queryRaw<ShopifyReviewEnvio[]>`
     SELECT r.id, r.status::text AS status, r.choice::text AS choice, ${ENVIO} AS envio
