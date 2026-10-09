@@ -16,6 +16,7 @@ import { ModuleScope, Prisma } from '@prisma/client'
 import { lockModuleScope, MODULE_CODES } from '../../modules/module.service'
 import { BadRequestError, NotFoundError } from '../../../errors/AppError'
 import { logAction } from '../activity-log.service'
+import { asegurarIdsDelNegocio } from './idsDelNegocio'
 import { startOfWeek } from 'date-fns'
 import { fromZonedTime, toZonedTime } from 'date-fns-tz'
 import { venueStartOfDay, venueStartOfMonth, DEFAULT_TIMEZONE } from '../../../utils/datetime'
@@ -288,6 +289,8 @@ export async function createSalesGoal(venueId: string, input: CreateSalesGoalInp
     if (!staff) {
       throw new NotFoundError('Staff not found')
     }
+    // FT-GRAVES T1-hermanos: además de existir, tiene que ser del equipo de ESTA sede (`idsDelNegocio.ts`).
+    await asegurarIdsDelNegocio({ venueId }, { staffIds: [input.staffId] })
   }
 
   const venueModule = await getOrCreateVenueModule(venueId)

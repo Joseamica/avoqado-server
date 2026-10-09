@@ -10,6 +10,12 @@
  * podría devolver otro turno si alguien cierra caja en medio, y entonces la orden y su cobro
  * caerían en turnos distintos.
  */
+// FT-GRAVES T2: este cobro encola su comisión en la transacción, con el MISMO gancho que la terminal. No es objeto de esta
+// suite (sus pruebas son tests/integration/commission/cobrosDelDashboard y cobrosEnLineaYCripto).
+jest.mock('@/services/tpv/paymentEffects.service', () => ({
+  ...jest.requireActual('@/services/tpv/paymentEffects.service'),
+  enqueuePaymentCommissionInTx: jest.fn().mockResolvedValue(undefined),
+}))
 jest.mock('@/services/venueSalesGuard', () => ({
   __esModule: true,
   assertVenueSalesEnabled: jest.fn(),

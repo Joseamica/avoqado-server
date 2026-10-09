@@ -3294,7 +3294,16 @@ export async function finalizeMercadoPagoCheckout(args: { sessionId: string; mpP
       ecommerceMerchant: { select: { id: true, venueId: true } },
       // `purpose` decide si la venta trae productos: sin él, TODO cobro por
       // MercadoPago se guardaba como entrada manual sin renglones.
-      paymentLink: { select: { id: true, venueId: true, createdById: true, purpose: true } },
+      // La primera persona atribuida (por fecha, como las otras ligas) queda como quien cobró (FT-GRAVES T2).
+      paymentLink: {
+        select: {
+          id: true,
+          venueId: true,
+          createdById: true,
+          purpose: true,
+          attributions: { select: { staffId: true }, orderBy: { createdAt: 'asc' } },
+        },
+      },
     },
   })
   if (!session) {
@@ -3305,6 +3314,9 @@ export async function finalizeMercadoPagoCheckout(args: { sessionId: string; mpP
 
   const isLink = !!session.paymentLink
   const venueId = session.paymentLink?.venueId ?? session.ecommerceMerchant.venueId
+  // FT-GRAVES T2: igual que las ligas por Stripe y Blumon — la primera persona atribuida queda como quien cobró y la comisión se
+  // congela con el cobro, repartida entre todas. Sin atribución (o checkout sin liga) no hay comisión: no se inventa a quién.
+  const attributedStaffIds = (session.paymentLink?.attributions ?? []).map(a => a.staffId)
   // session.amount already includes the tip; split it out so the Order/Payment
   // report the tip separately, mirroring finalizePaymentLinkCheckout (Stripe).
   const metadata = (session.metadata ?? {}) as Record<string, any>
@@ -3423,6 +3435,7 @@ export async function finalizeMercadoPagoCheckout(args: { sessionId: string; mpP
           type: isItemLink ? 'REGULAR' : 'FAST',
           processor: 'mercadopago',
           processorId,
+          processedById: attributedStaffIds[0] ?? undefined,
           feePercentage,
           feeAmount,
           netAmount,
@@ -3430,6 +3443,7 @@ export async function finalizeMercadoPagoCheckout(args: { sessionId: string; mpP
         },
         select: { id: true },
       })
+      if (attributedStaffIds.length > 0) await enqueuePaymentCommissionInTx(tx, createdPayment.id, attributedStaffIds)
 
       await tx.checkoutSession.update({ where: { id: session.id }, data: { paymentId: createdPayment.id } })
 
@@ -3441,7 +3455,8 @@ export async function finalizeMercadoPagoCheckout(args: { sessionId: string; mpP
       }
 
       orderIdForReferral = order.id
-    })
+      // La comisión se congela en esta transacción: el mismo tope de 10 s que las otras ligas y la terminal.
+    }, OPCIONES_DE_TRANSACCION_DEL_INTENTO)
 
     // Aplicar el vale YA COMMITEADO el cobro. Nunca puede tumbar una venta
     // cobrada: si truena, el posting queda pendiente y el sweeper lo retoma.

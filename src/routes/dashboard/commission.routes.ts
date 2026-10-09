@@ -13,6 +13,7 @@
 import express, { Request, Response, NextFunction } from 'express'
 import { checkPermission } from '@/middlewares/checkPermission.middleware'
 import { checkFeatureAccess } from '@/middlewares/checkFeatureAccess.middleware'
+import { conClave } from '@/middlewares/simCustodyIdempotency.middleware'
 import { venueHasCommissionsAccess } from '@/services/access/basePlan.service'
 import * as controller from '@/controllers/dashboard/commission.dashboard.controller'
 import * as commissionResolution from '@/services/dashboard/commission/commission-resolution.service'
@@ -73,7 +74,7 @@ router.get('/venues/:venueId/configs/:configId', checkPermission('commissions:re
  * Create commission config
  * @permission commissions:create
  */
-router.post('/venues/:venueId/configs', checkPermission('commissions:create'), controller.createConfig)
+router.post('/venues/:venueId/configs', checkPermission('commissions:create'), conClave, controller.createConfig)
 
 /**
  * PUT /venues/:venueId/configs/:configId
@@ -94,7 +95,7 @@ router.delete('/venues/:venueId/configs/:configId', checkPermission('commissions
  * Copy commission config
  * @permission commissions:create
  */
-router.post('/venues/:venueId/configs/:configId/copy', checkPermission('commissions:create'), controller.copyConfig)
+router.post('/venues/:venueId/configs/:configId/copy', checkPermission('commissions:create'), conClave, controller.copyConfig)
 
 // ==========================================
 // COMMISSION OVERRIDES
@@ -113,7 +114,7 @@ router.get('/venues/:venueId/configs/:configId/overrides', checkPermission('comm
  * Create override for staff
  * @permission commissions:create
  */
-router.post('/venues/:venueId/configs/:configId/overrides', checkPermission('commissions:create'), controller.createOverride)
+router.post('/venues/:venueId/configs/:configId/overrides', checkPermission('commissions:create'), conClave, controller.createOverride)
 
 /**
  * POST /venues/:venueId/configs/:configId/bulk-exclude
@@ -167,14 +168,14 @@ router.get('/venues/:venueId/configs/:configId/tiers', checkPermission('commissi
  * Create tier
  * @permission commissions:create
  */
-router.post('/venues/:venueId/configs/:configId/tiers', checkPermission('commissions:create'), controller.createTier)
+router.post('/venues/:venueId/configs/:configId/tiers', checkPermission('commissions:create'), conClave, controller.createTier)
 
 /**
  * POST /venues/:venueId/configs/:configId/tiers/batch
  * Create multiple tiers
  * @permission commissions:create
  */
-router.post('/venues/:venueId/configs/:configId/tiers/batch', checkPermission('commissions:create'), controller.createTiersBatch)
+router.post('/venues/:venueId/configs/:configId/tiers/batch', checkPermission('commissions:create'), conClave, controller.createTiersBatch)
 
 /**
  * PUT /venues/:venueId/tiers/:tierId
@@ -214,7 +215,7 @@ router.get('/venues/:venueId/configs/:configId/milestones', checkPermission('com
  * Create milestone
  * @permission commissions:create
  */
-router.post('/venues/:venueId/configs/:configId/milestones', checkPermission('commissions:create'), controller.createMilestone)
+router.post('/venues/:venueId/configs/:configId/milestones', checkPermission('commissions:create'), conClave, controller.createMilestone)
 
 /**
  * GET /venues/:venueId/milestones/:milestoneId
@@ -282,7 +283,7 @@ router.post('/venues/:venueId/calculations/:calculationId/void', checkPermission
  * Create manual commission calculation
  * @permission commissions:create
  */
-router.post('/venues/:venueId/calculations/manual', checkPermission('commissions:create'), controller.createManualCommission)
+router.post('/venues/:venueId/calculations/manual', checkPermission('commissions:create'), conClave, controller.createManualCommission)
 
 /**
  * POST /venues/:venueId/payments/commissions/batch
@@ -513,7 +514,12 @@ router.get('/venues/:venueId/staff/:staffId/pending-clawbacks', checkPermission(
  * Create clawback
  * @permission commissions:update
  */
-router.post('/venues/:venueId/calculations/:calculationId/clawback', checkPermission('commissions:update'), controller.createClawback)
+router.post(
+  '/venues/:venueId/calculations/:calculationId/clawback',
+  checkPermission('commissions:update'),
+  conClave,
+  controller.createClawback,
+)
 
 /**
  * DELETE /venues/:venueId/clawbacks/:clawbackId
@@ -565,7 +571,7 @@ router.get('/venues/:venueId/goals/:goalId', checkPermission('commissions:read')
  * Create a new sales goal
  * @permission commissions:create
  */
-router.post('/venues/:venueId/goals', checkPermission('commissions:create'), controller.createSalesGoal)
+router.post('/venues/:venueId/goals', checkPermission('commissions:create'), conClave, controller.createSalesGoal)
 
 /**
  * PATCH /venues/:venueId/goals/:goalId
@@ -630,6 +636,7 @@ router.get(
 router.post(
   '/venues/:venueId/org-configs',
   checkPermission('commissions:org-manage'),
+  conClave,
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { venueId } = req.params
@@ -652,7 +659,7 @@ router.put(
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { venueId, configId } = req.params
-      const config = await commissionResolution.updateOrgCommissionConfig(venueId, configId, req.body)
+      const config = await commissionResolution.updateOrgCommissionConfig(venueId, configId, req.body, (req as any).authContext?.userId)
       res.json({ data: config })
     } catch (error) {
       next(error)

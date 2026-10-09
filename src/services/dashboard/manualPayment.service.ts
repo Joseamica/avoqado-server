@@ -21,6 +21,7 @@ import { countPriorCompletedPayments } from '@/services/shared/priorCompletedPay
 import { contratoDePagoManual } from '@/services/fiscal/contratoDePrecio'
 import { operationHash } from '@/utils/operationHash'
 import { isRetryableDbError } from '@/utils/serializableRetry'
+import { enqueuePaymentCommissionInTx } from '@/services/tpv/paymentEffects.service'
 
 /**
  * Record a manual payment (admin-only). Two modes:
@@ -529,6 +530,8 @@ export async function createManualPayment(
         // possible future expansion (per-payment breakdown, audit detail).
         void orderSubtotal
         void orderDiscount
+        // FT-GRAVES T2: el MISMO gancho de comisión que la terminal, con el dinero. El esquema decide a quién; sin persona, nada.
+        await enqueuePaymentCommissionInTx(tx, payment.id)
 
         logger.info('Manual payment created', {
           paymentId: payment.id,

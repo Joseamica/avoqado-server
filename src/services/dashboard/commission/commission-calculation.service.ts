@@ -66,6 +66,8 @@ import {
 import { COMMISSION_BASE, resolveCommissionBase } from './commission-base'
 import { redondearRepartido, repartir } from './repartoPorCobro'
 import { aplicaALaPersona } from './personasElegidas'
+import { categoriasPropias } from './duenoDeCategorias'
+import { asegurarIdsDelNegocio } from './idsDelNegocio'
 import { subMonths, startOfMonth, endOfMonth } from 'date-fns'
 import { toZonedTime, fromZonedTime } from 'date-fns-tz'
 import { getApplicableTierRate, resolveGoalBasedTier } from './commission-tier.service'
@@ -304,15 +306,18 @@ export async function createCommissionForPayment(
   const categoryScoped = configs.filter(c => c.filterByCategories && c.categoryIds.length > 0)
   const catchAll = configs.filter(c => !(c.filterByCategories && c.categoryIds.length > 0))
   const claimed = [...new Set(categoryScoped.flatMap(c => c.categoryIds))]
+  // S-SOLAPE (dinero): cada categoría tiene UN dueño —el esquema de mayor prioridad que la reclama— y paga una sola vez.
+  const propias = categoriasPropias(categoryScoped)
 
   const results: CommissionCalculationResult[] = []
 
-  // 1) Category-scoped configs — each bills its own categories.
+  // 1) Category-scoped configs — each bills ONLY the categories it owns (`duenoDeCategorias.ts`).
   for (const config of categoryScoped) {
-    if (!payment.orderId) continue
+    const suyas = propias.get(config.id) ?? []
+    if (!payment.orderId || suyas.length === 0) continue
     const orderBase = await calculateCategoryFilteredAmount(
       payment.orderId,
-      config.categoryIds,
+      suyas,
       {
         includeTax: config.includeTax,
         includeDiscount: config.includeDiscount,
@@ -767,10 +772,10 @@ export async function createManualCommission(
   shiftId?: string,
 ): Promise<CommissionCalculationResult> {
   // Validate staff
+  // FT-GRAVES T1-hermanos: la persona, la orden y el turno tienen que ser de ESTA sede; 400 en español (`idsDelNegocio.ts`).
+  await asegurarIdsDelNegocio({ venueId }, { staffIds: [staffId], orderIds: [orderId], shiftIds: [shiftId] })
   const staffInfo = await validateStaffForCommission(staffId, venueId)
-  if (!staffInfo) {
-    throw new BadRequestError(`Staff ${staffId} is not active in venue ${venueId}`)
-  }
+  if (!staffInfo) throw new BadRequestError('Esa persona no está activa en este negocio.')
 
   // Find any active config (for reference, not for rate calculation)
   const config = await findActiveCommissionConfig(venueId)

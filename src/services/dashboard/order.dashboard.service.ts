@@ -1,6 +1,7 @@
 import { lockTableOrderScope } from '@/services/shared/tableOrderLock'
 // services/dashboard/order.dashboard.service.ts
 
+import { enqueuePaymentCommissionInTx } from '@/services/tpv/paymentEffects.service'
 import { NotFoundError } from '../../errors/AppError'
 import { PaginatedOrdersResponse } from '../../schemas/dashboard/order.schema'
 import prisma from '../../utils/prismaClient'
@@ -872,6 +873,8 @@ export async function settleOrder(
     })
     postingId = posting?.id ?? null
     settlementPaymentId = settlementPayment.id
+    // FT-GRAVES T2: el MISMO gancho de comisión que la terminal, con el dinero. El esquema decide a quién; sin persona, nada.
+    await enqueuePaymentCommissionInTx(tx, settlementPayment.id)
 
     return toSettle
   }, ORDER_LOCK_WAIT_BUDGET)

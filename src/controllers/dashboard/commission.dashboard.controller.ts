@@ -12,6 +12,7 @@
 
 import { Request, Response, NextFunction } from 'express'
 import * as configService from '@/services/dashboard/commission/commission-config.service'
+import { reemplazarEsquema } from '@/services/dashboard/commission/reemplazarEsquema'
 import * as overrideService from '@/services/dashboard/commission/commission-override.service'
 import * as tierService from '@/services/dashboard/commission/commission-tier.service'
 import * as milestoneService from '@/services/dashboard/commission/commission-milestone.service'
@@ -87,7 +88,7 @@ export async function updateConfig(req: Request, res: Response, next: NextFuncti
   try {
     const { venueId, configId } = req.params
 
-    const config = await configService.updateCommissionConfig(configId, venueId, req.body)
+    const config = await configService.updateCommissionConfig(configId, venueId, req.body, (req as any).authContext?.userId)
 
     res.json(config)
   } catch (error) {
@@ -121,6 +122,9 @@ export async function copyConfig(req: Request, res: Response, next: NextFunction
     const { venueId, configId } = req.params
     const authContext = (req as any).authContext
     const { name } = req.body
+    // «Duplicar con cambios»: con `replace: true` el nuevo REEMPLAZA al original en una sola transacción (FT-GRAVES S-REPLACE).
+    if (req.body?.replace === true)
+      return void res.status(201).json(await reemplazarEsquema(venueId, configId, req.body, authContext?.userId))
 
     const config = await configService.copyCommissionConfig(
       configId,
