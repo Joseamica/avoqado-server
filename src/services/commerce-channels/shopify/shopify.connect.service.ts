@@ -19,7 +19,7 @@ import { assertLegacyCatalogGovernanceForVenue } from '@/services/master-catalog
 import { utcTs } from '@/utils/sqlDates'
 import { SHOPIFY_FEATURE, SHOPIFY_SCOPES, SHOPIFY_SERVICE_ACTOR, SHOPIFY_WEBHOOK_TOPICS } from './shopify.constants'
 import { appCredentials, encryptShopifyToken, isValidShopDomain, readIntentId, signIntentId, verifyOAuthQueryHmac } from './shopify.crypto'
-import { exchangeOAuthCode, shopifyGraphql, type ShopifyFailure } from './shopify.graphql'
+import { exchangeOAuthCode, shopifyGraphql, type ShopifyFailure, type ShopifyResult } from './shopify.graphql'
 import {
   cercoVigente,
   fetchLevels,
@@ -52,6 +52,8 @@ const TANDA_APLICAR = 50
 const MAX_PAGINAS_UBICACIONES = 40
 /** BR-3: lo que devuelve una unidad que espera a que termine un envío de una conexión anterior. */
 const ENVIO_EN_CAMINO = 'ENVIO_EN_CAMINO'
+/** BR-4: `lastError` de lo que iba en camino a la tienda anterior de una sucursal que se ligó a otra. */
+export const RELIGADA_A_OTRA_TIENDA = 'RELIGADA_A_OTRA_TIENDA'
 /** K13: estas tx bloquean todas las sucursales de una tienda, o una sucursal con sus parejas; 5 s se quedan cortos con carga. */
 const TX_LARGA = { timeout: 15_000 }
 const apiBase = () => (env.BASE_URL ?? 'https://api.avoqado.io').replace(/\/+$/, '')
@@ -384,7 +386,8 @@ export async function listIntentLocations(
   const out: Array<{ id: string; name: string; countryCode: string | null }> = []
   let after: string | null = null
   for (let pagina = 0; pagina < MAX_PAGINAS_UBICACIONES; pagina++) {
-    const r = await graphql<PaginaUbicaciones>(
+    // Tipo explícito: `after` sale de `r` en la vuelta anterior y TS no puede inferirlo (TS7022).
+    const r: ShopifyResult<PaginaUbicaciones> = await graphql<PaginaUbicaciones>(
       intent.shopDomain,
       token,
       QUERY_UBICACIONES,
@@ -426,11 +429,14 @@ const DE_OTRA_EMPRESA = () => new ConflictError('Esa tienda de Shopify ya está 
  *   (`renovarCredencial`). Así, si la barrera de abajo contesta 409, las filas que esperaba pueden resolverse con el token
  *   nuevo y el siguiente intento entra: sin eso, una tienda revocada con un envío ambiguo y la sucursal desconectada no
  *   se podía reconectar nunca. El intent sigue EXCHANGED. Lo que ya se sabe que va a fallar (sucursal conectada, ubicación
- *   ocupada, tienda ajena, catálogo maestro) se dice antes, para no renovar en vano.
+ *   ocupada, tienda ajena, catálogo maestro) se dice antes, para no renovar en vano. Un reintento con el MISMO intent no
+ *   renueva otra vez (mismos bytes cifrados, tienda ACTIVE). Lo que la sucursal que se reconecta tiene en camino se
+ *   reprograma para ya.
  * - Después, en UNA tx: candado del catálogo maestro (#29), intent consumido, por id y ANTES de la tienda la sucursal
- *   propia y la que ocupaba esa ubicación (§10.3, N03), la barrera de envíos en camino de las dos (§9.1, §10.14, K16:
- *   B-8 rige aquí; una DEAD_LETTER ambigua ya no puede llegar y K10 nunca la revive), la tienda (otra organización ⇒ 409),
- *   sus parejas por id (BR-1) y la sucursal en CONNECTING con las reglas de generación del índice §3 (#8).
+ *   propia y la que ocupaba esa ubicación (§10.3, N03), la barrera de envíos en camino (§9.1, §10.14, K16: B-8 rige aquí;
+ *   una DEAD_LETTER ambigua ya no puede llegar y K10 nunca la revive) de la que ocupaba la ubicación y de la propia si
+ *   sigue en la MISMA tienda, la tienda (otra organización ⇒ 409), sus parejas por id (BR-1), lo que la propia tenía en
+ *   camino a OTRA tienda a DEAD_LETTER (BR-4) y la sucursal en CONNECTING con las reglas de generación del índice §3 (#8).
  */
 export async function confirmShopifyConnect(
   i: { venueId: string; authUserId: string; intent: string; locationId: string },
@@ -459,8 +465,14 @@ export async function confirmShopifyConnect(
     })
 
   const [propia, tienda] = await Promise.all([
-    prisma.shopifyLocationLink.findUnique({ where: { venueId: i.venueId }, select: { status: true } }),
-    prisma.shopifyStore.findUnique({ where: { shopDomain: intent.shopDomain }, select: { id: true, organizationId: true } }),
+    prisma.shopifyLocationLink.findUnique({
+      where: { venueId: i.venueId },
+      select: { id: true, status: true, storeId: true, generation: true },
+    }),
+    prisma.shopifyStore.findUnique({
+      where: { shopDomain: intent.shopDomain },
+      select: { id: true, organizationId: true, status: true, accessTokenCiphertext: true },
+    }),
   ])
   if (propia && propia.status !== 'DISCONNECTED') throw YA_CONECTADA()
   if (tienda && tienda.organizationId !== venue.organizationId) throw DE_OTRA_EMPRESA()
@@ -470,23 +482,41 @@ export async function confirmShopifyConnect(
       select: { venueId: true, status: true },
     })
     if (ocupante && ocupante.venueId !== i.venueId && ocupante.status !== 'DISCONNECTED') throw UBICACION_YA_LIGADA()
-    const renovada = await prisma.$transaction(async tx => {
+    // Este MISMO intent ya dejó su credencial (los mismos bytes cifrados) y la tienda sigue ACTIVE: un reintento tras un
+    // 409 no vuelve a subir `tokenVersion` ni a pedir webhooks y cuadre a todas las hermanas.
+    const yaRenovada = tienda.status === 'ACTIVE' && Buffer.from(tienda.accessTokenCiphertext).equals(Buffer.from(intent.tokenCiphertext))
+    // La sucursal que se reconecta a ESTA tienda: lo que tenga en camino de su conexión anterior se reintenta ya, no al
+    // cabo de su espera (hasta 6 h), que dura más que los 15 minutos del intent.
+    const reconecta = propia?.storeId === tienda.id ? propia : null
+    const r = await prisma.$transaction(async tx => {
       await gobierno(tx)
-      return renovarCredencial(tx, tienda.id, {
-        tokenCiphertext: intent.tokenCiphertext,
-        scopes: intent.scopes ?? '',
-        appKey: intent.appKey,
+      const renovada = yaRenovada
+        ? null
+        : await renovarCredencial(tx, tienda.id, {
+            tokenCiphertext: intent.tokenCiphertext,
+            scopes: intent.scopes ?? '',
+            appKey: intent.appKey,
+          })
+      if (!reconecta) return { renovada, reprogramadas: 0 }
+      // Sucursal antes que sus filas (§10.3); `renovarCredencial` ya la bloqueó con las demás de la tienda.
+      if (yaRenovada) await tx.$queryRaw`SELECT id FROM "ShopifyLocationLink" WHERE id = ${reconecta.id} FOR SHARE`
+      const reprogramadas = await tx.shopifyStockOutbox.updateMany({
+        where: { locationLinkId: reconecta.id, generation: { lt: reconecta.generation }, status: 'FAILED', ambiguous: true },
+        data: { scheduledAt: new Date() },
       })
+      return { renovada, reprogramadas: reprogramadas.count }
     }, TX_LARGA)
-    logAction({
-      venueId: i.venueId,
-      organizationId: venue.organizationId,
-      staffId: i.authUserId,
-      action: 'SHOPIFY_CREDENTIAL_RENEWED',
-      entity: 'ShopifyStore',
-      entityId: tienda.id,
-      data: renovada,
-    })
+    if (r.renovada) {
+      logAction({
+        venueId: i.venueId,
+        organizationId: venue.organizationId,
+        staffId: i.authUserId,
+        action: 'SHOPIFY_CREDENTIAL_RENEWED',
+        entity: 'ShopifyStore',
+        entityId: tienda.id,
+        data: { ...r.renovada, reprogramadas: r.reprogramadas },
+      })
+    }
   }
 
   try {
@@ -508,9 +538,12 @@ export async function confirmShopifyConnect(
       const ajena = afectadas.find(a => a.venueId !== i.venueId) ?? null
       if (previo && previo.status !== 'DISCONNECTED') throw YA_CONECTADA()
       if (ajena && ajena.status !== 'DISCONNECTED') throw UBICACION_YA_LIGADA()
-      // §9.1, BR-3, BR-4: con las dos sucursales bloqueadas nadie las reclama; si algo de ellas todavía puede llegar a
-      // Shopify (de cualquier generación), ni se sube la generación ni la sucursal cambia de tienda o ubicación.
-      for (const a of [previo, ajena]) {
+      // §9.1, BR-3: con las sucursales bloqueadas nadie las reclama. Si algo de la MISMA tienda todavía puede llegar a
+      // Shopify (de cualquier generación), no se sube la generación: con la credencial ya renovada (K9) y FALTA_PERMISO
+      // limpio (K10), el mensajero lo resuelve y el siguiente intento entra. La que ocupaba la ubicación es siempre de
+      // esta tienda. La propia, ligada a OTRA tienda, no espera: ver abajo (BR-4).
+      const mismaTienda = !!previo && previa?.id === previo.storeId
+      for (const a of [mismaTienda ? previo : null, ajena]) {
         if (a && (await envioEnCamino(tx, { locationLinkId: a.id }))) {
           throw new ConflictError(
             'Un cambio de stock de la conexión anterior todavía va en camino a Shopify; intenta en unos minutos',
@@ -523,15 +556,29 @@ export async function confirmShopifyConnect(
       if (conParejas.length > 0) {
         await tx.$queryRaw`SELECT id FROM "ShopifyVariantLink" WHERE "locationLinkId" IN (${Prisma.join(conParejas)}) ORDER BY id FOR UPDATE`
       }
-      if (ajena) await tx.shopifyLocationLink.delete({ where: { id: ajena.id } })
-      return dejarConectando(tx, previo, {
+      const religadas = previo && previo.storeId !== storeId ? await aCuarentenaPorReligar(tx, previo.id) : 0
+      if (ajena) {
+        // Lo que la sucursal que ocupaba la ubicación nunca mandó ya no tiene a dónde ir (nada suyo está en camino: barrera).
+        await tx.shopifyStockOutbox.updateMany({
+          where: { locationLinkId: ajena.id, status: { in: ['PENDING', 'FAILED'] }, ambiguous: false },
+          data: { status: 'DISCARDED', lastError: 'GENERACION_VIEJA', processedAt: new Date(), claimToken: null, leaseUntil: null },
+        })
+        await tx.shopifyLocationLink.delete({ where: { id: ajena.id } })
+      }
+      const ligada = await dejarConectando(tx, previo, {
         venueId: i.venueId,
         storeId,
         shopifyLocationId: ubicacion.id,
         locationName: ubicacion.name,
         connectedById: i.authUserId,
       })
+      return { ...ligada, religadas }
     }, TX_LARGA)
+    if (link.religadas > 0) {
+      logger.warn(
+        `[SHOPIFY] sucursal ${link.id} religada a ${intent.shopDomain}: ${link.religadas} envío(s) de la tienda anterior a DEAD_LETTER`,
+      )
+    }
     logAction({
       venueId: i.venueId,
       organizationId: venue.organizationId,
@@ -539,7 +586,7 @@ export async function confirmShopifyConnect(
       action: 'SHOPIFY_CONNECTED',
       entity: 'ShopifyLocationLink',
       entityId: link.id,
-      data: { tienda: intent.shopDomain, ubicacion: ubicacion.name, generation: link.generation },
+      data: { tienda: intent.shopDomain, ubicacion: ubicacion.name, generation: link.generation, religadas: link.religadas },
     })
     return { locationLinkId: link.id }
   } catch (e) {
@@ -578,6 +625,25 @@ async function tiendaDe(
     SELECT id, "organizationId" FROM "ShopifyStore" WHERE "shopDomain" = ${intent.shopDomain} FOR SHARE`
   if (!s || s.organizationId !== organizationId) throw DE_OTRA_EMPRESA()
   return s.id
+}
+
+/**
+ * BR-4 («mandar antes a DEAD_LETTER sus ambiguas»): la sucursal se liga a OTRA tienda y lo que todavía estaba en camino a
+ * la anterior (IN_PROGRESS, o vivo y ambiguo) no puede esperar: el reclamo sólo lo tomaría con la tienda vieja ACTIVE y
+ * esta sucursal sin error terminal, y la sucursal ya apunta a la tienda nueva, así que la espera no terminaría nunca. Se
+ * cierra como evidencia: DEAD_LETTER con su duda (un IN_PROGRESS con parámetros congelados pudo haber salido) y sus
+ * parámetros congelados, sin reclamo. Es seguro: la generación nueva lee la tienda nueva, K10 nunca la revive (generación
+ * y `lastError`), y un mensajero que vuelva de Shopify la encuentra ajena y no escribe nada (SKIPPED). Va con la sucursal
+ * y sus parejas ya bloqueadas (§10.3).
+ */
+async function aCuarentenaPorReligar(tx: Prisma.TransactionClient, locationLinkId: string): Promise<number> {
+  return tx.$executeRaw`
+    UPDATE "ShopifyStockOutbox"
+       SET status = 'DEAD_LETTER',
+           ambiguous = (ambiguous OR (status = 'IN_PROGRESS' AND "sentInventoryItemId" IS NOT NULL)),
+           "lastError" = ${RELIGADA_A_OTRA_TIENDA}, "processedAt" = ${utcTs(new Date())}, "claimToken" = NULL, "leaseUntil" = NULL
+     WHERE "locationLinkId" = ${locationLinkId}
+       AND (status = 'IN_PROGRESS' OR (status IN ('PENDING', 'FAILED') AND ambiguous))`
 }
 
 /**

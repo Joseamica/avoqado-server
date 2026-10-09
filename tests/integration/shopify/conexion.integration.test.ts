@@ -11,6 +11,7 @@ jest.mock('@/config/env', () => {
 })
 
 import crypto from 'crypto'
+import type { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { logAction } from '@/services/dashboard/activity-log.service'
@@ -87,7 +88,8 @@ afterEach(async () => {
   escenarios = []
 })
 
-const firmarConsulta = (q: Record<string, string>) => {
+/** Firma una consulta como Shopify; devuelve los MISMOS campos que recibió (con su tipo) más `hmac`. */
+const firmarConsulta = <Q extends Record<string, string>>(q: Q): Q & { hmac: string } => {
   const msg = Object.keys(q)
     .sort()
     .map(k => `${k}=${q[k]}`)
@@ -518,7 +520,7 @@ describe('ubicaciones y confirmar (#22, #27, #8, N03, N06)', () => {
         currency: 'MXN',
       },
     })
-    await prisma.shopifyLocationLink.create({
+    const vieja = await prisma.shopifyLocationLink.create({
       data: {
         storeId: e.storeId,
         venueId: ajena.id,
@@ -527,17 +529,31 @@ describe('ubicaciones y confirmar (#22, #27, #8, N03, N06)', () => {
         status: 'DISCONNECTED',
       },
     })
-    const i = {
-      venueId: e.venueId,
-      authUserId: e.staffId,
-      intent: await intentAutorizado(e, e.shopDomain),
-      locationId: 'gid://shopify/Location/9',
+    // Fix round 1 (Minor 3): lo que la ajena nunca mandó se descarta antes de borrarla, no se queda vivo para siempre.
+    const nuncaSalio = await prisma.shopifyStockOutbox.create({
+      data: { venueId: ajena.id, locationLinkId: vieja.id, generation: 1, productId: e.productId, delta: -1 },
+    })
+    try {
+      const i = {
+        venueId: e.venueId,
+        authUserId: e.staffId,
+        intent: await intentAutorizado(e, e.shopDomain),
+        locationId: 'gid://shopify/Location/9',
+      }
+      await confirmShopifyConnect(i, { graphql: confirmacion() })
+      expect(await sucursal(e)).toMatchObject({ shopifyLocationId: 'gid://shopify/Location/9', status: 'CONNECTING' })
+      expect(await prisma.shopifyVariantLink.count({ where: { venueId: e.venueId } })).toBe(0)
+      expect(await prisma.shopifyLocationLink.count({ where: { venueId: ajena.id } })).toBe(0)
+      expect(await prisma.shopifyStockOutbox.findUniqueOrThrow({ where: { id: nuncaSalio.id } })).toMatchObject({
+        status: 'DISCARDED',
+        lastError: 'GENERACION_VIEJA',
+      })
+    } finally {
+      // Aunque la prueba falle: la sucursal ajena no es de ningún escenario y bloquearía la limpieza de los siguientes.
+      await prisma.shopifyStockOutbox.deleteMany({ where: { venueId: ajena.id } })
+      await prisma.shopifyLocationLink.deleteMany({ where: { venueId: ajena.id } })
+      await prisma.venue.delete({ where: { id: ajena.id } })
     }
-    await confirmShopifyConnect(i, { graphql: confirmacion() })
-    expect(await sucursal(e)).toMatchObject({ shopifyLocationId: 'gid://shopify/Location/9', status: 'CONNECTING' })
-    expect(await prisma.shopifyVariantLink.count({ where: { venueId: e.venueId } })).toBe(0)
-    expect(await prisma.shopifyLocationLink.count({ where: { venueId: ajena.id } })).toBe(0)
-    await prisma.venue.delete({ where: { id: ajena.id } })
   })
 
   it('R02 (§11.4): conectar OTRA sucursal de la misma tienda renueva la credencial de TODAS: la que tenía FALTA_PERMISO vuelve a trabajar', async () => {
@@ -1188,21 +1204,133 @@ describe('decisiones vinculantes de B3', () => {
     expect((await sucursal(e)).status).toBe('REVIEWING')
   })
 
-  it('BR-4: ligar la sucursal a OTRA tienda con un envío en camino ⇒ 409; la sucursal no cambia de tienda y la nueva no se crea', async () => {
+  it.each([
+    ['la tienda vieja REVOCADA', 'REVOCADA'],
+    ['la sucursal con FALTA_PERMISO', 'FALTA_PERMISO'],
+  ])(
+    'BR-4: con %s y envíos atorados, ligar la sucursal a OTRA tienda conecta (generación + 1) y lo atorado queda DEAD_LETTER como evidencia',
+    async (_c, causa) => {
+      const e = await escenario()
+      const congelada = { sentInventoryItemId: DEAD_FRESCA.inventario, sentLocationId: DEAD_FRESCA.ubicacion, firstAttemptAt: new Date() }
+      const fila = (o: Partial<Prisma.ShopifyStockOutboxUncheckedCreateInput>) =>
+        prisma.shopifyStockOutbox.create({
+          data: { venueId: e.venueId, locationLinkId: e.locationLinkId, generation: 1, productId: e.productId, delta: -1, ...o },
+        })
+      const ambigua = await ambiguaEnCamino(e, 1)
+      const abandonada = await fila({
+        status: 'IN_PROGRESS',
+        attempts: 1,
+        claimToken: 'viejo',
+        leaseUntil: new Date(Date.now() - 60_000),
+        ...congelada,
+      })
+      const enHttp = await fila({
+        status: 'IN_PROGRESS',
+        attempts: 0,
+        claimToken: 'mensajero',
+        leaseUntil: new Date(Date.now() + 60_000),
+        ...congelada,
+      })
+      if (causa === 'REVOCADA')
+        await prisma.shopifyStore.update({ where: { id: e.storeId }, data: { status: 'REVOKED', revokedAt: new Date() } })
+      else await prisma.shopifyLocationLink.update({ where: { id: e.locationLinkId }, data: { importError: 'FALTA_PERMISO' } })
+      expect(await disconnectShopify({ venueId: e.venueId, staffId: e.staffId })).toEqual({ desconectada: true })
+      // Nadie puede resolverlas: el reclamo exige la tienda vieja ACTIVE y la sucursal sin error terminal.
+      expect(await claimShopifyOutbox(new Date())).toEqual({ kind: 'VACIO' })
+
+      const i = {
+        venueId: e.venueId,
+        authUserId: e.staffId,
+        intent: await intentAutorizado(e, 'mi-tienda.myshopify.com'),
+        locationId: 'gid://shopify/Location/9',
+      }
+      const { locationLinkId } = await confirmShopifyConnect(i, { graphql: confirmacion({ name: 'Tienda B' }) })
+      const nueva = await prisma.shopifyStore.findUniqueOrThrow({ where: { shopDomain: 'mi-tienda.myshopify.com' } })
+      expect(locationLinkId).toBe(e.locationLinkId)
+      expect(await sucursal(e)).toMatchObject({
+        status: 'CONNECTING',
+        generation: 3,
+        storeId: nueva.id,
+        shopifyLocationId: 'gid://shopify/Location/9',
+      })
+      expect(nueva.id).not.toBe(e.storeId)
+      for (const f of [ambigua, abandonada, enHttp]) {
+        const ahora = await prisma.shopifyStockOutbox.findUniqueOrThrow({ where: { id: f.id } })
+        expect(ahora).toMatchObject({
+          status: 'DEAD_LETTER',
+          ambiguous: true,
+          lastError: 'RELIGADA_A_OTRA_TIENDA',
+          claimToken: null,
+          leaseUntil: null,
+          sentInventoryItemId: DEAD_FRESCA.inventario,
+          sentLocationId: DEAD_FRESCA.ubicacion,
+        })
+        expect(ahora.processedAt).toBeInstanceOf(Date)
+      }
+      // El mensajero que volvía de Shopify con la del lease vivo ya no escribe nada.
+      expect(await runShopifyOutboxRow(enHttp.id, 'mensajero', new Date(), { graphql: exito(), hasAccess: conPlan })).toBe('SKIPPED')
+      expect(logAction).toHaveBeenCalledWith(
+        expect.objectContaining({ action: 'SHOPIFY_CONNECTED', data: expect.objectContaining({ religadas: 3 }) }),
+      )
+    },
+  )
+
+  it('BR-4: la MISMA tienda con algo en camino sigue esperando (409) y nada se manda a DEAD_LETTER', async () => {
     const e = await escenario({ linkStatus: 'DISCONNECTED' })
-    await enVuelo(e)
+    const fila = await enVuelo(e)
     const i = {
       venueId: e.venueId,
       authUserId: e.staffId,
-      intent: await intentAutorizado(e, 'mi-tienda.myshopify.com'),
+      intent: await intentAutorizado(e, e.shopDomain),
       locationId: 'gid://shopify/Location/9',
     }
     await expect(confirmShopifyConnect(i, { graphql: confirmacion() })).rejects.toMatchObject({
       statusCode: 409,
       code: 'SHOPIFY_ENVIO_EN_CAMINO',
     })
+    expect(await prisma.shopifyStockOutbox.findUniqueOrThrow({ where: { id: fila.id } })).toMatchObject({
+      status: 'IN_PROGRESS',
+      claimToken: 'mensajero',
+    })
     expect(await sucursal(e)).toMatchObject({ storeId: e.storeId, shopifyLocationId: UBICACION_PRUEBA, status: 'DISCONNECTED' })
-    expect(await prisma.shopifyStore.count({ where: { shopDomain: 'mi-tienda.myshopify.com' } })).toBe(0)
+  })
+
+  it('Minor 1 + 4: reintentar con el MISMO intent no vuelve a renovar; lo que la sucursal tiene en camino se reprograma para ya', async () => {
+    const e = await escenario()
+    const hermana = await otraSucursalDeLaTienda(e)
+    otras.push(hermana)
+    const enCamino = await ambiguaEnCamino(e, 1)
+    expect(await disconnectShopify({ venueId: e.venueId, staffId: e.staffId })).toEqual({ desconectada: true })
+    const enSeisHoras = () =>
+      prisma.shopifyStockOutbox.update({ where: { id: enCamino.id }, data: { scheduledAt: new Date(Date.now() + 6 * 3_600_000) } })
+    const programada = async () => (await prisma.shopifyStockOutbox.findUniqueOrThrow({ where: { id: enCamino.id } })).scheduledAt.getTime()
+    const i = { venueId: e.venueId, authUserId: e.staffId, intent: await intentAutorizado(e, e.shopDomain), locationId: UBICACION_PRUEBA }
+    const graphql = confirmacion({ name: 'Tienda México' })
+    const version = async () => (await prisma.shopifyStore.findUniqueOrThrow({ where: { id: e.storeId } })).tokenVersion
+
+    await enSeisHoras()
+    await expect(confirmShopifyConnect(i, { graphql })).rejects.toMatchObject({ code: 'SHOPIFY_ENVIO_EN_CAMINO' })
+    expect(await version()).toBe(2)
+    expect(await programada()).toBeLessThanOrEqual(Date.now())
+    expect(await sucursal(hermana)).toMatchObject({ webhooksAt: null, reconcileVersion: 1 })
+    // El worker vuelve a registrar los webhooks de la hermana…
+    await prisma.shopifyLocationLink.update({ where: { id: hermana.locationLinkId }, data: { webhooksAt: new Date() } })
+
+    await enSeisHoras() // falló otra vez y volvió a esperar
+    await expect(confirmShopifyConnect(i, { graphql })).rejects.toMatchObject({ code: 'SHOPIFY_ENVIO_EN_CAMINO' })
+    expect(await version()).toBe(2) // el mismo intent: no se renueva otra vez
+    // …y el reintento no se los vuelve a pedir ni le pide otra vuelta del cuadre.
+    expect(await sucursal(hermana)).toMatchObject({ webhooksAt: expect.any(Date), reconcileVersion: 1 })
+    expect(await programada()).toBeLessThanOrEqual(Date.now()) // pero sí se reprograma
+
+    await prisma.shopifyStockOutbox.update({
+      where: { id: enCamino.id },
+      data: { status: 'SENT', ambiguous: false, processedAt: new Date() },
+    })
+    await confirmShopifyConnect(i, { graphql })
+    expect(await version()).toBe(2)
+    expect(await sucursal(e)).toMatchObject({ status: 'CONNECTING', generation: 3 })
+    expect((logAction as jest.Mock).mock.calls.filter(([p]) => p.action === 'SHOPIFY_CREDENTIAL_RENEWED')).toHaveLength(1)
   })
 
   it('S6: desconectar deja el drenado pedido a las hermanas ACTIVE (lo diferido no se vara); sin hermanas vivas, lo diferido se cierra', async () => {
