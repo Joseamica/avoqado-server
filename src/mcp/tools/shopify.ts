@@ -17,7 +17,12 @@ import { z } from 'zod'
 import AppError from '@/errors/AppError'
 import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
 import { SHOPIFY_FEATURE } from '@/services/commerce-channels/shopify/shopify.constants'
-import { getShopifyOverview, listShopifyIssues, listShopifyReviews } from '@/services/commerce-channels/shopify/shopify.overview.service'
+import {
+  getShopifyOverview,
+  listShopifyIssues,
+  listShopifyReviews,
+  type ShopifyEstado,
+} from '@/services/commerce-channels/shopify/shopify.overview.service'
 import { resolveShopifyReview } from '@/services/commerce-channels/shopify/shopify.reconcile.service'
 import {
   disconnectShopify,
@@ -34,6 +39,16 @@ import type { McpScope } from '../scope'
 const SOLO_PILOTO = 'El conector con Shopify está en piloto por invitación y este local no lo tiene activo; escríbenos para sumarte.'
 const NO_ACTIVA =
   'La conexión con Shopify de este local no está activa (se está conectando, está en pausa o le falta un permiso), así que no hay nada que cuadrar todavía. El cuadre corre solo cuando vuelva a estar activa; revisa en qué va con shopify_status.'
+const NO_CONECTADA = 'Este local no tiene una tienda Shopify conectada.'
+/** Qué decir cuando la conexión no está en «por aplicar» (la única fase en que se puede aplicar). */
+const NO_LISTA_PARA_APLICAR: Record<ShopifyEstado, string> = {
+  IMPORTANDO: 'Todavía se está trayendo el catálogo de Shopify: espera a que termine y revisa el avance con shopify_status.',
+  POR_APLICAR: '',
+  APLICANDO: 'Ya se pidió aplicar: el stock de Shopify se está aplicando por partes. Revisa el avance con shopify_status.',
+  ACTIVA: 'Esta conexión ya está activa: no hay nada que aplicar.',
+  PAUSADA: 'La conexión está en pausa: reanúdala o reconéctala desde Integraciones › Shopify en el dashboard antes de aplicar.',
+  REVOCADA: 'Shopify quitó el permiso de la app: reconéctala desde Integraciones › Shopify en el dashboard antes de aplicar.',
+}
 const OFFSET_MAX = 100_000
 const FECHAS = 'Respuesta con fechas en UTC, ISO con Z.'
 
@@ -58,9 +73,11 @@ const confirmField = () =>
     .optional()
     .describe('true para aplicar; sin esto sólo muestra el cambio')
 
+const soloPiloto = () => text({ ok: false, planRequired: true, error: SOLO_PILOTO })
+
 /** Candado de las escrituras: la función (no el plan). null = adelante. */
 async function sinConector(venueId: string) {
-  return (await venueHasFeatureAccess(venueId, SHOPIFY_FEATURE)) ? null : text({ ok: false, planRequired: true, error: SOLO_PILOTO })
+  return (await venueHasFeatureAccess(venueId, SHOPIFY_FEATURE)) ? null : soloPiloto()
 }
 
 /**
@@ -72,6 +89,8 @@ function rechazo(err: unknown) {
   if (err.code === 'SHOPIFY_REVISION_CAMBIO') {
     return text({ ok: false, needsInput: true, question: 'Las cantidades cambiaron; pide la vista previa otra vez' })
   }
+  // L2: el servicio dice «el plan de esta sucursal no lo incluye: actívalo»; con el conector en piloto eso promete una compra.
+  if (err.code === 'SHOPIFY_SIN_PLAN') return soloPiloto()
   return text({ ok: false, codigo: err.code, error: err.code === 'SHOPIFY_NO_ACTIVA' ? NO_ACTIVA : err.message })
 }
 
@@ -139,7 +158,7 @@ export function registerShopifyTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'shopify_review_resolve',
-    'Resuelve una diferencia de «Por revisar» eligiendo el número de Avoqado o el de Shopify. Primero muestra las dos cantidades y en qué quedará; se aplica al llamar de nuevo con confirm:true y los argumentos de la vista previa. Si las cantidades cambiaron mientras tanto, no aplica y pide revisar otra vez. Requiere ajustar inventario y acceso al conector con Shopify.',
+    'Resuelve una diferencia de «Por revisar» eligiendo el número de Avoqado o el de Shopify. Primero muestra las dos cantidades y en qué quedará (si elige AVOQADO y la diferencia no es de piezas enteras, lo dice y no se puede aplicar); se aplica al llamar de nuevo con confirm:true y los argumentos de la vista previa. Si las cantidades cambiaron mientras tanto, no aplica y pide revisar otra vez. Requiere ajustar inventario y acceso al conector con Shopify.',
     {
       venueId: venueIdField(),
       reviewId: z
@@ -164,6 +183,15 @@ export function registerShopifyTools(server: McpServer, scope: McpScope) {
         if (confirm !== true || expectedAvoqadoQty === undefined || expectedShopifyQty === undefined) {
           const v = await getShopifyReviewPreview(venueId, reviewId)
           const quedara = choice === 'SHOPIFY' ? String(v.shopifyQty) : v.avoqadoQty
+          const diferencia = new Prisma.Decimal(v.avoqadoQty).minus(v.shopifyQty)
+          // Lo mismo que el 422 del servicio al confirmar, dicho de entrada y sin token: a Shopify sólo viajan piezas enteras.
+          if (choice === 'AVOQADO' && !diferencia.isInteger()) {
+            return text({
+              ok: false,
+              codigo: 'SHOPIFY_DIFERENCIA_NO_ENTERA',
+              error: `La diferencia (Avoqado ${v.avoqadoQty} − Shopify ${v.shopifyQty} = ${diferencia}) no es de piezas enteras y no se puede enviar a Shopify. Corrige el stock de Avoqado a piezas enteras y pide la vista previa otra vez, o elige SHOPIFY.`,
+            })
+          }
           return text({
             ok: false,
             requiresConfirmation: true,
@@ -180,7 +208,7 @@ export function registerShopifyTools(server: McpServer, scope: McpScope) {
             cambio:
               choice === 'SHOPIFY'
                 ? `Avoqado ${v.avoqadoQty} → ${v.shopifyQty}`
-                : `Shopify ${v.shopifyQty} → ${v.avoqadoQty}, se envía ${new Prisma.Decimal(v.avoqadoQty).minus(v.shopifyQty)}`,
+                : `Shopify ${v.shopifyQty} → ${v.avoqadoQty}, se envía ${diferencia}`,
             // El catálogo fija estos dos en la confirmación (catalog.ts): si alguien los cambia, el token deja de servir.
             expectedAvoqadoQty: v.avoqadoQty,
             expectedShopifyQty: v.shopifyQty,
@@ -216,7 +244,7 @@ export function registerShopifyTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'shopify_resync',
-    'Pide un cuadre de stock con Shopify para el local. El pedido queda guardado y el cuadre corre cuando la conexión es elegible (plan activo, tienda activa y sin un error terminal como falta de permiso o catálogo maestro); entonces se comparan los dos lados, lo que cambió en Shopify se aplica en Avoqado y lo que nadie explica queda en «Por revisar». No borra nada. Primero explica qué hará; se pide al llamar de nuevo con confirm:true. Requiere administrar la configuración y acceso al conector con Shopify.',
+    'Pide un cuadre de stock con Shopify para el local. El pedido queda guardado y el cuadre corre cuando la conexión es elegible (acceso al conector activo, tienda activa y sin un error terminal como falta de permiso o catálogo maestro); entonces se comparan los dos lados, lo que cambió en Shopify se aplica en Avoqado y lo que nadie explica queda en «Por revisar». No borra nada. Primero explica qué hará; se pide al llamar de nuevo con confirm:true. Requiere administrar la configuración y acceso al conector con Shopify.',
     { venueId: venueIdField(), confirm: confirmField() },
     async ({ venueId, confirm }) => {
       guard.venueFilter(venueId)
@@ -229,7 +257,7 @@ export function registerShopifyTools(server: McpServer, scope: McpScope) {
           requiresConfirmation: true,
           venueId,
           explicacion:
-            'El pedido de cuadre queda guardado y corre cuando la conexión es elegible (plan activo, tienda activa y sin un error terminal como falta de permiso o catálogo maestro): no necesariamente en el siguiente minuto. Entonces se comparará el stock de cada producto ligado con Shopify; lo que cambió en Shopify se aplica en Avoqado y lo que no se pueda explicar queda en «Por revisar». No borra nada.',
+            'El pedido de cuadre queda guardado y corre cuando la conexión es elegible (acceso al conector activo, tienda activa y sin un error terminal como falta de permiso o catálogo maestro): no necesariamente en el siguiente minuto. Entonces se comparará el stock de cada producto ligado con Shopify; lo que cambió en Shopify se aplica en Avoqado y lo que no se pueda explicar queda en «Por revisar». No borra nada.',
         })
       }
       try {
@@ -244,7 +272,7 @@ export function registerShopifyTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'shopify_connect_apply',
-    'Aplica el stock de Shopify a una conexión que ya está lista para revisar y empieza a sincronizar: cada producto emparejado toma el número que tenga Shopify en ese momento y lo vendido mientras se conectaba se respeta. Primero muestra el resumen de la vista previa (revísala con shopify_connect_preview); se aplica al llamar de nuevo con confirm:true. Requiere administrar la configuración y acceso al conector con Shopify.',
+    'Aplica el stock de Shopify a una conexión que ya está lista para revisar y empieza a sincronizar: cada producto emparejado toma el número que tenga Shopify en ese momento y lo vendido mientras se conectaba se respeta. Primero muestra el resumen de la vista previa (revísala con shopify_connect_preview), o dice por qué la conexión todavía no se puede aplicar; se aplica al llamar de nuevo con confirm:true. Requiere administrar la configuración y acceso al conector con Shopify.',
     { venueId: venueIdField(), confirm: confirmField() },
     async ({ venueId, confirm }) => {
       guard.venueFilter(venueId)
@@ -253,6 +281,10 @@ export function registerShopifyTools(server: McpServer, scope: McpScope) {
       if (sin) return sin
       try {
         if (confirm !== true) {
+          const { connection } = await getShopifyOverview(venueId)
+          if (!connection) return text({ ok: false, error: NO_CONECTADA })
+          if (connection.estado !== 'POR_APLICAR')
+            return text({ ok: false, estado: connection.estado, error: NO_LISTA_PARA_APLICAR[connection.estado] })
           const vista = await getConnectReview({ venueId, offset: 0, limit: 1, filtro: 'CAMBIAN' })
           return text({
             ok: false,
@@ -279,15 +311,21 @@ export function registerShopifyTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'shopify_disconnect',
-    'Desconecta la tienda Shopify del local: Avoqado sigue vendiendo normal, pero el stock deja de actualizarse en los dos lados; los cambios que no alcanzaron a salir se descartan (un envío que ya iba en camino termina solo). No requiere acceso al conector: quien lo perdió siempre puede salir. Primero muestra qué se desconecta; se aplica al llamar de nuevo con confirm:true. Requiere administrar la configuración.',
-    { venueId: venueIdField(), confirm: confirmField() },
-    async ({ venueId, confirm }) => {
+    'Desconecta la tienda Shopify del local: Avoqado sigue vendiendo normal, pero el stock deja de actualizarse en los dos lados; los cambios que no alcanzaron a salir se descartan (un envío que ya iba en camino termina solo) y las diferencias abiertas de «Por revisar» se cierran. No requiere acceso al conector: quien lo perdió siempre puede salir. Primero muestra qué se desconecta; se aplica al llamar de nuevo con confirm:true. Requiere administrar la configuración.',
+    {
+      venueId: venueIdField(),
+      expectedSourceFingerprint: z.string().max(300).optional().describe('La llena la vista previa; no la cambies'),
+      confirm: confirmField(),
+    },
+    async ({ venueId, expectedSourceFingerprint, confirm }) => {
       guard.venueFilter(venueId)
       guard.requirePermission('settings:manage', venueId)
       try {
-        if (confirm !== true) {
-          const { connection } = await getShopifyOverview(venueId)
-          if (!connection) return text({ ok: false, error: 'Este local no tiene una tienda Shopify conectada.' })
+        const { connection } = await getShopifyOverview(venueId)
+        if (!connection) return text({ ok: false, error: NO_CONECTADA })
+        // La confirmación queda atada a la tienda y la ubicación que se VIERON (el catálogo fija esta huella en el token).
+        const huella = `${connection.shopDomain}|${connection.locationName}`
+        if (confirm !== true || expectedSourceFingerprint === undefined) {
           return text({
             ok: false,
             requiresConfirmation: true,
@@ -295,8 +333,17 @@ export function registerShopifyTools(server: McpServer, scope: McpScope) {
             tienda: connection.shopDomain,
             ubicacion: connection.locationName,
             cambiosEnCamino: connection.conteos.pendientes,
+            porRevisar: connection.conteos.porRevisar,
+            expectedSourceFingerprint: huella,
             explicacion:
-              'Avoqado seguirá vendiendo normal; el stock deja de sincronizarse con Shopify. Los cambios que no alcanzaron a salir se descartan.',
+              'Avoqado seguirá vendiendo normal; el stock deja de sincronizarse con Shopify. Los cambios que no alcanzaron a salir se descartan, y las diferencias que sigan abiertas en «Por revisar» se cierran sin cambiar el stock de ningún producto.',
+          })
+        }
+        if (huella !== expectedSourceFingerprint) {
+          return text({
+            ok: false,
+            needsInput: true,
+            question: 'La conexión con Shopify de este local cambió desde la vista previa; pide la vista previa otra vez',
           })
         }
         const r = await disconnectShopify({ venueId, staffId: scope.staffId })

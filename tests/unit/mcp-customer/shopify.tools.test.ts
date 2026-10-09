@@ -95,7 +95,12 @@ const CASOS: Array<[string, string, Record<string, unknown>]> = [
 
 const VISTA = { reviewId: 'r1', producto: 'Camisa · M', sku: 'CAM-M', avoqadoQty: '5', shopifyQty: 4, suggestion: 'SHOPIFY' }
 const RESUMEN = { emparejados: 30, cambian: 4, nuevos: 2, sinPareja: 1 }
-const CONEXION = { shopDomain: 'mi-tienda.myshopify.com', locationName: 'Tienda México', conteos: { pendientes: 2 } }
+const CONEXION = {
+  shopDomain: 'mi-tienda.myshopify.com',
+  locationName: 'Tienda México',
+  estado: 'POR_APLICAR',
+  conteos: { pendientes: 2, porRevisar: 3 },
+}
 const PILOTO = 'El conector con Shopify está en piloto por invitación y este local no lo tiene activo; escríbenos para sumarte.'
 
 beforeEach(() => {
@@ -168,20 +173,36 @@ describe('herramientas MCP de Shopify', () => {
       expect(ok.texto).toBeUndefined()
     })
 
-    it('ninguna herramienta llegó a un servicio estando negada', async () => {
+    it('ninguna herramienta llegó a un servicio estando negada (las escrituras, con una confirmación VÁLIDA de la misma persona)', async () => {
+      const ESCRITURAS = ['shopify_review_resolve', 'shopify_resync', 'shopify_connect_apply', 'shopify_disconnect']
       for (const [name, permiso, args] of CASOS) {
+        let llamada: Record<string, unknown> = args
+        if (ESCRITURAS.includes(name)) {
+          // Con todos los permisos, la misma persona pide la vista previa y recibe su token firmado: la llamada de abajo
+          // trae confirm:true y un token que el catálogo ACEPTA, así que sólo el permiso puede detenerla.
+          const completo = await conectar('persona', ['mcp:read', 'mcp:write'], conPermisos(TODOS))
+          const p = await completo.call(name, args)
+          expect(p.confirmationToken).toEqual(expect.any(String))
+          llamada = { ...p.confirmationArguments, confirm: true, confirmationToken: p.confirmationToken }
+        }
+        jest.clearAllMocks() // lo que cuenta es lo que pasa DESPUÉS de negar
         const sin = await conectar('persona', ['mcp:read', 'mcp:write'], conPermisos(TODOS.filter(p => p !== permiso)))
-        await sin.call(name, { ...args, confirm: true })
+        expect(await sin.call(name, llamada)).toMatchObject({
+          isError: true,
+          texto: expect.stringContaining(`Missing permission ${permiso}`),
+        })
+        expect(mockOverview.getShopifyOverview).not.toHaveBeenCalled()
+        expect(mockOverview.listShopifyReviews).not.toHaveBeenCalled()
+        expect(mockOverview.listShopifyIssues).not.toHaveBeenCalled()
+        expect(mockConnect.getConnectReview).not.toHaveBeenCalled()
+        expect(mockPanel.getShopifyReviewPreview).not.toHaveBeenCalled()
+        expect(mockPanel.requestShopifyResync).not.toHaveBeenCalled()
+        expect(mockResolve).not.toHaveBeenCalled()
+        expect(mockConnect.requestApplyShopifyConnect).not.toHaveBeenCalled()
+        expect(mockConnect.disconnectShopify).not.toHaveBeenCalled()
+        expect(mockAccess).not.toHaveBeenCalled()
+        expect(mockAudit).not.toHaveBeenCalled()
       }
-      expect(mockOverview.getShopifyOverview).not.toHaveBeenCalled()
-      expect(mockOverview.listShopifyReviews).not.toHaveBeenCalled()
-      expect(mockOverview.listShopifyIssues).not.toHaveBeenCalled()
-      expect(mockConnect.getConnectReview).not.toHaveBeenCalled()
-      expect(mockPanel.getShopifyReviewPreview).not.toHaveBeenCalled()
-      expect(mockPanel.requestShopifyResync).not.toHaveBeenCalled()
-      expect(mockResolve).not.toHaveBeenCalled()
-      expect(mockConnect.disconnectShopify).not.toHaveBeenCalled()
-      expect(mockAccess).not.toHaveBeenCalled()
     })
   })
 
@@ -271,10 +292,25 @@ describe('herramientas MCP de Shopify', () => {
     expect(s.cambio).toBe('Avoqado 5 → 4')
     const a = await call('shopify_review_resolve', { venueId: 'centro', reviewId: 'r1', choice: 'AVOQADO' })
     expect(a.cambio).toBe('Shopify 4 → 5, se envía 1')
-    // Decimales y signo reales: A=2.5, S=4 ⇒ se envía −1.5 (la pantalla no inventa piezas enteras).
-    mockPanel.getShopifyReviewPreview.mockResolvedValue({ ...VISTA, avoqadoQty: '2.5' })
+    // Con signo: A=3, S=4 ⇒ se envía −1 (Shopify baja una pieza).
+    mockPanel.getShopifyReviewPreview.mockResolvedValue({ ...VISTA, avoqadoQty: '3' })
     const neg = await call('shopify_review_resolve', { venueId: 'centro', reviewId: 'r1', choice: 'AVOQADO' })
-    expect(neg.cambio).toBe('Shopify 4 → 2.5, se envía -1.5')
+    expect(neg.cambio).toBe('Shopify 4 → 3, se envía -1')
+  })
+
+  it('«usar Avoqado» con una diferencia que no es de piezas enteras: lo dice desde la vista previa, sin token; «usar Shopify» sí se puede', async () => {
+    mockPanel.getShopifyReviewPreview.mockResolvedValue({ ...VISTA, avoqadoQty: '2.5' })
+    const { call } = await conectar()
+    const a = await call('shopify_review_resolve', { venueId: 'centro', reviewId: 'r1', choice: 'AVOQADO' })
+    expect(a).toMatchObject({ ok: false, codigo: 'SHOPIFY_DIFERENCIA_NO_ENTERA' })
+    expect(a.error).toContain('piezas enteras')
+    expect(a.error).toContain('-1.5')
+    expect(a.requiresConfirmation).toBeUndefined()
+    expect(a.confirmationToken).toBeUndefined()
+    const s = await call('shopify_review_resolve', { venueId: 'centro', reviewId: 'r1', choice: 'SHOPIFY' })
+    expect(s).toMatchObject({ requiresConfirmation: true, cambio: 'Avoqado 2.5 → 4' })
+    expect(s.confirmationToken).toEqual(expect.any(String))
+    expect(mockResolve).not.toHaveBeenCalled()
   })
 
   it('resolver confirmado con el token y los argumentos de la vista previa: aplica, con quién eligió', async () => {
@@ -405,21 +441,22 @@ describe('herramientas MCP de Shopify', () => {
 
   it('un error de negocio de Shopify (código SHOPIFY_*) vuelve como ok:false con su texto; uno ajeno sigue lanzando', async () => {
     mockConnect.requestApplyShopifyConnect.mockRejectedValue(
-      new ForbiddenError('Shopify está en pausa porque el plan de esta sucursal no lo incluye', 'SHOPIFY_SIN_PLAN'),
+      new ConflictError('La vista previa todavía no está lista, o ya se aplicó', 'SHOPIFY_NO_EN_REVISION'),
     )
     const { call } = await conectar()
     const { r } = await enDosPasos(call, 'shopify_connect_apply', { venueId: 'centro' })
     expect(r).toMatchObject({
       ok: false,
-      codigo: 'SHOPIFY_SIN_PLAN',
-      error: 'Shopify está en pausa porque el plan de esta sucursal no lo incluye',
+      codigo: 'SHOPIFY_NO_EN_REVISION',
+      error: 'La vista previa todavía no está lista, o ya se aplicó',
     })
     expect(r.texto).toBeUndefined()
     expect(mockAudit).not.toHaveBeenCalled()
 
     mockConnect.requestApplyShopifyConnect.mockRejectedValue(new Error('boom interno'))
     const { r: ajeno } = await enDosPasos(call, 'shopify_connect_apply', { venueId: 'centro' })
-    expect(ajeno).toMatchObject({ isError: true, texto: expect.stringContaining('boom interno') }) // lanzado: el instrumento lo sanea
+    // Lanzado: aquí no hay instrumento, así que el SDK entrega el mensaje crudo (en producción `instrumentTools` lo sanea).
+    expect(ajeno).toMatchObject({ isError: true, texto: expect.stringContaining('boom interno') })
     expect(mockAudit).not.toHaveBeenCalled()
   })
 
@@ -447,6 +484,29 @@ describe('herramientas MCP de Shopify', () => {
     )
   })
 
+  it.each(['IMPORTANDO', 'APLICANDO', 'ACTIVA', 'PAUSADA', 'REVOCADA'])(
+    'aplicar con la conexión en %s: lo dice en claro, sin token ni resumen',
+    async estado => {
+      mockOverview.getShopifyOverview.mockResolvedValue({ planActive: true, connection: { ...CONEXION, estado } })
+      const { call } = await conectar()
+      const p = await call('shopify_connect_apply', { venueId: 'centro' })
+      expect(p).toMatchObject({ ok: false, estado, error: expect.stringMatching(/.{25,}/) })
+      expect(p.requiresConfirmation).toBeUndefined()
+      expect(p.confirmationToken).toBeUndefined()
+      expect(mockConnect.getConnectReview).not.toHaveBeenCalled()
+      expect(mockConnect.requestApplyShopifyConnect).not.toHaveBeenCalled()
+    },
+  )
+
+  it('aplicar un local sin tienda conectada: lo dice y no pide confirmación', async () => {
+    mockOverview.getShopifyOverview.mockResolvedValue({ planActive: true, connection: null })
+    const { call } = await conectar()
+    const p = await call('shopify_connect_apply', { venueId: 'centro' })
+    expect(p).toMatchObject({ ok: false, error: 'Este local no tiene una tienda Shopify conectada.' })
+    expect(p.confirmationToken).toBeUndefined()
+    expect(mockConnect.getConnectReview).not.toHaveBeenCalled()
+  })
+
   it('🔴 aplicar con el token de OTRA sucursal no aplica nada', async () => {
     const { call } = await conectar()
     const p = await call('shopify_connect_apply', { venueId: 'centro' })
@@ -465,7 +525,11 @@ describe('herramientas MCP de Shopify', () => {
       tienda: 'mi-tienda.myshopify.com',
       ubicacion: 'Tienda México',
       cambiosEnCamino: 2,
+      porRevisar: 3,
     })
+    expect(p.explicacion).toContain('«Por revisar»')
+    // La confirmación queda atada a la tienda y la ubicación que se vieron.
+    expect(p.confirmationArguments).toEqual({ venueId: 'centro', expectedSourceFingerprint: 'mi-tienda.myshopify.com|Tienda México' })
     expect(r).toMatchObject({ ok: true, desconectada: true })
     expect(mockConnect.disconnectShopify).toHaveBeenCalledWith({ venueId: 'centro', staffId: 'dueno' })
     expect(mockAccess).not.toHaveBeenCalled()
@@ -473,6 +537,45 @@ describe('herramientas MCP de Shopify', () => {
       expect.anything(),
       expect.objectContaining({ action: 'MCP_SHOPIFY_DISCONNECTED', venueId: 'centro' }),
     )
+  })
+
+  it.each([
+    ['la tienda', { shopDomain: 'otra-tienda.myshopify.com' }],
+    ['la ubicación', { locationName: 'Bodega Norte' }],
+  ])(
+    '🔴 desconectar: si cambió %s entre la vista previa y la confirmación, pide otra vista previa y no desconecta',
+    async (_que, cambio) => {
+      const { call } = await conectar()
+      const p = await call('shopify_disconnect', { venueId: 'centro' })
+      mockOverview.getShopifyOverview.mockResolvedValue({ planActive: true, connection: { ...CONEXION, ...cambio } })
+      const r = await call('shopify_disconnect', { ...p.confirmationArguments, confirm: true, confirmationToken: p.confirmationToken })
+      expect(r).toMatchObject({ ok: false, needsInput: true })
+      expect(r.question).toContain('otra vez')
+      expect(mockConnect.disconnectShopify).not.toHaveBeenCalled()
+      expect(mockAudit).not.toHaveBeenCalled()
+    },
+  )
+
+  it('desconectar: si la tienda ya no está al confirmar, lo dice y no llama al servicio', async () => {
+    const { call } = await conectar()
+    const p = await call('shopify_disconnect', { venueId: 'centro' })
+    mockOverview.getShopifyOverview.mockResolvedValue({ planActive: true, connection: null })
+    const r = await call('shopify_disconnect', { ...p.confirmationArguments, confirm: true, confirmationToken: p.confirmationToken })
+    expect(r).toMatchObject({ ok: false, error: 'Este local no tiene una tienda Shopify conectada.' })
+    expect(mockConnect.disconnectShopify).not.toHaveBeenCalled()
+  })
+
+  it('🔴 la huella de la tienda es parte del token: cambiarla a mano lo invalida', async () => {
+    const { call } = await conectar()
+    const p = await call('shopify_disconnect', { venueId: 'centro' })
+    const r = await call('shopify_disconnect', {
+      venueId: 'centro',
+      expectedSourceFingerprint: 'otra|cosa',
+      confirm: true,
+      confirmationToken: p.confirmationToken,
+    })
+    expect(r).toMatchObject({ needsInput: true, field: 'confirmationToken' })
+    expect(mockConnect.disconnectShopify).not.toHaveBeenCalled()
   })
 
   it('desconectar cuando ya no había nada que desconectar (otra persona se adelantó): lo dice y no audita', async () => {
@@ -519,6 +622,45 @@ describe('herramientas MCP de Shopify', () => {
         expect(t).toContain('piloto por invitación')
         expect(t).not.toMatch(/plan|premium|suscri|compr|pagar|subir/i)
       }
+    })
+
+    it('🔴 SHOPIFY_SIN_PLAN que viene del servicio («el plan de esta sucursal no lo incluye: actívalo») se dice con el texto de piloto', async () => {
+      const deServicio = (m: string) => new ForbiddenError(m, 'SHOPIFY_SIN_PLAN')
+      mockResolve.mockRejectedValue(
+        deServicio('Shopify está en pausa porque el plan de esta sucursal no lo incluye: actívalo y vuelve a resolver'),
+      )
+      mockConnect.requestApplyShopifyConnect.mockRejectedValue(
+        deServicio('Shopify está en pausa porque el plan de esta sucursal no lo incluye'),
+      )
+      const { call } = await conectar()
+      const resolver = (await enDosPasos(call, 'shopify_review_resolve', { venueId: 'centro', reviewId: 'r1', choice: 'SHOPIFY' })).r
+      const aplicar = (await enDosPasos(call, 'shopify_connect_apply', { venueId: 'centro' })).r
+      for (const r of [resolver, aplicar]) {
+        expect(r).toMatchObject({ ok: false, planRequired: true, error: PILOTO })
+        expect(r.codigo).toBeUndefined()
+      }
+      expect(mockAudit).not.toHaveBeenCalled()
+    })
+
+    it('🔴 ninguna descripción, vista previa ni negativa de Shopify habla de «plan» ni «Premium»', async () => {
+      const PROHIBIDO = /\bplan\b|premium|actívalo|suscri/i
+      const { client, call } = await conectar()
+      const tools = (await client.listTools()).tools.filter(x => x.name.startsWith('shopify_'))
+      expect(tools).toHaveLength(8)
+      for (const t of tools) expect(`${t.name}: ${t.description ?? ''}`).not.toMatch(PROHIBIDO)
+      const cadenas = (r: Record<string, unknown>) => Object.values(r).filter((v): v is string => typeof v === 'string')
+      const salidas: Array<Record<string, unknown>> = []
+      // Vistas previas (la del cuadre habla de cuándo corre).
+      salidas.push(await call('shopify_resync', { venueId: 'centro' }))
+      salidas.push(await call('shopify_connect_apply', { venueId: 'centro' }))
+      salidas.push(await call('shopify_disconnect', { venueId: 'centro' }))
+      // Negativa del candado.
+      mockAccess.mockResolvedValue(false)
+      salidas.push(await call('shopify_review_resolve', { venueId: 'centro', reviewId: 'r1', choice: 'AVOQADO' }))
+      salidas.push(await call('shopify_resync', { venueId: 'centro' }))
+      salidas.push(await call('shopify_connect_apply', { venueId: 'centro' }))
+      expect(salidas.every(x => cadenas(x).length > 0)).toBe(true)
+      for (const x of salidas) for (const c of cadenas(x)) expect(c).not.toMatch(PROHIBIDO)
     })
 
     it('con el conector concedido pasa el candado y el resolvedor se pregunta por el local pedido', async () => {
