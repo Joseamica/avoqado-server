@@ -20,7 +20,11 @@ const mockConnect = {
   requestApplyShopifyConnect: jest.fn(),
   disconnectShopify: jest.fn(),
 }
-jest.mock('@/services/commerce-channels/shopify/shopify.connect.service', () => mockConnect)
+// C3: `@/app` monta el callback con `SHOPIFY_OAUTH_CALLBACK_PATH` de este módulo; las constantes quedan reales.
+jest.mock('@/services/commerce-channels/shopify/shopify.connect.service', () => ({
+  ...jest.requireActual('@/services/commerce-channels/shopify/shopify.connect.service'),
+  ...mockConnect,
+}))
 const mockOverview = {
   getShopifyOverview: jest.fn(),
   listShopifyReviews: jest.fn(),

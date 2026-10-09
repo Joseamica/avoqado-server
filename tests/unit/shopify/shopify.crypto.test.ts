@@ -1,7 +1,9 @@
 import crypto from 'crypto'
+import logger from '@/config/logger'
 import {
   decryptShopifyToken,
   encryptShopifyToken,
+  formaDeFirmaOAuth,
   isValidShopDomain,
   readIntentId,
   signIntentId,
@@ -35,6 +37,86 @@ describe('shopify.crypto', () => {
     const hmac = crypto.createHmac('sha256', secret).update(msg).digest('hex')
     expect(verifyOAuthQueryHmac({ ...q, hmac }, secret)).toBe(true)
     expect(verifyOAuthQueryHmac({ ...q, code: 'otro', hmac }, secret)).toBe(false)
+  })
+
+  // L1 (preflight-C §6d): Shopify documenta la unión DECODIFICADA, pero su biblioteca oficial firma los valores
+  // CODIFICADOS (`URLSearchParams`, `+` → `%20`). El `host` del piloto termina en `==`: con una sola forma, el primer
+  // callback real devolvería FIRMA. Los mensajes van escritos a mano para no depender de la implementación.
+  describe('callback OAuth: las dos formas de la firma (L1)', () => {
+    const hmacDe = (msg: string, s = secret) => crypto.createHmac('sha256', s).update(msg).digest('hex')
+    const HOST = 'YWRtaW4uc2hvcGlmeS5jb20vc3RvcmUvYXZvcWFkby1wcnVlYmEtc3luYw==' // base64 de admin.shopify.com/store/avoqado-prueba-sync
+    const base = { code: 'c1', host: HOST, shop: 'avoqado-prueba-sync.myshopify.com', state: 'cint1.f1rma', timestamp: '1700000000' }
+    const CODIFICADA = `code=c1&host=${HOST.replace(/=/g, '%3D')}&shop=avoqado-prueba-sync.myshopify.com&state=cint1.f1rma&timestamp=1700000000`
+    const DECODIFICADA = `code=c1&host=${HOST}&shop=avoqado-prueba-sync.myshopify.com&state=cint1.f1rma&timestamp=1700000000`
+
+    it('el vector documentado de Shopify (secreto «hush») verifica', () => {
+      const q = {
+        code: '0907a61c0c8d55e99db179b68161bc00',
+        hmac: '700e2dadb827fcc8609e9d5ce208b2e9cdaab9df07390d2cbca10d7c328fc4bf',
+        shop: 'some-shop.myshopify.com',
+        state: '0.6784241404160823',
+        timestamp: '1337178173',
+      }
+      expect(verifyOAuthQueryHmac(q, 'hush')).toBe(true)
+      expect(formaDeFirmaOAuth({ ...q, shop: 'otra.myshopify.com' }, 'hush')).toBeNull()
+    })
+
+    it('🔴 host terminado en == firmado en la forma OFICIAL (codificada) ⇒ pasa, y dice cuál', () => {
+      const q = { ...base, hmac: hmacDe(CODIFICADA) }
+      expect(formaDeFirmaOAuth(q, secret)).toBe('codificada')
+      expect(verifyOAuthQueryHmac(q, secret)).toBe(true)
+    })
+
+    it('el mismo host firmado en la forma decodificada (la del ejemplo de la doc) ⇒ también pasa', () => {
+      expect(formaDeFirmaOAuth({ ...base, hmac: hmacDe(DECODIFICADA) }, secret)).toBe('decodificada')
+    })
+
+    it('valores con «/» y «+»: cada forma verifica la suya', () => {
+      const q = { ...base, host: 'Pj4+Pz8/' }
+      const cod = 'code=c1&host=Pj4%2BPz8%2F&shop=avoqado-prueba-sync.myshopify.com&state=cint1.f1rma&timestamp=1700000000'
+      const dec = 'code=c1&host=Pj4+Pz8/&shop=avoqado-prueba-sync.myshopify.com&state=cint1.f1rma&timestamp=1700000000'
+      expect(formaDeFirmaOAuth({ ...q, hmac: hmacDe(cod) }, secret)).toBe('codificada')
+      expect(formaDeFirmaOAuth({ ...q, hmac: hmacDe(dec) }, secret)).toBe('decodificada')
+    })
+
+    it('un espacio va como %20 en la forma oficial (no como «+»)', () => {
+      const q = { ...base, state: 'a b' }
+      const cod = CODIFICADA.replace('state=cint1.f1rma', 'state=a%20b')
+      expect(formaDeFirmaOAuth({ ...q, hmac: hmacDe(cod) }, secret)).toBe('codificada')
+      expect(formaDeFirmaOAuth({ ...q, hmac: hmacDe(cod.replace('a%20b', 'a+b')) }, secret)).toBeNull()
+    })
+
+    it('un valor alterado falla en las DOS formas', () => {
+      for (const msg of [CODIFICADA, DECODIFICADA]) {
+        expect(formaDeFirmaOAuth({ ...base, shop: 'otra.myshopify.com', hmac: hmacDe(msg) }, secret)).toBeNull()
+        expect(formaDeFirmaOAuth({ ...base, host: `${HOST}x`, hmac: hmacDe(msg) }, secret)).toBeNull()
+      }
+    })
+
+    it('otro secreto falla en las DOS formas', () => {
+      for (const msg of [CODIFICADA, DECODIFICADA])
+        expect(formaDeFirmaOAuth({ ...base, hmac: hmacDe(msg, 'otro-secreto') }, secret)).toBeNull()
+    })
+
+    it('un parámetro repetido (arreglo) se rechaza aunque la firma cuadre con su unión', () => {
+      const q = { ...base, shop: ['a.myshopify.com', 'b.myshopify.com'] } as unknown as Record<string, string>
+      const msg = 'code=c1&host=' + HOST + '&shop=a.myshopify.com,b.myshopify.com&state=cint1.f1rma&timestamp=1700000000'
+      expect(formaDeFirmaOAuth({ ...q, hmac: hmacDe(msg) }, secret)).toBeNull()
+    })
+
+    it('`signature` queda fuera del mensaje, como antes', () => {
+      expect(formaDeFirmaOAuth({ ...base, signature: 'legado', hmac: hmacDe(CODIFICADA) }, secret)).toBe('codificada')
+    })
+
+    it('registra la forma que pegó, nunca el hmac ni el secreto', () => {
+      const hmac = hmacDe(CODIFICADA)
+      ;(logger.info as jest.Mock).mockClear()
+      verifyOAuthQueryHmac({ ...base, hmac }, secret)
+      const lineas = JSON.stringify((logger.info as jest.Mock).mock.calls)
+      expect(lineas).toContain('codificada')
+      expect(lineas).not.toContain(hmac)
+      expect(lineas).not.toContain(secret)
+    })
   })
 
   it('valida el dominio de la tienda', () => {
