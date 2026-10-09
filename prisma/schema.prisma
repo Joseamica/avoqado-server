@@ -3397,8 +3397,8 @@ model FloorElement {
   @@index([venueId, type])
 }
 
-/// Una publicación del plano desde el dashboard. Da idempotencia al «Guardar» (el cliente HTTP del
-/// dashboard reintenta una vez ante un error de red) y deja el historial de quién publicó qué.
+// Una publicación del plano desde el dashboard. Da idempotencia al «Guardar» (el cliente HTTP del
+// dashboard reintenta una vez ante un error de red) y deja el historial de quién publicó qué.
 model FloorPlanPublication {
   id                String   @id @default(cuid())
   venueId           String
@@ -9675,7 +9675,7 @@ enum TableShape {
   RECTANGLE // Long table (6+ people)
 }
 
-/// Proporción del lienzo de un área en el plano de mesas (spec 2026-10-08 §4.3).
+// Proporción del lienzo de un área en el plano de mesas (spec 2026-10-08 §4.3).
 enum FloorShape {
   WIDE // 16:10
   SQUARE // 1:1
