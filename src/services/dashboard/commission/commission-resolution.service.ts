@@ -19,6 +19,7 @@ import { rechazarCambiosConComisiones, sinLoQueNoCambia, soloCamposDelEsquema } 
 import { validateAttendanceRule } from './commission-config.service'
 import { asegurarIdsDelNegocio } from './idsDelNegocio'
 import { ORDEN_DE_ESQUEMAS } from './duenoDeCategorias'
+import { nivelesAlCrear, nivelesParaGuardar } from './nivelesDelEsquema'
 
 export type CommissionConfigSource = 'venue' | 'organization'
 
@@ -100,21 +101,27 @@ export async function createOrgCommissionConfig(venueId: string, cuerpo: unknown
   // Final-fijo-niveles (fase 3): esta ruta no validaba ninguna tasa — un fijo de $5 con niveles quedaba como 500 %.
   validarTasasDelEsquema(data)
   validateAttendanceRule(data)
+  // S-NIVELES-ATÓMICO: un TIERED nace con sus niveles (formato de `/tiers/batch`), o no nace.
+  const niveles = nivelesAlCrear(data.calcType, (cuerpo as { tiers?: unknown } | null)?.tiers)
   const organizationId = await getOrgIdFromVenue(venueId)
   // D-ELEGIDOS: sólo personas del equipo de la ORGANIZACIÓN (alguna de sus sedes), sin repetidos.
   const elegidos = await personasElegidasAGuardar(data, { organizationId })
   await asegurarIdsDelNegocio({ organizationId }, { categoryIds: data.categoryIds }) // de alguna de SUS sedes (T1-hermanos)
 
-  const result = await prisma.commissionConfig.create({
-    data: {
-      ...data,
-      roleRates: data.roleRates ?? Prisma.JsonNull,
-      ...elegidos,
-      orgId: organizationId,
-      venueId: null, // Org-level: no venue
-      createdById,
-    } as Prisma.CommissionConfigUncheckedCreateInput,
-    include: configInclude,
+  // El esquema y sus niveles en UNA transacción: si un nivel falla, no queda un esquema plano que pague.
+  const result = await prisma.$transaction(async tx => {
+    const creado = await tx.commissionConfig.create({
+      data: {
+        ...data,
+        roleRates: data.roleRates ?? Prisma.JsonNull,
+        ...elegidos,
+        orgId: organizationId,
+        venueId: null, // Org-level: no venue
+        createdById,
+      } as Prisma.CommissionConfigUncheckedCreateInput,
+    })
+    if (niveles) await tx.commissionTier.createMany({ data: nivelesParaGuardar(creado.id, niveles) })
+    return tx.commissionConfig.findUniqueOrThrow({ where: { id: creado.id }, include: configInclude })
   })
 
   logAction({
@@ -123,7 +130,7 @@ export async function createOrgCommissionConfig(venueId: string, cuerpo: unknown
     action: 'ORG_COMMISSION_CONFIG_CREATED',
     entity: 'CommissionConfig',
     entityId: result.id,
-    data: { name: data.name },
+    data: { name: data.name, ...(niveles ? { niveles: niveles.length } : {}) },
   })
 
   return result

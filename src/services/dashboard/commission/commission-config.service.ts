@@ -20,6 +20,7 @@ import { validarTasasDelEsquema } from './tasasDelEsquema'
 import { personasElegidasAGuardar } from './personasElegidas'
 import { rechazarCambiosConComisiones, sinLoQueNoCambia } from './cambiosConComisiones'
 import { asegurarIdsDelNegocio } from './idsDelNegocio'
+import { nivelesAlCrear, nivelesParaGuardar } from './nivelesDelEsquema'
 import { logAction } from '../activity-log.service'
 import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
 
@@ -67,6 +68,8 @@ export interface CreateCommissionConfigInput {
   orgId?: string
   attendanceLinked?: boolean
   attendanceLatePenaltyRate?: number | null
+  /** S-NIVELES-ATÓMICO: los niveles de un esquema TIERED, con el formato del cuerpo de `/tiers/batch` (`nivelesDelEsquema.ts`). */
+  tiers?: unknown
 }
 
 export interface UpdateCommissionConfigInput {
@@ -234,6 +237,7 @@ export async function createCommissionConfig(venueId: string, data: CreateCommis
   // La tasa según el tipo (en un FIJO, el monto en pesos), las tasas por rol y la de meta superada: 400 en español
   // (final-fijo-niveles, fase 3; `tasasDelEsquema.ts`).
   validarTasasDelEsquema(data)
+  const niveles = nivelesAlCrear(data.calcType, data.tiers) // S-NIVELES-ATÓMICO: TIERED nace con sus niveles, o no nace
   // D-ELEGIDOS: a quién aplica (todo el equipo, de fábrica, o sólo las personas elegidas de ESTA sede).
   const elegidos = await personasElegidasAGuardar(data, { venueId })
   await asegurarIdsDelNegocio({ venueId }, { categoryIds: data.categoryIds }) // las categorías, de ESTA sede (T1-hermanos)
@@ -254,44 +258,45 @@ export async function createCommissionConfig(venueId: string, data: CreateCommis
 
   validateAttendanceRule(data)
 
-  const config = await prisma.commissionConfig.create({
-    data: {
-      venueId,
-      orgId: data.orgId,
-      name: data.name,
-      description: data.description,
-      priority: data.priority ?? 0,
-      recipient: data.recipient ?? CommissionRecipient.SERVER,
-      trigger: data.trigger ?? CommissionTrigger.PER_PAYMENT,
-      calcType: data.calcType ?? CommissionCalcType.PERCENTAGE,
-      defaultRate: data.defaultRate,
-      minAmount: data.minAmount,
-      maxAmount: data.maxAmount,
-      includeTips: data.includeTips ?? false, // Tips NOT included by default
-      includeDiscount: data.includeDiscount ?? false,
-      includeTax: data.includeTax ?? false, // D5 enmendada (fase 3): «sin IVA» de fábrica, igual que la base de datos
-      roleRates: data.roleRates ?? Prisma.JsonNull,
-      filterByCategories: data.filterByCategories ?? false,
-      categoryIds: data.categoryIds ?? [],
-      filterByStaff: elegidos.filterByStaff ?? false,
-      staffIds: elegidos.staffIds ?? [],
-      useGoalAsTier: data.useGoalAsTier ?? false,
-      goalBonusRate: data.goalBonusRate ?? null,
-      attendanceLinked: data.attendanceLinked ?? false,
-      attendanceLatePenaltyRate: data.attendanceLatePenaltyRate ?? null,
-      effectiveFrom: data.effectiveFrom ?? new Date(),
-      effectiveTo: data.effectiveTo,
-      createdById,
-    },
-    include: {
-      createdBy: {
-        select: {
-          id: true,
-          firstName: true,
-          lastName: true,
-        },
+  // El esquema y sus niveles en UNA transacción: si un nivel falla, no queda un esquema plano que pague (D2 de la QA).
+  const config = await prisma.$transaction(async tx => {
+    const creado = await tx.commissionConfig.create({
+      data: {
+        venueId,
+        orgId: data.orgId,
+        name: data.name,
+        description: data.description,
+        priority: data.priority ?? 0,
+        recipient: data.recipient ?? CommissionRecipient.SERVER,
+        trigger: data.trigger ?? CommissionTrigger.PER_PAYMENT,
+        calcType: data.calcType ?? CommissionCalcType.PERCENTAGE,
+        defaultRate: data.defaultRate,
+        minAmount: data.minAmount,
+        maxAmount: data.maxAmount,
+        includeTips: data.includeTips ?? false, // Tips NOT included by default
+        includeDiscount: data.includeDiscount ?? false,
+        includeTax: data.includeTax ?? false, // D5 enmendada (fase 3): «sin IVA» de fábrica, igual que la base de datos
+        roleRates: data.roleRates ?? Prisma.JsonNull,
+        filterByCategories: data.filterByCategories ?? false,
+        categoryIds: data.categoryIds ?? [],
+        filterByStaff: elegidos.filterByStaff ?? false,
+        staffIds: elegidos.staffIds ?? [],
+        useGoalAsTier: data.useGoalAsTier ?? false,
+        goalBonusRate: data.goalBonusRate ?? null,
+        attendanceLinked: data.attendanceLinked ?? false,
+        attendanceLatePenaltyRate: data.attendanceLatePenaltyRate ?? null,
+        effectiveFrom: data.effectiveFrom ?? new Date(),
+        effectiveTo: data.effectiveTo,
+        createdById,
       },
-    },
+      include: { createdBy: { select: { id: true, firstName: true, lastName: true } } },
+    })
+    if (!niveles) return creado
+    await tx.commissionTier.createMany({ data: nivelesParaGuardar(creado.id, niveles) })
+    return {
+      ...creado,
+      tiers: await tx.commissionTier.findMany({ where: { configId: creado.id }, orderBy: { tierLevel: 'asc' }, take: niveles.length }),
+    }
   })
 
   logger.info('Commission config created', {
@@ -308,7 +313,7 @@ export async function createCommissionConfig(venueId: string, data: CreateCommis
     action: 'COMMISSION_CONFIG_CREATED',
     entity: 'CommissionConfig',
     entityId: config.id,
-    data: { name: config.name, defaultRate: config.defaultRate },
+    data: { name: config.name, defaultRate: config.defaultRate, ...(niveles ? { niveles: niveles.length } : {}) },
   })
 
   return config
