@@ -22,7 +22,7 @@ describe('servicio chico del dashboard de Shopify', () => {
     await expect(requestShopifyResync({ venueId: 'v1', staffId: 's1' })).resolves.toEqual({ programado: true })
     expect(mockDb.shopifyLocationLink.updateMany).toHaveBeenCalledWith({
       where: { venueId: 'v1', status: 'ACTIVE', store: { status: 'ACTIVE' } },
-      data: { needsReconcile: true },
+      data: { needsReconcile: true, reconcileVersion: { increment: 1 } },
     })
     expect(mockDb.shopifyLocationLink.findUnique).toHaveBeenCalledWith(expect.objectContaining({ where: { venueId: 'v1' } }))
     expect(logAction).toHaveBeenCalledWith(

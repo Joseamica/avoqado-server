@@ -150,10 +150,13 @@ describe('controller de Shopify: lo que llega a los servicios y lo que vuelve', 
     const mal = await request(app).get(`${B}/issues?reason=NOPE`)
     expect(mal.status).toBe(400)
     expect(mal.body.message).toMatch(/Motivo no reconocido/)
-    for (const q of ['limit=0', 'limit=51', 'limit=abc', 'offset=-1', 'limit=1.5']) {
+    for (const q of ['limit=0', 'limit=51', 'limit=abc', 'offset=-1', 'limit=1.5', 'offset=100001']) {
       expect((await request(app).get(`${B}/reviews?${q}`)).status).toBe(400)
     }
-    expect(mockOverview.listShopifyReviews).toHaveBeenCalledTimes(2)
+    // El tope de B (OFFSET_MAX = 100_000) es el último valor válido; uno más es 400, no un recorte en silencio.
+    expect((await request(app).get(`${B}/reviews?offset=100000`)).status).toBe(200)
+    expect(mockOverview.listShopifyReviews).toHaveBeenLastCalledWith('v1', { offset: 100000, limit: 20, q: undefined })
+    expect(mockOverview.listShopifyReviews).toHaveBeenCalledTimes(3)
     expect(mockOverview.listShopifyIssues).toHaveBeenCalledTimes(1)
   })
 

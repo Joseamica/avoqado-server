@@ -19,8 +19,9 @@ import { billingPageUrl } from '@/utils/dashboardLinks'
 import { addDays } from 'date-fns'
 import emailService from './email.service'
 import { resolvePlanNotificationTarget } from './access/planNotification.service'
-import AppError, { ConflictError } from '@/errors/AppError'
+import AppError, { BadRequestError, ConflictError } from '@/errors/AppError'
 import { ventaSueltaAbierta } from './access/ventaSuelta'
+import { PREMIUM_ONLY_SIN_CATALOGO } from './access/basePlan.service'
 import {
   avisarConflictoCreado,
   cerrarConflictoEntregado,
@@ -297,6 +298,13 @@ export async function createTrialSubscriptions(
   venueSlug?: string,
   paymentMethodId?: string,
 ): Promise<string[]> {
+  // 🔴 Lo Premium por regla sin catálogo (hoy el conector Shopify) no se contrata suelto NUNCA, con la venta suelta abierta o
+  // cerrada: aquí pasan también la conversión de demos y el onboarding. Antes de cualquier llamada a Stripe.
+  const sinCatalogo = featureCodes.filter(code => (PREMIUM_ONLY_SIN_CATALOGO as readonly string[]).includes(code))
+  if (sinCatalogo.length > 0) {
+    throw new BadRequestError(`Esta función no se contrata como función suelta (${sinCatalogo.join(', ')}).`, 'FEATURE_NO_SE_VENDE_SUELTA')
+  }
+
   // 🔴 Venta suelta CERRADA (founder, 21-sep): el candado vive AQUÍ, en el único punto que crea
   // suscripciones sueltas, para que ningún camino —de hoy o futuro— se lo salte.
   if (!ventaSueltaAbierta()) {

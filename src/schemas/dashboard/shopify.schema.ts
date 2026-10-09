@@ -15,8 +15,8 @@ const entero = (que: string, min: number, max: number, porDefecto: number) =>
     .min(min, `${que} mínimo es ${min}`)
     .max(max, `${que} máximo es ${max}`)
     .default(porDefecto)
-/** Z9: `z.coerce` (llega como texto) y el tope se pone aquí; el servicio de B acota otra vez por si acaso. */
-const pagina = { offset: entero('El desplazamiento', 0, 1_000_000, 0), limit: entero('El límite', 1, 50, 20) }
+/** Z9: `z.coerce` (llega como texto) y el tope se pone aquí (100_000 = `OFFSET_MAX` de B: pasarse es 400, no un recorte en silencio). */
+const pagina = { offset: entero('El desplazamiento', 0, 100_000, 0), limit: entero('El límite', 1, 50, 20) }
 const busqueda = z
   .string({ invalid_type_error: 'La búsqueda debe ser un texto' })
   .trim()

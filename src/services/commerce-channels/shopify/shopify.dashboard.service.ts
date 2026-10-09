@@ -8,13 +8,13 @@ import { logAction } from '@/services/dashboard/activity-log.service'
 
 /**
  * «Cuadrar ahora»: el worker corre el cuadre de esta sucursal en su siguiente vuelta. Sólo ACTIVE y con la tienda vigente.
- * ponytail: no llama a `pedirCuadre` de B (store.service) porque ése no mira la tienda ni dice si hubo algo que pedir (el 409);
- * levantar `needsReconcile` basta, B4 no cierra la vuelta mientras esa bandera siga arriba.
+ * No usa `pedirCuadre` de B (store.service): ése no mira la tienda ni dice si hubo algo que pedir (el 409). Pide igual que él y
+ * que los demás escritores: bandera arriba y `reconcileVersion` +1 (B4 sólo cierra la vuelta si nadie pidió otra, T1).
  */
 export async function requestShopifyResync(i: { venueId: string; staffId: string }): Promise<{ programado: true }> {
   const r = await prisma.shopifyLocationLink.updateMany({
     where: { venueId: i.venueId, status: 'ACTIVE', store: { status: 'ACTIVE' } },
-    data: { needsReconcile: true },
+    data: { needsReconcile: true, reconcileVersion: { increment: 1 } },
   })
   if (r.count === 0) {
     throw new ConflictError(
