@@ -101,6 +101,21 @@ describe('Plano de mesas — plan antes que validación, y tables:configure por 
     expect(JSON.stringify(res.body)).toMatch(/folio de guardado/i)
   })
 
+  it('con el plan, una mesa con capacity 0 («sin dato») NO recibe 400 de validación', async () => {
+    conPlan()
+    const res = await api()
+      .put(path)
+      .set('Authorization', `Bearer ${makeToken('MANAGER')}`)
+      .send({
+        saveId: '11111111-1111-4111-8111-111111111111',
+        baseFingerprint: '0123456789abcdef',
+        areas: [{ clientId: 'a1', name: 'Salón', floorShape: 'WIDE', sortOrder: 0 }],
+        tables: [{ clientId: 't1', number: '1', capacity: 0, shape: 'SQUARE', rotation: 0, positionX: 0.5, positionY: 0.5, areaRef: 'a1' }],
+        elements: [],
+      })
+    expect(res.status).not.toBe(400)
+  })
+
   it.each(['MANAGER', 'ADMIN', 'OWNER'])('%s puede publicar (pasa tables:configure y llega a la validación)', async role => {
     conPlan()
     const res = await publicarVacio(role)

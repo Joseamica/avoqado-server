@@ -259,17 +259,25 @@ async function applyPublication(tx: Tx, venueId: string, input: PublishFloorPlan
     const t = lockedById.get(id)
     return !t?.pointerOpen && t?.liveOrderId ? [t.liveOrderId] : []
   })
-  const alreadyPointed = new Set<string>(
-    liveIds.length
-      ? (
-          await tx.table.findMany({
-            where: { venueId, currentOrderId: { in: liveIds }, id: { notIn: reviveIds } },
-            select: { currentOrderId: true },
-            take: liveIds.length,
-          })
-        ).flatMap(t => (t.currentOrderId ? [t.currentOrderId] : []))
-      : [],
-  )
+  const pointers = liveIds.length
+    ? await tx.table.findMany({
+        where: { venueId, currentOrderId: { in: liveIds } },
+        select: { id: true, number: true, currentOrderId: true },
+        take: liveIds.length,
+      })
+    : []
+  const alreadyPointed = new Set<string>(pointers.flatMap(t => (t.currentOrderId ? [t.currentOrderId] : [])))
+  for (const r of diff.tables.revive) {
+    const t = lockedById.get(r.id)
+    const other = t?.liveOrderId ? pointers.find(p => p.currentOrderId === t.liveOrderId) : undefined
+    if (t && other && !t.pointerOpen)
+      logger.warn('Plano de mesas: la cuenta viva de una mesa archivada la apunta otra mesa; se revive sin mover el puntero', {
+        venueId,
+        orderId: t.liveOrderId,
+        tableNumber: t.number,
+        pointedByTableNumber: other.number,
+      })
+  }
   for (const r of diff.tables.revive) {
     // Con su puntero en una cuenta abierta conserva su estado y su cuenta. Si el puntero no está abierto pero hay una
     // cuenta viva sin pagar ligada por tableId, queda OCUPADA apuntándola (como `reconcileTableAfterOrderRemoved`).

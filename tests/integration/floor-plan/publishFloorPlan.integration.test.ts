@@ -536,6 +536,29 @@ describe('publishFloorPlan', () => {
     expect(await prisma.table.findUniqueOrThrow({ where: { id: otra.id } })).toMatchObject({ currentOrderId: viva.id })
   })
 
+  it('revivir DOS mesas en un guardado: la que apunta la cuenta viva de la otra tampoco choca (R1 sin puntero, R2 conserva X)', async () => {
+    const created = await conMesas(mesa('t1', '1'), mesa('t2', '2', { positionX: 0.2 }))
+    const area = salon(created.areas[0].id)
+    const r1 = created.tables.find(t => t.number === '1')!
+    const r2 = created.tables.find(t => t.number === '2')!
+    const removed = await publish({ baseFingerprint: created.fingerprint, areas: [area], tables: [] })
+    // R2 (archivada) apunta a X; `updateOrder` movió el tableId de X a R1 (archivada) sin mover el puntero.
+    const x = await abrirCuenta(r2.id)
+    await prisma.order.update({ where: { id: x.id }, data: { tableId: r1.id } })
+    const back = await publish({
+      baseFingerprint: removed.fingerprint,
+      areas: [area],
+      tables: [mesa('a', '1', { areaRef: area.id }), mesa('b', '2', { areaRef: area.id, positionX: 0.2 })],
+    })
+    expect(back.tables).toHaveLength(2)
+    expect(await prisma.table.findUniqueOrThrow({ where: { id: r1.id } })).toMatchObject({
+      active: true,
+      status: 'OCCUPIED',
+      currentOrderId: null,
+    })
+    expect(await prisma.table.findUniqueOrThrow({ where: { id: r2.id } })).toMatchObject({ active: true, currentOrderId: x.id })
+  })
+
   it('una mesa con capacity 0 («sin dato»), existente y no tocada, publica 200 y la conserva en 0', async () => {
     const created = await conMesas(mesa('t1', '1'), mesa('t2', '2', { positionX: 0.2 }))
     const sinDato = created.tables.find(t => t.number === '2')!
