@@ -455,6 +455,88 @@ describe('sync.mobile.service processIntents', () => {
     expect(acks[0]).toMatchObject({ status: 'ACKED', result: { paymentId: 'pay-1' } })
   })
 
+  it.each([0, undefined])('PAY_CASH zero with tip=%s delegates the zero-balance guard and is ACKED', async tipCents => {
+    ;(orderMobileService.payCashOrder as jest.Mock).mockResolvedValue({ paymentId: 'pay-0', orderNumber: 'A-0', digitalReceipt: null })
+    const acks = await processIntents(
+      baseParams([{ id: 'zero-cash', type: 'PAY_CASH', payload: { orderId: 'order-5', amountCents: 0, tipCents } }]),
+    )
+
+    expect(orderMobileService.payCashOrder).toHaveBeenCalledTimes(1)
+    expect(orderMobileService.payCashOrder).toHaveBeenCalledWith(
+      VENUE,
+      'order-5',
+      expect.objectContaining({ amount: 0, tip: 0, staffId: STAFF, idempotencyKey: 'zero-cash', isOfflineReplay: true }),
+    )
+    expect(acks[0]).toMatchObject({ status: 'ACKED', result: { orderId: 'order-5', paymentId: 'pay-0' } })
+    expect(prisma.posSyncIntent.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: 'ACKED', errorCode: null }) }),
+    )
+  })
+
+  it('PAY_CASH zero on an outstanding balance stays REJECTED with the payCashOrder reason', async () => {
+    const message = 'Esta cuenta debe 50.00. Un cobro en $0 sólo cierra cuentas cortesiadas al 100%.'
+    ;(orderMobileService.payCashOrder as jest.Mock).mockRejectedValue(new BadRequestError(message))
+    const acks = await processIntents(
+      baseParams([{ id: 'zero-outstanding', type: 'PAY_CASH', payload: { orderId: 'order-5', amountCents: 0, tipCents: 0 } }]),
+    )
+
+    expect(orderMobileService.payCashOrder).toHaveBeenCalledTimes(1)
+    expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'BUSINESS_RULE', message })
+    expect(acks[0].result).toBeUndefined()
+    expect(prisma.posSyncIntent.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: 'REJECTED', errorCode: 'BUSINESS_RULE' }) }),
+    )
+  })
+
+  it('PAY_CASH zero with a tip stays INVALID_PAYLOAD without recording a payment', async () => {
+    const acks = await processIntents(
+      baseParams([{ id: 'zero-with-tip', type: 'PAY_CASH', payload: { orderId: 'order-5', amountCents: 0, tipCents: 500 } }]),
+    )
+
+    expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'INVALID_PAYLOAD' })
+    expect(orderMobileService.payCashOrder).not.toHaveBeenCalled()
+  })
+
+  it.each([false, '', ' ', [], '0'])('PAY_CASH coercion-only zero amount=%j stays INVALID_PAYLOAD', async amountCents => {
+    const acks = await processIntents(baseParams([{ id: 'coerced-zero', type: 'PAY_CASH', payload: { orderId: 'order-5', amountCents } }]))
+
+    expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'INVALID_PAYLOAD' })
+    expect(orderMobileService.payCashOrder).not.toHaveBeenCalled()
+  })
+
+  it.each([null, false, '0', []])('PAY_CASH numeric zero with non-numeric tip=%j stays INVALID_PAYLOAD', async tipCents => {
+    const acks = await processIntents(
+      baseParams([{ id: 'zero-coerced-tip', type: 'PAY_CASH', payload: { orderId: 'order-5', amountCents: 0, tipCents } }]),
+    )
+
+    expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'INVALID_PAYLOAD' })
+    expect(orderMobileService.payCashOrder).not.toHaveBeenCalled()
+  })
+
+  it('PAY_CASH preserves legacy positive amount and tip coercion', async () => {
+    ;(orderMobileService.payCashOrder as jest.Mock).mockResolvedValue({ paymentId: 'legacy-positive', orderNumber: 'A-1' })
+    const acks = await processIntents(
+      baseParams([{ id: 'positive-coercion', type: 'PAY_CASH', payload: { orderId: 'order-5', amountCents: '100', tipCents: '0' } }]),
+    )
+
+    expect(acks[0]).toMatchObject({ status: 'ACKED' })
+    expect(orderMobileService.payCashOrder).toHaveBeenCalledWith(VENUE, 'order-5', expect.objectContaining({ amount: 100, tip: 0 }))
+  })
+
+  it.each([
+    { name: 'negative amount', payload: { orderId: 'order-5', amountCents: -100 } },
+    { name: 'missing order', payload: { amountCents: 0, tipCents: 0 } },
+    { name: 'missing amount', payload: { orderId: 'order-5' } },
+    { name: 'non-numeric amount', payload: { orderId: 'order-5', amountCents: 'invalid' } },
+    { name: 'infinite amount', payload: { orderId: 'order-5', amountCents: Infinity } },
+    { name: 'negative infinite amount', payload: { orderId: 'order-5', amountCents: -Infinity } },
+  ])('PAY_CASH $name stays INVALID_PAYLOAD without recording a payment', async ({ payload }) => {
+    const acks = await processIntents(baseParams([{ id: 'invalid-cash', type: 'PAY_CASH', payload }]))
+
+    expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'INVALID_PAYLOAD' })
+    expect(orderMobileService.payCashOrder).not.toHaveBeenCalled()
+  })
+
   it('🔴 PAY_CASH reenvía el tipo de pago del catálogo (antes lo TIRABA y aterrizaba como efectivo)', async () => {
     ;(orderMobileService.payCashOrder as jest.Mock).mockResolvedValue({ paymentId: 'pay-2', orderNumber: 'A-2' })
 

@@ -1021,12 +1021,14 @@ async function applyPayCash(
       message: 'PAY_CASH: tipCents no puede ser negativo',
     }
   }
-  if (!orderId || !Number.isFinite(amountCents) || amountCents <= 0) {
+  // Only numeric zero without a tip delegates the zero-balance decision to payCashOrder.
+  const zeroWithoutTip = intent.payload.amountCents === 0 && (intent.payload.tipCents === undefined || intent.payload.tipCents === 0)
+  if (!orderId || !Number.isFinite(amountCents) || amountCents < 0 || (amountCents === 0 && !zeroWithoutTip)) {
     return {
       id: intent.id,
       status: 'REJECTED',
       errorCode: 'INVALID_PAYLOAD',
-      message: 'PAY_CASH requiere orderId/localOrderId y amountCents > 0',
+      message: 'PAY_CASH requiere orderId/localOrderId y amountCents > 0 (o $0 sin propina para cerrar una cuenta en $0)',
     }
   }
   // Mismo override que la ruta online del cobro: la caja liquida cualquier cheque.

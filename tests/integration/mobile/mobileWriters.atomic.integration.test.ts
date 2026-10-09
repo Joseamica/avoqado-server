@@ -15,6 +15,7 @@ import { bloquearOrdenParaFacturar } from '@/services/fiscal/admisionIva'
 import {
   applyOrderDiscount,
   createOrderWithItems,
+  payCashOrder,
   removeOrderDiscount,
   splitOrderBySeat,
   splitOrderItems,
@@ -28,6 +29,7 @@ import { buildAreaTicketCode } from '@/lib/areaTicketCode'
 import * as featureAccess from '@/middlewares/checkFeatureAccess.middleware'
 import * as tableOwnership from '@/middlewares/checkTableOwnership.middleware'
 import * as activityLog from '@/services/dashboard/activity-log.service'
+import * as receiptService from '@/services/dashboard/receipt.dashboard.service'
 
 jest.mock('@/communication/sockets', () => ({ __esModule: true, default: { getBroadcastingService: jest.fn(() => null) } }))
 jest.mock('@/services/wallet/notifyPassUpdated.service', () => ({ notifyCustomerPassUpdated: jest.fn() }))
@@ -469,7 +471,9 @@ beforeAll(async () => {
 })
 afterEach(() => jest.restoreAllMocks())
 afterAll(async () => {
+  if (!venueId) return
   await prisma.posSyncIntent.deleteMany({ where: { venueId: { in: [venueId, otherVenueId] } } })
+  await prisma.payment.deleteMany({ where: { venueId: { in: [venueId, otherVenueId] } } })
   await prisma.order.deleteMany({ where: { venueId: { in: [venueId, otherVenueId] } } })
   await prisma.terminal.deleteMany({ where: { venueId } })
   await prisma.fulfillmentArea.deleteMany({ where: { venueId } })
@@ -1014,6 +1018,91 @@ describe('createOrderWithItems writes promotions and reaffirmed money in its cre
     expect(result.stampReward).toEqual({ applied: true, discountAmount: 30, rewardLabel: 'Premio' })
     expect(result).toMatchObject({ subtotal: 150, discountAmount: 30, total: 120 })
     expect(await prisma.stampReward.findUniqueOrThrow({ where: { id: reward.id } })).toMatchObject({ status: 'REDEEMED' })
+  })
+})
+
+describe('Plan7b zero payment admission uses the locked balance', () => {
+  it('payCashOrder rejects debt created after the zero preflight while waiting for the actual Order holder', async () => {
+    const o = await newOrder()
+    await prisma.orderItem.update({ where: { id: o.items[0] }, data: { isCortesia: true, discountAmount: 100, total: 0 } })
+    await prisma.orderItem.update({ where: { id: o.items[1] }, data: { isCortesia: true, discountAmount: 50, total: 0 } })
+    await prisma.order.update({ where: { id: o.id }, data: { discountAmount: 150, total: 0, remainingBalance: 0 } })
+    const initial = await snapshot(o.id)
+    expect(initial).toMatchObject({ discount: 150, total: 0, remaining: 0, paymentStatus: 'PENDING' })
+    const entered = barrier(),
+      release = barrier(),
+      preflight = barrier()
+    let holderPid: number | undefined
+    const holder = prisma.$transaction(
+      async tx => {
+        expect(await orderLock.lockExistingOrderForPayment(tx, { venueId, orderId: o.id })).toBe(true)
+        const [{ pid }] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`
+        holderPid = pid
+        entered.release()
+        await release.promise
+        await tx.orderItem.update({ where: { id: o.items[1] }, data: { isCortesia: false, discountAmount: 0, total: 50 } })
+        await tx.order.update({
+          where: { id: o.id },
+          data: { discountAmount: 100, total: 50, remainingBalance: 50, version: { increment: 1 } },
+        })
+        return snapshot(o.id, tx)
+      },
+      { timeout: 15_000 },
+    )
+    let payment: ReturnType<typeof resultOf> | undefined
+    let observedZeroPreflight = false
+    const receipt = jest
+      .spyOn(receiptService, 'generateAndStoreReceipt')
+      .mockRejectedValue(new Error('External receipt is outside admission test'))
+    try {
+      await entered.promise
+      const readOrder = prisma.order.findUnique.bind(prisma.order)
+      jest.spyOn(prisma.order, 'findUnique').mockImplementationOnce((async (args: any) => {
+        const row = await readOrder(args)
+        expect(row).toMatchObject({ id: o.id, total: new Prisma.Decimal(0), remainingBalance: new Prisma.Decimal(0) })
+        observedZeroPreflight = true
+        preflight.release()
+        return row
+      }) as any)
+      payment = resultOf(payCashOrder(venueId, o.id, { amount: 0, tip: 0, staffId, idempotencyKey: randomUUID(), isOfflineReplay: true }))
+      await Promise.race([
+        preflight.promise,
+        payment.then(() => {
+          throw new Error('payment never read the zero preflight')
+        }),
+      ])
+      expect(holderPid).toEqual(expect.any(Number))
+      await waitingOnBackend(holderPid!)
+    } finally {
+      release.release()
+      await Promise.allSettled([holder, ...(payment ? [payment] : [])])
+    }
+    const committed = await holder
+    const outcome = await payment!
+    expect(observedZeroPreflight).toBe(true)
+    expect(committed).toMatchObject({ discount: 100, total: 50, remaining: 50, version: initial.version + 1 })
+    expect(outcome.error).toBeInstanceOf(BadRequestError)
+    expect(outcome.error.message).toBe('Esta cuenta debe 50.00. Un cobro en $0 sólo cierra cuentas cortesiadas al 100%.')
+    expect(outcome.value).toBeUndefined()
+    expect(await snapshot(o.id)).toEqual(committed)
+    expect(await prisma.payment.count({ where: { venueId, orderId: o.id } })).toBe(0)
+    expect(await prisma.venueTransaction.count({ where: { venueId, payment: { orderId: o.id } } })).toBe(0)
+    expect(await prisma.paymentAllocation.count({ where: { orderId: o.id } })).toBe(0)
+    expect(await prisma.paymentEffect.count({ where: { orderId: o.id } })).toBe(0)
+    expect(receipt).not.toHaveBeenCalled()
+  })
+
+  it('payCashOrder rejects an already outstanding balance before financial effects', async () => {
+    const o = await newOrder()
+    const before = await snapshot(o.id)
+
+    await expect(
+      payCashOrder(venueId, o.id, { amount: 0, tip: 0, staffId, idempotencyKey: randomUUID(), isOfflineReplay: true }),
+    ).rejects.toThrow('Esta cuenta debe 150.00.')
+
+    expect(await snapshot(o.id)).toEqual(before)
+    expect(await prisma.payment.count({ where: { venueId, orderId: o.id } })).toBe(0)
+    expect(await prisma.paymentAllocation.count({ where: { orderId: o.id } })).toBe(0)
   })
 })
 

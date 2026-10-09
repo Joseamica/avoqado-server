@@ -2850,6 +2850,12 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
         // lo devuelto se puede volver a cobrar. Por eso el tope es saldo + devuelto;
         // sin devoluciones, es exactamente el saldo.
         const saldoAntes = computeOrderBalance(cuenta, previousPayments)
+        // Recheck after the Order lock: the zero-payment preflight balance can be stale.
+        if (amount === 0 && tip === 0 && saldoAntes.remainingBalance.greaterThan(0.005)) {
+          throw new BadRequestError(
+            `Esta cuenta debe ${saldoAntes.remainingBalance.toFixed(2)}. Un cobro en $0 sólo cierra cuentas cortesiadas al 100%.`,
+          )
+        }
         const saldoCents = Math.max(0, pesosToCents(saldoAntes.remainingBalance.plus(saldoAntes.refundedAmount).toNumber()))
         const cambioCents = countsAsDrawerCash ? Math.max(0, amount - saldoCents) : 0
         const aplicadoCents = amount - cambioCents

@@ -293,6 +293,74 @@ describe('payCashOrder — cobro atómico (§5.4)', () => {
     jest.clearAllMocks()
   })
 
+  it('zero preflight with fresh debt50 rejects before any financial write under the Order lock', async () => {
+    const { row, payments, shift } = installFakeStore(
+      { discountAmount: new Decimal(50), total: new Decimal(50), remainingBalance: new Decimal(50) },
+      { openShift: true },
+    )
+    const before = { ...row }
+    prismaMock.order.findUnique.mockResolvedValueOnce({
+      ...row,
+      discountAmount: new Decimal(100),
+      total: new Decimal(0),
+      remainingBalance: new Decimal(0),
+    })
+
+    await expect(
+      payCashOrder('venue-1', 'order-1', { amount: 0, tip: 0, staffId: 'staff-1', idempotencyKey: 'zero-stale', isOfflineReplay: true }),
+    ).rejects.toThrow('Esta cuenta debe 50.00. Un cobro en $0 sólo cierra cuentas cortesiadas al 100%.')
+
+    expect(row).toEqual(before)
+    expect(payments).toEqual([])
+    expect(shift).toEqual({ totalSales: 0, totalTips: 0, totalOrders: 0 })
+    expect(prismaMock.order.update).not.toHaveBeenCalled()
+    expect(prismaMock.order.updateMany).not.toHaveBeenCalled()
+    expect(prismaMock.shift.updateMany).not.toHaveBeenCalled()
+    expect(prismaMock.payment.create).not.toHaveBeenCalled()
+    expect(prismaMock.venueTransaction.create).not.toHaveBeenCalled()
+    expect(prismaMock.paymentAllocation.create).not.toHaveBeenCalled()
+    expect(prismaMock.paymentEffect.createMany).not.toHaveBeenCalled()
+    expect(prismaMock.activityLog.create).not.toHaveBeenCalled()
+  })
+
+  it('a legitimate zero balance closes once and the zero-payment key remains idempotent', async () => {
+    const { row, payments, shift } = installFakeStore(
+      { discountAmount: new Decimal(100), total: new Decimal(0), remainingBalance: new Decimal(0) },
+      { openShift: true },
+    )
+    const input = { amount: 0, tip: 0, staffId: 'staff-1', idempotencyKey: 'zero-legitimate', isOfflineReplay: true }
+
+    const first = await payCashOrder('venue-1', 'order-1', input)
+    const orderWritesBeforeRetry = prismaMock.order.updateMany.mock.calls.length
+    const retry = await payCashOrder('venue-1', 'order-1', input)
+
+    expect(first).toMatchObject({ amount: 0, tipAmount: 0, orderPaymentStatus: 'PAID', remainingBalanceCents: 0 })
+    expect(retry.paymentId).toBe(first.paymentId)
+    expect(payments).toHaveLength(1)
+    expect(prismaMock.payment.create).toHaveBeenCalledTimes(1)
+    expect(prismaMock.order.updateMany).toHaveBeenCalledTimes(orderWritesBeforeRetry)
+    expect(prismaMock.shift.updateMany).toHaveBeenCalledTimes(1)
+    expect(shift).toEqual({ totalSales: 0, totalTips: 0, totalOrders: 1 })
+    expect(row.paymentStatus).toBe('PAID')
+  })
+
+  it('an already outstanding balance rejects zero without entering the money transaction', async () => {
+    const { row, payments } = installFakeStore({
+      discountAmount: new Decimal(50),
+      total: new Decimal(50),
+      remainingBalance: new Decimal(50),
+    })
+    const before = { ...row }
+
+    await expect(
+      payCashOrder('venue-1', 'order-1', { amount: 0, tip: 0, staffId: 'staff-1', idempotencyKey: 'zero-existing-debt' }),
+    ).rejects.toThrow('Esta cuenta debe 50.00.')
+
+    expect(row).toEqual(before)
+    expect(payments).toEqual([])
+    expect(prismaMock.$transaction).not.toHaveBeenCalled()
+  })
+
   // ── LA PRUEBA DEL BUG ──────────────────────────────────────────────────────────
 
   it('🔴 dos cobros simultáneos de la MISMA orden con llaves DISTINTAS crean UN SOLO Payment', async () => {
