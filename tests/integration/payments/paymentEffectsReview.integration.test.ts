@@ -67,6 +67,9 @@ beforeEach(async () => {
   paymentId = (await prisma.payment.create({ data: paymentData(100) })).id
 })
 afterEach(async () => {
+  // Sin fixture no hay nada que limpiar: con `venueId` undefined, Prisma ignora el filtro y cada
+  // deleteMany de abajo borra la TABLA ENTERA (8-oct-2026: pasó con la guarda de base del beforeAll en rojo).
+  if (!venueId) return
   await prisma.referralRewardGrant.deleteMany({ where: { venueId } })
   await prisma.referral.deleteMany({ where: { venueId } })
   await prisma.couponCode.deleteMany({ where: { discount: { venueId } } })
