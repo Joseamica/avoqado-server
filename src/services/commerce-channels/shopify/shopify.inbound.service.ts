@@ -288,7 +288,7 @@ function unaVezPorNegocio(f: Acceso): Acceso {
 }
 
 /** R1: un error PASAJERO de la base (tx que no arrancó o expiró, pool lleno, conflicto o interbloqueo). */
-function errorPasajeroDeBase(err: unknown): string | null {
+export function errorPasajeroDeBase(err: unknown): string | null {
   const e = err as { code?: unknown; meta?: { code?: unknown }; message?: unknown } | null
   if (e?.code === 'P2028' || e?.code === 'P2024' || e?.code === 'P2034') return String(e.code)
   if (e?.meta?.code === '40P01' || /deadlock detected/i.test(String(e?.message ?? ''))) return '40P01'

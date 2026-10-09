@@ -411,7 +411,7 @@ async function bloquearInventario(tx: Prisma.TransactionClient, productId: strin
  * §12.5: las filas del buzón del producto que una baja o una suspensión pueden descartar, bloqueadas por id ANTES de
  * verificar el evento y del primer efecto. Las IN_PROGRESS no se tocan: nadie aquí las modifica.
  */
-async function bloquearBuzon(
+export async function bloquearBuzon(
   tx: Prisma.TransactionClient,
   f: { productId: string; locationLinkId: string; generation: number },
 ): Promise<void> {

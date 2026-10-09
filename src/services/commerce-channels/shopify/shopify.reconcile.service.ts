@@ -18,11 +18,12 @@
  *   que no se puede completar se salta en ESA vuelta sin archivar nada.
  * Orden de candados (§10.3): sucursal (FOR SHARE) → tienda (FOR SHARE) → pareja → Inventory → buzón y revisión.
  */
-import { Prisma, type ShopifyReviewChoice, type ShopifyReviewReason } from '@prisma/client'
+import { Prisma, type ShopifyIssueReason, type ShopifyReviewChoice, type ShopifyReviewReason } from '@prisma/client'
 import { formatInTimeZone } from 'date-fns-tz'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { env } from '@/config/env'
+import { BadRequestError, ConflictError, ForbiddenError, NotFoundError, ServiceUnavailableError, ValidationError } from '@/errors/AppError'
 import emailService from '@/services/email.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
@@ -30,10 +31,13 @@ import { CATALOG_PAGE_SIZE, LIVE_OUTBOX_STATUSES, SHOPIFY_FEATURE } from './shop
 import { shopifyGraphql } from './shopify.graphql'
 import {
   applyShopifyLevel,
+  avisarSobreventa,
+  cercoVigente,
   fetchLevels,
   initializePair,
   levelKey,
   liveOutboxSum,
+  marcarOrigenShopify,
   SHOPIFY_IMPORT_ERRORES_TERMINALES,
   type CercoShopify,
   type NivelLeido,
@@ -42,6 +46,7 @@ import { notifyShopify } from './shopify.notify.service'
 import {
   ARCHIVADO_POR_SHOPIFY,
   archivarPareja,
+  bloquearBuzon,
   CATALOGO_MAESTRO,
   contextoDe,
   esErrorDeGobierno,
@@ -51,6 +56,7 @@ import {
   upsertShopifyVariant,
   type PaginaVariantes,
 } from './shopify.catalog.service'
+import { errorPasajeroDeBase } from './shopify.inbound.service'
 import {
   atenderFalla,
   conCerco,
@@ -476,6 +482,14 @@ async function tandaDeStock(l: Sucursal, cerco: CercoShopify, d: DepsUnidad): Pr
       if (o === 'EN_REVISION') porRevisar += 1
       // Esperar a un envío en vuelo es corto: la tanda queda pendiente. Una duda (ambigua) puede durar horas: no se espera.
       if (o === 'REINTENTAR' && f.ambiguasVivas === 0 && f.atoradasAmbiguas === 0) pendiente = true
+      // U2 (B5): suspendida y detenida SÓLO por una duda muerta (DEAD_LETTER ambigua, que ya no puede llegar): COMPARAR la
+      // esperaría para siempre. Va a «Por revisar» INCIERTO; resolverla la reactiva.
+      const sinSalida = f.enVuelo === 0 && f.ambiguasVivas === 0 && f.atoradasAmbiguas > 0
+      if (o === 'REINTENTAR' && p.suspendedReason && nivel.kind === 'OK' && sinSalida) {
+        const a = await abrirRevision(sucursal, cerco, d.hasAccess, p.productId, nivel.available, fetchedAt)
+        if (a === 'CONTEXTO_CAMBIO' || a === 'PAUSADO') return corte()
+        if (a === 'ABIERTA') porRevisar += 1
+      }
       continue
     }
     if (nivel.kind !== 'OK' || A === undefined) {
@@ -587,6 +601,7 @@ type Revision = 'ABIERTA' | 'CERRADA' | 'NADA' | 'EN_CAMINO' | 'CONTEXTO_CAMBIO'
  * (cuántas y si alguna es ambigua), se calcula `total = A − espejo − Σvivas − ΣDEAD_LETTER` (generación vigente, T3) y
  * se decide el motivo; de la foto no se reusa nada. Si la causa ya no existe, se cierra la abierta (offset 0) o no se
  * hace nada. Si el espejo se movió a otro número después de leer Shopify, la lectura ya es vieja y la tanda se repite.
+ * Una pareja suspendida sólo entra con una DEAD_LETTER ambigua (U2): queda INCIERTO y resolverla la reactiva (B5).
  * Abrir o cerrar deja bitácora después de la tx.
  */
 async function abrirRevision(
@@ -611,7 +626,7 @@ async function abrirRevision(
           FROM "ShopifyVariantLink" WHERE "productId" = ${productId} AND "locationLinkId" = ${link.id} FOR UPDATE`
       const [inv] = await tx.$queryRaw<Array<{ currentStock: Prisma.Decimal }>>`
         SELECT "currentStock" FROM "Inventory" WHERE "productId" = ${productId} FOR UPDATE`
-      if (!p || !p.initializedAt || p.suspendedReason || !inv) return { r: 'NADA' }
+      if (!p || !p.initializedAt || !inv) return { r: 'NADA' }
       if (p.mirrorAt > fetchedAt && p.mirrorAvailable !== S) return { r: 'EN_CAMINO' } // otro jalón o un envío llegó después
       const A = new Prisma.Decimal(inv.currentStock)
       const atoradas = await tx.shopifyStockOutbox.groupBy({
@@ -623,6 +638,8 @@ async function abrirRevision(
       const nAtoradas = atoradas.reduce((n, g) => n + g._count._all, 0)
       const ambiguas = atoradas.filter(g => g.ambiguous).reduce((n, g) => n + g._count._all, 0)
       const sumaAtoradas = atoradas.reduce((x, g) => x.plus(g._sum.delta ?? 0), new Prisma.Decimal(0))
+      // U2: una pareja suspendida sólo se revisa por una duda muerta que la deja sin salida; lo demás lo hace COMPARAR.
+      if (p.suspendedReason && ambiguas === 0) return { r: 'NADA' }
       const total = A.minus(p.mirrorAvailable)
         .minus(await liveOutboxSum(tx, productId, link.id, cerco.generation))
         .minus(sumaAtoradas)
@@ -830,4 +847,295 @@ async function mandarCorreos(venueId: string, porRevisar: number, desde: string,
     logger.error(`[SHOPIFY] correo «Por revisar» de ${venueId}: ${(err as Error)?.message}`)
     return true
   }
+}
+
+// ─── Resolver «Por revisar» (B5, 12 bis.9, §11.2, §12.2) ────────────────────────────────────────────────────
+
+export type EntradaResolucion = {
+  venueId: string
+  reviewId: string
+  choice: ShopifyReviewChoice
+  /** Decimal en texto: el `avoqadoQty` que se le mostró al dueño (o al MCP), tal cual. */
+  expectedAvoqadoQty: string
+  /** Entero: el `shopifyQty` que se le mostró. */
+  expectedShopifyQty: number
+  /** Quien resuelve (authContext): va al movimiento, a la revisión y a la bitácora. */
+  staffId: string | null
+}
+export type DepsResolucion = {
+  fetchLevels?: typeof fetchLevels
+  hasAccess?: (venueId: string) => Promise<boolean>
+  /** Vencimiento absoluto de la lectura de Shopify (ms epoch, §11.6); sin él, el tope de A. */
+  vence?: number
+}
+
+const MOTIVOS_DE_SUSPENSION: ShopifyIssueReason[] = ['SIN_INVENTARIO', 'NIVEL_INEXISTENTE', 'NO_RASTREADO']
+const noResponde = (m = 'Shopify no respondió: intenta en un minuto') => new ServiceUnavailableError(m, 'SHOPIFY_NO_RESPONDE')
+const enPausa = () =>
+  new ConflictError(
+    'La conexión con Shopify está en pausa, revocada o le falta un permiso: reconéctala en Integraciones › Shopify y vuelve a resolver',
+    'SHOPIFY_EN_PAUSA',
+  )
+const sinPlan = () =>
+  new ForbiddenError(
+    'Shopify está en pausa porque el plan de esta sucursal no lo incluye: actívalo y vuelve a resolver',
+    'SHOPIFY_SIN_PLAN',
+  )
+const yaResuelta = () => new ConflictError('Esa revisión ya se resolvió: recarga la lista', 'SHOPIFY_REVISION_YA_RESUELTA')
+const sinPareja = () => new ConflictError('Ese producto ya no está ligado a Shopify: recarga la lista', 'SHOPIFY_SIN_PAREJA')
+const suspendida = () =>
+  new ConflictError('La pareja de este producto está suspendida: revísala en «Productos sin pareja»', 'SHOPIFY_PAREJA_SUSPENDIDA')
+
+/**
+ * «Usar el de Avoqado» / «Usar el de Shopify». S se lee de Shopify ANTES; todo lo demás se revalida y se escribe en UNA
+ * transacción con los candados en orden (§10.3): sucursal → tienda FOR SHARE con el cerco de A (§11.2, §12.2) → pareja
+ * FOR UPDATE → Inventory → filas del buzón → revisión. Sin evento: lo pide una persona.
+ * - Lo que vio el dueño debe ser lo GUARDADO y lo VIGENTE; si no, 409 y la revisión queda reescrita, bajo los mismos
+ *   candados, con lo vigente (la pantalla lo muestra).
+ * - El plan se vuelve a mirar dentro (N16): pudo vencer mientras se leía Shopify.
+ * - SHOPIFY: Avoqado = S con su movimiento. AVOQADO: una fila NUEVA del buzón con A − S (piezas enteras). En los dos, el
+ *   espejo = S, las DEAD_LETTER del producto de la generación vigente se descartan (T3; S es fresco, así que las dos
+ *   elecciones valen llegue o no aquel envío; lo que todavía puede llegar bloquea con CAMBIOS_EN_CAMINO) y offset = 0:
+ *   después, `A = espejo + Σ vivas` (N3).
+ * - Una pareja suspendida que llegó aquí por una duda muerta (U2) se reactiva en la misma tx: S se leyó OK e Inventory
+ *   existe, así que la causa ya no está. Nunca la de un producto archivado.
+ * - Un error pasajero de la base o de Shopify es 503 (K12, B-7), nunca un 500.
+ */
+export async function resolveShopifyReview(
+  i: EntradaResolucion,
+  deps: DepsResolucion = {},
+): Promise<{ estado: 'RESUELTO' | 'ENVIO_PENDIENTE' }> {
+  try {
+    return await resolver(i, deps)
+  } catch (e) {
+    if (errorPasajeroDeBase(e)) throw noResponde('El sistema está ocupado: intenta en un minuto')
+    throw e
+  }
+}
+
+async function resolver(i: EntradaResolucion, deps: DepsResolucion): Promise<{ estado: 'RESUELTO' | 'ENVIO_PENDIENTE' }> {
+  let visto: Prisma.Decimal | null = null
+  try {
+    visto = new Prisma.Decimal(i.expectedAvoqadoQty)
+  } catch {
+    // se contesta abajo
+  }
+  if (!visto?.isFinite() || !Number.isSafeInteger(i.expectedShopifyQty) || !['AVOQADO', 'SHOPIFY'].includes(i.choice)) {
+    throw new BadRequestError(
+      'Las cantidades o la elección no son válidas: recarga la revisión y vuelve a elegir',
+      'SHOPIFY_CANTIDAD_INVALIDA',
+    )
+  }
+  const esperadoA = visto
+  const item = await prisma.shopifyReviewItem.findUnique({ where: { id: i.reviewId } })
+  if (!item || item.venueId !== i.venueId) throw new NotFoundError('Esa revisión no existe en esta sucursal', 'SHOPIFY_REVISION_NO_EXISTE')
+  if (item.status !== 'OPEN') throw yaResuelta()
+  const hasAccess = deps.hasAccess ?? accesoReal
+  if (!(await hasAccess(i.venueId))) throw sinPlan()
+  const pareja = await prisma.shopifyVariantLink.findUnique({
+    where: { productId: item.productId },
+    include: { locationLink: { include: { store: true } }, product: { select: { deletedAt: true } } },
+  })
+  if (!pareja) throw sinPareja()
+  const link = pareja.locationLink
+  // §10.13, §12.2: un error terminal no se vuelve a preguntar a Shopify hasta que alguien actúe.
+  if (link.status !== 'ACTIVE' || link.store.status !== 'ACTIVE' || terminal(link.importError)) throw enPausa()
+  if (!pareja.initializedAt || (pareja.suspendedReason && pareja.product.deletedAt)) throw suspendida()
+  // El cerco de A con la conexión con que se lee S (§11.2); sin lease: lo pide una persona, no el worker.
+  const cerco: CercoShopify = {
+    generation: link.generation,
+    storeId: link.storeId,
+    shopifyLocationId: link.shopifyLocationId,
+    tokenVersion: link.store.tokenVersion,
+  }
+  const fetchedAt = new Date() // B-1
+  // B-7, K12: `leerNiveles` convierte cualquier throw (descifrado, red) en una falla reintentable.
+  const r = await leerNiveles(
+    deps.fetchLevels ?? fetchLevels,
+    link.store,
+    [{ inventoryItemId: pareja.inventoryItemId, shopifyLocationId: link.shopifyLocationId }],
+    deps.vence,
+  )
+  if (r === SIN_TIEMPO) throw noResponde()
+  if (!r.ok) {
+    const a = await atenderFalla(link.store, r, [{ id: link.id, generation: link.generation }])
+    if (a === 'SIN_PERMISO') {
+      throw new ForbiddenError(
+        'A la app le falta un permiso en Shopify: vuelve a conectarla y acepta todos los permisos que pide',
+        'SHOPIFY_FALTA_PERMISO',
+      )
+    }
+    if (a === 'REVOCADA') throw enPausa()
+    throw noResponde()
+  }
+  const nivel = r.data.get(levelKey(link.shopifyLocationId, pareja.inventoryItemId))
+  if (!nivel || nivel.kind !== 'OK') {
+    throw new ConflictError(
+      nivel?.kind === 'NO_RASTREADO'
+        ? 'Shopify no lleva el inventario de este producto («Rastrear cantidad» apagado): enciéndelo en Shopify y vuelve a resolver'
+        : 'Shopify no tiene inventario de este producto en esa ubicación: actívalo en Shopify y vuelve a resolver (aquí nunca lo dejamos en cero)',
+      'SHOPIFY_SIN_NIVEL',
+    )
+  }
+  const S = nivel.available
+  const filas = { productId: item.productId, locationLinkId: link.id, generation: cerco.generation } // T3: generación vigente
+  type Salida =
+    | { cambio: true }
+    | { cambio: false; A: Prisma.Decimal; final: Prisma.Decimal; envio: string | null; descartadas: number; reactivada: boolean }
+  const res = await prisma.$transaction(
+    async (tx): Promise<Salida> => {
+      await marcarOrigenShopify(tx)
+      // Sucursal → tienda FOR SHARE con el cerco (§11.2, §12.2): misma generación, tienda, ubicación y credencial, la tienda
+      // ACTIVE y ningún error terminal. La fase la lee la sentencia siguiente, ya con el candado puesto.
+      if (!(await cercoVigente(tx, link.id, cerco))) throw enPausa()
+      const [l] = await tx.$queryRaw<Array<{ status: string }>>`
+        SELECT status::text AS status FROM "ShopifyLocationLink" WHERE id = ${link.id}`
+      const [p] = await tx.$queryRaw<
+        Array<{
+          inventoryItemId: string
+          mirrorAvailable: number
+          mirrorAt: Date
+          initializedAt: Date | null
+          suspendedReason: string | null
+          archivado: Date | null
+        }>
+      >`
+        SELECT v."inventoryItemId", v."mirrorAvailable", v."mirrorAt", v."initializedAt",
+               v."suspendedReason"::text AS "suspendedReason",
+               (SELECT pr."deletedAt" FROM "Product" pr WHERE pr.id = v."productId") AS archivado
+          FROM "ShopifyVariantLink" v WHERE v.id = ${pareja.id} AND v."locationLinkId" = ${link.id} FOR UPDATE`
+      const [inv] = await tx.$queryRaw<Array<{ id: string; currentStock: Prisma.Decimal }>>`
+        SELECT id, "currentStock" FROM "Inventory" WHERE "productId" = ${item.productId} FOR UPDATE`
+      await bloquearBuzon(tx, filas) // §10.3: las filas que se pueden descartar, antes de la revisión
+      const [rev] = await tx.$queryRaw<Array<{ status: string; avoqadoQty: Prisma.Decimal; shopifyQty: number }>>`
+        SELECT status::text AS status, "avoqadoQty", "shopifyQty" FROM "ShopifyReviewItem" WHERE id = ${item.id} FOR UPDATE`
+      if (!rev || rev.status !== 'OPEN') throw yaResuelta() // sólo UNA transición OPEN → RESOLVED (RF3)
+      if (!l || l.status !== 'ACTIVE') throw enPausa()
+      // N16: el plan pudo vencer mientras se leía Shopify.
+      if (!(await hasAccess(i.venueId))) throw sinPlan()
+      if (!p) throw sinPareja()
+      if (!p.initializedAt || (p.suspendedReason && p.archivado)) throw suspendida()
+      if (!inv) {
+        throw new ConflictError(
+          'Ese producto ya no lleva existencias por cantidad en Avoqado: vuelve a activarlas en su ficha y vuelve a resolver',
+          'SHOPIFY_SIN_INVENTARIO',
+        )
+      }
+      const vivas = await tx.shopifyStockOutbox.count({ where: { ...filas, status: { in: VIVAS } } })
+      if (vivas > 0)
+        throw new ConflictError('Hay cambios de este producto viajando a Shopify: intenta en un minuto', 'SHOPIFY_CAMBIOS_EN_CAMINO')
+      const A = new Prisma.Decimal(inv.currentStock)
+      // Lo que vio el dueño debe ser lo GUARDADO y lo VIGENTE. Si el espejo se movió después de leer (o cambió el
+      // artículo), S ya es viejo: lo más reciente que sabemos de Shopify es el espejo.
+      const sViejo = p.mirrorAt > fetchedAt || p.inventoryItemId !== pareja.inventoryItemId
+      const loGuardado = new Prisma.Decimal(rev.avoqadoQty).equals(esperadoA) && rev.shopifyQty === i.expectedShopifyQty
+      const loVigente = A.equals(esperadoA) && S === i.expectedShopifyQty
+      if (sViejo || !loGuardado || !loVigente) {
+        const atorados = await tx.shopifyStockOutbox.count({ where: { ...filas, status: 'DEAD_LETTER' } })
+        await tx.shopifyReviewItem.update({
+          where: { id: item.id },
+          data: { avoqadoQty: A, shopifyQty: sViejo ? p.mirrorAvailable : S, atorados },
+        })
+        return { cambio: true }
+      }
+      const diferencia = A.minus(S)
+      if (i.choice === 'AVOQADO' && !diferencia.isInteger()) {
+        throw new ValidationError(
+          'La diferencia no es de piezas enteras: corrige el stock de Avoqado a piezas enteras y vuelve a resolver',
+          'SHOPIFY_DIFERENCIA_NO_ENTERA',
+        )
+      }
+      const ahora = new Date()
+      const { count: descartadas } = await tx.shopifyStockOutbox.updateMany({
+        where: { ...filas, status: 'DEAD_LETTER' },
+        data: { status: 'DISCARDED', processedAt: ahora, lastError: `RESUELTO_CON_${i.choice}` },
+      })
+      let final = A
+      let envio: string | null = null
+      if (i.choice === 'SHOPIFY') {
+        final = new Prisma.Decimal(S)
+        if (!diferencia.isZero()) {
+          await tx.inventory.update({ where: { id: inv.id }, data: { currentStock: final } })
+          await tx.inventoryMovement.create({
+            data: {
+              inventoryId: inv.id,
+              type: 'ADJUSTMENT',
+              quantity: final.minus(A),
+              previousStock: A,
+              newStock: final,
+              reason: 'Shopify: diferencia resuelta con el número de Shopify',
+              createdBy: i.staffId,
+            },
+          })
+        }
+      } else if (!diferencia.isZero()) {
+        // B-2 (pareja e Inventory ya bloqueadas): A = espejo (S) + esta fila (A − S). Llave idempotente nueva: su id.
+        const fila = await tx.shopifyStockOutbox.create({
+          data: { venueId: i.venueId, locationLinkId: link.id, generation: cerco.generation, productId: item.productId, delta: diferencia },
+          select: { id: true },
+        })
+        envio = fila.id
+      }
+      await tx.shopifyVariantLink.update({
+        where: { id: pareja.id },
+        data: {
+          mirrorAvailable: S,
+          mirrorCommitted: nivel.committed,
+          mirrorAt: ahora,
+          committedAt: ahora,
+          suspendedReason: null,
+          suspendedAt: null,
+        },
+      })
+      if (p.suspendedReason) {
+        await tx.shopifyImportIssue.deleteMany({
+          where: { venueId: i.venueId, shopifyVariantId: pareja.shopifyVariantId, reason: { in: MOTIVOS_DE_SUSPENSION } },
+        })
+      }
+      await tx.shopifyReviewItem.update({
+        where: { id: item.id },
+        data: {
+          status: 'RESOLVED',
+          choice: i.choice,
+          resolvedById: i.staffId,
+          resolvedAt: ahora,
+          resolutionOutboxId: envio,
+          avoqadoQty: A,
+          shopifyQty: S,
+          atorados: descartadas,
+          offset: 0,
+        },
+      })
+      return { cambio: false, A, final, envio, descartadas, reactivada: !!p.suspendedReason }
+    },
+    { timeout: 15_000 }, // el plan se pregunta dentro, por otra conexión del pool
+  )
+  if (res.cambio) {
+    throw new ConflictError(
+      'Los números cambiaron desde que los viste: ya se muestran los de ahora; revísalos y vuelve a elegir',
+      'SHOPIFY_REVISION_CAMBIO',
+    )
+  }
+  logAction({
+    staffId: i.staffId,
+    venueId: i.venueId,
+    organizationId: link.store.organizationId,
+    action: 'SHOPIFY_REVIEW_RESOLVED',
+    entity: 'ShopifyReviewItem',
+    entityId: item.id,
+    data: {
+      productId: item.productId,
+      motivo: item.reason,
+      eleccion: i.choice,
+      avoqado: res.A.toString(),
+      shopify: S,
+      final: res.final.toString(),
+      envio: res.envio,
+      descartadas: res.descartadas,
+      reactivada: res.reactivada,
+    },
+  })
+  // N23: si un lado quedó en negativo, la pieza se vendió dos veces. El siguiente cuadre ya no ve un cambio que lo diga.
+  if (res.final.lessThan(0) || S < 0) await avisarSobreventa(i.venueId, item.productId)
+  return { estado: res.envio ? 'ENVIO_PENDIENTE' : 'RESUELTO' }
 }
