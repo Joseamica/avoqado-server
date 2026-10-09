@@ -4,8 +4,8 @@
  * un envío en camino— o reintroduce un orden de candados que se traba, y pierde ventas.
  *
  * Esta prueba fija dos cosas: (1) el TEXTO de la regla, literal, en lo que no puede faltar ni quedar con la versión vieja del
- * plan; (2) el CÓDIGO que respalda cada afirmación de comportamiento, para que un cambio en el código sin cambiar la regla
- * también falle aquí. Y que cada función que la regla nombra con paréntesis exista exportada.
+ * plan; (2) el CÓDIGO que respalda las afirmaciones clave de comportamiento, para que un cambio en el código sin cambiar la
+ * regla también falle aquí. Y que cada función que la regla nombra con paréntesis exista exportada.
  *
  * Prettier re-envuelve la prosa a 140 columnas (`proseWrap: always`): el texto se compara con los espacios colapsados.
  */
@@ -193,13 +193,15 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
       '`IDEMPOTENCY_CONCURRENT_REQUEST`',
       '`SERVICE_UNAVAILABLE`',
       '`ADJUST_QUANTITIES_FAILED`',
-      'quedan FAILED y conservan la duda previa',
+      'quedan FAILED hasta agotar los intentos (`SHOPIFY_OUTBOX_MAX_ATTEMPTS`, 6; después DEAD_LETTER) y conservan la duda previa',
       'Cualquier otro `userError` en una fila ambigua',
       'Sólo el éxito validado la limpia',
     ])
     const mensajero = leer(`${SHOPIFY}/shopify.outbox.service.ts`)
     expect(mensajero).toContain("new Set(['SERVICE_UNAVAILABLE', 'ADJUST_QUANTITIES_FAILED'])")
     expect(mensajero).toContain("codigos.includes('IDEMPOTENCY_CONCURRENT_REQUEST')")
+    expect(mensajero).toContain('export const SHOPIFY_OUTBOX_MAX_ATTEMPTS = 6')
+    expect(cuerpo(mensajero, 'async function reintentar(')).toContain('if (attempts >= SHOPIFY_OUTBOX_MAX_ATTEMPTS) return muerta(')
   })
 
   it('dice qué se conserva y cómo cierran los envíos de una generación vieja (§9.1-§9.2)', () => {
@@ -228,7 +230,7 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
       'Dos motivos (enmienda §12.1)',
       '`ENVIO_EN_CAMINO`',
       '`DUDA_POR_REVISAR`',
-      'hay una DEAD_LETTER ambigua o una revisión OPEN',
+      '`DUDA_POR_REVISAR` (sólo entre los bloqueados: hay una DEAD_LETTER ambigua o una revisión OPEN;',
     ])
     expect(regla).not.toContain('Un resultado no concluyente')
 
@@ -275,9 +277,11 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
   it('🔴 las entradas HTTP: webhook crudo de 1 MB antes del genérico y callback con las dos formas de HMAC', () => {
     contieneTodas([
       '`express.raw` de 1 MB (`SHOPIFY_WEBHOOK_MAX_BYTES`) montado ANTES del router genérico',
+      "Ese montaje usa `express.raw({ type: 'application/json' })`: el límite por omisión es de 100 KB",
+      'su tipo NO es comodín (cualquier otro Content-Type deja `req.body = {}`)',
       '`handleShopifyCallback(…)` recibe `req.query` INTACTO',
       'se aceptan DOS formas de firma',
-      'Un `host` terminado en `==` sólo cuadra con la primera',
+      'Un `host` terminado en `==` firmado como la biblioteca oficial sólo cuadra con la forma codificada; con una sola forma (la decodificada), el piloto daría `?error=FIRMA`',
     ])
     const app = leer('src/app.ts')
     enOrden(app, [
@@ -289,6 +293,11 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     expect(firma).toContain("return 'codificada'")
     expect(firma).toContain("return 'decodificada'")
     expect(firma).toContain(".replace(/\\+/g, '%20')")
+    // El anclaje de la regla: `formaDeFirmaOAuth` es lo que cuadra las dos formas; `verifyOAuthQueryHmac` sólo la llama.
+    expect(firma).toContain('export function formaDeFirmaOAuth(')
+    expect(cuerpo(firma, 'export function verifyOAuthQueryHmac(')).toContain('formaDeFirmaOAuth(query, secret)')
+    // El montaje genérico no fija `limit` (100 KB por omisión) y su tipo es sólo application/json: por eso el de Shopify va aparte.
+    expect(app).not.toMatch(/express\.raw\(\{ type: 'application\/json', limit/)
   })
 
   it('🔴 la retención de 90 días, la prueba de volumen apagada por defecto y el carril ci/ sin workflow_dispatch', () => {
@@ -344,10 +353,119 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     }
     recorre(path.join(RAIZ, 'src'))
     const pendienteEnLaRegla = regla.includes('todavía NO muestra `shopifyHeldAt`')
-    expect({ pendienteEnLaRegla, quienLasLee: tocan.map(f => path.relative(RAIZ, f)) }).toEqual({
-      pendienteEnLaRegla: tocan.length === 0,
-      quienLasLee: tocan.map(f => path.relative(RAIZ, f)),
+    const quienes = tocan.map(f => path.relative(RAIZ, f))
+    if (pendienteEnLaRegla && quienes.length > 0) {
+      throw new Error(
+        `El servidor ya lee shopifyHeld* (${quienes.join(', ')}): quita la viñeta «Pendiente (L5…)» del §7 de .claude/rules/shopify-conector.md ` +
+          'y revisa C12 (Android e iOS: ¿ya muestran las líneas retenidas?).',
+      )
+    }
+    if (!pendienteEnLaRegla && quienes.length === 0) {
+      throw new Error(
+        'La regla ya no trae la viñeta «Pendiente (L5…)» del §7 pero el servidor todavía NO expone shopifyHeld* fuera de inventory.mobile.service.ts: ' +
+          'vuelve a ponerla (o expón las líneas retenidas en el detalle del conteo y en stock_counts).',
+      )
+    }
+  })
+
+  it('🔴 el invariante: Σ vivas y Σ DEAD_LETTER son de la generación vigente (T3); lo de una generación vieja y las RELIGADA no entran', () => {
+    contieneTodas([
+      "`LIVE_OUTBOX_STATUSES = ['PENDING', 'IN_PROGRESS', 'FAILED']`",
+      'El invariante vale para una pareja iniciada y no suspendida, y TODAS sus sumas son de la generación vigente de la sucursal (T3): Σ vivas y Σ DEAD_LETTER por igual',
+      'Las filas de una generación vieja y las `RELIGADA_A_OTRA_TIENDA` (que quedan en la generación anterior) NO entran en la cuenta',
+      'Una DEAD_LETTER (de la generación vigente) conserva su delta en la cuenta',
+    ])
+    expect(leer(`${SHOPIFY}/shopify.constants.ts`)).toContain(
+      "export const LIVE_OUTBOX_STATUSES = ['PENDING', 'IN_PROGRESS', 'FAILED'] as const",
+    )
+    const mirror = leer(`${SHOPIFY}/shopify.mirror.service.ts`)
+    expect(mirror).toContain('Invariante operativo (§9.3; pareja iniciada y no suspendida)')
+    expect(mirror).toContain('del producto en la generación vigente.')
+    // Cada lugar que suma o cuenta filas del buzón lo hace SOLO de la generación vigente.
+    expect(cuerpo(mirror, 'export async function liveOutboxSum(')).toContain('generation, status: { in: [...LIVE_OUTBOX_STATUSES] }')
+    expect(cuerpo(mirror, 'export async function productBlocked(')).toContain('AND generation = ${generation}')
+    expect(cuerpo(mirror, 'async function bloquearFilasDelProducto(')).toContain('generation = ${p.generation}')
+    const reconcile = leer(`${SHOPIFY}/shopify.reconcile.service.ts`)
+    const revision = cuerpo(reconcile, 'async function abrirRevision(')
+    expect(revision).toContain("generation: cerco.generation, status: 'DEAD_LETTER'")
+    expect(revision).toContain('liveOutboxSum(tx, productId, link.id, cerco.generation)')
+    expect(cuerpo(reconcile, 'export async function leerTandaCuadre(')).toContain(
+      "locationLinkId, generation, status: { in: [...VIVAS, 'DEAD_LETTER'] }",
+    )
+    // Las RELIGADA quedan en la generación anterior: religar las manda a DEAD_LETTER y LUEGO sube la generación.
+    const conexion = leer(`${SHOPIFY}/shopify.connect.service.ts`)
+    enOrden(cuerpo(conexion, 'export async function confirmShopifyConnect('), [
+      'aCuarentenaPorReligar(tx, previo.id)',
+      'dejarConectando(tx, previo',
+    ])
+    expect(cuerpo(conexion, 'async function dejarConectando(')).toContain('generation: previo.generation + 1')
+  })
+
+  it('🔴 el cuadre decide en este orden: con DEAD_LETTER (aunque total = 0) ATORADO/INCIERTO y nunca cierra; sin ella, total = 0 cierra, total ≠ offset da DIFERENCIA', () => {
+    contieneTodas([
+      'con DEAD_LETTER (aunque `total = 0`, que es el caso normal de un ATORADO): abre o actualiza `ATORADO` (`INCIERTO` si alguna es ambigua) con `offset = total`; nunca cierra',
+      'sin DEAD_LETTER y `total = 0`: cierra la revisión OPEN (offset 0) o no hace nada',
+      'sin DEAD_LETTER y `total ≠ 0`: con un envío en camino sale `EN_CAMINO` sin escribir',
+      'una OPEN que ya existía conserva su motivo (sólo ATORADO e INCIERTO se lo pisan)',
+    ])
+    const revision = cuerpo(leer(`${SHOPIFY}/shopify.reconcile.service.ts`), 'async function abrirRevision(')
+    // `nAtoradas > 0` se pregunta ANTES que `total.isZero()`: con DEAD_LETTER y total 0 (el ATORADO normal) no se cierra nada.
+    enOrden(revision, [
+      'if (nAtoradas > 0)',
+      "reason = ambiguas > 0 ? 'INCIERTO' : 'ATORADO'",
+      'total.isZero()',
+      'reason: abierta.reason, avoqado: A.toString(), shopify: S',
+      'if (enCamino > 0) return',
+      'total.minus(abierta.offset).isZero()',
+      "reason = 'DIFERENCIA'",
+    ])
+    expect(revision).toContain("const motivo = reason === 'ATORADO' || reason === 'INCIERTO' ? reason : abierta.reason")
+  })
+
+  it('🔴 el guardia (trigger) y la marca de origen: lo que la regla dice de la migración y de set_config está en el SQL y en el código', () => {
+    contieneTodas([
+      'El trigger `"Inventory_guardia_shopify"` (`AFTER INSERT OR UPDATE OF "currentStock"`',
+      'si está PAUSED, manda `pausedFrom`',
+      "`SELECT set_config('avoqado.stock_origen', 'shopify', true)`",
+    ])
+    const carpetas = fs.readdirSync(path.join(RAIZ, 'prisma/migrations')).filter(d => d.endsWith('_shopify_conector'))
+    expect(carpetas).toHaveLength(1)
+    const sql = leer(`prisma/migrations/${carpetas[0]}/migration.sql`)
+    enOrden(sql, [
+      "IF current_setting('avoqado.stock_origen', true) = 'shopify' THEN",
+      'IF v_delta = 0 THEN',
+      `WHEN l.status = 'PAUSED' THEN COALESCE(l."pausedFrom"::text, 'ACTIVE')`,
+      `IF v_link IS NULL OR v_fase = 'DISCONNECTED' THEN`,
+      `IF v_fase = 'ACTIVE' THEN`,
+      'v."initializedAt" IS NOT NULL AND v."suspendedReason" IS NULL',
+      'INSERT INTO "ShopifyStockOutbox"',
+      'AFTER INSERT OR UPDATE OF "currentStock" ON "Inventory"',
+    ])
+    const mirror = leer(`${SHOPIFY}/shopify.mirror.service.ts`)
+    expect(cuerpo(mirror, 'export async function marcarOrigenShopify(')).toContain(
+      "SELECT set_config('avoqado.stock_origen', 'shopify', true)",
+    )
+  })
+
+  it('los globs de `paths:` de la regla apuntan a algo que existe, incluidos los demás escritores de stock', () => {
+    const cabecera = leer('.claude/rules/shopify-conector.md').split('---')[1]
+    const globs = [...cabecera.matchAll(/- '([^']+)'/g)].map(m => m[1])
+    for (const escritor of [
+      'src/services/inventory/**',
+      'src/services/dashboard/purchaseOrder*',
+      'src/services/dashboard/menu.dashboard.service.ts',
+      'src/services/mobile/areaTicketV7.mobile.service.ts',
+      'src/services/dashboard/chatbot-actions/definitions/product-stock.actions.ts',
+    ]) {
+      expect(globs).toContain(escritor)
+    }
+    const huecos = globs.filter(g => {
+      const previo = g.split('*')[0] // lo que precede al primer comodín
+      const dir = previo.endsWith('/') ? previo : path.dirname(previo)
+      const base = previo.endsWith('/') ? '' : path.basename(previo)
+      return !(fs.existsSync(path.join(RAIZ, dir)) && (base === '' || fs.readdirSync(path.join(RAIZ, dir)).some(f => f.startsWith(base))))
     })
+    expect(huecos).toEqual([])
   })
 
   it('no conserva versiones anteriores', () => {
