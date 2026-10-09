@@ -19,6 +19,7 @@ import { RoleRates } from './commission-utils'
 import { validarTasasDelEsquema } from './tasasDelEsquema'
 import { personasElegidasAGuardar } from './personasElegidas'
 import { rechazarCambiosConComisiones, sinLoQueNoCambia } from './cambiosConComisiones'
+import { asegurarIdsDelNegocio } from './idsDelNegocio'
 import { logAction } from '../activity-log.service'
 import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
 
@@ -235,6 +236,7 @@ export async function createCommissionConfig(venueId: string, data: CreateCommis
   validarTasasDelEsquema(data)
   // D-ELEGIDOS: a quién aplica (todo el equipo, de fábrica, o sólo las personas elegidas de ESTA sede).
   const elegidos = await personasElegidasAGuardar(data, { venueId })
+  await asegurarIdsDelNegocio({ venueId }, { categoryIds: data.categoryIds }) // las categorías, de ESTA sede (T1-hermanos)
 
   // Validate date range
   if (data.effectiveTo && data.effectiveFrom) {
@@ -355,6 +357,7 @@ export async function updateCommissionConfig(
   // tipo de antes; y las tasas por rol y de meta superada (final-fijo-niveles, fase 3).
   validarTasasDelEsquema(data, existing)
   const elegidos = await personasElegidasAGuardar(data, { venueId }, existing)
+  await asegurarIdsDelNegocio({ venueId }, { categoryIds: data.categoryIds }) // las categorías, de ESTA sede (T1-hermanos)
 
   // Validate date range
   const effectiveFrom = data.effectiveFrom ?? existing.effectiveFrom

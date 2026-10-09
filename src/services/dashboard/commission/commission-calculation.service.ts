@@ -66,6 +66,7 @@ import {
 import { COMMISSION_BASE, resolveCommissionBase } from './commission-base'
 import { redondearRepartido, repartir } from './repartoPorCobro'
 import { aplicaALaPersona } from './personasElegidas'
+import { asegurarIdsDelNegocio } from './idsDelNegocio'
 import { subMonths, startOfMonth, endOfMonth } from 'date-fns'
 import { toZonedTime, fromZonedTime } from 'date-fns-tz'
 import { getApplicableTierRate, resolveGoalBasedTier } from './commission-tier.service'
@@ -767,10 +768,10 @@ export async function createManualCommission(
   shiftId?: string,
 ): Promise<CommissionCalculationResult> {
   // Validate staff
+  // FT-GRAVES T1-hermanos: la persona, la orden y el turno tienen que ser de ESTA sede; 400 en español (`idsDelNegocio.ts`).
+  await asegurarIdsDelNegocio({ venueId }, { staffIds: [staffId], orderIds: [orderId], shiftIds: [shiftId] })
   const staffInfo = await validateStaffForCommission(staffId, venueId)
-  if (!staffInfo) {
-    throw new BadRequestError(`Staff ${staffId} is not active in venue ${venueId}`)
-  }
+  if (!staffInfo) throw new BadRequestError('Esa persona no está activa en este negocio.')
 
   // Find any active config (for reference, not for rate calculation)
   const config = await findActiveCommissionConfig(venueId)

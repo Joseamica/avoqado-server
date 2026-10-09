@@ -17,6 +17,7 @@ import { validarTasasDelEsquema } from './tasasDelEsquema'
 import { personasElegidasAGuardar } from './personasElegidas'
 import { rechazarCambiosConComisiones, sinLoQueNoCambia, soloCamposDelEsquema } from './cambiosConComisiones'
 import { validateAttendanceRule } from './commission-config.service'
+import { asegurarIdsDelNegocio } from './idsDelNegocio'
 
 export type CommissionConfigSource = 'venue' | 'organization'
 
@@ -101,6 +102,7 @@ export async function createOrgCommissionConfig(venueId: string, cuerpo: unknown
   const organizationId = await getOrgIdFromVenue(venueId)
   // D-ELEGIDOS: sólo personas del equipo de la ORGANIZACIÓN (alguna de sus sedes), sin repetidos.
   const elegidos = await personasElegidasAGuardar(data, { organizationId })
+  await asegurarIdsDelNegocio({ organizationId }, { categoryIds: data.categoryIds }) // de alguna de SUS sedes (T1-hermanos)
 
   const result = await prisma.commissionConfig.create({
     data: {
@@ -145,6 +147,7 @@ export async function updateOrgCommissionConfig(venueId: string, configId: strin
   validateAttendanceRule(data)
   validarTasasDelEsquema(data, existing) // lo que QUEDA (final-fijo-niveles, fase 3)
   const elegidos = await personasElegidasAGuardar(data, { organizationId }, existing)
+  await asegurarIdsDelNegocio({ organizationId }, { categoryIds: data.categoryIds }) // de alguna de SUS sedes (T1-hermanos)
 
   // El cambio y su ActivityLog (con quién lo hizo) en la MISMA transacción.
   return prisma.$transaction(async tx => {

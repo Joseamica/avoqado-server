@@ -23,6 +23,7 @@ import { validarTasasDelEsquema } from './tasasDelEsquema'
 import { personasElegidasAGuardar } from './personasElegidas'
 import { validateAttendanceRule, type CreateCommissionConfigInput } from './commission-config.service'
 import { soloCamposDelEsquema } from './cambiosConComisiones'
+import { asegurarIdsDelNegocio } from './idsDelNegocio'
 
 type Cambios = Partial<Omit<CreateCommissionConfigInput, 'orgId'>> & { description?: string | null }
 
@@ -63,6 +64,7 @@ export async function reemplazarEsquema(venueId: string, originalId: string, cue
       // Lo que QUEDA en el esquema nuevo pasa las mismas reglas que crear y actualizar.
       validarTasasDelEsquema(cambios, original)
       const elegidos = await personasElegidasAGuardar(cambios, { venueId }, original)
+      await asegurarIdsDelNegocio({ venueId }, { categoryIds: cambios.categoryIds }, tx) // de ESTA sede (T1-hermanos)
       const castigo = quedaIgual(
         cambios.attendanceLatePenaltyRate,
         original.attendanceLatePenaltyRate === null ? null : Number(original.attendanceLatePenaltyRate),

@@ -16,6 +16,7 @@ import { Prisma } from '@prisma/client'
 import { BadRequestError, NotFoundError } from '../../../errors/AppError'
 import { validateRate } from './commission-utils'
 import { logAction } from '../activity-log.service'
+import { asegurarIdsDelNegocio } from './idsDelNegocio'
 
 // ============================================
 // Type Definitions
@@ -180,18 +181,8 @@ export async function createCommissionOverride(
     throw new NotFoundError(`Commission config ${configId} not found`)
   }
 
-  // Verify staff belongs to venue
-  const staffVenue = await prisma.staffVenue.findFirst({
-    where: {
-      staffId: data.staffId,
-      venueId,
-      active: true,
-    },
-  })
-
-  if (!staffVenue) {
-    throw new BadRequestError(`Staff ${data.staffId} is not active in venue ${venueId}`)
-  }
+  // La persona tiene que ser del equipo ACTIVO de esta sede; 400 en español (FT-GRAVES T1-hermanos, `idsDelNegocio.ts`).
+  await asegurarIdsDelNegocio({ venueId }, { staffIds: [data.staffId] })
 
   // Validate rate if provided
   if (data.customRate !== undefined && data.customRate !== null) {
@@ -501,6 +492,8 @@ export async function bulkExcludeStaff(
   if (!config) {
     throw new NotFoundError(`Commission config ${configId} not found`)
   }
+  // FT-GRAVES T1-hermanos: TODAS las personas tienen que ser de esta sede, o no se excluye a nadie (`idsDelNegocio.ts`).
+  await asegurarIdsDelNegocio({ venueId }, { staffIds })
 
   let created = 0
 
