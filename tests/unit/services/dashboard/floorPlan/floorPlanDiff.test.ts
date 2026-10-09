@@ -264,3 +264,77 @@ describe('computeFloorPlanDiff — elementos y límites', () => {
     ).toBe('LIMIT_EXCEEDED')
   })
 })
+
+describe('computeFloorPlanDiff — claves repetidas y tipo de elemento', () => {
+  const barra = {
+    id: 'e1',
+    type: 'SERVICE_AREA' as const,
+    areaId: 'a1',
+    positionX: 0.1,
+    positionY: 0.1,
+    width: 0.3,
+    height: 0.1,
+    rotation: 0,
+    endX: null,
+    endY: null,
+    label: null,
+    color: null,
+  }
+  const keepElement = (extra: Record<string, unknown> = {}) => ({
+    id: barra.id,
+    type: barra.type,
+    areaRef: 'a1',
+    positionX: barra.positionX,
+    positionY: barra.positionY,
+    width: barra.width,
+    height: barra.height,
+    rotation: barra.rotation,
+    ...extra,
+  })
+
+  it('rechaza la misma mesa dos veces (no archiva en silencio a otra)', () => {
+    const t1 = table('t1', '1'),
+      t2 = table('t2', '2')
+    const e = rule(() =>
+      computeFloorPlanDiff(current([t1, t2]), { areas: [keepArea], tables: [keep(t1), keep(t1, { number: '2' })], elements: [] }),
+    )
+    expect(e.code).toBe('DUPLICATE_ID')
+    expect(e.details).toEqual({ id: 't1' })
+  })
+
+  it('rechaza el mismo elemento dos veces', () => {
+    const e = rule(() =>
+      computeFloorPlanDiff(current([], { elements: [barra] }), {
+        areas: [keepArea],
+        tables: [],
+        elements: [keepElement(), keepElement({ positionX: 0.5 })],
+      }),
+    )
+    expect(e.code).toBe('DUPLICATE_ID')
+    expect(e.details).toEqual({ id: 'e1' })
+  })
+
+  it('rechaza la misma área dos veces aunque traiga otro nombre', () => {
+    const e = rule(() => computeFloorPlanDiff(current([]), { areas: [keepArea, { ...keepArea, name: 'Otra' }], tables: [], elements: [] }))
+    expect(e.code).toBe('DUPLICATE_ID')
+    expect(e.details).toEqual({ id: 'a1' })
+  })
+
+  it('rechaza dos mesas nuevas con la misma clave', () => {
+    const e = rule(() => computeFloorPlanDiff(current([]), { areas: [keepArea], tables: [fresh('c', '1'), fresh('c', '2')], elements: [] }))
+    expect(e.code).toBe('DUPLICATE_CLIENT_ID')
+    expect(e.details).toEqual({ clientId: 'c' })
+  })
+
+  it('un elemento que cambia de tipo con la misma geometría sí se actualiza; uno igual no', () => {
+    const changed = computeFloorPlanDiff(current([], { elements: [barra] }), {
+      areas: [keepArea],
+      tables: [],
+      elements: [keepElement({ type: 'BAR_COUNTER' })],
+    })
+    expect(changed.elements.update).toEqual([{ id: 'e1', data: expect.objectContaining({ type: 'BAR_COUNTER' }) }])
+    const same = computeFloorPlanDiff(current([], { elements: [barra] }), { areas: [keepArea], tables: [], elements: [keepElement()] })
+    expect(same.elements.update).toEqual([])
+    expect(same.elements.archive).toEqual([])
+  })
+})

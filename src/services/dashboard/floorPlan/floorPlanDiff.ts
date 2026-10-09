@@ -14,6 +14,7 @@ import {
 export type FloorPlanRuleCode =
   | 'LIMIT_EXCEEDED'
   | 'DUPLICATE_CLIENT_ID'
+  | 'DUPLICATE_ID'
   | 'AREA_NAME_DUPLICATED'
   | 'UNKNOWN_AREA'
   | 'UNKNOWN_AREA_REF'
@@ -114,6 +115,7 @@ function tableChanged(cur: PlanTable, d: TableLayout): boolean {
 
 function elementChanged(cur: PlanElement, d: ElementLayout): boolean {
   return (
+    cur.type !== d.type ||
     cur.areaId !== targetId(d.area) ||
     !same(cur.positionX, d.positionX) ||
     !same(cur.positionY, d.positionY) ||
@@ -152,6 +154,16 @@ function toElementLayout(e: DesiredElement, area: AreaTarget, index: number): El
   }
 }
 
+/** Una misma fila no puede venir dos veces: se colapsaría en silencio y hasta podría archivar otra mesa. */
+function assertUniqueIds(items: ReadonlyArray<{ id?: string }>, what: string): void {
+  const seen = new Set<string>()
+  for (const { id } of items) {
+    if (!id) continue
+    if (seen.has(id)) throw new FloorPlanRuleError('DUPLICATE_ID', `El plano trae dos veces ${what}. Recarga el plano.`, { id })
+    seen.add(id)
+  }
+}
+
 /**
  * Compara el plano actual con el que el editor quiere publicar y dice qué crear, cambiar, archivar o
  * revivir. Pura: no toca la base. El servicio aplica el resultado dentro de una transacción.
@@ -171,6 +183,10 @@ export function computeFloorPlanDiff(
       kind: 'elements',
       limit: limits.elements,
     })
+
+  assertUniqueIds(desired.areas, 'la misma área')
+  assertUniqueIds(desired.tables, 'la misma mesa')
+  assertUniqueIds(desired.elements, 'el mismo elemento')
 
   const diff: FloorPlanDiff = {
     areas: { create: [], update: [], rename: [], remove: [] },
@@ -229,7 +245,13 @@ export function computeFloorPlanDiff(
   // ---- Mesas
   const active = new Map(current.activeTables.map(t => [t.id, t]))
   const numbers = new Set<string>()
+  const tableClientIds = new Set<string>()
   for (const t of desired.tables) {
+    if (t.clientId) {
+      if (tableClientIds.has(t.clientId))
+        throw new FloorPlanRuleError('DUPLICATE_CLIENT_ID', 'El plano trae dos mesas con la misma clave', { clientId: t.clientId })
+      tableClientIds.add(t.clientId)
+    }
     const n = t.number.trim()
     if (numbers.has(n)) throw new FloorPlanRuleError('TABLE_NUMBER_DUPLICATED', `Hay dos mesas con el número ${n}`, { number: n })
     numbers.add(n)
