@@ -496,6 +496,62 @@ describe('updateTpv — el servicio sólo escribe los campos editables, venga de
   })
 })
 
+// 🔴 Rediseño de Dispositivos (8-oct-2026): el superadmin ponía «Estado: Activa» al editar en el dashboard del negocio y
+// la terminal seguía pidiendo código, porque esta ruta escribía el estado pero nunca `activatedAt` (la de superadmin,
+// terminals.superadmin.service, sí lo sella). Sólo el superadmin: el código de activación existe para que nadie más
+// pueda dar de alta un aparato sin él, y esta ruta la usan dueños y gerentes con `tpv:update`.
+describe('updateTpv — «Estado: Activa» registra la activación sólo si lo pone un superadmin', () => {
+  const nuncaActivada = { id: 'terminal-1', venueId, type: 'TPV_ANDROID', name: 'Caja 2', serialNumber: 'AVQD-1', activatedAt: null }
+
+  beforeEach(() => {
+    prismaMock.terminal.findFirst.mockResolvedValue(nuncaActivada as any)
+    prismaMock.terminal.update.mockImplementation((({ data }: any) => Promise.resolve({ ...nuncaActivada, ...data })) as any)
+  })
+
+  it('superadmin + ACTIVE sobre una terminal nunca activada: sella activatedAt y quién la activó', async () => {
+    await updateTpv(venueId, 'terminal-1', { status: 'ACTIVE' as any }, { staffId: 'sa-1', role: 'SUPERADMIN' })
+
+    const { data } = prismaMock.terminal.update.mock.calls[0][0] as any
+    expect(data.status).toBe('ACTIVE')
+    expect(data.activatedAt).toBeInstanceOf(Date)
+    expect(data.activatedBy).toBe('sa-1')
+    const audit = (logAction as jest.Mock).mock.calls.map(([params]) => params).find(params => params?.action === 'TPV_UPDATED')
+    expect(audit.data.updatedFields).toEqual(['activatedAt', 'activatedBy', 'status'])
+  })
+
+  it('un dueño con tpv:update pone ACTIVE: cambia el estado pero NO activa (sigue pidiendo código)', async () => {
+    await updateTpv(venueId, 'terminal-1', { status: 'ACTIVE' as any }, { staffId: 'owner-1', role: 'OWNER' })
+
+    const { data } = prismaMock.terminal.update.mock.calls[0][0] as any
+    expect(data.status).toBe('ACTIVE')
+    expect(data).not.toHaveProperty('activatedAt')
+    expect(data).not.toHaveProperty('activatedBy')
+  })
+
+  it('sin rol conocido tampoco activa', async () => {
+    await updateTpv(venueId, 'terminal-1', { status: 'ACTIVE' as any }, { staffId: 'x' })
+
+    const { data } = prismaMock.terminal.update.mock.calls[0][0] as any
+    expect(data).not.toHaveProperty('activatedAt')
+  })
+
+  it('una terminal ya activada conserva su fecha de activación', async () => {
+    prismaMock.terminal.findFirst.mockResolvedValue({ ...nuncaActivada, activatedAt: new Date('2026-09-01T10:00:00Z') } as any)
+
+    await updateTpv(venueId, 'terminal-1', { status: 'ACTIVE' as any }, { staffId: 'sa-1', role: 'SUPERADMIN' })
+
+    const { data } = prismaMock.terminal.update.mock.calls[0][0] as any
+    expect(data).not.toHaveProperty('activatedAt')
+  })
+
+  it('otro estado (INACTIVE, MAINTENANCE) no activa aunque lo ponga un superadmin', async () => {
+    await updateTpv(venueId, 'terminal-1', { status: 'MAINTENANCE' as any }, { staffId: 'sa-1', role: 'SUPERADMIN' })
+
+    const { data } = prismaMock.terminal.update.mock.calls[0][0] as any
+    expect(data).not.toHaveProperty('activatedAt')
+  })
+})
+
 // 🔴 Auditorías de Codex del spec «pantalla del cliente» (3ª y 4ª ronda, 2026-09-16/17). Escogía las terminales del
 // negocio y las escribía sólo por id; y el horario del negocio se guardaba ANTES, fuera de la transacción, así que un
 // error dejaba la mitad guardada. Ahora cada terminal va acotada al negocio, una que se mudó en medio simplemente ya no

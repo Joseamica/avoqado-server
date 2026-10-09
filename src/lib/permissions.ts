@@ -418,6 +418,9 @@ export const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   // cheque, y la caja lo liquida igual. NO implica `tables:update`: cobrar no es tocar
   // el piso.
   'tables:pay-any': ['tables:pay-any', 'tables:read'],
+  // Plano de mesas (dashboard, 2026-10-08): dibujar áreas, mesas, paredes, barra y cocina.
+  // Configurar el plano no es operar mesas: sólo arrastra la lectura.
+  'tables:configure': ['tables:configure', 'tables:read'],
 
   // ===========================
   // RESERVATIONS
@@ -1045,6 +1048,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'tables:read',
     'tables:update',
     'tables:manage-all', // Propiedad de mesa: puede modificar/cerrar mesas de otros meseros
+    'tables:configure', // Plano de mesas en el dashboard (Configuración → Mesas y plano)
     'tpv:read',
     'tpv:create',
     'tpv:update',
@@ -1975,7 +1979,7 @@ export const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   teams: ['teams:read', 'teams:create', 'teams:update', 'teams:delete', 'teams:invite'],
   'staff-documents': ['staff-documents:read', 'staff-documents:write'],
   attendance: ['attendance:read', 'attendance:manage'],
-  tables: ['tables:read', 'tables:update', 'tables:manage-all', 'tables:pay-any'],
+  tables: ['tables:read', 'tables:update', 'tables:manage-all', 'tables:pay-any', 'tables:configure'],
   reservations: ['reservations:read', 'reservations:create', 'reservations:update', 'reservations:cancel', 'reservations:manage-passes'],
   'class-sessions': ['class-sessions:read-assigned'],
   settings: ['settings:read', 'settings:manage'],

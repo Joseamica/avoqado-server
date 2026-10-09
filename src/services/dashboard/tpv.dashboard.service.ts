@@ -242,6 +242,8 @@ export async function getTpvById(venueId: string, tpvId: string): Promise<Device
 
 export interface UpdateTpvActor {
   staffId?: string
+  /** Rol efectivo de quien edita. Sólo SUPERADMIN convierte «Estado: Activa» en activación (ver updateTpv). */
+  role?: string
 }
 
 /** El formulario manda la configuración como texto JSON; se guarda como objeto o se rechaza. */
@@ -284,7 +286,7 @@ export async function updateTpv(venueId: string, tpvId: string, updateData: Upda
       id: tpvId,
       venueId: venueId,
     },
-    select: { id: true, type: true, serialNumber: true },
+    select: { id: true, type: true, serialNumber: true, activatedAt: true },
   })
 
   if (!existingTerminal) {
@@ -298,6 +300,13 @@ export async function updateTpv(venueId: string, tpvId: string, updateData: Upda
   if (updateData.name !== undefined) data.name = updateData.name
   if (updateData.type !== undefined) data.type = updateData.type
   if (updateData.status !== undefined) data.status = updateData.status
+  // Un superadmin que pone «Activa» a una terminal que nunca se activó la ACTIVA: se sella `activatedAt`, igual que en
+  // su propia ruta (terminals.superadmin.service). Sin esto la terminal decía «Activa» y seguía pidiendo código. Sólo el
+  // superadmin: dueños y gerentes también entran aquí con `tpv:update`, y para ellos el código de activación es el candado.
+  if (updateData.status === TerminalStatus.ACTIVE && actor.role === 'SUPERADMIN' && !existingTerminal.activatedAt) {
+    data.activatedAt = new Date()
+    data.activatedBy = actor.staffId ?? null
+  }
   if (updateData.model !== undefined) data.model = updateData.model
   if (updateData.customerDisplayInverted !== undefined) data.customerDisplayInverted = updateData.customerDisplayInverted
   // Una marca como «Nexgo» deja a la terminal sin AngelPay en silencio: se guarda la forma canónica.

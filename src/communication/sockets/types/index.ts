@@ -84,6 +84,9 @@ export enum SocketEventType {
   HYBRID_CAMPAIGN_UPDATED = 'superadmin:hybrid-campaign:updated',
   VENUE_UPDATE = 'venue_update',
   TABLE_STATUS_CHANGE = 'table_status_change',
+  // Plano de mesas publicado desde el dashboard (2026-10-08). Payload: { fingerprint }. Los POS lo
+  // escucharán en su fase para volver a pedir el plano; hoy ningún cliente lo consume.
+  FLOOR_PLAN_UPDATED = 'floor_plan_updated',
 
   // Business Events - Shifts
   SHIFT_OPENED = 'shift_opened',
