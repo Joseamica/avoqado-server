@@ -405,6 +405,7 @@ model Venue {
   tables                Table[]
   areas                 Area[]
   floorElements         FloorElement[]
+  floorPlanPublications FloorPlanPublication[]
   shifts                Shift[]
   timeEntries           TimeEntry[]
   overtimeApprovals     OvertimeApproval[]
@@ -3293,6 +3294,11 @@ model Area {
   tables        Table[] // Un área tiene muchas mesas
   floorElements FloorElement[] // Elementos decorativos del área (paredes, barras, etc.)
 
+  // Plano del dashboard (2026-10-08): forma del lienzo del área y su orden en las pestañas.
+  // null = área anterior a esta fase ⇒ se dibuja como WIDE (16:10).
+  floorShape FloorShape?
+  sortOrder  Int         @default(0)
+
   // Demo data flag (for cleanup on conversion)
   isDemo Boolean @default(false)
 
@@ -3389,6 +3395,23 @@ model FloorElement {
   @@index([venueId])
   @@index([venueId, areaId])
   @@index([venueId, type])
+}
+
+/// Una publicación del plano desde el dashboard. Da idempotencia al «Guardar» (el cliente HTTP del
+/// dashboard reintenta una vez ante un error de red) y deja el historial de quién publicó qué.
+model FloorPlanPublication {
+  id                String   @id @default(cuid())
+  venueId           String
+  venue             Venue    @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  saveId            String
+  staffId           String?
+  baseFingerprint   String
+  resultFingerprint String
+  summary           Json
+  createdAt         DateTime @default(now())
+
+  @@unique([venueId, saveId])
+  @@index([venueId, createdAt])
 }
 
 model Shift {
@@ -9650,6 +9673,13 @@ enum TableShape {
   SQUARE // 2-4 person square table
   ROUND // Round table
   RECTANGLE // Long table (6+ people)
+}
+
+/// Proporción del lienzo de un área en el plano de mesas (spec 2026-10-08 §4.3).
+enum FloorShape {
+  WIDE // 16:10
+  SQUARE // 1:1
+  TALL // 10:16
 }
 
 enum TableStatus {

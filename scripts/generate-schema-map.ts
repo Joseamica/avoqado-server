@@ -148,6 +148,7 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   Zone: 'Multi-Tenant Core',
   Table: 'Multi-Tenant Core',
   FloorElement: 'Multi-Tenant Core',
+  FloorPlanPublication: 'Multi-Tenant Core',
 
   // 2. Modules, Features & Billing
   Module: 'Modules, Features & Billing',
