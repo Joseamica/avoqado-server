@@ -3,9 +3,10 @@
  * Fase 3 de Pago al personal, FT-GRAVES T2 (regla del founder, 8-oct): **un cobro COMPLETED con una persona atribuida genera
  * comisión según los esquemas; sin persona atribuida, no** (no se inventa a quién). Contra Postgres REAL.
  *
- * Los cobros que se registran desde el dashboard no comisionaban: el pago manual (`createManualPayment`), la venta manual
- * (`createOneManualSale`), saldar una orden (`settleOrder`) y saldar el saldo de un cliente (`settleCustomerBalance`). Ahora usan
- * el MISMO gancho que la terminal (`enqueuePaymentCommissionInTx`), en la transacción del cobro, con su deduplicación por pago.
+ * Los cobros que se registran desde el dashboard no comisionaban: el pago manual (`createManualPayment`), saldar una orden
+ * (`settleOrder`) y saldar el saldo de un cliente (`settleCustomerBalance`). Ahora usan el MISMO gancho que la terminal
+ * (`enqueuePaymentCommissionInTx`), en la transacción del cobro, con su deduplicación por pago. La venta manual de SIM
+ * (PlayTelecom) queda FUERA por decisión del founder: la paga Cash Out, su propio flujo.
  * El esquema decide a quién (aquí, «quién atendió»), y la devolución lo revierte por el mecanismo de siempre.
  *
  * Correr: TZ=UTC TEST_DATABASE_URL="<base de prueba>" npx jest --selectProjects=integration \
@@ -15,7 +16,6 @@ import { randomUUID } from 'crypto'
 import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { createManualPayment } from '@/services/dashboard/manualPayment.service'
-import { createOneManualSale } from '@/services/dashboard/manualSale.service'
 import { settleOrder } from '@/services/dashboard/order.dashboard.service'
 import { settleCustomerBalance } from '@/services/dashboard/customer.dashboard.service'
 import { issueRefund } from '@/services/dashboard/refund.dashboard.service'
@@ -55,9 +55,6 @@ afterEach(async () => {
   const mundo = m
   m = undefined as unknown as MundoComisiones
   if (mundo) {
-    await prisma.saleVerification.deleteMany({ where: { venueId: mundo.venueId } })
-    await prisma.serializedItem.deleteMany({ where: { organizationId: mundo.orgId } })
-    await prisma.itemCategory.deleteMany({ where: { organizationId: mundo.orgId } })
     await prisma.orderCustomer.deleteMany({ where: { order: { venueId: mundo.venueId } } })
     await prisma.customer.deleteMany({ where: { venueId: mundo.venueId } })
   }
@@ -155,36 +152,5 @@ describe('T2 · saldar el saldo de un cliente (settleCustomerBalance)', () => {
     await settleCustomerBalance(m.venueId, cliente.id, undefined, m.owner)
     await procesarEfectos(m)
     expect(await comisionesDeLaOrden(orderId)).toEqual([])
-  })
-})
-
-describe('T2 · venta manual de SIM fuera de la TPV (createOneManualSale)', () => {
-  it('🔴 la venta del promotor comisiona para él (quién atendió), y la devolución la revierte', async () => {
-    await prisma.staff.update({ where: { id: m.ana }, data: { employeeCode: `${m.key}-ANA` } })
-    await prisma.venue.update({ where: { id: m.venueId }, data: { name: `Tienda QA ${m.key}` } })
-    const categoria = await prisma.itemCategory.create({ data: { organizationId: m.orgId, name: 'SIM QA' } })
-    const iccid = `8952${Date.now()}`
-    await prisma.serializedItem.create({
-      data: { organizationId: m.orgId, categoryId: categoria.id, serialNumber: iccid, createdBy: m.owner },
-    })
-
-    const r = await createOneManualSale(m.orgId, m.owner, {
-      iccid,
-      promoterCode: `${m.key}-ANA`,
-      storeName: `Tienda QA ${m.key}`,
-      saleDate: new Date().toISOString().slice(0, 10),
-      saleType: 'Línea nueva',
-      paymentForm: 'Efectivo',
-      amount: 100,
-      saleStatus: 'Aprobada',
-    } as Parameters<typeof createOneManualSale>[2])
-    expect(r.ok).toBe(true)
-    const orderId = (r as { orderId: string }).orderId
-    await procesarEfectos(m)
-    expect(await comisionesDeLaOrden(orderId)).toEqual([[m.ana, '10.00']])
-
-    const pago = await prisma.payment.findFirstOrThrow({ where: { venueId: m.venueId, orderId } })
-    await devolverTodo(pago.id)
-    expect(await netoVivo({ venueId: m.venueId, orderId })).toBe('0.00')
   })
 })
