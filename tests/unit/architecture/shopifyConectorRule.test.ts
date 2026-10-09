@@ -330,6 +330,26 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     expect(leer('src/services/dashboard/productInventoryIntegration.service.ts')).toContain('pedirCuadreAlVolverACantidad(tx, productId)')
   })
 
+  it('la viñeta «Pendiente (L5)» de la regla es verdad mientras el servidor no exponga las líneas retenidas, y deja de serlo cuando lo haga', () => {
+    // Fuera de `inventory.mobile.service.ts` (que las escribe) nadie lee `shopifyHeld*`: el detalle del conteo (dashboard) y
+    // `stock_counts` (MCP) las ven como contadas. Cuando C9b las exponga, esta prueba falla y obliga a quitar la viñeta (y a mirar C12, Android e iOS).
+    const escritor = 'inventory.mobile.service.ts'
+    const tocan: string[] = []
+    const recorre = (dir: string) => {
+      for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+        const ruta = path.join(dir, e.name)
+        if (e.isDirectory()) recorre(ruta)
+        else if (e.name.endsWith('.ts') && e.name !== escritor && fs.readFileSync(ruta, 'utf8').includes('shopifyHeld')) tocan.push(ruta)
+      }
+    }
+    recorre(path.join(RAIZ, 'src'))
+    const pendienteEnLaRegla = regla.includes('todavía NO muestra `shopifyHeldAt`')
+    expect({ pendienteEnLaRegla, quienLasLee: tocan.map(f => path.relative(RAIZ, f)) }).toEqual({
+      pendienteEnLaRegla: tocan.length === 0,
+      quienLasLee: tocan.map(f => path.relative(RAIZ, f)),
+    })
+  })
+
   it('no conserva versiones anteriores', () => {
     expect(regla).not.toMatch(/descarta lo viejo/)
     expect(regla).not.toMatch(/mirrorAvailable \+ Σ delta` de las filas vivas/)
