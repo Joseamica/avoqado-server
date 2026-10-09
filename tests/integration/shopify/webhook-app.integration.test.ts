@@ -103,7 +103,10 @@ describe('L3 / L1: el callback OAuth por la app real', () => {
     ['shop repetido', '&shop=otra.myshopify.com'],
     ['un parámetro sin firmar, repetido', '&locale=es&locale=en'],
   ])('🔴 T7: %s ⇒ ?error=FIRMA por el servicio real; el intent no se gasta ni se canjea nada', async (_caso, extra) => {
-    const canje = jest.spyOn(graphql, 'exchangeOAuthCode')
+    // Con implementación propia: si una regresión dejara pasar la firma, nunca se sale a la red real de Shopify.
+    const canje = jest
+      .spyOn(graphql, 'exchangeOAuthCode')
+      .mockResolvedValue({ ok: false, code: 'HTTP_4XX', retryable: false, ambiguous: false, message: 'prueba' })
     const { id, state } = await intent()
     const r = await request(app).get(`${CALLBACK}?${consulta(state, firmaOficial(state))}${extra}`)
     expect(r.status).toBe(303)
