@@ -13,7 +13,7 @@ import { createStockBatch, deductStockFIFOInTx } from '../dashboard/fifoBatch.se
 import { withSerializableRetry } from '../../utils/serializableRetry'
 import { logAction } from '../dashboard/activity-log.service'
 import { computeInventoryAvailability } from '../dashboard/product.dashboard.service'
-import { resumirConteo, estadoParaClientes } from '../shared/stockCountSummary'
+import { resumirConteo, estadoParaClientes, retencionShopify } from '../shared/stockCountSummary'
 import {
   apartadasBajoCandado,
   refrescarEspejoParaConteo,
@@ -273,6 +273,8 @@ export function mapCountItem(item: {
   expected: unknown
   counted: unknown
   countedAt: Date | null
+  shopifyHeldAt: Date | null
+  shopifyHeldReason: string | null
   product: { name: string; sku: string | null; gtin: string | null; imageUrl: string | null } | null
   rawMaterial: { name: string; sku: string | null; gtin: string | null; unit: string } | null
 }) {
@@ -294,6 +296,8 @@ export function mapCountItem(item: {
     difference: Number(item.counted) - Number(item.expected),
     // null = todavía no se ha contado. Las apps lo leen como `yaSeConto`.
     countedAt: item.countedAt ? item.countedAt.toISOString() : null,
+    // Aditivo (L5): la línea contada que NO se aplicó por Shopify (hora ISO UTC + motivo); null = se aplicó.
+    shopifyHeld: retencionShopify(item),
   }
 }
 

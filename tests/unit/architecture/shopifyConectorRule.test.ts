@@ -20,9 +20,11 @@ const archivosShopify = fs
   .readdirSync(path.join(RAIZ, SHOPIFY))
   .filter(f => f.endsWith('.ts'))
   .map(f => `${SHOPIFY}/${f}`)
-// Los archivos compartidos cuyas funciones nombra la regla (B7 y la guarda de «no se vende suelta») también cuentan.
+// Los archivos compartidos cuyas funciones nombra la regla (B7, la guarda de «no se vende suelta» y la lectura del conteo, L5)
+// también cuentan.
 const codigo = [
   ...archivosShopify,
+  'src/services/mobile/inventory.mobile.service.ts',
   'src/services/dashboard/productWizard.service.ts',
   'src/services/dashboard/productInventoryIntegration.service.ts',
   'src/services/dashboard/venueFeature.dashboard.service.ts',
@@ -380,33 +382,22 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     expect(leer('src/services/dashboard/productInventoryIntegration.service.ts')).toContain('pedirCuadreAlVolverACantidad(tx, productId)')
   })
 
-  it('la viñeta «Pendiente (L5)» de la regla es verdad mientras el servidor no exponga las líneas retenidas, y deja de serlo cuando lo haga', () => {
-    // Fuera de `inventory.mobile.service.ts` (que las escribe) nadie lee `shopifyHeld*`: el detalle del conteo (dashboard) y
-    // `stock_counts` (MCP) las ven como contadas. Cuando C9b las exponga, esta prueba falla y obliga a quitar la viñeta (y a mirar C12, Android e iOS).
-    const escritor = 'inventory.mobile.service.ts'
-    const tocan: string[] = []
-    const recorre = (dir: string) => {
-      for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
-        const ruta = path.join(dir, e.name)
-        if (e.isDirectory()) recorre(ruta)
-        else if (e.name.endsWith('.ts') && e.name !== escritor && fs.readFileSync(ruta, 'utf8').includes('shopifyHeld')) tocan.push(ruta)
-      }
-    }
-    recorre(path.join(RAIZ, 'src'))
-    const pendienteEnLaRegla = regla.includes('todavía NO muestra `shopifyHeldAt`')
-    const quienes = tocan.map(f => path.relative(RAIZ, f))
-    if (pendienteEnLaRegla && quienes.length > 0) {
-      throw new Error(
-        `El servidor ya lee shopifyHeld* (${quienes.join(', ')}): quita la viñeta «Pendiente (L5…)» del §7 de .claude/rules/shopify-conector.md ` +
-          'y revisa C12 (Android e iOS: ¿ya muestran las líneas retenidas?).',
-      )
-    }
-    if (!pendienteEnLaRegla && quienes.length === 0) {
-      throw new Error(
-        'La regla ya no trae la viñeta «Pendiente (L5…)» del §7 pero el servidor todavía NO expone shopifyHeld* fuera de inventory.mobile.service.ts: ' +
-          'vuelve a ponerla (o expón las líneas retenidas en el detalle del conteo y en stock_counts).',
-      )
-    }
+  it('L5: la línea retenida se lee en el detalle del conteo (móvil, dashboard y MCP) y la regla dice dónde', () => {
+    // La viñeta «Pendiente (L5…)» se fue con C9b; si vuelve, o si alguien deja de exponer la retención, esto falla.
+    expect(regla).not.toContain('todavía NO muestra `shopifyHeldAt`')
+    contieneTodas([
+      'la línea retenida se expone como `shopifyHeld` (`{ at, motivo }` o `null`) en `mapCountItem(…)` (GET móvil y detalle del dashboard, que suma `noAplicadas`) y en `stock_counts` del MCP; las pantallas del POS (Android e iOS) son C12',
+    ])
+    expect(cuerpo(leer('src/services/mobile/inventory.mobile.service.ts'), 'export function mapCountItem(')).toContain(
+      'shopifyHeld: retencionShopify(item)',
+    )
+    expect(leer('src/services/dashboard/stockCountAudit.service.ts')).toContain(
+      'noAplicadas: count.items.filter(i => i.shopifyHeldAt).length',
+    )
+    const mcp = leer('src/mcp/tools/inventory.ts')
+    const stockCounts = mcp.slice(mcp.indexOf("'stock_counts',"), mcp.indexOf("'cancel_stock_count',"))
+    expect(stockCounts).toContain('shopifyHeld: retencionShopify(i)')
+    expect(stockCounts).toContain('noAplicadas: c.items.filter(i => i.shopifyHeldAt).length')
   })
 
   it('🔴 el invariante: Σ vivas y Σ DEAD_LETTER son de la generación vigente (T3); lo de una generación vieja y las RELIGADA no entran', () => {

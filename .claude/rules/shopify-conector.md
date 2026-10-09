@@ -223,8 +223,8 @@ ayudantes (`shopify.store.service.ts:305`).
     en la línea, en el aviso (texto y llave distintos) y en `noAplicados`.
   - Pausa, revocada, sin plan, sin permiso o Shopify sin contestar, con el producto libre: sin HTTP, se usa `mirrorCommitted` y el
     movimiento dice la hora (`committedAt`). Nunca se pone cero.
-  - Pendiente (L5, tareas C9b y C12 del plan C): el detalle del conteo (dashboard, MCP, Android, iOS) todavía NO muestra `shopifyHeldAt` /
-    `shopifyHeldReason`, así que una línea retenida se ve como contada. Al cerrarse, quita esta viñeta.
+  - Lectura (L5): la línea retenida se expone como `shopifyHeld` (`{ at, motivo }` o `null`) en `mapCountItem(…)` (GET móvil y detalle del
+    dashboard, que suma `noAplicadas`) y en `stock_counts` del MCP; las pantallas del POS (Android e iOS) son C12.
 
 ## 8. Nunca cero por ausencia
 
