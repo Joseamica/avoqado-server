@@ -14,6 +14,7 @@ import { getFloorElements, updateFloorElement } from '@/services/tpv/floor-eleme
 import type { DesiredTable, PlanTable, PublishFloorPlanInput } from '@/services/dashboard/floorPlan/floorPlan.types'
 
 jest.mock('@/communication/sockets', () => ({ __esModule: true, default: { getBroadcastingService: jest.fn(() => null) } }))
+import socketManager from '@/communication/sockets'
 
 const target = new URL(process.env.TEST_DATABASE_URL ?? '')
 if (!['localhost', '127.0.0.1'].includes(target.hostname) || !/^\/avoqado_[a-z0-9]+_test_/.test(target.pathname)) {
@@ -155,6 +156,36 @@ describe('publishFloorPlan', () => {
     const pax = await getTablesWithStatus(venueId)
     expect(pax.find(t => t.number === '2')).toMatchObject({ positionX: 0.75, positionY: 0.5, rotation: 45, areaId })
     expect((await getFloorElements(venueId)).map(e => e.type).sort()).toEqual(['SERVICE_AREA', 'WALL'])
+  })
+
+  it('un PUT idéntico al plano actual responde 200 con unchanged:true y no escribe publicación, bitácora ni aviso', async () => {
+    const created = await conMesas(mesa('t1', '1'), mesa('t2', '2', { positionX: 0.2 }))
+    const now = await getFloorPlan(venueId)
+    const contar = async () => [
+      await prisma.floorPlanPublication.count({ where: { venueId } }),
+      await prisma.activityLog.count({ where: { venueId, action: 'FLOOR_PLAN_PUBLISHED' } }),
+    ]
+    const antes = await contar()
+    const broadcast = jest.fn()
+    jest.spyOn(socketManager, 'getBroadcastingService').mockReturnValue({ broadcastToVenue: broadcast } as never)
+    const saveId = randomUUID()
+    const mismo = { saveId, baseFingerprint: now.fingerprint, areas: [salon(created.areas[0].id)], tables: now.tables.map(t => igual(t)) }
+    const first = await publishFloorPlan(venueId, { elements: [], ...mismo }, staffId)
+    // El mismo folio otra vez (reintento de red): se recalcula, vuelve a salir vacío y responde igual.
+    const retry = await publishFloorPlan(venueId, { elements: [], ...mismo }, staffId)
+    expect(first).toMatchObject({ unchanged: true, publicationId: null, replayed: false, fingerprint: now.fingerprint })
+    expect(retry).toMatchObject({ unchanged: true, publicationId: null, replayed: false })
+    expect(await contar()).toEqual(antes)
+    expect(broadcast).not.toHaveBeenCalled()
+    // Un cambio real sí publica (y no trae `unchanged`).
+    const real = await publish({
+      baseFingerprint: now.fingerprint,
+      areas: [salon(created.areas[0].id)],
+      tables: now.tables.map((t, i) => igual(t, i ? { positionX: 0.9 } : {})),
+    })
+    expect(real.unchanged).toBeUndefined()
+    expect(real.publicationId).toEqual(expect.any(String))
+    expect((await contar())[0]).toBe(antes[0] + 1)
   })
 
   it('el mismo folio no publica dos veces (reintento de red)', async () => {

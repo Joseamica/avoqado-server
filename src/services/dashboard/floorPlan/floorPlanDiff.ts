@@ -97,6 +97,25 @@ export interface FloorPlanDiff {
   elements: { update: Array<{ id: string; data: ElementLayout }>; create: ElementLayout[]; archive: string[] }
 }
 
+/** El diff no escribe nada: ni altas, cambios, bajas ni revividas de áreas, mesas o elementos. */
+export function isEmptyFloorPlanDiff(d: FloorPlanDiff): boolean {
+  return (
+    !d.areas.create.length &&
+    !d.areas.update.length &&
+    !d.areas.rename.length &&
+    !d.areas.remove.length &&
+    !d.tables.update.length &&
+    !d.tables.revive.length &&
+    !d.tables.create.length &&
+    !d.tables.archive.length &&
+    !d.tables.renumber.length &&
+    !d.tables.freeNumbers.length &&
+    !d.elements.update.length &&
+    !d.elements.create.length &&
+    !d.elements.archive.length
+  )
+}
+
 const RECT_TYPES: readonly FloorElementTypeCode[] = ['BAR_COUNTER', 'SERVICE_AREA', 'DOOR']
 
 /**

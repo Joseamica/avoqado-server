@@ -13,6 +13,7 @@ import { computeFloorPlanFingerprint } from './floorPlanFingerprint'
 import {
   archivedNumberLabel,
   computeFloorPlanDiff,
+  isEmptyFloorPlanDiff,
   FloorPlanRuleError,
   type AreaTarget,
   type ElementLayout,
@@ -196,6 +197,10 @@ async function applyPublication(tx: Tx, venueId: string, input: PublishFloorPlan
     throw error
   }
 
+  // Un guardado que no cambia nada (el editor se abre y se guarda sin tocar) no publica: ni folio, ni bitácora, ni aviso
+  // a los POS. Se compara el DIFF (lo que decide las escrituras), no la huella, que ignora el estado operativo.
+  if (isEmptyFloorPlanDiff(diff)) return { replayed: false as const, unchanged: true as const, publicationId: null }
+
   // 1) Mesas que se archivan o se reviven: se bloquean y se ve cuáles tienen una cuenta abierta. Archivar una así
   //    se rechaza; revivir una así la deja con su cuenta (un POS se la abrió justo antes de que se archivara).
   const archiveIds = new Set(diff.tables.archive)
@@ -347,7 +352,7 @@ export async function publishFloorPlan(
   venueId: string,
   input: PublishFloorPlanInput,
   staffId?: string,
-): Promise<FloorPlanDto & { publicationId: string; replayed: boolean }> {
+): Promise<FloorPlanDto & { publicationId: string | null; replayed: boolean; unchanged?: true }> {
   const once = () => prisma.$transaction(tx => applyPublication(tx, venueId, input, staffId), ORDER_LOCK_WAIT_BUDGET)
   let outcome: Awaited<ReturnType<typeof once>>
   try {
@@ -379,7 +384,7 @@ export async function publishFloorPlan(
     }
   }
 
-  if (!outcome.replayed) {
+  if (!outcome.replayed && !('unchanged' in outcome)) {
     void logAction({
       staffId: staffId ?? null,
       venueId,
@@ -394,5 +399,10 @@ export async function publishFloorPlan(
   }
 
   const plan = await getFloorPlan(venueId)
-  return { ...plan, publicationId: outcome.publicationId, replayed: outcome.replayed }
+  return {
+    ...plan,
+    publicationId: outcome.publicationId,
+    replayed: outcome.replayed,
+    ...('unchanged' in outcome ? { unchanged: true as const } : {}),
+  }
 }

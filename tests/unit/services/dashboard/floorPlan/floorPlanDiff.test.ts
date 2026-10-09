@@ -1,4 +1,9 @@
-import { computeFloorPlanDiff, FloorPlanRuleError, type CurrentFloorPlan } from '@/services/dashboard/floorPlan/floorPlanDiff'
+import {
+  computeFloorPlanDiff,
+  isEmptyFloorPlanDiff,
+  FloorPlanRuleError,
+  type CurrentFloorPlan,
+} from '@/services/dashboard/floorPlan/floorPlanDiff'
 import type { DesiredTable, PlanTable } from '@/services/dashboard/floorPlan/floorPlan.types'
 
 const area = { id: 'a1', name: 'Salón', floorShape: 'WIDE' as const, sortOrder: 0, externalId: null }
@@ -441,5 +446,21 @@ describe('computeFloorPlanDiff — claves repetidas y tipo de elemento', () => {
     const same = computeFloorPlanDiff(current([], { elements: [barra] }), { areas: [keepArea], tables: [], elements: [keepElement()] })
     expect(same.elements.update).toEqual([])
     expect(same.elements.archive).toEqual([])
+  })
+})
+
+describe('isEmptyFloorPlanDiff — guardado sin cambios', () => {
+  const t1 = table('t1', '1')
+  it('un plano idéntico al actual da un diff vacío', () => {
+    const d = computeFloorPlanDiff(current([t1]), { areas: [keepArea], tables: [keep(t1)], elements: [] })
+    expect(isEmptyFloorPlanDiff(d)).toBe(true)
+  })
+  it('un solo cambio real (mover una mesa) NO es vacío, y tampoco crear ni quitar', () => {
+    const mover = computeFloorPlanDiff(current([t1]), { areas: [keepArea], tables: [keep(t1, { positionX: 0.9 })], elements: [] })
+    expect(isEmptyFloorPlanDiff(mover)).toBe(false)
+    const crear = computeFloorPlanDiff(current([t1]), { areas: [keepArea], tables: [keep(t1), fresh('n', '2')], elements: [] })
+    expect(isEmptyFloorPlanDiff(crear)).toBe(false)
+    const quitar = computeFloorPlanDiff(current([t1]), { areas: [keepArea], tables: [], elements: [] })
+    expect(isEmptyFloorPlanDiff(quitar)).toBe(false)
   })
 })

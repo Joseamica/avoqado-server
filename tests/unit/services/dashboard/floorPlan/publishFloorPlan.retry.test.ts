@@ -89,6 +89,14 @@ describe('publishFloorPlan — choques de concurrencia', () => {
     expect(mockBroadcast).not.toHaveBeenCalled()
   })
 
+  it('un guardado sin cambios responde unchanged:true, sin folio, sin bitácora y sin aviso a los POS', async () => {
+    transaction.mockResolvedValueOnce({ replayed: false, unchanged: true, publicationId: null })
+    const out = await publishFloorPlan('v1', input, 'staff-1')
+    expect(out).toMatchObject({ unchanged: true, publicationId: null, replayed: false })
+    expect(logAction).not.toHaveBeenCalled()
+    expect(mockBroadcast).not.toHaveBeenCalled()
+  })
+
   it('si vuelve a chocar, sale el 409 FLOOR_PLAN_CHANGED en español (nunca un 500)', async () => {
     transaction.mockRejectedValueOnce(known('P2034')).mockRejectedValueOnce(deadlock())
     const error = await publishFloorPlan('v1', input, 'staff-1').catch(e => e)
