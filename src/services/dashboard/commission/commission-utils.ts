@@ -11,6 +11,7 @@
  */
 
 import prisma from '../../../utils/prismaClient'
+import { ORDEN_DE_ESQUEMAS } from './duenoDeCategorias'
 import logger from '../../../config/logger'
 import { Decimal } from '@prisma/client/runtime/library'
 import { Prisma, CommissionRecipient, StaffRole, CommissionCalcType, TierType, TierPeriod, ThresholdType } from '@prisma/client'
@@ -157,9 +158,7 @@ export async function findActiveCommissionConfig(
         orderBy: { tierLevel: 'asc' },
       },
     },
-    orderBy: {
-      priority: 'desc', // Highest priority first
-    },
+    orderBy: ORDEN_DE_ESQUEMAS, // Highest priority first; en un empate, el más nuevo (S-SOLAPE)
   })
 
   if (config) {
@@ -844,7 +843,7 @@ export async function findActiveCommissionConfigs(
   const venueConfigs = await db.commissionConfig.findMany({
     where: { venueId, ...dateFilter },
     include: includeTiers,
-    orderBy: { priority: 'desc' },
+    orderBy: ORDEN_DE_ESQUEMAS, // S-SOLAPE: el mismo orden decide el dueño de cada categoría y el general que paga
   })
   if (venueConfigs.length > 0) {
     return venueConfigs.map(c => ({ ...c, roleRates: c.roleRates as RoleRates | null, tiers: c.tiers as CommissionTierData[] }))
@@ -856,7 +855,7 @@ export async function findActiveCommissionConfigs(
   const orgConfigs = await db.commissionConfig.findMany({
     where: { orgId: venue.organizationId, venueId: null, ...dateFilter },
     include: includeTiers,
-    orderBy: { priority: 'desc' },
+    orderBy: ORDEN_DE_ESQUEMAS, // S-SOLAPE: el mismo orden decide el dueño de cada categoría y el general que paga
   })
   return orgConfigs.map(c => ({ ...c, roleRates: c.roleRates as RoleRates | null, tiers: c.tiers as CommissionTierData[] }))
 }

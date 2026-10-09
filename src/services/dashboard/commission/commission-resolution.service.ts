@@ -18,6 +18,7 @@ import { personasElegidasAGuardar } from './personasElegidas'
 import { rechazarCambiosConComisiones, sinLoQueNoCambia, soloCamposDelEsquema } from './cambiosConComisiones'
 import { validateAttendanceRule } from './commission-config.service'
 import { asegurarIdsDelNegocio } from './idsDelNegocio'
+import { ORDEN_DE_ESQUEMAS } from './duenoDeCategorias'
 
 export type CommissionConfigSource = 'venue' | 'organization'
 
@@ -53,7 +54,7 @@ export async function getEffectiveCommissionConfigs(venueId: string): Promise<Re
   const venueConfigs = await prisma.commissionConfig.findMany({
     where: { venueId, active: true, deletedAt: null },
     include: configInclude,
-    orderBy: { priority: 'desc' },
+    orderBy: ORDEN_DE_ESQUEMAS,
   })
 
   if (venueConfigs.length > 0) {
@@ -66,7 +67,7 @@ export async function getEffectiveCommissionConfigs(venueId: string): Promise<Re
   const orgConfigs = await prisma.commissionConfig.findMany({
     where: { orgId: organizationId, venueId: null, active: true, deletedAt: null },
     include: configInclude,
-    orderBy: { priority: 'desc' },
+    orderBy: ORDEN_DE_ESQUEMAS,
   })
 
   return orgConfigs.map(c => ({ config: c, source: 'organization' as const }))
@@ -85,7 +86,7 @@ export async function getOrgCommissionConfigs(venueId: string) {
   return prisma.commissionConfig.findMany({
     where: { orgId: organizationId, venueId: null, deletedAt: null },
     include: configInclude,
-    orderBy: { priority: 'desc' },
+    orderBy: ORDEN_DE_ESQUEMAS,
   })
 }
 
