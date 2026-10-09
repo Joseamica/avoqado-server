@@ -5,6 +5,7 @@
 
 // Load .env file for integration tests
 import * as dotenv from 'dotenv'
+import { motivoParaRechazarBaseDePruebas } from './baseDePruebasPermitida'
 
 const testDatabaseUrlWasPresent = Object.prototype.hasOwnProperty.call(process.env, 'TEST_DATABASE_URL')
 const testDatabaseUrlFromCaller = process.env.TEST_DATABASE_URL
@@ -18,6 +19,18 @@ if (!testDatabaseUrlWasPresent || !testDatabaseUrlFromCaller?.trim()) {
   delete process.env.DATABASE_URL
   delete process.env.TEST_DATABASE_URL
   throw new Error('Export a non-empty TEST_DATABASE_URL before running integration tests.')
+}
+
+// Nunca la base compartida ni una remota: una limpieza con `venueId` undefined borra tablas enteras
+// (ver baseDePruebasPermitida.ts). Se decide aquí, antes de que exista ningún gancho de las suites.
+const motivoDeRechazo = motivoParaRechazarBaseDePruebas(testDatabaseUrlFromCaller)
+if (motivoDeRechazo) {
+  delete process.env.DATABASE_URL
+  delete process.env.TEST_DATABASE_URL
+  throw new Error(
+    `Las pruebas de integración no corren aquí: ${motivoDeRechazo}. ` +
+      'Crea una base desechable (createdb avoqado_<tarea>_test_<fecha>) y exporta TEST_DATABASE_URL hacia ella.',
+  )
 }
 
 process.env.TEST_DATABASE_URL = testDatabaseUrlFromCaller
