@@ -18,7 +18,7 @@
  *   que no se puede completar se salta en ESA vuelta sin archivar nada.
  * Orden de candados (§10.3): sucursal (FOR SHARE) → tienda (FOR SHARE) → pareja → Inventory → buzón y revisión.
  */
-import { Prisma, type ShopifyIssueReason, type ShopifyReviewChoice, type ShopifyReviewReason } from '@prisma/client'
+import { Prisma, type ShopifyReviewChoice, type ShopifyReviewReason } from '@prisma/client'
 import { formatInTimeZone } from 'date-fns-tz'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
@@ -38,6 +38,7 @@ import {
   levelKey,
   liveOutboxSum,
   marcarOrigenShopify,
+  MOTIVOS_DE_SUSPENSION,
   SHOPIFY_IMPORT_ERRORES_TERMINALES,
   type CercoShopify,
   type NivelLeido,
@@ -483,12 +484,14 @@ async function tandaDeStock(l: Sucursal, cerco: CercoShopify, d: DepsUnidad): Pr
       // Esperar a un envío en vuelo es corto: la tanda queda pendiente. Una duda (ambigua) puede durar horas: no se espera.
       if (o === 'REINTENTAR' && f.ambiguasVivas === 0 && f.atoradasAmbiguas === 0) pendiente = true
       // U2 (B5): suspendida y detenida SÓLO por una duda muerta (DEAD_LETTER ambigua, que ya no puede llegar): COMPARAR la
-      // esperaría para siempre. Va a «Por revisar» INCIERTO; resolverla la reactiva.
+      // esperaría para siempre. Va a «Por revisar» INCIERTO; resolverla la reactiva. Un producto archivado (por quien sea)
+      // no: la resolución nunca lo reactiva, y una revisión que no se puede resolver se quedaría abierta para siempre.
       const sinSalida = f.enVuelo === 0 && f.ambiguasVivas === 0 && f.atoradasAmbiguas > 0
-      if (o === 'REINTENTAR' && p.suspendedReason && nivel.kind === 'OK' && sinSalida) {
+      if (o === 'REINTENTAR' && p.suspendedReason && !p.product.deletedAt && nivel.kind === 'OK' && sinSalida) {
         const a = await abrirRevision(sucursal, cerco, d.hasAccess, p.productId, nivel.available, fetchedAt)
         if (a === 'CONTEXTO_CAMBIO' || a === 'PAUSADO') return corte()
         if (a === 'ABIERTA') porRevisar += 1
+        if (a === 'EN_CAMINO') pendiente = true
       }
       continue
     }
@@ -869,7 +872,6 @@ export type DepsResolucion = {
   vence?: number
 }
 
-const MOTIVOS_DE_SUSPENSION: ShopifyIssueReason[] = ['SIN_INVENTARIO', 'NIVEL_INEXISTENTE', 'NO_RASTREADO']
 const noResponde = (m = 'Shopify no respondió: intenta en un minuto') => new ServiceUnavailableError(m, 'SHOPIFY_NO_RESPONDE')
 const enPausa = () =>
   new ConflictError(

@@ -328,10 +328,17 @@ describe('decisiones vinculantes de B5 (K12, T3, U2, bitácora)', () => {
     expect((await revision(r.id)).status).toBe('OPEN')
   })
 
-  it('400 SHOPIFY_CANTIDAD_INVALIDA: un número que no es número, uno infinito o un Shopify no entero; ni se pregunta a Shopify', async () => {
+  it('400 SHOPIFY_CANTIDAD_INVALIDA: un número que no es número, uno infinito, un Shopify no entero o una elección que no existe; ni se pregunta a Shopify', async () => {
     const e = await escenario()
     const r = await abrir(e, '13')
-    for (const mal of [{ expectedAvoqadoQty: 'trece' }, { expectedAvoqadoQty: 'NaN' }, { expectedShopifyQty: 10.5 }]) {
+    const malas = [
+      { expectedAvoqadoQty: 'trece' },
+      { expectedAvoqadoQty: 'NaN' },
+      { expectedAvoqadoQty: 'Infinity' },
+      { expectedShopifyQty: 10.5 },
+      { choice: 'AMBOS' as never },
+    ]
+    for (const mal of malas) {
       const d = deps()
       await expect(resolveShopifyReview({ ...entrada(e, r, 'SHOPIFY'), ...mal }, d)).rejects.toMatchObject({
         statusCode: 400,
@@ -417,6 +424,48 @@ describe('decisiones vinculantes de B5 (K12, T3, U2, bitácora)', () => {
     expect(await huecoDelInvariante(e.productId)).toBe('0')
     await cuadrar(e, nivel(9)) // ya activa y cuadrada: nada nuevo por revisar
     expect(await prisma.shopifyReviewItem.count({ where: { productId: e.productId, status: 'OPEN' } })).toBe(0)
+  })
+
+  it('U2: con una fila VIVA y ambigua además de la duda muerta, el cuadre no abre «Por revisar»: ésa todavía puede llegar', async () => {
+    const e = await escenario()
+    await suspendidaConDudaMuerta(e)
+    await prisma.shopifyStockOutbox.create({
+      data: {
+        venueId: e.venueId,
+        locationLinkId: e.locationLinkId,
+        generation: 1,
+        productId: e.productId,
+        delta: -1,
+        status: 'FAILED',
+        ambiguous: true,
+        sentInventoryItemId: 'gid://shopify/InventoryItem/1',
+        sentLocationId: 'gid://shopify/Location/1',
+        firstAttemptAt: new Date(),
+        scheduledAt: new Date(Date.now() + 3_600_000),
+      },
+    })
+    // La vuelta no se da por buena con una duda viva (§10.9): se corre hasta que la tanda de stock pasó por la pareja.
+    await pedirCuadre(e.locationLinkId)
+    const d = {
+      fetchLevels: nivelesFalsos(() => nivel(10)),
+      graphql: graphqlDelCatalogo(await variantesDeLaSucursal(e.locationLinkId)),
+      hasAccess: conPlan,
+    }
+    let enStock = false
+    for (let i = 0; i < 10 && !enStock; i++) enStock = (await reconcileVenue(e.venueId, d)).etapa === 'STOCK'
+    expect(enStock).toBe(true)
+    expect(d.fetchLevels).toHaveBeenCalled()
+    expect(await prisma.shopifyReviewItem.count({ where: { productId: e.productId, status: 'OPEN' } })).toBe(0)
+    expect((await pareja(e)).suspendedReason).toBe('NIVEL_INEXISTENTE')
+  })
+
+  it('U2: la pareja suspendida de un producto que archivó el DUEÑO no va a «Por revisar»: esa revisión nunca se podría resolver', async () => {
+    const e = await escenario()
+    await suspendidaConDudaMuerta(e)
+    await prisma.product.update({ where: { id: e.productId }, data: { deletedAt: new Date(), deletedBy: e.staffId } })
+    await cuadrar(e, nivel(10))
+    expect(await prisma.shopifyReviewItem.count({ where: { productId: e.productId, status: 'OPEN' } })).toBe(0)
+    expect((await pareja(e)).suspendedReason).toBe('NIVEL_INEXISTENTE')
   })
 
   it('la pareja suspendida de un producto archivado nunca se reactiva al resolver ⇒ 409 SHOPIFY_PAREJA_SUSPENDIDA sin preguntar a Shopify', async () => {

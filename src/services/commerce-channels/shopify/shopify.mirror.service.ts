@@ -409,7 +409,8 @@ const ISSUE_DE: Record<ShopifySuspendReason, ShopifyIssueReason> = {
   NIVEL_INEXISTENTE: 'NIVEL_INEXISTENTE',
   NO_RASTREADO: 'NO_RASTREADO',
 }
-const MOTIVOS_DE_SUSPENSION: ShopifyIssueReason[] = ['SIN_INVENTARIO', 'NIVEL_INEXISTENTE', 'NO_RASTREADO']
+/** Los motivos de «Productos sin pareja» que deja `suspendPair`; los limpia quien reactiva la pareja (A y la resolución de B). */
+export const MOTIVOS_DE_SUSPENSION: ShopifyIssueReason[] = ['SIN_INVENTARIO', 'NIVEL_INEXISTENTE', 'NO_RASTREADO']
 const DETALLE: Record<ShopifySuspendReason, string> = {
   SIN_INVENTARIO:
     'Este producto ya no lleva existencias por cantidad en Avoqado (por ejemplo, pasó a receta). La sincronización con Shopify quedó en pausa para él.',
