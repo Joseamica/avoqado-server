@@ -790,7 +790,33 @@ async function aLoMas<T>(p: Promise<T>, ms: number): Promise<T | typeof SIN_RESP
  * que faltaban reciben el del día siguiente (la campanita ya les avisó). Repetir es inofensivo: la llave por persona y
  * día la deduplica en el proveedor.
  */
-const correosPendientes = new Map<string, { porRevisar: number; despues: string; dia: string; timezone: string | null }>()
+const correosPendientes = new Map<string, { porRevisar: number; despues: string; dia: string; timezone: string | null; marcado: boolean }>()
+
+/**
+ * B8 (B4 Minor 1): la marca PERSISTIDA de «el correo "Por revisar" de hoy ya salió», sólo de correo y sin depender de las
+ * preferencias de la campanita (la campanita del día también la crea COMPARAR a media vuelta, y no existe para quien
+ * apagó sus avisos). La escribe el primer envío que el proveedor aceptó; sin ella, cada vuelta que cierra volvería a
+ * mandar la MISMA llave del día con otro contenido, y el proveedor la rechaza (409) con un error por dueño. Una fila de
+ * `ActivityLog` (registro de un correo a clientes) con `entity` + `entityId` = `<venue>:<día del negocio>`: se busca por
+ * el índice `ActivityLog_entity_entityId_idx`, exacto, nunca por un barrido.
+ */
+const CORREO_DEL_DIA = { entity: 'ShopifyPorRevisarCorreo', action: 'SHOPIFY_POR_REVISAR_EMAILED' } as const
+const marcaDelDia = (venueId: string, dia: string) => ({ entity: CORREO_DEL_DIA.entity, entityId: `${venueId}:${dia}` })
+
+async function correoDelDiaYaSalio(venueId: string, dia: string): Promise<boolean> {
+  return (await prisma.activityLog.findFirst({ where: { ...marcaDelDia(venueId, dia), venueId }, select: { id: true } })) !== null
+}
+
+/** Nunca lanza: sin la marca, a lo más la siguiente vuelta del día vuelve a intentar (y el proveedor deduplica la llave). */
+async function marcarCorreoDelDia(venueId: string, dia: string, porRevisar: number): Promise<void> {
+  try {
+    await prisma.activityLog.create({
+      data: { venueId, action: CORREO_DEL_DIA.action, ...marcaDelDia(venueId, dia), data: { dia, porRevisar } },
+    })
+  } catch (err) {
+    logger.warn(`[SHOPIFY] correo «Por revisar» de ${venueId}: no se pudo guardar la marca del día (${(err as Error)?.message})`)
+  }
+}
 
 /**
  * Campanita POR_REVISAR y un correo por OWNER/ADMIN con la plantilla canónica (spec D5). Los destinatarios se recorren
@@ -800,7 +826,7 @@ const correosPendientes = new Map<string, { porRevisar: number; despues: string;
 export async function notifyShopifyReview(venueId: string, porRevisar: number, o: { vence?: number } = {}): Promise<boolean> {
   if (porRevisar <= 0) return true
   await notifyShopify(venueId, 'POR_REVISAR', { count: porRevisar })
-  return mandarCorreos(venueId, porRevisar, '', o.vence)
+  return mandarCorreos(venueId, porRevisar, '', o.vence, { nueva: true, marcado: false })
 }
 
 /** La fase de avisos del worker: sigue los correos que quedaron a medias, mientras quede tiempo. */
@@ -811,12 +837,23 @@ export async function seguirAvisosPendientes(vence?: number): Promise<void> {
       correosPendientes.delete(venueId) // ya es otro día: el pendiente se vuelve a pedir con la llave de hoy
       continue
     }
-    await mandarCorreos(venueId, p.porRevisar, p.despues, vence)
+    await mandarCorreos(venueId, p.porRevisar, p.despues, vence, { nueva: false, marcado: p.marcado })
   }
 }
 
-async function mandarCorreos(venueId: string, porRevisar: number, desde: string, vence?: number): Promise<boolean> {
+/**
+ * `nueva`: empieza la ronda de correos del día (si su marca ya existe, no sale ninguno). `marcado`: la marca de hoy ya la
+ * escribió un envío anterior de esta misma ronda (la sigue la fase de avisos).
+ */
+async function mandarCorreos(
+  venueId: string,
+  porRevisar: number,
+  desde: string,
+  vence: number | undefined,
+  o: { nueva: boolean; marcado: boolean },
+): Promise<boolean> {
   let despues = desde
+  let marcado = o.marcado
   try {
     const [venue, abiertas] = await Promise.all([
       prisma.venue.findUnique({ where: { id: venueId }, select: { name: true, slug: true, timezone: true } }),
@@ -832,8 +869,10 @@ async function mandarCorreos(venueId: string, porRevisar: number, desde: string,
       return true
     }
     const dia = diaDe(venue.timezone)
+    // Ya salió hoy: nada nuevo. Un pendiente de la ronda de hoy (si quedó a medias) lo sigue la fase de avisos.
+    if (o.nueva && (await correoDelDiaYaSalio(venueId, dia))) return true
     const pausa = () => {
-      correosPendientes.set(venueId, { porRevisar, despues, dia, timezone: venue.timezone })
+      correosPendientes.set(venueId, { porRevisar, despues, dia, timezone: venue.timezone, marcado })
       return false
     }
     const base = `${env.FRONTEND_URL.replace(/\/+$/, '')}/venues/${venue.slug}`
@@ -868,7 +907,12 @@ async function mandarCorreos(venueId: string, porRevisar: number, desde: string,
           envio.catch(() => undefined) // si se abandona por el plazo, su falla no queda sin atender
           // §12.8: sin respuesta en lo que queda, `despues` sigue en el anterior: este destinatario se reintenta después
           // con la MISMA llave (el proveedor no lo duplica).
-          if ((await aLoMas(envio, Math.min(CORREO_MAX_MS, restante(vence)))) === SIN_RESPUESTA) return pausa()
+          const enviado = await aLoMas(envio, Math.min(CORREO_MAX_MS, restante(vence)))
+          if (enviado === SIN_RESPUESTA) return pausa()
+          if (enviado === true && !marcado) {
+            await marcarCorreoDelDia(venueId, dia, porRevisar)
+            marcado = true
+          }
         }
         despues = g.id
       }

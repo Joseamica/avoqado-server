@@ -8,6 +8,7 @@
  */
 import crypto from 'crypto'
 import prisma from '@/utils/prismaClient'
+import logger from '@/config/logger'
 import emailService from '@/services/email.service'
 import { importCatalogPage } from '@/services/commerce-channels/shopify/shopify.catalog.service'
 import { claimShopifyOutbox } from '@/services/commerce-channels/shopify/shopify.outbox.service'
@@ -21,6 +22,7 @@ import {
   tomarSucursal,
   unidadDeSucursal,
   type DepsUnidad,
+  type ResultadoUnidad,
   type SucursalTomada,
 } from '@/jobs/shopify-worker.job'
 import { pedirCuadreDeLaManana } from '@/jobs/shopify-reconcile.job'
@@ -491,32 +493,25 @@ describe('requisitos del ledger para B8', () => {
     expect((await sucursal(e)).requeuePending).toBe(true)
   })
 
-  it('U4 y B4 Minor 1: el aviso «Por revisar» sale sólo al CERRAR una vuelta con algo por revisar, y el correo sólo con la campanita nueva del día', async () => {
-    const e = await escenario()
-    await prisma.shopifyLocationLink.update({ where: { id: e.locationLinkId }, data: { webhooksAt: new Date() } })
-    const correo = jest.spyOn(emailService, 'sendShopifyPorRevisarEmail').mockResolvedValue(true)
-    const deps: DepsUnidad = {
-      hasAccess: conPlan,
-      graphql: graphqlDelCatalogo(await variantesDeLaSucursal(e.locationLinkId)),
-      fetchLevels: nivelesFalsos(() => nivel(10)),
+  /** Pide una vuelta y la corre con unidades del worker (tomar → unidad → soltar) hasta cerrarla; devuelve cada resultado. */
+  async function vueltaConElWorker(e: EscenarioShopify, deps: DepsUnidad): Promise<ResultadoUnidad[]> {
+    await pedirCuadre(e.locationLinkId)
+    const rs: ResultadoUnidad[] = []
+    for (let i = 0; i < 20; i++) {
+      const s = await tomarLaMia(e, new Date())
+      if (!s) break
+      const r = await unidadDeSucursal(s, Date.now() + 20_000, deps)
+      rs.push(r)
+      await soltarSucursal(s.id, s.workToken, new Date(), r.esperaMs ?? null)
     }
-    const campanitas = () =>
-      prisma.notification.count({ where: { venueId: e.venueId, entityType: 'ShopifyAviso', entityId: { startsWith: 'POR_REVISAR:' } } })
-    /** Pide una vuelta y la corre con unidades del worker (tomar → unidad → soltar) hasta cerrarla. */
-    const vuelta = async () => {
-      await pedirCuadre(e.locationLinkId)
-      for (let i = 0; i < 20; i++) {
-        const s = await tomarLaMia(e, new Date())
-        if (!s) break
-        const r = await unidadDeSucursal(s, Date.now() + 20_000, deps)
-        await soltarSucursal(s.id, s.workToken, new Date(), r.esperaMs ?? null)
-      }
-      expect(await sucursal(e)).toMatchObject({ needsReconcile: false, reconcileCursor: null, catalogSweepCursor: null })
-    }
-    await vuelta() // nada por revisar: ni campanita ni correo
-    expect(await campanitas()).toBe(0)
-    expect(correo).not.toHaveBeenCalled()
-
+    expect(await sucursal(e)).toMatchObject({ needsReconcile: false, reconcileCursor: null, catalogSweepCursor: null })
+    return rs
+  }
+  const campanitas = (e: EscenarioShopify) =>
+    prisma.notification.count({ where: { venueId: e.venueId, entityType: 'ShopifyAviso', entityId: { startsWith: 'POR_REVISAR:' } } })
+  const marcasDelCorreo = (e: EscenarioShopify) =>
+    prisma.activityLog.count({ where: { venueId: e.venueId, action: 'SHOPIFY_POR_REVISAR_EMAILED' } })
+  async function conAlgoPorRevisar(e: EscenarioShopify) {
     const suelto = await agregarProductoShopify(e, { pareja: false })
     await prisma.shopifyReviewItem.create({
       data: {
@@ -528,12 +523,139 @@ describe('requisitos del ledger para B8', () => {
         suggestion: 'SHOPIFY',
       },
     })
-    await vuelta() // cierra con 1 por revisar: campanita y correo
-    expect(await campanitas()).toBe(1)
+  }
+  const depsDeVuelta = async (e: EscenarioShopify, disponible = 10): Promise<DepsUnidad> => ({
+    hasAccess: conPlan,
+    graphql: graphqlDelCatalogo(await variantesDeLaSucursal(e.locationLinkId)),
+    fetchLevels: nivelesFalsos(() => nivel(disponible)),
+  })
+
+  it('U4 y B4 Minor 1: el aviso «Por revisar» sale sólo al CERRAR una vuelta con algo por revisar, y el correo una vez al día', async () => {
+    const e = await escenario()
+    await prisma.shopifyLocationLink.update({ where: { id: e.locationLinkId }, data: { webhooksAt: new Date() } })
+    const correo = jest.spyOn(emailService, 'sendShopifyPorRevisarEmail').mockResolvedValue(true)
+    const deps = await depsDeVuelta(e)
+    await vueltaConElWorker(e, deps) // nada por revisar: ni campanita ni correo
+    expect(await campanitas(e)).toBe(0)
+    expect(correo).not.toHaveBeenCalled()
+
+    await conAlgoPorRevisar(e)
+    await vueltaConElWorker(e, deps) // cierra con 1 por revisar: campanita y correo, y la marca del día
+    expect(await campanitas(e)).toBe(1)
     expect(correo).toHaveBeenCalledTimes(1)
-    await vuelta() // otra vuelta el mismo día: la campanita ya salió, el correo no se repite (otro contenido, misma llave)
-    expect(await campanitas()).toBe(1)
+    expect(await marcasDelCorreo(e)).toBe(1)
+    await vueltaConElWorker(e, deps) // otra vuelta el mismo día: el correo no se repite (otro contenido, misma llave)
+    expect(await campanitas(e)).toBe(1)
     expect(correo).toHaveBeenCalledTimes(1)
+    expect(await marcasDelCorreo(e)).toBe(1)
+  })
+
+  it('I1: la campanita del día que crea COMPARAR a media vuelta no se come el correo: sale una vez al cerrar', async () => {
+    const e = await escenario()
+    await prisma.shopifyLocationLink.update({ where: { id: e.locationLinkId }, data: { webhooksAt: new Date() } })
+    // La pareja estaba suspendida y Shopify tiene 12 contra 10 de Avoqado: el cuadre la reactiva COMPARANDO (EN_REVISION),
+    // y `initializePair` manda la campanita POR_REVISAR del día ANTES de que la vuelta cierre.
+    await prisma.shopifyVariantLink.update({
+      where: { id: e.variantLinkId },
+      data: { suspendedReason: 'NIVEL_INEXISTENTE', suspendedAt: new Date() },
+    })
+    const correo = jest.spyOn(emailService, 'sendShopifyPorRevisarEmail').mockResolvedValue(true)
+    const deps = await depsDeVuelta(e, 12)
+    await vueltaConElWorker(e, deps)
+    expect(await prisma.shopifyReviewItem.count({ where: { venueId: e.venueId, status: 'OPEN', reason: 'REACTIVADA' } })).toBe(1)
+    expect(await campanitas(e)).toBe(1)
+    expect(correo).toHaveBeenCalledTimes(1)
+    await vueltaConElWorker(e, deps)
+    expect(correo).toHaveBeenCalledTimes(1) // la misma revisión otra vuelta: hoy ya no
+  })
+
+  it('I1: con las alertas apagadas no hay campanita, y aun así el correo sale UNA vez al día, no en cada vuelta', async () => {
+    const e = await escenario()
+    await prisma.shopifyLocationLink.update({ where: { id: e.locationLinkId }, data: { webhooksAt: new Date() } })
+    await prisma.notificationPreference.create({ data: { staffId: e.staffId, venueId: e.venueId, type: 'ALERT', enabled: false } })
+    await conAlgoPorRevisar(e)
+    const correo = jest.spyOn(emailService, 'sendShopifyPorRevisarEmail').mockResolvedValue(true)
+    const deps = await depsDeVuelta(e)
+    await vueltaConElWorker(e, deps)
+    await vueltaConElWorker(e, deps)
+    await vueltaConElWorker(e, deps)
+    expect(await campanitas(e)).toBe(0)
+    expect(correo).toHaveBeenCalledTimes(1)
+  })
+
+  it('I1: la marca del día se busca por el índice (entity, entityId), nunca recorriendo ActivityLog', async () => {
+    const e = await escenario()
+    const correo = jest.spyOn(emailService, 'sendShopifyPorRevisarEmail').mockResolvedValue(true)
+    await conAlgoPorRevisar(e)
+    // Un negocio con historia: miles de filas de bitácora suyas (la de venueId no distingue nada).
+    await prisma.activityLog.createMany({
+      data: Array.from({ length: 5_000 }, (_, i) => ({ venueId: e.venueId, action: 'PRUEBA', entity: 'Order', entityId: `o-${i}` })),
+    })
+    expect(await notifyShopifyReview(e.venueId, 1)).toBe(true)
+    expect(correo).toHaveBeenCalledTimes(1)
+    await prisma.$executeRawUnsafe('ANALYZE "ActivityLog"')
+    const marca = await prisma.activityLog.findFirstOrThrow({ where: { venueId: e.venueId, action: 'SHOPIFY_POR_REVISAR_EMAILED' } })
+    // Literales (EXPLAIN no acepta parámetros): son ids propios, sin comillas.
+    const lit = (x: string | null) => {
+      if (!x || !/^[\w:-]+$/.test(x)) throw new Error(`literal inesperado: ${x}`)
+      return `'${x}'`
+    }
+    const plan = await prisma.$queryRawUnsafe<Array<{ 'QUERY PLAN': string }>>(
+      `EXPLAIN SELECT id FROM "ActivityLog" WHERE entity = ${lit(marca.entity)} AND "entityId" = ${lit(marca.entityId)} AND "venueId" = ${lit(e.venueId)} LIMIT 1`,
+    )
+    const texto = plan.map(r => r['QUERY PLAN']).join('\n')
+    expect(texto).toContain('ActivityLog_entity_entityId_idx')
+    expect(texto).not.toContain('Seq Scan')
+    expect(await notifyShopifyReview(e.venueId, 1)).toBe(true) // ya salió hoy
+    expect(correo).toHaveBeenCalledTimes(1)
+  })
+
+  it('I2: un negocio con catálogo maestro omite el barrido y termina el stock en la misma vuelta, sin esperar ni registrar una falla', async () => {
+    const e = await escenario()
+    await prisma.shopifyLocationLink.update({ where: { id: e.locationLinkId }, data: { webhooksAt: new Date() } })
+    const gobierno = jest.fn(async () => {
+      throw Object.assign(new Error('El catálogo lo administra el catálogo maestro'), { code: 'CATALOG_GOVERNANCE_REQUIRED' })
+    })
+    const deps: DepsUnidad = { ...(await depsDeVuelta(e)), upsert: gobierno as never }
+    const avisos = jest.spyOn(logger, 'warn')
+    avisos.mockClear() // el logger de la integración es compartido entre pruebas
+    const rs = await vueltaConElWorker(e, deps)
+    expect(gobierno).toHaveBeenCalled() // el barrido sí se intentó
+    expect(deps.fetchLevels).toHaveBeenCalled() // y el stock corrió en la misma vuelta
+    for (const r of rs) expect(r.ok && !r.esperaMs).toBe(true)
+    expect((await sucursal(e)).importError).toBeNull()
+    expect((await sucursal(e)).lastReconciledAt).not.toBeNull()
+    const fallas = avisos.mock.calls.filter(
+      c => String(c[0]).includes(`sucursal ${e.locationLinkId}`) && String(c[0]).includes('vuelve en'),
+    )
+    expect(fallas).toEqual([]) // ninguna «falló»
+  })
+
+  it('M2: la limpieza borra el token cifrado de los intents consumidos, fallidos o vencidos; el de uno vigente se queda', async () => {
+    const e = await escenario()
+    const intent = (status: 'EXCHANGED' | 'CONSUMED' | 'FAILED', expiresAt: Date) =>
+      prisma.shopifyConnectIntent.create({
+        data: {
+          venueId: e.venueId,
+          authUserId: e.staffId,
+          shopDomain: e.shopDomain,
+          appKey: 'PILOTO',
+          status,
+          expiresAt,
+          tokenCiphertext: Buffer.from('cifrado-de-prueba'),
+        },
+      })
+    const futuro = new Date(Date.now() + 10 * 60_000)
+    const vigente = await intent('EXCHANGED', futuro)
+    const consumido = await intent('CONSUMED', futuro)
+    const fallido = await intent('FAILED', futuro)
+    const vencido = await intent('EXCHANGED', new Date(Date.now() - 60_000))
+    await limpiarShopify(new Date(), Date.now() + 10_000)
+    const token = async (id: string) => (await prisma.shopifyConnectIntent.findUniqueOrThrow({ where: { id } })).tokenCiphertext
+    expect(await token(vigente.id)).not.toBeNull()
+    expect(await token(consumido.id)).toBeNull()
+    expect(await token(fallido.id)).toBeNull()
+    expect(await token(vencido.id)).toBeNull()
   })
 
   it('T5 y S7: la limpieza descarta lo que nunca podrá salir (generación vieja, sin sucursal) y purga los eventos terminales; lo que va en camino no se toca', async () => {

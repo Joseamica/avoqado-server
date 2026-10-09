@@ -62,7 +62,7 @@ describe('ShopifyWorkerJob', () => {
     })
     await new ShopifyWorkerJob(d).runOnce()
     expect(orden).toEqual(['entrada', 'buzon', 'evento', 'sucursal', 'avisos'])
-    expect(d.soltarSucursal).toHaveBeenCalledWith('s1', 'w-s1', expect.any(Date), null)
+    expect(d.soltarSucursal).toHaveBeenCalledWith('s1', 'w-s1', expect.any(Date), null, true)
     expect(d.seguirAvisos).toHaveBeenCalledWith(INICIO + 3_000) // R06: más que los 2 s que pide una petición
   })
 
@@ -171,8 +171,8 @@ describe('ShopifyWorkerJob', () => {
       unidad: jest.fn().mockRejectedValueOnce(new Error('la base parpadeó')).mockResolvedValue({ ok: true }),
     })
     await new ShopifyWorkerJob(d).runOnce()
-    expect(d.soltarSucursal).toHaveBeenNthCalledWith(1, 's1', 'w-s1', expect.any(Date), 60_000)
-    expect(d.soltarSucursal).toHaveBeenNthCalledWith(2, 's2', 'w-s2', expect.any(Date), null)
+    expect(d.soltarSucursal).toHaveBeenNthCalledWith(1, 's1', 'w-s1', expect.any(Date), 60_000, true)
+    expect(d.soltarSucursal).toHaveBeenNthCalledWith(2, 's2', 'w-s2', expect.any(Date), null, true)
   })
 })
 
@@ -294,9 +294,9 @@ describe('ShopifyWorkerJob · requisitos del ledger para B8', () => {
         }),
     })
     await new ShopifyWorkerJob(d).runOnce()
-    expect((d.soltarSucursal as jest.Mock).mock.calls.map(c => [c[0], c.length === 5 ? c[4] : 'con turno'])).toEqual([
+    expect((d.soltarSucursal as jest.Mock).mock.calls.map(c => [c[0], c[4]])).toEqual([
       ['corta', false],
-      ['sigue', 'con turno'],
+      ['sigue', true],
       ['tarde', false],
     ])
   })
