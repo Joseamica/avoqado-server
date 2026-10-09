@@ -578,6 +578,16 @@ describe('herramientas MCP de Shopify', () => {
     expect(mockConnect.disconnectShopify).not.toHaveBeenCalled()
   })
 
+  it('desconectar con un nombre de ubicación larguísimo: la huella (tienda|ubicación) cabe en el campo y la confirmación pasa', async () => {
+    // `locationName` no tiene tope en Shopify: una huella de 600+ caracteres tiene que pasar la validación (era max(300)).
+    mockOverview.getShopifyOverview.mockResolvedValue({ planActive: true, connection: { ...CONEXION, locationName: 'B'.repeat(600) } })
+    const { call } = await conectar()
+    const { p, r } = await enDosPasos(call, 'shopify_disconnect', { venueId: 'centro' })
+    expect(p.confirmationArguments.expectedSourceFingerprint.length).toBeGreaterThan(600)
+    expect(r).toMatchObject({ ok: true, desconectada: true })
+    expect(mockConnect.disconnectShopify).toHaveBeenCalledWith({ venueId: 'centro', staffId: 'dueno' })
+  })
+
   it('desconectar cuando ya no había nada que desconectar (otra persona se adelantó): lo dice y no audita', async () => {
     mockConnect.disconnectShopify.mockResolvedValue({ desconectada: false })
     const { call } = await conectar()

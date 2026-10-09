@@ -1,0 +1,245 @@
+---
+paths:
+  - 'src/services/commerce-channels/shopify/**'
+  - 'prisma/migrations/*shopify*/**'
+  - 'src/services/**/inventory*.ts'
+  - 'src/services/**/*Inventory*.ts'
+  - 'src/services/dashboard/productWizard.service.ts'
+  - 'src/services/mobile/inventory.mobile.service.ts'
+  - 'src/jobs/shopify-*.ts'
+  - 'src/mcp/tools/shopify.ts'
+  - 'src/routes/dashboard/shopify.routes.ts'
+  - 'src/controllers/**/shopify*.ts'
+  - 'tests/integration/shopify/**'
+---
+
+# Conector Shopify: el guardia del stock, la marca de origen, el espejo y los envíos en camino
+
+Spec y contrato viven en `docs/superpowers/` del workspace (hoy en la rama `docs/precedente-shopify-inventario`, worktree
+`.claude/worktrees/precedente-shopify-inventario`): `specs/2026-10-07-conector-shopify-design.md` (manda su §12 bis) y
+`plans/2026-10-07-conector-shopify-v2-indice.md` (mandan sus §9, §10, §11 y §12, en ese orden de precedencia: la más nueva gana), con los
+planes A, B y C a su lado. **Esta regla describe lo ENTREGADO en el código**: donde el plan y el código discrepan, gana el código. La prueba
+`tests/unit/architecture/shopifyConectorRule.test.ts` fija cada afirmación de abajo, en el texto y, cuando se puede, en el código: si
+cambias el comportamiento, cambia aquí la frase y su aserción en el mismo commit.
+
+## 0. Fase 1: piloto por invitación, NO se vende
+
+| Pieza                                                                            | Dónde                                                                                                                       | Efecto                                                                                                          |
+| -------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `SHOPIFY_PILOTO_SHOPS` (dominios `.myshopify.com`, coma; se lee en cada llamada) | `startShopifyConnect(…)`, `shopify.connect.service.ts:62-106`                                                               | otra tienda ⇒ 409 `SHOPIFY_SOLO_PILOTO`                                                                         |
+| `SHOPIFY_INTEGRATION` en `PREMIUM_ONLY_SIN_CATALOGO`                             | `basePlan.service.ts:93`                                                                                                    | Premium por regla pero SIN entrada de catálogo ni precio; `shopifyTierMirror.test.ts` falla si queda en los dos |
+| Nunca se contrata suelta                                                         | `addFeaturesToVenue(…)` (`venueFeature.dashboard.service.ts:190`) y `createTrialSubscriptions(…)` (`stripe.service.ts:303`) | 400 `FEATURE_NO_SE_VENDE_SUELTA`; la segunda es el embudo de venta suelta, conversión de demo y onboarding      |
+
+Ningún texto (página, avisos, MCP) manda a comprar ni a subir de plan para tener Shopify. El MCP usa su texto de piloto y no
+`planGateMessage` (`mcp/tools/shopify.ts`, `SOLO_PILOTO`); `SHOPIFY_SIN_PLAN` (el servidor dice «actívalo») se traduce a ese mismo texto en
+cada cliente. Un Premium ya pagado pasa el candado y choca con `SHOPIFY_SOLO_PILOTO` al conectar. La Fase 5 (app pública) la mueve a
+`PREMIUM_ONLY_CODES` con su entrada de catálogo.
+
+## 1. Entradas HTTP: webhook y callback
+
+- **Webhook** (`SHOPIFY_WEBHOOK_ROUTE`, `app.ts:161-165`): `express.raw` de 1 MB (`SHOPIFY_WEBHOOK_MAX_BYTES`) montado ANTES del router
+  genérico de `/api/v1/webhooks`, que sólo acepta 100 KB y no entrega el cuerpo crudo que firma el HMAC. `persistShopifyWebhook(…)` sólo
+  guarda y contesta; lo procesa el worker. Pruebas: `tests/unit/routes/shopify.webhook.app.test.ts` y
+  `tests/integration/shopify/webhook-app.integration.test.ts` (un POST firmado por la `app` real deja un evento).
+- **Callback OAuth** (`SHOPIFY_OAUTH_CALLBACK_PATH`, `app.ts:202-204`): público, sin sesión; la prueba de origen es el `hmac` más el `state`
+  firmado. `handleShopifyCallback(…)` recibe `req.query` INTACTO: un parámetro repetido (llega como arreglo) no es algo que Shopify firmó y
+  da `?error=FIRMA`; no se filtra antes.
+- **HMAC del callback** (`verifyOAuthQueryHmac(…)`, `shopify.crypto.ts:32-52`): se aceptan DOS formas de firma, las dos en tiempo constante
+  y las dos exigiendo el secreto: la de la biblioteca oficial de Shopify (valores codificados con `URLSearchParams`, `+` → `%20`) y la unión
+  decodificada del ejemplo de su doc. Un `host` terminado en `==` sólo cuadra con la primera. Se registra cuál pegó
+  (`callback OAuth: firma válida en la forma …`, nunca el hmac); falta confirmarlo con un callback real en el sandbox (C10). `hmac` está en
+  `PARAMS_SENSIBLES` del logger.
+
+## 2. El guardia ve TODO cambio de `"Inventory"."currentStock"`: no le avises a Shopify desde tu servicio
+
+El trigger `"Inventory_guardia_shopify"` (`AFTER INSERT OR UPDATE OF "currentStock"`, migración `shopify_conector`) encola el delta en
+`ShopifyStockOutbox` en la MISMA transacción del cambio, también desde SQL crudo y desde caminos que se agreguen. Encola según la **fase
+efectiva** de la sucursal (si está PAUSED, manda `pausedFrom`; por eso una pausa por plan no pierde ventas):
+
+| Fase efectiva             | Qué encola                                                      |
+| ------------------------- | --------------------------------------------------------------- |
+| CONNECTING · REVIEWING    | cualquier producto de la sucursal, tenga o no pareja (12 bis.2) |
+| ACTIVE                    | sólo productos con pareja iniciada y no suspendida              |
+| DISCONNECTED o sin enlace | nada                                                            |
+
+No encola: un cambio con la marca de origen `shopify`, un delta 0, ni un `DELETE` de la fila (ver §5). El buzón lo llenan SÓLO el guardia y
+la resolución «usar Avoqado» (`reconcile.service.ts:1150`).
+
+## 3. La marca de origen: si aplicas en Avoqado algo que VINO de Shopify
+
+Abre la transacción con `marcarOrigenShopify(tx)`, que hace `SELECT set_config('avoqado.stock_origen', 'shopify', true)`. Sin eso el cambio
+regresa a Shopify y se cuenta doble. Con `true` la marca vive sólo en esa transacción. Es la primera vez que el repo pasa contexto a un
+trigger: no la uses para nada más.
+
+## 4. El invariante, los cuatro escritores del espejo y el orden de candados
+
+**Invariante operativo (§9.3):** `Inventory = espejo + Σ vivas + Σ DEAD_LETTER sin resolver + offset de la revisión OPEN`
+
+- «Vivas» = filas PENDING, IN_PROGRESS y FAILED del producto en la generación vigente de su sucursal (`LIVE_OUTBOX_STATUSES`).
+- Una DEAD_LETTER conserva su delta en la cuenta hasta que la resolución la descarte. Una venta que dejó `Inventory = 9`, espejo 10 y su
+  `−1` en DEAD_LETTER es un estado CORRECTO, no algo que «arreglar».
+- COMPARAR con diferencia abre `REACTIVADA` con `offset = Inventory − S`; si los saldos ya coinciden, cierra en la misma tx la revisión OPEN
+  del producto (`offset = 0`, §11.8).
+- El cuadre calcula `total = Inventory − espejo − Σ vivas − Σ DEAD_LETTER` (`abrirRevision`, `reconcile.service.ts:618-731`): con
+  `total = 0` cierra la revisión OPEN (offset 0); con `total` distinto del offset de la OPEN abre o actualiza `DIFERENCIA` con
+  `offset = total`; con DEAD_LETTER abre o actualiza `ATORADO` (`INCIERTO` si alguna es ambigua).
+- Se compara con `Prisma.Decimal`, nunca con `Number`.
+
+El espejo (`mirrorAvailable` / `mirrorCommitted`) tiene CUATRO escritores, y nadie más:
+
+| Escritor                              | Qué hace                                                                                                                                                                                                                                                                                                                                                                                                                                 | Atomicidad                                    |
+| ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------- |
+| mensajero, `runShopifyOutboxRow(…)`   | al confirmar un envío: SENT y `espejo += delta` (NUNCA `quantityAfterChange`), sólo si la pareja existe y su generación coincide con la de la fila                                                                                                                                                                                                                                                                                       | misma tx que marcar SENT                      |
+| aplicador, `applyShopifyLevel(…)`     | frescura (`mirrorAt > fetchedAt`) y `productBlocked(…)` ANTES de actuar, también sobre un nivel no OK; luego espejo ← lectura vigente y `Inventory += S − espejo` con la marca                                                                                                                                                                                                                                                           | una tx; sin acceso ⇒ `PAUSADO` sin tocar nada |
+| inicio de pareja, `initializePair(…)` | TOMAR_SHOPIFY: espejo = S e `Inventory = S + Σ vivas` (en ACTIVE sólo con `createdProduct = true`; en REVIEWING con `applyRequestedAt`, para todas); COMPARAR: espejo = S, `Inventory` no se toca y, si difiere, `REACTIVADA` con su offset                                                                                                                                                                                              | una tx; sin acceso ⇒ `NO_APLICA`              |
+| resolución, `resolveShopifyReview(…)` | revalida las cantidades mostradas y las VIGENTES (Avoqado bajo candado, Shopify recién leído). «Usar Shopify»: espejo e `Inventory` a la lectura vigente, con la marca. «Usar Avoqado»: descarta las DEAD_LETTER, en la misma tx pone el espejo en `S` (la lectura recién hecha, con su `committed` y `mirrorAt`) y encola `A − S` (entero) como fila nueva; al quedar SENT esa fila, el mensajero suma su delta como con cualquier otra | una tx; 409/422 si no                         |
+
+Por qué «usar Avoqado» pone el espejo en `S` y no espera al mensajero: con `A = 12`, `S = 11` y espejo viejo `10`, encolar `+1` sin mover el
+espejo dejaría la cuenta en 11 contra las 12 piezas de Avoqado. Si hay filas vivas, la resolución contesta 409 `SHOPIFY_CAMBIOS_EN_CAMINO`.
+
+**Orden de candados (índice §10.3, con el evento de §11.2), siempre éste:** Product (si se toca) → sucursal (`FOR SHARE`) → tienda
+(`FOR SHARE`) → pareja (`FOR UPDATE`) → `Inventory` → buzón/revisión → evento (`FOR SHARE`, al final)
+
+- **Product se bloquea `FOR NO KEY UPDATE`** (K11): serializa con otros escritores del catálogo sin frenar el `FOR KEY SHARE` de una venta
+  que inserta un renglón con llave foránea al producto. Catálogo y archivo lo piden explícito (`bloquearProductos`,
+  `catalog.service.ts:355-363`; `archivarPareja(…)`, `:1082`); `switchInventoryMethod(…)` y `setProductInventoryMethod(…)` lo toman con el
+  `product.update` que ya hacen (no toca llaves) y llaman a `suspenderParejaPorReceta(…)` DESPUÉS, nunca antes.
+- **El mensajero**, con o sin cerco, toma el orden general sin Product: sucursal y tienda `FOR SHARE`, pareja `FOR UPDATE`, la fila del
+  buzón `FOR UPDATE` (releída: sigue `IN_PROGRESS` con su `claimToken`) y, con cerco de evento, el evento `FOR SHARE` al final
+  (`conFilaPropia`, `outbox.service.ts:165-182`). Nunca la fila primero, ni con `SKIP LOCKED`: `claimShopifyOutbox(…)` ELIGE su candidata
+  sin candado y la revalida ya con los candados puestos.
+- Los cierres por falla (devolver a la fila, FAILED, DEAD_LETTER) van sin cerco, con los candados en orden, y se protegen con el
+  `claimToken` de la fila: si ya no es suya, no escriben. No le exijas al mensajero revisar el cerco antes de esos cierres. Un 401 sólo
+  revoca la tienda si el token sigue siendo el vigente (`tokenVersion`).
+- **`marcarFaltaPermiso(…)`** bloquea `FOR NO KEY UPDATE` SÓLO la sucursal que recibe (`locationLinkId`; sin ella, las de la tienda, por id)
+  y después la tienda `FOR SHARE` (`mirror.service.ts:365-398`). Quien la llame lo hace antes de cualquier candado de pareja, fila o cerco,
+  o en una tx propia (el mensajero: tx de 15 s, porque avisa por dentro). `FOR NO KEY UPDATE` y no `FOR UPDATE`: no frena el `FOR KEY SHARE`
+  de quien inserte una pareja con llave foránea a la sucursal.
+- **Desconectar** (`disconnectShopify(…)`, `connect.service.ts:1173-1230`) bloquea primero TODAS las sucursales de la tienda por id (la
+  propia `FOR UPDATE`, las hermanas `FOR NO KEY UPDATE`), después las parejas de ESA sucursal, ordenadas por id, y sólo entonces sube la
+  generación. Nunca la propia y luego una hermana de id menor: se cruzaría con quien las toma por id (el drenado, diferir, renovar la
+  credencial). `renovarCredencial` (reconectar o reautorizar) también bloquea todas las sucursales de la tienda por id ANTES de la tienda.
+- **Conectar** (`confirmShopifyConnect(…)`): sucursales afectadas por id `FOR UPDATE` (la propia y la que ocupaba la ubicación) → tienda
+  `FOR SHARE` → sus parejas por id. La credencial nueva se guarda ANTES, en su propia tx (K9), para que un 409 de la barrera no impida
+  reconectar.
+- Así una pausa, desconexión o revocación espera a que termine quien tiene la sucursal y la tienda en `FOR SHARE`, sin trabarse con él.
+
+## 5. `Inventory` que desaparece o vuelve ⇒ suspender y reactivar la pareja, NUNCA borrarla
+
+Un `DELETE` de la fila (pasar el producto a receta, borrar la sucursal, limpiar una demo) no se manda a Shopify: dejaría la tienda en línea
+en cero. Pasar un producto a RECETA, por CUALQUIER camino, llama a `suspenderParejaPorReceta(…)` DESPUÉS de escribir el `Product` y ANTES de
+tocar `Inventory`; y volver a CANTIDAD llama a `pedirCuadreAlVolverACantidad(…)`. Los caminos de hoy son dos: `switchInventoryMethod(…)`
+(`productWizard.service.ts:569`), `setProductInventoryMethod(…)` (`productInventoryIntegration.service.ts:612`: PUT inventory-method, paso 2
+del asistente y la tool de recetas del MCP); si agregas otro que borre o cree filas de `Inventory` de productos ligados, usa los mismos dos
+ayudantes (`shopify.store.service.ts:305-329`).
+
+- `suspenderParejaPorReceta(…)` toma la pareja con `bloquearPareja(…)` y la suspende con `SIN_INVENTARIO` (`suspendPair(…)`). Excepción: un
+  producto que el conector archivó con un envío en camino se queda en `NIVEL_INEXISTENTE`; pisarlo apagaría el reintento que lo borra.
+- `pedirCuadreAlVolverACantidad(…)` pide el cuadre (`pedirCuadre(…)`) SÓLO si la pareja está suspendida por `SIN_INVENTARIO`: pedirlo
+  siempre armaría un cuadre por cada alta y cada PUT. El cuadre la reactiva solo (`COMPARAR`) cuando vuelve a haber `Inventory` y nivel en
+  Shopify; mientras tanto aparece en «Productos sin pareja».
+
+## 6. Envíos en camino, dudas y generaciones (§9.1-§9.2, §10.14, §11.3, §11.7)
+
+- `suspendPair(…)` sólo descarta filas vivas NO ambiguas en PENDING/FAILED (nunca se aplicaron). Las filas `IN_PROGRESS` y las ambiguas
+  siguen vivas: pueden haber llegado a Shopify.
+- **Dos barreras distintas; no las mezcles:**
+  - Iniciar o reactivar una pareja (`initializePair(…)`, los dos modos) espera (`REINTENTAR`) mientras `productBlocked(…)` no sea `LIBRE`
+    (`EN_VUELO` = una fila IN_PROGRESS; `INCIERTO` = una fila viva o DEAD_LETTER ambigua).
+  - Conectar una generación nueva (reconectar la sucursal a la MISMA tienda, con su ubicación u otra, o tomar la ubicación que ocupaba otra
+    sucursal desconectada) responde 409 `SHOPIFY_ENVIO_EN_CAMINO` mientras haya filas `IN_PROGRESS` o vivas ambiguas (`envioEnCamino(…)`,
+    `store.service.ts:271`) de cualquier generación anterior de esa sucursal o de la que ocupaba la ubicación. Una DEAD_LETTER ambigua no la
+    frena: ya no puede llegar.
+  - Religar la sucursal a OTRA tienda no es un 409: sus filas `IN_PROGRESS` y vivas ambiguas pasan a DEAD_LETTER con
+    `lastError = RELIGADA_A_OTRA_TIENDA` (duda y parámetros congelados conservados; `aCuarentenaPorReligar`, `connect.service.ts:639`),
+    porque el reclamo sólo las tomaría con la tienda vieja ACTIVE y la sucursal ya apunta a la nueva: la espera no terminaría nunca. No
+    avisan (es una acción deliberada del dueño); queda `religadas` en el `ActivityLog` de `SHOPIFY_CONNECTED`.
+  - Desconectar no espera: bloquea (§4), sube la generación y deja esas filas cerrarse con su llave; al llegar no mueven el espejo.
+- Una fila ambigua se reclama con su MISMA llave `@idempotent` y con sus parámetros congelados (`sentInventoryItemId`, `sentLocationId`; el
+  `delta` no cambia) aunque la pareja esté suspendida o la generación sea vieja, si la tienda está ACTIVE, la sucursal no tiene un error
+  terminal y su ventana no venció. Al quedar SENT, el mensajero mueve el espejo sólo si la pareja existe y su generación coincide. Una fila
+  de generación vieja cierra así con sus propios parámetros, nunca con los de la conexión nueva; una NO ambigua de generación vieja se
+  descarta (`GENERACION_VIEJA`) y nunca viaja.
+- Una fila ambigua (timeout, red, 5xx, respuesta ilegible, o un lease vencido: el proceso pudo morir con la petición en el aire) significa
+  «no sabemos si Shopify la aplicó». Mientras el producto tenga una, ni el receptor ni el cuadre le aplican nada de Shopify.
+- **`userErrors`:** `IDEMPOTENCY_CONCURRENT_REQUEST` (el primer intento sigue en curso: FAILED ambigua), `SERVICE_UNAVAILABLE` y
+  `ADJUST_QUANTITIES_FAILED` (reintentables según Shopify 2026-10) quedan FAILED y conservan la duda previa. Cualquier otro `userError` en
+  una fila ambigua (incluido `IDEMPOTENCY_KEY_PARAMETER_MISMATCH`) la deja DEAD_LETTER ambigua y su revisión es `INCIERTO`. Sólo el éxito
+  validado la limpia.
+- La ventana de 23 h sólo pone en cuarentena filas AMBIGUAS (la llave vive 24 h en Shopify): vencida, la fila pasa a DEAD_LETTER y a «Por
+  revisar» como INCIERTO. Una fila NO ambigua (429, «inténtalo más tarde») nunca se aplicó: si su ventana venció, se le borra
+  `firstAttemptAt` y se manda normal. `firstAttemptAt` lo pone el mensajero justo antes del HTTP: una fila devuelta por pausa o sin acceso
+  no abre ventana.
+- Permiso insuficiente (HTTP 403 o `errors[].extensions.code = 'ACCESS_DENIED'`) en CUALQUIER ruta se marca con `marcarFaltaPermiso(…)`,
+  condicionado a la credencial y la generación vigentes: si no aplica a la vigente devuelve `false` y quien llamó lo trata como
+  reintentable; si aplica, pone `importError = 'FALTA_PERMISO'` en las sucursales afectadas y avisa una vez. La fila del buzón va a
+  DEAD_LETTER `FALTA_PERMISO` y conserva su duda previa; el reclamo no toma filas de una sucursal con esa marca, y reautorizar la limpia y
+  re-encola esas filas (no ambigua ⇒ PENDING; ambigua ⇒ FAILED, para resolverse con su llave). La tienda sigue ACTIVE.
+
+## 7. Cerco, cuadre y conteo (§10.9, §11.1, §11.2, §12.1)
+
+- **Cerco:** `applyShopifyLevel(…)`, `initializePair(…)` y `runShopifyOutboxRow(…)` reciben `deps.cerco` (generación, tienda, ubicación de
+  Shopify, `tokenVersion`, y el `workToken` o el reclamo del evento). Se verifica DENTRO de su tx, bajo los candados (`cercoVigente(…)`); si
+  no coincide, el resultado es `CONTEXTO_CAMBIO` y no se toca nada. Todo efecto de B lo pasa (catálogo, archivo, aplicar, cuadre, eventos,
+  conteo); las escrituras de progreso van por `conCerco(…)`.
+- **Cuadre:** pedirlo (`requestShopifyResync(…)`, `pedirCuadre(…)`, el job de la mañana, reanudar o reautorizar) levanta `needsReconcile` o
+  sube `reconcileVersion`. La vuelta (`reconcileVenue(…)`) lo consume al empezar (`reconcileDoneVersion = v`, `reconcileVersion = v + 1`) y
+  una vuelta se cierra sólo con CAS sobre `reconcileVersion`; `lastReconciledAt` se pone entonces. Si llegó otro pedido a media vuelta,
+  empieza otra. El cuadre nunca escribe un `importError` terminal. Lo no concluyente se distingue:
+  - esperar un envío en vuelo deja la tanda pendiente (`REINTENTAR` sin dudas: es corto, 60 s);
+  - con una fila VIVA ambigua la vuelta no se da por buena: se empieza otra (en 10 min), porque esa fila todavía puede llegar;
+  - una DEAD_LETTER no detiene la vuelta: ya no puede llegar y queda en «Por revisar» (`ATORADO` o `INCIERTO`) para que la decida una
+    persona.
+- Qué sucursal cuadra el worker: ACTIVE, con su tienda ACTIVE, con acceso al plan (sin plan se pausa guardando la fase) y sin `importError`
+  terminal (`FALTA_PERMISO`, `CATALOGO_MUY_GRANDE`, `CATALOGO_MAESTRO`). Un pedido sobre otra se queda guardado (la bandera es durable) y
+  corre cuando vuelva a ser elegible.
+- **Conteo** (reemplaza la última regla de §11.1; enmienda §12.1): con un envío en camino no se puede saber si un cambio de apartadas vino
+  de un pedido (que también baja el disponible) o de un despacho (que no), así que ninguna fórmula sirve.
+  - Producto libre: antes de las líneas se refresca el espejo (`refrescarEspejoParaConteo(…)`: `fetchLevels(…)` + `applyShopifyLevel(…)`, 4
+    s para todo el conteo); en la tx de cada línea, bajo los candados (`apartadasBajoCandado(…)`),
+    `objetivo = contado − pareja.mirrorCommitted` (el vigente, coherente con `Inventory`).
+  - Producto bloqueado (`productBlocked(…)` ≠ `LIBRE`, revisado por tanda ANTES de cualquier HTTP y otra vez bajo candado): la línea NO se
+    aplica y el stock no cambia. Se marca en la línea (`shopifyHeldAt`, `shopifyHeldReason`), la respuesta del conteo trae `noAplicados` y
+    sale el aviso `CONTEO_NO_APLICADO`. Nunca se aplica un número que podría estar mal.
+  - Dos motivos (enmienda §12.1): `ENVIO_EN_CAMINO` (se resuelve solo: vuelve a contarlo en unos minutos) y `DUDA_POR_REVISAR` (hay una
+    DEAD_LETTER ambigua o una revisión OPEN: recontar no sirve hasta resolverla en «Por revisar»). El motivo viaja en la línea, en el aviso
+    (texto y llave distintos) y en `noAplicados`.
+  - Pausa, revocada, sin plan, sin permiso o Shopify sin contestar, con el producto libre: sin HTTP, se usa `mirrorCommitted` y el
+    movimiento dice la hora (`committedAt`). Nunca se pone cero.
+  - Pendiente (L5, tareas C9b y C12 del plan C): el detalle del conteo (dashboard, MCP, Android, iOS) todavía NO muestra `shopifyHeldAt` /
+    `shopifyHeldReason`, así que una línea retenida se ve como contada. Al cerrarse, quita esta viñeta.
+
+## 8. Nunca cero por ausencia
+
+Un nivel inexistente o inactivo en la ubicación, o un artículo `tracked = false`, NO es «0 piezas»: la pareja se suspende
+(`NIVEL_INEXISTENTE` / `NO_RASTREADO`) y aparece en «Productos sin pareja». Nada de `?.available ?? 0`.
+
+## 9. Avisos y la página
+
+`notifyShopify(venueId, aviso)` avisa a OWNER y ADMIN activos, uno por persona y por día (`CONTEO_NO_APLICADO`, también por producto, y
+`DUDA_POR_REVISAR` con su propia llave), con liga a `/venues/:slug/settings/integrations/shopify` (la página la construye el plan C en el
+dashboard): REVOCADA, ATORADOS, RETRASO, SOBREVENTA, POR_REVISAR, FALTA_PERMISO y CONTEO_NO_APLICADO. Si agregas un aviso, agrega su
+explicación en la página (`avisos.items` de `shopify.json` en el dashboard) y en la guía. La página nunca ofrece comprar Premium para
+Shopify (§0).
+
+## 10. Mantenimiento y pruebas
+
+- **Limpieza horaria** (`limpiarShopify(…)`, `worker.service.ts:353`): descarta lo que NUNCA salió de una generación vieja, borra lo cerrado
+  hace 30 días (filas SENT/DISCARDED, eventos terminales, intents) y **las revisiones RESUELTAS hace más de 90 días**
+  (`REVISIONES_RESUELTAS_DIAS`) cuya elección ya no está en camino: sin envío, o con su fila SENT, DISCARDED o ya borrada. Nunca se purga
+  una revisión OPEN, ni una resuelta cuyo envío siga PENDING, FAILED, IN_PROGRESS o DEAD_LETTER. Sin la purga la tabla crece para siempre (a
+  30,000 revisiones en un negocio la lista cuesta 35 ms con Seq Scan); la historia queda en `ActivityLog`. El índice `(status, resolvedAt)`
+  es la migración `shopify_review_resolved_index`: sin él la purga tarda 201 ms contra 0.04 ms con 1 M de filas.
+- **Prueba de volumen:** `tests/integration/shopify/catalogo-volumen.integration.test.ts` (5,000 variantes de punta a punta, ~9 min) está
+  APAGADA por defecto (`describe.skip`) para no sumarle minutos al CI de todos. `SHOPIFY_VOLUMEN=1` la enciende, siempre en una base
+  desechable:
+  `SHOPIFY_VOLUMEN=1 node scripts/run-with-launch-campaigns-test-db.cjs npx jest --selectProjects integration --runInBand --runTestsByPath tests/integration/shopify/catalogo-volumen.integration.test.ts`
+  (el runner crea y borra su base y aborta si coincide con `av-db-25`). Córrela a mano si tocas el barrido, la importación o el cuadre.
+- **Dónde están las pruebas:** guardia `tests/integration/shopify/guardia.integration.test.ts` (si agregas una forma nueva de escribir
+  stock, agrega su caso ahí); espejo, mensajero, avisos, resolución, conteo y worker en `tests/integration/shopify/*.integration.test.ts`;
+  esta regla `tests/unit/architecture/shopifyConectorRule.test.ts`; candado `tests/unit/services/access/shopifyTierMirror.test.ts`; rutas,
+  webhook y MCP `tests/unit/routes/shopify.*`, `tests/unit/controllers/dashboard/shopify.controller.test.ts` y
+  `tests/unit/mcp-customer/shopify.tools.test.ts`.
+- **Verificar en GitHub:** sube TU commit a una rama `ci/<tema>` (carril del workspace); los deploys sólo corren en `main`. 🔴 NUNCA
+  `gh workflow run` sobre esta rama: `workflow_dispatch` con `environment=production` publica en producción SIN importar la rama
+  (`ci-cd.yml:286-293`).

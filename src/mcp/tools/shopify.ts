@@ -314,7 +314,9 @@ export function registerShopifyTools(server: McpServer, scope: McpScope) {
     'Desconecta la tienda Shopify del local: Avoqado sigue vendiendo normal, pero el stock deja de actualizarse en los dos lados; los cambios que no alcanzaron a salir se descartan (un envío que ya iba en camino termina solo) y las diferencias abiertas de «Por revisar» se cierran. No requiere acceso al conector: quien lo perdió siempre puede salir. Primero muestra qué se desconecta; se aplica al llamar de nuevo con confirm:true. Requiere administrar la configuración.',
     {
       venueId: venueIdField(),
-      expectedSourceFingerprint: z.string().max(300).optional().describe('La llena la vista previa; no la cambies'),
+      // 1024: la huella es `tienda|ubicación` y el nombre de la ubicación no tiene tope en Shopify (con 300 una sucursal con
+      // nombre largo no se podía desconectar por MCP).
+      expectedSourceFingerprint: z.string().max(1024).optional().describe('La llena la vista previa; no la cambies'),
       confirm: confirmField(),
     },
     async ({ venueId, expectedSourceFingerprint, confirm }) => {
