@@ -4,9 +4,31 @@ import { FLOOR_PLAN_LIMITS } from '../../services/dashboard/floorPlan/floorPlan.
 // Mensajes en español a propósito: el middleware de validación los muestra tal cual (regla de la casa).
 const venueParams = z.object({ venueId: z.string().min(1, 'El venue es requerido') }).passthrough()
 
-const num = (campo: string) => z.number({ required_error: `Falta ${campo}`, invalid_type_error: `${campo} debe ser un número` })
-const coord = (campo: string) => num(campo).min(0, `${campo} debe estar dentro del plano`).max(1, `${campo} debe estar dentro del plano`)
-const size = (campo: string) => num(campo).gt(0, `${campo} debe ser mayor a cero`).max(1, `${campo} no puede salirse del plano`)
+/**
+ * Frases de un campo numérico. `campo` va en minúsculas y con su artículo («la posición», «las personas»): de ahí
+ * salen «Falta la posición» / «Faltan las personas» y «La posición debe…» / «Las personas deben…».
+ */
+const frases = (campo: string) => {
+  const plural = /^(los|las) /.test(campo)
+  const sujeto = campo.charAt(0).toUpperCase() + campo.slice(1)
+  return {
+    falta: `${plural ? 'Faltan' : 'Falta'} ${campo}`,
+    debe: `${sujeto} ${plural ? 'deben' : 'debe'}`,
+    puede: `${sujeto} no ${plural ? 'pueden' : 'puede'}`,
+  }
+}
+const num = (campo: string) => {
+  const f = frases(campo)
+  return z.number({ required_error: f.falta, invalid_type_error: `${f.debe} ser un número` })
+}
+const coord = (campo: string) => {
+  const fuera = `${frases(campo).debe} estar dentro del plano`
+  return num(campo).min(0, fuera).max(1, fuera)
+}
+const size = (campo: string) => {
+  const f = frases(campo)
+  return num(campo).gt(0, `${f.debe} ser mayor a cero`).max(1, `${f.puede} salirse del plano`)
+}
 const rotation = num('el giro')
   .int('El giro debe ser un número entero')
   .min(0, 'El giro debe estar entre 0 y 359 grados')
@@ -55,8 +77,8 @@ const tableSchema = z
         .max(99, 'Máximo 99 personas por mesa'),
       shape: z.enum(['SQUARE', 'ROUND', 'RECTANGLE'], { errorMap: () => ({ message: 'Forma de mesa no válida' }) }),
       rotation,
-      positionX: coord('La posición').nullable(),
-      positionY: coord('La posición').nullable(),
+      positionX: coord('la posición').nullable(),
+      positionY: coord('la posición').nullable(),
       areaRef: key.nullable(),
     },
     { invalid_type_error: 'Cada mesa debe ser un objeto' },
@@ -77,13 +99,13 @@ const elementSchema = z
         errorMap: () => ({ message: 'Tipo de elemento no válido' }),
       }),
       areaRef: key,
-      positionX: coord('La posición'),
-      positionY: coord('La posición'),
-      width: size('El ancho').nullable().optional(),
-      height: size('El alto').nullable().optional(),
+      positionX: coord('la posición'),
+      positionY: coord('la posición'),
+      width: size('el ancho').nullable().optional(),
+      height: size('el alto').nullable().optional(),
       rotation,
-      endX: coord('El final de la pared').nullable().optional(),
-      endY: coord('El final de la pared').nullable().optional(),
+      endX: coord('el final de la pared').nullable().optional(),
+      endY: coord('el final de la pared').nullable().optional(),
       label: z.string({ invalid_type_error: 'El texto no es válido' }).trim().max(40, 'El texto es muy largo').nullable().optional(),
       color: z
         .string({ invalid_type_error: 'Color no válido' })

@@ -24,6 +24,7 @@ jest.mock('@/middlewares/checkFeatureAccess.middleware', () => ({
 }))
 
 import floorPlanRoutes from '@/routes/dashboard/floorPlan.routes'
+import { publishFloorPlanSchema } from '@/schemas/dashboard/floorPlan.schema'
 
 function app() {
   const a = express()
@@ -116,5 +117,38 @@ describe('rutas del plano de mesas', () => {
       )
     }
     expect(mockPublish).not.toHaveBeenCalled()
+  })
+
+  it('los mensajes de los números son frases correctas (artículo en minúscula, plural concordado)', () => {
+    const mensajes = (b: unknown) => {
+      const r = publishFloorPlanSchema.safeParse({ params: { venueId: 'v1' }, body: b })
+      return r.success ? [] : r.error.errors.map(e => e.message)
+    }
+    const t = body.tables[0]
+    const sin = (campo: keyof typeof t) => Object.fromEntries(Object.entries(t).filter(([k]) => k !== campo))
+    expect(mensajes({ ...body, tables: [sin('positionX')] })).toContain('Falta la posición')
+    expect(mensajes({ ...body, tables: [{ ...t, positionX: 'a' }] })).toContain('La posición debe ser un número')
+    expect(mensajes({ ...body, tables: [{ ...t, positionX: 2 }] })).toContain('La posición debe estar dentro del plano')
+    expect(mensajes({ ...body, tables: [sin('capacity')] })).toContain('Faltan las personas')
+    expect(mensajes({ ...body, tables: [{ ...t, capacity: '4' }] })).toContain('Las personas deben ser un número')
+    expect(mensajes({ ...body, tables: [sin('rotation')] })).toContain('Falta el giro')
+    expect(mensajes({ ...body, tables: [{ ...t, rotation: 'x' }] })).toContain('El giro debe ser un número')
+    expect(mensajes({ ...body, tables: [{ ...t, rotation: 1.5 }] })).toContain('El giro debe ser un número entero')
+    expect(mensajes({ ...body, areas: [{ ...body.areas[0], sortOrder: 'a' }] })).toContain('El orden debe ser un número')
+    const barra = { type: 'BAR_COUNTER', areaRef: 'a1', positionX: 0, positionY: 0, rotation: 0, width: 0, height: 2 }
+    expect(mensajes({ ...body, elements: [barra] })).toEqual(
+      expect.arrayContaining(['El ancho debe ser mayor a cero', 'El alto no puede salirse del plano']),
+    )
+    const pared = { type: 'WALL', areaRef: 'a1', positionX: 0, positionY: 0, rotation: 0, endX: 3, endY: 0 }
+    expect(mensajes({ ...body, elements: [pared] })).toContain('El final de la pared debe estar dentro del plano')
+    // Ningún mensaje empieza en minúscula ni trae el artículo en mayúscula a media frase («Falta La posición»).
+    const todos = [
+      { ...body, tables: [{ ...t, positionX: 'a', positionY: undefined, capacity: undefined, rotation: 'x' }] },
+      { ...body, areas: [{ ...body.areas[0], sortOrder: undefined }] },
+      { ...body, elements: [{ ...barra, width: 'a', height: undefined, positionX: 'b' }] },
+    ].flatMap(mensajes)
+    expect(todos.length).toBeGreaterThan(5)
+    for (const m of todos) expect(m).toMatch(/^[A-ZÁÉÍÓÚÑ¿]/)
+    for (const m of todos) expect(m).not.toMatch(/\s(La|El|Las|Los) /)
   })
 })

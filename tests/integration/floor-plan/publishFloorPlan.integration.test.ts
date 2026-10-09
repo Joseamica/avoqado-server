@@ -6,6 +6,7 @@
 // La bitácora FLOOR_PLAN_PUBLISHED se prueba de verdad: el setup de integración simula `logAction`.
 jest.unmock('@/services/dashboard/activity-log.service')
 import { randomUUID } from 'crypto'
+import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { getFloorPlan, publishFloorPlan } from '@/services/dashboard/floorPlan/floorPlan.service'
 import { getTablesWithStatus, updateTablePosition } from '@/services/tpv/table.tpv.service'
@@ -19,10 +20,13 @@ if (!['localhost', '127.0.0.1'].includes(target.hostname) || !/^\/avoqado_[a-z0-
   throw new Error('Exige una base de prueba local y desechable (p. ej. avoqado_planomesas_test_20261008).')
 }
 
-let venueId: string
-let staffId: string
+// 🔴 Vacíos hasta que existan: un `where: { venueId: undefined }` en la limpieza borraría la tabla ENTERA.
+let venueId = ''
+let staffId = ''
 
 beforeEach(async () => {
+  venueId = ''
+  staffId = ''
   venueId = `plano-${randomUUID()}`
   await prisma.organization.create({ data: { id: venueId, name: 'Plano org', email: `${venueId}@example.test`, phone: '5500000000' } })
   await prisma.venue.create({ data: { id: venueId, organizationId: venueId, name: 'Plano restaurante', slug: venueId } })
@@ -30,6 +34,7 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
+  if (!venueId) return
   await prisma.table.updateMany({ where: { venueId }, data: { currentOrderId: null } })
   await prisma.order.deleteMany({ where: { venueId } })
   await prisma.floorPlanPublication.deleteMany({ where: { venueId } })
@@ -37,7 +42,7 @@ afterEach(async () => {
   await prisma.floorElement.deleteMany({ where: { venueId } })
   await prisma.table.deleteMany({ where: { venueId } })
   await prisma.area.deleteMany({ where: { venueId } })
-  await prisma.staff.deleteMany({ where: { id: staffId } })
+  if (staffId) await prisma.staff.deleteMany({ where: { id: staffId } })
   await prisma.venue.deleteMany({ where: { id: venueId } })
   await prisma.organization.deleteMany({ where: { id: venueId } })
 })
@@ -61,6 +66,42 @@ const salonNuevo = { clientId: 'a1', name: 'Salón', floorShape: 'WIDE' as const
 const salon = (id: string) => ({ id, name: 'Salón', floorShape: 'WIDE' as const, sortOrder: 0 })
 const conMesas = async (...tables: DesiredTable[]) =>
   publish({ baseFingerprint: (await getFloorPlan(venueId)).fingerprint, areas: [salonNuevo], tables })
+const abrirCuenta = async (tableId: string, paymentStatus: 'PENDING' | 'PAID' = 'PENDING') => {
+  const order = await prisma.order.create({
+    data: { venueId, orderNumber: `PLANO-${randomUUID()}`, subtotal: 100, taxAmount: 0, total: 100, tableId, paymentStatus },
+  })
+  await prisma.table.update({ where: { id: tableId }, data: { currentOrderId: order.id, status: 'OCCUPIED' } })
+  return order
+}
+/** Cuántas consultas que tocan `tabla` esperan un candado; reintenta ~5 s (o hasta que `hasta()` diga que ya no tiene caso). */
+async function esperandoCandado(tabla: string, hasta: () => boolean = () => false): Promise<number> {
+  for (let i = 0; i < 200 && !hasta(); i++) {
+    const [row] = await prisma.$queryRaw<Array<{ n: number }>>`
+      SELECT count(*)::int AS n FROM pg_stat_activity
+      WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE ${`%"${tabla}"%`}`
+    if (row.n) return row.n
+    await new Promise(r => setTimeout(r, 25))
+  }
+  return 0
+}
+/** Una transacción ajena que toma la fila y la suelta cuando la prueba diga. */
+async function tomarFila(tabla: 'Table' | 'Area', id: string, antesDeSoltar?: (tx: Prisma.TransactionClient) => Promise<unknown>) {
+  let soltar!: () => void
+  const suelta = new Promise<void>(r => (soltar = r))
+  let tomada!: () => void
+  const filaTomada = new Promise<void>(r => (tomada = r))
+  const termina = prisma.$transaction(
+    async tx => {
+      await tx.$queryRaw(Prisma.sql`SELECT id FROM ${Prisma.raw(`"${tabla}"`)} WHERE id = ${id} FOR UPDATE`)
+      tomada()
+      await suelta
+      if (antesDeSoltar) await antesDeSoltar(tx)
+    },
+    { timeout: 30_000 },
+  )
+  await filaTomada
+  return { soltar, termina }
+}
 
 describe('publishFloorPlan', () => {
   it('publica un salón nuevo, lo devuelve igual, avisa a los POS y la PAX lo lee', async () => {
@@ -122,10 +163,7 @@ describe('publishFloorPlan', () => {
   it('422 y nada cambia si se quita una mesa con cuenta abierta', async () => {
     const created = await conMesas(mesa('t1', '7'))
     const tableId = created.tables[0].id
-    const order = await prisma.order.create({
-      data: { venueId, orderNumber: `PLANO-${randomUUID()}`, subtotal: 100, taxAmount: 0, total: 100, tableId },
-    })
-    await prisma.table.update({ where: { id: tableId }, data: { currentOrderId: order.id, status: 'OCCUPIED' } })
+    await abrirCuenta(tableId)
     const now = await getFloorPlan(venueId)
     expect(now.fingerprint).toBe(created.fingerprint) // abrir una cuenta no cambia el plano
     expect(now.tables[0].hasOpenOrder).toBe(true)
@@ -133,8 +171,21 @@ describe('publishFloorPlan', () => {
       statusCode: 422,
       code: 'TABLES_WITH_OPEN_ORDERS',
       details: { numbers: ['7'] },
+      message: 'No se puede quitar la mesa 7: tiene una cuenta abierta. Ciérrala primero.',
     })
     expect(await prisma.table.findUniqueOrThrow({ where: { id: tableId } })).toMatchObject({ active: true })
+  })
+
+  it('422 en plural cuando son varias mesas con cuenta abierta («Ciérralas»)', async () => {
+    const created = await conMesas(mesa('t8', '8', { positionX: 0.2 }), mesa('t7', '7'))
+    for (const t of created.tables) await abrirCuenta(t.id)
+    await expect(publish({ baseFingerprint: created.fingerprint, areas: [salon(created.areas[0].id)], tables: [] })).rejects.toMatchObject({
+      statusCode: 422,
+      code: 'TABLES_WITH_OPEN_ORDERS',
+      details: { numbers: ['7', '8'] },
+      message: 'No se pueden quitar las mesas 7, 8: tienen una cuenta abierta. Ciérralas primero.',
+    })
+    expect(await prisma.table.count({ where: { venueId, active: true } })).toBe(2)
   })
 
   it('una cuenta que se abre MIENTRAS se publica también frena quitar la mesa (candado de fila)', async () => {
@@ -144,34 +195,15 @@ describe('publishFloorPlan', () => {
       data: { venueId, orderNumber: `PLANO-${randomUUID()}`, subtotal: 100, taxAmount: 0, total: 100, tableId },
     })
     // Otra transacción (como `assignTable`) ya tiene la mesa y está a punto de colgarle la cuenta.
-    let soltar!: () => void
-    const suelta = new Promise<void>(r => (soltar = r))
-    let tomada!: () => void
-    const mesaTomada = new Promise<void>(r => (tomada = r))
-    const abrirCuenta = prisma.$transaction(
-      async tx => {
-        await tx.$queryRaw`SELECT id FROM "Table" WHERE id = ${tableId} FOR UPDATE`
-        tomada()
-        await suelta
-        await tx.table.update({ where: { id: tableId }, data: { currentOrderId: order.id, status: 'OCCUPIED' } })
-      },
-      { timeout: 30_000 },
+    const cuenta = await tomarFila('Table', tableId, tx =>
+      tx.table.update({ where: { id: tableId }, data: { currentOrderId: order.id, status: 'OCCUPIED' } }),
     )
-    await mesaTomada
-    // La publicación leyó el plano SIN cuenta (misma huella) y queda esperando el candado de la mesa.
+    // La publicación queda esperando el candado de la mesa: todavía no lee el plano.
     const publicando = publish({ baseFingerprint: created.fingerprint, areas: [salon(created.areas[0].id)], tables: [] })
     publicando.catch(() => undefined)
-    let esperando = 0
-    for (let i = 0; i < 200 && !esperando; i++) {
-      const [row] = await prisma.$queryRaw<Array<{ n: number }>>`
-        SELECT count(*)::int AS n FROM pg_stat_activity
-        WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%"Table"%'`
-      esperando = row.n
-      if (!esperando) await new Promise(r => setTimeout(r, 25))
-    }
-    expect(esperando).toBe(1)
-    soltar()
-    await abrirCuenta
+    expect(await esperandoCandado('Table')).toBe(1)
+    cuenta.soltar()
+    await cuenta.termina
     await expect(publicando).rejects.toMatchObject({ statusCode: 422, code: 'TABLES_WITH_OPEN_ORDERS', details: { numbers: ['9'] } })
     expect(await prisma.table.findUniqueOrThrow({ where: { id: tableId } })).toMatchObject({ active: true, currentOrderId: order.id })
   })
@@ -192,6 +224,37 @@ describe('publishFloorPlan', () => {
       active: true,
       qrCode: original.qrCode,
       capacity: 6,
+      status: 'AVAILABLE',
+    })
+  })
+
+  it('revivir una mesa archivada que quedó con una cuenta sin pagar NO le quita la cuenta', async () => {
+    const created = await conMesas(mesa('t1', '5'))
+    const area = salon(created.areas[0].id)
+    const tableId = created.tables[0].id
+    const removed = await publish({ baseFingerprint: created.fingerprint, areas: [area], tables: [] })
+    // Un POS le abrió una cuenta justo antes de que se archivara: la mesa archivada todavía la apunta.
+    const order = await abrirCuenta(tableId)
+    const back = await publish({ baseFingerprint: removed.fingerprint, areas: [area], tables: [mesa('x', '5', { areaRef: area.id })] })
+    expect(back.tables).toEqual([expect.objectContaining({ id: tableId, number: '5', hasOpenOrder: true })])
+    expect(await prisma.table.findUniqueOrThrow({ where: { id: tableId } })).toMatchObject({
+      active: true,
+      currentOrderId: order.id,
+      status: 'OCCUPIED',
+    })
+    expect(await prisma.order.findUnique({ where: { id: order.id } })).toMatchObject({ id: order.id, tableId })
+  })
+
+  it('revivir una mesa archivada cuya cuenta ya se pagó la deja libre', async () => {
+    const created = await conMesas(mesa('t1', '6'))
+    const area = salon(created.areas[0].id)
+    const tableId = created.tables[0].id
+    const removed = await publish({ baseFingerprint: created.fingerprint, areas: [area], tables: [] })
+    await abrirCuenta(tableId, 'PAID')
+    await publish({ baseFingerprint: removed.fingerprint, areas: [area], tables: [mesa('x', '6', { areaRef: area.id })] })
+    expect(await prisma.table.findUniqueOrThrow({ where: { id: tableId } })).toMatchObject({
+      active: true,
+      currentOrderId: null,
       status: 'AVAILABLE',
     })
   })
@@ -243,6 +306,66 @@ describe('publishFloorPlan', () => {
     })
     expect(out.tables).toEqual([expect.objectContaining({ id: t7.id, number: '5' })])
     expect(await prisma.table.findUniqueOrThrow({ where: { id: t5.id } })).toMatchObject({ active: false, number: '5 (archivada)' })
+  })
+
+  it('liberar el número de una archivada nunca usa un número que trae el mismo guardado', async () => {
+    const created = await conMesas(mesa('t5', '5'), mesa('t7', '7', { positionX: 0.2 }))
+    const areaId = created.areas[0].id
+    const t5 = created.tables.find(t => t.number === '5')!
+    const t7 = created.tables.find(t => t.number === '7')!
+    const siete = (number: string): DesiredTable => ({
+      id: t7.id,
+      number,
+      capacity: 4,
+      shape: 'SQUARE',
+      rotation: 0,
+      positionX: 0.2,
+      positionY: 0.5,
+      areaRef: areaId,
+    })
+    const sin5 = await publish({ baseFingerprint: created.fingerprint, areas: [salon(areaId)], tables: [siete('7')] })
+    const out = await publish({
+      baseFingerprint: sin5.fingerprint,
+      areas: [salon(areaId)],
+      tables: [siete('5'), mesa('n', '5 (archivada)', { areaRef: areaId })],
+    })
+    expect(out.tables.map(t => [t.number, t.id === t7.id])).toEqual([
+      ['5', true],
+      ['5 (archivada)', false],
+    ])
+    expect(await prisma.table.findUniqueOrThrow({ where: { id: t5.id } })).toMatchObject({ active: false, number: '5 (archivada 2)' })
+  })
+
+  it('la PAX que mueve una mesa mientras se publica espera, y su cambio queda encima (no se pierde)', async () => {
+    const created = await conMesas(mesa('t1', '1'))
+    const areaId = created.areas[0].id
+    const t1 = created.tables[0]
+    // Un bloqueador detiene la publicación DESPUÉS de sus candados y de leer el plano: tiene el área que va a renombrar.
+    const area = await tomarFila('Area', areaId)
+    const publicando = publish({
+      baseFingerprint: created.fingerprint,
+      areas: [{ id: areaId, name: 'Comedor', floorShape: 'WIDE', sortOrder: 0 }],
+      tables: [{ id: t1.id, number: '1', capacity: 4, shape: 'SQUARE', rotation: 0, positionX: 0.25, positionY: 0.5, areaRef: areaId }],
+    })
+    publicando.catch(() => undefined)
+    expect(await esperandoCandado('Area')).toBe(1)
+    // La PAX (pantalla vieja) mueve esa misma mesa ahora: sin el candado escribiría ya, y la publicación la pisaría.
+    let paxTermino = false
+    const pax = updateTablePosition(venueId, t1.id, 0.9, 0.9).finally(() => (paxTermino = true))
+    pax.catch(() => undefined)
+    const paxEsperaba = (await esperandoCandado('Table', () => paxTermino)) === 1 && !paxTermino
+    area.soltar()
+    await area.termina
+    await publicando
+    await pax
+    expect(await prisma.area.findUniqueOrThrow({ where: { id: areaId } })).toMatchObject({ name: 'Comedor' }) // se publicó
+    expect(await prisma.table.findUniqueOrThrow({ where: { id: t1.id } })).toMatchObject({ positionX: 0.9, positionY: 0.9 }) // la PAX encima
+    expect(paxEsperaba).toBe(true)
+    // El plano cambió DESPUÉS de publicar: el siguiente guardado del editor recibirá 409 en vez de pisarlo.
+    const publicacion = await prisma.floorPlanPublication.findFirstOrThrow({
+      where: { venueId, baseFingerprint: created.fingerprint },
+    })
+    expect((await getFloorPlan(venueId)).fingerprint).not.toBe(publicacion.resultFingerprint)
   })
 
   it('borrar un área archiva sus elementos y las mesas movidas quedan en la otra', async () => {

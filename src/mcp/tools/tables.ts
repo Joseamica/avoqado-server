@@ -155,6 +155,8 @@ export function registerTableTools(server: McpServer, scope: McpScope) {
       const SHAPE = { WIDE: 'ancha', SQUARE: 'cuadrada', TALL: 'larga' } as const
       const TABLE_SHAPE = { SQUARE: 'cuadrada', ROUND: 'redonda', RECTANGLE: 'larga' } as const
       const areaIds = new Set(plan.areas.map(a => a.id))
+      // Acomodada = tiene las DOS coordenadas. La misma regla decide «placed» y «unplacedTables».
+      const isPlaced = (t: { positionX: number | null; positionY: number | null }) => t.positionX !== null && t.positionY !== null
       const areas = plan.areas.map(a => {
         const tables = plan.tables.filter(t => t.areaId === a.id)
         const els = plan.elements.filter(e => e.areaId === a.id)
@@ -167,16 +169,16 @@ export function registerTableTools(server: McpServer, scope: McpScope) {
             number: t.number,
             seats: t.capacity,
             shape: TABLE_SHAPE[t.shape],
-            placed: t.positionX !== null && t.positionY !== null,
+            placed: isPlaced(t),
           })),
           walls: count('WALL'),
           bars: count('BAR_COUNTER'),
           serviceAreas: els.filter(e => e.type === 'SERVICE_AREA').map(e => e.label ?? 'Área de servicio'),
           doors: count('DOOR'),
-          labels: els.filter(e => e.type === 'LABEL').map(e => e.label),
+          labels: els.flatMap(e => (e.type === 'LABEL' && e.label?.trim() ? [e.label] : [])),
         }
       })
-      const unplacedTables = plan.tables.filter(t => !t.areaId || !areaIds.has(t.areaId) || t.positionX === null).map(t => t.number)
+      const unplacedTables = plan.tables.filter(t => !t.areaId || !areaIds.has(t.areaId) || !isPlaced(t)).map(t => t.number)
       return text({
         venueId,
         areaCount: areas.length,

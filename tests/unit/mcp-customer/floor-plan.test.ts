@@ -102,4 +102,22 @@ describe('floor_plan', () => {
     ])
     expect(out.unplacedTables).toEqual(['2'])
   })
+
+  it('una mesa con una sola coordenada no está acomodada (misma regla que «placed»)', async () => {
+    const mediaMesa = { ...plan.tables[0], id: 't3', number: '3', positionX: 0.4, positionY: null }
+    mockGetFloorPlan.mockResolvedValueOnce({ ...plan, tables: [...plan.tables, mediaMesa] })
+    const out = parse(await call({ venueId: 'v1' }))
+    expect(out.areas[0].tables).toContainEqual({ number: '3', seats: 4, shape: 'cuadrada', placed: false })
+    expect(out.unplacedTables).toEqual(['2', '3'])
+  })
+
+  it('los letreros sin texto no salen como null ni vacíos', async () => {
+    const letrero = (id: string, label: string | null) => ({ ...plan.elements[1], id, type: 'LABEL', label })
+    mockGetFloorPlan.mockResolvedValueOnce({
+      ...plan,
+      elements: [...plan.elements, letrero('e3', null), letrero('e4', '   '), letrero('e5', 'Terraza')],
+    })
+    const out = parse(await call({ venueId: 'v1' }))
+    expect(out.areas[0].labels).toEqual(['Terraza'])
+  })
 })

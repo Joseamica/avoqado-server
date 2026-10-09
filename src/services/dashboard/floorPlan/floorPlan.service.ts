@@ -16,47 +16,71 @@ import {
   type TableLayout,
 } from './floorPlanDiff'
 import { getFloorPlan, loadFloorPlanState } from './floorPlan.read'
-import type { FloorPlanDto, PlanTable, PublishFloorPlanInput } from './floorPlan.types'
+import { FLOOR_PLAN_LIMITS, type FloorPlanDto, type PlanTable, type PublishFloorPlanInput } from './floorPlan.types'
 
 export { getFloorPlan }
 
 type Tx = Prisma.TransactionClient
 
+const PLAN_CHANGED = 'Alguien más cambió el plano mientras lo editabas. Recarga para ver sus cambios.'
+
 /**
- * Bloquea las mesas que se van a archivar y devuelve los números de las que tienen una cuenta sin pagar.
- * Mismo orden de candados que `assignTable` (Venue KEY SHARE → Table FOR UPDATE, por id): una cuenta que se
- * abre en paralelo sobre esa mesa o termina antes (y aquí se ve) o espera a que esta transacción termine.
- * Una cuenta que no se encuentra en el venue cuenta como abierta: ante la duda, la mesa no se quita.
+ * Candado del plano VIVO: todas las mesas y elementos activos del venue, por id, ANTES de leer el plano y su huella.
+ * Sin esto, la PAX (que no toma el candado del plano) podía mover una mesa entre la huella y la escritura, y la
+ * publicación la pisaba sin haberla visto. Con él, la PAX espera a que se publique y su cambio queda encima (el
+ * siguiente guardado del editor verá la huella nueva y recibirá 409). Acotado igual que la lectura (límite + 1).
+ * Orden: Venue KEY SHARE → Table → FloorElement, como `assignTable` (Venue → Table).
  */
-async function lockTablesWithUnpaidOrders(tx: Tx, venueId: string, tableIds: string[]): Promise<string[]> {
+async function lockLivePlan(tx: Tx, venueId: string): Promise<void> {
   await tx.$queryRaw`SELECT id FROM "Venue" WHERE id = ${venueId} FOR KEY SHARE`
+  await tx.$queryRaw`SELECT id FROM "Table" WHERE "venueId" = ${venueId} AND active = true ORDER BY id LIMIT ${FLOOR_PLAN_LIMITS.tables + 1} FOR UPDATE`
+  await tx.$queryRaw`SELECT id FROM "FloorElement" WHERE "venueId" = ${venueId} AND active = true ORDER BY id LIMIT ${FLOOR_PLAN_LIMITS.elements + 1} FOR UPDATE`
+}
+
+interface LockedTable {
+  id: string
+  number: string
+  /** Apunta a una cuenta sin pagar (o a una que no está en el venue: ante la duda, se trata como abierta). */
+  unpaidOrder: boolean
+}
+
+/**
+ * Bloquea (por id) las mesas que se archivan o se reviven y dice cuáles apuntan a una cuenta sin pagar. Las activas ya
+ * las tiene `lockLivePlan`; aquí se suman las archivadas que se reviven, a las que un POS pudo colgarle una cuenta.
+ */
+async function lockTablesWithOrders(tx: Tx, venueId: string, tableIds: string[]): Promise<LockedTable[]> {
   const locked = await tx.$queryRaw<Array<{ id: string; number: string; currentOrderId: string | null }>>(
     Prisma.sql`SELECT id, number, "currentOrderId" FROM "Table" WHERE "venueId" = ${venueId} AND id IN (${Prisma.join(tableIds)}) ORDER BY id FOR UPDATE`,
   )
-  if (locked.length !== tableIds.length) {
-    throw new ConflictError('Alguien más cambió el plano mientras lo editabas. Recarga para ver sus cambios.', 'FLOOR_PLAN_CHANGED')
-  }
+  if (locked.length !== tableIds.length) throw new ConflictError(PLAN_CHANGED, 'FLOOR_PLAN_CHANGED')
   const orderIds = locked.flatMap(t => (t.currentOrderId ? [t.currentOrderId] : []))
-  if (!orderIds.length) return []
-  const paid = await tx.order.findMany({
-    where: { venueId, id: { in: orderIds }, paymentStatus: 'PAID' },
-    select: { id: true },
-    orderBy: { id: 'asc' },
-    take: orderIds.length,
-  })
+  const paid = orderIds.length
+    ? await tx.order.findMany({
+        where: { venueId, id: { in: orderIds }, paymentStatus: 'PAID' },
+        select: { id: true },
+        orderBy: { id: 'asc' },
+        take: orderIds.length,
+      })
+    : []
   const paidIds = new Set(paid.map(o => o.id))
-  return locked.filter(t => t.currentOrderId && !paidIds.has(t.currentOrderId)).map(t => t.number)
+  return locked.map(t => ({ id: t.id, number: t.number, unpaidOrder: !!t.currentOrderId && !paidIds.has(t.currentOrderId) }))
 }
 
-/** Libera el número de una mesa archivada que otra mesa conservada va a usar. */
-async function freeArchivedNumber(tx: Tx, venueId: string, number: string): Promise<string> {
+/**
+ * Libera el número de una mesa archivada que otra mesa conservada va a usar. Nunca elige un número que el mismo
+ * guardado trae (`reserved`): chocaría con el índice único al crear o renombrar esa mesa.
+ */
+async function freeArchivedNumber(tx: Tx, venueId: string, number: string, reserved: ReadonlySet<string>): Promise<string> {
   for (let i = 1; i < 1000; i++) {
     const candidate = i === 1 ? `${number} (archivada)` : `${number} (archivada ${i})`
+    if (reserved.has(candidate)) continue
     const taken = await tx.table.findFirst({ where: { venueId, number: candidate }, select: { id: true } })
     if (!taken) return candidate
   }
   throw new ConflictError('No se pudo liberar el número de mesa', 'TABLE_NUMBER_UNAVAILABLE')
 }
+
+const byNumber = (a: string, b: string) => a.localeCompare(b, 'es', { numeric: true })
 
 function summarize(diff: FloorPlanDiff, before: PlanTable[]) {
   const numberOf = new Map(before.map(t => [t.id, t.number]))
@@ -76,8 +100,8 @@ function summarize(diff: FloorPlanDiff, before: PlanTable[]) {
 
 /**
  * Publica el plano COMPLETO que manda el editor, todo o nada (spec §5.2). Orden: candado por venue →
- * folio (idempotencia) → huella (cambios ajenos) → reglas → mesas con cuenta abierta → áreas → mesas →
- * elementos → publicación. Bitácora y aviso a los POS van DESPUÉS del commit.
+ * folio (idempotencia) → candado del plano vivo (mesas y elementos activos) → huella (cambios ajenos) → reglas →
+ * mesas con cuenta abierta → áreas → mesas → elementos → publicación. Bitácora y aviso a los POS van DESPUÉS del commit.
  */
 export async function publishFloorPlan(
   venueId: string,
@@ -93,14 +117,16 @@ export async function publishFloorPlan(
     })
     if (prior) return { replayed: true as const, publicationId: prior.id }
 
+    await lockLivePlan(tx, venueId)
     const current = await loadFloorPlanState(tx, venueId)
     if (current.overLimit)
       throw new ValidationError('Este plano pasa los límites del editor; escríbenos y lo revisamos contigo', 'FLOOR_PLAN_OVER_LIMIT')
     if (computeFloorPlanFingerprint(current) !== input.baseFingerprint) {
-      throw new ConflictError('Alguien más cambió el plano mientras lo editabas. Recarga para ver sus cambios.', 'FLOOR_PLAN_CHANGED')
+      throw new ConflictError(PLAN_CHANGED, 'FLOOR_PLAN_CHANGED')
     }
 
-    const desiredNumbers = [...new Set(input.tables.map(t => t.number.trim()))]
+    const desiredNumberSet = new Set(input.tables.map(t => t.number.trim()))
+    const desiredNumbers = [...desiredNumberSet]
     const archived = desiredNumbers.length
       ? await tx.table.findMany({
           where: { venueId, active: false, number: { in: desiredNumbers } },
@@ -126,17 +152,25 @@ export async function publishFloorPlan(
       throw error
     }
 
-    // 1) Mesas por archivar: se bloquea su alcance y se rechazan las que tienen una cuenta sin pagar.
-    if (diff.tables.archive.length) {
-      const blocked = await lockTablesWithUnpaidOrders(tx, venueId, diff.tables.archive)
-      if (blocked.length) {
-        const one = blocked.length === 1
-        throw new ValidationError(
-          `No se puede quitar ${one ? 'la mesa' : 'las mesas'} ${blocked.join(', ')}: ${one ? 'tiene' : 'tienen'} una cuenta abierta. Ciérrala primero.`,
-          'TABLES_WITH_OPEN_ORDERS',
-          { numbers: blocked },
-        )
-      }
+    // 1) Mesas que se archivan o se reviven: se bloquean y se ve cuáles tienen una cuenta sin pagar. Archivar una así
+    //    se rechaza; revivir una así la deja con su cuenta (un POS se la abrió justo antes de que se archivara).
+    const archiveIds = new Set(diff.tables.archive)
+    const lockIds = [...diff.tables.archive, ...diff.tables.revive.map(r => r.id)]
+    const locked = lockIds.length ? await lockTablesWithOrders(tx, venueId, lockIds) : []
+    const withUnpaidOrder = new Set(locked.filter(t => t.unpaidOrder).map(t => t.id))
+    const blocked = locked
+      .filter(t => archiveIds.has(t.id) && t.unpaidOrder)
+      .map(t => t.number)
+      .sort(byNumber)
+    if (blocked.length) {
+      const list = blocked.join(', ')
+      throw new ValidationError(
+        blocked.length === 1
+          ? `No se puede quitar la mesa ${list}: tiene una cuenta abierta. Ciérrala primero.`
+          : `No se pueden quitar las mesas ${list}: tienen una cuenta abierta. Ciérralas primero.`,
+        'TABLES_WITH_OPEN_ORDERS',
+        { numbers: blocked },
+      )
     }
 
     // 2) Elementos que el plano ya no trae (incluye los de las áreas que se borran) y áreas. Se archiva por id, no
@@ -171,14 +205,13 @@ export async function publishFloorPlan(
     if (diff.tables.archive.length)
       await tx.table.updateMany({ where: { venueId, id: { in: diff.tables.archive } }, data: { active: false } })
     for (const { id, number } of diff.tables.freeNumbers)
-      await tx.table.update({ where: { id }, data: { number: await freeArchivedNumber(tx, venueId, number) } })
+      await tx.table.update({ where: { id }, data: { number: await freeArchivedNumber(tx, venueId, number, desiredNumberSet) } })
     for (const id of diff.tables.renumber) await tx.table.update({ where: { id }, data: { number: `__tmp_${id}` } })
     for (const u of diff.tables.update) await tx.table.update({ where: { id: u.id }, data: tableData(u.data) })
     for (const r of diff.tables.revive) {
-      await tx.table.update({
-        where: { id: r.id },
-        data: { ...tableData(r.data), active: true, status: 'AVAILABLE', currentOrderId: null },
-      })
+      // Con una cuenta sin pagar conserva su estado y su cuenta; sin cuenta (o ya pagada) vuelve libre.
+      const free = withUnpaidOrder.has(r.id) ? {} : { status: 'AVAILABLE' as const, currentOrderId: null }
+      await tx.table.update({ where: { id: r.id }, data: { ...tableData(r.data), active: true, ...free } })
     }
     for (const c of diff.tables.create) {
       await tx.table.create({
