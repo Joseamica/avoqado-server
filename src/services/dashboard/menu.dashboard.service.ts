@@ -1,5 +1,5 @@
 import prisma from '../../utils/prismaClient'
-import { Menu, MenuCategory, Prisma, ModifierGroup, Modifier, ProductModifierGroup } from '@prisma/client'
+import { Menu, MenuCategory, Prisma, ModifierGroup, Modifier, ProductModifierGroup, Unit } from '@prisma/client'
 import { CreateMenuCategoryDto, UpdateMenuCategoryDto, ReorderMenuCategoriesDto } from '../../schemas/dashboard/menuCategory.schema'
 import {
   CreateMenuDto,
@@ -21,7 +21,12 @@ import logger from '../../config/logger'
 import socketManager from '../../communication/sockets'
 import { logAction } from './activity-log.service'
 import { archivarProductos } from './product.dashboard.service'
-import { inventoryMethodForNewProduct, isNonInventoriable, NON_INVENTORIABLE_MESSAGE } from './quantityInventoryRow'
+import {
+  ensureQuantityInventoryRow,
+  inventoryMethodForNewProduct,
+  isNonInventoriable,
+  NON_INVENTORIABLE_MESSAGE,
+} from './quantityInventoryRow'
 import type { CatalogActor } from '../../types/master-catalog'
 import {
   assertLegacyCatalogGovernanceComputedForVenue,
@@ -1223,7 +1228,7 @@ export async function reorderProducts(venueId: string, reorderData: ReorderProdu
   return prisma.$transaction(transactions)
 }
 
-interface ImportMenuData {
+export interface ImportMenuData {
   mode: 'merge' | 'replace'
   categories: {
     name: string
@@ -1231,6 +1236,15 @@ interface ImportMenuData {
     products: {
       name: string
       sku: string
+      // Additive (Shopify importer). Absent ⇒ the column is not touched, on create or update: today's imports never
+      // brought them. `gtin` is unique per venue — the caller must not send one another product of the venue already has.
+      gtin?: string
+      imageUrl?: string
+      // Additive (Shopify importer): asks for «por cantidad» exactly like `trackInventory: true` below, under the SAME rules
+      // (a type without stock rejects the file; a product on a recipe, or one turned off keeping its Inventory row, is kept
+      // as it is and counted). The difference: it also sets this unit, and only creates the Inventory row in 0 when there is
+      // none — it never touches an existing row's stock or minimum (the sheet's `trackInventory` writes `minStock`).
+      inventoryByQuantity?: { unit: Unit }
       price: number
       cost?: number
       description?: string
@@ -1274,6 +1288,11 @@ interface ImportMenuData {
   }[]
 }
 
+/** The row asks for «por cantidad»: the dashboard sheet's `trackInventory`, or the Shopify loader's `inventoryByQuantity`. */
+function asksForQuantity(product: ImportMenuData['categories'][number]['products'][number]): boolean {
+  return product.trackInventory === true || Boolean(product.inventoryByQuantity)
+}
+
 const GOVERNANCE_DIAGNOSTIC_ROWS_MAX = 100
 const GOVERNANCE_DIAGNOSTIC_SKU_SCALARS_MAX = 128
 
@@ -1300,7 +1319,7 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
 
   // Una clase, una cita, algo digital o un donativo no llevan existencias: se rechaza el archivo entero ANTES de escribir nada
   // (misma regla y mensaje que el alta y la edición de producto en el dashboard y en Artículos de Android/iOS).
-  const sinExistencias = data.categories.flatMap(c => c.products).find(p => isNonInventoriable(p.type || 'FOOD', p.trackInventory))
+  const sinExistencias = data.categories.flatMap(c => c.products).find(p => isNonInventoriable(p.type || 'FOOD', asksForQuantity(p)))
   if (sinExistencias)
     throw new AppError(`${NON_INVENTORIABLE_MESSAGE} (SKU ${boundedGovernanceDiagnosticSku(sinExistencias.sku).sku})`, 400)
 
@@ -1457,16 +1476,27 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
             where: { venueId, sku: productData.sku },
             include: { recipe: { select: { id: true } }, inventory: { select: { id: true } } },
           })
-          // `trackInventory` ⇒ el producto se cuenta «por cantidad». Antes sólo se escribía la fila de Inventory y el producto
-          // no se configuraba: tenía existencias y sus ventas NO descontaban. Dos excepciones, que se quedan como están y se
-          // cuentan: un producto con receta (se descontaría el producto en vez de sus insumos), y uno que se apagó conservando
-          // su fila — el export del dashboard escribe `track_inventory` según si EXISTE la fila, así que exportar y volver a
-          // importar lo prendería sin que nadie lo pidiera. Los que dañó la importación vieja los repara su script, no esto.
+          // `trackInventory` (or the Shopify loader's `inventoryByQuantity`) ⇒ el producto se cuenta «por cantidad». Antes sólo
+          // se escribía la fila de Inventory y el producto no se configuraba: tenía existencias y sus ventas NO descontaban. Dos
+          // excepciones, que se quedan como están y se cuentan: un producto con receta (se descontaría el producto en vez de sus
+          // insumos), y uno que se apagó conservando su fila — el export del dashboard escribe `track_inventory` según si EXISTE
+          // la fila, así que exportar y volver a importar lo prendería sin que nadie lo pidiera. Los que dañó la importación
+          // vieja los repara su script, no esto.
+          const pideCantidad = asksForQuantity(productData)
           const conReceta = existingProduct?.inventoryMethod === 'RECIPE' || Boolean(existingProduct?.recipe)
           const apagadoConFila = existingProduct?.trackInventory === false && Boolean(existingProduct?.inventory)
-          const porCantidad = productData.trackInventory === true && !conReceta && !apagadoConFila
-          if (productData.trackInventory === true && conReceta) productsKeptOnRecipe++
-          else if (productData.trackInventory === true && apagadoConFila) productsKeptUntracked++
+          const porCantidad = pideCantidad && !conReceta && !apagadoConFila
+          if (pideCantidad && conReceta) productsKeptOnRecipe++
+          else if (pideCantidad && apagadoConFila) productsKeptUntracked++
+          // Additive fields (Shopify importer): written only when present, on create AND update — an import without them
+          // (every import before them) writes exactly what it wrote before. A blank gtin is absent: '' would collide on
+          // @@unique([venueId, gtin]) with the next blank one. The unit only goes with «por cantidad» (same guards as above).
+          const gtin = productData.gtin?.trim()
+          const shopifyImportFields: { gtin?: string; imageUrl?: string; unit?: Unit } = {
+            ...(gtin ? { gtin } : {}),
+            ...(productData.imageUrl ? { imageUrl: productData.imageUrl } : {}),
+            ...(porCantidad && productData.inventoryByQuantity ? { unit: productData.inventoryByQuantity.unit } : {}),
+          }
 
           let product
           if (existingProduct) {
@@ -1499,6 +1529,7 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
                 // Sin `trackInventory` (undefined) la columna no se toca: re-importar no apaga lo que ya se contaba.
                 trackInventory: porCantidad ? true : undefined,
                 inventoryMethod: porCantidad ? 'QUANTITY' : undefined,
+                ...shopifyImportFields,
                 ...(archivado ? { deletedAt: null, deletedBy: null, active: true } : {}),
                 // Codex C5-2: the file adopts it (same id) ⇒ the owner's, no longer demo: converting the venue must not delete it.
                 isDemo: false,
@@ -1526,6 +1557,7 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
                 duration: productData.duration ?? null,
                 trackInventory: porCantidad,
                 inventoryMethod: inventoryMethodForNewProduct(porCantidad, undefined),
+                ...shopifyImportFields,
               },
             })
             if (actor.type === 'SERVICE') {
@@ -1599,6 +1631,10 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
               })
             }
           }
+
+          // Shopify loader, counted by piece ⇒ it must have its Inventory row (born in 0, no kardex; an existing one is never
+          // touched). A product kept on its recipe or kept off gets nothing (`porCantidad` is false).
+          if (porCantidad && productData.inventoryByQuantity) await ensureQuantityInventoryRow(tx, product)
 
           // Handle modifier groups
           if (productData.modifierGroups && productData.modifierGroups.length > 0) {
