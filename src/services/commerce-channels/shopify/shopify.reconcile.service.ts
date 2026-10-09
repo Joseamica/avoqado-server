@@ -468,6 +468,13 @@ async function tandaDeStock(l: Sucursal, cerco: CercoShopify, d: DepsUnidad): Pr
     const nivel: NivelLeido = r.data.get(levelKey(l.shopifyLocationId, p.inventoryItemId)) ?? { kind: 'SIN_NIVEL' }
     const A = t.stock.get(p.productId)
     const f = t.filas.get(p.productId) ?? sinFilas()
+    // Una pareja suspendida de un producto archivado (por quien sea) nunca se reactiva al resolver: su revisión OPEN ya no
+    // tiene salida y se cierra (offset 0, como al desconectar, K18) para que no siga en porRevisar, la campanita y los correos.
+    if (p.suspendedReason && p.product.deletedAt && t.offsets.has(p.productId)) {
+      const S = nivel.kind === 'OK' ? nivel.available : p.mirrorAvailable
+      const a = await abrirRevision(sucursal, cerco, d.hasAccess, p.productId, S, fetchedAt)
+      if (a === 'CONTEXTO_CAMBIO' || a === 'PAUSADO') return corte()
+    }
     // R5, §10.4: una pareja que el conector archivó con un envío en camino se borra en cuanto ya no queda nada en camino.
     // Cualquier otra suspensión de un producto que archivó el conector se queda así: nunca se reactiva comparando.
     if (p.suspendedReason && p.product.deletedAt && p.product.deletedBy === ARCHIVADO_POR_SHOPIFY) {
@@ -604,7 +611,8 @@ type Revision = 'ABIERTA' | 'CERRADA' | 'NADA' | 'EN_CAMINO' | 'CONTEXTO_CAMBIO'
  * (cuántas y si alguna es ambigua), se calcula `total = A − espejo − Σvivas − ΣDEAD_LETTER` (generación vigente, T3) y
  * se decide el motivo; de la foto no se reusa nada. Si la causa ya no existe, se cierra la abierta (offset 0) o no se
  * hace nada. Si el espejo se movió a otro número después de leer Shopify, la lectura ya es vieja y la tanda se repite.
- * Una pareja suspendida sólo entra con una DEAD_LETTER ambigua (U2): queda INCIERTO y resolverla la reactiva (B5).
+ * Una pareja suspendida sólo entra con una DEAD_LETTER ambigua (U2): queda INCIERTO y resolverla la reactiva (B5). Si su
+ * producto está archivado, la revisión OPEN que tenga se cierra (offset 0): la resolución ya no la podría resolver.
  * Abrir o cerrar deja bitácora después de la tx.
  */
 async function abrirRevision(
@@ -623,12 +631,35 @@ async function abrirRevision(
       // §9.7 (D10 del preflight): sin plan no se abre nada aunque esta pareja no haya pasado por A; la unidad se detiene.
       if (!(await hasAccess(link.venueId))) return { r: 'PAUSADO' }
       const [p] = await tx.$queryRaw<
-        Array<{ mirrorAvailable: number; mirrorAt: Date; initializedAt: Date | null; suspendedReason: string | null }>
+        Array<{
+          mirrorAvailable: number
+          mirrorAt: Date
+          initializedAt: Date | null
+          suspendedReason: string | null
+          archivado: Date | null
+        }>
       >`
-        SELECT "mirrorAvailable", "mirrorAt", "initializedAt", "suspendedReason"::text AS "suspendedReason"
-          FROM "ShopifyVariantLink" WHERE "productId" = ${productId} AND "locationLinkId" = ${link.id} FOR UPDATE`
+        SELECT v."mirrorAvailable", v."mirrorAt", v."initializedAt", v."suspendedReason"::text AS "suspendedReason",
+               (SELECT pr."deletedAt" FROM "Product" pr WHERE pr.id = v."productId") AS archivado
+          FROM "ShopifyVariantLink" v WHERE v."productId" = ${productId} AND v."locationLinkId" = ${link.id} FOR UPDATE`
       const [inv] = await tx.$queryRaw<Array<{ currentStock: Prisma.Decimal }>>`
         SELECT "currentStock" FROM "Inventory" WHERE "productId" = ${productId} FOR UPDATE`
+      if (p?.suspendedReason && p.archivado) {
+        // Pareja suspendida de un producto archivado: la resolución nunca la reactiva, así que su revisión se cierra.
+        const [abierta] = await tx.$queryRaw<Array<{ id: string; reason: ShopifyReviewReason }>>`
+          SELECT id, reason::text AS reason FROM "ShopifyReviewItem"
+           WHERE "productId" = ${productId} AND status = 'OPEN' ORDER BY "createdAt" ASC LIMIT 1 FOR UPDATE`
+        if (!abierta) return { r: 'NADA' }
+        await tx.shopifyReviewItem.update({ where: { id: abierta.id }, data: { status: 'RESOLVED', resolvedAt: new Date(), offset: 0 } })
+        return {
+          r: 'CERRADA',
+          bitacora: {
+            action: 'SHOPIFY_REVIEW_CLOSED',
+            reviewId: abierta.id,
+            data: { productId, reason: abierta.reason, causa: 'PRODUCTO_ARCHIVADO' },
+          },
+        }
+      }
       if (!p || !p.initializedAt || !inv) return { r: 'NADA' }
       if (p.mirrorAt > fetchedAt && p.mirrorAvailable !== S) return { r: 'EN_CAMINO' } // otro jalón o un envío llegó después
       const A = new Prisma.Decimal(inv.currentStock)

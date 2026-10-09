@@ -67,7 +67,7 @@ const avisos = (e: EscenarioShopify, aviso: string) =>
   prisma.notification.count({ where: { venueId: e.venueId, entityType: 'ShopifyAviso', entityId: { startsWith: `${aviso}:` } } })
 const venta = (inventoryId: string, n = 1) =>
   prisma.$executeRaw`UPDATE "Inventory" SET "currentStock" = "currentStock" - ${n} WHERE id = ${inventoryId}`
-/** Una vuelta entera del cuadre (B4) con Shopify en `n` y su catálogo igual al de las parejas de hoy. */
+/** Una vuelta entera del cuadre (B4) con Shopify en `n` y su catálogo igual al de las parejas de hoy; devuelve su cierre. */
 async function cuadrar(e: EscenarioShopify, n: NivelLeido) {
   await pedirCuadre(e.locationLinkId)
   const d = {
@@ -75,7 +75,10 @@ async function cuadrar(e: EscenarioShopify, n: NivelLeido) {
     graphql: graphqlDelCatalogo(await variantesDeLaSucursal(e.locationLinkId)),
     hasAccess: conPlan,
   }
-  for (let i = 0; i < 10; i++) if ((await reconcileVenue(e.venueId, d)).terminado) return
+  for (let i = 0; i < 10; i++) {
+    const r = await reconcileVenue(e.venueId, d)
+    if (r.terminado) return r
+  }
   throw new Error('la vuelta no terminó')
 }
 
@@ -466,6 +469,37 @@ describe('decisiones vinculantes de B5 (K12, T3, U2, bitácora)', () => {
     await cuadrar(e, nivel(10))
     expect(await prisma.shopifyReviewItem.count({ where: { productId: e.productId, status: 'OPEN' } })).toBe(0)
     expect((await pareja(e)).suspendedReason).toBe('NIVEL_INEXISTENTE')
+  })
+
+  it('ronda 2: el dueño archiva el producto DESPUÉS de que se abrió su INCIERTO ⇒ la siguiente vuelta lo cierra (offset 0) y ya no cuenta', async () => {
+    const e = await escenario()
+    await suspendidaConDudaMuerta(e)
+    expect(await cuadrar(e, nivel(10))).toMatchObject({ porRevisar: 1 })
+    const r = await prisma.shopifyReviewItem.findFirstOrThrow({ where: { productId: e.productId, status: 'OPEN' } })
+    await prisma.product.update({ where: { id: e.productId }, data: { deletedAt: new Date(), deletedBy: e.staffId } })
+    expect(await cuadrar(e, nivel(10))).toMatchObject({ porRevisar: 0 })
+    const cerrada = await revision(r.id)
+    expect(cerrada).toMatchObject({ status: 'RESOLVED', choice: null })
+    expect(cerrada.offset.toString()).toBe('0')
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'SHOPIFY_REVIEW_CLOSED',
+        venueId: e.venueId,
+        organizationId: e.organizationId,
+        entity: 'ShopifyReviewItem',
+        entityId: r.id,
+      }),
+    )
+    expect((await pareja(e)).suspendedReason).toBe('NIVEL_INEXISTENTE') // la pareja no se toca
+  })
+
+  it('ronda 2: la de una pareja suspendida cuyo producto NO está archivado sigue abierta en la siguiente vuelta', async () => {
+    const e = await escenario()
+    await suspendidaConDudaMuerta(e)
+    await cuadrar(e, nivel(10))
+    const r = await prisma.shopifyReviewItem.findFirstOrThrow({ where: { productId: e.productId, status: 'OPEN' } })
+    expect(await cuadrar(e, nivel(10))).toMatchObject({ porRevisar: 1 })
+    expect(await revision(r.id)).toMatchObject({ status: 'OPEN', reason: 'INCIERTO' })
   })
 
   it('la pareja suspendida de un producto archivado nunca se reactiva al resolver ⇒ 409 SHOPIFY_PAREJA_SUSPENDIDA sin preguntar a Shopify', async () => {
