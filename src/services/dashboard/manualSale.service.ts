@@ -1,3 +1,4 @@
+import { enqueuePaymentCommissionInTx } from '@/services/tpv/paymentEffects.service'
 import { Prisma } from '@prisma/client'
 import { fromZonedTime } from 'date-fns-tz'
 import prisma from '../../utils/prismaClient'
@@ -306,6 +307,10 @@ export async function createOneManualSale(
               reviewNotes: rejectionNote,
             },
           })
+
+          // FT-GRAVES T2: el MISMO gancho de comisión que la terminal, con el dinero. El esquema decide a quién (la venta lleva
+          // al promotor como quien atendió y a quien la subió como quien cobró); sin persona, nada.
+          await enqueuePaymentCommissionInTx(tx, payment.id)
 
           // 9. Return success + the audit payload. Audit itself runs OUTSIDE the tx
           //    (below) so an audit failure can't roll back the sale.

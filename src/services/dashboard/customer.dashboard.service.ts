@@ -7,6 +7,7 @@
  * @see CLAUDE.md - Layered Architecture section
  */
 
+import { enqueuePaymentCommissionInTx } from '@/services/tpv/paymentEffects.service'
 import prisma from '@/utils/prismaClient'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import logger from '@/config/logger'
@@ -948,6 +949,8 @@ export async function settleCustomerBalance(
         staffId: null,
       })
       if (posting?.id) postingIds.push(posting.id)
+      // FT-GRAVES T2: el MISMO gancho de comisión que la terminal, con el dinero. El esquema decide a quién; sin persona, nada.
+      await enqueuePaymentCommissionInTx(tx, settlementPayment.id)
     }
   }, ORDER_LOCK_WAIT_BUDGET)
 

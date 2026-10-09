@@ -32,6 +32,7 @@ import {
 import { countPriorCompletedPayments } from '../shared/priorCompletedPayments'
 import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
 import { generateDigitalReceipt, generateReceiptUrl } from '../tpv/digitalReceipt.tpv.service'
+import { enqueuePaymentCommissionInTx } from '../tpv/paymentEffects.service'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
 import { debeMarcarCocina } from '../kds/kitchenDisplayStations'
 import { armarComandasTrasCommit } from '../kds/kitchenTicketAuthoring.service'
@@ -1101,6 +1102,9 @@ async function completeAndAttributeB4BitPaymentInTx(
     })
   }
 
+  // FT-GRAVES T2: sólo quien GANÓ la transición a COMPLETED (una reentrega no llega aquí) comisiona, con el MISMO gancho que la
+  // terminal y en esta transacción. El esquema decide a quién (quien inició el cobro en la terminal); sin persona, nada.
+  await enqueuePaymentCommissionInTx(tx, paymentId)
   return { transitioned: true, ignoredAsOutOfOrder: false }
 }
 
