@@ -658,6 +658,80 @@ describe('requisitos del ledger para B8', () => {
     expect(await token(vencido.id)).toBeNull()
   })
 
+  describe('retención de las revisiones resueltas (B10)', () => {
+    const hace = (dias: number) => new Date(Date.now() - dias * 24 * 3600_000)
+    const fila = (e: EscenarioShopify, status: 'PENDING' | 'IN_PROGRESS' | 'FAILED' | 'DEAD_LETTER' | 'SENT' | 'DISCARDED') =>
+      prisma.shopifyStockOutbox.create({
+        data: {
+          venueId: e.venueId,
+          locationLinkId: e.locationLinkId,
+          generation: 1,
+          productId: e.productId,
+          delta: 1,
+          status,
+          processedAt: ['SENT', 'DISCARDED', 'DEAD_LETTER'].includes(status) ? hace(10) : null,
+        },
+      })
+    const datos = (e: EscenarioShopify, o: { status: 'OPEN' | 'RESOLVED'; resolvedAt: Date | null; outboxId?: string | null }) => ({
+      venueId: e.venueId,
+      productId: e.productId,
+      reason: 'DIFERENCIA' as const,
+      avoqadoQty: 5,
+      shopifyQty: 4,
+      suggestion: 'AVOQADO' as const,
+      status: o.status,
+      choice: o.status === 'RESOLVED' ? ('AVOQADO' as const) : null,
+      resolvedAt: o.resolvedAt,
+      resolutionOutboxId: o.outboxId ?? null,
+      createdAt: hace(200),
+    })
+    const revision = (e: EscenarioShopify, o: Parameters<typeof datos>[1]) => prisma.shopifyReviewItem.create({ data: datos(e, o) })
+    const existe = async (id: string) => (await prisma.shopifyReviewItem.findUnique({ where: { id } })) !== null
+
+    it('una RESUELTA de hace más de 90 días se purga si su elección ya no está en camino; la ATORADA o en camino, la reciente y la OPEN se quedan', async () => {
+      const e = await escenario()
+      const vieja = hace(91)
+      const enviada = await fila(e, 'SENT')
+      const descartada = await fila(e, 'DISCARDED')
+      const atorada = await fila(e, 'DEAD_LETTER')
+      const pendiente = await fila(e, 'PENDING')
+      const fallida = await fila(e, 'FAILED')
+      const enVuelo = await fila(e, 'IN_PROGRESS')
+      // Se purgan: sin envío (cerradas por el cuadre o por desconectar), SENT, DISCARDED y con la fila ya borrada.
+      const sinEnvio = await revision(e, { status: 'RESOLVED', resolvedAt: vieja })
+      const conSent = await revision(e, { status: 'RESOLVED', resolvedAt: vieja, outboxId: enviada.id })
+      const conDescartada = await revision(e, { status: 'RESOLVED', resolvedAt: vieja, outboxId: descartada.id })
+      const sinFila = await revision(e, { status: 'RESOLVED', resolvedAt: vieja, outboxId: 'fila-que-ya-no-existe' })
+      // Se quedan: la elección todavía puede salir o está atorada (ATORADO debe seguir visible), la reciente y las OPEN.
+      const conAtorada = await revision(e, { status: 'RESOLVED', resolvedAt: vieja, outboxId: atorada.id })
+      const conPendiente = await revision(e, { status: 'RESOLVED', resolvedAt: vieja, outboxId: pendiente.id })
+      const conFallida = await revision(e, { status: 'RESOLVED', resolvedAt: vieja, outboxId: fallida.id })
+      const conEnVuelo = await revision(e, { status: 'RESOLVED', resolvedAt: vieja, outboxId: enVuelo.id })
+      const casiVieja = await revision(e, { status: 'RESOLVED', resolvedAt: hace(89), outboxId: enviada.id })
+      const reciente = await revision(e, { status: 'RESOLVED', resolvedAt: hace(1) })
+      const abierta = await revision(e, { status: 'OPEN', resolvedAt: null })
+      const abiertaConFecha = await revision(e, { status: 'OPEN', resolvedAt: vieja }) // nunca ocurre, pero OPEN no se toca jamás
+      await limpiarShopify(new Date(), Date.now() + 10_000)
+      for (const r of [sinEnvio, conSent, conDescartada, sinFila]) expect(await existe(r.id)).toBe(false)
+      for (const r of [conAtorada, conPendiente, conFallida, conEnVuelo, casiVieja, reciente, abierta, abiertaConFecha])
+        expect(await existe(r.id)).toBe(true)
+    })
+
+    it('purga por tandas de verdad (más de una tanda de 500) y respeta el tiempo: sin tiempo no borra nada', async () => {
+      const e = await escenario()
+      const viejas = Array.from({ length: 1_100 }, () => datos(e, { status: 'RESOLVED', resolvedAt: hace(120) }))
+      await prisma.shopifyReviewItem.createMany({ data: viejas })
+      const abierta = await revision(e, { status: 'OPEN', resolvedAt: null })
+      const contar = () => prisma.shopifyReviewItem.count({ where: { venueId: e.venueId } })
+      expect(await contar()).toBe(1_101)
+      await limpiarShopify(new Date(), Date.now() - 1) // el tope ya pasó
+      expect(await contar()).toBe(1_101)
+      await limpiarShopify(new Date(), Date.now() + 60_000)
+      expect(await contar()).toBe(1) // las 1,100 viejas, en tres tandas; queda la OPEN
+      expect(await existe(abierta.id)).toBe(true)
+    })
+  })
+
   it('T5 y S7: la limpieza descarta lo que nunca podrá salir (generación vieja, sin sucursal) y purga los eventos terminales; lo que va en camino no se toca', async () => {
     const e = await escenario({ generation: 2 })
     const hace = (dias: number) => new Date(Date.now() - dias * 24 * 3600_000)

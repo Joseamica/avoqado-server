@@ -370,7 +370,7 @@ Every model A–Z with its location in `prisma/schema.prisma`.
 - `SettlementSimulation` → `schema.prisma:L7324`
 - `Shift` → `schema.prisma:L3406`
 - `ShopifyConnectIntent` → `schema.prisma:L19415`
-- `ShopifyImportIssue` → `schema.prisma:L19460`
+- `ShopifyImportIssue` → `schema.prisma:L19462`
 - `ShopifyInboundEvent` → `schema.prisma:L19392`
 - `ShopifyLocationLink` → `schema.prisma:L19275`
 - `ShopifyReviewItem` → `schema.prisma:L19433`
@@ -388,8 +388,8 @@ Every model A–Z with its location in `prisma/schema.prisma`.
 - `StaffPayLevel` → `schema.prisma:L18961`
 - `StaffPayLevelAssignment` → `schema.prisma:L18979`
 - `StaffPayStatement` → `schema.prisma:L19145`
-- `StaffPayTipWindow` → `schema.prisma:L19479`
-- `StaffPayVenueWindow` → `schema.prisma:L19496`
+- `StaffPayTipWindow` → `schema.prisma:L19481`
+- `StaffPayVenueWindow` → `schema.prisma:L19498`
 - `StaffSchedule` → `schema.prisma:L14242`
 - `StaffScheduleException` → `schema.prisma:L14254`
 - `StaffVenue` → `schema.prisma:L1281`

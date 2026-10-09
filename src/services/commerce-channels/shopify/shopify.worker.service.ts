@@ -47,6 +47,13 @@ const RESERVA_AVISO_MS = 1_000
 const MIN_PAGINA_MS = MIN_HTTP_MS + RESERVA_PAGINA_MS
 const LIMPIEZA_DIAS = 30
 const LIMPIEZA_TANDA = 500
+/**
+ * Retención de «Por revisar» (B10): una revisión RESUELTA de hace más de esto, cuya elección ya no está en camino, se borra.
+ * Sin ella `ShopifyReviewItem` crece para siempre y la lista de revisiones cuesta lo que pesa el historial del negocio
+ * (medido: 5 ms a 3,000 revisiones, 35 ms con Seq Scan a 30,000). ponytail: ventana fija de 90 días, sin ajuste por negocio;
+ * si alguien necesita más historial, el rastro vive en `ActivityLog` (abrir, cerrar y resolver lo escriben), o se vuelve ajuste.
+ */
+export const REVISIONES_RESUELTAS_DIAS = 90
 /** Lo que contesta `applyConnectPage` mientras algo de una conexión anterior puede llegar a Shopify (BR-3). */
 const ENVIO_EN_CAMINO = 'ENVIO_EN_CAMINO'
 
@@ -338,11 +345,15 @@ async function unidad(s: SucursalTomada, vence: number, d: DepsUnidad): Promise<
  *   en camino (IN_PROGRESS, ambiguo) no se toca.
  * - el token cifrado de los intents consumidos, fallidos o vencidos (M2);
  * - lo cerrado hace más de 30 días: filas SENT/DISCARDED, eventos terminales (PROCESSED, SKIPPED y los FAILED que ya no
- *   reintentan: su `nextAttemptAt` nulo engorda el reclamo, S7) e intents vencidos.
+ *   reintentan: su `nextAttemptAt` nulo engorda el reclamo, S7) e intents vencidos;
+ * - las revisiones RESUELTAS hace más de 90 días (B10) cuya elección ya no está en camino: sin envío, o con su fila SENT,
+ *   DISCARDED o ya borrada. Una elección PENDING, FAILED, IN_PROGRESS o DEAD_LETTER (ATORADO) se queda a la vista, y una OPEN
+ *   no se toca jamás. Sin esperar candados (`SKIP LOCKED`).
  */
 export async function limpiarShopify(now: Date, limite: number): Promise<void> {
   const antes = new Date(now.getTime() - LIMPIEZA_DIAS * 24 * 3600_000)
-  const hecho = { descartadas: 0, filas: 0, eventos: 0, tokens: 0, intents: 0 }
+  const hecho = { descartadas: 0, filas: 0, eventos: 0, tokens: 0, intents: 0, revisiones: 0 }
+  const resueltasAntes = new Date(now.getTime() - REVISIONES_RESUELTAS_DIAS * 24 * 3600_000)
   while (Date.now() < limite) {
     const n = await prisma.$executeRaw`
       UPDATE "ShopifyStockOutbox" o
@@ -405,5 +416,19 @@ export async function limpiarShopify(now: Date, limite: number): Promise<void> {
     if (intents.length === 0) break
     hecho.intents += (await prisma.shopifyConnectIntent.deleteMany({ where: { id: { in: intents.map(x => x.id) } } })).count
   }
-  if (hecho.descartadas + hecho.filas + hecho.eventos + hecho.tokens + hecho.intents > 0) logger.info('[SHOPIFY] limpieza', hecho)
+  while (Date.now() < limite) {
+    const n = await prisma.$executeRaw`
+      DELETE FROM "ShopifyReviewItem"
+       WHERE id IN (SELECT r.id FROM "ShopifyReviewItem" r
+                      LEFT JOIN "ShopifyStockOutbox" o ON o.id = r."resolutionOutboxId"
+                     WHERE r.status = 'RESOLVED' AND r."resolvedAt" < ${utcTs(resueltasAntes)}
+                       AND (r."resolutionOutboxId" IS NULL OR o.id IS NULL OR o.status IN ('SENT', 'DISCARDED'))
+                     ORDER BY r.id
+                     LIMIT ${LIMPIEZA_TANDA}
+                     FOR UPDATE OF r SKIP LOCKED)`
+    hecho.revisiones += n
+    if (n < LIMPIEZA_TANDA) break
+  }
+  if (hecho.descartadas + hecho.filas + hecho.eventos + hecho.tokens + hecho.intents + hecho.revisiones > 0)
+    logger.info('[SHOPIFY] limpieza', hecho)
 }

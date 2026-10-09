@@ -19454,6 +19454,8 @@ model ShopifyReviewItem {
 
   @@index([venueId, status, createdAt])
   @@index([productId, status])
+  /// La retención del worker (RESUELTAS de hace más de 90 días) busca por aquí, entre todos los negocios, cada hora.
+  @@index([status, resolvedAt])
 }
 
 /// «Productos sin pareja» y parejas suspendidas.
