@@ -5,6 +5,7 @@
  * apps sólo leen booleanos, nunca re-derivan una regla de negocio.
  */
 import { OrderType, Prisma } from '@prisma/client'
+import { parseServiceCourseSnapshot } from '@/services/service-courses/serviceCourseContract'
 
 import { reservaViva } from '@/services/delivery-channels/core/deliveryOrderLock'
 import { adapterFor } from '@/services/delivery-channels/core/adapterRegistry'
@@ -171,8 +172,8 @@ export async function ventasDeComandas(db: Prisma.TransactionClient, venueId: st
       : [],
     cursoIds.length
       ? db.orderItem.findMany({
-          where: { id: { in: cursoIds }, orderId: { in: [...conVenta] }, course: { not: null } },
-          select: { id: true, orderId: true, course: true },
+          where: { id: { in: cursoIds }, orderId: { in: [...conVenta] } },
+          select: { id: true, orderId: true, course: true, serviceCourse: true },
           take: cursoIds.length,
         })
       : [],
@@ -199,7 +200,17 @@ export async function ventasDeComandas(db: Prisma.TransactionClient, venueId: st
       retiros: new Map(propias.filter(a => a.action === 'REMOVE_ITEM').map(a => [a.lineId, a])),
       renglones: new Map((renglonesDe.get(v.id) ?? []).map(r => [r.id, r])),
       tableNumber: table?.number ?? null,
-      cursos: new Map((cursosDe.get(v.id) ?? []).map(r => [r.id, r.course!])),
+      cursos: new Map(
+        (cursosDe.get(v.id) ?? []).flatMap(r => {
+          let label = r.course
+          try {
+            label = parseServiceCourseSnapshot(r.serviceCourse)?.label ?? label
+          } catch {
+            /* legacy rows retain their course */
+          }
+          return label ? [[r.id, label] as [string, string]] : []
+        }),
+      ),
     })
   }
   return porId

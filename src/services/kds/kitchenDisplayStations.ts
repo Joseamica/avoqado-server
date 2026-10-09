@@ -7,8 +7,27 @@ import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
 import type { RoutingConfig } from '../printing/printRouting.engine'
 import type { ScreenStation } from './kitchenTicketPlanning'
+import { venueHasFeatureAccess } from '../access/basePlan.service'
+import { ForbiddenError } from '../../errors/AppError'
 
 type Db = Prisma.TransactionClient | typeof prisma
+
+type PreparationInput = {
+  serviceCourse?: { preparationVersion?: number; kind?: string } | null
+  promotionRef?: { selections: Array<{ serviceCourse?: { preparationVersion?: number } | null }> }
+}
+
+/** Validate before creating new preparation rows; payment retries of an existing sale remain compatible. */
+export async function assertPreparationAuthoringAccess(venueId: string, items: PreparationInput[]): Promise<void> {
+  const requested = items.some(
+    item =>
+      item.serviceCourse?.preparationVersion === 1 ||
+      item.promotionRef?.selections.some(selection => selection.serviceCourse?.preparationVersion === 1),
+  )
+  if (requested && !(await venueHasFeatureAccess(venueId, 'KITCHEN_DISPLAY'))) {
+    throw new ForbiddenError('La preparación por producto requiere Pro.', 'FEATURE_ACCESS_REQUIRED')
+  }
+}
 
 /**
  * ¿El negocio atiende alguna estación ACTIVA con pantalla de cocina? (spec 2026-09-24, etapa 1).
@@ -74,9 +93,17 @@ export async function estacionDePantallaParaReparto(venueId: string): Promise<st
  * ¿Esta venta o ronda necesita comanda de pantalla? Se resuelve FUERA de la transacción de dinero y nunca
  * lanza: saber si hay pantalla no puede tumbar un cobro.
  */
-export async function debeMarcarCocina(venueId: string): Promise<boolean> {
+export async function debeMarcarCocina(venueId: string, options: { hasPreparation?: boolean; orderId?: string } = {}): Promise<boolean> {
   try {
-    return await venueTienePantallaDeCocina(venueId)
+    if (await venueTienePantallaDeCocina(venueId)) return true
+    const hasPreparation =
+      options.hasPreparation ||
+      (options.orderId &&
+        (await prisma.orderItem.findFirst({
+          where: { orderId: options.orderId, order: { venueId }, serviceCourse: { path: ['preparationVersion'], equals: 1 } },
+          select: { id: true },
+        })))
+    return Boolean(hasPreparation) && (await venueHasFeatureAccess(venueId, 'KITCHEN_DISPLAY'))
   } catch (error) {
     logger.warn('[KDS] no se pudo saber si el negocio tiene pantalla; el cobro sigue sin marca de cocina', {
       venueId,

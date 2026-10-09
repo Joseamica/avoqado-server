@@ -125,7 +125,7 @@ export async function requireOrgOwner(req: Request, res: Response, next: NextFun
       return res.status(403).json({
         success: false,
         error: 'owner_required',
-        message: 'Solo el propietario de la organización puede migrar terminales.',
+        message: 'Solo el propietario de la organización puede modificar esta configuración.',
       })
     }
 

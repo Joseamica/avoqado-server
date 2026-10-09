@@ -60,12 +60,15 @@ import {
   rechazarCobroNuevoSobreCancelada,
   salirSiLaLlaveYaTienePago,
 } from '../shared/cuentaCancelada'
-import { debeMarcarCocina } from '../kds/kitchenDisplayStations'
+import { debeMarcarCocina, assertPreparationAuthoringAccess } from '../kds/kitchenDisplayStations'
 import { armarComandasTrasCommit, retirarComandasDeVentaAnulada } from '../kds/kitchenTicketAuthoring.service'
+import { parseServiceCourseSnapshot, legacyCourseForSnapshot, type ServiceCourseSnapshot } from '../service-courses/serviceCourseContract'
 
 // MARK: - Types
 
 export interface CreateOrderItemInput {
+  serviceCourse?: ServiceCourseSnapshot | null
+  externalId?: string | null
   // Product items set productId; custom items (e.g. "Otro importe") set name + unitPrice.
   productId?: string | null
   name?: string | null
@@ -91,7 +94,11 @@ export interface CreateOrderItemInput {
   promotionRef?: {
     promotionId: string
     promotionInstanceId: string
-    selections: Array<{ groupId: string; optionId: string }>
+    selections: Array<{
+      groupId: string
+      optionId: string
+      serviceCourse?: ServiceCourseSnapshot | null
+    }>
   }
 }
 
@@ -302,6 +309,9 @@ export interface OrderDetailResponse {
      *  items by course and labels each group "Enviado a la cocina a las HH:MM"
      *  (createdAt == fire time in the table flow). */
     course: string | null
+    serviceCourse?: { id: string; label: string; kind: 'IMMEDIATE' | 'STANDARD' } | null
+    orderPromotionId?: string | null
+    externalId?: string | null
     /** TABLE_SERVICE: asiento/comensal de la línea. */
     seat: number | null
     createdAt: Date
@@ -555,6 +565,8 @@ export async function buildOrderItemsData(
     throw new BadRequestError('At least one item is required')
   }
 
+  await assertPreparationAuthoringAccess(venueId, items)
+
   let subtotal = 0
   let itemDiscountTotal = 0
 
@@ -630,6 +642,9 @@ export async function buildOrderItemsData(
   // Item/order totals stay gross; discount reductions live in `discountAmount`
   // (same convention as TPV's Cobrar V1 flow — see order.tpv.service.ts).
   const productItemsData = productInputs.map(item => {
+    const serviceCourse = parseServiceCourseSnapshot(item.serviceCourse)
+    if (item.externalId != null && (typeof item.externalId !== 'string' || item.externalId.length < 1 || item.externalId.length > 256))
+      throw new BadRequestError('Identificador de producto inválido')
     const product = products.find(p => p.id === item.productId)!
     const itemModifierIds = item.modifierIds || []
 
@@ -681,6 +696,8 @@ export async function buildOrderItemsData(
 
     return {
       productId: item.productId,
+      ...(serviceCourse ? { serviceCourse: serviceCourse as Prisma.InputJsonValue, course: legacyCourseForSnapshot(serviceCourse) } : {}),
+      ...(item.externalId ? { externalId: item.externalId } : {}),
       productName: product.name,
       productSku: product.sku,
       categoryName: product.category?.name || null,
@@ -824,6 +841,7 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
   // sync.mobile.service.ts). Un item sin promotionRef se comporta igual que hoy.
   const itemsConPromocion = input.items.filter(it => it.promotionRef)
   const itemsNormales = input.items.filter(it => !it.promotionRef)
+  await assertPreparationAuthoringAccess(venueId, itemsConPromocion)
 
   // Dedupe defensivo por instancia: dos líneas con el mismo instanceId son la
   // MISMA promoción (un doble tap del cajero), no dos combos.
@@ -1007,6 +1025,11 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
       // descuento al centavo y recalcula los totales de la orden sin abrir otra transacción. Todo-o-nada: si la #2
       // truena, la #1 se va con el rollback de la venta.
       for (const ref of promocionesUnicas) {
+        const preparationOptions: [options?: { componentExternalIdPrefix: string }] = ref.selections.some(
+          s => s.serviceCourse?.preparationVersion === 1,
+        )
+          ? [{ componentExternalIdPrefix: `combo:${ref.promotionInstanceId}` }]
+          : []
         await applyPromotionToOrder(
           {
             venueId,
@@ -1019,6 +1042,7 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
             soldAt: new Date(),
           },
           tx,
+          ...preparationOptions,
         )
       }
 
@@ -1343,6 +1367,9 @@ export async function getOrder(venueId: string, orderId: string): Promise<OrderD
       // addItemsToOrder en modo ronda; filas viejas (pre-cambio) lo traen null
       // y el cliente cae a createdAt.
       course: item.course ?? null,
+      serviceCourse: item.serviceCourse as { id: string; label: string; kind: 'IMMEDIATE' | 'STANDARD' } | null,
+      orderPromotionId: item.orderPromotionId ?? null,
+      externalId: item.externalId ?? null,
       seat: item.seat ?? null,
       createdAt: item.createdAt,
       sentToKitchenAt: item.sentToKitchenAt ?? null,
@@ -2640,7 +2667,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
   const reconciliationEnabled = await resolvePaymentShiftReconciliationEnabled(prisma, venueId)
   // Etapa 3 del KDS: ¿esta venta necesita comanda de pantalla? FUERA de la transacción (nunca tumba un cobro);
   // la marca viaja en la MISMA escritura que salda la orden.
-  const marcarCocina = await debeMarcarCocina(venueId)
+  const marcarCocina = await debeMarcarCocina(venueId, { orderId })
 
   // Convert cents to decimal for database. `amount` es lo SOLICITADO; lo que se
   // registra como pago se decide dentro de la transacción (ver `aplicadoCents`).
@@ -3604,7 +3631,7 @@ export async function cancelOrderInTransaction(
     if (error instanceof NotFoundError && error.message === 'Venue not found') throw new NotFoundError('Order not found')
     throw error
   }
-  const kds = await retirarComandasDeVentaAnulada(tx, venueId, orderId)
+  const kds = await retirarComandasDeVentaAnulada(tx, venueId, orderId, { staffId: performedBy, reason })
   await assertOrderCancellableUnderLock(tx, { venueId, orderId })
   const removed = await tx.order.update({
     where: { id: orderId },

@@ -1,4 +1,5 @@
 import hybridBillingRoutes from './dashboard/hybridBilling.routes'
+import serviceCourseRoutes from './dashboard/serviceCourse.routes'
 import express, { RequestHandler } from 'express'
 import { z } from 'zod'
 import {
@@ -4632,6 +4633,7 @@ router.use('/venues/:venueId/org-item-categories', orgItemCategoryRoutes)
 router.use('/venues/:venueId/master-catalog', masterCatalogVenueRoutes)
 router.use('/organizations/:orgId/master-catalog', masterCatalogRoutes)
 router.use('/organizations', organizationDashboardRoutes)
+router.use(serviceCourseRoutes)
 
 // Organization Config routes — org-level goals, attendance, TPV defaults, categories
 // Receives orgId directly (no venue->org lookup hack)

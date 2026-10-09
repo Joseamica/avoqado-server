@@ -714,7 +714,10 @@ const OPTIONAL_TX: Array<{ callee: string; txIndex: number; lockedCallers: strin
   {
     callee: 'applyPromotionToOrder',
     txIndex: 1,
-    lockedCallers: ['src/services/mobile/order.mobile.service.ts#createOrderWithItems'],
+    lockedCallers: [
+      'src/services/mobile/order.mobile.service.ts#createOrderWithItems',
+      'src/services/tpv/order.tpv.service.ts#addItemsToOrder',
+    ],
   },
 ]
 

@@ -10,6 +10,17 @@ import { rechazarSiEsImportada } from '@/services/shared/ordenImportada'
 import { conservarDescuentoHistorico, recortarDescuentosDeRenglones } from '@/services/shared/repartoDescuentoTx'
 import { esErrorTransitorio } from '@/services/shared/erroresTransitorios'
 import { logAction } from '@/services/dashboard/activity-log.service'
+import {
+  parseServiceCourseSnapshot,
+  legacyCourseForSnapshot,
+  type ServiceCourseSnapshot,
+} from '@/services/service-courses/serviceCourseContract'
+
+export interface PromotionSelection {
+  groupId: string
+  optionId: string
+  serviceCourse?: ServiceCourseSnapshot | null
+}
 
 export interface ApplyPromotionParams {
   venueId: string
@@ -17,7 +28,7 @@ export interface ApplyPromotionParams {
   promotionId: string
   /** UUID del POS. Ancla la idempotencia del replay offline. */
   instanceId: string
-  selections: Array<{ groupId: string; optionId: string }>
+  selections: PromotionSelection[]
   /** Cuándo se vendió de verdad (ya acotado por el llamador). */
   soldAt: Date
 }
@@ -44,12 +55,15 @@ export interface ApplyPromotionParams {
 export async function applyPromotionToOrder(
   params: ApplyPromotionParams,
   tx?: Prisma.TransactionClient,
+  /** Internal: a mixed table round recalculates totals once, on its own tx. */
+  options: { deferTotalsToCaller?: boolean; sentToKitchenAt?: Date; componentExternalIdPrefix?: string } = {},
 ): Promise<{ orderPromotionId: string; netCents: number; created: boolean }> {
-  if (tx) return applyPromotionInTransaction(tx, params)
+  if (options.deferTotalsToCaller && !tx) throw new BadRequestError('El recálculo diferido requiere la transacción de la ronda')
+  if (tx) return applyPromotionInTransaction(tx, params, options)
 
   const { orderId, instanceId } = params
   try {
-    return await prisma.$transaction(own => applyPromotionInTransaction(own, params), ORDER_LOCK_WAIT_BUDGET)
+    return await prisma.$transaction(own => applyPromotionInTransaction(own, params, options), ORDER_LOCK_WAIT_BUDGET)
   } catch (err) {
     // Carrera del replay: dos intents con el MISMO instanceId pueden pasar
     // ambos el pre-read; el unique [orderId, instanceId] detiene al segundo.
@@ -72,6 +86,7 @@ export async function applyPromotionToOrder(
 async function applyPromotionInTransaction(
   tx: Prisma.TransactionClient,
   params: ApplyPromotionParams,
+  options: { deferTotalsToCaller?: boolean; sentToKitchenAt?: Date; componentExternalIdPrefix?: string },
 ): Promise<{ orderPromotionId: string; netCents: number; created: boolean }> {
   const { venueId, orderId, promotionId, instanceId, selections, soldAt } = params
 
@@ -130,6 +145,7 @@ async function applyPromotionInTransaction(
   // Resolver lo elegido contra la definición: una opción tiene que pertenecer
   // a su grupo, y no puede faltar ningún grupo por elegir.
   const chosen: PromotionOptionSnapshot[] = []
+  const selectedCourses: Array<{ groupId: string; optionId: string; serviceCourse: ServiceCourseSnapshot | null }> = []
   const denorm: Array<{ productName: string | null; productSku: string | null; categoryName: string | null }> = []
   for (const group of promotion.groups) {
     const selection = selections.find(s => s.groupId === group.id)
@@ -140,6 +156,7 @@ async function applyPromotionInTransaction(
     if (!option) {
       throw new BadRequestError(`Esa opción no pertenece al grupo "${group.name}".`)
     }
+    selectedCourses.push({ groupId: group.id, optionId: option.id, serviceCourse: parseServiceCourseSnapshot(selection.serviceCourse) })
     // Defensa a nivel dato (además del validador de publicación): cantidades
     // corruptas generan descuentos fantasma o líneas negativas.
     if (option.quantity < 1 || option.chargedQuantity < 0) {
@@ -194,7 +211,7 @@ async function applyPromotionInTransaction(
         type: promotion.type,
         pricingMode: promotion.pricingMode,
         priceCents: promotion.priceCents,
-        selections: chosen,
+        selections: chosen.map((selection, index) => ({ ...selection, ...selectedCourses[index] })),
       } as unknown as Prisma.InputJsonValue,
       grossCents: resolved.grossCents,
       discountCents: resolved.discountCents,
@@ -224,13 +241,19 @@ async function applyPromotionInTransaction(
       discountAmount: line.discountCents / 100,
       taxAmount: 0, // Las promociones NUNCA tocan el impuesto: el CFDI lo deriva del neto.
       total: line.totalCents / 100,
+      course: selectedCourses[i].serviceCourse ? legacyCourseForSnapshot(selectedCourses[i].serviceCourse!) : null,
+      ...(selectedCourses[i].serviceCourse ? { serviceCourse: selectedCourses[i].serviceCourse as Prisma.InputJsonValue } : {}),
+      ...(options.sentToKitchenAt ? { sentToKitchenAt: options.sentToKitchenAt } : {}),
+      ...(options.componentExternalIdPrefix ? { externalId: `${options.componentExternalIdPrefix}:g:${selectedCourses[i].groupId}` } : {}),
     })),
   })
 
   // 🔴 El recálculo de totales cae o persiste JUNTO con las líneas: una
   // ronda de puras promociones sin esto ACKeaba con el total viejo.
-  const { recalculateOrderTotals } = await import('../mobile/comp-item.mobile.service')
-  await recalculateOrderTotals(orderId, Number(order.discountAmount ?? 0), Number(order.paidAmount ?? 0), tx)
+  if (!options.deferTotalsToCaller) {
+    const { recalculateOrderTotals } = await import('../mobile/comp-item.mobile.service')
+    await recalculateOrderTotals(orderId, Number(order.discountAmount ?? 0), Number(order.paidAmount ?? 0), tx)
+  }
 
   return { orderPromotionId: created.id, netCents: resolved.netCents, created: true }
 }

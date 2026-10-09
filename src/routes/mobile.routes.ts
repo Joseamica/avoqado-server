@@ -6,6 +6,7 @@
  */
 
 import { Router, type Request, type Response, type NextFunction } from 'express'
+import { getMobile as getServiceCourses } from '../controllers/dashboard/serviceCourse.controller'
 import * as authMobileController from '../controllers/mobile/auth.mobile.controller'
 import * as coachClassController from '../controllers/mobile/coachClass.mobile.controller'
 import * as kioskCheckInController from '../controllers/kiosk/kioskCheckIn.controller'
@@ -625,8 +626,15 @@ router.post('/auth/request-reset', authMobileController.requestReset)
  */
 const checkPromotionGuardsIfPresent = (req: Request, res: Response, next: NextFunction) => {
   const items = Array.isArray(req.body?.items) ? req.body.items : []
-  if (!items.some((item: any) => item?.promotionRef)) return next()
-  return checkPermission('discounts:apply')(req, res, () => checkFeatureAccess('PROMOTIONS')(req, res, next))
+  const hasServiceCourse = items.some(
+    (item: any) =>
+      item?.serviceCourse != null ||
+      (Array.isArray(item?.promotionRef?.selections) &&
+        item.promotionRef.selections.some((selection: any) => selection?.serviceCourse != null)),
+  )
+  const afterPromotion = () => (hasServiceCourse ? checkFeatureAccess('TABLE_SERVICE')(req, res, next) : next())
+  if (!items.some((item: any) => item?.promotionRef)) return afterPromotion()
+  return checkPermission('discounts:apply')(req, res, () => checkFeatureAccess('PROMOTIONS')(req, res, afterPromotion))
 }
 
 router.post(
@@ -2201,6 +2209,7 @@ router.post(
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:create'),
   checkTableOwnership('order'),
+  checkPromotionGuardsIfPresent,
   orderMobileController.addItemsToOrder,
 )
 
@@ -2214,6 +2223,14 @@ router.post(
  * sincronizar no es puerta trasera. Body: { deviceId, intents: [...] }
  */
 router.post('/venues/:venueId/sync/intents', authenticateTokenMiddleware, validateVenueAccess, syncMobileController.syncIntents)
+router.get(
+  '/venues/:venueId/service-courses',
+  authenticateTokenMiddleware,
+  validateVenueAccess,
+  checkPermission('tables:read'),
+  checkFeatureAccess('TABLE_SERVICE'),
+  getServiceCourses,
+)
 
 // ============================================================================
 // INVENTORY
@@ -3129,6 +3146,22 @@ router.delete(
  * List active KDS orders for a venue.
  * Query: ?status=NEW,PREPARING,READY (default: active orders)
  */
+router.get(
+  '/venues/:venueId/kds/capabilities',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  checkPermission('orders:read'),
+  kdsMobileController.getPreparationCapabilities,
+)
+router.get(
+  '/venues/:venueId/kds/preparation',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  checkPermission('orders:read'),
+  checkFeatureAccess('KITCHEN_DISPLAY'),
+  kdsMobileController.getKitchenPreparation,
+)
+
 router.get(
   '/venues/:venueId/kds/orders',
   authenticateTokenMiddleware,

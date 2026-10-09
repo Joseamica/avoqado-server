@@ -1,7 +1,7 @@
 import { lockTableOrderScope } from '@/services/shared/tableOrderLock'
 import prisma from '../../utils/prismaClient'
 import { AreaTicketInventoryReservationStatus, Order, Prisma } from '@prisma/client'
-import { NotFoundError, BadRequestError, ConflictError, ValidationError } from '../../errors/AppError'
+import { NotFoundError, BadRequestError, ConflictError, ValidationError, ForbiddenError } from '../../errors/AppError'
 import logger from '../../config/logger'
 import socketManager from '../../communication/sockets'
 import { SocketEventType } from '../../communication/sockets/types'
@@ -38,8 +38,11 @@ import {
 import { baseDeCargos, recalcularCargosPorServicio } from '../shared/serviceCharges'
 import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
-import { debeMarcarCocina } from '../kds/kitchenDisplayStations'
+import { debeMarcarCocina, assertPreparationAuthoringAccess } from '../kds/kitchenDisplayStations'
 import { armarComandasTrasCommit, retirarComandasDeVentaAnulada, tomarCandadoDeComandas } from '../kds/kitchenTicketAuthoring.service'
+import { parseServiceCourseSnapshot, legacyCourseForSnapshot, type ServiceCourseSnapshot } from '../service-courses/serviceCourseContract'
+import { applyPromotionToOrder, type PromotionSelection } from '../promotions/promotion.service'
+import { venueHasFeatureAccess } from '../access/basePlan.service'
 
 /**
  * Helper function to flatten OrderItemModifier structure for Android compatibility
@@ -528,6 +531,8 @@ interface AddOrderItemInput {
   externalId?: string | null
   /** TABLE_SERVICE course/tiempo ("Aperitivos"...). Null = prepare immediately. */
   course?: string | null
+  serviceCourse?: ServiceCourseSnapshot | null
+  promotionRef?: { promotionId: string; promotionInstanceId: string; selections: PromotionSelection[] }
   /** Custom-amount line (no catalog product): label + unit price in cents. */
   customName?: string | null
   customUnitPriceCents?: number | null
@@ -595,12 +600,14 @@ export function normalizeAddItems(items: AddOrderItemInput[]): NormalizedAddOrde
     const normalizedNotes = normalizeNotes(item.notes)
     const normalizedModifiers = normalizeModifierIds(item.modifierIds)
     const normalizedExternalId = normalizeExternalId(item.externalId)
-    const normalizedCourse = item.course?.trim() || null
+    const serviceCourse = parseServiceCourseSnapshot(item.serviceCourse)
+    const normalizedCourse = serviceCourse ? legacyCourseForSnapshot(serviceCourse) : item.course?.trim() || null
     // Custom-amount lines never merge with catalog lines (distinct key space).
     const keyBase = item.productId
       ? buildAddItemKey(item.productId, normalizedModifiers, normalizedNotes, normalizedExternalId)
       : `custom:${item.customName ?? ''}:${item.customUnitPriceCents ?? 0}:${normalizedNotes ?? ''}`
     let key = keyBase + `|c:${normalizedCourse ?? ''}`
+    if (serviceCourse) key += `|sc:${JSON.stringify(serviceCourse)}`
     // D9 (venta por peso): each weighing is its own line — weighted lines get a
     // per-index key so two weighings of the same product NEVER merge here.
     if (item.weightQuantity != null) key += `|w#${index}`
@@ -622,6 +629,7 @@ export function normalizeAddItems(items: AddOrderItemInput[]): NormalizedAddOrde
         modifierIds: normalizedModifiers,
         externalId: normalizedExternalId,
         course: normalizedCourse,
+        ...(serviceCourse ? { serviceCourse } : {}),
         customName: item.customName ?? null,
         customUnitPriceCents: item.customUnitPriceCents ?? null,
         weightQuantity: item.weightQuantity ?? null,
@@ -1466,11 +1474,35 @@ export async function addItemsToOrder(
   asNewRound: boolean = false,
 ): Promise<Order & { tableName: string | null }> {
   logger.info(`📝 [ORDER SERVICE] Adding ${items.length} items to order ${orderId} (expected version: ${expectedVersion})`)
+  await assertPreparationAuthoringAccess(venueId, items)
 
   // Una ronda = un timestamp de envío compartido por todas sus filas (los
   // create corren en loop y sus createdAt difieren por ms — agrupar por
   // createdAt partiría la ronda).
   const roundSentAt = asNewRound ? new Date() : null
+
+  // A package is ONE sale reference, never a custom-price/catalog product.
+  // Existing TPV carts keep their original path; only table rounds carry refs.
+  const promotionItems = items.filter(item => item.promotionRef)
+  if (promotionItems.length > 0) {
+    if (!asNewRound) throw new BadRequestError('Los combos se envían como una ronda de mesa')
+    for (const item of promotionItems) {
+      const ref = item.promotionRef!
+      if (item.productId || item.customName || item.customUnitPriceCents != null || (item.quantity != null && item.quantity !== 1)) {
+        throw new BadRequestError('Manda cada combo en su propia línea, con una instancia y sin precio o producto sueltos')
+      }
+      if (!ref.promotionId || !ref.promotionInstanceId || !Array.isArray(ref.selections)) {
+        throw new BadRequestError('El combo requiere promotionId, promotionInstanceId y selections')
+      }
+    }
+    const [tables, promotions] = await Promise.all([
+      venueHasFeatureAccess(venueId, 'TABLE_SERVICE'),
+      venueHasFeatureAccess(venueId, 'PROMOTIONS'),
+    ])
+    if (!tables || !promotions)
+      throw new ForbiddenError('El pedido de combos por tiempos requiere acceso a Mesas y Combos', 'FEATURE_ACCESS_REQUIRED')
+    items = items.filter(item => !item.promotionRef)
+  }
 
   const normalizedItems = normalizeAddItems(items)
   if (normalizedItems.length !== items.length) {
@@ -1500,7 +1532,11 @@ export async function addItemsToOrder(
   // ¿El negocio tiene pantalla de cocina? Se pregunta FUERA de la transacción de dinero (nunca lanza): hacerlo con la orden
   // bloqueada deja esperando a cualquier escritura de la misma orden que llegue en ese momento. Se decide abajo, con la
   // orden ya releída bajo el candado, si es de mesa.
-  const negocioConPantalla = await debeMarcarCocina(venueId)
+  const negocioConPantalla = await debeMarcarCocina(venueId, {
+    hasPreparation:
+      items.some(item => item.serviceCourse?.preparationVersion === 1) ||
+      promotionItems.some(item => item.promotionRef!.selections.some(selection => selection.serviceCourse?.preparationVersion === 1)),
+  })
 
   /** El MISMO 409 que las apps ya manejan cuando otra escritura movió la orden (reducer offline ⇒ RETRY). */
   const conflictoDeVersion = () =>
@@ -1555,6 +1591,28 @@ export async function addItemsToOrder(
       // Etapa 3 del KDS: sólo una ronda de MESA manda su comanda a la pantalla (en mostrador nace al pagar). La marca viaja
       // en el CAS de versión de abajo.
       const marcarCocina = negocioConPantalla && Boolean(order.tableId)
+
+      const createdPromotionIds: string[] = []
+      for (const item of promotionItems) {
+        const ref = item.promotionRef!
+        const applied = await applyPromotionToOrder(
+          {
+            venueId,
+            orderId,
+            promotionId: ref.promotionId,
+            instanceId: ref.promotionInstanceId,
+            selections: ref.selections,
+            soldAt: roundSentAt!,
+          },
+          tx,
+          {
+            deferTotalsToCaller: true,
+            sentToKitchenAt: roundSentAt!,
+            ...(item.externalId && /^sync:[^:]+:\d+$/.test(item.externalId) ? { componentExternalIdPrefix: item.externalId } : {}),
+          },
+        )
+        if (applied.created) createdPromotionIds.push(applied.orderPromotionId)
+      }
 
       // Fetch products and validate
       // ✅ FIX: Use Set to deduplicate productIds (same product can be added multiple times)
@@ -1699,6 +1757,7 @@ export async function addItemsToOrder(
                 cortesiaReason: customComped ? item.cortesiaReason?.trim() || null : null,
                 notes: normalizeNotes(item.notes),
                 course: item.course ?? null,
+                ...(item.serviceCourse ? { serviceCourse: item.serviceCourse as Prisma.InputJsonValue } : {}),
                 seat: item.seat ?? null,
                 externalId: customExternalId,
                 sentToKitchenAt: roundSentAt,
@@ -1897,6 +1956,7 @@ export async function addItemsToOrder(
                 cortesiaReason: lineComped ? item.cortesiaReason?.trim() || null : null,
                 notes: normalizedNotes,
                 course: item.course ?? null,
+                ...(item.serviceCourse ? { serviceCourse: item.serviceCourse as Prisma.InputJsonValue } : {}),
                 seat: item.seat ?? null,
                 externalId: normalizedExternalId,
                 // Sin esto las rondas offline (ADD_ITEMS inyecta llaves) nunca quedaban «enviadas a cocina».
@@ -2030,6 +2090,7 @@ export async function addItemsToOrder(
             cortesiaReason: plainComped ? item.cortesiaReason?.trim() || null : null,
             notes: normalizedNotes,
             course: item.course ?? null,
+            ...(item.serviceCourse ? { serviceCourse: item.serviceCourse as Prisma.InputJsonValue } : {}),
             seat: item.seat ?? null,
             sentToKitchenAt: roundSentAt,
             modifiers: {
@@ -2069,6 +2130,18 @@ export async function addItemsToOrder(
       // En serie: una transacción es UNA conexión, y en serie el primer error corta la ronda sin dejar consultas en vuelo.
       const newOrderItems: Awaited<ReturnType<typeof escribirRenglon>>[] = []
       for (const item of normalizedItems) newOrderItems.push(await escribirRenglon(item))
+      if (createdPromotionIds.length > 0) {
+        // The selected component count is bounded by this request's packages;
+        // return every component rather than silently truncating a large combo.
+        const totalComponents = promotionItems.reduce((sum, item) => sum + item.promotionRef!.selections.length, 0)
+        newOrderItems.push(
+          ...(await tx.orderItem.findMany({
+            where: { orderId, orderPromotionId: { in: createdPromotionIds } },
+            take: totalComponents,
+            include: { product: { select: { id: true, name: true } }, modifiers: { include: { modifier: true } } },
+          })),
+        )
+      }
 
       // ⭐ P0 FIX: Re-fetch all items from DB to avoid double-counting updated items
       // Previously we did [...order.items, ...newOrderItems] but this would duplicate

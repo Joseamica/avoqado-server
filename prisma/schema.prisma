@@ -28,6 +28,10 @@ model Organization {
   billingEmail   String?
   billingAddress Json?
 
+  // TABLE_SERVICE (Pro): complete shared list; null preserves legacy defaults.
+  serviceCourses         Json?
+  serviceCoursesRevision Int   @default(0)
+
   // GRANDFATHER FLAG AT THE ORGANIZATION LEVEL — inherited by every venue, present and FUTURE.
   // Same semantics as Venue.seatCapExempt (exempt from BOTH the Free seat cap AND every feature
   // paywall); a venue is grandfathered when ITS OWN flag or THIS one is true. It exists because
@@ -871,6 +875,10 @@ model VenueSettings {
   id      String @id @default(cuid())
   venueId String @unique
   venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  // null inherits the organization's complete service-course catalog.
+  serviceCourses         Json?
+  serviceCoursesRevision Int   @default(0)
 
   // Operations
   autoCloseShifts           Boolean @default(false)
@@ -4179,6 +4187,8 @@ model OrderItem {
   // other client is required to send or read it). Restaurant-mode POS groups
   // kitchen comandas and the check display by this label.
   course String?
+  // Historical identity/name/kind, captured before transport. Immediate remains course=null.
+  serviceCourse Json?
 
   // TABLE_SERVICE — asiento/comensal de la línea (Square's seats). Additive:
   // null = sin asiento; solo el POS restaurante lo escribe/lee.
@@ -15836,6 +15846,9 @@ model KdsOrder {
   startedAt   DateTime?
   completedAt DateTime?
 
+  /// 0 preserves legacy BUMP; 1 requires explicit per-product preparation actions.
+  preparationVersion Int @default(0)
+
   /// Quién se adjudicó IMPRIMIR esta comanda, y cuándo.
   ///
   /// 🔴 POR QUÉ EXISTE: un pedido de marketplace no lo manda nadie desde una tablet — llega
@@ -15880,6 +15893,7 @@ model KdsOrder {
   /// El folio (spec 2026-09-27 §1). Se construye CONCURRENTLY en su propia migración.
   @@unique([venueId, sourceKey])
   @@index([venueId, status])
+  @@index([venueId, preparationVersion, status, id])
   /// Para "¿qué falta imprimir aquí?" sin recorrer la tabla entera.
   @@index([venueId, printedAt])
   /// Las comandas de una venta (cancelar un pedido, el barrido del KDS de Uber). Se construye
@@ -15895,6 +15909,14 @@ model KdsOrderItem {
   quantity    Int
   modifiers   String? // JSON array of modifier names
   notes       String?
+
+  /// Frozen service time and combo origin. Never resolved again after a catalog rename.
+  serviceCourse       Json?
+  orderPromotionId    String?
+  /// Quantity buckets HELD/PENDING/PREPARING/READY/DELIVERED/CANCELLED, per station.
+  /// null is legacy, never interpreted as delivered.
+  preparation         Json?
+  preparationRevision Int @default(0)
 
   /// KDS de Uber: liga floja al OrderItem real (igual que productId/categoryId abajo,
   /// sin `@relation` — una comanda es una foto del momento), id de renglón del
@@ -15917,6 +15939,7 @@ model KdsOrderItem {
   categoryId String?
 
   @@index([kdsOrderId])
+  @@index([orderItemId, kdsOrderId])
 }
 
 enum KdsOrderStatus {

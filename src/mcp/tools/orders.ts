@@ -366,7 +366,7 @@ export function registerOrderTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'pos_sync_status',
-    'Offline-first: últimos intents que los POS del venue reprodujeron al reconectar (replay del outbox offline) — 15 tipos: abrir/cobrar (OPEN_TABLE/ADD_ITEMS/PAY_CASH), mutaciones de cuenta (APPLY_DISCOUNT/APPLY_SERVICE_CHARGE/COMP_ORDER/UPDATE_DETAILS/CANCEL_ORDER/MOVE_ORDER/ASSIGN_ORDER/CLEAR_TABLE), separar/fusionar cheques (SPLIT_ORDER/SPLIT_BY_SEAT/MERGE_ORDERS), y las marcas de la pantalla de cocina hechas sin red (KDS_TICKET_MARK: LISTO o «salió en papel»; siempre ACKED), dispositivo, y status: ACKED / REJECTED con su errorCode (p.ej. TABLE_OWNED_BY_OTHER, FEATURE_LOCKED, PERMISSION_DENIED, STALE_DEVICE_SEQUENCE, OUTCOME_UNKNOWN) / PROCESSING (reserva en curso; si persiste, terminó en conciliación). RETRY es transitorio y nunca se persiste. Answers "¿qué se sincronizó cuando volvió el internet? ¿algún cobro/comanda offline fue rechazado?". Pass venueId.',
+    'Offline-first: últimos intents reproducidos al reconectar. Incluye abrir/cobrar, mutaciones de cuenta, separar/fusionar, KDS_TICKET_MARK (marca general legacy) y KDS_ITEM_PROGRESS (liberar, preparar, listo, entregar o corregir cantidades por producto). Muestra dispositivo y ACKED / REJECTED con errorCode / PROCESSING. Los conflictos de preparación requieren revisión visible; RETRY es transitorio y no se persiste. Answers "¿qué se sincronizó al volver el internet? ¿qué operación requiere revisión?". Pass venueId.',
     {
       venueId: z.string().describe('Venue cuyos replays offline leer (must be in your scope)'),
       limit: z.number().int().min(1).max(200).optional().describe('Máximo de intents (default 50)'),

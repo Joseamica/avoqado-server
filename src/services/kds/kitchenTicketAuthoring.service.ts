@@ -6,7 +6,7 @@
  * de una orden corre bajo un candado de Postgres por orden: dos armados a la vez (el gancho del cobro y el POST de
  * una app vieja) no duplican platillos.
  */
-import type { Prisma } from '@prisma/client'
+import { Prisma } from '@prisma/client'
 import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
 import { lockExistingOrderForPayment, ORDER_LOCK_WAIT_BUDGET } from '../shared/paymentShiftClaim'
@@ -14,6 +14,9 @@ import { toKdsModifierLabels } from './kdsModifierLabels'
 import { estacionesDelNegocio } from './kitchenDisplayStations'
 import { nombreEnCocina } from './nombreEnCocina'
 import { planKitchenTickets, type KitchenLine } from './kitchenTicketPlanning'
+import { initialPreparation, parsePreparation, PREPARATION_VERSION } from './kitchenPreparation'
+import { ConflictError } from '../../errors/AppError'
+import { parseServiceCourseSnapshot } from '../service-courses/serviceCourseContract'
 
 export type KitchenTrigger = 'PAID' | 'ROUND' | 'LEGACY_POST' | 'SWEEP'
 export type KitchenMarkAction = 'BUMP' | 'FALLBACK_PRINTED'
@@ -32,7 +35,13 @@ export async function authorKitchenTickets(params: {
   const startedAt = new Date()
 
   const { routing, screens } = await estacionesDelNegocio(venueId)
-  if (screens.length === 0) {
+  const preparationLine = await prisma.orderItem.findFirst({
+    where: { order: { id: orderId, venueId }, serviceCourse: { path: ['preparationVersion'], equals: PREPARATION_VERSION } },
+    select: { id: true },
+  })
+  // New POS work persists its progress even when a station uses paper, without backfilling legacy sales.
+  const preparationScreens = preparationLine ? [...routing.activeStationIds].map(id => ({ id, since: new Date(0) })) : screens
+  if (preparationScreens.length === 0 && !preparationLine) {
     await limpiarMarca(venueId, orderId, startedAt)
     return { ticketIds: [] }
   }
@@ -93,6 +102,8 @@ export async function authorKitchenTickets(params: {
           externalId: true,
           sentToKitchenAt: true,
           createdAt: true,
+          serviceCourse: true,
+          orderPromotionId: true,
           areaTicketLineId: true,
           weightQuantity: true,
           weightUnit: true,
@@ -132,6 +143,8 @@ export async function authorKitchenTickets(params: {
         externalId: r.externalId,
         sentToKitchenAt: r.sentToKitchenAt,
         createdAt: r.createdAt,
+        serviceCourse: r.serviceCourse,
+        orderPromotionId: r.orderPromotionId,
       }))
 
       const soloSinEnviar = trigger === 'PAID' || trigger === 'LEGACY_POST'
@@ -140,7 +153,7 @@ export async function authorKitchenTickets(params: {
         lines,
         coveredLineIds: new Set(cubiertos.map(c => c.orderItemId).filter((id): id is string => Boolean(id))),
         routing,
-        screens,
+        screens: preparationScreens.length ? preparationScreens : [{ id: 'none', since: new Date(0) }],
         stampedAt: startedAt,
       }
       const plans = planKitchenTickets({ ...entrada, soloSinEnviar })
@@ -150,6 +163,11 @@ export async function authorKitchenTickets(params: {
         soloSinEnviar && planKitchenTickets({ ...entrada, soloSinEnviar: false }).some(p => p.lines.some(l => l.sentToKitchenAt))
 
       for (const plan of plans) {
+        const preparationVersion = plan.lines.some(
+          l => parseServiceCourseSnapshot(l.serviceCourse)?.preparationVersion === PREPARATION_VERSION,
+        )
+          ? PREPARATION_VERSION
+          : 0
         const kdsOrderId = await cabeceraPorFolio(tx, {
           venueId,
           sourceKey: plan.sourceKey,
@@ -157,6 +175,7 @@ export async function authorKitchenTickets(params: {
           orderId,
           orderNumber: order.orderNumber,
           orderType: order.type,
+          preparationVersion,
         })
         await tx.kdsOrderItem.createMany({
           data: plan.lines.map(l => ({
@@ -168,6 +187,12 @@ export async function authorKitchenTickets(params: {
             orderItemId: l.id,
             productId: l.productId,
             categoryId: l.categoryId,
+            externalLineId: l.externalId,
+            serviceCourse: l.serviceCourse == null ? Prisma.DbNull : (l.serviceCourse as Prisma.InputJsonValue),
+            orderPromotionId: l.orderPromotionId ?? null,
+            preparation: preparationVersion
+              ? (initialPreparation(l.quantity, parseServiceCourseSnapshot(l.serviceCourse)?.kind ?? 'IMMEDIATE') as Prisma.InputJsonValue)
+              : Prisma.DbNull,
           })),
         })
         if (plan.toStamp.length > 0) {
@@ -244,21 +269,30 @@ export async function markKitchenTicket(a: {
   })
   if (a.action === 'BUMP') {
     await prisma.kdsOrder.updateMany({
-      where: { venueId: a.venueId, sourceKey: a.sourceKey, status: { not: 'COMPLETED' } },
+      where: { venueId: a.venueId, sourceKey: a.sourceKey, preparationVersion: 0, status: { not: 'COMPLETED' } },
+      // A legacy whole-ticket BUMP cannot complete or deliver new product-level work.
       data: { status: 'COMPLETED', completedAt: a.at },
     })
     return
   }
   // «Salió en papel»: sólo si nadie la empezó en una pantalla. Lo que la cocina ya tomó no se esconde.
   await prisma.kdsOrder.updateMany({
-    where: { venueId: a.venueId, sourceKey: a.sourceKey, status: 'NEW', fallbackPrintedAt: null },
+    where: { venueId: a.venueId, sourceKey: a.sourceKey, preparationVersion: 0, status: 'NEW', fallbackPrintedAt: null },
     data: { fallbackPrintedAt: a.at },
   })
 }
 
 async function cabeceraPorFolio(
   tx: Prisma.TransactionClient,
-  a: { venueId: string; sourceKey: string; stationId: string | null; orderId: string; orderNumber: string; orderType: string },
+  a: {
+    venueId: string
+    sourceKey: string
+    stationId: string | null
+    orderId: string
+    orderNumber: string
+    orderType: string
+    preparationVersion: number
+  },
 ): Promise<string> {
   const [creada] = await tx.kdsOrder.createManyAndReturn({
     data: [
@@ -270,6 +304,7 @@ async function cabeceraPorFolio(
         orderNumber: a.orderNumber,
         orderType: a.orderType,
         status: 'NEW',
+        preparationVersion: a.preparationVersion,
       },
     ],
     skipDuplicates: true,
@@ -278,13 +313,25 @@ async function cabeceraPorFolio(
   if (creada) return creada.id
   const existente = await tx.kdsOrder.findUniqueOrThrow({
     where: { venueId_sourceKey: { venueId: a.venueId, sourceKey: a.sourceKey } },
-    select: { id: true, orderId: true },
+    select: { id: true, orderId: true, preparationVersion: true },
   })
   // Una MARCA llegó antes: se le pone la venta. Su estado y su «en papel» son pegajosos y no se tocan.
   if (!existente.orderId) {
     await tx.kdsOrder.update({
       where: { id: existente.id },
       data: { orderId: a.orderId, orderNumber: a.orderNumber, orderType: a.orderType, printStationId: a.stationId },
+    })
+  }
+  if (a.preparationVersion && !existente.preparationVersion) {
+    // An old offline mark may have arrived BEFORE this round. It cannot swallow held products.
+    await tx.kdsOrder.update({
+      where: { id: existente.id },
+      data: {
+        preparationVersion: a.preparationVersion,
+        status: 'NEW',
+        completedAt: null,
+        fallbackPrintedAt: null,
+      },
     })
   }
   return existente.id
@@ -313,9 +360,10 @@ export async function retirarComandasDeVentaAnulada(
   tx: Prisma.TransactionClient,
   venueId: string,
   orderId: string,
+  actor: { staffId?: string; reason?: string } = {},
 ): Promise<{ kdsOrderIds: string[]; kdsOrderItemIds: string[] }> {
   await tomarCandadoDeComandas(tx, orderId)
-  const pendientes = { venueId, orderId, status: { not: 'COMPLETED' as const } }
+  const pendientes = { venueId, orderId, status: { not: 'COMPLETED' as const }, preparationVersion: 0 }
   const kdsOrderIds: string[] = [],
     kdsOrderItemIds: string[] = []
   let cursor: string | undefined
@@ -346,5 +394,49 @@ export async function retirarComandasDeVentaAnulada(
   }
   await tx.kdsOrderItem.deleteMany({ where: { kdsOrder: pendientes } })
   await tx.kdsOrder.deleteMany({ where: pendientes })
+  // New tickets remain a durable history. Cancelling the sale only cancels work still outstanding.
+  const tracked = { venueId, orderId, preparationVersion: PREPARATION_VERSION, status: { not: 'COMPLETED' as const } }
+  cursor = undefined
+  for (;;) {
+    const page: Pick<Prisma.KdsOrderItemGetPayload<{}>, 'id' | 'kdsOrderId' | 'quantity' | 'preparation' | 'preparationRevision'>[] =
+      await tx.kdsOrderItem.findMany({
+        where: { kdsOrder: tracked },
+        select: { id: true, kdsOrderId: true, quantity: true, preparation: true, preparationRevision: true },
+        orderBy: { id: 'asc' },
+        take: 100,
+        ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+      })
+    for (const row of page) {
+      const before = parsePreparation(row.preparation, row.quantity)
+      const after = {
+        ...before,
+        HELD: 0,
+        PENDING: 0,
+        PREPARING: 0,
+        READY: 0,
+        CANCELLED: before.CANCELLED + before.HELD + before.PENDING + before.PREPARING + before.READY,
+      }
+      const changed = await tx.kdsOrderItem.updateMany({
+        where: { id: row.id, preparationRevision: row.preparationRevision, kdsOrder: tracked },
+        data: { preparation: after, preparationRevision: { increment: 1 } },
+      })
+      if (changed.count !== 1) throw new ConflictError('La preparación cambió. Vuelve a revisar la cuenta.', 'PREPARATION_CONFLICT')
+      await tx.activityLog.create({
+        data: {
+          venueId,
+          staffId: actor.staffId,
+          action: 'KITCHEN_ORDER_CANCEL',
+          entity: 'KdsOrderItem',
+          entityId: row.id,
+          data: { orderId, reason: actor.reason ?? 'Cuenta anulada', before, after, revision: row.preparationRevision + 1 },
+        },
+      })
+      kdsOrderItemIds.push(row.id)
+      if (!kdsOrderIds.includes(row.kdsOrderId)) kdsOrderIds.push(row.kdsOrderId)
+    }
+    if (page.length < 100) break
+    cursor = page[page.length - 1].id
+  }
+  await tx.kdsOrder.updateMany({ where: tracked, data: { status: 'COMPLETED', completedAt: new Date() } })
   return { kdsOrderIds, kdsOrderItemIds }
 }
