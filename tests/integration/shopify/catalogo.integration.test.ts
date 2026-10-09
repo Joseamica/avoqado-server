@@ -26,11 +26,23 @@ import {
   crearEscenarioShopify,
   EscenarioShopify,
   graphqlFalso,
+  huecoDelInvariante,
   limpiarEscenarioShopify,
   UBICACION_PRUEBA,
 } from './fixtures'
-import { leerNiveles, MIN_HTTP_MS, TOKEN_ILEGIBLE } from '@/services/commerce-channels/shopify/shopify.store.service'
-import { conPlan, contexto, dormir, falla, graphqlConEfecto, paginaDeVariantes, procesando, variante } from './fixturesB'
+import { atenderFalla, leerNiveles, MIN_HTTP_MS, TOKEN_ILEGIBLE } from '@/services/commerce-channels/shopify/shopify.store.service'
+import {
+  conPlan,
+  contexto,
+  dormir,
+  falla,
+  graphqlConEfecto,
+  limpiarOtraSucursal,
+  otraSucursalDeLaTienda,
+  paginaDeVariantes,
+  procesando,
+  variante,
+} from './fixturesB'
 
 jest.setTimeout(120_000)
 
@@ -48,6 +60,8 @@ afterEach(async () => {
 })
 
 const conectando = () => escenario({ linkStatus: 'CONNECTING', initialized: false })
+/** Una página de la importación con el plan puesto (sin `hasAccess` el traductor mira el plan real, Minor 5). */
+const importar = (id: string, deps: Parameters<typeof importCatalogPage>[1] = {}) => importCatalogPage(id, { hasAccess: conPlan, ...deps })
 const porSku = (e: EscenarioShopify, sku: string) =>
   prisma.product.findUniqueOrThrow({
     where: { venueId_sku: { venueId: e.venueId, sku } },
@@ -311,7 +325,7 @@ describe('importar por páginas (#18, #19, N05, N06, N20)', () => {
     const graphql = graphqlFalso((_q, vars) =>
       vars.after ? paginaDeVariantes([variante(21)], null) : paginaDeVariantes([variante(22), variante(23)], 'c1', 3),
     )
-    expect(await importCatalogPage(e.locationLinkId, { graphql })).toEqual({ done: false, procesadas: 2 })
+    expect(await importar(e.locationLinkId, { graphql })).toEqual({ done: false, procesadas: 2 })
     expect(graphql.mock.calls[0][3]).toMatchObject({
       first: 50,
       after: null,
@@ -320,7 +334,7 @@ describe('importar por páginas (#18, #19, N05, N06, N20)', () => {
       conteo: true,
     })
     expect(await sucursal(e)).toMatchObject({ importCursor: 'c1', status: 'CONNECTING' })
-    expect(await importCatalogPage(e.locationLinkId, { graphql })).toEqual({ done: true, procesadas: 1 })
+    expect(await importar(e.locationLinkId, { graphql })).toEqual({ done: true, procesadas: 1 })
     expect(graphql.mock.calls[1][3]).toMatchObject({ after: 'c1', conteo: false })
     const l = await sucursal(e)
     expect(l).toMatchObject({ importCursor: null, status: 'REVIEWING', importAttempts: 0, importError: null, lastReconciledAt: null })
@@ -335,10 +349,10 @@ describe('importar por páginas (#18, #19, N05, N06, N20)', () => {
       return upsertShopifyVariant(c, v)
     })
     for (let i = 1; i <= 4; i++) {
-      expect(await importCatalogPage(e.locationLinkId, { graphql, upsert })).toEqual({ error: 'VARIANTE_FALLO', retry: true })
+      expect(await importar(e.locationLinkId, { graphql, upsert })).toEqual({ error: 'VARIANTE_FALLO', retry: true })
       expect(await sucursal(e)).toMatchObject({ importCursor: null, importAttempts: i })
     }
-    expect(await importCatalogPage(e.locationLinkId, { graphql, upsert })).toEqual({ done: false, procesadas: 3 })
+    expect(await importar(e.locationLinkId, { graphql, upsert })).toEqual({ done: false, procesadas: 3 })
     expect(await sucursal(e)).toMatchObject({ importCursor: 'c2', importAttempts: 0 })
     expect(await problema(e, 32)).toMatchObject({ reason: 'ERROR_IMPORTACION' })
     expect(await prisma.shopifyVariantLink.count({ where: { shopifyVariantId: { in: [variante(31).id, variante(33).id] } } })).toBe(2)
@@ -347,11 +361,11 @@ describe('importar por páginas (#18, #19, N05, N06, N20)', () => {
   it('catálogo de más de 20,000 variantes ⇒ importError CATALOGO_MUY_GRANDE; no importa nada ni vuelve a preguntar (12 bis.12)', async () => {
     const e = await conectando()
     const graphql = graphqlFalso(() => paginaDeVariantes([variante(41)], 'c1', 20_001))
-    expect(await importCatalogPage(e.locationLinkId, { graphql })).toEqual({ error: 'CATALOGO_MUY_GRANDE', retry: false })
+    expect(await importar(e.locationLinkId, { graphql })).toEqual({ error: 'CATALOGO_MUY_GRANDE', retry: false })
     expect(graphql.mock.calls[0][3]).toMatchObject({ conteo: true, limite: 20_001 })
     expect(await sucursal(e)).toMatchObject({ status: 'CONNECTING', importCursor: null, importError: 'CATALOGO_MUY_GRANDE' })
     expect(await prisma.product.count({ where: { venueId: e.venueId, originSystem: 'SHOPIFY' } })).toBe(0)
-    expect(await importCatalogPage(e.locationLinkId, { graphql })).toEqual({ error: 'CATALOGO_MUY_GRANDE', retry: false })
+    expect(await importar(e.locationLinkId, { graphql })).toEqual({ error: 'CATALOGO_MUY_GRANDE', retry: false })
     expect(graphql).toHaveBeenCalledTimes(1)
   })
 
@@ -397,7 +411,7 @@ describe('importar por páginas (#18, #19, N05, N06, N20)', () => {
   ]
   it.each(raras)('N06: %s ⇒ BAD_RESPONSE: no importa nada ni avanza', async (_n, respuesta) => {
     const e = await conectando()
-    expect(await importCatalogPage(e.locationLinkId, { graphql: graphqlFalso(() => respuesta) })).toEqual({
+    expect(await importar(e.locationLinkId, { graphql: graphqlFalso(() => respuesta) })).toEqual({
       error: 'BAD_RESPONSE',
       retry: true,
     })
@@ -411,7 +425,7 @@ describe('importar por páginas (#18, #19, N05, N06, N20)', () => {
 
   it('si la página no llega, no avanza, suma el intento y deja el error a la vista', async () => {
     const e = await conectando()
-    expect(await importCatalogPage(e.locationLinkId, { graphql: graphqlFalso(() => falla('HTTP_5XX', true, true)) })).toEqual({
+    expect(await importar(e.locationLinkId, { graphql: graphqlFalso(() => falla('HTTP_5XX', true, true)) })).toEqual({
       error: 'HTTP_5XX',
       retry: true,
     })
@@ -421,7 +435,7 @@ describe('importar por páginas (#18, #19, N05, N06, N20)', () => {
   it('N20: falta un permiso (403 o ACCESS_DENIED) ⇒ FALTA_PERMISO a la vista, aviso, y no vuelve a preguntar', async () => {
     const e = await conectando()
     const graphql = graphqlFalso(() => falla('FORBIDDEN', false, false))
-    expect(await importCatalogPage(e.locationLinkId, { graphql })).toEqual({ error: 'FALTA_PERMISO', retry: false })
+    expect(await importar(e.locationLinkId, { graphql })).toEqual({ error: 'FALTA_PERMISO', retry: false })
     expect(await sucursal(e)).toMatchObject({ importError: 'FALTA_PERMISO', importAttempts: 0, importCursor: null })
     expect(
       await prisma.notification.count({
@@ -437,7 +451,7 @@ describe('importar por páginas (#18, #19, N05, N06, N20)', () => {
         entityId: e.locationLinkId,
       }),
     )
-    expect(await importCatalogPage(e.locationLinkId, { graphql })).toEqual({ error: 'FALTA_PERMISO', retry: false })
+    expect(await importar(e.locationLinkId, { graphql })).toEqual({ error: 'FALTA_PERMISO', retry: false })
     expect(graphql).toHaveBeenCalledTimes(1)
   })
 
@@ -447,7 +461,7 @@ describe('importar por páginas (#18, #19, N05, N06, N20)', () => {
       () => prisma.shopifyLocationLink.update({ where: { id: e.locationLinkId }, data: { generation: 2 } }).then(() => undefined),
       () => paginaDeVariantes([variante(61)], 'c1', 1),
     )
-    expect(await importCatalogPage(e.locationLinkId, { graphql })).toEqual({ error: 'CONTEXTO_CAMBIO', retry: false })
+    expect(await importar(e.locationLinkId, { graphql })).toEqual({ error: 'CONTEXTO_CAMBIO', retry: false })
     expect(await sucursal(e)).toMatchObject({ importCursor: null, generation: 2 })
     expect(await prisma.product.count({ where: { venueId: e.venueId, originSystem: 'SHOPIFY' } })).toBe(0)
   })
@@ -462,7 +476,7 @@ describe('importar por páginas (#18, #19, N05, N06, N20)', () => {
       () => prisma.shopifyLocationLink.update({ where: { id: e.locationLinkId }, data: { workToken: 'w2' } }).then(() => undefined),
       () => paginaDeVariantes([variante(62)], 'c1', 1),
     )
-    expect(await importCatalogPage(e.locationLinkId, { graphql, workToken: 'w1' })).toEqual({ error: 'CONTEXTO_CAMBIO', retry: false })
+    expect(await importar(e.locationLinkId, { graphql, workToken: 'w1' })).toEqual({ error: 'CONTEXTO_CAMBIO', retry: false })
     expect(await sucursal(e)).toMatchObject({ importCursor: null })
     expect(await prisma.product.count({ where: { venueId: e.venueId, originSystem: 'SHOPIFY' } })).toBe(0)
   })
@@ -473,18 +487,18 @@ describe('importar por páginas (#18, #19, N05, N06, N20)', () => {
       prisma.shopifyLocationLink.update({ where: { id: e.locationLinkId }, data: { importError: 'FALTA_PERMISO' } }).then(() => undefined)
     // Con variantes: el upsert ve el error terminal bajo candado (cerco de A) y no escribe.
     const conVariante = graphqlConEfecto(marcar, () => paginaDeVariantes([variante(63)], 'c1', 1))
-    expect(await importCatalogPage(e.locationLinkId, { graphql: conVariante })).toEqual({ error: 'CONTEXTO_CAMBIO', retry: false })
+    expect(await importar(e.locationLinkId, { graphql: conVariante })).toEqual({ error: 'CONTEXTO_CAMBIO', retry: false })
     expect(await prisma.product.count({ where: { venueId: e.venueId, originSystem: 'SHOPIFY' } })).toBe(0)
     expect(await sucursal(e)).toMatchObject({ importError: 'FALTA_PERMISO', importCursor: null, status: 'CONNECTING' })
     // La última página, vacía: sólo el CAS del avance la detiene (antes la habría pasado a REVIEWING sin el error).
     await prisma.shopifyLocationLink.update({ where: { id: e.locationLinkId }, data: { importError: null } })
     const vacia = graphqlConEfecto(marcar, () => paginaDeVariantes([], null, 0))
-    expect(await importCatalogPage(e.locationLinkId, { graphql: vacia })).toEqual({ error: 'CONTEXTO_CAMBIO', retry: false })
+    expect(await importar(e.locationLinkId, { graphql: vacia })).toEqual({ error: 'CONTEXTO_CAMBIO', retry: false })
     expect(await sucursal(e)).toMatchObject({ importError: 'FALTA_PERMISO', status: 'CONNECTING' })
     // Un error pasajero tampoco la pisa ni suma intentos.
     await prisma.shopifyLocationLink.update({ where: { id: e.locationLinkId }, data: { importError: null } })
     const caida = graphqlConEfecto(marcar, () => falla('HTTP_5XX', true, true))
-    expect(await importCatalogPage(e.locationLinkId, { graphql: caida })).toEqual({ error: 'HTTP_5XX', retry: true })
+    expect(await importar(e.locationLinkId, { graphql: caida })).toEqual({ error: 'HTTP_5XX', retry: true })
     expect(await sucursal(e)).toMatchObject({ importError: 'FALTA_PERMISO', importAttempts: 0 })
   })
 })
@@ -747,7 +761,7 @@ describe('decisiones del preflight de B (K11, K14, K18, B-7)', () => {
     const e = await conectando()
     await prisma.shopifyStore.update({ where: { id: e.storeId }, data: { accessTokenCiphertext: Buffer.from('cifrado-dañado') } })
     const graphql = graphqlFalso(() => paginaDeVariantes([variante(17)], null))
-    expect(await importCatalogPage(e.locationLinkId, { graphql })).toEqual({ error: TOKEN_ILEGIBLE, retry: true })
+    expect(await importar(e.locationLinkId, { graphql })).toEqual({ error: TOKEN_ILEGIBLE, retry: true })
     expect(graphql).not.toHaveBeenCalled()
     expect(await sucursal(e)).toMatchObject({ importError: TOKEN_ILEGIBLE, importCursor: null, status: 'CONNECTING' })
     // La lectura de niveles (fetchLevels de A lanza al descifrar) tampoco truena.
@@ -763,7 +777,7 @@ describe('decisiones del preflight de B (K11, K14, K18, B-7)', () => {
   it('K18: Shopify rechaza la app con el token vigente (401) ⇒ la tienda queda REVOCADA, avisa, deja rastro y no vuelve a preguntar', async () => {
     const e = await conectando()
     const graphql = graphqlFalso(() => falla('UNAUTHORIZED', false, false))
-    expect(await importCatalogPage(e.locationLinkId, { graphql })).toEqual({ error: 'UNAUTHORIZED', retry: false })
+    expect(await importar(e.locationLinkId, { graphql })).toEqual({ error: 'UNAUTHORIZED', retry: false })
     expect(await prisma.shopifyStore.findUniqueOrThrow({ where: { id: e.storeId } })).toMatchObject({ status: 'REVOKED' })
     expect(
       await prisma.notification.count({ where: { venueId: e.venueId, entityType: 'ShopifyAviso', entityId: { startsWith: 'REVOCADA:' } } }),
@@ -776,7 +790,149 @@ describe('decisiones del preflight de B (K11, K14, K18, B-7)', () => {
         entityId: e.storeId,
       }),
     )
-    expect(await importCatalogPage(e.locationLinkId, { graphql })).toEqual({ error: 'TIENDA_REVOCADA', retry: false })
+    expect(await importar(e.locationLinkId, { graphql })).toEqual({ error: 'TIENDA_REVOCADA', retry: false })
     expect(graphql).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('ronda de arreglos 1 de B1', () => {
+  /** La variante del escenario (`ProductVariant/1`, `InventoryItem/1`, `Product/1`) como la devolvería Shopify. */
+  async function laDelEscenario(e: EscenarioShopify, available: number): Promise<VarianteShopify> {
+    const { sku } = await prisma.product.findUniqueOrThrow({ where: { id: e.productId }, select: { sku: true } })
+    const v = {
+      ...variante(1, { sku, barcode: null, producto: 'gid://shopify/Product/1', available, committed: 0 }),
+      id: 'gid://shopify/ProductVariant/1',
+    }
+    v.inventoryItem = { ...v.inventoryItem, id: 'gid://shopify/InventoryItem/1' }
+    return v
+  }
+
+  it('products/delete con una sucursal en FALTA_PERMISO: la sana se archiva y el archivo NO se interrumpe', async () => {
+    const e = await escenario()
+    const otra = await otraSucursalDeLaTienda(e) // su pareja nace después: la detenida va primero en la tanda
+    try {
+      await prisma.shopifyLocationLink.update({ where: { id: e.locationLinkId }, data: { importError: 'FALTA_PERMISO' } })
+      expect(await archiveShopifyProduct(e.storeId, 'gid://shopify/Product/1')).toEqual({ archivadas: 1, suspendidas: 0 })
+      expect(await prisma.shopifyVariantLink.count({ where: { id: otra.variantLinkId } })).toBe(0)
+      expect(await prisma.shopifyVariantLink.count({ where: { id: e.variantLinkId } })).toBe(1)
+      expect((await prisma.product.findUniqueOrThrow({ where: { id: e.productId } })).deletedAt).toBeNull()
+    } finally {
+      await limpiarOtraSucursal(otra)
+    }
+  })
+
+  it.each(['DISCONNECTED', 'PAUSED'] as const)('products/delete no toca el producto de una sucursal %s', async status => {
+    const e = await escenario({ linkStatus: status })
+    expect(await archiveShopifyProduct(e.storeId, 'gid://shopify/Product/1')).toEqual({ archivadas: 0, suspendidas: 0 })
+    expect(await prisma.shopifyVariantLink.count({ where: { id: e.variantLinkId } })).toBe(1)
+    expect(await prisma.product.findUniqueOrThrow({ where: { id: e.productId } })).toMatchObject({ deletedAt: null, active: true })
+  })
+
+  it('Minor 2: el evento lo toma otro proceso mientras Shopify contesta 403 ⇒ RECLAMO_PERDIDO, sin tronar y sin marcar nada', async () => {
+    const e = await escenario()
+    const ev = await prisma.shopifyInboundEvent.create({
+      data: {
+        dedupKey: `ev403-${e.venueId}`,
+        appKey: 'PILOTO',
+        topic: 'products/update',
+        shopDomain: e.shopDomain,
+        payload: {},
+        status: 'RECEIVED',
+      },
+    })
+    const reclamo = { eventId: ev.id, claimToken: await procesando(ev.id) }
+    const graphql = graphqlConEfecto(
+      () => prisma.shopifyInboundEvent.update({ where: { id: ev.id }, data: { claimToken: 'otro-proceso' } }).then(() => undefined),
+      () => falla('FORBIDDEN', false, false),
+    )
+    expect(await syncShopifyProduct(e.storeId, 'gid://shopify/Product/900', { hasAccess: conPlan, graphql, reclamo })).toEqual({
+      error: 'RECLAMO_PERDIDO',
+      retry: false,
+    })
+    expect(await sucursal(e)).toMatchObject({ importError: null })
+  })
+
+  it('una pareja suspendida que vuelve en el sync se COMPARA: se reactiva y abre «Por revisar» con el invariante cuadrado', async () => {
+    const e = await escenario() // Inventory 10, espejo 10
+    await prisma.shopifyVariantLink.update({
+      where: { id: e.variantLinkId },
+      data: { suspendedReason: 'NIVEL_INEXISTENTE', suspendedAt: new Date() },
+    })
+    const v = await laDelEscenario(e, 7)
+    expect(
+      await syncShopifyProduct(e.storeId, 'gid://shopify/Product/1', {
+        hasAccess: conPlan,
+        graphql: graphqlFalso(() => paginaDeVariantes([v], null)),
+      }),
+    ).toEqual({ ok: true })
+    expect(await prisma.shopifyVariantLink.findUniqueOrThrow({ where: { id: e.variantLinkId } })).toMatchObject({
+      suspendedReason: null,
+      mirrorAvailable: 7,
+    })
+    expect(await prisma.shopifyReviewItem.findFirst({ where: { productId: e.productId, status: 'OPEN' } })).toMatchObject({
+      reason: 'REACTIVADA',
+      shopifyQty: 7,
+    })
+    expect(await huecoDelInvariante(e.productId)).toBe('0')
+  })
+
+  it('Minor 6: un producto que archivó el conector y ya no es elegible (pasó a receta) vuelve en el sync ⇒ se anota y NO se compara', async () => {
+    const e = await escenario()
+    await prisma.product.update({
+      where: { id: e.productId },
+      data: { originSystem: 'SHOPIFY', deletedAt: new Date(), deletedBy: ARCHIVADO_POR_SHOPIFY, active: false, inventoryMethod: 'RECIPE' },
+    })
+    await prisma.shopifyVariantLink.update({
+      where: { id: e.variantLinkId },
+      data: { suspendedReason: 'NIVEL_INEXISTENTE', suspendedAt: new Date() },
+    })
+    const v = await laDelEscenario(e, 7)
+    expect(
+      await syncShopifyProduct(e.storeId, 'gid://shopify/Product/1', {
+        hasAccess: conPlan,
+        graphql: graphqlFalso(() => paginaDeVariantes([v], null)),
+      }),
+    ).toEqual({
+      ok: true,
+    })
+    expect(await prisma.shopifyVariantLink.findUniqueOrThrow({ where: { id: e.variantLinkId } })).toMatchObject({
+      suspendedReason: 'NIVEL_INEXISTENTE',
+    })
+    expect(await prisma.shopifyReviewItem.count({ where: { productId: e.productId, status: 'OPEN' } })).toBe(0)
+    expect(await prisma.product.findUniqueOrThrow({ where: { id: e.productId } })).toMatchObject({ deletedBy: ARCHIVADO_POR_SHOPIFY })
+    expect(await prisma.shopifyImportIssue.findFirst({ where: { venueId: e.venueId, shopifyVariantId: v.id } })).toMatchObject({
+      reason: 'METODO_RECETA',
+    })
+  })
+
+  it('B-7 en el sync: un token ilegible no truena ni sale a la red, y se reintenta', async () => {
+    const e = await escenario()
+    await prisma.shopifyStore.update({ where: { id: e.storeId }, data: { accessTokenCiphertext: Buffer.from('cifrado-dañado') } })
+    const graphql = graphqlFalso(() => paginaDeVariantes([], null))
+    expect(await syncShopifyProduct(e.storeId, 'gid://shopify/Product/1', { hasAccess: conPlan, graphql })).toEqual({
+      error: TOKEN_ILEGIBLE,
+      retry: true,
+    })
+    expect(graphql).not.toHaveBeenCalled()
+  })
+
+  it('Minor 5: sin `hasAccess` inyectado se mira el plan real; un negocio sin plan no escribe nada', async () => {
+    const e = await conectando()
+    expect(await upsertShopifyVariant({ ...(await contexto(e)), hasAccess: undefined }, variante(18))).toEqual({ kind: 'OBSOLETO' })
+    expect(await prisma.product.count({ where: { venueId: e.venueId, originSystem: 'SHOPIFY' } })).toBe(0)
+  })
+
+  it('Minor 3: la falta de permiso de toda la tienda deja una fila por sucursal con su venueId y su organizationId', async () => {
+    const e = await conectando()
+    expect(await atenderFalla({ id: e.storeId, tokenVersion: 1 }, falla('FORBIDDEN', false, false))).toBe('SIN_PERMISO')
+    expect(await sucursal(e)).toMatchObject({ importError: 'FALTA_PERMISO' })
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        venueId: e.venueId,
+        organizationId: e.organizationId,
+        action: 'SHOPIFY_PERMISSION_MISSING',
+        entityId: e.locationLinkId,
+      }),
+    )
   })
 })

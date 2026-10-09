@@ -22,7 +22,8 @@ import {
   assertLegacyCatalogGovernanceForVenue,
   writeLegacyServiceProductCreationAuditForVenue,
 } from '@/services/master-catalog/catalogGovernance.service'
-import { CATALOG_PAGE_SIZE, SHOPIFY_MAX_VARIANTS, SHOPIFY_SERVICE_ACTOR } from './shopify.constants'
+import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
+import { CATALOG_PAGE_SIZE, SHOPIFY_FEATURE, SHOPIFY_MAX_VARIANTS, SHOPIFY_SERVICE_ACTOR } from './shopify.constants'
 import { shopifyGraphql } from './shopify.graphql'
 import {
   bloquearPareja,
@@ -272,7 +273,7 @@ export type ContextoCatalogo = {
   workToken: string | null
   /** Reclamo del evento que trae este cambio (§10.7). */
   reclamo: Reclamo | null
-  /** El plan, revisado DENTRO de la tx común (#14). Sin él (prueba directa) no se revisa; el worker siempre lo pasa. */
+  /** El plan, revisado DENTRO de la tx común (#14). Sin él, el real (`venueHasFeatureAccess`), como en A: nunca abierto. */
   hasAccess?: (venueId: string) => Promise<boolean>
 }
 
@@ -298,6 +299,9 @@ export function contextoDe(
   }
 }
 
+/** El acceso efectivo (§9.7) cuando el llamador no lo inyecta: el mismo default que `initializePair` de A. */
+const accesoReal = (venueId: string) => venueHasFeatureAccess(venueId, SHOPIFY_FEATURE)
+
 /** El evento de un reclamo, con la forma del cerco de A (§11.2). Sin reclamo, `undefined`: nunca `null` (§12.6, R07). */
 const eventoDe = (r: Reclamo | null | undefined): CercoShopify['evento'] => (r ? { id: r.eventId, claimToken: r.claimToken } : undefined)
 /** El reclamo sigue siendo de quien procesa; se llama DESPUÉS de los candados del estado (§10.3: el evento es el último). */
@@ -320,15 +324,15 @@ export function cercoDe(ctx: ContextoCatalogo): CercoShopify {
 }
 
 /**
- * Sucursal → tienda `FOR SHARE` y todo lo del contexto igual (y el plan, si se pidió, #14); si no, la respuesta ya no
- * aplica. Devuelve el barrido. El reclamo del evento NO va aquí: va después de la pareja (§10.3).
+ * Sucursal → tienda `FOR SHARE` y todo lo del contexto igual, y el plan (#14; sin `hasAccess`, el real); si no, la
+ * respuesta ya no aplica. Devuelve el barrido. El reclamo del evento NO va aquí: va después de la pareja (§10.3).
  */
 async function cercar(tx: Prisma.TransactionClient, ctx: ContextoCatalogo): Promise<{ sweepId: number }> {
   await exigirCerco(tx, ctx.locationLinkId, cercoDe(ctx)) // el mismo cerco que A: sucursal → tienda FOR SHARE
   const [l] = await tx.$queryRaw<Array<{ status: string; catalogSweepId: number }>>`
     SELECT status::text AS status, "catalogSweepId" FROM "ShopifyLocationLink" WHERE id = ${ctx.locationLinkId}`
   if (!l || l.status !== ctx.fase) throw new ContextoObsoleto()
-  if (ctx.hasAccess && !(await ctx.hasAccess(ctx.venueId))) throw new ContextoObsoleto()
+  if (!(await (ctx.hasAccess ?? accesoReal)(ctx.venueId))) throw new ContextoObsoleto()
   return { sweepId: l.catalogSweepId }
 }
 
@@ -390,6 +394,18 @@ export type UpsertOutcome =
 type Importado = { importedAvailable?: number | null; importedAt?: Date }
 /** Lo que la tx hizo y se registra en la bitácora DESPUÉS de comitear (K18). */
 type Efectos = { restaurado?: string }
+
+/** Una sucursal con la que el catálogo trabaja: ACTIVE y sin error terminal (§12.2). Las demás esperan o no se tocan. */
+const sucursalTrabajable = (storeId: string): Prisma.ShopifyLocationLinkWhereInput => ({
+  storeId,
+  status: 'ACTIVE',
+  OR: [{ importError: null }, { importError: { notIn: SHOPIFY_IMPORT_ERRORES_TERMINALES } }],
+})
+
+/** §10.3: `Inventory` va después de la pareja y antes de las filas del buzón (como en A). */
+async function bloquearInventario(tx: Prisma.TransactionClient, productId: string): Promise<void> {
+  await tx.$queryRaw`SELECT id FROM "Inventory" WHERE "productId" = ${productId} FOR UPDATE`
+}
 
 /**
  * §12.5: las filas del buzón del producto que una baja o una suspensión pueden descartar, bloqueadas por id ANTES de
@@ -453,9 +469,11 @@ export async function upsertShopifyVariant(ctx: ContextoCatalogo, v: VarianteSho
         }
         const vigente = await tx.shopifyVariantLink.findUniqueOrThrow({ where: { id: pareja.id }, select: { inventoryItemId: true } })
         const cambioArticulo = vigente.inventoryItemId !== v.inventoryItem.id
-        // Suspender descarta las filas que nunca salieron (§12.5): se bloquean antes del evento.
-        if (cambioArticulo)
+        // Suspender descarta las filas que nunca salieron (§12.5): pareja → Inventory → filas (§10.3), antes del evento.
+        if (cambioArticulo) {
+          await bloquearInventario(tx, pareja.productId)
           await bloquearBuzon(tx, { productId: pareja.productId, locationLinkId: pareja.locationLinkId, generation: pareja.generation })
+        }
         await verificarReclamo(tx, ctx.reclamo) // el evento, último candado
         return actualizarPareja(tx, ctx, v, pareja, producto, importado, sweepId, cambioArticulo, efectos)
       }
@@ -615,11 +633,10 @@ async function actualizarPareja(
   cambioArticulo: boolean,
   efectos: Efectos,
 ): Promise<UpsertOutcome> {
-  if (archivadoPorShopify(producto)) {
-    const motivo = inelegible(producto)
-    if (motivo) await anotar(tx, ctx.venueId, v, motivo, null, producto.id)
-    else await restaurar(tx, ctx.venueId, producto.id, efectos)
-  }
+  // Archivado por el conector y ya no elegible (pasó a receta, a kilo…): se queda archivado y nadie lo compara.
+  const noElegible = archivadoPorShopify(producto) ? inelegible(producto) : null
+  if (noElegible) await anotar(tx, ctx.venueId, v, noElegible, null, producto.id)
+  else if (archivadoPorShopify(producto)) await restaurar(tx, ctx.venueId, producto.id, efectos)
   if (cambioArticulo) await suspendPair(tx, pareja.id, 'NIVEL_INEXISTENTE')
   const actual = await tx.product.findUniqueOrThrow({ where: { id: pareja.productId }, select: { id: true, sku: true, gtin: true } })
   const avisos: Array<{ reason: ShopifyIssueReason; detail: string }> = []
@@ -663,7 +680,8 @@ async function actualizarPareja(
     kind: 'ACTUALIZADO',
     variantLinkId: pareja.id,
     productId: actual.id,
-    iniciada: pareja.initializedAt !== null && pareja.suspendedReason === null && !cambioArticulo,
+    // `true` también si no es elegible: así el sync no compara (ni reactiva) un producto que no debe sincronizarse.
+    iniciada: noElegible !== null || (pareja.initializedAt !== null && pareja.suspendedReason === null && !cambioArticulo),
     creadaPorConector: pareja.createdProduct,
   }
 }
@@ -854,13 +872,12 @@ export async function syncShopifyProduct(
   let despues = ''
   for (;;) {
     const links = await prisma.shopifyLocationLink.findMany({
-      where: { storeId, status: 'ACTIVE', id: { gt: despues } },
-      select: { id: true, venueId: true, generation: true, storeId: true, shopifyLocationId: true, importError: true },
+      where: { ...sucursalTrabajable(storeId), id: { gt: despues } },
+      select: { id: true, venueId: true, generation: true, storeId: true, shopifyLocationId: true },
       orderBy: { id: 'asc' },
       take: 20,
     })
     for (const link of links) {
-      if (link.importError && SHOPIFY_IMPORT_ERRORES_TERMINALES.includes(link.importError)) continue
       const r = await sincronizarEnSucursal(store, link, productGid, deps, avance)
       if ('error' in r) return r
     }
@@ -964,6 +981,8 @@ async function sincronizarEnSucursal(
     }
   } catch (err) {
     if (esErrorDeGobierno(err)) return { error: CATALOGO_MAESTRO, retry: false }
+    // `atenderFalla` (401/403) verifica el reclamo al final de su tx: si otro proceso tomó el evento, nada quedó marcado.
+    if (err instanceof ContextoObsoleto) return perdido
     throw err
   }
   // Huérfanas: SÓLO con el recorrido completo, las parejas del producto cuya variante no vino en NINGUNA página.
@@ -1007,8 +1026,10 @@ export async function archiveShopifyProduct(
   if (!store || store.status !== 'ACTIVE') return { archivadas, suspendidas, interrumpido: 'CONTEXTO_CAMBIO' }
   let despues = ''
   for (;;) {
+    // Sólo sucursales ACTIVE y sin error terminal: una detenida (FALTA_PERMISO, CATALOGO_MAESTRO…) no pasaría el cerco y
+    // detendría el archivo de las sanas en cada pasada; una desconectada o en pausa no se toca.
     const tanda = await prisma.shopifyVariantLink.findMany({
-      where: { shopifyProductId: productGid, locationLink: { storeId }, id: { gt: despues } },
+      where: { shopifyProductId: productGid, locationLink: sucursalTrabajable(storeId), id: { gt: despues } },
       select: {
         id: true,
         productId: true,
@@ -1064,6 +1085,7 @@ export async function archivarPareja(
       if (!prod || !pareja || pareja.productId !== p.productId || pareja.locationLinkId !== p.locationLinkId)
         return { estado: 'NADA' as const }
       const filas = { productId: p.productId, locationLinkId: p.locationLinkId, generation: pareja.generation }
+      await bloquearInventario(tx, p.productId) // §10.3: pareja → Inventory → filas
       // §12.5: las filas que este archivo puede tocar, bloqueadas ANTES de verificar el evento y del primer efecto.
       await bloquearBuzon(tx, filas)
       await tx.$queryRaw`SELECT id FROM "ShopifyReviewItem" WHERE "productId" = ${p.productId} AND status = 'OPEN' ORDER BY id FOR UPDATE`

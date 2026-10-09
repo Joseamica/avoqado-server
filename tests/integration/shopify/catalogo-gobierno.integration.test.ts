@@ -111,12 +111,13 @@ it('N08: ENFORCED se enciende durante el HTTP ⇒ CATALOGO_MAESTRO, terminal, y 
     },
     () => paginaDeVariantes([variante(1, { sku: 'GOB-1', barcode: null })], 'c1', 1),
   )
-  expect(await importCatalogPage(link.id, { graphql })).toEqual({ error: 'CATALOGO_MAESTRO', retry: false })
+  const hasAccess = async () => true // el plan no es lo que se prueba aquí
+  expect(await importCatalogPage(link.id, { graphql, hasAccess })).toEqual({ error: 'CATALOGO_MAESTRO', retry: false })
   expect(await prisma.shopifyLocationLink.findUniqueOrThrow({ where: { id: link.id } })).toMatchObject({
     importError: 'CATALOGO_MAESTRO',
     importCursor: null,
   })
   expect(await prisma.shopifyVariantLink.count({ where: { productId: existente.id } })).toBe(0)
-  expect(await importCatalogPage(link.id, { graphql })).toEqual({ error: 'CATALOGO_MAESTRO', retry: false })
+  expect(await importCatalogPage(link.id, { graphql, hasAccess })).toEqual({ error: 'CATALOGO_MAESTRO', retry: false })
   expect(graphql).toHaveBeenCalledTimes(1)
 })

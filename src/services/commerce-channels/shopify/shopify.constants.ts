@@ -21,6 +21,7 @@ export const LEVELS_PAGE_SIZE = 50
 /** Un catálogo más grande no se conecta en esta versión (ajuste 12 bis.12). */
 export const SHOPIFY_MAX_VARIANTS = 20_000
 export const SHOPIFY_TIMEOUT_MS = 20_000
-export const SHOPIFY_SERVICE_ACTOR: CatalogActor = { type: 'SERVICE', servicePrincipalId: 'SHOPIFY_SYNC' }
+/** Principal de servicio: el tipo angosto lo exige la bitácora de altas de servicio (`writeLegacyServiceProductCreationAudit…`). */
+export const SHOPIFY_SERVICE_ACTOR: Extract<CatalogActor, { type: 'SERVICE' }> = { type: 'SERVICE', servicePrincipalId: 'SHOPIFY_SYNC' }
 /** Las filas del buzón que todavía pueden salir hacia Shopify. */
 export const LIVE_OUTBOX_STATUSES = ['PENDING', 'IN_PROGRESS', 'FAILED'] as const

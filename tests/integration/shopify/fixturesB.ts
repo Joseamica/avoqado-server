@@ -112,14 +112,21 @@ export async function procesando(id: string, claimToken = 'tok-prueba'): Promise
 /** «Tiene el plan» (§9.7): las pruebas lo pasan explícito como `deps.hasAccess`; el escenario de A no trae plan. */
 export const conPlan = async (): Promise<boolean> => true
 
-/** El contexto de catálogo de la sucursal TAL COMO ESTÁ ahora en la base (lo que llevaría una página pedida hoy). */
+/**
+ * El contexto de catálogo de la sucursal TAL COMO ESTÁ ahora en la base (lo que llevaría una página pedida hoy). Con el
+ * plan puesto (`conPlan`): sin `hasAccess` el traductor mira el plan real, y el escenario de A no lo trae.
+ */
 export async function contexto(
   e: { locationLinkId: string },
   o: { importando?: boolean; workToken?: string | null; reclamo?: Reclamo | null } = {},
 ): Promise<ContextoCatalogo> {
   const l = await prisma.shopifyLocationLink.findUniqueOrThrow({ where: { id: e.locationLinkId }, include: { store: true } })
   const fase = l.status === 'CONNECTING' ? 'CONNECTING' : 'ACTIVE'
-  return contextoDe(l, l.store, fase, o.importando ?? fase === 'CONNECTING', { workToken: o.workToken ?? null, reclamo: o.reclamo ?? null })
+  return contextoDe(l, l.store, fase, o.importando ?? fase === 'CONNECTING', {
+    workToken: o.workToken ?? null,
+    reclamo: o.reclamo ?? null,
+    hasAccess: conPlan,
+  })
 }
 
 /** Espera `ms` (pruebas del vencimiento, §11.6). */

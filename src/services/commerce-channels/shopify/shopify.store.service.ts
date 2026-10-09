@@ -120,19 +120,21 @@ export async function atenderFalla(
   const orden = [...enlaces].sort((a, b) => a.id.localeCompare(b.id))
   const r = await prisma.$transaction(
     async tx => {
-      // Sólo para la bitácora (K18): quién ya estaba marcado. Lectura sin candado: los candados los toma A.
-      const antes = new Map(
-        (
-          await tx.shopifyLocationLink.findMany({
-            where: { id: { in: orden.map(e => e.id) } },
-            select: { id: true, venueId: true, importError: true },
-            take: orden.length,
-          })
-        ).map(l => [l.id, l]),
-      )
-      const nuevas: Array<{ id: string; venueId: string }> = []
+      // Sólo para la bitácora (K18): quién ya estaba marcado, con su sucursal y su organización. Lectura sin candado: los
+      // candados los toma A. Sin enlaces, A marca las sucursales no desconectadas de la tienda (mismo tope que A).
+      const leidas = await tx.shopifyLocationLink.findMany({
+        where: orden.length > 0 ? { id: { in: orden.map(e => e.id) } } : { storeId: store.id, status: { not: 'DISCONNECTED' } },
+        select: { id: true, venueId: true, importError: true, store: { select: { organizationId: true } } },
+        orderBy: { id: 'asc' },
+        take: 1000,
+      })
+      const antes = new Map(leidas.map(l => [l.id, l]))
+      let nuevas: typeof leidas = []
       let alguna = false
-      if (orden.length === 0) alguna = await marcarFaltaPermiso(tx, { storeId: store.id, tokenVersion: store.tokenVersion })
+      if (orden.length === 0) {
+        alguna = await marcarFaltaPermiso(tx, { storeId: store.id, tokenVersion: store.tokenVersion })
+        if (alguna) nuevas = leidas.filter(l => l.importError !== FALTA_PERMISO)
+      }
       for (const e of orden) {
         if (
           !(await marcarFaltaPermiso(tx, {
@@ -156,18 +158,11 @@ export async function atenderFalla(
   for (const l of r.nuevas) {
     logAction({
       venueId: l.venueId,
+      organizationId: l.store.organizationId,
       action: 'SHOPIFY_PERMISSION_MISSING',
       entity: 'ShopifyLocationLink',
       entityId: l.id,
-      data: { storeId: store.id },
-    })
-  }
-  if (r.alguna && orden.length === 0) {
-    logAction({
-      action: 'SHOPIFY_PERMISSION_MISSING',
-      entity: 'ShopifyStore',
-      entityId: store.id,
-      data: { tokenVersion: store.tokenVersion },
+      data: { storeId: store.id, tokenVersion: store.tokenVersion },
     })
   }
   return r.alguna ? 'SIN_PERMISO' : 'REINTENTAR'
