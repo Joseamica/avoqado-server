@@ -219,7 +219,12 @@ jobs:
             jest-${{ runner.os }}-node20-
 
       - name: 🌐 Run API middleware tests
-        run: npm run test:api
+        # Each shard starts a fresh process so the accumulated Jest heap stays bounded.
+        # All API test files still run; keep the same assertions and 4 GB heap.
+        run: |
+          for SHARD in 1 2 3 4; do
+            npm run test:api -- --shard="${SHARD}/4"
+          done
 
   # NOTE: Staging deploy disabled — Render staging service is suspended.
   # Demo environment (Fly.io) is still active via fly-deploy.yml.
