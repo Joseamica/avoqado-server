@@ -18,6 +18,8 @@ const EXPECTED_WRITES: Record<string, Partial<Record<ProductMutation, number>>> 
   'src/controllers/mobile/product.mobile.controller.ts': { create: 1, update: 1 },
   'src/routes/tpv.routes.ts': { create: 1 },
   'src/services/cleanup/liveDemoCleanup.service.ts': { deleteMany: 1 },
+  // Conector Shopify (plan v2 B1): alta y restauración con el candado en su transacción; edición sin `active`.
+  'src/services/commerce-channels/shopify/shopify.catalog.service.ts': { create: 1, update: 2 },
   // WHY (plan 5, D2): replace archives through archivarProductos; no product deleteMany left here.
   'src/services/dashboard/menu.dashboard.service.ts': { create: 1, update: 1, updateMany: 3 },
   'src/services/dashboard/pricing.service.ts': { update: 1 },
@@ -100,6 +102,15 @@ const GOVERNED_WRITERS: Array<{ path: string; markers: string[] }> = [
       'assertLegacyCatalogGovernanceForVenue',
       "servicePrincipalId: 'DELIVERY_INGESTION'",
       'active: false',
+      'createdById: null',
+      'writeLegacyServiceProductCreationAuditForVenue',
+    ],
+  },
+  {
+    path: 'src/services/commerce-channels/shopify/shopify.catalog.service.ts',
+    markers: [
+      'assertLegacyCatalogGovernanceForVenue',
+      'SHOPIFY_SERVICE_ACTOR',
       'createdById: null',
       'writeLegacyServiceProductCreationAuditForVenue',
     ],

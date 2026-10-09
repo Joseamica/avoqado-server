@@ -235,9 +235,10 @@ export async function eventoVigente(tx: Prisma.TransactionClient, evento?: { id:
 
 /**
  * Sucursal (FOR SHARE) → tienda (FOR SHARE) → pareja (FOR UPDATE), en ese orden y en sentencias separadas (§10.3). Quien
- * además toque `Product` (catálogo, archivo, `switchInventoryMethod` en B) lo bloquea ANTES de llamar aquí.
+ * además toque `Product` (catálogo, archivo, `switchInventoryMethod` en B) lo bloquea ANTES de llamar aquí. Exportada
+ * para B (K14, BR-6): toda mutación de pareja de B pasa antes por aquí.
  */
-async function bloquearPareja(tx: Prisma.TransactionClient, variantLinkId: string): Promise<ParejaBloqueada | null> {
+export async function bloquearPareja(tx: Prisma.TransactionClient, variantLinkId: string): Promise<ParejaBloqueada | null> {
   const [link] = await tx.$queryRaw<
     Array<{
       id: string
