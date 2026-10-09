@@ -11,6 +11,8 @@ import AppError from '@/errors/AppError'
 import { moveOrderToTable, assignOrderWaiter } from '@/services/tpv/table.tpv.service'
 import { compWholeOrder } from '@/services/mobile/comp-item.mobile.service'
 import { updateOrderDetails, splitOrderItems, splitOrderBySeat, mergeOrders } from '@/services/mobile/order.mobile.service'
+// Módulo LIGERO (sólo Prisma): el `.service` arrastra sockets y candados que el MCP no necesita para leer.
+import { getFloorPlan } from '@/services/dashboard/floorPlan/floorPlan.read'
 
 const STATUS_MAP: Record<string, TableStatus> = {
   available: TableStatus.AVAILABLE,
@@ -138,6 +140,50 @@ export function registerTableTools(server: McpServer, scope: McpScope) {
         venueId,
         count: areas.length,
         areas: areas.map(a => ({ name: a.name, description: a.description, tables: a._count.tables })),
+      })
+    },
+  )
+
+  server.tool(
+    'floor_plan',
+    'The floor plan (plano del salón) of a venue you can access, area by area: each area with its shape (wide, square or tall), its tables (number, seats, shape and whether it is placed on the plan) and how many walls, bars, service areas (kitchen, bathroom…), doors and labels it has, plus the tables not placed yet. Answers "¿cómo está acomodado mi salón?" or "¿qué mesas no están en el plano?". Pass venueId. The plan is edited in the web dashboard (Configuración → Mesas y plano). For live occupancy use tables_status.',
+    { venueId: z.string().describe('Venue whose floor plan to read (must be in your scope)') },
+    async ({ venueId }) => {
+      guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('tables:read', venueId, 'read')
+      const plan = await getFloorPlan(venueId)
+      const SHAPE = { WIDE: 'ancha', SQUARE: 'cuadrada', TALL: 'larga' } as const
+      const TABLE_SHAPE = { SQUARE: 'cuadrada', ROUND: 'redonda', RECTANGLE: 'larga' } as const
+      const areaIds = new Set(plan.areas.map(a => a.id))
+      const areas = plan.areas.map(a => {
+        const tables = plan.tables.filter(t => t.areaId === a.id)
+        const els = plan.elements.filter(e => e.areaId === a.id)
+        const count = (type: string) => els.filter(e => e.type === type).length
+        return {
+          name: a.name,
+          shape: SHAPE[a.floorShape ?? 'WIDE'],
+          seats: tables.reduce((sum, t) => sum + t.capacity, 0),
+          tables: tables.map(t => ({
+            number: t.number,
+            seats: t.capacity,
+            shape: TABLE_SHAPE[t.shape],
+            placed: t.positionX !== null && t.positionY !== null,
+          })),
+          walls: count('WALL'),
+          bars: count('BAR_COUNTER'),
+          serviceAreas: els.filter(e => e.type === 'SERVICE_AREA').map(e => e.label ?? 'Área de servicio'),
+          doors: count('DOOR'),
+          labels: els.filter(e => e.type === 'LABEL').map(e => e.label),
+        }
+      })
+      const unplacedTables = plan.tables.filter(t => !t.areaId || !areaIds.has(t.areaId) || t.positionX === null).map(t => t.number)
+      return text({
+        venueId,
+        areaCount: areas.length,
+        tableCount: plan.tables.length,
+        areas,
+        unplacedTables,
+        ...(plan.overLimit ? { note: 'El plano pasa los límites del editor; se muestran los primeros elementos.' } : {}),
       })
     },
   )
