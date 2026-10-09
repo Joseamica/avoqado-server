@@ -32,6 +32,11 @@ jest.mock('../../../../src/services/pos-sync/posSyncStaff.service')
 jest.mock('../../../../src/services/pos-sync/posSyncTable.service')
 jest.mock('../../../../src/services/pos-sync/posSyncShift.service')
 
+function topologySql(query: unknown): string {
+  if (Array.isArray(query)) return query.join(' ')
+  if (query && typeof query === 'object' && 'strings' in query && Array.isArray(query.strings)) return query.strings.join(' ')
+  throw new Error('Unexpected SQL representation in topology fixture')
+}
 describe('POS Sync Order Service (posSyncOrder.service.ts)', () => {
   const mockPrismaVenueFindUnique = prisma.venue.findUnique as jest.Mock
   const mockPrismaOrderFindUnique = prisma.order.findUnique as jest.Mock
@@ -50,12 +55,20 @@ describe('POS Sync Order Service (posSyncOrder.service.ts)', () => {
     mockPrismaOrderFindUnique.mockResolvedValue(null) // No existing order by default
     mockPrismaTransaction.mockImplementation(async callback => {
       const mockTx = {
-        $queryRaw: jest.fn().mockResolvedValue([]),
+        $queryRaw: jest.fn(async (query: unknown) => {
+          const sql = topologySql(query)
+          if (sql.includes('FROM "Venue"')) return [{ id: venueId }]
+          if (sql.includes('FROM "Table"')) return [{ id: mockTableId }]
+          if (sql.includes('pg_advisory_xact_lock')) return []
+          throw new Error('Unexpected POS service fixture SQL')
+        }),
+        table: { findMany: jest.fn(async () => [{ id: mockTableId, number: '12', status: 'AVAILABLE', currentOrderId: null }]) },
         shift: {
           updateMany: mockShiftUpdateMany,
         },
         order: {
           findUnique: mockPrismaOrderFindUnique,
+          findMany: jest.fn(async () => []),
           upsert: mockPrismaOrderUpsert,
         },
       }

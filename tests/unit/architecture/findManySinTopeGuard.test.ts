@@ -473,7 +473,8 @@ const INVENTARIO: Record<string, number> = {
   // de `getShifts` (`orders → payments → allocations`) y los dos `findMany` de `getCurrentShift`,
   // que ahora agregan en la base. Los 4 que quedan son P3.2/P3.3 y siguen abiertos.
   'src/services/tpv/shift.tpv.service.ts': 4,
-  'src/services/tpv/table.tpv.service.ts': 3,
+  // Mesas Task6 replaces the third unbounded clear read with the paginated topology scope; two unrelated reads remain.
+  'src/services/tpv/table.tpv.service.ts': 2,
   'src/services/tpv/time-entry.tpv.service.ts': 4,
   'src/services/tpv/tpv-health.service.ts': 1,
   'src/services/tpv/tpv-message.service.ts': 4,

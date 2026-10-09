@@ -1,3 +1,4 @@
+import { lockTableOrderScope } from '@/services/shared/tableOrderLock'
 // services/dashboard/order.dashboard.service.ts
 
 import { NotFoundError } from '../../errors/AppError'
@@ -470,113 +471,125 @@ export async function updateOrder(venueId: string, orderId: string, data: Partia
     )
   }
 
-  // Get the current order to check previous status
-  const currentOrder = await prisma.order.findFirst({
-    where: {
-      id: orderId,
-      venueId,
-    },
-    select: { status: true, venueId: true },
-  })
-
-  if (!currentOrder) {
-    throw new NotFoundError(`Order with ID ${orderId} not found in this venue`)
-  }
-
-  if (customerId) {
-    const customer = await prisma.customer.findFirst({
+  const topologyWrite = tableId !== undefined || status !== undefined
+  const update = async (client: Prisma.TransactionClient) => {
+    if (topologyWrite)
+      await lockTableOrderScope(client, { venueId, orderIds: [orderId], tableIds: tableId ? [tableId] : [] }).catch(error => {
+        if (error instanceof NotFoundError) {
+          if (error.message === 'Venue not found' || error.message === 'Order not found') {
+            throw new NotFoundError(`Order with ID ${orderId} not found in this venue`)
+          }
+          if (tableId && error.message === 'Table not found or does not belong to this venue') {
+            throw new NotFoundError(`Table with ID ${tableId} not found in this venue`)
+          }
+        }
+        throw error
+      })
+    // Get the current order to check previous status
+    const currentOrder = await client.order.findFirst({
       where: {
-        id: customerId,
+        id: orderId,
         venueId,
       },
-      select: { id: true },
+      select: { status: true, venueId: true },
     })
 
-    if (!customer) {
-      throw new NotFoundError(`Customer with ID ${customerId} not found in this venue`)
+    if (!currentOrder) {
+      throw new NotFoundError(`Order with ID ${orderId} not found in this venue`)
     }
-  }
 
-  if (tableId) {
-    const table = await prisma.table.findFirst({
-      where: {
-        id: tableId,
-        venueId,
-      },
-      select: { id: true },
-    })
+    if (customerId) {
+      const customer = await client.customer.findFirst({
+        where: {
+          id: customerId,
+          venueId,
+        },
+        select: { id: true },
+      })
 
-    if (!table) {
-      throw new NotFoundError(`Table with ID ${tableId} not found in this venue`)
+      if (!customer) {
+        throw new NotFoundError(`Customer with ID ${customerId} not found in this venue`)
+      }
     }
-  }
 
-  if (servedById) {
-    const staffVenue = await prisma.staffVenue.findFirst({
-      where: {
-        staffId: servedById,
-        venueId,
-      },
-      select: { id: true },
-    })
+    if (tableId) {
+      const table = await client.table.findFirst({
+        where: {
+          id: tableId,
+          venueId,
+        },
+        select: { id: true },
+      })
 
-    if (!staffVenue) {
-      throw new NotFoundError(`Staff with ID ${servedById} not found in this venue`)
+      if (!table) {
+        throw new NotFoundError(`Table with ID ${tableId} not found in this venue`)
+      }
     }
-  }
 
-  // 🔴 Diseño §C.6: pasar a CANCELLED / DELETED por este PUT ES cancelar la orden, y va por la MISMA cancelación
-  // protegida que el DELETE (candado de la orden → relectura → sin dinero → sin cobro de terminal vivo). Antes escribía
-  // cualquier `status` sin revisar nada, y `orders:update` lo traen roles de piso. Si el status NO cambia (el diálogo lo
-  // reenvía siempre) la guarda no se activa: editar el nombre de una orden ya cancelada no es cancelarla otra vez.
-  const cancelando = (status === 'CANCELLED' || status === 'DELETED') && status !== currentOrder.status
-  const escribir = (client: Prisma.TransactionClient) =>
-    client.order.update({
-      where: { id: orderId },
-      data: {
-        ...(status !== undefined && { status }),
-        ...(customerId !== undefined && { customerId: customerId || null }),
-        ...(customerName !== undefined && { customerName }),
-        ...(tableId !== undefined && { tableId: tableId || null }),
-        ...(servedById !== undefined && { servedById: servedById || null }),
-        ...(createdAt !== undefined && { createdAt: new Date(createdAt) }),
-        ...(orderNumber !== undefined && { orderNumber }),
-        ...(type !== undefined && { type }),
-        ...(status === 'COMPLETED' && { completedAt: new Date() }),
-        // Los escritores con CAS de versión se enteran de que la orden se canceló.
-        ...(cancelando && { version: { increment: 1 } }),
-      },
-      include: {
-        items: {
-          include: {
-            product: true,
-            // ✅ FIX: Include modifiers so we can deduct their inventory
-            modifiers: {
-              include: {
-                modifier: true,
+    if (servedById) {
+      const staffVenue = await client.staffVenue.findFirst({
+        where: {
+          staffId: servedById,
+          venueId,
+        },
+        select: { id: true },
+      })
+
+      if (!staffVenue) {
+        throw new NotFoundError(`Staff with ID ${servedById} not found in this venue`)
+      }
+    }
+
+    // 🔴 Diseño §C.6: pasar a CANCELLED / DELETED por este PUT ES cancelar la orden, y va por la MISMA cancelación
+    // protegida que el DELETE (candado de la orden → relectura → sin dinero → sin cobro de terminal vivo). Antes escribía
+    // cualquier `status` sin revisar nada, y `orders:update` lo traen roles de piso. Si el status NO cambia (el diálogo lo
+    // reenvía siempre) la guarda no se activa: editar el nombre de una orden ya cancelada no es cancelarla otra vez.
+    const cancelando = (status === 'CANCELLED' || status === 'DELETED') && status !== currentOrder.status
+    const escribir = (client: Prisma.TransactionClient) =>
+      client.order.update({
+        where: { id: orderId },
+        data: {
+          ...(status !== undefined && { status }),
+          ...(customerId !== undefined && { customerId: customerId || null }),
+          ...(customerName !== undefined && { customerName }),
+          ...(tableId !== undefined && { tableId: tableId || null }),
+          ...(servedById !== undefined && { servedById: servedById || null }),
+          ...(createdAt !== undefined && { createdAt: new Date(createdAt) }),
+          ...(orderNumber !== undefined && { orderNumber }),
+          ...(type !== undefined && { type }),
+          ...(status === 'COMPLETED' && { completedAt: new Date() }),
+          // Los escritores con CAS de versión se enteran de que la orden se canceló.
+          ...(cancelando && { version: { increment: 1 } }),
+        },
+        include: {
+          items: {
+            include: {
+              product: true,
+              // ✅ FIX: Include modifiers so we can deduct their inventory
+              modifiers: {
+                include: {
+                  modifier: true,
+                },
               },
             },
           },
         },
-      },
-    })
-  const updatedOrder = cancelando
-    ? await prisma.$transaction(
-        async tx => {
-          await assertOrderCancellableUnderLock(
-            tx,
-            { venueId, orderId },
-            {
-              mensajeConDinero: MENSAJE_ORDEN_CON_DINERO,
-              contarPagosRegistrados: true,
-              notFoundMessage: `Order with ID ${orderId} not found in this venue`,
-            },
-          )
-          return escribir(tx)
+      })
+    if (cancelando)
+      await assertOrderCancellableUnderLock(
+        client,
+        { venueId, orderId },
+        {
+          mensajeConDinero: MENSAJE_ORDEN_CON_DINERO,
+          contarPagosRegistrados: true,
+          notFoundMessage: `Order with ID ${orderId} not found in this venue`,
         },
-        { timeout: 15_000, maxWait: 5_000 },
       )
-    : await escribir(prisma)
+    return { updatedOrder: await escribir(client), cancelando }
+  }
+  const { updatedOrder, cancelando } = topologyWrite
+    ? await prisma.$transaction(update, { timeout: 15_000, maxWait: 5_000 })
+    : await update(prisma)
 
   // 🔥 INVENTORY DEDUCTION: Automatically deduct stock when order is completed
   // 🔴 La deducción por CAMBIO DE STATUS se retiró (audit Codex xhigh 2026-08-14).

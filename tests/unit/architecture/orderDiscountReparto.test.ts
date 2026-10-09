@@ -134,12 +134,12 @@ const ESCRITORES_DE_FILAS: Record<string, Fila> = {
     clase: 'ESCRIBE',
     marcas: ['buildItemDiscountRow(', 'filaDeDescuentoDeCuenta(', SYNC],
   },
-  'src/services/mobile/order.mobile.service.ts#applyOrderDiscount': {
+  'src/services/mobile/order.mobile.service.ts#applyOrderDiscountInTransaction': {
     clase: 'ESCRIBE',
     marcas: [HISTORICO, 'nuevoRepartoDeCuenta(', 'recalculateOrderTotals('],
   },
   // B2c T3 (R7-1): conserva el resto histórico de la cabecera antes de quitar la fila (el recálculo es Σ filas).
-  'src/services/mobile/order.mobile.service.ts#removeOrderDiscount': {
+  'src/services/mobile/order.mobile.service.ts#removeOrderDiscountInTransaction': {
     clase: 'QUITA',
     marcas: [HISTORICO, 'revertirDescuentoDelRenglon(', 'recalculateOrderTotals('],
   },
@@ -172,7 +172,7 @@ const ESCRITORES_DE_FILAS: Record<string, Fila> = {
     clase: 'QUITA',
     marcas: ['revertirDescuentoDelRenglon(', 'refundLoyaltyForOrderDiscount(', 'refundStampRewardForOrderDiscount(', SYNC],
   },
-  'src/services/mobile/loyalty.mobile.service.ts#redeemPointsToOrder': {
+  'src/services/mobile/loyalty.mobile.service.ts#redeemPointsToOrderInTransaction': {
     clase: 'ESCRIBE',
     marcas: [HISTORICO, 'nuevoRepartoDeCuenta(', 'recalculateOrderTotals('],
   },
@@ -277,12 +277,15 @@ const ORIGEN_DE_LA_CABECERA: Record<string, Origen> = {
     origen: 'CERO',
     nota: 'el presupuesto convertido nace con descuento 0',
   },
-  'src/services/mobile/order.mobile.service.ts#splitOrderItems': {
+  'src/services/mobile/order.mobile.service.ts#splitOrderItemsInTransaction': {
     origen: 'CERO',
     nota: 'la cuenta hija nace en 0 y la recalcula recalculateOrderTotals',
   },
-  'src/services/mobile/order.mobile.service.ts#splitOrderBySeat': { origen: 'CERO', nota: 'igual que splitOrderItems, por puesto' },
-  'src/services/mobile/order.mobile.service.ts#mergeOrders': {
+  'src/services/mobile/order.mobile.service.ts#splitOrderBySeatInTransaction': {
+    origen: 'CERO',
+    nota: 'igual que splitOrderItems, por puesto',
+  },
+  'src/services/mobile/order.mobile.service.ts#mergeOrdersInTransaction': {
     origen: 'CERO',
     nota: 'la cuenta origen fusionada queda en 0; el destino lo recalcula recalculateOrderTotals',
   },
@@ -435,12 +438,12 @@ const MUTADORES_DE_RENGLONES: Record<string, Mutador> = {
     marcas: [GUARDA, HISTORICO, RECORTA, 'nuevoRepartoDirigido(', 'importesDeLasFilas(', SYNC],
     nota: 'P5: recorta lo dirigido a lo regalado, crea la cortesía espejo y re-deriva los % sin lo regalado (T4b, R8)',
   },
-  'src/services/mobile/comp-item.mobile.service.ts#compOrderItem': {
+  'src/services/mobile/comp-item.mobile.service.ts#compOrderItemInTransaction': {
     clase: 'SINCRONIZA',
     marcas: [GUARDA, HISTORICO, RECORTA, RECALC],
     nota: 'P5: retira el descuento propio del renglón regalado; el recálculo sincroniza',
   },
-  'src/services/mobile/comp-item.mobile.service.ts#compWholeOrder': {
+  'src/services/mobile/comp-item.mobile.service.ts#compWholeOrderInTransaction': {
     clase: 'SINCRONIZA',
     marcas: [GUARDA, HISTORICO, RECORTA, RECALC],
     nota: 'P5: igual que compOrderItem, para toda la cuenta',
@@ -461,17 +464,17 @@ const MUTADORES_DE_RENGLONES: Record<string, Mutador> = {
     marcas: ['crearEspejosDelVale(', 'importesDeLasFilas(', SYNC],
     nota: 'P5: espejo de los renglones nuevos (crearEspejosDelVale), % de cuenta re-derivados y repartos sincronizados',
   },
-  'src/services/mobile/order.mobile.service.ts#mergeOrders': {
+  'src/services/mobile/order.mobile.service.ts#mergeOrdersInTransaction': {
     clase: 'SINCRONIZA',
     marcas: [GUARDA, RECALC, 'Quita los descuentos'],
     nota: 'la cuenta origen no puede traer descuentos; su IVA pasa al destino (B2b v6) y el destino se recalcula',
   },
-  'src/services/mobile/order.mobile.service.ts#splitOrderItems': {
+  'src/services/mobile/order.mobile.service.ts#splitOrderItemsInTransaction': {
     clase: 'SINCRONIZA',
     marcas: [GUARDA, RECALC, 'Quita los descuentos'],
     nota: 'la guarda exige una cuenta sin descuentos; las dos se recalculan',
   },
-  'src/services/mobile/order.mobile.service.ts#splitOrderBySeat': {
+  'src/services/mobile/order.mobile.service.ts#splitOrderBySeatInTransaction': {
     clase: 'SINCRONIZA',
     marcas: [GUARDA, RECALC, 'Quita los descuentos'],
     nota: 'igual que splitOrderItems, por puesto',

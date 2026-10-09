@@ -127,6 +127,7 @@ describe('checkInReservationAndOpenOrder', () => {
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
     const { withSerializableRetry } = jest.requireMock('@/utils/serializableRetry')
     expect(withSerializableRetry).toHaveBeenCalledTimes(1)
+    expect(withSerializableRetry).toHaveBeenCalledWith(expect.any(Function), { timeoutMs: 15_000, maxWaitMs: 5_000 })
   })
 
   // nuevo — la visita ya la pagó el pase

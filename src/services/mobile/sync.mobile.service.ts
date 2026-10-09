@@ -1,3 +1,4 @@
+import { OrderTableTopologyChanged } from '@/services/shared/tableOrderLock'
 // src/services/mobile/sync.mobile.service.ts
 
 /**
@@ -310,6 +311,14 @@ function invalidPromotionLinesReason(items: any[]): string | null {
 }
 
 async function ackFromExisting(existing: any, intentId: string): Promise<SyncIntentAck> {
+  if (existing.type === 'HTTP_OP_V1') {
+    return {
+      id: intentId,
+      status: 'REJECTED',
+      errorCode: 'HTTP_OPERATION_RESERVED',
+      message: 'Esta operación se recupera por su identidad HTTP',
+    }
+  }
   if (existing.status !== 'PROCESSING') {
     return {
       id: intentId,
@@ -365,6 +374,15 @@ export async function processIntents(params: {
   logger.info(`🔁 [POS SYNC] Replay de ${intents.length} intents | venue=${venueId} device=${deviceId} staff=${staffId}`)
 
   for (const intent of intents) {
+    if (intent.id.startsWith('http:v1:') || String(intent.type) === 'HTTP_OP_V1') {
+      acks.push({
+        id: intent.id,
+        status: 'REJECTED',
+        errorCode: 'HTTP_OPERATION_RESERVED',
+        message: 'Esta operación se recupera por su identidad HTTP',
+      })
+      continue
+    }
     // 1. Dedup: ¿ya lo procesamos? Devolver el ack guardado tal cual.
     const existing = await prisma.posSyncIntent.findUnique({
       where: { venueId_idempotencyKey: { venueId, idempotencyKey: intent.id } },
@@ -385,7 +403,7 @@ export async function processIntents(params: {
     // legacy sin seq siguen soportados.
     if (typeof intent.seq === 'number') {
       const latestForDevice = await prisma.posSyncIntent.findFirst({
-        where: { venueId, deviceId, seq: { not: null } },
+        where: { venueId, deviceId, seq: { not: null }, type: { not: 'HTTP_OP_V1' } },
         orderBy: { seq: 'desc' },
         select: { seq: true },
       })
@@ -429,12 +447,12 @@ export async function processIntents(params: {
         }
         if (typeof intent.seq === 'number') {
           const sequenceWinner = await prisma.posSyncIntent.findFirst({
-            where: { venueId, deviceId, seq: intent.seq },
+            where: { venueId, deviceId, seq: intent.seq, type: { not: 'HTTP_OP_V1' } },
             select: { idempotencyKey: true },
           })
           if (sequenceWinner) {
             const latestForDevice = await prisma.posSyncIntent.findFirst({
-              where: { venueId, deviceId, seq: { not: null } },
+              where: { venueId, deviceId, seq: { not: null }, type: { not: 'HTTP_OP_V1' } },
               orderBy: { seq: 'desc' },
               select: { seq: true },
             })
@@ -581,13 +599,14 @@ async function applyIntent(ctx: {
         return await applyKdsTicketMark(venueId, intent)
     }
   } catch (error: any) {
-    const errorCode = error?.errorCode ?? error?.code ?? 'BUSINESS_RULE'
+    const errorCode =
+      error instanceof OrderTableTopologyChanged ? 'ORDER_TABLE_TOPOLOGY_CHANGED' : (error?.errorCode ?? error?.code ?? 'BUSINESS_RULE')
     // Sólo los errores de dominio (`AppError`) llevan `details` de contrato; el de Prisma no es contrato.
     const details = error instanceof AppError && error.details !== undefined ? { details: error.details } : {}
     // TRANSITORIO (conflicto de versión, etc.) → RETRY: el cliente lo deja
     // PENDING y reintenta; NUNCA se pierde. PERMANENTE (regla de negocio) →
     // REJECTED terminal → cuarentena visible.
-    if (RETRYABLE_ERROR_CODES.has(errorCode)) {
+    if (error instanceof OrderTableTopologyChanged || RETRYABLE_ERROR_CODES.has(errorCode)) {
       logger.info(`🔁 [POS SYNC] Intent ${intent.type} ${intent.id} transitorio (${errorCode}) — reintentar`)
       return { id: intent.id, status: 'RETRY', errorCode, message: error?.message ?? 'Condición transitoria — reintentar', ...details }
     }
@@ -715,7 +734,7 @@ async function resolveOrderId(venueId: string, payload: Record<string, unknown>,
     if (mapped) return mapped
     // Replay en request separado: buscar el OPEN_TABLE ya ackeado.
     const prior = await prisma.posSyncIntent.findFirst({
-      where: { venueId, localRef, status: 'ACKED' },
+      where: { venueId, localRef, status: 'ACKED', type: { not: 'HTTP_OP_V1' } },
       orderBy: { createdAt: 'desc' },
       select: { resultJson: true },
     })
@@ -1417,7 +1436,7 @@ function horaDeLaMarca(intent: SyncIntentInput): Date {
 /** Últimos intents procesados del venue — visibilidad de replays y rechazos. */
 export async function getRecentIntents(venueId: string, limit = 50) {
   return prisma.posSyncIntent.findMany({
-    where: { venueId },
+    where: { venueId, type: { not: 'HTTP_OP_V1' } },
     orderBy: { createdAt: 'desc' },
     take: Math.min(limit, 200),
     select: {

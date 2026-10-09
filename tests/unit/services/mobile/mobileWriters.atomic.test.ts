@@ -9,14 +9,21 @@
 import { Prisma } from '@prisma/client'
 import { prismaMock } from '../../../__helpers__/setup'
 import {
+  updateOrderDetails,
+  updateOrderDetailsInTransaction,
   applyOrderDiscount,
+  applyOrderDiscountInTransaction,
+  removeOrderDiscountInTransaction,
   createOrderWithItems,
   removeOrderDiscount,
   splitOrderBySeat,
   splitOrderItems,
 } from '@/services/mobile/order.mobile.service'
+import { assignOrderWaiterInTransaction } from '@/services/tpv/table.tpv.service'
+import { syncAutomaticServiceChargesInTransaction, syncAutomaticServiceCharges } from '@/services/mobile/service-charge.mobile.service'
 import * as promotionService from '@/services/promotions/promotion.service'
-import { redeemPointsToOrder } from '@/services/mobile/loyalty.mobile.service'
+import { redeemPointsToOrder, redeemPointsToOrderInTransaction } from '@/services/mobile/loyalty.mobile.service'
+import { getOrCreateLoyaltyConfig } from '@/services/dashboard/loyalty.dashboard.service'
 import * as stampService from '@/services/wallet/redeemStampReward.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { notifyCustomerPassUpdated } from '@/services/wallet/notifyPassUpdated.service'
@@ -110,6 +117,7 @@ let tx: any
 let committed: boolean
 const MODELS = [
   'order',
+  'table',
   'orderItem',
   'orderDiscount',
   'orderServiceCharge',
@@ -119,6 +127,7 @@ const MODELS = [
   'discount',
   'customer',
   'loyaltyTransaction',
+  'loyaltyConfig',
   'staffVenue',
   'stampReward',
   'shift',
@@ -173,7 +182,9 @@ const NOT_FOUND_MESSAGE: Record<Writer, string> = {
 }
 
 function model() {
-  return Object.fromEntries(['findUnique', 'findFirst', 'findMany', ...WRITES].map(name => [name, jest.fn()])) as Record<string, jest.Mock>
+  return Object.fromEntries(
+    ['findUnique', 'findUniqueOrThrow', 'findFirst', 'findMany', ...WRITES].map(name => [name, jest.fn()]),
+  ) as Record<string, jest.Mock>
 }
 function txCallOrders(except: jest.Mock[] = []): number[] {
   return MODELS.flatMap(name => Object.values(tx[name] as Record<string, jest.Mock>))
@@ -191,7 +202,16 @@ function paidOrder() {
 beforeEach(() => {
   jest.clearAllMocks()
   committed = false
-  tx = { $queryRaw: jest.fn().mockResolvedValue([{ id: 'order' }]), ...Object.fromEntries(MODELS.map(name => [name, model()])) }
+  tx = {
+    $queryRaw: jest.fn().mockImplementation(async (query: any) => {
+      const sql = Array.isArray(query) ? query.join('?') : query.sql
+      return [{ id: sql.includes('FROM "Table"') ? 't1' : sql.includes('FROM "Venue"') ? 'venue' : 'order' }]
+    }),
+    ...Object.fromEntries(MODELS.map(name => [name, model()])),
+  }
+  // Scope B's two snapshots contain only bounded topology, never economic fields.
+  tx.order.findMany.mockResolvedValue([{ id: 'order', tableId: 't1', status: 'PENDING', paymentStatus: 'PENDING', createdAt: new Date(0) }])
+  tx.table.findMany.mockResolvedValue([{ id: 't1', number: '1', status: 'OCCUPIED', currentOrderId: 'order' }])
   tx.order.findFirst.mockResolvedValue({ ...ORDER })
   tx.order.create.mockResolvedValue({ id: 'child', orderNumber: 'ORD-2', version: 1 })
   tx.order.update.mockImplementation(async ({ data }: any) => ({
@@ -234,8 +254,11 @@ beforeEach(() => {
     maxTotalUses: null,
     currentUses: 0,
   })
+  tx.loyaltyConfig.findUnique.mockResolvedValue(CONFIG)
+  tx.loyaltyConfig.create.mockResolvedValue({ ...CONFIG, active: false })
   tx.customer.findFirst.mockResolvedValue({ id: 'customer', loyaltyPoints: 5000 })
   tx.customer.updateMany.mockResolvedValue({ count: 1 })
+  tx.customer.findUniqueOrThrow.mockResolvedValue({ loyaltyPoints: 4000 })
   tx.loyaltyTransaction.create.mockResolvedValue({ id: 'lt-new' })
   tx.loyaltyTransaction.findUnique.mockResolvedValue({ id: 'lt', customerId: 'customer', points: -1000, orderId: 'order' })
   tx.staffVenue.findUnique.mockResolvedValue({ id: 'sv' })
@@ -252,7 +275,7 @@ beforeEach(() => {
   })
   // Venue configuration is not Order data: it may be read before the lock.
   prismaMock.loyaltyConfig.findUnique.mockResolvedValue(CONFIG)
-  // The response's balance is read after commit.
+  // Deliberately differs from the capped TX balance to detect a global read.
   prismaMock.customer.findUnique.mockResolvedValue({ loyaltyPoints: 4000 })
   // Every Order/child/reward read or write on the GLOBAL client is an escape from the lock.
   for (const [name, ops] of Object.entries({
@@ -278,19 +301,56 @@ beforeEach(() => {
 })
 
 describe('locked mobile writers', () => {
-  it.each(ALL)('%s locks the route venue Order before any tx access and recalculates on that tx with locked paidAmount', async name => {
+  it.each(ALL)('%s locks the route venue Order before domain access and recalculates on that tx with locked paidAmount', async name => {
     await writers[name]()
 
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
     expect(committed).toBe(true)
-    // Tagged template: [strings, ...values]. The split writers insert a child Order (Venue FK), so they take the Venue
-    // KEY SHARE fence FIRST, like deleteVenue's Venue → Order order; then the Order lock on the ROUTE venue, never one
-    // taken from the Order itself; then everything else.
+    // Splits discover bounded topology after Venue KEY SHARE, then lock Order → Table
+    // before any domain read/write. The other six writers keep their exact original contract.
     const raw = tx.$queryRaw.mock.calls
     const fenced = name === 'split' || name === 'splitBySeat'
-    expect(raw.map((call: any[]) => call.slice(1))).toEqual(fenced ? [['venue'], ['order', 'venue']] : [['order', 'venue']])
-    if (fenced) expect(raw[0][0].join('?')).toMatch(/FROM "Venue"\s+WHERE id = \?\s+FOR KEY SHARE/)
-    expect(tx.$queryRaw.mock.invocationCallOrder[raw.length - 1]).toBeLessThan(Math.min(...txCallOrders()))
+    if (fenced) {
+      const statements = raw.map(([query, ...values]: any[]) => ({
+        sql: Array.isArray(query) ? query.join('?') : query.sql,
+        values: Array.isArray(query) ? values : query.values,
+      }))
+      expect(statements).toEqual([
+        { sql: 'SELECT id FROM "Venue" WHERE id=? FOR KEY SHARE', values: ['venue'] },
+        { sql: 'SELECT id FROM "Order" WHERE "venueId"=? AND id=ANY(?::text[]) ORDER BY id FOR UPDATE', values: ['venue', ['order']] },
+        { sql: 'SELECT id FROM "Table" WHERE "venueId"=? AND id IN (?) ORDER BY id FOR NO KEY UPDATE', values: ['venue', 't1'] },
+      ])
+      const [venueLock, orderLock, tableLock] = tx.$queryRaw.mock.invocationCallOrder
+      expect(venueLock).toBeLessThan(Math.min(...txCallOrders()))
+      expect(orderLock).toBeLessThan(tableLock)
+      expect(orderLock).toBeLessThan(Math.min(...txCallOrders([tx.order.findMany, tx.table.findMany])))
+      const orderTopology = { id: true, tableId: true, status: true, paymentStatus: true, createdAt: true }
+      const tableTopology = { id: true, number: true, status: true, currentOrderId: true }
+      expect(tx.order.findMany.mock.calls.map(([args]: any[]) => args)).toEqual(
+        [0, 1].flatMap(() => [
+          { where: { venueId: 'venue', id: { in: ['order'] } }, select: orderTopology, orderBy: { id: 'asc' }, take: 1 },
+          {
+            where: { venueId: 'venue', tableId: { in: ['t1'] }, status: { notIn: ['COMPLETED', 'CANCELLED', 'DELETED'] } },
+            select: orderTopology,
+            orderBy: { id: 'asc' },
+            take: 100,
+          },
+        ]),
+      )
+      expect(tx.table.findMany.mock.calls.map(([args]: any[]) => args)).toEqual(
+        [0, 1].flatMap(() => [
+          { where: { venueId: 'venue', currentOrderId: { in: ['order'] } }, select: tableTopology, orderBy: { id: 'asc' }, take: 1 },
+          { where: { venueId: 'venue', id: { in: ['t1'] } }, select: tableTopology, orderBy: { id: 'asc' }, take: 1 },
+        ]),
+      )
+      for (const delegate of [tx.order.findMany, tx.table.findMany]) {
+        expect(delegate.mock.invocationCallOrder.slice(0, 2).every((call: number) => call < orderLock)).toBe(true)
+        expect(delegate.mock.invocationCallOrder.slice(2).every((call: number) => call > tableLock)).toBe(true)
+      }
+    } else {
+      expect(raw.map((call: any[]) => call.slice(1))).toEqual([['order', 'venue']])
+      expect(tx.$queryRaw.mock.invocationCallOrder[raw.length - 1]).toBeLessThan(Math.min(...txCallOrders()))
+    }
     expect(tx.order.update).toHaveBeenCalledWith(
       expect.objectContaining({
         where: { id: 'order' },
@@ -589,11 +649,12 @@ describe('writer-specific fresh decisions', () => {
 
   it('redeemPoints caps from the locked base and burns with the customer CAS after the Order lock', async () => {
     tx.order.findFirst.mockResolvedValue({ ...ORDER, subtotal: 25, discountAmount: 20 })
+    tx.customer.findUniqueOrThrow.mockResolvedValue({ loyaltyPoints: 4500 })
 
     const result = await redeemPointsToOrder('venue', 'order', 'customer', 1000, 'staff')
 
     // 1000 points × 0.01 = 10, but the locked base is 25 − 20 = 5 → only 500 points burn.
-    expect(result).toMatchObject({ pointsRedeemed: 500, discountAmount: 5, newBalance: 4000 })
+    expect(result).toMatchObject({ pointsRedeemed: 500, discountAmount: 5, newBalance: 4500 })
     expect(tx.customer.updateMany).toHaveBeenCalledWith({
       where: { id: 'customer', loyaltyPoints: { gte: 500 } },
       data: { loyaltyPoints: { decrement: 500 } },
@@ -603,6 +664,8 @@ describe('writer-specific fresh decisions', () => {
       expect.objectContaining({ data: expect.objectContaining({ points: -500, createdById: 'sv' }) }),
     )
     expect(tx.staffVenue.findUnique).toHaveBeenCalled()
+    expect(tx.customer.findUniqueOrThrow).toHaveBeenCalledWith({ where: { id: 'customer' }, select: { loyaltyPoints: true } })
+    expect(prismaMock.customer.findUnique).not.toHaveBeenCalled()
   })
 
   it('redeemPoints losing the customer CAS creates no discount and no totals', async () => {
@@ -956,5 +1019,277 @@ describe('createOrderWithItems writes the sale money inside its creation transac
     expect(committedAtRedeem).toEqual([true])
     expect(result.stampReward).toEqual({ applied: true, discountAmount: 10, rewardLabel: 'Café' })
     redeem.mockRestore()
+  })
+})
+
+describe('Task4 captured transaction results', () => {
+  it('apply helper returns original created row and totals without another transaction/audit or catalog usage write', async () => {
+    const result = await applyOrderDiscountInTransaction(tx, 'venue', 'order', 'disc', 'staff')
+    expect(result.row).toEqual({ id: 'od-new', name: 'Diez', amount: 15 })
+    expect(result.totals).toMatchObject({ subtotal: 150, discountAmount: 0, total: 150, version: 2 })
+    expect(tx.discount.update).not.toHaveBeenCalled()
+    expect(tx.discount.updateMany).not.toHaveBeenCalled()
+    expect(prismaMock.$transaction).not.toHaveBeenCalled()
+    expect(logAction).not.toHaveBeenCalled()
+  })
+  it('remove helper captures original discount plus real refund IDs/customer/stamp label', async () => {
+    const result = await removeOrderDiscountInTransaction(tx, 'venue', 'order', 'od', 'staff')
+    expect(result.row).toMatchObject({ id: 'od', name: 'Recompensas', amount: 10, loyaltyTransactionId: 'lt' })
+    expect(result.refund).toEqual({ pointsRefunded: 1000, customerId: 'customer', transactionId: 'lt-new' })
+    expect(result.stampRefund).toEqual({ rewardId: 'rw-od', customerId: 'customer', rewardLabel: 'Premio' })
+    expect(tx.loyaltyTransaction.create).toHaveBeenCalledTimes(1)
+    expect(prismaMock.$transaction).not.toHaveBeenCalled()
+    expect(logAction).not.toHaveBeenCalled()
+  })
+  it('redeem helper config and balance use caller TX, read AFTER successful CAS, capture original row/REDEEM', async () => {
+    prismaMock.loyaltyConfig.findUnique.mockRejectedValue(new Error('GLOBAL config'))
+    tx.order.findFirst.mockResolvedValue({ ...ORDER, subtotal: 25, discountAmount: 20 })
+    tx.customer.findUniqueOrThrow.mockResolvedValue({ loyaltyPoints: 4500 })
+    tx.orderDiscount.create.mockResolvedValue({
+      id: 'od-new',
+      name: 'Recompensas — 500 puntos',
+      amount: new Prisma.Decimal(5),
+      loyaltyTransactionId: 'lt-new',
+    })
+    const result = await redeemPointsToOrderInTransaction(tx, 'venue', 'order', 'customer', 1000, 'staff')
+    expect(result).toMatchObject({
+      pointsToBurn: 500,
+      discountAmount: 5,
+      newBalance: 4500,
+      transaction: { id: 'lt-new' },
+      row: { id: 'od-new', amount: new Prisma.Decimal(5), loyaltyTransactionId: 'lt-new' },
+    })
+    expect(tx.customer.findUniqueOrThrow.mock.invocationCallOrder[0]).toBeGreaterThan(tx.customer.updateMany.mock.invocationCallOrder[0])
+    expect(tx.loyaltyConfig.findUnique).toHaveBeenCalledWith({ where: { venueId: 'venue' } })
+    expect(tx.loyaltyConfig.create).not.toHaveBeenCalled()
+    expect(prismaMock.loyaltyConfig.findUnique).not.toHaveBeenCalled()
+    expect(prismaMock.customer.findUnique).not.toHaveBeenCalled()
+    expect(prismaMock.$transaction).not.toHaveBeenCalled()
+    expect(logAction).not.toHaveBeenCalled()
+  })
+  it.each([Infinity, NaN, 1.5, 0])('helper rejects invalid points %s before TX access/config', async points => {
+    await expect(redeemPointsToOrderInTransaction(tx, 'venue', 'order', 'customer', points, 'staff')).rejects.toThrow(
+      'points debe ser un entero positivo',
+    )
+    expect(tx.$queryRaw).not.toHaveBeenCalled()
+    expect(tx.loyaltyConfig.findUnique).not.toHaveBeenCalled()
+    expect(tx.customer.updateMany).not.toHaveBeenCalled()
+  })
+  it('injected config lookup creates inactive legacy defaults only through supplied client', async () => {
+    tx.loyaltyConfig.findUnique.mockResolvedValue(null)
+    const result = await getOrCreateLoyaltyConfig('venue', tx)
+    expect(result).toMatchObject({ active: false, pointsPerDollar: 1, redemptionRate: 0.01 })
+    expect(tx.loyaltyConfig.create).toHaveBeenCalledWith({
+      data: {
+        venueId: 'venue',
+        pointsPerDollar: 1,
+        pointsPerVisit: 0,
+        redemptionRate: 0.01,
+        minPointsRedeem: 100,
+        pointsExpireDays: 365,
+        active: false,
+      },
+    })
+    expect(prismaMock.loyaltyConfig.findUnique).not.toHaveBeenCalled()
+    expect(prismaMock.loyaltyConfig.create).not.toHaveBeenCalled()
+  })
+})
+
+describe('Task5 details and assignment transaction capture', () => {
+  beforeEach(() => {
+    tx.order.update.mockResolvedValue({ customerName: null, specialRequests: 'Keep', covers: 2, customerId: null, type: 'DINE_IN' })
+    tx.staffVenue.findFirst.mockResolvedValue({ staff: { id: 'recipient', firstName: 'Original', lastName: 'Waiter' } })
+    tx.serviceCharge = model()
+    tx.serviceCharge.findMany.mockResolvedValue([])
+  })
+  it('metadata without covers opens one transaction and locks before reads; null notes stays omitted', async () => {
+    const result = await updateOrderDetails('venue', 'order', { name: '  ', notes: null })
+    expect(result).toEqual({ name: null, notes: 'Keep', covers: 2, customerId: null, orderType: 'DINE_IN' })
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
+    expect(tx.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(tx.order.findFirst.mock.invocationCallOrder[0])
+    expect(tx.order.update).toHaveBeenCalledWith(expect.objectContaining({ data: { customerName: null } }))
+    expect(tx.serviceCharge.findMany).not.toHaveBeenCalled()
+  })
+  it('details helper stays in caller transaction and returns only captured DTO plus empty charge effects', async () => {
+    const r = await updateOrderDetailsInTransaction(tx, 'venue', 'order', { notes: ' keep ' })
+    expect(r).toEqual({
+      data: { name: null, notes: 'Keep', covers: 2, customerId: null, orderType: 'DINE_IN' },
+      affectedServiceChargeIds: [],
+    })
+    expect(prismaMock.$transaction).not.toHaveBeenCalled()
+    expect(tx.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(tx.order.findFirst.mock.invocationCallOrder[0])
+  })
+  it('assign helper locks fresh Order and returns original recipient facts without transaction/socket Table access', async () => {
+    const r = await assignOrderWaiterInTransaction(tx, 'venue', 'order', 'recipient')
+    expect(r).toEqual({
+      data: { staffName: 'Original Waiter' },
+      order: ORDER,
+      staff: { id: 'recipient', firstName: 'Original', lastName: 'Waiter' },
+    })
+    expect(tx.order.update).toHaveBeenCalledWith({ where: { id: 'order' }, data: { servedById: 'recipient' } })
+    expect(tx.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(tx.order.findFirst.mock.invocationCallOrder[0])
+    expect(prismaMock.$transaction).not.toHaveBeenCalled()
+    expect(prismaMock.table.findUnique).not.toHaveBeenCalled()
+  })
+  it('optional capture respects unchanged flag and manual duplicate without recalculation/effect IDs', async () => {
+    tx.order.findFirst.mockResolvedValue({ ...ORDER, paidAmount: 0, covers: 8 })
+    tx.serviceCharge.findMany.mockResolvedValue([{ id: 'rule', autoApplyMinCovers: 8 }])
+    tx.orderServiceCharge.findMany.mockResolvedValue([{ id: 'manual', serviceChargeId: 'rule', isAutomatic: false }])
+    const capture = { createdIds: [], deletedIds: [], recalculatedIds: [] }
+    expect(await syncAutomaticServiceChargesInTransaction(tx, 'venue', 'order', capture)).toBeNull()
+    expect(capture).toEqual({ createdIds: [], deletedIds: [], recalculatedIds: [] })
+    expect(tx.orderServiceCharge.findMany).toHaveBeenCalledTimes(1)
+    expect(tx.order.update).not.toHaveBeenCalled()
+  })
+  it('legacy automatic helper without capture adds no reads when unchanged', async () => {
+    expect(await syncAutomaticServiceCharges('venue', 'order', tx)).toBeNull()
+    expect(tx.orderServiceCharge.findMany).toHaveBeenCalledTimes(1)
+    expect(tx.orderServiceCharge.findUniqueOrThrow).not.toHaveBeenCalled()
+  })
+})
+
+describe('Task5 optional automatic capture boundary', () => {
+  beforeEach(() => {
+    tx.serviceCharge = model()
+  })
+  it('capture keeps every persisted changed survivor beyond 100 rows and legacy no-sink makes no capture reads', async () => {
+    const manualIds = Array.from({ length: 103 }, (_, index) => `manual-${String(index).padStart(3, '0')}`)
+    const rows: {
+      id: string
+      serviceChargeId: string | null
+      type: string
+      value: Prisma.Decimal
+      amount: Prisma.Decimal
+      isAutomatic: boolean
+    }[] = manualIds.map(id => ({
+      id,
+      serviceChargeId: null,
+      type: 'PERCENTAGE',
+      value: new Prisma.Decimal(1),
+      amount: new Prisma.Decimal(0.1),
+      isAutomatic: false,
+    }))
+    tx.order.findFirst.mockResolvedValue({ ...ORDER, covers: 8 })
+    tx.serviceCharge.findMany.mockResolvedValue([
+      { id: 'rule', name: 'Fixed', type: 'FIXED_AMOUNT', value: new Prisma.Decimal(5), taxable: false, autoApplyMinCovers: 8 },
+    ])
+    tx.orderServiceCharge.createMany.mockImplementation(async () => {
+      rows.push({
+        id: 'actual-created',
+        serviceChargeId: 'rule',
+        type: 'FIXED_AMOUNT',
+        value: new Prisma.Decimal(5),
+        amount: new Prisma.Decimal(5),
+        isAutomatic: true,
+      })
+      return { count: 1 }
+    })
+    tx.orderServiceCharge.findUniqueOrThrow.mockResolvedValue({ id: 'actual-created' })
+    let captureReads = 0
+    tx.orderServiceCharge.findMany.mockImplementation(
+      async (query: { select?: { id: boolean; amount: boolean }; take?: number; cursor?: { id: string }; skip?: number }) => {
+        if (!query.select) return rows.map(row => ({ ...row }))
+        captureReads++
+        const sorted = [...rows].sort((a, b) => a.id.localeCompare(b.id))
+        const start = query.cursor ? sorted.findIndex(row => row.id === query.cursor!.id) + (query.skip ?? 0) : 0
+        return sorted.slice(start, query.take === undefined ? undefined : start + query.take).map(({ id, amount }) => ({ id, amount }))
+      },
+    )
+    tx.orderServiceCharge.update.mockImplementation(async ({ where, data }: { where: { id: string }; data: { amount: number } }) => {
+      const row = rows.find(row => row.id === where.id)!
+      row.amount = new Prisma.Decimal(data.amount)
+      return row
+    })
+    const capture = { createdIds: [], deletedIds: [], recalculatedIds: [] }
+    await syncAutomaticServiceChargesInTransaction(tx, 'venue', 'order', capture)
+    expect(capture.createdIds).toEqual(['actual-created'])
+    expect(capture.deletedIds).toEqual([])
+    expect([...capture.recalculatedIds].sort()).toEqual(manualIds)
+    expect(rows.filter(row => manualIds.includes(row.id)).every(row => row.amount.equals(1.5))).toBe(true)
+    expect(tx.orderServiceCharge.update).toHaveBeenCalledTimes(103)
+    expect(prismaMock.$transaction).not.toHaveBeenCalled()
+    const firstCaptureReads = captureReads
+    rows.splice(
+      rows.findIndex(row => row.id === 'actual-created'),
+      1,
+    )
+    await syncAutomaticServiceChargesInTransaction(tx, 'venue', 'order')
+    expect(captureReads).toBe(firstCaptureReads)
+    expect(tx.orderServiceCharge.findUniqueOrThrow).toHaveBeenCalledTimes(1)
+  })
+  it('capture uses actual generated composite ID and persisted Decimal changes, excludes evaluated equal survivors', async () => {
+    tx.order.findFirst.mockResolvedValue({ ...ORDER, covers: 8 })
+    const rule = {
+      id: 'new-rule',
+      name: 'Fixed',
+      type: 'FIXED_AMOUNT',
+      value: new Prisma.Decimal(5),
+      taxable: false,
+      autoApplyMinCovers: 8,
+    }
+    const manual = {
+      id: 'manual',
+      serviceChargeId: null,
+      type: 'PERCENTAGE',
+      value: new Prisma.Decimal(10),
+      amount: new Prisma.Decimal(1),
+      isAutomatic: false,
+    }
+    const survivor = {
+      id: 'survivor',
+      serviceChargeId: 'old-rule',
+      type: 'PERCENTAGE',
+      value: new Prisma.Decimal(10),
+      amount: new Prisma.Decimal(15),
+      isAutomatic: true,
+    }
+    const created = {
+      id: 'actual-generated',
+      serviceChargeId: 'new-rule',
+      type: 'FIXED_AMOUNT',
+      value: new Prisma.Decimal(5),
+      amount: new Prisma.Decimal(5),
+      isAutomatic: true,
+    }
+    tx.serviceCharge.findMany.mockResolvedValue([rule])
+    tx.orderServiceCharge.createMany.mockResolvedValue({ count: 1 })
+    tx.orderServiceCharge.findUniqueOrThrow.mockResolvedValue({ id: created.id })
+    tx.orderServiceCharge.findMany
+      .mockResolvedValueOnce([manual, survivor])
+      .mockResolvedValueOnce([manual, survivor, created])
+      .mockResolvedValueOnce([manual, survivor, created])
+      .mockResolvedValueOnce([{ ...manual, amount: new Prisma.Decimal(15) }, survivor, created])
+    const capture = { createdIds: [], deletedIds: [], recalculatedIds: [] }
+    await syncAutomaticServiceChargesInTransaction(tx, 'venue', 'order', capture)
+    expect(capture).toEqual({ createdIds: ['actual-generated'], deletedIds: [], recalculatedIds: ['manual'] })
+    expect(tx.orderServiceCharge.createMany).toHaveBeenCalledWith(expect.objectContaining({ skipDuplicates: true }))
+    expect(tx.orderServiceCharge.findUniqueOrThrow).toHaveBeenCalledWith({
+      where: { orderId_serviceChargeId: { orderId: 'order', serviceChargeId: 'new-rule' } },
+      select: { id: true },
+    })
+    expect(tx.orderServiceCharge.update).toHaveBeenCalledTimes(1)
+    expect(tx.orderServiceCharge.update).toHaveBeenCalledWith({ where: { id: 'manual' }, data: { amount: 15 } })
+    expect(prismaMock.$transaction).not.toHaveBeenCalled()
+  })
+  it('capture count-zero skipDuplicates neither invents created ID nor recalculates/readbacks', async () => {
+    tx.order.findFirst.mockResolvedValue({ ...ORDER, covers: 8 })
+    tx.serviceCharge.findMany.mockResolvedValue([{ id: 'rule', autoApplyMinCovers: 8, name: 'Fixed', type: 'FIXED_AMOUNT', value: 10 }])
+    tx.orderServiceCharge.createMany.mockResolvedValue({ count: 0 })
+    const capture = { createdIds: [], deletedIds: [], recalculatedIds: [] }
+    expect(await syncAutomaticServiceChargesInTransaction(tx, 'venue', 'order', capture)).toBeNull()
+    expect(capture).toEqual({ createdIds: [], deletedIds: [], recalculatedIds: [] })
+    expect(tx.orderServiceCharge.findMany).toHaveBeenCalledTimes(1)
+    expect(tx.orderServiceCharge.findUniqueOrThrow).not.toHaveBeenCalled()
+    expect(tx.order.update).not.toHaveBeenCalled()
+  })
+  it('missing Order lock rejects metadata and assign before dependent reads', async () => {
+    tx.$queryRaw.mockResolvedValue([])
+    await expect(updateOrderDetailsInTransaction(tx, 'venue', 'order', { name: 'New' })).rejects.toThrow('Order not found')
+    await expect(assignOrderWaiterInTransaction(tx, 'venue', 'order', 'recipient')).rejects.toThrow(
+      'Order not found or does not belong to this venue',
+    )
+    expect(tx.order.findFirst).not.toHaveBeenCalled()
+    expect(tx.staffVenue.findFirst).not.toHaveBeenCalled()
+    expect(txWrites()).toEqual([])
   })
 })

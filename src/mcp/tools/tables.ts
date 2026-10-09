@@ -8,7 +8,8 @@ import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
 import { TableStatus } from '@prisma/client'
 import AppError from '@/errors/AppError'
-import { moveOrderToTable, assignOrderWaiter } from '@/services/tpv/table.tpv.service'
+import { ORDER_LOCK_WAIT_BUDGET } from '@/services/shared/paymentShiftClaim'
+import { moveOrderToTable, assignOrderWaiter, setTableStatusInTransaction } from '@/services/tpv/table.tpv.service'
 import { compWholeOrder } from '@/services/mobile/comp-item.mobile.service'
 import { updateOrderDetails, splitOrderItems, splitOrderBySeat, mergeOrders } from '@/services/mobile/order.mobile.service'
 // Módulo LIGERO (sólo Prisma): el `.service` arrastra sockets y candados que el MCP no necesita para leer.
@@ -213,17 +214,8 @@ export function registerTableTools(server: McpServer, scope: McpScope) {
       if (!table) return text({ ok: false, error: `No encontré la mesa "${number}" activa en este local.` })
 
       const target = STATUS_MAP[status]
-      // Don't strand an open tab: a table with a live order can't be freed to AVAILABLE here.
-      if (target === TableStatus.AVAILABLE && table.currentOrderId) {
-        return text({ ok: false, error: `La mesa ${number} tiene una cuenta abierta — ciérrala o cóbrala antes de marcarla disponible.` })
-      }
-
       try {
-        const updated = await prisma.table.update({
-          where: { id: table.id },
-          data: { status: target },
-          select: { number: true, status: true },
-        })
+        const updated = await prisma.$transaction(tx => setTableStatusInTransaction(tx, venueId, table.id, target), ORDER_LOCK_WAIT_BUDGET)
         await auditMcpWrite(scope, {
           action: 'TABLE_STATUS_SET',
           entity: 'Table',

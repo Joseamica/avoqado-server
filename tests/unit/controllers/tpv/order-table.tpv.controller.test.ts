@@ -19,11 +19,10 @@ import { BadRequestError, ConflictError } from '@/errors/AppError'
 import * as controller from '@/controllers/tpv/order-table.tpv.controller'
 import * as orderMobileService from '@/services/mobile/order.mobile.service'
 import * as serviceChargeMobileService from '@/services/mobile/service-charge.mobile.service'
-import * as tableTpvService from '@/services/tpv/table.tpv.service'
+import { prismaMock } from '../../../__helpers__/setup'
 
 jest.mock('@/services/mobile/order.mobile.service')
 jest.mock('@/services/mobile/service-charge.mobile.service')
-jest.mock('@/services/tpv/table.tpv.service')
 jest.mock('@/config/logger', () => ({ __esModule: true, default: { info: jest.fn(), warn: jest.fn(), error: jest.fn() } }))
 
 const mockRes = () => {
@@ -35,12 +34,27 @@ const mockRes = () => {
 
 const splitOrderItemsMock = orderMobileService.splitOrderItems as jest.Mock
 const splitOrderBySeatMock = orderMobileService.splitOrderBySeat as jest.Mock
-const mergeOrdersMock = orderMobileService.mergeOrders as jest.Mock
-const cancelOrderMock = orderMobileService.cancelOrder as jest.Mock
+const mergeOrdersMock = orderMobileService.mergeOrdersInTransaction as jest.Mock
+const cancelOrderMock = orderMobileService.cancelOrderInTransaction as jest.Mock
 const applyServiceChargeMock = serviceChargeMobileService.applyServiceCharge as jest.Mock
-const reconcileTableAfterOrderRemovedMock = tableTpvService.reconcileTableAfterOrderRemoved as jest.Mock
+const publishMergedOrdersMock = orderMobileService.publishMergedOrders as jest.Mock
+const publishCancelledOrderMock = orderMobileService.publishCancelledOrder as jest.Mock
 
-beforeEach(() => jest.clearAllMocks())
+beforeEach(() => {
+  jest.clearAllMocks()
+  let committed = false
+  prismaMock.$transaction.mockImplementation(async (callback: any) => {
+    const result = await callback(prismaMock)
+    committed = true
+    return result
+  })
+  publishMergedOrdersMock.mockImplementation(async () => {
+    expect(committed).toBe(true)
+  })
+  publishCancelledOrderMock.mockImplementation(async () => {
+    expect(committed).toBe(true)
+  })
+})
 
 describe('order-table.tpv.controller — splitOrder', () => {
   // NEW FEATURE TESTS
@@ -132,7 +146,7 @@ describe('order-table.tpv.controller — splitOrderBySeat', () => {
 
 describe('order-table.tpv.controller — mergeOrders', () => {
   it('pasa el staffId del authContext, NO el del body', async () => {
-    mergeOrdersMock.mockResolvedValue({ id: 'orden-destino' })
+    mergeOrdersMock.mockResolvedValue({ data: { id: 'orden-destino' }, tpvTableFreed: false })
     const req: any = {
       params: { venueId: 'venue-a', orderId: 'orden-destino' },
       body: { sourceOrderId: 'orden-origen', staffId: 'ATACANTE' },
@@ -141,11 +155,11 @@ describe('order-table.tpv.controller — mergeOrders', () => {
 
     await controller.mergeOrders(req, mockRes())
 
-    expect(mergeOrdersMock).toHaveBeenCalledWith('venue-a', 'orden-destino', 'orden-origen', 'staff-real')
+    expect(mergeOrdersMock).toHaveBeenCalledWith(prismaMock, 'venue-a', 'orden-destino', 'orden-origen', 'staff-real')
   })
 
   it('delega los argumentos en el orden exacto (venueId, targetOrderId, sourceOrderId, staffId)', async () => {
-    mergeOrdersMock.mockResolvedValue({})
+    mergeOrdersMock.mockResolvedValue({ data: {}, tpvTableFreed: false })
     const req: any = {
       params: { venueId: 'venue-a', orderId: 'orden-destino' },
       body: { sourceOrderId: 'orden-origen' },
@@ -154,7 +168,7 @@ describe('order-table.tpv.controller — mergeOrders', () => {
 
     await controller.mergeOrders(req, mockRes())
 
-    expect(mergeOrdersMock.mock.calls[0]).toEqual(['venue-a', 'orden-destino', 'orden-origen', 'staff-real'])
+    expect(mergeOrdersMock.mock.calls[0]).toEqual([prismaMock, 'venue-a', 'orden-destino', 'orden-origen', 'staff-real'])
   })
 
   // 🔴 El guard importante: sourceOrderId ausente se rechaza EN EL CONTROLLER,
@@ -181,14 +195,12 @@ describe('order-table.tpv.controller — mergeOrders', () => {
     expect(mergeOrdersMock).not.toHaveBeenCalled()
   })
 
-  // 🔴 Fix 1 (zombie table): after the shared mergeOrders succeeds, the /tpv
-  // controller reconciles the source table itself — see
-  // table.tpv.service.ts::reconcileTableAfterOrderRemoved and
-  // table.tpv.service.reconcileTableAfterOrderRemoved.test.ts for the
-  // reconciliation logic itself. These tests protect the WIRING between them.
-  it('calls reconcileTableAfterOrderRemoved(venueId, sourceOrderId) AFTER the shared merge succeeds, and its result overrides tableFreed in the response', async () => {
-    mergeOrdersMock.mockResolvedValue({ target: { id: 't' }, merged: { id: 'orden-origen' }, tableFreed: false })
-    reconcileTableAfterOrderRemovedMock.mockResolvedValue({ tableFreed: true })
+  // The single transaction returns the legacy TPV value; only delivery runs after commit.
+  it('uses the captured TPV tableFreed after one transaction and publishes the typed merge result', async () => {
+    mergeOrdersMock.mockResolvedValue({
+      data: { target: { id: 't' }, merged: { id: 'orden-origen' }, tableFreed: false },
+      tpvTableFreed: true,
+    })
     const req: any = {
       params: { venueId: 'venue-a', orderId: 'orden-destino' },
       body: { sourceOrderId: 'orden-origen' },
@@ -198,18 +210,21 @@ describe('order-table.tpv.controller — mergeOrders', () => {
 
     await controller.mergeOrders(req, res)
 
-    expect(reconcileTableAfterOrderRemovedMock).toHaveBeenCalledWith('venue-a', 'orden-origen')
-    // The reconciliation is authoritative: it overrides the shared service's
-    // OWN (possibly stale, currentOrderId-based) tableFreed value.
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
+    expect(publishMergedOrdersMock).toHaveBeenCalledWith('venue-a', await mergeOrdersMock.mock.results[0].value, 'staff-real')
+    // TPV preserves its captured own-table boolean, distinct from the shared DTO.
     expect(res.json).toHaveBeenCalledWith({
       success: true,
       data: { target: { id: 't' }, merged: { id: 'orden-origen' }, tableFreed: true },
     })
   })
 
-  it('never lets a reconciliation failure turn an already-committed merge into a 500 — falls back to the shared service tableFreed', async () => {
-    mergeOrdersMock.mockResolvedValue({ target: { id: 't' }, merged: { id: 'orden-origen' }, tableFreed: false })
-    reconcileTableAfterOrderRemovedMock.mockRejectedValue(new Error('DB blip'))
+  it('never lets a publication failure turn an already-committed merge into a 500 — retains captured tableFreed', async () => {
+    mergeOrdersMock.mockResolvedValue({
+      data: { target: { id: 't' }, merged: { id: 'orden-origen' }, tableFreed: false },
+      tpvTableFreed: false,
+    })
+    publishMergedOrdersMock.mockRejectedValue(new Error('Delivery blip'))
     const req: any = {
       params: { venueId: 'venue-a', orderId: 'orden-destino' },
       body: { sourceOrderId: 'orden-origen' },
@@ -229,8 +244,7 @@ describe('order-table.tpv.controller — mergeOrders', () => {
 
 describe('order-table.tpv.controller — cancelOrder', () => {
   it('pasa el staffId del authContext, NO el del body', async () => {
-    cancelOrderMock.mockResolvedValue(undefined)
-    reconcileTableAfterOrderRemovedMock.mockResolvedValue({ tableFreed: false })
+    cancelOrderMock.mockResolvedValue({ tpvTableFreed: false })
     const req: any = {
       params: { venueId: 'venue-a', orderId: 'orden-1' },
       body: { reason: 'Cliente se fue', staffId: 'ATACANTE' },
@@ -239,12 +253,11 @@ describe('order-table.tpv.controller — cancelOrder', () => {
 
     await controller.cancelOrder(req, mockRes())
 
-    expect(cancelOrderMock).toHaveBeenCalledWith('venue-a', 'orden-1', 'Cliente se fue', 'staff-real')
+    expect(cancelOrderMock).toHaveBeenCalledWith(prismaMock, 'venue-a', 'orden-1', 'Cliente se fue', 'staff-real')
   })
 
   it('delega los argumentos en el orden exacto (venueId, orderId, reason, staffId)', async () => {
-    cancelOrderMock.mockResolvedValue(undefined)
-    reconcileTableAfterOrderRemovedMock.mockResolvedValue({ tableFreed: false })
+    cancelOrderMock.mockResolvedValue({ tpvTableFreed: false })
     const req: any = {
       params: { venueId: 'venue-a', orderId: 'orden-1' },
       body: { reason: 'Cliente se fue' },
@@ -253,17 +266,16 @@ describe('order-table.tpv.controller — cancelOrder', () => {
 
     await controller.cancelOrder(req, mockRes())
 
-    expect(cancelOrderMock.mock.calls[0]).toEqual(['venue-a', 'orden-1', 'Cliente se fue', 'staff-real'])
+    expect(cancelOrderMock.mock.calls[0]).toEqual([prismaMock, 'venue-a', 'orden-1', 'Cliente se fue', 'staff-real'])
   })
 
   it('pasa reason undefined (no un string vacío ni null) cuando el body no trae reason', async () => {
-    cancelOrderMock.mockResolvedValue(undefined)
-    reconcileTableAfterOrderRemovedMock.mockResolvedValue({ tableFreed: false })
+    cancelOrderMock.mockResolvedValue({ tpvTableFreed: false })
     const req: any = { params: { venueId: 'v', orderId: 'o' }, body: {}, authContext: { userId: 's' } }
 
     await controller.cancelOrder(req, mockRes())
 
-    expect(cancelOrderMock).toHaveBeenCalledWith('v', 'o', undefined, 's')
+    expect(cancelOrderMock).toHaveBeenCalledWith(prismaMock, 'v', 'o', undefined, 's')
   })
 
   it('responde 400 en español cuando el servicio rechaza (p.ej. cuenta ya pagada)', async () => {
@@ -275,17 +287,14 @@ describe('order-table.tpv.controller — cancelOrder', () => {
 
     expect(res.status).toHaveBeenCalledWith(400)
     expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ success: false, message: 'Cannot cancel a paid order' }))
-    // A committed-nowhere rejection never reaches the reconciliation step.
-    expect(reconcileTableAfterOrderRemovedMock).not.toHaveBeenCalled()
+    // A rejected transaction never publishes a successful cancellation.
+    expect(publishCancelledOrderMock).not.toHaveBeenCalled()
   })
 
-  // 🔴 Fix 1 (zombie table), mirrored from mergeOrders: after the shared
-  // cancelOrder succeeds, this controller reconciles the order's OWN table
-  // — see table.tpv.service.ts::reconcileTableAfterOrderRemoved and its
-  // dedicated test. These tests protect the WIRING between them.
-  it('calls reconcileTableAfterOrderRemoved(venueId, orderId) AFTER the shared cancel succeeds, and its result becomes tableFreed', async () => {
-    cancelOrderMock.mockResolvedValue(undefined)
-    reconcileTableAfterOrderRemovedMock.mockResolvedValue({ tableFreed: true })
+  // Cancellation publishes the captured result after its one transaction commits.
+  it('uses the captured TPV tableFreed after one transaction and publishes the typed cancellation result', async () => {
+    cancelOrderMock.mockResolvedValue({ tpvTableFreed: false })
+    cancelOrderMock.mockResolvedValue({ tpvTableFreed: true })
     const req: any = {
       params: { venueId: 'venue-a', orderId: 'orden-1' },
       body: { reason: 'Cliente se fue' },
@@ -295,14 +304,15 @@ describe('order-table.tpv.controller — cancelOrder', () => {
 
     await controller.cancelOrder(req, res)
 
-    expect(reconcileTableAfterOrderRemovedMock).toHaveBeenCalledWith('venue-a', 'orden-1')
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
+    expect(publishCancelledOrderMock).toHaveBeenCalledWith('venue-a', { tpvTableFreed: true }, 'staff-real', 'Cliente se fue')
     expect(res.status).toHaveBeenCalledWith(200)
     expect(res.json).toHaveBeenCalledWith({ success: true, data: { tableFreed: true } })
   })
 
-  it('never lets a reconciliation failure turn an already-committed cancel into a 500 — falls back to tableFreed: false', async () => {
-    cancelOrderMock.mockResolvedValue(undefined)
-    reconcileTableAfterOrderRemovedMock.mockRejectedValue(new Error('DB blip'))
+  it('never lets a publication failure turn an already-committed cancel into a 500 — retains captured tableFreed', async () => {
+    cancelOrderMock.mockResolvedValue({ tpvTableFreed: false })
+    publishCancelledOrderMock.mockRejectedValue(new Error('Delivery blip'))
     const req: any = {
       params: { venueId: 'venue-a', orderId: 'orden-1' },
       body: {},

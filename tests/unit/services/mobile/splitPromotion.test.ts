@@ -22,7 +22,19 @@ beforeEach(() => {
   jest.clearAllMocks()
   prismaMock.$transaction = jest.fn((cb: any) => cb(prismaMock))
   // Candado canónico de la orden (Plan3b): la orden existe en este venue.
-  prismaMock.$queryRaw.mockResolvedValue([{ id: 'order-1' }])
+  prismaMock.order.findMany.mockResolvedValue([
+    { id: 'order-1', tableId: 't1', status: 'CONFIRMED', paymentStatus: 'PENDING', createdAt: new Date(0) },
+  ])
+  prismaMock.table.findMany.mockImplementation(async (args: { where: { currentOrderId?: unknown } }) =>
+    args.where.currentOrderId ? [] : [{ id: 't1', number: '1', status: 'OCCUPIED', currentOrderId: 'order-1' }],
+  )
+  prismaMock.$queryRaw.mockImplementation(async (query: { sql?: string } | string[], ...values: unknown[]) => {
+    const sql = Array.isArray(query) ? query.join('?') : (query.sql ?? '')
+    if (sql.includes('FROM "Venue"') && sql.includes('FOR KEY SHARE')) return [{ id: 'venue-1' }]
+    if (sql.includes('FROM "Order"') && sql.includes('FOR UPDATE') && Array.isArray(values[1])) return values[1].map(id => ({ id }))
+    if (sql.includes('FROM "Table"') && sql.includes('FOR NO KEY UPDATE')) return [{ id: 't1' }]
+    throw new Error(`Unexpected raw statement: ${sql}`)
+  })
   prismaMock.order.create.mockResolvedValue({ id: 'order-2', orderNumber: 'ORD-2', version: 1 })
   prismaMock.orderItem.updateMany.mockResolvedValue({ count: 1 })
   prismaMock.orderPromotion.updateMany.mockResolvedValue({ count: 1 })
@@ -67,4 +79,15 @@ describe('splitOrderItems — una promoción se mueve completa o no se mueve', (
 
     expect(prismaMock.orderPromotion.updateMany).not.toHaveBeenCalled()
   })
+})
+
+// The public wrapper deliberately keeps legacy filtering when no HTTP token is used.
+it('legacy mixed IDs still move only its valid selection', async () => {
+  prismaMock.order.findFirst.mockResolvedValue(fuente([{ id: 'i1' }, { id: 'i2' }, { id: 'i3' }]))
+  const result = await splitOrderItems('venue-1', 'order-1', ['i1', 'foreign'])
+  expect(prismaMock.orderItem.updateMany).toHaveBeenCalledWith({
+    where: { id: { in: ['i1'] }, orderId: 'order-1' },
+    data: { orderId: 'order-2' },
+  })
+  expect(Object.keys(result).sort()).toEqual(['created', 'source'])
 })

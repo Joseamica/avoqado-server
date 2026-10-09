@@ -19,7 +19,7 @@
 
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import prisma from '@/utils/prismaClient'
-import { StampRewardType, LoyaltyTransactionType } from '@prisma/client'
+import { StampRewardType, LoyaltyTransactionType, Prisma } from '@prisma/client'
 import logger from '@/config/logger'
 import { logAction } from './activity-log.service'
 import { grantStamp } from '../wallet/stampLedger.service'
@@ -29,14 +29,14 @@ import { venueHasFeatureAccess } from '../access/basePlan.service'
  * Get or create loyalty configuration for a venue
  * Creates default config if none exists
  */
-export async function getOrCreateLoyaltyConfig(venueId: string) {
-  let config = await prisma.loyaltyConfig.findUnique({
+export async function getOrCreateLoyaltyConfig(venueId: string, db: Pick<Prisma.TransactionClient, 'loyaltyConfig'> = prisma) {
+  let config = await db.loyaltyConfig.findUnique({
     where: { venueId },
   })
 
   // Create default config if none exists
   if (!config) {
-    config = await prisma.loyaltyConfig.create({
+    config = await db.loyaltyConfig.create({
       data: {
         venueId,
         pointsPerDollar: 1, // 1 point per $1 spent

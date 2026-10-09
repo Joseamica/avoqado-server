@@ -14,6 +14,9 @@ import { Request, Response } from 'express'
 import * as tableService from '../../services/tpv/table.tpv.service'
 import { isTableOwnershipEnforced, staffCanManageAllTables } from '../../middlewares/checkTableOwnership.middleware'
 import logger from '../../config/logger'
+import { BadRequestError, UnauthorizedError } from '@/errors/AppError'
+import { parseHttpOperation, manifestSchema, executeHttpOperation } from '@/services/mobile/http-operation.mobile.service'
+import { sendHttpOperationReply } from './http-operation.mobile.controller'
 
 /**
  * GET /mobile/venues/:venueId/tables
@@ -110,9 +113,30 @@ export async function clearTable(req: Request, res: Response): Promise<void> {
   try {
     const { venueId, tableId } = req.params
 
-    await tableService.clearTable(venueId, tableId)
-
-    res.status(200).json({ success: true, message: 'Mesa liberada' })
+    const operation = parseHttpOperation(req.body)
+    if (!operation) {
+      await tableService.clearTable(venueId, tableId)
+      res.status(200).json({ success: true, message: 'Mesa liberada' })
+      return
+    }
+    const staffId = (req as any).authContext?.userId as string | undefined
+    if (!staffId) throw new UnauthorizedError('Autenticación requerida')
+    const parsed = manifestSchema.safeParse({ action: 'clearTable', refs: { tableId }, payload: {} })
+    if (!parsed.success || parsed.data.action !== 'clearTable')
+      throw new BadRequestError('Datos de operación inválidos', 'HTTP_OPERATION_INVALID')
+    let result: Awaited<ReturnType<typeof tableService.clearTableInTransaction>> | undefined
+    const reply = await executeHttpOperation({ venueId, actorId: staffId, operation, manifest: parsed.data }, async tx => {
+      result = await tableService.clearTableInTransaction(tx, venueId, tableId)
+      return { response: { status: 200, body: { success: true, message: 'Mesa liberada' } }, affectedRefs: result.affectedRefs }
+    })
+    if (reply.kind === 'TERMINAL' && reply.envelope.outcome === 'APPLIED' && reply.appliedNow && result) {
+      try {
+        await tableService.publishClearedTable(venueId, result, staffId)
+      } catch (error) {
+        logger.error('clearTable committed; notification failed', error)
+      }
+    }
+    sendHttpOperationReply(res, operation, reply)
   } catch (error: any) {
     logger.error(`[TABLE MOBILE CONTROLLER] Error clearing table: ${error.message}`)
     res.status(error.statusCode || 500).json({
@@ -138,9 +162,31 @@ export async function moveOrder(req: Request, res: Response): Promise<void> {
     }
 
     logger.info(`[TABLE MOBILE CONTROLLER] POST /mobile/venues/${venueId}/orders/${orderId}/move -> ${targetTableId}`)
-    await tableService.moveOrderToTable(venueId, orderId, targetTableId)
-
-    res.status(200).json({ success: true })
+    const operation = parseHttpOperation(req.body)
+    if (!operation) {
+      await tableService.moveOrderToTable(venueId, orderId, targetTableId)
+      res.status(200).json({ success: true })
+      return
+    }
+    const staffId = (req as any).authContext?.userId as string | undefined
+    if (!staffId) throw new UnauthorizedError('Autenticación requerida')
+    const parsed = manifestSchema.safeParse({ action: 'moveOrder', refs: { orderId, targetTableId }, payload: {} })
+    if (!parsed.success || parsed.data.action !== 'moveOrder')
+      throw new BadRequestError('Datos de operación inválidos', 'HTTP_OPERATION_INVALID')
+    const manifest = parsed.data
+    let result: Awaited<ReturnType<typeof tableService.moveOrderToTableInTransaction>> | undefined
+    const reply = await executeHttpOperation({ venueId, actorId: staffId, operation, manifest }, async tx => {
+      result = await tableService.moveOrderToTableInTransaction(tx, venueId, orderId, manifest.refs.targetTableId)
+      return { response: { status: 200, body: { success: true } }, affectedRefs: result.affectedRefs }
+    })
+    if (reply.kind === 'TERMINAL' && reply.envelope.outcome === 'APPLIED' && reply.appliedNow && result) {
+      try {
+        await tableService.publishMovedOrder(venueId, result, staffId)
+      } catch (error) {
+        logger.error('moveOrder committed; notification failed', error)
+      }
+    }
+    sendHttpOperationReply(res, operation, reply)
   } catch (error: any) {
     logger.error(`[TABLE MOBILE CONTROLLER] Error moving order: ${error.message}`)
     res.status(error.statusCode || 500).json({
@@ -166,9 +212,33 @@ export async function assignOrder(req: Request, res: Response): Promise<void> {
     }
 
     logger.info(`[TABLE MOBILE CONTROLLER] POST /mobile/venues/${venueId}/orders/${orderId}/assign -> ${staffId}`)
-    const result = await tableService.assignOrderWaiter(venueId, orderId, staffId)
-
-    res.status(200).json({ success: true, data: result })
+    const operation = parseHttpOperation(req.body)
+    if (!operation) {
+      const result = await tableService.assignOrderWaiter(venueId, orderId, staffId)
+      res.status(200).json({ success: true, data: result })
+      return
+    }
+    const actorId = (req as any).authContext?.userId as string | undefined
+    if (!actorId) throw new UnauthorizedError('Autenticación requerida')
+    const parsed = manifestSchema.safeParse({ action: 'assignOrder', refs: { orderId, staffId }, payload: {} })
+    if (!parsed.success || parsed.data.action !== 'assignOrder')
+      throw new BadRequestError('Datos de operación inválidos', 'HTTP_OPERATION_INVALID')
+    const manifest = parsed.data
+    let assignment: Awaited<ReturnType<typeof tableService.assignOrderWaiterInTransaction>> | undefined
+    const reply = await executeHttpOperation({ venueId, actorId, operation, manifest }, async tx => {
+      assignment = await tableService.assignOrderWaiterInTransaction(tx, venueId, orderId, manifest.refs.staffId)
+      return {
+        response: { status: 200, body: { success: true, data: assignment.data } },
+        affectedRefs: [
+          { kind: 'Order', id: orderId },
+          { kind: 'Staff', id: manifest.refs.staffId },
+        ],
+      }
+    })
+    if (reply.kind === 'TERMINAL' && reply.envelope.outcome === 'APPLIED' && reply.appliedNow && assignment) {
+      await tableService.publishOrderWaiterAssignment(venueId, assignment)
+    }
+    sendHttpOperationReply(res, operation, reply)
   } catch (error: any) {
     logger.error(`[TABLE MOBILE CONTROLLER] Error assigning order: ${error.message}`)
     res.status(error.statusCode || 500).json({

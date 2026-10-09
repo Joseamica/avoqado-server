@@ -91,8 +91,12 @@ function db() {
     serializedItem: { findFirst: jest.fn(async () => null), findUnique: jest.fn(async () => null), create: jest.fn() },
     venue: { findUnique: jest.fn(async () => ({ organizationId: 'org' })) },
     // KDS etapa 3: anular TODOS los renglones retira de la pantalla de cocina las comandas de la cuenta.
-    kdsOrderItem: { deleteMany: jest.fn(async () => ({ count: 0 })) },
-    kdsOrder: { deleteMany: jest.fn(async () => ({ count: 0 })) },
+    kdsOrderItem: { findMany: jest.fn(async () => []), deleteMany: jest.fn(async () => ({ count: 0 })) },
+    kdsOrder: {
+      findMany: jest.fn(async () => []),
+      deleteMany: jest.fn(async () => ({ count: 0 })),
+      updateMany: jest.fn(async () => ({ count: 0 })),
+    },
   }
 }
 const serial = { id: 'serial', venueId: 'venue', serialNumber: 'SERIAL', status: 'AVAILABLE', category: { name: 'SIM' } }
@@ -146,7 +150,7 @@ describe('new atomic writers', () => {
     expect(globalDb.order.findUnique).not.toHaveBeenCalled()
     expect(globalDb.order.update).not.toHaveBeenCalled()
     expect(globalDb.order.updateMany).not.toHaveBeenCalled()
-    for (const model of ['orderItem', 'orderDiscount', 'orderServiceCharge'])
+    for (const model of ['orderItem', 'orderDiscount', 'orderServiceCharge', 'kdsOrder', 'kdsOrderItem'])
       for (const method of Object.keys(globalDb[model])) expect(globalDb[model][method]).not.toHaveBeenCalled()
   })
   it('register participates in its caller transaction and retains standalone compatibility', async () => {

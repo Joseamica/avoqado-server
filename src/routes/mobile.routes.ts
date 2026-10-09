@@ -64,6 +64,8 @@ import { switchUserSchema } from '../schemas/mobile/switchUser.mobile.schema'
 import { handoffSchema, confirmExternalSettlementSchema, notChargedSchema } from '../schemas/mobile/areaTicketExternal.schema'
 import { areaTicketResolveRateLimiter } from '../middlewares/area-ticket-rate-limit.middleware'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
+import { httpOperationGuard } from '../middlewares/httpOperation.middleware'
+import * as httpOperationMobileController from '../controllers/mobile/http-operation.mobile.controller'
 import { checkFeatureAccess } from '../middlewares/checkFeatureAccess.middleware'
 import { checkPermission } from '../middlewares/checkPermission.middleware'
 import { marcarPermiso, PERMISO_VER_ESPERADO } from '../middlewares/permissionFlag.middleware'
@@ -73,7 +75,12 @@ import { pinLoginRateLimiter, pinOverrideRateLimiter, pinSwitchUserRateLimiter }
 import { capturarVenueDeLaRuta, registerDeviceMiddleware } from '../middlewares/registerDevice.middleware'
 import { validateRequest } from '../middlewares/validation'
 import { recordFastPaymentParamsSchema, recordPaymentBodySchema } from '../schemas/tpv.schema'
-import { gatewayHeartbeatSchema, impresoraObservadaSchema, printConfigParamSchema, syncPrintJobsSchema } from '../schemas/mobile/print.mobile.schema'
+import {
+  gatewayHeartbeatSchema,
+  impresoraObservadaSchema,
+  printConfigParamSchema,
+  syncPrintJobsSchema,
+} from '../schemas/mobile/print.mobile.schema'
 import { setKitchenDisplaySchema } from '../schemas/dashboard/printStation.schema'
 import * as announcementReadController from '../controllers/shared/announcement.read.controller'
 
@@ -931,6 +938,7 @@ router.post(
 router.delete(
   '/venues/:venueId/orders/:orderId',
   authenticateTokenMiddleware,
+  httpOperationGuard(true),
   checkPermission('orders:cancel-unpaid'),
   checkTableOwnership('order'),
   orderMobileController.cancelOrder,
@@ -2142,6 +2150,7 @@ router.post(
 router.post(
   '/venues/:venueId/tables/:tableId/clear',
   authenticateTokenMiddleware,
+  httpOperationGuard(true),
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('tables:update'),
   checkTableOwnership('table'),
@@ -2159,6 +2168,7 @@ router.post(
 router.post(
   '/venues/:venueId/orders/:orderId/move',
   authenticateTokenMiddleware,
+  httpOperationGuard(true),
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('tables:update'),
   checkTableOwnership('order'),
@@ -2173,6 +2183,7 @@ router.post(
 router.post(
   '/venues/:venueId/orders/:orderId/assign',
   authenticateTokenMiddleware,
+  httpOperationGuard(true),
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:update'),
   checkTableOwnership('order'),
@@ -2530,6 +2541,7 @@ router.get(
 router.post(
   '/venues/:venueId/orders/:orderId/split',
   authenticateTokenMiddleware,
+  httpOperationGuard(true),
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:update'),
   checkTableOwnership('order'),
@@ -2545,6 +2557,7 @@ router.post(
 router.post(
   '/venues/:venueId/orders/:orderId/merge',
   authenticateTokenMiddleware,
+  httpOperationGuard(true),
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:merge'),
   checkTableOwnership('order'),
@@ -2558,6 +2571,7 @@ router.post(
 router.post(
   '/venues/:venueId/orders/:orderId/split-by-seat',
   authenticateTokenMiddleware,
+  httpOperationGuard(true),
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:update'),
   checkTableOwnership('order'),
@@ -2567,6 +2581,7 @@ router.post(
 router.post(
   '/venues/:venueId/orders/:orderId/discounts',
   authenticateTokenMiddleware,
+  httpOperationGuard(true),
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:update'),
   checkTableOwnership('order'),
@@ -2580,6 +2595,7 @@ router.post(
 router.delete(
   '/venues/:venueId/orders/:orderId/discounts/:orderDiscountId',
   authenticateTokenMiddleware,
+  httpOperationGuard(true),
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:update'),
   checkTableOwnership('order'),
@@ -2596,6 +2612,7 @@ router.delete(
 router.post(
   '/venues/:venueId/orders/:orderId/comp',
   authenticateTokenMiddleware,
+  httpOperationGuard(true),
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:update'),
   checkTableOwnership('order'),
@@ -2629,6 +2646,7 @@ router.get(
 router.post(
   '/venues/:venueId/orders/:orderId/service-charges',
   authenticateTokenMiddleware,
+  httpOperationGuard(true),
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:update'),
   checkTableOwnership('order'),
@@ -2641,6 +2659,7 @@ router.post(
 router.delete(
   '/venues/:venueId/orders/:orderId/service-charges/:orderServiceChargeId',
   authenticateTokenMiddleware,
+  httpOperationGuard(true),
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:update'),
   checkTableOwnership('order'),
@@ -2666,8 +2685,16 @@ router.get(
  * transaction (see loyalty.mobile.service — the dashboard path never did).
  */
 router.post(
+  '/venues/:venueId/order-operations/:operationId/resolve',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  httpOperationMobileController.resolveOperation,
+)
+
+router.post(
   '/venues/:venueId/orders/:orderId/loyalty/redeem',
   authenticateTokenMiddleware,
+  httpOperationGuard(true),
   checkFeatureAccess('LOYALTY_PROGRAM'),
   checkPermission('orders:update'),
   checkTableOwnership('order'),
@@ -2681,6 +2708,7 @@ router.post(
 router.post(
   '/venues/:venueId/orders/:orderId/details',
   authenticateTokenMiddleware,
+  httpOperationGuard(true),
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:update'),
   checkTableOwnership('order'),
@@ -2692,6 +2720,7 @@ router.post(
 router.post(
   '/venues/:venueId/orders/:orderId/items/:itemId/comp',
   authenticateTokenMiddleware,
+  httpOperationGuard(true),
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:update'),
   checkTableOwnership('order'),

@@ -1,3 +1,4 @@
+import { lockTableOrderScope } from '@/services/shared/tableOrderLock'
 import prisma from '../../utils/prismaClient'
 import { AreaTicketInventoryReservationStatus, Order, Prisma } from '@prisma/client'
 import { NotFoundError, BadRequestError, ConflictError, ValidationError } from '../../errors/AppError'
@@ -24,7 +25,7 @@ import {
 import { computeStoredOrderTotal, impuestoQueSeCobraAparte } from '../shared/orderBalance'
 import { assertNoLiveTerminalCharge } from '../shared/orderCancelGuard'
 import { rechazarSiEsImportada } from '../shared/ordenImportada'
-import { lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
+import { lockExistingOrderForPayment, ORDER_LOCK_WAIT_BUDGET } from '../shared/paymentShiftClaim'
 import { comoJson, importesDeLasFilas, nuevoRepartoDeCuenta, nuevoRepartoDirigido } from '../shared/repartoDescuento'
 import {
   conservarDescuentoHistorico,
@@ -435,57 +436,65 @@ export async function createOrder(venueId: string, input: CreateOrderInput): Pro
   // (`../shared/turnoDeCaja.ts`): `getActiveShifts` cuenta las órdenes del turno agrupando por
   // `Order.shiftId`, y sin esto un turno enseña el dinero correcto y «0 órdenes».
   // Opcional a propósito — un negocio que no abrió caja sigue vendiendo.
-  const currentShift = await turnoAbiertoDelNegocio(prisma, venueId)
+  const create = async (tx: Prisma.TransactionClient) => {
+    const currentShift = await turnoAbiertoDelNegocio(tx, venueId)
 
-  // Create order
-  const order = await prisma.order.create({
-    data: {
-      venueId,
-      shiftId: currentShift?.id ?? null,
-      tableId: input.tableId || null,
-      covers: input.covers || 1,
-      orderNumber,
-      servedById: input.waiterId || null,
-      createdById: input.waiterId || null,
-      terminalId: resolvedTerminalId, // Track which terminal created this order
-      status: 'PENDING',
-      paymentStatus: 'PENDING',
-      kitchenStatus: 'PENDING',
-      type: input.orderType || 'DINE_IN',
-      source: input.source || 'TPV', // KIOSK orders are excluded from pay-later/open orders lists
-      externalId: input.externalId || null,
-      subtotal: 0,
-      discountAmount: 0,
-      taxAmount: 0,
-      total: 0,
-      contratoDePrecio: 'IVA_INCLUIDO', // nace vacía; todo renglón que entra después trae IVA incluido (plan 2)
-      version: 1,
-    },
-    include: {
-      items: true,
-      payments: true,
-      table: {
-        select: {
-          id: true,
-          number: true,
+    // Create order
+    return tx.order.create({
+      data: {
+        venueId,
+        shiftId: currentShift?.id ?? null,
+        tableId: input.tableId || null,
+        covers: input.covers || 1,
+        orderNumber,
+        servedById: input.waiterId || null,
+        createdById: input.waiterId || null,
+        terminalId: resolvedTerminalId, // Track which terminal created this order
+        status: 'PENDING',
+        paymentStatus: 'PENDING',
+        kitchenStatus: 'PENDING',
+        type: input.orderType || 'DINE_IN',
+        source: input.source || 'TPV', // KIOSK orders are excluded from pay-later/open orders lists
+        externalId: input.externalId || null,
+        subtotal: 0,
+        discountAmount: 0,
+        taxAmount: 0,
+        total: 0,
+        contratoDePrecio: 'IVA_INCLUIDO', // nace vacía; todo renglón que entra después trae IVA incluido (plan 2)
+        version: 1,
+      },
+      include: {
+        items: true,
+        payments: true,
+        table: {
+          select: {
+            id: true,
+            number: true,
+          },
+        },
+        createdBy: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+          },
+        },
+        servedBy: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+          },
         },
       },
-      createdBy: {
-        select: {
-          id: true,
-          firstName: true,
-          lastName: true,
-        },
-      },
-      servedBy: {
-        select: {
-          id: true,
-          firstName: true,
-          lastName: true,
-        },
-      },
-    },
-  })
+    })
+  }
+  const order = input.tableId
+    ? await prisma.$transaction(async tx => {
+        await lockTableOrderScope(tx, { venueId, orderIds: [], tableIds: [input.tableId!] })
+        return create(tx)
+      }, ORDER_LOCK_WAIT_BUDGET)
+    : await create(prisma)
 
   logger.info(`✅ [ORDER SERVICE] Order created | id=${order.id} | number=${order.orderNumber} | type=${order.type}`)
 
@@ -1150,6 +1159,7 @@ export async function createOrderWithItems(
 
   async function runCreateOrderTransaction() {
     return prisma.$transaction(async tx => {
+      if (input.tableId) await lockTableOrderScope(tx, { venueId, orderIds: [], tableIds: [input.tableId] })
       // El turno de caja es del NEGOCIO, no de quien abre la orden (`../shared/turnoDeCaja.ts`).
       const currentShift = await turnoAbiertoDelNegocio(tx, venueId)
 
@@ -1393,7 +1403,7 @@ export async function createOrderWithItems(
       }
 
       return order
-    })
+    }, ORDER_LOCK_WAIT_BUDGET)
   }
 
   const fullOrder = await fetchOrderForTpvResponse(createdOrder.id)

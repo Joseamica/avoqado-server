@@ -94,6 +94,104 @@ describe('sync.mobile.service processIntents', () => {
     ;(tableOwnership.staffCanManageAllTables as jest.Mock).mockResolvedValue(false)
   })
 
+  describe('Gate A — HTTP operations stay outside legacy replay', () => {
+    const httpRows = [
+      { status: 'PROCESSING', ageMs: 0 },
+      { status: 'PROCESSING', ageMs: 6 * 60 * 1000 },
+      { status: 'RETRY', ageMs: 6 * 60 * 1000 },
+      { status: 'ACKED', ageMs: 6 * 60 * 1000 },
+      { status: 'REJECTED', ageMs: 6 * 60 * 1000 },
+    ]
+
+    it.each([
+      { id: 'http:v1:00000000-0000-4000-8000-000000000001', type: 'CLEAR_TABLE', payload: { tableId: 'table-1' } },
+      { id: 'legacy-http-type', type: 'HTTP_OP_V1', payload: {} },
+    ])('reservedBeforeLookup: $id / $type', async intent => {
+      const params = baseParams([{ ...intent, seq: 3 }])
+
+      const acks = await processIntents(params)
+
+      expect(acks).toHaveLength(1)
+      expect(acks[0]).toMatchObject({ id: intent.id, status: 'REJECTED', errorCode: 'HTTP_OPERATION_RESERVED' })
+      expect(acks[0].result).toBeUndefined()
+      expect(prisma.posSyncIntent.findUnique).not.toHaveBeenCalled()
+      expect(prisma.posSyncIntent.findFirst).not.toHaveBeenCalled()
+      expect(prisma.posSyncIntent.create).not.toHaveBeenCalled()
+      expect(prisma.posSyncIntent.update).not.toHaveBeenCalled()
+      expect(prisma.posSyncIntent.delete).not.toHaveBeenCalled()
+      expect(params.authorizeIntent).not.toHaveBeenCalled()
+      expect(featureAccess.hasFeatureAccess).not.toHaveBeenCalled()
+      expect(tableService.clearTable).not.toHaveBeenCalled()
+    })
+
+    it.each(httpRows)(
+      'HTTP row with malformed legacy key and $status status, age=$ageMs ms never becomes a legacy ack or mutation',
+      async ({ status, ageMs }) => {
+        ;(prisma.posSyncIntent.findUnique as jest.Mock).mockResolvedValueOnce({
+          venueId: VENUE,
+          deviceId: DEVICE,
+          staffId: STAFF,
+          type: 'HTTP_OP_V1',
+          idempotencyKey: 'malformed-http-key',
+          status,
+          createdAt: new Date(Date.now() - ageMs),
+          localRef: 'http-local-must-not-be-aliased',
+          errorCode: 'HTTP_RESULT_MUST_NOT_ESCAPE',
+          resultJson: { orderId: 'http-order-must-not-be-aliased' },
+        })
+        const params = baseParams([{ id: 'malformed-http-key', type: 'CLEAR_TABLE', payload: { tableId: 'table-1' } }])
+
+        const acks = await processIntents(params)
+
+        expect(acks).toHaveLength(1)
+        expect(acks[0]).toMatchObject({ id: 'malformed-http-key', status: 'REJECTED', errorCode: 'HTTP_OPERATION_RESERVED' })
+        expect(acks[0].result).toBeUndefined()
+        expect(prisma.posSyncIntent.findUnique).toHaveBeenCalledTimes(1)
+        expect(prisma.posSyncIntent.findFirst).not.toHaveBeenCalled()
+        expect(prisma.posSyncIntent.create).not.toHaveBeenCalled()
+        expect(prisma.posSyncIntent.update).not.toHaveBeenCalled()
+        expect(prisma.posSyncIntent.delete).not.toHaveBeenCalled()
+        expect(params.authorizeIntent).not.toHaveBeenCalled()
+        expect(featureAccess.hasFeatureAccess).not.toHaveBeenCalled()
+        expect(tableService.clearTable).not.toHaveBeenCalled()
+      },
+    )
+
+    it.each(httpRows)(
+      'P2002 winner lookup with an HTTP row and $status status, age=$ageMs ms never becomes a legacy ack or mutation',
+      async ({ status, ageMs }) => {
+        ;(prisma.posSyncIntent.create as jest.Mock).mockRejectedValueOnce({ code: 'P2002' })
+        ;(prisma.posSyncIntent.findUnique as jest.Mock).mockResolvedValueOnce(null).mockResolvedValueOnce({
+          venueId: VENUE,
+          deviceId: DEVICE,
+          staffId: STAFF,
+          type: 'HTTP_OP_V1',
+          idempotencyKey: 'malformed-http-winner-key',
+          status,
+          createdAt: new Date(Date.now() - ageMs),
+          localRef: 'http-local-must-not-be-aliased',
+          errorCode: 'HTTP_RESULT_MUST_NOT_ESCAPE',
+          resultJson: { orderId: 'http-order-must-not-be-aliased' },
+        })
+        const params = baseParams([{ id: 'malformed-http-winner-key', type: 'CLEAR_TABLE', payload: { tableId: 'table-1' } }])
+
+        const acks = await processIntents(params)
+
+        expect(acks).toHaveLength(1)
+        expect(acks[0]).toMatchObject({ id: 'malformed-http-winner-key', status: 'REJECTED', errorCode: 'HTTP_OPERATION_RESERVED' })
+        expect(acks[0].result).toBeUndefined()
+        expect(prisma.posSyncIntent.findUnique).toHaveBeenCalledTimes(2)
+        expect(prisma.posSyncIntent.create).toHaveBeenCalledTimes(1)
+        expect(prisma.posSyncIntent.findFirst).not.toHaveBeenCalled()
+        expect(prisma.posSyncIntent.update).not.toHaveBeenCalled()
+        expect(prisma.posSyncIntent.delete).not.toHaveBeenCalled()
+        expect(params.authorizeIntent).not.toHaveBeenCalled()
+        expect(featureAccess.hasFeatureAccess).not.toHaveBeenCalled()
+        expect(tableService.clearTable).not.toHaveBeenCalled()
+      },
+    )
+  })
+
   it('idempotencia: intent ya procesado devuelve el ack guardado sin re-aplicar', async () => {
     ;(prisma.posSyncIntent.findUnique as jest.Mock).mockResolvedValue({
       status: 'ACKED',
@@ -165,7 +263,7 @@ describe('sync.mobile.service processIntents', () => {
     const acks = await processIntents(baseParams([{ id: 'race-seq', seq: 12, type: 'OPEN_TABLE', payload: { tableId: 't1' } }]))
     expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'STALE_DEVICE_SEQUENCE', details: { latestSeq: 42 } })
     expect(prisma.posSyncIntent.findFirst).toHaveBeenLastCalledWith({
-      where: { venueId: VENUE, deviceId: DEVICE, seq: { not: null } },
+      where: { venueId: VENUE, deviceId: DEVICE, seq: { not: null }, type: { not: 'HTTP_OP_V1' } },
       orderBy: { seq: 'desc' },
       select: { seq: true },
     })
@@ -315,7 +413,7 @@ describe('sync.mobile.service processIntents', () => {
       baseParams([{ id: 'i7', type: 'ADD_ITEMS', payload: { localOrderId: 'local-C', items: [{ productId: 'p2', quantity: 1 }] } }]),
     )
     expect(prisma.posSyncIntent.findFirst).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { venueId: VENUE, localRef: 'local-C', status: 'ACKED' } }),
+      expect.objectContaining({ where: { venueId: VENUE, localRef: 'local-C', status: 'ACKED', type: { not: 'HTTP_OP_V1' } } }),
     )
     expect(acks[0]).toMatchObject({ status: 'ACKED', result: { orderId: 'order-3' } })
   })

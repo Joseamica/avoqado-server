@@ -8,6 +8,9 @@ import { randomUUID } from 'crypto'
 import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import * as orderLock from '@/services/shared/paymentShiftClaim'
+import { OrderTableTopologyChanged } from '@/services/shared/tableOrderLock'
+import { BadRequestError } from '@/errors/AppError'
+import socketManager from '@/communication/sockets'
 import { bloquearOrdenParaFacturar } from '@/services/fiscal/admisionIva'
 import {
   applyOrderDiscount,
@@ -86,6 +89,55 @@ function holdFiscal(orderId: string, after: (tx: Prisma.TransactionClient) => Pr
   )
   return { entered: entered.promise, release: finish.release, done }
 }
+/** The barrier belongs to the actual ordered scope claim of this fixture, never a Venue or unrelated Order. */
+function pauseAfterScopeOrderLock(orderId: string, entered: (pid: number) => void, finish: Promise<void>) {
+  const original = prisma.$transaction.bind(prisma)
+  let paused = false
+  jest.spyOn(prisma, '$transaction').mockImplementation(((callback: any, options: any) =>
+    Array.isArray(callback)
+      ? original(callback, options)
+      : original(
+          async tx =>
+            callback(
+              new Proxy(tx, {
+                get(target, key) {
+                  if (key !== '$queryRaw') return Reflect.get(target, key)
+                  return async (...args: unknown[]) => {
+                    const rows: unknown = await Reflect.apply(target.$queryRaw, target, args)
+                    const sql = Array.isArray(args[0]) ? args[0].join('?').replace(/\s+/g, ' ').trim() : ''
+                    const ids = args[2]
+                    if (
+                      !paused &&
+                      sql === 'SELECT id FROM "Order" WHERE "venueId"=? AND id=ANY(?::text[]) ORDER BY id FOR UPDATE' &&
+                      args[1] === venueId &&
+                      Array.isArray(ids) &&
+                      ids.includes(orderId) &&
+                      Array.isArray(rows) &&
+                      rows.some(row => row.id === orderId)
+                    ) {
+                      paused = true
+                      const [{ pid }] = await target.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`
+                      entered(pid)
+                      await finish
+                    }
+                    return rows
+                  }
+                },
+              }),
+            ),
+          options,
+        )) as any)
+}
+async function waitingOnBackend(pid: number) {
+  for (let attempt = 0; attempt < 150; attempt++) {
+    const [{ count }] = await prisma.$queryRaw<Array<{ count: number }>>`
+      SELECT count(*)::int AS count FROM pg_stat_activity
+      WHERE ${pid}::int = ANY(pg_blocking_pids(pid)) AND query ILIKE '%"Order"%'`
+    if (count > 0) return
+    await pause(20)
+  }
+  throw new Error(`No fiscal connection waited on writer backend ${pid}`)
+}
 /** Runs `run` while fiscal admission holds the Order; returns its outcome after fiscal commits. */
 async function whileFiscalHolds(orderId: string, change: (tx: Prisma.TransactionClient) => Promise<unknown>, run: () => Promise<unknown>) {
   const fiscal = holdFiscal(orderId, change)
@@ -96,9 +148,9 @@ async function whileFiscalHolds(orderId: string, change: (tx: Prisma.Transaction
     await waitingOn()
   } finally {
     fiscal.release()
-    await fiscal.done
-    await writer
+    await Promise.allSettled([fiscal.done, ...(writer ? [writer] : [])])
   }
+  await fiscal.done
   return writer!
 }
 async function snapshot(orderId: string, db: Prisma.TransactionClient = prisma) {
@@ -442,6 +494,11 @@ describe('locked mobile writers against real fiscal admission', () => {
   it.each(writers)('%s waits for the fiscal Order lock, then rereads PAID without a version bump', async (name, kind, run) => {
     const o = await newOrder(kind)
     const before = await state(o)
+    const topologyWriter = name === 'split' || name === 'splitBySeat'
+    const audit = topologyWriter ? jest.spyOn(activityLog, 'logAction') : undefined
+    const publication = topologyWriter ? jest.spyOn(socketManager, 'getBroadcastingService') : undefined
+    const auditCallsBefore = audit?.mock.calls.length
+    const publicationCallsBefore = publication?.mock.calls.length
     const fiscal = holdFiscal(o.id, tx =>
       tx.order.update({ where: { id: o.id }, data: { paymentStatus: 'PAID', paidAmount: before.order.total } }),
     )
@@ -454,24 +511,53 @@ describe('locked mobile writers against real fiscal admission', () => {
       expect(await state(o)).toEqual(before)
     } finally {
       fiscal.release()
-      await fiscal.done
-      await writer
+      await Promise.allSettled([fiscal.done, ...(writer ? [writer] : [])])
     }
-    expect((await writer!).error?.message).toBe(PAID_MESSAGE[name])
-    expect(await state(o)).toEqual({ ...before, order: { ...before.order, paymentStatus: 'PAID', paid: before.order.total } })
+    await fiscal.done
+    const paidState = { ...before, order: { ...before.order, paymentStatus: 'PAID' as const, paid: before.order.total } }
+    if (topologyWriter) {
+      expect((await writer!).error).toBeInstanceOf(OrderTableTopologyChanged)
+      expect((await writer!).error.constructor).toBe(OrderTableTopologyChanged)
+      expect((await writer!).error.message).toBe('ORDER_TABLE_TOPOLOGY_CHANGED')
+    } else {
+      expect((await writer!).error?.message).toBe(PAID_MESSAGE[name])
+    }
+    expect(await state(o)).toEqual(paidState)
+    if (topologyWriter) {
+      expect(audit!.mock.calls).toHaveLength(auditCallsBefore!)
+      expect(publication!.mock.calls).toHaveLength(publicationCallsBefore!)
+      const stable = await resultOf(run(o))
+      expect(stable.error).toBeInstanceOf(BadRequestError)
+      expect(stable.error).toMatchObject({ statusCode: 400, message: PAID_MESSAGE[name] })
+      expect(await state(o)).toEqual(paidState)
+      expect(audit!.mock.calls).toHaveLength(auditCallsBefore!)
+      expect(publication!.mock.calls).toHaveLength(publicationCallsBefore!)
+    }
   })
 
-  it.each(writers)('%s holds the Order until fiscal admission can read the complete operation', async (_name, kind, run) => {
+  it.each(writers)('%s holds the Order until fiscal admission can read the complete operation', async (name, kind, run) => {
     const o = await newOrder(kind)
     const entered = barrier(),
       finish = barrier()
-    const lock = orderLock.lockExistingOrderForPayment
-    jest.spyOn(orderLock, 'lockExistingOrderForPayment').mockImplementationOnce(async (...args) => {
-      const value = await lock(...args)
+    let writerPid: number | undefined
+    const acquired = (pid: number) => {
+      writerPid = pid
       entered.release()
-      await finish.promise
-      return value
-    })
+    }
+    if (name === 'split' || name === 'splitBySeat') {
+      pauseAfterScopeOrderLock(o.id, acquired, finish.promise)
+    } else {
+      const lock = orderLock.lockExistingOrderForPayment
+      jest.spyOn(orderLock, 'lockExistingOrderForPayment').mockImplementationOnce(async (...args) => {
+        const value = await lock(...args)
+        expect(value).toBe(true)
+        expect(args[1]).toEqual({ venueId, orderId: o.id })
+        const [{ pid }] = await args[0].$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`
+        acquired(pid)
+        await finish.promise
+        return value
+      })
+    }
     const writer = resultOf(run(o))
     let fiscal: Promise<Awaited<ReturnType<typeof snapshot>>> | undefined
     try {
@@ -485,10 +571,11 @@ describe('locked mobile writers against real fiscal admission', () => {
         await bloquearOrdenParaFacturar(tx, o.id)
         return snapshot(o.id, tx)
       })
-      await waitingOn()
+      expect(writerPid).toEqual(expect.any(Number))
+      await waitingOnBackend(writerPid!)
     } finally {
       finish.release()
-      await writer
+      await Promise.allSettled([writer, ...(fiscal ? [fiscal] : [])])
     }
     expect((await writer).error).toBeUndefined()
     expect(await fiscal!).toEqual(await snapshot(o.id))
@@ -609,13 +696,28 @@ describe('fresh decisions after waiting', () => {
   it('split rereads a concurrent payment (PARTIAL without a version bump) and refuses', async () => {
     const o = await newOrder()
     const before = await state(o)
+    const audit = jest.spyOn(activityLog, 'logAction')
+    const publication = jest.spyOn(socketManager, 'getBroadcastingService')
+    const auditCallsBefore = audit?.mock.calls.length
+    const publicationCallsBefore = publication?.mock.calls.length
     const writer = await whileFiscalHolds(
       o.id,
       tx => tx.order.update({ where: { id: o.id }, data: { paymentStatus: 'PARTIAL', paidAmount: 20, remainingBalance: 130 } }),
       () => splitOrderItems(venueId, o.id, [o.items[1]], staffId),
     )
-    expect(writer.error?.message).toBe('No se puede separar una cuenta ya pagada')
-    expect((await state(o)).venueOrders).toBe(before.venueOrders)
+    expect(writer.error).toBeInstanceOf(OrderTableTopologyChanged)
+    expect(writer.error.constructor).toBe(OrderTableTopologyChanged)
+    expect(writer.error.message).toBe('ORDER_TABLE_TOPOLOGY_CHANGED')
+    const partialState = { ...before, order: { ...before.order, paymentStatus: 'PARTIAL' as const, paid: 20, remaining: 130 } }
+    expect(await state(o)).toEqual(partialState)
+    expect(audit.mock.calls).toHaveLength(auditCallsBefore!)
+    expect(publication.mock.calls).toHaveLength(publicationCallsBefore!)
+    const stable = await resultOf(splitOrderItems(venueId, o.id, [o.items[1]], staffId))
+    expect(stable.error).toBeInstanceOf(BadRequestError)
+    expect(stable.error).toMatchObject({ statusCode: 400, message: PAID_MESSAGE.split })
+    expect(await state(o)).toEqual(partialState)
+    expect(audit.mock.calls).toHaveLength(auditCallsBefore!)
+    expect(publication.mock.calls).toHaveLength(publicationCallsBefore!)
   })
 
   it('split keeps a line added while it waited on the source and recalculates both checks', async () => {
@@ -920,7 +1022,7 @@ describe('the sync reducer classifies the locked writers as before', () => {
     jest.spyOn(featureAccess, 'hasFeatureAccess').mockResolvedValue({ hasAccess: true } as any)
     jest.spyOn(tableOwnership, 'isTableOwnershipEnforced').mockResolvedValue(false)
   })
-  const replay = (intent: { id: string; type: any; payload: Record<string, unknown> }) =>
+  const replay = (intent: { id: string; seq?: number; type: any; payload: Record<string, unknown> }) =>
     processIntents({ venueId, staffId, deviceId: 't4-device', intents: [intent], authorizeIntent: () => true })
   const persisted = (id: string) => prisma.posSyncIntent.findUnique({ where: { venueId_idempotencyKey: { venueId, idempotencyKey: id } } })
 
@@ -928,32 +1030,80 @@ describe('the sync reducer classifies the locked writers as before', () => {
     [
       'ADD_ITEMS promotion',
       (o: Fixture) => ({
-        type: 'ADD_ITEMS',
+        type: 'ADD_ITEMS' as const,
         payload: { orderId: o.id, items: [{ promotionRef: { promotionId, promotionInstanceId: randomUUID(), selections } }] },
       }),
       'A una cuenta ya pagada no se le pueden agregar promociones.',
     ],
     [
       'APPLY_DISCOUNT',
-      (o: Fixture) => ({ type: 'APPLY_DISCOUNT', payload: { orderId: o.id, discountId } }),
+      (o: Fixture) => ({ type: 'APPLY_DISCOUNT' as const, payload: { orderId: o.id, discountId } }),
       'No se puede descontar una orden ya pagada',
     ],
     [
       'SPLIT_ORDER',
-      (o: Fixture) => ({ type: 'SPLIT_ORDER', payload: { orderId: o.id, itemRefs: [o.items[1]] } }),
+      (o: Fixture) => ({ type: 'SPLIT_ORDER' as const, payload: { orderId: o.id, itemRefs: [o.items[1]] } }),
       'No se puede separar una cuenta ya pagada',
     ],
-  ] as const)('%s that finds the order PAID under the lock is REJECTED (quarantine), never RETRY', async (_label, build, message) => {
+  ] as const)('%s preserves transient FIFO and stable PAID quarantine under the lock', async (label, build, message) => {
     const o = await newOrder()
     const id = randomUUID()
+    const intent = { id, ...build(o), ...(label === 'SPLIT_ORDER' ? { seq: 1 } : {}) }
+    const followingOrder = label === 'SPLIT_ORDER' ? await newOrder() : undefined
+    const followingBefore = followingOrder ? await state(followingOrder) : undefined
+    const before = await state(o)
+    const followingId = randomUUID()
+    const followingIntent = followingOrder
+      ? { id: followingId, seq: 2, type: 'APPLY_DISCOUNT' as const, payload: { orderId: followingOrder.id, discountId } }
+      : undefined
+    const audit = label === 'SPLIT_ORDER' ? jest.spyOn(activityLog, 'logAction') : undefined
+    const publication = label === 'SPLIT_ORDER' ? jest.spyOn(socketManager, 'getBroadcastingService') : undefined
+    const auditCallsBefore = audit?.mock.calls.length
+    const publicationCallsBefore = publication?.mock.calls.length
     const outcome = await whileFiscalHolds(
       o.id,
       tx => tx.order.update({ where: { id: o.id }, data: { paymentStatus: 'PAID', paidAmount: 150, remainingBalance: 0 } }),
-      () => replay({ id, ...build(o) }),
+      () =>
+        followingOrder
+          ? processIntents({
+              venueId,
+              staffId,
+              deviceId: 't4-device',
+              authorizeIntent: () => true,
+              intents: [intent, followingIntent!],
+            })
+          : replay(intent),
     )
     expect(outcome.error).toBeUndefined()
-    expect(outcome.value).toEqual([expect.objectContaining({ id, status: 'REJECTED', errorCode: 'BUSINESS_RULE', message })])
-    expect(await persisted(id)).toMatchObject({ status: 'REJECTED' })
+    if (followingOrder) {
+      expect(outcome.value).toEqual([
+        { id, status: 'RETRY', errorCode: 'ORDER_TABLE_TOPOLOGY_CHANGED', message: 'ORDER_TABLE_TOPOLOGY_CHANGED' },
+      ])
+      expect(await persisted(id)).toBeNull()
+      expect(await persisted(followingId)).toBeNull()
+      const paidState = { ...before, order: { ...before.order, paymentStatus: 'PAID' as const, paid: 150, remaining: 0 } }
+      expect(await state(o)).toEqual(paidState)
+      expect(await state(followingOrder)).toEqual(followingBefore)
+      expect(audit!.mock.calls).toHaveLength(auditCallsBefore!)
+      expect(publication!.mock.calls).toHaveLength(publicationCallsBefore!)
+      const stable = await replay(intent)
+      expect(stable).toEqual([{ id, status: 'REJECTED', errorCode: 'BUSINESS_RULE', message }])
+      expect(await persisted(id)).toMatchObject({ status: 'REJECTED', errorCode: 'BUSINESS_RULE', resultJson: null })
+      expect(await state(o)).toEqual(paidState)
+      expect(await state(followingOrder)).toEqual(followingBefore)
+      expect(await persisted(followingId)).toBeNull()
+      expect(audit!.mock.calls).toHaveLength(auditCallsBefore!)
+      expect(publication!.mock.calls).toHaveLength(publicationCallsBefore!)
+      // Control proves that this follower was valid and would have an observable monetary effect if reached.
+      const followingAck = await replay(followingIntent!)
+      expect(followingAck).toEqual([expect.objectContaining({ id: followingId, status: 'ACKED' })])
+      expect(await persisted(followingId)).toMatchObject({ status: 'ACKED' })
+      expect((await state(followingOrder)).order.discounts).toHaveLength(1)
+      expect((await state(followingOrder)).order.total).toBeLessThan(followingBefore!.order.total)
+    } else {
+      expect(outcome.value).toEqual([expect.objectContaining({ id, status: 'REJECTED', errorCode: 'BUSINESS_RULE', message })])
+      expect(await persisted(id)).toMatchObject({ status: 'REJECTED' })
+    }
     expect(await snapshot(o.id)).toMatchObject({ discounts: [], promotions: [], items: [{}, {}] })
   })
 

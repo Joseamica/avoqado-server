@@ -104,6 +104,108 @@ export async function getCustomerLoyalty(venueId: string, customerId: string, or
  * points back with the rollback, and a concurrent writer can never interleave
  * between the discount and the totals.
  */
+export async function redeemPointsToOrderInTransaction(
+  tx: Prisma.TransactionClient,
+  venueId: string,
+  orderId: string,
+  customerId: string,
+  points: number,
+  staffId?: string,
+  config?: Awaited<ReturnType<typeof getOrCreateLoyaltyConfig>>,
+) {
+  if (!Number.isInteger(points) || points <= 0) {
+    throw new BadRequestError('points debe ser un entero positivo')
+  }
+  const { recalculateOrderTotals } = await import('./comp-item.mobile.service')
+  if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Orden no encontrada')
+  const order = await tx.order.findFirst({
+    where: { id: orderId, venueId },
+    select: { id: true, total: true, subtotal: true, discountAmount: true, paymentStatus: true, paidAmount: true, originSystem: true },
+  })
+  if (!order) throw new NotFoundError('Orden no encontrada')
+  // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
+  // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
+  rechazarSiEsImportada(order)
+  if (order.paymentStatus === 'PAID' || order.paymentStatus === 'PARTIAL') {
+    throw new BadRequestError('No se puede modificar una orden ya pagada')
+  }
+
+  const effectiveConfig = config ?? (await getOrCreateLoyaltyConfig(venueId, tx))
+  if (!effectiveConfig.active) throw new BadRequestError('El programa de lealtad no está activo en esta sucursal')
+  if (points < effectiveConfig.minPointsRedeem) {
+    throw new BadRequestError(`Se requieren al menos ${effectiveConfig.minPointsRedeem} puntos para canjear`)
+  }
+
+  const customer = await tx.customer.findFirst({
+    where: { id: customerId, venueId },
+    select: { id: true, loyaltyPoints: true },
+  })
+  if (!customer) throw new NotFoundError('Cliente no encontrado')
+  if (customer.loyaltyPoints < points) {
+    throw new BadRequestError(`Puntos insuficientes: el cliente tiene ${customer.loyaltyPoints}`)
+  }
+
+  const redemptionRate = Number(effectiveConfig.redemptionRate)
+  const rawValue = money(points * redemptionRate)
+  // 🔴 Tope contra la BASE (subtotal − descuentos), NO contra total: el total
+  // incluye cobros por servicio que el descuento no puede compensar — topar
+  // contra total quemaría puntos sin bajar la cuenta (auditoría 2026-07-18).
+  const redeemableBase = Math.max(0, Number(order.subtotal) - Number(order.discountAmount || 0))
+  const discountAmount = money(Math.min(rawValue, redeemableBase))
+  if (discountAmount <= 0) {
+    throw new BadRequestError('El canje no genera descuento sobre esta cuenta')
+  }
+  // If the value was capped, only burn the points actually used.
+  const pointsToBurn = discountAmount < rawValue && redemptionRate > 0 ? Math.ceil(discountAmount / redemptionRate) : points
+
+  const staffVenueId = await resolveStaffVenueId(tx, venueId, staffId)
+
+  const transaction = await tx.loyaltyTransaction.create({
+    data: {
+      customerId,
+      type: LoyaltyTransactionType.REDEEM,
+      points: -pointsToBurn,
+      orderId,
+      reason: `Canje de ${pointsToBurn} puntos por $${discountAmount.toFixed(2)} de descuento`,
+      createdById: staffVenueId,
+    },
+  })
+
+  // 🔴 Carrera de doble canje: el saldo leído arriba no reserva nada, así que el
+  // decremento debe ser CONDICIONAL — dos canjes concurrentes (sobre órdenes
+  // distintas) no pueden quemar los mismos puntos (auditoría 2026-07-18).
+  const burned = await tx.customer.updateMany({
+    where: { id: customerId, loyaltyPoints: { gte: pointsToBurn } },
+    data: { loyaltyPoints: { decrement: pointsToBurn } },
+  })
+  if (burned.count === 0) {
+    throw new BadRequestError('Puntos insuficientes (otro canje se procesó al mismo tiempo)')
+  }
+
+  const balance = await tx.customer.findUniqueOrThrow({ where: { id: customerId }, select: { loyaltyPoints: true } })
+  const newBalance = balance.loyaltyPoints
+
+  // Codex r1 P1: lo que la cabecera trae fuera de toda fila (orden anterior a B2…) queda en su fila antes de crear ésta.
+  await conservarDescuentoHistorico(tx, orderId, order.discountAmount)
+  const row = await tx.orderDiscount.create({
+    data: {
+      orderId,
+      type: 'FIXED_AMOUNT',
+      name: `Recompensas — ${pointsToBurn} puntos`,
+      value: new Prisma.Decimal(discountAmount),
+      amount: new Prisma.Decimal(discountAmount),
+      isManual: true,
+      appliedById: staffVenueId,
+      loyaltyTransactionId: transaction.id,
+      // B2: fijo topado a subtotal − descuentos (con promociones) ⇒ fila de CUENTA; el recálculo de abajo la reparte.
+      reparto: comoJson(nuevoRepartoDeCuenta({ conPromociones: true })),
+    },
+  })
+
+  const totals = await recalculateOrderTotals(orderId, 0, Number(order.paidAmount || 0), tx)
+  return { pointsToBurn, discountAmount, newBalance, transaction, row, totals }
+}
+
 export async function redeemPointsToOrder(venueId: string, orderId: string, customerId: string, points: number, staffId?: string) {
   if (!Number.isInteger(points) || points <= 0) {
     throw new BadRequestError('points debe ser un entero positivo')
@@ -111,93 +213,10 @@ export async function redeemPointsToOrder(venueId: string, orderId: string, cust
 
   // Venue configuration is not Order data: read before the lock; its checks keep their original order below.
   const config = await getOrCreateLoyaltyConfig(venueId)
-  const { recalculateOrderTotals } = await import('./comp-item.mobile.service')
-
-  const { pointsToBurn, discountAmount, totals } = await prisma.$transaction(async tx => {
-    if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Orden no encontrada')
-    const order = await tx.order.findFirst({
-      where: { id: orderId, venueId },
-      select: { id: true, total: true, subtotal: true, discountAmount: true, paymentStatus: true, paidAmount: true, originSystem: true },
-    })
-    if (!order) throw new NotFoundError('Orden no encontrada')
-    // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
-    // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
-    rechazarSiEsImportada(order)
-    if (order.paymentStatus === 'PAID' || order.paymentStatus === 'PARTIAL') {
-      throw new BadRequestError('No se puede modificar una orden ya pagada')
-    }
-
-    if (!config.active) throw new BadRequestError('El programa de lealtad no está activo en esta sucursal')
-    if (points < config.minPointsRedeem) {
-      throw new BadRequestError(`Se requieren al menos ${config.minPointsRedeem} puntos para canjear`)
-    }
-
-    const customer = await tx.customer.findFirst({
-      where: { id: customerId, venueId },
-      select: { id: true, loyaltyPoints: true },
-    })
-    if (!customer) throw new NotFoundError('Cliente no encontrado')
-    if (customer.loyaltyPoints < points) {
-      throw new BadRequestError(`Puntos insuficientes: el cliente tiene ${customer.loyaltyPoints}`)
-    }
-
-    const redemptionRate = Number(config.redemptionRate)
-    const rawValue = money(points * redemptionRate)
-    // 🔴 Tope contra la BASE (subtotal − descuentos), NO contra total: el total
-    // incluye cobros por servicio que el descuento no puede compensar — topar
-    // contra total quemaría puntos sin bajar la cuenta (auditoría 2026-07-18).
-    const redeemableBase = Math.max(0, Number(order.subtotal) - Number(order.discountAmount || 0))
-    const discountAmount = money(Math.min(rawValue, redeemableBase))
-    if (discountAmount <= 0) {
-      throw new BadRequestError('El canje no genera descuento sobre esta cuenta')
-    }
-    // If the value was capped, only burn the points actually used.
-    const pointsToBurn = discountAmount < rawValue && redemptionRate > 0 ? Math.ceil(discountAmount / redemptionRate) : points
-
-    const staffVenueId = await resolveStaffVenueId(tx, venueId, staffId)
-
-    const transaction = await tx.loyaltyTransaction.create({
-      data: {
-        customerId,
-        type: LoyaltyTransactionType.REDEEM,
-        points: -pointsToBurn,
-        orderId,
-        reason: `Canje de ${pointsToBurn} puntos por $${discountAmount.toFixed(2)} de descuento`,
-        createdById: staffVenueId,
-      },
-    })
-
-    // 🔴 Carrera de doble canje: el saldo leído arriba no reserva nada, así que el
-    // decremento debe ser CONDICIONAL — dos canjes concurrentes (sobre órdenes
-    // distintas) no pueden quemar los mismos puntos (auditoría 2026-07-18).
-    const burned = await tx.customer.updateMany({
-      where: { id: customerId, loyaltyPoints: { gte: pointsToBurn } },
-      data: { loyaltyPoints: { decrement: pointsToBurn } },
-    })
-    if (burned.count === 0) {
-      throw new BadRequestError('Puntos insuficientes (otro canje se procesó al mismo tiempo)')
-    }
-
-    // Codex r1 P1: lo que la cabecera trae fuera de toda fila (orden anterior a B2…) queda en su fila antes de crear ésta.
-    await conservarDescuentoHistorico(tx, orderId, order.discountAmount)
-    await tx.orderDiscount.create({
-      data: {
-        orderId,
-        type: 'FIXED_AMOUNT',
-        name: `Recompensas — ${pointsToBurn} puntos`,
-        value: new Prisma.Decimal(discountAmount),
-        amount: new Prisma.Decimal(discountAmount),
-        isManual: true,
-        appliedById: staffVenueId,
-        loyaltyTransactionId: transaction.id,
-        // B2: fijo topado a subtotal − descuentos (con promociones) ⇒ fila de CUENTA; el recálculo de abajo la reparte.
-        reparto: comoJson(nuevoRepartoDeCuenta({ conPromociones: true })),
-      },
-    })
-
-    const totals = await recalculateOrderTotals(orderId, 0, Number(order.paidAmount || 0), tx)
-    return { pointsToBurn, discountAmount, totals }
-  }, ORDER_LOCK_WAIT_BUDGET)
+  const { pointsToBurn, discountAmount, newBalance, totals } = await prisma.$transaction(
+    tx => redeemPointsToOrderInTransaction(tx, venueId, orderId, customerId, points, staffId, config),
+    ORDER_LOCK_WAIT_BUDGET,
+  )
 
   void (await import('../dashboard/activity-log.service')).logAction({
     action: 'LOYALTY_POINTS_REDEEMED',
@@ -208,15 +227,10 @@ export async function redeemPointsToOrder(venueId: string, orderId: string, cust
     data: { customerId, points: pointsToBurn, discountAmount },
   })
 
-  const balance = await prisma.customer.findUnique({
-    where: { id: customerId },
-    select: { loyaltyPoints: true },
-  })
-
   return {
     pointsRedeemed: pointsToBurn,
     discountAmount,
-    newBalance: balance?.loyaltyPoints ?? 0,
+    newBalance,
     order: totals,
   }
 }
@@ -231,7 +245,7 @@ export async function refundLoyaltyForOrderDiscount(
   venueId: string,
   row: { id: string; loyaltyTransactionId: string | null },
   staffId?: string,
-): Promise<{ pointsRefunded: number; customerId: string } | null> {
+): Promise<{ pointsRefunded: number; customerId: string; transactionId: string } | null> {
   if (!row.loyaltyTransactionId) return null
 
   // Same FK caveat as the redeem path (see resolveStaffVenueId).
@@ -250,7 +264,7 @@ export async function refundLoyaltyForOrderDiscount(
 
   const pointsRefunded = Math.abs(original.points)
 
-  await tx.loyaltyTransaction.create({
+  const adjustment = await tx.loyaltyTransaction.create({
     data: {
       customerId: original.customerId,
       type: LoyaltyTransactionType.ADJUST,
@@ -266,5 +280,5 @@ export async function refundLoyaltyForOrderDiscount(
     data: { loyaltyPoints: { increment: pointsRefunded } },
   })
 
-  return { pointsRefunded, customerId: original.customerId }
+  return { pointsRefunded, customerId: original.customerId, transactionId: adjustment.id }
 }

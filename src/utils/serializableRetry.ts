@@ -7,6 +7,8 @@ const RETRY_SQLSTATES = new Set(['40001', '55P03'])
 
 export interface SerializableRetryOptions {
   timeoutMs?: number
+  /** Optional interactive-transaction admission wait; omitted preserves Prisma's default. */
+  maxWaitMs?: number
   /** Total transaction attempts, including the initial attempt. */
   maxRetries?: number
   baseDelayMs?: number
@@ -61,14 +63,17 @@ export async function withSerializableRetry<T>(
   fn: (tx: Prisma.TransactionClient) => Promise<T>,
   options: SerializableRetryOptions = {},
 ): Promise<T> {
-  const { timeoutMs = 10_000, maxRetries = 5, baseDelayMs = 50 } = options
+  const { timeoutMs = 10_000, maxWaitMs, maxRetries = 5, baseDelayMs = 50 } = options
   validateOptions(timeoutMs, maxRetries, baseDelayMs)
+  if (maxWaitMs !== undefined && (!Number.isFinite(maxWaitMs) || maxWaitMs <= 0))
+    throw new RangeError('maxWaitMs must be greater than zero')
 
   for (let attempt = 1; attempt <= maxRetries; attempt += 1) {
     try {
       return await prisma.$transaction(fn, {
         isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
         timeout: timeoutMs,
+        ...(maxWaitMs === undefined ? {} : { maxWait: maxWaitMs }),
       })
     } catch (error) {
       if (!isRetryableDbError(error)) throw error

@@ -38,63 +38,75 @@ export const COMP_REASONS = [
   'Especial del administrador',
 ] as const
 
-export async function compOrderItem(params: { venueId: string; orderId: string; itemId: string; reason: string; staffId?: string }) {
+export async function compOrderItemInTransaction(
+  tx: Prisma.TransactionClient,
+  params: { venueId: string; orderId: string; itemId: string; reason: string; staffId?: string; captureBenefits?: boolean },
+) {
   const { venueId, orderId, itemId, reason, staffId } = params
 
   if (!reason?.trim()) {
     throw new BadRequestError('reason es requerido para dar de cortesía')
   }
 
-  const { item, totals, recorte } = await prisma.$transaction(async tx => {
-    if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Orden no encontrada')
-    const order = await tx.order.findUnique({
-      where: { id: orderId, venueId },
-      select: { id: true, paymentStatus: true, discountAmount: true, paidAmount: true, originSystem: true },
-    })
-    if (!order) throw new NotFoundError('Orden no encontrada')
-    // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
-    // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
-    rechazarSiEsImportada(order)
+  if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Orden no encontrada')
+  const order = await tx.order.findUnique({
+    where: { id: orderId, venueId },
+    select: { id: true, paymentStatus: true, discountAmount: true, paidAmount: true, originSystem: true },
+  })
+  if (!order) throw new NotFoundError('Orden no encontrada')
+  // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
+  // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
+  rechazarSiEsImportada(order)
 
-    // Never mutate the money of an order that was already paid (or partially).
-    if (order.paymentStatus === 'PAID' || order.paymentStatus === 'PARTIAL') {
-      throw new BadRequestError('No se puede dar cortesía en una orden ya pagada')
-    }
+  // Never mutate the money of an order that was already paid (or partially).
+  if (order.paymentStatus === 'PAID' || order.paymentStatus === 'PARTIAL') {
+    throw new BadRequestError('No se puede dar cortesía en una orden ya pagada')
+  }
 
-    const item = await tx.orderItem.findFirst({
-      where: { id: itemId, orderId },
-      select: { id: true, productName: true, isCortesia: true, total: true, quantity: true, unitPrice: true },
-    })
-    if (!item) throw new NotFoundError('Artículo no encontrado en la orden')
-    if (item.isCortesia) throw new BadRequestError('El artículo ya está dado de cortesía')
+  const item = await tx.orderItem.findFirst({
+    where: { id: itemId, orderId },
+    select: { id: true, productName: true, isCortesia: true, total: true, quantity: true, unitPrice: true },
+  })
+  if (!item) throw new NotFoundError('Artículo no encontrado en la orden')
+  if (item.isCortesia) throw new BadRequestError('El artículo ya está dado de cortesía')
 
-    // R7-1 (ruling de B2): el recálculo es Σ filas; el resto de cabecera sin fila se congela en la suya ANTES del recorte.
-    await conservarDescuentoHistorico(tx, orderId, order.discountAmount)
-    // P5 (founder, 1-oct): el descuento propio del renglón que se regala (y lo dirigido a él) se retira con sus beneficios
-    // ANTES de regalarlo; si no, su fila espejo seguía restando sobre los demás renglones.
-    const recorte = await recortarDescuentosDeRenglones(tx, orderId, { renglones: [itemId], venueId, staffId })
+  // R7-1 (ruling de B2): el recálculo es Σ filas; el resto de cabecera sin fila se congela en la suya ANTES del recorte.
+  await conservarDescuentoHistorico(tx, orderId, order.discountAmount)
+  // P5 (founder, 1-oct): el descuento propio del renglón que se regala (y lo dirigido a él) se retira con sus beneficios
+  // ANTES de regalarlo; si no, su fila espejo seguía restando sobre los demás renglones.
+  const recorte = await recortarDescuentosDeRenglones(tx, orderId, {
+    renglones: [itemId],
+    venueId,
+    staffId,
+    captureBenefits: params.captureBenefits,
+  })
 
-    // The line stays on the check (kitchen + audit) but costs 0.
-    await tx.orderItem.update({
-      where: { id: itemId },
-      data: {
-        isCortesia: true,
-        cortesiaReason: reason.trim(),
-        total: 0,
-        discountAmount: item.total, // what the comp gave away
-        appliedDiscountId: null, // su espejo lo acaba de retirar el recorte
-      },
-    })
+  // The line stays on the check (kitchen + audit) but costs 0.
+  await tx.orderItem.update({
+    where: { id: itemId },
+    data: {
+      isCortesia: true,
+      cortesiaReason: reason.trim(),
+      total: 0,
+      discountAmount: item.total, // what the comp gave away
+      appliedDiscountId: null, // su espejo lo acaba de retirar el recorte
+    },
+  })
 
-    const totals = await recalculateOrderTotals(
-      orderId,
-      Math.max(0, Number(order.discountAmount || 0) - recorte.recortadoPesos),
-      Number(order.paidAmount || 0),
-      tx,
-    )
+  const totals = await recalculateOrderTotals(
+    orderId,
+    Math.max(0, Number(order.discountAmount || 0) - recorte.recortadoPesos),
+    Number(order.paidAmount || 0),
+    tx,
+  )
 
-    return { item, totals, recorte }
-  }, ORDER_LOCK_WAIT_BUDGET)
+  return { item, totals, recorte }
+}
+
+export async function compOrderItem(params: { venueId: string; orderId: string; itemId: string; reason: string; staffId?: string }) {
+  const { venueId, orderId, itemId, reason, staffId } = params
+
+  const { item, totals, recorte } = await prisma.$transaction(tx => compOrderItemInTransaction(tx, params), ORDER_LOCK_WAIT_BUDGET)
 
   void logAction({
     action: 'ORDER_ITEM_COMPED',
@@ -119,54 +131,69 @@ export async function compOrderItem(params: { venueId: string; orderId: string; 
  * open order with one reason, then recomputes totals once. Same money guards
  * as the per-item comp.
  */
-export async function compWholeOrder(params: { venueId: string; orderId: string; reason: string; staffId?: string }) {
+export async function compWholeOrderInTransaction(
+  tx: Prisma.TransactionClient,
+  params: { venueId: string; orderId: string; reason: string; staffId?: string; captureBenefits?: boolean },
+) {
   const { venueId, orderId, reason, staffId } = params
 
   if (!reason?.trim()) {
     throw new BadRequestError('reason es requerido para dar de cortesía')
   }
 
-  const { order, items, compedAmount, totals, recorte } = await prisma.$transaction(async tx => {
-    if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Orden no encontrada')
-    const order = await tx.order.findUnique({
-      where: { id: orderId, venueId },
-      select: { id: true, paymentStatus: true, discountAmount: true, paidAmount: true, orderNumber: true, originSystem: true },
+  if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Orden no encontrada')
+  const order = await tx.order.findUnique({
+    where: { id: orderId, venueId },
+    select: { id: true, paymentStatus: true, discountAmount: true, paidAmount: true, orderNumber: true, originSystem: true },
+  })
+  if (!order) throw new NotFoundError('Orden no encontrada')
+  // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
+  // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
+  rechazarSiEsImportada(order)
+  if (order.paymentStatus === 'PAID' || order.paymentStatus === 'PARTIAL') {
+    throw new BadRequestError('No se puede dar cortesía en una orden ya pagada')
+  }
+
+  const items = await tx.orderItem.findMany({
+    where: { orderId, isCortesia: false },
+    select: { id: true, total: true },
+  })
+  if (items.length === 0) throw new BadRequestError('La cuenta no tiene artículos por dar de cortesía')
+
+  // R7-1 y P5, como en `compOrderItem`: conservar el resto de cabecera y retirar lo dirigido a los renglones ANTES de regalarlos.
+  await conservarDescuentoHistorico(tx, orderId, order.discountAmount)
+  const recorte = await recortarDescuentosDeRenglones(tx, orderId, {
+    renglones: items.map(i => i.id),
+    venueId,
+    staffId,
+    captureBenefits: params.captureBenefits,
+  })
+
+  const compedAmount = items.reduce((sum, i) => sum + Number(i.total), 0)
+  for (const item of items) {
+    await tx.orderItem.update({
+      where: { id: item.id },
+      data: { isCortesia: true, cortesiaReason: reason.trim(), total: 0, discountAmount: item.total, appliedDiscountId: null },
     })
-    if (!order) throw new NotFoundError('Orden no encontrada')
-    // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
-    // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
-    rechazarSiEsImportada(order)
-    if (order.paymentStatus === 'PAID' || order.paymentStatus === 'PARTIAL') {
-      throw new BadRequestError('No se puede dar cortesía en una orden ya pagada')
-    }
+  }
 
-    const items = await tx.orderItem.findMany({
-      where: { orderId, isCortesia: false },
-      select: { id: true, total: true },
-    })
-    if (items.length === 0) throw new BadRequestError('La cuenta no tiene artículos por dar de cortesía')
+  const totals = await recalculateOrderTotals(
+    orderId,
+    Math.max(0, Number(order.discountAmount || 0) - recorte.recortadoPesos),
+    Number(order.paidAmount || 0),
+    tx,
+  )
 
-    // R7-1 y P5, como en `compOrderItem`: conservar el resto de cabecera y retirar lo dirigido a los renglones ANTES de regalarlos.
-    await conservarDescuentoHistorico(tx, orderId, order.discountAmount)
-    const recorte = await recortarDescuentosDeRenglones(tx, orderId, { renglones: items.map(i => i.id), venueId, staffId })
+  return { order, items, compedAmount, totals, recorte }
+}
 
-    const compedAmount = items.reduce((sum, i) => sum + Number(i.total), 0)
-    for (const item of items) {
-      await tx.orderItem.update({
-        where: { id: item.id },
-        data: { isCortesia: true, cortesiaReason: reason.trim(), total: 0, discountAmount: item.total, appliedDiscountId: null },
-      })
-    }
+export async function compWholeOrder(params: { venueId: string; orderId: string; reason: string; staffId?: string }) {
+  const { venueId, orderId, reason, staffId } = params
 
-    const totals = await recalculateOrderTotals(
-      orderId,
-      Math.max(0, Number(order.discountAmount || 0) - recorte.recortadoPesos),
-      Number(order.paidAmount || 0),
-      tx,
-    )
-
-    return { order, items, compedAmount, totals, recorte }
-  }, ORDER_LOCK_WAIT_BUDGET)
+  const { order, items, compedAmount, totals, recorte } = await prisma.$transaction(
+    tx => compWholeOrderInTransaction(tx, params),
+    ORDER_LOCK_WAIT_BUDGET,
+  )
 
   void logAction({
     action: 'ORDER_COMPED',

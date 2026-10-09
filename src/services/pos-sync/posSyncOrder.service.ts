@@ -1,3 +1,4 @@
+import { lockTableOrderScope } from '@/services/shared/tableOrderLock'
 import prisma from '../../utils/prismaClient'
 import { NotFoundError } from '../../errors/AppError'
 import { Order, OrderSource, OrderStatus, OriginSystem, Prisma, SplitType, SyncStatus } from '@prisma/client'
@@ -208,13 +209,26 @@ export async function processPosOrderEvent(payload: RichPosPayload): Promise<Ord
     // otro crear la fila, y el primero tomar Shift antes de actualizar esa
     // Order ya existente. Esta relectura bajo advisory es la autoritativa.
     let existingOrder = await findExistingOrderWithSmartResolution(tx, externalId, venue.id, orderData.orderNumber)
+    const scoped = Boolean(tableId || existingOrder)
+    if (scoped) {
+      const existingOrderId = existingOrder?.id
+      const scope = await lockTableOrderScope(tx, {
+        venueId: venue.id,
+        orderIds: existingOrder ? [existingOrder.id] : [],
+        tableIds: tableId ? [tableId] : [],
+        optionalOrderId: existingOrderId,
+      })
+      // A classified alias can leave this venue while Order locks are acquired. The helper permits only that
+      // candidate's absence and keeps all other orders/Tables strict, so the natural-key create still owns its Table.
+      if (existingOrderId && !scope.orders.some(order => order.id === existingOrderId)) existingOrder = null
+    }
     if (existingOrder) {
       // El advisory sólo serializa eventos POS. Captura fiscal, cobros nativos, reatribución de turno o el borrado del
       // negocio no lo toman: entre la lectura de arriba y el candado la fila pudo ligarse a un turno, irse de este
       // negocio o desaparecer. Alias, liga de turno y existencia se deciden con la fila releída BAJO el candado; si ya
       // no es de este negocio con la llave que la clasificó, se trata como ausente y sigue el upsert por llave natural,
       // nunca una escritura por el id rancio.
-      const locked = await lockExistingOrderForPayment(tx, { venueId: venue.id, orderId: existingOrder.id })
+      const locked = scoped || (await lockExistingOrderForPayment(tx, { venueId: venue.id, orderId: existingOrder.id }))
       existingOrder = locked
         ? await tx.order.findFirst({ where: { id: existingOrder.id, venueId: venue.id, externalId: existingOrder.externalId } })
         : null

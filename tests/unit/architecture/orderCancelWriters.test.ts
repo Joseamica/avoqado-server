@@ -60,13 +60,13 @@ const PROTEGIDA_POR_EL_GUARD = ['assertOrderCancellableUnderLock']
 const VERDAD_EXTERNA_VIGILADA = ['lockExistingOrderForPayment', 'findLiveTerminalCharge']
 
 const INVENTARIO: Record<string, Clase> = {
-  'services/mobile/order.mobile.service.ts#cancelOrder': { clase: 'PROTEGIDA', marcadores: PROTEGIDA_POR_EL_GUARD },
+  'services/mobile/order.mobile.service.ts#cancelOrderInTransaction': { clase: 'PROTEGIDA', marcadores: PROTEGIDA_POR_EL_GUARD },
   'services/dashboard/order.dashboard.service.ts#deleteOrder': { clase: 'PROTEGIDA', marcadores: PROTEGIDA_POR_EL_GUARD },
   'services/mobile/areaTicketV7.mobile.service.ts#cancelAreaTicketCheckout': { clase: 'PROTEGIDA', marcadores: PROTEGIDA_POR_EL_GUARD },
   // Fusión: candado de LAS DOS órdenes en una sentencia + cobro vivo del ORIGEN.
-  'services/mobile/order.mobile.service.ts#mergeOrders': {
+  'services/mobile/order.mobile.service.ts#mergeOrdersInTransaction': {
     clase: 'PROTEGIDA',
-    marcadores: ['ORDER BY id FOR UPDATE', 'assertNoLiveTerminalCharge'],
+    marcadores: ['lockTableOrderScope(', 'assertNoLiveTerminalCharge'],
   },
   // Anular: candado + relectura con CAS de versión + G2 (cualquier anulación con cobro vivo).
   'services/tpv/order.tpv.service.ts#voidItems': {
@@ -106,5 +106,14 @@ describe('Inventario de escritores que cancelan una orden (§C.6)', () => {
     expect(i).toBeGreaterThanOrEqual(0)
     const { cuerpo } = funcionQueContiene(lineas, i)
     for (const marcador of marcadores) expect(cuerpo).toContain(marcador)
+  })
+})
+
+describe('Mesas merge cancellation keeps the ordered Order lock', () => {
+  it('the transaction helper delegates to the topology lock whose raw Order claim remains ordered', () => {
+    const helper = fs.readFileSync(path.join(SRC, 'services/shared/tableOrderLock.ts'), 'utf8')
+    expect(helper).toMatch(/FROM "Order"[\s\S]*?ORDER BY id FOR UPDATE/)
+    expect(helper).toContain('locked.length !== ids.length')
+    expect(helper).toContain('shape(before) !== shape(after)')
   })
 })

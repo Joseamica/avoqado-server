@@ -67,6 +67,8 @@ export async function authorKitchenTickets(params: {
   }
 
   const ticketIds = await prisma.$transaction(async tx => {
+    const venue = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM "Venue" WHERE id=${venueId} FOR KEY SHARE`
+    if (!venue.length) return [] as string[]
     // Mismo candado que `withDeliveryOrderLock`, con otro prefijo: Postgres lo suelta al terminar la tx.
     await tomarCandadoDeComandas(tx, orderId)
     // Y el de la orden ANTES de tocar renglones: comandas → orden → renglones, el orden de todos los escritores. Sin él el
@@ -307,9 +309,42 @@ export async function tomarCandadoDeComandas(tx: Prisma.TransactionClient, order
  * de la anulación (mismo orden que el armado: candado de comandas → orden). NO va en la fusión de cuentas: ahí los
  * renglones se MUEVEN a la otra cuenta y la comida sigue pedida.
  */
-export async function retirarComandasDeVentaAnulada(tx: Prisma.TransactionClient, venueId: string, orderId: string): Promise<void> {
+export async function retirarComandasDeVentaAnulada(
+  tx: Prisma.TransactionClient,
+  venueId: string,
+  orderId: string,
+): Promise<{ kdsOrderIds: string[]; kdsOrderItemIds: string[] }> {
   await tomarCandadoDeComandas(tx, orderId)
   const pendientes = { venueId, orderId, status: { not: 'COMPLETED' as const } }
+  const kdsOrderIds: string[] = [],
+    kdsOrderItemIds: string[] = []
+  let cursor: string | undefined
+  for (;;) {
+    const page = await tx.kdsOrder.findMany({
+      where: pendientes,
+      select: { id: true },
+      orderBy: { id: 'asc' },
+      take: 100,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+    })
+    kdsOrderIds.push(...page.map(row => row.id))
+    if (page.length < 100) break
+    cursor = page[page.length - 1].id
+  }
+  cursor = undefined
+  for (;;) {
+    const page: { id: string }[] = await tx.kdsOrderItem.findMany({
+      where: { kdsOrder: pendientes },
+      select: { id: true },
+      orderBy: { id: 'asc' },
+      take: 100,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+    })
+    kdsOrderItemIds.push(...page.map(row => row.id))
+    if (page.length < 100) break
+    cursor = page[page.length - 1].id
+  }
   await tx.kdsOrderItem.deleteMany({ where: { kdsOrder: pendientes } })
   await tx.kdsOrder.deleteMany({ where: pendientes })
+  return { kdsOrderIds, kdsOrderItemIds }
 }

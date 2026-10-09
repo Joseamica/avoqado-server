@@ -32,6 +32,8 @@ import { SocketEventType } from '@/communication/sockets/types'
 import { posSyncStaffService } from '@/services/pos-sync/posSyncStaff.service'
 import { getOrCreatePosTable } from '@/services/pos-sync/posSyncTable.service'
 import { getOrCreatePosShift } from '@/services/pos-sync/posSyncShift.service'
+import { lockTableOrderScope, OrderTableTopologyChanged } from '@/services/shared/tableOrderLock'
+import { NotFoundError } from '@/errors/AppError'
 
 const VENUE = 'venue-order-race'
 const SHIFT = 'shift-provisional'
@@ -64,14 +66,40 @@ const payload = {
   paymentMethodsCatalog: [{ idformadepago: 'EFE', tipo: 1, descripcion: 'EFECTIVO' }],
 } as any
 
+function topologySql(query: unknown): string {
+  if (Array.isArray(query)) return query.join(' ')
+  if (query && typeof query === 'object' && 'strings' in query && Array.isArray(query.strings)) return query.strings.join(' ')
+  throw new Error('Unexpected SQL representation in topology fixture')
+}
+
 function txWorld() {
   const tx = {
     // Real lock contract: the advisory returns nothing useful; the Order lock returns the row while the classified
     // ORDER is still this venue's.
-    $queryRaw: jest.fn(async (_sql: any, ...values: unknown[]) => (values.includes(ORDER) ? [{ id: ORDER }] : [])),
+    $queryRaw: jest.fn(async (_sql: any, ...values: unknown[]): Promise<Array<{ id: string }>> => {
+      const sql = topologySql(_sql)
+      if (sql.includes('FROM "Venue"')) return [{ id: VENUE }]
+      if (sql.includes('FROM "Table"')) return [{ id: 'table-pos' }]
+      if (sql.includes('ANY(')) {
+        const result = tx.order.findUnique.mock.results[tx.order.findUnique.mock.results.length - 1]
+        const row = result && (await result.value)
+        return row ? [{ id: row.id }] : []
+      }
+      return values.includes(ORDER) ? [{ id: ORDER }] : []
+    }),
+    table: {
+      findMany: jest.fn(async ({ where }: { where: { id?: { in: string[] } } }) =>
+        where.id ? [{ id: 'table-pos', number: '12', status: 'AVAILABLE', currentOrderId: null }] : [],
+      ),
+    },
     shift: { findFirst: jest.fn().mockResolvedValue({ id: SHIFT, status: 'OPEN' }), updateMany: jest.fn() },
     order: {
       findUnique: jest.fn((args: any) => m.order.findUnique(args)),
+      findMany: jest.fn(async ({ where }: { where: { id?: { in: string[] } } }): Promise<Record<string, unknown>[]> => {
+        const result = tx.order.findUnique.mock.results[tx.order.findUnique.mock.results.length - 1]
+        const row = result && (await result.value)
+        return row && where.id?.in.includes(row.id) ? [{ ...row, tableId: row.tableId ?? null, createdAt: CLAIMED_AT }] : []
+      }),
       // Reread under the lock: the stored row, as long as it keeps this venue and the key it was classified by.
       findFirst: jest.fn(async ({ where }: any) => {
         const row = await m.order.findUnique({ where: { venueId_externalId: { venueId: where.venueId, externalId: where.externalId } } })
@@ -149,6 +177,13 @@ it('serializa aliases SoftRestaurant :0:/:77: como una sola Order, Payment y asi
     const visibleOrders = () => [...committed.orders, ...staged.orders]
     const tx = {
       $queryRaw: jest.fn(async (_sql: any, ...values: unknown[]) => {
+        const sql = topologySql(_sql)
+        if (sql.includes('FROM "Venue"')) return [{ id: VENUE }]
+        if (sql.includes('FROM "Table"')) return [{ id: 'table-pos' }]
+        if (sql.includes('ANY('))
+          return visibleOrders()
+            .filter(row => values.some(value => Array.isArray(value) && value.includes(row.id)))
+            .map(row => ({ id: row.id }))
         const advisoryKey = values.find(value => typeof value === 'string' && value.startsWith('pos-order:')) as string | undefined
         if (!advisoryKey) {
           // Order row lock (`id`, `venueId`): a row while the order is visible for this venue.
@@ -165,11 +200,21 @@ it('serializa aliases SoftRestaurant :0:/:77: como una sola Order, Payment y asi
         }
         return []
       }),
+      table: {
+        findMany: jest.fn(async ({ where }: { where: { id?: { in: string[] } } }) =>
+          where.id ? [{ id: 'table-pos', number: '12', status: 'AVAILABLE', currentOrderId: null }] : [],
+        ),
+      },
       shift: {
         updateMany: jest.fn().mockResolvedValue({ count: 1 }),
         findFirst: jest.fn().mockResolvedValue({ id: SHIFT, status: 'OPEN' }),
       },
       order: {
+        findMany: jest.fn(async ({ where }: { where: { id?: { in: string[] } } }) =>
+          visibleOrders()
+            .filter(row => where.id?.in.includes(row.id))
+            .map(row => ({ ...row, tableId: row.tableId ?? null, createdAt: CLAIMED_AT })),
+        ),
         findUnique: jest.fn(async ({ where }: any) => {
           if (advisoryKeys[0] !== advisoryKeys[1]) {
             lookupCount += 1
@@ -189,7 +234,13 @@ it('serializa aliases SoftRestaurant :0:/:77: como una sola Order, Payment y asi
           const key = where.venueId_externalId
           const existing = visibleOrders().find(order => order.venueId === key.venueId && order.externalId === key.externalId)
           if (existing) return Object.assign(existing, update)
-          const row = { id: `order-${transaction + 1}`, venueId: VENUE, shiftId: SHIFT, ...create }
+          const row = {
+            id: `order-${transaction + 1}`,
+            venueId: VENUE,
+            shiftId: SHIFT,
+            ...create,
+            tableId: create.table?.connect?.id ?? null,
+          }
           staged.orders.push(row)
           return row
         }),
@@ -313,6 +364,13 @@ it('serializa la llave natural y reclasifica dentro de tx si la Order apareció 
   tx.payment.create.mockResolvedValue({ id: 'payment-pos', amount: 100 })
   const ops: string[] = []
   tx.$queryRaw.mockImplementation(async (_sql: any, ...values: unknown[]) => {
+    const sql = topologySql(_sql)
+    if (sql.includes('FROM "Venue"')) return [{ id: VENUE }]
+    if (sql.includes('FROM "Table"')) return [{ id: 'table-pos' }]
+    if (sql.includes('ANY(')) {
+      ops.push('order') // the topology helper's real Order claim is observable too
+      return [{ id: ORDER }]
+    }
     ops.push(values.includes(ORDER) ? 'order' : 'natural-key')
     return values.includes(ORDER) ? [{ id: ORDER }] : []
   })
@@ -419,7 +477,9 @@ describe('Plan 3b T6 — the header decides from the Order read under its lock',
     await processPosOrderEvent(payload)
 
     expect(tx.order.findFirst).toHaveBeenCalledWith({ where: { id: ORDER, venueId: VENUE, externalId: payload.orderData.externalId } })
-    const orderLock = tx.$queryRaw.mock.calls.findIndex(call => call.includes(ORDER))
+    const orderLock = tx.$queryRaw.mock.calls.findIndex(call =>
+      call.some(value => value === ORDER || (Array.isArray(value) && value.includes(ORDER))),
+    )
     expect(orderLock).toBeGreaterThanOrEqual(0)
     expect(at(tx.$queryRaw, orderLock)).toBeLessThan(at(tx.order.findFirst))
     expect(at(tx.order.findFirst)).toBeLessThan(at(tx.shift.updateMany))
@@ -431,7 +491,13 @@ describe('Plan 3b T6 — the header decides from the Order read under its lock',
     const orphan = storedOrder({ externalId: 'INSTANCE:0:123' })
     m.order.findUnique.mockResolvedValueOnce(null).mockResolvedValueOnce(orphan)
     const tx = txWorld()
-    tx.$queryRaw.mockImplementation(async () => []) // the Order lock finds no row of this venue any more
+    tx.$queryRaw.mockImplementation(async (query: unknown) => {
+      const sql = topologySql(query)
+      if (sql.includes('FROM "Venue"')) return [{ id: VENUE }]
+      if (sql.includes('FROM "Table"')) return [{ id: 'table-pos' }]
+      if (sql.includes('FROM "Order"')) tx.order.findMany.mockResolvedValue([]) // disappearance also persists in the fresh snapshot
+      return [] // the classified Order is gone; neither its old id nor its stale alias may be written
+    })
     tx.shift.updateMany.mockResolvedValue({ count: 1 })
     tx.order.update.mockResolvedValue({ ...orphan, externalId: payload.orderData.externalId }) // what a stale-id write would return
     tx.order.upsert.mockResolvedValue(storedOrder({ id: 'order-fresh', shiftId: SHIFT }))
@@ -442,6 +508,11 @@ describe('Plan 3b T6 — the header decides from the Order read under its lock',
     expect(tx.order.update).not.toHaveBeenCalled()
     expect(tx.order.findFirst).not.toHaveBeenCalled()
     expect(tx.order.upsert.mock.calls[0][0].where).toEqual({ venueId_externalId: { venueId: VENUE, externalId: 'INSTANCE:77:123' } })
+    const tableLock = tx.$queryRaw.mock.calls.findIndex(([query]) => topologySql(query).includes('FROM "Table"'))
+    expect(tableLock).toBeGreaterThanOrEqual(0)
+    expect(tx.$queryRaw.mock.invocationCallOrder[tableLock]).toBeLessThan(tx.shift.updateMany.mock.invocationCallOrder[0])
+    expect(tx.$queryRaw.mock.invocationCallOrder[tableLock]).toBeLessThan(tx.order.upsert.mock.invocationCallOrder[0])
+    expect(m.$transaction).toHaveBeenCalledTimes(1)
     expect(socketManager.broadcastToVenue).toHaveBeenCalledWith(
       VENUE,
       SocketEventType.ORDER_CREATED,
@@ -494,5 +565,140 @@ describe('Plan 3b T6 — the header decides from the Order read under its lock',
 
     expect(tx.order.update).not.toHaveBeenCalled()
     expect(socketManager.broadcastToVenue).not.toHaveBeenCalled()
+  })
+})
+
+describe('POS optional candidate — only its absence can reduce the reviewed scope', () => {
+  const table = { id: 'table-pos', number: '12', status: 'AVAILABLE', currentOrderId: null }
+  const candidate = { id: ORDER, tableId: null, status: 'COMPLETED', paymentStatus: 'PAID', createdAt: CLAIMED_AT }
+  const sibling = { ...candidate, id: 'sibling-required', tableId: table.id, status: 'PENDING', paymentStatus: 'PENDING' }
+  const optionalInput = { venueId: VENUE, orderIds: [ORDER], tableIds: [table.id], optionalOrderId: ORDER }
+
+  function scopeWorld(config: { before: any[]; after?: any[]; returnedIds?: string[]; afterTable?: any }) {
+    let claimed = false
+    const ops: string[] = []
+    const visible = () => (claimed ? (config.after ?? config.before) : config.before)
+    const visibleTable = () => (claimed ? (config.afterTable ?? table) : table)
+    const tx = {
+      $queryRaw: jest.fn(async (query: unknown, ...values: unknown[]) => {
+        const sql = topologySql(query)
+        if (sql.includes('FROM "Venue"')) {
+          ops.push('venue')
+          return [{ id: VENUE }]
+        }
+        if (sql.includes('FROM "Order"')) {
+          ops.push('order')
+          const ids = values.find(Array.isArray) as string[]
+          claimed = true
+          return (config.returnedIds ?? ids).map(id => ({ id }))
+        }
+        if (sql.includes('FROM "Table"')) {
+          ops.push('table')
+          claimed = true
+          return [{ id: table.id }]
+        }
+        throw new Error('Unexpected scope query')
+      }),
+      order: {
+        findMany: jest.fn(async ({ where }: any) =>
+          visible().filter(row =>
+            where.id ? where.id.in.includes(row.id) : where.tableId.in.includes(row.tableId) && !where.status.notIn.includes(row.status),
+          ),
+        ),
+      },
+      table: {
+        findMany: jest.fn(async ({ where }: any) => {
+          const row = visibleTable()
+          return where.id ? (where.id.in.includes(row.id) ? [row] : []) : where.currentOrderId.in.includes(row.currentOrderId) ? [row] : []
+        }),
+      },
+    }
+    return { tx, ops }
+  }
+
+  it('accepts only the optional candidate absent before claiming, while retaining its explicit Table scope', async () => {
+    const { tx, ops } = scopeWorld({ before: [] })
+    await expect(lockTableOrderScope(tx as any, optionalInput)).resolves.toEqual({ venueId: VENUE, tables: [table], orders: [] })
+    expect(ops).toEqual(['venue', 'table'])
+  })
+
+  it('accepts that one candidate disappearing during the ordered claim and still takes the Table once', async () => {
+    const { tx, ops } = scopeWorld({ before: [candidate], after: [], returnedIds: [] })
+    await expect(lockTableOrderScope(tx as any, optionalInput)).resolves.toEqual({ venueId: VENUE, tables: [table], orders: [] })
+    expect(ops).toEqual(['venue', 'order', 'table'])
+    const orderClaim = tx.$queryRaw.mock.calls.find(([query]) => topologySql(query).includes('FROM "Order"'))!
+    expect(orderClaim).toContainEqual([ORDER])
+  })
+
+  it('preserves strict Order-not-found behavior without the optional input', async () => {
+    const { tx, ops } = scopeWorld({ before: [] })
+    await expect(lockTableOrderScope(tx as any, { venueId: VENUE, orderIds: [ORDER], tableIds: [table.id] })).rejects.toBeInstanceOf(
+      NotFoundError,
+    )
+    expect(ops).toEqual(['venue'])
+  })
+
+  it('preserves strict topology rejection if a required Order disappears during its claim', async () => {
+    const { tx, ops } = scopeWorld({ before: [candidate], after: [], returnedIds: [] })
+    await expect(lockTableOrderScope(tx as any, { venueId: VENUE, orderIds: [ORDER], tableIds: [table.id] })).rejects.toBeInstanceOf(
+      OrderTableTopologyChanged,
+    )
+    expect(ops).toEqual(['venue', 'order'])
+  })
+
+  it('retains the required live sibling when only the optional candidate disappears', async () => {
+    const { tx, ops } = scopeWorld({ before: [candidate, sibling], after: [sibling], returnedIds: [sibling.id] })
+    await expect(lockTableOrderScope(tx as any, optionalInput)).resolves.toEqual({ venueId: VENUE, tables: [table], orders: [sibling] })
+    expect(ops).toEqual(['venue', 'order', 'table'])
+    const orderClaim = tx.$queryRaw.mock.calls.find(([query]) => topologySql(query).includes('FROM "Order"'))!
+    expect(orderClaim).toContainEqual([ORDER, sibling.id])
+  })
+
+  it('cannot waive the required sibling even when the optional candidate was claimed successfully', async () => {
+    const { tx, ops } = scopeWorld({ before: [candidate, sibling], after: [candidate], returnedIds: [ORDER] })
+    await expect(lockTableOrderScope(tx as any, optionalInput)).rejects.toBeInstanceOf(OrderTableTopologyChanged)
+    expect(ops).toEqual(['venue', 'order'])
+  })
+
+  it('cannot waive a required live sibling with the optional candidate', async () => {
+    const { tx, ops } = scopeWorld({ before: [candidate, sibling], after: [], returnedIds: [] })
+    await expect(lockTableOrderScope(tx as any, optionalInput)).rejects.toBeInstanceOf(OrderTableTopologyChanged)
+    expect(ops).toEqual(['venue', 'order'])
+  })
+
+  it.each([false, true])('rejects an unexpected returned Order ID before Table locks; optional=%s', async optional => {
+    const { tx, ops } = scopeWorld({ before: [candidate], returnedIds: ['foreign-order'] })
+    const input = optional ? optionalInput : { venueId: VENUE, orderIds: [ORDER], tableIds: [table.id] }
+    await expect(lockTableOrderScope(tx as any, input)).rejects.toBeInstanceOf(OrderTableTopologyChanged)
+    expect(ops).toEqual(['venue', 'order'])
+  })
+
+  it.each([
+    ['candidate reappeared', [candidate], table],
+    ['new live Order', [sibling], table],
+    ['Table status changed', [], { ...table, status: 'CLEANING' }],
+    ['Table pointer changed', [sibling], { ...table, currentOrderId: sibling.id }],
+  ])('rejects the fresh snapshot when %s, without a second claim pass', async (_label, after, afterTable) => {
+    const { tx, ops } = scopeWorld({ before: [candidate], after: after as any[], afterTable, returnedIds: [] })
+    await expect(lockTableOrderScope(tx as any, optionalInput)).rejects.toBeInstanceOf(OrderTableTopologyChanged)
+    expect(ops).toEqual(['venue', 'order', 'table'])
+  })
+
+  it('rejects loss of a Table discovered only through the vanished candidate', async () => {
+    const { tx, ops } = scopeWorld({ before: [{ ...candidate, tableId: table.id }], after: [], returnedIds: [] })
+    const input = { venueId: VENUE, orderIds: [ORDER], optionalOrderId: ORDER }
+    await expect(lockTableOrderScope(tx as any, input)).rejects.toBeInstanceOf(OrderTableTopologyChanged)
+    expect(ops).toEqual(['venue', 'order', 'table'])
+  })
+
+  it.each([
+    { optionalOrderId: 'other-id', orderIds: [ORDER] },
+    { optionalOrderId: ORDER, orderIds: [ORDER, 'other-id'] },
+    { optionalOrderId: ORDER, orderIds: [ORDER], kdsOrderIds: [ORDER] },
+  ])('rejects invalid optional scope %j before any lock', async options => {
+    const { tx, ops } = scopeWorld({ before: [candidate] })
+    const input = { venueId: VENUE, tableIds: [table.id], ...options }
+    await expect(lockTableOrderScope(tx as any, input)).rejects.toBeInstanceOf(RangeError)
+    expect(ops).toEqual([])
   })
 })
