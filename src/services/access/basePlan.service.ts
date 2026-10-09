@@ -86,8 +86,9 @@ export const PREMIUM_ONLY_CODES = [
  *
  * SHOPIFY_INTEGRATION — conector Shopify, Fase 1 piloto (spec 2026-10-07 §12 bis.15). En la Fase 5 (App 2 pública) se
  * mueve a PREMIUM_ONLY_CODES junto con su entrada en FEATURE_CATALOG; `shopifyTierMirror.test.ts` falla si queda en los
- * dos. El dashboard NO la espeja en plan-catalog.ts ni en plan-comparison.ts (comprar Premium hoy no la da): su
- * pantalla decide con `grantedFeatureCodes` de /plan-tier y, sin acceso, enseña «Shopify está en piloto».
+ * dos. El dashboard NO la espeja en plan-catalog.ts ni en plan-comparison.ts (comprar Premium hoy no la ANUNCIA; el
+ * acceso lo concede la regla y el piloto lo cierra SHOPIFY_PILOTO_SHOPS): su pantalla decide con `grantedFeatureCodes`
+ * de /plan-tier y, sin acceso, enseña «Shopify está en piloto».
  */
 export const PREMIUM_ONLY_SIN_CATALOGO = ['SHOPIFY_INTEGRATION'] as const
 
