@@ -87,7 +87,7 @@ export async function updateConfig(req: Request, res: Response, next: NextFuncti
   try {
     const { venueId, configId } = req.params
 
-    const config = await configService.updateCommissionConfig(configId, venueId, req.body)
+    const config = await configService.updateCommissionConfig(configId, venueId, req.body, (req as any).authContext?.userId)
 
     res.json(config)
   } catch (error) {

@@ -1,13 +1,16 @@
 /**
  * Config de esquemas — la regla de asistencia entra y sale completa, nunca a medias.
  */
-jest.mock('@/utils/prismaClient', () => ({
-  __esModule: true,
-  default: {
+jest.mock('@/utils/prismaClient', () => {
+  const db: any = {
     commissionConfig: { create: jest.fn(), findFirst: jest.fn(), update: jest.fn() },
     venue: { findUnique: jest.fn() },
-  },
-}))
+    activityLog: { create: jest.fn() },
+  }
+  // Actualizar escribe el cambio y su ActivityLog en una transacción (FT-GRAVES B1).
+  db.$transaction = jest.fn(async (fn: (tx: unknown) => unknown) => fn(db))
+  return { __esModule: true, default: db }
+})
 jest.mock('@/config/logger', () => ({
   __esModule: true,
   default: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },

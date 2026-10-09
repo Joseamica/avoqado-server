@@ -18,7 +18,9 @@ import { BadRequestError, NotFoundError } from '../../../errors/AppError'
 import { RoleRates } from './commission-utils'
 import { validarTasasDelEsquema } from './tasasDelEsquema'
 import { personasElegidasAGuardar } from './personasElegidas'
+import { rechazarCambiosConComisiones, sinLoQueNoCambia } from './cambiosConComisiones'
 import { logAction } from '../activity-log.service'
+import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
 
 // ============================================
 // Type Definitions
@@ -319,8 +321,13 @@ export async function createCommissionConfig(venueId: string, data: CreateCommis
  *
  * Note: Some fields cannot be changed if calculations exist
  */
-export async function updateCommissionConfig(configId: string, venueId: string, data: UpdateCommissionConfigInput): Promise<any> {
-  validateAttendanceRule(data)
+export async function updateCommissionConfig(
+  configId: string,
+  venueId: string,
+  cuerpo: UpdateCommissionConfigInput,
+  actorId?: string,
+): Promise<any> {
+  validateAttendanceRule(cuerpo)
   // Verify config exists and belongs to venue
   const existing = await prisma.commissionConfig.findFirst({
     where: {
@@ -339,20 +346,10 @@ export async function updateCommissionConfig(configId: string, venueId: string, 
     throw new NotFoundError(`Commission config ${configId} not found`)
   }
 
-  // If calculations exist, some fields are immutable
-  const hasCalculations = existing._count.calculations > 0
-  const immutableFields = ['defaultRate', 'calcType', 'recipient', 'trigger']
-
-  if (hasCalculations) {
-    for (const field of immutableFields) {
-      if (data[field as keyof UpdateCommissionConfigInput] !== undefined) {
-        throw new BadRequestError(
-          `Cannot modify ${field} because this config has ${existing._count.calculations} existing calculations. ` +
-            'Create a new config instead.',
-        )
-      }
-    }
-  }
+  // FT-GRAVES B1 (`cambiosConComisiones.ts`): lo que llega igual a lo guardado no es un cambio; con comisiones calculadas sólo
+  // se rechaza CAMBIAR la tasa, el tipo, a quién se le paga o cuándo se calcula (antes bastaba con que vinieran).
+  const data = sinLoQueNoCambia(cuerpo, existing)
+  rechazarCambiosConComisiones(data, existing, existing._count.calculations)
 
   // Lo que QUEDA: un tipo nuevo con la tasa de antes (un fijo de $5 que pasa a niveles sería 500 %) o una tasa nueva con el
   // tipo de antes; y las tasas por rol y de meta superada (final-fijo-niveles, fase 3).
@@ -397,33 +394,25 @@ export async function updateCommissionConfig(configId: string, venueId: string, 
   if (data.effectiveTo !== undefined) updateData.effectiveTo = data.effectiveTo
   if (data.active !== undefined) updateData.active = data.active
 
-  const config = await prisma.commissionConfig.update({
-    where: { id: configId },
-    data: updateData,
-    include: {
-      createdBy: {
-        select: {
-          id: true,
-          firstName: true,
-          lastName: true,
-        },
-      },
-    },
+  // El cambio y su ActivityLog (con quién, y si se desactivó) en la MISMA transacción (FT-GRAVES B1).
+  const config = await prisma.$transaction(async tx => {
+    const actualizado = await tx.commissionConfig.update({
+      where: { id: configId },
+      data: updateData,
+      include: { createdBy: { select: { id: true, firstName: true, lastName: true } } },
+    })
+    await writeLegacyActivityAuditTx(tx, {
+      staffId: actorId ?? null,
+      venueId,
+      action: 'COMMISSION_CONFIG_UPDATED',
+      entity: 'CommissionConfig',
+      entityId: configId,
+      data: { changes: Object.keys(data), ...(data.active !== undefined ? { active: data.active } : {}) },
+    })
+    return actualizado
   })
 
-  logger.info('Commission config updated', {
-    configId,
-    venueId,
-    changes: Object.keys(data),
-  })
-
-  logAction({
-    venueId,
-    action: 'COMMISSION_CONFIG_UPDATED',
-    entity: 'CommissionConfig',
-    entityId: configId,
-    data: { changes: Object.keys(data) },
-  })
+  logger.info('Commission config updated', { configId, venueId, changes: Object.keys(data) })
 
   return config
 }
