@@ -11,7 +11,7 @@ import {
 } from '@/services/commerce-channels/shopify/shopify.catalog.service'
 import type { ShopifyFailure, ShopifyFailureCode, ShopifyResult } from '@/services/commerce-channels/shopify/shopify.graphql'
 import { levelKey, type fetchLevels, type NivelLeido } from '@/services/commerce-channels/shopify/shopify.mirror.service'
-import { limpiarEscenarioShopify, type EscenarioShopify } from './fixtures'
+import { graphqlFalso, limpiarEscenarioShopify, type EscenarioShopify } from './fixtures'
 
 export type OpcionesVariante = {
   sku?: string | null
@@ -222,4 +222,51 @@ export async function otraSucursalDeLaTienda(
 /** Limpia SÓLO lo de la otra sucursal: la tienda, sus eventos y la organización son del escenario dueño. */
 export async function limpiarOtraSucursal(s: EscenarioShopify): Promise<void> {
   await limpiarEscenarioShopify({ ...s, storeId: '', shopDomain: '__de-otra-sucursal__', organizationId: '__de-otra-sucursal__' })
+}
+
+/** La variante que Shopify tendría para una pareja que YA existe, con el nombre y el SKU del producto de hoy. */
+export async function variantesDeLaSucursal(locationLinkId: string): Promise<VarianteShopify[]> {
+  const out: VarianteShopify[] = []
+  let despues = ''
+  for (;;) {
+    const parejas = await prisma.shopifyVariantLink.findMany({
+      where: { locationLinkId, id: { gt: despues } },
+      include: { product: { select: { name: true, sku: true, gtin: true, imageUrl: true } } },
+      orderBy: { id: 'asc' },
+      take: 200,
+    })
+    for (const p of parejas) {
+      out.push({
+        id: p.shopifyVariantId,
+        sku: p.originalSku ?? p.product.sku,
+        selectedOptions: [{ name: 'Title', value: 'Default Title' }],
+        barcodes: { nodes: p.product.gtin ? [{ value: p.product.gtin }] : [] },
+        contextualPricing: { price: { amount: '100.00', currencyCode: 'MXN' } },
+        media: { nodes: p.product.imageUrl ? [{ preview: { image: { url: p.product.imageUrl } } }] : [] },
+        product: { id: p.shopifyProductId, title: p.product.name, productType: 'Prueba', status: 'ACTIVE', featuredMedia: null },
+        inventoryItem: {
+          id: p.inventoryItemId,
+          tracked: true,
+          inventoryLevel: {
+            isActive: true,
+            quantities: [
+              { name: 'available', quantity: p.mirrorAvailable },
+              { name: 'committed', quantity: p.mirrorCommitted },
+            ],
+          },
+        },
+      })
+    }
+    if (parejas.length < 200) return out
+    despues = parejas[parejas.length - 1].id
+  }
+}
+
+/** Doble del barrido: sirve estas variantes de 50 en 50 con cursores `s1`, `s2`, … */
+export function graphqlDelCatalogo(variantes: VarianteShopify[]): jest.Mock {
+  return graphqlFalso((_q, vars) => {
+    const i = vars.after ? Number(String(vars.after).slice(1)) : 0
+    const hay = (i + 1) * 50 < variantes.length
+    return paginaDeVariantes(variantes.slice(i * 50, (i + 1) * 50), hay ? `s${i + 1}` : null)
+  })
 }

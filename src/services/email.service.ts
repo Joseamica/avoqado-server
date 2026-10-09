@@ -3445,6 +3445,112 @@ Servicios Tecnologicos Avo S.A. de C.V.`
   }
 
   /**
+   * Conector Shopify (plan v2 B4): productos cuyo stock no cuadra entre Avoqado y Shopify y que el cuadre no supo
+   * explicar. Plantilla canónica de `sendLowStockDigestEmail`; nombres escapados; html y text; uno por persona y día
+   * (la llave de idempotencia lleva la fecha del negocio).
+   */
+  async sendShopifyPorRevisarEmail(
+    email: string,
+    data: {
+      venueName: string
+      total: number
+      items: Array<{ name: string; avoqado: string; shopify: number; motivo: string }>
+      dashboardUrl: string
+      preferencesUrl: string
+      idempotencyKey?: string
+    },
+  ): Promise<boolean> {
+    const esc = escapeHtmlForReferralEmail
+    const logoUrl = 'https://avoqado.io/isotipo.svg'
+    const subject = `Stock por revisar entre Avoqado y Shopify en ${data.venueName}`
+    const fecha = new Date().toLocaleDateString('es-MX', {
+      weekday: 'long',
+      day: 'numeric',
+      month: 'long',
+      year: 'numeric',
+      timeZone: 'America/Mexico_City',
+    })
+    const fechaBonita = fecha.charAt(0).toUpperCase() + fecha.slice(1)
+    const resto = Math.max(0, data.total - data.items.length)
+    const resumen = `${data.total} ${data.total === 1 ? 'producto no cuadra' : 'productos no cuadran'} entre Avoqado y Shopify y no encontramos qu&eacute; venta lo explica.`
+    const filas = data.items
+      .map(
+        i => `
+          <tr>
+            <td style="padding: 12px 16px; border-bottom: 1px solid #e5e7eb;">
+              <div style="font-size: 14px; font-weight: 500; color: #000;">${esc(i.name)}</div>
+              <div style="font-size: 12px; color: #666;">${esc(i.motivo)}</div>
+            </td>
+            <td style="padding: 12px 16px; border-bottom: 1px solid #e5e7eb; text-align: right; font-size: 14px; color: #000;">${esc(i.avoqado)}</td>
+            <td style="padding: 12px 16px; border-bottom: 1px solid #e5e7eb; text-align: right; font-size: 14px; color: #000;">${i.shopify}</td>
+          </tr>`,
+      )
+      .join('')
+    const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${esc(subject)}</title>
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; margin: 0; padding: 0; background-color: #ffffff; color: #000000;">
+  <div style="max-width: 600px; margin: 0 auto; padding: 32px 24px;">
+    <div style="padding-bottom: 32px;">
+      <img src="${logoUrl}" alt="Avoqado" width="32" height="32" style="display: inline-block; vertical-align: middle;">
+      <span style="font-size: 18px; font-weight: 700; color: #000; vertical-align: middle; margin-left: 8px;">Avoqado</span>
+    </div>
+    <h1 style="margin: 0 0 8px 0; font-size: 28px; font-weight: 400; color: #000; line-height: 1.2;">
+      Stock por revisar en ${esc(data.venueName)}
+    </h1>
+    <p style="margin: 0 0 24px 0; font-size: 14px; color: #666;">${fechaBonita}</p>
+    <p style="margin: 0 0 24px 0; font-size: 14px; color: #000;">${resumen} Elige con un clic qu&eacute; n&uacute;mero es el bueno.</p>
+    <table cellpadding="0" cellspacing="0" style="width: 100%; border-collapse: collapse; border: 1px solid #e5e7eb; border-radius: 8px; overflow: hidden;">
+      <thead>
+        <tr style="background-color: #f9fafb;">
+          <th style="padding: 10px 16px; text-align: left; font-size: 12px; font-weight: 600; color: #666; text-transform: uppercase; border-bottom: 2px solid #e5e7eb;">Producto</th>
+          <th style="padding: 10px 16px; text-align: right; font-size: 12px; font-weight: 600; color: #666; text-transform: uppercase; border-bottom: 2px solid #e5e7eb;">Avoqado</th>
+          <th style="padding: 10px 16px; text-align: right; font-size: 12px; font-weight: 600; color: #666; text-transform: uppercase; border-bottom: 2px solid #e5e7eb;">Shopify</th>
+        </tr>
+      </thead>
+      <tbody>${filas}</tbody>
+    </table>
+    ${resto > 0 ? `<p style="margin: 12px 0 0 0; font-size: 13px; color: #666;">y ${resto} más en la página.</p>` : ''}
+    <div style="margin: 32px 0; text-align: left;">
+      <a href="${data.dashboardUrl}" style="display: inline-block; background-color: #000000; color: #ffffff; padding: 12px 24px; border-radius: 6px; text-decoration: none; font-size: 14px; font-weight: 600;">
+        Revisar en Avoqado
+      </a>
+    </div>
+    <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 32px 0;" />
+    <div style="padding-top: 8px;">
+      <div style="margin-bottom: 16px;">
+        <img src="${logoUrl}" alt="Avoqado" width="24" height="24" style="display: inline-block; vertical-align: middle;">
+        <span style="font-size: 14px; font-weight: 700; color: #000; vertical-align: middle; margin-left: 6px;">Avoqado</span>
+      </div>
+      <p style="margin: 0 0 8px 0; font-size: 12px; color: #999;">Servicios Tecnologicos Avo S.A. de C.V.</p>
+      <p style="margin: 0; font-size: 12px; color: #999;">
+        <a href="${data.preferencesUrl}" style="color: #666; text-decoration: underline;">Administra tus preferencias de notificaciones</a>
+      </p>
+    </div>
+  </div>
+</body>
+</html>`
+    const text = `Stock por revisar en ${data.venueName}
+${fechaBonita}
+
+${data.total} producto(s) no cuadran entre Avoqado y Shopify y no encontramos que venta lo explica.
+
+${data.items.map(i => `- ${i.name}: Avoqado ${i.avoqado}, Shopify ${i.shopify} (${i.motivo})`).join('\n')}
+${resto > 0 ? `y ${resto} más en la página.\n` : ''}
+Revisar en Avoqado: ${data.dashboardUrl}
+
+---
+Servicios Tecnologicos Avo S.A. de C.V.
+Preferencias: ${data.preferencesUrl}`
+    return this.sendEmail({ to: email, subject, html, text, idempotencyKey: data.idempotencyKey })
+  }
+
+  /**
    * Le manda al CLIENTE FINAL la liga de su tarjeta de sellos.
    *
    * 🔴 El lector NO es el negocio: aqui no se habla de planes, del dashboard ni de
