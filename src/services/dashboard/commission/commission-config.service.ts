@@ -30,7 +30,7 @@ import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
  * Asistencia → comisiones: el porcentaje de castigo vive en (0, 1] — 0.25 = pierde el 25% del
  * día con retardo. Prender la regla sin porcentaje sería un interruptor que no hace nada.
  */
-function validateAttendanceRule(data: { attendanceLinked?: boolean; attendanceLatePenaltyRate?: number | null }): void {
+export function validateAttendanceRule(data: { attendanceLinked?: boolean; attendanceLatePenaltyRate?: number | null }): void {
   const rate = data.attendanceLatePenaltyRate
   if (rate !== undefined && rate !== null && (!Number.isFinite(rate) || rate <= 0 || rate > 1)) {
     throw new BadRequestError('El castigo por retardo debe ser un porcentaje entre 1 y 100 (0.25 = 25%).')
