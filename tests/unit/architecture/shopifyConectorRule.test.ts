@@ -48,6 +48,47 @@ function enOrden(src: string, textos: string[]) {
   expect(textos.map((t, i) => `${posiciones[i]} ${t}`)).toEqual(textos.map(t => `${esperado[textos.indexOf(t)]} ${t}`))
 }
 
+/**
+ * Glob mínimo (`**`, `*`) a RegExp. Se escribe aquí porque package.json no declara ninguna librería de globs (fast-glob, glob y
+ * minimatch sólo están como dependencias de otras) y Node 20, el del CI, no trae `fs.globSync`.
+ * `a/**` casa lo que hay DENTRO de `a/`; `a/**\/b` casa `a/b` y `a/x/y/b`; `*` no cruza `/`.
+ */
+function globARegExp(g: string): RegExp {
+  let re = ''
+  for (let i = 0; i < g.length; ) {
+    if (g.startsWith('**/', i)) {
+      re += '(?:.*/)?'
+      i += 3
+    } else if (g.startsWith('/**', i) && i + 3 === g.length) {
+      re += '/.+'
+      i += 3
+    } else if (g.startsWith('**', i)) {
+      re += '.*'
+      i += 2
+    } else if (g[i] === '*') {
+      re += '[^/]*'
+      i += 1
+    } else {
+      re += g[i].replace(/[.+?^${}()|[\]\\]/g, '\\$&')
+      i += 1
+    }
+  }
+  return new RegExp(`^${re}$`)
+}
+/** Todos los archivos bajo esas carpetas, como rutas relativas a la raíz del repo con `/`. */
+function archivosBajo(carpetas: string[]): string[] {
+  const salida: string[] = []
+  const recorre = (rel: string) => {
+    for (const e of fs.readdirSync(path.join(RAIZ, rel), { withFileTypes: true })) {
+      const hijo = `${rel}/${e.name}`
+      if (e.isDirectory()) recorre(hijo)
+      else salida.push(hijo)
+    }
+  }
+  carpetas.forEach(recorre)
+  return salida
+}
+
 describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () => {
   it('🔴 trae el invariante operativo de §9.3, literal', () => {
     expect(regla).toContain('`Inventory = espejo + Σ vivas + Σ DEAD_LETTER sin resolver + offset de la revisión OPEN`')
@@ -277,7 +318,7 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
   it('🔴 las entradas HTTP: webhook crudo de 1 MB antes del genérico y callback con las dos formas de HMAC', () => {
     contieneTodas([
       '`express.raw` de 1 MB (`SHOPIFY_WEBHOOK_MAX_BYTES`) montado ANTES del router genérico',
-      "Ese montaje usa `express.raw({ type: 'application/json' })`: el límite por omisión es de 100 KB",
+      "El del router genérico usa `express.raw({ type: 'application/json' })`: el límite por omisión es de 100 KB",
       'su tipo NO es comodín (cualquier otro Content-Type deja `req.body = {}`)',
       '`handleShopifyCallback(…)` recibe `req.query` INTACTO',
       'se aceptan DOS formas de firma',
@@ -459,11 +500,11 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     ]) {
       expect(globs).toContain(escritor)
     }
+    // Cada glob se EXPANDE y debe casar con al menos un archivo (un `src/services/**/inexistente*.ts` no pasa).
+    const archivos = archivosBajo(['src', 'prisma/migrations', 'tests/integration'])
     const huecos = globs.filter(g => {
-      const previo = g.split('*')[0] // lo que precede al primer comodín
-      const dir = previo.endsWith('/') ? previo : path.dirname(previo)
-      const base = previo.endsWith('/') ? '' : path.basename(previo)
-      return !(fs.existsSync(path.join(RAIZ, dir)) && (base === '' || fs.readdirSync(path.join(RAIZ, dir)).some(f => f.startsWith(base))))
+      const re = globARegExp(g)
+      return !archivos.some(f => re.test(f))
     })
     expect(huecos).toEqual([])
   })

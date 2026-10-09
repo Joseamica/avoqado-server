@@ -31,7 +31,7 @@ cambias el comportamiento, cambia aquí la frase y su aserción en el mismo comm
 
 | Pieza                                                                            | Dónde                                                                                                                       | Efecto                                                                                                          |
 | -------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| `SHOPIFY_PILOTO_SHOPS` (dominios `.myshopify.com`, coma; se lee en cada llamada) | `startShopifyConnect(…)`, `shopify.connect.service.ts:62`                                                                   | otra tienda ⇒ 409 `SHOPIFY_SOLO_PILOTO`                                                                         |
+| `SHOPIFY_PILOTO_SHOPS` (dominios `.myshopify.com`, coma; se lee en cada llamada) | `startShopifyConnect(…)` (`shopify.connect.service.ts:90`; la lista, `tiendasPiloto`, en `:62`)                             | otra tienda ⇒ 409 `SHOPIFY_SOLO_PILOTO`                                                                         |
 | `SHOPIFY_INTEGRATION` en `PREMIUM_ONLY_SIN_CATALOGO`                             | `basePlan.service.ts:93`                                                                                                    | Premium por regla pero SIN entrada de catálogo ni precio; `shopifyTierMirror.test.ts` falla si queda en los dos |
 | Nunca se contrata suelta                                                         | `addFeaturesToVenue(…)` (`venueFeature.dashboard.service.ts:190`) y `createTrialSubscriptions(…)` (`stripe.service.ts:303`) | 400 `FEATURE_NO_SE_VENDE_SUELTA`; la segunda es el embudo de venta suelta, conversión de demo y onboarding      |
 
@@ -43,7 +43,7 @@ cada cliente. Un Premium ya pagado pasa el candado y choca con `SHOPIFY_SOLO_PIL
 ## 1. Entradas HTTP: webhook y callback
 
 - **Webhook** (`SHOPIFY_WEBHOOK_ROUTE`, `app.ts:161`): `express.raw` de 1 MB (`SHOPIFY_WEBHOOK_MAX_BYTES`) montado ANTES del router genérico
-  de `/api/v1/webhooks`. Ese montaje usa `express.raw({ type: 'application/json' })`: el límite por omisión es de 100 KB (un
+  de `/api/v1/webhooks`. El del router genérico usa `express.raw({ type: 'application/json' })`: el límite por omisión es de 100 KB (un
   `products/update` con muchas variantes lo rebasa) y su tipo NO es comodín (cualquier otro Content-Type deja `req.body = {}`); el HMAC es
   del cuerpo CRUDO. `persistShopifyWebhook(…)` sólo guarda y contesta; lo procesa el worker. Pruebas:
   `tests/unit/routes/shopify.webhook.app.test.ts` y `tests/integration/shopify/webhook-app.integration.test.ts` (un POST firmado por la
