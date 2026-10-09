@@ -252,6 +252,24 @@ async function applyPublication(tx: Tx, venueId: string, input: PublishFloorPlan
     await tx.table.update({ where: { id }, data: { number: await freeArchivedNumber(tx, venueId, number, desiredNumberSet) } })
   for (const id of diff.tables.renumber) await tx.table.update({ where: { id }, data: { number: `__tmp_${id}` } })
   for (const u of diff.tables.update) await tx.table.update({ where: { id: u.id }, data: tableData(u.data) })
+  // `updateOrder` del dashboard cambia el `tableId` sin mover el puntero: la cuenta viva de una mesa archivada puede
+  // seguir apuntada por OTRA mesa, y `currentOrderId` es único. Esas se reviven OCUPADAS sin tocar el puntero.
+  const reviveIds = diff.tables.revive.map(r => r.id)
+  const liveIds = reviveIds.flatMap(id => {
+    const t = lockedById.get(id)
+    return !t?.pointerOpen && t?.liveOrderId ? [t.liveOrderId] : []
+  })
+  const alreadyPointed = new Set<string>(
+    liveIds.length
+      ? (
+          await tx.table.findMany({
+            where: { venueId, currentOrderId: { in: liveIds }, id: { notIn: reviveIds } },
+            select: { currentOrderId: true },
+            take: liveIds.length,
+          })
+        ).flatMap(t => (t.currentOrderId ? [t.currentOrderId] : []))
+      : [],
+  )
   for (const r of diff.tables.revive) {
     // Con su puntero en una cuenta abierta conserva su estado y su cuenta. Si el puntero no está abierto pero hay una
     // cuenta viva sin pagar ligada por tableId, queda OCUPADA apuntándola (como `reconcileTableAfterOrderRemoved`).
@@ -260,7 +278,9 @@ async function applyPublication(tx: Tx, venueId: string, input: PublishFloorPlan
     const occupancy = t?.pointerOpen
       ? {}
       : t?.liveOrderId
-        ? { status: 'OCCUPIED' as const, currentOrderId: t.liveOrderId }
+        ? alreadyPointed.has(t.liveOrderId)
+          ? { status: 'OCCUPIED' as const }
+          : { status: 'OCCUPIED' as const, currentOrderId: t.liveOrderId }
         : { status: 'AVAILABLE' as const, currentOrderId: null }
     await tx.table.update({ where: { id: r.id }, data: { ...tableData(r.data), active: true, ...occupancy } })
   }

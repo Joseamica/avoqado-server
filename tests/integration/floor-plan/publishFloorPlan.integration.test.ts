@@ -513,6 +513,46 @@ describe('publishFloorPlan', () => {
     })
   })
 
+  it('revivir una mesa cuya cuenta viva YA la apunta otra mesa activa: 200, OCUPADA, sin tocar el puntero ajeno', async () => {
+    const created = await conMesas(mesa('t1', '2'), mesa('t2', '9', { positionX: 0.2 }))
+    const area = salon(created.areas[0].id)
+    const archivada = created.tables.find(t => t.number === '2')!
+    const otra = created.tables.find(t => t.number === '9')!
+    const removed = await publish({ baseFingerprint: created.fingerprint, areas: [area], tables: [igual(otra)] })
+    // `updateOrder` del dashboard cambió el tableId a la mesa archivada sin mover el puntero de la otra mesa.
+    const viva = await abrirCuenta(otra.id)
+    await prisma.order.update({ where: { id: viva.id }, data: { tableId: archivada.id } })
+    const back = await publish({
+      baseFingerprint: removed.fingerprint,
+      areas: [area],
+      tables: [igual(otra), mesa('x', '2', { areaRef: area.id })],
+    })
+    expect(back.tables.find(t => t.number === '2')).toMatchObject({ id: archivada.id, hasOpenOrder: true })
+    expect(await prisma.table.findUniqueOrThrow({ where: { id: archivada.id } })).toMatchObject({
+      active: true,
+      status: 'OCCUPIED',
+      currentOrderId: null,
+    })
+    expect(await prisma.table.findUniqueOrThrow({ where: { id: otra.id } })).toMatchObject({ currentOrderId: viva.id })
+  })
+
+  it('una mesa con capacity 0 («sin dato»), existente y no tocada, publica 200 y la conserva en 0', async () => {
+    const created = await conMesas(mesa('t1', '1'), mesa('t2', '2', { positionX: 0.2 }))
+    const sinDato = created.tables.find(t => t.number === '2')!
+    await prisma.table.update({ where: { id: sinDato.id }, data: { capacity: 0 } })
+    const now = await getFloorPlan(venueId)
+    const t1 = now.tables.find(t => t.number === '1')!
+    const t2 = now.tables.find(t => t.number === '2')!
+    expect(t2.capacity).toBe(0)
+    const out = await publish({
+      baseFingerprint: now.fingerprint,
+      areas: [salon(created.areas[0].id)],
+      tables: [igual(t1, { positionX: 0.7 }), igual(t2)],
+    })
+    expect(out.tables.find(t => t.number === '2')?.capacity).toBe(0)
+    expect(await prisma.table.findUniqueOrThrow({ where: { id: sinDato.id } })).toMatchObject({ capacity: 0, active: true })
+  })
+
   it('una cuenta abierta de verdad (confirmada, sin pagar) sí frena quitar la mesa', async () => {
     const created = await conMesas(mesa('t1', '4'))
     await abrirCuenta(created.tables[0].id, { status: 'CONFIRMED' })
