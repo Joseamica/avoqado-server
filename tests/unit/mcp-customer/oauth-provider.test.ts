@@ -225,8 +225,10 @@ describe('regresión: un refresh nunca amplía el consentimiento', () => {
   })
 })
 
-describe('el consentimiento no cambia de catálogo al canjear o renovar', () => {
-  const resource = new URL('/mcp/directory', process.env.MCP_ISSUER_URL ?? 'http://localhost:12344')
+describe.each([
+  ['manual', MCP_RESOURCE_URL, MCP_DIRECTORY_RESOURCE_URL],
+  ['directory', MCP_DIRECTORY_RESOURCE_URL, MCP_RESOURCE_URL],
+])('el consentimiento no cambia de catálogo al canjear o renovar (%s)', (_profile, resource, other) => {
   beforeEach(() => {
     const data = { clientId: 'c1', staffId: 's1', activeOrg: 'o1', scopes: ['mcp:read'], resource: resource.href }
     ;(store.consumeAuthCode as jest.Mock).mockResolvedValue({ ...data, redirectUri: 'http://cb' })
@@ -244,7 +246,6 @@ describe('el consentimiento no cambia de catálogo al canjear o renovar', () => 
     expect(store.createRefreshToken).toHaveBeenCalledWith(expect.objectContaining({ resource: resource.href }))
   })
   it('rechaza cambiar el recurso en código o refresh', async () => {
-    const other = new URL('/mcp', resource)
     await expect(provider.exchangeAuthorizationCode({ client_id: 'c1' } as never, 'code', undefined, undefined, other)).rejects.toThrow()
     await expect(provider.exchangeRefreshToken({ client_id: 'c1' } as never, 'refresh', undefined, other)).rejects.toThrow()
     expect(store.createRefreshToken).not.toHaveBeenCalled()
