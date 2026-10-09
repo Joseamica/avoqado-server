@@ -3528,9 +3528,7 @@ Servicios Tecnologicos Avo S.A. de C.V.`
         <span style="font-size: 14px; font-weight: 700; color: #000; vertical-align: middle; margin-left: 6px;">Avoqado</span>
       </div>
       <p style="margin: 0 0 8px 0; font-size: 12px; color: #999;">Servicios Tecnologicos Avo S.A. de C.V.</p>
-      <p style="margin: 0; font-size: 12px; color: #999;">
-        <a href="${data.preferencesUrl}" style="color: #666; text-decoration: underline;">Administra tus preferencias de notificaciones</a>
-      </p>
+      <p style="margin: 0; font-size: 12px; color: #999;">Este correo sale una vez al día mientras haya algo por revisar.</p>
     </div>
   </div>
 </body>
@@ -3546,7 +3544,7 @@ Revisar en Avoqado: ${data.dashboardUrl}
 
 ---
 Servicios Tecnologicos Avo S.A. de C.V.
-Preferencias: ${data.preferencesUrl}`
+Este correo sale una vez al día mientras haya algo por revisar.`
     return this.sendEmail({ to: email, subject, html, text, idempotencyKey: data.idempotencyKey })
   }
 

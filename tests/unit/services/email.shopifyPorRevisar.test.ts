@@ -26,11 +26,23 @@ describe('sendShopifyPorRevisarEmail — plantilla canónica (email-templates.md
     expect(o.html.split('https://avoqado.io/isotipo.svg').length - 1).toBeGreaterThanOrEqual(2)
     expect(o.html).toContain('background-color: #000000')
     expect(o.html).toContain(datos.dashboardUrl)
-    expect(o.html).toContain(datos.preferencesUrl)
     expect(o.html).toContain('Servicios Tecnologicos Avo S.A. de C.V.')
     expect(o.text.length).toBeGreaterThan(0)
     expect(o.text).toContain(datos.dashboardUrl)
     expect(o.idempotencyKey).toBe(datos.idempotencyKey)
+  })
+
+  // Ruling I1/L19: las preferencias NO gobiernan este correo, así que el pie no puede ofrecer apagarlo ahí.
+  it('🔴 el pie dice que sale una vez al día y NO liga a las preferencias de notificaciones (html y text)', async () => {
+    await emailService.sendShopifyPorRevisarEmail('dueno@example.com', datos)
+    const o = enviado()
+    const frase = 'Este correo sale una vez al día mientras haya algo por revisar.'
+    expect(o.html).toContain(frase)
+    expect(o.text).toContain(frase)
+    for (const cuerpo of [o.html, o.text]) {
+      expect(cuerpo).not.toContain(datos.preferencesUrl)
+      expect(cuerpo).not.toMatch(/preferencias/i)
+    }
   })
 
   it('escapa los nombres de producto y de negocio en el HTML', async () => {
