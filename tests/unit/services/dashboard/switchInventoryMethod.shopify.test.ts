@@ -14,6 +14,7 @@ function fakeDb(method: 'RECIPE' | 'QUANTITY') {
         .mockResolvedValue({ id: 'p1', venueId: 'v1', trackInventory: true, inventoryMethod: method, deletedAt: null, deletedBy: null }),
     },
     shopifyVariantLink: { findUnique: jest.fn().mockResolvedValue(null) },
+    shopifyLocationLink: { updateMany: jest.fn() },
     inventory: { deleteMany: jest.fn().mockResolvedValue({ count: 1 }), createMany: jest.fn() },
     recipeLine: { deleteMany: jest.fn() },
     recipe: { deleteMany: jest.fn() },
@@ -32,11 +33,23 @@ describe('switchInventoryMethod · conector Shopify (B7)', () => {
     expect(db.inventory.deleteMany).toHaveBeenCalledWith({ where: { productId: 'p1' } })
   })
 
-  it('a cantidad no consulta a Shopify', async () => {
+  it('a cantidad sin pareja: una lectura por índice y ninguna escritura a Shopify', async () => {
     const { db, tx } = fakeDb('QUANTITY')
     await switchInventoryMethod('v1', 'p1', 'QUANTITY', tx)
-    expect(db.shopifyVariantLink.findUnique).not.toHaveBeenCalled()
+    expect(db.shopifyVariantLink.findUnique).toHaveBeenCalledTimes(1)
+    expect(db.shopifyLocationLink.updateMany).not.toHaveBeenCalled()
     expect(db.$queryRaw).not.toHaveBeenCalled()
     expect(db.inventory.deleteMany).not.toHaveBeenCalled()
+  })
+
+  it('a cantidad con la pareja suspendida por la receta: UNA escritura, el cuadre de su sucursal', async () => {
+    const { db, tx } = fakeDb('QUANTITY')
+    db.shopifyVariantLink.findUnique.mockResolvedValue({ locationLinkId: 'l1', suspendedReason: 'SIN_INVENTARIO' })
+    await switchInventoryMethod('v1', 'p1', 'QUANTITY', tx)
+    expect(db.shopifyLocationLink.updateMany).toHaveBeenCalledTimes(1)
+    expect(db.shopifyLocationLink.updateMany).toHaveBeenCalledWith({
+      where: { id: 'l1', status: 'ACTIVE' },
+      data: { needsReconcile: true, reconcileVersion: { increment: 1 } },
+    })
   })
 })

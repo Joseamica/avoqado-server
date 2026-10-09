@@ -15,8 +15,7 @@ import {
 } from '../master-catalog/catalogGovernance.service'
 import { normalizarIvaDeProducto, traducirErrorDeIva } from '../fiscal/normalizarIvaDeProducto'
 import { bloquearParaCambiarIva } from '../fiscal/exclusionContable'
-import { bloquearPareja, suspendPair } from '../commerce-channels/shopify/shopify.mirror.service'
-import { SHOPIFY_SERVICE_ACTOR } from '../commerce-channels/shopify/shopify.constants'
+import { pedirCuadreAlVolverACantidad, suspenderParejaPorReceta } from '../commerce-channels/shopify/shopify.store.service'
 
 /**
  * Product Creation Wizard Service
@@ -597,24 +596,14 @@ export async function switchInventoryMethod(
     },
   })
   if (newMethod === 'RECIPE') {
-    // Conector Shopify (12 bis.5, #9): la pareja se suspende ANTES de borrar el Inventory. El DELETE no viaja a Shopify
-    // (dejaría en cero la tienda en línea) y la pareja deja de esperar algo de esa fila; el cuadre la reactiva al volver.
-    // Orden de candados (§10.3, N24): el `product.update` de arriba ya tomó el Product; sigue sucursal → tienda → pareja
-    // (`bloquearPareja`, BR-6/K14) y al final Inventory. Un producto sin pareja cuesta esta única lectura por índice.
-    const enlace = await db.shopifyVariantLink.findUnique({ where: { productId }, select: { id: true } })
-    const pareja = enlace && (await bloquearPareja(db, enlace.id))
-    if (pareja) {
-      // U3: un producto que el conector archivó con un envío en camino queda suspendido como NIVEL_INEXISTENTE; pisarlo
-      // con SIN_INVENTARIO apagaría el reintento del cuadre (R5) y la pareja no se borraría nunca.
-      const archivadoConEnvio =
-        pareja.suspendedReason === 'NIVEL_INEXISTENTE' &&
-        !!updated.deletedAt &&
-        updated.deletedBy === SHOPIFY_SERVICE_ACTOR.servicePrincipalId
-      if (!archivadoConEnvio) await suspendPair(db, pareja.id, 'SIN_INVENTARIO')
-    }
+    // Conector Shopify (12 bis.5, #9): la pareja se suspende ANTES de borrar el Inventory (el DELETE no viaja a Shopify).
+    // Orden de candados (§10.3, N24): el `product.update` de arriba ya tomó el Product; sigue la pareja y al final Inventory.
+    await suspenderParejaPorReceta(db, updated)
     // Switching TO RECIPE: Remove existing quantity tracking (Inventory table)
     await db.inventory.deleteMany({ where: { productId } })
   } else if (newMethod === 'QUANTITY') {
+    // Conector Shopify: la pareja suspendida por la receta pide su cuadre (antes de Inventory, §10.3).
+    await pedirCuadreAlVolverACantidad(db, productId)
     // Switching TO QUANTITY: Remove existing recipe (lines first: foreign key)
     await db.recipeLine.deleteMany({ where: { recipe: { productId } } })
     await db.recipe.deleteMany({ where: { productId } })

@@ -11,10 +11,18 @@ import type { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { logAction } from '@/services/dashboard/activity-log.service'
-import { SHOPIFY_TIMEOUT_MS } from './shopify.constants'
+import { SHOPIFY_SERVICE_ACTOR, SHOPIFY_TIMEOUT_MS } from './shopify.constants'
 import { decryptShopifyToken } from './shopify.crypto'
 import type { ShopifyFailure, shopifyGraphql } from './shopify.graphql'
-import { cercoVigente, eventoVigente, marcarFaltaPermiso, type CercoShopify, type fetchLevels } from './shopify.mirror.service'
+import {
+  bloquearPareja,
+  cercoVigente,
+  eventoVigente,
+  marcarFaltaPermiso,
+  suspendPair,
+  type CercoShopify,
+  type fetchLevels,
+} from './shopify.mirror.service'
 import { avisarTienda } from './shopify.outbox.service'
 
 /** `importError` que detiene TODO el trabajo de la sucursal hasta reautorizar (C lo enseña con su salida). */
@@ -284,4 +292,38 @@ export async function pedirCuadre(
     where: { id: locationLinkId, status: 'ACTIVE' },
     data: { needsReconcile: true, reconcileVersion: { increment: 1 } },
   })
+}
+
+/**
+ * B7 (12 bis.5, #9): un producto pasa a RECETA por CUALQUIER camino (`switchInventoryMethod`, `setProductInventoryMethod`:
+ * PUT inventory-method, paso 2 del asistente, MCP). Bajo receta la venta ya no escribe `Inventory`, así que el guardia
+ * nunca encola y Shopify no se entera: la pareja se suspende (`SIN_INVENTARIO`, nada viaja; el cuadre la reactiva al
+ * volver). Se llama DESPUÉS de escribir el `Product` (su candado) y ANTES de tocar `Inventory`: sucursal → tienda → pareja
+ * por `bloquearPareja` (BR-6/K14, §10.3). Sin pareja cuesta una lectura por índice. U3: un producto que el conector archivó
+ * con un envío en camino se queda en `NIVEL_INEXISTENTE` (pisarlo apagaría el reintento de R5).
+ */
+export async function suspenderParejaPorReceta(
+  db: Prisma.TransactionClient,
+  producto: { id: string; deletedAt: Date | null; deletedBy: string | null },
+): Promise<void> {
+  const enlace = await db.shopifyVariantLink.findUnique({ where: { productId: producto.id }, select: { id: true } })
+  const pareja = enlace && (await bloquearPareja(db, enlace.id))
+  if (!pareja) return
+  const archivadoConEnvio =
+    pareja.suspendedReason === 'NIVEL_INEXISTENTE' &&
+    !!producto.deletedAt &&
+    producto.deletedBy === SHOPIFY_SERVICE_ACTOR.servicePrincipalId
+  if (!archivadoConEnvio) await suspendPair(db, pareja.id, 'SIN_INVENTARIO')
+}
+
+/**
+ * B7: un producto vuelve a CANTIDAD. Si su pareja estaba suspendida por la receta se pide el cuadre de su sucursal, que la
+ * reactiva COMPARANDO (REACTIVADA); si no, esperaría a la ronda de la mañana. Una pareja que no está suspendida por receta
+ * no pide nada (un PUT repetido no dispara vueltas). Una escritura (`pedirCuadre`, que toma la sucursal con
+ * `FOR NO KEY UPDATE`) y sólo con pareja suspendida; va ANTES de `Inventory` (sucursal → … → Inventory, §10.3) y sin haber
+ * tomado la sucursal antes en esta tx (subir `FOR SHARE` → `UPDATE` entre dos cambios del mismo enlace sería deadlock).
+ */
+export async function pedirCuadreAlVolverACantidad(db: Prisma.TransactionClient, productId: string): Promise<void> {
+  const pareja = await db.shopifyVariantLink.findUnique({ where: { productId }, select: { locationLinkId: true, suspendedReason: true } })
+  if (pareja?.suspendedReason === 'SIN_INVENTARIO') await pedirCuadre(pareja.locationLinkId, db)
 }
