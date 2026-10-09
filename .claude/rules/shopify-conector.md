@@ -6,6 +6,8 @@ paths:
   - 'src/services/**/*Inventory*.ts'
   - 'src/services/dashboard/productWizard.service.ts'
   - 'src/services/mobile/inventory.mobile.service.ts'
+  - 'src/services/dashboard/stockCountAudit.service.ts'
+  - 'src/mcp/tools/inventory.ts'
   - 'src/jobs/shopify-*.ts'
   - 'src/mcp/tools/shopify.ts'
   - 'src/routes/dashboard/shopify.routes.ts'
