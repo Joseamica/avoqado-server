@@ -79,6 +79,19 @@ export const PREMIUM_ONLY_CODES = [
 ] as const
 
 /**
+ * Diferenciadores Premium por REGLA que todavía NO viven en el catálogo de presentación (`FEATURE_CATALOG`): no se
+ * listan, no se venden y no entran en ninguna oferta comercial. Existe porque `featureCatalog.test.ts` exige que cada
+ * código de `PREMIUM_ONLY_CODES` tenga su entrada Premium en el catálogo, y agregar una entrada cambia la huella
+ * (`definitionHash`) de TODAS las publicaciones vigentes.
+ *
+ * SHOPIFY_INTEGRATION — conector Shopify, Fase 1 piloto (spec 2026-10-07 §12 bis.15). En la Fase 5 (App 2 pública) se
+ * mueve a PREMIUM_ONLY_CODES junto con su entrada en FEATURE_CATALOG; `shopifyTierMirror.test.ts` falla si queda en los
+ * dos. El dashboard NO la espeja en plan-catalog.ts ni en plan-comparison.ts (comprar Premium hoy no la da): su
+ * pantalla decide con `grantedFeatureCodes` de /plan-tier y, sin acceso, enseña «Shopify está en piloto».
+ */
+export const PREMIUM_ONLY_SIN_CATALOGO = ['SHOPIFY_INTEGRATION'] as const
+
+/**
  * Free-tier codes (Feature.code): capabilities the FREE plan PROMISES (dashboard
  * catalog FREE `includes`), granted to EVERY venue regardless of plan — even with
  * no base plan at all. Without this, a brand-new Free venue gets 403 on routes the
@@ -117,6 +130,7 @@ const LEGACY_PLAN_CODES = new Set([
   'AGGREGATOR_PASSES', // Pro (founder D4, 2-oct): pases de TotalPass y Wellhub; suelta $199/mes.
   'SERVICE_PAY', // Pro (founder D3, 5-oct): pago al personal (clases, comisiones y propinas); suelta $199/mes por sucursal.
   ...PREMIUM_ONLY_CODES,
+  ...PREMIUM_ONLY_SIN_CATALOGO,
 ])
 
 /**
@@ -134,7 +148,7 @@ export function elPlanConcede(tier: BaseTier, code: string): boolean {
   // Explicit current catalog; a new unknown code cannot inherit a paid tier by omission.
   if (!LEGACY_PLAN_CODES.has(code)) return false
   if (tier === 'PREMIUM') return true
-  return !(PREMIUM_ONLY_CODES as readonly string[]).includes(code)
+  return !(PREMIUM_ONLY_CODES as readonly string[]).includes(code) && !(PREMIUM_ONLY_SIN_CATALOGO as readonly string[]).includes(code)
 }
 
 /**
