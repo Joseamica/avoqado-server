@@ -20,7 +20,7 @@ import { validarTasasDelEsquema } from './tasasDelEsquema'
 import { personasElegidasAGuardar } from './personasElegidas'
 import { rechazarCambiosConComisiones, sinLoQueNoCambia } from './cambiosConComisiones'
 import { asegurarIdsDelNegocio } from './idsDelNegocio'
-import { nivelesAlCrear, nivelesParaGuardar } from './nivelesDelEsquema'
+import { nivelesAlCrear, nivelesAlPasarANiveles, nivelesParaGuardar } from './nivelesDelEsquema'
 import { conReemplazadoPor } from './reemplazadoPor'
 import { logAction } from '../activity-log.service'
 import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
@@ -364,6 +364,13 @@ export async function updateCommissionConfig(
   validarTasasDelEsquema(data, existing)
   const elegidos = await personasElegidasAGuardar(data, { venueId }, existing)
   await asegurarIdsDelNegocio({ venueId }, { categoryIds: data.categoryIds }) // las categorías, de ESTA sede (T1-hermanos)
+  // Pasar a niveles editando: los niveles en la misma operación (FT-GRAVES, hermano de S-NIVELES-ATÓMICO).
+  const nivelesNuevos = nivelesAlPasarANiveles(
+    data.calcType,
+    existing.calcType,
+    (cuerpo as { tiers?: unknown } | null)?.tiers,
+    data.useGoalAsTier ?? existing.useGoalAsTier,
+  )
 
   // Validate date range
   const effectiveFrom = data.effectiveFrom ?? existing.effectiveFrom
@@ -410,6 +417,7 @@ export async function updateCommissionConfig(
       data: updateData,
       include: { createdBy: { select: { id: true, firstName: true, lastName: true } } },
     })
+    if (nivelesNuevos?.length) await tx.commissionTier.createMany({ data: nivelesParaGuardar(configId, nivelesNuevos) })
     await writeLegacyActivityAuditTx(tx, {
       staffId: actorId ?? null,
       venueId,

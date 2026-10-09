@@ -135,6 +135,41 @@ describe('S-NIVELES-ATÓMICO · un esquema por niveles nace con sus niveles, o n
     expect(org.status).toBe(201)
   })
 
+  // ── Hermanos: pasar a TIERED editando o con «Duplicar con cambios» también exige niveles en la misma operación ──
+  const put = (r: string, cuerpo: object) =>
+    request(server).put(`/api/v1/dashboard/commissions/venues/${m.venueId}${r}`).set('Authorization', `Bearer ${token()}`).send(cuerpo)
+  const tipo = async (id: string) => (await prisma.commissionConfig.findUniqueOrThrow({ where: { id } })).calcType
+
+  it('🔴 editar un esquema plano a TIERED sin niveles: 400 y no cambia; con niveles, cambia con ellos; con «meta como nivel», sin ellos', async () => {
+    const sin = await put(`/configs/${m.configId}`, { calcType: 'TIERED' })
+    expect([sin.status, sin.body.message]).toEqual([400, 'Un esquema por niveles necesita al menos un nivel.'])
+    expect(await tipo(m.configId)).toBe('PERCENTAGE')
+    const con = await put(`/configs/${m.configId}`, { calcType: 'TIERED', tiers: dosNiveles() })
+    expect(con.status).toBe(200)
+    expect([await tipo(m.configId), await prisma.commissionTier.count({ where: { configId: m.configId } })]).toEqual(['TIERED', 2])
+    const otro = (await post('/configs', { name: 'Plano', defaultRate: 0.05 })).body.id
+    expect((await put(`/configs/${otro}`, { calcType: 'TIERED', useGoalAsTier: true, goalBonusRate: 0.06 })).status).toBe(200)
+  })
+
+  it('🔴 editar un esquema plano de la organización a TIERED sin niveles: 400 y no cambia', async () => {
+    const org = (await post('/org-configs', { name: 'Org plano', defaultRate: 0.05 })).body.data.id
+    const r = await request(server)
+      .put(`/api/v1/dashboard/commissions/venues/${m.venueId}/org-configs/${org}`)
+      .set('Authorization', `Bearer ${token()}`)
+      .send({ calcType: 'TIERED' })
+    expect(r.status).toBe(400)
+    expect(await tipo(org)).toBe('PERCENTAGE')
+  })
+
+  it('🔴 «Duplicar con cambios» de un plano a TIERED: sin niveles 400 y el original sigue; con niveles, el nuevo nace con ellos', async () => {
+    const sin = await post(`/configs/${m.configId}/copy`, { replace: true, calcType: 'TIERED' })
+    expect([sin.status, sin.body.message]).toEqual([400, 'Un esquema por niveles necesita al menos un nivel.'])
+    expect((await prisma.commissionConfig.findUniqueOrThrow({ where: { id: m.configId } })).active).toBe(true)
+    const con = await post(`/configs/${m.configId}/copy`, { replace: true, calcType: 'TIERED', tiers: dosNiveles() })
+    expect(con.status).toBe(201)
+    expect(await prisma.commissionTier.count({ where: { configId: con.body.id } })).toBe(2)
+  })
+
   // ── Regresión: sin niveles, como siempre ──
   it('un porcentaje sin `tiers` se crea como siempre', async () => {
     const r = await post('/configs', { name: 'Plano', defaultRate: 0.05 })

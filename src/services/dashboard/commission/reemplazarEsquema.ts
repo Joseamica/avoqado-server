@@ -24,6 +24,7 @@ import { personasElegidasAGuardar } from './personasElegidas'
 import { validateAttendanceRule, type CreateCommissionConfigInput } from './commission-config.service'
 import { soloCamposDelEsquema } from './cambiosConComisiones'
 import { asegurarIdsDelNegocio } from './idsDelNegocio'
+import { nivelesAlPasarANiveles, nivelesParaGuardar } from './nivelesDelEsquema'
 
 type Cambios = Partial<Omit<CreateCommissionConfigInput, 'orgId'>> & { description?: string | null }
 
@@ -92,6 +93,13 @@ export async function reemplazarEsquema(venueId: string, originalId: string, cue
       if (hasta && hasta <= desde) throw new BadRequestError('La fecha de fin tiene que ser después de la de inicio.')
 
       const calcType = cambios.calcType ?? original.calcType
+      // Pasar a niveles desde un esquema plano: los niveles llegan aquí mismo (FT-GRAVES); si ya era TIERED, se copian los suyos.
+      const nivelesNuevos = nivelesAlPasarANiveles(
+        calcType,
+        original.calcType,
+        cuerpo?.tiers,
+        cambios.useGoalAsTier ?? original.useGoalAsTier,
+      )
       const roleRates = cambios.roleRates !== undefined ? cambios.roleRates : original.roleRates
       const nuevo = await tx.commissionConfig.create({
         data: {
@@ -125,7 +133,8 @@ export async function reemplazarEsquema(venueId: string, originalId: string, cue
         },
       })
       // Los niveles sólo significan algo en un esquema por niveles; las excepciones (tasa propia o excluir) siempre.
-      const niveles = calcType === 'TIERED' ? original.tiers : []
+      if (nivelesNuevos?.length) await tx.commissionTier.createMany({ data: nivelesParaGuardar(nuevo.id, nivelesNuevos) })
+      const niveles = calcType === 'TIERED' && !nivelesNuevos ? original.tiers : []
       if (niveles.length > 0) {
         await tx.commissionTier.createMany({
           data: niveles.map(t => ({

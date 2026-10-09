@@ -22,6 +22,21 @@ function valorDe(opciones: Record<string, string>, valor: unknown, que: string):
   }
 }
 
+/**
+ * Un esquema que NO era por niveles y pasa a TIERED, editándolo o con «Duplicar con cambios» (hermanos del arreglo de arriba):
+ * sus niveles llegan en la MISMA operación, salvo «meta como nivel». Si ya era TIERED, o no pasa a TIERED, `undefined`
+ * (sus niveles se manejan como siempre).
+ */
+export function nivelesAlPasarANiveles(
+  calcTypeNuevo: unknown,
+  calcTypeAntes: unknown,
+  tiers: unknown,
+  metaComoNivel: unknown,
+): CreateCommissionTierInput[] | undefined {
+  if (calcTypeNuevo !== 'TIERED' || calcTypeAntes === 'TIERED') return undefined
+  return nivelesAlCrear('TIERED', tiers, metaComoNivel) ?? []
+}
+
 /** Valida los niveles del esquema que se crea. Devuelve los niveles listos, o `undefined` si no es por niveles ni los trae. */
 export function nivelesAlCrear(calcType: unknown, tiers: unknown, metaComoNivel?: unknown): CreateCommissionTierInput[] | undefined {
   const porNiveles = calcType === 'TIERED'

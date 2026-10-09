@@ -19,7 +19,7 @@ import { rechazarCambiosConComisiones, sinLoQueNoCambia, soloCamposDelEsquema } 
 import { validateAttendanceRule } from './commission-config.service'
 import { asegurarIdsDelNegocio } from './idsDelNegocio'
 import { ORDEN_DE_ESQUEMAS } from './duenoDeCategorias'
-import { nivelesAlCrear, nivelesParaGuardar } from './nivelesDelEsquema'
+import { nivelesAlCrear, nivelesAlPasarANiveles, nivelesParaGuardar } from './nivelesDelEsquema'
 import { conReemplazadoPor } from './reemplazadoPor'
 
 export type CommissionConfigSource = 'venue' | 'organization'
@@ -158,6 +158,12 @@ export async function updateOrgCommissionConfig(venueId: string, configId: strin
   validarTasasDelEsquema(data, existing) // lo que QUEDA (final-fijo-niveles, fase 3)
   const elegidos = await personasElegidasAGuardar(data, { organizationId }, existing)
   await asegurarIdsDelNegocio({ organizationId }, { categoryIds: data.categoryIds }) // de alguna de SUS sedes (T1-hermanos)
+  const nivelesNuevos = nivelesAlPasarANiveles(
+    data.calcType,
+    existing.calcType,
+    (cuerpo as { tiers?: unknown } | null)?.tiers,
+    data.useGoalAsTier ?? existing.useGoalAsTier,
+  )
 
   // El cambio y su ActivityLog (con quién lo hizo) en la MISMA transacción.
   return prisma.$transaction(async tx => {
@@ -170,6 +176,7 @@ export async function updateOrgCommissionConfig(venueId: string, configId: strin
       } as Prisma.CommissionConfigUncheckedUpdateInput,
       include: configInclude,
     })
+    if (nivelesNuevos?.length) await tx.commissionTier.createMany({ data: nivelesParaGuardar(configId, nivelesNuevos) })
     await writeLegacyActivityAuditTx(tx, {
       staffId: actorId ?? null,
       venueId,
