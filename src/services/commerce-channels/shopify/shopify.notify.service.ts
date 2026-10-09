@@ -63,6 +63,37 @@ const TEXTOS: Record<ShopifyAviso, (d: Datos) => { title: string; message: strin
 }
 
 /**
+ * La llave con que se deduplica un aviso por destinatario y día del NEGOCIO. Una duda por revisar lleva su motivo en la
+ * llave: el aviso de «en unos minutos» de la mañana no esconde que hay que ir a «Por revisar». El envío en camino
+ * conserva la llave de siempre.
+ */
+function llaveDelDia(aviso: ShopifyAviso, venueId: string, timezone: string | null, data: Datos = {}): string {
+  const dia = formatInTimeZone(new Date(), timezone || 'America/Mexico_City', 'yyyy-MM-dd')
+  const motivo = data.motivo === 'DUDA_POR_REVISAR' ? `:${data.motivo}` : ''
+  return POR_PRODUCTO.has(aviso) && data.productId ? `${aviso}:${venueId}:${data.productId}${motivo}:${dia}` : `${aviso}:${venueId}:${dia}`
+}
+
+/**
+ * ¿Este aviso (sin producto) ya le salió HOY a alguien del negocio? La campanita de hoy existe. B8 lo usa para mandar el
+ * correo «Por revisar» sólo con la campanita NUEVA del día: el proveedor de correo rechaza la misma llave con otro
+ * contenido. Nunca lanza: en la duda contesta `false` (repetir la campanita la deduplica `notifyShopify`).
+ */
+export async function avisoDeHoyYaSalio(venueId: string, aviso: ShopifyAviso): Promise<boolean> {
+  try {
+    const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
+    if (!venue) return false
+    const ya = await prisma.notification.findFirst({
+      where: { venueId, type: NotificationType.ALERT, entityType: 'ShopifyAviso', entityId: llaveDelDia(aviso, venueId, venue.timezone) },
+      select: { id: true },
+    })
+    return ya !== null
+  } catch (err) {
+    logger.warn(`[SHOPIFY] no se pudo ver si el aviso ${aviso} de ${venueId} ya salió hoy: ${(err as Error).message}`)
+    return false
+  }
+}
+
+/**
  * Aviso inmediato del conector (ajuste 12 bis.8): a OWNER y ADMIN activos de la sucursal, uno por persona y por día.
  * Recorre a la gente por tandas con cursor y deduplica cada tanda con una consulta agrupada: ni un destinatario 101 se
  * queda fuera, ni las filas repetidas de una persona esconden a otra (N8). Nunca lanza.
@@ -74,12 +105,7 @@ export async function notifyShopify(venueId: string, aviso: ShopifyAviso, data: 
   try {
     const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { slug: true, timezone: true } })
     if (!venue) return
-    const dia = formatInTimeZone(new Date(), venue.timezone || 'America/Mexico_City', 'yyyy-MM-dd')
-    // Una duda por revisar lleva su motivo en la llave: el aviso de «en unos minutos» de la mañana no esconde que hay que
-    // ir a «Por revisar». El envío en camino conserva la llave de siempre.
-    const motivo = data.motivo === 'DUDA_POR_REVISAR' ? `:${data.motivo}` : ''
-    const llave =
-      POR_PRODUCTO.has(aviso) && data.productId ? `${aviso}:${venueId}:${data.productId}${motivo}:${dia}` : `${aviso}:${venueId}:${dia}`
+    const llave = llaveDelDia(aviso, venueId, venue.timezone, data)
     const texto = TEXTOS[aviso](data)
     let cursor: string | undefined
     for (;;) {

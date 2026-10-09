@@ -81,6 +81,8 @@ import { kitchenTicketsReconciliationJob } from './jobs/kitchen-tickets-reconcil
 import { paymentEffectsJob } from './jobs/payment-effects.job'
 import { angelpayEventWorkerJob } from './jobs/angelpay-event-worker.job'
 import { aggregatorPassWorkerJob } from './jobs/aggregator-pass-worker.job'
+import { shopifyWorkerJob } from './jobs/shopify-worker.job'
+import { shopifyReconcileJob } from './jobs/shopify-reconcile.job'
 import { cashDrawerReconcilerJob } from './jobs/cash-drawer-reconciler.job'
 import { planAccessReconciliationJob } from './jobs/plan-access-reconciliation.job'
 import { paidOrderReconcilerJob } from './jobs/paid-order-reconciler.job'
@@ -179,6 +181,8 @@ const gracefulShutdown = async (signal: string) => {
       paymentEffectsJob.stop()
       angelpayEventWorkerJob.stop()
       aggregatorPassWorkerJob.stop()
+      shopifyWorkerJob.stop()
+      shopifyReconcileJob.stop()
       cashDrawerReconcilerJob.stop()
       planAccessReconciliationJob.stop()
       paidOrderReconcilerJob.stop()
@@ -525,6 +529,9 @@ const startApplication = async (retries = 3) => {
       angelpayEventWorkerJob.start()
       // Conector de pases (TotalPass/Wellhub): reintentos de webhooks, visitas, horizonte y bandeja de salida.
       aggregatorPassWorkerJob.start()
+      // Conector Shopify: buzón, eventos y una unidad por sucursal con su lease (sin candado global).
+      shopifyWorkerJob.start()
+      shopifyReconcileJob.start()
       cashDrawerReconcilerJob.start()
       planAccessReconciliationJob.start()
       paidOrderReconcilerJob.start()

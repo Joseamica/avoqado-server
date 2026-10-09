@@ -59,4 +59,9 @@ export const DATABASE_JOB_SCHEDULES = {
   // Segundos :18/:48 y no :19/:49 como decía el plan: :49 ya es de cashClosePairReconciler. :18 queda entre el
   // monitor de POS (:17, cada 5 min) y el outbox de clientes (:20); :48, entre los anuncios (:47, cada 5 min) y :49.
   aggregatorPassWorker: '18,48 * * * * *',
+  // Conector Shopify (plan v2 B8): worker de 30 s en :21/:51 — :21 entre el outbox de clientes (:20) y el KDS (:22);
+  // :51 entre el outbox de clientes (:50) y el reconciliador de renglones (:52). Cuadre de la mañana a las 06:14:45
+  // (CDMX), hueco entre el sweeper de inventario (:44) y los efectos de pago (:46): sólo pide la vuelta; la corre el worker.
+  shopifyWorker: '21,51 * * * * *',
+  shopifyReconcile: '45 14 6 * * *',
 } as const
