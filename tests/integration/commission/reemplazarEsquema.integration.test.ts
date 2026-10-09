@@ -188,6 +188,16 @@ describe('S-REPLACE · «Duplicar con cambios» reemplaza al original en una sol
     expect((await esquemas()).map(e => e.active)).toEqual([true])
   })
 
+  it('🔴 la lista de esquemas dice quién reemplazó a quién (`reemplazadoPor`)', async () => {
+    const r = await reemplazar({ name: 'Niveles nuevos', defaultRate: 0.06 })
+    const lista = await request(server)
+      .get(`/api/v1/dashboard/commissions/venues/${m.venueId}/configs?includeInactive=true`)
+      .set('Authorization', `Bearer ${token()}`)
+    const porId = Object.fromEntries(lista.body.data.map((c: { id: string; reemplazadoPor: unknown }) => [c.id, c.reemplazadoPor]))
+    expect(porId[m.configId]).toEqual({ id: r.body.id, name: 'Niveles nuevos' })
+    expect(porId[r.body.id]).toBeNull()
+  })
+
   // ── Regresión: copiar SIN reemplazar sigue como antes (el original se queda activo) ──
   it('copiar sin `replace` deja el original activo y la copia con «(Copy)», como hoy', async () => {
     const r = await request(server)

@@ -128,6 +128,13 @@ describe('S-NIVELES-ATÓMICO · un esquema por niveles nace con sus niveles, o n
     expect(await prisma.commissionConfig.count({ where: { orgId: m.orgId, venueId: null } })).toBe(1)
   })
 
+  it('🔴 TIERED con «meta como nivel» no exige `tiers` (el nivel es la meta de cada quien)', async () => {
+    const r = await post('/configs', porNiveles({ tiers: undefined, useGoalAsTier: true, goalBonusRate: 0.06 }))
+    expect([r.status, r.body.calcType, r.body.useGoalAsTier]).toEqual([201, 'TIERED', true])
+    const org = await post('/org-configs', porNiveles({ tiers: undefined, useGoalAsTier: true, goalBonusRate: 0.06 }))
+    expect(org.status).toBe(201)
+  })
+
   // ── Regresión: sin niveles, como siempre ──
   it('un porcentaje sin `tiers` se crea como siempre', async () => {
     const r = await post('/configs', { name: 'Plano', defaultRate: 0.05 })

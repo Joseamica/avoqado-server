@@ -23,10 +23,11 @@ function valorDe(opciones: Record<string, string>, valor: unknown, que: string):
 }
 
 /** Valida los niveles del esquema que se crea. Devuelve los niveles listos, o `undefined` si no es por niveles ni los trae. */
-export function nivelesAlCrear(calcType: unknown, tiers: unknown): CreateCommissionTierInput[] | undefined {
+export function nivelesAlCrear(calcType: unknown, tiers: unknown, metaComoNivel?: unknown): CreateCommissionTierInput[] | undefined {
   const porNiveles = calcType === 'TIERED'
   if (tiers === undefined || tiers === null) {
-    if (porNiveles) throw new BadRequestError('Un esquema por niveles necesita al menos un nivel.')
+    // «Meta como nivel»: el nivel es la meta de ventas de cada persona, así que un TIERED así no necesita `tiers`.
+    if (porNiveles && metaComoNivel !== true) throw new BadRequestError('Un esquema por niveles necesita al menos un nivel.')
     return undefined
   }
   if (!porNiveles) throw new BadRequestError('Los niveles sólo aplican a un esquema por niveles: manda calcType «TIERED».')

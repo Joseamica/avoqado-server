@@ -20,6 +20,7 @@ import { validateAttendanceRule } from './commission-config.service'
 import { asegurarIdsDelNegocio } from './idsDelNegocio'
 import { ORDEN_DE_ESQUEMAS } from './duenoDeCategorias'
 import { nivelesAlCrear, nivelesParaGuardar } from './nivelesDelEsquema'
+import { conReemplazadoPor } from './reemplazadoPor'
 
 export type CommissionConfigSource = 'venue' | 'organization'
 
@@ -84,11 +85,12 @@ export async function getEffectiveCommissionConfigs(venueId: string): Promise<Re
 export async function getOrgCommissionConfigs(venueId: string) {
   const organizationId = await getOrgIdFromVenue(venueId)
 
-  return prisma.commissionConfig.findMany({
+  const esquemas = await prisma.commissionConfig.findMany({
     where: { orgId: organizationId, venueId: null, deletedAt: null },
     include: configInclude,
     orderBy: ORDEN_DE_ESQUEMAS,
   })
+  return conReemplazadoPor(esquemas) // el reemplazo es de la sede: aquí siempre `null`, mismo contrato que la lista de la sede
 }
 
 /**
@@ -102,7 +104,7 @@ export async function createOrgCommissionConfig(venueId: string, cuerpo: unknown
   validarTasasDelEsquema(data)
   validateAttendanceRule(data)
   // S-NIVELES-ATÓMICO: un TIERED nace con sus niveles (formato de `/tiers/batch`), o no nace.
-  const niveles = nivelesAlCrear(data.calcType, (cuerpo as { tiers?: unknown } | null)?.tiers)
+  const niveles = nivelesAlCrear(data.calcType, (cuerpo as { tiers?: unknown } | null)?.tiers, data.useGoalAsTier)
   const organizationId = await getOrgIdFromVenue(venueId)
   // D-ELEGIDOS: sólo personas del equipo de la ORGANIZACIÓN (alguna de sus sedes), sin repetidos.
   const elegidos = await personasElegidasAGuardar(data, { organizationId })

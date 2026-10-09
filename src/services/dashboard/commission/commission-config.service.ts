@@ -21,6 +21,7 @@ import { personasElegidasAGuardar } from './personasElegidas'
 import { rechazarCambiosConComisiones, sinLoQueNoCambia } from './cambiosConComisiones'
 import { asegurarIdsDelNegocio } from './idsDelNegocio'
 import { nivelesAlCrear, nivelesParaGuardar } from './nivelesDelEsquema'
+import { conReemplazadoPor } from './reemplazadoPor'
 import { logAction } from '../activity-log.service'
 import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
 
@@ -170,7 +171,7 @@ export async function getCommissionConfigs(venueId: string, filters: CommissionC
     orderBy: [{ priority: 'desc' }, { createdAt: 'desc' }],
   })
 
-  return configs
+  return conReemplazadoPor(configs) // a quién reemplazó cada uno (S-NIVELES/S-SOLAPE, para el dashboard)
 }
 
 /**
@@ -237,7 +238,7 @@ export async function createCommissionConfig(venueId: string, data: CreateCommis
   // La tasa según el tipo (en un FIJO, el monto en pesos), las tasas por rol y la de meta superada: 400 en español
   // (final-fijo-niveles, fase 3; `tasasDelEsquema.ts`).
   validarTasasDelEsquema(data)
-  const niveles = nivelesAlCrear(data.calcType, data.tiers) // S-NIVELES-ATÓMICO: TIERED nace con sus niveles, o no nace
+  const niveles = nivelesAlCrear(data.calcType, data.tiers, data.useGoalAsTier) // S-NIVELES-ATÓMICO: TIERED nace con sus niveles, o no nace
   // D-ELEGIDOS: a quién aplica (todo el equipo, de fábrica, o sólo las personas elegidas de ESTA sede).
   const elegidos = await personasElegidasAGuardar(data, { venueId })
   await asegurarIdsDelNegocio({ venueId }, { categoryIds: data.categoryIds }) // las categorías, de ESTA sede (T1-hermanos)
