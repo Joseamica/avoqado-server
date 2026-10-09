@@ -12,6 +12,45 @@
  */
 import { Prisma } from '@prisma/client'
 import { BadRequestError } from '../../../errors/AppError'
+import type { UpdateCommissionConfigInput } from './commission-config.service'
+
+/**
+ * Lo único que un cuerpo puede escribir en un esquema: los MISMOS campos que guarda el PUT de la sede. Nunca la sede, la
+ * organización, el autor, el borrado, ids ni escrituras anidadas de Prisma (FT-GRAVES T1: el de la organización guardaba el
+ * cuerpo tal cual y movía el esquema a otro negocio). `active` sólo al actualizar.
+ */
+export const CAMPOS_DEL_ESQUEMA = [
+  'name',
+  'description',
+  'priority',
+  'recipient',
+  'trigger',
+  'calcType',
+  'defaultRate',
+  'minAmount',
+  'maxAmount',
+  'includeTips',
+  'includeDiscount',
+  'includeTax',
+  'roleRates',
+  'filterByCategories',
+  'categoryIds',
+  'filterByStaff',
+  'staffIds',
+  'useGoalAsTier',
+  'goalBonusRate',
+  'effectiveFrom',
+  'effectiveTo',
+  'attendanceLinked',
+  'attendanceLatePenaltyRate',
+] as const
+
+/** El cuerpo reducido a la lista blanca; lo demás se ignora. Los VALORES los validan las reglas de cada campo. */
+export function soloCamposDelEsquema(cuerpo: unknown, o: { conActive?: boolean } = {}): UpdateCommissionConfigInput {
+  const fuente = (cuerpo && typeof cuerpo === 'object' ? cuerpo : {}) as Record<string, unknown>
+  const campos: readonly string[] = o.conActive ? [...CAMPOS_DEL_ESQUEMA, 'active'] : CAMPOS_DEL_ESQUEMA
+  return Object.fromEntries(campos.filter(c => fuente[c] !== undefined).map(c => [c, fuente[c]])) as UpdateCommissionConfigInput
+}
 
 const FIJOS = ['defaultRate', 'calcType', 'recipient', 'trigger'] as const
 type CampoFijo = (typeof FIJOS)[number]

@@ -22,33 +22,7 @@ import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
 import { validarTasasDelEsquema } from './tasasDelEsquema'
 import { personasElegidasAGuardar } from './personasElegidas'
 import { validateAttendanceRule, type CreateCommissionConfigInput } from './commission-config.service'
-
-/** Lo único que el cuerpo puede cambiar del esquema nuevo. Lo demás (sede, organización, autor) no viene del cliente. */
-const CAMBIABLES = [
-  'name',
-  'description',
-  'priority',
-  'recipient',
-  'trigger',
-  'calcType',
-  'defaultRate',
-  'minAmount',
-  'maxAmount',
-  'includeTips',
-  'includeDiscount',
-  'includeTax',
-  'roleRates',
-  'filterByCategories',
-  'categoryIds',
-  'filterByStaff',
-  'staffIds',
-  'useGoalAsTier',
-  'goalBonusRate',
-  'effectiveFrom',
-  'effectiveTo',
-  'attendanceLinked',
-  'attendanceLatePenaltyRate',
-] as const
+import { soloCamposDelEsquema } from './cambiosConComisiones'
 
 type Cambios = Partial<Omit<CreateCommissionConfigInput, 'orgId'>> & { description?: string | null }
 
@@ -64,7 +38,8 @@ function fecha(valor: unknown, que: string): Date {
 }
 
 export async function reemplazarEsquema(venueId: string, originalId: string, cuerpo: Record<string, unknown>, actorId: string) {
-  const cambios = Object.fromEntries(CAMBIABLES.filter(c => cuerpo?.[c] !== undefined).map(c => [c, cuerpo[c]])) as Cambios
+  // La lista blanca de la sede (`cambiosConComisiones.ts`): sede, organización, autor e ids nunca vienen del cliente.
+  const cambios = soloCamposDelEsquema(cuerpo) as Cambios
   if (typeof cambios.name === 'string') cambios.name = cambios.name.trim() || undefined
 
   return prisma.$transaction(

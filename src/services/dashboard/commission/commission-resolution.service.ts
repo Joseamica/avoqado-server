@@ -8,11 +8,15 @@
  * Same pattern as getEffectivePaymentConfig() — no merge, venue replaces org entirely.
  */
 
+import { Prisma } from '@prisma/client'
 import prisma from '../../../utils/prismaClient'
 import { NotFoundError } from '../../../errors/AppError'
 import { logAction } from '../activity-log.service'
+import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
 import { validarTasasDelEsquema } from './tasasDelEsquema'
 import { personasElegidasAGuardar } from './personasElegidas'
+import { rechazarCambiosConComisiones, sinLoQueNoCambia, soloCamposDelEsquema } from './cambiosConComisiones'
+import { validateAttendanceRule } from './commission-config.service'
 
 export type CommissionConfigSource = 'venue' | 'organization'
 
@@ -87,9 +91,13 @@ export async function getOrgCommissionConfigs(venueId: string) {
 /**
  * Create an org-level commission config
  */
-export async function createOrgCommissionConfig(venueId: string, data: any, createdById: string) {
+export async function createOrgCommissionConfig(venueId: string, cuerpo: unknown, createdById: string) {
+  // FT-GRAVES T1: sólo la lista blanca de la sede. Antes el cuerpo iba tal cual: elegía el id, nacía borrado o creaba filas
+  // anidadas en otro negocio.
+  const data = soloCamposDelEsquema(cuerpo)
   // Final-fijo-niveles (fase 3): esta ruta no validaba ninguna tasa — un fijo de $5 con niveles quedaba como 500 %.
   validarTasasDelEsquema(data)
+  validateAttendanceRule(data)
   const organizationId = await getOrgIdFromVenue(venueId)
   // D-ELEGIDOS: sólo personas del equipo de la ORGANIZACIÓN (alguna de sus sedes), sin repetidos.
   const elegidos = await personasElegidasAGuardar(data, { organizationId })
@@ -97,11 +105,12 @@ export async function createOrgCommissionConfig(venueId: string, data: any, crea
   const result = await prisma.commissionConfig.create({
     data: {
       ...data,
+      roleRates: data.roleRates ?? Prisma.JsonNull,
       ...elegidos,
       orgId: organizationId,
       venueId: null, // Org-level: no venue
       createdById,
-    },
+    } as Prisma.CommissionConfigUncheckedCreateInput,
     include: configInclude,
   })
 
@@ -120,31 +129,44 @@ export async function createOrgCommissionConfig(venueId: string, data: any, crea
 /**
  * Update an org-level commission config
  */
-export async function updateOrgCommissionConfig(venueId: string, configId: string, data: any) {
+export async function updateOrgCommissionConfig(venueId: string, configId: string, cuerpo: unknown, actorId?: string) {
   const organizationId = await getOrgIdFromVenue(venueId)
 
   // Verify config belongs to this org and is org-level
   const existing = await prisma.commissionConfig.findFirst({
-    where: { id: configId, orgId: organizationId, venueId: null },
+    where: { id: configId, orgId: organizationId, venueId: null, deletedAt: null },
+    include: { _count: { select: { calculations: true } } },
   })
   if (!existing) throw new NotFoundError('Org commission config not found')
+  // FT-GRAVES T1: la lista blanca de la sede (antes el cuerpo iba tal cual y movía el esquema de organización o de negocio) y el
+  // mismo candado: con comisiones calculadas no cambia la tasa, el tipo, a quién ni cuándo (`cambiosConComisiones.ts`).
+  const data = sinLoQueNoCambia(soloCamposDelEsquema(cuerpo, { conActive: true }), existing)
+  rechazarCambiosConComisiones(data, existing, existing._count.calculations)
+  validateAttendanceRule(data)
   validarTasasDelEsquema(data, existing) // lo que QUEDA (final-fijo-niveles, fase 3)
   const elegidos = await personasElegidasAGuardar(data, { organizationId }, existing)
 
-  const result = await prisma.commissionConfig.update({
-    where: { id: configId },
-    data: { ...data, ...elegidos },
-    include: configInclude,
+  // El cambio y su ActivityLog (con quién lo hizo) en la MISMA transacción.
+  return prisma.$transaction(async tx => {
+    const actualizado = await tx.commissionConfig.update({
+      where: { id: configId },
+      data: {
+        ...data,
+        ...(data.roleRates === null ? { roleRates: Prisma.JsonNull } : {}),
+        ...elegidos,
+      } as Prisma.CommissionConfigUncheckedUpdateInput,
+      include: configInclude,
+    })
+    await writeLegacyActivityAuditTx(tx, {
+      staffId: actorId ?? null,
+      venueId,
+      action: 'ORG_COMMISSION_CONFIG_UPDATED',
+      entity: 'CommissionConfig',
+      entityId: configId,
+      data: { changes: Object.keys(data), ...(data.active !== undefined ? { active: data.active } : {}) },
+    })
+    return actualizado
   })
-
-  logAction({
-    venueId,
-    action: 'ORG_COMMISSION_CONFIG_UPDATED',
-    entity: 'CommissionConfig',
-    entityId: configId,
-  })
-
-  return result
 }
 
 /**

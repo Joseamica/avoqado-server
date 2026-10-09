@@ -659,7 +659,7 @@ router.put(
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { venueId, configId } = req.params
-      const config = await commissionResolution.updateOrgCommissionConfig(venueId, configId, req.body)
+      const config = await commissionResolution.updateOrgCommissionConfig(venueId, configId, req.body, (req as any).authContext?.userId)
       res.json({ data: config })
     } catch (error) {
       next(error)
