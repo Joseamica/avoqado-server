@@ -17,7 +17,8 @@
  *   sin plan ⇒ esperar; si no, vuelve a la fila en 15 s sin gastar intento. Un archivo interrumpido (§12.8) tampoco se da
  *   por procesado, y el sync guarda su avance en el evento.
  * - Lo que lanza (R1): `ContextoObsoleto` = el reclamo es de otro (no se toca); un error pasajero de la base (P2028,
- *   P2024, P2034, 40P01) vuelve a la fila sin gastar intento; lo demás es FAILED con su espera. Nunca PROCESSED.
+ *   P2024, P2034, 40P01), también al cerrar o diferir, vuelve a la fila sin gastar intento mientras el aviso tenga menos
+ *   de 6 h; después gasta intento como cualquier falla. Lo demás es FAILED con su espera. Nunca PROCESSED.
  * - ponytail: un aviso de una tienda con varias sucursales se difiere si CUALQUIERA de las que toca no está ACTIVE. En el
  *   piloto hay una; si una tienda llega a tener sucursales en fases distintas por días, partir el evento por sucursal.
  */
@@ -50,6 +51,8 @@ import {
   FALTA_PERMISO,
   leerNiveles,
   leerToken,
+  MIN_ESCRITURA_MS,
+  restante,
   revocarTiendaSiVigente,
   SIN_TIEMPO,
   TOKEN_ILEGIBLE,
@@ -314,15 +317,21 @@ export async function processShopifyEvent(id: string, claimToken: string, deps: 
   return runWithContext({ ...base }, () => procesarEvento(id, claimToken, deps))
 }
 
+/**
+ * R1: un error pasajero de la base, como cualquier falla, se clasifica por la EDAD del aviso. Dentro de la ventana no gasta
+ * intento (una ola de carga no manda a cuarentena avisos sanos); pasada la ventana sigue el camino normal (intento y
+ * espera), así un aviso que siempre truena llega a la cuarentena y no se come la fase de eventos cada 15 s.
+ * ponytail: 6 h fijas desde que llegó; si los pasajeros se volvieran frecuentes, contarlos aparte de los intentos.
+ */
+const VENTANA_PASAJERO_MS = 6 * 60 * 60_000
+function porPasajero(ev: ShopifyInboundEvent, codigo: string): Resultado {
+  const motivo = `DB_PASAJERO: ${codigo}`
+  return Date.now() - ev.receivedAt.getTime() < VENTANA_PASAJERO_MS ? { o: 'CUPO', motivo } : { o: 'FAILED', motivo }
+}
+
 async function procesarEvento(id: string, claimToken: string, deps: DepsEvento): Promise<EventOutcome> {
   const ev = await prisma.shopifyInboundEvent.findUnique({ where: { id } })
   if (!ev || ev.status !== 'PROCESSING' || ev.claimToken !== claimToken) return 'SKIPPED'
-  const now = new Date()
-  const cerrar = (data: Prisma.ShopifyInboundEventUpdateManyMutationInput) =>
-    prisma.shopifyInboundEvent.updateMany({
-      where: { id, claimToken, status: 'PROCESSING' },
-      data: { ...data, claimToken: null, leaseUntil: null },
-    })
   const fresco = deps.hasAccess ?? accesoReal
   const pasada: Pasada = {
     acceso: unaVezPorNegocio(fresco),
@@ -339,29 +348,54 @@ async function procesarEvento(id: string, claimToken: string, deps: DepsEvento):
     if (err instanceof ContextoObsoleto) {
       r = { o: 'PERDIDO' } // una tx con efectos vio que el reclamo ya no es suyo y se deshizo entera
     } else if (pasajero) {
-      // ponytail: no gasta intento (la base estaba ocupada, no es culpa del aviso). Un interbloqueo que se repitiera
-      // siempre reintentaría cada 15 s sin cuarentena; queda en el log y en `error`. Contar intentos si se viera.
-      logger.warn(`[SHOPIFY] evento ${ev.topic} ${id}: la base no respondió a tiempo (${pasajero}); vuelve a la fila`)
-      r = { o: 'CUPO', motivo: `DB_PASAJERO: ${pasajero}` }
+      logger.warn(`[SHOPIFY] evento ${ev.topic} ${id} (${ev.shopDomain}): la base no respondió a tiempo (${pasajero})`)
+      r = porPasajero(ev, pasajero)
     } else {
-      logger.warn(`[SHOPIFY] evento ${ev.topic} ${id}: ${(err as Error)?.message}`)
+      logger.warn(`[SHOPIFY] evento ${ev.topic} ${id} (${ev.shopDomain}): ${(err as Error)?.message}`)
       r = { o: 'FAILED', motivo: String((err as Error)?.message ?? err).slice(0, 2000) }
     }
   }
+  // Cerrar (o diferir) también toca la base: un error pasajero ahí pasa por el MISMO clasificador y se intenta un cierre
+  // simple; si tampoco entra, el evento se queda PROCESSING y el siguiente reclamo lo retoma al vencer su lease.
+  try {
+    return await cerrarSegun(ev, claimToken, r)
+  } catch (err) {
+    const pasajero = errorPasajeroDeBase(err)
+    if (!pasajero) throw err
+    logger.warn(`[SHOPIFY] evento ${ev.topic} ${id} (${ev.shopDomain}): no se pudo cerrar (${pasajero}); se reintenta el cierre`)
+    try {
+      return await cerrarSegun(ev, claimToken, porPasajero(ev, pasajero))
+    } catch (err2) {
+      const otra = errorPasajeroDeBase(err2)
+      if (!otra) throw err2
+      logger.warn(`[SHOPIFY] evento ${ev.topic} ${id} (${ev.shopDomain}): tampoco cerró (${otra}); lo retoma su lease vencido`)
+      return 'FAILED'
+    }
+  }
+}
+
+/** Escribe el resultado de una pasada, con la hora del CIERRE (no la del arranque) y CAS del reclamo. */
+async function cerrarSegun(ev: ShopifyInboundEvent, claimToken: string, r: Resultado): Promise<EventOutcome> {
+  const ahora = new Date()
+  const cerrar = (data: Prisma.ShopifyInboundEventUpdateManyMutationInput) =>
+    prisma.shopifyInboundEvent.updateMany({
+      where: { id: ev.id, claimToken, status: 'PROCESSING' },
+      data: { ...data, claimToken: null, leaseUntil: null },
+    })
   switch (r.o) {
     case 'PERDIDO':
       return 'SKIPPED' // otro proceso tiene el evento: ni se cierra ni se toca
     case 'CUPO':
-      await cerrar({ status: 'RECEIVED', error: r.motivo ?? ev.error, nextAttemptAt: new Date(now.getTime() + ESPERA_CUPO_MS) })
+      await cerrar({ status: 'RECEIVED', error: r.motivo ?? ev.error, nextAttemptAt: new Date(ahora.getTime() + ESPERA_CUPO_MS) })
       return 'FAILED'
     case 'ESPERA':
-      await cerrar({ status: 'RECEIVED', error: r.motivo ?? null, nextAttemptAt: new Date(now.getTime() + ESPERA_PLAN_MS) })
+      await cerrar({ status: 'RECEIVED', error: r.motivo ?? null, nextAttemptAt: new Date(ahora.getTime() + ESPERA_PLAN_MS) })
       return 'DEFERRED'
     case 'DIFERIR':
-      return diferir(id, claimToken, r.enlaces, r.motivo)
+      return diferir(ev.id, claimToken, r.enlaces, r.motivo)
     case 'PROCESSED':
     case 'SKIPPED':
-      await cerrar({ status: r.o, processedAt: now, error: r.motivo ?? null })
+      await cerrar({ status: r.o, processedAt: ahora, error: r.motivo ?? null })
       return r.o
     case 'DEFERRED':
       await cerrar({ status: 'DEFERRED', error: r.motivo ?? null, nextAttemptAt: null })
@@ -373,8 +407,8 @@ async function procesarEvento(id: string, claimToken: string, deps: DepsEvento):
         status: 'FAILED',
         attemptCount: intento,
         error: r.motivo ?? null,
-        nextAttemptAt: ultimo ? null : new Date(now.getTime() + backoffMs(intento)),
-        processedAt: ultimo ? now : null,
+        nextAttemptAt: ultimo ? null : new Date(ahora.getTime() + backoffMs(intento)),
+        processedAt: ultimo ? ahora : null,
       })
       return 'FAILED'
     }
@@ -388,32 +422,35 @@ async function procesarEvento(id: string, claimToken: string, deps: DepsEvento):
  * → tienda → evento, el mismo del drenado.
  */
 async function diferir(id: string, claimToken: string, enlaces: string[], motivo: string): Promise<EventOutcome> {
-  return prisma.$transaction(async tx => {
-    const ids = [...new Set(enlaces)].sort()
-    const filas = ids.length
-      ? await tx.$queryRaw<Array<{ status: string; importError: string | null; storeId: string }>>`
+  return prisma.$transaction(
+    async tx => {
+      const ids = [...new Set(enlaces)].sort()
+      const filas = ids.length
+        ? await tx.$queryRaw<Array<{ status: string; importError: string | null; storeId: string }>>`
           SELECT status::text AS status, "importError", "storeId" FROM "ShopifyLocationLink"
            WHERE id IN (${Prisma.join(ids)}) ORDER BY id FOR SHARE`
-      : []
-    const tiendas = [...new Set(filas.map(f => f.storeId))].sort()
-    const estados = tiendas.length
-      ? await tx.$queryRaw<Array<{ status: string }>>`
+        : []
+      const tiendas = [...new Set(filas.map(f => f.storeId))].sort()
+      const estados = tiendas.length
+        ? await tx.$queryRaw<Array<{ status: string }>>`
           SELECT status::text AS status FROM "ShopifyStore" WHERE id IN (${Prisma.join(tiendas)}) ORDER BY id FOR SHARE`
-      : []
-    const donde = { id, claimToken, status: 'PROCESSING' as const }
-    const base = { claimToken: null, leaseUntil: null }
-    const escribir = async (data: Prisma.ShopifyInboundEventUpdateManyMutationInput, sale: EventOutcome): Promise<EventOutcome> =>
-      (await tx.shopifyInboundEvent.updateMany({ where: donde, data: { ...base, ...data } })).count === 1 ? sale : 'SKIPPED'
-    if (filas.length === 0) return escribir({ status: 'SKIPPED', error: 'SIN_SUCURSAL', processedAt: new Date() }, 'SKIPPED')
-    const terminal = (e: string | null) => e !== null && SHOPIFY_IMPORT_ERRORES_TERMINALES.includes(e)
-    const yaPuede =
-      estados.length === tiendas.length &&
-      estados.every(s => s.status === 'ACTIVE') &&
-      filas.every(f => f.status === 'ACTIVE' && !terminal(f.importError))
-    // No se procesó todavía: vuelve a la fila ya (FAILED para el worker, sin gastar intento).
-    if (yaPuede) return escribir({ status: 'RECEIVED', nextAttemptAt: null }, 'FAILED')
-    return escribir({ status: 'DEFERRED', error: motivo, nextAttemptAt: null }, 'DEFERRED')
-  })
+        : []
+      const donde = { id, claimToken, status: 'PROCESSING' as const }
+      const base = { claimToken: null, leaseUntil: null }
+      const escribir = async (data: Prisma.ShopifyInboundEventUpdateManyMutationInput, sale: EventOutcome): Promise<EventOutcome> =>
+        (await tx.shopifyInboundEvent.updateMany({ where: donde, data: { ...base, ...data } })).count === 1 ? sale : 'SKIPPED'
+      if (filas.length === 0) return escribir({ status: 'SKIPPED', error: 'SIN_SUCURSAL', processedAt: new Date() }, 'SKIPPED')
+      const terminal = (e: string | null) => e !== null && SHOPIFY_IMPORT_ERRORES_TERMINALES.includes(e)
+      const yaPuede =
+        estados.length === tiendas.length &&
+        estados.every(s => s.status === 'ACTIVE') &&
+        filas.every(f => f.status === 'ACTIVE' && !terminal(f.importError))
+      // No se procesó todavía: vuelve a la fila ya (FAILED para el worker, sin gastar intento).
+      if (yaPuede) return escribir({ status: 'RECEIVED', nextAttemptAt: null }, 'FAILED')
+      return escribir({ status: 'DEFERRED', error: motivo, nextAttemptAt: null }, 'DEFERRED')
+    },
+    { timeout: 15_000 }, // puede esperar los candados del drenado, que a su vez dura hasta 15 s
+  )
 }
 
 /** Estampa el negocio en el contexto de esta pasada (contexto-de-ejecucion.md): sólo si es UNO, para no mentir. */
@@ -585,12 +622,18 @@ async function sucursalesDeTienda(storeId: string): Promise<SucursalEvento[]> {
   }
 }
 
+/**
+ * Las variantes de un pedido o reembolso. Una lista que no es arreglo (o un renglón raro) cuenta como «sin variantes»:
+ * nunca lanza. El drenado lo lee DENTRO de su tx, y un throw ahí atoraría para siempre el drenado de toda la tienda.
+ */
 function variantesDe(topic: string, p: Carga): string[] {
+  const lista = (x: unknown): unknown[] => (Array.isArray(x) ? x : [])
   const ids =
     topic === 'refunds/create'
-      ? (p.refund_line_items ?? []).map(r => r?.line_item?.variant_id)
-      : (p.line_items ?? []).map(li => li?.variant_id)
-  return [...new Set(ids.filter((x): x is number | string => x !== null && x !== undefined).map(x => toGid('ProductVariant', String(x))))]
+      ? lista(p.refund_line_items).map(r => (r as { line_item?: { variant_id?: unknown } | null } | null)?.line_item?.variant_id)
+      : lista(p.line_items).map(li => (li as { variant_id?: unknown } | null)?.variant_id)
+  const validos = ids.filter((x): x is number | string => typeof x === 'number' || typeof x === 'string')
+  return [...new Set(validos.map(x => toGid('ProductVariant', String(x))))]
 }
 
 async function parejasDePedido(links: SucursalEvento[], gids: string[]): Promise<ParejaEvento[]> {
@@ -635,6 +678,8 @@ async function releerYAplicar(store: ShopifyStore, parejas: ParejaEvento[], caus
   }
   const resultados: ApplyOutcome[] = []
   for (const x of parejas) {
+    // §12.8: antes de CADA escritura se mira el vencimiento; lo ya aplicado se vuelve SIN_CAMBIO al repetir la pasada.
+    if (restante(deps.vence) < MIN_ESCRITURA_MS) return { o: 'CUPO', motivo: 'SIN_TIEMPO' }
     const nivel = r.data.get(levelKey(x.shopifyLocationId, x.inventoryItemId)) ?? { kind: 'SIN_NIVEL' as const }
     // §12.6 (R07): sin lease del worker (`workToken` ausente, nunca null): el aviso procesa aunque el worker tenga la sucursal.
     const cerco = {

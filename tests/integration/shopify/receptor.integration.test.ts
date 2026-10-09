@@ -740,3 +740,109 @@ describe('lo que exige la revisión de B1 (R1, R2, R3) y el contexto', () => {
     expect(visto).toEqual([e.venueId])
   })
 })
+
+describe('ronda de arreglos 1 de B2', () => {
+  it('Important 1: un error pasajero en un aviso de más de 6 h gasta intento con su espera (puede llegar a cuarentena)', async () => {
+    const e = await escenario()
+    const id = await evento(e, 'products/update', { id: 980 })
+    await prisma.shopifyInboundEvent.update({ where: { id }, data: { receivedAt: new Date(Date.now() - 7 * 60 * 60_000) } })
+    const pasajero = jest.fn(async () => {
+      throw Object.assign(new Error('Unable to start a transaction in the given time'), { code: 'P2028' })
+    })
+    expect(await processShopifyEvent(id, await procesando(id), { ...conAcceso, syncProduct: pasajero })).toBe('FAILED')
+    const f = await ev(id)
+    expect(f).toMatchObject({ status: 'FAILED', attemptCount: 1, error: 'DB_PASAJERO: P2028', claimToken: null })
+    expect(f.nextAttemptAt!.getTime()).toBeGreaterThan(Date.now())
+
+    // Al último intento queda terminal, como cualquier falla.
+    await prisma.shopifyInboundEvent.update({ where: { id }, data: { attemptCount: MAX_EVENT_ATTEMPTS - 1 } })
+    expect(await processShopifyEvent(id, await procesando(id), { ...conAcceso, syncProduct: pasajero })).toBe('FAILED')
+    expect(await ev(id)).toMatchObject({ status: 'FAILED', attemptCount: MAX_EVENT_ATTEMPTS, nextAttemptAt: null })
+  })
+
+  it('Minor 1: diferir espera los candados del drenado más de 5 s sin expirar ni escapar de processShopifyEvent', async () => {
+    const e = await escenario({ linkStatus: 'PAUSED', pausedFrom: 'ACTIVE' })
+    const id = await evento(e, 'products/update', { id: 981 })
+    const token = await procesando(id)
+    let tomado!: () => void
+    const listo = new Promise<void>(r => (tomado = r))
+    // Lo que hace el drenado: la sucursal FOR NO KEY UPDATE, que choca con el FOR SHARE de diferir.
+    const drenado = prisma.$transaction(
+      async tx => {
+        await tx.$queryRaw`SELECT id FROM "ShopifyLocationLink" WHERE id = ${e.locationLinkId} FOR NO KEY UPDATE`
+        tomado()
+        await dormir(6_000)
+      },
+      { timeout: 20_000 },
+    )
+    await listo
+    const r = await processShopifyEvent(id, token, conAcceso)
+    await drenado
+    expect(r).toBe('DEFERRED')
+    expect(await ev(id)).toMatchObject({ status: 'DEFERRED', error: 'SUCURSAL_PAUSED', attemptCount: 0, claimToken: null })
+  })
+
+  it('Minor 2 y 3: sin tiempo para escribir tras la lectura ⇒ no aplica nada y la espera se cuenta desde el cierre', async () => {
+    const e = await escenario()
+    const id = await evento(e, 'inventory_levels/update', NIVEL_1)
+    const lenta = jest.fn(async (_s: unknown, items: Array<{ inventoryItemId: string; shopifyLocationId: string }>) => {
+      await dormir(1_800)
+      return nivelesFalsos(() => nivel(7))(_s as never, items)
+    })
+    const token = await procesando(id)
+    const vence = Date.now() + MIN_HTTP_MS + 700 // alcanza para leer, no para escribir después
+    expect(await processShopifyEvent(id, token, { ...conAcceso, fetchLevels: lenta as never, vence })).toBe('FAILED')
+    const despues = Date.now()
+    expect(lenta).toHaveBeenCalledTimes(1)
+    expect(await stock(e)).toBe('10')
+    expect((await prisma.shopifyVariantLink.findUniqueOrThrow({ where: { id: e.variantLinkId } })).mirrorAvailable).toBe(10)
+    const f = await ev(id)
+    expect(f).toMatchObject({ status: 'RECEIVED', error: 'SIN_TIEMPO', attemptCount: 0, claimToken: null })
+    // Minor 3: 15 s desde el CIERRE; desde el arranque de la pasada (≈1.8 s antes) quedaría por debajo.
+    expect(f.nextAttemptAt!.getTime()).toBeGreaterThanOrEqual(despues + 14_500)
+  })
+
+  it('Minor 4: una lista de renglones que no es arreglo no tumba el drenado ni el proceso: cuenta como «sin variantes»', async () => {
+    const x = await escenario({ linkStatus: 'REVIEWING', initialized: false })
+    const y = await otraSucursalDeLaTienda(x)
+    otras.push(y)
+    await prisma.shopifyInboundEvent.createMany({
+      data: [
+        {
+          dedupKey: `roto1-${x.venueId}`,
+          appKey: 'PILOTO',
+          topic: 'orders/create',
+          shopDomain: x.shopDomain,
+          payload: { line_items: 'roto' },
+          status: 'DEFERRED',
+        },
+        {
+          dedupKey: `roto2-${x.venueId}`,
+          appKey: 'PILOTO',
+          topic: 'refunds/create',
+          shopDomain: x.shopDomain,
+          payload: { refund_line_items: { a: 1 } },
+          status: 'DEFERRED',
+        },
+      ],
+    })
+    const antes = (await prisma.shopifyLocationLink.findUniqueOrThrow({ where: { id: y.locationLinkId } })).reconcileVersion
+    await prisma.shopifyLocationLink.update({ where: { id: x.locationLinkId }, data: { status: 'ACTIVE', requeuePending: true } })
+    expect(await requeueDeferredEvents(x.locationLinkId)).toEqual({ reabiertos: 0, superados: 2, terminado: true })
+    expect((await prisma.shopifyLocationLink.findUniqueOrThrow({ where: { id: y.locationLinkId } })).reconcileVersion).toBe(antes + 1)
+
+    const id = await evento(x, 'orders/create', { line_items: { variant_id: 1 } })
+    expect(await processShopifyEvent(id, await procesando(id), conAcceso)).toBe('SKIPPED')
+    expect(await ev(id)).toMatchObject({ status: 'SKIPPED', error: 'SIN_PAREJA' })
+  })
+
+  it('desinstalación sin hora y sin tiempo para probar el token ⇒ no sale a la red y vuelve a la fila sin gastar intento', async () => {
+    const e = await escenario()
+    const id = await evento(e, 'app/uninstalled', { id: 1 })
+    const graphql = graphqlFalso(() => falla('UNAUTHORIZED', false, false))
+    expect(await processShopifyEvent(id, await procesando(id), { graphql, vence: Date.now() + 100 })).toBe('FAILED')
+    expect(graphql).not.toHaveBeenCalled()
+    expect(await ev(id)).toMatchObject({ status: 'RECEIVED', error: 'SIN_TIEMPO', attemptCount: 0, claimToken: null })
+    expect((await prisma.shopifyStore.findUniqueOrThrow({ where: { id: e.storeId } })).status).toBe('ACTIVE')
+  })
+})
