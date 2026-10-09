@@ -3456,7 +3456,6 @@ Servicios Tecnologicos Avo S.A. de C.V.`
       total: number
       items: Array<{ name: string; avoqado: string; shopify: number; motivo: string }>
       dashboardUrl: string
-      preferencesUrl: string
       idempotencyKey?: string
     },
   ): Promise<boolean> {

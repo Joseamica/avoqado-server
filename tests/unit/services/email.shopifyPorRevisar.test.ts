@@ -12,7 +12,6 @@ const datos = {
     { name: 'Pantalón', avoqado: '2', shopify: 4, motivo: 'Cambios sin enviar' },
   ],
   dashboardUrl: 'https://dash.test/venues/x/settings/integrations/shopify#por-revisar',
-  preferencesUrl: 'https://dash.test/venues/x/notifications/preferences',
   idempotencyKey: 'shopify-por-revisar:v:2026-10-08:a@b.test',
 }
 const enviado = () => envio.mock.calls[0][0] as { subject: string; html: string; text: string; idempotencyKey?: string }
@@ -40,7 +39,7 @@ describe('sendShopifyPorRevisarEmail — plantilla canónica (email-templates.md
     expect(o.html).toContain(frase)
     expect(o.text).toContain(frase)
     for (const cuerpo of [o.html, o.text]) {
-      expect(cuerpo).not.toContain(datos.preferencesUrl)
+      expect(cuerpo).not.toContain('/notifications/preferences')
       expect(cuerpo).not.toMatch(/preferencias/i)
     }
   })

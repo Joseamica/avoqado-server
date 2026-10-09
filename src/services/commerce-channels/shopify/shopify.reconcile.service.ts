@@ -901,7 +901,6 @@ async function mandarCorreos(
             total: porRevisar,
             items,
             dashboardUrl: `${base}/settings/integrations/shopify#por-revisar`,
-            preferencesUrl: `${base}/notifications/preferences`,
             idempotencyKey: `shopify-por-revisar:${venueId}:${dia}:${email}`,
           })
           envio.catch(() => undefined) // si se abandona por el plazo, su falla no queda sin atender
