@@ -20,6 +20,7 @@ import { resolveTenderForCharge, computeTenderCommission } from '../dashboard/te
 // response carries an identical `digitalReceipt` shape — mobile and TPV never
 // drift on how the receipt QR (accessKey + receiptUrl + autofactura) is built.
 import { mapDigitalReceiptResponse, resolveAutofacturaAvailable, type OrderInventoryWarning } from '../tpv/payment.tpv.service'
+import { enqueuePaymentCommissionInTx } from '../tpv/paymentEffects.service'
 import {
   buildItemDiscountRow,
   calculateDiscountPesos,
@@ -2911,6 +2912,10 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
           })
           postingId = posting?.id ?? null
         }
+
+        // FT-GRAVES S-EF (medido el 8-oct): el MISMO gancho de comisión que la terminal, con el dinero, en esta transacción. Sin
+        // él, este cobro y la cola sin red `PAY_CASH` (que lo reutiliza) no comisionaban. Un efecto por cobro: no se duplica.
+        await enqueuePaymentCommissionInTx(tx, newPayment.id)
 
         return {
           newPayment,
