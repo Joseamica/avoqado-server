@@ -1,17 +1,17 @@
 import type { Prisma } from '@prisma/client'
 import prisma from '../../../utils/prismaClient'
+import { CUENTA_VIVA_SIN_PAGAR, esCuentaVivaSinPagar } from '../../shared/cuentaEnLaMesa'
 import { computeFloorPlanFingerprint } from './floorPlanFingerprint'
 import { FLOOR_PLAN_LIMITS, type FloorPlanDto, type PlanArea, type PlanElement, type PlanTable } from './floorPlan.types'
 
 type Db = Prisma.TransactionClient | typeof prisma
 
 /**
- * Cuenta ABIERTA = viva y sin pagar. Es el mismo criterio con que `assignTable` (table.tpv.service) decide si una mesa
- * ya tiene cuenta, y el de la vista de mesas del POS (COMPLETED / CANCELLED / DELETED ya no están en la mesa). Una
- * cuenta cancelada o borrada con el puntero colgado NO frena quitar la mesa.
+ * El puntero `Table.currentOrderId` apunta a una cuenta viva y sin pagar (`shared/cuentaEnLaMesa`). Un puntero a una
+ * cuenta que no se encuentra cuenta como abierta: ante la duda, no se deja quitar la mesa.
  */
-export function isOpenOrder(order: { status: string; paymentStatus: string }): boolean {
-  return !['COMPLETED', 'CANCELLED', 'DELETED'].includes(order.status) && order.paymentStatus !== 'PAID'
+export function pointerIsOpen(order: { status: string; paymentStatus: string } | null | undefined): boolean {
+  return !order || esCuentaVivaSinPagar(order)
 }
 
 export interface FloorPlanState {
@@ -68,9 +68,22 @@ export async function loadFloorPlanState(db: Db, venueId: string): Promise<Floor
   })
   const overLimit =
     areas.length > FLOOR_PLAN_LIMITS.areas || tables.length > FLOOR_PLAN_LIMITS.tables || elements.length > FLOOR_PLAN_LIMITS.elements
+  const shown = tables.slice(0, FLOOR_PLAN_LIMITS.tables)
+  // Cuentas vivas y sin pagar ligadas a la mesa por `Order.tableId`, aunque la mesa no las apunte (cuenta dividida,
+  // orden dada de alta en el POS). UNA consulta para todas las mesas, acotada por ellas (índice venueId+tableId+paymentStatus).
+  const withLiveOrder = new Set(
+    shown.length
+      ? (
+          await db.order.groupBy({
+            by: ['tableId'],
+            where: { venueId, tableId: { in: shown.map(t => t.id) }, ...CUENTA_VIVA_SIN_PAGAR },
+          })
+        ).map(g => g.tableId)
+      : [],
+  )
   return {
     areas: areas.slice(0, FLOOR_PLAN_LIMITS.areas),
-    tables: tables.slice(0, FLOOR_PLAN_LIMITS.tables).map(t => ({
+    tables: shown.map(t => ({
       id: t.id,
       number: t.number,
       capacity: t.capacity,
@@ -79,8 +92,9 @@ export async function loadFloorPlanState(db: Db, venueId: string): Promise<Floor
       positionX: t.positionX,
       positionY: t.positionY,
       areaId: t.areaId,
-      // Puntero a una cuenta que no se encuentra: ante la duda, abierta (igual que el servidor al publicar).
-      hasOpenOrder: !!t.currentOrderId && (!t.currentOrder || isOpenOrder(t.currentOrder)),
+      // Abierta = su puntero apunta a una cuenta abierta, o tiene una cuenta viva sin pagar ligada por tableId (igual
+      // que el servidor al publicar).
+      hasOpenOrder: (!!t.currentOrderId && pointerIsOpen(t.currentOrder)) || withLiveOrder.has(t.id),
     })),
     elements: elements.slice(0, FLOOR_PLAN_LIMITS.elements),
     overLimit,

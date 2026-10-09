@@ -1,11 +1,12 @@
 import { randomUUID } from 'node:crypto'
 import { Prisma } from '@prisma/client'
 import prisma from '../../../utils/prismaClient'
-import { BadRequestError, ConflictError, ValidationError } from '../../../errors/AppError'
+import { BadRequestError, ConflictError, ServiceUnavailableError, ValidationError } from '../../../errors/AppError'
 import { logAction } from '../activity-log.service'
 import socketManager from '../../../communication/sockets'
 import { SocketEventType } from '../../../communication/sockets/types'
 import { ORDER_LOCK_WAIT_BUDGET } from '../../shared/paymentShiftClaim'
+import { CUENTA_VIVA_SIN_PAGAR_SQL } from '../../shared/cuentaEnLaMesa'
 import logger from '../../../config/logger'
 import { isDeadlockError, isRetryableDbError } from '../../../utils/serializableRetry'
 import { computeFloorPlanFingerprint } from './floorPlanFingerprint'
@@ -18,7 +19,7 @@ import {
   type FloorPlanDiff,
   type TableLayout,
 } from './floorPlanDiff'
-import { getFloorPlan, isOpenOrder, loadFloorPlanState } from './floorPlan.read'
+import { getFloorPlan, loadFloorPlanState, pointerIsOpen } from './floorPlan.read'
 import { FLOOR_PLAN_LIMITS, type FloorPlanDto, type PlanTable, type PublishFloorPlanInput } from './floorPlan.types'
 
 export { getFloorPlan }
@@ -26,6 +27,7 @@ export { getFloorPlan }
 type Tx = Prisma.TransactionClient
 
 const PLAN_CHANGED = 'Alguien más cambió el plano mientras lo editabas. Recarga para ver sus cambios.'
+const BUSY = 'El servidor está ocupado y no pudo guardar. Intenta de nuevo; tus cambios siguen en pantalla.'
 
 /**
  * Candado del plano VIVO: todas las mesas y elementos activos del venue, por id, ANTES de leer el plano y su huella.
@@ -47,13 +49,23 @@ async function lockLivePlan(tx: Tx, venueId: string): Promise<void> {
 interface LockedTable {
   id: string
   number: string
-  /** Apunta a una cuenta abierta (`isOpenOrder`), o a una que no está en el venue: ante la duda, se trata como abierta. */
-  openOrder: boolean
+  /** El puntero apunta a una cuenta abierta, o a una que no está en el venue: ante la duda, se trata como abierta. */
+  pointerOpen: boolean
+  /** La cuenta viva y sin pagar más vieja ligada a la mesa por `Order.tableId` (cuenta dividida, alta del POS), o null. */
+  liveOrderId: string | null
 }
 
+/** La mesa tiene una cuenta abierta: por su puntero o por una cuenta viva sin pagar ligada por tableId. */
+const hasOpenOrder = (t: LockedTable) => t.pointerOpen || t.liveOrderId !== null
+
 /**
- * Bloquea (por id) las mesas que se archivan o se reviven y dice cuáles apuntan a una cuenta abierta. Las activas ya
+ * Bloquea (por id) las mesas que se archivan o se reviven y dice cuáles tienen una cuenta abierta. Las activas ya
  * las tiene `lockLivePlan`; aquí se suman las archivadas que se reviven, a las que un POS pudo colgarle una cuenta.
+ *
+ * El puntero `Table.currentOrderId` no basta: cobrar la cuenta apuntada de una cuenta dividida NO mueve el puntero a la
+ * que sigue viva, y una orden dada de alta en el POS se liga sólo por `tableId`. Por eso también se busca, en UNA
+ * consulta acotada por las mesas en juego (índice venueId+tableId+paymentStatus), la cuenta viva sin pagar de cada una,
+ * con el mismo criterio que la vista de mesas del POS (`shared/cuentaEnLaMesa`).
  */
 async function lockTablesWithOrders(tx: Tx, venueId: string, tableIds: string[]): Promise<LockedTable[]> {
   const locked = await tx.$queryRaw<Array<{ id: string; number: string; currentOrderId: string | null }>>(
@@ -61,7 +73,7 @@ async function lockTablesWithOrders(tx: Tx, venueId: string, tableIds: string[])
   )
   if (locked.length !== tableIds.length) throw new ConflictError(PLAN_CHANGED, 'FLOOR_PLAN_CHANGED')
   const orderIds = locked.flatMap(t => (t.currentOrderId ? [t.currentOrderId] : []))
-  const orders = orderIds.length
+  const pointed = orderIds.length
     ? await tx.order.findMany({
         where: { venueId, id: { in: orderIds } },
         select: { id: true, status: true, paymentStatus: true },
@@ -69,8 +81,19 @@ async function lockTablesWithOrders(tx: Tx, venueId: string, tableIds: string[])
         take: orderIds.length,
       })
     : []
-  const closedIds = new Set(orders.filter(o => !isOpenOrder(o)).map(o => o.id))
-  return locked.map(t => ({ id: t.id, number: t.number, openOrder: !!t.currentOrderId && !closedIds.has(t.currentOrderId) }))
+  const pointedById = new Map(pointed.map(o => [o.id, o]))
+  const live = await tx.$queryRaw<Array<{ tableId: string; id: string }>>(
+    Prisma.sql`SELECT DISTINCT ON (o."tableId") o."tableId", o.id FROM "Order" o
+      WHERE o."venueId" = ${venueId} AND o."tableId" IN (${Prisma.join(tableIds)}) AND ${CUENTA_VIVA_SIN_PAGAR_SQL}
+      ORDER BY o."tableId", o."createdAt", o.id`,
+  )
+  const liveByTable = new Map(live.map(o => [o.tableId, o.id]))
+  return locked.map(t => ({
+    id: t.id,
+    number: t.number,
+    pointerOpen: !!t.currentOrderId && pointerIsOpen(pointedById.get(t.currentOrderId)),
+    liveOrderId: liveByTable.get(t.id) ?? null,
+  }))
 }
 
 /**
@@ -117,6 +140,16 @@ function isConcurrencyClash(error: unknown): boolean {
 }
 
 const errorCode = (error: unknown) => (error && typeof error === 'object' ? (error as { code?: unknown }).code : undefined)
+
+/**
+ * P2028: la transacción no pudo empezar a tiempo (pool lleno) o se pasó de su presupuesto. No es un choque ni un error del
+ * plano: se responde 503 para que el editor vuelva a intentar (es seguro: el folio `saveId` hace idempotente la publicación).
+ */
+const isTransactionTimeout = (error: unknown) => errorCode(error) === 'P2028'
+function busy(saveId: string, error: unknown): ServiceUnavailableError {
+  logger.warn('Plano de mesas: la transacción se pasó de tiempo; se responde 503', { saveId, code: errorCode(error) })
+  return new ServiceUnavailableError(BUSY, 'FLOOR_PLAN_BUSY')
+}
 
 /** Una pasada de la publicación, dentro de su transacción. */
 async function applyPublication(tx: Tx, venueId: string, input: PublishFloorPlanInput, staffId: string | undefined) {
@@ -168,9 +201,9 @@ async function applyPublication(tx: Tx, venueId: string, input: PublishFloorPlan
   const archiveIds = new Set(diff.tables.archive)
   const lockIds = [...diff.tables.archive, ...diff.tables.revive.map(r => r.id)]
   const locked = lockIds.length ? await lockTablesWithOrders(tx, venueId, lockIds) : []
-  const withOpenOrder = new Set(locked.filter(t => t.openOrder).map(t => t.id))
+  const lockedById = new Map(locked.map(t => [t.id, t]))
   const blocked = locked
-    .filter(t => archiveIds.has(t.id) && t.openOrder)
+    .filter(t => archiveIds.has(t.id) && hasOpenOrder(t))
     .map(t => t.number)
     .sort(byNumber)
   if (blocked.length) {
@@ -220,9 +253,16 @@ async function applyPublication(tx: Tx, venueId: string, input: PublishFloorPlan
   for (const id of diff.tables.renumber) await tx.table.update({ where: { id }, data: { number: `__tmp_${id}` } })
   for (const u of diff.tables.update) await tx.table.update({ where: { id: u.id }, data: tableData(u.data) })
   for (const r of diff.tables.revive) {
-    // Con una cuenta abierta conserva su estado y su cuenta; sin cuenta (o ya pagada, cancelada…) vuelve libre.
-    const free = withOpenOrder.has(r.id) ? {} : { status: 'AVAILABLE' as const, currentOrderId: null }
-    await tx.table.update({ where: { id: r.id }, data: { ...tableData(r.data), active: true, ...free } })
+    // Con su puntero en una cuenta abierta conserva su estado y su cuenta. Si el puntero no está abierto pero hay una
+    // cuenta viva sin pagar ligada por tableId, queda OCUPADA apuntándola (como `reconcileTableAfterOrderRemoved`).
+    // Sin ninguna (o ya pagada, cancelada…) vuelve libre.
+    const t = lockedById.get(r.id)
+    const occupancy = t?.pointerOpen
+      ? {}
+      : t?.liveOrderId
+        ? { status: 'OCCUPIED' as const, currentOrderId: t.liveOrderId }
+        : { status: 'AVAILABLE' as const, currentOrderId: null }
+    await tx.table.update({ where: { id: r.id }, data: { ...tableData(r.data), active: true, ...occupancy } })
   }
   for (const c of diff.tables.create) {
     await tx.table.create({
@@ -285,6 +325,7 @@ export async function publishFloorPlan(
   try {
     outcome = await once()
   } catch (error) {
+    if (isTransactionTimeout(error)) throw busy(input.saveId, error)
     if (!isConcurrencyClash(error)) throw error
     logger.warn('Plano de mesas: choque de concurrencia al publicar; se repite una vez', { saveId: input.saveId, code: errorCode(error) })
     // Un respiro corto y al azar, para no volver a chocar con el mismo escritor en el mismo instante.
@@ -292,8 +333,20 @@ export async function publishFloorPlan(
     try {
       outcome = await once()
     } catch (retryError) {
+      if (isTransactionTimeout(retryError)) throw busy(input.saveId, retryError)
       if (!isConcurrencyClash(retryError)) throw retryError
-      logger.warn('Plano de mesas: volvió a chocar; se responde 409', { saveId: input.saveId, code: errorCode(retryError) })
+      if (errorCode(retryError) === 'P2002') {
+        // Un único repetido DOS veces ya no huele a escritor concurrente: puede ser un hueco en las reglas del plano.
+        // Se responde 409 igual, pero a nivel error y con el índice que chocó, para que no se esconda como aviso.
+        const target = (retryError as { meta?: { target?: unknown } }).meta?.target
+        logger.error('Plano de mesas: el mismo choque de único se repitió al reintentar; se responde 409', {
+          saveId: input.saveId,
+          code: 'P2002',
+          target,
+        })
+      } else {
+        logger.warn('Plano de mesas: volvió a chocar; se responde 409', { saveId: input.saveId, code: errorCode(retryError) })
+      }
       throw new ConflictError(PLAN_CHANGED, 'FLOOR_PLAN_CHANGED')
     }
   }

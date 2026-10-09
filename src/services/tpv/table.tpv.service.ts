@@ -8,6 +8,7 @@ import { assertVenueSalesEnabled } from '../venueSalesGuard'
 import { logAction } from '../dashboard/activity-log.service'
 import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
 import { ORDER_LOCK_WAIT_BUDGET } from '../shared/paymentShiftClaim'
+import { ESTADOS_FUERA_DE_LA_MESA } from '../shared/cuentaEnLaMesa'
 
 interface TableStatusResponse {
   id: string
@@ -75,7 +76,8 @@ export async function getTablesWithStatus(venueId: string): Promise<TableStatusR
     where: {
       venueId,
       tableId: { not: null },
-      status: { notIn: ['COMPLETED', 'CANCELLED', 'DELETED'] },
+      // La misma lista con que el plano de mesas decide si una mesa tiene cuenta (shared/cuentaEnLaMesa).
+      status: { notIn: [...ESTADOS_FUERA_DE_LA_MESA] },
     },
     select: {
       id: true,

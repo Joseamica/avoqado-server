@@ -91,6 +91,11 @@ const abrirCuenta = async (
   await prisma.table.update({ where: { id: tableId }, data: { currentOrderId: order.id, status: 'OCCUPIED' } })
   return order
 }
+/** Una cuenta ligada a la mesa sólo por `Order.tableId`, sin que la mesa la apunte (cuenta dividida, alta del POS). */
+const cuentaSinPuntero = (tableId: string, paymentStatus: 'PENDING' | 'PAID' = 'PENDING') =>
+  prisma.order.create({
+    data: { venueId, orderNumber: `PLANO-${randomUUID()}`, subtotal: 100, taxAmount: 0, total: 100, tableId, paymentStatus },
+  })
 /** Cuántas consultas que tocan `tabla` esperan un candado; reintenta ~5 s (o hasta que `hasta()` diga que ya no tiene caso). */
 async function esperandoCandado(tabla: string, hasta: () => boolean = () => false): Promise<number> {
   for (let i = 0; i < 200 && !hasta(); i++) {
@@ -457,6 +462,55 @@ describe('publishFloorPlan', () => {
     const out = await publish({ baseFingerprint: now.fingerprint, areas: [salon(created.areas[0].id)], tables: [] })
     expect(out.tables).toEqual([])
     expect(await prisma.table.count({ where: { venueId, active: true } })).toBe(0)
+  })
+
+  it('mesa apuntando a la cuenta A ya PAGADA y con la cuenta B viva sin pagar (cuenta dividida): no se puede quitar', async () => {
+    const created = await conMesas(mesa('t1', '6'))
+    const tableId = created.tables[0].id
+    await abrirCuenta(tableId, { paymentStatus: 'PAID' }) // A: el puntero se queda en ella al cobrarla
+    await cuentaSinPuntero(tableId) // B: la otra mitad, viva y sin pagar, sólo por tableId
+    const now = await getFloorPlan(venueId)
+    expect(now.tables[0].hasOpenOrder).toBe(true)
+    await expect(publish({ baseFingerprint: now.fingerprint, areas: [salon(created.areas[0].id)], tables: [] })).rejects.toMatchObject({
+      statusCode: 422,
+      code: 'TABLES_WITH_OPEN_ORDERS',
+      details: { numbers: ['6'] },
+    })
+    expect(await prisma.table.findUniqueOrThrow({ where: { id: tableId } })).toMatchObject({ active: true })
+  })
+
+  it('una cuenta ligada sólo por tableId (sin puntero en la mesa) también frena quitar la mesa', async () => {
+    const created = await conMesas(mesa('t1', '3'), mesa('t2', '8', { positionX: 0.2 }))
+    const t3 = created.tables.find(t => t.number === '3')!
+    await cuentaSinPuntero(t3.id)
+    const now = await getFloorPlan(venueId)
+    expect(now.tables.map(t => [t.number, t.hasOpenOrder])).toEqual([
+      ['3', true],
+      ['8', false],
+    ])
+    await expect(publish({ baseFingerprint: now.fingerprint, areas: [salon(created.areas[0].id)], tables: [] })).rejects.toMatchObject({
+      statusCode: 422,
+      code: 'TABLES_WITH_OPEN_ORDERS',
+      details: { numbers: ['3'] },
+    })
+    expect(await prisma.table.count({ where: { venueId, active: true } })).toBe(2)
+  })
+
+  it('revivir una mesa con una cuenta viva ligada sólo por tableId la deja OCUPADA y apuntándola', async () => {
+    const created = await conMesas(mesa('t1', '2'))
+    const area = salon(created.areas[0].id)
+    const tableId = created.tables[0].id
+    const removed = await publish({ baseFingerprint: created.fingerprint, areas: [area], tables: [] })
+    // Un POS con la lista vieja le colgó una cuenta a la mesa archivada, sin puntero (o con el puntero en una ya pagada).
+    await abrirCuenta(tableId, { paymentStatus: 'PAID' })
+    const viva = await cuentaSinPuntero(tableId)
+    const back = await publish({ baseFingerprint: removed.fingerprint, areas: [area], tables: [mesa('x', '2', { areaRef: area.id })] })
+    expect(back.tables).toEqual([expect.objectContaining({ id: tableId, hasOpenOrder: true })])
+    expect(await prisma.table.findUniqueOrThrow({ where: { id: tableId } })).toMatchObject({
+      active: true,
+      status: 'OCCUPIED',
+      currentOrderId: viva.id,
+    })
   })
 
   it('una cuenta abierta de verdad (confirmada, sin pagar) sí frena quitar la mesa', async () => {
