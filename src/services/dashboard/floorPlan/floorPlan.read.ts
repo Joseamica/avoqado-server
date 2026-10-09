@@ -5,6 +5,15 @@ import { FLOOR_PLAN_LIMITS, type FloorPlanDto, type PlanArea, type PlanElement, 
 
 type Db = Prisma.TransactionClient | typeof prisma
 
+/**
+ * Cuenta ABIERTA = viva y sin pagar. Es el mismo criterio con que `assignTable` (table.tpv.service) decide si una mesa
+ * ya tiene cuenta, y el de la vista de mesas del POS (COMPLETED / CANCELLED / DELETED ya no están en la mesa). Una
+ * cuenta cancelada o borrada con el puntero colgado NO frena quitar la mesa.
+ */
+export function isOpenOrder(order: { status: string; paymentStatus: string }): boolean {
+  return !['COMPLETED', 'CANCELLED', 'DELETED'].includes(order.status) && order.paymentStatus !== 'PAID'
+}
+
 export interface FloorPlanState {
   areas: PlanArea[]
   tables: PlanTable[]
@@ -33,7 +42,7 @@ export async function loadFloorPlanState(db: Db, venueId: string): Promise<Floor
       positionY: true,
       areaId: true,
       currentOrderId: true,
-      currentOrder: { select: { paymentStatus: true } },
+      currentOrder: { select: { status: true, paymentStatus: true } },
     },
     orderBy: [{ number: 'asc' }, { id: 'asc' }],
     take: FLOOR_PLAN_LIMITS.tables + 1,
@@ -70,7 +79,8 @@ export async function loadFloorPlanState(db: Db, venueId: string): Promise<Floor
       positionX: t.positionX,
       positionY: t.positionY,
       areaId: t.areaId,
-      hasOpenOrder: !!t.currentOrderId && t.currentOrder?.paymentStatus !== 'PAID',
+      // Puntero a una cuenta que no se encuentra: ante la duda, abierta (igual que el servidor al publicar).
+      hasOpenOrder: !!t.currentOrderId && (!t.currentOrder || isOpenOrder(t.currentOrder)),
     })),
     elements: elements.slice(0, FLOOR_PLAN_LIMITS.elements),
     overLimit,

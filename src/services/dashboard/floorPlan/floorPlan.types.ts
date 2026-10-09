@@ -26,7 +26,7 @@ export interface PlanTable {
   positionX: number | null
   positionY: number | null
   areaId: string | null
-  /** Tiene una cuenta sin pagar: el editor no ofrece quitarla y el servidor no la archiva. */
+  /** Tiene una cuenta abierta (viva y sin pagar): el editor no ofrece quitarla y el servidor no la archiva. */
   hasOpenOrder: boolean
 }
 

@@ -1,6 +1,7 @@
 /*
-  Plano de mesas — capa HTTP: autenticación (401), aislamiento de venue (403) y permiso tables:configure
-  para publicar (403 con WAITER). Prisma va mockeado; no hace falta base.
+  Plano de mesas — capa HTTP: autenticación (401), aislamiento de venue (403), permiso tables:configure para publicar
+  (por rol) y el orden de los porteros: el 403 del plan (TABLE_SERVICE) sale ANTES que el 400 de validación.
+  Prisma va mockeado; no hace falta base.
 */
 process.env.NODE_ENV = process.env.NODE_ENV || 'test'
 process.env.ACCESS_TOKEN_SECRET = process.env.ACCESS_TOKEN_SECRET || 'test-access-secret'
@@ -18,6 +19,7 @@ import jwt from 'jsonwebtoken'
 import { api, startApiServer } from '@tests/__helpers__/apiServer'
 import { prismaMock } from '@tests/__helpers__/setup'
 import { mirrorTokenRoleOnStaffVenue } from '@tests/__helpers__/venueRoleMock'
+import { DEFAULT_PERMISSIONS } from '../../../src/lib/permissions'
 
 const app = require('../../../src/app').default
 startApiServer(() => app)
@@ -58,5 +60,69 @@ describe('Plano de mesas — autenticación y permisos', () => {
       .send({})
     expect(res.status).toBe(403)
     expect(res.body).toHaveProperty('required', 'tables:configure')
+  })
+})
+
+/**
+ * El plan se concede por el camino de la concesión explícita (una fila VenueFeature activa de TABLE_SERVICE), igual
+ * que la suite de lealtad. Sin fila y sin filas de plan base (`venueFeature.findMany` → []), el venue queda en Gratis.
+ */
+const TABLE_SERVICE_GRANT = {
+  id: 'vf-plano',
+  active: true,
+  endDate: null,
+  suspendedAt: null,
+  stripeSubscriptionId: null,
+  feature: { code: 'TABLE_SERVICE', name: 'Servicio de mesas' },
+}
+const sinPlan = () => {
+  prismaMock.venueFeature.findFirst.mockResolvedValue(null)
+  prismaMock.venueFeature.findMany.mockResolvedValue([])
+}
+const conPlan = () => prismaMock.venueFeature.findFirst.mockResolvedValue(TABLE_SERVICE_GRANT as any)
+const publicarVacio = (role: string) =>
+  api()
+    .put(path)
+    .set('Authorization', `Bearer ${makeToken(role)}`)
+    .send({})
+
+describe('Plano de mesas — plan antes que validación, y tables:configure por rol', () => {
+  it('sin el plan (TABLE_SERVICE), un cuerpo inválido recibe el 403 del plan, no el 400 de validación', async () => {
+    sinPlan()
+    const res = await publicarVacio('MANAGER')
+    expect(res.status).toBe(403)
+    expect(res.body).toMatchObject({ featureCode: 'TABLE_SERVICE', subscriptionRequired: true })
+  })
+
+  it('con el plan, el mismo cuerpo inválido llega a la validación (400 en español)', async () => {
+    conPlan()
+    const res = await publicarVacio('MANAGER')
+    expect(res.status).toBe(400)
+    expect(JSON.stringify(res.body)).toMatch(/folio de guardado/i)
+  })
+
+  it.each(['MANAGER', 'ADMIN', 'OWNER'])('%s puede publicar (pasa tables:configure y llega a la validación)', async role => {
+    conPlan()
+    const res = await publicarVacio(role)
+    expect(res.status).toBe(400)
+  })
+
+  it.each(['WAITER', 'CASHIER'])('%s NO puede publicar: 403 por tables:configure, aun con el plan', async role => {
+    conPlan()
+    const res = await publicarVacio(role)
+    expect(res.status).toBe(403)
+    expect(res.body).toHaveProperty('required', 'tables:configure')
+  })
+
+  it('defaults: MANAGER lo tiene escrito; ADMIN y OWNER lo reciben por tables:*; WAITER y CASHIER no', () => {
+    expect(DEFAULT_PERMISSIONS.MANAGER).toContain('tables:configure')
+    for (const role of ['ADMIN', 'OWNER'] as const) {
+      expect(DEFAULT_PERMISSIONS[role]).toContain('tables:*')
+      expect(DEFAULT_PERMISSIONS[role]).not.toContain('tables:configure')
+    }
+    for (const role of ['WAITER', 'CASHIER'] as const) {
+      expect(DEFAULT_PERMISSIONS[role]).not.toContain('tables:configure')
+      expect(DEFAULT_PERMISSIONS[role]).not.toContain('tables:*')
+    }
   })
 })

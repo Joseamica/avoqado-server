@@ -120,4 +120,14 @@ describe('floor_plan', () => {
     const out = parse(await call({ venueId: 'v1' }))
     expect(out.areas[0].labels).toEqual(['Terraza'])
   })
+
+  it('los letreros y las áreas de servicio salen sin espacios de más (datos viejos de la PAX)', async () => {
+    const letrero = { ...plan.elements[1], id: 'e3', type: 'LABEL', label: '  Terraza  ' }
+    const banoViejo = { ...plan.elements[1], id: 'e4', label: '  Baño ' }
+    const sinTexto = { ...plan.elements[1], id: 'e5', label: '   ' }
+    mockGetFloorPlan.mockResolvedValueOnce({ ...plan, elements: [...plan.elements, letrero, banoViejo, sinTexto] })
+    const out = parse(await call({ venueId: 'v1' }))
+    expect(out.areas[0].labels).toEqual(['Terraza'])
+    expect(out.areas[0].serviceAreas).toEqual(['Cocina', 'Baño', 'Área de servicio'])
+  })
 })

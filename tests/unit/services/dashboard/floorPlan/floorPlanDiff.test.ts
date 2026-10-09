@@ -189,11 +189,66 @@ describe('computeFloorPlanDiff — mesas', () => {
     ).toBe('UNKNOWN_TABLE')
   })
 
-  it('rechaza una mesa que apunta a un área que no existe', () => {
-    expect(
-      rule(() => computeFloorPlanDiff(current([]), { areas: [keepArea], tables: [fresh('a', '1', { areaRef: 'nope' })], elements: [] }))
-        .code,
-    ).toBe('UNKNOWN_AREA_REF')
+  it('rechaza una mesa que apunta a un área que no existe, y dice cuál mesa', () => {
+    const e = rule(() =>
+      computeFloorPlanDiff(current([]), { areas: [keepArea], tables: [fresh('a', '4', { areaRef: 'nope' })], elements: [] }),
+    )
+    expect(e.code).toBe('UNKNOWN_AREA_REF')
+    expect(e.message).toBe('La mesa 4 apunta a un área que no existe en el plano.')
+    expect(e.details).toEqual({ ref: 'nope', number: '4' })
+  })
+
+  it('borrar un área que todavía tiene una mesa: el mensaje nombra la mesa', () => {
+    const t4 = table('t4', '4', { areaId: 'a2' })
+    const terraza = { ...area, id: 'a2', name: 'Terraza', sortOrder: 1 }
+    // El plano ya no trae la Terraza, pero la mesa 4 sigue apuntando a ella.
+    const e = rule(() =>
+      computeFloorPlanDiff(current([t4], { areas: [area, terraza] }), { areas: [keepArea], tables: [keep(t4)], elements: [] }),
+    )
+    expect(e.code).toBe('UNKNOWN_AREA_REF')
+    expect(e.message).toBe('La mesa 4 apunta a un área que no existe en el plano.')
+  })
+
+  it('reutilizar la fila de una mesa que se quita, sin cambiar nada, no la reescribe', () => {
+    const t5 = table('t5', '5')
+    const d = computeFloorPlanDiff(current([t5]), {
+      areas: [keepArea],
+      tables: [fresh('n', '5', { positionX: 0.5, positionY: 0.5 })],
+      elements: [],
+    })
+    expect(d.tables.update).toEqual([])
+    expect(d.tables.archive).toEqual([])
+    expect(d.tables.create).toEqual([])
+  })
+
+  it('rechaza renombrar una mesa al número «5 (archivada)» que tiene una mesa archivada', () => {
+    const t7 = table('t7', '7')
+    const e = rule(() =>
+      computeFloorPlanDiff(current([t7], { archivedByNumber: new Map([['5 (archivada)', 'old5']]) }), {
+        areas: [keepArea],
+        tables: [keep(t7, { number: '5 (archivada)' })],
+        elements: [],
+      }),
+    )
+    expect(e.code).toBe('TABLE_NUMBER_RESERVED')
+    expect(e.message).toBe('El número «5 (archivada)» está reservado para una mesa archivada. Usa otro.')
+    expect(e.details).toEqual({ number: '5 (archivada)' })
+  })
+
+  it('rechaza una mesa NUEVA con el número «5 (archivada 2)» de una archivada (no revive la mesa vieja)', () => {
+    const e = rule(() =>
+      computeFloorPlanDiff(current([], { archivedByNumber: new Map([['5 (archivada 2)', 'old5']]) }), {
+        areas: [keepArea],
+        tables: [fresh('n', '5 (archivada 2)')],
+        elements: [],
+      }),
+    )
+    expect(e.code).toBe('TABLE_NUMBER_RESERVED')
+  })
+
+  it('«5 (archivada)» se puede usar si ninguna mesa archivada lo tiene', () => {
+    const d = computeFloorPlanDiff(current([]), { areas: [keepArea], tables: [fresh('n', '5 (archivada)')], elements: [] })
+    expect(d.tables.create).toEqual([{ clientId: 'n', data: expect.objectContaining({ number: '5 (archivada)' }) }])
   })
 
   it('una mesa sin área queda sin acomodar', () => {
@@ -254,6 +309,23 @@ describe('computeFloorPlanDiff — elementos y límites', () => {
         }),
       ).code,
     ).toBe('ELEMENT_SHAPE_INVALID')
+  })
+
+  it('un elemento que apunta a un área que no existe dice cuál es', () => {
+    const sinArea = (extra: Record<string, unknown>) =>
+      rule(() =>
+        computeFloorPlanDiff(current([]), {
+          areas: [keepArea],
+          tables: [],
+          elements: [{ ...wall, areaRef: 'nope', ...extra } as typeof wall],
+        }),
+      )
+    const pared = sinArea({})
+    expect(pared.code).toBe('UNKNOWN_AREA_REF')
+    expect(pared.message).toBe('Una pared apunta a un área que no existe en el plano.')
+    expect(pared.details).toEqual({ ref: 'nope', index: 0, type: 'WALL' })
+    const vip = sinArea({ type: 'LABEL', label: ' VIP ', endX: null, endY: null })
+    expect(vip.message).toBe('El letrero «VIP» apunta a un área que no existe en el plano.')
   })
 
   it('respeta los límites', () => {
@@ -324,6 +396,39 @@ describe('computeFloorPlanDiff — claves repetidas y tipo de elemento', () => {
     const e = rule(() => computeFloorPlanDiff(current([]), { areas: [keepArea], tables: [fresh('c', '1'), fresh('c', '2')], elements: [] }))
     expect(e.code).toBe('DUPLICATE_CLIENT_ID')
     expect(e.details).toEqual({ clientId: 'c' })
+  })
+
+  it('las claves repetidas se reportan antes que cualquier otra regla (áreas, elementos o mesas)', () => {
+    // La mesa trae la clave repetida Y un elemento apunta a un área que no existe: gana la clave repetida.
+    const e = rule(() =>
+      computeFloorPlanDiff(current([]), {
+        areas: [keepArea],
+        tables: [fresh('c', '1'), fresh('c', '2')],
+        elements: [{ type: 'WALL', areaRef: 'nope', positionX: 0, positionY: 0, endX: 1, endY: 0, rotation: 0 }],
+      }),
+    )
+    expect(e.code).toBe('DUPLICATE_CLIENT_ID')
+    // Dos áreas nuevas con la misma clave, y además dos áreas con el mismo nombre: gana la clave.
+    const a = rule(() =>
+      computeFloorPlanDiff(current([], { areas: [] }), {
+        areas: [
+          { clientId: 'x', name: 'Salón', floorShape: 'WIDE', sortOrder: 0 },
+          { clientId: 'x', name: 'Salón', floorShape: 'WIDE', sortOrder: 1 },
+        ],
+        tables: [],
+        elements: [],
+      }),
+    )
+    expect(a.code).toBe('DUPLICATE_CLIENT_ID')
+    // Una clave nueva igual al id de un área que ya existe también es una clave repetida.
+    const b = rule(() =>
+      computeFloorPlanDiff(current([]), {
+        areas: [keepArea, { clientId: 'a1', name: 'Terraza', floorShape: 'WIDE', sortOrder: 1 }],
+        tables: [],
+        elements: [],
+      }),
+    )
+    expect(b.code).toBe('DUPLICATE_CLIENT_ID')
   })
 
   it('un elemento que cambia de tipo con la misma geometría sí se actualiza; uno igual no', () => {

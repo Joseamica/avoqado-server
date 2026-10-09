@@ -173,9 +173,13 @@ export function registerTableTools(server: McpServer, scope: McpScope) {
           })),
           walls: count('WALL'),
           bars: count('BAR_COUNTER'),
-          serviceAreas: els.filter(e => e.type === 'SERVICE_AREA').map(e => e.label ?? 'Área de servicio'),
+          // Textos sin espacios de más: la PAX vieja los guardaba tal cual (el editor ya los recorta al publicar).
+          serviceAreas: els.filter(e => e.type === 'SERVICE_AREA').map(e => e.label?.trim() || 'Área de servicio'),
           doors: count('DOOR'),
-          labels: els.flatMap(e => (e.type === 'LABEL' && e.label?.trim() ? [e.label] : [])),
+          labels: els.flatMap(e => {
+            const label = e.type === 'LABEL' ? e.label?.trim() : undefined
+            return label ? [label] : []
+          }),
         }
       })
       const unplacedTables = plan.tables.filter(t => !t.areaId || !areaIds.has(t.areaId) || !isPlaced(t)).map(t => t.number)

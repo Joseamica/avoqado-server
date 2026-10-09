@@ -19,6 +19,7 @@ export type FloorPlanRuleCode =
   | 'UNKNOWN_AREA'
   | 'UNKNOWN_AREA_REF'
   | 'TABLE_NUMBER_DUPLICATED'
+  | 'TABLE_NUMBER_RESERVED'
   | 'UNKNOWN_TABLE'
   | 'UNKNOWN_ELEMENT'
   | 'ELEMENT_SHAPE_INVALID'
@@ -97,6 +98,28 @@ export interface FloorPlanDiff {
 }
 
 const RECT_TYPES: readonly FloorElementTypeCode[] = ['BAR_COUNTER', 'SERVICE_AREA', 'DOOR']
+
+/**
+ * Número que recibe una mesa ARCHIVADA cuando una mesa del plano reclama el suyo: «5 (archivada)», «5 (archivada 2)»…
+ * Es una etiqueta del sistema, no un número que alguien eligió: una mesa del plano no puede tomarla (`TABLE_NUMBER_RESERVED`).
+ */
+export const archivedNumberLabel = (number: string, attempt: number): string =>
+  attempt === 1 ? `${number} (archivada)` : `${number} (archivada ${attempt})`
+const ARCHIVED_LABEL = /\(archivada(?: \d+)?\)$/
+
+/** Cómo se nombra un elemento en un mensaje: «Una pared…», «El letrero «VIP»…». */
+const ELEMENT_NAMES: Record<FloorElementTypeCode, readonly [string, string]> = {
+  WALL: ['Una pared', 'La pared'],
+  BAR_COUNTER: ['Una barra', 'La barra'],
+  SERVICE_AREA: ['Un área de servicio', 'El área de servicio'],
+  LABEL: ['Un letrero', 'El letrero'],
+  DOOR: ['Una puerta', 'La puerta'],
+}
+const elementName = (e: DesiredElement): string => {
+  const [una, la] = ELEMENT_NAMES[e.type]
+  const label = e.label?.trim()
+  return label ? `${la} «${label}»` : una
+}
 const nameKey = (s: string) => s.trim().toLocaleLowerCase('es-MX')
 const same = (a: number | null, b: number | null) => (a === null || b === null ? a === b : Math.abs(a - b) < 1e-6)
 const targetId = (t: AreaTarget | null): string | null | undefined => (t === null ? null : t.kind === 'existing' ? t.id : undefined)
@@ -164,6 +187,16 @@ function assertUniqueIds(items: ReadonlyArray<{ id?: string }>, what: string): v
   }
 }
 
+/** Dos filas nuevas con la misma clave (o una clave igual a un id que ya existe) no se pueden distinguir. */
+function assertUniqueClientIds(items: ReadonlyArray<{ clientId?: string }>, message: string, existingIds: ReadonlySet<string>): void {
+  const seen = new Set<string>()
+  for (const { clientId } of items) {
+    if (!clientId) continue
+    if (seen.has(clientId) || existingIds.has(clientId)) throw new FloorPlanRuleError('DUPLICATE_CLIENT_ID', message, { clientId })
+    seen.add(clientId)
+  }
+}
+
 /**
  * Compara el plano actual con el que el editor quiere publicar y dice qué crear, cambiar, archivar o
  * revivir. Pura: no toca la base. El servicio aplica el resultado dentro de una transacción.
@@ -184,9 +217,13 @@ export function computeFloorPlanDiff(
       limit: limits.elements,
     })
 
+  // Primero las claves repetidas, de cualquier tipo: sin ellas no se sabe de qué fila habla el resto de las reglas.
   assertUniqueIds(desired.areas, 'la misma área')
   assertUniqueIds(desired.tables, 'la misma mesa')
   assertUniqueIds(desired.elements, 'el mismo elemento')
+  // Una clave de área nueva tampoco puede ser el id de un área que ya existe: las mesas y elementos la usarían de referencia.
+  assertUniqueClientIds(desired.areas, 'El plano trae dos áreas con la misma clave', new Set(current.areas.map(a => a.id)))
+  assertUniqueClientIds(desired.tables, 'El plano trae dos mesas con la misma clave', new Set())
 
   const diff: FloorPlanDiff = {
     areas: { create: [], update: [], rename: [], remove: [] },
@@ -213,17 +250,16 @@ export function computeFloorPlanDiff(
       continue
     }
     const clientId = a.clientId as string
-    if (refs.has(clientId) || currentAreas.has(clientId))
-      throw new FloorPlanRuleError('DUPLICATE_CLIENT_ID', 'El plano trae dos áreas con la misma clave', { clientId })
     refs.set(clientId, { kind: 'new', clientId })
     diff.areas.create.push({ clientId, name, floorShape: a.floorShape, sortOrder: a.sortOrder })
   }
   const keptAreaIds = new Set(desired.areas.flatMap(a => (a.id ? [a.id] : [])))
   diff.areas.remove = current.areas.filter(a => !keptAreaIds.has(a.id)).map(a => a.id)
 
-  const resolveArea = (ref: string): AreaTarget => {
+  // `who` nombra a quien apunta mal («La mesa 4», «Una pared»): borrar un área que todavía tiene mesas cae aquí.
+  const resolveArea = (ref: string, who: string, details: Record<string, unknown>): AreaTarget => {
     const target = refs.get(ref)
-    if (!target) throw new FloorPlanRuleError('UNKNOWN_AREA_REF', 'Algo del plano apunta a un área que no existe', { ref })
+    if (!target) throw new FloorPlanRuleError('UNKNOWN_AREA_REF', `${who} apunta a un área que no existe en el plano.`, { ref, ...details })
     return target
   }
 
@@ -234,7 +270,7 @@ export function computeFloorPlanDiff(
     const prev = e.id ? currentElements.get(e.id) : undefined
     if (e.id && !prev)
       throw new FloorPlanRuleError('UNKNOWN_ELEMENT', 'Un elemento del plano ya no existe. Recarga el plano.', { id: e.id })
-    const layout = toElementLayout(e, resolveArea(e.areaRef), index)
+    const layout = toElementLayout(e, resolveArea(e.areaRef, elementName(e), { index, type: e.type }), index)
     if (prev) {
       keptElements.add(prev.id)
       if (elementChanged(prev, layout)) diff.elements.update.push({ id: prev.id, data: layout })
@@ -245,18 +281,18 @@ export function computeFloorPlanDiff(
   // ---- Mesas
   const active = new Map(current.activeTables.map(t => [t.id, t]))
   const numbers = new Set<string>()
-  const tableClientIds = new Set<string>()
   for (const t of desired.tables) {
-    if (t.clientId) {
-      if (tableClientIds.has(t.clientId))
-        throw new FloorPlanRuleError('DUPLICATE_CLIENT_ID', 'El plano trae dos mesas con la misma clave', { clientId: t.clientId })
-      tableClientIds.add(t.clientId)
-    }
     const n = t.number.trim()
     if (numbers.has(n)) throw new FloorPlanRuleError('TABLE_NUMBER_DUPLICATED', `Hay dos mesas con el número ${n}`, { number: n })
     numbers.add(n)
-    if (t.id && !active.has(t.id))
-      throw new FloorPlanRuleError('UNKNOWN_TABLE', 'Una mesa del plano ya no existe. Recarga el plano.', { id: t.id })
+    const prev = t.id ? active.get(t.id) : undefined
+    if (t.id && !prev) throw new FloorPlanRuleError('UNKNOWN_TABLE', 'Una mesa del plano ya no existe. Recarga el plano.', { id: t.id })
+    // Un número que la mesa no tenía y que es la etiqueta de una ARCHIVADA: crearla revivía la mesa vieja (con su
+    // historial y su QR) y renombrarla le cambiaba la etiqueta a la archivada. Se pide otro número antes de escribir.
+    if (prev?.number !== n && ARCHIVED_LABEL.test(n) && current.archivedByNumber.has(n))
+      throw new FloorPlanRuleError('TABLE_NUMBER_RESERVED', `El número «${n}» está reservado para una mesa archivada. Usa otro.`, {
+        number: n,
+      })
   }
   const keptIds = new Set(desired.tables.flatMap(t => (t.id ? [t.id] : [])))
   // Mesas que el plano ya no trae: se archivan, salvo que una mesa NUEVA con su mismo número las reutilice.
@@ -269,7 +305,7 @@ export function computeFloorPlanDiff(
       rotation: t.rotation,
       positionX: t.positionX,
       positionY: t.positionY,
-      area: t.areaRef === null ? null : resolveArea(t.areaRef),
+      area: t.areaRef === null ? null : resolveArea(t.areaRef, `La mesa ${t.number.trim()}`, { number: t.number.trim() }),
     }
     if (t.id) {
       const prev = active.get(t.id) as PlanTable
@@ -282,7 +318,8 @@ export function computeFloorPlanDiff(
     const reusable = omittedByNumber.get(data.number)
     if (reusable) {
       omittedByNumber.delete(data.number)
-      diff.tables.update.push({ id: reusable, data })
+      // Sólo se reescribe si cambió algo (menos escrituras y menos candados en la publicación).
+      if (tableChanged(active.get(reusable) as PlanTable, data)) diff.tables.update.push({ id: reusable, data })
       continue
     }
     const archived = current.archivedByNumber.get(data.number)
@@ -297,9 +334,8 @@ export function computeFloorPlanDiff(
   // Una mesa conservada que toma el número de una archivada (o por archivar) obliga a liberar ese número.
   const claimed = new Set(diff.tables.update.filter(u => diff.tables.renumber.includes(u.id)).map(u => u.data.number))
   for (const [number, id] of omittedByNumber) if (claimed.has(number)) diff.tables.freeNumbers.push({ id, number })
-  const revived = new Set(diff.tables.revive.map(r => r.id))
-  for (const [number, id] of current.archivedByNumber)
-    if (claimed.has(number) && !revived.has(id)) diff.tables.freeNumbers.push({ id, number })
+  // Una archivada reclamada nunca es también revivida: eso exigiría dos mesas del plano con su número (TABLE_NUMBER_DUPLICATED).
+  for (const [number, id] of current.archivedByNumber) if (claimed.has(number)) diff.tables.freeNumbers.push({ id, number })
 
   return diff
 }

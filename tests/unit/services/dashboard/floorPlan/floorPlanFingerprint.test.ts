@@ -52,6 +52,32 @@ describe('computeFloorPlanFingerprint', () => {
     expect(computeFloorPlanFingerprint({ ...plan, areas: [{ ...area, name: 'Terraza' }] })).not.toBe(base)
   })
 
+  it('cambia si un ELEMENTO se mueve, cambia de color, de texto, de tamaño, de área o de tipo', () => {
+    const base = computeFloorPlanFingerprint(plan)
+    const label: PlanElement = { ...wall, id: 'e2', type: 'LABEL', endX: null, endY: null, label: 'VIP', color: '#111111' }
+    const conLetrero = computeFloorPlanFingerprint({ ...plan, elements: [wall, label] })
+    expect(conLetrero).not.toBe(base) // agregar uno
+    const cambios: Array<Partial<PlanElement>> = [
+      { positionX: 0.3 }, // mover
+      { positionY: 0.3 },
+      { color: '#222222' }, // color
+      { label: 'Terraza' }, // texto
+      { width: 0.2 }, // tamaño
+      { rotation: 90 },
+      { areaId: null }, // área
+      { type: 'DOOR' }, // tipo
+    ]
+    for (const cambio of cambios) {
+      expect({ cambio, huella: computeFloorPlanFingerprint({ ...plan, elements: [wall, { ...label, ...cambio }] }) }).not.toEqual({
+        cambio,
+        huella: conLetrero,
+      })
+    }
+    // y en una pared, mover el punto final
+    expect(computeFloorPlanFingerprint({ ...plan, elements: [{ ...wall, endX: 0.5 }] })).not.toBe(base)
+    expect(computeFloorPlanFingerprint({ ...plan, elements: [{ ...wall, endY: 0.5 }] })).not.toBe(base)
+  })
+
   it('ignora el estado operativo: abrir una cuenta no es cambiar el plano', () => {
     expect(computeFloorPlanFingerprint({ ...plan, tables: [{ ...t1, hasOpenOrder: true }, t2] })).toBe(computeFloorPlanFingerprint(plan))
   })

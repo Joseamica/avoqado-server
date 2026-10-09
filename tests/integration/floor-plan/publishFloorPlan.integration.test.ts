@@ -10,8 +10,8 @@ import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { getFloorPlan, publishFloorPlan } from '@/services/dashboard/floorPlan/floorPlan.service'
 import { getTablesWithStatus, updateTablePosition } from '@/services/tpv/table.tpv.service'
-import { getFloorElements } from '@/services/tpv/floor-element.tpv.service'
-import type { DesiredTable, PublishFloorPlanInput } from '@/services/dashboard/floorPlan/floorPlan.types'
+import { getFloorElements, updateFloorElement } from '@/services/tpv/floor-element.tpv.service'
+import type { DesiredTable, PlanTable, PublishFloorPlanInput } from '@/services/dashboard/floorPlan/floorPlan.types'
 
 jest.mock('@/communication/sockets', () => ({ __esModule: true, default: { getBroadcastingService: jest.fn(() => null) } }))
 
@@ -62,13 +62,31 @@ const mesa = (clientId: string, number: string, extra: Partial<DesiredTable> = {
 })
 const publish = (input: Partial<PublishFloorPlanInput> & { baseFingerprint: string }) =>
   publishFloorPlan(venueId, { saveId: randomUUID(), areas: [], tables: [], elements: [], ...input }, staffId)
+/** La misma mesa, tal cual está (o con algún cambio). */
+const igual = (t: PlanTable, extra: Partial<DesiredTable> = {}): DesiredTable => ({
+  id: t.id,
+  number: t.number,
+  capacity: t.capacity,
+  shape: t.shape,
+  rotation: t.rotation,
+  positionX: t.positionX,
+  positionY: t.positionY,
+  areaRef: t.areaId,
+  ...extra,
+})
 const salonNuevo = { clientId: 'a1', name: 'Salón', floorShape: 'WIDE' as const, sortOrder: 0 }
 const salon = (id: string) => ({ id, name: 'Salón', floorShape: 'WIDE' as const, sortOrder: 0 })
 const conMesas = async (...tables: DesiredTable[]) =>
   publish({ baseFingerprint: (await getFloorPlan(venueId)).fingerprint, areas: [salonNuevo], tables })
-const abrirCuenta = async (tableId: string, paymentStatus: 'PENDING' | 'PAID' = 'PENDING') => {
+const abrirCuenta = async (
+  tableId: string,
+  {
+    paymentStatus = 'PENDING',
+    status = 'PENDING',
+  }: { paymentStatus?: 'PENDING' | 'PAID'; status?: 'PENDING' | 'CONFIRMED' | 'CANCELLED' | 'DELETED' } = {},
+) => {
   const order = await prisma.order.create({
-    data: { venueId, orderNumber: `PLANO-${randomUUID()}`, subtotal: 100, taxAmount: 0, total: 100, tableId, paymentStatus },
+    data: { venueId, orderNumber: `PLANO-${randomUUID()}`, subtotal: 100, taxAmount: 0, total: 100, tableId, paymentStatus, status },
   })
   await prisma.table.update({ where: { id: tableId }, data: { currentOrderId: order.id, status: 'OCCUPIED' } })
   return order
@@ -250,7 +268,7 @@ describe('publishFloorPlan', () => {
     const area = salon(created.areas[0].id)
     const tableId = created.tables[0].id
     const removed = await publish({ baseFingerprint: created.fingerprint, areas: [area], tables: [] })
-    await abrirCuenta(tableId, 'PAID')
+    await abrirCuenta(tableId, { paymentStatus: 'PAID' })
     await publish({ baseFingerprint: removed.fingerprint, areas: [area], tables: [mesa('x', '6', { areaRef: area.id })] })
     expect(await prisma.table.findUniqueOrThrow({ where: { id: tableId } })).toMatchObject({
       active: true,
@@ -366,6 +384,123 @@ describe('publishFloorPlan', () => {
       where: { venueId, baseFingerprint: created.fingerprint },
     })
     expect((await getFloorPlan(venueId)).fingerprint).not.toBe(publicacion.resultFingerprint)
+  })
+
+  it('la PAX que mueve un ELEMENTO mientras se publica espera, y su cambio queda encima (no se pierde)', async () => {
+    const empty = await getFloorPlan(venueId)
+    const letrero = { type: 'LABEL' as const, positionX: 0.1, positionY: 0.1, rotation: 0, label: 'VIP' }
+    const created = await publish({ baseFingerprint: empty.fingerprint, areas: [salonNuevo], elements: [{ ...letrero, areaRef: 'a1' }] })
+    const areaId = created.areas[0].id
+    const el = created.elements[0]
+    // Igual que con las mesas: la publicación queda detenida DESPUÉS de sus candados, en el área que va a renombrar.
+    const area = await tomarFila('Area', areaId)
+    const publicando = publish({
+      baseFingerprint: created.fingerprint,
+      areas: [{ id: areaId, name: 'Comedor', floorShape: 'WIDE', sortOrder: 0 }],
+      elements: [{ ...letrero, id: el.id, areaRef: areaId, positionX: 0.25 }],
+    })
+    publicando.catch(() => undefined)
+    expect(await esperandoCandado('Area')).toBe(1)
+    let paxTermino = false
+    const pax = updateFloorElement(venueId, el.id, { positionX: 0.9, positionY: 0.9 }).finally(() => (paxTermino = true))
+    pax.catch(() => undefined)
+    const paxEsperaba = (await esperandoCandado('FloorElement', () => paxTermino)) === 1 && !paxTermino
+    area.soltar()
+    await area.termina
+    await publicando
+    await pax
+    expect(await prisma.area.findUniqueOrThrow({ where: { id: areaId } })).toMatchObject({ name: 'Comedor' })
+    expect(await prisma.floorElement.findUniqueOrThrow({ where: { id: el.id } })).toMatchObject({ positionX: 0.9, positionY: 0.9 })
+    expect(paxEsperaba).toBe(true)
+  })
+
+  it('abrir una cuenta en otra mesa mientras se publica NO espera a la publicación', async () => {
+    const created = await conMesas(mesa('t1', '1'), mesa('t2', '2', { positionX: 0.2 }))
+    const areaId = created.areas[0].id
+    const t2 = created.tables.find(t => t.number === '2')!
+    // La publicación ya tiene sus candados de mesa y espera el área que va a renombrar.
+    const area = await tomarFila('Area', areaId)
+    const publicando = publish({
+      baseFingerprint: created.fingerprint,
+      areas: [{ id: areaId, name: 'Comedor', floorShape: 'WIDE', sortOrder: 0 }],
+      tables: created.tables.map(t => igual(t)),
+    })
+    publicando.catch(() => undefined)
+    expect(await esperandoCandado('Area')).toBe(1)
+    // Una cuenta nueva que apunta a la mesa 2 (la orden que da de alta un POS, una cuenta dividida) sólo necesita la
+    // llave de la mesa. Con FOR UPDATE esperaba a que terminara la publicación; con FOR NO KEY UPDATE entra ya.
+    const cuenta = prisma.order.create({
+      data: { venueId, orderNumber: `PLANO-${randomUUID()}`, subtotal: 100, taxAmount: 0, total: 100, tableId: t2.id },
+    })
+    cuenta.catch(() => undefined)
+    const antesDeSoltar = await Promise.race([
+      cuenta.then(() => 'creada'),
+      new Promise<string>(r => setTimeout(() => r('esperando a la publicación'), 3_000)),
+    ])
+    area.soltar()
+    await area.termina
+    await publicando
+    const order = await cuenta
+    expect(antesDeSoltar).toBe('creada')
+    expect(await prisma.order.findUniqueOrThrow({ where: { id: order.id } })).toMatchObject({ tableId: t2.id })
+    expect(await prisma.area.findUniqueOrThrow({ where: { id: areaId } })).toMatchObject({ name: 'Comedor' })
+  })
+
+  it('una cuenta CANCELADA o BORRADA no frena quitar la mesa, ni el plano la marca como abierta', async () => {
+    const created = await conMesas(mesa('t1', '1'), mesa('t2', '2', { positionX: 0.2 }))
+    const [t1, t2] = [...created.tables].sort((a, b) => a.number.localeCompare(b.number))
+    // El puntero se quedó colgado de una cuenta que ya no está viva (sin pagar, pero cancelada / borrada).
+    await abrirCuenta(t1.id, { status: 'CANCELLED' })
+    await abrirCuenta(t2.id, { status: 'DELETED' })
+    const now = await getFloorPlan(venueId)
+    expect(now.tables.map(t => t.hasOpenOrder)).toEqual([false, false])
+    const out = await publish({ baseFingerprint: now.fingerprint, areas: [salon(created.areas[0].id)], tables: [] })
+    expect(out.tables).toEqual([])
+    expect(await prisma.table.count({ where: { venueId, active: true } })).toBe(0)
+  })
+
+  it('una cuenta abierta de verdad (confirmada, sin pagar) sí frena quitar la mesa', async () => {
+    const created = await conMesas(mesa('t1', '4'))
+    await abrirCuenta(created.tables[0].id, { status: 'CONFIRMED' })
+    const now = await getFloorPlan(venueId)
+    expect(now.tables[0].hasOpenOrder).toBe(true)
+    await expect(publish({ baseFingerprint: now.fingerprint, areas: [salon(created.areas[0].id)], tables: [] })).rejects.toMatchObject({
+      statusCode: 422,
+      code: 'TABLES_WITH_OPEN_ORDERS',
+      details: { numbers: ['4'] },
+    })
+  })
+
+  it('el número «5 (archivada)» de una mesa archivada no se puede usar: 400 legible y nada cambia', async () => {
+    const created = await conMesas(mesa('t5', '5'), mesa('t7', '7', { positionX: 0.2 }))
+    const areaId = created.areas[0].id
+    const t5 = created.tables.find(t => t.number === '5')!
+    const t7 = created.tables.find(t => t.number === '7')!
+    // Quitar la 5 y renombrar la 7 a 5: la 5 archivada queda como «5 (archivada)».
+    const sin5 = await publish({ baseFingerprint: created.fingerprint, areas: [salon(areaId)], tables: [igual(t7, { number: '5' })] })
+    expect(await prisma.table.findUniqueOrThrow({ where: { id: t5.id } })).toMatchObject({ active: false, number: '5 (archivada)' })
+    const reservado = {
+      statusCode: 400,
+      code: 'TABLE_NUMBER_RESERVED',
+      message: 'El número «5 (archivada)» está reservado para una mesa archivada. Usa otro.',
+      details: { number: '5 (archivada)' },
+    }
+    // Renombrar una mesa a ese número…
+    const t7ahora = sin5.tables[0]
+    await expect(
+      publish({ baseFingerprint: sin5.fingerprint, areas: [salon(areaId)], tables: [igual(t7ahora, { number: '5 (archivada)' })] }),
+    ).rejects.toMatchObject(reservado)
+    // …o crear una mesa nueva con él (revivía la vieja 5, con su historial y su QR).
+    await expect(
+      publish({
+        baseFingerprint: sin5.fingerprint,
+        areas: [salon(areaId)],
+        tables: [igual(t7ahora), mesa('n', '5 (archivada)', { areaRef: areaId })],
+      }),
+    ).rejects.toMatchObject(reservado)
+    expect(await prisma.table.findUniqueOrThrow({ where: { id: t5.id } })).toMatchObject({ active: false, number: '5 (archivada)' })
+    expect(await prisma.table.findUniqueOrThrow({ where: { id: t7.id } })).toMatchObject({ active: true, number: '5' })
+    expect((await getFloorPlan(venueId)).fingerprint).toBe(sin5.fingerprint)
   })
 
   it('borrar un área archiva sus elementos y las mesas movidas quedan en la otra', async () => {
