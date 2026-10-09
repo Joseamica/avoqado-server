@@ -2,7 +2,8 @@
 import type { CatalogActor } from '@/types/master-catalog'
 
 export const SHOPIFY_API_VERSION = '2026-10'
-export const SHOPIFY_SCOPES = 'read_products,write_products,read_inventory,write_inventory,read_locations,read_orders'
+/** K8: `read_fulfillments` lo exige el tema FULFILLMENTS_CREATE; sin él, su webhook se rechaza. */
+export const SHOPIFY_SCOPES = 'read_products,write_products,read_inventory,write_inventory,read_locations,read_orders,read_fulfillments'
 export const SHOPIFY_WEBHOOK_TOPICS = [
   'INVENTORY_LEVELS_UPDATE',
   'PRODUCTS_CREATE',
