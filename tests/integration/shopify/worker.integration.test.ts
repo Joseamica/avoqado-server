@@ -783,4 +783,70 @@ describe('requisitos del ledger para B8', () => {
     expect(await prisma.shopifyInboundEvent.findUnique({ where: { id: saltado.id } })).toBeNull()
     expect(await prisma.shopifyInboundEvent.findUnique({ where: { id: reintentable.id } })).not.toBeNull()
   })
+
+  describe('M4: lo vivo de la generación VIGENTE sin pareja viva nunca sale; la limpieza lo descarta', () => {
+    const hace = (min: number) => new Date(Date.now() - min * 60_000)
+    const fila = (e: EscenarioShopify, productId: string, o: { createdAt: Date; status?: 'PENDING' | 'FAILED'; ambiguous?: boolean }) =>
+      prisma.shopifyStockOutbox.create({
+        data: {
+          venueId: e.venueId,
+          locationLinkId: e.locationLinkId,
+          generation: 1,
+          productId,
+          delta: -1,
+          status: o.status ?? 'PENDING',
+          ambiguous: o.ambiguous ?? false,
+          createdAt: o.createdAt,
+          ...(o.ambiguous ? { sentInventoryItemId: 'gid://shopify/InventoryItem/1', sentLocationId: UBICACION_PRUEBA } : {}),
+        },
+      })
+    const estado = (id: string) => prisma.shopifyStockOutbox.findUniqueOrThrow({ where: { id } })
+    const vivas = (e: EscenarioShopify) =>
+      prisma.shopifyStockOutbox.count({ where: { locationLinkId: e.locationLinkId, status: { in: ['PENDING', 'FAILED', 'IN_PROGRESS'] } } })
+
+    it('🔴 sin pareja, suspendida o sin iniciar y de más de 15 min ⇒ DISCARDED SIN_PAREJA_VIVA; lo reciente, lo ambiguo y lo de una pareja viva se quedan', async () => {
+      const e = await escenario()
+      const sinPareja = await agregarProductoShopify(e, { pareja: false })
+      const suspendido = await agregarProductoShopify(e)
+      await prisma.shopifyVariantLink.update({
+        where: { id: suspendido.variantLinkId! },
+        data: { suspendedReason: 'SIN_INVENTARIO', suspendedAt: new Date() },
+      })
+      const sinIniciar = await agregarProductoShopify(e, { initialized: false })
+      const muertas = [
+        await fila(e, sinPareja.productId, { createdAt: hace(20) }),
+        await fila(e, suspendido.productId, { createdAt: hace(20), status: 'FAILED' }),
+        await fila(e, sinIniciar.productId, { createdAt: hace(20) }),
+      ]
+      const reciente = await fila(e, sinPareja.productId, { createdAt: hace(5) })
+      const ambigua = await fila(e, suspendido.productId, { createdAt: hace(20), status: 'FAILED', ambiguous: true })
+      const deParejaViva = await fila(e, e.productId, { createdAt: hace(20) })
+      expect(await vivas(e)).toBe(6)
+
+      await limpiarShopify(new Date(), Date.now() + 10_000)
+      for (const m of muertas) {
+        const f = await estado(m.id)
+        expect(f).toMatchObject({ status: 'DISCARDED', lastError: 'SIN_PAREJA_VIVA', claimToken: null })
+        expect(f.processedAt).not.toBeNull()
+      }
+      expect(await estado(reciente.id)).toMatchObject({ status: 'PENDING' })
+      expect(await estado(ambigua.id)).toMatchObject({ status: 'FAILED' }) // pudo llegar: se resuelve con su llave
+      expect(await estado(deParejaViva.id)).toMatchObject({ status: 'PENDING' }) // el mensajero la manda
+      expect(await vivas(e)).toBe(3) // el resumen (y su sondeo de 5 s) y el aviso RETRASO dejan de verlas
+    })
+
+    it('una sucursal que no está ACTIVE no se toca (en REVIEWING lo vivo todavía cuenta para TOMAR_SHOPIFY), ni nada sin tiempo', async () => {
+      const e = await escenario({ linkStatus: 'REVIEWING', initialized: false })
+      const sinPareja = await agregarProductoShopify(e, { pareja: false })
+      const enRevision = await fila(e, sinPareja.productId, { createdAt: hace(20) })
+      await limpiarShopify(new Date(), Date.now() + 10_000)
+      expect(await estado(enRevision.id)).toMatchObject({ status: 'PENDING' })
+
+      await prisma.shopifyLocationLink.update({ where: { id: e.locationLinkId }, data: { status: 'ACTIVE' } })
+      await limpiarShopify(new Date(), Date.now() - 1) // el tope ya pasó
+      expect(await estado(enRevision.id)).toMatchObject({ status: 'PENDING' })
+      await limpiarShopify(new Date(), Date.now() + 10_000)
+      expect(await estado(enRevision.id)).toMatchObject({ status: 'DISCARDED', lastError: 'SIN_PAREJA_VIVA' })
+    })
+  })
 })

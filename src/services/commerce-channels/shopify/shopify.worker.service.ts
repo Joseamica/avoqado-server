@@ -48,6 +48,13 @@ const MIN_PAGINA_MS = MIN_HTTP_MS + RESERVA_PAGINA_MS
 const LIMPIEZA_DIAS = 30
 const LIMPIEZA_TANDA = 500
 /**
+ * M4: lo vivo de la generación VIGENTE de una sucursal ACTIVE cuyo producto no tiene pareja viva se descarta pasado esto. El
+ * mismo umbral del aviso RETRASO (15 min): lo que la campanita podría contar como «atrasado» ya es descartable en la
+ * siguiente limpieza. ponytail: la limpieza corre una vez por hora; entre el minuto 15 y esa hora, una de estas filas todavía
+ * cuenta en el resumen y en RETRASO.
+ */
+export const SIN_PAREJA_VIVA_MIN = 15
+/**
  * Retención de «Por revisar» (B10): una revisión RESUELTA de hace más de esto, cuya elección ya no está en camino, se borra.
  * Sin ella `ShopifyReviewItem` crece para siempre y la lista de revisiones cuesta lo que pesa el historial del negocio
  * (medido: 5 ms a 3,000 revisiones, 35 ms con Seq Scan a 30,000). ponytail: ventana fija de 90 días, sin ajuste por negocio;
@@ -343,6 +350,8 @@ async function unidad(s: SucursalTomada, vence: number, d: DepsUnidad): Promise<
  *   sucursal justo antes de que desconectar confirme. Se DESCARTA (no se borra: es evidencia; a los 30 días lo borra el
  *   paso siguiente), sin esperar candados (`SKIP LOCKED`: la que alguien tiene se queda para la siguiente hora). Lo que va
  *   en camino (IN_PROGRESS, ambiguo) no se toca.
+ * - M4: lo que tampoco saldrá de la generación VIGENTE de una sucursal ACTIVE: producto sin pareja viva y más de 15 min,
+ *   igual de acotado y sin esperar candados (DISCARDED `SIN_PAREJA_VIVA`).
  * - el token cifrado de los intents consumidos, fallidos o vencidos (M2);
  * - lo cerrado hace más de 30 días: filas SENT/DISCARDED, eventos terminales (PROCESSED, SKIPPED y los FAILED que ya no
  *   reintentan: su `nextAttemptAt` nulo engorda el reclamo, S7) e intents vencidos;
@@ -352,7 +361,7 @@ async function unidad(s: SucursalTomada, vence: number, d: DepsUnidad): Promise<
  */
 export async function limpiarShopify(now: Date, limite: number): Promise<void> {
   const antes = new Date(now.getTime() - LIMPIEZA_DIAS * 24 * 3600_000)
-  const hecho = { descartadas: 0, filas: 0, eventos: 0, tokens: 0, intents: 0, revisiones: 0 }
+  const hecho = { descartadas: 0, sinParejaViva: 0, filas: 0, eventos: 0, tokens: 0, intents: 0, revisiones: 0 }
   const resueltasAntes = new Date(now.getTime() - REVISIONES_RESUELTAS_DIAS * 24 * 3600_000)
   while (Date.now() < limite) {
     const n = await prisma.$executeRaw`
@@ -366,6 +375,30 @@ export async function limpiarShopify(now: Date, limite: number): Promise<void> {
                FOR UPDATE OF f SKIP LOCKED) p
        WHERE o.id = p.id`
     hecho.descartadas += n
+    if (n < LIMPIEZA_TANDA) break
+  }
+  // M4: lo vivo NO ambiguo de la generación VIGENTE de una sucursal ACTIVE cuyo producto no tiene pareja viva (sin pareja,
+  // suspendida o sin iniciar) tampoco saldrá: el reclamo exige pareja viva, y reactivar (COMPARAR) o archivar lo descartarían
+  // igual. Sin esto se quedaba vivo para siempre: contaba en el resumen (y su sondeo de 5 s), en RETRASO y le cerraba la
+  // resolución con 409. Con más de 15 min (`SIN_PAREJA_VIVA_MIN`), por tandas, sin esperar candados.
+  const sinParejaVivaDesde = new Date(now.getTime() - SIN_PAREJA_VIVA_MIN * 60_000)
+  while (Date.now() < limite) {
+    const n = await prisma.$executeRaw`
+      UPDATE "ShopifyStockOutbox" o
+         SET status = 'DISCARDED', "lastError" = 'SIN_PAREJA_VIVA', "processedAt" = ${utcTs(now)}, "claimToken" = NULL, "leaseUntil" = NULL
+        FROM (SELECT f.id
+                FROM "ShopifyStockOutbox" f JOIN "ShopifyLocationLink" l ON l.id = f."locationLinkId"
+               WHERE f.status IN ('PENDING', 'FAILED') AND f.ambiguous = false
+                 AND l.status = 'ACTIVE' AND f.generation = l.generation
+                 AND f."createdAt" < ${utcTs(sinParejaVivaDesde)}
+                 AND NOT EXISTS (SELECT 1 FROM "ShopifyVariantLink" v
+                                  WHERE v."productId" = f."productId" AND v."locationLinkId" = f."locationLinkId"
+                                    AND v."initializedAt" IS NOT NULL AND v."suspendedReason" IS NULL)
+               ORDER BY f.id
+               LIMIT ${LIMPIEZA_TANDA}
+               FOR UPDATE OF f SKIP LOCKED) p
+       WHERE o.id = p.id`
+    hecho.sinParejaViva += n
     if (n < LIMPIEZA_TANDA) break
   }
   while (Date.now() < limite) {
@@ -429,6 +462,6 @@ export async function limpiarShopify(now: Date, limite: number): Promise<void> {
     hecho.revisiones += n
     if (n < LIMPIEZA_TANDA) break
   }
-  if (hecho.descartadas + hecho.filas + hecho.eventos + hecho.tokens + hecho.intents + hecho.revisiones > 0)
+  if (hecho.descartadas + hecho.sinParejaViva + hecho.filas + hecho.eventos + hecho.tokens + hecho.intents + hecho.revisiones > 0)
     logger.info('[SHOPIFY] limpieza', hecho)
 }

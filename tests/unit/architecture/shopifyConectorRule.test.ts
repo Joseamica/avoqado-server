@@ -420,6 +420,14 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     expect(limpieza).toContain('r.status = \'RESOLVED\' AND r."resolvedAt" <')
     expect(limpieza).toContain("o.status IN ('SENT', 'DISCARDED')")
     expect(limpieza).not.toContain("status = 'OPEN'")
+    // M4: lo vivo de la generación vigente sin pareja viva (sólo de una sucursal ACTIVE, nunca lo ambiguo).
+    contieneTodas([
+      'lo vivo NO ambiguo de la generación vigente cuyo producto no tiene pareja viva con más de 15 min (`SIN_PAREJA_VIVA_MIN`, M4',
+    ])
+    expect(worker).toContain('export const SIN_PAREJA_VIVA_MIN = 15')
+    expect(limpieza).toContain("l.status = 'ACTIVE' AND f.generation = l.generation")
+    expect(limpieza).toContain(`AND v."initializedAt" IS NOT NULL AND v."suspendedReason" IS NULL)`)
+    expect(limpieza).toContain('"lastError" = \'SIN_PAREJA_VIVA\'')
     // La prueba de volumen existe y sólo corre con la variable.
     expect(leer('tests/integration/shopify/catalogo-volumen.integration.test.ts')).toContain(
       "const describirSi = process.env.SHOPIFY_VOLUMEN === '1' ? describe : describe.skip",
