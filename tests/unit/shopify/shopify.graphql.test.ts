@@ -158,7 +158,8 @@ describe('shopifyGraphql', () => {
     await llamar()
     expect(fetchMock.mock.calls[0][1].redirect).toBe('error')
     // Así contesta fetch (undici) cuando el servidor redirige y `redirect` es 'error'.
-    fetchMock.mockRejectedValueOnce(new TypeError('fetch failed', { cause: new Error('unexpected redirect') }))
+    // (`cause` con Object.assign: el target es2020 de tsconfig no trae el segundo argumento de Error.)
+    fetchMock.mockRejectedValueOnce(Object.assign(new TypeError('fetch failed'), { cause: new Error('unexpected redirect') }))
     const r = await llamar()
     expect(r).toMatchObject({ ok: false, code: 'NETWORK', retryable: true, ambiguous: true })
     expect(JSON.stringify(r)).not.toContain('tok-secreto')
