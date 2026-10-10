@@ -12,7 +12,7 @@ import { Prisma, type ShopifyAppKey, type ShopifyConnectIntent, type ShopifyInte
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { env } from '@/config/env'
-import { BadRequestError, ConflictError, ForbiddenError, NotFoundError, ServiceUnavailableError } from '@/errors/AppError'
+import { BadRequestError, ConflictError, ForbiddenError, NotFoundError, ServiceUnavailableError, ValidationError } from '@/errors/AppError'
 import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { assertLegacyCatalogGovernanceForVenue } from '@/services/master-catalog/catalogGovernance.service'
@@ -840,8 +840,18 @@ export async function registerShopifyWebhooks(
 
 // ─── Vista previa y aplicar (12 bis.3) ──────────────────────────────────────────────────────────────────────
 
+/** P2-4: la conexión que se vio en una vista previa: el enlace y su generación (reconectar sube la generación). */
+export type ConexionVista = { linkId: string; generation: number }
+const conexionCambio = () =>
+  new ConflictError('La conexión con Shopify cambió desde la vista previa; pide la vista previa otra vez.', 'SHOPIFY_CONEXION_CAMBIO')
+
 export type FiltroVistaPrevia = 'CAMBIAN' | 'NUEVOS' | 'TODOS'
-/** Forma que consume C (`ShopifyConnectReviewItem`) más `quedara` (aditivo, §10.12). */
+export type EleccionConexion = 'AVOQADO' | 'SHOPIFY'
+/** D1: la conexión que una pantalla VIO; guardar la exige y la compara bajo candado (una pantalla vieja no guarda). */
+export type VistaConexion = { linkId: string; generation: number; tokenVersion: number }
+/** Tope por llamada (ruta, MCP e ids de la vista previa): una página. */
+export const MAX_ELECCIONES = 50
+/** Forma que consume C (`ShopifyConnectReviewItem`) más `quedara` (aditivo, §10.12) y, desde D1, la decisión del dueño. */
 type FilaVista = {
   variantLinkId: string
   productId: string
@@ -851,19 +861,22 @@ type FilaVista = {
   shopifyQty: number | null
   nuevo: boolean
   quedara: string | null
+  /** D1: hay que elegir qué número se queda (ya existía, sin iniciar, con Inventory, y su stock no es `quedara`). */
+  requiereDecision: boolean
+  /** La elección guardada que sigue en pie; null = falta (o la de antes ya no vale: cambió un número, la generación o la credencial). */
+  eleccion: EleccionConexion | null
 }
+type ContextoVista = { id: string; generation: number; tokenVersion: number }
 
 /**
- * «Así quedará tu stock», paginado en la base. `quedara` = lo que Shopify tenía al importar + lo que la caja vendió
- * mientras tanto (§10.12, N13): es exactamente lo que deja «Aplicar» (TOMAR_SHOPIFY = S + pendientes). `cambian` =
- * existentes cuyo stock de hoy no es el que quedará.
+ * D1: las piezas de SQL que la vista previa, guardar y contar lo que falta leen IGUAL.
+ * - QUEDARA: lo que deja «Usar el de Shopify» = lo de Shopify al importar + lo pendiente (TOMAR_SHOPIFY, §10.12, N13).
+ * - DECIDE: hay una decisión real: el producto ya existía (no lo creó la importación), sin iniciar ni suspendido, con
+ *   Inventory, y su stock no es QUEDARA. Incluye el cero (tener cero no es carecer de inventario).
+ * - VIGENTE: la elección guardada es de ESTA generación y credencial, y Avoqado y lo de Shopify al importar siguen en los
+ *   números que se vieron. Una venta en caja durante la vista previa la invalida sola.
  */
-export async function getConnectReview(i: { venueId: string; offset: unknown; limit: unknown; filtro: FiltroVistaPrevia }) {
-  const limit = Math.min(50, Math.max(1, Math.floor(Number(i.limit) || 20)))
-  const offset = Math.max(0, Math.floor(Number(i.offset) || 0))
-  const resumenVacio = { emparejados: 0, cambian: 0, nuevos: 0, sinPareja: 0 }
-  const link = await prisma.shopifyLocationLink.findUnique({ where: { venueId: i.venueId }, select: { id: true, generation: true } })
-  if (!link) return { items: [] as FilaVista[], total: 0, nextOffset: null as number | null, resumen: resumenVacio }
+function sqlDeVista(link: ContextoVista) {
   const DESDE = Prisma.sql`
     FROM "ShopifyVariantLink" v
     LEFT JOIN "Inventory" inv ON inv."productId" = v."productId"
@@ -874,12 +887,54 @@ export async function getConnectReview(i: { venueId: string; offset: unknown; li
     ) pend ON true`
   const QUEDARA = Prisma.sql`(v."importedAvailable" + COALESCE(pend.suma, 0))`
   const CAMBIA = Prisma.sql`v."createdProduct" = false AND v."importedAvailable" IS NOT NULL AND inv."currentStock" IS DISTINCT FROM ${QUEDARA}`
-  const filtro =
+  const DECIDE = Prisma.sql`(${CAMBIA} AND v."initializedAt" IS NULL AND v."suspendedReason" IS NULL AND inv.id IS NOT NULL)`
+  const VIGENTE = Prisma.sql`COALESCE(v."connectChoice" IS NOT NULL
+    AND v."connectChoiceGeneration" = ${link.generation}
+    AND v."connectChoiceTokenVersion" = ${link.tokenVersion}
+    AND v."connectSeenAvoqadoQty" = inv."currentStock"
+    AND v."connectSeenShopifyQty" = v."importedAvailable", false)`
+  return { DESDE, QUEDARA, CAMBIA, DECIDE, VIGENTE }
+}
+
+/**
+ * «Así quedará tu stock», paginado en la base. `quedara` = lo que Shopify tenía al importar + lo que la caja vendió
+ * mientras tanto (§10.12, N13): es lo que deja «Usar el de Shopify». `cambian` = existentes cuyo stock de hoy no es el que
+ * quedará; `porDecidir` (D1) = los que piden elegir sin una elección vigente, en TODAS las páginas (también con `ids`). `ids`
+ * (≤ 50, para el MCP) limita las filas, nunca el resumen. `conexion` es lo que la pantalla devuelve al guardar.
+ */
+export async function getConnectReview(i: { venueId: string; offset: unknown; limit: unknown; filtro: FiltroVistaPrevia; ids?: string[] }) {
+  const limit = Math.min(50, Math.max(1, Math.floor(Number(i.limit) || 20)))
+  const offset = Math.max(0, Math.floor(Number(i.offset) || 0))
+  const resumenVacio = { emparejados: 0, cambian: 0, nuevos: 0, sinPareja: 0, porDecidir: 0 }
+  const link = await prisma.shopifyLocationLink.findUnique({
+    where: { venueId: i.venueId },
+    select: { id: true, generation: true, store: { select: { tokenVersion: true } } },
+  })
+  if (!link) {
+    return {
+      items: [] as FilaVista[],
+      total: 0,
+      nextOffset: null as number | null,
+      resumen: resumenVacio,
+      conexion: null as VistaConexion | null,
+    }
+  }
+  const conexion: VistaConexion = { linkId: link.id, generation: link.generation, tokenVersion: link.store.tokenVersion }
+  const { DESDE, QUEDARA, CAMBIA, DECIDE, VIGENTE } = sqlDeVista({
+    id: link.id,
+    generation: link.generation,
+    tokenVersion: link.store.tokenVersion,
+  })
+  const porFiltro =
     i.filtro === 'NUEVOS' ? Prisma.sql`AND v."createdProduct" = true` : i.filtro === 'CAMBIAN' ? Prisma.sql`AND ${CAMBIA}` : Prisma.empty
+  const ids = (i.ids ?? []).slice(0, MAX_ELECCIONES)
+  const filtro = ids.length > 0 ? Prisma.sql`${porFiltro} AND v.id IN (${Prisma.join(ids)})` : porFiltro
   const [filas, [cuenta], [res], sinPareja] = await Promise.all([
     prisma.$queryRaw<Array<Omit<FilaVista, 'avoqadoQty'> & { avoqadoQty: string | null }>>`
       SELECT v.id AS "variantLinkId", v."productId", p.name, p.sku, inv."currentStock"::text AS "avoqadoQty",
-             v."importedAvailable" AS "shopifyQty", v."createdProduct" AS nuevo, ${QUEDARA}::text AS quedara
+             v."importedAvailable" AS "shopifyQty", v."createdProduct" AS nuevo, ${QUEDARA}::text AS quedara,
+             ${DECIDE} AS "requiereDecision",
+             CASE WHEN ${DECIDE} AND ${VIGENTE} THEN v."connectChoice"::text END AS eleccion
         ${DESDE}
         JOIN "Product" p ON p.id = v."productId"
        WHERE v."locationLinkId" = ${link.id} ${filtro}
@@ -887,10 +942,11 @@ export async function getConnectReview(i: { venueId: string; offset: unknown; li
        LIMIT ${limit} OFFSET ${offset}`,
     prisma.$queryRaw<Array<{ total: number }>>`
       SELECT count(*)::int AS total ${DESDE} WHERE v."locationLinkId" = ${link.id} ${filtro}`,
-    prisma.$queryRaw<Array<{ emparejados: number; nuevos: number; cambian: number }>>`
+    prisma.$queryRaw<Array<{ emparejados: number; nuevos: number; cambian: number; porDecidir: number }>>`
       SELECT count(*)::int AS emparejados,
              (count(*) FILTER (WHERE v."createdProduct"))::int AS nuevos,
-             (count(*) FILTER (WHERE ${CAMBIA}))::int AS cambian
+             (count(*) FILTER (WHERE ${CAMBIA}))::int AS cambian,
+             (count(*) FILTER (WHERE ${DECIDE} AND NOT ${VIGENTE}))::int AS "porDecidir"
         ${DESDE}
        WHERE v."locationLinkId" = ${link.id}`,
     prisma.shopifyImportIssue.count({ where: { venueId: i.venueId } }),
@@ -906,14 +962,161 @@ export async function getConnectReview(i: { venueId: string; offset: unknown; li
     items,
     total,
     nextOffset: offset + items.length < total ? offset + items.length : null,
-    resumen: { emparejados: res?.emparejados ?? 0, cambian: res?.cambian ?? 0, nuevos: res?.nuevos ?? 0, sinPareja },
+    resumen: {
+      emparejados: res?.emparejados ?? 0,
+      cambian: res?.cambian ?? 0,
+      nuevos: res?.nuevos ?? 0,
+      sinPareja,
+      porDecidir: res?.porDecidir ?? 0,
+    },
+    conexion,
   }
 }
 
-/** P2-4: la conexión que se vio en una vista previa: el enlace y su generación (reconectar sube la generación). */
-export type ConexionVista = { linkId: string; generation: number }
-const conexionCambio = () =>
-  new ConflictError('La conexión con Shopify cambió desde la vista previa; pide la vista previa otra vez.', 'SHOPIFY_CONEXION_CAMBIO')
+/** D1: cuántos productos piden elegir y no tienen una elección vigente (todas las páginas). Agregado: acotado por diseño. */
+export async function contarPorDecidir(db: Prisma.TransactionClient, link: ContextoVista): Promise<number> {
+  const { DESDE, DECIDE, VIGENTE } = sqlDeVista(link)
+  const [r] = await db.$queryRaw<Array<{ n: number }>>`
+    SELECT count(*)::int AS n ${DESDE} WHERE v."locationLinkId" = ${link.id} AND ${DECIDE} AND NOT ${VIGENTE}`
+  return r?.n ?? 0
+}
+
+const faltanDecisiones = (n: number) =>
+  new ValidationError(
+    `Falta elegir en ${n === 1 ? '1 producto' : `${n} productos`} qué número se queda: en «Cambian», elige «Usar el de Avoqado» o «Usar el de Shopify» en cada uno (o «… en todos») y vuelve a aplicar.`,
+    'SHOPIFY_FALTAN_DECISIONES',
+  )
+const revisionCambio = () =>
+  new ConflictError(
+    'Los números cambiaron desde que los viste: ya se muestran los de ahora; revísalos y vuelve a elegir',
+    'SHOPIFY_REVISION_CAMBIO',
+  )
+const vistaVieja = () =>
+  new ConflictError(
+    'La conexión con Shopify cambió desde que viste la lista (se reconectó o se volvió a dar permiso): vuelve a cargar la vista previa y elige otra vez.',
+    'SHOPIFY_CONEXION_CAMBIO',
+  )
+
+export type EleccionVista = { variantLinkId: string; choice: EleccionConexion; expectedAvoqadoQty: string; expectedShopifyQty: number }
+
+/**
+ * D1: guarda la elección del dueño en cada pareja, con los números que VIO, o con `todos` la misma opción en TODOS los
+ * productos que todavía no tienen una elección vigente (todas las páginas; los ya elegidos se quedan; con «AVOQADO» se
+ * saltan los que no darían piezas enteras). La forma la valida Zod (ruta y MCP); aquí: pertenencia, repetidos, la conexión
+ * vista (P1-2), las cantidades vigentes y el ajuste entero.
+ * UNA tx con los candados en orden (§10.3): sucursal FOR SHARE (con ella tomada, «Aplicar», que la escribe, espera) → tienda
+ * FOR SHARE → la vista comparada → las parejas por id FOR UPDATE. Guardar no toca stock ni espejo: aplicar lo revalida.
+ */
+export async function saveConnectChoices(
+  i: { venueId: string; staffId: string; vista: VistaConexion; elecciones?: EleccionVista[]; todos?: EleccionConexion },
+  deps: { hasAccess?: (venueId: string) => Promise<boolean> } = {},
+): Promise<{ guardadas: number; porDecidir: number }> {
+  if (!(await (deps.hasAccess ?? accesoReal)(i.venueId))) throw new ForbiddenError(TEXTO_SIN_ACCESO, 'SHOPIFY_SIN_PLAN')
+  const elecciones = i.todos ? [] : (i.elecciones ?? [])
+  const ids = [...new Set(elecciones.map(e => e.variantLinkId))]
+  if (ids.length !== elecciones.length) {
+    throw new BadRequestError('Un producto viene dos veces: recarga la vista previa y vuelve a elegir', 'SHOPIFY_CANTIDAD_INVALIDA')
+  }
+  const r = await prisma.$transaction(async tx => {
+    const [l] = await tx.$queryRaw<
+      Array<{ id: string; status: string; generation: number; applyRequestedAt: Date | null; storeId: string }>
+    >`
+      SELECT id, status::text AS status, generation, "applyRequestedAt", "storeId"
+        FROM "ShopifyLocationLink" WHERE "venueId" = ${i.venueId} FOR SHARE`
+    if (!l || l.status === 'DISCONNECTED')
+      throw new ConflictError('Esta sucursal no tiene una tienda Shopify conectada', 'SHOPIFY_SIN_CONEXION')
+    const [s] = await tx.$queryRaw<Array<{ tokenVersion: number; organizationId: string }>>`
+      SELECT "tokenVersion", "organizationId" FROM "ShopifyStore" WHERE id = ${l.storeId} FOR SHARE`
+    // P1-2: lo que la pantalla vio debe ser la conexión de AHORA (reconectar sube la generación; reautorizar, la credencial).
+    if (!s || l.id !== i.vista.linkId || l.generation !== i.vista.generation || s.tokenVersion !== i.vista.tokenVersion) throw vistaVieja()
+    if (l.status !== 'REVIEWING' || l.applyRequestedAt) {
+      throw new ConflictError('La vista previa todavía no está lista, o ya se aplicó', 'SHOPIFY_NO_EN_REVISION')
+    }
+    const ctx = { id: l.id, generation: l.generation, tokenVersion: s.tokenVersion }
+    const { DESDE, QUEDARA, DECIDE, VIGENTE } = sqlDeVista(ctx)
+
+    if (i.todos) {
+      // Las candidatas por id (§10.3) y, en UNA sentencia, la misma opción con lo que hay AHORA como «lo que se vio».
+      // Explícito del dueño, sobre su catálogo de esta sucursal (tope del catálogo: CATALOGO_MUY_GRANDE).
+      await tx.$queryRaw`
+        SELECT count(*) FROM (
+          SELECT id FROM "ShopifyVariantLink"
+           WHERE "locationLinkId" = ${l.id} AND "initializedAt" IS NULL AND "suspendedReason" IS NULL
+           ORDER BY id FOR UPDATE
+        ) candidatas`
+      const entero =
+        i.todos === 'AVOQADO' ? Prisma.sql`AND (inv."currentStock" - ${QUEDARA}) = trunc(inv."currentStock" - ${QUEDARA})` : Prisma.empty
+      const guardadas = await tx.$executeRaw`
+        UPDATE "ShopifyVariantLink" w
+           SET "connectChoice" = ${i.todos}::"ShopifyReviewChoice",
+               "connectChoiceGeneration" = ${l.generation},
+               "connectChoiceTokenVersion" = ${s.tokenVersion},
+               "connectSeenAvoqadoQty" = x.a,
+               "connectSeenShopifyQty" = x.s,
+               "connectChoiceById" = ${i.staffId}
+          FROM (SELECT v.id, inv."currentStock" AS a, v."importedAvailable" AS s ${DESDE}
+                 WHERE v."locationLinkId" = ${l.id} AND ${DECIDE} AND NOT ${VIGENTE} ${entero}) x
+         WHERE w.id = x.id`
+      return { linkId: l.id, organizationId: s.organizationId, ctx, guardadas, data: { todos: i.todos, guardadas } }
+    }
+
+    await tx.$queryRaw`
+      SELECT id FROM "ShopifyVariantLink" WHERE id IN (${Prisma.join(ids)}) AND "locationLinkId" = ${l.id} ORDER BY id FOR UPDATE`
+    const filas = await tx.$queryRaw<
+      Array<{ id: string; productId: string; decide: boolean; avoqado: string | null; shopify: number | null; quedara: string | null }>
+    >`
+      SELECT v.id, v."productId", ${DECIDE} AS decide, inv."currentStock"::text AS avoqado,
+             v."importedAvailable" AS shopify, ${QUEDARA}::text AS quedara
+        ${DESDE}
+       WHERE v."locationLinkId" = ${l.id} AND v.id IN (${Prisma.join(ids)})`
+    const porId = new Map(filas.map(f => [f.id, f]))
+    const hechas: Array<{ productId: string; eleccion: EleccionConexion; avoqado: string; shopify: number }> = []
+    for (const e of elecciones) {
+      const f = porId.get(e.variantLinkId)
+      if (!f) throw new ConflictError('Ese producto ya no está ligado a Shopify: recarga la lista', 'SHOPIFY_SIN_PAREJA')
+      const visto = new Prisma.Decimal(e.expectedAvoqadoQty)
+      if (
+        !f.decide ||
+        f.avoqado === null ||
+        f.quedara === null ||
+        !new Prisma.Decimal(f.avoqado).equals(visto) ||
+        f.shopify !== e.expectedShopifyQty
+      ) {
+        throw revisionCambio()
+      }
+      // «Avoqado» manda a Shopify A − S − pendientes = A − QUEDARA, y a Shopify sólo viajan piezas enteras.
+      if (e.choice === 'AVOQADO' && !visto.minus(new Prisma.Decimal(f.quedara)).isInteger()) {
+        throw new ValidationError(
+          'La diferencia no es de piezas enteras: corrige el stock de Avoqado a piezas enteras y vuelve a elegir',
+          'SHOPIFY_DIFERENCIA_NO_ENTERA',
+        )
+      }
+      await tx.shopifyVariantLink.update({
+        where: { id: f.id },
+        data: {
+          connectChoice: e.choice,
+          connectChoiceGeneration: l.generation,
+          connectChoiceTokenVersion: s.tokenVersion,
+          connectSeenAvoqadoQty: visto,
+          connectSeenShopifyQty: e.expectedShopifyQty,
+          connectChoiceById: i.staffId,
+        },
+      })
+      hechas.push({ productId: f.productId, eleccion: e.choice, avoqado: visto.toString(), shopify: e.expectedShopifyQty })
+    }
+    return { linkId: l.id, organizationId: s.organizationId, ctx, guardadas: hechas.length, data: { elecciones: hechas } }
+  }, TX_LARGA)
+  logAction({
+    venueId: i.venueId,
+    organizationId: r.organizationId,
+    staffId: i.staffId,
+    action: 'SHOPIFY_CONNECT_CHOICES_SAVED',
+    entity: 'ShopifyLocationLink',
+    entityId: r.linkId,
+    data: r.data,
+  })
+  return { guardadas: r.guardadas, porDecidir: await contarPorDecidir(prisma, r.ctx) }
+}
 
 export async function requestApplyShopifyConnect(
   i: { venueId: string; staffId: string; expected?: ConexionVista },
@@ -921,6 +1124,21 @@ export async function requestApplyShopifyConnect(
 ): Promise<{ applyRequestedAt: Date }> {
   if (!(await (deps.hasAccess ?? accesoReal)(i.venueId))) {
     throw new ForbiddenError(TEXTO_SIN_ACCESO, 'SHOPIFY_SIN_PLAN')
+  }
+  // D1: no se aplica mientras falte una elección, también de páginas que nadie abrió. La carrera con una venta que la
+  // invalide después de contar la cierra la tx de cada producto al aplicar (`initializePair`).
+  const vigente = await prisma.shopifyLocationLink.findUnique({
+    where: { venueId: i.venueId },
+    select: { id: true, status: true, generation: true, applyRequestedAt: true, store: { select: { tokenVersion: true } } },
+  })
+  if (vigente && i.expected && (vigente.id !== i.expected.linkId || vigente.generation !== i.expected.generation)) throw conexionCambio()
+  if (vigente?.status === 'REVIEWING' && !vigente.applyRequestedAt) {
+    const faltan = await contarPorDecidir(prisma, {
+      id: vigente.id,
+      generation: vigente.generation,
+      tokenVersion: vigente.store.tokenVersion,
+    })
+    if (faltan > 0) throw faltanDecisiones(faltan)
   }
   // P2-4: con `expected` (la confirmación del MCP), la conexión vista va DENTRO del `where`: si entre la vista previa y el
   // confirm alguien desconectó y reconectó (aunque sea la misma tienda y ubicación), no se aplica la conexión nueva.

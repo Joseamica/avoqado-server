@@ -164,7 +164,7 @@ espejo dejaría la cuenta en 11 contra las 12 piezas de Avoqado. Si hay filas vi
   y después la tienda `FOR SHARE` (`mirror.service.ts:372`). Quien la llame lo hace antes de cualquier candado de pareja, fila o cerco, o en
   una tx propia (el mensajero: tx de 15 s, porque avisa por dentro). `FOR NO KEY UPDATE` y no `FOR UPDATE`: no frena el `FOR KEY SHARE` de
   quien inserte una pareja con llave foránea a la sucursal.
-- **Desconectar** (`disconnectShopify(…)`, `connect.service.ts:1186`) bloquea primero TODAS las sucursales de la tienda por id (la propia
+- **Desconectar** (`disconnectShopify(…)`, `connect.service.ts:1404`) bloquea primero TODAS las sucursales de la tienda por id (la propia
   `FOR UPDATE`, las hermanas `FOR NO KEY UPDATE`), después las parejas de ESA sucursal, ordenadas por id, y sólo entonces sube la
   generación. Nunca la propia y luego una hermana de id menor: se cruzaría con quien las toma por id (el drenado, diferir, renovar la
   credencial). `renovarCredencial` (reconectar o reautorizar) también bloquea todas las sucursales de la tienda por id ANTES de la tienda.
@@ -177,6 +177,26 @@ espejo dejaría la cuenta en 11 contra las 12 piezas de Avoqado. Si hay filas vi
   `requestApplyShopifyConnect(…)` en el `where` de su `updateMany`, `disconnectShopify(…)` con la sucursal ya bloqueada. Reconectar la MISMA
   tienda y ubicación sube la generación: un confirm viejo contesta 409 `SHOPIFY_CONEXION_CAMBIO` (el MCP pide otra vista previa) y no aplica
   ni desconecta la conexión nueva. La ruta del dashboard no manda la generación (la página sondea el estado) y se comporta como antes.
+
+## 4 bis. Elegir por producto al conectar (D1)
+
+Spec: `specs/2026-10-10-conector-shopify-d1-eleccion-por-producto-design.md`. Al conectar o reconectar, un producto que YA existía en
+Avoqado (`createdProduct = false`), sin iniciar ni suspendido, con `Inventory`, y cuyo stock no es `importedAvailable + Σ vivas` (también
+con cero, y también en la primera conexión) pide que el dueño elija: «Usar el de Avoqado» o «Usar el de Shopify», sin preselección (o «Usar
+Avoqado en todos» / «Usar Shopify en todos» para los que faltan). Los productos que creó la importación toman Shopify sin preguntar.
+
+- **Dónde vive:** en la pareja (`connectChoice`, `connectChoiceGeneration`, `connectChoiceTokenVersion`, `connectSeenAvoqadoQty`,
+  `connectSeenShopifyQty`, `connectChoiceById`), migración `…_shopify_eleccion_conexion`. Vale sólo en la generación y con la credencial con
+  que se eligió, y mientras Avoqado y lo de Shopify al importar sigan en los números vistos (`sqlDeVista`, el mismo SQL para la vista
+  previa, guardar y contar): una venta durante la vista previa, reconectar o reautorizar la invalidan sin borrar nada.
+- **Guardar** (`saveConnectChoices(…)`, `POST /connect/choices`, a lo más 50 por llamada o `todos`): Guardar exige la conexión que se vio
+  (`linkId`, `generation`, `tokenVersion`, que devuelve la vista previa) y la compara bajo la sucursal y la tienda `FOR SHARE` (409
+  `SHOPIFY_CONEXION_CAMBIO`: «vuelve a cargar»); después bloquea las parejas por id (§10.3). Por producto, lo visto debe ser lo vigente (409
+  `SHOPIFY_REVISION_CAMBIO`) y «Avoqado» debe dejar piezas enteras (422 `SHOPIFY_DIFERENCIA_NO_ENTERA`); `todos` llena sólo las que no
+  tienen una elección vigente y, con «Avoqado», se salta las que no darían piezas enteras. Sólo en REVIEWING sin «Aplicar» pedido. No toca
+  stock ni espejo. La forma la valida Zod (ruta y MCP).
+- **Aplicar se niega** mientras falte alguna, también de páginas que nadie abrió: `requestApplyShopifyConnect(…)` cuenta con
+  `contarPorDecidir(…)` y contesta 422 `SHOPIFY_FALTAN_DECISIONES` con cuántas faltan.
 
 ## 5. `Inventory` que desaparece o vuelve ⇒ suspender y reactivar la pareja, NUNCA borrarla
 
@@ -294,9 +314,9 @@ borre o cree filas de `Inventory` de productos ligados, o que cambie esos campos
     conector (contar 8 con Shopify en 10 encolaría +8 y dejaría 18 en los dos lados). Ronda 3: la fase efectiva (con `pausedFrom`, como el
     guardia) es CONNECTING o REVIEWING, porque el aplicar inicia con TOMAR TODA pareja sin iniciar, también las emparejadas, y reconectar a
     la misma tienda las deja así (con Avoqado 5 y Shopify 10, contar 8 encolaría +3 y dejaría 13). Se vuelve a contar en cuanto la pareja se
-    inicia. **Hueco conocido, aceptado para el piloto:** un producto SIN pareja todavía, contado durante CONNECTING y ligado después,
-    queda en S + (contado − A); los dos lados coinciden, ningún dinero se mueve y un reconteo lo arregla. Retenerlo obligaría a frenar todo
-    conteo durante la conexión; la guía pide no contar mientras se importa el catálogo y D1/B (reescribe el aplicar) lo retoma.
+    inicia. **Hueco conocido, aceptado para el piloto:** un producto SIN pareja todavía, contado durante CONNECTING y ligado después, queda
+    en S + (contado − A); los dos lados coinciden, ningún dinero se mueve y un reconteo lo arregla. Retenerlo obligaría a frenar todo conteo
+    durante la conexión; la guía pide no contar mientras se importa el catálogo y D1/B (reescribe el aplicar) lo retoma.
   - Dos motivos (enmienda §12.1): `ENVIO_EN_CAMINO` (el producto se estaba sincronizando: vuelve a contarlo cuando termine; el texto es
     genérico porque también cubre la pareja en retención, donde puede no haber nada en camino) y `DUDA_POR_REVISAR` (sólo entre los
     bloqueados: hay una DEAD_LETTER ambigua o una revisión OPEN; recontar no sirve hasta resolverla en «Por revisar»). El motivo viaja en la
@@ -333,8 +353,8 @@ la guía. La página nunca ofrece comprar Premium para Shopify (§0).
   (`REVISIONES_RESUELTAS_DIAS`) cuya elección ya no está en camino: sin envío, o con su fila SENT, DISCARDED o ya borrada. Nunca se purga
   una revisión OPEN, ni una resuelta cuyo envío siga PENDING, FAILED, IN_PROGRESS o DEAD_LETTER. Sin la purga la tabla crece para siempre (a
   30,000 revisiones en un negocio la lista cuesta 35 ms con Seq Scan); la historia queda en `ActivityLog`. El índice `(status, resolvedAt)`
-  va en la misma migración `shopify_conector` (la única del conector, `20261008230100_shopify_conector`, posterior a la última de develop):
-  sin él la purga tarda 201 ms contra 0.04 ms con 1 M de filas.
+  va en la misma migración `shopify_conector` (la del conector, `20261008230100_shopify_conector`; la única otra es la de D1,
+  `…_shopify_eleccion_conexion`, que sólo agrega columnas nulas a la pareja): sin él la purga tarda 201 ms contra 0.04 ms con 1 M de filas.
 - **Prueba de volumen:** `tests/integration/shopify/catalogo-volumen.integration.test.ts` (5,000 variantes de punta a punta, ~9 min) está
   APAGADA por defecto (`describe.skip`) para no sumarle minutos al CI de todos. `SHOPIFY_VOLUMEN=1` la enciende, siempre en una base
   desechable:

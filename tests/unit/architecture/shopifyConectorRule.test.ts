@@ -749,9 +749,22 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     ])
     // Una sola migración del conector, con marca POSTERIOR a la última de develop al unirse (la del índice de la retención
     // se fundió aquí): ninguna otra carpeta `*shopify*`, para que el índice nunca se cree antes que su tabla.
-    const carpetas = fs.readdirSync(path.join(RAIZ, 'prisma/migrations')).filter(d => d.endsWith('_shopify_conector'))
+    const migraciones = fs.readdirSync(path.join(RAIZ, 'prisma/migrations'))
+    const carpetas = migraciones.filter(d => d.endsWith('_shopify_conector'))
     expect(carpetas).toEqual(['20261008230100_shopify_conector'])
-    expect(fs.readdirSync(path.join(RAIZ, 'prisma/migrations')).filter(d => /shopify/i.test(d))).toEqual(carpetas)
+    // D1: la única otra migración del conector sólo AGREGA columnas nulas a la pareja, y va después de la del conector.
+    const d1 = migraciones.filter(d => d.endsWith('_shopify_eleccion_conexion'))
+    expect(d1).toHaveLength(1)
+    expect(d1[0] > carpetas[0]).toBe(true)
+    expect(migraciones.filter(d => /shopify/i.test(d))).toEqual([...carpetas, ...d1])
+    const sqlD1 = leer(`prisma/migrations/${d1[0]}/migration.sql`).replace(/--.*$/gm, '')
+    expect(
+      sqlD1
+        .split(';')
+        .map(s => s.trim())
+        .filter(Boolean)[0],
+    ).toBe("SET LOCAL lock_timeout = '5s'")
+    expect(sqlD1).not.toMatch(/CREATE INDEX|DROP|UPDATE|DELETE|NOT NULL/i)
     contieneTodas(['El índice `(status, resolvedAt)` va en la misma migración `shopify_conector`'])
     const sql = leer(`prisma/migrations/${carpetas[0]}/migration.sql`)
     expect(sql).toContain('CREATE INDEX "ShopifyReviewItem_status_resolvedAt_idx" ON "ShopifyReviewItem"("status", "resolvedAt");')
@@ -778,6 +791,33 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     expect(cuerpo(mirror, 'export async function marcarOrigenShopify(')).toContain(
       "SELECT set_config('avoqado.stock_origen', 'shopify', true)",
     )
+  })
+
+  it('🔴 D1: la elección vive en la pareja con lo que se vio y con la conexión que se vio; «Aplicar» se niega mientras falte alguna', () => {
+    contieneTodas([
+      'pide que el dueño elija: «Usar el de Avoqado» o «Usar el de Shopify», sin preselección',
+      'Vale sólo en la generación y con la credencial con que se eligió',
+      'Guardar exige la conexión que se vio',
+      'contesta 422 `SHOPIFY_FALTAN_DECISIONES` con cuántas faltan',
+    ])
+    const conexion = leer(`${SHOPIFY}/shopify.connect.service.ts`)
+    const piezas = cuerpo(conexion, 'function sqlDeVista(')
+    expect(piezas).toContain('v."connectChoiceGeneration" = ${link.generation}')
+    expect(piezas).toContain('v."connectChoiceTokenVersion" = ${link.tokenVersion}')
+    expect(piezas).toContain('v."connectSeenAvoqadoQty" = inv."currentStock"')
+    expect(cuerpo(conexion, 'export async function getConnectReview(')).toContain('tokenVersion: link.store.tokenVersion')
+    enOrden(cuerpo(conexion, 'export async function requestApplyShopifyConnect('), [
+      'contarPorDecidir(prisma',
+      'throw faltanDecisiones(',
+      'prisma.shopifyLocationLink.updateMany(',
+    ])
+    // Guardar: sucursal y tienda FOR SHARE, la vista comparada YA con los candados, después las parejas por id (§10.3).
+    enOrden(cuerpo(conexion, 'export async function saveConnectChoices('), [
+      'FROM "ShopifyLocationLink" WHERE "venueId" = ${i.venueId} FOR SHARE',
+      'FROM "ShopifyStore" WHERE id = ${l.storeId} FOR SHARE',
+      'throw vistaVieja()',
+      'ORDER BY id FOR UPDATE',
+    ])
   })
 
   it('los globs de `paths:` de la regla apuntan a algo que existe, incluidos los demás escritores de stock', () => {
@@ -813,7 +853,7 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     const de = (f: string) => `${SHOPIFY}/shopify.${f}.ts`
     const anclas: Record<string, [string, string]> = {
       'shopify.connect.service.ts:90': [de('connect.service'), 'export async function startShopifyConnect('],
-      'connect.service.ts:1186': [de('connect.service'), 'export async function disconnectShopify('],
+      'connect.service.ts:1404': [de('connect.service'), 'export async function disconnectShopify('],
       'connect.service.ts:639': [de('connect.service'), 'async function aCuarentenaPorReligar('],
       'shopify.crypto.ts:32': [de('crypto'), 'export function formaDeFirmaOAuth('],
       'catalog.service.ts:68': [de('catalog.service'), 'export const FILTRO_ESTADO'],

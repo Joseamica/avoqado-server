@@ -31,6 +31,7 @@ import {
   registerShopifyWebhooks,
   requestApplyShopifyConnect,
   resumeShopifyLink,
+  saveConnectChoices,
   startShopifyConnect,
 } from '@/services/commerce-channels/shopify/shopify.connect.service'
 import {
@@ -737,8 +738,8 @@ describe('webhooks, vista previa y aplicar (#6, 12 bis.3, N13, N20, N25)', () =>
       },
     })
     const cambian = await getConnectReview({ venueId: e.venueId, offset: 0, limit: 20, filtro: 'CAMBIAN' })
-    expect(cambian.resumen).toEqual({ emparejados: 3, cambian: 1, nuevos: 1, sinPareja: 1 })
-    expect(cambian).toMatchObject({ total: 1, nextOffset: null })
+    expect(cambian.resumen).toEqual({ emparejados: 3, cambian: 1, nuevos: 1, sinPareja: 1, porDecidir: 1 })
+    expect(cambian).toMatchObject({ total: 1, nextOffset: null, conexion: { linkId: e.locationLinkId, generation: 1, tokenVersion: 1 } })
     expect(cambian.items[0]).toEqual({
       variantLinkId: e.variantLinkId,
       productId: e.productId,
@@ -748,6 +749,9 @@ describe('webhooks, vista previa y aplicar (#6, 12 bis.3, N13, N20, N25)', () =>
       shopifyQty: 10,
       nuevo: false,
       quedara: '9',
+      // D1: ya existía y su 10 no es «10 − 1»: pide elegir, sin nada elegido.
+      requiereDecision: true,
+      eleccion: null,
     })
     expect((await getConnectReview({ venueId: e.venueId, offset: 0, limit: 20, filtro: 'NUEVOS' })).items.map(i => i.productId)).toEqual([
       nuevo.productId,
@@ -832,6 +836,18 @@ describe('webhooks, vista previa y aplicar (#6, 12 bis.3, N13, N20, N25)', () =>
       initializedAt: null,
     })
 
+    // D1: el producto ya existía (se ligó por SKU) y su 9 no es «7 − 1»: hay que elegir. «Shopify» es la mecánica de siempre.
+    const ligada = await prisma.shopifyVariantLink.findUniqueOrThrow({ where: { productId: p.productId } })
+    const { conexion } = await getConnectReview({ venueId: e.venueId, offset: 0, limit: 1, filtro: 'CAMBIAN' })
+    await saveConnectChoices(
+      {
+        venueId: e.venueId,
+        staffId: e.staffId,
+        vista: conexion!,
+        elecciones: [{ variantLinkId: ligada.id, choice: 'SHOPIFY', expectedAvoqadoQty: '9', expectedShopifyQty: 7 }],
+      },
+      { hasAccess: conPlan },
+    )
     await requestApplyShopifyConnect({ venueId: e.venueId, staffId: e.staffId }, { hasAccess: conPlan })
     const fetchLevels = nivelesFalsos(item => (item === variante(1).inventoryItem.id ? nivel(7) : nivel(10)))
     for (let i = 0; i < 5 && (await sucursal(e)).status !== 'ACTIVE'; i++)
