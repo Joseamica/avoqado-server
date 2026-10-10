@@ -116,9 +116,10 @@ trigger: no la uses para nada más.
 - Una DEAD_LETTER (de la generación vigente) conserva su delta en la cuenta hasta que la resolución la descarte. Una venta que dejó
   `Inventory = 9`, espejo 10 y su `−1` en DEAD_LETTER es un estado CORRECTO, no algo que «arreglar».
 - COMPARAR con diferencia abre `REACTIVADA` con `offset = Inventory − S`; si los saldos ya coinciden, cierra en la misma tx la revisión OPEN
-  del producto (`offset = 0`, §11.8). La revisión guarda `firstPairing` (W5): la pareja nunca se había iniciado, o sea, el producto ya
-  existía en Avoqado y acaba de aparecer en Shopify con el mismo SKU. Sigue siendo `REACTIVADA` (mismo motivo, misma sugerencia, mismos
-  filtros); sólo cambia el texto: la página (`primeraVez` en la lista) y el correo no dicen «se volvió a emparejar».
+  del producto (`offset = 0`, §11.8). La revisión guarda `firstPairing` (W5): la pareja nunca se había iniciado y el producto NO lo creó el
+  conector, o sea, ya existía en Avoqado y acaba de aparecer en Shopify con el mismo SKU (una creada por el conector, suspendida en su
+  primer inicio y reactivada después, no lo es). Sigue siendo `REACTIVADA` (mismo motivo, misma sugerencia, mismos filtros); sólo cambia el
+  texto: la página (`primeraVez` en la lista, sólo en una `REACTIVADA`) y el correo no dicen «se volvió a emparejar».
 - El cuadre calcula `total = Inventory − espejo − Σ vivas − Σ DEAD_LETTER` (`abrirRevision`, `reconcile.service.ts:735`) y decide en este
   orden:
   - con DEAD_LETTER (aunque `total = 0`, que es el caso normal de un ATORADO): abre o actualiza `ATORADO` (`INCIERTO` si alguna es ambigua)
@@ -288,6 +289,9 @@ borre o cree filas de `Inventory` de productos ligados, o que cambie esos campos
   - Producto bloqueado (`productBlocked(…)` ≠ `LIBRE`, revisado por tanda ANTES de cualquier HTTP y otra vez bajo candado): la línea NO se
     aplica y el stock no cambia. Se marca en la línea (`shopifyHeldAt`, `shopifyHeldReason`), la respuesta del conteo trae `noAplicados` y
     sale el aviso `CONTEO_NO_APLICADO`. Nunca se aplica un número que podría estar mal.
+  - Pareja en retención (ronda 2 de P1-1: la creó el conector, no está suspendida y todavía no se inicia): la línea también se retiene con
+    `ENVIO_EN_CAMINO`. El guardia retiene sus cambios y TOMAR pone `Inventory = S + Σ vivas`: contar 8 con Shopify en 10 encolaría +8 y
+    dejaría 18 en los dos lados. Se vuelve a contar en cuanto la pareja se inicia.
   - Dos motivos (enmienda §12.1): `ENVIO_EN_CAMINO` (se resuelve solo: vuelve a contarlo en unos minutos) y `DUDA_POR_REVISAR` (sólo entre
     los bloqueados: hay una DEAD_LETTER ambigua o una revisión OPEN; recontar no sirve hasta resolverla en «Por revisar»). El motivo viaja
     en la línea, en el aviso (texto y llave distintos) y en `noAplicados`.

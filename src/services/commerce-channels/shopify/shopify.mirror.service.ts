@@ -802,8 +802,9 @@ export async function initializePair(
     }
     const datos = {
       reason: 'REACTIVADA' as const,
-      // W5: la pareja nunca se había iniciado ⇒ se liga por PRIMERA vez (el producto ya existía en Avoqado), no «otra vez».
-      firstPairing: !p.initializedAt,
+      // W5: la pareja nunca se había iniciado y el producto NO lo creó el conector ⇒ ya existía en Avoqado y se liga por
+      // PRIMERA vez. Una creada por el conector, suspendida en su primer inicio y reactivada después, no es eso (ronda 2).
+      firstPairing: !p.initializedAt && !p.createdProduct,
       avoqadoQty: inv.currentStock,
       shopifyQty: S,
       atorados: 0,

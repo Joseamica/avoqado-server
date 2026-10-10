@@ -213,6 +213,9 @@ export async function refrescarEspejoParaConteo(venueId: string, productIds: str
  * línea no se aplica (§12.1): `DUDA_POR_REVISAR` si hay una DEAD_LETTER ambigua o una revisión abierta (no se resuelve
  * sola), si no `ENVIO_EN_CAMINO`. Si no, las apartadas VIGENTES del espejo, con su nota. Sin Shopify, sin pareja viva, o
  * desconectada: null (el objetivo es el contado). Sin Shopify (`sinShopify`) no consulta nada.
+ * Ronda 2 (P1-1): la pareja que CREÓ el conector y todavía no se inicia también retiene la línea (`ENVIO_EN_CAMINO`). El
+ * guardia retiene sus cambios y TOMAR pone `Inventory = S + Σ vivas`: un conteo de 8 con Shopify en 10 encolaría +8 y
+ * terminaría en 18 en los dos lados. Se vuelve a contar en cuanto la pareja se inicia.
  */
 export async function apartadasBajoCandado(
   tx: Prisma.TransactionClient,
@@ -230,10 +233,18 @@ export async function apartadasBajoCandado(
   if (!l || l.status === 'DISCONNECTED') return null
   await tx.$queryRaw`SELECT id FROM "ShopifyStore" WHERE id = ${l.storeId} FOR SHARE`
   const [p] = await tx.$queryRaw<
-    Array<{ mirrorCommitted: number; committedAt: Date | null; mirrorAt: Date; initializedAt: Date | null; suspendedReason: string | null }>
+    Array<{
+      mirrorCommitted: number
+      committedAt: Date | null
+      mirrorAt: Date
+      initializedAt: Date | null
+      suspendedReason: string | null
+      createdProduct: boolean
+    }>
   >`
-    SELECT "mirrorCommitted", "committedAt", "mirrorAt", "initializedAt", "suspendedReason"::text AS "suspendedReason"
+    SELECT "mirrorCommitted", "committedAt", "mirrorAt", "initializedAt", "suspendedReason"::text AS "suspendedReason", "createdProduct"
       FROM "ShopifyVariantLink" WHERE id = ${ref.id} FOR UPDATE`
+  if (p && !p.initializedAt && !p.suspendedReason && p.createdProduct) return ENVIO_EN_CAMINO // ronda 2: en retención
   if (!p || !p.initializedAt || p.suspendedReason) return null
   if (refresco.bloqueados.has(productId) || (await productBlocked(tx, productId, ref.locationLinkId, l.generation)) !== 'LIBRE') {
     const [d] = await tx.$queryRaw<Array<{ duda: boolean }>>`

@@ -343,11 +343,19 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
       expect(leer(f)).toContain("'FEATURE_NO_SE_VENDE_SUELTA'")
     }
     // W5: la primera vez que se liga no es «se volvió a emparejar»: mismo motivo, otra marca y otro texto.
-    contieneTodas(['La revisión guarda `firstPairing` (W5): la pareja nunca se había iniciado'])
+    contieneTodas([
+      'La revisión guarda `firstPairing` (W5): la pareja nunca se había iniciado y el producto NO lo creó el conector',
+      '`primeraVez` en la lista, sólo en una `REACTIVADA`',
+    ])
     expect(cuerpo(leer(`${SHOPIFY}/shopify.mirror.service.ts`), 'export async function initializePair(')).toContain(
-      'firstPairing: !p.initializedAt',
+      'firstPairing: !p.initializedAt && !p.createdProduct',
     )
-    expect(leer(`${SHOPIFY}/shopify.overview.service.ts`)).toContain('primeraVez: f.firstPairing')
+    expect(leer(`${SHOPIFY}/shopify.overview.service.ts`)).toContain("primeraVez: f.reason === 'REACTIVADA' && f.firstPairing")
+    // Ronda 2: el conteo retiene la línea de una pareja en retención (creada por el conector y sin iniciar).
+    contieneTodas(['Pareja en retención (ronda 2 de P1-1'])
+    expect(cuerpo(leer(`${SHOPIFY}/shopify.count.service.ts`), 'export async function apartadasBajoCandado(')).toContain(
+      'if (p && !p.initializedAt && !p.suspendedReason && p.createdProduct) return ENVIO_EN_CAMINO',
+    )
     // C4 (ronda de revisión): la huella de las confirmaciones por MCP cabe con nombres de ubicación largos.
     const mcp = leer('src/mcp/tools/shopify.ts')
     expect(mcp).toContain("z.string().max(1024).optional().describe('La llena la vista previa; no la cambies')")

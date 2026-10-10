@@ -278,7 +278,8 @@ export async function listShopifyReviews(
     envio: f.envio,
     createdAt: f.createdAt.toISOString(),
     product: { id: f.productId, name: f.productName, sku: f.productSku },
-    primeraVez: f.firstPairing,
+    // Ronda 2: sólo una REACTIVADA lo dice; si después la pisó ATORADO o INCIERTO, la marca ya no significa nada.
+    primeraVez: f.reason === 'REACTIVADA' && f.firstPairing,
   }))
   const total = cuenta?.total ?? 0
   return { items, total, nextOffset: siguiente(p.skip, items.length, total) }

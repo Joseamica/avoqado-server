@@ -201,6 +201,45 @@ it('🔴 P1-2: una fila de un producto que ya no se sincroniza (pasó a kilo sin
   expect(await espejo(e)).toBe(10)
 })
 
+it('ronda 2 (P1-1): la venta RETENIDA de una pareja creada por el conector se descarta si TOMAR la suspende al iniciar', async () => {
+  const e = await escenario()
+  const sinNivel = await agregarProductoShopify(e, { stock: 0, initialized: false, createdProduct: true })
+  const aKilos = await agregarProductoShopify(e, { stock: 0, initialized: false, createdProduct: true })
+  for (const p of [sinNivel, aKilos]) await venta(p.inventoryId) // −1 retenido de cada una
+  expect(
+    await prisma.shopifyStockOutbox.count({ where: { productId: { in: [sinNivel.productId, aKilos.productId] }, status: 'PENDING' } }),
+  ).toBe(2)
+  await prisma.product.update({ where: { id: aKilos.productId }, data: { unit: 'KILOGRAM' } })
+  const tomar = (variantLinkId: string, nivel: NivelLeido) =>
+    initializePair({ variantLinkId, nivel, fetchedAt: new Date(), mode: 'TOMAR_SHOPIFY' }, { hasAccess: siAcceso })
+  expect(await tomar(sinNivel.variantLinkId!, { kind: 'SIN_NIVEL' })).toBe('SUSPENDIDA') // nunca cero por ausencia
+  expect(await tomar(aKilos.variantLinkId!, ok(10))).toBe('SUSPENDIDA') // FF-I1: ya no se sincroniza
+  for (const p of [sinNivel, aKilos]) {
+    expect(
+      await prisma.shopifyStockOutbox.findMany({ where: { productId: p.productId }, select: { status: true, lastError: true } }),
+    ).toEqual([{ status: 'DISCARDED', lastError: 'PAREJA_SUSPENDIDA' }])
+    expect((await prisma.inventory.findUniqueOrThrow({ where: { id: p.inventoryId } })).currentStock.toString()).toBe('-1')
+  }
+  expect(await claimShopifyOutbox(new Date())).toEqual({ kind: 'VACIO' }) // nada viaja a Shopify
+})
+
+it('ronda 2 (W5): la pareja que CREÓ el conector, suspendida en su primer inicio y reactivada después, no es «ya existía en Avoqado»', async () => {
+  const e = await escenario()
+  const creada = await agregarProductoShopify(e, { stock: 4, initialized: false, createdProduct: true })
+  await prisma.shopifyVariantLink.update({
+    where: { id: creada.variantLinkId! },
+    data: { suspendedReason: 'NIVEL_INEXISTENTE', suspendedAt: new Date() },
+  })
+  const emparejada = await agregarProductoShopify(e, { stock: 4, initialized: false, createdProduct: false })
+  const comparar2 = (variantLinkId: string) =>
+    initializePair({ variantLinkId, nivel: ok(7), fetchedAt: new Date(), mode: 'COMPARAR' }, { hasAccess: siAcceso })
+  expect(await comparar2(creada.variantLinkId!)).toBe('EN_REVISION')
+  expect(await comparar2(emparejada.variantLinkId!)).toBe('EN_REVISION')
+  const revision = (productId: string) => prisma.shopifyReviewItem.findFirstOrThrow({ where: { productId, status: 'OPEN' } })
+  expect(await revision(creada.productId)).toMatchObject({ reason: 'REACTIVADA', firstPairing: false })
+  expect(await revision(emparejada.productId)).toMatchObject({ reason: 'REACTIVADA', firstPairing: true })
+})
+
 it('P1-2 (regresión): una fila AMBIGUA con sus parámetros congelados de ese mismo producto se sigue resolviendo con su llave', async () => {
   const e = await escenario()
   await venta(e.inventoryId)

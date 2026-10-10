@@ -243,11 +243,18 @@ it('W5: «Por revisar» dice si una REACTIVADA es la PRIMERA vez que se liga el 
   const base = { venueId: e.venueId, reason: 'REACTIVADA' as const, avoqadoQty: 7, shopifyQty: 5, suggestion: 'SHOPIFY' as const }
   const primera = await prisma.shopifyReviewItem.create({ data: { ...base, productId: e.productId, firstPairing: true } })
   const otraVez = await prisma.shopifyReviewItem.create({ data: { ...base, productId: otro.productId } })
+  // Ronda 2: una REACTIVADA de primera vez que después pasó a ATORADO (el motivo se pisa, la marca se queda) ya no es
+  // «primera vez»: sólo una REACTIVADA lo dice, también para el MCP.
+  const tercero = await agregarProductoShopify(e)
+  const atorada = await prisma.shopifyReviewItem.create({
+    data: { ...base, reason: 'ATORADO', suggestion: 'AVOQADO', productId: tercero.productId, firstPairing: true },
+  })
   const lista = await listShopifyReviews(e.venueId, {})
   expect(new Map(lista.items.map(i => [i.id, i.primeraVez]))).toEqual(
     new Map([
       [primera.id, true],
       [otraVez.id, false],
+      [atorada.id, false],
     ]),
   )
 })

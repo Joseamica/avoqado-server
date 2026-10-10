@@ -16,7 +16,7 @@ import {
   ENVIO_EN_CAMINO,
   refrescarEspejoParaConteo,
 } from '@/services/commerce-channels/shopify/shopify.count.service'
-import { applyShopifyLevel } from '@/services/commerce-channels/shopify/shopify.mirror.service'
+import { applyShopifyLevel, initializePair } from '@/services/commerce-channels/shopify/shopify.mirror.service'
 import { claimShopifyOutbox, runShopifyOutboxRow } from '@/services/commerce-channels/shopify/shopify.outbox.service'
 import { resumeShopifyLink } from '@/services/commerce-channels/shopify/shopify.connect.service'
 import {
@@ -121,6 +121,46 @@ it('12 bis.14: 9 en el estante con 2 apartadas vigentes ⇒ Avoqado 7 y viaja �
   await enviar(t)
   expect([await stock(e), t.s.available]).toEqual(['7', 7])
   expect(await huecoDelInvariante(e.productId)).toBe('0')
+})
+
+it('🔴 ronda 2 (P1-1): contar en la ventana de retención (pareja creada por el conector, sin iniciar) NO se aplica; al iniciar y recontar, 8 y 8', async () => {
+  // Shopify tiene 10; el catálogo creó el producto con Inventory 0 y todavía no inicia la pareja. En el estante hay 8.
+  const e = await escenario({ stock: 0, initialized: false })
+  await prisma.shopifyVariantLink.update({ where: { id: e.variantLinkId }, data: { createdProduct: true } })
+  const t = tiendaFalsa(10, 0)
+  const id = await contar(e, '8', { fetchLevels: t.fetchLevels, hasAccess: conPlan })
+  // Sin retenerla: objetivo = 8 ⇒ +8 retenido ⇒ TOMAR pone S + 8 = 18 y manda +8 a Shopify (18 en los dos lados).
+  expect(ultima).toEqual({ success: true, revision: 1, noAplicados: [{ productId: e.productId, motivo: 'ENVIO_EN_CAMINO' }] })
+  expect(await stock(e)).toBe('0')
+  expect(await movimientosDeConteo(e)).toBe(0)
+  expect(await deltas(e)).toEqual([])
+  expect(await prisma.stockCountItem.findFirstOrThrow({ where: { stockCountId: id } })).toMatchObject({
+    shopifyHeldAt: expect.any(Date),
+    shopifyHeldReason: 'ENVIO_EN_CAMINO',
+  })
+  expect(await avisosDeConteo(e)).toBe(1)
+  // La pareja se inicia (TOMAR) y se vuelve a contar: 8 en los dos lados.
+  expect(
+    await initializePair(
+      { variantLinkId: e.variantLinkId, nivel: nivel(10), fetchedAt: new Date(), mode: 'TOMAR_SHOPIFY' },
+      { hasAccess: conPlan },
+    ),
+  ).toBe('INICIADA')
+  expect(await stock(e)).toBe('10')
+  await contar(e, '8', { fetchLevels: t.fetchLevels, hasAccess: conPlan })
+  expect(ultima).toEqual({ success: true, revision: 1 })
+  expect(await deltas(e)).toEqual(['-2'])
+  await enviar(t)
+  expect([await stock(e), t.s.available]).toEqual(['8', 8])
+  expect(await huecoDelInvariante(e.productId)).toBe('0')
+})
+
+it('ronda 2 (regresión): una pareja sin iniciar que NO creó el conector cuenta como siempre (no hay nada retenido que proteger)', async () => {
+  const e = await escenario({ stock: 0, initialized: false })
+  await contar(e, '8', { hasAccess: conPlan })
+  expect(ultima).toEqual({ success: true, revision: 1 })
+  expect(await stock(e)).toBe('8')
+  expect(await deltas(e)).toEqual([])
 })
 
 it('N02 (ej. 1): un pedido entra y se jala ENTRE el refresco y la línea ⇒ la línea usa el espejo vigente: 7 y 7', async () => {
