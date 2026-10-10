@@ -51,14 +51,14 @@ const avisar = (webhookId: string, hmac: string) =>
     .send(CUERPO)
 
 describe('S1: el webhook de Shopify por la app real', () => {
-  it('🔴 firmado ⇒ 200 y exactamente UN evento guardado con el cuerpo tal cual; repetido, sigue siendo uno', async () => {
+  it('🔴 firmado ⇒ 200 y exactamente UN evento guardado con lo que el procesador lee del cuerpo (M7); repetido, sigue siendo uno', async () => {
     const id = crypto.randomUUID()
     const firma = crypto.createHmac('sha256', SECRETO).update(CUERPO).digest('base64')
     expect((await avisar(id, firma)).status).toBe(200)
     expect(await eventos(id)).toBe(1)
     const fila = await prisma.shopifyInboundEvent.findUniqueOrThrow({ where: { dedupKey: id } })
     expect(fila).toMatchObject({ appKey: 'PILOTO', topic: 'inventory_levels/update', shopDomain: e.shopDomain, status: 'RECEIVED' })
-    expect(fila.payload).toEqual({ inventory_item_id: 1, location_id: 1, available: 7 })
+    expect(fila.payload).toEqual({ inventory_item_id: 1, location_id: 1 }) // `available` no lo lee nadie: se relee de Shopify
 
     expect((await avisar(id, firma)).status).toBe(200)
     expect(await eventos(id)).toBe(1)

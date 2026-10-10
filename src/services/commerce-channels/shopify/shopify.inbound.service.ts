@@ -90,6 +90,32 @@ function leerHora(h: string | undefined): Date | null {
 
 // ─── Guardar ────────────────────────────────────────────────────────────────────────────────────────────────
 
+type Llave = number | string | null
+/** Un id de Shopify tal como llega (número o texto), `null` explícito, o `undefined` si no viene (o viene con otra forma). */
+const llave = (x: unknown): Llave | undefined => (typeof x === 'number' || typeof x === 'string' || x === null ? x : undefined)
+
+/**
+ * M7: lo ÚNICO que el procesador lee de un aviso (`Carga`, más abajo): el `id` (producto en los tópicos de catálogo), el
+ * artículo y la ubicación del inventario, y el `variant_id` de cada renglón de un pedido o un reembolso. Un pedido o un
+ * reembolso de Shopify trae el nombre, el correo, el teléfono y las direcciones del cliente (y la desinstalación, los de la
+ * tienda): nada de eso se guarda. Se arma DESPUÉS de verificar el HMAC sobre el cuerpo crudo. Un renglón que no es objeto
+ * queda con `variant_id: null` (el procesador ya lo trata como «sin variante»); una lista que no es arreglo no se guarda
+ * (el procesador la trata como vacía). `_avoqadoAvance` lo escribe Avoqado después (§12.8): nunca se toma del aviso.
+ */
+export function cargaMinima(p: Record<string, unknown>): Prisma.InputJsonObject {
+  const out: Record<string, Prisma.InputJsonValue | null> = {}
+  for (const k of ['id', 'inventory_item_id', 'location_id'] as const) {
+    const v = llave(p[k])
+    if (v !== undefined) out[k] = v
+  }
+  const renglon = (x: unknown) => ({ variant_id: llave((x as { variant_id?: unknown } | null)?.variant_id) ?? null })
+  if (Array.isArray(p.line_items)) out.line_items = p.line_items.map(renglon)
+  if (Array.isArray(p.refund_line_items)) {
+    out.refund_line_items = p.refund_line_items.map(r => ({ line_item: renglon((r as { line_item?: unknown } | null)?.line_item) }))
+  }
+  return out
+}
+
 export type PersistOutcome =
   | { outcome: 'PERSISTED'; eventId: string }
   | { outcome: 'DUPLICATE' | 'INVALID_SIGNATURE' | 'MALFORMED' | 'TOO_LARGE' }
@@ -124,7 +150,7 @@ export async function persistShopifyWebhook(input: {
         appKey: input.appKey,
         topic: input.topic,
         shopDomain,
-        payload: payload as Prisma.InputJsonObject,
+        payload: cargaMinima(payload as Record<string, unknown>), // M7: sin datos del cliente
         triggeredAt: leerHora(input.triggeredAt),
       },
       select: { id: true },

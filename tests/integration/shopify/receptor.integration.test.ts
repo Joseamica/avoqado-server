@@ -327,6 +327,67 @@ describe('procesar (#14, #16, N09, N10, N11, N20)', () => {
     expect((await ev(id)).processedAt).toBeInstanceOf(Date)
   })
 
+  it('🔴 M7: sólo se guarda lo que el procesador lee; un pedido o un reembolso NO deja datos del cliente, y se procesa igual', async () => {
+    const e = await escenario()
+    const direccion = { name: 'Ana Pérez', address1: 'Calle Falsa 123', city: 'CDMX', zip: '01000', phone: '+525512345678' }
+    const cliente = {
+      id: 207119551,
+      first_name: 'Ana',
+      last_name: 'Pérez',
+      email: 'ana@example.test',
+      phone: '+525512345678',
+      default_address: direccion,
+    }
+    const pedido = {
+      id: 450789469,
+      email: 'ana@example.test',
+      contact_email: 'ana@example.test',
+      phone: '+525512345678',
+      customer: cliente,
+      billing_address: direccion,
+      shipping_address: direccion,
+      note: 'Entregar a Ana en la puerta',
+      line_items: [
+        { id: 1, variant_id: 1, quantity: 2, title: 'Camisa', price: '499.00' },
+        { id: 2, variant_id: null, title: 'Envío' },
+      ],
+    }
+    const pid = await evento(e, 'orders/create', pedido)
+    const sinCliente = (x: unknown) => {
+      const t = JSON.stringify(x)
+      for (const dato of ['customer', 'email', 'billing_address', 'shipping_address', 'phone', 'Ana', 'Pérez', '5512345678', 'Calle'])
+        expect(t).not.toContain(dato)
+    }
+    expect((await ev(pid)).payload).toEqual({ id: 450789469, line_items: [{ variant_id: 1 }, { variant_id: null }] })
+    sinCliente((await ev(pid)).payload)
+    expect(await processShopifyEvent(pid, await procesando(pid), { ...conAcceso, fetchLevels: nivelesFalsos(() => nivel(8, 2)) })).toBe(
+      'PROCESSED',
+    )
+    expect(await stock(e)).toBe('8')
+
+    const reembolso = {
+      id: 509562969,
+      order_id: 450789469,
+      note: 'Ana devolvió la camisa',
+      user_id: 548380009,
+      refund_line_items: [{ id: 104689539, quantity: 1, line_item: { id: 1, variant_id: 1, title: 'Camisa', name: 'Camisa · Ana' } }],
+      transactions: [{ id: 1, amount: '499.00', gateway: 'bogus', receipt: { card: 'tarjeta de Ana' } }],
+    }
+    const rid = await evento(e, 'refunds/create', reembolso)
+    expect((await ev(rid)).payload).toEqual({ id: 509562969, refund_line_items: [{ line_item: { variant_id: 1 } }] })
+    sinCliente((await ev(rid)).payload)
+    expect(await processShopifyEvent(rid, await procesando(rid), { ...conAcceso, fetchLevels: nivelesFalsos(() => nivel(9, 1)) })).toBe(
+      'PROCESSED',
+    )
+    expect(await stock(e)).toBe('9')
+
+    // Los demás tópicos también se quedan con sus llaves: el del inventario y la desinstalación (que trae los datos de la tienda).
+    const nid = await evento(e, 'inventory_levels/update', { ...NIVEL_1, updated_at: '2026-10-10T00:00:00-06:00' })
+    expect((await ev(nid)).payload).toEqual({ inventory_item_id: 1, location_id: 1 })
+    const uid = await evento(e, 'app/uninstalled', { id: 690933842, name: 'Tienda', email: 'dueno@example.test', phone: '555' })
+    expect((await ev(uid)).payload).toEqual({ id: 690933842 })
+  })
+
   it('orders/create ⇒ relee las variantes del pedido', async () => {
     const e = await escenario()
     const id = await evento(e, 'orders/create', { line_items: [{ variant_id: 1, quantity: 2 }, { variant_id: null }] })

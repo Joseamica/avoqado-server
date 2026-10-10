@@ -48,9 +48,11 @@ cada cliente lo traduce a su mismo texto de piloto por el código, nunca por el 
 - **Webhook** (`SHOPIFY_WEBHOOK_ROUTE`, `app.ts:161`): `express.raw` de 1 MB (`SHOPIFY_WEBHOOK_MAX_BYTES`) montado ANTES del router genérico
   de `/api/v1/webhooks`. El del router genérico usa `express.raw({ type: 'application/json' })`: el límite por omisión es de 100 KB (un
   `products/update` con muchas variantes lo rebasa) y su tipo NO es comodín (cualquier otro Content-Type deja `req.body = {}`); el HMAC es
-  del cuerpo CRUDO. `persistShopifyWebhook(…)` sólo guarda y contesta; lo procesa el worker. Pruebas:
-  `tests/unit/routes/shopify.webhook.app.test.ts` y `tests/integration/shopify/webhook-app.integration.test.ts` (un POST firmado por la
-  `app` real deja un evento).
+  del cuerpo CRUDO. `persistShopifyWebhook(…)` sólo guarda y contesta; lo procesa el worker. Guarda SÓLO lo que el procesador lee
+  (`cargaMinima(…)`: el `id`, el artículo y la ubicación del inventario, y el `variant_id` de cada renglón; M7): un pedido o un reembolso
+  trae el nombre, el correo, el teléfono y las direcciones del cliente, y nada de eso se queda. Si un procesador empieza a leer otro campo,
+  agrégalo ahí en el mismo cambio. Pruebas: `tests/unit/routes/shopify.webhook.app.test.ts` y
+  `tests/integration/shopify/webhook-app.integration.test.ts` (un POST firmado por la `app` real deja un evento).
 - **Callback OAuth** (`SHOPIFY_OAUTH_CALLBACK_PATH`, `app.ts:202`): público, sin sesión; la prueba de origen es el `hmac` más el `state`
   firmado. `handleShopifyCallback(…)` recibe `req.query` INTACTO: un parámetro repetido (llega como arreglo) no es algo que Shopify firmó y
   da `?error=FIRMA`; no se filtra antes.

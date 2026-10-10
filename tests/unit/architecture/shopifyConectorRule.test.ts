@@ -354,6 +354,16 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
       'se aceptan DOS formas de firma',
       'Un `host` terminado en `==` firmado como la biblioteca oficial sólo cuadra con la forma codificada; con una sola forma (la decodificada), el piloto daría `?error=FIRMA`',
     ])
+    // M7: del aviso sólo se guarda lo que el procesador lee (sin datos del cliente).
+    contieneTodas([
+      'Guarda SÓLO lo que el procesador lee (`cargaMinima(…)`',
+      'trae el nombre, el correo, el teléfono y las direcciones del cliente, y nada de eso se queda',
+    ])
+    const receptor = leer(`${SHOPIFY}/shopify.inbound.service.ts`)
+    expect(cuerpo(receptor, 'export async function persistShopifyWebhook(')).toContain(
+      'payload: cargaMinima(payload as Record<string, unknown>)',
+    )
+    expect(cuerpo(receptor, 'export async function persistShopifyWebhook(')).not.toContain('payload: payload as')
     const app = leer('src/app.ts')
     enOrden(app, [
       "app.post(SHOPIFY_WEBHOOK_ROUTE, express.raw({ type: '*/*', limit: SHOPIFY_WEBHOOK_MAX_BYTES }), handleShopifyWebhook)",
