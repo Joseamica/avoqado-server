@@ -7,7 +7,14 @@ import { join } from 'path'
 import type { CfdiStatus } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { resolveFiscalProvider } from '@/services/fiscal/fiscalProvider.factory'
-import { issueCfdiForOrder, cancelCfdi, refreshPendingCancellation, sincronizarCancelacionExterna } from '@/services/fiscal/cfdi.service'
+import {
+  issueCfdiForOrder,
+  cancelCfdi,
+  refreshPendingCancellation,
+  sincronizarCancelacionExterna,
+  defaultRefreshDeps,
+} from '@/services/fiscal/cfdi.service'
+import { ProviderHttpError } from '@/services/fiscal/providers/facturapi.provider'
 import { replaceCfdi } from '@/services/fiscal/cfdiReplacement.service'
 import { encenderIvaPorProducto } from '../../__helpers__/iva-por-producto'
 
@@ -233,7 +240,7 @@ describe('D21: lo que sigue funcionando con una heredada terminada', () => {
     await prisma.order.deleteMany({ where: { venueId } })
     await prisma.product.deleteMany({ where: { venueId } })
     await prisma.menuCategory.deleteMany({ where: { venueId } })
-    await prisma.merchantFiscalConfig.deleteMany({ where: { fiscalEmisorId } })
+    if (fiscalEmisorId) await prisma.merchantFiscalConfig.deleteMany({ where: { fiscalEmisorId } }) // id undefined = toda la tabla
     await prisma.fiscalEmisor.deleteMany({ where: { venueId } })
     await prisma.merchantAccount.deleteMany({ where: { id: fixture } })
     await prisma.paymentProvider.deleteMany({ where: { id: fixture } })
@@ -312,6 +319,9 @@ describe('D21: lo que sigue funcionando con una heredada terminada', () => {
     async (respuesta, original, pendiente) => {
       const o = await order()
       const vieja = await heredada(o.id, { status: 'STAMPED' })
+      // C2 · Tarea 2: antes del POST se consulta al PAC; el doble de este archivo dice «cancelada» por defecto, así que la consulta previa
+      // tiene que ver lo que vería el PAC real antes de pedirla: ninguna cancelación.
+      provider.getCancellationStatus.mockResolvedValueOnce({ status: 'none', cancelledAt: null })
       provider.cancelInvoice.mockResolvedValue({ status: respuesta, cancelledAt: respuesta === 'canceled' ? new Date() : null })
       const result = await replaceCfdi({ cfdiId: vieja.id, sandbox: true, expectedVenueId: venueId }, deps as any)
       expect(result).toMatchObject({ status: 'REPLACED', cancelPendiente: pendiente })
@@ -329,14 +339,17 @@ describe('D21: lo que sigue funcionando con una heredada terminada', () => {
     },
   )
 
-  type Camino = 'directa' | 'en trámite' | 'externa' | 'otra vez tras rechazo'
+  type Camino = 'directa' | 'rechazo' | 'en duda' | 'en trámite' | 'externa' | 'otra vez tras rechazo'
   const CANCELADA = { status: 'CANCELLED', cancelStatus: 'CANCELLED' } as const
   const ACEPTADA = { status: 'CANCELLED', cancelStatus: 'ACCEPTED' } as const
   const VIGENTE_RECHAZADA = { status: 'STAMPED', cancelStatus: 'REJECTED' } as const
   it.each([
     ['pendiente (queda en trámite)', 'directa', 'pending', { status: 'STAMPED', cancelStatus: 'REQUESTED' }],
-    ['rechazo del receptor', 'directa', 'rejected', VIGENTE_RECHAZADA],
-    ['expiración sin respuesta', 'directa', 'expired', VIGENTE_RECHAZADA],
+    // C2 · Tarea 2 (cambian a propósito): un rechazo CONCLUYENTE llega del PAC como error con su código de cancelación (C2-25); un
+    // «rechazada» o «caducada» en la RESPUESTA del POST no prueba nada de ESTE intento: queda EN DUDA y la consulta lo cierra (C2-24).
+    ['rechazo del receptor (rechazo concluyente del PAC)', 'rechazo', 'rejected', VIGENTE_RECHAZADA],
+    ['respuesta «rechazada» al POST: en duda, y la consulta la cierra', 'en duda', 'rejected', VIGENTE_RECHAZADA],
+    ['expiración sin respuesta: en duda, y la consulta la cierra', 'en duda', 'expired', VIGENTE_RECHAZADA],
     ['aceptación', 'directa', 'accepted', ACEPTADA],
     ['cancelación confirmada', 'directa', 'canceled', CANCELADA],
     ['en trámite que después se confirma', 'en trámite', 'canceled', CANCELADA],
@@ -351,10 +364,30 @@ describe('D21: lo que sigue funcionando con una heredada terminada', () => {
     const c = await heredada(o.id, { status: 'STAMPED' })
     const pac = { status: respuesta, cancelledAt: respuesta === 'canceled' || respuesta === 'accepted' ? new Date() : null }
     const cancelar = () => cancelCfdi({ cfdiId: c.id, motivo: '02', sandbox: true, expectedVenueId: venueId })
+    // C2 · Tarea 2: la consulta que va antes de cada POST (y la de confirmación tras un rechazo) ve lo que vería el PAC real antes de pedir
+    // la cancelación: ninguna. (El doble de este archivo dice «cancelada» por defecto.)
+    const sinCancelacion = () => provider.getCancellationStatus.mockResolvedValueOnce({ status: 'none', cancelledAt: null })
+    const rechazoConcluyente = () =>
+      new ProviderHttpError(400, 'invoice_cancellation_not_allowed', 'El receptor no permite la cancelación de esta factura')
     if (camino === 'directa') {
+      sinCancelacion()
       provider.cancelInvoice.mockResolvedValue(pac)
       await cancelar()
+    } else if (camino === 'rechazo') {
+      sinCancelacion() // antes del POST
+      sinCancelacion() // la confirmación tras el rechazo
+      provider.cancelInvoice.mockRejectedValue(rechazoConcluyente())
+      expect(await cancelar()).not.toHaveProperty('enDuda')
+    } else if (camino === 'en duda') {
+      sinCancelacion()
+      provider.cancelInvoice.mockResolvedValue(pac)
+      expect(await cancelar()).toMatchObject({ enDuda: true })
+      const enDuda = await prisma.cfdi.findUniqueOrThrow({ where: { id: c.id }, include: { fiscalEmisor: true } })
+      expect(enDuda).toMatchObject({ status: 'STAMPED', cancelStatus: 'REQUESTED', cancelAcusadaAt: null })
+      provider.getCancellationStatus.mockResolvedValue(pac)
+      await refreshPendingCancellation(enDuda, { sandbox: true }, { ...defaultRefreshDeps, now: () => new Date(Date.now() + 2 * 60_000) })
     } else if (camino === 'en trámite') {
+      sinCancelacion()
       provider.cancelInvoice.mockResolvedValue({ status: 'pending', cancelledAt: null })
       await cancelar()
       const enTramite = await prisma.cfdi.findUniqueOrThrow({ where: { id: c.id }, include: { fiscalEmisor: true } })
@@ -365,11 +398,15 @@ describe('D21: lo que sigue funcionando con una heredada terminada', () => {
       provider.getCancellationStatus.mockResolvedValue(pac)
       await sincronizarCancelacionExterna(c, { sandbox: true })
     } else {
-      provider.cancelInvoice.mockResolvedValueOnce({ status: 'rejected', cancelledAt: null })
+      sinCancelacion()
+      sinCancelacion()
+      provider.cancelInvoice.mockRejectedValueOnce(rechazoConcluyente())
       await cancelar()
       expect(await fila(c.id)).toMatchObject({ ...VIGENTE_RECHAZADA, protocoloIva: null })
+      sinCancelacion() // la persona la pide otra vez: intento nuevo, con su consulta previa
       provider.cancelInvoice.mockResolvedValueOnce(pac)
       await cancelar()
+      expect(provider.cancelInvoice).toHaveBeenCalledTimes(2)
     }
     expect(await fila(c.id)).toMatchObject({ ...esperado, protocoloIva: null })
   })

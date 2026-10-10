@@ -9,6 +9,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { registerCfdiTools } from '../../../src/mcp/tools/cfdi'
 import { configureToolCatalog } from '../../../src/mcp/catalog'
 import type { McpScope } from '../../../src/mcp/scope'
+import { conectarPorElCatalogo, pasoUnoYDos } from '../../__helpers__/mcp-por-el-catalogo'
 
 const mockAudit = jest.fn()
 const mockVenueFilter = jest.fn((v?: string) => ({ venueId: { in: [v ?? 'v1'] } }))
@@ -113,6 +114,9 @@ describe('emit_global_invoice — dos pasos, `cfdi:configure`, feature CFDI', ()
     })
     expect(r).not.toHaveProperty('needsConfirmation')
     expect(r.message).toMatch(/irreversible/)
+    // OF-1 (T9 N-2): promete sólo lo que hace. El paso 2 recalcula la vista pero no la compara con la mostrada.
+    expect(r.message).not.toMatch(/huella|Si algo cambia antes/)
+    expect(r.message).toContain('con otros argumentos el token no sirve y no se hace nada')
     expect(mockVistaPreviaComplementaria).toHaveBeenCalledWith(
       expect.objectContaining({ venueId: 'v1', emisorId: 'e1', principalId: 'g1' }),
     )
@@ -280,5 +284,74 @@ describe('emit_global_invoice — el paso 2 a través del catálogo (token de co
     } finally {
       await c.close()
     }
+  })
+})
+
+// ─── C2 · T9 ronda 1 (los hermanos de I-2): con los confirmationArgs DE LA HERRAMIENTA tal cual (no los del catálogo) ───
+describe('emit_global_invoice — T9 ronda 1 · por el catálogo, con los confirmationArgs de la herramienta', () => {
+  it.each([
+    ['COMPLEMENTARIA', { tipo: 'COMPLEMENTARIA', principalCfdiId: 'g1' }],
+    ['PRINCIPAL', { tipo: 'PRINCIPAL', desde: PERIODO.desde }],
+  ])(
+    'control — %s: paso 1 y paso 2 con los confirmationArgs de la herramienta y el token ⇒ emite UNA vez; alterados ⇒ no',
+    async (tipo, extra) => {
+      const c = await conectarPorElCatalogo(server => registerCfdiTools(server as never, scope), scope)
+      try {
+        const emitir = tipo === 'COMPLEMENTARIA' ? mockEmitirComplementaria : mockIssueGlobalForEmisor
+        const { vista, resultado } = await pasoUnoYDos(c, 'emit_global_invoice', { venueId: 'v1', ...extra })
+        expect(vista.requiresConfirmation).toBe(true)
+        expect(vista.confirmationArgs).toEqual({ ...vista.confirmationArguments, confirm: true })
+        expect(resultado).toMatchObject({ ok: true, status: 'STAMPED' })
+        expect(emitir).toHaveBeenCalledTimes(1)
+        const otro = tipo === 'COMPLEMENTARIA' ? { principalCfdiId: 'otra' } : { desde: '2026-04-01T06:00:00.000Z' }
+        expect(
+          await c.call('emit_global_invoice', { ...vista.confirmationArgs, ...otro, confirmationToken: vista.confirmationToken }),
+        ).toMatchObject({ needsInput: true })
+        expect(emitir).toHaveBeenCalledTimes(1)
+      } finally {
+        await c.close()
+      }
+    },
+  )
+})
+
+// Ronda QA (hermanos): la global que quedó EN DUDA no se reporta como «El PAC rechazó el timbrado» ni con el error crudo.
+describe('emit_global_invoice — ronda QA (hermanos): timbre en duda', () => {
+  it('🔴 complementaria en duda ⇒ `enDuda: true` y el motivo «sin respuesta clara… no la vuelvas a emitir»', async () => {
+    mockEmitirComplementaria.mockResolvedValue({
+      status: 'STAMP_FAILED',
+      cfdi: {
+        status: 'STAMP_FAILED',
+        protocoloIva: 1,
+        enviadoAt: new Date('2026-10-05T18:00:00Z'),
+        falloDefinitivo: false,
+        lastError: 'fetch failed',
+      },
+      excluidas: {},
+    })
+    const r = parse(await call({ venueId: 'v1', tipo: 'COMPLEMENTARIA', principalCfdiId: 'g1', confirm: true }))
+    expect(r).toMatchObject({ ok: false, status: 'STAMP_FAILED', enDuda: true })
+    expect(r.motivo).toMatch(/^No hubo respuesta clara del PAC: la factura global/)
+    expect(r.motivo).not.toMatch(/fetch failed|rechaz/i)
+  })
+  it('control — un rechazo definitivo de la global sigue con el porqué del PAC', async () => {
+    mockEmitirComplementaria.mockResolvedValue({
+      status: 'STAMP_FAILED',
+      cfdi: {
+        ...{
+          status: 'STAMP_FAILED',
+          protocoloIva: 1,
+          enviadoAt: new Date('2026-10-05T18:00:00Z'),
+          falloDefinitivo: false,
+          lastError: 'fetch failed',
+        },
+        falloDefinitivo: true,
+        lastError: 'CFDI40999 rechazo',
+      },
+      excluidas: {},
+    })
+    const r = parse(await call({ venueId: 'v1', tipo: 'COMPLEMENTARIA', principalCfdiId: 'g1', confirm: true }))
+    expect(r).toMatchObject({ ok: false, motivo: 'CFDI40999 rechazo' })
+    expect(r).not.toHaveProperty('enDuda')
   })
 })

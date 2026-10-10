@@ -110,9 +110,41 @@ export function buildCreateInvoiceParams(input: AvoqadoSaleInput): CreateInvoice
 export const CREDIT_NOTE_USO_CFDI = 'G02'
 /** SAT c_TipoRelacion: "Nota de crédito de los documentos relacionados". */
 export const CREDIT_NOTE_RELATIONSHIP = '01' as const
-/** ClaveProdServ genérica ("no existe en el catálogo") + ClaveUnidad "Actividad". */
-const CREDIT_NOTE_PRODUCT_KEY = '01010101'
+/** C2 (Anexo 20, Apéndice 5: «la clave que corresponda según el caso o la clave 84111506», unidad «ACT»). Las notas v1 llevan la de antes. */
+export const CLAVE_NOTA = '84111506'
+/** La clave de las notas v1 (ya timbradas): ClaveProdServ genérica («no existe en el catálogo»). Su lector la sigue exigiendo. */
+export const CLAVE_NOTA_V1 = '01010101'
+const CREDIT_NOTE_PRODUCT_KEY = CLAVE_NOTA_V1
 const CREDIT_NOTE_UNIT_KEY = 'ACT'
+
+/**
+ * C2 (D5): los conceptos de una nota, uno por tratamiento (en el orden de `TRATAMIENTOS_DE_NOTA`), con IVA incluido: el total del egreso es
+ * lo devuelto. Un tratamiento en cero no da concepto. Con `sku` (nota a una global), `NoIdentificacion` = el folio del ticket.
+ */
+export function conceptosDeNota(
+  bruto: Partial<Record<'IVA_16' | 'IVA_8' | 'IVA_0' | 'EXENTO' | 'NO_OBJETO', number>>,
+  etiqueta: string,
+  o: { descripcion?: string; sku?: string } = {},
+): CfdiItemInput[] {
+  return (['IVA_16', 'IVA_8', 'IVA_0', 'EXENTO', 'NO_OBJETO'] as const)
+    .filter(t => (bruto[t] ?? 0) > 0)
+    .map(t => {
+      const sat = impuestosSatDe(t)
+      if ('bloqueado' in sat) throw new Error(sat.motivo) // inalcanzable: los cinco tratamientos de una nota son timbrables
+      return {
+        satProductKey: CLAVE_NOTA,
+        satUnitKey: CREDIT_NOTE_UNIT_KEY,
+        description: o.descripcion ?? `Devolución sobre factura ${etiqueta}`,
+        quantity: 1,
+        unitPriceCents: bruto[t]!,
+        discountCents: 0,
+        objetoImp: sat.objetoImp,
+        taxes: sat.taxes,
+        taxIncluded: true,
+        ...(o.sku ? { sku: o.sku } : {}),
+      }
+    })
+}
 
 /** Un renglón de la nota de crédito: importe IVA-INCLUIDO (centavos) a una tasa real. */
 export interface CreditNoteLine {

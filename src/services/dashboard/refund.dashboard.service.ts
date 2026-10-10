@@ -23,6 +23,8 @@ import type { FiscalCongelado } from '../fiscal/deliveryFiscalDelta'
 import { devolverConEfectivo, sePuedeEscogerComoDevolver, type DevolverCon } from '../tpv/terminalRefundTarget'
 import { postCashRefundToDrawer } from '../shared/cashDrawerPosting'
 import { parteDeUnidades as getUnitRefundCents } from '../shared/parteDeUnidades'
+import { NO_SE_PUEDE_POR_ARTICULOS, leerCobradoDeLaOrden } from '../fiscal/cobradoDeLaOrden'
+import { TOPES_POR_ORDEN } from '../fiscal/librosDeOrdenes'
 import { computeTenderCommission } from './tenderType.dashboard.service'
 import {
   ORDER_LOCK_WAIT_BUDGET,
@@ -211,7 +213,7 @@ function asRecord(value: Prisma.JsonValue | Record<string, unknown> | null | und
   return value as Record<string, unknown>
 }
 
-function collectExistingRefundedItems(refundRows: RefundPaymentRow[]): Map<string, ExistingRefundedItem> {
+function collectExistingRefundedItems(refundRows: Array<Pick<RefundPaymentRow, 'processorData'>>): Map<string, ExistingRefundedItem> {
   const byOrderItemId = new Map<string, ExistingRefundedItem>()
 
   for (const refund of refundRows) {
@@ -816,26 +818,47 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
         const orderItemIds = input.items!.map(i => i.orderItemId)
         const orderItems = await tx.orderItem.findMany({
           where: { id: { in: orderItemIds }, orderId: original.orderId },
-          select: { id: true, productId: true, productName: true, quantity: true, total: true, orderPromotionId: true },
+          select: { id: true, productId: true, productName: true, quantity: true, orderPromotionId: true },
         })
 
         if (orderItems.length !== orderItemIds.length) {
           throw new BadRequestError('One or more orderItemIds do not belong to this payment order')
         }
 
+        // C2 A-R1/A-R2: lo que cobró cada renglón (el mismo cargador que usan las pantallas), leído bajo el candado del cobro.
+        const cobrado = await leerCobradoDeLaOrden(tx, original.orderId)
         // Una promoción se reembolsa completa o nada: se evalúa contra TODAS las
         // líneas de la orden, no sólo las seleccionadas.
-        const allOrderLines = await tx.orderItem.findMany({
-          where: { orderId: original.orderId },
-          select: { id: true, orderPromotionId: true, total: true },
-        })
-        assertRefundableLines(allOrderLines, orderItemIds)
+        assertRefundableLines(cobrado.renglones, orderItemIds)
+        // A-R3: si no se puede decir cuánto cobró cada artículo, no se adivina: se devuelve por importe. Nunca de más.
+        if (!cobrado.atribuible || orderItems.some(o => !cobrado.cobradoCents.has(o.id))) {
+          throw new BadRequestError(cobrado.motivo ?? NO_SE_PUEDE_POR_ARTICULOS.SIN_ARTICULO, 'REFUND_ITEMS_NOT_ATTRIBUTABLE')
+        }
+        // Ronda 1 (I1): lo ya devuelto de cada artículo se cuenta sobre TODA la orden —todas las devoluciones de todos sus cobros—, no
+        // sólo las de este cobro: en una cuenta dividida un artículo se devolvía una vez por COBRO. Sin candado nuevo: la Orden ya está
+        // bloqueada FOR UPDATE antes que el cobro (`bloquearCobroParaReembolso` → `lockExistingOrderForPayment`), así que ningún otro cobro
+        // de esta cuenta devuelve en medio. Sólo la proyección de `refundedItems`; con tope (`TOPES_POR_ORDEN.movimientos`).
+        // ⚠️ C2 · OF-2 (A-1 N1): SIN filtro de `status` a propósito, como la lectura por cobro (`bloquearCobroParaReembolso`): son CANTIDADES
+        // devueltas; filtrar dejaría volver a devolver por otro cobro el artículo de una devolución no completada. Lo fija una prueba.
+        const devolucionesDeLaOrden = await tx.$queryRaw<Array<{ id: string; processorData: Prisma.JsonValue }>>(Prisma.sql`
+          SELECT id, jsonb_build_object('refundedItems', "processorData"->'refundedItems') AS "processorData"
+          FROM "Payment"
+          WHERE "venueId" = ${input.venueId}
+            AND "orderId" = ${original.orderId}
+            AND type = CAST(${PaymentType.REFUND} AS "PaymentType")
+          ORDER BY "createdAt" ASC, id ASC
+          LIMIT ${TOPES_POR_ORDEN.movimientos + 1}
+        `)
+        if (devolucionesDeLaOrden.length > TOPES_POR_ORDEN.movimientos) {
+          throw new BadRequestError(NO_SE_PUEDE_POR_ARTICULOS.TOPE, 'REFUND_ITEMS_NOT_ATTRIBUTABLE')
+        }
+        const devueltoEnLaOrden = collectExistingRefundedItems(devolucionesDeLaOrden)
 
         for (const req of input.items!) {
           const orderItem = orderItems.find(o => o.id === req.orderItemId)!
           const refundQty = req.quantity ?? orderItem.quantity
-          const alreadyRefundedItem = refundedItemsByOrderItemId.get(orderItem.id)
-          const alreadyRefundedQty = alreadyRefundedItem?.quantity ?? 0
+          const yaEnLaOrden = devueltoEnLaOrden.get(orderItem.id)
+          const alreadyRefundedQty = yaEnLaOrden?.quantity ?? 0
 
           if (refundQty <= 0) {
             throw new BadRequestError(`Invalid refund quantity ${refundQty} for item ${orderItem.id}`)
@@ -845,13 +868,30 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
           }
           assertPromotionLineFullQuantity(orderItem as any, refundQty)
           if (alreadyRefundedQty + refundQty > orderItem.quantity) {
+            // Ronda 1 (I1): si lo que falta lo devolvió OTRO cobro de la misma cuenta, se dice así.
+            if (alreadyRefundedQty > (refundedItemsByOrderItemId.get(orderItem.id)?.quantity ?? 0)) {
+              const nombre = orderItem.productName ? ` («${orderItem.productName}»)` : ''
+              const quedan = Math.max(0, orderItem.quantity - alreadyRefundedQty)
+              throw new BadRequestError(
+                `Este artículo${nombre} ya se devolvió en otro cobro de la misma cuenta; quedan ${quedan} de ${orderItem.quantity} por devolver.`,
+              )
+            }
             throw new BadRequestError(
               `Refund quantity ${refundQty} for item ${orderItem.id} exceeds remaining refundable quantity (${orderItem.quantity - alreadyRefundedQty})`,
             )
           }
 
-          const lineTotalCents = toCents(orderItem.total)
-          const lineRefundCents = getUnitRefundCents(lineTotalCents, orderItem.quantity, alreadyRefundedQty, refundQty)
+          // A-R2: lo que cobraron las unidades devueltas (neto de su descuento y de su parte de los de la cuenta), no el bruto.
+          const lineChargedCents = cobrado.cobradoCents.get(orderItem.id)!
+          // Ronda 1 (I1, M3): y nunca más que lo cobrado del renglón menos lo ya devuelto de él en la orden (otro cobro, o una devolución
+          // bruta de antes de A, ya se llevó su parte).
+          const lineRefundCents = Math.max(
+            0,
+            Math.min(
+              getUnitRefundCents(lineChargedCents, orderItem.quantity, alreadyRefundedQty, refundQty),
+              lineChargedCents - (yaEnLaOrden?.amountCents ?? 0),
+            ),
+          )
           refundCents += lineRefundCents
           refundedItems.push({
             orderItemId: orderItem.id,
@@ -1256,17 +1296,24 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
 }
 
 /**
+ * C2 · OF-2 (M2): tope de devoluciones que se leen de UN cobro. Un cobro real tiene un puñado; si se llena, se avisa en el log.
+ */
+export const TOPE_DEVOLUCIONES_POR_COBRO = 500
+
+/**
  * Return the set of REFUND payments that reference a given original payment.
  */
 export async function listRefundsForPayment(venueId: string, originalPaymentId: string) {
+  // C2 · OF-2 (M2): el filtro por `processorData.originalPaymentId` va en SQL (ruta JSON), con tope. Antes se leían TODAS las devoluciones
+  // del negocio, con su JSON, y se filtraba aquí; lo llama el detalle de cobro del POS en cada apertura.
   const refunds = await prisma.payment.findMany({
     where: {
       venueId,
       type: PaymentType.REFUND,
-      // processorData->>originalPaymentId = :originalPaymentId
-      // Prisma JSON filters don't hit this cleanly, so we filter in JS below.
+      processorData: { path: ['originalPaymentId'], equals: originalPaymentId },
     },
     orderBy: { createdAt: 'desc' },
+    take: TOPE_DEVOLUCIONES_POR_COBRO,
     select: {
       id: true,
       amount: true,
@@ -1279,30 +1326,33 @@ export async function listRefundsForPayment(venueId: string, originalPaymentId: 
     },
   })
 
+  if (refunds.length === TOPE_DEVOLUCIONES_POR_COBRO) {
+    logger.warn('[REFUND.DASHBOARD] listRefundsForPayment llegó al tope de devoluciones de un cobro', {
+      venueId,
+      originalPaymentId,
+      tope: TOPE_DEVOLUCIONES_POR_COBRO,
+    })
+  }
+
   // Since 2026-04-19 refunds split the refund across Payment.amount (sale) and
   // Payment.tipAmount (tip). Consumers built before that split only read `amount`
   // and would under-report the total refund by the tip portion. Return `amount`
   // as the NEGATIVE TOTAL so those consumers keep working, and expose the
   // split in separate fields for anyone that cares.
-  return refunds
-    .filter(r => {
-      const pd = (r.processorData as Record<string, unknown>) || {}
-      return pd.originalPaymentId === originalPaymentId
-    })
-    .map(r => {
-      const sale = Number(r.amount)
-      const tip = Number(r.tipAmount ?? 0)
-      const total = sale + tip // both are negative for refunds
-      return {
-        id: r.id,
-        amount: total,
-        saleAmount: sale,
-        tipAmount: tip,
-        status: r.status,
-        method: r.method,
-        createdAt: r.createdAt,
-        processedBy: r.processedBy,
-        processorData: r.processorData,
-      }
-    })
+  return refunds.map(r => {
+    const sale = Number(r.amount)
+    const tip = Number(r.tipAmount ?? 0)
+    const total = sale + tip // both are negative for refunds
+    return {
+      id: r.id,
+      amount: total,
+      saleAmount: sale,
+      tipAmount: tip,
+      status: r.status,
+      method: r.method,
+      createdAt: r.createdAt,
+      processedBy: r.processedBy,
+      processorData: r.processorData,
+    }
+  })
 }

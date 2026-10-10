@@ -2,6 +2,9 @@
 import {
   buildCreateInvoiceParams,
   buildGlobalInvoiceParams,
+  CLAVE_NOTA,
+  CLAVE_NOTA_V1,
+  conceptosDeNota,
   formaPagoDeLaGlobal,
   groupOrderIntoGlobalLines,
   AvoqadoSaleInput,
@@ -283,5 +286,31 @@ describe('groupOrderIntoGlobalLines (derive real IVA per product, not assumed 16
     expect(lines[0].taxCents).toBe(0)
     expect(lines[0].objetoImp).toBe('01')
     expect(lines[0].totalCents).toBe(10000)
+  })
+})
+
+// ─── C2 · Tarea 7 ──────────────────────────────────────────────────────────────
+describe('C2 · conceptosDeNota (Apéndice 5: 84111506/ACT)', () => {
+  it('un concepto por tratamiento, IVA incluido, objeto y traslado de cada uno, clave 84111506 y unidad ACT', () => {
+    const items = conceptosDeNota({ IVA_16: 5800, IVA_0: 2500, EXENTO: 3000, NO_OBJETO: 2000 }, 'F12')
+    expect(
+      items.map(i => [i.satProductKey, i.satUnitKey, i.unitPriceCents, i.objetoImp, i.taxes.map(t => `${t.factor}:${t.rate}`).join(',')]),
+    ).toEqual([
+      ['84111506', 'ACT', 5800, '02', 'Tasa:0.16'],
+      ['84111506', 'ACT', 2500, '02', 'Tasa:0'],
+      ['84111506', 'ACT', 3000, '02', 'Exento:0'],
+      ['84111506', 'ACT', 2000, '01', ''],
+    ])
+    expect(items.every(i => i.description === 'Devolución sobre factura F12' && i.taxIncluded && i.sku === undefined)).toBe(true)
+  })
+  it('con sku (nota a una global): NoIdentificacion = folio del ticket', () => {
+    // (el plan leía `[0].sku`; con el cuerpo neutro es un TypeError: se compara la lista, rojo por aserción)
+    expect(conceptosDeNota({ IVA_16: 100 }, 'G-1', { sku: 'ORD-2' }).map(i => i.sku)).toEqual(['ORD-2'])
+  })
+  it('control — las claves: la nueva es 84111506 y la de las notas v1 (ya timbradas) sigue siendo 01010101', () => {
+    expect([CLAVE_NOTA, CLAVE_NOTA_V1]).toEqual(['84111506', '01010101'])
+  })
+  it('un tratamiento en cero no da concepto; el orden es el de TRATAMIENTOS_DE_NOTA aunque el objeto llegue en otro', () => {
+    expect(conceptosDeNota({ NO_OBJETO: 5, IVA_16: 0, IVA_0: 7 }, 'X').map(i => i.unitPriceCents)).toEqual([7, 5])
   })
 })

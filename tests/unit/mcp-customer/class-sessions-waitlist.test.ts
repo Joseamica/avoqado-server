@@ -164,11 +164,25 @@ describe('class_session_detail (read, PRO-gated)', () => {
       status: 'SCHEDULED',
       reservations: [
         {
-          confirmationCode: 'RES-PAS', status: 'CONFIRMED', partySize: 1, guestName: 'Ana', guestPhone: null, customer: null,
+          confirmationCode: 'RES-PAS',
+          status: 'CONFIRMED',
+          partySize: 1,
+          guestName: 'Ana',
+          guestPhone: null,
+          customer: null,
           aggregatorBooking: { id: 'b1', provider: 'TOTALPASS' },
           passVisit: { id: 'v1', status: 'PENDING', deadlineAt, awaitingVenue: true },
         },
-        { confirmationCode: 'RES-OWN', status: 'CONFIRMED', partySize: 1, guestName: 'Luis', guestPhone: null, customer: null, aggregatorBooking: null, passVisit: null },
+        {
+          confirmationCode: 'RES-OWN',
+          status: 'CONFIRMED',
+          partySize: 1,
+          guestName: 'Luis',
+          guestPhone: null,
+          customer: null,
+          aggregatorBooking: null,
+          passVisit: null,
+        },
       ],
     })
     const out = parse(await call('class_session_detail', { venueId: 'v1', sessionId: 'cs1' }))

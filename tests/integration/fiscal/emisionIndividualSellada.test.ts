@@ -4,7 +4,7 @@ import { randomUUID } from 'crypto'
 import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { issueCfdiForOrder } from '@/services/fiscal/cfdi.service'
-import { huellaDeEntrada, leerEntrada, paramsDesdeEntrada } from '@/services/fiscal/entradaDocumental'
+import { huellaDeEntrada, leerEntrada, leerMontosPorRenglon, paramsDesdeEntrada } from '@/services/fiscal/entradaDocumental'
 import { encenderIvaPorProducto } from '../../__helpers__/iva-por-producto'
 
 const { isDisposableH1Url } = require('../../../scripts/h1-test-database.cjs')
@@ -142,6 +142,14 @@ describe('emisión individual sellada', () => {
       expect.objectContaining({ orderItemId: o.items[0].id, intento: 1 }),
     ])
     expect(await prisma.orderItem.findUnique({ where: { id: o.items[0].id } })).toMatchObject({ ivaTratamiento: 'IVA_16' })
+  })
+  it('C2 T6: la factura timbrada guarda lo facturado de cada artículo (montosPorRenglon) y se lee de la base', async () => {
+    const o = await order()
+    expect((await issue(o.id)).status).toBe('STAMPED')
+    const cfdi = await row(o.id)
+    const entrada = leerEntrada(cfdi.entrada)!
+    expect(leerMontosPorRenglon(entrada)).toEqual([{ orderItemId: o.items[0].id, totalCents: 11600, porTratamiento: { IVA_16: 11600 } }])
+    expect(cfdi.entradaHuella).toBe(huellaDeEntrada(entrada))
   })
   it('un cambio al producto durante el PAC no cambia la foto ni el sello', async () => {
     const o = await order()

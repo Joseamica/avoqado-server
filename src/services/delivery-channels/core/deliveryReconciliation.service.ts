@@ -436,6 +436,9 @@ export async function reconcileDeliveryOrderFromProvider(
       venueId,
       salesRefundCents: dVenta,
       tipRefundCents: dPropina,
+      // C2 · OF-2 (A-1 M4): aquí `refundedItems` es REGISTRO, no dinero: el dinero es `dVenta`/`dPropina` (el delta del proveedor) y la nota
+      // va por el congelado (`fiscalByRateCents`). Guarda el BRUTO del renglón (`OrderItem.total`), no lo cobrado. Lo que sí importa: la
+      // cantidad COMPLETA queda marcada, así que una devolución posterior de ese artículo se rechaza por cantidad antes de mirar el monto.
       refundedItems: acreditadas.map(a => ({
         orderItemId: a.orderItemId,
         quantity: porId.get(a.orderItemId)!.quantity,

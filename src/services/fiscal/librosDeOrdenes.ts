@@ -186,7 +186,8 @@ const cuentaDe = (o: Orden): CuentaDeMezcla => ({
   orderDiscounts: [],
 })
 const filasDe = (c: Conteo) => c.renglones + c.descuentos + c.destinos + c.movimientos + c.articulos
-const SELECT_RENGLON = {
+/** Lo que la composición lee de cada renglón (el libro, y el cargador de lo cobrado de una orden: `cobradoDeLaOrden.ts`). */
+export const SELECT_RENGLON = {
   id: true,
   orderId: true,
   quantity: true,

@@ -10,6 +10,7 @@ import { PaymentMethod, TransactionStatus } from '@prisma/client'
 import { NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { listRefundsForPayment } from '../dashboard/refund.dashboard.service'
+import { chargedTotalDe, leerCobradoDeLaOrden } from '../fiscal/cobradoDeLaOrden'
 import { centavosDevueltosPorComponente, centavosYaDevueltos } from '../shared/devueltoDeUnCobro'
 import { seDevuelveEnTerminal, sePuedeEscogerComoDevolver } from '../tpv/terminalRefundTarget'
 
@@ -166,6 +167,7 @@ export async function getTransactionDetail(venueId: string, paymentId: string) {
       authorizationNumber: true,
       createdAt: true,
       processorData: true,
+      orderId: true,
       processedBy: {
         select: {
           firstName: true,
@@ -207,6 +209,8 @@ export async function getTransactionDetail(venueId: string, paymentId: string) {
   }
 
   const refunds = payment.status !== 'PENDING' && payment.status !== 'REFUNDED' ? await listRefundsForPayment(venueId, payment.id) : []
+  // C2 A-R4: lo que cobró cada artículo, con el MISMO cargador que usa el escritor de devoluciones (la pantalla y el servidor no difieren).
+  const cobrado = payment.orderId ? await leerCobradoDeLaOrden(prisma, payment.orderId) : null
 
   // Los topes cuentan EXACTAMENTE como `issueRefund` (Codex, 29-sep): sólo los reembolsos COMPLETED movieron dinero, y lo ya
   // devuelto es el MÁXIMO entre esas filas y el acumulado histórico `processorData.refundedAmountCents`. Todo en centavos
@@ -288,12 +292,16 @@ export async function getTransactionDetail(venueId: string, paymentId: string) {
       const prior = refundedByOrderItemId.get(item.id) ?? { quantity: 0, amount: 0 }
       const refundedQty = Math.min(prior.quantity, item.quantity)
       const remainingQty = Math.max(0, item.quantity - refundedQty)
+      const chargedTotal = chargedTotalDe(cobrado, item.id)
       return {
         id: item.id,
         productName: item.productName ?? item.product?.name ?? 'Producto',
         quantity: item.quantity,
         unitPrice: Number(item.unitPrice),
         total: Number(item.total),
+        // C2 A-R4 (aditivo, opcional): lo que cobró el renglón completo; se omite si la venta no es atribuible (A-R3).
+        // Los POS usan `chargedTotal ?? total` en la misma cuenta por unidades que hace el servidor al devolver.
+        ...(chargedTotal === undefined ? {} : { chargedTotal }),
         productImageUrl: item.product?.imageUrl ?? null,
         trackInventory: item.product?.trackInventory ?? false,
         refundedQty,

@@ -16,6 +16,7 @@ import {
   type MezclaPorTratamiento,
 } from './ivaMath'
 import type { IvaTratamiento } from './ivaTratamiento'
+import type { TratamientoDeNota } from './saldoFiscal'
 
 /**
  * IVA en centavos por tasa (forma VIEJA, hasta el plan 4b; sólo se lee). Llaves = las de `taxByRate` de ivaMath:
@@ -124,6 +125,32 @@ export function desgloseCongelado(processorData: unknown, salesCents: number): D
   const taxCents = Object.values(congelado.porTratamiento).reduce((s, v) => s + (v?.ivaCents ?? 0), 0)
   if (taxCents < 0 || taxCents > salesCents) return null
   return { netCents: salesCents - taxCents, taxCents, taxByRate: congelado.taxByRate, porTratamiento: congelado.porTratamiento }
+}
+
+/**
+ * C2 (D19, Codex C2-4): lo devuelto POR TRATAMIENTO (base + IVA, en centavos) de un ajuste del proveedor de entregas, para su nota de
+ * crédito. La MISMA lectura que `desgloseCongelado` (las dos formas, con el rango del IVA). `null` si no es un ajuste del proveedor;
+ * `'INVALIDO'` si lo es y su reparto no se lee, su IVA sale de rango, no suma la venta devuelta o trae una parte negativa: la nota se
+ * detiene, nunca cae a proporcional.
+ * Lo que coincide con la póliza y el estado de resultados es el TOTAL por tratamiento, no la base y el IVA: la nota v2 recalcula su base
+ * y su IVA desde ese total, así que pueden diferir 1 ¢ del reparto congelado. En la forma vieja con 8 %, el «IVA_8» es IVA puro con base 0
+ * y no se puede volver un concepto: la nota lo detiene por el 8 % (`MOTIVO_OCHO_SIN_REGLA`, Tarea 7).
+ */
+export function repartoCongeladoDeAjuste(
+  processorData: unknown,
+  salesCents: number,
+): Partial<Record<TratamientoDeNota, number>> | null | 'INVALIDO' {
+  const pd = processorData as { provenance?: unknown } | null | undefined
+  if (pd?.provenance !== 'PROVIDER_ADJUSTMENT') return null
+  const congelado = desgloseCongelado(processorData, salesCents)
+  if (!congelado) return 'INVALIDO'
+  const bruto: Partial<Record<TratamientoDeNota, number>> = {}
+  // `leerCongelado` sólo admite los tratamientos de catálogo (`TRATAMIENTOS_CONGELABLES`): nunca un BLOQUEADO_* (Ruling 4b-R4).
+  for (const [t, v] of Object.entries(congelado.porTratamiento) as Array<[TratamientoDeNota, { baseCents: number; ivaCents: number }]>) {
+    if (v.baseCents < 0 || v.ivaCents < 0) return 'INVALIDO' // una nota no lleva un concepto negativo
+    if (v.baseCents + v.ivaCents > 0) bruto[t] = v.baseCents + v.ivaCents
+  }
+  return bruto // la suma ya la exige `desgloseCongelado` (v2: base + IVA = venta; la forma vieja la arma así)
 }
 
 /**

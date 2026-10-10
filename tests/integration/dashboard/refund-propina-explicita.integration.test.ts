@@ -26,7 +26,7 @@
  */
 import prisma from '@/utils/prismaClient'
 import { setupTestData, teardownTestData } from '@tests/helpers/test-data-setup'
-import { issueRefund } from '@/services/dashboard/refund.dashboard.service'
+import { issueRefund, listRefundsForPayment } from '@/services/dashboard/refund.dashboard.service'
 import { Prisma } from '@prisma/client'
 
 jest.setTimeout(60000)
@@ -264,5 +264,22 @@ describe('Reembolso con propina excluida explícitamente', () => {
     const total = reembolsos.reduce((suma, r) => suma + Math.abs(Number(r.amount)) + Math.abs(Number(r.tipAmount)), 0)
     expect(reembolsos).toHaveLength(2)
     expect(total).toBe(110)
+  })
+
+  // C2 · OF-2 (M2): el filtro por `processorData.originalPaymentId` ya va en SQL (ruta JSON de Prisma). En Postgres real: sólo las
+  // devoluciones de ESE cobro (no las de otro cobro del mismo negocio), de la más nueva a la más vieja, con el total negativo de siempre.
+  it('control — listRefundsForPayment: sólo las devoluciones de ese cobro, por la ruta JSON en SQL', async () => {
+    const a = await cobrarConPropina(100, 20)
+    const b = await cobrarConPropina(50, 0)
+    await issueRefund({ venueId, paymentId: a.id, amount: 1_000, tipRefundCents: 0, reason: 'RETURNED_GOODS', staffId })
+    await issueRefund({ venueId, paymentId: b.id, amount: 500, reason: 'RETURNED_GOODS', staffId })
+    await issueRefund({ venueId, paymentId: a.id, amount: 2_000, tipRefundCents: 500, reason: 'RETURNED_GOODS', staffId })
+
+    const deA = await listRefundsForPayment(venueId, a.id)
+    expect(deA.map(r => r.amount)).toEqual([-20, -10])
+    expect(deA.map(r => (r.processorData as any).originalPaymentId)).toEqual([a.id, a.id])
+    expect(deA[0]).toMatchObject({ saleAmount: -15, tipAmount: -5 })
+    expect((await listRefundsForPayment(venueId, b.id)).map(r => r.amount)).toEqual([-5])
+    expect(await listRefundsForPayment(venueId, 'no-existe')).toEqual([])
   })
 })
