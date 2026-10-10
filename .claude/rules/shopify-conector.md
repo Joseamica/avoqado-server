@@ -57,8 +57,15 @@ traduce a ese mismo texto en cada cliente. Un Premium ya pagado pasa el candado 
   las dos en tiempo constante y las dos exigiendo el secreto: la de la biblioteca oficial de Shopify (valores codificados con
   `URLSearchParams`, `+` → `%20`) y la unión decodificada del ejemplo de su doc. Un `host` terminado en `==` firmado como la biblioteca
   oficial sólo cuadra con la forma codificada; con una sola forma (la decodificada), el piloto daría `?error=FIRMA`. Se registra cuál pegó
-  (`callback OAuth: firma válida en la forma …`, nunca el hmac); falta confirmarlo con un callback real en el sandbox (C10). `hmac` está en
+  (`callback OAuth: firma válida en la forma …`, nunca el hmac). CONFIRMADO en vivo (C10, 9-oct-2026): tres callbacks reales de la tienda de
+  prueba, los tres en la forma codificada, con un `host` sin el relleno `=` de base64; no quites la forma codificada. `hmac` está en
   `PARAMS_SENSIBLES` del logger.
+- **Búsqueda de Shopify en minúsculas** (`FILTRO_ESTADO`, `catalog.service.ts:66`): los valores de `product_status:` van en minúsculas y se
+  unen con OR, `(product_status:active OR product_status:draft)`. En mayúsculas Shopify devuelve 0 variantes sin error: medido en vivo (C10,
+  API 2026-10, 0 contra 25) y confirmado por personal de Shopify, con la doc de `productVariants` equivocada
+  ([community.shopify.dev/t/21623](https://community.shopify.dev/t/bug-report-graphql-api-productvariants-product-status-query-not-working/21623)).
+  Ningún otro código escribe `product_status:` a mano (lo vigila `tests/unit/shopify/shopify.filtro-estado.test.ts`). Si la tienda tiene
+  variantes y el filtro no trae ninguna, la importación lo dice en el log (`0 variantes activas o en borrador de N`).
 
 ## 2. El guardia ve TODO cambio de `"Inventory"."currentStock"`: no le avises a Shopify desde tu servicio
 
@@ -229,7 +236,9 @@ ayudantes (`shopify.store.service.ts:305`).
     dashboard, que suma `noAplicadas`) y en `stock_counts` del MCP. En el POS (Android e iOS, C12) lo cuentan la tarjeta «N productos no se
     aplicaron» que queda arriba de la lista de conteos al confirmar, la insignia «No se aplicó» con su motivo en cada línea del detalle, la
     fila de la lista y el comprobante impreso; la tarjeta nace de `noAplicados` y se completa releyendo el GET (`shopifyHeld`), porque el
-    reintento `alreadyCompleted` no trae `noAplicados`; el motivo se lee como texto y uno que la app no conoce cae en `DUDA_POR_REVISAR`.
+    reintento `alreadyCompleted` no trae `noAplicados`; el motivo se lee como texto y uno que la app no conoce cae en `DUDA_POR_REVISAR`. Si
+    esa relectura falla (sin red, por ejemplo), el POS no inventa que todo se aplicó: enseña la línea ámbar «No se pudo comprobar si todo se
+    aplicó; revisa este conteo en el historial cuando vuelva la red.» (degrada y lo dice, ronda 1 de C12).
 
 ## 8. Nunca cero por ausencia
 
@@ -257,6 +266,10 @@ Shopify (§0).
   desechable:
   `SHOPIFY_VOLUMEN=1 node scripts/run-with-launch-campaigns-test-db.cjs npx jest --selectProjects integration --runInBand --runTestsByPath tests/integration/shopify/catalogo-volumen.integration.test.ts`
   (el runner crea y borra su base y aborta si coincide con `av-db-25`). Córrela a mano si tocas el barrido, la importación o el cuadre.
+- **Prueba de arranque del sandbox de la guía:** `tests/unit/scripts/shopify-sandbox-arranque.test.ts` importa la app real con el entorno
+  saneado (~30 s) y está APAGADA por defecto; `SHOPIFY_SANDBOX=1` la enciende:
+  `SHOPIFY_SANDBOX=1 npx jest --selectProjects=unit --runTestsByPath tests/unit/scripts/shopify-sandbox-arranque.test.ts`. Córrela si tocas
+  `scripts/shopify-sandbox-server.ts` o algo que la app exija al importarse.
 - **Dónde están las pruebas:** guardia `tests/integration/shopify/guardia.integration.test.ts` (si agregas una forma nueva de escribir
   stock, agrega su caso ahí); espejo, mensajero, avisos, resolución, conteo y worker en `tests/integration/shopify/*.integration.test.ts`;
   esta regla `tests/unit/architecture/shopifyConectorRule.test.ts`; candado `tests/unit/services/access/shopifyTierMirror.test.ts`; rutas,

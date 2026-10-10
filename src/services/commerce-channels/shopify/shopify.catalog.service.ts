@@ -59,10 +59,11 @@ export const CATALOGO_MAESTRO = 'CATALOGO_MAESTRO'
 // Los `importError` terminales (FALTA_PERMISO, CATALOGO_MUY_GRANDE, CATALOGO_MAESTRO) son la lista de A,
 // `SHOPIFY_IMPORT_ERRORES_TERMINALES` (§12.2): una sola, la misma que usan su cerco y su reclamo del buzón.
 /**
- * En MINÚSCULAS: medido en vivo (C10, API 2026-10), `product_status:ACTIVE,DRAFT` devuelve 0 variantes y
- * `product_status:active,draft` las ACTIVE y DRAFT sin la archivada. En mayúsculas la tienda se conectaba vacía.
+ * En MINÚSCULAS y con OR: medido en vivo (C10, API 2026-10), con mayúsculas Shopify devuelve 0 variantes (la tienda se
+ * conectaba vacía); `(product_status:active OR product_status:draft)` trae las ACTIVE y DRAFT sin la archivada, también
+ * detrás de `product_id:N`. Es la única fuente del filtro: una prueba falla si otro código escribe `product_status:` a mano.
  */
-export const FILTRO_ESTADO = 'product_status:active,draft'
+export const FILTRO_ESTADO = '(product_status:active OR product_status:draft)'
 const MAX_INTENTOS_IMPORTACION = 5
 /** 2,500 variantes: más que el tope de Shopify por producto (2,048). */
 const MAX_PAGINAS_PRODUCTO = 50
@@ -782,6 +783,15 @@ export async function importCatalogPage(
     return { error: CATALOGO_MUY_GRANDE, retry: false }
   }
   const { nodes, pageInfo } = r.data.productVariants
+  // C10: la tienda tiene variantes (el conteo va SIN filtro) y el filtro de estado no trae ninguna. Puede ser legítimo
+  // (todo archivado) y por eso no detiene la conexión, pero así fue como un filtro en mayúsculas conectaba tiendas vacías
+  // sin que nadie se enterara: queda en el log, con los dos números.
+  const totalTienda = r.data.total?.count ?? 0
+  if (cursor === null && nodes.length === 0 && !pageInfo.hasNextPage && totalTienda > 0) {
+    logger.warn(
+      `[SHOPIFY] importación ${link.id}: 0 variantes activas o en borrador de ${totalTienda} en la tienda; revisa el filtro de estado`,
+    )
+  }
   // Las que ya quedaron ERROR_IMPORTACION en un intento anterior de esta misma página no se reintentan aquí.
   const fallidas = new Set(
     (

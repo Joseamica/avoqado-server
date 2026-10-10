@@ -5,6 +5,7 @@
  * antes de archivar sin romper la barrera de un envío en camino. Postgres real; Shopify por deps.graphql.
  */
 import prisma from '@/utils/prismaClient'
+import logger from '@/config/logger'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { fetchLevels } from '@/services/commerce-channels/shopify/shopify.mirror.service'
 import {
@@ -329,7 +330,8 @@ describe('importar por páginas (#18, #19, N05, N06, N20)', () => {
     expect(graphql.mock.calls[0][3]).toMatchObject({
       first: 50,
       after: null,
-      query: 'product_status:active,draft', // en minúsculas: en mayúsculas Shopify devuelve 0 (C10, en vivo)
+      // en minúsculas y con OR: en mayúsculas Shopify devuelve 0 (C10, en vivo)
+      query: '(product_status:active OR product_status:draft)',
       loc: 'gid://shopify/Location/1',
       conteo: true,
     })
@@ -339,6 +341,24 @@ describe('importar por páginas (#18, #19, N05, N06, N20)', () => {
     const l = await sucursal(e)
     expect(l).toMatchObject({ importCursor: null, status: 'REVIEWING', importAttempts: 0, importError: null, lastReconciledAt: null })
     expect(l.importedAt).toBeInstanceOf(Date)
+  })
+
+  it('🔴 C10: la tienda tiene variantes pero el filtro no trae NINGUNA ⇒ se avisa en el log (no se conecta vacía en silencio)', async () => {
+    const e = await conectando()
+    ;(logger.warn as jest.Mock).mockClear()
+    // `total` es el conteo SIN filtro de la tienda: 26 variantes, y la página filtrada llega vacía.
+    const graphql = graphqlFalso(() => paginaDeVariantes([], null, 26))
+    expect(await importar(e.locationLinkId, { graphql })).toEqual({ done: true, procesadas: 0 })
+    const avisos = (logger.warn as jest.Mock).mock.calls.map(c => String(c[0]))
+    expect(avisos.some(m => /0 variantes activas o en borrador de 26/.test(m))).toBe(true)
+  })
+
+  it('una tienda de verdad vacía (0 variantes en total) se conecta sin ese aviso', async () => {
+    const e = await conectando()
+    ;(logger.warn as jest.Mock).mockClear()
+    const graphql = graphqlFalso(() => paginaDeVariantes([], null, 0))
+    expect(await importar(e.locationLinkId, { graphql })).toEqual({ done: true, procesadas: 0 })
+    expect((logger.warn as jest.Mock).mock.calls.some(c => /variantes activas o en borrador/.test(String(c[0])))).toBe(false)
   })
 
   it('una variante que truena no avanza el cursor; al 5º intento queda ERROR_IMPORTACION y la página sigue', async () => {

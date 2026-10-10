@@ -345,6 +345,23 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     expect(cuerpo(firma, 'export function verifyOAuthQueryHmac(')).toContain('formaDeFirmaOAuth(query, secret)')
     // El montaje genérico no fija `limit` (100 KB por omisión) y su tipo es sólo application/json: por eso el de Shopify va aparte.
     expect(app).not.toMatch(/express\.raw\(\{ type: 'application\/json', limit/)
+    // C10: la forma codificada quedó confirmada con callbacks reales; ya no es una tarea pendiente.
+    contieneTodas(['CONFIRMADO en vivo (C10, 9-oct-2026): tres callbacks reales de la tienda de prueba, los tres en la forma codificada'])
+    expect(regla).not.toContain('falta confirmarlo con un callback real')
+  })
+
+  it('🔴 C10: la búsqueda de Shopify va en minúsculas y con OR, desde UNA constante, y una importación vacía se dice', () => {
+    contieneTodas([
+      'los valores de `product_status:` van en minúsculas y se unen con OR, `(product_status:active OR product_status:draft)`',
+      'En mayúsculas Shopify devuelve 0 variantes sin error',
+      'https://community.shopify.dev/t/bug-report-graphql-api-productvariants-product-status-query-not-working/21623',
+      'Ningún otro código escribe `product_status:` a mano',
+      '`0 variantes activas o en borrador de N`',
+    ])
+    const catalogo = leer(`${SHOPIFY}/shopify.catalog.service.ts`)
+    expect(catalogo).toContain("export const FILTRO_ESTADO = '(product_status:active OR product_status:draft)'")
+    expect(cuerpo(catalogo, 'export async function importCatalogPage(')).toContain('0 variantes activas o en borrador de')
+    expect(leer(`${SHOPIFY}/shopify.reconcile.service.ts`)).toContain('query: FILTRO_ESTADO')
   })
 
   it('🔴 la retención de 90 días, la prueba de volumen apagada por defecto y el carril ci/ sin workflow_dispatch', () => {
@@ -367,6 +384,11 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     // La prueba de volumen existe y sólo corre con la variable.
     expect(leer('tests/integration/shopify/catalogo-volumen.integration.test.ts')).toContain(
       "const describirSi = process.env.SHOPIFY_VOLUMEN === '1' ? describe : describe.skip",
+    )
+    // La de arranque del sandbox de la guía (C10, ruling S-ARR) también va apagada, y la regla dice cómo encenderla.
+    contieneTodas(['`SHOPIFY_SANDBOX=1` la enciende', 'tests/unit/scripts/shopify-sandbox-arranque.test.ts'])
+    expect(leer('tests/unit/scripts/shopify-sandbox-arranque.test.ts')).toContain(
+      "const itSi = process.env.SHOPIFY_SANDBOX === '1' ? it : it.skip",
     )
     // workflow_dispatch con production publica sin importar la rama: la regla no puede dejar de avisarlo.
     expect(leer('.github/workflows/ci-cd.yml')).toContain("github.event.inputs.environment == 'production'")
@@ -395,6 +417,8 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
       'En el POS (Android e iOS, C12) lo cuentan la tarjeta «N productos no se aplicaron» que queda arriba de la lista de conteos al confirmar, la insignia «No se aplicó» con su motivo en cada línea del detalle, la fila de la lista y el comprobante impreso',
       'la tarjeta nace de `noAplicados` y se completa releyendo el GET (`shopifyHeld`), porque el reintento `alreadyCompleted` no trae `noAplicados`',
       'el motivo se lee como texto y uno que la app no conoce cae en `DUDA_POR_REVISAR`',
+      // Ronda 1 de C12: si la relectura falla, el POS lo dice en ámbar en vez de dar por aplicado todo.
+      '«No se pudo comprobar si todo se aplicó; revisa este conteo en el historial cuando vuelva la red.»',
     ])
     expect(regla).not.toContain('las pantallas del POS (Android e iOS) son C12')
     expect(cuerpo(leer('src/services/mobile/inventory.mobile.service.ts'), 'export function mapCountItem(')).toContain(
