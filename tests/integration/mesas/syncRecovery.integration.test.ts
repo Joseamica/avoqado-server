@@ -3,8 +3,11 @@ import prisma from '@/utils/prismaClient'
 import { lookupSyncRecovery } from '@/services/mobile/sync-recovery.mobile.service'
 
 const target = new URL(process.env.TEST_DATABASE_URL ?? '')
-if (!['localhost', '127.0.0.1'].includes(target.hostname) || !/^\/avoqado_mesasq16_test_\d+$/.test(target.pathname)) {
-  throw new Error('Q16 requiere su propia base local desechable avoqado_mesasq16_test_<fecha>.')
+if (
+  !['localhost', '127.0.0.1'].includes(target.hostname) ||
+  (!/^\/avoqado_mesasq16_test_\d+$/.test(target.pathname) && target.pathname !== '/avoqado_h1a_test_20260808')
+) {
+  throw new Error('Q16 requiere una base local desechable avoqado_mesasq16_test_<fecha> o avoqado_h1a_test_20260808 de CI.')
 }
 const fixture = `q16-${randomUUID()}`
 const venue = `${fixture}-A`
