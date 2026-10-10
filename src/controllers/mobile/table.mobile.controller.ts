@@ -33,7 +33,8 @@ export async function getTables(req: Request, res: Response): Promise<void> {
 
     // Plano en el POS (spec 2026-10-09 §3.1): la versión ANTES de leer las mesas — una versión vieja con datos nuevos sólo
     // cuesta una consulta de más; al revés, el mesero vería lo viejo en silencio. Si la versión falla, /tables contesta
-    // como siempre y el POS lo lee como servidor viejo (consulta completa cada 10 s).
+    // como siempre, sin versiones. El POS NO lo toma por servidor viejo (eso sólo lo dice un 404 de /tables/version):
+    // sigue consultando la versión y, mientras no coincida con la de sus mesas, vuelve a pedir /tables (cada 10 s).
     const versions = await computeTablesVersions(venueId).catch(error => {
       logger.warn(`[TABLE MOBILE CONTROLLER] Sin versión de mesas para ${venueId}: ${error?.message}`)
       return null
