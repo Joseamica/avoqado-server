@@ -282,8 +282,8 @@ Un nivel inexistente o inactivo en la ubicación, o un artículo `tracked = fals
 `notifyShopify(venueId, aviso)` avisa a OWNER y ADMIN activos, uno por persona y por día (`CONTEO_NO_APLICADO`, también por producto, y
 `DUDA_POR_REVISAR` con su propia llave), con liga a `/venues/:slug/settings/integrations/shopify` (la página la construye el plan C en el
 dashboard): REVOCADA, ATORADOS, RETRASO, SOBREVENTA, POR_REVISAR, FALTA_PERMISO, CONTEO_NO_APLICADO y BARRIDO_OMITIDO. Si agregas un aviso,
-agrega su explicación en la página (`avisos.items` de `shopify.json` en el dashboard) y en la guía. PENDIENTE: `BARRIDO_OMITIDO` (FF-I2,
-servidor) todavía no la tiene en la página ni en la guía. La página nunca ofrece comprar Premium para Shopify (§0).
+agrega su explicación en la página (`avisos.items` de `shopify.json` en el dashboard, más `SHOPIFY_AVISOS` en `src/types/shopify.ts`) y en
+la guía. La página nunca ofrece comprar Premium para Shopify (§0).
 
 ## 10. Mantenimiento y pruebas
 

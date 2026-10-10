@@ -412,6 +412,8 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     ])
     // La regla vieja (saltar el barrido entero con la compuerta) no vuelve: se saltaba para siempre.
     expect(regla).not.toContain('el barrido no archiva nada: se salta (`BAJA_MASIVA`')
+    // BARRIDO_OMITIDO ya tiene su explicación en la página y en la guía: la nota de pendiente no vuelve.
+    expect(regla).not.toContain('PENDIENTE: `BARRIDO_OMITIDO`')
     const catalogo = leer(`${SHOPIFY}/shopify.catalog.service.ts`)
     expect(catalogo).toContain('nodes(ids: $ids) { ... on ProductVariant { id product { id status } } }')
     expect(cuerpo(catalogo, 'export async function confirmarBajas(')).toContain("n === null || n.product.status === 'ARCHIVED'")
