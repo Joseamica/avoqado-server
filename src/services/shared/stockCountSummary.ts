@@ -64,7 +64,7 @@ export function retencionShopify(l: {
   shopifyHeldReason?: string | null
 }): { at: string; motivo: MotivoRetenido } | null {
   if (!l.shopifyHeldAt) return null
-  // Sólo ENVIO_EN_CAMINO se lee como «vuelve a contar en unos minutos»; un motivo inesperado o vacío cae a lo prudente.
+  // Sólo ENVIO_EN_CAMINO se lee como «vuelve a contarlo cuando termine»; un motivo inesperado o vacío cae a lo prudente.
   const motivo: MotivoRetenido = l.shopifyHeldReason === 'ENVIO_EN_CAMINO' ? 'ENVIO_EN_CAMINO' : 'DUDA_POR_REVISAR'
   return { at: l.shopifyHeldAt.toISOString(), motivo }
 }

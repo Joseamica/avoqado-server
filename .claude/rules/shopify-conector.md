@@ -289,12 +289,16 @@ borre o cree filas de `Inventory` de productos ligados, o que cambie esos campos
   - Producto bloqueado (`productBlocked(…)` ≠ `LIBRE`, revisado por tanda ANTES de cualquier HTTP y otra vez bajo candado): la línea NO se
     aplica y el stock no cambia. Se marca en la línea (`shopifyHeldAt`, `shopifyHeldReason`), la respuesta del conteo trae `noAplicados` y
     sale el aviso `CONTEO_NO_APLICADO`. Nunca se aplica un número que podría estar mal.
-  - Pareja en retención (ronda 2 de P1-1: la creó el conector, no está suspendida y todavía no se inicia): la línea también se retiene con
-    `ENVIO_EN_CAMINO`. El guardia retiene sus cambios y TOMAR pone `Inventory = S + Σ vivas`: contar 8 con Shopify en 10 encolaría +8 y
-    dejaría 18 en los dos lados. Se vuelve a contar en cuanto la pareja se inicia.
-  - Dos motivos (enmienda §12.1): `ENVIO_EN_CAMINO` (se resuelve solo: vuelve a contarlo en unos minutos) y `DUDA_POR_REVISAR` (sólo entre
-    los bloqueados: hay una DEAD_LETTER ambigua o una revisión OPEN; recontar no sirve hasta resolverla en «Por revisar»). El motivo viaja
-    en la línea, en el aviso (texto y llave distintos) y en `noAplicados`.
+  - Pareja en retención (no suspendida y sin iniciar): la línea también se retiene con `ENVIO_EN_CAMINO` en dos casos, porque TOMAR va a
+    poner `Inventory = S + Σ vivas` y un conteo es ABSOLUTO (una venta, relativa, sí se respeta así: 12 bis.2). Ronda 2 de P1-1: la creó el
+    conector (contar 8 con Shopify en 10 encolaría +8 y dejaría 18 en los dos lados). Ronda 3: la fase efectiva (con `pausedFrom`, como el
+    guardia) es CONNECTING o REVIEWING, porque el aplicar inicia con TOMAR TODA pareja sin iniciar, también las emparejadas, y reconectar a
+    la misma tienda las deja así (con Avoqado 5 y Shopify 10, contar 8 encolaría +3 y dejaría 13). Se vuelve a contar en cuanto la pareja se
+    inicia.
+  - Dos motivos (enmienda §12.1): `ENVIO_EN_CAMINO` (el producto se estaba sincronizando: vuelve a contarlo cuando termine; el texto es
+    genérico porque también cubre la pareja en retención, donde puede no haber nada en camino) y `DUDA_POR_REVISAR` (sólo entre los
+    bloqueados: hay una DEAD_LETTER ambigua o una revisión OPEN; recontar no sirve hasta resolverla en «Por revisar»). El motivo viaja en la
+    línea, en el aviso (texto y llave distintos) y en `noAplicados`.
   - Pausa, revocada, sin plan, sin permiso o Shopify sin contestar, con el producto libre: sin HTTP, se usa `mirrorCommitted` y el
     movimiento dice la hora (`committedAt`). Nunca se pone cero.
   - Lectura (L5): la línea retenida se expone como `shopifyHeld` (`{ at, motivo }` o `null`) en `mapCountItem(…)` (GET móvil y detalle del

@@ -18,7 +18,11 @@ import {
 } from '@/services/commerce-channels/shopify/shopify.count.service'
 import { applyShopifyLevel, initializePair } from '@/services/commerce-channels/shopify/shopify.mirror.service'
 import { claimShopifyOutbox, runShopifyOutboxRow } from '@/services/commerce-channels/shopify/shopify.outbox.service'
-import { resumeShopifyLink } from '@/services/commerce-channels/shopify/shopify.connect.service'
+import {
+  applyConnectPage,
+  requestApplyShopifyConnect,
+  resumeShopifyLink,
+} from '@/services/commerce-channels/shopify/shopify.connect.service'
 import {
   agregarProductoShopify,
   assertTestDatabase,
@@ -155,6 +159,57 @@ it('🔴 ronda 2 (P1-1): contar en la ventana de retención (pareja creada por e
   expect(await huecoDelInvariante(e.productId)).toBe('0')
 })
 
+it('🔴 ronda 3 (12 bis.2): contar mientras se REVISA la conexión (pareja emparejada, sin iniciar) no se aplica; al aplicar y recontar, 8 y 8', async () => {
+  // Avoqado 5, Shopify 10, en el estante 8. Sin retenerla: el guardia encola +3 y TOMAR al aplicar pone 10 + 3 = 13 (y +3 viaja).
+  const e = await escenario({ linkStatus: 'REVIEWING', stock: 5, initialized: false })
+  const t = tiendaFalsa(10, 0)
+  const id = await contar(e, '8', { fetchLevels: t.fetchLevels, hasAccess: conPlan })
+  expect(ultima).toEqual({ success: true, revision: 1, noAplicados: [{ productId: e.productId, motivo: 'ENVIO_EN_CAMINO' }] })
+  expect(await stock(e)).toBe('5')
+  expect(await deltas(e)).toEqual([])
+  expect(await prisma.stockCountItem.findFirstOrThrow({ where: { stockCountId: id } })).toMatchObject({
+    shopifyHeldReason: 'ENVIO_EN_CAMINO',
+  })
+  // Con la sucursal en pausa desde REVIEWING (fase efectiva), igual.
+  await prisma.shopifyLocationLink.update({ where: { id: e.locationLinkId }, data: { status: 'PAUSED', pausedFrom: 'REVIEWING' } })
+  await contar(e, '8', { fetchLevels: t.fetchLevels, hasAccess: conPlan })
+  expect(ultima).toMatchObject({ noAplicados: [{ productId: e.productId, motivo: 'ENVIO_EN_CAMINO' }] })
+  expect(await stock(e)).toBe('5')
+  await prisma.shopifyLocationLink.update({ where: { id: e.locationLinkId }, data: { status: 'REVIEWING', pausedFrom: null } })
+  // Se aplica la conexión (TOMAR: Shopify gana) y se vuelve a contar: 8 en los dos lados.
+  await requestApplyShopifyConnect({ venueId: e.venueId, staffId: e.staffId }, { hasAccess: conPlan })
+  for (
+    let i = 0;
+    i < 5 && (await prisma.shopifyLocationLink.findUniqueOrThrow({ where: { id: e.locationLinkId } })).status !== 'ACTIVE';
+    i++
+  ) {
+    await applyConnectPage(e.locationLinkId, { fetchLevels: t.fetchLevels, hasAccess: conPlan })
+  }
+  expect(await stock(e)).toBe('10')
+  await contar(e, '8', { fetchLevels: t.fetchLevels, hasAccess: conPlan })
+  expect(ultima).toEqual({ success: true, revision: 1 })
+  await enviar(t)
+  expect([await stock(e), t.s.available]).toEqual(['8', 8])
+  expect(await huecoDelInvariante(e.productId)).toBe('0')
+})
+
+it('ronda 3: lo mismo mientras se CONECTA, con la pareja que la importación ya ligó', async () => {
+  const e = await escenario({ linkStatus: 'CONNECTING', stock: 5, initialized: false })
+  await contar(e, '8', { hasAccess: conPlan })
+  expect(ultima).toMatchObject({ noAplicados: [{ productId: e.productId, motivo: 'ENVIO_EN_CAMINO' }] })
+  expect(await stock(e)).toBe('5')
+})
+
+it('ronda 3 (regresión): en ACTIVE, una pareja iniciada cuenta como siempre: 12 bis.14, 7 y 7', async () => {
+  const e = await escenario({ mirrorCommitted: 2 })
+  const t = tiendaFalsa(10, 2)
+  await contar(e, '9', { fetchLevels: t.fetchLevels, hasAccess: conPlan })
+  expect(ultima).toEqual({ success: true, revision: 1 })
+  expect(await stock(e)).toBe('7')
+  await enviar(t)
+  expect([await stock(e), t.s.available]).toEqual(['7', 7])
+})
+
 it('ronda 2 (regresión): una pareja sin iniciar que NO creó el conector cuenta como siempre (no hay nada retenido que proteger)', async () => {
   const e = await escenario({ stock: 0, initialized: false })
   await contar(e, '8', { hasAccess: conPlan })
@@ -213,7 +268,9 @@ it('N02 (ej. 2, §12.1): con una venta local EN VUELO la línea no se aplica, ni
     shopifyHeldReason: 'ENVIO_EN_CAMINO',
   })
   expect(await avisosDeConteo(e)).toBe(1)
-  expect((await avisoDeConteo(e)).message).toContain('había un cambio en camino a Shopify. Vuelve a contarlo en unos minutos.')
+  expect((await avisoDeConteo(e)).message).toContain(
+    'el producto se estaba sincronizando con Shopify cuando confirmaste el conteo. Vuelve a contarlo cuando termine.',
+  )
   // Llega la venta a Shopify y después el aviso del pedido; se vuelve a contar.
   expect(await runShopifyOutboxRow(enVuelo.id, enVuelo.claimToken, new Date(), { graphql: t.graphql as never, hasAccess: conPlan })).toBe(
     'SENT',

@@ -213,9 +213,13 @@ export async function refrescarEspejoParaConteo(venueId: string, productIds: str
  * línea no se aplica (§12.1): `DUDA_POR_REVISAR` si hay una DEAD_LETTER ambigua o una revisión abierta (no se resuelve
  * sola), si no `ENVIO_EN_CAMINO`. Si no, las apartadas VIGENTES del espejo, con su nota. Sin Shopify, sin pareja viva, o
  * desconectada: null (el objetivo es el contado). Sin Shopify (`sinShopify`) no consulta nada.
- * Ronda 2 (P1-1): la pareja que CREÓ el conector y todavía no se inicia también retiene la línea (`ENVIO_EN_CAMINO`). El
- * guardia retiene sus cambios y TOMAR pone `Inventory = S + Σ vivas`: un conteo de 8 con Shopify en 10 encolaría +8 y
- * terminaría en 18 en los dos lados. Se vuelve a contar en cuanto la pareja se inicia.
+ * Pareja EN RETENCIÓN (no suspendida y sin iniciar) también retiene la línea (`ENVIO_EN_CAMINO`) en dos casos, porque TOMAR
+ * va a poner `Inventory = S + Σ vivas` y un conteo es ABSOLUTO (una venta, relativa, sí se respeta así; 12 bis.2):
+ * - ronda 2 (P1-1): la creó el conector. Con Shopify en 10, contar 8 encolaría +8 y dejaría 18 en los dos lados;
+ * - ronda 3: la fase efectiva (con `pausedFrom`, como el guardia) es CONNECTING o REVIEWING: el aplicar inicia con TOMAR TODA
+ *   pareja sin iniciar, también las emparejadas (y reconectar a la misma tienda las deja así). Con Avoqado 5 y Shopify 10,
+ *   contar 8 encolaría +3 y dejaría 13 en los dos lados.
+ * Se vuelve a contar en cuanto la pareja se inicia.
  */
 export async function apartadasBajoCandado(
   tx: Prisma.TransactionClient,
@@ -225,8 +229,9 @@ export async function apartadasBajoCandado(
   if (refresco.sinShopify) return null
   const ref = await tx.shopifyVariantLink.findUnique({ where: { productId }, select: { id: true, locationLinkId: true } })
   if (!ref) return null
-  const [l] = await tx.$queryRaw<Array<{ status: string; storeId: string; generation: number; timezone: string }>>`
-    SELECT l.status::text AS status, l."storeId", l.generation, v.timezone
+  const [l] = await tx.$queryRaw<Array<{ status: string; fase: string; storeId: string; generation: number; timezone: string }>>`
+    SELECT l.status::text AS status, l."storeId", l.generation, v.timezone,
+           CASE WHEN l.status = 'PAUSED' THEN COALESCE(l."pausedFrom"::text, 'ACTIVE') ELSE l.status::text END AS fase
       FROM "ShopifyLocationLink" l JOIN "Venue" v ON v.id = l."venueId"
      WHERE l.id = ${ref.locationLinkId}
      FOR SHARE OF l`
@@ -244,7 +249,9 @@ export async function apartadasBajoCandado(
   >`
     SELECT "mirrorCommitted", "committedAt", "mirrorAt", "initializedAt", "suspendedReason"::text AS "suspendedReason", "createdProduct"
       FROM "ShopifyVariantLink" WHERE id = ${ref.id} FOR UPDATE`
-  if (p && !p.initializedAt && !p.suspendedReason && p.createdProduct) return ENVIO_EN_CAMINO // ronda 2: en retención
+  // En retención: la creó el conector (ronda 2) o se está conectando o revisando la conexión (ronda 3).
+  const conectando = l.fase === 'CONNECTING' || l.fase === 'REVIEWING'
+  if (p && !p.initializedAt && !p.suspendedReason && (p.createdProduct || conectando)) return ENVIO_EN_CAMINO
   if (!p || !p.initializedAt || p.suspendedReason) return null
   if (refresco.bloqueados.has(productId) || (await productBlocked(tx, productId, ref.locationLinkId, l.generation)) !== 'LIBRE') {
     const [d] = await tx.$queryRaw<Array<{ duda: boolean }>>`

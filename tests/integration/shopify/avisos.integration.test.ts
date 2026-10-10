@@ -123,6 +123,7 @@ it('§12.1 CONTEO_NO_APLICADO: uno por producto y por día, con el producto en e
   expect(lista.find(n => n.entityId?.includes(':prod-1:'))).toMatchObject({
     type: 'ALERT',
     priority: 'HIGH',
-    message: 'El conteo de Camisa · M no se aplicó: había un cambio en camino a Shopify. Vuelve a contarlo en unos minutos.',
+    message:
+      'El conteo de Camisa · M no se aplicó: el producto se estaba sincronizando con Shopify cuando confirmaste el conteo. Vuelve a contarlo cuando termine.',
   })
 })

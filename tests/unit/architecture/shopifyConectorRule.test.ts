@@ -352,9 +352,18 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     )
     expect(leer(`${SHOPIFY}/shopify.overview.service.ts`)).toContain("primeraVez: f.reason === 'REACTIVADA' && f.firstPairing")
     // Ronda 2: el conteo retiene la línea de una pareja en retención (creada por el conector y sin iniciar).
-    contieneTodas(['Pareja en retención (ronda 2 de P1-1'])
-    expect(cuerpo(leer(`${SHOPIFY}/shopify.count.service.ts`), 'export async function apartadasBajoCandado(')).toContain(
-      'if (p && !p.initializedAt && !p.suspendedReason && p.createdProduct) return ENVIO_EN_CAMINO',
+    contieneTodas([
+      'Pareja en retención (no suspendida y sin iniciar): la línea también se retiene con `ENVIO_EN_CAMINO` en dos casos',
+      'Ronda 3: la fase efectiva (con `pausedFrom`, como el guardia) es CONNECTING o REVIEWING',
+      '`ENVIO_EN_CAMINO` (el producto se estaba sincronizando: vuelve a contarlo cuando termine',
+    ])
+    const retencion = cuerpo(leer(`${SHOPIFY}/shopify.count.service.ts`), 'export async function apartadasBajoCandado(')
+    expect(retencion).toContain(
+      `CASE WHEN l.status = 'PAUSED' THEN COALESCE(l."pausedFrom"::text, 'ACTIVE') ELSE l.status::text END AS fase`,
+    )
+    expect(retencion).toContain("const conectando = l.fase === 'CONNECTING' || l.fase === 'REVIEWING'")
+    expect(retencion).toContain(
+      'if (p && !p.initializedAt && !p.suspendedReason && (p.createdProduct || conectando)) return ENVIO_EN_CAMINO',
     )
     // C4 (ronda de revisión): la huella de las confirmaciones por MCP cabe con nombres de ubicación largos.
     const mcp = leer('src/mcp/tools/shopify.ts')

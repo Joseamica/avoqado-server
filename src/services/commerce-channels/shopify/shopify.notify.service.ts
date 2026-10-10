@@ -73,7 +73,9 @@ const TEXTOS: Record<ShopifyAviso, (d: Datos) => { title: string; message: strin
     message:
       d.motivo === 'DUDA_POR_REVISAR'
         ? `El conteo de ${d.productName ?? 'un producto'} no se aplicó: Shopify tiene una revisión pendiente de este producto. Resuélvela en Integraciones → Shopify → Por revisar y después vuelve a contarlo.`
-        : `El conteo de ${d.productName ?? 'un producto'} no se aplicó: había un cambio en camino a Shopify. Vuelve a contarlo en unos minutos.`,
+        : // Ronda 3: genérico. También retiene una pareja sin iniciar o una conexión en revisión, donde puede no haber nada
+          // «en camino» y el inicio puede tardar (o no llegar mientras esté en pausa).
+          `El conteo de ${d.productName ?? 'un producto'} no se aplicó: el producto se estaba sincronizando con Shopify cuando confirmaste el conteo. Vuelve a contarlo cuando termine.`,
     priority: NotificationPriority.HIGH,
   }),
   // R-I2b: el barrido no vio buena parte de la tienda y no dio de baja nada: lo que no trajo la búsqueda sigue existiendo
