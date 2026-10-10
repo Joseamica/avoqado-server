@@ -329,7 +329,7 @@ describe('importar por páginas (#18, #19, N05, N06, N20)', () => {
     expect(graphql.mock.calls[0][3]).toMatchObject({
       first: 50,
       after: null,
-      query: 'product_status:ACTIVE,DRAFT',
+      query: 'product_status:active,draft', // en minúsculas: en mayúsculas Shopify devuelve 0 (C10, en vivo)
       loc: 'gid://shopify/Location/1',
       conteo: true,
     })
