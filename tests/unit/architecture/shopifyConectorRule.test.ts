@@ -820,6 +820,47 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     ])
   })
 
+  it('🔴 D1: al aplicar, Shopify fresca primero; la elección se revalida bajo candado; «Avoqado» encola A − S − Σ vivas en la MISMA tx', () => {
+    contieneTodas([
+      '«Avoqado» deja `Inventory` igual, pone el espejo en la lectura fresca y encola en la MISMA tx `A − S − Σ vivas`',
+      'Restar las vivas es lo que evita descontar dos veces una venta hecha mientras se conectaba',
+      'antes de cualquier salida automática',
+      'la tanda termina y la conexión vuelve a «Así quedará tu stock»',
+      'ACTIVE no espera a que los ajustes lleguen',
+      'y «Usar el de Avoqado» al conectar (D1, `initializePair(…)`, §4 bis)',
+    ])
+    expect(regla).not.toContain('**Hueco conocido, aceptado para el piloto:**')
+    const mirror = leer(`${SHOPIFY}/shopify.mirror.service.ts`)
+    enOrden(cuerpo(mirror, 'export async function initializePair('), [
+      'bloquearFilasDelProducto(tx, p',
+      'decisionBajoCandado(tx, p, inv.currentStock, S)',
+      "return { outcome: 'POR_DECIDIR' }",
+      'mirrorAvailable: S,',
+      'tx.shopifyStockOutbox.create(',
+    ])
+    // P1-1: la lectura fresca se compara ANTES de las dos salidas automáticas (sin decisión y «Shopify»).
+    enOrden(cuerpo(mirror, 'async function decisionBajoCandado('), [
+      'd.importedAvailable === null',
+      'S !== d.importedAvailable',
+      'A.equals(pendientes.plus(d.importedAvailable))',
+      'A.minus(S).minus(pendientes)',
+    ])
+    const conexion = leer(`${SHOPIFY}/shopify.connect.service.ts`)
+    // P1-3: al primer POR_DECIDIR, regresar y terminar la tanda.
+    enOrden(cuerpo(conexion, 'export async function applyConnectPage('), [
+      "if (o === 'POR_DECIDIR')",
+      'devolverAVistaPrevia(link.id, cerco, p.id)',
+      'devuelta: true',
+    ])
+    // P2-4: con la sucursal FOR UPDATE, la aplicación todavía pedida y el cerco completo.
+    enOrden(cuerpo(conexion, 'export async function devolverAVistaPrevia('), [
+      'FOR UPDATE OF l',
+      '!l.applyRequestedAt',
+      'cercoVigente(tx, linkId, cerco)',
+      'applyRequestedAt: null',
+    ])
+  })
+
   it('los globs de `paths:` de la regla apuntan a algo que existe, incluidos los demás escritores de stock', () => {
     const cabecera = leer('.claude/rules/shopify-conector.md').split('---')[1]
     const globs = [...cabecera.matchAll(/- '([^']+)'/g)].map(m => m[1])
@@ -853,7 +894,7 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     const de = (f: string) => `${SHOPIFY}/shopify.${f}.ts`
     const anclas: Record<string, [string, string]> = {
       'shopify.connect.service.ts:90': [de('connect.service'), 'export async function startShopifyConnect('],
-      'connect.service.ts:1404': [de('connect.service'), 'export async function disconnectShopify('],
+      'connect.service.ts:1445': [de('connect.service'), 'export async function disconnectShopify('],
       'connect.service.ts:639': [de('connect.service'), 'async function aCuarentenaPorReligar('],
       'shopify.crypto.ts:32': [de('crypto'), 'export function formaDeFirmaOAuth('],
       'catalog.service.ts:68': [de('catalog.service'), 'export const FILTRO_ESTADO'],

@@ -39,7 +39,7 @@ export type ApplyOutcome =
   | 'SUSPENDIDO'
   | 'NO_INICIADA'
   | 'CONTEXTO_CAMBIO'
-export type InitOutcome = 'INICIADA' | 'EN_REVISION' | 'SUSPENDIDA' | 'REINTENTAR' | 'NO_APLICA' | 'CONTEXTO_CAMBIO'
+export type InitOutcome = 'INICIADA' | 'EN_REVISION' | 'SUSPENDIDA' | 'REINTENTAR' | 'NO_APLICA' | 'CONTEXTO_CAMBIO' | 'POR_DECIDIR'
 /** El contexto con el que el llamador leyó (§11.2). `workToken` y `evento` sólo si el llamador los tiene. */
 export type CercoShopify = {
   generation: number
@@ -685,6 +685,61 @@ export async function applyShopifyLevel(
 
 // ─── Iniciar una pareja ─────────────────────────────────────────────────────────────────────────────────────
 
+/** D1: qué dice la pareja de la elección del dueño al aplicar la conexión (con todo ya bloqueado). */
+type Decision =
+  | { kind: 'SIN_DECISION' }
+  | { kind: 'POR_DECIDIR'; refrescar: boolean }
+  | { kind: 'ELEGIDA'; choice: 'AVOQADO' | 'SHOPIFY'; pendientes: Prisma.Decimal; ajuste: Prisma.Decimal; staffId: string | null }
+const SIN_DECISION: Decision = { kind: 'SIN_DECISION' }
+/** Lo que una elección agrega al `SHOPIFY_STOCK_INITIALIZED` de su producto. */
+type EleccionAplicada = {
+  eleccion: 'AVOQADO' | 'SHOPIFY'
+  shopify: number
+  pendientes: string
+  ajuste: string
+  envio: string | null
+  staffId: string | null
+}
+
+/**
+ * D1 (spec 2026-10-10): al aplicar la conexión, ¿este producto pide la elección del dueño y la que guardó sigue en pie? Se
+ * llama con la pareja, Inventory y sus filas YA bloqueadas (§10.3, §12.5): nadie encola mientras tanto, así que la suma de
+ * pendientes es la buena.
+ * - P1-1: si la lectura fresca no es lo de Shopify que se vio al importar, ninguna salida automática (ni «sin decisión» ni
+ *   «Shopify»): la fila vuelve a la vista previa con el número nuevo (`refrescar`).
+ * - Pide elegir el que ya existía en Avoqado y cuyo stock no es «lo de Shopify al importar + pendientes» (el DECIDE de la
+ *   vista previa). La elección vale en la generación y la credencial con que se hizo y sólo si Avoqado y lo de Shopify al
+ *   importar son los números que se vieron.
+ */
+async function decisionBajoCandado(tx: Prisma.TransactionClient, p: ParejaBloqueada, A: Prisma.Decimal, S: number): Promise<Decision> {
+  const d = await tx.shopifyVariantLink.findUniqueOrThrow({
+    where: { id: p.id },
+    select: {
+      importedAvailable: true,
+      connectChoice: true,
+      connectChoiceGeneration: true,
+      connectChoiceTokenVersion: true,
+      connectSeenAvoqadoQty: true,
+      connectSeenShopifyQty: true,
+      connectChoiceById: true,
+    },
+  })
+  if (d.importedAvailable === null) return SIN_DECISION
+  if (S !== d.importedAvailable) return { kind: 'POR_DECIDIR', refrescar: true }
+  const pendientes = await liveOutboxSum(tx, p.productId, p.locationLinkId, p.generation)
+  if (A.equals(pendientes.plus(d.importedAvailable))) return SIN_DECISION
+  const vigente =
+    d.connectChoiceGeneration === p.generation &&
+    d.connectChoiceTokenVersion === p.tokenVersion &&
+    d.connectSeenAvoqadoQty !== null &&
+    new Prisma.Decimal(d.connectSeenAvoqadoQty).equals(A) &&
+    d.connectSeenShopifyQty === d.importedAvailable
+  if (!vigente || d.connectChoice === null) return { kind: 'POR_DECIDIR', refrescar: false }
+  const ajuste = A.minus(S).minus(pendientes)
+  if (d.connectChoice === 'AVOQADO' && !ajuste.isInteger()) return { kind: 'POR_DECIDIR', refrescar: false }
+  return { kind: 'ELEGIDA', choice: d.connectChoice, pendientes, ajuste, staffId: d.connectChoiceById }
+}
+
 /**
  * TOMAR_SHOPIFY: Inventory = S + pendientes, espejo = S. Vale para cualquier pareja sin iniciar en REVIEWING con
  * «Aplicar» pedido (el dueño vio la vista previa), y en ACTIVE sólo si el catálogo CREÓ el producto (`createdProduct`,
@@ -701,7 +756,14 @@ export async function initializePair(
 ): Promise<InitOutcome> {
   const hasAccess = deps.hasAccess ?? accesoReal
   const tomar = input.mode === 'TOMAR_SHOPIFY'
-  type R = { outcome: InitOutcome; venueId?: string; productId?: string; cambio?: { previo: string; nuevo: string }; negativo?: boolean }
+  type R = {
+    outcome: InitOutcome
+    venueId?: string
+    productId?: string
+    cambio?: { previo: string; nuevo: string }
+    negativo?: boolean
+    decision?: EleccionAplicada
+  }
   const r = await prisma.$transaction(async (tx): Promise<R> => {
     await marcarOrigenShopify(tx)
     const p = await bloquearPareja(tx, input.variantLinkId)
@@ -741,8 +803,18 @@ export async function initializePair(
       await suspendPair(tx, p.id, 'SIN_INVENTARIO')
       return { outcome: 'SUSPENDIDA' }
     }
-    const ahora = new Date()
     const S = input.nivel.available
+    // D1: al aplicar la conexión, un producto que ya existía usa la elección del dueño (ver `decisionBajoCandado`). Sin una
+    // elección vigente no se escribe NADA (ni espejo ni inicio): la fila vuelve a la vista previa con lo de ahora.
+    const decision =
+      tomar && p.linkStatus === 'REVIEWING' && !p.createdProduct ? await decisionBajoCandado(tx, p, inv.currentStock, S) : SIN_DECISION
+    if (decision.kind === 'POR_DECIDIR') {
+      if (decision.refrescar) {
+        await tx.shopifyVariantLink.update({ where: { id: p.id }, data: { importedAvailable: S, importedAt: new Date() } })
+      }
+      return { outcome: 'POR_DECIDIR' }
+    }
+    const ahora = new Date()
     await tx.shopifyVariantLink.update({
       where: { id: p.id },
       data: {
@@ -761,10 +833,48 @@ export async function initializePair(
     const base = { venueId: p.venueId, productId: p.productId }
 
     if (tomar) {
-      const objetivo = (await liveOutboxSum(tx, p.productId, p.locationLinkId, p.generation)).plus(S)
+      if (decision.kind === 'ELEGIDA' && decision.choice === 'AVOQADO') {
+        // «Usar el de Avoqado»: Inventory se queda; el espejo ya es la lectura fresca (S); sale sólo lo que falta para que
+        // Shopify llegue a A, creado en ESTA tx (su id es la llave @idempotent): A = S + Σ vivas + ajuste (N3).
+        const fila = decision.ajuste.isZero()
+          ? null
+          : await tx.shopifyStockOutbox.create({
+              data: {
+                venueId: p.venueId,
+                locationLinkId: p.locationLinkId,
+                generation: p.generation,
+                productId: p.productId,
+                delta: decision.ajuste,
+              },
+              select: { id: true },
+            })
+        const A = inv.currentStock.toString()
+        return {
+          outcome: 'INICIADA',
+          ...base,
+          negativo: inv.currentStock.lessThan(0) || S < 0,
+          cambio: { previo: A, nuevo: A },
+          decision: {
+            eleccion: 'AVOQADO',
+            shopify: S,
+            pendientes: decision.pendientes.toString(),
+            ajuste: decision.ajuste.toString(),
+            envio: fila?.id ?? null,
+            staffId: decision.staffId,
+          },
+        }
+      }
+      // «Usar el de Shopify», o nada que elegir: la mecánica de siempre (Inventory = S + Σ vivas).
+      const pendientes = await liveOutboxSum(tx, p.productId, p.locationLinkId, p.generation)
+      const objetivo = pendientes.plus(S)
       const delta = objetivo.minus(inv.currentStock)
       const negativo = objetivo.lessThan(0) || S < 0
-      if (delta.isZero()) return { outcome: 'INICIADA', ...base, negativo }
+      const elegida: EleccionAplicada | undefined =
+        decision.kind === 'ELEGIDA'
+          ? { eleccion: 'SHOPIFY', shopify: S, pendientes: pendientes.toString(), ajuste: '0', envio: null, staffId: decision.staffId }
+          : undefined
+      const cambio = { previo: inv.currentStock.toString(), nuevo: objetivo.toString() }
+      if (delta.isZero()) return { outcome: 'INICIADA', ...base, negativo, ...(elegida ? { cambio, decision: elegida } : {}) }
       await tx.inventory.update({ where: { id: inv.id }, data: { currentStock: objetivo } })
       await tx.inventoryMovement.create({
         data: {
@@ -774,10 +884,10 @@ export async function initializePair(
           previousStock: inv.currentStock,
           newStock: objetivo,
           reason: 'Shopify: inicio de sincronización',
-          createdBy: null,
+          createdBy: elegida?.staffId ?? null,
         },
       })
-      return { outcome: 'INICIADA', ...base, negativo, cambio: { previo: inv.currentStock.toString(), nuevo: objetivo.toString() } }
+      return { outcome: 'INICIADA', ...base, negativo, cambio, decision: elegida }
     }
 
     // COMPARAR re-arranca la cuenta. Como el producto está LIBRE, todo lo que queda es lo que nunca llegó o lo atorado sin
@@ -817,7 +927,14 @@ export async function initializePair(
     return { outcome: 'EN_REVISION', ...base, negativo }
   })
   if (r.cambio && r.venueId && r.productId) {
-    logAction({ venueId: r.venueId, action: 'SHOPIFY_STOCK_INITIALIZED', entity: 'Product', entityId: r.productId, data: r.cambio })
+    logAction({
+      venueId: r.venueId,
+      staffId: r.decision?.staffId ?? null,
+      action: 'SHOPIFY_STOCK_INITIALIZED',
+      entity: 'Product',
+      entityId: r.productId,
+      data: { ...r.cambio, ...(r.decision ?? {}) },
+    })
   }
   if (r.outcome === 'EN_REVISION' && r.venueId) await notifyShopify(r.venueId, 'POR_REVISAR', { count: 1 })
   if (r.negativo && r.venueId && r.productId) await avisarSobreventa(r.venueId, r.productId)

@@ -1106,15 +1106,18 @@ export async function saveConnectChoices(
     }
     return { linkId: l.id, organizationId: s.organizationId, ctx, guardadas: hechas.length, data: { elecciones: hechas } }
   }, TX_LARGA)
-  logAction({
-    venueId: i.venueId,
-    organizationId: r.organizationId,
-    staffId: i.staffId,
-    action: 'SHOPIFY_CONNECT_CHOICES_SAVED',
-    entity: 'ShopifyLocationLink',
-    entityId: r.linkId,
-    data: r.data,
-  })
+  // Un «en todos» que no encontró a nadie no cambió nada: un no-op no se registra.
+  if (r.guardadas > 0) {
+    logAction({
+      venueId: i.venueId,
+      organizationId: r.organizationId,
+      staffId: i.staffId,
+      action: 'SHOPIFY_CONNECT_CHOICES_SAVED',
+      entity: 'ShopifyLocationLink',
+      entityId: r.linkId,
+      data: r.data,
+    })
+  }
   return { guardadas: r.guardadas, porDecidir: await contarPorDecidir(prisma, r.ctx) }
 }
 
@@ -1190,7 +1193,7 @@ export async function applyConnectPage(
     workToken?: string | null
     vence?: number
   } = {},
-): Promise<{ done: boolean; procesadas: number; error?: string }> {
+): Promise<{ done: boolean; procesadas: number; error?: string; devuelta?: boolean }> {
   const link = await prisma.shopifyLocationLink.findUnique({ where: { id: locationLinkId }, include: { store: true } })
   if (!link || link.status !== 'REVIEWING' || !link.applyRequestedAt || link.store.status !== 'ACTIVE')
     return { done: false, procesadas: 0 }
@@ -1231,6 +1234,13 @@ export async function applyConnectPage(
     const o = await initializePair({ variantLinkId: p.id, nivel, fetchedAt, mode: 'TOMAR_SHOPIFY' }, { hasAccess, cerco })
     if (o === 'CONTEXTO_CAMBIO') return { done: false, procesadas, error: 'CONTEXTO_CAMBIO' } // otro tiene la sucursal: nada más
     if (o === 'NO_APLICA') break // cambió la fase, la tienda o el plan: el worker lo verá en la siguiente vuelta
+    // D1 (P1-3): al primer producto cuya elección ya no vale, la conexión regresa a la vista previa y la tanda TERMINA (lo
+    // aplicado se queda). Seguir con las demás dejaría las mismas primeras filas para cada vuelta y la conexión en
+    // «Aplicando» para siempre. Si el regreso no pudo (otro cerco), la siguiente vuelta lo vuelve a intentar con el suyo.
+    if (o === 'POR_DECIDIR') {
+      const devuelta = await devolverAVistaPrevia(link.id, cerco, p.id)
+      return devuelta ? { done: false, procesadas, devuelta: true } : { done: false, procesadas }
+    }
     if (o !== 'REINTENTAR') procesadas += 1
   }
   return { done: false, procesadas }
@@ -1285,6 +1295,37 @@ async function terminarAplicacion(
     entityId: linkId,
   })
   return { done: true, procesadas: 0 }
+}
+
+/**
+ * D1: «Aplicar» encontró un producto cuya elección ya no es la que se vio (una venta, un cambio en Shopify, una credencial
+ * nueva). No se adivina: la conexión vuelve a «Así quedará tu stock» (REVIEWING sin «Aplicar» pedido), lo ya aplicado se
+ * queda, y la página lo dice al volver. Como `terminarAplicacion`: la sucursal FOR UPDATE (§10.3), la aplicación todavía
+ * pedida, y el MISMO cerco de quien aplicó (P2-4: generación, tienda ACTIVE, ubicación, credencial, lease, sin error
+ * terminal). Si algo no coincide, no toca nada.
+ */
+export async function devolverAVistaPrevia(linkId: string, cerco: CercoShopify, variantLinkId: string): Promise<boolean> {
+  const r = await prisma.$transaction(async tx => {
+    const [l] = await tx.$queryRaw<Array<{ status: string; applyRequestedAt: Date | null; venueId: string; organizationId: string }>>`
+      SELECT l.status::text AS status, l."applyRequestedAt", l."venueId", s."organizationId"
+        FROM "ShopifyLocationLink" l JOIN "ShopifyStore" s ON s.id = l."storeId"
+       WHERE l.id = ${linkId}
+       FOR UPDATE OF l`
+    if (!l || l.status !== 'REVIEWING' || !l.applyRequestedAt) return null
+    if (!(await cercoVigente(tx, linkId, cerco))) return null
+    await tx.shopifyLocationLink.update({ where: { id: linkId }, data: { applyRequestedAt: null, applyRequestedById: null } })
+    return l
+  })
+  if (!r) return false
+  logAction({
+    venueId: r.venueId,
+    organizationId: r.organizationId,
+    action: 'SHOPIFY_APPLY_RETURNED',
+    entity: 'ShopifyLocationLink',
+    entityId: linkId,
+    data: { variantLinkId },
+  })
+  return true
 }
 
 // ─── Pausa por plan y desconexión ───────────────────────────────────────────────────────────────────────────

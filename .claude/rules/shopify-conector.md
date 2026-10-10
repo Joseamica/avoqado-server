@@ -95,8 +95,8 @@ RETIENE: el reclamo exige pareja iniciada, así que no sale hasta que TOMAR inic
 fila `−1` sale después). La limpieza horaria (M4, §10) la cuenta como viva; si la pareja se suspende al iniciar, `suspendPair(…)` la
 descarta como a cualquier otra.
 
-No encola: un cambio con la marca de origen `shopify`, un delta 0, ni un `DELETE` de la fila (ver §5). El buzón lo llenan SÓLO el guardia y
-la resolución «usar Avoqado» (`reconcile.service.ts:1290`).
+No encola: un cambio con la marca de origen `shopify`, un delta 0, ni un `DELETE` de la fila (ver §5). El buzón lo llenan SÓLO el guardia,
+la resolución «usar Avoqado» (`reconcile.service.ts:1290`) y «Usar el de Avoqado» al conectar (D1, `initializePair(…)`, §4 bis).
 
 ## 3. La marca de origen: si aplicas en Avoqado algo que VINO de Shopify
 
@@ -136,7 +136,7 @@ El espejo (`mirrorAvailable` / `mirrorCommitted`) tiene CUATRO escritores, y nad
 | ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------- |
 | mensajero, `runShopifyOutboxRow(…)`   | al confirmar un envío: SENT y `espejo += delta` (NUNCA `quantityAfterChange`), sólo si la pareja existe y su generación coincide con la de la fila                                                                                                                                                                                                                                                                                       | misma tx que marcar SENT                      |
 | aplicador, `applyShopifyLevel(…)`     | frescura (`mirrorAt > fetchedAt`) y `productBlocked(…)` ANTES de actuar, también sobre un nivel no OK; luego espejo ← lectura vigente y `Inventory += S − espejo` con la marca                                                                                                                                                                                                                                                           | una tx; sin acceso ⇒ `PAUSADO` sin tocar nada |
-| inicio de pareja, `initializePair(…)` | TOMAR_SHOPIFY: espejo = S e `Inventory = S + Σ vivas` (en ACTIVE sólo con `createdProduct = true`; en REVIEWING con `applyRequestedAt`, para todas); COMPARAR: espejo = S, `Inventory` no se toca y, si difiere, `REACTIVADA` con su offset                                                                                                                                                                                              | una tx; sin acceso ⇒ `NO_APLICA`              |
+| inicio de pareja, `initializePair(…)` | TOMAR_SHOPIFY: espejo = S e `Inventory = S + Σ vivas` (en ACTIVE sólo con `createdProduct = true`; en REVIEWING con `applyRequestedAt`, para todas); COMPARAR: espejo = S, `Inventory` no se toca y, si difiere, `REACTIVADA` con su offset; con una elección D1 (§4 bis), «Avoqado» deja `Inventory`, espejo = S y encola `A − S − Σ vivas`                                                                                             | una tx; sin acceso ⇒ `NO_APLICA`              |
 | resolución, `resolveShopifyReview(…)` | revalida las cantidades mostradas y las VIGENTES (Avoqado bajo candado, Shopify recién leído). «Usar Shopify»: espejo e `Inventory` a la lectura vigente, con la marca. «Usar Avoqado»: descarta las DEAD_LETTER, en la misma tx pone el espejo en `S` (la lectura recién hecha, con su `committed` y `mirrorAt`) y encola `A − S` (entero) como fila nueva; al quedar SENT esa fila, el mensajero suma su delta como con cualquier otra | una tx; 409/422 si no                         |
 
 Por qué «usar Avoqado» pone el espejo en `S` y no espera al mensajero: con `A = 12`, `S = 11` y espejo viejo `10`, encolar `+1` sin mover el
@@ -164,7 +164,7 @@ espejo dejaría la cuenta en 11 contra las 12 piezas de Avoqado. Si hay filas vi
   y después la tienda `FOR SHARE` (`mirror.service.ts:372`). Quien la llame lo hace antes de cualquier candado de pareja, fila o cerco, o en
   una tx propia (el mensajero: tx de 15 s, porque avisa por dentro). `FOR NO KEY UPDATE` y no `FOR UPDATE`: no frena el `FOR KEY SHARE` de
   quien inserte una pareja con llave foránea a la sucursal.
-- **Desconectar** (`disconnectShopify(…)`, `connect.service.ts:1404`) bloquea primero TODAS las sucursales de la tienda por id (la propia
+- **Desconectar** (`disconnectShopify(…)`, `connect.service.ts:1445`) bloquea primero TODAS las sucursales de la tienda por id (la propia
   `FOR UPDATE`, las hermanas `FOR NO KEY UPDATE`), después las parejas de ESA sucursal, ordenadas por id, y sólo entonces sube la
   generación. Nunca la propia y luego una hermana de id menor: se cruzaría con quien las toma por id (el drenado, diferir, renovar la
   credencial). `renovarCredencial` (reconectar o reautorizar) también bloquea todas las sucursales de la tienda por id ANTES de la tienda.
@@ -197,6 +197,18 @@ Avoqado en todos» / «Usar Shopify en todos» para los que faltan). Los product
   stock ni espejo. La forma la valida Zod (ruta y MCP).
 - **Aplicar se niega** mientras falte alguna, también de páginas que nadie abrió: `requestApplyShopifyConnect(…)` cuenta con
   `contarPorDecidir(…)` y contesta 422 `SHOPIFY_FALTAN_DECISIONES` con cuántas faltan.
+- **Al aplicar** (`initializePair(…)` en TOMAR, ya con la pareja, `Inventory` y sus filas bloqueadas): `decisionBajoCandado` compara la
+  lectura fresca de Shopify con lo que se vio al importar antes de cualquier salida automática (P1-1: un 5/5 que llega como 6 no se aplica
+  en silencio; `importedAvailable` toma el 6 y la fila vuelve a la vista previa), y después la elección contra lo de ahora. Sin una elección
+  vigente, `POR_DECIDIR`: nada se escribe. «Shopify» es la mecánica de siempre, `Inventory = S + Σ vivas`. «Avoqado» deja `Inventory` igual,
+  pone el espejo en la lectura fresca y encola en la MISMA tx `A − S − Σ vivas` (entero; su id es la llave): `A = S + Σ vivas + ajuste`
+  (N3). Restar las vivas es lo que evita descontar dos veces una venta hecha mientras se conectaba. El `SHOPIFY_STOCK_INITIALIZED` del
+  producto lleva la elección y quién la hizo.
+- **Al primer `POR_DECIDIR`** de una tanda, la tanda termina y la conexión vuelve a «Así quedará tu stock» (`devolverAVistaPrevia(…)`:
+  sucursal `FOR UPDATE`, aplicación todavía pedida y `cercoVigente(…)` completo; `applyRequestedAt = null`, `SHOPIFY_APPLY_RETURNED`). Lo ya
+  aplicado no se repite: su ajuste conserva su única fila.
+- **ACTIVE no espera a que los ajustes lleguen:** `terminarAplicacion` no cambia; el ajuste es una fila PENDING no ambigua de una pareja ya
+  iniciada (no la frena `envioEnCamino(…)` ni la descarta `SIN_PAREJA`) y sale con el mensajero en cuanto la sucursal está ACTIVE.
 
 ## 5. `Inventory` que desaparece o vuelve ⇒ suspender y reactivar la pareja, NUNCA borrarla
 
@@ -314,9 +326,10 @@ borre o cree filas de `Inventory` de productos ligados, o que cambie esos campos
     conector (contar 8 con Shopify en 10 encolaría +8 y dejaría 18 en los dos lados). Ronda 3: la fase efectiva (con `pausedFrom`, como el
     guardia) es CONNECTING o REVIEWING, porque el aplicar inicia con TOMAR TODA pareja sin iniciar, también las emparejadas, y reconectar a
     la misma tienda las deja así (con Avoqado 5 y Shopify 10, contar 8 encolaría +3 y dejaría 13). Se vuelve a contar en cuanto la pareja se
-    inicia. **Hueco conocido, aceptado para el piloto:** un producto SIN pareja todavía, contado durante CONNECTING y ligado después, queda
-    en S + (contado − A); los dos lados coinciden, ningún dinero se mueve y un reconteo lo arregla. Retenerlo obligaría a frenar todo conteo
-    durante la conexión; la guía pide no contar mientras se importa el catálogo y D1/B (reescribe el aplicar) lo retoma.
+    inicia. **El producto SIN pareja contado durante CONNECTING** no se retiene (retenerlo frenaría todo conteo durante la conexión): queda
+    `Inventory = contado` con su fila `contado − A₀`, y al ligarse pide elegir (§4 bis). Con «Avoqado», Shopify termina en lo contado
+    (`S + (contado − A₀) + (contado − S − (contado − A₀)) = contado`); con «Shopify», la vista previa enseña `S + pendientes` antes de
+    aplicar y los dos lados quedan ahí.
   - Dos motivos (enmienda §12.1): `ENVIO_EN_CAMINO` (el producto se estaba sincronizando: vuelve a contarlo cuando termine; el texto es
     genérico porque también cubre la pareja en retención, donde puede no haber nada en camino) y `DUDA_POR_REVISAR` (sólo entre los
     bloqueados: hay una DEAD_LETTER ambigua o una revisión OPEN; recontar no sirve hasta resolverla en «Por revisar»). El motivo viaja en la
