@@ -10,13 +10,15 @@
  * `{ success: true, data: Table[] }` — so clients need no model changes.
  */
 
-import { Request, Response } from 'express'
+import { NextFunction, Request, Response } from 'express'
 import * as tableService from '../../services/tpv/table.tpv.service'
 import { isTableOwnershipEnforced, staffCanManageAllTables } from '../../middlewares/checkTableOwnership.middleware'
 import logger from '../../config/logger'
 import { BadRequestError, UnauthorizedError } from '@/errors/AppError'
 import { parseHttpOperation, manifestSchema, executeHttpOperation } from '@/services/mobile/http-operation.mobile.service'
 import { sendHttpOperationReply } from './http-operation.mobile.controller'
+import { computeTablesVersions } from '../../services/mobile/tablesVersion.service'
+import { getMobileFloorPlan } from '../../services/mobile/floorPlan.mobile.service'
 
 /**
  * GET /mobile/venues/:venueId/tables
@@ -29,6 +31,14 @@ export async function getTables(req: Request, res: Response): Promise<void> {
 
     logger.info(`[TABLE MOBILE CONTROLLER] GET /mobile/venues/${venueId}/tables`)
 
+    // Plano en el POS (spec 2026-10-09 §3.1): la versión ANTES de leer las mesas — una versión vieja con datos nuevos sólo
+    // cuesta una consulta de más; al revés, el mesero vería lo viejo en silencio. Si la versión falla, /tables contesta
+    // como siempre, sin versiones. El POS NO lo toma por servidor viejo (eso sólo lo dice un 404 de /tables/version):
+    // sigue consultando la versión y, mientras no coincida con la de sus mesas, vuelve a pedir /tables (cada 10 s).
+    const versions = await computeTablesVersions(venueId).catch(error => {
+      logger.warn(`[TABLE MOBILE CONTROLLER] Sin versión de mesas para ${venueId}: ${error?.message}`)
+      return null
+    })
     const tables = await tableService.getTablesWithStatus(venueId)
 
     // Propiedad de mesa (additive siblings — `data` no cambia de forma):
@@ -50,6 +60,7 @@ export async function getTables(req: Request, res: Response): Promise<void> {
         staffId: authContext?.userId ?? null,
         canManageAllTables,
       },
+      ...(versions ? { tablesVersion: versions.tablesVersion, floorPlanVersion: versions.floorPlanVersion } : {}),
     })
   } catch (error: any) {
     logger.error(`[TABLE MOBILE CONTROLLER] Error getting tables: ${error.message}`)
@@ -57,6 +68,32 @@ export async function getTables(req: Request, res: Response): Promise<void> {
       success: false,
       message: error.message || 'Internal server error',
     })
+  }
+}
+
+/**
+ * GET /mobile/venues/:venueId/tables/version
+ * Plano en el POS (spec 2026-10-09 §3.2): la pregunta barata de cada 10 s. `{ success, data: { tablesVersion, floorPlanVersion } }`.
+ */
+export async function getTablesVersion(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const versions = await computeTablesVersions(req.params.venueId)
+    res.status(200).json({ success: true, data: versions })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * GET /mobile/venues/:venueId/floor-plan
+ * Plano en el POS (spec 2026-10-09 §3.2): áreas + elementos activos, acotado a 30/1500 con `overLimit`.
+ */
+export async function getFloorPlan(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const data = await getMobileFloorPlan(req.params.venueId)
+    res.status(200).json({ success: true, data })
+  } catch (error) {
+    next(error)
   }
 }
 

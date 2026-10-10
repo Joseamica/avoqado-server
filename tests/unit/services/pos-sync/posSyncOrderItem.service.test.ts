@@ -153,7 +153,7 @@ describe('posSyncOrderItem.service — line events serialized on the parent Orde
     prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof prismaMock) => Promise<unknown>) => callback(prismaMock))
   })
 
-  it('resolves, locks and rereads the parent inside the transaction before writing the line, and never touches the header', async () => {
+  it('resolves, locks and rereads the parent inside the transaction before writing the line, and never touches the header money', async () => {
     const tx = lineTx()
     runIn(tx)
 
@@ -174,8 +174,11 @@ describe('posSyncOrderItem.service — line events serialized on the parent Orde
     expect(at(tx.order.findFirst)).toBeLessThan(at(tx.orderItem.upsert))
     // Existing Product: the fast path never takes the Venue fence.
     expect(assertLegacyCatalogGovernanceForVenue).not.toHaveBeenCalled()
-    // The imported POS header is the monetary authority: a line event never rewrites the Order.
-    expect(tx.order.update).not.toHaveBeenCalled()
+    // The imported POS header is the monetary authority: a line event never rewrites the Order's money. It only touches
+    // `updatedAt`, after the line and in the same transaction, so the POS floor plan version (tablesVersion) moves.
+    expect(tx.order.update).toHaveBeenCalledTimes(1)
+    expect(tx.order.update).toHaveBeenCalledWith({ where: { id: 'order-1' }, data: { updatedAt: expect.any(Date) } })
+    expect(at(tx.orderItem.upsert)).toBeLessThan(at(tx.order.update))
     expect(tx.order.updateMany).not.toHaveBeenCalled()
     expect(tx.order.upsert).not.toHaveBeenCalled()
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
@@ -268,6 +271,8 @@ describe('posSyncOrderItem.service — line events serialized on the parent Orde
     await expect(processPosOrderItemEvent(event({ deleted: true }))).resolves.toEqual({ id: 'item-ext-1', deleted: true })
     expect(tx.orderItem.deleteMany).toHaveBeenCalledWith({ where: { orderId: 'order-1', externalId: 'item-ext-1' } })
     expect(at(tx.order.findFirst)).toBeLessThan(at(tx.orderItem.deleteMany))
+    // Nothing was deleted: nothing changed for /tables, so the parent is not touched.
+    expect(tx.order.update).not.toHaveBeenCalled()
     expect(tx.product.findUnique).not.toHaveBeenCalled()
     expect(assertLegacyCatalogGovernanceForVenue).not.toHaveBeenCalled()
   })
