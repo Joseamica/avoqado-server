@@ -765,6 +765,7 @@ describe('webhooks, vista previa y aplicar (#6, 12 bis.3, N13, N20, N25)', () =>
     ).rejects.toMatchObject({
       statusCode: 403,
       code: 'SHOPIFY_SIN_PLAN',
+      message: 'El conector con Shopify no está activo en este local (piloto por invitación).', // M2: sin «plan» ni «actívalo»
     })
     await expect(requestApplyShopifyConnect({ venueId: e.venueId, staffId: e.staffId }, { hasAccess: conPlan })).rejects.toMatchObject({
       statusCode: 409,

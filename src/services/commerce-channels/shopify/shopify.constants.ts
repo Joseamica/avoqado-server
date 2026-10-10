@@ -24,5 +24,10 @@ export const SHOPIFY_MAX_VARIANTS = 20_000
 export const SHOPIFY_TIMEOUT_MS = 20_000
 /** Principal de servicio: el tipo angosto lo exige la bitácora de altas de servicio (`writeLegacyServiceProductCreationAudit…`). */
 export const SHOPIFY_SERVICE_ACTOR: Extract<CatalogActor, { type: 'SERVICE' }> = { type: 'SERVICE', servicePrincipalId: 'SHOPIFY_SYNC' }
+/**
+ * M2: lo que dice un `SHOPIFY_SIN_PLAN` (sin acceso a la función). Fase 1 es un piloto por invitación (§0 de la regla): ni
+ * «plan», ni «actívalo», ni «Premium»; nada que mande a comprar.
+ */
+export const TEXTO_SIN_ACCESO = 'El conector con Shopify no está activo en este local (piloto por invitación).'
 /** Las filas del buzón que todavía pueden salir hacia Shopify. */
 export const LIVE_OUTBOX_STATUSES = ['PENDING', 'IN_PROGRESS', 'FAILED'] as const

@@ -27,7 +27,7 @@ import { BadRequestError, ConflictError, ForbiddenError, NotFoundError, ServiceU
 import emailService from '@/services/email.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
-import { CATALOG_PAGE_SIZE, LIVE_OUTBOX_STATUSES, SHOPIFY_FEATURE } from './shopify.constants'
+import { CATALOG_PAGE_SIZE, LIVE_OUTBOX_STATUSES, SHOPIFY_FEATURE, TEXTO_SIN_ACCESO } from './shopify.constants'
 import { shopifyGraphql } from './shopify.graphql'
 import {
   applyShopifyLevel,
@@ -1003,11 +1003,7 @@ const enPausa = () =>
     'La conexión con Shopify está en pausa, revocada o le falta un permiso: reconéctala en Integraciones › Shopify y vuelve a resolver',
     'SHOPIFY_EN_PAUSA',
   )
-const sinPlan = () =>
-  new ForbiddenError(
-    'Shopify está en pausa porque el plan de esta sucursal no lo incluye: actívalo y vuelve a resolver',
-    'SHOPIFY_SIN_PLAN',
-  )
+const sinPlan = () => new ForbiddenError(TEXTO_SIN_ACCESO, 'SHOPIFY_SIN_PLAN')
 const yaResuelta = () => new ConflictError('Esa revisión ya se resolvió: recarga la lista', 'SHOPIFY_REVISION_YA_RESUELTA')
 const sinPareja = () => new ConflictError('Ese producto ya no está ligado a Shopify: recarga la lista', 'SHOPIFY_SIN_PAREJA')
 const suspendida = () =>

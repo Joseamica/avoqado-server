@@ -17,7 +17,7 @@ import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { assertLegacyCatalogGovernanceForVenue } from '@/services/master-catalog/catalogGovernance.service'
 import { utcTs } from '@/utils/sqlDates'
-import { SHOPIFY_FEATURE, SHOPIFY_SCOPES, SHOPIFY_SERVICE_ACTOR, SHOPIFY_WEBHOOK_TOPICS } from './shopify.constants'
+import { SHOPIFY_FEATURE, SHOPIFY_SCOPES, SHOPIFY_SERVICE_ACTOR, SHOPIFY_WEBHOOK_TOPICS, TEXTO_SIN_ACCESO } from './shopify.constants'
 import { appCredentials, encryptShopifyToken, isValidShopDomain, readIntentId, signIntentId, verifyOAuthQueryHmac } from './shopify.crypto'
 import { exchangeOAuthCode, shopifyGraphql, type ShopifyFailure, type ShopifyResult } from './shopify.graphql'
 import {
@@ -915,7 +915,7 @@ export async function requestApplyShopifyConnect(
   deps: { hasAccess?: (venueId: string) => Promise<boolean> } = {},
 ): Promise<{ applyRequestedAt: Date }> {
   if (!(await (deps.hasAccess ?? accesoReal)(i.venueId))) {
-    throw new ForbiddenError('Shopify está en pausa porque el plan de esta sucursal no lo incluye', 'SHOPIFY_SIN_PLAN')
+    throw new ForbiddenError(TEXTO_SIN_ACCESO, 'SHOPIFY_SIN_PLAN')
   }
   const r = await prisma.shopifyLocationLink.updateMany({
     where: { venueId: i.venueId, status: 'REVIEWING', applyRequestedAt: null },

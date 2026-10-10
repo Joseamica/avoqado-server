@@ -38,9 +38,10 @@ cambias el comportamiento, cambia aquí la frase y su aserción en el mismo comm
 | Nunca se contrata suelta                                                         | `addFeaturesToVenue(…)` (`venueFeature.dashboard.service.ts:190`) y `createTrialSubscriptions(…)` (`stripe.service.ts:303`) | 400 `FEATURE_NO_SE_VENDE_SUELTA`; la segunda es el embudo de venta suelta, conversión de demo y onboarding      |
 
 Ningún texto (página, avisos, MCP, la razón del movimiento de un conteo) manda a comprar ni a subir de plan para tener Shopify. El MCP usa
-su texto de piloto y no `planGateMessage` (`mcp/tools/shopify.ts`, `SOLO_PILOTO`); `SHOPIFY_SIN_PLAN` (el servidor dice «actívalo») se
-traduce a ese mismo texto en cada cliente. Un Premium ya pagado pasa el candado y choca con `SHOPIFY_SOLO_PILOTO` al conectar. La Fase 5
-(app pública) la mueve a `PREMIUM_ONLY_CODES` con su entrada de catálogo.
+su texto de piloto y no `planGateMessage` (`mcp/tools/shopify.ts`, `SOLO_PILOTO`); `SHOPIFY_SIN_PLAN` ya sale del servidor con texto de
+piloto (`TEXTO_SIN_ACCESO`: «El conector con Shopify no está activo en este local (piloto por invitación).», sin «plan» ni «actívalo», M2) y
+cada cliente lo traduce a su mismo texto de piloto por el código, nunca por el mensaje. Un Premium ya pagado pasa el candado y choca con
+`SHOPIFY_SOLO_PILOTO` al conectar. La Fase 5 (app pública) la mueve a `PREMIUM_ONLY_CODES` con su entrada de catálogo.
 
 ## 1. Entradas HTTP: webhook y callback
 

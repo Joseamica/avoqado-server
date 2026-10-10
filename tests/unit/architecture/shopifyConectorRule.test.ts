@@ -306,6 +306,17 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
       'Ningún texto (página, avisos, MCP, la razón del movimiento de un conteo) manda a comprar ni a subir de plan para tener Shopify',
     ])
     expect(leer(`${SHOPIFY}/shopify.connect.service.ts`)).toContain("'SHOPIFY_SOLO_PILOTO'")
+    // M2: el 403 SHOPIFY_SIN_PLAN del servidor ya no habla de «plan» ni manda a «activarlo».
+    contieneTodas(['`SHOPIFY_SIN_PLAN` ya sale del servidor con texto de piloto (`TEXTO_SIN_ACCESO`', 'sin «plan» ni «actívalo», M2'])
+    expect(regla).not.toContain('(el servidor dice «actívalo»)')
+    expect(leer(`${SHOPIFY}/shopify.constants.ts`)).toContain(
+      "export const TEXTO_SIN_ACCESO = 'El conector con Shopify no está activo en este local (piloto por invitación).'",
+    )
+    for (const f of ['shopify.connect.service.ts', 'shopify.reconcile.service.ts']) {
+      const src = leer(`${SHOPIFY}/${f}`)
+      expect(src).toContain("new ForbiddenError(TEXTO_SIN_ACCESO, 'SHOPIFY_SIN_PLAN')")
+      expect(src).not.toMatch(/el plan de esta sucursal|actívalo y vuelve/)
+    }
     // C12 (N2): la razón del movimiento del conteo la ve el cajero en el POS; sin acceso no culpa a «el plan».
     const conteo = leer(`${SHOPIFY}/shopify.count.service.ts`)
     expect(conteo).toContain("? 'el conector con Shopify no está activo en este local'")

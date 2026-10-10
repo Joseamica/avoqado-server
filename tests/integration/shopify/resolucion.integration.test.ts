@@ -213,9 +213,12 @@ it('Shopify sin nivel en la ubicación ⇒ 409 SHOPIFY_SIN_NIVEL; nunca se resue
 it('sin plan ⇒ 403 SHOPIFY_SIN_PLAN; una revisión de otra sucursal ⇒ 404', async () => {
   const e = await escenario()
   const r = await abrir(e, '13')
-  await expect(resolveShopifyReview(entrada(e, r, 'SHOPIFY'), { ...deps(), hasAccess: async () => false })).rejects.toMatchObject({
+  const sinAcceso = resolveShopifyReview(entrada(e, r, 'SHOPIFY'), { ...deps(), hasAccess: async () => false })
+  await expect(sinAcceso).rejects.toMatchObject({
     statusCode: 403,
     code: 'SHOPIFY_SIN_PLAN',
+    // M2: piloto por invitación (§0): ni «plan», ni «actívalo», ni «Premium».
+    message: 'El conector con Shopify no está activo en este local (piloto por invitación).',
   })
   const otra = await escenario()
   await expect(resolveShopifyReview({ ...entrada(e, r, 'SHOPIFY'), venueId: otra.venueId }, deps())).rejects.toMatchObject({

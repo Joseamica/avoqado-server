@@ -89,7 +89,8 @@ function rechazo(err: unknown) {
   if (err.code === 'SHOPIFY_REVISION_CAMBIO') {
     return text({ ok: false, needsInput: true, question: 'Las cantidades cambiaron; pide la vista previa otra vez' })
   }
-  // L2: el servicio dice «el plan de esta sucursal no lo incluye: actívalo»; con el conector en piloto eso promete una compra.
+  // L2: el MCP dice su propio texto de piloto (el servicio ya no habla de «plan» ni de «actívalo» desde M2, y aun así el
+  // código manda: un mensaje de servicio nunca sale tal cual con este código).
   if (err.code === 'SHOPIFY_SIN_PLAN') return soloPiloto()
   return text({ ok: false, codigo: err.code, error: err.code === 'SHOPIFY_NO_ACTIVA' ? NO_ACTIVA : err.message })
 }

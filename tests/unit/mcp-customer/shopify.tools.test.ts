@@ -634,14 +634,11 @@ describe('herramientas MCP de Shopify', () => {
       }
     })
 
-    it('🔴 SHOPIFY_SIN_PLAN que viene del servicio («el plan de esta sucursal no lo incluye: actívalo») se dice con el texto de piloto', async () => {
+    it('🔴 SHOPIFY_SIN_PLAN que viene del servicio se dice con el texto de piloto del MCP, diga lo que diga el servicio', async () => {
       const deServicio = (m: string) => new ForbiddenError(m, 'SHOPIFY_SIN_PLAN')
-      mockResolve.mockRejectedValue(
-        deServicio('Shopify está en pausa porque el plan de esta sucursal no lo incluye: actívalo y vuelve a resolver'),
-      )
-      mockConnect.requestApplyShopifyConnect.mockRejectedValue(
-        deServicio('Shopify está en pausa porque el plan de esta sucursal no lo incluye'),
-      )
+      // El texto de hoy del servicio (M2) y uno cualquiera: manda el código, nunca el mensaje.
+      mockResolve.mockRejectedValue(deServicio('El conector con Shopify no está activo en este local (piloto por invitación).'))
+      mockConnect.requestApplyShopifyConnect.mockRejectedValue(deServicio('texto que el MCP no debe repetir'))
       const { call } = await conectar()
       const resolver = (await enDosPasos(call, 'shopify_review_resolve', { venueId: 'centro', reviewId: 'r1', choice: 'SHOPIFY' })).r
       const aplicar = (await enDosPasos(call, 'shopify_connect_apply', { venueId: 'centro' })).r
