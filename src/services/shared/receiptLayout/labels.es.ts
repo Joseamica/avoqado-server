@@ -17,7 +17,11 @@ export const LABELS = {
   cortesia: 'CORTESÍA',
   subtotal: 'Subtotal:',
   descuento: 'Descuento:',
-  ivaIncluido: 'IVA incluido:',
+  // D3 (IVA por producto, plan 7): el ticket NO calcula IVA. Con IVA incluido —la norma, LFPC 7 Bis— imprime la leyenda;
+  // sólo una venta que cobró el IVA APARTE imprime «IVA agregado: $X». El cargo por servicio va en su renglón.
+  ivaIncluidoCuandoAplica: 'IVA incluido cuando aplica',
+  ivaAgregado: 'IVA agregado:',
+  cargoPorServicio: 'Cargo por servicio:',
   propina: 'Propina:',
   total: 'TOTAL:',
   pago: 'Pago:',

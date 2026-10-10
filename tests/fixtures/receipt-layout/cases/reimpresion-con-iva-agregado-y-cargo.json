@@ -1,0 +1,2 @@
+{ "layout": "canonical", "sale": "reprint", "venue": "one-emisor",
+  "saleOverride": { "subtotalCents": 35000, "discountCents": 1500, "serviceChargeCents": 2850, "taxCents": 5816, "tipCents": 3500, "totalCents": 45666 } }

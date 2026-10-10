@@ -100,9 +100,18 @@ interface ReceiptEmailData {
   }>
   // Totals
   subtotal?: number
+  /** Descuento en pesos (IVA por producto, plan 7, A7-R6). Sólo se pinta si es > 0, en negativo, entre Subtotal y Cargo. */
+  discountAmount?: number
+  /** IVA agregado (el que la venta cobró aparte). Con IVA incluido va 0 y se pinta la leyenda si `leyendaIva`. */
   taxAmount?: number
   tipAmount?: number
   totalAmount?: number
+  /** Cargo por servicio (IVA por producto, plan 7). Sólo se pinta si es > 0. */
+  serviceChargeAmount?: number
+  /** true ⇒ «IVA incluido cuando aplica» en lugar de un renglón de impuesto. Ausente ⇒ como antes (ligas de pago). */
+  leyendaIva?: boolean
+  /** Comprobante de una devolución: «Total reembolsado». */
+  esDevolucion?: boolean
   // Payment info
   paymentMethod?: string
   paymentDate?: string
@@ -604,10 +613,12 @@ class EmailService {
     <div style="padding: 24px 0; border-bottom: 1px solid #e0e0e0;">
       <table cellpadding="0" cellspacing="0" style="width: 100%;">
         ${data.subtotal !== undefined ? `<tr><td style="padding: 8px 0; font-size: 15px; color: #000;">Subtotal</td><td style="padding: 8px 0; font-size: 15px; color: #000; text-align: right;">${formatCurrency(data.subtotal)}</td></tr>` : ''}
-        ${data.taxAmount !== undefined && data.taxAmount > 0 ? `<tr><td style="padding: 8px 0; font-size: 15px; color: #000;">Impuestos</td><td style="padding: 8px 0; font-size: 15px; color: #000; text-align: right;">${formatCurrency(data.taxAmount)}</td></tr>` : ''}
+        ${data.discountAmount !== undefined && data.discountAmount > 0 ? `<tr><td style="padding: 8px 0; font-size: 15px; color: #000;">Descuento</td><td style="padding: 8px 0; font-size: 15px; color: #000; text-align: right;">${formatCurrency(-data.discountAmount)}</td></tr>` : ''}
+        ${data.serviceChargeAmount !== undefined && data.serviceChargeAmount > 0 ? `<tr><td style="padding: 8px 0; font-size: 15px; color: #000;">Cargo por servicio</td><td style="padding: 8px 0; font-size: 15px; color: #000; text-align: right;">${formatCurrency(data.serviceChargeAmount)}</td></tr>` : ''}
+        ${data.taxAmount !== undefined && data.taxAmount > 0 ? `<tr><td style="padding: 8px 0; font-size: 15px; color: #000;">IVA agregado</td><td style="padding: 8px 0; font-size: 15px; color: #000; text-align: right;">${formatCurrency(data.taxAmount)}</td></tr>` : data.leyendaIva ? `<tr><td colspan="2" style="padding: 8px 0; font-size: 13px; color: #666;">IVA incluido cuando aplica</td></tr>` : ''}
         ${data.tipAmount !== undefined && data.tipAmount > 0 ? `<tr><td style="padding: 8px 0; font-size: 15px; color: #000;">Propina</td><td style="padding: 8px 0; font-size: 15px; color: #1a73e8; text-align: right;">${formatCurrency(data.tipAmount)}</td></tr>` : ''}
         <tr style="border-top: 1px solid #e0e0e0;">
-          <td style="padding: 16px 0 0 0; font-size: 18px; font-weight: 600; color: #000;">Total</td>
+          <td style="padding: 16px 0 0 0; font-size: 18px; font-weight: 600; color: #000;">${data.esDevolucion ? 'Total reembolsado' : 'Total'}</td>
           <td style="padding: 16px 0 0 0; font-size: 18px; font-weight: 600; color: #000; text-align: right;">${formatCurrency(data.totalAmount)}</td>
         </tr>
       </table>
@@ -651,9 +662,11 @@ ${data.processedBy ? `Atendido por: ${data.processedBy}` : ''}
 
 ${itemsText ? `PRODUCTOS:\n${itemsText}\n` : ''}
 ${data.subtotal !== undefined ? `Subtotal: ${formatCurrency(data.subtotal)}` : ''}
-${data.taxAmount !== undefined && data.taxAmount > 0 ? `Impuestos: ${formatCurrency(data.taxAmount)}` : ''}
+${data.discountAmount !== undefined && data.discountAmount > 0 ? `Descuento: ${formatCurrency(-data.discountAmount)}` : ''}
+${data.serviceChargeAmount !== undefined && data.serviceChargeAmount > 0 ? `Cargo por servicio: ${formatCurrency(data.serviceChargeAmount)}` : ''}
+${data.taxAmount !== undefined && data.taxAmount > 0 ? `IVA agregado: ${formatCurrency(data.taxAmount)}` : data.leyendaIva ? 'IVA incluido cuando aplica' : ''}
 ${data.tipAmount !== undefined && data.tipAmount > 0 ? `Propina: ${formatCurrency(data.tipAmount)}` : ''}
-TOTAL: ${formatCurrency(data.totalAmount)}
+${data.esDevolucion ? 'Total reembolsado' : 'TOTAL'}: ${formatCurrency(data.totalAmount)}
 
 Metodo de pago: ${formatPaymentMethod(data.paymentMethod)}
 

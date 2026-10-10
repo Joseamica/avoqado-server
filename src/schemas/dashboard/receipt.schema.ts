@@ -73,6 +73,21 @@ export const ReceiptDataSnapshotSchema = z.object({
       email: z.string().optional(),
     })
     .optional(),
+  // IVA por producto, plan 7 (D3): totales del comprobante congelados al crear el recibo (`ticketTotals`). Opcional: los viejos no lo traen.
+  ticketTotals: z
+    .object({
+      kind: z.enum(['COBRO', 'DEVOLUCION']),
+      desglosado: z.boolean(),
+      subtotal: z.number(),
+      // Ronda 1 (A7-R6): descuento en pesos, sólo con desglose y > 0.
+      discount: z.number().optional(),
+      serviceCharge: z.number(),
+      addedTax: z.number(),
+      tip: z.number(),
+      total: z.number(),
+    })
+    .nullable()
+    .optional(),
 })
 
 export type ReceiptDataSnapshot = z.infer<typeof ReceiptDataSnapshotSchema>

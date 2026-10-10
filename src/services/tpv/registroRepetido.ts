@@ -16,6 +16,7 @@ import { CardBrand, CardEntryMode, PaymentMethod, Prisma, type Payment } from '@
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { logAction } from '../dashboard/activity-log.service'
+import { RECIBO_CANONICO } from '../shared/reciboCanonico'
 import { avisarAprobacionTardiaTrasVentana, terminalPaymentService } from '../terminal-payment.service'
 import {
   afiliacionDelApkDelRegistro,
@@ -359,7 +360,7 @@ export async function consolidarRegistroRepetidoDetallado<T extends Payment>(
         orderId: existente.orderId,
       })
     }
-    const releido = await prisma.payment.findUnique({ where: { id: existente.id }, include: { receipts: true } })
+    const releido = await prisma.payment.findUnique({ where: { id: existente.id }, include: { receipts: RECIBO_CANONICO } })
     const registro = releido ? ({ ...existente, ...releido } as T) : existente
     return plan.contradicciones.length > 0
       ? { estado: 'CONTRADICE', registro, contradicciones: plan.contradicciones }
@@ -371,7 +372,7 @@ export async function consolidarRegistroRepetidoDetallado<T extends Payment>(
     if (esViolacionDeUnicidad(error) && entrante.idempotencyKey) {
       const dueno = await prisma.payment.findUnique({
         where: { venueId_idempotencyKey: { venueId, idempotencyKey: entrante.idempotencyKey } },
-        include: { receipts: true },
+        include: { receipts: RECIBO_CANONICO },
       })
       if (dueno) {
         logger.warn('🔁 [Terminal-payment] La llave ya pertenece a OTRO Payment: se devuelve su dueño durable', {

@@ -48,9 +48,15 @@ export interface ReceiptSale {
   timezone: string
   items: ReceiptSaleItem[]
   subtotalCents: number
+  /**
+   * 🔴 SÓLO el IVA que se cobró APARTE, encima del precio (D3, plan 7 de IVA). Con IVA incluido —la norma— va en 0 y el
+   * ticket imprime «IVA incluido cuando aplica». Nunca un IVA extraído del precio.
+   */
   taxCents: number
   discountCents: number | null
   tipCents: number | null
+  /** Cargo por servicio de la venta. Se imprime cuando existe: es parte de la suma del ticket (regla de cuadre). */
+  serviceChargeCents?: number | null
   totalCents: number
   /** null = pre-cuenta: todavía no hay pago, así que el bloque `payment` no imprime nada. */
   tender: ReceiptTender | null
