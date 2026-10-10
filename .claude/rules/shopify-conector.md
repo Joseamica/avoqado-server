@@ -53,6 +53,12 @@ cada cliente lo traduce a su mismo texto de piloto por el código, nunca por el 
   trae el nombre, el correo, el teléfono y las direcciones del cliente, y nada de eso se queda. Si un procesador empieza a leer otro campo,
   agrégalo ahí en el mismo cambio. Pruebas: `tests/unit/routes/shopify.webhook.app.test.ts` y
   `tests/integration/shopify/webhook-app.integration.test.ts` (un POST firmado por la `app` real deja un evento).
+- **Pedidos y reembolsos, por tandas (P2-3):** el worker relee los niveles de las variantes de un pedido o reembolso de 50 en 50
+  (`TANDA_PEDIDO`, una página de `fetchLevels(…)`), en orden fijo, y anota en el evento lo que ya quedó (`_avoqadoAvance`, con
+  `guardarAvanceEvento`, como el sync del catálogo; la llave lleva sucursal y generación). Sin tiempo, la pasada vuelve a la fila sin gastar
+  intento y la siguiente sigue desde ahí; lo que quedó en vuelo o incierto no se anota y el reintento lo repite. Antes se leía todo de una
+  vez y cada pasada empezaba desde la primera pareja: un pedido de ~150 variantes no avanzaba nunca y, como el reclamo es del más viejo
+  primero, detenía la entrada de webhooks de todas las tiendas.
 - **Callback OAuth** (`SHOPIFY_OAUTH_CALLBACK_PATH`, `app.ts:204`): público, sin sesión; la prueba de origen es el `hmac` más el `state`
   firmado. `handleShopifyCallback(…)` recibe `req.query` INTACTO: un parámetro repetido (llega como arreglo) no es algo que Shopify firmó y
   da `?error=FIRMA`; no se filtra antes.

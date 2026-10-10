@@ -69,6 +69,13 @@ const ESPERA_CUPO_MS = 15_000
 const ESPERA_PLAN_MS = 60_000
 const TANDA_REENCOLAR = 500
 const TANDA_CARGAS = 50
+/**
+ * P2-3: las parejas de un pedido o reembolso se leen y se aplican de 50 en 50 (una página de `fetchLevels`), y lo hecho se
+ * guarda en el evento (`_avoqadoAvance`, como el sync del catálogo). Antes se leía TODO de una vez y, sin tiempo, la pasada
+ * siguiente empezaba otra vez desde la primera pareja: un pedido de ~150 variantes no avanzaba nunca y, como el reclamo es
+ * del más viejo primero, detenía la entrada de webhooks de todas las tiendas.
+ */
+const TANDA_PEDIDO = 50
 const IDS_POR_CONSULTA = 200
 const TOPICOS_CATALOGO = ['products/create', 'products/update', 'products/delete']
 const CAUSA_DE_PEDIDO: Record<string, string> = {
@@ -570,8 +577,18 @@ async function procesar(ev: ShopifyInboundEvent, pasada: Pasada): Promise<Result
   estampar(tocadas.map(l => l.venueId))
   const espera = await compuerta(tocadas, acceso)
   if (espera) return espera
-  return releerYAplicar(store, parejas, causa, pasada)
+  return releerYAplicar(store, parejas, causa, pasada, {
+    avance: p._avoqadoAvance,
+    guardar: avance => guardarAvanceEvento(ev.id, pasada.evento.claimToken, avance),
+  })
 }
+
+/** P2-3: la llave del avance de un pedido, por sucursal y generación (una reconexión empieza de cero). */
+const llaveDePedido = (x: ParejaEvento): string => `pedido:${x.locationLinkId}:${x.generation}`
+/** Lo que ya no hay que repetir: el nivel se aplicó (o no hacía falta), o la pareja quedó fuera. */
+const RESULTADOS_HECHOS: ApplyOutcome[] = ['APLICADO', 'SIN_CAMBIO', 'SUSPENDIDO', 'NO_INICIADA']
+/** Orden por código (no por idioma): el mismo en cada pasada. */
+const comparar = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0)
 
 /**
  * R2, B-5: `CONTEXTO_CAMBIO` puede ser una reconexión, la tienda revocada, un error terminal, la sucursal que dejó de
@@ -682,53 +699,99 @@ async function parejasDePedido(links: SucursalEvento[], gids: string[]): Promise
  * Relee Shopify y aplica con el espejo de A, con el cerco de la sucursal y el reclamo del evento (§11.2). En vuelo o
  * lectura vieja ⇒ FAILED (reintento); incierto ⇒ FAILED; pausa ⇒ diferir; el contexto cambió ⇒ nada se escribe y se
  * relee (R2); si el reclamo ya es de otro, el cierre del evento tampoco lo toca.
+ * P2-3: por tandas de `TANDA_PEDIDO`, en orden fijo (sucursal, pareja). Con `progreso` (pedidos y reembolsos), lo que ya
+ * quedó (`RESULTADOS_HECHOS`) se anota en el evento y la pasada siguiente sigue desde ahí: cada pasada avanza, nunca se
+ * repite desde cero. Lo que quedó pendiente (en vuelo, incierto) no se anota: el reintento lo vuelve a intentar.
  */
-async function releerYAplicar(store: ShopifyStore, parejas: ParejaEvento[], causa: string, pasada: Pasada): Promise<Resultado> {
+async function releerYAplicar(
+  store: ShopifyStore,
+  parejas: ParejaEvento[],
+  causa: string,
+  pasada: Pasada,
+  progreso?: { avance?: AvanceSync; guardar: (avance: AvanceSync) => Promise<boolean> },
+): Promise<Resultado> {
   const { deps, evento } = pasada
-  const fetchedAt = new Date() // B-1: antes de la petición
   const enlaces: EnlaceEnCurso[] = [
     ...new Map(parejas.map(x => [x.locationLinkId, { id: x.locationLinkId, generation: x.generation }])).values(),
   ]
-  const r = await leerNiveles(
-    deps.fetchLevels ?? fetchLevels,
-    store,
-    parejas.map(x => ({ inventoryItemId: x.inventoryItemId, shopifyLocationId: x.shopifyLocationId })),
-    deps.vence,
-  )
-  if (r === SIN_TIEMPO) return { o: 'CUPO', motivo: 'SIN_TIEMPO' }
-  if (!r.ok) {
-    const atencion = await atenderFalla(store, r, enlaces, evento)
-    if (atencion === 'SIN_PERMISO') return { o: 'DIFERIR', motivo: FALTA_PERMISO, enlaces: enlaces.map(e => e.id) }
-    if (atencion === 'REVOCADA') return { o: 'DIFERIR', motivo: 'TIENDA_REVOCADA', enlaces: enlaces.map(e => e.id) }
-    return { o: 'FAILED', motivo: `${r.code}: ${r.message}`.slice(0, 2000) }
-  }
-  const resultados: ApplyOutcome[] = []
-  for (const x of parejas) {
-    // §12.8: antes de CADA escritura se mira el vencimiento; lo ya aplicado se vuelve SIN_CAMBIO al repetir la pasada.
-    if (restante(deps.vence) < MIN_ESCRITURA_MS) return { o: 'CUPO', motivo: 'SIN_TIEMPO' }
-    const nivel = r.data.get(levelKey(x.shopifyLocationId, x.inventoryItemId)) ?? { kind: 'SIN_NIVEL' as const }
-    // §12.6 (R07): sin lease del worker (`workToken` ausente, nunca null): el aviso procesa aunque el worker tenga la sucursal.
-    const cerco = {
-      generation: x.generation,
-      storeId: store.id,
-      shopifyLocationId: x.shopifyLocationId,
-      tokenVersion: store.tokenVersion,
-      evento,
+  const avance: AvanceSync = { ...(progreso?.avance ?? {}) }
+  const hechas = new Map<string, Set<string>>()
+  const hechasDe = (x: ParejaEvento): Set<string> => {
+    const k = llaveDePedido(x)
+    let h = hechas.get(k)
+    if (!h) {
+      h = new Set(avance[k]?.vistas ?? [])
+      hechas.set(k, h)
     }
-    const o = await applyShopifyLevel({ variantLinkId: x.id, nivel, fetchedAt, cause: causa }, { hasAccess: pasada.acceso, cerco })
-    // §12.2: A no tocó nada (reconexión, tienda revocada, error terminal o el reclamo ya es de otro) y lo demás tampoco se
-    // toca. Lo ya aplicado de otras parejas se vuelve SIN_CAMBIO al repetir (el espejo ya se movió).
-    if (o === 'CONTEXTO_CAMBIO')
-      return trasCambio(
-        store.id,
-        enlaces.map(e => e.id),
-        pasada,
-      )
-    resultados.push(o)
+    return h
+  }
+  const pendientes = parejas
+    .filter(x => !hechasDe(x).has(x.id))
+    .sort((a, b) => comparar(a.locationLinkId, b.locationLinkId) || comparar(a.id, b.id))
+  let sinGuardar = false
+  /** Escribe en el evento lo hecho en esta pasada (CAS del reclamo). `false` = el evento ya es de otro. */
+  const guardar = async (): Promise<boolean> => {
+    if (!progreso || !sinGuardar) return true
+    for (const [k, h] of hechas) avance[k] = { cursor: null, vistas: [...h] }
+    sinGuardar = false
+    return progreso.guardar(avance)
+  }
+  const sinTiempo = async (): Promise<Resultado> => ((await guardar()) ? { o: 'CUPO', motivo: 'SIN_TIEMPO' } : { o: 'PERDIDO' })
+  const resultados: ApplyOutcome[] = []
+  for (let i = 0; i < pendientes.length; i += TANDA_PEDIDO) {
+    const tanda = pendientes.slice(i, i + TANDA_PEDIDO)
+    const fetchedAt = new Date() // B-1: antes de la petición
+    const r = await leerNiveles(
+      deps.fetchLevels ?? fetchLevels,
+      store,
+      tanda.map(x => ({ inventoryItemId: x.inventoryItemId, shopifyLocationId: x.shopifyLocationId })),
+      deps.vence,
+    )
+    if (r === SIN_TIEMPO) return sinTiempo()
+    if (!r.ok) {
+      if (!(await guardar())) return { o: 'PERDIDO' } // lo de las tandas anteriores ya no se repite
+      const atencion = await atenderFalla(store, r, enlaces, evento)
+      if (atencion === 'SIN_PERMISO') return { o: 'DIFERIR', motivo: FALTA_PERMISO, enlaces: enlaces.map(e => e.id) }
+      if (atencion === 'REVOCADA') return { o: 'DIFERIR', motivo: 'TIENDA_REVOCADA', enlaces: enlaces.map(e => e.id) }
+      return { o: 'FAILED', motivo: `${r.code}: ${r.message}`.slice(0, 2000) }
+    }
+    for (const x of tanda) {
+      // §12.8: antes de CADA escritura se mira el vencimiento; lo ya aplicado queda anotado y no se repite.
+      if (restante(deps.vence) < MIN_ESCRITURA_MS) return sinTiempo()
+      const nivel = r.data.get(levelKey(x.shopifyLocationId, x.inventoryItemId)) ?? { kind: 'SIN_NIVEL' as const }
+      // §12.6 (R07): sin lease del worker (`workToken` ausente, nunca null): el aviso procesa aunque el worker tenga la sucursal.
+      const cerco = {
+        generation: x.generation,
+        storeId: store.id,
+        shopifyLocationId: x.shopifyLocationId,
+        tokenVersion: store.tokenVersion,
+        evento,
+      }
+      const o = await applyShopifyLevel({ variantLinkId: x.id, nivel, fetchedAt, cause: causa }, { hasAccess: pasada.acceso, cerco })
+      // §12.2: A no tocó nada (reconexión, tienda revocada, error terminal o el reclamo ya es de otro) y lo demás tampoco se
+      // toca. Lo ya aplicado de otras parejas se vuelve SIN_CAMBIO al repetir (el espejo ya se movió).
+      if (o === 'CONTEXTO_CAMBIO')
+        return trasCambio(
+          store.id,
+          enlaces.map(e => e.id),
+          pasada,
+        )
+      resultados.push(o)
+      if (RESULTADOS_HECHOS.includes(o)) {
+        hechasDe(x).add(x.id)
+        sinGuardar = true
+      }
+    }
+    // Queda otra tanda: lo de ésta se anota ya, por si la siguiente no alcanza.
+    if (i + TANDA_PEDIDO < pendientes.length && !(await guardar())) return { o: 'PERDIDO' }
   }
   if (resultados.includes('PAUSADO')) return { o: 'DIFERIR', motivo: 'SUCURSAL_PAUSADA', enlaces: enlaces.map(e => e.id) }
-  if (resultados.includes('INCIERTO')) return { o: 'FAILED', motivo: 'ENVIO_INCIERTO' }
-  if (resultados.includes('REINTENTAR')) return { o: 'FAILED', motivo: 'ENVIO_EN_VUELO_O_LECTURA_VIEJA' }
+  if (resultados.includes('INCIERTO') || resultados.includes('REINTENTAR')) {
+    if (!(await guardar())) return { o: 'PERDIDO' } // el reintento sólo repite lo que quedó pendiente
+    return resultados.includes('INCIERTO')
+      ? { o: 'FAILED', motivo: 'ENVIO_INCIERTO' }
+      : { o: 'FAILED', motivo: 'ENVIO_EN_VUELO_O_LECTURA_VIEJA' }
+  }
   return { o: 'PROCESSED', motivo: resultados.join(',').slice(0, 200) }
 }
 

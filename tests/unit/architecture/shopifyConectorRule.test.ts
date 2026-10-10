@@ -365,6 +365,21 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
       'payload: cargaMinima(payload as Record<string, unknown>)',
     )
     expect(cuerpo(receptor, 'export async function persistShopifyWebhook(')).not.toContain('payload: payload as')
+    // P2-3: pedidos y reembolsos por tandas de 50, con el avance anotado en el evento (como el sync del catálogo).
+    contieneTodas([
+      'el worker relee los niveles de las variantes de un pedido o reembolso de 50 en 50 (`TANDA_PEDIDO`',
+      'anota en el evento lo que ya quedó (`_avoqadoAvance`',
+    ])
+    expect(receptor).toContain('const TANDA_PEDIDO = 50')
+    enOrden(cuerpo(receptor, 'async function releerYAplicar('), [
+      'for (let i = 0; i < pendientes.length; i += TANDA_PEDIDO)',
+      'pendientes.slice(i, i + TANDA_PEDIDO)',
+      'if (r === SIN_TIEMPO) return sinTiempo()',
+      'if (restante(deps.vence) < MIN_ESCRITURA_MS) return sinTiempo()',
+    ])
+    expect(cuerpo(receptor, 'async function procesar(')).toContain(
+      'guardar: avance => guardarAvanceEvento(ev.id, pasada.evento.claimToken, avance)',
+    )
     const app = leer('src/app.ts')
     enOrden(app, [
       "app.post(SHOPIFY_WEBHOOK_ROUTE, express.raw({ type: '*/*', limit: SHOPIFY_WEBHOOK_MAX_BYTES }), handleShopifyWebhook)",

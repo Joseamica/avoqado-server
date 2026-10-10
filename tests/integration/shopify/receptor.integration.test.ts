@@ -15,7 +15,14 @@ import {
   processShopifyEvent,
   requeueDeferredEvents,
 } from '@/services/commerce-channels/shopify/shopify.inbound.service'
-import { assertTestDatabase, crearEscenarioShopify, EscenarioShopify, graphqlFalso, limpiarEscenarioShopify } from './fixtures'
+import {
+  agregarProductoShopify,
+  assertTestDatabase,
+  crearEscenarioShopify,
+  EscenarioShopify,
+  graphqlFalso,
+  limpiarEscenarioShopify,
+} from './fixtures'
 import { ContextoObsoleto, MIN_HTTP_MS } from '@/services/commerce-channels/shopify/shopify.store.service'
 import { getContext, runWithContext } from '@/observability/executionContext'
 import {
@@ -861,6 +868,74 @@ describe('ronda de arreglos 1 de B2', () => {
     expect(f).toMatchObject({ status: 'RECEIVED', error: 'SIN_TIEMPO', attemptCount: 0, claimToken: null })
     // Minor 3: 15 s desde el CIERRE; desde el arranque de la pasada (≈1.8 s antes) quedaría por debajo.
     expect(f.nextAttemptAt!.getTime()).toBeGreaterThanOrEqual(despues + 14_500)
+  })
+
+  it('🔴 P2-3: un pedido grande se lee y se aplica por tandas de 50 y guarda su avance: cada pasada avanza y termina PROCESSED', async () => {
+    const e = await escenario()
+    const parejas = [e.variantLinkId]
+    for (let i = 0; i < 119; i++) parejas.push((await agregarProductoShopify(e)).variantLinkId!)
+    const variantes = await prisma.shopifyVariantLink.findMany({
+      where: { id: { in: parejas } },
+      select: { shopifyVariantId: true },
+      take: 200,
+    })
+    const line_items = variantes.map(v => ({ variant_id: Number(v.shopifyVariantId.split('/').pop()), quantity: 1 }))
+    const id = await evento(e, 'orders/create', { line_items })
+    const leidas: number[] = []
+    // Shopify lento: cada lectura tarda 1.2 s. Con el plazo de abajo cabe UNA lectura por pasada (la segunda pide 2 s).
+    const fetchLevels = jest.fn(async (s: unknown, items: Array<{ inventoryItemId: string; shopifyLocationId: string }>) => {
+      leidas.push(items.length)
+      await dormir(1_200)
+      return nivelesFalsos(() => nivel(7))(s as never, items)
+    })
+    const hechasEnElEvento = async () => {
+      const avance = ((await ev(id)).payload as { _avoqadoAvance?: Record<string, { vistas: string[] } | null> })._avoqadoAvance ?? {}
+      return Object.values(avance).reduce((n, a) => n + (a?.vistas.length ?? 0), 0)
+    }
+    let pasadas = 0
+    let resultado = ''
+    let antes = 0
+    let conAvance = 0
+    for (; pasadas < 25 && resultado !== 'PROCESSED'; pasadas++) {
+      resultado = await processShopifyEvent(id, await procesando(id), {
+        ...conAcceso,
+        fetchLevels: fetchLevels as never,
+        vence: Date.now() + MIN_HTTP_MS + 1_500,
+      })
+      if (resultado !== 'PROCESSED') {
+        const ahora = await hechasEnElEvento()
+        expect(ahora).toBeGreaterThanOrEqual(antes) // lo hecho no se pierde entre pasadas
+        if (ahora > antes) conAvance++
+        antes = ahora
+        expect(await ev(id)).toMatchObject({ status: 'RECEIVED', attemptCount: 0 }) // sin tiempo no gasta intento
+      }
+    }
+    expect(resultado).toBe('PROCESSED')
+    expect(pasadas).toBeGreaterThanOrEqual(3) // 120 variantes, una tanda de 50 por pasada a lo más
+    expect(conAvance).toBeGreaterThanOrEqual(2) // y las pasadas a medias guardaron su avance
+    expect(Math.max(...leidas)).toBeLessThanOrEqual(50) // nunca lee el pedido entero de una vez
+    // Lo ya aplicado no se vuelve a leer: a lo más se relee la tanda que quedó a medias en cada corte.
+    expect(leidas.reduce((a, b) => a + b, 0)).toBeLessThan(120 + 50 * pasadas)
+    const stocks = await prisma.inventory.findMany({ where: { venueId: e.venueId }, select: { currentStock: true }, take: 200 })
+    expect(stocks).toHaveLength(120)
+    expect(stocks.every(s => s.currentStock.toString() === '7')).toBe(true)
+  })
+
+  it('P2-3 (regresión): un pedido de pocas variantes se resuelve en UNA pasada sin escribir avance en el evento', async () => {
+    const e = await escenario()
+    const otra = await agregarProductoShopify(e)
+    const v2 = await prisma.shopifyVariantLink.findUniqueOrThrow({ where: { id: otra.variantLinkId! } })
+    const id = await evento(e, 'orders/create', {
+      line_items: [
+        { variant_id: 1, quantity: 1 },
+        { variant_id: Number(v2.shopifyVariantId.split('/').pop()), quantity: 1 },
+      ],
+    })
+    expect(await processShopifyEvent(id, await procesando(id), { ...conAcceso, fetchLevels: nivelesFalsos(() => nivel(4)) })).toBe(
+      'PROCESSED',
+    )
+    expect(await stock(e)).toBe('4')
+    expect(((await ev(id)).payload as { _avoqadoAvance?: unknown })._avoqadoAvance).toBeUndefined()
   })
 
   it('Minor 4: una lista de renglones que no es arreglo no tumba el drenado ni el proceso: cuenta como «sin variantes»', async () => {
