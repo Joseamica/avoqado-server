@@ -313,7 +313,7 @@ export async function suspenderParejaPorReceta(
     pareja.suspendedReason === 'NIVEL_INEXISTENTE' &&
     !!producto.deletedAt &&
     producto.deletedBy === SHOPIFY_SERVICE_ACTOR.servicePrincipalId
-  if (!archivadoConEnvio) await suspendPair(db, pareja.id, 'SIN_INVENTARIO')
+  if (!archivadoConEnvio) await suspendPair(db, pareja.id, 'SIN_INVENTARIO', 'METODO_RECETA') // R-M2: el motivo real
 }
 
 /**

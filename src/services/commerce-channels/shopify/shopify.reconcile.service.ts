@@ -43,6 +43,7 @@ import {
   sincronizableBajoCandado,
   suspendPair,
   type CercoShopify,
+  type MotivoNoSincronizable,
   type NivelLeido,
 } from './shopify.mirror.service'
 import { notifyShopify } from './shopify.notify.service'
@@ -1055,9 +1056,21 @@ const yaResuelta = () => new ConflictError('Esa revisión ya se resolvió: recar
 const sinPareja = () => new ConflictError('Ese producto ya no está ligado a Shopify: recarga la lista', 'SHOPIFY_SIN_PAREJA')
 const suspendida = () =>
   new ConflictError('La pareja de este producto está suspendida: revísala en «Productos sin pareja»', 'SHOPIFY_PAREJA_SUSPENDIDA')
-const sinInventario = () =>
+/** R-M2: el 409 dice por qué el producto ya no se sincroniza (el mismo motivo que la incidencia en «Productos sin pareja»). */
+const TEXTO_SIN_INVENTARIO: Record<MotivoNoSincronizable, string> = {
+  METODO_RECETA: 'Ese producto ahora se controla por receta en Avoqado: vuelve a ponerlo por cantidad en su ficha y vuelve a resolver',
+  UNIDAD_NO_PIEZA:
+    'Ese producto se mide en otra unidad en Avoqado (kilos, litros) y Shopify sólo cuenta piezas: ponlo por pieza en su ficha y vuelve a resolver',
+  TIPO_SIN_INVENTARIO:
+    'Ese producto es de un tipo que no lleva inventario en Avoqado (como un servicio): no se puede sincronizar con Shopify',
+  SIN_INVENTARIO_EN_AVOQADO:
+    'Ese producto ya no lleva control de existencias en Avoqado: vuelve a activarle el inventario por cantidad en su ficha y vuelve a resolver',
+}
+const sinInventario = (motivo?: MotivoNoSincronizable) =>
   new ConflictError(
-    'Ese producto ya no lleva existencias por cantidad en Avoqado: vuelve a activarlas en su ficha y vuelve a resolver',
+    motivo
+      ? TEXTO_SIN_INVENTARIO[motivo]
+      : 'Ese producto ya no lleva existencias por cantidad en Avoqado: vuelve a activarlas en su ficha y vuelve a resolver',
     'SHOPIFY_SIN_INVENTARIO',
   )
 
@@ -1157,7 +1170,7 @@ async function resolver(i: EntradaResolucion, deps: DepsResolucion): Promise<{ e
   const filas = { productId: item.productId, locationLinkId: link.id, generation: cerco.generation } // T3: generación vigente
   type Salida =
     | { cambio: true }
-    | { cambio: 'SIN_INVENTARIO' }
+    | { cambio: 'SIN_INVENTARIO'; motivo: MotivoNoSincronizable }
     | { cambio: false; A: Prisma.Decimal; final: Prisma.Decimal; envio: string | null; descartadas: number; reactivada: boolean }
   const res = await prisma.$transaction(
     async (tx): Promise<Salida> => {
@@ -1198,10 +1211,12 @@ async function resolver(i: EntradaResolucion, deps: DepsResolucion): Promise<{ e
       const sincronizable = await sincronizableBajoCandado(tx, {
         productId: item.productId,
         suspendedReason: p.suspendedReason as ShopifySuspendReason | null,
+        venueId: i.venueId,
+        shopifyVariantId: pareja.shopifyVariantId,
       })
       if (sincronizable.motivo) {
-        if (!sincronizable.dejarComoEsta) await suspendPair(tx, pareja.id, 'SIN_INVENTARIO')
-        return { cambio: 'SIN_INVENTARIO' }
+        if (!sincronizable.dejarComoEsta) await suspendPair(tx, pareja.id, 'SIN_INVENTARIO', sincronizable.motivo)
+        return { cambio: 'SIN_INVENTARIO', motivo: sincronizable.motivo }
       }
       const vivas = await tx.shopifyStockOutbox.count({ where: { ...filas, status: { in: VIVAS } } })
       if (vivas > 0)
@@ -1292,7 +1307,7 @@ async function resolver(i: EntradaResolucion, deps: DepsResolucion): Promise<{ e
     },
     { timeout: 15_000 }, // el plan se pregunta dentro, por otra conexión del pool
   )
-  if (res.cambio === 'SIN_INVENTARIO') throw sinInventario()
+  if (res.cambio === 'SIN_INVENTARIO') throw sinInventario(res.motivo)
   if (res.cambio) {
     throw new ConflictError(
       'Los números cambiaron desde que los viste: ya se muestran los de ahora; revísalos y vuelve a elegir',

@@ -500,19 +500,36 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     enOrden(cuerpo(mirror, 'export async function initializePair('), [
       'bloquearPareja(tx',
       'sincronizableBajoCandado(tx, p)',
-      "suspendPair(tx, p.id, 'SIN_INVENTARIO')",
+      "suspendPair(tx, p.id, 'SIN_INVENTARIO', sincronizable.motivo)",
       'productBlocked(tx',
     ])
     enOrden(cuerpo(mirror, 'export async function applyShopifyLevel('), ['bloquearPareja(tx', 'sincronizableBajoCandado(tx, p)'])
     enOrden(cuerpo(leer(`${SHOPIFY}/shopify.reconcile.service.ts`), 'async function resolver('), [
       'FOR UPDATE',
       'sincronizableBajoCandado(tx,',
-      "return { cambio: 'SIN_INVENTARIO' }",
+      "return { cambio: 'SIN_INVENTARIO', motivo: sincronizable.motivo }",
     ])
     // UNA regla: el catálogo no la copia.
     const catalogo = leer(`${SHOPIFY}/shopify.catalog.service.ts`)
     expect(catalogo).toContain('const inelegible = (p: Candidato): ShopifyIssueReason | null => motivoNoSincronizable(p)')
     expect(catalogo).not.toContain("return 'METODO_RECETA'")
+  })
+
+  it('🔴 R-M2: la pareja queda SIN_INVENTARIO pero la incidencia y el 409 dicen el motivo real, y la reactivación los limpia todos', () => {
+    contieneTodas([
+      'la incidencia de «Productos sin pareja» lleva el motivo REAL con su propio texto: `METODO_RECETA`, `UNIDAD_NO_PIEZA`, `TIPO_SIN_INVENTARIO` o `SIN_INVENTARIO_EN_AVOQADO`',
+      'El 409 `SHOPIFY_SIN_INVENTARIO` de la resolución nombra ese mismo motivo',
+      'al reactivarse se limpian todos (`MOTIVOS_DE_SUSPENSION`)',
+    ])
+    const mirror = leer(`${SHOPIFY}/shopify.mirror.service.ts`)
+    expect(mirror).toMatch(/MOTIVOS_DE_SUSPENSION: ShopifyIssueReason\[\] = \[[^\]]*'NO_RASTREADO',\s*\.\.\.MOTIVOS_NO_SINCRONIZABLE/)
+    expect(cuerpo(mirror, 'export async function suspendPair(')).toContain(
+      "reason === 'SIN_INVENTARIO' && motivo ? motivo : ISSUE_DE[reason]",
+    )
+    expect(cuerpo(leer(`${SHOPIFY}/shopify.store.service.ts`), 'export async function suspenderParejaPorReceta(')).toContain(
+      "suspendPair(db, pareja.id, 'SIN_INVENTARIO', 'METODO_RECETA')",
+    )
+    expect(cuerpo(leer(`${SHOPIFY}/shopify.reconcile.service.ts`), 'async function resolver(')).toContain('throw sinInventario(res.motivo)')
   })
 
   it('L5: la línea retenida se lee en el detalle del conteo (móvil, dashboard y MCP) y la regla dice dónde', () => {
@@ -665,8 +682,8 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
       'shopify.crypto.ts:32': [de('crypto'), 'export function formaDeFirmaOAuth('],
       'catalog.service.ts:67': [de('catalog.service'), 'export const FILTRO_ESTADO'],
       'catalog.service.ts:416': [de('catalog.service'), 'async function bloquearProductos('],
-      'reconcile.service.ts:1255': [de('reconcile.service'), 'tx.shopifyStockOutbox.create('],
-      'reconcile.service.ts:716': [de('reconcile.service'), 'async function abrirRevision('],
+      'reconcile.service.ts:1270': [de('reconcile.service'), 'tx.shopifyStockOutbox.create('],
+      'reconcile.service.ts:717': [de('reconcile.service'), 'async function abrirRevision('],
       'mirror.service.ts:5': [de('mirror.service'), 'Invariante operativo'],
       'mirror.service.ts:372': [de('mirror.service'), 'export async function marcarFaltaPermiso('],
       'outbox.service.ts:166': [de('outbox.service'), 'async function conFilaPropia'],

@@ -51,8 +51,10 @@ it('a receta: la pareja queda SIN_INVENTARIO, el Inventory se borra, nada viaja 
   expect(await prisma.shopifyStockOutbox.findMany({ where: { productId: e.productId }, select: { status: true }, take: 5 })).toEqual([
     { status: 'DISCARDED' },
   ])
+  // R-M2: la pareja queda SIN_INVENTARIO, pero «Productos sin pareja» dice el motivo real: pasó a receta.
   expect(await prisma.shopifyImportIssue.findFirst({ where: { venueId: e.venueId } })).toMatchObject({
-    reason: 'SIN_INVENTARIO',
+    reason: 'METODO_RECETA',
+    detail: expect.stringMatching(/receta/),
     productId: e.productId,
   })
 })
@@ -73,7 +75,7 @@ it('de vuelta a cantidad + cuadre ⇒ se reactiva COMPARANDO y abre «Por revisa
   for (let i = 0; i < 10 && !terminado; i++) terminado = (await reconcileVenue(e.venueId, deps)).terminado
   expect(terminado).toBe(true)
   expect((await pareja(e)).suspendedReason).toBeNull()
-  expect(await prisma.shopifyImportIssue.count({ where: { venueId: e.venueId, reason: 'SIN_INVENTARIO' } })).toBe(0) // ya no está en «Productos sin pareja»
+  expect(await prisma.shopifyImportIssue.count({ where: { venueId: e.venueId } })).toBe(0) // ya no está en «Productos sin pareja», con ningún motivo
   expect(await prisma.shopifyReviewItem.findFirst({ where: { productId: e.productId, status: 'OPEN' } })).toMatchObject({
     reason: 'REACTIVADA',
     shopifyQty: 10,
@@ -182,7 +184,7 @@ describe('setProductInventoryMethod: el otro camino a receta (PUT inventory-meth
       { status: 'DISCARDED' },
     ])
     expect(await prisma.shopifyImportIssue.findFirst({ where: { venueId: e.venueId } })).toMatchObject({
-      reason: 'SIN_INVENTARIO',
+      reason: 'METODO_RECETA',
       productId: e.productId,
     })
     expect(await prisma.product.findUniqueOrThrow({ where: { id: e.productId } })).toMatchObject({ inventoryMethod: 'RECIPE' })
@@ -288,7 +290,7 @@ describe('FF-I1: pasar a receta por setProductInventoryMethod conserva la fila d
     expect(await prisma.shopifyReviewItem.count({ where: { productId: e.productId } })).toBe(0)
     expect(await stockDe(e)).toBe('10')
     expect(await movimientos(e)).toBe(antes)
-    expect(await prisma.shopifyImportIssue.findFirst({ where: { venueId: e.venueId } })).toMatchObject({ reason: 'SIN_INVENTARIO' })
+    expect(await prisma.shopifyImportIssue.findFirst({ where: { venueId: e.venueId } })).toMatchObject({ reason: 'METODO_RECETA' })
   })
 
   it('a receta → products/update (syncShopifyProduct) con la variante en Shopify: el sync no la revive', async () => {
@@ -371,5 +373,118 @@ describe('FF-I1: pasar a receta por setProductInventoryMethod conserva la fila d
       reason: 'REACTIVADA',
       shopifyQty: 7,
     })
+    expect(await prisma.shopifyImportIssue.count({ where: { venueId: e.venueId } })).toBe(0) // R-M2: la de «receta» se limpia
+  })
+
+  /** Los cuatro motivos por los que un producto deja de sincronizarse, cómo se provoca cada uno y cómo se reconoce su texto. */
+  const inelegibles = [
+    ['METODO_RECETA', { inventoryMethod: 'RECIPE' }, /receta/],
+    ['UNIDAD_NO_PIEZA', { unit: 'KILOGRAM' }, /otra unidad/],
+    ['TIPO_SIN_INVENTARIO', { type: 'APPOINTMENTS_SERVICE' }, /no lleva inventario/],
+    ['SIN_INVENTARIO_EN_AVOQADO', { trackInventory: false }, /control de existencias/],
+  ] as const
+  const incidencia = (e: EscenarioShopify) => prisma.shopifyImportIssue.findFirst({ where: { venueId: e.venueId } })
+
+  it.each(inelegibles)(
+    '🔴 R-M2 (%s): la pareja queda SIN_INVENTARIO, pero «Productos sin pareja» dice el motivo real con su propio texto',
+    async (motivo, cambio, texto) => {
+      const e = await escenario()
+      await prisma.product.update({ where: { id: e.productId }, data: cambio }) // sin los ayudantes de B7: la pareja sigue viva
+      const o = await applyShopifyLevel(
+        { variantLinkId: e.variantLinkId, nivel: nivel(7), fetchedAt: new Date(), cause: 'aviso' },
+        { hasAccess: conPlan },
+      )
+      expect(o).toBe('SUSPENDIDO')
+      expect((await pareja(e)).suspendedReason).toBe('SIN_INVENTARIO')
+      expect(await incidencia(e)).toMatchObject({ reason: motivo, detail: expect.stringMatching(texto), productId: e.productId })
+    },
+  )
+
+  it.each(inelegibles)(
+    '🔴 R-M2 (%s): resolver una duda muerta de un producto que dejó de sincronizarse contesta 409 con el motivo real',
+    async (motivo, cambio, texto) => {
+      const e = await escenario()
+      await prisma.$executeRaw`UPDATE "Inventory" SET "currentStock" = "currentStock" - 1 WHERE id = ${e.inventoryId}` // A = 9, fila −1
+      await prisma.shopifyStockOutbox.updateMany({
+        where: { productId: e.productId },
+        data: {
+          status: 'DEAD_LETTER',
+          ambiguous: true,
+          sentInventoryItemId: 'gid://shopify/InventoryItem/1',
+          sentLocationId: 'gid://shopify/Location/1',
+          firstAttemptAt: new Date(),
+          processedAt: new Date(),
+          lastError: 'VENTANA_24H',
+        },
+      })
+      await prisma.$transaction(tx => suspendPair(tx, e.variantLinkId, 'NIVEL_INEXISTENTE'))
+      await cuadrarCon(e, 10)
+      const r = await prisma.shopifyReviewItem.findFirstOrThrow({ where: { productId: e.productId, status: 'OPEN' } })
+      await prisma.product.update({ where: { id: e.productId }, data: cambio })
+      const resolver = resolveShopifyReview(
+        {
+          venueId: e.venueId,
+          reviewId: r.id,
+          choice: 'AVOQADO',
+          expectedAvoqadoQty: r.avoqadoQty.toString(),
+          expectedShopifyQty: r.shopifyQty,
+          staffId: e.staffId,
+        },
+        { fetchLevels: nivelesFalsos(() => nivel(10)), hasAccess: conPlan },
+      )
+      await expect(resolver).rejects.toMatchObject({
+        statusCode: 409,
+        code: 'SHOPIFY_SIN_INVENTARIO',
+        message: expect.stringMatching(texto),
+      })
+      expect((await pareja(e)).suspendedReason).toBe('SIN_INVENTARIO')
+      expect(await incidencia(e)).toMatchObject({ reason: motivo })
+    },
+  )
+
+  it('🔴 R-M2: al reactivarse por la resolución (U2), la incidencia con el motivo real se limpia', async () => {
+    const e = await escenario()
+    await prisma.$executeRaw`UPDATE "Inventory" SET "currentStock" = "currentStock" - 1 WHERE id = ${e.inventoryId}` // A = 9, fila −1
+    await prisma.shopifyStockOutbox.updateMany({
+      where: { productId: e.productId },
+      data: {
+        status: 'DEAD_LETTER',
+        ambiguous: true,
+        sentInventoryItemId: 'gid://shopify/InventoryItem/1',
+        sentLocationId: 'gid://shopify/Location/1',
+        firstAttemptAt: new Date(),
+        processedAt: new Date(),
+        lastError: 'VENTANA_24H',
+      },
+    })
+    // Suspendida antes, cuando se medía en kilos; el producto ya volvió a contarse por pieza.
+    await prisma.$transaction(tx => suspendPair(tx, e.variantLinkId, 'SIN_INVENTARIO'))
+    await prisma.shopifyImportIssue.updateMany({ where: { venueId: e.venueId }, data: { reason: 'UNIDAD_NO_PIEZA' } })
+    await cuadrarCon(e, 10)
+    const r = await prisma.shopifyReviewItem.findFirstOrThrow({ where: { productId: e.productId, status: 'OPEN' } })
+    expect(r).toMatchObject({ reason: 'INCIERTO' })
+    await resolveShopifyReview(
+      {
+        venueId: e.venueId,
+        reviewId: r.id,
+        choice: 'SHOPIFY',
+        expectedAvoqadoQty: r.avoqadoQty.toString(),
+        expectedShopifyQty: r.shopifyQty,
+        staffId: e.staffId,
+      },
+      { fetchLevels: nivelesFalsos(() => nivel(10)), hasAccess: conPlan },
+    )
+    expect((await pareja(e)).suspendedReason).toBeNull()
+    expect(await prisma.shopifyImportIssue.count({ where: { venueId: e.venueId } })).toBe(0)
+  })
+
+  it('🔴 R-M2: si mientras sigue suspendida cambia el motivo (de receta a kilos), la incidencia dice el de hoy', async () => {
+    const e = await escenario()
+    await setProductInventoryMethod(e.venueId, e.productId, 'RECIPE')
+    expect(await incidencia(e)).toMatchObject({ reason: 'METODO_RECETA' })
+    await prisma.product.update({ where: { id: e.productId }, data: { inventoryMethod: 'QUANTITY', unit: 'KILOGRAM' } })
+    await cuadrarCon(e, 7)
+    expect((await pareja(e)).suspendedReason).toBe('SIN_INVENTARIO')
+    expect(await incidencia(e)).toMatchObject({ reason: 'UNIDAD_NO_PIEZA', detail: expect.stringMatching(/otra unidad/) })
   })
 })

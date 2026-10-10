@@ -410,10 +410,27 @@ const ISSUE_DE: Record<ShopifySuspendReason, ShopifyIssueReason> = {
   NIVEL_INEXISTENTE: 'NIVEL_INEXISTENTE',
   NO_RASTREADO: 'NO_RASTREADO',
 }
-/** Los motivos de «Productos sin pareja» que deja `suspendPair`; los limpia quien reactiva la pareja (A y la resolución de B). */
-export const MOTIVOS_DE_SUSPENSION: ShopifyIssueReason[] = ['SIN_INVENTARIO', 'NIVEL_INEXISTENTE', 'NO_RASTREADO']
 
 // ─── ¿Se puede sincronizar este producto? (FF-I1) ───────────────────────────────────────────────────────────
+
+/** Por qué un producto no se sincroniza con Shopify (R-M2: es el motivo que ve el dueño en «Productos sin pareja»). */
+export type MotivoNoSincronizable = 'TIPO_SIN_INVENTARIO' | 'METODO_RECETA' | 'SIN_INVENTARIO_EN_AVOQADO' | 'UNIDAD_NO_PIEZA'
+const MOTIVOS_NO_SINCRONIZABLE: MotivoNoSincronizable[] = [
+  'TIPO_SIN_INVENTARIO',
+  'METODO_RECETA',
+  'SIN_INVENTARIO_EN_AVOQADO',
+  'UNIDAD_NO_PIEZA',
+]
+/**
+ * Los motivos de «Productos sin pareja» que deja `suspendPair` (los de nivel y, para `SIN_INVENTARIO`, el motivo real del
+ * producto, R-M2); los limpia quien reactiva la pareja (A y la resolución de B).
+ */
+export const MOTIVOS_DE_SUSPENSION: ShopifyIssueReason[] = [
+  'SIN_INVENTARIO',
+  'NIVEL_INEXISTENTE',
+  'NO_RASTREADO',
+  ...MOTIVOS_NO_SINCRONIZABLE,
+]
 
 const UNIDADES_PIEZA: string[] = ['UNIT', 'PIECE']
 type ProductoSincronizable = { type: string; trackInventory: boolean; inventoryMethod: string | null; unit: string | null }
@@ -424,7 +441,7 @@ type ProductoSincronizable = { type: string; trackInventory: boolean; inventoryM
  * usan el catálogo al ligar y el espejo al iniciar, aplicar o reactivar una pareja. Una fila de `Inventory` no basta:
  * `setProductInventoryMethod(…)` la conserva al pasar a receta, y con ella el cuadre revivía la pareja (Shopify sobrevendía).
  */
-export function motivoNoSincronizable(p: ProductoSincronizable): ShopifyIssueReason | null {
+export function motivoNoSincronizable(p: ProductoSincronizable): MotivoNoSincronizable | null {
   if (isNonInventoriable(p.type, true)) return 'TIPO_SIN_INVENTARIO'
   if (p.inventoryMethod === 'RECIPE') return 'METODO_RECETA'
   if (!p.trackInventory || p.inventoryMethod !== 'QUANTITY') return 'SIN_INVENTARIO_EN_AVOQADO'
@@ -438,11 +455,13 @@ export function motivoNoSincronizable(p: ProductoSincronizable): ShopifyIssueRea
  * (pasar a receta, por cualquier camino) escribe el `Product` y DESPUÉS suspende la pareja bajo su candado
  * (`suspenderParejaPorReceta`): si esta tx vio el producto de antes y reactivó, aquélla la suspende en cuanto la suelta.
  * `archivadoConEnvio` es U3: un producto que el conector archivó con un envío en camino conserva `NIVEL_INEXISTENTE`.
+ * R-M2: si ya estaba suspendida por esto y el motivo cambió (de receta a kilos, por ejemplo), la incidencia se pone al día:
+ * «Productos sin pareja» dice siempre el motivo de hoy.
  */
 export async function sincronizableBajoCandado(
   tx: Prisma.TransactionClient,
-  p: { productId: string; suspendedReason: ShopifySuspendReason | null },
-): Promise<{ motivo: ShopifyIssueReason | null; dejarComoEsta: boolean }> {
+  p: { productId: string; suspendedReason: ShopifySuspendReason | null; venueId: string; shopifyVariantId: string },
+): Promise<{ motivo: MotivoNoSincronizable | null; dejarComoEsta: boolean }> {
   const prod = await tx.product.findUnique({
     where: { id: p.productId },
     select: { type: true, trackInventory: true, inventoryMethod: true, unit: true, deletedAt: true, deletedBy: true },
@@ -451,24 +470,50 @@ export async function sincronizableBajoCandado(
   const motivo = motivoNoSincronizable(prod)
   const archivadoConEnvio =
     p.suspendedReason === 'NIVEL_INEXISTENTE' && !!prod.deletedAt && prod.deletedBy === SHOPIFY_SERVICE_ACTOR.servicePrincipalId
-  // Ya suspendida por esto (cada cuadre pasa por aquí mientras siga en receta): no se reescribe nada.
+  // Ya suspendida por esto (cada cuadre pasa por aquí mientras siga en receta): sólo se pone al día el motivo, si cambió.
+  if (motivo && p.suspendedReason === 'SIN_INVENTARIO') {
+    await tx.shopifyImportIssue.updateMany({
+      where: { venueId: p.venueId, shopifyVariantId: p.shopifyVariantId, reason: { in: MOTIVOS_DE_SUSPENSION, not: motivo } },
+      data: { reason: motivo, detail: DETALLE_NO_SINCRONIZABLE[motivo] },
+    })
+  }
   return { motivo, dejarComoEsta: p.suspendedReason === 'SIN_INVENTARIO' || archivadoConEnvio }
 }
 const DETALLE: Record<ShopifySuspendReason, string> = {
   SIN_INVENTARIO:
-    'Este producto ya no lleva existencias por cantidad en Avoqado (por ejemplo, pasó a receta). La sincronización con Shopify quedó en pausa para él.',
+    'Este producto ya no tiene inventario en Avoqado. La sincronización con Shopify quedó en pausa para él; se reanuda sola cuando vuelva a tenerlo.',
   NIVEL_INEXISTENTE:
     'La variante no está activa en la ubicación de Shopify de esta sucursal. Actívala en Shopify y se reanuda sola en el siguiente cuadre.',
   NO_RASTREADO:
     'Shopify no lleva el inventario de esta variante («Rastrear cantidad» apagado). Enciéndelo en Shopify y se reanuda sola en el siguiente cuadre.',
 }
+/** R-M2: el texto de una pareja suspendida `SIN_INVENTARIO` porque su producto ya no se sincroniza, por motivo. */
+const DETALLE_NO_SINCRONIZABLE: Record<MotivoNoSincronizable, string> = {
+  METODO_RECETA:
+    'Este producto pasó a receta en Avoqado y Shopify sólo sincroniza productos contados por pieza. La sincronización quedó en pausa para él; se reanuda sola si vuelve a contarse por cantidad.',
+  UNIDAD_NO_PIEZA:
+    'Este producto se mide en otra unidad en Avoqado (kilos, litros) y Shopify sólo cuenta piezas. La sincronización quedó en pausa para él; se reanuda sola si vuelve a contarse por pieza.',
+  TIPO_SIN_INVENTARIO:
+    'Este producto es de un tipo que no lleva inventario en Avoqado (como un servicio o una clase). La sincronización con Shopify quedó en pausa para él.',
+  SIN_INVENTARIO_EN_AVOQADO:
+    'Este producto ya no lleva control de existencias en Avoqado. La sincronización con Shopify quedó en pausa para él; se reanuda sola al volver a activarle el inventario por cantidad.',
+}
 
 /**
  * Pone la pareja en pausa con su motivo y la deja en «Productos sin pareja». Descarta SÓLO lo que nunca llegó a Shopify
  * (PENDING/FAILED no ambiguas). Una IN_PROGRESS o una ambigua sigue viva: es la barrera de un envío que pudo aplicarse y
- * sólo se resuelve con su misma llave (§9.1). Nunca escribe stock ni espejo.
+ * sólo se resuelve con su misma llave (§9.1). Nunca escribe stock ni espejo. R-M2: con `SIN_INVENTARIO` y el motivo del
+ * producto (`motivoNoSincronizable`), la incidencia lleva ESE motivo y su texto (receta, unidad, tipo o sin seguimiento);
+ * la pareja sigue `SIN_INVENTARIO`, que es lo que lee el resto del conector.
  */
-export async function suspendPair(tx: Prisma.TransactionClient, variantLinkId: string, reason: ShopifySuspendReason): Promise<void> {
+export async function suspendPair(
+  tx: Prisma.TransactionClient,
+  variantLinkId: string,
+  reason: ShopifySuspendReason,
+  motivo: MotivoNoSincronizable | null = null,
+): Promise<void> {
+  const issue = reason === 'SIN_INVENTARIO' && motivo ? motivo : ISSUE_DE[reason]
+  const detail = reason === 'SIN_INVENTARIO' && motivo ? DETALLE_NO_SINCRONIZABLE[motivo] : DETALLE[reason]
   const ahora = new Date()
   const p = await tx.shopifyVariantLink.update({
     where: { id: variantLinkId },
@@ -502,11 +547,11 @@ export async function suspendPair(tx: Prisma.TransactionClient, variantLinkId: s
       shopifyProductId: p.shopifyProductId,
       title: p.product.name,
       sku: p.originalSku ?? p.product.sku,
-      reason: ISSUE_DE[reason],
-      detail: DETALLE[reason],
+      reason: issue,
+      detail,
       productId: p.productId,
     },
-    update: { reason: ISSUE_DE[reason], detail: DETALLE[reason], title: p.product.name, productId: p.productId },
+    update: { reason: issue, detail, title: p.product.name, productId: p.productId },
   })
 }
 
@@ -573,8 +618,9 @@ export async function applyShopifyLevel(
     if (!(await eventoVigente(tx, deps.cerco?.evento))) return { outcome: 'CONTEXTO_CAMBIO' }
     // FF-I1: un producto que ya no se sincroniza (receta con su fila de Inventory, sin seguimiento…) se suspende como si no
     // tuviera Inventory: lo que llegue de Shopify ya no le toca.
-    if ((await sincronizableBajoCandado(tx, p)).motivo) {
-      await suspendPair(tx, p.id, 'SIN_INVENTARIO')
+    const { motivo } = await sincronizableBajoCandado(tx, p)
+    if (motivo) {
+      await suspendPair(tx, p.id, 'SIN_INVENTARIO', motivo)
       return { outcome: 'SUSPENDIDO' }
     }
     if (input.nivel.kind !== 'OK') {
@@ -668,7 +714,7 @@ export async function initializePair(
       await bloquearInventario(tx, p.productId) // §10.3 y §12.5: pareja → Inventory → filas, antes del evento
       await bloquearFilasDelProducto(tx, p, false)
       if (!(await eventoVigente(tx, deps.cerco?.evento))) return { outcome: 'CONTEXTO_CAMBIO' }
-      await suspendPair(tx, p.id, 'SIN_INVENTARIO')
+      await suspendPair(tx, p.id, 'SIN_INVENTARIO', sincronizable.motivo)
       return { outcome: 'SUSPENDIDA' }
     }
     if (p.mirrorAt > input.fetchedAt) return { outcome: 'REINTENTAR' }

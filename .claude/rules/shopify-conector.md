@@ -83,7 +83,7 @@ efectiva** de la sucursal (si está PAUSED, manda `pausedFrom`; por eso una paus
 | DISCONNECTED o sin enlace | nada                                                            |
 
 No encola: un cambio con la marca de origen `shopify`, un delta 0, ni un `DELETE` de la fila (ver §5). El buzón lo llenan SÓLO el guardia y
-la resolución «usar Avoqado» (`reconcile.service.ts:1255`).
+la resolución «usar Avoqado» (`reconcile.service.ts:1270`).
 
 ## 3. La marca de origen: si aplicas en Avoqado algo que VINO de Shopify
 
@@ -99,12 +99,12 @@ trigger: no la uses para nada más.
   pareja iniciada y no suspendida, y TODAS sus sumas son de la generación vigente de la sucursal (T3): Σ vivas y Σ DEAD_LETTER por igual.
   Las filas de una generación vieja y las `RELIGADA_A_OTRA_TIENDA` (que quedan en la generación anterior) NO entran en la cuenta; el filtro
   por `generation` vive en `productBlocked(…)`, `liveOutboxSum(…)`, `bloquearFilasDelProducto` y `abrirRevision` (`mirror.service.ts:5`,
-  `reconcile.service.ts:716`).
+  `reconcile.service.ts:717`).
 - Una DEAD_LETTER (de la generación vigente) conserva su delta en la cuenta hasta que la resolución la descarte. Una venta que dejó
   `Inventory = 9`, espejo 10 y su `−1` en DEAD_LETTER es un estado CORRECTO, no algo que «arreglar».
 - COMPARAR con diferencia abre `REACTIVADA` con `offset = Inventory − S`; si los saldos ya coinciden, cierra en la misma tx la revisión OPEN
   del producto (`offset = 0`, §11.8).
-- El cuadre calcula `total = Inventory − espejo − Σ vivas − Σ DEAD_LETTER` (`abrirRevision`, `reconcile.service.ts:716`) y decide en este
+- El cuadre calcula `total = Inventory − espejo − Σ vivas − Σ DEAD_LETTER` (`abrirRevision`, `reconcile.service.ts:717`) y decide en este
   orden:
   - con DEAD_LETTER (aunque `total = 0`, que es el caso normal de un ATORADO): abre o actualiza `ATORADO` (`INCIERTO` si alguna es ambigua)
     con `offset = total`; nunca cierra;
@@ -176,6 +176,11 @@ ayudantes (`shopify.store.service.ts:305`).
   cuadre revivía la pareja y Shopify sobrevendía. Por eso `initializePair(…)`, `applyShopifyLevel(…)` y la resolución (U2) leen el producto
   bajo el candado de la pareja (`sincronizableBajoCandado(…)`) y, si ya no se sincroniza, suspenden con `SIN_INVENTARIO` en vez de iniciar,
   aplicar o reactivar (la resolución contesta 409 `SHOPIFY_SIN_INVENTARIO` y la revisión sigue abierta).
+- **El motivo real (R-M2):** la pareja queda `SIN_INVENTARIO` (es lo que lee el resto del conector), pero la incidencia de «Productos sin
+  pareja» lleva el motivo REAL con su propio texto: `METODO_RECETA`, `UNIDAD_NO_PIEZA`, `TIPO_SIN_INVENTARIO` o `SIN_INVENTARIO_EN_AVOQADO`,
+  el que devuelve `motivoNoSincronizable(…)` y que `suspendPair(…)` recibe (`suspenderParejaPorReceta(…)` pasa `METODO_RECETA`). El 409
+  `SHOPIFY_SIN_INVENTARIO` de la resolución nombra ese mismo motivo. Si el motivo cambia mientras sigue suspendida (de receta a kilos),
+  `sincronizableBajoCandado(…)` pone la incidencia al día; al reactivarse se limpian todos (`MOTIVOS_DE_SUSPENSION`).
 
 ## 6. Envíos en camino, dudas y generaciones (§9.1-§9.2, §10.14, §11.3, §11.7)
 
