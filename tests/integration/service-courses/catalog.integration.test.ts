@@ -4,7 +4,7 @@ import type { Feature, VenueFeature } from '@prisma/client'
 const testUrl = new URL(process.env.TEST_DATABASE_URL ?? '')
 if (
   !['localhost', '127.0.0.1', '[::1]'].includes(testUrl.hostname) ||
-  !/^\/avoqado_h1a_test_\d+_\d+$/.test(testUrl.pathname) ||
+  !/^\/avoqado_h1a_test_\d+(?:_\d+)?$/.test(testUrl.pathname) ||
   process.env.DATABASE_URL !== process.env.TEST_DATABASE_URL
 ) {
   throw new Error('Esta suite exige una base local desechable propia; no se imprimió la URL')
