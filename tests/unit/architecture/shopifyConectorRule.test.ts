@@ -562,6 +562,14 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     const carpetas = fs.readdirSync(path.join(RAIZ, 'prisma/migrations')).filter(d => d.endsWith('_shopify_conector'))
     expect(carpetas).toHaveLength(1)
     const sql = leer(`prisma/migrations/${carpetas[0]}/migration.sql`)
+    // M3: el tope de espera de candados va ANTES de todo (también del ALTER TYPE, los ALTER TABLE y las llaves foráneas), una vez.
+    const sentencias = sql
+      .replace(/--.*$/gm, '')
+      .split(';')
+      .map(s => s.trim())
+      .filter(Boolean)
+    expect(sentencias[0]).toBe("SET LOCAL lock_timeout = '5s'")
+    expect(sentencias.filter(s => s.includes('lock_timeout'))).toHaveLength(1)
     enOrden(sql, [
       "IF current_setting('avoqado.stock_origen', true) = 'shopify' THEN",
       'IF v_delta = 0 THEN',

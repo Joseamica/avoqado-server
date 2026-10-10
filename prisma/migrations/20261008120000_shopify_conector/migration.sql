@@ -1,3 +1,8 @@
+-- M3: el tope de espera de candados cubre TODA la migración: el ALTER TYPE, los ALTER TABLE, las llaves foráneas y el CREATE
+-- TRIGGER piden candado sobre tablas vivas ("Inventory", "Product", "Venue", "Organization"…). Si tardan, la migración falla
+-- en vez de formar fila delante de las ventas.
+SET LOCAL lock_timeout = '5s';
+
 -- CreateEnum
 CREATE TYPE "ShopifyAppKey" AS ENUM ('PILOTO', 'PUBLICA');
 
@@ -324,8 +329,7 @@ ALTER TABLE "ShopifyReviewItem" ADD CONSTRAINT "ShopifyReviewItem_productId_fkey
 -- Reversión (no se ejecuta aquí):
 --   DROP TRIGGER IF EXISTS "Inventory_guardia_shopify" ON "Inventory";
 --   DROP FUNCTION IF EXISTS "shopifyGuardiaInventario"();
--- CREATE TRIGGER pide candado sobre "Inventory": si tarda, la migración falla en vez de formar fila delante de las ventas.
-SET LOCAL lock_timeout = '5s';
+-- (El tope de espera de candados del CREATE TRIGGER es el `SET LOCAL lock_timeout` del principio del archivo.)
 
 -- Fase efectiva: si la sucursal está PAUSED, manda la fase de antes (pausedFrom).
 --  · CONNECTING / REVIEWING ⇒ se encola CUALQUIER producto de la sucursal (aún sin pareja): ajuste 12 bis.2.
