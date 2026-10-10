@@ -294,7 +294,9 @@ borre o cree filas de `Inventory` de productos ligados, o que cambie esos campos
     conector (contar 8 con Shopify en 10 encolaría +8 y dejaría 18 en los dos lados). Ronda 3: la fase efectiva (con `pausedFrom`, como el
     guardia) es CONNECTING o REVIEWING, porque el aplicar inicia con TOMAR TODA pareja sin iniciar, también las emparejadas, y reconectar a
     la misma tienda las deja así (con Avoqado 5 y Shopify 10, contar 8 encolaría +3 y dejaría 13). Se vuelve a contar en cuanto la pareja se
-    inicia.
+    inicia. **Hueco conocido, aceptado para el piloto:** un producto SIN pareja todavía, contado durante CONNECTING y ligado después,
+    queda en S + (contado − A); los dos lados coinciden, ningún dinero se mueve y un reconteo lo arregla. Retenerlo obligaría a frenar todo
+    conteo durante la conexión; la guía pide no contar mientras se importa el catálogo y D1/B (reescribe el aplicar) lo retoma.
   - Dos motivos (enmienda §12.1): `ENVIO_EN_CAMINO` (el producto se estaba sincronizando: vuelve a contarlo cuando termine; el texto es
     genérico porque también cubre la pareja en retención, donde puede no haber nada en camino) y `DUDA_POR_REVISAR` (sólo entre los
     bloqueados: hay una DEAD_LETTER ambigua o una revisión OPEN; recontar no sirve hasta resolverla en «Por revisar»). El motivo viaja en la

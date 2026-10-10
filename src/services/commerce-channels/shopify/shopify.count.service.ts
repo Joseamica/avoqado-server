@@ -6,7 +6,7 @@
  * siguiente jalón: si sube lo apartado, también baja el disponible, así que nada se descuenta dos veces.
  * - Con el producto bloqueado (`productBlocked ≠ LIBRE`, visto antes del HTTP o bajo candado) la línea NO se aplica
  *   (§12.1): un despacho durante la barrera no se distingue de un pedido, y cualquier número podría estar mal. El motivo
- *   es `ENVIO_EN_CAMINO` (se resuelve solo: recontar en unos minutos) o `DUDA_POR_REVISAR` (una duda muerta o una
+ *   es `ENVIO_EN_CAMINO` (el producto se estaba sincronizando: recontar cuando termine) o `DUDA_POR_REVISAR` (una duda muerta o una
  *   revisión abierta: hay que resolverla en «Por revisar» antes de recontar).
  * - Antes de las líneas (`refrescarEspejoParaConteo`), si se puede, se pone el espejo al día con el nivel vigente y
  *   `applyShopifyLevel` (con su cerco). Ese `committed` nunca se usa directo. Lo bloqueado no se pide a Shopify.

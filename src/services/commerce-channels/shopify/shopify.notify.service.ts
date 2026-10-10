@@ -103,7 +103,7 @@ export async function notifyShopify(venueId: string, aviso: ShopifyAviso, data: 
     const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { slug: true, timezone: true } })
     if (!venue) return
     const dia = formatInTimeZone(new Date(), venue.timezone || 'America/Mexico_City', 'yyyy-MM-dd')
-    // Una duda por revisar lleva su motivo en la llave: el aviso de «en unos minutos» de la mañana no esconde que hay que
+    // Una duda por revisar lleva su motivo en la llave: el aviso de «se estaba sincronizando» de la mañana no esconde que hay que
     // ir a «Por revisar». El envío en camino conserva la llave de siempre.
     const motivo = data.motivo === 'DUDA_POR_REVISAR' ? `:${data.motivo}` : ''
     const llave =
