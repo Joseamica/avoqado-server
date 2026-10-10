@@ -118,6 +118,10 @@ jobs:
           OPENAI_API_KEY: test-openai-api-key
           STRIPE_SECRET_KEY: sk_test_ci_placeholder
           NODE_ENV: test
+          # La integración corre en UN proceso (--runInBand) y la memoria se acumula archivo tras archivo. Con 331
+          # archivos el tope por defecto (~4 GB) se agotó en el 290 (run 38042072801, exit 134, cero pruebas fallidas);
+          # develop solo, con 315, ya va cerca. 8 GB es lo mismo que usa test:unit; el runner trae 16 GB.
+          NODE_OPTIONS: --max-old-space-size=8192
 
       - name: 📋 Get package version
         id: package-version
