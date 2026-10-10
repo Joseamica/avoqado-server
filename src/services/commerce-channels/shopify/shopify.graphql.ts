@@ -69,6 +69,9 @@ async function llamar<T>(
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...headers },
       body: JSON.stringify(payload),
+      // M1: la petición lleva el token o el client_secret: jamás se sigue una redirección (fetch la reenviaría a otro host
+      // con los mismos encabezados y cuerpo). Si Shopify redirige, fetch lanza y sale como falla de red ambigua.
+      redirect: 'error',
       // El llamador puede acortarlo (lo que le queda de presupuesto a su fase, N17 de B), nunca alargarlo.
       signal: AbortSignal.timeout(Math.max(1, Math.min(SHOPIFY_TIMEOUT_MS, timeoutMs))),
     })

@@ -153,6 +153,17 @@ describe('shopifyGraphql', () => {
     expect(Date.now() - inicio).toBeLessThan(5_000) // el default es 20 s
   })
 
+  it('🔴 M1: nunca sigue una redirección con el token puesto (redirect: error); si llega una, es una falla de red ambigua', async () => {
+    fetchMock.mockResolvedValue(respuesta(200, { data: { shop: { name: 'X' } } }))
+    await llamar()
+    expect(fetchMock.mock.calls[0][1].redirect).toBe('error')
+    // Así contesta fetch (undici) cuando el servidor redirige y `redirect` es 'error'.
+    fetchMock.mockRejectedValueOnce(new TypeError('fetch failed', { cause: new Error('unexpected redirect') }))
+    const r = await llamar()
+    expect(r).toMatchObject({ ok: false, code: 'NETWORK', retryable: true, ambiguous: true })
+    expect(JSON.stringify(r)).not.toContain('tok-secreto')
+  })
+
   it('sin datos de cupo, la tienda se da por libre', () => {
     expect(shopifyThrottleOk('nunca-vista.myshopify.com')).toBe(true)
   })
@@ -183,6 +194,7 @@ describe('exchangeOAuthCode', () => {
     const [url, init] = fetchMock.mock.calls[0]
     expect(url).toBe('https://t.myshopify.com/admin/oauth/access_token')
     expect(JSON.parse(init.body)).toEqual({ client_id: 'cliente', client_secret: 'secreto-app', code: 'codigo' })
+    expect(init.redirect).toBe('error') // M1: el client_secret nunca viaja a otro host por una redirección
   })
 
   it('un 400 no se reintenta y no filtra el secreto', async () => {
