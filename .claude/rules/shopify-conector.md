@@ -83,7 +83,7 @@ efectiva** de la sucursal (si está PAUSED, manda `pausedFrom`; por eso una paus
 | DISCONNECTED o sin enlace | nada                                                            |
 
 No encola: un cambio con la marca de origen `shopify`, un delta 0, ni un `DELETE` de la fila (ver §5). El buzón lo llenan SÓLO el guardia y
-la resolución «usar Avoqado» (`reconcile.service.ts:1208`).
+la resolución «usar Avoqado» (`reconcile.service.ts:1255`).
 
 ## 3. La marca de origen: si aplicas en Avoqado algo que VINO de Shopify
 
@@ -99,12 +99,12 @@ trigger: no la uses para nada más.
   pareja iniciada y no suspendida, y TODAS sus sumas son de la generación vigente de la sucursal (T3): Σ vivas y Σ DEAD_LETTER por igual.
   Las filas de una generación vieja y las `RELIGADA_A_OTRA_TIENDA` (que quedan en la generación anterior) NO entran en la cuenta; el filtro
   por `generation` vive en `productBlocked(…)`, `liveOutboxSum(…)`, `bloquearFilasDelProducto` y `abrirRevision` (`mirror.service.ts:5`,
-  `reconcile.service.ts:669`).
+  `reconcile.service.ts:716`).
 - Una DEAD_LETTER (de la generación vigente) conserva su delta en la cuenta hasta que la resolución la descarte. Una venta que dejó
   `Inventory = 9`, espejo 10 y su `−1` en DEAD_LETTER es un estado CORRECTO, no algo que «arreglar».
 - COMPARAR con diferencia abre `REACTIVADA` con `offset = Inventory − S`; si los saldos ya coinciden, cierra en la misma tx la revisión OPEN
   del producto (`offset = 0`, §11.8).
-- El cuadre calcula `total = Inventory − espejo − Σ vivas − Σ DEAD_LETTER` (`abrirRevision`, `reconcile.service.ts:669`) y decide en este
+- El cuadre calcula `total = Inventory − espejo − Σ vivas − Σ DEAD_LETTER` (`abrirRevision`, `reconcile.service.ts:716`) y decide en este
   orden:
   - con DEAD_LETTER (aunque `total = 0`, que es el caso normal de un ATORADO): abre o actualiza `ATORADO` (`INCIERTO` si alguna es ambigua)
     con `offset = total`; nunca cierra;
@@ -228,13 +228,17 @@ ayudantes (`shopify.store.service.ts:305`).
   - con una fila VIVA ambigua la vuelta no se da por buena: se empieza otra (en 10 min), porque esa fila todavía puede llegar;
   - una DEAD_LETTER no detiene la vuelta: ya no puede llegar y queda en «Por revisar» (`ATORADO` o `INCIERTO`) para que la decida una
     persona.
-- **Bajas del barrido (FF-I2):** lo que el barrido completo no vio NO se da por borrado sin más, porque la búsqueda de Shopify puede
-  devolver 0 en silencio (C10). Dos defensas: (a) si no se vio NINGUNA pareja, o más de 10 y más del 20 %, el barrido no archiva nada: se
-  salta (`BAJA_MASIVA`, al log de errores como todo barrido saltado) y avisa `BARRIDO_OMITIDO`; (b) cada baja se confirma con una lectura
-  directa por id (`confirmarBajas(…)`, la consulta `nodes` por ids, sin búsqueda): sólo se archiva lo que Shopify dice que ya no existe o
-  cuyo producto está `ARCHIVED`; lo que sigue se da por visto. El sync de un producto (`syncShopifyProduct(…)`) confirma igual sus
-  huérfanas. Restaurar mira sólo `deletedBy = SHOPIFY_SYNC` (lo escribe sólo el conector), sin importar `originSystem`: el catálogo del
-  piloto lo subió el cargador CSV (`AVOQADO`).
+- **Bajas del barrido (FF-I2, R-I2b):** lo que el barrido completo no vio NO se da por borrado sin más, porque la búsqueda de Shopify puede
+  devolver 0 en silencio (C10). La protección es la confirmación por id: cada baja se confirma con una lectura directa por id
+  (`confirmarBajas(…)`, la consulta `nodes` por ids, de 50 en 50 y dentro del vencimiento de la unidad, sin búsqueda): sólo se archiva lo
+  que Shopify dice que ya no existe o cuyo producto está `ARCHIVED`; lo que sigue se da por visto. Si la lectura falla, no se archiva nada
+  (a la 5ª falla, la vuelta sigue sin bajas). Cuando la baja parece masiva (no se vio NINGUNA pareja, o más de 10 y más del 20 %), igual se
+  confirma por id, pero la vuelta archiva a lo más `TOPE_BAJAS_CON_DUDA` (20) y deja el resto para las siguientes: una baja masiva de verdad
+  se drena en unas vueltas (un catálogo de UN producto borrado también se archiva) y una búsqueda rota no archiva nada. Va al log de errores
+  (`BAJA_MASIVA`, «N de M») y avisa `BARRIDO_OMITIDO` sólo si todo lo confirmado sigue en Shopify (la búsqueda parece rota) o si la lectura
+  directa no se pudo hacer. La cuenta de lo apartado vive en el mismo cursor (`BAJAS|n`). El sync de un producto (`syncShopifyProduct(…)`)
+  confirma igual sus huérfanas. Restaurar mira sólo `deletedBy = SHOPIFY_SYNC` (lo escribe sólo el conector), sin importar `originSystem`:
+  el catálogo del piloto lo subió el cargador CSV (`AVOQADO`).
 - Qué sucursal cuadra el worker: ACTIVE, con su tienda ACTIVE, con acceso al plan (sin plan se pausa guardando la fase) y sin `importError`
   terminal (`FALTA_PERMISO`, `CATALOGO_MUY_GRANDE`, `CATALOGO_MAESTRO`). Un pedido sobre otra se queda guardado (la bandera es durable) y
   corre cuando vuelva a ser elegible.

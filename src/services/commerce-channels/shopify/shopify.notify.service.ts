@@ -14,8 +14,16 @@ export type ShopifyAviso =
   | 'FALTA_PERMISO'
   | 'CONTEO_NO_APLICADO'
   | 'BARRIDO_OMITIDO'
-/** `motivo` (sólo CONTEO_NO_APLICADO): por qué no se aplicó la línea del conteo (§12.1); cambia lo que hay que hacer. */
-type Datos = { productName?: string; count?: number; productId?: string; motivo?: 'ENVIO_EN_CAMINO' | 'DUDA_POR_REVISAR' }
+/**
+ * `motivo`: en CONTEO_NO_APLICADO, por qué no se aplicó la línea del conteo (§12.1; cambia lo que hay que hacer); en
+ * BARRIDO_OMITIDO, si lo que la búsqueda no trajo sigue en Shopify o no se pudo confirmar (R-I2b).
+ */
+type Datos = {
+  productName?: string
+  count?: number
+  productId?: string
+  motivo?: 'ENVIO_EN_CAMINO' | 'DUDA_POR_REVISAR' | 'BUSQUEDA_ROTA' | 'SIN_CONFIRMAR'
+}
 
 const TANDA = 50
 /** Avisos que se deduplican por producto además de por día (§12.1): un conteo no aplicado de otro producto sí avisa. */
@@ -68,10 +76,14 @@ const TEXTOS: Record<ShopifyAviso, (d: Datos) => { title: string; message: strin
         : `El conteo de ${d.productName ?? 'un producto'} no se aplicó: había un cambio en camino a Shopify. Vuelve a contarlo en unos minutos.`,
     priority: NotificationPriority.HIGH,
   }),
-  // FF-I2: el barrido no vio casi nada de la tienda (la búsqueda de Shopify pudo fallar en silencio) y no dio de baja nada.
+  // R-I2b: el barrido no vio buena parte de la tienda y no dio de baja nada: lo que no trajo la búsqueda sigue existiendo
+  // (la búsqueda de Shopify parece rota, C10) o no se pudo confirmar uno por uno. La cuenta es de variantes (parejas).
   BARRIDO_OMITIDO: d => ({
     title: 'No pudimos revisar tu catálogo de Shopify',
-    message: `Shopify no nos mostró ${cuantos(d.count, 'producto', 'productos')} de tu tienda, así que esta vez no dimos de baja ninguno en Avoqado. Tus ventas y el stock se siguen sincronizando. Si los quitaste de Shopify a propósito, se darán de baja conforme Shopify nos avise de cada uno.`,
+    message:
+      d.motivo === 'SIN_CONFIRMAR'
+        ? `Shopify no nos mostró ${cuantos(d.count, 'producto (variante)', 'productos (variantes)')} de tu tienda y no pudimos confirmar uno por uno si siguen existiendo, así que no dimos de baja ninguno. Tus ventas y el stock se siguen sincronizando; lo volvemos a revisar en el siguiente cuadre.`
+        : `Shopify no nos mostró ${cuantos(d.count, 'producto (variante)', 'productos (variantes)')} de tu tienda, pero al preguntarle uno por uno siguen existiendo, así que no dimos de baja ninguno. Tus ventas y el stock se siguen sincronizando; no tienes que hacer nada.`,
     priority: NotificationPriority.NORMAL,
   }),
 }

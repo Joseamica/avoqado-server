@@ -24,7 +24,9 @@ import {
   notifyShopifyReview,
   reconcileVenue,
   seguirAvisosPendientes,
+  TOPE_BAJAS_CON_DUDA,
 } from '@/services/commerce-channels/shopify/shopify.reconcile.service'
+import * as notificationService from '@/services/dashboard/notification.service'
 import {
   agregarProductoShopify,
   assertTestDatabase,
@@ -498,7 +500,7 @@ describe('barrido de catálogo (§10.10, N21)', () => {
     expect(await prisma.shopifyVariantLink.count({ where: { locationLinkId: e.locationLinkId } })).toBe(21) // ninguna baja de más
   })
 
-  describe('FF-I2: un barrido que no ve casi nada no archiva, y cada baja se confirma con una lectura directa', () => {
+  describe('FF-I2 y R-I2b: cada baja se confirma con una lectura directa; con muchas sin ver se drena con tope por vuelta', () => {
     const errores = () => (logger.error as jest.Mock).mock.calls.map(c => String(c[0]))
     const confirmaciones = (g: jest.Mock) => g.mock.calls.filter(c => esConfirmacion(c[2])).map(c => c[3].ids as string[])
     const varianteDe = async (variantLinkId: string | null) =>
@@ -506,43 +508,105 @@ describe('barrido de catálogo (§10.10, N21)', () => {
     /** El catálogo que trae la búsqueda y, aparte, lo que contesta la lectura directa de cada baja. */
     const conConfirmacion = (catalogo: VarianteShopify[], existe: (id: string) => { productId: string; status: string } | null) =>
       graphqlFalso((q, vars) => (esConfirmacion(q) ? lecturaDirecta(vars.ids, existe) : paginaDeVariantes(catalogo, null)))
+    const sigue = () => ({ productId: 'gid://shopify/Product/9', status: 'ACTIVE' })
     const archivados = (e: EscenarioShopify) => prisma.product.count({ where: { venueId: e.venueId, deletedAt: { not: null } } })
     const parejas = (e: EscenarioShopify) => prisma.shopifyVariantLink.count({ where: { locationLinkId: e.locationLinkId } })
+    /** `n` parejas (la del escenario y n − 1 más); las variantes de las primeras `ocultas` agregadas no salen en la búsqueda. */
+    async function catalogoDe(e: EscenarioShopify, n: number, ocultas: number) {
+      const nuevas = []
+      for (let i = 0; i < n - 1; i++) nuevas.push(await agregarProductoShopify(e))
+      const fuera = await Promise.all(nuevas.slice(0, ocultas).map(x => varianteDe(x.variantLinkId)))
+      const visibles = (await variantesDeLaSucursal(e.locationLinkId)).filter(v => !fuera.includes(v.id))
+      return { fuera, visibles }
+    }
     beforeEach(() => (logger.error as jest.Mock).mockClear())
 
-    it('🔴 la búsqueda no trae NINGUNA variante (como el filtro en mayúsculas de C10): no archiva nada, salta el barrido, lo registra y avisa', async () => {
+    it('🔴 R-I2b: un catálogo de UN producto que se borró en Shopify (1 de 1 sin ver) se archiva tras confirmarlo por id', async () => {
+      const e = await escenario()
+      const id = await varianteDe(e.variantLinkId)
+      const graphql = conConfirmacion([], () => null) // la búsqueda no lo trae y la lectura directa dice que ya no existe
+      await vuelta(e, () => nivel(10), { graphql })
+      expect(confirmaciones(graphql)).toEqual([[id]])
+      expect(await parejas(e)).toBe(0)
+      expect(await prisma.product.findUniqueOrThrow({ where: { id: e.productId } })).toMatchObject({ deletedBy: ARCHIVADO_POR_SHOPIFY })
+      expect(await avisos(e, 'BARRIDO_OMITIDO')).toBe(0) // no es una búsqueda rota: la baja es de verdad
+    })
+
+    it('🔴 R-I2b: 30 de 40 sin ver y borradas en Shopify ⇒ se archivan por vueltas, sin pasar el tope de cada vuelta', async () => {
+      const e = await escenario()
+      const { fuera, visibles } = await catalogoDe(e, 40, 30)
+      const graphql = graphqlDelCatalogo(visibles) // la lectura directa: lo que no está en el catálogo ya no existe
+      await vuelta(e, () => nivel(10), { graphql })
+      expect(await archivados(e)).toBe(TOPE_BAJAS_CON_DUDA) // la primera vuelta llega al tope y deja el resto
+      expect(await parejas(e)).toBe(40 - TOPE_BAJAS_CON_DUDA)
+      expect(errores().some(m => m.includes('BAJA_MASIVA') && m.includes('30 de 40'))).toBe(true)
+      await vuelta(e, () => nivel(10), { graphql })
+      expect(await archivados(e)).toBe(30) // la siguiente drena lo que faltaba
+      expect(await parejas(e)).toBe(10)
+      expect([...new Set(confirmaciones(graphql).flat())].sort()).toEqual([...fuera].sort())
+      expect(await avisos(e, 'BARRIDO_OMITIDO')).toBe(0)
+      const quedan = await prisma.shopifyVariantLink.findMany({
+        where: { locationLinkId: e.locationLinkId },
+        select: { shopifyVariantId: true },
+        take: 50,
+      })
+      expect(quedan.map(v => v.shopifyVariantId).sort()).toEqual(visibles.map(v => v.id).sort()) // sólo las que sí se ven
+    })
+
+    it('🔴 R-I2b: 30 de 40 sin ver pero vivas (la búsqueda está rota) ⇒ no se archiva nada, se dan por vistas y avisa', async () => {
+      const e = await escenario()
+      const { fuera, visibles } = await catalogoDe(e, 40, 30)
+      const graphql = conConfirmacion(visibles, sigue)
+      await vuelta(e, () => nivel(10), { graphql })
+      expect(await parejas(e)).toBe(40)
+      expect(await archivados(e)).toBe(0)
+      expect(confirmaciones(graphql).flat().sort()).toEqual([...fuera].sort())
+      expect(errores().some(m => m.includes('BAJA_MASIVA') && m.includes('30 de 40'))).toBe(true)
+      expect(await avisos(e, 'BARRIDO_OMITIDO')).toBe(1)
+      const { catalogSweepId } = await sucursal(e)
+      expect(await prisma.shopifyVariantLink.count({ where: { locationLinkId: e.locationLinkId, lastSeenSweepId: catalogSweepId } })).toBe(
+        40,
+      )
+    })
+
+    it('🔴 la búsqueda no trae NINGUNA variante (el filtro en mayúsculas de C10) y todas siguen ⇒ no archiva nada, lo registra y avisa', async () => {
       const e = await escenario()
       await agregarProductoShopify(e)
       await agregarProductoShopify(e)
-      const graphql = graphqlFalso(() => paginaDeVariantes([], null, 0))
+      const graphql = conConfirmacion([], sigue)
       await vuelta(e, () => nivel(10), { graphql })
       expect(await parejas(e)).toBe(3)
       expect(await archivados(e)).toBe(0)
-      expect(confirmaciones(graphql)).toEqual([]) // ni se llegó a confirmar una por una
+      expect(confirmaciones(graphql).flat()).toHaveLength(3) // se le preguntó a Shopify una por una
       expect(errores().some(m => m.includes('BAJA_MASIVA') && m.includes('3 de 3'))).toBe(true)
       expect(await avisos(e, 'BARRIDO_OMITIDO')).toBe(1)
     })
 
-    it('más del 20 % sin ver y más de 10 (11 de 44) tampoco se archiva; con 10 de 44 sí, una vez confirmadas', async () => {
+    it('🔴 R-I2b: con muchas sin ver y la lectura directa fallando, no archiva nada; a la 5ª falla la vuelta sigue sin bajas y avisa', async () => {
       const e = await escenario()
-      const nuevas = []
-      for (let i = 0; i < 43; i++) nuevas.push(await agregarProductoShopify(e))
-      const ocultas = await Promise.all(nuevas.slice(0, 11).map(n => varianteDe(n.variantLinkId)))
-      const todas = await variantesDeLaSucursal(e.locationLinkId)
-      const sin = (fuera: string[]) => todas.filter(v => !fuera.includes(v.id))
-
-      const g11 = graphqlDelCatalogo(sin(ocultas))
-      await vuelta(e, () => nivel(10), { graphql: g11 })
-      expect(await parejas(e)).toBe(44)
+      await agregarProductoShopify(e)
+      await agregarProductoShopify(e)
+      const graphql = graphqlFalso(q => (esConfirmacion(q) ? falla('HTTP_5XX', true, true) : paginaDeVariantes([], null, 0)))
+      await vuelta(e, () => nivel(10), { graphql })
+      expect(confirmaciones(graphql)).toHaveLength(5)
+      expect(await parejas(e)).toBe(3)
       expect(await archivados(e)).toBe(0)
-      expect(confirmaciones(g11)).toEqual([])
       expect(await avisos(e, 'BARRIDO_OMITIDO')).toBe(1)
+    })
 
-      const g10 = graphqlDelCatalogo(sin(ocultas.slice(0, 10)))
-      await vuelta(e, () => nivel(10), { graphql: g10 })
-      expect(confirmaciones(g10).flat().sort()).toEqual(ocultas.slice(0, 10).sort())
-      expect(await parejas(e)).toBe(34)
-      expect(await archivados(e)).toBe(10)
+    it('R-I2b: el aviso va dentro del vencimiento de la unidad: si no contesta, la unidad no se queda esperándolo', async () => {
+      const e = await escenario()
+      await agregarProductoShopify(e)
+      const graphql = conConfirmacion([], sigue)
+      await pedirCuadre(e.locationLinkId)
+      const deps = { fetchLevels: nivelesFalsos(() => nivel(10)), graphql, hasAccess: conPlan }
+      for (let i = 0; i < 5 && !(await sucursal(e)).catalogSweepCursor?.startsWith('BAJAS'); i++) await reconcileVenue(e.venueId, deps)
+      expect((await sucursal(e)).catalogSweepCursor).toMatch(/^BAJAS/)
+      jest.spyOn(notificationService, 'sendNotification').mockImplementation(() => new Promise(() => undefined)) // nunca contesta
+      const t0 = Date.now()
+      await reconcileVenue(e.venueId, { ...deps, vence: Date.now() + 3_000 })
+      expect(Date.now() - t0).toBeLessThan(4_500)
+      expect(await archivados(e)).toBe(0)
     })
 
     it('una baja de verdad (Shopify ya no tiene la variante) o un producto ARCHIVED en Shopify se archiva, confirmado por id', async () => {
@@ -580,6 +644,7 @@ describe('barrido de catálogo (§10.10, N21)', () => {
           catalogSweepId,
         )
       }
+      expect(await avisos(e, 'BARRIDO_OMITIDO')).toBe(0) // 2 de 3 sin ver no es masivo
     })
 
     it('si la lectura directa falla, no archiva nada; a la 5ª falla esa vuelta sigue sin bajas', async () => {
@@ -592,6 +657,7 @@ describe('barrido de catálogo (§10.10, N21)', () => {
       expect(confirmaciones(graphql)).toHaveLength(5)
       expect(await prisma.shopifyVariantLink.count({ where: { id: vieja.variantLinkId! } })).toBe(1)
       expect(await archivados(e)).toBe(0)
+      expect(await avisos(e, 'BARRIDO_OMITIDO')).toBe(0) // 1 de 2 sin ver no es masivo
     })
   })
 

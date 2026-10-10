@@ -398,16 +398,20 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     expect(leer(`${SHOPIFY}/shopify.reconcile.service.ts`)).toContain('query: FILTRO_ESTADO')
   })
 
-  it('🔴 FF-I2: el barrido no archiva si no vio casi nada, cada baja se confirma por id y restaurar no mira originSystem', () => {
+  it('🔴 FF-I2 y R-I2b: cada baja se confirma por id, la masiva se drena con tope por vuelta y restaurar no mira originSystem', () => {
     contieneTodas([
-      'si no se vio NINGUNA pareja, o más de 10 y más del 20 %, el barrido no archiva nada',
-      'se salta (`BAJA_MASIVA`, al log de errores como todo barrido saltado) y avisa `BARRIDO_OMITIDO`',
-      'cada baja se confirma con una lectura directa por id (`confirmarBajas(…)`, la consulta `nodes` por ids, sin búsqueda)',
+      'cada baja se confirma con una lectura directa por id (`confirmarBajas(…)`, la consulta `nodes` por ids, de 50 en 50 y dentro del vencimiento de la unidad, sin búsqueda)',
       'sólo se archiva lo que Shopify dice que ya no existe o cuyo producto está `ARCHIVED`',
+      'Si la lectura falla, no se archiva nada',
+      'Cuando la baja parece masiva (no se vio NINGUNA pareja, o más de 10 y más del 20 %), igual se confirma por id, pero la vuelta archiva a lo más `TOPE_BAJAS_CON_DUDA` (20)',
+      'un catálogo de UN producto borrado también se archiva',
+      'avisa `BARRIDO_OMITIDO` sólo si todo lo confirmado sigue en Shopify (la búsqueda parece rota) o si la lectura directa no se pudo hacer',
       'El sync de un producto (`syncShopifyProduct(…)`) confirma igual sus huérfanas',
       'Restaurar mira sólo `deletedBy = SHOPIFY_SYNC` (lo escribe sólo el conector), sin importar `originSystem`',
       'CONTEO_NO_APLICADO y BARRIDO_OMITIDO',
     ])
+    // La regla vieja (saltar el barrido entero con la compuerta) no vuelve: se saltaba para siempre.
+    expect(regla).not.toContain('el barrido no archiva nada: se salta (`BAJA_MASIVA`')
     const catalogo = leer(`${SHOPIFY}/shopify.catalog.service.ts`)
     expect(catalogo).toContain('nodes(ids: $ids) { ... on ProductVariant { id product { id status } } }')
     expect(cuerpo(catalogo, 'export async function confirmarBajas(')).toContain("n === null || n.product.status === 'ARCHIVED'")
@@ -417,12 +421,18 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     // El sync confirma ANTES de archivar sus huérfanas.
     enOrden(cuerpo(catalogo, 'async function sincronizarEnSucursal('), ['confirmarBajas(', 'archivarPareja(p, cerco)'])
     const reconcile = leer(`${SHOPIFY}/shopify.reconcile.service.ts`)
-    enOrden(cuerpo(reconcile, 'async function bajasDelBarrido('), [
+    expect(reconcile).toContain('export const TOPE_BAJAS_CON_DUDA = 20')
+    // La compuerta ya no salta el barrido: confirma por id, aparta lo que va a archivar (hasta el tope) y sólo entonces archiva.
+    const bajas = cuerpo(reconcile, 'async function bajasDelBarrido(')
+    expect(bajas).not.toContain('saltarBarrido(')
+    enOrden(bajas, [
       'sinVer === total || (sinVer > BAJAS_MAXIMAS_SIN_DUDA && sinVer * 5 > total)',
-      "notifyShopify(l.venueId, 'BARRIDO_OMITIDO'",
       'confirmarBajas(',
+      "avisarBarridoOmitido(l, sinVer, 'BUSQUEDA_ROTA', d.vence)",
+      'porArchivar.slice(0, TOPE_BAJAS_CON_DUDA - apartadas)',
       'archivarPareja(p, cerco)',
     ])
+    expect(cuerpo(reconcile, 'async function avisarBarridoOmitido(')).toContain('aLoMas(notifyShopify(')
     expect(cuerpo(reconcile, 'async function saltarBarrido(')).toContain('logger.error(')
   })
 
@@ -655,8 +665,8 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
       'shopify.crypto.ts:32': [de('crypto'), 'export function formaDeFirmaOAuth('],
       'catalog.service.ts:67': [de('catalog.service'), 'export const FILTRO_ESTADO'],
       'catalog.service.ts:416': [de('catalog.service'), 'async function bloquearProductos('],
-      'reconcile.service.ts:1208': [de('reconcile.service'), 'tx.shopifyStockOutbox.create('],
-      'reconcile.service.ts:669': [de('reconcile.service'), 'async function abrirRevision('],
+      'reconcile.service.ts:1255': [de('reconcile.service'), 'tx.shopifyStockOutbox.create('],
+      'reconcile.service.ts:716': [de('reconcile.service'), 'async function abrirRevision('],
       'mirror.service.ts:5': [de('mirror.service'), 'Invariante operativo'],
       'mirror.service.ts:372': [de('mirror.service'), 'export async function marcarFaltaPermiso('],
       'outbox.service.ts:166': [de('outbox.service'), 'async function conFilaPropia'],
