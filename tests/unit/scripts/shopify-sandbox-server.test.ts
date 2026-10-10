@@ -2,7 +2,7 @@
 import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import http from 'node:http'
-import type { AddressInfo } from 'node:net'
+import net, { type AddressInfo } from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import bcrypt from 'bcryptjs'
@@ -13,6 +13,7 @@ import {
   cifrarAzar,
   CLAVES_LITERALES_DEL_SEED,
   clavesDelSeed,
+  crearServidorLocal,
   crearTunel,
   entornoSandbox,
   esquemaSandbox,
@@ -250,60 +251,80 @@ describe('el cliente de Prisma del sandbox (Codex N9)', () => {
   })
 })
 
+/** Una petición HTTP con la ruta CRUDA (sin normalizar), como la mandaría cualquiera por el túnel. */
+const pedirA = (puerto: number, method: string, ruta: string, cuerpo?: string, encabezados: http.OutgoingHttpHeaders = {}) =>
+  new Promise<{ status: number; body: string }>((resolve, reject) => {
+    const conLargo = cuerpo !== undefined && !('transfer-encoding' in encabezados)
+    const req = http.request(
+      {
+        host: '127.0.0.1',
+        port: puerto,
+        method,
+        path: ruta,
+        agent: false,
+        headers: {
+          ...(cuerpo !== undefined ? { 'content-type': 'application/json' } : {}),
+          ...(conLargo ? { 'content-length': Buffer.byteLength(cuerpo) } : {}),
+          ...encabezados,
+        },
+      },
+      res => {
+        const partes: Buffer[] = []
+        res.on('data', (c: Buffer) => partes.push(c))
+        res.on('end', () => resolve({ status: res.statusCode ?? 0, body: Buffer.concat(partes).toString('utf8') }))
+      },
+    )
+    req.on('error', reject)
+    if (cuerpo !== undefined) req.write(cuerpo)
+    req.end()
+  })
+
+/** La «app» de mentira: contesta 200 y anota lo que le llegó; si una petición prohibida la alcanza, se ve aquí. */
+const appDeMentira = (
+  vistas: { method?: string; url?: string; cuerpo: string }[],
+  encabezados: { origin?: string; crudos: string[] }[] = [],
+) =>
+  ((req, res) => {
+    const partes: Buffer[] = []
+    req.on('data', (c: Buffer) => partes.push(c))
+    req.on('end', () => {
+      vistas.push({ method: req.method, url: req.url, cuerpo: Buffer.concat(partes).toString('utf8') })
+      encabezados.push({ origin: req.headers.origin, crudos: req.rawHeaders.filter((_, i) => i % 2 === 0).map(k => k.toLowerCase()) })
+      res.statusCode = 200
+      res.end('app')
+    })
+  }) as http.RequestListener
+
+const escucharEnCualquierPuerto = async (server: http.Server) => {
+  await new Promise<void>(listo => server.listen(0, '127.0.0.1', () => listo()))
+  return (server.address() as AddressInfo).port
+}
+
 describe('el túnel (ronda 1): por el puerto público sólo pasa lo que Shopify necesita', () => {
   const RUTAS = rutasDelTunel(SHOPIFY_OAUTH_CALLBACK_PATH, SHOPIFY_WEBHOOK_ROUTE)
   const WEBHOOK = SHOPIFY_WEBHOOK_ROUTE.replace(':appKey', 'piloto')
   const CALLBACK = SHOPIFY_OAUTH_CALLBACK_PATH
   const vistas: { method?: string; url?: string; cuerpo: string }[] = []
+  const encabezadosVistos: { origin?: string; crudos: string[] }[] = []
   const bitacora: string[] = []
   let server: http.Server
   let puerto = 0
 
   beforeAll(async () => {
-    // La «app» de mentira contesta 200 y anota lo que le llegó: si una ruta prohibida la alcanza, se ve aquí.
-    const app: http.RequestListener = (req, res) => {
-      const partes: Buffer[] = []
-      req.on('data', (c: Buffer) => partes.push(c))
-      req.on('end', () => {
-        vistas.push({ method: req.method, url: req.url, cuerpo: Buffer.concat(partes).toString('utf8') })
-        res.statusCode = 200
-        res.end('app')
-      })
-    }
-    server = crearTunel(app, RUTAS, linea => bitacora.push(linea))
-    await new Promise<void>(listo => server.listen(0, '127.0.0.1', () => listo()))
-    puerto = (server.address() as AddressInfo).port
+    server = crearTunel(appDeMentira(vistas, encabezadosVistos), RUTAS, linea => bitacora.push(linea))
+    puerto = await escucharEnCualquierPuerto(server)
   })
   afterAll(async () => {
     await new Promise<void>(listo => server.close(() => listo()))
   })
   beforeEach(() => {
     vistas.length = 0
+    encabezadosVistos.length = 0
     bitacora.length = 0
   })
 
-  /** La ruta viaja CRUDA (sin normalizar), como la mandaría cualquiera por el túnel. */
-  const pedir = (method: string, ruta: string, cuerpo?: string) =>
-    new Promise<{ status: number; body: string }>((resolve, reject) => {
-      const req = http.request(
-        {
-          host: '127.0.0.1',
-          port: puerto,
-          method,
-          path: ruta,
-          agent: false,
-          headers: cuerpo ? { 'content-type': 'application/json', 'content-length': Buffer.byteLength(cuerpo) } : {},
-        },
-        res => {
-          const partes: Buffer[] = []
-          res.on('data', (c: Buffer) => partes.push(c))
-          res.on('end', () => resolve({ status: res.statusCode ?? 0, body: Buffer.concat(partes).toString('utf8') }))
-        },
-      )
-      req.on('error', reject)
-      if (cuerpo) req.write(cuerpo)
-      req.end()
-    })
+  const pedir = (method: string, ruta: string, cuerpo?: string, encabezados: http.OutgoingHttpHeaders = {}) =>
+    pedirA(puerto, method, ruta, cuerpo, encabezados)
 
   it('deja pasar exactamente GET /health, GET del callback del OAuth (con su query) y POST del webhook (cuerpo intacto)', async () => {
     expect(await pedir('GET', '/health')).toEqual({ status: 200, body: 'app' })
@@ -381,6 +402,161 @@ describe('el túnel (ronda 1): por el puerto público sólo pasa lo que Shopify 
     expect(bitacora).toHaveLength(1)
     expect(bitacora[0]).toContain('POST /api/dev/generate-token')
     expect(bitacora[0]).not.toMatch(/valor-secreto|cuerpo-secreto|SUPERADMIN|\?/)
+  })
+
+  it('🔴 ronda 2: el Origin no llega a la app (ni en headers ni en rawHeaders): un CORS rechazado no termina en una traza', async () => {
+    expect((await pedir('GET', '/health', undefined, { origin: 'https://evil.example' })).status).toBe(200)
+    expect((await pedir('POST', WEBHOOK, '{}', { Origin: 'https://evil.example' })).status).toBe(200)
+    expect(encabezadosVistos).toHaveLength(2)
+    for (const e of encabezadosVistos) {
+      expect(e.origin).toBeUndefined()
+      expect(e.crudos).not.toContain('origin')
+    }
+  })
+
+  it('🔴 ronda 2: un GET con cuerpo (content-length > 0 o transfer-encoding) da 404 sin cuerpo y no llega a la app', async () => {
+    expect(await pedir('GET', '/health', 'x')).toEqual({ status: 404, body: '' })
+    expect(await pedir('GET', `${CALLBACK}?code=a`, '{"a":1}', { 'transfer-encoding': 'chunked' })).toEqual({ status: 404, body: '' })
+    // Sin cuerpo (o con content-length 0) sigue pasando.
+    expect((await pedir('GET', '/health', undefined, { 'content-length': '0' })).status).toBe(200)
+    expect(vistas.map(v => v.url)).toEqual(['/health'])
+  })
+
+  it('🔴 ronda 2: cualquier content-encoding da 404 sin cuerpo, también en el webhook', async () => {
+    for (const ce of ['gzip', 'deflate', 'br', 'identity']) {
+      expect(await pedir('POST', WEBHOOK, '{}', { 'content-encoding': ce })).toEqual({ status: 404, body: '' })
+    }
+    expect(await pedir('GET', '/health', undefined, { 'content-encoding': 'gzip' })).toEqual({ status: 404, body: '' })
+    expect(vistas).toEqual([])
+  })
+
+  it('🔴 ronda 2: de la ruta rechazada se anotan sólo los primeros segmentos (un secreto en la ruta no llega al log)', async () => {
+    await pedir('POST', '/api/v1/webhooks/aggregators/prov/TOKEN-SECRETO-123/kind', '{}')
+    expect(bitacora).toEqual(['túnel: 404 POST /api/v1/webhooks/…'])
+  })
+
+  it('ronda 2: la ruta pasa por el redactor que se le dé (servir usa redactUrlSecrets) antes de recortarla', async () => {
+    const notas: string[] = []
+    const otro = crearTunel(
+      appDeMentira([]),
+      RUTAS,
+      l => notas.push(l),
+      ruta => ruta.replace('generate-token', '[redactado]'),
+    )
+    const p = await escucharEnCualquierPuerto(otro)
+    try {
+      await pedirA(p, 'GET', '/api/dev/generate-token')
+      expect(notas).toEqual(['túnel: 404 GET /api/dev/[redactado]'])
+    } finally {
+      await new Promise<void>(listo => otro.close(() => listo()))
+    }
+  })
+})
+
+describe('el puerto de la app completa (ronda 2): sólo Host local, y nunca /api/dev', () => {
+  const vistas: { method?: string; url?: string; cuerpo: string }[] = []
+  let server: http.Server
+  let puerto = 0
+  beforeAll(async () => {
+    server = crearServidorLocal(appDeMentira(vistas))
+    puerto = await escucharEnCualquierPuerto(server)
+  })
+  afterAll(async () => {
+    await new Promise<void>(listo => server.close(() => listo()))
+  })
+  beforeEach(() => {
+    vistas.length = 0
+  })
+  /** HTTP/1.0 sin Host (el cliente de Node siempre lo pone). */
+  const sinHost = () =>
+    new Promise<string>((resolve, reject) => {
+      const s = net.connect(puerto, '127.0.0.1', () => s.write('GET /health HTTP/1.0\r\n\r\n'))
+      let datos = ''
+      s.on('data', (d: Buffer) => (datos += d.toString('utf8')))
+      s.on('end', () => resolve(datos))
+      s.on('error', reject)
+    })
+
+  it('pasa con Host localhost:PUERTO, 127.0.0.1:PUERTO o [::1]:PUERTO (el dashboard local manda localhost:3100)', async () => {
+    for (const host of [`localhost:${puerto}`, `127.0.0.1:${puerto}`, `[::1]:${puerto}`, `LocalHost:${puerto}`]) {
+      expect([host, await pedirA(puerto, 'GET', '/api/v1/dashboard/venues/v1/shopify/overview', undefined, { host })]).toEqual([
+        host,
+        { status: 200, body: 'app' },
+      ])
+    }
+    expect(vistas).toHaveLength(4)
+  })
+
+  it('🔴 un túnel mal apuntado (Host público), un DNS rebinding o sin Host: 421 sin cuerpo y no llega a la app', async () => {
+    for (const host of [
+      'algo.trycloudflare.com',
+      'algo.trycloudflare.com:443',
+      `evil.com:${puerto}`,
+      'localhost',
+      `localhost:${puerto + 1}`,
+      `127.0.0.1:${puerto}.evil.com`,
+      `localhost:${puerto}@evil.com`,
+    ]) {
+      expect([host, await pedirA(puerto, 'GET', '/health', undefined, { host })]).toEqual([host, { status: 421, body: '' }])
+    }
+    expect(await sinHost()).toMatch(/^HTTP\/1\.[01] 421 /)
+    expect(vistas).toEqual([])
+  })
+
+  it('🔴 /api/dev da 404 sin cuerpo, por cualquier forma de escribirlo, aunque el Host sea local', async () => {
+    const host = `localhost:${puerto}`
+    for (const [method, ruta] of [
+      ['POST', '/api/dev/generate-token'],
+      ['GET', '/api/dev'],
+      ['GET', '/api/dev/'],
+      ['POST', '/API/DEV/generate-token'],
+      ['POST', '/api/dev/generate-token/'],
+      ['POST', '//api/dev/generate-token'],
+      ['POST', '/api/v1/../dev/generate-token'],
+      ['POST', '/api/./dev/generate-token'],
+      ['POST', '/api/%64ev/generate-token'],
+      ['POST', '/api/dev%2Fgenerate-token'],
+      ['POST', '/api\\dev\\generate-token'],
+      ['POST', '/api/dev/generate-token?x=1'],
+      ['POST', `http://localhost:${puerto}/api/dev/generate-token`],
+    ] as const) {
+      const r = await pedirA(puerto, method, ruta, method === 'POST' ? '{"role":"SUPERADMIN"}' : undefined, { host })
+      expect([method, ruta, r]).toEqual([method, ruta, { status: 404, body: '' }])
+    }
+    expect(vistas).toEqual([])
+  })
+
+  it('lo demás sigue igual: /api/devices, el dashboard, el callback y /health llegan a la app', async () => {
+    const host = `localhost:${puerto}`
+    for (const ruta of ['/api/devices', '/api/v1/dashboard/auth/status', '/api/v1/shopify/oauth/callback?code=a', '/health']) {
+      expect((await pedirA(puerto, 'GET', ruta, undefined, { host })).status).toBe(200)
+    }
+    expect(vistas).toHaveLength(4)
+  })
+})
+
+describe('candados del código de `servir` (ronda 2)', () => {
+  const fuente = fs.readFileSync(path.join(RAIZ_REPO, 'scripts', 'shopify-sandbox-server.ts'), 'utf8')
+  const arrancar = fuente.slice(fuente.indexOf('async function arrancar('), fuente.indexOf('async function main('))
+
+  it('🔴 hay un solo `.listen(` y es el de `escuchar`, en 127.0.0.1', () => {
+    expect(fuente.match(/\.listen\(/g)).toHaveLength(1)
+    expect(fuente).toMatch(/const escuchar = [\s\S]{0,300}server\.listen\(puerto, '127\.0\.0\.1'/)
+  })
+
+  it('🔴 la app completa pasa por crearServidorLocal y el túnel por crearTunel; los dos escuchan DESPUÉS de revisar las contraseñas', () => {
+    const revisa = arrancar.indexOf('staffConClaveDelSeed(')
+    const app = arrancar.indexOf('await escuchar(servidorApp, port)')
+    const tunel = arrancar.indexOf('await escuchar(servidorTunel, port + 1)')
+    expect(revisa).toBeGreaterThan(-1)
+    expect(app).toBeGreaterThan(revisa)
+    expect(tunel).toBeGreaterThan(revisa)
+    expect(arrancar.slice(revisa, app)).toMatch(/process\.exit\(1\)/)
+    expect(arrancar).toMatch(/const servidorApp = crearServidorLocal\(app\)/)
+    expect(arrancar).toMatch(
+      /const servidorTunel = crearTunel\(\s*app,\s*rutasDelTunel\(SHOPIFY_OAUTH_CALLBACK_PATH, SHOPIFY_WEBHOOK_ROUTE\)/,
+    )
+    expect(arrancar).not.toMatch(/http\.createServer\(app\)|app\.listen\(/)
   })
 })
 

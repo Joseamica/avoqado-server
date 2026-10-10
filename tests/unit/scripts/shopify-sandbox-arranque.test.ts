@@ -51,6 +51,12 @@ itSi(
       const r = correr(dir, 'probar')
       expect(r.stderr).not.toMatch(/✋/)
       expect(r.stdout).toContain('Importación revisada')
+      // Ronda 2: `probar` monta `crearTunel` y `crearServidorLocal` sobre la app REAL (NODE_ENV=development, donde existe
+      // /api/dev/generate-token: directo a la app firma un token de SUPERADMIN) y comprueba que por el túnel y por el puerto
+      // local da 404, y que un Host ajeno da 421. En jest la app no sirve para esto: con NODE_ENV=test no monta esa ruta.
+      expect(r.stdout).toContain(
+        'Túnel revisado con la app real: POST /api/dev/generate-token directo 200, por el túnel 404, por el puerto local 404; Host ajeno 421; /health 200.',
+      )
       expect(r.status).toBe(0)
     } finally {
       fs.rmSync(dir, { recursive: true, force: true })

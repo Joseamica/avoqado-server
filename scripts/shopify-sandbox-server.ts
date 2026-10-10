@@ -13,8 +13,10 @@
  *
  * 🔴 Lo que se publica por el túnel (ronda 1): con `NODE_ENV=development` la app trae `POST /api/dev/generate-token`, que
  * firma tokens de SUPERADMIN sin sesión, además de trazas de error y rutas de desarrollo. Por eso la app completa escucha
- * SÓLO en `127.0.0.1:PORT` (la usa el dashboard local) y el túnel apunta a OTRO puerto, `127.0.0.1:PORT+1`, que sólo deja
- * pasar lo que Shopify necesita: `GET /health`, el callback del OAuth y el POST del webhook (`crearTunel`). Y las
+ * SÓLO en `127.0.0.1:PORT` (la usa el dashboard local), sólo con un `Host` de esta Mac (otro da 421: un túnel apuntado
+ * ahí por error falla cerrado) y sin `/api/dev` (`crearServidorLocal`, ronda 2); el túnel apunta a OTRO puerto,
+ * `127.0.0.1:PORT+1`, que sólo deja pasar lo que Shopify necesita: `GET /health`, el callback del OAuth y el POST del
+ * webhook, sin `Origin`, sin cuerpo en un GET y sin `content-encoding` (`crearTunel`). Y las
  * contraseñas conocidas del seed (`superadmin`/`superadmin`, …) se reemplazan al preparar; `servir` no arranca si alguna
  * cuenta todavía entra con una de ellas.
  *
@@ -255,14 +257,90 @@ export function crearTunel(
   app: RequestListener,
   rutas: RutaDelTunel[],
   anotar: (linea: string) => void = l => console.log(l),
+  redactar: (ruta: string) => string = ruta => ruta,
 ): http.Server {
   return http.createServer((req, res) => {
-    if (pasaPorElTunel(req.method, req.url, rutas)) return void app(req, res)
+    if (pasaPorElTunel(req.method, req.url, rutas) && !cuerpoProhibido(req.method, req.headers)) {
+      quitarOrigin(req)
+      return void app(req, res)
+    }
     const limpio = (s: string) => s.replace(/[^\x21-\x7e]/g, '').slice(0, 200)
-    anotar(`túnel: 404 ${limpio(req.method ?? '?')} ${limpio((req.url ?? '').split('?')[0])}`)
-    req.resume()
-    res.statusCode = 404
-    res.end()
+    anotar(`túnel: 404 ${limpio(req.method ?? '?')} ${primerosSegmentos(limpio(redactar((req.url ?? '').split('?')[0])))}`)
+    cerrarSinCuerpo(req, res, 404)
+  })
+}
+
+/**
+ * Ronda 2: lo que pasa por las rutas permitidas tampoco puede provocar una traza de error (en desarrollo la app la
+ * devuelve): un GET con cuerpo (`content-length` > 0 o `transfer-encoding`) o cualquier `content-encoding` no los manda
+ * Shopify, así que se rechazan.
+ */
+export function cuerpoProhibido(metodo: string | undefined, h: http.IncomingHttpHeaders): boolean {
+  if (h['content-encoding'] !== undefined) return true
+  return metodo === 'GET' && (h['transfer-encoding'] !== undefined || Number(h['content-length'] ?? 0) !== 0)
+}
+
+/** Sin `Origin` no hay CORS que rechazar (y ese rechazo, en desarrollo, sale con traza). Shopify no lo necesita. */
+function quitarOrigin(req: http.IncomingMessage) {
+  delete req.headers.origin
+  for (let i = req.rawHeaders.length - 2; i >= 0; i -= 2) {
+    if (req.rawHeaders[i].toLowerCase() === 'origin') req.rawHeaders.splice(i, 2)
+  }
+}
+
+/** Sólo los primeros `n` segmentos de una ruta: un secreto más adentro (un token de webhook) no llega al log. */
+export function primerosSegmentos(ruta: string, n = 3): string {
+  const partes = ruta.split('/')
+  return partes.length > n + 1 ? `${partes.slice(0, n + 1).join('/')}/…` : ruta
+}
+
+const cerrarSinCuerpo = (req: http.IncomingMessage, res: http.ServerResponse, status: number) => {
+  req.resume()
+  res.statusCode = status
+  res.end()
+}
+
+// ---------- El puerto de la app completa (ronda 2) ----------
+
+/** `Host` que acepta el puerto de la app: sólo esta Mac, en ESTE puerto. Un túnel mal apuntado manda el Host público. */
+export function hostLocal(host: string | undefined, puerto: number | undefined): boolean {
+  if (!host || !puerto) return false
+  return [`localhost:${puerto}`, `127.0.0.1:${puerto}`, `[::1]:${puerto}`].includes(host.toLowerCase())
+}
+
+const RUTA_DEV = /^\/+api\/+dev(\/|$)/i
+/**
+ * ¿Es una ruta de `/api/dev` (que en desarrollo firma tokens de SUPERADMIN sin sesión)? Se mira la ruta cruda, la
+ * normalizada (`..`, `.`, `\`, forma absoluta) y la decodificada: basta con que UNA lo sea.
+ */
+export function esRutaDeDesarrollo(url: string | undefined): boolean {
+  const cruda = (url ?? '').split('?')[0]
+  const formas = [cruda]
+  try {
+    formas.push(new URL(url ?? '', 'http://sandbox.invalid').pathname)
+  } catch {
+    return true // una ruta que ni siquiera se puede leer no llega a la app
+  }
+  for (const f of [...formas]) {
+    try {
+      formas.push(decodeURIComponent(f))
+    } catch {
+      return true
+    }
+  }
+  return formas.some(f => RUTA_DEV.test(f))
+}
+
+/**
+ * El servidor de la app completa (127.0.0.1:PORT, para el dashboard local): con un `Host` que no sea de esta Mac en este
+ * puerto contesta 421 sin cuerpo (un túnel apuntado aquí por error, o un DNS rebinding, fallan cerrados), y `/api/dev`
+ * da 404 sin cuerpo (nada del flujo lo usa: la guía entra por `/api/v1/live-demo/auto-login`).
+ */
+export function crearServidorLocal(app: RequestListener): http.Server {
+  return http.createServer((req, res) => {
+    if (!hostLocal(req.headers.host, req.socket.localPort)) return cerrarSinCuerpo(req, res, 421)
+    if (esRutaDeDesarrollo(req.url)) return cerrarSinCuerpo(req, res, 404)
+    app(req, res)
   })
 }
 
@@ -455,6 +533,62 @@ const escuchar = (server: http.Server, puerto: number) =>
     server.listen(puerto, '127.0.0.1', () => listo())
   })
 
+/** Una petición a un servidor de esta Mac; sólo devuelve el código (el cuerpo, que puede traer un token, se tira). */
+const pedirCodigo = (puerto: number, metodo: string, ruta: string, host: string, cuerpo?: string) =>
+  new Promise<number>(resolve => {
+    const req = http.request(
+      {
+        host: '127.0.0.1',
+        port: puerto,
+        method: metodo,
+        path: ruta,
+        agent: false,
+        timeout: 10_000,
+        headers: { host, ...(cuerpo ? { 'content-type': 'application/json', 'content-length': Buffer.byteLength(cuerpo) } : {}) },
+      },
+      res => {
+        res.resume()
+        res.on('end', () => resolve(res.statusCode ?? 0))
+      },
+    )
+    req.on('timeout', () => req.destroy())
+    req.on('error', () => resolve(0))
+    if (cuerpo) req.write(cuerpo)
+    req.end()
+  })
+
+/**
+ * Ronda 2 (`probar`): monta el túnel y el puerto local sobre la app REAL, en puertos efímeros de 127.0.0.1, y comprueba
+ * que `/api/dev/generate-token` (que directo a la app sí responde 200 con un token de SUPERADMIN: es la prueba de que la
+ * ruta peligrosa existe en este modo) da 404 por los dos, que un Host ajeno da 421 y que `/health` llega. No toca la base.
+ */
+async function revisarConLaAppReal(app: RequestListener, rutas: RutaDelTunel[]): Promise<string[]> {
+  const directo = http.createServer(app)
+  const tunel = crearTunel(app, rutas, () => undefined)
+  const local = crearServidorLocal(app)
+  const servidores = [directo, tunel, local]
+  try {
+    for (const s of servidores) await escuchar(s, 0)
+    const [pd, pt, pl] = servidores.map(s => (s.address() as { port: number }).port)
+    const token = ['POST', '/api/dev/generate-token'] as const
+    const cuerpo = '{"role":"SUPERADMIN"}'
+    const medido = {
+      directo: await pedirCodigo(pd, ...token, `localhost:${pd}`, cuerpo),
+      tunel: await pedirCodigo(pt, ...token, 'algo.trycloudflare.com', cuerpo),
+      local: await pedirCodigo(pl, ...token, `localhost:${pl}`, cuerpo),
+      hostAjeno: await pedirCodigo(pl, 'GET', '/health', 'algo.trycloudflare.com'),
+      saludTunel: await pedirCodigo(pt, 'GET', '/health', 'algo.trycloudflare.com'),
+      saludLocal: await pedirCodigo(pl, 'GET', '/health', `localhost:${pl}`),
+    }
+    const esperado = { directo: 200, tunel: 404, local: 404, hostAjeno: 421, saludTunel: 200, saludLocal: 200 }
+    return Object.entries(esperado)
+      .filter(([k, v]) => medido[k as keyof typeof medido] !== v)
+      .map(([k, v]) => `${k}: esperaba ${v}, dio ${medido[k as keyof typeof medido]}`)
+  } finally {
+    for (const s of servidores) s.close()
+  }
+}
+
 /** `probar` y `servir`: importa la app y el worker DE VERDAD, revisa el entorno, y sólo `servir` escucha y arranca. */
 async function arrancar(modo: 'probar' | 'servir', sandbox: string, esperado: NodeJS.ProcessEnv) {
   const gancho = path.join(sandbox, DENTRO.gancho)
@@ -465,6 +599,10 @@ async function arrancar(modo: 'probar' | 'servir', sandbox: string, esperado: No
   await import(gancho) // instala el gancho ANTES de que nada pida `@prisma/client`
   const { default: app } = await import('../src/app')
   const { shopifyWorkerJob } = await import('../src/jobs/shopify-worker.job')
+  // Las rutas que publica el túnel salen de las MISMAS constantes con que `app.ts` las monta (ya están cargadas).
+  const { SHOPIFY_OAUTH_CALLBACK_PATH } = await import('../src/services/commerce-channels/shopify/shopify.connect.service')
+  const { SHOPIFY_WEBHOOK_ROUTE } = await import('../src/services/commerce-channels/shopify/shopify.inbound.service')
+  const { redactUrlSecrets } = await import('../src/middlewares/requestLogger')
   // 🔴 Ya importados la app, el worker y el cliente de Prisma (que carga su `.env`): el entorno debe ser EXACTAMENTE el del
   // sandbox. Sólo nombres; no se consulta la base.
   const ajenas = llavesAjenas(process.env, esperado)
@@ -475,13 +613,18 @@ async function arrancar(modo: 'probar' | 'servir', sandbox: string, esperado: No
   if (modo === 'probar') {
     // `llavesAjenas` ya cubre que Stripe y OpenAI sigan siendo los SINTÉTICOS (están en el entorno esperado).
     console.log('Importación revisada: la app y el worker cargan con el entorno del sandbox y nada más (Stripe y OpenAI sintéticos).')
+    const fallas = await revisarConLaAppReal(app, rutasDelTunel(SHOPIFY_OAUTH_CALLBACK_PATH, SHOPIFY_WEBHOOK_ROUTE))
+    if (fallas.length) {
+      console.error(`✋ El túnel o el puerto local no se comportan como deben con la app real: ${fallas.join('; ')}.`)
+      process.exit(1)
+    }
+    console.log(
+      'Túnel revisado con la app real: POST /api/dev/generate-token directo 200, por el túnel 404, por el puerto local 404; Host ajeno 421; /health 200.',
+    )
     process.exit(0)
   }
-  // Las rutas que publica el túnel salen de las MISMAS constantes con que `app.ts` las monta (ya están cargadas).
-  const { SHOPIFY_OAUTH_CALLBACK_PATH } = await import('../src/services/commerce-channels/shopify/shopify.connect.service')
-  const { SHOPIFY_WEBHOOK_ROUTE } = await import('../src/services/commerce-channels/shopify/shopify.inbound.service')
   const { default: prisma } = await import('../src/utils/prismaClient')
-  exigirEntorno(esperado, 'Al cargar las rutas de Shopify')
+  exigirEntorno(esperado, 'Al cargar el cliente de Prisma')
   console.log('Revisando que ninguna cuenta entre con una contraseña conocida del seed (unos segundos)…')
   const quedan = await staffConClaveDelSeed(leerStaff(prisma), clavesDelSeed(await slugsDeSucursales(prisma)), await comparadorRapido())
   if (quedan) {
@@ -489,9 +632,15 @@ async function arrancar(modo: 'probar' | 'servir', sandbox: string, esperado: No
     process.exit(1)
   }
   const port = Number(process.env.PORT ?? 3100)
-  // 🔴 La app completa SÓLO en 127.0.0.1 (el dashboard local); el túnel apunta al puerto de al lado, que filtra.
-  const servidorApp = http.createServer(app)
-  const servidorTunel = crearTunel(app, rutasDelTunel(SHOPIFY_OAUTH_CALLBACK_PATH, SHOPIFY_WEBHOOK_ROUTE))
+  // 🔴 La app completa SÓLO en 127.0.0.1 y sólo con Host local (el dashboard local); el túnel apunta al puerto de al lado,
+  // que filtra. Si alguien apunta el túnel al puerto de la app, el Host público da 421.
+  const servidorApp = crearServidorLocal(app)
+  const servidorTunel = crearTunel(
+    app,
+    rutasDelTunel(SHOPIFY_OAUTH_CALLBACK_PATH, SHOPIFY_WEBHOOK_ROUTE),
+    l => console.log(l),
+    redactUrlSecrets,
+  )
   await escuchar(servidorApp, port)
   await escuchar(servidorTunel, port + 1)
   console.log(
