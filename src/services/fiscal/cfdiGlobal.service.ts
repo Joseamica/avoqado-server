@@ -1,4 +1,5 @@
 // La reserva global congela el periodo completo; sólo su entrada llega al PAC.
+import { textoDeTimbreEnDuda, timbreEnDuda } from './timbreEnDuda'
 import { CsdStatus, Prisma } from '@prisma/client'
 import type { GlobalPeriodicity } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
@@ -702,6 +703,8 @@ export interface ComplementariaExistente {
   folio: string | null
   /** Ronda 1 (m2): su último motivo (el rechazo del PAC, la guarda…), para el panel de una no timbrada. */
   lastError?: string | null
+  /** Ronda QA (hermanos): para saber si quedó EN DUDA (`timbreEnDuda`). */
+  protocoloIva?: number | null
 }
 export const llaveDeComplementaria = (llavePrincipal: string, n: number): string => `${llavePrincipal}-c${n}`
 /**
@@ -748,7 +751,16 @@ export async function complementariasDe(principal: {
       type: 'INGRESO',
       idempotencyKey: { startsWith: `${principal.idempotencyKey}-c` },
     },
-    select: { id: true, idempotencyKey: true, status: true, falloDefinitivo: true, enviadoAt: true, folio: true, lastError: true },
+    select: {
+      id: true,
+      idempotencyKey: true,
+      status: true,
+      falloDefinitivo: true,
+      enviadoAt: true,
+      protocoloIva: true,
+      folio: true,
+      lastError: true,
+    },
     orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
     take: MAX_COMPLEMENTARIAS + 1,
   })
@@ -1488,6 +1500,8 @@ export interface GlobalDeOtraPeriodicidad {
   estado: 'APARTADA' | 'RECHAZADA' | 'DETENIDA'
   folio: string | null
   motivo: string | null
+  /** Ronda QA (hermanos, aditivo): quedó EN DUDA (el PAC no contestó claro); no es un rechazo. */
+  timbreEnDuda?: true
   /** El id de su principal si es una complementaria; `null` en una principal. */
   complementariaDe: string | null
 }
@@ -1509,7 +1523,11 @@ export interface PeriodoDeLaGlobal {
     estado: 'TIMBRADA' | 'CANCELADA' | 'SIN_TIMBRAR'
     /** Ronda 1 (m2): el motivo de una complementaria SIN_TIMBRAR (p. ej. el rechazo del PAC); ausente en las demás. */
     motivo?: string | null
+    /** Ronda QA (hermanos, aditivo): quedó EN DUDA (el PAC no contestó claro); no es un rechazo. */
+    timbreEnDuda?: true
   }>
+  /** Ronda QA (hermanos, aditivo): la principal SIN_TIMBRAR quedó EN DUDA (el PAC no contestó claro); no es un rechazo. */
+  timbreEnDuda?: true
 }
 
 /** T11: el estado de una complementaria para el panel (la misma regla que la principal: en cancelación sigue timbrada). */
@@ -1531,6 +1549,13 @@ function motivoDeLaFila(fila: any, aviso: { action: string; motivo: string | nul
   if (aviso?.action === AVISO_PERIODO_DETENIDO && avisada >= escrita) return aviso.motivo ?? null
   return fila?.lastError ?? null
 }
+/**
+ * Ronda QA (hermanos): una global EN DUDA (el PAC no contestó claro y pudo haberla timbrado) no enseña su error crudo como motivo; un aviso más
+ * nuevo que la fila (`motivoDeLaFila`) sí manda. Y se marca con `timbreEnDuda` (aditivo).
+ */
+const motivoSinTimbrar = (fila: any, motivo: string | null): string | null =>
+  timbreEnDuda(fila) && motivo === (fila?.lastError ?? null) ? textoDeTimbreEnDuda('la factura global') : motivo
+const conDuda = (fila: any): { timbreEnDuda?: true } => (timbreEnDuda(fila) ? { timbreEnDuda: true } : {})
 /** Ronda 1 (I1): el estado de una global de otra periodicidad (sólo para mostrar). */
 const estadoDeOtra = (f: { status: string; falloDefinitivo?: boolean | null }): GlobalDeOtraPeriodicidad['estado'] =>
   f.status === 'VALIDATION_FAILED' ? 'DETENIDA' : apartaSusVentas(f) ? 'APARTADA' : 'RECHAZADA'
@@ -1591,8 +1616,14 @@ export async function periodosDeLaGlobal(
     const existentes = fila && (estado === 'TIMBRADA' || estado === 'CANCELADA') ? await deps.complementariasDe(fila) : []
     const complementarias = existentes.map(c => {
       const e = estadoDeLaComplementaria(c)
-      // Ronda 1 (m2): la no timbrada dice por qué (el rechazo del PAC, la guarda…); las demás no llevan `motivo`.
-      return { cfdiId: c.id, folio: c.folio, estado: e, ...(e === 'SIN_TIMBRAR' ? { motivo: c.lastError ?? null } : {}) }
+      // Ronda 1 (m2): la no timbrada dice por qué (el rechazo del PAC, la guarda…); las demás no llevan `motivo`. Ronda QA (hermanos): una EN
+      // DUDA no enseña el error crudo del PAC.
+      return {
+        cfdiId: c.id,
+        folio: c.folio,
+        estado: e,
+        ...(e === 'SIN_TIMBRAR' ? { motivo: motivoSinTimbrar(c, c.lastError ?? null), ...conDuda(c) } : {}),
+      }
     })
     let corregidasPendientes: { n: number; completo: boolean } | null = null
     // Sólo donde `emitirGlobalComplementaria` sí emite: principal STAMPED de protocolo 1 o CANCELADA (ronda 1, I1: nunca una heredada timbrada).
@@ -1621,7 +1652,8 @@ export async function periodosDeLaGlobal(
       estado,
       cfdiId: fila?.id ?? null,
       folio: fila?.folio ?? null,
-      motivo: estado === 'SIN_TIMBRAR' ? motivoDeLaFila(fila, aviso) : detenido,
+      motivo: estado === 'SIN_TIMBRAR' ? motivoSinTimbrar(fila, motivoDeLaFila(fila, aviso)) : detenido,
+      ...(estado === 'SIN_TIMBRAR' ? conDuda(fila) : {}),
       corregidasPendientes,
       complementarias,
     })
@@ -1651,9 +1683,12 @@ export async function periodosDeLaGlobal(
     const complementariaDe =
       esObjeto(fila.entrada) && typeof fila.entrada.complementariaDe === 'string' ? (fila.entrada.complementariaDe as string) : null
     // Una complementaria comparte el periodo (y sus avisos) con su principal: su motivo es el de su fila; si espera a una persona, eso.
-    const motivo = complementariaDe
-      ? (fila.lastError ?? (fila.status === 'STAMPING' && fila.enviadoAt === null ? MOTIVO_COMPLEMENTARIA_DEL_JOB : null))
-      : motivoDeLaFila(fila, await deps.ultimoAvisoDelPeriodo(emisor, q, [AVISO_PERIODO_DETENIDO, AVISO_PERIODO_REANUDADO]))
+    const motivo = motivoSinTimbrar(
+      fila,
+      complementariaDe
+        ? (fila.lastError ?? (fila.status === 'STAMPING' && fila.enviadoAt === null ? MOTIVO_COMPLEMENTARIA_DEL_JOB : null))
+        : motivoDeLaFila(fila, await deps.ultimoAvisoDelPeriodo(emisor, q, [AVISO_PERIODO_DETENIDO, AVISO_PERIODO_REANUDADO])),
+    )
     globales.push({
       cfdiId: fila.id,
       periodicidad,
@@ -1664,6 +1699,7 @@ export async function periodosDeLaGlobal(
       estado: estadoDeOtra(fila),
       folio: fila.folio ?? null,
       motivo,
+      ...conDuda(fila),
       complementariaDe,
     })
   }

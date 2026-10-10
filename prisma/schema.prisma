@@ -17068,6 +17068,7 @@ model Cfdi {
   taxCents      Int
   totalCents    Int
   taxBreakdown  Json? // [{ impuesto:002, tipo:Traslado, base, tasa, importe }, ...]
+  xmlConceptos  Json? // C2: totales y conceptos del XML timbrado (ObjetoImp y traslados de cada uno); evidencia de notas y extracciones
 
   /// IVA por producto, plan 3: la ENTRADA documental del intento — lo que se le mandó
   /// al PAC (o se congeló para mandarle), reconstruible sin volver a leer las órdenes.
@@ -17112,6 +17113,9 @@ model Cfdi {
   cancelStatus         CfdiCancelStatus?
   cancelRequestedAt    DateTime?
   cancelledAt          DateTime?
+  cancelIntento        Int       @default(0) // C2: número del intento de cancelación vigente; cada desenlace se aplica sólo a SU intento
+  cancelEnviadaAt      DateTime? // C2: token del ÚNICO envío de este intento (cuándo se tomó); NULL = anotado y todavía no enviado
+  cancelAcusadaAt      DateTime? // C2: cuándo el PAC acusó este intento (lo vio en trámite); distingue «en trámite» de «en duda»
 
   /// Sustitución (CFDI 4.0 TipoRelacion 04): la factura CORREGIDA apunta a la que sustituye.
   /// 🔴 Es el INTENTO DURABLE: se escribe al reservar, ANTES de llamar al PAC. Sustituir son dos

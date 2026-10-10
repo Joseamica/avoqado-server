@@ -22,7 +22,9 @@ import {
   syncPendingCancellations,
   tocaRevisarCancelaciones,
   llaveDeEmision,
+  ENVIO_TERMINADO_MS,
 } from '../../../../src/services/fiscal/cfdi.service'
+import { ConflictError } from '../../../../src/errors/AppError'
 
 const D = (n: number) => new Prisma.Decimal(n)
 const receptor = {
@@ -161,8 +163,10 @@ describe('issueCfdiForOrder — venta con facturas previas', () => {
     expect(deps.reserveCfdi).not.toHaveBeenCalled()
   })
 
+  // C2 · T10 ronda 1 (M3, cambia A PROPÓSITO): el texto depende del estado derivado; esta fila es un LEGADO acusado (`cancelIntento: 0`, el
+  // default de la columna en producción). Sin el número, la fila se leería «anotada» y diría «se está enviando».
   it('con la cancelación EN TRÁMITE, primero le pregunta al PAC; si sigue en trámite, no timbra (409)', async () => {
-    const pendiente = fila({ cancelStatus: 'REQUESTED' })
+    const pendiente = fila({ cancelStatus: 'REQUESTED', cancelIntento: 0 })
     const deps = makeIssueDeps({
       findOrderInvoices: jest.fn().mockResolvedValue([pendiente]),
       refreshPendingCancellation: jest.fn().mockResolvedValue(pendiente),
@@ -233,7 +237,7 @@ describe('issueCfdiForOrder — venta con facturas previas', () => {
   })
 
   it('si preguntar al PAC falla, NO se da por cancelada: se trata como en trámite', async () => {
-    const pendiente = fila({ cancelStatus: 'REQUESTED' })
+    const pendiente = fila({ cancelStatus: 'REQUESTED', cancelIntento: 0 }) // T10 ronda 1 (M3): legado acusado, ver arriba
     const deps = makeIssueDeps({
       findOrderInvoices: jest.fn().mockResolvedValue([pendiente]),
       refreshPendingCancellation: jest.fn().mockRejectedValue(new Error('fetch failed')),
@@ -298,6 +302,7 @@ function refreshDeps(estado: { status: string; cancelledAt: Date | null }, over:
       .fn()
       .mockImplementation(async (_id: string, data: any) => ({ ...fila({ cancelStatus: 'REQUESTED' }), ...data })),
     logAction: jest.fn().mockResolvedValue(undefined),
+    now: () => new Date(),
     ...over,
   }
   return Object.assign(deps, { getCancellationStatus })
@@ -320,20 +325,28 @@ describe('refreshPendingCancellation', () => {
     )
   })
 
-  it('sigue en trámite ⇒ no escribe nada', async () => {
+  // C2 (dorada que cambia a propósito, Codex C2-11/C2-29): con el intento ya ACUSADO, «sigue en trámite» no escribe nada; sin acuse, se
+  // acusa (probado en cfdiCancel.service.test.ts).
+  const acusadaHace = (min: number) => {
+    const t = new Date(Date.now() - min * 60_000)
+    return { cancelStatus: 'REQUESTED', cancelIntento: 1, cancelRequestedAt: t, cancelEnviadaAt: t, cancelAcusadaAt: t }
+  }
+  it('sigue en trámite (intento ya acusado) ⇒ no escribe nada', async () => {
     const deps = refreshDeps({ status: 'pending', cancelledAt: null })
-    const antes = fila({ cancelStatus: 'REQUESTED' })
+    const antes = fila(acusadaHace(90))
     const r = await refreshPendingCancellation(antes, { sandbox: false }, deps)
     expect(deps.applyCancelOutcome).not.toHaveBeenCalled()
     expect(r).toBe(antes)
   })
 
-  it('el PAC dice que NO hay cancelación (none/expired/rejected) ⇒ REJECTED, sigue vigente, con la razón', async () => {
+  // C2 (dorada que cambia a propósito): el cierre negativo sólo corre con el envío TERMINADO (acusado o en duda) y nunca toca `status`
+  // (sigue STAMPED porque la escritura no lo cambia, y el `where` de `aplicarCancelacion` lo exige).
+  it('el PAC dice que NO hay cancelación (none/expired/rejected) sobre un intento acusado ⇒ REJECTED, sigue vigente, con la razón', async () => {
     for (const status of ['none', 'expired', 'rejected']) {
       const deps = refreshDeps({ status, cancelledAt: null })
-      await refreshPendingCancellation(fila({ cancelStatus: 'REQUESTED' }), { sandbox: false }, deps)
+      await refreshPendingCancellation(fila(acusadaHace(90)), { sandbox: false }, deps)
       const data = (deps.applyCancelOutcome as jest.Mock).mock.calls[0][1]
-      expect([status, data.cancelStatus, data.status]).toEqual([status, 'REJECTED', 'STAMPED'])
+      expect([status, data.cancelStatus, data.status ?? 'sin cambio']).toEqual([status, 'REJECTED', 'sin cambio'])
       expect(data.lastError).toMatch(/vigente/)
       expect(deps.logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'CFDI_CANCEL_NOT_APPLIED' }))
     }
@@ -373,7 +386,8 @@ describe('syncPendingCancellations', () => {
       .mockResolvedValue([fila({ id: 'a', cancelStatus: 'REQUESTED' }), fila({ id: 'b', cancelStatus: 'REQUESTED' })])
     const tally = await syncPendingCancellations({ sandbox: false, now: new Date() }, { findPending, refresh })
     expect(refresh).toHaveBeenCalledTimes(2)
-    expect(tally).toEqual({ revisadas: 2, resueltas: 1, siguenEnTramite: 0, errores: 1 })
+    // C2 (dorada que cambia a propósito, C2-7): el resultado gana `cursor` (página no llena ⇒ vuelve al principio).
+    expect(tally).toEqual({ revisadas: 2, resueltas: 1, siguenEnTramite: 0, errores: 1, cursor: null })
   })
 
   // full-testing 24-sep: una factura que el PAC no reconocía se reintentaba cada 5 min escribiendo `error:`.
@@ -463,7 +477,8 @@ describe('barrido de cancelaciones: una vez por hora, sólo las de más de 1 h',
     const ahora = new Date('2026-09-24T12:00:00Z')
     const findPending = jest.fn().mockResolvedValue([])
     await syncPendingCancellations({ sandbox: false, now: ahora }, { findPending, refresh: jest.fn() })
-    expect(findPending).toHaveBeenCalledWith(new Date('2026-09-24T11:00:00Z'))
+    // C2 (dorada que cambia a propósito, C2-7): `findPending(cutoff, cursor)`; sin cursor, desde el principio.
+    expect(findPending).toHaveBeenCalledWith(new Date('2026-09-24T11:00:00Z'), null)
   })
 
   it('toca revisar en la primera pasada y después sólo cuando ya pasó una hora', () => {
@@ -472,5 +487,142 @@ describe('barrido de cancelaciones: una vez por hora, sólo las de más de 1 h',
     expect(tocaRevisarCancelaciones(t0, t0 + 5 * 60_000)).toBe(false)
     expect(tocaRevisarCancelaciones(t0, t0 + 59 * 60_000)).toBe(false)
     expect(tocaRevisarCancelaciones(t0, t0 + 60 * 60_000)).toBe(true)
+  })
+})
+
+// ─── C2 · Tarea 10, ronda 1 (M3): refacturar con la cancelación de la anterior pedida ⇒ ConflictError con código y texto según el estado
+describe('C2 · T10 ronda 1 (M3) — refacturar: `ConflictError(…, CFDI_CANCEL_PENDING)` y el texto según en qué va la cancelación', () => {
+  beforeEach(() => jest.clearAllMocks())
+  const T0 = new Date('2026-10-05T18:00:00.000Z')
+  afterEach(() => jest.useRealTimers())
+  const refacturar = async (anterior: Record<string, any>, ahora: Date) => {
+    jest.useFakeTimers({ now: ahora, doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] })
+    const pendiente = fila({ cancelStatus: 'REQUESTED', ...anterior })
+    const deps = makeIssueDeps({
+      findOrderInvoices: jest.fn().mockResolvedValue([pendiente]),
+      refreshPendingCancellation: jest.fn().mockResolvedValue(pendiente),
+    })
+    const err = await issueCfdiForOrder({ orderId: 'o1', receptor, sandbox: true, expectedVenueId: 'v1' }, deps).then(
+      () => null,
+      (e: unknown) => e,
+    )
+    expect(deps.createInvoice).not.toHaveBeenCalled()
+    return err as any
+  }
+  it('🔴 en trámite (acusada) ⇒ ConflictError con código CFDI_CANCEL_PENDING y el texto de siempre', async () => {
+    const err = await refacturar({ cancelIntento: 1, cancelEnviadaAt: T0, cancelAcusadaAt: T0 }, T0)
+    expect(err).toBeInstanceOf(ConflictError)
+    expect(err).toMatchObject({ statusCode: 409, code: 'CFDI_CANCEL_PENDING' })
+    expect(err.message).toBe(
+      'La cancelación de la factura A-14 sigue en trámite ante el SAT; en cuanto quede cancelada podrás volver a facturar esta venta.',
+    )
+  })
+  it('🔴 enviándose (token reciente, sin acuse) ⇒ «se está enviando al SAT», nunca «en trámite ante el SAT»', async () => {
+    const err = await refacturar({ cancelIntento: 1, cancelEnviadaAt: T0, cancelAcusadaAt: null }, new Date(T0.getTime() + 30_000))
+    expect(err).toMatchObject({ code: 'CFDI_CANCEL_PENDING' })
+    expect(err.message).toBe(
+      'La cancelación de la factura A-14 se está enviando al SAT; en cuanto quede cancelada podrás volver a facturar esta venta.',
+    )
+  })
+  it('🔴 en duda (pasado el umbral, sin acuse) ⇒ «en duda… hasta 24 horas»', async () => {
+    const err = await refacturar(
+      { cancelIntento: 1, cancelEnviadaAt: T0, cancelAcusadaAt: null },
+      new Date(T0.getTime() + ENVIO_TERMINADO_MS + 1_000),
+    )
+    expect(err).toMatchObject({ code: 'CFDI_CANCEL_PENDING' })
+    expect(err.message).toBe(
+      'La cancelación de la factura A-14 está en duda: la estamos confirmando con el SAT (puede tardar hasta 24 horas). En cuanto quede cancelada podrás volver a facturar esta venta.',
+    )
+  })
+  it('🔴 un legado (`cancelIntento: 0`) y el estado heredado CANCEL_REQUESTED dicen «en trámite», con el código', async () => {
+    expect((await refacturar({ cancelIntento: 0 }, T0)).message).toMatch(/A-14 sigue en trámite ante el SAT/)
+    const heredada = await refacturar({ status: 'CANCEL_REQUESTED', cancelStatus: null }, T0)
+    expect(heredada).toMatchObject({ code: 'CFDI_CANCEL_PENDING' })
+    expect(heredada.message).toMatch(/A-14 sigue en trámite ante el SAT/)
+  })
+})
+
+// C2 · OF-2 (T10 N-2, `task-10-rereview-1.md`): la original A sigue vigente junto a su sustituta B TIMBRADA. La venta ya está facturada con
+// B: se contesta con B (antes: con A, la más vieja, y el texto mandaba a «Corregir importe», que la fila de A no ofrece). Hermano: A con la
+// cancelación en trámite + B timbrada decía «en cuanto quede cancelada podrás volver a facturar esta venta», falso (sigue facturada con B).
+describe('C2 · OF-2 (T10 N-2) — refacturar con la original vigente y su sustituta TIMBRADA', () => {
+  beforeEach(() => jest.clearAllMocks())
+  const T0 = new Date('2026-10-05T18:00:00.000Z')
+  const sustituta = (over: Record<string, any> = {}) =>
+    fila({ id: 'c-b', idempotencyKey: 'cfdi-order-o1-r1', folio: '15', uuid: 'UUID-B', replacesCfdiId: 'c-a14', ...over })
+  const refacturar = (facturas: any[]) => {
+    const deps = makeIssueDeps({
+      findOrderInvoices: jest.fn().mockResolvedValue(facturas),
+      refreshPendingCancellation: jest.fn().mockImplementation(async (c: any) => c),
+    })
+    return { deps, res: issueCfdiForOrder({ orderId: 'o1', receptor, sandbox: true, expectedVenueId: 'v1' }, deps) }
+  }
+
+  it('🔴 A vigente (cancelación rechazada) + B timbrada ⇒ alreadyIssued con B, y dice cuál original sigue vigente', async () => {
+    const { deps, res } = refacturar([fila({ cancelStatus: 'REJECTED' }), sustituta()])
+    const r = await res
+    expect(r.alreadyIssued).toBe(true)
+    expect(r.cfdi.id).toBe('c-b')
+    expect(r.originalVigente).toMatchObject({ id: 'c-a14', serie: 'A', folio: '14', cancelStatus: 'REJECTED' })
+    expect(deps.createInvoice).not.toHaveBeenCalled()
+    expect(deps.reserveCfdi).not.toHaveBeenCalled()
+  })
+
+  it('🔴 A con la cancelación EN TRÁMITE + B timbrada ⇒ alreadyIssued con B (nunca «podrás volver a facturar»)', async () => {
+    const enTramite = fila({ cancelStatus: 'REQUESTED', cancelIntento: 1, cancelEnviadaAt: T0, cancelAcusadaAt: T0 })
+    const { deps, res } = refacturar([enTramite, sustituta()])
+    const r = await res
+    expect(r.alreadyIssued).toBe(true)
+    expect(r.cfdi.id).toBe('c-b')
+    expect(r.originalVigente).toMatchObject({ id: 'c-a14', cancelStatus: 'REQUESTED' })
+    expect(deps.refreshPendingCancellation).toHaveBeenCalledTimes(1)
+    expect(deps.createInvoice).not.toHaveBeenCalled()
+  })
+
+  // Ronda de la ola (review-OF m2, cambia A PROPÓSITO): la sustituta B se está cancelando y la original A sigue vigente ⇒ la venta ESTÁ
+  // facturada con A (se cancele o no B): `alreadyIssued` con A, no un 409 `CFDI_CANCEL_PENDING` (que el dashboard titulaba «la factura
+  // anterior todavía no queda cancelada» y la autofactura pasaba tal cual al cliente final, con folios).
+  it('🔴 m2: la SUSTITUTA con la cancelación en trámite y A vigente ⇒ alreadyIssued con A (y cuál sustituta se está cancelando)', async () => {
+    const { deps, res } = refacturar([
+      fila({}),
+      sustituta({ cancelStatus: 'REQUESTED', cancelIntento: 1, cancelEnviadaAt: T0, cancelAcusadaAt: T0 }),
+    ])
+    const r = await res
+    expect(r).toMatchObject({ status: 'STAMPED', alreadyIssued: true, cfdi: { id: 'c-a14' } })
+    expect(r.sustitutaEnCancelacion).toMatchObject({ id: 'c-b', folio: '15', cancelStatus: 'REQUESTED' })
+    expect(r.originalVigente).toBeUndefined()
+    expect(deps.createInvoice).not.toHaveBeenCalled()
+    expect(deps.reserveCfdi).not.toHaveBeenCalled()
+  })
+  it('🔴 m2: ídem con la cancelación de A TAMBIÉN en trámite ⇒ alreadyIssued con A, nunca el 409', async () => {
+    const enTramite = { cancelStatus: 'REQUESTED', cancelIntento: 1, cancelEnviadaAt: T0, cancelAcusadaAt: T0 }
+    const r = await refacturar([fila(enTramite), sustituta(enTramite)]).res
+    expect(r).toMatchObject({ alreadyIssued: true, cfdi: { id: 'c-a14' }, sustitutaEnCancelacion: { id: 'c-b' } })
+  })
+  it('control — sin sustituta, la cancelación en trámite de la única factura sigue siendo el 409 `CFDI_CANCEL_PENDING`', async () => {
+    const err: any = await refacturar([
+      fila({ cancelStatus: 'REQUESTED', cancelIntento: 1, cancelEnviadaAt: T0, cancelAcusadaAt: T0 }),
+    ]).res.then(
+      () => null,
+      (e: unknown) => e,
+    )
+    expect(err).toBeInstanceOf(ConflictError)
+    expect(err).toMatchObject({ code: 'CFDI_CANCEL_PENDING' })
+    expect(err.message).toBe(
+      'La cancelación de la factura A-14 sigue en trámite ante el SAT; en cuanto quede cancelada podrás volver a facturar esta venta.',
+    )
+  })
+
+  it('control — con A cancelada, B es la única vigente: alreadyIssued con B y sin original vigente', async () => {
+    const r = await refacturar([fila({ status: 'CANCELLED', cancelStatus: 'CANCELLED' }), sustituta()]).res
+    expect(r.cfdi.id).toBe('c-b')
+    expect(r.originalVigente).toBeUndefined()
+  })
+
+  it('control — la sustituta todavía NO timbrada no cuenta: la venta sigue facturada con A', async () => {
+    const r = await refacturar([fila({}), sustituta({ status: 'STAMP_FAILED' })]).res
+    expect(r.alreadyIssued).toBe(true)
+    expect(r.cfdi.id).toBe('c-a14')
+    expect(r.originalVigente).toBeUndefined()
   })
 })

@@ -111,7 +111,7 @@ describe('liberar sellos al confirmar cancelación', () => {
     await prisma.order.deleteMany({ where: { venueId } })
     await prisma.product.deleteMany({ where: { venueId } })
     await prisma.menuCategory.deleteMany({ where: { venueId } })
-    await prisma.merchantFiscalConfig.deleteMany({ where: { fiscalEmisorId } })
+    if (fiscalEmisorId) await prisma.merchantFiscalConfig.deleteMany({ where: { fiscalEmisorId } }) // id undefined = toda la tabla
     await prisma.fiscalEmisor.deleteMany({ where: { venueId } })
     await prisma.merchantAccount.deleteMany({ where: { id: fixture } })
     await prisma.paymentProvider.deleteMany({ where: { id: fixture } })
@@ -226,8 +226,15 @@ describe('liberar sellos al confirmar cancelación', () => {
     }
     await Promise.all([run(), run()])
     expect(release).toHaveBeenCalledTimes(1)
-    expect(await prisma.activityLog.count({ where: { entityId: c.id, action: { in: ['CFDI_CANCELLED', 'CFDI_CANCEL_CONFIRMED'] } } })).toBe(
-      1,
+    // C2 · OF-2 (T2 R4, cambia A PROPÓSITO): en la directa, el ganador deja «solicitada» (`CFDI_CANCELLED`, el controlador) y, como su
+    // petición terminó en el hecho al instante, también «confirmada» (`CFDI_CANCEL_CONFIRMED`, origen DUENO). El perdedor, nada: una de cada una.
+    const bitacora = await prisma.activityLog.findMany({
+      where: { entityId: c.id, action: { in: ['CFDI_CANCELLED', 'CFDI_CANCEL_CONFIRMED'] } },
+      select: { action: true },
+      take: 10,
+    })
+    expect(bitacora.map(b => b.action).sort()).toEqual(
+      path === 'directa' ? ['CFDI_CANCELLED', 'CFDI_CANCEL_CONFIRMED'] : ['CFDI_CANCEL_CONFIRMED'],
     )
     expect(await seals(c.id)).toBe(0)
     expect((await currentItem(o.items[0].id)).ivaTratamiento).toBeNull()
@@ -313,11 +320,79 @@ describe('liberar sellos al confirmar cancelación', () => {
       await cancelling
     }
     // Sin negocio: el manifiesto ya está acotado por la factura (Ruling 4b-R13, mismas filas que el bucle por id de antes).
-    expect(lock.mock.calls.map(call => [call[1], call[2]])).toEqual([[[o.id, second.id].sort(), undefined]])
+    // C2 · Tarea 2 (cambia a propósito): la INTENCIÓN de cancelar se anota bajo los mismos candados de la emisión, antes del PAC
+    // (`anotarIntencionDeCancelar`), y el desenlace los vuelve a tomar (`aplicarCancelacion`): dos tomas, las dos con TODAS las órdenes
+    // del manifiesto, en orden y sin negocio.
+    const todas = [[o.id, second.id].sort(), undefined]
+    expect(lock.mock.calls.map(call => [call[1], call[2]])).toEqual([todas, todas])
     expect(await seals(c.id)).toBe(0)
     expect((await currentItem(o.items[0].id)).ivaTratamiento).toBeNull()
     expect((await currentItem(second.items[0].id)).ivaTratamiento).toBeNull()
   })
+  // C2 · Tarea 2 · ronda 1 (M4): la de arriba se detiene ahora en la INTENCIÓN (la primera toma de candados). Esta variante toma el
+  // candado de la orden DESPUÉS de anotar la intención —entre la consulta al PAC y el desenlace—, así que es `aplicarCancelacion` la que
+  // espera la orden mayor: tampoco retiene el producto que comparten mientras espera, ni libera sellos antes de tenerlas todas.
+  it('control — global, bajo contención ENTRE el PAC y el desenlace: el desenlace espera la orden mayor sin retener el producto ni liberar antes', async () => {
+    const { o, c } = await fixtureFor('directa')
+    const second = await order()
+    await prisma.cfdi.update({ where: { id: c.id }, data: { isGlobal: true, orderId: null } })
+    await prisma.cfdiGlobalOrden.createMany({ data: [second.id, o.id].map(orderId => ({ cfdiId: c.id, orderId, huella: 'test' })) })
+    await prisma.$transaction(tx =>
+      sellosIva.sellarRenglones(tx, { cfdiId: c.id, intento: 1, renglones: [{ orderItemId: second.items[0].id, tratamiento: 'IVA_16' }] }),
+    )
+    const [, mayor] = [o.id, second.id].sort()
+    let unlock!: () => void
+    let locked!: () => void
+    const held = new Promise<void>(resolve => {
+      locked = resolve
+    })
+    const gate = new Promise<void>(resolve => {
+      unlock = resolve
+    })
+    let holder: Promise<unknown> = Promise.resolve()
+    let lock!: jest.SpyInstance
+    // La consulta previa al PAC ocurre DESPUÉS de anotar la intención: ahí una conciliación de Uber toma la orden mayor.
+    provider.getCancellationStatus.mockImplementationOnce(async () => {
+      expect(await prisma.cfdi.findUniqueOrThrow({ where: { id: c.id } })).toMatchObject({ cancelStatus: 'REQUESTED', cancelIntento: 1 })
+      lock = jest.spyOn(admisionIva, 'bloquearOrdenesParaFacturar') // sólo la toma del DESENLACE
+      holder = prisma.$transaction(
+        async tx => {
+          await tx.$queryRaw`SELECT id FROM "Order" WHERE id = ${mayor} FOR UPDATE`
+          locked()
+          await gate
+        },
+        { timeout: 15000 },
+      )
+      await held
+      return { status: 'canceled', cancelledAt: new Date() }
+    })
+    const cancelling = cancel('directa', c)
+    try {
+      await held
+      let waiting = false
+      for (let tries = 0; tries < 200 && !waiting; tries++) {
+        const waiters = await prisma.$queryRaw<Array<{ n: number }>>`SELECT COUNT(*)::int AS n FROM pg_stat_activity
+          WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%"Order"%FOR UPDATE%'`
+        waiting = waiters[0].n > 0
+        if (!waiting) await new Promise(resolve => setTimeout(resolve, 10))
+      }
+      expect(waiting).toBe(true)
+      expect(lock).toHaveBeenCalledTimes(1) // la toma del DESENLACE (la de la intención terminó antes de la consulta)
+      // Detenido en la orden mayor, el desenlace no retiene el producto que comparten.
+      await prisma.$transaction(tx => tx.$queryRaw`SELECT id FROM "Product" WHERE id = ${productId} FOR NO KEY UPDATE NOWAIT`)
+      expect(await seals(c.id)).toBe(2)
+      expect((await row(o.id)).status).toBe('STAMPED')
+    } finally {
+      unlock()
+      await holder
+      await cancelling
+    }
+    const todas = [[o.id, second.id].sort(), undefined]
+    expect(lock.mock.calls.map(call => [call[1], call[2]])).toEqual([todas])
+    expect(await seals(c.id)).toBe(0)
+    expect((await row(o.id)).status).toBe('CANCELLED')
+  })
+
   // Plan 4b (Ruling 4b-R13, «mismas filas»): una orden de la global que después se movió a otro negocio de la organización
   // (playtelecomEventSimReassignment) sigue siendo de ESTA factura: la cancelación la toma igual, por id, antes de liberar sus
   // sellos. Filtrar por el negocio de la factura la dejaba sin candado.
@@ -375,13 +450,18 @@ describe('liberar sellos al confirmar cancelación', () => {
     expect((await currentItem(movida.items[0].id)).ivaTratamiento).toBeNull()
     expect((await row(o.id)).status).toBe('CANCELLED')
   })
-  it('pending directo atrasado no degrada una confirmación externa ni libera dos veces', async () => {
+  // C2 · Tarea 2 (cambia a propósito): con la intención anotada ANTES del PAC, mientras el POST vuela la fila ya está `REQUESTED`, y el
+  // webhook manda una fila `REQUESTED` a la CONSULTA (`refreshPendingCancellation`), no a la sincronización externa: es esa consulta la que
+  // aplica el hecho en `ENVIANDO` (C2-29). La consulta previa al POST no ve cancelación (el doble de este archivo dice «cancelada» por
+  // defecto). El dueño que envió reporta lo que quedó (`applied`: él mandó el intento).
+  it('pending directo atrasado no degrada una confirmación que llegó por la consulta ni libera dos veces', async () => {
     const { o, c } = await fixtureFor('directa')
     let entered!: () => void
     let respond!: (result: any) => void
     const ready = new Promise<void>(resolve => {
       entered = resolve
     })
+    provider.getCancellationStatus.mockResolvedValueOnce({ status: 'none', cancelledAt: null }) // la consulta previa al POST
     provider.cancelInvoice.mockImplementation(() => {
       entered()
       return new Promise(resolve => {
@@ -391,9 +471,11 @@ describe('liberar sellos al confirmar cancelación', () => {
     const direct = cancel('directa', c)
     await ready
     const release = jest.spyOn(sellosIva, 'liberarSellosDe')
-    await cancel('externa', c)
+    const enVuelo = await prisma.cfdi.findUniqueOrThrow({ where: { id: c.id }, include: { fiscalEmisor: true } })
+    expect(enVuelo).toMatchObject({ cancelStatus: 'REQUESTED', cancelEnviadaAt: expect.any(Date) })
+    await cancel('pendiente', enVuelo) // el aviso del webhook: el PAC ya dice «cancelada»
     respond({ status: 'pending', cancelledAt: null })
-    expect(await direct).toMatchObject({ applied: false, cancelStatus: 'CANCELLED' })
+    expect(await direct).toMatchObject({ cancelStatus: 'CANCELLED' })
     expect(release).toHaveBeenCalledTimes(1)
     expect((await row(o.id)).status).toBe('CANCELLED')
     expect(await seals(c.id)).toBe(0)

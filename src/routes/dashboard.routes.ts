@@ -326,6 +326,7 @@ import {
   listCfdisSchema,
   cancelCfdiSchema,
   sendCfdiEmailSchema,
+  emitRefundCreditNoteSchema,
   upsertEmisorSchema,
   upsertMerchantConfigSchema,
   uploadCsdSchema,
@@ -3739,6 +3740,7 @@ router.get(
 router.post(
   '/venues/:venueId/refunds/:refundId/credit-note',
   authenticateTokenMiddleware,
+  validateRequest(emitRefundCreditNoteSchema), // C2 T9: `{ modalidad?, huella? }` — validate body BEFORE feature/perm checks
   checkFeatureAccess('CFDI'),
   checkPermission('cfdi:issue'),
   emitRefundCreditNoteController,

@@ -35,6 +35,13 @@ jest.mock('../../../../src/middlewares/checkPermission.middleware', () => ({
   },
 }))
 
+// C2 · ronda QA (D1): la nota de crédito, para su 502.
+const mockEmitNota = jest.fn()
+jest.mock('../../../../src/services/fiscal/cfdiCreditNote.service', () => ({
+  emitRefundCreditNote: (...a: any[]) => mockEmitNota(...a),
+  getRefundCreditNoteStatus: jest.fn(),
+}))
+
 const mockSendCfdiByEmail = jest.fn()
 jest.mock('../../../../src/services/fiscal/cfdiEmail.service', () => ({
   sendCfdiByEmail: (...a: any[]) => mockSendCfdiByEmail(...a),
@@ -140,6 +147,7 @@ import {
   downloadCfdiFileController,
   sendCfdiEmailController,
   confirmOrderPriceContractController,
+  emitRefundCreditNoteController,
 } from '../../../../src/controllers/dashboard/cfdi.dashboard.controller'
 
 // ==========================================
@@ -361,16 +369,109 @@ describe('issueCfdiForOrderController', () => {
     expect(mockLogAction).not.toHaveBeenCalled()
   })
 
-  it('cancelación de la factura anterior EN TRÁMITE ⇒ 409 con el mensaje del servicio', async () => {
-    const msg =
-      'La cancelación de la factura A-14 sigue en trámite ante el SAT; en cuanto quede cancelada podrás volver a facturar esta venta.'
-    mockIssue.mockRejectedValue(new Error(msg))
+  // C2 · OF-2 (T10 N-2): la venta ya está facturada con la SUSTITUTA y la original sigue vigente. El texto no manda a «Corregir importe»
+  // (la fila de la original no lo ofrece): nombra a las dos y manda a «Terminar la sustitución» sólo si la original no tiene una
+  // cancelación viva (la condición con la que la fila lo ofrece).
+  describe('C2 · OF-2 (T10 N-2) — ya facturada con la sustituta y la original vigente', () => {
+    const sustituta = { id: 'cb', uuid: 'UB', serie: 'A', folio: '15', status: 'STAMPED', receptorNombre: 'WORKY' }
+    const conOriginal = (original: Record<string, unknown>) =>
+      mockIssue.mockResolvedValue({
+        status: 'STAMPED',
+        alreadyIssued: true,
+        cfdi: sustituta,
+        originalVigente: { id: 'ca', uuid: 'UA', serie: 'A', folio: '14', status: 'STAMPED', ...original },
+      })
+
+    it('🔴 original sin cancelación viva ⇒ nombra la A-15 y la A-14, y manda a «Terminar la sustitución», nunca a «Corregir importe»', async () => {
+      conOriginal({ cancelStatus: 'REJECTED' })
+      const res = mockRes()
+      await issueCfdiForOrderController(mockReq(), res)
+      expect(res.status).toHaveBeenCalledWith(409)
+      const body = res.json.mock.calls[0][0]
+      expect(body.code).toBe('CFDI_ALREADY_ISSUED')
+      expect(body.error).toBe(
+        'Esta venta ya está facturada con la factura A-15, que sustituye a la A-14. La A-14 todavía no queda cancelada: en Facturación, usa «Terminar la sustitución» en la A-14.',
+      )
+      expect(body.cfdi).toMatchObject({ id: 'cb', folio: '15' })
+      expect(mockLogAction).not.toHaveBeenCalled()
+    })
+
+    it('🔴 original con la cancelación en trámite ⇒ lo dice, sin botones que la fila no ofrece', async () => {
+      conOriginal({ cancelStatus: 'REQUESTED' })
+      const res = mockRes()
+      await issueCfdiForOrderController(mockReq(), res)
+      const body = res.json.mock.calls[0][0]
+      expect(body.error).toBe(
+        'Esta venta ya está facturada con la factura A-15, que sustituye a la A-14; la cancelación de la A-14 sigue pendiente ante el SAT.',
+      )
+      expect(body.error).not.toMatch(/Corregir importe|Terminar la sustitución/)
+    })
+  })
+
+  // Ronda de la ola (review-OF m2): ya facturada con la ORIGINAL y su sustituta se está cancelando. Nunca «Corregir importe» (la fila de la
+  // original ya tiene sustituta: no lo ofrece); «Cancelar» sólo si la original no tiene una cancelación viva (la condición de la fila).
+  describe('ronda de la ola (m2) — ya facturada con la original y la sustituta en cancelación', () => {
+    const original = { id: 'ca', uuid: 'UA', serie: 'A', folio: '14', status: 'STAMPED', receptorNombre: 'WORKY' }
+    const conSustituta = (originalOver: Record<string, unknown>) =>
+      mockIssue.mockResolvedValue({
+        status: 'STAMPED',
+        alreadyIssued: true,
+        cfdi: { ...original, ...originalOver },
+        sustitutaEnCancelacion: { id: 'cb', uuid: 'UB', serie: 'A', folio: '15', status: 'STAMPED', cancelStatus: 'REQUESTED' },
+      })
+
+    it('🔴 la original sin cancelación viva ⇒ nombra las dos y manda a cancelar también la original', async () => {
+      conSustituta({ cancelStatus: null })
+      const res = mockRes()
+      await issueCfdiForOrderController(mockReq(), res)
+      expect(res.status).toHaveBeenCalledWith(409)
+      const body = res.json.mock.calls[0][0]
+      expect(body.code).toBe('CFDI_ALREADY_ISSUED')
+      expect(body.error).toBe(
+        'Esta venta ya está facturada con la factura A-14: la A-15, que la corregía, tiene su cancelación en trámite. Para facturarla a otra razón social, cancela también la A-14 en Facturación.',
+      )
+      expect(body.cfdi).toMatchObject({ id: 'ca', folio: '14' })
+    })
+
+    it('🔴 la original también con su cancelación en trámite ⇒ lo dice, sin mandar a botones que la fila no ofrece', async () => {
+      conSustituta({ cancelStatus: 'REQUESTED' })
+      const res = mockRes()
+      await issueCfdiForOrderController(mockReq(), res)
+      const body = res.json.mock.calls[0][0]
+      expect(body.error).toBe(
+        'Esta venta ya está facturada con la factura A-14; su cancelación y la de la A-15, que la corregía, siguen en trámite ante el SAT.',
+      )
+      expect(body.error).not.toMatch(/Corregir importe|Terminar la sustitución|cancela (la|también)/)
+    })
+  })
+
+  // C2 · T10 ronda 1 (M3, cambia A PROPÓSITO): el servicio lanza `ConflictError(texto, 'CFDI_CANCEL_PENDING')` y el texto depende del estado
+  // (aquí «se está enviando», sin «en trámite»): el 409 y su código salen del CÓDIGO, no de la regex del texto.
+  it('🔴 M3: cancelación de la factura anterior pendiente ⇒ 409 con el código del ConflictError y su texto (sin depender de «en trámite»)', async () => {
+    const msg = 'La cancelación de la factura A-14 se está enviando al SAT; en cuanto quede cancelada podrás volver a facturar esta venta.'
+    mockIssue.mockRejectedValue(new ConflictError(msg, 'CFDI_CANCEL_PENDING'))
 
     const res = mockRes()
     await issueCfdiForOrderController(mockReq(), res)
 
     expect(res.status).toHaveBeenCalledWith(409)
-    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ error: msg, code: 'CFDI_CANCEL_PENDING' }))
+    expect(res.json).toHaveBeenCalledWith({ error: msg, code: 'CFDI_CANCEL_PENDING' })
+  })
+
+  it('🔴 M3: un Error suelto que dice «en trámite» ya NO se adivina como CFDI_CANCEL_PENDING (se mapea por código)', async () => {
+    mockIssue.mockRejectedValue(new Error('algo sigue en trámite'))
+    const res = mockRes()
+    await issueCfdiForOrderController(mockReq(), res)
+    expect(res.status).toHaveBeenCalledWith(500)
+    expect(res.json.mock.calls[0][0]).not.toHaveProperty('code', 'CFDI_CANCEL_PENDING')
+  })
+
+  it('control — M3: un ConflictError SIN código sigue saliendo como antes, sin `code`', async () => {
+    mockIssue.mockRejectedValue(new ConflictError('La venta está incluida en una factura global.'))
+    const res = mockRes()
+    await issueCfdiForOrderController(mockReq(), res)
+    expect(res.status).toHaveBeenCalledWith(409)
+    expect(res.json).toHaveBeenCalledWith({ error: 'La venta está incluida en una factura global.' })
   })
 
   it('calls issueCfdiForOrder with the correct receptor and orderId', async () => {
@@ -682,6 +783,182 @@ describe('cancelCfdiController', () => {
     await cancelCfdiController(cancelReq({ params: { cfdiId: 'c1' /* no venueId */ }, authContext: { venueId: 'token-venue' } }), res)
 
     expect(mockCancel).toHaveBeenCalledWith(expect.objectContaining({ expectedVenueId: 'token-venue' }))
+  })
+
+  // C2 · Tarea 2 (Codex C2-6): la intención no se anota si la factura tiene documentos relacionados vivos. Es un ConflictError con su
+  // texto (que no menciona «timbrad/motivo/sustituci»): sin el caso tipado caía en el 500 genérico «Error interno al cancelar».
+  it('🔴 C2: un ConflictError (nota de crédito viva, otra cancelación en trámite) ⇒ 409 con SU texto, como aviso', async () => {
+    const texto = 'Esta factura tiene la nota de crédito A-3 en proceso; el SAT exige cancelar primero lo relacionado.'
+    mockCancel.mockRejectedValue(new ConflictError(texto))
+    const res = mockRes()
+    await cancelCfdiController(cancelReq(), res)
+    expect(res.status).toHaveBeenCalledWith(409)
+    expect(res.json).toHaveBeenCalledWith({ error: texto })
+    expect(mockLogAction).not.toHaveBeenCalled() // la cancelación rechazada por relacionados no escribe (no pasó nada)
+  })
+
+  it('🔴 C2: la respuesta lleva el estado derivado (CANCELACION_EN_DUDA incluido) para que el panel lo diga', async () => {
+    mockCancel.mockResolvedValue({
+      applied: true,
+      cancelStatus: 'REQUESTED',
+      cancelledAt: null,
+      cfdi: { id: 'c1' },
+      enDuda: true,
+      estado: 'CANCELACION_EN_DUDA',
+    })
+    const res = mockRes()
+    await cancelCfdiController(cancelReq(), res)
+    expect(res.status).toHaveBeenCalledWith(200)
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ cancelStatus: 'REQUESTED', estado: 'CANCELACION_EN_DUDA' }))
+  })
+
+  // C2 ronda 1 (I1): el panel prefiere `enDuda` (el dueño sabe que su POST terminó sin respuesta clara).
+  it('🔴 C2 ronda 1 (I1): la respuesta lleva `enDuda` cuando el envío quedó en duda', async () => {
+    mockCancel.mockResolvedValue({
+      applied: true,
+      cancelStatus: 'REQUESTED',
+      cancelledAt: null,
+      cfdi: { id: 'c1' },
+      enDuda: true,
+      estado: 'CANCELACION_EN_DUDA',
+    })
+    const res = mockRes()
+    await cancelCfdiController(cancelReq(), res)
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ enDuda: true, estado: 'CANCELACION_EN_DUDA' }))
+  })
+
+  // C2 ronda 1 (M1): la consulta previa al PAC falló: no se envió nada (el intento ya se cerró). 502 con un texto claro, nunca 500.
+  it('🔴 C2 ronda 1 (M1): ProviderUnavailableError ⇒ 502 con SU texto, como aviso, sin bitácora', async () => {
+    const texto =
+      'No se pudo consultar al SAT antes de enviar la cancelación: no se envió nada y la factura sigue vigente. Intenta de nuevo en unos minutos.'
+    mockCancel.mockRejectedValue(new ProviderUnavailableError(texto))
+    const res = mockRes()
+    await cancelCfdiController(cancelReq(), res)
+    expect(res.status).toHaveBeenCalledWith(502)
+    expect(res.json).toHaveBeenCalledWith({ error: texto })
+    expect(mockLogAction).not.toHaveBeenCalled()
+  })
+
+  // C2 ronda 1 (M6): si ESTA petición anotó el intento pero otra escritura ganó (y la auditó como confirmación), queda registrado
+  // QUIÉN lo pidió, con una acción propia que no duplica CFDI_CANCELLED ni CFDI_CANCEL_CONFIRMED.
+  it('🔴 C2 ronda 1 (M6): anotó el intento y no ganó la escritura ⇒ CFDI_CANCEL_REQUESTED con su staffId; CFDI_CANCELLED no', async () => {
+    mockCancel.mockResolvedValue({
+      applied: false,
+      intencionNueva: true,
+      cancelStatus: 'CANCELLED',
+      cancelledAt: null,
+      cfdi: { id: 'c1' },
+      estado: 'CANCELADA',
+    })
+    const res = mockRes()
+    await cancelCfdiController(cancelReq({ authContext: { venueId: 'v1', userId: 'staff-1' } }), res)
+    expect(mockLogAction).toHaveBeenCalledTimes(1)
+    expect(mockLogAction).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'CFDI_CANCEL_REQUESTED', staffId: 'staff-1', entityId: 'c1' }),
+    )
+  })
+
+  it('control — C2 ronda 1 (M6): anotó el intento y ganó ⇒ sólo CFDI_CANCELLED (no se duplica)', async () => {
+    mockCancel.mockResolvedValue({
+      applied: true,
+      intencionNueva: true,
+      cancelStatus: 'REQUESTED',
+      cancelledAt: null,
+      cfdi: { id: 'c1' },
+      estado: 'EN_TRAMITE',
+    })
+    const res = mockRes()
+    await cancelCfdiController(cancelReq(), res)
+    expect(mockLogAction.mock.calls.map(c => c[0].action)).toEqual(['CFDI_CANCELLED'])
+  })
+
+  it('C2: el intento ya estaba abierto por otro (sólo se consultó) ⇒ 200 con su estado y SIN bitácora', async () => {
+    mockCancel.mockResolvedValue({
+      applied: false,
+      cancelStatus: 'REQUESTED',
+      cancelledAt: null,
+      cfdi: { id: 'c1' },
+      enTramitePorOtro: true,
+      estado: 'EN_TRAMITE',
+    })
+    const res = mockRes()
+    await cancelCfdiController(cancelReq(), res)
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ estado: 'EN_TRAMITE' }))
+    expect(mockLogAction).not.toHaveBeenCalled()
+  })
+})
+
+// C2 · T10 (M9 de la T2): tras un rechazo concluyente el panel decía «Cancelación solicitada.» sin más. La respuesta dice por qué.
+describe('cancelCfdiController — C2 · T10 (M9): el porqué de un rechazo', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockLogAction.mockResolvedValue(undefined)
+  })
+  it('🔴 cancelación RECHAZADA ⇒ `motivoRechazoCancelacion` con el texto de la fila', async () => {
+    mockCancel.mockResolvedValue({
+      applied: true,
+      cancelStatus: 'REJECTED',
+      cancelledAt: null,
+      cfdi: { id: 'c1', cancelStatus: 'REJECTED', lastError: 'Esta factura ya tiene notas de crédito; cancélalas primero.' },
+      estado: 'RECHAZADA',
+    })
+    const res = mockRes()
+    await cancelCfdiController(cancelReq(), res)
+    expect(res.status).toHaveBeenCalledWith(200)
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cancelStatus: 'REJECTED',
+        estado: 'RECHAZADA',
+        motivoRechazoCancelacion: 'Esta factura ya tiene notas de crédito; cancélalas primero.',
+      }),
+    )
+  })
+  it('control — sin rechazo no viaja (ni el `lastError` de la fila)', async () => {
+    mockCancel.mockResolvedValue({
+      applied: true,
+      cancelStatus: 'REQUESTED',
+      cancelledAt: null,
+      cfdi: { id: 'c1', cancelStatus: 'REQUESTED', lastError: 'algo viejo' },
+      estado: 'EN_TRAMITE',
+    })
+    const res = mockRes()
+    await cancelCfdiController(cancelReq(), res)
+    expect(res.json.mock.calls[0][0]).not.toHaveProperty('motivoRechazoCancelacion')
+    expect(res.json.mock.calls[0][0]).not.toHaveProperty('lastError')
+  })
+})
+
+// C2 · T10 ronda 1 (I-1): «Consultar estado» manda `{ soloConsultar: true }`: el servicio sólo consulta y aquí no se registra nada.
+describe('cancelCfdiController — C2 · T10 ronda 1 (I-1): «Consultar estado»', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockLogAction.mockResolvedValue(undefined)
+  })
+  it('🔴 `{ soloConsultar: true }` llega al servicio (sin motivo) y NO escribe bitácora aunque el resultado no diga `applied`', async () => {
+    mockCancel.mockResolvedValue({
+      cancelStatus: 'REJECTED',
+      cancelledAt: null,
+      cfdi: { id: 'c1', cancelStatus: 'REJECTED', lastError: 'El receptor rechazó la cancelación ante el SAT: la factura sigue vigente.' },
+      estado: 'RECHAZADA',
+    })
+    const res = mockRes()
+    await cancelCfdiController(cancelReq({ body: { soloConsultar: true }, authContext: { venueId: 'v1', userId: 'staff-1' } }), res)
+    expect(mockCancel).toHaveBeenCalledWith(expect.objectContaining({ cfdiId: 'c1', soloConsultar: true, motivo: undefined }))
+    expect(mockLogAction).not.toHaveBeenCalled()
+    expect(res.status).toHaveBeenCalledWith(200)
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        estado: 'RECHAZADA',
+        motivoRechazoCancelacion: 'El receptor rechazó la cancelación ante el SAT: la factura sigue vigente.',
+      }),
+    )
+  })
+  it('control — sin `soloConsultar`, el servicio no recibe la bandera (cancelar de siempre)', async () => {
+    mockCancel.mockResolvedValue({ applied: true, cancelStatus: 'REQUESTED', cancelledAt: null, cfdi: { id: 'c1' }, estado: 'EN_TRAMITE' })
+    const res = mockRes()
+    await cancelCfdiController(cancelReq(), res)
+    expect(mockCancel.mock.calls[0][0]).not.toHaveProperty('soloConsultar', true)
+    expect(mockLogAction.mock.calls.map(c => c[0].action)).toEqual(['CFDI_CANCELLED'])
   })
 })
 
@@ -2316,7 +2593,6 @@ describe('nivel del log en los fallos de facturación', () => {
     ['venta de otro negocio', 'Order o1 not found', 404],
     ['sin emisor', 'Order o1 not found or has no fiscal emisor configured', 404],
     ['comercio sin facturación', 'Facturación no habilitada para este comercio', 403],
-    ['cancelación en trámite', 'La cancelación de la factura FT-1 sigue en trámite ante el SAT', 409],
     ['emisión en curso', 'CFDI en proceso para esta orden', 409],
   ])('Facturar: %s ⇒ %s como warn, nunca error', async (_caso, mensaje, status) => {
     mockIssue.mockRejectedValue(new Error(mensaje))
@@ -2324,6 +2600,17 @@ describe('nivel del log en los fallos de facturación', () => {
     await issueCfdiForOrderController(mockReq(), res)
 
     expect(res.status).toHaveBeenCalledWith(status)
+    expect(log.warn).toHaveBeenCalledWith(expect.stringContaining('[cfdi.controller] issue failed'))
+    expect(log.error).not.toHaveBeenCalled()
+  })
+
+  // C2 · T10 ronda 1 (M3, cambia A PROPÓSITO): la cancelación pendiente llega como ConflictError con código; sigue siendo warn.
+  it('🔴 M3 — Facturar: cancelación pendiente (ConflictError con código) ⇒ 409 como warn, nunca error', async () => {
+    mockIssue.mockRejectedValue(new ConflictError('La cancelación de la factura FT-1 sigue en trámite ante el SAT', 'CFDI_CANCEL_PENDING'))
+    const res = mockRes()
+    await issueCfdiForOrderController(mockReq(), res)
+
+    expect(res.status).toHaveBeenCalledWith(409)
     expect(log.warn).toHaveBeenCalledWith(expect.stringContaining('[cfdi.controller] issue failed'))
     expect(log.error).not.toHaveBeenCalled()
   })
@@ -2387,9 +2674,186 @@ it.each([
   expect(res.json).toHaveBeenCalledWith({ error: message })
 })
 
+// C2 · Tarea 2 (M6/G4): si la cancelación de la original no se pudo ni anotar (nota de crédito viva), la sustituta YA está timbrada:
+// la respuesta lo dice con el texto del conflicto, en un campo nuevo y opcional.
+it('🔴 C2: la sustitución timbró y la cancelación de la original chocó con una nota viva ⇒ 200 con `cancelConflicto`', async () => {
+  const texto = 'Esta factura tiene la nota de crédito A-3 vigente; el SAT exige cancelar primero lo relacionado.'
+  mockReplace.mockResolvedValueOnce({
+    status: 'REPLACED',
+    sustituta: { id: 's1', uuid: 'UUID-SUB' },
+    original: { uuid: 'UUID-ORIG' },
+    cancelStatus: null,
+    cancelPendiente: true,
+    cancelConflicto: texto,
+  })
+  const res = { status: jest.fn().mockReturnThis(), json: jest.fn() }
+  await replaceCfdiController({ params: { venueId: 'v1', cfdiId: 'c1' }, authContext: { venueId: 'v1' } } as any, res as any)
+  expect(res.status).toHaveBeenCalledWith(200)
+  expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ cancelPendiente: true, cancelConflicto: texto }))
+})
+
+it('🔴 C2 ronda 2 (N3): la sustitución timbró y la cancelación de la original no salió por un aviso del PAC ⇒ 200 con `cancelAviso`', async () => {
+  const texto = 'No se pudo consultar al SAT antes de enviar la cancelación: no se envió nada y la factura sigue vigente.'
+  mockReplace.mockResolvedValueOnce({
+    status: 'REPLACED',
+    sustituta: { id: 's1', uuid: 'UUID-SUB' },
+    original: { uuid: 'UUID-ORIG' },
+    cancelStatus: 'REJECTED',
+    cancelPendiente: true,
+    cancelAviso: texto,
+  })
+  const res = { status: jest.fn().mockReturnThis(), json: jest.fn() }
+  await replaceCfdiController({ params: { venueId: 'v1', cfdiId: 'c1' }, authContext: { venueId: 'v1' } } as any, res as any)
+  expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ cancelPendiente: true, cancelAviso: texto }))
+})
+
+// Ronda de la ola (3): la respuesta de «sustituir / terminar la sustitución» dice si la cancelación de la original quedó EN DUDA (sólo cuando
+// es verdad, como la de cancelar) y si ESTA petición anotó un intento nuevo (siempre, `false` por omisión).
+it('🔴 ronda (3): la sustitución con la cancelación en duda ⇒ `enDuda: true` y `cancelIntentoNuevo: true`', async () => {
+  mockReplace.mockResolvedValueOnce({
+    status: 'REPLACED',
+    sustituta: { id: 's1', uuid: 'UUID-SUB' },
+    original: { uuid: 'UUID-ORIG' },
+    cancelStatus: 'REQUESTED',
+    cancelPendiente: true,
+    enDuda: true,
+    cancelIntentoNuevo: true,
+  })
+  const res = { status: jest.fn().mockReturnThis(), json: jest.fn() }
+  await replaceCfdiController({ params: { venueId: 'v1', cfdiId: 'c1' }, authContext: { venueId: 'v1' } } as any, res as any)
+  expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ cancelStatus: 'REQUESTED', enDuda: true, cancelIntentoNuevo: true }))
+})
+it('🔴 ronda (3): sin duda ni intento nuevo ⇒ sin `enDuda` y `cancelIntentoNuevo: false` (aunque el servicio no lo mande)', async () => {
+  mockReplace.mockResolvedValueOnce({
+    status: 'REPLACED',
+    sustituta: { id: 's1', uuid: 'UUID-SUB' },
+    original: { uuid: 'UUID-ORIG' },
+    cancelStatus: 'REJECTED',
+    cancelPendiente: true,
+  })
+  const res = { status: jest.fn().mockReturnThis(), json: jest.fn() }
+  await replaceCfdiController({ params: { venueId: 'v1', cfdiId: 'c1' }, authContext: { venueId: 'v1' } } as any, res as any)
+  const body = res.json.mock.calls[0][0]
+  expect(body).not.toHaveProperty('enDuda')
+  expect(body.cancelIntentoNuevo).toBe(false)
+})
+
 it('replacement preserves shared ConflictError as409', async () => {
   mockReplace.mockRejectedValueOnce(new ConflictError('La factura de esta venta se está procesando; intenta de nuevo en unos minutos.'))
   const res = { status: jest.fn().mockReturnThis(), json: jest.fn() }
   await replaceCfdiController({ params: { venueId: 'v1', cfdiId: 'c1' }, authContext: { venueId: 'v1' } } as any, res as any)
   expect(res.status).toHaveBeenCalledWith(409)
+})
+
+// C2 · ronda QA (D1): con el PAC sin contestar (`enviadoAt` puesto, `falloDefinitivo: false`) el documento quedó EN DUDA, no rechazado. El 502
+// conserva `error`, `message` y `cfdiId` (clientes ya desplegados) y AGREGA `timbreEnDuda: true` para que el dashboard lo diga así.
+describe('C2 · ronda QA (D1) — 502 de factura y nota: `timbreEnDuda`', () => {
+  const enDuda = {
+    id: 'c1',
+    status: 'STAMP_FAILED',
+    protocoloIva: 1,
+    enviadoAt: new Date(),
+    falloDefinitivo: false,
+    lastError: 'fetch failed',
+  }
+  const rechazo = { ...enDuda, falloDefinitivo: true, lastError: 'RFC del receptor inválido' }
+  beforeEach(() => jest.clearAllMocks())
+  it.each([
+    ['🔴 factura en duda', 'factura', enDuda, true],
+    ['control — factura rechazada', 'factura', rechazo, false],
+    ['🔴 nota en duda', 'nota', enDuda, true],
+    ['control — nota rechazada', 'nota', rechazo, false],
+  ] as const)('%s', async (_caso, doc, cfdi, duda) => {
+    const res = mockRes()
+    if (doc === 'factura') {
+      mockIssue.mockResolvedValue({ status: 'STAMP_FAILED', cfdi })
+      await issueCfdiForOrderController(mockReq(), res)
+    } else {
+      mockEmitNota.mockResolvedValue({ status: 'STAMP_FAILED', cfdi })
+      await emitRefundCreditNoteController(mockReq({ params: { venueId: 'v1', refundId: 'r1' }, body: undefined }), res)
+    }
+    expect(res.status).toHaveBeenCalledWith(502)
+    const body = res.json.mock.calls[0][0]
+    expect(body).toMatchObject({ error: 'El PAC rechazó el timbrado', message: cfdi.lastError, cfdiId: 'c1' })
+    if (duda) expect(body.timbreEnDuda).toBe(true)
+    else expect(body).not.toHaveProperty('timbreEnDuda')
+  })
+})
+
+// Ronda QA (hermanos): la factura GLOBAL (principal y complementaria) que quedó EN DUDA. Como la factura y la nota (D1): el 502 conserva
+// `error`/`message` y AGREGA `timbreEnDuda: true` para que el dashboard no diga «el PAC rechazó».
+describe('ronda QA (hermanos) — 502 de la global: `timbreEnDuda`', () => {
+  const enDuda = {
+    id: 'g1',
+    status: 'STAMP_FAILED',
+    protocoloIva: 1,
+    enviadoAt: new Date(),
+    falloDefinitivo: false,
+    lastError: 'fetch failed',
+  }
+  const rechazo = { ...enDuda, falloDefinitivo: true, lastError: 'CFDI40999' }
+  const peticion = {
+    params: { venueId: 'v1', emisorId: 'e1', principalId: 'g-principal' },
+    body: {},
+    authContext: { venueId: 'v1', userId: 'u1' },
+  }
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockLogAction.mockResolvedValue(undefined)
+    mockPrismaFiscalEmisorFindFirst.mockResolvedValue({ id: 'e1' })
+  })
+  it.each([
+    ['🔴 principal en duda', 'principal', enDuda, true],
+    ['control — principal rechazada', 'principal', rechazo, false],
+    ['🔴 complementaria en duda', 'complementaria', enDuda, true],
+    ['control — complementaria rechazada', 'complementaria', rechazo, false],
+  ] as const)('%s', async (_caso, cual, cfdi, duda) => {
+    const res = mockRes()
+    const r = { status: 'STAMP_FAILED', cfdi, excluidasPorIvaMixto: 0, excluidas: {} }
+    if (cual === 'principal') {
+      mockIssueGlobal.mockResolvedValue(r)
+      await triggerGlobalCfdiController({ ...peticion } as any, res)
+    } else {
+      mockEmitirComplementaria.mockResolvedValue({ ...r, complementariaDe: 'g-principal' })
+      await emitGlobalComplementariaController({ ...peticion } as any, res)
+    }
+    expect(res.status).toHaveBeenCalledWith(502)
+    const body = res.json.mock.calls[0][0]
+    expect(body).toMatchObject({ message: cfdi.lastError })
+    if (duda) expect(body.timbreEnDuda).toBe(true)
+    else expect(body).not.toHaveProperty('timbreEnDuda')
+  })
+})
+
+// Micro-ronda final (review-QA-rereview, Minor): la factura CORREGIDA de «Corregir importe» quedó EN DUDA. El 502 traía sólo el resultado, sin
+// texto: el diálogo enseñaba «Request failed with status code 502». Con la MISMA regla (`timbreEnDuda`) agrega `timbreEnDuda` y el texto de
+// quien opera (`textoDeTimbreEnDuda`); un rechazo sale como antes.
+describe('micro-ronda final — 502 de «Corregir importe» con la corregida en duda', () => {
+  const { textoDeTimbreEnDuda } = jest.requireActual('../../../../src/services/fiscal/timbreEnDuda')
+  const sustituta = {
+    id: 's1',
+    status: 'STAMP_FAILED',
+    protocoloIva: 1,
+    enviadoAt: new Date(),
+    falloDefinitivo: false,
+    lastError: 'fetch failed',
+  }
+  const base = { status: 'STAMP_FAILED', original: { id: 'c1', uuid: 'U' }, cancelStatus: null, cancelPendiente: true }
+  beforeEach(() => jest.clearAllMocks())
+  it.each([
+    ['🔴 en duda ⇒ `timbreEnDuda` y el texto «en duda… no la vuelvas a emitir»', sustituta, true],
+    ['control — rechazo definitivo ⇒ el 502 de siempre, sin campo ni texto nuevos', { ...sustituta, falloDefinitivo: true }, false],
+  ] as const)('%s', async (_caso, s, duda) => {
+    mockReplace.mockResolvedValue({ ...base, sustituta: s })
+    const res = mockRes()
+    await replaceCfdiController({ params: { venueId: 'v1', cfdiId: 'c1' }, authContext: { venueId: 'v1' } } as any, res as any)
+    expect(res.status).toHaveBeenCalledWith(502)
+    const body = res.json.mock.calls[0][0]
+    expect(body).toMatchObject({ status: 'STAMP_FAILED', sustituta: { id: 's1' }, cancelPendiente: true })
+    if (duda) expect(body).toMatchObject({ timbreEnDuda: true, error: textoDeTimbreEnDuda('la factura corregida') })
+    else {
+      expect(body).not.toHaveProperty('timbreEnDuda')
+      expect(body).not.toHaveProperty('error')
+    }
+  })
 })

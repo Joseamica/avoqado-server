@@ -1,5 +1,6 @@
 import { registerInventoryTools } from '../../../src/mcp/tools/inventory'
 import type { McpScope } from '../../../src/mcp/scope'
+import { conectarPorElCatalogo } from '../../__helpers__/mcp-por-el-catalogo'
 
 const mockCancel = jest.fn(async () => ({ id: 'c1', status: 'CANCELLED', cancelledAt: '2026-09-08T01:00:00.000Z', revision: 5 }))
 const mockLogAction = jest.fn()
@@ -145,5 +146,107 @@ describe('stock_counts revision contract', () => {
 
     const out = parse(await callList({ venueId: 'v1' }))
     expect(out.counts[0]).toMatchObject({ id: 'c1', revision: 4 })
+  })
+})
+
+/**
+ * C2 · ola final OF-1 (decisión del founder «A», 9-oct): por el CATÁLOGO real, como corre en producción. Antes el catálogo firmaba
+ * `{venueId, countId}` sin la revisión que la vista previa sí devolvía: el paso 2 con lo firmado volvía a pedir confirmación (bucle) y el
+ * paso 2 como lo dice la herramienta perdía el token. La sonda de `review-final.md` lo midió: 0 cancelaciones.
+ */
+describe('cancel_stock_count — por el catálogo (token de confirmación)', () => {
+  let c: Awaited<ReturnType<typeof conectarPorElCatalogo>>
+  const enProgreso = {
+    id: 'c1',
+    revision: 4,
+    status: 'IN_PROGRESS',
+    type: 'FULL',
+    createdAt: new Date('2026-09-07T22:51:23.142Z'),
+    _count: { items: 137 },
+  }
+  beforeEach(async () => {
+    mockStockCountFindFirst.mockResolvedValue(enProgreso)
+    c = await conectarPorElCatalogo(server => registerInventoryTools(server as never, scope), scope)
+  })
+  afterEach(async () => {
+    await c.close()
+    mockStockCountFindFirst.mockReset()
+  })
+
+  it('🔴 paso 1 y paso 2 con los confirmationArguments del catálogo ⇒ cancela UNA vez, con la revisión que se VIO', async () => {
+    const vista = await c.call('cancel_stock_count', { venueId: 'v1', countId: 'c1' })
+    expect(vista.requiresConfirmation).toBe(true)
+    expect(vista.confirmationArguments).toEqual({ venueId: 'v1', countId: 'c1', expectedRevision: 4 })
+    const out = await c.call('cancel_stock_count', {
+      ...vista.confirmationArguments,
+      confirm: true,
+      confirmationToken: vista.confirmationToken,
+    })
+    expect(out).toMatchObject({ ok: true })
+    expect(mockCancel).toHaveBeenCalledTimes(1)
+    expect(mockCancel).toHaveBeenCalledWith('c1', 'v1', 'staff-1', 4)
+  })
+
+  it('🔴 paso 2 como lo dice el mensaje de la herramienta (expectedRevision de la vista) ⇒ también cancela una vez', async () => {
+    const vista = await c.call('cancel_stock_count', { venueId: 'v1', countId: 'c1' })
+    const out = await c.call('cancel_stock_count', {
+      venueId: 'v1',
+      countId: 'c1',
+      expectedRevision: vista.expectedRevision,
+      confirm: true,
+      confirmationToken: vista.confirmationToken,
+    })
+    expect(out).toMatchObject({ ok: true })
+    expect(mockCancel).toHaveBeenCalledTimes(1)
+  })
+
+  it('control — con una expectedRevision distinta a la que se vio, el token no vale y no cancela', async () => {
+    const vista = await c.call('cancel_stock_count', { venueId: 'v1', countId: 'c1' })
+    const out = await c.call('cancel_stock_count', {
+      ...vista.confirmationArguments,
+      expectedRevision: 5,
+      confirm: true,
+      confirmationToken: vista.confirmationToken,
+    })
+    expect(out).toMatchObject({ needsInput: true, field: 'confirmationToken' })
+    expect(mockCancel).not.toHaveBeenCalled()
+  })
+
+  it('control — sin token no cancela', async () => {
+    const vista = await c.call('cancel_stock_count', { venueId: 'v1', countId: 'c1' })
+    const out = await c.call('cancel_stock_count', { ...vista.confirmationArguments, confirm: true })
+    expect(out).toMatchObject({ needsInput: true, field: 'confirmationToken' })
+    expect(mockCancel).not.toHaveBeenCalled()
+  })
+
+  it('control — el catálogo sólo ata `expectedRevision` donde la vista previa la devuelve arriba: hoy, sólo cancel_stock_count', () => {
+    // Las demás herramientas con `expectedRevision` en su esquema (save/publish/set_hybrid_campaign_status, set_feature_list_price,
+    // set_promotion_group_status, configure_receipt_layout) la RECIBEN del agente y su vista previa no la devuelve en el primer nivel
+    // (`receiptLayout` usa `revisionActual`), así que la línea del catálogo no les cambia nada. Si una nueva la devuelve, decide aquí.
+    const fs = require('fs') as typeof import('fs')
+    const path = require('path') as typeof import('path')
+    const ts = require('typescript') as typeof import('typescript')
+    const directory = path.resolve(__dirname, '../../../src/mcp/tools')
+    const conRevisionEnLaVista = new Set<string>()
+    for (const file of fs.readdirSync(directory).filter(f => f.endsWith('.ts'))) {
+      const ast = ts.createSourceFile(file, fs.readFileSync(path.join(directory, file), 'utf8'), ts.ScriptTarget.Latest, true)
+      const visit = (node: import('typescript').Node, tool: string | null) => {
+        if (
+          ts.isCallExpression(node) &&
+          ts.isPropertyAccessExpression(node.expression) &&
+          ['tool', 'registerTool'].includes(node.expression.name.text) &&
+          node.arguments[0] &&
+          ts.isStringLiteral(node.arguments[0])
+        )
+          tool = node.arguments[0].text
+        if (tool && ts.isObjectLiteralExpression(node)) {
+          const nombres = node.properties.map(p => (p.name && ts.isIdentifier(p.name) ? p.name.text : null))
+          if (nombres.includes('requiresConfirmation') && nombres.includes('expectedRevision')) conRevisionEnLaVista.add(tool)
+        }
+        ts.forEachChild(node, n => visit(n, tool))
+      }
+      visit(ast, null)
+    }
+    expect([...conRevisionEnLaVista]).toEqual(['cancel_stock_count'])
   })
 })

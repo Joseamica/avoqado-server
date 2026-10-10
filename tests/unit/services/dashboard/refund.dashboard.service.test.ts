@@ -1,8 +1,9 @@
 import { PaymentType, TransactionStatus } from '@prisma/client'
 import { Decimal } from '@prisma/client/runtime/library'
-import { issueRefund } from '@/services/dashboard/refund.dashboard.service'
+import { issueRefund, listRefundsForPayment, TOPE_DEVOLUCIONES_POR_COBRO } from '@/services/dashboard/refund.dashboard.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { prismaMock } from '../../../__helpers__/setup'
+import { TOPES_POR_ORDEN } from '@/services/fiscal/librosDeOrdenes'
 
 // logAction is globally mocked to a no-op jest.fn in tests/__helpers__/setup.ts,
 // so we assert the audit dual-write on the mock itself (not prismaMock.activityLog).
@@ -13,9 +14,20 @@ jest.mock('@/services/dashboard/rawMaterial.service', () => ({
 
 const ORDER_GENERATION = new Date('2026-09-04T09:00:00.000Z')
 
+// C2 A-1: la cuenta de la orden que lee `leerCobradoDeLaOrden` (cabecera de descuento y sus filas). Por default, sin descuentos.
+let descuentosDeLaCuenta: Array<{ amount: Decimal; reparto: unknown }> = []
+// C2 A-1 ronda 1 (I1): las devoluciones de TODA la orden (todos sus cobros). null = las del propio cobro (una cuenta de un solo cobro).
+let devolucionesDeLaOrden: Array<{ id: string; processorData: unknown }> | null = null
+// C2 · OF-2 (A-1 N1): el SQL de esa lectura, tal cual lo armó el servicio (para fijar su `WHERE`).
+let sqlDeLaOrden: string | null = null
+
 describe('refund.dashboard.service', () => {
   beforeEach(() => {
     jest.clearAllMocks()
+    descuentosDeLaCuenta = []
+    devolucionesDeLaOrden = null
+    sqlDeLaOrden = null
+    prismaMock.order.findUnique.mockResolvedValue({ discountAmount: new Decimal(0), contratoDePrecio: null, originSystem: null })
     prismaMock.payment.findFirst.mockResolvedValue({
       orderId: 'order-1',
       order: { updatedAt: ORDER_GENERATION },
@@ -23,6 +35,7 @@ describe('refund.dashboard.service', () => {
     prismaMock.$transaction.mockImplementation(async (callback: any) => {
       // El lock de Order comparte `$queryRaw` con las dos lecturas Payment del servicio.
       // Interceptarlo aquí mantiene las colas `.mockResolvedValueOnce` enfocadas en Payment.
+      let devolucionesDelCobro: unknown[] = []
       const queryRaw = jest.fn(async (...args: any[]) => {
         const query = args[0]
         const sql = Array.isArray(query)
@@ -33,7 +46,16 @@ describe('refund.dashboard.service', () => {
               ? query.sql.join('?')
               : String(query)
         if (sql.includes('FROM "Order"')) return [{ id: 'order-1' }]
-        return (prismaMock.$queryRaw as any)(...args)
+        // C2 A-1: los descuentos de la cuenta que lee el cargador de lo cobrado (proyección del libro). Por default, ninguno.
+        if (sql.includes('FROM "OrderDiscount"')) return descuentosDeLaCuenta
+        // C2 A-1 ronda 1: lo ya devuelto en TODA la orden. Por default, lo del cobro (lo que la prueba sembró en su cola).
+        if (sql.includes("jsonb_build_object('refundedItems'")) {
+          sqlDeLaOrden = sql
+          return devolucionesDeLaOrden ?? devolucionesDelCobro
+        }
+        const r = await (prismaMock.$queryRaw as any)(...args)
+        if (sql.includes(`->>'originalPaymentId'`)) devolucionesDelCobro = Array.isArray(r) ? r : []
+        return r
       })
       return callback({ ...(prismaMock as any), $queryRaw: queryRaw })
     })
@@ -1532,6 +1554,335 @@ describe('refund.dashboard.service', () => {
       )
     })
   })
+  // C2 A-1 (decisión A del founder, 9-oct; investigacion-bruto-vs-neto.md §1): cada artículo devuelve lo que COBRARON sus unidades —su
+  // total menos su descuento propio y su parte de los descuentos de la cuenta—, no el bruto. Lo demás (topes, propina, cantidades) igual.
+  describe('🔴 C2 A-1 · la devolución por artículos devuelve lo COBRADO, no el bruto', () => {
+    const cobro = (amount: number, tipAmount = 0, processorData: Record<string, unknown> = {}) => ({
+      id: 'payment-original',
+      venueId: 'venue-1',
+      status: TransactionStatus.COMPLETED,
+      type: PaymentType.REGULAR,
+      method: 'CASH',
+      source: 'APP',
+      amount,
+      tipAmount,
+      orderId: 'order-1',
+      shiftId: null,
+      merchantAccountId: null,
+      processorData,
+      fundsFlow: null,
+      tenderTypeId: null,
+      tenderCountsAsCash: null,
+    })
+    /** Un renglón al 16 % de $100 con lo que lee el cargador (`SELECT_RENGLON`) y lo que lee el escritor. */
+    const linea = (id: string, o: Record<string, unknown> = {}) => ({
+      id,
+      orderId: 'order-1',
+      productId: `p-${id}`,
+      productName: id,
+      quantity: 1,
+      unitPrice: new Decimal(100),
+      total: new Decimal(100),
+      discountAmount: new Decimal(0),
+      orderPromotionId: null,
+      isCortesia: false,
+      ivaTratamiento: null,
+      product: { taxRate: new Decimal(0.16), ivaTratamiento: 'IVA_16' },
+      ...o,
+    })
+    const espejo = (renglones: Record<string, number>) => ({ v: 1, alcance: 'DIRIGIDO', conPromociones: null, espejo: true, renglones })
+    const dirigido = (renglones: Record<string, number>) => ({ v: 1, alcance: 'DIRIGIDO', conPromociones: null, espejo: false, renglones })
+    const cuenta = (renglones: Record<string, number>) => ({ v: 1, alcance: 'CUENTA', conPromociones: true, espejo: false, renglones })
+    /** La venta: sus renglones (el escritor pide los elegidos por id; el cargador, todos), la cabecera y las filas de descuento. */
+    const venta = (lineas: Array<ReturnType<typeof linea>>, cabecera: number, filas: Array<{ amount: number; reparto: unknown }> = []) => {
+      prismaMock.order.findUnique.mockResolvedValue({ discountAmount: new Decimal(cabecera), contratoDePrecio: null, originSystem: null })
+      descuentosDeLaCuenta = filas.map(f => ({ amount: new Decimal(f.amount), reparto: f.reparto }))
+      prismaMock.orderItem.findMany.mockImplementation(async (a: any) =>
+        a?.where?.id?.in ? lineas.filter(l => a.where.id.in.includes(l.id)) : lineas,
+      )
+    }
+    const reembolsar = (items: Array<{ orderItemId: string; quantity?: number }>, over: Record<string, unknown> = {}) =>
+      issueRefund({ venueId: 'venue-1', paymentId: 'payment-original', items, reason: 'RETURNED_GOODS', staffId: 'staff-9', ...over })
+    const filaReembolso = (i = 0) => prismaMock.payment.create.mock.calls[i][0].data
+
+    beforeEach(() => {
+      // `clearAllMocks` NO vacía las colas de `mockResolvedValueOnce` ni las implementaciones.
+      prismaMock.$queryRaw.mockReset()
+      prismaMock.orderItem.findMany.mockReset()
+      prismaMock.payment.create.mockResolvedValue({ id: 'refund-neto-1' })
+      prismaMock.shift.updateMany.mockResolvedValue({ count: 1 } as never)
+    })
+    afterEach(() => {
+      prismaMock.orderItem.findMany.mockReset()
+      prismaMock.orderItem.findMany.mockResolvedValue([])
+    })
+
+    it('🔴 E2 · A $100 −$10 propio + B $50 (cobro $140): devolver A regresa $90, y refundedItems dice $90', async () => {
+      prismaMock.$queryRaw.mockResolvedValueOnce([cobro(140)]).mockResolvedValueOnce([])
+      venta([linea('A', { discountAmount: new Decimal(10) }), linea('B', { unitPrice: new Decimal(50), total: new Decimal(50) })], 10, [
+        { amount: 10, reparto: espejo({ A: 1000 }) },
+      ])
+
+      const r = await reembolsar([{ orderItemId: 'A' }])
+
+      expect(r.amount).toBe(90)
+      expect(r.remainingRefundable).toBe(50)
+      expect(Number(filaReembolso().amount)).toBe(-90)
+      expect(filaReembolso().processorData.refundedItems).toEqual([
+        expect.objectContaining({ orderItemId: 'A', quantity: 1, amountCents: 9000, amount: 90 }),
+      ])
+    })
+
+    it('🔴 E3 · descuento de cuenta repartido 10/10 (A $100 + B $100 −$20, cobro $180): devolver A regresa $90', async () => {
+      prismaMock.$queryRaw.mockResolvedValueOnce([cobro(180)]).mockResolvedValueOnce([])
+      venta([linea('A'), linea('B')], 20, [{ amount: 20, reparto: cuenta({ A: 1000, B: 1000 }) }])
+
+      const r = await reembolsar([{ orderItemId: 'A' }])
+
+      expect(r.amount).toBe(90)
+      expect(filaReembolso().processorData.refundedItems[0]).toMatchObject({ amountCents: 9000, amount: 90 })
+    })
+
+    it('🔴 E3 · descuento de cuenta dirigido 100 % a A: devolver A regresa $80 (y B, después, sus $100)', async () => {
+      prismaMock.$queryRaw.mockResolvedValueOnce([cobro(180)]).mockResolvedValueOnce([])
+      venta([linea('A'), linea('B')], 20, [{ amount: 20, reparto: dirigido({ A: 2000 }) }])
+
+      expect((await reembolsar([{ orderItemId: 'A' }])).amount).toBe(80)
+    })
+
+    it('🔴 D8 sin reparto con varios IVA (café $116 al 16 % + grano $100 al 0 %, −$21.60): el café regresa $104.40', async () => {
+      prismaMock.$queryRaw.mockResolvedValueOnce([cobro(194.4)]).mockResolvedValueOnce([])
+      venta(
+        [
+          linea('cafe', { unitPrice: new Decimal(116), total: new Decimal(116) }),
+          linea('grano', { product: { taxRate: new Decimal(0), ivaTratamiento: 'IVA_0' } }),
+        ],
+        21.6,
+        [{ amount: 21.6, reparto: null }],
+      )
+
+      expect((await reembolsar([{ orderItemId: 'cafe' }])).amount).toBe(104.4)
+    })
+
+    it('🔴 E1 · A $100 −$10 sola (cobro $90): antes 400 «exceeds remaining», ahora devuelve sus $90', async () => {
+      prismaMock.$queryRaw.mockResolvedValueOnce([cobro(90)]).mockResolvedValueOnce([])
+      venta([linea('A', { discountAmount: new Decimal(10) })], 10, [{ amount: 10, reparto: espejo({ A: 1000 }) }])
+
+      const r = await reembolsar([{ orderItemId: 'A' }])
+
+      expect(r.amount).toBe(90)
+      expect(r.remainingRefundable).toBe(0)
+    })
+
+    it('🔴 E1′ · con $10 de propina: sin propina devuelve $90 de venta; con la casilla, $90 + $10', async () => {
+      prismaMock.$queryRaw.mockResolvedValueOnce([cobro(90, 10)]).mockResolvedValueOnce([])
+      venta([linea('A', { discountAmount: new Decimal(10) })], 10, [{ amount: 10, reparto: espejo({ A: 1000 }) }])
+      const sinPropina = await reembolsar([{ orderItemId: 'A' }])
+      expect(sinPropina.amount).toBe(90)
+      expect(filaReembolso(0).tipAmount.toFixed(2)).toBe('0.00')
+
+      prismaMock.$queryRaw.mockResolvedValueOnce([cobro(90, 10)]).mockResolvedValueOnce([])
+      const conPropina = await reembolsar([{ orderItemId: 'A' }], { tipRefundCents: 1000 })
+      expect(conPropina.amount).toBe(100)
+      expect(Number(filaReembolso(1).amount)).toBe(-90)
+      expect(Number(filaReembolso(1).tipAmount)).toBe(-10)
+    })
+
+    it('🔴 E4 · cortesía bruta de la TPV (total $100, descuento $100) + B $150: devolver los dos regresa $150, no $250', async () => {
+      prismaMock.$queryRaw.mockResolvedValueOnce([cobro(150)]).mockResolvedValueOnce([])
+      venta(
+        [
+          linea('regalo', { isCortesia: true, discountAmount: new Decimal(100) }),
+          linea('B', { unitPrice: new Decimal(150), total: new Decimal(150) }),
+        ],
+        100,
+      )
+
+      const r = await reembolsar([{ orderItemId: 'regalo' }, { orderItemId: 'B' }])
+
+      expect(r.amount).toBe(150)
+      expect(filaReembolso().processorData.refundedItems).toEqual([
+        expect.objectContaining({ orderItemId: 'regalo', amountCents: 0 }),
+        expect.objectContaining({ orderItemId: 'B', amountCents: 15000 }),
+      ])
+    })
+
+    it('🔴 E4 · la cortesía bruta de la TPV sola regresa $0 ⇒ el 400 de siempre «must be greater than zero», sin escribir nada', async () => {
+      prismaMock.$queryRaw.mockResolvedValueOnce([cobro(150)]).mockResolvedValueOnce([])
+      venta(
+        [
+          linea('regalo', { isCortesia: true, discountAmount: new Decimal(100) }),
+          linea('B', { unitPrice: new Decimal(150), total: new Decimal(150) }),
+        ],
+        100,
+      )
+
+      await expect(reembolsar([{ orderItemId: 'regalo' }])).rejects.toThrow('Refund amount must be greater than zero')
+      expect(prismaMock.payment.create).not.toHaveBeenCalled()
+    })
+
+    it('🔴 A-R3 · composición no atribuible (descuento sin reparto mayor que lo vendido) ⇒ 400 «haz la devolución por importe» y nada escrito', async () => {
+      prismaMock.$queryRaw.mockResolvedValueOnce([cobro(200)]).mockResolvedValueOnce([])
+      venta([linea('A'), linea('B')], 300, [{ amount: 300, reparto: null }])
+
+      const fallo = reembolsar([{ orderItemId: 'A' }])
+      await expect(fallo).rejects.toThrow(
+        'Esta venta tiene descuentos que no se pueden repartir por artículo; haz la devolución por importe.',
+      )
+      await expect(fallo).rejects.toMatchObject({ statusCode: 400, code: 'REFUND_ITEMS_NOT_ATTRIBUTABLE' })
+      expect(prismaMock.payment.create).not.toHaveBeenCalled()
+      expect(prismaMock.payment.update).not.toHaveBeenCalled()
+    })
+
+    it('🔴 un artículo elegido que el cargador no vio (nunca pasa bajo el candado) ⇒ el mismo 400 y nada escrito, nunca un monto inventado', async () => {
+      prismaMock.$queryRaw.mockResolvedValueOnce([cobro(200)]).mockResolvedValueOnce([])
+      venta([linea('A'), linea('B')], 0)
+      prismaMock.orderItem.findMany.mockImplementation(async (a: any) => (a?.where?.id?.in ? [linea('X')] : [linea('A'), linea('B')]))
+
+      await expect(reembolsar([{ orderItemId: 'X' }])).rejects.toMatchObject({ statusCode: 400, code: 'REFUND_ITEMS_NOT_ATTRIBUTABLE' })
+      expect(prismaMock.payment.create).not.toHaveBeenCalled()
+    })
+
+    it('🔴 residuo: 3 unidades que cobraron $10 ($12 −$2) devueltas una por una regresan 3.34 + 3.33 + 3.33 = $10.00 exactos', async () => {
+      venta([linea('A', { quantity: 3, unitPrice: new Decimal(4), total: new Decimal(12), discountAmount: new Decimal(2) })], 2, [
+        { amount: 2, reparto: espejo({ A: 200 }) },
+      ])
+      const previos: any[] = []
+      const devueltos: number[] = []
+      for (let i = 0; i < 3; i++) {
+        prismaMock.$queryRaw.mockResolvedValueOnce([cobro(10)]).mockResolvedValueOnce([...previos])
+        const r = await reembolsar([{ orderItemId: 'A', quantity: 1 }])
+        const fila = filaReembolso(i)
+        devueltos.push(fila.processorData.refundedItems[0].amountCents)
+        previos.push({
+          id: `refund-${i}`,
+          amount: fila.amount,
+          tipAmount: fila.tipAmount,
+          createdAt: new Date(`2026-10-09T1${i}:00:00.000Z`),
+          status: TransactionStatus.COMPLETED,
+          processorData: fila.processorData,
+        })
+        if (i === 2) expect(r.remainingRefundable).toBe(0)
+      }
+      expect(devueltos).toEqual([334, 333, 333])
+      expect(devueltos.reduce((a, b) => a + b, 0)).toBe(1000)
+    })
+
+    // Ronda 1 (I1, revisión de A-1): en una cuenta DIVIDIDA lo ya devuelto de un artículo se cuenta sobre TODA la orden, no por cobro.
+    it('🔴 I1 · cuenta dividida (A $100 + B $100 en dos cobros de $100): A se devuelve UNA vez; por el otro cobro se rechaza y B sí sale', async () => {
+      venta([linea('A'), linea('B')], 0)
+      prismaMock.$queryRaw.mockResolvedValueOnce([cobro(100)]).mockResolvedValueOnce([])
+      expect((await reembolsar([{ orderItemId: 'A' }])).amount).toBe(100)
+      // El segundo cobro no tiene devoluciones propias, pero la ORDEN ya devolvió A por el primero.
+      devolucionesDeLaOrden = [{ id: 'refund-p1', processorData: filaReembolso(0).processorData }]
+
+      prismaMock.$queryRaw.mockResolvedValueOnce([{ ...cobro(100), id: 'payment-2' }]).mockResolvedValueOnce([])
+      await expect(reembolsar([{ orderItemId: 'A' }], { paymentId: 'payment-2' })).rejects.toThrow(
+        'Este artículo («A») ya se devolvió en otro cobro de la misma cuenta; quedan 0 de 1 por devolver.',
+      )
+      expect(prismaMock.payment.create).toHaveBeenCalledTimes(1)
+
+      prismaMock.$queryRaw.mockResolvedValueOnce([{ ...cobro(100), id: 'payment-2' }]).mockResolvedValueOnce([])
+      expect((await reembolsar([{ orderItemId: 'B' }], { paymentId: 'payment-2' })).amount).toBe(100)
+    })
+
+    // C2 · OF-2 (A-1 N1): lo ya devuelto de la ORDEN no filtra por `status` A PROPÓSITO (como la lectura por cobro): una devolución por
+    // artículos no completada sigue contando en CANTIDADES, o el artículo se podría volver a devolver por otro cobro. Agregar
+    // `status = 'COMPLETED'` a ese `WHERE` tiene que hacer caer esta prueba.
+    it('control — la lectura de lo ya devuelto en la ORDEN filtra por negocio, orden y tipo, y NUNCA por status', async () => {
+      venta([linea('A'), linea('B')], 0)
+      prismaMock.$queryRaw.mockResolvedValueOnce([cobro(100)]).mockResolvedValueOnce([])
+      await reembolsar([{ orderItemId: 'A' }])
+      const where = sqlDeLaOrden!.slice(sqlDeLaOrden!.indexOf('WHERE'), sqlDeLaOrden!.indexOf('ORDER BY'))
+      expect(where).toMatch(/"venueId" = \?/)
+      expect(where).toMatch(/"orderId" = \?/)
+      expect(where).toMatch(/type = CAST/)
+      expect(where).not.toMatch(/status/i)
+    })
+
+    it('🔴 I1 · cadena repartida entre los dos cobros: 1 pieza por el cobro 1 y 2 por el cobro 2 suman EXACTO lo cobrado ($10.00)', async () => {
+      venta(
+        [
+          linea('A', { quantity: 3, unitPrice: new Decimal(4), total: new Decimal(12), discountAmount: new Decimal(2) }),
+          linea('B', { unitPrice: new Decimal(10), total: new Decimal(10) }),
+        ],
+        2,
+        [{ amount: 2, reparto: espejo({ A: 200 }) }],
+      )
+      prismaMock.$queryRaw.mockResolvedValueOnce([cobro(10)]).mockResolvedValueOnce([])
+      await reembolsar([{ orderItemId: 'A', quantity: 1 }])
+      devolucionesDeLaOrden = [{ id: 'refund-p1', processorData: filaReembolso(0).processorData }]
+      prismaMock.$queryRaw.mockResolvedValueOnce([{ ...cobro(10), id: 'payment-2' }]).mockResolvedValueOnce([])
+      await reembolsar([{ orderItemId: 'A', quantity: 2 }], { paymentId: 'payment-2' })
+
+      const partes = [filaReembolso(0), filaReembolso(1)].map(f => f.processorData.refundedItems[0].amountCents)
+      expect(partes).toEqual([334, 666])
+      expect(partes[0] + partes[1]).toBe(1000)
+    })
+
+    it('🔴 M3 · una devolución BRUTA de antes de A (1 de 2 piezas a $50) + la otra ahora: nunca más que lo cobrado del renglón ($90 ⇒ $40)', async () => {
+      venta([linea('A', { quantity: 2, unitPrice: new Decimal(50), discountAmount: new Decimal(10) }), linea('B')], 10, [
+        { amount: 10, reparto: espejo({ A: 1000 }) },
+      ])
+      const previa = {
+        id: 'refund-bruto',
+        amount: -50,
+        tipAmount: 0,
+        createdAt: new Date('2026-10-01T10:00:00.000Z'),
+        status: TransactionStatus.COMPLETED,
+        processorData: { refundedItems: [{ orderItemId: 'A', quantity: 1, amountCents: 5000, amount: 50 }] },
+      }
+      prismaMock.$queryRaw.mockResolvedValueOnce([cobro(190)]).mockResolvedValueOnce([previa])
+
+      const r = await reembolsar([{ orderItemId: 'A', quantity: 1 }])
+
+      expect(r.amount).toBe(40)
+      expect(filaReembolso().processorData.refundedItems[0]).toMatchObject({ amountCents: 4000, amount: 40 })
+    })
+
+    it('🔴 M1 · más renglones que el tope: el 400 dice la causa (no «descuentos») y no escribe nada', async () => {
+      prismaMock.$queryRaw.mockResolvedValueOnce([cobro(100)]).mockResolvedValueOnce([])
+      venta(
+        Array.from({ length: TOPES_POR_ORDEN.renglones + 1 }, (_, i) => linea(i === 0 ? 'A' : `r${i}`)),
+        0,
+      )
+
+      await expect(reembolsar([{ orderItemId: 'A' }])).rejects.toThrow(
+        'Esta venta tiene demasiados artículos, descuentos o devoluciones para devolverla por artículo; haz la devolución por importe.',
+      )
+      expect(prismaMock.payment.create).not.toHaveBeenCalled()
+    })
+
+    it('🔴 M1 · más devoluciones en la orden que el tope: el mismo 400 por causa, sin escribir nada', async () => {
+      prismaMock.$queryRaw.mockResolvedValueOnce([cobro(100)]).mockResolvedValueOnce([])
+      venta([linea('A'), linea('B')], 0)
+      devolucionesDeLaOrden = Array.from({ length: TOPES_POR_ORDEN.movimientos + 1 }, (_, i) => ({ id: `r${i}`, processorData: {} }))
+
+      await expect(reembolsar([{ orderItemId: 'A' }])).rejects.toThrow(
+        'Esta venta tiene demasiados artículos, descuentos o devoluciones para devolverla por artículo; haz la devolución por importe.',
+      )
+      expect(prismaMock.payment.create).not.toHaveBeenCalled()
+    })
+
+    it('🔴 el tope por cobro no cambia: con $100 ya devueltos de $140, devolver A (ahora $90) se sigue rechazando con el mismo 400', async () => {
+      prismaMock.$queryRaw.mockResolvedValueOnce([cobro(140)]).mockResolvedValueOnce([
+        {
+          id: 'refund-previo',
+          amount: -100,
+          tipAmount: 0,
+          createdAt: new Date('2026-10-09T10:00:00.000Z'),
+          status: TransactionStatus.COMPLETED,
+          processorData: {},
+        },
+      ])
+      venta([linea('A', { discountAmount: new Decimal(10) }), linea('B', { unitPrice: new Decimal(50), total: new Decimal(50) })], 10, [
+        { amount: 10, reparto: espejo({ A: 1000 }) },
+      ])
+
+      await expect(reembolsar([{ orderItemId: 'A' }])).rejects.toThrow('Refund (90.00) exceeds remaining refundable (40.00)')
+      expect(prismaMock.payment.create).not.toHaveBeenCalled()
+    })
+  })
 })
 
 describe('issueRefund — replay MCP sin mover dinero de nuevo', () => {
@@ -1579,5 +1930,63 @@ describe('issueRefund — replay MCP sin mover dinero de nuevo', () => {
     } as any)
     await expect(issueRefund(input)).rejects.toThrow(/idempotencia/)
     expect(prismaMock.$transaction).not.toHaveBeenCalled()
+  })
+})
+
+// C2 · OF-2 (M2, `review-final.md`): `listRefundsForPayment` lo llama el detalle de cobro del POS en CADA apertura. Antes leía TODAS las
+// devoluciones del negocio (sin tope, con `processorData` completo) y filtraba en JS por `originalPaymentId`. Ahora filtra en SQL por la
+// ruta JSON, con orden y tope; el resultado es el mismo.
+describe('C2 · OF-2 (M2) — listRefundsForPayment filtra en SQL y con tope', () => {
+  const logger = jest.requireMock('@/config/logger').default
+  const fila = (id: string, amount: number, tip: number, originalPaymentId = 'pay-1') => ({
+    id,
+    amount: new Decimal(amount),
+    tipAmount: new Decimal(tip),
+    status: 'COMPLETED',
+    method: 'CASH',
+    createdAt: new Date('2026-10-01T12:00:00Z'),
+    processedBy: { firstName: 'Ana', lastName: 'R' },
+    processorData: { originalPaymentId, refundReason: 'RETURNED_GOODS' },
+  })
+  beforeEach(() => {
+    prismaMock.payment.findMany.mockReset()
+    ;(logger.warn as jest.Mock).mockClear()
+  })
+
+  it('🔴 el `where` lleva venue, tipo y la ruta JSON `originalPaymentId`; con orden y `take`', async () => {
+    prismaMock.payment.findMany.mockResolvedValue([] as any)
+    await listRefundsForPayment('venue-1', 'pay-1')
+    expect(prismaMock.payment.findMany).toHaveBeenCalledTimes(1)
+    const args = prismaMock.payment.findMany.mock.calls[0][0] as any
+    expect(args.where).toEqual({
+      venueId: 'venue-1',
+      type: PaymentType.REFUND,
+      processorData: { path: ['originalPaymentId'], equals: 'pay-1' },
+    })
+    expect(args.orderBy).toEqual({ createdAt: 'desc' })
+    expect(args.take).toBe(TOPE_DEVOLUCIONES_POR_COBRO)
+  })
+
+  it('control — el resultado es el de siempre: `amount` = total negativo (venta + propina) y el reparto aparte', async () => {
+    prismaMock.payment.findMany.mockResolvedValue([fila('r2', -30, -5), fila('r1', -10, 0)] as any)
+    const r = await listRefundsForPayment('venue-1', 'pay-1')
+    expect(r).toEqual([
+      expect.objectContaining({ id: 'r2', amount: -35, saleAmount: -30, tipAmount: -5, status: 'COMPLETED', method: 'CASH' }),
+      expect.objectContaining({ id: 'r1', amount: -10, saleAmount: -10, tipAmount: 0 }),
+    ])
+    expect(r[0].processorData).toEqual({ originalPaymentId: 'pay-1', refundReason: 'RETURNED_GOODS' })
+    expect(r[0].processedBy).toEqual({ firstName: 'Ana', lastName: 'R' })
+  })
+
+  it('🔴 si se llena el tope, lo avisa en el log (nunca en silencio)', async () => {
+    prismaMock.payment.findMany.mockResolvedValue(
+      Array.from({ length: TOPE_DEVOLUCIONES_POR_COBRO }, (_, i) => fila(`r${i}`, -1, 0)) as any,
+    )
+    const r = await listRefundsForPayment('venue-1', 'pay-1')
+    expect(r).toHaveLength(TOPE_DEVOLUCIONES_POR_COBRO)
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('tope'),
+      expect.objectContaining({ venueId: 'venue-1', originalPaymentId: 'pay-1' }),
+    )
   })
 })

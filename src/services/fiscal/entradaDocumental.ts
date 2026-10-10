@@ -4,11 +4,20 @@
 // la comparación de reenvíos, la auditoría de un intento incierto) sólo la LEE — nunca vuelve a
 // resolver la orden viva ni el producto después del commit (ver `global-constraints.md`).
 import { createHash } from 'crypto'
+import logger from '../../config/logger'
 import type { IvaTratamiento } from './ivaTratamiento'
-import type { LoadedOrderBundle, IssueReceptor } from './cfdi.service'
+import type { LoadedOrderBundle, IssueReceptor, RenglonParaCfdi } from './cfdi.service'
 import { assembleSaleInput } from './assembleSaleInput'
 import { buildCreateInvoiceParams } from './cfdiPayloadBuilder'
-import type { CreateInvoiceParams } from './providers/fiscal-provider.interface'
+import type { CfdiItemInput, CreateInvoiceParams } from './providers/fiscal-provider.interface'
+import {
+  asignacionFiscal,
+  documentoDeConceptos,
+  resumenDeConceptos,
+  TRATAMIENTOS_DE_NOTA,
+  unidadesDeConceptos,
+  type TratamientoDeNota,
+} from './saldoFiscal'
 
 export interface EntradaDocumentalV1 {
   version: 1
@@ -35,6 +44,82 @@ export interface EntradaDocumentalV1 {
    * `externalId`: ese campo lo pone `paramsDesdeEntrada` con la llave de la versión que se envía.
    */
   params: Omit<CreateInvoiceParams, 'externalId'>
+  /**
+   * C2 (P4; Codex C2-4, C2-10): lo facturado de cada artículo —con sus extras, sus descuentos y el ajuste de la 6b—, por tratamiento,
+   * tal como lo REPARTE el documento (`asignacionFiscal`; forma: `MontosPorRenglon`). Opcional: las entradas de antes de C2 no lo traen, y
+   * una factura sin él detiene la devolución por artículos (ofrece «acreditar por importe»).
+   * 🔴 Ronda 1 (M1): se LEE sólo con `leerMontosPorRenglon(e)`, que lo valida. `leerEntrada` lo deja tal como se guardó: la huella se calcula
+   * sobre lo leído y se compara con la guardada (`cfdi.service.ts`, `cfdiCreditNote.service.ts`), así que quitarlo o corregirlo ahí anularía
+   * la entrada entera —también la nota por importe—. Por eso es `unknown`: nadie lo usa sin pasar por la validación.
+   */
+  montosPorRenglon?: unknown
+}
+
+/** C2: lo facturado de cada artículo, por tratamiento (la forma VALIDADA de `EntradaDocumentalV1.montosPorRenglon`). */
+export type MontosPorRenglon = Array<{
+  orderItemId: string
+  totalCents: number
+  porTratamiento: Partial<Record<TratamientoDeNota, number>>
+}>
+
+/** La clave de un concepto SIN `origen` (importe libre, bundles armados a mano): nunca es un `OrderItem.id` y no se congela. */
+const SIN_ORIGEN = '\u0000sin-origen:'
+
+/**
+ * C2 (P4; Codex C2-4, C2-10): lo facturado de cada artículo, del documento REPARTIDO con la regla del PAC (`asignacionFiscal`, T4) sobre
+ * el payload tal como se manda —los descuentos ya traen el ajuste de la 6b—, nunca una suma neta propia. Los conceptos del bundle y
+ * `items` van 1 a 1 y en orden (`buildCreateInvoiceParams` mapea `bundle.order.items`); cada concepto —producto y extras— lleva el
+ * `OrderItem` del que nace (`origen`, C1), y los de un mismo artículo comparten clave y se suman solos. Ordenado por `orderItemId`: la foto
+ * no depende del orden físico de las filas. `{ motivo }` si no se puede repartir (no van 1 a 1 —defensivo: hoy salen del mismo arreglo—,
+ * o la asignación es inválida).
+ */
+function calcularMontosPorRenglon(conceptos: RenglonParaCfdi[], items: CfdiItemInput[]): MontosPorRenglon | { motivo: string } {
+  if (conceptos.length !== items.length) return { motivo: 'los conceptos y el payload no van 1 a 1' }
+  const clave = (i: number) => conceptos[i].origen ?? `${SIN_ORIGEN}${i}`
+  const a = asignacionFiscal(unidadesDeConceptos(items, clave), documentoDeConceptos(items), resumenDeConceptos(items))
+  if ('invalido' in a) return { motivo: a.invalido }
+  return [...a.porClave]
+    .filter(([k]) => !k.startsWith(SIN_ORIGEN))
+    .map(([orderItemId, m]) => {
+      const porTratamiento: Partial<Record<TratamientoDeNota, number>> = {}
+      for (const t of TRATAMIENTOS_DE_NOTA) if (m[t]) porTratamiento[t] = m[t]!.totalCents
+      return { orderItemId, totalCents: Object.values(porTratamiento).reduce((s, c) => s + c, 0), porTratamiento }
+    })
+    .sort((x, y) => (x.orderItemId < y.orderItemId ? -1 : x.orderItemId > y.orderItemId ? 1 : 0))
+}
+
+const esCentavos = (v: unknown): v is number => Number.isInteger(v) && (v as number) >= 0
+
+/**
+ * C2: la forma de `montosPorRenglon` que se congela y que se lee (la MISMA regla en los dos lados, para que la captura nunca guarde algo
+ * que el lector rechace): cada artículo es un renglón de la entrada, sin repetirse; `totalCents` y cada monto son centavos enteros ≥ 0;
+ * los tratamientos son los de una nota (`TRATAMIENTOS_DE_NOTA`) y suman su `totalCents`; y todos juntos no pasan del total de la factura.
+ * 🔴 Ronda 1 (M1): no se endurece sin subir la versión de la entrada. Una regla más estricta (o un tratamiento menos en
+ * `TRATAMIENTOS_DE_NOTA`) le quitaría la evidencia a facturas YA timbradas: la entrada se sigue leyendo, pero sus devoluciones por
+ * artículos se detendrían.
+ */
+function montosPorRenglonValidos(
+  v: unknown,
+  renglones: ReadonlyArray<{ orderItemId: string }>,
+  facturaTotalCents: number,
+): v is MontosPorRenglon {
+  if (!Array.isArray(v)) return false
+  const deLaEntrada = new Set(renglones.map(r => r.orderItemId))
+  const vistos = new Set<string>()
+  let suma = 0
+  for (const m of v) {
+    if (!esObjeto(m) || typeof m.orderItemId !== 'string' || !deLaEntrada.has(m.orderItemId) || vistos.has(m.orderItemId)) return false
+    vistos.add(m.orderItemId)
+    if (!esCentavos(m.totalCents) || !esObjeto(m.porTratamiento)) return false
+    let delArticulo = 0
+    for (const [t, c] of Object.entries(m.porTratamiento)) {
+      if (!(TRATAMIENTOS_DE_NOTA as readonly string[]).includes(t) || !esCentavos(c)) return false
+      delArticulo += c
+    }
+    if (delArticulo !== m.totalCents) return false
+    suma += m.totalCents
+  }
+  return suma <= facturaTotalCents
 }
 
 /**
@@ -75,6 +160,33 @@ export function capturarEntrada(
   )
 
   const renglones = (bundle.order.renglonesOrigen ?? []).map(r => ({ orderItemId: r.orderItemId, tratamiento: r.tratamiento }))
+  const montos = { subtotalCents: bundle.subtotalCents, taxCents: bundle.taxCents, totalCents: bundle.totalCents }
+
+  // C2 (P4, Codex C2-4/C2-10): lo facturado de cada artículo, del documento REPARTIDO. Es evidencia para las devoluciones «por artículos»:
+  // si no se puede congelar (o no pasa la regla del lector), la factura sale igual SIN el campo y esas devoluciones se detienen y ofrecen
+  // «acreditar por importe» (Tarea 9). Nada de aquí puede detener una factura.
+  // Ronda 1 (M3): sólo en una captura que se timbraría. Con motivos del cargador (`VALIDATION_FAILED`) el documento no lleva el ajuste de la
+  // 6b ni `montos` es el documento: no se congela nada (el reintento recaptura).
+  let montosPorRenglon: MontosPorRenglon | undefined
+  let sinMontos: string | null = null
+  if (!bundle.unsupportedReasons?.length) {
+    try {
+      const m = calcularMontosPorRenglon(bundle.order.items as RenglonParaCfdi[], params.items)
+      if (!Array.isArray(m)) sinMontos = m.motivo
+      else if (!montosPorRenglonValidos(m, renglones, montos.totalCents)) sinMontos = 'no pasa la regla del lector'
+      else montosPorRenglon = m
+    } catch (e) {
+      sinMontos = `error al repartir: ${e instanceof Error ? e.message : String(e)}`
+    }
+  }
+  if (sinMontos) logger.warn(`[entradaDocumental] orden ${orderId}: sin montosPorRenglon (${sinMontos})`)
+  // Ronda 1 (M4): con artículos, lo congelado suma el documento; si no (p. ej. un concepto sin `origen`), se congela igual —la dirección es
+  // segura: esa devolución se detiene, nunca acredita de más— y queda la señal.
+  const sumaCongelada = (montosPorRenglon ?? []).reduce((s, m) => s + m.totalCents, 0)
+  if (montosPorRenglon?.length && sumaCongelada !== montos.totalCents)
+    logger.warn(
+      `[entradaDocumental] orden ${orderId}: montosPorRenglon congelado, pero sus artículos (${sumaCongelada} ¢) no suman el total de la factura (${montos.totalCents} ¢); ¿un concepto sin origen?`,
+    )
 
   const entrada: EntradaDocumentalV1 = {
     version: 1,
@@ -85,9 +197,10 @@ export function capturarEntrada(
     paymentStatus: bundle.order.paymentStatus ?? null,
     clasificacion,
     paidCents: bundle.paidCents,
-    montos: { subtotalCents: bundle.subtotalCents, taxCents: bundle.taxCents, totalCents: bundle.totalCents },
+    montos,
     renglones,
     params,
+    ...(montosPorRenglon?.length ? { montosPorRenglon } : {}),
   }
   // Copia profunda: mutar el bundle (o el receptor) DESPUÉS de capturar nunca puede alcanzar la
   // entrada ya sellada — es la garantía de "foto congelada".
@@ -151,6 +264,21 @@ export function leerEntrada(json: unknown): EntradaDocumentalV1 | null {
     if (!esObjeto(r) || typeof r.orderItemId !== 'string' || typeof r.tratamiento !== 'string') return null
   }
   if (!esObjeto(json.params)) return null
+  // C2 ronda 1 (M1): `montosPorRenglon` NO se valida aquí (se queda tal como se guardó, por la huella); lo valida `leerMontosPorRenglon`.
 
   return json as unknown as EntradaDocumentalV1
+}
+
+/**
+ * C2 ronda 1 (M1): lo facturado de cada artículo de una entrada LEÍDA, validado con la misma regla de la captura. Sin el campo (facturas de
+ * antes de C2, venta sin renglones, o si la captura no pudo) ⇒ `null`, sin aviso. Malformado (incluido `null`) ⇒ `null` con aviso: sólo
+ * se pierde esa evidencia —la devolución por artículos se detiene y ofrece «por importe»—; la entrada sigue sirviendo para lo demás.
+ */
+export function leerMontosPorRenglon(e: EntradaDocumentalV1): MontosPorRenglon | null {
+  if (e.montosPorRenglon === undefined) return null
+  if (montosPorRenglonValidos(e.montosPorRenglon, e.renglones, e.montos.totalCents)) return e.montosPorRenglon
+  logger.warn(
+    `[entradaDocumental] orden ${e.orderId}: montosPorRenglon malformado; la entrada se usa, pero sin evidencia de lo facturado por artículo`,
+  )
+  return null
 }

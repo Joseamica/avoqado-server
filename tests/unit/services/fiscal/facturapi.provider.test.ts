@@ -136,70 +136,8 @@ describe('FacturapiProvider', () => {
     expect(mockCreate.mock.calls[0][0].items[0].product.taxability).toBe('01')
   })
 
-  // 🔴 `cancellation_status: 'none'` significa que el PAC NO canceló nada. Tratarlo como cancelado hacía
-  // que diéramos por cancelada una factura viva — y en una sustitución eso deja DOS facturas vigentes.
-  it('cancelInvoice NO da por cancelado un `none` ni un status desconocido: la factura sigue viva', async () => {
-    const provider = new FacturapiProvider('sk_test_x')
-    mockCancel.mockResolvedValue({ ...MOCK_INVOICE_RESPONSE, status: 'valid', cancellation_status: 'none' })
-    await expect(provider.cancelInvoice({ providerInvoiceId: 'fa1', motivo: '02' })).resolves.toMatchObject({
-      status: 'none',
-      cancelledAt: null,
-    })
-    mockCancel.mockResolvedValue({ ...MOCK_INVOICE_RESPONSE, status: 'valid', cancellation_status: 'lo-que-sea' })
-    await expect(provider.cancelInvoice({ providerInvoiceId: 'fa1', motivo: '02' })).resolves.toMatchObject({
-      status: 'none',
-      cancelledAt: null,
-    })
-  })
-
-  it('cancelInvoice: la factura ya cancelada manda sobre el cancellation_status', async () => {
-    const provider = new FacturapiProvider('sk_test_x')
-    mockCancel.mockResolvedValue({ ...MOCK_INVOICE_RESPONSE, status: 'canceled', cancellation_status: 'none' })
-    const r = await provider.cancelInvoice({ providerInvoiceId: 'fa1', motivo: '02' })
-    expect(r.status).toBe('canceled')
-    expect(r.cancelledAt).toBeInstanceOf(Date)
-  })
-
-  it('cancelInvoice mapea pending/verifying, accepted, rejected y expired sin inventar una cancelación', async () => {
-    const provider = new FacturapiProvider('sk_test_x')
-    for (const [raw, esperado] of [
-      ['pending', 'pending'],
-      ['verifying', 'pending'],
-      ['accepted', 'accepted'],
-      ['rejected', 'rejected'],
-      ['expired', 'expired'],
-    ] as const) {
-      mockCancel.mockResolvedValue({ ...MOCK_INVOICE_RESPONSE, status: 'valid', cancellation_status: raw })
-      const r = await provider.cancelInvoice({ providerInvoiceId: 'fa1', motivo: '02' })
-      expect([raw, r.status]).toEqual([raw, esperado])
-      expect([raw, r.cancelledAt]).toEqual([raw, esperado === 'accepted' ? expect.any(Date) : null])
-    }
-  })
-
-  // Testarudo 24-sep-2026: la A-14 se canceló en el SAT pero Avoqado se quedó con la solicitud «en trámite»
-  // para siempre, porque sólo se preguntaba UNA vez (al pedirla). Esta consulta es la que faltaba.
-  it('getCancellationStatus CONSULTA (no cancela) y usa la misma regla que cancelInvoice', async () => {
-    const provider = new FacturapiProvider('sk_test_x')
-    mockCancel.mockClear()
-    mockRetrieve.mockResolvedValue({
-      ...MOCK_INVOICE_RESPONSE,
-      status: 'canceled',
-      cancellation_status: 'none',
-      cancellation: { status: 'accepted', last_checked: '2026-09-21T18:09:00.000Z' },
-    })
-    const r = await provider.getCancellationStatus('fa1')
-    expect(mockRetrieve).toHaveBeenCalledWith('fa1')
-    expect(mockCancel).not.toHaveBeenCalled()
-    expect(r.status).toBe('canceled')
-    expect(r.cancelledAt).toEqual(new Date('2026-09-21T18:09:00.000Z'))
-
-    mockRetrieve.mockResolvedValue({ ...MOCK_INVOICE_RESPONSE, status: 'valid', cancellation_status: 'pending' })
-    await expect(provider.getCancellationStatus('fa1')).resolves.toEqual({ status: 'pending', cancelledAt: null })
-
-    // Sin fecha del PAC no se inventa una: cancelada, pero `cancelledAt` vacío.
-    mockRetrieve.mockResolvedValue({ ...MOCK_INVOICE_RESPONSE, status: 'canceled', cancellation_status: 'none', cancellation: null })
-    await expect(provider.getCancellationStatus('fa1')).resolves.toEqual({ status: 'canceled', cancelledAt: null })
-  })
+  // C2 · Tarea 2: las pruebas de `cancelInvoice`/`getCancellationStatus` (antes con `client.invoices.cancel`/`retrieve` del SDK) viven en
+  // facturapi.provider.cancel.test.ts, con las mismas aserciones, sobre `fetch` con tiempo límite.
 
   it('createInvoice passes external_id when externalId is provided', async () => {
     mockCreate.mockResolvedValue(MOCK_INVOICE_RESPONSE)
@@ -630,19 +568,6 @@ describe('FacturapiProvider', () => {
 
   // ── Other existing tests ───────────────────────────────────────────────────
 
-  it('cancelInvoice passes motive + substitution', async () => {
-    mockCancel.mockResolvedValue({
-      id: 'fa_inv_1',
-      uuid: 'UUID-123',
-      status: 'canceled',
-      cancellation_status: 'accepted',
-    })
-    const provider = new FacturapiProvider('sk_test_x')
-    const r = await provider.cancelInvoice({ providerInvoiceId: 'fa_inv_1', motivo: '02' })
-    expect(mockCancel).toHaveBeenCalledWith('fa_inv_1', expect.objectContaining({ motive: '02' }))
-    expect(['accepted', 'canceled']).toContain(r.status)
-  })
-
   it('updateOrgLegal calls organizations.updateLegal with the mapped body — including the REQUIRED name', async () => {
     mockOrgUpdateLegal.mockResolvedValue({ id: 'org1' })
     const provider = new FacturapiProvider('sk_test_x')
@@ -698,5 +623,35 @@ describe('FacturapiProvider', () => {
         idempotencyKey: 'i',
       }),
     ).rejects.toThrow(/TaxObjectError/)
+  })
+})
+
+// ─── C2 · T7 ronda 1 (M1): el XML se baja por `fetch` con tiempo límite y conserva el status HTTP ───
+describe('C2 · T7 ronda 1 · downloadXml', () => {
+  afterEach(() => jest.restoreAllMocks())
+  it('🔴 baja /v2/invoices/{id}/xml con la llave y un tiempo límite, y devuelve los bytes', async () => {
+    mockInvoicesDownloadXml.mockResolvedValue(Buffer.from('del SDK')) // el camino de antes (sin status), para que el rojo sea por aserción
+    const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValue(new Response('<cfdi:Comprobante/>', { status: 200 }))
+    const xml = await new FacturapiProvider('sk_test_x').downloadXml('fa inv/1')
+    expect(xml.toString('utf8')).toBe('<cfdi:Comprobante/>')
+    expect(fetchMock).toHaveBeenCalledWith('https://www.facturapi.io/v2/invoices/fa%20inv%2F1/xml', {
+      method: 'GET',
+      headers: { Authorization: 'Bearer sk_test_x' },
+      signal: expect.any(AbortSignal),
+    })
+    expect(mockInvoicesDownloadXml).not.toHaveBeenCalled()
+  })
+  it.each([404, 401, 403, 500])('🔴 un %i del PAC sale como ProviderHttpError con su status (y su mensaje)', async status => {
+    mockInvoicesDownloadXml.mockRejectedValue(new Error('Invoice not found')) // el SDK de antes tira un Error SIN status
+    jest
+      .spyOn(global, 'fetch')
+      .mockResolvedValue(
+        new Response(JSON.stringify({ message: 'Invoice not found' }), { status, headers: { 'content-type': 'application/json' } }),
+      )
+    await expect(new FacturapiProvider('sk_test_x').downloadXml('fa_1')).rejects.toMatchObject({
+      name: 'ProviderHttpError',
+      status,
+      message: 'Invoice not found',
+    })
   })
 })

@@ -3,9 +3,17 @@ import { replaceCfdi } from '@/services/fiscal/cfdiReplacement.service'
 import { ProviderHttpError } from '@/services/fiscal/providers/facturapi.provider'
 import { randomUUID } from 'crypto'
 import prisma from '@/utils/prismaClient'
-import { issueCfdiForOrder } from '@/services/fiscal/cfdi.service'
-import { huellaDeEntrada, leerEntrada, paramsDesdeEntrada } from '@/services/fiscal/entradaDocumental'
+import { anotarIntencionDeCancelar, issueCfdiForOrder, TEXTO_SUSTITUCION_ATORADA } from '@/services/fiscal/cfdi.service'
+import {
+  MOTIVO_ORIGINAL_EN_SUSTITUCION,
+  MOTIVO_ORIGINAL_EN_SUSTITUCION_ATORADA,
+  emitRefundCreditNote,
+  getRefundCreditNoteStatus,
+  loadRefundForCreditNoteFromDb,
+} from '@/services/fiscal/cfdiCreditNote.service'
+import { huellaDeEntrada, leerEntrada, leerMontosPorRenglon, paramsDesdeEntrada } from '@/services/fiscal/entradaDocumental'
 import { encenderIvaPorProducto } from '../../__helpers__/iva-por-producto'
+import { xmlDeLaFila } from '../../__helpers__/xml-del-pac'
 
 const database = new URL(process.env.TEST_DATABASE_URL ?? '')
 // La base fiscal de esta Mac o la desechable de CI (ci-cd.yml adopta ese nombre en vez de relajar la guarda): nunca otra.
@@ -85,7 +93,8 @@ describe('sustitución sellada', () => {
     provider.findByExternalId.mockReset().mockResolvedValue(null)
     provider.getInvoice.mockReset().mockResolvedValue(stamped)
     provider.cancelInvoice.mockReset().mockResolvedValue({ status: 'pending' })
-    provider.downloadXml.mockResolvedValue(Buffer.from('<Comprobante/>'))
+    // C2 T7 (D5): la nota exige el XML de su original; el doble devuelve el que el PAC timbraría con lo que se le mandó.
+    provider.downloadXml.mockImplementation(async (id: string) => xmlDeLaFila(prisma, id))
     provider.downloadPdf.mockResolvedValue(Buffer.from('%PDF'))
     await prisma.product.update({ where: { id: productId }, data: { ivaTratamiento: 'IVA_16' } })
   })
@@ -157,6 +166,32 @@ describe('sustitución sellada', () => {
     expect(await sellosIva.renglonesSellados(prisma, o.id)).toEqual([expect.objectContaining({ cfdis: 1, tratamiento: 'IVA_16' })])
     expect(provider.createInvoice).toHaveBeenCalledTimes(1)
     expect(await prisma.orderItemSelloIva.findFirst({ where: { cfdiId: sub.id } })).toMatchObject({ intento: 1 })
+  })
+  it('control — C2 T6 ronda 1 (M5): la sustituta congela SU propio montosPorRenglon, el del documento nuevo; la original conserva el suyo', async () => {
+    const { o, cfdi } = await original()
+    const deLaOriginal = [{ orderItemId: o.items[0].id, totalCents: 11600, porTratamiento: { IVA_16: 11600 } }]
+    expect(leerMontosPorRenglon(leerEntrada(cfdi.entrada)!)).toEqual(deLaOriginal)
+    // La venta se corrige antes de sustituir: un artículo más de $50, cobrado.
+    const otro = await prisma.orderItem.create({
+      data: { orderId: o.id, productId, productName: 'Producto', quantity: 1, unitPrice: 50, taxAmount: 0, total: 50 },
+    })
+    await prisma.order.update({ where: { id: o.id }, data: { subtotal: 166, total: 166 } })
+    await prisma.payment.create({
+      data: { venueId, orderId: o.id, amount: 50, feePercentage: 0, feeAmount: 0, netAmount: 50, method: 'CASH', status: 'COMPLETED' },
+    })
+    expect(await replacement(cfdi.id)).toMatchObject({ status: 'REPLACED' })
+    const sub = await replacementRow(cfdi.id)
+    const entry = leerEntrada(sub.entrada)!
+    const esperado = [
+      { orderItemId: o.items[0].id, totalCents: 11600, porTratamiento: { IVA_16: 11600 } },
+      { orderItemId: otro.id, totalCents: 5000, porTratamiento: { IVA_16: 5000 } },
+    ].sort((x, y) => (x.orderItemId < y.orderItemId ? -1 : 1))
+    expect(leerMontosPorRenglon(entry)).toEqual(esperado)
+    expect(entry.montos.totalCents).toBe(16600)
+    expect(sub.entradaHuella).toBe(huellaDeEntrada(entry))
+    const orig = await prisma.cfdi.findUniqueOrThrow({ where: { id: cfdi.id } })
+    expect(leerMontosPorRenglon(leerEntrada(orig.entrada)!)).toEqual(deLaOriginal)
+    expect(orig.entradaHuella).not.toBe(sub.entradaHuella)
   })
   it('el payload permanece congelado si la orden cambia tras el commit de reserva', async () => {
     const { o, cfdi } = await original()
@@ -442,5 +477,297 @@ describe('sustitución sellada', () => {
     ).rejects.toThrow(/Cfdi_heredada_solo_terminada/)
     expect(await prisma.cfdi.count({ where: { replacesCfdiId: cfdi.id } })).toBe(0)
     expect(await prisma.cfdi.findUniqueOrThrow({ where: { id: cfdi.id } })).toEqual(antes)
+  })
+
+  // ── C2 · Tarea 3 (+ G4 del controlador): la sustitución no EMPIEZA sobre una original con cancelación en trámite, ni sobre una con
+  // notas de crédito vivas. Las dos guardas viven en el `capture` de la emisión (reserva fresca y recaptura), bajo el candado de la orden.
+  const EN_TRAMITE = /cancelación en trámite/
+  /** Una nota de crédito (EGRESO) que apunta a la original por su entrada, como las del protocolo; `over` la vuelve timbrada, muerta o heredada. */
+  async function notaDe(orderId: string, originalId: string, over: Record<string, unknown> = {}) {
+    return prisma.cfdi.create({
+      data: {
+        venueId,
+        fiscalEmisorId,
+        orderId,
+        type: 'EGRESO',
+        status: 'STAMPING',
+        flow: 'STAFF_B',
+        receptorRfc: receptor.rfc,
+        receptorNombre: receptor.razonSocial,
+        receptorRegimen: receptor.regimenFiscal,
+        receptorCp: receptor.codigoPostal,
+        usoCfdi: 'G02',
+        formaPago: '01',
+        metodoPago: 'PUE',
+        subtotalCents: 862,
+        taxCents: 138,
+        totalCents: 1000,
+        protocoloIva: 1,
+        attempts: 1,
+        idempotencyKey: `cfdi-refund-${randomUUID()}`,
+        entrada: { v: 1, tipo: 'EGRESO', originalCfdiId: originalId },
+        ...over,
+      } as any,
+    })
+  }
+  const sinSustituta = async (originalId: string) => {
+    expect(provider.createInvoice).not.toHaveBeenCalled()
+    expect(provider.cancelInvoice).not.toHaveBeenCalled()
+    expect(await prisma.cfdi.count({ where: { replacesCfdiId: originalId } })).toBe(0)
+  }
+
+  it('🔴 T3: original con cancelación en trámite (enviada y acusada) ⇒ rechaza; ni sustituta reservada ni PAC', async () => {
+    const { cfdi } = await original()
+    const hace = new Date(Date.now() - 5 * 60_000)
+    await prisma.cfdi.update({
+      where: { id: cfdi.id },
+      data: {
+        cancelStatus: 'REQUESTED',
+        cancelMotivo: '02',
+        cancelRequestedAt: hace,
+        cancelIntento: 1,
+        cancelEnviadaAt: hace,
+        cancelAcusadaAt: hace,
+      },
+    })
+    const antes = await prisma.cfdi.findUniqueOrThrow({ where: { id: cfdi.id } })
+    await expect(replacement(cfdi.id)).rejects.toThrow(EN_TRAMITE)
+    await sinSustituta(cfdi.id)
+    expect(await prisma.cfdi.findUniqueOrThrow({ where: { id: cfdi.id } })).toEqual(antes)
+  })
+
+  it('🔴 T3: basta la intención recién ANOTADA (aún sin enviar al PAC)', async () => {
+    const { cfdi } = await original()
+    expect(await anotarIntencionDeCancelar(cfdi.id, cfdi.attempts, { motivo: '02' })).toMatchObject({ estado: 'ANOTADA', intento: 1 })
+    // T10 (M2 de la T3), cambio A PROPÓSITO: sólo ANOTADA, el SAT todavía no la tiene ⇒ «se está enviando al SAT», no «en trámite».
+    await expect(replacement(cfdi.id)).rejects.toThrow(/se está enviando al SAT; espera a que se resuelva antes de sustituirla/)
+    await sinSustituta(cfdi.id)
+  })
+
+  it('🔴 T3 en la RECAPTURA: una sustituta fallida no se vuelve a capturar ni a enviar sobre una original en trámite', async () => {
+    const { cfdi } = await original()
+    provider.createInvoice.mockRejectedValueOnce(new ProviderHttpError(400, 'invalid_request', 'invalid'))
+    await replacement(cfdi.id)
+    const fallida = await replacementRow(cfdi.id)
+    expect(fallida).toMatchObject({ status: 'STAMP_FAILED', falloDefinitivo: true, attempts: 1 })
+    expect(provider.createInvoice).toHaveBeenCalledTimes(1)
+    await prisma.cfdi.update({
+      where: { id: cfdi.id },
+      data: { cancelStatus: 'REQUESTED', cancelMotivo: '02', cancelRequestedAt: new Date() },
+    })
+    await expect(replacement(cfdi.id)).rejects.toThrow(EN_TRAMITE)
+    expect(provider.createInvoice).toHaveBeenCalledTimes(1)
+    expect(provider.cancelInvoice).not.toHaveBeenCalled()
+    // La transacción de la recaptura se revirtió entera: la sustituta sigue como estaba (ni reclamada, ni con otra versión).
+    expect(await replacementRow(cfdi.id)).toEqual(fallida)
+  })
+
+  it('🔴 G4: original con una nota de crédito TIMBRADA viva ⇒ rechaza con el texto de la cancelación (C2-6); ni sustituta ni PAC', async () => {
+    const { o, cfdi } = await original()
+    await notaDe(o.id, cfdi.id, { status: 'STAMPED', serie: 'NC', folio: '7', uuid: randomUUID() })
+    await expect(replacement(cfdi.id)).rejects.toThrow(
+      'Esta factura tiene la nota de crédito NC-7 vigente; el SAT exige cancelar primero lo relacionado.',
+    )
+    await sinSustituta(cfdi.id)
+  })
+
+  it('🔴 G4: una nota RESERVADA (en proceso, sin folio) y una nota HEREDADA de la misma venta también bloquean', async () => {
+    const { o, cfdi } = await original()
+    const reservada = await notaDe(o.id, cfdi.id)
+    await expect(replacement(cfdi.id)).rejects.toThrow(
+      'Esta factura tiene una nota de crédito en proceso; el SAT exige cancelar primero lo relacionado.',
+    )
+    await prisma.cfdi.delete({ where: { id: reservada.id } })
+    await notaDe(o.id, 'otra', { status: 'STAMPED', protocoloIva: null, entrada: undefined, serie: 'NC', folio: '8', uuid: randomUUID() })
+    await expect(replacement(cfdi.id)).rejects.toThrow(/NC-8/)
+    await sinSustituta(cfdi.id)
+  })
+
+  it('control — G4: una nota muerta (validación fallida) o de OTRA original no estorba: la sustitución sale', async () => {
+    const { o, cfdi } = await original()
+    await notaDe(o.id, cfdi.id, { status: 'VALIDATION_FAILED' })
+    await notaDe(o.id, 'otra-original', { status: 'STAMPED', serie: 'NC', folio: '9', uuid: randomUUID() })
+    expect(await replacement(cfdi.id)).toMatchObject({ status: 'REPLACED' })
+    expect(provider.createInvoice).toHaveBeenCalledTimes(1)
+  })
+
+  // ── C2 · Tarea 3, ronda 1 (I1, el espejo de G4; M1): mientras la SUSTITUCIÓN de A está en vuelo (B reservada y en el PAC, o en duda),
+  // ni una nota de crédito sobre A ni una cancelación manual de A empiezan; las dos lo dicen. Cuando B termina, la nota sale contra la
+  // corregida; si B falla en definitiva, la nota vuelve a salir contra A (y entonces G4 detiene una nueva sustitución).
+  describe('ronda 1 de la T3 · sustitución en curso', () => {
+    const createCreditNote = jest.fn()
+    beforeEach(() =>
+      createCreditNote.mockReset().mockImplementation(async () => {
+        throw new Error('la nota NO debía llegar al PAC')
+      }),
+    )
+    const notaTimbrable = () =>
+      createCreditNote.mockImplementation(async () => ({
+        ...stamped,
+        stampedAt: new Date(),
+        uuid: randomUUID(),
+        providerInvoiceId: randomUUID(),
+      }))
+    async function reembolso(orderId: string, amount = 10) {
+      return prisma.payment.create({
+        data: {
+          venueId,
+          orderId,
+          type: 'REFUND',
+          amount: -amount,
+          tipAmount: 0,
+          feePercentage: 0,
+          feeAmount: 0,
+          netAmount: -amount,
+          method: 'CASH',
+          status: 'COMPLETED',
+        },
+      })
+    }
+    const nota = (refundPaymentId: string, over: Record<string, unknown> = {}) =>
+      emitRefundCreditNote({ venueId, refundPaymentId, sandbox: true }, {
+        resolveProvider: (() => ({ ...provider, createCreditNote })) as any,
+        storeArtifact: deps.storeArtifact,
+        ...over,
+      } as any)
+    const egresos = (orderId: string) => prisma.cfdi.count({ where: { orderId, type: 'EGRESO' } })
+    const elegibilidad = async (refundPaymentId: string) => (await getRefundCreditNoteStatus(venueId, refundPaymentId))!.eligibility
+    const ESPERA = { eligible: false, reason: 'ORIGINAL_EN_SUSTITUCION', message: MOTIVO_ORIGINAL_EN_SUSTITUCION }
+
+    /** Barrera determinista: arranca la sustitución de A y la deja PAUSADA dentro del PAC (B reservada y enviada, sin respuesta). */
+    async function sustitucionEnPausa(originalId: string) {
+      let soltar!: () => void
+      const pausa = new Promise<void>(r => (soltar = r))
+      let entrar!: () => void
+      const enElPac = new Promise<void>(r => (entrar = r))
+      provider.createInvoice.mockImplementationOnce(async () => {
+        entrar()
+        await pausa
+        // stampedAt propio: la nota posterior elige la corregida por `stampedAt`, no por un empate con la original.
+        return { ...stamped, stampedAt: new Date() }
+      })
+      const promesa = replacement(originalId)
+      await enElPac
+      const sustituta = await replacementRow(originalId)
+      expect(sustituta).toMatchObject({ status: 'STAMPING', replacesCfdiId: originalId })
+      expect(sustituta.enviadoAt).not.toBeNull()
+      return { soltar, promesa, sustituta }
+    }
+
+    it('🔴 I1: con la sustitución EN VUELO, la nota sobre A se rechaza con su texto (botón y emisión) y no deja EGRESO; al soltarla, la sustitución cancela A sin conflicto y la nota sale contra la corregida', async () => {
+      const { o, cfdi } = await original()
+      const r = await reembolso(o.id)
+      const { soltar, promesa, sustituta } = await sustitucionEnPausa(cfdi.id)
+      let res: any
+      try {
+        expect(await elegibilidad(r.id)).toEqual(ESPERA)
+        await expect(nota(r.id)).rejects.toThrow(MOTIVO_ORIGINAL_EN_SUSTITUCION)
+        expect(createCreditNote).not.toHaveBeenCalled()
+        expect(await egresos(o.id)).toBe(0)
+      } finally {
+        soltar()
+        res = await promesa.catch((e: unknown) => e)
+      }
+      expect(res).toMatchObject({ status: 'REPLACED', cancelStatus: 'REQUESTED' })
+      expect(res.cancelConflicto).toBeUndefined()
+      expect(provider.cancelInvoice).toHaveBeenCalledTimes(1)
+      // B timbrada: la nota vuelve a ser posible, contra la CORREGIDA (la original ya está en trámite de cancelación).
+      notaTimbrable()
+      expect((await nota(r.id)).status).toBe('STAMPED')
+      expect((await prisma.cfdi.findFirstOrThrow({ where: { orderId: o.id, type: 'EGRESO' } })).entrada).toMatchObject({
+        originalCfdiId: sustituta.id,
+      })
+    })
+
+    it('🔴 I1 bajo candado: la revisión inicial no ve sustituta; B se reserva ANTES de que la nota tome el candado de la orden ⇒ la revisión bajo candado la detiene; ni fila ni PAC', async () => {
+      const { o, cfdi } = await original()
+      const r = await reembolso(o.id)
+      const lecturas: boolean[] = []
+      let pausada: Awaited<ReturnType<typeof sustitucionEnPausa>> | undefined
+      const cargar: typeof loadRefundForCreditNoteFromDb = async (...args) => {
+        const l = await loadRefundForCreditNoteFromDb(...args)
+        lecturas.push(!!l?.original?.sustitutaEnCurso)
+        if (lecturas.length === 1) pausada = await sustitucionEnPausa(cfdi.id)
+        return l
+      }
+      try {
+        await expect(nota(r.id, { loadRefundForCreditNote: cargar })).rejects.toThrow(MOTIVO_ORIGINAL_EN_SUSTITUCION)
+        expect(lecturas).toEqual([false, true])
+        expect(createCreditNote).not.toHaveBeenCalled()
+        expect(await egresos(o.id)).toBe(0)
+      } finally {
+        pausada?.soltar()
+        await pausada?.promesa.catch(() => undefined)
+      }
+      expect(await pausada!.promesa).toMatchObject({ status: 'REPLACED' })
+    })
+
+    it('🔴 I1: B en DUDA (el PAC no contestó: STAMP_FAILED sin fallo definitivo) sigue deteniendo la nota sobre A', async () => {
+      const { o, cfdi } = await original()
+      const r = await reembolso(o.id)
+      provider.createInvoice.mockRejectedValueOnce(new Error('timeout'))
+      expect((await replacement(cfdi.id)).status).toBe('STAMP_FAILED')
+      expect(await replacementRow(cfdi.id)).toMatchObject({ status: 'STAMP_FAILED', falloDefinitivo: false })
+      expect(await elegibilidad(r.id)).toEqual(ESPERA)
+      await expect(nota(r.id)).rejects.toThrow(MOTIVO_ORIGINAL_EN_SUSTITUCION)
+      expect(await egresos(o.id)).toBe(0)
+    })
+
+    // C2 · T10 (N1 de la re-revisión de la T3): B se ENVIÓ y lleva más de una hora sin resolverse ⇒ nadie la termina sola (CFDI_VIVO). La nota
+    // y la cancelación manual siguen bloqueadas, pero el texto manda a soporte en vez de prometer «espera a que termine».
+    it('🔴 T10 (N1): B en duda desde hace más de una hora ⇒ la nota y la cancelación manual dicen «escríbenos a soporte»; sin anotar nada', async () => {
+      const { o, cfdi } = await original()
+      const r = await reembolso(o.id)
+      provider.createInvoice.mockRejectedValueOnce(new Error('timeout'))
+      expect((await replacement(cfdi.id)).status).toBe('STAMP_FAILED')
+      const b = await replacementRow(cfdi.id)
+      expect(b).toMatchObject({ status: 'STAMP_FAILED', falloDefinitivo: false, enviadoAt: expect.any(Date) })
+      // Recién enviada: «espera a que termine».
+      expect(await elegibilidad(r.id)).toEqual(ESPERA)
+      await prisma.cfdi.update({ where: { id: b.id }, data: { enviadoAt: new Date(Date.now() - 2 * 60 * 60_000) } })
+      expect(await elegibilidad(r.id)).toEqual({
+        eligible: false,
+        reason: 'ORIGINAL_EN_SUSTITUCION',
+        message: MOTIVO_ORIGINAL_EN_SUSTITUCION_ATORADA,
+      })
+      await expect(nota(r.id)).rejects.toThrow(MOTIVO_ORIGINAL_EN_SUSTITUCION_ATORADA)
+      expect(await anotarIntencionDeCancelar(cfdi.id, cfdi.attempts, { motivo: '02' })).toEqual({ conflicto: TEXTO_SUSTITUCION_ATORADA })
+      expect(await prisma.cfdi.findUniqueOrThrow({ where: { id: cfdi.id } })).toMatchObject({ cancelStatus: null, cancelIntento: 0 })
+      expect(await egresos(o.id)).toBe(0)
+    })
+
+    it('control — I1: B fallida EN DEFINITIVA (el PAC la rechazó) ya no detiene: la nota sale contra A; y entonces G4 detiene un nuevo intento de sustituir', async () => {
+      const { o, cfdi } = await original()
+      const r = await reembolso(o.id)
+      provider.createInvoice.mockRejectedValueOnce(new ProviderHttpError(400, 'invalid_request', 'invalid'))
+      await replacement(cfdi.id)
+      expect(await replacementRow(cfdi.id)).toMatchObject({ status: 'STAMP_FAILED', falloDefinitivo: true })
+      expect(await elegibilidad(r.id)).toEqual({ eligible: true, reason: null, message: null })
+      notaTimbrable()
+      expect((await nota(r.id)).status).toBe('STAMPED')
+      expect((await prisma.cfdi.findFirstOrThrow({ where: { orderId: o.id, type: 'EGRESO' } })).entrada).toMatchObject({
+        originalCfdiId: cfdi.id,
+      })
+      await expect(replacement(cfdi.id)).rejects.toThrow(/el SAT exige cancelar primero lo relacionado/)
+      expect(provider.createInvoice).toHaveBeenCalledTimes(1)
+    })
+
+    it('🔴 M1: con la sustitución EN VUELO, cancelar A a mano se rechaza («se está sustituyendo») sin anotar nada; al soltarla, la sustitución cancela A sin conflicto', async () => {
+      const { cfdi } = await original()
+      const { soltar, promesa } = await sustitucionEnPausa(cfdi.id)
+      let res: any
+      try {
+        expect(await anotarIntencionDeCancelar(cfdi.id, cfdi.attempts, { motivo: '02' })).toEqual({
+          conflicto: 'Esta factura se está sustituyendo; espera a que termine antes de cancelarla.',
+        })
+        expect(await prisma.cfdi.findUniqueOrThrow({ where: { id: cfdi.id } })).toMatchObject({ cancelStatus: null, cancelIntento: 0 })
+        expect(provider.cancelInvoice).not.toHaveBeenCalled()
+      } finally {
+        soltar()
+        res = await promesa.catch((e: unknown) => e)
+      }
+      expect(res).toMatchObject({ status: 'REPLACED', cancelStatus: 'REQUESTED' })
+      expect(res.cancelConflicto).toBeUndefined()
+    })
   })
 })

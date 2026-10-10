@@ -256,7 +256,9 @@ const INVENTARIO: Record<string, number> = {
   'src/services/dashboard/receipt.dashboard.service.ts': 3,
   'src/services/dashboard/recipe.service.ts': 2,
   'src/services/dashboard/recipeRecalculation.service.ts': 3,
-  'src/services/dashboard/refund.dashboard.service.ts': 3,
+  // C2 A-1 (9-oct): 3 ⇒ 2; las líneas de la orden ya las lee el cargador de lo cobrado (`cobradoDeLaOrden.ts`), con tope.
+  // C2 OF-2 (M2): 2 ⇒ 1; `listRefundsForPayment` filtra en SQL por el cobro y lleva `take`.
+  'src/services/dashboard/refund.dashboard.service.ts': 1,
   'src/services/dashboard/refunds.dashboard.service.ts': 1,
   'src/services/dashboard/reports.dashboard.service.ts': 1,
   'src/services/dashboard/reservation.dashboard.service.ts': 3,

@@ -445,8 +445,17 @@ export function configureToolCatalog(server: McpServer, scope: McpScope, profile
         if (data?.requiresConfirmation === true && input.confirm !== true) {
           // Existing previews can supply concurrency fields that were unknown on the first call.
           // Bind those exact values as well, rather than invalidating an otherwise correct confirmation.
+          // `expectedRevision`: `cancel_stock_count` la devuelve en su vista previa y la exige al confirmar; sin atarla, el paso 2 con lo
+          // firmado volvía a pedir confirmación y nunca cancelaba. Las demás herramientas con ese campo no lo devuelven arriba en su vista
+          // previa (prueba en stock-count-cancel.test.ts), así que esto no las cambia.
           const confirmationArguments = { ...intent }
-          for (const field of ['expectedSourceFingerprint', 'expectedUpdatedAt', 'resolvedProductId', 'resolvedStaffVenueId']) {
+          for (const field of [
+            'expectedSourceFingerprint',
+            'expectedUpdatedAt',
+            'resolvedProductId',
+            'resolvedStaffVenueId',
+            'expectedRevision',
+          ]) {
             if (config.inputSchema?.[field] && data[field] != null) confirmationArguments[field] = data[field]
           }
           return structureToolResult(

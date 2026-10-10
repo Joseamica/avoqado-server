@@ -1,10 +1,19 @@
 import { randomUUID } from 'crypto'
 import { readFileSync } from 'fs'
 import { join } from 'path'
+import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
-import { finalizarTimbre, completarArchivos, escalarIntentoIncierto } from '@/services/fiscal/finalizadorCfdi'
+import {
+  finalizarTimbre,
+  completarArchivos,
+  escalarIntentoIncierto,
+  dondeFaltanArchivos,
+  repararArchivosDe,
+} from '@/services/fiscal/finalizadorCfdi'
 import { reconcileStuckCfdi } from '@/services/fiscal/cfdiReconcile.service'
+import { getCfdiStatus } from '@/services/fiscal/cfdi.service'
 import { sellarRenglones } from '@/services/fiscal/sellosIva'
+import { TOPE_XML_TIMBRADO_PROPIO_BYTES } from '@/services/fiscal/cfdiReceived.parser'
 
 const database = new URL(process.env.TEST_DATABASE_URL ?? '')
 // La base fiscal de esta Mac o la desechable de CI (ci-cd.yml adopta ese nombre en vez de relajar la guarda): nunca otra.
@@ -232,7 +241,10 @@ describe('finalizador y conciliación reales', () => {
   it('archivos y desglose del XML; una cancelación durante descarga impide escribirlos', async () => {
     const row = await reservation()
     await finish(row)
-    expect(await artifacts(row)).toBe('OK')
+    // C2 · T5 ronda 1 (M3): este fixture no es un comprobante completo (sin SubTotal/Total ni Importe/ObjetoImp en su concepto). Se guardan
+    // los archivos y el desglose como siempre, pero NO `xmlConceptos` (nunca se inventa un "0").
+    // C2 T7 (N1), cambio A PROPÓSITO: el resultado ya no es FALLO sino XML_ILEGIBLE (el XML se bajó y no se lee: permanente).
+    expect(await artifacts(row)).toBe('XML_ILEGIBLE')
     expect(await current(row.id)).toMatchObject({
       xmlUrl: expect.stringContaining('.xml'),
       pdfUrl: expect.stringContaining('.pdf'),
@@ -240,6 +252,8 @@ describe('finalizador y conciliación reales', () => {
         { impuesto: '002', tipoFactor: 'Tasa', tasa: '0.160000', base: '100.00', importe: '16.00' },
         { impuesto: '002', tipoFactor: 'Exento', tasa: null, base: '50.00', importe: null },
       ],
+      // C2 T7 ronda 1 (I2), cambio A PROPÓSITO: el veredicto ilegible queda PERSISTIDO como marca (nunca unos conceptos inventados).
+      xmlConceptos: { version: 1, ilegible: true, motivo: expect.any(String), at: expect.any(String) },
     })
     const cancelled = await reservation()
     stamped.uuid = randomUUID()
@@ -248,7 +262,166 @@ describe('finalizador y conciliación reales', () => {
       await prisma.cfdi.update({ where: { id: cancelled.id }, data: { status: 'CANCELLED' } })
       return xml
     })
-    expect(await artifacts(cancelled)).toBe('FALLO')
-    expect(await current(cancelled.id)).toMatchObject({ status: 'CANCELLED', xmlUrl: null, pdfUrl: null, taxBreakdown: null })
+    expect(await artifacts(cancelled)).toBe('XML_ILEGIBLE') // C2 T7 (N1): el MISMO fixture incompleto; lo que importa es que no escribe
+    expect(await current(cancelled.id)).toMatchObject({
+      status: 'CANCELLED',
+      xmlUrl: null,
+      pdfUrl: null,
+      taxBreakdown: null,
+      xmlConceptos: null,
+    })
+  })
+
+  // C2 · Tarea 5 (Codex C2-13): las filas timbradas ANTES de la T5 tienen archivos y desglose pero no `xmlConceptos`. El barrido las
+  // encuentra (en la base real: `DbNull` sobre JSON) y `repararArchivosDe` —la misma que usa la espera de una nota— las completa con el
+  // CAS de hoy; después ya no las encuentra.
+  const XML_C2 =
+    '<cfdi:Comprobante xmlns:cfdi="http://www.sat.gob.mx/cfd/4" Version="4.0" SubTotal="100.01" Total="116.01"><cfdi:Conceptos>' +
+    '<cfdi:Concepto NoIdentificacion="T-1" ObjetoImp="02" Importe="100.000000"><cfdi:Impuestos><cfdi:Traslados>' +
+    '<cfdi:Traslado Base="100.000000" Impuesto="002" TipoFactor="Tasa" TasaOCuota="0.160000" Importe="16.000000"/></cfdi:Traslados>' +
+    '</cfdi:Impuestos></cfdi:Concepto><cfdi:Concepto ObjetoImp="01" Importe="0.010000"/></cfdi:Conceptos>' +
+    '<cfdi:Impuestos TotalImpuestosTrasladados="16.00"><cfdi:Traslados><cfdi:Traslado Base="100.00" Impuesto="002" TipoFactor="Tasa" ' +
+    'TasaOCuota="0.160000" Importe="16.00"/></cfdi:Traslados></cfdi:Impuestos></cfdi:Comprobante>'
+  it('🔴 C2-T5 · una fila timbrada con archivos y SIN xmlConceptos entra al barrido; repararArchivosDe la completa y sale', async () => {
+    const row = await reservation()
+    await finish(row)
+    const desglose = [{ impuesto: '002', tipoFactor: 'Tasa', tasa: '0.160000', base: '100.00', importe: '16.00' }]
+    await prisma.cfdi.update({
+      where: { id: row.id },
+      data: { xmlUrl: 'https://example.test/viejo.xml', pdfUrl: 'https://example.test/viejo.pdf', taxBreakdown: desglose },
+    })
+    const corte = new Date(Date.now() + 60_000)
+    const faltan = () => prisma.cfdi.findMany({ where: { AND: [dondeFaltanArchivos(corte, null), { id: row.id }] }, select: { id: true } })
+    expect(await faltan()).toEqual([{ id: row.id }])
+    provider.downloadXml.mockResolvedValue(Buffer.from(XML_C2))
+    const deps = { resolverProveedor: () => provider as any, completar: (p: any) => completarArchivos(p, { storeArtifact }) }
+    expect(await repararArchivosDe(row.id, { sandbox: true }, deps)).toBe('OK')
+    expect(provider.downloadXml).toHaveBeenCalledWith('pac')
+    expect(await current(row.id)).toMatchObject({
+      status: 'STAMPED',
+      xmlUrl: expect.stringContaining(`${stamped.uuid}.xml`),
+      taxBreakdown: desglose,
+      xmlConceptos: {
+        version: 1,
+        subTotal: '100.01',
+        descuento: '0.00',
+        total: '116.01',
+        totalImpuestosTrasladados: '16.00',
+        conceptos: [
+          {
+            noIdentificacion: 'T-1',
+            objetoImp: '02',
+            importe: '100.000000',
+            descuento: '0',
+            traslados: [{ impuesto: '002', tipoFactor: 'Tasa', tasa: '0.160000', base: '100.000000', importe: '16.000000' }],
+          },
+          { noIdentificacion: null, objetoImp: '01', importe: '0.010000', descuento: '0', traslados: [] },
+        ],
+      },
+    })
+    expect(await faltan()).toEqual([])
+    // Ronda 1 (M1): `GET /cfdi/:id` (la fila de `getCfdiStatus`) no trae `xmlConceptos`; todo lo demás, sí.
+    const vista = await getCfdiStatus({ cfdiId: row.id, expectedVenueId: venueId })
+    expect(vista).not.toHaveProperty('xmlConceptos')
+    expect(vista).toMatchObject({
+      id: row.id,
+      status: 'STAMPED',
+      taxBreakdown: desglose,
+      xmlUrl: expect.stringContaining('.xml'),
+      replacedBy: [],
+    })
+    // Ronda 1 (M6): con la fila completa de nuevo sin `xmlConceptos` y el PDF del PAC caído, la evidencia del XML se escribe igual y el PDF
+    // de antes se queda (la escritura sólo lleva lo que salió bien).
+    await prisma.cfdi.update({ where: { id: row.id }, data: { xmlConceptos: Prisma.DbNull, pdfUrl: 'https://example.test/viejo.pdf' } })
+    provider.downloadPdf.mockRejectedValueOnce(new Error('el PAC no rinde el PDF'))
+    expect(await repararArchivosDe(row.id, { sandbox: true }, deps)).toBe('FALLO')
+    expect(await current(row.id)).toMatchObject({
+      pdfUrl: 'https://example.test/viejo.pdf',
+      xmlConceptos: expect.objectContaining({ version: 1, total: '116.01' }),
+    })
+    expect(await faltan()).toEqual([])
+    // Una fila que todavía no está timbrada: NO_APLICA, sin tocar al proveedor.
+    const enCurso = await reservation()
+    provider.downloadXml.mockClear()
+    expect(await repararArchivosDe(enCurso.id, { sandbox: true }, deps)).toBe('NO_APLICA')
+    expect(provider.downloadXml).not.toHaveBeenCalled()
+  })
+  // OF-1 · T7 N1 + M4: una factura con conceptos legibles a la que sólo le falta el PDF vuelve al barrido cada 5 min. Si el PAC contesta un
+  // 200 que no es un CFDI (mantenimiento), la marca «ilegible» NO puede pisar esos conceptos (si no, toda nota se detiene para siempre).
+  it('🔴 OF-1 · conceptos buenos y sin PDF + un 200 basura del PAC ⇒ el barrido no baja el XML y `xmlConceptos` queda intacto; sin conceptos ⇒ la marca', async () => {
+    const row = await reservation()
+    await finish(row)
+    provider.downloadXml.mockResolvedValue(Buffer.from(XML_C2))
+    expect(await artifacts(row)).toBe('OK')
+    await prisma.cfdi.update({ where: { id: row.id }, data: { pdfUrl: null } })
+    const antes = await current(row.id)
+    expect(antes.xmlConceptos).toMatchObject({ version: 1, total: '116.01' })
+    const corte = new Date(Date.now() + 60_000)
+    const faltan = () => prisma.cfdi.findMany({ where: { AND: [dondeFaltanArchivos(corte, null), { id: row.id }] }, select: { id: true } })
+    expect(await faltan()).toEqual([{ id: row.id }]) // vuelve por su PDF
+
+    // (M4) El barrido: sólo el PDF; el XML ni se pide.
+    provider.downloadXml.mockClear().mockResolvedValue(Buffer.from('esto no es xml'))
+    const deps = { resolverProveedor: () => provider as any, completar: (p: any) => completarArchivos(p, { storeArtifact }) }
+    expect(await repararArchivosDe(row.id, { sandbox: true }, deps)).toBe('OK')
+    expect(provider.downloadXml).not.toHaveBeenCalled()
+    expect(await current(row.id)).toMatchObject({
+      xmlConceptos: antes.xmlConceptos,
+      taxBreakdown: antes.taxBreakdown,
+      xmlUrl: antes.xmlUrl,
+      pdfUrl: expect.stringContaining('.pdf'),
+    })
+    expect(await faltan()).toEqual([])
+
+    // (N1) Aunque el XML se baje (otra reparación a la vez que leyó la fila antes de los conceptos), la marca y lo que sale de un XML
+    // ilegible no pisan lo que ya había: ni sin resumen ('esto no es xml') ni con un resumen vacío ('<Comprobante/>').
+    for (const basura of ['esto no es xml', '<Comprobante/>']) {
+      provider.downloadXml.mockResolvedValue(Buffer.from(basura))
+      expect(await artifacts(row)).toBe('XML_ILEGIBLE')
+      expect(await current(row.id)).toMatchObject({
+        xmlConceptos: antes.xmlConceptos,
+        taxBreakdown: antes.taxBreakdown,
+        xmlUrl: antes.xmlUrl,
+      })
+    }
+
+    // Una fila SIN conceptos y un XML ilegible ⇒ la marca, como hoy (con la versión del lector); y ya no vuelve al barrido por su XML.
+    await prisma.cfdi.update({ where: { id: row.id }, data: { xmlConceptos: Prisma.DbNull } })
+    provider.downloadXml.mockResolvedValue(Buffer.from('esto no es xml'))
+    expect(await artifacts(row)).toBe('XML_ILEGIBLE')
+    expect((await current(row.id)).xmlConceptos).toMatchObject({ version: 1, ilegible: true, motivo: expect.any(String), lector: 1 })
+    expect(await faltan()).toEqual([])
+  })
+
+  // Ronda de la ola (review-OF m3): el XML de más de 4 MiB (T8 M4) con el almacenamiento caído UNA vez. Antes quedaba la marca sin `xmlUrl` y la
+  // fila ya no volvía al barrido: nunca tendría su XML descargable. Ahora es un FALLO transitorio: sin marca, sigue en el barrido, y la
+  // siguiente reparación guarda el archivo con la marca.
+  it('🔴 m3 · XML > tope y la subida falla una vez ⇒ sin marca y en el barrido; la siguiente reparación lo guarda con la marca', async () => {
+    const row = await reservation()
+    await finish(row)
+    await prisma.cfdi.update({ where: { id: row.id }, data: { xmlUrl: null, pdfUrl: null, taxBreakdown: Prisma.DbNull } })
+    const grande = XML_C2.replace('</cfdi:Comprobante>', `<!--${'x'.repeat(TOPE_XML_TIMBRADO_PROPIO_BYTES)}--></cfdi:Comprobante>`)
+    provider.downloadXml.mockResolvedValue(Buffer.from(grande))
+    let fallo = false
+    const almacen = jest.fn(async (_b: Buffer, path: string) => {
+      if (path.endsWith('.xml') && !fallo) {
+        fallo = true
+        throw new Error('almacenamiento caído')
+      }
+      return `https://example.test/${path}`
+    })
+    const deps = { resolverProveedor: () => provider as any, completar: (p: any) => completarArchivos(p, { storeArtifact: almacen }) }
+    const corte = new Date(Date.now() + 60_000)
+    const faltan = () => prisma.cfdi.findMany({ where: { AND: [dondeFaltanArchivos(corte, null), { id: row.id }] }, select: { id: true } })
+
+    expect(await repararArchivosDe(row.id, { sandbox: true }, deps)).toBe('FALLO')
+    expect(await current(row.id)).toMatchObject({ xmlConceptos: null, xmlUrl: null, pdfUrl: expect.stringContaining('.pdf') })
+    expect(await faltan()).toEqual([{ id: row.id }])
+
+    expect(await repararArchivosDe(row.id, { sandbox: true }, deps)).toBe('XML_ILEGIBLE')
+    const despues = await current(row.id)
+    expect(despues.xmlUrl).toEqual(expect.stringContaining('.xml'))
+    expect(despues.xmlConceptos).toMatchObject({ version: 1, ilegible: true, lector: 1 })
+    expect(await faltan()).toEqual([])
   })
 })

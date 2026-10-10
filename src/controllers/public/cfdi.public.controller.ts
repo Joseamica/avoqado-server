@@ -20,10 +20,41 @@ import { sendCfdiWhatsApp } from '../../services/whatsapp.service'
 import { logAction } from '../../services/dashboard/activity-log.service'
 import logger from '../../config/logger'
 import { env } from '../../config/env'
+import { timbreEnDuda } from '../../services/fiscal/timbreEnDuda'
 
 /** Public base URL of THIS API — used to build the zip download link we send over
  *  WhatsApp. Prod: api.avoqado.io; dev: set BASE_URL to the tunnel (ngrok) URL. */
 const API_PUBLIC_BASE = process.env.BASE_URL || 'https://api.avoqado.io'
+
+const SELECT_PUBLICO = {
+  uuid: true,
+  status: true,
+  serie: true,
+  folio: true,
+  pdfUrl: true,
+  xmlUrl: true,
+  cancelStatus: true,
+  replacesCfdiId: true,
+} as const
+/**
+ * La factura de VENTA que se le enseña al cliente: la más reciente (nunca una nota de crédito, H19). Ronda de la ola (2), m2: si ésa es una
+ * SUSTITUTA con su cancelación pedida y su original sigue timbrada, la venta está facturada con la ORIGINAL: ésa es la que se enseña.
+ */
+async function facturaDeLaVentaPublica(orderId: string, soloTimbradas = false) {
+  const ultima = await prisma.cfdi.findFirst({
+    where: { orderId, type: 'INGRESO', ...(soloTimbradas ? { status: 'STAMPED' as const } : {}) },
+    orderBy: { createdAt: 'desc' },
+    select: SELECT_PUBLICO,
+  })
+  if (ultima?.cancelStatus === 'REQUESTED' && ultima.replacesCfdiId) {
+    const original = await prisma.cfdi.findFirst({
+      where: { id: ultima.replacesCfdiId, orderId, type: 'INGRESO', status: 'STAMPED' },
+      select: SELECT_PUBLICO,
+    })
+    if (original) return original
+  }
+  return ultima
+}
 
 /** Resolve the latest STAMPED sale invoice (INGRESO, with PDF+XML) for a receipt accessKey — never a credit note (H19). */
 async function resolveStampedCfdi(accessKey: string) {
@@ -33,15 +64,32 @@ async function resolveStampedCfdi(accessKey: string) {
   })
   const order = receipt?.payment?.order
   if (!order) return { order: null as null, cfdi: null }
-  const cfdi = await prisma.cfdi.findFirst({
-    where: { orderId: order.id, status: 'STAMPED', type: 'INGRESO' },
-    orderBy: { createdAt: 'desc' },
-    select: { serie: true, folio: true, uuid: true, pdfUrl: true, xmlUrl: true },
-  })
-  return { order, cfdi }
+  return { order, cfdi: await facturaDeLaVentaPublica(order.id, true) }
 }
 
 const MEXICO_TZ = 'America/Mexico_City'
+
+/**
+ * Ronda de la ola (2) — la regla desde B3a: la autofactura pública NUNCA enseña al cliente final motivos internos ni folios (lo abre
+ * cualquiera con el QR del ticket; los textos están escritos para el comercio). El dueño los sigue viendo en su dashboard y van al log.
+ */
+const NO_SE_PUEDE_EN_LINEA = {
+  error: 'No se pudo facturar',
+  code: 'FISCAL_BLOCK',
+  message: 'Esta cuenta no se puede facturar en línea. Pide tu factura directamente al negocio.',
+} as const
+/** Ronda QA (hermanos): un timbre EN DUDA, para el cliente final (sin «rechazó» ni texto técnico, sin invitar a reintentar a ciegas). */
+const TEXTO_PUBLICO_TIMBRE_EN_DUDA = 'Tu factura se está procesando. Vuelve a abrir este recibo en unos minutos para descargarla.'
+const TEXTO_PUBLICO_CANCELACION_PENDIENTE = 'La factura anterior de esta cuenta se está cancelando. Intenta de nuevo más tarde.'
+/**
+ * Un motivo que el CLIENTE corrige (sus datos de receptor), y no uno del comercio (emisor, CSD, conceptos, forma de pago, red del PAC).
+ * ponytail: por palabras; un motivo nuevo del receptor que no las diga sale neutro (la dirección segura).
+ */
+const esDelReceptor = (m: string) =>
+  /receptor|\bRFC\b|r[eé]gimen|raz[oó]n social|c[oó]digo postal|uso\s*(del\s*)?cfdi|usocfdi|p[uú]blico en general/i.test(m) &&
+  // Ronda de la ola (4) (m-a): un motivo de CONCEPTO («Concepto 1 ("Régimen keto")…», o el PAC hablando de un concepto) lleva el nombre del
+  // producto: nunca es del receptor.
+  !/emisor|\bCSD\b|certificado|sello|concepto/i.test(m)
 
 // ─── POST /receipt/:accessKey/cfdi ───────────────────────────────────────────
 
@@ -118,15 +166,37 @@ export async function autofacturaController(req: Request<{ accessKey: string }>,
       }
       const fiscal = reasons.filter(r => internos.includes(r) || /no coincide con lo cobrado/i.test(r))
       if (fiscal.length > 0) {
-        logger.info('[cfdi.public] autofactura rechazada por bloqueo fiscal', { orderId: order.id, venueId: order.venueId, motivos: fiscal })
-        res.status(422).json({
-          error: 'No se pudo facturar',
-          code: 'FISCAL_BLOCK',
-          message: 'Esta cuenta no se puede facturar en línea. Pide tu factura directamente al negocio.',
+        logger.info('[cfdi.public] autofactura rechazada por bloqueo fiscal', {
+          orderId: order.id,
+          venueId: order.venueId,
+          motivos: fiscal,
         })
+        // El GET también dice `FISCAL_BLOCK` (son los motivos del sobre): el panel cierra el formulario y pinta la tarjeta del GET.
+        res.status(422).json(NO_SE_PUEDE_EN_LINEA)
+        return
+      }
+      // Ronda de la ola (2): cualquier otro motivo que no sea del receptor (CSD del emisor, conceptos sin clave, forma de pago…) tampoco
+      // viaja. Ronda de la ola (4) (I1): como 409 `{ error }` neutro, que el panel pinta como tarjeta; con un 422 `FISCAL_BLOCK` el panel
+      // esperaba la tarjeta del GET, que para estos motivos dice «disponible», y el cliente se quedaba sin ningún mensaje.
+      const delComercio = reasons.filter(r => !esDelReceptor(r))
+      if (delComercio.length > 0) {
+        logger.info('[cfdi.public] autofactura rechazada por un motivo del comercio', {
+          orderId: order.id,
+          venueId: order.venueId,
+          motivos: delComercio,
+        })
+        res.status(409).json({ error: NO_SE_PUEDE_EN_LINEA.message })
         return
       }
       res.status(422).json({ error: 'No se pudo facturar', reasons })
+      return
+    }
+
+    if (result.status === 'STAMP_FAILED' && timbreEnDuda(result.cfdi)) {
+      // Ronda QA (hermanos): el PAC no contestó claro y pudo haberla timbrado (la conciliación lo confirma). Ni el error crudo ni «rechazó»,
+      // ni invitar a reintentar a ciegas: 409 `{ error }`, que el panel pinta como tarjeta. El GET la enseña cuando quede timbrada.
+      logger.info('[cfdi.public] autofactura en duda: el PAC no contestó claro', { orderId: order.id, lastError: result.cfdi?.lastError })
+      res.status(409).json({ error: TEXTO_PUBLICO_TIMBRE_EN_DUDA, code: 'TIMBRE_EN_DUDA' })
       return
     }
 
@@ -135,7 +205,10 @@ export async function autofacturaController(req: Request<{ accessKey: string }>,
       // endpoint, but the message is about the receptor's own fiscal info — no
       // sensitive data). Strip the boilerplate "Validación de timbrado:" prefix.
       const reason = (result.cfdi?.lastError ?? '').replace(/^Validaci[oó]n de timbrado:\s*/i, '').trim()
-      res.status(502).json({ error: 'El SAT rechazó el timbrado', message: reason || undefined })
+      // Ronda de la ola (2): sólo si es del receptor; un error del emisor, del certificado o de la red del PAC no viaja (va al log).
+      if (reason && !esDelReceptor(reason))
+        logger.info('[cfdi.public] el PAC rechazó por un motivo del comercio', { orderId: order.id, reason })
+      res.status(502).json({ error: 'El SAT rechazó el timbrado', message: (esDelReceptor(reason) && reason) || undefined })
       return
     }
 
@@ -170,8 +243,23 @@ export async function autofacturaController(req: Request<{ accessKey: string }>,
       },
     })
   } catch (err: unknown) {
+    // C2 · T10 ronda 1 (M3): el 409 tipado lleva su código si lo trae (`CFDI_CANCEL_PENDING`: la cancelación de la factura anterior sigue
+    // pendiente). Aditivo: sin código, la respuesta es la de antes.
     if (err instanceof ConflictError) {
-      res.status(409).json({ error: err.message })
+      // Ronda de la ola (2): al cliente final, nunca el texto interno. La cancelación pendiente conserva su código con un texto sin folios;
+      // «en proceso» ya es neutro; cualquier otro conflicto (incluida en una global, cancelada en el PAC, revisión de soporte…) es «pídela
+      // al negocio», con el motivo en el log.
+      if (err.code === 'CFDI_CANCEL_PENDING') {
+        res.status(409).json({ error: TEXTO_PUBLICO_CANCELACION_PENDIENTE, code: err.code })
+        return
+      }
+      if (/procesando|en proceso/i.test(err.message)) {
+        res.status(409).json({ error: err.message })
+        return
+      }
+      logger.info('[cfdi.public] autofactura no disponible por un motivo interno', { accessKey, motivo: err.message })
+      // Ronda de la ola (4) (I1): 409 `{ error }` (el status que estos conflictos tenían), que el panel pinta como tarjeta.
+      res.status(409).json({ error: NO_SE_PUEDE_EN_LINEA.message })
       return
     }
     const message = err instanceof Error ? err.message : String(err)
@@ -188,9 +276,9 @@ export async function autofacturaController(req: Request<{ accessKey: string }>,
       return
     }
 
-    // Concurrent in-flight reservation (or a previous invoice whose cancellation is still pending at the SAT)
-    // — surface as 409 so the widget can retry
-    if (/en proceso|en trámite/i.test(message)) {
+    // Concurrent in-flight reservation — surface as 409 so the widget can retry. (C2 · T10 ronda 1, M3: la cancelación pendiente de la
+    // factura anterior llega como ConflictError con su código, arriba; ya no se adivina por el texto.)
+    if (/en proceso/i.test(message)) {
       res.status(409).json({ error: message })
       return
     }
@@ -233,12 +321,12 @@ export async function getAutofacturaStatusController(req: Request<{ accessKey: s
     }
 
     // Return the most-recent sale invoice (INGRESO, any status) so the portal can show "ya facturada /
-    // descargar" without re-issuing. A credit note is never "the" invoice of the ticket (H19).
-    const cfdi = await prisma.cfdi.findFirst({
-      where: { orderId: order.id, type: 'INGRESO' },
-      orderBy: { createdAt: 'desc' },
-      select: { uuid: true, status: true, serie: true, folio: true, pdfUrl: true, xmlUrl: true },
-    })
+    // descargar" without re-issuing. A credit note is never "the" invoice of the ticket (H19). Ronda de la ola (2): en el caso m2, la original.
+    const cfdi = await facturaDeLaVentaPublica(order.id)
+    // C2 · T10: `cancelStatus` sólo para decir `cancelacionEnTramite`; ni él ni `replacesCfdiId` viajan en el objeto público.
+    const { cancelStatus, replacesCfdiId: _sustituye, ...cfdiPublico } = cfdi ?? { cancelStatus: null, replacesCfdiId: null }
+    // C2 · T10 (nuevo y opcional, sólo cuando es verdad): se pidió cancelar la factura y el SAT todavía no lo resuelve. Sigue vigente.
+    const cancelacionEnTramite = cancelStatus === 'REQUESTED'
 
     // Whether the customer may self-invoice this ticket. This is the ADMIN's
     // decision: the merchant that collected the payment must have BOTH
@@ -268,7 +356,12 @@ export async function getAutofacturaStatusController(req: Request<{ accessKey: s
       logger.info('[cfdi.public] autofactura no disponible por bloqueo fiscal', { orderId: order.id, venueId: order.venueId, motivos })
     }
 
-    res.status(200).json({ cfdi: cfdi ?? null, autofacturaAvailable, ...(autofacturaUnavailable && { autofacturaUnavailable }) })
+    res.status(200).json({
+      cfdi: cfdi ? cfdiPublico : null,
+      autofacturaAvailable,
+      ...(autofacturaUnavailable && { autofacturaUnavailable }),
+      ...(cancelacionEnTramite && { cancelacionEnTramite: true }),
+    })
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)
     logger.error('[cfdi.public] get status error', { accessKey, error: message })

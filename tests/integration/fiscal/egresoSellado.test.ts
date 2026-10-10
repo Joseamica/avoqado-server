@@ -14,14 +14,29 @@ import { ProviderHttpError } from '@/services/fiscal/providers/facturapi.provide
 import * as admission from '@/services/fiscal/admisionIva'
 import request from 'supertest'
 import { resolveFiscalProvider } from '@/services/fiscal/fiscalProvider.factory'
-import { emitRefundCreditNote, getRefundCreditNoteStatus } from '@/services/fiscal/cfdiCreditNote.service'
-import { emitRefundCreditNoteController } from '@/controllers/dashboard/cfdi.dashboard.controller'
+import {
+  AVISO_FACTURACION_APAGADA,
+  emitRefundCreditNote,
+  getRefundCreditNoteStatus,
+  MOTIVO_FALTA_LA_HUELLA,
+  MOTIVO_REPARTO_CAMBIO,
+  MOTIVO_NOTA_CAMBIO,
+  MOTIVO_XML_ILEGIBLE,
+} from '@/services/fiscal/cfdiCreditNote.service'
+import { MOTIVO_ESPERA_XML } from '@/services/fiscal/saldoFiscal'
+import * as finalizador from '@/services/fiscal/finalizadorCfdi'
+import { xmlConceptosDe, xmlDeLaFila } from '../../__helpers__/xml-del-pac'
+import { emitRefundCreditNoteController, getRefundCreditNoteController } from '@/controllers/dashboard/cfdi.dashboard.controller'
+import { validateRequest } from '@/middlewares/validation'
+import { emitRefundCreditNoteSchema } from '@/schemas/dashboard/cfdi.schema'
 import { Prisma } from '@prisma/client'
 import { randomUUID } from 'crypto'
 import prisma from '@/utils/prismaClient'
 import { issueCfdiForOrder } from '@/services/fiscal/cfdi.service'
 import { huellaDeEntrada } from '@/services/fiscal/entradaDocumental'
 import { encenderIvaPorProducto } from '../../__helpers__/iva-por-producto'
+import { logAction } from '@/services/dashboard/activity-log.service'
+import { issueRefund } from '@/services/dashboard/refund.dashboard.service'
 
 const database = new URL(process.env.TEST_DATABASE_URL ?? '')
 // La base fiscal de esta Mac o la desechable de CI (ci-cd.yml adopta ese nombre en vez de relajar la guarda): nunca otra.
@@ -47,6 +62,7 @@ describe('egreso con entrada congelada', () => {
   const fixture = `emision-iva-${randomUUID()}`
   let venueId: string
   let productId: string
+  let cafeId: string // C2 T7: un segundo producto, al 0 %, para la venta mezclada
   let fiscalEmisorId: string
   const provider = {
     name: 'facturapi',
@@ -71,6 +87,11 @@ describe('egreso con entrada congelada', () => {
     await encenderIvaPorProducto(venueId)
     const category = await prisma.menuCategory.create({ data: { venueId, name: fixture, slug: fixture } })
     productId = (await prisma.product.create({ data: { venueId, categoryId: category.id, name: fixture, sku: fixture, price: 116 } })).id
+    cafeId = (
+      await prisma.product.create({
+        data: { venueId, categoryId: category.id, name: `${fixture}-cafe`, sku: `${fixture}-cafe`, price: 200, ivaTratamiento: 'IVA_0' },
+      })
+    ).id
     fiscalEmisorId = (
       await prisma.fiscalEmisor.create({
         data: {
@@ -96,6 +117,7 @@ describe('egreso con entrada congelada', () => {
   })
   afterEach(() => jest.restoreAllMocks())
   beforeEach(async () => {
+    finalizador.olvidarReparaciones() // C2 T7 ronda 1 (I2): la memoria de reparaciones es del proceso
     jest.clearAllMocks()
     jest.mocked(resolveFiscalProvider).mockReturnValue(provider as any)
     provider.createCreditNote
@@ -103,10 +125,12 @@ describe('egreso con entrada congelada', () => {
       .mockImplementation(async () => ({ ...stamped, uuid: randomUUID(), providerInvoiceId: randomUUID() }))
     stamped.uuid = randomUUID()
     stamped.providerInvoiceId = randomUUID()
-    provider.createInvoice.mockReset().mockResolvedValue(stamped)
+    // C2 T7: cada factura con su identidad del PAC, y el XML de cada una armado de lo que se le mandó (la regla de la 6b): la nota exige
+    // el XML de su original (D5).
+    provider.createInvoice.mockReset().mockImplementation(async () => ({ ...stamped, uuid: randomUUID(), providerInvoiceId: randomUUID() }))
     provider.findByExternalId.mockReset().mockResolvedValue(null)
     provider.getInvoice.mockReset().mockResolvedValue(stamped)
-    provider.downloadXml.mockResolvedValue(Buffer.from('<Comprobante/>'))
+    provider.downloadXml.mockReset().mockImplementation(async (id: string) => xmlDeLaFila(prisma, id))
     provider.downloadPdf.mockResolvedValue(Buffer.from('%PDF'))
     await prisma.product.update({ where: { id: productId }, data: { ivaTratamiento: 'IVA_16' } })
   })
@@ -167,8 +191,71 @@ describe('egreso con entrada congelada', () => {
     await issue(o.id)
     return { o, original: await row(o.id), refund: await refund(o.id) }
   }
-  it('rechaza original mixta por la ruta real del dashboard con 409 y texto exacto', async () => {
-    const s = await sale('IVA_0')
+  /** C2 T7: la venta mezclada del plan —café $200 al 0 % + pan $58 al 16 %— con su factura timbrada (y su XML). */
+  async function ventaMixta() {
+    const o = await prisma.order.create({
+      data: {
+        venueId,
+        orderNumber: randomUUID(),
+        subtotal: 258,
+        taxAmount: 0,
+        total: 258,
+        paymentStatus: 'PAID',
+        contratoDePrecio: 'IVA_INCLUIDO',
+        items: {
+          create: [
+            { productId: cafeId, productName: 'Café', quantity: 1, unitPrice: 200, taxAmount: 0, total: 200 },
+            { productId, productName: 'Pan', quantity: 1, unitPrice: 58, taxAmount: 0, total: 58 },
+          ],
+        },
+        payments: { create: { venueId, amount: 258, feePercentage: 0, feeAmount: 0, netAmount: 258, method: 'CASH', status: 'COMPLETED' } },
+      },
+      include: { items: true },
+    })
+    await issue(o.id)
+    return {
+      o,
+      original: await row(o.id),
+      cafe: o.items.find(i => i.productId === cafeId)!,
+      pan: o.items.find(i => i.productId === productId)!,
+    }
+  }
+  /** Un reembolso POR ARTÍCULOS, como lo escribe `issueRefund` (`processorData.refundedItems`), sin propina. */
+  async function refundArticulos(orderId: string, items: Array<{ id: string; cents: number; nombre: string }>) {
+    const total = items.reduce((s, x) => s + x.cents, 0) / 100
+    return prisma.payment.create({
+      data: {
+        venueId,
+        orderId,
+        type: 'REFUND',
+        amount: -total,
+        tipAmount: 0,
+        feePercentage: 0,
+        feeAmount: 0,
+        netAmount: -total,
+        method: 'CASH',
+        status: 'COMPLETED',
+        processorData: {
+          refundedItems: items.map(x => ({
+            orderItemId: x.id,
+            quantity: 1,
+            amountCents: x.cents,
+            amount: x.cents / 100,
+            productName: x.nombre,
+          })),
+        },
+      },
+    })
+  }
+  /** El XML de una fila después de reescribir sus conceptos (lo que el PAC habría timbrado con ellos). */
+  const conXml = (items: any[]) => {
+    const x = xmlConceptosDe(items)
+    return { xmlConceptos: x.xmlConceptos as unknown as Prisma.InputJsonValue, taxBreakdown: x.taxBreakdown as Prisma.InputJsonValue }
+  }
+  // C2 (§4.4), dorada que cambia A PROPÓSITO: antes «rechaza original mixta por la ruta real del dashboard con 409 y texto exacto».
+  it('🔴 C2: la original mixta ya no se rechaza: por la ruta real del dashboard timbra su nota por tasa (201)', async () => {
+    const v = await ventaMixta()
+    const r = await refund(v.o.id, 258)
     const app = express()
     app.post(
       '/venues/:venueId/refunds/:refundId/credit-note',
@@ -178,12 +265,229 @@ describe('egreso con entrada congelada', () => {
       },
       emitRefundCreditNoteController,
     )
-    const res = await request(app).post(`/venues/${venueId}/refunds/${s.refund.id}/credit-note`)
-    expect(res.status).toBe(409)
-    expect(res.body.error).toBe(
-      'La factura original tiene productos con IVA distinto de 16 %; la nota de crédito para esas ventas todavía no está disponible aquí. Emítela desde el portal del SAT o de tu PAC.',
+    const res = await request(app).post(`/venues/${venueId}/refunds/${r.id}/credit-note`)
+    expect(res.status).toBe(201)
+    expect(provider.createCreditNote.mock.calls[0][0].items.map((i: any) => [i.satProductKey, i.unitPriceCents, i.taxes[0]?.rate])).toEqual(
+      [
+        ['84111506', 5800, 0.16],
+        ['84111506', 20000, 0],
+      ],
     )
+  })
+  it('🔴 C2 T7: mezclada, por artículos sólo el café ⇒ UN concepto 84111506/ACT al 0 % por $200, PUE y G02, entrada v2; luego $58 por importe al 16 %; luego $1 no cabe', async () => {
+    const v = await ventaMixta()
+    const r1 = await refundArticulos(v.o.id, [{ id: v.cafe.id, cents: 20000, nombre: 'Café' }])
+    const logAction = jest.fn()
+    const emitConBitacora = (id: string) => emitRefundCreditNote({ venueId, refundPaymentId: id, sandbox: true }, { logAction })
+    expect((await emitConBitacora(r1.id)).status).toBe('STAMPED')
+    const enviado = provider.createCreditNote.mock.calls[0][0]
+    expect(enviado.items).toEqual([
+      {
+        satProductKey: '84111506',
+        satUnitKey: 'ACT',
+        description: `Devolución sobre factura ${v.original.serie}${v.original.folio}`,
+        quantity: 1,
+        unitPriceCents: 20000,
+        discountCents: 0,
+        objetoImp: '02',
+        taxes: [{ type: 'IVA', factor: 'Tasa', rate: 0, withholding: false }],
+        taxIncluded: true,
+      },
+    ])
+    expect(enviado).toMatchObject({ metodoPago: 'PUE', receptor: { usoCfdi: 'G02' }, relationship: '01', relatedUuids: [v.original.uuid] })
+    const n1 = await note(r1.id)
+    expect(n1).toMatchObject({ metodoPago: 'PUE', usoCfdi: 'G02', subtotalCents: 20000, taxCents: 0, totalCents: 20000 })
+    expect(n1.entrada).toMatchObject({
+      version: 2,
+      causa: 'DEVOLUCION',
+      originalCfdiId: v.original.id, // la guarda C2-6 de la cancelación la encuentra por esta llave
+      modalidad: 'POR_ARTICULOS',
+      porTratamiento: { IVA_0: { baseCents: 20000, ivaCents: 0, totalCents: 20000 } },
+      porRenglon: [{ orderItemId: v.cafe.id, totalCents: 20000, porTratamiento: { IVA_0: 20000 } }],
+      redondeo: [],
+    })
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'CFDI_CREDIT_NOTE_ISSUED',
+        data: expect.objectContaining({ modalidad: 'POR_ARTICULOS', redondeo: [], originalEsGlobal: false, relatedCfdiId: v.original.id }),
+      }),
+    )
+    // Lo único que queda es el pan: $58 por importe sale al 16 %.
+    const r2 = await refund(v.o.id, 58)
+    expect((await emit(r2.id)).status).toBe('STAMPED')
+    expect(provider.createCreditNote.mock.calls[1][0].items).toEqual([
+      expect.objectContaining({
+        satProductKey: '84111506',
+        unitPriceCents: 5800,
+        taxes: [{ type: 'IVA', factor: 'Tasa', rate: 0.16, withholding: false }],
+      }),
+    ])
+    expect((await note(r2.id)).entrada).toMatchObject({
+      modalidad: 'POR_IMPORTE',
+      porTratamiento: { IVA_16: { baseCents: 5000, ivaCents: 800, totalCents: 5800 } },
+    })
+    // Y ya no queda nada: $1 más no cabe.
+    const r3 = await refund(v.o.id, 1)
+    expect((await getRefundCreditNoteStatus(venueId, r3.id))?.eligibility.reason).toBe('EXCEEDS_REMAINING')
+    await expect(emit(r3.id)).rejects.toThrow(/queda/)
+    expect(provider.createCreditNote).toHaveBeenCalledTimes(2)
+  })
+  it('🔴 (B) de punta a punta: la 6b dejó a B 1 ¢ debajo de lo cobrado; devolverlo COMPLETO timbra, con el centavo declarado y la entrada v2 legible', async () => {
+    // A $19 − $2.50 y B $35 (al 16 %): el PAC daría otro total, la 6b baja el descuento de A a $2.49 ⇒ A queda en 16.51 y B en 34.99.
+    const o = await prisma.order.create({
+      data: {
+        venueId,
+        orderNumber: randomUUID(),
+        subtotal: 54,
+        discountAmount: 2.5,
+        taxAmount: 0,
+        total: 51.5,
+        paymentStatus: 'PAID',
+        contratoDePrecio: 'IVA_INCLUIDO',
+        items: {
+          create: [
+            { productId, productName: 'A', quantity: 1, unitPrice: 19, discountAmount: 2.5, taxAmount: 0, total: 19 },
+            { productId, productName: 'B', quantity: 1, unitPrice: 35, taxAmount: 0, total: 35 },
+          ],
+        },
+        payments: {
+          create: { venueId, amount: 51.5, feePercentage: 0, feeAmount: 0, netAmount: 51.5, method: 'CASH', status: 'COMPLETED' },
+        },
+      },
+      include: { items: true },
+    })
+    await issue(o.id)
+    const original = await row(o.id)
+    const b = o.items.find(i => i.productName === 'B')!
+    expect((original.entrada as any).montosPorRenglon).toContainEqual({
+      orderItemId: b.id,
+      totalCents: 3499,
+      porTratamiento: { IVA_16: 3499 },
+    })
+    const r = await refundArticulos(o.id, [{ id: b.id, cents: 3500, nombre: 'B' }])
+    expect((await emit(r.id)).status).toBe('STAMPED')
+    expect(provider.createCreditNote.mock.calls[0][0].items).toEqual([expect.objectContaining({ unitPriceCents: 3500 })])
+    expect((await note(r.id)).entrada).toMatchObject({
+      version: 2,
+      porRenglon: [{ orderItemId: b.id, totalCents: 3500, porTratamiento: { IVA_16: 3500 } }],
+      redondeo: [{ tratamiento: 'IVA_16', componente: 'ARTICULO', cents: 1, ambito: 'FACTURA', orderItemId: b.id }],
+    })
+  })
+  it('🔴 C2-P3: una original PPD ⇒ la nota sale PUE', async () => {
+    const s = await sale()
+    await prisma.cfdi.update({ where: { id: s.original.id }, data: { metodoPago: 'PPD' } })
+    expect((await emit(s.refund.id)).status).toBe('STAMPED')
+    expect(provider.createCreditNote.mock.calls[0][0].metodoPago).toBe('PUE')
+    expect(await note(s.refund.id)).toMatchObject({ metodoPago: 'PUE', usoCfdi: 'G02' })
+  })
+  it('🔴 G8: reembolso sin forma SAT y la original PPD «por definir» (99) sin pagos ⇒ la nota sale con 15 (condonación) y PUE', async () => {
+    const s = await sale()
+    await prisma.cfdi.update({ where: { id: s.original.id }, data: { metodoPago: 'PPD', formaPago: '99' } })
+    await prisma.payment.update({ where: { id: s.refund.id }, data: { method: 'OTHER' } })
+    expect((await emit(s.refund.id)).status).toBe('STAMPED')
+    expect(provider.createCreditNote.mock.calls[0][0]).toMatchObject({ formaPago: '15', metodoPago: 'PUE' })
+  })
+  it('🔴 C2-13 de punta a punta: sin el XML de la original la vista dice ESPERA_XML y pide sus archivos; el POST los repara al momento y timbra', async () => {
+    const s = await sale()
+    await prisma.cfdi.update({ where: { id: s.original.id }, data: { xmlConceptos: Prisma.DbNull } })
+    provider.downloadXml.mockClear()
+    provider.downloadXml.mockRejectedValueOnce(new Error('el PAC no rinde el XML'))
+    expect((await getRefundCreditNoteStatus(venueId, s.refund.id))?.eligibility).toMatchObject({ eligible: false, reason: 'ESPERA_XML' })
+    expect(provider.downloadXml.mock.calls).toEqual([[s.original.facturapiId]]) // los pidió, una vez, con SU identidad
+    expect((await emit(s.refund.id)).status).toBe('STAMPED')
+    expect((await prisma.cfdi.findUniqueOrThrow({ where: { id: s.original.id } })).xmlConceptos).not.toBeNull()
+    expect(provider.createCreditNote).toHaveBeenCalledTimes(1)
+  })
+  it('🔴 C2-13: si el PAC no rinde el XML, el POST responde VALIDATION_FAILED con MOTIVO_ESPERA_XML y no reserva', async () => {
+    const s = await sale()
+    await prisma.cfdi.update({ where: { id: s.original.id }, data: { xmlConceptos: Prisma.DbNull } })
+    provider.downloadXml.mockRejectedValue(new Error('el PAC no rinde el XML'))
+    expect(await emit(s.refund.id)).toMatchObject({ status: 'VALIDATION_FAILED', reasons: [MOTIVO_ESPERA_XML] })
+    expect(await prisma.cfdi.count({ where: { idempotencyKey: `cfdi-refund-${s.refund.id}` } })).toBe(0)
     expect(provider.createCreditNote).not.toHaveBeenCalled()
+  })
+  it('🔴 N1: un XML que se bajó y no se lee DETIENE la nota con su motivo (nunca espera para siempre), en el POST y en la vista', async () => {
+    const s = await sale()
+    await prisma.cfdi.update({ where: { id: s.original.id }, data: { xmlConceptos: Prisma.DbNull } })
+    provider.downloadXml.mockResolvedValue(Buffer.from('<Comprobante/>'))
+    expect(await emit(s.refund.id)).toMatchObject({ status: 'VALIDATION_FAILED', reasons: [MOTIVO_XML_ILEGIBLE] })
+    expect((await getRefundCreditNoteStatus(venueId, s.refund.id))?.eligibility).toEqual({
+      eligible: false,
+      reason: 'XML_IRRECUPERABLE',
+      message: MOTIVO_XML_ILEGIBLE,
+    })
+    expect(await prisma.cfdi.count({ where: { idempotencyKey: `cfdi-refund-${s.refund.id}` } })).toBe(0)
+    expect(provider.createCreditNote).not.toHaveBeenCalled()
+  })
+  it('🔴 I2 (ronda 1): dos vistas y el POST a la vez sobre una original sin XML ⇒ UNA sola bajada; la vista la espera ≤ 2 s', async () => {
+    const s = await sale()
+    await prisma.cfdi.update({ where: { id: s.original.id }, data: { xmlConceptos: Prisma.DbNull } })
+    provider.downloadXml.mockClear()
+    const compartida = jest.spyOn(finalizador, 'repararArchivosCompartido')
+    let soltar!: () => void
+    const puerta = new Promise<void>(r => (soltar = r))
+    provider.downloadXml.mockImplementation(async (id: string) => {
+      await puerta
+      return xmlDeLaFila(prisma, id)
+    })
+    const pedidos = Promise.all([
+      getRefundCreditNoteStatus(venueId, s.refund.id),
+      getRefundCreditNoteStatus(venueId, s.refund.id),
+      emit(s.refund.id),
+    ])
+    setTimeout(soltar, 300)
+    const [v1, v2, nota] = await pedidos
+    expect(nota.status).toBe('STAMPED')
+    expect([v1!.eligibility.reason, v2!.eligibility.reason].every(r => r === null || r === 'ESPERA_XML')).toBe(true)
+    // UNA bajada del XML de la ORIGINAL (la otra llamada es la de los archivos de la nota recién timbrada).
+    expect(provider.downloadXml.mock.calls.filter(([id]) => id === s.original.facturapiId)).toHaveLength(1)
+    for (const [, opts] of compartida.mock.calls.filter(([, o]) => !o.insistir)) expect(opts.esperaMs).toBeLessThanOrEqual(2_000)
+  })
+  it('🔴 I2 (ronda 1): el veredicto «ilegible» queda PERSISTIDO en la original; la vista siguiente lo dice SIN volver a bajar el XML', async () => {
+    const s = await sale()
+    await prisma.cfdi.update({ where: { id: s.original.id }, data: { xmlConceptos: Prisma.DbNull } })
+    provider.downloadXml.mockResolvedValue(Buffer.from('<Comprobante/>'))
+    expect(await emit(s.refund.id)).toMatchObject({ status: 'VALIDATION_FAILED', reasons: [MOTIVO_XML_ILEGIBLE] })
+    expect((await prisma.cfdi.findUniqueOrThrow({ where: { id: s.original.id } })).xmlConceptos).toMatchObject({
+      version: 1,
+      ilegible: true,
+    })
+    finalizador.olvidarReparaciones() // otro proceso, sin memoria: sólo lo persistido
+    provider.downloadXml.mockClear()
+    expect((await getRefundCreditNoteStatus(venueId, s.refund.id))?.eligibility).toEqual({
+      eligible: false,
+      reason: 'XML_IRRECUPERABLE',
+      message: MOTIVO_XML_ILEGIBLE,
+    })
+    expect(provider.downloadXml).not.toHaveBeenCalled()
+  })
+  it('🔴 M4 (ronda 1): con la nota ya timbrada, la vista no repara el XML de la original ni calcula la elegibilidad', async () => {
+    const s = await sale()
+    expect((await emit(s.refund.id)).status).toBe('STAMPED')
+    await prisma.cfdi.update({ where: { id: s.original.id }, data: { xmlConceptos: Prisma.DbNull } })
+    provider.downloadXml.mockClear()
+    const st = await getRefundCreditNoteStatus(venueId, s.refund.id)
+    expect(st?.creditNote).toMatchObject({ status: 'STAMPED' })
+    expect(st?.eligibility).toEqual({ eligible: false, reason: null, message: 'Este reembolso ya tiene su nota de crédito timbrada.' })
+    expect(provider.downloadXml).not.toHaveBeenCalled()
+  })
+  it('🔴 G6: con la facturación del comercio apagada la nota manual NO se bloquea, y la vista previa lo dice (con su desglose)', async () => {
+    const s = await sale()
+    await prisma.merchantFiscalConfig.updateMany({ where: { fiscalEmisorId }, data: { facturacionEnabled: false } })
+    try {
+      const st = await getRefundCreditNoteStatus(venueId, s.refund.id)
+      expect(st?.eligibility.eligible).toBe(true)
+      expect(st?.preview).toMatchObject({
+        avisoFacturacionApagada: AVISO_FACTURACION_APAGADA,
+        usoCfdi: 'G02',
+        desglose: [{ tratamiento: 'IVA_16', cents: 11600, baseCents: 10000, ivaCents: 1600 }],
+        redondeo: [],
+      })
+      expect((await emit(s.refund.id)).status).toBe('STAMPED')
+    } finally {
+      await prisma.merchantFiscalConfig.updateMany({ where: { fiscalEmisorId }, data: { facturacionEnabled: true } })
+    }
+    expect((await getRefundCreditNoteStatus(venueId, (await refund(s.o.id, 1)).id))?.preview).not.toHaveProperty('avisoFacturacionApagada')
   })
   it('congela entrada EGRESO y versión sin sellos nuevos; catálogo posterior no cambia IVA16', async () => {
     const s = await sale()
@@ -252,20 +556,39 @@ describe('egreso con entrada congelada', () => {
     expect(provider.createCreditNote).toHaveBeenCalledTimes(1)
     expect((await note(s.refund.id)).attempts).toBe(1)
   })
-  it('legacy original sin IVA conserva excepción y congela procedencia', async () => {
+  // C2 (C2-P5), dorada que cambia A PROPÓSITO: la histórica sin IVA ya no sale por `taxCents === 0` (`originalSinIvaHistorico`, v1) sino por
+  // SU XML: el concepto `ObjetoImp 01` da una nota v2 no objeto.
+  it('legacy original sin IVA: su XML dice «no objeto» ⇒ la nota v2 sale no objeto, con su procedencia congelada', async () => {
     const s = await sale()
+    const sinIva = conXml([
+      {
+        satProductKey: '01010101',
+        satUnitKey: 'H87',
+        description: 'Producto',
+        quantity: 1,
+        unitPriceCents: 11600,
+        discountCents: 0,
+        taxIncluded: true,
+        objetoImp: '01',
+        taxes: [],
+      },
+    ])
     await prisma.cfdi.update({
       where: { id: s.original.id },
-      data: { protocoloIva: null, entrada: Prisma.DbNull, entradaHuella: null, subtotalCents: 11600, taxCents: 0 },
+      data: { protocoloIva: null, entrada: Prisma.DbNull, entradaHuella: null, subtotalCents: 11600, taxCents: 0, ...sinIva },
     })
     await emit(s.refund.id)
     expect(await note(s.refund.id)).toMatchObject({
       protocoloIva: 1,
       taxCents: 0,
       subtotalCents: 11600,
-      entrada: { originalSinIvaHistorico: true },
+      entrada: {
+        version: 2,
+        originalCfdiId: s.original.id,
+        porTratamiento: { NO_OBJETO: { baseCents: 11600, ivaCents: 0, totalCents: 11600 } },
+      },
     })
-    expect(provider.createCreditNote.mock.calls[0][0].items[0]).toMatchObject({ objetoImp: '01', taxes: [] })
+    expect(provider.createCreditNote.mock.calls[0][0].items[0]).toMatchObject({ satProductKey: '84111506', objetoImp: '01', taxes: [] })
   })
   it('idempotencia STAMPED no revela una nota de otro tenant', async () => {
     const s = await sale()
@@ -281,13 +604,20 @@ describe('egreso con entrada congelada', () => {
     return async (refundPaymentId: string, confirm?: boolean, extra = {}) =>
       JSON.parse((await handlers.get('emit_refund_credit_note')!({ venueId, refundPaymentId, confirm, ...extra }, {})).content[0].text)
   }
-  it.each([undefined, true])('MCP real bloquea original mixta con confirm=%s sin PAC/audit', async confirm => {
-    const s = await sale('IVA_0')
-    const out = await mcp()(s.refund.id, confirm)
-    expect(out.reason).toBe('ORIGINAL_IVA_MIXTO')
-    expect(out.error).toContain('Emítela desde el portal del SAT o de tu PAC.')
+  // C2 (§4.4), dorada que cambia A PROPÓSITO: antes «MCP real bloquea original mixta con confirm=%s sin PAC/audit» (`ORIGINAL_IVA_MIXTO`).
+  it('🔴 C2: el MCP real ya no bloquea la original mixta: la vista previa no toca el PAC y con confirm emite por tasa', async () => {
+    const v = await ventaMixta()
+    const r = await refund(v.o.id, 258)
+    const call = mcp()
+    // T9 ronda 1, cambio A PROPÓSITO: el paso 2 son los confirmationArgs de la vista previa tal cual (sin lookupOnly; con su huella).
+    const vista = await call(r.id)
+    expect(vista).toMatchObject({ requiresConfirmation: true, expectedSourceFingerprint: expect.any(String) })
+    expect(vista.confirmationArgs.lookupOnly).toBeUndefined()
     expect(provider.createCreditNote).not.toHaveBeenCalled()
     expect(auditMcpWrite).not.toHaveBeenCalled()
+    expect((await call(r.id, true, vista.confirmationArgs)).ok).toBe(true)
+    expect(provider.createCreditNote).toHaveBeenCalledTimes(1)
+    expect(auditMcpWrite).toHaveBeenCalledTimes(1)
   })
   it('MCP real recupera nota enviada con la original cancelada; preview no consulta el PAC', async () => {
     const s = await sale()
@@ -301,7 +631,7 @@ describe('egreso con entrada congelada', () => {
     expect(preview).toMatchObject({ requiresConfirmation: true, preview: { importeAcreditadoMxn: 116 } })
     expect(provider.findByExternalId).toHaveBeenCalledTimes(lookups)
     provider.findByExternalId.mockResolvedValue({ ...stamped, uuid: randomUUID() })
-    expect((await call(s.refund.id, true)).ok).toBe(true)
+    expect((await call(s.refund.id, true, preview.confirmationArgs)).ok).toBe(true) // T9 ronda 1: con los args de la vista
     expect(provider.createCreditNote).toHaveBeenCalledTimes(1)
   })
   it('POST pending guarda id; recuperación usa id y nunca segundo POST', async () => {
@@ -426,7 +756,9 @@ describe('egreso con entrada congelada', () => {
         uuid: randomUUID(),
         entrada: data.entrada as Prisma.InputJsonValue,
         globalPeriod: Prisma.DbNull,
-        taxBreakdown: Prisma.DbNull,
+        // C2 T7: la factura más nueva trae su XML (la nota lo exige, D5); la fila leída trae `JsonValue | null`.
+        taxBreakdown: data.taxBreakdown as Prisma.InputJsonValue,
+        xmlConceptos: data.xmlConceptos as Prisma.InputJsonValue,
       },
     })
     const r = await refund(s.o.id)
@@ -502,16 +834,31 @@ describe('egreso con entrada congelada', () => {
     const { subtotalCents, taxCents, totalCents, ...item } = example
     Object.assign(e.params.items[0], item)
     e.montos = { subtotalCents, taxCents, totalCents }
+    // C2 T6: la captura congeló lo facturado de cada artículo del documento ORIGINAL; éste es otro documento, sin esa evidencia.
+    delete e.montosPorRenglon
     e.paidCents = totalCents
     await prisma.cfdi.update({
       where: { id: s.original.id },
-      data: { entrada: e, entradaHuella: huellaDeEntrada(e), subtotalCents, taxCents, totalCents },
+      // C2 T7 (D5): otro documento, otro XML: el PAC habría timbrado ESTOS conceptos.
+      data: { entrada: e, entradaHuella: huellaDeEntrada(e), subtotalCents, taxCents, totalCents, ...conXml(e.params.items) },
     })
     await prisma.payment.update({ where: { id: s.refund.id }, data: { amount: -totalCents / 100 } })
     expect((await getRefundCreditNoteStatus(venueId, s.refund.id))?.eligibility.eligible).toBe(true)
     await emit(s.refund.id)
     expect(provider.createCreditNote).toHaveBeenCalledTimes(1)
     expect((await note(s.refund.id)).totalCents).toBe(totalCents)
+  })
+  it('🔴 C2 T6 ronda 1 (M1): un montosPorRenglon malformado en la original no la anula: la nota por importe sale igual', async () => {
+    const s = await sale()
+    const e = structuredClone(s.original.entrada) as any
+    expect(e.montosPorRenglon).toEqual([expect.objectContaining({ totalCents: 11600 })])
+    // Suma de más (11601 en una factura de 11600): ya no es evidencia por artículo, pero la factura sigue siendo la misma.
+    e.montosPorRenglon = [{ orderItemId: e.renglones[0].orderItemId, totalCents: 11601, porTratamiento: { IVA_16: 11601 } }]
+    await prisma.cfdi.update({ where: { id: s.original.id }, data: { entrada: e, entradaHuella: huellaDeEntrada(e) } })
+    expect((await getRefundCreditNoteStatus(venueId, s.refund.id))?.eligibility.eligible).toBe(true)
+    expect((await emit(s.refund.id)).status).toBe('STAMPED')
+    expect(provider.createCreditNote).toHaveBeenCalledTimes(1)
+    expect((await note(s.refund.id)).totalCents).toBe(11600)
   })
   it('CSD inválido guarda intento nunca enviado, corregirlo permite primera versión1', async () => {
     const s = await sale()
@@ -543,7 +890,7 @@ describe('egreso con entrada congelada', () => {
       },
       items: [
         {
-          satProductKey: '01010101',
+          satProductKey: '84111506', // C2-P3 (Apéndice 5), dorada que cambia A PROPÓSITO: antes 01010101
           satUnitKey: 'ACT',
           description: `Devolución sobre factura ${s.original.serie}${s.original.folio}`,
           quantity: 1,
@@ -592,30 +939,378 @@ describe('egreso con entrada congelada', () => {
     ).rejects.toThrow(/no soporta/)
     expect(await prisma.cfdi.count({ where: { idempotencyKey: `cfdi-refund-${s.refund.id}` } })).toBe(0)
   })
-  it('MCP mantiene lookupOnly entre dos llamadas aunque el intento pase a rechazado', async () => {
+  // T9 ronda 1, cambio A PROPÓSITO: «consultar» queda atado a la huella de la vista previa (no a un lookupOnly que el catálogo no firma).
+  it('MCP: si el intento pasa a rechazado entre los pasos, confirmar «consultar» no recaptura (pide otra vista); con lookupOnly en el paso 1, sólo consulta', async () => {
     const s = await sale()
     provider.createCreditNote.mockRejectedValueOnce(new Error('timeout'))
     await emit(s.refund.id)
     const call = mcp()
     const preview = await call(s.refund.id)
-    expect(preview.confirmationArgs).toMatchObject({ confirm: true, lookupOnly: true, venueId, refundPaymentId: s.refund.id })
+    expect(preview.confirmationArgs).toMatchObject({ confirm: true, venueId, refundPaymentId: s.refund.id })
+    expect(preview.message).toMatch(/consultará/)
+    const conLookup = await call(s.refund.id, undefined, { lookupOnly: true })
+    expect(conLookup.confirmationArgs).toMatchObject({ lookupOnly: true })
     await prisma.cfdi.update({ where: { id: (await note(s.refund.id)).id }, data: { falloDefinitivo: true } })
-    const confirmed = await call(s.refund.id, true, { lookupOnly: preview.confirmationArgs.lookupOnly })
-    expect(confirmed.ok).toBe(false)
+    const confirmed = await call(s.refund.id, true, preview.confirmationArgs)
+    expect(confirmed).toMatchObject({ ok: false, error: expect.stringMatching(/vista previa/) })
+    const soloConsulta = await call(s.refund.id, true, conLookup.confirmationArgs)
+    expect(soloConsulta.ok).toBe(false)
     expect(provider.createCreditNote).toHaveBeenCalledTimes(1)
     expect((await note(s.refund.id)).attempts).toBe(1)
   })
-  it('MCP confirm viejo sin flag exige preview fresco; false explícito sí permite recaptura', async () => {
+  // T9 ronda 1, cambio A PROPÓSITO: la confirmación vieja (o sin huella) no hace nada; la vista previa fresca SÍ recaptura (antes, por el
+  // catálogo, ese reintento no terminaba nunca).
+  it('MCP: una confirmación vieja o sin huella no recaptura; con la vista previa fresca, el reintento sí', async () => {
     const s = await sale()
     provider.createCreditNote.mockRejectedValueOnce(new Error('timeout'))
     await emit(s.refund.id)
     const call = mcp()
-    await call(s.refund.id)
+    const vieja = await call(s.refund.id)
     await prisma.cfdi.update({ where: { id: (await note(s.refund.id)).id }, data: { falloDefinitivo: true } })
-    const fresh = await call(s.refund.id, true)
-    expect(fresh).toMatchObject({ requiresConfirmation: true, confirmationArgs: { lookupOnly: false } })
+    expect(await call(s.refund.id, true)).toMatchObject({ ok: false, error: expect.stringMatching(/vista previa/) })
+    expect(await call(s.refund.id, true, vieja.confirmationArgs)).toMatchObject({ ok: false, error: expect.stringMatching(/vista previa/) })
     expect(provider.createCreditNote).toHaveBeenCalledTimes(1)
-    expect((await call(s.refund.id, true, { lookupOnly: false })).ok).toBe(true)
+    const fresca = await call(s.refund.id)
+    expect(fresca).toMatchObject({ requiresConfirmation: true })
+    expect((await call(s.refund.id, true, fresca.confirmationArgs)).ok).toBe(true)
     expect(provider.createCreditNote).toHaveBeenCalledTimes(2)
+  })
+
+  // ─── C2 · Tarea 9: «acreditar por importe» (P10; Codex C2-16) ───────────────
+  /** La venta mezclada con su factura SIN `montosPorRenglon` (como una factura de antes de la T6): por artículos no hay evidencia. */
+  async function ventaMixtaSinEvidencia() {
+    const v = await ventaMixta()
+    const e = structuredClone(v.original.entrada) as any
+    expect(e.montosPorRenglon).toHaveLength(2)
+    delete e.montosPorRenglon
+    await prisma.cfdi.update({ where: { id: v.original.id }, data: { entrada: e, entradaHuella: huellaDeEntrada(e) } })
+    return v
+  }
+  /** La ruta real del dashboard (GET y POST de la nota), con la validación del body como en `dashboard.routes.ts`. */
+  function dashboard(userId: string) {
+    const app = express()
+    app.use(express.json())
+    const auth = (req: any, _res: any, next: any) => {
+      req.authContext = { venueId, userId }
+      next()
+    }
+    app.get('/venues/:venueId/refunds/:refundId/credit-note', auth, getRefundCreditNoteController)
+    app.post(
+      '/venues/:venueId/refunds/:refundId/credit-note',
+      auth,
+      validateRequest(emitRefundCreditNoteSchema),
+      emitRefundCreditNoteController,
+      // validateRequest pasa sus errores con next(err): el manejador de errores de la app los vuelve 400.
+    )
+    app.use((err: any, _req: any, res: any, _next: any) => res.status(err.statusCode ?? 500).json({ error: err.message }))
+    return {
+      ver: (id: string) => request(app).get(`/venues/${venueId}/refunds/${id}/credit-note`),
+      emitir: (id: string, body?: Record<string, unknown>) =>
+        body
+          ? request(app).post(`/venues/${venueId}/refunds/${id}/credit-note`).send(body)
+          : request(app).post(`/venues/${venueId}/refunds/${id}/credit-note`),
+    }
+  }
+  /** Un ajuste de la plataforma de entregas (su reparto congelado, todo al 0 %): cambia la PROPORCIÓN de lo que queda por acreditar. */
+  async function ajusteDeEntregasAl0(orderId: string, cents: number) {
+    return prisma.payment.create({
+      data: {
+        venueId,
+        orderId,
+        type: 'REFUND',
+        amount: -cents / 100,
+        tipAmount: 0,
+        feePercentage: 0,
+        feeAmount: 0,
+        netAmount: -cents / 100,
+        method: 'CASH',
+        status: 'COMPLETED',
+        processorData: {
+          provenance: 'PROVIDER_ADJUSTMENT',
+          fiscalByRateCents: { v: 2, porTratamiento: { IVA_0: { baseCents: cents, ivaCents: 0 } } },
+        },
+      },
+    })
+  }
+  const notaDe = (id: string) => prisma.cfdi.findUnique({ where: { idempotencyKey: `cfdi-refund-${id}` } })
+  /** La bitácora de la nota (en integración `logAction` es un doble: se lee lo que recibió). */
+  const bitacoraDe = (cfdiId: string) =>
+    jest
+      .mocked(logAction)
+      .mock.calls.map(c => c[0] as any)
+      .find(x => x.action === 'CFDI_CREDIT_NOTE_ISSUED' && x.entityId === cfdiId)
+  it('🔴 C2 T9 de punta a punta: sin montosPorRenglon, por artículos se detiene y se ofrece «por importe»; sin huella 400, con la vieja 409 sin reservar, con la vigente STAMPED con quién la eligió', async () => {
+    const v = await ventaMixtaSinEvidencia()
+    const r1 = await refundArticulos(v.o.id, [{ id: v.pan.id, cents: 5800, nombre: 'Pan' }])
+    const d = dashboard(`staff-${fixture}`)
+    // La vista previa: por artículos no hay evidencia; se ofrece la alternativa con su reparto y su huella.
+    const g1 = await d.ver(r1.id)
+    expect(g1.status).toBe(200)
+    expect(g1.body.eligibility).toMatchObject({ eligible: false, reason: 'SIN_MONTO_POR_ARTICULO' })
+    const alt1 = g1.body.preview.alternativa
+    expect(alt1).toMatchObject({ modalidad: 'POR_IMPORTE', huella: expect.stringMatching(/^[0-9a-f]{64}$/) })
+    expect(alt1.desglose.map((x: any) => x.tratamiento).sort()).toEqual(['IVA_0', 'IVA_16'])
+    expect(alt1.desglose.reduce((s: number, x: any) => s + x.cents, 0)).toBe(5800)
+    // Sin elegir: se detiene (nunca cambia en silencio de modalidad).
+    const sinElegir = await d.emitir(r1.id)
+    expect(sinElegir.status).toBe(409)
+    expect(sinElegir.body.error).toMatch(/no registró cuánto se facturó/)
+    // Eligiendo sin huella: 400, sin reservar.
+    const sinHuella = await d.emitir(r1.id, { modalidad: 'POR_IMPORTE' })
+    expect(sinHuella.status).toBe(400)
+    expect(sinHuella.body.error).toBe(MOTIVO_FALTA_LA_HUELLA)
+    // Una modalidad inventada no pasa la validación del body.
+    expect((await d.emitir(r1.id, { modalidad: 'REGALO', huella: alt1.huella })).status).toBe(400)
+    expect(await notaDe(r1.id)).toBeNull()
+    // Entre la vista previa y el POST se timbra OTRA nota (un ajuste de entregas todo al 0 %): cambia lo que queda y su proporción.
+    const r2 = await ajusteDeEntregasAl0(v.o.id, 10000)
+    expect((await d.emitir(r2.id)).status).toBe(201)
+    const vieja = await d.emitir(r1.id, { modalidad: 'POR_IMPORTE', huella: alt1.huella })
+    expect(vieja.status).toBe(409)
+    expect(vieja.body.error).toBe(MOTIVO_REPARTO_CAMBIO)
+    expect(await notaDe(r1.id)).toBeNull() // no reservó
+    expect(provider.createCreditNote).toHaveBeenCalledTimes(1)
+    // La vista previa de nuevo: otro reparto, otra huella; con ésa sale.
+    const alt2 = (await d.ver(r1.id)).body.preview.alternativa
+    expect(alt2.huella).not.toBe(alt1.huella)
+    expect(alt2.desglose).not.toEqual(alt1.desglose)
+    const ok = await d.emitir(r1.id, { modalidad: 'POR_IMPORTE', huella: alt2.huella })
+    expect(ok.status).toBe(201)
+    const n1 = (await notaDe(r1.id))!
+    expect(n1).toMatchObject({ status: 'STAMPED', totalCents: 5800 })
+    expect(n1.entrada).toMatchObject({
+      version: 2,
+      modalidad: 'POR_IMPORTE_ELEGIDO',
+      elegidoPor: `staff-${fixture}`,
+      devueltoCents: 5800,
+      porTratamiento: Object.fromEntries(
+        alt2.desglose.map((x: any) => [x.tratamiento, { baseCents: x.baseCents, ivaCents: x.ivaCents, totalCents: x.cents }]),
+      ),
+    })
+    expect((n1.entrada as any).porRenglon).toBeUndefined()
+    expect(provider.createCreditNote.mock.calls[1][0].items.map((i: any) => [i.unitPriceCents, i.taxes[0]?.rate]).sort()).toEqual(
+      alt2.desglose.map((x: any) => [x.cents, x.tratamiento === 'IVA_16' ? 0.16 : 0]).sort(),
+    )
+    // La bitácora lo dice: la modalidad elegida y quién la eligió.
+    expect(bitacoraDe(n1.id)?.data).toMatchObject({ modalidad: 'POR_IMPORTE_ELEGIDO', elegidoPor: `staff-${fixture}` })
+  })
+  // C2 · T10 ronda 1 (M9): la emisión NORMAL también ata la vista previa. El panel manda `{ huella }` (sin modalidad); bajo los candados, si
+  // lo que se timbraría ya no es lo que se vio (otra nota de la misma factura en medio), 409 sin reservar. Sin body, como siempre.
+  it('🔴 T10 ronda 1 (M9): por importe normal ⇒ la vista previa da `preview.huella`; con la vieja 409 «La factura cambió…» sin reservar; con la vigente 201', async () => {
+    const v = await ventaMixta()
+    const r1 = await refund(v.o.id, 58) // sin artículos: por importe, en proporción a lo que QUEDA de cada tasa
+    const d = dashboard(`staff-${fixture}`)
+    const g1 = await d.ver(r1.id)
+    expect(g1.body.eligibility.eligible).toBe(true)
+    const h1 = g1.body.preview.huella
+    expect(h1).toEqual(expect.stringMatching(/^[0-9a-f]{64}$/))
+    // Entre la vista previa y el POST se timbra OTRA nota (un ajuste de entregas todo al 0 %): cambia la proporción de lo que queda.
+    const r2 = await ajusteDeEntregasAl0(v.o.id, 10000)
+    expect((await d.emitir(r2.id)).status).toBe(201)
+    const vieja = await d.emitir(r1.id, { huella: h1 })
+    expect(vieja.status).toBe(409)
+    expect(vieja.body.error).toBe(MOTIVO_NOTA_CAMBIO)
+    expect(await notaDe(r1.id)).toBeNull() // no reservó
+    expect(provider.createCreditNote).toHaveBeenCalledTimes(1)
+    const g2 = await d.ver(r1.id)
+    expect(g2.body.preview.huella).not.toBe(h1)
+    const ok = await d.emitir(r1.id, { huella: g2.body.preview.huella })
+    expect(ok.status).toBe(201)
+    expect((await notaDe(r1.id))!.entrada).toMatchObject({ devueltoCents: 5800 })
+  })
+  it('control — T10 ronda 1 (M9): sin huella (cliente viejo) la emisión normal sale como siempre', async () => {
+    const v = await ventaMixta()
+    const r1 = await refund(v.o.id, 58)
+    const d = dashboard(`staff-${fixture}`)
+    expect((await d.emitir(r1.id)).status).toBe(201)
+  })
+  it('🔴 C2 T9: con evidencia por artículo, elegir «por importe» se rechaza (409) y no reserva; por artículos sale como siempre', async () => {
+    const v = await ventaMixta()
+    const r = await refundArticulos(v.o.id, [{ id: v.pan.id, cents: 5800, nombre: 'Pan' }])
+    const d = dashboard(`staff-${fixture}`)
+    const g = await d.ver(r.id)
+    expect(g.body.eligibility.eligible).toBe(true)
+    expect(g.body.preview.alternativa).toBeUndefined()
+    const elegido = await d.emitir(r.id, { modalidad: 'POR_IMPORTE', huella: 'f'.repeat(64) })
+    expect(elegido.status).toBe(409)
+    expect(elegido.body.error).toMatch(/sólo se puede elegir cuando no hay forma de comprobar/)
+    expect(await notaDe(r.id)).toBeNull()
+    expect((await d.emitir(r.id)).status).toBe(201)
+    expect((await notaDe(r.id))!.entrada).toMatchObject({ modalidad: 'POR_ARTICULOS' })
+  })
+  it('🔴 C2 T9 por el MCP real: la vista previa «por importe» da el reparto y la huella; con confirm emite la ELEGIDA con quién la eligió', async () => {
+    const v = await ventaMixtaSinEvidencia()
+    const r = await refundArticulos(v.o.id, [{ id: v.pan.id, cents: 5800, nombre: 'Pan' }])
+    const call = mcp()
+    const sin = await call(r.id)
+    expect(sin).toMatchObject({ ok: false, reason: 'SIN_MONTO_POR_ARTICULO', alternativa: { modalidad: 'POR_IMPORTE', importeMxn: 58 } })
+    const vista = await call(r.id, undefined, { modalidad: 'POR_IMPORTE' })
+    expect(vista).toMatchObject({ requiresConfirmation: true, expectedSourceFingerprint: expect.stringMatching(/^[0-9a-f]{64}$/) })
+    expect(provider.createCreditNote).not.toHaveBeenCalled()
+    expect((await call(r.id, true, vista.confirmationArgs)).ok).toBe(true)
+    expect((await notaDe(r.id))!.entrada).toMatchObject({ modalidad: 'POR_IMPORTE_ELEGIDO', elegidoPor: 'test-staff' })
+  })
+
+  // ─── C2 · Tarea 9, ronda 1 (I-1): la cortesía D9 por su RENGLÓN, también en una factura SIN montos ───
+  it('🔴 C2 T9 ronda 1 (I-1): factura SIN montos y una galleta de cortesía devuelta por artículos ⇒ «por importe» con el aviso que la nombra', async () => {
+    const o = await prisma.order.create({
+      data: {
+        venueId,
+        orderNumber: randomUUID(),
+        subtotal: 258,
+        taxAmount: 0,
+        total: 258,
+        paymentStatus: 'PAID',
+        contratoDePrecio: 'IVA_INCLUIDO',
+        items: {
+          create: [
+            { productId: cafeId, productName: 'Café', quantity: 1, unitPrice: 200, taxAmount: 0, total: 200 },
+            { productId, productName: 'Pan', quantity: 1, unitPrice: 58, taxAmount: 0, total: 58 },
+            // La cortesía de la terminal: el descuento es el total (D9 la deja fuera de la factura).
+            {
+              productId,
+              productName: 'Galleta',
+              quantity: 1,
+              unitPrice: 10,
+              taxAmount: 0,
+              total: 10,
+              discountAmount: 10,
+              isCortesia: true,
+            },
+          ],
+        },
+        payments: { create: { venueId, amount: 258, feePercentage: 0, feeAmount: 0, netAmount: 258, method: 'CASH', status: 'COMPLETED' } },
+      },
+      include: { items: true },
+    })
+    await issue(o.id)
+    const original = await row(o.id)
+    expect(original.totalCents).toBe(25800) // la galleta no entró
+    const e = structuredClone(original.entrada) as any
+    delete e.montosPorRenglon // una factura de antes de C2
+    await prisma.cfdi.update({ where: { id: original.id }, data: { entrada: e, entradaHuella: huellaDeEntrada(e) } })
+    const pan = o.items.find(i => i.productName === 'Pan')!
+    const galleta = o.items.find(i => i.productName === 'Galleta')!
+    // El escritor de devoluciones regresa el BRUTO de la galleta (el defecto preexistente); el nombre NO viaja en el reembolso.
+    const r = await refundArticulos(o.id, [
+      { id: pan.id, cents: 5800, nombre: 'Pan' },
+      { id: galleta.id, cents: 1000, nombre: '' },
+    ])
+    const st = await getRefundCreditNoteStatus(venueId, r.id)
+    expect(st?.eligibility.reason).toBe('SIN_MONTO_POR_ARTICULO')
+    expect(st?.preview?.alternativa?.aviso).toEqual(expect.stringContaining('«Galleta» no aparece en la factura'))
+    expect(st?.preview?.alternativa?.aviso).toContain('($10.00)')
+    expect(st?.preview?.alternativa?.aviso).not.toContain('Pan')
+  })
+
+  // C2 A-1 (decisión A del founder, 9-oct): la devolución por artículos regresa lo COBRADO. Sobre Postgres real: café $200 al 0 % + pan
+  // $58 al 16 % con un descuento de CUENTA de $25.80 repartido 10 % / 10 % (D7). Devolver el pan por el escritor real regresa $52.20, no
+  // $58, y su nota por artículos SÍ sale. Con el bruto, el escritor devolvía $58 y la nota se detenía con ARTICULO_EXCEDE_LO_FACTURADO
+  // ($58 > $52.20 facturados del pan).
+  it('🔴 C2 A-1: devolver por artículos un renglón con descuento de cuenta regresa lo cobrado ($52.20) y su nota por artículos SÍ sale', async () => {
+    const o = await prisma.order.create({
+      data: {
+        venueId,
+        orderNumber: randomUUID(),
+        subtotal: 258,
+        discountAmount: 25.8,
+        taxAmount: 0,
+        total: 232.2,
+        paymentStatus: 'PAID',
+        contratoDePrecio: 'IVA_INCLUIDO',
+        items: {
+          create: [
+            { productId: cafeId, productName: 'Café', quantity: 1, unitPrice: 200, taxAmount: 0, total: 200 },
+            { productId, productName: 'Pan', quantity: 1, unitPrice: 58, taxAmount: 0, total: 58 },
+          ],
+        },
+        payments: {
+          create: { venueId, amount: 232.2, feePercentage: 0, feeAmount: 0, netAmount: 232.2, method: 'CASH', status: 'COMPLETED' },
+        },
+      },
+      include: { items: true, payments: true },
+    })
+    const cafe = o.items.find(i => i.productId === cafeId)!
+    const pan = o.items.find(i => i.productId === productId)!
+    await prisma.orderDiscount.create({
+      data: {
+        orderId: o.id,
+        type: 'PERCENTAGE',
+        name: '10 % en la cuenta',
+        value: 10,
+        amount: 25.8,
+        reparto: { v: 1, alcance: 'CUENTA', conPromociones: true, espejo: false, renglones: { [cafe.id]: 2000, [pan.id]: 580 } },
+      },
+    })
+    await issue(o.id)
+    const original = await row(o.id)
+    expect(original.status).toBe('STAMPED')
+
+    const r = await issueRefund({ venueId, paymentId: o.payments[0].id, items: [{ orderItemId: pan.id }], reason: 'RETURNED_GOODS' })
+
+    expect(r).toMatchObject({ amount: 52.2, remainingRefundable: 180, status: 'COMPLETED' })
+    const fila = await prisma.payment.findUniqueOrThrow({ where: { id: r.refundId } })
+    expect(fila.amount.toString()).toBe('-52.2')
+    expect(fila.tipAmount.toString()).toBe('0')
+    expect((fila.processorData as any).refundedItems).toEqual([
+      expect.objectContaining({ orderItemId: pan.id, quantity: 1, amountCents: 5220, amount: 52.2 }),
+    ])
+
+    const res = await emit(r.refundId)
+    expect(res.status).toBe('STAMPED')
+    expect(provider.createCreditNote.mock.calls[0][0].items).toEqual([
+      expect.objectContaining({ unitPriceCents: 5220, taxes: [{ type: 'IVA', factor: 'Tasa', rate: 0.16, withholding: false }] }),
+    ])
+    expect((await note(r.refundId)).entrada).toMatchObject({
+      modalidad: 'POR_ARTICULOS',
+      porRenglon: [{ orderItemId: pan.id, totalCents: 5220, porTratamiento: { IVA_16: 5220 } }],
+    })
+  })
+
+  // C2 A-1 ronda 1 (I1): en una cuenta DIVIDIDA lo ya devuelto de un artículo se cuenta sobre TODA la orden. Sobre Postgres real (la
+  // lectura de las devoluciones de la orden es SQL crudo): A $100 + B $100 pagada en dos cobros de $100. A por el cobro 1 ⇒ $100; A otra
+  // vez por el cobro 2 ⇒ 400 y nada escrito; B por el cobro 2 ⇒ $100.
+  it('🔴 C2 A-1 ronda 1: cuenta dividida en dos cobros ⇒ un artículo se devuelve UNA vez en toda la orden', async () => {
+    const pago = {
+      venueId,
+      amount: 100,
+      feePercentage: 0,
+      feeAmount: 0,
+      netAmount: 100,
+      method: 'CASH' as const,
+      status: 'COMPLETED' as const,
+    }
+    const o = await prisma.order.create({
+      data: {
+        venueId,
+        orderNumber: randomUUID(),
+        subtotal: 200,
+        taxAmount: 0,
+        total: 200,
+        paymentStatus: 'PAID',
+        contratoDePrecio: 'IVA_INCLUIDO',
+        items: {
+          create: [
+            { productId, productName: 'A', quantity: 1, unitPrice: 100, taxAmount: 0, total: 100 },
+            { productId, productName: 'B', quantity: 1, unitPrice: 100, taxAmount: 0, total: 100 },
+          ],
+        },
+        payments: { create: [pago, pago] },
+      },
+      include: { items: true, payments: { orderBy: { id: 'asc' } } },
+    })
+    const [p1, p2] = o.payments
+    const a = o.items.find(i => i.productName === 'A')!
+    const b = o.items.find(i => i.productName === 'B')!
+    const devolver = (paymentId: string, orderItemId: string) =>
+      issueRefund({ venueId, paymentId, items: [{ orderItemId }], reason: 'RETURNED_GOODS' })
+
+    expect((await devolver(p1.id, a.id)).amount).toBe(100)
+    await expect(devolver(p2.id, a.id)).rejects.toThrow(
+      'Este artículo («A») ya se devolvió en otro cobro de la misma cuenta; quedan 0 de 1 por devolver.',
+    )
+    expect((await devolver(p2.id, b.id)).amount).toBe(100)
+    const devoluciones = await prisma.payment.findMany({ where: { orderId: o.id, type: 'REFUND' }, select: { amount: true } })
+    expect(devoluciones.map(d => d.amount.toString()).sort()).toEqual(['-100', '-100'])
   })
 })

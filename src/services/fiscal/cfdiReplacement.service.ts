@@ -20,7 +20,7 @@
 import { Prisma } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
-import { ConflictError } from '../../errors/AppError'
+import { ConflictError, ProviderUnavailableError } from '../../errors/AppError'
 import { uploadFileToStorage } from '../storage.service'
 import { resolveFiscalProvider } from './fiscalProvider.factory'
 import { buildCreateInvoiceParams } from './cfdiPayloadBuilder'
@@ -29,6 +29,10 @@ import { assembleSaleInput } from './assembleSaleInput'
 import { correoCapturado } from './cfdiEmail.service'
 import {
   cancelCfdi,
+  anotarIntencionDeCancelar,
+  tomarEnvio,
+  sigoSiendoDueno,
+  refreshPendingCancellation,
   emitirConEntrada,
   finalizarEmision,
   type IssueCfdiDeps,
@@ -41,6 +45,7 @@ import {
   type IssueReceptor,
 } from './cfdi.service'
 import { conceptoDesdeElPayload, totalSegunElPacCents } from './reglaDelPac'
+import type { ArchivosCfdi } from './finalizadorCfdi'
 
 export interface ReplaceCfdiDeps {
   /** La factura ORIGINAL, con su `fiscalEmisor` incluido (lo necesita el conector). */
@@ -55,10 +60,15 @@ export interface ReplaceCfdiDeps {
   persistCfdi: IssueCfdiDeps['persistCfdi']
   /** Reclamo con la VERSIÓN leída (`attempts`) — ver `claimCfdi` en cfdi.service (Codex P1-1). */
   claimCfdi: (cfdiId: string, desdeEstados: string[], version: number) => Promise<boolean>
-  /** Guarda SÓLO las URLs de los archivos; nunca el estado fiscal (Codex P1-4). */
-  persistArtifacts: (idempotencyKey: string, urls: { xmlUrl: string; pdfUrl: string }, version?: number) => Promise<any>
+  /** Guarda SÓLO los archivos (URLs y, C2 · T5, la evidencia del XML); nunca el estado fiscal (Codex P1-4). */
+  persistArtifacts: (idempotencyKey: string, urls: ArchivosCfdi, version?: number) => Promise<any>
   storeArtifact: (buffer: Buffer, path: string, contentType: string) => Promise<string>
   updateCfdi: CancelCfdiDeps['updateCfdi']
+  /** C2: lo que `cancelCfdi` necesita para anotar la intención, tomar el único envío, releer el token y consultar. */
+  anotarIntencion: CancelCfdiDeps['anotarIntencion']
+  tomarEnvio: CancelCfdiDeps['tomarEnvio']
+  dueno: NonNullable<CancelCfdiDeps['dueno']>
+  refresh: CancelCfdiDeps['refresh']
 }
 
 export interface ReplaceCfdiResult {
@@ -71,6 +81,23 @@ export interface ReplaceCfdiResult {
   /** true mientras la original NO conste cancelada. La pantalla lo tiene que decir. */
   cancelPendiente: boolean
   reasons?: string[]
+  /**
+   * C2 (M6/G4): la cancelación de la original NO se pudo ni anotar, por una regla (documentos relacionados vivos, u otra cancelación en
+   * trámite con otro motivo): su texto, para que la pantalla diga qué hacer. Nuevo y opcional.
+   */
+  cancelConflicto?: string
+  /** C2 ronda 2 (N3): la cancelación de la original no salió por un aviso del PAC (p. ej. no se pudo consultar antes de enviarla). */
+  cancelAviso?: string
+  /**
+   * Ronda de la ola (3): la cancelación de la original quedó EN DUDA (el POST no tuvo respuesta clara; sólo se consulta). Sólo cuando es
+   * verdad, con la misma regla que `cancelCfdi`. Nuevo y opcional.
+   */
+  enDuda?: true
+  /**
+   * Ronda de la ola (3): ESTA petición anotó un intento NUEVO de cancelar la original. `false` ⇒ el `cancelStatus` que se devuelve no es de
+   * esta petición (p. ej. el REJECTED de un intento anterior, si falló antes de anotar). Nuevo y opcional.
+   */
+  cancelIntentoNuevo?: boolean
 }
 
 /**
@@ -172,6 +199,20 @@ export async function replaceCfdi(
     }
   }
   // Sólo las filas históricas persistidas sin protocolo conservan el ciclo anterior.
+  // C2 · Tarea 3: esta rama NO lleva las guardas de la sustitución (cancelación en trámite, G4). Es inalcanzable mientras exista la
+  // restricción `Cfdi_heredada_solo_terminada` (D21): una sustituta heredada sólo puede estar STAMPED/CANCEL_REQUESTED/CANCELLED y
+  // `claimCfdi` no reclama ninguno de esos estados (409 antes del PAC). Quitar esa restricción exige poner aquí las guardas.
+  // C2 · T10 (M4 de la T3): una sustituta HEREDADA ya terminada (cancelada, o con su cancelación pendiente) no se reclama nunca (D21):
+  // antes contestaba para siempre «Sustitución en proceso para esta factura», que es falso. Se dice qué pasó y a quién acudir; nada se
+  // timbra (volver a sustituir esa original no es automático: la fila heredada ocupa su lugar).
+  if (previa && (previa.status === 'CANCELLED' || previa.status === 'CANCEL_REQUESTED')) {
+    const folio = [previa.serie, previa.folio].filter(Boolean).join('-') || previa.uuid || 'sin folio'
+    throw new ConflictError(
+      previa.status === 'CANCELLED'
+        ? `La corrección anterior de esta factura (${folio}) se canceló antes de este sistema, así que no se puede volver a sustituir desde aquí. Escríbenos a soporte para resolverla.`
+        : `La corrección anterior de esta factura (${folio}) tiene una cancelación pendiente de antes de este sistema, así que no se puede volver a sustituir desde aquí. Escríbenos a soporte para resolverla.`,
+    )
+  }
   if (previa && previa.status === 'STAMPING') {
     const ageMs = Date.now() - new Date(previa.updatedAt ?? previa.createdAt ?? Date.now()).getTime()
     if (ageMs < STAMPING_TTL_MS) throw new Error('Sustitución en proceso para esta factura') // → 409
@@ -312,13 +353,29 @@ async function cancelarOriginal(
   deps: ReplaceCfdiDeps,
   status: 'REPLACED',
 ): Promise<ReplaceCfdiResult> {
+  // C2 ronda 1 (M8): `vigente` vive fuera del `try` para que el caso del conflicto describa la original RELEÍDA, no la foto vieja.
+  let vigente = original
+  // Ronda de la ola (3): ¿ESTA petición anotó un intento nuevo? Se sabe aunque la cancelación truene después de anotar.
+  let cancelIntentoNuevo = false
+  const anotarIntencion: ReplaceCfdiDeps['anotarIntencion'] = async (...a) => {
+    const r = await deps.anotarIntencion(...a)
+    if ('estado' in r && r.estado === 'ANOTADA') cancelIntentoNuevo = true
+    return r
+  }
   try {
     // 🔴 Se RELEE: entre el timbre de la sustituta y este punto la original pudo cambiar de estado
     // (otra petición la canceló, o una cancelación anterior se resolvió). Usar la foto vieja podría
     // pisar un `cancelSubstituteUuid` bueno o revertir una cancelación aceptada (Codex P2-5).
-    const vigente = (await deps.loadCfdi(original.id)) ?? original
+    vigente = (await deps.loadCfdi(original.id)) ?? original
     if (vigente.status === 'CANCELLED') {
-      return { status, sustituta, original: vigente, cancelStatus: vigente.cancelStatus ?? 'CANCELLED', cancelPendiente: false }
+      return {
+        status,
+        sustituta,
+        original: vigente,
+        cancelStatus: vigente.cancelStatus ?? 'CANCELLED',
+        cancelPendiente: false,
+        cancelIntentoNuevo,
+      }
     }
     let primeraLectura = true
     const res = await cancelCfdi(
@@ -338,6 +395,10 @@ async function cancelarOriginal(
         },
         resolveProvider: deps.resolveProvider,
         updateCfdi: deps.updateCfdi,
+        anotarIntencion,
+        tomarEnvio: deps.tomarEnvio,
+        dueno: deps.dueno,
+        refresh: deps.refresh,
       },
     )
     return {
@@ -346,14 +407,46 @@ async function cancelarOriginal(
       original: res.cfdi,
       cancelStatus: res.cancelStatus,
       cancelPendiente: !(res.cancelStatus === 'CANCELLED' || res.cancelStatus === 'ACCEPTED'),
+      cancelIntentoNuevo,
+      ...(res.enDuda ? { enDuda: true as const } : {}),
     }
   } catch (err: unknown) {
+    // 🔴 C2 (M6/G4): una REGLA impidió anotar la intención (la original tiene una nota de crédito viva, u otra cancelación en trámite con
+    // otro motivo). No es «el PAC no contestó»: no se le llamó. La sustituta ya está timbrada; se devuelve el texto para que se resuelva.
+    if (err instanceof ConflictError) {
+      logger.warn(`[cfdi] sustituta ${sustituta.uuid} timbrada; la cancelación de ${original.id} no se pidió: ${err.message}`)
+      return {
+        status,
+        sustituta,
+        original: vigente,
+        cancelStatus: vigente.cancelStatus ?? null,
+        cancelPendiente: true,
+        cancelConflicto: err.message,
+        cancelIntentoNuevo,
+      }
+    }
+    // C2 ronda 2 (N3): la cancelación pudo cambiar la fila antes de fallar (M1 la cierra «no se llegó a enviar»): el resultado describe
+    // la original RELEÍDA, no la foto de antes de timbrar.
+    const releida = (await deps.loadCfdi(original.id).catch(() => null)) ?? vigente
+    // C2 ronda 2 (N3): la consulta previa al PAC falló (M1): no salió nada y el intento ya quedó cerrado. Es un aviso con su texto.
+    if (err instanceof ProviderUnavailableError) {
+      logger.warn(`[cfdi] sustituta ${sustituta.uuid} timbrada; la cancelación de ${original.id} no salió: ${err.message}`)
+      return {
+        status,
+        sustituta,
+        original: releida,
+        cancelStatus: releida.cancelStatus ?? null,
+        cancelPendiente: true,
+        cancelAviso: err.message,
+        cancelIntentoNuevo,
+      }
+    }
     // El PAC no contestó. La sustituta YA está timbrada y su vínculo es durable: volver a pedir la
     // sustitución reanuda justo aquí.
     logger.error(
       `[cfdi] sustituta ${sustituta.uuid} timbrada pero falló la cancelación de ${original.id}: ${err instanceof Error ? err.message : String(err)}`,
     )
-    return { status, sustituta, original, cancelStatus: null, cancelPendiente: true }
+    return { status, sustituta, original: releida, cancelStatus: releida.cancelStatus ?? null, cancelPendiente: true, cancelIntentoNuevo }
   }
 }
 
@@ -441,4 +534,8 @@ const defaultReplaceDeps: ReplaceCfdiDeps = {
   },
   storeArtifact: (buffer, path, contentType) => uploadFileToStorage(buffer, path, contentType),
   updateCfdi: aplicarCancelacion,
+  anotarIntencion: anotarIntencionDeCancelar,
+  tomarEnvio,
+  dueno: sigoSiendoDueno,
+  refresh: (cfdi, opts) => refreshPendingCancellation(cfdi, opts),
 }

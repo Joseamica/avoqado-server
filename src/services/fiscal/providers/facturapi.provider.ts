@@ -33,6 +33,13 @@ const toCents = (pesos: number): number => Math.round(pesos * 100)
 export const FACTURAPI_DEDUPLICA = false
 export const RECHAZOS_CONFIRMADOS = ['invalid_request', 'product_key_not_found', 'invoice_stamping_validation_error'] as const
 
+/**
+ * C2 (ronda 1, I2): tiempos límite de las llamadas de CANCELACIÓN a Facturapi. El umbral de «envío terminado» de la cancelación
+ * (`ENVIO_TERMINADO_MS`, cfdi.service.ts) se DERIVA de estos dos: el dueño hace una consulta previa y luego el POST.
+ */
+export const TIEMPO_LIMITE_CONSULTA_MS = 30_000
+export const TIEMPO_LIMITE_ENVIO_MS = 30_000
+
 export class ProviderHttpError extends Error {
   constructor(
     public readonly status: number,
@@ -566,9 +573,25 @@ export class FacturapiProvider implements FiscalProvider {
     return { invoices, truncated }
   }
 
+  /**
+   * C2 T7, ronda 1 (M1): el XML se baja por `fetch` con tiempo límite y conserva el status HTTP en `ProviderHttpError` (el SDK lo descarta:
+   * tiraba un `Error` sin status y no se distinguía «el PAC ya no lo entrega» —404/401/403, permanente— de un PAC caído).
+   */
   async downloadXml(providerInvoiceId: string): Promise<Buffer> {
-    const stream = await this.client.invoices.downloadXml(providerInvoiceId)
-    return this.binaryDownloadToBuffer(stream)
+    const response = await fetch(`https://www.facturapi.io/v2/invoices/${encodeURIComponent(providerInvoiceId)}/xml`, {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${this.apiKey}` },
+      signal: AbortSignal.timeout(TIEMPO_LIMITE_CONSULTA_MS),
+    })
+    if (!response.ok) {
+      const body: any = await response.json().catch(() => null)
+      throw new ProviderHttpError(
+        response.status,
+        typeof body?.code === 'string' ? body.code : null,
+        typeof body?.message === 'string' && body.message ? body.message : `Facturapi HTTP ${response.status}`,
+      )
+    }
+    return Buffer.from(await response.arrayBuffer())
   }
 
   async downloadPdf(providerInvoiceId: string): Promise<Buffer> {
@@ -576,12 +599,36 @@ export class FacturapiProvider implements FiscalProvider {
     return this.binaryDownloadToBuffer(stream)
   }
 
+  /**
+   * C2 · Tarea 2: la cancelación y su consulta van por `fetch` con tiempo límite (antes, el SDK sin tiempo límite: un PAC colgado dejaba
+   * la petición abierta para siempre). Como `postInvoice`, conserva el status HTTP y el `code` del PAC en `ProviderHttpError`: sin ellos
+   * no se distingue «trámite existente» (409 `invoice_cancellation_in_progress`) de un rechazo concluyente ni de «no se sabe».
+   * Un cuerpo ilegible (p. ej. un 502 de la puerta de enlace) sale como `ProviderHttpError` sin código: quien llama lo trata EN DUDA.
+   */
+  private async facturapiJson(method: 'GET' | 'DELETE', path: string): Promise<any> {
+    const response = await fetch(`https://www.facturapi.io/v2${path}`, {
+      method,
+      headers: { Authorization: `Bearer ${this.apiKey}` },
+      // C2 ronda 1 (I2): los MISMOS tiempos límite de los que se deriva ENVIO_TERMINADO_MS.
+      signal: AbortSignal.timeout(method === 'GET' ? TIEMPO_LIMITE_CONSULTA_MS : TIEMPO_LIMITE_ENVIO_MS),
+    })
+    const body: any = await response.json().catch(() => null)
+    if (!response.ok)
+      throw new ProviderHttpError(
+        response.status,
+        typeof body?.code === 'string' ? body.code : null,
+        typeof body?.message === 'string' && body.message ? body.message : `Facturapi HTTP ${response.status}`,
+      )
+    if (!body || typeof body.status !== 'string') throw new Error('Respuesta ilegible de Facturapi')
+    return body
+  }
+
   async cancelInvoice(params: CancelInvoiceParams): Promise<CancelInvoiceResult> {
-    // invoices.cancel returns the full Invoice object (not a custom cancel result).
-    // cancellation_status is a CancellationStatus enum on the Invoice.
-    const opts: { motive: string; substitution?: string } = { motive: params.motivo }
-    if (params.substituteUuid) opts.substitution = params.substituteUuid
-    const inv = await this.client.invoices.cancel(params.providerInvoiceId, opts as Parameters<typeof this.client.invoices.cancel>[1])
+    // DELETE /v2/invoices/{id}?motive=..&substitution=.. (docs.facturapi.io «Cancelaciones»). Devuelve la factura completa;
+    // cancellation_status es el estado de la SOLICITUD.
+    const query = new URLSearchParams({ motive: params.motivo })
+    if (params.substituteUuid) query.set('substitution', params.substituteUuid)
+    const inv = await this.facturapiJson('DELETE', `/invoices/${encodeURIComponent(params.providerInvoiceId)}?${query.toString()}`)
     // 🔴 Hay que mirar LAS DOS cosas: el estado de la FACTURA y el de la SOLICITUD. Una cancelación
     // inmediata deja `status: 'canceled'` aunque `cancellation_status` siga en `none`; y un `none` con
     // la factura viva significa que NO se canceló nada. Tratar `none` (o un valor desconocido) como
@@ -594,13 +641,13 @@ export class FacturapiProvider implements FiscalProvider {
   }
 
   /**
-   * CONSULTA el estado de una cancelación ya pedida, sin volver a pedirla. Cuando el SAT contesta «en
+   * CONSULTA el estado de una cancelación ya pedida, sin volver a pedirla (GET, idempotente). Cuando el SAT contesta «en
    * trámite» al cancelar, ésta es la única forma de enterarse después de que sí quedó (Testarudo, A-14:
    * cancelada en el SAT y «Timbrada» en Avoqado durante tres días). La fecha sale de lo que registró el
    * PAC; si no la trae, se devuelve `null` en vez de inventar una.
    */
   async getCancellationStatus(providerInvoiceId: string): Promise<CancelInvoiceResult> {
-    const inv: any = await this.client.invoices.retrieve(providerInvoiceId)
+    const inv: any = await this.facturapiJson('GET', `/invoices/${encodeURIComponent(providerInvoiceId)}`)
     const status = this.mapCancellationStatus(inv.status as string, inv.cancellation_status as string)
     const registrada = inv.cancellation?.last_checked ? new Date(inv.cancellation.last_checked) : null
     return {
