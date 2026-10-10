@@ -13,9 +13,21 @@ import { randomUUID } from 'crypto'
 import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { readTablesVersions, tablesVersionSql, type TablesVersions } from '@/services/mobile/tablesVersion.service'
-import { assignTable, clearTable, moveOrderToTable, releaseTableIfSettled, updateTablePosition } from '@/services/tpv/table.tpv.service'
+import {
+  assignTable,
+  clearTable,
+  createTable,
+  deleteTable,
+  moveOrderToTable,
+  releaseTableIfSettled,
+  setTableStatusInTransaction,
+  updateTablePosition,
+} from '@/services/tpv/table.tpv.service'
 import { addItemsToOrder } from '@/services/tpv/order.tpv.service'
-import { cancelOrder, mergeOrders, payCashOrder, splitOrderItems } from '@/services/mobile/order.mobile.service'
+import { cancelOrder, mergeOrders, payCashOrder, splitOrderBySeat, splitOrderItems } from '@/services/mobile/order.mobile.service'
+import { compOrderItem, compWholeOrder } from '@/services/mobile/comp-item.mobile.service'
+import { processPosOrderItemEvent } from '@/services/pos-sync/posSyncOrderItem.service'
+import { ORDER_LOCK_WAIT_BUDGET } from '@/services/shared/paymentShiftClaim'
 import { recordOrderPayment } from '@/services/tpv/payment.tpv.service'
 import { getFloorPlan, publishFloorPlan } from '@/services/dashboard/floorPlan/floorPlan.service'
 import { createFloorElement, deleteFloorElement, updateFloorElement } from '@/services/tpv/floor-element.tpv.service'
@@ -62,6 +74,15 @@ afterAll(() => prisma.$disconnect())
 
 /** `updatedAt` guarda milisegundos: dos escrituras en el mismo milisegundo no se distinguirían. */
 const pausa = () => new Promise(r => setTimeout(r, 5))
+
+/** Rechaza a los `ms`: una espera entre dos conexiones nunca cuelga la suite. */
+function conTope<T>(promesa: Promise<T>, ms: number, que: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined
+  const tope = new Promise<never>((_, rechazar) => {
+    timer = setTimeout(() => rechazar(new Error(`${que}: más de ${ms} ms`)), ms)
+  })
+  return Promise.race([promesa, tope]).finally(() => clearTimeout(timer))
+}
 
 async function alrededorDe(accion: () => Promise<unknown>): Promise<{ antes: TablesVersions; despues: TablesVersions }> {
   const antes = await readTablesVersions(venueId)
@@ -267,6 +288,8 @@ describe('tablesVersion se mueve por cada ruta que cambia mesas o cuentas (spec 
 
   // Corrección C1 (auditoría Codex, hallazgo 2): Prisma pone `updatedAt` al ESCRIBIR. Si A escribe primero y confirma
   // DESPUÉS que B, el `updatedAt` de A es menor que el máximo ya visto: con `MAX` la versión no se movería.
+  // T2a (auditoría del código): la prueba afirma que ESE orden ocurrió de verdad (A < B leídos después) y ninguna espera
+  // entre conexiones puede colgar la suite: todas tienen tope y A se suelta en `finally`.
   it('una transacción que confirma TARDE con un updatedAt menor también la mueve (dos conexiones)', async () => {
     const t1 = await mesa()
     const t2 = await mesa()
@@ -280,17 +303,27 @@ describe('tablesVersion se mueve por cada ruta que cambia mesas o cuentas (spec 
       async tx => {
         await tx.order.update({ where: { id: a.id }, data: { customerName: 'A tarde' } })
         escribioA()
-        await espera
+        await conTope(espera, 5_000, 'A esperando a que B escriba')
       },
-      { timeout: 30_000 },
+      { timeout: 15_000 },
     )
-    await aEscribio
-    await pausa()
-    await prisma.order.update({ where: { id: b.id }, data: { customerName: 'B pronto' } })
-    const antes = await readTablesVersions(venueId)
-    soltar()
+    let antes: TablesVersions
+    try {
+      // Si A falla antes de escribir, la carrera lo dice al momento (no a los 120 s del timeout de jest).
+      await conTope(Promise.race([aEscribio, transaccionA]), 5_000, 'esperando la escritura de A')
+      await pausa()
+      await prisma.order.update({ where: { id: b.id }, data: { customerName: 'B pronto' } })
+      antes = await readTablesVersions(venueId)
+    } finally {
+      soltar()
+    }
     await transaccionA
     const despues = await readTablesVersions(venueId)
+    const [filaA, filaB] = await Promise.all(
+      [a.id, b.id].map(id => prisma.order.findUniqueOrThrow({ where: { id }, select: { updatedAt: true } })),
+    )
+    // El caso que motivó la suma: A confirmó DESPUÉS de B y aun así quedó con el updatedAt MENOR.
+    expect(filaA.updatedAt.getTime()).toBeLessThan(filaB.updatedAt.getTime())
     expect(despues.tablesVersion).not.toBe(antes.tablesVersion)
   })
 
@@ -306,18 +339,148 @@ describe('tablesVersion se mueve por cada ruta que cambia mesas o cuentas (spec 
     expect(despues.tablesVersion).not.toBe(antes.tablesVersion)
   })
 
+  // T2b (auditoría del código, «arreglar antes de publicar»): las rutas que faltaban, cada una por su función real.
+  it('cambiar el estado de una mesa (setTableStatusInTransaction, la del MCP set_table_status) — y NO mueve floorPlanVersion', async () => {
+    const t = await mesa()
+    const { antes, despues } = await alrededorDe(() =>
+      prisma.$transaction(tx => setTableStatusInTransaction(tx, venueId, t.id, 'RESERVED'), ORDER_LOCK_WAIT_BUDGET),
+    )
+    expect(despues.tablesVersion).not.toBe(antes.tablesVersion)
+    expect(despues.floorPlanVersion).toBe(antes.floorPlanVersion)
+  })
+
+  it('separar la cuenta por asiento (splitOrderBySeat, la del MCP split_table_check_by_seat)', async () => {
+    const t = await mesa()
+    const o = await cuentaEnMesa(t.id, 100)
+    const renglones = await prisma.orderItem.findMany({ where: { orderId: o.id }, orderBy: { id: 'asc' }, take: 2 })
+    await Promise.all(renglones.map((r, i) => prisma.orderItem.update({ where: { id: r.id }, data: { seat: i + 1 } })))
+    const { antes, despues } = await alrededorDe(() => splitOrderBySeat(venueId, o.id, staffId))
+    expect(despues.tablesVersion).not.toBe(antes.tablesVersion)
+  })
+
+  it('dar cortesía a toda la cuenta (compWholeOrder, la del MCP comp_table_check)', async () => {
+    const t = await mesa()
+    const o = await cuentaEnMesa(t.id, 100)
+    const { antes, despues } = await alrededorDe(() => compWholeOrder({ venueId, orderId: o.id, reason: 'Reclamo del cliente', staffId }))
+    expect(despues.tablesVersion).not.toBe(antes.tablesVersion)
+  })
+
+  it('dar cortesía a UN artículo (compOrderItem, la del POS)', async () => {
+    const t = await mesa()
+    const o = await cuentaEnMesa(t.id, 100)
+    const [primero] = await prisma.orderItem.findMany({ where: { orderId: o.id }, orderBy: { id: 'asc' }, take: 1 })
+    const { antes, despues } = await alrededorDe(() =>
+      compOrderItem({ venueId, orderId: o.id, itemId: primero.id, reason: 'Reclamo del cliente', staffId }),
+    )
+    expect(despues.tablesVersion).not.toBe(antes.tablesVersion)
+  })
+
+  // El dashboard da de alta y archiva mesas sólo publicando el plano (cubierto abajo); fuera del plano, las rutas reales
+  // son POST y DELETE /tpv/venues/:venueId/tables (createTable y deleteTable).
+  it('dar de alta una mesa fuera del plano (createTable) — y NO mueve floorPlanVersion', async () => {
+    const { antes, despues } = await alrededorDe(() => createTable(venueId, { number: 'Nueva', capacity: 4, shape: 'SQUARE' }))
+    expect(despues.tablesVersion).not.toBe(antes.tablesVersion)
+    expect(despues.floorPlanVersion).toBe(antes.floorPlanVersion)
+  })
+
+  it('archivar una mesa fuera del plano (deleteTable)', async () => {
+    const t = await mesa()
+    const { antes, despues } = await alrededorDe(() => deleteTable(venueId, t.id))
+    expect(despues.tablesVersion).not.toBe(antes.tablesVersion)
+  })
+
   // Corrección C3 (hallazgo 5): el switch «sólo el dueño de la mesa» viaja en /tables (`settings`).
   it('prender o apagar «sólo el dueño de la mesa» mueve tablesVersion y NO floorPlanVersion', async () => {
     await mesa()
-    // Fixture: el venue ya tiene su fila de VenueSettings. Sin fila, `updateVenueSettings` la crea con `createData`, que NO
-    // copia `enforceTableOwnership`: el primer «prender» se pierde (la fila nace en false) y la versión, con razón, no se
-    // mueve. Es un defecto del servicio, no de la versión (reporte de la Task 2, 2026-10-09).
-    await prisma.venueSettings.create({ data: { venueId } })
+    // Sin fila de VenueSettings a propósito: el primer «prender» va por el camino REAL de creación (`createData`), que
+    // ahora sí copia el campo (V1).
+    expect(await prisma.venueSettings.findUnique({ where: { venueId } })).toBeNull()
     const prender = await alrededorDe(() => updateVenueSettings(venueId, { enforceTableOwnership: true }, staffId))
     expect(prender.despues.tablesVersion).not.toBe(prender.antes.tablesVersion)
     expect(prender.despues.floorPlanVersion).toBe(prender.antes.floorPlanVersion)
     const apagar = await alrededorDe(() => updateVenueSettings(venueId, { enforceTableOwnership: false }, staffId))
     expect(apagar.despues.tablesVersion).not.toBe(apagar.antes.tablesVersion)
+  })
+})
+
+// F4 (auditoría Codex del código, hallazgo 4): los artículos que llegan de SoftRestaurant cambian lo que pinta /tables
+// (renglones, cantidades) y antes no tocaban la orden padre. Se llama al procesador real, el mismo punto de entrada que usa
+// el dispatcher de RabbitMQ (`posSyncService.processPosOrderItemEvent`).
+describe('SoftRestaurant: un artículo importado mueve tablesVersion sin tocar el dinero de la cabecera', () => {
+  const PRODUCTO_POS = 'sr-cafe'
+
+  async function cuentaImportada() {
+    const t = await mesa()
+    const categoryId = (await prisma.menuCategory.findFirstOrThrow({ where: { venueId }, select: { id: true } })).id
+    await prisma.product.create({
+      data: { venueId, categoryId, sku: `SR-${venueId}`, name: 'Café SR', price: 50, externalId: PRODUCTO_POS },
+    })
+    const externalId = `SR1:1:${randomUUID()}`
+    const order = await prisma.order.create({
+      data: {
+        venueId,
+        tableId: t.id,
+        externalId,
+        orderNumber: randomUUID(),
+        originSystem: 'POS_SOFTRESTAURANT',
+        subtotal: 100,
+        taxAmount: 16,
+        total: 116,
+        remainingBalance: 116,
+        contratoDePrecio: 'IVA_APARTE',
+      },
+    })
+    await prisma.table.update({ where: { id: t.id }, data: { status: 'OCCUPIED', currentOrderId: order.id } })
+    return { orderId: order.id, externalId }
+  }
+  const renglon = (parentOrderExternalId: string, externalId: string, itemData: Record<string, unknown> = {}) => ({
+    venueId,
+    parentOrderExternalId,
+    itemData: {
+      externalId,
+      deleted: false,
+      productExternalId: PRODUCTO_POS,
+      productName: 'Café',
+      quantity: 1,
+      unitPrice: 50,
+      taxAmount: 8,
+      total: 50,
+      ...itemData,
+    },
+  })
+  /** La cabecera importada es la autoridad del dinero (IVA_APARTE): un evento de renglón nunca la recalcula. */
+  const dineroDe = (id: string) =>
+    prisma.order.findUniqueOrThrow({
+      where: { id },
+      select: { subtotal: true, taxAmount: true, total: true, remainingBalance: true, paidAmount: true, paymentStatus: true },
+    })
+
+  it('CREAR un artículo', async () => {
+    const { orderId, externalId } = await cuentaImportada()
+    const dinero = await dineroDe(orderId)
+    const { antes, despues } = await alrededorDe(() => processPosOrderItemEvent(renglon(externalId, `${externalId}:L1`)))
+    expect(despues.tablesVersion).not.toBe(antes.tablesVersion)
+    expect(await dineroDe(orderId)).toEqual(dinero)
+  })
+
+  it('ACTUALIZAR la cantidad de un artículo', async () => {
+    const { orderId, externalId } = await cuentaImportada()
+    await processPosOrderItemEvent(renglon(externalId, `${externalId}:L1`))
+    const dinero = await dineroDe(orderId)
+    const { antes, despues } = await alrededorDe(() =>
+      processPosOrderItemEvent(renglon(externalId, `${externalId}:L1`, { quantity: 3, total: 150, taxAmount: 24 })),
+    )
+    expect(despues.tablesVersion).not.toBe(antes.tablesVersion)
+    expect(await dineroDe(orderId)).toEqual(dinero)
+  })
+
+  it('BORRAR un artículo', async () => {
+    const { orderId, externalId } = await cuentaImportada()
+    await processPosOrderItemEvent(renglon(externalId, `${externalId}:L1`))
+    const dinero = await dineroDe(orderId)
+    const { antes, despues } = await alrededorDe(() => processPosOrderItemEvent(renglon(externalId, `${externalId}:L1`, { deleted: true })))
+    expect(despues.tablesVersion).not.toBe(antes.tablesVersion)
+    expect(await dineroDe(orderId)).toEqual(dinero)
   })
 })
 
