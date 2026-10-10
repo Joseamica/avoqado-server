@@ -45,7 +45,7 @@ cada cliente lo traduce a su mismo texto de piloto por el código, nunca por el 
 
 ## 1. Entradas HTTP: webhook y callback
 
-- **Webhook** (`SHOPIFY_WEBHOOK_ROUTE`, `app.ts:161`): `express.raw` de 1 MB (`SHOPIFY_WEBHOOK_MAX_BYTES`) montado ANTES del router genérico
+- **Webhook** (`SHOPIFY_WEBHOOK_ROUTE`, `app.ts:165`): `express.raw` de 1 MB (`SHOPIFY_WEBHOOK_MAX_BYTES`) montado ANTES del router genérico
   de `/api/v1/webhooks`. El del router genérico usa `express.raw({ type: 'application/json' })`: el límite por omisión es de 100 KB (un
   `products/update` con muchas variantes lo rebasa) y su tipo NO es comodín (cualquier otro Content-Type deja `req.body = {}`); el HMAC es
   del cuerpo CRUDO. `persistShopifyWebhook(…)` sólo guarda y contesta; lo procesa el worker. Guarda SÓLO lo que el procesador lee
@@ -53,7 +53,7 @@ cada cliente lo traduce a su mismo texto de piloto por el código, nunca por el 
   trae el nombre, el correo, el teléfono y las direcciones del cliente, y nada de eso se queda. Si un procesador empieza a leer otro campo,
   agrégalo ahí en el mismo cambio. Pruebas: `tests/unit/routes/shopify.webhook.app.test.ts` y
   `tests/integration/shopify/webhook-app.integration.test.ts` (un POST firmado por la `app` real deja un evento).
-- **Callback OAuth** (`SHOPIFY_OAUTH_CALLBACK_PATH`, `app.ts:202`): público, sin sesión; la prueba de origen es el `hmac` más el `state`
+- **Callback OAuth** (`SHOPIFY_OAUTH_CALLBACK_PATH`, `app.ts:204`): público, sin sesión; la prueba de origen es el `hmac` más el `state`
   firmado. `handleShopifyCallback(…)` recibe `req.query` INTACTO: un parámetro repetido (llega como arreglo) no es algo que Shopify firmó y
   da `?error=FIRMA`; no se filtra antes.
 - **HMAC del callback** (`formaDeFirmaOAuth(…)`, `shopify.crypto.ts:32`; `verifyOAuthQueryHmac(…)`, `:47`): se aceptan DOS formas de firma,
@@ -63,7 +63,7 @@ cada cliente lo traduce a su mismo texto de piloto por el código, nunca por el 
   (`callback OAuth: firma válida en la forma …`, nunca el hmac). CONFIRMADO en vivo (C10, 9-oct-2026): tres callbacks reales de la tienda de
   prueba, los tres en la forma codificada, con un `host` sin el relleno `=` de base64; no quites la forma codificada. `hmac` está en
   `PARAMS_SENSIBLES` del logger.
-- **Búsqueda de Shopify en minúsculas** (`FILTRO_ESTADO`, `catalog.service.ts:66`): los valores de `product_status:` van en minúsculas y se
+- **Búsqueda de Shopify en minúsculas** (`FILTRO_ESTADO`, `catalog.service.ts:67`): los valores de `product_status:` van en minúsculas y se
   unen con OR, `(product_status:active OR product_status:draft)`. En mayúsculas Shopify devuelve 0 variantes sin error: medido en vivo (C10,
   API 2026-10, 0 contra 25) y confirmado por personal de Shopify, con la doc de `productVariants` equivocada
   ([community.shopify.dev/t/21623](https://community.shopify.dev/t/bug-report-graphql-api-productvariants-product-status-query-not-working/21623)).
@@ -83,7 +83,7 @@ efectiva** de la sucursal (si está PAUSED, manda `pausedFrom`; por eso una paus
 | DISCONNECTED o sin enlace | nada                                                            |
 
 No encola: un cambio con la marca de origen `shopify`, un delta 0, ni un `DELETE` de la fila (ver §5). El buzón lo llenan SÓLO el guardia y
-la resolución «usar Avoqado» (`reconcile.service.ts:1150`).
+la resolución «usar Avoqado» (`reconcile.service.ts:1208`).
 
 ## 3. La marca de origen: si aplicas en Avoqado algo que VINO de Shopify
 
@@ -99,12 +99,12 @@ trigger: no la uses para nada más.
   pareja iniciada y no suspendida, y TODAS sus sumas son de la generación vigente de la sucursal (T3): Σ vivas y Σ DEAD_LETTER por igual.
   Las filas de una generación vieja y las `RELIGADA_A_OTRA_TIENDA` (que quedan en la generación anterior) NO entran en la cuenta; el filtro
   por `generation` vive en `productBlocked(…)`, `liveOutboxSum(…)`, `bloquearFilasDelProducto` y `abrirRevision` (`mirror.service.ts:5`,
-  `reconcile.service.ts:618`).
+  `reconcile.service.ts:669`).
 - Una DEAD_LETTER (de la generación vigente) conserva su delta en la cuenta hasta que la resolución la descarte. Una venta que dejó
   `Inventory = 9`, espejo 10 y su `−1` en DEAD_LETTER es un estado CORRECTO, no algo que «arreglar».
 - COMPARAR con diferencia abre `REACTIVADA` con `offset = Inventory − S`; si los saldos ya coinciden, cierra en la misma tx la revisión OPEN
   del producto (`offset = 0`, §11.8).
-- El cuadre calcula `total = Inventory − espejo − Σ vivas − Σ DEAD_LETTER` (`abrirRevision`, `reconcile.service.ts:618`) y decide en este
+- El cuadre calcula `total = Inventory − espejo − Σ vivas − Σ DEAD_LETTER` (`abrirRevision`, `reconcile.service.ts:669`) y decide en este
   orden:
   - con DEAD_LETTER (aunque `total = 0`, que es el caso normal de un ATORADO): abre o actualiza `ATORADO` (`INCIERTO` si alguna es ambigua)
     con `offset = total`; nunca cierra;
@@ -131,11 +131,11 @@ espejo dejaría la cuenta en 11 contra las 12 piezas de Avoqado. Si hay filas vi
 
 - **Product se bloquea `FOR NO KEY UPDATE`** (K11): serializa con otros escritores del catálogo sin frenar el `FOR KEY SHARE` de una venta
   que inserta un renglón con llave foránea al producto. Catálogo y archivo lo piden explícito (`bloquearProductos`,
-  `catalog.service.ts:359`; `archivarPareja(…)`, `:1082`); `switchInventoryMethod(…)` y `setProductInventoryMethod(…)` lo toman con el
+  `catalog.service.ts:416`; `archivarPareja(…)`, `:1165`); `switchInventoryMethod(…)` y `setProductInventoryMethod(…)` lo toman con el
   `product.update` que ya hacen (no toca llaves) y llaman a `suspenderParejaPorReceta(…)` DESPUÉS, nunca antes.
 - **El mensajero**, con o sin cerco, toma el orden general sin Product: sucursal y tienda `FOR SHARE`, pareja `FOR UPDATE`, la fila del
   buzón `FOR UPDATE` (releída: sigue `IN_PROGRESS` con su `claimToken`) y, con cerco de evento, el evento `FOR SHARE` al final
-  (`conFilaPropia`, `outbox.service.ts:165`). Nunca la fila primero, ni con `SKIP LOCKED`: `claimShopifyOutbox(…)` ELIGE su candidata sin
+  (`conFilaPropia`, `outbox.service.ts:166`). Nunca la fila primero, ni con `SKIP LOCKED`: `claimShopifyOutbox(…)` ELIGE su candidata sin
   candado y la revalida ya con los candados puestos.
 - Los cierres por falla (devolver a la fila, FAILED, DEAD_LETTER) van sin cerco, con los candados en orden, y se protegen con el
   `claimToken` de la fila: si ya no es suya, no escriben. No le exijas al mensajero revisar el cerco antes de esos cierres. Un 401 sólo
@@ -145,7 +145,7 @@ espejo dejaría la cuenta en 11 contra las 12 piezas de Avoqado. Si hay filas vi
   salir; `leerToken(…)` lo deja en el log de errores) devuelven la fila sin sumar `attempts` y sin tocar su duda, como la importación y el
   cuadre. Una `SHOPIFY_TOKEN_KEY` mal puesta no manda el buzón a DEAD_LETTER; una fila ambigua sigue acotada por su ventana de 23 h.
 - **`marcarFaltaPermiso(…)`** bloquea `FOR NO KEY UPDATE` SÓLO la sucursal que recibe (`locationLinkId`; sin ella, las de la tienda, por id)
-  y después la tienda `FOR SHARE` (`mirror.service.ts:371`). Quien la llame lo hace antes de cualquier candado de pareja, fila o cerco, o en
+  y después la tienda `FOR SHARE` (`mirror.service.ts:372`). Quien la llame lo hace antes de cualquier candado de pareja, fila o cerco, o en
   una tx propia (el mensajero: tx de 15 s, porque avisa por dentro). `FOR NO KEY UPDATE` y no `FOR UPDATE`: no frena el `FOR KEY SHARE` de
   quien inserte una pareja con llave foránea a la sucursal.
 - **Desconectar** (`disconnectShopify(…)`, `connect.service.ts:1173`) bloquea primero TODAS las sucursales de la tienda por id (la propia
@@ -274,7 +274,7 @@ servidor) todavía no la tiene en la página ni en la guía. La página nunca of
 
 ## 10. Mantenimiento y pruebas
 
-- **Limpieza horaria** (`limpiarShopify(…)`, `worker.service.ts:353`): descarta lo que NUNCA salió de una generación vieja y, de una
+- **Limpieza horaria** (`limpiarShopify(…)`, `worker.service.ts:362`): descarta lo que NUNCA salió de una generación vieja y, de una
   sucursal ACTIVE, lo vivo NO ambiguo de la generación vigente cuyo producto no tiene pareja viva con más de 15 min (`SIN_PAREJA_VIVA_MIN`,
   M4: nunca saldría y contaba para siempre en el resumen y en RETRASO), borra lo cerrado hace 30 días (filas SENT/DISCARDED, eventos
   terminales, intents) y **las revisiones RESUELTAS hace más de 90 días** (`REVISIONES_RESUELTAS_DIAS`) cuya elección ya no está en camino:

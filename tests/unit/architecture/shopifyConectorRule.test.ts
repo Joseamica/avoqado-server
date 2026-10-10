@@ -644,6 +644,48 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     expect(regla).not.toMatch(/la baja al cerrar/)
   })
 
+  it('M9: cada ancla `archivo:línea` de un archivo del conector apunta a lo que nombra (una ancla corrida manda a leer otra cosa)', () => {
+    // Sólo los archivos del conector: los compartidos (app.ts, stripe, el asistente…) los editan otras sesiones a diario y una
+    // ancla de línea ahí no se puede sostener sin romper esta prueba por un cambio ajeno.
+    const de = (f: string) => `${SHOPIFY}/shopify.${f}.ts`
+    const anclas: Record<string, [string, string]> = {
+      'shopify.connect.service.ts:90': [de('connect.service'), 'export async function startShopifyConnect('],
+      'connect.service.ts:1173': [de('connect.service'), 'export async function disconnectShopify('],
+      'connect.service.ts:639': [de('connect.service'), 'async function aCuarentenaPorReligar('],
+      'shopify.crypto.ts:32': [de('crypto'), 'export function formaDeFirmaOAuth('],
+      'catalog.service.ts:67': [de('catalog.service'), 'export const FILTRO_ESTADO'],
+      'catalog.service.ts:416': [de('catalog.service'), 'async function bloquearProductos('],
+      'reconcile.service.ts:1208': [de('reconcile.service'), 'tx.shopifyStockOutbox.create('],
+      'reconcile.service.ts:669': [de('reconcile.service'), 'async function abrirRevision('],
+      'mirror.service.ts:5': [de('mirror.service'), 'Invariante operativo'],
+      'mirror.service.ts:372': [de('mirror.service'), 'export async function marcarFaltaPermiso('],
+      'outbox.service.ts:166': [de('outbox.service'), 'async function conFilaPropia'],
+      'shopify.store.service.ts:305': [de('store.service'), 'export async function suspenderParejaPorReceta('],
+      'store.service.ts:271': [de('store.service'), 'export async function envioEnCamino('],
+      'worker.service.ts:362': [de('worker.service'), 'export async function limpiarShopify('],
+    }
+    // Las cortas (`:N`) son del archivo que la regla acaba de nombrar.
+    const cortas: Record<string, [string, string]> = {
+      '`:62`': [de('connect.service'), 'const tiendasPiloto'],
+      '`:47`': [de('crypto'), 'export function verifyOAuthQueryHmac('],
+      '`:1165`': [de('catalog.service'), 'export async function archivarPareja('],
+    }
+    const enLaRegla = [
+      ...regla.matchAll(/`((?:shopify\.)?(?:connect|catalog|reconcile|mirror|outbox|store|worker)\.service\.ts|shopify\.crypto\.ts):\d+`/g),
+    ].map(m => m[0].slice(1, -1))
+    expect(enLaRegla.filter(a => !(a in anclas))).toEqual([]) // una ancla nueva entra a la tabla
+    const corridas: string[] = []
+    for (const [ancla, [archivo, texto]] of [...Object.entries(anclas), ...Object.entries(cortas)]) {
+      expect(regla).toContain(ancla)
+      const lineas = leer(archivo).split('\n')
+      const n = Number(ancla.replace(/`/g, '').split(':').pop())
+      if (!lineas[n - 1]?.includes(texto)) {
+        corridas.push(`${ancla} ⇒ «${texto}» está en la línea ${lineas.findIndex(l => l.includes(texto)) + 1}`)
+      }
+    }
+    expect(corridas).toEqual([])
+  })
+
   it('cada función que la regla nombra existe exportada en el código', () => {
     const nombres = [...new Set([...regla.matchAll(/`([a-zA-Z]+)\(/g)].map(m => m[1]))]
     expect(nombres.length).toBeGreaterThan(20)
