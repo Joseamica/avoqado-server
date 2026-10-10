@@ -2122,6 +2122,47 @@ router.get('/venues/:venueId/suppliers', authenticateTokenMiddleware, requireVen
  */
 router.get('/venues/:venueId/tables', authenticateTokenMiddleware, checkPermission('tables:read'), tableMobileController.getTables)
 
+/**
+ * @openapi
+ * /mobile/venues/{venueId}/tables/version:
+ *   get:
+ *     summary: Versión barata de mesas y plano (el POS la pregunta cada 10 s y sólo baja lo que cambió)
+ *     tags: [Mobile - Tables]
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: "{ success, data: { tablesVersion, floorPlanVersion } }"
+ */
+router.get(
+  '/venues/:venueId/tables/version',
+  authenticateTokenMiddleware,
+  checkPermission('tables:read'),
+  tableMobileController.getTablesVersion,
+)
+
+/**
+ * @openapi
+ * /mobile/venues/{venueId}/floor-plan:
+ *   get:
+ *     summary: Plano del salón para el POS (áreas + elementos activos; las mesas viajan en /tables)
+ *     tags: [Mobile - Tables]
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: "{ success, data: { floorPlanVersion, areas, elements, overLimit } }"
+ */
+router.get('/venues/:venueId/floor-plan', authenticateTokenMiddleware, checkPermission('tables:read'), tableMobileController.getFloorPlan)
+
 // ─── TABLE_SERVICE (PRO) — restaurant table service from the mobile POS ─────
 // Open/clear tables and add rounds to an open order. Gated by the
 // TABLE_SERVICE feature code (paid-tier blanket grant → PRO+; FREE gets 403),

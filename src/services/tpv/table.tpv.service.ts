@@ -23,6 +23,9 @@ interface TableStatusResponse {
   status: TableStatus
   areaId: string | null
   areaName: string | null
+  /** Plano en el POS (2026-10-09): orden y forma del área de la mesa. Opcionales: create/updateTable no los mandan. */
+  areaSortOrder?: number | null
+  areaFloorShape?: 'WIDE' | 'SQUARE' | 'TALL' | null
   currentOrder: {
     id: string
     orderNumber: string
@@ -109,7 +112,7 @@ export async function getTablesWithStatus(venueId: string): Promise<TableStatusR
     where: { venueId, active: true },
     include: {
       area: {
-        select: { id: true, name: true },
+        select: { id: true, name: true, sortOrder: true, floorShape: true },
       },
       currentOrder: {
         include: {
@@ -140,6 +143,8 @@ export async function getTablesWithStatus(venueId: string): Promise<TableStatusR
     status: table.status,
     areaId: table.areaId,
     areaName: table.area?.name || null,
+    areaSortOrder: table.area?.sortOrder ?? null,
+    areaFloorShape: table.area?.floorShape ?? null,
     // 🔴 Sólo se manda el puntero si la orden SIGUE ABIERTA. Al cobrar una
     // cuenta dividida, `Table.currentOrderId` se queda apuntando a la que se
     // acaba de pagar; mandarla hacía que el POS mostrara "Pagar $310.50" de
