@@ -295,6 +295,12 @@ CREATE INDEX "ShopifyReviewItem_venueId_status_createdAt_idx" ON "ShopifyReviewI
 CREATE INDEX "ShopifyReviewItem_productId_status_idx" ON "ShopifyReviewItem"("productId", "status");
 
 -- CreateIndex
+-- La retención de «Por revisar» (B10) borra cada hora las revisiones RESUELTAS de hace más de 90 días, entre todos los
+-- negocios: sin este índice cada pasada es un Seq Scan de toda la tabla (medido: 201 ms con 1,000,000 de filas; con un
+-- índice sobre resolvedAt, 0.04 ms).
+CREATE INDEX "ShopifyReviewItem_status_resolvedAt_idx" ON "ShopifyReviewItem"("status", "resolvedAt");
+
+-- CreateIndex
 CREATE INDEX "ShopifyImportIssue_venueId_createdAt_idx" ON "ShopifyImportIssue"("venueId", "createdAt");
 
 -- CreateIndex

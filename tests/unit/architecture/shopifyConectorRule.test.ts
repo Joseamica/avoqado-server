@@ -647,9 +647,14 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
       'si está PAUSED, manda `pausedFrom`',
       "`SELECT set_config('avoqado.stock_origen', 'shopify', true)`",
     ])
+    // Una sola migración del conector, con marca POSTERIOR a la última de develop al unirse (la del índice de la retención
+    // se fundió aquí): ninguna otra carpeta `*shopify*`, para que el índice nunca se cree antes que su tabla.
     const carpetas = fs.readdirSync(path.join(RAIZ, 'prisma/migrations')).filter(d => d.endsWith('_shopify_conector'))
-    expect(carpetas).toHaveLength(1)
+    expect(carpetas).toEqual(['20261008230100_shopify_conector'])
+    expect(fs.readdirSync(path.join(RAIZ, 'prisma/migrations')).filter(d => /shopify/i.test(d))).toEqual(carpetas)
+    contieneTodas(['El índice `(status, resolvedAt)` va en la misma migración `shopify_conector`'])
     const sql = leer(`prisma/migrations/${carpetas[0]}/migration.sql`)
+    expect(sql).toContain('CREATE INDEX "ShopifyReviewItem_status_resolvedAt_idx" ON "ShopifyReviewItem"("status", "resolvedAt");')
     // M3: el tope de espera de candados va ANTES de todo (también del ALTER TYPE, los ALTER TABLE y las llaves foráneas), una vez.
     const sentencias = sql
       .replace(/--.*$/gm, '')

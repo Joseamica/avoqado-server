@@ -293,8 +293,9 @@ la guía. La página nunca ofrece comprar Premium para Shopify (§0).
   terminales, intents) y **las revisiones RESUELTAS hace más de 90 días** (`REVISIONES_RESUELTAS_DIAS`) cuya elección ya no está en camino:
   sin envío, o con su fila SENT, DISCARDED o ya borrada. Nunca se purga una revisión OPEN, ni una resuelta cuyo envío siga PENDING, FAILED,
   IN_PROGRESS o DEAD_LETTER. Sin la purga la tabla crece para siempre (a 30,000 revisiones en un negocio la lista cuesta 35 ms con Seq
-  Scan); la historia queda en `ActivityLog`. El índice `(status, resolvedAt)` es la migración `shopify_review_resolved_index`: sin él la
-  purga tarda 201 ms contra 0.04 ms con 1 M de filas.
+  Scan); la historia queda en `ActivityLog`. El índice `(status, resolvedAt)` va en la misma migración `shopify_conector` (la única del
+  conector, `20261008230100_shopify_conector`, posterior a la última de develop): sin él la purga tarda 201 ms contra 0.04 ms con 1 M de
+  filas.
 - **Prueba de volumen:** `tests/integration/shopify/catalogo-volumen.integration.test.ts` (5,000 variantes de punta a punta, ~9 min) está
   APAGADA por defecto (`describe.skip`) para no sumarle minutos al CI de todos. `SHOPIFY_VOLUMEN=1` la enciende, siempre en una base
   desechable:
