@@ -402,6 +402,7 @@ const SELECCION_CANDIDATO = {
   trackInventory: true,
   inventoryMethod: true,
   unit: true,
+  soldByWeight: true,
   deletedAt: true,
   deletedBy: true,
   originSystem: true,

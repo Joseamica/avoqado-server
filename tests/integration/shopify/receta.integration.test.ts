@@ -6,6 +6,8 @@
 import prisma from '@/utils/prismaClient'
 import { switchInventoryMethod } from '@/services/dashboard/productWizard.service'
 import { setProductInventoryMethod } from '@/services/dashboard/productInventoryIntegration.service'
+import { updateProduct } from '@/services/dashboard/product.dashboard.service'
+import { updateProduct as updateFromPos } from '@/controllers/mobile/product.mobile.controller'
 import { archiveShopifyProduct, syncShopifyProduct } from '@/services/commerce-channels/shopify/shopify.catalog.service'
 import { reconcileVenue, resolveShopifyReview } from '@/services/commerce-channels/shopify/shopify.reconcile.service'
 import { applyShopifyLevel, suspendPair } from '@/services/commerce-channels/shopify/shopify.mirror.service'
@@ -532,5 +534,92 @@ describe('FF-I1: pasar a receta por setProductInventoryMethod conserva la fila d
     expect(r).toMatchObject({ etapa: 'STOCK', aplicados: 0 })
     expect((await pareja(e)).suspendedReason).toBeNull()
     expect(await incidencia(e)).toBeNull()
+  })
+})
+
+describe('🔴 P1-2: el PATCH genérico del producto (ficha del dashboard y PATCH móvil) también suspende o pide el cuadre', () => {
+  const actor = (e: EscenarioShopify) => ({ type: 'HUMAN' as const, staffId: e.staffId, impersonating: false })
+  const incidenciaDe = (e: EscenarioShopify) =>
+    prisma.shopifyImportIssue.findFirst({ where: { venueId: e.venueId, productId: e.productId } })
+  const filasDe = (e: EscenarioShopify) =>
+    prisma.shopifyStockOutbox.findMany({ where: { productId: e.productId }, select: { status: true, lastError: true }, take: 5 })
+  /** El PATCH móvil real (`/mobile/venues/:venueId/products/:productId`), con un req/res de prueba. */
+  async function patchMovil(e: EscenarioShopify, body: Record<string, unknown>) {
+    const r: { status: number; error: unknown } = { status: 200, error: undefined }
+    const req = {
+      params: { venueId: e.venueId, productId: e.productId },
+      body,
+      authContext: { userId: e.staffId, venueId: e.venueId, orgId: e.organizationId, role: 'MANAGER' },
+    }
+    const res = {
+      status(code: number) {
+        r.status = code
+        return this
+      },
+      json() {
+        return this
+      },
+    }
+    await updateFromPos(req as never, res as never, err => {
+      r.error = err
+    })
+    if (r.error) throw r.error
+    return r
+  }
+
+  it('dashboard: «Se vende por peso» sobre una pareja viva ⇒ SIN_INVENTARIO con UNIDAD_NO_PIEZA y lo que no salió se descarta', async () => {
+    const e = await escenario()
+    await prisma.$executeRaw`UPDATE "Inventory" SET "currentStock" = "currentStock" - 1 WHERE id = ${e.inventoryId}` // una fila viva
+    await updateProduct(e.venueId, e.productId, { soldByWeight: true } as never, actor(e))
+    expect((await prisma.product.findUniqueOrThrow({ where: { id: e.productId } })).unit).toBe('KILOGRAM')
+    expect((await pareja(e)).suspendedReason).toBe('SIN_INVENTARIO')
+    expect(await incidenciaDe(e)).toMatchObject({ reason: 'UNIDAD_NO_PIEZA' })
+    expect(await filasDe(e)).toEqual([{ status: 'DISCARDED', lastError: 'PAREJA_SUSPENDIDA' }])
+    // Ya suspendida, la venta de 1 kg no viaja: el guardia no encola nada de una pareja suspendida.
+    await prisma.$executeRaw`UPDATE "Inventory" SET "currentStock" = "currentStock" - 1 WHERE id = ${e.inventoryId}`
+    expect(await prisma.shopifyStockOutbox.count({ where: { productId: e.productId, status: 'PENDING' } })).toBe(0)
+  })
+
+  it('móvil: a receta ⇒ METODO_RECETA; sin control de existencias ⇒ SIN_INVENTARIO_EN_AVOQADO', async () => {
+    const receta = await escenario()
+    await patchMovil(receta, { inventoryMethod: 'RECIPE' })
+    expect((await pareja(receta)).suspendedReason).toBe('SIN_INVENTARIO')
+    expect(await incidenciaDe(receta)).toMatchObject({ reason: 'METODO_RECETA' })
+
+    const sinSeguimiento = await escenario()
+    await patchMovil(sinSeguimiento, { trackInventory: false })
+    expect((await pareja(sinSeguimiento)).suspendedReason).toBe('SIN_INVENTARIO')
+    expect(await incidenciaDe(sinSeguimiento)).toMatchObject({ reason: 'SIN_INVENTARIO_EN_AVOQADO' })
+  })
+
+  it('móvil: «se vende por peso» sin mandar la unidad (el PATCH no la fuerza) también suspende: la venta descuenta kilos', async () => {
+    const e = await escenario()
+    await patchMovil(e, { soldByWeight: true })
+    expect(await prisma.product.findUniqueOrThrow({ where: { id: e.productId } })).toMatchObject({ soldByWeight: true, unit: 'UNIT' })
+    expect((await pareja(e)).suspendedReason).toBe('SIN_INVENTARIO')
+    expect(await incidenciaDe(e)).toMatchObject({ reason: 'UNIDAD_NO_PIEZA' })
+  })
+
+  it('de vuelta a pieza por la ficha ⇒ pide el cuadre (que la reactiva comparando)', async () => {
+    const e = await escenario()
+    await updateProduct(e.venueId, e.productId, { soldByWeight: true } as never, actor(e))
+    await sinCuadrePedido(e)
+    await updateProduct(e.venueId, e.productId, { soldByWeight: false, unit: 'UNIT' } as never, actor(e))
+    expect((await pareja(e)).suspendedReason).toBe('SIN_INVENTARIO') // la reactiva el cuadre, no el PATCH
+    expect(await sucursal(e)).toMatchObject({ needsReconcile: true })
+  })
+
+  it('regresión: editar el nombre de un producto elegible no toca la pareja ni pide cuadre; uno sin Shopify, igual que siempre', async () => {
+    const e = await escenario()
+    await sinCuadrePedido(e)
+    await updateProduct(e.venueId, e.productId, { name: 'Otro nombre' } as never, actor(e))
+    await patchMovil(e, { name: 'Otro nombre 2' })
+    expect(await pareja(e)).toMatchObject({ suspendedReason: null })
+    expect(await sucursal(e)).toMatchObject({ needsReconcile: false })
+    expect(await incidenciaDe(e)).toBeNull()
+
+    const sin = await agregarProductoShopify(e, { pareja: false })
+    await updateProduct(e.venueId, sin.productId, { soldByWeight: true } as never, actor(e))
+    expect((await prisma.product.findUniqueOrThrow({ where: { id: sin.productId } })).unit).toBe('KILOGRAM')
   })
 })

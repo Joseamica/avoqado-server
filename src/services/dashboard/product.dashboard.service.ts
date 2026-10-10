@@ -22,6 +22,7 @@ import {
 import { normalizarIvaDeProducto, traducirErrorDeIva } from '../fiscal/normalizarIvaDeProducto'
 import { bloquearParaCambiarIva } from '../fiscal/exclusionContable'
 import { isRetryableDbError } from '../../utils/serializableRetry'
+import { ajustarParejaAlProducto } from '../commerce-channels/shopify/shopify.store.service'
 
 export interface CreateProductDto {
   name: string
@@ -968,6 +969,9 @@ export async function updateProduct(
     }
     // Con el estado FINAL (el PATCH parcial puede no traer `type`): una cita o un evento no se inventaría. Revierte todo.
     if (isNonInventoriable(updated.type, updated.trackInventory)) throw new AppError(NON_INVENTORIABLE_MESSAGE, 400)
+    // P1-2 (Shopify): pasar a kilo, a receta o sin control de existencias suspende la pareja; volver a pieza pide el
+    // cuadre. Después del Product y ANTES de Inventory (orden de candados del conector).
+    await ajustarParejaAlProducto(tx, updated)
     await ensureQuantityInventoryRow(tx, updated)
     return updated
   })

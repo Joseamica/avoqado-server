@@ -90,7 +90,7 @@ fila `−1` sale después). La limpieza horaria (M4, §10) la cuenta como viva; 
 descarta como a cualquier otra.
 
 No encola: un cambio con la marca de origen `shopify`, un delta 0, ni un `DELETE` de la fila (ver §5). El buzón lo llenan SÓLO el guardia y
-la resolución «usar Avoqado» (`reconcile.service.ts:1279`).
+la resolución «usar Avoqado» (`reconcile.service.ts:1288`).
 
 ## 3. La marca de origen: si aplicas en Avoqado algo que VINO de Shopify
 
@@ -106,12 +106,12 @@ trigger: no la uses para nada más.
   pareja iniciada y no suspendida, y TODAS sus sumas son de la generación vigente de la sucursal (T3): Σ vivas y Σ DEAD_LETTER por igual.
   Las filas de una generación vieja y las `RELIGADA_A_OTRA_TIENDA` (que quedan en la generación anterior) NO entran en la cuenta; el filtro
   por `generation` vive en `productBlocked(…)`, `liveOutboxSum(…)`, `bloquearFilasDelProducto` y `abrirRevision` (`mirror.service.ts:5`,
-  `reconcile.service.ts:726`).
+  `reconcile.service.ts:735`).
 - Una DEAD_LETTER (de la generación vigente) conserva su delta en la cuenta hasta que la resolución la descarte. Una venta que dejó
   `Inventory = 9`, espejo 10 y su `−1` en DEAD_LETTER es un estado CORRECTO, no algo que «arreglar».
 - COMPARAR con diferencia abre `REACTIVADA` con `offset = Inventory − S`; si los saldos ya coinciden, cierra en la misma tx la revisión OPEN
   del producto (`offset = 0`, §11.8).
-- El cuadre calcula `total = Inventory − espejo − Σ vivas − Σ DEAD_LETTER` (`abrirRevision`, `reconcile.service.ts:726`) y decide en este
+- El cuadre calcula `total = Inventory − espejo − Σ vivas − Σ DEAD_LETTER` (`abrirRevision`, `reconcile.service.ts:735`) y decide en este
   orden:
   - con DEAD_LETTER (aunque `total = 0`, que es el caso normal de un ATORADO): abre o actualiza `ATORADO` (`INCIERTO` si alguna es ambigua)
     con `offset = total`; nunca cierra;
@@ -138,11 +138,11 @@ espejo dejaría la cuenta en 11 contra las 12 piezas de Avoqado. Si hay filas vi
 
 - **Product se bloquea `FOR NO KEY UPDATE`** (K11): serializa con otros escritores del catálogo sin frenar el `FOR KEY SHARE` de una venta
   que inserta un renglón con llave foránea al producto. Catálogo y archivo lo piden explícito (`bloquearProductos`,
-  `catalog.service.ts:417`; `archivarPareja(…)`, `:1179`); `switchInventoryMethod(…)` y `setProductInventoryMethod(…)` lo toman con el
+  `catalog.service.ts:418`; `archivarPareja(…)`, `:1180`); `switchInventoryMethod(…)` y `setProductInventoryMethod(…)` lo toman con el
   `product.update` que ya hacen (no toca llaves) y llaman a `suspenderParejaPorReceta(…)` DESPUÉS, nunca antes.
 - **El mensajero**, con o sin cerco, toma el orden general sin Product: sucursal y tienda `FOR SHARE`, pareja `FOR UPDATE`, la fila del
   buzón `FOR UPDATE` (releída: sigue `IN_PROGRESS` con su `claimToken`) y, con cerco de evento, el evento `FOR SHARE` al final
-  (`conFilaPropia`, `outbox.service.ts:166`). Nunca la fila primero, ni con `SKIP LOCKED`: `claimShopifyOutbox(…)` ELIGE su candidata sin
+  (`conFilaPropia`, `outbox.service.ts:169`). Nunca la fila primero, ni con `SKIP LOCKED`: `claimShopifyOutbox(…)` ELIGE su candidata sin
   candado y la revalida ya con los candados puestos.
 - Los cierres por falla (devolver a la fila, FAILED, DEAD_LETTER) van sin cerco, con los candados en orden, y se protegen con el
   `claimToken` de la fila: si ya no es suya, no escriben. No le exijas al mensajero revisar el cerco antes de esos cierres. Un 401 sólo
@@ -168,17 +168,23 @@ espejo dejaría la cuenta en 11 contra las 12 piezas de Avoqado. Si hay filas vi
 
 Un `DELETE` de la fila (pasar el producto a receta, borrar la sucursal, limpiar una demo) no se manda a Shopify: dejaría la tienda en línea
 en cero. Pasar un producto a RECETA, por CUALQUIER camino, llama a `suspenderParejaPorReceta(…)` DESPUÉS de escribir el `Product` y ANTES de
-tocar `Inventory`; y volver a CANTIDAD llama a `pedirCuadreAlVolverACantidad(…)`. Los caminos de hoy son dos: `switchInventoryMethod(…)`
-(`productWizard.service.ts:569`), `setProductInventoryMethod(…)` (`productInventoryIntegration.service.ts:612`: PUT inventory-method, paso 2
-del asistente y la tool de recetas del MCP); si agregas otro que borre o cree filas de `Inventory` de productos ligados, usa los mismos dos
-ayudantes (`shopify.store.service.ts:305`).
+tocar `Inventory`; y volver a CANTIDAD llama a `pedirCuadreAlVolverACantidad(…)`. Los caminos de hoy son CUATRO. Dos cambian el método:
+`switchInventoryMethod(…)` (`productWizard.service.ts:569`) y `setProductInventoryMethod(…)` (`productInventoryIntegration.service.ts:612`:
+PUT inventory-method, paso 2 del asistente y la tool de recetas del MCP). Los otros dos son los PATCH genéricos del producto, que cambian
+`type`, `trackInventory`, `inventoryMethod`, `unit` y `soldByWeight`: la ficha del dashboard (`updateProduct(…)` de
+`product.dashboard.service.ts`) y el PATCH móvil (`product.mobile.controller.ts`). Esos dos llaman a `ajustarParejaAlProducto(…)` (P1-2)
+entre `product.update` y `ensureQuantityInventoryRow`: si el producto ya no se sincroniza, suspende con el motivo real (por
+`suspenderParejaPorReceta(…)`, con su excepción U3); si sí, `pedirCuadreAlVolverACantidad(…)`. Antes no lo hacían: pasar a kilo por la ficha
+dejaba la pareja viva y cada kilo entero vendido le quitaba una PIEZA a Shopify (reproducido en vivo, 39 → 38). Si agregas otro camino que
+borre o cree filas de `Inventory` de productos ligados, o que cambie esos campos, usa los mismos ayudantes (`shopify.store.service.ts:308`).
 
 - `suspenderParejaPorReceta(…)` toma la pareja con `bloquearPareja(…)` y la suspende con `SIN_INVENTARIO` (`suspendPair(…)`). Excepción: un
   producto que el conector archivó con un envío en camino se queda en `NIVEL_INEXISTENTE`; pisarlo apagaría el reintento que lo borra.
 - `pedirCuadreAlVolverACantidad(…)` pide el cuadre (`pedirCuadre(…)`) SÓLO si la pareja está suspendida por `SIN_INVENTARIO`: pedirlo
   siempre armaría un cuadre por cada alta y cada PUT. El cuadre la reactiva solo (`COMPARAR`) cuando el producto vuelve a ser elegible
-  (`trackInventory` + `QUANTITY`, por pieza y de un tipo con existencias: `motivoNoSincronizable(…)`, la MISMA regla con que el catálogo
-  liga) y hay `Inventory` y nivel en Shopify; mientras tanto aparece en «Productos sin pareja».
+  (`trackInventory` + `QUANTITY`, por pieza —ni otra unidad ni «se vende por peso»: la venta descuenta kilos aunque la unidad diga pieza— y
+  de un tipo con existencias: `motivoNoSincronizable(…)`, la MISMA regla con que el catálogo liga) y hay `Inventory` y nivel en Shopify;
+  mientras tanto aparece en «Productos sin pareja».
 - Una fila de `Inventory` sola NO basta para reactivar (FF-I1): `setProductInventoryMethod(…)` la conserva al pasar a receta, y con ella el
   cuadre revivía la pareja y Shopify sobrevendía. Por eso `initializePair(…)`, `applyShopifyLevel(…)` y la resolución (U2) leen el producto
   bajo el candado de la pareja (`sincronizableBajoCandado(…)`) y, si ya no se sincroniza, suspenden con `SIN_INVENTARIO` en vez de iniciar,
@@ -188,10 +194,13 @@ ayudantes (`shopify.store.service.ts:305`).
   el que devuelve `motivoNoSincronizable(…)` y que `suspendPair(…)` recibe (`suspenderParejaPorReceta(…)` pasa `METODO_RECETA`). El 409
   `SHOPIFY_SIN_INVENTARIO` de la resolución nombra ese mismo motivo. Si el motivo cambia mientras sigue suspendida (de receta a kilos),
   `sincronizableBajoCandado(…)` pone la incidencia al día; al reactivarse se limpian todos (`MOTIVOS_DE_SUSPENSION`).
-- **Sin los ayudantes de B7 (R-M3):** una pareja VIVA cuyo producto deja de ser elegible por otro camino (apagar `trackInventory` desde la
-  ficha, pasar a kilo, cambiar el tipo) también se suspende, por dos puertas: el catálogo (`upsertShopifyVariant(…)` lo ve con el `Product`
-  ya bloqueado y suspende con `Inventory` y las filas bloqueadas antes del evento) y la tanda de stock del cuadre, que la manda a
-  `applyShopifyLevel(…)` aunque Shopify no haya cambiado. El orden de candados (§10.3) no cambia.
+- **Sin los ayudantes (R-M3):** una pareja VIVA cuyo producto deja de ser elegible por un camino que no los llama (SQL a mano, un camino
+  nuevo) también se suspende, por tres puertas: el catálogo (`upsertShopifyVariant(…)` lo ve con el `Product` ya bloqueado y suspende con
+  `Inventory` y las filas bloqueadas antes del evento), la tanda de stock del cuadre, que la manda a `applyShopifyLevel(…)` aunque Shopify
+  no haya cambiado, y el mensajero (P1-2): una fila NO ambigua de una pareja viva cuyo producto ya no se sincroniza no recibe un envío
+  nuevo; `runShopifyOutboxRow(…)` suspende la pareja con el motivo real y descarta la fila (`PAREJA_SUSPENDIDA`), antes de mandar a
+  DEAD_LETTER un delta no entero. La ambigua con sus parámetros congelados se sigue resolviendo con su llave. El orden de candados (§10.3)
+  no cambia.
 
 ## 6. Envíos en camino, dudas y generaciones (§9.1-§9.2, §10.14, §11.3, §11.7)
 
@@ -202,7 +211,7 @@ ayudantes (`shopify.store.service.ts:305`).
     (`EN_VUELO` = una fila IN_PROGRESS; `INCIERTO` = una fila viva o DEAD_LETTER ambigua).
   - Conectar una generación nueva (reconectar la sucursal a la MISMA tienda, con su ubicación u otra, o tomar la ubicación que ocupaba otra
     sucursal desconectada) responde 409 `SHOPIFY_ENVIO_EN_CAMINO` mientras haya filas `IN_PROGRESS` o vivas ambiguas (`envioEnCamino(…)`,
-    `store.service.ts:271`) de cualquier generación anterior de esa sucursal o de la que ocupaba la ubicación. Una DEAD_LETTER ambigua no la
+    `store.service.ts:273`) de cualquier generación anterior de esa sucursal o de la que ocupaba la ubicación. Una DEAD_LETTER ambigua no la
     frena: ya no puede llegar.
   - Religar la sucursal a OTRA tienda no es un 409: sus filas `IN_PROGRESS` y vivas ambiguas pasan a DEAD_LETTER con
     `lastError = RELIGADA_A_OTRA_TIENDA` (duda y parámetros congelados conservados; `aCuarentenaPorReligar`, `connect.service.ts:639`),

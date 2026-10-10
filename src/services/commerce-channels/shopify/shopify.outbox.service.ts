@@ -40,7 +40,10 @@ import {
   CercoShopify,
   eventoVigente,
   marcarFaltaPermiso,
+  motivoNoSincronizable,
   SHOPIFY_IMPORT_ERRORES_TERMINALES,
+  suspendPair,
+  type MotivoNoSincronizable,
 } from './shopify.mirror.service'
 // Ciclo de importación con store.service (que importa `avisarTienda` de aquí) a propósito: sólo se llaman dentro de funciones.
 import { leerToken, revocarTiendaSiVigente } from './shopify.store.service'
@@ -278,8 +281,12 @@ type Destino = { inventoryItemId: string; locationId: string }
 type Decision =
   | { k: 'ENVIAR'; destino: Destino; resolver: boolean }
   | { k: 'DESCARTAR'; motivo: string }
+  | { k: 'SUSPENDER'; motivo: MotivoNoSincronizable }
   | { k: 'PAUSAR' }
   | { k: 'MUERTA'; motivo: string }
+/** Lo que decide si el producto todavía se sincroniza (`motivoNoSincronizable`), leído sin candado (P1-2). */
+type ProductoDeFila = { type: string; trackInventory: boolean; inventoryMethod: string | null; unit: string | null; soldByWeight: boolean }
+const SELECCION_PRODUCTO = { type: true, trackInventory: true, inventoryMethod: true, unit: true, soldByWeight: true } as const
 
 /**
  * - sin sucursal ⇒ DISCARDED; tienda no ACTIVE o sucursal con un error terminal (§11.3, §12.2) ⇒ PAUSADO (sin gastar
@@ -290,8 +297,13 @@ type Decision =
  *   (A7-5, nunca viaja a una conexión que ya no es la suya); sin pareja ⇒ DISCARDED; delta no
  *   entero ⇒ DEAD_LETTER; pareja suspendida ⇒ DISCARDED PAREJA_SUSPENDIDA; sucursal no ACTIVE o pareja sin iniciar ⇒
  *   PAUSADO (A7-4). Si no, se manda (reusando los parámetros congelados de un intento anterior, §9.2).
+ * - P1-2: un producto con pareja viva que ya no se sincroniza (pasó a kilo, a receta o sin control de existencias por un
+ *   camino que no suspendió la pareja) nunca recibe un envío NUEVO: se suspende la pareja con el motivo real y la fila se
+ *   descarta.
+ *   Antes que el delta no entero: una pesada fraccionaria no es un atorado que alguien deba revisar. La ambigua de arriba
+ *   no entra aquí (pudo llegar: se resuelve con su llave).
  */
-function decidir(row: ShopifyStockOutbox, ctx: Contexto): Decision {
+function decidir(row: ShopifyStockOutbox, ctx: Contexto, producto: ProductoDeFila | null): Decision {
   if (!ctx.link) return { k: 'DESCARTAR', motivo: 'SIN_ENLACE' }
   if (ctx.store?.status !== 'ACTIVE') return { k: 'PAUSAR' }
   if (ctx.link.importError !== null && SHOPIFY_IMPORT_ERRORES_TERMINALES.includes(ctx.link.importError)) return { k: 'PAUSAR' }
@@ -300,6 +312,10 @@ function decidir(row: ShopifyStockOutbox, ctx: Contexto): Decision {
   if (row.ambiguous && congelados) return { k: 'ENVIAR', destino: congelados, resolver: true }
   if (ctx.link.generation !== row.generation) return { k: 'DESCARTAR', motivo: 'GENERACION_VIEJA' }
   if (!ctx.pareja) return { k: 'DESCARTAR', motivo: 'SIN_PAREJA' }
+  // Sólo una pareja VIVA (la que hoy se mandaría): una sin iniciar o suspendida ya la decide quien la inicia (FF-I1).
+  const viva = ctx.link.status === 'ACTIVE' && !!ctx.pareja.initializedAt && !ctx.pareja.suspendedReason
+  const inelegible = viva && producto ? motivoNoSincronizable(producto) : null
+  if (inelegible) return { k: 'SUSPENDER', motivo: inelegible }
   if (!row.delta.isInteger()) return { k: 'MUERTA', motivo: 'DELTA_NO_ENTERO' }
   if (ctx.pareja.suspendedReason) return { k: 'DESCARTAR', motivo: 'PAREJA_SUSPENDIDA' }
   if (ctx.link.status !== 'ACTIVE' || !ctx.pareja.initializedAt) return { k: 'PAUSAR' }
@@ -461,7 +477,9 @@ export async function runShopifyOutboxRow(
 
   const link = await prisma.shopifyLocationLink.findUnique({ where: { id: row.locationLinkId }, include: { store: true } })
   const pareja = await prisma.shopifyVariantLink.findUnique({ where: { productId: row.productId } })
-  const leida = decidir(row, contextoLeido(row.locationLinkId, link, pareja))
+  // Sin el producto: esta lectura sólo decide si hace falta mirar el plan y descifrar el token. Lo inelegible (P1-2) se
+  // decide abajo, ya con la pareja bloqueada.
+  const leida = decidir(row, contextoLeido(row.locationLinkId, link, pareja), null)
   // El plan sólo se mira para un cambio nuevo (#14); resolver una duda no lo es.
   const sinPlan = leida.k === 'ENVIAR' && !leida.resolver && !(await hasAccess(row.venueId))
   let token = ''
@@ -479,7 +497,9 @@ export async function runShopifyOutboxRow(
 
   type Previo = { k: 'ENVIAR'; destino: Destino; generation: number } | { k: 'SALIDA'; outcome: RowOutcome; atorada?: string }
   const previo = await conFilaPropia(row, claimToken, deps.cerco, async (tx, ctx): Promise<Previo> => {
-    let d = decidir(row, ctx)
+    // El producto, otra vez ya con la pareja bloqueada (sin candado: Product va ANTES que la sucursal, §10.3; quien lo
+    // vuelve inelegible suspende la pareja bajo su candado después, como en `sincronizableBajoCandado`).
+    let d = decidir(row, ctx, await tx.product.findUnique({ where: { id: row.productId }, select: SELECCION_PRODUCTO }))
     // Lo que no se preparó para salir (sin plan, o sin candado no se veía enviable) se devuelve: sale en otra vuelta.
     if (d.k === 'ENVIAR' && (leida.k !== 'ENVIAR' || sinPlan)) d = { k: 'PAUSAR' }
     if (d.k === 'ENVIAR') {
@@ -502,6 +522,17 @@ export async function runShopifyOutboxRow(
         where: { id },
         data: { status: 'DISCARDED', processedAt: now, lastError: d.motivo, ...SIN_RECLAMO },
       })
+      return { k: 'SALIDA', outcome: 'DISCARDED' }
+    }
+    if (d.k === 'SUSPENDER') {
+      // La pareja ya está bloqueada (FOR UPDATE) y la fila es nuestra: suspendPair descarta las demás PENDING/FAILED no
+      // ambiguas del producto; ésta (IN_PROGRESS, nuestra) se descarta aquí, con el mismo motivo.
+      await suspendPair(tx, ctx.pareja!.id, 'SIN_INVENTARIO', d.motivo)
+      await tx.shopifyStockOutbox.update({
+        where: { id },
+        data: { status: 'DISCARDED', processedAt: now, lastError: 'PAREJA_SUSPENDIDA', ...SIN_RECLAMO },
+      })
+      logger.warn(`[SHOPIFY] buzón: fila ${row.id} de un producto que ya no se sincroniza (${d.motivo}); pareja suspendida, no sale`)
       return { k: 'SALIDA', outcome: 'DISCARDED' }
     }
     await tx.shopifyStockOutbox.update({

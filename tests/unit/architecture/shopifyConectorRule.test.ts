@@ -27,6 +27,7 @@ const codigo = [
   'src/services/mobile/inventory.mobile.service.ts',
   'src/services/dashboard/productWizard.service.ts',
   'src/services/dashboard/productInventoryIntegration.service.ts',
+  'src/services/dashboard/product.dashboard.service.ts',
   'src/services/dashboard/venueFeature.dashboard.service.ts',
   'src/services/stripe.service.ts',
 ]
@@ -492,9 +493,42 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     expect(leer('src/services/dashboard/productInventoryIntegration.service.ts')).toContain('pedirCuadreAlVolverACantidad(tx, productId)')
   })
 
+  it('🔴 P1-2: los PATCH genéricos del producto (ficha y móvil) son el 3º y 4º camino: suspenden o piden el cuadre, entre el Product y el Inventory', () => {
+    contieneTodas([
+      'Los caminos de hoy son CUATRO.',
+      'Esos dos llaman a `ajustarParejaAlProducto(…)` (P1-2) entre `product.update` y `ensureQuantityInventoryRow`',
+      'cada kilo entero vendido le quitaba una PIEZA a Shopify (reproducido en vivo, 39 → 38)',
+      'y el mensajero (P1-2): una fila NO ambigua de una pareja viva cuyo producto ya no se sincroniza no recibe un envío nuevo',
+    ])
+    expect(regla).not.toContain('Los caminos de hoy son dos')
+    for (const archivo of ['src/services/dashboard/product.dashboard.service.ts', 'src/controllers/mobile/product.mobile.controller.ts']) {
+      enOrden(cuerpo(leer(archivo), 'export async function updateProduct('), [
+        'tx.product.update(',
+        'await ajustarParejaAlProducto(tx, updated)',
+        'await ensureQuantityInventoryRow(tx, updated)',
+      ])
+    }
+    const store = leer(`${SHOPIFY}/shopify.store.service.ts`)
+    enOrden(cuerpo(store, 'export async function ajustarParejaAlProducto('), [
+      'motivoNoSincronizable(producto)',
+      'suspenderParejaPorReceta(db, producto, motivo)',
+      'pedirCuadreAlVolverACantidad(db, producto.id)',
+    ])
+    // «Se vende por peso» cuenta como otra unidad: la venta descuenta kilos aunque la unidad diga pieza.
+    expect(cuerpo(leer(`${SHOPIFY}/shopify.mirror.service.ts`), 'export function motivoNoSincronizable(')).toContain(
+      "if (p.soldByWeight || (p.unit && !UNIDADES_PIEZA.includes(p.unit))) return 'UNIDAD_NO_PIEZA'",
+    )
+    // El mensajero: lo inelegible de una pareja viva se suspende ANTES del delta no entero; la ambigua congelada va antes.
+    enOrden(cuerpo(leer(`${SHOPIFY}/shopify.outbox.service.ts`), 'function decidir('), [
+      'if (row.ambiguous && congelados)',
+      "return { k: 'SUSPENDER', motivo: inelegible }",
+      "return { k: 'MUERTA', motivo: 'DELTA_NO_ENTERO' }",
+    ])
+  })
+
   it('🔴 FF-I1: reactivar exige un producto elegible (no basta la fila de Inventory), con UNA regla compartida con el catálogo', () => {
     contieneTodas([
-      'cuando el producto vuelve a ser elegible (`trackInventory` + `QUANTITY`, por pieza y de un tipo con existencias: `motivoNoSincronizable(…)`, la MISMA regla con que el catálogo liga) y hay `Inventory` y nivel en Shopify',
+      'cuando el producto vuelve a ser elegible (`trackInventory` + `QUANTITY`, por pieza —ni otra unidad ni «se vende por peso»: la venta descuenta kilos aunque la unidad diga pieza— y de un tipo con existencias: `motivoNoSincronizable(…)`, la MISMA regla con que el catálogo liga) y hay `Inventory` y nivel en Shopify',
       'Una fila de `Inventory` sola NO basta para reactivar (FF-I1): `setProductInventoryMethod(…)` la conserva al pasar a receta',
       'leen el producto bajo el candado de la pareja (`sincronizableBajoCandado(…)`) y, si ya no se sincroniza, suspenden con `SIN_INVENTARIO`',
     ])
@@ -531,15 +565,19 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
       "reason === 'SIN_INVENTARIO' && motivo ? motivo : ISSUE_DE[reason]",
     )
     expect(cuerpo(leer(`${SHOPIFY}/shopify.store.service.ts`), 'export async function suspenderParejaPorReceta(')).toContain(
-      "suspendPair(db, pareja.id, 'SIN_INVENTARIO', 'METODO_RECETA')",
+      "motivo: MotivoNoSincronizable = 'METODO_RECETA'",
+    )
+    expect(cuerpo(leer(`${SHOPIFY}/shopify.store.service.ts`), 'export async function suspenderParejaPorReceta(')).toContain(
+      "suspendPair(db, pareja.id, 'SIN_INVENTARIO', motivo)",
     )
     expect(cuerpo(leer(`${SHOPIFY}/shopify.reconcile.service.ts`), 'async function resolver(')).toContain('throw sinInventario(res.motivo)')
   })
 
   it('🔴 R-M3: una pareja viva que se vuelve inelegible sin B7 se suspende en el catálogo y en la tanda de stock, sin cambiar §10.3', () => {
     contieneTodas([
-      'una pareja VIVA cuyo producto deja de ser elegible por otro camino (apagar `trackInventory` desde la ficha, pasar a kilo, cambiar el tipo) también se suspende',
-      'la tanda de stock del cuadre, que la manda a `applyShopifyLevel(…)` aunque Shopify no haya cambiado. El orden de candados (§10.3) no cambia',
+      'una pareja VIVA cuyo producto deja de ser elegible por un camino que no los llama (SQL a mano, un camino nuevo) también se suspende, por tres puertas',
+      'la tanda de stock del cuadre, que la manda a `applyShopifyLevel(…)` aunque Shopify no haya cambiado, y el mensajero (P1-2)',
+      'La ambigua con sus parámetros congelados se sigue resolviendo con su llave. El orden de candados (§10.3) no cambia',
     ])
     const catalogo = leer(`${SHOPIFY}/shopify.catalog.service.ts`)
     // Product → sucursal y tienda → pareja → Inventory → filas → evento, y la decisión con el Product ya bloqueado.
@@ -558,7 +596,9 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
       "if (cambios.inelegible) await suspendPair(tx, pareja.id, 'SIN_INVENTARIO', cambios.inelegible)",
     )
     const reconcile = leer(`${SHOPIFY}/shopify.reconcile.service.ts`)
-    expect(reconcile).toMatch(/product: \{\s*select: \{[^}]*type: true, trackInventory: true, inventoryMethod: true, unit: true/)
+    expect(reconcile).toMatch(
+      /product: \{\s*select: \{[^}]*type: true,\s*trackInventory: true,\s*inventoryMethod: true,\s*unit: true,\s*soldByWeight: true/,
+    )
     expect(cuerpo(reconcile, 'async function tandaDeStock(')).toContain(
       'if (inelegible || nivel.available !== p.mirrorAvailable || nivel.committed !== p.mirrorCommitted)',
     )
@@ -721,21 +761,21 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
       'connect.service.ts:639': [de('connect.service'), 'async function aCuarentenaPorReligar('],
       'shopify.crypto.ts:32': [de('crypto'), 'export function formaDeFirmaOAuth('],
       'catalog.service.ts:68': [de('catalog.service'), 'export const FILTRO_ESTADO'],
-      'catalog.service.ts:417': [de('catalog.service'), 'async function bloquearProductos('],
-      'reconcile.service.ts:1279': [de('reconcile.service'), 'tx.shopifyStockOutbox.create('],
-      'reconcile.service.ts:726': [de('reconcile.service'), 'async function abrirRevision('],
+      'catalog.service.ts:418': [de('catalog.service'), 'async function bloquearProductos('],
+      'reconcile.service.ts:1288': [de('reconcile.service'), 'tx.shopifyStockOutbox.create('],
+      'reconcile.service.ts:735': [de('reconcile.service'), 'async function abrirRevision('],
       'mirror.service.ts:5': [de('mirror.service'), 'Invariante operativo'],
       'mirror.service.ts:372': [de('mirror.service'), 'export async function marcarFaltaPermiso('],
-      'outbox.service.ts:166': [de('outbox.service'), 'async function conFilaPropia'],
-      'shopify.store.service.ts:305': [de('store.service'), 'export async function suspenderParejaPorReceta('],
-      'store.service.ts:271': [de('store.service'), 'export async function envioEnCamino('],
+      'outbox.service.ts:169': [de('outbox.service'), 'async function conFilaPropia'],
+      'shopify.store.service.ts:308': [de('store.service'), 'export async function suspenderParejaPorReceta('],
+      'store.service.ts:273': [de('store.service'), 'export async function envioEnCamino('],
       'worker.service.ts:362': [de('worker.service'), 'export async function limpiarShopify('],
     }
     // Las cortas (`:N`) son del archivo que la regla acaba de nombrar.
     const cortas: Record<string, [string, string]> = {
       '`:62`': [de('connect.service'), 'const tiendasPiloto'],
       '`:47`': [de('crypto'), 'export function verifyOAuthQueryHmac('],
-      '`:1179`': [de('catalog.service'), 'export async function archivarPareja('],
+      '`:1180`': [de('catalog.service'), 'export async function archivarPareja('],
     }
     const enLaRegla = [
       ...regla.matchAll(/`((?:shopify\.)?(?:connect|catalog|reconcile|mirror|outbox|store|worker)\.service\.ts|shopify\.crypto\.ts):\d+`/g),

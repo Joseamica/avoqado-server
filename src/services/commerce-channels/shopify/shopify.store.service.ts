@@ -19,9 +19,11 @@ import {
   cercoVigente,
   eventoVigente,
   marcarFaltaPermiso,
+  motivoNoSincronizable,
   suspendPair,
   type CercoShopify,
   type fetchLevels,
+  type MotivoNoSincronizable,
 } from './shopify.mirror.service'
 import { avisarTienda } from './shopify.outbox.service'
 
@@ -300,11 +302,13 @@ export async function pedirCuadre(
  * nunca encola y Shopify no se entera: la pareja se suspende (`SIN_INVENTARIO`, nada viaja; el cuadre la reactiva al
  * volver). Se llama DESPUÉS de escribir el `Product` (su candado) y ANTES de tocar `Inventory`: sucursal → tienda → pareja
  * por `bloquearPareja` (BR-6/K14, §10.3). Sin pareja cuesta una lectura por índice. U3: un producto que el conector archivó
- * con un envío en camino se queda en `NIVEL_INEXISTENTE` (pisarlo apagaría el reintento de R5).
+ * con un envío en camino se queda en `NIVEL_INEXISTENTE` (pisarlo apagaría el reintento de R5). `motivo`: el real para
+ * «Productos sin pareja» (R-M2); `ajustarParejaAlProducto(…)` pasa el de kilos, tipo o sin control de existencias.
  */
 export async function suspenderParejaPorReceta(
   db: Prisma.TransactionClient,
   producto: { id: string; deletedAt: Date | null; deletedBy: string | null },
+  motivo: MotivoNoSincronizable = 'METODO_RECETA',
 ): Promise<void> {
   const enlace = await db.shopifyVariantLink.findUnique({ where: { productId: producto.id }, select: { id: true } })
   const pareja = enlace && (await bloquearPareja(db, enlace.id))
@@ -313,7 +317,34 @@ export async function suspenderParejaPorReceta(
     pareja.suspendedReason === 'NIVEL_INEXISTENTE' &&
     !!producto.deletedAt &&
     producto.deletedBy === SHOPIFY_SERVICE_ACTOR.servicePrincipalId
-  if (!archivadoConEnvio) await suspendPair(db, pareja.id, 'SIN_INVENTARIO', 'METODO_RECETA') // R-M2: el motivo real
+  if (!archivadoConEnvio) await suspendPair(db, pareja.id, 'SIN_INVENTARIO', motivo) // R-M2: el motivo real
+}
+
+/**
+ * P1-2: el PATCH genérico del producto (la ficha del dashboard, `updateProduct(…)`, y el PATCH móvil) cambia `type`,
+ * `trackInventory`, `inventoryMethod`, `unit` y `soldByWeight` sin pasar por `switchInventoryMethod(…)` ni
+ * `setProductInventoryMethod(…)`. Pasar a kilo dejaba la pareja viva y cada kilo entero vendido le quitaba una PIEZA a
+ * Shopify (reproducido en vivo: 39 → 38 por 1 kg). Con el producto YA escrito (su candado) y ANTES de tocar `Inventory`
+ * (§10.3), igual que los ayudantes de B7: si ya no se sincroniza (`motivoNoSincronizable(…)`, la MISMA regla del catálogo)
+ * se suspende con el motivo real (U3 incluida); si sí, se pide el cuadre como al volver a cantidad (sólo si estaba
+ * suspendida por `SIN_INVENTARIO`). Sin pareja cuesta una lectura por índice.
+ */
+export async function ajustarParejaAlProducto(
+  db: Prisma.TransactionClient,
+  producto: {
+    id: string
+    type: string
+    trackInventory: boolean
+    inventoryMethod: string | null
+    unit: string | null
+    soldByWeight: boolean
+    deletedAt: Date | null
+    deletedBy: string | null
+  },
+): Promise<void> {
+  const motivo = motivoNoSincronizable(producto)
+  if (motivo) await suspenderParejaPorReceta(db, producto, motivo)
+  else await pedirCuadreAlVolverACantidad(db, producto.id)
 }
 
 /**

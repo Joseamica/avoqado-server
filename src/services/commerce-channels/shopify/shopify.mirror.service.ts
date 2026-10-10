@@ -433,11 +433,19 @@ export const MOTIVOS_DE_SUSPENSION: ShopifyIssueReason[] = [
 ]
 
 const UNIDADES_PIEZA: string[] = ['UNIT', 'PIECE']
-type ProductoSincronizable = { type: string; trackInventory: boolean; inventoryMethod: string | null; unit: string | null }
+type ProductoSincronizable = {
+  type: string
+  trackInventory: boolean
+  inventoryMethod: string | null
+  unit: string | null
+  /** P1-2: la venta de un producto por peso descuenta kilos (`weightQuantity`) aunque su unidad diga pieza. */
+  soldByWeight: boolean
+}
 
 /**
  * Lo que impide sincronizar con Shopify el inventario de un producto (tipo, método, seguimiento, unidad); `null` =
- * elegible: por cantidad (`trackInventory` + `QUANTITY`), de un tipo que lleva existencias y por pieza. Es UNA regla: la
+ * elegible: por cantidad (`trackInventory` + `QUANTITY`), de un tipo que lleva existencias y por pieza (ni otra unidad ni
+ * «se vende por peso»: el PATCH móvil prende `soldByWeight` sin forzar `KILOGRAM`, y la venta descuenta kilos). Es UNA regla: la
  * usan el catálogo al ligar y el espejo al iniciar, aplicar o reactivar una pareja. Una fila de `Inventory` no basta:
  * `setProductInventoryMethod(…)` la conserva al pasar a receta, y con ella el cuadre revivía la pareja (Shopify sobrevendía).
  */
@@ -445,7 +453,7 @@ export function motivoNoSincronizable(p: ProductoSincronizable): MotivoNoSincron
   if (isNonInventoriable(p.type, true)) return 'TIPO_SIN_INVENTARIO'
   if (p.inventoryMethod === 'RECIPE') return 'METODO_RECETA'
   if (!p.trackInventory || p.inventoryMethod !== 'QUANTITY') return 'SIN_INVENTARIO_EN_AVOQADO'
-  if (p.unit && !UNIDADES_PIEZA.includes(p.unit)) return 'UNIDAD_NO_PIEZA'
+  if (p.soldByWeight || (p.unit && !UNIDADES_PIEZA.includes(p.unit))) return 'UNIDAD_NO_PIEZA'
   return null
 }
 
@@ -464,7 +472,7 @@ export async function sincronizableBajoCandado(
 ): Promise<{ motivo: MotivoNoSincronizable | null; dejarComoEsta: boolean }> {
   const prod = await tx.product.findUnique({
     where: { id: p.productId },
-    select: { type: true, trackInventory: true, inventoryMethod: true, unit: true, deletedAt: true, deletedBy: true },
+    select: { type: true, trackInventory: true, inventoryMethod: true, unit: true, soldByWeight: true, deletedAt: true, deletedBy: true },
   })
   if (!prod) return { motivo: 'SIN_INVENTARIO_EN_AVOQADO', dejarComoEsta: true }
   const motivo = motivoNoSincronizable(prod)

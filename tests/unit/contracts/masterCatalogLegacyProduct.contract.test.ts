@@ -225,7 +225,9 @@ const expectNoUnexpectedPrismaAccess = () => {
   // `venueIvaPorProducto`: Tarea 5 del plan de IVA por producto — todo writer de Product
   // consulta este modelo (¿el flag está encendido?) ANTES de escribir `ivaTratamiento` vía
   // normalizarIvaDeProducto. Es acceso NUEVO e INTENCIONAL, no una fuga de H1.
-  const allowedModels = new Set(['product', 'activityLog', 'venueIvaPorProducto'])
+  // `shopifyVariantLink`: P1-2 del conector Shopify — el PATCH genérico lee la pareja del producto (una lectura por índice
+  // único; sólo escribe si el producto está ligado) para suspenderla o pedir el cuadre. Tampoco es una fuga de H1.
+  const allowedModels = new Set(['product', 'activityLog', 'venueIvaPorProducto', 'shopifyVariantLink'])
   for (const [modelName, model] of Object.entries(prismaMock)) {
     if (allowedModels.has(modelName) || !model || typeof model !== 'object') continue
     for (const operation of Object.values(model as Record<string, unknown>)) {

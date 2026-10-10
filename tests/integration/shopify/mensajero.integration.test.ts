@@ -185,6 +185,36 @@ it('envía el delta con @idempotent y llave = id de la fila; SENT, ambiguous fal
   expect(await hueco(e)).toBe('0')
 })
 
+it('🔴 P1-2: una fila de un producto que ya no se sincroniza (pasó a kilo sin suspender la pareja) NO sale: se suspende y se descarta', async () => {
+  const e = await escenario()
+  await venta(e.inventoryId) // el −1 de una pesada de 1.000 kg con la pareja todavía viva
+  await prisma.product.update({ where: { id: e.productId }, data: { soldByWeight: true, unit: 'KILOGRAM' } }) // sin ayudantes
+  const graphql = graphqlFalso(exito)
+  const c = await reclamar()
+  expect(await runShopifyOutboxRow(c.id, c.claimToken, new Date(), { graphql, hasAccess: siAcceso })).toBe('DISCARDED')
+  expect(graphql).not.toHaveBeenCalled() // Shopify no pierde la pieza
+  expect(await fila(c.id)).toMatchObject({ status: 'DISCARDED', lastError: 'PAREJA_SUSPENDIDA', claimToken: null })
+  expect((await prisma.shopifyVariantLink.findUniqueOrThrow({ where: { id: e.variantLinkId } })).suspendedReason).toBe('SIN_INVENTARIO')
+  expect(await prisma.shopifyImportIssue.findFirst({ where: { venueId: e.venueId, productId: e.productId } })).toMatchObject({
+    reason: 'UNIDAD_NO_PIEZA',
+  })
+  expect(await espejo(e)).toBe(10)
+})
+
+it('P1-2 (regresión): una fila AMBIGUA con sus parámetros congelados de ese mismo producto se sigue resolviendo con su llave', async () => {
+  const e = await escenario()
+  await venta(e.inventoryId)
+  const c1 = await reclamar()
+  const timeout = graphqlFalso(falla('TIMEOUT', true, true))
+  expect(await runShopifyOutboxRow(c1.id, c1.claimToken, new Date(), { graphql: timeout, hasAccess: siAcceso })).toBe('FAILED')
+  expect(await fila(c1.id)).toMatchObject({ ambiguous: true, sentInventoryItemId: 'gid://shopify/InventoryItem/1' })
+  await prisma.product.update({ where: { id: e.productId }, data: { unit: 'KILOGRAM' } })
+  const c2 = await reclamar(new Date(Date.now() + 3_600_000))
+  const graphql = graphqlFalso(exito)
+  expect(await runShopifyOutboxRow(c2.id, c2.claimToken, new Date(), { graphql, hasAccess: siAcceso })).toBe('SENT')
+  expect(graphql.mock.calls[0][3].key).toBe(c1.id) // la MISMA llave: pudo haber llegado
+})
+
 it('tras SENT con el espejo en negativo (vendido en caja después del pedido en línea) ⇒ aviso SOBREVENTA', async () => {
   const e = await escenario({ stock: 0 })
   await venta(e.inventoryId)

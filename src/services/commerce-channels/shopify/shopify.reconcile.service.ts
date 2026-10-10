@@ -489,7 +489,16 @@ const SELECCION_PAREJA = {
   // R-M3: lo que decide si el producto todavía se sincroniza (`motivoNoSincronizable`); la foto sólo lo sugiere, A lo
   // vuelve a leer bajo el candado de la pareja.
   product: {
-    select: { price: true, deletedAt: true, deletedBy: true, type: true, trackInventory: true, inventoryMethod: true, unit: true },
+    select: {
+      price: true,
+      deletedAt: true,
+      deletedBy: true,
+      type: true,
+      trackInventory: true,
+      inventoryMethod: true,
+      unit: true,
+      soldByWeight: true,
+    },
   },
 } satisfies Prisma.ShopifyVariantLinkSelect
 type ParejaCuadre = Prisma.ShopifyVariantLinkGetPayload<{ select: typeof SELECCION_PAREJA }>
