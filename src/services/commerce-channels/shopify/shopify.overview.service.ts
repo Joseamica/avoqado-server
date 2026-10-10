@@ -26,6 +26,9 @@ import { SHOPIFY_IMPORT_ERRORES_TERMINALES } from './shopify.mirror.service'
 type FaseVisible = 'CONNECTING' | 'REVIEWING' | 'ACTIVE' | 'PAUSED'
 export type ShopifyEstado = 'IMPORTANDO' | 'POR_APLICAR' | 'APLICANDO' | 'ACTIVA' | 'PAUSADA' | 'REVOCADA'
 export type ShopifyConnection = {
+  /** ADITIVO (P2-4): el enlace y su generación; la huella de las confirmaciones del MCP los lleva. */
+  linkId: string
+  generation: number
   fase: FaseVisible
   pausedFrom: Exclude<FaseVisible, 'PAUSED'> | null
   estado: ShopifyEstado
@@ -124,6 +127,8 @@ export async function getShopifyOverview(venueId: string): Promise<{ planActive:
   return {
     planActive,
     connection: {
+      linkId: link.id,
+      generation: link.generation,
       fase: link.status as FaseVisible,
       pausedFrom,
       estado: estadoDe(link.status, link.applyRequestedAt, link.store.status),

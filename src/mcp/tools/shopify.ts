@@ -74,6 +74,18 @@ const confirmField = () =>
     .describe('true para aplicar; sin esto sólo muestra el cambio')
 
 const soloPiloto = () => text({ ok: false, planRequired: true, error: SOLO_PILOTO })
+const CONEXION_CAMBIO = 'La conexión con Shopify de este local cambió desde la vista previa; pide la vista previa otra vez'
+/**
+ * P2-4: lo que la confirmación ata. Tienda y ubicación no bastan: desconectar y reconectar la MISMA tienda y ubicación da la
+ * misma huella, y un confirm viejo actuaba sobre la conexión nueva (aplicar B sin haber visto su vista previa). El enlace y su
+ * generación cambian con cada conexión; el servicio los vuelve a comparar dentro de su escritura.
+ */
+const huellaDe = (c: { shopDomain: string; locationName: string; linkId: string; generation: number }) =>
+  `${c.shopDomain}|${c.locationName}|${c.linkId}|${c.generation}`
+const huellaField = () =>
+  // 1024: la huella lleva el nombre de la ubicación, que no tiene tope en Shopify (con 300 una sucursal con nombre largo no
+  // se podía confirmar por MCP).
+  z.string().max(1024).optional().describe('La llena la vista previa; no la cambies')
 
 /** Candado de las escrituras: la función (no el plan). null = adelante. */
 async function sinConector(venueId: string) {
@@ -92,6 +104,7 @@ function rechazo(err: unknown) {
   // L2: el MCP dice su propio texto de piloto (el servicio ya no habla de «plan» ni de «actívalo» desde M2, y aun así el
   // código manda: un mensaje de servicio nunca sale tal cual con este código).
   if (err.code === 'SHOPIFY_SIN_PLAN') return soloPiloto()
+  if (err.code === 'SHOPIFY_CONEXION_CAMBIO') return text({ ok: false, needsInput: true, question: CONEXION_CAMBIO })
   return text({ ok: false, codigo: err.code, error: err.code === 'SHOPIFY_NO_ACTIVA' ? NO_ACTIVA : err.message })
 }
 
@@ -274,16 +287,16 @@ export function registerShopifyTools(server: McpServer, scope: McpScope) {
   server.tool(
     'shopify_connect_apply',
     'Aplica el stock de Shopify a una conexión que ya está lista para revisar y empieza a sincronizar: cada producto emparejado toma el número que tenga Shopify en ese momento y lo vendido mientras se conectaba se respeta. Primero muestra el resumen de la vista previa (revísala con shopify_connect_preview), o dice por qué la conexión todavía no se puede aplicar; se aplica al llamar de nuevo con confirm:true. Requiere administrar la configuración y acceso al conector con Shopify.',
-    { venueId: venueIdField(), confirm: confirmField() },
-    async ({ venueId, confirm }) => {
+    { venueId: venueIdField(), expectedSourceFingerprint: huellaField(), confirm: confirmField() },
+    async ({ venueId, expectedSourceFingerprint, confirm }) => {
       guard.venueFilter(venueId)
       guard.requirePermission('settings:manage', venueId)
       const sin = await sinConector(venueId)
       if (sin) return sin
       try {
-        if (confirm !== true) {
-          const { connection } = await getShopifyOverview(venueId)
-          if (!connection) return text({ ok: false, error: NO_CONECTADA })
+        const { connection } = await getShopifyOverview(venueId)
+        if (!connection) return text({ ok: false, error: NO_CONECTADA })
+        if (confirm !== true || expectedSourceFingerprint === undefined) {
           if (connection.estado !== 'POR_APLICAR')
             return text({ ok: false, estado: connection.estado, error: NO_LISTA_PARA_APLICAR[connection.estado] })
           const vista = await getConnectReview({ venueId, offset: 0, limit: 1, filtro: 'CAMBIAN' })
@@ -292,11 +305,18 @@ export function registerShopifyTools(server: McpServer, scope: McpScope) {
             requiresConfirmation: true,
             venueId,
             resumen: vista.resumen,
+            // P2-4: el catálogo fija esta huella en la confirmación: si la conexión cambia, el confirm no aplica la nueva.
+            expectedSourceFingerprint: huellaDe(connection),
             explicacion:
               'Cada producto emparejado tomará el número que tenga Shopify al aplicarse (puede no ser el de la vista previa si alguien vende mientras tanto). Las ventas hechas mientras se conectaba se respetan. Después, cada venta, devolución o pedido en línea se refleja en los dos lados.',
           })
         }
-        await requestApplyShopifyConnect({ venueId, staffId: scope.staffId })
+        if (huellaDe(connection) !== expectedSourceFingerprint) return text({ ok: false, needsInput: true, question: CONEXION_CAMBIO })
+        await requestApplyShopifyConnect({
+          venueId,
+          staffId: scope.staffId,
+          expected: { linkId: connection.linkId, generation: connection.generation },
+        })
         await auditMcpWrite(scope, { action: 'MCP_SHOPIFY_CONNECT_APPLIED', entity: 'Venue', entityId: venueId, venueId, data: {} })
         return text({
           ok: true,
@@ -313,21 +333,16 @@ export function registerShopifyTools(server: McpServer, scope: McpScope) {
   server.tool(
     'shopify_disconnect',
     'Desconecta la tienda Shopify del local: Avoqado sigue vendiendo normal, pero el stock deja de actualizarse en los dos lados; los cambios que no alcanzaron a salir se descartan (un envío que ya iba en camino termina solo) y las diferencias abiertas de «Por revisar» se cierran. No requiere acceso al conector: quien lo perdió siempre puede salir. Primero muestra qué se desconecta; se aplica al llamar de nuevo con confirm:true. Requiere administrar la configuración.',
-    {
-      venueId: venueIdField(),
-      // 1024: la huella es `tienda|ubicación` y el nombre de la ubicación no tiene tope en Shopify (con 300 una sucursal con
-      // nombre largo no se podía desconectar por MCP).
-      expectedSourceFingerprint: z.string().max(1024).optional().describe('La llena la vista previa; no la cambies'),
-      confirm: confirmField(),
-    },
+    { venueId: venueIdField(), expectedSourceFingerprint: huellaField(), confirm: confirmField() },
     async ({ venueId, expectedSourceFingerprint, confirm }) => {
       guard.venueFilter(venueId)
       guard.requirePermission('settings:manage', venueId)
       try {
         const { connection } = await getShopifyOverview(venueId)
         if (!connection) return text({ ok: false, error: NO_CONECTADA })
-        // La confirmación queda atada a la tienda y la ubicación que se VIERON (el catálogo fija esta huella en el token).
-        const huella = `${connection.shopDomain}|${connection.locationName}`
+        // La confirmación queda atada a la tienda, la ubicación, el enlace y la generación que se VIERON (P2-4: el catálogo
+        // fija esta huella en el token, y el servicio vuelve a comparar enlace y generación bajo el candado de la sucursal).
+        const huella = huellaDe(connection)
         if (confirm !== true || expectedSourceFingerprint === undefined) {
           return text({
             ok: false,
@@ -342,14 +357,12 @@ export function registerShopifyTools(server: McpServer, scope: McpScope) {
               'Avoqado seguirá vendiendo normal; el stock deja de sincronizarse con Shopify. Los cambios que no alcanzaron a salir se descartan, y las diferencias que sigan abiertas en «Por revisar» se cierran sin cambiar el stock de ningún producto.',
           })
         }
-        if (huella !== expectedSourceFingerprint) {
-          return text({
-            ok: false,
-            needsInput: true,
-            question: 'La conexión con Shopify de este local cambió desde la vista previa; pide la vista previa otra vez',
-          })
-        }
-        const r = await disconnectShopify({ venueId, staffId: scope.staffId })
+        if (huella !== expectedSourceFingerprint) return text({ ok: false, needsInput: true, question: CONEXION_CAMBIO })
+        const r = await disconnectShopify({
+          venueId,
+          staffId: scope.staffId,
+          expected: { linkId: connection.linkId, generation: connection.generation },
+        })
         // Si otra persona se adelantó no hubo cambio: no se audita un hecho que no ocurrió.
         if (r.desconectada) {
           await auditMcpWrite(scope, { action: 'MCP_SHOPIFY_DISCONNECTED', entity: 'Venue', entityId: venueId, venueId, data: {} })

@@ -786,6 +786,35 @@ describe('webhooks, vista previa y aplicar (#6, 12 bis.3, N13, N20, N25)', () =>
     })
   })
 
+  it('🔴 P2-4: aplicar o desconectar con la generación que se VIO: si la conexión ya es otra, 409 y no se escribe nada', async () => {
+    const e = await escenario({ linkStatus: 'REVIEWING', initialized: false })
+    const vista = { linkId: e.locationLinkId, generation: 1 }
+    // Mientras tanto, alguien desconectó y volvió a conectar la MISMA tienda y ubicación: la conexión nueva es la generación 2.
+    await prisma.shopifyLocationLink.update({ where: { id: e.locationLinkId }, data: { generation: 2 } })
+    await expect(
+      requestApplyShopifyConnect({ venueId: e.venueId, staffId: e.staffId, expected: vista }, { hasAccess: conPlan }),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'SHOPIFY_CONEXION_CAMBIO' })
+    expect(await sucursal(e)).toMatchObject({ status: 'REVIEWING', applyRequestedAt: null })
+    await expect(disconnectShopify({ venueId: e.venueId, staffId: e.staffId, expected: vista })).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'SHOPIFY_CONEXION_CAMBIO',
+    })
+    expect(await sucursal(e)).toMatchObject({ status: 'REVIEWING', generation: 2 })
+    // Otro enlace (misma generación) tampoco sirve.
+    await expect(
+      requestApplyShopifyConnect(
+        { venueId: e.venueId, staffId: e.staffId, expected: { linkId: 'otro', generation: 2 } },
+        { hasAccess: conPlan },
+      ),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'SHOPIFY_CONEXION_CAMBIO' })
+    // Con la vigente sí, y la del dashboard (sin esperada) sigue igual.
+    const vigente = { linkId: e.locationLinkId, generation: 2 }
+    const a = await requestApplyShopifyConnect({ venueId: e.venueId, staffId: e.staffId, expected: vigente }, { hasAccess: conPlan })
+    expect(a.applyRequestedAt).toBeInstanceOf(Date)
+    expect(await disconnectShopify({ venueId: e.venueId, staffId: e.staffId, expected: vigente })).toEqual({ desconectada: true })
+    expect(await sucursal(e)).toMatchObject({ status: 'DISCONNECTED', generation: 3 })
+  })
+
   it('RF1: un producto SIN pareja vende 1 mientras se importa; la importación lo liga; al aplicar Avoqado = S − 1 y la fila sale con el espejo cuadrado', async () => {
     const e = await escenario({ linkStatus: 'CONNECTING', initialized: false })
     const p = await agregarProductoShopify(e, { sku: 'RF1-SKU', stock: 10, pareja: false })

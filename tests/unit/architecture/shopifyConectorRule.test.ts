@@ -342,8 +342,26 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
       expect(leer(f)).toContain('PREMIUM_ONLY_SIN_CATALOGO')
       expect(leer(f)).toContain("'FEATURE_NO_SE_VENDE_SUELTA'")
     }
-    // C4 (ronda de revisión): la huella del desconectar por MCP cabe con nombres de ubicación largos.
-    expect(leer('src/mcp/tools/shopify.ts')).toContain('expectedSourceFingerprint: z.string().max(1024)')
+    // C4 (ronda de revisión): la huella de las confirmaciones por MCP cabe con nombres de ubicación largos.
+    const mcp = leer('src/mcp/tools/shopify.ts')
+    expect(mcp).toContain("z.string().max(1024).optional().describe('La llena la vista previa; no la cambies')")
+    // P2-4: aplicar y desconectar atan la confirmación al enlace y a su GENERACIÓN, y el servicio los revalida al escribir.
+    expect(mcp.match(/expectedSourceFingerprint: huellaField\(\)/g)).toHaveLength(2)
+    expect(mcp).toContain('`${c.shopDomain}|${c.locationName}|${c.linkId}|${c.generation}`')
+    expect(mcp.match(/expected: \{ linkId: connection\.linkId, generation: connection\.generation \}/g)).toHaveLength(2)
+    contieneTodas([
+      'atan su confirmación a la tienda, la ubicación, el enlace y la generación que se vieron',
+      'contesta 409 `SHOPIFY_CONEXION_CAMBIO`',
+    ])
+    const conexion = leer(`${SHOPIFY}/shopify.connect.service.ts`)
+    expect(cuerpo(conexion, 'export async function requestApplyShopifyConnect(')).toContain(
+      '...(i.expected ? { id: i.expected.linkId, generation: i.expected.generation } : {})',
+    )
+    enOrden(cuerpo(conexion, 'export async function disconnectShopify('), [
+      'WHERE id = ${yo.id} FOR UPDATE',
+      'l.generation !== i.expected.generation)) throw conexionCambio()',
+      'generation: { increment: 1 }',
+    ])
   })
 
   it('🔴 las entradas HTTP: webhook crudo de 1 MB antes del genérico y callback con las dos formas de HMAC', () => {
@@ -772,7 +790,7 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     const de = (f: string) => `${SHOPIFY}/shopify.${f}.ts`
     const anclas: Record<string, [string, string]> = {
       'shopify.connect.service.ts:90': [de('connect.service'), 'export async function startShopifyConnect('],
-      'connect.service.ts:1173': [de('connect.service'), 'export async function disconnectShopify('],
+      'connect.service.ts:1186': [de('connect.service'), 'export async function disconnectShopify('],
       'connect.service.ts:639': [de('connect.service'), 'async function aCuarentenaPorReligar('],
       'shopify.crypto.ts:32': [de('crypto'), 'export function formaDeFirmaOAuth('],
       'catalog.service.ts:68': [de('catalog.service'), 'export const FILTRO_ESTADO'],

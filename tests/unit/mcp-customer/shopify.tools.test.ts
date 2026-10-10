@@ -96,11 +96,16 @@ const CASOS: Array<[string, string, Record<string, unknown>]> = [
 const VISTA = { reviewId: 'r1', producto: 'Camisa · M', sku: 'CAM-M', avoqadoQty: '5', shopifyQty: 4, suggestion: 'SHOPIFY' }
 const RESUMEN = { emparejados: 30, cambian: 4, nuevos: 2, sinPareja: 1 }
 const CONEXION = {
+  linkId: 'link1',
+  generation: 1,
   shopDomain: 'mi-tienda.myshopify.com',
   locationName: 'Tienda México',
   estado: 'POR_APLICAR',
   conteos: { pendientes: 2, porRevisar: 3 },
 }
+/** P2-4: la huella ata la confirmación a la tienda, la ubicación, el enlace y la GENERACIÓN que se vieron. */
+const HUELLA = 'mi-tienda.myshopify.com|Tienda México|link1|1'
+const ESPERADA = { linkId: 'link1', generation: 1 }
 const PILOTO = 'El conector con Shopify está en piloto por invitación y este local no lo tiene activo; escríbenos para sumarte.'
 
 beforeEach(() => {
@@ -477,7 +482,8 @@ describe('herramientas MCP de Shopify', () => {
     expect(mockConnect.getConnectReview).toHaveBeenCalledWith({ venueId: 'centro', offset: 0, limit: 1, filtro: 'CAMBIAN' })
     expect(r).toMatchObject({ ok: true, solicitado: true })
     expect(mockConnect.requestApplyShopifyConnect).toHaveBeenCalledTimes(1)
-    expect(mockConnect.requestApplyShopifyConnect).toHaveBeenCalledWith({ venueId: 'centro', staffId: 'dueno' })
+    expect(p.confirmationArguments).toEqual({ venueId: 'centro', expectedSourceFingerprint: HUELLA })
+    expect(mockConnect.requestApplyShopifyConnect).toHaveBeenCalledWith({ venueId: 'centro', staffId: 'dueno', expected: ESPERADA })
     expect(mockAudit).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ action: 'MCP_SHOPIFY_CONNECT_APPLIED', venueId: 'centro' }),
@@ -529,9 +535,9 @@ describe('herramientas MCP de Shopify', () => {
     })
     expect(p.explicacion).toContain('«Por revisar»')
     // La confirmación queda atada a la tienda y la ubicación que se vieron.
-    expect(p.confirmationArguments).toEqual({ venueId: 'centro', expectedSourceFingerprint: 'mi-tienda.myshopify.com|Tienda México' })
+    expect(p.confirmationArguments).toEqual({ venueId: 'centro', expectedSourceFingerprint: HUELLA })
     expect(r).toMatchObject({ ok: true, desconectada: true })
-    expect(mockConnect.disconnectShopify).toHaveBeenCalledWith({ venueId: 'centro', staffId: 'dueno' })
+    expect(mockConnect.disconnectShopify).toHaveBeenCalledWith({ venueId: 'centro', staffId: 'dueno', expected: ESPERADA })
     expect(mockAccess).not.toHaveBeenCalled()
     expect(mockAudit).toHaveBeenCalledWith(
       expect.anything(),
@@ -552,6 +558,37 @@ describe('herramientas MCP de Shopify', () => {
       expect(r).toMatchObject({ ok: false, needsInput: true })
       expect(r.question).toContain('otra vez')
       expect(mockConnect.disconnectShopify).not.toHaveBeenCalled()
+      expect(mockAudit).not.toHaveBeenCalled()
+    },
+  )
+
+  it.each(['shopify_connect_apply', 'shopify_disconnect'])(
+    '🔴 P2-4 · %s: desconectar y reconectar a la MISMA tienda y ubicación (otra generación) invalida la confirmación vieja',
+    async herramienta => {
+      const { call } = await conectar()
+      const p = await call(herramienta, { venueId: 'centro' })
+      expect(p.confirmationArguments.expectedSourceFingerprint).toBe(HUELLA)
+      // Mientras tanto: alguien desconectó y volvió a conectar la misma tienda y ubicación; la nueva espera aplicarse.
+      mockOverview.getShopifyOverview.mockResolvedValue({ planActive: true, connection: { ...CONEXION, generation: 2 } })
+      const r = await call(herramienta, { ...p.confirmationArguments, confirm: true, confirmationToken: p.confirmationToken })
+      expect(r).toMatchObject({ ok: false, needsInput: true })
+      expect(r.question).toContain('otra vez')
+      expect(mockConnect.requestApplyShopifyConnect).not.toHaveBeenCalled()
+      expect(mockConnect.disconnectShopify).not.toHaveBeenCalled()
+      expect(mockAudit).not.toHaveBeenCalled()
+    },
+  )
+
+  it.each(['shopify_connect_apply', 'shopify_disconnect'])(
+    '🔴 P2-4 · %s: si la conexión cambia entre leerla y escribir, el 409 del servicio pide otra vista previa y no audita',
+    async herramienta => {
+      const cambio = new ConflictError('La conexión con Shopify cambió desde la vista previa', 'SHOPIFY_CONEXION_CAMBIO')
+      mockConnect.requestApplyShopifyConnect.mockRejectedValue(cambio)
+      mockConnect.disconnectShopify.mockRejectedValue(cambio)
+      const { call } = await conectar()
+      const { r } = await enDosPasos(call, herramienta, { venueId: 'centro' })
+      expect(r).toMatchObject({ ok: false, needsInput: true })
+      expect(r.question).toContain('otra vez')
       expect(mockAudit).not.toHaveBeenCalled()
     },
   )
@@ -585,7 +622,7 @@ describe('herramientas MCP de Shopify', () => {
     const { p, r } = await enDosPasos(call, 'shopify_disconnect', { venueId: 'centro' })
     expect(p.confirmationArguments.expectedSourceFingerprint.length).toBeGreaterThan(600)
     expect(r).toMatchObject({ ok: true, desconectada: true })
-    expect(mockConnect.disconnectShopify).toHaveBeenCalledWith({ venueId: 'centro', staffId: 'dueno' })
+    expect(mockConnect.disconnectShopify).toHaveBeenCalledWith({ venueId: 'centro', staffId: 'dueno', expected: ESPERADA })
   })
 
   it('desconectar cuando ya no había nada que desconectar (otra persona se adelantó): lo dice y no audita', async () => {

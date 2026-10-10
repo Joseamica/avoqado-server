@@ -910,21 +910,34 @@ export async function getConnectReview(i: { venueId: string; offset: unknown; li
   }
 }
 
+/** P2-4: la conexión que se vio en una vista previa: el enlace y su generación (reconectar sube la generación). */
+export type ConexionVista = { linkId: string; generation: number }
+const conexionCambio = () =>
+  new ConflictError('La conexión con Shopify cambió desde la vista previa; pide la vista previa otra vez.', 'SHOPIFY_CONEXION_CAMBIO')
+
 export async function requestApplyShopifyConnect(
-  i: { venueId: string; staffId: string },
+  i: { venueId: string; staffId: string; expected?: ConexionVista },
   deps: { hasAccess?: (venueId: string) => Promise<boolean> } = {},
 ): Promise<{ applyRequestedAt: Date }> {
   if (!(await (deps.hasAccess ?? accesoReal)(i.venueId))) {
     throw new ForbiddenError(TEXTO_SIN_ACCESO, 'SHOPIFY_SIN_PLAN')
   }
+  // P2-4: con `expected` (la confirmación del MCP), la conexión vista va DENTRO del `where`: si entre la vista previa y el
+  // confirm alguien desconectó y reconectó (aunque sea la misma tienda y ubicación), no se aplica la conexión nueva.
   const r = await prisma.shopifyLocationLink.updateMany({
-    where: { venueId: i.venueId, status: 'REVIEWING', applyRequestedAt: null },
+    where: {
+      venueId: i.venueId,
+      status: 'REVIEWING',
+      applyRequestedAt: null,
+      ...(i.expected ? { id: i.expected.linkId, generation: i.expected.generation } : {}),
+    },
     data: { applyRequestedAt: new Date(), applyRequestedById: i.staffId },
   })
   const link = await prisma.shopifyLocationLink.findUnique({
     where: { venueId: i.venueId },
-    select: { id: true, status: true, applyRequestedAt: true, store: { select: { organizationId: true } } },
+    select: { id: true, status: true, generation: true, applyRequestedAt: true, store: { select: { organizationId: true } } },
   })
+  if (link && i.expected && (link.id !== i.expected.linkId || link.generation !== i.expected.generation)) throw conexionCambio()
   // 409 como el `reauthorizeShopDomain` de C: el mismo código sale siempre con el mismo estado.
   if (!link || link.status === 'DISCONNECTED')
     throw new ConflictError('Esta sucursal no tiene una tienda Shopify conectada', 'SHOPIFY_SIN_CONEXION')
@@ -1170,7 +1183,12 @@ type Hermana = { id: string; status: string }
  *   sin hermanas vivas, lo diferido de la tienda ya no tiene a quién esperar y se cierra.
  * Las parejas se quedan: reconectar la MISMA tienda y ubicación las vuelve a usar (cuando lo que iba en camino terminó).
  */
-export async function disconnectShopify(i: { venueId: string; staffId: string | null }): Promise<{ desconectada: boolean }> {
+export async function disconnectShopify(i: {
+  venueId: string
+  staffId: string | null
+  /** P2-4: la conexión que se VIO (confirmación del MCP); se compara con la sucursal ya bloqueada. */
+  expected?: ConexionVista
+}): Promise<{ desconectada: boolean }> {
   const r = await prisma.$transaction(async tx => {
     const [yo] = await tx.$queryRaw<Array<{ id: string; storeId: string }>>`
       SELECT id, "storeId" FROM "ShopifyLocationLink" WHERE "venueId" = ${i.venueId}`
@@ -1179,11 +1197,13 @@ export async function disconnectShopify(i: { venueId: string; staffId: string | 
     const antes = await tx.$queryRaw<Hermana[]>`
       SELECT id, status::text AS status FROM "ShopifyLocationLink"
        WHERE "storeId" = ${yo.storeId} AND id < ${yo.id} ORDER BY id LIMIT 1000 FOR NO KEY UPDATE`
-    const [l] = await tx.$queryRaw<Array<{ id: string; status: string; storeId: string }>>`
-      SELECT id, status::text AS status, "storeId" FROM "ShopifyLocationLink" WHERE id = ${yo.id} FOR UPDATE`
+    const [l] = await tx.$queryRaw<Array<{ id: string; status: string; storeId: string; generation: number }>>`
+      SELECT id, status::text AS status, "storeId", generation FROM "ShopifyLocationLink" WHERE id = ${yo.id} FOR UPDATE`
     const despues = await tx.$queryRaw<Hermana[]>`
       SELECT id, status::text AS status FROM "ShopifyLocationLink"
        WHERE "storeId" = ${yo.storeId} AND id > ${yo.id} ORDER BY id LIMIT 1000 FOR NO KEY UPDATE`
+    // P2-4: bajo el candado de la sucursal, ¿es la conexión que se vio? Si no, nada se escribe (la tx se deshace).
+    if (l && i.expected && (l.id !== i.expected.linkId || l.generation !== i.expected.generation)) throw conexionCambio()
     if (!l || l.status === 'DISCONNECTED') return null
     await tx.$queryRaw`SELECT id FROM "ShopifyVariantLink" WHERE "locationLinkId" = ${l.id} ORDER BY id FOR UPDATE`
     const ahora = new Date()
