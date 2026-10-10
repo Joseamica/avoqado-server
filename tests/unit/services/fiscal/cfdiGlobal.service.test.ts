@@ -3237,3 +3237,61 @@ describe('ola final (Minor 2): la llave vieja corta se reconoce igual en SQL y e
     }
   })
 })
+
+// Ronda QA (hermanos): en el panel de periodos, una global (principal, complementaria o de otra periodicidad) que quedó EN DUDA no enseña el
+// error crudo del PAC («fetch failed») como su motivo: dice que no hubo respuesta clara y que no se re-emita, y lo marca con `timbreEnDuda`.
+describe('ronda QA (hermanos) — periodosDeLaGlobal con un timbre EN DUDA', () => {
+  const ahora = new Date('2026-10-05T15:00:00Z')
+  const enDuda = {
+    status: 'STAMP_FAILED',
+    protocoloIva: 1,
+    enviadoAt: new Date('2026-10-04T10:00:00Z'),
+    falloDefinitivo: false,
+    lastError: 'fetch failed',
+  }
+  const TEXTO = /^No hubo respuesta clara del PAC: la factura global/
+  it('🔴 la principal SIN_TIMBRAR en duda ⇒ motivo neutro y `timbreEnDuda`; una rechazada conserva su motivo y no lo trae', async () => {
+    const ps = periodosCerradosRecientes('DIARIO', ahora)
+    const filas = new Map<string, any>([
+      [ps[0].periodStart.toISOString(), { id: 'g0', fiscalEmisorId: 'e1', folio: null, ...enDuda }],
+      [
+        ps[1].periodStart.toISOString(),
+        { id: 'g1', fiscalEmisorId: 'e1', folio: null, ...enDuda, falloDefinitivo: true, lastError: 'CFDI40999' },
+      ],
+    ])
+    const d = deps({
+      loadEmisor: jest.fn().mockResolvedValue({ ...emisor, globalPeriodicity: 'DIARIO' }),
+      findGlobalDelPeriodo: jest.fn(async (_e: string, p: any) => filas.get(p.periodStart.toISOString()) ?? null),
+      ultimoAvisoDelPeriodo: jest.fn().mockResolvedValue(null),
+    })
+    const { periodos } = await periodosDeLaGlobal({ venueId: 'v1', emisorId: 'e1', now: ahora }, d)
+    expect(periodos[0].motivo).toMatch(TEXTO)
+    expect(periodos[0]).toMatchObject({ estado: 'SIN_TIMBRAR', timbreEnDuda: true })
+    expect(periodos[1]).toMatchObject({ estado: 'SIN_TIMBRAR', motivo: 'CFDI40999' })
+    expect(periodos[1]).not.toHaveProperty('timbreEnDuda')
+  })
+  it('🔴 una complementaria en duda de una principal timbrada ⇒ motivo neutro y `timbreEnDuda`', async () => {
+    const ps = periodosCerradosRecientes('DIARIO', ahora)
+    const principal = {
+      id: 'g0',
+      fiscalEmisorId: 'e1',
+      status: 'STAMPED',
+      protocoloIva: 1,
+      folio: '12',
+      idempotencyKey: 'k',
+      lastError: null,
+    }
+    const d = deps({
+      loadEmisor: jest.fn().mockResolvedValue({ ...emisor, globalPeriodicity: 'DIARIO' }),
+      findGlobalDelPeriodo: jest.fn(async (_e: string, p: any) =>
+        p.periodStart.toISOString() === ps[0].periodStart.toISOString() ? principal : null,
+      ),
+      complementariasDe: jest.fn(async (p: any) => (p.id === 'g0' ? [{ id: 'c1', idempotencyKey: 'k-c1', folio: null, ...enDuda }] : [])),
+      ultimoAvisoDelPeriodo: jest.fn().mockResolvedValue(null),
+    })
+    const { periodos } = await periodosDeLaGlobal({ venueId: 'v1', emisorId: 'e1', now: ahora }, d)
+    expect(periodos[0].complementarias).toEqual([
+      { cfdiId: 'c1', folio: null, estado: 'SIN_TIMBRAR', motivo: expect.stringMatching(TEXTO), timbreEnDuda: true },
+    ])
+  })
+})

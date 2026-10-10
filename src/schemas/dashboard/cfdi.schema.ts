@@ -69,14 +69,24 @@ export const confirmPriceContractSchema = z.object({
 
 /** Schema passed to validateRequest() for POST /venues/:venueId/cfdi/:cfdiId/cancel */
 export const cancelCfdiSchema = z.object({
-  body: z.object({
-    motivo: z.enum(['01', '02', '03', '04'], {
-      required_error: 'El motivo de cancelación es requerido',
-      invalid_type_error: 'El motivo de cancelación no es válido',
+  body: z
+    .object({
+      motivo: z
+        .enum(['01', '02', '03', '04'], {
+          required_error: 'El motivo de cancelación es requerido',
+          invalid_type_error: 'El motivo de cancelación no es válido',
+        })
+        .optional(),
+      // Optional — the "motivo 01 requires substituteUuid" cross-field rule lives in the SERVICE (shape-only in Zod per rules)
+      substituteUuid: z.string().uuid('El UUID de sustitución no es válido').optional(),
+      // C2 · T10 ronda 1 (I-1): «Consultar estado». Nuevo y opcional: con él no se pide nada al SAT, sólo se consulta (sin motivo).
+      soloConsultar: z.literal(true, { errorMap: () => ({ message: 'La consulta no es válida' }) }).optional(),
+    })
+    // Cancelar de verdad (sin `soloConsultar`) sigue exigiendo el motivo, con el mismo texto de siempre.
+    .superRefine((b, ctx) => {
+      if (!b.soloConsultar && b.motivo === undefined)
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['motivo'], message: 'El motivo de cancelación es requerido' })
     }),
-    // Optional — the "motivo 01 requires substituteUuid" cross-field rule lives in the SERVICE (shape-only in Zod per rules)
-    substituteUuid: z.string().uuid('El UUID de sustitución no es válido').optional(),
-  }),
 })
 
 /** Schema passed to validateRequest() for POST /venues/:venueId/cfdi/:cfdiId/email. Sin correo, va al registrado del receptor. */
@@ -84,6 +94,21 @@ export const sendCfdiEmailSchema = z.object({
   body: z.object({
     email: z.string().trim().email('El correo no es válido').optional(),
   }),
+})
+
+/**
+ * Schema passed to validateRequest() for POST /venues/:venueId/refunds/:refundId/credit-note.
+ * C2 (Tarea 9, P10): sin body, la nota sale con su modalidad de siempre. `{ modalidad: 'POR_IMPORTE', huella }` = «acreditar por importe»
+ * confirmado por una persona viendo el reparto; la regla «sin huella no» y «sólo sin evidencia» viven en el SERVICIO (shape-only aquí).
+ * T10 ronda 1 (M9): `{ huella }` sin modalidad = la emisión de siempre, atada a la vista previa que se vio (`preview.huella`).
+ */
+export const emitRefundCreditNoteSchema = z.object({
+  body: z
+    .object({
+      modalidad: z.literal('POR_IMPORTE', { errorMap: () => ({ message: 'La modalidad de la nota no es válida' }) }).optional(),
+      huella: z.string().min(1, 'La huella del reparto no es válida').optional(),
+    })
+    .optional(),
 })
 
 // ==========================================

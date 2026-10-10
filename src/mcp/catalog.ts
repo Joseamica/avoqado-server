@@ -473,6 +473,9 @@ export function configureToolCatalog(server: McpServer, scope: McpScope, profile
           // `fecha`: el ajuste manual de pago por servicio confirma en el periodo que se VIO en la vista previa, aunque pase la
           // medianoche del cambio de periodo (con «hoy» un reintento daría CLAVE_REUTILIZADA y un bono doble). No quitar.
           // `destinoFecha`: lo mismo para «liquidar diferencia»: se liquida en el periodo destino que se VIO. No quitar.
+          // `expectedRevision`: `cancel_stock_count` la devuelve en su vista previa y la exige al confirmar; sin atarla, el paso 2 con lo
+          // firmado volvía a pedir confirmación y nunca cancelaba. Las demás herramientas con ese campo no lo devuelven arriba en su vista
+          // previa (prueba en stock-count-cancel.test.ts), así que esto no las cambia.
           const confirmationArguments = { ...intent }
           for (const field of [
             'expectedSourceFingerprint',
@@ -481,6 +484,7 @@ export function configureToolCatalog(server: McpServer, scope: McpScope, profile
             'resolvedStaffVenueId',
             'fecha',
             'destinoFecha',
+            'expectedRevision',
             // Conector Shopify: «resolver» confirma con las cantidades que se VIERON; si cambiaron, el servicio da 409.
             'expectedAvoqadoQty',
             'expectedShopifyQty',

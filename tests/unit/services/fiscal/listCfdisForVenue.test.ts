@@ -23,7 +23,7 @@ jest.mock('../../../../src/config/logger', () => ({
 }))
 
 import prisma from '../../../../src/utils/prismaClient'
-import { listCfdisForVenue } from '../../../../src/services/fiscal/cfdi.service'
+import { ENVIO_TERMINADO_MS, listCfdisForVenue } from '../../../../src/services/fiscal/cfdi.service'
 
 const findMany = prisma.cfdi.findMany as jest.Mock
 const count = prisma.cfdi.count as jest.Mock
@@ -318,7 +318,8 @@ describe('result shape', () => {
 
     expect(result).toEqual({
       // C1 · Tarea 11 (S6): cada fila gana `complementariaDe` (null en una individual); nada se quita.
-      cfdis: [{ ...SAMPLE_CFDI, complementariaDe: null }],
+      // C2 · T10 (C2-31), cambio A PROPÓSITO: y `estadoCancelacion` (null = nunca se pidió cancelarla).
+      cfdis: [{ ...SAMPLE_CFDI, complementariaDe: null, estadoCancelacion: null }],
       total: 42,
       page: 2,
       pageSize: 10,
@@ -400,5 +401,99 @@ describe('C1 · Tarea 11 — `fiscalEmisorId` y `complementariaDe` en cada fila 
     findMany.mockResolvedValueOnce([global('g1', 'cfdi-global-e1-2026-05-04')])
     await listCfdisForVenue({ venueId: VENUE_ID, page: 1, pageSize: 20 })
     expect(findMany).toHaveBeenCalledTimes(1)
+  })
+})
+
+// ─── C2 · Tarea 10 (Codex C2-31): el estado de la cancelación, derivado al momento de CADA consulta ─────────────────────────────────
+describe('C2 · T10 — `estadoCancelacion` en la lista (C2-31)', () => {
+  const T0 = new Date('2026-10-05T18:00:00.000Z')
+  const enviada = { ...SAMPLE_CFDI, id: 'c-env', cancelStatus: 'REQUESTED', cancelIntento: 1, cancelEnviadaAt: T0, cancelAcusadaAt: null }
+  const acusada = { ...enviada, id: 'c-acu', cancelAcusadaAt: new Date(T0.getTime() + 5_000) }
+  afterEach(() => jest.useRealTimers())
+  const consultar = async (ahora: Date, filas: unknown[]) => {
+    jest.useFakeTimers({ now: ahora, doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] })
+    findMany.mockResolvedValueOnce(filas)
+    const r = await listCfdisForVenue({ venueId: VENUE_ID, page: 1, pageSize: 20 })
+    jest.useRealTimers()
+    return r.cfdis as any[]
+  }
+  it('🔴 enviada hace 30 s y sin acuse ⇒ ENVIANDO; la MISMA fila en una consulta NUEVA pasado el umbral ⇒ CANCELACION_EN_DUDA; con acuse ⇒ EN_TRAMITE', async () => {
+    const antes = await consultar(new Date(T0.getTime() + 30_000), [enviada, acusada])
+    expect(antes.map(c => [c.id, c.estadoCancelacion])).toEqual([
+      ['c-env', 'ENVIANDO'],
+      ['c-acu', 'EN_TRAMITE'],
+    ])
+    const despues = await consultar(new Date(T0.getTime() + ENVIO_TERMINADO_MS + 1_000), [enviada, acusada])
+    expect(despues.map(c => [c.id, c.estadoCancelacion])).toEqual([
+      ['c-env', 'CANCELACION_EN_DUDA'],
+      ['c-acu', 'EN_TRAMITE'],
+    ])
+  })
+  it('🔴 la consulta trae lo que hace falta para derivarlo, y NO devuelve las fechas internas ni el intento', async () => {
+    const [fila] = await consultar(new Date(T0.getTime() + 30_000), [enviada])
+    const select = findMany.mock.calls[0][0].select
+    expect(select).toMatchObject({ cancelEnviadaAt: true, cancelAcusadaAt: true, cancelIntento: true })
+    expect(fila).not.toHaveProperty('cancelEnviadaAt')
+    expect(fila).not.toHaveProperty('cancelAcusadaAt')
+    expect(fila).not.toHaveProperty('cancelIntento')
+  })
+  // T10 ronda 1 (I-1, cambia A PROPÓSITO): «Consultar estado» manda `soloConsultar` y ya no repite el motivo. Los dos campos los agregó la
+  // T10 (nunca estuvieron en producción): ya no se leen ni salen.
+  it('🔴 la fila ya NO trae `cancelMotivo` ni `cancelSubstituteUuid` («Consultar estado» no los necesita)', async () => {
+    const [fila] = await consultar(new Date(T0.getTime() + 30_000), [enviada])
+    const select = findMany.mock.calls[0][0].select
+    expect(select).not.toHaveProperty('cancelMotivo')
+    expect(select).not.toHaveProperty('cancelSubstituteUuid')
+    expect(fila).not.toHaveProperty('cancelMotivo')
+    expect(fila).not.toHaveProperty('cancelSubstituteUuid')
+  })
+  it('🔴 M9: una cancelación rechazada dice POR QUÉ (`motivoRechazoCancelacion`); el `lastError` de otra cosa no sale', async () => {
+    const [rechazada, timbrada] = await consultar(T0, [
+      {
+        ...SAMPLE_CFDI,
+        id: 'c-rej',
+        cancelStatus: 'REJECTED',
+        cancelIntento: 1,
+        lastError: 'Esta factura ya tiene notas de crédito; cancélalas primero.',
+      },
+      { ...SAMPLE_CFDI, id: 'c-ok', lastError: 'un error técnico viejo' },
+    ])
+    expect(findMany.mock.calls[0][0].select).toMatchObject({ lastError: true })
+    expect(rechazada).toMatchObject({
+      estadoCancelacion: 'RECHAZADA',
+      motivoRechazoCancelacion: 'Esta factura ya tiene notas de crédito; cancélalas primero.',
+    })
+    expect(rechazada).not.toHaveProperty('lastError')
+    expect(timbrada).not.toHaveProperty('motivoRechazoCancelacion')
+    expect(timbrada).not.toHaveProperty('lastError')
+    expect(timbrada.estadoCancelacion).toBeNull()
+  })
+})
+
+// C2 · ronda QA (D6): un `STAMP_FAILED` que se ENVIÓ y no tuvo respuesta clara (`falloDefinitivo: false`) no es «rechazado»: la fila trae
+// `timbreEnDuda: true` (aditivo) y la lista lo dice así. Las columnas con que se deriva son internas.
+describe('C2 · ronda QA (D6) — `timbreEnDuda` en la lista', () => {
+  const enviada = new Date('2026-10-09T18:00:00.000Z')
+  const fallida = { ...SAMPLE_CFDI, status: 'STAMP_FAILED', stampedAt: null, uuid: null, protocoloIva: 1 }
+  it('🔴 enviada y sin rechazo ⇒ `timbreEnDuda: true`; rechazo definitivo o nunca enviada ⇒ sin el campo; las columnas no salen', async () => {
+    findMany.mockResolvedValueOnce([
+      { ...fallida, id: 'duda', enviadoAt: enviada, falloDefinitivo: false },
+      { ...fallida, id: 'rechazo', enviadoAt: enviada, falloDefinitivo: true },
+      { ...fallida, id: 'sin-enviar', enviadoAt: null, falloDefinitivo: false },
+      { ...SAMPLE_CFDI, id: 'timbrada', protocoloIva: 1, enviadoAt: enviada, falloDefinitivo: false },
+    ])
+    const { cfdis } = await listCfdisForVenue({ venueId: VENUE_ID, page: 1, pageSize: 20 })
+    expect(findMany.mock.calls[0][0].select).toMatchObject({ enviadoAt: true, falloDefinitivo: true, protocoloIva: true })
+    expect((cfdis as any[]).map(c => [c.id, c.timbreEnDuda])).toEqual([
+      ['duda', true],
+      ['rechazo', undefined],
+      ['sin-enviar', undefined],
+      ['timbrada', undefined],
+    ])
+    for (const c of cfdis as any[]) {
+      expect(c).not.toHaveProperty('enviadoAt')
+      expect(c).not.toHaveProperty('falloDefinitivo')
+      expect(c).not.toHaveProperty('protocoloIva')
+    }
   })
 })

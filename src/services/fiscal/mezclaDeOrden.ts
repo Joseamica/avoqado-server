@@ -63,7 +63,40 @@ function netoCents(it: RenglonDeMezcla): number {
  * no cuánto impuesto se cobró. Ningún renglón se multiplica por (1 + tasa).
  */
 export function mezclaDeLaOrden(items: RenglonDeMezcla[], cuenta?: CuentaDeMezcla | null): ComposicionDeLaOrden {
-  const grupo = (r: { tratamiento: IvaTratamiento; tasa: number }) => `${r.tratamiento}|${r.tasa}`
+  const { renglones, atribuible, variosIva, ivaAparteDesconocido } = componer(items, cuenta, 'POR_IVA')
+  const por = new Map<string, MezclaPorTratamiento[number]>()
+  for (const r of renglones) {
+    if (r.cents === 0) continue
+    const parte = por.get(grupo(r))
+    if (parte) parte.grossCents += r.cents
+    else por.set(grupo(r), { tratamiento: r.tratamiento, tasa: r.tasa, grossCents: r.cents })
+  }
+  // Sin nada en la mezcla y algo que no se pudo atribuir (el único IVA quedó recortado a 0), tampoco consta a qué tasa va el cobro.
+  return { mezcla: [...por.values()], renglones, aproximada: (!atribuible && (variosIva || por.size === 0)) || ivaAparteDesconocido }
+}
+
+/** Lo que cobró cada renglón para el DINERO, y si se puede decir (C2 A-R1/A-R3). */
+export type CobradoPorRenglon = { atribuible: boolean; renglones: RenglonDeLaComposicion[] }
+
+/**
+ * C2 A-R1 (decisión A del founder, 9-oct): lo que cobró cada renglón, para el DINERO de una devolución por artículos y para lo que las
+ * pantallas ofrecen devolver. Es la MISMA composición que `mezclaDeLaOrden` (neto del renglón − su parte de cada reparto D7 − su parte
+ * de D8) con una sola diferencia: lo que la cuenta no atribuye (D8) se reparte en proporción sobre TODOS los renglones vivos aunque
+ * haya varios IVA (el dinero no necesita tasa). A-R3: `atribuible` es false si `partesDeLaCuenta` da un motivo, si D8 no cabe o si un
+ * renglón queda negativo (neto roto, o un reparto mayor que lo que cobra); entonces nadie devuelve por artículos. Puro.
+ */
+export function cobradoPorRenglon(items: RenglonDeMezcla[], cuenta?: CuentaDeMezcla | null): CobradoPorRenglon {
+  const { renglones, atribuible } = componer(items, cuenta, 'TODOS')
+  return { atribuible, renglones }
+}
+
+const grupo = (r: { tratamiento: IvaTratamiento; tasa: number }) => `${r.tratamiento}|${r.tasa}`
+
+/**
+ * El núcleo de las dos composiciones. `d8`: «POR_IVA» (la factura y los reportes: con varios IVA, D8 no se resta de nadie) o «TODOS»
+ * (el dinero: D8 se reparte en proporción sobre todos los renglones vivos, en un solo grupo).
+ */
+function componer(items: RenglonDeMezcla[], cuenta: CuentaDeMezcla | null | undefined, d8Por: 'POR_IVA' | 'TODOS') {
   const base = items.map((it, i) => ({ it, llave: it.id ?? `#${i}`, neto: netoCents(it), cantidad: it.quantity, ...tratamientoYTasa(it) }))
   // Los renglones rotos también cuentan aquí: si mezclaban IVA, la composición es aproximada aunque en la mezcla quede uno (r2 N8).
   const variosIva = new Set(base.filter(r => r.neto !== 0).map(grupo)).size > 1
@@ -83,26 +116,20 @@ export function mezclaDeLaOrden(items: RenglonDeMezcla[], cuenta?: CuentaDeMezcl
     for (const [llave, cents] of Object.entries(partes.porLlave)) deCuenta[llave] = (deCuenta[llave] ?? 0) + cents
     if (partes.motivos.length > 0) atribuible = false
     if (partes.d8Cents > 0) {
-      const d8 = repartirSinConstancia(partes.d8Cents, partes.quedan)
+      // Para el dinero, todos los renglones vivos en UN grupo: lo sin constancia se reparte en proporción sin importar la tasa.
+      const quedan = d8Por === 'TODOS' ? partes.quedan.map(q => ({ ...q, grupoIva: 'DINERO' })) : partes.quedan
+      const d8 = repartirSinConstancia(partes.d8Cents, quedan)
       if (d8.ok) for (const [llave, cents] of Object.entries(d8.porRenglon)) deCuenta[llave] = (deCuenta[llave] ?? 0) + cents
       else atribuible = false
     }
   }
-  const renglones = base.map(r => {
+  const renglones: RenglonDeLaComposicion[] = base.map(r => {
     const cents = r.neto - (deCuenta[r.llave] ?? 0)
     // Negativo: un renglón roto, o un reparto que le pone más de lo que cobra. Pesa 0 y lo de más no se puede atribuir.
     if (cents < 0) atribuible = false
     return { llave: r.llave, tratamiento: r.tratamiento, tasa: r.tasa, cantidad: r.cantidad, cents: Math.max(0, cents) }
   })
-  const por = new Map<string, MezclaPorTratamiento[number]>()
-  for (const r of renglones) {
-    if (r.cents === 0) continue
-    const parte = por.get(grupo(r))
-    if (parte) parte.grossCents += r.cents
-    else por.set(grupo(r), { tratamiento: r.tratamiento, tasa: r.tasa, grossCents: r.cents })
-  }
-  // Sin nada en la mezcla y algo que no se pudo atribuir (el único IVA quedó recortado a 0), tampoco consta a qué tasa va el cobro.
-  return { mezcla: [...por.values()], renglones, aproximada: (!atribuible && (variosIva || por.size === 0)) || ivaAparteDesconocido }
+  return { renglones, atribuible, variosIva, ivaAparteDesconocido }
 }
 
 /** La mezcla sin lo demás (la conciliación de reparto y las pruebas viejas). */

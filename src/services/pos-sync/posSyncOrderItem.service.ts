@@ -63,10 +63,15 @@ async function applyPosOrderItemEvent({ venueId, parentOrderExternalId, itemData
         const locked = await lockExistingOrderForPayment(tx, { venueId, orderId: candidate.id })
         const parent = locked ? await tx.order.findFirst({ where: { id: candidate.id, ...parentKey }, select: { id: true } }) : null
         if (!parent) throw parentNotFound()
+        // WHY: /tables pinta los renglones y la versión del plano del POS (`tablesVersion`) sólo mira el `updatedAt` de la
+        // cuenta, no el de sus renglones. Sin este toque, un artículo de SoftRestaurant no refresca el POS. Sólo `updatedAt`:
+        // el dinero de la cabecera importada no se toca.
+        const touchParent = () => tx.order.update({ where: { id: parent.id }, data: { updatedAt: new Date() } })
 
         // Caso 1: El item fue eliminado
         if (itemData.deleted) {
           const { count } = await tx.orderItem.deleteMany({ where: { orderId: parent.id, externalId: itemData.externalId } })
+          if (count > 0) await touchParent()
           return { deleted: count > 0, orderId: parent.id }
         }
 
@@ -112,6 +117,7 @@ async function applyPosOrderItemEvent({ venueId, parentOrderExternalId, itemData
             lastSyncAt: new Date(),
           },
         })
+        await touchParent()
         return { orderItem }
       }
 

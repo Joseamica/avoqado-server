@@ -1,4 +1,4 @@
-import AppError, { BadRequestError, ConflictError } from '../../errors/AppError'
+import AppError, { BadRequestError, ConflictError, ProviderUnavailableError } from '../../errors/AppError'
 /**
  * CFDI Dashboard Controller
  *
@@ -26,6 +26,8 @@ import {
 import { vistaPreviaContrato, confirmarContratoIvaIncluido, VistaPreviaContrato } from '@/services/fiscal/confirmarContratoDePrecio.service'
 import { replaceCfdi } from '@/services/fiscal/cfdiReplacement.service'
 import { emitRefundCreditNote, getRefundCreditNoteStatus } from '@/services/fiscal/cfdiCreditNote.service'
+import { textoDeTimbreEnDuda, timbreEnDuda } from '@/services/fiscal/timbreEnDuda'
+import { emitRefundCreditNoteSchema } from '@/schemas/dashboard/cfdi.schema'
 import { searchSatCatalog } from '@/services/fiscal/satCatalogLookup.service'
 import { SatCatalogUnavailableError } from '@/errors/AppError'
 import {
@@ -111,6 +113,8 @@ export async function issueCfdiForOrderController(req: Request, res: Response): 
         error: 'El PAC rechazó el timbrado',
         message: result.cfdi?.lastError,
         cfdiId: result.cfdi?.id,
+        // C2 · ronda QA (D1, aditivo): el PAC no contestó claro y la factura quedó EN DUDA (no la rechazó); el dashboard lo dice así.
+        ...(timbreEnDuda(result.cfdi) ? { timbreEnDuda: true } : {}),
       })
       return
     }
@@ -119,10 +123,27 @@ export async function issueCfdiForOrderController(req: Request, res: Response): 
     // decía «éxito» (Testarudo 24-sep: a otra razón social y tras cancelar). 409 para que ningún cliente
     // —tampoco el dashboard ya desplegado— pueda leerlo como una factura nueva.
     if (result.alreadyIssued) {
-      const folio = [result.cfdi?.serie, result.cfdi?.folio].filter(Boolean).join('-') || result.cfdi?.uuid || 'anterior'
+      const folioDe = (c: any) => [c?.serie, c?.folio].filter(Boolean).join('-') || c?.uuid || 'anterior'
+      const folio = folioDe(result.cfdi)
+      // C2 · OF-2 (T10 N-2): ya facturada con la SUSTITUTA y la original sigue vigente. La fila de la original no ofrece «Corregir
+      // importe»; ofrece «Terminar la sustitución» sólo sin una cancelación viva (`sePuedeTerminarLaSustitucion` del dashboard).
+      const original = result.originalVigente
+      const enTramite = (c: any) => c.cancelStatus === 'REQUESTED' || c.status === 'CANCEL_REQUESTED'
+      // Ronda de la ola (review-OF m2): ya facturada con la ORIGINAL y su sustituta se está cancelando. La fila de la original ya tiene
+      // sustituta (no ofrece «Corregir importe»); «Cancelar», sólo sin una cancelación viva.
+      const sustituta = result.sustitutaEnCancelacion
+      const error = sustituta
+        ? enTramite(result.cfdi)
+          ? `Esta venta ya está facturada con la factura ${folio}; su cancelación y la de la ${folioDe(sustituta)}, que la corregía, siguen en trámite ante el SAT.`
+          : `Esta venta ya está facturada con la factura ${folio}: la ${folioDe(sustituta)}, que la corregía, tiene su cancelación en trámite. Para facturarla a otra razón social, cancela también la ${folio} en Facturación.`
+        : !original
+          ? `Esta venta ya tiene la factura ${folio} vigente. Para facturarla a otra razón social, primero cancela la ${folio} en Facturación; si sólo el importe está mal, usa «Corregir importe».`
+          : enTramite(original)
+            ? `Esta venta ya está facturada con la factura ${folio}, que sustituye a la ${folioDe(original)}; la cancelación de la ${folioDe(original)} sigue pendiente ante el SAT.`
+            : `Esta venta ya está facturada con la factura ${folio}, que sustituye a la ${folioDe(original)}. La ${folioDe(original)} todavía no queda cancelada: en Facturación, usa «Terminar la sustitución» en la ${folioDe(original)}.`
       res.status(409).json({
         code: 'CFDI_ALREADY_ISSUED',
-        error: `Esta venta ya tiene la factura ${folio} vigente. Para facturarla a otra razón social, primero cancela la ${folio} en Facturación; si sólo el importe está mal, usa «Corregir importe».`,
+        error,
         cfdi: {
           id: result.cfdi.id,
           uuid: result.cfdi.uuid,
@@ -157,13 +178,16 @@ export async function issueCfdiForOrderController(req: Request, res: Response): 
       },
     })
   } catch (err: unknown) {
-    if (err instanceof ConflictError) {
-      res.status(409).json({ error: err.message })
-      return
-    }
     const message = err instanceof Error ? err.message : String(err)
     // warn si la respuesta es un caso esperado (4xx); error sólo si termina en 5xx.
     const aviso = `[cfdi.controller] issue failed for order ${orderId}: ${message}`
+    // C2 · T10 ronda 1 (M3): el 409 tipado lleva su código si lo trae (p. ej. `CFDI_CANCEL_PENDING`: la cancelación de la factura anterior
+    // sigue pendiente). El código es el contrato; el texto cambia según el estado. Aditivo: sin código, la respuesta es la de antes.
+    if (err instanceof ConflictError) {
+      logger.warn(aviso)
+      res.status(409).json({ error: err.message, ...(err.code ? { code: err.code } : {}) })
+      return
+    }
 
     // La venta no es de este negocio (aislamiento) o no existe: no es un problema de configuración fiscal,
     // y el texto no debe mandar a revisar emisores.
@@ -189,13 +213,6 @@ export async function issueCfdiForOrderController(req: Request, res: Response): 
     if (/no habilitada/i.test(message)) {
       logger.warn(aviso)
       res.status(403).json({ error: message })
-      return
-    }
-
-    // La cancelación de la factura anterior sigue en trámite ante el SAT: todavía no se puede refacturar.
-    if (/en trámite/i.test(message)) {
-      logger.warn(aviso)
-      res.status(409).json({ code: 'CFDI_CANCEL_PENDING', error: message })
       return
     }
 
@@ -384,6 +401,8 @@ export async function sendCfdiEmailController(req: Request, res: Response): Prom
 export async function cancelCfdiController(req: Request, res: Response): Promise<void> {
   const { cfdiId } = req.params
   const { motivo, substituteUuid } = req.body
+  // C2 · T10 ronda 1 (I-1): «Consultar estado» sólo consulta (nunca anota ni envía un intento) y no se registra en la bitácora: no pidió nada.
+  const soloConsultar = req.body?.soloConsultar === true
   // Venue resolved via resolveRequestVenueId (URL → x-venue-id → token), consistent with checkPermission.
   const authContext = (req as any).authContext ?? {}
   const venueId = resolveRequestVenueId(req, authContext)
@@ -402,27 +421,61 @@ export async function cancelCfdiController(req: Request, res: Response): Promise
       substituteUuid,
       sandbox,
       expectedVenueId: venueId,
+      ...(soloConsultar ? { soloConsultar: true } : {}),
     })
 
-    if (result.applied !== false)
+    if (soloConsultar) {
+      // Sólo se consultó: nadie pidió nada (la confirmación o el cierre, si los hubo, los registra la consulta misma).
+    } else if (result.applied !== false)
       await logAction({
         staffId: authContext.userId,
         venueId,
         action: 'CFDI_CANCELLED',
         entity: 'Cfdi',
         entityId: cfdiId,
-        data: { motivo, substituteUuid: substituteUuid ?? null, cancelStatus: result.cancelStatus },
+        data: { motivo, substituteUuid: substituteUuid ?? null, cancelStatus: result.cancelStatus, estado: result.estado ?? null },
+      })
+    // C2 ronda 1 (M6): esta persona anotó el intento pero otra escritura ganó (y la auditó como confirmación): queda registrado QUIÉN lo
+    // pidió, con una acción propia (no duplica CFDI_CANCELLED ni CFDI_CANCEL_CONFIRMED).
+    else if (result.intencionNueva)
+      await logAction({
+        staffId: authContext.userId,
+        venueId,
+        action: 'CFDI_CANCEL_REQUESTED',
+        entity: 'Cfdi',
+        entityId: cfdiId,
+        data: { motivo, substituteUuid: substituteUuid ?? null, cancelStatus: result.cancelStatus, estado: result.estado ?? null },
       })
 
     res.status(200).json({
       cancelStatus: result.cancelStatus,
       cancelledAt: result.cancelledAt,
       cfdiId: result.cfdi?.id,
+      // C2: el estado derivado (ANOTADA · ENVIANDO · EN_TRAMITE · CANCELACION_EN_DUDA · RECHAZADA · CANCELADA). Nuevo y opcional.
+      estado: result.estado,
+      // C2 ronda 1 (I1): el envío terminó sin respuesta clara (el panel lo prefiere sobre el estado). Nuevo y opcional.
+      ...(result.enDuda ? { enDuda: true } : {}),
+      // C2 · T10 (M9): por qué NO quedó (el panel lo dice en vez de «Cancelación solicitada.»). Nuevo y opcional; sólo con el rechazo.
+      ...(result.cancelStatus === 'REJECTED' && result.cfdi?.lastError ? { motivoRechazoCancelacion: result.cfdi.lastError } : {}),
     })
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)
     // warn si la respuesta es un caso esperado (4xx); error sólo si termina en 5xx.
     const aviso = `[cfdi.controller] cancelCfdi failed for cfdi ${cfdiId}: ${message}`
+
+    // C2 (Codex C2-6): una regla impidió anotar la intención (documentos relacionados vivos, otra cancelación en trámite con otro
+    // motivo): 409 con SU texto, antes de las regex. No pasó nada: no se escribe bitácora.
+    if (err instanceof ConflictError) {
+      logger.warn(aviso)
+      res.status(409).json({ error: message })
+      return
+    }
+    // C2 ronda 1 (M1): no se pudo consultar al SAT antes de enviar: no salió nada y el intento ya se cerró. 502 con su texto.
+    if (err instanceof ProviderUnavailableError) {
+      logger.warn(aviso)
+      res.status(502).json({ error: message })
+      return
+    }
 
     if (/not found/i.test(message)) {
       logger.warn(aviso)
@@ -494,6 +547,8 @@ export async function replaceCfdiController(req: Request, res: Response): Promis
         sustitutaUuid: result.sustituta?.uuid ?? null,
         cancelStatus: result.cancelStatus,
         cancelPendiente: result.cancelPendiente,
+        cancelConflicto: result.cancelConflicto ?? null,
+        cancelAviso: result.cancelAviso ?? null,
       },
     })
 
@@ -513,6 +568,18 @@ export async function replaceCfdiController(req: Request, res: Response): Promis
       original: { id: cfdiId, uuid: result.original?.uuid ?? null },
       cancelStatus: result.cancelStatus,
       cancelPendiente: result.cancelPendiente,
+      // C2 (M6): por qué no se pudo pedir la cancelación de la original (p. ej. tiene una nota de crédito viva). Nuevo y opcional.
+      ...(result.cancelConflicto ? { cancelConflicto: result.cancelConflicto } : {}),
+      // C2 ronda 2 (N3): por qué no salió la cancelación de la original (p. ej. no se pudo consultar al SAT). Nuevo y opcional.
+      ...(result.cancelAviso ? { cancelAviso: result.cancelAviso } : {}),
+      // Ronda de la ola (3): la cancelación de la original quedó EN DUDA (como `enDuda` de cancelar: sólo cuando es verdad). Nuevo y opcional.
+      ...(result.enDuda ? { enDuda: true } : {}),
+      // Ronda de la ola (3): ESTA petición anotó un intento nuevo de cancelar la original; `false` ⇒ el `cancelStatus` no es de esta petición.
+      cancelIntentoNuevo: result.cancelIntentoNuevo ?? false,
+      // Micro-ronda final (aditivo): la factura CORREGIDA quedó EN DUDA (502 sin texto hasta hoy): no es un rechazo y no se re-emite.
+      ...(result.status === 'STAMP_FAILED' && timbreEnDuda(result.sustituta)
+        ? { timbreEnDuda: true, error: textoDeTimbreEnDuda('la factura corregida') }
+        : {}),
     })
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)
@@ -558,6 +625,14 @@ export async function emitRefundCreditNoteController(req: Request, res: Response
 
   // Sandbox stamps in dev/staging (free, no SAT effect); live key in production.
   const sandbox = env.NODE_ENV !== 'production'
+  // C2 (Tarea 9, P10): sin body, la nota de siempre; `{ modalidad: 'POR_IMPORTE', huella }` = «acreditar por importe» confirmado por una
+  // persona (cfdi:issue) viendo el reparto. La ruta ya valida la forma; aquí se vuelve a leer con el mismo esquema (llamadas directas).
+  const cuerpo = emitRefundCreditNoteSchema.shape.body.safeParse(req.body ?? undefined)
+  if (!cuerpo.success) {
+    res.status(400).json({ error: cuerpo.error.errors[0]?.message ?? 'La solicitud de la nota de crédito no es válida' })
+    return
+  }
+  const { modalidad, huella } = cuerpo.data ?? {}
 
   try {
     const result = await emitRefundCreditNote({
@@ -565,6 +640,10 @@ export async function emitRefundCreditNoteController(req: Request, res: Response
       refundPaymentId: refundId,
       sandbox,
       requestedByStaffId: authContext.userId ?? null,
+      ...(modalidad ? { modalidad, huellaDelReparto: huella } : {}),
+      // C2 · T10 ronda 1 (M9): la emisión normal también manda la huella de la vista previa (`preview.huella`); el servicio la compara bajo
+      // los candados (409 «La factura cambió…» sin timbrar). Sin huella (clientes viejos), como siempre.
+      ...(!modalidad && huella ? { huellaDelReparto: huella } : {}),
     })
 
     if (result.status === 'VALIDATION_FAILED') {
@@ -572,7 +651,13 @@ export async function emitRefundCreditNoteController(req: Request, res: Response
       return
     }
     if (result.status === 'STAMP_FAILED') {
-      res.status(502).json({ error: 'El PAC rechazó el timbrado', message: result.cfdi?.lastError, cfdiId: result.cfdi?.id })
+      res.status(502).json({
+        error: 'El PAC rechazó el timbrado',
+        message: result.cfdi?.lastError,
+        cfdiId: result.cfdi?.id,
+        // C2 · ronda QA (D1, aditivo): la nota quedó EN DUDA (el PAC no contestó claro), no rechazada.
+        ...(timbreEnDuda(result.cfdi) ? { timbreEnDuda: true } : {}),
+      })
       return
     }
 
@@ -596,6 +681,12 @@ export async function emitRefundCreditNoteController(req: Request, res: Response
     if (/no encontrado/i.test(message)) {
       logger.warn(aviso)
       res.status(404).json({ error: message })
+      return
+    }
+    // C2 (Tarea 9): «por importe» sin la huella del reparto ⇒ 400 con su texto.
+    if (err instanceof BadRequestError) {
+      logger.warn(aviso)
+      res.status(400).json({ error: message })
       return
     }
     if (err instanceof ConflictError || /en proceso/i.test(message)) {
@@ -1140,6 +1231,8 @@ export async function triggerGlobalCfdiController(req: Request, res: Response): 
         res.status(502).json({
           error: 'El PAC rechazó el timbrado de la factura global',
           message: result.cfdi?.lastError,
+          // Ronda QA (hermanos, aditivo): EN DUDA (el PAC no contestó claro), no rechazada; como la factura y la nota (D1).
+          ...(timbreEnDuda(result.cfdi) ? { timbreEnDuda: true } : {}),
           excluidasPorIvaMixto: result.excluidasPorIvaMixto,
           excluidas,
         })
@@ -1420,6 +1513,8 @@ export async function emitGlobalComplementariaController(req: Request, res: Resp
         res.status(502).json({
           error: 'El PAC rechazó el timbrado de la factura global complementaria',
           message: result.cfdi?.lastError,
+          // Ronda QA (hermanos, aditivo): EN DUDA (el PAC no contestó claro), no rechazada; como la factura y la nota (D1).
+          ...(timbreEnDuda(result.cfdi) ? { timbreEnDuda: true } : {}),
           excluidasPorIvaMixto: result.excluidasPorIvaMixto,
           excluidas,
           complementariaDe,

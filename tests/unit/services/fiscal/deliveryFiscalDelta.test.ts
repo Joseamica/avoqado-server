@@ -8,6 +8,7 @@ import {
   desgloseCongelado,
   enLibrosPorTratamiento,
   ivaDeDevolucion,
+  repartoCongeladoDeAjuste,
 } from '../../../../src/services/fiscal/deliveryFiscalDelta'
 import type { MezclaPorTratamiento } from '../../../../src/services/fiscal/ivaMath'
 
@@ -221,5 +222,47 @@ describe('B4b · desgloseCongelado y la regla de la conciliación', () => {
       IVA_16: { baseCents: 5371, ivaCents: 859 },
       IVA_0: { baseCents: 5370, ivaCents: 0 },
     })
+  })
+})
+
+describe('C2 · repartoCongeladoDeAjuste — lo devuelto por tratamiento de un ajuste de entregas, para su nota de crédito', () => {
+  const v2 = (porTratamiento: Record<string, { baseCents: number; ivaCents: number }>) => ({
+    provenance: 'PROVIDER_ADJUSTMENT',
+    fiscalByRateCents: { v: 2, porTratamiento },
+  })
+  it('🔴 ajuste v2 válido ⇒ base + IVA por tratamiento; sin `PROVIDER_ADJUSTMENT` ⇒ null (no es un ajuste)', () => {
+    const valido = v2({ IVA_16: { baseCents: 5000, ivaCents: 800 }, IVA_0: { baseCents: 2000, ivaCents: 0 } })
+    expect(repartoCongeladoDeAjuste(valido, 7800)).toEqual({ IVA_16: 5800, IVA_0: 2000 })
+    expect(repartoCongeladoDeAjuste({ ...valido, provenance: 'MANUAL' }, 7800)).toBeNull()
+    expect(repartoCongeladoDeAjuste(null, 7800)).toBeNull()
+  })
+  it('🔴 forma vieja (Ruling 4b-R3): toda la base al 16 % y cada IVA a su tasa, igual que la póliza', () => {
+    expect(repartoCongeladoDeAjuste({ provenance: 'PROVIDER_ADJUSTMENT', fiscalByRateCents: { '0.16': 800 } }, 5800)).toEqual({
+      IVA_16: 5800,
+    })
+    expect(repartoCongeladoDeAjuste({ provenance: 'PROVIDER_ADJUSTMENT', fiscalByRateCents: { '0.16': 800, '0.08': 80 } }, 5880)).toEqual({
+      IVA_16: 5800,
+      IVA_8: 80,
+    })
+  })
+  it('🔴 ilegible, con una base negativa, con el IVA fuera de rango o que no suma la venta ⇒ INVALIDO (la nota se detiene)', () => {
+    const casos: Array<[unknown, number]> = [
+      [{ provenance: 'PROVIDER_ADJUSTMENT', fiscalByRateCents: 'x' }, 5800],
+      [{ provenance: 'PROVIDER_ADJUSTMENT' }, 5800],
+      [v2({ IVA_16: { baseCents: -100, ivaCents: 800 }, IVA_0: { baseCents: 5100, ivaCents: 0 } }), 5800],
+      [v2({ IVA_16: { baseCents: 5000, ivaCents: 800 } }), 5801],
+      [{ provenance: 'PROVIDER_ADJUSTMENT', fiscalByRateCents: { '0.16': -1 } }, 5800],
+      [{ provenance: 'PROVIDER_ADJUSTMENT', fiscalByRateCents: { '0.16': 5900 } }, 5800],
+      [{ provenance: 'PROVIDER_ADJUSTMENT', fiscalByRateCents: { '0.16': 900, '0.08': -100 } }, 5800],
+    ]
+    for (const [pd, venta] of casos) expect(repartoCongeladoDeAjuste(pd, venta)).toBe('INVALIDO')
+  })
+  it('M-6 (ronda 1): el tipo sólo admite tratamientos de nota; un BLOQUEADO_* no se produce ni se puede leer (lo vigila el typecheck)', () => {
+    const r = repartoCongeladoDeAjuste(v2({ IVA_16: { baseCents: 5000, ivaCents: 800 } }), 5800)
+    expect(r).toEqual({ IVA_16: 5800 })
+    if (r && r !== 'INVALIDO') {
+      // @ts-expect-error — BLOQUEADO_03 no es un tratamiento de nota (con el tipo ancho, esta línea compila y el typecheck falla)
+      expect(r.BLOQUEADO_03).toBeUndefined()
+    }
   })
 })

@@ -7,6 +7,7 @@ import prisma from '../../utils/prismaClient'
 import { STAFF_PUBLIC_SELECT } from '../../utils/staffPublicSelect'
 import { PaginatedPaymentsResponse } from '../../schemas/dashboard/payment.schema'
 import { logAction } from './activity-log.service'
+import { chargedTotalDe, leerCobradoDeLaOrden } from '../fiscal/cobradoDeLaOrden'
 import {
   MINDFORM_NEW_VENUE_ID,
   getLegacyPayments,
@@ -366,7 +367,15 @@ export async function getPaymentById(venueId: string, paymentId: string) {
     throw new NotFoundError(`Payment con ID ${paymentId} no encontrado en este venue`)
   }
 
-  return payment
+  // C2 A-R4 (aditivo, opcional): lo que cobró cada renglón completo, con el MISMO cargador que usa el escritor de devoluciones. Se omite
+  // si la venta no es atribuible (A-R3). El dashboard usa `chargedTotal ?? total` en la misma cuenta por unidades que hace el servidor.
+  const cobrado = payment.orderId ? await leerCobradoDeLaOrden(prisma, payment.orderId) : null
+  if (!payment.order) return payment
+  const items = payment.order.items.map(it => {
+    const chargedTotal = chargedTotalDe(cobrado, it.id)
+    return chargedTotal === undefined ? it : { ...it, chargedTotal }
+  })
+  return { ...payment, order: { ...payment.order, items } }
 }
 
 /**

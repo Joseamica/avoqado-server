@@ -102,4 +102,22 @@ describe('validateBeforeStamp (D1)', () => {
     const xaxxReason = r.reasons.find(reason => /Público en General|XAXX/i.test(reason))
     expect(xaxxReason).toBeUndefined()
   })
+
+  // ── C2 · Tarea 8: la nota de crédito RELACIONADA con una global lleva el mismo Público en General ──
+  it('🔴 C2 T8: una nota relacionada con una global (relacionadaConGlobal) admite XAXX010101000, 616 y G02', () => {
+    const r = validateBeforeStamp({
+      ...ok,
+      receptor: { rfc: 'XAXX010101000', razonSocial: 'PÚBLICO EN GENERAL', regimenFiscal: '616', codigoPostal: '01000', usoCfdi: 'G02' },
+      relacionadaConGlobal: true,
+    })
+    expect(r).toEqual({ valid: true, reasons: [] })
+  })
+
+  it('control — C2 T8: sin relacionadaConGlobal (o en false) una factura o nota individual sigue rechazando XAXX010101000', () => {
+    for (const relacionadaConGlobal of [undefined, false]) {
+      const r = validateBeforeStamp({ ...ok, receptor: { ...ok.receptor, rfc: 'XAXX010101000' }, relacionadaConGlobal })
+      expect(r.valid).toBe(false)
+      expect(r.reasons.join(' ')).toMatch(/Público en General/)
+    }
+  })
 })

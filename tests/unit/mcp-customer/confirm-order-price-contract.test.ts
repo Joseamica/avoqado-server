@@ -11,6 +11,7 @@
  */
 import { registerCfdiTools } from '../../../src/mcp/tools/cfdi'
 import type { McpScope } from '../../../src/mcp/scope'
+import { conectarPorElCatalogo, pasoUnoYDos } from '../../__helpers__/mcp-por-el-catalogo'
 
 const mockVistaPreviaContrato = jest.fn()
 const mockConfirmarContratoIvaIncluido = jest.fn()
@@ -104,10 +105,12 @@ const PREVIEW_CONFIRMABLE = {
 const HUELLA = PREVIEW_CONFIRMABLE.huella
 
 describe('confirm_order_price_contract — confirm-gated (IVA por producto, plan 2)', () => {
+  // T9 ronda 1, cambio A PROPÓSITO: el motivo se da en el PASO 1 (el catálogo firma la entrada del paso 1; uno que llega hasta el
+  // paso 2 cambia lo firmado). Sin motivo, la vista previa lo pide (ver «sin motivo» abajo).
   it('(a) sin confirm ⇒ devuelve la vista previa, NO llama al servicio de confirmar, sin auditoría', async () => {
     mockVistaPreviaContrato.mockResolvedValueOnce(PREVIEW_CONFIRMABLE)
 
-    const out = parse(await call('confirm_order_price_contract', { venueId: 'v1', orderId: 'o1' }))
+    const out = parse(await call('confirm_order_price_contract', { venueId: 'v1', orderId: 'o1', motivo: 'x' }))
 
     expect(out.requiresConfirmation).toBe(true)
     // El transporte JSON serializa `createdAt` a ISO string; el resto viaja igual, MÁS
@@ -132,7 +135,7 @@ describe('confirm_order_price_contract — confirm-gated (IVA por producto, plan
   it('(F3) venta SIN COBRAR ⇒ el mensaje dice «sin cobrar (total $X)», nunca «cobrada» ni «pagada»', async () => {
     mockVistaPreviaContrato.mockResolvedValueOnce({ ...PREVIEW_CONFIRMABLE, paymentStatus: 'PENDING', paidAmountMxn: 0 })
 
-    const out = parse(await call('confirm_order_price_contract', { venueId: 'v1', orderId: 'o1' }))
+    const out = parse(await call('confirm_order_price_contract', { venueId: 'v1', orderId: 'o1', motivo: 'x' }))
 
     expect(out.requiresConfirmation).toBe(true)
     expect(out.message).toMatch(/sin cobrar \(total \$150\.50\)/)
@@ -329,5 +332,111 @@ describe('confirm_order_price_contract — confirm-gated (IVA por producto, plan
     const tool = descripciones.get('confirm_order_price_contract')!
     expect(tool.descripcion).toMatch(/huella/)
     expect(Object.keys(tool.esquema)).toContain('huella')
+  })
+})
+
+// ─── C2 · T9 ronda 1: rota desde el 1-oct por el catálogo (medido en la revisión, B1/B2). Ahora sigue el patrón que el catálogo entiende ───
+describe('confirm_order_price_contract — T9 ronda 1 · por el catálogo (token de confirmación)', () => {
+  const MOTIVO = 'El cliente lo confirmó por WhatsApp.'
+  let c: Awaited<ReturnType<typeof conectarPorElCatalogo>>
+  beforeEach(async () => {
+    c = await conectarPorElCatalogo(server => registerCfdiTools(server as never, scope), scope)
+    mockVistaPreviaContrato.mockResolvedValue(PREVIEW_CONFIRMABLE)
+    mockConfirmarContratoIvaIncluido.mockResolvedValue({ ok: true })
+  })
+  afterEach(async () => c.close())
+
+  it('🔴 paso 1 con el motivo y paso 2 con los confirmationArgs de la herramienta y el token ⇒ confirma UNA vez, con la versión y la huella vistas', async () => {
+    const { vista, resultado } = await pasoUnoYDos(c, 'confirm_order_price_contract', { venueId: 'v1', orderId: 'o1', motivo: MOTIVO })
+    expect(vista.requiresConfirmation).toBe(true)
+    expect(vista.confirmationToken).toEqual(expect.any(String))
+    expect(vista.confirmationArgs).toEqual({ ...vista.confirmationArguments, confirm: true })
+    expect(resultado).toMatchObject({ ok: true })
+    expect(mockConfirmarContratoIvaIncluido).toHaveBeenCalledTimes(1)
+    expect(mockConfirmarContratoIvaIncluido).toHaveBeenCalledWith({
+      venueId: 'v1',
+      orderId: 'o1',
+      versionVista: 3,
+      huellaVista: HUELLA,
+      staffId: 's1',
+      motivo: MOTIVO,
+    })
+  })
+  it('🔴 con los argumentos alterados (otra venta, otro motivo, otra huella), el token no sirve y no confirma', async () => {
+    const vista = await c.call('confirm_order_price_contract', { venueId: 'v1', orderId: 'o1', motivo: MOTIVO })
+    for (const cambio of [{ orderId: 'o2' }, { motivo: 'otro' }, { expectedSourceFingerprint: `3:${'0'.repeat(64)}` }])
+      expect(
+        await c.call('confirm_order_price_contract', { ...vista.confirmationArgs, ...cambio, confirmationToken: vista.confirmationToken }),
+      ).toMatchObject({ needsInput: true, field: 'confirmationToken' })
+    expect(mockConfirmarContratoIvaIncluido).not.toHaveBeenCalled()
+  })
+  it('🔴 sin motivo en el paso 1: la vista previa lo PIDE (needsInput) y no ofrece una confirmación que no podría terminar', async () => {
+    const vista = await c.call('confirm_order_price_contract', { venueId: 'v1', orderId: 'o1' })
+    expect(vista).toMatchObject({ ok: false, needsInput: true, field: 'motivo' })
+    expect(vista.requiresConfirmation).toBeUndefined()
+    expect(vista.confirmationToken).toBeUndefined()
+    expect(vista.preview.huella).toBe(HUELLA)
+    expect(mockConfirmarContratoIvaIncluido).not.toHaveBeenCalled()
+  })
+  it('🔴 si la venta cambió entre los pasos, el servicio lo rechaza con la versión y la huella que se VIERON (no las de ahora)', async () => {
+    mockConfirmarContratoIvaIncluido.mockResolvedValue({ ok: false, code: 'CAMBIO_DESDE_LA_VISTA', message: 'La venta cambió.' })
+    const vista = await c.call('confirm_order_price_contract', { venueId: 'v1', orderId: 'o1', motivo: MOTIVO })
+    expect(vista.expectedSourceFingerprint).toBe(`3:${HUELLA}`)
+    // Entre el paso 1 y el paso 2 la venta cambió (otra versión): se confirma con lo que se VIO, y el servicio lo rechaza.
+    mockVistaPreviaContrato.mockResolvedValue({ ...PREVIEW_CONFIRMABLE, version: 4, huella: 'f'.repeat(64) })
+    const resultado = await c.call('confirm_order_price_contract', {
+      ...vista.confirmationArgs,
+      confirmationToken: vista.confirmationToken,
+    })
+    expect(resultado).toMatchObject({ ok: false, error: 'La venta cambió.' })
+    expect(mockConfirmarContratoIvaIncluido).toHaveBeenCalledWith(expect.objectContaining({ versionVista: 3, huellaVista: HUELLA }))
+    expect(mockAudit).not.toHaveBeenCalled()
+  })
+})
+
+// C2 · OF-2 (T9 N-1, `task-9-rereview-1.md`): el «rodeo» viejo (version/huella sueltas en el PASO 1) con valores de una vista ANTERIOR ya no se
+// confirma en silencio contra la versión fresca: se dice que la venta cambió, se enseña la vista nueva y no se da token. Y el mensaje de
+// `needsInput` ya no empuja a mandar version/huella (el paso 2 los toma de confirmationArgs).
+describe('confirm_order_price_contract — OF-2 · T9 N-1: el rodeo con version/huella viejas', () => {
+  const MOTIVO = 'El cliente lo confirmó por WhatsApp.'
+  let c: Awaited<ReturnType<typeof conectarPorElCatalogo>>
+  beforeEach(async () => {
+    c = await conectarPorElCatalogo(server => registerCfdiTools(server as never, scope), scope)
+    mockVistaPreviaContrato.mockResolvedValue({ ...PREVIEW_CONFIRMABLE, version: 4, huella: 'f'.repeat(64) })
+    mockConfirmarContratoIvaIncluido.mockResolvedValue({ ok: true })
+  })
+  afterEach(async () => c.close())
+
+  it('🔴 paso 1 con la version/huella de una vista VIEJA ⇒ ok:false «la venta cambió», con la vista nueva y SIN token', async () => {
+    const r = await c.call('confirm_order_price_contract', { venueId: 'v1', orderId: 'o1', motivo: MOTIVO, version: 3, huella: HUELLA })
+    expect(r).toMatchObject({ ok: false, preview: { version: 4, huella: 'f'.repeat(64) } })
+    expect(r.error).toMatch(/cambió desde la vista previa que mandaste/)
+    expect(r.requiresConfirmation).toBeUndefined()
+    expect(r.confirmationToken).toBeUndefined()
+    expect(mockConfirmarContratoIvaIncluido).not.toHaveBeenCalled()
+  })
+  it('🔴 con sólo la huella vieja (version vigente) también', async () => {
+    const r = await c.call('confirm_order_price_contract', { venueId: 'v1', orderId: 'o1', motivo: MOTIVO, version: 4, huella: HUELLA })
+    expect(r).toMatchObject({ ok: false })
+    expect(r.confirmationToken).toBeUndefined()
+  })
+  it('control — el rodeo con los valores VIGENTES sigue funcionando (paso 1 ⇒ token; paso 2 confirma una vez)', async () => {
+    const vista = await c.call('confirm_order_price_contract', {
+      venueId: 'v1',
+      orderId: 'o1',
+      motivo: MOTIVO,
+      version: 4,
+      huella: 'f'.repeat(64),
+    })
+    expect(vista.requiresConfirmation).toBe(true)
+    const r = await c.call('confirm_order_price_contract', { ...vista.confirmationArgs, confirmationToken: vista.confirmationToken })
+    expect(r).toMatchObject({ ok: true })
+    expect(mockConfirmarContratoIvaIncluido).toHaveBeenCalledTimes(1)
+  })
+  it('🔴 sin motivo: el mensaje ya no pide mandar version ni huella', async () => {
+    const r = await c.call('confirm_order_price_contract', { venueId: 'v1', orderId: 'o1' })
+    expect(r).toMatchObject({ needsInput: true, field: 'motivo' })
+    expect(r.message).not.toMatch(/version:|huella:/)
+    expect(r.message).toMatch(/pide la vista previa otra vez con un motivo/)
   })
 })

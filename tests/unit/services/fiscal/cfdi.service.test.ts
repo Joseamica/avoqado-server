@@ -1,7 +1,8 @@
 import { withIssueTransaction } from '../../../__helpers__/issue-cfdi-transaction'
 // tests/unit/services/fiscal/cfdi.service.test.ts
 import { Prisma } from '@prisma/client'
-import { issueCfdiForOrder, IssueCfdiDeps } from '../../../../src/services/fiscal/cfdi.service'
+import { issueCfdiForOrder, IssueCfdiDeps, getCfdiStatus } from '../../../../src/services/fiscal/cfdi.service'
+import prisma from '../../../../src/utils/prismaClient'
 
 /** Helper: build a realistic P2002 unique-violation error as Prisma would throw. */
 function makeP2002(): Prisma.PrismaClientKnownRequestError {
@@ -74,7 +75,8 @@ function makeDeps(over: Partial<IssueCfdiDeps> = {}): IssueCfdiDeps {
     resolveProvider: jest.fn().mockReturnValue({
       name: 'facturapi',
       createInvoice: jest.fn().mockResolvedValue(stamped),
-      downloadXml: jest.fn().mockResolvedValue(Buffer.from('<Comprobante/>')),
+      // C2 · T5 ronda 1 (M3): un comprobante con sus totales; sin ellos no hay `xmlConceptos` (nunca se inventan).
+      downloadXml: jest.fn().mockResolvedValue(Buffer.from('<Comprobante SubTotal="100.00" Total="116.00"/>')),
       downloadPdf: jest.fn().mockResolvedValue(Buffer.from('%PDF')),
     } as any),
     storeArtifact: jest.fn().mockImplementation(async (_b, path) => `https://cdn/${path}`),
@@ -98,7 +100,8 @@ describe('issueCfdiForOrder', () => {
     expect(calls[0].xmlUrl ?? null).toBeNull()
     const [llave, urls] = (deps.persistArtifacts as jest.Mock).mock.calls[0]
     expect(llave).toBe('cfdi-order-o1')
-    expect(Object.keys(urls).sort()).toEqual(['pdfUrl', 'taxBreakdown', 'xmlUrl'])
+    // C2 · T5: los archivos llevan también los conceptos del XML (evidencia, no estado fiscal).
+    expect(Object.keys(urls).sort()).toEqual(['pdfUrl', 'taxBreakdown', 'xmlConceptos', 'xmlUrl'])
     expect(urls.xmlUrl).toMatch(/\.xml$/)
   })
 
@@ -668,5 +671,20 @@ describe('issueCfdiForOrder — recuperación de intentos', () => {
     const res = await issueCfdiForOrder({ orderId: 'o1', receptor, sandbox: true }, deps)
     expect(res.cfdi.xmlUrl).toMatch(/\.xml$/)
     expect(res.cfdi.pdfUrl).toMatch(/\.pdf$/)
+  })
+})
+
+// C2 · T5 ronda 1 (M1): `xmlConceptos` de una global pesa ~1 MiB de JSON; `GET /dashboard/venues/:venueId/cfdi/:cfdiId` (que devuelve la
+// fila de `getCfdiStatus`) no lo trae. No se quita nada más: sigue siendo la fila completa con su `include`.
+describe('C2 · T5 ronda 1 (M1) · getCfdiStatus no devuelve `xmlConceptos`', () => {
+  it('🔴 la lectura por omisión omite `xmlConceptos` y conserva lo demás (sin `select`, con `include` de las sustitutas)', async () => {
+    ;(prisma.cfdi.findUnique as jest.Mock).mockResolvedValueOnce({ id: 'c1', venueId: 'v1' })
+    // C2 · T10 (C2-31), cambio A PROPÓSITO: la fila gana `estadoCancelacion` (null = nunca se pidió cancelarla).
+    expect(await getCfdiStatus({ cfdiId: 'c1', expectedVenueId: 'v1' })).toEqual({ id: 'c1', venueId: 'v1', estadoCancelacion: null })
+    const q = (prisma.cfdi.findUnique as jest.Mock).mock.calls.at(-1)[0]
+    expect(q.where).toEqual({ id: 'c1' })
+    expect(q.omit).toEqual({ xmlConceptos: true })
+    expect(q.select).toBeUndefined()
+    expect(q.include.replacedBy).toEqual(expect.objectContaining({ take: 5 }))
   })
 })
