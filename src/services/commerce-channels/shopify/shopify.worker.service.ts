@@ -381,6 +381,9 @@ export async function limpiarShopify(now: Date, limite: number): Promise<void> {
   // suspendida o sin iniciar) tampoco saldrá: el reclamo exige pareja viva, y reactivar (COMPARAR) o archivar lo descartarían
   // igual. Sin esto se quedaba vivo para siempre: contaba en el resumen (y su sondeo de 5 s), en RETRASO y le cerraba la
   // resolución con 409. Con más de 15 min (`SIN_PAREJA_VIVA_MIN`), por tandas, sin esperar candados.
+  // P1-1: la pareja SIN INICIAR que creó el conector (`createdProduct`) cuenta como viva: el guardia retiene su venta y
+  // TOMAR_SHOPIFY la suma al iniciarla. El barrido del cuadre la inicia hasta su etapa de stock (decenas de minutos en un
+  // catálogo grande): descartarla aquí volvería a perder la venta. Si se suspende al iniciar, `suspendPair` la descarta.
   const sinParejaVivaDesde = new Date(now.getTime() - SIN_PAREJA_VIVA_MIN * 60_000)
   while (Date.now() < limite) {
     const n = await prisma.$executeRaw`
@@ -393,7 +396,7 @@ export async function limpiarShopify(now: Date, limite: number): Promise<void> {
                  AND f."createdAt" < ${utcTs(sinParejaVivaDesde)}
                  AND NOT EXISTS (SELECT 1 FROM "ShopifyVariantLink" v
                                   WHERE v."productId" = f."productId" AND v."locationLinkId" = f."locationLinkId"
-                                    AND v."initializedAt" IS NOT NULL AND v."suspendedReason" IS NULL)
+                                    AND v."suspendedReason" IS NULL AND (v."initializedAt" IS NOT NULL OR v."createdProduct"))
                ORDER BY f.id
                LIMIT ${LIMPIEZA_TANDA}
                FOR UPDATE OF f SKIP LOCKED) p

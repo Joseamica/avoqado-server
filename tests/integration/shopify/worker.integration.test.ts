@@ -835,6 +835,17 @@ describe('requisitos del ledger para B8', () => {
       expect(await vivas(e)).toBe(3) // el resumen (y su sondeo de 5 s) y el aviso RETRASO dejan de verlas
     })
 
+    it('🔴 P1-1: lo vivo de una pareja que creó el conector y todavía no se inicia se queda (TOMAR lo va a sumar), aunque pasen 15 min', async () => {
+      const e = await escenario()
+      const creada = await agregarProductoShopify(e, { initialized: false, createdProduct: true })
+      const emparejada = await agregarProductoShopify(e, { initialized: false, createdProduct: false })
+      const retenida = await fila(e, creada.productId, { createdAt: hace(40) })
+      const muerta = await fila(e, emparejada.productId, { createdAt: hace(40) })
+      await limpiarShopify(new Date(), Date.now() + 10_000)
+      expect(await estado(retenida.id)).toMatchObject({ status: 'PENDING', lastError: null })
+      expect(await estado(muerta.id)).toMatchObject({ status: 'DISCARDED', lastError: 'SIN_PAREJA_VIVA' })
+    })
+
     it('una sucursal que no está ACTIVE no se toca (en REVIEWING lo vivo todavía cuenta para TOMAR_SHOPIFY), ni nada sin tiempo', async () => {
       const e = await escenario({ linkStatus: 'REVIEWING', initialized: false })
       const sinPareja = await agregarProductoShopify(e, { pareja: false })

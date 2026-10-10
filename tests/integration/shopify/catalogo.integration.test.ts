@@ -8,6 +8,7 @@ import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { fetchLevels } from '@/services/commerce-channels/shopify/shopify.mirror.service'
+import * as espejoA from '@/services/commerce-channels/shopify/shopify.mirror.service'
 import {
   ARCHIVADO_POR_SHOPIFY,
   archivarPareja,
@@ -732,6 +733,33 @@ describe('sync de un producto en ACTIVE (#7, #20, N01, N11, N21)', () => {
     expect(await syncShopifyProduct(e.storeId, 'gid://shopify/Product/650', { graphql, hasAccess: conPlan })).toEqual({ ok: true })
     expect((await prisma.shopifyVariantLink.findUniqueOrThrow({ where: { productId: ex.productId } })).initializedAt).toBeNull()
     expect(await sucursal(e)).toMatchObject({ needsReconcile: true })
+  })
+
+  it('🔴 P1-1: el sync crea el producto, el inicio falla una vez y la caja lo vende antes del reintento ⇒ la venta no se pierde', async () => {
+    const e = await escenario()
+    const graphql = graphqlFalso(() =>
+      paginaDeVariantes([variante(175, { sku: 'NACE-1', producto: 'gid://shopify/Product/675', available: 6 })], null),
+    )
+    const iniciar = jest.spyOn(espejoA, 'initializePair').mockResolvedValueOnce('REINTENTAR')
+    try {
+      expect(await syncShopifyProduct(e.storeId, 'gid://shopify/Product/675', { graphql, hasAccess: conPlan })).toEqual({ ok: true })
+      const nuevo = await porSku(e, 'NACE-1')
+      expect(nuevo.shopifyVariantLink).toMatchObject({ createdProduct: true, initializedAt: null })
+      expect(await sucursal(e)).toMatchObject({ needsReconcile: true }) // N21: el cuadre lo reintenta
+      await prisma.$executeRaw`UPDATE "Inventory" SET "currentStock" = "currentStock" - 1 WHERE id = ${nuevo.inventory!.id}`
+      expect(await prisma.shopifyStockOutbox.count({ where: { productId: nuevo.id, status: 'PENDING' } })).toBe(1)
+
+      // El reintento (aquí, el siguiente aviso del producto) lo inicia con TOMAR, sumando la venta retenida.
+      expect(await syncShopifyProduct(e.storeId, 'gid://shopify/Product/675', { graphql, hasAccess: conPlan })).toEqual({ ok: true })
+      const despues = await porSku(e, 'NACE-1')
+      expect(despues.shopifyVariantLink!.initializedAt).not.toBeNull()
+      expect(despues.shopifyVariantLink!.mirrorAvailable).toBe(6)
+      expect(despues.inventory!.currentStock.toString()).toBe('5')
+      expect(await prisma.shopifyStockOutbox.findFirstOrThrow({ where: { productId: nuevo.id } })).toMatchObject({ status: 'PENDING' })
+      expect(await huecoDelInvariante(nuevo.id)).toBe('0')
+    } finally {
+      iniciar.mockRestore()
+    }
   })
 
   it('N11: si el evento pierde su reclamo entre páginas, el sync se detiene sin escribir nada', async () => {

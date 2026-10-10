@@ -461,7 +461,9 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     ])
     expect(worker).toContain('export const SIN_PAREJA_VIVA_MIN = 15')
     expect(limpieza).toContain("l.status = 'ACTIVE' AND f.generation = l.generation")
-    expect(limpieza).toContain(`AND v."initializedAt" IS NOT NULL AND v."suspendedReason" IS NULL)`)
+    // P1-1: la pareja sin iniciar que creó el conector cuenta como viva (TOMAR suma lo que el guardia le retuvo).
+    expect(limpieza).toContain(`AND v."suspendedReason" IS NULL AND (v."initializedAt" IS NOT NULL OR v."createdProduct"))`)
+    contieneTodas(['la sin iniciar que creó el conector cuenta como viva, P1-1'])
     expect(limpieza).toContain('"lastError" = \'SIN_PAREJA_VIVA\'')
     // La prueba de volumen existe y sólo corre con la variable.
     expect(leer('tests/integration/shopify/catalogo-volumen.integration.test.ts')).toContain(
@@ -645,6 +647,8 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     contieneTodas([
       'El trigger `"Inventory_guardia_shopify"` (`AFTER INSERT OR UPDATE OF "currentStock"`',
       'si está PAUSED, manda `pausedFrom`',
+      'productos con pareja no suspendida: iniciada, o sin iniciar que el conector creó (`createdProduct`, P1-1)',
+      'Ahora el guardia la encola y la fila se RETIENE: el reclamo exige pareja iniciada, así que no sale hasta que TOMAR inicia la pareja y la suma',
       "`SELECT set_config('avoqado.stock_origen', 'shopify', true)`",
     ])
     // Una sola migración del conector, con marca POSTERIOR a la última de develop al unirse (la del índice de la retención
@@ -669,7 +673,8 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
       `WHEN l.status = 'PAUSED' THEN COALESCE(l."pausedFrom"::text, 'ACTIVE')`,
       `IF v_link IS NULL OR v_fase = 'DISCONNECTED' THEN`,
       `IF v_fase = 'ACTIVE' THEN`,
-      'v."initializedAt" IS NOT NULL AND v."suspendedReason" IS NULL',
+      // P1-1: en ACTIVE también la pareja SIN INICIAR que creó el conector (su venta se retiene y TOMAR la suma).
+      'v."suspendedReason" IS NULL AND (v."initializedAt" IS NOT NULL OR v."createdProduct")',
       'INSERT INTO "ShopifyStockOutbox"',
       'AFTER INSERT OR UPDATE OF "currentStock" ON "Inventory"',
     ])

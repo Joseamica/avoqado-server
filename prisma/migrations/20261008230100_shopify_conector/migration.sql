@@ -339,7 +339,9 @@ ALTER TABLE "ShopifyReviewItem" ADD CONSTRAINT "ShopifyReviewItem_productId_fkey
 
 -- Fase efectiva: si la sucursal está PAUSED, manda la fase de antes (pausedFrom).
 --  · CONNECTING / REVIEWING ⇒ se encola CUALQUIER producto de la sucursal (aún sin pareja): ajuste 12 bis.2.
---  · ACTIVE ⇒ sólo productos con pareja iniciada y no suspendida.
+--  · ACTIVE ⇒ productos con pareja no suspendida: iniciada, o SIN INICIAR que el conector creó (createdProduct). Ésas las
+--    va a iniciar TOMAR_SHOPIFY (Inventory = S + Σ vivas): la venta que llegue antes se retiene aquí (el mensajero no la
+--    manda hasta que la pareja se inicie) y TOMAR la suma. Sin esto se perdía en silencio (P1-1, auditoría de Codex).
 --  · DISCONNECTED o sin enlace ⇒ nada.
 -- No encola: marca de origen 'shopify'; delta 0; DELETE de la fila (lo maneja switchInventoryMethod, ajuste 12 bis.5).
 CREATE OR REPLACE FUNCTION "shopifyGuardiaInventario"() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -376,7 +378,7 @@ BEGIN
     SELECT TRUE INTO v_ok
       FROM "ShopifyVariantLink" v
      WHERE v."productId" = NEW."productId" AND v."locationLinkId" = v_link
-       AND v."initializedAt" IS NOT NULL AND v."suspendedReason" IS NULL;
+       AND v."suspendedReason" IS NULL AND (v."initializedAt" IS NOT NULL OR v."createdProduct");
     IF v_ok IS NOT TRUE THEN
       RETURN NEW;
     END IF;

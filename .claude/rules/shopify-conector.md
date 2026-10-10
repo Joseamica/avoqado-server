@@ -76,11 +76,18 @@ El trigger `"Inventory_guardia_shopify"` (`AFTER INSERT OR UPDATE OF "currentSto
 `ShopifyStockOutbox` en la MISMA transacción del cambio, también desde SQL crudo y desde caminos que se agreguen. Encola según la **fase
 efectiva** de la sucursal (si está PAUSED, manda `pausedFrom`; por eso una pausa por plan no pierde ventas):
 
-| Fase efectiva             | Qué encola                                                      |
-| ------------------------- | --------------------------------------------------------------- |
-| CONNECTING · REVIEWING    | cualquier producto de la sucursal, tenga o no pareja (12 bis.2) |
-| ACTIVE                    | sólo productos con pareja iniciada y no suspendida              |
-| DISCONNECTED o sin enlace | nada                                                            |
+| Fase efectiva             | Qué encola                                                                                                |
+| ------------------------- | --------------------------------------------------------------------------------------------------------- |
+| CONNECTING · REVIEWING    | cualquier producto de la sucursal, tenga o no pareja (12 bis.2)                                           |
+| ACTIVE                    | productos con pareja no suspendida: iniciada, o sin iniciar que el conector creó (`createdProduct`, P1-1) |
+| DISCONNECTED o sin enlace | nada                                                                                                      |
+
+**La pareja sin iniciar que creó el conector (P1-1):** el catálogo la crea activa (si tiene precio) con `Inventory` en 0, y el barrido del
+cuadre la inicia hasta su etapa de stock (decenas de minutos en un catálogo grande): una venta, un ajuste o una recepción en esa ventana se
+perdía en silencio, porque TOMAR pone `Inventory = S + Σ vivas` y el cuadre no ve la diferencia. Ahora el guardia la encola y la fila se
+RETIENE: el reclamo exige pareja iniciada, así que no sale hasta que TOMAR inicia la pareja y la suma (`Inventory = S − 1`, espejo `S`, la
+fila `−1` sale después). La limpieza horaria (M4, §10) la cuenta como viva; si la pareja se suspende al iniciar, `suspendPair(…)` la
+descarta como a cualquier otra.
 
 No encola: un cambio con la marca de origen `shopify`, un delta 0, ni un `DELETE` de la fila (ver §5). El buzón lo llenan SÓLO el guardia y
 la resolución «usar Avoqado» (`reconcile.service.ts:1279`).
@@ -289,13 +296,13 @@ la guía. La página nunca ofrece comprar Premium para Shopify (§0).
 
 - **Limpieza horaria** (`limpiarShopify(…)`, `worker.service.ts:362`): descarta lo que NUNCA salió de una generación vieja y, de una
   sucursal ACTIVE, lo vivo NO ambiguo de la generación vigente cuyo producto no tiene pareja viva con más de 15 min (`SIN_PAREJA_VIVA_MIN`,
-  M4: nunca saldría y contaba para siempre en el resumen y en RETRASO), borra lo cerrado hace 30 días (filas SENT/DISCARDED, eventos
-  terminales, intents) y **las revisiones RESUELTAS hace más de 90 días** (`REVISIONES_RESUELTAS_DIAS`) cuya elección ya no está en camino:
-  sin envío, o con su fila SENT, DISCARDED o ya borrada. Nunca se purga una revisión OPEN, ni una resuelta cuyo envío siga PENDING, FAILED,
-  IN_PROGRESS o DEAD_LETTER. Sin la purga la tabla crece para siempre (a 30,000 revisiones en un negocio la lista cuesta 35 ms con Seq
-  Scan); la historia queda en `ActivityLog`. El índice `(status, resolvedAt)` va en la misma migración `shopify_conector` (la única del
-  conector, `20261008230100_shopify_conector`, posterior a la última de develop): sin él la purga tarda 201 ms contra 0.04 ms con 1 M de
-  filas.
+  M4: nunca saldría y contaba para siempre en el resumen y en RETRASO; la sin iniciar que creó el conector cuenta como viva, P1-1), borra lo
+  cerrado hace 30 días (filas SENT/DISCARDED, eventos terminales, intents) y **las revisiones RESUELTAS hace más de 90 días**
+  (`REVISIONES_RESUELTAS_DIAS`) cuya elección ya no está en camino: sin envío, o con su fila SENT, DISCARDED o ya borrada. Nunca se purga
+  una revisión OPEN, ni una resuelta cuyo envío siga PENDING, FAILED, IN_PROGRESS o DEAD_LETTER. Sin la purga la tabla crece para siempre (a
+  30,000 revisiones en un negocio la lista cuesta 35 ms con Seq Scan); la historia queda en `ActivityLog`. El índice `(status, resolvedAt)`
+  va en la misma migración `shopify_conector` (la única del conector, `20261008230100_shopify_conector`, posterior a la última de develop):
+  sin él la purga tarda 201 ms contra 0.04 ms con 1 M de filas.
 - **Prueba de volumen:** `tests/integration/shopify/catalogo-volumen.integration.test.ts` (5,000 variantes de punta a punta, ~9 min) está
   APAGADA por defecto (`describe.skip`) para no sumarle minutos al CI de todos. `SHOPIFY_VOLUMEN=1` la enciende, siempre en una base
   desechable:

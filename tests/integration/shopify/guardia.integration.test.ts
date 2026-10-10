@@ -178,6 +178,22 @@ describe('las fases de la sucursal', () => {
     expect(await filas(suspendida.productId)).toHaveLength(0)
   })
 
+  it('P1-1: ACTIVE encola la pareja SIN INICIAR que creó el conector (la va a iniciar TOMAR); la emparejada sin iniciar, no', async () => {
+    const e = await escenario()
+    const creada = await agregarProductoShopify(e, { initialized: false, createdProduct: true })
+    const emparejada = await agregarProductoShopify(e, { initialized: false, createdProduct: false })
+    const creadaSuspendida = await agregarProductoShopify(e, { initialized: false, createdProduct: true })
+    await prisma.shopifyVariantLink.update({
+      where: { id: creadaSuspendida.variantLinkId! },
+      data: { suspendedReason: 'NIVEL_INEXISTENTE', suspendedAt: new Date() },
+    })
+    for (const id of [creada.inventoryId, emparejada.inventoryId, creadaSuspendida.inventoryId]) await restarUno(id)
+    expect(await deltas(creada.productId)).toEqual(['-1'])
+    expect((await filas(creada.productId))[0]).toMatchObject({ status: 'PENDING', generation: 1, locationLinkId: e.locationLinkId })
+    expect(await filas(emparejada.productId)).toHaveLength(0)
+    expect(await filas(creadaSuspendida.productId)).toHaveLength(0)
+  })
+
   it('PAUSED desde ACTIVE: encola la pareja iniciada y no un producto sin pareja', async () => {
     const e = await escenario({ linkStatus: 'PAUSED', pausedFrom: 'ACTIVE' })
     const sinPareja = await agregarProductoShopify(e, { pareja: false })

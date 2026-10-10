@@ -27,6 +27,7 @@ import {
   TOPE_BAJAS_CON_DUDA,
 } from '@/services/commerce-channels/shopify/shopify.reconcile.service'
 import * as notificationService from '@/services/dashboard/notification.service'
+import { claimShopifyOutbox, runShopifyOutboxRow } from '@/services/commerce-channels/shopify/shopify.outbox.service'
 import {
   agregarProductoShopify,
   assertTestDatabase,
@@ -469,6 +470,46 @@ describe('barrido de catálogo (§10.10, N21)', () => {
     })
     expect(await prisma.shopifyVariantLink.count({ where: { id: vieja.variantLinkId! } })).toBe(0)
     expect((await pareja(e)).lastSeenSweepId).toBe((await sucursal(e)).catalogSweepId)
+  })
+
+  it('🔴 P1-1: una venta entre que el barrido CREA el producto y la etapa de stock lo inicia no se pierde: Avoqado 9, espejo 10, −1 en camino', async () => {
+    const e = await escenario()
+    const catalogo = await variantesDeLaSucursal(e.locationLinkId)
+    catalogo.push(variante(302, { sku: 'TARDIA-1', producto: 'gid://shopify/Product/302' }))
+    const graphql = graphqlDelCatalogo(catalogo)
+    const deps = { graphql, fetchLevels: nivelesFalsos(() => nivel(10)), hasAccess: conPlan }
+    await hastaElStock(e, deps)
+    const nueva = await prisma.product.findUniqueOrThrow({
+      where: { venueId_sku: { venueId: e.venueId, sku: 'TARDIA-1' } },
+      include: { inventory: true, shopifyVariantLink: true },
+    })
+    expect(nueva.shopifyVariantLink).toMatchObject({ createdProduct: true, initializedAt: null, suspendedReason: null })
+    expect(nueva.active).toBe(true) // con precio: el POS lo puede vender ya
+    await venta(nueva.inventory!.id) // la caja lo vende ANTES de que la etapa de stock lo inicie
+    expect(await prisma.shopifyStockOutbox.count({ where: { productId: nueva.id, status: 'PENDING' } })).toBe(1)
+
+    for (let i = 0; i < 10 && !(await reconcileVenue(e.venueId, deps)).terminado; i++);
+    const pareja = await prisma.shopifyVariantLink.findUniqueOrThrow({ where: { productId: nueva.id } })
+    expect(pareja.initializedAt).not.toBeNull()
+    expect(pareja.mirrorAvailable).toBe(10)
+    expect((await prisma.inventory.findUniqueOrThrow({ where: { productId: nueva.id } })).currentStock.toString()).toBe('9')
+    const fila = await prisma.shopifyStockOutbox.findFirstOrThrow({ where: { productId: nueva.id } })
+    expect(fila).toMatchObject({ status: 'PENDING', generation: 1 })
+    expect(fila.delta.toString()).toBe('-1')
+    expect(await huecoDelInvariante(nueva.id)).toBe('0')
+
+    // El mensajero la manda: Shopify recibe el −1 y el espejo queda en 9.
+    const c = await claimShopifyOutbox(new Date())
+    expect(c).toMatchObject({ kind: 'FILA', id: fila.id })
+    const envio = graphqlFalso(() => ({
+      ok: true as const,
+      data: { inventoryAdjustQuantities: { inventoryAdjustmentGroup: { id: 'gid://shopify/InventoryAdjustmentGroup/1' }, userErrors: [] } },
+    }))
+    const r = c as { id: string; claimToken: string }
+    expect(await runShopifyOutboxRow(r.id, r.claimToken, new Date(), { graphql: envio, hasAccess: conPlan })).toBe('SENT')
+    expect(envio.mock.calls[0][3].input.changes[0]).toMatchObject({ delta: -1 })
+    expect((await prisma.shopifyVariantLink.findUniqueOrThrow({ where: { productId: nueva.id } })).mirrorAvailable).toBe(9)
+    expect(await huecoDelInvariante(nueva.id)).toBe('0')
   })
 
   it('N17 (§12.8, ronda 4): con cada variante lenta, el barrido avanza DENTRO de la página por vueltas, no repite lo hecho y llega al stock', async () => {
