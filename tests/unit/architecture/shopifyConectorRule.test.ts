@@ -342,6 +342,12 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
       expect(leer(f)).toContain('PREMIUM_ONLY_SIN_CATALOGO')
       expect(leer(f)).toContain("'FEATURE_NO_SE_VENDE_SUELTA'")
     }
+    // W5: la primera vez que se liga no es «se volvió a emparejar»: mismo motivo, otra marca y otro texto.
+    contieneTodas(['La revisión guarda `firstPairing` (W5): la pareja nunca se había iniciado'])
+    expect(cuerpo(leer(`${SHOPIFY}/shopify.mirror.service.ts`), 'export async function initializePair(')).toContain(
+      'firstPairing: !p.initializedAt',
+    )
+    expect(leer(`${SHOPIFY}/shopify.overview.service.ts`)).toContain('primeraVez: f.firstPairing')
     // C4 (ronda de revisión): la huella de las confirmaciones por MCP cabe con nombres de ubicación largos.
     const mcp = leer('src/mcp/tools/shopify.ts')
     expect(mcp).toContain("z.string().max(1024).optional().describe('La llena la vista previa; no la cambies')")
@@ -795,7 +801,7 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
       'shopify.crypto.ts:32': [de('crypto'), 'export function formaDeFirmaOAuth('],
       'catalog.service.ts:68': [de('catalog.service'), 'export const FILTRO_ESTADO'],
       'catalog.service.ts:418': [de('catalog.service'), 'async function bloquearProductos('],
-      'reconcile.service.ts:1288': [de('reconcile.service'), 'tx.shopifyStockOutbox.create('],
+      'reconcile.service.ts:1290': [de('reconcile.service'), 'tx.shopifyStockOutbox.create('],
       'reconcile.service.ts:735': [de('reconcile.service'), 'async function abrirRevision('],
       'mirror.service.ts:5': [de('mirror.service'), 'Invariante operativo'],
       'mirror.service.ts:372': [de('mirror.service'), 'export async function marcarFaltaPermiso('],
@@ -808,7 +814,7 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     const cortas: Record<string, [string, string]> = {
       '`:62`': [de('connect.service'), 'const tiendasPiloto'],
       '`:47`': [de('crypto'), 'export function verifyOAuthQueryHmac('],
-      '`:1180`': [de('catalog.service'), 'export async function archivarPareja('],
+      '`:1188`': [de('catalog.service'), 'export async function archivarPareja('],
     }
     const enLaRegla = [
       ...regla.matchAll(/`((?:shopify\.)?(?:connect|catalog|reconcile|mirror|outbox|store|worker)\.service\.ts|shopify\.crypto\.ts):\d+`/g),

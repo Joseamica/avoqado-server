@@ -198,6 +198,7 @@ CREATE TABLE "ShopifyReviewItem" (
     "avoqadoQty" DECIMAL(12,3) NOT NULL,
     "shopifyQty" INTEGER NOT NULL,
     "atorados" INTEGER NOT NULL DEFAULT 0,
+    "firstPairing" BOOLEAN NOT NULL DEFAULT false,
     "offset" DECIMAL(12,3) NOT NULL DEFAULT 0,
     "suggestion" "ShopifyReviewChoice" NOT NULL,
     "status" "ShopifyReviewStatus" NOT NULL DEFAULT 'OPEN',

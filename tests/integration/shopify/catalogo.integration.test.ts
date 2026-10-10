@@ -152,7 +152,12 @@ describe('emparejar y crear (12 bis.13, #11, #20, N07, N05)', () => {
     expect(p.active).toBe(false)
     expect(p.price.toFixed(2)).toBe('0.00')
     expect(p.shopifyVariantLink).not.toBeNull()
-    expect(await problema(e, 4)).toMatchObject({ reason: 'SIN_PRECIO', productId: p.id })
+    // W2: entra APAGADO; el texto dice las dos cosas que faltan (precio y prenderlo), también para el MCP.
+    expect(await problema(e, 4)).toMatchObject({
+      reason: 'SIN_PRECIO',
+      productId: p.id,
+      detail: 'Entró sin precio en pesos: ponle precio y préndelo en Avoqado para venderlo.',
+    })
   })
 
   it('sin SKU ⇒ SIN_SKU y no crea nada', async () => {
@@ -720,6 +725,7 @@ describe('sync de un producto en ACTIVE (#7, #20, N01, N11, N21)', () => {
       reason: 'REACTIVADA',
       shopifyQty: 9,
       suggestion: 'SHOPIFY',
+      firstPairing: true, // W5: se liga por PRIMERA vez (ya existía en Avoqado), no «se volvió a emparejar»
     })
   })
 

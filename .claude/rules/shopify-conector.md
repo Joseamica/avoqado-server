@@ -96,7 +96,7 @@ fila `−1` sale después). La limpieza horaria (M4, §10) la cuenta como viva; 
 descarta como a cualquier otra.
 
 No encola: un cambio con la marca de origen `shopify`, un delta 0, ni un `DELETE` de la fila (ver §5). El buzón lo llenan SÓLO el guardia y
-la resolución «usar Avoqado» (`reconcile.service.ts:1288`).
+la resolución «usar Avoqado» (`reconcile.service.ts:1290`).
 
 ## 3. La marca de origen: si aplicas en Avoqado algo que VINO de Shopify
 
@@ -116,7 +116,9 @@ trigger: no la uses para nada más.
 - Una DEAD_LETTER (de la generación vigente) conserva su delta en la cuenta hasta que la resolución la descarte. Una venta que dejó
   `Inventory = 9`, espejo 10 y su `−1` en DEAD_LETTER es un estado CORRECTO, no algo que «arreglar».
 - COMPARAR con diferencia abre `REACTIVADA` con `offset = Inventory − S`; si los saldos ya coinciden, cierra en la misma tx la revisión OPEN
-  del producto (`offset = 0`, §11.8).
+  del producto (`offset = 0`, §11.8). La revisión guarda `firstPairing` (W5): la pareja nunca se había iniciado, o sea, el producto ya
+  existía en Avoqado y acaba de aparecer en Shopify con el mismo SKU. Sigue siendo `REACTIVADA` (mismo motivo, misma sugerencia, mismos
+  filtros); sólo cambia el texto: la página (`primeraVez` en la lista) y el correo no dicen «se volvió a emparejar».
 - El cuadre calcula `total = Inventory − espejo − Σ vivas − Σ DEAD_LETTER` (`abrirRevision`, `reconcile.service.ts:735`) y decide en este
   orden:
   - con DEAD_LETTER (aunque `total = 0`, que es el caso normal de un ATORADO): abre o actualiza `ATORADO` (`INCIERTO` si alguna es ambigua)
@@ -144,7 +146,7 @@ espejo dejaría la cuenta en 11 contra las 12 piezas de Avoqado. Si hay filas vi
 
 - **Product se bloquea `FOR NO KEY UPDATE`** (K11): serializa con otros escritores del catálogo sin frenar el `FOR KEY SHARE` de una venta
   que inserta un renglón con llave foránea al producto. Catálogo y archivo lo piden explícito (`bloquearProductos`,
-  `catalog.service.ts:418`; `archivarPareja(…)`, `:1180`); `switchInventoryMethod(…)` y `setProductInventoryMethod(…)` lo toman con el
+  `catalog.service.ts:418`; `archivarPareja(…)`, `:1188`); `switchInventoryMethod(…)` y `setProductInventoryMethod(…)` lo toman con el
   `product.update` que ya hacen (no toca llaves) y llaman a `suspenderParejaPorReceta(…)` DESPUÉS, nunca antes.
 - **El mensajero**, con o sin cerco, toma el orden general sin Product: sucursal y tienda `FOR SHARE`, pareja `FOR UPDATE`, la fila del
   buzón `FOR UPDATE` (releída: sigue `IN_PROGRESS` con su `claimToken`) y, con cerco de evento, el evento `FOR SHARE` al final

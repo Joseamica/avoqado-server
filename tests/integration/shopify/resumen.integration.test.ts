@@ -237,6 +237,21 @@ it('T3: lo «pendiente» se cuenta y se enseña sólo de la generación vigente 
   )
 })
 
+it('W5: «Por revisar» dice si una REACTIVADA es la PRIMERA vez que se liga el producto (`primeraVez`)', async () => {
+  const e = await escenario()
+  const otro = await agregarProductoShopify(e)
+  const base = { venueId: e.venueId, reason: 'REACTIVADA' as const, avoqadoQty: 7, shopifyQty: 5, suggestion: 'SHOPIFY' as const }
+  const primera = await prisma.shopifyReviewItem.create({ data: { ...base, productId: e.productId, firstPairing: true } })
+  const otraVez = await prisma.shopifyReviewItem.create({ data: { ...base, productId: otro.productId } })
+  const lista = await listShopifyReviews(e.venueId, {})
+  expect(new Map(lista.items.map(i => [i.id, i.primeraVez]))).toEqual(
+    new Map([
+      [primera.id, true],
+      [otraVez.id, false],
+    ]),
+  )
+})
+
 it('Y1: una pareja cuenta una vez aunque tenga también su motivo en «Productos sin pareja»', async () => {
   const e = await escenario()
   // La pareja suspendida (p. ej. el producto pasó a receta) deja una fila en `ShopifyImportIssue` CON productId.
@@ -285,6 +300,7 @@ it('listas: tope de 50 con un límite hostil, total y nextOffset, búsqueda en e
     'createdAt',
     'envio',
     'id',
+    'primeraVez', // W5 (aditivo)
     'product',
     'reason',
     'shopifyQty',

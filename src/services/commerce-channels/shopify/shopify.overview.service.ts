@@ -196,6 +196,8 @@ export type ShopifyReviewListItem = {
   envio: ShopifyEnvio | null
   createdAt: string
   product: { id: string; name: string; sku: string | null }
+  /** ADITIVO (W5): en una REACTIVADA, el producto se ligó por PRIMERA vez (ya existía en Avoqado), no «otra vez». */
+  primeraVez: boolean
 }
 export type ShopifyIssueListItem = {
   id: string
@@ -225,7 +227,8 @@ const REVISION_Y_ENVIO = Prisma.sql`
   LEFT JOIN "ShopifyLocationLink" l ON l."venueId" = r."venueId"
   LEFT JOIN "ShopifyStockOutbox" o ON o.id = r."resolutionOutboxId" AND o."venueId" = r."venueId"`
 
-type FilaRevision = Omit<ShopifyReviewListItem, 'product' | 'createdAt' | 'avoqadoQty'> & {
+type FilaRevision = Omit<ShopifyReviewListItem, 'product' | 'createdAt' | 'avoqadoQty' | 'primeraVez'> & {
+  firstPairing: boolean
   avoqadoQty: string
   createdAt: Date
   productId: string
@@ -255,7 +258,7 @@ export async function listShopifyReviews(
   const [filas, [cuenta]] = await Promise.all([
     prisma.$queryRaw<FilaRevision[]>`
       SELECT r.id, r.status::text AS status, r.reason::text AS reason, r."avoqadoQty"::text AS "avoqadoQty", r."shopifyQty",
-             r.atorados, r.suggestion::text AS suggestion, r.choice::text AS choice, r."createdAt",
+             r.atorados, r.suggestion::text AS suggestion, r.choice::text AS choice, r."createdAt", r."firstPairing",
              p.id AS "productId", p.name AS "productName", p.sku AS "productSku",
              ${ENVIO} AS envio
       ${filtro}
@@ -275,6 +278,7 @@ export async function listShopifyReviews(
     envio: f.envio,
     createdAt: f.createdAt.toISOString(),
     product: { id: f.productId, name: f.productName, sku: f.productSku },
+    primeraVez: f.firstPairing,
   }))
   const total = cuenta?.total ?? 0
   return { items, total, nextOffset: siguiente(p.skip, items.length, total) }

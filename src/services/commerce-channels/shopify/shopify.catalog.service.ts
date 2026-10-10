@@ -661,7 +661,15 @@ async function crearProducto(
   })
   await writeLegacyServiceProductCreationAuditForVenue(tx, { venueId: ctx.venueId, productId: creado.id, actor: SHOPIFY_SERVICE_ACTOR })
   const r = await ligar(tx, ctx, v, creado, importado, true, sweepId)
-  if (precio === null) await anotar(tx, ctx.venueId, v, 'SIN_PRECIO', 'Ponle precio en Avoqado para venderlo en la tienda', creado.id)
+  if (precio === null)
+    await anotar(
+      tx,
+      ctx.venueId,
+      v,
+      'SIN_PRECIO',
+      'Entró sin precio en pesos: ponle precio y préndelo en Avoqado para venderlo.',
+      creado.id,
+    )
   return r
 }
 

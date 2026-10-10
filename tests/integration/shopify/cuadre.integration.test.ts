@@ -358,7 +358,7 @@ describe('stock', () => {
     await vuelta(e, () => nivel(12))
     expect((await pareja(e)).suspendedReason).toBeNull()
     const [reactivada] = await abiertas(e)
-    expect(reactivada).toMatchObject({ reason: 'REACTIVADA', shopifyQty: 12 })
+    expect(reactivada).toMatchObject({ reason: 'REACTIVADA', shopifyQty: 12, firstPairing: false }) // W5: ya se había iniciado
     expect(reactivada.offset.toString()).toBe('-2') // A6, §9.3: Inventory − S
     expect(await stock(e)).toBe('10')
     expect(await huecoDelInvariante(e.productId)).toBe('0')

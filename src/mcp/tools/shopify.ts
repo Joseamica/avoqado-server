@@ -124,7 +124,7 @@ export function registerShopifyTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'shopify_review_list',
-    `Productos cuyo stock no cuadra entre Avoqado y Shopify y que el cuadre no pudo explicar («Por revisar»): las dos cantidades, el motivo y cuál se sugiere usar; también las elecciones ya hechas cuyo envío a Shopify sigue en camino, se atoró o acaba de llegar. Paginado (máximo 50) y con búsqueda por nombre o SKU. ${FECHAS}`,
+    `Productos cuyo stock no cuadra entre Avoqado y Shopify y que el cuadre no pudo explicar («Por revisar»): las dos cantidades, el motivo y cuál se sugiere usar (primeraVez: el producto ya existía en Avoqado y acaba de aparecer en Shopify con el mismo SKU, no que se volvió a emparejar); también las elecciones ya hechas cuyo envío a Shopify sigue en camino, se atoró o acaba de llegar. Paginado (máximo 50) y con búsqueda por nombre o SKU. ${FECHAS}`,
     { venueId: venueIdField(), ...pagina },
     async ({ venueId, offset, limit, q }) => {
       guard.venueFilter(venueId)

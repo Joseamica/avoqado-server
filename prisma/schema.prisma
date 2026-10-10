@@ -19492,6 +19492,9 @@ model ShopifyReviewItem {
   avoqadoQty         Decimal              @db.Decimal(12, 3)
   shopifyQty         Int
   atorados           Int                  @default(0)
+  /// W5: en una REACTIVADA, la pareja se ligó POR PRIMERA VEZ (nunca se había iniciado): el producto ya existía en Avoqado
+  /// y acaba de aparecer en Shopify con el mismo SKU. La página lo dice así y no «se volvió a emparejar».
+  firstPairing       Boolean              @default(false)
   /// Diferencia que esta revisión explica mientras está OPEN (§9.3): REACTIVADA = Inventory − S al abrirla;
   /// DIFERENCIA = el hueco medido. Al resolver vuelve a 0.
   offset             Decimal              @default(0) @db.Decimal(12, 3)

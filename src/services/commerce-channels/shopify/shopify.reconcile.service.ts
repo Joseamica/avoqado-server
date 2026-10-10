@@ -886,6 +886,8 @@ const MOTIVO_CORREO: Record<ShopifyReviewReason, string> = {
   INCIERTO: 'No sabemos si llegó',
   REACTIVADA: 'Volvió a ligarse',
 }
+/** W5: una REACTIVADA cuya pareja se ligó por primera vez (el producto ya existía en Avoqado). */
+const MOTIVO_PRIMERA_VEZ = 'Recién ligado'
 
 /** K22: el día del NEGOCIO (como la campanita de `notifyShopify`), no el de UTC. */
 const diaDe = (timezone: string | null | undefined): string => formatInTimeZone(new Date(), timezone || 'America/Mexico_City', 'yyyy-MM-dd')
@@ -976,7 +978,7 @@ async function mandarCorreos(
       prisma.venue.findUnique({ where: { id: venueId }, select: { name: true, slug: true, timezone: true } }),
       prisma.shopifyReviewItem.findMany({
         where: { venueId, status: 'OPEN' },
-        select: { reason: true, avoqadoQty: true, shopifyQty: true, product: { select: { name: true } } },
+        select: { reason: true, firstPairing: true, avoqadoQty: true, shopifyQty: true, product: { select: { name: true } } },
         orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
         take: 20,
       }),
@@ -997,7 +999,7 @@ async function mandarCorreos(
       name: x.product.name,
       avoqado: new Prisma.Decimal(x.avoqadoQty).toString(),
       shopify: x.shopifyQty,
-      motivo: MOTIVO_CORREO[x.reason],
+      motivo: x.reason === 'REACTIVADA' && x.firstPairing ? MOTIVO_PRIMERA_VEZ : MOTIVO_CORREO[x.reason],
     }))
     const enviados = new Set<string>()
     for (;;) {
