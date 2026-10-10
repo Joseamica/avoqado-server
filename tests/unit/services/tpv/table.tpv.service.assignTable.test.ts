@@ -25,21 +25,41 @@ import { logAction } from '@/services/dashboard/activity-log.service'
 
 const VENUE = 'venue-1'
 const TABLE = 'mesa-1'
+let capturedOrders: Array<Record<string, any>> = []
+let capturedTable: Record<string, any>
 const PARENT = { id: 'padre-pagado', orderNumber: 'ORD-PADRE', status: 'COMPLETED', paymentStatus: 'PAID', items: [] }
 
 function mesaOcupadaCon(currentOrder: Record<string, unknown>) {
-  prismaMock.table.findFirst.mockResolvedValue({
+  capturedOrders = [{ ...currentOrder, tableId: TABLE, createdAt: new Date(0) }]
+  capturedTable = {
     id: TABLE,
     number: '4',
     status: 'OCCUPIED',
     currentOrderId: currentOrder.id,
     currentOrder,
-  } as any)
+  }
+  prismaMock.table.findFirst.mockResolvedValue(capturedTable as any)
 }
 
 beforeEach(() => {
   jest.clearAllMocks()
-  prismaMock.$queryRaw.mockResolvedValue([{ id: TABLE }])
+  capturedOrders = []
+  capturedTable = { id: TABLE, number: '4', status: 'AVAILABLE', currentOrderId: null }
+  prismaMock.table.findMany.mockImplementation(async () => [capturedTable] as any)
+  prismaMock.order.findMany.mockImplementation(
+    async (args: any) =>
+      capturedOrders.filter(row =>
+        args.where.id?.in ? args.where.id.in.includes(row.id) : !args.where.status.notIn.includes(row.status),
+      ) as any,
+  )
+  prismaMock.$queryRaw.mockImplementation(async (query: any, ...values: any[]) => {
+    const sql = Array.isArray(query) ? query.join('?') : query.sql
+    if (sql.includes('pg_advisory_xact_lock') && values[0] === 7_310_115) return []
+    if (sql.includes('FROM "Venue"') && sql.includes('FOR KEY SHARE')) return [{ id: VENUE }]
+    if (sql.includes('FROM "Order"') && sql.includes('FOR UPDATE')) return values[1].map((id: string) => ({ id }))
+    if (sql.includes('FROM "Table"') && sql.includes('FOR NO KEY UPDATE')) return [{ id: TABLE }]
+    throw new Error(`Unexpected raw statement: ${sql}`)
+  })
   prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'sv-1', staffId: 'staff-1', staff: { firstName: 'A', lastName: 'B' } } as any)
   prismaMock.order.updateMany.mockResolvedValue({ count: 0 } as any)
   prismaMock.order.findFirst.mockResolvedValue(null)
@@ -52,6 +72,7 @@ describe('assignTable — puntero a una cuenta cerrada (R2-TABLE-01)', () => {
   it('puntero al padre pagado y queda un hijo vivo → devuelve el hijo, re-apunta la mesa y NO crea cuenta', async () => {
     mesaOcupadaCon(PARENT)
     const hijo = { id: 'hijo-vivo', orderNumber: 'ORD-HIJO', status: 'PENDING', paymentStatus: 'PENDING', items: [] }
+    capturedOrders.push({ ...hijo, tableId: TABLE, createdAt: new Date(1) })
     prismaMock.order.findFirst.mockResolvedValue(hijo as any)
 
     const result = await assignTable(VENUE, TABLE, 'staff-1', 2)
@@ -59,7 +80,13 @@ describe('assignTable — puntero a una cuenta cerrada (R2-TABLE-01)', () => {
     expect(result).toEqual({ order: hijo, isNewOrder: false })
     expect(prismaMock.order.findFirst).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { venueId: VENUE, tableId: TABLE, status: { notIn: ['COMPLETED', 'CANCELLED', 'DELETED'] }, paymentStatus: { not: 'PAID' } },
+        where: {
+          id: 'hijo-vivo',
+          venueId: VENUE,
+          tableId: TABLE,
+          status: { notIn: ['COMPLETED', 'CANCELLED', 'DELETED'] },
+          paymentStatus: { not: 'PAID' },
+        },
         orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
       }),
     )

@@ -24,6 +24,7 @@ import { RESERVATION_INCLUDE } from '@/services/dashboard/reservation.dashboard.
 import { resolveServicesMany } from '@/services/reservation/reservation-services.resolver'
 import { createOrderFromReservation } from '@/services/reservation/createOrderFromReservation'
 import { withSerializableRetry } from '@/utils/serializableRetry'
+import { ORDER_LOCK_WAIT_BUDGET } from '@/services/shared/paymentShiftClaim'
 import { onVenueCheckIn } from '@/services/aggregators/core/visitHook'
 
 /**
@@ -246,12 +247,14 @@ export async function checkInReservationAndOpenOrder(cmd: CheckInCommand): Promi
   let orderError: typeof ORDER_CREATION_FAILED | undefined
 
   try {
-    const created = await withSerializableRetry(tx =>
-      createOrderFromReservation(tx, {
-        reservationId: cmd.reservationId,
-        venueId: cmd.venueId,
-        createdByStaffId: cmd.actor.type === 'HUMAN' ? cmd.actor.staffId : null,
-      }),
+    const created = await withSerializableRetry(
+      tx =>
+        createOrderFromReservation(tx, {
+          reservationId: cmd.reservationId,
+          venueId: cmd.venueId,
+          createdByStaffId: cmd.actor.type === 'HUMAN' ? cmd.actor.staffId : null,
+        }),
+      { timeoutMs: ORDER_LOCK_WAIT_BUDGET.timeout, maxWaitMs: ORDER_LOCK_WAIT_BUDGET.maxWait },
     )
     orderId = created?.orderId ?? null
     orderCreated = created?.created ?? false

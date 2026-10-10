@@ -109,7 +109,12 @@ function fiscalPayload(expression: ts.Expression | undefined): boolean {
 
 type Call = { callee: string; owner: string; file: string; args: string[]; argNodes: ts.NodeArray<ts.Expression> }
 /** A `$transaction(callback, options?)` site and the calls its callback makes (a named callback counts as one call). */
-type Transaction = { owner: string; line: number; options: ts.Expression | undefined; callees: Array<{ name: string; argc: number }> }
+type Transaction = {
+  owner: string
+  line: number
+  options: ts.Expression | undefined
+  callees: Array<{ name: string; argc: number; argNodes?: ts.NodeArray<ts.Expression> }>
+}
 
 const calleeName = (n: ts.CallExpression) =>
   ts.isIdentifier(n.expression) ? n.expression.text : ts.isPropertyAccessExpression(n.expression) ? n.expression.name.text : ''
@@ -118,11 +123,39 @@ function calleesOf(node: ts.Node): Transaction['callees'] {
   if (ts.isIdentifier(node)) return [{ name: node.text, argc: 1 }]
   const found: Transaction['callees'] = []
   const walk = (n: ts.Node): void => {
-    if (ts.isCallExpression(n)) found.push({ name: calleeName(n), argc: n.arguments.length })
+    if (ts.isCallExpression(n)) found.push({ name: calleeName(n), argc: n.arguments.length, argNodes: n.arguments })
     ts.forEachChild(n, walk)
   }
   walk(node)
   return found
+}
+
+/** Only an actual tx argument counts; (payload, undefined, options) opens inside the optional entry point. */
+function hasCallerTransaction(arg: ts.Expression | undefined): boolean {
+  if (!arg) return false
+  const value = unwrap(arg)
+  return !(ts.isIdentifier(value) && value.text === 'undefined') && !ts.isVoidExpression(value)
+}
+
+/** Resolve a named callback in its nearest lexical block, never an unrelated top-level homonym. */
+function transactionCallback(callback: ts.Expression, call: ts.CallExpression): ts.Node {
+  if (!ts.isIdentifier(callback)) return callback
+  for (let scope: ts.Node | undefined = call.parent; scope; scope = scope.parent) {
+    if (!ts.isBlock(scope) && !ts.isSourceFile(scope)) continue
+    for (const statement of scope.statements) {
+      if (ts.isFunctionDeclaration(statement) && statement.name?.text === callback.text) return statement
+      if (ts.isVariableStatement(statement)) {
+        for (const declaration of statement.declarationList.declarations) {
+          if (ts.isIdentifier(declaration.name) && declaration.name.text === callback.text) {
+            const init = declaration.initializer && unwrap(declaration.initializer)
+            // A shadowing non-function is unresolved, not the homonymous function from an outer scope.
+            return init && (ts.isArrowFunction(init) || ts.isFunctionExpression(init)) ? init : callback
+          }
+        }
+      }
+    }
+  }
+  return callback
 }
 
 let cached: ReturnType<typeof scanSources> | undefined
@@ -165,7 +198,7 @@ function scanSources() {
             owner: keyOf(n),
             line: sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1,
             options: n.arguments[1],
-            callees: calleesOf(callback),
+            callees: calleesOf(transactionCallback(callback, n)),
           })
         if (ts.isPropertyAccessExpression(n.expression) && ts.isPropertyAccessExpression(n.expression.expression)) {
           const method = n.expression.name.text
@@ -314,11 +347,11 @@ const WRITERS: Record<string, Writer> = {
     callers: [
       'src/services/dashboard/discountEngine.service.ts#applyEvaluatedDiscount',
       'src/services/dashboard/discountEngine.service.ts#applyManualDiscount',
-      'src/services/mobile/comp-item.mobile.service.ts#compOrderItem',
-      'src/services/mobile/comp-item.mobile.service.ts#compWholeOrder',
-      'src/services/mobile/loyalty.mobile.service.ts#redeemPointsToOrder',
-      'src/services/mobile/order.mobile.service.ts#applyOrderDiscount',
-      'src/services/mobile/order.mobile.service.ts#removeOrderDiscount',
+      'src/services/mobile/comp-item.mobile.service.ts#compOrderItemInTransaction',
+      'src/services/mobile/comp-item.mobile.service.ts#compWholeOrderInTransaction',
+      'src/services/mobile/loyalty.mobile.service.ts#redeemPointsToOrderInTransaction',
+      'src/services/mobile/order.mobile.service.ts#applyOrderDiscountInTransaction',
+      'src/services/mobile/order.mobile.service.ts#removeOrderDiscountInTransaction',
       'src/services/promotions/promotion.service.ts#removePromotionFromOrder',
       'src/services/tpv/discount.tpv.service.ts#applyCouponCode',
       'src/services/tpv/order.tpv.service.ts#applyDiscount',
@@ -337,7 +370,7 @@ const WRITERS: Record<string, Writer> = {
   'src/services/shared/repartoDescuentoTx.ts#revertirDescuentoDelRenglon': {
     class: 'CALLER_LOCKED',
     callers: [
-      'src/services/mobile/order.mobile.service.ts#removeOrderDiscount',
+      'src/services/mobile/order.mobile.service.ts#removeOrderDiscountInTransaction',
       'src/services/dashboard/discountEngine.service.ts#removeDiscountFromOrder',
     ],
     proof: proof(
@@ -352,8 +385,8 @@ const WRITERS: Record<string, Writer> = {
   'src/services/shared/repartoDescuentoTx.ts#recortarDescuentosDeRenglones': {
     class: 'CALLER_LOCKED',
     callers: [
-      'src/services/mobile/comp-item.mobile.service.ts#compOrderItem',
-      'src/services/mobile/comp-item.mobile.service.ts#compWholeOrder',
+      'src/services/mobile/comp-item.mobile.service.ts#compOrderItemInTransaction',
+      'src/services/mobile/comp-item.mobile.service.ts#compWholeOrderInTransaction',
       'src/services/promotions/promotion.service.ts#removePromotionFromOrder',
       'src/services/tpv/order.tpv.service.ts#compItems',
       'src/services/tpv/order.tpv.service.ts#removeOrderItem',
@@ -396,29 +429,37 @@ const WRITERS: Record<string, Writer> = {
     proof: T3('applyCouponCode'),
   },
   // ── Mobile courtesies, charges and merge (T1) ───────────────────────────────────────────────
-  'src/services/mobile/comp-item.mobile.service.ts#compOrderItem': { class: 'LOCKED', lock: LOCK, proof: T1('compOrderItem') },
-  'src/services/mobile/comp-item.mobile.service.ts#compWholeOrder': { class: 'LOCKED', lock: LOCK, proof: T1('compWholeOrder') },
-  'src/services/mobile/service-charge.mobile.service.ts#applyServiceCharge': {
+  'src/services/mobile/comp-item.mobile.service.ts#compOrderItemInTransaction': { class: 'LOCKED', lock: LOCK, proof: T1('compOrderItem') },
+  'src/services/mobile/comp-item.mobile.service.ts#compWholeOrderInTransaction': {
+    class: 'LOCKED',
+    lock: LOCK,
+    proof: T1('compWholeOrder'),
+  },
+  'src/services/mobile/service-charge.mobile.service.ts#applyServiceChargeInTransaction': {
     class: 'LOCKED',
     lock: ['requireOpenOrder('],
     proof: T1('applyServiceCharge'),
   },
-  'src/services/mobile/service-charge.mobile.service.ts#removeServiceCharge': {
+  'src/services/mobile/service-charge.mobile.service.ts#removeServiceChargeInTransaction': {
     class: 'LOCKED',
     lock: ['requireOpenOrder('],
     proof: T1('removeServiceCharge'),
   },
   'src/services/mobile/service-charge.mobile.service.ts#syncAutomaticServiceChargesInTransaction': {
     class: 'CALLER_LOCKED',
-    callers: ['src/services/mobile/service-charge.mobile.service.ts#syncAutomaticServiceCharges'],
+    callers: [
+      'src/services/mobile/service-charge.mobile.service.ts#syncAutomaticServiceCharges',
+      'src/services/mobile/order.mobile.service.ts#mergeOrdersInTransaction',
+      'src/services/mobile/order.mobile.service.ts#updateOrderDetailsInTransaction',
+    ],
     proof: T1('syncAutomaticServiceCharges'),
   },
-  'src/services/mobile/order.mobile.service.ts#mergeOrders': {
+  'src/services/mobile/order.mobile.service.ts#mergeOrdersInTransaction': {
     class: 'LOCKED',
-    lock: ['ORDER BY id FOR UPDATE'],
+    lock: ['lockTableOrderScope('],
     proof: proof(MOBILE_T1, 'mergeOrders', 'merge rereads source membership after waiting'),
   },
-  'src/services/mobile/order.mobile.service.ts#updateOrderDetails': {
+  'src/services/mobile/order.mobile.service.ts#updateOrderDetailsInTransaction': {
     class: 'METADATA',
     reason:
       'Opaque data map carries only customerName/specialRequests/covers/type/customerId. Only a covers change composes money, and it does so under lockExistingOrderForPayment through syncAutomaticServiceCharges with the same tx (T1).',
@@ -427,16 +468,16 @@ const WRITERS: Record<string, Writer> = {
   'src/services/mobile/comp-item.mobile.service.ts#recalculateOrderTotals': {
     class: 'CALLER_LOCKED',
     callers: [
-      'src/services/mobile/comp-item.mobile.service.ts#compOrderItem',
-      'src/services/mobile/comp-item.mobile.service.ts#compWholeOrder',
-      'src/services/mobile/loyalty.mobile.service.ts#redeemPointsToOrder',
-      'src/services/mobile/order.mobile.service.ts#applyOrderDiscount',
-      'src/services/mobile/order.mobile.service.ts#mergeOrders',
-      'src/services/mobile/order.mobile.service.ts#removeOrderDiscount',
-      'src/services/mobile/order.mobile.service.ts#splitOrderBySeat',
-      'src/services/mobile/order.mobile.service.ts#splitOrderItems',
-      'src/services/mobile/service-charge.mobile.service.ts#applyServiceCharge',
-      'src/services/mobile/service-charge.mobile.service.ts#removeServiceCharge',
+      'src/services/mobile/comp-item.mobile.service.ts#compOrderItemInTransaction',
+      'src/services/mobile/comp-item.mobile.service.ts#compWholeOrderInTransaction',
+      'src/services/mobile/loyalty.mobile.service.ts#redeemPointsToOrderInTransaction',
+      'src/services/mobile/order.mobile.service.ts#applyOrderDiscountInTransaction',
+      'src/services/mobile/order.mobile.service.ts#mergeOrdersInTransaction',
+      'src/services/mobile/order.mobile.service.ts#removeOrderDiscountInTransaction',
+      'src/services/mobile/order.mobile.service.ts#splitOrderBySeatInTransaction',
+      'src/services/mobile/order.mobile.service.ts#splitOrderItemsInTransaction',
+      'src/services/mobile/service-charge.mobile.service.ts#applyServiceChargeInTransaction',
+      'src/services/mobile/service-charge.mobile.service.ts#removeServiceChargeInTransaction',
       'src/services/mobile/service-charge.mobile.service.ts#syncAutomaticServiceChargesInTransaction',
       'src/services/promotions/promotion.service.ts#applyPromotionInTransaction',
       'src/services/promotions/promotion.service.ts#removePromotionFromOrder',
@@ -444,16 +485,24 @@ const WRITERS: Record<string, Writer> = {
     ],
     proof: T4('applyOrderDiscount'),
   },
-  'src/services/mobile/order.mobile.service.ts#applyOrderDiscount': { class: 'LOCKED', lock: LOCK, proof: T4('applyOrderDiscount') },
-  'src/services/mobile/order.mobile.service.ts#removeOrderDiscount': { class: 'LOCKED', lock: LOCK, proof: T4('removeOrderDiscount') },
-  'src/services/mobile/order.mobile.service.ts#splitOrderItems': {
+  'src/services/mobile/order.mobile.service.ts#applyOrderDiscountInTransaction': {
     class: 'LOCKED',
-    lock: VENUE_FENCE_THEN_LOCK,
+    lock: LOCK,
+    proof: T4('applyOrderDiscount'),
+  },
+  'src/services/mobile/order.mobile.service.ts#removeOrderDiscountInTransaction': {
+    class: 'LOCKED',
+    lock: LOCK,
+    proof: T4('removeOrderDiscount'),
+  },
+  'src/services/mobile/order.mobile.service.ts#splitOrderItemsInTransaction': {
+    class: 'LOCKED',
+    lock: ['lockTableOrderScope('],
     proof: [...T4('splitOrderItems'), ...proof(MOBILE_T4, 'splitOrderItems', 'split writers take the Venue before the source Order')],
   },
-  'src/services/mobile/order.mobile.service.ts#splitOrderBySeat': {
+  'src/services/mobile/order.mobile.service.ts#splitOrderBySeatInTransaction': {
     class: 'LOCKED',
-    lock: VENUE_FENCE_THEN_LOCK,
+    lock: ['lockTableOrderScope('],
     proof: [...T4('splitOrderBySeat'), ...proof(MOBILE_T4, 'splitOrderBySeat', 'split writers take the Venue before the source Order')],
   },
   'src/services/promotions/promotion.service.ts#applyPromotionInTransaction': {
@@ -466,7 +515,11 @@ const WRITERS: Record<string, Writer> = {
     lock: LOCK,
     proof: T4('removePromotionFromOrder'),
   },
-  'src/services/mobile/loyalty.mobile.service.ts#redeemPointsToOrder': { class: 'LOCKED', lock: LOCK, proof: T4('redeemPointsToOrder') },
+  'src/services/mobile/loyalty.mobile.service.ts#redeemPointsToOrderInTransaction': {
+    class: 'LOCKED',
+    lock: LOCK,
+    proof: T4('redeemPointsToOrder'),
+  },
   'src/services/wallet/redeemStampReward.service.ts#redeemStampReward': { class: 'LOCKED', lock: LOCK, proof: T4('redeemStampReward') },
   'src/services/mobile/order.mobile.service.ts#createOrderWithItems': {
     class: 'PRIVATE_CREATION',
@@ -637,6 +690,7 @@ const WRITERS: Record<string, Writer> = {
 
 /** Functions that are not fiscal writers themselves but hold the Order lock for a CALLER_LOCKED helper. */
 const LOCK_HOLDERS: Record<string, string[]> = {
+  'src/services/mobile/order.mobile.service.ts#updateOrderDetailsInTransaction': LOCK,
   'src/services/dashboard/discountEngine.service.ts#applyDiscountToOrder': ['lockDiscountOrder('],
   'src/services/dashboard/discountEngine.service.ts#applyAutomaticDiscounts': ['lockDiscountOrder('],
   'src/services/mobile/service-charge.mobile.service.ts#syncAutomaticServiceCharges': LOCK,
@@ -655,12 +709,16 @@ const OPTIONAL_TX: Array<{ callee: string; txIndex: number; lockedCallers: strin
   {
     callee: 'syncAutomaticServiceCharges',
     txIndex: 2,
+    lockedCallers: [],
+  },
+  {
+    callee: 'applyPromotionToOrder',
+    txIndex: 1,
     lockedCallers: [
-      'src/services/mobile/order.mobile.service.ts#mergeOrders',
-      'src/services/mobile/order.mobile.service.ts#updateOrderDetails',
+      'src/services/mobile/order.mobile.service.ts#createOrderWithItems',
+      'src/services/tpv/order.tpv.service.ts#addItemsToOrder',
     ],
   },
-  { callee: 'applyPromotionToOrder', txIndex: 1, lockedCallers: ['src/services/mobile/order.mobile.service.ts#createOrderWithItems'] },
 ]
 
 type OrderWriter = { class: 'METADATA' | 'PRIVATE_CREATION' | 'CANCEL_GUARD' | 'EXCLUDED'; why: string; markers?: string[] }
@@ -683,11 +741,11 @@ const NON_FISCAL_ORDER_WRITERS: Record<string, OrderWriter> = {
     why: 'links a customer: the fiscal receptor comes from explicit request parameters, never from the order customer',
   },
   'src/services/tpv/fastPaymentCustomer.ts#linkCustomerToExistingOrder': { class: 'METADATA', why: 'customer link only' },
-  'src/services/tpv/table.tpv.service.ts#moveOrderToTable': {
+  'src/services/tpv/table.tpv.service.ts#moveOrderToTableInTransaction': {
     class: 'METADATA',
     why: 'tableId only (residual: Table FOR UPDATE → Order vs split Order → child insert KEY SHARE Table)',
   },
-  'src/services/tpv/table.tpv.service.ts#assignOrderWaiter': { class: 'METADATA', why: 'servedById only' },
+  'src/services/tpv/table.tpv.service.ts#assignOrderWaiterInTransaction': { class: 'METADATA', why: 'servedById only' },
   'src/services/tpv/table.tpv.service.ts#assignTable': {
     class: 'PRIVATE_CREATION',
     why: 'new empty order; detaching zombie orders only clears tableId',
@@ -738,7 +796,7 @@ const NON_FISCAL_ORDER_WRITERS: Record<string, OrderWriter> = {
     class: 'METADATA',
     why: 'provider status marks',
   },
-  'src/services/mobile/order.mobile.service.ts#cancelOrder': CANCEL('assertOrderCancellableUnderLock'),
+  'src/services/mobile/order.mobile.service.ts#cancelOrderInTransaction': CANCEL('assertOrderCancellableUnderLock'),
   'src/services/dashboard/order.dashboard.service.ts#deleteOrder': CANCEL('assertOrderCancellableUnderLock'),
   'src/services/mobile/areaTicketV7.mobile.service.ts#cancelAreaTicketCheckout': CANCEL('assertOrderCancellableUnderLock'),
   'src/services/delivery-channels/core/cancelDeliveryOrder.service.ts#cancelDeliveryOrder': CANCEL('lockExistingOrderForPayment('),
@@ -834,7 +892,7 @@ describe('Plan 3b final manifest of the writers the documentary capture depends 
       for (const caller of callers) {
         const holder = LOCK_HOLDERS[caller]
         const cls = WRITERS[caller]?.class
-        expect({ caller, holdsLock: cls ? LOCKING.has(cls) : !!holder && holder.every(m => codeOf(caller).includes(m)) }).toEqual({
+        expect({ caller, holdsLock: (!!cls && LOCKING.has(cls)) || (!!holder && holder.every(m => codeOf(caller).includes(m))) }).toEqual({
           caller,
           holdsLock: true,
         })
@@ -845,7 +903,9 @@ describe('Plan 3b final manifest of the writers the documentary capture depends 
   it.each(OPTIONAL_TX)(
     '$callee receives a caller transaction only from writers that hold the Order',
     ({ callee, txIndex, lockedCallers }) => {
-      const withTx = [...new Set(calls.filter(c => c.callee === callee && c.args.length > txIndex).map(c => c.owner))].sort()
+      const withTx = [
+        ...new Set(calls.filter(c => c.callee === callee && hasCallerTransaction(c.argNodes[txIndex])).map(c => c.owner)),
+      ].sort()
       expect(withTx).toEqual([...lockedCallers].sort())
       for (const caller of lockedCallers) {
         const holdsLock = LOCKING.has(WRITERS[caller]?.class ?? '') || codeOf(caller).includes('lockExistingOrderForPayment(')
@@ -913,7 +973,7 @@ describe('locked-transaction helpers never receive the global client', () => {
   ]
 
   it.each(GUARDED)('$callee gets a transaction client, never the autocommit prisma import', ({ callee, txIndex, minimum }) => {
-    const sites = calls.filter(c => c.callee === callee && c.args.length > txIndex)
+    const sites = calls.filter(c => c.callee === callee && hasCallerTransaction(c.argNodes[txIndex]))
     expect(sites.length).toBeGreaterThanOrEqual(minimum)
     // ponytail: identifiers bound to the default `utils/prismaClient` import only; an alias (`const db = prisma`) would need symbol resolution.
     const global = sites
@@ -935,6 +995,19 @@ describe('locked-transaction helpers never receive the global client', () => {
  * the same literal values). Only the function that OPENS the transaction takes the options.
  */
 const ORDER_LOCK_TRANSACTIONS: Record<string, number> = {
+  'src/services/tpv/order.tpv.service.ts#createOrder': 1,
+  'src/services/tpv/order.tpv.service.ts#createOrderWithItems': 1,
+  // Mesas topology-lock and controller entry points, with the same budget contract.
+  'src/controllers/tpv/order-table.tpv.controller.ts#mergeOrders': 1,
+  'src/controllers/tpv/order-table.tpv.controller.ts#cancelOrder': 1,
+  'src/services/tpv/table.tpv.service.ts#assignTable': 1,
+  'src/services/tpv/table.tpv.service.ts#clearTable': 1,
+  'src/services/tpv/table.tpv.service.ts#releaseTableIfSettled': 1,
+  'src/services/tpv/table.tpv.service.ts#moveOrderToTable': 1,
+  'src/services/tpv/table.tpv.service.ts#reconcileTableAfterOrderRemoved': 1,
+  'src/services/tpv/table.tpv.service.ts#assignOrderWaiter': 1,
+  'src/services/tpv/table.tpv.service.ts#deleteTable': 1,
+  'src/mcp/tools/tables.ts#registerTableTools': 1,
   // Plan 3b writers (the final review's list)
   'src/services/dashboard/discountEngine.service.ts#applyDiscountToOrder': 1,
   'src/services/dashboard/discountEngine.service.ts#removeDiscountFromOrder': 1,
@@ -999,10 +1072,65 @@ const OWN_BUDGET: Record<string, { options: string; reason: string }> = {
 }
 
 /** Functions that take the canonical Order lock on the transaction they RECEIVE; one that opens its own is an opener. */
+
+/** The new helper is a seed only while its executable SQL still claims ordered Order rows FOR UPDATE. */
+function hasOrderedOrderClaim(body: string): boolean {
+  const sf = ts.createSourceFile('scope.ts', body, ts.ScriptTarget.Latest, true)
+  let found = false
+  const visit = (node: ts.Node): void => {
+    if (ts.isTaggedTemplateExpression(node) && ts.isPropertyAccessExpression(node.tag) && node.tag.name.text === '$queryRaw') {
+      found ||= /FROM\s+"Order"[\s\S]*?ORDER BY id FOR UPDATE/.test(node.template.getText(sf))
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(sf)
+  return found
+}
+
+/** Scope delegation retains the old unconditional awaited Venue fence before each ordered Order claim. */
+function hasVenueFenceBeforeOrderedOrderClaim(body: string): boolean {
+  const sf = ts.createSourceFile('scope.ts', body, ts.ScriptTarget.Latest, true)
+  const scope = sf.statements.find(ts.isFunctionDeclaration)
+  if (!scope?.body || scope.name?.text !== 'lockTableOrderScope') return false
+  const client = scope.parameters[0]?.name
+  if (!client || !ts.isIdentifier(client)) return false
+  const fences: number[] = []
+  const claims: number[] = []
+  const visit = (node: ts.Node): void => {
+    if (node !== scope && (ts.isFunctionDeclaration(node) || ts.isArrowFunction(node) || ts.isFunctionExpression(node))) return
+    if (
+      ts.isTaggedTemplateExpression(node) &&
+      ts.isPropertyAccessExpression(node.tag) &&
+      node.tag.name.text === '$queryRaw' &&
+      ts.isIdentifier(node.tag.expression) &&
+      node.tag.expression.text === client.text &&
+      ts.isAwaitExpression(node.parent)
+    ) {
+      const sql = node.template.getText(sf)
+      if (/FROM\s+"Order"[\s\S]*?ORDER BY id FOR UPDATE/.test(sql)) claims.push(node.getStart(sf))
+      if (/FROM\s+"Venue"[\s\S]*?FOR KEY SHARE/.test(sql)) {
+        const declaration = node.parent.parent
+        // A nested/conditional/foreign-client fence does not prove the unconditional claim ordering.
+        if (
+          ts.isVariableDeclaration(declaration) &&
+          ts.isVariableDeclarationList(declaration.parent) &&
+          ts.isVariableStatement(declaration.parent.parent) &&
+          declaration.parent.parent.parent === scope.body
+        )
+          fences.push(node.getStart(sf))
+      }
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(scope)
+  return fences.length === 1 && claims.length > 0 && claims.every(position => fences[0] < position)
+}
+
 function orderLockHelpers(code: Map<string, string>, calls: Call[]): Set<string> {
   const calleesByOwner = new Map<string, Set<string>>()
   for (const c of calls) calleesByOwner.set(c.owner, (calleesByOwner.get(c.owner) ?? new Set()).add(c.callee))
   const helpers = new Set(['lockExistingOrderForPayment'])
+  if (hasOrderedOrderClaim(code.get('src/services/shared/tableOrderLock.ts#lockTableOrderScope') ?? '')) helpers.add('lockTableOrderScope')
   for (let grew = true; grew; ) {
     grew = false
     for (const [key, body] of code) {
@@ -1032,15 +1160,23 @@ function budgetOf(options: ts.Expression | undefined): { timeout?: string; maxWa
   return { timeout: value('timeout'), maxWait: value('maxWait') }
 }
 
+function transactionTakesOrderLock(t: Transaction, helpers: Set<string>): boolean {
+  return t.callees.some(
+    c => helpers.has(c.name) || OPTIONAL_TX.some(o => o.callee === c.name && hasCallerTransaction(c.argNodes?.[o.txIndex])),
+  )
+}
+
 describe('every transaction that takes the canonical Order lock waits on ONE budget (Ruling T8-R2)', () => {
   const { code, calls, transactions } = scan()
   const helpers = orderLockHelpers(code, calls)
-  // ponytail: callees are matched by name and a named callback only to a top-level function; callbacks handed to a
+  // Named transaction callbacks resolve their nearest lexical binding; callbacks handed to a
   // wrapper that opens the transaction (withDeliveryOrderLock) are covered by its own pin below. Raw
   // `SELECT … FROM "Order" … FOR UPDATE` outside the canonical helper is outside this rule (listed in the final-wave report).
-  const locking = transactions.filter(t =>
-    t.callees.some(c => helpers.has(c.name) || OPTIONAL_TX.some(o => o.callee === c.name && c.argc > o.txIndex)),
-  )
+  const locking = transactions.filter(t => transactionTakesOrderLock(t, helpers))
+
+  it('scope delegation preserves the Venue KEY SHARE fence before ordered Order FOR UPDATE', () => {
+    expect(hasVenueFenceBeforeOrderedOrderClaim(code.get('src/services/shared/tableOrderLock.ts#lockTableOrderScope') ?? '')).toBe(true)
+  })
 
   it('finds the lock-taking transactions (a collapse means the scanner broke, not the code)', () => {
     for (const helper of ['lockDiscountOrder', 'requireOpenOrder', 'applyPromotionInTransaction', 'assertOrderCancellableUnderLock'])
@@ -1096,5 +1232,96 @@ describe('R11 (Codex r5): quien rearma el dinero de una orden desde sus renglone
   it.each([...rearman].sort())('%s rechaza (o, si es automático, salta) las órdenes importadas', key => {
     const cuerpo = code.get(key) ?? ''
     expect({ key, guarda: MARCAS.some(m => cuerpo.includes(m)) }).toEqual({ key, guarda: true })
+  })
+})
+
+describe('Mesas lock/budget scanner regressions', () => {
+  const source = (text: string) => ts.createSourceFile('fixture.ts', text, ts.ScriptTarget.Latest, true)
+  const opener = (text: string): Transaction => {
+    const sf = source(text)
+    let result: Transaction | undefined
+    const visit = (node: ts.Node): void => {
+      if (ts.isCallExpression(node) && calleeName(node) === '$transaction') {
+        result = {
+          owner: ownerOf(node),
+          line: 1,
+          options: node.arguments[1],
+          callees: calleesOf(transactionCallback(node.arguments[0], node)),
+        }
+      }
+      ts.forEachChild(node, visit)
+    }
+    visit(sf)
+    if (!result) throw new Error('fixture has no transaction')
+    return result
+  }
+
+  it('seeds only the real ordered Order SQL and propagates through a tx-only helper', () => {
+    const body = 'async function lockTableOrderScope(tx) { await tx.$queryRaw`SELECT id FROM "Order" ORDER BY id FOR UPDATE`; }'
+    const key = 'src/services/shared/tableOrderLock.ts#lockTableOrderScope'
+    const call: Call = {
+      callee: 'lockTableOrderScope',
+      owner: 'fixture.ts#mergeOrdersInTransaction',
+      file: 'fixture.ts',
+      args: ['tx'],
+      argNodes: ts.factory.createNodeArray([ts.factory.createIdentifier('tx')]),
+    }
+    const code = new Map([
+      [key, body],
+      ['fixture.ts#mergeOrdersInTransaction', 'async function mergeOrdersInTransaction(tx) { await lockTableOrderScope(tx); }'],
+    ])
+    expect(orderLockHelpers(code, [call]).has('mergeOrdersInTransaction')).toBe(true)
+    expect(orderLockHelpers(new Map([[key, body.replace('FOR UPDATE', 'FOR SHARE')]]), [call]).has('lockTableOrderScope')).toBe(false)
+    expect(hasOrderedOrderClaim(body.replace('"Order"', '"Table"'))).toBe(false)
+  })
+
+  it('rejects a removed, reordered, conditional or foreign-client Venue fence', () => {
+    const venue = 'const venues = await tx.$queryRaw`SELECT id FROM "Venue" FOR KEY SHARE`;'
+    const order = 'const orders = await tx.$queryRaw`SELECT id FROM "Order" ORDER BY id FOR UPDATE`;'
+    const scope = (parts: string) => `async function lockTableOrderScope(tx) { ${parts} }`
+    expect(hasVenueFenceBeforeOrderedOrderClaim(scope(venue + order))).toBe(true)
+    expect(hasVenueFenceBeforeOrderedOrderClaim(scope(order))).toBe(false)
+    expect(hasVenueFenceBeforeOrderedOrderClaim(scope(order + venue))).toBe(false)
+    expect(hasVenueFenceBeforeOrderedOrderClaim(scope(venue.replace('FOR KEY SHARE', 'FOR SHARE') + order))).toBe(false)
+    expect(hasVenueFenceBeforeOrderedOrderClaim(scope(`if (condition) { ${venue} } ${order}`))).toBe(false)
+    expect(hasVenueFenceBeforeOrderedOrderClaim(scope(venue.replace('tx.$queryRaw', 'foreign.$queryRaw') + order))).toBe(false)
+    expect(hasVenueFenceBeforeOrderedOrderClaim(scope(`// ${venue}\n${order}`))).toBe(false)
+  })
+
+  it('finds a lexical local callback and rejects its missing/wrong budget', () => {
+    const local =
+      'async function updateOrder() { const update = async tx => lockTableOrderScope(tx); return prisma.$transaction(update, OPTIONS); }'
+    const noBudget = opener(local.replace(', OPTIONS', ''))
+    expect(noBudget.callees.some(c => c.name === 'lockTableOrderScope')).toBe(true)
+    expect(budgetOf(noBudget.options)).not.toEqual(ONE_BUDGET)
+    expect(budgetOf(opener(local.replace('OPTIONS', '{ timeout: 5000, maxWait: 2000 }')).options)).not.toEqual(ONE_BUDGET)
+    expect(budgetOf(opener(local.replace('OPTIONS', 'ORDER_LOCK_WAIT_BUDGET')).options)).toEqual(ONE_BUDGET)
+  })
+
+  it('does not use a homonymous callback from another lexical scope', () => {
+    const t = opener(
+      'async function update(tx) { await lockTableOrderScope(tx); } async function other() { const update = async tx => writeMetadata(tx); return prisma.$transaction(update); }',
+    )
+    expect(t.callees.some(c => c.name === 'lockTableOrderScope')).toBe(false)
+    expect(t.callees.some(c => c.name === 'writeMetadata')).toBe(true)
+  })
+
+  it('distinguishes undefined plus options from tx plus options, while global/import aliases remain caller arguments', () => {
+    const call = (text: string) => {
+      const st = source(text).statements[0]
+      if (!ts.isExpressionStatement(st) || !ts.isCallExpression(st.expression)) throw new Error('invalid call fixture')
+      return st.expression
+    }
+    const ownOptional = opener('prisma.$transaction(tx => applyPromotionToOrder(payload, undefined, options), ORDER_LOCK_WAIT_BUDGET)')
+    const callerOptional = opener('prisma.$transaction(tx => applyPromotionToOrder(payload, tx, options), ORDER_LOCK_WAIT_BUDGET)')
+    expect(transactionTakesOrderLock(ownOptional, new Set())).toBe(false)
+    expect(transactionTakesOrderLock(callerOptional, new Set())).toBe(true)
+    expect(hasCallerTransaction(call('applyPromotionToOrder(payload, undefined, options)').arguments[1])).toBe(false)
+    expect(hasCallerTransaction(call('applyPromotionToOrder(payload, tx, options)').arguments[1])).toBe(true)
+    for (const importedName of ['prisma', 'tenantPrisma']) {
+      const arg = call(`applyPromotionToOrder(payload, ${importedName}, options)`).arguments[1]
+      expect(hasCallerTransaction(arg)).toBe(true)
+      expect(ts.isIdentifier(arg) && new Set([importedName]).has(arg.text)).toBe(true)
+    }
   })
 })

@@ -110,7 +110,10 @@ export async function updateTpv(
       logger.warn('Edición de terminal con campos no editables: se ignoraron', { terminalId: tpvId, venueId, ignoredFields })
     }
 
-    const updatedTpv = await tpvDashboardService.updateTpv(venueId, tpvId, updateData, { staffId: req.authContext?.userId })
+    const updatedTpv = await tpvDashboardService.updateTpv(venueId, tpvId, updateData, {
+      staffId: req.authContext?.userId,
+      role: req.authContext?.role,
+    })
 
     if (Object.prototype.hasOwnProperty.call(updateData, 'customerDisplayInverted')) {
       const appVersion = sanitizeLegacyClientMetadata(req.headers['x-app-version'])

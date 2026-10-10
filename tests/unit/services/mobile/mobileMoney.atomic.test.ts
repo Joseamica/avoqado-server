@@ -38,14 +38,23 @@ beforeEach(() => {
   committed = false
   const model = () =>
     Object.fromEntries(
-      ['findUnique', 'findFirst', 'findMany', 'create', 'createMany', 'update', 'updateMany', 'delete', 'deleteMany'].map(name => [
-        name,
-        jest.fn(),
-      ]),
+      [
+        'findUnique',
+        'findUniqueOrThrow',
+        'findFirst',
+        'findMany',
+        'create',
+        'createMany',
+        'update',
+        'updateMany',
+        'delete',
+        'deleteMany',
+      ].map(name => [name, jest.fn()]),
     )
   tx = {
     $queryRaw: jest.fn().mockResolvedValue([{ id: 'order' }]),
     order: model(),
+    table: model(),
     orderItem: model(),
     orderDiscount: model(),
     orderServiceCharge: model(),
@@ -54,6 +63,8 @@ beforeEach(() => {
     customer: model(),
     terminalPaymentRequest: model(),
   }
+  tx.table.findMany.mockResolvedValue([])
+  tx.table.findFirst.mockResolvedValue(null)
   tx.order.findUnique.mockResolvedValue({ ...order })
   tx.order.findFirst.mockResolvedValue({ ...order })
   tx.orderItem.findFirst.mockResolvedValue({ ...item })
@@ -62,6 +73,7 @@ beforeEach(() => {
   tx.orderServiceCharge.findMany.mockResolvedValue([])
   tx.orderServiceCharge.findFirst.mockResolvedValue(null)
   tx.orderServiceCharge.createMany.mockResolvedValue({ count: 1 })
+  tx.orderServiceCharge.findUniqueOrThrow.mockResolvedValue({ id: 'auto-created' })
   tx.serviceCharge.findFirst.mockResolvedValue(charge)
   tx.serviceCharge.findMany.mockResolvedValue([charge])
   tx.staffVenue.findUnique.mockResolvedValue({ id: 'staff-venue' })
@@ -164,7 +176,16 @@ describe('mobile money writers own the lock and transaction', () => {
     const source = { ...order, id: 'source', paidAmount: 0, items: [item], _count: { items: 2 }, orderDiscounts: [], serviceCharges: [] }
     prismaMock.order.findFirst.mockImplementation(async ({ where }: any) => (where.id === 'source' ? source : { ...order, paidAmount: 1 }))
     tx.order.findFirst.mockImplementation(async ({ where }: any) => (where.id === 'source' ? source : order))
-    tx.$queryRaw.mockResolvedValue([{ id: 'order' }, { id: 'source' }])
+    const topologyOrders = [order, source].map(row => ({ ...row, tableId: null, createdAt: new Date('2026-10-01T00:00:00Z') }))
+    tx.order.findMany.mockImplementation(async ({ where }: { where: { id?: { in: string[] } } }) =>
+      where.id ? topologyOrders.filter(row => where.id!.in.includes(row.id)) : [],
+    )
+    tx.$queryRaw.mockImplementation(async (query: TemplateStringsArray) => {
+      const sql = query.join(' ')
+      if (sql.includes('FROM "Venue"')) return [{ id: 'venue' }]
+      if (sql.includes('FROM "Order"')) return [{ id: 'order' }, { id: 'source' }]
+      throw new Error('Unexpected merge fixture SQL')
+    })
     tx.terminalPaymentRequest.findFirst.mockResolvedValue(null)
     prismaMock.table.findFirst.mockResolvedValue(null)
     const result = await mergeOrders('venue', 'order', 'source')
@@ -175,5 +196,45 @@ describe('mobile money writers own the lock and transaction', () => {
     expect(tx.order.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ remainingBalance: 93 }) }))
     expect(tx.orderServiceCharge.createMany).toHaveBeenCalled()
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('Task3 transaction entry points and opt-in benefit capture', () => {
+  it('returns the actual created charge row without opening another transaction or auditing', async () => {
+    const { applyServiceChargeInTransaction } = await import('@/services/mobile/service-charge.mobile.service')
+    const row = { id: 'actual-created-charge' }
+    tx.orderServiceCharge.create.mockResolvedValue(row)
+    const result = await applyServiceChargeInTransaction(tx, 'venue', 'order', 'charge', 'staff')
+    expect(result.row).toBe(row)
+    expect(result.amount).toBe(8)
+    expect(prismaMock.$transaction).not.toHaveBeenCalled()
+    expect(logAction).not.toHaveBeenCalled()
+  })
+  it.each(['item', 'whole'] as const)('%s helper shares reason guard and returns empty captured benefits', async kind => {
+    const { compOrderItemInTransaction, compWholeOrderInTransaction } = await import('@/services/mobile/comp-item.mobile.service')
+    const params = { venueId: 'venue', orderId: 'order', itemId: 'item', reason: ' Error ', captureBenefits: true }
+    const result = kind === 'item' ? await compOrderItemInTransaction(tx, params) : await compWholeOrderInTransaction(tx, params)
+    expect(result.recorte.benefits).toEqual([])
+    expect(tx.orderItem.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ cortesiaReason: 'Error' }) }),
+    )
+    expect(prismaMock.$transaction).not.toHaveBeenCalled()
+    expect(logAction).not.toHaveBeenCalled()
+    await expect(
+      kind === 'item'
+        ? compOrderItemInTransaction(tx, { ...params, reason: ' ' })
+        : compWholeOrderInTransaction(tx, { ...params, reason: ' ' }),
+    ).rejects.toThrow('reason es requerido')
+  })
+  it('captureBenefits is absent by default, initialized before both recorte early returns', async () => {
+    const { recortarDescuentosDeRenglones } = await import('@/services/shared/repartoDescuentoTx')
+    const omitted = await recortarDescuentosDeRenglones(tx, 'order', { venueId: 'venue', renglones: [] })
+    expect(omitted).not.toHaveProperty('benefits')
+    expect((await recortarDescuentosDeRenglones(tx, 'order', { venueId: 'venue', renglones: [], captureBenefits: true })).benefits).toEqual(
+      [],
+    )
+    expect(
+      (await recortarDescuentosDeRenglones(tx, 'order', { venueId: 'venue', renglones: ['item'], captureBenefits: true })).benefits,
+    ).toEqual([])
   })
 })

@@ -19,8 +19,8 @@
  */
 jest.mock('../../../../src/utils/prismaClient', () => {
   const client = {
-    order: { findFirst: jest.fn() },
-    table: { findFirst: jest.fn(), update: jest.fn() },
+    order: { findFirst: jest.fn(), findMany: jest.fn() },
+    table: { findFirst: jest.fn(), findMany: jest.fn(), update: jest.fn() },
     $queryRaw: jest.fn().mockResolvedValue([]),
   }
   return { __esModule: true, default: { ...client, $transaction: jest.fn((fn: any) => fn(client)) } }
@@ -34,107 +34,119 @@ import prisma from '../../../../src/utils/prismaClient'
 import { reconcileTableAfterOrderRemoved } from '../../../../src/services/tpv/table.tpv.service'
 
 const mockedPrisma = prisma as unknown as {
-  order: { findFirst: jest.Mock }
-  table: { findFirst: jest.Mock; update: jest.Mock }
+  order: { findFirst: jest.Mock; findMany: jest.Mock }
+  table: { findFirst: jest.Mock; findMany: jest.Mock; update: jest.Mock }
+  $queryRaw: jest.Mock
 }
 
 const VENUE_ID = 'venue-1'
 const REMOVED_ORDER_ID = 'split-child-order-1'
 const TABLE_ID = 'table-1'
+let siblingId: string | null = null
+let removedTableId: string | null
+let tableFixture: { id: string; number: string; status: string; currentOrderId: string | null } | null
+const selectedTable = { id: true, number: true, status: true, currentOrderId: true }
 
 describe('table.tpv.service — reconcileTableAfterOrderRemoved', () => {
-  beforeEach(() => jest.clearAllMocks())
+  beforeEach(() => {
+    jest.clearAllMocks()
+    siblingId = null
+    removedTableId = TABLE_ID
+    tableFixture = { id: TABLE_ID, number: '7', status: 'OCCUPIED', currentOrderId: null }
+    mockedPrisma.order.findFirst.mockImplementation(async args =>
+      args.where.id === REMOVED_ORDER_ID && args.where.venueId === VENUE_ID ? { id: REMOVED_ORDER_ID, tableId: removedTableId } : null,
+    )
+    mockedPrisma.order.findMany.mockImplementation(async args => {
+      if (args.where.venueId !== VENUE_ID) return []
+      const rows = [
+        { id: REMOVED_ORDER_ID, tableId: removedTableId, status: 'PENDING', paymentStatus: 'PENDING', createdAt: new Date(0) },
+        ...['CANCELLED', 'COMPLETED', 'DELETED'].map(status => ({
+          id: `excluded-${status}`,
+          tableId: TABLE_ID,
+          status,
+          paymentStatus: 'PAID',
+          createdAt: new Date(0),
+        })),
+        ...(siblingId ? [{ id: siblingId, tableId: TABLE_ID, status: 'PENDING', paymentStatus: 'PENDING', createdAt: new Date(1) }] : []),
+      ]
+      return rows.filter(row =>
+        args.where.id?.in
+          ? args.where.id.in.includes(row.id)
+          : args.where.tableId.in.includes(row.tableId) && !args.where.status.notIn.includes(row.status),
+      )
+    })
+    mockedPrisma.table.findMany.mockImplementation(async args => {
+      if (args.where.venueId !== VENUE_ID || args.where.currentOrderId) return []
+      if (!args.where.id.in.includes(TABLE_ID)) return []
+      return tableFixture ? [tableFixture] : []
+    })
+    mockedPrisma.$queryRaw.mockImplementation(async (query, ...values) => {
+      const sql = Array.isArray(query) ? query.join('?') : query.sql
+      if (sql.includes('FROM "Venue"') && sql.includes('FOR KEY SHARE')) return [{ id: VENUE_ID }]
+      if (sql.includes('FROM "Order"') && sql.includes('FOR UPDATE')) return values[1].map((id: string) => ({ id }))
+      if (sql.includes('FROM "Table"') && sql.includes('FOR NO KEY UPDATE')) return [{ id: TABLE_ID }]
+      throw new Error(`Unexpected raw statement: ${sql}`)
+    })
+    mockedPrisma.table.update.mockImplementation(async args => ({ id: args.where.id, number: '7', ...args.data }))
+  })
 
   // ── NEW: the zombie-table fix itself ─────────────────────────────────────
 
   it('releases the table (AVAILABLE, currentOrderId: null) when the removed order was its ONLY open order — the exact SPLIT_ORDER zombie-table case', async () => {
-    mockedPrisma.order.findFirst.mockImplementation((args: any) => {
-      // 1st call: look up the removed order's own tableId (works even though
-      // Table.currentOrderId never pointed at it — that's the whole fix).
-      if (args.where.id === REMOVED_ORDER_ID) return Promise.resolve({ tableId: TABLE_ID })
-      // 2nd call: sibling lookup on that table — none left.
-      return Promise.resolve(null)
-    })
-    // Strict by design: only resolves when queried by the table's OWN id (the
-    // correct lookup) — a regression back to querying by `currentOrderId`
-    // (the original bug) must see this as "table not found" and no-op, not
-    // silently succeed because the mock was too permissive. Caught exactly
-    // this gap during sabotage testing (2026-08-07).
-    mockedPrisma.table.findFirst.mockImplementation((args: any) =>
-      args?.where?.id === TABLE_ID && args?.where?.venueId === VENUE_ID
-        ? Promise.resolve({ id: TABLE_ID, number: '7' })
-        : Promise.resolve(null),
-    )
-    mockedPrisma.table.update.mockResolvedValue({})
+    // The fixture resolves only the table's own id AND tenant in findMany, never a bare pointer.
 
     const result = await reconcileTableAfterOrderRemoved(VENUE_ID, REMOVED_ORDER_ID)
 
     expect(mockedPrisma.table.update).toHaveBeenCalledWith({
       where: { id: TABLE_ID },
       data: { status: 'AVAILABLE', currentOrderId: null },
+      select: selectedTable,
     })
     expect(result).toEqual({ tableFreed: true })
   })
 
   it('repoints to a sibling still open on that table instead of releasing it — the table is NOT free just because ONE check left', async () => {
     const SIBLING_ID = 'sibling-order-2'
-    mockedPrisma.order.findFirst.mockImplementation((args: any) => {
-      if (args.where.id === REMOVED_ORDER_ID) return Promise.resolve({ tableId: TABLE_ID })
-      return Promise.resolve({ id: SIBLING_ID })
-    })
-    // Strict by design: only resolves when queried by the table's OWN id (the
-    // correct lookup) — a regression back to querying by `currentOrderId`
-    // (the original bug) must see this as "table not found" and no-op, not
-    // silently succeed because the mock was too permissive. Caught exactly
-    // this gap during sabotage testing (2026-08-07).
-    mockedPrisma.table.findFirst.mockImplementation((args: any) =>
-      args?.where?.id === TABLE_ID && args?.where?.venueId === VENUE_ID
-        ? Promise.resolve({ id: TABLE_ID, number: '7' })
-        : Promise.resolve(null),
-    )
-    mockedPrisma.table.update.mockResolvedValue({})
+    siblingId = SIBLING_ID
+    // The fixture resolves only the table's own id AND tenant in findMany, never a bare pointer.
 
     const result = await reconcileTableAfterOrderRemoved(VENUE_ID, REMOVED_ORDER_ID)
 
     expect(mockedPrisma.table.update).toHaveBeenCalledWith({
       where: { id: TABLE_ID },
       data: { status: 'OCCUPIED', currentOrderId: SIBLING_ID },
+      select: selectedTable,
     })
     expect(result).toEqual({ tableFreed: false })
   })
 
   it('the sibling lookup excludes the removed order itself and CANCELLED/COMPLETED/DELETED orders', async () => {
-    mockedPrisma.order.findFirst.mockImplementation((args: any) => {
-      if (args.where.id === REMOVED_ORDER_ID) return Promise.resolve({ tableId: TABLE_ID })
-      return Promise.resolve(null)
-    })
-    // Strict by design: only resolves when queried by the table's OWN id (the
-    // correct lookup) — a regression back to querying by `currentOrderId`
-    // (the original bug) must see this as "table not found" and no-op, not
-    // silently succeed because the mock was too permissive. Caught exactly
-    // this gap during sabotage testing (2026-08-07).
-    mockedPrisma.table.findFirst.mockImplementation((args: any) =>
-      args?.where?.id === TABLE_ID && args?.where?.venueId === VENUE_ID
-        ? Promise.resolve({ id: TABLE_ID, number: '7' })
-        : Promise.resolve(null),
-    )
-    mockedPrisma.table.update.mockResolvedValue({})
+    // The fixture resolves only the table's own id AND tenant in findMany, never a bare pointer.
 
     await reconcileTableAfterOrderRemoved(VENUE_ID, REMOVED_ORDER_ID)
 
-    const siblingCall = mockedPrisma.order.findFirst.mock.calls[1][0]
-    expect(siblingCall.where).toEqual({
-      venueId: VENUE_ID,
-      tableId: TABLE_ID,
-      id: { not: REMOVED_ORDER_ID },
-      status: { notIn: ['COMPLETED', 'CANCELLED', 'DELETED'] },
+    expect(mockedPrisma.order.findMany).toHaveBeenCalledWith({
+      where: { venueId: VENUE_ID, tableId: { in: [TABLE_ID] }, status: { notIn: ['COMPLETED', 'CANCELLED', 'DELETED'] } },
+      select: { id: true, tableId: true, status: true, paymentStatus: true, createdAt: true },
+      orderBy: { id: 'asc' },
+      take: 100,
     })
+    // The captured removed row is live, but cannot count as its own sibling; closed rows are excluded by discovery.
+    expect(mockedPrisma.table.update).toHaveBeenCalledWith({
+      where: { id: TABLE_ID },
+      data: { status: 'AVAILABLE', currentOrderId: null },
+      select: selectedTable,
+    })
+    const orderLocks = mockedPrisma.$queryRaw.mock.calls.filter(
+      ([query]) => Array.isArray(query) && query.join('').includes('FROM "Order"'),
+    )
+    expect(orderLocks.map(call => call[2])).toEqual([[REMOVED_ORDER_ID]])
   })
 
   // ── NEW: edge cases ───────────────────────────────────────────────────────
 
   it('no-ops when the removed order was never bound to a table (mostrador sale)', async () => {
-    mockedPrisma.order.findFirst.mockResolvedValue({ tableId: null })
+    removedTableId = null
 
     const result = await reconcileTableAfterOrderRemoved(VENUE_ID, REMOVED_ORDER_ID)
 
@@ -144,8 +156,7 @@ describe('table.tpv.service — reconcileTableAfterOrderRemoved', () => {
   })
 
   it('tenant isolation: no-ops if the table does not resolve for THIS venue (never trusts a bare tableId)', async () => {
-    mockedPrisma.order.findFirst.mockResolvedValue({ tableId: TABLE_ID })
-    mockedPrisma.table.findFirst.mockResolvedValue(null) // wrong venue or deleted
+    tableFixture = null // wrong venue or deleted
 
     const result = await reconcileTableAfterOrderRemoved(VENUE_ID, REMOVED_ORDER_ID)
 
@@ -154,21 +165,7 @@ describe('table.tpv.service — reconcileTableAfterOrderRemoved', () => {
   })
 
   it('idempotent: calling it again after the table is already released does the same safe no-sibling write', async () => {
-    mockedPrisma.order.findFirst.mockImplementation((args: any) => {
-      if (args.where.id === REMOVED_ORDER_ID) return Promise.resolve({ tableId: TABLE_ID })
-      return Promise.resolve(null)
-    })
-    // Strict by design: only resolves when queried by the table's OWN id (the
-    // correct lookup) — a regression back to querying by `currentOrderId`
-    // (the original bug) must see this as "table not found" and no-op, not
-    // silently succeed because the mock was too permissive. Caught exactly
-    // this gap during sabotage testing (2026-08-07).
-    mockedPrisma.table.findFirst.mockImplementation((args: any) =>
-      args?.where?.id === TABLE_ID && args?.where?.venueId === VENUE_ID
-        ? Promise.resolve({ id: TABLE_ID, number: '7' })
-        : Promise.resolve(null),
-    )
-    mockedPrisma.table.update.mockResolvedValue({})
+    // The fixture resolves only the table's own id AND tenant in findMany, never a bare pointer.
 
     await reconcileTableAfterOrderRemoved(VENUE_ID, REMOVED_ORDER_ID)
     const result = await reconcileTableAfterOrderRemoved(VENUE_ID, REMOVED_ORDER_ID)

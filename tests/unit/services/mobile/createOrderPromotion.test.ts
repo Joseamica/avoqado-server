@@ -154,6 +154,29 @@ describe('createOrderWithItems — líneas de promoción', () => {
     expect(result.items).toHaveLength(2)
   })
 
+  it('sólo un combo con preparación por producto agrega su identidad estable de componentes', async () => {
+    jest.spyOn(require('@/services/access/basePlan.service'), 'venueHasFeatureAccess').mockResolvedValue(true)
+    const serviceCourse = { id: 'desserts', label: 'Con el postre', kind: 'STANDARD', preparationVersion: 1 }
+    await createOrderWithItems('venue-1', {
+      staffId: 'staff-1',
+      items: [
+        { productId: 'p1', quantity: 1 },
+        {
+          promotionRef: {
+            promotionId: 'promo-1',
+            promotionInstanceId: 'uuid-1',
+            selections: [{ groupId: 'g1', optionId: 'o1', serviceCourse }],
+          },
+        },
+      ],
+    } as any)
+    expect(apply).toHaveBeenCalledWith(
+      expect.objectContaining({ selections: [{ groupId: 'g1', optionId: 'o1', serviceCourse }] }),
+      prismaMock,
+      { componentExternalIdPrefix: 'combo:uuid-1' },
+    )
+  })
+
   // ── 🔴 DINERO: los términos que recalculateOrderTotals no conoce ──
 
   it('🔴 la PROPINA sobrevive a la promoción: el total la incluye y remainingBalance cuadra', async () => {

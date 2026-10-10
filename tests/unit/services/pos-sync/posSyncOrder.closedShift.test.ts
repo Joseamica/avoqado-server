@@ -88,12 +88,41 @@ function closedShift() {
   }
 }
 
+function topologySql(query: unknown): string {
+  if (Array.isArray(query)) return query.join(' ')
+  if (query && typeof query === 'object' && 'strings' in query && Array.isArray(query.strings)) return query.strings.join(' ')
+  throw new Error('Unexpected SQL representation in topology fixture')
+}
+
 function transactionWorld() {
   const tx = {
-    $queryRaw: jest.fn().mockResolvedValue([{ pg_advisory_xact_lock: null }]),
+    $queryRaw: jest.fn(async (query: unknown): Promise<Array<{ id: string } | { pg_advisory_xact_lock: null }>> => {
+      const sql = topologySql(query)
+      if (sql.includes('FROM "Venue"')) return [{ id: VENUE }]
+      if (sql.includes('FROM "Table"')) return [{ id: 'table-pos' }]
+      if (sql.includes('FROM "Order"')) {
+        const result = tx.order.findUnique.mock.results[tx.order.findUnique.mock.results.length - 1]
+        const row = result && (await result.value)
+        return row ? [{ id: row.id }] : []
+      }
+      if (sql.includes('pg_advisory_xact_lock')) return [{ pg_advisory_xact_lock: null }]
+      throw new Error('Unexpected closed-shift fixture SQL')
+    }),
+    table: {
+      findMany: jest.fn(async ({ where }: { where: { id?: { in: string[] } } }) =>
+        where.id ? [{ id: 'table-pos', number: '12', status: 'AVAILABLE', currentOrderId: null }] : [],
+      ),
+    },
     shift: m.shift,
     order: {
       findUnique: jest.fn((args: any) => m.order.findUnique(args)),
+      findMany: jest.fn(async ({ where }: { where: { id?: { in: string[] } } }): Promise<Record<string, unknown>[]> => {
+        const result = tx.order.findUnique.mock.results[tx.order.findUnique.mock.results.length - 1]
+        const row = result && (await result.value)
+        return row && where.id?.in.includes(row.id)
+          ? [{ ...row, tableId: row.tableId ?? null, createdAt: new Date('2026-10-01T00:00:00Z') }]
+          : []
+      }),
       // Reread under the Order lock: the stored row is still there.
       findFirst: jest.fn((args: any) => m.order.findUnique(args)),
       upsert: jest.fn(),

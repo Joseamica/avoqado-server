@@ -8,9 +8,12 @@ import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
 import { TableStatus } from '@prisma/client'
 import AppError from '@/errors/AppError'
-import { moveOrderToTable, assignOrderWaiter } from '@/services/tpv/table.tpv.service'
+import { ORDER_LOCK_WAIT_BUDGET } from '@/services/shared/paymentShiftClaim'
+import { moveOrderToTable, assignOrderWaiter, setTableStatusInTransaction } from '@/services/tpv/table.tpv.service'
 import { compWholeOrder } from '@/services/mobile/comp-item.mobile.service'
 import { updateOrderDetails, splitOrderItems, splitOrderBySeat, mergeOrders } from '@/services/mobile/order.mobile.service'
+// Módulo LIGERO (sólo Prisma): el `.service` arrastra sockets y candados que el MCP no necesita para leer.
+import { getFloorPlan } from '@/services/dashboard/floorPlan/floorPlan.read'
 
 const STATUS_MAP: Record<string, TableStatus> = {
   available: TableStatus.AVAILABLE,
@@ -143,6 +146,57 @@ export function registerTableTools(server: McpServer, scope: McpScope) {
   )
 
   server.tool(
+    'floor_plan',
+    'The floor plan (plano del salón) of a venue you can access, area by area: each area with its shape (wide, square or tall), its tables (number, seats, shape and whether it is placed on the plan) and how many walls, bars, service areas (kitchen, bathroom…), doors and labels it has, plus the tables not placed yet. Answers "¿cómo está acomodado mi salón?" or "¿qué mesas no están en el plano?". Pass venueId. The plan is edited in the web dashboard (Configuración → Mesas y plano). For live occupancy use tables_status.',
+    { venueId: z.string().describe('Venue whose floor plan to read (must be in your scope)') },
+    async ({ venueId }) => {
+      guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('tables:read', venueId, 'read')
+      const plan = await getFloorPlan(venueId)
+      const SHAPE = { WIDE: 'ancha', SQUARE: 'cuadrada', TALL: 'larga' } as const
+      const TABLE_SHAPE = { SQUARE: 'cuadrada', ROUND: 'redonda', RECTANGLE: 'larga' } as const
+      const areaIds = new Set(plan.areas.map(a => a.id))
+      // Acomodada = tiene las DOS coordenadas. La misma regla decide «placed» y «unplacedTables».
+      const isPlaced = (t: { positionX: number | null; positionY: number | null }) => t.positionX !== null && t.positionY !== null
+      const areas = plan.areas.map(a => {
+        const tables = plan.tables.filter(t => t.areaId === a.id)
+        const els = plan.elements.filter(e => e.areaId === a.id)
+        const count = (type: string) => els.filter(e => e.type === type).length
+        return {
+          name: a.name,
+          shape: SHAPE[a.floorShape ?? 'WIDE'],
+          // capacity 0 = «sin dato»: no suma lugares.
+          seats: tables.reduce((sum, t) => sum + (t.capacity > 0 ? t.capacity : 0), 0),
+          tables: tables.map(t => ({
+            number: t.number,
+            seats: t.capacity > 0 ? t.capacity : null,
+            shape: TABLE_SHAPE[t.shape],
+            placed: isPlaced(t),
+          })),
+          walls: count('WALL'),
+          bars: count('BAR_COUNTER'),
+          // Textos sin espacios de más: la PAX vieja los guardaba tal cual (el editor ya los recorta al publicar).
+          serviceAreas: els.filter(e => e.type === 'SERVICE_AREA').map(e => e.label?.trim() || 'Área de servicio'),
+          doors: count('DOOR'),
+          labels: els.flatMap(e => {
+            const label = e.type === 'LABEL' ? e.label?.trim() : undefined
+            return label ? [label] : []
+          }),
+        }
+      })
+      const unplacedTables = plan.tables.filter(t => !t.areaId || !areaIds.has(t.areaId) || !isPlaced(t)).map(t => t.number)
+      return text({
+        venueId,
+        areaCount: areas.length,
+        tableCount: plan.tables.length,
+        areas,
+        unplacedTables,
+        ...(plan.overLimit ? { note: 'El plano pasa los límites del editor; se muestran los primeros elementos.' } : {}),
+      })
+    },
+  )
+
+  server.tool(
     'set_table_status',
     'Set the status of a table in a venue you can access, found by its number: available, occupied, reserved or cleaning. Safety: a table with a live (open) order CANNOT be marked available — close/pay that order first. This WRITES — it changes the floor; requires tables:update. Pass venueId + table number + the new status.',
     {
@@ -160,17 +214,8 @@ export function registerTableTools(server: McpServer, scope: McpScope) {
       if (!table) return text({ ok: false, error: `No encontré la mesa "${number}" activa en este local.` })
 
       const target = STATUS_MAP[status]
-      // Don't strand an open tab: a table with a live order can't be freed to AVAILABLE here.
-      if (target === TableStatus.AVAILABLE && table.currentOrderId) {
-        return text({ ok: false, error: `La mesa ${number} tiene una cuenta abierta — ciérrala o cóbrala antes de marcarla disponible.` })
-      }
-
       try {
-        const updated = await prisma.table.update({
-          where: { id: table.id },
-          data: { status: target },
-          select: { number: true, status: true },
-        })
+        const updated = await prisma.$transaction(tx => setTableStatusInTransaction(tx, venueId, table.id, target), ORDER_LOCK_WAIT_BUDGET)
         await auditMcpWrite(scope, {
           action: 'TABLE_STATUS_SET',
           entity: 'Table',

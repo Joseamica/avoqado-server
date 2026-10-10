@@ -1,3 +1,6 @@
+import type { HttpEnvelope } from './http-operation.mobile.service'
+import { lockTableOrderScope } from '@/services/shared/tableOrderLock'
+import type { AutomaticServiceChargeCapture } from './service-charge.mobile.service'
 /**
  * Mobile Order Service
  *
@@ -20,6 +23,7 @@ import { resolveTenderForCharge, computeTenderCommission } from '../dashboard/te
 // response carries an identical `digitalReceipt` shape — mobile and TPV never
 // drift on how the receipt QR (accessKey + receiptUrl + autofactura) is built.
 import { mapDigitalReceiptResponse, resolveAutofacturaAvailable, type OrderInventoryWarning } from '../tpv/payment.tpv.service'
+import { enqueuePaymentCommissionInTx } from '../tpv/paymentEffects.service'
 import {
   buildItemDiscountRow,
   calculateDiscountPesos,
@@ -56,12 +60,15 @@ import {
   rechazarCobroNuevoSobreCancelada,
   salirSiLaLlaveYaTienePago,
 } from '../shared/cuentaCancelada'
-import { debeMarcarCocina } from '../kds/kitchenDisplayStations'
+import { debeMarcarCocina, assertPreparationAuthoringAccess } from '../kds/kitchenDisplayStations'
 import { armarComandasTrasCommit, retirarComandasDeVentaAnulada } from '../kds/kitchenTicketAuthoring.service'
+import { parseServiceCourseSnapshot, legacyCourseForSnapshot, type ServiceCourseSnapshot } from '../service-courses/serviceCourseContract'
 
 // MARK: - Types
 
 export interface CreateOrderItemInput {
+  serviceCourse?: ServiceCourseSnapshot | null
+  externalId?: string | null
   // Product items set productId; custom items (e.g. "Otro importe") set name + unitPrice.
   productId?: string | null
   name?: string | null
@@ -87,7 +94,11 @@ export interface CreateOrderItemInput {
   promotionRef?: {
     promotionId: string
     promotionInstanceId: string
-    selections: Array<{ groupId: string; optionId: string }>
+    selections: Array<{
+      groupId: string
+      optionId: string
+      serviceCourse?: ServiceCourseSnapshot | null
+    }>
   }
 }
 
@@ -298,6 +309,9 @@ export interface OrderDetailResponse {
      *  items by course and labels each group "Enviado a la cocina a las HH:MM"
      *  (createdAt == fire time in the table flow). */
     course: string | null
+    serviceCourse?: { id: string; label: string; kind: 'IMMEDIATE' | 'STANDARD' } | null
+    orderPromotionId?: string | null
+    externalId?: string | null
     /** TABLE_SERVICE: asiento/comensal de la línea. */
     seat: number | null
     createdAt: Date
@@ -551,6 +565,8 @@ export async function buildOrderItemsData(
     throw new BadRequestError('At least one item is required')
   }
 
+  await assertPreparationAuthoringAccess(venueId, items)
+
   let subtotal = 0
   let itemDiscountTotal = 0
 
@@ -626,6 +642,9 @@ export async function buildOrderItemsData(
   // Item/order totals stay gross; discount reductions live in `discountAmount`
   // (same convention as TPV's Cobrar V1 flow — see order.tpv.service.ts).
   const productItemsData = productInputs.map(item => {
+    const serviceCourse = parseServiceCourseSnapshot(item.serviceCourse)
+    if (item.externalId != null && (typeof item.externalId !== 'string' || item.externalId.length < 1 || item.externalId.length > 256))
+      throw new BadRequestError('Identificador de producto inválido')
     const product = products.find(p => p.id === item.productId)!
     const itemModifierIds = item.modifierIds || []
 
@@ -677,6 +696,8 @@ export async function buildOrderItemsData(
 
     return {
       productId: item.productId,
+      ...(serviceCourse ? { serviceCourse: serviceCourse as Prisma.InputJsonValue, course: legacyCourseForSnapshot(serviceCourse) } : {}),
+      ...(item.externalId ? { externalId: item.externalId } : {}),
       productName: product.name,
       productSku: product.sku,
       categoryName: product.category?.name || null,
@@ -820,6 +841,7 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
   // sync.mobile.service.ts). Un item sin promotionRef se comporta igual que hoy.
   const itemsConPromocion = input.items.filter(it => it.promotionRef)
   const itemsNormales = input.items.filter(it => !it.promotionRef)
+  await assertPreparationAuthoringAccess(venueId, itemsConPromocion)
 
   // Dedupe defensivo por instancia: dos líneas con el mismo instanceId son la
   // MISMA promoción (un doble tap del cajero), no dos combos.
@@ -907,6 +929,7 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
   let promotionTotals: { subtotal: number; discount: number; total: number } | null = null
   try {
     const created = await prisma.$transaction(async tx => {
+      if (input.tableId) await lockTableOrderScope(tx, { venueId, orderIds: [], tableIds: [input.tableId] })
       // 🔴 La venta se toma en el mostrador: la orden nace en el turno de caja abierto AHORA
       // (`../shared/turnoDeCaja.ts`), resuelto con el MISMO cliente de la transacción — pasar
       // `prisma` aquí se saldría de ella. Desde la fase 1, `getActiveShifts` cuenta las órdenes
@@ -1002,6 +1025,11 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
       // descuento al centavo y recalcula los totales de la orden sin abrir otra transacción. Todo-o-nada: si la #2
       // truena, la #1 se va con el rollback de la venta.
       for (const ref of promocionesUnicas) {
+        const preparationOptions: [options?: { componentExternalIdPrefix: string }] = ref.selections.some(
+          s => s.serviceCourse?.preparationVersion === 1,
+        )
+          ? [{ componentExternalIdPrefix: `combo:${ref.promotionInstanceId}` }]
+          : []
         await applyPromotionToOrder(
           {
             venueId,
@@ -1014,6 +1042,7 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
             soldAt: new Date(),
           },
           tx,
+          ...preparationOptions,
         )
       }
 
@@ -1338,6 +1367,9 @@ export async function getOrder(venueId: string, orderId: string): Promise<OrderD
       // addItemsToOrder en modo ronda; filas viejas (pre-cambio) lo traen null
       // y el cliente cae a createdAt.
       course: item.course ?? null,
+      serviceCourse: item.serviceCourse as { id: string; label: string; kind: 'IMMEDIATE' | 'STANDARD' } | null,
+      orderPromotionId: item.orderPromotionId ?? null,
+      externalId: item.externalId ?? null,
       seat: item.seat ?? null,
       createdAt: item.createdAt,
       sentToKitchenAt: item.sentToKitchenAt ?? null,
@@ -1392,82 +1424,88 @@ export interface OrderDetailsInput {
  * TABLE_SERVICE — partial update of the check's details. Only provided keys
  * change; covers also synchronizes automatic service charges atomically.
  */
-export async function updateOrderDetails(venueId: string, orderId: string, input: OrderDetailsInput) {
-  const update = async (db: Prisma.TransactionClient) => {
-    const order = await db.order.findFirst({
-      where: { id: orderId, venueId },
-      select: { id: true, status: true, customerName: true },
-    })
-    if (!order) throw new NotFoundError('Order not found')
-    if (['COMPLETED', 'CANCELLED', 'DELETED'].includes(order.status)) {
-      throw new BadRequestError('La cuenta ya está cerrada')
-    }
+export async function updateOrderDetailsInTransaction(
+  tx: Prisma.TransactionClient,
+  venueId: string,
+  orderId: string,
+  input: OrderDetailsInput,
+) {
+  if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Order not found')
+  const charges: AutomaticServiceChargeCapture = { createdIds: [], deletedIds: [], recalculatedIds: [] }
+  const order = await tx.order.findFirst({
+    where: { id: orderId, venueId },
+    select: { id: true, status: true, customerName: true },
+  })
+  if (!order) throw new NotFoundError('Order not found')
+  if (['COMPLETED', 'CANCELLED', 'DELETED'].includes(order.status)) {
+    throw new BadRequestError('La cuenta ya está cerrada')
+  }
 
-    // Partial-update semantics tolerant to clients that serialize defaults
-    // (Android's kotlinx encodeDefaults=true sends null for untouched fields):
-    // null/undefined = no change; EMPTY STRING clears name/notes/customer.
-    const data: Record<string, unknown> = {}
-    if (input.name !== undefined && input.name !== null) data.customerName = input.name.trim() || null
-    if (input.notes !== undefined && input.notes !== null) data.specialRequests = input.notes.trim() || null
-    if (input.covers !== undefined && input.covers !== null) {
-      if (input.covers < 1 || input.covers > 200) throw new BadRequestError('covers inválido')
-      data.covers = input.covers
-    }
-    if (input.orderType !== undefined && input.orderType !== null && input.orderType !== '') {
-      const valid = ['DINE_IN', 'TAKEOUT', 'DELIVERY', 'PICKUP']
-      if (!valid.includes(input.orderType)) throw new BadRequestError('orderType inválido')
-      data.type = input.orderType
-    }
-    if (input.customerId !== undefined && input.customerId !== null) {
-      if (input.customerId) {
-        const customer = await db.customer.findFirst({
-          where: { id: input.customerId, venueId },
-          select: { id: true, firstName: true, lastName: true },
-        })
-        if (!customer) throw new BadRequestError('Cliente no encontrado en este venue')
-        data.customerId = customer.id
-        // Follow the customer's name on the check label ONLY when the check has
-        // no explicit name yet (never clobber a name the waiter typed). Checked
-        // against the STORED name because clients that serialize defaults send
-        // name:null on every call.
-        if (!order.customerName && data.customerName === undefined) {
-          data.customerName = `${customer.firstName || ''} ${customer.lastName || ''}`.trim() || null
-        }
-      } else {
-        // Empty string detaches the customer.
-        data.customerId = null
+  // Partial-update semantics tolerant to clients that serialize defaults
+  // (Android's kotlinx encodeDefaults=true sends null for untouched fields):
+  // null/undefined = no change; EMPTY STRING clears name/notes/customer.
+  const data: Record<string, unknown> = {}
+  if (input.name !== undefined && input.name !== null) data.customerName = input.name.trim() || null
+  if (input.notes !== undefined && input.notes !== null) data.specialRequests = input.notes.trim() || null
+  if (input.covers !== undefined && input.covers !== null) {
+    if (input.covers < 1 || input.covers > 200) throw new BadRequestError('covers inválido')
+    data.covers = input.covers
+  }
+  if (input.orderType !== undefined && input.orderType !== null && input.orderType !== '') {
+    const valid = ['DINE_IN', 'TAKEOUT', 'DELIVERY', 'PICKUP']
+    if (!valid.includes(input.orderType)) throw new BadRequestError('orderType inválido')
+    data.type = input.orderType
+  }
+  if (input.customerId !== undefined && input.customerId !== null) {
+    if (input.customerId) {
+      const customer = await tx.customer.findFirst({
+        where: { id: input.customerId, venueId },
+        select: { id: true, firstName: true, lastName: true },
+      })
+      if (!customer) throw new BadRequestError('Cliente no encontrado en este venue')
+      data.customerId = customer.id
+      // Follow the customer's name on the check label ONLY when the check has
+      // no explicit name yet (never clobber a name the waiter typed). Checked
+      // against the STORED name because clients that serialize defaults send
+      // name:null on every call.
+      if (!order.customerName && data.customerName === undefined) {
+        data.customerName = `${customer.firstName || ''} ${customer.lastName || ''}`.trim() || null
       }
+    } else {
+      // Empty string detaches the customer.
+      data.customerId = null
     }
-    if (Object.keys(data).length === 0) throw new BadRequestError('Nada que actualizar')
+  }
+  if (Object.keys(data).length === 0) throw new BadRequestError('Nada que actualizar')
 
-    const updated = await db.order.update({
-      where: { id: order.id },
-      data,
-      select: { customerName: true, specialRequests: true, covers: true, customerId: true, type: true },
-    })
+  const updated = await tx.order.update({
+    where: { id: order.id },
+    data,
+    select: { customerName: true, specialRequests: true, covers: true, customerId: true, type: true },
+  })
 
-    // Cambiar el conteo de comensales puede disparar (o retirar) el cargo
-    // automático por grupo — el cargo debe seguir al conteo, no quedarse pegado.
-    if (input.covers != null) {
-      const { syncAutomaticServiceCharges } = await import('./service-charge.mobile.service')
-      await syncAutomaticServiceCharges(venueId, orderId, db)
-    }
+  // Cambiar el conteo de comensales puede disparar (o retirar) el cargo
+  // automático por grupo — el cargo debe seguir al conteo, no quedarse pegado.
+  if (input.covers != null) {
+    const { syncAutomaticServiceChargesInTransaction } = await import('./service-charge.mobile.service')
+    await syncAutomaticServiceChargesInTransaction(tx, venueId, orderId, charges)
+  }
 
-    return {
+  return {
+    data: {
       name: updated.customerName,
       notes: updated.specialRequests,
       covers: updated.covers,
       customerId: updated.customerId,
       orderType: updated.type,
-    }
+    },
+    affectedServiceChargeIds: [...new Set([...charges.createdIds, ...charges.deletedIds, ...charges.recalculatedIds])],
   }
-  // Only covers changes compose a money mutation; metadata-only edits keep
-  // their existing path. Lock before all reads used by the composed update.
-  if (input.covers == null) return update(prisma)
-  return prisma.$transaction(async tx => {
-    if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Order not found')
-    return update(tx)
-  }, ORDER_LOCK_WAIT_BUDGET)
+}
+
+export async function updateOrderDetails(venueId: string, orderId: string, input: OrderDetailsInput) {
+  const result = await prisma.$transaction(tx => updateOrderDetailsInTransaction(tx, venueId, orderId, input), ORDER_LOCK_WAIT_BUDGET)
+  return result.data
 }
 
 // MARK: - Table order discounts (check panel "Descuentos")
@@ -1477,78 +1515,89 @@ export async function updateOrderDetails(venueId: string, orderId: string, input
  * and recomputes totals (same recalc the comp path uses, so % discounts
  * re-derive consistently).
  */
-export async function applyOrderDiscount(venueId: string, orderId: string, discountId: string, staffId?: string) {
+export async function applyOrderDiscountInTransaction(
+  tx: Prisma.TransactionClient,
+  venueId: string,
+  orderId: string,
+  discountId: string,
+  _staffId?: string,
+) {
   const { recalculateOrderTotals } = await import('./comp-item.mobile.service')
 
   // 🔴 Candado de la orden (Plan3b) ANTES de leer: estado, subtotal, descuentos ya aplicados y la regla del catálogo
   // se leen bajo él, y la fila del descuento y los totales se escriben en la MISMA transacción.
-  const { row, totals } = await prisma.$transaction(async tx => {
-    if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Order not found')
-    const order = await tx.order.findFirst({
-      where: { id: orderId, venueId },
-      select: { id: true, paymentStatus: true, discountAmount: true, paidAmount: true, subtotal: true, originSystem: true },
-    })
-    if (!order) throw new NotFoundError('Order not found')
-    // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
-    // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
-    rechazarSiEsImportada(order)
-    if (order.paymentStatus === 'PAID' || order.paymentStatus === 'PARTIAL') {
-      throw new BadRequestError('No se puede descontar una orden ya pagada')
-    }
+  if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Order not found')
+  const order = await tx.order.findFirst({
+    where: { id: orderId, venueId },
+    select: { id: true, paymentStatus: true, discountAmount: true, paidAmount: true, subtotal: true, originSystem: true },
+  })
+  if (!order) throw new NotFoundError('Order not found')
+  // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
+  // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
+  rechazarSiEsImportada(order)
+  if (order.paymentStatus === 'PAID' || order.paymentStatus === 'PARTIAL') {
+    throw new BadRequestError('No se puede descontar una orden ya pagada')
+  }
 
-    const discount = await tx.discount.findFirst({ where: { id: discountId, venueId } })
-    if (!discount) throw new NotFoundError('Descuento no encontrado')
-    validateDiscountActive(discount)
-    if (discount.scope !== 'ORDER') {
-      throw new BadRequestError('Solo descuentos de orden aplican a la cuenta completa')
-    }
+  const discount = await tx.discount.findFirst({ where: { id: discountId, venueId } })
+  if (!discount) throw new NotFoundError('Descuento no encontrado')
+  validateDiscountActive(discount)
+  if (discount.scope !== 'ORDER') {
+    throw new BadRequestError('Solo descuentos de orden aplican a la cuenta completa')
+  }
 
-    const dup = await tx.orderDiscount.findFirst({ where: { orderId, discountId } })
-    if (dup) throw new BadRequestError('Ese descuento ya está aplicado a la cuenta')
+  const dup = await tx.orderDiscount.findFirst({ where: { orderId, discountId } })
+  if (dup) throw new BadRequestError('Ese descuento ya está aplicado a la cuenta')
 
-    const subtotal = Number(order.subtotal)
-    const value = Number(discount.value)
+  const subtotal = Number(order.subtotal)
+  const value = Number(discount.value)
 
-    // 🔴 MONEY: sólo se puede descontar lo que TODAVÍA no está descontado.
-    //
-    // Topar contra el subtotal COMPLETO no basta cuando la cuenta ya trae
-    // descuentos: DOS descuentos fijos de $200 sobre una cuenta de $253 dejaban
-    // `discountAmount` en $425.30 — casi el doble de la mercancía. El total no
-    // sale negativo porque `recalculateOrderTotals` lo clampa, pero el número
-    // GUARDADO miente, y es el que alimenta reportes, comisiones y la factura
-    // (CFDI40111 exige que el descuento del comprobante sea la suma de los
-    // descuentos de los conceptos: $425.30 sobre conceptos que suman $253 es
-    // imposible de timbrar). Reproducido en vivo el 2026-08-09.
-    //
-    // Espejo de `applyDiscount` en order.tpv.service.ts y del
-    // `remainingDiscountable` que ya usan discount.tpv.service.ts y
-    // discountEngine.service.ts.
-    const remainingDiscountable = Math.max(0, subtotal - Number(order.discountAmount || 0))
-    const rawAmount = discount.type === 'PERCENTAGE' ? Math.round(((subtotal * value) / 100) * 100) / 100 : Math.min(value, subtotal)
-    // R6 (founder, 2-oct): el tope del catálogo vale al aplicar y, viajando en el reparto, al recalcular. Hoy el móvil lo
-    // ignoraba. Un tope que no es nulo cuenta, incluido 0 (Codex r1), igual que el cupón y el motor.
-    const tope = discount.type === 'PERCENTAGE' && discount.maxDiscountAmount != null ? Number(discount.maxDiscountAmount) : null
-    const amount = Math.min(rawAmount, tope ?? Infinity, remainingDiscountable)
+  // 🔴 MONEY: sólo se puede descontar lo que TODAVÍA no está descontado.
+  //
+  // Topar contra el subtotal COMPLETO no basta cuando la cuenta ya trae
+  // descuentos: DOS descuentos fijos de $200 sobre una cuenta de $253 dejaban
+  // `discountAmount` en $425.30 — casi el doble de la mercancía. El total no
+  // sale negativo porque `recalculateOrderTotals` lo clampa, pero el número
+  // GUARDADO miente, y es el que alimenta reportes, comisiones y la factura
+  // (CFDI40111 exige que el descuento del comprobante sea la suma de los
+  // descuentos de los conceptos: $425.30 sobre conceptos que suman $253 es
+  // imposible de timbrar). Reproducido en vivo el 2026-08-09.
+  //
+  // Espejo de `applyDiscount` en order.tpv.service.ts y del
+  // `remainingDiscountable` que ya usan discount.tpv.service.ts y
+  // discountEngine.service.ts.
+  const remainingDiscountable = Math.max(0, subtotal - Number(order.discountAmount || 0))
+  const rawAmount = discount.type === 'PERCENTAGE' ? Math.round(((subtotal * value) / 100) * 100) / 100 : Math.min(value, subtotal)
+  // R6 (founder, 2-oct): el tope del catálogo vale al aplicar y, viajando en el reparto, al recalcular. Hoy el móvil lo
+  // ignoraba. Un tope que no es nulo cuenta, incluido 0 (Codex r1), igual que el cupón y el motor.
+  const tope = discount.type === 'PERCENTAGE' && discount.maxDiscountAmount != null ? Number(discount.maxDiscountAmount) : null
+  const amount = Math.min(rawAmount, tope ?? Infinity, remainingDiscountable)
 
-    // Codex r1 P1: lo que la cabecera trae fuera de toda fila (orden anterior a B2…) queda en su fila antes de crear ésta.
-    await conservarDescuentoHistorico(tx, orderId, order.discountAmount)
-    const row = await tx.orderDiscount.create({
-      data: {
-        orderId,
-        discountId,
-        type: discount.type,
-        name: discount.name,
-        value: discount.value,
-        amount,
-        // Su recálculo, en esta misma tx, la sincroniza (y la vuelve regla de recálculo) respetando el tope.
-        reparto: comoJson(nuevoRepartoDeCuenta({ conPromociones: true, tope })),
-      },
-      select: { id: true, name: true, amount: true },
-    })
+  // Codex r1 P1: lo que la cabecera trae fuera de toda fila (orden anterior a B2…) queda en su fila antes de crear ésta.
+  await conservarDescuentoHistorico(tx, orderId, order.discountAmount)
+  const row = await tx.orderDiscount.create({
+    data: {
+      orderId,
+      discountId,
+      type: discount.type,
+      name: discount.name,
+      value: discount.value,
+      amount,
+      // Su recálculo, en esta misma tx, la sincroniza (y la vuelve regla de recálculo) respetando el tope.
+      reparto: comoJson(nuevoRepartoDeCuenta({ conPromociones: true, tope })),
+    },
+    select: { id: true, name: true, amount: true },
+  })
 
-    const totals = await recalculateOrderTotals(orderId, 0, Number(order.paidAmount || 0), tx)
-    return { row, totals }
-  }, ORDER_LOCK_WAIT_BUDGET)
+  const totals = await recalculateOrderTotals(orderId, 0, Number(order.paidAmount || 0), tx)
+  return { row, totals }
+}
+
+export async function applyOrderDiscount(venueId: string, orderId: string, discountId: string, staffId?: string) {
+  const { row, totals } = await prisma.$transaction(
+    tx => applyOrderDiscountInTransaction(tx, venueId, orderId, discountId, staffId),
+    ORDER_LOCK_WAIT_BUDGET,
+  )
 
   void (await import('../dashboard/activity-log.service')).logAction({
     action: 'ORDER_DISCOUNT_APPLIED',
@@ -1563,7 +1612,13 @@ export async function applyOrderDiscount(venueId: string, orderId: string, disco
 }
 
 /** Removes one applied order discount and recomputes totals. */
-export async function removeOrderDiscount(venueId: string, orderId: string, orderDiscountId: string, staffId?: string) {
+export async function removeOrderDiscountInTransaction(
+  tx: Prisma.TransactionClient,
+  venueId: string,
+  orderId: string,
+  orderDiscountId: string,
+  staffId?: string,
+) {
   // 🔴 MONEY: a discount that came from redeeming loyalty points must give the
   // points BACK when it is removed — otherwise the customer paid with points
   // for a discount that no longer exists. Both moves share one transaction.
@@ -1576,39 +1631,44 @@ export async function removeOrderDiscount(venueId: string, orderId: string, orde
   const { refundStampRewardForOrderDiscount } = await import('../wallet/redeemStampReward.service')
   // 🔴 Candado de la orden (Plan3b) antes que el cliente y el premio (Order → Customer/StampReward): se releen la orden
   // y la fila del descuento bajo él, y devoluciones + borrado + totales van en la misma transacción.
-  const { row, refund, stampRefund, totals } = await prisma.$transaction(async tx => {
-    if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Order not found')
-    const order = await tx.order.findFirst({
-      where: { id: orderId, venueId },
-      select: { id: true, paymentStatus: true, paidAmount: true, discountAmount: true, originSystem: true },
-    })
-    if (!order) throw new NotFoundError('Order not found')
-    // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
-    // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
-    rechazarSiEsImportada(order)
-    if (order.paymentStatus === 'PAID' || order.paymentStatus === 'PARTIAL') {
-      throw new BadRequestError('No se puede modificar una orden ya pagada')
-    }
+  if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Order not found')
+  const order = await tx.order.findFirst({
+    where: { id: orderId, venueId },
+    select: { id: true, paymentStatus: true, paidAmount: true, discountAmount: true, originSystem: true },
+  })
+  if (!order) throw new NotFoundError('Order not found')
+  // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
+  // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
+  rechazarSiEsImportada(order)
+  if (order.paymentStatus === 'PAID' || order.paymentStatus === 'PARTIAL') {
+    throw new BadRequestError('No se puede modificar una orden ya pagada')
+  }
 
-    const row = await tx.orderDiscount.findFirst({ where: { id: orderDiscountId, orderId } })
-    if (!row) throw new NotFoundError('Descuento no aplicado a esta orden')
-    // R7-1 (ruling de B2 «al retirar un descuento, antes de borrarlo»): el recálculo de abajo es Σ filas, así que un resto de
-    // cabecera sin fila se perdería con ésta; se congela antes de devolver, revertir y borrar.
-    await conservarDescuentoHistorico(tx, orderId, order.discountAmount)
+  const row = await tx.orderDiscount.findFirst({ where: { id: orderDiscountId, orderId } })
+  if (!row) throw new NotFoundError('Descuento no aplicado a esta orden')
+  // R7-1 (ruling de B2 «al retirar un descuento, antes de borrarlo»): el recálculo de abajo es Σ filas, así que un resto de
+  // cabecera sin fila se perdería con ésta; se congela antes de devolver, revertir y borrar.
+  await conservarDescuentoHistorico(tx, orderId, order.discountAmount)
 
-    const refunded = await refundLoyaltyForOrderDiscount(tx, venueId, row, staffId)
-    const stamp = await refundStampRewardForOrderDiscount(tx, venueId, row)
-    // R3-2: si la fila era espejo, su renglón deja de traer el descuento; el recálculo de abajo sincroniza los repartos.
-    await revertirDescuentoDelRenglon(tx, orderId, row)
-    // D16 (Codex r1 #3): quitar una fila devuelve el impuesto que restó, igual que el motor. Una fila vieja del 16 % deja así
-    // de dejar la orden en impuesto negativo; una nueva IVA_APARTE recupera su impuesto. El recálculo de abajo no toca
-    // `taxAmount`; su sincronización mueve lo que cambie al re-repartir otras filas.
-    const impuestoDevuelto = new Prisma.Decimal(row.taxReduction ?? 0)
-    if (impuestoDevuelto.gt(0)) await tx.order.update({ where: { id: orderId }, data: { taxAmount: { increment: impuestoDevuelto } } })
-    await tx.orderDiscount.delete({ where: { id: row.id } })
-    const t = await recalculateOrderTotals(orderId, 0, Number(order.paidAmount || 0), tx)
-    return { row, refund: refunded, stampRefund: stamp, totals: t }
-  }, ORDER_LOCK_WAIT_BUDGET)
+  const refunded = await refundLoyaltyForOrderDiscount(tx, venueId, row, staffId)
+  const stamp = await refundStampRewardForOrderDiscount(tx, venueId, row)
+  // R3-2: si la fila era espejo, su renglón deja de traer el descuento; el recálculo de abajo sincroniza los repartos.
+  await revertirDescuentoDelRenglon(tx, orderId, row)
+  // D16 (Codex r1 #3): quitar una fila devuelve el impuesto que restó, igual que el motor. Una fila vieja del 16 % deja así
+  // de dejar la orden en impuesto negativo; una nueva IVA_APARTE recupera su impuesto. El recálculo de abajo no toca
+  // `taxAmount`; su sincronización mueve lo que cambie al re-repartir otras filas.
+  const impuestoDevuelto = new Prisma.Decimal(row.taxReduction ?? 0)
+  if (impuestoDevuelto.gt(0)) await tx.order.update({ where: { id: orderId }, data: { taxAmount: { increment: impuestoDevuelto } } })
+  await tx.orderDiscount.delete({ where: { id: row.id } })
+  const t = await recalculateOrderTotals(orderId, 0, Number(order.paidAmount || 0), tx)
+  return { row, refund: refunded, stampRefund: stamp, totals: t }
+}
+
+export async function removeOrderDiscount(venueId: string, orderId: string, orderDiscountId: string, staffId?: string) {
+  const { row, refund, stampRefund, totals } = await prisma.$transaction(
+    tx => removeOrderDiscountInTransaction(tx, venueId, orderId, orderDiscountId, staffId),
+    ORDER_LOCK_WAIT_BUDGET,
+  )
 
   void (await import('../dashboard/activity-log.service')).logAction({
     action: 'ORDER_DISCOUNT_REMOVED',
@@ -1636,139 +1696,164 @@ export async function removeOrderDiscount(venueId: string, orderId: string, orde
  * rest; both orders' money is recomputed from their items. The table stays
  * OCCUPIED; currentOrderId keeps pointing at the source.
  */
+export async function splitOrderItemsInTransaction(
+  tx: Prisma.TransactionClient,
+  venueId: string,
+  orderId: string,
+  itemIds: string[],
+  staffId?: string,
+  strictItems = false,
+) {
+  if (!Array.isArray(itemIds) || itemIds.length === 0) {
+    throw new BadRequestError('itemIds es requerido')
+  }
+  const { recalculateOrderTotals } = await import('./comp-item.mobile.service')
+  try {
+    await lockTableOrderScope(tx, { venueId, orderIds: [orderId] })
+  } catch (error) {
+    if (error instanceof NotFoundError && error.message === 'Venue not found') throw new NotFoundError('Order not found')
+    throw error
+  }
+  const source = await tx.order.findFirst({
+    where: { id: orderId, venueId },
+    select: {
+      id: true,
+      orderNumber: true,
+      status: true,
+      paymentStatus: true,
+      tableId: true,
+      covers: true,
+      servedById: true,
+      type: true,
+      paidAmount: true,
+      shiftId: true,
+      contratoDePrecio: true,
+      originSystem: true,
+      items: { select: { id: true, orderPromotionId: true } },
+      orderDiscounts: { select: { id: true } },
+      serviceCharges: { select: { id: true, isAutomatic: true } },
+    },
+  })
+  if (!source) throw new NotFoundError('Order not found')
+  // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
+  // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
+  rechazarSiEsImportada(source)
+  if (['COMPLETED', 'CANCELLED', 'DELETED'].includes(source.status)) {
+    throw new BadRequestError('La cuenta ya está cerrada')
+  }
+  if (source.paymentStatus === 'PAID' || source.paymentStatus === 'PARTIAL') {
+    throw new BadRequestError('No se puede separar una cuenta ya pagada')
+  }
+  // 🔴 MONEY (auditoría): mismos guards que fusionar — un descuento/canje/cargo
+  // se calculó sobre la cuenta COMPLETA; partirla cambiaría la base en silencio.
+  if (source.orderDiscounts.length > 0) {
+    throw new BadRequestError(
+      'Quita los descuentos (o la recompensa) antes de separar la cuenta: su monto se calculó sobre la cuenta completa.',
+    )
+  }
+  if (source.serviceCharges.some(sc => !sc.isAutomatic)) {
+    throw new BadRequestError('Quita los cobros por servicio antes de separar la cuenta.')
+  }
+
+  const sourceItemIds = new Set(source.items.map(i => i.id))
+  if (strictItems) {
+    if (new Set(itemIds).size !== itemIds.length)
+      throw new BadRequestError('No repitas artículos al separar la cuenta', 'SPLIT_DUPLICATE_ITEM_IDS')
+    if (itemIds.some(id => !sourceItemIds.has(id)))
+      throw new BadRequestError('Todos los artículos deben pertenecer a esta cuenta', 'SPLIT_ITEM_NOT_IN_SOURCE')
+  }
+  const toMove = itemIds.filter(id => sourceItemIds.has(id))
+  if (toMove.length === 0) throw new BadRequestError('Los artículos no pertenecen a esta cuenta')
+  if (toMove.length >= sourceItemIds.size) {
+    throw new BadRequestError('Debe quedar al menos un artículo en la cuenta original')
+  }
+
+  // 🔴 Una promoción se mueve COMPLETA o no se mueve (audit 2026-08-13): mover
+  // sólo el refresco de un combo dejaría la instancia (OrderPromotion) en el
+  // origen mientras sus líneas viven en dos cheques — cada uno vería un
+  // subconjunto "completo" y el guard de reembolso dejaría de proteger.
+  const movingSet = new Set(toMove)
+  const promoLineCount = new Map<string, { total: number; moving: number }>()
+  for (const item of source.items) {
+    if (!item.orderPromotionId) continue
+    const entry = promoLineCount.get(item.orderPromotionId) ?? { total: 0, moving: 0 }
+    entry.total += 1
+    if (movingSet.has(item.id)) entry.moving += 1
+    promoLineCount.set(item.orderPromotionId, entry)
+  }
+  const movedPromotionIds: string[] = []
+  for (const [orderPromotionId, count] of promoLineCount) {
+    if (count.moving > 0 && count.moving < count.total) {
+      throw new BadRequestError('Una promoción se mueve completa a la otra cuenta: selecciona todos sus artículos o ninguno.')
+    }
+    if (count.moving === count.total && count.moving > 0) movedPromotionIds.push(orderPromotionId)
+  }
+
+  const created = await tx.order.create({
+    data: {
+      venueId,
+      // 🔴 El cheque separado HEREDA el turno de su origen, no «el turno abierto ahora»:
+      // es la MISMA comida, y separar la cuenta a caballo de un cambio de turno la partiría
+      // entre dos cortes. Heredar es un hecho copiado; resolver sería una suposición.
+      // Si el origen no tiene turno, el hijo tampoco — no se inventa uno.
+      shiftId: source.shiftId,
+      tableId: source.tableId,
+      covers: source.covers,
+      orderNumber: `ORD-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`,
+      servedById: source.servedById,
+      type: source.type,
+      status: 'PENDING',
+      paymentStatus: 'PENDING',
+      kitchenStatus: 'PENDING',
+      subtotal: 0,
+      discountAmount: 0,
+      taxAmount: 0,
+      total: 0,
+      version: 1,
+      // Separar cuenta no cambia el precio que el cliente ya vio: la cuenta nueva
+      // hereda el mismo contrato del origen, nunca se resuelve de nuevo.
+      contratoDePrecio: source.contratoDePrecio,
+    },
+    select: { id: true, orderNumber: true, version: true },
+  })
+
+  await tx.orderItem.updateMany({
+    where: { id: { in: toMove }, orderId: source.id },
+    data: { orderId: created.id },
+  })
+
+  // La INSTANCIA de cada promoción movida completa sigue a sus líneas: si se
+  // quedara en el origen, el histórico y el guard de reembolso apuntarían a
+  // un cheque que ya no tiene esas líneas.
+  if (movedPromotionIds.length > 0) {
+    await tx.orderPromotion.updateMany({
+      where: { id: { in: movedPromotionIds }, orderId: source.id },
+      data: { orderId: created.id },
+    })
+  }
+
+  const src = await recalculateOrderTotals(source.id, 0, Number(source.paidAmount || 0), tx)
+  const dst = await recalculateOrderTotals(created.id, 0, 0, tx)
+  return {
+    source,
+    newOrder: created,
+    movedCount: toMove.length,
+    sourceTotals: src,
+    newTotals: dst,
+    movedItemIds: toMove,
+    movedPromotionIds,
+  }
+}
+
 export async function splitOrderItems(venueId: string, orderId: string, itemIds: string[], staffId?: string) {
   if (!Array.isArray(itemIds) || itemIds.length === 0) {
     throw new BadRequestError('itemIds es requerido')
   }
 
-  // 🔴 Atómico (auditoría): crear + mover + AMBOS recálculos en UNA transacción.
-  // Un crash a medias dejaría el origen sobre-cobrando los items ya movidos.
-  // 🔴 Y bajo el candado del ORIGEN (Plan3b): sus líneas, promociones, descuentos, cargos, turno, contrato y pagos se
-  // leen DESPUÉS de bloquearlo, así que lo que se separa es la cuenta tal como está, no una foto vieja. El cheque nuevo
-  // nace dentro de esta misma transacción: es privado hasta el commit y no necesita candado.
-  const { recalculateOrderTotals } = await import('./comp-item.mobile.service')
-  const { source, newOrder, movedCount, sourceTotals, newTotals } = await prisma.$transaction(async tx => {
-    // The child Order INSERT takes the Venue FK lock: take its compatible shared lock first, matching deleteVenue's
-    // Venue -> Order order (otherwise this holds the source Order and waits on a deletion that holds the Venue: 40P01).
-    const venues = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM "Venue" WHERE id = ${venueId} FOR KEY SHARE`
-    if (!venues.length) throw new NotFoundError('Order not found')
-    if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Order not found')
-    const source = await tx.order.findFirst({
-      where: { id: orderId, venueId },
-      select: {
-        id: true,
-        orderNumber: true,
-        status: true,
-        paymentStatus: true,
-        tableId: true,
-        covers: true,
-        servedById: true,
-        type: true,
-        paidAmount: true,
-        shiftId: true,
-        contratoDePrecio: true,
-        originSystem: true,
-        items: { select: { id: true, orderPromotionId: true } },
-        orderDiscounts: { select: { id: true } },
-        serviceCharges: { select: { id: true, isAutomatic: true } },
-      },
-    })
-    if (!source) throw new NotFoundError('Order not found')
-    // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
-    // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
-    rechazarSiEsImportada(source)
-    if (['COMPLETED', 'CANCELLED', 'DELETED'].includes(source.status)) {
-      throw new BadRequestError('La cuenta ya está cerrada')
-    }
-    if (source.paymentStatus === 'PAID' || source.paymentStatus === 'PARTIAL') {
-      throw new BadRequestError('No se puede separar una cuenta ya pagada')
-    }
-    // 🔴 MONEY (auditoría): mismos guards que fusionar — un descuento/canje/cargo
-    // se calculó sobre la cuenta COMPLETA; partirla cambiaría la base en silencio.
-    if (source.orderDiscounts.length > 0) {
-      throw new BadRequestError(
-        'Quita los descuentos (o la recompensa) antes de separar la cuenta: su monto se calculó sobre la cuenta completa.',
-      )
-    }
-    if (source.serviceCharges.some(sc => !sc.isAutomatic)) {
-      throw new BadRequestError('Quita los cobros por servicio antes de separar la cuenta.')
-    }
-
-    const sourceItemIds = new Set(source.items.map(i => i.id))
-    const toMove = itemIds.filter(id => sourceItemIds.has(id))
-    if (toMove.length === 0) throw new BadRequestError('Los artículos no pertenecen a esta cuenta')
-    if (toMove.length >= sourceItemIds.size) {
-      throw new BadRequestError('Debe quedar al menos un artículo en la cuenta original')
-    }
-
-    // 🔴 Una promoción se mueve COMPLETA o no se mueve (audit 2026-08-13): mover
-    // sólo el refresco de un combo dejaría la instancia (OrderPromotion) en el
-    // origen mientras sus líneas viven en dos cheques — cada uno vería un
-    // subconjunto "completo" y el guard de reembolso dejaría de proteger.
-    const movingSet = new Set(toMove)
-    const promoLineCount = new Map<string, { total: number; moving: number }>()
-    for (const item of source.items) {
-      if (!item.orderPromotionId) continue
-      const entry = promoLineCount.get(item.orderPromotionId) ?? { total: 0, moving: 0 }
-      entry.total += 1
-      if (movingSet.has(item.id)) entry.moving += 1
-      promoLineCount.set(item.orderPromotionId, entry)
-    }
-    const movedPromotionIds: string[] = []
-    for (const [orderPromotionId, count] of promoLineCount) {
-      if (count.moving > 0 && count.moving < count.total) {
-        throw new BadRequestError('Una promoción se mueve completa a la otra cuenta: selecciona todos sus artículos o ninguno.')
-      }
-      if (count.moving === count.total && count.moving > 0) movedPromotionIds.push(orderPromotionId)
-    }
-
-    const created = await tx.order.create({
-      data: {
-        venueId,
-        // 🔴 El cheque separado HEREDA el turno de su origen, no «el turno abierto ahora»:
-        // es la MISMA comida, y separar la cuenta a caballo de un cambio de turno la partiría
-        // entre dos cortes. Heredar es un hecho copiado; resolver sería una suposición.
-        // Si el origen no tiene turno, el hijo tampoco — no se inventa uno.
-        shiftId: source.shiftId,
-        tableId: source.tableId,
-        covers: source.covers,
-        orderNumber: `ORD-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`,
-        servedById: source.servedById,
-        type: source.type,
-        status: 'PENDING',
-        paymentStatus: 'PENDING',
-        kitchenStatus: 'PENDING',
-        subtotal: 0,
-        discountAmount: 0,
-        taxAmount: 0,
-        total: 0,
-        version: 1,
-        // Separar cuenta no cambia el precio que el cliente ya vio: la cuenta nueva
-        // hereda el mismo contrato del origen, nunca se resuelve de nuevo.
-        contratoDePrecio: source.contratoDePrecio,
-      },
-      select: { id: true, orderNumber: true, version: true },
-    })
-
-    await tx.orderItem.updateMany({
-      where: { id: { in: toMove }, orderId: source.id },
-      data: { orderId: created.id },
-    })
-
-    // La INSTANCIA de cada promoción movida completa sigue a sus líneas: si se
-    // quedara en el origen, el histórico y el guard de reembolso apuntarían a
-    // un cheque que ya no tiene esas líneas.
-    if (movedPromotionIds.length > 0) {
-      await tx.orderPromotion.updateMany({
-        where: { id: { in: movedPromotionIds }, orderId: source.id },
-        data: { orderId: created.id },
-      })
-    }
-
-    const src = await recalculateOrderTotals(source.id, 0, Number(source.paidAmount || 0), tx)
-    const dst = await recalculateOrderTotals(created.id, 0, 0, tx)
-    return { source, newOrder: created, movedCount: toMove.length, sourceTotals: src, newTotals: dst }
-  }, ORDER_LOCK_WAIT_BUDGET)
+  const { source, newOrder, movedCount, sourceTotals, newTotals } = await prisma.$transaction(
+    tx => splitOrderItemsInTransaction(tx, venueId, orderId, itemIds, staffId),
+    ORDER_LOCK_WAIT_BUDGET,
+  )
 
   void (await import('../dashboard/activity-log.service')).logAction({
     action: 'ORDER_SPLIT',
@@ -1798,122 +1883,124 @@ export async function splitOrderItems(venueId: string, orderId: string, itemIds:
  *   vacía y para conservar su historial (es "la cuenta de la mesa").
  * - Requiere al menos 2 asientos distintos; si no, no hay nada que dividir.
  */
-export async function splitOrderBySeat(venueId: string, orderId: string, staffId?: string) {
+export async function splitOrderBySeatInTransaction(tx: Prisma.TransactionClient, venueId: string, orderId: string, staffId?: string) {
   const { recalculateOrderTotals } = await import('./comp-item.mobile.service')
-  // 🔴 Bajo el candado del ORIGEN (Plan3b): los asientos, el estado, los pagos, los descuentos y los cargos se leen
-  // DESPUÉS de bloquearlo, y los cheques por asiento —privados hasta el commit— nacen, reciben sus líneas y se
-  // recalculan en esta MISMA transacción.
-  const created = await prisma.$transaction(async tx => {
-    // The child Order INSERT takes the Venue FK lock: take its compatible shared lock first, matching deleteVenue's
-    // Venue -> Order order (otherwise this holds the source Order and waits on a deletion that holds the Venue: 40P01).
-    const venues = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM "Venue" WHERE id = ${venueId} FOR KEY SHARE`
-    if (!venues.length) throw new NotFoundError('Order not found')
-    if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Order not found')
-    const source = await tx.order.findFirst({
-      where: { id: orderId, venueId },
-      select: {
-        id: true,
-        orderNumber: true,
-        status: true,
-        paymentStatus: true,
-        tableId: true,
-        covers: true,
-        servedById: true,
-        type: true,
-        paidAmount: true,
-        shiftId: true,
-        contratoDePrecio: true,
-        originSystem: true,
-        items: { select: { id: true, seat: true } },
-        orderDiscounts: { select: { id: true } },
-        serviceCharges: { select: { id: true, isAutomatic: true } },
+  try {
+    await lockTableOrderScope(tx, { venueId, orderIds: [orderId] })
+  } catch (error) {
+    if (error instanceof NotFoundError && error.message === 'Venue not found') throw new NotFoundError('Order not found')
+    throw error
+  }
+  const source = await tx.order.findFirst({
+    where: { id: orderId, venueId },
+    select: {
+      id: true,
+      orderNumber: true,
+      status: true,
+      paymentStatus: true,
+      tableId: true,
+      covers: true,
+      servedById: true,
+      type: true,
+      paidAmount: true,
+      shiftId: true,
+      contratoDePrecio: true,
+      originSystem: true,
+      items: { select: { id: true, seat: true } },
+      orderDiscounts: { select: { id: true } },
+      serviceCharges: { select: { id: true, isAutomatic: true } },
+    },
+  })
+  if (!source) throw new NotFoundError('Order not found')
+  // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
+  // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
+  rechazarSiEsImportada(source)
+  if (['COMPLETED', 'CANCELLED', 'DELETED'].includes(source.status)) {
+    throw new BadRequestError('La cuenta ya está cerrada')
+  }
+  if (source.paymentStatus === 'PAID' || source.paymentStatus === 'PARTIAL') {
+    throw new BadRequestError('No se puede dividir una cuenta ya pagada')
+  }
+  // 🔴 MONEY (auditoría): mismos guards que fusionar — descuentos/canjes/cargos
+  // se calcularon sobre la cuenta completa; dividirla cambiaría la base.
+  if (source.orderDiscounts.length > 0) {
+    throw new BadRequestError('Quita los descuentos (o la recompensa) antes de dividir por puesto.')
+  }
+  if (source.serviceCharges.some(sc => !sc.isAutomatic)) {
+    throw new BadRequestError('Quita los cobros por servicio antes de dividir por puesto.')
+  }
+
+  // Agrupar por asiento; las líneas sin asiento no se mueven.
+  const bySeat = new Map<number, string[]>()
+  for (const item of source.items) {
+    if (item.seat == null) continue
+    const list = bySeat.get(item.seat) ?? []
+    list.push(item.id)
+    bySeat.set(item.seat, list)
+  }
+
+  const seats = [...bySeat.keys()].sort((a, b) => a - b)
+  if (seats.length < 2) {
+    throw new BadRequestError('Se necesitan al menos dos asientos con artículos para dividir por puesto')
+  }
+
+  // El asiento más bajo se queda en la cuenta original.
+  const seatsToMove = seats.slice(1)
+
+  const movedItemIds: string[] = []
+  const results: Array<{ id: string; orderNumber: string; seat: number }> = []
+  for (const seat of seatsToMove) {
+    const itemIds = bySeat.get(seat) as string[]
+    const newOrder = await tx.order.create({
+      data: {
+        venueId,
+        // 🔴 Mismo criterio que separar cheque: el turno se HEREDA del origen (es la misma
+        // comida), nunca se resuelve «el turno abierto ahora» — dividir por puesto a caballo
+        // de un cambio de turno partiría una sola mesa entre dos cortes.
+        shiftId: source.shiftId,
+        tableId: source.tableId,
+        // Un cheque POR ASIENTO es de UNA persona: heredar los covers de la
+        // mesa inflaría el conteo y dispararía cargos automáticos por grupo.
+        covers: 1,
+        orderNumber: `ORD-${Date.now()}-${Math.random().toString(36).slice(2, 4).toUpperCase()}-S${seat}`,
+        customerName: `Asiento ${seat}`,
+        servedById: source.servedById,
+        type: source.type,
+        status: 'PENDING',
+        paymentStatus: 'PENDING',
+        kitchenStatus: 'PENDING',
+        subtotal: 0,
+        discountAmount: 0,
+        taxAmount: 0,
+        total: 0,
+        version: 1,
+        // Dividir por puesto no cambia el precio que el cliente ya vio: cada
+        // cheque por asiento hereda el mismo contrato del origen.
+        contratoDePrecio: source.contratoDePrecio,
       },
+      select: { id: true, orderNumber: true },
     })
-    if (!source) throw new NotFoundError('Order not found')
-    // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
-    // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
-    rechazarSiEsImportada(source)
-    if (['COMPLETED', 'CANCELLED', 'DELETED'].includes(source.status)) {
-      throw new BadRequestError('La cuenta ya está cerrada')
-    }
-    if (source.paymentStatus === 'PAID' || source.paymentStatus === 'PARTIAL') {
-      throw new BadRequestError('No se puede dividir una cuenta ya pagada')
-    }
-    // 🔴 MONEY (auditoría): mismos guards que fusionar — descuentos/canjes/cargos
-    // se calcularon sobre la cuenta completa; dividirla cambiaría la base.
-    if (source.orderDiscounts.length > 0) {
-      throw new BadRequestError('Quita los descuentos (o la recompensa) antes de dividir por puesto.')
-    }
-    if (source.serviceCharges.some(sc => !sc.isAutomatic)) {
-      throw new BadRequestError('Quita los cobros por servicio antes de dividir por puesto.')
-    }
+    await tx.orderItem.updateMany({
+      where: { id: { in: itemIds }, orderId: source.id },
+      data: { orderId: newOrder.id },
+    })
+    movedItemIds.push(...itemIds)
+    results.push({ id: newOrder.id, orderNumber: newOrder.orderNumber, seat })
+  }
 
-    // Agrupar por asiento; las líneas sin asiento no se mueven.
-    const bySeat = new Map<number, string[]>()
-    for (const item of source.items) {
-      if (item.seat == null) continue
-      const list = bySeat.get(item.seat) ?? []
-      list.push(item.id)
-      bySeat.set(item.seat, list)
-    }
+  // 🔴 Recalcular DENTRO de la tx (auditoría): un crash después del commit y
+  // antes del recálculo dejaría el origen sobre-cobrando los asientos movidos.
+  const src = await recalculateOrderTotals(source.id, 0, Number(source.paidAmount || 0), tx)
+  const totalsPerSeat = []
+  for (const r of results) {
+    const t = await recalculateOrderTotals(r.id, 0, 0, tx)
+    totalsPerSeat.push({ id: r.id, orderNumber: r.orderNumber, seat: r.seat, total: t.total })
+  }
+  return { source, seats, seatsToMove, results: totalsPerSeat, sourceTotals: src, movedItemIds }
+}
 
-    const seats = [...bySeat.keys()].sort((a, b) => a - b)
-    if (seats.length < 2) {
-      throw new BadRequestError('Se necesitan al menos dos asientos con artículos para dividir por puesto')
-    }
-
-    // El asiento más bajo se queda en la cuenta original.
-    const seatsToMove = seats.slice(1)
-
-    const results: Array<{ id: string; orderNumber: string; seat: number }> = []
-    for (const seat of seatsToMove) {
-      const itemIds = bySeat.get(seat) as string[]
-      const newOrder = await tx.order.create({
-        data: {
-          venueId,
-          // 🔴 Mismo criterio que separar cheque: el turno se HEREDA del origen (es la misma
-          // comida), nunca se resuelve «el turno abierto ahora» — dividir por puesto a caballo
-          // de un cambio de turno partiría una sola mesa entre dos cortes.
-          shiftId: source.shiftId,
-          tableId: source.tableId,
-          // Un cheque POR ASIENTO es de UNA persona: heredar los covers de la
-          // mesa inflaría el conteo y dispararía cargos automáticos por grupo.
-          covers: 1,
-          orderNumber: `ORD-${Date.now()}-${Math.random().toString(36).slice(2, 4).toUpperCase()}-S${seat}`,
-          customerName: `Asiento ${seat}`,
-          servedById: source.servedById,
-          type: source.type,
-          status: 'PENDING',
-          paymentStatus: 'PENDING',
-          kitchenStatus: 'PENDING',
-          subtotal: 0,
-          discountAmount: 0,
-          taxAmount: 0,
-          total: 0,
-          version: 1,
-          // Dividir por puesto no cambia el precio que el cliente ya vio: cada
-          // cheque por asiento hereda el mismo contrato del origen.
-          contratoDePrecio: source.contratoDePrecio,
-        },
-        select: { id: true, orderNumber: true },
-      })
-      await tx.orderItem.updateMany({
-        where: { id: { in: itemIds }, orderId: source.id },
-        data: { orderId: newOrder.id },
-      })
-      results.push({ id: newOrder.id, orderNumber: newOrder.orderNumber, seat })
-    }
-
-    // 🔴 Recalcular DENTRO de la tx (auditoría): un crash después del commit y
-    // antes del recálculo dejaría el origen sobre-cobrando los asientos movidos.
-    const src = await recalculateOrderTotals(source.id, 0, Number(source.paidAmount || 0), tx)
-    const totalsPerSeat = []
-    for (const r of results) {
-      const t = await recalculateOrderTotals(r.id, 0, 0, tx)
-      totalsPerSeat.push({ id: r.id, orderNumber: r.orderNumber, seat: r.seat, total: t.total })
-    }
-    return { source, seats, seatsToMove, results: totalsPerSeat, sourceTotals: src }
-  }, ORDER_LOCK_WAIT_BUDGET)
+export async function splitOrderBySeat(venueId: string, orderId: string, staffId?: string) {
+  const created = await prisma.$transaction(tx => splitOrderBySeatInTransaction(tx, venueId, orderId, staffId), ORDER_LOCK_WAIT_BUDGET)
 
   const createdTotals = created.results
   const sourceTotals = created.sourceTotals
@@ -1947,17 +2034,36 @@ export async function splitOrderBySeat(venueId: string, orderId: string, staffId
  * Se pide quitarlos primero, con el motivo explícito. Los cobros AUTOMÁTICOS por
  * comensales se re-aplican solos en el destino, así que esos no estorban.
  */
-export async function mergeOrders(venueId: string, targetOrderId: string, sourceOrderId: string, staffId?: string) {
+export async function mergeOrdersInTransaction(
+  tx: Prisma.TransactionClient,
+  venueId: string,
+  targetOrderId: string,
+  sourceOrderId: string,
+  staffId?: string,
+) {
   if (targetOrderId === sourceOrderId) {
     throw new BadRequestError('No se puede fusionar una cuenta consigo misma')
   }
 
+  let scope: Awaited<ReturnType<typeof lockTableOrderScope>>
+  try {
+    scope = await lockTableOrderScope(tx, { venueId, orderIds: [targetOrderId, sourceOrderId] })
+  } catch (error) {
+    // Failed topology discovery performs no mutation; identify the original missing-side DTO.
+    if (error instanceof NotFoundError) {
+      const existingTarget = await tx.order.findFirst({ where: { id: targetOrderId, venueId }, select: { id: true } })
+      if (!existingTarget) throw new NotFoundError('Cuenta destino no encontrada')
+      const existingSource = await tx.order.findFirst({ where: { id: sourceOrderId, venueId }, select: { id: true } })
+      if (!existingSource) throw new NotFoundError('Cuenta origen no encontrada')
+    }
+    throw error
+  }
   const [target, source] = await Promise.all([
-    prisma.order.findFirst({
+    tx.order.findFirst({
       where: { id: targetOrderId, venueId },
       select: { id: true, orderNumber: true, status: true, paymentStatus: true, paidAmount: true, tableId: true },
     }),
-    prisma.order.findFirst({
+    tx.order.findFirst({
       where: { id: sourceOrderId, venueId },
       select: {
         id: true,
@@ -1966,13 +2072,14 @@ export async function mergeOrders(venueId: string, targetOrderId: string, source
         paymentStatus: true,
         tableId: true,
         customerName: true,
-        items: { select: { id: true } },
-        orderDiscounts: { select: { id: true } },
-        serviceCharges: { select: { id: true, isAutomatic: true } },
+        _count: { select: { items: true } },
+        orderDiscounts: { select: { id: true }, take: 1 },
+        serviceCharges: { where: { isAutomatic: false }, select: { id: true, isAutomatic: true }, take: 1 },
       },
     }),
   ])
   if (!target) throw new NotFoundError('Cuenta destino no encontrada')
+  const validatedTargetId = target.id
   if (!source) throw new NotFoundError('Cuenta origen no encontrada')
 
   for (const [order, label] of [
@@ -1987,7 +2094,7 @@ export async function mergeOrders(venueId: string, targetOrderId: string, source
     }
   }
 
-  if (source.items.length === 0) {
+  if (source._count.items === 0) {
     throw new BadRequestError('La cuenta origen no tiene artículos')
   }
   if (source.orderDiscounts.length > 0) {
@@ -2001,159 +2108,218 @@ export async function mergeOrders(venueId: string, targetOrderId: string, source
   }
 
   const { recalculateOrderTotals } = await import('./comp-item.mobile.service')
-  const { totals, itemsCount } = await prisma.$transaction(
-    async tx => {
-      // 🔴 Diseño §C.6: el candado de LAS DOS órdenes, ordenado por id y en UNA sentencia (mismo patrón que
-      // areaTicketV7 y commission-calculation), ANTES de releer y de tocar un solo renglón. Es lo que serializa esta
-      // fusión con la admisión de un cobro y con el registro del dinero (los dos toman `Order FOR UPDATE`), y lo que hace
-      // que dos fusiones cruzadas A→B / B→A se formen en fila en vez de interbloquearse (40P01 → P2034, un 500): la
-      // segunda despierta con su destino ya CANCELLED y la relectura de abajo la rechaza con 400. Sin candado, las
-      // relecturas de READ COMMITTED no bloqueaban nada y el orden era renglón → orden, el inverso del registro de un
-      // pago por producto (Order → PaymentAllocation → OrderItem).
-      const bloqueadas = await tx.$queryRaw<Array<{ id: string }>>(
-        Prisma.sql`SELECT id FROM "Order" WHERE "venueId" = ${venueId} AND id IN (${Prisma.join([source.id, target.id])}) ORDER BY id FOR UPDATE`,
-      )
-      if (!Array.isArray(bloqueadas) || bloqueadas.length !== 2) {
-        throw new BadRequestError('La cuenta cambió mientras se fusionaba — vuelve a intentar')
-      }
-      // 🔴 Revalidar DENTRO de la tx y BAJO el candado: entre el guard y la tx pudo entrar un pago, un descuento, o una
-      // fusión cruzada A→B / B→A. Sin esto, dos merges concurrentes pueden cancelar AMBAS cuentas con los items varados
-      // en una cuenta cancelada.
-      const freshSource = await tx.order.findFirst({
-        where: {
-          id: source.id,
-          venueId,
-          status: { notIn: ['COMPLETED', 'CANCELLED', 'DELETED'] },
-          paymentStatus: { notIn: ['PAID', 'PARTIAL'] },
-        },
-        select: {
-          id: true,
-          specialRequests: true,
-          contratoDePrecio: true,
-          originSystem: true,
-          taxAmount: true,
-          _count: { select: { items: true } },
-          orderDiscounts: { select: { id: true } },
-          serviceCharges: { select: { id: true, isAutomatic: true } },
-        },
-      })
-      const freshTarget = await tx.order.findFirst({
-        where: {
-          id: target.id,
-          venueId,
-          status: { notIn: ['COMPLETED', 'CANCELLED', 'DELETED'] },
-          paymentStatus: { notIn: ['PAID', 'PARTIAL'] },
-        },
-        select: { id: true, specialRequests: true, contratoDePrecio: true, paidAmount: true, originSystem: true },
-      })
-      if (!freshSource || !freshTarget) {
-        throw new BadRequestError('La cuenta cambió mientras se fusionaba — vuelve a intentar')
-      }
-      // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; fusionarla (en
-      // cualquiera de los dos lados) rearmaría su dinero aquí y cobraría el IVA dos veces (P12). Se junta en el POS externo.
-      rechazarSiEsImportada(freshSource)
-      rechazarSiEsImportada(freshTarget)
-      if (freshSource._count.items === 0) {
-        throw new BadRequestError('La cuenta origen no tiene artículos')
-      }
-      if (freshSource.orderDiscounts.length > 0 || freshSource.serviceCharges.some(sc => !sc.isAutomatic)) {
-        throw new BadRequestError('La cuenta origen recibió descuentos o cobros durante la fusión — vuelve a intentar')
-      }
-      // Fusionar CANCELA el origen: un cobro de terminal sin desenlace acreditado sobre él aterrizaría en una orden
-      // cancelada. Mismo 409 que `cancelOrder`, con `orderId` aditivo para decir cuál cuenta lo tiene. El DESTINO no se
-      // bloquea (decisión G3): sumarle renglones no crea sobrepago.
-      await assertNoLiveTerminalCharge(
-        tx,
-        { venueId, orderId: source.id },
-        {
-          mensaje: 'La cuenta origen tiene un cobro en curso en la terminal. Cancela o espera el resultado del cobro antes de fusionarla.',
-          detallesExtra: { orderId: source.id },
-        },
-      )
-
-      await tx.orderItem.updateMany({
-        where: { orderId: source.id },
-        data: { orderId: target.id },
-      })
-      // Los cobros automáticos del origen se van con él: el destino re-evalúa
-      // los suyos por comensales en el recálculo.
-      await tx.orderServiceCharge.deleteMany({ where: { orderId: source.id } })
-
-      // Codex r5 #3: el IVA aparte del origen viaja con sus renglones; el origen cancelado queda fiscalmente no cobrable. Sólo el
-      // positivo: un negativo viejo (el motor de antes de D16) no le baja la deuda al destino.
-      const impuestoDelOrigen = Prisma.Decimal.max(0, new Prisma.Decimal(freshSource.taxAmount))
-
-      // El destino se queda con el contrato COMBINADO (spec v5, `combinarContratos`): si origen y
-      // destino coinciden, se conserva; si difieren, pasa a DESCONOCIDO — la fusión NUNCA se
-      // bloquea por esto. Las notas de cocina del origen, de paso, NO se pierden: se anexan.
-      await tx.order.update({
-        where: { id: target.id },
-        data: {
-          contratoDePrecio: combinarContratos(freshTarget.contratoDePrecio, freshSource.contratoDePrecio),
-          ...(impuestoDelOrigen.gt(0) ? { taxAmount: { increment: impuestoDelOrigen } } : {}),
-          ...(freshSource.specialRequests?.trim()
-            ? { specialRequests: [freshTarget.specialRequests, freshSource.specialRequests].filter(Boolean).join(' · ') }
-            : {}),
-        },
-      })
-
-      await tx.order.update({
-        where: { id: source.id },
-        data: {
-          status: 'CANCELLED',
-          specialRequests: `Fusionada en ${target.orderNumber}`,
-          subtotal: 0,
-          discountAmount: 0,
-          serviceChargeAmount: 0,
-          taxAmount: 0,
-          total: 0,
-          // Los escritores con CAS de versión (anular, descontar, rondas) se enteran de que el origen cambió.
-          version: { increment: 1 },
-        },
-      })
-
-      const totals = await recalculateOrderTotals(target.id, 0, Number(freshTarget.paidAmount || 0), tx)
-      const { syncAutomaticServiceCharges } = await import('./service-charge.mobile.service')
-      return { totals: (await syncAutomaticServiceCharges(venueId, target.id, tx)) ?? totals, itemsCount: freshSource._count.items }
+  const freshSource = await tx.order.findFirst({
+    where: {
+      id: source.id,
+      venueId,
+      status: { notIn: ['COMPLETED', 'CANCELLED', 'DELETED'] },
+      paymentStatus: { notIn: ['PAID', 'PARTIAL'] },
     },
-    { timeout: 15_000, maxWait: 5_000 },
+    select: {
+      id: true,
+      specialRequests: true,
+      contratoDePrecio: true,
+      originSystem: true,
+      taxAmount: true,
+      _count: { select: { items: true } },
+      orderDiscounts: { select: { id: true }, take: 1 },
+      serviceCharges: { where: { isAutomatic: false }, select: { id: true, isAutomatic: true }, take: 1 },
+    },
+  })
+  const freshTarget = await tx.order.findFirst({
+    where: {
+      id: target.id,
+      venueId,
+      status: { notIn: ['COMPLETED', 'CANCELLED', 'DELETED'] },
+      paymentStatus: { notIn: ['PAID', 'PARTIAL'] },
+    },
+    select: { id: true, specialRequests: true, contratoDePrecio: true, paidAmount: true, originSystem: true },
+  })
+  if (!freshSource || !freshTarget) {
+    throw new BadRequestError('La cuenta cambió mientras se fusionaba — vuelve a intentar')
+  }
+  // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; fusionarla (en
+  // cualquiera de los dos lados) rearmaría su dinero aquí y cobraría el IVA dos veces (P12). Se junta en el POS externo.
+  rechazarSiEsImportada(freshSource)
+  rechazarSiEsImportada(freshTarget)
+  if (freshSource._count.items === 0) {
+    throw new BadRequestError('La cuenta origen no tiene artículos')
+  }
+  if (freshSource.orderDiscounts.length > 0 || freshSource.serviceCharges.some(sc => !sc.isAutomatic)) {
+    throw new BadRequestError('La cuenta origen recibió descuentos o cobros durante la fusión — vuelve a intentar')
+  }
+  // Fusionar CANCELA el origen: un cobro de terminal sin desenlace acreditado sobre él aterrizaría en una orden
+  // cancelada. Mismo 409 que `cancelOrder`, con `orderId` aditivo para decir cuál cuenta lo tiene. El DESTINO no se
+  // bloquea (decisión G3): sumarle renglones no crea sobrepago.
+  await assertNoLiveTerminalCharge(
+    tx,
+    { venueId, orderId: source.id },
+    {
+      mensaje: 'La cuenta origen tiene un cobro en curso en la terminal. Cancela o espera el resultado del cobro antes de fusionarla.',
+      detallesExtra: { orderId: source.id },
+    },
   )
 
-  // El origen quedó CANCELLED: sus referidos PENDING se anulan como en cualquier cancelación. Después del commit —
-  // `onOrderCancelled` abre su propia transacción con `Order FOR UPDATE`. Nunca lanza.
-  {
-    const { onOrderCancelled } = await import('@/services/referrals/referralRefund.service')
-    await onOrderCancelled({ orderId: source.id, venueId })
+  const movedItemIds: string[] = [],
+    promotionIds = new Set<string>(),
+    deletedChargeIds: string[] = []
+  let cursor: string | undefined
+  for (;;) {
+    const page = await tx.orderItem.findMany({
+      where: { orderId: source.id },
+      select: { id: true, orderPromotionId: true },
+      orderBy: { id: 'asc' },
+      take: 100,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+    })
+    for (const item of page) {
+      movedItemIds.push(item.id)
+      if (item.orderPromotionId) promotionIds.add(item.orderPromotionId)
+    }
+    if (page.length < 100) break
+    cursor = page[page.length - 1].id
   }
-  // Y las pantallas abiertas se enteran de que el origen ya no es una cuenta viva (auditoría Fable 11-sep, P3-7).
-  await avisarOrdenCancelada(venueId, source.id, 'CANCELLED')
-
-  // La mesa del origen: re-apuntar a otra cuenta abierta, o liberarla.
-  const boundTable = await prisma.table.findFirst({
-    where: { venueId, currentOrderId: source.id },
-    select: { id: true, number: true },
-  })
-  let tableFreed = Boolean(boundTable)
-  if (boundTable) {
-    const sibling = await prisma.order.findFirst({
-      where: {
-        venueId,
-        tableId: boundTable.id,
-        id: { not: source.id },
-        status: { notIn: ['COMPLETED', 'CANCELLED', 'DELETED'] },
-      },
+  cursor = undefined
+  for (;;) {
+    const page: { id: string }[] = await tx.orderServiceCharge.findMany({
+      where: { orderId: source.id },
       select: { id: true },
-      orderBy: { createdAt: 'asc' },
+      orderBy: { id: 'asc' },
+      take: 100,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
     })
-    await prisma.table.update({
-      where: { id: boundTable.id },
-      data: sibling ? { status: 'OCCUPIED', currentOrderId: sibling.id } : { status: 'AVAILABLE', currentOrderId: null },
-    })
-  } else {
-    const { reconcileTableAfterOrderRemoved } = await import('../tpv/table.tpv.service')
-    ;({ tableFreed } = await reconcileTableAfterOrderRemoved(venueId, source.id))
+    deletedChargeIds.push(...page.map(charge => charge.id))
+    if (page.length < 100) break
+    cursor = page[page.length - 1].id
   }
+  async function targetChargeAmounts() {
+    const amounts = new Map<string, Prisma.Decimal>()
+    let chargeCursor: string | undefined
+    for (;;) {
+      const page = await tx.orderServiceCharge.findMany({
+        where: { orderId: validatedTargetId },
+        select: { id: true, amount: true },
+        orderBy: { id: 'asc' },
+        take: 100,
+        ...(chargeCursor ? { cursor: { id: chargeCursor }, skip: 1 } : {}),
+      })
+      for (const charge of page) amounts.set(charge.id, charge.amount)
+      if (page.length < 100) return amounts
+      chargeCursor = page[page.length - 1].id
+    }
+  }
+  const priorTargetCharges = await targetChargeAmounts()
+  await tx.orderItem.updateMany({
+    where: { orderId: source.id },
+    data: { orderId: target.id },
+  })
+  // Los cobros automáticos del origen se van con él: el destino re-evalúa
+  // los suyos por comensales en el recálculo.
+  await tx.orderServiceCharge.deleteMany({ where: { orderId: source.id } })
 
+  // Codex r5 #3: el IVA aparte del origen viaja con sus renglones; el origen cancelado queda fiscalmente no cobrable. Sólo el
+  // positivo: un negativo viejo (el motor de antes de D16) no le baja la deuda al destino.
+  const impuestoDelOrigen = Prisma.Decimal.max(0, new Prisma.Decimal(freshSource.taxAmount))
+
+  // El destino se queda con el contrato COMBINADO (spec v5, `combinarContratos`): si origen y
+  // destino coinciden, se conserva; si difieren, pasa a DESCONOCIDO — la fusión NUNCA se
+  // bloquea por esto. Las notas de cocina del origen, de paso, NO se pierden: se anexan.
+  await tx.order.update({
+    where: { id: target.id },
+    data: {
+      contratoDePrecio: combinarContratos(freshTarget.contratoDePrecio, freshSource.contratoDePrecio),
+      ...(impuestoDelOrigen.gt(0) ? { taxAmount: { increment: impuestoDelOrigen } } : {}),
+      ...(freshSource.specialRequests?.trim()
+        ? { specialRequests: [freshTarget.specialRequests, freshSource.specialRequests].filter(Boolean).join(' · ') }
+        : {}),
+    },
+  })
+
+  const removedSource = await tx.order.update({
+    where: { id: source.id },
+    data: {
+      status: 'CANCELLED',
+      specialRequests: `Fusionada en ${target.orderNumber}`,
+      subtotal: 0,
+      discountAmount: 0,
+      serviceChargeAmount: 0,
+      taxAmount: 0,
+      total: 0,
+      // Los escritores con CAS de versión (anular, descontar, rondas) se enteran de que el origen cambió.
+      version: { increment: 1 },
+    },
+    select: { tableId: true },
+  })
+
+  const totals = await recalculateOrderTotals(target.id, 0, Number(freshTarget.paidAmount || 0), tx)
+  const { syncAutomaticServiceChargesInTransaction } = await import('./service-charge.mobile.service')
+  const chargeCapture: AutomaticServiceChargeCapture = { createdIds: [], deletedIds: [], recalculatedIds: [] }
+  const finalTotals = (await syncAutomaticServiceChargesInTransaction(tx, venueId, target.id, chargeCapture)) ?? totals
+  const currentTargetCharges = await targetChargeAmounts()
+  for (const [id, amount] of currentTargetCharges) {
+    const prior = priorTargetCharges.get(id)
+    if (prior && !prior.equals(amount)) chargeCapture.recalculatedIds.push(id)
+  }
+  const { reconcileTableAfterOrderRemovedInTransaction } = await import('../tpv/table.tpv.service')
+  const boundTable = scope.tables.find(table => table.currentOrderId === source.id)
+  const reconciled = await reconcileTableAfterOrderRemovedInTransaction(tx, scope, source.id)
+  // Shared legacy treats a found pointer as true even if its sibling remains occupied.
+  const tableFreed = boundTable ? true : reconciled.tableFreed
+  const ownTable = reconciled.tables.find(table => table.id === removedSource.tableId)
+  const tpvTableFreed = Boolean(ownTable?.status === 'AVAILABLE' && ownTable.currentOrderId === null)
+  const itemsCount = freshSource._count.items
+  const affectedRefs: HttpEnvelope['affectedRefs'] = [
+    { kind: 'Order', id: source.id },
+    { kind: 'Order', id: target.id },
+    ...movedItemIds.map(id => ({ kind: 'OrderItem' as const, id })),
+    ...[...promotionIds].map(id => ({ kind: 'OrderPromotion' as const, id })),
+    ...[...new Set([...deletedChargeIds, ...chargeCapture.createdIds, ...chargeCapture.deletedIds, ...chargeCapture.recalculatedIds])].map(
+      id => ({ kind: 'OrderServiceCharge' as const, id }),
+    ),
+    ...reconciled.tables.map(table => ({ kind: 'Table' as const, id: table.id })),
+  ]
+  return {
+    data: {
+      target: { id: target.id, orderNumber: target.orderNumber, total: finalTotals.total, version: finalTotals.version },
+      merged: { id: source.id, orderNumber: source.orderNumber, items: itemsCount },
+      tableFreed,
+    },
+    source,
+    target,
+    itemsCount,
+    tables: reconciled.tables,
+    hadBoundTable: Boolean(boundTable),
+    tpvTableFreed,
+    affectedRefs,
+  }
+}
+
+export async function publishMergedOrders(
+  venueId: string,
+  result: Awaited<ReturnType<typeof mergeOrdersInTransaction>>,
+  staffId?: string,
+): Promise<void> {
+  const { source, target, itemsCount } = result
+  const { onOrderCancelled } = await import('@/services/referrals/referralRefund.service')
+  await onOrderCancelled({ orderId: source.id, venueId })
+  await avisarOrdenCancelada(venueId, source.id, 'CANCELLED')
+  // The old fallback reconciliation also published its captured final table status.
+  if (!result.hadBoundTable) {
+    const broadcastingService = socketManager.getBroadcastingService()
+    for (const table of result.tables) {
+      logger.info(`✅ [TABLE SERVICE] Table ${table.number} reconciled after order removal`)
+      if (broadcastingService)
+        broadcastingService.broadcastToVenue(venueId, SocketEventType.TABLE_STATUS_CHANGE, {
+          tableId: table.id,
+          tableNumber: table.number,
+          status: table.status,
+          orderId: table.currentOrderId,
+          orderNumber: null,
+          covers: null,
+          waiter: null,
+        })
+    }
+  }
   void (await import('../dashboard/activity-log.service')).logAction({
     action: 'ORDERS_MERGED',
     entity: 'Order',
@@ -2162,17 +2328,15 @@ export async function mergeOrders(venueId: string, targetOrderId: string, source
     venueId,
     data: { sourceOrderId: source.id, sourceOrderNumber: source.orderNumber, items: itemsCount },
   })
+}
 
-  return {
-    target: {
-      id: target.id,
-      orderNumber: target.orderNumber,
-      total: totals.total,
-      version: totals.version,
-    },
-    merged: { id: source.id, orderNumber: source.orderNumber, items: itemsCount },
-    tableFreed,
-  }
+export async function mergeOrders(venueId: string, targetOrderId: string, sourceOrderId: string, staffId?: string) {
+  const result = await prisma.$transaction(
+    tx => mergeOrdersInTransaction(tx, venueId, targetOrderId, sourceOrderId, staffId),
+    ORDER_LOCK_WAIT_BUDGET,
+  )
+  await publishMergedOrders(venueId, result, staffId)
+  return result.data
 }
 
 // MARK: - Cash Payment Types
@@ -2503,7 +2667,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
   const reconciliationEnabled = await resolvePaymentShiftReconciliationEnabled(prisma, venueId)
   // Etapa 3 del KDS: ¿esta venta necesita comanda de pantalla? FUERA de la transacción (nunca tumba un cobro);
   // la marca viaja en la MISMA escritura que salda la orden.
-  const marcarCocina = await debeMarcarCocina(venueId)
+  const marcarCocina = await debeMarcarCocina(venueId, { orderId })
 
   // Convert cents to decimal for database. `amount` es lo SOLICITADO; lo que se
   // registra como pago se decide dentro de la transacción (ver `aplicadoCents`).
@@ -2714,6 +2878,12 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
         // lo devuelto se puede volver a cobrar. Por eso el tope es saldo + devuelto;
         // sin devoluciones, es exactamente el saldo.
         const saldoAntes = computeOrderBalance(cuenta, previousPayments)
+        // Recheck after the Order lock: the zero-payment preflight balance can be stale.
+        if (amount === 0 && tip === 0 && saldoAntes.remainingBalance.greaterThan(0.005)) {
+          throw new BadRequestError(
+            `Esta cuenta debe ${saldoAntes.remainingBalance.toFixed(2)}. Un cobro en $0 sólo cierra cuentas cortesiadas al 100%.`,
+          )
+        }
         const saldoCents = Math.max(0, pesosToCents(saldoAntes.remainingBalance.plus(saldoAntes.refundedAmount).toNumber()))
         const cambioCents = countsAsDrawerCash ? Math.max(0, amount - saldoCents) : 0
         const aplicadoCents = amount - cambioCents
@@ -2911,6 +3081,10 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
           })
           postingId = posting?.id ?? null
         }
+
+        // FT-GRAVES S-EF (medido el 8-oct): el MISMO gancho de comisión que la terminal, con el dinero, en esta transacción. Sin
+        // él, este cobro y la cola sin red `PAY_CASH` (que lo reutiliza) no comisionaban. Un efecto por cobro: no se duplica.
+        await enqueuePaymentCommissionInTx(tx, newPayment.id)
 
         return {
           newPayment,
@@ -3441,106 +3615,98 @@ export async function attachCustomerToOrder(venueId: string, orderId: string, cu
  * @param orderId Order ID
  * @param reason Cancellation reason
  */
-export async function cancelOrder(venueId: string, orderId: string, reason?: string, performedBy?: string): Promise<void> {
+export async function cancelOrderInTransaction(
+  tx: Prisma.TransactionClient,
+  venueId: string,
+  orderId: string,
+  reason?: string,
+  performedBy?: string,
+) {
   logger.info(`📱 [ORDER.MOBILE] Cancelling order ${orderId} | venue=${venueId} | reason=${reason || 'none'}`)
-
-  // Codex 11-sep (409 al cancelar, P1): comprobar y cancelar bajo el MISMO lock de la orden que toman la admisión de un
-  // cobro (`terminal-payment.service`, `FOR UPDATE` de Order) y el registro del dinero (`payment.tpv.service`). Antes eran
-  // tres pasos sueltos (leer `paymentStatus`, consultar la reserva, UPDATE): una admisión o un pago podía colarse entre la
-  // lectura y el UPDATE y la orden terminaba CANCELLED con un cobro vivo o ya pagada. Todo se relee DENTRO del lock.
-  // La regla (candado → relectura → PAID/PARTIAL → cobro vivo) vive UNA vez en `shared/orderCancelGuard` y la usan
-  // todas las rutas que cancelan o anulan una orden (diseño §C.6). Aquí se conserva la semántica de siempre:
-  //  - 🔴 Ninguna orden CON DINERO ENCIMA se cancela por aquí — ni PAID ni PARTIAL. Es lo que hace honesto al permiso
-  //    acotado `orders:cancel-unpaid` que gatea esta ruta: "sin cobrar" tiene que ser una propiedad del código, no una
-  //    promesa del nombre. Con pagos hechos el camino es reembolsar y después cancelar, igual que en Square.
-  //  - Un cobro de terminal cuyo desenlace no está ACREDITADO puede mover dinero todavía (también un CANCEL_REQUESTED:
-  //    pedir la cancelación es una intención, no un resultado) ⇒ 409 `ORDER_CANCEL_BLOCKED_BY_TERMINAL_CHARGE` con el
-  //    `requestId` que bloquea, para que la app no lo confunda con otro 409 (contrato aditivo).
-  await prisma.$transaction(
-    async tx => {
-      // Primero el candado de comandas (mismo orden que el armado): la cocina deja de ver la cuenta anulada.
-      await retirarComandasDeVentaAnulada(tx, venueId, orderId)
-      await assertOrderCancellableUnderLock(tx, { venueId, orderId })
-
-      await tx.order.update({
-        where: { id: orderId },
-        // Sin motivo NO se tocan las notas del cliente: antes se sobrescribían con el estado de la orden («PENDING»).
-        data: {
-          status: 'CANCELLED',
-          ...(reason ? { specialRequests: `Cancelled: ${reason}` } : {}),
-        },
-      })
-    },
-    { timeout: 15_000, maxWait: 5_000 },
-  )
-
-  logger.info(`✅ [ORDER.MOBILE] Order ${orderId} cancelled`)
-
-  // Referidos: los PENDING atados a esta orden se anulan (si no, cuelgan para
-  // siempre) y, en defensa en profundidad, se revierte cualquier premio.
-  // Nunca lanza: la cancelación no se cae por el referido.
-  {
-    const { onOrderCancelled } = await import('@/services/referrals/referralRefund.service')
-    await onOrderCancelled({ orderId, venueId })
+  let scope: Awaited<ReturnType<typeof lockTableOrderScope>>
+  try {
+    // Existing kitchen advisory precedes all shared Order locks, including captured siblings.
+    scope = await lockTableOrderScope(tx, { venueId, orderIds: [orderId], kdsOrderIds: [orderId] })
+  } catch (error) {
+    if (error instanceof NotFoundError && error.message === 'Venue not found') throw new NotFoundError('Order not found')
+    throw error
   }
-
-  // TABLE_SERVICE — "Anular cuenta" on an open table: a cancelled check must
-  // release its table (clearTable would refuse: the order is unpaid, not PAID).
-  // No-op for orders not bound to a table. Mirrors Square: voiding the check
-  // closes it and frees the table immediately.
-  const boundTable = await prisma.table.findFirst({
-    where: { venueId, currentOrderId: orderId },
-    select: { id: true, number: true },
+  const kds = await retirarComandasDeVentaAnulada(tx, venueId, orderId, { staffId: performedBy, reason })
+  await assertOrderCancellableUnderLock(tx, { venueId, orderId })
+  const removed = await tx.order.update({
+    where: { id: orderId },
+    data: { status: 'CANCELLED', ...(reason ? { specialRequests: `Cancelled: ${reason}` } : {}) },
+    select: { tableId: true },
   })
-  if (boundTable) {
-    // Multi-cheque: si quedan otras cuentas abiertas en la mesa, re-apuntar
-    // en vez de liberar.
-    const sibling = await prisma.order.findFirst({
-      where: { venueId, tableId: boundTable.id, id: { not: orderId }, status: { notIn: ['COMPLETED', 'CANCELLED', 'DELETED'] } },
-      select: { id: true },
-      orderBy: { createdAt: 'asc' },
-    })
-    await prisma.table.update({
-      where: { id: boundTable.id },
-      data: sibling ? { status: 'OCCUPIED', currentOrderId: sibling.id } : { status: 'AVAILABLE', currentOrderId: null },
-    })
+  const boundTable = scope.tables.find(table => table.currentOrderId === orderId)
+  const { reconcileTableAfterOrderRemovedInTransaction } = await import('../tpv/table.tpv.service')
+  const reconciled = await reconcileTableAfterOrderRemovedInTransaction(tx, scope, orderId)
+  const ownTable = reconciled.tables.find(table => table.id === removed.tableId)
+  const table = reconciled.tables.find(row => row.id === boundTable?.id) ?? ownTable ?? null
+  const tpvTableFreed = Boolean(ownTable?.status === 'AVAILABLE' && ownTable.currentOrderId === null)
+  const affectedRefs: HttpEnvelope['affectedRefs'] = [
+    { kind: 'Order', id: orderId },
+    ...reconciled.tables.map(row => ({ kind: 'Table' as const, id: row.id })),
+    ...kds.kdsOrderIds.map(id => ({ kind: 'KdsOrder' as const, id })),
+    ...kds.kdsOrderItemIds.map(id => ({ kind: 'KdsOrderItem' as const, id })),
+  ]
+  return { orderId, table, tables: reconciled.tables, hadBoundTable: Boolean(boundTable), tpvTableFreed, affectedRefs }
+}
+
+export async function publishCancelledOrder(
+  venueId: string,
+  result: Awaited<ReturnType<typeof cancelOrderInTransaction>>,
+  staffId?: string,
+  reason?: string,
+): Promise<void> {
+  const { orderId, table } = result
+  logger.info(`✅ [ORDER.MOBILE] Order ${orderId} cancelled`)
+  const { onOrderCancelled } = await import('@/services/referrals/referralRefund.service')
+  await onOrderCancelled({ orderId, venueId })
+  const broadcastingService = socketManager.getBroadcastingService()
+  if (result.hadBoundTable && table) {
     logger.info(
-      sibling
-        ? `✅ [ORDER.MOBILE] Table ${boundTable.number} repointed to sibling check after cancellation`
-        : `✅ [ORDER.MOBILE] Table ${boundTable.number} released after order cancellation`,
+      table.currentOrderId
+        ? `✅ [ORDER.MOBILE] Table ${table.number} repointed to sibling check after cancellation`
+        : `✅ [ORDER.MOBILE] Table ${table.number} released after order cancellation`,
     )
   } else {
-    const { reconcileTableAfterOrderRemoved } = await import('../tpv/table.tpv.service')
-    await reconcileTableAfterOrderRemoved(venueId, orderId)
+    for (const row of result.tables) {
+      logger.info(`✅ [TABLE SERVICE] Table ${row.number} reconciled after order removal`)
+      if (broadcastingService)
+        broadcastingService.broadcastToVenue(venueId, SocketEventType.TABLE_STATUS_CHANGE, {
+          tableId: row.id,
+          tableNumber: row.number,
+          status: row.status,
+          orderId: row.currentOrderId,
+          orderNumber: null,
+          covers: null,
+          waiter: null,
+        })
+    }
   }
-
   const { logAction } = await import('../dashboard/activity-log.service')
-  void logAction({
-    action: 'ORDER_CANCELLED',
-    entity: 'Order',
-    entityId: orderId,
-    staffId: performedBy,
-    venueId,
-    data: { reason: reason ?? null },
-  })
-
-  // Emit Socket.IO event
-  const broadcastingService = socketManager.getBroadcastingService()
+  void logAction({ action: 'ORDER_CANCELLED', entity: 'Order', entityId: orderId, staffId, venueId, data: { reason: reason ?? null } })
   if (broadcastingService) {
-    broadcastingService.broadcastToVenue(venueId, SocketEventType.ORDER_UPDATED, {
-      orderId,
-      status: 'CANCELLED',
-    })
-    if (boundTable) {
+    broadcastingService.broadcastToVenue(venueId, SocketEventType.ORDER_UPDATED, { orderId, status: 'CANCELLED' })
+    // Preserve the original bound-pointer notification DTO; no fresh DB reconstruction.
+    if (result.hadBoundTable && table)
       broadcastingService.broadcastToVenue(venueId, SocketEventType.TABLE_STATUS_CHANGE, {
-        tableId: boundTable.id,
-        tableNumber: boundTable.number,
+        tableId: table.id,
+        tableNumber: table.number,
         status: 'AVAILABLE',
         orderId: null,
         orderNumber: null,
       })
-    }
   }
+}
+
+export async function cancelOrder(venueId: string, orderId: string, reason?: string, performedBy?: string): Promise<void> {
+  const result = await prisma.$transaction(
+    tx => cancelOrderInTransaction(tx, venueId, orderId, reason, performedBy),
+    ORDER_LOCK_WAIT_BUDGET,
+  )
+  await publishCancelledOrder(venueId, result, performedBy, reason)
 }
 
 export interface StampRewardOnOrderResult {

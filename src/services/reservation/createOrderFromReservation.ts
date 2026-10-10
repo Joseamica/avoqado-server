@@ -1,3 +1,4 @@
+import { lockTableOrderScope } from '@/services/shared/tableOrderLock'
 import { Prisma, OrderType, OrderSource, OrderStatus } from '@prisma/client'
 import { assertVenueSalesEnabled } from '@/services/venueSalesGuard'
 import { turnoAbiertoDelNegocio } from '@/services/shared/turnoDeCaja'
@@ -72,6 +73,7 @@ export async function createOrderFromReservation(
     },
   })
   if (!reservation) return null
+  if (reservation.tableId) await lockTableOrderScope(tx, { venueId, orderIds: [], tableIds: [reservation.tableId] })
 
   // partySize drives line quantity so a family of 3 paying 1 charge sees the
   // correct total automatically. Defaults to 1 for legacy bookings — math is

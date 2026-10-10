@@ -3,6 +3,12 @@
  * PAY_CASH de la cola offline, que usa la misma función) arma la comanda de pantalla AL SALDAR. La marca durable
  * viaja en la MISMA escritura que salda la cuenta; un abono parcial no arma nada; sin pantalla, nada cambia.
  */
+// FT-GRAVES S-EF: payCashOrder encola la comisión del cobro en su transacción, igual que la terminal. No es objeto de esta
+// suite (su prueba es tests/integration/commission/efectivoPosMovil.integration.test.ts).
+jest.mock('@/services/tpv/paymentEffects.service', () => ({
+  ...jest.requireActual('@/services/tpv/paymentEffects.service'),
+  enqueuePaymentCommissionInTx: jest.fn().mockResolvedValue(undefined),
+}))
 jest.mock('@/services/venueSalesGuard', () => ({ __esModule: true, assertVenueSalesEnabled: jest.fn() }))
 jest.mock('@/communication/sockets', () => ({ __esModule: true, default: { getBroadcastingService: jest.fn(() => null) } }))
 jest.mock('@/services/dashboard/receipt.dashboard.service', () => ({

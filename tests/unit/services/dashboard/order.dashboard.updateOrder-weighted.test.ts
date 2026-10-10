@@ -49,6 +49,18 @@ const makeItem = (overrides: Record<string, any> = {}) => ({
 describe('updateOrder — ya no toca inventario (ni pesado ni normal)', () => {
   beforeEach(() => {
     jest.clearAllMocks()
+    prismaMock.$transaction.mockImplementation(async (callback: (client: typeof prismaMock) => unknown) => callback(prismaMock))
+    prismaMock.$queryRaw.mockImplementation(async (query: unknown) => {
+      const sql = Array.isArray(query) ? query.join(' ') : ''
+      if (sql.includes('FROM "Venue"')) return [{ id: VENUE_ID }]
+      if (sql.includes('FROM "Order"')) return [{ id: ORDER_ID }]
+      throw new Error('Unexpected weighted-order topology SQL')
+    })
+    prismaMock.order.findMany.mockResolvedValue([
+      { id: ORDER_ID, tableId: null, status: 'PENDING', paymentStatus: 'PENDING', createdAt: new Date('2026-10-01T00:00:00Z') },
+    ])
+    prismaMock.table.findMany.mockResolvedValue([])
+
     prismaMock.order.findFirst.mockResolvedValue({ status: 'PENDING', venueId: VENUE_ID } as any)
   })
 

@@ -92,6 +92,50 @@ describe('serializableRetry', () => {
       isolationLevel: 'Serializable',
       timeout: 10_000,
     })
+    expect(prismaMock.$transaction.mock.calls[2][1]).not.toHaveProperty('maxWait')
+  })
+
+  it('preserves the explicit Order lock budget on every native Serializable attempt', async () => {
+    prismaMock.$transaction.mockRejectedValueOnce({ code: 'P2034' }).mockResolvedValueOnce('done')
+    const options = { timeoutMs: 15_000, maxWaitMs: 5_000, maxRetries: 2, baseDelayMs: 0 }
+
+    await expect(withSerializableRetry(async () => 'ignored', options)).resolves.toBe('done')
+
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(2)
+    for (const call of prismaMock.$transaction.mock.calls) {
+      expect(call[1]).toEqual({ isolationLevel: 'Serializable', timeout: 15_000, maxWait: 5_000 })
+    }
+  })
+
+  it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY])(
+    'rejects supplied invalid maxWaitMs %s before opening a transaction',
+    async maxWaitMs => {
+      const options = { maxWaitMs, baseDelayMs: 0 }
+      await expect(withSerializableRetry(async () => undefined, options)).rejects.toThrow('maxWaitMs')
+      expect(prismaMock.$transaction).not.toHaveBeenCalled()
+    },
+  )
+
+  it('keeps five attempts by default and omits maxWait for existing callers', async () => {
+    prismaMock.$transaction.mockRejectedValue({ code: '40001' })
+
+    await expect(withSerializableRetry(async () => undefined, { baseDelayMs: 0 })).rejects.toBeInstanceOf(ConflictError)
+
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(5)
+    for (const call of prismaMock.$transaction.mock.calls) {
+      expect(call[1]).toEqual({ isolationLevel: 'Serializable', timeout: 10_000 })
+      expect(call[1]).not.toHaveProperty('maxWait')
+    }
+  })
+
+  it('propagates reservation P2002 by identity without another attempt', async () => {
+    const original = Object.assign(new Error('Unique constraint'), { code: 'P2002', meta: { target: 'Order_reservationId_alive_key' } })
+    prismaMock.$transaction.mockRejectedValue(original)
+    const options = { timeoutMs: 15_000, maxWaitMs: 5_000, baseDelayMs: 0 }
+
+    await expect(withSerializableRetry(async () => undefined, options)).rejects.toBe(original)
+
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
   })
 
   it('surfaces exhaustion as an operational HTTP 409 without a Prisma code', async () => {

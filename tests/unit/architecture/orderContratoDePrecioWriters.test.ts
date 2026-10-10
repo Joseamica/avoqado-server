@@ -57,7 +57,10 @@ const ACTUALIZA = /\.order\s*\.\s*(update|updateMany)\s*\(/
 const PENDIENTES: Array<{ archivo: string; funcion?: string }> = []
 
 /** Únicos lugares autorizados a CAMBIAR el contrato después de crear. */
-const REESCRITURA_AUTORIZADA = new Set(['mergeOrders', 'confirmarContratoIvaIncluido'])
+const REESCRITURA_AUTORIZADA = new Set([
+  'services/mobile/order.mobile.service.ts#mergeOrdersInTransaction',
+  'services/fiscal/confirmarContratoDePrecio.service.ts#confirmarContratoIvaIncluido',
+])
 
 type Sitio = { rel: string; linea: number; funcion: string | null; declara: boolean }
 
@@ -79,7 +82,7 @@ function escanear() {
       }
       if (ACTUALIZA.test(linea) && /contratoDePrecio\s*:/.test(llamada(lineas, i))) {
         const funcion = funcionQueContiene(lineas, i)
-        if (!funcion || !REESCRITURA_AUTORIZADA.has(funcion)) reescrituras.push({ rel, linea: i + 1, funcion, declara: true })
+        if (!funcion || !REESCRITURA_AUTORIZADA.has(`${rel}#${funcion}`)) reescrituras.push({ rel, linea: i + 1, funcion, declara: true })
       }
     })
   }
@@ -113,5 +116,15 @@ describe('Order.contratoDePrecio — escritores', () => {
       expect(sitios.length).toBeGreaterThan(0)
       expect(sitios.every(s => !s.declara)).toBe(true)
     }
+  })
+})
+
+describe('price-contract rewrite authorization is source-qualified', () => {
+  it('keeps the reviewed merge helper and rejects a same-name foreign writer', () => {
+    expect(REESCRITURA_AUTORIZADA.has('services/mobile/order.mobile.service.ts#mergeOrdersInTransaction')).toBe(true)
+    expect(REESCRITURA_AUTORIZADA.has('services/other.ts#mergeOrdersInTransaction')).toBe(false)
+    expect(REESCRITURA_AUTORIZADA.has('services/mobile/order.mobile.service.ts#unreviewedWriter')).toBe(false)
+    const mobile = fs.readFileSync(path.join(SRC, 'services/mobile/order.mobile.service.ts'), 'utf8')
+    expect(mobile).toMatch(/\$transaction\(\s*tx => mergeOrdersInTransaction\([\s\S]*?ORDER_LOCK_WAIT_BUDGET/)
   })
 })

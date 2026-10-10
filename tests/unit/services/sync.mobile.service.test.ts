@@ -17,10 +17,12 @@ import * as compItemService from '@/services/mobile/comp-item.mobile.service'
 import * as promotionService from '@/services/promotions/promotion.service'
 import * as featureAccess from '@/middlewares/checkFeatureAccess.middleware'
 import * as tableOwnership from '@/middlewares/checkTableOwnership.middleware'
+import * as kitchenPreparation from '@/services/kds/kitchenPreparation.service'
 
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
+    $queryRaw: jest.fn(),
     posSyncIntent: {
       findUnique: jest.fn(),
       findFirst: jest.fn(),
@@ -30,6 +32,7 @@ jest.mock('@/utils/prismaClient', () => ({
     },
     order: { findFirst: jest.fn() },
     orderItem: { findMany: jest.fn() },
+    kdsOrder: { findFirst: jest.fn() },
   },
 }))
 
@@ -92,6 +95,104 @@ describe('sync.mobile.service processIntents', () => {
     ;(featureAccess.hasFeatureAccess as jest.Mock).mockResolvedValue({ hasAccess: true })
     ;(tableOwnership.isTableOwnershipEnforced as jest.Mock).mockResolvedValue(false)
     ;(tableOwnership.staffCanManageAllTables as jest.Mock).mockResolvedValue(false)
+  })
+
+  describe('Gate A — HTTP operations stay outside legacy replay', () => {
+    const httpRows = [
+      { status: 'PROCESSING', ageMs: 0 },
+      { status: 'PROCESSING', ageMs: 6 * 60 * 1000 },
+      { status: 'RETRY', ageMs: 6 * 60 * 1000 },
+      { status: 'ACKED', ageMs: 6 * 60 * 1000 },
+      { status: 'REJECTED', ageMs: 6 * 60 * 1000 },
+    ]
+
+    it.each([
+      { id: 'http:v1:00000000-0000-4000-8000-000000000001', type: 'CLEAR_TABLE', payload: { tableId: 'table-1' } },
+      { id: 'legacy-http-type', type: 'HTTP_OP_V1', payload: {} },
+    ])('reservedBeforeLookup: $id / $type', async intent => {
+      const params = baseParams([{ ...intent, seq: 3 }])
+
+      const acks = await processIntents(params)
+
+      expect(acks).toHaveLength(1)
+      expect(acks[0]).toMatchObject({ id: intent.id, status: 'REJECTED', errorCode: 'HTTP_OPERATION_RESERVED' })
+      expect(acks[0].result).toBeUndefined()
+      expect(prisma.posSyncIntent.findUnique).not.toHaveBeenCalled()
+      expect(prisma.posSyncIntent.findFirst).not.toHaveBeenCalled()
+      expect(prisma.posSyncIntent.create).not.toHaveBeenCalled()
+      expect(prisma.posSyncIntent.update).not.toHaveBeenCalled()
+      expect(prisma.posSyncIntent.delete).not.toHaveBeenCalled()
+      expect(params.authorizeIntent).not.toHaveBeenCalled()
+      expect(featureAccess.hasFeatureAccess).not.toHaveBeenCalled()
+      expect(tableService.clearTable).not.toHaveBeenCalled()
+    })
+
+    it.each(httpRows)(
+      'HTTP row with malformed legacy key and $status status, age=$ageMs ms never becomes a legacy ack or mutation',
+      async ({ status, ageMs }) => {
+        ;(prisma.posSyncIntent.findUnique as jest.Mock).mockResolvedValueOnce({
+          venueId: VENUE,
+          deviceId: DEVICE,
+          staffId: STAFF,
+          type: 'HTTP_OP_V1',
+          idempotencyKey: 'malformed-http-key',
+          status,
+          createdAt: new Date(Date.now() - ageMs),
+          localRef: 'http-local-must-not-be-aliased',
+          errorCode: 'HTTP_RESULT_MUST_NOT_ESCAPE',
+          resultJson: { orderId: 'http-order-must-not-be-aliased' },
+        })
+        const params = baseParams([{ id: 'malformed-http-key', type: 'CLEAR_TABLE', payload: { tableId: 'table-1' } }])
+
+        const acks = await processIntents(params)
+
+        expect(acks).toHaveLength(1)
+        expect(acks[0]).toMatchObject({ id: 'malformed-http-key', status: 'REJECTED', errorCode: 'HTTP_OPERATION_RESERVED' })
+        expect(acks[0].result).toBeUndefined()
+        expect(prisma.posSyncIntent.findUnique).toHaveBeenCalledTimes(1)
+        expect(prisma.posSyncIntent.findFirst).not.toHaveBeenCalled()
+        expect(prisma.posSyncIntent.create).not.toHaveBeenCalled()
+        expect(prisma.posSyncIntent.update).not.toHaveBeenCalled()
+        expect(prisma.posSyncIntent.delete).not.toHaveBeenCalled()
+        expect(params.authorizeIntent).not.toHaveBeenCalled()
+        expect(featureAccess.hasFeatureAccess).not.toHaveBeenCalled()
+        expect(tableService.clearTable).not.toHaveBeenCalled()
+      },
+    )
+
+    it.each(httpRows)(
+      'P2002 winner lookup with an HTTP row and $status status, age=$ageMs ms never becomes a legacy ack or mutation',
+      async ({ status, ageMs }) => {
+        ;(prisma.posSyncIntent.create as jest.Mock).mockRejectedValueOnce({ code: 'P2002' })
+        ;(prisma.posSyncIntent.findUnique as jest.Mock).mockResolvedValueOnce(null).mockResolvedValueOnce({
+          venueId: VENUE,
+          deviceId: DEVICE,
+          staffId: STAFF,
+          type: 'HTTP_OP_V1',
+          idempotencyKey: 'malformed-http-winner-key',
+          status,
+          createdAt: new Date(Date.now() - ageMs),
+          localRef: 'http-local-must-not-be-aliased',
+          errorCode: 'HTTP_RESULT_MUST_NOT_ESCAPE',
+          resultJson: { orderId: 'http-order-must-not-be-aliased' },
+        })
+        const params = baseParams([{ id: 'malformed-http-winner-key', type: 'CLEAR_TABLE', payload: { tableId: 'table-1' } }])
+
+        const acks = await processIntents(params)
+
+        expect(acks).toHaveLength(1)
+        expect(acks[0]).toMatchObject({ id: 'malformed-http-winner-key', status: 'REJECTED', errorCode: 'HTTP_OPERATION_RESERVED' })
+        expect(acks[0].result).toBeUndefined()
+        expect(prisma.posSyncIntent.findUnique).toHaveBeenCalledTimes(2)
+        expect(prisma.posSyncIntent.create).toHaveBeenCalledTimes(1)
+        expect(prisma.posSyncIntent.findFirst).not.toHaveBeenCalled()
+        expect(prisma.posSyncIntent.update).not.toHaveBeenCalled()
+        expect(prisma.posSyncIntent.delete).not.toHaveBeenCalled()
+        expect(params.authorizeIntent).not.toHaveBeenCalled()
+        expect(featureAccess.hasFeatureAccess).not.toHaveBeenCalled()
+        expect(tableService.clearTable).not.toHaveBeenCalled()
+      },
+    )
   })
 
   it('idempotencia: intent ya procesado devuelve el ack guardado sin re-aplicar', async () => {
@@ -165,7 +266,7 @@ describe('sync.mobile.service processIntents', () => {
     const acks = await processIntents(baseParams([{ id: 'race-seq', seq: 12, type: 'OPEN_TABLE', payload: { tableId: 't1' } }]))
     expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'STALE_DEVICE_SEQUENCE', details: { latestSeq: 42 } })
     expect(prisma.posSyncIntent.findFirst).toHaveBeenLastCalledWith({
-      where: { venueId: VENUE, deviceId: DEVICE, seq: { not: null } },
+      where: { venueId: VENUE, deviceId: DEVICE, seq: { not: null }, type: { not: 'HTTP_OP_V1' } },
       orderBy: { seq: 'desc' },
       select: { seq: true },
     })
@@ -315,7 +416,7 @@ describe('sync.mobile.service processIntents', () => {
       baseParams([{ id: 'i7', type: 'ADD_ITEMS', payload: { localOrderId: 'local-C', items: [{ productId: 'p2', quantity: 1 }] } }]),
     )
     expect(prisma.posSyncIntent.findFirst).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { venueId: VENUE, localRef: 'local-C', status: 'ACKED' } }),
+      expect.objectContaining({ where: { venueId: VENUE, localRef: 'local-C', status: 'ACKED', type: { not: 'HTTP_OP_V1' } } }),
     )
     expect(acks[0]).toMatchObject({ status: 'ACKED', result: { orderId: 'order-3' } })
   })
@@ -355,6 +456,88 @@ describe('sync.mobile.service processIntents', () => {
       }),
     )
     expect(acks[0]).toMatchObject({ status: 'ACKED', result: { paymentId: 'pay-1' } })
+  })
+
+  it.each([0, undefined])('PAY_CASH zero with tip=%s delegates the zero-balance guard and is ACKED', async tipCents => {
+    ;(orderMobileService.payCashOrder as jest.Mock).mockResolvedValue({ paymentId: 'pay-0', orderNumber: 'A-0', digitalReceipt: null })
+    const acks = await processIntents(
+      baseParams([{ id: 'zero-cash', type: 'PAY_CASH', payload: { orderId: 'order-5', amountCents: 0, tipCents } }]),
+    )
+
+    expect(orderMobileService.payCashOrder).toHaveBeenCalledTimes(1)
+    expect(orderMobileService.payCashOrder).toHaveBeenCalledWith(
+      VENUE,
+      'order-5',
+      expect.objectContaining({ amount: 0, tip: 0, staffId: STAFF, idempotencyKey: 'zero-cash', isOfflineReplay: true }),
+    )
+    expect(acks[0]).toMatchObject({ status: 'ACKED', result: { orderId: 'order-5', paymentId: 'pay-0' } })
+    expect(prisma.posSyncIntent.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: 'ACKED', errorCode: null }) }),
+    )
+  })
+
+  it('PAY_CASH zero on an outstanding balance stays REJECTED with the payCashOrder reason', async () => {
+    const message = 'Esta cuenta debe 50.00. Un cobro en $0 sólo cierra cuentas cortesiadas al 100%.'
+    ;(orderMobileService.payCashOrder as jest.Mock).mockRejectedValue(new BadRequestError(message))
+    const acks = await processIntents(
+      baseParams([{ id: 'zero-outstanding', type: 'PAY_CASH', payload: { orderId: 'order-5', amountCents: 0, tipCents: 0 } }]),
+    )
+
+    expect(orderMobileService.payCashOrder).toHaveBeenCalledTimes(1)
+    expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'BUSINESS_RULE', message })
+    expect(acks[0].result).toBeUndefined()
+    expect(prisma.posSyncIntent.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: 'REJECTED', errorCode: 'BUSINESS_RULE' }) }),
+    )
+  })
+
+  it('PAY_CASH zero with a tip stays INVALID_PAYLOAD without recording a payment', async () => {
+    const acks = await processIntents(
+      baseParams([{ id: 'zero-with-tip', type: 'PAY_CASH', payload: { orderId: 'order-5', amountCents: 0, tipCents: 500 } }]),
+    )
+
+    expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'INVALID_PAYLOAD' })
+    expect(orderMobileService.payCashOrder).not.toHaveBeenCalled()
+  })
+
+  it.each([false, '', ' ', [], '0'])('PAY_CASH coercion-only zero amount=%j stays INVALID_PAYLOAD', async amountCents => {
+    const acks = await processIntents(baseParams([{ id: 'coerced-zero', type: 'PAY_CASH', payload: { orderId: 'order-5', amountCents } }]))
+
+    expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'INVALID_PAYLOAD' })
+    expect(orderMobileService.payCashOrder).not.toHaveBeenCalled()
+  })
+
+  it.each([null, false, '0', []])('PAY_CASH numeric zero with non-numeric tip=%j stays INVALID_PAYLOAD', async tipCents => {
+    const acks = await processIntents(
+      baseParams([{ id: 'zero-coerced-tip', type: 'PAY_CASH', payload: { orderId: 'order-5', amountCents: 0, tipCents } }]),
+    )
+
+    expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'INVALID_PAYLOAD' })
+    expect(orderMobileService.payCashOrder).not.toHaveBeenCalled()
+  })
+
+  it('PAY_CASH preserves legacy positive amount and tip coercion', async () => {
+    ;(orderMobileService.payCashOrder as jest.Mock).mockResolvedValue({ paymentId: 'legacy-positive', orderNumber: 'A-1' })
+    const acks = await processIntents(
+      baseParams([{ id: 'positive-coercion', type: 'PAY_CASH', payload: { orderId: 'order-5', amountCents: '100', tipCents: '0' } }]),
+    )
+
+    expect(acks[0]).toMatchObject({ status: 'ACKED' })
+    expect(orderMobileService.payCashOrder).toHaveBeenCalledWith(VENUE, 'order-5', expect.objectContaining({ amount: 100, tip: 0 }))
+  })
+
+  it.each([
+    { name: 'negative amount', payload: { orderId: 'order-5', amountCents: -100 } },
+    { name: 'missing order', payload: { amountCents: 0, tipCents: 0 } },
+    { name: 'missing amount', payload: { orderId: 'order-5' } },
+    { name: 'non-numeric amount', payload: { orderId: 'order-5', amountCents: 'invalid' } },
+    { name: 'infinite amount', payload: { orderId: 'order-5', amountCents: Infinity } },
+    { name: 'negative infinite amount', payload: { orderId: 'order-5', amountCents: -Infinity } },
+  ])('PAY_CASH $name stays INVALID_PAYLOAD without recording a payment', async ({ payload }) => {
+    const acks = await processIntents(baseParams([{ id: 'invalid-cash', type: 'PAY_CASH', payload }]))
+
+    expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'INVALID_PAYLOAD' })
+    expect(orderMobileService.payCashOrder).not.toHaveBeenCalled()
   })
 
   it('🔴 PAY_CASH reenvía el tipo de pago del catálogo (antes lo TIRABA y aterrizaba como efectivo)', async () => {
@@ -1050,6 +1233,29 @@ describe('ADD_ITEMS — la cortesía y las cantidades no se cuelan por el replay
     expect(promotionService.applyPromotionToOrder).toHaveBeenCalled()
   })
 
+  it('ADD_ITEMS conserva los tiempos históricos por grupo y marca una ronda también si sólo lleva combo', async () => {
+    ;(featureAccess.hasFeatureAccess as jest.Mock).mockResolvedValue({ hasAccess: true })
+    ;(tableOwnership.isTableOwnershipEnforced as jest.Mock).mockResolvedValue(false)
+    ;(prisma.posSyncIntent.findUnique as jest.Mock).mockResolvedValue(null)
+    ;(prisma.posSyncIntent.findFirst as jest.Mock).mockResolvedValue(null)
+    ;(prisma.posSyncIntent.create as jest.Mock).mockResolvedValue({})
+    ;(prisma.posSyncIntent.update as jest.Mock).mockResolvedValue({})
+    const selections = [
+      { groupId: 'g1', optionId: 'o1', serviceCourse: { id: 'immediate', label: 'Al momento', kind: 'IMMEDIATE' } },
+      { groupId: 'g2', optionId: 'o2', serviceCourse: { id: 'old-dessert', label: 'Con el postre', kind: 'STANDARD' } },
+    ]
+    const params = addItems([{ promotionRef: { promotionId: 'promo-1', promotionInstanceId: 'uuid-1', selections }, quantity: 1 }])
+    const acks = await processIntents(params)
+    expect(acks[0].status).toBe('ACKED')
+    expect(promotionService.applyPromotionToOrder).toHaveBeenCalledWith(
+      expect.objectContaining({ selections }),
+      undefined,
+      expect.objectContaining({ sentToKitchenAt: expect.any(Date), componentExternalIdPrefix: expect.stringMatching(/^sync:/) }),
+    )
+    const call = (promotionService.applyPromotionToOrder as jest.Mock).mock.calls[0]
+    expect(call[2].sentToKitchenAt).toEqual(call[0].soldAt)
+  })
+
   it('con orders:comp la cortesía offline SÍ pasa — no se rompe el flujo legítimo', async () => {
     const params = addItems([{ productId: 'p1', quantity: 1, isCortesia: true, cortesiaReason: 'Cliente molesto' }])
 
@@ -1241,5 +1447,183 @@ describe('KDS_TICKET_MARK — marcas de cocina hechas sin red (etapa 3 del KDS)'
 
   it('pide orders:update', () => {
     expect(requiredPermissionForIntent('KDS_TICKET_MARK')).toBe('orders:update')
+  })
+})
+
+describe('preparation replay and financial FIFO', () => {
+  let preparation: jest.SpyInstance
+  const progress = (id: string, seq: number) => ({
+    id,
+    seq,
+    type: 'KDS_ITEM_PROGRESS',
+    staffId: STAFF,
+    payload: { orderId: 'order-1', action: 'START', items: [{ id: 'line-1', quantity: 1, expectedRevision: 0 }] },
+  })
+  const cash = (id: string, seq: number) => ({
+    id,
+    seq,
+    type: 'PAY_CASH',
+    staffId: STAFF,
+    payload: { orderId: 'order-1', amountCents: 80 },
+  })
+  beforeEach(() => {
+    jest.clearAllMocks()
+    ;(prisma.posSyncIntent.findUnique as jest.Mock).mockResolvedValue(null)
+    ;(prisma.posSyncIntent.findFirst as jest.Mock).mockResolvedValue(null)
+    ;(prisma.posSyncIntent.create as jest.Mock).mockResolvedValue({})
+    ;(prisma.posSyncIntent.update as jest.Mock).mockResolvedValue({})
+    ;(prisma.posSyncIntent.delete as jest.Mock).mockResolvedValue({})
+    ;(tableOwnership.isTableOwnershipEnforced as jest.Mock).mockResolvedValue(false)
+    ;(orderMobileService.payCashOrder as jest.Mock).mockReset().mockResolvedValue({ paymentId: 'payment-1' })
+    preparation = jest.spyOn(kitchenPreparation, 'applyKitchenPreparation').mockResolvedValue({ orderId: 'order-1', items: [] })
+    ;(prisma.kdsOrder.findFirst as jest.Mock).mockResolvedValue(null)
+    ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([])
+  })
+  afterEach(() => preparation.mockRestore())
+
+  it.each([{ sourceKey: 'round:offline-1:station-1' }, { localOrderId: 'offline-order-1' }])(
+    'a provisional account reference delegates validation and remains retryable: %j',
+    async reference => {
+      preparation.mockRejectedValue(Object.assign(new Error('La comanda sigue pendiente'), { code: 'PREPARATION_DEPENDENCY_PENDING' }))
+      const intent = {
+        ...progress('prep-provisional', 1),
+        payload: {
+          ...reference,
+          action: 'START',
+          items: [{ externalId: 'sync:offline-1:0', sourceKey: 'round:offline-1:station-1', quantity: 1, expectedRevision: 0 }],
+        },
+      }
+      const [ack] = await processIntents(baseParams([intent]))
+      expect(ack).toMatchObject({ status: 'RETRY', errorCode: 'PREPARATION_DEPENDENCY_PENDING' })
+      expect(preparation).toHaveBeenCalledWith(VENUE, '', expect.objectContaining({ items: intent.payload.items }), STAFF, intent.id)
+      expect(prisma.posSyncIntent.update).not.toHaveBeenCalled()
+    },
+  )
+
+  it('resolves an authored kitchen source only inside the current venue', async () => {
+    ;(prisma.kdsOrder.findFirst as jest.Mock).mockResolvedValue({ orderId: 'order-1' })
+    const intent = {
+      ...progress('prep-by-source', 1),
+      payload: { ...progress('p', 1).payload, orderId: undefined, sourceKey: 'round:r1:s1' },
+    }
+    const [ack] = await processIntents(baseParams([intent]))
+    expect(ack.status).toBe('ACKED')
+    expect(prisma.kdsOrder.findFirst).toHaveBeenCalledWith({
+      where: { venueId: VENUE, sourceKey: 'round:r1:s1' },
+      select: { orderId: true },
+    })
+    expect(preparation).toHaveBeenCalledWith(VENUE, 'order-1', expect.anything(), STAFF, intent.id)
+  })
+  it.each([
+    { action: 'START', items: [{ id: 'canonical-line', quantity: 1, expectedRevision: 0 }] },
+    { action: 'START', items: [{ externalId: 'e1', sourceKey: 'round:r1:s1', quantity: 0, expectedRevision: 0 }] },
+  ])('a missing account never makes canonical or malformed selection retry forever: %j', async command => {
+    const [ack] = await processIntents(baseParams([{ ...progress('prep-invalid', 1), payload: { sourceKey: 'round:r1:s1', ...command } }]))
+    expect(ack).toMatchObject({ status: 'REJECTED', errorCode: 'INVALID_PAYLOAD' })
+    expect(preparation).not.toHaveBeenCalled()
+  })
+  it('a provisional account still receives the authoritative Pro rejection', async () => {
+    preparation.mockRejectedValue(Object.assign(new Error('Requiere Pro'), { code: 'FEATURE_ACCESS_REQUIRED' }))
+    const [ack] = await processIntents(
+      baseParams([
+        {
+          ...progress('prep-free', 1),
+          payload: {
+            sourceKey: 'round:r1:s1',
+            action: 'START',
+            items: [{ externalId: 'e1', sourceKey: 'round:r1:s1', quantity: 1, expectedRevision: 0 }],
+          },
+        },
+      ]),
+    )
+    expect(ack).toMatchObject({ status: 'REJECTED', errorCode: 'FEATURE_ACCESS_REQUIRED' })
+    expect(prisma.posSyncIntent.delete).not.toHaveBeenCalled()
+  })
+  it.each(['PREPARATION_DEPENDENCY_PENDING', 'PREPARATION_REVISION_PENDING'])(
+    '%s remains pending without a terminal rejection',
+    async code => {
+      preparation.mockRejectedValue(Object.assign(new Error('Esperando una acción anterior'), { code }))
+      const [ack] = await processIntents(baseParams([progress('prep-1', 1)]))
+      expect(ack).toMatchObject({ id: 'prep-1', status: 'RETRY', errorCode: code })
+      expect(prisma.posSyncIntent.delete).toHaveBeenCalled()
+      expect(prisma.posSyncIntent.update).not.toHaveBeenCalled()
+    },
+  )
+  it('preparation retry pauses later preparation while both later cash payments still replay', async () => {
+    preparation.mockRejectedValue(Object.assign(new Error('Pool ocupado'), { code: 'P2024' }))
+    const acks = await processIntents(baseParams([progress('prep-1', 1), cash('cash-2', 2), progress('prep-3', 3), cash('cash-4', 4)]))
+    expect(acks.map(a => [a.id, a.status])).toEqual([
+      ['prep-1', 'RETRY'],
+      ['cash-2', 'ACKED'],
+      ['cash-4', 'ACKED'],
+    ])
+    expect(preparation).toHaveBeenCalledTimes(1)
+    expect(orderMobileService.payCashOrder).toHaveBeenCalledTimes(2)
+  })
+  it('cash retry preserves financial FIFO while independent preparation can replay', async () => {
+    ;(orderMobileService.payCashOrder as jest.Mock).mockRejectedValue(Object.assign(new Error('Pool ocupado'), { code: 'P2024' }))
+    const acks = await processIntents(baseParams([cash('cash-1', 1), progress('prep-2', 2), cash('cash-3', 3)]))
+    expect(acks.map(a => [a.id, a.status])).toEqual([
+      ['cash-1', 'RETRY'],
+      ['prep-2', 'ACKED'],
+    ])
+    expect(orderMobileService.payCashOrder).toHaveBeenCalledTimes(1)
+    expect(preparation).toHaveBeenCalledTimes(1)
+  })
+  it('a newer preparation sequence does not invalidate an earlier financial sequence', async () => {
+    ;(prisma.posSyncIntent.findFirst as jest.Mock).mockImplementation(async ({ where }: any) =>
+      where.type?.notIn?.includes('KDS_ITEM_PROGRESS') ? null : { seq: 10 },
+    )
+    const [ack] = await processIntents(baseParams([cash('cash-5', 5)]))
+    expect(ack).toMatchObject({ id: 'cash-5', status: 'ACKED' })
+    expect(orderMobileService.payCashOrder).toHaveBeenCalledTimes(1)
+  })
+  it('a newer financial sequence does not invalidate an earlier preparation sequence', async () => {
+    ;(prisma.posSyncIntent.findFirst as jest.Mock).mockImplementation(async ({ where }: any) =>
+      where.type === 'KDS_ITEM_PROGRESS' ? null : { seq: 50 },
+    )
+    const [ack] = await processIntents(baseParams([progress('prep-10', 10)]))
+    expect(ack).toMatchObject({ id: 'prep-10', status: 'ACKED' })
+    expect(preparation).toHaveBeenCalledTimes(1)
+  })
+  it('still rejects a preparation sequence already used in its own lane', async () => {
+    ;(prisma.posSyncIntent.findFirst as jest.Mock).mockResolvedValue({ seq: 10 })
+    const [ack] = await processIntents(baseParams([progress('prep-9', 9)]))
+    expect(ack).toMatchObject({ status: 'REJECTED', errorCode: 'STALE_DEVICE_SEQUENCE' })
+    expect(preparation).not.toHaveBeenCalled()
+    expect(prisma.posSyncIntent.create).not.toHaveBeenCalled()
+  })
+  it('a processing preparation pauses its own lane without repeating its effect or blocking cash', async () => {
+    ;(prisma.posSyncIntent.findUnique as jest.Mock).mockResolvedValueOnce({
+      status: 'PROCESSING',
+      type: 'KDS_ITEM_PROGRESS',
+      venueId: VENUE,
+      staffId: STAFF,
+      deviceId: DEVICE,
+      createdAt: new Date(),
+    })
+    const acks = await processIntents(baseParams([progress('prep-1', 1), cash('cash-2', 2), progress('prep-3', 3)]))
+    expect(acks.map(a => [a.id, a.status])).toEqual([
+      ['prep-1', 'RETRY'],
+      ['cash-2', 'ACKED'],
+    ])
+    expect(preparation).not.toHaveBeenCalled()
+    expect(orderMobileService.payCashOrder).toHaveBeenCalledTimes(1)
+  })
+  it('a preparation reservation failure pauses only preparation', async () => {
+    ;(prisma.posSyncIntent.create as jest.Mock).mockRejectedValueOnce({ code: 'P2024' })
+    const acks = await processIntents(baseParams([progress('prep-1', 1), cash('cash-2', 2), progress('prep-3', 3)]))
+    expect(acks.map(a => [a.id, a.status])).toEqual([
+      ['prep-1', 'RETRY'],
+      ['cash-2', 'ACKED'],
+    ])
+    expect(preparation).not.toHaveBeenCalled()
+    expect(orderMobileService.payCashOrder).toHaveBeenCalledTimes(1)
+  })
+  it('obsolete preparation remains a visible terminal conflict', async () => {
+    preparation.mockRejectedValue(Object.assign(new Error('Otro compañero cambió el producto'), { code: 'PREPARATION_CONFLICT' }))
+    const [ack] = await processIntents(baseParams([progress('prep-1', 1)]))
+    expect(ack).toMatchObject({ status: 'REJECTED', errorCode: 'PREPARATION_CONFLICT' })
+    expect(prisma.posSyncIntent.delete).not.toHaveBeenCalled()
   })
 })

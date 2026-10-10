@@ -401,6 +401,35 @@ export async function venueHasFeatureAccess(venueId: string, featureCode: string
   return tier != null && elPlanConcede(tier, featureCode)
 }
 
+/** Whether any branch can use the capability. One scoped EXISTS-style lookup,
+ * including the same legacy/hybrid/exemption rules as venueHasFeatureAccess.
+ * Organization configuration never depends on an arbitrary first venue.
+ */
+export async function organizationHasFeatureAccess(organizationId: string, featureCode: string): Promise<boolean> {
+  const now = new Date()
+  const codes = [featureCode]
+  if (elPlanConcede('PRO', featureCode)) codes.push('PLAN_PRO')
+  if (elPlanConcede('PREMIUM', featureCode)) codes.push('PLAN_PREMIUM')
+  const venue = await prisma.venue.findFirst({
+    where: {
+      organizationId,
+      ...((FREE_TIER_CODES as readonly string[]).includes(featureCode)
+        ? {}
+        : {
+            OR: [
+              { seatCapExempt: true },
+              { organization: { seatCapExempt: true } },
+              { status: { in: [...DEMO_VENUE_STATUSES] } },
+              { features: { some: { feature: { code: { in: codes } }, ...activeWindowWhere(now) } } },
+              { capabilityGrants: { some: { featureCode, revokedAt: null, startsAt: { lte: now }, endsAt: { gt: now } } } },
+            ],
+          }),
+    },
+    select: { id: true },
+  })
+  return venue !== null
+}
+
 /**
  * Batch version of {@link venueHasFeatureAccess}: of the given venues, which ones may use
  * `featureCode`. Same tier-aware semantics, in a small constant number of queries (≤3

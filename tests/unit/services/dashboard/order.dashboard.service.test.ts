@@ -1,3 +1,9 @@
+// FT-GRAVES T2: este cobro encola su comisión en la transacción, con el MISMO gancho que la terminal. No es objeto de esta
+// suite (sus pruebas son tests/integration/commission/cobrosDelDashboard y cobrosEnLineaYCripto).
+jest.mock('@/services/tpv/paymentEffects.service', () => ({
+  ...jest.requireActual('@/services/tpv/paymentEffects.service'),
+  enqueuePaymentCommissionInTx: jest.fn().mockResolvedValue(undefined),
+}))
 import { PaymentType } from '@prisma/client'
 
 const deductInventoryForProductMock = jest.fn()
@@ -157,8 +163,15 @@ describe('order.dashboard.service — deleteOrder guard de pagos', () => {
     prismaMock.$queryRaw.mockResolvedValue([{ id: 'order-1' }] as any)
     prismaMock.order.findFirst.mockResolvedValue(order as any)
     prismaMock.order.findUnique.mockResolvedValue(order as any)
+    // No legacy or tracked kitchen tickets exist in these payment-guard fixtures.
+    prismaMock.kdsOrder.findMany.mockResolvedValue([])
+    prismaMock.kdsOrderItem.findMany.mockResolvedValue([])
     prismaMock.payment.count.mockResolvedValue(completedPayments as any)
     prismaMock.terminalPaymentRequest.findFirst.mockResolvedValue(null)
+    // Empty kitchen history for these financial guards; the cancellation writer now pages both ticket versions.
+    prismaMock.kdsOrder.findMany.mockResolvedValue([])
+    prismaMock.kdsOrderItem.findMany.mockResolvedValue([])
+    prismaMock.kdsOrder.updateMany.mockResolvedValue({ count: 0 })
     prismaMock.order.update.mockResolvedValue({ id: 'order-1', venueId: 'venue-1', status: 'CANCELLED' } as any)
   }
 
@@ -350,6 +363,16 @@ describe('order.dashboard.service — updateOrder no toca inventario', () => {
   beforeEach(() => {
     jest.clearAllMocks()
     prismaMock.$transaction.mockImplementation(async (cb: any) => cb(prismaMock))
+    prismaMock.$queryRaw.mockImplementation(async (query: unknown) => {
+      const sql = Array.isArray(query) ? query.join(' ') : ''
+      if (sql.includes('FROM "Venue"')) return [{ id: 'venue-1' }]
+      if (sql.includes('FROM "Order"')) return [{ id: 'order-1' }]
+      throw new Error('Unexpected dashboard topology SQL')
+    })
+    prismaMock.order.findMany.mockResolvedValue([
+      { id: 'order-1', tableId: null, status: 'PENDING', paymentStatus: 'PENDING', createdAt: new Date('2026-10-01T00:00:00Z') },
+    ])
+    prismaMock.table.findMany.mockResolvedValue([])
   })
 
   const orderConItems = (status: string) => ({
@@ -390,6 +413,16 @@ describe('order.dashboard.service — updateOrder ignora total/tipAmount/subtota
   beforeEach(() => {
     jest.clearAllMocks()
     prismaMock.$transaction.mockImplementation(async (cb: any) => cb(prismaMock))
+    prismaMock.$queryRaw.mockImplementation(async (query: unknown) => {
+      const sql = Array.isArray(query) ? query.join(' ') : ''
+      if (sql.includes('FROM "Venue"')) return [{ id: 'venue-1' }]
+      if (sql.includes('FROM "Order"')) return [{ id: 'order-1' }]
+      throw new Error('Unexpected dashboard topology SQL')
+    })
+    prismaMock.order.findMany.mockResolvedValue([
+      { id: 'order-1', tableId: null, status: 'PENDING', paymentStatus: 'PENDING', createdAt: new Date('2026-10-01T00:00:00Z') },
+    ])
+    prismaMock.table.findMany.mockResolvedValue([])
   })
 
   const orden = () => ({ id: 'order-1', venueId: 'venue-1', status: 'PENDING', paymentStatus: 'PENDING', items: [] })

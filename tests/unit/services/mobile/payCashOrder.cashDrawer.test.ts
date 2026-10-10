@@ -12,6 +12,12 @@
  * faltante por ese monto al cerrar.
  */
 
+// FT-GRAVES S-EF: payCashOrder encola la comisión del cobro en su transacción, igual que la terminal. No es objeto de esta
+// suite (su prueba es tests/integration/commission/efectivoPosMovil.integration.test.ts).
+jest.mock('@/services/tpv/paymentEffects.service', () => ({
+  ...jest.requireActual('@/services/tpv/paymentEffects.service'),
+  enqueuePaymentCommissionInTx: jest.fn().mockResolvedValue(undefined),
+}))
 jest.mock('@/services/venueSalesGuard', () => ({
   __esModule: true,
   assertVenueSalesEnabled: jest.fn(),

@@ -24,6 +24,8 @@ export interface KitchenLine {
   externalId: string | null
   sentToKitchenAt: Date | null
   createdAt: Date
+  serviceCourse?: unknown
+  orderPromotionId?: string | null
 }
 
 export interface KitchenOrderRef {
@@ -50,8 +52,8 @@ export interface KitchenTicketPlan {
 /** Una comanda con más de 12 h de retraso ya no se prepara: la cubrió el papel o nunca se pidió. */
 export const KITCHEN_STALENESS_MS = 12 * 60 * 60 * 1000
 
-/** Llave de renglón de una ronda: `sync:<roundKey>:<índice>` (la inyecta la cola offline o la manda la app). */
-const LLAVE_DE_RONDA = /^sync:([^:]+):\d+$/
+/** Normal: sync:<roundKey>:<índice>; componente de combo: la misma llave + :g:<grupo>. */
+const LLAVE_DE_RONDA = /^sync:([^:]+):\d+(?::(?:\d+|g:[^:]+))?$/
 
 /** El origen de un renglón. Mesa: su ronda. Mostrador: la venta. */
 export function originKeyFor(line: KitchenLine, order: KitchenOrderRef, stampedAt: Date): string {

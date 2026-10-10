@@ -34,6 +34,20 @@ const mesa = { id: 'ord-2', externalId: null, tableId: 'mesa-7' }
 const base = { coveredLineIds: new Set<string>(), routing, screens, stampedAt: T0, soloSinEnviar: false }
 
 describe('planKitchenTickets', () => {
+  it('a combo component shares the round folio of its wrapper and normal items', () => {
+    const plans = planKitchenTickets({
+      ...base,
+      order: mesa,
+      lines: [
+        linea({ id: 'normal', externalId: 'sync:r-1:0' }),
+        linea({ id: 'combo-first', externalId: 'sync:r-1:1:g:g1' }),
+        linea({ id: 'combo-second', externalId: 'sync:r-1:1:g:g2' }),
+      ],
+    })
+    expect(plans.map(p => p.sourceKey)).toEqual(['round:r-1:cocina'])
+    expect(plans[0].lines.map(l => l.id)).toEqual(['normal', 'combo-first', 'combo-second'])
+  })
+
   it('mostrador: una comanda por estación con pantalla, con el folio de la venta', () => {
     const plans = planKitchenTickets({ ...base, order: venta, lines: [linea({ id: 'a' }), linea({ id: 'b', productStationId: 'barra' })] })
     expect(plans.map(p => [p.sourceKey, p.stationId, p.lines.map(l => l.id)])).toEqual([

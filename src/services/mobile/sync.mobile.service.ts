@@ -1,3 +1,4 @@
+import { OrderTableTopologyChanged } from '@/services/shared/tableOrderLock'
 // src/services/mobile/sync.mobile.service.ts
 
 /**
@@ -43,6 +44,8 @@ import * as orderMobileService from './order.mobile.service'
 import { applyPromotionToOrder, removeIntentPromotions } from '../promotions/promotion.service'
 import { logAction } from '../dashboard/activity-log.service'
 import { markKitchenTicket } from '../kds/kitchenTicketAuthoring.service'
+import { applyKitchenPreparation, preparationActionSchema, preparationCommandSchema } from '../kds/kitchenPreparation.service'
+import { preparationPermissions } from '../kds/kitchenPreparation'
 
 // ─── Contrato (espejo EXACTO por nombre en iOS/Android) ─────────────────────
 
@@ -62,6 +65,7 @@ export type SyncIntentType =
   | 'SPLIT_BY_SEAT'
   | 'MERGE_ORDERS'
   | 'KDS_TICKET_MARK'
+  | 'KDS_ITEM_PROGRESS'
 
 export interface SyncIntentInput {
   /** UUID del intent generado en el dispositivo (= idempotencyKey). */
@@ -127,6 +131,7 @@ const KNOWN_TYPES: SyncIntentType[] = [
   'SPLIT_BY_SEAT',
   'MERGE_ORDERS',
   'KDS_TICKET_MARK',
+  'KDS_ITEM_PROGRESS',
 ]
 
 /**
@@ -201,6 +206,7 @@ export function requiredPermissionForIntent(type: string): string | null {
     // Etapa 3 del KDS: marcar LISTO o «salió en papel» es un acto de cocina sobre una comanda — mismo permiso que el
     // bump y el status en línea (`/kds/orders/:id/bump`, `orders:update`). El rol KITCHEN lo trae.
     case 'KDS_TICKET_MARK':
+    case 'KDS_ITEM_PROGRESS':
       return 'orders:update'
     default:
       return null
@@ -224,6 +230,10 @@ export function requiredPermissionForIntent(type: string): string | null {
 export function requiredPermissionsForIntent(intent: SyncIntentInput): string[] {
   const base = requiredPermissionForIntent(intent.type)
   const permissions = base ? [base] : []
+  if (intent.type === 'KDS_ITEM_PROGRESS') {
+    const action = preparationActionSchema.safeParse(intent.payload?.action)
+    return action.success ? preparationPermissions(action.data) : permissions
+  }
 
   if (intent.type === 'ADD_ITEMS') {
     const items = Array.isArray(intent.payload?.items) ? (intent.payload.items as any[]) : []
@@ -310,6 +320,14 @@ function invalidPromotionLinesReason(items: any[]): string | null {
 }
 
 async function ackFromExisting(existing: any, intentId: string): Promise<SyncIntentAck> {
+  if (existing.type === 'HTTP_OP_V1') {
+    return {
+      id: intentId,
+      status: 'REJECTED',
+      errorCode: 'HTTP_OPERATION_RESERVED',
+      message: 'Esta operación se recupera por su identidad HTTP',
+    }
+  }
   if (existing.status !== 'PROCESSING') {
     return {
       id: intentId,
@@ -356,6 +374,9 @@ export async function processIntents(params: {
   const acks: SyncIntentAck[] = []
   /** localRef (UUID del dispositivo) → orderId de server, dentro del batch. */
   const localRefMap = new Map<string, string>()
+  // Preparation revisions are independent of financial versions. A retry pauses
+  // only its own lane; the financial lane still preserves its original FIFO.
+  const blockedLanes = new Set<'preparation' | 'financial'>()
 
   // 🛡️ Orden FIFO defensivo por seq: el cliente ya manda en orden, pero el
   // server NO debe confiar 100% en eso (cliente viejo/buggy, request a mano).
@@ -365,6 +386,17 @@ export async function processIntents(params: {
   logger.info(`🔁 [POS SYNC] Replay de ${intents.length} intents | venue=${venueId} device=${deviceId} staff=${staffId}`)
 
   for (const intent of intents) {
+    const lane = intent.type === 'KDS_ITEM_PROGRESS' ? 'preparation' : 'financial'
+    if (blockedLanes.has(lane)) continue
+    if (intent.id.startsWith('http:v1:') || String(intent.type) === 'HTTP_OP_V1') {
+      acks.push({
+        id: intent.id,
+        status: 'REJECTED',
+        errorCode: 'HTTP_OPERATION_RESERVED',
+        message: 'Esta operación se recupera por su identidad HTTP',
+      })
+      continue
+    }
     // 1. Dedup: ¿ya lo procesamos? Devolver el ack guardado tal cual.
     const existing = await prisma.posSyncIntent.findUnique({
       where: { venueId_idempotencyKey: { venueId, idempotencyKey: intent.id } },
@@ -376,7 +408,7 @@ export async function processIntents(params: {
       // Reponer el mapa local para intents posteriores del mismo batch.
       if (existing.localRef && result?.orderId) localRefMap.set(existing.localRef, String(result.orderId))
       acks.push(ack)
-      if (ack.status === 'RETRY') break
+      if (ack.status === 'RETRY') blockedLanes.add(lane)
       continue
     }
 
@@ -385,7 +417,12 @@ export async function processIntents(params: {
     // legacy sin seq siguen soportados.
     if (typeof intent.seq === 'number') {
       const latestForDevice = await prisma.posSyncIntent.findFirst({
-        where: { venueId, deviceId, seq: { not: null } },
+        where: {
+          venueId,
+          deviceId,
+          seq: { not: null },
+          type: lane === 'preparation' ? 'KDS_ITEM_PROGRESS' : { notIn: ['HTTP_OP_V1', 'KDS_ITEM_PROGRESS'] },
+        },
         orderBy: { seq: 'desc' },
         select: { seq: true },
       })
@@ -424,17 +461,17 @@ export async function processIntents(params: {
         if (winner) {
           const winnerAck = await ackFromExisting(winner, intent.id)
           acks.push(winnerAck)
-          if (winnerAck.status === 'RETRY') break
+          if (winnerAck.status === 'RETRY') blockedLanes.add(lane)
           continue
         }
         if (typeof intent.seq === 'number') {
           const sequenceWinner = await prisma.posSyncIntent.findFirst({
-            where: { venueId, deviceId, seq: intent.seq },
+            where: { venueId, deviceId, seq: intent.seq, type: { not: 'HTTP_OP_V1' } },
             select: { idempotencyKey: true },
           })
           if (sequenceWinner) {
             const latestForDevice = await prisma.posSyncIntent.findFirst({
-              where: { venueId, deviceId, seq: { not: null } },
+              where: { venueId, deviceId, seq: { not: null }, type: { not: 'HTTP_OP_V1' } },
               orderBy: { seq: 'desc' },
               select: { seq: true },
             })
@@ -456,7 +493,8 @@ export async function processIntents(params: {
         errorCode: reserveError?.code ?? 'INTENT_RESERVATION_FAILED',
         message: 'No se pudo reservar la operación de forma segura. Reintenta.',
       })
-      break
+      blockedLanes.add(lane)
+      continue
     }
 
     // 3. Autorizar + aplicar. El actor persistido evita que una operación
@@ -494,9 +532,8 @@ export async function processIntents(params: {
     }
 
     // RETRY (transitorio): NO se persiste (para que un próximo replay lo
-    // re-drive) y se DETIENE el batch — los intents posteriores dependen de
-    // este por FIFO, así que se dejan sin procesar (el cliente los mantiene
-    // PENDING). Nunca se pierde nada.
+    // re-drive) y se DETIENE su carril. Los posteriores de ese mismo carril
+    // quedan sin procesar y PENDING; preparación no detiene cobros ni viceversa.
     if (ack.status === 'RETRY') {
       // No hubo resultado terminal: liberar la reserva permite el próximo
       // intento. El reducer sólo devuelve RETRY para errores transitorios.
@@ -506,8 +543,9 @@ export async function processIntents(params: {
         })
         .catch(error => logger.error(`❌ [POS SYNC] No se pudo liberar reserva RETRY ${intent.id}`, error))
       acks.push(ack)
-      logger.info(`🔁 [POS SYNC] Intent ${intent.id} en RETRY — corto el batch para preservar FIFO`)
-      break
+      logger.info(`🔁 [POS SYNC] Intent ${intent.id} en RETRY — pauso ${lane} para preservar su FIFO`)
+      blockedLanes.add(lane)
+      continue
     }
 
     // 4. Cerrar la reserva con el ACK terminal. Si esta escritura cae después
@@ -579,15 +617,54 @@ async function applyIntent(ctx: {
         return await applyMergeOrders(venueId, staffId, intent, localRefMap)
       case 'KDS_TICKET_MARK':
         return await applyKdsTicketMark(venueId, intent)
+      case 'KDS_ITEM_PROGRESS': {
+        let orderId = await resolveOrderId(venueId, intent.payload, localRefMap)
+        if (!orderId && typeof intent.payload.sourceKey === 'string') {
+          const ticket = await prisma.kdsOrder.findFirst({
+            where: { venueId, sourceKey: intent.payload.sourceKey },
+            select: { orderId: true },
+          })
+          orderId = ticket?.orderId ?? null
+        }
+        if (!orderId) {
+          const provisional = preparationCommandSchema.safeParse({
+            action: intent.payload.action,
+            items: intent.payload.items,
+            ...(intent.payload.reason !== undefined ? { reason: intent.payload.reason } : {}),
+          })
+          if (!provisional.success || provisional.data.items.some(item => item.id)) {
+            return invalid(intent, 'La preparación requiere identificar la cuenta')
+          }
+        }
+        const action = preparationActionSchema.safeParse(intent.payload.action)
+        if (orderId && action.success && action.data !== 'START' && action.data !== 'READY')
+          await assertOwnership(venueId, staffId, orderId)
+        const result = await applyKitchenPreparation(
+          venueId,
+          orderId ?? '',
+          {
+            action: intent.payload.action,
+            items: intent.payload.items,
+            ...(intent.payload.reason !== undefined ? { reason: intent.payload.reason } : {}),
+          },
+          staffId,
+          intent.id,
+        )
+        return { id: intent.id, status: 'ACKED', result }
+      }
     }
   } catch (error: any) {
-    const errorCode = error?.errorCode ?? error?.code ?? 'BUSINESS_RULE'
+    const errorCode =
+      error instanceof OrderTableTopologyChanged ? 'ORDER_TABLE_TOPOLOGY_CHANGED' : (error?.errorCode ?? error?.code ?? 'BUSINESS_RULE')
     // Sólo los errores de dominio (`AppError`) llevan `details` de contrato; el de Prisma no es contrato.
     const details = error instanceof AppError && error.details !== undefined ? { details: error.details } : {}
     // TRANSITORIO (conflicto de versión, etc.) → RETRY: el cliente lo deja
     // PENDING y reintenta; NUNCA se pierde. PERMANENTE (regla de negocio) →
     // REJECTED terminal → cuarentena visible.
-    if (RETRYABLE_ERROR_CODES.has(errorCode)) {
+    const preparationDependency =
+      intent.type === 'KDS_ITEM_PROGRESS' &&
+      (errorCode === 'PREPARATION_DEPENDENCY_PENDING' || errorCode === 'PREPARATION_REVISION_PENDING')
+    if (error instanceof OrderTableTopologyChanged || RETRYABLE_ERROR_CODES.has(errorCode) || preparationDependency) {
       logger.info(`🔁 [POS SYNC] Intent ${intent.type} ${intent.id} transitorio (${errorCode}) — reintentar`)
       return { id: intent.id, status: 'RETRY', errorCode, message: error?.message ?? 'Condición transitoria — reintentar', ...details }
     }
@@ -715,7 +792,7 @@ async function resolveOrderId(venueId: string, payload: Record<string, unknown>,
     if (mapped) return mapped
     // Replay en request separado: buscar el OPEN_TABLE ya ackeado.
     const prior = await prisma.posSyncIntent.findFirst({
-      where: { venueId, localRef, status: 'ACKED' },
+      where: { venueId, localRef, status: 'ACKED', type: { not: 'HTTP_OP_V1' } },
       orderBy: { createdAt: 'desc' },
       select: { resultJson: true },
     })
@@ -867,14 +944,22 @@ async function applyAddItems(
 
   try {
     for (const item of conPromocion) {
-      await applyPromotionToOrder({
-        venueId,
-        orderId,
-        promotionId: item.promotionRef.promotionId,
-        instanceId: item.promotionRef.promotionInstanceId,
-        selections: item.promotionRef.selections,
-        soldAt,
-      })
+      await applyPromotionToOrder(
+        {
+          venueId,
+          orderId,
+          promotionId: item.promotionRef.promotionId,
+          instanceId: item.promotionRef.promotionInstanceId,
+          selections: item.promotionRef.selections,
+          soldAt,
+        },
+        undefined,
+        {
+          sentToKitchenAt: soldAt,
+          componentExternalIdPrefix:
+            item.externalId && /^sync:[^:]+:\d+$/.test(item.externalId) ? item.externalId : `sync:${intent.id}:${items.indexOf(item)}`,
+        },
+      )
     }
   } catch (error: any) {
     // 🔴 El loop también compensa (audit 2026-08-14): si la promo #2 truena en
@@ -1002,12 +1087,14 @@ async function applyPayCash(
       message: 'PAY_CASH: tipCents no puede ser negativo',
     }
   }
-  if (!orderId || !Number.isFinite(amountCents) || amountCents <= 0) {
+  // Only numeric zero without a tip delegates the zero-balance decision to payCashOrder.
+  const zeroWithoutTip = intent.payload.amountCents === 0 && (intent.payload.tipCents === undefined || intent.payload.tipCents === 0)
+  if (!orderId || !Number.isFinite(amountCents) || amountCents < 0 || (amountCents === 0 && !zeroWithoutTip)) {
     return {
       id: intent.id,
       status: 'REJECTED',
       errorCode: 'INVALID_PAYLOAD',
-      message: 'PAY_CASH requiere orderId/localOrderId y amountCents > 0',
+      message: 'PAY_CASH requiere orderId/localOrderId y amountCents > 0 (o $0 sin propina para cerrar una cuenta en $0)',
     }
   }
   // Mismo override que la ruta online del cobro: la caja liquida cualquier cheque.
@@ -1417,7 +1504,7 @@ function horaDeLaMarca(intent: SyncIntentInput): Date {
 /** Últimos intents procesados del venue — visibilidad de replays y rechazos. */
 export async function getRecentIntents(venueId: string, limit = 50) {
   return prisma.posSyncIntent.findMany({
-    where: { venueId },
+    where: { venueId, type: { not: 'HTTP_OP_V1' } },
     orderBy: { createdAt: 'desc' },
     take: Math.min(limit, 200),
     select: {

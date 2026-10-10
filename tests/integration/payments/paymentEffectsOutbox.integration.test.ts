@@ -38,6 +38,8 @@ beforeAll(async () => {
 })
 
 beforeEach(async () => {
+  // Con `venueId` undefined (el beforeAll falló), el deleteMany de abajo borraría la tabla entera.
+  if (!venueId) throw new Error('El fixture de la suite no se creó: no se limpia nada.')
   await prisma.paymentEffect.deleteMany({ where: { venueId } })
   orderId = (
     await prisma.order.create({

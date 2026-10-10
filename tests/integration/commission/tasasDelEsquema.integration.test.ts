@@ -183,9 +183,22 @@ describe('final-fijo-niveles · la API rechaza una tasa de más de 100 % (400, t
   })
 
   it('🔴 las demás tasas también: un nivel, una tasa por rol, una tasa propia y la tasa por meta superada de más de 100 % ⇒ 400', async () => {
-    const niveles = (await post('/configs', { ...porcentaje(0.03), calcType: 'TIERED' })).body.id
-    const nivel = await post(`/configs/${niveles}/tiers/batch`, {
+    // S-NIVELES-ATÓMICO: un esquema por niveles nace con sus niveles; un nivel de más de 100 % es 400 al crear y al agregar.
+    const alCrear = await post('/configs', {
+      ...porcentaje(0.03),
+      calcType: 'TIERED',
       tiers: [{ tierLevel: 1, name: 'Bronce', minThreshold: 0, maxThreshold: null, rate: 1.5 }],
+    })
+    expect([alCrear.status, alCrear.body.message]).toEqual([400, 'La tasa de un nivel va de 0 % a 100 %: 150 % no es válida.'])
+    const niveles = (
+      await post('/configs', {
+        ...porcentaje(0.03),
+        calcType: 'TIERED',
+        tiers: [{ tierLevel: 1, name: 'Bronce', minThreshold: 0, maxThreshold: 1000, rate: 0.02 }],
+      })
+    ).body.id
+    const nivel = await post(`/configs/${niveles}/tiers/batch`, {
+      tiers: [{ tierLevel: 2, name: 'Plata', minThreshold: 1000, maxThreshold: null, rate: 1.5 }],
     })
     expect([nivel.status, nivel.body.message]).toEqual([400, 'La tasa de un nivel va de 0 % a 100 %: 150 % no es válida.'])
 
@@ -201,12 +214,19 @@ describe('final-fijo-niveles · la API rechaza una tasa de más de 100 % (400, t
 
   it('regresión: lo válido se sigue guardando (porcentaje, niveles con sus tasas, por rol, tasa propia, de organización)', async () => {
     expect((await post('/configs', porcentaje(1))).status).toBe(201) // 100 % es el tope, incluido
-    const niveles = (await post('/configs', { ...porcentaje(0.03), calcType: 'TIERED', roleRates: { WAITER: 0.04 } })).body.id
-    const batch = await post(`/configs/${niveles}/tiers/batch`, {
+    // S-NIVELES-ATÓMICO: los niveles van en la misma creación; `/tiers/batch` sigue agregando más.
+    const creado = await post('/configs', {
+      ...porcentaje(0.03),
+      calcType: 'TIERED',
+      roleRates: { WAITER: 0.04 },
       tiers: [
         { tierLevel: 1, name: 'Bronce', minThreshold: 0, maxThreshold: 10000, rate: 0.02 },
-        { tierLevel: 2, name: 'Plata', minThreshold: 10000, maxThreshold: null, rate: 0.03 },
+        { tierLevel: 2, name: 'Plata', minThreshold: 10000, maxThreshold: 20000, rate: 0.03 },
       ],
+    })
+    expect(creado.status).toBe(201)
+    const batch = await post(`/configs/${creado.body.id}/tiers/batch`, {
+      tiers: [{ tierLevel: 3, name: 'Oro', minThreshold: 20000, maxThreshold: null, rate: 0.04 }],
     })
     expect(batch.status).toBe(201)
     expect((await post(`/configs/${m.configId}/overrides`, { staffId: m.ana, customRate: 0.05 })).status).toBe(201)

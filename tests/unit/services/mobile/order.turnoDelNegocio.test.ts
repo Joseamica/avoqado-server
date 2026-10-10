@@ -105,7 +105,21 @@ describe('createOrderWithItems (POS móvil) — cae en el turno del NEGOCIO', ()
 
 describe('separar cheque — el turno se HEREDA del origen, no se resuelve', () => {
   // Candado canónico del ORIGEN (Plan3b): la cuenta existe en este venue.
-  beforeEach(() => prismaMock.$queryRaw.mockResolvedValue([{ id: 'order-origen' }]))
+  beforeEach(() => {
+    prismaMock.order.findMany.mockResolvedValue([
+      { id: 'order-origen', tableId: 'mesa-1', status: 'PENDING', paymentStatus: 'PENDING', createdAt: new Date(0) },
+    ] as any)
+    prismaMock.table.findMany.mockImplementation(async (args: any) =>
+      args.where.currentOrderId ? [] : ([{ id: 'mesa-1', number: '1', status: 'OCCUPIED', currentOrderId: 'order-origen' }] as any),
+    )
+    prismaMock.$queryRaw.mockImplementation(async (query: any, ...values: any[]) => {
+      const sql = Array.isArray(query) ? query.join('?') : query.sql
+      if (sql.includes('FROM "Venue"') && sql.includes('FOR KEY SHARE')) return [{ id: VENUE }]
+      if (sql.includes('FROM "Order"') && sql.includes('FOR UPDATE')) return values[1].map((id: string) => ({ id }))
+      if (sql.includes('FROM "Table"') && sql.includes('FOR NO KEY UPDATE')) return [{ id: 'mesa-1' }]
+      throw new Error(`Unexpected raw statement: ${sql}`)
+    })
+  })
 
   function cuentaOrigen(shiftId: string | null, items: any[]) {
     return {

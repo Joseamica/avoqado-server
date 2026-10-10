@@ -6,6 +6,7 @@
  */
 
 import { Router, type Request, type Response, type NextFunction } from 'express'
+import { getMobile as getServiceCourses } from '../controllers/dashboard/serviceCourse.controller'
 import * as authMobileController from '../controllers/mobile/auth.mobile.controller'
 import * as coachClassController from '../controllers/mobile/coachClass.mobile.controller'
 import * as kioskCheckInController from '../controllers/kiosk/kioskCheckIn.controller'
@@ -64,6 +65,8 @@ import { switchUserSchema } from '../schemas/mobile/switchUser.mobile.schema'
 import { handoffSchema, confirmExternalSettlementSchema, notChargedSchema } from '../schemas/mobile/areaTicketExternal.schema'
 import { areaTicketResolveRateLimiter } from '../middlewares/area-ticket-rate-limit.middleware'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
+import { httpOperationGuard } from '../middlewares/httpOperation.middleware'
+import * as httpOperationMobileController from '../controllers/mobile/http-operation.mobile.controller'
 import { checkFeatureAccess } from '../middlewares/checkFeatureAccess.middleware'
 import { checkPermission } from '../middlewares/checkPermission.middleware'
 import { marcarPermiso, PERMISO_VER_ESPERADO } from '../middlewares/permissionFlag.middleware'
@@ -73,7 +76,12 @@ import { pinLoginRateLimiter, pinOverrideRateLimiter, pinSwitchUserRateLimiter }
 import { capturarVenueDeLaRuta, registerDeviceMiddleware } from '../middlewares/registerDevice.middleware'
 import { validateRequest } from '../middlewares/validation'
 import { recordFastPaymentParamsSchema, recordPaymentBodySchema } from '../schemas/tpv.schema'
-import { gatewayHeartbeatSchema, impresoraObservadaSchema, printConfigParamSchema, syncPrintJobsSchema } from '../schemas/mobile/print.mobile.schema'
+import {
+  gatewayHeartbeatSchema,
+  impresoraObservadaSchema,
+  printConfigParamSchema,
+  syncPrintJobsSchema,
+} from '../schemas/mobile/print.mobile.schema'
 import { setKitchenDisplaySchema } from '../schemas/dashboard/printStation.schema'
 import * as announcementReadController from '../controllers/shared/announcement.read.controller'
 
@@ -618,8 +626,15 @@ router.post('/auth/request-reset', authMobileController.requestReset)
  */
 const checkPromotionGuardsIfPresent = (req: Request, res: Response, next: NextFunction) => {
   const items = Array.isArray(req.body?.items) ? req.body.items : []
-  if (!items.some((item: any) => item?.promotionRef)) return next()
-  return checkPermission('discounts:apply')(req, res, () => checkFeatureAccess('PROMOTIONS')(req, res, next))
+  const hasServiceCourse = items.some(
+    (item: any) =>
+      item?.serviceCourse != null ||
+      (Array.isArray(item?.promotionRef?.selections) &&
+        item.promotionRef.selections.some((selection: any) => selection?.serviceCourse != null)),
+  )
+  const afterPromotion = () => (hasServiceCourse ? checkFeatureAccess('TABLE_SERVICE')(req, res, next) : next())
+  if (!items.some((item: any) => item?.promotionRef)) return afterPromotion()
+  return checkPermission('discounts:apply')(req, res, () => checkFeatureAccess('PROMOTIONS')(req, res, afterPromotion))
 }
 
 router.post(
@@ -931,6 +946,7 @@ router.post(
 router.delete(
   '/venues/:venueId/orders/:orderId',
   authenticateTokenMiddleware,
+  httpOperationGuard(true),
   checkPermission('orders:cancel-unpaid'),
   checkTableOwnership('order'),
   orderMobileController.cancelOrder,
@@ -2142,6 +2158,7 @@ router.post(
 router.post(
   '/venues/:venueId/tables/:tableId/clear',
   authenticateTokenMiddleware,
+  httpOperationGuard(true),
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('tables:update'),
   checkTableOwnership('table'),
@@ -2159,6 +2176,7 @@ router.post(
 router.post(
   '/venues/:venueId/orders/:orderId/move',
   authenticateTokenMiddleware,
+  httpOperationGuard(true),
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('tables:update'),
   checkTableOwnership('order'),
@@ -2173,6 +2191,7 @@ router.post(
 router.post(
   '/venues/:venueId/orders/:orderId/assign',
   authenticateTokenMiddleware,
+  httpOperationGuard(true),
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:update'),
   checkTableOwnership('order'),
@@ -2190,6 +2209,7 @@ router.post(
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:create'),
   checkTableOwnership('order'),
+  checkPromotionGuardsIfPresent,
   orderMobileController.addItemsToOrder,
 )
 
@@ -2203,6 +2223,14 @@ router.post(
  * sincronizar no es puerta trasera. Body: { deviceId, intents: [...] }
  */
 router.post('/venues/:venueId/sync/intents', authenticateTokenMiddleware, validateVenueAccess, syncMobileController.syncIntents)
+router.get(
+  '/venues/:venueId/service-courses',
+  authenticateTokenMiddleware,
+  validateVenueAccess,
+  checkPermission('tables:read'),
+  checkFeatureAccess('TABLE_SERVICE'),
+  getServiceCourses,
+)
 
 // ============================================================================
 // INVENTORY
@@ -2530,6 +2558,7 @@ router.get(
 router.post(
   '/venues/:venueId/orders/:orderId/split',
   authenticateTokenMiddleware,
+  httpOperationGuard(true),
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:update'),
   checkTableOwnership('order'),
@@ -2545,6 +2574,7 @@ router.post(
 router.post(
   '/venues/:venueId/orders/:orderId/merge',
   authenticateTokenMiddleware,
+  httpOperationGuard(true),
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:merge'),
   checkTableOwnership('order'),
@@ -2558,6 +2588,7 @@ router.post(
 router.post(
   '/venues/:venueId/orders/:orderId/split-by-seat',
   authenticateTokenMiddleware,
+  httpOperationGuard(true),
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:update'),
   checkTableOwnership('order'),
@@ -2567,6 +2598,7 @@ router.post(
 router.post(
   '/venues/:venueId/orders/:orderId/discounts',
   authenticateTokenMiddleware,
+  httpOperationGuard(true),
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:update'),
   checkTableOwnership('order'),
@@ -2580,6 +2612,7 @@ router.post(
 router.delete(
   '/venues/:venueId/orders/:orderId/discounts/:orderDiscountId',
   authenticateTokenMiddleware,
+  httpOperationGuard(true),
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:update'),
   checkTableOwnership('order'),
@@ -2596,6 +2629,7 @@ router.delete(
 router.post(
   '/venues/:venueId/orders/:orderId/comp',
   authenticateTokenMiddleware,
+  httpOperationGuard(true),
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:update'),
   checkTableOwnership('order'),
@@ -2629,6 +2663,7 @@ router.get(
 router.post(
   '/venues/:venueId/orders/:orderId/service-charges',
   authenticateTokenMiddleware,
+  httpOperationGuard(true),
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:update'),
   checkTableOwnership('order'),
@@ -2641,6 +2676,7 @@ router.post(
 router.delete(
   '/venues/:venueId/orders/:orderId/service-charges/:orderServiceChargeId',
   authenticateTokenMiddleware,
+  httpOperationGuard(true),
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:update'),
   checkTableOwnership('order'),
@@ -2666,8 +2702,16 @@ router.get(
  * transaction (see loyalty.mobile.service — the dashboard path never did).
  */
 router.post(
+  '/venues/:venueId/order-operations/:operationId/resolve',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  httpOperationMobileController.resolveOperation,
+)
+
+router.post(
   '/venues/:venueId/orders/:orderId/loyalty/redeem',
   authenticateTokenMiddleware,
+  httpOperationGuard(true),
   checkFeatureAccess('LOYALTY_PROGRAM'),
   checkPermission('orders:update'),
   checkTableOwnership('order'),
@@ -2681,6 +2725,7 @@ router.post(
 router.post(
   '/venues/:venueId/orders/:orderId/details',
   authenticateTokenMiddleware,
+  httpOperationGuard(true),
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:update'),
   checkTableOwnership('order'),
@@ -2692,6 +2737,7 @@ router.post(
 router.post(
   '/venues/:venueId/orders/:orderId/items/:itemId/comp',
   authenticateTokenMiddleware,
+  httpOperationGuard(true),
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:update'),
   checkTableOwnership('order'),
@@ -3100,6 +3146,22 @@ router.delete(
  * List active KDS orders for a venue.
  * Query: ?status=NEW,PREPARING,READY (default: active orders)
  */
+router.get(
+  '/venues/:venueId/kds/capabilities',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  checkPermission('orders:read'),
+  kdsMobileController.getPreparationCapabilities,
+)
+router.get(
+  '/venues/:venueId/kds/preparation',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  checkPermission('orders:read'),
+  checkFeatureAccess('KITCHEN_DISPLAY'),
+  kdsMobileController.getKitchenPreparation,
+)
+
 router.get(
   '/venues/:venueId/kds/orders',
   authenticateTokenMiddleware,

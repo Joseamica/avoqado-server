@@ -28,6 +28,10 @@ model Organization {
   billingEmail   String?
   billingAddress Json?
 
+  // TABLE_SERVICE (Pro): complete shared list; null preserves legacy defaults.
+  serviceCourses         Json?
+  serviceCoursesRevision Int   @default(0)
+
   // GRANDFATHER FLAG AT THE ORGANIZATION LEVEL — inherited by every venue, present and FUTURE.
   // Same semantics as Venue.seatCapExempt (exempt from BOTH the Free seat cap AND every feature
   // paywall); a venue is grandfathered when ITS OWN flag or THIS one is true. It exists because
@@ -408,6 +412,7 @@ model Venue {
   tables                Table[]
   areas                 Area[]
   floorElements         FloorElement[]
+  floorPlanPublications FloorPlanPublication[]
   shifts                Shift[]
   timeEntries           TimeEntry[]
   overtimeApprovals     OvertimeApproval[]
@@ -876,6 +881,10 @@ model VenueSettings {
   id      String @id @default(cuid())
   venueId String @unique
   venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  // null inherits the organization's complete service-course catalog.
+  serviceCourses         Json?
+  serviceCoursesRevision Int   @default(0)
 
   // Operations
   autoCloseShifts           Boolean @default(false)
@@ -3305,6 +3314,11 @@ model Area {
   tables        Table[] // Un área tiene muchas mesas
   floorElements FloorElement[] // Elementos decorativos del área (paredes, barras, etc.)
 
+  // Plano del dashboard (2026-10-08): forma del lienzo del área y su orden en las pestañas.
+  // null = área anterior a esta fase ⇒ se dibuja como WIDE (16:10).
+  floorShape FloorShape?
+  sortOrder  Int         @default(0)
+
   // Demo data flag (for cleanup on conversion)
   isDemo Boolean @default(false)
 
@@ -3401,6 +3415,23 @@ model FloorElement {
   @@index([venueId])
   @@index([venueId, areaId])
   @@index([venueId, type])
+}
+
+// Una publicación del plano desde el dashboard. Da idempotencia al «Guardar» (el cliente HTTP del
+// dashboard reintenta una vez ante un error de red) y deja el historial de quién publicó qué.
+model FloorPlanPublication {
+  id                String   @id @default(cuid())
+  venueId           String
+  venue             Venue    @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  saveId            String
+  staffId           String?
+  baseFingerprint   String
+  resultFingerprint String
+  summary           Json
+  createdAt         DateTime @default(now())
+
+  @@unique([venueId, saveId])
+  @@index([venueId, createdAt])
 }
 
 model Shift {
@@ -4168,6 +4199,8 @@ model OrderItem {
   // other client is required to send or read it). Restaurant-mode POS groups
   // kitchen comandas and the check display by this label.
   course String?
+  // Historical identity/name/kind, captured before transport. Immediate remains course=null.
+  serviceCourse Json?
 
   // TABLE_SERVICE — asiento/comensal de la línea (Square's seats). Additive:
   // null = sin asiento; solo el POS restaurante lo escribe/lee.
@@ -9662,6 +9695,13 @@ enum TableShape {
   SQUARE // 2-4 person square table
   ROUND // Round table
   RECTANGLE // Long table (6+ people)
+}
+
+// Proporción del lienzo de un área en el plano de mesas (spec 2026-10-08 §4.3).
+enum FloorShape {
+  WIDE // 16:10
+  SQUARE // 1:1
+  TALL // 10:16
 }
 
 enum TableStatus {
@@ -15819,6 +15859,9 @@ model KdsOrder {
   startedAt   DateTime?
   completedAt DateTime?
 
+  /// 0 preserves legacy BUMP; 1 requires explicit per-product preparation actions.
+  preparationVersion Int @default(0)
+
   /// Quién se adjudicó IMPRIMIR esta comanda, y cuándo.
   ///
   /// 🔴 POR QUÉ EXISTE: un pedido de marketplace no lo manda nadie desde una tablet — llega
@@ -15863,6 +15906,7 @@ model KdsOrder {
   /// El folio (spec 2026-09-27 §1). Se construye CONCURRENTLY en su propia migración.
   @@unique([venueId, sourceKey])
   @@index([venueId, status])
+  @@index([venueId, preparationVersion, status, id])
   /// Para "¿qué falta imprimir aquí?" sin recorrer la tabla entera.
   @@index([venueId, printedAt])
   /// Las comandas de una venta (cancelar un pedido, el barrido del KDS de Uber). Se construye
@@ -15878,6 +15922,14 @@ model KdsOrderItem {
   quantity    Int
   modifiers   String? // JSON array of modifier names
   notes       String?
+
+  /// Frozen service time and combo origin. Never resolved again after a catalog rename.
+  serviceCourse       Json?
+  orderPromotionId    String?
+  /// Quantity buckets HELD/PENDING/PREPARING/READY/DELIVERED/CANCELLED, per station.
+  /// null is legacy, never interpreted as delivered.
+  preparation         Json?
+  preparationRevision Int @default(0)
 
   /// KDS de Uber: liga floja al OrderItem real (igual que productId/categoryId abajo,
   /// sin `@relation` — una comanda es una foto del momento), id de renglón del
@@ -15900,6 +15952,7 @@ model KdsOrderItem {
   categoryId String?
 
   @@index([kdsOrderId])
+  @@index([orderItemId, kdsOrderId])
 }
 
 enum KdsOrderStatus {

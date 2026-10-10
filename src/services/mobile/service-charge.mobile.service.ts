@@ -84,42 +84,50 @@ function computeAmount(type: 'PERCENTAGE' | 'FIXED_AMOUNT', value: number, base:
 }
 
 /** Aplica un cobro del catálogo a la cuenta abierta. */
+export async function applyServiceChargeInTransaction(
+  tx: Prisma.TransactionClient,
+  venueId: string,
+  orderId: string,
+  serviceChargeId: string,
+  staffId?: string,
+) {
+  const order = await requireOpenOrder(tx, venueId, orderId)
+  // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
+  // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
+  rechazarSiEsImportada(order)
+
+  const charge = await tx.serviceCharge.findFirst({ where: { id: serviceChargeId, venueId, active: true } })
+  if (!charge) throw new NotFoundError('Cobro por servicio no encontrado')
+
+  const already = await tx.orderServiceCharge.findFirst({ where: { orderId, serviceChargeId } })
+  if (already) throw new BadRequestError('Ese cobro ya está aplicado a la cuenta')
+
+  const base = Math.max(0, Number(order.subtotal) - Number(order.discountAmount))
+  const amount = computeAmount(charge.type, Number(charge.value), base)
+
+  const row = await tx.orderServiceCharge.create({
+    data: {
+      orderId,
+      serviceChargeId: charge.id,
+      name: charge.name,
+      type: charge.type,
+      value: charge.value,
+      amount: new Prisma.Decimal(amount),
+      taxable: charge.taxable,
+      isAutomatic: false,
+      appliedById: await resolveStaffVenueId(tx, venueId, staffId),
+    },
+  })
+
+  const { recalculateOrderTotals } = await import('./comp-item.mobile.service')
+  const totals = await recalculateOrderTotals(orderId, 0, Number(order.paidAmount || 0), tx)
+
+  return { charge, row, amount, totals }
+}
+
 export async function applyServiceCharge(venueId: string, orderId: string, serviceChargeId: string, staffId?: string) {
   const { charge, amount, totals } = await prisma
-    .$transaction(async tx => {
-      const order = await requireOpenOrder(tx, venueId, orderId)
-      // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
-      // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
-      rechazarSiEsImportada(order)
-
-      const charge = await tx.serviceCharge.findFirst({ where: { id: serviceChargeId, venueId, active: true } })
-      if (!charge) throw new NotFoundError('Cobro por servicio no encontrado')
-
-      const already = await tx.orderServiceCharge.findFirst({ where: { orderId, serviceChargeId } })
-      if (already) throw new BadRequestError('Ese cobro ya está aplicado a la cuenta')
-
-      const base = Math.max(0, Number(order.subtotal) - Number(order.discountAmount))
-      const amount = computeAmount(charge.type, Number(charge.value), base)
-
-      await tx.orderServiceCharge.create({
-        data: {
-          orderId,
-          serviceChargeId: charge.id,
-          name: charge.name,
-          type: charge.type,
-          value: charge.value,
-          amount: new Prisma.Decimal(amount),
-          taxable: charge.taxable,
-          isAutomatic: false,
-          appliedById: await resolveStaffVenueId(tx, venueId, staffId),
-        },
-      })
-
-      const { recalculateOrderTotals } = await import('./comp-item.mobile.service')
-      const totals = await recalculateOrderTotals(orderId, 0, Number(order.paidAmount || 0), tx)
-
-      return { charge, amount, totals }
-    }, ORDER_LOCK_WAIT_BUDGET)
+    .$transaction(tx => applyServiceChargeInTransaction(tx, venueId, orderId, serviceChargeId, staffId), ORDER_LOCK_WAIT_BUDGET)
     .catch(err => {
       if ((err as { code?: string }).code === 'P2002') throw new BadRequestError('Ese cobro ya está aplicado a la cuenta')
       throw err
@@ -137,24 +145,35 @@ export async function applyServiceCharge(venueId: string, orderId: string, servi
   return totals
 }
 
+/** Quita el cobro usando la transacción del caller. */
+export async function removeServiceChargeInTransaction(
+  tx: Prisma.TransactionClient,
+  venueId: string,
+  orderId: string,
+  orderServiceChargeId: string,
+) {
+  const order = await requireOpenOrder(tx, venueId, orderId)
+  // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
+  // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
+  rechazarSiEsImportada(order)
+
+  const row = await tx.orderServiceCharge.findFirst({ where: { id: orderServiceChargeId, orderId } })
+  if (!row) throw new NotFoundError('Cobro no aplicado a esta orden')
+
+  await tx.orderServiceCharge.delete({ where: { id: row.id } })
+
+  const { recalculateOrderTotals } = await import('./comp-item.mobile.service')
+  const totals = await recalculateOrderTotals(orderId, 0, Number(order.paidAmount || 0), tx)
+
+  return { row, totals }
+}
+
 /** Quita un cobro aplicado de la cuenta. */
 export async function removeServiceCharge(venueId: string, orderId: string, orderServiceChargeId: string, staffId?: string) {
-  const { row, totals } = await prisma.$transaction(async tx => {
-    const order = await requireOpenOrder(tx, venueId, orderId)
-    // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
-    // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
-    rechazarSiEsImportada(order)
-
-    const row = await tx.orderServiceCharge.findFirst({ where: { id: orderServiceChargeId, orderId } })
-    if (!row) throw new NotFoundError('Cobro no aplicado a esta orden')
-
-    await tx.orderServiceCharge.delete({ where: { id: row.id } })
-
-    const { recalculateOrderTotals } = await import('./comp-item.mobile.service')
-    const totals = await recalculateOrderTotals(orderId, 0, Number(order.paidAmount || 0), tx)
-
-    return { row, totals }
-  }, ORDER_LOCK_WAIT_BUDGET)
+  const { row, totals } = await prisma.$transaction(
+    tx => removeServiceChargeInTransaction(tx, venueId, orderId, orderServiceChargeId),
+    ORDER_LOCK_WAIT_BUDGET,
+  )
 
   void (await import('../dashboard/activity-log.service')).logAction({
     action: 'ORDER_SERVICE_CHARGE_REMOVED',
@@ -185,7 +204,30 @@ export async function syncAutomaticServiceCharges(venueId: string, orderId: stri
   }, ORDER_LOCK_WAIT_BUDGET)
 }
 
-async function syncAutomaticServiceChargesInTransaction(tx: Prisma.TransactionClient, venueId: string, orderId: string) {
+export type AutomaticServiceChargeCapture = { createdIds: string[]; deletedIds: string[]; recalculatedIds: string[] }
+
+export async function syncAutomaticServiceChargesInTransaction(
+  tx: Prisma.TransactionClient,
+  venueId: string,
+  orderId: string,
+  capture?: AutomaticServiceChargeCapture,
+) {
+  async function capturedAmounts() {
+    const amounts = new Map<string, Prisma.Decimal>()
+    let cursor: string | undefined
+    for (;;) {
+      const page = await tx.orderServiceCharge.findMany({
+        where: { orderId },
+        select: { id: true, amount: true },
+        orderBy: { id: 'asc' },
+        take: 100,
+        ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+      })
+      for (const row of page) amounts.set(row.id, row.amount)
+      if (page.length < 100) return amounts
+      cursor = page[page.length - 1].id
+    }
+  }
   const order = await tx.order.findFirst({
     where: { id: orderId, venueId },
     select: { id: true, subtotal: true, discountAmount: true, paymentStatus: true, paidAmount: true, covers: true, originSystem: true },
@@ -224,17 +266,35 @@ async function syncAutomaticServiceChargesInTransaction(tx: Prisma.TransactionCl
           isAutomatic: true,
         },
       })
+      if (capture && created.count > 0) {
+        const row = await tx.orderServiceCharge.findUniqueOrThrow({
+          where: { orderId_serviceChargeId: { orderId, serviceChargeId: rule.id } },
+          select: { id: true },
+        })
+        capture.createdIds.push(row.id)
+      }
       // ON CONFLICT preserves manual rows and never aborts the caller's tx.
       changed = created.count > 0 || changed
     } else if (!qualifies && existing?.isAutomatic) {
       // Bajaron los comensales: el cargo automático deja de corresponder.
       await tx.orderServiceCharge.delete({ where: { id: existing.id } })
+      if (capture) capture.deletedIds.push(existing.id)
       changed = true
     }
   }
 
   if (!changed) return null
 
+  // Complete cursor pages under the caller's Order lock; no capture reads without a sink.
+  const before = capture ? await capturedAmounts() : new Map<string, Prisma.Decimal>()
   const { recalculateOrderTotals } = await import('./comp-item.mobile.service')
-  return recalculateOrderTotals(orderId, 0, Number(order.paidAmount || 0), tx)
+  const totals = await recalculateOrderTotals(orderId, 0, Number(order.paidAmount || 0), tx)
+  if (capture) {
+    const after = await capturedAmounts()
+    for (const [id, amount] of after) {
+      const prior = before.get(id)
+      if (prior && !prior.equals(amount)) capture.recalculatedIds.push(id)
+    }
+  }
+  return totals
 }

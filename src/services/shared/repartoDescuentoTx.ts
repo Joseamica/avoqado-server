@@ -288,6 +288,11 @@ export type ResultadoDeRecorte = {
   recortadoPesos: number
   impuestoDevuelto: Prisma.Decimal
   retiradas: Array<{ id: string; name: string; pointsRefunded: number; stampRewardReturned: string | null }>
+  benefits?: Array<{
+    orderDiscountId: string
+    loyaltyRefund: { pointsRefunded: number; customerId: string; transactionId: string } | null
+    stampRefund: { rewardId: string; customerId: string; rewardLabel: string } | null
+  }>
 }
 
 /**
@@ -299,9 +304,10 @@ export type ResultadoDeRecorte = {
 export async function recortarDescuentosDeRenglones(
   tx: Prisma.TransactionClient,
   orderId: string,
-  o: { renglones: string[]; venueId: string; staffId?: string | null },
+  o: { renglones: string[]; venueId: string; staffId?: string | null; captureBenefits?: boolean },
 ): Promise<ResultadoDeRecorte> {
   const resultado: ResultadoDeRecorte = { recortadoPesos: 0, impuestoDevuelto: new Prisma.Decimal(0), retiradas: [] }
+  if (o.captureBenefits) resultado.benefits = []
   if (o.renglones.length === 0) return resultado
   const cambian = await tx.orderItem.findMany({
     where: { orderId, id: { in: o.renglones } },
@@ -328,6 +334,7 @@ export async function recortarDescuentosDeRenglones(
     if (recorte.accion === 'RETIRAR') {
       const puntos = await refundLoyaltyForOrderDiscount(tx, o.venueId, fila, o.staffId ?? undefined)
       const premio = await refundStampRewardForOrderDiscount(tx, o.venueId, fila)
+      if (o.captureBenefits) resultado.benefits!.push({ orderDiscountId: fila.id, loyaltyRefund: puntos, stampRefund: premio })
       await tx.orderDiscount.delete({ where: { id: fila.id } })
       impuesto = impuesto.plus(guardada)
       resultado.retiradas.push({

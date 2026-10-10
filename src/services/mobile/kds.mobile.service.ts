@@ -7,12 +7,12 @@
  */
 
 import logger from '../../config/logger'
-import { BadRequestError, NotFoundError, ProviderUnavailableError } from '../../errors/AppError'
+import { BadRequestError, ConflictError, NotFoundError, ProviderUnavailableError } from '../../errors/AppError'
 import { contexto, markDeliveryOrderReady } from '@/services/delivery-channels/core/respondToDeliveryOrder.service'
 import type { CourierInfo } from '@/services/delivery-channels/core/types'
 import prisma from '../../utils/prismaClient'
 import { OrderStatus } from '@prisma/client'
-import type { KdsOrderStatus, Prisma } from '@prisma/client'
+import type { KdsOrder, KdsOrderItem, KdsOrderStatus, Prisma } from '@prisma/client'
 import { anexarCapacidades, anexarMesaYTiempos, ventasDeComandas, type EstadoRetiro, type VentaDeComanda } from './kdsCapacidades'
 import { toKdsModifierLabels } from '../kds/kdsModifierLabels'
 import { venueTienePantallaDeCocina } from '../kds/kitchenDisplayStations'
@@ -68,6 +68,7 @@ export interface KdsOrderResponse {
   orderType: string
   orderId: string | null
   status: KdsOrderStatus
+  preparationVersion?: number
   /** Falta que la cocina lo acepte en la app de delivery (sólo en canales MANUAL). */
   needsAcceptance?: boolean
   /** ¿Falta que un aparato reclame e imprima esta comanda? Sólo para pedidos de marketplace. */
@@ -178,17 +179,80 @@ export async function countKdsOrders(venueId: string, statusFilter?: string, sta
   return prisma.kdsOrder.count({ where: await filtroDelTablero(venueId, statusesDelFiltro(statusFilter), stationId) })
 }
 
-export async function listKdsOrders(venueId: string, statusFilter?: string, stationId?: string): Promise<KdsOrderResponse[]> {
-  // Las MÁS RECIENTES primero para aplicar el tope — con un rezago acumulado, la cocina debe
-  // seguir viendo lo que acaba de entrar, no lo de hace un mes — y luego se voltean para
-  // entregarlas de la más vieja a la más nueva, como siempre. `id` desempata en el mismo instante.
-  const recientes = await prisma.kdsOrder.findMany({
-    where: await filtroDelTablero(venueId, statusesDelFiltro(statusFilter), stationId),
-    include: { items: true },
-    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-    take: KDS_LIST_MAX,
-  })
-  const orders = recientes.reverse()
+export interface KdsBoardPageOptions {
+  urgencyVersion: 1
+  offset?: number
+  limit?: number
+}
+
+export async function listKdsOrders(
+  venueId: string,
+  statusFilter?: string,
+  stationId?: string,
+  page?: KdsBoardPageOptions,
+): Promise<KdsOrderResponse[]> {
+  const offset = page?.offset ?? 0
+  const limit = page?.limit ?? KDS_LIST_MAX
+  if (
+    page &&
+    (!Number.isSafeInteger(offset) || offset < 0 || offset > 1_000_000 || !Number.isSafeInteger(limit) || limit < 1 || limit > KDS_LIST_MAX)
+  ) {
+    throw new BadRequestError('La página de cocina debe tener entre 1 y 100 comandas y un desplazamiento válido')
+  }
+  const base = await filtroDelTablero(venueId, statusesDelFiltro(statusFilter), stationId)
+  let orders: Array<KdsOrder & { items: KdsOrderItem[] }>
+  if (page?.urgencyVersion === 1) {
+    const priority: Prisma.KdsOrderWhereInput = {
+      preparationVersion: 1,
+      items: {
+        some: {
+          AND: [
+            {
+              OR: [
+                { preparation: { path: ['urgency', 'acknowledged'], equals: false } },
+                { preparation: { path: ['urgency', 'acknowledged'], equals: true } },
+              ],
+            },
+            { OR: ['HELD', 'PENDING', 'PREPARING'].map(state => ({ preparation: { path: [state], gt: 0 } })) },
+          ],
+        },
+      },
+    }
+    const urgentCount = await prisma.kdsOrder.count({ where: { ...base, AND: [base, priority] } })
+    const urgentTake = Math.min(limit, Math.max(0, urgentCount - offset))
+    const urgent =
+      urgentTake > 0
+        ? await prisma.kdsOrder.findMany({
+            where: { ...base, AND: [base, priority] },
+            include: { items: true },
+            orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+            skip: offset,
+            take: urgentTake,
+          })
+        : []
+    const remaining = limit - urgent.length
+    const normal =
+      remaining > 0
+        ? await prisma.kdsOrder.findMany({
+            where: { ...base, AND: [base, { NOT: priority }] },
+            include: { items: true },
+            orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+            skip: Math.max(0, offset - urgentCount),
+            take: remaining,
+          })
+        : []
+    orders = [...urgent, ...normal]
+  } else {
+    // Preserve the legacy first page and response array for installed clients.
+    orders = (
+      await prisma.kdsOrder.findMany({
+        where: base,
+        include: { items: true },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        take: KDS_LIST_MAX,
+      })
+    ).reverse()
+  }
 
   // 🔴 Consultas aparte y no un `include`: `KdsOrder.orderId` es un `String?` SUELTO, sin relación con
   // `Order` — un `include` revienta en runtime (y la orden puede estar borrada: ausencia = "no falta
@@ -218,8 +282,10 @@ export async function listRecentKdsOrders(venueId: string, stationId?: string): 
 
 /** «Deshacer»: una comanda terminada vuelve a la cocina como nueva. */
 export async function recallKdsOrder(venueId: string, kdsOrderId: string): Promise<KdsOrderResponse> {
+  const existing = await prisma.kdsOrder.findFirst({ where: { id: kdsOrderId, venueId }, select: { preparationVersion: true } })
+  requireLegacyPreparation(existing)
   const r = await prisma.kdsOrder.updateMany({
-    where: { id: kdsOrderId, venueId, status: KdsStatus.COMPLETED },
+    where: { id: kdsOrderId, venueId, preparationVersion: 0, status: KdsStatus.COMPLETED },
     data: { status: KdsStatus.NEW, completedAt: null },
   })
   if (r.count === 0) throw new NotFoundError('No hay una comanda terminada con ese id para regresar')
@@ -235,12 +301,13 @@ export async function bumpKdsOrdersBatch(venueId: string, ids: string[]): Promis
   const unicos = [...new Set(ids)].slice(0, KDS_BUMP_BATCH_MAX)
   const pendientes = await prisma.kdsOrder.findMany({
     where: { venueId, id: { in: unicos }, status: { not: KdsStatus.COMPLETED } },
-    select: { id: true, orderId: true, orderNumber: true },
+    select: { id: true, orderId: true, orderNumber: true, preparationVersion: true },
     take: KDS_BUMP_BATCH_MAX,
   })
   if (pendientes.length === 0) return { completed: 0 }
+  pendientes.forEach(requireLegacyPreparation)
   const r = await prisma.kdsOrder.updateMany({
-    where: { venueId, id: { in: pendientes.map(p => p.id) }, status: { not: KdsStatus.COMPLETED } },
+    where: { venueId, id: { in: pendientes.map(p => p.id) }, preparationVersion: 0, status: { not: KdsStatus.COMPLETED } },
     data: { status: KdsStatus.COMPLETED, completedAt: new Date() },
   })
   // Igual que el bump de una: un pedido de reparto terminado avisa «listo» al proveedor (no-op para lo demás).
@@ -335,6 +402,8 @@ export async function updateKdsOrderStatus(venueId: string, orderId: string, new
     throw new NotFoundError('Orden KDS no encontrada')
   }
 
+  requireLegacyPreparation(existing)
+
   const now = new Date()
   const updateData: any = { status: upperStatus }
 
@@ -346,7 +415,7 @@ export async function updateKdsOrderStatus(venueId: string, orderId: string, new
   }
 
   const updated = await prisma.kdsOrder.update({
-    where: { id: orderId },
+    where: { id: orderId, venueId, preparationVersion: 0 },
     data: updateData,
     include: { items: true },
   })
@@ -393,9 +462,10 @@ export async function bumpKdsOrder(venueId: string, orderId: string): Promise<Kd
   if (!existing) {
     throw new NotFoundError('Orden KDS no encontrada')
   }
+  requireLegacyPreparation(existing)
 
   const updated = await prisma.kdsOrder.update({
-    where: { id: orderId },
+    where: { id: orderId, venueId, preparationVersion: 0 },
     data: {
       status: KdsStatus.COMPLETED,
       completedAt: new Date(),
@@ -417,6 +487,14 @@ export async function bumpKdsOrder(venueId: string, orderId: string): Promise<Kd
 
 // MARK: - Helper
 
+function requireLegacyPreparation(ticket: { preparationVersion?: number } | null) {
+  if (ticket?.preparationVersion)
+    throw new ConflictError(
+      'Esta comanda avanza por producto. Actualiza la app y usa Preparando, Listo o Entregado en cada producto.',
+      'PREPARATION_VERSION_REQUIRED',
+    )
+}
+
 function formatKdsOrder(order: any, needsAcceptance = false): KdsOrderResponse {
   return {
     id: order.id,
@@ -424,6 +502,7 @@ function formatKdsOrder(order: any, needsAcceptance = false): KdsOrderResponse {
     orderType: order.orderType,
     orderId: order.orderId,
     status: order.status,
+    preparationVersion: order.preparationVersion ?? 0,
     customerName: order.customerName ?? null,
     customerContact: order.customerContact ?? null,
     sourceKey: order.sourceKey ?? null,
@@ -440,6 +519,13 @@ function formatKdsOrder(order: any, needsAcceptance = false): KdsOrderResponse {
       // no imprimirlo.
       productId: item.productId ?? null,
       categoryId: item.categoryId ?? null,
+      orderItemId: item.orderItemId ?? null,
+      externalId: item.externalLineId ?? null,
+      orderPromotionId: item.orderPromotionId ?? null,
+      serviceCourse: item.serviceCourse ?? null,
+      course: item.serviceCourse?.label ?? null,
+      preparation: item.preparation ?? null,
+      preparationRevision: item.preparationRevision ?? 0,
     })),
     /**
      * 🔴 ¿Falta que alguien acepte este pedido en la app de delivery?

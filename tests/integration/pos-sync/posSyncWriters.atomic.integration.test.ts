@@ -121,23 +121,53 @@ async function whileFiscalHolds<T>(
   }
   return writer!
 }
-/** Pauses the next Order lock right after it is acquired; `entered` fails if the writer ends without taking it. */
-function pauseAfterOrderLock() {
+/** Observe only this fixture's real claim, after PostgreSQL acquired it; preserve the legacy item path explicitly. */
+function pauseAfterOrderLock(orderId: string, mode: 'scope' | 'legacy') {
   const entered = barrier<number>(),
     finish = barrier()
-  const lock = orderLock.lockExistingOrderForPayment
-  jest.spyOn(orderLock, 'lockExistingOrderForPayment').mockImplementationOnce(async (tx, input) => {
-    const value = await lock(tx, input)
-    entered.release(await backendPid(tx))
-    await finish.promise
-    return value
-  })
+  const original = prisma.$transaction.bind(prisma)
+  let paused = false
+  jest.spyOn(prisma, '$transaction').mockImplementation(((callback: any, options: any) =>
+    Array.isArray(callback)
+      ? original(callback, options)
+      : original(
+          async tx =>
+            callback(
+              new Proxy(tx, {
+                get(target, key) {
+                  if (key !== '$queryRaw') return Reflect.get(target, key)
+                  return async (...args: unknown[]) => {
+                    const rows: unknown = await Reflect.apply(target.$queryRaw, target, args)
+                    const sql = Array.isArray(args[0]) ? args[0].join('?').replace(/\s+/g, ' ').trim() : ''
+                    const scopeClaim =
+                      mode === 'scope' &&
+                      sql === 'SELECT id FROM "Order" WHERE "venueId"=? AND id=ANY(?::text[]) ORDER BY id FOR UPDATE' &&
+                      args[1] === venueId &&
+                      Array.isArray(args[2]) &&
+                      args[2].includes(orderId)
+                    const legacyClaim =
+                      mode === 'legacy' &&
+                      sql === 'SELECT id FROM "Order" WHERE id = ? AND "venueId" = ? FOR UPDATE' &&
+                      args[1] === orderId &&
+                      args[2] === venueId
+                    if (!paused && (scopeClaim || legacyClaim) && Array.isArray(rows) && rows.some(row => row.id === orderId)) {
+                      paused = true
+                      entered.release(await backendPid(target))
+                      await finish.promise
+                    }
+                    return rows
+                  }
+                },
+              }),
+            ),
+          options,
+        )) as any)
   return {
     entered: (writer: Promise<unknown>) =>
       Promise.race([
         entered.promise,
         writer.then(() => {
-          throw new Error('writer never acquired Order lock')
+          throw new Error('writer never acquired target Order lock')
         }),
       ]),
     release: () => finish.release(),
@@ -292,7 +322,7 @@ describe('header events vs fiscal capture, both directions', () => {
 
   it('fiscal capture arriving while a header event holds the Order sees the whole event: money, PAID and its payment', async () => {
     const o = await posOrder()
-    const paused = pauseAfterOrderLock()
+    const paused = pauseAfterOrderLock(o.id, 'scope')
     const writer = resultOf(processPosOrderEvent(header(o.externalId, { subtotal: 300, taxAmount: 48, total: 348 }, 348)))
     let reservation: Promise<unknown> | undefined
     try {
@@ -304,7 +334,7 @@ describe('header events vs fiscal capture, both directions', () => {
       await blockedBy(pid)
     } finally {
       paused.release()
-      await writer
+      await Promise.allSettled([writer, ...(reservation ? [reservation] : [])])
     }
     expect((await writer).error).toBeUndefined()
     const final = { order: await snapshot(o.id), payments: await prisma.payment.count({ where: { orderId: o.id } }) }
@@ -420,7 +450,7 @@ describe('line events vs fiscal capture, both directions', () => {
 
   it('fiscal capture arriving while a line event holds the Order sees the finished line', async () => {
     const o = await posOrder({ lines: 1 })
-    const paused = pauseAfterOrderLock()
+    const paused = pauseAfterOrderLock(o.id, 'legacy')
     const writer = resultOf(processPosOrderItemEvent(line(o.externalId, `${o.externalId}:NEW`, { quantity: 3, total: 150, taxAmount: 24 })))
     let reservation: Promise<unknown> | undefined
     try {
@@ -432,7 +462,7 @@ describe('line events vs fiscal capture, both directions', () => {
       await blockedBy(pid)
     } finally {
       paused.release()
-      await writer
+      await Promise.allSettled([writer, ...(reservation ? [reservation] : [])])
     }
     expect((await writer).error).toBeUndefined()
     const final = await snapshot(o.id)

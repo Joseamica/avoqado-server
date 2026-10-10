@@ -1,6 +1,12 @@
 // El guard de ventas por sucursal (venueSalesGuard) NO es el objeto de esta suite:
 // se prueba en tests/unit/services/venueSalesGuard.test.ts. Sin este mock, cada
 // servicio de venta consulta venue.salesEnabled contra un prismaMock que no lo define.
+// FT-GRAVES T2: este cobro encola su comisión en la transacción, con el MISMO gancho que la terminal. No es objeto de esta
+// suite (sus pruebas son tests/integration/commission/cobrosDelDashboard y cobrosEnLineaYCripto).
+jest.mock('@/services/tpv/paymentEffects.service', () => ({
+  ...jest.requireActual('@/services/tpv/paymentEffects.service'),
+  enqueuePaymentCommissionInTx: jest.fn().mockResolvedValue(undefined),
+}))
 jest.mock('@/services/venueSalesGuard', () => ({
   __esModule: true,
   assertVenueSalesEnabled: jest.fn(),
