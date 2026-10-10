@@ -137,7 +137,11 @@ espejo dejaría la cuenta en 11 contra las 12 piezas de Avoqado. Si hay filas vi
   candado y la revalida ya con los candados puestos.
 - Los cierres por falla (devolver a la fila, FAILED, DEAD_LETTER) van sin cerco, con los candados en orden, y se protegen con el
   `claimToken` de la fila: si ya no es suya, no escriben. No le exijas al mensajero revisar el cerco antes de esos cierres. Un 401 sólo
-  revoca la tienda si el token sigue siendo el vigente (`tokenVersion`).
+  revoca la tienda si el token sigue siendo el vigente (`tokenVersion`), y lo hace por `revocarTiendaSiVigente(…)` como toda revocación
+  (deja `SHOPIFY_STORE_REVOKED` en `ActivityLog` y avisa REVOCADA, M5).
+- **Lo que no es un intento no gasta intento (M6):** `THROTTLED` (429, o THROTTLED en un 200) y un token que no se puede descifrar (antes de
+  salir; `leerToken(…)` lo deja en el log de errores) devuelven la fila sin sumar `attempts` y sin tocar su duda, como la importación y el
+  cuadre. Una `SHOPIFY_TOKEN_KEY` mal puesta no manda el buzón a DEAD_LETTER; una fila ambigua sigue acotada por su ventana de 23 h.
 - **`marcarFaltaPermiso(…)`** bloquea `FOR NO KEY UPDATE` SÓLO la sucursal que recibe (`locationLinkId`; sin ella, las de la tienda, por id)
   y después la tienda `FOR SHARE` (`mirror.service.ts:371`). Quien la llame lo hace antes de cualquier candado de pareja, fila o cerco, o en
   una tx propia (el mensajero: tx de 15 s, porque avisa por dentro). `FOR NO KEY UPDATE` y no `FOR UPDATE`: no frena el `FOR KEY SHARE` de

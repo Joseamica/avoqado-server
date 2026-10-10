@@ -1,6 +1,8 @@
 // tests/integration/shopify/mensajero.integration.test.ts
 import { randomUUID } from 'crypto'
 import prisma from '@/utils/prismaClient'
+import logger from '@/config/logger'
+import { logAction } from '@/services/dashboard/activity-log.service'
 import {
   applyShopifyLevel,
   CercoShopify,
@@ -447,6 +449,7 @@ it('falla reintentable ⇒ FAILED con espera creciente; al 6º intento DEAD_LETT
 
 it('401 con el token vigente ⇒ tienda REVOKED (la sucursal conserva su fase), fila PENDING sin gastar intento, aviso', async () => {
   const e = await escenario()
+  ;(logAction as jest.Mock).mockClear()
   await venta(e.inventoryId)
   const c = await reclamar()
   expect(
@@ -462,6 +465,87 @@ it('401 con el token vigente ⇒ tienda REVOKED (la sucursal conserva su fase), 
   expect(await fila(c.id)).toMatchObject({ status: 'PENDING', attempts: 0, claimToken: null })
   expect(await avisos(e, 'REVOCADA')).toBe(1)
   expect(await hueco(e)).toBe('0')
+  // M5: la revocación del mensajero deja rastro como cualquier otra (revocarTiendaSiVigente).
+  expect(logAction).toHaveBeenCalledWith(
+    expect.objectContaining({
+      action: 'SHOPIFY_STORE_REVOKED',
+      entity: 'ShopifyStore',
+      entityId: e.storeId,
+      organizationId: e.organizationId,
+    }),
+  )
+})
+
+describe('M6: lo que no gastó un intento de verdad no lo cuenta', () => {
+  const clave = process.env.SHOPIFY_TOKEN_KEY
+  afterEach(() => {
+    process.env.SHOPIFY_TOKEN_KEY = clave
+  })
+  const errores = () => (logger.error as jest.Mock).mock.calls.map(c => String(c[0]))
+
+  it('🔴 una SHOPIFY_TOKEN_KEY equivocada no manda filas a DEAD_LETTER: cada vez vuelven sin gastar intento, sin salir a la red, y queda en el log de errores', async () => {
+    const e = await escenario()
+    await venta(e.inventoryId)
+    process.env.SHOPIFY_TOKEN_KEY = 'b'.repeat(64) // otra llave válida: el token guardado ya no se puede descifrar
+    ;(logger.error as jest.Mock).mockClear()
+    const graphql = graphqlFalso(exito)
+    const t0 = Date.now()
+    for (let i = 0; i < SHOPIFY_OUTBOX_MAX_ATTEMPTS + 2; i++) {
+      const ahora = new Date(t0 + i * 61_000) // cada vuelta, pasada la espera de la anterior
+      const c = await reclamar(ahora)
+      expect(await runShopifyOutboxRow(c.id, c.claimToken, ahora, { graphql, hasAccess: siAcceso })).toBe('PAUSADO')
+    }
+    expect(await filaDe(e.productId)).toMatchObject({ status: 'PENDING', attempts: 0, claimToken: null, ambiguous: false })
+    expect(graphql).not.toHaveBeenCalled()
+    expect(errores().some(m => m.includes('SHOPIFY_TOKEN_KEY'))).toBe(true)
+    expect(await avisos(e, 'ATORADOS')).toBe(0)
+    process.env.SHOPIFY_TOKEN_KEY = clave // la llave correcta otra vez: sale a la primera
+    const c = await reclamar(new Date(t0 + 20 * 61_000))
+    expect(await runShopifyOutboxRow(c.id, c.claimToken, new Date(), { graphql, hasAccess: siAcceso })).toBe('SENT')
+    expect(await hueco(e)).toBe('0')
+  })
+
+  it('🔴 THROTTLED (429 o THROTTLED en un 200) devuelve la fila sin gastar intento y sin tocar la duda; nunca llega a DEAD_LETTER por eso', async () => {
+    const e = await escenario()
+    await venta(e.inventoryId)
+    const graphql = graphqlFalso(falla('THROTTLED', true, false))
+    const t0 = Date.now()
+    for (let i = 0; i < SHOPIFY_OUTBOX_MAX_ATTEMPTS + 2; i++) {
+      const ahora = new Date(t0 + i * 61_000)
+      const c = await reclamar(ahora)
+      expect(await runShopifyOutboxRow(c.id, c.claimToken, ahora, { graphql, hasAccess: siAcceso })).toBe('PAUSADO')
+    }
+    expect(graphql).toHaveBeenCalledTimes(SHOPIFY_OUTBOX_MAX_ATTEMPTS + 2)
+    expect(await filaDe(e.productId)).toMatchObject({ status: 'PENDING', attempts: 0, ambiguous: false, claimToken: null })
+    expect(await avisos(e, 'ATORADOS')).toBe(0)
+    expect(await hueco(e)).toBe('0')
+  })
+
+  it('THROTTLED sobre una fila que ya era ambigua la deja ambigua y con su ventana (se resuelve con la misma llave)', async () => {
+    const e = await escenario()
+    await venta(e.inventoryId)
+    const ahora = new Date()
+    const c = await reclamar(ahora)
+    expect(
+      await runShopifyOutboxRow(c.id, c.claimToken, ahora, { graphql: graphqlFalso(falla('TIMEOUT', true, true)), hasAccess: siAcceso }),
+    ).toBe('FAILED')
+    const ambigua = await filaDe(e.productId)
+    expect(ambigua).toMatchObject({ ambiguous: true, attempts: 1 })
+    const despues = new Date(ahora.getTime() + 61_000)
+    const c2 = await reclamar(despues)
+    expect(
+      await runShopifyOutboxRow(c2.id, c2.claimToken, despues, {
+        graphql: graphqlFalso(falla('THROTTLED', true, false)),
+        hasAccess: siAcceso,
+      }),
+    ).toBe('PAUSADO')
+    expect(await filaDe(e.productId)).toMatchObject({
+      status: 'FAILED',
+      ambiguous: true,
+      attempts: 1,
+      firstAttemptAt: ambigua.firstAttemptAt,
+    })
+  })
 })
 
 it('🔴 401 de un token viejo (se reautorizó mientras volaba la petición) NO revoca; la fila vuelve a PENDING (#13)', async () => {
@@ -476,6 +560,7 @@ it('🔴 401 de un token viejo (se reautorizó mientras volaba la petición) NO 
   expect(await prisma.shopifyStore.findUniqueOrThrow({ where: { id: e.storeId } })).toMatchObject({ status: 'ACTIVE', tokenVersion: 2 })
   expect(await fila(c.id)).toMatchObject({ status: 'PENDING', attempts: 0 })
   expect(await avisos(e, 'REVOCADA')).toBe(0)
+  expect(logAction).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'SHOPIFY_STORE_REVOKED', entityId: e.storeId }))
 })
 
 it('HTTP 403 ⇒ DEAD_LETTER FALTA_PERMISO, sin revocar, con aviso', async () => {
@@ -653,17 +738,17 @@ it('SERVICE_UNAVAILABLE en userErrors ⇒ FAILED reintentable que no inventa dud
 })
 
 it.each([
-  ['TIMEOUT', true],
-  ['THROTTLED', false],
+  ['TIMEOUT', true, 'FAILED'],
+  ['THROTTLED', false, 'PAUSADO'], // M6: vuelve sin gastar intento
 ] as const)(
   '🔴 tras %s el reintento manda EXACTAMENTE los parámetros del primer intento, aunque la pareja cambie (N2)',
-  async (code, ambigua) => {
+  async (code, ambigua, salida) => {
     const e = await escenario()
     await venta(e.inventoryId)
     const t0 = new Date()
     const c1 = await reclamar(t0)
     const primero = graphqlFalso(falla(code, true, ambigua))
-    expect(await runShopifyOutboxRow(c1.id, c1.claimToken, t0, { graphql: primero, hasAccess: siAcceso })).toBe('FAILED')
+    expect(await runShopifyOutboxRow(c1.id, c1.claimToken, t0, { graphql: primero, hasAccess: siAcceso })).toBe(salida)
     expect(await fila(c1.id)).toMatchObject({
       ambiguous: ambigua,
       sentInventoryItemId: 'gid://shopify/InventoryItem/1',

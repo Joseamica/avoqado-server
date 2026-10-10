@@ -118,6 +118,19 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
       'se protegen con el `claimToken` de la fila',
       'Un 401 sólo revoca la tienda si el token sigue siendo el vigente',
     ])
+    // M5 y M6: el 401 revoca por el mismo camino que todos; THROTTLED y un token ilegible no gastan intento.
+    contieneTodas([
+      'y lo hace por `revocarTiendaSiVigente(…)` como toda revocación (deja `SHOPIFY_STORE_REVOKED` en `ActivityLog` y avisa REVOCADA, M5)',
+      '**Lo que no es un intento no gasta intento (M6):** `THROTTLED` (429, o THROTTLED en un 200) y un token que no se puede descifrar',
+      'Una `SHOPIFY_TOKEN_KEY` mal puesta no manda el buzón a DEAD_LETTER',
+    ])
+    const mensajeroM = leer(`${SHOPIFY}/shopify.outbox.service.ts`)
+    const enviar = cuerpo(mensajeroM, 'export async function runShopifyOutboxRow(')
+    expect(enviar).toContain('await revocarTiendaSiVigente(store.id, tokenVersion)')
+    expect(enviar).not.toContain("data: { status: 'REVOKED'")
+    enOrden(enviar, ['const leido = leerToken(link!.store)', 'await cerrar(row, claimToken, devuelta(row, now))'])
+    const trasLimite = enviar.slice(enviar.indexOf("if (r.code === 'THROTTLED')"))
+    enOrden(trasLimite, ["if (r.code === 'THROTTLED')", 'await cerrar(row, claimToken, devuelta(row, now))', "return 'PAUSADO'"])
     expect(regla).not.toContain('El mensajero sólo toma')
     expect(regla).not.toContain('El mensajero sin cerco: pareja → buzón')
     expect(regla).not.toContain('Con cerco: sucursal → tienda → pareja → buzón → evento (al final)')

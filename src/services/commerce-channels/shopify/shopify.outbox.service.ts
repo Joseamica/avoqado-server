@@ -32,7 +32,6 @@ import logger from '@/config/logger'
 import { utcTs } from '@/utils/sqlDates'
 import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
 import { shopifyGraphql } from './shopify.graphql'
-import { decryptShopifyToken } from './shopify.crypto'
 import { SHOPIFY_FEATURE } from './shopify.constants'
 import { notifyShopify, ShopifyAviso } from './shopify.notify.service'
 import {
@@ -43,6 +42,8 @@ import {
   marcarFaltaPermiso,
   SHOPIFY_IMPORT_ERRORES_TERMINALES,
 } from './shopify.mirror.service'
+// Ciclo de importación con store.service (que importa `avisarTienda` de aquí) a propósito: sólo se llaman dentro de funciones.
+import { leerToken, revocarTiendaSiVigente } from './shopify.store.service'
 
 export const SHOPIFY_OUTBOX_MAX_ATTEMPTS = 6
 /** Lo que dura el reclamo; si el proceso muere con la fila en curso, el siguiente reclamo la retoma al vencer. */
@@ -436,8 +437,9 @@ export async function avisarTienda(storeId: string, aviso: ShopifyAviso): Promis
  * tarde»; FAILED ambiguo si la misma llave sigue en curso) · 401 con el token vigente ⇒ REVOKED; con un token que cambió
  * mientras volaba ⇒ FAILED (la fila queda PENDING para usar el nuevo) · 403 o ACCESS_DENIED con la credencial y la
  * generación vigentes ⇒ la sucursal queda FALTA_PERMISO (un aviso) y la fila DEAD_LETTER con la duda previa; de una
- * credencial o generación vieja ⇒ FAILED reintentable, sin marca ni aviso (§11.3) · otra falla reintentable ⇒ FAILED con
- * espera, y DEAD_LETTER al tope · no reintentable ⇒ DEAD_LETTER.
+ * credencial o generación vieja ⇒ FAILED reintentable, sin marca ni aviso (§11.3) · THROTTLED, o un token que no se puede
+ * descifrar (antes de salir), ⇒ la fila vuelve SIN gastar intento ni tocar su duda (PAUSADO, M6) · otra falla reintentable
+ * ⇒ FAILED con espera, y DEAD_LETTER al tope · no reintentable ⇒ DEAD_LETTER.
  */
 export async function runShopifyOutboxRow(
   id: string,
@@ -464,11 +466,15 @@ export async function runShopifyOutboxRow(
   const sinPlan = leida.k === 'ENVIAR' && !leida.resolver && !(await hasAccess(row.venueId))
   let token = ''
   if (leida.k === 'ENVIAR' && !sinPlan) {
-    try {
-      token = decryptShopifyToken(link!.store.accessTokenCiphertext)
-    } catch (err) {
-      return reintentar(row, claimToken, now, { ambiguous: row.ambiguous, lastError: `TOKEN_ILEGIBLE: ${(err as Error).message}` })
+    // M6 (como la importación y el cuadre, B-7): un token que no se puede descifrar no salió a la red, así que no es un
+    // intento. La fila vuelve sin gastarlo (con la duda que traía): una SHOPIFY_TOKEN_KEY mal puesta no puede mandar el
+    // buzón entero a DEAD_LETTER. `leerToken` lo deja en el log de errores con la pista de la llave.
+    const leido = leerToken(link!.store)
+    if (leido === null) {
+      await cerrar(row, claimToken, devuelta(row, now))
+      return 'PAUSADO'
     }
+    token = leido
   }
 
   type Previo = { k: 'ENVIAR'; destino: Destino; generation: number } | { k: 'SALIDA'; outcome: RowOutcome; atorada?: string }
@@ -551,19 +557,22 @@ export async function runShopifyOutboxRow(
   }
 
   if (r.code === 'UNAUTHORIZED') {
-    // Sólo revoca si el token que salió sigue siendo el vigente (#13): una reautorización a media petición no se pisa.
-    const revocada = await prisma.shopifyStore.updateMany({
-      where: { id: store.id, status: 'ACTIVE', tokenVersion },
-      data: { status: 'REVOKED', revokedAt: now },
-    })
+    // Sólo revoca si el token que salió sigue siendo el vigente (#13): una reautorización a media petición no se pisa. M5:
+    // por `revocarTiendaSiVigente`, como toda revocación: deja SHOPIFY_STORE_REVOKED en ActivityLog, el error en el log y
+    // avisa REVOCADA a cada sucursal de la tienda. Va en su propia tx, sin candados de la fila puestos.
+    const revocada = await revocarTiendaSiVigente(store.id, tokenVersion)
     await cerrar(row, claimToken, { status: 'PENDING', scheduledAt: now })
-    if (revocada.count === 0) {
+    if (!revocada) {
       logger.warn(`[SHOPIFY] buzón: 401 de un token que ya cambió (${store.shopDomain}); la fila sale con el vigente`)
       return 'FAILED'
     }
-    logger.error(`[SHOPIFY] ${store.shopDomain} rechazó el token (401): tienda revocada`)
-    await avisarTienda(store.id, 'REVOCADA')
     return 'REVOKED'
+  }
+  if (r.code === 'THROTTLED') {
+    // M6: Shopify dijo «más tarde» (429 o THROTTLED en un 200): no aplicó nada y no es un intento. La fila vuelve sin
+    // gastarlo y con su duda tal cual; una fila ambigua conserva su ventana de 23 h, que es lo que la acota.
+    await cerrar(row, claimToken, devuelta(row, now))
+    return 'PAUSADO'
   }
   if (r.code === 'FORBIDDEN') {
     // §11.3: sólo la credencial y la generación con las que salió la petición, si siguen vigentes, marcan la sucursal.
