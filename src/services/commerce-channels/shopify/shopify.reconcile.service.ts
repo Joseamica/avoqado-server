@@ -51,6 +51,7 @@ import {
   archivarPareja,
   bloquearBuzon,
   CATALOGO_MAESTRO,
+  confirmarBajas,
   contextoDe,
   esErrorDeGobierno,
   FILTRO_ESTADO,
@@ -332,8 +333,11 @@ async function fallaDelBarrido(
   return ok ? vacio('BARRIDO', { error, esperaMs: ESPERA_TANDA_MS }) : cambio('BARRIDO')
 }
 
-/** Sin un barrido COMPLETO no se decide ninguna baja: la vuelta pasa directo al stock. Nunca escribe `importError` (T2). */
-async function saltarBarrido(l: Sucursal, cerco: CercoShopify, error: string): Promise<ResultadoCuadre> {
+/**
+ * Sin un barrido COMPLETO no se decide ninguna baja: la vuelta pasa directo al stock. Nunca escribe `importError` (T2).
+ * Queda en el log de errores (B4 Minor 11): una vuelta sin barrido no recupera avisos perdidos ni da de baja nada.
+ */
+async function saltarBarrido(l: Sucursal, cerco: CercoShopify, error: string, detalle = ''): Promise<ResultadoCuadre> {
   const ok = await avanzar(
     l,
     cerco,
@@ -341,24 +345,69 @@ async function saltarBarrido(l: Sucursal, cerco: CercoShopify, error: string): P
     { catalogSweepCursor: null, reconcileCursor: '', importAttempts: 0 },
   )
   if (!ok) return cambio('BARRIDO')
-  logger.warn(`[SHOPIFY] barrido ${l.id}: se omite en esta vuelta (${error}); no se archiva nada`)
+  logger.error(`[SHOPIFY] barrido ${l.id}: se omite en esta vuelta (${error}${detalle}); no se archiva nada`)
   return vacio('BARRIDO', { error })
 }
+
+/** FF-I2: con más de esto sin ver (y más del 20 %), o con TODO sin ver, el barrido no da de baja nada. */
+const BAJAS_MAXIMAS_SIN_DUDA = 10
+const BAJA_MASIVA = 'BAJA_MASIVA'
 
 /**
  * Las parejas que el barrido COMPLETO no vio se archivan con el cerco de ESTA vuelta (N05: si la sucursal se reconectó,
  * nada se archiva); las que un envío en camino deja suspendidas cuentan como vistas (la tanda de stock las reintenta).
  * Es lo ÚNICO que archiva las huérfanas de un aviso que llegó con la sucursal en PAUSED, CONNECTING o REVIEWING (R5).
  * Cada pareja que se toca sale del conjunto (borrada o marcada), así que la siguiente tanda empieza donde quedó.
+ * FF-I2, dos defensas: (a) si no se vio NINGUNA, o más de 10 y más del 20 %, no se archiva nada (la búsqueda de Shopify
+ * puede devolver 0 en silencio, C10): se salta el barrido, queda en el log de errores y se avisa al dueño; (b) cada baja
+ * se confirma con una lectura directa por id (`confirmarBajas`): la que Shopify dice que sigue se da por vista. Como cada
+ * tanda saca del conjunto lo que toca, la proporción sólo baja: si la primera tanda pasó (a), las siguientes también.
  */
 async function bajasDelBarrido(l: Sucursal, cerco: CercoShopify, d: DepsUnidad): Promise<ResultadoCuadre> {
+  const noVista: Prisma.ShopifyVariantLinkWhereInput = {
+    locationLinkId: l.id,
+    OR: [{ lastSeenSweepId: null }, { lastSeenSweepId: { not: l.catalogSweepId } }],
+  }
+  const [total, sinVer] = await Promise.all([
+    prisma.shopifyVariantLink.count({ where: { locationLinkId: l.id } }),
+    prisma.shopifyVariantLink.count({ where: noVista }),
+  ])
+  if (sinVer > 0 && (sinVer === total || (sinVer > BAJAS_MAXIMAS_SIN_DUDA && sinVer * 5 > total))) {
+    const r = await saltarBarrido(l, cerco, BAJA_MASIVA, `: Shopify no mostró ${sinVer} de ${total} parejas`)
+    if (r.error === BAJA_MASIVA) await notifyShopify(l.venueId, 'BARRIDO_OMITIDO', { count: sinVer })
+    return r
+  }
   const tanda = await prisma.shopifyVariantLink.findMany({
-    where: { locationLinkId: l.id, OR: [{ lastSeenSweepId: null }, { lastSeenSweepId: { not: l.catalogSweepId } }] },
+    where: noVista,
     select: { id: true, productId: true, venueId: true, locationLinkId: true, shopifyVariantId: true },
     orderBy: { id: 'asc' },
     take: TANDA_CUADRE,
   })
+  let bajas = new Set<string>()
+  if (tanda.length > 0) {
+    // B-7: un token que no se puede descifrar no tumba la unidad; no salió nada y no cuenta como falla del barrido.
+    const token = leerToken(l.store)
+    if (token === null) return vacio('BAJAS', { error: TOKEN_ILEGIBLE, esperaMs: ESPERA_TANDA_MS })
+    const ids = tanda.map(p => p.shopifyVariantId)
+    const c = await confirmarBajas(l.store.shopDomain, token, ids, conVencimiento(d.graphql ?? shopifyGraphql, d.vence))
+    if (c === SIN_TIEMPO) return vacio('BAJAS', { error: 'SIN_TIEMPO' })
+    if (!c.ok) {
+      const a = await atenderFalla(l.store, c, [{ id: l.id, generation: l.generation }])
+      if (a === 'SIN_PERMISO') return vacio('BAJAS', { error: FALTA_PERMISO })
+      return fallaDelBarrido(l, cerco, c.code) // a la 5ª, esta vuelta sigue sin bajas
+    }
+    bajas = c.data
+    const siguen = tanda.filter(p => !bajas.has(p.shopifyVariantId)).map(p => p.id)
+    if (siguen.length > 0) {
+      logger.warn(`[SHOPIFY] barrido ${l.id}: ${siguen.length} variantes no vinieron en la búsqueda pero siguen en Shopify; no se archivan`)
+      const marcadas = await conCerco(l.id, cerco, tx =>
+        tx.shopifyVariantLink.updateMany({ where: { id: { in: siguen } }, data: { lastSeenSweepId: l.catalogSweepId } }),
+      )
+      if (marcadas === 'CONTEXTO_CAMBIO') return cambio('BAJAS')
+    }
+  }
   for (const p of tanda) {
+    if (!bajas.has(p.shopifyVariantId)) continue
     if (sinTiempoPara(d.vence)) return vacio('BAJAS', { error: 'SIN_TIEMPO' }) // las ya archivadas no vuelven a salir
     const r = await archivarPareja(p, cerco)
     if (r === 'OBSOLETO') return cambio('BAJAS')

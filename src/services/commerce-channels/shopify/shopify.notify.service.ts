@@ -5,7 +5,15 @@ import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { sendNotification } from '@/services/dashboard/notification.service'
 
-export type ShopifyAviso = 'REVOCADA' | 'ATORADOS' | 'RETRASO' | 'SOBREVENTA' | 'POR_REVISAR' | 'FALTA_PERMISO' | 'CONTEO_NO_APLICADO'
+export type ShopifyAviso =
+  | 'REVOCADA'
+  | 'ATORADOS'
+  | 'RETRASO'
+  | 'SOBREVENTA'
+  | 'POR_REVISAR'
+  | 'FALTA_PERMISO'
+  | 'CONTEO_NO_APLICADO'
+  | 'BARRIDO_OMITIDO'
 /** `motivo` (sólo CONTEO_NO_APLICADO): por qué no se aplicó la línea del conteo (§12.1); cambia lo que hay que hacer. */
 type Datos = { productName?: string; count?: number; productId?: string; motivo?: 'ENVIO_EN_CAMINO' | 'DUDA_POR_REVISAR' }
 
@@ -59,6 +67,12 @@ const TEXTOS: Record<ShopifyAviso, (d: Datos) => { title: string; message: strin
         ? `El conteo de ${d.productName ?? 'un producto'} no se aplicó: Shopify tiene una revisión pendiente de este producto. Resuélvela en Integraciones → Shopify → Por revisar y después vuelve a contarlo.`
         : `El conteo de ${d.productName ?? 'un producto'} no se aplicó: había un cambio en camino a Shopify. Vuelve a contarlo en unos minutos.`,
     priority: NotificationPriority.HIGH,
+  }),
+  // FF-I2: el barrido no vio casi nada de la tienda (la búsqueda de Shopify pudo fallar en silencio) y no dio de baja nada.
+  BARRIDO_OMITIDO: d => ({
+    title: 'No pudimos revisar tu catálogo de Shopify',
+    message: `Shopify no nos mostró ${cuantos(d.count, 'producto', 'productos')} de tu tienda, así que esta vez no dimos de baja ninguno en Avoqado. Tus ventas y el stock se siguen sincronizando. Si los quitaste de Shopify a propósito, se darán de baja conforme Shopify nos avise de cada uno.`,
+    priority: NotificationPriority.NORMAL,
   }),
 }
 

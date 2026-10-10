@@ -364,6 +364,34 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     expect(leer(`${SHOPIFY}/shopify.reconcile.service.ts`)).toContain('query: FILTRO_ESTADO')
   })
 
+  it('🔴 FF-I2: el barrido no archiva si no vio casi nada, cada baja se confirma por id y restaurar no mira originSystem', () => {
+    contieneTodas([
+      'si no se vio NINGUNA pareja, o más de 10 y más del 20 %, el barrido no archiva nada',
+      'se salta (`BAJA_MASIVA`, al log de errores como todo barrido saltado) y avisa `BARRIDO_OMITIDO`',
+      'cada baja se confirma con una lectura directa por id (`confirmarBajas(…)`, la consulta `nodes` por ids, sin búsqueda)',
+      'sólo se archiva lo que Shopify dice que ya no existe o cuyo producto está `ARCHIVED`',
+      'El sync de un producto (`syncShopifyProduct(…)`) confirma igual sus huérfanas',
+      'Restaurar mira sólo `deletedBy = SHOPIFY_SYNC` (lo escribe sólo el conector), sin importar `originSystem`',
+      'CONTEO_NO_APLICADO y BARRIDO_OMITIDO',
+    ])
+    const catalogo = leer(`${SHOPIFY}/shopify.catalog.service.ts`)
+    expect(catalogo).toContain('nodes(ids: $ids) { ... on ProductVariant { id product { id status } } }')
+    expect(cuerpo(catalogo, 'export async function confirmarBajas(')).toContain("n === null || n.product.status === 'ARCHIVED'")
+    expect(catalogo).toContain(
+      'const archivadoPorShopify = (p: Candidato): boolean => !!p.deletedAt && p.deletedBy === ARCHIVADO_POR_SHOPIFY',
+    )
+    // El sync confirma ANTES de archivar sus huérfanas.
+    enOrden(cuerpo(catalogo, 'async function sincronizarEnSucursal('), ['confirmarBajas(', 'archivarPareja(p, cerco)'])
+    const reconcile = leer(`${SHOPIFY}/shopify.reconcile.service.ts`)
+    enOrden(cuerpo(reconcile, 'async function bajasDelBarrido('), [
+      'sinVer === total || (sinVer > BAJAS_MAXIMAS_SIN_DUDA && sinVer * 5 > total)',
+      "notifyShopify(l.venueId, 'BARRIDO_OMITIDO'",
+      'confirmarBajas(',
+      'archivarPareja(p, cerco)',
+    ])
+    expect(cuerpo(reconcile, 'async function saltarBarrido(')).toContain('logger.error(')
+  })
+
   it('🔴 la retención de 90 días, la prueba de volumen apagada por defecto y el carril ci/ sin workflow_dispatch', () => {
     contieneTodas([
       '`REVISIONES_RESUELTAS_DIAS`',

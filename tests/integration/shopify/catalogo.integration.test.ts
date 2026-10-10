@@ -36,8 +36,10 @@ import {
   conPlan,
   contexto,
   dormir,
+  esConfirmacion,
   falla,
   graphqlConEfecto,
+  lecturaDirecta,
   limpiarOtraSucursal,
   otraSucursalDeLaTienda,
   paginaDeVariantes,
@@ -526,8 +528,12 @@ describe('importar por páginas (#18, #19, N05, N06, N20)', () => {
 describe('sync de un producto en ACTIVE (#7, #20, N01, N11, N21)', () => {
   const PRODUCTO = 'gid://shopify/Product/500'
   const cincuentaYUno = Array.from({ length: 51 }, (_, i) => variante(100 + i, { producto: PRODUCTO }))
+  /** Las páginas de la búsqueda; la lectura directa de una baja (FF-I2) dice que lo que no está en `variantes` ya no existe. */
   const paginas = (variantes: VarianteShopify[], fallarSegunda = false) =>
-    graphqlFalso((_q, vars) => {
+    graphqlFalso((q, vars) => {
+      if (esConfirmacion(q)) {
+        return lecturaDirecta(vars.ids, id => (variantes.some(v => v.id === id) ? { productId: PRODUCTO, status: 'ACTIVE' } : null))
+      }
       if (!vars.after) return paginaDeVariantes(variantes.slice(0, 50), variantes.length > 50 ? 'p2' : null)
       return fallarSegunda ? falla('HTTP_5XX', true, true) : paginaDeVariantes(variantes.slice(50), null)
     })
@@ -588,13 +594,17 @@ describe('sync de un producto en ACTIVE (#7, #20, N01, N11, N21)', () => {
     const P = 'gid://shopify/Product/510'
     const huerfana = await agregarProductoShopify(e)
     await prisma.shopifyVariantLink.update({ where: { id: huerfana.variantLinkId! }, data: { shopifyProductId: P } })
-    const responde = graphqlFalso((_q, vars) =>
-      vars.after ? paginaDeVariantes([variante(212, { producto: P })], null) : paginaDeVariantes([variante(211, { producto: P })], 'q2'),
-    )
+    const responde = graphqlFalso((q, vars) => {
+      if (esConfirmacion(q)) return lecturaDirecta(vars.ids, () => null) // la huérfana ya no existe en Shopify (FF-I2)
+      return vars.after
+        ? paginaDeVariantes([variante(212, { producto: P })], null)
+        : paginaDeVariantes([variante(211, { producto: P })], 'q2')
+    })
     const graphql = jest.fn(async (...a: unknown[]) => {
-      if (!(a[3] as { after?: string | null }).after) await dormir(1_000) // la primera página tarda
+      if (!esConfirmacion(a[2] as string) && !(a[3] as { after?: string | null }).after) await dormir(1_000) // la primera página tarda
       return responde(...a)
     })
+    const paginasPedidas = () => graphql.mock.calls.filter(c => !esConfirmacion(c[2] as string))
     const guardado: AvanceSync = {}
     const guardarAvance = jest.fn(async (a: AvanceSync) => {
       Object.assign(guardado, JSON.parse(JSON.stringify(a)))
@@ -618,11 +628,65 @@ describe('sync de un producto en ACTIVE (#7, #20, N01, N11, N21)', () => {
     expect(
       await syncShopifyProduct(e.storeId, P, { hasAccess: conPlan, graphql: graphql as never, avance: guardado, guardarAvance }),
     ).toEqual({ ok: true })
-    expect(graphql).toHaveBeenCalledTimes(2) // la página 1 no se repitió
-    expect((graphql.mock.calls[1][3] as { after: string }).after).toBe('q2')
+    expect(paginasPedidas()).toHaveLength(2) // la página 1 no se repitió
+    expect((paginasPedidas()[1][3] as { after: string }).after).toBe('q2')
+    expect(graphql.mock.calls.filter(c => esConfirmacion(c[2] as string))).toHaveLength(1) // la baja, confirmada por id
     expect(await prisma.shopifyVariantLink.count({ where: { shopifyVariantId: variante(212).id } })).toBe(1)
     expect(await prisma.shopifyVariantLink.count({ where: { id: huerfana.variantLinkId! } })).toBe(0) // ahora sí: no vino en ninguna
     expect(guardado[`${l.id}:${l.generation}`]).toMatchObject({ cursor: FIN_PAGINAS })
+  })
+
+  it('🔴 FF-I2: una pareja del producto que la búsqueda no trajo pero Shopify dice (por id) que sigue NO se archiva', async () => {
+    const e = await escenario()
+    const P = 'gid://shopify/Product/520'
+    const otra = await agregarProductoShopify(e)
+    const deOtra = await prisma.shopifyVariantLink.update({ where: { id: otra.variantLinkId! }, data: { shopifyProductId: P } })
+    const graphql = graphqlFalso((q, vars) =>
+      esConfirmacion(q)
+        ? lecturaDirecta(vars.ids, () => ({ productId: P, status: 'ACTIVE' }))
+        : paginaDeVariantes([variante(221, { producto: P })], null),
+    )
+    expect(await syncShopifyProduct(e.storeId, P, { hasAccess: conPlan, graphql })).toEqual({ ok: true })
+    expect(graphql.mock.calls.filter(c => esConfirmacion(c[2])).map(c => c[3].ids)).toEqual([[deOtra.shopifyVariantId]])
+    expect(await prisma.shopifyVariantLink.count({ where: { id: otra.variantLinkId! } })).toBe(1)
+    expect(await prisma.product.findUniqueOrThrow({ where: { id: otra.productId } })).toMatchObject({ deletedAt: null })
+  })
+
+  it('FF-I2 en el sync: si la lectura directa falla, no se archiva nada y el evento se reintenta', async () => {
+    const e = await escenario()
+    const P = 'gid://shopify/Product/530'
+    const otra = await agregarProductoShopify(e)
+    await prisma.shopifyVariantLink.update({ where: { id: otra.variantLinkId! }, data: { shopifyProductId: P } })
+    const graphql = graphqlFalso((q, _vars) =>
+      esConfirmacion(q) ? falla('HTTP_5XX', true, true) : paginaDeVariantes([variante(231, { producto: P })], null),
+    )
+    expect(await syncShopifyProduct(e.storeId, P, { hasAccess: conPlan, graphql })).toEqual({ error: 'HTTP_5XX', retry: true })
+    expect(await prisma.shopifyVariantLink.count({ where: { id: otra.variantLinkId! } })).toBe(1)
+    expect(await prisma.product.findUniqueOrThrow({ where: { id: otra.productId } })).toMatchObject({ deletedAt: null })
+  })
+
+  it('🔴 FF-I2: un producto de Avoqado (originSystem AVOQADO, como el catálogo del piloto que subió el cargador CSV) que archivó el conector se restaura al volver su variante', async () => {
+    const e = await escenario()
+    const antes = await prisma.product.findUniqueOrThrow({ where: { id: e.productId } })
+    expect(antes.originSystem).toBe('AVOQADO')
+    const p = await prisma.shopifyVariantLink.findUniqueOrThrow({ where: { id: e.variantLinkId } })
+    expect(await archivarPareja(p)).toBe('ARCHIVADA')
+    expect(await prisma.product.findUniqueOrThrow({ where: { id: e.productId } })).toMatchObject({ deletedBy: ARCHIVADO_POR_SHOPIFY })
+    const v = { ...variante(1, { sku: antes.sku, barcode: null, producto: 'gid://shopify/Product/1', available: 10, committed: 0 }) }
+    v.id = 'gid://shopify/ProductVariant/1'
+    v.inventoryItem = { ...v.inventoryItem, id: 'gid://shopify/InventoryItem/1' }
+    const graphql = graphqlFalso(() => paginaDeVariantes([v], null))
+    expect(await syncShopifyProduct(e.storeId, 'gid://shopify/Product/1', { hasAccess: conPlan, graphql })).toEqual({ ok: true })
+    expect(await prisma.product.findUniqueOrThrow({ where: { id: e.productId } })).toMatchObject({
+      deletedAt: null,
+      deletedBy: null,
+      active: true,
+    })
+    expect(await prisma.shopifyVariantLink.findUnique({ where: { productId: e.productId } })).toMatchObject({
+      shopifyVariantId: 'gid://shopify/ProductVariant/1',
+      createdProduct: false,
+    })
+    expect(await prisma.shopifyImportIssue.count({ where: { venueId: e.venueId, reason: 'PRODUCTO_ARCHIVADO' } })).toBe(0)
   })
 
   it('RF2 (N01): con un envío en camino, archivar SUSPENDE la pareja y conserva la barrera; al cerrar el envío, se borra', async () => {

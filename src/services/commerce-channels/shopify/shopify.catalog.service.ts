@@ -24,7 +24,7 @@ import {
 } from '@/services/master-catalog/catalogGovernance.service'
 import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
 import { CATALOG_PAGE_SIZE, SHOPIFY_FEATURE, SHOPIFY_MAX_VARIANTS, SHOPIFY_SERVICE_ACTOR } from './shopify.constants'
-import { shopifyGraphql } from './shopify.graphql'
+import { shopifyGraphql, type ShopifyResult } from './shopify.graphql'
 import {
   bloquearPareja,
   initializePair,
@@ -192,6 +192,58 @@ export const paginaValida =
     }
     return true
   }
+
+// ─── Confirmar una baja con una lectura directa (FF-I2) ──────────────────────────────────────────────────────
+
+/**
+ * FF-I2: la lectura DIRECTA con que se confirma una baja antes de archivar. `nodes(ids:)` no busca: contesta por id, así
+ * que un filtro de búsqueda que devuelve 0 en silencio (C10) no puede hacer pasar por borrado un producto que sigue en
+ * la tienda.
+ */
+export const QUERY_CONFIRMAR_BAJAS = `query ConfirmarBajas($ids: [ID!]!) {
+  nodes(ids: $ids) { ... on ProductVariant { id product { id status } } }
+}`
+type NodoBaja = { id: string; product: { id: string; status: string } } | null
+/** En el orden pedido: `null` (ya no existe) o la variante PEDIDA en esa posición con su producto y su estado. */
+const respuestaBajasDe =
+  (pedidos: string[]) =>
+  (d: unknown): d is { nodes: NodoBaja[] } => {
+    const nodes = (d as { nodes?: unknown } | null)?.nodes
+    return (
+      Array.isArray(nodes) &&
+      nodes.length === pedidos.length &&
+      nodes.every((n, i) => {
+        if (n === null) return true
+        const x = n as { id?: unknown; product?: { id?: unknown; status?: unknown } | null }
+        return x.id === pedidos[i] && gid(x.product?.id, 'Product') && texto(x.product?.status)
+      })
+    )
+  }
+const POR_CONFIRMACION = 50
+
+/**
+ * De las variantes que una búsqueda NO trajo, las que Shopify confirma por id que ya no existen o cuyo producto está
+ * ARCHIVED: sólo ésas se archivan. Una que sigue (ACTIVE, DRAFT o cualquier otro estado) no es baja: la búsqueda falló.
+ * `graphql` ya viene con el vencimiento de la unidad (`conVencimiento`); una falla (o `SIN_TIEMPO`) sale tal cual y nada
+ * se archiva.
+ */
+export async function confirmarBajas(
+  shopDomain: string,
+  token: string,
+  variantIds: string[],
+  graphql: typeof shopifyGraphql,
+): Promise<ShopifyResult<Set<string>>> {
+  const bajas = new Set<string>()
+  for (let i = 0; i < variantIds.length; i += POR_CONFIRMACION) {
+    const ids = variantIds.slice(i, i + POR_CONFIRMACION)
+    const r = await graphql<{ nodes: NodoBaja[] }>(shopDomain, token, QUERY_CONFIRMAR_BAJAS, { ids }, { validate: respuestaBajasDe(ids) })
+    if (!r.ok) return r
+    r.data.nodes.forEach((n, j) => {
+      if (n === null || n.product.status === 'ARCHIVED') bajas.add(ids[j])
+    })
+  }
+  return { ok: true, data: bajas }
+}
 
 /** Los caracteres que `SKU_REGEX` no acepta se vuelven «-»; el original queda en `originalSku` de la pareja. */
 export function normalizeSku(raw: string | null | undefined): string | null {
@@ -374,8 +426,11 @@ async function bloquearProductos(tx: Prisma.TransactionClient, ids: Array<string
  * regla con que el espejo inicia, aplica o reactiva una pareja (`motivoNoSincronizable` de A, FF-I1): no se duplica.
  */
 const inelegible = (p: Candidato): ShopifyIssueReason | null => motivoNoSincronizable(p)
-const archivadoPorShopify = (p: Candidato): boolean =>
-  !!p.deletedAt && p.originSystem === 'SHOPIFY' && p.deletedBy === ARCHIVADO_POR_SHOPIFY
+/**
+ * Lo archivó el conector: `deletedBy = SHOPIFY_SYNC`, que sólo escribe él. Sin mirar `originSystem` (FF-I2): un producto
+ * que ya era de Avoqado y se ligó (el catálogo del piloto lo subió el cargador CSV, `AVOQADO`) también vuelve.
+ */
+const archivadoPorShopify = (p: Candidato): boolean => !!p.deletedAt && p.deletedBy === ARCHIVADO_POR_SHOPIFY
 
 /** La elegibilidad va ANTES de restaurar (N07): un archivado por el conector que ya no es elegible se queda archivado. */
 function motivoParaNoLigar(p: Candidato, v: VarianteShopify, porSku: boolean): ShopifyIssueReason | 'RESTAURAR' | null {
@@ -996,7 +1051,8 @@ async function sincronizarEnSucursal(
     if (err instanceof ContextoObsoleto) return perdido
     throw err
   }
-  // Huérfanas: SÓLO con el recorrido completo, las parejas del producto cuya variante no vino en NINGUNA página.
+  // Huérfanas: SÓLO con el recorrido completo, las parejas del producto cuya variante no vino en NINGUNA página. FF-I2:
+  // cada una se confirma antes con una lectura directa por id; la que Shopify dice que sigue no se archiva.
   let despues = ''
   for (;;) {
     const tanda = await prisma.shopifyVariantLink.findMany({
@@ -1005,10 +1061,34 @@ async function sincronizarEnSucursal(
       orderBy: { id: 'asc' },
       take: TANDA,
     })
-    for (const p of tanda) {
-      if (vistas.has(p.shopifyVariantId)) continue
-      if (restante(deps.vence) < MIN_ESCRITURA_MS) return sinTiempo() // el cursor ya dice FIN: la próxima vez sólo bajas
-      if ((await archivarPareja(p, cerco)) === 'OBSOLETO') return cambio
+    const huerfanas = tanda.filter(p => !vistas.has(p.shopifyVariantId))
+    if (huerfanas.length > 0) {
+      const c = await confirmarBajas(
+        store.shopDomain,
+        token,
+        huerfanas.map(p => p.shopifyVariantId),
+        graphql,
+      )
+      if (c === SIN_TIEMPO) return sinTiempo() // el cursor ya dice FIN: la próxima vez sólo bajas
+      if (!c.ok) {
+        try {
+          const atencion = await atenderFalla(store, c, [{ id: link.id, generation: link.generation }], eventoDe(deps.reclamo))
+          return { error: atencion === 'SIN_PERMISO' ? FALTA_PERMISO : c.code, retry: atencion === 'REINTENTAR' }
+        } catch (err) {
+          if (err instanceof ContextoObsoleto) return perdido
+          throw err
+        }
+      }
+      for (const p of huerfanas) {
+        if (!c.data.has(p.shopifyVariantId)) {
+          logger.warn(
+            `[SHOPIFY] sync ${link.id}: la variante ${p.shopifyVariantId} no vino en la búsqueda pero sigue en Shopify; no se archiva`,
+          )
+          continue
+        }
+        if (restante(deps.vence) < MIN_ESCRITURA_MS) return sinTiempo()
+        if ((await archivarPareja(p, cerco)) === 'OBSOLETO') return cambio
+      }
     }
     if (!(await renovado())) return perdido
     if (tanda.length < TANDA) return { ok: true }

@@ -262,9 +262,41 @@ export async function variantesDeLaSucursal(locationLinkId: string): Promise<Var
   }
 }
 
-/** Doble del barrido: sirve estas variantes de 50 en 50 con cursores `s1`, `s2`, … */
+/** ¿Es la lectura DIRECTA con que el conector confirma una baja (FF-I2, `nodes(ids:)`), y no una búsqueda? */
+export const esConfirmacion = (query: string): boolean => query.includes('query ConfirmarBajas')
+
+/**
+ * La respuesta de esa lectura directa: de las `ids` pedidas, en su orden, las que `existe` dice que siguen en Shopify (con
+ * su producto y su estado) y `null` para las que ya no existen.
+ */
+export function lecturaDirecta(
+  ids: string[],
+  existe: (id: string) => { productId: string; status: string } | null,
+): ShopifyResult<unknown> {
+  return {
+    ok: true,
+    data: {
+      nodes: ids.map(id => {
+        const x = existe(id)
+        return x ? { id, product: { id: x.productId, status: x.status } } : null
+      }),
+    },
+  }
+}
+
+/**
+ * Doble del barrido: sirve estas variantes de 50 en 50 con cursores `s1`, `s2`, … La lectura directa de una baja
+ * contesta con lo mismo: una variante que no está en el catálogo ya no existe.
+ */
 export function graphqlDelCatalogo(variantes: VarianteShopify[]): jest.Mock {
-  return graphqlFalso((_q, vars) => {
+  const porId = new Map(variantes.map(v => [v.id, v]))
+  return graphqlFalso((q, vars) => {
+    if (esConfirmacion(q)) {
+      return lecturaDirecta(vars.ids, id => {
+        const v = porId.get(id)
+        return v ? { productId: v.product.id, status: v.product.status } : null
+      })
+    }
     const i = vars.after ? Number(String(vars.after).slice(1)) : 0
     const hay = (i + 1) * 50 < variantes.length
     return paginaDeVariantes(variantes.slice(i * 50, (i + 1) * 50), hay ? `s${i + 1}` : null)

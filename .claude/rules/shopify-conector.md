@@ -221,6 +221,13 @@ ayudantes (`shopify.store.service.ts:305`).
   - con una fila VIVA ambigua la vuelta no se da por buena: se empieza otra (en 10 min), porque esa fila todavía puede llegar;
   - una DEAD_LETTER no detiene la vuelta: ya no puede llegar y queda en «Por revisar» (`ATORADO` o `INCIERTO`) para que la decida una
     persona.
+- **Bajas del barrido (FF-I2):** lo que el barrido completo no vio NO se da por borrado sin más, porque la búsqueda de Shopify puede
+  devolver 0 en silencio (C10). Dos defensas: (a) si no se vio NINGUNA pareja, o más de 10 y más del 20 %, el barrido no archiva nada: se
+  salta (`BAJA_MASIVA`, al log de errores como todo barrido saltado) y avisa `BARRIDO_OMITIDO`; (b) cada baja se confirma con una lectura
+  directa por id (`confirmarBajas(…)`, la consulta `nodes` por ids, sin búsqueda): sólo se archiva lo que Shopify dice que ya no existe o
+  cuyo producto está `ARCHIVED`; lo que sigue se da por visto. El sync de un producto (`syncShopifyProduct(…)`) confirma igual sus
+  huérfanas. Restaurar mira sólo `deletedBy = SHOPIFY_SYNC` (lo escribe sólo el conector), sin importar `originSystem`: el catálogo del
+  piloto lo subió el cargador CSV (`AVOQADO`).
 - Qué sucursal cuadra el worker: ACTIVE, con su tienda ACTIVE, con acceso al plan (sin plan se pausa guardando la fase) y sin `importError`
   terminal (`FALTA_PERMISO`, `CATALOGO_MUY_GRANDE`, `CATALOGO_MAESTRO`). Un pedido sobre otra se queda guardado (la bandera es durable) y
   corre cuando vuelva a ser elegible.
@@ -254,9 +261,9 @@ Un nivel inexistente o inactivo en la ubicación, o un artículo `tracked = fals
 
 `notifyShopify(venueId, aviso)` avisa a OWNER y ADMIN activos, uno por persona y por día (`CONTEO_NO_APLICADO`, también por producto, y
 `DUDA_POR_REVISAR` con su propia llave), con liga a `/venues/:slug/settings/integrations/shopify` (la página la construye el plan C en el
-dashboard): REVOCADA, ATORADOS, RETRASO, SOBREVENTA, POR_REVISAR, FALTA_PERMISO y CONTEO_NO_APLICADO. Si agregas un aviso, agrega su
-explicación en la página (`avisos.items` de `shopify.json` en el dashboard) y en la guía. La página nunca ofrece comprar Premium para
-Shopify (§0).
+dashboard): REVOCADA, ATORADOS, RETRASO, SOBREVENTA, POR_REVISAR, FALTA_PERMISO, CONTEO_NO_APLICADO y BARRIDO_OMITIDO. Si agregas un aviso,
+agrega su explicación en la página (`avisos.items` de `shopify.json` en el dashboard) y en la guía. PENDIENTE: `BARRIDO_OMITIDO` (FF-I2,
+servidor) todavía no la tiene en la página ni en la guía. La página nunca ofrece comprar Premium para Shopify (§0).
 
 ## 10. Mantenimiento y pruebas
 
