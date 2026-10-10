@@ -6,10 +6,19 @@
 import prisma from '@/utils/prismaClient'
 import { switchInventoryMethod } from '@/services/dashboard/productWizard.service'
 import { setProductInventoryMethod } from '@/services/dashboard/productInventoryIntegration.service'
-import { archiveShopifyProduct } from '@/services/commerce-channels/shopify/shopify.catalog.service'
-import { reconcileVenue } from '@/services/commerce-channels/shopify/shopify.reconcile.service'
-import { agregarProductoShopify, assertTestDatabase, crearEscenarioShopify, EscenarioShopify, limpiarEscenarioShopify } from './fixtures'
-import { conPlan, dormir, graphqlDelCatalogo, nivel, nivelesFalsos, variantesDeLaSucursal } from './fixturesB'
+import { archiveShopifyProduct, syncShopifyProduct } from '@/services/commerce-channels/shopify/shopify.catalog.service'
+import { reconcileVenue, resolveShopifyReview } from '@/services/commerce-channels/shopify/shopify.reconcile.service'
+import { applyShopifyLevel, suspendPair } from '@/services/commerce-channels/shopify/shopify.mirror.service'
+import { pedirCuadre } from '@/services/commerce-channels/shopify/shopify.store.service'
+import {
+  agregarProductoShopify,
+  assertTestDatabase,
+  crearEscenarioShopify,
+  EscenarioShopify,
+  graphqlFalso,
+  limpiarEscenarioShopify,
+} from './fixtures'
+import { conPlan, dormir, graphqlDelCatalogo, nivel, nivelesFalsos, paginaDeVariantes, variantesDeLaSucursal } from './fixturesB'
 
 jest.setTimeout(120_000)
 let escenarios: EscenarioShopify[] = []
@@ -241,4 +250,126 @@ describe('setProductInventoryMethod: el otro camino a receta (PUT inventory-meth
       }
     },
   )
+})
+
+describe('FF-I1: pasar a receta por setProductInventoryMethod conserva la fila de Inventory; nada revive la pareja por eso', () => {
+  /** La variante del escenario como la tendría Shopify hoy, con `available` piezas (otro número que Avoqado). */
+  async function laVarianteEn(e: EscenarioShopify, available: number) {
+    const [v] = await variantesDeLaSucursal(e.locationLinkId)
+    const quantities = [
+      { name: 'available', quantity: available },
+      { name: 'committed', quantity: 0 },
+    ]
+    return { ...v, inventoryItem: { ...v.inventoryItem, inventoryLevel: { isActive: true, quantities } } }
+  }
+  /** Una vuelta entera del cuadre con Shopify en `available` y su catálogo igual al de las parejas de hoy. */
+  async function cuadrarCon(e: EscenarioShopify, available: number) {
+    await pedirCuadre(e.locationLinkId)
+    const deps = {
+      fetchLevels: nivelesFalsos(() => nivel(available)),
+      graphql: graphqlDelCatalogo(await variantesDeLaSucursal(e.locationLinkId)),
+      hasAccess: conPlan,
+    }
+    let terminado = false
+    for (let i = 0; i < 10 && !terminado; i++) terminado = (await reconcileVenue(e.venueId, deps)).terminado
+    expect(terminado).toBe(true)
+  }
+  const stockDe = async (e: EscenarioShopify) =>
+    (await prisma.inventory.findUniqueOrThrow({ where: { id: e.inventoryId } })).currentStock.toString()
+  const movimientos = (e: EscenarioShopify) => prisma.inventoryMovement.count({ where: { inventoryId: e.inventoryId } })
+
+  it('a receta → reconcileVenue: la pareja sigue SIN_INVENTARIO, sin REACTIVADA, y el Inventory no se toca', async () => {
+    const e = await escenario()
+    await setProductInventoryMethod(e.venueId, e.productId, 'RECIPE')
+    expect(await prisma.inventory.count({ where: { productId: e.productId } })).toBe(1) // este camino conserva la fila
+    const antes = await movimientos(e)
+    await cuadrarCon(e, 7)
+    expect((await pareja(e)).suspendedReason).toBe('SIN_INVENTARIO')
+    expect(await prisma.shopifyReviewItem.count({ where: { productId: e.productId } })).toBe(0)
+    expect(await stockDe(e)).toBe('10')
+    expect(await movimientos(e)).toBe(antes)
+    expect(await prisma.shopifyImportIssue.findFirst({ where: { venueId: e.venueId } })).toMatchObject({ reason: 'SIN_INVENTARIO' })
+  })
+
+  it('a receta → products/update (syncShopifyProduct) con la variante en Shopify: el sync no la revive', async () => {
+    const e = await escenario()
+    await setProductInventoryMethod(e.venueId, e.productId, 'RECIPE')
+    const antes = await movimientos(e)
+    const pagina = paginaDeVariantes([await laVarianteEn(e, 7)], null)
+    const graphql = graphqlFalso(() => pagina)
+    expect(await syncShopifyProduct(e.storeId, 'gid://shopify/Product/1', { graphql, hasAccess: conPlan })).toEqual({ ok: true })
+    expect((await pareja(e)).suspendedReason).toBe('SIN_INVENTARIO')
+    expect(await prisma.shopifyReviewItem.count({ where: { productId: e.productId } })).toBe(0)
+    expect(await stockDe(e)).toBe('10')
+    expect(await movimientos(e)).toBe(antes)
+  })
+
+  it('a receta con una duda muerta en «Por revisar» (U2): resolver contesta 409 SHOPIFY_SIN_INVENTARIO y la pareja sigue suspendida', async () => {
+    const e = await escenario()
+    await prisma.$executeRaw`UPDATE "Inventory" SET "currentStock" = "currentStock" - 1 WHERE id = ${e.inventoryId}` // A = 9, fila −1
+    await prisma.shopifyStockOutbox.updateMany({
+      where: { productId: e.productId },
+      data: {
+        status: 'DEAD_LETTER',
+        ambiguous: true,
+        sentInventoryItemId: 'gid://shopify/InventoryItem/1',
+        sentLocationId: 'gid://shopify/Location/1',
+        firstAttemptAt: new Date(),
+        processedAt: new Date(),
+        lastError: 'VENTANA_24H',
+      },
+    })
+    await prisma.$transaction(tx => suspendPair(tx, e.variantLinkId, 'NIVEL_INEXISTENTE'))
+    await cuadrarCon(e, 10)
+    const r = await prisma.shopifyReviewItem.findFirstOrThrow({ where: { productId: e.productId, status: 'OPEN' } })
+    expect(r).toMatchObject({ reason: 'INCIERTO' })
+    await setProductInventoryMethod(e.venueId, e.productId, 'RECIPE')
+    const filas = () =>
+      prisma.shopifyStockOutbox.findMany({ where: { productId: e.productId }, select: { id: true, status: true }, orderBy: { id: 'asc' } })
+    const filasAntes = await filas()
+    const resolver = resolveShopifyReview(
+      {
+        venueId: e.venueId,
+        reviewId: r.id,
+        choice: 'AVOQADO',
+        expectedAvoqadoQty: r.avoqadoQty.toString(),
+        expectedShopifyQty: r.shopifyQty,
+        staffId: e.staffId,
+      },
+      { fetchLevels: nivelesFalsos(() => nivel(10)), hasAccess: conPlan },
+    )
+    await expect(resolver).rejects.toMatchObject({ statusCode: 409, code: 'SHOPIFY_SIN_INVENTARIO' })
+    expect((await pareja(e)).suspendedReason).toBe('SIN_INVENTARIO')
+    expect((await prisma.shopifyReviewItem.findUniqueOrThrow({ where: { id: r.id } })).status).toBe('OPEN')
+    expect(await filas()).toEqual(filasAntes) // ni se descartó la duda ni salió una fila nueva
+    expect(await stockDe(e)).toBe('9')
+  })
+
+  it('applyShopifyLevel: un cambio de Shopify sobre la pareja VIVA de un producto que dejó de llevar existencias la suspende y no toca Inventory', async () => {
+    const e = await escenario()
+    // Otro camino que no pasa por los ayudantes de B7 (una edición directa del producto): la pareja sigue viva.
+    await prisma.product.update({ where: { id: e.productId }, data: { trackInventory: false } })
+    const antes = await movimientos(e)
+    const o = await applyShopifyLevel(
+      { variantLinkId: e.variantLinkId, nivel: nivel(7), fetchedAt: new Date(), cause: 'aviso' },
+      { hasAccess: conPlan },
+    )
+    expect(o).toBe('SUSPENDIDO')
+    expect((await pareja(e)).suspendedReason).toBe('SIN_INVENTARIO')
+    expect(await stockDe(e)).toBe('10')
+    expect(await movimientos(e)).toBe(antes)
+  })
+
+  it('regresión: de vuelta a CANTIDAD por el mismo camino, el cuadre SÍ la reactiva comparando (REACTIVADA)', async () => {
+    const e = await escenario()
+    await setProductInventoryMethod(e.venueId, e.productId, 'RECIPE')
+    await setProductInventoryMethod(e.venueId, e.productId, 'QUANTITY')
+    expect(await sucursal(e)).toMatchObject({ needsReconcile: true })
+    await cuadrarCon(e, 7)
+    expect((await pareja(e)).suspendedReason).toBeNull()
+    expect(await prisma.shopifyReviewItem.findFirst({ where: { productId: e.productId, status: 'OPEN' } })).toMatchObject({
+      reason: 'REACTIVADA',
+      shopifyQty: 7,
+    })
+  })
 })

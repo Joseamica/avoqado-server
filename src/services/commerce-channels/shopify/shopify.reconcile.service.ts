@@ -18,7 +18,7 @@
  *   que no se puede completar se salta en ESA vuelta sin archivar nada.
  * Orden de candados (§10.3): sucursal (FOR SHARE) → tienda (FOR SHARE) → pareja → Inventory → buzón y revisión.
  */
-import { Prisma, type ShopifyReviewChoice, type ShopifyReviewReason } from '@prisma/client'
+import { Prisma, type ShopifyReviewChoice, type ShopifyReviewReason, type ShopifySuspendReason } from '@prisma/client'
 import { formatInTimeZone } from 'date-fns-tz'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
@@ -40,6 +40,8 @@ import {
   marcarOrigenShopify,
   MOTIVOS_DE_SUSPENSION,
   SHOPIFY_IMPORT_ERRORES_TERMINALES,
+  sincronizableBajoCandado,
+  suspendPair,
   type CercoShopify,
   type NivelLeido,
 } from './shopify.mirror.service'
@@ -961,6 +963,11 @@ const yaResuelta = () => new ConflictError('Esa revisión ya se resolvió: recar
 const sinPareja = () => new ConflictError('Ese producto ya no está ligado a Shopify: recarga la lista', 'SHOPIFY_SIN_PAREJA')
 const suspendida = () =>
   new ConflictError('La pareja de este producto está suspendida: revísala en «Productos sin pareja»', 'SHOPIFY_PAREJA_SUSPENDIDA')
+const sinInventario = () =>
+  new ConflictError(
+    'Ese producto ya no lleva existencias por cantidad en Avoqado: vuelve a activarlas en su ficha y vuelve a resolver',
+    'SHOPIFY_SIN_INVENTARIO',
+  )
 
 /**
  * «Usar el de Avoqado» / «Usar el de Shopify». S se lee de Shopify ANTES; todo lo demás se revalida y se escribe en UNA
@@ -973,8 +980,9 @@ const suspendida = () =>
  *   espejo = S, las DEAD_LETTER del producto de la generación vigente se descartan (T3; S es fresco, así que las dos
  *   elecciones valen llegue o no aquel envío; lo que todavía puede llegar bloquea con CAMBIOS_EN_CAMINO) y offset = 0:
  *   después, `A = espejo + Σ vivas` (N3).
- * - Una pareja suspendida que llegó aquí por una duda muerta (U2) se reactiva en la misma tx: S se leyó OK e Inventory
- *   existe, así que la causa ya no está. Nunca la de un producto archivado.
+ * - Una pareja suspendida que llegó aquí por una duda muerta (U2) se reactiva en la misma tx: S se leyó OK, Inventory
+ *   existe y el producto se sincroniza (FF-I1), así que la causa ya no está. Nunca la de un producto archivado. Si el
+ *   producto ya no se sincroniza (pasó a receta y conserva su fila de Inventory), la pareja queda SIN_INVENTARIO y 409.
  * - Un error pasajero de la base o de Shopify es 503 (K12, B-7), nunca un 500.
  */
 export async function resolveShopifyReview(
@@ -1057,6 +1065,7 @@ async function resolver(i: EntradaResolucion, deps: DepsResolucion): Promise<{ e
   const filas = { productId: item.productId, locationLinkId: link.id, generation: cerco.generation } // T3: generación vigente
   type Salida =
     | { cambio: true }
+    | { cambio: 'SIN_INVENTARIO' }
     | { cambio: false; A: Prisma.Decimal; final: Prisma.Decimal; envio: string | null; descartadas: number; reactivada: boolean }
   const res = await prisma.$transaction(
     async (tx): Promise<Salida> => {
@@ -1091,11 +1100,16 @@ async function resolver(i: EntradaResolucion, deps: DepsResolucion): Promise<{ e
       if (!(await hasAccess(i.venueId))) throw sinPlan()
       if (!p) throw sinPareja()
       if (!p.initializedAt || (p.suspendedReason && p.archivado)) throw suspendida()
-      if (!inv) {
-        throw new ConflictError(
-          'Ese producto ya no lleva existencias por cantidad en Avoqado: vuelve a activarlas en su ficha y vuelve a resolver',
-          'SHOPIFY_SIN_INVENTARIO',
-        )
+      if (!inv) throw sinInventario()
+      // FF-I1: un producto que ya no se sincroniza (receta con su fila de Inventory, sin seguimiento…) no se resuelve ni se
+      // reactiva (U2): su pareja queda SIN_INVENTARIO —en esta tx, por eso no se lanza aquí— y la revisión sigue abierta.
+      const sincronizable = await sincronizableBajoCandado(tx, {
+        productId: item.productId,
+        suspendedReason: p.suspendedReason as ShopifySuspendReason | null,
+      })
+      if (sincronizable.motivo) {
+        if (!sincronizable.dejarComoEsta) await suspendPair(tx, pareja.id, 'SIN_INVENTARIO')
+        return { cambio: 'SIN_INVENTARIO' }
       }
       const vivas = await tx.shopifyStockOutbox.count({ where: { ...filas, status: { in: VIVAS } } })
       if (vivas > 0)
@@ -1186,6 +1200,7 @@ async function resolver(i: EntradaResolucion, deps: DepsResolucion): Promise<{ e
     },
     { timeout: 15_000 }, // el plan se pregunta dentro, por otra conexión del pool
   )
+  if (res.cambio === 'SIN_INVENTARIO') throw sinInventario()
   if (res.cambio) {
     throw new ConflictError(
       'Los números cambiaron desde que los viste: ya se muestran los de ahora; revísalos y vuelve a elegir',

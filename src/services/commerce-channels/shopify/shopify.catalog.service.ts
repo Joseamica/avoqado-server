@@ -17,7 +17,7 @@ import logger from '@/config/logger'
 import { generateSlug } from '@/utils/slugify'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { archivarProductos } from '@/services/dashboard/product.dashboard.service'
-import { ensureQuantityInventoryRow, isNonInventoriable } from '@/services/dashboard/quantityInventoryRow'
+import { ensureQuantityInventoryRow } from '@/services/dashboard/quantityInventoryRow'
 import {
   assertLegacyCatalogGovernanceForVenue,
   writeLegacyServiceProductCreationAuditForVenue,
@@ -29,6 +29,7 @@ import {
   bloquearPareja,
   initializePair,
   marcarOrigenShopify,
+  motivoNoSincronizable,
   SHOPIFY_IMPORT_ERRORES_TERMINALES,
   suspendPair,
   type CercoShopify,
@@ -67,7 +68,6 @@ export const FILTRO_ESTADO = '(product_status:active OR product_status:draft)'
 const MAX_INTENTOS_IMPORTACION = 5
 /** 2,500 variantes: más que el tope de Shopify por producto (2,048). */
 const MAX_PAGINAS_PRODUCTO = 50
-const UNIDADES_PIEZA: string[] = ['UNIT', 'PIECE']
 /** El código de barras de Avoqado admite 14 caracteres (EAN-13, UPC-12, GTIN-14). */
 const GTIN_MAX = 14
 /** Shopify rechaza cantidades fuera de ±2,000,000,000: fuera de eso no es un dato real (igual que A). */
@@ -369,14 +369,11 @@ async function bloquearProductos(tx: Prisma.TransactionClient, ids: Array<string
   return new Map(filas.map(f => [f.id, f]))
 }
 
-/** Lo que impide traer el inventario de un producto, aunque esté libre (tipo, método, seguimiento, unidad). */
-function inelegible(p: Candidato): ShopifyIssueReason | null {
-  if (isNonInventoriable(p.type, true)) return 'TIPO_SIN_INVENTARIO'
-  if (p.inventoryMethod === 'RECIPE') return 'METODO_RECETA'
-  if (!p.trackInventory || p.inventoryMethod !== 'QUANTITY') return 'SIN_INVENTARIO_EN_AVOQADO'
-  if (p.unit && !UNIDADES_PIEZA.includes(p.unit)) return 'UNIDAD_NO_PIEZA'
-  return null
-}
+/**
+ * Lo que impide traer el inventario de un producto, aunque esté libre (tipo, método, seguimiento, unidad). Es la MISMA
+ * regla con que el espejo inicia, aplica o reactiva una pareja (`motivoNoSincronizable` de A, FF-I1): no se duplica.
+ */
+const inelegible = (p: Candidato): ShopifyIssueReason | null => motivoNoSincronizable(p)
 const archivadoPorShopify = (p: Candidato): boolean =>
   !!p.deletedAt && p.originSystem === 'SHOPIFY' && p.deletedBy === ARCHIVADO_POR_SHOPIFY
 

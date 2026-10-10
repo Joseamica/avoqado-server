@@ -162,8 +162,13 @@ ayudantes (`shopify.store.service.ts:305`).
 - `suspenderParejaPorReceta(…)` toma la pareja con `bloquearPareja(…)` y la suspende con `SIN_INVENTARIO` (`suspendPair(…)`). Excepción: un
   producto que el conector archivó con un envío en camino se queda en `NIVEL_INEXISTENTE`; pisarlo apagaría el reintento que lo borra.
 - `pedirCuadreAlVolverACantidad(…)` pide el cuadre (`pedirCuadre(…)`) SÓLO si la pareja está suspendida por `SIN_INVENTARIO`: pedirlo
-  siempre armaría un cuadre por cada alta y cada PUT. El cuadre la reactiva solo (`COMPARAR`) cuando vuelve a haber `Inventory` y nivel en
-  Shopify; mientras tanto aparece en «Productos sin pareja».
+  siempre armaría un cuadre por cada alta y cada PUT. El cuadre la reactiva solo (`COMPARAR`) cuando el producto vuelve a ser elegible
+  (`trackInventory` + `QUANTITY`, por pieza y de un tipo con existencias: `motivoNoSincronizable(…)`, la MISMA regla con que el catálogo
+  liga) y hay `Inventory` y nivel en Shopify; mientras tanto aparece en «Productos sin pareja».
+- Una fila de `Inventory` sola NO basta para reactivar (FF-I1): `setProductInventoryMethod(…)` la conserva al pasar a receta, y con ella el
+  cuadre revivía la pareja y Shopify sobrevendía. Por eso `initializePair(…)`, `applyShopifyLevel(…)` y la resolución (U2) leen el producto
+  bajo el candado de la pareja (`sincronizableBajoCandado(…)`) y, si ya no se sincroniza, suspenden con `SIN_INVENTARIO` en vez de iniciar,
+  aplicar o reactivar (la resolución contesta 409 `SHOPIFY_SIN_INVENTARIO` y la revisión sigue abierta).
 
 ## 6. Envíos en camino, dudas y generaciones (§9.1-§9.2, §10.14, §11.3, §11.7)
 

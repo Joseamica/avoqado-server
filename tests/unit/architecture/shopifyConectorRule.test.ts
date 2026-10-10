@@ -408,6 +408,33 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     expect(leer('src/services/dashboard/productInventoryIntegration.service.ts')).toContain('pedirCuadreAlVolverACantidad(tx, productId)')
   })
 
+  it('🔴 FF-I1: reactivar exige un producto elegible (no basta la fila de Inventory), con UNA regla compartida con el catálogo', () => {
+    contieneTodas([
+      'cuando el producto vuelve a ser elegible (`trackInventory` + `QUANTITY`, por pieza y de un tipo con existencias: `motivoNoSincronizable(…)`, la MISMA regla con que el catálogo liga) y hay `Inventory` y nivel en Shopify',
+      'Una fila de `Inventory` sola NO basta para reactivar (FF-I1): `setProductInventoryMethod(…)` la conserva al pasar a receta',
+      'leen el producto bajo el candado de la pareja (`sincronizableBajoCandado(…)`) y, si ya no se sincroniza, suspenden con `SIN_INVENTARIO`',
+    ])
+    expect(regla).not.toContain('cuando vuelve a haber `Inventory` y nivel en Shopify')
+    const mirror = leer(`${SHOPIFY}/shopify.mirror.service.ts`)
+    // Las tres entradas lo revisan DESPUÉS del candado de la pareja; la de iniciar, antes de esperar envíos (no los espera).
+    enOrden(cuerpo(mirror, 'export async function initializePair('), [
+      'bloquearPareja(tx',
+      'sincronizableBajoCandado(tx, p)',
+      "suspendPair(tx, p.id, 'SIN_INVENTARIO')",
+      'productBlocked(tx',
+    ])
+    enOrden(cuerpo(mirror, 'export async function applyShopifyLevel('), ['bloquearPareja(tx', 'sincronizableBajoCandado(tx, p)'])
+    enOrden(cuerpo(leer(`${SHOPIFY}/shopify.reconcile.service.ts`), 'async function resolver('), [
+      'FOR UPDATE',
+      'sincronizableBajoCandado(tx,',
+      "return { cambio: 'SIN_INVENTARIO' }",
+    ])
+    // UNA regla: el catálogo no la copia.
+    const catalogo = leer(`${SHOPIFY}/shopify.catalog.service.ts`)
+    expect(catalogo).toContain('const inelegible = (p: Candidato): ShopifyIssueReason | null => motivoNoSincronizable(p)')
+    expect(catalogo).not.toContain("return 'METODO_RECETA'")
+  })
+
   it('L5: la línea retenida se lee en el detalle del conteo (móvil, dashboard y MCP) y la regla dice dónde', () => {
     // La viñeta «Pendiente (L5…)» se fue con C9b; si vuelve, o si alguien deja de exponer la retención, esto falla.
     expect(regla).not.toContain('todavía NO muestra `shopifyHeldAt`')
