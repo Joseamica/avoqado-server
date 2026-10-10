@@ -1,5 +1,5 @@
 import { Prisma } from '@prisma/client'
-import { resumirConteo, estadoParaClientes, UNIDAD_DE_PRODUCTO } from '@/services/shared/stockCountSummary'
+import { resumirConteo, estadoParaClientes, retencionShopify, UNIDAD_DE_PRODUCTO } from '@/services/shared/stockCountSummary'
 
 /**
  * La regla única de «qué resume un conteo». Nació del conteo de Mindform del
@@ -76,5 +76,20 @@ describe('estadoParaClientes', () => {
   })
   it.each(['IN_PROGRESS', 'COMPLETED', 'CANCELLED'])('%s pasa tal cual', s => {
     expect(estadoParaClientes(s)).toBe(s)
+  })
+})
+
+describe('retencionShopify', () => {
+  // Un motivo inesperado (o nulo con la hora puesta) no puede leerse como «vuelve a contar en unos minutos»: cae a lo prudente,
+  // «resuélvelo primero». Sólo ENVIO_EN_CAMINO se reconoce como tal.
+  it('ENVIO_EN_CAMINO pasa tal cual; cualquier otro motivo con hora cae a DUDA_POR_REVISAR', () => {
+    const at = new Date('2026-10-08T15:00:00.000Z')
+    expect(retencionShopify({ shopifyHeldAt: at, shopifyHeldReason: 'ENVIO_EN_CAMINO' })).toEqual({
+      at: at.toISOString(),
+      motivo: 'ENVIO_EN_CAMINO',
+    })
+    for (const raro of ['DUDA_POR_REVISAR', 'OTRA_COSA', '', null, undefined])
+      expect(retencionShopify({ shopifyHeldAt: at, shopifyHeldReason: raro })).toEqual({ at: at.toISOString(), motivo: 'DUDA_POR_REVISAR' })
+    expect(retencionShopify({ shopifyHeldAt: null, shopifyHeldReason: 'ENVIO_EN_CAMINO' })).toBeNull()
   })
 })

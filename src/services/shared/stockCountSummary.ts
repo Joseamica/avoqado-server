@@ -1,4 +1,5 @@
 import { Prisma } from '@prisma/client'
+import type { MotivoRetenido } from '../commerce-channels/shopify/shopify.count.service'
 
 /**
  * La ÚNICA regla de «qué resume un conteo físico». La consumen /mobile,
@@ -51,6 +52,21 @@ export function resumirConteo(lineas: LineaDeConteo[]): ResumenDeConteo {
     .sort((a, b) => a.unit.localeCompare(b.unit))
 
   return { itemCount: lineas.length, countedCount, matchedCount, mismatchedCount, differenceByUnit }
+}
+
+/**
+ * La línea que el conteo NO aplicó por la conexión con Shopify (B6 la marca al confirmar): hubo un envío en camino o
+ * una diferencia por revisar, así que su diferencia NO movió el stock. null = se aplicó (o el negocio no usa Shopify).
+ * La comparten el detalle de /mobile, el del dashboard y el MCP: una línea retenida nunca se presenta como aplicada.
+ */
+export function retencionShopify(l: {
+  shopifyHeldAt?: Date | null
+  shopifyHeldReason?: string | null
+}): { at: string; motivo: MotivoRetenido } | null {
+  if (!l.shopifyHeldAt) return null
+  // Sólo ENVIO_EN_CAMINO se lee como «vuelve a contarlo cuando termine»; un motivo inesperado o vacío cae a lo prudente.
+  const motivo: MotivoRetenido = l.shopifyHeldReason === 'ENVIO_EN_CAMINO' ? 'ENVIO_EN_CAMINO' : 'DUDA_POR_REVISAR'
+  return { at: l.shopifyHeldAt.toISOString(), motivo }
 }
 
 export type EstadoParaClientes = 'IN_PROGRESS' | 'COMPLETED' | 'CANCELLED'

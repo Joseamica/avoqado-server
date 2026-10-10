@@ -14,7 +14,7 @@ import { AdjustStockSchema } from '@/schemas/dashboard/inventory.schema'
 import { listPresentations, setPresentations } from '@/services/dashboard/rawMaterialPresentation.service'
 import { getReorderSuggestions, getAutoReorderConfig, setAutoReorderConfig } from '@/services/dashboard/autoReorder.service'
 import { getBatchesForRawMaterial, quarantineBatch, releaseBatchFromQuarantine } from '@/services/dashboard/fifoBatch.service'
-import { resumirConteo } from '@/services/shared/stockCountSummary'
+import { resumirConteo, retencionShopify } from '@/services/shared/stockCountSummary'
 import { cancelStockCount } from '@/services/mobile/inventory.mobile.service'
 import { planGateMessage } from '../planGate'
 import { venuesWithFeatureAccess } from '@/services/access/basePlan.service'
@@ -663,7 +663,7 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'stock_counts',
-    'Physical inventory counts (conteos de existencia) of a venue: each count with its status (IN_PROGRESS/COMPLETED/CANCELLED), who created it, when, and every line — QUANTITY products AND raw materials/ingredients (RECIPE products are never counted; their stock derives from ingredients) — with expected vs physically-counted quantity and the variance. Answers "¿cuándo fue el último conteo?", "¿qué diferencias salieron?", "¿qué insumos faltaron contra sistema?". Newest first. Pass venueId. Each count also carries `summary` (how many lines were actually counted, matches, mismatches, and the difference per unit — only counted lines) and `cancelledAt` when it was discarded. PREMIUM (INVENTORY_TRACKING).',
+    'Physical inventory counts (conteos de existencia) of a venue: each count with its status (IN_PROGRESS/COMPLETED/CANCELLED), who created it, when, and every line — QUANTITY products AND raw materials/ingredients (RECIPE products are never counted; their stock derives from ingredients) — with expected vs physically-counted quantity and the variance. Answers "¿cuándo fue el último conteo?", "¿qué diferencias salieron?", "¿qué insumos faltaron contra sistema?". Newest first. Pass venueId. Each count also carries `summary` (how many lines were actually counted, matches, mismatches, and the difference per unit — only counted lines) and `cancelledAt` when it was discarded. A counted line can be NOT applied because of the Shopify connection: it carries when it was held (ISO, fechas en UTC) and why — the product was syncing with Shopify when the count was confirmed (recount it once that finishes) or a difference with Shopify is pending review (resolve it first in Integraciones → Shopify) — and each count says how many lines were not applied. The variance of a held line did NOT change stock: never present it as applied. The per-unit difference of the count summary still includes the lines that were not applied. PREMIUM (INVENTORY_TRACKING).',
     {
       venueId: z.string().describe('Venue whose stock counts to read (must be in your scope)'),
       status: z.enum(['IN_PROGRESS', 'COMPLETED', 'CANCELLED']).optional().describe('Only counts in this status. Omit for all.'),
@@ -712,6 +712,8 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
             // como contada» vive una sola vez, en resumirConteo; aquí sólo se reexpone.
             countedLines: summary.countedCount,
             summary,
+            // Líneas contadas que NO se aplicaron por Shopify (L5); `summary` las sigue contando.
+            noAplicadas: c.items.filter(i => i.shopifyHeldAt).length,
             items: c.items.map(i => ({
               kind: i.rawMaterialId ? 'INGREDIENT' : 'PRODUCT',
               name: i.product?.name ?? i.rawMaterial?.name ?? '',
@@ -720,6 +722,7 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
               expected: Number(i.expected),
               counted: i.countedAt ? Number(i.counted) : null,
               variance: i.countedAt ? round2(Number(i.counted) - Number(i.expected)) : null,
+              shopifyHeld: retencionShopify(i),
             })),
           }
         }),

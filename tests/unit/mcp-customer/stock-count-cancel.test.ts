@@ -147,6 +147,42 @@ describe('stock_counts revision contract', () => {
     const out = parse(await callList({ venueId: 'v1' }))
     expect(out.counts[0]).toMatchObject({ id: 'c1', revision: 4 })
   })
+
+  it('L5: una línea que el conteo NO aplicó por Shopify sale con su retención (UTC) y el conteo dice cuántas', async () => {
+    const linea = (o: Record<string, unknown>) => ({
+      rawMaterialId: null,
+      expected: '20.000',
+      counted: '18.000',
+      countedAt: new Date('2026-10-08T14:00:00.000Z'),
+      shopifyHeldAt: null,
+      shopifyHeldReason: null,
+      product: { name: 'Gorra', sku: '10025' },
+      rawMaterial: null,
+      ...o,
+    })
+    mockStockCountFindMany.mockResolvedValueOnce([
+      {
+        id: 'c1',
+        revision: 6,
+        type: 'FULL',
+        status: 'COMPLETED',
+        note: null,
+        createdAt: new Date('2026-10-08T13:00:00.000Z'),
+        completedAt: new Date('2026-10-08T15:00:00.000Z'),
+        cancelledAt: null,
+        createdByUser: null,
+        items: [linea({}), linea({ shopifyHeldAt: new Date('2026-10-08T15:00:00.000Z'), shopifyHeldReason: 'DUDA_POR_REVISAR' })],
+      },
+    ])
+
+    const [c] = parse(await callList({ venueId: 'v1' })).counts
+    expect(c.noAplicadas).toBe(1)
+    expect(c.items[0].shopifyHeld).toBeNull()
+    expect(c.items[1].shopifyHeld).toEqual({ at: '2026-10-08T15:00:00.000Z', motivo: 'DUDA_POR_REVISAR' })
+    // Regresión: los campos de siempre siguen ahí, iguales.
+    expect(c.items[1]).toMatchObject({ kind: 'PRODUCT', name: 'Gorra', sku: '10025', expected: 20, counted: 18, variance: -2 })
+    expect(c.summary.countedCount).toBe(2)
+  })
 })
 
 /**

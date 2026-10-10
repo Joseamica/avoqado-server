@@ -8,6 +8,7 @@ import { logAction } from './activity-log.service'
 import { ensureQuantityInventoryRow } from './quantityInventoryRow'
 import { operationHash } from '@/utils/operationHash'
 import { acquireRecipeCostGraphVenueLockV1, lockRecipeCostProductForUpdateV1 } from './recipe-cost-graph-lock'
+import { pedirCuadreAlVolverACantidad, suspenderParejaPorReceta } from '../commerce-channels/shopify/shopify.store.service'
 
 /**
  * Product Inventory Integration Service
@@ -644,6 +645,10 @@ export async function setProductInventoryMethod(
         inventoryMethod, // Set method (QUANTITY | RECIPE)
       },
     })
+    // Conector Shopify (B7): con el Product ya escrito (su candado) y antes de Inventory, la pareja se suspende al irse a
+    // receta (bajo receta la venta no escribe Inventory: Shopify no se enteraría) y pide su cuadre al volver a cantidad.
+    if (inventoryMethod === 'RECIPE') await suspenderParejaPorReceta(tx, updated)
+    else await pedirCuadreAlVolverACantidad(tx, productId)
     // Si el asistente se abandona tras este paso, el producto ya es «por cantidad»: necesita su fila.
     await ensureQuantityInventoryRow(tx, updated)
   })

@@ -305,6 +305,14 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   set_terminal_payment_strict_mode: 'write',
   settlement_calendar: 'read',
   settlement_week: 'read',
+  shopify_connect_apply: 'write',
+  shopify_connect_preview: 'read',
+  shopify_disconnect: 'write',
+  shopify_resync: 'write',
+  shopify_review_list: 'read',
+  shopify_review_resolve: 'write',
+  shopify_status: 'read',
+  shopify_unmatched_list: 'read',
   sim_custody: 'read',
   sim_pending_approvals: 'read',
   split_table_check: 'write',
@@ -477,6 +485,9 @@ export function configureToolCatalog(server: McpServer, scope: McpScope, profile
             'fecha',
             'destinoFecha',
             'expectedRevision',
+            // Conector Shopify: «resolver» confirma con las cantidades que se VIERON; si cambiaron, el servicio da 409.
+            'expectedAvoqadoQty',
+            'expectedShopifyQty',
           ]) {
             if (config.inputSchema?.[field] && data[field] != null) confirmationArguments[field] = data[field]
           }

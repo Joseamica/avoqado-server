@@ -364,6 +364,7 @@ import { updateAreaSettlementRouteSchema } from '../schemas/dashboard/areaTicket
 import classSessionRoutes from './dashboard/classSession.routes'
 import staffPayRoutes from './dashboard/staffPay.routes'
 import passIntegrationsRoutes from './dashboard/passIntegrations.routes'
+import shopifyRoutes from './dashboard/shopify.routes'
 import googleCalendarStatusRoutes from './dashboard/googleCalendarStatus.routes'
 // @temporary - Serialized inventory demo routes (delete after final implementation)
 import serializedInventoryRoutes from './dashboard/serializedInventory.routes'
@@ -4593,6 +4594,10 @@ router.use('/venues/:venueId/staff-pay', authenticateTokenMiddleware, staffPayRo
 // Conector de pases (TotalPass/Wellhub): conectar, ligar clases, lugares, check-ins. Gate AGGREGATOR_PASSES (Pro) y
 // permisos dentro del sub-router (permiso antes que plan).
 router.use('/venues/:venueId/pass-integrations', authenticateTokenMiddleware, passIntegrationsRoutes)
+
+// Conector Shopify (spec 2026-10-07): permiso antes que plan dentro del sub-router; el resumen, las listas, la vista
+// previa y desconectar sólo piden permiso (apagado se ve y se explica).
+router.use('/venues/:venueId/shopify', authenticateTokenMiddleware, shopifyRoutes)
 
 // Google Calendar Sync — venue-scoped status / ops endpoints (Phase 3)
 router.use('/venues/:venueId/google-calendar', authenticateTokenMiddleware, googleCalendarStatusRoutes)

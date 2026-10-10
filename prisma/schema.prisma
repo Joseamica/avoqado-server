@@ -157,6 +157,9 @@ model Organization {
   staffPayTipWindows       StaffPayTipWindow[]
   staffPayVenueWindows     StaffPayVenueWindow[]
 
+  // Conector Shopify (spec 2026-10-07)
+  shopifyStores ShopifyStore[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
@@ -708,6 +711,9 @@ model Venue {
   // Conector de pases (TotalPass/Wellhub)
   aggregatorConnections   AggregatorConnection[]
   aggregatorCapacityRules AggregatorCapacityRule[]
+
+  // Conector Shopify (spec 2026-10-07): una sucursal ↔ una ubicación de Shopify
+  shopifyLocationLink ShopifyLocationLink?
 
   @@unique([id, organizationId])
   @@index([organizationId])
@@ -1963,6 +1969,8 @@ model Product {
 
   // Relations
   inventory        Inventory?
+  shopifyVariantLink ShopifyVariantLink?
+  shopifyReviewItems ShopifyReviewItem[]
   orderItems       OrderItem[]
   areaTicketLines  AreaTicketLine[]
   paymentLinkItems PaymentLinkItem[]
@@ -3034,6 +3042,10 @@ model StockCountItem {
   // con appliedAt: re-aplicar una línea ya aplicada re-SETearía el stock al
   // valor contado y borraría las ventas ocurridas después del crash.
   appliedAt DateTime?
+  // Conector Shopify (§12.1): la línea NO se aplicó porque el producto tenía un envío en camino a Shopify; no se
+  // sabe si un cambio de apartadas vino de un pedido o de un despacho. Se recuenta después.
+  shopifyHeldAt     DateTime?
+  shopifyHeldReason String?
 
   @@index([stockCountId])
   @@index([productId])
@@ -10044,6 +10056,7 @@ enum OriginSystem {
   AVOQADO // Creado en nuestro sistema (la fuente de verdad por defecto)
   POS_SOFTRESTAURANT // Sincronizado desde el POS SoftRestaurant
   DELIVERY_PLATFORM // Orden inyectada por un canal de delivery (Deliverect o directo)
+  SHOPIFY // Importado o sincronizado desde Shopify (conector, spec 2026-10-07)
 }
 
 enum CommandType {
@@ -19198,6 +19211,329 @@ model StaffPayStatement {
   createdAt DateTime         @default(now())
 
   @@unique([periodId, staffId])
+}
+
+// ═══ Conector Shopify (spec 2026-10-07-conector-shopify-design.md, §12 bis) ═══
+enum ShopifyAppKey {
+  PILOTO
+  PUBLICA
+}
+
+/// La revocación vive SÓLO aquí (ajuste 12 bis.7). Una credencial nueva revive todas las sucursales de la tienda.
+enum ShopifyStoreStatus {
+  ACTIVE
+  REVOKED
+}
+
+/// Fase de cada sucursal. PAUSED guarda en `pausedFrom` la fase a la que vuelve.
+enum ShopifyLinkStatus {
+  CONNECTING   // importando catálogo; el stock NO se toca; el guardia ya encola todo
+  REVIEWING    // vista previa lista; con applyRequestedAt se inicializan las parejas por tandas
+  ACTIVE
+  PAUSED
+  DISCONNECTED
+}
+
+enum ShopifyOutboxStatus {
+  PENDING
+  IN_PROGRESS
+  SENT
+  FAILED
+  DEAD_LETTER
+  DISCARDED
+}
+
+enum ShopifyEventStatus {
+  RECEIVED
+  PROCESSING
+  PROCESSED
+  FAILED
+  DEFERRED
+  SKIPPED
+}
+
+enum ShopifyIntentPurpose {
+  CONNECT
+  REAUTHORIZE
+}
+
+enum ShopifyIntentStatus {
+  CREATED
+  EXCHANGING
+  EXCHANGED
+  CONSUMED
+  FAILED
+}
+
+enum ShopifyReviewStatus {
+  OPEN
+  RESOLVED
+}
+
+enum ShopifyReviewChoice {
+  AVOQADO
+  SHOPIFY
+}
+
+enum ShopifyReviewReason {
+  DIFERENCIA   // el cuadre no pudo explicar Avoqado ≠ espejo + pendientes
+  ATORADO      // hay envíos en DEAD_LETTER
+  INCIERTO     // un envío ambiguo venció su ventana: no sabemos si llegó
+  REACTIVADA   // pareja nueva o reactivada sobre un producto que ya tenía stock distinto
+}
+
+enum ShopifySuspendReason {
+  SIN_INVENTARIO      // el producto se quedó sin fila "Inventory" (p. ej. pasó a receta)
+  NIVEL_INEXISTENTE   // la variante no tiene nivel activo en la ubicación
+  NO_RASTREADO        // inventoryItem.tracked = false en Shopify
+}
+
+enum ShopifyIssueReason {
+  SIN_SKU
+  SKU_REPETIDO
+  SKU_CHOCA
+  CODIGO_REPETIDO
+  IDENTIDAD_EN_CONFLICTO
+  PRODUCTO_ARCHIVADO
+  METODO_RECETA
+  TIPO_SIN_INVENTARIO
+  SIN_INVENTARIO_EN_AVOQADO
+  UNIDAD_NO_PIEZA
+  SIN_PRECIO
+  NIVEL_INEXISTENTE
+  NO_RASTREADO
+  SIN_INVENTARIO
+  ERROR_IMPORTACION
+}
+
+/// Una tienda de Shopify ligada a una organización. El token va cifrado (SHOPIFY_TOKEN_KEY).
+model ShopifyStore {
+  id                    String                @id @default(cuid())
+  organizationId        String
+  organization          Organization          @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  shopDomain            String                @unique
+  appKey                ShopifyAppKey
+  accessTokenCiphertext Bytes
+  /// Sube con cada token nuevo. Un 401 sólo revoca si el token usado sigue siendo el vigente.
+  tokenVersion          Int                   @default(1)
+  scopes                String
+  status                ShopifyStoreStatus    @default(ACTIVE)
+  revokedAt             DateTime?
+  /// Cuándo se guardó el token vigente. Un `app/uninstalled` con `X-Shopify-Triggered-At` anterior no lo revoca (§10.6).
+  authorizedAt          DateTime              @default(now())
+  createdAt             DateTime              @default(now())
+  updatedAt             DateTime              @updatedAt
+  locationLinks         ShopifyLocationLink[]
+
+  @@index([organizationId])
+}
+
+/// Una sucursal de Avoqado ↔ una ubicación de Shopify. Una fila por sucursal.
+model ShopifyLocationLink {
+  id                 String               @id @default(cuid())
+  storeId            String
+  store              ShopifyStore         @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  venueId            String               @unique
+  venue              Venue                @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  shopifyLocationId  String
+  locationName       String
+  status             ShopifyLinkStatus    @default(CONNECTING)
+  pausedFrom         ShopifyLinkStatus?
+  /// Sube al conectar a otra tienda/ubicación o tras desconectar. Cada fila del buzón guarda la suya.
+  generation         Int                  @default(1)
+  importCursor       String?
+  importAttempts     Int                  @default(0)
+  importError        String?
+  importedAt         DateTime?
+  applyRequestedAt   DateTime?
+  applyRequestedById String?
+  webhooksAt         DateTime?
+  needsReconcile     Boolean              @default(false)
+  reconcileCursor    String?
+  lastReconciledAt   DateTime?
+  /// Sube con cada pedido de cuadre; el cierre de una vuelta hace CAS con la versión que la empezó (§10.9).
+  reconcileVersion   Int                  @default(0)
+  reconcileDoneVersion Int                @default(0)
+  /// Barrido de catálogo (recupera webhooks perdidos, §10.10).
+  catalogSweepId     Int                  @default(0)
+  catalogSweepCursor String?
+  /// Reencolar eventos DEFERRED pendiente; se marca en la MISMA tx de la transición y el worker lo drena (§10.5).
+  requeuePending     Boolean              @default(false)
+  /// Lease del trabajo por sucursal (§10.1): reemplaza al candado global del worker.
+  workToken          String?
+  workLeaseUntil     DateTime?
+  lastWorkedAt       DateTime?
+  /// Espera tras una unidad fallida, para no empezar siempre por la misma sucursal (§10.2).
+  nextWorkAt         DateTime?
+  connectedById      String?
+  createdAt          DateTime             @default(now())
+  updatedAt          DateTime             @updatedAt
+  variantLinks       ShopifyVariantLink[]
+
+  @@unique([storeId, shopifyLocationId])
+  @@index([status])
+}
+
+/// Un producto plano de Avoqado ↔ una variante de Shopify.
+/// Invariante operativo (§9.3): Inventory.currentStock = mirrorAvailable + Σ delta de filas vivas (PENDING, IN_PROGRESS,
+/// FAILED) + Σ delta de DEAD_LETTER sin resolver + offset de la revisión OPEN, del producto en la generación vigente.
+model ShopifyVariantLink {
+  id                String                @id @default(cuid())
+  locationLinkId    String
+  locationLink      ShopifyLocationLink   @relation(fields: [locationLinkId], references: [id], onDelete: Cascade)
+  venueId           String
+  productId         String                @unique
+  product           Product               @relation(fields: [productId], references: [id], onDelete: Cascade)
+  shopifyProductId  String
+  shopifyVariantId  String
+  inventoryItemId   String
+  originalSku       String?
+  /// Lo que Shopify tenía al importar; sólo alimenta la vista previa («así quedará tu stock»).
+  importedAvailable Int?
+  importedAt        DateTime?
+  /// null = pareja creada pero su stock todavía no se inicializa.
+  initializedAt     DateTime?
+  /// true si el catálogo CREÓ el producto de Avoqado para esta variante (no lo emparejó con uno que ya existía).
+  /// Sólo con true se permite TOMAR_SHOPIFY estando ACTIVE (§9.6).
+  createdProduct    Boolean               @default(false)
+  suspendedReason   ShopifySuspendReason?
+  suspendedAt       DateTime?
+  mirrorAvailable   Int                   @default(0)
+  mirrorCommitted   Int                   @default(0)
+  mirrorAt          DateTime              @default(now())
+  committedAt       DateTime?
+  /// Último barrido de catálogo que vio esta variante; las bajas se deciden sólo al terminar un barrido completo.
+  lastSeenSweepId   Int?
+  createdAt         DateTime              @default(now())
+  updatedAt         DateTime              @updatedAt
+
+  @@unique([locationLinkId, inventoryItemId])
+  @@unique([locationLinkId, shopifyVariantId])
+  @@index([locationLinkId, shopifyProductId])
+  @@index([locationLinkId, initializedAt])
+  @@index([venueId])
+}
+
+/// Buzón Avoqado → Shopify. Lo llenan SÓLO el guardia y la resolución «usar Avoqado».
+/// El destino queda congelado en (locationLinkId, generation).
+model ShopifyStockOutbox {
+  id             String              @id @default(cuid())
+  venueId        String
+  locationLinkId String
+  generation     Int
+  productId      String
+  delta          Decimal             @db.Decimal(12, 3)
+  status         ShopifyOutboxStatus @default(PENDING)
+  /// Algún intento terminó sin saber si Shopify lo aplicó (timeout, red, 5xx, respuesta ilegible). Pegajoso: sólo lo
+  /// limpia una respuesta definitiva (éxito o userErrors).
+  ambiguous      Boolean             @default(false)
+  /// Congelados en el PRIMER intento: todo reintento con la misma llave manda exactamente los mismos parámetros (§9.2).
+  sentInventoryItemId String?
+  sentLocationId      String?
+  attempts       Int                 @default(0)
+  scheduledAt    DateTime            @default(now())
+  firstAttemptAt DateTime?
+  claimToken     String?
+  leaseUntil     DateTime?
+  lastError      String?             @db.Text
+  createdAt      DateTime            @default(now())
+  processedAt    DateTime?
+
+  @@index([status, scheduledAt])
+  @@index([productId, status])
+  @@index([venueId, status])
+  @@index([locationLinkId, generation, status])
+}
+
+/// Webhooks de Shopify. Se guardan y se contesta 200; un worker los procesa con lease.
+model ShopifyInboundEvent {
+  id            String             @id @default(cuid())
+  dedupKey      String             @unique
+  appKey        ShopifyAppKey
+  topic         String
+  shopDomain    String
+  payload       Json
+  status        ShopifyEventStatus @default(RECEIVED)
+  error         String?            @db.Text
+  attemptCount  Int                @default(0)
+  nextAttemptAt DateTime?
+  claimToken    String?
+  leaseUntil    DateTime?
+  /// `X-Shopify-Triggered-At`: hora en que Shopify originó el aviso (puede llegar desordenado).
+  triggeredAt   DateTime?
+  receivedAt    DateTime           @default(now())
+  processedAt   DateTime?
+
+  @@index([status, nextAttemptAt])
+  @@index([shopDomain, status])
+}
+
+/// Intención OAuth de un solo uso: CREATED → EXCHANGING → EXCHANGED → CONSUMED (o FAILED).
+model ShopifyConnectIntent {
+  id              String               @id @default(cuid())
+  venueId         String
+  authUserId      String
+  shopDomain      String
+  appKey          ShopifyAppKey
+  purpose         ShopifyIntentPurpose @default(CONNECT)
+  status          ShopifyIntentStatus  @default(CREATED)
+  tokenCiphertext Bytes?
+  scopes          String?
+  expiresAt       DateTime
+  createdAt       DateTime             @default(now())
+
+  @@index([venueId, createdAt])
+  @@index([expiresAt])
+}
+
+/// «Por revisar».
+model ShopifyReviewItem {
+  id                 String               @id @default(cuid())
+  venueId            String
+  productId          String
+  product            Product              @relation(fields: [productId], references: [id], onDelete: Cascade)
+  reason             ShopifyReviewReason
+  avoqadoQty         Decimal              @db.Decimal(12, 3)
+  shopifyQty         Int
+  atorados           Int                  @default(0)
+  /// W5: en una REACTIVADA, la pareja se ligó POR PRIMERA VEZ (nunca se había iniciado): el producto ya existía en Avoqado
+  /// y acaba de aparecer en Shopify con el mismo SKU. La página lo dice así y no «se volvió a emparejar».
+  firstPairing       Boolean              @default(false)
+  /// Diferencia que esta revisión explica mientras está OPEN (§9.3): REACTIVADA = Inventory − S al abrirla;
+  /// DIFERENCIA = el hueco medido. Al resolver vuelve a 0.
+  offset             Decimal              @default(0) @db.Decimal(12, 3)
+  suggestion         ShopifyReviewChoice
+  status             ShopifyReviewStatus  @default(OPEN)
+  choice             ShopifyReviewChoice?
+  resolvedById       String?
+  resolvedAt         DateTime?
+  /// Fila del buzón creada por «usar Avoqado»; la pantalla dice «se enviará» mientras no esté SENT.
+  resolutionOutboxId String?
+  createdAt          DateTime             @default(now())
+  updatedAt          DateTime             @updatedAt
+
+  @@index([venueId, status, createdAt])
+  @@index([productId, status])
+  /// La retención del worker (RESUELTAS de hace más de 90 días) busca por aquí, entre todos los negocios, cada hora.
+  @@index([status, resolvedAt])
+}
+
+/// «Productos sin pareja» y parejas suspendidas.
+model ShopifyImportIssue {
+  id               String             @id @default(cuid())
+  venueId          String
+  shopifyVariantId String
+  shopifyProductId String
+  title            String
+  sku              String?
+  reason           ShopifyIssueReason
+  detail           String?
+  productId        String?
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+
+  @@unique([venueId, shopifyVariantId])
+  @@index([venueId, createdAt])
 }
 
 /// Interruptor de propinas en el recibo (spec fase 3 §7.1). Cada ventana es [startsAt, endsAt): prender abre una, apagar la

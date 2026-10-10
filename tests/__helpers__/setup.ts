@@ -425,6 +425,10 @@ const prismaMock: any = {
   googleOAuthSession: createMockModel(),
   // Google Calendar Sync (Phase 2 — push)
   calendarSyncOutbox: createMockModel(),
+  // Conector Shopify: el conteo (B6) pregunta si el negocio tiene sucursal ligada, y él y el paso a receta (B7) por la
+  // pareja del producto.
+  shopifyLocationLink: createMockModel(),
+  shopifyVariantLink: createMockModel(),
   aggregatorConnection: createMockModel(),
   aggregatorProductLink: createMockModel(),
   aggregatorSessionLink: createMockModel(),
@@ -500,6 +504,11 @@ prismaMock.aggregatorVisit.findMany.mockResolvedValue([])
 // Conector de pases: crear/editar/cancelar sesiones y cambiar su lista llama `enqueuePassSessionSync`, que busca las
 // conexiones activas del venue. Casi ningún venue tiene: por default ninguna, para que esos tests no tengan que mockearlo.
 prismaMock.aggregatorConnection.findMany.mockResolvedValue([])
+// Conector Shopify: casi ningún producto tiene pareja. Sin estos defaults, los tests del conteo y del asistente que no
+// saben de Shopify reventarían con «parejas is not iterable» o leerían `undefined` como pareja.
+prismaMock.shopifyLocationLink.findUnique.mockResolvedValue(null)
+prismaMock.shopifyVariantLink.findMany.mockResolvedValue([])
+prismaMock.shopifyVariantLink.findUnique.mockResolvedValue(null)
 prismaMock.orderItem.findMany.mockResolvedValue([])
 // IVA por producto B2: los escritores de descuentos sincronizan los repartos leyendo las filas de la orden
 // (`sincronizarRepartos`). Mismo patrón que `orderItem`: una orden sin filas, salvo que la prueba diga otra cosa.

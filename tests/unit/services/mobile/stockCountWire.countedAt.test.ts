@@ -36,6 +36,43 @@ describe('mapCountItem — countedAt viaja al cliente', () => {
   })
 })
 
+describe('mapCountItem — la línea que el conteo NO aplicó por Shopify (L5)', () => {
+  it('una línea retenida lleva shopifyHeld con la hora en ISO UTC y el motivo', () => {
+    const wire = mapCountItem(
+      item({
+        counted: '18.000',
+        countedAt: new Date(),
+        shopifyHeldAt: new Date('2026-10-08T15:00:00.000Z'),
+        shopifyHeldReason: 'ENVIO_EN_CAMINO',
+      }) as never,
+    )
+    expect(wire.shopifyHeld).toEqual({ at: '2026-10-08T15:00:00.000Z', motivo: 'ENVIO_EN_CAMINO' })
+    expect(
+      mapCountItem(item({ shopifyHeldAt: new Date('2026-10-08T15:00:00.000Z'), shopifyHeldReason: 'DUDA_POR_REVISAR' }) as never)
+        .shopifyHeld,
+    ).toEqual({ at: '2026-10-08T15:00:00.000Z', motivo: 'DUDA_POR_REVISAR' })
+  })
+
+  it('una línea aplicada (o sin conexión) lleva shopifyHeld: null', () => {
+    expect(mapCountItem(item({ shopifyHeldAt: null, shopifyHeldReason: null }) as never).shopifyHeld).toBeNull()
+    // Una fila sin las columnas (fixture viejo) tampoco inventa una retención.
+    expect(mapCountItem(item({}) as never).shopifyHeld).toBeNull()
+  })
+
+  it('🔴 regresión: los campos de siempre no cambian por la retención', () => {
+    const base = mapCountItem(item({ counted: '18.000', countedAt: new Date('2026-09-07T22:51:00.000Z') }) as never)
+    const retenida = mapCountItem(
+      item({
+        counted: '18.000',
+        countedAt: new Date('2026-09-07T22:51:00.000Z'),
+        shopifyHeldAt: new Date('2026-10-08T15:00:00.000Z'),
+        shopifyHeldReason: 'ENVIO_EN_CAMINO',
+      }) as never,
+    )
+    expect(retenida).toEqual({ ...base, shopifyHeld: { at: '2026-10-08T15:00:00.000Z', motivo: 'ENVIO_EN_CAMINO' } })
+  })
+})
+
 describe('getStockCounts — summary y cancelados', () => {
   beforeEach(() => {
     jest.clearAllMocks()
@@ -106,5 +143,36 @@ describe('getStockCounts — summary y cancelados', () => {
     })
     expect(c.items).toHaveLength(2)
     expect(c.items[1]).toMatchObject({ itemType: 'RAW_MATERIAL', unit: 'GRAM', productId: 'rm1' })
+  })
+
+  it('🔴 el GET móvil conserva la forma vieja de cada línea y sólo AÑADE shopifyHeld', async () => {
+    const [c] = await getStockCounts('v1')
+    expect(Object.keys(c.items[0]).sort()).toEqual(
+      [
+        'id',
+        'productId',
+        'rawMaterialId',
+        'itemType',
+        'productName',
+        'sku',
+        'gtin',
+        'imageUrl',
+        'unit',
+        'expected',
+        'counted',
+        'difference',
+        'countedAt',
+        'shopifyHeld',
+      ].sort(),
+    )
+    expect(c.items[0]).toMatchObject({
+      id: 'i1',
+      productId: 'p1',
+      itemType: 'PRODUCT',
+      productName: 'Gorra Beige',
+      expected: 20,
+      counted: 0,
+    })
+    expect(c.items[0].shopifyHeld).toBeNull()
   })
 })

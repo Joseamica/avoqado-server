@@ -51,6 +51,13 @@ import { handleMercadoPagoWebhook } from './controllers/webhook/mercadoPago.webh
 import { handleFacturapiWebhook } from './controllers/webhook/facturapi.webhook.controller'
 import { handlePassWebhook } from './controllers/aggregators/passWebhook.controller'
 import { activarUberOAuth, startUberOAuth, uberOAuthCallback } from './controllers/delivery-channels/uber.oauth.controller'
+import {
+  handleShopifyWebhook,
+  SHOPIFY_WEBHOOK_MAX_BYTES,
+  SHOPIFY_WEBHOOK_ROUTE,
+} from './services/commerce-channels/shopify/shopify.inbound.service'
+import { SHOPIFY_OAUTH_CALLBACK_PATH } from './services/commerce-channels/shopify/shopify.connect.service'
+import { shopifyOAuthCallback } from './controllers/commerce-channels/shopify.oauth.controller'
 import publicRoutes from './routes/public.routes'
 import appUpdateRoutes from './routes/superadmin/appUpdate.routes'
 import settlementReportRoutes from './routes/settlement-report.routes'
@@ -151,6 +158,12 @@ app.post('/api/v1/webhooks/facturapi/:emisorId', express.raw({ type: '*/*', limi
 // antes del router genérico. El `:token` es el secreto de la conexión: el logger lo redacta (`redactPathSecrets`).
 app.post('/api/v1/webhooks/aggregators/:provider/:token/:kind', express.raw({ type: '*/*', limit: '1mb' }), handlePassWebhook)
 
+// ⚠️ Conector Shopify: la firma (HMAC base64) es del cuerpo CRUDO, y un products/update con muchas variantes pasa de los
+// 100 KB del router genérico. Raw propio de 1 MB, antes del genérico. Sólo guarda el aviso y contesta 200: el worker lo
+// procesa con reclamo y lease (spec 12 bis.10). `:appKey` (piloto | publica) no es secreto. El logger le llega
+// por el `app.use('/api/v1/webhooks', requestLoggerMiddleware)` de arriba.
+app.post(SHOPIFY_WEBHOOK_ROUTE, express.raw({ type: '*/*', limit: SHOPIFY_WEBHOOK_MAX_BYTES }), handleShopifyWebhook)
+
 app.use(
   '/api/v1/webhooks',
   express.raw({ type: 'application/json' }), // Raw body parser for Stripe signature verification
@@ -186,6 +199,9 @@ app.use('/api/v1/public', requestLoggerMiddleware, express.json(), cookieParser(
 // dueño autorice aquí; sin este flujo cada alta dependería de un ticket a soporte de Uber.
 app.get('/api/v1/delivery/uber/oauth/start', requestLoggerMiddleware, startUberOAuth)
 app.get('/api/v1/delivery/uber/oauth/callback', requestLoggerMiddleware, uberOAuthCallback)
+// Conector Shopify: callback OAuth PÚBLICO (Shopify redirige sin sesión de Avoqado; la prueba de origen es su `hmac` y el
+// `state` firmado). Es la ruta que B pone en `redirect_uri`. El logger redacta `code` y `state`.
+app.get(SHOPIFY_OAUTH_CALLBACK_PATH, requestLoggerMiddleware, shopifyOAuthCallback)
 // La página de selección de tiendas publica aquí (form HTML): `state2` firmado + las tiendas marcadas.
 app.post(
   '/api/v1/delivery/uber/oauth/activate',

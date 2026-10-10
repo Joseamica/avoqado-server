@@ -229,6 +229,17 @@ const envSchema = z.object({
   MERCADO_PAGO_TOKEN_KEY: z.string().length(64, 'MERCADO_PAGO_TOKEN_KEY debe ser hex de 32 bytes (64 chars)').optional(),
   // Conector de pases (TotalPass/Wellhub). Llave AES de 32 bytes en hex para la place_api_key de cada sucursal.
   AGGREGATOR_TOKEN_KEY: z.string().length(64, 'AGGREGATOR_TOKEN_KEY debe ser hex de 32 bytes (64 chars)').optional(),
+  // Conector Shopify (spec 2026-10-07). Llave AES de 32 bytes en hex para el token de cada tienda. Opcional: sin ella el
+  // conector no cifra ni descifra, y ninguna otra parte de la API se entera.
+  SHOPIFY_TOKEN_KEY: z.string().length(64, 'SHOPIFY_TOKEN_KEY debe ser hex de 32 bytes (64 chars)').optional(),
+  // App «Avoqado – Piloto» (custom distribution): Dev Dashboard de Shopify → la app → Credentials.
+  SHOPIFY_PILOTO_CLIENT_ID: z.string().min(1, 'SHOPIFY_PILOTO_CLIENT_ID no puede ir vacío').optional(),
+  SHOPIFY_PILOTO_CLIENT_SECRET: z.string().min(1, 'SHOPIFY_PILOTO_CLIENT_SECRET no puede ir vacío').optional(),
+  // App pública (Fase 5).
+  SHOPIFY_PUBLICA_CLIENT_ID: z.string().min(1, 'SHOPIFY_PUBLICA_CLIENT_ID no puede ir vacío').optional(),
+  SHOPIFY_PUBLICA_CLIENT_SECRET: z.string().min(1, 'SHOPIFY_PUBLICA_CLIENT_SECRET no puede ir vacío').optional(),
+  // Fase 1: dominios *.myshopify.com que pueden conectar, separados por coma. Otra tienda recibe 409 SHOPIFY_SOLO_PILOTO.
+  SHOPIFY_PILOTO_SHOPS: z.string().optional(),
   // Llave de Avoqado como integrador de TotalPass (portal developers.totalpass.com). Secreta.
   TOTALPASS_PARTNER_API_KEY: z.string().min(1).optional(),
   TOTALPASS_BOOKING_API_URL: z.string().url().default('https://booking-api.totalpass.com'),

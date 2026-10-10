@@ -28,6 +28,7 @@ import {
 } from '../../services/master-catalog/catalogGovernance.service'
 import { normalizarIvaDeProducto, traducirErrorDeIva } from '../../services/fiscal/normalizarIvaDeProducto'
 import { bloquearParaCambiarIva } from '../../services/fiscal/exclusionContable'
+import { ajustarParejaAlProducto } from '../../services/commerce-channels/shopify/shopify.store.service'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -344,6 +345,9 @@ export async function updateProduct(req: Request, res: Response, next: NextFunct
       }
       // Con el estado FINAL (el tipo puede no venir en el cuerpo): revierte toda la escritura.
       if (isNonInventoriable(updated.type, updated.trackInventory)) throw new AppError(NON_INVENTORIABLE_MESSAGE, 400)
+      // P1-2 (Shopify): pasar a kilo o «por peso», a receta o sin control de existencias suspende la pareja; volver a pieza
+      // pide el cuadre. Después del Product y ANTES de Inventory (orden de candados del conector).
+      await ajustarParejaAlProducto(tx, updated)
       // Artículos de Android e iOS activan «por cantidad» por aquí, no por el servicio del dashboard.
       await ensureQuantityInventoryRow(tx, updated)
       // El `include` se leyó ANTES de la fila: la haya creado el helper o, en carrera, el asistente,
