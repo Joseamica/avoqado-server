@@ -303,9 +303,13 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
       'otra tienda ⇒ 409 `SHOPIFY_SOLO_PILOTO`',
       '`PREMIUM_ONLY_SIN_CATALOGO`',
       '400 `FEATURE_NO_SE_VENDE_SUELTA`',
-      'Ningún texto (página, avisos, MCP) manda a comprar ni a subir de plan para tener Shopify',
+      'Ningún texto (página, avisos, MCP, la razón del movimiento de un conteo) manda a comprar ni a subir de plan para tener Shopify',
     ])
     expect(leer(`${SHOPIFY}/shopify.connect.service.ts`)).toContain("'SHOPIFY_SOLO_PILOTO'")
+    // C12 (N2): la razón del movimiento del conteo la ve el cajero en el POS; sin acceso no culpa a «el plan».
+    const conteo = leer(`${SHOPIFY}/shopify.count.service.ts`)
+    expect(conteo).toContain("? 'el conector con Shopify no está activo en este local'")
+    expect(conteo).not.toContain('por el plan')
     expect(leer('src/services/access/basePlan.service.ts')).toContain(
       "export const PREMIUM_ONLY_SIN_CATALOGO = ['SHOPIFY_INTEGRATION'] as const",
     )
@@ -386,8 +390,13 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     // La viñeta «Pendiente (L5…)» se fue con C9b; si vuelve, o si alguien deja de exponer la retención, esto falla.
     expect(regla).not.toContain('todavía NO muestra `shopifyHeldAt`')
     contieneTodas([
-      'la línea retenida se expone como `shopifyHeld` (`{ at, motivo }` o `null`) en `mapCountItem(…)` (GET móvil y detalle del dashboard, que suma `noAplicadas`) y en `stock_counts` del MCP; las pantallas del POS (Android e iOS) son C12',
+      'la línea retenida se expone como `shopifyHeld` (`{ at, motivo }` o `null`) en `mapCountItem(…)` (GET móvil y detalle del dashboard, que suma `noAplicadas`) y en `stock_counts` del MCP',
+      // C12: dónde lo enseña el POS, y por qué el GET manda sobre la respuesta del confirm.
+      'En el POS (Android e iOS, C12) lo cuentan la tarjeta «N productos no se aplicaron» que queda arriba de la lista de conteos al confirmar, la insignia «No se aplicó» con su motivo en cada línea del detalle, la fila de la lista y el comprobante impreso',
+      'la tarjeta nace de `noAplicados` y se completa releyendo el GET (`shopifyHeld`), porque el reintento `alreadyCompleted` no trae `noAplicados`',
+      'el motivo se lee como texto y uno que la app no conoce cae en `DUDA_POR_REVISAR`',
     ])
+    expect(regla).not.toContain('las pantallas del POS (Android e iOS) son C12')
     expect(cuerpo(leer('src/services/mobile/inventory.mobile.service.ts'), 'export function mapCountItem(')).toContain(
       'shopifyHeld: retencionShopify(item)',
     )

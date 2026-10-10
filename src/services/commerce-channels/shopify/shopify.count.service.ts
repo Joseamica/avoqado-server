@@ -125,6 +125,8 @@ export async function refrescarEspejoParaConteo(venueId: string, productIds: str
       const libres = parejas.filter(p => !bloqueados.has(p.productId))
       pendientes = libres.map(p => p.productId)
       if (libres.length === 0) continue
+      // La razón termina en el movimiento del conteo, que el cajero ve en el POS. N2 (C12): el conector no se vende, así
+      // que sin acceso no se culpa a «el plan».
       const motivo =
         link.status === 'PAUSED'
           ? 'Shopify en pausa'
@@ -135,7 +137,7 @@ export async function refrescarEspejoParaConteo(venueId: string, productIds: str
               : link.importError === FALTA_PERMISO
                 ? 'falta un permiso en Shopify'
                 : !(await hasAccess(venueId))
-                  ? 'Shopify en pausa por el plan'
+                  ? 'el conector con Shopify no está activo en este local'
                   : null
       if (motivo || link.status !== 'ACTIVE' || sinRed) {
         if (motivo) marcar(motivo)

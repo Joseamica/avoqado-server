@@ -37,10 +37,10 @@ cambias el comportamiento, cambia aquí la frase y su aserción en el mismo comm
 | `SHOPIFY_INTEGRATION` en `PREMIUM_ONLY_SIN_CATALOGO`                             | `basePlan.service.ts:93`                                                                                                    | Premium por regla pero SIN entrada de catálogo ni precio; `shopifyTierMirror.test.ts` falla si queda en los dos |
 | Nunca se contrata suelta                                                         | `addFeaturesToVenue(…)` (`venueFeature.dashboard.service.ts:190`) y `createTrialSubscriptions(…)` (`stripe.service.ts:303`) | 400 `FEATURE_NO_SE_VENDE_SUELTA`; la segunda es el embudo de venta suelta, conversión de demo y onboarding      |
 
-Ningún texto (página, avisos, MCP) manda a comprar ni a subir de plan para tener Shopify. El MCP usa su texto de piloto y no
-`planGateMessage` (`mcp/tools/shopify.ts`, `SOLO_PILOTO`); `SHOPIFY_SIN_PLAN` (el servidor dice «actívalo») se traduce a ese mismo texto en
-cada cliente. Un Premium ya pagado pasa el candado y choca con `SHOPIFY_SOLO_PILOTO` al conectar. La Fase 5 (app pública) la mueve a
-`PREMIUM_ONLY_CODES` con su entrada de catálogo.
+Ningún texto (página, avisos, MCP, la razón del movimiento de un conteo) manda a comprar ni a subir de plan para tener Shopify. El MCP usa
+su texto de piloto y no `planGateMessage` (`mcp/tools/shopify.ts`, `SOLO_PILOTO`); `SHOPIFY_SIN_PLAN` (el servidor dice «actívalo») se
+traduce a ese mismo texto en cada cliente. Un Premium ya pagado pasa el candado y choca con `SHOPIFY_SOLO_PILOTO` al conectar. La Fase 5
+(app pública) la mueve a `PREMIUM_ONLY_CODES` con su entrada de catálogo.
 
 ## 1. Entradas HTTP: webhook y callback
 
@@ -226,7 +226,10 @@ ayudantes (`shopify.store.service.ts:305`).
   - Pausa, revocada, sin plan, sin permiso o Shopify sin contestar, con el producto libre: sin HTTP, se usa `mirrorCommitted` y el
     movimiento dice la hora (`committedAt`). Nunca se pone cero.
   - Lectura (L5): la línea retenida se expone como `shopifyHeld` (`{ at, motivo }` o `null`) en `mapCountItem(…)` (GET móvil y detalle del
-    dashboard, que suma `noAplicadas`) y en `stock_counts` del MCP; las pantallas del POS (Android e iOS) son C12.
+    dashboard, que suma `noAplicadas`) y en `stock_counts` del MCP. En el POS (Android e iOS, C12) lo cuentan la tarjeta «N productos no se
+    aplicaron» que queda arriba de la lista de conteos al confirmar, la insignia «No se aplicó» con su motivo en cada línea del detalle, la
+    fila de la lista y el comprobante impreso; la tarjeta nace de `noAplicados` y se completa releyendo el GET (`shopifyHeld`), porque el
+    reintento `alreadyCompleted` no trae `noAplicados`; el motivo se lee como texto y uno que la app no conoce cae en `DUDA_POR_REVISAR`.
 
 ## 8. Nunca cero por ausencia
 
