@@ -2264,6 +2264,15 @@ router.post(
  * sincronizar no es puerta trasera. Body: { deviceId, intents: [...] }
  */
 router.post('/venues/:venueId/sync/intents', authenticateTokenMiddleware, validateVenueAccess, syncMobileController.syncIntents)
+// Consulta resultados ya materializados; nunca ejecuta un intent ni crea una orden.
+router.post(
+  '/venues/:venueId/sync/recovery',
+  authenticateTokenMiddleware,
+  validateVenueAccess,
+  checkPermission('orders:read'),
+  syncMobileController.syncRecovery,
+)
+
 router.get(
   '/venues/:venueId/service-courses',
   authenticateTokenMiddleware,
