@@ -532,6 +532,34 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     expect(cuerpo(leer(`${SHOPIFY}/shopify.reconcile.service.ts`), 'async function resolver(')).toContain('throw sinInventario(res.motivo)')
   })
 
+  it('🔴 R-M3: una pareja viva que se vuelve inelegible sin B7 se suspende en el catálogo y en la tanda de stock, sin cambiar §10.3', () => {
+    contieneTodas([
+      'una pareja VIVA cuyo producto deja de ser elegible por otro camino (apagar `trackInventory` desde la ficha, pasar a kilo, cambiar el tipo) también se suspende',
+      'la tanda de stock del cuadre, que la manda a `applyShopifyLevel(…)` aunque Shopify no haya cambiado. El orden de candados (§10.3) no cambia',
+    ])
+    const catalogo = leer(`${SHOPIFY}/shopify.catalog.service.ts`)
+    // Product → sucursal y tienda → pareja → Inventory → filas → evento, y la decisión con el Product ya bloqueado.
+    enOrden(cuerpo(catalogo, 'export async function upsertShopifyVariant('), [
+      'bloquearProductos(tx',
+      'cercar(tx, ctx)',
+      'bloquearPareja(tx, parejaVista.id)',
+      'motivoNoSincronizable(producto)',
+      'if (cambios.articulo || cambios.inelegible) {',
+      'bloquearInventario(tx, pareja.productId)',
+      'bloquearBuzon(tx,',
+      'verificarReclamo(tx, ctx.reclamo)',
+      'actualizarPareja(',
+    ])
+    expect(cuerpo(catalogo, 'async function actualizarPareja(')).toContain(
+      "if (cambios.inelegible) await suspendPair(tx, pareja.id, 'SIN_INVENTARIO', cambios.inelegible)",
+    )
+    const reconcile = leer(`${SHOPIFY}/shopify.reconcile.service.ts`)
+    expect(reconcile).toMatch(/product: \{\s*select: \{[^}]*type: true, trackInventory: true, inventoryMethod: true, unit: true/)
+    expect(cuerpo(reconcile, 'async function tandaDeStock(')).toContain(
+      'if (inelegible || nivel.available !== p.mirrorAvailable || nivel.committed !== p.mirrorCommitted)',
+    )
+  })
+
   it('L5: la línea retenida se lee en el detalle del conteo (móvil, dashboard y MCP) y la regla dice dónde', () => {
     // La viñeta «Pendiente (L5…)» se fue con C9b; si vuelve, o si alguien deja de exponer la retención, esto falla.
     expect(regla).not.toContain('todavía NO muestra `shopifyHeldAt`')
@@ -680,10 +708,10 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
       'connect.service.ts:1173': [de('connect.service'), 'export async function disconnectShopify('],
       'connect.service.ts:639': [de('connect.service'), 'async function aCuarentenaPorReligar('],
       'shopify.crypto.ts:32': [de('crypto'), 'export function formaDeFirmaOAuth('],
-      'catalog.service.ts:67': [de('catalog.service'), 'export const FILTRO_ESTADO'],
-      'catalog.service.ts:416': [de('catalog.service'), 'async function bloquearProductos('],
-      'reconcile.service.ts:1270': [de('reconcile.service'), 'tx.shopifyStockOutbox.create('],
-      'reconcile.service.ts:717': [de('reconcile.service'), 'async function abrirRevision('],
+      'catalog.service.ts:68': [de('catalog.service'), 'export const FILTRO_ESTADO'],
+      'catalog.service.ts:417': [de('catalog.service'), 'async function bloquearProductos('],
+      'reconcile.service.ts:1279': [de('reconcile.service'), 'tx.shopifyStockOutbox.create('],
+      'reconcile.service.ts:726': [de('reconcile.service'), 'async function abrirRevision('],
       'mirror.service.ts:5': [de('mirror.service'), 'Invariante operativo'],
       'mirror.service.ts:372': [de('mirror.service'), 'export async function marcarFaltaPermiso('],
       'outbox.service.ts:166': [de('outbox.service'), 'async function conFilaPropia'],
@@ -695,7 +723,7 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     const cortas: Record<string, [string, string]> = {
       '`:62`': [de('connect.service'), 'const tiendasPiloto'],
       '`:47`': [de('crypto'), 'export function verifyOAuthQueryHmac('],
-      '`:1165`': [de('catalog.service'), 'export async function archivarPareja('],
+      '`:1179`': [de('catalog.service'), 'export async function archivarPareja('],
     }
     const enLaRegla = [
       ...regla.matchAll(/`((?:shopify\.)?(?:connect|catalog|reconcile|mirror|outbox|store|worker)\.service\.ts|shopify\.crypto\.ts):\d+`/g),

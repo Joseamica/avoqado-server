@@ -33,6 +33,7 @@ import {
   SHOPIFY_IMPORT_ERRORES_TERMINALES,
   suspendPair,
   type CercoShopify,
+  type MotivoNoSincronizable,
   type NivelLeido,
 } from './shopify.mirror.service'
 import {
@@ -525,14 +526,19 @@ export async function upsertShopifyVariant(ctx: ContextoCatalogo, v: VarianteSho
           throw new Error('la pareja cambió mientras se leía; se reintenta')
         }
         const vigente = await tx.shopifyVariantLink.findUniqueOrThrow({ where: { id: pareja.id }, select: { inventoryItemId: true } })
-        const cambioArticulo = vigente.inventoryItemId !== v.inventoryItem.id
+        const cambios = {
+          articulo: vigente.inventoryItemId !== v.inventoryItem.id,
+          // R-M3: una pareja VIVA cuyo producto ya no se sincroniza sin haber pasado por los ayudantes de B7 (apagar
+          // `trackInventory` desde la ficha, pasar a kilo…): con el Product ya bloqueado se ve aquí, y se suspende.
+          inelegible: pareja.initializedAt !== null && pareja.suspendedReason === null ? motivoNoSincronizable(producto) : null,
+        }
         // Suspender descarta las filas que nunca salieron (§12.5): pareja → Inventory → filas (§10.3), antes del evento.
-        if (cambioArticulo) {
+        if (cambios.articulo || cambios.inelegible) {
           await bloquearInventario(tx, pareja.productId)
           await bloquearBuzon(tx, { productId: pareja.productId, locationLinkId: pareja.locationLinkId, generation: pareja.generation })
         }
         await verificarReclamo(tx, ctx.reclamo) // el evento, último candado
-        return actualizarPareja(tx, ctx, v, pareja, producto, importado, sweepId, cambioArticulo, efectos)
+        return actualizarPareja(tx, ctx, v, pareja, producto, importado, sweepId, cambios, efectos)
       }
       // Sin pareja no hay más candados del estado (el alta de Inventory es INSERT ... ON CONFLICT DO NOTHING).
       await verificarReclamo(tx, ctx.reclamo)
@@ -677,7 +683,9 @@ async function restaurar(tx: Prisma.TransactionClient, venueId: string, productI
  * avisa. Si el conector archivó su producto (pareja suspendida con un envío en camino, §10.4) y la variante volvió, se
  * restaura si sigue siendo elegible; el sync o el cuadre la reactivan comparando. Si la variante cambió de artículo de
  * inventario (BR-6, K14), la pareja se suspende (`NIVEL_INEXISTENTE`: conserva la barrera de lo que esté en camino) y
- * guarda el id nuevo; el cuadre la vuelve a comparar. `iniciada` = viva: iniciada y no suspendida.
+ * guarda el id nuevo; el cuadre la vuelve a comparar. R-M3: una pareja VIVA cuyo producto ya no se sincroniza
+ * (`cambios.inelegible`, decidido con el Product bloqueado) se suspende `SIN_INVENTARIO` con su motivo real; sus filas y su
+ * Inventory ya están bloqueados. `iniciada` = viva: iniciada y no suspendida.
  */
 async function actualizarPareja(
   tx: Prisma.TransactionClient,
@@ -687,14 +695,15 @@ async function actualizarPareja(
   producto: Candidato,
   importado: Importado,
   sweepId: number,
-  cambioArticulo: boolean,
+  cambios: { articulo: boolean; inelegible: MotivoNoSincronizable | null },
   efectos: Efectos,
 ): Promise<UpsertOutcome> {
+  const cambioArticulo = cambios.articulo
   // Archivado por el conector y ya no elegible (pasó a receta, a kilo…): se queda archivado y nadie lo compara.
   const noElegible = archivadoPorShopify(producto) ? inelegible(producto) : null
   if (noElegible) await anotar(tx, ctx.venueId, v, noElegible, null, producto.id)
   else if (archivadoPorShopify(producto)) await restaurar(tx, ctx.venueId, producto.id, efectos)
-  if (cambioArticulo) await suspendPair(tx, pareja.id, 'NIVEL_INEXISTENTE')
+  if (cambioArticulo && !cambios.inelegible) await suspendPair(tx, pareja.id, 'NIVEL_INEXISTENTE')
   const actual = await tx.product.findUniqueOrThrow({ where: { id: pareja.productId }, select: { id: true, sku: true, gtin: true } })
   const avisos: Array<{ reason: ShopifyIssueReason; detail: string }> = []
   let sku = actual.sku
@@ -733,12 +742,17 @@ async function actualizarPareja(
       where: { venueId: ctx.venueId, shopifyVariantId: v.id, reason: { in: ['SKU_CHOCA', 'CODIGO_REPETIDO'] } },
     })
   }
+  // R-M3: al final, para que «Productos sin pareja» diga por qué ya no se sincroniza (pesa más que un SKU ocupado).
+  if (cambios.inelegible) await suspendPair(tx, pareja.id, 'SIN_INVENTARIO', cambios.inelegible)
   return {
     kind: 'ACTUALIZADO',
     variantLinkId: pareja.id,
     productId: actual.id,
     // `true` también si no es elegible: así el sync no compara (ni reactiva) un producto que no debe sincronizarse.
-    iniciada: noElegible !== null || (pareja.initializedAt !== null && pareja.suspendedReason === null && !cambioArticulo),
+    iniciada:
+      noElegible !== null ||
+      cambios.inelegible !== null ||
+      (pareja.initializedAt !== null && pareja.suspendedReason === null && !cambioArticulo),
     creadaPorConector: pareja.createdProduct,
   }
 }

@@ -63,7 +63,7 @@ cada cliente lo traduce a su mismo texto de piloto por el código, nunca por el 
   (`callback OAuth: firma válida en la forma …`, nunca el hmac). CONFIRMADO en vivo (C10, 9-oct-2026): tres callbacks reales de la tienda de
   prueba, los tres en la forma codificada, con un `host` sin el relleno `=` de base64; no quites la forma codificada. `hmac` está en
   `PARAMS_SENSIBLES` del logger.
-- **Búsqueda de Shopify en minúsculas** (`FILTRO_ESTADO`, `catalog.service.ts:67`): los valores de `product_status:` van en minúsculas y se
+- **Búsqueda de Shopify en minúsculas** (`FILTRO_ESTADO`, `catalog.service.ts:68`): los valores de `product_status:` van en minúsculas y se
   unen con OR, `(product_status:active OR product_status:draft)`. En mayúsculas Shopify devuelve 0 variantes sin error: medido en vivo (C10,
   API 2026-10, 0 contra 25) y confirmado por personal de Shopify, con la doc de `productVariants` equivocada
   ([community.shopify.dev/t/21623](https://community.shopify.dev/t/bug-report-graphql-api-productvariants-product-status-query-not-working/21623)).
@@ -83,7 +83,7 @@ efectiva** de la sucursal (si está PAUSED, manda `pausedFrom`; por eso una paus
 | DISCONNECTED o sin enlace | nada                                                            |
 
 No encola: un cambio con la marca de origen `shopify`, un delta 0, ni un `DELETE` de la fila (ver §5). El buzón lo llenan SÓLO el guardia y
-la resolución «usar Avoqado» (`reconcile.service.ts:1270`).
+la resolución «usar Avoqado» (`reconcile.service.ts:1279`).
 
 ## 3. La marca de origen: si aplicas en Avoqado algo que VINO de Shopify
 
@@ -99,12 +99,12 @@ trigger: no la uses para nada más.
   pareja iniciada y no suspendida, y TODAS sus sumas son de la generación vigente de la sucursal (T3): Σ vivas y Σ DEAD_LETTER por igual.
   Las filas de una generación vieja y las `RELIGADA_A_OTRA_TIENDA` (que quedan en la generación anterior) NO entran en la cuenta; el filtro
   por `generation` vive en `productBlocked(…)`, `liveOutboxSum(…)`, `bloquearFilasDelProducto` y `abrirRevision` (`mirror.service.ts:5`,
-  `reconcile.service.ts:717`).
+  `reconcile.service.ts:726`).
 - Una DEAD_LETTER (de la generación vigente) conserva su delta en la cuenta hasta que la resolución la descarte. Una venta que dejó
   `Inventory = 9`, espejo 10 y su `−1` en DEAD_LETTER es un estado CORRECTO, no algo que «arreglar».
 - COMPARAR con diferencia abre `REACTIVADA` con `offset = Inventory − S`; si los saldos ya coinciden, cierra en la misma tx la revisión OPEN
   del producto (`offset = 0`, §11.8).
-- El cuadre calcula `total = Inventory − espejo − Σ vivas − Σ DEAD_LETTER` (`abrirRevision`, `reconcile.service.ts:717`) y decide en este
+- El cuadre calcula `total = Inventory − espejo − Σ vivas − Σ DEAD_LETTER` (`abrirRevision`, `reconcile.service.ts:726`) y decide en este
   orden:
   - con DEAD_LETTER (aunque `total = 0`, que es el caso normal de un ATORADO): abre o actualiza `ATORADO` (`INCIERTO` si alguna es ambigua)
     con `offset = total`; nunca cierra;
@@ -131,7 +131,7 @@ espejo dejaría la cuenta en 11 contra las 12 piezas de Avoqado. Si hay filas vi
 
 - **Product se bloquea `FOR NO KEY UPDATE`** (K11): serializa con otros escritores del catálogo sin frenar el `FOR KEY SHARE` de una venta
   que inserta un renglón con llave foránea al producto. Catálogo y archivo lo piden explícito (`bloquearProductos`,
-  `catalog.service.ts:416`; `archivarPareja(…)`, `:1165`); `switchInventoryMethod(…)` y `setProductInventoryMethod(…)` lo toman con el
+  `catalog.service.ts:417`; `archivarPareja(…)`, `:1179`); `switchInventoryMethod(…)` y `setProductInventoryMethod(…)` lo toman con el
   `product.update` que ya hacen (no toca llaves) y llaman a `suspenderParejaPorReceta(…)` DESPUÉS, nunca antes.
 - **El mensajero**, con o sin cerco, toma el orden general sin Product: sucursal y tienda `FOR SHARE`, pareja `FOR UPDATE`, la fila del
   buzón `FOR UPDATE` (releída: sigue `IN_PROGRESS` con su `claimToken`) y, con cerco de evento, el evento `FOR SHARE` al final
@@ -181,6 +181,10 @@ ayudantes (`shopify.store.service.ts:305`).
   el que devuelve `motivoNoSincronizable(…)` y que `suspendPair(…)` recibe (`suspenderParejaPorReceta(…)` pasa `METODO_RECETA`). El 409
   `SHOPIFY_SIN_INVENTARIO` de la resolución nombra ese mismo motivo. Si el motivo cambia mientras sigue suspendida (de receta a kilos),
   `sincronizableBajoCandado(…)` pone la incidencia al día; al reactivarse se limpian todos (`MOTIVOS_DE_SUSPENSION`).
+- **Sin los ayudantes de B7 (R-M3):** una pareja VIVA cuyo producto deja de ser elegible por otro camino (apagar `trackInventory` desde la
+  ficha, pasar a kilo, cambiar el tipo) también se suspende, por dos puertas: el catálogo (`upsertShopifyVariant(…)` lo ve con el `Product`
+  ya bloqueado y suspende con `Inventory` y las filas bloqueadas antes del evento) y la tanda de stock del cuadre, que la manda a
+  `applyShopifyLevel(…)` aunque Shopify no haya cambiado. El orden de candados (§10.3) no cambia.
 
 ## 6. Envíos en camino, dudas y generaciones (§9.1-§9.2, §10.14, §11.3, §11.7)
 

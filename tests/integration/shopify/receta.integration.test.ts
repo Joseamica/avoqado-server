@@ -487,4 +487,50 @@ describe('FF-I1: pasar a receta por setProductInventoryMethod conserva la fila d
     expect((await pareja(e)).suspendedReason).toBe('SIN_INVENTARIO')
     expect(await incidencia(e)).toMatchObject({ reason: 'UNIDAD_NO_PIEZA', detail: expect.stringMatching(/otra unidad/) })
   })
+
+  it('🔴 R-M3: el sync del producto suspende una pareja VIVA cuyo producto dejó de llevar existencias desde la ficha (sin B7), aunque Shopify siga igual', async () => {
+    const e = await escenario()
+    await prisma.$executeRaw`UPDATE "Inventory" SET "currentStock" = "currentStock" - 1 WHERE id = ${e.inventoryId}` // una venta sin mandar
+    await prisma.product.update({ where: { id: e.productId }, data: { trackInventory: false } }) // ninguna ayuda de B7
+    const antes = await movimientos(e)
+    const pagina = paginaDeVariantes([await laVarianteEn(e, 10)], null) // Shopify sigue en el espejo: nada que aplicar
+    expect(
+      await syncShopifyProduct(e.storeId, 'gid://shopify/Product/1', { graphql: graphqlFalso(() => pagina), hasAccess: conPlan }),
+    ).toEqual({
+      ok: true,
+    })
+    expect((await pareja(e)).suspendedReason).toBe('SIN_INVENTARIO')
+    expect(await incidencia(e)).toMatchObject({ reason: 'SIN_INVENTARIO_EN_AVOQADO', productId: e.productId })
+    // Lo que nunca salió se descarta, como en toda suspensión; Avoqado no se toca.
+    expect(await prisma.shopifyStockOutbox.findMany({ where: { productId: e.productId }, select: { status: true }, take: 5 })).toEqual([
+      { status: 'DISCARDED' },
+    ])
+    expect(await stockDe(e)).toBe('9')
+    expect(await movimientos(e)).toBe(antes)
+    expect(await prisma.shopifyReviewItem.count({ where: { productId: e.productId } })).toBe(0)
+  })
+
+  it('🔴 R-M3: la tanda de stock manda a A una pareja VIVA cuyo producto ya no se sincroniza aunque Shopify no cambió, y A la suspende', async () => {
+    const e = await escenario()
+    await prisma.product.update({ where: { id: e.productId }, data: { unit: 'KILOGRAM' } }) // ninguna ayuda de B7
+    const antes = await movimientos(e)
+    // Directo a la tanda de stock, sin barrido (el barrido entra por el catálogo, la otra puerta).
+    await prisma.shopifyLocationLink.update({ where: { id: e.locationLinkId }, data: { catalogSweepCursor: null, reconcileCursor: '' } })
+    const r = await reconcileVenue(e.venueId, { fetchLevels: nivelesFalsos(() => nivel(10)), hasAccess: conPlan }) // = espejo
+    expect(r).toMatchObject({ etapa: 'STOCK' })
+    expect((await pareja(e)).suspendedReason).toBe('SIN_INVENTARIO')
+    expect(await incidencia(e)).toMatchObject({ reason: 'UNIDAD_NO_PIEZA' })
+    expect(await stockDe(e)).toBe('10')
+    expect(await movimientos(e)).toBe(antes)
+    expect(await prisma.shopifyReviewItem.count({ where: { productId: e.productId } })).toBe(0)
+  })
+
+  it('R-M3 (regresión): una pareja viva de un producto elegible que Shopify no cambió no pasa por A ni se suspende', async () => {
+    const e = await escenario()
+    await prisma.shopifyLocationLink.update({ where: { id: e.locationLinkId }, data: { catalogSweepCursor: null, reconcileCursor: '' } })
+    const r = await reconcileVenue(e.venueId, { fetchLevels: nivelesFalsos(() => nivel(10)), hasAccess: conPlan })
+    expect(r).toMatchObject({ etapa: 'STOCK', aplicados: 0 })
+    expect((await pareja(e)).suspendedReason).toBeNull()
+    expect(await incidencia(e)).toBeNull()
+  })
 })

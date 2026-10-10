@@ -39,6 +39,7 @@ import {
   liveOutboxSum,
   marcarOrigenShopify,
   MOTIVOS_DE_SUSPENSION,
+  motivoNoSincronizable,
   SHOPIFY_IMPORT_ERRORES_TERMINALES,
   sincronizableBajoCandado,
   suspendPair,
@@ -485,7 +486,11 @@ const SELECCION_PAREJA = {
   mirrorAvailable: true,
   mirrorCommitted: true,
   createdProduct: true,
-  product: { select: { price: true, deletedAt: true, deletedBy: true } },
+  // R-M3: lo que decide si el producto todavía se sincroniza (`motivoNoSincronizable`); la foto sólo lo sugiere, A lo
+  // vuelve a leer bajo el candado de la pareja.
+  product: {
+    select: { price: true, deletedAt: true, deletedBy: true, type: true, trackInventory: true, inventoryMethod: true, unit: true },
+  },
 } satisfies Prisma.ShopifyVariantLinkSelect
 type ParejaCuadre = Prisma.ShopifyVariantLinkGetPayload<{ select: typeof SELECCION_PAREJA }>
 export type TandaCuadre = {
@@ -609,7 +614,10 @@ async function tandaDeStock(l: Sucursal, cerco: CercoShopify, d: DepsUnidad): Pr
       if (o === 'REINTENTAR') pendiente = true
       continue
     }
-    if (nivel.available !== p.mirrorAvailable || nivel.committed !== p.mirrorCommitted) {
+    // R-M3: una pareja viva cuyo producto ya no se sincroniza sin haber pasado por los ayudantes de B7 (apagar
+    // `trackInventory` desde la ficha, pasar a kilo…) va a A aunque Shopify no haya cambiado: A la suspende bajo candado.
+    const inelegible = motivoNoSincronizable(p.product) !== null
+    if (inelegible || nivel.available !== p.mirrorAvailable || nivel.committed !== p.mirrorCommitted) {
       const o = await applyShopifyLevel({ variantLinkId: p.id, nivel, fetchedAt, cause: 'cuadre' }, acceso)
       if (o === 'CONTEXTO_CAMBIO' || o === 'PAUSADO') return corte() // K17: nunca se sigue a «Por revisar» en pausa
       if (o === 'APLICADO') aplicados += 1
@@ -617,6 +625,7 @@ async function tandaDeStock(l: Sucursal, cerco: CercoShopify, d: DepsUnidad): Pr
         pendiente = true // N14: en vuelo o lectura vieja: la tanda espera
         continue
       }
+      if (o === 'SUSPENDIDO') continue // ya está en «Productos sin pareja» con su motivo; «Por revisar» no la abriría
     }
     // N15: la foto sólo dice si hay algo que mirar (un cambio de Shopify mueve Avoqado y espejo por igual: no lo cambia).
     const total = A.minus(p.mirrorAvailable).minus(f.vivas).minus(f.atoradasSuma)
