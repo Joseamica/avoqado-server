@@ -50,6 +50,11 @@ export async function applyConnect(req: Request, res: Response) {
   ok(res, { solicitado: true })
 }
 
+export async function saveConnectChoices(req: Request, res: Response) {
+  const { vista, elecciones, todos } = req.body
+  ok(res, await connect.saveConnectChoices({ venueId: req.params.venueId, staffId: userOf(req), vista, elecciones, todos }))
+}
+
 export async function disconnect(req: Request, res: Response) {
   // L17: el resultado real de B (`false` = no había nada que desconectar), no un `true` fijo.
   const r = await connect.disconnectShopify({ venueId: req.params.venueId, staffId: userOf(req) })

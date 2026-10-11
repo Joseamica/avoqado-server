@@ -31,12 +31,14 @@ import {
   registerShopifyWebhooks,
   requestApplyShopifyConnect,
   resumeShopifyLink,
+  saveConnectChoices,
   startShopifyConnect,
 } from '@/services/commerce-channels/shopify/shopify.connect.service'
 import {
   agregarProductoShopify,
   assertTestDatabase,
   crearEscenarioShopify,
+  eligioShopify,
   EscenarioShopify,
   graphqlFalso,
   huecoDelInvariante,
@@ -737,8 +739,8 @@ describe('webhooks, vista previa y aplicar (#6, 12 bis.3, N13, N20, N25)', () =>
       },
     })
     const cambian = await getConnectReview({ venueId: e.venueId, offset: 0, limit: 20, filtro: 'CAMBIAN' })
-    expect(cambian.resumen).toEqual({ emparejados: 3, cambian: 1, nuevos: 1, sinPareja: 1 })
-    expect(cambian).toMatchObject({ total: 1, nextOffset: null })
+    expect(cambian.resumen).toEqual({ emparejados: 3, cambian: 1, nuevos: 1, sinPareja: 1, porDecidir: 1 })
+    expect(cambian).toMatchObject({ total: 1, nextOffset: null, conexion: { linkId: e.locationLinkId, generation: 1, tokenVersion: 1 } })
     expect(cambian.items[0]).toEqual({
       variantLinkId: e.variantLinkId,
       productId: e.productId,
@@ -748,6 +750,9 @@ describe('webhooks, vista previa y aplicar (#6, 12 bis.3, N13, N20, N25)', () =>
       shopifyQty: 10,
       nuevo: false,
       quedara: '9',
+      // D1: ya existía y su 10 no es «10 − 1»: pide elegir, sin nada elegido.
+      requiereDecision: true,
+      eleccion: null,
     })
     expect((await getConnectReview({ venueId: e.venueId, offset: 0, limit: 20, filtro: 'NUEVOS' })).items.map(i => i.productId)).toEqual([
       nuevo.productId,
@@ -832,6 +837,18 @@ describe('webhooks, vista previa y aplicar (#6, 12 bis.3, N13, N20, N25)', () =>
       initializedAt: null,
     })
 
+    // D1: el producto ya existía (se ligó por SKU) y su 9 no es «7 − 1»: hay que elegir. «Shopify» es la mecánica de siempre.
+    const ligada = await prisma.shopifyVariantLink.findUniqueOrThrow({ where: { productId: p.productId } })
+    const { conexion } = await getConnectReview({ venueId: e.venueId, offset: 0, limit: 1, filtro: 'CAMBIAN' })
+    await saveConnectChoices(
+      {
+        venueId: e.venueId,
+        staffId: e.staffId,
+        vista: conexion!,
+        elecciones: [{ variantLinkId: ligada.id, choice: 'SHOPIFY', expectedAvoqadoQty: '9', expectedShopifyQty: 7 }],
+      },
+      { hasAccess: conPlan },
+    )
     await requestApplyShopifyConnect({ venueId: e.venueId, staffId: e.staffId }, { hasAccess: conPlan })
     const fetchLevels = nivelesFalsos(item => (item === variante(1).inventoryItem.id ? nivel(7) : nivel(10)))
     for (let i = 0; i < 5 && (await sucursal(e)).status !== 'ACTIVE'; i++)
@@ -852,6 +869,7 @@ describe('webhooks, vista previa y aplicar (#6, 12 bis.3, N13, N20, N25)', () =>
     const suelto = await agregarProductoShopify(e, { pareja: false, stock: 3 })
     await prisma.$executeRaw`UPDATE "Inventory" SET "currentStock" = "currentStock" - 1 WHERE id = ${suelto.inventoryId}`
     const sinNivel = await agregarProductoShopify(e, { stock: 4, initialized: false })
+    await eligioShopify(e, e.variantLinkId, 8) // D1: ya existía y no cuadra (10 contra 8): el dueño eligió Shopify
     const fetchLevels = nivelesFalsos(item => (item === 'gid://shopify/InventoryItem/1' ? nivel(8) : { kind: 'SIN_NIVEL' }))
     expect(await applyConnectPage(e.locationLinkId, { fetchLevels, hasAccess: conPlan })).toEqual({ done: false, procesadas: 2 })
     expect(await applyConnectPage(e.locationLinkId, { fetchLevels, hasAccess: conPlan })).toEqual({ done: true, procesadas: 0 })
@@ -1191,8 +1209,10 @@ describe('decisiones vinculantes de B3', () => {
   it('R3 (B-4): una tanda de aplicar pregunta por el plan UNA sola vez, aunque inicie varias parejas', async () => {
     const e = await escenario({ linkStatus: 'REVIEWING', initialized: false })
     await prisma.shopifyLocationLink.update({ where: { id: e.locationLinkId }, data: { applyRequestedAt: new Date() } })
-    await agregarProductoShopify(e, { stock: 3, initialized: false })
-    await agregarProductoShopify(e, { stock: 4, initialized: false })
+    const a = await agregarProductoShopify(e, { stock: 3, initialized: false })
+    const b = await agregarProductoShopify(e, { stock: 4, initialized: false })
+    // D1: los tres ya existían y no cuadran con Shopify (5): el dueño eligió Shopify en cada uno.
+    for (const id of [e.variantLinkId, a.variantLinkId!, b.variantLinkId!]) await eligioShopify(e, id, 5)
     const hasAccess = jest.fn(async () => true)
     expect(await applyConnectPage(e.locationLinkId, { fetchLevels: nivelesFalsos(() => nivel(5)), hasAccess })).toEqual({
       done: false,

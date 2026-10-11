@@ -370,11 +370,12 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     expect(mcp).toContain("z.string().max(1024).optional().describe('La llena la vista previa; no la cambies')")
     // P2-4: aplicar y desconectar atan la confirmación al enlace y a su GENERACIÓN, y el servicio los revalida al escribir.
     expect(mcp.match(/expectedSourceFingerprint: huellaField\(\)/g)).toHaveLength(2)
-    expect(mcp).toContain('`${c.shopDomain}|${c.locationName}|${c.linkId}|${c.generation}`')
+    expect(mcp).toContain('`${c.shopDomain}|${c.locationName}|${c.linkId}|${c.generation}|${c.tokenVersion}`')
     expect(mcp.match(/expected: \{ linkId: connection\.linkId, generation: connection\.generation \}/g)).toHaveLength(2)
     contieneTodas([
       'atan su confirmación a la tienda, la ubicación, el enlace y la generación que se vieron',
       'contesta 409 `SHOPIFY_CONEXION_CAMBIO`',
+      'D1: la huella también lleva la credencial (`tokenVersion`)',
     ])
     const conexion = leer(`${SHOPIFY}/shopify.connect.service.ts`)
     expect(cuerpo(conexion, 'export async function requestApplyShopifyConnect(')).toContain(
@@ -749,9 +750,22 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     ])
     // Una sola migración del conector, con marca POSTERIOR a la última de develop al unirse (la del índice de la retención
     // se fundió aquí): ninguna otra carpeta `*shopify*`, para que el índice nunca se cree antes que su tabla.
-    const carpetas = fs.readdirSync(path.join(RAIZ, 'prisma/migrations')).filter(d => d.endsWith('_shopify_conector'))
+    const migraciones = fs.readdirSync(path.join(RAIZ, 'prisma/migrations'))
+    const carpetas = migraciones.filter(d => d.endsWith('_shopify_conector'))
     expect(carpetas).toEqual(['20261008230100_shopify_conector'])
-    expect(fs.readdirSync(path.join(RAIZ, 'prisma/migrations')).filter(d => /shopify/i.test(d))).toEqual(carpetas)
+    // D1: la única otra migración del conector sólo AGREGA columnas nulas a la pareja, y va después de la del conector.
+    const d1 = migraciones.filter(d => d.endsWith('_shopify_eleccion_conexion'))
+    expect(d1).toHaveLength(1)
+    expect(d1[0] > carpetas[0]).toBe(true)
+    expect(migraciones.filter(d => /shopify/i.test(d))).toEqual([...carpetas, ...d1])
+    const sqlD1 = leer(`prisma/migrations/${d1[0]}/migration.sql`).replace(/--.*$/gm, '')
+    expect(
+      sqlD1
+        .split(';')
+        .map(s => s.trim())
+        .filter(Boolean)[0],
+    ).toBe("SET LOCAL lock_timeout = '5s'")
+    expect(sqlD1).not.toMatch(/CREATE INDEX|DROP|UPDATE|DELETE|NOT NULL/i)
     contieneTodas(['El índice `(status, resolvedAt)` va en la misma migración `shopify_conector`'])
     const sql = leer(`prisma/migrations/${carpetas[0]}/migration.sql`)
     expect(sql).toContain('CREATE INDEX "ShopifyReviewItem_status_resolvedAt_idx" ON "ShopifyReviewItem"("status", "resolvedAt");')
@@ -778,6 +792,100 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     expect(cuerpo(mirror, 'export async function marcarOrigenShopify(')).toContain(
       "SELECT set_config('avoqado.stock_origen', 'shopify', true)",
     )
+  })
+
+  it('🔴 D1: la elección vive en la pareja con lo que se vio y con la conexión que se vio; «Aplicar» se niega mientras falte alguna', () => {
+    contieneTodas([
+      'pide que el dueño elija: «Usar el de Avoqado» o «Usar el de Shopify», sin preselección',
+      'Vale sólo en la generación y con la credencial con que se eligió',
+      'Guardar exige la conexión que se vio',
+      'contesta 422 `SHOPIFY_FALTAN_DECISIONES` con cuántas faltan',
+      // P2-a / P2-b (auditoría de Codex): un solo predicado de «Avoqado» y la vista previa del MCP que dice lo que de verdad pasa.
+      '«Avoqado» exige Avoqado entero Y la diferencia entera',
+      '`motivoAvoqadoNoSeManda(…)` (`shopify.constants.ts`) es el único predicado',
+      'La diferencia sola no basta',
+      'dice que se respetan las elecciones ya guardadas (también «Avoqado»)',
+    ])
+    const conexion = leer(`${SHOPIFY}/shopify.connect.service.ts`)
+    const piezas = cuerpo(conexion, 'function sqlDeVista(')
+    expect(piezas).toContain('v."connectChoiceGeneration" = ${link.generation}')
+    expect(piezas).toContain('v."connectChoiceTokenVersion" = ${link.tokenVersion}')
+    expect(piezas).toContain('v."connectSeenAvoqadoQty" = inv."currentStock"')
+    expect(cuerpo(conexion, 'export async function getConnectReview(')).toContain('tokenVersion: link.store.tokenVersion')
+    enOrden(cuerpo(conexion, 'export async function requestApplyShopifyConnect('), [
+      'contarPorDecidir(prisma',
+      'throw faltanDecisiones(',
+      'prisma.shopifyLocationLink.updateMany(',
+    ])
+    // P2-a: Avoqado entero Y la diferencia entera, con el MISMO predicado, en las cuatro puertas (guardar, `todos` en SQL, aplicar y MCP).
+    const constantes = leer(`${SHOPIFY}/shopify.constants.ts`)
+    const predicado = cuerpo(constantes, 'export function motivoAvoqadoNoSeManda(')
+    expect(predicado).toContain('!a.isInteger()')
+    expect(predicado).toContain('a.minus(quedara).isInteger()')
+    expect(cuerpo(conexion, 'export async function saveConnectChoices(')).toContain('motivoAvoqadoNoSeManda(visto, f.quedara)')
+    expect(cuerpo(conexion, 'export async function saveConnectChoices(')).toContain('inv."currentStock" = trunc(inv."currentStock")')
+    expect(cuerpo(leer(`${SHOPIFY}/shopify.mirror.service.ts`), 'async function decisionBajoCandado(')).toContain(
+      "d.connectChoice === 'AVOQADO' && motivoAvoqadoNoSeManda(A, pendientes.plus(S)) !== null",
+    )
+    expect(leer('src/mcp/tools/shopify.ts')).toContain('motivoAvoqadoNoSeManda(f!.avoqadoQty, f!.quedara!) : null')
+    // P2-b: la vista previa del MCP sin nada por elegir ya no afirma que cada producto tomará Shopify.
+    expect(leer('src/mcp/tools/shopify.ts')).not.toContain('Cada producto emparejado tomará')
+    // Guardar: sucursal y tienda FOR SHARE, la vista comparada YA con los candados, después las parejas por id (§10.3).
+    enOrden(cuerpo(conexion, 'export async function saveConnectChoices('), [
+      'FROM "ShopifyLocationLink" WHERE "venueId" = ${i.venueId} FOR SHARE',
+      'FROM "ShopifyStore" WHERE id = ${l.storeId} FOR SHARE',
+      'throw vistaVieja()',
+      'ORDER BY id FOR UPDATE',
+    ])
+  })
+
+  it('🔴 D1: al aplicar, Shopify fresca primero; la elección se revalida bajo candado; «Avoqado» encola A − S − Σ vivas en la MISMA tx', () => {
+    contieneTodas([
+      '«Avoqado» deja `Inventory` igual, pone el espejo en la lectura fresca y encola en la MISMA tx `A − S − Σ vivas`',
+      'Restar las vivas es lo que evita descontar dos veces una venta hecha mientras se conectaba',
+      'antes de cualquier salida automática',
+      'la tanda termina y la conexión vuelve a «Así quedará tu stock»',
+      'ACTIVE no espera a que los ajustes lleguen',
+      'también cuando el catálogo no vio un nivel OK (`importedAvailable` nulo)',
+      'si con el número nuevo ya no hay nada que decidir, sigue con TOMAR',
+      'refresca `importedAvailable` de las DEMÁS filas de la tanda ya leída',
+      'y «Usar el de Avoqado» al conectar (D1, `initializePair(…)`, §4 bis)',
+    ])
+    expect(regla).not.toContain('**Hueco conocido, aceptado para el piloto:**')
+    const mirror = leer(`${SHOPIFY}/shopify.mirror.service.ts`)
+    enOrden(cuerpo(mirror, 'export async function initializePair('), [
+      'bloquearFilasDelProducto(tx, p',
+      'decisionBajoCandado(tx, p, inv.currentStock, S)',
+      "return { outcome: 'POR_DECIDIR' }",
+      'mirrorAvailable: S,',
+      'tx.shopifyStockOutbox.create(',
+    ])
+    // P1-1: la lectura fresca se compara ANTES de las dos salidas automáticas (sin decisión y «Shopify»).
+    enOrden(cuerpo(mirror, 'async function decisionBajoCandado('), [
+      'd.importedAvailable === null || S !== d.importedAvailable',
+      'A.equals(pendientes.plus(S))',
+      'A.equals(pendientes.plus(d.importedAvailable))',
+      'A.minus(S).minus(pendientes)',
+    ])
+    // Refrescar lo importado al regresar: sólo la pareja (§10.3, sin Inventory) y con el cerco; nunca stock.
+    const refresco = cuerpo(mirror, 'export async function refrescarLoImportado(')
+    enOrden(refresco, ['bloquearPareja(tx', '!coincide(p, cerco)', "p.linkStatus !== 'REVIEWING'", 'importedAvailable: S'])
+    expect(refresco).not.toMatch(/bloquearInventario|tx\.inventory\.|shopifyStockOutbox|mirrorAvailable/)
+    const conexion = leer(`${SHOPIFY}/shopify.connect.service.ts`)
+    // P1-3: al primer POR_DECIDIR, regresar y terminar la tanda.
+    enOrden(cuerpo(conexion, 'export async function applyConnectPage('), [
+      "if (o === 'POR_DECIDIR')",
+      'devolverAVistaPrevia(link.id, cerco, p.id)',
+      'refrescarLoImportado(',
+      'devuelta: true',
+    ])
+    // P2-4: con la sucursal FOR UPDATE, la aplicación todavía pedida y el cerco completo.
+    enOrden(cuerpo(conexion, 'export async function devolverAVistaPrevia('), [
+      'FOR UPDATE OF l',
+      '!l.applyRequestedAt',
+      'cercoVigente(tx, linkId, cerco)',
+      'applyRequestedAt: null',
+    ])
   })
 
   it('los globs de `paths:` de la regla apuntan a algo que existe, incluidos los demás escritores de stock', () => {
@@ -812,9 +920,9 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     // ancla de línea ahí no se puede sostener sin romper esta prueba por un cambio ajeno.
     const de = (f: string) => `${SHOPIFY}/shopify.${f}.ts`
     const anclas: Record<string, [string, string]> = {
-      'shopify.connect.service.ts:90': [de('connect.service'), 'export async function startShopifyConnect('],
-      'connect.service.ts:1186': [de('connect.service'), 'export async function disconnectShopify('],
-      'connect.service.ts:639': [de('connect.service'), 'async function aCuarentenaPorReligar('],
+      'shopify.connect.service.ts:98': [de('connect.service'), 'export async function startShopifyConnect('],
+      'connect.service.ts:1481': [de('connect.service'), 'export async function disconnectShopify('],
+      'connect.service.ts:647': [de('connect.service'), 'async function aCuarentenaPorReligar('],
       'shopify.crypto.ts:32': [de('crypto'), 'export function formaDeFirmaOAuth('],
       'catalog.service.ts:68': [de('catalog.service'), 'export const FILTRO_ESTADO'],
       'catalog.service.ts:418': [de('catalog.service'), 'async function bloquearProductos('],
@@ -829,7 +937,7 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     }
     // Las cortas (`:N`) son del archivo que la regla acaba de nombrar.
     const cortas: Record<string, [string, string]> = {
-      '`:62`': [de('connect.service'), 'const tiendasPiloto'],
+      '`:70`': [de('connect.service'), 'const tiendasPiloto'],
       '`:47`': [de('crypto'), 'export function verifyOAuthQueryHmac('],
       '`:1188`': [de('catalog.service'), 'export async function archivarPareja('],
     }

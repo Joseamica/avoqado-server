@@ -16,7 +16,7 @@ import { Prisma, ShopifyIssueReason } from '@prisma/client'
 import { z } from 'zod'
 import AppError from '@/errors/AppError'
 import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
-import { SHOPIFY_FEATURE } from '@/services/commerce-channels/shopify/shopify.constants'
+import { motivoAvoqadoNoSeManda, SHOPIFY_FEATURE } from '@/services/commerce-channels/shopify/shopify.constants'
 import {
   getShopifyOverview,
   listShopifyIssues,
@@ -28,8 +28,10 @@ import {
   disconnectShopify,
   getConnectReview,
   requestApplyShopifyConnect,
+  saveConnectChoices,
 } from '@/services/commerce-channels/shopify/shopify.connect.service'
 import { getShopifyReviewPreview, requestShopifyResync } from '@/services/commerce-channels/shopify/shopify.dashboard.service'
+import { connectChoicesBodySchema, listaDeElecciones } from '@/schemas/dashboard/shopify.schema'
 import { auditMcpWrite } from '../audit'
 import { createGuard } from '../guard'
 import { text } from '../respond'
@@ -80,12 +82,36 @@ const CONEXION_CAMBIO = 'La conexión con Shopify de este local cambió desde la
  * misma huella, y un confirm viejo actuaba sobre la conexión nueva (aplicar B sin haber visto su vista previa). El enlace y su
  * generación cambian con cada conexión; el servicio los vuelve a comparar dentro de su escritura.
  */
-const huellaDe = (c: { shopDomain: string; locationName: string; linkId: string; generation: number }) =>
-  `${c.shopDomain}|${c.locationName}|${c.linkId}|${c.generation}`
+// D1: también la credencial; reautorizar no cambia la generación y una elección vista con la credencial vieja no debe guardarse.
+const huellaDe = (c: { shopDomain: string; locationName: string; linkId: string; generation: number; tokenVersion: number }) =>
+  `${c.shopDomain}|${c.locationName}|${c.linkId}|${c.generation}|${c.tokenVersion}`
 const huellaField = () =>
   // 1024: la huella lleva el nombre de la ubicación, que no tiene tope en Shopify (con 300 una sucursal con nombre largo no
   // se podía confirmar por MCP).
   z.string().max(1024).optional().describe('La llena la vista previa; no la cambies')
+
+/**
+ * D1: los campos de las elecciones salen del MISMO cuerpo que la ruta del dashboard (`connectChoicesBodySchema`, una sola
+ * fuente de la forma y de sus mensajes): `todos` tal cual; `expectedElecciones` es su lista con las cantidades vistas (la
+ * llena la vista previa); `elecciones`, la misma lista con el renglón recortado al producto y la opción (la pone el modelo).
+ * Antes de guardar, el cuerpo completo pasa por `safeParse`: es lo que mantiene «exactamente una de las dos» en un solo lugar.
+ */
+const CUERPO_ELECCIONES = connectChoicesBodySchema.innerType().shape
+const eleccionesField = () =>
+  listaDeElecciones(CUERPO_ELECCIONES.elecciones.unwrap().element.pick({ variantLinkId: true, choice: true }))
+    .optional()
+    .describe('Qué número se queda en cada producto que pide elegir (requiereDecision en shopify_connect_preview), por variantLinkId')
+const firmaDe = (xs: Array<{ variantLinkId: string; choice: string }>) =>
+  xs
+    .map(x => `${x.variantLinkId}:${x.choice}`)
+    .sort()
+    .join(',')
+/** «actual → nuevo» de un producto con una elección (L18). */
+const cambioDe = (f: { avoqadoQty: string; shopifyQty: number | null; quedara: string | null }, choice: 'AVOQADO' | 'SHOPIFY') =>
+  choice === 'AVOQADO'
+    ? `Shopify ${f.shopifyQty} → ${f.avoqadoQty} (Avoqado se queda en ${f.avoqadoQty})`
+    : `Avoqado ${f.avoqadoQty} → ${f.quedara}`
+const VUELVE_A_VER = 'Algún producto ya no pide elegir o sus números cambiaron: pide shopify_connect_preview otra vez'
 
 /** Candado de las escrituras: la función (no el plan). null = adelante. */
 async function sinConector(venueId: string) {
@@ -150,7 +176,7 @@ export function registerShopifyTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'shopify_connect_preview',
-    'Vista previa de una conexión con Shopify que ya trajo su catálogo y espera aplicarse («así quedará tu stock»): por producto, lo que tiene Avoqado hoy, cómo quedará al aplicar (quedara: lo que Shopify tenía al importar con lo que la caja cambió mientras se conectaba) y lo que tenía Shopify, y el resumen (emparejados, cambian, nuevos, sin pareja). Paginado (máximo 50), con filtro CAMBIAN, NUEVOS o TODOS. Sólo lee.',
+    'Vista previa de una conexión con Shopify que ya trajo su catálogo y espera aplicarse («así quedará tu stock»): por producto, lo que tiene Avoqado hoy, lo que tenía Shopify al importar, cómo quedará si se usa el número de Shopify (quedara: lo de Shopify al importar con lo que la caja cambió mientras se conectaba), si hay que elegir (requiereDecision: el producto ya existía en Avoqado y su número no coincide) y la elección guardada (eleccion, AVOQADO o SHOPIFY; vacía si falta), y el resumen (emparejados, cambian, nuevos, sin pareja y porDecidir: cuántos faltan por elegir en todas las páginas). Paginado (máximo 50), con filtro CAMBIAN, NUEVOS o TODOS; los que piden elegir están en CAMBIAN. Sólo lee.',
     {
       venueId: venueIdField(),
       ...paginaSola,
@@ -286,44 +312,169 @@ export function registerShopifyTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'shopify_connect_apply',
-    'Aplica el stock de Shopify a una conexión que ya está lista para revisar y empieza a sincronizar: cada producto emparejado toma el número que tenga Shopify en ese momento y lo vendido mientras se conectaba se respeta. Primero muestra el resumen de la vista previa (revísala con shopify_connect_preview), o dice por qué la conexión todavía no se puede aplicar; se aplica al llamar de nuevo con confirm:true. Requiere administrar la configuración y acceso al conector con Shopify.',
-    { venueId: venueIdField(), expectedSourceFingerprint: huellaField(), confirm: confirmField() },
-    async ({ venueId, expectedSourceFingerprint, confirm }) => {
+    'Aplica una conexión con Shopify que ya está lista para revisar y empieza a sincronizar. Los productos nuevos y los que ya coinciden toman el número que tenga Shopify al aplicarse; en los que ya existían en Avoqado con otro número hay que elegir, sin preselección: en elecciones, por producto, AVOQADO (se queda el número de Avoqado y se manda a Shopify la diferencia) o SHOPIFY (Avoqado toma el de Shopify con lo vendido mientras se conectaba), máximo 50 por llamada; o en todos, la misma opción para todos los que faltan en todas las páginas. No se aplica mientras falte alguno (porDecidir en shopify_connect_preview). Primero muestra los cambios (actual → nuevo) y cuántos faltan; se guarda y se aplica al llamar de nuevo con confirm:true y los argumentos de la vista previa. Si un número cambió mientras tanto, pide revisar otra vez. Requiere administrar la configuración y acceso al conector con Shopify.',
+    {
+      venueId: venueIdField(),
+      elecciones: eleccionesField(),
+      todos: CUERPO_ELECCIONES.todos.describe('La misma opción para TODOS los productos que faltan por elegir, en todas las páginas'),
+      expectedElecciones: CUERPO_ELECCIONES.elecciones.describe('La llena la vista previa; no la cambies'),
+      expectedSourceFingerprint: huellaField(),
+      confirm: confirmField(),
+    },
+    async ({ venueId, elecciones, todos, expectedElecciones, expectedSourceFingerprint, confirm }) => {
       guard.venueFilter(venueId)
       guard.requirePermission('settings:manage', venueId)
       const sin = await sinConector(venueId)
       if (sin) return sin
+      const pedidas = elecciones ?? []
+      if (pedidas.length > 0 && todos) {
+        return text({
+          ok: false,
+          needsInput: true,
+          question: 'Usa elecciones (por producto) o todos (una opción para los que faltan), no los dos.',
+        })
+      }
+      if (new Set(pedidas.map(x => x.variantLinkId)).size !== pedidas.length) {
+        return text({ ok: false, needsInput: true, question: 'Un producto viene dos veces en elecciones: manda cada uno una sola vez.' })
+      }
       try {
         const { connection } = await getShopifyOverview(venueId)
         if (!connection) return text({ ok: false, error: NO_CONECTADA })
-        if (confirm !== true || expectedSourceFingerprint === undefined) {
+        if (confirm !== true || expectedSourceFingerprint === undefined || (pedidas.length > 0 && expectedElecciones === undefined)) {
           if (connection.estado !== 'POR_APLICAR')
             return text({ ok: false, estado: connection.estado, error: NO_LISTA_PARA_APLICAR[connection.estado] })
-          const vista = await getConnectReview({ venueId, offset: 0, limit: 1, filtro: 'CAMBIAN' })
-          return text({
+          const comun = {
             ok: false,
             requiresConfirmation: true,
             venueId,
-            resumen: vista.resumen,
-            // P2-4: el catálogo fija esta huella en la confirmación: si la conexión cambia, el confirm no aplica la nueva.
+            // P2-4 + D1: el catálogo fija esta huella (con la credencial): si la conexión cambia, el confirm no guarda ni aplica.
             expectedSourceFingerprint: huellaDe(connection),
+          }
+          if (pedidas.length > 0) {
+            const v = await getConnectReview({ venueId, offset: 0, limit: 50, filtro: 'TODOS', ids: pedidas.map(x => x.variantLinkId) })
+            const filas = pedidas.map(x => ({ x, f: v.items.find(i => i.variantLinkId === x.variantLinkId) }))
+            if (filas.some(({ f }) => !f?.requiereDecision || f.shopifyQty === null || f.quedara === null)) {
+              return text({ ok: false, needsInput: true, question: VUELVE_A_VER })
+            }
+            // P2-a: «Avoqado» exige Avoqado entero Y la diferencia entera (el mismo predicado que el servicio al guardar y aplicar).
+            const noEntera = filas
+              .map(({ x, f }) => ({ f: f!, motivo: x.choice === 'AVOQADO' ? motivoAvoqadoNoSeManda(f!.avoqadoQty, f!.quedara!) : null }))
+              .find(r => r.motivo !== null)
+            if (noEntera) {
+              return text({
+                ok: false,
+                codigo: 'SHOPIFY_DIFERENCIA_NO_ENTERA',
+                error:
+                  noEntera.motivo === 'AVOQADO_CON_DECIMALES'
+                    ? `${noEntera.f.name}: el stock de Avoqado (${noEntera.f.avoqadoQty}) tiene decimales y Shopify sólo cuenta piezas enteras, así que no podría quedar igual que Avoqado. Corrige su stock a piezas enteras o elige SHOPIFY.`
+                    : `${noEntera.f.name}: la diferencia con Shopify no es de piezas enteras (Avoqado ${noEntera.f.avoqadoQty}), así que no se puede enviar a Shopify. Corrige su stock a piezas enteras o elige SHOPIFY.`,
+              })
+            }
+            // El resumen es GLOBAL: lo que falta después = lo que falta hoy menos las que esta llamada elige por primera vez.
+            const faltan = Math.max(0, (v.resumen.porDecidir ?? 0) - filas.filter(({ f }) => !f!.eleccion).length)
+            return text({
+              ...comun,
+              resumen: v.resumen,
+              cambios: filas.map(({ x, f }) => ({
+                producto: f!.name,
+                sku: f!.sku,
+                eleccion: x.choice,
+                avoqado: f!.avoqadoQty,
+                shopify: f!.shopifyQty,
+                cambio: cambioDe(f!, x.choice),
+              })),
+              faltanPorDecidir: faltan,
+              // El catálogo fija estas cantidades en la confirmación (catalog.ts): si cambian, el token deja de servir.
+              expectedElecciones: filas.map(({ x, f }) => ({
+                variantLinkId: x.variantLinkId,
+                choice: x.choice,
+                expectedAvoqadoQty: f!.avoqadoQty,
+                expectedShopifyQty: f!.shopifyQty!,
+              })),
+              explicacion:
+                faltan > 0
+                  ? `Se guardarán ${pedidas.length} elecciones, pero todavía faltarán ${faltan} productos por decidir, así que NO se aplicará: pide shopify_connect_preview (filtro CAMBIAN) y vuelve con las que faltan, o usa todos.`
+                  : 'Se guardarán las elecciones y se aplicará: los productos nuevos y los que no piden elegir toman el número que tenga Shopify al aplicarse; en los elegidos se queda la elección. Las ventas hechas mientras se conectaba se respetan. Si un número elegido cambia antes de aplicarse, la conexión regresa a la vista previa para volver a elegir.',
+            })
+          }
+          const v = await getConnectReview({ venueId, offset: 0, limit: todos ? 50 : 1, filtro: 'CAMBIAN' })
+          const porDecidir = v.resumen.porDecidir ?? 0
+          if (todos && porDecidir > 0) {
+            const ejemplos = v.items.filter(i => i.requiereDecision && !i.eleccion).slice(0, 10)
+            return text({
+              ...comun,
+              todos,
+              resumen: v.resumen,
+              faltanPorDecidir: porDecidir,
+              cambios: ejemplos.map(f => ({
+                producto: f.name,
+                sku: f.sku,
+                avoqado: f.avoqadoQty,
+                shopify: f.shopifyQty,
+                cambio: cambioDe(f, todos),
+              })),
+              explicacion: `Se elegirá ${todos} en los ${porDecidir} productos que faltan (todas las páginas; los ya elegidos se quedan) y se aplicará. Arriba, hasta 10 ejemplos.${todos === 'AVOQADO' ? ' Los que tengan decimales en Avoqado se quedan por elegir y entonces no se aplicará todavía.' : ''}`,
+            })
+          }
+          if (porDecidir > 0) {
+            return text({
+              ok: false,
+              needsInput: true,
+              faltanPorDecidir: porDecidir,
+              question: `Faltan ${porDecidir} productos por decidir (requiereDecision en shopify_connect_preview, filtro CAMBIAN). Pregúntale al usuario, uno por uno o para todos, si se queda el número de Avoqado o el de Shopify, y pásalo en elecciones o en todos.`,
+            })
+          }
+          return text({
+            ...comun,
+            resumen: v.resumen,
+            // Aquí ya no falta nada por elegir: con «todos» se firma igual (no cambia nada), pero se dice con todas sus letras.
             explicacion:
-              'Cada producto emparejado tomará el número que tenga Shopify al aplicarse (puede no ser el de la vista previa si alguien vende mientras tanto). Las ventas hechas mientras se conectaba se respetan. Después, cada venta, devolución o pedido en línea se refleja en los dos lados.',
+              (todos ? 'No falta ningún producto por elegir; «todos» no cambia nada. ' : '') +
+              // P2-b: lo que de verdad pasa al aplicar. Si hay elecciones guardadas y vigentes (también «Avoqado»), se respetan; el número
+              // de Shopify es lo predeterminado sólo donde nadie tuvo que elegir.
+              'Se respetan las elecciones ya guardadas (en esos productos se queda el número que elegiste). En los demás, nuevos o que ya coinciden con Shopify, se aplica el número que tenga Shopify al aplicarse (puede no ser el de la vista previa si alguien vende mientras tanto). Las ventas hechas mientras se conectaba se respetan. Después, cada venta, devolución o pedido en línea se refleja en los dos lados.',
           })
         }
         if (huellaDe(connection) !== expectedSourceFingerprint) return text({ ok: false, needsInput: true, question: CONEXION_CAMBIO })
+        if (pedidas.length > 0 || todos) {
+          if (pedidas.length > 0 && firmaDe(pedidas) !== firmaDe(expectedElecciones ?? [])) {
+            return text({ ok: false, needsInput: true, question: VUELVE_A_VER })
+          }
+          const vista = { linkId: connection.linkId, generation: connection.generation, tokenVersion: connection.tokenVersion }
+          // La forma (y «exactamente una de las dos») es la del cuerpo de la ruta: nunca se guarda sin pasar por ella.
+          const cuerpo = connectChoicesBodySchema.safeParse(todos ? { vista, todos } : { vista, elecciones: expectedElecciones })
+          if (!cuerpo.success) {
+            return text({ ok: false, needsInput: true, question: cuerpo.error.issues[0]?.message ?? VUELVE_A_VER })
+          }
+          const g = await saveConnectChoices({ venueId, staffId: scope.staffId, ...cuerpo.data })
+          // Como el servicio: un «en todos» que no encontró a nadie no cambió nada, y un no-op no se audita.
+          if (g.guardadas > 0) {
+            await auditMcpWrite(scope, {
+              action: 'MCP_SHOPIFY_CONNECT_CHOICES_SAVED',
+              entity: 'Venue',
+              entityId: venueId,
+              venueId,
+              data: { guardadas: g.guardadas, porDecidir: g.porDecidir, ...(todos ? { todos } : {}) },
+            })
+          }
+          if (g.porDecidir > 0) {
+            return text({
+              ok: true,
+              venueId,
+              guardadas: g.guardadas,
+              aplicado: false,
+              faltanPorDecidir: g.porDecidir,
+              mensaje: `Elecciones guardadas. Todavía faltan ${g.porDecidir} productos por decidir: revísalos con shopify_connect_preview y vuelve a llamar con sus elecciones.`,
+            })
+          }
+        }
         await requestApplyShopifyConnect({
           venueId,
           staffId: scope.staffId,
           expected: { linkId: connection.linkId, generation: connection.generation },
         })
         await auditMcpWrite(scope, { action: 'MCP_SHOPIFY_CONNECT_APPLIED', entity: 'Venue', entityId: venueId, venueId, data: {} })
-        return text({
-          ok: true,
-          venueId,
-          solicitado: true,
-          mensaje: 'Aplicando: el stock de Shopify se aplica por partes en los próximos minutos.',
-        })
+        return text({ ok: true, venueId, solicitado: true, mensaje: 'Aplicando: el stock se aplica por partes en los próximos minutos.' })
       } catch (e) {
         return rechazo(e)
       }

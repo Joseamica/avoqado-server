@@ -29,6 +29,8 @@ export type ShopifyConnection = {
   /** ADITIVO (P2-4): el enlace y su generación; la huella de las confirmaciones del MCP los lleva. */
   linkId: string
   generation: number
+  /** ADITIVO (D1): la credencial; la huella del MCP la lleva (reautorizar no cambia la generación). */
+  tokenVersion: number
   fase: FaseVisible
   pausedFrom: Exclude<FaseVisible, 'PAUSED'> | null
   estado: ShopifyEstado
@@ -93,7 +95,10 @@ type Conteos = {
 
 export async function getShopifyOverview(venueId: string): Promise<{ planActive: boolean; connection: ShopifyConnection | null }> {
   const [link, planActive] = await Promise.all([
-    prisma.shopifyLocationLink.findUnique({ where: { venueId }, include: { store: { select: { shopDomain: true, status: true } } } }),
+    prisma.shopifyLocationLink.findUnique({
+      where: { venueId },
+      include: { store: { select: { shopDomain: true, status: true, tokenVersion: true } } },
+    }),
     venueHasFeatureAccess(venueId, SHOPIFY_FEATURE),
   ])
   if (!link || link.status === 'DISCONNECTED') return { planActive, connection: null }
@@ -129,6 +134,7 @@ export async function getShopifyOverview(venueId: string): Promise<{ planActive:
     connection: {
       linkId: link.id,
       generation: link.generation,
+      tokenVersion: link.store.tokenVersion,
       fase: link.status as FaseVisible,
       pausedFrom,
       estado: estadoDe(link.status, link.applyRequestedAt, link.store.status),

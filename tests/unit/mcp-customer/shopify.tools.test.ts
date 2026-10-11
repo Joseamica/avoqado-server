@@ -19,7 +19,12 @@ const mockResolve = jest.fn()
 jest.mock('@/services/commerce-channels/shopify/shopify.reconcile.service', () => ({
   resolveShopifyReview: (...a: unknown[]) => mockResolve(...a),
 }))
-const mockConnect = { getConnectReview: jest.fn(), requestApplyShopifyConnect: jest.fn(), disconnectShopify: jest.fn() }
+const mockConnect = {
+  getConnectReview: jest.fn(),
+  requestApplyShopifyConnect: jest.fn(),
+  disconnectShopify: jest.fn(),
+  saveConnectChoices: jest.fn(),
+}
 jest.mock('@/services/commerce-channels/shopify/shopify.connect.service', () => mockConnect)
 const mockPanel = { getShopifyReviewPreview: jest.fn(), requestShopifyResync: jest.fn() }
 jest.mock('@/services/commerce-channels/shopify/shopify.dashboard.service', () => mockPanel)
@@ -98,13 +103,14 @@ const RESUMEN = { emparejados: 30, cambian: 4, nuevos: 2, sinPareja: 1 }
 const CONEXION = {
   linkId: 'link1',
   generation: 1,
+  tokenVersion: 1,
   shopDomain: 'mi-tienda.myshopify.com',
   locationName: 'Tienda México',
   estado: 'POR_APLICAR',
   conteos: { pendientes: 2, porRevisar: 3 },
 }
-/** P2-4: la huella ata la confirmación a la tienda, la ubicación, el enlace y la GENERACIÓN que se vieron. */
-const HUELLA = 'mi-tienda.myshopify.com|Tienda México|link1|1'
+/** P2-4 + D1: la huella ata la confirmación a la tienda, la ubicación, el enlace, la GENERACIÓN y la credencial que se vieron. */
+const HUELLA = 'mi-tienda.myshopify.com|Tienda México|link1|1|1'
 const ESPERADA = { linkId: 'link1', generation: 1 }
 const PILOTO = 'El conector con Shopify está en piloto por invitación y este local no lo tiene activo; escríbenos para sumarte.'
 
@@ -720,5 +726,284 @@ describe('herramientas MCP de Shopify', () => {
     const { p, r } = await enDosPasos(call, 'shopify_review_resolve', { venueId: 'centro', reviewId: 'r1', choice: 'AVOQADO' })
     expect(p.quedara).toBe('5')
     expect(r).toMatchObject({ ok: true, estado: 'ENVIO_PENDIENTE', mensaje: 'Elección guardada; se enviará a Shopify en unos segundos.' })
+  })
+
+  describe('D1: elegir por producto al aplicar', () => {
+    const VISTA_CONEXION = { linkId: 'link1', generation: 1, tokenVersion: 1 }
+    const FILA = {
+      variantLinkId: 'vl1',
+      productId: 'p1',
+      name: 'Camisa · M',
+      sku: 'CAM-M',
+      avoqadoQty: '5',
+      shopifyQty: 6,
+      nuevo: false,
+      quedara: '6',
+      requiereDecision: true,
+      eleccion: null,
+    }
+    const ELECCION = { variantLinkId: 'vl1', choice: 'AVOQADO' }
+    const VISTA_ELECCION = { variantLinkId: 'vl1', choice: 'AVOQADO', expectedAvoqadoQty: '5', expectedShopifyQty: 6 }
+    const conFilas = (filas: unknown[], porDecidir: number) =>
+      mockConnect.getConnectReview.mockResolvedValue({
+        items: filas,
+        total: filas.length,
+        nextOffset: null,
+        resumen: { ...RESUMEN, porDecidir },
+        conexion: VISTA_CONEXION,
+      })
+
+    it('la vista previa enseña «actual → nuevo» por producto y ata elecciones y cantidades vistas; al confirmar guarda (con la conexión vista) y aplica', async () => {
+      conFilas([FILA], 1)
+      mockConnect.saveConnectChoices.mockResolvedValue({ guardadas: 1, porDecidir: 0 })
+      const { call } = await conectar()
+      const { p, r } = await enDosPasos(call, 'shopify_connect_apply', { venueId: 'centro', elecciones: [ELECCION] })
+      expect(mockConnect.getConnectReview).toHaveBeenCalledWith({ venueId: 'centro', offset: 0, limit: 50, filtro: 'TODOS', ids: ['vl1'] })
+      expect(p).toMatchObject({
+        ok: false,
+        requiresConfirmation: true,
+        faltanPorDecidir: 0,
+        cambios: [
+          { producto: 'Camisa · M', eleccion: 'AVOQADO', avoqado: '5', shopify: 6, cambio: 'Shopify 6 → 5 (Avoqado se queda en 5)' },
+        ],
+      })
+      expect(p.confirmationArguments).toEqual({
+        venueId: 'centro',
+        elecciones: [ELECCION],
+        expectedElecciones: [VISTA_ELECCION],
+        expectedSourceFingerprint: HUELLA,
+      })
+      expect(r).toMatchObject({ ok: true, solicitado: true })
+      expect(mockConnect.saveConnectChoices).toHaveBeenCalledWith({
+        venueId: 'centro',
+        staffId: 'dueno',
+        vista: VISTA_CONEXION,
+        elecciones: [VISTA_ELECCION],
+      })
+      expect(mockConnect.requestApplyShopifyConnect).toHaveBeenCalledWith({ venueId: 'centro', staffId: 'dueno', expected: ESPERADA })
+      expect(mockAudit).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ action: 'MCP_SHOPIFY_CONNECT_CHOICES_SAVED' }))
+    })
+
+    it('«Shopify» enseña cómo queda Avoqado', async () => {
+      conFilas([{ ...FILA, avoqadoQty: '4', quedara: '5' }], 1)
+      const { call } = await conectar()
+      const p = await call('shopify_connect_apply', { venueId: 'centro', elecciones: [{ variantLinkId: 'vl1', choice: 'SHOPIFY' }] })
+      expect(p.cambios[0].cambio).toBe('Avoqado 4 → 5')
+    })
+
+    it('«en todos»: lo explica con ejemplos y, al confirmar, guarda para todos los que faltan y aplica', async () => {
+      conFilas([FILA], 30)
+      mockConnect.saveConnectChoices.mockResolvedValue({ guardadas: 30, porDecidir: 0 })
+      const { call } = await conectar()
+      const { p, r } = await enDosPasos(call, 'shopify_connect_apply', { venueId: 'centro', todos: 'SHOPIFY' })
+      expect(p).toMatchObject({
+        requiresConfirmation: true,
+        todos: 'SHOPIFY',
+        faltanPorDecidir: 30,
+        cambios: [{ cambio: 'Avoqado 5 → 6' }],
+      })
+      expect(p.explicacion).toMatch(/los 30 productos que faltan/)
+      expect(r).toMatchObject({ ok: true, solicitado: true })
+      expect(mockConnect.saveConnectChoices).toHaveBeenCalledWith({
+        venueId: 'centro',
+        staffId: 'dueno',
+        vista: VISTA_CONEXION,
+        todos: 'SHOPIFY',
+      })
+    })
+
+    it('«en todos» que al confirmar ya no encontró a nadie (otra persona eligió antes): aplica y no audita un guardado que no ocurrió', async () => {
+      conFilas([FILA], 1)
+      mockConnect.saveConnectChoices.mockResolvedValue({ guardadas: 0, porDecidir: 0 })
+      const { call } = await conectar()
+      const { r } = await enDosPasos(call, 'shopify_connect_apply', { venueId: 'centro', todos: 'AVOQADO' })
+      expect(r).toMatchObject({ ok: true, solicitado: true })
+      expect(mockAudit.mock.calls.map(c => c[1].action)).toEqual(['MCP_SHOPIFY_CONNECT_APPLIED'])
+    })
+
+    it('si todavía faltan decisiones: guarda las que vienen, NO aplica, y lo dice', async () => {
+      conFilas([FILA], 4)
+      mockConnect.saveConnectChoices.mockResolvedValue({ guardadas: 1, porDecidir: 3 })
+      const { call } = await conectar()
+      const { p, r } = await enDosPasos(call, 'shopify_connect_apply', { venueId: 'centro', elecciones: [ELECCION] })
+      expect(p).toMatchObject({ faltanPorDecidir: 3 })
+      expect(p.explicacion).toMatch(/NO se aplicará/)
+      expect(r).toMatchObject({ ok: true, aplicado: false, faltanPorDecidir: 3, guardadas: 1 })
+      expect(mockConnect.requestApplyShopifyConnect).not.toHaveBeenCalled()
+    })
+
+    it('«todos» sin nada por elegir: la vista previa lo dice con todas sus letras y, al confirmar, aplica como siempre', async () => {
+      conFilas([], 0)
+      mockConnect.saveConnectChoices.mockResolvedValue({ guardadas: 0, porDecidir: 0 })
+      const { call } = await conectar()
+      const { p, r } = await enDosPasos(call, 'shopify_connect_apply', { venueId: 'centro', todos: 'AVOQADO' })
+      expect(p).toMatchObject({ ok: false, requiresConfirmation: true })
+      expect(p.explicacion).toContain('No falta ningún producto por elegir; «todos» no cambia nada.')
+      expect(p.faltanPorDecidir).toBeUndefined()
+      // Lo demás no cambia: se firma igual y aplica; un guardado que no encontró a nadie no se audita.
+      expect(r).toMatchObject({ ok: true, solicitado: true })
+      expect(mockAudit.mock.calls.map(c => c[1].action)).toEqual(['MCP_SHOPIFY_CONNECT_APPLIED'])
+    })
+
+    it('sin «todos» y sin nada por elegir: la explicación de siempre, sin hablar de «todos»', async () => {
+      conFilas([], 0)
+      const { call } = await conectar()
+      const p = await call('shopify_connect_apply', { venueId: 'centro' })
+      expect(p).toMatchObject({ ok: false, requiresConfirmation: true })
+      expect(p.explicacion).not.toContain('todos')
+      expect(p.explicacion).toContain('Se respetan las elecciones ya guardadas')
+      expect(p.explicacion).toContain('se aplica el número que tenga Shopify')
+    })
+
+    it('🔴 P2-b · sin «todos», sin faltantes y con una elección «Avoqado» vigente: NO dice que cada producto tomará Shopify', async () => {
+      conFilas([{ ...FILA, eleccion: 'AVOQADO' }], 0)
+      const { call } = await conectar()
+      const p = await call('shopify_connect_apply', { venueId: 'centro' })
+      expect(p).toMatchObject({ ok: false, requiresConfirmation: true })
+      expect(p.explicacion).not.toContain('Cada producto emparejado tomará')
+      expect(p.explicacion).not.toContain('todos')
+      expect(p.explicacion).toContain('Se respetan las elecciones ya guardadas')
+      expect(p.explicacion).toContain('nuevos o que ya coinciden con Shopify')
+    })
+
+    it('🔴 P2-b · con «todos», nada por elegir y una elección «Avoqado» vigente: conserva el prefijo y dice que se respeta lo guardado', async () => {
+      conFilas([{ ...FILA, eleccion: 'AVOQADO' }], 0)
+      mockConnect.saveConnectChoices.mockResolvedValue({ guardadas: 0, porDecidir: 0 })
+      const { call } = await conectar()
+      const { p, r } = await enDosPasos(call, 'shopify_connect_apply', { venueId: 'centro', todos: 'SHOPIFY' })
+      expect(p.explicacion).toContain('No falta ningún producto por elegir; «todos» no cambia nada. ')
+      expect(p.explicacion).toContain('Se respetan las elecciones ya guardadas')
+      expect(p.explicacion).not.toContain('Cada producto emparejado tomará')
+      expect(r).toMatchObject({ ok: true, solicitado: true })
+    })
+
+    it('🔴 «faltan» no baja de lo que de verdad falta: un producto con una elección vigente ya guardada no cuenta como decidido ahora', async () => {
+      // 5 por decidir en total. Se mandan vl1 (sin elección: ésa sí se decide ahora) y vl2 (YA elegida y vigente: no estaba entre las 5).
+      const YA_ELEGIDA = { ...FILA, variantLinkId: 'vl2', name: 'Camisa · L', sku: 'CAM-L', eleccion: 'SHOPIFY' }
+      conFilas([FILA, YA_ELEGIDA], 5)
+      const { call } = await conectar()
+      const p = await call('shopify_connect_apply', {
+        venueId: 'centro',
+        elecciones: [ELECCION, { variantLinkId: 'vl2', choice: 'AVOQADO' }],
+      })
+      expect(p.faltanPorDecidir).toBe(4) // 5 − 1, no 5 − 2
+      expect(p.explicacion).toMatch(/todavía faltarán 4 productos/)
+      expect(p.explicacion).toMatch(/NO se aplicará/)
+    })
+
+    it('«faltan» llega a cero cuando lo que se manda cubre todo lo pendiente, aunque una venga ya elegida: entonces sí se aplicará', async () => {
+      const YA_ELEGIDA = { ...FILA, variantLinkId: 'vl2', name: 'Camisa · L', sku: 'CAM-L', eleccion: 'SHOPIFY' }
+      conFilas([FILA, YA_ELEGIDA], 1)
+      const { call } = await conectar()
+      const p = await call('shopify_connect_apply', {
+        venueId: 'centro',
+        elecciones: [ELECCION, { variantLinkId: 'vl2', choice: 'AVOQADO' }],
+      })
+      expect(p.faltanPorDecidir).toBe(0)
+      expect(p.explicacion).not.toMatch(/NO se aplicará/)
+    })
+
+    it('sin elecciones y con productos por decidir: no ofrece confirmar, pide elegir', async () => {
+      conFilas([], 2)
+      const { call } = await conectar()
+      const p = await call('shopify_connect_apply', { venueId: 'centro' })
+      expect(p).toMatchObject({ ok: false, needsInput: true, faltanPorDecidir: 2 })
+      expect(p.confirmationToken).toBeUndefined()
+    })
+
+    it('elecciones y todos a la vez, o un producto que ya no pide elegir: pide aclarar, sin firmar nada', async () => {
+      conFilas([{ ...FILA, requiereDecision: false }], 0)
+      const { call } = await conectar()
+      expect(await call('shopify_connect_apply', { venueId: 'centro', elecciones: [ELECCION], todos: 'AVOQADO' })).toMatchObject({
+        needsInput: true,
+      })
+      const p = await call('shopify_connect_apply', { venueId: 'centro', elecciones: [ELECCION] })
+      expect(p).toMatchObject({ ok: false, needsInput: true })
+      expect(p.confirmationToken).toBeUndefined()
+    })
+
+    it('«Avoqado» con decimales: lo dice de entrada y no firma nada', async () => {
+      conFilas([{ ...FILA, avoqadoQty: '2.5', quedara: '4' }], 1)
+      const { call } = await conectar()
+      const p = await call('shopify_connect_apply', { venueId: 'centro', elecciones: [ELECCION] })
+      expect(p).toMatchObject({ ok: false, codigo: 'SHOPIFY_DIFERENCIA_NO_ENTERA' })
+      expect(p.confirmationToken).toBeUndefined()
+    })
+
+    it('🔴 P2-a · «Avoqado» con 4.5 y 0.5 pendientes (la diferencia sale entera, −1): lo dice de entrada, con el porqué, y no firma nada', async () => {
+      // A 4.5, S 6, pendiente −0.5 ⇒ quedará 5.5 y A − quedará = −1 (entera), pero el mensajero rechaza el pendiente decimal.
+      conFilas([{ ...FILA, avoqadoQty: '4.5', quedara: '5.5' }], 1)
+      const { call } = await conectar()
+      const p = await call('shopify_connect_apply', { venueId: 'centro', elecciones: [ELECCION] })
+      expect(p).toMatchObject({ ok: false, codigo: 'SHOPIFY_DIFERENCIA_NO_ENTERA' })
+      expect(p.error).toContain('decimales')
+      expect(p.error).toContain('Camisa · M')
+      expect(p.confirmationToken).toBeUndefined()
+      // «Shopify» con el mismo producto sí se puede.
+      const s = await call('shopify_connect_apply', { venueId: 'centro', elecciones: [{ ...ELECCION, choice: 'SHOPIFY' }] })
+      expect(s).toMatchObject({ requiresConfirmation: true })
+    })
+
+    it('P2-a · Avoqado entero pero con un pendiente decimal (la diferencia no es entera): también se niega, nombrando la diferencia', async () => {
+      conFilas([{ ...FILA, avoqadoQty: '5', quedara: '5.5' }], 1)
+      const { call } = await conectar()
+      const p = await call('shopify_connect_apply', { venueId: 'centro', elecciones: [ELECCION] })
+      expect(p).toMatchObject({ ok: false, codigo: 'SHOPIFY_DIFERENCIA_NO_ENTERA' })
+      expect(p.error).toContain('diferencia')
+      expect(p.confirmationToken).toBeUndefined()
+    })
+
+    it('🔴 cambiar una cantidad firmada invalida la confirmación y no se guarda nada', async () => {
+      conFilas([FILA], 1)
+      const { call } = await conectar()
+      const p = await call('shopify_connect_apply', { venueId: 'centro', elecciones: [ELECCION] })
+      const alterados = { ...p.confirmationArguments, expectedElecciones: [{ ...VISTA_ELECCION, expectedAvoqadoQty: '4' }] }
+      const r = await call('shopify_connect_apply', { ...alterados, confirm: true, confirmationToken: p.confirmationToken })
+      expect(r).toMatchObject({ ok: false, needsInput: true, field: 'confirmationToken' })
+      expect(mockConnect.saveConnectChoices).not.toHaveBeenCalled()
+    })
+
+    it('🔴 P1-2: reautorizar entre la vista previa y el confirm cambia la huella: no se guarda ni se aplica', async () => {
+      conFilas([FILA], 1)
+      const { call } = await conectar()
+      const p = await call('shopify_connect_apply', { venueId: 'centro', elecciones: [ELECCION] })
+      mockOverview.getShopifyOverview.mockResolvedValue({ planActive: true, connection: { ...CONEXION, tokenVersion: 2 } })
+      const r = await call('shopify_connect_apply', { ...p.confirmationArguments, confirm: true, confirmationToken: p.confirmationToken })
+      expect(r).toMatchObject({ ok: false, needsInput: true })
+      expect(mockConnect.saveConnectChoices).not.toHaveBeenCalled()
+      expect(mockConnect.requestApplyShopifyConnect).not.toHaveBeenCalled()
+    })
+
+    it('las descripciones hablan de elegir, sin comillas invertidas ni nombres internos', async () => {
+      const { client } = await conectar()
+      const d = new Map((await client.listTools()).tools.map(t => [t.name, t.description ?? '']))
+      expect(d.get('shopify_connect_preview')).toContain('requiereDecision')
+      expect(d.get('shopify_connect_preview')).toContain('porDecidir')
+      expect(d.get('shopify_connect_apply')).toContain('sin preselección')
+      expect(d.get('shopify_connect_apply')).toContain('todos')
+      for (const n of ['shopify_connect_preview', 'shopify_connect_apply']) expect(d.get(n)).not.toContain('`')
+    })
+
+    it('un producto repetido en elecciones: pide mandarlo una sola vez, sin firmar nada ni consultar la vista previa', async () => {
+      conFilas([FILA], 1)
+      const { call } = await conectar()
+      const p = await call('shopify_connect_apply', { venueId: 'centro', elecciones: [ELECCION, { ...ELECCION, choice: 'SHOPIFY' }] })
+      expect(p).toMatchObject({ ok: false, needsInput: true })
+      expect(p.confirmationToken).toBeUndefined()
+      expect(mockConnect.getConnectReview).not.toHaveBeenCalled()
+    })
+
+    it('la forma de las elecciones es la del cuerpo de guardar (una sola fuente): lista vacía o más de 50 se rechazan en español sin llamar a nada', async () => {
+      const { call } = await conectar()
+      const vacia = await call('shopify_connect_apply', { venueId: 'centro', elecciones: [] })
+      expect(vacia.isError).toBe(true)
+      expect(vacia.texto).toContain('Elige al menos un producto')
+      const muchas = Array.from({ length: 51 }, (_, n) => ({ variantLinkId: `vl${n}`, choice: 'SHOPIFY' }))
+      expect((await call('shopify_connect_apply', { venueId: 'centro', elecciones: muchas })).texto).toContain(
+        'Máximo 50 productos por vez',
+      )
+      expect(mockConnect.getConnectReview).not.toHaveBeenCalled()
+      expect(mockConnect.saveConnectChoices).not.toHaveBeenCalled()
+    })
   })
 })

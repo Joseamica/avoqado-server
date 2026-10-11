@@ -33,7 +33,7 @@ cambias el comportamiento, cambia aquí la frase y su aserción en el mismo comm
 
 | Pieza                                                                            | Dónde                                                                                                                       | Efecto                                                                                                          |
 | -------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| `SHOPIFY_PILOTO_SHOPS` (dominios `.myshopify.com`, coma; se lee en cada llamada) | `startShopifyConnect(…)` (`shopify.connect.service.ts:90`; la lista, `tiendasPiloto`, en `:62`)                             | otra tienda ⇒ 409 `SHOPIFY_SOLO_PILOTO`                                                                         |
+| `SHOPIFY_PILOTO_SHOPS` (dominios `.myshopify.com`, coma; se lee en cada llamada) | `startShopifyConnect(…)` (`shopify.connect.service.ts:98`; la lista, `tiendasPiloto`, en `:70`)                             | otra tienda ⇒ 409 `SHOPIFY_SOLO_PILOTO`                                                                         |
 | `SHOPIFY_INTEGRATION` en `PREMIUM_ONLY_SIN_CATALOGO`                             | `basePlan.service.ts:93`                                                                                                    | Premium por regla pero SIN entrada de catálogo ni precio; `shopifyTierMirror.test.ts` falla si queda en los dos |
 | Nunca se contrata suelta                                                         | `addFeaturesToVenue(…)` (`venueFeature.dashboard.service.ts:190`) y `createTrialSubscriptions(…)` (`stripe.service.ts:303`) | 400 `FEATURE_NO_SE_VENDE_SUELTA`; la segunda es el embudo de venta suelta, conversión de demo y onboarding      |
 
@@ -95,8 +95,8 @@ RETIENE: el reclamo exige pareja iniciada, así que no sale hasta que TOMAR inic
 fila `−1` sale después). La limpieza horaria (M4, §10) la cuenta como viva; si la pareja se suspende al iniciar, `suspendPair(…)` la
 descarta como a cualquier otra.
 
-No encola: un cambio con la marca de origen `shopify`, un delta 0, ni un `DELETE` de la fila (ver §5). El buzón lo llenan SÓLO el guardia y
-la resolución «usar Avoqado» (`reconcile.service.ts:1290`).
+No encola: un cambio con la marca de origen `shopify`, un delta 0, ni un `DELETE` de la fila (ver §5). El buzón lo llenan SÓLO el guardia,
+la resolución «usar Avoqado» (`reconcile.service.ts:1290`) y «Usar el de Avoqado» al conectar (D1, `initializePair(…)`, §4 bis).
 
 ## 3. La marca de origen: si aplicas en Avoqado algo que VINO de Shopify
 
@@ -136,7 +136,7 @@ El espejo (`mirrorAvailable` / `mirrorCommitted`) tiene CUATRO escritores, y nad
 | ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------- |
 | mensajero, `runShopifyOutboxRow(…)`   | al confirmar un envío: SENT y `espejo += delta` (NUNCA `quantityAfterChange`), sólo si la pareja existe y su generación coincide con la de la fila                                                                                                                                                                                                                                                                                       | misma tx que marcar SENT                      |
 | aplicador, `applyShopifyLevel(…)`     | frescura (`mirrorAt > fetchedAt`) y `productBlocked(…)` ANTES de actuar, también sobre un nivel no OK; luego espejo ← lectura vigente y `Inventory += S − espejo` con la marca                                                                                                                                                                                                                                                           | una tx; sin acceso ⇒ `PAUSADO` sin tocar nada |
-| inicio de pareja, `initializePair(…)` | TOMAR_SHOPIFY: espejo = S e `Inventory = S + Σ vivas` (en ACTIVE sólo con `createdProduct = true`; en REVIEWING con `applyRequestedAt`, para todas); COMPARAR: espejo = S, `Inventory` no se toca y, si difiere, `REACTIVADA` con su offset                                                                                                                                                                                              | una tx; sin acceso ⇒ `NO_APLICA`              |
+| inicio de pareja, `initializePair(…)` | TOMAR_SHOPIFY: espejo = S e `Inventory = S + Σ vivas` (en ACTIVE sólo con `createdProduct = true`; en REVIEWING con `applyRequestedAt`, para todas); COMPARAR: espejo = S, `Inventory` no se toca y, si difiere, `REACTIVADA` con su offset; con una elección D1 (§4 bis), «Avoqado» deja `Inventory`, espejo = S y encola `A − S − Σ vivas`                                                                                             | una tx; sin acceso ⇒ `NO_APLICA`              |
 | resolución, `resolveShopifyReview(…)` | revalida las cantidades mostradas y las VIGENTES (Avoqado bajo candado, Shopify recién leído). «Usar Shopify»: espejo e `Inventory` a la lectura vigente, con la marca. «Usar Avoqado»: descarta las DEAD_LETTER, en la misma tx pone el espejo en `S` (la lectura recién hecha, con su `committed` y `mirrorAt`) y encola `A − S` (entero) como fila nueva; al quedar SENT esa fila, el mensajero suma su delta como con cualquier otra | una tx; 409/422 si no                         |
 
 Por qué «usar Avoqado» pone el espejo en `S` y no espera al mensajero: con `A = 12`, `S = 11` y espejo viejo `10`, encolar `+1` sin mover el
@@ -164,7 +164,7 @@ espejo dejaría la cuenta en 11 contra las 12 piezas de Avoqado. Si hay filas vi
   y después la tienda `FOR SHARE` (`mirror.service.ts:372`). Quien la llame lo hace antes de cualquier candado de pareja, fila o cerco, o en
   una tx propia (el mensajero: tx de 15 s, porque avisa por dentro). `FOR NO KEY UPDATE` y no `FOR UPDATE`: no frena el `FOR KEY SHARE` de
   quien inserte una pareja con llave foránea a la sucursal.
-- **Desconectar** (`disconnectShopify(…)`, `connect.service.ts:1186`) bloquea primero TODAS las sucursales de la tienda por id (la propia
+- **Desconectar** (`disconnectShopify(…)`, `connect.service.ts:1481`) bloquea primero TODAS las sucursales de la tienda por id (la propia
   `FOR UPDATE`, las hermanas `FOR NO KEY UPDATE`), después las parejas de ESA sucursal, ordenadas por id, y sólo entonces sube la
   generación. Nunca la propia y luego una hermana de id menor: se cruzaría con quien las toma por id (el drenado, diferir, renovar la
   credencial). `renovarCredencial` (reconectar o reautorizar) también bloquea todas las sucursales de la tienda por id ANTES de la tienda.
@@ -176,7 +176,52 @@ espejo dejaría la cuenta en 11 contra las 12 piezas de Avoqado. Si hay filas vi
   enlace y la generación que se vieron, y el servicio vuelve a comparar enlace y generación DENTRO de su escritura:
   `requestApplyShopifyConnect(…)` en el `where` de su `updateMany`, `disconnectShopify(…)` con la sucursal ya bloqueada. Reconectar la MISMA
   tienda y ubicación sube la generación: un confirm viejo contesta 409 `SHOPIFY_CONEXION_CAMBIO` (el MCP pide otra vista previa) y no aplica
-  ni desconecta la conexión nueva. La ruta del dashboard no manda la generación (la página sondea el estado) y se comporta como antes.
+  ni desconecta la conexión nueva. La ruta del dashboard no manda la generación (la página sondea el estado) y se comporta como antes. D1:
+  la huella también lleva la credencial (`tokenVersion`), porque reautorizar no cambia la generación; `shopify_connect_apply` guarda las
+  elecciones (o `todos`) con la conexión vista (`vista` de `saveConnectChoices(…)`) y ata las cantidades vistas en `expectedElecciones`
+  (`catalog.ts`).
+
+## 4 bis. Elegir por producto al conectar (D1)
+
+Spec: `specs/2026-10-10-conector-shopify-d1-eleccion-por-producto-design.md`. Al conectar o reconectar, un producto que YA existía en
+Avoqado (`createdProduct = false`), sin iniciar ni suspendido, con `Inventory`, y cuyo stock no es `importedAvailable + Σ vivas` (también
+con cero, y también en la primera conexión) pide que el dueño elija: «Usar el de Avoqado» o «Usar el de Shopify», sin preselección (o «Usar
+Avoqado en los que faltan» / «Usar Shopify en los que faltan»). Los productos que creó la importación toman Shopify sin preguntar.
+
+- **Dónde vive:** en la pareja (`connectChoice`, `connectChoiceGeneration`, `connectChoiceTokenVersion`, `connectSeenAvoqadoQty`,
+  `connectSeenShopifyQty`, `connectChoiceById`), migración `…_shopify_eleccion_conexion`. Vale sólo en la generación y con la credencial con
+  que se eligió, y mientras Avoqado y lo de Shopify al importar sigan en los números vistos (`sqlDeVista`, el mismo SQL para la vista
+  previa, guardar y contar): una venta durante la vista previa, reconectar o reautorizar la invalidan sin borrar nada.
+- **Guardar** (`saveConnectChoices(…)`, `POST /connect/choices`, a lo más 50 por llamada o `todos`): Guardar exige la conexión que se vio
+  (`linkId`, `generation`, `tokenVersion`, que devuelve la vista previa) y la compara bajo la sucursal y la tienda `FOR SHARE` (409
+  `SHOPIFY_CONEXION_CAMBIO`: «vuelve a cargar»); después bloquea las parejas por id (§10.3). Por producto, lo visto debe ser lo vigente (409
+  `SHOPIFY_REVISION_CAMBIO`) y «Avoqado» exige Avoqado entero Y la diferencia entera (422 `SHOPIFY_DIFERENCIA_NO_ENTERA`, con el porqué):
+  `motivoAvoqadoNoSeManda(…)` (`shopify.constants.ts`) es el único predicado, el mismo al guardar, en `todos`, al aplicar y en la vista
+  previa del MCP. La diferencia sola no basta: con Avoqado 4.5, Shopify 6 y −0.5 pendiente sale −1 (entera), pero el mensajero rechaza el
+  pendiente decimal y Shopify quedaría en 5, no en 4.5 (P2-a, Codex). `todos` llena sólo las que no tienen una elección vigente y, con
+  «Avoqado», se salta las que no darían piezas enteras. Sólo en REVIEWING sin «Aplicar» pedido. No toca stock ni espejo. La forma la valida
+  Zod (ruta y MCP).
+- **La vista previa del MCP** (`shopify_connect_apply`, sin nada por elegir) no dice que cada producto tomará Shopify: dice que se respetan
+  las elecciones ya guardadas (también «Avoqado») y que el número de Shopify se aplica donde nadie tuvo que elegir (P2-b, Codex).
+- **Aplicar se niega** mientras falte alguna, también de páginas que nadie abrió: `requestApplyShopifyConnect(…)` cuenta con
+  `contarPorDecidir(…)` y contesta 422 `SHOPIFY_FALTAN_DECISIONES` con cuántas faltan.
+- **Al aplicar** (`initializePair(…)` en TOMAR, ya con la pareja, `Inventory` y sus filas bloqueadas): `decisionBajoCandado` compara la
+  lectura fresca de Shopify con lo que se vio al importar antes de cualquier salida automática, también cuando el catálogo no vio un nivel
+  OK (`importedAvailable` nulo) (P1-1: un 5/5 que llega como 6 no se aplica en silencio; `importedAvailable` toma el 6 y la fila vuelve a la
+  vista previa; si con el número nuevo ya no hay nada que decidir, sigue con TOMAR, que deja `Inventory` igual), y después la elección
+  contra lo de ahora. Sin una elección vigente, `POR_DECIDIR`: nada se escribe (tampoco con «Avoqado» si Avoqado o el ajuste no son enteros:
+  P2-a). «Shopify» es la mecánica de siempre, `Inventory = S + Σ vivas`. «Avoqado» deja `Inventory` igual, pone el espejo en la lectura
+  fresca y encola en la MISMA tx `A − S − Σ vivas` (entero; su id es la llave): `A = S + Σ vivas + ajuste` (N3). Restar las vivas es lo que
+  evita descontar dos veces una venta hecha mientras se conectaba. El `SHOPIFY_STOCK_INITIALIZED` del producto lleva la elección y quién la
+  hizo.
+- **Al primer `POR_DECIDIR`** de una tanda, la tanda termina y la conexión vuelve a «Así quedará tu stock» (`devolverAVistaPrevia(…)`:
+  sucursal `FOR UPDATE`, aplicación todavía pedida y `cercoVigente(…)` completo; `applyRequestedAt = null`, `SHOPIFY_APPLY_RETURNED`). Ya de
+  regreso, refresca `importedAvailable` de las DEMÁS filas de la tanda ya leída cuyo nivel cambió (`refrescarLoImportado(…)`: sólo la
+  pareja, con el mismo cerco, sin stock ni espejo; lo que no alcance el tiempo lo ve el siguiente «Aplicar»; un fallo de UNA fila se
+  registra en el log y se sigue: es mejor esfuerzo, el regreso ya ocurrió y la unidad no se cuenta como fallida), para que un regreso enseñe
+  todo lo que hay que volver a elegir. Lo ya aplicado no se repite: su ajuste conserva su única fila.
+- **ACTIVE no espera a que los ajustes lleguen:** `terminarAplicacion` no cambia; el ajuste es una fila PENDING no ambigua de una pareja ya
+  iniciada (no la frena `envioEnCamino(…)` ni la descarta `SIN_PAREJA`) y sale con el mensajero en cuanto la sucursal está ACTIVE.
 
 ## 5. `Inventory` que desaparece o vuelve ⇒ suspender y reactivar la pareja, NUNCA borrarla
 
@@ -228,7 +273,7 @@ borre o cree filas de `Inventory` de productos ligados, o que cambie esos campos
     `store.service.ts:273`) de cualquier generación anterior de esa sucursal o de la que ocupaba la ubicación. Una DEAD_LETTER ambigua no la
     frena: ya no puede llegar.
   - Religar la sucursal a OTRA tienda no es un 409: sus filas `IN_PROGRESS` y vivas ambiguas pasan a DEAD_LETTER con
-    `lastError = RELIGADA_A_OTRA_TIENDA` (duda y parámetros congelados conservados; `aCuarentenaPorReligar`, `connect.service.ts:639`),
+    `lastError = RELIGADA_A_OTRA_TIENDA` (duda y parámetros congelados conservados; `aCuarentenaPorReligar`, `connect.service.ts:647`),
     porque el reclamo sólo las tomaría con la tienda vieja ACTIVE y la sucursal ya apunta a la nueva: la espera no terminaría nunca. No
     avisan (es una acción deliberada del dueño); queda `religadas` en el `ActivityLog` de `SHOPIFY_CONNECTED`.
   - Desconectar no espera: bloquea (§4), sube la generación y deja esas filas cerrarse con su llave; al llegar no mueven el espejo.
@@ -294,9 +339,10 @@ borre o cree filas de `Inventory` de productos ligados, o que cambie esos campos
     conector (contar 8 con Shopify en 10 encolaría +8 y dejaría 18 en los dos lados). Ronda 3: la fase efectiva (con `pausedFrom`, como el
     guardia) es CONNECTING o REVIEWING, porque el aplicar inicia con TOMAR TODA pareja sin iniciar, también las emparejadas, y reconectar a
     la misma tienda las deja así (con Avoqado 5 y Shopify 10, contar 8 encolaría +3 y dejaría 13). Se vuelve a contar en cuanto la pareja se
-    inicia. **Hueco conocido, aceptado para el piloto:** un producto SIN pareja todavía, contado durante CONNECTING y ligado después,
-    queda en S + (contado − A); los dos lados coinciden, ningún dinero se mueve y un reconteo lo arregla. Retenerlo obligaría a frenar todo
-    conteo durante la conexión; la guía pide no contar mientras se importa el catálogo y D1/B (reescribe el aplicar) lo retoma.
+    inicia. **El producto SIN pareja contado durante CONNECTING** no se retiene (retenerlo frenaría todo conteo durante la conexión): queda
+    `Inventory = contado` con su fila `contado − A₀`, y al ligarse pide elegir (§4 bis). Con «Avoqado», Shopify termina en lo contado
+    (`S + (contado − A₀) + (contado − S − (contado − A₀)) = contado`); con «Shopify», la vista previa enseña `S + pendientes` antes de
+    aplicar y los dos lados quedan ahí.
   - Dos motivos (enmienda §12.1): `ENVIO_EN_CAMINO` (el producto se estaba sincronizando: vuelve a contarlo cuando termine; el texto es
     genérico porque también cubre la pareja en retención, donde puede no haber nada en camino) y `DUDA_POR_REVISAR` (sólo entre los
     bloqueados: hay una DEAD_LETTER ambigua o una revisión OPEN; recontar no sirve hasta resolverla en «Por revisar»). El motivo viaja en la
@@ -333,8 +379,8 @@ la guía. La página nunca ofrece comprar Premium para Shopify (§0).
   (`REVISIONES_RESUELTAS_DIAS`) cuya elección ya no está en camino: sin envío, o con su fila SENT, DISCARDED o ya borrada. Nunca se purga
   una revisión OPEN, ni una resuelta cuyo envío siga PENDING, FAILED, IN_PROGRESS o DEAD_LETTER. Sin la purga la tabla crece para siempre (a
   30,000 revisiones en un negocio la lista cuesta 35 ms con Seq Scan); la historia queda en `ActivityLog`. El índice `(status, resolvedAt)`
-  va en la misma migración `shopify_conector` (la única del conector, `20261008230100_shopify_conector`, posterior a la última de develop):
-  sin él la purga tarda 201 ms contra 0.04 ms con 1 M de filas.
+  va en la misma migración `shopify_conector` (la del conector, `20261008230100_shopify_conector`; la única otra es la de D1,
+  `…_shopify_eleccion_conexion`, que sólo agrega columnas nulas a la pareja): sin él la purga tarda 201 ms contra 0.04 ms con 1 M de filas.
 - **Prueba de volumen:** `tests/integration/shopify/catalogo-volumen.integration.test.ts` (5,000 variantes de punta a punta, ~9 min) está
   APAGADA por defecto (`describe.skip`) para no sumarle minutos al CI de todos. `SHOPIFY_VOLUMEN=1` la enciende, siempre en una base
   desechable:

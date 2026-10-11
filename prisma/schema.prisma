@@ -19402,6 +19402,15 @@ model ShopifyVariantLink {
   mirrorCommitted   Int                   @default(0)
   mirrorAt          DateTime              @default(now())
   committedAt       DateTime?
+  /// D1 (spec 2026-10-10): la elección del dueño al conectar («Usar el de Avoqado» / «Usar el de Shopify») y los números que
+  /// vio. Vale sólo en la generación y con la credencial con que se eligió, y mientras Avoqado y lo de Shopify al importar
+  /// sigan en esos números; si no, se vuelve a pedir. Nunca se borra: la generación y los números la invalidan.
+  connectChoice             ShopifyReviewChoice?
+  connectChoiceGeneration   Int?
+  connectChoiceTokenVersion Int?
+  connectSeenAvoqadoQty     Decimal?             @db.Decimal(12, 3)
+  connectSeenShopifyQty     Int?
+  connectChoiceById         String?
   /// Último barrido de catálogo que vio esta variante; las bajas se deciden sólo al terminar un barrido completo.
   lastSeenSweepId   Int?
   createdAt         DateTime              @default(now())
@@ -19414,7 +19423,7 @@ model ShopifyVariantLink {
   @@index([venueId])
 }
 
-/// Buzón Avoqado → Shopify. Lo llenan SÓLO el guardia y la resolución «usar Avoqado».
+/// Buzón Avoqado → Shopify. Lo llenan SÓLO el guardia, la resolución «usar Avoqado» y «Usar el de Avoqado» al conectar (D1).
 /// El destino queda congelado en (locationLinkId, generation).
 model ShopifyStockOutbox {
   id             String              @id @default(cuid())

@@ -1,4 +1,5 @@
 /** Conector Shopify — spec docs/superpowers/specs/2026-10-07-conector-shopify-design.md (raíz del workspace), §12 bis. */
+import { Prisma } from '@prisma/client'
 import type { CatalogActor } from '@/types/master-catalog'
 
 export const SHOPIFY_API_VERSION = '2026-10'
@@ -31,3 +32,20 @@ export const SHOPIFY_SERVICE_ACTOR: Extract<CatalogActor, { type: 'SERVICE' }> =
 export const TEXTO_SIN_ACCESO = 'El conector con Shopify no está activo en este local (piloto por invitación).'
 /** Las filas del buzón que todavía pueden salir hacia Shopify. */
 export const LIVE_OUTBOX_STATUSES = ['PENDING', 'IN_PROGRESS', 'FAILED'] as const
+
+/** D1: por qué «Usar el de Avoqado» no se puede mandar a Shopify (P2-a). */
+export type MotivoAvoqadoNoSeManda = 'AVOQADO_CON_DECIMALES' | 'DIFERENCIA_NO_ENTERA'
+
+/**
+ * D1: ¿«Usar el de Avoqado» se puede mandar a Shopify? Es la ÚNICA respuesta (guardar por producto, «en los que faltan» en SQL,
+ * aplicar bajo candado y la vista previa del MCP preguntan lo mismo). Al elegir «Avoqado» se manda `A − quedara`
+ * (`quedara = S + pendientes`) y a Shopify sólo viajan piezas enteras, pero con eso NO basta: hace falta que Avoqado también
+ * sea entero. Con A 4.5, S 6 y −0.5 pendiente la diferencia es −1 (entera), pero el mensajero rechaza el pendiente decimal
+ * (`DELTA_NO_ENTERO`): Shopify recibiría −1, quedaría en 5 y no en 4.5. Si Avoqado y la diferencia son enteros, lo pendiente
+ * también lo es. `null` = se puede.
+ */
+export function motivoAvoqadoNoSeManda(avoqado: Prisma.Decimal | string | number, quedara: Prisma.Decimal | string | number) {
+  const a = new Prisma.Decimal(avoqado)
+  if (!a.isInteger()) return 'AVOQADO_CON_DECIMALES' as const
+  return a.minus(quedara).isInteger() ? null : ('DIFERENCIA_NO_ENTERA' as const)
+}
