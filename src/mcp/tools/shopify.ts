@@ -16,7 +16,7 @@ import { Prisma, ShopifyIssueReason } from '@prisma/client'
 import { z } from 'zod'
 import AppError from '@/errors/AppError'
 import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
-import { SHOPIFY_FEATURE } from '@/services/commerce-channels/shopify/shopify.constants'
+import { motivoAvoqadoNoSeManda, SHOPIFY_FEATURE } from '@/services/commerce-channels/shopify/shopify.constants'
 import {
   getShopifyOverview,
   listShopifyIssues,
@@ -356,14 +356,18 @@ export function registerShopifyTools(server: McpServer, scope: McpScope) {
             if (filas.some(({ f }) => !f?.requiereDecision || f.shopifyQty === null || f.quedara === null)) {
               return text({ ok: false, needsInput: true, question: VUELVE_A_VER })
             }
-            const noEntera = filas.find(
-              ({ x, f }) => x.choice === 'AVOQADO' && !new Prisma.Decimal(f!.avoqadoQty).minus(f!.quedara!).isInteger(),
-            )
+            // P2-a: «Avoqado» exige Avoqado entero Y la diferencia entera (el mismo predicado que el servicio al guardar y aplicar).
+            const noEntera = filas
+              .map(({ x, f }) => ({ f: f!, motivo: x.choice === 'AVOQADO' ? motivoAvoqadoNoSeManda(f!.avoqadoQty, f!.quedara!) : null }))
+              .find(r => r.motivo !== null)
             if (noEntera) {
               return text({
                 ok: false,
                 codigo: 'SHOPIFY_DIFERENCIA_NO_ENTERA',
-                error: `${noEntera.f!.name}: la diferencia con Shopify no es de piezas enteras (Avoqado ${noEntera.f!.avoqadoQty}), así que no se puede enviar a Shopify. Corrige su stock a piezas enteras o elige SHOPIFY.`,
+                error:
+                  noEntera.motivo === 'AVOQADO_CON_DECIMALES'
+                    ? `${noEntera.f.name}: el stock de Avoqado (${noEntera.f.avoqadoQty}) tiene decimales y Shopify sólo cuenta piezas enteras, así que no podría quedar igual que Avoqado. Corrige su stock a piezas enteras o elige SHOPIFY.`
+                    : `${noEntera.f.name}: la diferencia con Shopify no es de piezas enteras (Avoqado ${noEntera.f.avoqadoQty}), así que no se puede enviar a Shopify. Corrige su stock a piezas enteras o elige SHOPIFY.`,
               })
             }
             // El resumen es GLOBAL: lo que falta después = lo que falta hoy menos las que esta llamada elige por primera vez.
@@ -426,7 +430,9 @@ export function registerShopifyTools(server: McpServer, scope: McpScope) {
             // Aquí ya no falta nada por elegir: con «todos» se firma igual (no cambia nada), pero se dice con todas sus letras.
             explicacion:
               (todos ? 'No falta ningún producto por elegir; «todos» no cambia nada. ' : '') +
-              'Cada producto emparejado tomará el número que tenga Shopify al aplicarse (puede no ser el de la vista previa si alguien vende mientras tanto). Las ventas hechas mientras se conectaba se respetan. Después, cada venta, devolución o pedido en línea se refleja en los dos lados.',
+              // P2-b: lo que de verdad pasa al aplicar. Si hay elecciones guardadas y vigentes (también «Avoqado»), se respetan; el número
+              // de Shopify es lo predeterminado sólo donde nadie tuvo que elegir.
+              'Se respetan las elecciones ya guardadas (en esos productos se queda el número que elegiste). En los demás, nuevos o que ya coinciden con Shopify, se aplica el número que tenga Shopify al aplicarse (puede no ser el de la vista previa si alguien vende mientras tanto). Las ventas hechas mientras se conectaba se respetan. Después, cada venta, devolución o pedido en línea se refleja en los dos lados.',
           })
         }
         if (huellaDe(connection) !== expectedSourceFingerprint) return text({ ok: false, needsInput: true, question: CONEXION_CAMBIO })

@@ -800,6 +800,11 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
       'Vale sólo en la generación y con la credencial con que se eligió',
       'Guardar exige la conexión que se vio',
       'contesta 422 `SHOPIFY_FALTAN_DECISIONES` con cuántas faltan',
+      // P2-a / P2-b (auditoría de Codex): un solo predicado de «Avoqado» y la vista previa del MCP que dice lo que de verdad pasa.
+      '«Avoqado» exige Avoqado entero Y la diferencia entera',
+      '`motivoAvoqadoNoSeManda(…)` (`shopify.constants.ts`) es el único predicado',
+      'La diferencia sola no basta',
+      'dice que se respetan las elecciones ya guardadas (también «Avoqado»)',
     ])
     const conexion = leer(`${SHOPIFY}/shopify.connect.service.ts`)
     const piezas = cuerpo(conexion, 'function sqlDeVista(')
@@ -812,6 +817,19 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
       'throw faltanDecisiones(',
       'prisma.shopifyLocationLink.updateMany(',
     ])
+    // P2-a: Avoqado entero Y la diferencia entera, con el MISMO predicado, en las cuatro puertas (guardar, `todos` en SQL, aplicar y MCP).
+    const constantes = leer(`${SHOPIFY}/shopify.constants.ts`)
+    const predicado = cuerpo(constantes, 'export function motivoAvoqadoNoSeManda(')
+    expect(predicado).toContain('!a.isInteger()')
+    expect(predicado).toContain('a.minus(quedara).isInteger()')
+    expect(cuerpo(conexion, 'export async function saveConnectChoices(')).toContain('motivoAvoqadoNoSeManda(visto, f.quedara)')
+    expect(cuerpo(conexion, 'export async function saveConnectChoices(')).toContain('inv."currentStock" = trunc(inv."currentStock")')
+    expect(cuerpo(leer(`${SHOPIFY}/shopify.mirror.service.ts`), 'async function decisionBajoCandado(')).toContain(
+      "d.connectChoice === 'AVOQADO' && motivoAvoqadoNoSeManda(A, pendientes.plus(S)) !== null",
+    )
+    expect(leer('src/mcp/tools/shopify.ts')).toContain('motivoAvoqadoNoSeManda(f!.avoqadoQty, f!.quedara!) : null')
+    // P2-b: la vista previa del MCP sin nada por elegir ya no afirma que cada producto tomará Shopify.
+    expect(leer('src/mcp/tools/shopify.ts')).not.toContain('Cada producto emparejado tomará')
     // Guardar: sucursal y tienda FOR SHARE, la vista comparada YA con los candados, después las parejas por id (§10.3).
     enOrden(cuerpo(conexion, 'export async function saveConnectChoices('), [
       'FROM "ShopifyLocationLink" WHERE "venueId" = ${i.venueId} FOR SHARE',
@@ -902,9 +920,9 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     // ancla de línea ahí no se puede sostener sin romper esta prueba por un cambio ajeno.
     const de = (f: string) => `${SHOPIFY}/shopify.${f}.ts`
     const anclas: Record<string, [string, string]> = {
-      'shopify.connect.service.ts:91': [de('connect.service'), 'export async function startShopifyConnect('],
-      'connect.service.ts:1467': [de('connect.service'), 'export async function disconnectShopify('],
-      'connect.service.ts:640': [de('connect.service'), 'async function aCuarentenaPorReligar('],
+      'shopify.connect.service.ts:98': [de('connect.service'), 'export async function startShopifyConnect('],
+      'connect.service.ts:1481': [de('connect.service'), 'export async function disconnectShopify('],
+      'connect.service.ts:647': [de('connect.service'), 'async function aCuarentenaPorReligar('],
       'shopify.crypto.ts:32': [de('crypto'), 'export function formaDeFirmaOAuth('],
       'catalog.service.ts:68': [de('catalog.service'), 'export const FILTRO_ESTADO'],
       'catalog.service.ts:418': [de('catalog.service'), 'async function bloquearProductos('],
@@ -919,7 +937,7 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     }
     // Las cortas (`:N`) son del archivo que la regla acaba de nombrar.
     const cortas: Record<string, [string, string]> = {
-      '`:63`': [de('connect.service'), 'const tiendasPiloto'],
+      '`:70`': [de('connect.service'), 'const tiendasPiloto'],
       '`:47`': [de('crypto'), 'export function verifyOAuthQueryHmac('],
       '`:1188`': [de('catalog.service'), 'export async function archivarPareja('],
     }

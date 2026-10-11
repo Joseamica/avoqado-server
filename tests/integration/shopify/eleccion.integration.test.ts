@@ -189,6 +189,30 @@ describe('D1 · guardar la elección', () => {
     expect(await elegir(e, 'SHOPIFY', '2.5', 4)).toEqual({ guardadas: 1, porDecidir: 0 })
   })
 
+  it('🔴 P2-a · Avoqado 4.5, Shopify 6 y −0.5 pendiente: la diferencia (−1) sale entera pero Avoqado no ⇒ «Avoqado» da 422 con el porqué y no guarda; «Shopify» sí', async () => {
+    // El mensajero rechaza el pendiente decimal (DELTA_NO_ENTERO): enviando el −1, Shopify quedaría en 5 y no en 4.5.
+    const e = await enRevision({ stock: 4.5, importado: 6, pendiente: -0.5 })
+    expect((await vista(e)).items[0]).toMatchObject({ avoqadoQty: '4.5', shopifyQty: 6, quedara: '5.5', requiereDecision: true })
+    await expect(elegir(e, 'AVOQADO', '4.5', 6)).rejects.toMatchObject({
+      statusCode: 422,
+      code: 'SHOPIFY_DIFERENCIA_NO_ENTERA',
+      message: expect.stringContaining('decimales'),
+    })
+    expect((await prisma.shopifyVariantLink.findUniqueOrThrow({ where: { id: e.variantLinkId } })).connectChoice).toBeNull()
+    expect((await vista(e)).resumen.porDecidir).toBe(1)
+    expect(await elegir(e, 'SHOPIFY', '4.5', 6)).toEqual({ guardadas: 1, porDecidir: 0 })
+  })
+
+  it('P2-a · Avoqado entero pero con un pendiente decimal (la diferencia no es entera) ⇒ 422 y no guarda', async () => {
+    const e = await enRevision({ stock: 5, importado: 6, pendiente: -0.5 })
+    await expect(elegir(e, 'AVOQADO', '5', 6)).rejects.toMatchObject({
+      statusCode: 422,
+      code: 'SHOPIFY_DIFERENCIA_NO_ENTERA',
+      message: expect.stringContaining('diferencia'),
+    })
+    expect((await prisma.shopifyVariantLink.findUniqueOrThrow({ where: { id: e.variantLinkId } })).connectChoice).toBeNull()
+  })
+
   it('sólo con plan, en «Así quedará» sin aplicar, en esta sucursal y sin productos repetidos', async () => {
     const e = await enRevision({ stock: 5, importado: 6 })
     const v = await vistaDe(e)
@@ -261,6 +285,19 @@ describe('D1 · «Usar … en todos»', () => {
     const entero = await agregarProductoShopify(e, { stock: 3, initialized: false })
     await prisma.shopifyVariantLink.update({ where: { id: entero.variantLinkId! }, data: { importedAvailable: 5 } })
     expect(await enTodos(e, 'AVOQADO')).toEqual({ guardadas: 1, porDecidir: 1 })
+    await expect(aplicar(e)).rejects.toMatchObject({ code: 'SHOPIFY_FALTAN_DECISIONES' })
+    expect(await enTodos(e, 'SHOPIFY')).toEqual({ guardadas: 1, porDecidir: 0 })
+  })
+})
+
+describe('D1 · «Usar Avoqado en los que faltan» con Avoqado decimal (P2-a)', () => {
+  it('🔴 se salta el producto con 4.5 y −0.5 pendiente aunque su diferencia (−1) sea entera; ése se queda por elegir y los enteros sí se guardan', async () => {
+    const e = await enRevision({ stock: 4.5, importado: 6, pendiente: -0.5 })
+    const entero = await agregarProductoShopify(e, { stock: 3, initialized: false })
+    await prisma.shopifyVariantLink.update({ where: { id: entero.variantLinkId! }, data: { importedAvailable: 5 } })
+    expect(await enTodos(e, 'AVOQADO')).toEqual({ guardadas: 1, porDecidir: 1 })
+    expect((await prisma.shopifyVariantLink.findUniqueOrThrow({ where: { id: e.variantLinkId } })).connectChoice).toBeNull()
+    expect((await prisma.shopifyVariantLink.findUniqueOrThrow({ where: { id: entero.variantLinkId! } })).connectChoice).toBe('AVOQADO')
     await expect(aplicar(e)).rejects.toMatchObject({ code: 'SHOPIFY_FALTAN_DECISIONES' })
     expect(await enTodos(e, 'SHOPIFY')).toEqual({ guardadas: 1, porDecidir: 0 })
   })
@@ -455,6 +492,32 @@ describe('D1 · aplicar la elección dentro de la tx de cada producto', () => {
     expect(await huecoDelInvariante(e.productId)).toBe('0')
     await enviar(t)
     expect([await stock(e.inventoryId), t.s.available]).toEqual(['4', 4])
+  })
+
+  it('🔴 P2-a · bajo el candado: una elección «Avoqado» con Avoqado 4.5 (la diferencia sale entera) NO se aplica; no encola nada, no inicia la pareja y la conexión regresa', async () => {
+    // Estado que el guardado ya no deja nacer (sólo por SQL a mano): el aplicar es la última defensa.
+    const e = await enRevision({ stock: 4.5, importado: 6, pendiente: -0.5 })
+    await prisma.shopifyVariantLink.update({
+      where: { id: e.variantLinkId },
+      data: {
+        connectChoice: 'AVOQADO',
+        connectChoiceGeneration: 1,
+        connectChoiceTokenVersion: 1,
+        connectSeenAvoqadoQty: new Prisma.Decimal('4.5'),
+        connectSeenShopifyQty: 6,
+        connectChoiceById: e.staffId,
+      },
+    })
+    await aplicar(e)
+    expect(await applyConnectPage(e.locationLinkId, { fetchLevels: nivelesFalsos(() => nivel(6)), hasAccess: conPlan })).toMatchObject({
+      done: false,
+      devuelta: true,
+    })
+    expect(await prisma.shopifyVariantLink.findUniqueOrThrow({ where: { id: e.variantLinkId } })).toMatchObject({ initializedAt: null })
+    expect(await stock(e.inventoryId)).toBe('4.5')
+    expect(await deltas(e.productId)).toEqual(['-0.5']) // sólo la venta de antes: ningún ajuste nuevo
+    expect(inicios(e.productId)).toEqual([])
+    expect((await sucursal(e)).applyRequestedAt).toBeNull()
   })
 
   it('«Shopify» es la mecánica de siempre: Inventory = S + pendientes, Shopify termina igual y la bitácora dice quién lo eligió', async () => {

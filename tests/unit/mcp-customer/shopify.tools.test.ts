@@ -851,7 +851,30 @@ describe('herramientas MCP de Shopify', () => {
       const p = await call('shopify_connect_apply', { venueId: 'centro' })
       expect(p).toMatchObject({ ok: false, requiresConfirmation: true })
       expect(p.explicacion).not.toContain('todos')
-      expect(p.explicacion).toContain('Cada producto emparejado tomará el número que tenga Shopify')
+      expect(p.explicacion).toContain('Se respetan las elecciones ya guardadas')
+      expect(p.explicacion).toContain('se aplica el número que tenga Shopify')
+    })
+
+    it('🔴 P2-b · sin «todos», sin faltantes y con una elección «Avoqado» vigente: NO dice que cada producto tomará Shopify', async () => {
+      conFilas([{ ...FILA, eleccion: 'AVOQADO' }], 0)
+      const { call } = await conectar()
+      const p = await call('shopify_connect_apply', { venueId: 'centro' })
+      expect(p).toMatchObject({ ok: false, requiresConfirmation: true })
+      expect(p.explicacion).not.toContain('Cada producto emparejado tomará')
+      expect(p.explicacion).not.toContain('todos')
+      expect(p.explicacion).toContain('Se respetan las elecciones ya guardadas')
+      expect(p.explicacion).toContain('nuevos o que ya coinciden con Shopify')
+    })
+
+    it('🔴 P2-b · con «todos», nada por elegir y una elección «Avoqado» vigente: conserva el prefijo y dice que se respeta lo guardado', async () => {
+      conFilas([{ ...FILA, eleccion: 'AVOQADO' }], 0)
+      mockConnect.saveConnectChoices.mockResolvedValue({ guardadas: 0, porDecidir: 0 })
+      const { call } = await conectar()
+      const { p, r } = await enDosPasos(call, 'shopify_connect_apply', { venueId: 'centro', todos: 'SHOPIFY' })
+      expect(p.explicacion).toContain('No falta ningún producto por elegir; «todos» no cambia nada. ')
+      expect(p.explicacion).toContain('Se respetan las elecciones ya guardadas')
+      expect(p.explicacion).not.toContain('Cada producto emparejado tomará')
+      expect(r).toMatchObject({ ok: true, solicitado: true })
     })
 
     it('🔴 «faltan» no baja de lo que de verdad falta: un producto con una elección vigente ya guardada no cuenta como decidido ahora', async () => {
@@ -904,6 +927,29 @@ describe('herramientas MCP de Shopify', () => {
       const { call } = await conectar()
       const p = await call('shopify_connect_apply', { venueId: 'centro', elecciones: [ELECCION] })
       expect(p).toMatchObject({ ok: false, codigo: 'SHOPIFY_DIFERENCIA_NO_ENTERA' })
+      expect(p.confirmationToken).toBeUndefined()
+    })
+
+    it('🔴 P2-a · «Avoqado» con 4.5 y 0.5 pendientes (la diferencia sale entera, −1): lo dice de entrada, con el porqué, y no firma nada', async () => {
+      // A 4.5, S 6, pendiente −0.5 ⇒ quedará 5.5 y A − quedará = −1 (entera), pero el mensajero rechaza el pendiente decimal.
+      conFilas([{ ...FILA, avoqadoQty: '4.5', quedara: '5.5' }], 1)
+      const { call } = await conectar()
+      const p = await call('shopify_connect_apply', { venueId: 'centro', elecciones: [ELECCION] })
+      expect(p).toMatchObject({ ok: false, codigo: 'SHOPIFY_DIFERENCIA_NO_ENTERA' })
+      expect(p.error).toContain('decimales')
+      expect(p.error).toContain('Camisa · M')
+      expect(p.confirmationToken).toBeUndefined()
+      // «Shopify» con el mismo producto sí se puede.
+      const s = await call('shopify_connect_apply', { venueId: 'centro', elecciones: [{ ...ELECCION, choice: 'SHOPIFY' }] })
+      expect(s).toMatchObject({ requiresConfirmation: true })
+    })
+
+    it('P2-a · Avoqado entero pero con un pendiente decimal (la diferencia no es entera): también se niega, nombrando la diferencia', async () => {
+      conFilas([{ ...FILA, avoqadoQty: '5', quedara: '5.5' }], 1)
+      const { call } = await conectar()
+      const p = await call('shopify_connect_apply', { venueId: 'centro', elecciones: [ELECCION] })
+      expect(p).toMatchObject({ ok: false, codigo: 'SHOPIFY_DIFERENCIA_NO_ENTERA' })
+      expect(p.error).toContain('diferencia')
       expect(p.confirmationToken).toBeUndefined()
     })
 

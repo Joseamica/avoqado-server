@@ -17,7 +17,14 @@ import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { assertLegacyCatalogGovernanceForVenue } from '@/services/master-catalog/catalogGovernance.service'
 import { utcTs } from '@/utils/sqlDates'
-import { SHOPIFY_FEATURE, SHOPIFY_SCOPES, SHOPIFY_SERVICE_ACTOR, SHOPIFY_WEBHOOK_TOPICS, TEXTO_SIN_ACCESO } from './shopify.constants'
+import {
+  motivoAvoqadoNoSeManda,
+  SHOPIFY_FEATURE,
+  SHOPIFY_SCOPES,
+  SHOPIFY_SERVICE_ACTOR,
+  SHOPIFY_WEBHOOK_TOPICS,
+  TEXTO_SIN_ACCESO,
+} from './shopify.constants'
 import { appCredentials, encryptShopifyToken, isValidShopDomain, readIntentId, signIntentId, verifyOAuthQueryHmac } from './shopify.crypto'
 import { exchangeOAuthCode, shopifyGraphql, type ShopifyFailure, type ShopifyResult } from './shopify.graphql'
 import {
@@ -1045,8 +1052,11 @@ export async function saveConnectChoices(
            WHERE "locationLinkId" = ${l.id} AND "initializedAt" IS NULL AND "suspendedReason" IS NULL
            ORDER BY id FOR UPDATE
         ) candidatas`
+      // P2-a: el mismo predicado que `motivoAvoqadoNoSeManda`, en SQL: Avoqado entero Y la diferencia con lo que quedará, entera.
       const entero =
-        i.todos === 'AVOQADO' ? Prisma.sql`AND (inv."currentStock" - ${QUEDARA}) = trunc(inv."currentStock" - ${QUEDARA})` : Prisma.empty
+        i.todos === 'AVOQADO'
+          ? Prisma.sql`AND inv."currentStock" = trunc(inv."currentStock") AND (inv."currentStock" - ${QUEDARA}) = trunc(inv."currentStock" - ${QUEDARA})`
+          : Prisma.empty
       const guardadas = await tx.$executeRaw`
         UPDATE "ShopifyVariantLink" w
            SET "connectChoice" = ${i.todos}::"ShopifyReviewChoice",
@@ -1085,10 +1095,14 @@ export async function saveConnectChoices(
       ) {
         throw revisionCambio()
       }
-      // «Avoqado» manda a Shopify A − S − pendientes = A − QUEDARA, y a Shopify sólo viajan piezas enteras.
-      if (e.choice === 'AVOQADO' && !visto.minus(new Prisma.Decimal(f.quedara)).isInteger()) {
+      // «Avoqado» manda a Shopify A − S − pendientes = A − QUEDARA, y a Shopify sólo viajan piezas enteras: hace falta Avoqado entero
+      // Y la diferencia entera (P2-a: con 4.5, 6 y −0.5 pendiente la diferencia es entera, pero Shopify no terminaría en 4.5).
+      const noSeManda = e.choice === 'AVOQADO' ? motivoAvoqadoNoSeManda(visto, f.quedara) : null
+      if (noSeManda) {
         throw new ValidationError(
-          'La diferencia no es de piezas enteras: corrige el stock de Avoqado a piezas enteras y vuelve a elegir',
+          noSeManda === 'AVOQADO_CON_DECIMALES'
+            ? `El stock de Avoqado (${visto}) tiene decimales y Shopify sólo cuenta piezas enteras, así que no podría quedar igual que Avoqado. Corrige el stock de Avoqado a piezas enteras y vuelve a elegir, o usa el de Shopify`
+            : 'La diferencia no es de piezas enteras: corrige el stock de Avoqado a piezas enteras y vuelve a elegir',
           'SHOPIFY_DIFERENCIA_NO_ENTERA',
         )
       }

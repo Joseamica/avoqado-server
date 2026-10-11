@@ -26,7 +26,7 @@ import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
 import { isNonInventoriable } from '@/services/dashboard/quantityInventoryRow'
 import { decryptShopifyToken } from './shopify.crypto'
 import { shopifyGraphql, ShopifyResult } from './shopify.graphql'
-import { LEVELS_PAGE_SIZE, LIVE_OUTBOX_STATUSES, SHOPIFY_FEATURE, SHOPIFY_SERVICE_ACTOR } from './shopify.constants'
+import { LEVELS_PAGE_SIZE, LIVE_OUTBOX_STATUSES, motivoAvoqadoNoSeManda, SHOPIFY_FEATURE, SHOPIFY_SERVICE_ACTOR } from './shopify.constants'
 import { notifyShopify } from './shopify.notify.service'
 
 export type NivelLeido = { kind: 'OK'; available: number; committed: number } | { kind: 'SIN_NIVEL' } | { kind: 'NO_RASTREADO' }
@@ -739,7 +739,11 @@ async function decisionBajoCandado(tx: Prisma.TransactionClient, p: ParejaBloque
     d.connectSeenShopifyQty === d.importedAvailable
   if (!vigente || d.connectChoice === null) return { kind: 'POR_DECIDIR', refrescar: false }
   const ajuste = A.minus(S).minus(pendientes)
-  if (d.connectChoice === 'AVOQADO' && !ajuste.isInteger()) return { kind: 'POR_DECIDIR', refrescar: false }
+  // P2-a: «Avoqado» exige Avoqado entero Y el ajuste entero (el predicado único de las constantes): con 4.5, 6 y −0.5 pendiente el
+  // ajuste (−1) es entero, pero el mensajero rechaza el pendiente decimal y Shopify no terminaría en A.
+  if (d.connectChoice === 'AVOQADO' && motivoAvoqadoNoSeManda(A, pendientes.plus(S)) !== null) {
+    return { kind: 'POR_DECIDIR', refrescar: false }
+  }
   return { kind: 'ELEGIDA', choice: d.connectChoice, pendientes, ajuste, staffId: d.connectChoiceById }
 }
 

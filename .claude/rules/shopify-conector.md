@@ -33,7 +33,7 @@ cambias el comportamiento, cambia aquí la frase y su aserción en el mismo comm
 
 | Pieza                                                                            | Dónde                                                                                                                       | Efecto                                                                                                          |
 | -------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| `SHOPIFY_PILOTO_SHOPS` (dominios `.myshopify.com`, coma; se lee en cada llamada) | `startShopifyConnect(…)` (`shopify.connect.service.ts:91`; la lista, `tiendasPiloto`, en `:63`)                             | otra tienda ⇒ 409 `SHOPIFY_SOLO_PILOTO`                                                                         |
+| `SHOPIFY_PILOTO_SHOPS` (dominios `.myshopify.com`, coma; se lee en cada llamada) | `startShopifyConnect(…)` (`shopify.connect.service.ts:98`; la lista, `tiendasPiloto`, en `:70`)                             | otra tienda ⇒ 409 `SHOPIFY_SOLO_PILOTO`                                                                         |
 | `SHOPIFY_INTEGRATION` en `PREMIUM_ONLY_SIN_CATALOGO`                             | `basePlan.service.ts:93`                                                                                                    | Premium por regla pero SIN entrada de catálogo ni precio; `shopifyTierMirror.test.ts` falla si queda en los dos |
 | Nunca se contrata suelta                                                         | `addFeaturesToVenue(…)` (`venueFeature.dashboard.service.ts:190`) y `createTrialSubscriptions(…)` (`stripe.service.ts:303`) | 400 `FEATURE_NO_SE_VENDE_SUELTA`; la segunda es el embudo de venta suelta, conversión de demo y onboarding      |
 
@@ -164,7 +164,7 @@ espejo dejaría la cuenta en 11 contra las 12 piezas de Avoqado. Si hay filas vi
   y después la tienda `FOR SHARE` (`mirror.service.ts:372`). Quien la llame lo hace antes de cualquier candado de pareja, fila o cerco, o en
   una tx propia (el mensajero: tx de 15 s, porque avisa por dentro). `FOR NO KEY UPDATE` y no `FOR UPDATE`: no frena el `FOR KEY SHARE` de
   quien inserte una pareja con llave foránea a la sucursal.
-- **Desconectar** (`disconnectShopify(…)`, `connect.service.ts:1467`) bloquea primero TODAS las sucursales de la tienda por id (la propia
+- **Desconectar** (`disconnectShopify(…)`, `connect.service.ts:1481`) bloquea primero TODAS las sucursales de la tienda por id (la propia
   `FOR UPDATE`, las hermanas `FOR NO KEY UPDATE`), después las parejas de ESA sucursal, ordenadas por id, y sólo entonces sube la
   generación. Nunca la propia y luego una hermana de id menor: se cruzaría con quien las toma por id (el drenado, diferir, renovar la
   credencial). `renovarCredencial` (reconectar o reautorizar) también bloquea todas las sucursales de la tienda por id ANTES de la tienda.
@@ -195,19 +195,25 @@ Avoqado en los que faltan» / «Usar Shopify en los que faltan»). Los productos
 - **Guardar** (`saveConnectChoices(…)`, `POST /connect/choices`, a lo más 50 por llamada o `todos`): Guardar exige la conexión que se vio
   (`linkId`, `generation`, `tokenVersion`, que devuelve la vista previa) y la compara bajo la sucursal y la tienda `FOR SHARE` (409
   `SHOPIFY_CONEXION_CAMBIO`: «vuelve a cargar»); después bloquea las parejas por id (§10.3). Por producto, lo visto debe ser lo vigente (409
-  `SHOPIFY_REVISION_CAMBIO`) y «Avoqado» debe dejar piezas enteras (422 `SHOPIFY_DIFERENCIA_NO_ENTERA`); `todos` llena sólo las que no
-  tienen una elección vigente y, con «Avoqado», se salta las que no darían piezas enteras. Sólo en REVIEWING sin «Aplicar» pedido. No toca
-  stock ni espejo. La forma la valida Zod (ruta y MCP).
+  `SHOPIFY_REVISION_CAMBIO`) y «Avoqado» exige Avoqado entero Y la diferencia entera (422 `SHOPIFY_DIFERENCIA_NO_ENTERA`, con el porqué):
+  `motivoAvoqadoNoSeManda(…)` (`shopify.constants.ts`) es el único predicado, el mismo al guardar, en `todos`, al aplicar y en la vista
+  previa del MCP. La diferencia sola no basta: con Avoqado 4.5, Shopify 6 y −0.5 pendiente sale −1 (entera), pero el mensajero rechaza el
+  pendiente decimal y Shopify quedaría en 5, no en 4.5 (P2-a, Codex). `todos` llena sólo las que no tienen una elección vigente y, con
+  «Avoqado», se salta las que no darían piezas enteras. Sólo en REVIEWING sin «Aplicar» pedido. No toca stock ni espejo. La forma la valida
+  Zod (ruta y MCP).
+- **La vista previa del MCP** (`shopify_connect_apply`, sin nada por elegir) no dice que cada producto tomará Shopify: dice que se respetan
+  las elecciones ya guardadas (también «Avoqado») y que el número de Shopify se aplica donde nadie tuvo que elegir (P2-b, Codex).
 - **Aplicar se niega** mientras falte alguna, también de páginas que nadie abrió: `requestApplyShopifyConnect(…)` cuenta con
   `contarPorDecidir(…)` y contesta 422 `SHOPIFY_FALTAN_DECISIONES` con cuántas faltan.
 - **Al aplicar** (`initializePair(…)` en TOMAR, ya con la pareja, `Inventory` y sus filas bloqueadas): `decisionBajoCandado` compara la
   lectura fresca de Shopify con lo que se vio al importar antes de cualquier salida automática, también cuando el catálogo no vio un nivel
   OK (`importedAvailable` nulo) (P1-1: un 5/5 que llega como 6 no se aplica en silencio; `importedAvailable` toma el 6 y la fila vuelve a la
   vista previa; si con el número nuevo ya no hay nada que decidir, sigue con TOMAR, que deja `Inventory` igual), y después la elección
-  contra lo de ahora. Sin una elección vigente, `POR_DECIDIR`: nada se escribe. «Shopify» es la mecánica de siempre,
-  `Inventory = S + Σ vivas`. «Avoqado» deja `Inventory` igual, pone el espejo en la lectura fresca y encola en la MISMA tx `A − S − Σ vivas`
-  (entero; su id es la llave): `A = S + Σ vivas + ajuste` (N3). Restar las vivas es lo que evita descontar dos veces una venta hecha
-  mientras se conectaba. El `SHOPIFY_STOCK_INITIALIZED` del producto lleva la elección y quién la hizo.
+  contra lo de ahora. Sin una elección vigente, `POR_DECIDIR`: nada se escribe (tampoco con «Avoqado» si Avoqado o el ajuste no son enteros:
+  P2-a). «Shopify» es la mecánica de siempre, `Inventory = S + Σ vivas`. «Avoqado» deja `Inventory` igual, pone el espejo en la lectura
+  fresca y encola en la MISMA tx `A − S − Σ vivas` (entero; su id es la llave): `A = S + Σ vivas + ajuste` (N3). Restar las vivas es lo que
+  evita descontar dos veces una venta hecha mientras se conectaba. El `SHOPIFY_STOCK_INITIALIZED` del producto lleva la elección y quién la
+  hizo.
 - **Al primer `POR_DECIDIR`** de una tanda, la tanda termina y la conexión vuelve a «Así quedará tu stock» (`devolverAVistaPrevia(…)`:
   sucursal `FOR UPDATE`, aplicación todavía pedida y `cercoVigente(…)` completo; `applyRequestedAt = null`, `SHOPIFY_APPLY_RETURNED`). Ya de
   regreso, refresca `importedAvailable` de las DEMÁS filas de la tanda ya leída cuyo nivel cambió (`refrescarLoImportado(…)`: sólo la
@@ -267,7 +273,7 @@ borre o cree filas de `Inventory` de productos ligados, o que cambie esos campos
     `store.service.ts:273`) de cualquier generación anterior de esa sucursal o de la que ocupaba la ubicación. Una DEAD_LETTER ambigua no la
     frena: ya no puede llegar.
   - Religar la sucursal a OTRA tienda no es un 409: sus filas `IN_PROGRESS` y vivas ambiguas pasan a DEAD_LETTER con
-    `lastError = RELIGADA_A_OTRA_TIENDA` (duda y parámetros congelados conservados; `aCuarentenaPorReligar`, `connect.service.ts:640`),
+    `lastError = RELIGADA_A_OTRA_TIENDA` (duda y parámetros congelados conservados; `aCuarentenaPorReligar`, `connect.service.ts:647`),
     porque el reclamo sólo las tomaría con la tienda vieja ACTIVE y la sucursal ya apunta a la nueva: la espera no terminaría nunca. No
     avisan (es una acción deliberada del dueño); queda `religadas` en el `ActivityLog` de `SHOPIFY_CONNECTED`.
   - Desconectar no espera: bloquea (§4), sube la generación y deja esas filas cerrarse con su llave; al llegar no mueven el espejo.
