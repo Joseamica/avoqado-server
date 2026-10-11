@@ -1,10 +1,18 @@
 # CLAUDE.md - Avoqado Server (Backend)
 
 Multi-tenant B2B SaaS for restaurant/venue management (POS, payments, inventory, staff). Express.js + TypeScript, PostgreSQL/Prisma,
-Socket.IO, Redis, RabbitMQ. Payments via Blumon (TPV + E-commerce) and Stripe (subscriptions).
+Socket.IO, RabbitMQ. **No Redis** (founder, 21-sep-2026): prod runs ONE instance; locks → `pg_advisory_xact_lock`, shared state → a
+Postgres row with CAS, cache → in-process memory with TTL. Payments via Blumon (TPV + E-commerce) and Stripe (subscriptions).
 
 > **Reglas de entorno** — sesiones de IA en paralelo, y cuándo verificar según la carga de la máquina — están en el `CLAUDE.md` del
 > workspace (`../CLAUDE.md`), que auto-carga junto con este archivo. Léelas antes de correr builds/tests o de tocar git.
+
+**Verificación dual OAuth:** `avq-verify` no copia `.env`; si divergen los dos casos de recurso consentido, comprueba los orígenes públicos
+con las mismas entradas explícitas de prueba en ambas máquinas, sin transferir secretos. El diagnóstico `SXNqUO` pasó 23/23 por lado;
+eso no vuelve verde el shard original ni autoriza quitar una bandera previa de DIFIEREN.
+**Presupuestos event-loop:** conserva el límite y repite sólo el archivo cuando diverge; el probe usa el mínimo de tiempo de pared y CPU
+del hilo, así que no atribuyas el fallo sólo a descheduling. `qnKCre` pasó en ambas máquinas después del fallo Mac de `5VEMi3`; el shard
+sigue DIFIEREN y la causa no quedó demostrada. No elevar el presupuesto ni normalizar esa diferencia como aprobación.
 
 ## 🔴 CRITICAL — Ask which payment tier (and how it gets turned on) BEFORE building or changing anything
 
@@ -14,8 +22,9 @@ decision is unfinished: it either leaks paid value into a lower tier or hides a 
 **authoritative** gate — get it right here first.
 
 - **Backend (authoritative):** `src/services/access/basePlan.service.ts` + `src/middlewares/checkFeatureAccess.middleware.ts`. Obligatory
-  gating questions live in `.claude/rules/feature-gating.md` (Module vs Feature decision). PREMIUM-only codes today: `CFDI`,
-  `INVENTORY_TRACKING`.
+  gating questions live in `.claude/rules/feature-gating.md` (Module vs Feature decision). PREMIUM-only codes: read
+  `PREMIUM_ONLY_CODES` in `basePlan.service.ts` (CFDI, INVENTORY_TRACKING, COMMISSIONS and more) — never trust a copy in a doc.
+  COMMISSIONS is DUAL-GRANTED (module OR plan; `basePlan.service.ts` ~line 480).
 - **Module vs Feature — use the RIGHT resolver (crossing them fails silently; grandfathered venues pass a wrong-system gate):** `Module`
   codes (`SERIALIZED_INVENTORY`, `WHITE_LABEL_DASHBOARD`, `COMMISSIONS`) gate via `moduleService.isModuleEnabled` (incl. org-level
   fallback); `Feature` codes (`INVENTORY_TRACKING`, `CFDI`, `ADVANCED_REPORTS`…) via `venueHasFeatureAccess`. **Every MCP
@@ -53,13 +62,14 @@ min, y si no hay evidencia se escribe "no encontré cómo lo resuelve X" y se si
 - **avoqado-windows-service** — bridges an external SoftRestaurant POS in via RabbitMQ
 
 **Namespace ownership — know which clients share an endpoint before touching it:** `avoqado-ios` and `avoqado-android` (the staff-facing POS
-apps) consume the **`/api/v1/mobile/*`** namespace (controllers under `src/controllers/mobile/`), NOT `/api/v1/dashboard/*`. The dashboard
-namespace (`src/controllers/dashboard/`) is consumed by `avoqado-web-dashboard` and `avoqado-desktop`. Both avoqado-ios and avoqado-android
-are developed in parallel by other LLM-agent sessions against `/mobile` right now — before changing a `/mobile` controller/service/ schema,
-re-verify its current contract directly in source (never from memory or an earlier session), since those two clients depend on it and their
-in-flight work isn't visible from here. A change confined to `/dashboard` (e.g. its own controllers/services) does not carry that same risk
-unless the underlying service function is also called from a `/mobile` controller — grep for other callers of any service function before
-assuming a fix is dashboard-only.
+apps) consume mainly the **`/api/v1/mobile/*`** namespace (controllers under `src/controllers/mobile/`), **but they ALSO call some
+`/api/v1/dashboard/*` routes** (verified 9-oct-2026: `venues/:id`, products, discounts, referrals capture/validate/force-override,
+reservations + waitlist, class-sessions, inventory raw-materials and inter-venue-transfers). The dashboard namespace
+(`src/controllers/dashboard/`) is consumed by `avoqado-web-dashboard`, by those app calls, and by the legacy `avoqado-desktop`. Both apps
+are developed in parallel by other LLM-agent sessions right now — before changing a `/mobile` controller/service/schema, re-verify its
+current contract directly in source (never from memory or an earlier session). **Before changing a `/dashboard` route, grep both apps**
+(`grep -rn "dashboard/venues" ../avoqado-android/app/src ../avoqado-ios/avoqado-ios`): if they call it, it carries the same risk as
+`/mobile`. Also grep for other callers of any service function before assuming a fix is dashboard-only.
 
 ## How This Configuration Works
 
@@ -118,8 +128,8 @@ Permissions: Use `checkPermission('resource:action')`, NOT `authorizeRole` (lega
 ```bash
 npm run dev            # Dev server (hot reload)
 npm run build          # Compile TypeScript
-npm run pre-deploy     # CI/CD sim (MUST pass before push)
-npm test               # All tests
+npm run pre-deploy     # CI/CD sim — pesado: va por ../scripts/avq-verify.sh o el carril ci/<tema>, nunca a pelo
+npm test               # All tests — pesado: igual (ver «Verificación repartida» en ../CLAUDE.md)
 npm run test:unit      # Unit tests
 npm run test:api       # API integration
 npm run test:workflows # E2E workflows
@@ -265,37 +275,6 @@ unfinished (treat it like permissions/MCP: kept in lockstep). Do NOT log reads o
 ONLY `ActivityLog`, so siloed-only writes are invisible to it. Stamp `venueId` on org-level events + thread the actor (`performedBy`) from
 the controller. Full rule + examples: `.claude/rules/critical-warnings.md`. (Backend-only — clients call the API; `avoqado-server` audits.)
 
-## 🔴 CRITICAL — Keep the sales presentation in sync
-
-The partner sales presentation (`~/Documents/Programming/Avoqado-HQ/operations/marketing/platform-presentation/`) is the canonical "what
-Avoqado does" document — third parties sell from it. It must never fall behind the platform.
-
-**Whenever you add, change, or remove a customer-visible capability (feature, module, product, payment method, supported sector, tier
-packaging), you MUST update BOTH deliverables as part of the SAME change — never "later":** the full deck (`avoqado-presentacion-v2.html`)
-AND the one-pager (`avoqado-one-pager-v2.html`) — plus the client one-pager (`avoqado-one-pager-cliente.html`). **Editing the HTML is only
-HALF the change.** You MUST then **regenerate the PDF of each** with the Chrome-headless HTML→PDF command in that folder's `README.md` — the
-PDF is the file partners actually open and send, so an HTML edit WITHOUT a freshly regenerated PDF is an INCOMPLETE change. Updating only
-one deliverable, or editing HTML without regenerating its PDF, is incomplete. Internal refactors and bugfixes with no customer-visible
-impact are exempt.
-
----
-
-## Fetching Asana task attachments / screenshots
-
-When given an Asana task URL, you **can** see its screenshots and attachments — don't claim you can't.
-
-- `mcp__asana__*` reads task text/comments but **not** files; the `mcp__claude_ai_Asana__` connector is often unauthorized. Don't stop there
-  — use the Asana Personal Access Token directly (it's what powers the `asana` MCP server):
-  1. Read the token (use it, **never print or commit the value**): key `ASANA_ACCESS_TOKEN` under `mcpServers.asana.env` in
-     `~/.claude.json`. Example:
-     `TOKEN=$(python3 -c "import json,os; print(json.load(open(os.path.expanduser('~/.claude.json')))['mcpServers']['asana']['env']['ASANA_ACCESS_TOKEN'])")`
-  2. List attachments + signed URLs (task GID = the long number after `/task/` in the URL):
-     `curl -s -H "Authorization: Bearer $TOKEN" "https://app.asana.com/api/1.0/tasks/<GID>/attachments?opt_fields=name,download_url,created_at"`
-  3. `curl` each `download_url` (pre-signed, needs no auth) to a temp file in the scratchpad, then Read the image. Inline description images
-     are attachments too, so this returns all of them — not just the ones embedded in the text.
-- If slide/screenshot text is unreadable after Read downscales a large image, crop it into regions with PIL and upscale (LANCZOS) before
-  re-reading.
-
 ## 🔴 Offline-first (reducer de intents) — LEE `.claude/rules/offline-first-y-hub-lan.md`
 
 Este repo es la FUENTE DE VERDAD del contrato: `SyncIntentType` en `src/services/mobile/sync.mobile.service.ts` (15 tipos hoy). Agregar o
@@ -308,3 +287,6 @@ Tres cosas que no se negocian:
 - `RETRY` (transitorio) ≠ `REJECTED` (permanente). Convertir uno en otro pierde el intent para siempre.
 - Dinero: `PAY_CASH` deduplica por `[venueId, idempotencyKey]` y `ADD_ITEMS` usa CAS real sobre `version`. Sin eso, un reintento cobra dos
   veces.
+
+> Reglas del workspace que aplican aquí también (MCP en sync, presentación de ventas, adjuntos de Asana, tier, sin red…):
+> `../AGENTS.md` y `../CLAUDE.md`, que cargan siempre al abrir desde `Avoqado/`. Copias quitadas el 9-oct-2026 (fase 2b).

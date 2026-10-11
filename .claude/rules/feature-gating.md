@@ -102,6 +102,10 @@ resolver de Features → pasaba para todos; fix commit `16c3bc35`.)
 Para saber cuál: `SELECT code FROM "Module"` vs `SELECT code FROM "Feature"`. **Nunca gatees un Module con el resolver de Features ni
 viceversa.**
 
+⚠️ **Excepción: `COMMISSIONS` es DUAL-GRANTED** (vive en los dos sistemas: módulo O plan PREMIUM). Gatéalo SIEMPRE con
+`venueHasCommissionsAccess(venueId)` de `basePlan.service.ts`, nunca con uno solo de los dos resolvers: el dashboard y el MCP deben
+contestar igual.
+
 ### 🔴 El grandfathering vive en DOS niveles — resuélvelo SOLO con `access/grandfather.ts`
 
 `seatCapExempt` existe en `Venue` **y** en `Organization`. Un venue está exento si **cualquiera de los dos** la tiene. La de la organización

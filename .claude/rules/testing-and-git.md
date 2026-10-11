@@ -38,6 +38,9 @@ describe('Feature X', () => {
 
 ## Testing Commands
 
+> 🔴 Las corridas pesadas (suite completa, `pre-deploy`, typecheck) van por `../scripts/avq-verify.sh` o por el carril `ci/<tema>`,
+> nunca a pelo en esta Mac compartida (ver «Verificación repartida» en `../CLAUDE.md`). Un archivo de test suelto sí corre directo.
+
 ```bash
 npm test              # Run all tests
 npm run test:unit     # Unit tests only
@@ -120,8 +123,8 @@ This ensures zero prettier/eslint warnings in commits.
 ## Pre-Commit Checklist
 
 1. [ ] Does this change affect existing documentation?
-2. [ ] Did I run `npm test` (full suite)?
-3. [ ] Did I run `npm run pre-deploy`?
+2. [ ] Did I run the module suite, and the full suite via `avq-verify` (4 shards) or the `ci/<tema>` lane when the change is broad?
+3. [ ] Did `pre-deploy` (typecheck + build + suite) pass — via `avq-verify` or the `ci/<tema>` lane, never bare on this Mac?
 4. [ ] Did I delete temporary scripts?
 5. [ ] No regressions in related features?
 6. [ ] If schema change: Did I create a proper migration (NOT `db push`)?
