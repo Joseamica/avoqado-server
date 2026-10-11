@@ -803,6 +803,31 @@ describe('replaceCfdi — P1/P2 de la auditoría', () => {
     expect(createInvoice).not.toHaveBeenCalled()
   })
 
+  // C2-pulido · G3 (hermano): la sustituta anterior quedó CANCELADA en el PAC ⇒ rechazo de dominio (ConflictError ⇒ 409 con su texto), no un
+  // Error plano que el controlador convertía en 500.
+  it('🔴 G3 hermano: la sustituta anterior cancelada en el PAC ⇒ ConflictError con su texto, sin timbrar', async () => {
+    const createInvoice = jest.fn().mockResolvedValue(timbrada)
+    const deps = makeDeps({
+      findSustituta: jest.fn().mockResolvedValue({
+        id: 'cfdi-sub',
+        status: 'STAMP_FAILED',
+        attempts: 1,
+        idempotencyKey: 'cfdi-order-o1-r1',
+        replacesCfdiId: 'cfdi-orig',
+        venueId: 'v1',
+      }),
+      resolveProvider: jest.fn().mockReturnValue({
+        name: 'facturapi',
+        findByExternalId: jest.fn().mockResolvedValue({ providerInvoiceId: 'fa-sub', uuid: 'UUID-SUB', status: 'canceled' }),
+        createInvoice,
+      } as any),
+    })
+    const err = await replaceCfdi(params, deps).catch(e => e)
+    expect(err).toBeInstanceOf(ConflictError)
+    expect(err.message).toMatch(/UUID-SUB\) quedó cancelada en el PAC/)
+    expect(createInvoice).not.toHaveBeenCalled()
+  })
+
   // P1-4 · Mientras bajan los archivos, otra petición cancela la factura. El segundo guardado NO
   // puede reescribir la vigencia fiscal: resucitaría un documento cancelado.
   it('🔴 guardar los archivos NO reescribe el estado fiscal', async () => {
@@ -880,6 +905,15 @@ describe('replaceCfdi — P1/P2 de la auditoría', () => {
     const deps = makeDeps({ loadCfdi: jest.fn().mockResolvedValue({ ...original, type: 'EGRESO' }) })
     await expect(replaceCfdi(params, deps)).rejects.toThrow(/nota de crédito|egreso/i)
     expect(deps.resolveProvider).not.toHaveBeenCalled()
+  })
+
+  // C2-pulido · G3 (guía de Facturación): «Corregir importe» sobre una nota respondía 500 «Error interno al sustituir el CFDI» porque el rechazo
+  // era un `Error` plano que el controlador no reconoce. Es un rechazo de DOMINIO esperado ⇒ `ConflictError` (409 con su texto en español).
+  it('🔴 G3: el rechazo de sustituir una nota de crédito es un ConflictError (409 con su texto), no un Error plano (500)', async () => {
+    const deps = makeDeps({ loadCfdi: jest.fn().mockResolvedValue({ ...original, type: 'EGRESO' }) })
+    const err = await replaceCfdi(params, deps).catch(e => e)
+    expect(err).toBeInstanceOf(ConflictError)
+    expect(err.message).toBe('Esta es una nota de crédito (egreso), no una factura de venta; no se sustituye por este camino.')
   })
 
   // P2-5 · Repetir el POST después de una sustitución COMPLETA no es un error: es el mismo cliente
@@ -1076,4 +1110,25 @@ describe('replaceCfdi — ronda de la ola (3): `enDuda` y `cancelIntentoNuevo`',
     const res = await replaceCfdi(params, makeDeps())
     expect(res).toMatchObject({ cancelPendiente: false, cancelIntentoNuevo: true })
   })
+})
+
+// Revisión de T-I2 (m-1): la regla de la devolución (A7-R10) es sólo de la AUTOFACTURA del cliente. Una SUSTITUCIÓN de una autofactura
+// original sobre una venta con devolución la hace el personal y debe seguir pudiendo corregir la factura. Hasta hoy, quitar la guarda
+// `!sustitucion` sólo tumbaba esta suite por un TypeError (su transacción de mentira no traía `payment`); aquí la tabla de pagos SÍ trae una
+// devolución completada y se exige el resultado.
+it('control — m-1: sustituir una AUTOFACTURA de una venta con devolución completada se hace igual (la regla A7-R10 no aplica al personal)', async () => {
+  const pagos = [
+    { orderId: 'o1', type: 'REGULAR', status: 'COMPLETED' },
+    { orderId: 'o1', type: 'REFUND', status: 'COMPLETED' },
+  ]
+  const findFirst = jest.fn(
+    async ({ where = {} }: any) => pagos.find(f => Object.entries(where).every(([k, v]) => (f as any)[k] === v)) ?? null,
+  )
+  const deps = makeDeps({ loadCfdi: jest.fn().mockResolvedValue({ ...original, flow: 'AUTOFACTURA_A' }) })
+  const base = deps.runInTransaction!
+  deps.runInTransaction = work => base(tx => work(Object.assign(tx, { payment: { findFirst } })))
+  const res = await replaceCfdi(params, deps).catch(e => e)
+  expect(res).toMatchObject({ status: 'REPLACED' })
+  // La tabla sí tiene una devolución que la regla vería (lo prueba el sabotaje sin `!sustitucion`).
+  expect(await findFirst({ where: { orderId: 'o1', type: 'REFUND', status: 'COMPLETED' } })).not.toBeNull()
 })

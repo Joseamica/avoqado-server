@@ -37,6 +37,8 @@ jest.mock('../../src/services/tpv/digitalReceipt.tpv.service', () => ({
 const mockLoadOrderForCfdiFromDb = jest.fn()
 jest.mock('../../src/services/fiscal/cfdi.service', () => ({
   loadOrderForCfdiFromDb: (...args: unknown[]) => mockLoadOrderForCfdiFromDb(...args),
+  // T-I2 (A7-R10): la venta de estas pruebas no tiene devoluciones.
+  ventaConDevolucion: async () => false,
 }))
 
 import jwt from 'jsonwebtoken'
