@@ -5,6 +5,7 @@ import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
 import { NotFoundError } from '../../errors/AppError'
 import { recordFastPayment } from '../tpv/payment.tpv.service'
+import { RECIBO_CANONICO } from '../shared/reciboCanonico'
 
 /**
  * Interface for test payment creation
@@ -117,12 +118,7 @@ export async function createTestPayment(data: CreateTestPaymentData): Promise<Pa
           email: true,
         },
       },
-      receipts: {
-        orderBy: {
-          createdAt: 'desc',
-        },
-        take: 1,
-      },
+      receipts: RECIBO_CANONICO,
     },
   })
 
@@ -186,12 +182,7 @@ export async function getTestPayments(venueId?: string, limit: number = 10): Pro
           slug: true,
         },
       },
-      receipts: {
-        orderBy: {
-          createdAt: 'desc',
-        },
-        take: 1,
-      },
+      receipts: RECIBO_CANONICO,
     },
     orderBy: {
       createdAt: 'desc',

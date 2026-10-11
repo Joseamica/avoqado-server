@@ -45,8 +45,9 @@ import {
 // La aritmética canónica del saldo: UNA sola definición de "cuánto se lleva
 // pagado y cuánto falta" para los cuatro caminos de cobro. Se extrajo de este
 // mismo archivo; volver a llamarla es lo que impide que se separen otra vez.
-import { claseDeEstado, computeOrderBalance, summarizeRefunds, type RefundState } from '../shared/orderBalance'
+import { claseDeEstado, computeOrderBalance, impuestoQueSeCobraAparte, summarizeRefunds, type RefundState } from '../shared/orderBalance'
 import { rechazarSiEsImportada } from '../shared/ordenImportada'
+import { RECIBO_CANONICO } from '../shared/reciboCanonico'
 import {
   CobroYaRegistrado,
   assertIdempotentPaymentOrder,
@@ -256,6 +257,8 @@ export interface OrderDetailResponse {
   source: string
   subtotal: number
   taxAmount: number
+  /** IVA que la orden SUMA aparte (IVA por producto, plan 7, r2 R2-13). 0 = el precio ya lo traía. */
+  addedTaxAmount: number
   discountAmount: number
   tipAmount: number
   total: number
@@ -1284,6 +1287,8 @@ export async function getOrder(venueId: string, orderId: string): Promise<OrderD
     source: flattenedOrder.source,
     subtotal: Number(flattenedOrder.subtotal),
     taxAmount: Number(flattenedOrder.taxAmount),
+    // Aditivo (IVA por producto, plan 7, r2 R2-13): el IVA que la orden de verdad suma aparte (0 con IVA_INCLUIDO o cancelada).
+    addedTaxAmount: impuestoQueSeCobraAparte(flattenedOrder).toNumber(),
     discountAmount: Number(flattenedOrder.discountAmount),
     tipAmount: Number(flattenedOrder.tipAmount),
     total: Number(flattenedOrder.total),
@@ -2445,7 +2450,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
   if (input.idempotencyKey) {
     const existingByKey = await prisma.payment.findUnique({
       where: { venueId_idempotencyKey: { venueId, idempotencyKey: input.idempotencyKey } },
-      include: { receipts: true },
+      include: { receipts: RECIBO_CANONICO },
     })
     if (existingByKey) {
       assertIdempotentPaymentOrder(existingByKey, orderId)
@@ -2939,7 +2944,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
       if ((err?.code === 'P2002' || err instanceof CobroYaRegistrado) && input.idempotencyKey) {
         const winner = await prisma.payment.findUnique({
           where: { venueId_idempotencyKey: { venueId, idempotencyKey: input.idempotencyKey } },
-          include: { receipts: true },
+          include: { receipts: RECIBO_CANONICO },
         })
         if (winner) {
           assertIdempotentPaymentOrder(winner, orderId)
@@ -2984,7 +2989,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
         if (input.idempotencyKey) {
           const mine = await prisma.payment.findUnique({
             where: { venueId_idempotencyKey: { venueId, idempotencyKey: input.idempotencyKey } },
-            include: { receipts: true },
+            include: { receipts: RECIBO_CANONICO },
           })
           if (mine) {
             assertIdempotentPaymentOrder(mine, orderId)

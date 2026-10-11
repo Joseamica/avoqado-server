@@ -4,6 +4,7 @@ import logger from '../../config/logger'
 import { BadRequestError, ConflictError, NotFoundError, ServiceUnavailableError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { generateDigitalReceipt } from './digitalReceipt.tpv.service'
+import { RECIBO_CANONICO } from '../shared/reciboCanonico'
 import { publishCommand } from '../../communication/rabbitmq/publisher'
 import { trackRecentPaymentCommand } from '../pos-sync/posSyncOrder.service'
 import { socketManager } from '../../communication/sockets/managers/socketManager'
@@ -231,7 +232,7 @@ export async function buscarRegistroPorReferencia(
             ...(ultimo ? [{ OR: [{ createdAt: { lt: ultimo.createdAt } }, { createdAt: ultimo.createdAt, id: { lt: ultimo.id } }] }] : []),
           ],
         },
-        include: { receipts: true }, // Include receipt data for idempotent response
+        include: { receipts: RECIBO_CANONICO }, // Include receipt data for idempotent response
         orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         take: PAGINA,
       })
@@ -402,7 +403,7 @@ import { aplicaCandadoDeEfectivo, cobroEnEfectivoSobreOrdenSaldada } from '../sh
 import { resolveTenderForCharge, computeTenderCommission, type ResolvedTenderCharge } from '../dashboard/tenderType.dashboard.service'
 import { validateStaffVenue as validateStaffVenueShared } from '../../utils/staff-venue.util'
 import { isRetryableDbError } from '../../utils/serializableRetry'
-import { loadOrderForCfdiFromDb } from '../fiscal/cfdi.service'
+import { loadOrderForCfdiFromDb, ventaConDevolucion } from '../fiscal/cfdi.service'
 import {
   terminalPaymentService,
   avisarAprobacionTardiaTrasVentana,
@@ -1012,7 +1013,9 @@ export async function resolveAutofacturaAvailable(orderId: string | null | undef
     const bundle = await loadOrderForCfdiFromDb(orderId)
     // Fuera del sobre seguro (promoción, cargo por servicio…) el motor rechazaría el documento: el
     // ticket no ofrece una autofactura que después va a fallar.
-    return !!bundle && bundle.facturacionEnabled && bundle.autofacturaEnabled && !bundle.unsupportedReasons?.length
+    if (!bundle || !bundle.facturacionEnabled || !bundle.autofacturaEnabled || bundle.unsupportedReasons?.length) return false
+    // T-I2 (A7-R10): con una devolución completada tampoco (el GET público dice lo mismo); p. ej. el recibo de la devolución de la TPV.
+    return !(await ventaConDevolucion(orderId))
   } catch (error) {
     logger.error('[payment.tpv.service] resolveAutofacturaAvailable lookup failed — defaulting to false', {
       orderId,
@@ -3229,7 +3232,7 @@ export async function recordOrderPayment(
           idempotencyKey: paymentData.idempotencyKey,
         },
       },
-      include: { receipts: true },
+      include: { receipts: RECIBO_CANONICO },
     })
 
     if (existingByKey) {
@@ -3909,7 +3912,7 @@ export async function recordOrderPayment(
   } catch (error) {
     if (error instanceof RegistroYaExistentePorReferencia) return devolverExistentePorReferencia(error.registro)
     if (error instanceof CobroDuplicadoEnEfectivo) {
-      const existente = await prisma.payment.findUnique({ where: { id: error.existingPaymentId }, include: { receipts: true } })
+      const existente = await prisma.payment.findUnique({ where: { id: error.existingPaymentId }, include: { receipts: RECIBO_CANONICO } })
       if (existente) {
         logger.warn('🔄 [recordOrderPayment] Cobro en EFECTIVO sobre una orden ya saldada — se devuelve el existente', {
           venueId,
@@ -4007,7 +4010,7 @@ export async function recordOrderPayment(
       throw error
     }
     if (error instanceof ReintentoDelGanadorDeLaSolicitud) {
-      const ganador = await prisma.payment.findUnique({ where: { id: error.winnerPaymentId }, include: { receipts: true } })
+      const ganador = await prisma.payment.findUnique({ where: { id: error.winnerPaymentId }, include: { receipts: RECIBO_CANONICO } })
       if (ganador) {
         logger.info('🔄 [S0] Bajo el candado de la solicitud, el ganador ya era este mismo intento — se devuelve el existente', {
           venueId,
@@ -4048,7 +4051,7 @@ export async function recordOrderPayment(
               idempotencyKey: paymentData.idempotencyKey,
             },
           },
-          include: { receipts: true },
+          include: { receipts: RECIBO_CANONICO },
         })
 
         if (winner) {
@@ -4884,7 +4887,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
           idempotencyKey: paymentData.idempotencyKey,
         },
       },
-      include: { receipts: true },
+      include: { receipts: RECIBO_CANONICO },
     })
 
     if (existingByKey) {
@@ -5458,7 +5461,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
   } catch (error) {
     if (error instanceof RegistroYaExistentePorReferencia) return devolverExistentePorReferencia(error.registro)
     if (error instanceof ReintentoDelGanadorDeLaSolicitud) {
-      const ganador = await prisma.payment.findUnique({ where: { id: error.winnerPaymentId }, include: { receipts: true } })
+      const ganador = await prisma.payment.findUnique({ where: { id: error.winnerPaymentId }, include: { receipts: RECIBO_CANONICO } })
       if (ganador) {
         logger.info('🔄 [S0] Bajo el candado de la solicitud, el ganador ya era este mismo intento — se devuelve el existente', {
           venueId,
@@ -5494,7 +5497,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
               idempotencyKey: paymentData.idempotencyKey,
             },
           },
-          include: { receipts: true },
+          include: { receipts: RECIBO_CANONICO },
         })
 
         if (winner) {

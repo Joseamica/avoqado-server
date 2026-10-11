@@ -333,6 +333,14 @@ async function deleteVenueDataTx(tx: DbClient, venueId: string): Promise<number>
   }
 
   // Delete in correct order (most dependent first)
+  // 0. IVA por producto (plan 3): el sello de un renglón y el manifiesto de la global referencian OrderItem, Order y Cfdi
+  // con RESTRICT, y el Cfdi al venue con RESTRICT. Ninguno cae en cascada con el venue, así que la guardia del DMMF no los
+  // ve: una demo con una venta facturada revertía entera con P2003 (D2 del 7a). Sólo filas con LAS DOS puntas en esta
+  // demo; una que cruce a otro venue sigue bloqueando y la limpieza falla cerrada en vez de dessellar ventas ajenas.
+  await borrar(tx.orderItemSelloIva.deleteMany({ where: { orderItem: { order: { venueId } }, cfdi: { venueId } } }))
+  await borrar(tx.cfdiGlobalOrden.deleteMany({ where: { order: { venueId }, cfdi: { venueId } } }))
+  await borrar(tx.cfdi.deleteMany({ where: { venueId } }))
+
   // 1. Order items and payments
   await borrar(tx.orderItem.deleteMany({ where: { order: { venueId } } }))
   await borrar(tx.payment.deleteMany({ where: { order: { venueId } } }))

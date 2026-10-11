@@ -22,6 +22,7 @@ import { assertOrderCancellableUnderLock, avisarOrdenCancelada } from '../shared
 // misma que usan los cuatro canales de cobro, para que la pantalla no pueda
 // contradecir al saldo persistido.
 import { summarizeRefunds } from '../shared/orderBalance'
+import { ORDEN_RECIBO_CANONICO } from '../shared/reciboCanonico'
 import { rechazarCobroNuevoSobreCancelada } from '../shared/cuentaCancelada'
 import { retirarComandasDeVentaAnulada } from '../kds/kitchenTicketAuthoring.service'
 
@@ -317,7 +318,8 @@ export async function getOrderById(venueId: string, orderId: string) {
           processedBy: { select: STAFF_PUBLIC_SELECT }, // Y quién procesó cada pago
           saleVerification: true, // 📸 PRE-payment verification photos
           receipts: {
-            // Drawer only needs metadata, not the full dataSnapshot JSON
+            // Drawer only needs metadata, not the full dataSnapshot JSON. Ordenados: receipts[0] es el canónico (plan 7a, T3b m1).
+            orderBy: ORDEN_RECIBO_CANONICO,
             select: {
               id: true,
               accessKey: true,

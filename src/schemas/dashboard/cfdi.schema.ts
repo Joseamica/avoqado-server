@@ -302,7 +302,18 @@ const diaCalendario = z
 export const listCfdisSchema = z.object({
   query: z.object({
     status: unoOVariosQuery(
-      ['DRAFT', 'VALIDATING', 'VALIDATION_FAILED', 'STAMPING', 'STAMPED', 'STAMP_FAILED', 'CANCEL_REQUESTED', 'CANCELLED'],
+      // G7 (C2-pulido, nuevo y opcional): `STAMP_IN_DOUBT` = el timbre EN DUDA; `STAMP_FAILED` ya no lo incluye (es «Con error»).
+      [
+        'DRAFT',
+        'VALIDATING',
+        'VALIDATION_FAILED',
+        'STAMPING',
+        'STAMPED',
+        'STAMP_FAILED',
+        'STAMP_IN_DOUBT',
+        'CANCEL_REQUESTED',
+        'CANCELLED',
+      ],
       'El estado del CFDI no es válido',
     ),
     flow: unoOVariosQuery(['STAFF_B', 'AUTOFACTURA_A', 'GLOBAL_C'], 'El flujo del CFDI no es válido'),

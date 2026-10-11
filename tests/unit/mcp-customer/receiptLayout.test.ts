@@ -61,13 +61,22 @@ jest.mock('@/services/dashboard/receiptLayout/readiness.service', () => ({
 }))
 
 const handlers = new Map<string, (a: Record<string, unknown>, e: unknown) => Promise<{ content: Array<{ text: string }> }>>()
+const descripciones = new Map<string, string>()
 const scope = { staffId: 's1', activeOrg: 'o1', allowedVenueIds: ['v1'], perVenueAccess: new Map() } as McpScope
 const call = (tool: string, args: Record<string, unknown>) => handlers.get(tool)!(args, {})
 const parse = (r: { content: Array<{ text: string }> }) => JSON.parse(r.content[0].text)
 const raw = () => JSON.parse(JSON.stringify(CANONICAL_LAYOUT)) as unknown[]
 
 beforeAll(() => {
-  registerReceiptLayoutTools({ tool: (...a: unknown[]) => handlers.set(a[0] as string, a[a.length - 1] as never) } as never, scope)
+  registerReceiptLayoutTools(
+    {
+      tool: (...a: unknown[]) => {
+        descripciones.set(a[0] as string, a[1] as string)
+        handlers.set(a[0] as string, a[a.length - 1] as never)
+      },
+    } as never,
+    scope,
+  )
 })
 beforeEach(() => {
   jest.clearAllMocks()
@@ -105,6 +114,13 @@ describe('receipt_layout (lectura)', () => {
 })
 
 describe('configure_receipt_layout (escritura)', () => {
+  // A7-R7: la IA no debe prometerle al negocio que puede esconder la propina o el descuento cobrados — el papel dejaría de sumar.
+  it('🔴 la descripción dice que la propina y el descuento cobrados SIEMPRE se imprimen', () => {
+    const d = descripciones.get('configure_receipt_layout') ?? ''
+    expect(d).toMatch(/tip and discount the sale charged ALWAYS print/)
+    expect(d).toMatch(/showTip.*showDiscount/)
+  })
+
   it('🔴 exige receipt-layout:manage', async () => {
     await call('configure_receipt_layout', { venueId: 'v1', blocks: raw(), expectedRevision: 0 })
     expect(permisosPedidos).toEqual(['receipt-layout:manage'])

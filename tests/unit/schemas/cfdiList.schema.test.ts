@@ -48,3 +48,11 @@ describe('listCfdisSchema — status/flow uno o varios', () => {
     if (!r.success) expect(r.error.issues[0].message).toBe('El estado del CFDI no es válido')
   })
 })
+
+// C2-pulido · G7: el filtro acepta `STAMP_IN_DOUBT` (nuevo y opcional) para pedir los timbres EN DUDA aparte de «Con error».
+describe('listCfdisSchema — C2-pulido · G7', () => {
+  it('🔴 `STAMP_IN_DOUBT` es un valor válido del filtro de estatus', () => {
+    const r = parse({ status: 'DRAFT,VALIDATING,STAMPING,STAMP_IN_DOUBT' })
+    expect(r.success && r.data.query.status).toEqual(['DRAFT', 'VALIDATING', 'STAMPING', 'STAMP_IN_DOUBT'])
+  })
+})

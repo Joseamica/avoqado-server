@@ -280,6 +280,7 @@ describe('deleteVenueData — lo que bloquea el borrado del VENUE se quita antes
     'referralRewardGrant',
     'upsellAcceptance',
     'serializedItem',
+    'cfdi', // D2 del 7a: Cfdi.venueId es RESTRICT y no cae en cascada con el venue
   ] as const
 
   it.each(BLOQUEADORES_DEL_VENUE)('borra %s ANTES que el venue', async modelo => {
@@ -291,6 +292,23 @@ describe('deleteVenueData — lo que bloquea el borrado del VENUE se quita antes
     const bloqueador = prismaMock[modelo].deleteMany
     expect(bloqueador).toHaveBeenCalled()
     expect(bloqueador.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.venue.delete.mock.invocationCallOrder[0])
+  })
+
+  // D2 del 7a: el sello y el manifiesto del IVA por producto (RESTRICT) no caen en cascada con nada, así que la guardia del
+  // DMMF de abajo no los ve. Prueba real contra base: tests/integration/cleanup/liveDemoCleanupSellosIva.integration.test.ts.
+  it.each([
+    ['orderItemSelloIva', 'orderItem'],
+    ['orderItemSelloIva', 'cfdi'],
+    ['cfdiGlobalOrden', 'order'],
+    ['cfdiGlobalOrden', 'cfdi'],
+  ] as const)('IVA: borra %s ANTES que %s', async (hijo, padre) => {
+    prismaMock.liveDemoSession.findMany.mockResolvedValue([makeSession(1)])
+    mockCascadeAlreadyDeletedSession()
+
+    await cleanupExpiredLiveDemos()
+
+    expect(prismaMock[hijo].deleteMany).toHaveBeenCalled()
+    expect(prismaMock[hijo].deleteMany.mock.invocationCallOrder[0]).toBeLessThan(prismaMock[padre].deleteMany.mock.invocationCallOrder[0])
   })
 })
 

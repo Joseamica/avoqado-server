@@ -107,7 +107,7 @@
         }
       ],
       "subtotalCents": 35000,
-      "taxCents": 4828,
+      "taxCents": 0,
       "discountCents": null,
       "tipCents": 3500,
       "totalCents": 38500,
@@ -289,7 +289,7 @@
     },
     {
       "kind": "text",
-      "text": "IVA incluido:                             $48.28",
+      "text": "IVA incluido cuando aplica",
       "align": "left",
       "bold": false,
       "double": false

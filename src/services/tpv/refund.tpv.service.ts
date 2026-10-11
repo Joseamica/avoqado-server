@@ -32,6 +32,7 @@ import logger from '../../config/logger'
 import { BadRequestError, ConflictError, InternalServerError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { generateDigitalReceipt } from './digitalReceipt.tpv.service'
+import { RECIBO_CANONICO } from '../shared/reciboCanonico'
 import { Decimal } from '@prisma/client/runtime/library'
 import { asegurarObligacionDeCostoNegativo, costearYProyectarReembolso } from '../payments/deferredTransactionCost.service'
 import { createRefundCommission } from '../dashboard/commission/commission-calculation.service'
@@ -240,7 +241,7 @@ function llaveDeIdempotencia(refundData: RefundRequestData, venueId: string): st
 async function buscarReembolsoPorLlave(venueId: string, idempotencyKey: string) {
   return prisma.payment.findUnique({
     where: { venueId_idempotencyKey: { venueId, idempotencyKey } },
-    include: { receipts: true },
+    include: { receipts: RECIBO_CANONICO },
   })
 }
 
@@ -314,7 +315,7 @@ export async function recordRefund(
     where: { id: refundData.originalPaymentId, venueId },
     include: {
       order: true,
-      receipts: true,
+      receipts: RECIBO_CANONICO,
     },
   })
 

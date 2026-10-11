@@ -1,0 +1,243 @@
+{
+  "case": "iva-agregado-con-leyenda-apagada",
+  "width": 48,
+  "blocks": [
+    {
+      "type": "businessName",
+      "align": "center",
+      "emphasis": "double"
+    },
+    {
+      "type": "orderInfo",
+      "showOrderType": true
+    },
+    {
+      "type": "separator",
+      "style": "line"
+    },
+    {
+      "type": "items",
+      "showModifiers": true,
+      "showNotes": true
+    },
+    {
+      "type": "separator",
+      "style": "line"
+    },
+    {
+      "type": "totals",
+      "showSubtotal": true,
+      "showTax": false,
+      "showDiscount": true,
+      "showTip": true
+    },
+    {
+      "type": "payment",
+      "showChange": true,
+      "showCardLastFour": true
+    }
+  ],
+  "input": {
+    "sale": {
+      "kind": "SALE",
+      "orderNumber": "2077",
+      "orderType": "Cita",
+      "occurredAt": "2026-09-02T21:40:00.000Z",
+      "timezone": "America/Mexico_City",
+      "items": [
+        {
+          "name": "Corte de cabello",
+          "quantity": 1,
+          "unitPriceCents": 35000,
+          "totalPriceCents": 35000
+        }
+      ],
+      "subtotalCents": 35000,
+      "taxCents": 5600,
+      "discountCents": null,
+      "tipCents": null,
+      "totalCents": 42100,
+      "tender": {
+        "kind": "CARD",
+        "label": "Tarjeta",
+        "cardBrand": "VISA",
+        "cardLastFour": "1234",
+        "authCode": "A1B2C3",
+        "referenceNumber": "000123",
+        "merchantAccountId": "maA"
+      },
+      "staffName": "Luis",
+      "transactionId": "pay_0002",
+      "receiptUrl": "https://r.avoqado.io/x/def",
+      "reprint": {
+        "printedAt": "2026-09-03T15:00:00.000Z"
+      },
+      "appVersion": "3.1.0",
+      "serviceChargeCents": 1500
+    },
+    "venue": {
+      "name": "Testarudo Cafe",
+      "address": "Nápoles 47",
+      "city": "Cuauhtémoc",
+      "state": "Ciudad de México",
+      "zipCode": "06600",
+      "phone": "55 1234 5678",
+      "hasLogo": true,
+      "fiscalEmisors": [
+        {
+          "id": "emA",
+          "legalName": "TESTARUDO CAFE S.A.P.I. DE C.V.",
+          "rfc": "TCA2501231A6",
+          "lugarExpedicion": "06600",
+          "merchantAccountIds": [
+            "maA"
+          ]
+        }
+      ],
+      "principalEmisorId": "emA",
+      "legacy": {
+        "legalName": null,
+        "rfc": null
+      }
+    }
+  },
+  "lines": [
+    {
+      "kind": "text",
+      "text": "Testarudo Cafe",
+      "align": "center",
+      "bold": false,
+      "double": true
+    },
+    {
+      "kind": "text",
+      "text": "Orden #:                                    2077",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "Fecha:                          02/09/2026 15:40",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "Tipo:                                       Cita",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "Reimpresión:                    03/09/2026 09:00",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "------------------------------------------------",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "Cant Artículo                             Precio",
+      "align": "left",
+      "bold": true,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "------------------------------------------------",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "1    Corte de cabello                    $350.00",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "------------------------------------------------",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "Subtotal:                                $350.00",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "Cargo por servicio:                       $15.00",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "IVA agregado:                             $56.00",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "------------------------------------------------",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "TOTAL:           $421.00",
+      "align": "left",
+      "bold": true,
+      "double": true
+    },
+    {
+      "kind": "feed",
+      "lines": 1
+    },
+    {
+      "kind": "text",
+      "text": "Pago:                                    Tarjeta",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "Tarjeta:                          VISA **** 1234",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "Autorización:                             A1B2C3",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "Referencia:                               000123",
+      "align": "left",
+      "bold": false,
+      "double": false
+    }
+  ]
+}
