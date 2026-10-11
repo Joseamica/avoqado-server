@@ -205,6 +205,21 @@ describe('D1 · guardar la elección', () => {
     await prisma.shopifyLocationLink.update({ where: { id: e.locationLinkId }, data: { applyRequestedAt: new Date() } })
     await expect(elegir(e, 'SHOPIFY', '5', 6)).rejects.toMatchObject({ statusCode: 409, code: 'SHOPIFY_NO_EN_REVISION' })
   })
+
+  it('M6 · sin tienda conectada (desconectada, o una sucursal que nunca conectó) ⇒ 409 SHOPIFY_SIN_CONEXION y nada se guarda', async () => {
+    const e = await enRevision({ stock: 5, importado: 6 })
+    const v = await vistaDe(e)
+    await prisma.shopifyLocationLink.update({ where: { id: e.locationLinkId }, data: { status: 'DISCONNECTED' } })
+    await expect(elegir(e, 'SHOPIFY', '5', 6, { vista: v })).rejects.toMatchObject({ statusCode: 409, code: 'SHOPIFY_SIN_CONEXION' })
+    await expect(
+      saveConnectChoices({ venueId: e.venueId, staffId: e.staffId, vista: v, todos: 'SHOPIFY' }, { hasAccess: conPlan }),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'SHOPIFY_SIN_CONEXION' })
+    await expect(
+      saveConnectChoices({ venueId: 'sucursal-sin-shopify', staffId: e.staffId, vista: v, todos: 'SHOPIFY' }, { hasAccess: conPlan }),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'SHOPIFY_SIN_CONEXION' })
+    expect((await prisma.shopifyVariantLink.findUniqueOrThrow({ where: { id: e.variantLinkId } })).connectChoice).toBeNull()
+    expect((logAction as jest.Mock).mock.calls.map(c => c[0]).filter(a => a.action === 'SHOPIFY_CONNECT_CHOICES_SAVED')).toEqual([])
+  })
 })
 
 describe('D1 · «Usar … en todos»', () => {
@@ -310,6 +325,26 @@ describe('D1 · «Aplicar» se niega mientras falte alguna', () => {
     expect(pagina2.items).toHaveLength(1)
     await elegir(e, 'AVOQADO', pagina2.items[0].avoqadoQty, pagina2.items[0].shopifyQty!, { variantLinkId: pagina2.items[0].variantLinkId })
     await expect(aplicar(e)).resolves.toMatchObject({ applyRequestedAt: expect.any(Date) })
+  })
+
+  it('🔴 M6 · la confirmación del MCP con una conexión que ya es otra ⇒ 409 SHOPIFY_CONEXION_CAMBIO de entrada, no «faltan decisiones»', async () => {
+    // Falta una decisión Y la conexión vista es vieja: lo que hay que decir es «pide la vista previa otra vez» (la comparación
+    // temprana va antes de contar), no «elige lo que falta» de una conexión que el dueño ni vio.
+    const e = await enRevision({ stock: 5, importado: 6 })
+    expect((await vista(e)).resumen.porDecidir).toBe(1)
+    const confirmar = (expected: { linkId: string; generation: number }) =>
+      requestApplyShopifyConnect({ venueId: e.venueId, staffId: e.staffId, expected }, { hasAccess: conPlan })
+    await expect(confirmar({ linkId: e.locationLinkId, generation: 2 })).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'SHOPIFY_CONEXION_CAMBIO',
+    })
+    await expect(confirmar({ linkId: 'otro-enlace', generation: 1 })).rejects.toMatchObject({ code: 'SHOPIFY_CONEXION_CAMBIO' })
+    expect((await sucursal(e)).applyRequestedAt).toBeNull()
+    // Con la vigente, lo que contesta es lo que de verdad falta.
+    await expect(confirmar({ linkId: e.locationLinkId, generation: 1 })).rejects.toMatchObject({
+      statusCode: 422,
+      code: 'SHOPIFY_FALTAN_DECISIONES',
+    })
   })
 
   it('sin nada que elegir, «Aplicar» se pide como siempre (regresión)', async () => {

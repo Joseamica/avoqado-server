@@ -176,7 +176,10 @@ espejo dejaría la cuenta en 11 contra las 12 piezas de Avoqado. Si hay filas vi
   enlace y la generación que se vieron, y el servicio vuelve a comparar enlace y generación DENTRO de su escritura:
   `requestApplyShopifyConnect(…)` en el `where` de su `updateMany`, `disconnectShopify(…)` con la sucursal ya bloqueada. Reconectar la MISMA
   tienda y ubicación sube la generación: un confirm viejo contesta 409 `SHOPIFY_CONEXION_CAMBIO` (el MCP pide otra vista previa) y no aplica
-  ni desconecta la conexión nueva. La ruta del dashboard no manda la generación (la página sondea el estado) y se comporta como antes.
+  ni desconecta la conexión nueva. La ruta del dashboard no manda la generación (la página sondea el estado) y se comporta como antes. D1:
+  la huella también lleva la credencial (`tokenVersion`), porque reautorizar no cambia la generación; `shopify_connect_apply` guarda las
+  elecciones (o `todos`) con la conexión vista (`vista` de `saveConnectChoices(…)`) y ata las cantidades vistas en `expectedElecciones`
+  (`catalog.ts`).
 
 ## 4 bis. Elegir por producto al conectar (D1)
 

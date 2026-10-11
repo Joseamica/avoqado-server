@@ -103,26 +103,33 @@ const eleccionSchema = z
     expectedShopifyQty: enteroSeguro('Faltan las cantidades que viste', 'La cantidad de Shopify no es válida'),
   })
   .strict(CAMPO_DE_MAS)
+/**
+ * D1: una página de elecciones (1 a 50), con sus mensajes. El cuerpo la usa con el renglón completo; el MCP, con el mismo
+ * renglón recortado al producto y la opción (las cantidades vistas las pone su vista previa), sin repetir la forma.
+ */
+export function listaDeElecciones<T extends z.ZodTypeAny>(renglon: T) {
+  return z
+    .array(renglon, { invalid_type_error: 'Las elecciones van en una lista' })
+    .min(1, 'Elige al menos un producto')
+    .max(50, 'Máximo 50 productos por vez')
+}
 
 /**
  * D1: el cuerpo de «guardar la elección», UNA sola definición (ruta del dashboard y herramienta del MCP): la conexión vista
  * más EXACTAMENTE una de dos cosas: la elección por producto (1 a 50, una página; el tope es `MAX_ELECCIONES` de
  * `shopify.connect.service`, fijado por prueba) o la misma opción «en todos» los que faltan. La forma vive aquí y no en el
- * servicio: una lista vacía sin `todos` reventaría allá como un 500.
+ * servicio: una lista vacía sin `todos` reventaría allá como un 500. El MCP declara sus campos desde `innerType().shape` y
+ * pasa por `safeParse` de este esquema antes de guardar.
  */
 export const connectChoicesBodySchema = z
   .object({
     vista: vistaSchema,
-    elecciones: z
-      .array(eleccionSchema, { invalid_type_error: 'Las elecciones van en una lista' })
-      .min(1, 'Elige al menos un producto')
-      .max(50, 'Máximo 50 productos por vez')
-      .optional(),
+    elecciones: listaDeElecciones(eleccionSchema).optional(),
     todos: z.enum(['AVOQADO', 'SHOPIFY'], { errorMap: () => ({ message: 'Elige Avoqado o Shopify para todos' }) }).optional(),
   })
   .strict(CAMPO_DE_MAS)
   .refine(b => (b.elecciones !== undefined ? 1 : 0) + (b.todos !== undefined ? 1 : 0) === 1, {
-    message: 'Manda una elección por producto o una para todos, no las dos',
+    message: 'Manda una sola de las dos: la elección por producto o una para todos (no las dos, ni ninguna)',
   })
 
 export const connectChoicesSchema = z.object({ params: venueParams, query: z.any().optional(), body: connectChoicesBodySchema })

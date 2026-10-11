@@ -488,6 +488,8 @@ export function configureToolCatalog(server: McpServer, scope: McpScope, profile
             // Conector Shopify: «resolver» confirma con las cantidades que se VIERON; si cambiaron, el servicio da 409.
             'expectedAvoqadoQty',
             'expectedShopifyQty',
+            // Conector Shopify (D1): aplicar la conexión confirma las elecciones con las cantidades que se VIERON.
+            'expectedElecciones',
           ]) {
             if (config.inputSchema?.[field] && data[field] != null) confirmationArguments[field] = data[field]
           }

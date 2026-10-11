@@ -93,6 +93,7 @@ it('ACTIVE: la forma completa, con conteos de la generación vigente, retraso y 
     // P2-4 (aditivo): la huella de las confirmaciones del MCP lleva el enlace y su generación.
     linkId: e.locationLinkId,
     generation: 1,
+    tokenVersion: 1,
     fase: 'ACTIVE',
     pausedFrom: null,
     estado: 'ACTIVA',

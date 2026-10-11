@@ -370,11 +370,12 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     expect(mcp).toContain("z.string().max(1024).optional().describe('La llena la vista previa; no la cambies')")
     // P2-4: aplicar y desconectar atan la confirmación al enlace y a su GENERACIÓN, y el servicio los revalida al escribir.
     expect(mcp.match(/expectedSourceFingerprint: huellaField\(\)/g)).toHaveLength(2)
-    expect(mcp).toContain('`${c.shopDomain}|${c.locationName}|${c.linkId}|${c.generation}`')
+    expect(mcp).toContain('`${c.shopDomain}|${c.locationName}|${c.linkId}|${c.generation}|${c.tokenVersion}`')
     expect(mcp.match(/expected: \{ linkId: connection\.linkId, generation: connection\.generation \}/g)).toHaveLength(2)
     contieneTodas([
       'atan su confirmación a la tienda, la ubicación, el enlace y la generación que se vieron',
       'contesta 409 `SHOPIFY_CONEXION_CAMBIO`',
+      'D1: la huella también lleva la credencial (`tokenVersion`)',
     ])
     const conexion = leer(`${SHOPIFY}/shopify.connect.service.ts`)
     expect(cuerpo(conexion, 'export async function requestApplyShopifyConnect(')).toContain(

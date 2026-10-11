@@ -254,7 +254,7 @@ describe('controller de Shopify: lo que llega a los servicios y lo que vuelve', 
   it.each([
     ['sin la conexión vista', { elecciones: [UNA] }, 'Falta la conexión que viste'],
     ['las dos cosas a la vez', { vista: VISTA, elecciones: [UNA], todos: 'AVOQADO' }, 'no las dos'],
-    ['ninguna', { vista: VISTA }, 'no las dos'],
+    ['ninguna', { vista: VISTA }, 'ni ninguna'],
     // Una lista vacía sin `todos` llegaba al servicio y reventaba como un 500 (`Prisma.join([])`): la guarda es la forma.
     ['sin elecciones', { vista: VISTA, elecciones: [] }, 'Elige al menos un producto'],
     ['una lista vacía aunque venga «en todos»', { vista: VISTA, elecciones: [], todos: 'AVOQADO' }, 'Elige al menos un producto'],
