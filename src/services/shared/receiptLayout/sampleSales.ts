@@ -18,12 +18,13 @@ const BASE = {
   receiptUrl: 'https://r.avoqado.io/x/ejemplo',
 } as const
 
+// IVA por producto, plan 7 (D3): son ventas con IVA INCLUIDO, así que su IVA agregado es 0 y el ticket muestra la leyenda.
 export const SAMPLE_SALES: Record<'retail' | 'restaurant' | 'appointments', ReceiptSale> = {
   retail: {
     ...BASE,
     orderType: 'En tienda',
     subtotalCents: 12000,
-    taxCents: 1655,
+    taxCents: 0,
     tipCents: null,
     totalCents: 12000,
     items: [
@@ -36,7 +37,7 @@ export const SAMPLE_SALES: Record<'retail' | 'restaurant' | 'appointments', Rece
     ...BASE,
     orderType: 'En mesa',
     subtotalCents: 6600,
-    taxCents: 910,
+    taxCents: 0,
     tipCents: 1000,
     totalCents: 7600,
     items: [
@@ -49,7 +50,7 @@ export const SAMPLE_SALES: Record<'retail' | 'restaurant' | 'appointments', Rece
     ...BASE,
     orderType: 'Cita',
     subtotalCents: 35000,
-    taxCents: 4828,
+    taxCents: 0,
     tipCents: null,
     totalCents: 35000,
     items: [{ name: 'Corte de cabello', quantity: 1, unitPriceCents: 35000, totalPriceCents: 35000 }],

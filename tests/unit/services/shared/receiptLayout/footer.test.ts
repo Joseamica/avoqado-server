@@ -6,6 +6,7 @@ import {
   renderSignature,
   renderTotals,
 } from '@/services/shared/receiptLayout/blocks/footer'
+import { TEMPLATES } from '@/services/shared/receiptLayout/templates'
 import { input } from './helpers'
 
 const W = 32
@@ -14,24 +15,67 @@ const sp = (n: number) => ' '.repeat(n)
 const totals = { type: 'totals', showSubtotal: true, showTax: true, showDiscount: true, showTip: true } as const
 
 describe('renderTotals', () => {
-  it('subtotal, descuento en negativo, IVA incluido, propina, divisor y TOTAL en grande a la MITAD del ancho', () => {
-    const r = renderTotals(totals, input({ subtotalCents: 4500, discountCents: 500, taxCents: 621, tipCents: 1000, totalCents: 5000 }), W)
+  it('IVA incluido (la norma): subtotal, descuento, la LEYENDA sin cantidad, propina, divisor y TOTAL a la mitad del ancho', () => {
+    const r = renderTotals(totals, input({ subtotalCents: 4500, discountCents: 500, taxCents: 0, tipCents: 1000, totalCents: 5000 }), W)
     expect(r).toEqual([
       line('Subtotal:' + sp(17) + '$45.00'),
       line('Descuento:' + sp(16) + '-$5.00'),
-      line('IVA incluido:' + sp(14) + '$6.21'),
+      line('IVA incluido cuando aplica'),
       line('Propina:' + sp(18) + '$10.00'),
       line('-'.repeat(32)),
       line('TOTAL:' + sp(4) + '$50.00', true, true),
     ])
   })
+  it('🔴 venta vieja con IVA APARTE y cargo por servicio: cada uno en su renglón y subtotal − descuento + cargo + IVA + propina = TOTAL', () => {
+    const r = renderTotals(
+      totals,
+      input({ subtotalCents: 4500, discountCents: 500, serviceChargeCents: 400, taxCents: 704, tipCents: 1000, totalCents: 6104 }),
+      W,
+    )
+    expect(r).toEqual([
+      line('Subtotal:' + sp(17) + '$45.00'),
+      line('Descuento:' + sp(16) + '-$5.00'),
+      line('Cargo por servicio:' + sp(8) + '$4.00'),
+      line('IVA agregado:' + sp(14) + '$7.04'),
+      line('Propina:' + sp(18) + '$10.00'),
+      line('-'.repeat(32)),
+      line('TOTAL:' + sp(4) + '$61.04', true, true),
+    ])
+  })
+  it('apagar «Mostrar el impuesto» quita la LEYENDA, pero nunca el IVA agregado ni el cargo: son parte de la suma', () => {
+    const sinImpuesto = { ...totals, showTax: false }
+    const textos = (l: ReturnType<typeof renderTotals>) => l.map(x => (x as { text?: string }).text)
+    expect(textos(renderTotals(sinImpuesto, input({ taxCents: 0 }), W))).not.toContain('IVA incluido cuando aplica')
+    const r = renderTotals(sinImpuesto, input({ subtotalCents: 4500, serviceChargeCents: 400, taxCents: 704, totalCents: 5604 }), W)
+    expect(r).toContainEqual(line('Cargo por servicio:' + sp(8) + '$4.00'))
+    expect(r).toContainEqual(line('IVA agregado:' + sp(14) + '$7.04'))
+  })
+  it('un IVA negativo (motor de descuentos viejo) nunca se imprime: sale la leyenda', () => {
+    const r = renderTotals(totals, input({ taxCents: -50 }), W)
+    expect(r).toContainEqual(line('IVA incluido cuando aplica'))
+    expect(r.some(l => (l as { text?: string }).text?.startsWith('IVA agregado'))).toBe(false)
+  })
+  it('un cargo grande cabe en las 32 columnas', () => {
+    const r = renderTotals(totals, input({ subtotalCents: 4500, serviceChargeCents: 1234567, totalCents: 1239067 }), W)
+    expect(r).toContainEqual(line('Cargo por servicio:' + sp(3) + '$12,345.67'))
+  })
   it('🔴 un total que no cabe a doble ancho cae a negritas a ancho completo (nunca se parte)', () => {
     const r = renderTotals({ ...totals, showSubtotal: false, showTax: false }, input({ totalCents: 12345678 }), W)
     expect(r[r.length - 1]).toEqual(line('TOTAL:' + sp(15) + '$123,456.78', true, false))
   })
-  it('los interruptores apagan sus renglones; el TOTAL nunca', () => {
+  it('sin propina ni descuento, los interruptores apagan sus renglones; el TOTAL nunca', () => {
     const r = renderTotals({ type: 'totals', showSubtotal: false, showTax: false, showDiscount: false, showTip: false }, input(), W)
     expect(r).toEqual([line('-'.repeat(32)), line('TOTAL:' + sp(4) + '$45.00', true, true)])
+  })
+  it('🔴 la propina cobrada sale aunque la plantilla «Citas y servicios» la oculte: el papel suma (A7-R7)', () => {
+    const deCitas = TEMPLATES.appointments.blocks.find(b => b.type === 'totals') as Parameters<typeof renderTotals>[0]
+    expect(deCitas.showTip).toBe(false)
+    const r = renderTotals(deCitas, input({ subtotalCents: 35000, tipCents: 3500, totalCents: 38500 }), W)
+    expect(r).toContainEqual(line('Propina:' + sp(18) + '$35.00'))
+  })
+  it('🔴 el descuento aplicado sale aunque el negocio apague «Mostrar descuentos»: el papel suma (A7-R7)', () => {
+    const r = renderTotals({ ...totals, showDiscount: false }, input({ subtotalCents: 10000, discountCents: 1000, totalCents: 9000 }), W)
+    expect(r).toContainEqual(line('Descuento:' + sp(15) + '-$10.00'))
   })
 })
 

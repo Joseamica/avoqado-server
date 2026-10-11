@@ -137,8 +137,8 @@ const template = (id: TemplateId, name: string, description: string, blocks: Blo
 
 export const TEMPLATES: Record<TemplateId, ReceiptTemplate> = {
   canonical: template('canonical', 'Ticket de Avoqado', 'El ticket completo, con todo encendido.', CANONICAL_LAYOUT),
-  retail: template('retail', 'Tienda', 'Sin quien atendió ni propina; con política de cambios.', RETAIL),
+  retail: template('retail', 'Tienda', 'Sin quien atendió; con política de cambios.', RETAIL),
   restaurant: template('restaurant', 'Restaurante', 'Con quien atendió y propina.', RESTAURANT),
-  appointments: template('appointments', 'Citas y servicios', 'Sin tipo de orden ni propina; notas ocultas.', APPOINTMENTS),
+  appointments: template('appointments', 'Citas y servicios', 'Sin tipo de orden; notas ocultas.', APPOINTMENTS),
   minimal: template('minimal', 'Mínimo', 'Sólo lo obligatorio; sin logo, QR ni textos.', MINIMAL),
 }

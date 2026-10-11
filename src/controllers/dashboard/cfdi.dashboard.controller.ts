@@ -597,6 +597,12 @@ export async function replaceCfdiController(req: Request, res: Response): Promis
       res.status(409).json({ error: message })
       return
     }
+    // C2-pulido · G3 (hermano): el comercio apagó la facturación (lo dice el motor al capturar) ⇒ 403 con su texto, como al facturar; no 500.
+    if (/no habilitada/i.test(message)) {
+      logger.warn(aviso)
+      res.status(403).json({ error: message })
+      return
+    }
     logger.error(aviso)
     res.status(500).json({ error: 'Error interno al sustituir el CFDI' })
   }

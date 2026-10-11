@@ -22,6 +22,14 @@ jest.mock('../../../../src/services/fiscal/cfdi.service', () => ({
   __esModule: true,
   issueCfdiForOrder: jest.fn(),
   loadOrderForCfdiFromDb: jest.fn(),
+  ventaConDevolucion: jest.fn(),
+  MOTIVO_AUTOFACTURA_CON_DEVOLUCION: 'MOTIVO-DEVOLUCION (A7-R10)',
+}))
+
+// C2-pulido · G2: la regla «ticket ya incluido en una global viva» es la MISMA función que usa la admisión del POST (`exclusionGlobal.ts`).
+jest.mock('../../../../src/services/fiscal/exclusionGlobal', () => ({
+  __esModule: true,
+  excluirSiEstaEnGlobal: jest.fn().mockResolvedValue(null),
 }))
 
 jest.mock('../../../../src/services/whatsapp.service', () => ({
@@ -48,8 +56,14 @@ jest.mock('../../../../src/config/env', () => ({
 // ── Imports (after mocks) ─────────────────────────────────────────────────────
 
 import prisma from '../../../../src/utils/prismaClient'
-import { issueCfdiForOrder, loadOrderForCfdiFromDb } from '../../../../src/services/fiscal/cfdi.service'
+import {
+  issueCfdiForOrder,
+  loadOrderForCfdiFromDb,
+  ventaConDevolucion,
+  MOTIVO_AUTOFACTURA_CON_DEVOLUCION,
+} from '../../../../src/services/fiscal/cfdi.service'
 import { motivoNoCuadra } from '../../../../src/services/fiscal/reglaDelPac'
+import { excluirSiEstaEnGlobal } from '../../../../src/services/fiscal/exclusionGlobal'
 import { logAction } from '../../../../src/services/dashboard/activity-log.service'
 import logger from '../../../../src/config/logger'
 import { sendCfdiWhatsApp } from '../../../../src/services/whatsapp.service'
@@ -877,5 +891,176 @@ describe('autofactura — ronda QA (hermanos): timbre en duda', () => {
     await autofacturaController(makeReq({ accessKey: 'key-abc' }) as any, res as any)
     expect(res.status).toHaveBeenCalledWith(502)
     expect(res.json).toHaveBeenCalledWith({ error: 'El SAT rechazó el timbrado' })
+  })
+})
+
+// T-I2 · A7-R10 (founder, 10-oct): la autofactura PÚBLICA no se ofrece en una venta con devolución completada (total o parcial). El cliente
+// ve el mensaje neutro de siempre; el motivo va al log. Lo que decide el POST es el motor (bajo el candado de la orden, `cfdi.service.test`).
+describe('T-I2 · A7-R10 — la autofactura no se ofrece en una venta con devolución', () => {
+  const mockVentaConDevolucion = ventaConDevolucion as jest.Mock
+  afterEach(() => mockVentaConDevolucion.mockReset())
+
+  it('🔴 GET · venta con devolución ⇒ no disponible con el tipo neutro FISCAL_BLOCK; el motivo va al log, no al cuerpo', async () => {
+    mockFindReceipt.mockResolvedValue(makeReceipt())
+    mockFindCfdi.mockResolvedValue(null)
+    mockLoadOrder.mockResolvedValue(makeBundle())
+    mockVentaConDevolucion.mockResolvedValue(true)
+
+    const res = makeRes()
+    await getAutofacturaStatusController(makeReq({ accessKey: 'key-abc' }) as any, res as any)
+
+    expect(res.status).toHaveBeenCalledWith(200)
+    expect(res.json).toHaveBeenCalledWith({ cfdi: null, autofacturaAvailable: false, autofacturaUnavailable: { kind: 'FISCAL_BLOCK' } })
+    expect(mockVentaConDevolucion).toHaveBeenCalledWith('order-1')
+    expect(JSON.stringify(res.json.mock.calls[0][0])).not.toMatch(/devoluci|A7-R10/i)
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringContaining('autofactura'),
+      expect.objectContaining({ orderId: 'order-1', motivos: [MOTIVO_AUTOFACTURA_CON_DEVOLUCION] }),
+    )
+  })
+
+  it('🔴 GET · ya facturada y luego devuelta ⇒ la factura se sigue enseñando (camino C2), pero ya no se ofrece facturar', async () => {
+    mockFindReceipt.mockResolvedValue(makeReceipt())
+    mockFindCfdi.mockResolvedValue({ uuid: 'U1', status: 'STAMPED', serie: 'F', folio: '9', pdfUrl: 'p', xmlUrl: 'x', cancelStatus: null })
+    mockLoadOrder.mockResolvedValue(makeBundle())
+    mockVentaConDevolucion.mockResolvedValue(true)
+
+    const res = makeRes()
+    await getAutofacturaStatusController(makeReq({ accessKey: 'key-abc' }) as any, res as any)
+
+    expect(res.json).toHaveBeenCalledWith({
+      cfdi: { uuid: 'U1', status: 'STAMPED', serie: 'F', folio: '9', pdfUrl: 'p', xmlUrl: 'x' },
+      autofacturaAvailable: false,
+      autofacturaUnavailable: { kind: 'FISCAL_BLOCK' },
+    })
+  })
+
+  it('control — GET · sin devolución ⇒ disponible como hoy', async () => {
+    mockFindReceipt.mockResolvedValue(makeReceipt())
+    mockFindCfdi.mockResolvedValue(null)
+    mockLoadOrder.mockResolvedValue(makeBundle())
+    mockVentaConDevolucion.mockResolvedValue(false)
+
+    const res = makeRes()
+    await getAutofacturaStatusController(makeReq({ accessKey: 'key-abc' }) as any, res as any)
+
+    expect(res.json).toHaveBeenCalledWith({ cfdi: null, autofacturaAvailable: true })
+  })
+
+  it('control — GET · comercio con la autofactura apagada ⇒ DISABLED aunque haya devolución (el recibo no la ofrece)', async () => {
+    mockFindReceipt.mockResolvedValue(makeReceipt())
+    mockFindCfdi.mockResolvedValue(null)
+    mockLoadOrder.mockResolvedValue(makeBundle({ autofacturaEnabled: false }))
+    mockVentaConDevolucion.mockResolvedValue(true)
+
+    const res = makeRes()
+    await getAutofacturaStatusController(makeReq({ accessKey: 'key-abc' }) as any, res as any)
+
+    expect(res.json).toHaveBeenCalledWith({ cfdi: null, autofacturaAvailable: false, autofacturaUnavailable: { kind: 'DISABLED' } })
+  })
+
+  it('control — POST · el motor rechaza por la devolución ⇒ 409 con el cuerpo neutro de C2, sin el motivo, sin CFDI_ISSUED', async () => {
+    mockFindReceipt.mockResolvedValue(makeReceipt())
+    mockIssueCfdi.mockRejectedValue(new ConflictError(MOTIVO_AUTOFACTURA_CON_DEVOLUCION))
+
+    const res = makeRes()
+    await autofacturaController(makeReq({ accessKey: 'key-abc' }) as any, res as any)
+
+    expect(res.status).toHaveBeenCalledWith(409)
+    expect(res.json).toHaveBeenCalledWith({ error: 'Esta cuenta no se puede facturar en línea. Pide tu factura directamente al negocio.' })
+    expect(mockLogAction).not.toHaveBeenCalled()
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringContaining('autofactura'),
+      expect.objectContaining({ motivo: MOTIVO_AUTOFACTURA_CON_DEVOLUCION }),
+    )
+  })
+})
+
+// C2-pulido (guía de Facturación, 10-oct) — el GET público decide lo mismo que el POST:
+//  · G1: con la factura de la venta EN DUDA (`timbreEnDuda`, la regla única de C2) no se vuelve a ofrecer el formulario: «no disponible» con
+//    `kind: 'TIMBRE_EN_DUDA'` (nuevo y opcional; el mismo código que ya trae el 409 del POST) para que el recibo diga «se está procesando».
+//  · m-2 (revisión de T-I2): lo en duda MANDA sobre la devolución, la global y el sobre fiscal (se está procesando, no «pídela al negocio»).
+//  · G2: el ticket ya incluido en una factura global viva ⇒ `FISCAL_BLOCK` neutro, con la MISMA función que la admisión del POST.
+describe('C2-pulido · G1 / G2 / m-2 — el GET dice lo mismo que el POST', () => {
+  const mockVentaConDevolucion = ventaConDevolucion as jest.Mock
+  const mockEnGlobal = excluirSiEstaEnGlobal as jest.Mock
+  const MOTIVO_GLOBAL = 'Esta venta ya está incluida en la factura global G-12; para facturarla aparte primero hay que cancelar esa global.'
+  const enDuda = {
+    uuid: null,
+    status: 'STAMP_FAILED',
+    serie: 'A',
+    folio: '40',
+    pdfUrl: null,
+    xmlUrl: null,
+    cancelStatus: null,
+    replacesCfdiId: null,
+    protocoloIva: 1,
+    enviadoAt: new Date('2026-10-10T12:00:00Z'),
+    falloDefinitivo: false,
+  }
+  const publico = { uuid: null, status: 'STAMP_FAILED', serie: 'A', folio: '40', pdfUrl: null, xmlUrl: null }
+  const pedir = async () => {
+    const res = makeRes()
+    await getAutofacturaStatusController(makeReq({ accessKey: 'key-abc' }) as any, res as any)
+    expect(res.status).toHaveBeenCalledWith(200)
+    return res.json.mock.calls[0][0]
+  }
+  beforeEach(() => {
+    mockFindReceipt.mockResolvedValue(makeReceipt())
+    mockLoadOrder.mockResolvedValue(makeBundle())
+    mockVentaConDevolucion.mockResolvedValue(false)
+    mockEnGlobal.mockResolvedValue(null)
+  })
+  afterEach(() => {
+    mockVentaConDevolucion.mockReset()
+    mockEnGlobal.mockReset().mockResolvedValue(null)
+  })
+
+  it('🔴 G1: la factura de la venta EN DUDA ⇒ no disponible con `TIMBRE_EN_DUDA` (no se vuelve a ofrecer el formulario); las columnas internas no viajan', async () => {
+    mockFindCfdi.mockResolvedValue(enDuda)
+    expect(await pedir()).toEqual({ cfdi: publico, autofacturaAvailable: false, autofacturaUnavailable: { kind: 'TIMBRE_EN_DUDA' } })
+  })
+
+  it('🔴 m-2: en duda y con una devolución que entró después ⇒ sigue «se está procesando» (no FISCAL_BLOCK)', async () => {
+    mockFindCfdi.mockResolvedValue(enDuda)
+    mockVentaConDevolucion.mockResolvedValue(true)
+    expect(await pedir()).toMatchObject({ autofacturaAvailable: false, autofacturaUnavailable: { kind: 'TIMBRE_EN_DUDA' } })
+  })
+
+  it('🔴 m-2: en duda manda también sobre la global, el sobre fiscal y el comercio con la autofactura apagada', async () => {
+    mockFindCfdi.mockResolvedValue(enDuda)
+    mockEnGlobal.mockResolvedValue(MOTIVO_GLOBAL)
+    mockLoadOrder.mockResolvedValue({ ...makeBundle({ autofacturaEnabled: false }), unsupportedReasons: ['motivo fiscal'] })
+    expect(await pedir()).toMatchObject({ autofacturaAvailable: false, autofacturaUnavailable: { kind: 'TIMBRE_EN_DUDA' } })
+  })
+
+  it('🔴 un rechazo DEFINITIVO no es «en duda»: disponible (el cliente corrige sus datos y reintenta) y las columnas internas no viajan', async () => {
+    mockFindCfdi.mockResolvedValue({ ...enDuda, falloDefinitivo: true })
+    expect(await pedir()).toEqual({ cfdi: publico, autofacturaAvailable: true })
+  })
+
+  it('🔴 G2: ticket ya incluido en una global viva ⇒ FISCAL_BLOCK neutro (sin el folio ni el motivo, que van al log), con la función del POST', async () => {
+    mockFindCfdi.mockResolvedValue(null)
+    mockEnGlobal.mockResolvedValue(MOTIVO_GLOBAL)
+    const body = await pedir()
+    expect(body).toEqual({ cfdi: null, autofacturaAvailable: false, autofacturaUnavailable: { kind: 'FISCAL_BLOCK' } })
+    expect(mockEnGlobal).toHaveBeenCalledWith(expect.anything(), 'order-1')
+    expect(JSON.stringify(body)).not.toMatch(/global|G-12/i)
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringContaining('autofactura'),
+      expect.objectContaining({ orderId: 'order-1', motivos: [MOTIVO_GLOBAL] }),
+    )
+  })
+
+  it('control — G2 con el comercio que tiene la autofactura apagada ⇒ DISABLED, como siempre (el recibo no la ofrece)', async () => {
+    mockFindCfdi.mockResolvedValue(null)
+    mockEnGlobal.mockResolvedValue(MOTIVO_GLOBAL)
+    mockLoadOrder.mockResolvedValue(makeBundle({ autofacturaEnabled: false }))
+    expect(await pedir()).toEqual({ cfdi: null, autofacturaAvailable: false, autofacturaUnavailable: { kind: 'DISABLED' } })
+  })
+
+  it('control — sin global, sin devolución y sin duda ⇒ disponible como hoy', async () => {
+    mockFindCfdi.mockResolvedValue(null)
+    expect(await pedir()).toEqual({ cfdi: null, autofacturaAvailable: true })
   })
 })

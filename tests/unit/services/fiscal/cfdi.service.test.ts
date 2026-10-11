@@ -1,7 +1,13 @@
 import { withIssueTransaction } from '../../../__helpers__/issue-cfdi-transaction'
 // tests/unit/services/fiscal/cfdi.service.test.ts
 import { Prisma } from '@prisma/client'
-import { issueCfdiForOrder, IssueCfdiDeps, getCfdiStatus } from '../../../../src/services/fiscal/cfdi.service'
+import {
+  issueCfdiForOrder,
+  IssueCfdiDeps,
+  getCfdiStatus,
+  MOTIVO_AUTOFACTURA_CON_DEVOLUCION,
+} from '../../../../src/services/fiscal/cfdi.service'
+import { ConflictError } from '../../../../src/errors/AppError'
 import prisma from '../../../../src/utils/prismaClient'
 
 /** Helper: build a realistic P2002 unique-violation error as Prisma would throw. */
@@ -686,5 +692,78 @@ describe('C2 · T5 ronda 1 (M1) · getCfdiStatus no devuelve `xmlConceptos`', ()
     expect(q.omit).toEqual({ xmlConceptos: true })
     expect(q.select).toBeUndefined()
     expect(q.include.replacedBy).toEqual(expect.objectContaining({ take: 5 }))
+  })
+})
+
+// T-I2 · A7-R10 (founder, 10-oct): una venta con CUALQUIER devolución completada (total o parcial) no se autofactura. La comprobación que
+// decide va DENTRO de la transacción de admisión, después del `FOR UPDATE` de la orden (el mismo candado que toman las devoluciones).
+describe('T-I2 · A7-R10 — la autofactura no se ofrece en una venta con devolución', () => {
+  /** Tabla `Payment` de mentira que SÍ aplica el `where` (igualdad): mide QUÉ cuenta como devolución, no la forma de la consulta. */
+  const tablaPagos = (filas: Record<string, any>[]) =>
+    jest.fn(async ({ where = {} }: any) => filas.find(f => Object.entries(where).every(([k, v]) => f[k] === v)) ?? null)
+  /** Mete la tabla en la transacción del motor y guarda esa transacción para mirar el orden candado → consulta. */
+  function conPagos(deps: IssueCfdiDeps, findFirst: jest.Mock) {
+    const vistas: any[] = []
+    const base = deps.runInTransaction!
+    deps.runInTransaction = work =>
+      base(tx => {
+        vistas.push(tx)
+        return work(Object.assign(tx, { payment: { findFirst } }))
+      })
+    return { deps, vistas }
+  }
+  const venta = { orderId: 'o1', type: 'REGULAR', status: 'COMPLETED', amount: 116 }
+  const devolucionTotal = { orderId: 'o1', type: 'REFUND', status: 'COMPLETED', amount: -116 }
+  const devolucionParcial = { orderId: 'o1', type: 'REFUND', status: 'COMPLETED', amount: -40 }
+  const autofactura = { orderId: 'o1', receptor, sandbox: true, flow: 'AUTOFACTURA_A' as const, expectedVenueId: 'v1' }
+
+  it.each([
+    ['total', devolucionTotal],
+    ['parcial', devolucionParcial],
+  ])(
+    '🔴 (1/2) devolución %s ⇒ ConflictError con el motivo (el controlador lo vuelve 409 neutro), sin reservar ni tocar el PAC',
+    async (_n, dev) => {
+      const { deps } = conPagos(makeDeps(), tablaPagos([venta, dev]))
+      const err = await issueCfdiForOrder(autofactura, deps).catch(e => e)
+      expect(err).toBeInstanceOf(ConflictError)
+      expect(err.message).toBe(MOTIVO_AUTOFACTURA_CON_DEVOLUCION)
+      expect(deps.reserveCfdi).not.toHaveBeenCalled()
+      expect(deps.resolveProvider).not.toHaveBeenCalled()
+    },
+  )
+
+  it('🔴 (5) la consulta que decide va en la MISMA transacción y DESPUÉS del `FOR UPDATE` de la orden', async () => {
+    const findFirst = tablaPagos([venta, devolucionTotal])
+    const { deps, vistas } = conPagos(makeDeps(), findFirst)
+    await issueCfdiForOrder(autofactura, deps).catch(() => undefined)
+    expect(findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: { orderId: 'o1', type: 'REFUND', status: 'COMPLETED' } }))
+    const candado = vistas[0].$queryRaw.mock
+    const iCandado = candado.calls.findIndex((c: any[]) => /FOR UPDATE/.test(Array.from(c[0] as string[]).join('?')))
+    expect(iCandado).toBeGreaterThanOrEqual(0)
+    expect(findFirst.mock.invocationCallOrder[0]).toBeGreaterThan(candado.invocationCallOrder[iCandado])
+  })
+
+  it('🔴 (4) una devolución PENDING o FAILED no bloquea: sólo la COMPLETED', async () => {
+    const pendiente = { ...devolucionTotal, status: 'PENDING' }
+    const fallida = { ...devolucionTotal, status: 'FAILED' }
+    const findFirst = tablaPagos([venta, pendiente, fallida])
+    const { deps } = conPagos(makeDeps(), findFirst)
+    const res = await issueCfdiForOrder(autofactura, deps)
+    // La regla SÍ miró los pagos de la venta (y no encontró una devolución completada): no es que no se haya preguntado.
+    expect(findFirst).toHaveBeenCalled()
+    expect(res.status).toBe('STAMPED')
+  })
+
+  it('control — (3) venta sin devolución ⇒ se timbra como hoy', async () => {
+    const { deps } = conPagos(makeDeps(), tablaPagos([venta]))
+    const res = await issueCfdiForOrder(autofactura, deps)
+    expect(res.status).toBe('STAMPED')
+    expect(deps.resolveProvider).toHaveBeenCalled()
+  })
+
+  it('control — la factura del PERSONAL (STAFF_B) de una venta con devolución no cambia: se timbra', async () => {
+    const { deps } = conPagos(makeDeps(), tablaPagos([venta, devolucionTotal]))
+    const res = await issueCfdiForOrder({ ...autofactura, flow: 'STAFF_B' }, deps)
+    expect(res.status).toBe('STAMPED')
   })
 })

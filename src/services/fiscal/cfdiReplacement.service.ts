@@ -130,9 +130,9 @@ export async function replaceCfdi(
   }
   // 🔴 Una nota de crédito (EGRESO) también tiene `orderId` y puede estar STAMPED. Sustituirla por
   // este camino reconstruiría la factura de VENTA: un documento de otro tipo que no corresponde al
-  // que se relaciona (Codex P2-7).
+  // que se relaciona (Codex P2-7). C2-pulido · G3: rechazo de DOMINIO ⇒ ConflictError (409 con su texto); un Error plano era un 500.
   if (original.type && original.type !== 'INGRESO') {
-    throw new Error('Esta es una nota de crédito (egreso), no una factura de venta; no se sustituye por este camino.')
+    throw new ConflictError('Esta es una nota de crédito (egreso), no una factura de venta; no se sustituye por este camino.')
   }
   if (!original.uuid || !original.facturapiId) {
     throw new Error('La factura original no tiene folio fiscal; no se puede relacionar una sustituta.')
@@ -311,7 +311,8 @@ export async function replaceCfdi(
       return cancelarOriginal(params, original, recuperada.cfdi, deps, 'REPLACED')
     }
     if (previo?.status === 'canceled') {
-      throw new Error(
+      // C2-pulido · G3 (hermano): rechazo de dominio, no un 500.
+      throw new ConflictError(
         `La sustituta anterior (${previo.uuid ?? previo.providerInvoiceId}) quedó cancelada en el PAC; revísala antes de volver a sustituir.`,
       )
     }

@@ -17,6 +17,9 @@
  * `/cfdi*` están VIVAS y son las que alimentan la página nueva del dashboard.
  */
 
+import { ticketTotalsDelSnapshot, ticketTotalsSinDesglose, type TicketTotals } from '../services/shared/ticketTotals'
+import logger from '../config/logger'
+
 interface ReceiptData {
   payment: {
     id: string
@@ -78,10 +81,13 @@ interface ReceiptData {
     firstName: string
     lastName: string
   }
+  /** IVA por producto, plan 7 (D3): los totales congelados del recibo. Ausente/null en recibos viejos. */
+  ticketTotals?: TicketTotals | null
   receiptInfo: {
     accessKey: string
     generatedAt: string
     currency: string
+    /** @deprecated IVA por producto, plan 7 (D3): nadie lo lee; el ticket no calcula IVA. Se sigue escribiendo para no cambiar la forma del JSON. */
     taxRate: number
   }
 }
@@ -157,6 +163,13 @@ export function generateReceiptHTML(data: ReceiptData): string {
   const currency = data.receiptInfo.currency || 'MXN'
   const datetime = formatDate(data.payment.createdAt)
   const receiptNumber = data.receiptInfo.accessKey?.slice(-4).toUpperCase() || 'N/A'
+  // IVA por producto, plan 7 (D3; r1 #2 y #4): la misma regla que el visor, el correo y la reimpresión. Un recibo viejo cae al
+  // total del cobro sin desglose; una devolución va en positivo y como «Total reembolsado».
+  const congelados = ticketTotalsDelSnapshot(data)
+  // Inalcanzable hoy (0 de 18,815 recibos sin el cobro en su snapshot), pero si pasa, que se vea (revisión T3 m2).
+  if (!congelados) logger.warn('Recibo HTML sin el cobro en su snapshot: los totales salen en $0', { paymentId: data.payment?.id })
+  const totales = congelados ?? ticketTotalsSinDesglose({ amount: 0, tipAmount: 0 })
+  const esDevolucion = totales.kind === 'DEVOLUCION'
 
   return `
 <!DOCTYPE html>
@@ -851,25 +864,55 @@ export function generateReceiptHTML(data: ReceiptData): string {
                 <div class="totals-section">
                     <div class="total-row">
                         <span class="label">Subtotal</span>
-                        <span class="value">${formatCurrency(data.order.subtotal, currency)}</span>
-                    </div>
-                    <div class="total-row">
-                        <span class="label">Impuestos</span>
-                        <span class="value">${formatCurrency(data.order.taxAmount, currency)}</span>
+                        <span class="value">${formatCurrency(totales.subtotal, currency)}</span>
                     </div>
                     ${
-                      data.payment.tipAmount > 0
+                      totales.discount !== undefined && totales.discount > 0
+                        ? `
+                    <div class="total-row">
+                        <span class="label">Descuento</span>
+                        <span class="value">${formatCurrency(-totales.discount, currency)}</span>
+                    </div>
+                    `
+                        : ''
+                    }
+                    ${
+                      totales.serviceCharge > 0
+                        ? `
+                    <div class="total-row">
+                        <span class="label">Cargo por servicio</span>
+                        <span class="value">${formatCurrency(totales.serviceCharge, currency)}</span>
+                    </div>
+                    `
+                        : ''
+                    }
+                    ${
+                      totales.addedTax > 0
+                        ? `
+                    <div class="total-row">
+                        <span class="label">IVA agregado</span>
+                        <span class="value">${formatCurrency(totales.addedTax, currency)}</span>
+                    </div>
+                    `
+                        : `
+                    <div class="total-row">
+                        <span class="label">IVA incluido cuando aplica</span>
+                    </div>
+                    `
+                    }
+                    ${
+                      totales.tip > 0
                         ? `
                     <div class="total-row tip">
                         <span class="label">Propina</span>
-                        <span class="value">${formatCurrency(data.payment.tipAmount, currency)}</span>
+                        <span class="value">${formatCurrency(totales.tip, currency)}</span>
                     </div>
                     `
                         : ''
                     }
                     <div class="total-row final">
-                        <span class="label">Total pagado</span>
-                        <span class="value">${formatCurrency(data.payment.amount + data.payment.tipAmount, currency)}</span>
+                        <span class="label">${esDevolucion ? 'Total reembolsado' : 'Total pagado'}</span>
+                        <span class="value">${formatCurrency(totales.total, currency)}</span>
                     </div>
                 </div>
 

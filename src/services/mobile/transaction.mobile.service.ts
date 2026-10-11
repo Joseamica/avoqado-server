@@ -12,6 +12,7 @@ import prisma from '../../utils/prismaClient'
 import { listRefundsForPayment } from '../dashboard/refund.dashboard.service'
 import { chargedTotalDe, leerCobradoDeLaOrden } from '../fiscal/cobradoDeLaOrden'
 import { centavosDevueltosPorComponente, centavosYaDevueltos } from '../shared/devueltoDeUnCobro'
+import { totalesDelComprobante } from '../shared/ticketTotals'
 import { seDevuelveEnTerminal, sePuedeEscogerComoDevolver } from '../tpv/terminalRefundTarget'
 
 export interface MobileTransactionFilters {
@@ -211,6 +212,9 @@ export async function getTransactionDetail(venueId: string, paymentId: string) {
   const refunds = payment.status !== 'PENDING' && payment.status !== 'REFUNDED' ? await listRefundsForPayment(venueId, payment.id) : []
   // C2 A-R4: lo que cobró cada artículo, con el MISMO cargador que usa el escritor de devoluciones (la pantalla y el servidor no difieren).
   const cobrado = payment.orderId ? await leerCobradoDeLaOrden(prisma, payment.orderId) : null
+  // IVA por producto, plan 7a: el MISMO comprobante que vio el cliente (r2 R2-9). Sólo aquí, con el cobro ya comprobado dentro del
+  // negocio de la ruta (sin IDOR): del recibo digital si existe; si no, de la orden y el pago.
+  const totalesDelTicket = await totalesDelComprobante(prisma, paymentId)
 
   // Los topes cuentan EXACTAMENTE como `issueRefund` (Codex, 29-sep): sólo los reembolsos COMPLETED movieron dinero, y lo ya
   // devuelto es el MÁXIMO entre esas filas y el acumulado histórico `processorData.refundedAmountCents`. Todo en centavos
@@ -276,6 +280,10 @@ export async function getTransactionDetail(venueId: string, paymentId: string) {
     // Aditivo (30-sep-2026): ¿el cajero puede escoger con qué devolver? Misma regla que valida el reembolso.
     canChooseRefundMethod: sePuedeEscogerComoDevolver(payment),
     tenderLabel: payment.tenderLabel ?? null,
+    // Aditivo (IVA por producto, plan 7a, D3; r1 #1, #2, #9; r2 R2-6, R2-9; r3 R3-11): el comprobante COMPLETO —subtotal, cargo,
+    // IVA agregado, propina, total y si es devolución—, el mismo que el recibo digital. La reimpresión lo usa tal cual y no vuelve
+    // a leer `amount`/`tipAmount` (que siguen aquí arriba, vivos, como siempre).
+    ticketTotals: totalesDelTicket,
     refunds: refunds.map(refund => {
       const processorData = (refund.processorData as Record<string, unknown>) || {}
       return {

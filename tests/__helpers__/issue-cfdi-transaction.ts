@@ -8,6 +8,8 @@ export function withIssueTransaction<T extends IssueCfdiDeps>(deps: T): T {
     $executeRaw: jest.fn().mockResolvedValue(1),
     // La versión en conflicto deja rastro (`CFDI_TIMBRE_DUPLICADO`) en la misma frontera transaccional.
     activityLog: { create: jest.fn().mockResolvedValue({}) },
+    // T-I2 (A7-R10): la autofactura pregunta en la admisión si la venta tiene una devolución completada; por default, no.
+    payment: { findFirst: jest.fn().mockResolvedValue(null) },
     cfdi: {
       findUnique: jest.fn(({ where }) => deps.findExistingCfdi(where.idempotencyKey)),
       findFirst: jest.fn().mockResolvedValue(null),

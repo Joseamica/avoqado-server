@@ -8,8 +8,9 @@
  * NEGOCIO nunca son 500 — van dentro del ack.
  */
 
-import { Request, Response } from 'express'
+import { Request, Response, NextFunction } from 'express'
 import * as syncService from '../../services/mobile/sync.mobile.service'
+import { lookupSyncRecovery } from '../../services/mobile/sync-recovery.mobile.service'
 import logger from '../../config/logger'
 import { getUserAccess, hasPermission } from '../../services/access/access.service'
 
@@ -60,5 +61,14 @@ export async function syncIntents(req: Request, res: Response): Promise<void> {
   } catch (error: any) {
     logger.error(`[SYNC MOBILE CONTROLLER] Error procesando intents: ${error.message}`)
     res.status(500).json({ success: false, message: 'Error interno al sincronizar' })
+  }
+}
+
+export async function syncRecovery(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const data = await lookupSyncRecovery(req.params.venueId, req.body)
+    res.status(200).json({ success: true, data })
+  } catch (error) {
+    next(error)
   }
 }

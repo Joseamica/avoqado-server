@@ -497,3 +497,94 @@ describe('C2 · ronda QA (D6) — `timbreEnDuda` en la lista', () => {
     }
   })
 })
+
+// C2-pulido · G7 (guía de Facturación, 10-oct): el filtro «Con error» (`VALIDATION_FAILED,STAMP_FAILED`) incluía los timbres EN DUDA, que la
+// fila pinta «En espera del PAC». La separación va DENTRO del `where` (con la regla única `DONDE_TIMBRE_EN_DUDA`): `STAMP_FAILED` = la
+// rechazada; `STAMP_IN_DOUBT` (nuevo y opcional) = la en duda. La tabla de mentira APLICA el `where`, así que la prueba mide qué filas y qué
+// total salen, no la forma de la consulta. (La semántica de NULL de Postgres la mide la integración `c2PulidoServidor.test.ts`.)
+describe('C2-pulido · G7 — «Con error» no incluye los timbres en duda', () => {
+  const enviada = new Date('2026-10-09T18:00:00.000Z')
+  const fila = (id: string, extra: Record<string, unknown>) => ({
+    ...SAMPLE_CFDI,
+    id,
+    venueId: VENUE_ID,
+    stampedAt: null,
+    updatedAt: enviada,
+    protocoloIva: 1,
+    enviadoAt: null,
+    falloDefinitivo: false,
+    ...extra,
+  })
+  const filas = [
+    fila('rechazada', { status: 'STAMP_FAILED', enviadoAt: enviada, falloDefinitivo: true }),
+    fila('sin-enviar', { status: 'STAMP_FAILED' }),
+    fila('en-duda', { status: 'STAMP_FAILED', enviadoAt: enviada }),
+    fila('validacion', { status: 'VALIDATION_FAILED' }),
+    fila('timbrando', { status: 'STAMPING' }),
+    fila('timbrada', { status: 'STAMPED', stampedAt: enviada }),
+  ]
+  /** Evalúa un `where` de Prisma (igualdad, `in`, `not`, `gte`/`lte`, AND/OR/NOT) sobre una fila. */
+  const cumple = (f: any, w: any): boolean =>
+    Object.entries(w ?? {}).every(([k, v]: [string, any]) => {
+      if (k === 'AND') return (Array.isArray(v) ? v : [v]).every(x => cumple(f, x))
+      if (k === 'OR') return v.some((x: any) => cumple(f, x))
+      if (k === 'NOT') return !(Array.isArray(v) ? v : [v]).some(x => cumple(f, x))
+      if (v && typeof v === 'object' && !(v instanceof Date)) {
+        if ('in' in v) return v.in.includes(f[k])
+        if ('not' in v) return v.not === null ? f[k] != null : f[k] !== v.not
+        if ('gte' in v || 'lte' in v) return f[k] != null && (!v.gte || f[k] >= v.gte) && (!v.lte || f[k] <= v.lte)
+      }
+      return f[k] === v
+    })
+  beforeEach(() => {
+    findMany.mockImplementation(async ({ where, skip, take }: any) => filas.filter(f => cumple(f, where)).slice(skip, skip + take))
+    count.mockImplementation(async ({ where }: any) => filas.filter(f => cumple(f, where)).length)
+  })
+  const ids = async (status: any, extra: Record<string, unknown> = {}) => {
+    const r = await listCfdisForVenue({ venueId: VENUE_ID, status, page: 1, pageSize: 20, ...extra })
+    return { ids: (r.cfdis as any[]).map(c => c.id).sort(), total: r.total }
+  }
+
+  it('🔴 «Con error» (VALIDATION_FAILED + STAMP_FAILED) ⇒ las rechazadas y la de validación, SIN la en duda; el total dice lo mismo', async () => {
+    expect(await ids(['VALIDATION_FAILED', 'STAMP_FAILED'])).toEqual({ ids: ['rechazada', 'sin-enviar', 'validacion'], total: 3 })
+  })
+
+  it('🔴 `STAMP_FAILED` solo ⇒ sólo las rechazadas (también la que nunca se envió); la en duda no', async () => {
+    expect(await ids('STAMP_FAILED')).toEqual({ ids: ['rechazada', 'sin-enviar'], total: 2 })
+  })
+
+  it('🔴 «En proceso» con el valor nuevo (DRAFT, VALIDATING, STAMPING, STAMP_IN_DOUBT) ⇒ la que timbra y la en duda', async () => {
+    expect(await ids(['DRAFT', 'VALIDATING', 'STAMPING', 'STAMP_IN_DOUBT'])).toEqual({ ids: ['en-duda', 'timbrando'], total: 2 })
+  })
+
+  it('🔴 `STAMP_IN_DOUBT` solo ⇒ sólo la en duda', async () => {
+    expect(await ids(['STAMP_IN_DOUBT'])).toEqual({ ids: ['en-duda'], total: 1 })
+  })
+
+  it('control — los dos (STAMP_FAILED + STAMP_IN_DOUBT) ⇒ todas las STAMP_FAILED, como antes', async () => {
+    expect(await ids(['STAMP_FAILED', 'STAMP_IN_DOUBT'])).toEqual({ ids: ['en-duda', 'rechazada', 'sin-enviar'], total: 3 })
+  })
+
+  it('🔴 con rango de fechas: la separación no pisa el `OR` de la fecha, y la paginación cuenta lo mismo que filtra', async () => {
+    const r = await listCfdisForVenue({
+      venueId: VENUE_ID,
+      status: ['VALIDATION_FAILED', 'STAMP_FAILED'],
+      from: '2026-10-09',
+      to: '2026-10-09',
+      page: 2,
+      pageSize: 2,
+      venueTimezone: TIMEZONE,
+    })
+    const where = findMany.mock.calls[0][0].where
+    expect(where.OR).toEqual([{ stampedAt: expect.any(Object) }, { stampedAt: null, updatedAt: expect.any(Object) }])
+    expect(count.mock.calls[0][0].where).toBe(where)
+    expect(r.total).toBe(3)
+    expect((r.cfdis as any[]).map(c => c.id)).toHaveLength(1)
+  })
+
+  it('control — sin filtro de estatus salen todas; un estatus que no es de error sigue siendo el filtro exacto de siempre', async () => {
+    expect((await ids(undefined)).total).toBe(6)
+    await listCfdisForVenue({ venueId: VENUE_ID, status: ['STAMPED'], page: 1, pageSize: 20 })
+    expect(findMany.mock.calls.at(-1)[0].where.status).toBe('STAMPED')
+  })
+})

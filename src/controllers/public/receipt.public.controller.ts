@@ -100,6 +100,7 @@ export async function getPublicReceipt(req: Request<{ accessKey: string }>, res:
       },
       items: dataSnapshot.order?.items || [],
       processedBy: dataSnapshot.processedBy,
+      ticketTotals: dataSnapshot.ticketTotals ?? null, // IVA por producto, plan 7 (D3): el HTML legado pinta los totales congelados
       receiptInfo: {
         generatedAt: new Date().toISOString(),
         currency: dataSnapshot.venue?.currency || 'MXN',

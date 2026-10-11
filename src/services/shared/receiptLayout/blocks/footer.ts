@@ -11,16 +11,26 @@ type Of<T extends Block['type']> = Extract<Block, { type: T }>
 /** ~88 puntos de 576 (80 mm): firma, no protagonista (mismo tamaño que hoy en Android). */
 const AVOQADO_MARK_WIDTH_PCT = 15
 
-/** Totales: 🔒 legal (el TOTAL). Etiqueta «IVA incluido:» porque el precio ya trae el impuesto (spec § 9). */
+/**
+ * Totales: 🔒 legal (el TOTAL). D3 del plan 7 de IVA: el ticket NO calcula IVA. Con IVA incluido (la norma, LFPC 7 Bis)
+ * imprime «IVA incluido cuando aplica»; sólo una venta vieja que cobró el IVA aparte imprime «IVA agregado: $X».
+ * Regla de cuadre: subtotal − descuento + cargo por servicio + IVA agregado + propina = TOTAL. Por eso el descuento, el
+ * cargo, el IVA agregado y la propina salen SIEMPRE que sean ≠ 0 (son parte de la suma; A7-R7: ni Square ni Toast dejan
+ * ocultar la propina cobrada). `showDiscount`/`showTip` sólo evitarían un renglón en $0, que de todos modos no sale;
+ * `showTax` sólo apaga la leyenda. `showSubtotal: false` (plantilla «Mínimo») no imprime el subtotal: quedan el TOTAL y, si
+ * los hubo, el descuento, el cargo, el IVA agregado y la propina.
+ */
 export function renderTotals(block: Of<'totals'>, input: ReceiptInput, width: PaperWidth): LogicalLine[] {
   const { sale } = input
   const money = (label: string, cents: number, opts: { bold?: boolean } = {}) =>
     twoColumnLines(label, formatMoney(cents), width).map(l => textLine(l, 'left', opts))
   const lines: LogicalLine[] = []
   if (block.showSubtotal) lines.push(...money(LABELS.subtotal, sale.subtotalCents))
-  if (block.showDiscount && sale.discountCents) lines.push(...money(LABELS.descuento, -Math.abs(sale.discountCents)))
-  if (block.showTax) lines.push(...money(LABELS.ivaIncluido, sale.taxCents))
-  if (block.showTip && sale.tipCents) lines.push(...money(LABELS.propina, sale.tipCents))
+  if (sale.discountCents) lines.push(...money(LABELS.descuento, -Math.abs(sale.discountCents)))
+  if (sale.serviceChargeCents && sale.serviceChargeCents > 0) lines.push(...money(LABELS.cargoPorServicio, sale.serviceChargeCents))
+  if (sale.taxCents > 0) lines.push(...money(LABELS.ivaAgregado, sale.taxCents))
+  else if (block.showTax) lines.push(textLine(LABELS.ivaIncluidoCuandoAplica))
+  if (sale.tipCents) lines.push(...money(LABELS.propina, sale.tipCents))
   lines.push(textLine(divider(width)))
   // En grande, el TOTAL gasta dos columnas por carácter: se acomoda a la MITAD del ancho.
   // Si ni así cabe, negritas a ancho completo — y si tampoco, etiqueta arriba y valor abajo.

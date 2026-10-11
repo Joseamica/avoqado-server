@@ -2738,6 +2738,34 @@ it('🔴 ronda (3): sin duda ni intento nuevo ⇒ sin `enDuda` y `cancelIntentoN
   expect(body.cancelIntentoNuevo).toBe(false)
 })
 
+// C2-pulido · G3 (guía de Facturación): «Corregir importe» nunca contesta 500 ante un rechazo de DOMINIO esperado.
+describe('C2-pulido · G3 — sustituir: los rechazos de dominio no son 500', () => {
+  const pedir = async () => {
+    const res = { status: jest.fn().mockReturnThis(), json: jest.fn() }
+    await replaceCfdiController({ params: { venueId: 'v1', cfdiId: 'c1' }, authContext: { venueId: 'v1' } } as any, res as any)
+    return res
+  }
+  it('control — la nota de crédito (ConflictError del servicio) ⇒ 409 con el texto en español', async () => {
+    const texto = 'Esta es una nota de crédito (egreso), no una factura de venta; no se sustituye por este camino.'
+    mockReplace.mockRejectedValueOnce(new ConflictError(texto))
+    const res = await pedir()
+    expect(res.status).toHaveBeenCalledWith(409)
+    expect(res.json).toHaveBeenCalledWith({ error: texto })
+  })
+  it('🔴 hermano: el comercio con la facturación apagada (lo dice el motor al capturar) ⇒ 403 con el texto, como al facturar; no 500', async () => {
+    mockReplace.mockRejectedValueOnce(new Error('Facturación no habilitada para este comercio'))
+    const res = await pedir()
+    expect(res.status).toHaveBeenCalledWith(403)
+    expect(res.json).toHaveBeenCalledWith({ error: 'Facturación no habilitada para este comercio' })
+  })
+  it('control — un error inesperado sigue siendo 500 sin el texto interno', async () => {
+    mockReplace.mockRejectedValueOnce(new Error('connection reset'))
+    const res = await pedir()
+    expect(res.status).toHaveBeenCalledWith(500)
+    expect(res.json).toHaveBeenCalledWith({ error: 'Error interno al sustituir el CFDI' })
+  })
+})
+
 it('replacement preserves shared ConflictError as409', async () => {
   mockReplace.mockRejectedValueOnce(new ConflictError('La factura de esta venta se está procesando; intenta de nuevo en unos minutos.'))
   const res = { status: jest.fn().mockReturnThis(), json: jest.fn() }
