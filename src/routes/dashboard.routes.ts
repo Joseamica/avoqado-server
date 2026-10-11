@@ -5680,10 +5680,13 @@ router.post(
  *       200:
  *         description: Commands retrieved successfully
  */
+// 🔴 Las 3 lecturas del registro (esta, /history y /:commandId) piden `tpv:command`, lo que abre el panel «Comandos remotos»
+// en el dashboard (TpvId.tsx). `tpv-commands:read` sólo lo tiene SUPERADMIN: dejaba al OWNER con 403 y el historial girando.
+// Candado fijado en tests/unit/routes/tpvCommands.routes.permissions.test.ts.
 router.get(
   '/venues/:venueId/tpv-commands',
   authenticateTokenMiddleware,
-  checkPermission('tpv-commands:read'),
+  checkPermission('tpv:command'),
   validateRequest(commandsQuerySchema),
   tpvCommandController.getCommands as any,
 )
@@ -5852,7 +5855,7 @@ router.get(
 router.get(
   '/venues/:venueId/tpv-commands/history',
   authenticateTokenMiddleware,
-  checkPermission('tpv-commands:read'),
+  checkPermission('tpv:command'), // ídem la lectura de la lista: mismo permiso que el panel
   validateRequest(commandHistoryQuerySchema),
   tpvCommandController.getCommandHistory as any,
 )
@@ -5885,7 +5888,7 @@ router.get(
 router.get(
   '/venues/:venueId/tpv-commands/:commandId',
   authenticateTokenMiddleware,
-  checkPermission('tpv-commands:read'),
+  checkPermission('tpv:command'), // ídem la lectura de la lista: mismo permiso que el panel
   tpvCommandController.getCommandStatus,
 )
 
