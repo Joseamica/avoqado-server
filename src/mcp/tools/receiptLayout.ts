@@ -69,7 +69,7 @@ export function registerReceiptLayoutTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'configure_receipt_layout',
-    "Change the DESIGN of a venue's paper receipt: which blocks print and in what order. TWO STEPS — the first call only shows how the ticket would look and asks for confirmation; nothing is saved until you call again with confirm:true. Seven blocks are mandatory and cannot be removed (tax data, order, items, totals, payment, area delivery, the Avoqado signature). Requires receipt-layout:manage.",
+    "Change the DESIGN of a venue's paper receipt: which blocks print and in what order. TWO STEPS — the first call only shows how the ticket would look and asks for confirmation; nothing is saved until you call again with confirm:true. Seven blocks are mandatory and cannot be removed (tax data, order, items, totals, payment, area delivery, the Avoqado signature). In the totals, the tip and discount the sale charged ALWAYS print (as do the service charge and any added VAT), so the paper always adds up to the TOTAL: showTip and showDiscount can no longer hide them, they only matter for a $0 line, which never prints anyway. Requires receipt-layout:manage.",
     {
       venueId: z.string().describe('Venue whose receipt design to change (must be in your scope)'),
       blocks: z.array(z.unknown()).describe('The ordered list of receipt blocks'),

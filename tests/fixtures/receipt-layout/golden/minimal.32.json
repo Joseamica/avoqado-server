@@ -69,7 +69,7 @@
         }
       ],
       "subtotalCents": 12000,
-      "taxCents": 1655,
+      "taxCents": 0,
       "discountCents": null,
       "tipCents": null,
       "totalCents": 12000,

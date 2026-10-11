@@ -5,4 +5,4 @@
     { "type": "totals" }, { "type": "amountInWords" }, { "type": "payment" }, { "type": "areaDelivery" }, { "type": "qr", "caption": "Califícanos y factura aquí" },
     { "type": "fiscalNotice" }, { "type": "separator", "style": "blank" }, { "type": "text", "lines": ["Gracias", "Vuelva pronto"], "align": "right" },
     { "type": "reference", "showAppVersion": true }, { "type": "signature" }
-  ] }, "sale": "reprint", "venue": "two-emisors", "saleOverride": { "areaDeliveryCode": "9016719357", "discountCents": 500 } }
+  ] }, "sale": "reprint", "venue": "two-emisors", "saleOverride": { "areaDeliveryCode": "9016719357", "discountCents": 500, "totalCents": 38000 } }

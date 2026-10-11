@@ -4,6 +4,7 @@ import logger from '../../config/logger'
 import { BadRequestError, ConflictError, NotFoundError, ServiceUnavailableError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { generateDigitalReceipt } from './digitalReceipt.tpv.service'
+import { RECIBO_CANONICO } from '../shared/reciboCanonico'
 import { publishCommand } from '../../communication/rabbitmq/publisher'
 import { trackRecentPaymentCommand } from '../pos-sync/posSyncOrder.service'
 import { socketManager } from '../../communication/sockets/managers/socketManager'
@@ -231,7 +232,7 @@ export async function buscarRegistroPorReferencia(
             ...(ultimo ? [{ OR: [{ createdAt: { lt: ultimo.createdAt } }, { createdAt: ultimo.createdAt, id: { lt: ultimo.id } }] }] : []),
           ],
         },
-        include: { receipts: true }, // Include receipt data for idempotent response
+        include: { receipts: RECIBO_CANONICO }, // Include receipt data for idempotent response
         orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         take: PAGINA,
       })
@@ -3229,7 +3230,7 @@ export async function recordOrderPayment(
           idempotencyKey: paymentData.idempotencyKey,
         },
       },
-      include: { receipts: true },
+      include: { receipts: RECIBO_CANONICO },
     })
 
     if (existingByKey) {
@@ -3909,7 +3910,7 @@ export async function recordOrderPayment(
   } catch (error) {
     if (error instanceof RegistroYaExistentePorReferencia) return devolverExistentePorReferencia(error.registro)
     if (error instanceof CobroDuplicadoEnEfectivo) {
-      const existente = await prisma.payment.findUnique({ where: { id: error.existingPaymentId }, include: { receipts: true } })
+      const existente = await prisma.payment.findUnique({ where: { id: error.existingPaymentId }, include: { receipts: RECIBO_CANONICO } })
       if (existente) {
         logger.warn('🔄 [recordOrderPayment] Cobro en EFECTIVO sobre una orden ya saldada — se devuelve el existente', {
           venueId,
@@ -4007,7 +4008,7 @@ export async function recordOrderPayment(
       throw error
     }
     if (error instanceof ReintentoDelGanadorDeLaSolicitud) {
-      const ganador = await prisma.payment.findUnique({ where: { id: error.winnerPaymentId }, include: { receipts: true } })
+      const ganador = await prisma.payment.findUnique({ where: { id: error.winnerPaymentId }, include: { receipts: RECIBO_CANONICO } })
       if (ganador) {
         logger.info('🔄 [S0] Bajo el candado de la solicitud, el ganador ya era este mismo intento — se devuelve el existente', {
           venueId,
@@ -4048,7 +4049,7 @@ export async function recordOrderPayment(
               idempotencyKey: paymentData.idempotencyKey,
             },
           },
-          include: { receipts: true },
+          include: { receipts: RECIBO_CANONICO },
         })
 
         if (winner) {
@@ -4884,7 +4885,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
           idempotencyKey: paymentData.idempotencyKey,
         },
       },
-      include: { receipts: true },
+      include: { receipts: RECIBO_CANONICO },
     })
 
     if (existingByKey) {
@@ -5458,7 +5459,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
   } catch (error) {
     if (error instanceof RegistroYaExistentePorReferencia) return devolverExistentePorReferencia(error.registro)
     if (error instanceof ReintentoDelGanadorDeLaSolicitud) {
-      const ganador = await prisma.payment.findUnique({ where: { id: error.winnerPaymentId }, include: { receipts: true } })
+      const ganador = await prisma.payment.findUnique({ where: { id: error.winnerPaymentId }, include: { receipts: RECIBO_CANONICO } })
       if (ganador) {
         logger.info('🔄 [S0] Bajo el candado de la solicitud, el ganador ya era este mismo intento — se devuelve el existente', {
           venueId,
@@ -5494,7 +5495,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
               idempotencyKey: paymentData.idempotencyKey,
             },
           },
-          include: { receipts: true },
+          include: { receipts: RECIBO_CANONICO },
         })
 
         if (winner) {

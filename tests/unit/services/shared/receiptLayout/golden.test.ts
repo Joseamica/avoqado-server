@@ -11,6 +11,7 @@ import {
   interpret,
   layoutBlocksSchema,
   PAPER_WIDTHS,
+  SAMPLE_SALES,
   TEMPLATES,
   type Block,
   type ReceiptInput,
@@ -64,5 +65,37 @@ describe('casos dorados — el intérprete de referencia', () => {
       expect(existsSync(goldenPath)).toBe(true)
       expect(lines).toEqual(read(goldenPath).lines)
     })
+  })
+})
+
+describe('regla de cuadre del ticket (IVA por producto, plan 7: Codex r2 N10 y r3 R3-4)', () => {
+  /** subtotal − descuento + cargo por servicio + IVA agregado + propina = TOTAL. Un IVA ≤ 0 no se suma (sale la leyenda). */
+  const cuadra = (s: ReceiptSale) =>
+    s.subtotalCents - (s.discountCents ?? 0) + (s.serviceChargeCents ?? 0) + Math.max(0, s.taxCents) + (s.tipCents ?? 0) === s.totalCents
+
+  it.each(caseFiles)('%s cuadra', file => {
+    const c: CaseFile = read(resolve(ROOT, 'cases', file))
+    const sale: ReceiptSale = { ...read(resolve(ROOT, 'samples', `${c.sale}.json`)), ...(c.saleOverride ?? {}) }
+    expect(cuadra(sale)).toBe(true)
+  })
+
+  it.each(Object.keys(SAMPLE_SALES) as (keyof typeof SAMPLE_SALES)[])(
+    'la venta de muestra del diseñador «%s» cuadra y no trae IVA agregado',
+    k => {
+      expect(cuadra(SAMPLE_SALES[k])).toBe(true)
+      expect(SAMPLE_SALES[k].taxCents).toBe(0)
+    },
+  )
+
+  it('sólo los dos casos de una venta con IVA aparte imprimen «IVA agregado»', () => {
+    const conIva = readdirSync(resolve(ROOT, 'golden')).filter(f =>
+      readFileSync(resolve(ROOT, 'golden', f), 'utf8').includes('IVA agregado:'),
+    )
+    expect(conIva.sort()).toEqual([
+      'iva-agregado-con-leyenda-apagada.32.json',
+      'iva-agregado-con-leyenda-apagada.48.json',
+      'reimpresion-con-iva-agregado-y-cargo.32.json',
+      'reimpresion-con-iva-agregado-y-cargo.48.json',
+    ])
   })
 })

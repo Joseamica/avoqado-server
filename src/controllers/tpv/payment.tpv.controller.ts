@@ -4,6 +4,7 @@ import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import * as paymentTpvService from '../../services/tpv/payment.tpv.service'
 import * as saleVerificationService from '../../services/tpv/sale-verification.service'
 import * as receiptDashboardService from '../../services/dashboard/receipt.dashboard.service'
+import { ticketTotalsDelSnapshot } from '../../services/shared/ticketTotals'
 import { sendReceiptWhatsApp } from '../../services/whatsapp.service'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
@@ -342,7 +343,8 @@ export async function sendPaymentReceiptWhatsApp(req: Request, res: Response, ne
     const venueName = dataSnapshot?.venue?.name || 'Establecimiento'
     const baseAmount = parseFloat(dataSnapshot?.payment?.amount?.toString() || '0')
     const tipAmountVal = parseFloat(dataSnapshot?.payment?.tipAmount?.toString() || '0')
-    const totalAmount = (baseAmount + tipAmountVal).toFixed(2)
+    // m-1 (A7-R8): el MISMO total que el recibo, en magnitud (una devolución sin «−»). Sin el cobro en el snapshot, lo de siempre.
+    const totalAmount = (ticketTotalsDelSnapshot(dataSnapshot)?.total ?? baseAmount + tipAmountVal).toFixed(2)
     const receiptUrl = `${process.env.FRONTEND_URL}/receipts/public/${receipt.accessKey}`
 
     // Send WhatsApp message asynchronously (don't block response)

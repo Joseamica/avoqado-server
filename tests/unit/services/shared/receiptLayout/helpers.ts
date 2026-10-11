@@ -8,7 +8,7 @@ export const baseSale = (over: Partial<ReceiptSale> = {}): ReceiptSale => ({
   timezone: 'America/Mexico_City',
   items: [{ name: 'Galleta', quantity: 1, unitPriceCents: 4500, totalPriceCents: 4500 }],
   subtotalCents: 4500,
-  taxCents: 621,
+  taxCents: 0,
   discountCents: null,
   tipCents: null,
   totalCents: 4500,
