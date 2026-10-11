@@ -41,8 +41,11 @@ export const EXTRAIDO: Prisma.OrderWhereInput = {
   cfdis: { some: { type: 'EGRESO', idempotencyKey: { startsWith: PREFIJO_EXTRACCION }, OR: [CFDI_VIVO, EXTRACCION_CANCELADA] } },
 }
 
-/** El llamador tiene bloqueada la orden antes de consultar su pertenencia. */
-export async function excluirSiEstaEnGlobal(tx: Prisma.TransactionClient, orderId: string): Promise<string | null> {
+/**
+ * La admisión del POST la llama con la orden bloqueada (ahí DECIDE). C2-pulido · G2: el GET público de la autofactura la llama sin candado,
+ * sólo para no ofrecer un formulario que el POST rechazaría: la MISMA regla en los dos.
+ */
+export async function excluirSiEstaEnGlobal(tx: Pick<Prisma.TransactionClient, 'cfdi'>, orderId: string): Promise<string | null> {
   const cfdi = await tx.cfdi.findFirst({
     where: { isGlobal: true, manifiestoGlobal: { some: { orderId } }, ...CFDI_VIVO },
     select: { serie: true, folio: true, globalPeriod: true },

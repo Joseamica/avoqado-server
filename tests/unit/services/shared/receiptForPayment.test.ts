@@ -31,6 +31,8 @@ jest.mock('@/services/tpv/digitalReceipt.tpv.service', () => ({
 
 jest.mock('@/services/fiscal/cfdi.service', () => ({
   loadOrderForCfdiFromDb: (...args: unknown[]) => mockLoadOrderForCfdiFromDb(...args),
+  // T-I2 (A7-R10): la venta de estas pruebas no tiene devoluciones.
+  ventaConDevolucion: async () => false,
 }))
 
 import { getReceiptForPayment } from '@/services/shared/receiptForPayment.service'

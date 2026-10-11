@@ -403,7 +403,7 @@ import { aplicaCandadoDeEfectivo, cobroEnEfectivoSobreOrdenSaldada } from '../sh
 import { resolveTenderForCharge, computeTenderCommission, type ResolvedTenderCharge } from '../dashboard/tenderType.dashboard.service'
 import { validateStaffVenue as validateStaffVenueShared } from '../../utils/staff-venue.util'
 import { isRetryableDbError } from '../../utils/serializableRetry'
-import { loadOrderForCfdiFromDb } from '../fiscal/cfdi.service'
+import { loadOrderForCfdiFromDb, ventaConDevolucion } from '../fiscal/cfdi.service'
 import {
   terminalPaymentService,
   avisarAprobacionTardiaTrasVentana,
@@ -1013,7 +1013,9 @@ export async function resolveAutofacturaAvailable(orderId: string | null | undef
     const bundle = await loadOrderForCfdiFromDb(orderId)
     // Fuera del sobre seguro (promoción, cargo por servicio…) el motor rechazaría el documento: el
     // ticket no ofrece una autofactura que después va a fallar.
-    return !!bundle && bundle.facturacionEnabled && bundle.autofacturaEnabled && !bundle.unsupportedReasons?.length
+    if (!bundle || !bundle.facturacionEnabled || !bundle.autofacturaEnabled || bundle.unsupportedReasons?.length) return false
+    // T-I2 (A7-R10): con una devolución completada tampoco (el GET público dice lo mismo); p. ej. el recibo de la devolución de la TPV.
+    return !(await ventaConDevolucion(orderId))
   } catch (error) {
     logger.error('[payment.tpv.service] resolveAutofacturaAvailable lookup failed — defaulting to false', {
       orderId,

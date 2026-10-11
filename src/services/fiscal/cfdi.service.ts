@@ -31,15 +31,17 @@ import {
   netoRenglonCents,
 } from './descuentoPorRenglon'
 import { filasDeDescuentoCompletas } from './filasDeDescuentoTx'
-import { timbreEnDuda } from './timbreEnDuda'
+import { DONDE_TIMBRE_EN_DUDA, timbreEnDuda } from './timbreEnDuda'
 import { leerReparto } from '../shared/repartoDescuento'
 
 // ─── List CFDIs ───────────────────────────────────────────────────────────────
 
+/** G7 (C2-pulido): el filtro de la lista separa el timbre EN DUDA de la rechazada; `STAMP_FAILED` ya no lo incluye. */
+export type EstatusDeLaLista = CfdiStatus | 'STAMP_IN_DOUBT'
 export interface ListCfdisParams {
   venueId: string
-  /** Uno o varios (la pantalla deja marcar más de uno). */
-  status?: CfdiStatus | CfdiStatus[]
+  /** Uno o varios (la pantalla deja marcar más de uno). G7: `STAMP_IN_DOUBT` = el `STAMP_FAILED` en duda (`timbreEnDuda`). */
+  status?: EstatusDeLaLista | EstatusDeLaLista[]
   flow?: CfdiFlow | CfdiFlow[]
   isGlobal?: boolean
   receptorRfc?: string
@@ -134,8 +136,23 @@ export async function listCfdisForVenue(params: ListCfdisParams): Promise<ListCf
     if (v.length === 0) return undefined
     return v.length === 1 ? v[0] : { in: v }
   }
-  const statusWhere = unoOVarios(status)
-  if (statusWhere !== undefined) where.status = statusWhere
+  // G7 (C2-pulido): el timbre EN DUDA no es «Con error». `STAMP_FAILED` = la rechazada; `STAMP_IN_DOUBT` = la en duda (la regla única,
+  // `DONDE_TIMBRE_EN_DUDA`); los dos juntos = todas las STAMP_FAILED. Va en el `where`, así que la página y el total dicen lo mismo.
+  const pedidos = status === undefined ? [] : Array.isArray(status) ? status : [status]
+  const pideDuda = pedidos.includes('STAMP_IN_DOUBT')
+  const pideFallida = pedidos.includes('STAMP_FAILED')
+  const reales = pedidos.filter((s): s is CfdiStatus => s !== 'STAMP_IN_DOUBT' && (pideDuda || s !== 'STAMP_FAILED'))
+  const statusWhere = unoOVarios(reales)
+  if (pideDuda === pideFallida) {
+    if (statusWhere !== undefined) where.status = statusWhere
+  } else {
+    // Sin `NOT` a secas sobre una columna que admite NULL (`protocoloIva`): Postgres descartaría la fila en silencio.
+    const separada: Prisma.CfdiWhereInput = pideFallida
+      ? { status: 'STAMP_FAILED', OR: [{ protocoloIva: null }, { NOT: DONDE_TIMBRE_EN_DUDA }] }
+      : DONDE_TIMBRE_EN_DUDA
+    // En `AND`: el `OR` de abajo es el del rango de fechas.
+    where.AND = [statusWhere === undefined ? separada : { OR: [{ status: statusWhere }, separada] }]
+  }
   const flowWhere = unoOVarios(flow)
   if (flowWhere !== undefined) where.flow = flowWhere
   if (isGlobal !== undefined) {
@@ -609,6 +626,15 @@ export async function issueCfdiForOrder(
 
 /** «Otra solicitud lo tiene en proceso». La global (`cfdiGlobal.service.ts`) la importa: el job lo distingue de un periodo detenido por el texto EXACTO. */
 export const PROCESANDO = 'La factura de esta venta se está procesando; intenta de nuevo en unos minutos.'
+/**
+ * A7-R10 (founder, 10-oct): una venta con CUALQUIER devolución completada (total o parcial) no se AUTOFACTURA. Al cliente le llega el
+ * texto neutro de siempre; este motivo va sólo al log. La factura del personal, la sustitución y las notas de crédito no lo miran.
+ */
+export const MOTIVO_AUTOFACTURA_CON_DEVOLUCION = 'Esta venta tiene una devolución completada: no se autofactura (A7-R10).'
+/** ¿La venta tiene al menos un `Payment` REFUND `COMPLETED`? (una PENDING o FAILED no cuenta). */
+export async function ventaConDevolucion(orderId: string, db: Pick<Prisma.TransactionClient, 'payment'> = prisma): Promise<boolean> {
+  return !!(await db.payment.findFirst({ where: { orderId, type: 'REFUND', status: 'COMPLETED' }, select: { id: true } }))
+}
 /** D9 (B3a): no queda ningún concepto con importe que facturar. */
 export const MOTIVO_TODO_CORTESIA =
   'Esta venta no tiene importe que facturar: todos sus artículos son cortesía o tienen descuento completo.'
@@ -640,6 +666,10 @@ export async function emitirConEntrada(
   async function admission(tx: Prisma.TransactionClient) {
     const order = await bloquearOrdenParaFacturar(tx, params.orderId)
     if (!order || (params.expectedVenueId && order.venueId !== params.expectedVenueId)) throw new Error(`Order ${params.orderId} not found`)
+    // T-I2 (A7-R10): aquí DECIDE, bajo el `FOR UPDATE` de la orden que también toman las devoluciones ligadas: una que entró entre el GET y
+    // el POST ya se ve. Una devolución que llega después de esta admisión es de una venta ya facturada: va por nota de crédito (C2).
+    if (!sustitucion && params.flow === 'AUTOFACTURA_A' && (await ventaConDevolucion(params.orderId, tx)))
+      throw new ConflictError(MOTIVO_AUTOFACTURA_CON_DEVOLUCION)
     await tomarAdmisionCompartida(tx, order.organizationId)
     const motivo = await excluirSiEstaEnGlobal(tx, params.orderId)
     if (motivo) throw new ConflictError(motivo)
