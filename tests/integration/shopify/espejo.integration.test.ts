@@ -20,6 +20,7 @@ import {
   agregarProductoShopify,
   assertTestDatabase,
   crearEscenarioShopify,
+  eligioShopify,
   EscenarioShopify,
   graphqlFalso,
   huecoDelInvariante,
@@ -546,6 +547,7 @@ describe('initializePair', () => {
     const e = await escenario({ linkStatus: 'REVIEWING', initialized: false })
     await prisma.shopifyLocationLink.update({ where: { id: e.locationLinkId }, data: { applyRequestedAt: new Date() } })
     await venta(e.inventoryId, 2) // vendido mientras se revisaba: queda −2 en el buzón
+    await eligioShopify(e, e.variantLinkId, 15) // D1: ya existía y no cuadra (8 contra 15 − 2): el dueño eligió Shopify
     expect(await iniciar(e.variantLinkId, ok(15), 'TOMAR_SHOPIFY')).toBe('INICIADA')
     expect(await stock(e.inventoryId)).toBe('13') // 15 + (−2)
     const p = await pareja(e.variantLinkId)
@@ -679,6 +681,7 @@ describe('initializePair', () => {
   it('🔴 acceso real (#14, §9.7): el mismo negocio sin plan ⇒ NO_APLICA; exento ⇒ INICIADA', async () => {
     const e = await escenario({ linkStatus: 'REVIEWING', initialized: false })
     await prisma.shopifyLocationLink.update({ where: { id: e.locationLinkId }, data: { applyRequestedAt: new Date() } })
+    await eligioShopify(e, e.variantLinkId, 15) // D1: ya existía y no cuadra (10 contra 15): el dueño eligió Shopify
     const sinInyectar = () =>
       initializePair({ variantLinkId: e.variantLinkId, nivel: ok(15), fetchedAt: new Date(), mode: 'TOMAR_SHOPIFY' })
     expect(await sinInyectar()).toBe('NO_APLICA')

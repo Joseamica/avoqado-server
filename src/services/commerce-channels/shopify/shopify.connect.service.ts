@@ -25,6 +25,7 @@ import {
   fetchLevels,
   initializePair,
   levelKey,
+  refrescarLoImportado,
   SHOPIFY_IMPORT_ERRORES_TERMINALES,
   type CercoShopify,
 } from './shopify.mirror.service'
@@ -1238,8 +1239,17 @@ export async function applyConnectPage(
     // aplicado se queda). Seguir con las demás dejaría las mismas primeras filas para cada vuelta y la conexión en
     // «Aplicando» para siempre. Si el regreso no pudo (otro cerco), la siguiente vuelta lo vuelve a intentar con el suyo.
     if (o === 'POR_DECIDIR') {
-      const devuelta = await devolverAVistaPrevia(link.id, cerco, p.id)
-      return devuelta ? { done: false, procesadas, devuelta: true } : { done: false, procesadas }
+      if (!(await devolverAVistaPrevia(link.id, cerco, p.id))) return { done: false, procesadas }
+      // Ya de regreso: las DEMÁS filas de esta tanda (ya leída) cuyo nivel cambió toman el número nuevo, para que UN regreso
+      // enseñe todo lo que hay que volver a elegir. Sin aplicar nada ni tocar stock; lo que no alcance el tiempo lo vuelve a
+      // ver el siguiente «Aplicar», fila por fila.
+      for (const otra of tanda) {
+        if (otra.id === p.id) continue
+        if (restante(deps.vence) < MIN_ESCRITURA_MS) break
+        const n = r.data.get(levelKey(link.shopifyLocationId, otra.inventoryItemId))
+        if (n?.kind === 'OK') await refrescarLoImportado(otra.id, n.available, cerco)
+      }
+      return { done: false, procesadas, devuelta: true }
     }
     if (o !== 'REINTENTAR') procesadas += 1
   }

@@ -27,6 +27,7 @@ import {
   agregarProductoShopify,
   assertTestDatabase,
   crearEscenarioShopify,
+  eligioShopify,
   EscenarioShopify,
   huecoDelInvariante,
   limpiarEscenarioShopify,
@@ -176,7 +177,9 @@ it('🔴 ronda 3 (12 bis.2): contar mientras se REVISA la conexión (pareja empa
   expect(ultima).toMatchObject({ noAplicados: [{ productId: e.productId, motivo: 'ENVIO_EN_CAMINO' }] })
   expect(await stock(e)).toBe('5')
   await prisma.shopifyLocationLink.update({ where: { id: e.locationLinkId }, data: { status: 'REVIEWING', pausedFrom: null } })
-  // Se aplica la conexión (TOMAR: Shopify gana) y se vuelve a contar: 8 en los dos lados.
+  // Se aplica la conexión (TOMAR: Shopify gana) y se vuelve a contar: 8 en los dos lados. D1: ya existía y no cuadra (5
+  // contra 10), así que el dueño eligió «Usar el de Shopify».
+  await eligioShopify(e, e.variantLinkId, 10)
   await requestApplyShopifyConnect({ venueId: e.venueId, staffId: e.staffId }, { hasAccess: conPlan })
   for (
     let i = 0;

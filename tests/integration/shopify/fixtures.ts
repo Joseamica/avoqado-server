@@ -167,6 +167,31 @@ export async function agregarProductoShopify(
 }
 
 /**
+ * D1: la pareja como la deja una vista previa en la que el dueño eligió «Usar el de Shopify»: Shopify al importar = `shopify` y
+ * lo visto = lo de AHORA (llámala justo antes de aplicar, después de las ventas). Para las pruebas de la mecánica de TOMAR con
+ * un producto que ya existía y no cuadra: desde D1 ese producto no se aplica sin una elección.
+ */
+export async function eligioShopify(e: EscenarioShopify, variantLinkId: string, shopify: number): Promise<void> {
+  const v = await prisma.shopifyVariantLink.findUniqueOrThrow({
+    where: { id: variantLinkId },
+    select: { productId: true, locationLink: { select: { generation: true, store: { select: { tokenVersion: true } } } } },
+  })
+  const inv = await prisma.inventory.findUniqueOrThrow({ where: { productId: v.productId } })
+  await prisma.shopifyVariantLink.update({
+    where: { id: variantLinkId },
+    data: {
+      importedAvailable: shopify,
+      connectChoice: 'SHOPIFY',
+      connectChoiceGeneration: v.locationLink.generation,
+      connectChoiceTokenVersion: v.locationLink.store.tokenVersion,
+      connectSeenAvoqadoQty: inv.currentStock,
+      connectSeenShopifyQty: shopify,
+      connectChoiceById: e.staffId,
+    },
+  })
+}
+
+/**
  * Lo que el invariante operativo (§9.3) no explica: Inventory − espejo − Σ(vivas + DEAD_LETTER) − offset de la revisión
  * OPEN, en la generación vigente de la pareja. `'0'` = cuadra. Vale para parejas iniciadas y no suspendidas.
  */

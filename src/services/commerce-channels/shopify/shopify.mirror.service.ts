@@ -687,7 +687,7 @@ export async function applyShopifyLevel(
 
 /** D1: qué dice la pareja de la elección del dueño al aplicar la conexión (con todo ya bloqueado). */
 type Decision =
-  | { kind: 'SIN_DECISION' }
+  | { kind: 'SIN_DECISION'; refrescar?: boolean }
   | { kind: 'POR_DECIDIR'; refrescar: boolean }
   | { kind: 'ELEGIDA'; choice: 'AVOQADO' | 'SHOPIFY'; pendientes: Prisma.Decimal; ajuste: Prisma.Decimal; staffId: string | null }
 const SIN_DECISION: Decision = { kind: 'SIN_DECISION' }
@@ -705,8 +705,10 @@ type EleccionAplicada = {
  * D1 (spec 2026-10-10): al aplicar la conexión, ¿este producto pide la elección del dueño y la que guardó sigue en pie? Se
  * llama con la pareja, Inventory y sus filas YA bloqueadas (§10.3, §12.5): nadie encola mientras tanto, así que la suma de
  * pendientes es la buena.
- * - P1-1: si la lectura fresca no es lo de Shopify que se vio al importar, ninguna salida automática (ni «sin decisión» ni
- *   «Shopify»): la fila vuelve a la vista previa con el número nuevo (`refrescar`).
+ * - P1-1: si la lectura fresca no es lo de Shopify que se vio al importar (o el catálogo no vio un nivel OK y quedó nulo),
+ *   `importedAvailable` toma el número nuevo (`refrescar`) y ninguna salida automática usa el viejo: si con el nuevo hay que
+ *   elegir, la fila vuelve a la vista previa; si ya no (`A = S + pendientes`, el mismo DECIDE de la vista previa), sigue con
+ *   TOMAR, que deja `Inventory` en A: nada cambia en silencio.
  * - Pide elegir el que ya existía en Avoqado y cuyo stock no es «lo de Shopify al importar + pendientes» (el DECIDE de la
  *   vista previa). La elección vale en la generación y la credencial con que se hizo y sólo si Avoqado y lo de Shopify al
  *   importar son los números que se vieron.
@@ -724,9 +726,10 @@ async function decisionBajoCandado(tx: Prisma.TransactionClient, p: ParejaBloque
       connectChoiceById: true,
     },
   })
-  if (d.importedAvailable === null) return SIN_DECISION
-  if (S !== d.importedAvailable) return { kind: 'POR_DECIDIR', refrescar: true }
   const pendientes = await liveOutboxSum(tx, p.productId, p.locationLinkId, p.generation)
+  if (d.importedAvailable === null || S !== d.importedAvailable) {
+    return A.equals(pendientes.plus(S)) ? { kind: 'SIN_DECISION', refrescar: true } : { kind: 'POR_DECIDIR', refrescar: true }
+  }
   if (A.equals(pendientes.plus(d.importedAvailable))) return SIN_DECISION
   const vigente =
     d.connectChoiceGeneration === p.generation &&
@@ -738,6 +741,26 @@ async function decisionBajoCandado(tx: Prisma.TransactionClient, p: ParejaBloque
   const ajuste = A.minus(S).minus(pendientes)
   if (d.connectChoice === 'AVOQADO' && !ajuste.isInteger()) return { kind: 'POR_DECIDIR', refrescar: false }
   return { kind: 'ELEGIDA', choice: d.connectChoice, pendientes, ajuste, staffId: d.connectChoiceById }
+}
+
+/**
+ * D1: al regresar la conexión a la vista previa, las DEMÁS parejas de la tanda ya leída cuyo nivel de Shopify cambió desde la
+ * importación toman el número nuevo, para que UN regreso enseñe todo lo que hay que volver a elegir. Sólo `importedAvailable`
+ * (lo que la vista previa compara), nunca stock ni espejo: por eso basta la pareja (§10.3: sucursal y tienda FOR SHARE →
+ * pareja FOR UPDATE, sin Inventory). Con el MISMO cerco de quien aplicó, en REVIEWING y sin iniciar; si no, no toca nada.
+ */
+export async function refrescarLoImportado(variantLinkId: string, S: number, cerco: CercoShopify): Promise<boolean> {
+  return prisma.$transaction(async tx => {
+    const p = await bloquearPareja(tx, variantLinkId)
+    if (!p || !coincide(p, cerco)) return false
+    if (p.linkStatus !== 'REVIEWING' || p.initializedAt || p.suspendedReason) return false
+    const r = await tx.shopifyVariantLink.updateMany({
+      // Con el nulo explícito: `<> S` en SQL deja fuera las filas nulas (la importación sin nivel OK, P1-1).
+      where: { id: p.id, OR: [{ importedAvailable: null }, { importedAvailable: { not: S } }] },
+      data: { importedAvailable: S, importedAt: new Date() },
+    })
+    return r.count > 0
+  })
 }
 
 /**
@@ -808,12 +831,10 @@ export async function initializePair(
     // elección vigente no se escribe NADA (ni espejo ni inicio): la fila vuelve a la vista previa con lo de ahora.
     const decision =
       tomar && p.linkStatus === 'REVIEWING' && !p.createdProduct ? await decisionBajoCandado(tx, p, inv.currentStock, S) : SIN_DECISION
-    if (decision.kind === 'POR_DECIDIR') {
-      if (decision.refrescar) {
-        await tx.shopifyVariantLink.update({ where: { id: p.id }, data: { importedAvailable: S, importedAt: new Date() } })
-      }
-      return { outcome: 'POR_DECIDIR' }
+    if (decision.kind !== 'ELEGIDA' && decision.refrescar) {
+      await tx.shopifyVariantLink.update({ where: { id: p.id }, data: { importedAvailable: S, importedAt: new Date() } })
     }
+    if (decision.kind === 'POR_DECIDIR') return { outcome: 'POR_DECIDIR' }
     const ahora = new Date()
     await tx.shopifyVariantLink.update({
       where: { id: p.id },

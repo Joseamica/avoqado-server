@@ -38,6 +38,7 @@ import {
   agregarProductoShopify,
   assertTestDatabase,
   crearEscenarioShopify,
+  eligioShopify,
   EscenarioShopify,
   graphqlFalso,
   huecoDelInvariante,
@@ -868,6 +869,7 @@ describe('webhooks, vista previa y aplicar (#6, 12 bis.3, N13, N20, N25)', () =>
     const suelto = await agregarProductoShopify(e, { pareja: false, stock: 3 })
     await prisma.$executeRaw`UPDATE "Inventory" SET "currentStock" = "currentStock" - 1 WHERE id = ${suelto.inventoryId}`
     const sinNivel = await agregarProductoShopify(e, { stock: 4, initialized: false })
+    await eligioShopify(e, e.variantLinkId, 8) // D1: ya existía y no cuadra (10 contra 8): el dueño eligió Shopify
     const fetchLevels = nivelesFalsos(item => (item === 'gid://shopify/InventoryItem/1' ? nivel(8) : { kind: 'SIN_NIVEL' }))
     expect(await applyConnectPage(e.locationLinkId, { fetchLevels, hasAccess: conPlan })).toEqual({ done: false, procesadas: 2 })
     expect(await applyConnectPage(e.locationLinkId, { fetchLevels, hasAccess: conPlan })).toEqual({ done: true, procesadas: 0 })
@@ -1207,8 +1209,10 @@ describe('decisiones vinculantes de B3', () => {
   it('R3 (B-4): una tanda de aplicar pregunta por el plan UNA sola vez, aunque inicie varias parejas', async () => {
     const e = await escenario({ linkStatus: 'REVIEWING', initialized: false })
     await prisma.shopifyLocationLink.update({ where: { id: e.locationLinkId }, data: { applyRequestedAt: new Date() } })
-    await agregarProductoShopify(e, { stock: 3, initialized: false })
-    await agregarProductoShopify(e, { stock: 4, initialized: false })
+    const a = await agregarProductoShopify(e, { stock: 3, initialized: false })
+    const b = await agregarProductoShopify(e, { stock: 4, initialized: false })
+    // D1: los tres ya existían y no cuadran con Shopify (5): el dueño eligió Shopify en cada uno.
+    for (const id of [e.variantLinkId, a.variantLinkId!, b.variantLinkId!]) await eligioShopify(e, id, 5)
     const hasAccess = jest.fn(async () => true)
     expect(await applyConnectPage(e.locationLinkId, { fetchLevels: nivelesFalsos(() => nivel(5)), hasAccess })).toEqual({
       done: false,

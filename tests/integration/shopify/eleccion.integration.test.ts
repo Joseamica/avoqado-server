@@ -232,11 +232,10 @@ describe('D1 · «Usar … en todos»', () => {
     await expect(aplicar(e)).resolves.toMatchObject({ applyRequestedAt: expect.any(Date) })
   })
 
-  it('«en todos» sin ninguno por elegir no escribe nada ni deja rastro en la bitácora (un no-op no se registra)', async () => {
+  it('«en todos» sin ninguno por elegir no escribe nada ni lo manda a la bitácora (un no-op no se registra)', async () => {
     const e = await enRevision({ stock: 6, importado: 6 }) // cuadra: no pide elegir
     expect(await enTodos(e, 'AVOQADO')).toEqual({ guardadas: 0, porDecidir: 0 })
     expect((logAction as jest.Mock).mock.calls.map(c => c[0]).filter(a => a.action === 'SHOPIFY_CONNECT_CHOICES_SAVED')).toEqual([])
-    expect(await prisma.activityLog.count({ where: { venueId: e.venueId, action: 'SHOPIFY_CONNECT_CHOICES_SAVED' } })).toBe(0)
     expect((await prisma.shopifyVariantLink.findUniqueOrThrow({ where: { id: e.variantLinkId } })).connectChoice).toBeNull()
   })
 
@@ -450,12 +449,21 @@ describe('D1 · aplicar la elección dentro de la tx de cada producto', () => {
     const e = await enRevision({ stock: 5, importado: 6 })
     const otro = await agregarProductoShopify(e, { stock: 3, initialized: false })
     await prisma.shopifyVariantLink.update({ where: { id: otro.variantLinkId! }, data: { importedAvailable: 5 } })
+    // Uno VÁLIDO después de los dos que dejan de valer: si la tanda siguiera, éste se aplicaría.
+    const valido = await agregarProductoShopify(e, { stock: 4, initialized: false })
+    await prisma.shopifyVariantLink.update({ where: { id: valido.variantLinkId! }, data: { importedAvailable: 5 } })
+    expect([e.variantLinkId < otro.variantLinkId!, otro.variantLinkId! < valido.variantLinkId!]).toEqual([true, true])
     await enTodos(e, 'AVOQADO')
     await aplicar(e)
     await venta(e) // la elección del primero (vio 5) ya no vale
     await venta(e, otro.inventoryId) // ni la del segundo
     const lectura = nivelesFalsos(item => nivel(item === 'gid://shopify/InventoryItem/1' ? 6 : 5))
     expect(await applyConnectPage(e.locationLinkId, { fetchLevels: lectura, hasAccess: conPlan })).toMatchObject({ devuelta: true })
+    expect(await prisma.shopifyVariantLink.findUniqueOrThrow({ where: { id: valido.variantLinkId! } })).toMatchObject({
+      initializedAt: null,
+    })
+    expect(await deltas(valido.productId)).toEqual([])
+    expect(await stock(valido.inventoryId)).toBe('4')
     for (let n = 0; n < 3; n++) {
       expect(await applyConnectPage(e.locationLinkId, { fetchLevels: lectura, hasAccess: conPlan })).toEqual({ done: false, procesadas: 0 })
     }
@@ -473,8 +481,11 @@ describe('D1 · aplicar la elección dentro de la tx de cada producto', () => {
     await enTodos(e, 'AVOQADO')
     await aplicar(e)
     await venta(e, otro.inventoryId) // sólo la del segundo deja de valer
+    expect(e.variantLinkId < otro.variantLinkId!).toBe(true) // la tanda va por id: el primero se aplica antes del que regresa
     const lectura = nivelesFalsos(item => nivel(item === 'gid://shopify/InventoryItem/1' ? 6 : 5))
     expect(await applyConnectPage(e.locationLinkId, { fetchLevels: lectura, hasAccess: conPlan })).toMatchObject({ devuelta: true })
+    expect((await prisma.shopifyVariantLink.findUniqueOrThrow({ where: { id: e.variantLinkId } })).initializedAt).not.toBeNull()
+    expect(await deltas(e.productId)).toEqual(['-1'])
     // Vuelve a elegir el segundo (Avoqado 2, Shopify 5, venta −1 ⇒ ajuste −2) y aplica hasta ACTIVE.
     await elegir(e, 'AVOQADO', '2', 5, { variantLinkId: otro.variantLinkId! })
     await aplicar(e)
@@ -517,6 +528,8 @@ describe('D1 · aplicar la elección dentro de la tx de cada producto', () => {
     })
     expect(await deltas(e.productId)).toEqual([])
     expect((await sucursal(e)).applyRequestedAt).toBeNull()
+    expect((await prisma.shopifyVariantLink.findUniqueOrThrow({ where: { id: e.variantLinkId } })).initializedAt).toBeNull()
+    expect(await stock(e.inventoryId)).toBe('5')
   })
 
   it('🔴 P2-4: regresar a la vista previa exige el cerco completo y una aplicación pedida; si no, no toca nada', async () => {
@@ -529,9 +542,77 @@ describe('D1 · aplicar la elección dentro de la tx de cada producto', () => {
     expect(await devolverAVistaPrevia(e.locationLinkId, cerco, e.variantLinkId)).toBe(false)
     expect((await sucursal(e)).applyRequestedAt).not.toBeNull()
     await prisma.shopifyStore.update({ where: { id: e.storeId }, data: { status: 'ACTIVE' } })
+    expect(await devolverAVistaPrevia(e.locationLinkId, { ...cerco, generation: 2 }, e.variantLinkId)).toBe(false) // otra generación
+    expect(await devolverAVistaPrevia(e.locationLinkId, { ...cerco, workToken: 'otro-lease' }, e.variantLinkId)).toBe(false) // otro lease
+    await prisma.shopifyLocationLink.update({ where: { id: e.locationLinkId }, data: { status: 'ACTIVE' } }) // ya no está en revisión
+    expect(await devolverAVistaPrevia(e.locationLinkId, cerco, e.variantLinkId)).toBe(false)
+    expect((await sucursal(e)).applyRequestedAt).not.toBeNull()
+    await prisma.shopifyLocationLink.update({ where: { id: e.locationLinkId }, data: { status: 'REVIEWING' } })
     expect(await devolverAVistaPrevia(e.locationLinkId, cerco, e.variantLinkId)).toBe(true)
     expect((await sucursal(e)).applyRequestedAt).toBeNull()
     expect(await devolverAVistaPrevia(e.locationLinkId, cerco, e.variantLinkId)).toBe(false) // ya no hay aplicación pedida
+  })
+
+  it('🔴 P1-1 sin número al importar: un producto que ya existía, importado SIN nivel y leído OK al aplicar, no se pisa: pide elegir', async () => {
+    const e = await crearEscenarioShopify({ linkStatus: 'REVIEWING', initialized: false, stock: 5, mirrorAvailable: 5 })
+    escenarios.push(e) // importedAvailable = null: el catálogo no vio un nivel OK
+    expect((await vista(e)).resumen.porDecidir).toBe(0)
+    await aplicar(e)
+    expect(await applyConnectPage(e.locationLinkId, { fetchLevels: nivelesFalsos(() => nivel(10)), hasAccess: conPlan })).toMatchObject({
+      devuelta: true,
+    })
+    expect(await prisma.shopifyVariantLink.findUniqueOrThrow({ where: { id: e.variantLinkId } })).toMatchObject({
+      importedAvailable: 10,
+      initializedAt: null,
+    })
+    expect(await stock(e.inventoryId)).toBe('5')
+    expect(await deltas(e.productId)).toEqual([])
+    const v = await getConnectReview({ venueId: e.venueId, offset: 0, limit: 20, filtro: 'TODOS' })
+    expect(v.resumen.porDecidir).toBe(1)
+    expect(v.items[0]).toMatchObject({ avoqadoQty: '5', shopifyQty: 10, requiereDecision: true, eleccion: null })
+  })
+
+  it('🔴 refrescar y seguir: elegido con 5/6, Shopify vende uno en línea (lee 5) ⇒ ya no hay qué decidir: ACTIVE sin regresar, los dos en 5', async () => {
+    const e = await enRevision({ stock: 5, importado: 6 })
+    const t = tiendaFalsa(5, 0)
+    await elegir(e, 'AVOQADO', '5', 6)
+    await aplicar(e)
+    expect(await applyConnectPage(e.locationLinkId, { fetchLevels: t.fetchLevels, hasAccess: conPlan })).toEqual({
+      done: false,
+      procesadas: 1,
+    })
+    await aplicarTodo(e, t.fetchLevels)
+    expect((await sucursal(e)).status).toBe('ACTIVE')
+    expect((logAction as jest.Mock).mock.calls.map(c => c[0]).filter(a => a.action === 'SHOPIFY_APPLY_RETURNED')).toEqual([])
+    expect(await prisma.shopifyVariantLink.findUniqueOrThrow({ where: { id: e.variantLinkId } })).toMatchObject({
+      importedAvailable: 5,
+      mirrorAvailable: 5,
+      initializedAt: expect.any(Date),
+    })
+    expect(await deltas(e.productId)).toEqual([])
+    await enviar(t)
+    expect([await stock(e.inventoryId), t.s.available]).toEqual(['5', 5])
+    expect(await huecoDelInvariante(e.productId)).toBe('0')
+  })
+
+  it('🔴 un solo regreso enseña TODAS las filas de la tanda que cambiaron en Shopify; ningún stock se mueve', async () => {
+    const e = await enRevision({ stock: 5, importado: 6 })
+    const otro = await agregarProductoShopify(e, { stock: 3, initialized: false })
+    await prisma.shopifyVariantLink.update({ where: { id: otro.variantLinkId! }, data: { importedAvailable: 5 } })
+    await enTodos(e, 'AVOQADO')
+    await aplicar(e)
+    // Shopify vendió en línea… al revés: subió los dos (7 y 6) entre la vista previa y el aplicar.
+    const lectura = nivelesFalsos(item => nivel(item === 'gid://shopify/InventoryItem/1' ? 7 : 6))
+    expect(await applyConnectPage(e.locationLinkId, { fetchLevels: lectura, hasAccess: conPlan })).toMatchObject({ devuelta: true })
+    const v = await vista(e)
+    expect(v.resumen.porDecidir).toBe(2)
+    const fila = (id: string) => v.items.find(i => i.variantLinkId === id)
+    expect(fila(e.variantLinkId)).toMatchObject({ shopifyQty: 7, requiereDecision: true, eleccion: null })
+    expect(fila(otro.variantLinkId!)).toMatchObject({ shopifyQty: 6, requiereDecision: true, eleccion: null })
+    expect([await stock(e.inventoryId), await stock(otro.inventoryId)]).toEqual(['5', '3'])
+    expect([await deltas(e.productId), await deltas(otro.productId)]).toEqual([[], []])
+    expect((await prisma.shopifyVariantLink.findUniqueOrThrow({ where: { id: otro.variantLinkId! } })).initializedAt).toBeNull()
+    expect((logAction as jest.Mock).mock.calls.map(c => c[0]).filter(a => a.action === 'SHOPIFY_APPLY_RETURNED')).toHaveLength(1)
   })
 
   it('Review Focus 5: el producto elegido pasó a receta antes de aplicar ⇒ se suspende sin encolar ajuste y no frena el ACTIVE', async () => {

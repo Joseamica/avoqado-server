@@ -827,6 +827,9 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
       'antes de cualquier salida automática',
       'la tanda termina y la conexión vuelve a «Así quedará tu stock»',
       'ACTIVE no espera a que los ajustes lleguen',
+      'también cuando el catálogo no vio un nivel OK (`importedAvailable` nulo)',
+      'si con el número nuevo ya no hay nada que decidir, sigue con TOMAR',
+      'refresca `importedAvailable` de las DEMÁS filas de la tanda ya leída',
       'y «Usar el de Avoqado» al conectar (D1, `initializePair(…)`, §4 bis)',
     ])
     expect(regla).not.toContain('**Hueco conocido, aceptado para el piloto:**')
@@ -840,16 +843,21 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     ])
     // P1-1: la lectura fresca se compara ANTES de las dos salidas automáticas (sin decisión y «Shopify»).
     enOrden(cuerpo(mirror, 'async function decisionBajoCandado('), [
-      'd.importedAvailable === null',
-      'S !== d.importedAvailable',
+      'd.importedAvailable === null || S !== d.importedAvailable',
+      'A.equals(pendientes.plus(S))',
       'A.equals(pendientes.plus(d.importedAvailable))',
       'A.minus(S).minus(pendientes)',
     ])
+    // Refrescar lo importado al regresar: sólo la pareja (§10.3, sin Inventory) y con el cerco; nunca stock.
+    const refresco = cuerpo(mirror, 'export async function refrescarLoImportado(')
+    enOrden(refresco, ['bloquearPareja(tx', '!coincide(p, cerco)', "p.linkStatus !== 'REVIEWING'", 'importedAvailable: S'])
+    expect(refresco).not.toMatch(/bloquearInventario|tx\.inventory\.|shopifyStockOutbox|mirrorAvailable/)
     const conexion = leer(`${SHOPIFY}/shopify.connect.service.ts`)
     // P1-3: al primer POR_DECIDIR, regresar y terminar la tanda.
     enOrden(cuerpo(conexion, 'export async function applyConnectPage('), [
       "if (o === 'POR_DECIDIR')",
       'devolverAVistaPrevia(link.id, cerco, p.id)',
+      'refrescarLoImportado(',
       'devuelta: true',
     ])
     // P2-4: con la sucursal FOR UPDATE, la aplicación todavía pedida y el cerco completo.
@@ -893,9 +901,9 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     // ancla de línea ahí no se puede sostener sin romper esta prueba por un cambio ajeno.
     const de = (f: string) => `${SHOPIFY}/shopify.${f}.ts`
     const anclas: Record<string, [string, string]> = {
-      'shopify.connect.service.ts:90': [de('connect.service'), 'export async function startShopifyConnect('],
-      'connect.service.ts:1445': [de('connect.service'), 'export async function disconnectShopify('],
-      'connect.service.ts:639': [de('connect.service'), 'async function aCuarentenaPorReligar('],
+      'shopify.connect.service.ts:91': [de('connect.service'), 'export async function startShopifyConnect('],
+      'connect.service.ts:1455': [de('connect.service'), 'export async function disconnectShopify('],
+      'connect.service.ts:640': [de('connect.service'), 'async function aCuarentenaPorReligar('],
       'shopify.crypto.ts:32': [de('crypto'), 'export function formaDeFirmaOAuth('],
       'catalog.service.ts:68': [de('catalog.service'), 'export const FILTRO_ESTADO'],
       'catalog.service.ts:418': [de('catalog.service'), 'async function bloquearProductos('],
@@ -910,7 +918,7 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     }
     // Las cortas (`:N`) son del archivo que la regla acaba de nombrar.
     const cortas: Record<string, [string, string]> = {
-      '`:62`': [de('connect.service'), 'const tiendasPiloto'],
+      '`:63`': [de('connect.service'), 'const tiendasPiloto'],
       '`:47`': [de('crypto'), 'export function verifyOAuthQueryHmac('],
       '`:1188`': [de('catalog.service'), 'export async function archivarPareja('],
     }
