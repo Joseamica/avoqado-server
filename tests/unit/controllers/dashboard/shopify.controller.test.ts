@@ -18,6 +18,7 @@ const mockConnect = {
   confirmShopifyConnect: jest.fn(),
   getConnectReview: jest.fn(),
   requestApplyShopifyConnect: jest.fn(),
+  saveConnectChoices: jest.fn(),
   disconnectShopify: jest.fn(),
 }
 // C3: `@/app` monta el callback con `SHOPIFY_OAUTH_CALLBACK_PATH` de este módulo; las constantes quedan reales.
@@ -38,6 +39,7 @@ const mockPanel = { requestShopifyResync: jest.fn(), reauthorizeShopDomain: jest
 jest.mock('@/services/commerce-channels/shopify/shopify.dashboard.service', () => mockPanel)
 
 import { globalErrorHandler } from '@/app'
+import { MAX_ELECCIONES } from '@/services/commerce-channels/shopify/shopify.connect.service'
 import shopifyRouter from '@/routes/dashboard/shopify.routes'
 
 const app = express()
@@ -210,6 +212,133 @@ describe('controller de Shopify: lo que llega a los servicios y lo que vuelve', 
     const r = await request(app).post(`${B}/connect/start`).send({ shopDomain: 'otra.myshopify.com' })
     expect(r.status).toBe(409)
     expect(r.body.code).toBe('SHOPIFY_SOLO_PILOTO')
+  })
+
+  const VISTA = { linkId: 'l1', generation: 1, tokenVersion: 1 }
+  const UNA = { variantLinkId: 'vl1', choice: 'AVOQADO', expectedAvoqadoQty: '5', expectedShopifyQty: 6 }
+
+  it('D1: guardar elecciones manda la conexión vista y las elecciones, con el negocio de la ruta y quién eligió', async () => {
+    mockConnect.saveConnectChoices.mockResolvedValue({ guardadas: 1, porDecidir: 2 })
+    const r = await request(app)
+      .post(`${B}/connect/choices`)
+      .send({ vista: VISTA, elecciones: [UNA] })
+    expect(r.status).toBe(200)
+    expect(r.body).toEqual({ success: true, data: { guardadas: 1, porDecidir: 2 } })
+    expect(mockConnect.saveConnectChoices).toHaveBeenCalledWith({
+      venueId: 'v1',
+      staffId: 'u1',
+      vista: VISTA,
+      elecciones: [UNA],
+      todos: undefined,
+    })
+  })
+
+  it('D1: «en todos» viaja por la misma ruta', async () => {
+    mockConnect.saveConnectChoices.mockResolvedValue({ guardadas: 30, porDecidir: 0 })
+    await request(app).post(`${B}/connect/choices`).send({ vista: VISTA, todos: 'SHOPIFY' })
+    expect(mockConnect.saveConnectChoices).toHaveBeenCalledWith({
+      venueId: 'v1',
+      staffId: 'u1',
+      vista: VISTA,
+      elecciones: undefined,
+      todos: 'SHOPIFY',
+    })
+  })
+
+  it('🔴 D1: el negocio sale de la URL; un venueId en el body se rechaza y quién eligió sale de la sesión, no del body', async () => {
+    const r = await request(app).post(`${B}/connect/choices`).send({ vista: VISTA, todos: 'AVOQADO', venueId: 'otro', staffId: 'otro' })
+    expect(r.status).toBe(400)
+    expect(mockConnect.saveConnectChoices).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['sin la conexión vista', { elecciones: [UNA] }, 'Falta la conexión que viste'],
+    ['las dos cosas a la vez', { vista: VISTA, elecciones: [UNA], todos: 'AVOQADO' }, 'no las dos'],
+    ['ninguna', { vista: VISTA }, 'no las dos'],
+    // Una lista vacía sin `todos` llegaba al servicio y reventaba como un 500 (`Prisma.join([])`): la guarda es la forma.
+    ['sin elecciones', { vista: VISTA, elecciones: [] }, 'Elige al menos un producto'],
+    ['una lista vacía aunque venga «en todos»', { vista: VISTA, elecciones: [], todos: 'AVOQADO' }, 'Elige al menos un producto'],
+    ['una lista que no es lista', { vista: VISTA, elecciones: UNA }, 'Las elecciones van en una lista'],
+    ['«en todos» con una opción que no existe', { vista: VISTA, todos: 'AMBOS' }, 'Elige Avoqado o Shopify para todos'],
+    [
+      'más de 50',
+      { vista: VISTA, elecciones: Array.from({ length: 51 }, (_, n) => ({ ...UNA, variantLinkId: `vl${n}` })) },
+      'Máximo 50 productos por vez',
+    ],
+    ['una opción que no existe', { vista: VISTA, elecciones: [{ ...UNA, choice: 'AMBOS' }] }, 'Elige Avoqado o Shopify'],
+    ['sin lo que vio', { vista: VISTA, elecciones: [{ variantLinkId: 'vl1', choice: 'SHOPIFY' }] }, 'Faltan las cantidades que viste'],
+    [
+      'una cantidad fuera de rango',
+      { vista: VISTA, elecciones: [{ ...UNA, expectedShopifyQty: 2 ** 60 }] },
+      'La cantidad de Shopify no es válida',
+    ],
+    [
+      'una cantidad con decimales',
+      { vista: VISTA, elecciones: [{ ...UNA, expectedShopifyQty: 6.5 }] },
+      'La cantidad de Shopify no es válida',
+    ],
+    ['una cantidad de Avoqado que no es texto', { vista: VISTA, elecciones: [{ ...UNA, expectedAvoqadoQty: 5 }] }, 'debe ir como texto'],
+    ['un producto sin id', { vista: VISTA, elecciones: [{ ...UNA, variantLinkId: '' }] }, 'Falta el producto'],
+    [
+      'una conexión vista sin número de generación',
+      { vista: { linkId: 'l1', tokenVersion: 1 }, todos: 'AVOQADO' },
+      'Falta la conexión que viste',
+    ],
+    [
+      'una conexión vista con una versión fuera de rango',
+      { vista: { ...VISTA, tokenVersion: 2 ** 60 }, todos: 'AVOQADO' },
+      'La conexión no es válida',
+    ],
+    ['una conexión vista sin id', { vista: { ...VISTA, linkId: '' }, todos: 'AVOQADO' }, 'Falta la conexión que viste'],
+    ['un campo de más', { vista: VISTA, todos: 'AVOQADO', venueId: 'otro' }, 'Hay un campo que no se esperaba'],
+    [
+      'un campo de más dentro de una elección',
+      { vista: VISTA, elecciones: [{ ...UNA, productId: 'p1' }] },
+      'Hay un campo que no se esperaba',
+    ],
+  ])('D1: guardar con %s ⇒ 400 en español y el servicio ni se llama', async (_c, body, texto) => {
+    const r = await request(app).post(`${B}/connect/choices`).send(body)
+    expect(r.status).toBe(400)
+    expect(JSON.stringify(r.body)).toContain(texto)
+    expect(mockConnect.saveConnectChoices).not.toHaveBeenCalled()
+  })
+
+  it('D1: el tope de la forma es el MISMO del servicio (MAX_ELECCIONES): exactamente el tope pasa, uno más no', async () => {
+    mockConnect.saveConnectChoices.mockResolvedValue({ guardadas: MAX_ELECCIONES, porDecidir: 0 })
+    const lista = (n: number) => Array.from({ length: n }, (_, k) => ({ ...UNA, variantLinkId: `vl${k}` }))
+    expect(
+      (
+        await request(app)
+          .post(`${B}/connect/choices`)
+          .send({ vista: VISTA, elecciones: lista(MAX_ELECCIONES) })
+      ).status,
+    ).toBe(200)
+    expect(
+      (
+        await request(app)
+          .post(`${B}/connect/choices`)
+          .send({ vista: VISTA, elecciones: lista(MAX_ELECCIONES + 1) })
+      ).status,
+    ).toBe(400)
+    expect(mockConnect.saveConnectChoices).toHaveBeenCalledTimes(1)
+  })
+
+  it('D1: una pantalla vieja llega como 409 con su código; «Aplicar» con decisiones pendientes como 422', async () => {
+    mockConnect.saveConnectChoices.mockRejectedValue(
+      new ConflictError(
+        'La conexión con Shopify cambió desde que viste la lista: vuelve a cargar la vista previa.',
+        'SHOPIFY_CONEXION_CAMBIO',
+      ),
+    )
+    const g = await request(app).post(`${B}/connect/choices`).send({ vista: VISTA, todos: 'AVOQADO' })
+    expect(g.status).toBe(409)
+    expect(g.body.code).toBe('SHOPIFY_CONEXION_CAMBIO')
+    mockConnect.requestApplyShopifyConnect.mockRejectedValue(
+      new ValidationError('Falta elegir en 2 productos qué número se queda.', 'SHOPIFY_FALTAN_DECISIONES'),
+    )
+    const r = await request(app).post(`${B}/connect/apply`).send({})
+    expect(r.status).toBe(422)
+    expect(r.body).toEqual({ message: 'Falta elegir en 2 productos qué número se queda.', code: 'SHOPIFY_FALTAN_DECISIONES' })
   })
 
   it('aplicar, desconectar y cuadrar devuelven su confirmación', async () => {

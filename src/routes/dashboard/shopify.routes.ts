@@ -27,6 +27,8 @@ router.post('/connect/confirm', validateRequest(s.confirmSchema), ...gate(MANAGE
 // Sin plan: la vista previa sólo LEE lo que ya se importó; aplicar sí lo pide.
 router.get('/connect/review', validateRequest(s.connectReviewSchema), checkPermission(MANAGE), ctrl.getConnectReview)
 router.post('/connect/apply', validateRequest(s.soloVenueSchema), ...gate(MANAGE), ctrl.applyConnect)
+// D1: la elección por producto o «en todos» (guardarla no toca stock; aplicar la revalida).
+router.post('/connect/choices', validateRequest(s.connectChoicesSchema), ...gate(MANAGE), ctrl.saveConnectChoices)
 // Sin plan, a propósito: quien lo perdió siempre puede salir.
 router.post('/disconnect', validateRequest(s.soloVenueSchema), checkPermission(MANAGE), ctrl.disconnect)
 router.post('/resync', validateRequest(s.soloVenueSchema), ...gate(MANAGE), ctrl.resync)
