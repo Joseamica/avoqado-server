@@ -96,6 +96,10 @@ solo `next()` los deja fuera y el log de cierre —el que la gente busca— pier
 **registro** del callback, no en el de su ejecución.
 
 **4. El campo explícito del sitio de llamada siempre gana** sobre el ambiental. Quien llama sabe algo que el contexto no.
+🔴 Corolario (7-oct-2026): **no escribas `authContext.venueId` (el del TOKEN) como campo de un log de petición.** `checkPermission` publica
+al contexto el venue de la OPERACIÓN (URL → `x-venue-id` → token) y tu campo explícito lo pisa: la línea sale con el `venueId` de un negocio
+y el `venueName` de otro. Le pasó a `Request End` —ahora lee `getContext()?.venueId` y deja el token de respaldo, fijado en
+`tests/unit/observability/effectiveVenueContext.test.ts`—; el patrón sigue en dos líneas de error de `checkFeatureAccess.middleware.ts`.
 
 **5. Nada de texto crudo del cliente como campo de log.** El `X-Correlation-ID` entrante pasa por `sanitizeCorrelationId`: acota longitud y
 charset, y rechaza arrays (Express entrega array cuando el header llega dos veces). Un header hostil **nunca** es error: se genera uno nuevo

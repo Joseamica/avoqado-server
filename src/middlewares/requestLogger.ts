@@ -1,6 +1,6 @@
 import { Request, Response, NextFunction } from 'express'
 import logger from '../config/logger' // Ajusta la ruta si es necesario
-import { runWithContext } from '../observability/executionContext'
+import { getContext, runWithContext } from '../observability/executionContext'
 import { CORRELATION_HEADER, resolveCorrelationId } from '../observability/correlationId'
 import { normalizeEntrypoint, redactPathSecrets } from '../observability/entrypoint'
 
@@ -137,7 +137,11 @@ export const requestLoggerMiddleware = (req: Request, res: Response, next: NextF
         const authFields: Record<string, any> = {}
         if (authContext) {
           authFields.userId = authContext.userId
-          authFields.venueId = authContext.venueId
+          // 🔴 El venue de la OPERACIÓN (el que `checkPermission` publicó al contexto: URL → `x-venue-id` → token), no el del token:
+          // un campo explícito gana al ambiental (`logContext.ts`), y escribir aquí `authContext.venueId` pisaba esa corrección y la
+          // línea salía con el venueId del token junto al venueName del venue operado. El token queda de respaldo para una
+          // autenticación que no estampó el contexto.
+          authFields.venueId = getContext()?.venueId ?? authContext.venueId
           authFields.role = authContext.role
           if (authContext.terminalSerialNumber) {
             authFields.terminal = authContext.terminalSerialNumber
