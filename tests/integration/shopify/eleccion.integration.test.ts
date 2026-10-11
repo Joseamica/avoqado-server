@@ -6,7 +6,9 @@
  */
 import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
+import logger from '@/config/logger'
 import { logAction } from '@/services/dashboard/activity-log.service'
+import * as mirror from '@/services/commerce-channels/shopify/shopify.mirror.service'
 import {
   applyConnectPage,
   devolverAVistaPrevia,
@@ -280,6 +282,18 @@ describe('D1 · «Aplicar» se niega mientras falte alguna', () => {
     expect((await prisma.shopifyLocationLink.findUniqueOrThrow({ where: { id: e.locationLinkId } })).applyRequestedAt).toBeNull()
     await elegir(e, 'AVOQADO', '4', 6) // vuelve a elegir con lo de ahora
     await expect(aplicar(e)).resolves.toMatchObject({ applyRequestedAt: expect.any(Date) })
+  })
+
+  it('el texto de «faltan decisiones» nombra los botones de ahora («… en los que faltan»), no los de antes («… en todos»)', async () => {
+    const e = await enRevision({ stock: 5, importado: 6 })
+    const err = await aplicar(e).then(
+      () => null,
+      (x: unknown) => x as { code: string; message: string },
+    )
+    expect(err).toMatchObject({ code: 'SHOPIFY_FALTAN_DECISIONES' })
+    expect(err!.message).toContain('«Usar Avoqado en los que faltan»')
+    expect(err!.message).toContain('«Usar Shopify en los que faltan»')
+    expect(err!.message).not.toContain('en todos')
   })
 
   it('🔴 una elección de otra generación o de otra credencial no cuenta', async () => {
@@ -648,6 +662,44 @@ describe('D1 · aplicar la elección dentro de la tx de cada producto', () => {
     expect([await deltas(e.productId), await deltas(otro.productId)]).toEqual([[], []])
     expect((await prisma.shopifyVariantLink.findUniqueOrThrow({ where: { id: otro.variantLinkId! } })).initializedAt).toBeNull()
     expect((logAction as jest.Mock).mock.calls.map(c => c[0]).filter(a => a.action === 'SHOPIFY_APPLY_RETURNED')).toHaveLength(1)
+  })
+
+  it('🔴 el refresco de UNA fila que falla (mejor esfuerzo, ya de regreso) no tumba la unidad: sigue con las demás, avisa en el log y devuelve devuelta', async () => {
+    const e = await enRevision({ stock: 5, importado: 6 })
+    const falla = await agregarProductoShopify(e, { stock: 3, initialized: false })
+    const sigue = await agregarProductoShopify(e, { stock: 4, initialized: false })
+    await prisma.shopifyVariantLink.update({ where: { id: falla.variantLinkId! }, data: { importedAvailable: 5 } })
+    await prisma.shopifyVariantLink.update({ where: { id: sigue.variantLinkId! }, data: { importedAvailable: 5 } })
+    // El orden de la tanda es por id: la que falla va ANTES de la que sigue (si el error cortara el ciclo, la segunda no se refrescaría).
+    expect([e.variantLinkId < falla.variantLinkId!, falla.variantLinkId! < sigue.variantLinkId!]).toEqual([true, true])
+    await enTodos(e, 'AVOQADO')
+    await aplicar(e)
+    const lectura = nivelesFalsos(item => nivel(item === 'gid://shopify/InventoryItem/1' ? 7 : 6))
+    const original = mirror.refrescarLoImportado
+    const refresco = jest.spyOn(mirror, 'refrescarLoImportado').mockImplementation(async (variantLinkId, S, cerco) => {
+      if (variantLinkId === falla.variantLinkId) throw new Error('se cayó la base a media tanda')
+      return original(variantLinkId, S, cerco)
+    })
+    ;(logger.warn as jest.Mock).mockClear()
+    try {
+      // No lanza: el regreso a la vista previa ya estaba confirmado y el refresco es un paso de mejor esfuerzo.
+      expect(await applyConnectPage(e.locationLinkId, { fetchLevels: lectura, hasAccess: conPlan })).toMatchObject({ devuelta: true })
+      expect(refresco.mock.calls.map(c => c[0])).toEqual([falla.variantLinkId, sigue.variantLinkId]) // intentó las dos
+    } finally {
+      refresco.mockRestore()
+    }
+    // De regreso en la vista previa (sin «Aplicar» pedido), una sola vez.
+    expect(await sucursal(e)).toMatchObject({ status: 'REVIEWING', applyRequestedAt: null })
+    expect((logAction as jest.Mock).mock.calls.map(c => c[0]).filter(a => a.action === 'SHOPIFY_APPLY_RETURNED')).toHaveLength(1)
+    // La que falló se queda con lo que tenía; la siguiente SÍ tomó el número nuevo; ningún stock se mueve.
+    expect((await prisma.shopifyVariantLink.findUniqueOrThrow({ where: { id: falla.variantLinkId! } })).importedAvailable).toBe(5)
+    expect((await prisma.shopifyVariantLink.findUniqueOrThrow({ where: { id: sigue.variantLinkId! } })).importedAvailable).toBe(6)
+    expect([await stock(e.inventoryId), await stock(falla.inventoryId), await stock(sigue.inventoryId)]).toEqual(['5', '3', '4'])
+    // El log dice cuál sucursal, cuál pareja y por qué.
+    const avisos = (logger.warn as jest.Mock).mock.calls.map(c => String(c[0])).filter(m => m.includes(falla.variantLinkId!))
+    expect(avisos).toHaveLength(1) // sólo la fila que falló, una vez
+    expect(avisos[0]).toContain(e.locationLinkId)
+    expect(avisos[0]).toContain('se cayó la base a media tanda')
   })
 
   it('Review Focus 5: el producto elegido pasó a receta antes de aplicar ⇒ se suspende sin encolar ajuste y no frena el ACTIVE', async () => {

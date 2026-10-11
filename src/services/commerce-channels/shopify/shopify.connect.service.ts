@@ -984,7 +984,7 @@ export async function contarPorDecidir(db: Prisma.TransactionClient, link: Conte
 
 const faltanDecisiones = (n: number) =>
   new ValidationError(
-    `Falta elegir en ${n === 1 ? '1 producto' : `${n} productos`} qué número se queda: en «Cambian», elige «Usar el de Avoqado» o «Usar el de Shopify» en cada uno (o «… en todos») y vuelve a aplicar.`,
+    `Falta elegir en ${n === 1 ? '1 producto' : `${n} productos`} qué número se queda: en «Cambian», elige «Usar el de Avoqado» o «Usar el de Shopify» en cada uno (o «Usar Avoqado en los que faltan» / «Usar Shopify en los que faltan») y vuelve a aplicar.`,
     'SHOPIFY_FALTAN_DECISIONES',
   )
 const revisionCambio = () =>
@@ -1247,7 +1247,19 @@ export async function applyConnectPage(
         if (otra.id === p.id) continue
         if (restante(deps.vence) < MIN_ESCRITURA_MS) break
         const n = r.data.get(levelKey(link.shopifyLocationId, otra.inventoryItemId))
-        if (n?.kind === 'OK') await refrescarLoImportado(otra.id, n.available, cerco)
+        if (n?.kind !== 'OK') continue
+        // Mejor esfuerzo, A PROPÓSITO: el regreso a la vista previa ya se confirmó (y es lo único que movió algo). Si el refresco de
+        // UNA fila falla, la unidad no debe contarse como fallida (el worker esperaría `ESPERA_FALLA_MS` por un regreso que sí
+        // ocurrió): se avisa en el log y se sigue con las demás; la fila sin refrescar la vuelve a ver el siguiente «Aplicar».
+        // (Un envoltorio de contexto nunca se traga errores; éste es un paso aparte, posterior al trabajo ya confirmado.)
+        try {
+          await refrescarLoImportado(otra.id, n.available, cerco)
+        } catch (err) {
+          logger.warn(
+            `[SHOPIFY] sucursal ${link.id}: no se pudo refrescar lo importado de la pareja ${otra.id} al regresar a la vista previa; ` +
+              `el siguiente «Aplicar» la vuelve a ver: ${(err as Error).message}`,
+          )
+        }
       }
       return { done: false, procesadas, devuelta: true }
     }

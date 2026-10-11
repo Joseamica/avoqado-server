@@ -423,7 +423,9 @@ export function registerShopifyTools(server: McpServer, scope: McpScope) {
           return text({
             ...comun,
             resumen: v.resumen,
+            // Aquí ya no falta nada por elegir: con «todos» se firma igual (no cambia nada), pero se dice con todas sus letras.
             explicacion:
+              (todos ? 'No falta ningún producto por elegir; «todos» no cambia nada. ' : '') +
               'Cada producto emparejado tomará el número que tenga Shopify al aplicarse (puede no ser el de la vista previa si alguien vende mientras tanto). Las ventas hechas mientras se conectaba se respetan. Después, cada venta, devolución o pedido en línea se refleja en los dos lados.',
           })
         }

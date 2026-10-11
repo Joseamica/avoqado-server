@@ -164,7 +164,7 @@ espejo dejaría la cuenta en 11 contra las 12 piezas de Avoqado. Si hay filas vi
   y después la tienda `FOR SHARE` (`mirror.service.ts:372`). Quien la llame lo hace antes de cualquier candado de pareja, fila o cerco, o en
   una tx propia (el mensajero: tx de 15 s, porque avisa por dentro). `FOR NO KEY UPDATE` y no `FOR UPDATE`: no frena el `FOR KEY SHARE` de
   quien inserte una pareja con llave foránea a la sucursal.
-- **Desconectar** (`disconnectShopify(…)`, `connect.service.ts:1455`) bloquea primero TODAS las sucursales de la tienda por id (la propia
+- **Desconectar** (`disconnectShopify(…)`, `connect.service.ts:1467`) bloquea primero TODAS las sucursales de la tienda por id (la propia
   `FOR UPDATE`, las hermanas `FOR NO KEY UPDATE`), después las parejas de ESA sucursal, ordenadas por id, y sólo entonces sube la
   generación. Nunca la propia y luego una hermana de id menor: se cruzaría con quien las toma por id (el drenado, diferir, renovar la
   credencial). `renovarCredencial` (reconectar o reautorizar) también bloquea todas las sucursales de la tienda por id ANTES de la tienda.
@@ -186,7 +186,7 @@ espejo dejaría la cuenta en 11 contra las 12 piezas de Avoqado. Si hay filas vi
 Spec: `specs/2026-10-10-conector-shopify-d1-eleccion-por-producto-design.md`. Al conectar o reconectar, un producto que YA existía en
 Avoqado (`createdProduct = false`), sin iniciar ni suspendido, con `Inventory`, y cuyo stock no es `importedAvailable + Σ vivas` (también
 con cero, y también en la primera conexión) pide que el dueño elija: «Usar el de Avoqado» o «Usar el de Shopify», sin preselección (o «Usar
-Avoqado en todos» / «Usar Shopify en todos» para los que faltan). Los productos que creó la importación toman Shopify sin preguntar.
+Avoqado en los que faltan» / «Usar Shopify en los que faltan»). Los productos que creó la importación toman Shopify sin preguntar.
 
 - **Dónde vive:** en la pareja (`connectChoice`, `connectChoiceGeneration`, `connectChoiceTokenVersion`, `connectSeenAvoqadoQty`,
   `connectSeenShopifyQty`, `connectChoiceById`), migración `…_shopify_eleccion_conexion`. Vale sólo en la generación y con la credencial con
@@ -211,7 +211,8 @@ Avoqado en todos» / «Usar Shopify en todos» para los que faltan). Los product
 - **Al primer `POR_DECIDIR`** de una tanda, la tanda termina y la conexión vuelve a «Así quedará tu stock» (`devolverAVistaPrevia(…)`:
   sucursal `FOR UPDATE`, aplicación todavía pedida y `cercoVigente(…)` completo; `applyRequestedAt = null`, `SHOPIFY_APPLY_RETURNED`). Ya de
   regreso, refresca `importedAvailable` de las DEMÁS filas de la tanda ya leída cuyo nivel cambió (`refrescarLoImportado(…)`: sólo la
-  pareja, con el mismo cerco, sin stock ni espejo; lo que no alcance el tiempo lo ve el siguiente «Aplicar»), para que un regreso enseñe
+  pareja, con el mismo cerco, sin stock ni espejo; lo que no alcance el tiempo lo ve el siguiente «Aplicar»; un fallo de UNA fila se
+  registra en el log y se sigue: es mejor esfuerzo, el regreso ya ocurrió y la unidad no se cuenta como fallida), para que un regreso enseñe
   todo lo que hay que volver a elegir. Lo ya aplicado no se repite: su ajuste conserva su única fila.
 - **ACTIVE no espera a que los ajustes lleguen:** `terminarAplicacion` no cambia; el ajuste es una fila PENDING no ambigua de una pareja ya
   iniciada (no la frena `envioEnCamino(…)` ni la descarta `SIN_PAREJA`) y sale con el mensajero en cuanto la sucursal está ACTIVE.
