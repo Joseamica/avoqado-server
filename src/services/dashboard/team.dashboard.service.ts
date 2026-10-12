@@ -296,6 +296,7 @@ export async function getTeamMember(venueId: string, teamMemberId: string) {
               name: true,
             },
           },
+          timezone: true,
         },
       },
     },
@@ -304,6 +305,12 @@ export async function getTeamMember(venueId: string, teamMemberId: string) {
   if (!staffVenue) {
     throw new NotFoundError('Team member not found')
   }
+
+  // RH: sus puestos vigentes hoy, con la MISMA definición que la lista de Personas (una consulta indexada).
+  // `timezone` sólo se lee para «hoy»: el objeto `venue` de la respuesta no cambia.
+  const { timezone, ...venue } = staffVenue.venue
+  const vigentes = await asignacionesVigentes(venueId, [staffVenue.staffId], hoyDeLaSede(timezone ?? 'America/Mexico_City'))
+  const currentAssignments = vigentes.get(staffVenue.staffId) ?? []
 
   // Calculate real-time stats from orders (for sales and order count)
   const orderStats = await prisma.order.aggregate({
@@ -367,7 +374,8 @@ export async function getTeamMember(venueId: string, teamMemberId: string) {
     totalTips,
     totalOrders,
     averageRating,
-    venue: staffVenue.venue,
+    venue,
+    currentAssignments,
   }
 }
 

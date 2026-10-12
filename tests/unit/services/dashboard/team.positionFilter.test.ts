@@ -1,7 +1,7 @@
 // Lista de Personas (spec RH §6): filtro por puesto SIN perder el filtro de pertenencia a la organización, orden estable
 // y el puesto vigente de cada fila en un solo query por página.
 import { prismaMock } from '@tests/__helpers__/setup'
-import { getTeamMembers } from '@/services/dashboard/team.dashboard.service'
+import { getTeamMember, getTeamMembers } from '@/services/dashboard/team.dashboard.service'
 import * as teamService from '@/services/dashboard/team.dashboard.service'
 import { getTeamMembers as getTeamMembersController } from '@/controllers/dashboard/team.dashboard.controller'
 
@@ -157,5 +157,32 @@ describe('getTeamMembers: superadmins ocultos fuera del total', () => {
     await getTeamMembersController(req, res, jest.fn())
     expect(spy).toHaveBeenCalledWith(SEDE, 2, 20, 'ana', PUESTO, 'OWNER')
     spy.mockRestore()
+  })
+})
+
+// Fix round 3: la ficha de una persona trae sus puestos vigentes, con la MISMA definición que la lista.
+describe('getTeamMember: currentAssignments', () => {
+  beforeEach(() => {
+    prismaMock.staffVenue.findFirst.mockResolvedValue({
+      ...fila('staff-a'),
+      staffId: 'staff-a',
+      venue: { name: 'Sede', organization: { name: 'Org' }, timezone: 'America/Mexico_City' },
+    })
+    prismaMock.order.aggregate.mockResolvedValue({ _sum: { total: 0 }, _count: 0 })
+    prismaMock.payment.aggregate.mockResolvedValue({ _sum: { tipAmount: 0 } })
+    prismaMock.review.aggregate.mockResolvedValue({ _avg: { overallRating: null } })
+  })
+
+  it('trae los puestos vigentes con UNA consulta para [staffId] y no cambia el objeto venue', async () => {
+    const r: any = await getTeamMember(SEDE, 'sv-staff-a')
+    expect(prismaMock.staffAssignment.findMany).toHaveBeenCalledTimes(1)
+    expect(prismaMock.staffAssignment.findMany.mock.calls[0][0].where).toMatchObject({ venueId: SEDE, staffId: { in: ['staff-a'] } })
+    expect(r.currentAssignments).toEqual([expect.objectContaining({ id: 'as-1', positionName: 'Mesero', effectiveFrom: '2026-09-01' })])
+    expect(r.venue).toEqual({ name: 'Sede', organization: { name: 'Org' } })
+  })
+
+  it('sin puesto vigente ⇒ currentAssignments: []', async () => {
+    prismaMock.staffAssignment.findMany.mockResolvedValue([])
+    expect(((await getTeamMember(SEDE, 'sv-staff-a')) as any).currentAssignments).toEqual([])
   })
 })
