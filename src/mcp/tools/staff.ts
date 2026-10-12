@@ -84,7 +84,7 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'list_staff',
-    'List the team (roster) of a venue you can access: each member\'s membership id, staff id, name, role and whether their account is active. The IDs can be passed to reservation staff/schedule tools. Optionally filter by name or only active members. Pass venueId. Answers "who works here / who is on my team?". For sales performance use staff_ranking instead. Cada persona trae sus puestos vigentes hoy (nombre, relación —«Sin definir» si no se ha indicado— y desde cuándo) con los ids para terminar una asignación.',
+    'List the team (roster) of a venue you can access: each member\'s membership id, staff id, name, role and whether their account is active. The IDs can be passed to reservation staff/schedule tools. Optionally filter by name or only active members. Pass venueId. Answers "who works here / who is on my team?". For sales performance use staff_ranking instead. Cada persona trae sus puestos vigentes hoy (nombre, relación —«Sin definir» si no se ha indicado— y desde cuándo; no se incluyen en sucursales de marca blanca) con los ids para terminar una asignación.',
     {
       venueId: z.string().describe('Venue whose team to list (must be in your scope)'),
       search: z.string().optional().describe('Filter by name (partial, case-insensitive)'),

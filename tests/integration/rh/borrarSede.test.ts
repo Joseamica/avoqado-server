@@ -9,6 +9,15 @@ jest.mock('@/services/modules/module.service', () => ({
   moduleService: { isModuleEnabled: jest.fn().mockResolvedValue(false) },
 }))
 
+// deleteVenue borra también la carpeta de la sede en el almacenamiento (Firebase): aquí nunca debe salir una llamada de red,
+// aunque haya credenciales reales en el entorno.
+const mockDeleteVenueFolder = jest.fn().mockResolvedValue(true)
+jest.mock('@/services/storage.service', () => ({
+  ...jest.requireActual('@/services/storage.service'),
+  deleteVenueFolder: (...a: unknown[]) => mockDeleteVenueFolder(...a),
+  deleteFileFromStorage: jest.fn().mockResolvedValue(true),
+}))
+
 // Borrar una sede de prueba (TRIAL) que ya tiene puestos de RH: puesto y asignación caen los dos con el cascade del venue,
 // y la asignación referencia su puesto con RESTRICT. El orden lo decidía Postgres.
 const key = `rh1a-borrarsede-${process.pid}-${Date.now()}`
@@ -51,6 +60,7 @@ it('deleteVenue (real) borra una sede TRIAL con puestos y una cadena de asignaci
 
   await expect(deleteVenue(orgId!, venueId!)).resolves.toBeUndefined()
 
+  expect(mockDeleteVenueFolder).toHaveBeenCalledWith(key) // la carpeta se pidió borrar por el mock, no por la red
   expect(await prisma.venue.count({ where: { id: venueId } })).toBe(0)
   expect(await prisma.staffPosition.count({ where: { venueId } })).toBe(0)
   expect(await prisma.staffAssignment.count({ where: { venueId } })).toBe(0)

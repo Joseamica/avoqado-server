@@ -1088,7 +1088,7 @@ model Staff {
   /// Puestos que esta persona ha ocupado (RH fase 1a). Restrict: no se borra a alguien con historial de puestos.
   staffAssignments StaffAssignment[]
 
-  areaTicketsIssued            AreaTicket[]                   @relation("AreaTicketIssuedByStaff")
+  areaTicketsIssued             AreaTicket[]                   @relation("AreaTicketIssuedByStaff")
   areaTicketCheckoutSessions    AreaTicketCheckoutSession[]    @relation("AreaTicketCheckoutStaff")
   areaTicketPrintAttempts       AreaTicketPrintAttempt[]       @relation("AreaTicketPrintStaff")
   areaTicketFulfillments        AreaTicketFulfillment[]        @relation("AreaTicketFulfillmentStaff")

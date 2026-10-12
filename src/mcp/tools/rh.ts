@@ -5,6 +5,7 @@ import AppError from '@/errors/AppError'
 import prisma from '@/utils/prismaClient'
 import { asignarPuesto, terminarAsignacion, type AsignacionDto } from '@/services/dashboard/rh/asignaciones.service'
 import { asegurarSedeNoMarcaBlanca } from '@/services/dashboard/rh/marcaBlanca'
+import { hoyDeLaSede } from '@/services/dashboard/rh/vigencias'
 import { archivarPuesto, crearPuesto, listarPuestos, type PuestoDto } from '@/services/dashboard/rh/puestos.service'
 import { auditMcpWrite } from '../audit'
 import { createGuard } from '../guard'
@@ -40,6 +41,15 @@ const puestoVista = (p: PuestoDto) => ({
 })
 const asignacionVista = (a: AsignacionDto) => ({ ...a, relation: a.relation ?? SIN_DEFINIR })
 const nombreDe = (p: { firstName: string; lastName: string }) => `${p.firstName} ${p.lastName}`.trim()
+
+/**
+ * «Hoy» en la fecha civil de la sede (AAAA-MM-DD). La vista previa la devuelve en el nivel de arriba (`fecha`) para que la
+ * confirmación firmada ate el día que la persona VIO, aunque el reintento pase la medianoche (mismo patrón que Pago al personal).
+ */
+async function hoyDeLaSedeCivil(venueId: string): Promise<string> {
+  const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
+  return hoyDeLaSede(venue?.timezone ?? 'America/Mexico_City')
+}
 
 /** Un rechazo de negocio del servicio (español, escrito para el operador) vuelve como respuesta; lo inesperado sube y lo sanea instrument.ts. */
 function rechazo(err: unknown) {
@@ -161,11 +171,15 @@ export function registerRhTools(server: McpServer, scope: McpScope) {
         })
       }
       let p: PuestoDto
+      const antes = Date.now()
       try {
         p = await archivarPuesto({ venueId, actorId: scope.staffId, positionId })
       } catch (err) {
         return rechazo(err)
       }
+      // Ya estaba archivado (otra persona lo archivó entre la vista previa y ahora): el servicio devuelve su archivedAt de antes
+      // y no cambió nada, así que no se escribe una auditoría que diga que esta conexión lo archivó.
+      if (p.archivedAt && new Date(p.archivedAt).getTime() < antes) return text({ ok: true, puesto: puestoVista(p) })
       await auditMcpWrite(scope, {
         action: 'STAFF_POSITION_ARCHIVED',
         entity: 'StaffPosition',
@@ -202,11 +216,13 @@ export function registerRhTools(server: McpServer, scope: McpScope) {
         if (!persona.active) return text({ ok: false, error: 'Esa persona no está activa en este negocio.' })
         if (!puesto) return text({ ok: false, error: 'Ese puesto no existe en esta sucursal.' })
         if (puesto.archivedAt) return text({ ok: false, error: `El puesto «${puesto.name}» está archivado. Elige otro.` })
+        const desde = fecha ?? (await hoyDeLaSedeCivil(venueId))
         return text({
           ok: false,
           requiresConfirmation: true,
-          preview: { persona: nombreDe(persona.staff), puesto: puesto.name, relacion: relation ?? SIN_DEFINIR, fecha: fecha ?? 'hoy' },
-          message: `Esto ASIGNARÁ el puesto «${puesto.name}» a ${nombreDe(persona.staff)} (relación: ${relation ?? SIN_DEFINIR}, desde ${fecha ?? 'hoy'}). No cambia su rol ni sus permisos. Vuelve a llamar con confirm:true para asignarlo.`,
+          fecha: desde, // arriba, no sólo en `preview`: así la firma de la confirmación ata este día
+          preview: { persona: nombreDe(persona.staff), puesto: puesto.name, relacion: relation ?? SIN_DEFINIR, fecha: desde },
+          message: `Esto ASIGNARÁ el puesto «${puesto.name}» a ${nombreDe(persona.staff)} (relación: ${relation ?? SIN_DEFINIR}, desde ${desde}). No cambia su rol ni sus permisos. Vuelve a llamar con confirm:true para asignarlo.`,
         })
       }
       let a: AsignacionDto
@@ -244,11 +260,13 @@ export function registerRhTools(server: McpServer, scope: McpScope) {
         })
         if (!actual) return text({ ok: false, error: 'Esa asignación no existe en esta sucursal.' })
         if (actual.effectiveTo) return text({ ok: false, error: 'Esa asignación ya terminó.' })
+        const ultimoDia = fecha ?? (await hoyDeLaSedeCivil(venueId))
         return text({
           ok: false,
           requiresConfirmation: true,
-          preview: { persona: nombreDe(actual.staff), puesto: actual.position.name, ultimoDia: fecha ?? 'hoy' },
-          message: `Esto TERMINARÁ el puesto «${actual.position.name}» de ${nombreDe(actual.staff)} (último día: ${fecha ?? 'hoy'}). No cambia su rol ni sus permisos. Vuelve a llamar con confirm:true para terminarlo.`,
+          fecha: ultimoDia, // arriba, no sólo en `preview`: así la firma de la confirmación ata este día
+          preview: { persona: nombreDe(actual.staff), puesto: actual.position.name, ultimoDia },
+          message: `Esto TERMINARÁ el puesto «${actual.position.name}» de ${nombreDe(actual.staff)} (último día: ${ultimoDia}). No cambia su rol ni sus permisos. Vuelve a llamar con confirm:true para terminarlo.`,
         })
       }
       let a: AsignacionDto

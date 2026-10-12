@@ -62,6 +62,7 @@ const V = 'v1'
 const S = 'staff-1'
 const P = 'pos-1'
 const parse = (r: { content: Array<{ text: string }> }) => JSON.parse(r.content[0].text)
+const FECHA = /^\d{4}-\d{2}-\d{2}$/
 
 function armar(perms: string[] = ['teams:read', 'teams:update'], scopes: string[] = ['mcp:read', 'mcp:write']) {
   const scope = {
@@ -89,6 +90,24 @@ function armar(perms: string[] = ['teams:read', 'teams:update'], scopes: string[
     schema: (name: string) => z.object(shapes.get(name)!),
     descs,
   }
+}
+
+/** Cliente MCP real contra un servidor con el catálogo (confirmación firmada) y las herramientas de RH. */
+async function conectado() {
+  const scope = {
+    staffId: 'actor-1',
+    activeOrg: 'o1',
+    scopes: ['mcp:read', 'mcp:write'],
+    allowedVenueIds: [V],
+    perVenueAccess: new Map([[V, { role: StaffRole.MANAGER, corePermissions: ['teams:read', 'teams:update'] } as never]]),
+  } as McpScope
+  const server = new McpServer({ name: 'rh-test', version: '1' })
+  const client = new Client({ name: 'test', version: '1' })
+  configureToolCatalog(server, scope)
+  registerRhTools(server, scope)
+  const [a, b] = InMemoryTransport.createLinkedPair()
+  await Promise.all([server.connect(a), client.connect(b)])
+  return { client, close: async () => (await client.close(), await server.close()) }
 }
 
 const dtoPuesto = (o: Record<string, unknown> = {}) => ({
@@ -130,7 +149,8 @@ beforeEach(() => {
     staff: { firstName: 'Ana', lastName: 'López' },
   })
   mockCrear.mockResolvedValue(dtoPuesto())
-  mockArchivar.mockResolvedValue(dtoPuesto({ archivedAt: '2026-10-11T00:00:00.000Z' }))
+  // Archivado por ESTA llamada: su archivedAt es de ahora (uno anterior a la llamada significa «ya estaba archivado»).
+  mockArchivar.mockImplementation(async () => dtoPuesto({ archivedAt: new Date().toISOString() }))
   mockAsignar.mockResolvedValue(dtoAsignacion())
   mockTerminar.mockResolvedValue(dtoAsignacion({ effectiveTo: '2026-10-11' }))
   mockVigentes.mockResolvedValue(new Map())
@@ -248,6 +268,14 @@ describe('MCP RH', () => {
       expect(out).toMatchObject({ ok: true, puesto: { archivado: true } })
     })
 
+    it('ya estaba archivado (lo archivó otra persona antes) ⇒ responde ok pero NO escribe auditoría de esta conexión', async () => {
+      mockArchivar.mockResolvedValue(dtoPuesto({ archivedAt: '2026-01-01T00:00:00.000Z' }))
+      const out = await armar().call('archive_position', { ...base, confirm: true })
+      expect(mockArchivar).toHaveBeenCalledTimes(1)
+      expect(mockAudit).not.toHaveBeenCalled()
+      expect(out).toMatchObject({ ok: true, puesto: { positionId: P, archivado: true } })
+    })
+
     it('puesto ajeno o ya archivado ⇒ ok:false en la vista previa', async () => {
       mockPosicionFind.mockResolvedValueOnce(null)
       expect(await armar().call('archive_position', base)).toMatchObject({ ok: false, error: 'Ese puesto no existe en esta sucursal.' })
@@ -265,12 +293,40 @@ describe('MCP RH', () => {
   describe('assign_staff_position', () => {
     const base = { venueId: V, staffId: S, positionId: P }
 
-    it('sin confirm devuelve vista previa (con nombres, «Sin definir» y «hoy») y NO escribe', async () => {
+    it('sin confirm devuelve vista previa (con nombres, «Sin definir» y la fecha concreta de hoy) y NO escribe', async () => {
       const out = await armar().call('assign_staff_position', base)
       expect(out.requiresConfirmation).toBe(true)
-      expect(out.preview).toEqual({ persona: 'Ana López', puesto: 'Coach', relacion: 'Sin definir', fecha: 'hoy' })
+      expect(out.preview).toEqual({ persona: 'Ana López', puesto: 'Coach', relacion: 'Sin definir', fecha: expect.stringMatching(FECHA) })
+      expect(out.fecha).toBe(out.preview.fecha) // arriba también: es lo que ata la confirmación firmada
       expect(mockAsignar).not.toHaveBeenCalled()
       expect(mockAudit).not.toHaveBeenCalled()
+    })
+
+    describe('«hoy» es la fecha civil de la sede', () => {
+      beforeEach(() =>
+        jest.useFakeTimers({ now: new Date('2026-10-12T05:00:00Z'), doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] }),
+      )
+      afterEach(() => jest.useRealTimers())
+
+      it('la vista previa devuelve ese día arriba y en el preview, según la zona horaria de la sede', async () => {
+        const t = armar()
+        // 05:00 UTC = 23:00 del 11 en Ciudad de México y 14:00 del 12 en Tokio.
+        mockVenueFind.mockResolvedValue({ timezone: 'America/Mexico_City' })
+        const mx = await t.call('assign_staff_position', base)
+        expect(mx.fecha).toBe('2026-10-11')
+        expect(mx.preview.fecha).toBe('2026-10-11')
+        expect(mx.message).toContain('desde 2026-10-11')
+        mockVenueFind.mockResolvedValue({ timezone: 'Asia/Tokyo' })
+        expect((await t.call('assign_staff_position', base)).fecha).toBe('2026-10-12')
+        expect(mockVenueFind).toHaveBeenCalledWith({ where: { id: V }, select: { timezone: true } })
+      })
+
+      it('si la persona ya pasó una fecha, esa se respeta y no se consulta la zona horaria', async () => {
+        const out = await armar().call('assign_staff_position', { ...base, fecha: '2026-10-01' })
+        expect(out.fecha).toBe('2026-10-01')
+        expect(out.preview.fecha).toBe('2026-10-01')
+        expect(mockVenueFind).not.toHaveBeenCalled()
+      })
     })
 
     it('con confirm escribe (relación vacía = null) y audita', async () => {
@@ -353,9 +409,26 @@ describe('MCP RH', () => {
 
     it('sin confirm: vista previa con persona y puesto, y NO termina nada', async () => {
       const out = await armar().call('end_staff_assignment', base)
-      expect(out.preview).toEqual({ persona: 'Ana López', puesto: 'Coach', ultimoDia: 'hoy' })
+      expect(out.preview).toEqual({ persona: 'Ana López', puesto: 'Coach', ultimoDia: expect.stringMatching(FECHA) })
+      expect(out.fecha).toBe(out.preview.ultimoDia) // arriba también: es lo que ata la confirmación firmada
       expect(mockTerminar).not.toHaveBeenCalled()
       expect(mockAudit).not.toHaveBeenCalled()
+    })
+
+    it('«hoy» es la fecha civil de la sede (23:00 del 11 en Ciudad de México, aunque en UTC ya sea 12) y una fecha dada se respeta', async () => {
+      jest.useFakeTimers({ now: new Date('2026-10-12T05:00:00Z'), doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] })
+      try {
+        const t = armar()
+        const out = await t.call('end_staff_assignment', base)
+        expect(out.fecha).toBe('2026-10-11')
+        expect(out.preview.ultimoDia).toBe('2026-10-11')
+        expect(out.message).toContain('último día: 2026-10-11')
+        mockVenueFind.mockClear()
+        expect((await t.call('end_staff_assignment', { ...base, fecha: '2026-10-05' })).fecha).toBe('2026-10-05')
+        expect(mockVenueFind).not.toHaveBeenCalled()
+      } finally {
+        jest.useRealTimers()
+      }
     })
 
     it('con confirm termina en la fecha dada y audita', async () => {
@@ -426,6 +499,10 @@ describe('MCP RH', () => {
       expect(out.staff[0]).toMatchObject({ staffVenueId: 'sv-1', staffId: 'st-1', name: 'Ana Alfa', role: 'MANAGER', active: true })
     })
 
+    it('la descripción de list_staff avisa, en español llano, que en marca blanca no se incluyen los puestos', () => {
+      expect(armar().descs.get('list_staff')).toMatch(/no se incluyen en sucursales de marca blanca/)
+    })
+
     it('list_staff en marca blanca: no hay puestos y ni se consultan', async () => {
       mockStaffVenueFindMany.mockResolvedValue(filas)
       mockPagoGenerico.mockResolvedValue(false)
@@ -448,23 +525,6 @@ describe('MCP RH', () => {
   })
 
   describe('por el protocolo MCP real (catálogo con confirmación firmada)', () => {
-    async function conectado() {
-      const scope = {
-        staffId: 'actor-1',
-        activeOrg: 'o1',
-        scopes: ['mcp:read', 'mcp:write'],
-        allowedVenueIds: [V],
-        perVenueAccess: new Map([[V, { role: StaffRole.MANAGER, corePermissions: ['teams:read', 'teams:update'] } as never]]),
-      } as McpScope
-      const server = new McpServer({ name: 'rh-test', version: '1' })
-      const client = new Client({ name: 'test', version: '1' })
-      configureToolCatalog(server, scope)
-      registerRhTools(server, scope)
-      const [a, b] = InMemoryTransport.createLinkedPair()
-      await Promise.all([server.connect(a), client.connect(b)])
-      return { client, close: async () => (await client.close(), await server.close()) }
-    }
-
     it('cada parámetro declara su tipo (sin $ref a otro parámetro) y las cinco herramientas se anuncian', async () => {
       const c = await conectado()
       try {
@@ -517,6 +577,59 @@ describe('MCP RH', () => {
     })
   })
 
+  describe('la fecha de «hoy» queda atada a la confirmación firmada', () => {
+    type Previa = { structuredContent: { data: Record<string, any> } }
+
+    it('asignar sin fecha: la vista previa fija el día, el token lo ata y SÓLO con ese día se escribe', async () => {
+      const c = await conectado()
+      try {
+        const args = { venueId: V, staffId: S, positionId: P }
+        const previa = (await c.client.callTool({ name: 'assign_staff_position', arguments: args })) as unknown as Previa
+        const { data } = previa.structuredContent
+        expect(data.fecha).toMatch(FECHA)
+        expect(data.confirmationArguments).toMatchObject({ ...args, fecha: data.fecha })
+
+        // Confirmar con los argumentos originales (sin el día que se vio) ya no vale: el token cubre la fecha.
+        const sinDia = await c.client.callTool({
+          name: 'assign_staff_position',
+          arguments: { ...args, confirm: true, confirmationToken: data.confirmationToken },
+        })
+        expect(sinDia.structuredContent).toMatchObject({ status: 'needs_input', data: { field: 'confirmationToken' } })
+        expect(mockAsignar).not.toHaveBeenCalled()
+
+        const hecho = await c.client.callTool({
+          name: 'assign_staff_position',
+          arguments: { ...data.confirmationArguments, confirm: true, confirmationToken: data.confirmationToken },
+        })
+        expect(hecho.isError).not.toBe(true)
+        expect(mockAsignar).toHaveBeenCalledTimes(1)
+        expect(mockAsignar).toHaveBeenCalledWith(expect.objectContaining({ staffId: S, positionId: P, fecha: data.fecha }))
+      } finally {
+        await c.close()
+      }
+    })
+
+    it('terminar sin fecha: igual, el último día que se VIO es el que se escribe', async () => {
+      const c = await conectado()
+      try {
+        const args = { venueId: V, assignmentId: 'asg-1' }
+        const previa = (await c.client.callTool({ name: 'end_staff_assignment', arguments: args })) as unknown as Previa
+        const { data } = previa.structuredContent
+        expect(data.fecha).toMatch(FECHA)
+        expect(data.confirmationArguments).toMatchObject({ ...args, fecha: data.fecha })
+
+        const hecho = await c.client.callTool({
+          name: 'end_staff_assignment',
+          arguments: { ...data.confirmationArguments, confirm: true, confirmationToken: data.confirmationToken },
+        })
+        expect(hecho.isError).not.toBe(true)
+        expect(mockTerminar).toHaveBeenCalledWith(expect.objectContaining({ assignmentId: 'asg-1', fecha: data.fecha }))
+      } finally {
+        await c.close()
+      }
+    })
+  })
+
   describe('regresión', () => {
     const NUNCA = /por fuera|informal|sin comprobante/i
 
@@ -549,6 +662,22 @@ describe('MCP RH', () => {
         await t.raw('end_staff_assignment', { venueId: V, assignmentId: 'asg-1' }),
       ]
       for (const p of previas) expect(p.content[0].text).not.toMatch(NUNCA)
+    })
+
+    it('las lecturas de las vistas previas (persona, puesto, asignación) siempre llevan venueId en su where', async () => {
+      const t = armar()
+      await t.call('archive_position', { venueId: V, positionId: P })
+      expect(mockPosicionFind).toHaveBeenLastCalledWith(expect.objectContaining({ where: { id: P, venueId: V } }))
+
+      mockPosicionFind.mockClear()
+      await t.call('assign_staff_position', { venueId: V, staffId: S, positionId: P })
+      expect(mockStaffVenueFind).toHaveBeenLastCalledWith(
+        expect.objectContaining({ where: { staffId_venueId: { staffId: S, venueId: V } } }),
+      )
+      expect(mockPosicionFind).toHaveBeenLastCalledWith(expect.objectContaining({ where: { id: P, venueId: V } }))
+
+      await t.call('end_staff_assignment', { venueId: V, assignmentId: 'asg-1' })
+      expect(mockAsignacionFind).toHaveBeenLastCalledWith(expect.objectContaining({ where: { id: 'asg-1', venueId: V } }))
     })
 
     it('asignar o terminar un puesto no toca el rol: sólo llama a los servicios de asignaciones', async () => {
