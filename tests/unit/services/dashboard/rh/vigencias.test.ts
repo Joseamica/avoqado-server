@@ -11,6 +11,18 @@ describe('vigencias RH (spec §3.2)', () => {
     it('mismo día de inicio y fin sí se traslapa (vigencia de un día)', () => {
       expect(seTraslapan({ desde: '2026-10-09', hasta: '2026-10-09' }, { desde: '2026-10-09', hasta: null })).toBe(true)
     })
+    it('vigencia de un día contra una cerrada que termina ese día se traslapa', () => {
+      expect(seTraslapan({ desde: '2026-10-09', hasta: null }, { desde: '2026-10-01', hasta: '2026-10-09' })).toBe(true)
+    })
+    it('dos rangos cerrados que se cruzan un solo día se traslapan', () => {
+      expect(seTraslapan({ desde: '2026-10-01', hasta: '2026-10-09' }, { desde: '2026-10-09', hasta: '2026-10-20' })).toBe(true)
+    })
+    it('dos rangos cerrados separados no se traslapan', () => {
+      expect(seTraslapan({ desde: '2026-10-01', hasta: '2026-10-08' }, { desde: '2026-10-10', hasta: '2026-10-20' })).toBe(false)
+    })
+    it('un rango contenido en otro se traslapa', () => {
+      expect(seTraslapan({ desde: '2026-10-01', hasta: '2026-10-31' }, { desde: '2026-10-10', hasta: '2026-10-12' })).toBe(true)
+    })
     it('diaAnterior cruza mes y año bisiesto', () => {
       expect(diaAnterior('2028-03-01')).toBe('2028-02-29')
       expect(diaAnterior('2027-01-01')).toBe('2026-12-31')
@@ -32,6 +44,12 @@ describe('vigencias RH (spec §3.2)', () => {
     })
     it('rechaza fecha con formato inválido', () => {
       expect(() => validarFechaDeCambio('09/10/2026', '2026-10-09')).toThrow('Fecha inválida')
+    })
+    it('rechaza fechas imposibles del calendario (no las normaliza)', () => {
+      expect(() => validarFechaDeCambio('2026-02-31', '2026-10-09')).toThrow('Fecha inválida')
+      expect(() => validarFechaDeCambio('2026-13-01', '2026-10-09')).toThrow('Fecha inválida')
+      expect(() => diaAnterior('2026-02-31')).toThrow('Fecha inválida')
+      expect(() => diaAnterior('2026-13-01')).toThrow('Fecha inválida')
     })
   })
 })
