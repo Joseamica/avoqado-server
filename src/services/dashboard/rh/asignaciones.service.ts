@@ -3,17 +3,20 @@ import prisma from '../../../utils/prismaClient'
 import { BadRequestError, ConflictError, NotFoundError } from '../../../errors/AppError'
 import { withSerializableRetry } from '../../../utils/serializableRetry'
 import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
-import { fechaComoDbDate, dbDateComoFecha } from '../staffPay/periodos'
+import { fechaComoDbDate, dbDateComoFecha, sumarDias } from '../staffPay/periodos'
 import { assertFechaNoCerrada } from '../staffPay/periodosGuardados'
 import { asegurarSedeNoMarcaBlanca } from './marcaBlanca'
 import { tomarCandadoPersona } from './candado'
 import { Fecha, diaAnterior, hoyDeLaSede, validarFechaDeCambio } from './vigencias'
 
 /*
- * Concurrencia (spec RH §3.2): todo corre en SERIALIZABLE con el candado de la persona. En SERIALIZABLE la foto de la
- * base se toma en la PRIMERA sentencia (incluida la del candado), así que quien esperó el candado lee una foto vieja: no
- * hace falta releer. Si otra solicitud escribió mientras tanto, Postgres aborta ésta con 40001 y `withSerializableRetry`
- * la repite con foto nueva, que ya ve lo escrito (lo prueba tests/integration/rh/asignaciones.concurrencia.test.ts).
+ * Concurrencia (spec RH §3.2). 🔴 INVARIANTE: todo escritor de StaffAssignment corre en SERIALIZABLE
+ * (`withSerializableRetry`). El candado de la persona sólo forma la fila; la corrección la da SSI de Postgres. En
+ * SERIALIZABLE la foto de la base se toma en la PRIMERA sentencia (incluida la del candado), así que quien esperó el
+ * candado lee una foto vieja: releer no sirve. Si otra solicitud escribió mientras tanto, Postgres aborta ésta con 40001
+ * y `withSerializableRetry` la repite con foto nueva, que ya ve lo escrito (tests/integration/rh/asignaciones.concurrencia
+ * .test.ts). Un escritor fuera de SERIALIZABLE (aunque tome el candado) rompe la garantía: SSI sólo vigila transacciones
+ * SERIALIZABLE, y quien esperó el candado valida sobre una foto vieja.
  */
 
 export interface AsignacionDto {
@@ -58,15 +61,24 @@ function aDto(a: Fila): AsignacionDto {
   }
 }
 
-/** «Hoy» es el día civil de la sede; sólo hoy o pasado, y nunca dentro de un periodo cerrado de la organización. */
-async function contextoDeFecha(tx: Tx, venueId: string, fecha?: Fecha): Promise<Fecha> {
+/**
+ * «Hoy» es el día civil de la sede; `fecha` sólo puede ser hoy o pasado. El periodo cerrado se revisa en el PRIMER DÍA
+ * QUE CAMBIA (`primerDiaQueCambia`): al asignar o cambiar es la propia fecha; al terminar, el día siguiente.
+ */
+async function contextoDeFecha(
+  tx: Tx,
+  venueId: string,
+  fecha: Fecha | undefined,
+  primerDiaQueCambia: (f: Fecha) => Fecha = f => f,
+): Promise<Fecha> {
   const venue = await tx.venue.findUnique({ where: { id: venueId }, select: { timezone: true, organizationId: true } })
   if (!venue) throw new NotFoundError('Sucursal no encontrada')
   const hoy = hoyDeLaSede(venue.timezone)
   const f = fecha ?? hoy
   validarFechaDeCambio(f, hoy)
-  // Consulta el periodo que CONTIENE la fecha (aguanta cierres fuera de orden, cierre.service.ts:169).
-  await assertFechaNoCerrada(tx, venue.organizationId, f, 'el puesto no puede cambiar')
+  // Consulta el periodo que CONTIENE ese día (aguanta cierres fuera de orden, cierre.service.ts:169). Sin `accion`: el
+  // mensaje con acción habla de clases y «Ajustar monto», que no aplica a RH.
+  await assertFechaNoCerrada(tx, venue.organizationId, primerDiaQueCambia(f))
   return f
 }
 
@@ -97,9 +109,14 @@ async function sinTraslape(tx: Tx, venueId: string, staffId: string, positionId:
 
 /** Lee la asignación de ESTA sede y toma el candado de su persona (el staffId de una asignación nunca cambia). */
 async function asignacionConCandado(tx: Tx, venueId: string, assignmentId: string) {
-  const actual = await tx.staffAssignment.findFirst({ where: { id: assignmentId, venueId } })
+  const actual = await tx.staffAssignment.findFirst({
+    where: { id: assignmentId, venueId },
+    include: { ...CON_PUESTO, supersededBy: { select: { id: true } } },
+  })
   if (!actual) throw new NotFoundError('Esa asignación no existe en esta sucursal.')
   await tomarCandadoPersona(tx, venueId, actual.staffId)
+  // Id viejo: ya existe una versión posterior (quien edita vio la pantalla antes de otro cambio).
+  if (actual.supersededBy) throw new ConflictError('Esta asignación cambió mientras la editabas. Recarga e inténtalo de nuevo.')
   return actual
 }
 
@@ -154,10 +171,12 @@ export async function cambiarAsignacion(input: {
   return withSerializableRetry(async tx => {
     const actual = await asignacionConCandado(tx, input.venueId, input.assignmentId)
     if (actual.effectiveTo) throw new BadRequestError('Esa asignación ya terminó. Crea una nueva.')
-    const desde = await contextoDeFecha(tx, input.venueId, input.fecha)
     const positionId = input.positionId ?? actual.positionId
     const relation = input.relation !== undefined ? input.relation : actual.relation
     const cambiaPuesto = positionId !== actual.positionId
+    // Nada cambia: ni versión nueva ni auditoría.
+    if (!cambiaPuesto && relation === actual.relation) return aDto(actual)
+    const desde = await contextoDeFecha(tx, input.venueId, input.fecha)
     if (cambiaPuesto) await validarPersonaYPuesto(tx, input.venueId, actual.staffId, positionId)
 
     // Mismo día: reemplaza la versión abierta ese día (spec RH §3.2), sin crear una de un día.
@@ -170,7 +189,7 @@ export async function cambiarAsignacion(input: {
         action: 'STAFF_ASSIGNMENT_UPDATED',
         entity: 'StaffAssignment',
         entityId: a.id,
-        data: { positionId, relation, desde, mismoDia: true },
+        data: { antes: { positionId: actual.positionId, relation: actual.relation }, positionId, relation, desde, mismoDia: true },
       })
       return aDto(a)
     }
@@ -214,7 +233,9 @@ export async function terminarAsignacion(input: {
   return withSerializableRetry(async tx => {
     const actual = await asignacionConCandado(tx, input.venueId, input.assignmentId)
     if (actual.effectiveTo) throw new BadRequestError('Esa asignación ya terminó.')
-    const hasta = await contextoDeFecha(tx, input.venueId, input.fecha)
+    // `hasta` es el último día con el puesto: lo que cambia empieza al día siguiente (con septiembre cerrado, terminar el
+    // 30-sep sí se puede).
+    const hasta = await contextoDeFecha(tx, input.venueId, input.fecha, f => sumarDias(f, 1))
     if (hasta < dbDateComoFecha(actual.effectiveFrom)) throw new BadRequestError('No puede terminar antes de que empezara.')
     const a = await tx.staffAssignment.update({
       where: { id: actual.id },

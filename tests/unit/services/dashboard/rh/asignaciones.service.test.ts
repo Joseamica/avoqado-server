@@ -7,8 +7,10 @@ import {
   terminarAsignacion,
 } from '@/services/dashboard/rh/asignaciones.service'
 import * as marca from '@/services/dashboard/rh/marcaBlanca'
+import { BadRequestError } from '@/errors/AppError'
 
 jest.mock('@/services/activityAudit.service', () => ({ writeLegacyActivityAuditTx: jest.fn() }))
+import { writeLegacyActivityAuditTx } from '@/services/activityAudit.service'
 jest.mock('@/services/dashboard/staffPay/periodosGuardados', () => ({ assertFechaNoCerrada: jest.fn().mockResolvedValue(undefined) }))
 import { assertFechaNoCerrada } from '@/services/dashboard/staffPay/periodosGuardados'
 jest.mock('@/services/dashboard/rh/vigencias', () => ({
@@ -63,14 +65,22 @@ describe('asignaciones (spec RH §3.2)', () => {
       expect(candado).toBeLessThan(prismaMock.staffAssignment.findFirst.mock.invocationCallOrder[0])
       expect(JSON.stringify(prismaMock.$queryRaw.mock.calls[0][0])).toContain('avoqado:rh-asignacion:v1:v1:s1')
     })
-    it('«hoy» es el día de la sede (America/Tijuana), no el del servidor', async () => {
-      prismaMock.venue.findUnique.mockResolvedValue({ id: 'v1', timezone: 'America/Tijuana', organizationId: 'o1' } as any)
-      prismaMock.staffAssignment.create.mockResolvedValue(fila() as any)
-      await asignarPuesto({ venueId: 'v1', staffId: 's1', positionId: 'p1', actorId: 'x' })
-      expect(hoyDeLaSede).toHaveBeenCalledWith('America/Tijuana')
-      expect(prismaMock.staffAssignment.create).toHaveBeenCalledWith(
-        expect.objectContaining({ data: expect.objectContaining({ effectiveFrom: new Date('2026-10-09T00:00:00.000Z') }) }),
-      )
+    it('«hoy» es el día de la sede: a las 06:30 UTC del 10-oct, Tijuana sigue en el 9 y CDMX ya está en el 10', async () => {
+      const real = jest.requireActual('@/services/dashboard/rh/vigencias').hoyDeLaSede
+      ;(hoyDeLaSede as jest.Mock).mockImplementationOnce(real).mockImplementationOnce(real)
+      jest.useFakeTimers({ now: new Date('2026-10-10T06:30:00Z'), doNotFake: ['nextTick', 'setImmediate'] })
+      try {
+        prismaMock.staffAssignment.create.mockImplementation(async (args: any) => fila({ effectiveFrom: args.data.effectiveFrom }))
+        prismaMock.venue.findUnique.mockResolvedValueOnce({ id: 'v1', timezone: 'America/Tijuana', organizationId: 'o1' } as any)
+        const tijuana = await asignarPuesto({ venueId: 'v1', staffId: 's1', positionId: 'p1', actorId: 'x' })
+        prismaMock.venue.findUnique.mockResolvedValueOnce({ id: 'v1', timezone: 'America/Mexico_City', organizationId: 'o1' } as any)
+        const cdmx = await asignarPuesto({ venueId: 'v1', staffId: 's1', positionId: 'p1', actorId: 'x' })
+        expect(tijuana.effectiveFrom).toBe('2026-10-09')
+        expect(cdmx.effectiveFrom).toBe('2026-10-10')
+      } finally {
+        jest.useRealTimers()
+        prismaMock.staffAssignment.create.mockReset()
+      }
     })
     it('cambiar relación cierra la versión el día anterior y abre otra con supersedesId', async () => {
       prismaMock.staffAssignment.findFirst.mockResolvedValue({
@@ -179,7 +189,8 @@ describe('asignaciones (spec RH §3.2)', () => {
       await expect(asignarPuesto({ venueId: 'v1', staffId: 's1', positionId: 'p1', fecha: '2026-09-20', actorId: 'x' })).rejects.toThrow(
         'periodo cerrado',
       )
-      expect(assertFechaNoCerrada).toHaveBeenCalledWith(expect.anything(), 'o1', '2026-09-20', expect.any(String))
+      // Sin `accion`: mensaje genérico, sin «Ajustar monto en la clase».
+      expect(assertFechaNoCerrada).toHaveBeenCalledWith(expect.anything(), 'o1', '2026-09-20')
     })
     it('terminar antes del inicio ⇒ 400', async () => {
       prismaMock.staffAssignment.findFirst.mockResolvedValue({
@@ -192,6 +203,155 @@ describe('asignaciones (spec RH §3.2)', () => {
       await expect(terminarAsignacion({ venueId: 'v1', assignmentId: 'a1', fecha: '2026-10-08', actorId: 'x' })).rejects.toThrow(
         'antes de que empezara',
       )
+    })
+    it('asignar hacia atrás busca el traslape del mismo puesto desde esa fecha', async () => {
+      prismaMock.staffAssignment.create.mockResolvedValue(fila() as any)
+      await asignarPuesto({ venueId: 'v1', staffId: 's1', positionId: 'p1', fecha: '2026-09-20', actorId: 'x' })
+      expect(prismaMock.staffAssignment.findFirst).toHaveBeenCalledWith({
+        where: {
+          venueId: 'v1',
+          staffId: 's1',
+          positionId: 'p1',
+          OR: [{ effectiveTo: null }, { effectiveTo: { gte: new Date('2026-09-20T00:00:00.000Z') } }],
+        },
+        select: { id: true },
+      })
+    })
+    it('cambiar de puesto el mismo día: reemplaza la fila (sin cerrar), revisa traslape sin contarse a sí misma y audita el antes', async () => {
+      prismaMock.staffAssignment.findFirst.mockResolvedValueOnce(fila({ id: 'a2', supersedesId: 'a1' }) as any)
+      prismaMock.staffPosition.findFirst.mockResolvedValue({ id: 'p2', venueId: 'v1', name: 'Recepción', archivedAt: null } as any)
+      prismaMock.staffAssignment.update.mockResolvedValue(fila({ id: 'a2', positionId: 'p2', position: { name: 'Recepción' } }) as any)
+      const a = await cambiarAsignacion({ venueId: 'v1', assignmentId: 'a2', positionId: 'p2', actorId: 'x' })
+      expect(prismaMock.staffAssignment.findFirst).toHaveBeenCalledWith({
+        where: {
+          venueId: 'v1',
+          staffId: 's1',
+          positionId: 'p2',
+          id: { not: 'a2' },
+          OR: [{ effectiveTo: null }, { effectiveTo: { gte: new Date('2026-10-09T00:00:00.000Z') } }],
+        },
+        select: { id: true },
+      })
+      expect(prismaMock.staffAssignment.update).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: 'a2' }, data: { positionId: 'p2', relation: null } }),
+      )
+      expect(prismaMock.staffAssignment.create).not.toHaveBeenCalled()
+      expect(writeLegacyActivityAuditTx).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          action: 'STAFF_ASSIGNMENT_UPDATED',
+          data: expect.objectContaining({ antes: { positionId: 'p1', relation: null }, positionId: 'p2' }),
+        }),
+      )
+      expect(a.positionName).toBe('Recepción')
+    })
+    it('cambiar de puesto otro día: cierra la anterior el día previo y abre la nueva con supersedesId, tras revisar traslape del puesto nuevo', async () => {
+      prismaMock.staffAssignment.findFirst.mockResolvedValueOnce(
+        fila({ id: 'a1', relation: 'ASIMILADO', effectiveFrom: new Date('2026-10-01T00:00:00Z') }) as any,
+      )
+      prismaMock.staffPosition.findFirst.mockResolvedValue({ id: 'p2', venueId: 'v1', name: 'Recepción', archivedAt: null } as any)
+      prismaMock.staffAssignment.update.mockResolvedValue({} as any)
+      prismaMock.staffAssignment.create.mockResolvedValue(fila({ id: 'a3', positionId: 'p2', supersedesId: 'a1' }) as any)
+      await cambiarAsignacion({ venueId: 'v1', assignmentId: 'a1', positionId: 'p2', actorId: 'x' })
+      expect(prismaMock.staffAssignment.update).toHaveBeenCalledWith({
+        where: { id: 'a1' },
+        data: { effectiveTo: new Date('2026-10-08T00:00:00.000Z') },
+      })
+      expect(prismaMock.staffAssignment.findFirst).toHaveBeenLastCalledWith({
+        where: {
+          venueId: 'v1',
+          staffId: 's1',
+          positionId: 'p2',
+          OR: [{ effectiveTo: null }, { effectiveTo: { gte: new Date('2026-10-09T00:00:00.000Z') } }],
+        },
+        select: { id: true },
+      })
+      expect(prismaMock.staffAssignment.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            positionId: 'p2',
+            relation: 'ASIMILADO',
+            supersedesId: 'a1',
+            effectiveFrom: new Date('2026-10-09T00:00:00.000Z'),
+          }),
+        }),
+      )
+      const ultimaLectura = prismaMock.staffAssignment.findFirst.mock.invocationCallOrder.slice(-1)[0]
+      expect(ultimaLectura).toBeLessThan(prismaMock.staffAssignment.create.mock.invocationCallOrder[0])
+    })
+    it('cambiar una asignación que ya terminó ⇒ 400', async () => {
+      prismaMock.staffAssignment.findFirst.mockResolvedValueOnce(fila({ effectiveTo: new Date('2026-10-05T00:00:00Z') }) as any)
+      await expect(
+        cambiarAsignacion({ venueId: 'v1', assignmentId: 'a1', relation: 'ASIMILADO' as any, actorId: 'x' }),
+      ).rejects.toMatchObject({ statusCode: 400, message: expect.stringContaining('ya terminó') })
+    })
+    it('cambiar con fecha anterior al inicio ⇒ 400', async () => {
+      prismaMock.staffAssignment.findFirst.mockResolvedValueOnce(fila({ effectiveFrom: new Date('2026-10-05T00:00:00Z') }) as any)
+      await expect(
+        cambiarAsignacion({ venueId: 'v1', assignmentId: 'a1', relation: 'ASIMILADO' as any, fecha: '2026-10-03', actorId: 'x' }),
+      ).rejects.toMatchObject({ statusCode: 400, message: expect.stringContaining('posterior al inicio') })
+      expect(prismaMock.staffAssignment.update).not.toHaveBeenCalled()
+    })
+    it('id viejo (ya tiene una versión posterior) ⇒ 409 al cambiar y al terminar', async () => {
+      const vieja = fila({ effectiveTo: new Date('2026-10-08T00:00:00Z'), supersededBy: { id: 'a2' } })
+      const msg = 'Esta asignación cambió mientras la editabas. Recarga e inténtalo de nuevo.'
+      prismaMock.staffAssignment.findFirst.mockResolvedValueOnce(vieja as any)
+      await expect(
+        cambiarAsignacion({ venueId: 'v1', assignmentId: 'a1', relation: 'ASIMILADO' as any, actorId: 'x' }),
+      ).rejects.toMatchObject({ statusCode: 409, message: msg })
+      prismaMock.staffAssignment.findFirst.mockResolvedValueOnce(vieja as any)
+      await expect(terminarAsignacion({ venueId: 'v1', assignmentId: 'a1', actorId: 'x' })).rejects.toMatchObject({
+        statusCode: 409,
+        message: msg,
+      })
+    })
+    it('cambiar sin cambiar nada (mismo puesto y relación) ⇒ devuelve la actual, sin versión ni auditoría', async () => {
+      prismaMock.staffAssignment.findFirst.mockResolvedValueOnce(
+        fila({ relation: 'ASIMILADO', effectiveFrom: new Date('2026-10-01T00:00:00Z') }) as any,
+      )
+      const a = await cambiarAsignacion({ venueId: 'v1', assignmentId: 'a1', positionId: 'p1', relation: 'ASIMILADO' as any, actorId: 'x' })
+      expect(a).toMatchObject({ id: 'a1', relation: 'ASIMILADO', effectiveFrom: '2026-10-01', effectiveTo: null })
+      expect(prismaMock.staffAssignment.update).not.toHaveBeenCalled()
+      expect(prismaMock.staffAssignment.create).not.toHaveBeenCalled()
+      expect(writeLegacyActivityAuditTx).not.toHaveBeenCalled()
+    })
+    it('terminar el último día de un mes cerrado se permite: el periodo se revisa en el día siguiente', async () => {
+      // Septiembre cerrado; el 5-oct se termina con hasta = 30-sep.
+      ;(assertFechaNoCerrada as jest.Mock).mockImplementationOnce(async (_db: unknown, _org: string, f: string) => {
+        if (f >= '2026-09-01' && f <= '2026-09-30') throw new BadRequestError('El periodo del 2026-09-01 al 2026-09-30 ya está cerrado')
+      })
+      prismaMock.staffAssignment.findFirst.mockResolvedValueOnce(fila({ effectiveFrom: new Date('2026-08-01T00:00:00Z') }) as any)
+      prismaMock.staffAssignment.update.mockResolvedValue(fila({ effectiveTo: new Date('2026-09-30T00:00:00Z') }) as any)
+      const a = await terminarAsignacion({ venueId: 'v1', assignmentId: 'a1', fecha: '2026-09-30', actorId: 'x' })
+      expect(assertFechaNoCerrada).toHaveBeenCalledWith(expect.anything(), 'o1', '2026-10-01')
+      expect(prismaMock.staffAssignment.update).toHaveBeenCalledWith(
+        expect.objectContaining({ data: { effectiveTo: new Date('2026-09-30T00:00:00.000Z') } }),
+      )
+      expect(a.effectiveTo).toBe('2026-09-30')
+    })
+    it('terminar cuando el día siguiente cae en un periodo cerrado (cierre fuera de orden) ⇒ 400', async () => {
+      // Se cerró la 2a quincena de septiembre antes que la 1a: hasta = 15-sep ⇒ el 16 ya está cerrado.
+      ;(assertFechaNoCerrada as jest.Mock).mockImplementationOnce(async (_db: unknown, _org: string, f: string) => {
+        if (f >= '2026-09-16' && f <= '2026-09-30') throw new BadRequestError('El periodo del 2026-09-16 al 2026-09-30 ya está cerrado')
+      })
+      prismaMock.staffAssignment.findFirst.mockResolvedValueOnce(fila({ effectiveFrom: new Date('2026-08-01T00:00:00Z') }) as any)
+      await expect(terminarAsignacion({ venueId: 'v1', assignmentId: 'a1', fecha: '2026-09-15', actorId: 'x' })).rejects.toMatchObject({
+        statusCode: 400,
+        message: expect.stringContaining('ya está cerrado'),
+      })
+      expect(assertFechaNoCerrada).toHaveBeenCalledWith(expect.anything(), 'o1', '2026-09-16')
+      expect(prismaMock.staffAssignment.update).not.toHaveBeenCalled()
+    })
+    it('terminar en el futuro ⇒ 400 (se valida con hasta, no con el día siguiente)', async () => {
+      prismaMock.staffAssignment.findFirst.mockResolvedValueOnce(fila({ effectiveFrom: new Date('2026-10-01T00:00:00Z') }) as any)
+      await expect(terminarAsignacion({ venueId: 'v1', assignmentId: 'a1', fecha: '2026-10-10', actorId: 'x' })).rejects.toThrow(
+        'No se permiten fechas futuras',
+      )
+      prismaMock.staffAssignment.findFirst.mockResolvedValueOnce(fila({ effectiveFrom: new Date('2026-10-01T00:00:00Z') }) as any)
+      prismaMock.staffAssignment.update.mockResolvedValue(fila({ effectiveTo: new Date('2026-10-09T00:00:00Z') }) as any)
+      await expect(terminarAsignacion({ venueId: 'v1', assignmentId: 'a1', fecha: '2026-10-09', actorId: 'x' })).resolves.toMatchObject({
+        effectiveTo: '2026-10-09',
+      })
     })
     it('asignación de otra sede ⇒ 404 sin tomar candado', async () => {
       await expect(terminarAsignacion({ venueId: 'v1', assignmentId: 'aX', actorId: 'x' })).rejects.toMatchObject({ statusCode: 404 })

@@ -1,5 +1,7 @@
 import prisma from '@/utils/prismaClient'
-import { asignarPuesto } from '@/services/dashboard/rh/asignaciones.service'
+import { asignarPuesto, cambiarAsignacion, terminarAsignacion } from '@/services/dashboard/rh/asignaciones.service'
+import { dbDateComoFecha } from '@/services/dashboard/staffPay/periodos'
+import { seTraslapan } from '@/services/dashboard/rh/vigencias'
 
 jest.mock('@/services/modules/module.service', () => ({
   ...jest.requireActual('@/services/modules/module.service'),
@@ -23,6 +25,8 @@ afterAll(async () => {
   // Guarda: si beforeAll falló, nunca correr deleteMany({ venueId: undefined }) contra toda la base de pruebas.
   if (!venueId) return
   await prisma.activityLog.deleteMany({ where: { venueId } })
+  // Primero se sueltan las cadenas de versiones (supersedesId … ON DELETE RESTRICT).
+  await prisma.staffAssignment.updateMany({ where: { venueId }, data: { supersedesId: null } })
   await prisma.staffAssignment.deleteMany({ where: { venueId } })
   await prisma.staffPosition.deleteMany({ where: { venueId } })
   await prisma.staffVenue.deleteMany({ where: { venueId } })
@@ -31,7 +35,11 @@ afterAll(async () => {
   if (orgId) await prisma.organization.deleteMany({ where: { id: orgId } })
 })
 
+// Día civil de Tijuana calculado aparte (Intl), no con el helper del servicio.
+const hoyEnTijuana = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Tijuana' }).format(new Date())
+
 it('dos asignaciones simultáneas del mismo puesto: gana una, la otra 409; «hoy» es el día de la sede', async () => {
+  const antes = hoyEnTijuana()
   const r = await Promise.allSettled([
     asignarPuesto({ venueId: venueId!, staffId: staffId!, positionId: positionId!, actorId: staffId! }),
     asignarPuesto({ venueId: venueId!, staffId: staffId!, positionId: positionId!, actorId: staffId! }),
@@ -43,9 +51,41 @@ it('dos asignaciones simultáneas del mismo puesto: gana una, la otra 409; «hoy
   expect(await prisma.staffAssignment.count({ where: { venueId } })).toBe(1)
   // La perdedora se revirtió entera: una sola auditoría.
   expect(await prisma.activityLog.count({ where: { venueId, action: 'STAFF_ASSIGNMENT_CREATED' } })).toBe(1)
-  // Día civil de Tijuana calculado aparte (Intl), no con el helper del servicio.
-  const hoyTijuana = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Tijuana' }).format(new Date())
-  expect(ganadoras[0].value.effectiveFrom).toBe(hoyTijuana)
+  // Antes y después de la llamada: si la medianoche de Tijuana cae justo en medio, vale cualquiera de los dos días.
+  expect([antes, hoyEnTijuana()]).toContain(ganadoras[0].value.effectiveFrom)
+})
+
+it('cambiar y terminar la MISMA asignación a la vez: gana uno, el otro 4xx, y la cadena de versiones queda sana', async () => {
+  const p2 = (await prisma.staffPosition.create({ data: { venueId: venueId!, name: 'Recepción', suggestedRole: 'WAITER' } })).id
+  const a = await asignarPuesto({ venueId: venueId!, staffId: staffId!, positionId: p2, fecha: '2026-10-01', actorId: staffId! })
+  const [cambio, fin] = await Promise.allSettled([
+    cambiarAsignacion({ venueId: venueId!, assignmentId: a.id, relation: 'EMPLEADO_NOMINA', actorId: staffId! }),
+    terminarAsignacion({ venueId: venueId!, assignmentId: a.id, actorId: staffId! }),
+  ])
+  expect([cambio.status, fin.status].sort()).toEqual(['fulfilled', 'rejected'])
+  if (cambio.status === 'fulfilled') {
+    // Ganó el cambio: terminar llegó con un id que ya tiene versión posterior.
+    expect((fin as PromiseRejectedResult).reason).toMatchObject({ statusCode: 409 })
+  } else {
+    // Ganó terminar: el cambio llegó a una asignación ya terminada.
+    expect(cambio.reason).toMatchObject({ statusCode: 400, message: expect.stringContaining('ya terminó') })
+  }
+  const filas = await prisma.staffAssignment.findMany({
+    where: { venueId: venueId!, staffId: staffId!, positionId: p2 },
+    orderBy: { effectiveFrom: 'asc' },
+    take: 10,
+  })
+  const vig = filas.map(f => ({ desde: dbDateComoFecha(f.effectiveFrom), hasta: f.effectiveTo ? dbDateComoFecha(f.effectiveTo) : null }))
+  expect(filas.filter(f => f.effectiveTo === null).length).toBeLessThanOrEqual(1)
+  for (const v of vig) if (v.hasta) expect(v.hasta >= v.desde).toBe(true) // el CHECK de la base
+  for (let i = 0; i < vig.length; i++) for (let j = i + 1; j < vig.length; j++) expect(seTraslapan(vig[i], vig[j])).toBe(false)
+  if (cambio.status === 'fulfilled') {
+    expect(filas).toHaveLength(2)
+    expect(filas[1]).toMatchObject({ supersedesId: a.id, relation: 'EMPLEADO_NOMINA', effectiveTo: null })
+  } else {
+    expect(filas).toHaveLength(1)
+    expect(filas[0].effectiveTo).not.toBeNull()
+  }
 })
 
 it('el CHECK de la base rechaza una vigencia invertida', async () => {
