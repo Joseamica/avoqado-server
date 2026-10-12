@@ -178,18 +178,30 @@ describe('seeding the plan lists at the classic monthly price (spec §4.2)', () 
     expect(await prisma.hybridCampaign.findUniqueOrThrow({ where: { id: pro.id } })).toEqual(changed)
   })
 
-  /** Puts on sale a copy of the list's current publication without SERVICE_PAY: how the lists published on 5-oct look. */
-  async function sellWithoutServicePay(key: string) {
+  /**
+   * Puts on sale a copy of the list's current publication without SERVICE_PAY: how the lists published on 5-oct look.
+   * With `price`, the copy sells at that price instead. Republishing passes the list price rule, and the CI database is
+   * shared: other suites leave plan PROMOTIONS on sale (a Pro one at $1,000 breaks a $999 list), so a test price sits
+   * above any of them.
+   */
+  async function sellWithoutServicePay(key: string, price?: number) {
     const list = (await planLists()).find(candidate => candidate.listProductKey === key)!
     const current = await prisma.hybridOfferPublication.findUniqueOrThrow({ where: { id: list.currentPublicationId! } })
     expect(current.includedFeatureCodes).toContain('SERVICE_PAY')
+    const repriced =
+      price === undefined
+        ? null
+        : compileHybridPublication({
+            ...hybridOfferDefinition.parse(current.definition),
+            terms: { ...hybridOfferDefinition.parse(current.definition).terms, price },
+          })
     const stale = await prisma.hybridOfferPublication.create({
       data: {
         campaignId: list.id,
         version: list.revision,
         name: list.name,
-        definition: current.definition as Prisma.InputJsonValue,
-        definitionHash: current.definitionHash,
+        definition: (repriced?.definition ?? current.definition) as Prisma.InputJsonValue,
+        definitionHash: repriced?.definitionHash ?? current.definitionHash,
         includedFeatureCodes: current.includedFeatureCodes.filter(code => code !== 'SERVICE_PAY'),
         createdById: staffId,
       },
@@ -241,18 +253,18 @@ describe('seeding the plan lists at the classic monthly price (spec §4.2)', () 
   })
 
   it('a plan list at another price keeps that price when its composition is brought up to date', async () => {
-    const { list } = await sellWithoutServicePay('PLAN:PRO')
+    const { list } = await sellWithoutServicePay('PLAN:PRO', 9999)
     const { report } = await run({ apply: true, confirmHost: host, confirmDb: dbName })
     expect(report.results.find(r => r.productKey === 'PLAN:PRO')).toMatchObject({
       outcome: 'DIFFERENT_PRICE',
-      current: 999,
+      current: 9999,
       missing: ['SERVICE_PAY'],
       recomposed: true,
     })
     const after = await prisma.hybridCampaign.findUniqueOrThrow({ where: { id: list.id } })
     const republished = await prisma.hybridOfferPublication.findUniqueOrThrow({ where: { id: after.currentPublicationId! } })
     expect(republished.includedFeatureCodes).toContain('SERVICE_PAY')
-    expect(await priceOf(republished.id)).toBe(999)
+    expect(await priceOf(republished.id)).toBe(9999)
   })
 
   it('a failed Stripe preparation while republishing is finished by the next --apply, which then sells the code composition', async () => {
@@ -266,12 +278,12 @@ describe('seeding the plan lists at the classic monthly price (spec §4.2)', () 
 
     const { report, text } = await run({ apply: true, confirmHost: host, confirmDb: dbName })
     expect(report.results.find(r => r.productKey === 'PLAN:PRO')).toMatchObject({ outcome: 'PENDING', missing: [], recomposed: false })
-    expect(text).toMatch(/PLAN:PRO: precio pendiente terminado a \$999\.00/)
+    expect(text).toMatch(/PLAN:PRO: precio pendiente terminado a \$9999\.00/)
     const after = await prisma.hybridCampaign.findUniqueOrThrow({ where: { id: list.id } })
     expect(after.pendingPublicationId).toBeNull()
     const onSale = await prisma.hybridOfferPublication.findUniqueOrThrow({ where: { id: after.currentPublicationId! } })
     expect(onSale.includedFeatureCodes).toContain('SERVICE_PAY')
-    expect(await priceOf(onSale.id)).toBe(999)
+    expect(await priceOf(onSale.id)).toBe(9999)
   })
 
   it('a function the code dropped from the plan is taken off the list it sells, and the reason stays in the audit', async () => {
@@ -301,7 +313,7 @@ describe('seeding the plan lists at the classic monthly price (spec §4.2)', () 
     const after = await prisma.hybridCampaign.findUniqueOrThrow({ where: { id: pro.id } })
     const onSale = await prisma.hybridOfferPublication.findUniqueOrThrow({ where: { id: after.currentPublicationId! } })
     expect(onSale.includedFeatureCodes).not.toContain(notInPro)
-    expect(await priceOf(onSale.id)).toBe(999)
+    expect(await priceOf(onSale.id)).toBe(9999)
     const audit = await prisma.activityLog.findFirst({
       where: { staffId, action: 'HYBRID_LIST_RECOMPOSED', entityId: pro.id },
       orderBy: { createdAt: 'desc' },
