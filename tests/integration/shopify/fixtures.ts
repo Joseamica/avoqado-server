@@ -259,6 +259,8 @@ export async function limpiarEscenarioShopify(e: EscenarioShopify): Promise<void
   await prisma.venueAreaTicketSettings.deleteMany({ where: { venueId } })
   await prisma.venueScaleSettings.deleteMany({ where: { venueId } })
   await prisma.venueFeature.deleteMany({ where: { venueId } })
+  // 5a: la prueba del candado crea una capability grant (para demostrar que sola no basta); su llave al negocio es RESTRICT.
+  await prisma.capabilityGrant.deleteMany({ where: { venueId } })
   await prisma.activityLog.deleteMany({ where: { venueId } })
   // La gente del negocio: el ADMIN del escenario y la que agreguen las pruebas (A5 crea más de 100), por tandas.
   const gente: string[] = [e.staffId]

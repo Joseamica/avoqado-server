@@ -900,6 +900,25 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     ])
   })
 
+  it('🔴 5a · candado propio: concesión explícita y vigente, nunca una demo; el piloto contesta SHOPIFY_USA_APP_PROPIA', () => {
+    contieneTodas([
+      'sólo una concesión explícita y vigente de `SHOPIFY_INTEGRATION`',
+      'nunca un negocio en `DEMO_VENUE_STATUSES`',
+      'recibe 409 `SHOPIFY_USA_APP_PROPIA` en el piloto',
+    ])
+    const conexion = leer(`${SHOPIFY}/shopify.connect.service.ts`)
+    const candado = cuerpo(conexion, 'export async function puedeConectarConAppPropia(')
+    expect(candado).toContain('DEMO_VENUE_STATUSES')
+    expect(candado).toContain('isActiveWindow(vf)')
+    expect(candado).not.toMatch(/venueHasFeatureAccess|hasCapabilityGrant|capabilityGrant/)
+    enOrden(cuerpo(conexion, 'export async function startShopifyConnect('), [
+      'if (!tiendasPiloto().has(shop))',
+      'await puedeConectarConAppPropia(i.venueId)',
+      "'SHOPIFY_USA_APP_PROPIA'",
+      "'SHOPIFY_SOLO_PILOTO'",
+    ])
+  })
+
   it('los globs de `paths:` de la regla apuntan a algo que existe, incluidos los demás escritores de stock', () => {
     const cabecera = leer('.claude/rules/shopify-conector.md').split('---')[1]
     const globs = [...cabecera.matchAll(/- '([^']+)'/g)].map(m => m[1])
@@ -932,9 +951,9 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     // ancla de línea ahí no se puede sostener sin romper esta prueba por un cambio ajeno.
     const de = (f: string) => `${SHOPIFY}/shopify.${f}.ts`
     const anclas: Record<string, [string, string]> = {
-      'shopify.connect.service.ts:98': [de('connect.service'), 'export async function startShopifyConnect('],
-      'connect.service.ts:1481': [de('connect.service'), 'export async function disconnectShopify('],
-      'connect.service.ts:647': [de('connect.service'), 'async function aCuarentenaPorReligar('],
+      'shopify.connect.service.ts:115': [de('connect.service'), 'export async function startShopifyConnect('],
+      'connect.service.ts:1505': [de('connect.service'), 'export async function disconnectShopify('],
+      'connect.service.ts:671': [de('connect.service'), 'async function aCuarentenaPorReligar('],
       'shopify.crypto.ts:34': [de('crypto'), 'export function formaDeFirmaOAuth('],
       'catalog.service.ts:68': [de('catalog.service'), 'export const FILTRO_ESTADO'],
       'catalog.service.ts:418': [de('catalog.service'), 'async function bloquearProductos('],

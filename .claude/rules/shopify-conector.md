@@ -33,7 +33,7 @@ cambias el comportamiento, cambia aquí la frase y su aserción en el mismo comm
 
 | Pieza                                                                            | Dónde                                                                                                                       | Efecto                                                                                                          |
 | -------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| `SHOPIFY_PILOTO_SHOPS` (dominios `.myshopify.com`, coma; se lee en cada llamada) | `startShopifyConnect(…)` (`shopify.connect.service.ts:98`; la lista, `tiendasPiloto`, en `:70`)                             | otra tienda ⇒ 409 `SHOPIFY_SOLO_PILOTO`                                                                         |
+| `SHOPIFY_PILOTO_SHOPS` (dominios `.myshopify.com`, coma; se lee en cada llamada) | `startShopifyConnect(…)` (`shopify.connect.service.ts:115`; la lista, `tiendasPiloto`, en `:70`)                             | otra tienda ⇒ 409 `SHOPIFY_SOLO_PILOTO` (con la invitación de la app propia, `SHOPIFY_USA_APP_PROPIA`, §4 ter)  |
 | `SHOPIFY_INTEGRATION` en `PREMIUM_ONLY_SIN_CATALOGO`                             | `basePlan.service.ts:93`                                                                                                    | Premium por regla pero SIN entrada de catálogo ni precio; `shopifyTierMirror.test.ts` falla si queda en los dos |
 | Nunca se contrata suelta                                                         | `addFeaturesToVenue(…)` (`venueFeature.dashboard.service.ts:190`) y `createTrialSubscriptions(…)` (`stripe.service.ts:303`) | 400 `FEATURE_NO_SE_VENDE_SUELTA`; la segunda es el embudo de venta suelta, conversión de demo y onboarding      |
 
@@ -164,7 +164,7 @@ espejo dejaría la cuenta en 11 contra las 12 piezas de Avoqado. Si hay filas vi
   y después la tienda `FOR SHARE` (`mirror.service.ts:372`). Quien la llame lo hace antes de cualquier candado de pareja, fila o cerco, o en
   una tx propia (el mensajero: tx de 15 s, porque avisa por dentro). `FOR NO KEY UPDATE` y no `FOR UPDATE`: no frena el `FOR KEY SHARE` de
   quien inserte una pareja con llave foránea a la sucursal.
-- **Desconectar** (`disconnectShopify(…)`, `connect.service.ts:1481`) bloquea primero TODAS las sucursales de la tienda por id (la propia
+- **Desconectar** (`disconnectShopify(…)`, `connect.service.ts:1505`) bloquea primero TODAS las sucursales de la tienda por id (la propia
   `FOR UPDATE`, las hermanas `FOR NO KEY UPDATE`), después las parejas de ESA sucursal, ordenadas por id, y sólo entonces sube la
   generación. Nunca la propia y luego una hermana de id menor: se cruzaría con quien las toma por id (el drenado, diferir, renovar la
   credencial). `renovarCredencial` (reconectar o reautorizar) también bloquea todas las sucursales de la tienda por id ANTES de la tienda.
@@ -223,6 +223,18 @@ Avoqado en los que faltan» / «Usar Shopify en los que faltan»). Los productos
 - **ACTIVE no espera a que los ajustes lleguen:** `terminarAplicacion` no cambia; el ajuste es una fila PENDING no ambigua de una pareja ya
   iniciada (no la frena `envioEnCamino(…)` ni la descarta `SIN_PAREJA`) y sale con el mensajero en cuanto la sucursal está ACTIVE.
 
+## 4 ter. App del comercio (Fase 5a)
+
+Spec: `specs/2026-10-11-conector-shopify-app-del-comercio-design.md`. La App Store no acepta un conector de un POS externo (1.1.8): el
+comercio crea SU app en su Dev Dashboard y pega Client ID y Client Secret. Sólo cambia cómo entra la llave: espejo, buzón, vista previa, D1,
+cuadre y conteo no cambian, y el piloto (`PILOTO`, OAuth) convive igual.
+
+- **Candado propio** (`puedeConectarConAppPropia(…)`): `venueHasFeatureAccess` deja pasar al trato preferente y a las demos (casi todo
+  producción); aquí sólo una concesión explícita y vigente de `SHOPIFY_INTEGRATION` (su fila `VenueFeature` en ventana activa, la de
+  `isActiveWindow`: la cortesía de superadmin; una capability grant sola no basta) y nunca un negocio en `DEMO_VENUE_STATUSES`. Premium no
+  basta todavía. Una tienda fuera de `SHOPIFY_PILOTO_SHOPS` con la cortesía recibe 409 `SHOPIFY_USA_APP_PROPIA` en el piloto (el dashboard
+  abre el bloque de llaves); sin ella, el `SHOPIFY_SOLO_PILOTO` de siempre.
+
 ## 5. `Inventory` que desaparece o vuelve ⇒ suspender y reactivar la pareja, NUNCA borrarla
 
 Un `DELETE` de la fila (pasar el producto a receta, borrar la sucursal, limpiar una demo) no se manda a Shopify: dejaría la tienda en línea
@@ -273,7 +285,7 @@ borre o cree filas de `Inventory` de productos ligados, o que cambie esos campos
     `store.service.ts:273`) de cualquier generación anterior de esa sucursal o de la que ocupaba la ubicación. Una DEAD_LETTER ambigua no la
     frena: ya no puede llegar.
   - Religar la sucursal a OTRA tienda no es un 409: sus filas `IN_PROGRESS` y vivas ambiguas pasan a DEAD_LETTER con
-    `lastError = RELIGADA_A_OTRA_TIENDA` (duda y parámetros congelados conservados; `aCuarentenaPorReligar`, `connect.service.ts:647`),
+    `lastError = RELIGADA_A_OTRA_TIENDA` (duda y parámetros congelados conservados; `aCuarentenaPorReligar`, `connect.service.ts:671`),
     porque el reclamo sólo las tomaría con la tienda vieja ACTIVE y la sucursal ya apunta a la nueva: la espera no terminaría nunca. No
     avisan (es una acción deliberada del dueño); queda `religadas` en el `ActivityLog` de `SHOPIFY_CONNECTED`.
   - Desconectar no espera: bloquea (§4), sube la generación y deja esas filas cerrarse con su llave; al llegar no mueven el espejo.

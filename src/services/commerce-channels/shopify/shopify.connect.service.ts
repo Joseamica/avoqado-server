@@ -13,7 +13,7 @@ import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { env } from '@/config/env'
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError, ServiceUnavailableError, ValidationError } from '@/errors/AppError'
-import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
+import { DEMO_VENUE_STATUSES, isActiveWindow, venueHasFeatureAccess } from '@/services/access/basePlan.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { assertLegacyCatalogGovernanceForVenue } from '@/services/master-catalog/catalogGovernance.service'
 import { utcTs } from '@/utils/sqlDates'
@@ -93,6 +93,23 @@ function faltanPermisos(scope: string): string[] {
   return SHOPIFY_SCOPES.split(',').filter(s => !dados.has(s) && !(s.startsWith('read_') && dados.has(`write_${s.slice(5)}`)))
 }
 
+/**
+ * 5a (spec 2026-10-11 §3.1): el candado de la app del comercio. `venueHasFeatureAccess` deja pasar a los negocios con trato
+ * preferente y a las demos (casi todo producción); aquí SÓLO la fila `VenueFeature` de `SHOPIFY_INTEGRATION` en su ventana activa
+ * (`isActiveWindow`, la misma del resolver): la cortesía de superadmin. Una capability grant sola no basta (la lista de funciones
+ * concedidas del dashboard no incluye Shopify; ruling de la auditoría). Nunca una demo: trae la fila sola y su stock es de mentira.
+ * El plan Premium no basta todavía (la Fase 1 no se vende): encenderlo para Premium es esta función.
+ */
+export async function puedeConectarConAppPropia(venueId: string): Promise<boolean> {
+  const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { status: true } })
+  if (!venue || (DEMO_VENUE_STATUSES as readonly string[]).includes(venue.status)) return false
+  const vf = await prisma.venueFeature.findFirst({
+    where: { venueId, feature: { code: SHOPIFY_FEATURE } },
+    select: { active: true, endDate: true, suspendedAt: true },
+  })
+  return !!vf && isActiveWindow(vf)
+}
+
 // ─── Iniciar y callback ─────────────────────────────────────────────────────────────────────────────────────
 
 export async function startShopifyConnect(i: {
@@ -107,6 +124,13 @@ export async function startShopifyConnect(i: {
   if (!isValidShopDomain(shop))
     throw new BadRequestError('Escribe el dominio de tu tienda, el que termina en .myshopify.com', 'SHOPIFY_DOMINIO_INVALIDO')
   if (!tiendasPiloto().has(shop)) {
+    // 5a: quien tiene la invitación conecta con SU app (el dashboard abre ese bloque); los demás, el piloto de siempre.
+    if (await puedeConectarConAppPropia(i.venueId)) {
+      throw new ConflictError(
+        'Esta tienda se conecta con una app que creas en tu Shopify: pega su Client ID y su Client Secret.',
+        'SHOPIFY_USA_APP_PROPIA',
+      )
+    }
     throw new ConflictError(
       'La conexión con Shopify está en piloto y por ahora sólo se abre para tiendas invitadas. Escríbenos y te sumamos.',
       'SHOPIFY_SOLO_PILOTO',

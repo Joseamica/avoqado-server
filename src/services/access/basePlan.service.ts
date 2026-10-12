@@ -180,7 +180,7 @@ export function cruzaPlanYSuelta(origen: string, destino: string): boolean {
 }
 
 /** Active-window predicate shared by every base-plan query: active, not suspended, trial null/future. */
-function isActiveWindow(vf: { active: boolean; suspendedAt: Date | null; endDate: Date | null }, now: Date = new Date()): boolean {
+export function isActiveWindow(vf: { active: boolean; suspendedAt: Date | null; endDate: Date | null }, now: Date = new Date()): boolean {
   if (!vf.active || vf.suspendedAt) return false
   if (vf.endDate && vf.endDate < now) return false // trial expired unpaid
   return true
