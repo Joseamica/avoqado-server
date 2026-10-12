@@ -21,6 +21,8 @@ const esquema = (over: Record<string, unknown>) => ({
 beforeEach(() => {
   prismaMock.venue.findUnique.mockResolvedValue({ organizationId: ORG, timezone: 'America/Mexico_City' })
   prismaMock.staffVenue.findUnique.mockResolvedValue({ id: 'sv-1' })
+  // validateStaffForCommission (el motor): StaffVenue activo de la sede, con su Staff.
+  prismaMock.staffVenue.findFirst.mockResolvedValue({ staffId: PERSONA, role: 'WAITER', staff: { id: PERSONA, active: true } })
   prismaMock.commissionConfig.findMany.mockResolvedValue([])
   prismaMock.commissionOverride.findFirst.mockResolvedValue(null)
   prismaMock.staffPayLevelAssignment.findFirst.mockResolvedValue(null)
@@ -73,6 +75,24 @@ describe('resumenDePago (spec RH §3.5)', () => {
     expect(r).toEqual({ comisiones: null, nivelDeClase: 'SIN_PERMISO', propinas: { regla: 'ATIENDE_LUEGO_COBRA' } })
     expect(prismaMock.commissionConfig.findMany).not.toHaveBeenCalled()
     expect(prismaMock.staffPayLevelAssignment.findFirst).not.toHaveBeenCalled()
+  })
+
+  it('StaffVenue inactivo ⇒ comisiones: [] (el motor no le calcula), sin leer esquemas', async () => {
+    prismaMock.commissionConfig.findMany.mockResolvedValue([esquema({ id: 'cfg-a' })])
+    prismaMock.staffVenue.findFirst.mockResolvedValue(null) // el motor busca con active: true
+    const r = await resumenDePago(SEDE, PERSONA, TODO)
+    expect(r.comisiones).toEqual([])
+    expect(prismaMock.staffVenue.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { staffId: PERSONA, venueId: SEDE, active: true } }),
+    )
+    expect(prismaMock.commissionConfig.findMany).not.toHaveBeenCalled()
+  })
+
+  it('Staff inactivo ⇒ comisiones: []', async () => {
+    prismaMock.commissionConfig.findMany.mockResolvedValue([esquema({ id: 'cfg-a' })])
+    prismaMock.staffVenue.findFirst.mockResolvedValue({ staffId: PERSONA, role: 'WAITER', staff: { id: PERSONA, active: false } })
+    expect((await resumenDePago(SEDE, PERSONA, TODO)).comisiones).toEqual([])
+    expect(prismaMock.commissionConfig.findMany).not.toHaveBeenCalled()
   })
 
   it('persona de otra sede ⇒ 404 y no lee nada más', async () => {

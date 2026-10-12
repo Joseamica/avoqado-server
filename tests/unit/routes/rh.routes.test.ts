@@ -12,6 +12,9 @@ jest.mock('@/middlewares/checkPermission.middleware', () => ({
 
 import rhRoutes from '@/routes/dashboard/rh.routes'
 import * as puestos from '@/services/dashboard/rh/puestos.service'
+import * as asign from '@/services/dashboard/rh/asignaciones.service'
+import * as resumen from '@/services/dashboard/rh/resumenDePago.service'
+import logger from '@/config/logger'
 import * as accessService from '@/services/access/access.service'
 import { moduleService } from '@/services/modules/module.service'
 
@@ -97,6 +100,32 @@ describe('rutas RH (spec §6-7)', () => {
       expect(JSON.stringify(res.body)).toContain('Relación inválida')
     })
 
+    it('suggestedRole SUPERADMIN ⇒ 400 «Rol inválido» (al crear y al editar), sin llamar al servicio', async () => {
+      const crear = jest.spyOn(puestos, 'crearPuesto')
+      const editar = jest.spyOn(puestos, 'editarPuesto')
+      const app = appConUsuario({ permissions: ['teams:update'] })
+      const post = await request(app).post(`${base}/positions`).send({ name: 'Dios', suggestedRole: 'SUPERADMIN' })
+      expect(post.status).toBe(400)
+      expect(post.body.error).toContain('Rol inválido')
+      const patch = await request(app).patch(`${base}/positions/cjld2cjxh0000qzrmn831i7rp`).send({ suggestedRole: 'SUPERADMIN' })
+      expect(patch.status).toBe(400)
+      expect(patch.body.error).toContain('Rol inválido')
+      expect(crear).not.toHaveBeenCalled()
+      expect(editar).not.toHaveBeenCalled()
+    })
+
+    it('getUserAccess falla ⇒ pay-overview sin permiso en los dos bloques y warn en el log (como staffPay/acceso.ts)', async () => {
+      jest.spyOn(accessService, 'getUserAccess').mockRejectedValueOnce(new Error('caída de la base'))
+      prismaMock.venue.findUnique.mockResolvedValue({ organizationId: ORG, timezone: 'America/Mexico_City' })
+      prismaMock.staffVenue.findUnique.mockResolvedValue({ id: 'sv-1' })
+      const res = await request(appConUsuario({ permissions: ['teams:read'] })).get(`${base}/staff/${PERSONA}/pay-overview`)
+      expect(res.status).toBe(200)
+      expect(res.body).toEqual({ comisiones: null, nivelDeClase: 'SIN_PERMISO', propinas: { regla: 'ATIENDE_LUEGO_COBRA' } })
+      expect(logger.warn).toHaveBeenCalled()
+      expect(prismaMock.commissionConfig.findMany).not.toHaveBeenCalled()
+      expect(prismaMock.staffPayLevelAssignment.findFirst).not.toHaveBeenCalled()
+    })
+
     it('sede de marca blanca ⇒ GET /rh/positions 403 en español, aun con teams:read (spec §5.3)', async () => {
       marcaBlanca.mockResolvedValue(true)
       const listar = jest.spyOn(puestos, 'listarPuestos')
@@ -105,6 +134,55 @@ describe('rutas RH (spec §6-7)', () => {
       expect(res.body.error).toBe('Puestos y relación de RH no está disponible en esta sucursal.')
       expect(marcaBlanca).toHaveBeenCalledWith(SEDE, 'WHITE_LABEL_DASHBOARD')
       expect(listar).not.toHaveBeenCalled()
+    })
+  })
+
+  // Cada ruta con su permiso EXACTO: sin él ⇒ 403 que nombra ese permiso; sólo con él ⇒ pasa.
+  describe('permiso por ruta (las 10)', () => {
+    const P = 'cjld2cjxh0000qzrmn831i7rp'
+    const A = 'cjld2cjxh0000qzrmn831i7ra'
+    const rutas: Array<[string, 'get' | 'post' | 'patch', string, string, Record<string, unknown> | null]> = [
+      ['listar puestos', 'get', '/positions', 'teams:read', null],
+      ['sugeridos', 'get', '/positions/suggestions', 'teams:read', null],
+      ['crear puesto', 'post', '/positions', 'teams:update', { name: 'Coach', suggestedRole: 'WAITER' }],
+      ['editar puesto', 'patch', `/positions/${P}`, 'teams:update', { name: 'Coach' }],
+      ['archivar puesto', 'post', `/positions/${P}/archive`, 'teams:update', {}],
+      ['historial', 'get', `/staff/${PERSONA}/assignments`, 'teams:read', null],
+      ['asignar', 'post', `/staff/${PERSONA}/assignments`, 'teams:update', { positionId: P }],
+      ['cambiar', 'post', `/assignments/${A}/change`, 'teams:update', { relation: null }],
+      ['terminar', 'post', `/assignments/${A}/end`, 'teams:update', {}],
+      ['cómo se le paga', 'get', `/staff/${PERSONA}/pay-overview`, 'teams:read', null],
+    ]
+    const espias: jest.SpyInstance[] = []
+    beforeAll(() => {
+      const vacio = { data: [], total: 0, hasMore: false }
+      espias.push(
+        jest.spyOn(puestos, 'listarPuestos').mockResolvedValue(vacio),
+        jest.spyOn(puestos, 'puestosSugeridos').mockResolvedValue([]),
+        jest.spyOn(puestos, 'crearPuesto').mockResolvedValue({} as any),
+        jest.spyOn(puestos, 'editarPuesto').mockResolvedValue({} as any),
+        jest.spyOn(puestos, 'archivarPuesto').mockResolvedValue({} as any),
+        jest.spyOn(asign, 'historialDePersona').mockResolvedValue(vacio),
+        jest.spyOn(asign, 'asignarPuesto').mockResolvedValue({} as any),
+        jest.spyOn(asign, 'cambiarAsignacion').mockResolvedValue({} as any),
+        jest.spyOn(asign, 'terminarAsignacion').mockResolvedValue({} as any),
+        jest.spyOn(resumen, 'resumenDePago').mockResolvedValue({} as any),
+        jest.spyOn(accessService, 'getUserAccess').mockResolvedValue({ role: 'VIEWER', corePermissions: [] } as any),
+      )
+    })
+    afterAll(() => espias.forEach(e => e.mockRestore()))
+
+    it.each(rutas)('%s (%s %s) pide %s', async (_n, metodo, ruta, permiso, cuerpo) => {
+      const llamar = (permissions: string[]) => {
+        const r = request(appConUsuario({ permissions }))[metodo](`${base}${ruta}`)
+        return cuerpo ? r.send(cuerpo) : r
+      }
+      const otro = permiso === 'teams:read' ? 'teams:update' : 'teams:read'
+      const sin = await llamar([otro])
+      expect(sin.status).toBe(403)
+      expect(sin.body.message).toBe(`Falta ${permiso}`)
+      const con = await llamar([permiso])
+      expect([200, 201]).toContain(con.status)
     })
   })
 })

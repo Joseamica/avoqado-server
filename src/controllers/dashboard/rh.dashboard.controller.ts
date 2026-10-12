@@ -5,6 +5,7 @@ import * as puestos from '../../services/dashboard/rh/puestos.service'
 import * as asign from '../../services/dashboard/rh/asignaciones.service'
 import { resumenDePago } from '../../services/dashboard/rh/resumenDePago.service'
 import { getUserAccess, hasPermission } from '../../services/access/access.service'
+import logger from '../../config/logger'
 
 const h =
   (fn: (req: Request) => Promise<unknown>, status = 200) =>
@@ -58,9 +59,13 @@ function overrideDeImpersonacion(req: Request) {
 
 export const payOverview = h(async req => {
   const { venueId, userId } = ctx(req)
-  const access = await getUserAccess(userId, venueId, undefined, overrideDeImpersonacion(req))
-  return resumenDePago(venueId, req.params.staffId, {
-    comisiones: hasPermission(access, 'commissions:read'),
-    pagoPorClase: hasPermission(access, 'staffpay:read'),
-  })
+  let puede = { comisiones: false, pagoPorClase: false }
+  try {
+    const access = await getUserAccess(userId, venueId, undefined, overrideDeImpersonacion(req))
+    puede = { comisiones: hasPermission(access, 'commissions:read'), pagoPorClase: hasPermission(access, 'staffpay:read') }
+  } catch (error) {
+    // Igual que staffPay/acceso.ts (permisoYAcceso): un error al resolver el acceso cuenta como «sin permiso».
+    logger.warn('rh.payOverview: no se pudo resolver el acceso; se muestra sin permiso', { venueId, userId, error })
+  }
+  return resumenDePago(venueId, req.params.staffId, puede)
 })

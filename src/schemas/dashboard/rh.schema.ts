@@ -35,7 +35,10 @@ export const crearPuestoSchema = z.object({
       .trim()
       .min(1, 'El nombre es obligatorio')
       .max(60, 'Máximo 60 caracteres'),
-    suggestedRole: z.nativeEnum(StaffRole, { errorMap: () => ({ message: 'Rol inválido' }) }),
+    // SUPERADMIN es de la plataforma, no un rol que un puesto pueda sugerir.
+    suggestedRole: z
+      .nativeEnum(StaffRole, { errorMap: () => ({ message: 'Rol inválido' }) })
+      .refine(r => r !== StaffRole.SUPERADMIN, 'Rol inválido'),
     suggestedRelation: relacion.optional(),
     tracksAttendanceDefault: sino.optional(),
     componentKinds: z

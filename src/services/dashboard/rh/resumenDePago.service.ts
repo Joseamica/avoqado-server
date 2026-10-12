@@ -1,6 +1,6 @@
 import prisma from '../../../utils/prismaClient'
 import { NotFoundError } from '../../../errors/AppError'
-import { findActiveCommissionConfigs, findActiveOverride } from '../commission/commission-utils'
+import { findActiveCommissionConfigs, findActiveOverride, validateStaffForCommission } from '../commission/commission-utils'
 import { aplicaALaPersona } from '../commission/personasElegidas'
 import { dbDateComoFecha, fechaComoDbDate } from '../staffPay/periodos'
 import { hoyDeLaSede } from './vigencias'
@@ -35,9 +35,12 @@ export async function resumenDePago(
 
   let comisiones: ResumenDePagoDto['comisiones'] = null
   if (puede.comisiones) {
-    // Mismo filtro de elegibilidad que el motor: «sólo personas elegidas» (personasElegidas.ts). Sin recortar la lista:
-    // los esquemas vigentes de una sede son pocos, y la lista completa es la verdad.
-    const configs = (await findActiveCommissionConfigs(venueId)).filter(cfg => aplicaALaPersona(cfg, staffId))
+    // La misma regla del motor: sin StaffVenue activo o con el Staff inactivo no se le calcula comisión
+    // (validateStaffForCommission, sólo lee) ⇒ lista vacía, no null: el usuario SÍ tiene permiso de verlo.
+    // Después, «sólo personas elegidas» (personasElegidas.ts). Sin recortar la lista: los esquemas vigentes de una
+    // sede son pocos, y la lista completa es la verdad.
+    const elegible = await validateStaffForCommission(staffId, venueId)
+    const configs = elegible ? (await findActiveCommissionConfigs(venueId)).filter(cfg => aplicaALaPersona(cfg, staffId)) : []
     comisiones = await Promise.all(
       configs.map(async cfg => {
         const ov = await findActiveOverride(cfg.id, staffId)
