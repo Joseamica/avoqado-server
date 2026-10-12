@@ -95,6 +95,8 @@ export async function getTeamMembers(
   pageSize: number = 10,
   search?: string,
   positionId?: string,
+  /** Rol de quien pide EN ESTA SEDE (req.resolvedRole de checkPermission). Sólo un SUPERADMIN ve a otros SUPERADMIN. */
+  callerRole?: StaffRole,
 ): Promise<PaginatedTeamResponse> {
   const skip = (page - 1) * pageSize
 
@@ -112,65 +114,48 @@ export async function getTeamMembers(
     ? { staff: { organizations: { some: { organizationId: venueOrg.organizationId, isActive: true } } } }
     : {}
 
-  // Build search conditions
-  const searchConditions = search
-    ? {
-        OR: [
-          {
-            staff: {
-              firstName: {
-                contains: search,
-                mode: 'insensitive' as const,
-              },
-            },
-          },
-          {
-            staff: {
-              lastName: {
-                contains: search,
-                mode: 'insensitive' as const,
-              },
-            },
-          },
-          {
-            staff: {
-              email: {
-                contains: search,
-                mode: 'insensitive' as const,
-              },
-            },
-          },
-        ],
-      }
-    : {}
+  // Búsqueda por palabras, como la del panel («Ana López», «ana l»): cada palabra debe aparecer en el nombre, el apellido o
+  // el correo; las palabras se combinan con AND. Una sola palabra conserva la forma de siempre (un OR en la raíz).
+  const porPalabra = (search ?? '')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 5) // ponytail: tope de 5 palabras; más no afina y sólo encarece la consulta
+    .map(t => ({
+      OR: [
+        { staff: { firstName: { contains: t, mode: 'insensitive' as const } } },
+        { staff: { lastName: { contains: t, mode: 'insensitive' as const } } },
+        { staff: { email: { contains: t, mode: 'insensitive' as const } } },
+      ],
+    }))
 
   // RH: filtro por puesto vigente hoy (fin inclusivo, igual que asignacionesVigentes). Va en AND con la pertenencia a la
   // organización: un segundo `staff` suelto la reemplazaría y volverían a salir personas retiradas.
   const hoyDb = fechaComoDbDate(hoy)
-  const membershipFilter = positionId
+  const positionFilter = positionId
     ? {
-        AND: [
-          activeOrgMemberFilter,
-          {
-            staff: {
-              staffAssignments: {
-                some: {
-                  venueId,
-                  positionId,
-                  effectiveFrom: { lte: hoyDb },
-                  OR: [{ effectiveTo: null }, { effectiveTo: { gte: hoyDb } }],
-                },
-              },
+        staff: {
+          staffAssignments: {
+            some: {
+              venueId,
+              positionId,
+              effectiveFrom: { lte: hoyDb },
+              OR: [{ effectiveTo: null }, { effectiveTo: { gte: hoyDb } }],
             },
           },
-        ],
+        },
       }
-    : activeOrgMemberFilter
+    : null
+  const and = [...(positionFilter ? [activeOrgMemberFilter, positionFilter] : []), ...(porPalabra.length > 1 ? porPalabra : [])]
 
   const whereCondition = {
     venueId,
-    ...membershipFilter,
-    ...searchConditions,
+    ...(positionFilter ? {} : activeOrgMemberFilter),
+    ...(porPalabra.length === 1 ? porPalabra[0] : {}),
+    ...(and.length > 0 ? { AND: and } : {}),
+    // El panel oculta a los SUPERADMIN salvo a otro SUPERADMIN (Teams.tsx → filterSuperadminFromTeam). Se filtra AQUÍ para
+    // que el total y las páginas no los cuenten. Sin rol conocido (llamadas internas) se ocultan: es lo seguro.
+    ...(callerRole === StaffRole.SUPERADMIN ? {} : { role: { not: StaffRole.SUPERADMIN } }),
   }
 
   const [staffVenues, totalCount] = await prisma.$transaction([

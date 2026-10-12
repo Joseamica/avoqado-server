@@ -11,7 +11,8 @@ export async function getTeamMembers(req: Request, res: Response, next: NextFunc
     const search = req.query.search as string
     const positionId = req.query.positionId as string | undefined
 
-    const result = await teamService.getTeamMembers(venueId, page, pageSize, search, positionId)
+    // resolvedRole = rol de quien pide en ESTA sede (lo pone checkPermission('teams:read')).
+    const result = await teamService.getTeamMembers(venueId, page, pageSize, search, positionId, (req as any).resolvedRole)
     res.status(200).json(result)
   } catch (error) {
     next(error)
