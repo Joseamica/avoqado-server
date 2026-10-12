@@ -61,7 +61,7 @@ async function hoyDeLaSedeDb(venueId: string): Promise<Date> {
 
 /**
  * ÚNICA definición de «persona vigente en el puesto» (listado y respuestas de crear/editar/archivar): la asignación está
- * vigente HOY (fin inclusivo, mismo criterio que asignacionesVigentes) y la persona sigue activa en ESTA sucursal.
+ * vigente HOY (fin inclusivo, mismo criterio que asignacionesVigentes) y la persona sigue activa (su cuenta y en ESTA sucursal).
  */
 function conConteoVigentes(venueId: string, hoy: Date) {
   return {
@@ -72,7 +72,8 @@ function conConteoVigentes(venueId: string, hoy: Date) {
             venueId,
             effectiveFrom: { lte: hoy },
             OR: [{ effectiveTo: null }, { effectiveTo: { gte: hoy } }],
-            staff: { venues: { some: { venueId, active: true } } },
+            // Cuenta global activa (Superadmin la desactiva sin tocar StaffVenue) y activa en ESTA sucursal.
+            staff: { active: true, venues: { some: { venueId, active: true } } },
           },
         },
       },
@@ -119,6 +120,10 @@ export async function crearPuesto(input: CrearPuestoInput): Promise<PuestoDto> {
   const hoy = await hoyDeLaSedeDb(input.venueId)
   return withSerializableRetry(async tx => {
     await nombreLibre(tx, input.venueId, name)
+    // Tope de puestos ACTIVOS por sucursal, dentro de la misma transacción serializable (dos altas a la vez no lo rebasan).
+    if ((await tx.staffPosition.count({ where: { venueId: input.venueId, archivedAt: null } })) >= TOPE) {
+      throw new BadRequestError('Esta sucursal ya tiene 100 puestos activos. Archiva alguno antes de crear otro.')
+    }
     const p = await tx.staffPosition.create({
       data: {
         venueId: input.venueId,

@@ -84,7 +84,8 @@ describe('puestos (spec RH §3.1)', () => {
       const lista = await listarPuestos('v1', {})
       expect(lista.data[0].personasVigentes).toBe(4)
       const dondeLista = prismaMock.staffPosition.findMany.mock.calls[0][0].include._count.select.assignments.where
-      expect(dondeLista.staff).toEqual({ venues: { some: { venueId: 'v1', active: true } } })
+      // Cuenta global activa (Staff.active) Y activa en esta sede: una cuenta desactivada en Superadmin ya no cuenta.
+      expect(dondeLista.staff).toEqual({ active: true, venues: { some: { venueId: 'v1', active: true } } })
       expect(dondeLista.venueId).toBe('v1')
 
       prismaMock.staffPosition.findFirst.mockResolvedValue(conConteo({ id: 'p1', venueId: 'v1' }, 4))
@@ -103,6 +104,19 @@ describe('puestos (spec RH §3.1)', () => {
       await expect(crearPuesto({ venueId: 'v1', actorId: 'a1', name: 'Coach', suggestedRole: 'WAITER' as any })).rejects.toThrow(
         'Ya existe un puesto llamado «Coach»',
       )
+    })
+    it('con 100 puestos activos ⇒ 400 en español y no crea; cuenta sólo activos de esta sede', async () => {
+      prismaMock.staffPosition.count.mockResolvedValue(100)
+      await expect(crearPuesto({ venueId: 'v1', actorId: 'a1', name: 'Coach', suggestedRole: 'WAITER' as any })).rejects.toThrow(
+        'Esta sucursal ya tiene 100 puestos activos. Archiva alguno antes de crear otro.',
+      )
+      expect(prismaMock.staffPosition.count).toHaveBeenCalledWith({ where: { venueId: 'v1', archivedAt: null } })
+      expect(prismaMock.staffPosition.create).not.toHaveBeenCalled()
+    })
+    it('con 99 puestos activos todavía crea', async () => {
+      prismaMock.staffPosition.count.mockResolvedValue(99)
+      prismaMock.staffPosition.create.mockResolvedValue(conConteo({ id: 'p100', name: 'Coach', suggestedRole: 'WAITER' }))
+      expect((await crearPuesto({ venueId: 'v1', actorId: 'a1', name: 'Coach', suggestedRole: 'WAITER' as any })).id).toBe('p100')
     })
     it('marca blanca ⇒ 403', async () => {
       ;(moduleService.isModuleEnabled as jest.Mock).mockResolvedValue(true)

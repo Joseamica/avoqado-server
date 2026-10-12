@@ -1,7 +1,9 @@
+import { CommissionCalcType } from '@prisma/client'
 import prisma from '../../../utils/prismaClient'
 import { NotFoundError } from '../../../errors/AppError'
 import { findActiveCommissionConfigs, findActiveOverride, validateStaffForCommission } from '../commission/commission-utils'
 import { aplicaALaPersona } from '../commission/personasElegidas'
+import { categoriasPropias } from '../commission/duenoDeCategorias'
 import { dbDateComoFecha, fechaComoDbDate } from '../staffPay/periodos'
 import { hoyDeLaSede } from './vigencias'
 
@@ -37,19 +39,27 @@ export async function resumenDePago(
   if (puede.comisiones) {
     // La misma regla del motor: sin StaffVenue activo o con el Staff inactivo no se le calcula comisión
     // (validateStaffForCommission, sólo lee) ⇒ lista vacía, no null: el usuario SÍ tiene permiso de verlo.
-    // Después, «sólo personas elegidas» (personasElegidas.ts). Sin recortar la lista: los esquemas vigentes de una
-    // sede son pocos, y la lista completa es la verdad.
     const elegible = await validateStaffForCommission(staffId, venueId)
-    const configs = elegible ? (await findActiveCommissionConfigs(venueId)).filter(cfg => aplicaALaPersona(cfg, staffId)) : []
+    const configs = elegible ? await findActiveCommissionConfigs(venueId) : []
+    // Sólo los esquemas que el motor USARÍA, en su mismo orden (commission-calculation.service.ts,
+    // createCommissionForPayment ~:306-345): primero se reparte, sin mirar a la persona —cada esquema por categorías paga
+    // sólo las categorías de las que es dueño (`categoriasPropias`) y de los generales sólo paga el primero (`catchAll[0]`)—;
+    // después, ya en createCalcForConfig (~:134), «sólo personas elegidas» (`aplicaALaPersona`). Por eso un general
+    // ganador que no incluye a la persona NO cede su lugar a otro general. Sin recortar: los esquemas de una sede son pocos.
+    const porCategorias = configs.filter(c => c.filterByCategories && c.categoryIds.length > 0)
+    const general = configs.find(c => !(c.filterByCategories && c.categoryIds.length > 0))
+    const propias = categoriasPropias(porCategorias)
+    const usados = configs.filter(c => c === general || (propias.get(c.id) ?? []).length > 0).filter(c => aplicaALaPersona(c, staffId))
     comisiones = await Promise.all(
-      configs.map(async cfg => {
+      usados.map(async cfg => {
         const ov = await findActiveOverride(cfg.id, staffId)
         return {
           configId: cfg.id,
           nombre: cfg.name,
           alcance: cfg.venueId ? ('SEDE' as const) : ('ORGANIZACION' as const),
           excluida: !!ov?.excludeFromCommissions,
-          tasaPersonal: ov?.customRate != null ? Number(ov.customRate) : null,
+          // FIXED paga config.defaultRate e ignora la tasa de la excepción (~:182-184): no se muestra una tasa que no se usa.
+          tasaPersonal: cfg.calcType !== CommissionCalcType.FIXED && ov?.customRate != null ? Number(ov.customRate) : null,
         }
       }),
     )
