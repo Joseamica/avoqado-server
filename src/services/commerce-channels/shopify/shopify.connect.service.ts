@@ -23,6 +23,7 @@ import {
   SHOPIFY_SCOPES,
   SHOPIFY_SERVICE_ACTOR,
   SHOPIFY_WEBHOOK_TOPICS,
+  SHOPIFY_WEBHOOK_TOPICS_OPCIONALES,
   TEXTO_SIN_ACCESO,
 } from './shopify.constants'
 import { appCredentials, encryptShopifyToken, isValidShopDomain, readIntentId, signIntentId, verifyOAuthQueryHmac } from './shopify.crypto'
@@ -961,17 +962,26 @@ const creacionValidaDe =
     return suscripcionValida(c.webhookSubscription) && c.webhookSubscription.topic === topic && c.webhookSubscription.uri === uri
   }
 
+/** 5a: Shopify niega los temas de pedidos a una app sin acceso a datos protegidos de clientes (la del comercio en Basic). */
+const DATOS_PROTEGIDOS = /protected customer data/i
+type ResultadoWebhooks = { done: boolean } | { error: string; retry: boolean }
+
 /**
- * UNA unidad: lista las suscripciones de ESTA app a la uri de su receptor y crea la primera que falta. Cuando están los
- * nueve temas, marca `webhooksAt` (cercado con la tienda y la credencial con que se listó, y el lease, N05). Idempotente:
- * «ya existe» cuenta como hecho. Cualquier otro rechazo de Shopify es permanente (K8: casi siempre un permiso o un acceso
- * de la app que falta): queda FALTA_PERMISO, terminal y a la vista, en vez de reintentar para siempre con la importación
+ * UNA unidad: lista las suscripciones de ESTA app a la uri de su receptor y crea el primer tema OBLIGATORIO que falta. Cuando
+ * están los nueve temas, marca `webhooksAt` (cercado con la tienda y la credencial con que se listó, y el lease, N05).
+ * Idempotente: «ya existe» cuenta como hecho. Cualquier otro rechazo de Shopify es permanente (K8: casi siempre un permiso o un
+ * acceso de la app que falta): queda FALTA_PERMISO, terminal y a la vista, en vez de reintentar para siempre con la importación
  * detenida detrás.
+ * 5a: con los obligatorios puestos, los de pedidos que falten (`SHOPIFY_WEBHOOK_TOPICS_OPCIONALES`) se intentan UNA vez cada uno
+ * en esta misma unidad. El que Shopify niega por datos protegidos de clientes se salta (un tema negado nunca aparece en la lista:
+ * de uno en uno se reintentaría para siempre); si alguno se saltó y no hubo otro error, se marca `webhooksAt` ya, con un aviso en
+ * el log y `SHOPIFY_AVISOS_DE_PEDIDOS_NO_DISPONIBLES` en `ActivityLog`. Cambiar la credencial reinicia `webhooksAt` y los vuelve a
+ * intentar.
  */
 export async function registerShopifyWebhooks(
   locationLinkId: string,
   deps: { graphql?: typeof shopifyGraphql; workToken?: string | null; vence?: number } = {},
-): Promise<{ done: boolean } | { error: string; retry: boolean }> {
+): Promise<ResultadoWebhooks> {
   const link = await prisma.shopifyLocationLink.findUnique({ where: { id: locationLinkId }, include: { store: true } })
   if (!link || link.status === 'DISCONNECTED' || link.store.status !== 'ACTIVE') return { error: 'SIN_CONEXION', retry: false }
   if (terminal(link.importError)) return { error: link.importError, retry: false } // §11.3: no se vuelve a llamar a Shopify
@@ -996,8 +1006,8 @@ export async function registerShopifyWebhooks(
   if (lista === SIN_TIEMPO) return { error: 'SIN_TIEMPO', retry: true }
   if (!lista.ok) return fallo(lista)
   const faltan = SHOPIFY_WEBHOOK_TOPICS.filter(t => !lista.data.webhookSubscriptions.nodes.some(n => n.topic === t && n.uri === uri))
-  if (faltan.length === 0) {
-    // N05, §11.2: la lista vale para ESA tienda y ESA credencial; si se reautorizó o revocó mientras viajaba, no se marca.
+  // N05, §11.2: la lista vale para ESA tienda y ESA credencial; si se reautorizó o revocó mientras viajaba, no se marca.
+  const marcar = async (): Promise<boolean> => {
     const cerco: CercoShopify = {
       generation: link.generation,
       storeId: link.storeId,
@@ -1011,24 +1021,25 @@ export async function registerShopifyWebhooks(
         data: { webhooksAt: new Date() },
       }),
     )
-    return r !== 'CONTEXTO_CAMBIO' && r.count === 1 ? { done: true } : { error: 'CONTEXTO_CAMBIO', retry: false }
+    return r !== 'CONTEXTO_CAMBIO' && r.count === 1
   }
-  const topic = faltan[0]
-  const c = await graphql<RespuestaWebhook>(
-    link.store.shopDomain,
-    token,
-    MUTATION_WEBHOOK,
-    { topic, uri },
-    { validate: creacionValidaDe(topic, uri) },
-  )
-  if (c === SIN_TIEMPO) return { error: 'SIN_TIEMPO', retry: true } // sin tiempo después de listar: no se crea nada
-  if (!c.ok) return fallo(c)
-  const errores = c.data.webhookSubscriptionCreate.userErrors.filter(u => !/already been taken/i.test(u.message))
-  if (errores.length > 0) {
-    const detalle = errores
-      .map(u => u.message)
-      .join(' · ')
-      .slice(0, 300)
+  if (faltan.length === 0) return (await marcar()) ? { done: true } : { error: 'CONTEXTO_CAMBIO', retry: false }
+  /** Crea UN tema: `null` = quedó (o ya existía); `string[]` = lo que Shopify rechazó; si no, cómo termina la unidad. */
+  const crear = async (topic: string): Promise<ResultadoWebhooks | string[] | null> => {
+    const c = await graphql<RespuestaWebhook>(
+      link.store.shopDomain,
+      token,
+      MUTATION_WEBHOOK,
+      { topic, uri },
+      { validate: creacionValidaDe(topic, uri) },
+    )
+    if (c === SIN_TIEMPO) return { error: 'SIN_TIEMPO', retry: true } // sin tiempo después de listar: no se crea nada
+    if (!c.ok) return fallo(c)
+    const errores = c.data.webhookSubscriptionCreate.userErrors.map(u => u.message).filter(m => !/already been taken/i.test(m))
+    return errores.length > 0 ? errores : null
+  }
+  const rechazado = async (topic: string, errores: string[]): Promise<ResultadoWebhooks> => {
+    const detalle = errores.join(' · ').slice(0, 300)
     logger.error(`[SHOPIFY] webhook ${topic} de ${link.store.shopDomain} rechazado: ${detalle}`)
     const a = await atenderFalla(
       link.store,
@@ -1038,7 +1049,34 @@ export async function registerShopifyWebhooks(
     // Si la credencial cambió mientras tanto, el rechazo era de la vieja: se reintenta con la nueva.
     return a === 'SIN_PERMISO' ? { error: FALTA_PERMISO, retry: false } : { error: 'WEBHOOK_RECHAZADO', retry: true }
   }
-  return { done: false }
+  const obligatorio = faltan.find(t => !SHOPIFY_WEBHOOK_TOPICS_OPCIONALES.has(t))
+  if (obligatorio) {
+    const r = await crear(obligatorio)
+    if (r === null) return { done: false }
+    return Array.isArray(r) ? rechazado(obligatorio, r) : r
+  }
+  const negados: string[] = []
+  for (const topic of faltan) {
+    const r = await crear(topic)
+    if (r === null) continue
+    if (!Array.isArray(r)) return r
+    if (!r.every(m => DATOS_PROTEGIDOS.test(m))) return rechazado(topic, r)
+    negados.push(topic)
+  }
+  if (negados.length === 0) return { done: false } // todos creados: la siguiente unidad los ve en la lista y marca
+  if (!(await marcar())) return { error: 'CONTEXTO_CAMBIO', retry: false }
+  logger.warn(
+    `[SHOPIFY] ${link.store.shopDomain}: sin avisos de pedidos (${negados.join(', ')}): Shopify no da datos protegidos de clientes a esta app o plan; el stock sigue sincronizado por los avisos de inventario y el cuadre nocturno`,
+  )
+  logAction({
+    venueId: link.venueId,
+    organizationId: link.store.organizationId,
+    action: 'SHOPIFY_AVISOS_DE_PEDIDOS_NO_DISPONIBLES',
+    entity: 'ShopifyLocationLink',
+    entityId: link.id,
+    data: { shopDomain: link.store.shopDomain, temas: negados },
+  })
+  return { done: true }
 }
 
 // ─── Vista previa y aplicar (12 bis.3) ──────────────────────────────────────────────────────────────────────

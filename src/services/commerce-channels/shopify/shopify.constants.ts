@@ -16,6 +16,17 @@ export const SHOPIFY_WEBHOOK_TOPICS = [
   'REFUNDS_CREATE',
   'APP_UNINSTALLED',
 ] as const
+/**
+ * 5a: los temas de pedidos traen datos protegidos de clientes y Shopify puede negarlos a una app (la del comercio en una tienda
+ * Basic). Son opcionales: todo aviso es sólo una señal que relee `available`/`committed`, un pedido baja `available` (llega por
+ * `inventory_levels/update`) y el cuadre nocturno corrige `committed`. Los demás temas siguen siendo obligatorios.
+ */
+export const SHOPIFY_WEBHOOK_TOPICS_OPCIONALES: ReadonlySet<string> = new Set([
+  'ORDERS_CREATE',
+  'ORDERS_CANCELLED',
+  'FULFILLMENTS_CREATE',
+  'REFUNDS_CREATE',
+] satisfies Array<(typeof SHOPIFY_WEBHOOK_TOPICS)[number]>)
 export const SHOPIFY_FEATURE = 'SHOPIFY_INTEGRATION'
 export const CATALOG_PAGE_SIZE = 50
 /** 50 artículos × (artículo + nivel + 2 cantidades) quedan muy abajo de los 1,000 puntos que Shopify permite por consulta. */

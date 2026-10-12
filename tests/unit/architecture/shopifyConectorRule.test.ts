@@ -1006,6 +1006,25 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     expect(cuerpo(receptor, 'export async function handleShopifyWebhook(')).toContain("req.params.appKey === 'comercio'")
   })
 
+  it('5a · avisos de pedidos opcionales: un tema de pedidos negado por datos protegidos se salta y la conexión sigue', () => {
+    contieneTodas([
+      'Por eso son opcionales (`SHOPIFY_WEBHOOK_TOPICS_OPCIONALES`)',
+      'intenta UNA vez cada tema de pedidos en la misma unidad',
+      '`SHOPIFY_AVISOS_DE_PEDIDOS_NO_DISPONIBLES` en `ActivityLog`',
+      'Un obligatorio negado, u otro rechazo, sigue en FALTA_PERMISO',
+    ])
+    expect(leer(`${SHOPIFY}/shopify.constants.ts`)).toMatch(
+      /SHOPIFY_WEBHOOK_TOPICS_OPCIONALES[^=]*= new Set\(\[\s*'ORDERS_CREATE',\s*'ORDERS_CANCELLED',\s*'FULFILLMENTS_CREATE',\s*'REFUNDS_CREATE',\s*\]/,
+    )
+    const registrar = cuerpo(leer(`${SHOPIFY}/shopify.connect.service.ts`), 'export async function registerShopifyWebhooks(')
+    enOrden(registrar, [
+      'const obligatorio = faltan.find(t => !SHOPIFY_WEBHOOK_TOPICS_OPCIONALES.has(t))',
+      'if (!r.every(m => DATOS_PROTEGIDOS.test(m))) return rechazado(topic, r)',
+      'if (!(await marcar()))',
+      "action: 'SHOPIFY_AVISOS_DE_PEDIDOS_NO_DISPONIBLES'",
+    ])
+  })
+
   it('5a · lo que se ve: el método en el resumen y en el MCP; nada de las llaves pasa por la IA', () => {
     contieneTodas(['`shopify_status` del MCP lleva `metodo` y nada de las llaves (ni la terminación)'])
     expect(leer('src/mcp/tools/shopify.ts')).toContain('connection: connection && { ...connection, clientIdTerminacion: undefined }')
@@ -1046,9 +1065,9 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     // ancla de línea ahí no se puede sostener sin romper esta prueba por un cambio ajeno.
     const de = (f: string) => `${SHOPIFY}/shopify.${f}.ts`
     const anclas: Record<string, [string, string]> = {
-      'shopify.connect.service.ts:116': [de('connect.service'), 'export async function startShopifyConnect('],
-      'connect.service.ts:1676': [de('connect.service'), 'export async function disconnectShopify('],
-      'connect.service.ts:842': [de('connect.service'), 'async function aCuarentenaPorReligar('],
+      'shopify.connect.service.ts:117': [de('connect.service'), 'export async function startShopifyConnect('],
+      'connect.service.ts:1714': [de('connect.service'), 'export async function disconnectShopify('],
+      'connect.service.ts:843': [de('connect.service'), 'async function aCuarentenaPorReligar('],
       'shopify.crypto.ts:34': [de('crypto'), 'export function formaDeFirmaOAuth('],
       'catalog.service.ts:68': [de('catalog.service'), 'export const FILTRO_ESTADO'],
       'catalog.service.ts:418': [de('catalog.service'), 'async function bloquearProductos('],
@@ -1063,7 +1082,7 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     }
     // Las cortas (`:N`) son del archivo que la regla acaba de nombrar.
     const cortas: Record<string, [string, string]> = {
-      '`:71`': [de('connect.service'), 'const tiendasPiloto'],
+      '`:72`': [de('connect.service'), 'const tiendasPiloto'],
       '`:49`': [de('crypto'), 'export function verifyOAuthQueryHmac('],
       '`:1188`': [de('catalog.service'), 'export async function archivarPareja('],
     }

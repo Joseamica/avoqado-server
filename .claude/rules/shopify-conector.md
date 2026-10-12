@@ -33,7 +33,7 @@ cambias el comportamiento, cambia aquí la frase y su aserción en el mismo comm
 
 | Pieza                                                                            | Dónde                                                                                                                       | Efecto                                                                                                          |
 | -------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| `SHOPIFY_PILOTO_SHOPS` (dominios `.myshopify.com`, coma; se lee en cada llamada) | `startShopifyConnect(…)` (`shopify.connect.service.ts:116`; la lista, `tiendasPiloto`, en `:71`)                            | otra tienda ⇒ 409 `SHOPIFY_SOLO_PILOTO` (con la invitación de la app propia, `SHOPIFY_USA_APP_PROPIA`, §4 ter)  |
+| `SHOPIFY_PILOTO_SHOPS` (dominios `.myshopify.com`, coma; se lee en cada llamada) | `startShopifyConnect(…)` (`shopify.connect.service.ts:117`; la lista, `tiendasPiloto`, en `:72`)                            | otra tienda ⇒ 409 `SHOPIFY_SOLO_PILOTO` (con la invitación de la app propia, `SHOPIFY_USA_APP_PROPIA`, §4 ter)  |
 | `SHOPIFY_INTEGRATION` en `PREMIUM_ONLY_SIN_CATALOGO`                             | `basePlan.service.ts:93`                                                                                                    | Premium por regla pero SIN entrada de catálogo ni precio; `shopifyTierMirror.test.ts` falla si queda en los dos |
 | Nunca se contrata suelta                                                         | `addFeaturesToVenue(…)` (`venueFeature.dashboard.service.ts:190`) y `createTrialSubscriptions(…)` (`stripe.service.ts:303`) | 400 `FEATURE_NO_SE_VENDE_SUELTA`; la segunda es el embudo de venta suelta, conversión de demo y onboarding      |
 
@@ -165,7 +165,7 @@ espejo dejaría la cuenta en 11 contra las 12 piezas de Avoqado. Si hay filas vi
   y después la tienda `FOR SHARE` (`mirror.service.ts:372`). Quien la llame lo hace antes de cualquier candado de pareja, fila o cerco, o en
   una tx propia (el mensajero: tx de 15 s, porque avisa por dentro). `FOR NO KEY UPDATE` y no `FOR UPDATE`: no frena el `FOR KEY SHARE` de
   quien inserte una pareja con llave foránea a la sucursal.
-- **Desconectar** (`disconnectShopify(…)`, `connect.service.ts:1676`) bloquea primero TODAS las sucursales de la tienda por id (la propia
+- **Desconectar** (`disconnectShopify(…)`, `connect.service.ts:1714`) bloquea primero TODAS las sucursales de la tienda por id (la propia
   `FOR UPDATE`, las hermanas `FOR NO KEY UPDATE`), después las parejas de ESA sucursal, ordenadas por id, y sólo entonces sube la
   generación. Nunca la propia y luego una hermana de id menor: se cruzaría con quien las toma por id (el drenado, diferir, renovar la
   credencial). `renovarCredencial` (reconectar o reautorizar) también bloquea todas las sucursales de la tienda por id ANTES de la tienda.
@@ -264,6 +264,15 @@ cuadre y conteo no cambian, y el piloto (`PILOTO`, OAuth) convive igual.
 - **Avisos:** `:appKey` acepta `comercio`. El secret de un aviso `COMERCIO` es el de SU tienda: `X-Shopify-Shop-Domain` (validado) sólo
   elige cuál se usa y la firma sigue decidiendo; sin tienda `COMERCIO`, sin secret legible o con la firma mala ⇒ 401. `PILOTO` sigue con el
   de env. El registro de suscripciones no cambia: la ruta de la app de la tienda (`/webhooks/shopify/comercio`) con la llave de 24 h.
+- **Avisos de pedidos opcionales:** Shopify niega los temas de pedidos (`ORDERS_CREATE`, `ORDERS_CANCELLED`, `FULFILLMENTS_CREATE`,
+  `REFUNDS_CREATE`) a una app sin acceso a datos protegidos de clientes, y la del comercio en una tienda Basic no lo tiene (medido en vivo:
+  «This app is not approved to subscribe to webhook topics containing protected customer data»). Antes eso dejaba la sucursal en
+  FALTA_PERMISO y en CONNECTING para siempre. Por eso son opcionales (`SHOPIFY_WEBHOOK_TOPICS_OPCIONALES`): `registerShopifyWebhooks(…)`
+  crea los obligatorios de uno en uno como siempre y, con ellos puestos, intenta UNA vez cada tema de pedidos en la misma unidad; el que se
+  niega por datos protegidos se salta y, si no hubo otro error, marca `webhooksAt` con un aviso en el log y
+  `SHOPIFY_AVISOS_DE_PEDIDOS_NO_DISPONIBLES` en `ActivityLog` (con los `temas`). Es seguro: todo aviso es sólo una señal que relee
+  `available` y `committed`; un pedido baja `available`, que llega por `inventory_levels/update`, y el cuadre nocturno corrige `committed`.
+  Un obligatorio negado, u otro rechazo, sigue en FALTA_PERMISO; cambiar las llaves reinicia `webhooksAt` y los vuelve a intentar.
 - **Lo que se ve:** el resumen suma `metodo` (`PILOTO` | `APP_DEL_COMERCIO`) y `clientIdTerminacion` (los 4 últimos del Client ID; la
   tarjeta dice «Conectada con la app de tu tienda (…abcd)» y ofrece «Cambiar llaves»). `shopify_status` del MCP lleva `metodo` y nada de las
   llaves (ni la terminación): un secret nunca pasa por la IA, y conectar no tiene herramienta del MCP.
@@ -318,7 +327,7 @@ borre o cree filas de `Inventory` de productos ligados, o que cambie esos campos
     `store.service.ts:279`) de cualquier generación anterior de esa sucursal o de la que ocupaba la ubicación. Una DEAD_LETTER ambigua no la
     frena: ya no puede llegar.
   - Religar la sucursal a OTRA tienda no es un 409: sus filas `IN_PROGRESS` y vivas ambiguas pasan a DEAD_LETTER con
-    `lastError = RELIGADA_A_OTRA_TIENDA` (duda y parámetros congelados conservados; `aCuarentenaPorReligar`, `connect.service.ts:842`),
+    `lastError = RELIGADA_A_OTRA_TIENDA` (duda y parámetros congelados conservados; `aCuarentenaPorReligar`, `connect.service.ts:843`),
     porque el reclamo sólo las tomaría con la tienda vieja ACTIVE y la sucursal ya apunta a la nueva: la espera no terminaría nunca. No
     avisan (es una acción deliberada del dueño); queda `religadas` en el `ActivityLog` de `SHOPIFY_CONNECTED`.
   - Desconectar no espera: bloquea (§4), sube la generación y deja esas filas cerrarse con su llave; al llegar no mueven el espejo.

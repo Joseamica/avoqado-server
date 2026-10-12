@@ -1477,3 +1477,172 @@ describe('decisiones vinculantes de B3', () => {
     expect(graphql).not.toHaveBeenCalled()
   })
 })
+
+describe('5a: avisos de pedidos opcionales cuando Shopify no da datos protegidos de clientes', () => {
+  /** El texto que Shopify devolvió en vivo para `ORDERS_CREATE` en una tienda Basic con la app del comercio (11-oct-2026). */
+  const PROTEGIDOS =
+    'This app is not approved to subscribe to webhook topics containing protected customer data. See https://shopify.dev/docs/apps/launch/protected-customer-data for more details.'
+  const OPCIONALES = ['ORDERS_CREATE', 'ORDERS_CANCELLED', 'FULFILLMENTS_CREATE', 'REFUNDS_CREATE']
+  const OBLIGATORIOS = SHOPIFY_WEBHOOK_TOPICS.filter(t => !OPCIONALES.includes(t))
+  const AVISO = 'SHOPIFY_AVISOS_DE_PEDIDOS_NO_DISPONIBLES'
+
+  /** Shopify con memoria: la lista devuelve lo que ya existe y lo que se crea; `rechazo(topic)` da el userError (o null). */
+  function shopifyDeAvisos(existentes: readonly string[], rechazo: (topic: string) => string | null = () => null) {
+    const nodos = existentes.map((t, i) => ({ id: `gid://shopify/WebhookSubscription/${i}`, topic: t, uri: URI_WEBHOOKS }))
+    return graphqlFalso((q, vars) => {
+      if (!q.includes('webhookSubscriptionCreate')) return { ok: true, data: { webhookSubscriptions: { nodes: [...nodos] } } }
+      const motivo = rechazo(vars.topic)
+      if (motivo) {
+        return {
+          ok: true,
+          data: {
+            webhookSubscriptionCreate: { webhookSubscription: null, userErrors: [{ field: ['webhookSubscription'], message: motivo }] },
+          },
+        }
+      }
+      const s = { id: `gid://shopify/WebhookSubscription/${100 + nodos.length}`, topic: vars.topic, uri: vars.uri }
+      nodos.push(s)
+      return { ok: true, data: { webhookSubscriptionCreate: { webhookSubscription: s, userErrors: [] } } }
+    })
+  }
+  const creados = (g: jest.Mock) => g.mock.calls.filter(c => String(c[2]).includes('webhookSubscriptionCreate')).map(c => c[3].topic)
+  const avisosDePedidos = () => (logAction as jest.Mock).mock.calls.filter(c => c[0].action === AVISO).map(c => c[0])
+  const advertencias = () => (logger.warn as jest.Mock).mock.calls.map(c => String(c[0])).filter(m => /sin avisos de pedidos/i.test(m))
+  beforeEach(() => {
+    ;(logger.warn as jest.Mock).mockClear()
+    ;(logger.error as jest.Mock).mockClear()
+  })
+
+  it('(a) con los obligatorios ya puestos, ORDERS_CREATE rechazado por datos protegidos se salta: los demás se crean y la conexión sigue', async () => {
+    const e = await escenario({ linkStatus: 'CONNECTING', initialized: false })
+    const graphql = shopifyDeAvisos(OBLIGATORIOS, t => (t === 'ORDERS_CREATE' ? PROTEGIDOS : null))
+    expect(await registerShopifyWebhooks(e.locationLinkId, { graphql })).toEqual({ done: true })
+    expect(creados(graphql)).toEqual(OPCIONALES) // cada opcional UNA vez, en la misma llamada
+    expect(await sucursal(e)).toMatchObject({ importError: null, webhooksAt: expect.any(Date) })
+    expect(advertencias()).toHaveLength(1)
+    expect(advertencias()[0]).toContain(e.shopDomain)
+    expect(advertencias()[0]).toContain('ORDERS_CREATE')
+    expect(avisosDePedidos()).toEqual([
+      expect.objectContaining({
+        venueId: e.venueId,
+        entity: 'ShopifyLocationLink',
+        entityId: e.locationLinkId,
+        data: { shopDomain: e.shopDomain, temas: ['ORDERS_CREATE'] },
+      }),
+    ])
+    expect(logAction).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'SHOPIFY_PERMISSION_MISSING' }))
+    // Nunca la llave en el log.
+    expect(JSON.stringify([(logger.warn as jest.Mock).mock.calls, (logger.error as jest.Mock).mock.calls])).not.toContain(TOKEN_DE_PRUEBA)
+    // Ya marcada: la siguiente vuelta no vuelve a preguntarle a Shopify (antes reintentaba cada 30 min para siempre).
+    const despues = shopifyDeAvisos(OBLIGATORIOS, () => PROTEGIDOS)
+    expect(await registerShopifyWebhooks(e.locationLinkId, { graphql: despues })).toEqual({ done: true })
+    expect(despues).not.toHaveBeenCalled()
+  })
+
+  it('(b) el caso en vivo (tienda Basic) desde cero: los obligatorios de uno en uno y después los cuatro de pedidos rechazados ⇒ conectada', async () => {
+    const e = await escenario({ linkStatus: 'CONNECTING', initialized: false })
+    const graphql = shopifyDeAvisos([], t => (OPCIONALES.includes(t) ? PROTEGIDOS : null))
+    for (const obligatorio of OBLIGATORIOS) {
+      graphql.mockClear()
+      expect(await registerShopifyWebhooks(e.locationLinkId, { graphql })).toEqual({ done: false })
+      expect(creados(graphql)).toEqual([obligatorio])
+      expect(graphql).toHaveBeenCalledTimes(2)
+    }
+    graphql.mockClear()
+    expect(await registerShopifyWebhooks(e.locationLinkId, { graphql })).toEqual({ done: true })
+    expect(creados(graphql)).toEqual(OPCIONALES)
+    expect(await sucursal(e)).toMatchObject({ importError: null, webhooksAt: expect.any(Date) })
+    expect(advertencias()).toHaveLength(1)
+    expect(avisosDePedidos()).toEqual([expect.objectContaining({ data: { shopDomain: e.shopDomain, temas: OPCIONALES } })])
+  })
+
+  it('(c) un tema OBLIGATORIO rechazado por datos protegidos sigue como hoy: FALTA_PERMISO, sin webhooksAt y sin probar los de pedidos', async () => {
+    const e = await escenario({ linkStatus: 'CONNECTING', initialized: false })
+    const graphql = shopifyDeAvisos(
+      OBLIGATORIOS.filter(t => t !== 'INVENTORY_LEVELS_UPDATE'),
+      () => PROTEGIDOS,
+    )
+    expect(await registerShopifyWebhooks(e.locationLinkId, { graphql })).toEqual({ error: 'FALTA_PERMISO', retry: false })
+    expect(creados(graphql)).toEqual(['INVENTORY_LEVELS_UPDATE'])
+    expect(await sucursal(e)).toMatchObject({ importError: 'FALTA_PERMISO', webhooksAt: null })
+    expect(avisosDePedidos()).toEqual([])
+    expect(advertencias()).toEqual([])
+  })
+
+  it('(d) un tema de pedidos rechazado por OTRO motivo sigue como hoy (FALTA_PERMISO), aunque otro ya se haya saltado por datos protegidos', async () => {
+    const e = await escenario({ linkStatus: 'CONNECTING', initialized: false })
+    const otro = 'You do not have permission to create webhooks with orders/cancelled topic'
+    const graphql = shopifyDeAvisos(OBLIGATORIOS, t => (t === 'ORDERS_CREATE' ? PROTEGIDOS : t === 'ORDERS_CANCELLED' ? otro : null))
+    expect(await registerShopifyWebhooks(e.locationLinkId, { graphql })).toEqual({ error: 'FALTA_PERMISO', retry: false })
+    expect(creados(graphql)).toEqual(['ORDERS_CREATE', 'ORDERS_CANCELLED'])
+    expect(await sucursal(e)).toMatchObject({ importError: 'FALTA_PERMISO', webhooksAt: null })
+    expect(avisosDePedidos()).toEqual([])
+    expect(advertencias()).toEqual([])
+    expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'SHOPIFY_PERMISSION_MISSING', venueId: e.venueId }))
+
+    // Y sólo el otro motivo, con ORDERS_CREATE ya puesto: igual que hoy.
+    const e2 = await escenario({ linkStatus: 'CONNECTING', initialized: false })
+    const solo = shopifyDeAvisos([...OBLIGATORIOS, 'ORDERS_CREATE'], t => (t === 'ORDERS_CANCELLED' ? otro : null))
+    expect(await registerShopifyWebhooks(e2.locationLinkId, { graphql: solo })).toEqual({ error: 'FALTA_PERMISO', retry: false })
+    expect(await sucursal(e2)).toMatchObject({ importError: 'FALTA_PERMISO', webhooksAt: null })
+  })
+
+  it('(d bis) una falla de red al crear un tema de pedidos sigue como hoy: reintentable y sin marcar nada', async () => {
+    const e = await escenario({ linkStatus: 'CONNECTING', initialized: false })
+    const graphql = graphqlFalso(q =>
+      q.includes('webhookSubscriptionCreate')
+        ? falla('HTTP_5XX', true, true)
+        : {
+            ok: true,
+            data: {
+              webhookSubscriptions: {
+                nodes: OBLIGATORIOS.map((t, i) => ({ id: `gid://shopify/WebhookSubscription/${i}`, topic: t, uri: URI_WEBHOOKS })),
+              },
+            },
+          },
+    )
+    expect(await registerShopifyWebhooks(e.locationLinkId, { graphql })).toEqual({ error: 'HTTP_5XX', retry: true })
+    expect(await sucursal(e)).toMatchObject({ importError: null, webhooksAt: null })
+    expect(avisosDePedidos()).toEqual([])
+  })
+
+  it('(d ter) sin tiempo a media vuelta de los de pedidos: SIN_TIEMPO reintentable y no se marca nada', async () => {
+    const e = await escenario({ linkStatus: 'CONNECTING', initialized: false })
+    const base = shopifyDeAvisos(OBLIGATORIOS, t => (t === 'ORDERS_CREATE' ? PROTEGIDOS : null))
+    // El rechazo de ORDERS_CREATE se come el tiempo que quedaba: el siguiente ya no sale.
+    const graphql = jest.fn(async (...a: unknown[]) => {
+      if (String(a[2]).includes('webhookSubscriptionCreate')) await dormir(1_600)
+      return base(...a)
+    })
+    expect(await registerShopifyWebhooks(e.locationLinkId, { graphql: graphql as never, vence: Date.now() + MIN_HTTP_MS + 1_500 })).toEqual(
+      {
+        error: 'SIN_TIEMPO',
+        retry: true,
+      },
+    )
+    expect(creados(graphql)).toEqual(['ORDERS_CREATE'])
+    expect(await sucursal(e)).toMatchObject({ importError: null, webhooksAt: null })
+    expect(avisosDePedidos()).toEqual([])
+    expect(advertencias()).toEqual([])
+  })
+
+  it('(e) regresión: si Shopify acepta todo, los obligatorios van de uno en uno, después los de pedidos, y webhooksAt se marca al ver los 9', async () => {
+    const e = await escenario({ linkStatus: 'CONNECTING', initialized: false })
+    const graphql = shopifyDeAvisos([])
+    for (const obligatorio of OBLIGATORIOS) {
+      graphql.mockClear()
+      expect(await registerShopifyWebhooks(e.locationLinkId, { graphql })).toEqual({ done: false })
+      expect(creados(graphql)).toEqual([obligatorio])
+    }
+    graphql.mockClear()
+    expect(await registerShopifyWebhooks(e.locationLinkId, { graphql })).toEqual({ done: false })
+    expect(creados(graphql)).toEqual(OPCIONALES)
+    expect((await sucursal(e)).webhooksAt).toBeNull()
+    graphql.mockClear()
+    expect(await registerShopifyWebhooks(e.locationLinkId, { graphql })).toEqual({ done: true })
+    expect(graphql).toHaveBeenCalledTimes(1) // sólo la lista, con los 9
+    expect(await sucursal(e)).toMatchObject({ importError: null, webhooksAt: expect.any(Date) })
+    expect(avisosDePedidos()).toEqual([])
+    expect(advertencias()).toEqual([])
+  })
+})
