@@ -13,6 +13,9 @@ import { inviteTeamMember, updateTeamMember } from '@/services/dashboard/team.da
 import { ROLE_HIERARCHY } from '@/lib/permissions'
 import { StaffRole } from '@prisma/client'
 import { DateTime } from 'luxon'
+import { asignacionesVigentes } from '@/services/dashboard/rh/asignaciones.service'
+import { pagoGenericoPermitido } from '@/services/dashboard/rh/marcaBlanca'
+import { hoyDeLaSede } from '@/services/dashboard/rh/vigencias'
 
 // SUPERADMIN deliberately excluded — an agent must never be able to grant it.
 const INVITE_ROLE_MAP: Record<string, StaffRole> = {
@@ -24,6 +27,24 @@ const INVITE_ROLE_MAP: Record<string, StaffRole> = {
   kitchen: StaffRole.KITCHEN,
   host: StaffRole.HOST,
   viewer: StaffRole.VIEWER,
+}
+
+/**
+ * RH fase 1a: puestos vigentes HOY de una página de personas, con UNA consulta por lote (asignacionesVigentes), nunca una
+ * por persona. En una sucursal de marca blanca RH no se muestra: devuelve null y la respuesta no lleva `puestos`.
+ */
+async function puestosVigentes(venueId: string, staffIds: string[]) {
+  if (staffIds.length === 0 || !(await pagoGenericoPermitido(venueId))) return null
+  const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
+  const vigentes = await asignacionesVigentes(venueId, staffIds, hoyDeLaSede(venue?.timezone ?? 'America/Mexico_City'))
+  return (staffId: string) =>
+    (vigentes.get(staffId) ?? []).map(a => ({
+      assignmentId: a.id,
+      positionId: a.positionId,
+      nombre: a.positionName,
+      relacion: a.relation ?? 'Sin definir',
+      desde: a.effectiveFrom,
+    }))
 }
 
 export function registerStaffTools(server: McpServer, scope: McpScope) {
@@ -63,7 +84,7 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'list_staff',
-    'List the team (roster) of a venue you can access: each member\'s membership id, staff id, name, role and whether their account is active. The IDs can be passed to reservation staff/schedule tools. Optionally filter by name or only active members. Pass venueId. Answers "who works here / who is on my team?". For sales performance use staff_ranking instead.',
+    'List the team (roster) of a venue you can access: each member\'s membership id, staff id, name, role and whether their account is active. The IDs can be passed to reservation staff/schedule tools. Optionally filter by name or only active members. Pass venueId. Answers "who works here / who is on my team?". For sales performance use staff_ranking instead. Cada persona trae sus puestos vigentes hoy (nombre, relación —«Sin definir» si no se ha indicado— y desde cuándo) con los ids para terminar una asignación.',
     {
       venueId: z.string().describe('Venue whose team to list (must be in your scope)'),
       search: z.string().optional().describe('Filter by name (partial, case-insensitive)'),
@@ -97,6 +118,10 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
         skip: offset,
         take: limit ?? 200,
       })
+      const puestosDe = await puestosVigentes(
+        venueId,
+        rows.map(r => r.staffId),
+      )
       return text({
         venueId,
         count: rows.length,
@@ -109,6 +134,7 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
           name: `${r.staff.firstName} ${r.staff.lastName}`.trim(),
           role: r.role,
           active: r.staff.active,
+          ...(puestosDe ? { puestos: puestosDe(r.staffId) } : {}),
         })),
       })
     },
@@ -347,7 +373,7 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'staff_detail',
-    'Detail of ONE team member of a venue you can access, found by name: their account status and the role they hold at EACH of your venues where they work. The drill-down after list_staff — answers "¿qué rol tiene Juan? ¿en qué locales trabaja? ¿está activo?". Does NOT expose contact details (email/phone). If the name matches several people it returns them so you can be specific. Pass venueId + name.',
+    'Detail of ONE team member of a venue you can access, found by name: their account status and the role they hold at EACH of your venues where they work. The drill-down after list_staff — answers "¿qué rol tiene Juan? ¿en qué locales trabaja? ¿está activo?". Does NOT expose contact details (email/phone). If the name matches several people it returns them so you can be specific. Incluye sus puestos vigentes hoy en esta sucursal (nombre, relación —«Sin definir» si no se ha indicado— y desde cuándo). Pass venueId + name.',
     {
       venueId: z.string().describe('Venue to search within (must be in your scope)'),
       name: z.string().min(1).describe('Team member name or part of it'),
@@ -384,10 +410,12 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
         select: { role: true, venue: { select: { name: true } } },
         orderBy: { venue: { name: 'asc' } },
       })
+      const puestosDe = await puestosVigentes(venueId, [m.staffId])
       return text({
         found: true,
         staff: { name: `${m.staff.firstName} ${m.staff.lastName}`.trim(), active: m.staff.active },
         venues: assignments.map(a => ({ venue: a.venue?.name ?? null, role: a.role })),
+        ...(puestosDe ? { puestos: puestosDe(m.staffId) } : {}),
       })
     },
   )
