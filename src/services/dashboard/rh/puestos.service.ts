@@ -1,10 +1,10 @@
-import { PayComponentKind, Prisma, StaffRole, WorkRelation } from '@prisma/client'
+import { PayComponentKind, Prisma, StaffPosition, StaffRole, WorkRelation } from '@prisma/client'
 import prisma from '../../../utils/prismaClient'
-import { ConflictError, NotFoundError } from '../../../errors/AppError'
+import { BadRequestError, ConflictError, NotFoundError } from '../../../errors/AppError'
 import { withSerializableRetry } from '../../../utils/serializableRetry'
 import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
 import { SECTOR_ROLE_DEFAULTS } from '../../../utils/roleDisplay'
-import { getBusinessCategory } from '../../../utils/businessCategory'
+import { categoryOfVenueType } from '../../../utils/venueTypeCategory'
 import { asegurarSedeNoMarcaBlanca } from './marcaBlanca'
 import { fechaComoDbDate } from '../staffPay/periodos'
 import { hoyDeLaSede } from './vigencias'
@@ -36,7 +36,9 @@ export interface CrearPuestoInput {
 const TOPE = 100
 const limpiar = (s: string) => s.trim().replace(/\s+/g, ' ')
 
-function aDto(p: any, personasVigentes = 0): PuestoDto {
+type PuestoConConteo = StaffPosition & { _count: { assignments: number } }
+
+function aDto(p: PuestoConConteo): PuestoDto {
   return {
     id: p.id,
     name: p.name,
@@ -47,8 +49,42 @@ function aDto(p: any, personasVigentes = 0): PuestoDto {
     tracksAttendanceDefault: p.tracksAttendanceDefault ?? true,
     componentKinds: p.componentKinds ?? [],
     archivedAt: p.archivedAt ? new Date(p.archivedAt).toISOString() : null,
-    personasVigentes,
+    personasVigentes: p._count.assignments,
   }
+}
+
+/** Hoy en la zona de la sede, como valor de columna @db.Date. */
+async function hoyDeLaSedeDb(venueId: string): Promise<Date> {
+  const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
+  return fechaComoDbDate(hoyDeLaSede(venue?.timezone ?? 'America/Mexico_City'))
+}
+
+/**
+ * ÚNICA definición de «persona vigente en el puesto» (listado y respuestas de crear/editar/archivar): la asignación está
+ * vigente HOY (fin inclusivo, mismo criterio que asignacionesVigentes) y la persona sigue activa en ESTA sucursal.
+ */
+function conConteoVigentes(venueId: string, hoy: Date) {
+  return {
+    _count: {
+      select: {
+        assignments: {
+          where: {
+            venueId,
+            effectiveFrom: { lte: hoy },
+            OR: [{ effectiveTo: null }, { effectiveTo: { gte: hoy } }],
+            staff: { venues: { some: { venueId, active: true } } },
+          },
+        },
+      },
+    },
+  } satisfies Prisma.StaffPositionInclude
+}
+
+/** Nombre limpio y no vacío (el servicio no confía en que la ruta ya lo validó). */
+function nombreValido(crudo: string): string {
+  const name = limpiar(crudo)
+  if (!name) throw new BadRequestError('El nombre del puesto no puede estar vacío.')
+  return name
 }
 
 async function nombreLibre(tx: Prisma.TransactionClient | typeof prisma, venueId: string, name: string, exceptoId?: string) {
@@ -63,8 +99,7 @@ export async function listarPuestos(venueId: string, opts: { incluirArchivados?:
   const limite = Math.min(Math.max(opts.limit ?? 50, 1), TOPE)
   const skip = Math.max(opts.offset ?? 0, 0)
   const where: Prisma.StaffPositionWhereInput = { venueId, ...(opts.incluirArchivados ? {} : { archivedAt: null }) }
-  const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
-  const hoyDb = fechaComoDbDate(hoyDeLaSede(venue?.timezone ?? 'America/Mexico_City'))
+  const hoy = await hoyDeLaSedeDb(venueId)
   const [total, rows] = await Promise.all([
     prisma.staffPosition.count({ where }),
     prisma.staffPosition.findMany({
@@ -72,22 +107,16 @@ export async function listarPuestos(venueId: string, opts: { incluirArchivados?:
       orderBy: [{ name: 'asc' }, { id: 'asc' }],
       take: limite,
       skip,
-      // Mismo criterio que asignacionesVigentes: vigente HOY, con fin inclusivo.
-      include: {
-        _count: {
-          select: {
-            assignments: { where: { effectiveFrom: { lte: hoyDb }, OR: [{ effectiveTo: null }, { effectiveTo: { gte: hoyDb } }] } },
-          },
-        },
-      },
+      include: conConteoVigentes(venueId, hoy),
     }),
   ])
-  return { data: rows.map(r => aDto(r, (r as any)._count?.assignments ?? 0)), total, hasMore: skip + rows.length < total }
+  return { data: rows.map(aDto), total, hasMore: skip + rows.length < total }
 }
 
 export async function crearPuesto(input: CrearPuestoInput): Promise<PuestoDto> {
   await asegurarSedeNoMarcaBlanca(input.venueId)
-  const name = limpiar(input.name)
+  const name = nombreValido(input.name)
+  const hoy = await hoyDeLaSedeDb(input.venueId)
   return withSerializableRetry(async tx => {
     await nombreLibre(tx, input.venueId, name)
     const p = await tx.staffPosition.create({
@@ -101,6 +130,7 @@ export async function crearPuesto(input: CrearPuestoInput): Promise<PuestoDto> {
         color: input.color ?? null,
         icon: input.icon ?? null,
       },
+      include: conConteoVigentes(input.venueId, hoy),
     })
     await writeLegacyActivityAuditTx(tx, {
       staffId: input.actorId,
@@ -118,13 +148,15 @@ export async function editarPuesto(
   input: { venueId: string; actorId: string; positionId: string } & Partial<Omit<CrearPuestoInput, 'venueId' | 'actorId'>>,
 ): Promise<PuestoDto> {
   await asegurarSedeNoMarcaBlanca(input.venueId)
+  const name = input.name !== undefined ? nombreValido(input.name) : undefined
+  const hoy = await hoyDeLaSedeDb(input.venueId)
   return withSerializableRetry(async tx => {
     const actual = await tx.staffPosition.findFirst({ where: { id: input.positionId, venueId: input.venueId } })
     if (!actual) throw new NotFoundError('Ese puesto no existe en esta sucursal.')
-    const name = input.name !== undefined ? limpiar(input.name) : undefined
-    if (name) await nombreLibre(tx, input.venueId, name, actual.id)
+    // El nombre sólo debe ser único entre ACTIVOS: a un puesto archivado se le puede cambiar sin chocar.
+    if (name !== undefined && !actual.archivedAt) await nombreLibre(tx, input.venueId, name, actual.id)
     const data: Prisma.StaffPositionUpdateInput = {
-      ...(name ? { name } : {}),
+      ...(name !== undefined ? { name } : {}),
       ...(input.suggestedRole ? { suggestedRole: input.suggestedRole } : {}),
       ...(input.suggestedRelation !== undefined ? { suggestedRelation: input.suggestedRelation } : {}),
       ...(input.tracksAttendanceDefault !== undefined ? { tracksAttendanceDefault: input.tracksAttendanceDefault } : {}),
@@ -132,7 +164,7 @@ export async function editarPuesto(
       ...(input.color !== undefined ? { color: input.color } : {}),
       ...(input.icon !== undefined ? { icon: input.icon } : {}),
     }
-    const p = await tx.staffPosition.update({ where: { id: actual.id }, data })
+    const p = await tx.staffPosition.update({ where: { id: actual.id }, data, include: conConteoVigentes(input.venueId, hoy) })
     await writeLegacyActivityAuditTx(tx, {
       staffId: input.actorId,
       venueId: input.venueId,
@@ -147,11 +179,19 @@ export async function editarPuesto(
 
 export async function archivarPuesto(input: { venueId: string; actorId: string; positionId: string }): Promise<PuestoDto> {
   await asegurarSedeNoMarcaBlanca(input.venueId)
+  const hoy = await hoyDeLaSedeDb(input.venueId)
   return withSerializableRetry(async tx => {
-    const actual = await tx.staffPosition.findFirst({ where: { id: input.positionId, venueId: input.venueId } })
+    const actual = await tx.staffPosition.findFirst({
+      where: { id: input.positionId, venueId: input.venueId },
+      include: conConteoVigentes(input.venueId, hoy),
+    })
     if (!actual) throw new NotFoundError('Ese puesto no existe en esta sucursal.')
     if (actual.archivedAt) return aDto(actual) // ya estaba archivado: idempotente, sin segunda fila de auditoría
-    const p = await tx.staffPosition.update({ where: { id: actual.id }, data: { archivedAt: new Date() } })
+    const p = await tx.staffPosition.update({
+      where: { id: actual.id },
+      data: { archivedAt: new Date() },
+      include: conConteoVigentes(input.venueId, hoy),
+    })
     await writeLegacyActivityAuditTx(tx, {
       staffId: input.actorId,
       venueId: input.venueId,
@@ -168,10 +208,19 @@ export async function archivarPuesto(input: { venueId: string; actorId: string; 
 export async function puestosSugeridos(venueId: string): Promise<Array<{ name: string; suggestedRole: StaffRole }>> {
   const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { type: true } })
   if (!venue) throw new NotFoundError('Sucursal no encontrada')
-  const nombres = SECTOR_ROLE_DEFAULTS[getBusinessCategory(venue.type as never)]?.es ?? {}
-  const existentes = await prisma.staffPosition.findMany({ where: { venueId, archivedAt: null }, select: { name: true }, take: TOPE })
+  const porRol = SECTOR_ROLE_DEFAULTS[categoryOfVenueType(venue.type)]?.es ?? {}
+  // Dos roles pueden compartir nombre (en SERVICES, CASHIER y HOST son «Recepcionista»): un chip por nombre, gana el primer rol.
+  const candidatos = new Map<string, { name: string; suggestedRole: StaffRole }>()
+  for (const [role, name] of Object.entries(porRol) as Array<[StaffRole, string]>) {
+    if (!candidatos.has(name.toLowerCase())) candidatos.set(name.toLowerCase(), { name, suggestedRole: role })
+  }
+  if (candidatos.size === 0) return []
+  // Consulta exacta y acotada: sólo los nombres del giro que ya existen como puesto activo (a lo sumo uno por candidato).
+  const existentes = await prisma.staffPosition.findMany({
+    where: { venueId, archivedAt: null, name: { in: [...candidatos.values()].map(c => c.name), mode: 'insensitive' } },
+    select: { name: true },
+    take: TOPE,
+  })
   const usados = new Set(existentes.map(e => e.name.toLowerCase()))
-  return (Object.entries(nombres) as Array<[StaffRole, string]>)
-    .filter(([, n]) => !usados.has(n.toLowerCase()))
-    .map(([role, name]) => ({ name, suggestedRole: role }))
+  return [...candidatos.values()].filter(c => !usados.has(c.name.toLowerCase()))
 }
