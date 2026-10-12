@@ -165,7 +165,7 @@ espejo dejaría la cuenta en 11 contra las 12 piezas de Avoqado. Si hay filas vi
   y después la tienda `FOR SHARE` (`mirror.service.ts:372`). Quien la llame lo hace antes de cualquier candado de pareja, fila o cerco, o en
   una tx propia (el mensajero: tx de 15 s, porque avisa por dentro). `FOR NO KEY UPDATE` y no `FOR UPDATE`: no frena el `FOR KEY SHARE` de
   quien inserte una pareja con llave foránea a la sucursal.
-- **Desconectar** (`disconnectShopify(…)`, `connect.service.ts:1668`) bloquea primero TODAS las sucursales de la tienda por id (la propia
+- **Desconectar** (`disconnectShopify(…)`, `connect.service.ts:1676`) bloquea primero TODAS las sucursales de la tienda por id (la propia
   `FOR UPDATE`, las hermanas `FOR NO KEY UPDATE`), después las parejas de ESA sucursal, ordenadas por id, y sólo entonces sube la
   generación. Nunca la propia y luego una hermana de id menor: se cruzaría con quien las toma por id (el drenado, diferir, renovar la
   credencial). `renovarCredencial` (reconectar o reautorizar) también bloquea todas las sucursales de la tienda por id ANTES de la tienda.
@@ -249,17 +249,18 @@ cuadre y conteo no cambian, y el piloto (`PILOTO`, OAuth) convive igual.
   cambia las llaves. Renovar la llave de 24 h NO la sube ni toca `webhooksAt`: `guardarLlaveSiVigente(…)` es CAS sobre `tokenVersion` (una
   renovación tardía no pisa las llaves nuevas del dueño) y el cerco, las elecciones D1 y la huella del MCP siguen valiendo. Tampoco mueve
   `authorizedAt`: un `app/uninstalled` posterior a la autorización revoca igual.
-- **Renovar a tiempo** (`renovarLlavesPorVencer(…)`, fase `llaves` del worker, antes del buzón): las tiendas `COMERCIO` ACTIVE cuya llave
-  vence en menos de 60 s, 20 por vuelta, las que vencen primero. Shopify devuelve la MISMA llave hasta que vence: una vuelta antes sólo
-  mueve el vencimiento y la siguiente trae la nueva. Llaves rechazadas ⇒ revoca con su `motivo`; Shopify sin contestar ⇒ aviso en el log y
-  la siguiente vuelta. Es rutina: sin `ActivityLog` (la revocación sí, `SHOPIFY_STORE_REVOKED`).
+- **Renovar a tiempo** (`renovarLlavesPorVencer(…)`, fase `llaves` del worker, antes del buzón): las tiendas `COMERCIO` ACTIVE con alguna
+  sucursal no desconectada cuya llave vence en menos de 60 s, 20 por vuelta, las que vencen primero. Shopify devuelve la MISMA llave hasta
+  que vence: una vuelta antes sólo mueve el vencimiento y la siguiente trae la nueva. Llaves rechazadas ⇒ revoca con su `motivo` (y el
+  código de Shopify, si lo dio); Shopify sin contestar ⇒ aviso en el log y la siguiente vuelta. Es rutina: sin `ActivityLog` (la revocación
+  sí, `SHOPIFY_STORE_REVOKED`).
 - **Un 401 nunca revoca de golpe una tienda `COMERCIO`** (una llave vencida no es una desconexión): `atenderFalla(…)`, el mensajero y la
   sonda de desinstalación pasan por `resolverRechazoDelComercio(…)`, que relee la tienda (no ACTIVE o credencial distinta ⇒ REINTENTAR),
-  pide la llave (rechazada ⇒ revoca; sin contestar o el secret ilegible ⇒ ESPERAR), guarda una llave distinta ⇒ REINTENTAR y, con LA MISMA,
-  prueba `{ shop { id } }`: 200 ⇒ quien llamó traía una vieja (REINTENTAR); 401 ⇒ acceso retirado o app desinstalada, revoca
-  (`ACCESO_RETIRADO`). Con el vencimiento de quien llama, cada petición sale con lo menor entre 5 s y lo que queda y, sin margen, REINTENTAR
-  sin preguntar. Con ESPERAR el mensajero devuelve la fila con la espera de una pausa (`devuelta`, sin gastar intento y con su duda, como un
-  429). En `PILOTO` el 401 revoca como siempre.
+  pide la llave (rechazada ⇒ revoca; sin contestar o el secret ilegible ⇒ ESPERAR), guarda una llave distinta ⇒ REINTENTAR y, con LA MISMA a
+  5 s o menos de vencer, ESPERAR sin sonda (su 401 sería del vencimiento diario); si no, prueba `{ shop { id } }`: 200 ⇒ quien llamó traía
+  una vieja (REINTENTAR); 401 ⇒ acceso retirado o app desinstalada, revoca (`ACCESO_RETIRADO`). Con el vencimiento de quien llama, cada
+  petición sale con lo menor entre 5 s y lo que queda y, sin margen, REINTENTAR sin preguntar. Con ESPERAR el mensajero devuelve la fila con
+  la espera de una pausa (`devuelta`, sin gastar intento y con su duda, como un 429). En `PILOTO` el 401 revoca como siempre.
 - **Avisos:** `:appKey` acepta `comercio`. El secret de un aviso `COMERCIO` es el de SU tienda: `X-Shopify-Shop-Domain` (validado) sólo
   elige cuál se usa y la firma sigue decidiendo; sin tienda `COMERCIO`, sin secret legible o con la firma mala ⇒ 401. `PILOTO` sigue con el
   de env. El registro de suscripciones no cambia: la ruta de la app de la tienda (`/webhooks/shopify/comercio`) con la llave de 24 h.
@@ -317,7 +318,7 @@ borre o cree filas de `Inventory` de productos ligados, o que cambie esos campos
     `store.service.ts:279`) de cualquier generación anterior de esa sucursal o de la que ocupaba la ubicación. Una DEAD_LETTER ambigua no la
     frena: ya no puede llegar.
   - Religar la sucursal a OTRA tienda no es un 409: sus filas `IN_PROGRESS` y vivas ambiguas pasan a DEAD_LETTER con
-    `lastError = RELIGADA_A_OTRA_TIENDA` (duda y parámetros congelados conservados; `aCuarentenaPorReligar`, `connect.service.ts:834`),
+    `lastError = RELIGADA_A_OTRA_TIENDA` (duda y parámetros congelados conservados; `aCuarentenaPorReligar`, `connect.service.ts:842`),
     porque el reclamo sólo las tomaría con la tienda vieja ACTIVE y la sucursal ya apunta a la nueva: la espera no terminaría nunca. No
     avisan (es una acción deliberada del dueño); queda `religadas` en el `ActivityLog` de `SHOPIFY_CONNECTED`.
   - Desconectar no espera: bloquea (§4), sube la generación y deja esas filas cerrarse con su llave; al llegar no mueven el espejo.

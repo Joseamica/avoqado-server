@@ -383,6 +383,11 @@ type TiendaLlave = Prisma.ShopifyStoreGetPayload<{ select: typeof SELECCION_LLAV
 const PLAZO_LLAVE_MS = 5_000
 /** A lo más estas tiendas por vuelta (las que vencen primero); el margen, `RENOVAR_ANTES_MS`, es el de la Tarea 2. */
 const TANDA_LLAVES = 20
+/** Con esto o menos de vida, la MISMA llave no se prueba: un 401 de la sonda sería del vencimiento diario, no una desconexión. */
+const LLAVE_POR_VENCER_S = 5
+/** El motivo de una revocación por llaves rechazadas, con el código que dio Shopify si lo dio: la evidencia queda en la bitácora. */
+const motivoDeRechazo = (r: { motivo: string; codigoShopify?: string }): string =>
+  r.codigoShopify ? `${r.motivo}:${r.codigoShopify}` : r.motivo
 
 /**
  * La llave de 24 h con las llaves guardadas de la tienda. `null` = el secret no se pudo descifrar: es pasajero (una
@@ -420,11 +425,12 @@ export async function guardarLlaveSiVigente(
  * 5a (spec §4): un 401 de Shopify. En PILOTO (y PUBLICA) es la desconexión de siempre: revoca si la credencial usada sigue vigente.
  * En una tienda COMERCIO un 401 NUNCA revoca de golpe —una llave de 24 h vencida no es una desconexión—: relee la tienda (si ya no
  * está ACTIVE o cambió la credencial, quien llamó traía una vieja ⇒ REINTENTAR), pide la llave con sus llaves (rechazadas ⇒ revoca
- * con su motivo; Shopify sin contestar o el secret ilegible ⇒ ESPERAR), guarda una llave distinta (CAS) ⇒ REINTENTAR, y si es LA
- * MISMA la prueba con `{ shop { id } }`: 200 = quien llamó traía una vieja ⇒ REINTENTAR; 401 con una llave vigente = app
- * desinstalada o acceso retirado ⇒ revoca (`ACCESO_RETIRADO`); otra falla ⇒ ESPERAR. Ruling P2-8: con `vence` (el plazo de quien
- * llama) cada petición sale con `min(5 s, lo que queda)` y, sin margen, REINTENTAR sin preguntar: la siguiente vuelta lo decide con
- * su presupuesto. Lo usan `atenderFalla`, el mensajero y la sonda de desinstalación.
+ * con su motivo y el código de Shopify; Shopify sin contestar o el secret ilegible ⇒ ESPERAR), guarda una llave distinta (CAS) ⇒
+ * REINTENTAR, y si es LA MISMA: a 5 s o menos de vencer ⇒ ESPERAR sin sonda (su 401 sería del vencimiento diario); si no, la prueba
+ * con `{ shop { id } }`: 200 = quien llamó traía una vieja ⇒ REINTENTAR; 401 con una llave vigente = app desinstalada o acceso
+ * retirado ⇒ revoca (`ACCESO_RETIRADO`); otra falla ⇒ ESPERAR. Ruling P2-8: con `vence` (el plazo de quien llama) cada petición sale
+ * con `min(5 s, lo que queda)` y, sin margen, REINTENTAR sin preguntar: la siguiente vuelta lo decide con su presupuesto. Lo usan
+ * `atenderFalla`, el mensajero y la sonda de desinstalación.
  */
 export async function resolverRechazoDelComercio(
   storeId: string,
@@ -440,11 +446,14 @@ export async function resolverRechazoDelComercio(
   if (plazo() < MIN_HTTP_MS) return 'REINTENTAR'
   const r = await pedirLlaveDeTienda(s, plazo())
   if (r === null || (!r.ok && r.motivo === 'TRANSITORIO')) return 'ESPERAR'
-  if (!r.ok) return revocar(r.motivo)
+  if (!r.ok) return revocar(motivoDeRechazo(r))
   if (r.token !== leerToken(s)) {
     await guardarLlaveSiVigente(s, r, true)
     return 'REINTENTAR'
   }
+  // La MISMA llave a segundos de vencer (Shopify la devuelve así cerca del vencimiento diario): un 401 de la sonda sería del
+  // vencimiento y revocaría por error. Se espera: la siguiente vuelta ya trae la nueva.
+  if (r.expiresIn <= LLAVE_POR_VENCER_S) return 'ESPERAR'
   if (plazo() < MIN_HTTP_MS) return 'REINTENTAR'
   const prueba = await shopifyGraphql<{ shop: { id: string } }>(
     s.shopDomain,
@@ -464,13 +473,20 @@ export async function resolverRechazoDelComercio(
  * 5a (spec §4): cada vuelta del worker, las tiendas COMERCIO ACTIVE cuya llave de 24 h vence en menos de un minuto, las que vencen
  * primero y con tope. Shopify devuelve la MISMA llave hasta que vence: una vuelta antes sólo mueve el vencimiento y la siguiente, ya
  * vencida, trae la nueva. OK ⇒ CAS (`guardarLlaveSiVigente`); llaves rechazadas ⇒ revoca con su motivo; Shopify sin contestar ⇒
- * `logger.warn` y la siguiente vuelta. Es rutina: no deja ActivityLog (la revocación sí). ponytail: con más de 20 tiendas cuyo
- * Shopify no contesta, las de después esperan; mientras tanto las cubre el 401 de `resolverRechazoDelComercio`. Devuelve cuántas
- * llaves guardó.
+ * `logger.warn` y la siguiente vuelta. Es rutina: no deja ActivityLog (la revocación sí). Sólo tiendas con alguna sucursal no
+ * desconectada. ponytail: va una tienda tras otra y cada petición tiene como plazo lo que queda de la fase (3 s): UNA tienda cuyo Shopify
+ * no contesta se gasta la fase entera, y las de después esperan a la siguiente vuelta (y, como el orden es por vencimiento, puede volver
+ * a ir primero); mientras tanto las cubre el 401 de `resolverRechazoDelComercio`. Devuelve cuántas llaves guardó.
  */
 export async function renovarLlavesPorVencer(now: Date, vence: number): Promise<number> {
   const tiendas = await prisma.shopifyStore.findMany({
-    where: { appKey: 'COMERCIO', status: 'ACTIVE', accessTokenExpiresAt: { lte: new Date(now.getTime() + RENOVAR_ANTES_MS) } },
+    where: {
+      appKey: 'COMERCIO',
+      status: 'ACTIVE',
+      accessTokenExpiresAt: { lte: new Date(now.getTime() + RENOVAR_ANTES_MS) },
+      // Sin ninguna sucursal conectada nadie usa la llave: conectar otra vez la trae nueva del intent.
+      locationLinks: { some: { status: { not: 'DISCONNECTED' } } },
+    },
     orderBy: { accessTokenExpiresAt: 'asc' },
     take: TANDA_LLAVES,
     select: SELECCION_LLAVE,
@@ -485,7 +501,7 @@ export async function renovarLlavesPorVencer(now: Date, vence: number): Promise<
     } else if (r.motivo === 'TRANSITORIO') {
       logger.warn(`[SHOPIFY] tienda ${s.id}: Shopify no contestó al renovar la llave de 24 h; se reintenta en la siguiente vuelta`)
     } else {
-      await revocarTiendaSiVigente(s.id, s.tokenVersion, { motivo: r.motivo })
+      await revocarTiendaSiVigente(s.id, s.tokenVersion, { motivo: motivoDeRechazo(r) })
     }
   }
   return guardadas

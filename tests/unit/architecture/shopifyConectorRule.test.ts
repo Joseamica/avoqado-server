@@ -1047,8 +1047,8 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     const de = (f: string) => `${SHOPIFY}/shopify.${f}.ts`
     const anclas: Record<string, [string, string]> = {
       'shopify.connect.service.ts:116': [de('connect.service'), 'export async function startShopifyConnect('],
-      'connect.service.ts:1668': [de('connect.service'), 'export async function disconnectShopify('],
-      'connect.service.ts:834': [de('connect.service'), 'async function aCuarentenaPorReligar('],
+      'connect.service.ts:1676': [de('connect.service'), 'export async function disconnectShopify('],
+      'connect.service.ts:842': [de('connect.service'), 'async function aCuarentenaPorReligar('],
       'shopify.crypto.ts:34': [de('crypto'), 'export function formaDeFirmaOAuth('],
       'catalog.service.ts:68': [de('catalog.service'), 'export const FILTRO_ESTADO'],
       'catalog.service.ts:418': [de('catalog.service'), 'async function bloquearProductos('],

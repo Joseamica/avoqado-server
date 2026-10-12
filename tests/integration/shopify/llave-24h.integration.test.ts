@@ -12,7 +12,11 @@ import { decryptShopifyToken, encryptShopifyToken } from '@/services/commerce-ch
 import { getConnectReview } from '@/services/commerce-channels/shopify/shopify.connect.service'
 import { claimShopifyOutbox, runShopifyOutboxRow } from '@/services/commerce-channels/shopify/shopify.outbox.service'
 import { processShopifyEvent } from '@/services/commerce-channels/shopify/shopify.inbound.service'
-import { atenderFalla, renovarLlavesPorVencer } from '@/services/commerce-channels/shopify/shopify.store.service'
+import {
+  atenderFalla,
+  renovarLlavesPorVencer,
+  resolverRechazoDelComercio,
+} from '@/services/commerce-channels/shopify/shopify.store.service'
 import {
   assertTestDatabase,
   crearEscenarioShopify,
@@ -104,6 +108,39 @@ describe('5a · renovar a tiempo (worker)', () => {
     const f = shopifyPorFetch({})
     expect(await renovarLlavesPorVencer(new Date(), lejos())).toBe(0)
     expect(f).not.toHaveBeenCalled()
+  })
+
+  it('fix final: no renueva la llave de una tienda COMERCIO sin ninguna sucursal conectada (su única sucursal está DISCONNECTED), aunque ya venció', async () => {
+    const e = await comercio({ linkStatus: 'DISCONNECTED', venceEnMs: -1_000 })
+    const f = shopifyPorFetch({ llave: () => LLAVE_OK('shpat_nueva_24h') })
+    expect(await renovarLlavesPorVencer(new Date(), lejos())).toBe(0)
+    expect(f).not.toHaveBeenCalled()
+    expect(await llaveDe(e)).toBe(TOKEN_DE_PRUEBA)
+    expect((await tienda(e)).status).toBe('ACTIVE')
+  })
+
+  it('fix final: la revocación por llaves rechazadas guarda el código de Shopify junto al motivo (la evidencia), al renovar y desde un 401', async () => {
+    const RECHAZO = { status: 400, body: { error: 'invalid_scope' } }
+    const a = await comercio({ venceEnMs: 10_000 })
+    shopifyPorFetch({ llave: () => RECHAZO })
+    await renovarLlavesPorVencer(new Date(), lejos())
+    expect((await tienda(a)).status).toBe('REVOKED')
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'SHOPIFY_STORE_REVOKED',
+        entityId: a.storeId,
+        data: expect.objectContaining({ motivo: 'RECHAZADA:invalid_scope' }),
+      }),
+    )
+    const b = await comercio()
+    expect(await atenderFalla({ id: b.storeId, tokenVersion: 1 }, f401)).toBe('REVOCADA')
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'SHOPIFY_STORE_REVOKED',
+        entityId: b.storeId,
+        data: expect.objectContaining({ motivo: 'RECHAZADA:invalid_scope' }),
+      }),
+    )
   })
 
   it('🔴 riesgo 3: una renovación tardía no pisa las llaves nuevas que el dueño acaba de poner (tokenVersion distinto ⇒ no escribe), tampoco desde un 401', async () => {
@@ -210,6 +247,19 @@ describe('5a · un 401 nunca revoca de golpe una tienda COMERCIO (riesgo 1)', ()
         data: expect.objectContaining({ motivo: 'ACCESO_RETIRADO' }),
       }),
     )
+  })
+
+  it('🔴 fix final (I1): la MISMA llave con segundos de vida (el vencimiento diario) ⇒ ESPERAR sin la sonda: su 401 sería del vencimiento, no una desconexión', async () => {
+    const e = await comercio()
+    const f = shopifyPorFetch({ llave: () => LLAVE_OK(TOKEN_DE_PRUEBA, 3), api: () => SONDA_401 })
+    expect(await resolverRechazoDelComercio(e.storeId, 1)).toBe('ESPERAR')
+    expect(await atenderFalla({ id: e.storeId, tokenVersion: 1 }, f401)).toBe('REINTENTAR')
+    expect(f.mock.calls.map(c => String(c[0]))).toEqual([
+      `https://${e.shopDomain}/admin/oauth/access_token`,
+      `https://${e.shopDomain}/admin/oauth/access_token`,
+    ])
+    expect(await tienda(e)).toMatchObject({ status: 'ACTIVE', tokenVersion: 1 })
+    expect(logAction).not.toHaveBeenCalled()
   })
 
   it('llaves rechazadas ⇒ REVOCADA con su motivo; Shopify sin contestar ⇒ REINTENTAR; credencial vieja ⇒ REINTENTAR sin preguntar; PILOTO revoca como siempre, sin pedir llave', async () => {

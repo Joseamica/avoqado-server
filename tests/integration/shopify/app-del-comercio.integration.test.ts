@@ -386,6 +386,51 @@ describe('5a · conectar con las llaves de la app de la tienda', () => {
     expect(siempre401).toHaveBeenCalledTimes(2)
     expect(await prisma.shopifyStore.findUnique({ where: { shopDomain: dominio } })).toBeNull()
   })
+
+  it('🔴 fix final (I2): confirmar reintentado tras un 409, con la llave del intent renovada en medio, sube tokenVersion UNA sola vez (con la app del comercio se comparan las llaves de la app, no la llave de 24 h)', async () => {
+    const e = await escenario({ linkStatus: 'DISCONNECTED' })
+    await conCortesia(e)
+    // Un envío de la conexión anterior a la MISMA tienda sigue en camino: confirmar contesta 409 hasta que llegue (K9: la credencial ya
+    // quedó guardada antes del 409).
+    const enCamino = await prisma.shopifyStockOutbox.create({
+      data: {
+        venueId: e.venueId,
+        locationLinkId: e.locationLinkId,
+        generation: 1,
+        productId: e.productId,
+        delta: -1,
+        status: 'IN_PROGRESS',
+        claimToken: 'mensajero',
+        leaseUntil: new Date(Date.now() + 60_000),
+      },
+    })
+    shopifyPorFetch({ llave: () => LLAVE_OK('shpat_primera') })
+    const r = await conectarConAppDelComercio(llaves(e))
+    if (!('intent' in r)) throw new Error('se esperaba el intent')
+    const i = { venueId: e.venueId, authUserId: e.staffId, intent: r.intent, locationId: UBICACION_PRUEBA }
+    const graphql = ubicaciones()
+    await expect(confirmShopifyConnect(i, { graphql })).rejects.toMatchObject({ statusCode: 409, code: 'SHOPIFY_ENVIO_EN_CAMINO' })
+    expect(await tienda(e)).toMatchObject({ appKey: 'COMERCIO', tokenVersion: 2 })
+    // El dueño se tarda: a la llave del intent le queda menos de un minuto y el reintento pide otra. Shopify da la MISMA llave, que el
+    // intent vuelve a cifrar con otros bytes.
+    const delIntent = () => prisma.shopifyConnectIntent.findFirstOrThrow({ where: { venueId: e.venueId } })
+    await prisma.shopifyConnectIntent.updateMany({ where: { venueId: e.venueId }, data: { tokenExpiresAt: new Date(Date.now() + 30_000) } })
+    const antes = Buffer.from((await delIntent()).tokenCiphertext!)
+    const pide = shopifyPorFetch({ llave: () => LLAVE_OK('shpat_primera') })
+    await expect(confirmShopifyConnect(i, { graphql })).rejects.toMatchObject({ statusCode: 409, code: 'SHOPIFY_ENVIO_EN_CAMINO' })
+    expect(pide).toHaveBeenCalledTimes(1)
+    expect(Buffer.from((await delIntent()).tokenCiphertext!).equals(antes)).toBe(false)
+    expect((await tienda(e)).tokenVersion).toBe(2)
+    // Ya llegó lo que iba en camino: confirmar entra sin renovar otra vez.
+    await prisma.shopifyStockOutbox.update({
+      where: { id: enCamino.id },
+      data: { status: 'SENT', processedAt: new Date(), claimToken: null, leaseUntil: null },
+    })
+    await confirmShopifyConnect(i, { graphql })
+    expect(await tienda(e)).toMatchObject({ appKey: 'COMERCIO', tokenVersion: 2, status: 'ACTIVE' })
+    expect((await sucursal(e)).status).toBe('CONNECTING')
+    expect((logAction as jest.Mock).mock.calls.filter(([p]) => p.action === 'SHOPIFY_CREDENTIAL_RENEWED')).toHaveLength(1)
+  })
 })
 
 describe('5a · cambiar de método por REAUTHORIZE (riesgo 7)', () => {

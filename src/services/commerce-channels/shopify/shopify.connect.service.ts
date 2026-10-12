@@ -664,7 +664,7 @@ export async function confirmShopifyConnect(
     }),
     prisma.shopifyStore.findUnique({
       where: { shopDomain: intent.shopDomain },
-      select: { id: true, organizationId: true, status: true, accessTokenCiphertext: true },
+      select: { id: true, organizationId: true, status: true, accessTokenCiphertext: true, clientSecretCiphertext: true },
     }),
   ])
   if (propia && propia.status !== 'DISCONNECTED') throw YA_CONECTADA()
@@ -676,8 +676,16 @@ export async function confirmShopifyConnect(
     })
     if (ocupante && ocupante.venueId !== i.venueId && ocupante.status !== 'DISCONNECTED') throw UBICACION_YA_LIGADA()
     // Este MISMO intent ya dejó su credencial (los mismos bytes cifrados) y la tienda sigue ACTIVE: un reintento tras un
-    // 409 no vuelve a subir `tokenVersion` ni a pedir webhooks y cuadre a todas las hermanas.
-    const yaRenovada = tienda.status === 'ACTIVE' && Buffer.from(tienda.accessTokenCiphertext).equals(Buffer.from(intent.tokenCiphertext))
+    // 409 no vuelve a subir `tokenVersion` ni a pedir webhooks y cuadre a todas las hermanas. Con la app del comercio la credencial
+    // son sus llaves (el secret cifrado del intent): la llave de 24 h del intent se vuelve a cifrar cada vez que se renueva, así que
+    // compararla subiría `tokenVersion` dos veces en un reintento tras un 409.
+    const yaRenovada =
+      tienda.status === 'ACTIVE' &&
+      (intent.appKey === 'COMERCIO'
+        ? !!intent.clientSecretCiphertext &&
+          !!tienda.clientSecretCiphertext &&
+          Buffer.from(tienda.clientSecretCiphertext).equals(Buffer.from(intent.clientSecretCiphertext))
+        : Buffer.from(tienda.accessTokenCiphertext).equals(Buffer.from(intent.tokenCiphertext)))
     // La sucursal que se reconecta a ESTA tienda: lo que tenga en camino de su conexión anterior se reintenta ya, no al
     // cabo de su espera (hasta 6 h), que dura más que los 15 minutos del intent.
     const reconecta = propia?.storeId === tienda.id ? propia : null
