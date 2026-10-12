@@ -1,0 +1,99 @@
+// «Cómo se le paga hoy» (spec RH §3.5): sólo lee los motores de hoy, con su permiso por bloque.
+import { prismaMock } from '@tests/__helpers__/setup'
+import { resumenDePago } from '@/services/dashboard/rh/resumenDePago.service'
+import { NotFoundError } from '@/errors/AppError'
+
+const SEDE = 'venue-1'
+const ORG = 'org-1'
+const PERSONA = 'staff-1'
+const TODO = { comisiones: true, pagoPorClase: true }
+
+const esquema = (over: Record<string, unknown>) => ({
+  id: 'cfg',
+  name: 'General',
+  venueId: SEDE,
+  filterByStaff: false,
+  staffIds: [],
+  tiers: [],
+  ...over,
+})
+
+beforeEach(() => {
+  prismaMock.venue.findUnique.mockResolvedValue({ organizationId: ORG, timezone: 'America/Mexico_City' })
+  prismaMock.staffVenue.findUnique.mockResolvedValue({ id: 'sv-1' })
+  prismaMock.commissionConfig.findMany.mockResolvedValue([])
+  prismaMock.commissionOverride.findFirst.mockResolvedValue(null)
+  prismaMock.staffPayLevelAssignment.findFirst.mockResolvedValue(null)
+})
+
+function nadaSeEscribio() {
+  for (const modelo of Object.values(prismaMock)) {
+    if (!modelo || typeof modelo !== 'object') continue
+    for (const m of ['create', 'createMany', 'update', 'updateMany', 'upsert', 'delete', 'deleteMany'] as const) {
+      if ((modelo as any)[m]) expect((modelo as any)[m]).not.toHaveBeenCalled()
+    }
+  }
+}
+
+describe('resumenDePago (spec RH §3.5)', () => {
+  it('excepción con excludeFromCommissions ⇒ la comisión sale excluida; tasa personal en número', async () => {
+    prismaMock.commissionConfig.findMany.mockResolvedValue([
+      esquema({ id: 'cfg-a', name: 'Meseros' }),
+      esquema({ id: 'cfg-b', name: 'Barra' }),
+    ])
+    prismaMock.commissionOverride.findFirst.mockImplementation(async ({ where }: any) =>
+      where.configId === 'cfg-a'
+        ? { excludeFromCommissions: true, customRate: null }
+        : { excludeFromCommissions: false, customRate: '0.05' },
+    )
+    const r = await resumenDePago(SEDE, PERSONA, TODO)
+    expect(r.comisiones).toEqual([
+      { configId: 'cfg-a', nombre: 'Meseros', alcance: 'SEDE', excluida: true, tasaPersonal: null },
+      { configId: 'cfg-b', nombre: 'Barra', alcance: 'SEDE', excluida: false, tasaPersonal: 0.05 },
+    ])
+    expect(prismaMock.commissionOverride.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ staffId: PERSONA }) }),
+    )
+    nadaSeEscribio()
+  })
+
+  it('un esquema «sólo elegidos» que no incluye a la persona NO aparece; uno de organización sale con su alcance', async () => {
+    prismaMock.commissionConfig.findMany
+      .mockResolvedValueOnce([]) // la sede no tiene esquemas propios ⇒ el motor cae a los de la organización
+      .mockResolvedValueOnce([
+        esquema({ id: 'cfg-otros', venueId: null, filterByStaff: true, staffIds: ['staff-9'] }),
+        esquema({ id: 'cfg-yo', venueId: null, name: 'Org', filterByStaff: true, staffIds: [PERSONA] }),
+      ])
+    const r = await resumenDePago(SEDE, PERSONA, TODO)
+    expect(r.comisiones).toEqual([{ configId: 'cfg-yo', nombre: 'Org', alcance: 'ORGANIZACION', excluida: false, tasaPersonal: null }])
+  })
+
+  it('sin commissions:read ⇒ comisiones: null y no se consulta el motor; sin staffpay:read ⇒ nivelDeClase: SIN_PERMISO', async () => {
+    const r = await resumenDePago(SEDE, PERSONA, { comisiones: false, pagoPorClase: false })
+    expect(r).toEqual({ comisiones: null, nivelDeClase: 'SIN_PERMISO', propinas: { regla: 'ATIENDE_LUEGO_COBRA' } })
+    expect(prismaMock.commissionConfig.findMany).not.toHaveBeenCalled()
+    expect(prismaMock.staffPayLevelAssignment.findFirst).not.toHaveBeenCalled()
+  })
+
+  it('persona de otra sede ⇒ 404 y no lee nada más', async () => {
+    prismaMock.staffVenue.findUnique.mockResolvedValue(null)
+    await expect(resumenDePago(SEDE, PERSONA, TODO)).rejects.toBeInstanceOf(NotFoundError)
+    expect(prismaMock.staffVenue.findUnique).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { staffId_venueId: { staffId: PERSONA, venueId: SEDE } } }),
+    )
+    expect(prismaMock.commissionConfig.findMany).not.toHaveBeenCalled()
+  })
+
+  it('sin nivel ⇒ nivelDeClase: null; con nivel ⇒ nombre y desde (día civil), buscado en la organización hasta hoy', async () => {
+    expect((await resumenDePago(SEDE, PERSONA, TODO)).nivelDeClase).toBeNull()
+    prismaMock.staffPayLevelAssignment.findFirst.mockResolvedValue({
+      effectiveFrom: new Date('2026-09-01T00:00:00.000Z'),
+      payLevel: { name: 'Senior' },
+    })
+    expect((await resumenDePago(SEDE, PERSONA, TODO)).nivelDeClase).toEqual({ nombre: 'Senior', desde: '2026-09-01' })
+    const args = prismaMock.staffPayLevelAssignment.findFirst.mock.calls[0][0]
+    expect(args.where).toMatchObject({ staffId: PERSONA, organizationId: ORG, effectiveFrom: { lte: expect.any(Date) } })
+    expect(args.orderBy).toEqual([{ effectiveFrom: 'desc' }, { revision: 'desc' }])
+    nadaSeEscribio()
+  })
+})

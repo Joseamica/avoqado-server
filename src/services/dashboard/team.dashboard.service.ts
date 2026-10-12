@@ -17,6 +17,9 @@ import { ROLE_HIERARCHY, canAssignRole, ungrantablePermissions } from '../../lib
 import { assertCanAddSeat } from '../access/seatCap.service'
 import { withSerializableRetry } from '@/utils/serializableRetry'
 import { isLiveSlotHold } from './appointmentStaffAssignment.service'
+import { AsignacionDto, asignacionesVigentes } from './rh/asignaciones.service'
+import { hoyDeLaSede } from './rh/vigencias'
+import { fechaComoDbDate } from './staffPay/periodos'
 
 interface TeamMember {
   id: string
@@ -35,6 +38,8 @@ interface TeamMember {
   averageRating: number
   permissionSetId: string | null
   permissionSetName: string | null
+  /** RH fase 1a: puestos vigentes HOY en la sede (vacío = sin puesto). Lo trae la lista; updateTeamMember no. */
+  currentAssignments?: AsignacionDto[]
 }
 
 interface PaginatedTeamResponse {
@@ -89,6 +94,7 @@ export async function getTeamMembers(
   page: number = 1,
   pageSize: number = 10,
   search?: string,
+  positionId?: string,
 ): Promise<PaginatedTeamResponse> {
   const skip = (page - 1) * pageSize
 
@@ -99,8 +105,9 @@ export async function getTeamMembers(
   // (Asana 1215884464715725).
   const venueOrg = await prisma.venue.findUnique({
     where: { id: venueId },
-    select: { organizationId: true },
+    select: { organizationId: true, timezone: true },
   })
+  const hoy = hoyDeLaSede(venueOrg?.timezone ?? 'America/Mexico_City')
   const activeOrgMemberFilter = venueOrg?.organizationId
     ? { staff: { organizations: { some: { organizationId: venueOrg.organizationId, isActive: true } } } }
     : {}
@@ -137,9 +144,32 @@ export async function getTeamMembers(
       }
     : {}
 
+  // RH: filtro por puesto vigente hoy (fin inclusivo, igual que asignacionesVigentes). Va en AND con la pertenencia a la
+  // organización: un segundo `staff` suelto la reemplazaría y volverían a salir personas retiradas.
+  const hoyDb = fechaComoDbDate(hoy)
+  const membershipFilter = positionId
+    ? {
+        AND: [
+          activeOrgMemberFilter,
+          {
+            staff: {
+              staffAssignments: {
+                some: {
+                  venueId,
+                  positionId,
+                  effectiveFrom: { lte: hoyDb },
+                  OR: [{ effectiveTo: null }, { effectiveTo: { gte: hoyDb } }],
+                },
+              },
+            },
+          },
+        ],
+      }
+    : activeOrgMemberFilter
+
   const whereCondition = {
     venueId,
-    ...activeOrgMemberFilter,
+    ...membershipFilter,
     ...searchConditions,
   }
 
@@ -168,7 +198,7 @@ export async function getTeamMembers(
           },
         },
       },
-      orderBy: [{ role: 'asc' }, { staff: { firstName: 'asc' } }],
+      orderBy: [{ role: 'asc' }, { staff: { firstName: 'asc' } }, { id: 'asc' }],
       skip,
       take: pageSize,
     }),
@@ -179,6 +209,8 @@ export async function getTeamMembers(
 
   // Get all staff IDs for calculating real-time stats
   const staffIds = staffVenues.map(sv => sv.staff.id)
+  // RH: puestos vigentes de toda la página en una sola consulta (sin N+1).
+  const vigentes = await asignacionesVigentes(venueId, staffIds, hoy)
 
   // Calculate real-time stats from orders grouped by staff (for sales and order count)
   const orderStats = await prisma.order.groupBy({
@@ -241,6 +273,7 @@ export async function getTeamMembers(
       averageRating: 0, // Rating requires more complex query, keeping as 0 for list view
       permissionSetId: sv.permissionSet?.id ?? null,
       permissionSetName: sv.permissionSet?.name ?? null,
+      currentAssignments: vigentes.get(sv.staff.id) ?? [],
     }
   })
 

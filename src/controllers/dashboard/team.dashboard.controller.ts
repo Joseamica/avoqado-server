@@ -9,8 +9,9 @@ export async function getTeamMembers(req: Request, res: Response, next: NextFunc
     const page = parseInt(req.query.page as string) || 1
     const pageSize = parseInt(req.query.pageSize as string) || 10
     const search = req.query.search as string
+    const positionId = req.query.positionId as string | undefined
 
-    const result = await teamService.getTeamMembers(venueId, page, pageSize, search)
+    const result = await teamService.getTeamMembers(venueId, page, pageSize, search, positionId)
     res.status(200).json(result)
   } catch (error) {
     next(error)
