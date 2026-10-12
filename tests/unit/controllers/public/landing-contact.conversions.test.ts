@@ -12,6 +12,7 @@ jest.mock('@/config/logger', () => ({
   default: { error: jest.fn(), warn: jest.fn(), info: jest.fn(), debug: jest.fn() },
 }))
 
+import { createHash } from 'crypto'
 import type { NextFunction, Request, Response } from 'express'
 import { submitContact } from '@/controllers/public/landing.public.controller'
 import emailService from '@/services/email.service'
@@ -19,6 +20,9 @@ import { signupFromLanding } from '@/services/onboarding/signup.service'
 
 const mockSignupFromLanding = signupFromLanding as jest.Mock
 const mockSendEmail = emailService.sendEmail as jest.Mock
+
+/** El identificador de conversión que la landing pasa al píxel de ChatGPT como `event_id`. */
+const huella = (organizationId: string) => createHash('sha256').update(organizationId).digest('hex').slice(0, 32)
 
 const contactBody = {
   firstName: 'Ana',
@@ -74,7 +78,7 @@ describe('submitContact conversion signals', () => {
     expect(res.body).toEqual({
       success: true,
       message: 'Demo solicitada exitosamente',
-      conversion: { leadCreated: true, registrationCompleted: true },
+      conversion: { leadCreated: true, registrationCompleted: true, eventId: huella('org-new') },
     })
   })
 
@@ -92,7 +96,7 @@ describe('submitContact conversion signals', () => {
     expect(res.statusCode).toBe(200)
     expect(res.body).toEqual(
       expect.objectContaining({
-        conversion: { leadCreated: true, registrationCompleted: false },
+        conversion: { leadCreated: true, registrationCompleted: false, eventId: huella('org-existing') },
       }),
     )
   })
@@ -111,7 +115,7 @@ describe('submitContact conversion signals', () => {
     expect(res.statusCode).toBe(200)
     expect(res.body).toEqual(
       expect.objectContaining({
-        conversion: { leadCreated: true, registrationCompleted: false },
+        conversion: { leadCreated: true, registrationCompleted: false, eventId: huella('org-incomplete') },
       }),
     )
   })
@@ -146,7 +150,66 @@ describe('submitContact conversion signals', () => {
     expect(res.body).toEqual({
       success: false,
       message: 'No se pudo notificar al equipo. Intenta de nuevo.',
-      conversion: { leadCreated: false, registrationCompleted: true },
+      conversion: { leadCreated: false, registrationCompleted: true, eventId: huella('org-new') },
+    })
+  })
+
+  // El píxel de ChatGPT descarta un evento repetido si trae el mismo `event_id`. Quien vuelve a
+  // mandar el formulario con el MISMO correo cae en la MISMA cuenta, así que debe recibir el
+  // MISMO identificador: así ChatGPT no lo cuenta dos veces.
+  it('gives the same eventId to the same account when the form is sent again', async () => {
+    mockSignupFromLanding.mockResolvedValueOnce({
+      staff: { id: 'staff-new', email: contactBody.email },
+      organizationId: 'org-repetida',
+      magicLinkToken: 'token-new',
+      alreadyExisted: false,
+      yaEsCliente: false,
+    })
+    mockSignupFromLanding.mockResolvedValueOnce({
+      staff: { id: 'staff-new', email: contactBody.email },
+      organizationId: 'org-repetida',
+      magicLinkToken: 'renewed-token',
+      alreadyExisted: true,
+      yaEsCliente: false,
+    })
+
+    const primera = await submit()
+    const segunda = await submit()
+
+    const id1 = (primera.res.body as { conversion: { eventId?: string } }).conversion.eventId
+    const id2 = (segunda.res.body as { conversion: { eventId?: string } }).conversion.eventId
+    expect(id1).toBe(huella('org-repetida'))
+    expect(id2).toBe(id1)
+  })
+
+  it('never exposes the internal organization id in the public response', async () => {
+    mockSignupFromLanding.mockResolvedValue({
+      staff: { id: 'staff-new', email: contactBody.email },
+      organizationId: 'cmorgsecreta000000000000',
+      magicLinkToken: 'token-new',
+      alreadyExisted: false,
+      yaEsCliente: false,
+    })
+
+    const { res } = await submit()
+
+    expect(JSON.stringify(res.body)).not.toContain('cmorgsecreta000000000000')
+  })
+
+  it('sends no eventId when the signup returns no organization', async () => {
+    mockSignupFromLanding.mockResolvedValue({
+      staff: { id: 'staff-new', email: contactBody.email },
+      organizationId: null,
+      magicLinkToken: null,
+      alreadyExisted: true,
+      yaEsCliente: false,
+    })
+
+    const { res } = await submit()
+
+    expect((res.body as { conversion: Record<string, unknown> }).conversion).toEqual({
+      leadCreated: true,
+      registrationCompleted: false,
     })
   })
 })
