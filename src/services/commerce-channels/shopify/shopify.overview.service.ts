@@ -31,6 +31,10 @@ export type ShopifyConnection = {
   generation: number
   /** ADITIVO (D1): la credencial; la huella del MCP la lleva (reautorizar no cambia la generación). */
   tokenVersion: number
+  /** ADITIVO (5a): con qué app se conectó la tienda: la del piloto (OAuth) o la que creó el comercio en su Dev Dashboard. */
+  metodo: 'PILOTO' | 'APP_DEL_COMERCIO'
+  /** ADITIVO (5a): los 4 últimos caracteres del Client ID de la app del comercio (no es secreto); null en PILOTO. */
+  clientIdTerminacion: string | null
   fase: FaseVisible
   pausedFrom: Exclude<FaseVisible, 'PAUSED'> | null
   estado: ShopifyEstado
@@ -97,7 +101,7 @@ export async function getShopifyOverview(venueId: string): Promise<{ planActive:
   const [link, planActive] = await Promise.all([
     prisma.shopifyLocationLink.findUnique({
       where: { venueId },
-      include: { store: { select: { shopDomain: true, status: true, tokenVersion: true } } },
+      include: { store: { select: { shopDomain: true, status: true, tokenVersion: true, appKey: true, clientId: true } } },
     }),
     venueHasFeatureAccess(venueId, SHOPIFY_FEATURE),
   ])
@@ -135,6 +139,8 @@ export async function getShopifyOverview(venueId: string): Promise<{ planActive:
       linkId: link.id,
       generation: link.generation,
       tokenVersion: link.store.tokenVersion,
+      metodo: link.store.appKey === 'COMERCIO' ? 'APP_DEL_COMERCIO' : 'PILOTO',
+      clientIdTerminacion: link.store.appKey === 'COMERCIO' && link.store.clientId ? link.store.clientId.slice(-4) : null,
       fase: link.status as FaseVisible,
       pausedFrom,
       estado: estadoDe(link.status, link.applyRequestedAt, link.store.status),

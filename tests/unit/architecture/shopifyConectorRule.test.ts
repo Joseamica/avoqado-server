@@ -1006,6 +1006,14 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     expect(cuerpo(receptor, 'export async function handleShopifyWebhook(')).toContain("req.params.appKey === 'comercio'")
   })
 
+  it('5a · lo que se ve: el método en el resumen y en el MCP; nada de las llaves pasa por la IA', () => {
+    contieneTodas(['`shopify_status` del MCP lleva `metodo` y nada de las llaves (ni la terminación)'])
+    expect(leer('src/mcp/tools/shopify.ts')).toContain('connection: connection && { ...connection, clientIdTerminacion: undefined }')
+    expect(leer(`${SHOPIFY}/shopify.overview.service.ts`)).toContain(
+      "metodo: link.store.appKey === 'COMERCIO' ? 'APP_DEL_COMERCIO' : 'PILOTO'",
+    )
+  })
+
   it('los globs de `paths:` de la regla apuntan a algo que existe, incluidos los demás escritores de stock', () => {
     const cabecera = leer('.claude/rules/shopify-conector.md').split('---')[1]
     const globs = [...cabecera.matchAll(/- '([^']+)'/g)].map(m => m[1])

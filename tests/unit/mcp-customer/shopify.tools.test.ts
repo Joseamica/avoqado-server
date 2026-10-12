@@ -163,6 +163,22 @@ describe('herramientas MCP de Shopify', () => {
     expect(mockOverview.getShopifyOverview).toHaveBeenCalledTimes(1)
   })
 
+  it('🔴 5a: el estado dice con qué app se conectó (metodo) y no deja pasar nada de las llaves a la IA, ni la terminación del Client ID', async () => {
+    mockOverview.getShopifyOverview.mockResolvedValue({
+      planActive: true,
+      connection: { ...CONEXION, metodo: 'APP_DEL_COMERCIO', clientIdTerminacion: 'abcd' },
+    })
+    const { client, call } = await conectar()
+    const r = await call('shopify_status', { venueId: 'centro' })
+    expect(r.connection).toMatchObject({ metodo: 'APP_DEL_COMERCIO', shopDomain: 'mi-tienda.myshopify.com' })
+    expect(r.connection).not.toHaveProperty('clientIdTerminacion')
+    expect(JSON.stringify(r)).not.toContain('abcd')
+    const desc = (await client.listTools()).tools.find(t => t.name === 'shopify_status')!.description!
+    expect(desc).toContain('APP_DEL_COMERCIO')
+    mockOverview.getShopifyOverview.mockResolvedValue({ planActive: false, connection: null })
+    expect(await call('shopify_status', { venueId: 'centro' })).toMatchObject({ ok: true, planActive: false, connection: null })
+  })
+
   it('las listas pasan página, búsqueda y motivo', async () => {
     const { call } = await conectar()
     await call('shopify_review_list', { venueId: 'centro', q: 'camisa' })

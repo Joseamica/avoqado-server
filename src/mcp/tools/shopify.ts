@@ -139,12 +139,14 @@ export function registerShopifyTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'shopify_status',
-    `Estado del conector con Shopify del local: tienda y ubicación ligadas, en qué va (trayendo catálogo, lista para revisar, aplicando, activa, pausada o sin permiso de Shopify), productos emparejados, cambios en camino, atorados o sin confirmar, retraso y el cuadre (si hay uno en curso y cuándo fue el último). Un local que perdió el acceso ve la pausa. ${FECHAS}`,
+    `Estado del conector con Shopify del local: tienda y ubicación ligadas, en qué va (trayendo catálogo, lista para revisar, aplicando, activa, pausada o sin permiso de Shopify), productos emparejados, cambios en camino, atorados o sin confirmar, retraso, el cuadre (si hay uno en curso y cuándo fue el último) y con qué app se conectó (metodo: PILOTO, la app del piloto de Avoqado, o APP_DEL_COMERCIO, la app que creó la propia tienda). Un local que perdió el acceso ve la pausa. ${FECHAS}`,
     { venueId: venueIdField() },
     async ({ venueId }) => {
       guard.venueFilter(venueId)
       guard.requirePermission('inventory:read', venueId)
-      return text({ ok: true, venueId, ...(await getShopifyOverview(venueId)) })
+      const { planActive, connection } = await getShopifyOverview(venueId)
+      // 5a (spec §7): el método sí; nada de las llaves de la app pasa por la IA, ni la terminación del Client ID.
+      return text({ ok: true, venueId, planActive, connection: connection && { ...connection, clientIdTerminacion: undefined } })
     },
   )
 

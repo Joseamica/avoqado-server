@@ -263,6 +263,9 @@ cuadre y conteo no cambian, y el piloto (`PILOTO`, OAuth) convive igual.
 - **Avisos:** `:appKey` acepta `comercio`. El secret de un aviso `COMERCIO` es el de SU tienda: `X-Shopify-Shop-Domain` (validado) sólo
   elige cuál se usa y la firma sigue decidiendo; sin tienda `COMERCIO`, sin secret legible o con la firma mala ⇒ 401. `PILOTO` sigue con el
   de env. El registro de suscripciones no cambia: la ruta de la app de la tienda (`/webhooks/shopify/comercio`) con la llave de 24 h.
+- **Lo que se ve:** el resumen suma `metodo` (`PILOTO` | `APP_DEL_COMERCIO`) y `clientIdTerminacion` (los 4 últimos del Client ID; la
+  tarjeta dice «Conectada con la app de tu tienda (…abcd)» y ofrece «Cambiar llaves»). `shopify_status` del MCP lleva `metodo` y nada de las
+  llaves (ni la terminación): un secret nunca pasa por la IA, y conectar no tiene herramienta del MCP.
 
 ## 5. `Inventory` que desaparece o vuelve ⇒ suspender y reactivar la pareja, NUNCA borrarla
 

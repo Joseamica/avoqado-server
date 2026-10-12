@@ -12,7 +12,15 @@ import {
   SHOPIFY_IMPORT_ERRORES_VISIBLES,
 } from '@/services/commerce-channels/shopify/shopify.overview.service'
 import { SHOPIFY_IMPORT_ERRORES_TERMINALES } from '@/services/commerce-channels/shopify/shopify.mirror.service'
-import { agregarProductoShopify, assertTestDatabase, crearEscenarioShopify, EscenarioShopify, limpiarEscenarioShopify } from './fixtures'
+import {
+  agregarProductoShopify,
+  assertTestDatabase,
+  crearEscenarioShopify,
+  EscenarioShopify,
+  limpiarEscenarioShopify,
+  TOKEN_DE_PRUEBA,
+} from './fixtures'
+import { aComercio, CLIENT_ID_PRUEBA, SECRET_PRUEBA } from './fixturesB'
 
 let escenarios: EscenarioShopify[] = []
 async function escenario(o?: Parameters<typeof crearEscenarioShopify>[0]): Promise<EscenarioShopify> {
@@ -94,6 +102,9 @@ it('ACTIVE: la forma completa, con conteos de la generación vigente, retraso y 
     linkId: e.locationLinkId,
     generation: 1,
     tokenVersion: 1,
+    // 5a (aditivo): con qué app se conectó y, sólo en COMERCIO, la terminación del Client ID.
+    metodo: 'PILOTO',
+    clientIdTerminacion: null,
     fase: 'ACTIVE',
     pausedFrom: null,
     estado: 'ACTIVA',
@@ -707,4 +718,15 @@ describe('envíos de «Por revisar» (C2 GET /reviews/envios)', () => {
     const hostil = await getShopifyReviewEnvios(e.venueId, ['a\u0000b', creadas[1]])
     expect(hostil.items.map(i => i.id)).toEqual([creadas[1]])
   })
+})
+
+it('5a: una tienda con la app del comercio dice su método y sólo la terminación del Client ID; nada de las llaves sale', async () => {
+  const e = await escenario()
+  await aComercio(e)
+  const r = await getShopifyOverview(e.venueId)
+  expect(r.connection).toMatchObject({ metodo: 'APP_DEL_COMERCIO', clientIdTerminacion: CLIENT_ID_PRUEBA.slice(-4) })
+  const json = JSON.stringify(r)
+  expect(json).not.toContain(CLIENT_ID_PRUEBA)
+  expect(json).not.toContain(SECRET_PRUEBA)
+  expect(json).not.toContain(TOKEN_DE_PRUEBA)
 })
