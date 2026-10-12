@@ -40,6 +40,8 @@ export async function loadFloorPlanState(db: Db, venueId: string): Promise<Floor
       rotation: true,
       positionX: true,
       positionY: true,
+      width: true,
+      height: true,
       areaId: true,
       currentOrderId: true,
       currentOrder: { select: { status: true, paymentStatus: true } },
@@ -92,6 +94,8 @@ export async function loadFloorPlanState(db: Db, venueId: string): Promise<Floor
       positionX: t.positionX,
       positionY: t.positionY,
       areaId: t.areaId,
+      width: t.width,
+      height: t.height,
       // Abierta = su puntero apunta a una cuenta abierta, o tiene una cuenta viva sin pagar ligada por tableId (igual
       // que el servidor al publicar).
       hasOpenOrder: (!!t.currentOrderId && pointerIsOpen(t.currentOrder)) || withLiveOrder.has(t.id),

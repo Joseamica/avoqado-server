@@ -80,6 +80,9 @@ const tableSchema = z
       rotation,
       positionX: coord('la posición').nullable(),
       positionY: coord('la posición').nullable(),
+      // Tamaño propio (spec 2026-10-12), 0–1 de su área como el de los elementos. Fuera = se conserva el guardado.
+      width: size('el ancho').nullable().optional(),
+      height: size('el alto').nullable().optional(),
       areaRef: key.nullable(),
     },
     { invalid_type_error: 'Cada mesa debe ser un objeto' },
@@ -89,6 +92,10 @@ const tableSchema = z
     idOrClientId(v, ctx)
     if ((v.positionX === null) !== (v.positionY === null))
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'La mesa necesita ambas coordenadas o ninguna' })
+    // Ancho y alto van juntos: los dos con valor, los dos null (automático) o los dos fuera (se conserva lo guardado).
+    const kind = (n: number | null | undefined) => (n === undefined ? 'fuera' : n === null ? 'null' : 'valor')
+    if (kind(v.width) !== kind(v.height))
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'La mesa necesita ancho y alto juntos, o ninguno de los dos' })
   })
 
 const elementSchema = z

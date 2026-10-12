@@ -16,6 +16,8 @@ const table = (id: string, number: string, extra: Partial<PlanTable> = {}): Plan
   positionX: 0.5,
   positionY: 0.5,
   areaId: 'a1',
+  width: null,
+  height: null,
   hasOpenOrder: false,
   ...extra,
 })
