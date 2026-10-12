@@ -316,6 +316,44 @@ export async function seedPlanList(
   return { outcome, row: await saveList(product, definition, before.revision, staffId) }
 }
 
+/**
+ * What the plan's list on sale lacks (`missing`) or still sells that the code dropped (`extra`). A publication freezes its
+ * composition, so a function that enters the plan later (SERVICE_PAY, founder D3, 5-oct) never reaches the list by itself.
+ * Empty both ways when there is no list on sale or a price is still pending (`retryListPrice` finishes that one first).
+ */
+export async function planListCompositionGap(tier: 'PRO' | 'PREMIUM'): Promise<{ missing: string[]; extra: string[] }> {
+  const list = await prisma.hybridCampaign.findFirst({
+    where: { purpose: 'LIST', listProductKey: `PLAN:${tier}` },
+    select: { currentPublicationId: true, pendingPublicationId: true },
+  })
+  if (!list?.currentPublicationId || list.pendingPublicationId) return { missing: [], extra: [] }
+  const current = await prisma.hybridOfferPublication.findUniqueOrThrow({
+    where: { id: list.currentPublicationId },
+    select: { definition: true, includedFeatureCodes: true },
+  })
+  const { includedFeatureCodes } = compileHybridPublication(current.definition)
+  return {
+    missing: includedFeatureCodes.filter(code => !current.includedFeatureCodes.includes(code)),
+    extra: current.includedFeatureCodes.filter(code => !includedFeatureCodes.includes(code)),
+  }
+}
+
+/**
+ * Republishes the plan's list with its SAME definition (price and terms) so its composition follows the code, through the
+ * same flow as a saved price (product lock, pending publication, Stripe, finalize). Contracts already accepted keep theirs.
+ */
+export async function recomposePlanList(tier: 'PRO' | 'PREMIUM', staffId: string): Promise<ListPriceRow> {
+  const product = PRODUCTS.find(p => p.planTier === tier)!
+  const list = await prisma.hybridCampaign.findFirst({ where: { purpose: 'LIST', listProductKey: product.productKey } })
+  if (!list?.currentPublicationId) throw new NotFoundError('Este plan no tiene precio de lista.', 'HYBRID_LIST_NOT_FOUND')
+  if (list.pendingPublicationId) throw new ConflictError('Hay un precio pendiente de preparar: termínalo antes.', 'HYBRID_LIST_PREPARING')
+  const current = await prisma.hybridOfferPublication.findUniqueOrThrow({
+    where: { id: list.currentPublicationId },
+    select: { definition: true },
+  })
+  return saveList(product, current.definition, list.revision, staffId)
+}
+
 /** ACTIVE ↔ PAUSED. Pausing takes the function off loose sale; contracts already accepted keep their price. */
 export async function setListPriceStatus(
   input: { productKey: string; status: 'ACTIVE' | 'PAUSED'; expectedRevision: number },

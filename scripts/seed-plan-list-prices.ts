@@ -14,6 +14,10 @@
  * Idempotent: a plan list that already exists at that price is reported («ya existe»); one at another price is NOT
  * changed («precio distinto: la fase 2 lo decide»); a price left pending by a failed Stripe preparation is finished.
  *
+ * Composition (12-oct-2026): a publication freezes which functions the plan includes, so one that enters the plan later
+ * (SERVICE_PAY, founder D3) never reaches a list on sale by itself. For an existing list the run says what it lacks or
+ * still sells against the code; --apply republishes it at ITS OWN price (never the classic one) with the code's list.
+ *
  * 🔴 It prints the host and database name of DATABASE_URL first, and writing requires repeating BOTH in --confirm-host and
  * --confirm-db (the `cancelar-ordenes-fantasma.ts` pattern, plus the name: several databases share `localhost`). It is the
  * only defense against an inherited DATABASE_URL pointing elsewhere. The Prisma client is loaded only after that check,
@@ -36,6 +40,11 @@ export interface SeedResult {
   price: number
   /** The price on sale before this run (null when the plan had none). */
   current: number | null
+  /** Functions the code puts in the plan that its list on sale lacks / still sells and the code dropped. */
+  missing: string[]
+  extra: string[]
+  /** --apply republished the list at its own price with the code's composition. */
+  recomposed: boolean
 }
 
 /** A refusal: nothing was written. The script exits 2 with the message already printed. */
@@ -64,6 +73,17 @@ const MESSAGES: Record<PlanSeedOutcome, (r: SeedResult, apply: boolean) => strin
   PENDING: (r, apply) => (apply ? `precio pendiente terminado a ${pesos(r.price)}` : `precio pendiente de preparar; --apply lo termina`),
 }
 
+/** The composition line, empty when the list on sale already sells what the code includes. */
+function composition(r: SeedResult, apply: boolean): string {
+  const gap = [r.missing.length ? `le falta ${r.missing.join(', ')}` : '', r.extra.length ? `le sobra ${r.extra.join(', ')}` : '']
+    .filter(Boolean)
+    .join(' y ')
+  if (!gap) return ''
+  return apply
+    ? ` · su lista de funciones ${gap}: republicada al mismo precio con la del código`
+    : ` · su lista de funciones ${gap}; --apply la republica al mismo precio`
+}
+
 export async function seedPlanLists(
   options: SeedOptions,
   log: (line: string) => void = console.log,
@@ -77,7 +97,9 @@ export async function seedPlanLists(
 
   // Loaded after the host and name check: the client reads DATABASE_URL when it loads.
   const { default: prisma } = await import('../src/utils/prismaClient')
-  const { listPriceBoard, planSeedOutcome, seedPlanList } = await import('../src/services/launchCampaigns/hybridListPrice.service')
+  const { listPriceBoard, planListCompositionGap, planSeedOutcome, recomposePlanList, seedPlanList } = await import(
+    '../src/services/launchCampaigns/hybridListPrice.service'
+  )
 
   let staffId = options.staffId
   if (options.apply) {
@@ -100,9 +122,13 @@ export async function seedPlanLists(
     const price = STANDARD_PLAN_GROSS_CENTS[tier].monthly / 100
     const row = board.find(candidate => candidate.productKey === productKey)!
     const outcome = options.apply ? (await seedPlanList(tier, price, staffId!)).outcome : planSeedOutcome(row, price)
-    const result = { productKey, outcome, price, current: row.price }
+    // Only a list already on sale can sell an old composition: a new or just-finished one was compiled from today's code.
+    const gap = outcome === 'EXISTS' || outcome === 'DIFFERENT_PRICE' ? await planListCompositionGap(tier) : { missing: [], extra: [] }
+    const recomposed = options.apply && gap.missing.length + gap.extra.length > 0
+    if (recomposed) await recomposePlanList(tier, staffId!)
+    const result = { productKey, outcome, price, current: row.price, ...gap, recomposed }
     results.push(result)
-    log(`${productKey}: ${MESSAGES[outcome](result, options.apply)}`)
+    log(`${productKey}: ${MESSAGES[outcome](result, options.apply)}${composition(result, options.apply)}`)
   }
   return { host, results }
 }

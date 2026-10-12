@@ -1,6 +1,7 @@
 /**
  * Pago al personal entra a PRO y PREMIUM (fase 3, decisión D3). Se corre una vez DESPUÉS de desplegar el Bloque C, y otra
- * vez después de republicar en superadmin cada oferta de plan que este script liste y cuando terminen de pagarse las
+ * vez después de republicar cada oferta de plan que este script liste (las listas L_PLAN_* con
+ * `scripts/seed-plan-list-prices.ts --apply`; las promociones en superadmin) y cuando terminen de pagarse las
  * compras que reporta en curso: los contratos comerciales vivos conservan SERVICE_PAY en su periodo pagado y en sus
  * renovaciones. Idempotente.
  *
@@ -25,7 +26,11 @@ async function main() {
     console.log(`${enCurso} compra(s) de plan en curso no se tocaron (${porEstado}). Vuelve a correrlo cuando se completen.`)
   }
   if (r.staleCampaigns.length)
-    console.log('Republica en superadmin estas ofertas de plan («Publicar» y luego «Activar») y vuelve a correr este script.')
+    // Las listas de los planes (L_PLAN_*, purpose LIST) no tienen «Publicar»: `publishWithin` las rechaza (12-oct-2026).
+    console.log(
+      'Republica estas ofertas de plan y vuelve a correr este script: las listas L_PLAN_* con ' +
+        'scripts/seed-plan-list-prices.ts --apply; una promoción, en superadmin («Publicar» y luego «Activar»).',
+    )
   if (enCurso || r.staleCampaigns.length) process.exitCode = 2
   if (r.skippedContracts.length) {
     console.log(`${r.skippedContracts.length} contrato(s) no se pudieron poner al día; revisa su motivo en skippedContracts.`)
