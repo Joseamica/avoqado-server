@@ -303,6 +303,8 @@ const prismaMock: any = {
   purchaseOrderInvoiceLine: createMockModel(),
   supplierItemCode: createMockModel(),
   staffDocument: createMockModel(),
+  staffPosition: createMockModel(),
+  staffAssignment: createMockModel(),
   purchaseOrderItem: createMockModel(),
   // Payment config & analytics models
   merchantAccount: createMockModel(),

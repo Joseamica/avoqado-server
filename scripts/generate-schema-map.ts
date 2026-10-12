@@ -303,6 +303,8 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   OvertimeApproval: 'Staff, Auth, Permissions & Time',
   WorkShiftTemplate: 'Staff, Auth, Permissions & Time',
   WorkShiftAssignment: 'Staff, Auth, Permissions & Time',
+  StaffPosition: 'Staff, Auth, Permissions & Time',
+  StaffAssignment: 'Staff, Auth, Permissions & Time',
 
   // 8. Serialized Inventory
   SerializedItem: 'Serialized Inventory',
