@@ -156,7 +156,7 @@ export async function refrescarEspejoParaConteo(venueId: string, productIds: str
       )
       if (!r.ok) {
         // §11.3: 401/403/ACCESS_DENIED dejan su marca (con la credencial y la generación con que se leyó) y no se insiste.
-        const a = await atenderFalla(link.store, r, [{ id: link.id, generation: link.generation }])
+        const a = await atenderFalla(link.store, r, [{ id: link.id, generation: link.generation }], null, vence)
         marcar(a === 'SIN_PERMISO' ? 'falta un permiso en Shopify' : a === 'REVOCADA' ? 'Shopify desconectado' : SIN_RESPUESTA)
         sinRed = true // Shopify no contestó bien: el resto del conteo usa el espejo, sin otra espera
         continue

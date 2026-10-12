@@ -9,9 +9,10 @@ import {
   type Reclamo,
   type VarianteShopify,
 } from '@/services/commerce-channels/shopify/shopify.catalog.service'
+import { encryptShopifyToken } from '@/services/commerce-channels/shopify/shopify.crypto'
 import type { ShopifyFailure, ShopifyFailureCode, ShopifyResult } from '@/services/commerce-channels/shopify/shopify.graphql'
 import { levelKey, type fetchLevels, type NivelLeido } from '@/services/commerce-channels/shopify/shopify.mirror.service'
-import { graphqlFalso, limpiarEscenarioShopify, type EscenarioShopify } from './fixtures'
+import { graphqlFalso, limpiarEscenarioShopify, TOKEN_DE_PRUEBA, type EscenarioShopify } from './fixtures'
 
 export type OpcionesVariante = {
   sku?: string | null
@@ -345,4 +346,18 @@ export function shopifyPorFetch(r: {
 }
 export const quitarFetch = (): void => {
   global.fetch = fetchDeVerdad
+}
+
+/** 5a: la tienda del escenario pasa a la app del comercio, con sus llaves cifradas y la llave de 24 h que vence en `venceEnMs`. */
+export async function aComercio(e: EscenarioShopify, o: { venceEnMs?: number; token?: string } = {}): Promise<void> {
+  await prisma.shopifyStore.update({
+    where: { id: e.storeId },
+    data: {
+      appKey: 'COMERCIO',
+      clientId: CLIENT_ID_PRUEBA,
+      clientSecretCiphertext: encryptShopifyToken(SECRET_PRUEBA),
+      accessTokenCiphertext: encryptShopifyToken(o.token ?? TOKEN_DE_PRUEBA),
+      accessTokenExpiresAt: new Date(Date.now() + (o.venceEnMs ?? 86_399_000)),
+    },
+  })
 }

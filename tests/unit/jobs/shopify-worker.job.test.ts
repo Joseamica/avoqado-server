@@ -20,6 +20,7 @@ function base(over: Partial<ShopifyWorkerDeps> = {}): ShopifyWorkerDeps & { [k: 
     now: () => new Date(INICIO),
     cron: { start: jest.fn(), stop: jest.fn() },
     entrada: jest.fn().mockResolvedValue(undefined),
+    renovarLlaves: jest.fn().mockResolvedValue(0),
     claimOutbox: jest.fn().mockResolvedValue({ kind: 'VACIO' }),
     runOutboxRow: jest.fn().mockResolvedValue('SENT'),
     claimEvent: jest.fn().mockResolvedValue({ kind: 'VACIO' }),
@@ -35,11 +36,15 @@ function base(over: Partial<ShopifyWorkerDeps> = {}): ShopifyWorkerDeps & { [k: 
 const conCodigo = (code: string) => Object.assign(new Error(code), { code })
 
 describe('ShopifyWorkerJob', () => {
-  it('orden: entrada → buzón → eventos → sucursales → avisos (una unidad por reclamo, y se suelta)', async () => {
+  it('orden: entrada → llaves → buzón → eventos → sucursales → avisos (una unidad por reclamo, y se suelta)', async () => {
     const orden: string[] = []
     const d = base({
       entrada: jest.fn(async () => {
         orden.push('entrada')
+      }),
+      renovarLlaves: jest.fn(async () => {
+        orden.push('llaves')
+        return 0
       }),
       claimOutbox: jest.fn().mockResolvedValueOnce({ kind: 'FILA', id: 'o1', claimToken: 't' }).mockResolvedValue({ kind: 'VACIO' }),
       runOutboxRow: jest.fn(async () => {
@@ -61,9 +66,68 @@ describe('ShopifyWorkerJob', () => {
       }),
     })
     await new ShopifyWorkerJob(d).runOnce()
-    expect(orden).toEqual(['entrada', 'buzon', 'evento', 'sucursal', 'avisos'])
+    expect(orden).toEqual(['entrada', 'llaves', 'buzon', 'evento', 'sucursal', 'avisos'])
     expect(d.soltarSucursal).toHaveBeenCalledWith('s1', 'w-s1', expect.any(Date), null, true)
     expect(d.seguirAvisos).toHaveBeenCalledWith(INICIO + 3_000) // R06: más que los 2 s que pide una petición
+    expect(d.renovarLlaves).toHaveBeenCalledWith(INICIO + 3_000) // 5a: la fase de las llaves, con su presupuesto
+  })
+
+  it('5a: si renovar las llaves truena, la vuelta sigue con el buzón (una fase no tumba a las demás)', async () => {
+    const d = base({
+      renovarLlaves: jest.fn().mockRejectedValue(new Error('la base no contestó')),
+      claimOutbox: jest.fn().mockResolvedValueOnce({ kind: 'FILA', id: 'o1', claimToken: 't' }).mockResolvedValue({ kind: 'VACIO' }),
+    })
+    await new ShopifyWorkerJob(d).runOnce()
+    expect(d.runOutboxRow).toHaveBeenCalledTimes(1)
+  })
+
+  it('🔴 5a (ruling P2-9): con cada fase gastando TODO su presupuesto, la vuelta cabe en 25 s y avisos y limpieza conservan el suyo', async () => {
+    const ARRANQUE = new Date('2030-01-01T00:07:00Z').getTime() // minuto 7: la vuelta también limpia
+    let t = ARRANQUE
+    const fin: Record<string, number> = {}
+    const hasta = (fase: string, vence: number) => {
+      t = vence
+      fin[fase] = t - ARRANQUE
+    }
+    const d = base({
+      now: () => new Date(t),
+      renovarLlaves: jest.fn(async (vence: number) => hasta('llaves', vence)),
+      claimOutbox: jest.fn().mockResolvedValueOnce({ kind: 'FILA', id: 'o1', claimToken: 't' }).mockResolvedValue({ kind: 'VACIO' }),
+      runOutboxRow: jest.fn(async (_id: string, _c: string, _n: Date, timeoutMs: number) => {
+        hasta('buzon', t + timeoutMs)
+        return 'SENT' as const
+      }),
+      claimEvent: jest.fn().mockResolvedValueOnce({ kind: 'FILA', id: 'e1', claimToken: 'k' }).mockResolvedValue({ kind: 'VACIO' }),
+      processEvent: jest.fn(async (_id: string, _c: string, vence: number) => {
+        hasta('eventos', vence)
+        return 'PROCESSED' as const
+      }),
+      tomarSucursal: jest.fn().mockResolvedValueOnce(sucursal('s1')).mockResolvedValue(null),
+      unidad: jest.fn(async (_s: SucursalTomada, vence: number) => {
+        hasta('sucursales', vence)
+        return { ok: true }
+      }),
+      seguirAvisos: jest.fn(async (vence: number) => {
+        fin.avisosQueda = vence - t
+        hasta('avisos', vence)
+      }),
+      limpiar: jest.fn(async (_now: Date, vence: number) => {
+        fin.limpiezaQueda = vence - t
+        hasta('limpieza', vence)
+      }),
+    })
+    await new ShopifyWorkerJob(d).runOnce()
+    // Con 28 s de presupuestos (los de antes más «llaves»), los avisos llegaban con 2 s y la limpieza con 0.
+    expect(fin).toEqual({
+      llaves: 3_000,
+      buzon: 9_000,
+      eventos: 13_000,
+      sucursales: 20_000,
+      avisosQueda: 3_000,
+      avisos: 23_000,
+      limpiezaQueda: 2_000,
+      limpieza: 25_000,
+    })
   })
 
   it('#12: una fila en cuarentena no detiene el buzón', async () => {
@@ -76,7 +140,7 @@ describe('ShopifyWorkerJob', () => {
     })
     await new ShopifyWorkerJob(d).runOnce()
     expect(d.runOutboxRow).toHaveBeenCalledTimes(1)
-    expect(d.runOutboxRow).toHaveBeenCalledWith('sana', 't', expect.any(Date), 7_000)
+    expect(d.runOutboxRow).toHaveBeenCalledWith('sana', 't', expect.any(Date), 6_000)
   })
 
   it('N12: varios eventos en cuarentena delante de uno sano no vacían la fase', async () => {
@@ -90,7 +154,7 @@ describe('ShopifyWorkerJob', () => {
     })
     await new ShopifyWorkerJob(d).runOnce()
     expect(d.processEvent).toHaveBeenCalledTimes(1)
-    expect(d.processEvent).toHaveBeenCalledWith('sano', 'k', INICIO + 5_000)
+    expect(d.processEvent).toHaveBeenCalledWith('sano', 'k', INICIO + 4_000)
   })
 
   it('el buzón respeta su presupuesto y deja tiempo a las demás fases', async () => {
@@ -105,9 +169,9 @@ describe('ShopifyWorkerJob', () => {
       claimEvent: jest.fn().mockResolvedValueOnce({ kind: 'FILA', id: 'e1', claimToken: 'k' }).mockResolvedValue({ kind: 'VACIO' }),
     })
     await new ShopifyWorkerJob(d).runOnce()
-    expect(d.runOutboxRow).toHaveBeenCalledTimes(2) // a los 0 y 4 s; a los 8 s ya se acabaron los 7 y no empieza otra
-    expect((d.runOutboxRow as jest.Mock).mock.calls.map(c => c[3])).toEqual([7_000, 3_000]) // el corte = lo que queda
-    expect(d.processEvent).toHaveBeenCalledWith('e1', 'k', INICIO + 8_000 + 5_000)
+    expect(d.runOutboxRow).toHaveBeenCalledTimes(2) // a los 0 y 4 s; a los 8 s ya se acabaron los 6 y no empieza otra
+    expect((d.runOutboxRow as jest.Mock).mock.calls.map(c => c[3])).toEqual([6_000, 2_000]) // el corte = lo que queda
+    expect(d.processEvent).toHaveBeenCalledWith('e1', 'k', INICIO + 8_000 + 4_000)
   })
 
   it('N17 (§11.6): cada unidad recibe el vencimiento absoluto de su fase; después del reclamo se recalcula y sin el mínimo no empieza', async () => {
@@ -121,12 +185,12 @@ describe('ShopifyWorkerJob', () => {
       }),
       unidad: jest.fn(async (_s: SucursalTomada, vence: number) => {
         vences.push(vence)
-        t += 2_900
+        t += 2_400
         return { ok: true }
       }),
     })
     await new ShopifyWorkerJob(d).runOnce()
-    expect(vences).toEqual([INICIO + 8_000, INICIO + 8_000]) // a los 6 s quedan 2 s; tras el reclamo, 1.9 s: se suelta sin unidad
+    expect(vences).toEqual([INICIO + 7_000, INICIO + 7_000]) // a los 5 s quedan 2 s; tras el reclamo, 1.9 s: se suelta sin unidad
     expect(d.soltarSucursal).toHaveBeenCalledTimes(3)
     expect((d.soltarSucursal as jest.Mock).mock.calls[2][3]).toBeNull()
   })
@@ -281,7 +345,7 @@ describe('ShopifyWorkerJob · requisitos del ledger para B8', () => {
         .mockResolvedValueOnce(sucursal('corta'))
         .mockResolvedValueOnce(sucursal('sigue'))
         .mockImplementationOnce(async () => {
-          t += 6_000 // el reclamo se come el margen: quedan 1.9 s
+          t += 6_000 // el reclamo se come el margen: quedan 0.9 s
           return sucursal('tarde')
         })
         .mockResolvedValue(null),

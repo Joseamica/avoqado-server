@@ -271,7 +271,7 @@ async function paginaDelBarrido(l: Sucursal, cerco: CercoShopify, d: DepsUnidad)
   )
   if (r === SIN_TIEMPO) return vacio('BARRIDO', { error: 'SIN_TIEMPO' }) // no salió nada: no cuenta como falla
   if (!r.ok) {
-    const a = await atenderFalla(l.store, r, [{ id: l.id, generation: l.generation }])
+    const a = await atenderFalla(l.store, r, [{ id: l.id, generation: l.generation }], null, d.vence)
     if (a === 'SIN_PERMISO') return vacio('BARRIDO', { error: FALTA_PERMISO })
     return fallaDelBarrido(l, cerco, r.code)
   }
@@ -417,7 +417,7 @@ async function bajasDelBarrido(l: Sucursal, cerco: CercoShopify, d: DepsUnidad):
     const c = await confirmarBajas(l.store.shopDomain, token, ids, conVencimiento(d.graphql ?? shopifyGraphql, d.vence))
     if (c === SIN_TIEMPO) return vacio('BAJAS', { error: 'SIN_TIEMPO' })
     if (!c.ok) {
-      const a = await atenderFalla(l.store, c, [{ id: l.id, generation: l.generation }])
+      const a = await atenderFalla(l.store, c, [{ id: l.id, generation: l.generation }], null, d.vence)
       if (a === 'SIN_PERMISO') return vacio('BAJAS', { error: FALTA_PERMISO })
       // Masiva y sin poder confirmar nada por 5ª vez: la vuelta sigue sin bajas y el dueño se entera.
       if (masiva && l.importAttempts + 1 >= MAX_FALLAS_BARRIDO) await avisarBarridoOmitido(l, sinVer, 'SIN_CONFIRMAR', d.vence)
@@ -565,7 +565,7 @@ async function tandaDeStock(l: Sucursal, cerco: CercoShopify, d: DepsUnidad): Pr
   )
   if (r === SIN_TIEMPO) return vacio('STOCK', { error: 'SIN_TIEMPO' })
   if (!r.ok) {
-    const a = await atenderFalla(l.store, r, [{ id: l.id, generation: l.generation }])
+    const a = await atenderFalla(l.store, r, [{ id: l.id, generation: l.generation }], null, d.vence)
     return a === 'SIN_PERMISO' ? vacio('STOCK', { error: FALTA_PERMISO }) : vacio('STOCK', { error: r.code, esperaMs: ESPERA_TANDA_MS })
   }
   const acceso = { hasAccess: d.hasAccess, cerco }
@@ -1167,7 +1167,7 @@ async function resolver(i: EntradaResolucion, deps: DepsResolucion): Promise<{ e
   )
   if (r === SIN_TIEMPO) throw noResponde()
   if (!r.ok) {
-    const a = await atenderFalla(link.store, r, [{ id: link.id, generation: link.generation }])
+    const a = await atenderFalla(link.store, r, [{ id: link.id, generation: link.generation }], null, deps.vence)
     if (a === 'SIN_PERMISO') {
       throw new ForbiddenError(
         'A la app le falta un permiso en Shopify: vuelve a conectarla y acepta todos los permisos que pide',

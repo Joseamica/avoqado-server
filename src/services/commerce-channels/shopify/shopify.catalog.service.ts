@@ -844,7 +844,7 @@ export async function importCatalogPage(
   )
   if (r === SIN_TIEMPO) return { error: 'SIN_TIEMPO', retry: true } // no salió nada: no cuenta como intento
   if (!r.ok) {
-    const atencion = await atenderFalla(link.store, r, [{ id: link.id, generation: link.generation }])
+    const atencion = await atenderFalla(link.store, r, [{ id: link.id, generation: link.generation }], null, deps.vence)
     if (atencion === 'SIN_PERMISO') return { error: FALTA_PERMISO, retry: false }
     await prisma.shopifyLocationLink.updateMany({
       where: mismo,
@@ -1035,7 +1035,7 @@ async function sincronizarEnSucursal(
       )
       if (r === SIN_TIEMPO) return sinTiempo() // no salió nada: el evento vuelve sin gastar intento
       if (!r.ok) {
-        const atencion = await atenderFalla(store, r, [{ id: link.id, generation: link.generation }], eventoDe(deps.reclamo))
+        const atencion = await atenderFalla(store, r, [{ id: link.id, generation: link.generation }], eventoDe(deps.reclamo), deps.vence)
         await olvidar() // el siguiente intento empieza de cero (un cursor viejo puede ya no servir)
         return { error: atencion === 'SIN_PERMISO' ? FALTA_PERMISO : r.code, retry: atencion === 'REINTENTAR' }
       }
@@ -1095,7 +1095,7 @@ async function sincronizarEnSucursal(
       if (c === SIN_TIEMPO) return sinTiempo() // el cursor ya dice FIN: la próxima vez sólo bajas
       if (!c.ok) {
         try {
-          const atencion = await atenderFalla(store, c, [{ id: link.id, generation: link.generation }], eventoDe(deps.reclamo))
+          const atencion = await atenderFalla(store, c, [{ id: link.id, generation: link.generation }], eventoDe(deps.reclamo), deps.vence)
           return { error: atencion === 'SIN_PERMISO' ? FALTA_PERMISO : c.code, retry: atencion === 'REINTENTAR' }
         } catch (err) {
           if (err instanceof ContextoObsoleto) return perdido

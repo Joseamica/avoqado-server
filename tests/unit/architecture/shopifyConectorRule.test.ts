@@ -127,7 +127,7 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     ])
     const mensajeroM = leer(`${SHOPIFY}/shopify.outbox.service.ts`)
     const enviar = cuerpo(mensajeroM, 'export async function runShopifyOutboxRow(')
-    expect(enviar).toContain('await revocarTiendaSiVigente(store.id, tokenVersion)')
+    expect(enviar).toContain('await resolverRechazoDelComercio(store.id, tokenVersion, { vence })')
     expect(enviar).not.toContain("data: { status: 'REVOKED'")
     enOrden(enviar, ['const leido = leerToken(link!.store)', 'await cerrar(row, claimToken, devuelta(row, now))'])
     const trasLimite = enviar.slice(enviar.indexOf("if (r.code === 'THROTTLED')"))
@@ -947,6 +947,51 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     contieneTodas(['ubicaciones y confirmar piden otra con las llaves del intent y repiten UNA vez'])
   })
 
+  it('🔴 5a · la llave de 24 h: renovar no es una credencial nueva (CAS, sin tokenVersion ni webhooksAt) y un 401 de COMERCIO nunca revoca de golpe', () => {
+    contieneTodas([
+      'Renovar la llave de 24 h NO la sube ni toca `webhooksAt`',
+      'Un 401 nunca revoca de golpe una tienda `COMERCIO`',
+      'En `PILOTO` el 401 revoca como siempre',
+      'En una tienda `COMERCIO` decide antes `resolverRechazoDelComercio(…)`',
+    ])
+    const tienda = leer(`${SHOPIFY}/shopify.store.service.ts`)
+    const guardar = cuerpo(tienda, 'export async function guardarLlaveSiVigente(')
+    expect(guardar).toContain('where: { id: s.id, tokenVersion: s.tokenVersion }')
+    expect(guardar).not.toMatch(/increment|webhooksAt/)
+    contieneTodas([
+      'cada petición sale con lo menor entre 5 s y lo que queda y, sin margen, REINTENTAR sin preguntar',
+      'el mensajero devuelve la fila con la espera de una pausa',
+    ])
+    expect(cuerpo(tienda, 'export async function atenderFalla(')).toContain(
+      'await resolverRechazoDelComercio(store.id, store.tokenVersion, { evento, vence })',
+    )
+    const resolver = cuerpo(tienda, 'export async function resolverRechazoDelComercio(')
+    expect(resolver).toContain('Math.min(PLAZO_LLAVE_MS, restante(o.vence))')
+    enOrden(resolver, [
+      "if (!s || s.status !== 'ACTIVE' || s.tokenVersion !== tokenVersion) return 'REINTENTAR'",
+      "if (s.appKey !== 'COMERCIO') return revocar()",
+      "if (plazo() < MIN_HTTP_MS) return 'REINTENTAR'",
+      'await pedirLlaveDeTienda(s, plazo())',
+      "return 'ESPERAR'",
+      'await guardarLlaveSiVigente(s, r, true)',
+      "'{ shop { id } }'",
+      "revocar('ACCESO_RETIRADO')",
+    ])
+    expect(cuerpo(tienda, 'export async function renovarLlavesPorVencer(')).not.toContain('logAction')
+    expect(cuerpo(leer(`${SHOPIFY}/shopify.inbound.service.ts`), 'async function desinstalada(')).toContain(
+      'await resolverRechazoDelComercio(store.id, store.tokenVersion, { evento, vence: deps.vence })',
+    )
+    // Ruling P2-7: lo pasajero vuelve con la espera de una pausa, sin gastar intento.
+    const enviar = cuerpo(leer(`${SHOPIFY}/shopify.outbox.service.ts`), 'export async function runShopifyOutboxRow(')
+    const al401 = enviar.slice(enviar.indexOf("if (r.code === 'UNAUTHORIZED')"))
+    enOrden(al401, [
+      'await resolverRechazoDelComercio(store.id, tokenVersion, { vence })',
+      "if (a === 'ESPERAR')",
+      'await cerrar(row, claimToken, devuelta(row, now))',
+      "return 'PAUSADO'",
+    ])
+  })
+
   it('los globs de `paths:` de la regla apuntan a algo que existe, incluidos los demás escritores de stock', () => {
     const cabecera = leer('.claude/rules/shopify-conector.md').split('---')[1]
     const globs = [...cabecera.matchAll(/- '([^']+)'/g)].map(m => m[1])
@@ -990,8 +1035,8 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
       'mirror.service.ts:5': [de('mirror.service'), 'Invariante operativo'],
       'mirror.service.ts:372': [de('mirror.service'), 'export async function marcarFaltaPermiso('],
       'outbox.service.ts:169': [de('outbox.service'), 'async function conFilaPropia'],
-      'shopify.store.service.ts:308': [de('store.service'), 'export async function suspenderParejaPorReceta('],
-      'store.service.ts:273': [de('store.service'), 'export async function envioEnCamino('],
+      'shopify.store.service.ts:314': [de('store.service'), 'export async function suspenderParejaPorReceta('],
+      'store.service.ts:279': [de('store.service'), 'export async function envioEnCamino('],
       'worker.service.ts:362': [de('worker.service'), 'export async function limpiarShopify('],
     }
     // Las cortas (`:N`) son del archivo que la regla acaba de nombrar.

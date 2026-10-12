@@ -1,6 +1,7 @@
 /**
  * Worker del conector Shopify (spec 12 bis.10-11, §10.1-§10.2, §11.6, §11.9; plan v2 B8). Cada 30 s, SIN candado global:
  *  0. una LECTURA segura de entrada, con reintento (R04): si la base no contesta, la vuelta no reclama nada;
+ *  0b. llaves (5a): renueva la llave de 24 h de las tiendas con la app del comercio que vence en menos de un minuto;
  *  1. buzón Avoqado → Shopify (una fila por reclamo; una en cuarentena no detiene a las demás, #12);
  *  2. eventos de Shopify (uno por reclamo, con lease; CUARENTENA sigue, N12);
  *  3. sucursales: cada una se reclama con su lease (`workToken`, 90 s, `SKIP LOCKED`, la que lleva más tiempo sin turno
@@ -22,6 +23,7 @@ import { DATABASE_JOB_SCHEDULES } from './jobSchedules'
 import { claimShopifyOutbox, type ClaimResult } from '../services/commerce-channels/shopify/shopify.outbox.service'
 import { claimShopifyEvent, processShopifyEvent } from '../services/commerce-channels/shopify/shopify.inbound.service'
 import { seguirAvisosPendientes } from '../services/commerce-channels/shopify/shopify.reconcile.service'
+import { renovarLlavesPorVencer } from '../services/commerce-channels/shopify/shopify.store.service'
 import {
   conNegocio,
   enviarFila,
@@ -51,9 +53,20 @@ export {
 } from '../services/commerce-channels/shopify/shopify.worker.service'
 
 const PRESUPUESTO_TOTAL_MS = 25_000
-type Fase = 'buzon' | 'eventos' | 'sucursales' | 'avisos' | 'limpieza'
-/** R06: avisos tiene MÁS que `MIN_UNIDAD_MS` (con 1 s nunca alcanzaba para un correo pendiente). La suma es la vuelta. */
-const PRESUPUESTO_MS: Record<Fase, number> = { buzon: 7_000, eventos: 5_000, sucursales: 8_000, avisos: 3_000, limpieza: 2_000 }
+type Fase = 'llaves' | 'buzon' | 'eventos' | 'sucursales' | 'avisos' | 'limpieza'
+/**
+ * R06: avisos tiene MÁS que `MIN_UNIDAD_MS` (con 1 s nunca alcanzaba para un correo pendiente). La suma es la vuelta (25 s); 5a:
+ * «llaves» (primero) le quitó 1 s al buzón, al de eventos y a las sucursales, para que avisos y limpieza conserven el suyo aunque
+ * las demás gasten todo (ruling P2-9).
+ */
+const PRESUPUESTO_MS: Record<Fase, number> = {
+  llaves: 3_000,
+  buzon: 6_000,
+  eventos: 4_000,
+  sucursales: 7_000,
+  avisos: 3_000,
+  limpieza: 2_000,
+}
 
 /**
  * R04 (cron-jobs.md:21): lo ÚNICO que se reintenta es esta lectura, antes de cualquier reclamo. Un reclamo cambia tokens
@@ -74,6 +87,8 @@ export type ShopifyWorkerDeps = {
   cron: { start(): void; stop(): void }
   /** La lectura segura de entrada (R04): la única con reintento. */
   entrada: () => Promise<unknown>
+  /** 5a: renueva las llaves de 24 h de las tiendas con la app del comercio que vencen en menos de un minuto. */
+  renovarLlaves: (vence: number) => Promise<unknown>
   claimOutbox: (now: Date) => Promise<ClaimResult>
   /** El mensajero de A con `timeoutMs` = lo que le queda a la fase después del reclamo. */
   runOutboxRow: (id: string, claimToken: string, now: Date, timeoutMs: number) => Promise<unknown>
@@ -99,6 +114,7 @@ export class ShopifyWorkerJob {
     this.deps = {
       now: () => new Date(),
       entrada: entradaSegura,
+      renovarLlaves: vence => renovarLlavesPorVencer(new Date(), vence),
       claimOutbox: now => claimShopifyOutbox(now),
       runOutboxRow: (id, claimToken, now, timeoutMs) => enviarFila(id, claimToken, now, timeoutMs, { hasAccess: this.plan }),
       claimEvent: now => claimShopifyEvent(now),
@@ -150,6 +166,7 @@ export class ShopifyWorkerJob {
       }
       const tope = inicio.getTime() + PRESUPUESTO_TOTAL_MS
       this.plan = planDeLaVuelta()
+      await this.paso('llaves', () => this.deps.renovarLlaves(this.limite(tope, 'llaves')))
       await this.paso('buzon', () => this.buzon(this.limite(tope, 'buzon')))
       await this.paso('eventos', () => this.eventos(this.limite(tope, 'eventos')))
       await this.paso('sucursales', () => this.sucursales(this.limite(tope, 'sucursales')))

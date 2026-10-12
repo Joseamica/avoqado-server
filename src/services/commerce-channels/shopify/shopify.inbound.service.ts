@@ -52,6 +52,8 @@ import {
   leerNiveles,
   leerToken,
   MIN_ESCRITURA_MS,
+  MIN_HTTP_MS,
+  resolverRechazoDelComercio,
   restante,
   revocarTiendaSiVigente,
   SIN_TIEMPO,
@@ -627,6 +629,15 @@ async function desinstalada(store: ShopifyStore, ev: ShopifyInboundEvent, evento
     if (prueba === SIN_TIEMPO) return { o: 'CUPO', motivo: 'SIN_TIEMPO' }
     if (prueba.ok) return { o: 'SKIPPED', motivo: 'TOKEN_VIGENTE' }
     if (prueba.code !== 'UNAUTHORIZED') return { o: 'FAILED', motivo: `PRUEBA_DE_TOKEN: ${prueba.code}` }
+    // 5a: en una tienda COMERCIO el 401 puede ser sólo la llave de 24 h vencida: decide `resolverRechazoDelComercio`, con el plazo
+    // del evento (sin margen, el evento vuelve sin gastar intento). Si no revocó, la llave ya se renovó (o Shopify no contestó) y el
+    // aviso se vuelve a probar con la vigente.
+    if (store.appKey === 'COMERCIO') {
+      if (restante(deps.vence) < MIN_HTTP_MS) return { o: 'CUPO', motivo: 'SIN_TIEMPO' }
+      return (await resolverRechazoDelComercio(store.id, store.tokenVersion, { evento, vence: deps.vence })) === 'REVOCADA'
+        ? { o: 'PROCESSED' }
+        : { o: 'FAILED', motivo: 'PRUEBA_DE_TOKEN: LLAVE_RENOVADA' }
+    }
     return (await revocarTiendaSiVigente(store.id, store.tokenVersion, { evento }))
       ? { o: 'PROCESSED' }
       : { o: 'SKIPPED', motivo: 'REINSTALADA_DESPUES' }
@@ -750,7 +761,7 @@ async function releerYAplicar(
     if (r === SIN_TIEMPO) return sinTiempo()
     if (!r.ok) {
       if (!(await guardar())) return { o: 'PERDIDO' } // lo de las tandas anteriores ya no se repite
-      const atencion = await atenderFalla(store, r, enlaces, evento)
+      const atencion = await atenderFalla(store, r, enlaces, evento, deps.vence)
       if (atencion === 'SIN_PERMISO') return { o: 'DIFERIR', motivo: FALTA_PERMISO, enlaces: enlaces.map(e => e.id) }
       if (atencion === 'REVOCADA') return { o: 'DIFERIR', motivo: 'TIENDA_REVOCADA', enlaces: enlaces.map(e => e.id) }
       return { o: 'FAILED', motivo: `${r.code}: ${r.message}`.slice(0, 2000) }

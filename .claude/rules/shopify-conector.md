@@ -156,7 +156,8 @@ espejo dejaría la cuenta en 11 contra las 12 piezas de Avoqado. Si hay filas vi
 - Los cierres por falla (devolver a la fila, FAILED, DEAD_LETTER) van sin cerco, con los candados en orden, y se protegen con el
   `claimToken` de la fila: si ya no es suya, no escriben. No le exijas al mensajero revisar el cerco antes de esos cierres. Un 401 sólo
   revoca la tienda si el token sigue siendo el vigente (`tokenVersion`), y lo hace por `revocarTiendaSiVigente(…)` como toda revocación
-  (deja `SHOPIFY_STORE_REVOKED` en `ActivityLog` y avisa REVOCADA, M5).
+  (deja `SHOPIFY_STORE_REVOKED` en `ActivityLog` y avisa REVOCADA, M5). En una tienda `COMERCIO` decide antes
+  `resolverRechazoDelComercio(…)` (§4 ter): una llave de 24 h vencida no es una desconexión.
 - **Lo que no es un intento no gasta intento (M6):** `THROTTLED` (429, o THROTTLED en un 200) y un token que no se puede descifrar (antes de
   salir; `leerToken(…)` lo deja en el log de errores) devuelven la fila sin sumar `attempts` y sin tocar su duda, como la importación y el
   cuadre. Una `SHOPIFY_TOKEN_KEY` mal puesta no manda el buzón a DEAD_LETTER; una fila ambigua sigue acotada por su ventana de 23 h.
@@ -244,6 +245,21 @@ cuadre y conteo no cambian, y el piloto (`PILOTO`, OAuth) convive igual.
   vencimiento a la tienda; al volver a `PILOTO` quedan en null. El secret nunca sale en una respuesta, en `ActivityLog` ni en el log, y la
   limpieza horaria lo borra del intent junto con el token. Si la llave del intent vence a medio asistente (menos de un minuto, o un 401),
   ubicaciones y confirmar piden otra con las llaves del intent y repiten UNA vez.
+- **La llave de 24 h y `tokenVersion`:** `tokenVersion` sigue siendo la credencial (la app y su autorización) y sólo sube cuando el dueño
+  cambia las llaves. Renovar la llave de 24 h NO la sube ni toca `webhooksAt`: `guardarLlaveSiVigente(…)` es CAS sobre `tokenVersion` (una
+  renovación tardía no pisa las llaves nuevas del dueño) y el cerco, las elecciones D1 y la huella del MCP siguen valiendo. Tampoco mueve
+  `authorizedAt`: un `app/uninstalled` posterior a la autorización revoca igual.
+- **Renovar a tiempo** (`renovarLlavesPorVencer(…)`, fase `llaves` del worker, antes del buzón): las tiendas `COMERCIO` ACTIVE cuya llave
+  vence en menos de 60 s, 20 por vuelta, las que vencen primero. Shopify devuelve la MISMA llave hasta que vence: una vuelta antes sólo
+  mueve el vencimiento y la siguiente trae la nueva. Llaves rechazadas ⇒ revoca con su `motivo`; Shopify sin contestar ⇒ aviso en el log y
+  la siguiente vuelta. Es rutina: sin `ActivityLog` (la revocación sí, `SHOPIFY_STORE_REVOKED`).
+- **Un 401 nunca revoca de golpe una tienda `COMERCIO`** (una llave vencida no es una desconexión): `atenderFalla(…)`, el mensajero y la
+  sonda de desinstalación pasan por `resolverRechazoDelComercio(…)`, que relee la tienda (no ACTIVE o credencial distinta ⇒ REINTENTAR),
+  pide la llave (rechazada ⇒ revoca; sin contestar o el secret ilegible ⇒ ESPERAR), guarda una llave distinta ⇒ REINTENTAR y, con LA MISMA,
+  prueba `{ shop { id } }`: 200 ⇒ quien llamó traía una vieja (REINTENTAR); 401 ⇒ acceso retirado o app desinstalada, revoca
+  (`ACCESO_RETIRADO`). Con el vencimiento de quien llama, cada petición sale con lo menor entre 5 s y lo que queda y, sin margen, REINTENTAR
+  sin preguntar. Con ESPERAR el mensajero devuelve la fila con la espera de una pausa (`devuelta`, sin gastar intento y con su duda, como un
+  429). En `PILOTO` el 401 revoca como siempre.
 
 ## 5. `Inventory` que desaparece o vuelve ⇒ suspender y reactivar la pareja, NUNCA borrarla
 
@@ -257,7 +273,7 @@ PUT inventory-method, paso 2 del asistente y la tool de recetas del MCP). Los ot
 entre `product.update` y `ensureQuantityInventoryRow`: si el producto ya no se sincroniza, suspende con el motivo real (por
 `suspenderParejaPorReceta(…)`, con su excepción U3); si sí, `pedirCuadreAlVolverACantidad(…)`. Antes no lo hacían: pasar a kilo por la ficha
 dejaba la pareja viva y cada kilo entero vendido le quitaba una PIEZA a Shopify (reproducido en vivo, 39 → 38). Si agregas otro camino que
-borre o cree filas de `Inventory` de productos ligados, o que cambie esos campos, usa los mismos ayudantes (`shopify.store.service.ts:308`).
+borre o cree filas de `Inventory` de productos ligados, o que cambie esos campos, usa los mismos ayudantes (`shopify.store.service.ts:314`).
 
 - `suspenderParejaPorReceta(…)` toma la pareja con `bloquearPareja(…)` y la suspende con `SIN_INVENTARIO` (`suspendPair(…)`). Excepción: un
   producto que el conector archivó con un envío en camino se queda en `NIVEL_INEXISTENTE`; pisarlo apagaría el reintento que lo borra.
@@ -292,7 +308,7 @@ borre o cree filas de `Inventory` de productos ligados, o que cambie esos campos
     (`EN_VUELO` = una fila IN_PROGRESS; `INCIERTO` = una fila viva o DEAD_LETTER ambigua).
   - Conectar una generación nueva (reconectar la sucursal a la MISMA tienda, con su ubicación u otra, o tomar la ubicación que ocupaba otra
     sucursal desconectada) responde 409 `SHOPIFY_ENVIO_EN_CAMINO` mientras haya filas `IN_PROGRESS` o vivas ambiguas (`envioEnCamino(…)`,
-    `store.service.ts:273`) de cualquier generación anterior de esa sucursal o de la que ocupaba la ubicación. Una DEAD_LETTER ambigua no la
+    `store.service.ts:279`) de cualquier generación anterior de esa sucursal o de la que ocupaba la ubicación. Una DEAD_LETTER ambigua no la
     frena: ya no puede llegar.
   - Religar la sucursal a OTRA tienda no es un 409: sus filas `IN_PROGRESS` y vivas ambiguas pasan a DEAD_LETTER con
     `lastError = RELIGADA_A_OTRA_TIENDA` (duda y parámetros congelados conservados; `aCuarentenaPorReligar`, `connect.service.ts:834`),

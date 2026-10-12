@@ -113,13 +113,13 @@ it('RF5 (N18, N25): 21 sucursales, la primera lenta y fallando, y el buzón y lo
     cron: { start: jest.fn(), stop: jest.fn() },
     claimOutbox: async () => ({ kind: 'FILA', id: 'o', claimToken: 't' }),
     runOutboxRow: async () => {
-      t += 2_500 // el buzón siempre tiene trabajo y gasta sus 7 s
+      t += 2_500 // el buzón siempre tiene trabajo y gasta sus 6 s
       enviadas++
       return 'SENT'
     },
     claimEvent: async () => ({ kind: 'FILA', id: 'e', claimToken: 'k' }),
     processEvent: async () => {
-      t += 1_000 // los eventos también gastan sus 5 s
+      t += 1_000 // los eventos también gastan sus 4 s
       procesados++
       return 'PROCESSED'
     },
@@ -134,8 +134,9 @@ it('RF5 (N18, N25): 21 sucursales, la primera lenta y fallando, y el buzón y lo
     await job.runOnce()
     t += 30_000
   }
-  expect(enviadas).toBe(9) // 3 por vuelta (7 s de buzón): no se comió el tiempo de las sucursales
-  expect(procesados).toBe(12) // 4 por vuelta (5 s de eventos)
+  // 5a (ruling P2-9): la fase «llaves» le quitó 1 s al buzón y a los eventos (la vuelta sigue sumando 25 s).
+  expect(enviadas).toBe(6) // 2 por vuelta (6 s de buzón): no se comió el tiempo de las sucursales
+  expect(procesados).toBe(9) // 3 por vuelta (4 s de eventos)
   for (const m of mias) expect(atendidas.has(m.locationLinkId)).toBe(true)
   const l = await prisma.shopifyLocationLink.findUniqueOrThrow({ where: { id: lenta } })
   expect(l.workToken).toBeNull()

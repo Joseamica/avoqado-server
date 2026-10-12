@@ -12,8 +12,9 @@ import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { SHOPIFY_SERVICE_ACTOR, SHOPIFY_TIMEOUT_MS } from './shopify.constants'
-import { decryptShopifyToken } from './shopify.crypto'
-import type { ShopifyFailure, shopifyGraphql } from './shopify.graphql'
+import { decryptShopifyToken, encryptShopifyToken } from './shopify.crypto'
+import { shopifyGraphql, type ShopifyFailure } from './shopify.graphql'
+import { pedirLlaveDelComercio, RENOVAR_ANTES_MS, type LlaveDelComercio } from './shopify.llave-comercio'
 import {
   bloquearPareja,
   cercoVigente,
@@ -79,12 +80,12 @@ export async function conCerco<T>(
 /**
  * Revoca la tienda (tienda → evento). Con `tokenVersionUsada`, sólo si ese token sigue vigente; con `autorizadaHasta`,
  * sólo si la autorización vigente es anterior (desinstalación, §10.6); con `evento`, sólo si el evento sigue siendo de
- * quien llama (si no, `ContextoObsoleto` y nada cambia).
+ * quien llama (si no, `ContextoObsoleto` y nada cambia). Con `motivo` (5a), la bitácora lo lleva.
  */
 export async function revocarTiendaSiVigente(
   storeId: string,
   tokenVersionUsada: number | null,
-  o: { evento?: Evento | null; autorizadaHasta?: Date } = {},
+  o: { evento?: Evento | null; autorizadaHasta?: Date; motivo?: string } = {},
 ): Promise<boolean> {
   const revocada = await prisma.$transaction(async tx => {
     const [s] = await tx.$queryRaw<Array<{ status: string; tokenVersion: number; authorizedAt: Date | null; organizationId: string }>>`
@@ -103,7 +104,7 @@ export async function revocarTiendaSiVigente(
     action: 'SHOPIFY_STORE_REVOKED',
     entity: 'ShopifyStore',
     entityId: storeId,
-    data: revocada,
+    data: o.motivo ? { ...revocada, motivo: o.motivo } : revocada,
   })
   await avisarTienda(storeId, 'REVOCADA')
   return true
@@ -112,7 +113,8 @@ export async function revocarTiendaSiVigente(
 export type Atencion = 'REVOCADA' | 'SIN_PERMISO' | 'REINTENTAR' | 'DEFINITIVA'
 
 /**
- * 401 ⇒ revoca (si el token es el vigente; si cambió, se reintenta con el nuevo) · FORBIDDEN (403 o ACCESS_DENIED en un
+ * 401 ⇒ `resolverRechazoDelComercio` (PILOTO: revoca si el token es el vigente; si cambió, se reintenta con el nuevo. COMERCIO: una
+ * llave vencida no es una desconexión; con `vence`, el plazo de quien llama) · FORBIDDEN (403 o ACCESS_DENIED en un
  * 200) ⇒ `marcarFaltaPermiso` de A en cada sucursal de la llamada, por id, en su propia tx (BR-9, A7-6: antes de
  * cualquier candado de pareja, fila o cerco). A bloquea SÓLO esa sucursal `FOR NO KEY UPDATE`, se salta las
  * desconectadas y marca sólo si su generación y la credencial siguen siendo las mismas; si no, la falla es de una
@@ -124,8 +126,12 @@ export async function atenderFalla(
   f: ShopifyFailure,
   enlaces: EnlaceEnCurso[] = [],
   evento: Evento | null = null,
+  vence?: number,
 ): Promise<Atencion> {
-  if (f.code === 'UNAUTHORIZED') return (await revocarTiendaSiVigente(store.id, store.tokenVersion, { evento })) ? 'REVOCADA' : 'REINTENTAR'
+  if (f.code === 'UNAUTHORIZED') {
+    const a = await resolverRechazoDelComercio(store.id, store.tokenVersion, { evento, vence })
+    return a === 'ESPERAR' ? 'REINTENTAR' : a // quien llama ya reintenta con su propia espera
+  }
   if (f.code !== 'FORBIDDEN') return f.retryable ? 'REINTENTAR' : 'DEFINITIVA'
   const orden = [...enlaces].sort((a, b) => a.id.localeCompare(b.id))
   const r = await prisma.$transaction(
@@ -357,4 +363,130 @@ export async function ajustarParejaAlProducto(
 export async function pedirCuadreAlVolverACantidad(db: Prisma.TransactionClient, productId: string): Promise<void> {
   const pareja = await db.shopifyVariantLink.findUnique({ where: { productId }, select: { locationLinkId: true, suspendedReason: true } })
   if (pareja?.suspendedReason === 'SIN_INVENTARIO') await pedirCuadre(pareja.locationLinkId, db)
+}
+
+// ─── App del comercio (5a, spec 2026-10-11 §4): la llave de 24 h ───────────────────────────────────────────
+
+/** Lo que se lee de una tienda para pedir y guardar su llave de 24 h. */
+const SELECCION_LLAVE = {
+  id: true,
+  shopDomain: true,
+  status: true,
+  appKey: true,
+  tokenVersion: true,
+  clientId: true,
+  clientSecretCiphertext: true,
+  accessTokenCiphertext: true,
+} as const
+type TiendaLlave = Prisma.ShopifyStoreGetPayload<{ select: typeof SELECCION_LLAVE }>
+/** Tope de cada petición de la llave o de la sonda (con el vencimiento de quien llama, lo que quede si es menos). */
+const PLAZO_LLAVE_MS = 5_000
+/** A lo más estas tiendas por vuelta (las que vencen primero); el margen, `RENOVAR_ANTES_MS`, es el de la Tarea 2. */
+const TANDA_LLAVES = 20
+
+/**
+ * La llave de 24 h con las llaves guardadas de la tienda. `null` = el secret no se pudo descifrar: es pasajero (una
+ * `SHOPIFY_TOKEN_KEY` mal puesta, como `TOKEN_ILEGIBLE`) y `leerToken` ya lo dejó en el log, sin el secret. Una tienda COMERCIO sin
+ * llaves guardadas no tiene cómo pedirla: eso sí es definitivo.
+ */
+async function pedirLlaveDeTienda(s: TiendaLlave, timeoutMs: number): Promise<LlaveDelComercio | null> {
+  if (!s.clientId || !s.clientSecretCiphertext) return { ok: false, motivo: 'RECHAZADA', codigoShopify: 'SIN_LLAVES' }
+  const secreto = leerToken({ id: s.id, accessTokenCiphertext: s.clientSecretCiphertext })
+  if (secreto === null) return null
+  return pedirLlaveDelComercio({ shop: s.shopDomain, clientId: s.clientId, clientSecret: secreto }, { timeoutMs })
+}
+
+/**
+ * 5a: guarda la llave de 24 h (o sólo su vencimiento, si Shopify devolvió la misma) con CAS sobre la credencial: si el dueño cambió
+ * las llaves mientras tanto (`tokenVersion` distinto), no escribe nada. NO sube `tokenVersion` ni toca `webhooksAt`: renovar no es
+ * una credencial nueva (spec §1); el cerco, las elecciones D1 y la huella del MCP siguen valiendo.
+ */
+export async function guardarLlaveSiVigente(
+  s: { id: string; tokenVersion: number },
+  llave: { token: string; expiresIn: number },
+  nueva: boolean,
+): Promise<boolean> {
+  const r = await prisma.shopifyStore.updateMany({
+    where: { id: s.id, tokenVersion: s.tokenVersion },
+    data: {
+      accessTokenExpiresAt: new Date(Date.now() + llave.expiresIn * 1000),
+      ...(nueva ? { accessTokenCiphertext: encryptShopifyToken(llave.token) } : {}),
+    },
+  })
+  return r.count === 1
+}
+
+/**
+ * 5a (spec §4): un 401 de Shopify. En PILOTO (y PUBLICA) es la desconexión de siempre: revoca si la credencial usada sigue vigente.
+ * En una tienda COMERCIO un 401 NUNCA revoca de golpe —una llave de 24 h vencida no es una desconexión—: relee la tienda (si ya no
+ * está ACTIVE o cambió la credencial, quien llamó traía una vieja ⇒ REINTENTAR), pide la llave con sus llaves (rechazadas ⇒ revoca
+ * con su motivo; Shopify sin contestar o el secret ilegible ⇒ ESPERAR), guarda una llave distinta (CAS) ⇒ REINTENTAR, y si es LA
+ * MISMA la prueba con `{ shop { id } }`: 200 = quien llamó traía una vieja ⇒ REINTENTAR; 401 con una llave vigente = app
+ * desinstalada o acceso retirado ⇒ revoca (`ACCESO_RETIRADO`); otra falla ⇒ ESPERAR. Ruling P2-8: con `vence` (el plazo de quien
+ * llama) cada petición sale con `min(5 s, lo que queda)` y, sin margen, REINTENTAR sin preguntar: la siguiente vuelta lo decide con
+ * su presupuesto. Lo usan `atenderFalla`, el mensajero y la sonda de desinstalación.
+ */
+export async function resolverRechazoDelComercio(
+  storeId: string,
+  tokenVersion: number,
+  o: { evento?: Evento | null; vence?: number } = {},
+): Promise<'REVOCADA' | 'REINTENTAR' | 'ESPERAR'> {
+  const revocar = async (motivo?: string): Promise<'REVOCADA' | 'REINTENTAR'> =>
+    (await revocarTiendaSiVigente(storeId, tokenVersion, { evento: o.evento, motivo })) ? 'REVOCADA' : 'REINTENTAR'
+  const plazo = () => Math.min(PLAZO_LLAVE_MS, restante(o.vence))
+  const s = await prisma.shopifyStore.findUnique({ where: { id: storeId }, select: SELECCION_LLAVE })
+  if (!s || s.status !== 'ACTIVE' || s.tokenVersion !== tokenVersion) return 'REINTENTAR'
+  if (s.appKey !== 'COMERCIO') return revocar()
+  if (plazo() < MIN_HTTP_MS) return 'REINTENTAR'
+  const r = await pedirLlaveDeTienda(s, plazo())
+  if (r === null || (!r.ok && r.motivo === 'TRANSITORIO')) return 'ESPERAR'
+  if (!r.ok) return revocar(r.motivo)
+  if (r.token !== leerToken(s)) {
+    await guardarLlaveSiVigente(s, r, true)
+    return 'REINTENTAR'
+  }
+  if (plazo() < MIN_HTTP_MS) return 'REINTENTAR'
+  const prueba = await shopifyGraphql<{ shop: { id: string } }>(
+    s.shopDomain,
+    r.token,
+    '{ shop { id } }',
+    {},
+    {
+      validate: (d: unknown): d is { shop: { id: string } } => typeof (d as { shop?: { id?: unknown } } | null)?.shop?.id === 'string',
+      timeoutMs: plazo(),
+    },
+  )
+  if (prueba.ok) return 'REINTENTAR'
+  return prueba.code === 'UNAUTHORIZED' ? revocar('ACCESO_RETIRADO') : 'ESPERAR'
+}
+
+/**
+ * 5a (spec §4): cada vuelta del worker, las tiendas COMERCIO ACTIVE cuya llave de 24 h vence en menos de un minuto, las que vencen
+ * primero y con tope. Shopify devuelve la MISMA llave hasta que vence: una vuelta antes sólo mueve el vencimiento y la siguiente, ya
+ * vencida, trae la nueva. OK ⇒ CAS (`guardarLlaveSiVigente`); llaves rechazadas ⇒ revoca con su motivo; Shopify sin contestar ⇒
+ * `logger.warn` y la siguiente vuelta. Es rutina: no deja ActivityLog (la revocación sí). ponytail: con más de 20 tiendas cuyo
+ * Shopify no contesta, las de después esperan; mientras tanto las cubre el 401 de `resolverRechazoDelComercio`. Devuelve cuántas
+ * llaves guardó.
+ */
+export async function renovarLlavesPorVencer(now: Date, vence: number): Promise<number> {
+  const tiendas = await prisma.shopifyStore.findMany({
+    where: { appKey: 'COMERCIO', status: 'ACTIVE', accessTokenExpiresAt: { lte: new Date(now.getTime() + RENOVAR_ANTES_MS) } },
+    orderBy: { accessTokenExpiresAt: 'asc' },
+    take: TANDA_LLAVES,
+    select: SELECCION_LLAVE,
+  })
+  let guardadas = 0
+  for (const s of tiendas) {
+    if (restante(vence) < MIN_HTTP_MS) break
+    const r = await pedirLlaveDeTienda(s, restante(vence))
+    if (r === null) continue // el secret no se pudo descifrar: `leerToken` ya lo dejó en el log de errores
+    if (r.ok) {
+      if (await guardarLlaveSiVigente(s, r, r.token !== leerToken(s))) guardadas++
+    } else if (r.motivo === 'TRANSITORIO') {
+      logger.warn(`[SHOPIFY] tienda ${s.id}: Shopify no contestó al renovar la llave de 24 h; se reintenta en la siguiente vuelta`)
+    } else {
+      await revocarTiendaSiVigente(s.id, s.tokenVersion, { motivo: r.motivo })
+    }
+  }
+  return guardadas
 }

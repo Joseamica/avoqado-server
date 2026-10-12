@@ -46,7 +46,7 @@ import {
   type MotivoNoSincronizable,
 } from './shopify.mirror.service'
 // Ciclo de importación con store.service (que importa `avisarTienda` de aquí) a propósito: sólo se llaman dentro de funciones.
-import { leerToken, revocarTiendaSiVigente } from './shopify.store.service'
+import { leerToken, resolverRechazoDelComercio } from './shopify.store.service'
 
 export const SHOPIFY_OUTBOX_MAX_ATTEMPTS = 6
 /** Lo que dura el reclamo; si el proceso muere con la fila en curso, el siguiente reclamo la retoma al vencer. */
@@ -588,12 +588,18 @@ export async function runShopifyOutboxRow(
   }
 
   if (r.code === 'UNAUTHORIZED') {
-    // Sólo revoca si el token que salió sigue siendo el vigente (#13): una reautorización a media petición no se pisa. M5:
-    // por `revocarTiendaSiVigente`, como toda revocación: deja SHOPIFY_STORE_REVOKED en ActivityLog, el error en el log y
-    // avisa REVOCADA a cada sucursal de la tienda. Va en su propia tx, sin candados de la fila puestos.
-    const revocada = await revocarTiendaSiVigente(store.id, tokenVersion)
+    // Sólo revoca si el token que salió sigue siendo el vigente (#13): una reautorización a media petición no se pisa. M5: por
+    // `revocarTiendaSiVigente`, como toda revocación (SHOPIFY_STORE_REVOKED, el error en el log y REVOCADA a cada sucursal). 5a: en
+    // una tienda COMERCIO decide antes `resolverRechazoDelComercio`, con el plazo de esta fila: una llave de 24 h vencida se renueva y
+    // la fila sale con la nueva; si Shopify no contestó o el secret no se lee (ESPERAR), la fila vuelve con la espera de una pausa,
+    // sin gastar intento y con su duda (`devuelta`, como un 429: ruling P2-7). Va en su propia tx, sin candados de la fila puestos.
+    const a = await resolverRechazoDelComercio(store.id, tokenVersion, { vence })
+    if (a === 'ESPERAR') {
+      await cerrar(row, claimToken, devuelta(row, now))
+      return 'PAUSADO'
+    }
     await cerrar(row, claimToken, { status: 'PENDING', scheduledAt: now })
-    if (!revocada) {
+    if (a !== 'REVOCADA') {
       logger.warn(`[SHOPIFY] buzón: 401 de un token que ya cambió (${store.shopDomain}); la fila sale con el vigente`)
       return 'FAILED'
     }

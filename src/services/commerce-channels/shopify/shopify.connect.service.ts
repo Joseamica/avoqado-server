@@ -975,7 +975,7 @@ export async function registerShopifyWebhooks(
   const uri = `${apiBase()}${shopifyWebhookPath(link.store.appKey)}`
   const enlace = [{ id: link.id, generation: link.generation }] // R8: sólo esta sucursal
   const fallo = async (r: ShopifyFailure) => {
-    const a = await atenderFalla(link.store, r, enlace)
+    const a = await atenderFalla(link.store, r, enlace, null, deps.vence)
     return a === 'SIN_PERMISO' ? { error: FALTA_PERMISO, retry: false } : { error: r.code, retry: a === 'REINTENTAR' }
   }
   const lista = await graphql<{ webhookSubscriptions: { nodes: Suscripcion[] } }>(
@@ -1426,7 +1426,7 @@ export async function applyConnectPage(
   )
   if (r === SIN_TIEMPO) return { done: false, procesadas: 0, error: 'SIN_TIEMPO' }
   if (!r.ok) {
-    const a = await atenderFalla(link.store, r, [{ id: link.id, generation: link.generation }])
+    const a = await atenderFalla(link.store, r, [{ id: link.id, generation: link.generation }], null, deps.vence)
     return { done: false, procesadas: 0, error: a === 'SIN_PERMISO' ? FALTA_PERMISO : r.code }
   }
   let procesadas = 0
