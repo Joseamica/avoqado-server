@@ -18,18 +18,34 @@ import { pagoGenericoPermitido } from '../../src/services/dashboard/rh/marcaBlan
 const EXCLUIDAS: Partial<Record<VenueStatus, string>> = { LIVE_DEMO: 'demo pública', CLOSED: 'sede cerrada' }
 const ESTADOS_EXCLUIDOS = Object.keys(EXCLUIDAS) as VenueStatus[]
 
-function argumento(nombre: string): string | undefined {
-  const i = process.argv.indexOf(nombre)
-  if (i < 0) return undefined
-  const valor = process.argv[i + 1]
-  if (!valor || valor.startsWith('--')) throw new Error(`${nombre} necesita un valor`)
-  return valor
+const USO = 'Sólo se aceptan --dry-run, --venue <id> y --confirmar-base <base> (el valor va separado por espacio, sin «=»).'
+
+/** Lee los argumentos; cualquier cosa fuera de los tres conocidos es un error (un `--venue=<id>` mal escrito migraría TODAS las sedes). */
+function leerArgumentos(args: string[]): { solo?: string; confirmada?: string; dry: boolean } {
+  const r: { solo?: string; confirmada?: string; dry: boolean } = { dry: false }
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]
+    if (a === '--dry-run') r.dry = true
+    else if (a === '--venue' || a === '--confirmar-base') {
+      const valor = args[++i]
+      if (!valor || valor.startsWith('--')) throw new Error(`${a} necesita un valor. ${USO}`)
+      if (a === '--venue') r.solo = valor
+      else r.confirmada = valor
+    } else throw new Error(`Argumento desconocido: «${a}». ${USO}`)
+  }
+  return r
 }
 
 async function main() {
-  const solo = argumento('--venue')
-  const confirmada = argumento('--confirmar-base')
-  const dry = process.argv.includes('--dry-run')
+  let args: ReturnType<typeof leerArgumentos>
+  try {
+    args = leerArgumentos(process.argv.slice(2))
+  } catch (e) {
+    console.error(`No se hizo nada. ${e instanceof Error ? e.message : e}`)
+    process.exitCode = 1
+    return
+  }
+  const { solo, confirmada, dry } = args
   if (!process.env.DATABASE_URL) throw new Error('Falta DATABASE_URL')
   const url = new URL(process.env.DATABASE_URL)
   const base = url.pathname.slice(1)
