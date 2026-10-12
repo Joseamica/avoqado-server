@@ -46,6 +46,7 @@ jest.mock('@/utils/prismaClient', () => {
     oAuthState: { deleteMany: jest.fn() },
     googleOAuthSession: { deleteMany: jest.fn() },
     googleCalendarConnection: { deleteMany: jest.fn() },
+    staffAssignment: { deleteMany: jest.fn() },
     venue: { findUnique: jest.fn(), findFirst: jest.fn(), findMany: jest.fn() },
   }
   return {
@@ -126,6 +127,7 @@ describe('staff.superadmin.service — ActivityLog capture + performedBy actor',
         oAuthState: mockPrisma.oAuthState,
         googleOAuthSession: mockPrisma.googleOAuthSession,
         googleCalendarConnection: mockPrisma.googleCalendarConnection,
+        staffAssignment: mockPrisma.staffAssignment,
         $queryRaw: mockPrisma.$queryRaw,
       }),
     )
@@ -265,6 +267,11 @@ describe('staff.superadmin.service — ActivityLog capture + performedBy actor',
     expect(mockPrisma.googleOAuthSession.deleteMany).toHaveBeenCalledWith({
       where: { OR: [{ authUserId: TARGET_STAFF_ID }, { staffId: TARGET_STAFF_ID }] },
     })
+    // RH: sus asignaciones (StaffAssignment.staffId es Restrict) se borran en UNA sentencia justo antes del Staff.
+    expect(mockPrisma.staffAssignment.deleteMany).toHaveBeenCalledWith({ where: { staffId: TARGET_STAFF_ID } })
+    expect(mockPrisma.staffAssignment.deleteMany.mock.invocationCallOrder[0]).toBeLessThan(
+      mockPrisma.staff.delete.mock.invocationCallOrder[0],
+    )
   })
 
   it('retains and anonymizes a Staff with immutable H1 provenance in one transaction', async () => {
@@ -276,6 +283,7 @@ describe('staff.superadmin.service — ActivityLog capture + performedBy actor',
     await expect(deleteStaff(TARGET_STAFF_ID, ACTOR_ID, ACTOR_ID)).resolves.toEqual({ success: true, retainedForAudit: true })
 
     expect(mockPrisma.staff.delete).not.toHaveBeenCalled()
+    expect(mockPrisma.staffAssignment.deleteMany).not.toHaveBeenCalled() // retenida: su historial de RH se conserva
     expect(mockPrisma.staff.update).toHaveBeenCalledWith(
       expect.objectContaining({
         where: { id: TARGET_STAFF_ID },

@@ -194,6 +194,10 @@ export async function submitContact(req: Request, res: Response, next: NextFunct
     // persisted account counts as a completed registration; renewing the magic
     // link for an unfinished account must not count the same person twice.
     let registrationCompleted = false
+    // `event_id` para el Pixel de ChatGPT: deriva de la cuenta, así que quien reenvía el formulario
+    // con el mismo correo (misma cuenta) manda el mismo id y ChatGPT descarta el repetido. Es un
+    // hash del id interno, que nunca sale en esta respuesta pública.
+    let eventId: string | undefined
     try {
       const alta = await signupFromLanding({
         email: String(email),
@@ -212,6 +216,9 @@ export async function submitContact(req: Request, res: Response, next: NextFunct
       yaEsCliente = alta.yaEsCliente
       altaEstado = alta.yaEsCliente ? 'existente' : 'creada'
       registrationCompleted = !alta.alreadyExisted && !alta.yaEsCliente
+      if (alta.organizationId) {
+        eventId = crypto.createHash('sha256').update(alta.organizationId).digest('hex').slice(0, 32)
+      }
       if (alta.magicLinkToken) {
         // Pasa por el redirect propio para poder contar el clic (ver continuarOnboarding).
         const apiUrl = process.env.PUBLIC_API_URL || 'https://api.avoqado.io'
@@ -541,7 +548,7 @@ Política de Privacidad: https://avoqado.io/privacy
 
     // Basta con que UNO de los internos llegue para no perder el lead.
     const leadCreated = internosOk.some(Boolean)
-    const conversion = { leadCreated, registrationCompleted }
+    const conversion = { leadCreated, registrationCompleted, ...(eventId ? { eventId } : {}) }
     if (!leadCreated) {
       logger.error('[CONTACT_SUBMIT] Internal notification failed', { email, companyName, internos })
       return res.status(502).json({

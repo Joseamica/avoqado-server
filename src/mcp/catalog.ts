@@ -335,6 +335,12 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   staff_ranking: 'read',
   staff_schedule: 'read',
   staff_tips: 'read',
+  // RH fase 1a: puestos y asignaciones
+  list_positions: 'read',
+  create_position: 'write',
+  archive_position: 'write',
+  assign_staff_position: 'write',
+  end_staff_assignment: 'write',
   stamp_card_status: 'read',
   stamp_payroll_receipts: 'write',
   stock_batches: 'read',

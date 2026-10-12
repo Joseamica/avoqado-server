@@ -25,6 +25,7 @@ import { registerStaffPayTools } from './tools/staffPay'
 import { registerSubscriptionTools } from './tools/subscriptions'
 import { registerMenuTools } from './tools/menu'
 import { registerStaffTools } from './tools/staff'
+import { registerRhTools } from './tools/rh'
 import { registerReviewTools } from './tools/reviews'
 import { registerCustomerTools } from './tools/customers'
 import { registerCustomerGroupTools } from './tools/customerGroups'
@@ -113,6 +114,7 @@ export function registerAllTools(server: McpServer, scope: McpScope, flags: Tool
   registerSubscriptionTools(server, scope)
   registerMenuTools(server, scope)
   registerStaffTools(server, scope)
+  registerRhTools(server, scope)
   registerReviewTools(server, scope)
   registerCustomerTools(server, scope)
   registerCustomerGroupTools(server, scope)

@@ -482,6 +482,8 @@ model Venue {
   purchaseOrders              PurchaseOrder[]
   purchaseOrderInvoices       PurchaseOrderInvoice[]
   staffDocuments              StaffDocument[]
+  staffPositions              StaffPosition[]
+  staffAssignments            StaffAssignment[]
   pricingPolicies             PricingPolicy[]
   wasteReports                InventoryWasteReport[]
   rawMaterialMovements        RawMaterialMovement[]
@@ -1082,6 +1084,9 @@ model Staff {
   documents         StaffDocument[] @relation("StaffDocumentOwner")
   /// Documentos que ESTA persona subió al expediente de alguien más.
   documentsUploaded StaffDocument[] @relation("StaffDocumentUploader")
+
+  /// Puestos que esta persona ha ocupado (RH fase 1a). Restrict: no se borra a alguien con historial de puestos.
+  staffAssignments StaffAssignment[]
 
   areaTicketsIssued             AreaTicket[]                   @relation("AreaTicketIssuedByStaff")
   areaTicketCheckoutSessions    AreaTicketCheckoutSession[]    @relation("AreaTicketCheckoutStaff")
@@ -3680,6 +3685,69 @@ model StaffWorkScheduleException {
 
   @@index([staffVenueId, startDate, endDate])
   @@index([venueId, startDate])
+}
+
+/// Relación legal de una persona en un puesto. «Sin definir» = null (nunca un valor del enum). Spec RH §3.2.
+enum WorkRelation {
+  EMPLEADO_NOMINA
+  ASIMILADO
+  INDEPENDIENTE_FACTURA
+  RENTA_SILLA
+}
+
+/// Tipos de pieza de pago. En la fase 1a sólo se usan en la plantilla del puesto (sin montos). Spec RH §3.3.
+enum PayComponentKind {
+  SALARY
+  HOURLY
+  BONUS_FIXED
+  CHAIR_RENT
+  BONUS_CONDITIONAL
+}
+
+/// Catálogo de puestos de una sede (spec RH §3.1). Plantilla SIN montos; no cambia permisos.
+model StaffPosition {
+  id                      String             @id @default(cuid())
+  venueId                 String
+  venue                   Venue              @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  name                    String
+  color                   String?
+  icon                    String?
+  suggestedRole           StaffRole
+  suggestedRelation       WorkRelation?
+  tracksAttendanceDefault Boolean            @default(true)
+  componentKinds          PayComponentKind[] @default([])
+  migrationKey            String?            @unique
+  archivedAt              DateTime?
+  createdAt               DateTime           @default(now())
+  updatedAt               DateTime           @updatedAt
+  assignments             StaffAssignment[]
+
+  @@index([venueId, archivedAt])
+}
+
+/// Una persona en un puesto de una sede, con vigencia en fechas civiles de la sede (spec RH §3.2).
+model StaffAssignment {
+  id               String           @id @default(cuid())
+  staffId          String
+  staff            Staff            @relation(fields: [staffId], references: [id], onDelete: Restrict)
+  venueId          String
+  venue            Venue            @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  positionId       String
+  position         StaffPosition    @relation(fields: [positionId], references: [id], onDelete: Restrict)
+  relation         WorkRelation?
+  effectiveFrom    DateTime         @db.Date
+  effectiveTo      DateTime?        @db.Date
+  tracksAttendance Boolean          @default(true)
+  supersedesId     String?          @unique
+  supersedes       StaffAssignment? @relation("AssignmentVersion", fields: [supersedesId], references: [id], onDelete: Restrict)
+  supersededBy     StaffAssignment? @relation("AssignmentVersion")
+  migrationKey     String?          @unique
+  createdById      String?
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+
+  @@index([venueId, staffId, effectiveTo])
+  @@index([venueId, positionId, effectiveTo])
 }
 
 model StaffDocument {

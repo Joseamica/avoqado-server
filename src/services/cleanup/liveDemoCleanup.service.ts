@@ -461,6 +461,10 @@ async function deleteVenueDataTx(tx: DbClient, venueId: string): Promise<number>
   // 8. Shifts and staff assignments
   await borrar(tx.shift.deleteMany({ where: { venueId } }))
   await borrar(tx.staffVenue.deleteMany({ where: { venueId } }))
+  // Puestos de RH (fase 1a): la asignación referencia su puesto con RESTRICT y los dos mueren con el cascade del venue, en
+  // el orden que elija Postgres. Se borran las asignaciones primero, en UNA sentencia (la cadena de versiones
+  // `supersedesId` se revisa al final de la sentencia). Las del Staff de la sesión ya se fueron con su borrado definitivo.
+  await borrar(tx.staffAssignment.deleteMany({ where: { venueId } })) // → StaffPosition
 
   // 9. Payment config + the merchant accounts it points to.
   // MerchantAccount has NO venueId and its FK from VenuePaymentConfig is

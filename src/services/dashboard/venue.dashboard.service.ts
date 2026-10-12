@@ -670,6 +670,13 @@ export async function deleteVenue(orgId: string, venueId: string, options?: { sk
     })
     logger.info(`  ✓ Deleted ${deletedMonthlyVenueProfit.count} MonthlyVenueProfits`)
 
+    // Puestos de RH (fase 1a): la asignación referencia su puesto con RESTRICT y los dos caen con el cascade del venue.
+    // Se van primero, en UNA sentencia (la cadena `supersedesId` se revisa al final), igual que en liveDemoCleanup.
+    const deletedStaffAssignments = await tx.staffAssignment.deleteMany({
+      where: { venueId },
+    })
+    logger.info(`  ✓ Deleted ${deletedStaffAssignments.count} StaffAssignments`)
+
     // 18. Finally, delete the Venue itself
     await tx.venue.delete({
       where: { id: venueId },
