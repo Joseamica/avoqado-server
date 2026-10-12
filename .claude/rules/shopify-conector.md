@@ -165,7 +165,7 @@ espejo dejaría la cuenta en 11 contra las 12 piezas de Avoqado. Si hay filas vi
   y después la tienda `FOR SHARE` (`mirror.service.ts:372`). Quien la llame lo hace antes de cualquier candado de pareja, fila o cerco, o en
   una tx propia (el mensajero: tx de 15 s, porque avisa por dentro). `FOR NO KEY UPDATE` y no `FOR UPDATE`: no frena el `FOR KEY SHARE` de
   quien inserte una pareja con llave foránea a la sucursal.
-- **Desconectar** (`disconnectShopify(…)`, `connect.service.ts:1714`) bloquea primero TODAS las sucursales de la tienda por id (la propia
+- **Desconectar** (`disconnectShopify(…)`, `connect.service.ts:1730`) bloquea primero TODAS las sucursales de la tienda por id (la propia
   `FOR UPDATE`, las hermanas `FOR NO KEY UPDATE`), después las parejas de ESA sucursal, ordenadas por id, y sólo entonces sube la
   generación. Nunca la propia y luego una hermana de id menor: se cruzaría con quien las toma por id (el drenado, diferir, renovar la
   credencial). `renovarCredencial` (reconectar o reautorizar) también bloquea todas las sucursales de la tienda por id ANTES de la tienda.
@@ -239,12 +239,15 @@ cuadre y conteo no cambian, y el piloto (`PILOTO`, OAuth) convive igual.
   candado, el dominio y el propósito de hoy): ANTES de crear nada pide la llave de 24 h (`pedirLlaveDelComercio(…)`: form-urlencoded,
   `grant_type=client_credentials`, sin seguir redirecciones) y revisa los permisos con `faltanPermisos` (422 `SHOPIFY_APP_FALTAN_PERMISOS`).
   Llaves rechazadas ⇒ 422 con su código (`SHOPIFY_APP_SECRET_INVALIDO`, `SHOPIFY_APP_CLIENT_ID_INVALIDO`, `SHOPIFY_APP_OTRA_ORGANIZACION`,
-  `SHOPIFY_TIENDA_NO_EXISTE`, `SHOPIFY_APP_RECHAZADA`); Shopify sin contestar ⇒ 503 `SHOPIFY_NO_RESPONDE`. El intent nace `COMERCIO` con las
+  `SHOPIFY_TIENDA_NO_EXISTE`, `SHOPIFY_APP_RECHAZADA`, éste sólo si su `error` ES un código de Shopify); Shopify sin contestar, o un 4xx sin
+  `error` o con texto libre en él (un proxy), ⇒ 503 `SHOPIFY_NO_RESPONDE`: no prueba nada de las llaves. El intent nace `COMERCIO` con las
   llaves cifradas (`SHOPIFY_TOKEN_KEY`): CONNECT sigue como tras el callback (ubicación → confirmar); REAUTHORIZE pasa en el acto por
   `reautorizar` y `renovarCredencial`. Confirmar, `tiendaDe` y `renovarCredencial` copian `clientId`, `clientSecretCiphertext` y el
   vencimiento a la tienda; al volver a `PILOTO` quedan en null. El secret nunca sale en una respuesta, en `ActivityLog` ni en el log, y la
   limpieza horaria lo borra del intent junto con el token. Si la llave del intent vence a medio asistente (menos de un minuto, o un 401),
-  ubicaciones y confirmar piden otra con las llaves del intent y repiten UNA vez.
+  ubicaciones y confirmar piden otra con las llaves del intent y repiten UNA vez. Confirmar un intent `COMERCIO` creado ANTES del último
+  cambio de llaves de la tienda (otra sucursal usó «Cambiar llaves» con este asistente abierto) contesta 409 `SHOPIFY_LLAVES_CAMBIARON` sin
+  escribir nada: copiar sus llaves restauraría las viejas. Se decide con la tienda bloqueada; el mismo intent ya aplicado sí sigue.
 - **La llave de 24 h y `tokenVersion`:** `tokenVersion` sigue siendo la credencial (la app y su autorización) y sólo sube cuando el dueño
   cambia las llaves. Renovar la llave de 24 h NO la sube ni toca `webhooksAt`: `guardarLlaveSiVigente(…)` es CAS sobre `tokenVersion` (una
   renovación tardía no pisa las llaves nuevas del dueño) y el cerco, las elecciones D1 y la huella del MCP siguen valiendo. Tampoco mueve
@@ -258,9 +261,11 @@ cuadre y conteo no cambian, y el piloto (`PILOTO`, OAuth) convive igual.
   sonda de desinstalación pasan por `resolverRechazoDelComercio(…)`, que relee la tienda (no ACTIVE o credencial distinta ⇒ REINTENTAR),
   pide la llave (rechazada ⇒ revoca; sin contestar o el secret ilegible ⇒ ESPERAR), guarda una llave distinta ⇒ REINTENTAR y, con LA MISMA a
   5 s o menos de vencer, ESPERAR sin sonda (su 401 sería del vencimiento diario); si no, prueba `{ shop { id } }`: 200 ⇒ quien llamó traía
-  una vieja (REINTENTAR); 401 ⇒ acceso retirado o app desinstalada, revoca (`ACCESO_RETIRADO`). Con el vencimiento de quien llama, cada
-  petición sale con lo menor entre 5 s y lo que queda y, sin margen, REINTENTAR sin preguntar. Con ESPERAR el mensajero devuelve la fila con
-  la espera de una pausa (`devuelta`, sin gastar intento y con su duda, como un 429). En `PILOTO` el 401 revoca como siempre.
+  una vieja (REINTENTAR); 401 ⇒ acceso retirado o app desinstalada, revoca (`ACCESO_RETIRADO`). La vida de la llave se cuenta desde que
+  SALIÓ la petición (Shopify contó `expires_in` durante el viaje) y se vuelve a mirar antes de revocar: si la llave ya pudo vencer mientras
+  viajaba la sonda, ESPERAR. Con el vencimiento de quien llama, cada petición sale con lo menor entre 5 s y lo que queda y, sin margen,
+  REINTENTAR sin preguntar. Con ESPERAR el mensajero devuelve la fila con la espera de una pausa (`devuelta`, sin gastar intento y con su
+  duda, como un 429). En `PILOTO` el 401 revoca como siempre.
 - **Avisos:** `:appKey` acepta `comercio`. El secret de un aviso `COMERCIO` es el de SU tienda: `X-Shopify-Shop-Domain` (validado) sólo
   elige cuál se usa y la firma sigue decidiendo; sin tienda `COMERCIO`, sin secret legible o con la firma mala ⇒ 401. `PILOTO` sigue con el
   de env. El registro de suscripciones no cambia: la ruta de la app de la tienda (`/webhooks/shopify/comercio`) con la llave de 24 h.
@@ -327,7 +332,7 @@ borre o cree filas de `Inventory` de productos ligados, o que cambie esos campos
     `store.service.ts:279`) de cualquier generación anterior de esa sucursal o de la que ocupaba la ubicación. Una DEAD_LETTER ambigua no la
     frena: ya no puede llegar.
   - Religar la sucursal a OTRA tienda no es un 409: sus filas `IN_PROGRESS` y vivas ambiguas pasan a DEAD_LETTER con
-    `lastError = RELIGADA_A_OTRA_TIENDA` (duda y parámetros congelados conservados; `aCuarentenaPorReligar`, `connect.service.ts:843`),
+    `lastError = RELIGADA_A_OTRA_TIENDA` (duda y parámetros congelados conservados; `aCuarentenaPorReligar`, `connect.service.ts:859`),
     porque el reclamo sólo las tomaría con la tienda vieja ACTIVE y la sucursal ya apunta a la nueva: la espera no terminaría nunca. No
     avisan (es una acción deliberada del dueño); queda `religadas` en el `ActivityLog` de `SHOPIFY_CONNECTED`.
   - Desconectar no espera: bloquea (§4), sube la generación y deja esas filas cerrarse con su llave; al llegar no mueven el espejo.

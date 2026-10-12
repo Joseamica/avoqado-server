@@ -207,6 +207,22 @@ describe('5a · renovar a tiempo (worker)', () => {
     expect(registros()).not.toMatch(/Forbidden por el proxy|shpss_|shpat_/)
   })
 
+  it('🔴 Codex C1: un 4xx cuyo `error` es texto libre (no un código de Shopify) no revoca, ni al renovar ni desde un 401: es pasajero y el log lleva sólo el status', async () => {
+    const e = await comercio({ venceEnMs: 10_000 })
+    const libre = () => ({ status: 403, body: { error: 'Temporary upstream failure' } })
+    shopifyPorFetch({ llave: libre })
+    expect(await renovarLlavesPorVencer(new Date(), lejos())).toBe(0)
+    expect((await tienda(e)).status).toBe('ACTIVE')
+    shopifyPorFetch({ llave: libre })
+    expect(await atenderFalla({ id: e.storeId, tokenVersion: 1 }, f401)).toBe('REINTENTAR')
+    expect((await tienda(e)).status).toBe('ACTIVE')
+    expect(logAction).not.toHaveBeenCalled()
+    expect((logger.error as jest.Mock).mock.calls.map(c => String(c[0]))).toEqual(
+      expect.arrayContaining([expect.stringContaining('HTTP 403')]),
+    )
+    expect(registros()).not.toMatch(/Temporary upstream|shpss_|shpat_/)
+  })
+
   it('🔴 Review Focus 3: con el secret ilegible (otra SHOPIFY_TOKEN_KEY) ni el 401 ni la renovación revocan: es pasajero y queda en el log de errores, sin el secret', async () => {
     const e = await comercio({ venceEnMs: 10_000 })
     await prisma.shopifyStore.update({ where: { id: e.storeId }, data: { clientSecretCiphertext: Buffer.from('no-se-puede-descifrar') } })
@@ -260,6 +276,47 @@ describe('5a · un 401 nunca revoca de golpe una tienda COMERCIO (riesgo 1)', ()
     ])
     expect(await tienda(e)).toMatchObject({ status: 'ACTIVE', tokenVersion: 1 })
     expect(logAction).not.toHaveBeenCalled()
+  })
+
+  it('🔴 Codex C3: el vencimiento se cuenta desde que SALIÓ la petición: con expires_in 6, una respuesta lenta y una sonda lenta, el 401 de la sonda no revoca (ESPERAR); y si la respuesta sola ya se comió el margen, ni siquiera se prueba', async () => {
+    const e = await comercio()
+    const real = Date.now
+    let adelanto = 0 // el reloj falso: cada respuesta de Shopify «tarda» lo que sume aquí
+    const reloj = jest.spyOn(Date, 'now').mockImplementation(() => real() + adelanto)
+    try {
+      const lenta = shopifyPorFetch({
+        llave: () => {
+          adelanto += 600
+          return LLAVE_OK(TOKEN_DE_PRUEBA, 6)
+        },
+        api: () => {
+          adelanto += 600
+          return SONDA_401
+        },
+      })
+      // Shopify contó los 6 s cuando ya iba en camino: a los 1.2 s la llave pudo haber vencido (6 − 5 de margen = 1 s).
+      expect(await resolverRechazoDelComercio(e.storeId, 1)).toBe('ESPERAR')
+      expect(lenta.mock.calls.map(c => String(c[0]))).toEqual([
+        `https://${e.shopDomain}/admin/oauth/access_token`,
+        `https://${e.shopDomain}/admin/api/2026-10/graphql.json`,
+      ])
+      const muyLenta = shopifyPorFetch({
+        llave: () => {
+          adelanto += 1_500
+          return LLAVE_OK(TOKEN_DE_PRUEBA, 6)
+        },
+        api: () => SONDA_401,
+      })
+      expect(await resolverRechazoDelComercio(e.storeId, 1)).toBe('ESPERAR')
+      expect(muyLenta.mock.calls.map(c => String(c[0]))).toEqual([`https://${e.shopDomain}/admin/oauth/access_token`])
+    } finally {
+      reloj.mockRestore()
+    }
+    expect(await tienda(e)).toMatchObject({ status: 'ACTIVE', tokenVersion: 1 })
+    expect(logAction).not.toHaveBeenCalled()
+    // Sin demora, la misma llave con 6 s y la sonda en 401 sí es acceso retirado: revoca (la guarda no tapa una desinstalación real).
+    shopifyPorFetch({ llave: () => LLAVE_OK(TOKEN_DE_PRUEBA, 6), api: () => SONDA_401 })
+    expect(await resolverRechazoDelComercio(e.storeId, 1)).toBe('REVOCADA')
   })
 
   it('llaves rechazadas ⇒ REVOCADA con su motivo; Shopify sin contestar ⇒ REINTENTAR; credencial vieja ⇒ REINTENTAR sin preguntar; PILOTO revoca como siempre, sin pedir llave', async () => {

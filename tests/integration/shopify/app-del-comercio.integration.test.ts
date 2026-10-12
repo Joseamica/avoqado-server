@@ -35,7 +35,19 @@ import {
   limpiarEscenarioShopify,
   UBICACION_PRUEBA,
 } from './fixtures'
-import { aComercio, CLIENT_ID_PRUEBA, falla, LLAVE_OK, quitarFetch, SECRET_MALO, SECRET_PRUEBA, shopifyPorFetch } from './fixturesB'
+import {
+  aComercio,
+  CLIENT_ID_PRUEBA,
+  dormir,
+  falla,
+  limpiarOtraSucursal,
+  LLAVE_OK,
+  otraSucursalDeLaTienda,
+  quitarFetch,
+  SECRET_MALO,
+  SECRET_PRUEBA,
+  shopifyPorFetch,
+} from './fixturesB'
 
 jest.setTimeout(120_000)
 const SECRETO = 'secreto-app-piloto'
@@ -430,6 +442,54 @@ describe('5a · conectar con las llaves de la app de la tienda', () => {
     expect(await tienda(e)).toMatchObject({ appKey: 'COMERCIO', tokenVersion: 2, status: 'ACTIVE' })
     expect((await sucursal(e)).status).toBe('CONNECTING')
     expect((logAction as jest.Mock).mock.calls.filter(([p]) => p.action === 'SHOPIFY_CREDENTIAL_RENEWED')).toHaveLength(1)
+  })
+})
+
+describe('5a · un asistente abierto antes de «Cambiar llaves» (Codex C2)', () => {
+  it('🔴 la otra sucursal confirma con un intent de ANTES del último cambio de llaves: 409 SHOPIFY_LLAVES_CAMBIARON, la tienda se queda con las llaves nuevas, tokenVersion no sube y la sucursal no se liga', async () => {
+    const e = await escenario()
+    await conCortesia(e)
+    await aComercio(e)
+    const otra = await otraSucursalDeLaTienda(e, { sinEnlace: true })
+    try {
+      await conCortesia(otra)
+      // La otra sucursal abre su asistente con las llaves de hoy y lo deja abierto en la elección de ubicación.
+      shopifyPorFetch({ llave: () => LLAVE_OK('shpat_vieja') })
+      const r = await conectarConAppDelComercio(llaves(otra))
+      if (!('intent' in r)) throw new Error('se esperaba el intent')
+      await dormir(5)
+      // Mientras tanto, el dueño rota el Client Secret con «Cambiar llaves» desde la primera sucursal.
+      const NUEVO = 'shpss_secreto_rotado_0123456789abcdef'
+      shopifyPorFetch({ llave: () => LLAVE_OK('shpat_nueva') })
+      expect(await conectarConAppDelComercio({ ...llaves(e, { purpose: 'REAUTHORIZE' }), clientSecret: NUEVO })).toEqual({
+        reautorizada: true,
+      })
+      const antes = await tienda(e)
+      expect(decryptShopifyToken(antes.clientSecretCiphertext!)).toBe(NUEVO)
+      // La otra sucursal vuelve y elige su ubicación con el intent viejo: no puede restaurar el secret de antes.
+      const i = { venueId: otra.venueId, authUserId: otra.staffId, intent: r.intent, locationId: 'gid://shopify/Location/2' }
+      await expect(confirmShopifyConnect(i, { graphql: ubicaciones() })).rejects.toMatchObject({
+        statusCode: 409,
+        code: 'SHOPIFY_LLAVES_CAMBIARON',
+        message: 'Las llaves de esta tienda cambiaron mientras conectabas; vuelve a empezar.',
+      })
+      const despues = await tienda(e)
+      expect(decryptShopifyToken(despues.clientSecretCiphertext!)).toBe(NUEVO)
+      expect(decryptShopifyToken(despues.accessTokenCiphertext)).toBe('shpat_nueva')
+      expect(despues.tokenVersion).toBe(antes.tokenVersion)
+      expect(despues.authorizedAt).toEqual(antes.authorizedAt)
+      expect(await prisma.shopifyLocationLink.findUnique({ where: { venueId: otra.venueId } })).toBeNull()
+      expect(logAction).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'SHOPIFY_CREDENTIAL_RENEWED' }))
+      // Con un intent nuevo (las llaves de hoy) sí entra.
+      shopifyPorFetch({ llave: () => LLAVE_OK('shpat_nueva') })
+      const r2 = await conectarConAppDelComercio({ ...llaves(otra), clientSecret: NUEVO })
+      if (!('intent' in r2)) throw new Error('se esperaba el intent')
+      await confirmShopifyConnect({ ...i, intent: r2.intent }, { graphql: ubicaciones() })
+      expect(decryptShopifyToken((await tienda(e)).clientSecretCiphertext!)).toBe(NUEVO)
+      expect((await prisma.shopifyLocationLink.findUniqueOrThrow({ where: { venueId: otra.venueId } })).status).toBe('CONNECTING')
+    } finally {
+      await limpiarOtraSucursal(otra)
+    }
   })
 })
 

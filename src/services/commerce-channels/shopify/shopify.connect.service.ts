@@ -259,6 +259,10 @@ export async function handleShopifyCallback(
   return `${pagina}?intent=${encodeURIComponent(query.state)}`
 }
 
+/** Codex C2: el intent nació antes del último cambio de llaves de la tienda; sus llaves ya no son las vigentes. */
+const LLAVES_CAMBIARON = () =>
+  new ConflictError('Las llaves de esta tienda cambiaron mientras conectabas; vuelve a empezar.', 'SHOPIFY_LLAVES_CAMBIARON')
+
 /** 5a: lo de la app del comercio que viaja del intent a la tienda; en PILOTO todo es null (cambiar de método limpia lo otro). */
 type CredencialesDelComercio = { clientId: string | null; clientSecretCiphertext: Uint8Array | null; accessTokenExpiresAt: Date | null }
 const credencialesDe = (intent: ShopifyConnectIntent): CredencialesDelComercio => ({
@@ -281,16 +285,26 @@ const credencialesDe = (intent: ShopifyConnectIntent): CredencialesDelComercio =
  *   PENDING; ambiguo ⇒ FAILED, para resolverse con su llave), conservando parámetros congelados, `firstAttemptAt` e
  *   intentos. Sin candado de pareja: todo otro escritor de esas filas toma antes la sucursal FOR SHARE. El filtro de
  *   generación es lo que impide revivir una fila de una conexión que ya no existe (BR-3, BR-4, K16).
+ * - Codex C2: con `intentCreadoEn` (confirmar con un intent `COMERCIO`), si la tienda cambió de llaves DESPUÉS de que nació el intent
+ *   (`authorizedAt` posterior: «Cambiar llaves» desde otra sucursal con este asistente abierto), 409 `SHOPIFY_LLAVES_CAMBIARON` sin
+ *   escribir nada: copiar las llaves del intent restauraría las viejas. Se lee con la tienda bloqueada, después de sus sucursales.
  */
 async function renovarCredencial(
   tx: Prisma.TransactionClient,
   storeId: string,
   d: { tokenCiphertext: Uint8Array; scopes: string; appKey: ShopifyAppKey } & CredencialesDelComercio,
+  intentCreadoEn?: Date,
 ): Promise<{ tokenVersion: number; sucursales: number; reencoladas: number }> {
   const ahora = new Date()
   // ponytail: las sucursales de UNA tienda son un puñado; el tope es defensa (el mismo de A). Por tandas si alguna pasa de 1000.
   const enlaces = await tx.$queryRaw<Array<{ id: string }>>`
     SELECT id FROM "ShopifyLocationLink" WHERE "storeId" = ${storeId} ORDER BY id LIMIT 1000 FOR NO KEY UPDATE`
+  if (intentCreadoEn) {
+    // El mismo candado de la tienda que toma el `update` de abajo, tomado antes: nadie cambia sus llaves entre leer y escribir.
+    const [vigente] = await tx.$queryRaw<Array<{ authorizedAt: Date }>>`
+      SELECT "authorizedAt" FROM "ShopifyStore" WHERE id = ${storeId} FOR NO KEY UPDATE`
+    if (vigente && vigente.authorizedAt > intentCreadoEn) throw LLAVES_CAMBIARON()
+  }
   const tienda = await tx.shopifyStore.update({
     where: { id: storeId },
     data: {
@@ -628,7 +642,8 @@ const DE_OTRA_EMPRESA = () => new ConflictError('Esa tienda de Shopify ya está 
  *   nuevo y el siguiente intento entra: sin eso, una tienda revocada con un envío ambiguo y la sucursal desconectada no
  *   se podía reconectar nunca. El intent sigue EXCHANGED. Lo que ya se sabe que va a fallar (sucursal conectada, ubicación
  *   ocupada, tienda ajena, catálogo maestro) se dice antes, para no renovar en vano. Un reintento con el MISMO intent no
- *   renueva otra vez (mismos bytes cifrados, tienda ACTIVE). Lo que la sucursal que se reconecta tiene en camino se
+ *   renueva otra vez (mismos bytes cifrados, tienda ACTIVE). Un intent `COMERCIO` creado ANTES del último cambio de llaves de la
+ *   tienda no renueva: 409 `SHOPIFY_LLAVES_CAMBIARON` (Codex C2). Lo que la sucursal que se reconecta tiene en camino se
  *   reprograma para ya.
  * - Después, en UNA tx: candado del catálogo maestro (#29), intent consumido, por id y ANTES de la tienda la sucursal
  *   propia y la que ocupaba esa ubicación (§10.3, N03), la barrera de envíos en camino (§9.1, §10.14, K16: B-8 rige aquí;
@@ -692,14 +707,15 @@ export async function confirmShopifyConnect(
     const reconecta = propia?.storeId === tienda.id ? propia : null
     const r = await prisma.$transaction(async tx => {
       await gobierno(tx)
+      // Codex C2: un intent COMERCIO de antes del último cambio de llaves no las restaura (409); el mismo intent ya aplicado no llega aquí.
       const renovada = yaRenovada
         ? null
-        : await renovarCredencial(tx, tienda.id, {
-            tokenCiphertext: intent.tokenCiphertext,
-            scopes: intent.scopes ?? '',
-            appKey: intent.appKey,
-            ...credencialesDe(intent),
-          })
+        : await renovarCredencial(
+            tx,
+            tienda.id,
+            { tokenCiphertext: intent.tokenCiphertext, scopes: intent.scopes ?? '', appKey: intent.appKey, ...credencialesDe(intent) },
+            intent.appKey === 'COMERCIO' ? intent.createdAt : undefined,
+          )
       if (!reconecta) return { renovada, reprogramadas: 0 }
       // Sucursal antes que sus filas (§10.3); `renovarCredencial` ya la bloqueó con las demás de la tienda.
       if (yaRenovada) await tx.$queryRaw`SELECT id FROM "ShopifyLocationLink" WHERE id = ${reconecta.id} FOR SHARE`

@@ -383,7 +383,10 @@ type TiendaLlave = Prisma.ShopifyStoreGetPayload<{ select: typeof SELECCION_LLAV
 const PLAZO_LLAVE_MS = 5_000
 /** A lo más estas tiendas por vuelta (las que vencen primero); el margen, `RENOVAR_ANTES_MS`, es el de la Tarea 2. */
 const TANDA_LLAVES = 20
-/** Con esto o menos de vida, la MISMA llave no se prueba: un 401 de la sonda sería del vencimiento diario, no una desconexión. */
+/**
+ * Con esto o menos de vida, la MISMA llave no se prueba ni se revoca por su 401: sería del vencimiento diario, no una desconexión. La
+ * vida se cuenta desde que SALIÓ la petición de la llave (Codex C3): Shopify contó `expires_in` en algún momento del viaje.
+ */
 const LLAVE_POR_VENCER_S = 5
 /** El motivo de una revocación por llaves rechazadas, con el código que dio Shopify si lo dio: la evidencia queda en la bitácora. */
 const motivoDeRechazo = (r: { motivo: string; codigoShopify?: string }): string =>
@@ -426,9 +429,10 @@ export async function guardarLlaveSiVigente(
  * En una tienda COMERCIO un 401 NUNCA revoca de golpe —una llave de 24 h vencida no es una desconexión—: relee la tienda (si ya no
  * está ACTIVE o cambió la credencial, quien llamó traía una vieja ⇒ REINTENTAR), pide la llave con sus llaves (rechazadas ⇒ revoca
  * con su motivo y el código de Shopify; Shopify sin contestar o el secret ilegible ⇒ ESPERAR), guarda una llave distinta (CAS) ⇒
- * REINTENTAR, y si es LA MISMA: a 5 s o menos de vencer ⇒ ESPERAR sin sonda (su 401 sería del vencimiento diario); si no, la prueba
- * con `{ shop { id } }`: 200 = quien llamó traía una vieja ⇒ REINTENTAR; 401 con una llave vigente = app desinstalada o acceso
- * retirado ⇒ revoca (`ACCESO_RETIRADO`); otra falla ⇒ ESPERAR. Ruling P2-8: con `vence` (el plazo de quien llama) cada petición sale
+ * REINTENTAR, y si es LA MISMA: a 5 s o menos de vencer, contados desde que SALIÓ la petición (Codex C3) ⇒ ESPERAR sin sonda (su 401
+ * sería del vencimiento diario); si no, la prueba con `{ shop { id } }`: 200 = quien llamó traía una vieja ⇒ REINTENTAR; 401 con una
+ * llave que todavía no pudo vencer = app desinstalada o acceso retirado ⇒ revoca (`ACCESO_RETIRADO`), y si mientras viajaba la sonda ya
+ * pudo vencer ⇒ ESPERAR; otra falla ⇒ ESPERAR. Ruling P2-8: con `vence` (el plazo de quien llama) cada petición sale
  * con `min(5 s, lo que queda)` y, sin margen, REINTENTAR sin preguntar: la siguiente vuelta lo decide con su presupuesto. Lo usan
  * `atenderFalla`, el mensajero y la sonda de desinstalación.
  */
@@ -444,6 +448,7 @@ export async function resolverRechazoDelComercio(
   if (!s || s.status !== 'ACTIVE' || s.tokenVersion !== tokenVersion) return 'REINTENTAR'
   if (s.appKey !== 'COMERCIO') return revocar()
   if (plazo() < MIN_HTTP_MS) return 'REINTENTAR'
+  const pedidaEn = Date.now()
   const r = await pedirLlaveDeTienda(s, plazo())
   if (r === null || (!r.ok && r.motivo === 'TRANSITORIO')) return 'ESPERAR'
   if (!r.ok) return revocar(motivoDeRechazo(r))
@@ -452,8 +457,11 @@ export async function resolverRechazoDelComercio(
     return 'REINTENTAR'
   }
   // La MISMA llave a segundos de vencer (Shopify la devuelve así cerca del vencimiento diario): un 401 de la sonda sería del
-  // vencimiento y revocaría por error. Se espera: la siguiente vuelta ya trae la nueva.
-  if (r.expiresIn <= LLAVE_POR_VENCER_S) return 'ESPERAR'
+  // vencimiento y revocaría por error. Se espera: la siguiente vuelta ya trae la nueva. Codex C3: el vencimiento más temprano posible
+  // se cuenta desde que salió la petición (no desde que llegó la respuesta), y se vuelve a mirar antes de revocar por la sonda.
+  const venceLoAntes = pedidaEn + (r.expiresIn - LLAVE_POR_VENCER_S) * 1000
+  const pudoVencer = () => Date.now() >= venceLoAntes
+  if (pudoVencer()) return 'ESPERAR'
   if (plazo() < MIN_HTTP_MS) return 'REINTENTAR'
   const prueba = await shopifyGraphql<{ shop: { id: string } }>(
     s.shopDomain,
@@ -466,7 +474,9 @@ export async function resolverRechazoDelComercio(
     },
   )
   if (prueba.ok) return 'REINTENTAR'
-  return prueba.code === 'UNAUTHORIZED' ? revocar('ACCESO_RETIRADO') : 'ESPERAR'
+  if (prueba.code !== 'UNAUTHORIZED') return 'ESPERAR'
+  // Mientras la sonda viajaba la llave pudo vencer: su 401 no prueba que retiraron el acceso.
+  return pudoVencer() ? 'ESPERAR' : revocar('ACCESO_RETIRADO')
 }
 
 /**

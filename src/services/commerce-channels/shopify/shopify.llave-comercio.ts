@@ -2,8 +2,8 @@
 /**
  * 5a, «la app es del comercio» (spec 2026-10-11 §2): la llave de 24 h de la app que el comercio creó en SU Dev Dashboard, con
  * `grant_type=client_credentials`. Puro: sin base de datos y con `fetch` inyectable. El cuerpo de Shopify sólo se lee para
- * clasificar: nunca va a un mensaje ni al log. Lo que no se reconoce (un 4xx sin `error`, un 200 sin llave) NO se da por definitivo
- * (ruling P1 de la auditoría): se reintenta y deja un `logger.error` con el status y el código, para que se vea en Better Stack.
+ * clasificar: nunca va a un mensaje ni al log. Lo que no se reconoce (un 4xx sin `error` o con texto libre en él, un 200 sin llave) NO
+ * se da por definitivo (ruling P1 y Codex C1): se reintenta y deja un `logger.error` con el status, para que se vea en Better Stack.
  *
  * Medido en vivo el 11-oct: pedirla otra vez antes de que venza devuelve la MISMA llave con el tiempo que le queda; una nueva sólo
  * sale al vencer. Por eso renovarla es barato y no necesita candado (spec §4).
@@ -28,8 +28,8 @@ export type LlaveDelComercio =
   | { ok: false; motivo: MotivoLlave; codigoShopify?: string }
 
 const TRANSITORIO: LlaveDelComercio = { ok: false, motivo: 'TRANSITORIO' }
-/** El código de Shopify sólo si tiene forma de código (`invalid_request`): nunca texto libre. */
-const codigo = (x: unknown): string | undefined => (typeof x === 'string' && /^[a-z0-9_]{1,60}$/i.test(x) ? x : undefined)
+/** El código de Shopify sólo si tiene forma de código (`invalid_request`): nunca texto libre ni una palabra con mayúsculas. */
+const codigo = (x: unknown): string | undefined => (typeof x === 'string' && /^[a-z0-9_]{1,60}$/.test(x) ? x : undefined)
 /** Lo que no se reconoce se reintenta y queda en el log de errores SÓLO con el status y el código (nunca el cuerpo ni las llaves). */
 function noReconocida(status: number, codigoShopify: string | undefined): LlaveDelComercio {
   logger.error(
@@ -78,12 +78,13 @@ export async function pedirLlaveDelComercio(
   if (status === 404 && cuerpo?.errors === 'Not Found') return { ok: false, motivo: 'TIENDA_NO_EXISTE' }
   // Documentado (sin medir): «Oauth error shop_not_permitted: Client credentials cannot be performed on this shop.»
   if (texto.includes('shop_not_permitted')) return { ok: false, motivo: 'APP_DE_OTRA_ORGANIZACION' }
-  // Ruling P1: sólo un 4xx CON su `error` es un rechazo de las llaves; sin él (un proxy, una página de error) no se sabe nada.
-  if (typeof cuerpo?.error !== 'string') return noReconocida(status, undefined)
-  const error = codigo(cuerpo.error)
+  // Ruling P1 y Codex C1: sólo un 4xx cuyo `error` ES un código de Shopify es un rechazo de las llaves. Sin él, o con texto libre
+  // («Temporary upstream failure» de un proxy), no se sabe nada de las llaves: se reintenta, nunca se revoca.
+  const error = codigo(cuerpo?.error)
+  if (!error) return noReconocida(status, undefined)
   if (error === 'application_cannot_be_found') return { ok: false, motivo: 'CLIENT_ID_INVALIDO' }
-  if (error === 'invalid_request' && /client secret/i.test(String(cuerpo.error_description ?? ''))) {
+  if (error === 'invalid_request' && /client secret/i.test(String(cuerpo?.error_description ?? ''))) {
     return { ok: false, motivo: 'SECRET_INVALIDO' }
   }
-  return { ok: false, motivo: 'RECHAZADA', codigoShopify: error ?? 'SIN_CODIGO' }
+  return { ok: false, motivo: 'RECHAZADA', codigoShopify: error }
 }

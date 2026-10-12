@@ -69,12 +69,11 @@ describe('pedirLlaveDelComercio (5a)', () => {
       { error: 'invalid_request', error_description: 'Missing grant_type' },
       { ok: false, motivo: 'RECHAZADA', codigoShopify: 'invalid_request' },
     ],
-    [
-      '4xx con un error que no tiene forma de código',
-      400,
-      { error: 'Something went wrong here' },
-      { ok: false, motivo: 'RECHAZADA', codigoShopify: 'SIN_CODIGO' },
-    ],
+    // Auditoría Codex C1: un `error` que no es un código (texto libre, o una palabra con mayúsculas de un proxy) no prueba que las
+    // llaves estén mal: se reintenta, como un 4xx sin `error`. Antes era RECHAZADA:SIN_CODIGO y la tienda quedaba revocada.
+    ['4xx con un error que no tiene forma de código', 400, { error: 'Something went wrong here' }, { ok: false, motivo: 'TRANSITORIO' }],
+    ['403 con texto libre en `error` (Codex C1)', 403, { error: 'Temporary upstream failure' }, { ok: false, motivo: 'TRANSITORIO' }],
+    ['403 con una palabra que no es código', 403, { error: 'Forbidden' }, { ok: false, motivo: 'TRANSITORIO' }],
     // Ruling P1: un 4xx SIN un `error` reconocible (un proxy, una página de error) no es un rechazo de las llaves: se reintenta.
     ['4xx sin error (HTML de un proxy)', 403, '<html>Forbidden</html>', { ok: false, motivo: 'TRANSITORIO' }],
     ['404 que no es el de Shopify (HTML de un proxy)', 404, '<html>Not Found</html>', { ok: false, motivo: 'TRANSITORIO' }],
@@ -116,6 +115,17 @@ describe('pedirLlaveDelComercio (5a)', () => {
   it.each([408, 429, 500, 503])('🔴 riesgo 6: un %s es rutina (Shopify ocupado): se reintenta sin escribir en el log', async status => {
     expect(await pedir(jest.fn().mockResolvedValue(respuesta(status, '<html>')))).toEqual({ ok: false, motivo: 'TRANSITORIO' })
     for (const f of [logger.info, logger.warn, logger.error, logger.debug]) expect(f).not.toHaveBeenCalled()
+  })
+
+  it('🔴 Codex C1: un `error` de texto libre se reintenta y queda en el log de errores sólo con el status: el texto no se escribe', async () => {
+    const cuerpo = { error: `Temporary upstream failure ${SECRETO}`, error_description: 'shpat_24h' }
+    expect(await pedir(jest.fn().mockResolvedValue(respuesta(403, cuerpo)))).toEqual({ ok: false, motivo: 'TRANSITORIO' })
+    expect(logger.error).toHaveBeenCalledTimes(1)
+    const linea = String((logger.error as jest.Mock).mock.calls[0][0])
+    expect(linea).toContain('HTTP 403')
+    expect(linea).toContain('código ninguno')
+    const todo = JSON.stringify([logger.info, logger.warn, logger.error, logger.debug].map(f => (f as jest.Mock).mock.calls))
+    expect(todo).not.toMatch(/Temporary upstream|shpss_|shpat_/)
   })
 
   it('🔴 ruling P1 · riesgo 6: un 4xx que no se reconoce queda en el log de errores sólo con el status y el código: ni el cuerpo, ni el secret, ni la llave', async () => {
