@@ -27,6 +27,7 @@ import {
 } from './shopify.constants'
 import { appCredentials, encryptShopifyToken, isValidShopDomain, readIntentId, signIntentId, verifyOAuthQueryHmac } from './shopify.crypto'
 import { exchangeOAuthCode, shopifyGraphql, type ShopifyFailure, type ShopifyResult } from './shopify.graphql'
+import { pedirLlaveDelComercio, RENOVAR_ANTES_MS, type LlaveDelComercio } from './shopify.llave-comercio'
 import {
   cercoVigente,
   fetchLevels,
@@ -140,25 +141,7 @@ export async function startShopifyConnect(i: {
   if (!creds) throw new ServiceUnavailableError('Falta configurar la app de Shopify en el servidor', 'SHOPIFY_SIN_CREDENCIALES')
   const venue = await prisma.venue.findUnique({ where: { id: i.venueId }, select: { organizationId: true } })
   if (!venue) throw new NotFoundError('Sucursal no encontrada')
-  if (i.purpose === 'REAUTHORIZE') {
-    const link = await prisma.shopifyLocationLink.findUnique({
-      where: { venueId: i.venueId },
-      select: { status: true, store: { select: { shopDomain: true } } },
-    })
-    if (!link || link.status === 'DISCONNECTED' || link.store.shopDomain !== shop) {
-      throw new ConflictError('Esta sucursal no está conectada a esa tienda; usa «Conectar»', 'SHOPIFY_REAUTORIZAR_SIN_TIENDA')
-    }
-  } else {
-    // Catálogo maestro (spec §3, «no se soporta»): se dice ANTES de mandar al dueño a Shopify.
-    await prisma.$transaction(tx =>
-      assertLegacyCatalogGovernanceForVenue(tx, {
-        venueId: i.venueId,
-        operation: 'CREATE',
-        willBeVendable: true,
-        actor: SHOPIFY_SERVICE_ACTOR,
-      }),
-    )
-  }
+  await validarProposito(i.venueId, shop, i.purpose)
   const intent = await prisma.shopifyConnectIntent.create({
     data: {
       venueId: i.venueId,
@@ -185,6 +168,31 @@ export async function startShopifyConnect(i: {
   u.searchParams.set('redirect_uri', `${apiBase()}${SHOPIFY_OAUTH_CALLBACK_PATH}`)
   u.searchParams.set('state', signIntentId(intent.id))
   return { url: u.toString() }
+}
+
+/**
+ * Lo que cada propósito exige ANTES de mandar al dueño a Shopify (o de mandar las llaves de su app): REAUTHORIZE, la MISMA tienda
+ * ya conectada; CONNECT, el catálogo maestro (spec §3, «no se soporta»).
+ */
+async function validarProposito(venueId: string, shop: string, purpose: ShopifyIntentPurpose): Promise<void> {
+  if (purpose === 'REAUTHORIZE') {
+    const link = await prisma.shopifyLocationLink.findUnique({
+      where: { venueId },
+      select: { status: true, store: { select: { shopDomain: true } } },
+    })
+    if (!link || link.status === 'DISCONNECTED' || link.store.shopDomain !== shop) {
+      throw new ConflictError('Esta sucursal no está conectada a esa tienda; usa «Conectar»', 'SHOPIFY_REAUTORIZAR_SIN_TIENDA')
+    }
+    return
+  }
+  await prisma.$transaction(tx =>
+    assertLegacyCatalogGovernanceForVenue(tx, {
+      venueId,
+      operation: 'CREATE',
+      willBeVendable: true,
+      actor: SHOPIFY_SERVICE_ACTOR,
+    }),
+  )
 }
 
 /**
@@ -230,7 +238,7 @@ export async function handleShopifyCallback(
   }
   if (intent.purpose === 'REAUTHORIZE') {
     try {
-      return await reautorizar(intent, venue.organizationId, r.data, pagina)
+      return (await reautorizar(intent, venue.organizationId, r.data)) ? `${pagina}?reautorizada=1` : error('TIENDA')
     } catch (err) {
       // Un intent EXCHANGING para siempre es un callejón: queda FAILED y el dueño vuelve a empezar.
       logger.error(`[SHOPIFY] reautorizar ${intent.shopDomain}: ${(err as Error).message}`)
@@ -250,14 +258,22 @@ export async function handleShopifyCallback(
   return `${pagina}?intent=${encodeURIComponent(query.state)}`
 }
 
+/** 5a: lo de la app del comercio que viaja del intent a la tienda; en PILOTO todo es null (cambiar de método limpia lo otro). */
+type CredencialesDelComercio = { clientId: string | null; clientSecretCiphertext: Uint8Array | null; accessTokenExpiresAt: Date | null }
+const credencialesDe = (intent: ShopifyConnectIntent): CredencialesDelComercio => ({
+  clientId: intent.clientId,
+  clientSecretCiphertext: intent.clientSecretCiphertext,
+  accessTokenExpiresAt: intent.tokenExpiresAt,
+})
+
 /**
  * §11.4: la ÚNICA forma de dejar una credencial nueva en una tienda que ya existe (CONNECT y REAUTHORIZE), dentro de la
  * tx de quien llama.
  * - Candados (R6/S4, §10.3): TODAS las sucursales de la tienda por id —también las desconectadas, K10 les limpia
  *   FALTA_PERMISO— y después la tienda. `FOR NO KEY UPDATE`: choca con el FOR SHARE de diferir, del drenado y del cerco
  *   (S5), y no frena a quien inserte una pareja con llave a la sucursal.
- * - Tienda: token, permisos, `authorizedAt` (en la MISMA tx que `tokenVersion++`: la desinstalación por hora de origen
- *   depende de eso, S3, §10.6) y ACTIVE.
+ * - Tienda: token, permisos, las llaves de la app del comercio (5a: null al volver a PILOTO), `authorizedAt` (en la MISMA
+ *   tx que `tokenVersion++`: la desinstalación por hora de origen depende de eso, S3, §10.6) y ACTIVE.
  * - Sucursales vivas: webhooks otra vez (tras desinstalar, Shopify borró las suscripciones), el drenado de lo diferido
  *   (§10.5, S2) y una vuelta del cuadre. La fase y la generación no se tocan.
  * - K10 / BR-8: lo que murió por falta de permiso EN LA GENERACIÓN VIGENTE de su sucursal vuelve a salir (no ambiguo ⇒
@@ -268,7 +284,7 @@ export async function handleShopifyCallback(
 async function renovarCredencial(
   tx: Prisma.TransactionClient,
   storeId: string,
-  d: { tokenCiphertext: Uint8Array; scopes: string; appKey: ShopifyAppKey },
+  d: { tokenCiphertext: Uint8Array; scopes: string; appKey: ShopifyAppKey } & CredencialesDelComercio,
 ): Promise<{ tokenVersion: number; sucursales: number; reencoladas: number }> {
   const ahora = new Date()
   // ponytail: las sucursales de UNA tienda son un puñado; el tope es defensa (el mismo de A). Por tandas si alguna pasa de 1000.
@@ -280,6 +296,9 @@ async function renovarCredencial(
       accessTokenCiphertext: d.tokenCiphertext,
       scopes: d.scopes,
       appKey: d.appKey,
+      clientId: d.clientId,
+      clientSecretCiphertext: d.clientSecretCiphertext,
+      accessTokenExpiresAt: d.accessTokenExpiresAt,
       status: 'ACTIVE',
       revokedAt: null,
       authorizedAt: ahora,
@@ -302,26 +321,29 @@ async function renovarCredencial(
   return { tokenVersion: tienda.tokenVersion, sucursales: enlaces.length, reencoladas }
 }
 
-/** Token nuevo para una tienda ya conectada (§3 tienda: REVOKED → ACTIVE con tokenVersion++), vía `renovarCredencial`. */
+/**
+ * Token nuevo para una tienda ya conectada (§3 tienda: REVOKED → ACTIVE con tokenVersion++), vía `renovarCredencial`, con las
+ * llaves del intent. `false` = la tienda no es de esta organización (el intent queda FAILED).
+ */
 async function reautorizar(
   intent: ShopifyConnectIntent,
   organizationId: string,
   datos: { accessToken: string; scope: string },
-  pagina: string,
-): Promise<string> {
+): Promise<boolean> {
   const store = await prisma.shopifyStore.findUnique({
     where: { shopDomain: intent.shopDomain },
     select: { id: true, organizationId: true },
   })
   if (!store || store.organizationId !== organizationId) {
     await prisma.shopifyConnectIntent.updateMany({ where: { id: intent.id, status: 'EXCHANGING' }, data: { status: 'FAILED' } })
-    return `${pagina}?error=TIENDA`
+    return false
   }
   const r = await prisma.$transaction(async tx => {
     const renovada = await renovarCredencial(tx, store.id, {
       tokenCiphertext: encryptShopifyToken(datos.accessToken),
       scopes: datos.scope,
       appKey: intent.appKey,
+      ...credencialesDe(intent),
     })
     await tx.shopifyConnectIntent.updateMany({ where: { id: intent.id, status: 'EXCHANGING' }, data: { status: 'CONSUMED' } })
     return renovada
@@ -335,7 +357,123 @@ async function reautorizar(
     entityId: store.id,
     data: r,
   })
-  return `${pagina}?reautorizada=1`
+  return true
+}
+
+/** 5a: lo que Shopify dijo de las llaves, con su código y qué hacer (spec §3.3). El secret nunca va en el texto. */
+function llavesRechazadas(r: Extract<LlaveDelComercio, { ok: false }>): never {
+  switch (r.motivo) {
+    case 'TRANSITORIO':
+      throw new ServiceUnavailableError('Shopify no respondió; intenta de nuevo', 'SHOPIFY_NO_RESPONDE')
+    case 'SECRET_INVALIDO':
+      throw new ValidationError(
+        'Shopify no reconoce ese Client Secret. Cópialo otra vez desde tu app en Shopify y pégalo completo.',
+        'SHOPIFY_APP_SECRET_INVALIDO',
+      )
+    case 'CLIENT_ID_INVALIDO':
+      throw new ValidationError(
+        'Shopify no encuentra una app con ese Client ID. Cópialo otra vez desde tu app en Shopify.',
+        'SHOPIFY_APP_CLIENT_ID_INVALIDO',
+      )
+    case 'APP_DE_OTRA_ORGANIZACION':
+      throw new ValidationError(
+        'Esa app no es de la misma organización de Shopify que tu tienda: créala con la cuenta dueña de la tienda y vuelve a pegar sus llaves.',
+        'SHOPIFY_APP_OTRA_ORGANIZACION',
+      )
+    case 'TIENDA_NO_EXISTE':
+      throw new ValidationError(
+        'Shopify no encuentra esa tienda. Revisa el dominio: termina en .myshopify.com.',
+        'SHOPIFY_TIENDA_NO_EXISTE',
+      )
+    default:
+      throw new ValidationError(
+        `Shopify rechazó las llaves de tu app (${r.codigoShopify ?? 'sin código'}). Revisa que la app esté instalada en tu tienda y vuelve a intentar.`,
+        'SHOPIFY_APP_RECHAZADA',
+      )
+  }
+}
+
+/**
+ * 5a (spec 2026-10-11 §3): conectar (CONNECT) o cambiar las llaves (REAUTHORIZE) con la app que el comercio creó en SU Dev
+ * Dashboard. Antes de crear nada: el candado propio, el dominio y el propósito (los de hoy) y la llave de 24 h con sus permisos. El
+ * intent nace con las llaves cifradas y el vencimiento de 15 min de hoy; de ahí sigue el camino de siempre: CONNECT devuelve el
+ * intent (ubicación → confirmar, como tras el callback); REAUTHORIZE sigue en el acto el del callback (`reautorizar`). Nunca registra,
+ * guarda en claro ni devuelve el secret ni la llave.
+ */
+export async function conectarConAppDelComercio(i: {
+  venueId: string
+  authUserId: string
+  shopDomain: string
+  clientId: string
+  clientSecret: string
+  purpose: ShopifyIntentPurpose
+}): Promise<{ intent: string } | { reautorizada: true }> {
+  const shop = String(i.shopDomain ?? '')
+    .trim()
+    .toLowerCase()
+  if (!isValidShopDomain(shop))
+    throw new BadRequestError('Escribe el dominio de tu tienda, el que termina en .myshopify.com', 'SHOPIFY_DOMINIO_INVALIDO')
+  if (!(await puedeConectarConAppPropia(i.venueId))) {
+    throw new ForbiddenError(
+      'Conectar con la app de tu tienda todavía es por invitación. Escríbenos y la activamos para este negocio.',
+      'SHOPIFY_APP_PROPIA_SIN_INVITACION',
+    )
+  }
+  const venue = await prisma.venue.findUnique({ where: { id: i.venueId }, select: { organizationId: true } })
+  if (!venue) throw new NotFoundError('Sucursal no encontrada')
+  await validarProposito(i.venueId, shop, i.purpose)
+  const clientId = i.clientId.trim()
+  const clientSecret = i.clientSecret.trim()
+  const r = await pedirLlaveDelComercio({ shop, clientId, clientSecret })
+  if (!r.ok) llavesRechazadas(r)
+  const faltan = faltanPermisos(r.scope)
+  if (faltan.length > 0) {
+    throw new ValidationError(
+      `A tu app le faltan estos permisos: ${faltan.join(', ')}. Agrégalos a tu app, publica una versión y apruébala en tu tienda; después vuelve a conectar.`,
+      'SHOPIFY_APP_FALTAN_PERMISOS',
+      { faltan },
+    )
+  }
+  const ahora = Date.now()
+  const intent = await prisma.shopifyConnectIntent.create({
+    data: {
+      venueId: i.venueId,
+      authUserId: i.authUserId,
+      shopDomain: shop,
+      appKey: 'COMERCIO',
+      purpose: i.purpose,
+      // CONNECT queda como tras el callback (listo para elegir la ubicación); REAUTHORIZE, como a media vuelta del callback.
+      status: i.purpose === 'REAUTHORIZE' ? 'EXCHANGING' : 'EXCHANGED',
+      tokenCiphertext: encryptShopifyToken(r.token),
+      scopes: r.scope,
+      clientId,
+      clientSecretCiphertext: encryptShopifyToken(clientSecret),
+      tokenExpiresAt: new Date(ahora + r.expiresIn * 1000),
+      expiresAt: new Date(ahora + SELECCION_TTL_MS),
+    },
+  })
+  logAction({
+    venueId: i.venueId,
+    organizationId: venue.organizationId,
+    staffId: i.authUserId,
+    action: 'SHOPIFY_CONNECT_STARTED',
+    entity: 'ShopifyConnectIntent',
+    entityId: intent.id,
+    data: { metodo: 'APP_DEL_COMERCIO', shopDomain: shop },
+  })
+  if (i.purpose === 'CONNECT') return { intent: signIntentId(intent.id) }
+  let reautorizada: boolean
+  try {
+    reautorizada = await reautorizar(intent, venue.organizationId, { accessToken: r.token, scope: r.scope })
+  } catch (err) {
+    // Como en el callback: un intent EXCHANGING para siempre es un callejón. Queda FAILED y el error sigue a quien llamó.
+    await prisma.shopifyConnectIntent.updateMany({ where: { id: intent.id, status: 'EXCHANGING' }, data: { status: 'FAILED' } })
+    throw err
+  }
+  if (!reautorizada) {
+    throw new ConflictError('Esta sucursal no está conectada a esa tienda; usa «Conectar»', 'SHOPIFY_REAUTORIZAR_SIN_TIENDA')
+  }
+  return { reautorizada: true }
 }
 
 type IntentListo = ShopifyConnectIntent & { tokenCiphertext: Uint8Array }
@@ -361,6 +499,38 @@ function tokenDe(intent: IntentListo): string {
   const token = leerToken({ id: intent.id, accessTokenCiphertext: intent.tokenCiphertext })
   if (token === null) throw new ServiceUnavailableError('Falta configurar la app de Shopify en el servidor', 'SHOPIFY_SIN_CREDENCIALES')
   return token
+}
+
+/**
+ * 5a (ruling P2-4 de la auditoría): la llave del intent para leer ubicaciones o confirmar. La de la app del comercio dura 24 h y el
+ * asistente puede quedarse abierto: si le queda menos de `RENOVAR_ANTES_MS` (o `forzar`, tras un 401) se pide otra con las llaves
+ * del PROPIO intent y se guarda en él (en la base y en memoria: confirmar la copia a la tienda). El piloto, como siempre.
+ */
+async function tokenDelIntent(intent: IntentListo, forzar = false): Promise<string> {
+  if (intent.appKey !== 'COMERCIO') return tokenDe(intent)
+  if (!forzar && intent.tokenExpiresAt && intent.tokenExpiresAt.getTime() > Date.now() + RENOVAR_ANTES_MS) return tokenDe(intent)
+  const secreto = intent.clientSecretCiphertext ? leerToken({ id: intent.id, accessTokenCiphertext: intent.clientSecretCiphertext }) : null
+  if (!intent.clientId || secreto === null) {
+    throw new ServiceUnavailableError('Falta configurar la app de Shopify en el servidor', 'SHOPIFY_SIN_CREDENCIALES')
+  }
+  const r = await pedirLlaveDelComercio({ shop: intent.shopDomain, clientId: intent.clientId, clientSecret: secreto })
+  if (!r.ok) llavesRechazadas(r)
+  const tokenCiphertext = encryptShopifyToken(r.token)
+  const tokenExpiresAt = new Date(Date.now() + r.expiresIn * 1000)
+  await prisma.shopifyConnectIntent.updateMany({ where: { id: intent.id, status: 'EXCHANGED' }, data: { tokenCiphertext, tokenExpiresAt } })
+  intent.tokenCiphertext = tokenCiphertext
+  intent.tokenExpiresAt = tokenExpiresAt
+  return r.token
+}
+
+/**
+ * 5a: una lectura de Shopify con la llave del intent. Con la app del comercio un 401 puede ser sólo la llave de 24 h vencida a media
+ * vuelta: se pide otra UNA vez y se repite la misma lectura; un segundo 401 ya no se repite (sale como hoy).
+ */
+async function conTokenDelIntent<T>(intent: IntentListo, leer: (token: string) => Promise<ShopifyResult<T>>): Promise<ShopifyResult<T>> {
+  const r = await leer(await tokenDelIntent(intent))
+  if (r.ok || r.code !== 'UNAUTHORIZED' || intent.appKey !== 'COMERCIO') return r
+  return leer(await tokenDelIntent(intent, true))
 }
 
 /** Con el token de un intent todavía no hay tienda que avisar: falta un permiso ⇒ 403 que la página explica (§9.5). */
@@ -414,17 +584,12 @@ export async function listIntentLocations(
 ): Promise<Array<{ id: string; name: string; countryCode: string | null }>> {
   const intent = await intentListo(i)
   const graphql = deps.graphql ?? shopifyGraphql
-  const token = tokenDe(intent)
   const out: Array<{ id: string; name: string; countryCode: string | null }> = []
   let after: string | null = null
   for (let pagina = 0; pagina < MAX_PAGINAS_UBICACIONES; pagina++) {
     // Tipo explícito: `after` sale de `r` en la vuelta anterior y TS no puede inferirlo (TS7022).
-    const r: ShopifyResult<PaginaUbicaciones> = await graphql<PaginaUbicaciones>(
-      intent.shopDomain,
-      token,
-      QUERY_UBICACIONES,
-      { after },
-      { validate: paginaUbicacionesDe(after) },
+    const r: ShopifyResult<PaginaUbicaciones> = await conTokenDelIntent(intent, token =>
+      graphql<PaginaUbicaciones>(intent.shopDomain, token, QUERY_UBICACIONES, { after }, { validate: paginaUbicacionesDe(after) }),
     )
     if (!r.ok) fallaDeIntent(r)
     for (const l of r.data.locations.nodes)
@@ -476,12 +641,8 @@ export async function confirmShopifyConnect(
 ): Promise<{ locationLinkId: string }> {
   const intent = await intentListo(i)
   const graphql = deps.graphql ?? shopifyGraphql
-  const r = await graphql<Confirmacion>(
-    intent.shopDomain,
-    tokenDe(intent),
-    QUERY_CONFIRMAR,
-    { id: i.locationId },
-    { validate: confirmacionDe(i.locationId) },
+  const r = await conTokenDelIntent(intent, token =>
+    graphql<Confirmacion>(intent.shopDomain, token, QUERY_CONFIRMAR, { id: i.locationId }, { validate: confirmacionDe(i.locationId) }),
   )
   if (!r.ok) fallaDeIntent(r)
   const ubicacion = r.data.location
@@ -528,6 +689,7 @@ export async function confirmShopifyConnect(
             tokenCiphertext: intent.tokenCiphertext,
             scopes: intent.scopes ?? '',
             appKey: intent.appKey,
+            ...credencialesDe(intent),
           })
       if (!reconecta) return { renovada, reprogramadas: 0 }
       // Sucursal antes que sus filas (§10.3); `renovarCredencial` ya la bloqueó con las demás de la tienda.
@@ -648,6 +810,7 @@ async function tiendaDe(
           accessTokenCiphertext: intent.tokenCiphertext,
           scopes: intent.scopes ?? '',
           authorizedAt: new Date(),
+          ...credencialesDe(intent),
         },
       ],
       skipDuplicates: true,

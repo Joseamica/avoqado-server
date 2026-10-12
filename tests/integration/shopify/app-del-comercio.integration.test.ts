@@ -9,11 +9,31 @@ jest.mock('@/config/env', () => {
   return { ...real, env: { ...real.env, BASE_URL: 'https://api.test', FRONTEND_URL: 'https://dash.test' } }
 })
 
+import crypto from 'crypto'
 import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
+import logger from '@/config/logger'
 import { logAction } from '@/services/dashboard/activity-log.service'
-import { puedeConectarConAppPropia, startShopifyConnect } from '@/services/commerce-channels/shopify/shopify.connect.service'
-import { assertTestDatabase, crearEscenarioShopify, EscenarioShopify, limpiarEscenarioShopify } from './fixtures'
+import { SHOPIFY_SCOPES } from '@/services/commerce-channels/shopify/shopify.constants'
+import { decryptShopifyToken } from '@/services/commerce-channels/shopify/shopify.crypto'
+import {
+  conectarConAppDelComercio,
+  confirmShopifyConnect,
+  handleShopifyCallback,
+  listIntentLocations,
+  puedeConectarConAppPropia,
+  registerShopifyWebhooks,
+  startShopifyConnect,
+} from '@/services/commerce-channels/shopify/shopify.connect.service'
+import {
+  assertTestDatabase,
+  crearEscenarioShopify,
+  EscenarioShopify,
+  graphqlFalso,
+  limpiarEscenarioShopify,
+  UBICACION_PRUEBA,
+} from './fixtures'
+import { CLIENT_ID_PRUEBA, falla, LLAVE_OK, quitarFetch, SECRET_MALO, SECRET_PRUEBA, shopifyPorFetch } from './fixturesB'
 
 jest.setTimeout(120_000)
 const SECRETO = 'secreto-app-piloto'
@@ -38,6 +58,7 @@ beforeEach(() => {
   ;(logAction as jest.Mock).mockClear()
 })
 afterEach(async () => {
+  quitarFetch()
   for (const e of escenarios) await limpiarEscenarioShopify(e)
   escenarios = []
 })
@@ -105,5 +126,344 @@ describe('5a · el candado propio (riesgo 4)', () => {
     expect((await startShopifyConnect({ ...i, shopDomain: 'otra.myshopify.com' })).url).toContain(
       'https://otra.myshopify.com/admin/oauth/authorize',
     )
+  })
+})
+
+/** Lo que manda la página: las llaves de la app de la tienda para conectar (o, con REAUTHORIZE, para cambiarlas). */
+const llaves = (e: EscenarioShopify, o: { dominio?: string; purpose?: 'CONNECT' | 'REAUTHORIZE' } = {}) => ({
+  venueId: e.venueId,
+  authUserId: e.staffId,
+  shopDomain: o.dominio ?? e.shopDomain,
+  clientId: CLIENT_ID_PRUEBA,
+  clientSecret: SECRET_PRUEBA,
+  purpose: o.purpose ?? ('CONNECT' as const),
+})
+const sinConexion = async (e: EscenarioShopify) => {
+  await prisma.shopifyVariantLink.deleteMany({ where: { venueId: e.venueId } })
+  await prisma.shopifyLocationLink.deleteMany({ where: { venueId: e.venueId } })
+}
+const tienda = (e: EscenarioShopify) => prisma.shopifyStore.findUniqueOrThrow({ where: { id: e.storeId } })
+const sucursal = (e: EscenarioShopify) => prisma.shopifyLocationLink.findUniqueOrThrow({ where: { venueId: e.venueId } })
+const intents = (e: EscenarioShopify) => prisma.shopifyConnectIntent.count({ where: { venueId: e.venueId } })
+const registros = () => JSON.stringify([logger.info, logger.warn, logger.error, logger.debug].map(f => (f as jest.Mock).mock.calls))
+const comoError = (err: { message: string; code?: string; details?: unknown }) => ({
+  message: err.message,
+  code: err.code,
+  details: err.details,
+})
+/** Firma una consulta del callback como Shopify (los mismos campos más `hmac`). */
+const firmarConsulta = <Q extends Record<string, string>>(q: Q): Q & { hmac: string } => {
+  const msg = Object.keys(q)
+    .sort()
+    .map(k => `${k}=${q[k]}`)
+    .join('&')
+  return { ...q, hmac: crypto.createHmac('sha256', SECRETO).update(msg).digest('hex') }
+}
+const ubicaciones = () =>
+  graphqlFalso((q, vars) =>
+    q.includes('Ubicaciones')
+      ? {
+          ok: true,
+          data: {
+            locations: {
+              pageInfo: { hasNextPage: false, endCursor: null },
+              nodes: [{ id: UBICACION_PRUEBA, name: 'Centro', isActive: true, address: { countryCode: 'MX' } }],
+            },
+          },
+        }
+      : { ok: true, data: { location: { id: vars.id, name: 'Centro', isActive: true } } },
+  )
+
+describe('5a · conectar con las llaves de la app de la tienda', () => {
+  it('🔴 CONNECT (Review Focus 1: espacios y mayúsculas): pide la llave con las llaves recortadas, deja el intent EXCHANGED con todo cifrado y sigue como tras el callback; la tienda nace COMERCIO con sus llaves', async () => {
+    const e = await escenario()
+    await sinConexion(e)
+    await conCortesia(e)
+    const dominio = `nueva-${e.venueId.slice(-10)}.myshopify.com`
+    const f = shopifyPorFetch({ llave: () => LLAVE_OK('shpat_conectar') })
+    const r = await conectarConAppDelComercio({
+      ...llaves(e),
+      shopDomain: `  ${dominio.toUpperCase()} `,
+      clientId: ` ${CLIENT_ID_PRUEBA}\n`,
+      clientSecret: `  ${SECRET_PRUEBA} `,
+    })
+    if (!('intent' in r)) throw new Error('se esperaba el intent')
+    expect(r.intent).toMatch(/^c[a-z0-9]+\.[0-9a-f]{64}$/)
+    expect(f.mock.calls[0][0]).toBe(`https://${dominio}/admin/oauth/access_token`)
+    expect(Object.fromEntries(new URLSearchParams(f.mock.calls[0][1].body))).toEqual({
+      grant_type: 'client_credentials',
+      client_id: CLIENT_ID_PRUEBA,
+      client_secret: SECRET_PRUEBA,
+    })
+    const intent = await prisma.shopifyConnectIntent.findFirstOrThrow({ where: { venueId: e.venueId } })
+    expect(intent).toMatchObject({
+      appKey: 'COMERCIO',
+      purpose: 'CONNECT',
+      status: 'EXCHANGED',
+      shopDomain: dominio,
+      clientId: CLIENT_ID_PRUEBA,
+    })
+    expect(decryptShopifyToken(intent.clientSecretCiphertext!)).toBe(SECRET_PRUEBA)
+    expect(decryptShopifyToken(intent.tokenCiphertext!)).toBe('shpat_conectar')
+    expect(intent.tokenExpiresAt!.getTime()).toBeGreaterThan(Date.now() + 86_000_000)
+    expect(intent.expiresAt.getTime()).toBeLessThanOrEqual(Date.now() + 15 * 60_000)
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'SHOPIFY_CONNECT_STARTED',
+        entityId: intent.id,
+        staffId: e.staffId,
+        data: { metodo: 'APP_DEL_COMERCIO', shopDomain: dominio },
+      }),
+    )
+    // De aquí, el camino de siempre: las ubicaciones con la llave del intent y confirmar crea la tienda con sus llaves.
+    const graphql = ubicaciones()
+    expect(await listIntentLocations({ venueId: e.venueId, authUserId: e.staffId, intent: r.intent }, { graphql })).toEqual([
+      { id: UBICACION_PRUEBA, name: 'Centro', countryCode: 'MX' },
+    ])
+    expect(graphql.mock.calls[0][1]).toBe('shpat_conectar')
+    await confirmShopifyConnect({ venueId: e.venueId, authUserId: e.staffId, intent: r.intent, locationId: UBICACION_PRUEBA }, { graphql })
+    const nueva = await prisma.shopifyStore.findUniqueOrThrow({ where: { shopDomain: dominio } })
+    expect(nueva).toMatchObject({ appKey: 'COMERCIO', clientId: CLIENT_ID_PRUEBA, status: 'ACTIVE', tokenVersion: 1 })
+    expect(decryptShopifyToken(nueva.clientSecretCiphertext!)).toBe(SECRET_PRUEBA)
+    expect(decryptShopifyToken(nueva.accessTokenCiphertext)).toBe('shpat_conectar')
+    expect(nueva.accessTokenExpiresAt!.getTime()).toBe(intent.tokenExpiresAt!.getTime())
+  })
+
+  it.each([
+    ['secret malo', 422, 'SHOPIFY_APP_SECRET_INVALIDO', SECRET_MALO],
+    [
+      'Client ID malo',
+      422,
+      'SHOPIFY_APP_CLIENT_ID_INVALIDO',
+      {
+        status: 400,
+        body: {
+          error: 'application_cannot_be_found',
+          error_description: 'Could not find Shopify API application with api_key 00000000000000000000000000000000',
+        },
+      },
+    ],
+    [
+      'app de otra organización',
+      422,
+      'SHOPIFY_APP_OTRA_ORGANIZACION',
+      { status: 400, body: 'Oauth error shop_not_permitted: Client credentials cannot be performed on this shop.' },
+    ],
+    ['tienda inexistente', 422, 'SHOPIFY_TIENDA_NO_EXISTE', { status: 404, body: { errors: 'Not Found' } }],
+    ['otro rechazo', 422, 'SHOPIFY_APP_RECHAZADA', { status: 400, body: { error: 'invalid_scope' } }],
+    ['Shopify sin contestar', 503, 'SHOPIFY_NO_RESPONDE', { status: 503, body: 'x' }],
+  ] as const)('🔴 %s ⇒ %i %s y no se crea nada', async (_caso, statusCode, code, contesta) => {
+    const e = await escenario()
+    await conCortesia(e)
+    shopifyPorFetch({ llave: () => contesta })
+    await expect(conectarConAppDelComercio(llaves(e))).rejects.toMatchObject({ statusCode, code })
+    expect(await intents(e)).toBe(0)
+    expect(logAction).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'SHOPIFY_CONNECT_STARTED' }))
+  })
+
+  it('🔴 faltan permisos ⇒ 422 SHOPIFY_APP_FALTAN_PERMISOS con la lista y qué hacer; no se crea nada', async () => {
+    const e = await escenario()
+    await conCortesia(e)
+    shopifyPorFetch({ llave: () => ({ status: 200, body: { access_token: 'shpat_x', scope: 'read_products', expires_in: 86399 } }) })
+    await expect(conectarConAppDelComercio(llaves(e))).rejects.toMatchObject({
+      statusCode: 422,
+      code: 'SHOPIFY_APP_FALTAN_PERMISOS',
+      message: expect.stringContaining('publica una versión y apruébala en tu tienda'),
+      details: { faltan: ['write_products', 'read_inventory', 'write_inventory', 'read_locations', 'read_orders', 'read_fulfillments'] },
+    })
+    expect(await intents(e)).toBe(0)
+  })
+
+  it('🔴 Review Focus 2: sin la invitación vigente ⇒ 403 SHOPIFY_APP_PROPIA_SIN_INVITACION que dice a quién pedirla, y nada sale a Shopify; un dominio que no es de Shopify ⇒ 400', async () => {
+    const e = await escenario()
+    const f = shopifyPorFetch({ llave: () => LLAVE_OK() })
+    await expect(conectarConAppDelComercio(llaves(e))).rejects.toMatchObject({
+      statusCode: 403,
+      code: 'SHOPIFY_APP_PROPIA_SIN_INVITACION',
+      message: expect.stringContaining('Escríbenos'),
+    })
+    await expect(conectarConAppDelComercio(llaves(e, { purpose: 'REAUTHORIZE' }))).rejects.toMatchObject({
+      code: 'SHOPIFY_APP_PROPIA_SIN_INVITACION',
+    })
+    await conCortesia(e)
+    await expect(conectarConAppDelComercio(llaves(e, { dominio: 'evil.com' }))).rejects.toMatchObject({
+      statusCode: 400,
+      code: 'SHOPIFY_DOMINIO_INVALIDO',
+    })
+    expect(f).not.toHaveBeenCalled()
+  })
+
+  it('🔴 Review Focus 5: «Cambiar llaves» con el dominio de OTRA tienda ⇒ 409 SHOPIFY_REAUTORIZAR_SIN_TIENDA y el secret no viaja', async () => {
+    const e = await escenario()
+    await conCortesia(e)
+    const f = shopifyPorFetch({ llave: () => LLAVE_OK() })
+    await expect(
+      conectarConAppDelComercio(llaves(e, { dominio: 'otra-tienda.myshopify.com', purpose: 'REAUTHORIZE' })),
+    ).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'SHOPIFY_REAUTORIZAR_SIN_TIENDA',
+    })
+    expect(f).not.toHaveBeenCalled()
+    expect(await intents(e)).toBe(0)
+  })
+
+  it('🔴 riesgo 6: el secret (ni la llave) no sale en ninguna respuesta, ni en ActivityLog, ni en el log', async () => {
+    const e = await escenario()
+    await conCortesia(e)
+    for (const f of [logger.info, logger.warn, logger.error, logger.debug]) (f as jest.Mock).mockClear()
+    shopifyPorFetch({ llave: () => LLAVE_OK('shpat_no_se_ve') })
+    const bien = await conectarConAppDelComercio(llaves(e))
+    shopifyPorFetch({ llave: () => SECRET_MALO })
+    const mal = await conectarConAppDelComercio(llaves(e)).catch(comoError)
+    shopifyPorFetch({ llave: () => ({ status: 200, body: { access_token: 'shpat_no_se_ve', scope: 'read_products', expires_in: 86399 } }) })
+    const permisos = await conectarConAppDelComercio(llaves(e)).catch(comoError)
+    for (const visto of [JSON.stringify([bien, mal, permisos]), JSON.stringify((logAction as jest.Mock).mock.calls), registros()]) {
+      expect(visto).not.toContain(SECRET_PRUEBA)
+      expect(visto).not.toContain('shpat_no_se_ve')
+    }
+    const intent = await prisma.shopifyConnectIntent.findFirstOrThrow({ where: { venueId: e.venueId } })
+    expect(Buffer.from(intent.clientSecretCiphertext!).toString('utf8')).not.toContain(SECRET_PRUEBA)
+    expect(Buffer.from(intent.tokenCiphertext!).toString('utf8')).not.toContain('shpat_no_se_ve')
+  })
+
+  it('🔴 ruling P2-4: la llave del intent vence a medio asistente: ubicaciones y confirmar piden otra con las llaves del intent, la guardan y la tienda nace con la vigente; un 401 se repite UNA vez', async () => {
+    const e = await escenario()
+    await sinConexion(e)
+    await conCortesia(e)
+    const dominio = `vence-${e.venueId.slice(-10)}.myshopify.com`
+    shopifyPorFetch({ llave: () => LLAVE_OK('shpat_primera') })
+    const r = await conectarConAppDelComercio({ ...llaves(e), shopDomain: dominio })
+    if (!('intent' in r)) throw new Error('se esperaba el intent')
+    // El dueño se tardó: a la llave del intent le queda menos de un minuto.
+    await prisma.shopifyConnectIntent.updateMany({ where: { venueId: e.venueId }, data: { tokenExpiresAt: new Date(Date.now() + 30_000) } })
+    const pide = shopifyPorFetch({ llave: () => LLAVE_OK('shpat_segunda') })
+    const lista = ubicaciones()
+    await listIntentLocations({ venueId: e.venueId, authUserId: e.staffId, intent: r.intent }, { graphql: lista })
+    expect(lista.mock.calls[0][1]).toBe('shpat_segunda')
+    expect(Object.fromEntries(new URLSearchParams(pide.mock.calls[0][1].body))).toMatchObject({
+      client_id: CLIENT_ID_PRUEBA,
+      client_secret: SECRET_PRUEBA,
+    })
+    const intent = await prisma.shopifyConnectIntent.findFirstOrThrow({ where: { venueId: e.venueId } })
+    expect(decryptShopifyToken(intent.tokenCiphertext!)).toBe('shpat_segunda')
+    expect(intent.tokenExpiresAt!.getTime()).toBeGreaterThan(Date.now() + 86_000_000)
+    // Se vuelve a tardar entre elegir y confirmar: confirmar pide otra antes de usarla; y si Shopify aun así dice 401 (la llave
+    // venció justo ahí), se pide otra UNA vez, se repite y la tienda nace con la última.
+    await prisma.shopifyConnectIntent.updateMany({ where: { venueId: e.venueId }, data: { tokenExpiresAt: new Date(Date.now() + 30_000) } })
+    const otras = ['shpat_tercera', 'shpat_cuarta']
+    shopifyPorFetch({ llave: () => LLAVE_OK(otras.shift()) })
+    let vez = 0
+    const con401 = graphqlFalso((_q, vars) =>
+      vez++ === 0 ? falla('UNAUTHORIZED', false, false) : { ok: true, data: { location: { id: vars.id, name: 'Centro', isActive: true } } },
+    )
+    await confirmShopifyConnect(
+      { venueId: e.venueId, authUserId: e.staffId, intent: r.intent, locationId: UBICACION_PRUEBA },
+      { graphql: con401 },
+    )
+    expect(con401.mock.calls.map(c => c[1])).toEqual(['shpat_tercera', 'shpat_cuarta'])
+    const nueva = await prisma.shopifyStore.findUniqueOrThrow({ where: { shopDomain: dominio } })
+    expect(decryptShopifyToken(nueva.accessTokenCiphertext)).toBe('shpat_cuarta')
+    expect(nueva.accessTokenExpiresAt!.getTime()).toBeGreaterThan(Date.now() + 86_000_000)
+  })
+
+  it('un segundo 401 al confirmar ya no se repite: 503 SHOPIFY_NO_RESPONDE y no nace ninguna tienda', async () => {
+    const e = await escenario()
+    await sinConexion(e)
+    await conCortesia(e)
+    const dominio = `otro401-${e.venueId.slice(-10)}.myshopify.com`
+    shopifyPorFetch({ llave: () => LLAVE_OK('shpat_primera') })
+    const r = await conectarConAppDelComercio({ ...llaves(e), shopDomain: dominio })
+    if (!('intent' in r)) throw new Error('se esperaba el intent')
+    const siempre401 = graphqlFalso(() => falla('UNAUTHORIZED', false, false))
+    await expect(
+      confirmShopifyConnect(
+        { venueId: e.venueId, authUserId: e.staffId, intent: r.intent, locationId: UBICACION_PRUEBA },
+        { graphql: siempre401 },
+      ),
+    ).rejects.toMatchObject({ statusCode: 503, code: 'SHOPIFY_NO_RESPONDE' })
+    expect(siempre401).toHaveBeenCalledTimes(2)
+    expect(await prisma.shopifyStore.findUnique({ where: { shopDomain: dominio } })).toBeNull()
+  })
+})
+
+describe('5a · cambiar de método por REAUTHORIZE (riesgo 7)', () => {
+  it('🔴 PILOTO → COMERCIO → PILOTO: credenciales coherentes en cada paso, tokenVersion sube y los avisos se vuelven a pedir en la ruta de su app', async () => {
+    const e = await escenario()
+    await conCortesia(e)
+    await prisma.shopifyLocationLink.update({ where: { id: e.locationLinkId }, data: { webhooksAt: new Date() } })
+    shopifyPorFetch({ llave: () => LLAVE_OK('shpat_comercio') })
+    expect(await conectarConAppDelComercio(llaves(e, { purpose: 'REAUTHORIZE' }))).toEqual({ reautorizada: true })
+    let t = await tienda(e)
+    expect(t).toMatchObject({ appKey: 'COMERCIO', clientId: CLIENT_ID_PRUEBA, tokenVersion: 2, status: 'ACTIVE' })
+    expect(decryptShopifyToken(t.accessTokenCiphertext)).toBe('shpat_comercio')
+    expect(decryptShopifyToken(t.clientSecretCiphertext!)).toBe(SECRET_PRUEBA)
+    expect(t.accessTokenExpiresAt!.getTime()).toBeGreaterThan(Date.now() + 86_000_000)
+    expect((await sucursal(e)).webhooksAt).toBeNull()
+    expect(await prisma.shopifyConnectIntent.findFirstOrThrow({ where: { venueId: e.venueId } })).toMatchObject({
+      appKey: 'COMERCIO',
+      purpose: 'REAUTHORIZE',
+      status: 'CONSUMED',
+    })
+    expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'SHOPIFY_REAUTHORIZED', entityId: e.storeId }))
+    // Los avisos se vuelven a pedir con la llave de 24 h y en la ruta de la app del comercio.
+    const avisos = graphqlFalso((q, vars) =>
+      q.includes('Suscripciones')
+        ? { ok: true, data: { webhookSubscriptions: { nodes: [] } } }
+        : {
+            ok: true,
+            data: {
+              webhookSubscriptionCreate: {
+                webhookSubscription: { id: 'gid://shopify/WebhookSubscription/1', topic: vars.topic, uri: vars.uri },
+                userErrors: [],
+              },
+            },
+          },
+    )
+    expect(await registerShopifyWebhooks(e.locationLinkId, { graphql: avisos })).toEqual({ done: false })
+    expect(avisos.mock.calls.map(c => c[1])).toEqual(['shpat_comercio', 'shpat_comercio'])
+    expect(avisos.mock.calls.map(c => c[3].uri)).toEqual([
+      'https://api.test/api/v1/webhooks/shopify/comercio',
+      'https://api.test/api/v1/webhooks/shopify/comercio',
+    ])
+    // Y de vuelta al piloto por OAuth: las llaves del comercio se borran de la tienda.
+    process.env.SHOPIFY_PILOTO_SHOPS = e.shopDomain
+    const { url } = await startShopifyConnect({
+      venueId: e.venueId,
+      authUserId: e.staffId,
+      shopDomain: e.shopDomain,
+      purpose: 'REAUTHORIZE',
+    })
+    const q = firmarConsulta({ code: 'c1', shop: e.shopDomain, state: new URL(url).searchParams.get('state')!, timestamp: '1700000000' })
+    const exchange = jest.fn(async () => ({ ok: true as const, data: { accessToken: 'shpat_piloto', scope: SHOPIFY_SCOPES } }))
+    expect(await handleShopifyCallback(q, { exchange })).toContain('?reautorizada=1')
+    t = await tienda(e)
+    expect(t).toMatchObject({ appKey: 'PILOTO', clientId: null, clientSecretCiphertext: null, accessTokenExpiresAt: null, tokenVersion: 3 })
+    expect(decryptShopifyToken(t.accessTokenCiphertext)).toBe('shpat_piloto')
+  })
+
+  it('🔴 ruling preflight: si `reautorizar` truena a media vuelta, el intent queda FAILED (no EXCHANGING para siempre), el error sale tal cual y la tienda no cambia', async () => {
+    const e = await escenario()
+    await conCortesia(e)
+    const antes = await tienda(e)
+    shopifyPorFetch({ llave: () => LLAVE_OK('shpat_comercio') })
+    // La primera tx de esta vuelta es la de `reautorizar` (REAUTHORIZE no pasa por el candado del catálogo maestro).
+    const espia = jest.spyOn(prisma, '$transaction').mockRejectedValueOnce(new Error('base caída a media vuelta'))
+    try {
+      await expect(conectarConAppDelComercio(llaves(e, { purpose: 'REAUTHORIZE' }))).rejects.toThrow('base caída a media vuelta')
+    } finally {
+      espia.mockRestore()
+    }
+    expect(await prisma.shopifyConnectIntent.findFirstOrThrow({ where: { venueId: e.venueId } })).toMatchObject({
+      appKey: 'COMERCIO',
+      purpose: 'REAUTHORIZE',
+      status: 'FAILED',
+    })
+    expect(await tienda(e)).toMatchObject({
+      appKey: antes.appKey,
+      tokenVersion: antes.tokenVersion,
+      clientId: null,
+      clientSecretCiphertext: null,
+    })
+    expect(logAction).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'SHOPIFY_REAUTHORIZED' }))
   })
 })

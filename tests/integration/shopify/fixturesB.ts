@@ -302,3 +302,47 @@ export function graphqlDelCatalogo(variantes: VarianteShopify[]): jest.Mock {
     return paginaDeVariantes(variantes.slice(i * 50, (i + 1) * 50), hay ? `s${i + 1}` : null)
   })
 }
+
+// ─── 5a: Shopify «de verdad» por `global.fetch` ─────────────────────────────────────────────────────────────
+
+/** Lo que contesta Shopify a una petición HTTP (cuerpo JSON o texto). */
+export type RespuestaHttp = { status: number; body: unknown }
+/** La llave de 24 h como la dio Shopify en vivo el 11-oct (permisos compactos: `write_x` implica `read_x`). */
+export const LLAVE_OK = (token = 'shpat_llave_24h', expiresIn = 86399): RespuestaHttp => ({
+  status: 200,
+  body: {
+    access_token: token,
+    scope: 'write_products,write_inventory,read_locations,read_orders,read_fulfillments',
+    expires_in: expiresIn,
+  },
+})
+export const SECRET_MALO: RespuestaHttp = {
+  status: 400,
+  body: { error: 'invalid_request', error_description: 'Missing or invalid client secret' },
+}
+export const CLIENT_ID_PRUEBA = 'cid_0123456789abcdef0123456789ab'
+export const SECRET_PRUEBA = 'shpss_secreto_de_prueba_0123456789ab'
+
+const fetchDeVerdad = global.fetch
+/**
+ * 5a: reemplaza `global.fetch` (lo usan `pedirLlaveDelComercio` y `shopifyGraphql` cuando nadie inyecta otro): la llave
+ * (`/admin/oauth/access_token`) y la Admin API (`/graphql.json`) contestan lo que diga la prueba; otra URL truena. Cada llamada queda
+ * en `.mock.calls` (`[url, init]`). Se quita con `quitarFetch()` en el `afterEach`.
+ */
+export function shopifyPorFetch(r: {
+  llave?: () => RespuestaHttp | Promise<RespuestaHttp>
+  api?: () => RespuestaHttp | Promise<RespuestaHttp>
+}): jest.Mock {
+  const f = jest.fn(async (url: unknown) => {
+    const u = String(url)
+    const responder = u.endsWith('/admin/oauth/access_token') ? r.llave : u.endsWith('/graphql.json') ? r.api : undefined
+    if (!responder) throw new Error(`fetch inesperado: ${u}`)
+    const { status, body } = await responder()
+    return { status, text: async () => (typeof body === 'string' ? body : JSON.stringify(body)) }
+  })
+  global.fetch = f as unknown as typeof fetch
+  return f
+}
+export const quitarFetch = (): void => {
+  global.fetch = fetchDeVerdad
+}

@@ -20,6 +20,7 @@ const mockConnect = {
   requestApplyShopifyConnect: jest.fn(),
   saveConnectChoices: jest.fn(),
   disconnectShopify: jest.fn(),
+  conectarConAppDelComercio: jest.fn(),
 }
 // C3: `@/app` monta el callback con `SHOPIFY_OAUTH_CALLBACK_PATH` de este módulo; las constantes quedan reales.
 jest.mock('@/services/commerce-channels/shopify/shopify.connect.service', () => ({
@@ -97,6 +98,35 @@ describe('controller de Shopify: lo que llega a los servicios y lo que vuelve', 
     expect(r.status).toBe(409)
     expect(r.body.code).toBe('SHOPIFY_REAUTORIZAR_SIN_TIENDA')
     expect(mockConnect.startShopifyConnect).not.toHaveBeenCalled()
+  })
+
+  it('🔴 5a: conectar y cambiar llaves con la app de la tienda: llaves recortadas al servicio con su propósito; un campo de más o una llave que falta ⇒ 400 sin repetir el secret', async () => {
+    mockConnect.conectarConAppDelComercio.mockResolvedValue({ intent: 'intent-firmado' })
+    const cuerpo = { shopDomain: ' Mi-Tienda.myshopify.com ', clientId: ' cid ', clientSecret: ' shpss_secreto ' }
+    const r = await request(app).post(`${B}/connect/credentials`).send(cuerpo)
+    expect(r.body).toEqual({ success: true, data: { intent: 'intent-firmado' } })
+    expect(mockConnect.conectarConAppDelComercio).toHaveBeenCalledWith({
+      venueId: 'v1',
+      authUserId: 'u1',
+      shopDomain: 'mi-tienda.myshopify.com',
+      clientId: 'cid',
+      clientSecret: 'shpss_secreto',
+      purpose: 'CONNECT',
+    })
+    mockConnect.conectarConAppDelComercio.mockResolvedValue({ reautorizada: true })
+    const re = await request(app).post(`${B}/reauthorize/credentials`).send(cuerpo)
+    expect(re.body).toEqual({ success: true, data: { reautorizada: true } })
+    expect(mockConnect.conectarConAppDelComercio).toHaveBeenLastCalledWith(expect.objectContaining({ purpose: 'REAUTHORIZE' }))
+    const deMas = await request(app)
+      .post(`${B}/connect/credentials`)
+      .send({ ...cuerpo, extra: 1 })
+    expect(deMas.status).toBe(400)
+    expect(deMas.body.message).toMatch(/Hay un campo que no se esperaba/)
+    expect(JSON.stringify(deMas.body)).not.toContain('shpss_secreto')
+    const sinSecret = await request(app).post(`${B}/connect/credentials`).send({ shopDomain: 'mi-tienda.myshopify.com', clientId: 'cid' })
+    expect(sinSecret.status).toBe(400)
+    expect(sinSecret.body.message).toMatch(/Pega el Client Secret de tu app/)
+    expect(mockConnect.conectarConAppDelComercio).toHaveBeenCalledTimes(2)
   })
 
   it('🔴 confirmar NO acepta el nombre de la ubicación: lo pone el servidor desde Shopify (Codex #22)', async () => {

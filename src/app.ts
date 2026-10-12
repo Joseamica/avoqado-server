@@ -458,7 +458,9 @@ export function globalErrorHandler(err: Error, req: ExpressRequest, res: Express
   }
 
   if (isJsonBodyParseError(bodyParseError)) {
-    logger.warn(`Invalid JSON body: ${bodyParseError.message}, CorrelationID: ${correlationId}`, {
+    // 5a: nunca el mensaje del parser: V8 copia un pedazo del cuerpo (un secret sin comillas, una contraseña) y aquí terminaba en el
+    // log. El nombre del error, el status, el correlationId y la ruta (ya saneada) bastan para buscarlo.
+    logger.warn(`Invalid JSON body, CorrelationID: ${correlationId}`, {
       name: bodyParseError.name,
       statusCode: 400,
       correlationId,

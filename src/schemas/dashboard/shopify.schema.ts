@@ -29,18 +29,33 @@ const intent = z
 
 export const soloVenueSchema = z.object({ params: venueParams, ...nada })
 
+const dominioTienda = z
+  .string({ required_error: 'Escribe el dominio de tu tienda', invalid_type_error: 'El dominio de tu tienda debe ser un texto' })
+  .trim()
+  .toLowerCase()
+  .min(1, 'Escribe el dominio de tu tienda')
+  .max(120, 'El dominio es demasiado largo')
+
 export const startSchema = z.object({
   params: venueParams,
   query: z.any().optional(),
+  body: z.object({ shopDomain: dominioTienda }).strict(CAMPO_DE_MAS),
+})
+
+/** 5a: una llave de la app del comercio. Sólo forma: sin espacios alrededor y con tope (medido: 32 y 38; Shopify decide si sirve). */
+const llaveDeApp = (que: string) =>
+  z
+    .string({ required_error: `Pega el ${que} de tu app`, invalid_type_error: `El ${que} debe ser un texto` })
+    .trim()
+    .min(1, `Pega el ${que} de tu app`)
+    .max(200, `El ${que} es demasiado largo`)
+
+/** 5a: conectar o cambiar las llaves con la app de la tienda. El secret sólo viaja en este cuerpo; nada lo devuelve. */
+export const credentialsSchema = z.object({
+  params: venueParams,
+  query: z.any().optional(),
   body: z
-    .object({
-      shopDomain: z
-        .string({ required_error: 'Escribe el dominio de tu tienda', invalid_type_error: 'El dominio de tu tienda debe ser un texto' })
-        .trim()
-        .toLowerCase()
-        .min(1, 'Escribe el dominio de tu tienda')
-        .max(120, 'El dominio es demasiado largo'),
-    })
+    .object({ shopDomain: dominioTienda, clientId: llaveDeApp('Client ID'), clientSecret: llaveDeApp('Client Secret') })
     .strict(CAMPO_DE_MAS),
 })
 

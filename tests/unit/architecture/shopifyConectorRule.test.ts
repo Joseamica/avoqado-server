@@ -919,6 +919,34 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     ])
   })
 
+  it('🔴 5a · conectar con las llaves: la llave y los permisos ANTES del intent; las llaves viajan del intent a la tienda; la limpieza borra el secret', () => {
+    contieneTodas([
+      'ANTES de crear nada pide la llave de 24 h',
+      'al volver a `PILOTO` quedan en null',
+      'El secret nunca sale en una respuesta, en `ActivityLog` ni en el log',
+    ])
+    const conexion = leer(`${SHOPIFY}/shopify.connect.service.ts`)
+    const conectar = cuerpo(conexion, 'export async function conectarConAppDelComercio(')
+    enOrden(conectar, [
+      'await puedeConectarConAppPropia(i.venueId)',
+      'await validarProposito(',
+      'await pedirLlaveDelComercio(',
+      'faltanPermisos(r.scope)',
+      'prisma.shopifyConnectIntent.create(',
+      "action: 'SHOPIFY_CONNECT_STARTED'",
+    ])
+    expect(conectar).toContain("data: { metodo: 'APP_DEL_COMERCIO', shopDomain: shop }")
+    expect(cuerpo(conexion, 'async function renovarCredencial(')).toContain('clientSecretCiphertext: d.clientSecretCiphertext')
+    expect(cuerpo(conexion, 'async function tiendaDe(')).toContain('...credencialesDe(intent)')
+    expect(cuerpo(leer(`${SHOPIFY}/shopify.worker.service.ts`), 'export async function limpiarShopify(')).toContain(
+      '"clientSecretCiphertext" = NULL',
+    )
+    // Ruling P2-4: el asistente no lee la llave del intent sin pasar por la renovación (y una sola repetición tras un 401).
+    expect(cuerpo(conexion, 'export async function listIntentLocations(')).toContain('conTokenDelIntent(intent,')
+    expect(cuerpo(conexion, 'export async function confirmShopifyConnect(')).toContain('conTokenDelIntent(intent,')
+    contieneTodas(['ubicaciones y confirmar piden otra con las llaves del intent y repiten UNA vez'])
+  })
+
   it('los globs de `paths:` de la regla apuntan a algo que existe, incluidos los demás escritores de stock', () => {
     const cabecera = leer('.claude/rules/shopify-conector.md').split('---')[1]
     const globs = [...cabecera.matchAll(/- '([^']+)'/g)].map(m => m[1])
@@ -951,9 +979,9 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     // ancla de línea ahí no se puede sostener sin romper esta prueba por un cambio ajeno.
     const de = (f: string) => `${SHOPIFY}/shopify.${f}.ts`
     const anclas: Record<string, [string, string]> = {
-      'shopify.connect.service.ts:115': [de('connect.service'), 'export async function startShopifyConnect('],
-      'connect.service.ts:1505': [de('connect.service'), 'export async function disconnectShopify('],
-      'connect.service.ts:671': [de('connect.service'), 'async function aCuarentenaPorReligar('],
+      'shopify.connect.service.ts:116': [de('connect.service'), 'export async function startShopifyConnect('],
+      'connect.service.ts:1668': [de('connect.service'), 'export async function disconnectShopify('],
+      'connect.service.ts:834': [de('connect.service'), 'async function aCuarentenaPorReligar('],
       'shopify.crypto.ts:34': [de('crypto'), 'export function formaDeFirmaOAuth('],
       'catalog.service.ts:68': [de('catalog.service'), 'export const FILTRO_ESTADO'],
       'catalog.service.ts:418': [de('catalog.service'), 'async function bloquearProductos('],
@@ -968,7 +996,7 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     }
     // Las cortas (`:N`) son del archivo que la regla acaba de nombrar.
     const cortas: Record<string, [string, string]> = {
-      '`:70`': [de('connect.service'), 'const tiendasPiloto'],
+      '`:71`': [de('connect.service'), 'const tiendasPiloto'],
       '`:49`': [de('crypto'), 'export function verifyOAuthQueryHmac('],
       '`:1188`': [de('catalog.service'), 'export async function archivarPareja('],
     }

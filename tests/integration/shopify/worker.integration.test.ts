@@ -631,7 +631,7 @@ describe('requisitos del ledger para B8', () => {
     expect(fallas).toEqual([]) // ninguna «falló»
   })
 
-  it('M2: la limpieza borra el token cifrado de los intents consumidos, fallidos o vencidos; el de uno vigente se queda', async () => {
+  it('M2 (y 5a): la limpieza borra el token y el secret cifrados de los intents consumidos, fallidos o vencidos; los de uno vigente se quedan', async () => {
     const e = await escenario()
     const intent = (status: 'EXCHANGED' | 'CONSUMED' | 'FAILED', expiresAt: Date) =>
       prisma.shopifyConnectIntent.create({
@@ -643,6 +643,7 @@ describe('requisitos del ledger para B8', () => {
           status,
           expiresAt,
           tokenCiphertext: Buffer.from('cifrado-de-prueba'),
+          clientSecretCiphertext: Buffer.from('secreto-cifrado-de-prueba'),
         },
       })
     const futuro = new Date(Date.now() + 10 * 60_000)
@@ -656,6 +657,11 @@ describe('requisitos del ledger para B8', () => {
     expect(await token(consumido.id)).toBeNull()
     expect(await token(fallido.id)).toBeNull()
     expect(await token(vencido.id)).toBeNull()
+    const secreto = async (id: string) => (await prisma.shopifyConnectIntent.findUniqueOrThrow({ where: { id } })).clientSecretCiphertext
+    expect(await secreto(vigente.id)).not.toBeNull()
+    expect(await secreto(consumido.id)).toBeNull()
+    expect(await secreto(fallido.id)).toBeNull()
+    expect(await secreto(vencido.id)).toBeNull()
   })
 
   describe('retención de las revisiones resueltas (B10)', () => {

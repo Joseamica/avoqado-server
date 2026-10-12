@@ -22,6 +22,9 @@ const ADJUST = 'inventory:adjust'
 router.get('/', validateRequest(s.soloVenueSchema), checkPermission(READ), ctrl.getOverview)
 router.post('/connect/start', validateRequest(s.startSchema), ...gate(MANAGE), ctrl.startConnect)
 router.post('/reauthorize/start', validateRequest(s.soloVenueSchema), ...gate(MANAGE), ctrl.startReauthorize)
+// 5a: con la app del comercio (Client ID + Client Secret). CONNECT devuelve el intent; REAUTHORIZE cambia las llaves en el acto.
+router.post('/connect/credentials', validateRequest(s.credentialsSchema), ...gate(MANAGE), ctrl.connectWithCredentials)
+router.post('/reauthorize/credentials', validateRequest(s.credentialsSchema), ...gate(MANAGE), ctrl.reauthorizeWithCredentials)
 router.get('/connect/locations', validateRequest(s.locationsSchema), ...gate(MANAGE), ctrl.listLocations)
 router.post('/connect/confirm', validateRequest(s.confirmSchema), ...gate(MANAGE), ctrl.confirmConnect)
 // Sin plan: la vista previa sólo LEE lo que ya se importó; aplicar sí lo pide.

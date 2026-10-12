@@ -33,7 +33,7 @@ cambias el comportamiento, cambia aquí la frase y su aserción en el mismo comm
 
 | Pieza                                                                            | Dónde                                                                                                                       | Efecto                                                                                                          |
 | -------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| `SHOPIFY_PILOTO_SHOPS` (dominios `.myshopify.com`, coma; se lee en cada llamada) | `startShopifyConnect(…)` (`shopify.connect.service.ts:115`; la lista, `tiendasPiloto`, en `:70`)                             | otra tienda ⇒ 409 `SHOPIFY_SOLO_PILOTO` (con la invitación de la app propia, `SHOPIFY_USA_APP_PROPIA`, §4 ter)  |
+| `SHOPIFY_PILOTO_SHOPS` (dominios `.myshopify.com`, coma; se lee en cada llamada) | `startShopifyConnect(…)` (`shopify.connect.service.ts:116`; la lista, `tiendasPiloto`, en `:71`)                            | otra tienda ⇒ 409 `SHOPIFY_SOLO_PILOTO` (con la invitación de la app propia, `SHOPIFY_USA_APP_PROPIA`, §4 ter)  |
 | `SHOPIFY_INTEGRATION` en `PREMIUM_ONLY_SIN_CATALOGO`                             | `basePlan.service.ts:93`                                                                                                    | Premium por regla pero SIN entrada de catálogo ni precio; `shopifyTierMirror.test.ts` falla si queda en los dos |
 | Nunca se contrata suelta                                                         | `addFeaturesToVenue(…)` (`venueFeature.dashboard.service.ts:190`) y `createTrialSubscriptions(…)` (`stripe.service.ts:303`) | 400 `FEATURE_NO_SE_VENDE_SUELTA`; la segunda es el embudo de venta suelta, conversión de demo y onboarding      |
 
@@ -164,7 +164,7 @@ espejo dejaría la cuenta en 11 contra las 12 piezas de Avoqado. Si hay filas vi
   y después la tienda `FOR SHARE` (`mirror.service.ts:372`). Quien la llame lo hace antes de cualquier candado de pareja, fila o cerco, o en
   una tx propia (el mensajero: tx de 15 s, porque avisa por dentro). `FOR NO KEY UPDATE` y no `FOR UPDATE`: no frena el `FOR KEY SHARE` de
   quien inserte una pareja con llave foránea a la sucursal.
-- **Desconectar** (`disconnectShopify(…)`, `connect.service.ts:1505`) bloquea primero TODAS las sucursales de la tienda por id (la propia
+- **Desconectar** (`disconnectShopify(…)`, `connect.service.ts:1668`) bloquea primero TODAS las sucursales de la tienda por id (la propia
   `FOR UPDATE`, las hermanas `FOR NO KEY UPDATE`), después las parejas de ESA sucursal, ordenadas por id, y sólo entonces sube la
   generación. Nunca la propia y luego una hermana de id menor: se cruzaría con quien las toma por id (el drenado, diferir, renovar la
   credencial). `renovarCredencial` (reconectar o reautorizar) también bloquea todas las sucursales de la tienda por id ANTES de la tienda.
@@ -234,6 +234,16 @@ cuadre y conteo no cambian, y el piloto (`PILOTO`, OAuth) convive igual.
   `isActiveWindow`: la cortesía de superadmin; una capability grant sola no basta) y nunca un negocio en `DEMO_VENUE_STATUSES`. Premium no
   basta todavía. Una tienda fuera de `SHOPIFY_PILOTO_SHOPS` con la cortesía recibe 409 `SHOPIFY_USA_APP_PROPIA` en el piloto (el dashboard
   abre el bloque de llaves); sin ella, el `SHOPIFY_SOLO_PILOTO` de siempre.
+- **Conectar o cambiar llaves** (`conectarConAppDelComercio(…)`, `POST /connect/credentials` y `POST /reauthorize/credentials`, con el
+  candado, el dominio y el propósito de hoy): ANTES de crear nada pide la llave de 24 h (`pedirLlaveDelComercio(…)`: form-urlencoded,
+  `grant_type=client_credentials`, sin seguir redirecciones) y revisa los permisos con `faltanPermisos` (422 `SHOPIFY_APP_FALTAN_PERMISOS`).
+  Llaves rechazadas ⇒ 422 con su código (`SHOPIFY_APP_SECRET_INVALIDO`, `SHOPIFY_APP_CLIENT_ID_INVALIDO`, `SHOPIFY_APP_OTRA_ORGANIZACION`,
+  `SHOPIFY_TIENDA_NO_EXISTE`, `SHOPIFY_APP_RECHAZADA`); Shopify sin contestar ⇒ 503 `SHOPIFY_NO_RESPONDE`. El intent nace `COMERCIO` con las
+  llaves cifradas (`SHOPIFY_TOKEN_KEY`): CONNECT sigue como tras el callback (ubicación → confirmar); REAUTHORIZE pasa en el acto por
+  `reautorizar` y `renovarCredencial`. Confirmar, `tiendaDe` y `renovarCredencial` copian `clientId`, `clientSecretCiphertext` y el
+  vencimiento a la tienda; al volver a `PILOTO` quedan en null. El secret nunca sale en una respuesta, en `ActivityLog` ni en el log, y la
+  limpieza horaria lo borra del intent junto con el token. Si la llave del intent vence a medio asistente (menos de un minuto, o un 401),
+  ubicaciones y confirmar piden otra con las llaves del intent y repiten UNA vez.
 
 ## 5. `Inventory` que desaparece o vuelve ⇒ suspender y reactivar la pareja, NUNCA borrarla
 
@@ -285,7 +295,7 @@ borre o cree filas de `Inventory` de productos ligados, o que cambie esos campos
     `store.service.ts:273`) de cualquier generación anterior de esa sucursal o de la que ocupaba la ubicación. Una DEAD_LETTER ambigua no la
     frena: ya no puede llegar.
   - Religar la sucursal a OTRA tienda no es un 409: sus filas `IN_PROGRESS` y vivas ambiguas pasan a DEAD_LETTER con
-    `lastError = RELIGADA_A_OTRA_TIENDA` (duda y parámetros congelados conservados; `aCuarentenaPorReligar`, `connect.service.ts:671`),
+    `lastError = RELIGADA_A_OTRA_TIENDA` (duda y parámetros congelados conservados; `aCuarentenaPorReligar`, `connect.service.ts:834`),
     porque el reclamo sólo las tomaría con la tienda vieja ACTIVE y la sucursal ya apunta a la nueva: la espera no terminaría nunca. No
     avisan (es una acción deliberada del dueño); queda `religadas` en el `ActivityLog` de `SHOPIFY_CONNECTED`.
   - Desconectar no espera: bloquea (§4), sube la generación y deja esas filas cerrarse con su llave; al llegar no mueven el espejo.

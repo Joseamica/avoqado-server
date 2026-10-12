@@ -8,6 +8,7 @@ jest.mock('../../src/config/env', () => ({
 
 import { globalErrorHandler } from '@/app'
 import { isJsonBodyParseError } from '@/utils/httpErrors'
+import logger from '@/config/logger'
 
 describe('isJsonBodyParseError', () => {
   it('detects malformed JSON errors emitted by express.json()', () => {
@@ -44,7 +45,9 @@ describe('HTTP body limits', () => {
   beforeEach(() => consumer.mockClear())
 
   it('rejects an oversized upload with 413 before the consumer runs', async () => {
-    const response = await api().post('/FULLTEST/body-limit').send({ xml: 'FULLTEST-'.repeat(256) })
+    const response = await api()
+      .post('/FULLTEST/body-limit')
+      .send({ xml: 'FULLTEST-'.repeat(256) })
 
     expect(response.status).toBe(413)
     expect(response.body).toEqual({ message: 'La solicitud excede el tamaño máximo permitido.', code: 'PAYLOAD_TOO_LARGE' })
@@ -63,6 +66,23 @@ describe('HTTP body limits', () => {
 
     expect(response.status).toBe(400)
     expect(consumer).not.toHaveBeenCalled()
+  })
+
+  it('🔴 5a: a malformed JSON body never reaches the log, not even a piece of it (an unquoted secret stays out)', async () => {
+    const niveles = [logger.info, logger.warn, logger.error, logger.debug] as jest.Mock[]
+    niveles.forEach(f => f.mockClear())
+    const response = await api()
+      .post('/FULLTEST/body-limit')
+      .set('Content-Type', 'application/json')
+      .send('{"shopDomain":"mi-tienda.myshopify.com","clientId":"cid","clientSecret":shpss_sintetico_123}')
+
+    expect(response.status).toBe(400)
+    expect(response.body).toEqual({ message: 'JSON inválido en el cuerpo de la solicitud.' })
+    expect(consumer).not.toHaveBeenCalled()
+    const registrado = JSON.stringify(niveles.map(f => f.mock.calls))
+    expect(registrado).toContain('Invalid JSON body')
+    expect(registrado).toContain('SyntaxError') // el nombre del error sí se queda
+    expect(registrado).not.toMatch(/shpss|sintetico/)
   })
 
   it('does not classify an unrelated internal status field as a body size error', async () => {

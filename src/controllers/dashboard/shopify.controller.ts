@@ -31,6 +31,32 @@ export async function startReauthorize(req: Request, res: Response) {
   ok(res, await connect.startShopifyConnect({ venueId, authUserId: userOf(req), shopDomain, purpose: 'REAUTHORIZE' }))
 }
 
+/** 5a: el secret llega en el cuerpo validado, va directo al servicio y nunca se devuelve ni se registra. */
+export async function connectWithCredentials(req: Request, res: Response) {
+  const { shopDomain, clientId, clientSecret } = req.body
+  const venueId = req.params.venueId
+  ok(
+    res,
+    await connect.conectarConAppDelComercio({ venueId, authUserId: userOf(req), shopDomain, clientId, clientSecret, purpose: 'CONNECT' }),
+  )
+}
+
+export async function reauthorizeWithCredentials(req: Request, res: Response) {
+  const { shopDomain, clientId, clientSecret } = req.body
+  const venueId = req.params.venueId
+  ok(
+    res,
+    await connect.conectarConAppDelComercio({
+      venueId,
+      authUserId: userOf(req),
+      shopDomain,
+      clientId,
+      clientSecret,
+      purpose: 'REAUTHORIZE',
+    }),
+  )
+}
+
 export async function listLocations(req: Request, res: Response) {
   ok(res, await connect.listIntentLocations({ venueId: req.params.venueId, authUserId: userOf(req), intent: String(req.query.intent) }))
 }

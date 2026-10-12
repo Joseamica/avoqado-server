@@ -427,14 +427,14 @@ export async function limpiarShopify(now: Date, limite: number): Promise<void> {
     if (eventos.length === 0) break
     hecho.eventos += (await prisma.shopifyInboundEvent.deleteMany({ where: { id: { in: eventos.map(x => x.id) } } })).count
   }
-  // M2: el token de un intent ya no sirve en cuanto se consumió, falló o venció (confirmar sólo usa uno EXCHANGED y
-  // vigente; al consumirlo, la tienda ya guardó su copia): no se guarda 30 días más. Sin esperar candados (un confirmar
-  // en curso tiene su intent bloqueado: se queda para la siguiente hora).
+  // M2 (y 5a): el token y el secret de la app del comercio de un intent ya no sirven en cuanto se consumió, falló o venció
+  // (confirmar sólo usa uno EXCHANGED y vigente; al consumirlo, la tienda ya guardó su copia): no se guardan 30 días más. Sin esperar
+  // candados (un confirmar en curso tiene su intent bloqueado: se queda para la siguiente hora).
   while (Date.now() < limite) {
     const n = await prisma.$executeRaw`
-      UPDATE "ShopifyConnectIntent" SET "tokenCiphertext" = NULL
+      UPDATE "ShopifyConnectIntent" SET "tokenCiphertext" = NULL, "clientSecretCiphertext" = NULL
        WHERE id IN (SELECT i.id FROM "ShopifyConnectIntent" i
-                     WHERE i."tokenCiphertext" IS NOT NULL
+                     WHERE (i."tokenCiphertext" IS NOT NULL OR i."clientSecretCiphertext" IS NOT NULL)
                        AND (i.status IN ('CONSUMED', 'FAILED') OR i."expiresAt" < ${utcTs(now)})
                      ORDER BY i.id
                      LIMIT ${LIMPIEZA_TANDA}
