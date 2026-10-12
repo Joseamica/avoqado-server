@@ -268,7 +268,8 @@ cuadre y conteo no cambian, y el piloto (`PILOTO`, OAuth) convive igual.
   duda, como un 429). En `PILOTO` el 401 revoca como siempre.
 - **Avisos:** `:appKey` acepta `comercio`. El secret de un aviso `COMERCIO` es el de SU tienda: `X-Shopify-Shop-Domain` (validado) sólo
   elige cuál se usa y la firma sigue decidiendo; sin tienda `COMERCIO`, sin secret legible o con la firma mala ⇒ 401. `PILOTO` sigue con el
-  de env. El registro de suscripciones no cambia: la ruta de la app de la tienda (`/webhooks/shopify/comercio`) con la llave de 24 h.
+  de env. Las suscripciones salen a la ruta de la app de la tienda (`/webhooks/shopify/comercio`) con la llave de 24 h, y los temas de
+  pedidos son opcionales (siguiente punto).
 - **Avisos de pedidos opcionales:** Shopify niega los temas de pedidos (`ORDERS_CREATE`, `ORDERS_CANCELLED`, `FULFILLMENTS_CREATE`,
   `REFUNDS_CREATE`) a una app sin acceso a datos protegidos de clientes, y la del comercio en una tienda Basic no lo tiene (medido en vivo:
   «This app is not approved to subscribe to webhook topics containing protected customer data»). Antes eso dejaba la sucursal en
