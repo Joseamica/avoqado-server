@@ -550,6 +550,8 @@ async function conTokenDelIntent<T>(intent: IntentListo, leer: (token: string) =
 
 /** Con el token de un intent todavía no hay tienda que avisar: falta un permiso ⇒ 403 que la página explica (§9.5). */
 function fallaDeIntent(r: ShopifyFailure): never {
+  // Guía 5a (12-oct): un 503 suelto en la ubicación no dejaba rastro de qué contestó Shopify. Sólo el código y el status.
+  logger.warn(`[SHOPIFY] intent: la lectura de Shopify falló (${r.code}${r.status ? `, HTTP ${r.status}` : ''})`)
   if (r.code === 'FORBIDDEN') {
     throw new ForbiddenError(
       'A la app le falta un permiso en Shopify: vuelve a conectar y acepta todos los permisos que pide',
