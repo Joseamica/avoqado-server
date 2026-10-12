@@ -168,7 +168,7 @@ describe('asignaciones (spec RH §3.2)', () => {
       prismaMock.staffPosition.findFirst.mockResolvedValue({ id: 'p1', venueId: 'v1', name: 'Coach', archivedAt: new Date() } as any)
       await expect(asignarPuesto({ venueId: 'v1', staffId: 's1', positionId: 'p1', actorId: 'x' })).rejects.toMatchObject({
         statusCode: 400,
-        message: expect.stringContaining('archivado'),
+        message: 'El puesto «Coach» está archivado. Elige otro.',
       })
     })
     it('puesto de otra sede ⇒ 404', async () => {

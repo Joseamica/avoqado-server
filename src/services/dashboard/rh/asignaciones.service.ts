@@ -87,7 +87,7 @@ async function validarPersonaYPuesto(tx: Tx, venueId: string, staffId: string, p
   if (!sv || !sv.active) throw new BadRequestError('Esa persona no está activa en este negocio.')
   const puesto = await tx.staffPosition.findFirst({ where: { id: positionId, venueId } })
   if (!puesto) throw new NotFoundError('Ese puesto no existe en esta sucursal.')
-  if (puesto.archivedAt) throw new BadRequestError(`El puesto «${puesto.name}» está archivado. Elige otro o restáuralo.`)
+  if (puesto.archivedAt) throw new BadRequestError(`El puesto «${puesto.name}» está archivado. Elige otro.`)
   return puesto
 }
 
