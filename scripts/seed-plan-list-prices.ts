@@ -40,6 +40,8 @@ export interface SeedResult {
   price: number
   /** The price on sale before this run (null when the plan had none). */
   current: number | null
+  /** The price left pending by a failed Stripe preparation (null when none). */
+  pending: number | null
   /** Functions the code puts in the plan that its list on sale lacks / still sells and the code dropped. */
   missing: string[]
   extra: string[]
@@ -70,7 +72,8 @@ const MESSAGES: Record<PlanSeedOutcome, (r: SeedResult, apply: boolean) => strin
   CREATE: (r, apply) => (apply ? `creada a ${pesos(r.price)} al mes, en venta` : `se crearía a ${pesos(r.price)} al mes`),
   EXISTS: r => `ya existe a ${pesos(r.price)}`,
   DIFFERENT_PRICE: r => `precio distinto: la fase 2 lo decide (hoy ${pesos(r.current)}, clásico ${pesos(r.price)}); no se cambió`,
-  PENDING: (r, apply) => (apply ? `precio pendiente terminado a ${pesos(r.price)}` : `precio pendiente de preparar; --apply lo termina`),
+  PENDING: (r, apply) =>
+    apply ? `precio pendiente terminado a ${pesos(r.pending ?? r.price)}` : `precio pendiente de preparar; --apply lo termina`,
 }
 
 /** The composition line, empty when the list on sale already sells what the code includes. */
@@ -122,11 +125,12 @@ export async function seedPlanLists(
     const price = STANDARD_PLAN_GROSS_CENTS[tier].monthly / 100
     const row = board.find(candidate => candidate.productKey === productKey)!
     const outcome = options.apply ? (await seedPlanList(tier, price, staffId!)).outcome : planSeedOutcome(row, price)
-    // Only a list already on sale can sell an old composition: a new or just-finished one was compiled from today's code.
-    const gap = outcome === 'EXISTS' || outcome === 'DIFFERENT_PRICE' ? await planListCompositionGap(tier) : { missing: [], extra: [] }
-    const recomposed = options.apply && gap.missing.length + gap.extra.length > 0
-    if (recomposed) await recomposePlanList(tier, staffId!)
-    const result = { productKey, outcome, price, current: row.price, ...gap, recomposed }
+    // After the seed nothing is pending, so --apply always brings the composition up to date (a no-op when it already is);
+    // the dry run only reads it.
+    const composed = options.apply
+      ? await recomposePlanList(tier, staffId!)
+      : { ...(await planListCompositionGap(tier)), recomposed: false }
+    const result = { productKey, outcome, price, current: row.price, pending: row.pendingPrice, ...composed }
     results.push(result)
     log(`${productKey}: ${MESSAGES[outcome](result, options.apply)}${composition(result, options.apply)}`)
   }
