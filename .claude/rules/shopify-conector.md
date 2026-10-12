@@ -260,6 +260,9 @@ cuadre y conteo no cambian, y el piloto (`PILOTO`, OAuth) convive igual.
   (`ACCESO_RETIRADO`). Con el vencimiento de quien llama, cada petición sale con lo menor entre 5 s y lo que queda y, sin margen, REINTENTAR
   sin preguntar. Con ESPERAR el mensajero devuelve la fila con la espera de una pausa (`devuelta`, sin gastar intento y con su duda, como un
   429). En `PILOTO` el 401 revoca como siempre.
+- **Avisos:** `:appKey` acepta `comercio`. El secret de un aviso `COMERCIO` es el de SU tienda: `X-Shopify-Shop-Domain` (validado) sólo
+  elige cuál se usa y la firma sigue decidiendo; sin tienda `COMERCIO`, sin secret legible o con la firma mala ⇒ 401. `PILOTO` sigue con el
+  de env. El registro de suscripciones no cambia: la ruta de la app de la tienda (`/webhooks/shopify/comercio`) con la llave de 24 h.
 
 ## 5. `Inventory` que desaparece o vuelve ⇒ suspender y reactivar la pareja, NUNCA borrarla
 

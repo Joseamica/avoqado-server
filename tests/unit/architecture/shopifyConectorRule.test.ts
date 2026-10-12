@@ -992,6 +992,20 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     ])
   })
 
+  it('🔴 5a · avisos: el secret de un aviso COMERCIO es el de SU tienda y la firma decide', () => {
+    contieneTodas(['`:appKey` acepta `comercio`', 'sólo elige cuál se usa y la firma sigue decidiendo'])
+    const receptor = leer(`${SHOPIFY}/shopify.inbound.service.ts`)
+    enOrden(cuerpo(receptor, 'export async function persistShopifyWebhook('), [
+      'await secretoDelAviso(input.appKey, shopDomain)',
+      'verifyWebhookHmac(input.rawBody, input.hmac, secreto)',
+      'payload: cargaMinima(',
+    ])
+    const secreto = cuerpo(receptor, 'async function secretoDelAviso(')
+    expect(secreto).toContain("if (appKey !== 'COMERCIO') return appCredentials(appKey)?.clientSecret ?? null")
+    expect(secreto).toContain('if (!isValidShopDomain(shopDomain)) return null')
+    expect(cuerpo(receptor, 'export async function handleShopifyWebhook(')).toContain("req.params.appKey === 'comercio'")
+  })
+
   it('los globs de `paths:` de la regla apuntan a algo que existe, incluidos los demás escritores de stock', () => {
     const cabecera = leer('.claude/rules/shopify-conector.md').split('---')[1]
     const globs = [...cabecera.matchAll(/- '([^']+)'/g)].map(m => m[1])

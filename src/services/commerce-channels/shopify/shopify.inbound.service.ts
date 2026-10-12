@@ -129,7 +129,26 @@ export type PersistOutcome =
   | { outcome: 'PERSISTED'; eventId: string }
   | { outcome: 'DUPLICATE' | 'INVALID_SIGNATURE' | 'MALFORMED' | 'TOO_LARGE' }
 
-/** Verifica la firma con el secreto de SU app (HMAC base64 del cuerpo crudo) y guarda; dedup por X-Shopify-Webhook-Id. */
+/**
+ * 5a (spec §5): el secret con que se verifica un aviso. PILOTO y PUBLICA: el de su app (env). COMERCIO: el de LA tienda. El
+ * encabezado `X-Shopify-Shop-Domain` sólo elige qué secret se usa; la firma sigue decidiendo (con el dominio de otra tienda, su
+ * secret no cuadra). Sin tienda COMERCIO o sin secret legible ⇒ null (401).
+ */
+async function secretoDelAviso(appKey: ShopifyAppKey, shopDomain: string): Promise<string | null> {
+  if (appKey !== 'COMERCIO') return appCredentials(appKey)?.clientSecret ?? null
+  if (!isValidShopDomain(shopDomain)) return null
+  const s = await prisma.shopifyStore.findUnique({
+    where: { shopDomain },
+    select: { id: true, appKey: true, clientSecretCiphertext: true },
+  })
+  if (s?.appKey !== 'COMERCIO' || !s.clientSecretCiphertext) return null
+  return leerToken({ id: s.id, accessTokenCiphertext: s.clientSecretCiphertext })
+}
+
+/**
+ * Verifica la firma con el secreto de SU app —o de SU tienda, en COMERCIO— (HMAC base64 del cuerpo crudo) y guarda; dedup por
+ * X-Shopify-Webhook-Id.
+ */
 export async function persistShopifyWebhook(input: {
   rawBody: Buffer
   appKey: ShopifyAppKey
@@ -140,9 +159,9 @@ export async function persistShopifyWebhook(input: {
   triggeredAt?: string
 }): Promise<PersistOutcome> {
   if (input.rawBody.length > SHOPIFY_WEBHOOK_MAX_BYTES) return { outcome: 'TOO_LARGE' }
-  const creds = appCredentials(input.appKey)
-  if (!creds || !verifyWebhookHmac(input.rawBody, input.hmac, creds.clientSecret)) return { outcome: 'INVALID_SIGNATURE' }
   const shopDomain = (input.shopDomain ?? '').trim().toLowerCase()
+  const secreto = await secretoDelAviso(input.appKey, shopDomain)
+  if (!secreto || !verifyWebhookHmac(input.rawBody, input.hmac, secreto)) return { outcome: 'INVALID_SIGNATURE' }
   if (!input.topic || !input.webhookId || !isValidShopDomain(shopDomain)) return { outcome: 'MALFORMED' }
   let payload: unknown
   try {
@@ -180,13 +199,20 @@ const CODIGO_HTTP: Record<PersistOutcome['outcome'], number> = {
 }
 
 /**
- * POST /api/v1/webhooks/shopify/:appKey. C3 la monta con `express.raw` (cualquier tipo de contenido, 1 MB) ANTES del
- * parser JSON y del router genérico de webhooks; queda bajo `app.use('/api/v1/webhooks', requestLoggerMiddleware)`, así
- * que tiene logger y `X-Correlation-ID` (contexto-de-ejecucion.md, regla 7). Sólo guarda y contesta: el negocio se conoce
- * al procesar, y ahí se estampa (`venueId`/`venueName`).
+ * POST /api/v1/webhooks/shopify/:appKey (`:appKey`: piloto, publica o, desde 5a, comercio). C3 la monta con `express.raw`
+ * (cualquier tipo de contenido, 1 MB) ANTES del parser JSON y del router genérico de webhooks; queda bajo
+ * `app.use('/api/v1/webhooks', requestLoggerMiddleware)`, así que tiene logger y `X-Correlation-ID` (contexto-de-ejecucion.md,
+ * regla 7). Sólo guarda y contesta: el negocio se conoce al procesar, y ahí se estampa (`venueId`/`venueName`).
  */
 export async function handleShopifyWebhook(req: Request, res: Response): Promise<void> {
-  const appKey: ShopifyAppKey | null = req.params.appKey === 'piloto' ? 'PILOTO' : req.params.appKey === 'publica' ? 'PUBLICA' : null
+  const appKey: ShopifyAppKey | null =
+    req.params.appKey === 'piloto'
+      ? 'PILOTO'
+      : req.params.appKey === 'publica'
+        ? 'PUBLICA'
+        : req.params.appKey === 'comercio'
+          ? 'COMERCIO'
+          : null
   if (!appKey) {
     res.status(404).end()
     return

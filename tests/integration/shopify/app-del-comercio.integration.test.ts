@@ -10,12 +10,13 @@ jest.mock('@/config/env', () => {
 })
 
 import crypto from 'crypto'
+import type { Request, Response } from 'express'
 import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { SHOPIFY_SCOPES } from '@/services/commerce-channels/shopify/shopify.constants'
-import { decryptShopifyToken } from '@/services/commerce-channels/shopify/shopify.crypto'
+import { decryptShopifyToken, encryptShopifyToken } from '@/services/commerce-channels/shopify/shopify.crypto'
 import {
   conectarConAppDelComercio,
   confirmShopifyConnect,
@@ -25,6 +26,7 @@ import {
   registerShopifyWebhooks,
   startShopifyConnect,
 } from '@/services/commerce-channels/shopify/shopify.connect.service'
+import { handleShopifyWebhook, persistShopifyWebhook } from '@/services/commerce-channels/shopify/shopify.inbound.service'
 import {
   assertTestDatabase,
   crearEscenarioShopify,
@@ -33,7 +35,7 @@ import {
   limpiarEscenarioShopify,
   UBICACION_PRUEBA,
 } from './fixtures'
-import { CLIENT_ID_PRUEBA, falla, LLAVE_OK, quitarFetch, SECRET_MALO, SECRET_PRUEBA, shopifyPorFetch } from './fixturesB'
+import { aComercio, CLIENT_ID_PRUEBA, falla, LLAVE_OK, quitarFetch, SECRET_MALO, SECRET_PRUEBA, shopifyPorFetch } from './fixturesB'
 
 jest.setTimeout(120_000)
 const SECRETO = 'secreto-app-piloto'
@@ -465,5 +467,68 @@ describe('5a · cambiar de método por REAUTHORIZE (riesgo 7)', () => {
       clientSecretCiphertext: null,
     })
     expect(logAction).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'SHOPIFY_REAUTHORIZED' }))
+  })
+})
+
+describe('5a · avisos con el secret de cada tienda (riesgo 5)', () => {
+  const firmarCon = (secreto: string, b: Buffer) => crypto.createHmac('sha256', secreto).update(b).digest('base64')
+  const CUERPO = Buffer.from(JSON.stringify({ inventory_item_id: 1, location_id: 1 }))
+  const guardar = (appKey: 'COMERCIO' | 'PILOTO', shopDomain: string, hmac: string) =>
+    persistShopifyWebhook({ rawBody: CUERPO, appKey, hmac, topic: 'inventory_levels/update', shopDomain, webhookId: crypto.randomUUID() })
+
+  it('🔴 un aviso COMERCIO se verifica con el secret de SU tienda; con el de otra, con el viejo o sin tienda COMERCIO ⇒ 401; PILOTO sigue con el de env', async () => {
+    const a = await escenario()
+    await aComercio(a)
+    const b = await escenario()
+    await aComercio(b)
+    await prisma.shopifyStore.update({
+      where: { id: b.storeId },
+      data: { clientSecretCiphertext: encryptShopifyToken('shpss_de_la_otra_tienda') },
+    })
+    expect((await guardar('COMERCIO', a.shopDomain, firmarCon(SECRET_PRUEBA, CUERPO))).outcome).toBe('PERSISTED')
+    // La firma de OTRA tienda con el dominio de ésta: el encabezado sólo elige el secret; la firma decide.
+    expect(await guardar('COMERCIO', a.shopDomain, firmarCon('shpss_de_la_otra_tienda', CUERPO))).toEqual({ outcome: 'INVALID_SIGNATURE' })
+    // El secret viejo, después de «Cambiar llaves».
+    await prisma.shopifyStore.update({ where: { id: a.storeId }, data: { clientSecretCiphertext: encryptShopifyToken('shpss_nuevo') } })
+    expect(await guardar('COMERCIO', a.shopDomain, firmarCon(SECRET_PRUEBA, CUERPO))).toEqual({ outcome: 'INVALID_SIGNATURE' })
+    expect((await guardar('COMERCIO', ` ${a.shopDomain.toUpperCase()} `, firmarCon('shpss_nuevo', CUERPO))).outcome).toBe('PERSISTED')
+    // Sin tienda, un dominio que no es de Shopify, o una tienda PILOTO por la ruta de COMERCIO.
+    expect(await guardar('COMERCIO', 'no-existe-5a.myshopify.com', firmarCon(SECRET_PRUEBA, CUERPO))).toEqual({
+      outcome: 'INVALID_SIGNATURE',
+    })
+    expect(await guardar('COMERCIO', 'evil.com', firmarCon(SECRET_PRUEBA, CUERPO))).toEqual({ outcome: 'INVALID_SIGNATURE' })
+    const p = await escenario()
+    expect(await guardar('COMERCIO', p.shopDomain, firmarCon(SECRETO, CUERPO))).toEqual({ outcome: 'INVALID_SIGNATURE' })
+    // El piloto no cambia.
+    expect((await guardar('PILOTO', p.shopDomain, firmarCon(SECRETO, CUERPO))).outcome).toBe('PERSISTED')
+    expect(await prisma.shopifyInboundEvent.count({ where: { shopDomain: a.shopDomain, appKey: 'COMERCIO' } })).toBe(2)
+  })
+
+  it('la ruta /webhooks/shopify/comercio guarda el aviso como COMERCIO; otra sigue en 404', async () => {
+    const a = await escenario()
+    await aComercio(a)
+    const respuesta = () => {
+      const res = { status: jest.fn(), end: jest.fn() }
+      res.status.mockReturnValue(res)
+      return res
+    }
+    const peticion = (appKey: string, headers: Record<string, string>) =>
+      ({ params: { appKey }, body: CUERPO, get: (h: string) => headers[h.toLowerCase()] }) as unknown as Request
+    const cabeceras = {
+      'x-shopify-hmac-sha256': firmarCon(SECRET_PRUEBA, CUERPO),
+      'x-shopify-topic': 'inventory_levels/update',
+      'x-shopify-shop-domain': a.shopDomain,
+      'x-shopify-webhook-id': `w-comercio-${a.venueId}`,
+    }
+    const ok = respuesta()
+    await handleShopifyWebhook(peticion('comercio', cabeceras), ok as unknown as Response)
+    expect(ok.status).toHaveBeenCalledWith(200)
+    expect(await prisma.shopifyInboundEvent.findUniqueOrThrow({ where: { dedupKey: `w-comercio-${a.venueId}` } })).toMatchObject({
+      appKey: 'COMERCIO',
+      shopDomain: a.shopDomain,
+    })
+    const otra = respuesta()
+    await handleShopifyWebhook(peticion('otra', cabeceras), otra as unknown as Response)
+    expect(otra.status).toHaveBeenCalledWith(404)
   })
 })
