@@ -4,7 +4,9 @@ import { createTokenCipher } from '@/lib/token-encryption'
 
 // `process.env` y no `@/config/env`: importar `env` en una prueba hace `process.exit` si falta algo
 // (.claude/rules/contexto-de-ejecucion.md). Mismo patrón que `aggregators/core/credentials.ts`.
-export function appCredentials(appKey: 'PILOTO' | 'PUBLICA'): { clientId: string; clientSecret: string } | null {
+export function appCredentials(appKey: 'PILOTO' | 'PUBLICA' | 'COMERCIO'): { clientId: string; clientSecret: string } | null {
+  // 5a: las llaves de la app del comercio son de CADA tienda (cifradas en ShopifyStore), nunca del entorno.
+  if (appKey === 'COMERCIO') return null
   const clientId = appKey === 'PILOTO' ? process.env.SHOPIFY_PILOTO_CLIENT_ID : process.env.SHOPIFY_PUBLICA_CLIENT_ID
   const clientSecret = appKey === 'PILOTO' ? process.env.SHOPIFY_PILOTO_CLIENT_SECRET : process.env.SHOPIFY_PUBLICA_CLIENT_SECRET
   return clientId && clientSecret ? { clientId, clientSecret } : null

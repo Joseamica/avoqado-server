@@ -1,6 +1,7 @@
 import crypto from 'crypto'
 import logger from '@/config/logger'
 import {
+  appCredentials,
   decryptShopifyToken,
   encryptShopifyToken,
   formaDeFirmaOAuth,
@@ -141,5 +142,27 @@ describe('shopify.crypto', () => {
 
   it('arma gids', () => {
     expect(toGid('InventoryItem', 42)).toBe('gid://shopify/InventoryItem/42')
+  })
+
+  it('5a: COMERCIO no tiene llaves en el entorno (son de cada tienda): null aunque estén las del piloto y la pública', () => {
+    const claves = [
+      'SHOPIFY_PILOTO_CLIENT_ID',
+      'SHOPIFY_PILOTO_CLIENT_SECRET',
+      'SHOPIFY_PUBLICA_CLIENT_ID',
+      'SHOPIFY_PUBLICA_CLIENT_SECRET',
+    ]
+    Object.assign(process.env, {
+      SHOPIFY_PILOTO_CLIENT_ID: 'p',
+      SHOPIFY_PILOTO_CLIENT_SECRET: 'ps',
+      SHOPIFY_PUBLICA_CLIENT_ID: 'u',
+      SHOPIFY_PUBLICA_CLIENT_SECRET: 'us',
+    })
+    try {
+      expect(appCredentials('COMERCIO')).toBeNull()
+      expect(appCredentials('PILOTO')).toEqual({ clientId: 'p', clientSecret: 'ps' })
+      expect(appCredentials('PUBLICA')).toEqual({ clientId: 'u', clientSecret: 'us' })
+    } finally {
+      for (const k of claves) delete process.env[k]
+    }
   })
 })

@@ -753,11 +753,10 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     const migraciones = fs.readdirSync(path.join(RAIZ, 'prisma/migrations'))
     const carpetas = migraciones.filter(d => d.endsWith('_shopify_conector'))
     expect(carpetas).toEqual(['20261008230100_shopify_conector'])
-    // D1: la única otra migración del conector sólo AGREGA columnas nulas a la pareja, y va después de la del conector.
+    // D1 y 5a: las otras dos migraciones del conector sólo AGREGAN (columnas nulas y, la de 5a, el valor COMERCIO), en ese orden.
     const d1 = migraciones.filter(d => d.endsWith('_shopify_eleccion_conexion'))
     expect(d1).toHaveLength(1)
     expect(d1[0] > carpetas[0]).toBe(true)
-    expect(migraciones.filter(d => /shopify/i.test(d))).toEqual([...carpetas, ...d1])
     const sqlD1 = leer(`prisma/migrations/${d1[0]}/migration.sql`).replace(/--.*$/gm, '')
     expect(
       sqlD1
@@ -766,6 +765,19 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
         .filter(Boolean)[0],
     ).toBe("SET LOCAL lock_timeout = '5s'")
     expect(sqlD1).not.toMatch(/CREATE INDEX|DROP|UPDATE|DELETE|NOT NULL/i)
+    const m5a = migraciones.filter(d => d.endsWith('_shopify_app_del_comercio'))
+    expect(m5a).toHaveLength(1)
+    expect(m5a[0] > d1[0]).toBe(true)
+    expect(migraciones.filter(d => /shopify/i.test(d))).toEqual([...carpetas, ...d1, ...m5a])
+    const sql5a = leer(`prisma/migrations/${m5a[0]}/migration.sql`).replace(/--.*$/gm, '')
+    expect(
+      sql5a
+        .split(';')
+        .map(s => s.trim())
+        .filter(Boolean)[0],
+    ).toBe("SET LOCAL lock_timeout = '5s'")
+    expect(sql5a).toContain(`ALTER TYPE "ShopifyAppKey" ADD VALUE 'COMERCIO'`)
+    expect(sql5a).not.toMatch(/CREATE INDEX|DROP|UPDATE|DELETE|NOT NULL/i)
     contieneTodas(['El índice `(status, resolvedAt)` va en la misma migración `shopify_conector`'])
     const sql = leer(`prisma/migrations/${carpetas[0]}/migration.sql`)
     expect(sql).toContain('CREATE INDEX "ShopifyReviewItem_status_resolvedAt_idx" ON "ShopifyReviewItem"("status", "resolvedAt");')
@@ -923,7 +935,7 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
       'shopify.connect.service.ts:98': [de('connect.service'), 'export async function startShopifyConnect('],
       'connect.service.ts:1481': [de('connect.service'), 'export async function disconnectShopify('],
       'connect.service.ts:647': [de('connect.service'), 'async function aCuarentenaPorReligar('],
-      'shopify.crypto.ts:32': [de('crypto'), 'export function formaDeFirmaOAuth('],
+      'shopify.crypto.ts:34': [de('crypto'), 'export function formaDeFirmaOAuth('],
       'catalog.service.ts:68': [de('catalog.service'), 'export const FILTRO_ESTADO'],
       'catalog.service.ts:418': [de('catalog.service'), 'async function bloquearProductos('],
       'reconcile.service.ts:1290': [de('reconcile.service'), 'tx.shopifyStockOutbox.create('],
@@ -938,7 +950,7 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     // Las cortas (`:N`) son del archivo que la regla acaba de nombrar.
     const cortas: Record<string, [string, string]> = {
       '`:70`': [de('connect.service'), 'const tiendasPiloto'],
-      '`:47`': [de('crypto'), 'export function verifyOAuthQueryHmac('],
+      '`:49`': [de('crypto'), 'export function verifyOAuthQueryHmac('],
       '`:1188`': [de('catalog.service'), 'export async function archivarPareja('],
     }
     const enLaRegla = [

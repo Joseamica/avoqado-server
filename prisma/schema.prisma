@@ -19217,6 +19217,8 @@ model StaffPayStatement {
 enum ShopifyAppKey {
   PILOTO
   PUBLICA
+  // 5a (spec 2026-10-11): la app la creó el comercio en SU Dev Dashboard; sus llaves viven cifradas en ShopifyStore.
+  COMERCIO
 }
 
 /// La revocación vive SÓLO aquí (ajuste 12 bis.7). Una credencial nueva revive todas las sucursales de la tienda.
@@ -19308,22 +19310,29 @@ enum ShopifyIssueReason {
 
 /// Una tienda de Shopify ligada a una organización. El token va cifrado (SHOPIFY_TOKEN_KEY).
 model ShopifyStore {
-  id                    String                @id @default(cuid())
-  organizationId        String
-  organization          Organization          @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  shopDomain            String                @unique
-  appKey                ShopifyAppKey
-  accessTokenCiphertext Bytes
-  /// Sube con cada token nuevo. Un 401 sólo revoca si el token usado sigue siendo el vigente.
-  tokenVersion          Int                   @default(1)
-  scopes                String
-  status                ShopifyStoreStatus    @default(ACTIVE)
-  revokedAt             DateTime?
+  id                     String                @id @default(cuid())
+  organizationId         String
+  organization           Organization          @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  shopDomain             String                @unique
+  appKey                 ShopifyAppKey
+  accessTokenCiphertext  Bytes
+  /// Sube con cada CREDENCIAL nueva (conectar, reautorizar, cambiar las llaves). La llave de 24 h de COMERCIO NO la sube. Un 401
+  /// sólo revoca si la credencial usada sigue siendo la vigente.
+  tokenVersion           Int                   @default(1)
+  scopes                 String
+  status                 ShopifyStoreStatus    @default(ACTIVE)
+  revokedAt              DateTime?
   /// Cuándo se guardó el token vigente. Un `app/uninstalled` con `X-Shopify-Triggered-At` anterior no lo revoca (§10.6).
-  authorizedAt          DateTime              @default(now())
-  createdAt             DateTime              @default(now())
-  updatedAt             DateTime              @updatedAt
-  locationLinks         ShopifyLocationLink[]
+  authorizedAt           DateTime              @default(now())
+  /// 5a (app del comercio): el Client ID de SU app. No es secreto: la página enseña su terminación. Nulo en PILOTO.
+  clientId               String?
+  /// 5a: el Client Secret, cifrado con SHOPIFY_TOKEN_KEY. Nunca sale en una respuesta, en la bitácora ni en el log.
+  clientSecretCiphertext Bytes?
+  /// 5a: cuándo vence la llave de 24 h guardada en `accessTokenCiphertext`. Renovarla NO sube `tokenVersion`.
+  accessTokenExpiresAt   DateTime?
+  createdAt              DateTime              @default(now())
+  updatedAt              DateTime              @updatedAt
+  locationLinks          ShopifyLocationLink[]
 
   @@index([organizationId])
 }
@@ -19477,19 +19486,24 @@ model ShopifyInboundEvent {
   @@index([shopDomain, status])
 }
 
-/// Intención OAuth de un solo uso: CREATED → EXCHANGING → EXCHANGED → CONSUMED (o FAILED).
+/// Intención de conexión de un solo uso: CREATED → EXCHANGING → EXCHANGED → CONSUMED (o FAILED). Con la app del comercio (5a)
+/// nace EXCHANGED (CONNECT) o EXCHANGING (REAUTHORIZE), con sus llaves cifradas.
 model ShopifyConnectIntent {
-  id              String               @id @default(cuid())
-  venueId         String
-  authUserId      String
-  shopDomain      String
-  appKey          ShopifyAppKey
-  purpose         ShopifyIntentPurpose @default(CONNECT)
-  status          ShopifyIntentStatus  @default(CREATED)
-  tokenCiphertext Bytes?
-  scopes          String?
-  expiresAt       DateTime
-  createdAt       DateTime             @default(now())
+  id                     String               @id @default(cuid())
+  venueId                String
+  authUserId             String
+  shopDomain             String
+  appKey                 ShopifyAppKey
+  purpose                ShopifyIntentPurpose @default(CONNECT)
+  status                 ShopifyIntentStatus  @default(CREATED)
+  tokenCiphertext        Bytes?
+  scopes                 String?
+  /// 5a: las llaves de la app del comercio (el secret cifrado) y el vencimiento de su llave de 24 h; pasan a la tienda.
+  clientId               String?
+  clientSecretCiphertext Bytes?
+  tokenExpiresAt         DateTime?
+  expiresAt              DateTime
+  createdAt              DateTime             @default(now())
 
   @@index([venueId, createdAt])
   @@index([expiresAt])

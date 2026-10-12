@@ -135,10 +135,10 @@ export async function shopifyGraphql<T>(
   )
 }
 
-/** Canjea el `code` del callback OAuth por un token offline. */
+/** Canjea el `code` del callback OAuth por un token offline. COMERCIO no tiene app en el entorno: sale «faltan las llaves». */
 export async function exchangeOAuthCode(
   shop: string,
-  appKey: 'PILOTO' | 'PUBLICA',
+  appKey: 'PILOTO' | 'PUBLICA' | 'COMERCIO',
   code: string,
 ): Promise<ShopifyResult<{ accessToken: string; scope: string }>> {
   const creds = appCredentials(appKey)

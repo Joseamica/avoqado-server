@@ -62,7 +62,7 @@ cada cliente lo traduce a su mismo texto de piloto por el código, nunca por el 
 - **Callback OAuth** (`SHOPIFY_OAUTH_CALLBACK_PATH`, `app.ts:204`): público, sin sesión; la prueba de origen es el `hmac` más el `state`
   firmado. `handleShopifyCallback(…)` recibe `req.query` INTACTO: un parámetro repetido (llega como arreglo) no es algo que Shopify firmó y
   da `?error=FIRMA`; no se filtra antes.
-- **HMAC del callback** (`formaDeFirmaOAuth(…)`, `shopify.crypto.ts:32`; `verifyOAuthQueryHmac(…)`, `:47`): se aceptan DOS formas de firma,
+- **HMAC del callback** (`formaDeFirmaOAuth(…)`, `shopify.crypto.ts:34`; `verifyOAuthQueryHmac(…)`, `:49`): se aceptan DOS formas de firma,
   las dos en tiempo constante y las dos exigiendo el secreto: la de la biblioteca oficial de Shopify (valores codificados con
   `URLSearchParams`, `+` → `%20`) y la unión decodificada del ejemplo de su doc. Un `host` terminado en `==` firmado como la biblioteca
   oficial sólo cuadra con la forma codificada; con una sola forma (la decodificada), el piloto daría `?error=FIRMA`. Se registra cuál pegó
@@ -379,8 +379,9 @@ la guía. La página nunca ofrece comprar Premium para Shopify (§0).
   (`REVISIONES_RESUELTAS_DIAS`) cuya elección ya no está en camino: sin envío, o con su fila SENT, DISCARDED o ya borrada. Nunca se purga
   una revisión OPEN, ni una resuelta cuyo envío siga PENDING, FAILED, IN_PROGRESS o DEAD_LETTER. Sin la purga la tabla crece para siempre (a
   30,000 revisiones en un negocio la lista cuesta 35 ms con Seq Scan); la historia queda en `ActivityLog`. El índice `(status, resolvedAt)`
-  va en la misma migración `shopify_conector` (la del conector, `20261008230100_shopify_conector`; la única otra es la de D1,
-  `…_shopify_eleccion_conexion`, que sólo agrega columnas nulas a la pareja): sin él la purga tarda 201 ms contra 0.04 ms con 1 M de filas.
+  va en la misma migración `shopify_conector` (la del conector, `20261008230100_shopify_conector`; las otras dos sólo agregan: la de D1,
+  `…_shopify_eleccion_conexion`, columnas nulas a la pareja, y la de 5a, `…_shopify_app_del_comercio`, el valor `COMERCIO` y columnas nulas
+  a la tienda y al intent): sin él la purga tarda 201 ms contra 0.04 ms con 1 M de filas.
 - **Prueba de volumen:** `tests/integration/shopify/catalogo-volumen.integration.test.ts` (5,000 variantes de punta a punta, ~9 min) está
   APAGADA por defecto (`describe.skip`) para no sumarle minutos al CI de todos. `SHOPIFY_VOLUMEN=1` la enciende, siempre en una base
   desechable:
