@@ -1,5 +1,5 @@
 import prisma from '@/utils/prismaClient'
-import { migrarSede } from '@/services/dashboard/rh/migracion'
+import { ensayarSede, migrarSede } from '@/services/dashboard/rh/migracion'
 import { archivarPuesto, editarPuesto } from '@/services/dashboard/rh/puestos.service'
 import { terminarAsignacion } from '@/services/dashboard/rh/asignaciones.service'
 
@@ -18,7 +18,7 @@ const staffIds: string[] = []
 const st: Record<string, string> = {}
 let coachId: string | undefined
 
-async function persona(nombre: string, venue: string, role: 'WAITER' | 'CASHIER', active = true) {
+async function persona(nombre: string, venue: string, role: 'WAITER' | 'CASHIER' | 'SUPERADMIN', active = true) {
   const id = (await prisma.staff.create({ data: { email: `${key}-${nombre}@example.test`, firstName: nombre, lastName: 'Prueba' } })).id
   staffIds.push(id)
   st[nombre] = id
@@ -63,6 +63,7 @@ describe('sede principal: dos corridas, edición humana y archivado', () => {
     await persona('beto', v, 'CASHIER')
     await persona('caro', v, 'WAITER', false) // baja: no se migra
     await persona('dani', v, 'WAITER') // ya tiene un puesto puesto a mano
+    await persona('sam', v, 'SUPERADMIN') // interno de Avoqado: no se migra
     // Puestos manuales que chocan con los nombres del giro (caso 5): «Mesero» y «Mesero (WAITER)» ocupados; «cajero» en minúsculas.
     for (const name of ['Mesero', 'Mesero (WAITER)', 'cajero']) {
       await prisma.staffPosition.create({ data: { venueId: v, name, suggestedRole: 'WAITER' } })
@@ -73,6 +74,25 @@ describe('sede principal: dos corridas, edición humana y archivado', () => {
       data: { venueId: v, staffId: st.dani, positionId: coachId, effectiveFrom: new Date('2026-01-01T00:00:00Z') },
     })
     rolesAntes = await roles(v)
+  })
+
+  it('ensayo: muestra el plan con los nombres finales y las omitidas, sin escribir nada', async () => {
+    const antes = await Promise.all([
+      prisma.staffPosition.count({ where: { venueId } }),
+      prisma.staffAssignment.count({ where: { venueId } }),
+    ])
+
+    const plan = await ensayarSede(venueId!)
+
+    expect(plan.puestos.map(x => x.name)).toEqual(['Cajero (CASHIER)', 'Mesero (WAITER) 2'])
+    expect(plan.asignaciones.map(x => x.staffId)).toEqual([st.ana, st.beto])
+    expect(plan.yaTienenPuesto).toEqual([st.dani])
+    expect(plan.puestoArchivado).toEqual([])
+    const despues = await Promise.all([
+      prisma.staffPosition.count({ where: { venueId } }),
+      prisma.staffAssignment.count({ where: { venueId } }),
+    ])
+    expect(despues).toEqual(antes)
   })
 
   it('1 y 5: crea un puesto por rol en uso (con «(ROL)» y «… 2» si el nombre está ocupado) y una asignación por activo', async () => {
@@ -100,6 +120,9 @@ describe('sede principal: dos corridas, edición humana y archivado', () => {
     for (const a of asign) expect(a).toMatchObject({ relation: null, effectiveTo: null })
     expect(asign.find(a => a.staffId === st.ana)?.position.suggestedRole).toBe('WAITER')
     expect(asign.find(a => a.staffId === st.beto)?.position.suggestedRole).toBe('CASHIER')
+    // SUPERADMIN: ni puesto ni asignación.
+    expect(await prisma.staffPosition.count({ where: { venueId, suggestedRole: 'SUPERADMIN' } })).toBe(0)
+    expect(await prisma.staffAssignment.count({ where: { venueId, staffId: st.sam } })).toBe(0)
   })
 
   it('1: la segunda corrida no crea nada', async () => {
@@ -130,6 +153,7 @@ describe('sede principal: dos corridas, edición humana y archivado', () => {
     await terminarAsignacion({ venueId: venueId!, assignmentId: deBeto.id, actorId: st.ana }) // la API nunca borra
     await archivarPuesto({ venueId: venueId!, actorId: st.ana, positionId: cajero.id })
     await persona('eva', venueId!, 'CASHIER') // alta posterior con el rol cuyo puesto se archivó
+    expect((await ensayarSede(venueId!)).puestoArchivado).toEqual([st.eva])
     const [puestos, asignaciones] = await Promise.all([
       prisma.staffPosition.count({ where: { venueId } }),
       prisma.staffAssignment.count({ where: { venueId } }),
@@ -140,6 +164,16 @@ describe('sede principal: dos corridas, edición humana y archivado', () => {
     expect(await prisma.staffAssignment.count({ where: { venueId } })).toBe(asignaciones)
     expect(await prisma.staffAssignment.count({ where: { venueId, staffId: st.eva } })).toBe(0)
     expect((await prisma.staffAssignment.findUniqueOrThrow({ where: { id: deBeto.id } })).effectiveTo).not.toBeNull()
+  })
+
+  it('8: la asignación nueva hereda el checador del puesto (tracksAttendanceDefault)', async () => {
+    const mesero = await prisma.staffPosition.findUniqueOrThrow({ where: { migrationKey: `role:${venueId}:WAITER` } })
+    await editarPuesto({ venueId: venueId!, actorId: st.ana, positionId: mesero.id, tracksAttendanceDefault: false })
+    await persona('iris', venueId!, 'WAITER')
+
+    expect(await migrarSede(venueId!)).toEqual({ puestosCreados: 0, asignacionesCreadas: 1 })
+    const deIris = await prisma.staffAssignment.findFirstOrThrow({ where: { venueId, staffId: st.iris } })
+    expect(deIris).toMatchObject({ positionId: mesero.id, tracksAttendance: false })
   })
 
   it('6: ningún StaffVenue.role cambió', async () => {
@@ -184,10 +218,19 @@ describe('sede con 5,001+ bajas históricas', () => {
       })
     const rolesAntes = await porRol()
 
-    expect(await migrarSede(v)).toEqual({ puestosCreados: 2, asignacionesCreadas: 1 })
+    // Sólo nace el puesto de CASHIER (Gus lo recibe); el de WAITER no, porque su única activa ya tiene puesto.
+    expect(await migrarSede(v)).toEqual({ puestosCreados: 1, asignacionesCreadas: 1 })
     expect(await prisma.staffAssignment.count({ where: { venueId: v, staffId: fer } })).toBe(1)
     expect(await prisma.staffAssignment.count({ where: { venueId: v, staffId: gus, migrationKey: { not: null } } })).toBe(1)
+    expect(await prisma.staffPosition.count({ where: { venueId: v, migrationKey: `role:${v}:WAITER` } })).toBe(0)
     expect(await prisma.staffAssignment.count({ where: { venueId: v } })).toBe(HISTORICOS + 2)
     expect(await porRol()).toEqual(rolesAntes)
+
+    // 5: cuando llega alguien que sí lo necesita, una corrida posterior crea el puesto de WAITER.
+    const hugo = await persona('hugo', v, 'WAITER')
+    expect(await migrarSede(v)).toEqual({ puestosCreados: 1, asignacionesCreadas: 1 })
+    const mesero = await prisma.staffPosition.findUniqueOrThrow({ where: { migrationKey: `role:${v}:WAITER` } })
+    expect(mesero.name).toBe('Mesero')
+    expect(await prisma.staffAssignment.findFirstOrThrow({ where: { venueId: v, staffId: hugo } })).toMatchObject({ positionId: mesero.id })
   })
 })

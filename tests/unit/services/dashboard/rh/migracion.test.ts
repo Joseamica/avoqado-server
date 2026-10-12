@@ -64,6 +64,18 @@ describe('migración RH 1a (spec §8)', () => {
       expect(p.asignaciones).toHaveLength(0)
       expect(p.puestos).toHaveLength(0)
     })
+    it('SUPERADMIN (interno de Avoqado, el negocio no lo ve) no recibe puesto ni asignación', () => {
+      const p = planDeMigracion({
+        venueId: 'v1',
+        timezone: 'UTC',
+        venueType: 'RESTAURANT',
+        roleConfigs: [],
+        staffVenues: [sv('a', 'SUPERADMIN'), sv('b', 'WAITER')],
+        existentes: new Set(),
+      })
+      expect(p.puestos.map(x => x.suggestedRole)).toEqual(['WAITER'])
+      expect(p.asignaciones.map(x => x.migrationKey)).toEqual(['sv:b'])
+    })
     it('lo ya migrado (aunque se haya editado o archivado) no se repite', () => {
       const p = planDeMigracion({
         venueId: 'v1',

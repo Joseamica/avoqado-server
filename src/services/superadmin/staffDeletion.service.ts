@@ -79,6 +79,11 @@ export async function deleteOrRetainStaffWithH1ProvenanceTx(
   await tx.oAuthState.deleteMany({ where: { userId: staffId } })
   await tx.googleOAuthSession.deleteMany({ where: { OR: [{ authUserId: staffId }, { staffId }] } })
   if (!provenance.length) {
+    // Asignaciones de RH (StaffAssignment.staffId es Restrict): sin provenance la persona se borra entera, y su historial de
+    // puestos con ella. UNA sola sentencia: la cadena de versiones (supersedesId, también Restrict) se revisa al final de
+    // la sentencia, cuando ya no queda ninguna. No es provenance H1: con provenance la persona se retiene y su historial
+    // se conserva.
+    await tx.staffAssignment.deleteMany({ where: { staffId } })
     await tx.staff.delete({ where: { id: staffId } })
     return { staff, retainedForAudit: false }
   }
