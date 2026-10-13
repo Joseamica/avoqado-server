@@ -13,7 +13,7 @@ import { hasPermission } from '@/services/access/access.service'
 import { emitRefundCreditNote, getRefundCreditNoteStatus, type RefundCreditNoteStatus } from '@/services/fiscal/cfdiCreditNote.service'
 import { operationHash } from '@/utils/operationHash'
 import { sendCfdiByEmail } from '@/services/fiscal/cfdiEmail.service'
-import { estadoDeCancelacion, type EstadoDeCancelacion } from '@/services/fiscal/cfdi.service'
+import { estadoDeCancelacion, extraccionesPendientes, type EstadoDeCancelacion } from '@/services/fiscal/cfdi.service'
 import { vistaPreviaContrato, confirmarContratoIvaIncluido } from '@/services/fiscal/confirmarContratoDePrecio.service'
 import {
   emitirGlobalComplementaria,
@@ -277,12 +277,16 @@ export function registerCfdiTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
   server.tool(
     'cfdi_status',
-    'CFDI 4.0 (facturación) status across your venues: invoice count by status (STAMPED = timbrada/issued; plus drafts, validation/stamp failures, and cancellations), the total stamped amount, and your most recent issued invoices (folio, UUID, receptor, amount). STAMP_FAILED includes `timbresEnDuda`: the PAC gave no clear answer and may have stamped them — they are NOT rejections, never re-issue them; reconciliation confirms them. Pass venueId to focus one venue.',
+    "CFDI 4.0 (facturación) status across your venues: invoice count by status (STAMPED = timbrada/issued; plus drafts, validation/stamp failures, and cancellations), the total stamped amount, and your most recent issued invoices (folio, UUID, receptor, amount). STAMP_FAILED includes `timbresEnDuda`: the PAC gave no clear answer and may have stamped them — they are NOT rejections, never re-issue them; reconciliation confirms them. `extraccionesPendientes`: sales taken OUT of the global invoice (an extraction credit note was stamped) that are still missing the customer's own invoice — `total` (exact) and `items` (page of `limit`; pass `siguiente` back as `extraccionesCursor` for more): invoice those sales again. `enProceso`: those whose customer invoice is being confirmed with the SAT — never request them again. Pass venueId to focus one venue.",
     {
       venueId: z.string().optional().describe('Focus one venue (must be in your scope); omit for all your venues'),
-      limit: z.number().int().min(1).max(20).default(5).describe('Max recent stamped invoices to return'),
+      limit: z.number().int().min(1).max(20).default(5).describe('Max recent stamped invoices (and pending extractions) to return'),
+      extraccionesCursor: z
+        .string()
+        .optional()
+        .describe('The `extraccionesPendientes.siguiente` of the previous call, for the next page of pending extractions'),
     },
-    async ({ venueId, limit }) => {
+    async ({ venueId, limit, extraccionesCursor }) => {
       guard.venueFilter(venueId) // scope check (throws if a given venueId is out of scope)
       // Read gate — mirror the dashboard's checkPermission('cfdi:view'). Single-venue focus throws
       // if the caller lacks it; the all-venues path filters to venues where the caller holds it below.
@@ -350,6 +354,10 @@ export function registerCfdiTools(server: McpServer, scope: McpScope) {
         take: limit,
       })
 
+      // C3 · T8 (Codex C3-6/C3-10): las ventas sacadas de la global a las que les FALTA la factura del cliente (ninguna viva), y cuántas la
+      // tienen EN PROCESO (viva sin timbrar): ésas no se vuelven a pedir. Acotado: dos consultas, página de `limit`, total exacto.
+      const extracciones = await extraccionesPendientes(cfdiVenueIds, { limit, cursor: extraccionesCursor ?? null })
+
       // ¿Facturapi nos avisa solo cuando el SAT resuelve una cancelación? Sin webhook, la factura cancelada se
       // entera por la revisión de cada hora. Pocos emisores por venue: consulta acotada.
       const emisores = await prisma.fiscalEmisor.findMany({
@@ -370,6 +378,27 @@ export function registerCfdiTools(server: McpServer, scope: McpScope) {
         byStatus,
         // Ronda QA (hermanos, aditivo): cuántas de `byStatus.STAMP_FAILED` están EN DUDA (no son rechazos: no se re-emiten).
         timbresEnDuda,
+        // C3 · T8 (aditivo): las ventas sacadas de la global que esperan la factura del cliente.
+        extraccionesPendientes: {
+          total: extracciones.total,
+          enProceso: extracciones.enProceso,
+          items: extracciones.items.map(e => ({
+            id: e.id,
+            venueId: e.venueId,
+            orderId: e.orderId,
+            folio: `${e.serie ?? ''}${e.folio ?? ''}` || null,
+            totalMxn: e.totalCents / 100,
+          })),
+          siguiente: extracciones.siguiente,
+          ...(extracciones.enProceso > 0
+            ? {
+                aviso:
+                  extracciones.enProceso === 1
+                    ? '1 factura del cliente se está confirmando con el SAT; no la vuelvas a pedir.'
+                    : `${extracciones.enProceso} facturas del cliente se están confirmando con el SAT; no las vuelvas a pedir.`,
+              }
+            : {}),
+        },
         stamped: { count: stamped._count._all, totalMxn: (stamped._sum.totalCents ?? 0) / 100 },
         recentStamped: recent.map(r => ({
           id: r.id,

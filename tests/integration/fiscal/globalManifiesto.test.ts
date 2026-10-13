@@ -13,6 +13,7 @@ import { issueCfdiForOrder, cancelCfdi } from '@/services/fiscal/cfdi.service'
 import { resolveFiscalProvider } from '@/services/fiscal/fiscalProvider.factory'
 import { ProviderHttpError } from '@/services/fiscal/providers/facturapi.provider'
 import { encenderIvaPorProducto } from '../../__helpers__/iva-por-producto'
+import { xmlDeLaFila } from '../../__helpers__/xml-del-pac'
 
 const { isDisposableH1Url } = require('../../../scripts/h1-test-database.cjs')
 const database = new URL(process.env.TEST_DATABASE_URL ?? '')
@@ -46,6 +47,7 @@ describe('global con manifiesto y entrada congelada', () => {
     name: 'facturapi',
     createInvoice: jest.fn(),
     createGlobalInvoice: jest.fn(),
+    createCreditNote: jest.fn(),
     cancelInvoice: jest.fn(),
     findByExternalId: jest.fn(),
     getInvoice: jest.fn(),
@@ -152,6 +154,9 @@ describe('global con manifiesto y entrada congelada', () => {
   it('todo16 conserva payload y dinero; reserva protocolo1, manifiesto y sellos antes del PAC', async () => {
     const a = await order()
     const b = await order(58)
+    // C3: el XML de lo que se le mandó (la extracción necesita los conceptos del XML de la global) y la nota de extracción.
+    provider.downloadXml.mockImplementation(async (id: string) => xmlDeLaFila(prisma, id))
+    provider.createCreditNote.mockImplementation(async () => valid())
     provider.createGlobalInvoice.mockImplementation(async params => {
       const c = await row()
       expect(c).toMatchObject({ protocoloIva: 1, attempts: 1, subtotalCents: 15000, taxCents: 2400, totalCents: 17400 })
@@ -187,10 +192,16 @@ describe('global con manifiesto y entrada congelada', () => {
       return valid()
     })
     expect((await global()).status).toBe('STAMPED')
-    await expect(issue(a.id)).rejects.toThrow('ya está incluida en la factura global')
-    await cancelCfdi({ cfdiId: (await row()).id, motivo: '02', sandbox: true, expectedVenueId: venueId })
+    // C3 (D6) — dorada que cambia A PROPÓSITO: ya no «primero cancela la global»; la venta sale de ella con su nota de extracción y se factura
+    // al cliente. Con esa nota viva, la global ya no se puede cancelar (C2-6: primero lo relacionado) y su manifiesto queda intacto.
+    expect(await issue(a.id)).toMatchObject({ status: 'STAMPED', cfdi: { type: 'INGRESO', isGlobal: false, totalCents: 11600 } })
+    expect(provider.createCreditNote).toHaveBeenCalledTimes(1)
+    await expect(cancelCfdi({ cfdiId: (await row()).id, motivo: '02', sandbox: true, expectedVenueId: venueId })).rejects.toThrow(
+      /relacionado/,
+    )
     expect(await prisma.cfdiGlobalOrden.count({ where: { cfdiId: (await row()).id } })).toBe(2)
     expect((await issue(b.id)).status).toBe('STAMPED')
+    expect(provider.createCreditNote).toHaveBeenCalledTimes(2)
   })
   it('🔴 C1: el ticket mezclado ya entra (antes se excluía en silencio)', async () => {
     // Para la v1, «MIXTA» era todo lo que no fuera todo al 16 % (aquí el producto pasó al 0 % antes de sellarse): se excluía y sólo se

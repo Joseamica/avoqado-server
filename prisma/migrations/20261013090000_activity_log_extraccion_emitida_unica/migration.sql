@@ -1,0 +1,17 @@
+-- IVA por producto, bloque C3 (Codex C3-22/C3-23): la llave única del evento `CFDI_EXTRACCION_EMITIDA`. Lo escribe UN solo lugar
+-- (`registrarExtraccionEmitida`, `cfdiExtraccion.service.ts`), desde todo camino que ve una extracción timbrada —el envío, la recuperación,
+-- cada «ya timbrada» y el barrido del reconciliador—; dos escrituras a la vez ⇒ una gana y la otra recibe P2002 («ya estaba»). El barrido
+-- del job usa este mismo índice parcial en su `NOT EXISTS`. `schema.prisma` no cambia: los índices parciales de `ActivityLog` viven sólo en
+-- el SQL (ver el comentario del modelo).
+--
+-- ONE statement per file, on purpose (precedent: 20260901190001_index_serialized_item_org_created_at_concurrently). Prisma sends a
+-- migration file to Postgres as a single multi-statement batch, run inside an implicit transaction block, where CREATE INDEX CONCURRENTLY
+-- is rejected (SQLSTATE 25001). A file holding exactly one statement is not wrapped, so CONCURRENTLY works.
+--
+-- IF NOT EXISTS: an environment that already built this index by hand skips it instead of failing.
+--
+-- Before applying (read-only): `SELECT "entityId", count(*) FROM "ActivityLog" WHERE action = 'CFDI_EXTRACCION_EMITIDA' GROUP BY 1
+-- HAVING count(*) > 1` must return 0 rows (the action is new).
+-- Recovery: inspect pg_index.indisvalid/indisready; if invalid, run a separate DROP INDEX CONCURRENTLY for this exact name, then retry
+-- this migration.
+CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS "ActivityLog_extraccion_emitida_key" ON "ActivityLog"("entityId") WHERE "action" = 'CFDI_EXTRACCION_EMITIDA';

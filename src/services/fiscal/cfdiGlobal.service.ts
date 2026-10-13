@@ -346,7 +346,8 @@ function leerGlobalV2(cfdi: any, modo: ModoDeLectura): EntradaGlobalV2 {
   return cfdi.entrada as EntradaGlobalV2
 }
 
-function realValido(r: unknown): boolean {
+/** C3 la reusa: la forma de los remanentes que congela una extracción es la de los reales de C1. */
+export function realValido(r: unknown): boolean {
   return (
     esObjeto(r) &&
     (r.orderItemId === null || typeof r.orderItemId === 'string') &&

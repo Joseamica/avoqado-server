@@ -4,11 +4,13 @@ const mockIssue = jest.fn()
 const mockCancel = jest.fn()
 const mockGetStatus = jest.fn()
 const mockListCfdis = jest.fn()
+const mockExtraccionesPendientes = jest.fn()
 jest.mock('../../../../src/services/fiscal/cfdi.service', () => ({
   issueCfdiForOrder: (...a: any[]) => mockIssue(...a),
   cancelCfdi: (...a: any[]) => mockCancel(...a),
   getCfdiStatus: (...a: any[]) => mockGetStatus(...a),
   listCfdisForVenue: (...a: any[]) => mockListCfdis(...a),
+  extraccionesPendientes: (...a: any[]) => mockExtraccionesPendientes(...a),
   // Literales distintos a propósito del texto real: una constante `undefined` no puede pasar las pruebas.
   MOTIVO_CONTRATO_DESCONOCIDO: 'MOTIVO-CONTRATO-DESCONOCIDO',
   MOTIVO_IVA_APARTE: 'MOTIVO-IVA-APARTE',
@@ -130,6 +132,7 @@ import {
   issueCfdiForOrderController,
   replaceCfdiController,
   listCfdisController,
+  extraccionesPendientesController,
   cancelCfdiController,
   getCfdiStatusController,
   getFiscalConfigController,
@@ -2883,5 +2886,71 @@ describe('micro-ronda final — 502 de «Corregir importe» con la corregida en 
       expect(body).not.toHaveProperty('timbreEnDuda')
       expect(body).not.toHaveProperty('error')
     }
+  })
+})
+
+// ==========================================
+// extraccionesPendientesController (C3, ola final · I-1)
+// ==========================================
+
+describe('extraccionesPendientesController', () => {
+  const VENUE_ID = 'venue-xyz'
+  const req = (overrides: Partial<any> = {}): any => ({
+    params: { venueId: VENUE_ID },
+    authContext: { venueId: 'token-venue' },
+    ...overrides,
+  })
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockExtraccionesPendientes.mockResolvedValue({
+      total: 3,
+      enProceso: 1,
+      items: [{ id: 'e1', venueId: VENUE_ID, orderId: 'o1', serie: 'E', folio: '1', totalCents: 11600, stampedAt: new Date() }],
+      siguiente: null,
+    })
+  })
+
+  it('🔴 devuelve SÓLO { total, enProceso } (sin items ni cursor), del venue de la URL, con el tope mínimo', async () => {
+    const res = mockRes()
+    await extraccionesPendientesController(req(), res)
+
+    expect(mockExtraccionesPendientes).toHaveBeenCalledTimes(1)
+    expect(mockExtraccionesPendientes).toHaveBeenCalledWith([VENUE_ID], { limit: 1 })
+    expect(res.status).toHaveBeenCalledWith(200)
+    expect(res.json).toHaveBeenCalledWith({ total: 3, enProceso: 1 })
+  })
+
+  it('el venue sale de la misma resolución que la lista (URL > x-venue-id > token)', async () => {
+    await extraccionesPendientesController(req({ params: {} }), mockRes())
+    expect(mockExtraccionesPendientes).toHaveBeenLastCalledWith(['token-venue'], { limit: 1 })
+  })
+
+  it('sin venue ⇒ 400 y no consulta', async () => {
+    const res = mockRes()
+    await extraccionesPendientesController(req({ params: {}, authContext: {} }), res)
+    expect(res.status).toHaveBeenCalledWith(400)
+    expect(mockExtraccionesPendientes).not.toHaveBeenCalled()
+  })
+
+  it('un fallo de la consulta ⇒ 500 en español, sin filtrar el error', async () => {
+    mockExtraccionesPendientes.mockRejectedValue(new Error('relation "Cfdi" blew up'))
+    const res = mockRes()
+    await extraccionesPendientesController(req(), res)
+    expect(res.status).toHaveBeenCalledWith(500)
+    expect(JSON.stringify(res.json.mock.calls)).not.toContain('blew up')
+  })
+
+  it('🔴 la ruta usa el MISMO permiso que la lista (cfdi:view + plan CFDI) y va ANTES de /:cfdiId', () => {
+    const fs = require('fs')
+    const path = require('path')
+    const rutas = fs.readFileSync(path.join(__dirname, '../../../../src/routes/dashboard.routes.ts'), 'utf8') as string
+    const ruta = rutas.indexOf("'/venues/:venueId/cfdi/extracciones-pendientes'")
+    expect(ruta).toBeGreaterThan(-1)
+    expect(ruta).toBeLessThan(rutas.indexOf("'/venues/:venueId/cfdi/:cfdiId',"))
+    const bloque = rutas.slice(ruta, rutas.indexOf('\n)', ruta))
+    expect(bloque).toContain("checkFeatureAccess('CFDI')")
+    expect(bloque).toContain("checkPermission('cfdi:view')")
+    expect(bloque).toContain('extraccionesPendientesController')
   })
 })

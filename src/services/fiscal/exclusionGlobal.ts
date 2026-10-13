@@ -1,4 +1,4 @@
-import type { Prisma } from '@prisma/client'
+import { Prisma } from '@prisma/client'
 
 /** Una respuesta incierta sigue ocupando la venta, aunque el barrido la marque STAMP_FAILED. */
 export const CFDI_VIVO: Prisma.CfdiWhereInput = {
@@ -9,8 +9,24 @@ export const CFDI_VIVO: Prisma.CfdiWhereInput = {
   ],
 }
 
+/**
+ * C3 (Codex C3-10): `CFDI_VIVO` para SQL crudo —el mismo predicado; `tests/integration/fiscal/cfdiVivoSql.test.ts` compara los dos en cada
+ * estado—. `alias` es el alias de la tabla `"Cfdi"` en la consulta (código, nunca entrada del usuario).
+ */
+export const cfdiVivoSql = (alias: string) => {
+  const a = Prisma.raw(`"${alias}"`)
+  return Prisma.sql`${a}.status::text <> 'VALIDATION_FAILED'
+    AND (${a}.status::text <> 'STAMP_FAILED' OR ${a}."falloDefinitivo" = false)
+    AND (${a}.status::text <> 'CANCELLED' OR ${a}."cancelStatus" IS NULL OR ${a}."cancelStatus"::text NOT IN ('ACCEPTED', 'CANCELLED'))`
+}
+
 /** C1 (Codex C3-15): la llave de toda nota de extracción (C3) empieza así; C3 la importa de aquí. */
 export const PREFIJO_EXTRACCION = 'cfdi-extraccion-'
+/**
+ * C3 (C3-P9 = B, Codex C3-19): la llave de LA nota de extracción de un ticket de una global: una sola por (global, ticket), sin generaciones.
+ * Vive aquí, junto al prefijo, porque la usan el lector de la nota (`cfdiCreditNote.service.ts`) y la extracción sin importarse entre sí.
+ */
+export const llaveDeExtraccion = (globalCfdiId: string, orderId: string) => `${PREFIJO_EXTRACCION}${globalCfdiId}-${orderId}`
 const SUFIJO_COMPLEMENTARIA = /^(.+)-c([1-9]\d*)$/
 
 /**
@@ -42,17 +58,14 @@ export const EXTRAIDO: Prisma.OrderWhereInput = {
 }
 
 /**
- * La admisión del POST la llama con la orden bloqueada (ahí DECIDE). C2-pulido · G2: el GET público de la autofactura la llama sin candado,
- * sólo para no ofrecer un formulario que el POST rechazaría: la MISMA regla en los dos.
+ * C3 (D6): la global VIVA cuyo manifiesto tiene la venta (la más reciente). La admisión de la factura individual la lee con la orden bloqueada
+ * (ahí DECIDE: un ticket en una global viva sólo se factura aparte con su extracción timbrada); el GET público de la autofactura, sin candado.
+ * Sustituye a la regla «primero cancela la global» (C2-pulido · G2).
  */
-export async function excluirSiEstaEnGlobal(tx: Pick<Prisma.TransactionClient, 'cfdi'>, orderId: string): Promise<string | null> {
-  const cfdi = await tx.cfdi.findFirst({
+export const globalVivaDeLaOrden = (db: Pick<Prisma.TransactionClient, 'cfdi'>, orderId: string) =>
+  db.cfdi.findFirst({
     where: { isGlobal: true, manifiestoGlobal: { some: { orderId } }, ...CFDI_VIVO },
-    select: { serie: true, folio: true, globalPeriod: true },
+    orderBy: { createdAt: 'desc' },
+    select: { id: true, uuid: true, venueId: true, fiscalEmisorId: true, status: true, cancelStatus: true, serie: true, folio: true },
   })
-  if (!cfdi) return null
-  const period = cfdi.globalPeriod as { meses?: string; anio?: number } | null
-  const label =
-    [cfdi.serie, cfdi.folio].filter(Boolean).join('-') || [period?.meses, period?.anio].filter(Boolean).join('/') || 'del periodo'
-  return `Esta venta ya está incluida en la factura global ${label}; para facturarla aparte primero hay que cancelar esa global.`
-}
+export type GlobalVivaDeLaOrden = NonNullable<Awaited<ReturnType<typeof globalVivaDeLaOrden>>>

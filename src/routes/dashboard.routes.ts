@@ -104,6 +104,7 @@ import {
   issueCfdiForOrderController,
   confirmOrderPriceContractController,
   listCfdisController,
+  extraccionesPendientesController,
   getCfdiStatusController,
   cancelCfdiController,
   replaceCfdiController,
@@ -3686,6 +3687,15 @@ router.get(
   checkPermission('cfdi:view'),
   validateRequest(listCfdisSchema),
   listCfdisController,
+)
+// C3 (ola final, I-1): cuántas ventas se sacaron de la factura global y no tienen factura del cliente (aviso de Facturación). Sólo lectura,
+// mismo permiso que la lista. ANTES de /:cfdiId, o `extracciones-pendientes` se leería como un id.
+router.get(
+  '/venues/:venueId/cfdi/extracciones-pendientes',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('CFDI'),
+  checkPermission('cfdi:view'),
+  extraccionesPendientesController,
 )
 
 // ---- CFDI lifecycle: status read + cancel ----

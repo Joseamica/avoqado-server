@@ -1,7 +1,14 @@
 // src/services/fiscal/cfdi.service.ts
-import { ConflictError, ProviderUnavailableError } from '../../errors/AppError'
+import { BadRequestError, ConflictError, ProviderUnavailableError } from '../../errors/AppError'
 import { bloquearOrdenParaFacturar, bloquearOrdenesParaFacturar, tomarAdmisionCompartida } from './admisionIva'
-import { excluirSiEstaEnGlobal, CFDI_VIVO, llavePrincipalDe } from './exclusionGlobal'
+import {
+  CFDI_VIVO,
+  cfdiVivoSql,
+  globalVivaDeLaOrden,
+  llavePrincipalDe,
+  PREFIJO_EXTRACCION,
+  type GlobalVivaDeLaOrden,
+} from './exclusionGlobal'
 import { capturarEntrada, huellaDeEntrada, leerEntrada, EntradaDocumentalV1 } from './entradaDocumental'
 import { finalizarTimbre, completarArchivos, escalarIntentoIncierto, ArchivosCfdi, conLimiteDeTiempo } from './finalizadorCfdi'
 import { sellarRenglones, liberarSellosDe } from './sellosIva'
@@ -12,6 +19,7 @@ import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { fromZonedTime } from 'date-fns-tz'
 import { DEFAULT_TIMEZONE } from '../../utils/datetime'
+import { utcTs } from '../../utils/sqlDates'
 import { uploadFileToStorage } from '../storage.service'
 import { resolveFiscalProvider } from './fiscalProvider.factory'
 import { buildCreateInvoiceParams } from './cfdiPayloadBuilder'
@@ -191,7 +199,132 @@ export async function listCfdisForVenue(params: ListCfdisParams): Promise<ListCf
   ])
 
   const ahora = new Date()
-  return { cfdis: (await conSuPrincipal(venueId, filas)).map(f => vistaDeCancelacion(f, ahora)), total, page, pageSize }
+  const conSuFactura = await conSuFacturaDelCliente(venueId, filas)
+  return { cfdis: (await conSuPrincipal(venueId, conSuFactura)).map(f => vistaDeCancelacion(f, ahora)), total, page, pageSize }
+}
+
+/** C3 · T8: en qué va la factura del cliente de una nota de extracción timbrada y viva. */
+export type FacturaDelCliente = 'TIMBRADA' | 'EN_PROCESO' | 'FALTA'
+
+/**
+ * C3 (M10): una nota de extracción con la cancelación EN TRÁMITE o CONSUMADA. La admisión de la factura del cliente responde por ella el 409
+ * `CFDI_CANCEL_PENDING`; por eso la lista y el MCP no la cuentan como «falta» (ruling T8: «falta» invitaría a un botón que va a fallar). Si la
+ * cancelación se rechaza, vuelve sola a «falta». Las dos listas también van al SQL de `extraccionesPendientes`: UN solo predicado.
+ */
+const EXTRACCION_EN_CANCELACION = { cancelStatus: ['REQUESTED', 'ACCEPTED', 'CANCELLED'], status: ['CANCELLED', 'CANCEL_REQUESTED'] }
+const extraccionEnCancelacion = (e: { status: string; cancelStatus: string | null }) =>
+  EXTRACCION_EN_CANCELACION.cancelStatus.includes(e.cancelStatus ?? '') || EXTRACCION_EN_CANCELACION.status.includes(e.status)
+
+/** C3 · T8: una nota de extracción que todavía sostiene la venta: timbrada y sin cancelación (la misma base que `extraccionesPendientes`). */
+const extraccionQueSostiene = (f: { idempotencyKey: string | null; status: string; cancelStatus: string | null }) =>
+  !!f.idempotencyKey?.startsWith(PREFIJO_EXTRACCION) && f.status === 'STAMPED' && !extraccionEnCancelacion(f)
+
+/**
+ * C3 · T8 (Codex C3-6/C3-10/C3-14): a cada fila, `esExtraccion` (la nota que sacó un ticket de la factura global) y, en una extracción que
+ * sostiene la venta, en qué va SU factura del cliente —la de ingreso, individual, de la misma orden, cuya `entrada.extraccion.cfdiId` es esta
+ * nota—: `TIMBRADA` (alguna viva timbrada), `EN_PROCESO` (viva sin timbrar: reserva, envío incierto o sustitución en curso) o `FALTA`
+ * (ninguna viva; `facturaDelClientePendiente: true`). Toda la página en UNA consulta agrupada (nunca una por fila), con la definición de
+ * documento vivo de hoy (`cfdiVivoSql`). Corre antes de `conSuPrincipal`, que quita la llave de la salida.
+ */
+async function conSuFacturaDelCliente<
+  T extends { id: string; orderId: string | null; status: string; cancelStatus: string | null; idempotencyKey: string | null },
+>(venueId: string, filas: T[]) {
+  const extracciones = filas.filter(f => f.orderId && extraccionQueSostiene(f))
+  const vivas = extracciones.length
+    ? await prisma.$queryRaw<Array<{ extraccionId: string; timbrada: boolean }>>`
+        SELECT n.entrada -> 'extraccion' ->> 'cfdiId' AS "extraccionId", bool_or(n.status::text = 'STAMPED') AS timbrada
+        FROM "Cfdi" n
+        WHERE n."venueId" = ${venueId} AND n."orderId" = ANY(${extracciones.map(f => f.orderId)})
+          AND n.type::text = 'INGRESO' AND n."isGlobal" = false
+          AND n.entrada -> 'extraccion' ->> 'cfdiId' = ANY(${extracciones.map(f => f.id)}) AND ${cfdiVivoSql('n')}
+        GROUP BY 1`
+    : []
+  const timbrada = new Map(vivas.map(v => [v.extraccionId, v.timbrada]))
+  const clasificadas = new Set(extracciones.map(f => f.id))
+  return filas.map(f => {
+    const facturaDelCliente: FacturaDelCliente | null = !clasificadas.has(f.id)
+      ? null
+      : timbrada.get(f.id) === true
+        ? 'TIMBRADA'
+        : timbrada.has(f.id)
+          ? 'EN_PROCESO'
+          : 'FALTA'
+    return {
+      ...f,
+      esExtraccion: !!f.idempotencyKey?.startsWith(PREFIJO_EXTRACCION),
+      facturaDelCliente,
+      facturaDelClientePendiente: facturaDelCliente === 'FALTA',
+    }
+  })
+}
+
+/** C3 · T8: el tope de una página de `extraccionesPendientes` (lo impone el servidor, pida lo que pida quien llama). */
+const TOPE_DE_EXTRACCIONES_PENDIENTES = 50
+
+export interface ExtraccionPendiente {
+  id: string
+  venueId: string
+  orderId: string
+  serie: string | null
+  folio: string | null
+  totalCents: number
+  stampedAt: Date
+}
+
+/** El `siguiente` de `extraccionesPendientes` es `<stampedAt ISO>|<id>` de la última de la página; otra cosa no se lee como «sin cursor». */
+function leerCursorDeExtracciones(cursor: string): { stampedAt: Date; id: string } {
+  const i = cursor.indexOf('|')
+  const stampedAt = new Date(cursor.slice(0, i))
+  const id = cursor.slice(i + 1)
+  if (i < 1 || !id || Number.isNaN(stampedAt.getTime()))
+    throw new BadRequestError('El cursor de las extracciones no es válido: usa el `siguiente` de la consulta anterior.')
+  return { stampedAt, id }
+}
+
+/**
+ * C3 · T8 (Codex C3-6/C3-10): las notas de extracción timbradas y vivas de estos venues cuya venta NO tiene ninguna factura del cliente viva
+ * (`total` exacto e `items`: la más reciente primero, por páginas con el cursor `(stampedAt, id)`), y cuántas la tienen EN PROCESO (alguna
+ * viva y ninguna viva timbrada): ésas no se vuelven a pedir. El mismo predicado que la lista de facturas (`cfdiVivoSql`). Dos consultas, sea
+ * cual sea el número de extracciones: los dos conteos juntos y la página.
+ * Fix T8 ronda 1: cada `EXISTS` va en el `WHERE` de su propio conteo (Postgres lo vuelve semi/anti-join; dentro de `count(*) FILTER` quedaba
+ * como SubPlan correlacionado por cada extracción), y `type`/`status` se comparan contra el literal del enum para que el índice
+ * `(venueId, status)` use sus dos columnas.
+ */
+export async function extraccionesPendientes(
+  venueIds: string[],
+  opts: { limit: number; cursor?: string | null },
+): Promise<{ total: number; enProceso: number; items: ExtraccionPendiente[]; siguiente: string | null }> {
+  const limit = Math.min(Math.max(Math.trunc(opts.limit) || 1, 1), TOPE_DE_EXTRACCIONES_PENDIENTES)
+  const despuesDe = opts.cursor ? leerCursorDeExtracciones(opts.cursor) : null
+  const facturaViva = (soloTimbrada: boolean) => Prisma.sql`EXISTS (
+      SELECT 1 FROM "Cfdi" n
+      WHERE n."venueId" = e."venueId" AND n."orderId" = e."orderId" AND n.type = 'INGRESO'::"CfdiType" AND n."isGlobal" = false
+        AND n.entrada -> 'extraccion' ->> 'cfdiId' = e.id AND ${cfdiVivoSql('n')}
+        ${soloTimbrada ? Prisma.sql`AND n.status = 'STAMPED'::"CfdiStatus"` : Prisma.empty})`
+  const extraccionesQueSostienen = Prisma.sql`e."venueId" = ANY(${venueIds}) AND e.type = 'EGRESO'::"CfdiType" AND e.status = 'STAMPED'::"CfdiStatus"
+      AND e."idempotencyKey" LIKE ${`${PREFIJO_EXTRACCION}%`}
+      AND (e."cancelStatus" IS NULL OR e."cancelStatus"::text NOT IN (${Prisma.join(EXTRACCION_EN_CANCELACION.cancelStatus)}))
+      AND e.status::text NOT IN (${Prisma.join(EXTRACCION_EN_CANCELACION.status)})`
+  const [conteos, items] = await Promise.all([
+    prisma.$queryRaw<Array<{ total: number; enProceso: number }>>`
+      SELECT (SELECT count(*)::int FROM "Cfdi" e WHERE ${extraccionesQueSostienen} AND NOT ${facturaViva(false)}) AS total,
+             (SELECT count(*)::int FROM "Cfdi" e
+              WHERE ${extraccionesQueSostienen} AND ${facturaViva(false)} AND NOT ${facturaViva(true)}) AS "enProceso"`,
+    prisma.$queryRaw<ExtraccionPendiente[]>`
+      SELECT e.id, e."venueId", e."orderId", e.serie, e.folio, e."totalCents", e."stampedAt"
+      FROM "Cfdi" e
+      WHERE ${extraccionesQueSostienen} AND NOT ${facturaViva(false)}
+        ${despuesDe ? Prisma.sql`AND (e."stampedAt", e.id) < (${utcTs(despuesDe.stampedAt)}, ${despuesDe.id})` : Prisma.empty}
+      ORDER BY e."stampedAt" DESC, e.id DESC
+      LIMIT ${limit}`,
+  ])
+  const ultima = items.length === limit ? items[items.length - 1] : null
+  return {
+    total: conteos[0].total,
+    enProceso: conteos[0].enProceso,
+    items,
+    siguiente: ultima ? `${new Date(ultima.stampedAt).toISOString()}|${ultima.id}` : null,
+  }
 }
 
 /**
@@ -357,6 +490,18 @@ export interface IssueCfdiDeps {
    * petición pudo cancelar el CFDI, y reescribir el estado aquí lo resucitaría (Codex P1-4).
    */
   persistArtifacts: (idempotencyKey: string, urls: ArchivosCfdi, version?: number) => Promise<any>
+  /** C3: la nota de extracción (por omisión, la de `cfdiExtraccion.service`). */
+  emitirExtraccion?: typeof import('./cfdiExtraccion.service').emitirExtraccion
+  /** C3 (Codex C3-20): recuperar por su identidad una extracción enviada y en duda (por omisión, `recuperarExtraccionEnviada`). */
+  recuperarExtraccion?: typeof import('./cfdiExtraccion.service').recuperarExtraccionEnviada
+  /** C3: la global viva de la venta leída FUERA de candados, antes de cualquier efecto (la admisión la vuelve a leer bajo los suyos). */
+  globalVivaDeLaOrdenFuera?: (orderId: string) => Promise<{ id: string; venueId: string; fiscalEmisorId: string | null } | null>
+  /** C3 (C3-13/C3-19): el antecedente de extracción de la venta leído FUERA de candados (por omisión, `extraccionDeLaOrden` con `prisma`). */
+  extraccionDeLaOrdenFuera?: (orderId: string) => Promise<any | null>
+  /** SÓLO PARA PRUEBAS (C3): dentro de la admisión, después de su último candado. */
+  despuesDeLaAdmision?: () => Promise<void>
+  /** SÓLO PARA PRUEBAS (C3): después de la comprobación previa de la factura del cliente, antes de extraer. */
+  despuesDeLaComprobacionPrevia?: () => Promise<void>
 }
 
 export interface IssueCfdiResult {
@@ -381,7 +526,7 @@ export interface IssueCfdiResult {
 }
 
 /** «A-14», o el UUID si la factura no trae serie/folio. Para mensajes al usuario. */
-function folioDe(cfdi: { serie?: string | null; folio?: string | null; uuid?: string | null }): string {
+export function folioDe(cfdi: { serie?: string | null; folio?: string | null; uuid?: string | null }): string {
   if (cfdi.serie || cfdi.folio) return [cfdi.serie, cfdi.folio].filter(Boolean).join('-')
   return cfdi.uuid ?? 'anterior'
 }
@@ -413,7 +558,15 @@ export function llaveDeEmision(orderId: string, facturas: Array<{ idempotencyKey
 export const STAMPING_TTL_MS = 3 * 60_000
 
 export async function issueCfdiForOrder(
-  params: { orderId: string; receptor: IssueReceptor; sandbox: boolean; flow?: 'STAFF_B' | 'AUTOFACTURA_A'; expectedVenueId?: string },
+  params: {
+    orderId: string
+    receptor: IssueReceptor
+    sandbox: boolean
+    flow?: 'STAFF_B' | 'AUTOFACTURA_A'
+    expectedVenueId?: string
+    /** C3-16: quien factura desde el dashboard (la extracción lo registra); la autofactura no lo pasa. */
+    staffId?: string | null
+  },
   overrides: Partial<IssueCfdiDeps> = {},
 ): Promise<IssueCfdiResult> {
   const deps = { ...defaultDeps, ...overrides }
@@ -653,6 +806,13 @@ export {
   MOTIVO_MEDIO_CENTAVO_SIN_REGLA,
 } from './reglaDelPac'
 type IssueParams = Parameters<typeof issueCfdiForOrder>[0]
+/** C3: lo que la admisión deja a la captura: la global viva de la venta y su extracción timbrada (o nada). */
+type Admitido = { global: GlobalVivaDeLaOrden | null; extraccion: any | null }
+/**
+ * C3: la extracción se carga PEREZOSA. `cfdi.service ↔ cfdiExtraccion ↔ cfdiCreditNote` es un ciclo y las dependencias por omisión de la
+ * extracción se arman al cargar su módulo: importada de arriba, según quién cargue primero, quedarían a medias (aviso de la Tarea 2).
+ */
+const moduloDeExtraccion = () => import('./cfdiExtraccion.service')
 
 /** Reservar y recapturar son las únicas rutas que leen la venta viva. El PAC sólo recibe la foto. */
 export async function emitirConEntrada(
@@ -663,7 +823,93 @@ export async function emitirConEntrada(
 ): Promise<IssueCfdiResult> {
   const deps = { ...defaultDeps, ...overrides }
   const transaction = deps.runInTransaction ?? defaultDeps.runInTransaction!
-  async function admission(tx: Prisma.TransactionClient) {
+  // C3 (§4.5, D6; Codex C3-1/C3-7/C3-11/C3-12/C3-13/C3-16/C3-20): un ticket en una global viva se factura aparte. ANTES de cualquier efecto
+  // fiscal se comprueba que la factura del cliente se podría emitir; sólo entonces se extrae (y la reserva de la extracción repite la prueba
+  // y la preparación real bajo su candado). Lo que sigue (admisión, captura y envío) es el camino de siempre.
+  if (!sustitucion) {
+    const detenida = await extraerSiEstaEnGlobal()
+    if (detenida) return detenida
+  }
+  async function extraerSiEstaEnGlobal(): Promise<IssueCfdiResult | null> {
+    const ext = await moduloDeExtraccion()
+    const actor = params.flow === 'AUTOFACTURA_A' ? null : (params.staffId ?? null) // C3-16: el staff del dashboard; la autofactura, nadie
+    const enGlobal = await deps.globalVivaDeLaOrdenFuera!(params.orderId)
+    // 🔴 C3-13/C3-19: el ANTECEDENTE de extracción de esta venta —viva o cancelada y confirmada, de cualquier global— manda aunque su global ya
+    // no esté viva. Cancelada (sin generaciones: C3-P9 = B) o sin su global ⇒ se detiene y se dice a quién acudir; nunca se cae a la factura
+    // ordinaria por la orden completa.
+    const antecedente = await deps.extraccionDeLaOrdenFuera!(params.orderId)
+    if (antecedente) {
+      if (params.expectedVenueId && antecedente.venueId !== params.expectedVenueId) throw new Error(`Order ${params.orderId} not found`)
+      const motivo = ext.motivoDelAntecedente(antecedente, enGlobal, params.orderId)
+      if (motivo) {
+        void logAction({
+          staffId: actor,
+          venueId: antecedente.venueId,
+          action: antecedente.status === 'CANCELLED' ? 'CFDI_EXTRACCION_CANCELADA' : 'CFDI_EXTRACCION_SIN_GLOBAL',
+          entity: 'Cfdi',
+          entityId: antecedente.id,
+          data: { orderId: params.orderId, extraidoCents: antecedente.totalCents },
+        })
+        return { status: 'VALIDATION_FAILED', cfdi: null, reasons: [motivo] }
+      }
+    }
+    if (!enGlobal) return null
+    if (params.expectedVenueId && enGlobal.venueId !== params.expectedVenueId) throw new Error(`Order ${params.orderId} not found`)
+    let vigente = await ext.extraccionVigente(prisma, enGlobal.id, params.orderId)
+    // 🔴 C3-20: lo ENVIADO se recupera PRIMERO —antes de las habilitaciones de hoy y del XML—, por su identidad y con su captura y su emisor
+    // congelados. Las habilitaciones de hoy aplican a efectos fiscales NUEVOS (la extracción que falta y la factura del cliente).
+    if (vigente && ext.esEnvioIncierto(vigente))
+      vigente = await (deps.recuperarExtraccion ?? ext.recuperarExtraccionEnviada)(
+        vigente,
+        { venueId: enGlobal.venueId, sandbox: params.sandbox, staffId: actor },
+        { resolveProvider: deps.resolveProvider }, // B21
+      )
+    else if (vigente?.status === 'STAMPED') await ext.registrarExtraccionEmitida(vigente, actor) // C3-23: si una caída se lo comió
+    if (vigente?.status === 'STAMPED') return null
+    const permitirEfectivo = (params.flow ?? 'STAFF_B') === 'STAFF_B'
+    const bundle = await deps.loadOrderForCfdi(params.orderId, { permitirEfectivo })
+    if (!bundle) throw new Error(`Order ${params.orderId} not found or has no fiscal emisor configured`)
+    if (!bundle.facturacionEnabled) throw new Error('Facturación no habilitada para este comercio')
+    if (params.flow === 'AUTOFACTURA_A' && !bundle.autofacturaEnabled) throw new Error('Autofactura no habilitada para este comercio')
+    // La comprobación previa: con `prisma`, sin candados ni efectos (C3-11/C3-20: lo enviado ya se recuperó arriba).
+    const previa = await ext.prepararPorExtraccion(prisma, params, enGlobal, bundle)
+    if (previa.reasons.length) return { status: 'VALIDATION_FAILED', cfdi: null, reasons: previa.reasons }
+    await deps.despuesDeLaComprobacionPrevia?.()
+    const extraida = await (deps.emitirExtraccion ?? ext.emitirExtraccion)(
+      {
+        venueId: enGlobal.venueId,
+        orderId: params.orderId,
+        sandbox: params.sandbox,
+        staffId: actor,
+        flow: params.flow ?? 'STAFF_B', // B14
+        // 🔴 C3-12 / G1: la preparación REAL, otra vez, dentro de la reserva de la extracción (la orden y el emisor releídos con `tx`, bajo
+        // el `FOR UPDATE` de la orden). `c` trae lo que acaba de armar `construirExtraccion` (no se modifica: memoria compartida).
+        comprobarNominativa: async (tx, c) => {
+          const b = await deps.loadOrderForCfdi(params.orderId, { permitirEfectivo }, tx)
+          if (!b) return ['La venta ya no tiene un emisor fiscal configurado.']
+          if (!b.facturacionEnabled) return ['Facturación no habilitada para este comercio']
+          if (params.flow === 'AUTOFACTURA_A' && !b.autofacturaEnabled) return ['Autofactura no habilitada para este comercio']
+          const base = { remanentes: c.remanentes, filasD16: c.filasD16, bruto: c.bruto, porTratamiento: c.porTratamiento }
+          return (await ext.prepararPorExtraccion(tx, params, enGlobal, b, base)).reasons
+        },
+      },
+      { resolveProvider: deps.resolveProvider }, // B21
+    )
+    if (extraida.status === 'SIN_SALDO')
+      return { status: 'VALIDATION_FAILED', cfdi: null, reasons: extraida.reasons ?? [ext.MOTIVO_SIN_SALDO_EN_GLOBAL] }
+    if (extraida.status === 'STAMPED') return null
+    // Lo que no se timbró se dice como de la extracción (el que factura no la pidió: pidió la factura del cliente). Sus motivos —con fila de
+    // extracción— son de ESA nota (receptor Público en General): con el prefijo, el personal no lee «código postal del receptor» creyendo que
+    // es el de su cliente. Sin fila, los motivos son de la factura del cliente (`comprobarNominativa`) y van tal cual. La autofactura pública
+    // no enseña ninguno de los de la extracción (`cfdi.public.controller.ts`).
+    const deLaExtraccion = (m: string) => `No se pudo sacar la venta de la factura global: ${m}`
+    const cfdi = extraida.cfdi?.lastError
+      ? { ...extraida.cfdi, lastError: deLaExtraccion(extraida.cfdi.lastError) }
+      : (extraida.cfdi ?? null)
+    const reasons = extraida.cfdi ? (extraida.reasons ?? []).map(deLaExtraccion) : (extraida.reasons ?? [])
+    return { status: extraida.status, cfdi, reasons }
+  }
+  async function admission(tx: Prisma.TransactionClient): Promise<Admitido> {
     const order = await bloquearOrdenParaFacturar(tx, params.orderId)
     if (!order || (params.expectedVenueId && order.venueId !== params.expectedVenueId)) throw new Error(`Order ${params.orderId} not found`)
     // T-I2 (A7-R10): aquí DECIDE, bajo el `FOR UPDATE` de la orden que también toman las devoluciones ligadas: una que entró entre el GET y
@@ -671,8 +917,27 @@ export async function emitirConEntrada(
     if (!sustitucion && params.flow === 'AUTOFACTURA_A' && (await ventaConDevolucion(params.orderId, tx)))
       throw new ConflictError(MOTIVO_AUTOFACTURA_CON_DEVOLUCION)
     await tomarAdmisionCompartida(tx, order.organizationId)
-    const motivo = await excluirSiEstaEnGlobal(tx, params.orderId)
+    // C3 (§4.5, D6; Codex C3-1/C3-13/C3-19, R3-1): un ticket en una global viva sólo se factura con su extracción TIMBRADA y sin cancelación
+    // en trámite ni consumada, revisada bajo este candado de la orden (el que toma también la cancelación de la extracción). Y el antecedente
+    // de extracción manda aunque su global ya no esté viva (la carrera entre la comprobación y la admisión): nunca la ruta ordinaria.
+    const ext = await moduloDeExtraccion()
+    const global = await globalVivaDeLaOrden(tx, params.orderId)
+    // (La sustitución no lo mira: su original ya salió de una extracción timbrada, y ésta no se puede cancelar mientras la sostenga.)
+    const antecedente = sustitucion ? null : await ext.extraccionDeLaOrden(tx, params.orderId)
+    const motivo = antecedente && ext.motivoDelAntecedente(antecedente, global, params.orderId)
     if (motivo) throw new ConflictError(motivo)
+    let extraccion: any = null
+    if (global) {
+      if (global.cancelStatus === 'REQUESTED') throw new ConflictError(ext.MOTIVO_GLOBAL_EN_CANCELACION)
+      extraccion = await ext.extraccionVigente(tx, global.id, params.orderId)
+      // M10: en cancelación (en trámite o consumada) ⇒ el código estable de la cancelación pendiente, con el folio de la nota y su estado.
+      if (extraccion && extraccionEnCancelacion(extraccion))
+        throw new ConflictError(textoDeExtraccionEnCancelacion(extraccion, new Date()), 'CFDI_CANCEL_PENDING')
+      if (extraccion?.status !== 'STAMPED')
+        throw new ConflictError(
+          extraccion?.status === 'STAMPING' || ext.esEnvioIncierto(extraccion) ? PROCESANDO : textoDeVentaSinExtraer(global),
+        )
+    }
     // findFirst answers existence without silently truncating the order's invoice history.
     const alive = await tx.cfdi.findFirst({
       where: {
@@ -685,8 +950,11 @@ export async function emitirConEntrada(
       },
     })
     if (alive) throw new ConflictError('CFDI en proceso para esta orden')
+    await deps.despuesDeLaAdmision?.() // gancho de prueba (C3): con todos los candados de la admisión tomados
+    return { global, extraccion }
   }
-  async function capture(tx: Prisma.TransactionClient) {
+  async function capture(tx: Prisma.TransactionClient, admitido: Admitido) {
+    let extraidaDeLaOriginal: EntradaDocumentalV1 | null = null
     // La original sólo debe seguir vigente al reservar/recapturar; recuperar un envío no depende de ello.
     if (sustitucion) {
       const original = await tx.cfdi.findUnique({ where: { id: sustitucion.id } })
@@ -712,6 +980,8 @@ export async function emitirConEntrada(
       // factura ANTERIOR de esa orden, porque las heredadas apuntan a la orden, no a la factura.
       const relacionado = await documentoRelacionadoVivo(tx, original.id, original)
       if (relacionado) throw new ConflictError(textoDeDocumentoRelacionado(relacionado))
+      const deLaOriginal = leerEntrada(original.entrada)
+      if (deLaOriginal?.extraccion) extraidaDeLaOriginal = deLaOriginal
     }
     const bundle = await deps.loadOrderForCfdi(
       params.orderId,
@@ -728,22 +998,57 @@ export async function emitirConEntrada(
         'El emisor fiscal de esta cuenta cambió desde que se emitió la factura; no se puede sustituir automáticamente.',
       )
     }
-    const entrada = capturarEntrada(bundle, params.receptor, params.orderId, { replacesCfdiId: sustitucion?.id })
-    if (sustitucion) entrada.params.relation = { tipoRelacion: '04', relatedUuids: [sustitucion.uuid] }
-    const validation = validateBeforeStamp({
-      csdStatus: bundle.emisor.csdStatus,
-      formaPago: entrada.params.formaPago,
-      receptor: params.receptor,
-      items: entrada.params.items,
-      expectedSubtotalCents: entrada.montos.subtotalCents,
-      expectedTaxCents: entrada.montos.taxCents,
-      expectedTotalCents: entrada.montos.totalCents,
-      isGlobal: false,
-    })
-    const reasons = motivosParaMostrar(validation.reasons, bundle.unsupportedReasons ?? [])
+    const validar = (e: EntradaDocumentalV1) =>
+      validateBeforeStamp({
+        csdStatus: bundle.emisor.csdStatus,
+        formaPago: e.params.formaPago,
+        receptor: params.receptor,
+        items: e.params.items,
+        expectedSubtotalCents: e.montos.subtotalCents,
+        expectedTaxCents: e.montos.taxCents,
+        expectedTotalCents: e.montos.totalCents,
+        isGlobal: false,
+      }).reasons
+    let entrada: EntradaDocumentalV1
+    let reasons: string[]
+    // C3 (B10): en las dos ramas de extracción la factura es por lo EXTRAÍDO (su `paidCents`), no por lo cobrado de la orden: ni la barrera
+    // de lo cobrado ni los motivos del cargador (hablan de reconstruir la orden, y estas facturas no lo hacen) aplican.
+    if (extraidaDeLaOriginal) {
+      // C3 (Tarea 7; spec §4.5): la sustituta de una factura por extracción CONSERVA lo extraído —mismos conceptos, montos, renglones y
+      // `extraccion`—; sólo cambian el receptor y la relación 04.
+      entrada = structuredClone({
+        ...extraidaDeLaOriginal,
+        replacesCfdiId: sustitucion!.id,
+        params: {
+          ...extraidaDeLaOriginal.params,
+          receptor: params.receptor,
+          relation: { tipoRelacion: '04', relatedUuids: [sustitucion!.uuid] },
+        },
+      })
+      reasons = validar(entrada)
+    } else if (admitido.extraccion) {
+      // Una venta que salió de su global sólo se sustituye desde una factura que salió de esa extracción.
+      if (sustitucion) throw new ConflictError('La entrada fiscal de esta factura requiere revisión de soporte.')
+      // C3: la factura del cliente sale de los remanentes CONGELADOS en la extracción timbrada, con las claves del catálogo de hoy.
+      const ext = await moduloDeExtraccion()
+      const preparada = await ext.prepararPorExtraccion(tx, params, admitido.global!, bundle, ext.baseDeLaExtraccion(admitido.extraccion))
+      if (!preparada.entrada) throw new ConflictError(preparada.reasons.join(' '))
+      entrada = preparada.entrada
+      reasons = preparada.reasons
+    } else {
+      entrada = capturarEntrada(bundle, params.receptor, params.orderId, { replacesCfdiId: sustitucion?.id })
+      if (sustitucion) entrada.params.relation = { tipoRelacion: '04', relatedUuids: [sustitucion.uuid] }
+      reasons = motivosParaMostrar(validar(entrada), bundle.unsupportedReasons ?? [])
+    }
     // B3a Tarea 6b: el documento que SE MANDA, sumado como el PAC; tras el ajuste del cargador, la suma por concepto ya no es lo cobrado a propósito.
     const documentoCents = totalSegunElPacCents(entrada.params.items.map(conceptoDesdeElPayload))
-    if (!bundle.unsupportedReasons?.length && bundle.paidCents !== undefined && bundle.paidCents !== documentoCents) {
+    if (
+      !extraidaDeLaOriginal &&
+      !admitido.extraccion &&
+      !bundle.unsupportedReasons?.length &&
+      bundle.paidCents !== undefined &&
+      bundle.paidCents !== documentoCents
+    ) {
       const pesos = (c: number) => `$${(c / 100).toFixed(2)}`
       reasons.push(
         sustitucion
@@ -771,13 +1076,13 @@ export async function emitirConEntrada(
     return { bundle, entrada, reasons, data }
   }
   let reserved = await transaction(async tx => {
-    await admission(tx)
+    const admitido = await admission(tx)
     const existing = await tx.cfdi.findUnique({
       where: { idempotencyKey },
       include: { fiscalEmisor: true, venue: { select: { slug: true } } },
     })
     if (existing) return { cfdi: existing, fresh: false, emisor: existing.fiscalEmisor, slug: existing.venue.slug, reasons: [] as string[] }
-    const captured = await capture(tx)
+    const captured = await capture(tx, admitido)
     const data = { ...captured.data, attempts: captured.reasons.length ? 0 : 1 }
     const cfdi = await deps.reserveCfdi(data, tx)
     if (!captured.reasons.length)
@@ -815,7 +1120,7 @@ export async function emitirConEntrada(
     if (!recovered) {
       const previous = cfdi
       reserved = await transaction(async tx => {
-        await admission(tx)
+        const admitido = await admission(tx)
         const where = {
           id: previous.id,
           status: previous.status,
@@ -825,7 +1130,7 @@ export async function emitirConEntrada(
         const claimed = await tx.cfdi.updateMany({ where, data: { status: 'STAMPING' } })
         if (claimed.count !== 1) throw new ConflictError(PROCESANDO)
         await liberarSellosDe(tx, previous.id)
-        const captured = await capture(tx)
+        const captured = await capture(tx, admitido)
         const attempts = previous.attempts + (captured.reasons.length ? 0 : 1)
         const { count } = await tx.cfdi.updateMany({
           where: { id: previous.id, status: 'STAMPING', attempts: previous.attempts },
@@ -1115,6 +1420,14 @@ function baseCfdiData(
 // ─── real default deps (DB + storage). Tests inject their own. ───
 const defaultDeps: IssueCfdiDeps = {
   findExistingCfdi: idempotencyKey => prisma.cfdi.findUnique({ where: { idempotencyKey } }),
+  // C3: la consulta directa (no `globalVivaDeLaOrden`, que es la de la admisión bajo candado).
+  globalVivaDeLaOrdenFuera: orderId =>
+    prisma.cfdi.findFirst({
+      where: { isGlobal: true, manifiestoGlobal: { some: { orderId } }, ...CFDI_VIVO },
+      orderBy: { createdAt: 'desc' },
+      select: { id: true, venueId: true, fiscalEmisorId: true },
+    }),
+  extraccionDeLaOrdenFuera: async orderId => (await moduloDeExtraccion()).extraccionDeLaOrden(prisma, orderId),
   // Acotado: una venta tiene un puñado de facturas (original, sustitutas, reemisiones). 50 sobra.
   findOrderInvoices: orderId =>
     prisma.cfdi.findMany({
@@ -2226,6 +2539,38 @@ export function textoDeCancelacionPendienteAlRefacturar(
     return `La cancelación de ${factura} está en duda: la estamos confirmando con el SAT (puede tardar hasta 24 horas). En cuanto quede cancelada podrás volver a facturar esta venta.`
   return `La cancelación de ${factura} sigue en trámite ante el SAT; en cuanto quede cancelada podrás volver a facturar esta venta.`
 }
+/**
+ * C3 (M10): por qué no sale la factura del cliente si la nota que saca su venta de la global tiene la cancelación pedida o ya cancelada, con
+ * el folio de esa nota y en qué va (el mismo criterio que `textoDeCancelacionPendienteAlRefacturar`). Va con `CFDI_CANCEL_PENDING`.
+ */
+export function textoDeExtraccionEnCancelacion(
+  c: {
+    status: string
+    cancelStatus: string | null
+    cancelIntento?: number | null
+    cancelEnviadaAt?: Date | null
+    cancelAcusadaAt?: Date | null
+    serie?: string | null
+    folio?: string | null
+    uuid?: string | null
+  },
+  ahora: Date,
+): string {
+  const nota = `la nota ${folioDe(c)}, que saca esta venta de la factura global`
+  const e = c.status === 'CANCELLED' ? 'CANCELADA' : estadoDeCancelacion(c, ahora)
+  if (e === 'CANCELADA')
+    return `Se canceló ${nota}, así que la factura del cliente ya no se puede emitir desde aquí. Pide a soporte que facture esta venta.`
+  if (e === 'ANOTADA' || e === 'ENVIANDO')
+    return `La cancelación de ${nota}, se está enviando al SAT; mientras se resuelve no se puede emitir la factura del cliente.`
+  if (e === 'CANCELACION_EN_DUDA')
+    return `La cancelación de ${nota}, está en duda: la estamos confirmando con el SAT (puede tardar hasta 24 horas). Mientras se resuelve no se puede emitir la factura del cliente.`
+  return `${nota[0].toUpperCase()}${nota.slice(1)}, tiene una cancelación en trámite ante el SAT; mientras se resuelve no se puede emitir la factura del cliente.`
+}
+/** C3: la admisión ve la venta en una global viva sin su extracción timbrada (una carrera con la comprobación): se vuelve a intentar. */
+export function textoDeVentaSinExtraer(g: { serie: string | null; folio: string | null; uuid: string | null }): string {
+  const etiqueta = [g.serie, g.folio].filter(Boolean).join('-') || g.uuid || 'del periodo'
+  return `Esta venta está en la factura global ${etiqueta} y todavía no se saca de ella; primero hay que sacarla. Vuelve a intentarlo: se saca sola al facturar.`
+}
 export const TEXTO_SUSTITUCION_ATORADA =
   'Esta factura se está sustituyendo y la factura nueva lleva más de una hora sin respuesta del PAC. Escríbenos a soporte para resolverla; después podrás cancelarla.'
 
@@ -2233,9 +2578,15 @@ export const TEXTO_SUSTITUCION_ATORADA =
  * C2 (spec §4.5, Codex C2-5): la intención de cancelar se anota ANTES de llamar al PAC, con número de intento, bajo los candados de la
  * emisión (órdenes del CFDI → productos → admisión compartida). La misma cancelación ya en trámite devuelve su número; una distinta,
  * conflicto. C2-22: el sustituto SIEMPRE se escribe (también `null`), así un 02 tras un 01 rechazado no arrastra el UUID viejo.
- * (C3 agrega su guarda aquí.)
+ * C3 (Codex C3-5): la nota que saca un ticket de la global no se cancela mientras sostenga la factura del cliente.
+ * `ganchos.despuesDeLosCandados`: SÓLO PARA PRUEBAS, con todos los candados tomados.
  */
-export async function anotarIntencionDeCancelar(cfdiId: string, version: number, p: ParamsDeCancelacion): Promise<IntencionDeCancelar> {
+export async function anotarIntencionDeCancelar(
+  cfdiId: string,
+  version: number,
+  p: ParamsDeCancelacion,
+  ganchos?: { despuesDeLosCandados?: () => Promise<void> },
+): Promise<IntencionDeCancelar> {
   return prisma.$transaction(
     async tx => {
       const orders = await tx.$queryRaw<Array<{ orderId: string }>>`
@@ -2258,11 +2609,13 @@ export async function anotarIntencionDeCancelar(cfdiId: string, version: number,
           cancelIntento: true,
           orderId: true,
           isGlobal: true,
+          idempotencyKey: true,
           venue: { select: { organizationId: true } },
         },
       })
       if (!actual) return { estado: 'PERDIDA' }
       await tomarAdmisionCompartida(tx, actual.venue.organizationId)
+      await ganchos?.despuesDeLosCandados?.()
       if (
         actual.status !== 'STAMPED' ||
         actual.attempts !== version ||
@@ -2282,6 +2635,27 @@ export async function anotarIntencionDeCancelar(cfdiId: string, version: number,
       // T10 (N1 de la T3): una sustituta atorada en el PAC (enviada hace más de una hora) no la termina nadie sola: el texto manda a soporte.
       if (sustituyendose)
         return { conflicto: sustitutaAtorada(sustituyendose, new Date()) ? TEXTO_SUSTITUCION_ATORADA : TEXTO_SUSTITUCION_EN_CURSO }
+      // C3 (§4.5, Codex C3-5): la nota que saca un ticket de la global no se cancela mientras sostenga la factura del cliente (vigente,
+      // reservada o incierta). La orden ya está bloqueada: la factura del cliente revisa la extracción bajo ese mismo candado.
+      if (actual.idempotencyKey?.startsWith(PREFIJO_EXTRACCION) && actual.orderId) {
+        const sostenida = await tx.cfdi.findFirst({
+          where: {
+            orderId: actual.orderId,
+            type: 'INGRESO',
+            isGlobal: false,
+            ...CFDI_VIVO,
+            entrada: { path: ['extraccion', 'cfdiId'], equals: cfdiId },
+          },
+          select: { serie: true, folio: true, uuid: true },
+        })
+        if (sostenida)
+          return {
+            conflicto:
+              sostenida.serie || sostenida.folio || sostenida.uuid
+                ? `Esta nota sostiene la factura ${folioDe(sostenida)} del cliente; para cancelarla, primero cancela esa factura.`
+                : 'Esta nota sostiene una factura del cliente que sigue en proceso; cuando se resuelva, cancela primero esa factura.',
+          }
+      }
       if (actual.cancelStatus === 'REQUESTED') {
         const misma = actual.cancelMotivo === p.motivo && (actual.cancelSubstituteUuid ?? null) === (p.substituteUuid ?? null)
         return misma

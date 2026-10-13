@@ -26,10 +26,11 @@ jest.mock('../../../../src/services/fiscal/cfdi.service', () => ({
   MOTIVO_AUTOFACTURA_CON_DEVOLUCION: 'MOTIVO-DEVOLUCION (A7-R10)',
 }))
 
-// C2-pulido · G2: la regla «ticket ya incluido en una global viva» es la MISMA función que usa la admisión del POST (`exclusionGlobal.ts`).
-jest.mock('../../../../src/services/fiscal/exclusionGlobal', () => ({
+// C3 (Ruling G2; antes C2-pulido · G2): un ticket en una global viva SE OFRECE; el GET sólo no la ofrece si su extracción se canceló o quedó
+// sin su global (`motivoAutofacturaEnGlobal`, la regla del antecedente que también mira la admisión del POST).
+jest.mock('../../../../src/services/fiscal/cfdiExtraccion.service', () => ({
   __esModule: true,
-  excluirSiEstaEnGlobal: jest.fn().mockResolvedValue(null),
+  motivoAutofacturaEnGlobal: jest.fn().mockResolvedValue(null),
 }))
 
 jest.mock('../../../../src/services/whatsapp.service', () => ({
@@ -63,7 +64,7 @@ import {
   MOTIVO_AUTOFACTURA_CON_DEVOLUCION,
 } from '../../../../src/services/fiscal/cfdi.service'
 import { motivoNoCuadra } from '../../../../src/services/fiscal/reglaDelPac'
-import { excluirSiEstaEnGlobal } from '../../../../src/services/fiscal/exclusionGlobal'
+import { motivoAutofacturaEnGlobal } from '../../../../src/services/fiscal/cfdiExtraccion.service'
 import { logAction } from '../../../../src/services/dashboard/activity-log.service'
 import logger from '../../../../src/config/logger'
 import { sendCfdiWhatsApp } from '../../../../src/services/whatsapp.service'
@@ -894,6 +895,73 @@ describe('autofactura — ronda QA (hermanos): timbre en duda', () => {
   })
 })
 
+// C3 · T4 (ronda 1, Important 1): si lo que falló es la EXTRACCIÓN (la fila que vuelve es su EGRESO a Público en General, no la factura
+// del cliente), sus motivos son del comercio aunque hablen de «receptor» o «código postal» (el receptor de esa nota es Público en General):
+// nunca se le enseñan al cliente. En duda ⇒ «se está procesando», como la factura.
+describe('C3 · la autofactura no enseña el rechazo de la EXTRACCIÓN', () => {
+  const NEUTRO = 'Esta cuenta no se puede facturar en línea. Pide tu factura directamente al negocio.'
+  const PREFIJO = 'No se pudo sacar la venta de la factura global: '
+  const RECHAZO_DEL_PAC =
+    'Validación de timbrado: El campo DomicilioFiscalReceptor debe ser igual al LugarExpedicion cuando el RFC del receptor es XAXX010101000'
+  const extraccion = {
+    id: 'ext-1',
+    type: 'EGRESO',
+    status: 'STAMP_FAILED',
+    protocoloIva: 1,
+    enviadoAt: new Date(),
+    falloDefinitivo: true,
+    lastError: `${PREFIJO}${RECHAZO_DEL_PAC}`,
+  }
+  beforeEach(() => {
+    mockFindReceipt.mockResolvedValue(makeReceipt())
+    mockFindCfdi.mockResolvedValue(null)
+    mockLoadOrder.mockResolvedValue(makeBundle())
+  })
+  const postear = async () => {
+    const res = makeRes()
+    await autofacturaController(makeReq({ accessKey: 'key-abc' }) as any, res as any)
+    return { status: res.status.mock.calls[0]?.[0], body: res.json.mock.calls[0]?.[0] }
+  }
+
+  it('🔴 la extracción RECHAZADA en definitiva ⇒ 409 neutro, sin `message` ni «global»; el motivo va al log', async () => {
+    mockIssueCfdi.mockResolvedValue({ status: 'STAMP_FAILED', cfdi: extraccion })
+    const r = await postear()
+    expect(r).toEqual({ status: 409, body: { error: NEUTRO } })
+    expect(JSON.stringify(r.body)).not.toMatch(/global|receptor|XAXX/i)
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringContaining('autofactura'),
+      expect.objectContaining({ orderId: 'order-1', motivo: extraccion.lastError }),
+    )
+  })
+
+  it('🔴 la extracción en VALIDATION_FAILED ⇒ 409 neutro, sin `reasons` visibles', async () => {
+    mockIssueCfdi.mockResolvedValue({
+      status: 'VALIDATION_FAILED',
+      cfdi: { ...extraccion, status: 'VALIDATION_FAILED', enviadoAt: null, falloDefinitivo: false },
+      reasons: [`${PREFIJO}El código postal del receptor no coincide con el lugar de expedición.`],
+    })
+    const r = await postear()
+    expect(r).toEqual({ status: 409, body: { error: NEUTRO } })
+    expect(r.body).not.toHaveProperty('reasons')
+  })
+
+  it('control — la extracción EN DUDA ⇒ TIMBRE_EN_DUDA (se está procesando), como la factura', async () => {
+    mockIssueCfdi.mockResolvedValue({ status: 'STAMP_FAILED', cfdi: { ...extraccion, falloDefinitivo: false } })
+    expect(await postear()).toEqual({
+      status: 409,
+      body: {
+        error: 'Tu factura se está procesando. Vuelve a abrir este recibo en unos minutos para descargarla.',
+        code: 'TIMBRE_EN_DUDA',
+      },
+    })
+  })
+
+  it('control — VALIDATION_FAILED SIN fila de extracción (la comprobación de la factura del cliente): sus motivos del receptor sí viajan', async () => {
+    mockIssueCfdi.mockResolvedValue({ status: 'VALIDATION_FAILED', cfdi: null, reasons: ['El RFC del receptor no es válido.'] })
+    expect(await postear()).toEqual({ status: 422, body: { error: 'No se pudo facturar', reasons: ['El RFC del receptor no es válido.'] } })
+  })
+})
+
 // T-I2 · A7-R10 (founder, 10-oct): la autofactura PÚBLICA no se ofrece en una venta con devolución completada (total o parcial). El cliente
 // ve el mensaje neutro de siempre; el motivo va al log. Lo que decide el POST es el motor (bajo el candado de la orden, `cfdi.service.test`).
 describe('T-I2 · A7-R10 — la autofactura no se ofrece en una venta con devolución', () => {
@@ -980,11 +1048,13 @@ describe('T-I2 · A7-R10 — la autofactura no se ofrece en una venta con devolu
 //  · G1: con la factura de la venta EN DUDA (`timbreEnDuda`, la regla única de C2) no se vuelve a ofrecer el formulario: «no disponible» con
 //    `kind: 'TIMBRE_EN_DUDA'` (nuevo y opcional; el mismo código que ya trae el 409 del POST) para que el recibo diga «se está procesando».
 //  · m-2 (revisión de T-I2): lo en duda MANDA sobre la devolución, la global y el sobre fiscal (se está procesando, no «pídela al negocio»).
-//  · G2: el ticket ya incluido en una factura global viva ⇒ `FISCAL_BLOCK` neutro, con la MISMA función que la admisión del POST.
+//  · G2 → C3 (Ruling G2, dorada que cambia A PROPÓSITO): el ticket en una global viva SE OFRECE; sólo su extracción cancelada o sin su global
+//    ⇒ `FISCAL_BLOCK` neutro (`motivoAutofacturaEnGlobal`).
 describe('C2-pulido · G1 / G2 / m-2 — el GET dice lo mismo que el POST', () => {
   const mockVentaConDevolucion = ventaConDevolucion as jest.Mock
-  const mockEnGlobal = excluirSiEstaEnGlobal as jest.Mock
-  const MOTIVO_GLOBAL = 'Esta venta ya está incluida en la factura global G-12; para facturarla aparte primero hay que cancelar esa global.'
+  const mockEnGlobal = motivoAutofacturaEnGlobal as jest.Mock
+  const MOTIVO_GLOBAL =
+    'La nota que sacaba esta venta de la factura global (E-9) se canceló. Volver a sacarla no se hace sola: pide a soporte que facture esta venta.'
   const enDuda = {
     uuid: null,
     status: 'STAMP_FAILED',
@@ -1039,13 +1109,13 @@ describe('C2-pulido · G1 / G2 / m-2 — el GET dice lo mismo que el POST', () =
     expect(await pedir()).toEqual({ cfdi: publico, autofacturaAvailable: true })
   })
 
-  it('🔴 G2: ticket ya incluido en una global viva ⇒ FISCAL_BLOCK neutro (sin el folio ni el motivo, que van al log), con la función del POST', async () => {
+  it('🔴 C3-19 (G2): su extracción se canceló (o quedó sin su global) ⇒ FISCAL_BLOCK neutro (sin el folio ni el motivo, que van al log)', async () => {
     mockFindCfdi.mockResolvedValue(null)
     mockEnGlobal.mockResolvedValue(MOTIVO_GLOBAL)
     const body = await pedir()
     expect(body).toEqual({ cfdi: null, autofacturaAvailable: false, autofacturaUnavailable: { kind: 'FISCAL_BLOCK' } })
     expect(mockEnGlobal).toHaveBeenCalledWith(expect.anything(), 'order-1')
-    expect(JSON.stringify(body)).not.toMatch(/global|G-12/i)
+    expect(JSON.stringify(body)).not.toMatch(/global|E9/i)
     expect(logger.info).toHaveBeenCalledWith(
       expect.stringContaining('autofactura'),
       expect.objectContaining({ orderId: 'order-1', motivos: [MOTIVO_GLOBAL] }),
@@ -1062,5 +1132,12 @@ describe('C2-pulido · G1 / G2 / m-2 — el GET dice lo mismo que el POST', () =
   it('control — sin global, sin devolución y sin duda ⇒ disponible como hoy', async () => {
     mockFindCfdi.mockResolvedValue(null)
     expect(await pedir()).toEqual({ cfdi: null, autofacturaAvailable: true })
+  })
+
+  it('🔴 C3 (G2): en una global viva SIN motivo del antecedente ⇒ disponible (el POST decide, sacándola de la global)', async () => {
+    mockFindCfdi.mockResolvedValue(null)
+    mockEnGlobal.mockResolvedValue(null) // la función ya no dice «primero cancela la global»: en una global viva, sin motivo
+    expect(await pedir()).toEqual({ cfdi: null, autofacturaAvailable: true })
+    expect(mockEnGlobal).toHaveBeenCalledWith(expect.anything(), 'order-1')
   })
 })

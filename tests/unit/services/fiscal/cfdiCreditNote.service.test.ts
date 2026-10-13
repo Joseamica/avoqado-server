@@ -29,6 +29,7 @@ import {
   acumularNota,
   MEMORIA_DE_GLOBALES,
   MOTIVO_GLOBAL_CANCELADA,
+  MOTIVO_EXTRAIDA_SIN_FACTURA,
   olvidarGlobalesEvaluadas,
   asegurarGlobalVigente,
   VIGENCIA_MINIMA_ANTES_DE_LOS_CANDADOS_MS,
@@ -49,15 +50,16 @@ import * as regla from '@/services/fiscal/reglaDelPac'
 import { CFDI_VIVO } from '@/services/fiscal/exclusionGlobal'
 import { ENVIO_TERMINADO_MS } from '@/services/fiscal/cfdi.service'
 import { huellaDeEntrada } from '@/services/fiscal/entradaDocumental'
+import { montosDesdeDocumento } from '@/services/fiscal/globalPorTratamiento'
 import {
-  cuadrarLaGlobal,
-  montosDesdeDocumento,
-  paramsDeLaGlobal,
-  SIN_FILAS_D16,
-  type ConceptoReal,
-  type PorTratamientoGlobal,
-} from '@/services/fiscal/globalPorTratamiento'
-import { closedPeriodFor } from '@/services/fiscal/globalPeriod'
+  globalDe,
+  originalGlobal,
+  originalGlobalDe,
+  originalGlobalDeUnTicket,
+  PERIODO_GLOBAL,
+  ticketGlobal,
+  ticketsDelPlan,
+} from '../../../__helpers__/global-de-prueba'
 import { splitIvaIncluded } from '@/services/fiscal/ivaMath'
 import {
   asignacionFiscal,
@@ -211,7 +213,14 @@ function makeLoaded(over: Partial<LoadedRefundForCreditNote> = {}): LoadedRefund
     // El desglose real de tasas de la orden (una sola tasa 16% por defecto).
     grossByRate: [{ rate: 0.16, grossCents: 11600 }],
     alreadyCreditedCents: 0,
-    acreditado: { notas: [], desconocidoCents: 0, porRenglon: new Map(), alreadyCreditedCents: 0, extraida: false },
+    acreditado: {
+      notas: [],
+      desconocidoCents: 0,
+      porRenglon: new Map(),
+      alreadyCreditedCents: 0,
+      extraida: false,
+      sinTrazaPorArticulo: false,
+    },
     ...over,
   }
 }
@@ -941,141 +950,7 @@ describe('C2 · notas v2', () => {
 // C2 · Tarea 8: la nota de un ticket que entró en la factura GLOBAL
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** El periodo de las globales de prueba: mayo de 2026 (MENSUAL), como la integración de C1. */
-const PERIODO_GLOBAL = closedPeriodFor('MENSUAL', new Date('2026-06-03T17:00:00Z'))
-type Articulo = [orderItemId: string, cents: number, tratamiento: 'IVA_16' | 'IVA_0' | 'EXENTO' | 'NO_OBJETO', descuentoCents?: number]
-/**
- * Un ticket de la entrada v2 de la global (la forma que congela C1): sus renglones, lo cobrado por tratamiento y —salvo `sinReales`— sus
- * conceptos reales (con su descuento ORIGINAL), con su huella.
- */
-function ticketGlobal(
-  orderId: string,
-  folio: string,
-  porTratamiento: PorTratamientoGlobal,
-  articulos: Articulo[],
-  o: { sinReales?: boolean; formaPago?: string; lineas?: any[] } = {},
-) {
-  const renglones = articulos.map(([orderItemId, , tratamiento]) => ({ orderItemId, tratamiento }))
-  const conceptosReales: ConceptoReal[] | null =
-    o.sinReales || !articulos.length
-      ? null
-      : articulos.map(([orderItemId, cents, tratamiento, descuentoCents]) => ({
-          orderItemId,
-          productId: null,
-          descripcion: orderItemId,
-          precio: (cents / 100).toFixed(2),
-          cantidad: 1,
-          descuentoCents: descuentoCents ?? 0,
-          ivaIncluido: true,
-          tratamiento,
-        }))
-  const paidCents = Object.values(porTratamiento).reduce((s, c) => s + (c ?? 0), 0)
-  const formaPago = o.formaPago ?? '04'
-  const t = {
-    orderId,
-    folio,
-    formaPago,
-    paidCents,
-    renglones,
-    porTratamiento,
-    ...(o.lineas ? { lineas: o.lineas } : {}),
-    conceptosReales,
-    filasD16: [] as string[][],
-  }
-  return {
-    ...t,
-    huella: huellaDeEntrada({
-      renglones,
-      porTratamiento,
-      lineas: o.lineas ?? null,
-      conceptosReales,
-      folio,
-      formaPago,
-      filasD16: [],
-    }),
-  }
-}
-/**
- * Una global v2 timbrada con esos tickets (`paramsDeLaGlobal` + `cuadrarLaGlobal` de C1), con su XML (`xmlDe` de sus conceptos), como la
- * fila que lee el cargador: `esGlobal`, sin orden, el Público en General y la llave de la principal (o `-c2` si es complementaria).
- */
-function globalDe(
-  ordenes: Array<ReturnType<typeof ticketGlobal>>,
-  over: Partial<NonNullable<LoadedRefundForCreditNote['original']>> & { complementaria?: boolean } = {},
-) {
-  const { complementaria, ...resto } = over
-  const base = paramsDeLaGlobal({ lugarExpedicion: '01000' }, ordenes, PERIODO_GLOBAL)
-  const cobrado = ordenes.reduce((s, o) => s + o.paidCents, 0)
-  const porTasa: PorTratamientoGlobal = {}
-  for (const o of ordenes)
-    for (const [t, c] of Object.entries(o.porTratamiento) as Array<[keyof PorTratamientoGlobal, number]>) porTasa[t] = (porTasa[t] ?? 0) + c
-  const c = cuadrarLaGlobal(base.items, cobrado, { cobradoPorTasa: porTasa, filasD16: SIN_FILAS_D16 })
-  if (!c.ok) throw new Error(`la global de prueba no cuadra: ${c.motivo}`)
-  const globalPeriod = { periodicidad: PERIODO_GLOBAL.satPeriodicidad, meses: PERIODO_GLOBAL.meses, anio: PERIODO_GLOBAL.anio }
-  const entrada = {
-    version: 2,
-    tipo: 'GLOBAL',
-    fiscalEmisorId: 'e1',
-    globalPeriod,
-    periodo: { desde: PERIODO_GLOBAL.periodStart.toISOString(), hasta: PERIODO_GLOBAL.periodEnd.toISOString() },
-    montos: c.montos,
-    excluidas: {},
-    excluidasPorIvaMixto: 0,
-    ordenes,
-    formaDelMezclado: 'UN_CONCEPTO',
-    cuadre: { ok: true },
-    ajustes: c.ajustes,
-    params: { ...base, items: c.items },
-    ...(complementaria ? { complementariaDe: 'cfdi-global-principal' } : {}),
-  }
-  const llave = `cfdi-global-e1-${PERIODO_GLOBAL.anio}-${PERIODO_GLOBAL.meses}-${PERIODO_GLOBAL.satPeriodicidad}`
-  return makeOriginal({
-    id: complementaria ? 'cfdi-global-c2' : 'cfdi-global-1',
-    orderId: null,
-    esGlobal: true,
-    idempotencyKey: complementaria ? `${llave}-c2` : llave,
-    fiscalEmisorId: 'e1',
-    globalPeriod,
-    entrada,
-    uuid: complementaria ? 'UUID-GLOBAL-C2' : 'UUID-GLOBAL-1',
-    serie: 'G',
-    folio: '7',
-    formaPago: '04',
-    metodoPago: 'PUE',
-    receptorRfc: 'XAXX010101000',
-    receptorNombre: 'PÚBLICO EN GENERAL',
-    receptorRegimen: '616',
-    receptorCp: '01000',
-    receptorEmail: null,
-    ...resto,
-  })
-}
-/** Los tres tickets del plan: `o1` todo-16 $116; `o2` mezclado café $200 al 0 % + pan $58 al 16 % (con reales); `o3` sin artículos $50. */
-const ticketsDelPlan = (o: { sinReales?: boolean } = {}) => [
-  ticketGlobal('o1', 'ORD-1', { IVA_16: 11600 }, [['o1-a', 11600, 'IVA_16']], o),
-  ticketGlobal(
-    'o2',
-    'ORD-2',
-    { IVA_16: 5800, IVA_0: 20000 },
-    [
-      ['o2-cafe', 20000, 'IVA_0'],
-      ['o2-pan', 5800, 'IVA_16'],
-    ],
-    o,
-  ),
-  ticketGlobal('o3', 'ORD-3', { IVA_16: 5000 }, []),
-]
-const originalGlobal = (
-  o: { sinReales?: boolean } & Partial<NonNullable<LoadedRefundForCreditNote['original']>> & { complementaria?: boolean } = {},
-) => {
-  const { sinReales, ...over } = o
-  return globalDe(ticketsDelPlan({ sinReales }), over)
-}
-/** Una global todo-16 IVA incluido de esos tickets sin artículos (el `orderId` es el folio). */
-const originalGlobalDe = (tickets: Array<[folio: string, cents: number]>) =>
-  globalDe(tickets.map(([folio, cents]) => ticketGlobal(folio, folio, { IVA_16: cents }, [])))
-/** Una global de un solo ticket `o1` de esos centavos al 16 %. */
-const originalGlobalDeUnTicket = (cents: number) => globalDe([ticketGlobal('o1', 'ORD-1', { IVA_16: cents }, [])])
+// La global de prueba (PERIODO_GLOBAL, ticketGlobal, globalDe, originalGlobal…) vive en `tests/__helpers__/global-de-prueba.ts` (C3 la comparte).
 /** Un reembolso del ticket `orderId` de esa global, por `cents` (y, si se dan, por esos artículos). */
 function devolucionEnLaGlobal(original: ReturnType<typeof globalDe>, orderId: string, cents: number, articulos?: Array<[string, number]>) {
   const loaded = makeLoaded({ original })
@@ -1775,6 +1650,7 @@ const nada = (): LoadedRefundForCreditNote['acreditado'] => ({
   porRenglon: new Map(),
   alreadyCreditedCents: 0,
   extraida: false,
+  sinTrazaPorArticulo: false,
 })
 
 describe('C2 · T8 ronda 1 · I1: UNA sola evaluación de la global por emisión (la vista previa también la reutiliza)', () => {
@@ -2020,6 +1896,31 @@ describe('C2 · T8 ronda 1 · minors', () => {
       reason: 'ORIGINAL_CANCELLED',
       message: 'La factura original fue cancelada; una nota de crédito no aplica sobre un CFDI cancelado.',
     })
+  })
+  it('🔴 C3 · T5: el ticket de la global ya fue EXTRAÍDO (nota viva) y aún no hay factura del cliente ⇒ la devolución espera, con su motivo', () => {
+    const loaded = devolucionEnLaGlobal(originalGlobal(), 'o1', 1000)
+    expect(checkCreditNoteEligibility(loaded)).toMatchObject({ eligible: true }) // sin extracción: la nota sale como siempre
+    loaded.acreditado.extraida = true
+    expect(checkCreditNoteEligibility(loaded)).toEqual({
+      eligible: false,
+      reason: 'EXTRAIDA_SIN_FACTURA',
+      message: MOTIVO_EXTRAIDA_SIN_FACTURA,
+    })
+    expect(MOTIVO_EXTRAIDA_SIN_FACTURA).toBe(
+      'Esta venta se está facturando aparte; emite la nota de crédito cuando su factura esté timbrada.',
+    )
+  })
+  it('control — C3 · T5: la rama es SÓLO de la global: con una factura individual, `extraida` no cambia nada', () => {
+    const loaded = makeLoaded({})
+    loaded.acreditado.extraida = true
+    expect(checkCreditNoteEligibility(loaded)).toMatchObject({ eligible: true })
+  })
+  it('🔴 C3 · T5: la global se canceló POR FUERA con la extracción viva ⇒ el motivo es el de la extracción, no el de «entra en otra global»', () => {
+    const loaded = devolucionEnLaGlobal(originalGlobal({ status: 'CANCELLED', cancelStatus: 'CANCELLED' } as any), 'o1', 1000)
+    loaded.acreditado.extraida = true
+    expect(checkCreditNoteEligibility(loaded)).toMatchObject({ eligible: false, reason: 'EXTRAIDA_SIN_FACTURA' })
+    loaded.acreditado.extraida = false // sin extracción, la cancelada conserva su motivo propio (M2)
+    expect(checkCreditNoteEligibility(loaded)).toEqual({ eligible: false, reason: 'ORIGINAL_CANCELLED', message: MOTIVO_GLOBAL_CANCELADA })
   })
   it('🔴 M5: el CP del receptor genérico es el lugar de expedición VIGENTE del emisor (el de la nota), no el de la global', () => {
     const g = originalGlobal({
@@ -3031,6 +2932,69 @@ describe('OF-1 · T11 H1 · `leerEgreso` lee una nota v1 (de antes de C2) y mand
     expect(r.desconocidoCents).toBe(11600)
     // Lo desconocido también baja el saldo (conservador): las dos legibles + la corrupta.
     expect(r.alreadyCreditedCents).toBe(34800)
+  })
+
+  it('🔴 C3 · B9: una nota v1 (sin rastro por artículo) o una ilegible ⇒ `sinTrazaPorArticulo`', async () => {
+    const corrupta = notaV1(false, 'n-mala')
+    corrupta.entrada.params.items[0].satUnitKey = 'H87'
+    corrupta.entradaHuella = huellaDeEntrada(corrupta.entrada)
+    const leer = (filas: any[]) =>
+      acreditadoContra(
+        {
+          cfdi: { aggregate: jest.fn(async () => ({ _sum: { totalCents: null } })), findMany: jest.fn(async () => filas) },
+        } as any,
+        { venueId: 'v1', orderId: 'o1', originalCfdiId: 'orig-1' },
+      )
+    expect((await leer([])).sinTrazaPorArticulo).toBe(false)
+    expect((await leer([notaV1(false, 'n-16')])).sinTrazaPorArticulo).toBe(true)
+    expect((await leer([corrupta])).sinTrazaPorArticulo).toBe(true)
+  })
+})
+
+describe('C3 · B9 · `acreditadoContra.sinTrazaPorArticulo`: sólo las notas POR ARTÍCULOS dejan saber qué productos quedan', () => {
+  /** La fila de una nota v2 tal como la reserva (`capturarEgreso`) y la deja el commit. */
+  const fila = (loaded: LoadedRefundForCreditNote, id: string) => {
+    const c = capturarEgreso(loaded, 'cfdi-refund-pay-refund-1')
+    return { ...c.base, id, protocoloIva: 1, entrada: c.entrada as any, entradaHuella: huellaDeEntrada(c.entrada) }
+  }
+  const porImporte = () => {
+    const l = makeLoaded({ original: originalMixta() })
+    l.refund.salesRefundCents = 5800
+    l.refund.processorData = {}
+    return l
+  }
+  const leer = (filas: any[], historicoCents: number | null = null) =>
+    acreditadoContra(
+      {
+        cfdi: {
+          aggregate: jest.fn(async () => ({ _sum: { totalCents: historicoCents } })),
+          findMany: jest.fn(async () => filas),
+        },
+      } as any,
+      { venueId: 'v1', orderId: 'o1', originalCfdiId: 'cfdi-ingreso-1' },
+    )
+
+  it('control — la de por artículos se lee como por artículos y la de por importe como por importe', () => {
+    expect(leerEgreso(fila(porArticulo(originalMixta(), 'pan', 5800), 'n-art'))).toMatchObject({ modalidad: 'POR_ARTICULOS' })
+    expect(leerEgreso(fila(porImporte(), 'n-imp'))).toMatchObject({ modalidad: 'POR_IMPORTE' })
+  })
+  it('🔴 una nota por artículos ⇒ hay rastro (y su `porRenglon` cuenta); una por importe ⇒ sin rastro', async () => {
+    const art = await leer([fila(porArticulo(originalMixta(), 'pan', 5800), 'n-art')])
+    expect(art).toMatchObject({ sinTrazaPorArticulo: false, desconocidoCents: 0 })
+    expect(art.porRenglon.get('pan')).toBeDefined()
+    expect((await leer([fila(porImporte(), 'n-imp')])).sinTrazaPorArticulo).toBe(true)
+    expect((await leer([fila(porArticulo(originalMixta(), 'pan', 5800), 'n-art'), fila(porImporte(), 'n-imp')])).sinTrazaPorArticulo).toBe(
+      true,
+    )
+  })
+  it('🔴 una nota heredada (sin protocolo, en `desconocidoCents`) ⇒ sin rastro', async () => {
+    expect((await leer([], 5800)).sinTrazaPorArticulo).toBe(true)
+  })
+  it('una nota de OTRA original no cuenta', async () => {
+    const ajena = fila(porImporte(), 'n-ajena')
+    ;(ajena.entrada as any).originalCfdiId = 'otra'
+    ajena.entradaHuella = huellaDeEntrada(ajena.entrada)
+    expect((await leer([ajena])).sinTrazaPorArticulo).toBe(false)
   })
 })
 

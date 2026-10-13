@@ -47,6 +47,9 @@ jest.mock('@/utils/prismaClient', () => ({
       count: jest.fn().mockResolvedValue(0),
     },
     fiscalEmisor: { findMany: jest.fn().mockResolvedValue([]) },
+    // C3 · T8 (cambia A PROPÓSITO): `cfdi_status` también cuenta las extracciones que esperan la factura del cliente (dos consultas crudas:
+    // los conteos y la página). Aquí, ninguna.
+    $queryRaw: jest.fn(async (s: TemplateStringsArray) => (s.join('').includes('count(') ? [{ total: 0, enProceso: 0 }] : [])),
   },
 }))
 
