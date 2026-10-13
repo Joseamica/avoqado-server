@@ -161,12 +161,15 @@ validates configs at runtime against this schema. If you add/rename fields in th
 reject the update with cryptic "should have required property" errors. Schema is defined in `scripts/setup-modules.ts` — after editing,
 re-run the script to update the DB.
 
-## Production Data Inserts: IDs MUST be cuid format
+## Data Inserts (any DB, any tool): IDs MUST be cuid v1
 
-When the user asks you to insert/create records directly in production (psql, scripts, etc.), **always generate IDs as cuid v1** (25 chars,
-prefix `c`) to match Prisma's `@default(cuid())` convention. Never use custom prefixes like `mindf_hh_001` or UUIDs — they break consistency
-with the rest of the catalog. Use the `cuid` package: `npm install --no-save cuid && node -e "console.log(require('cuid')())"`. FKs with
-`ON UPDATE CASCADE` (Product→MenuCategory, Inventory→Product) allow safe id rewrites in a transaction if you forget upfront.
+Whenever you create records outside Prisma's `create` — SQL, psql, scripts, seeds, imports, demo data, local OR production — **always
+generate IDs as cuid v1** (25 chars, prefix `c`) to match Prisma's `@default(cuid())`. Never cuid2 (`@paralleldrive/cuid2` starts with
+any letter), UUIDs, or custom prefixes like `mindf_hh_001`: the `z.string().cuid()` validators reject them with a 400 the dashboard
+shows as a generic error (IQ, 13-oct-2026: 273 of 281 products created on 6-may with random ids could not print labels). Use the `cuid`
+package: `npm install --no-save cuid && node -e "console.log(require('cuid')())"`. Before applying, check every generated id matches
+`^c[a-z0-9]{24}$`. FKs with `ON UPDATE CASCADE` (Product→MenuCategory, Inventory→Product) allow safe id rewrites in a transaction if you
+forget upfront.
 
 ## Cross-Repo (TPV Android)
 
