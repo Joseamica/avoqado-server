@@ -26,6 +26,9 @@ export interface PlanTable {
   positionX: number | null
   positionY: number | null
   areaId: string | null
+  /** Tamaño propio (spec 2026-10-12), 0–1 de la cuadrícula de su área; null = automático. Van juntos. */
+  width: number | null
+  height: number | null
   /** Tiene una cuenta abierta (viva y sin pagar): el editor no ofrece quitarla y el servidor no la archiva. */
   hasOpenOrder: boolean
 }
@@ -71,6 +74,12 @@ export interface DesiredTable {
   rotation: number
   positionX: number | null
   positionY: number | null
+  /**
+   * Tamaño propio, 0–1 de su área. `undefined` (un dashboard de antes de esta función no los manda) = se conserva el que
+   * la mesa ya tiene; `null` en los dos = automático. Van juntos (lo exige el esquema del PUT).
+   */
+  width?: number | null
+  height?: number | null
   /** id de un área existente o clientId de una nueva; null = sin acomodar. */
   areaRef: string | null
 }

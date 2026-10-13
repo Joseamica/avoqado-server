@@ -3,7 +3,7 @@ import type { PlanArea, PlanElement, PlanTable } from './floorPlan.types'
 
 export interface FingerprintInput {
   areas: Array<Pick<PlanArea, 'id' | 'name' | 'floorShape' | 'sortOrder'>>
-  tables: Array<Pick<PlanTable, 'id' | 'number' | 'capacity' | 'shape' | 'rotation' | 'positionX' | 'positionY' | 'areaId'>>
+  tables: Array<Pick<PlanTable, 'id' | 'number' | 'capacity' | 'shape' | 'rotation' | 'positionX' | 'positionY' | 'areaId' | 'width' | 'height'>>
   elements: PlanElement[]
 }
 
@@ -18,7 +18,12 @@ const byId = <T extends { id: string }>(rows: T[]) => [...rows].sort((a, b) => (
 export function computeFloorPlanFingerprint(plan: FingerprintInput): string {
   const canonical = {
     a: byId(plan.areas).map(a => [a.id, a.name, a.floorShape, a.sortOrder]),
-    t: byId(plan.tables).map(t => [t.id, t.number, t.capacity, t.shape, t.rotation, round(t.positionX), round(t.positionY), t.areaId]),
+    t: byId(plan.tables).map(t => {
+      const base = [t.id, t.number, t.capacity, t.shape, t.rotation, round(t.positionX), round(t.positionY), t.areaId]
+      // El tamaño entra SÓLO si la mesa tiene uno propio: la huella de una mesa automática es la de siempre, y desplegar
+      // esta versión no le da un 409 «Alguien más cambió el plano» a un editor que ya estaba abierto (spec 2026-10-12).
+      return t.width === null && t.height === null ? base : [...base, round(t.width), round(t.height)]
+    }),
     e: byId(plan.elements).map(e => [
       e.id,
       e.type,

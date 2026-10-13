@@ -78,4 +78,14 @@ describe('getTablesWithStatus — campos nuevos', () => {
       ['2', null, null, null],
     ])
   })
+
+  it('cada mesa trae su tamaño propio (0–1 de su área), o null si es automática (spec 2026-10-12)', async () => {
+    await prisma.table.create({ data: { venueId, number: '1', capacity: 4, qrCode: randomUUID(), width: 0.075, height: 0.16 } })
+    await prisma.table.create({ data: { venueId, number: '2', capacity: 2, qrCode: randomUUID() } })
+    const mesas = await getTablesWithStatus(venueId)
+    expect(mesas.map(m => [m.number, m.width, m.height])).toEqual([
+      ['1', 0.075, 0.16],
+      ['2', null, null],
+    ])
+  })
 })

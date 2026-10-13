@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 // Stripe is not what this suite measures: «preparing» a publication just stamps fake Product/Price ids on it.
 jest.mock('@/services/launchCampaigns/hybridPrices', () => ({
@@ -12,6 +13,7 @@ import { compileHybridPublication } from '@/services/launchCampaigns/hybridOffer
 import { hybridOfferDefinition } from '@/services/launchCampaigns/hybridOffer.schema'
 import { STANDARD_PLAN_GROSS_CENTS } from '@/services/access/planPricing.constants'
 import { ensureHybridPublicationPrices } from '@/services/launchCampaigns/hybridPrices'
+import { recomposePlanList } from '@/services/launchCampaigns/hybridListPrice.service'
 import { seedPlanLists } from '../../../scripts/seed-plan-list-prices'
 
 const stamp = `${Date.now()}${process.pid}`
@@ -174,5 +176,148 @@ describe('seeding the plan lists at the classic monthly price (spec §4.2)', () 
     expect(report.results.find(r => r.productKey === 'PLAN:PRO')).toMatchObject({ outcome: 'DIFFERENT_PRICE', current: 999 })
     expect(text).toMatch(/precio distinto: la fase 2 lo decide/)
     expect(await prisma.hybridCampaign.findUniqueOrThrow({ where: { id: pro.id } })).toEqual(changed)
+  })
+
+  /**
+   * Puts on sale a copy of the list's current publication without SERVICE_PAY: how the lists published on 5-oct look.
+   * With `price`, the copy sells at that price instead. Republishing passes the list price rule, and the CI database is
+   * shared: other suites leave plan PROMOTIONS on sale (a Pro one at $1,000 breaks a $999 list), so a test price sits
+   * above any of them.
+   */
+  async function sellWithoutServicePay(key: string, price?: number) {
+    const list = (await planLists()).find(candidate => candidate.listProductKey === key)!
+    const current = await prisma.hybridOfferPublication.findUniqueOrThrow({ where: { id: list.currentPublicationId! } })
+    expect(current.includedFeatureCodes).toContain('SERVICE_PAY')
+    const repriced =
+      price === undefined
+        ? null
+        : compileHybridPublication({
+            ...hybridOfferDefinition.parse(current.definition),
+            terms: { ...hybridOfferDefinition.parse(current.definition).terms, price },
+          })
+    const stale = await prisma.hybridOfferPublication.create({
+      data: {
+        campaignId: list.id,
+        version: list.revision,
+        name: list.name,
+        definition: (repriced?.definition ?? current.definition) as Prisma.InputJsonValue,
+        definitionHash: repriced?.definitionHash ?? current.definitionHash,
+        includedFeatureCodes: current.includedFeatureCodes.filter(code => code !== 'SERVICE_PAY'),
+        createdById: staffId,
+      },
+    })
+    await prisma.hybridCampaign.update({ where: { id: list.id }, data: { currentPublicationId: stale.id, revision: { increment: 1 } } })
+    return { list, current, stale }
+  }
+
+  it('a plan list selling an older composition: the dry run names what it lacks and writes nothing', async () => {
+    const { list } = await sellWithoutServicePay('PLAN:PREMIUM')
+    const before = await prisma.hybridCampaign.findUniqueOrThrow({ where: { id: list.id } })
+    const publications = await prisma.hybridOfferPublication.count({ where: { campaignId: list.id } })
+    const { report, text } = await run({ apply: false })
+    expect(await prisma.hybridOfferPublication.count({ where: { campaignId: list.id } })).toBe(publications)
+    expect(report.results.find(r => r.productKey === 'PLAN:PREMIUM')).toMatchObject({
+      outcome: 'EXISTS',
+      missing: ['SERVICE_PAY'],
+      extra: [],
+      recomposed: false,
+    })
+    expect(text).toMatch(/PLAN:PREMIUM: .*le falta SERVICE_PAY.*--apply la republica al mismo precio/)
+    expect(await prisma.hybridCampaign.findUniqueOrThrow({ where: { id: list.id } })).toEqual(before)
+  })
+
+  it('--apply republishes it at the same price with the code composition, and a second run publishes nothing', async () => {
+    const list = (await planLists()).find(candidate => candidate.listProductKey === 'PLAN:PREMIUM')!
+    const stale = await prisma.hybridOfferPublication.findUniqueOrThrow({ where: { id: list.currentPublicationId! } })
+    const { report, text } = await run({ apply: true, confirmHost: host, confirmDb: dbName })
+    expect(report.results.find(r => r.productKey === 'PLAN:PREMIUM')).toMatchObject({
+      outcome: 'EXISTS',
+      missing: ['SERVICE_PAY'],
+      recomposed: true,
+    })
+    expect(text).toMatch(/PLAN:PREMIUM: .*republicada al mismo precio/)
+    const after = await prisma.hybridCampaign.findUniqueOrThrow({ where: { id: list.id } })
+    expect(after).toMatchObject({ status: 'ACTIVE', pendingPublicationId: null })
+    expect(after.currentPublicationId).not.toBe(stale.id)
+    const republished = await prisma.hybridOfferPublication.findUniqueOrThrow({ where: { id: after.currentPublicationId! } })
+    expect(republished.includedFeatureCodes).toContain('SERVICE_PAY')
+    // The SAME definition (price and terms). Its hash also covers the catalog, so in production it is not the 5-oct one.
+    expect(republished.definition).toEqual(stale.definition)
+    expect(await priceOf(republished.id)).toBe(1970.84)
+    expect(republished.stripePriceId).toBe(`price_seed_${republished.id}`)
+
+    const publications = await prisma.hybridOfferPublication.count({ where: { campaignId: list.id } })
+    const again = await run({ apply: true, confirmHost: host, confirmDb: dbName })
+    expect(again.report.results.find(r => r.productKey === 'PLAN:PREMIUM')).toMatchObject({ missing: [], extra: [], recomposed: false })
+    expect(await prisma.hybridOfferPublication.count({ where: { campaignId: list.id } })).toBe(publications)
+  })
+
+  it('a plan list at another price keeps that price when its composition is brought up to date', async () => {
+    const { list } = await sellWithoutServicePay('PLAN:PRO', 9999)
+    const { report } = await run({ apply: true, confirmHost: host, confirmDb: dbName })
+    expect(report.results.find(r => r.productKey === 'PLAN:PRO')).toMatchObject({
+      outcome: 'DIFFERENT_PRICE',
+      current: 9999,
+      missing: ['SERVICE_PAY'],
+      recomposed: true,
+    })
+    const after = await prisma.hybridCampaign.findUniqueOrThrow({ where: { id: list.id } })
+    const republished = await prisma.hybridOfferPublication.findUniqueOrThrow({ where: { id: after.currentPublicationId! } })
+    expect(republished.includedFeatureCodes).toContain('SERVICE_PAY')
+    expect(await priceOf(republished.id)).toBe(9999)
+  })
+
+  it('a failed Stripe preparation while republishing is finished by the next --apply, which then sells the code composition', async () => {
+    const { list } = await sellWithoutServicePay('PLAN:PRO')
+    jest.mocked(ensureHybridPublicationPrices).mockRejectedValueOnce(new Error('Stripe no contestó'))
+    await expect(run({ apply: true, confirmHost: host, confirmDb: dbName })).rejects.toMatchObject({ code: 'HYBRID_LIST_PREPARING' })
+    expect((await prisma.hybridCampaign.findUniqueOrThrow({ where: { id: list.id } })).pendingPublicationId).not.toBeNull()
+    // Never a second publication on top of a pending one: that one is finished first.
+    await expect(recomposePlanList('PRO', staffId)).rejects.toMatchObject({ code: 'HYBRID_LIST_PREPARING' })
+    expect((await run({ apply: false })).text).toMatch(/PLAN:PRO: precio pendiente de preparar; --apply lo termina/)
+
+    const { report, text } = await run({ apply: true, confirmHost: host, confirmDb: dbName })
+    expect(report.results.find(r => r.productKey === 'PLAN:PRO')).toMatchObject({ outcome: 'PENDING', missing: [], recomposed: false })
+    expect(text).toMatch(/PLAN:PRO: precio pendiente terminado a \$9999\.00/)
+    const after = await prisma.hybridCampaign.findUniqueOrThrow({ where: { id: list.id } })
+    expect(after.pendingPublicationId).toBeNull()
+    const onSale = await prisma.hybridOfferPublication.findUniqueOrThrow({ where: { id: after.currentPublicationId! } })
+    expect(onSale.includedFeatureCodes).toContain('SERVICE_PAY')
+    expect(await priceOf(onSale.id)).toBe(9999)
+  })
+
+  it('a function the code dropped from the plan is taken off the list it sells, and the reason stays in the audit', async () => {
+    const [premium, pro] = await planLists()
+    const current = await prisma.hybridOfferPublication.findUniqueOrThrow({ where: { id: pro.currentPublicationId! } })
+    const premiumCodes = (await prisma.hybridOfferPublication.findUniqueOrThrow({ where: { id: premium.currentPublicationId! } }))
+      .includedFeatureCodes
+    const notInPro = premiumCodes.find(code => !current.includedFeatureCodes.includes(code))!
+    const inflated = await prisma.hybridOfferPublication.create({
+      data: {
+        campaignId: pro.id,
+        version: pro.revision,
+        name: pro.name,
+        definition: current.definition as Prisma.InputJsonValue,
+        definitionHash: current.definitionHash,
+        includedFeatureCodes: [...current.includedFeatureCodes, notInPro].sort(),
+        createdById: staffId,
+      },
+    })
+    await prisma.hybridCampaign.update({ where: { id: pro.id }, data: { currentPublicationId: inflated.id, revision: { increment: 1 } } })
+
+    const dry = await run({ apply: false })
+    expect(dry.report.results.find(r => r.productKey === 'PLAN:PRO')).toMatchObject({ missing: [], extra: [notInPro] })
+    expect(dry.text).toMatch(new RegExp(`PLAN:PRO: .*le sobra ${notInPro}`))
+
+    await run({ apply: true, confirmHost: host, confirmDb: dbName })
+    const after = await prisma.hybridCampaign.findUniqueOrThrow({ where: { id: pro.id } })
+    const onSale = await prisma.hybridOfferPublication.findUniqueOrThrow({ where: { id: after.currentPublicationId! } })
+    expect(onSale.includedFeatureCodes).not.toContain(notInPro)
+    expect(await priceOf(onSale.id)).toBe(9999)
+    const audit = await prisma.activityLog.findFirst({
+      where: { staffId, action: 'HYBRID_LIST_RECOMPOSED', entityId: pro.id },
+      orderBy: { createdAt: 'desc' },
+    })
+    expect(audit?.data).toMatchObject({ productKey: 'PLAN:PRO', missing: [], extra: [notInPro], publicationId: onSale.id })
   })
 })

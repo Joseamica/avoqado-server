@@ -67,7 +67,7 @@ export const SECTOR_ROLE_DEFAULTS: Record<BusinessCategory, Record<'es' | 'en', 
   RETAIL: {
     es: {
       [StaffRole.WAITER]: 'Vendedor',
-      [StaffRole.KITCHEN]: 'Almacen',
+      [StaffRole.KITCHEN]: 'Almacén',
       [StaffRole.HOST]: 'Recepcionista',
     },
     en: {
@@ -80,7 +80,7 @@ export const SECTOR_ROLE_DEFAULTS: Record<BusinessCategory, Record<'es' | 'en', 
     es: {
       [StaffRole.WAITER]: 'Especialista',
       [StaffRole.CASHIER]: 'Recepcionista',
-      [StaffRole.KITCHEN]: 'Area de Servicio',
+      [StaffRole.KITCHEN]: 'Área de Servicio',
       [StaffRole.HOST]: 'Recepcionista',
     },
     en: {
@@ -121,7 +121,7 @@ export const SECTOR_ROLE_DEFAULTS: Record<BusinessCategory, Record<'es' | 'en', 
   OTHER: {
     es: {
       [StaffRole.WAITER]: 'Asistente',
-      [StaffRole.KITCHEN]: 'Almacen',
+      [StaffRole.KITCHEN]: 'Almacén',
       [StaffRole.HOST]: 'Recepcionista',
     },
     en: {

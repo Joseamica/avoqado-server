@@ -92,7 +92,7 @@ describe('floor_plan', () => {
         name: 'Salón',
         shape: 'ancha',
         seats: 4,
-        tables: [{ number: '1', seats: 4, shape: 'cuadrada', placed: true }],
+        tables: [{ number: '1', seats: 4, shape: 'cuadrada', placed: true, size: 'automático' }],
         walls: 1,
         bars: 0,
         serviceAreas: ['Cocina'],
@@ -108,14 +108,14 @@ describe('floor_plan', () => {
     mockGetFloorPlan.mockResolvedValueOnce({ ...plan, tables: [plan.tables[0], sinDato] })
     const out = parse(await call({ venueId: 'v1' }))
     expect(out.areas[0].seats).toBe(4)
-    expect(out.areas[0].tables).toContainEqual({ number: '4', seats: null, shape: 'cuadrada', placed: true })
+    expect(out.areas[0].tables).toContainEqual({ number: '4', seats: null, shape: 'cuadrada', placed: true, size: 'automático' })
   })
 
   it('una mesa con una sola coordenada no está acomodada (misma regla que «placed»)', async () => {
     const mediaMesa = { ...plan.tables[0], id: 't3', number: '3', positionX: 0.4, positionY: null }
     mockGetFloorPlan.mockResolvedValueOnce({ ...plan, tables: [...plan.tables, mediaMesa] })
     const out = parse(await call({ venueId: 'v1' }))
-    expect(out.areas[0].tables).toContainEqual({ number: '3', seats: 4, shape: 'cuadrada', placed: false })
+    expect(out.areas[0].tables).toContainEqual({ number: '3', seats: 4, shape: 'cuadrada', placed: false, size: 'automático' })
     expect(out.unplacedTables).toEqual(['2', '3'])
   })
 
@@ -137,5 +137,26 @@ describe('floor_plan', () => {
     const out = parse(await call({ venueId: 'v1' }))
     expect(out.areas[0].labels).toEqual(['Terraza'])
     expect(out.areas[0].serviceAreas).toEqual(['Cocina', 'Baño', 'Área de servicio'])
+  })
+
+  it('cada mesa dice su tamaño: automático o «A × B cuadros» de su área; redonda y cuadrada, un solo lado', async () => {
+    const larga = { ...plan.tables[0], id: 't5', number: '5', shape: 'RECTANGLE', width: 0.075, height: 0.16 }
+    const redonda = { ...plan.tables[0], id: 't6', number: '6', shape: 'ROUND', width: 0.15, height: 0.16 }
+    mockGetFloorPlan.mockResolvedValueOnce({ ...plan, tables: [plan.tables[0], larga, redonda] })
+    const out = parse(await call({ venueId: 'v1' }))
+    // Salón no tiene forma ⇒ ancha, 40 × 25: 0.075 × 40 = 3 y 0.16 × 25 = 4; la redonda 6 × 4 ⇒ un lado de 4.
+    expect(out.areas[0].tables.map((t: { number: string; size: string }) => [t.number, t.size])).toEqual([
+      ['1', 'automático'],
+      ['5', '3 × 4 cuadros'],
+      ['6', '4 × 4 cuadros'],
+    ])
+  })
+
+  // El caso fijo de `customSizeCells`: el MISMO resultado en el dashboard, Android, iOS y aquí (Global Constraints).
+  it('la conversión de 0–1 a cuadros es la de las apps: 0.05 × 0.08 en un área larga (25 × 40) ⇒ «2 × 3 cuadros»', async () => {
+    const chica = { ...plan.tables[0], id: 't7', number: '7', shape: 'RECTANGLE', width: 0.05, height: 0.08 }
+    mockGetFloorPlan.mockResolvedValueOnce({ ...plan, areas: [{ ...plan.areas[0], floorShape: 'TALL' }], tables: [chica] })
+    const out = parse(await call({ venueId: 'v1' }))
+    expect(out.areas[0].tables[0].size).toBe('2 × 3 cuadros')
   })
 })

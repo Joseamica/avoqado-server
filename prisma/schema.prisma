@@ -3351,6 +3351,10 @@ model Table {
   positionY Float?
   shape     TableShape @default(SQUARE)
   rotation  Int        @default(0) // 0, 90, 180, 270 degrees
+  // Tamaño propio (spec 2026-10-12), normalizado a la cuadrícula de SU área (0–1), como FloorElement.width/height.
+  // null = automático (por forma y personas). Van juntos: los dos o ninguno (lo valida el PUT del plano).
+  width     Float?
+  height    Float?
 
   // Table status for availability tracking
   status TableStatus @default(AVAILABLE)

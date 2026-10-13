@@ -147,7 +147,7 @@ export function registerTableTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'floor_plan',
-    'The floor plan (plano del salón) of a venue you can access, area by area: each area with its shape (wide, square or tall), its tables (number, seats, shape and whether it is placed on the plan) and how many walls, bars, service areas (kitchen, bathroom…), doors and labels it has, plus the tables not placed yet. Answers "¿cómo está acomodado mi salón?" or "¿qué mesas no están en el plano?". Pass venueId. The plan is edited in the web dashboard (Configuración → Mesas y plano). For live occupancy use tables_status.',
+    'The floor plan (plano del salón) of a venue you can access, area by area: each area with its shape (wide, square or tall), its tables (number, seats, shape, size — «automático» or «A × B cuadros» of the area grid — and whether it is placed on the plan) and how many walls, bars, service areas (kitchen, bathroom…), doors and labels it has, plus the tables not placed yet. Answers "¿cómo está acomodado mi salón?" or "¿qué mesas no están en el plano?". Pass venueId. The plan is edited in the web dashboard (Configuración → Mesas y plano). For live occupancy use tables_status.',
     { venueId: z.string().describe('Venue whose floor plan to read (must be in your scope)') },
     async ({ venueId }) => {
       guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
@@ -155,6 +155,30 @@ export function registerTableTools(server: McpServer, scope: McpScope) {
       const plan = await getFloorPlan(venueId)
       const SHAPE = { WIDE: 'ancha', SQUARE: 'cuadrada', TALL: 'larga' } as const
       const TABLE_SHAPE = { SQUARE: 'cuadrada', ROUND: 'redonda', RECTANGLE: 'larga' } as const
+      // La cuadrícula de cada forma de área (la del editor, `gridOf` del dashboard): el tamaño propio se guarda 0–1 de ella.
+      const GRID = { WIDE: [40, 25], SQUARE: [40, 40], TALL: [25, 40] } as const
+      /**
+       * `customSizeCells`: LA conversión de 0–1 a cuadros, idéntica en el dashboard, Android e iOS (no hay librería
+       * compartida entre repos: se copia por valor). floor(x + 0.5), de 2 al lado de su eje; redonda y cuadrada, el menor.
+       */
+      const customSizeCells = (
+        shape: string,
+        width: number | null | undefined,
+        height: number | null | undefined,
+        cols: number,
+        rows: number,
+      ) => {
+        if (width == null || height == null) return null
+        const w = Math.min(Math.max(Math.floor(width * cols + 0.5), 2), cols)
+        const h = Math.min(Math.max(Math.floor(height * rows + 0.5), 2), rows)
+        const side = Math.min(w, h)
+        return shape === 'RECTANGLE' ? { w, h } : { w: side, h: side }
+      }
+      const sizeOf = (t: { shape: string; width: number | null; height: number | null }, floorShape: keyof typeof GRID) => {
+        const [cols, rows] = GRID[floorShape]
+        const c = customSizeCells(t.shape, t.width, t.height, cols, rows)
+        return c ? `${c.w} × ${c.h} cuadros` : 'automático'
+      }
       const areaIds = new Set(plan.areas.map(a => a.id))
       // Acomodada = tiene las DOS coordenadas. La misma regla decide «placed» y «unplacedTables».
       const isPlaced = (t: { positionX: number | null; positionY: number | null }) => t.positionX !== null && t.positionY !== null
@@ -172,6 +196,7 @@ export function registerTableTools(server: McpServer, scope: McpScope) {
             seats: t.capacity > 0 ? t.capacity : null,
             shape: TABLE_SHAPE[t.shape],
             placed: isPlaced(t),
+            size: sizeOf(t, a.floorShape ?? 'WIDE'),
           })),
           walls: count('WALL'),
           bars: count('BAR_COUNTER'),

@@ -287,8 +287,10 @@ export type PlanSeedOutcome = 'CREATE' | 'EXISTS' | 'DIFFERENT_PRICE' | 'PENDING
 
 /** What seeding a plan list at `price` does to its row. A plan list that already has a price is never changed here. */
 export function planSeedOutcome(row: Pick<ListPriceRow, 'price' | 'pendingPrice'>, price: number): PlanSeedOutcome {
+  // A pending price is finished first, also over a list already on sale: republishing a composition can leave one.
+  if (row.pendingPrice !== null) return 'PENDING'
   if (row.price !== null) return row.price === price ? 'EXISTS' : 'DIFFERENT_PRICE'
-  return row.pendingPrice !== null ? 'PENDING' : 'CREATE'
+  return 'CREATE'
 }
 
 /**
@@ -314,6 +316,62 @@ export async function seedPlanList(
     terms: { currency: 'MXN', interval: 'MONTHLY', price, taxIncluded: true, promotionCycles: null, renewal: { kind: 'SAME_PRICE' } },
   }
   return { outcome, row: await saveList(product, definition, before.revision, staffId) }
+}
+
+/**
+ * What the plan's list on sale lacks (`missing`) or still sells that the code dropped (`extra`). A publication freezes its
+ * composition, so a function that enters the plan later (SERVICE_PAY, founder D3, 5-oct) never reaches the list by itself.
+ * Empty both ways when there is no list on sale or a price is still pending (the seed finishes that one first).
+ */
+export async function planListCompositionGap(tier: 'PRO' | 'PREMIUM'): Promise<{ missing: string[]; extra: string[] }> {
+  const list = await prisma.hybridCampaign.findFirst({
+    where: { purpose: 'LIST', listProductKey: `PLAN:${tier}` },
+    select: { currentPublicationId: true, pendingPublicationId: true },
+  })
+  if (!list?.currentPublicationId || list.pendingPublicationId) return { missing: [], extra: [] }
+  const current = await prisma.hybridOfferPublication.findUniqueOrThrow({
+    where: { id: list.currentPublicationId },
+    select: { definition: true, includedFeatureCodes: true },
+  })
+  const { includedFeatureCodes } = compileHybridPublication(current.definition)
+  return {
+    missing: includedFeatureCodes.filter(code => !current.includedFeatureCodes.includes(code)),
+    extra: current.includedFeatureCodes.filter(code => !includedFeatureCodes.includes(code)),
+  }
+}
+
+/**
+ * Republishes the plan's list with its SAME definition (price and terms) so its composition follows the code, through the
+ * same flow as a saved price (product lock, pending publication, Stripe, finalize). Contracts already accepted keep theirs.
+ * Does nothing when the list already sells the code's composition; a pending price must be finished first.
+ */
+export async function recomposePlanList(
+  tier: 'PRO' | 'PREMIUM',
+  staffId: string,
+): Promise<{ missing: string[]; extra: string[]; recomposed: boolean }> {
+  const product = PRODUCTS.find(p => p.planTier === tier)!
+  const list = await prisma.hybridCampaign.findFirst({ where: { purpose: 'LIST', listProductKey: product.productKey } })
+  if (!list?.currentPublicationId) throw new NotFoundError('Este plan no tiene precio de lista.', 'HYBRID_LIST_NOT_FOUND')
+  if (list.pendingPublicationId) throw new ConflictError('Hay un precio pendiente de preparar: termínalo antes.', 'HYBRID_LIST_PREPARING')
+  const gap = await planListCompositionGap(tier)
+  if (!gap.missing.length && !gap.extra.length) return { ...gap, recomposed: false }
+  const current = await prisma.hybridOfferPublication.findUniqueOrThrow({
+    where: { id: list.currentPublicationId },
+    select: { definition: true },
+  })
+  await saveList(product, current.definition, list.revision, staffId)
+  // The price audit says before = after; this one says WHY the list was republished.
+  const { currentPublicationId } = await prisma.hybridCampaign.findUniqueOrThrow({
+    where: { id: list.id },
+    select: { currentPublicationId: true },
+  })
+  await audit(prisma, list.id, staffId, 'HYBRID_LIST_RECOMPOSED', {
+    productKey: product.productKey,
+    missing: gap.missing,
+    extra: gap.extra,
+    publicationId: currentPublicationId,
+  })
+  return { ...gap, recomposed: true }
 }
 
 /** ACTIVE ↔ PAUSED. Pausing takes the function off loose sale; contracts already accepted keep their price. */

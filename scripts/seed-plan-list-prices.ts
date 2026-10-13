@@ -14,6 +14,10 @@
  * Idempotent: a plan list that already exists at that price is reported («ya existe»); one at another price is NOT
  * changed («precio distinto: la fase 2 lo decide»); a price left pending by a failed Stripe preparation is finished.
  *
+ * Composition (12-oct-2026): a publication freezes which functions the plan includes, so one that enters the plan later
+ * (SERVICE_PAY, founder D3) never reaches a list on sale by itself. For an existing list the run says what it lacks or
+ * still sells against the code; --apply republishes it at ITS OWN price (never the classic one) with the code's list.
+ *
  * 🔴 It prints the host and database name of DATABASE_URL first, and writing requires repeating BOTH in --confirm-host and
  * --confirm-db (the `cancelar-ordenes-fantasma.ts` pattern, plus the name: several databases share `localhost`). It is the
  * only defense against an inherited DATABASE_URL pointing elsewhere. The Prisma client is loaded only after that check,
@@ -36,6 +40,13 @@ export interface SeedResult {
   price: number
   /** The price on sale before this run (null when the plan had none). */
   current: number | null
+  /** The price left pending by a failed Stripe preparation (null when none). */
+  pending: number | null
+  /** Functions the code puts in the plan that its list on sale lacks / still sells and the code dropped. */
+  missing: string[]
+  extra: string[]
+  /** --apply republished the list at its own price with the code's composition. */
+  recomposed: boolean
 }
 
 /** A refusal: nothing was written. The script exits 2 with the message already printed. */
@@ -61,7 +72,19 @@ const MESSAGES: Record<PlanSeedOutcome, (r: SeedResult, apply: boolean) => strin
   CREATE: (r, apply) => (apply ? `creada a ${pesos(r.price)} al mes, en venta` : `se crearía a ${pesos(r.price)} al mes`),
   EXISTS: r => `ya existe a ${pesos(r.price)}`,
   DIFFERENT_PRICE: r => `precio distinto: la fase 2 lo decide (hoy ${pesos(r.current)}, clásico ${pesos(r.price)}); no se cambió`,
-  PENDING: (r, apply) => (apply ? `precio pendiente terminado a ${pesos(r.price)}` : `precio pendiente de preparar; --apply lo termina`),
+  PENDING: (r, apply) =>
+    apply ? `precio pendiente terminado a ${pesos(r.pending ?? r.price)}` : `precio pendiente de preparar; --apply lo termina`,
+}
+
+/** The composition line, empty when the list on sale already sells what the code includes. */
+function composition(r: SeedResult, apply: boolean): string {
+  const gap = [r.missing.length ? `le falta ${r.missing.join(', ')}` : '', r.extra.length ? `le sobra ${r.extra.join(', ')}` : '']
+    .filter(Boolean)
+    .join(' y ')
+  if (!gap) return ''
+  return apply
+    ? ` · su lista de funciones ${gap}: republicada al mismo precio con la del código`
+    : ` · su lista de funciones ${gap}; --apply la republica al mismo precio`
 }
 
 export async function seedPlanLists(
@@ -77,7 +100,9 @@ export async function seedPlanLists(
 
   // Loaded after the host and name check: the client reads DATABASE_URL when it loads.
   const { default: prisma } = await import('../src/utils/prismaClient')
-  const { listPriceBoard, planSeedOutcome, seedPlanList } = await import('../src/services/launchCampaigns/hybridListPrice.service')
+  const { listPriceBoard, planListCompositionGap, planSeedOutcome, recomposePlanList, seedPlanList } = await import(
+    '../src/services/launchCampaigns/hybridListPrice.service'
+  )
 
   let staffId = options.staffId
   if (options.apply) {
@@ -100,9 +125,14 @@ export async function seedPlanLists(
     const price = STANDARD_PLAN_GROSS_CENTS[tier].monthly / 100
     const row = board.find(candidate => candidate.productKey === productKey)!
     const outcome = options.apply ? (await seedPlanList(tier, price, staffId!)).outcome : planSeedOutcome(row, price)
-    const result = { productKey, outcome, price, current: row.price }
+    // After the seed nothing is pending, so --apply always brings the composition up to date (a no-op when it already is);
+    // the dry run only reads it.
+    const composed = options.apply
+      ? await recomposePlanList(tier, staffId!)
+      : { ...(await planListCompositionGap(tier)), recomposed: false }
+    const result = { productKey, outcome, price, current: row.price, pending: row.pendingPrice, ...composed }
     results.push(result)
-    log(`${productKey}: ${MESSAGES[outcome](result, options.apply)}`)
+    log(`${productKey}: ${MESSAGES[outcome](result, options.apply)}${composition(result, options.apply)}`)
   }
   return { host, results }
 }

@@ -45,6 +45,9 @@ export interface TableLayout {
   rotation: number
   positionX: number | null
   positionY: number | null
+  /** Tamaño propio (0–1 de su área); null = automático. */
+  width: number | null
+  height: number | null
   area: AreaTarget | null
 }
 
@@ -151,6 +154,8 @@ function tableChanged(cur: PlanTable, d: TableLayout): boolean {
     cur.rotation !== d.rotation ||
     !same(cur.positionX, d.positionX) ||
     !same(cur.positionY, d.positionY) ||
+    !same(cur.width, d.width) ||
+    !same(cur.height, d.height) ||
     cur.areaId !== targetId(d.area)
   )
 }
@@ -317,6 +322,10 @@ export function computeFloorPlanDiff(
   // Mesas que el plano ya no trae: se archivan, salvo que una mesa NUEVA con su mismo número las reutilice.
   const omittedByNumber = new Map(current.activeTables.filter(t => !keptIds.has(t.id)).map(t => [t.number, t.id]))
   for (const t of desired.tables) {
+    // Sin ancho ni alto en el cuerpo (un dashboard de antes de esta función, aún en caché): se conserva el tamaño que la
+    // mesa ya tiene; nunca se borra en silencio. `null` en los dos = automático (spec 2026-10-12 §3).
+    const stored = t.id ? active.get(t.id) : undefined
+    const keepSize = t.width === undefined && t.height === undefined
     const data: TableLayout = {
       number: t.number.trim(),
       capacity: t.capacity,
@@ -324,6 +333,9 @@ export function computeFloorPlanDiff(
       rotation: t.rotation,
       positionX: t.positionX,
       positionY: t.positionY,
+      // Sin área («Sin acomodar») no hay cuadrícula con qué medir: vuelve a automática, venga como venga el cuerpo.
+      width: t.areaRef === null ? null : keepSize ? (stored?.width ?? null) : (t.width ?? null),
+      height: t.areaRef === null ? null : keepSize ? (stored?.height ?? null) : (t.height ?? null),
       area: t.areaRef === null ? null : resolveArea(t.areaRef, `La mesa ${t.number.trim()}`, { number: t.number.trim() }),
     }
     if (t.id) {

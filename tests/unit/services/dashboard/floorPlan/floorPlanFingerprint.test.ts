@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { computeFloorPlanFingerprint } from '@/services/dashboard/floorPlan/floorPlanFingerprint'
 import type { PlanArea, PlanElement, PlanTable } from '@/services/dashboard/floorPlan/floorPlan.types'
 
@@ -11,6 +12,8 @@ const t1: PlanTable = {
   positionX: 0.25,
   positionY: 0.5,
   areaId: 'a1',
+  width: null,
+  height: null,
   hasOpenOrder: false,
 }
 const t2: PlanTable = { ...t1, id: 't2', number: '2', positionX: 0.75 }
@@ -86,5 +89,28 @@ describe('computeFloorPlanFingerprint', () => {
     expect(computeFloorPlanFingerprint({ ...plan, tables: [{ ...t1, positionX: 0.2500000001 }, t2] })).toBe(
       computeFloorPlanFingerprint(plan),
     )
+  })
+
+  // Review Focus 5: con el editor abierto durante el despliegue, una huella distinta sería un 409 falso al guardar.
+  it('sin tamaños propios la huella es la de siempre (desplegar no le da un 409 falso a un editor abierto)', () => {
+    const deAntes = createHash('sha256')
+      .update(
+        JSON.stringify({
+          a: [[area.id, area.name, area.floorShape, area.sortOrder]],
+          t: [t1, t2].map(t => [t.id, t.number, t.capacity, t.shape, t.rotation, t.positionX, t.positionY, t.areaId]),
+          e: [[wall.id, wall.type, wall.areaId, 0, 0, null, null, 0, 1, 0, null, null]],
+        }),
+      )
+      .digest('hex')
+      .slice(0, 16)
+    expect(computeFloorPlanFingerprint(plan)).toBe(deAntes)
+  })
+
+  it('cambia si una mesa toma, cambia o pierde su tamaño propio', () => {
+    const base = computeFloorPlanFingerprint(plan)
+    const chica = computeFloorPlanFingerprint({ ...plan, tables: [{ ...t1, width: 0.075, height: 0.16 }, t2] })
+    expect(chica).not.toBe(base)
+    expect(computeFloorPlanFingerprint({ ...plan, tables: [{ ...t1, width: 0.1, height: 0.16 }, t2] })).not.toBe(chica)
+    expect(computeFloorPlanFingerprint({ ...plan, tables: [{ ...t1, width: 0.075, height: 0.16000000001 }, t2] })).toBe(chica)
   })
 })

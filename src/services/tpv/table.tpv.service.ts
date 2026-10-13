@@ -26,6 +26,9 @@ interface TableStatusResponse {
   /** Plano en el POS (2026-10-09): orden y forma del área de la mesa. Opcionales: create/updateTable no los mandan. */
   areaSortOrder?: number | null
   areaFloorShape?: 'WIDE' | 'SQUARE' | 'TALL' | null
+  /** Tamaño propio (spec 2026-10-12), 0–1 de la cuadrícula de su área; null = automático. Opcional: create/updateTable no lo mandan. */
+  width?: number | null
+  height?: number | null
   currentOrder: {
     id: string
     orderNumber: string
@@ -145,6 +148,8 @@ export async function getTablesWithStatus(venueId: string): Promise<TableStatusR
     areaName: table.area?.name || null,
     areaSortOrder: table.area?.sortOrder ?? null,
     areaFloorShape: table.area?.floorShape ?? null,
+    width: table.width,
+    height: table.height,
     // 🔴 Sólo se manda el puntero si la orden SIGUE ABIERTA. Al cobrar una
     // cuenta dividida, `Table.currentOrderId` se queda apuntando a la que se
     // acaba de pagar; mandarla hacía que el POS mostrara "Pagar $310.50" de

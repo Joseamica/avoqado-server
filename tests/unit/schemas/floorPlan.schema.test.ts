@@ -26,3 +26,32 @@ describe('publishFloorPlanSchema — personas por mesa', () => {
     expect(!r.success && r.error.issues[0].message).toMatch(/personas/i)
   })
 })
+
+/** El cuerpo de `body(4)` con la mesa cambiada (ancho/alto). */
+const conTamano = (extra: Record<string, unknown>) => {
+  const b = body(4)
+  return { ...b, body: { ...b.body, tables: [{ ...b.body.tables[0], ...extra }] } }
+}
+const mensajes = (extra: Record<string, unknown>) => {
+  const r = publishFloorPlanSchema.safeParse(conTamano(extra))
+  return r.success ? [] : r.error.issues.map(i => i.message)
+}
+
+describe('publishFloorPlanSchema — tamaño libre de la mesa (spec 2026-10-12)', () => {
+  it('acepta ancho y alto juntos, los dos null (automático) o ninguno (dashboard de antes)', () => {
+    for (const extra of [{ width: 0.075, height: 0.16 }, { width: null, height: null }, {}, { width: 1, height: 1 }])
+      expect(publishFloorPlanSchema.safeParse(conTamano(extra)).success).toBe(true)
+  })
+
+  // Review Focus 2
+  it('rechaza uno solo, con mensaje en español', () => {
+    for (const extra of [{ width: 0.1 }, { height: 0.1 }, { width: 0.1, height: null }, { width: null }])
+      expect(mensajes(extra)).toContain('La mesa necesita ancho y alto juntos, o ninguno de los dos')
+  })
+
+  it('rechaza cero, negativo y más de 1, en español', () => {
+    expect(mensajes({ width: 0, height: 0.1 })).toContain('El ancho debe ser mayor a cero')
+    expect(mensajes({ width: 0.1, height: -0.2 })).toContain('El alto debe ser mayor a cero')
+    expect(mensajes({ width: 1.2, height: 0.1 })).toContain('El ancho no puede salirse del plano')
+  })
+})
