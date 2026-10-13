@@ -466,3 +466,36 @@ describe('isEmptyFloorPlanDiff — guardado sin cambios', () => {
     expect(isEmptyFloorPlanDiff(quitar)).toBe(false)
   })
 })
+
+describe('computeFloorPlanDiff — tamaño libre (spec 2026-10-12)', () => {
+  const conTamano = table('t1', '1', { shape: 'RECTANGLE', width: 0.075, height: 0.16 })
+  const plano = (t: DesiredTable) => ({ areas: [keepArea], tables: [t], elements: [] })
+
+  // Review Focus 1: `keep` arma la mesa SIN width/height, como un dashboard de antes en caché.
+  it('la mesa sin ancho ni alto en el cuerpo conserva el tamaño guardado: tal cual, no es un cambio', () => {
+    expect(isEmptyFloorPlanDiff(computeFloorPlanDiff(current([conTamano]), plano(keep(conTamano))))).toBe(true)
+  })
+
+  it('la mesa sin ancho ni alto en el cuerpo conserva el tamaño guardado: si se mueve, se reescribe CON su tamaño', () => {
+    const d = computeFloorPlanDiff(current([conTamano]), plano(keep(conTamano, { positionX: 0.7 })))
+    expect(d.tables.update).toEqual([{ id: 't1', data: expect.objectContaining({ positionX: 0.7, width: 0.075, height: 0.16 }) }])
+  })
+
+  it('null en los dos vuelve a automático; otro valor es un cambio', () => {
+    const auto = computeFloorPlanDiff(current([conTamano]), plano(keep(conTamano, { width: null, height: null })))
+    expect(auto.tables.update[0].data).toMatchObject({ width: null, height: null })
+    const otro = computeFloorPlanDiff(current([conTamano]), plano(keep(conTamano, { width: 0.1, height: 0.16 })))
+    expect(otro.tables.update[0].data).toMatchObject({ width: 0.1, height: 0.16 })
+  })
+
+  it('el mismo tamaño con ruido de punto flotante no es un cambio', () => {
+    const d = computeFloorPlanDiff(current([conTamano]), plano(keep(conTamano, { width: 0.0750000001, height: 0.16 })))
+    expect(isEmptyFloorPlanDiff(d)).toBe(true)
+  })
+
+  it('una mesa nueva sin los campos nace automática; con ellos, con su tamaño', () => {
+    expect(computeFloorPlanDiff(current([]), plano(fresh('n1', '9'))).tables.create[0].data).toMatchObject({ width: null, height: null })
+    const chica = computeFloorPlanDiff(current([]), plano(fresh('n1', '9', { width: 0.05, height: 0.08 })))
+    expect(chica.tables.create[0].data).toMatchObject({ width: 0.05, height: 0.08 })
+  })
+})

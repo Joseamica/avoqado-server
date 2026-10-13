@@ -249,6 +249,8 @@ async function applyPublication(tx: Tx, venueId: string, input: PublishFloorPlan
     rotation: d.rotation,
     positionX: d.positionX,
     positionY: d.positionY,
+    width: d.width,
+    height: d.height,
     areaId: areaId(d.area),
   })
   if (diff.tables.archive.length)

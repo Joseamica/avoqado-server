@@ -710,3 +710,33 @@ describe('publishFloorPlan', () => {
     })
   })
 })
+
+describe('publishFloorPlan — tamaño libre (spec 2026-10-12)', () => {
+  it('guarda ancho y alto y los devuelve; sin los campos se conservan; la PAX no los toca; null vuelve a automático', async () => {
+    const creado = await conMesas(mesa('t1', '1', { shape: 'RECTANGLE', width: 0.075, height: 0.16 }))
+    const [t1] = creado.tables
+    expect(t1).toMatchObject({ width: 0.075, height: 0.16 })
+    expect((await getFloorPlan(venueId)).fingerprint).toBe(creado.fingerprint)
+    const areaId = creado.areas[0].id
+
+    // Review Focus 1: un dashboard de antes (sin los campos: `igual` no los pone) mueve la mesa y el tamaño se queda.
+    const movida = await publish({ baseFingerprint: creado.fingerprint, areas: [salon(areaId)], tables: [igual(t1, { positionX: 0.3 })] })
+    expect(movida.tables[0]).toMatchObject({ positionX: 0.3, width: 0.075, height: 0.16 })
+
+    // La PAX mueve la mesa por su ruta vieja: no escribe tamaño, así que se conserva.
+    await updateTablePosition(venueId, t1.id, 0.4, 0.5)
+    expect((await getFloorPlan(venueId)).tables[0]).toMatchObject({ positionX: 0.4, width: 0.075, height: 0.16 })
+
+    // «Automático»: null en los dos. Es un cambio real (publica) y la huella cambia.
+    const antes = await getFloorPlan(venueId)
+    const auto = await publish({
+      baseFingerprint: antes.fingerprint,
+      areas: [salon(areaId)],
+      tables: [igual(antes.tables[0], { width: null, height: null })],
+    })
+    expect(auto.unchanged).toBeUndefined()
+    expect(auto.publicationId).toEqual(expect.any(String))
+    expect(auto.tables[0]).toMatchObject({ width: null, height: null })
+    expect(auto.fingerprint).not.toBe(antes.fingerprint)
+  })
+})
