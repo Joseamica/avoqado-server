@@ -95,7 +95,7 @@ const COLUMNS = {
   option3: ['option3 value'],
   sku: ['variant sku', 'sku'],
   price: ['variant price', 'price'],
-  barcode: ['variant barcode', 'barcodes', 'barcode'],
+  barcode: ['variant barcode', 'variant barcodes', 'barcodes', 'barcode'],
   imageSrc: ['image src', 'product image url'],
   variantImage: ['variant image', 'variant image url'],
 } as const
@@ -139,11 +139,19 @@ export function parsePriceListCsv(text: string): Map<string, string> {
   return prices
 }
 
-/** «gtin:0001234; upc:5678» → ['0001234', '5678']. Shopify allows up to 20, with an optional type prefix. */
+/**
+ * «gtin:0001234; upc:5678» → ['0001234', '5678']. Shopify allows up to 20, with an optional type prefix, and writes a
+ * leading apostrophe («'8435732763015») so a spreadsheet keeps the zeros: the scanner reads the digits without it.
+ */
 function barcodesOf(value: string): string[] {
   return value
     .split(';')
-    .map(code => code.trim().replace(/^[a-z_]+:\s*/i, ''))
+    .map(code =>
+      code
+        .trim()
+        .replace(/^'/, '')
+        .replace(/^[a-z_]+:\s*/i, ''),
+    )
     .filter(Boolean)
 }
 

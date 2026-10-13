@@ -310,6 +310,15 @@ describe('convertShopifyCsv — barcode → gtin', () => {
     expect(products(result)[0].gtin).toBe('8445123456789')
   })
 
+  it('reads «Variant Barcodes» and drops the apostrophe Shopify puts in front so a spreadsheet keeps the zeros (IQ, 13-oct)', () => {
+    const headers = LEGACY_HEADERS.map(h => (h === 'Variant Barcode' ? 'Variant Barcodes' : h))
+    const result = convertShopifyCsv(
+      csv([first('a', 'Camisa', { 'Variant SKU': 'A', 'Variant Barcodes': "'0435732763015" })], headers),
+      FACTOR,
+    )
+    expect(products(result)[0].gtin).toBe('0435732763015')
+  })
+
   it('leaves gtin out when the variant has no barcode', () => {
     const result = convertShopifyCsv(csv([first('a', 'Camisa')]), FACTOR)
     expect(products(result)[0]).not.toHaveProperty('gtin')
