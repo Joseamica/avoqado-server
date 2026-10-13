@@ -25,6 +25,7 @@ jest.mock('@/services/inventory/inventoryPosting.service', () => ({
 jest.mock('@/services/dashboard/autoReorder.service', () => ({ runAutoReorderForVenue: jest.fn().mockResolvedValue(undefined) }))
 jest.mock('@/services/referrals/referralQualification.service', () => ({ onOrderPaid: jest.fn().mockResolvedValue(undefined) }))
 jest.mock('@/services/shared/loyaltyOnPaidOrder', () => ({ awardLoyaltyForPaidOrder: jest.fn().mockResolvedValue(undefined) }))
+jest.mock('@/services/tpv/table.tpv.service', () => ({ releaseTableIfSettled: jest.fn() }))
 
 const debeMarcarCocinaMock = jest.fn()
 jest.mock('@/services/kds/kitchenDisplayStations', () => ({ debeMarcarCocina: (...a: unknown[]) => debeMarcarCocinaMock(...a) }))
@@ -34,8 +35,9 @@ jest.mock('@/services/kds/kitchenTicketAuthoring.service', () => ({ armarComanda
 import { Decimal } from '@prisma/client/runtime/library'
 import { payCashOrder } from '@/services/mobile/order.mobile.service'
 import { prismaMock } from '../../../__helpers__/setup'
+import { releaseTableIfSettled } from '@/services/tpv/table.tpv.service'
 
-function seedOrder() {
+function seedOrder(tableId: string | null = null) {
   prismaMock.$transaction.mockImplementation(async (cb: any) => cb(prismaMock))
   prismaMock.order.findUnique.mockResolvedValue({
     id: 'order-1',
@@ -48,6 +50,7 @@ function seedOrder() {
     remainingBalance: new Decimal(90),
     version: 1,
     venueId: 'venue-1',
+    tableId,
     areaTicketCheckoutSession: null,
     customerId: null,
     customer: null,
@@ -69,9 +72,56 @@ const escrituraConMarca = () =>
 beforeEach(() => {
   jest.clearAllMocks()
   armarMock.mockResolvedValue(undefined)
+  ;(releaseTableIfSettled as jest.Mock).mockReset().mockResolvedValue(true)
 })
 
 describe('payCashOrder — comanda de pantalla al saldar', () => {
+  it('mesa saldada: libera la última cuenta después de registrar un solo pago', async () => {
+    seedOrder('table-1')
+    debeMarcarCocinaMock.mockResolvedValue(false)
+    let committed = false
+    let committedAtRelease = false
+    prismaMock.$transaction.mockImplementation(async (cb: any) => {
+      const result = await cb(prismaMock)
+      committed = true
+      return result
+    })
+    ;(releaseTableIfSettled as jest.Mock).mockImplementation(async () => {
+      committedAtRelease = committed
+      return true
+    })
+
+    const paid = await payCashOrder('venue-1', 'order-1', { amount: 9000, tip: 0, staffId: 'staff-1' })
+
+    expect(paid).toMatchObject({ paymentId: 'payment-1', status: 'COMPLETED', remainingBalanceCents: 0 })
+    expect(releaseTableIfSettled).toHaveBeenCalledTimes(1)
+    expect(releaseTableIfSettled).toHaveBeenCalledWith('venue-1', 'table-1')
+    expect(committedAtRelease).toBe(true)
+    expect(prismaMock.payment.create).toHaveBeenCalledTimes(1)
+  })
+
+  it('mesa con abono parcial: conserva su ocupación', async () => {
+    seedOrder('table-1')
+    debeMarcarCocinaMock.mockResolvedValue(false)
+
+    const paid = await payCashOrder('venue-1', 'order-1', { amount: 4000, tip: 0, staffId: 'staff-1' })
+
+    expect(paid).toMatchObject({ orderPaymentStatus: 'PARTIAL', remainingBalanceCents: 5000 })
+    expect(releaseTableIfSettled).not.toHaveBeenCalled()
+  })
+
+  it('fallo al liberar la mesa: conserva el pago aprobado y no vuelve a cobrar', async () => {
+    seedOrder('table-1')
+    debeMarcarCocinaMock.mockResolvedValue(false)
+    ;(releaseTableIfSettled as jest.Mock).mockRejectedValue(new Error('Own table bookkeeping failure'))
+
+    const paid = await payCashOrder('venue-1', 'order-1', { amount: 9000, tip: 0, staffId: 'staff-1' })
+
+    expect(paid).toMatchObject({ paymentId: 'payment-1', status: 'COMPLETED', amount: 9000 })
+    expect(releaseTableIfSettled).toHaveBeenCalledTimes(1)
+    expect(prismaMock.payment.create).toHaveBeenCalledTimes(1)
+  })
+
   it('venta saldada con pantalla: la marca va en la escritura que salda y la comanda se arma una vez', async () => {
     seedOrder()
     debeMarcarCocinaMock.mockResolvedValue(true)

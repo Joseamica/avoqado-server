@@ -427,6 +427,17 @@ export async function processIntents(params: {
         select: { seq: true },
       })
       if (typeof latestForDevice?.seq === 'number' && latestForDevice.seq >= intent.seq) {
+        // The same UUID may have been reserved after the first lookup; its result wins over the sequence fence.
+        const concurrent = await prisma.posSyncIntent.findUnique({
+          where: { venueId_idempotencyKey: { venueId, idempotencyKey: intent.id } },
+        })
+        if (concurrent) {
+          const ack = await ackFromExisting(concurrent, intent.id)
+          if (concurrent.localRef && ack.result?.orderId) localRefMap.set(concurrent.localRef, String(ack.result.orderId))
+          acks.push(ack)
+          if (ack.status === 'RETRY') blockedLanes.add(lane)
+          continue
+        }
         acks.push({
           id: intent.id,
           status: 'REJECTED',
