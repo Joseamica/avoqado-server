@@ -3,6 +3,7 @@ import emailService from '../../services/email.service'
 import logger from '../../config/logger'
 import { BadRequestError } from '../../errors/AppError'
 import { signupFromLanding } from '../../services/onboarding/signup.service'
+import { ofertaReclamadaEnTexto, parametrosDeCampanaDelStaff } from '../../services/onboarding/campanaDelCorreo.service'
 import { sendLeadToHubspot, isHubspotEnabled } from '../../services/integrations/hubspot.client'
 import crypto from 'crypto'
 import prisma from '../../utils/prismaClient'
@@ -198,6 +199,10 @@ export async function submitContact(req: Request, res: Response, next: NextFunct
     // con el mismo correo (misma cuenta) manda el mismo id y ChatGPT descarta el repetido. Es un
     // hash del id interno, que nunca sale en esta respuesta pública.
     let eventId: string | undefined
+    // La oferta que la cuenta SÍ reclamó, para decirla en el correo («$10 al mes por 3 meses…»).
+    let ofertaTexto: string | null = null
+    // «No pude leerla» no es «no tiene oferta»: si la lectura falla, el correo no promete precio ni «sin tarjeta».
+    let ofertaIncierta = false
     try {
       const alta = await signupFromLanding({
         email: String(email),
@@ -218,6 +223,19 @@ export async function submitContact(req: Request, res: Response, next: NextFunct
       registrationCompleted = !alta.alreadyExisted && !alta.yaEsCliente
       if (alta.organizationId) {
         eventId = crypto.createHash('sha256').update(alta.organizationId).digest('hex').slice(0, 32)
+      }
+      // Sin mirar si este envío trae código: quien ya reclamó la oferta y reenvía desde otra página la conserva.
+      if (alta.organizationId && !alta.yaEsCliente) {
+        const organizationId = alta.organizationId
+        // Leer la oferta nunca tumba el alta ni el correo.
+        ofertaTexto = await ofertaReclamadaEnTexto(organizationId).catch(err => {
+          ofertaIncierta = true
+          logger.warn('[CONTACT_SUBMIT] No se pudo leer la oferta reclamada para el correo', {
+            organizationId,
+            error: err instanceof Error ? err.message : String(err),
+          })
+          return null
+        })
       }
       if (alta.magicLinkToken) {
         // Pasa por el redirect propio para poder contar el clic (ver continuarOnboarding).
@@ -417,9 +435,11 @@ Campaña: ${utmTexto || '—'}
         // contradecir por escrito lo que va a ver en 3 minutos. (Auditoría de Codex, 18-sep.)
         yaEsCliente
           ? ''
-          : launchCampaignCode
-            ? `<p style="font-size:16px;margin:0 0 8px 0;color:#000;">Tu oferta se activa con tarjeta al terminar de crear tu cuenta. Cancela cuando quieras desde tu panel.</p>`
-            : `<p style="font-size:16px;margin:0 0 8px 0;color:#000;">El plan inicial es <strong>gratis para siempre</strong> y no pedimos tarjeta. Puedes ir creciendo cuando tu negocio crezca.</p>`
+          : ofertaTexto || launchCampaignCode
+            ? `<p style="font-size:16px;margin:0 0 8px 0;color:#000;">${ofertaTexto ? `Tu oferta: <strong>${escapeHtml(ofertaTexto)}</strong>. Se activa` : 'Tu oferta se activa'} con tarjeta al terminar de crear tu cuenta. Cancela cuando quieras desde tu panel.</p>`
+            : ofertaIncierta
+              ? ''
+              : `<p style="font-size:16px;margin:0 0 8px 0;color:#000;">El plan inicial es <strong>gratis para siempre</strong> y no pedimos tarjeta. Puedes ir creciendo cuando tu negocio crezca.</p>`
       }
     </div>
 
@@ -489,9 +509,11 @@ ${elegidos.map(m => `- ${m.label}${m.beneficio ? `: ${m.beneficio}` : ''}`).join
 }
 
 ${
-  launchCampaignCode
-    ? 'Tu oferta se activa con tarjeta al terminar de crear tu cuenta. Cancela cuando quieras desde tu panel.'
-    : 'El plan inicial es gratis para siempre y no pedimos tarjeta.'
+  ofertaTexto || launchCampaignCode
+    ? `${ofertaTexto ? `Tu oferta: ${ofertaTexto}. Se activa` : 'Tu oferta se activa'} con tarjeta al terminar de crear tu cuenta. Cancela cuando quieras desde tu panel.`
+    : ofertaIncierta
+      ? ''
+      : 'El plan inicial es gratis para siempre y no pedimos tarjeta.'
 }
 
 ${magicLink ? `Tu cuenta ya está creada; solo falta que elijas tu contraseña.\n${ctaTexto}: ${ctaUrl}\n(el enlace sirve 24 horas y una sola vez)` : `${ctaTexto}: ${ctaUrl}`}
@@ -773,7 +795,7 @@ export async function continuarOnboarding(req: Request, res: Response, _next: Ne
   // correo en espanol. Sin esto el dashboard elige idioma por el navegador, y a
   // un mexicano con Chrome en ingles —que son muchos— la primera pantalla de
   // Avoqado le sale en ingles justo despues de leer todo en espanol.
-  const destino = `${frontendUrl}/auth/reset-password/${encodeURIComponent(token)}?lang=es`
+  let destino = `${frontendUrl}/auth/reset-password/${encodeURIComponent(token)}?lang=es`
 
   try {
     // El token viaja en claro en el correo; en la DB vive su hash SHA-256.
@@ -785,6 +807,10 @@ export async function continuarOnboarding(req: Request, res: Response, _next: Ne
 
     if (staff) {
       const vencido = staff.resetTokenExpiry ? staff.resetTokenExpiry < new Date() : true
+      // La oferta y las UTM viajan en el enlace, para que la visita de regreso desde el correo
+      // siga contando para la campaña. Va ANTES de medir el clic: si medir falla, el destino la conserva.
+      const extra = await parametrosDeCampanaDelStaff(staff.id).catch(() => '')
+      if (extra) destino = `${destino}&${extra}`
       await prisma.activityLog.create({
         data: {
           staffId: staff.id,
