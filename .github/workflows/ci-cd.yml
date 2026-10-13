@@ -20,41 +20,27 @@
 #   - Production: https://avoqado-server.onrender.com (Render)
 #   - Demo:       https://avoqado-server.fly.dev (Fly.io) - see fly-deploy.yml
 
-name: 🚀 Avoqado Server CI/CD Pipeline
+# ⚠️ PRUEBA DE COSTO EN UBICLOUD (12-oct-2026) — rama desechable, NO FUSIONAR.
+# Sólo corre en ramas ci/ubicloud-**; sin jobs de deploy; permisos de sólo lectura.
+name: 🧪 PRUEBA Ubicloud — 2 · Standard, igual que hoy
 
 on:
   push:
-    # 'ci/**' = carril de verificación por sesión (regla del workspace, 8-oct-2026): corre TODAS las pruebas y nunca
-    # publica (los deploys sólo corren en main). La concurrencia es por rama: un carril no cancela a otro ni a develop.
-    branches: [main, develop, 'ci/**']
-  pull_request:
-    branches: [main, develop]
-  workflow_dispatch:
-    inputs:
-      environment:
-        description: 'Environment to deploy to'
-        required: true
-        default: 'production'
-        type: choice
-        options:
-          - production
+    branches: ['ci/ubicloud-**']
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  cancel-in-progress: true
 
 permissions:
-  contents: write
+  contents: read
   actions: read
-  security-events: write
-  pull-requests: write
-  issues: write
 
 jobs:
   # 🧪 Quality Gate: Test, lint and build
   test-and-build:
     name: 🧪 Test, Lint & Build
-    runs-on: ubuntu-latest
+    runs-on: ubicloud-standard-4
     # The database is named for the disposable H1 fixture on purpose. Fourteen
     # integration suites delete data (rollback, cleanup, staff deletion,
     # concurrency) and refuse to run unless DATABASE_URL and TEST_DATABASE_URL
@@ -82,6 +68,9 @@ jobs:
     steps:
       - name: 📥 Checkout code
         uses: actions/checkout@v4
+
+      - name: 🔎 Máquina (para la medición)
+        run: echo "nproc=$(nproc) mem=$(free -g | awk '/Mem:/{print $2}')GB cpu=$(lscpu | sed -n 's/^Model name:[[:space:]]*//p')" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: 🟢 Setup Node.js
         uses: actions/setup-node@v4
@@ -148,7 +137,7 @@ jobs:
   # 🧪 Unit tests are sharded so every test still runs, but wall-clock time drops.
   unit-tests:
     name: 🧪 Unit Tests (${{ matrix.shard }}/4)
-    runs-on: ubuntu-latest
+    runs-on: ubicloud-standard-2
     strategy:
       fail-fast: false
       matrix:
@@ -157,6 +146,9 @@ jobs:
     steps:
       - name: 📥 Checkout code
         uses: actions/checkout@v4
+
+      - name: 🔎 Máquina (para la medición)
+        run: echo "nproc=$(nproc) mem=$(free -g | awk '/Mem:/{print $2}')GB cpu=$(lscpu | sed -n 's/^Model name:[[:space:]]*//p')" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: 🟢 Setup Node.js
         uses: actions/setup-node@v4
@@ -195,12 +187,15 @@ jobs:
   # is local: scripts/pre-deploy-check.sh step 6b.
   api-tests:
     name: 🌐 API Middleware Tests (informational)
-    runs-on: ubuntu-latest
+    runs-on: ubicloud-standard-2
     continue-on-error: true
 
     steps:
       - name: 📥 Checkout code
         uses: actions/checkout@v4
+
+      - name: 🔎 Máquina (para la medición)
+        run: echo "nproc=$(nproc) mem=$(free -g | awk '/Mem:/{print $2}')GB cpu=$(lscpu | sed -n 's/^Model name:[[:space:]]*//p')" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: 🟢 Setup Node.js
         uses: actions/setup-node@v4
@@ -229,212 +224,3 @@ jobs:
           for SHARD in 1 2 3 4; do
             npm run test:api -- --shard="${SHARD}/4"
           done
-
-  # NOTE: Staging deploy disabled — Render staging service is suspended.
-  # Demo environment (Fly.io) is still active via fly-deploy.yml.
-  # Uncomment this job if/when Render staging is re-enabled.
-  #
-  # deploy-staging:
-  #   name: 🚀 Deploy to Staging
-  #   needs: test-and-build
-  #   runs-on: ubuntu-latest
-  #   if: |
-  #     (github.ref == 'refs/heads/develop' && github.event_name == 'push') ||
-  #     (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'staging')
-  #   environment:
-  #     name: staging
-  #     url: ${{ vars.STAGING_API_URL }}
-  #
-  #   steps:
-  #     - name: 🚀 Deploy to Render (Staging)
-  #       uses: johnbeynon/render-deploy-action@v0.0.8
-  #       with:
-  #         service-id: ${{ secrets.RENDER_STAGING_SERVICE_ID }}
-  #         api-key: ${{ secrets.RENDER_API_KEY }}
-  #
-  #     - name: ⏳ Wait for deployment to stabilize
-  #       run: |
-  #         echo "⏳ Waiting for deployment to complete..."
-  #         sleep 90
-  #
-  #     - name: 🏥 Comprehensive health check
-  #       run: |
-  #         echo "🏥 Performing health checks..."
-  #
-  #         # Basic health check
-  #         for i in {1..10}; do
-  #           if curl -f -s ${{ vars.STAGING_API_URL }}/health; then
-  #             echo "✅ Basic health check passed!"
-  #             break
-  #           fi
-  #           echo "⏳ Health check attempt $i failed, retrying in 10 seconds..."
-  #           sleep 10
-  #         done
-  #
-  #         # Extended API tests
-  #         echo "🔍 Testing API endpoints..."
-  #         curl -f -s ${{ vars.STAGING_API_URL }}/health | jq '.' || echo "❌ JSON response invalid"
-  #
-  #         echo "✅ Staging deployment successful!"
-  #
-  #     - name: 📢 Notify staging deployment
-  #       if: always()
-  #       run: |
-  #         STATUS="${{ job.status }}"
-  #         if [ "$STATUS" = "success" ]; then
-  #           echo "🎉 ✅ Staging deployment completed successfully!"
-  #           echo "📍 Environment: ${{ vars.STAGING_API_URL }}"
-  #           echo "📦 Version: ${{ needs.test-and-build.outputs.version }}"
-  #           echo "🕐 Build time: ${{ needs.test-and-build.outputs.build-time }}"
-  #         else
-  #           echo "❌ 🚨 Staging deployment failed!"
-  #           exit 1
-  #         fi
-
-  # 🏭 Deploy to Production Environment
-  deploy-production:
-    name: 🏭 Deploy to Production
-    needs: [test-and-build, unit-tests]
-    runs-on: ubuntu-latest
-    if: |
-      (github.ref == 'refs/heads/main' && github.event_name == 'push') ||
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'production')
-    environment:
-      name: production
-      url: ${{ vars.PRODUCTION_API_URL }}
-
-    steps:
-      - name: 🏭 Deploy to Render (Production)
-        uses: johnbeynon/render-deploy-action@v0.0.8
-        with:
-          service-id: ${{ secrets.RENDER_PRODUCTION_SERVICE_ID }}
-          api-key: ${{ secrets.RENDER_API_KEY }}
-
-      - name: ⏳ Wait for Render deploy to go LIVE (honest verification)
-        # A blind sleep + /health curl passes even when the deploy failed or went to the
-        # wrong service (the OLD version answers 200). Instead: poll the Render API until
-        # the triggered deploy reaches a terminal state AND verify the live commit is THIS one.
-        run: |
-          echo "⏳ Polling Render for the deploy of ${GITHUB_SHA:0:10}..."
-          for i in $(seq 1 90); do
-            RESP=$(curl -s -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
-              "https://api.render.com/v1/services/${{ secrets.RENDER_PRODUCTION_SERVICE_ID }}/deploys?limit=1")
-            STATUS=$(echo "$RESP" | jq -r '.[0].deploy.status // "unknown"')
-            COMMIT=$(echo "$RESP" | jq -r '.[0].deploy.commit.id // ""')
-            echo "[$i] status=$STATUS commit=${COMMIT:0:10}"
-            case "$STATUS" in
-              live)
-                if [ "$COMMIT" = "$GITHUB_SHA" ]; then
-                  echo "✅ Deploy LIVE and serving THIS commit."
-                  exit 0
-                fi
-                echo "❌ Live deploy is a DIFFERENT commit ($COMMIT) — the trigger did not take."
-                exit 1;;
-              build_failed|update_failed|canceled|deactivated|pre_deploy_failed)
-                echo "❌ Deploy ended in: $STATUS"; exit 1;;
-            esac
-            sleep 20
-          done
-          echo "❌ Timed out (30m) waiting for the deploy to finish"; exit 1
-
-      - name: 🏥 Production health verification
-        run: |
-          echo "🏥 Performing comprehensive production health checks..."
-
-          # Extended health checks for production
-          for i in {1..15}; do
-            if curl -f -s ${{ vars.PRODUCTION_API_URL }}/health; then
-              echo "✅ Production health check $i passed!"
-              
-              # Additional production-specific checks
-              echo "🔍 Verifying API responses..."
-              HEALTH_RESPONSE=$(curl -s ${{ vars.PRODUCTION_API_URL }}/health)
-              echo "📊 Health response: $HEALTH_RESPONSE"
-              
-              # Validate JSON response
-              echo "$HEALTH_RESPONSE" | jq '.' > /dev/null || (echo "❌ Invalid JSON response" && exit 1)
-              
-              echo "✅ All production health checks passed!"
-              break
-            fi
-            echo "⏳ Production health check attempt $i failed, retrying in 15 seconds..."
-            sleep 15
-          done
-
-          echo "🎉 Production deployment successful!"
-
-      - name: 📢 Notify production deployment
-        if: always()
-        run: |
-          STATUS="${{ job.status }}"
-          if [ "$STATUS" = "success" ]; then
-            echo "🎉 ✅ 🏭 PRODUCTION DEPLOYMENT SUCCESSFUL! 🏭 ✅ 🎉"
-            echo "📍 Environment: ${{ vars.PRODUCTION_API_URL }}"
-            echo "📦 Version: ${{ needs.test-and-build.outputs.version }}"
-            echo "🕐 Build time: ${{ needs.test-and-build.outputs.build-time }}"
-            echo "🚀 Commit: ${{ github.sha }}"
-          else
-            echo "❌ 🚨 PRODUCTION DEPLOYMENT FAILED! 🚨 ❌"
-            exit 1
-          fi
-
-  # 👀 PR Preview and Quality Report
-  deploy-preview:
-    name: 👀 PR Preview & Quality Report
-    runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
-    needs: [test-and-build, unit-tests]
-
-    steps:
-      - name: 💬 Enhanced PR Comment
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const { data: pr } = await github.rest.pulls.get({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: context.issue.number
-            });
-
-            const buildTime = '${{ needs.test-and-build.outputs.build-time }}';
-            const version = '${{ needs.test-and-build.outputs.version }}';
-
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: `## 🚀 Build Successful! Ready for Review
-
-            ### 📋 Build Summary
-            - **Branch**: \`${pr.head.ref}\`
-            - **Commit**: \`${context.sha.substring(0, 7)}\`
-            - **Version**: \`${version}\`
-            - **Built at**: \`${buildTime}\`
-
-            ### 🔍 Quality Checks
-            - ✅ **ESLint**: No issues found
-            - ✅ **TypeScript**: Compilation successful
-            - ✅ **Unit Tests**: All passing
-            - ✅ **Integration Tests**: All passing
-            - ✅ **Build**: Successful
-
-            ### 🗄️ Database
-            - **Neon Branch**: \`pr-${context.issue.number}\` will be created when merged
-            - **Migrations**: Will be applied automatically
-
-            ### 📦 Artifacts
-            - **Build files**: Available for 7 days
-            - **Prisma schema**: Included for migration review
-
-            ---
-
-            🎯 **Ready for code review!** All automated checks have passed.`
-            });
-
-      - name: 📊 Build metrics
-        run: |
-          echo "📊 Build Metrics Summary:"
-          echo "🕐 Build completed at: ${{ needs.test-and-build.outputs.build-time }}"
-          echo "📦 Version: ${{ needs.test-and-build.outputs.version }}"
-          echo "🔄 Workflow run: ${{ github.run_number }}"
-          echo "📝 Commit: ${{ github.sha }}"
