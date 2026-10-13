@@ -493,6 +493,12 @@ describe('computeFloorPlanDiff — tamaño libre (spec 2026-10-12)', () => {
     expect(isEmptyFloorPlanDiff(d)).toBe(true)
   })
 
+  // Ola final F3
+  it('una mesa que se manda a «Sin acomodar» (sin área) vuelve a automática aunque el cuerpo no traiga los campos', () => {
+    const d = computeFloorPlanDiff(current([conTamano]), plano(keep(conTamano, { areaRef: null, positionX: null, positionY: null })))
+    expect(d.tables.update).toEqual([{ id: 't1', data: expect.objectContaining({ area: null, width: null, height: null }) }])
+  })
+
   it('una mesa nueva sin los campos nace automática; con ellos, con su tamaño', () => {
     expect(computeFloorPlanDiff(current([]), plano(fresh('n1', '9'))).tables.create[0].data).toMatchObject({ width: null, height: null })
     const chica = computeFloorPlanDiff(current([]), plano(fresh('n1', '9', { width: 0.05, height: 0.08 })))

@@ -333,8 +333,9 @@ export function computeFloorPlanDiff(
       rotation: t.rotation,
       positionX: t.positionX,
       positionY: t.positionY,
-      width: keepSize ? (stored?.width ?? null) : (t.width ?? null),
-      height: keepSize ? (stored?.height ?? null) : (t.height ?? null),
+      // Sin área («Sin acomodar») no hay cuadrícula con qué medir: vuelve a automática, venga como venga el cuerpo.
+      width: t.areaRef === null ? null : keepSize ? (stored?.width ?? null) : (t.width ?? null),
+      height: t.areaRef === null ? null : keepSize ? (stored?.height ?? null) : (t.height ?? null),
       area: t.areaRef === null ? null : resolveArea(t.areaRef, `La mesa ${t.number.trim()}`, { number: t.number.trim() }),
     }
     if (t.id) {
