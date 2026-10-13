@@ -273,6 +273,13 @@ export interface OrderDetailResponse {
   discountAmount: number
   tipAmount: number
   total: number
+  /** Aditivo: saldo canónico para precuenta, en CENTAVOS enteros; no reemplaza los importes legacy en pesos. */
+  preBillBalance?: {
+    orderTotalCents: number
+    totalPaidCents: number
+    remainingBalanceCents: number
+    tipAmountCents: number
+  }
   staffName: string | null
   /** Additive: dueño del cheque (servedById) — el POS lo compara contra su
    *  staffId para pintar read-only cuando enforceTableOwnership está encendido. */
@@ -1265,7 +1272,7 @@ export async function getOrder(venueId: string, orderId: string): Promise<OrderD
           createdAt: true,
           // ADITIVO: sin `type` un reembolso es indistinguible de un cobro
           // negativo. NO se serializa en `payments[]` (contrato viejo intacto);
-          // alimenta `refundState`/`refundedAmount`.
+          // alimenta `refundState`/`refundedAmount` y el saldo aditivo de precuenta.
           type: true,
           processedBy: {
             select: { firstName: true, lastName: true },
@@ -1300,12 +1307,13 @@ export async function getOrder(venueId: string, orderId: string): Promise<OrderD
   // Flatten modifiers for mobile response
   const flattenedOrder = flattenOrderModifiers(order)
 
-  // El carril del reembolso — MISMO resumen que usan los cuatro canales de
-  // cobro, para que el detalle no pueda contradecir al saldo persistido.
-  // 🔴 Sólo los COMPLETED devuelven dinero: un reembolso PENDING/FAILED todavía
-  // no salió de la caja, y contarlo marcaría como devuelta una venta que no lo
-  // está. (Aquí llegan pagos de todos los estados.)
-  const refunds = summarizeRefunds((flattenedOrder.payments || []).filter((p: any) => p.status === 'COMPLETED'))
+  // Sólo dinero ocurrido: COMPLETED, incluido `type` para que REFUND no reabra deuda.
+  // El calculador compartido suma la propina al total y al pagado; no se resta de la mercancía.
+  // Proyección pura de lo ya leído: sin otra consulta ni cambios a los importes legacy.
+  const balance = computeOrderBalance(
+    flattenedOrder,
+    (flattenedOrder.payments || []).filter((p: any) => p.status === 'COMPLETED'),
+  )
 
   return {
     id: flattenedOrder.id,
@@ -1321,6 +1329,12 @@ export async function getOrder(venueId: string, orderId: string): Promise<OrderD
     discountAmount: Number(flattenedOrder.discountAmount),
     tipAmount: Number(flattenedOrder.tipAmount),
     total: Number(flattenedOrder.total),
+    preBillBalance: {
+      orderTotalCents: pesosToCents(balance.total.toNumber()),
+      totalPaidCents: pesosToCents(balance.paidAmount.toNumber()),
+      remainingBalanceCents: pesosToCents(balance.remainingBalance.toNumber()),
+      tipAmountCents: pesosToCents(balance.tipAmount.toNumber()),
+    },
     staffName: flattenedOrder.servedBy ? `${flattenedOrder.servedBy.firstName} ${flattenedOrder.servedBy.lastName}`.trim() : null,
     // Additive: dueño del cheque con id — para la UI read-only de propiedad de mesa.
     waiter: flattenedOrder.servedById
@@ -1405,8 +1419,8 @@ export async function getOrder(venueId: string, orderId: string): Promise<OrderD
         itemIds: (p.items ?? []).map((i: any) => i.id),
       }
     }),
-    refundState: refunds.refundState,
-    refundedAmount: Number(refunds.refundedAmount),
+    refundState: balance.refundState,
+    refundedAmount: Number(balance.refundedAmount),
   }
 }
 
