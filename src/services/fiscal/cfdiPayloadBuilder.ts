@@ -116,6 +116,12 @@ export const CLAVE_NOTA = '84111506'
 export const CLAVE_NOTA_V1 = '01010101'
 const CREDIT_NOTE_PRODUCT_KEY = CLAVE_NOTA_V1
 const CREDIT_NOTE_UNIT_KEY = 'ACT'
+/**
+ * C3 (Guía del CFDI global, Apéndice 2, ejemplo III): el texto de cada concepto de la nota de EXTRACCIÓN. Vive aquí, junto a los conceptos
+ * de nota, porque lo usan su captura y su lector sin importarse entre sí.
+ */
+export const descripcionDeExtraccion = (folio: string, etiquetaGlobal: string) =>
+  `Venta del ticket ${folio} facturada aparte (factura global ${etiquetaGlobal})`
 
 /**
  * C2 (D5): los conceptos de una nota, uno por tratamiento (en el orden de `TRATAMIENTOS_DE_NOTA`), con IVA incluido: el total del egreso es

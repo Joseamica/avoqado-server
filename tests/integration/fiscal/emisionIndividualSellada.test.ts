@@ -369,11 +369,24 @@ describe('emisión individual sellada', () => {
     expect(provider.createInvoice).toHaveBeenCalledTimes(1)
     expect(await prisma.cfdi.count({ where: { orderId: o.id } })).toBe(2)
   })
+  // C3 (D6) — doradas que cambian A PROPÓSITO: la admisión ya no dice «primero cancela la global» (`excluirSiEstaEnGlobal`); con la venta en
+  // una global viva y SIN su extracción timbrada (la carrera con la comprobación previa, que aquí se simula en la admisión) dice «primero hay
+  // que sacarla», sin reserva ni sellos.
+  const globalDePrueba = {
+    id: 'global-de-prueba',
+    uuid: 'UUID-G',
+    venueId: '',
+    fiscalEmisorId: '',
+    status: 'STAMPED',
+    cancelStatus: null,
+    serie: 'G',
+    folio: '7',
+  }
   it('exclusión global devuelve motivo y no crea reserva ni sellos', async () => {
     const o = await order()
-    const spy = jest.spyOn(exclusionGlobal, 'excluirSiEstaEnGlobal').mockResolvedValue('La venta está incluida en una factura global.')
+    const spy = jest.spyOn(exclusionGlobal, 'globalVivaDeLaOrden').mockResolvedValue({ ...globalDePrueba, venueId } as any)
     try {
-      await expect(issue(o.id)).rejects.toMatchObject({ statusCode: 409, message: 'La venta está incluida en una factura global.' })
+      await expect(issue(o.id)).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/G-7.*primero hay que sacarla/) })
       expect(await prisma.cfdi.count({ where: { orderId: o.id } })).toBe(0)
       expect(await prisma.orderItemSelloIva.count({ where: { orderItemId: o.items[0].id } })).toBe(0)
       expect(provider.createInvoice).not.toHaveBeenCalled()
@@ -389,11 +402,11 @@ describe('emisión individual sellada', () => {
     const before = await row(o.id)
     await prisma.order.update({ where: { id: o.id }, data: { contratoDePrecio: 'IVA_INCLUIDO' } })
     const spy = jest
-      .spyOn(exclusionGlobal, 'excluirSiEstaEnGlobal')
+      .spyOn(exclusionGlobal, 'globalVivaDeLaOrden')
       .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce('La venta está incluida en una factura global.')
+      .mockResolvedValueOnce({ ...globalDePrueba, venueId } as any)
     try {
-      await expect(issue(o.id)).rejects.toMatchObject({ statusCode: 409, message: 'La venta está incluida en una factura global.' })
+      await expect(issue(o.id)).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/primero hay que sacarla/) })
       expect(spy).toHaveBeenCalledTimes(2)
       expect(await row(o.id)).toEqual(before)
       expect(await prisma.orderItemSelloIva.count({ where: { cfdiId: before.id } })).toBe(0)

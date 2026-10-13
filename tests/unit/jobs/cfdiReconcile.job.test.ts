@@ -16,8 +16,15 @@ jest.mock('../../../src/services/fiscal/finalizadorCfdi', () => ({
   conLimiteDeTiempo: jest.requireActual('../../../src/services/fiscal/finalizadorCfdi').conLimiteDeTiempo,
 }))
 jest.mock('../../../src/services/fiscal/fiscalProvider.factory', () => ({ resolveFiscalProvider: () => ({ name: 'fake' }) }))
+// C3 · T2 (Codex C3-23): la pasada que repone el `CFDI_EXTRACCION_EMITIDA` perdido llama al ÚNICO escritor del evento; aquí, un doble.
+jest.mock('../../../src/services/fiscal/cfdiExtraccion.service', () => ({ registrarExtraccionEmitida: jest.fn() }))
+import { registrarExtraccionEmitida } from '../../../src/services/fiscal/cfdiExtraccion.service'
 describe('barrido de archivos CFDI', () => {
-  beforeEach(() => jest.clearAllMocks())
+  beforeEach(() => {
+    jest.clearAllMocks()
+    // C3 · T2 (M2 del pre-flight): la pasada de eventos de extracción lee con `$queryRaw`; sin filas por omisión.
+    ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([])
+  })
   it('corre sin STAMPING; selección acotada, orden estable y fallo aislado', async () => {
     const rows = ['a', 'b'].map(id => ({
       id,
@@ -179,5 +186,46 @@ describe('barrido de archivos CFDI', () => {
       expect(o.esperaMs).toBeLessThanOrEqual(PRESUPUESTO_REPARACION_MS)
       expect(o).not.toHaveProperty('insistir') // el barrido respeta lo recordado
     }
+  })
+
+  // C3 · T2 (Codex C3-23, v7/v8): si el proceso cae entre el timbre de una extracción y su evento y nadie vuelve a llamar, la fila no entra en
+  // ninguna otra selección del job. Esta pasada la encuentra (timbrada o ya CANCELADA, con su `uuid`, hace más de 10 min, sin evento) y lo
+  // escribe sin actor; acotada a 50, con cursor por id, y una fila que falla no detiene a las demás.
+  it('🔴 C3-23: la pasada de eventos de extracción — selección acotada y cortada a 10 min, cursor por id, sin actor y fallo aislado', async () => {
+    const filas = Array.from({ length: 50 }, (_, i) => ({ id: `e${String(i).padStart(2, '0')}` }))
+    ;(prisma.cfdi.findMany as jest.Mock)
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+    ;(prisma.$queryRaw as jest.Mock).mockResolvedValueOnce(filas).mockResolvedValueOnce([])
+    ;(prisma.cfdi.findUniqueOrThrow as jest.Mock).mockImplementation(async ({ where }: any) => ({ id: where.id, completa: true }))
+    ;(registrarExtraccionEmitida as jest.Mock).mockRejectedValueOnce(new Error('una que falla'))
+    const before = Date.now()
+    const job = new CfdiReconcileJob()
+    await job.runNow()
+    expect(prisma.$queryRaw).toHaveBeenCalledTimes(1)
+    const [sql, ...valores] = (prisma.$queryRaw as jest.Mock).mock.calls[0]
+    const texto = (sql as string[]).join('?')
+    expect(texto).toMatch(/c\.status IN \('STAMPED', 'CANCELLED'\)/)
+    expect(texto).toMatch(/c\.uuid IS NOT NULL/)
+    expect(texto).toMatch(/starts_with\(c\."idempotencyKey", \?\)/)
+    expect(texto).toMatch(
+      /NOT EXISTS \(SELECT 1 FROM "ActivityLog" a WHERE a\.action = 'CFDI_EXTRACCION_EMITIDA' AND a\."entityId" = c\.id\)/,
+    )
+    expect(texto).toMatch(/ORDER BY c\.id\s+LIMIT \?/)
+    // C3 · T4 (pendiente 1 de la T2): el corte mira también `updatedAt`: el job no le gana al usuario que acaba de recuperar o finalizar.
+    expect(texto).toMatch(/GREATEST\(c\."stampedAt", c\."updatedAt"\) < \?/)
+    // El corte viaja como `utcTs(cutoff)` (un fragmento con la fecha y `AT TIME ZONE 'UTC'`), nunca como un `Date` suelto.
+    const fragmento = valores.find((v: any) => v?.strings?.join('?').includes("AT TIME ZONE 'UTC'")) as any
+    const corte = fragmento?.values?.[0] as Date
+    expect(corte.getTime()).toBeLessThanOrEqual(Date.now() - 10 * 60_000)
+    expect(corte.getTime()).toBeGreaterThanOrEqual(before - 10 * 60_000)
+    expect(valores).toContain('cfdi-extraccion-')
+    expect(valores).toContain(50)
+    expect((registrarExtraccionEmitida as jest.Mock).mock.calls.map(([c, actor]) => [c.id, actor])).toEqual(filas.map(f => [f.id, null]))
+    expect((registrarExtraccionEmitida as jest.Mock).mock.calls[0][0]).toMatchObject({ completa: true }) // la fila entera, releída
+    await job.runNow() // la página estaba llena: la siguiente pasada sigue después de la última
+    expect((prisma.$queryRaw as jest.Mock).mock.calls[1]).toContain('e49')
   })
 })

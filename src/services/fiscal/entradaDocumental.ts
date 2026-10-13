@@ -13,6 +13,7 @@ import type { CfdiItemInput, CreateInvoiceParams } from './providers/fiscal-prov
 import {
   asignacionFiscal,
   documentoDeConceptos,
+  REDONDEO_PERMITIDO_CENTS,
   resumenDeConceptos,
   TRATAMIENTOS_DE_NOTA,
   unidadesDeConceptos,
@@ -53,6 +54,24 @@ export interface EntradaDocumentalV1 {
    * la entrada entera —también la nota por importe—. Por eso es `unknown`: nadie lo usa sin pasar por la validación.
    */
   montosPorRenglon?: unknown
+  /**
+   * C3: la factura del cliente de un ticket extraído de una global guarda de qué extracción sale y cómo concuerda con ella; su sustitución
+   * la reutiliza. Opcional: sólo la llevan las facturas por extracción. `leerEntrada` la valida (malformada ⇒ la entrada no se lee).
+   */
+  extraccion?: ExtraccionDeLaFactura
+}
+
+/** C3 (Codex C3-9): una diferencia de concordancia entre la factura del cliente y su extracción, en centavos con signo (cliente − extracción). */
+export type DiferenciaDeConcordancia = { tratamiento: TratamientoDeNota; componente: 'BASE' | 'IVA' | 'TOTAL'; cents: number }
+/** C3: la extracción de la que sale una factura del cliente (`EntradaDocumentalV1.extraccion`). */
+export type ExtraccionDeLaFactura = {
+  cfdiId: string
+  uuid: string
+  globalCfdiId: string
+  generacion: number
+  folio: string
+  brutoPorTratamiento: Partial<Record<TratamientoDeNota, number>>
+  diferencias: DiferenciaDeConcordancia[]
 }
 
 /** C2: lo facturado de cada artículo, por tratamiento (la forma VALIDADA de `EntradaDocumentalV1.montosPorRenglon`). */
@@ -265,8 +284,32 @@ export function leerEntrada(json: unknown): EntradaDocumentalV1 | null {
   }
   if (!esObjeto(json.params)) return null
   // C2 ronda 1 (M1): `montosPorRenglon` NO se valida aquí (se queda tal como se guardó, por la huella); lo valida `leerMontosPorRenglon`.
+  if (json.extraccion !== undefined && !extraccionValida(json.extraccion)) return null
 
   return json as unknown as EntradaDocumentalV1
+}
+
+const esTexto = (v: unknown): v is string => typeof v === 'string' && v.length > 0
+const esTratamientoDeNota = (t: unknown) => (TRATAMIENTOS_DE_NOTA as readonly unknown[]).includes(t)
+/** C3: la extracción de una factura del cliente; cada diferencia es de 1 ¢ (el tope de la concordancia, Codex C3-9) y distinta de cero. */
+function extraccionValida(x: unknown): x is ExtraccionDeLaFactura {
+  if (!esObjeto(x) || ![x.cfdiId, x.uuid, x.globalCfdiId, x.folio].every(esTexto)) return false
+  if (!Number.isInteger(x.generacion) || (x.generacion as number) < 1) return false
+  if (!esObjeto(x.brutoPorTratamiento)) return false
+  const bruto = Object.entries(x.brutoPorTratamiento)
+  if (!bruto.length || !bruto.every(([t, c]) => esTratamientoDeNota(t) && Number.isInteger(c) && (c as number) > 0)) return false
+  return (
+    Array.isArray(x.diferencias) &&
+    x.diferencias.every(
+      d =>
+        esObjeto(d) &&
+        esTratamientoDeNota(d.tratamiento) &&
+        (d.componente === 'BASE' || d.componente === 'IVA' || d.componente === 'TOTAL') &&
+        Number.isInteger(d.cents) &&
+        d.cents !== 0 &&
+        Math.abs(d.cents as number) <= REDONDEO_PERMITIDO_CENTS,
+    )
+  )
 }
 
 /**

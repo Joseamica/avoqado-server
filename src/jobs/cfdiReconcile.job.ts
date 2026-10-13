@@ -24,6 +24,9 @@ import {
 import { NODE_ENV } from '../config/env'
 import { asegurarWebhooksFaltantes, defaultAsegurarFaltantesDeps } from '../services/fiscal/facturapiWebhook.service'
 import { scheduleJob } from '../observability/jobContext'
+import { PREFIJO_EXTRACCION } from '../services/fiscal/exclusionGlobal'
+import { registrarExtraccionEmitida } from '../services/fiscal/cfdiExtraccion.service'
+import { utcTs } from '../utils/sqlDates'
 
 // Antigüedad mínima; el CAS igualmente protege las respuestas concurrentes.
 const STUCK_THRESHOLD_MS = 10 * 60_000
@@ -41,6 +44,8 @@ export const PRESUPUESTO_REPARACION_MS = 120_000
 export const PRESUPUESTO_TIMBRES_ATORADOS_MS = 60_000
 /** OF-1: lo más que se espera el alta de webhooks faltantes en una pasada (el SDK de Facturapi no tiene tiempo límite). */
 export const PRESUPUESTO_WEBHOOKS_MS = 30_000
+/** C3 (Codex C3-23): cuántas extracciones sin su evento repara una pasada (con cursor por id). */
+export const EVENTOS_DE_EXTRACCION_POR_PASADA = 50
 
 export class CfdiReconcileJob {
   private job: CronJob | null = null
@@ -54,6 +59,8 @@ export class CfdiReconcileJob {
   private cancelCursor: CursorDeCancelaciones | null = null
   /** C2 ronda 2 (N1): dónde se quedó la fase de cierres recientes del barrido. */
   private cierresCursor: CursorDeCierres | null = null
+  /** C3 (C3-23): dónde se quedó la pasada de eventos de extracción (por id). */
+  private extraccionCursor: string | null = null
 
   constructor() {
     // Every 5 minutes at :02 offset — avoids aligning with top-of-hour / :00 / :05 cron bursts.
@@ -194,6 +201,7 @@ export class CfdiReconcileJob {
       this.reconcileCursor = intentada ? { updatedAt: intentada.updatedAt, id: intentada.id } : null
 
       await this.repairArtifacts(cutoff)
+      await this.repararEventosDeExtraccion(cutoff)
 
       const durationMs = Date.now() - startTime
       if (stuck.length) logger.info(`[cfdiReconcile] tick complete — ${stuck.length} row(s) in ${durationMs}ms`, { tally })
@@ -243,6 +251,40 @@ export class CfdiReconcileJob {
         enLaPagina: rows.length,
       })
     this.artifactCursor = intentada?.stampedAt ? { stampedAt: intentada.stampedAt, id: intentada.id } : null
+  }
+
+  /**
+   * C3 (Codex C3-23, v7/v8): extracciones timbradas SIN su `CFDI_EXTRACCION_EMITIDA` —el proceso cayó entre finalizar y registrar y nadie
+   * volvió a llamar—, también las que se CANCELARON antes de esta pasada (la cancelación no borra que se emitió: `uuid` y `stampedAt` son la
+   * evidencia del timbre). Sólo las timbradas hace más de `STUCK_THRESHOLD_MS` (antes, el camino del usuario puede estar registrándola con
+   * su actor). El `NOT EXISTS` usa el índice único parcial `ActivityLog_extraccion_emitida_key`; `registrarExtraccionEmitida` es idempotente
+   * por él, así que una carrera con el usuario no duplica. El actor se perdió con el proceso: `staffId: null`, como los demás eventos del job.
+   * Una fila que falla no detiene a las demás. El corte mira también `updatedAt` (C3 · T4): una extracción que el usuario acaba de recuperar
+   * o finalizar trae el `stampedAt` del PAC (viejo), y el job no debe ganarle el registro dejándolo sin actor. El corte va con `utcTs` (`stampedAt` es UTC sin zona; un `Date` suelto se compara en la zona
+   * de la SESIÓN: la base local está en America/Mexico_City y lo corría 6 h — lo encontró la integración). ponytail: recorre `Cfdi` sin índice propio (filtra por llave y estado); un índice parcial por
+   * llave si la tabla crece tanto que la pasada pese.
+   */
+  private async repararEventosDeExtraccion(cutoff: Date): Promise<void> {
+    const filas = await retry(
+      () => prisma.$queryRaw<Array<{ id: string }>>`
+        SELECT c.id FROM "Cfdi" c
+        WHERE c.status IN ('STAMPED', 'CANCELLED') AND c.type = 'EGRESO' AND c.uuid IS NOT NULL
+          AND c."stampedAt" IS NOT NULL AND GREATEST(c."stampedAt", c."updatedAt") < ${utcTs(cutoff)}
+          AND starts_with(c."idempotencyKey", ${PREFIJO_EXTRACCION})
+          AND NOT EXISTS (SELECT 1 FROM "ActivityLog" a WHERE a.action = 'CFDI_EXTRACCION_EMITIDA' AND a."entityId" = c.id)
+          AND c.id > ${this.extraccionCursor ?? ''}
+        ORDER BY c.id
+        LIMIT ${EVENTOS_DE_EXTRACCION_POR_PASADA}`,
+      { retries: 2, initialDelay: 1500, shouldRetry: shouldRetryDbConnectionError, context: 'cfdiReconcile.findExtraccionesSinEvento' },
+    )
+    this.extraccionCursor = filas.length === EVENTOS_DE_EXTRACCION_POR_PASADA ? filas[filas.length - 1].id : null
+    for (const { id } of filas) {
+      try {
+        await registrarExtraccionEmitida(await prisma.cfdi.findUniqueOrThrow({ where: { id } }), null)
+      } catch (err) {
+        logger.error(`[cfdiReconcile] no se pudo registrar la extracción cfdi=${id}`, err)
+      }
+    }
   }
 
   /**

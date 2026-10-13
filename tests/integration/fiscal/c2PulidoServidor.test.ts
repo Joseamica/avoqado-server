@@ -1,7 +1,8 @@
 // C2-pulido (guía de Facturación, 10-oct), contra una base real:
 //  · G7: el filtro de la lista separa el timbre EN DUDA de «Con error» DENTRO del `where` (semántica de NULL de Postgres, página y total).
 //  · G1/m-2: con la factura de la venta EN DUDA, el GET público ya no ofrece el formulario (`TIMBRE_EN_DUDA`), ni con una devolución.
-//  · G2: el ticket ya incluido en una global VIVA no se ofrece (FISCAL_BLOCK neutro) — la MISMA regla que la admisión del POST.
+//  · G2 → C3 (Ruling G2, dorada que cambia A PROPÓSITO): el ticket en una global VIVA SE OFRECE (el POST decide, sacándolo de la global); no
+//    se ofrece si su extracción se canceló o quedó sin su global.
 // Sólo el PAC es de mentira.
 jest.mock('@/services/fiscal/fiscalProvider.factory', () => ({ resolveFiscalProvider: jest.fn() }))
 jest.mock('@/services/storage.service', () => ({
@@ -283,13 +284,50 @@ describe('C2-pulido · servidor (base real)', () => {
       return g
     }
 
-    it('🔴 G2: global viva ⇒ el GET dice FISCAL_BLOCK neutro, igual que el POST (409 neutro), sin PAC ni fila nueva', async () => {
+    /** Una nota de extracción de la venta contra la global `g` (sólo la fila: lo que miran el GET y el antecedente). */
+    const extraccion = (orderId: string, g: { id: string }, extra: Record<string, unknown> = {}) =>
+      factura({
+        orderId,
+        type: 'EGRESO',
+        flow: 'STAFF_B',
+        idempotencyKey: `cfdi-extraccion-${g.id}-${orderId}`,
+        status: 'STAMPED',
+        uuid: randomUUID(),
+        serie: 'E',
+        folio: '9',
+        stampedAt: new Date(),
+        receptorRfc: 'XAXX010101000',
+        ...extra,
+      })
+
+    it('🔴 C3 (G2): global viva ⇒ el GET SÍ la ofrece (el POST decide); el POST no puede sacarla sin el XML de la global ⇒ 409 neutro, sin PAC ni fila nueva', async () => {
       const { orderId, accessKey } = await venta()
       await enGlobal(orderId)
-      expect(await get(accessKey)).toEqual({ cfdi: null, autofacturaAvailable: false, autofacturaUnavailable: { kind: 'FISCAL_BLOCK' } })
+      expect(await get(accessKey)).toEqual({ cfdi: null, autofacturaAvailable: true })
       expect(await post(accessKey)).toEqual({ status: 409, body: { error: NEUTRO } })
       expect(provider.createInvoice).not.toHaveBeenCalled()
       expect(await prisma.cfdi.count({ where: { orderId } })).toBe(0)
+    })
+
+    it('🔴 C3-19 (G2): su extracción se CANCELÓ ⇒ el GET ya no la ofrece (FISCAL_BLOCK neutro, el motivo al log)', async () => {
+      const { orderId, accessKey } = await venta()
+      const g = await enGlobal(orderId)
+      await extraccion(orderId, g, { status: 'CANCELLED', cancelStatus: 'ACCEPTED', cancelledAt: new Date() })
+      expect(await get(accessKey)).toEqual({ cfdi: null, autofacturaAvailable: false, autofacturaUnavailable: { kind: 'FISCAL_BLOCK' } })
+    })
+
+    it('🔴 C3-13 (G2): su extracción es de una global que ya no está vigente ⇒ el GET no la ofrece', async () => {
+      const { orderId, accessKey } = await venta()
+      const g = await enGlobal(orderId, { status: 'CANCELLED', cancelStatus: 'ACCEPTED', cancelledAt: new Date() })
+      await extraccion(orderId, g)
+      expect(await get(accessKey)).toEqual({ cfdi: null, autofacturaAvailable: false, autofacturaUnavailable: { kind: 'FISCAL_BLOCK' } })
+    })
+
+    it('control — global viva con su extracción timbrada (la factura del cliente falta o se reintenta) ⇒ se ofrece', async () => {
+      const { orderId, accessKey } = await venta()
+      const g = await enGlobal(orderId)
+      await extraccion(orderId, g)
+      expect(await get(accessKey)).toEqual({ cfdi: null, autofacturaAvailable: true })
     })
 
     it('control — la global CANCELADA (confirmada) ya no la tiene: el GET vuelve a ofrecer la autofactura', async () => {

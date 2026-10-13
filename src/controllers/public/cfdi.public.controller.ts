@@ -26,7 +26,7 @@ import { logAction } from '../../services/dashboard/activity-log.service'
 import logger from '../../config/logger'
 import { env } from '../../config/env'
 import { timbreEnDuda } from '../../services/fiscal/timbreEnDuda'
-import { excluirSiEstaEnGlobal } from '../../services/fiscal/exclusionGlobal'
+import { motivoAutofacturaEnGlobal } from '../../services/fiscal/cfdiExtraccion.service'
 
 /** Public base URL of THIS API — used to build the zip download link we send over
  *  WhatsApp. Prod: api.avoqado.io; dev: set BASE_URL to the tunnel (ngrok) URL. */
@@ -161,6 +161,24 @@ export async function autofacturaController(req: Request<{ accessKey: string }>,
     })
 
     // 6. Map service results to HTTP responses
+    // C3 · T4 (ronda 1): lo que falló es la EXTRACCIÓN (la fila que vuelve es su egreso a Público en General, no la factura del cliente). Sus
+    // motivos son del comercio aunque hablen de «receptor» o «código postal» (el receptor de esa nota es Público en General): nunca viajan
+    // (regla de B3a). En duda ⇒ «se está procesando», como la factura; si no, el 409 neutro, con el motivo al log.
+    if (result.status !== 'STAMPED' && result.cfdi?.type === 'EGRESO') {
+      if (timbreEnDuda(result.cfdi)) {
+        logger.info('[cfdi.public] autofactura en duda: la extracción de la global no se confirmó', { orderId: order.id })
+        res.status(409).json({ error: TEXTO_PUBLICO_TIMBRE_EN_DUDA, code: 'TIMBRE_EN_DUDA' })
+        return
+      }
+      logger.info('[cfdi.public] autofactura detenida: no se pudo sacar la venta de la factura global', {
+        orderId: order.id,
+        venueId: order.venueId,
+        motivo: result.cfdi.lastError,
+        reasons: result.reasons,
+      })
+      res.status(409).json({ error: NO_SE_PUEDE_EN_LINEA.message })
+      return
+    }
     if (result.status === 'VALIDATION_FAILED') {
       // Los motivos del bloqueo FISCAL (venta que no se puede timbrar exacta) están escritos para el comercio
       // («factúrala con tu contador», con importes): no viajan a este endpoint sin sesión (mismo criterio que el GET).
@@ -362,10 +380,11 @@ export async function getAutofacturaStatusController(req: Request<{ accessKey: s
     const habilitada = !!bundle && bundle.facturacionEnabled && bundle.autofacturaEnabled
     // T-I2 (A7-R10): una venta con devolución completada no ofrece autofactura; para el cliente es el mismo FISCAL_BLOCK neutro (el
     // motivo va al log con los demás). Una factura YA timbrada se sigue enseñando arriba (`cfdi`). Quien decide es el POST, bajo candado.
-    // C2-pulido · G2: el ticket ya incluido en una global viva, con la MISMA función que la admisión del POST (aquí sin candado: sólo avisa).
+    // C3 (Ruling G2; antes C2-pulido · G2): un ticket en una global viva SE OFRECE —el POST decide, sacándolo de la global—; sólo no se ofrece
+    // si su extracción se canceló o quedó sin su global (C3-13/C3-19). Aquí sin candado: sólo avisa.
     const motivos = [...(bundle?.unsupportedReasons ?? [])]
     if (habilitada && (await ventaConDevolucion(order.id))) motivos.push(MOTIVO_AUTOFACTURA_CON_DEVOLUCION)
-    const enGlobal = habilitada ? await excluirSiEstaEnGlobal(prisma, order.id) : null
+    const enGlobal = habilitada ? await motivoAutofacturaEnGlobal(prisma, order.id) : null
     if (enGlobal) motivos.push(enGlobal)
     const autofacturaAvailable = habilitada && motivos.length === 0
     // B3a ronda final F3 (Codex final #3): campo NUEVO y opcional — nunca se quita ni se renombra uno de los de arriba. Distingue

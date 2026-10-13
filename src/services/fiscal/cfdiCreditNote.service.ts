@@ -23,7 +23,14 @@ import prisma from '../../utils/prismaClient'
 import { uploadFileToStorage } from '../storage.service'
 import { logAction as defaultLogAction } from '../dashboard/activity-log.service'
 import { resolveFiscalProvider } from './fiscalProvider.factory'
-import { CLAVE_NOTA_V1, conceptosDeNota, CREDIT_NOTE_RELATIONSHIP, CREDIT_NOTE_USO_CFDI, CreditNoteLine } from './cfdiPayloadBuilder'
+import {
+  CLAVE_NOTA_V1,
+  conceptosDeNota,
+  CREDIT_NOTE_RELATIONSHIP,
+  CREDIT_NOTE_USO_CFDI,
+  CreditNoteLine,
+  descripcionDeExtraccion,
+} from './cfdiPayloadBuilder'
 import { validateBeforeStamp } from './cfdiValidation'
 import { repartirProporcional, splitIvaIncluded } from './ivaMath'
 import { mapFormaPago } from './satCatalog'
@@ -50,15 +57,16 @@ import {
   montosDesdeDocumento,
   SIN_FILAS_D16,
 } from './globalPorTratamiento'
-import { leerGlobal, ordenesDeLaGlobal } from './cfdiGlobal.service'
+import { leerGlobal, ordenesDeLaGlobal, realValido } from './cfdiGlobal.service'
 import { repartoCongeladoDeAjuste } from './deliveryFiscalDelta'
 import logger from '../../config/logger'
-import { CFDI_VIVO } from './exclusionGlobal'
+import { CFDI_VIVO, llaveDeExtraccion } from './exclusionGlobal'
 import { correoCapturado } from './cfdiEmail.service'
 import type { CfdiItemInput, CreditNoteParams } from './providers/fiscal-provider.interface'
 import { esMarcaDeXmlIlegible, repararArchivosCompartido, type ResultadoDeReparacion } from './finalizadorCfdi'
 import type { AjusteAlCobro } from './reglaDelPac'
 import type { ConceptoReal } from './globalPorTratamiento'
+import type { RedondeoDeRemanentes } from './nominativaPorExtraccion'
 import {
   asignacionFiscal,
   cabeEnElSaldo,
@@ -187,6 +195,12 @@ export interface AcreditadoContra {
   /** C3: alguna nota viva es una extracción (`causa: 'EXTRACCION'`). */
   extraida: boolean
   /**
+   * C3 (B9): alguna nota viva no deja rastro por artículo —una por importe, elegida, de delivery, una v1, o lo ilegible/heredado
+   * (`desconocidoCents > 0`)—; con ella no se puede saber qué productos quedan. La extracción (`causa: 'EXTRACCION'`) no cuenta: no es
+   * una devolución.
+   */
+  sinTrazaPorArticulo: boolean
+  /**
    * Ronda 1 de la T8 (I2): lo que las notas vivas usaron de la tolerancia de P8 en el ámbito de su TICKET (sólo notas a una global). En el
    * documento global, la base y el IVA pueden pasar lo que queda a lo más esto (más lo de la nota nueva). Nuevo y opcional.
    */
@@ -297,6 +311,7 @@ export type CreditNoteBlockReason =
   | 'ORIGINAL_CANCELLED'
   | 'ORIGINAL_CANCEL_PENDING'
   | 'ORIGINAL_EN_SUSTITUCION'
+  | 'EXTRAIDA_SIN_FACTURA' // C3 (T5): el ticket de la global ya se extrajo y su factura del cliente aún no está timbrada
   | 'TIP_ONLY'
   | 'EXCEEDS_REMAINING'
   | 'ORIGINAL_IVA_MIXTO' // ya no se emite (C2): se conserva en el tipo
@@ -353,6 +368,13 @@ export function motivoOriginalEnCancelacion(
  */
 export const MOTIVO_ORIGINAL_EN_SUSTITUCION_ATORADA =
   'Esta factura se está sustituyendo y la factura nueva lleva más de una hora sin respuesta del PAC. Escríbenos a soporte para resolverla; después podrás hacer la nota de crédito.'
+
+/**
+ * C3 (Tarea 5): el ticket de la global ya se EXTRAJO (su nota de extracción está viva) y su factura del cliente todavía no está timbrada: la
+ * venta ya no vive en la global, y la nota de la devolución irá contra la factura del cliente cuando exista (el cargador la elige a ella
+ * por `stampedAt`). Antes, esperar: una nota contra la global descontaría de un ticket que la extracción ya sacó.
+ */
+export const MOTIVO_EXTRAIDA_SIN_FACTURA = 'Esta venta se está facturando aparte; emite la nota de crédito cuando su factura esté timbrada.'
 
 export interface CreditNoteEligibility {
   eligible: boolean
@@ -419,9 +441,11 @@ export const AVISO_FACTURACION_APAGADA = 'La facturación de este comercio está
 export interface EntradaEgresoV2 {
   version: 2
   tipo: 'EGRESO'
-  causa: 'DEVOLUCION'
+  /** C3: `EXTRACCION` = la nota que saca un ticket de su global para facturarlo aparte (no es una devolución; `modalidad` es `POR_IMPORTE`). */
+  causa: 'DEVOLUCION' | 'EXTRACCION'
   orderId: string
-  refundPaymentId: string
+  /** `null` sólo en una extracción (C3): no hay reembolso. */
+  refundPaymentId: string | null
   /** 🔴 La guarda C2-6 de la cancelación encuentra las notas vivas por esta llave (`documentoRelacionadoVivo`). */
   originalCfdiId: string
   originalUuid: string
@@ -439,6 +463,17 @@ export interface EntradaEgresoV2 {
   ajustes: AjusteAlCobro[]
   montos: { subtotalCents: number; taxCents: number; totalCents: number }
   params: Omit<CreditNoteParams, 'externalId' | 'idempotencyKey' | 'protocoloIva'>
+  /** C3 (sólo EXTRACCION): siempre 1 — una extracción por (global, ticket), sin generaciones (C3-P9 = B). */
+  generacion?: 1
+  /** C3 (sólo EXTRACCION, Codex C3-7): los productos que quedan del ticket, congelados: de ellos sale la factura del cliente. */
+  remanentes?: ConceptoReal[]
+  /** C3 (sólo EXTRACCION, v7 C1-43): las filas D16 del ticket, congeladas con los remanentes. */
+  filasD16?: string[][]
+  /**
+   * C3 (sólo EXTRACCION, M7 de la T3): lo que cada artículo devuelto completo difiere de lo facturado de él (acreditado − facturado, CON
+   * signo), dentro del |ajuste| de su tasa. Va aparte de `redondeo` (cuyo `ARTICULO` no lleva signo). Sólo si hay.
+   */
+  redondeoDeRemanentes?: RedondeoDeRemanentes[]
 }
 
 /**
@@ -450,9 +485,9 @@ export const NOTA_A_GLOBAL_LLEVA_BLOQUE = false
 const invalida = (message: string): CreditNoteEligibility => ({ eligible: false, reason: 'ORIGINAL_ENTRADA_INVALIDA', message })
 const detenida = (reason: CreditNoteBlockReason, message: string): CreditNoteEligibility => ({ eligible: false, reason, message })
 /** El total de lo fiscal de un ámbito (todas sus tasas). */
-const totalDe = (x: FiscalDeNota): number => Object.values(x).reduce((s, c) => s + (c?.totalCents ?? 0), 0)
+export const totalDe = (x: FiscalDeNota): number => Object.values(x).reduce((s, c) => s + (c?.totalCents ?? 0), 0)
 /** Ronda 1 (I1): TODO lo acreditado —cada nota viva, en el tratamiento que sea, y lo ilegible—, por su total. */
-const acreditadoTotal = (a: AcreditadoContra | undefined): number =>
+export const acreditadoTotal = (a: AcreditadoContra | undefined): number =>
   (a?.notas ?? []).reduce((s, n) => s + totalDe(n), 0) + (a?.desconocidoCents ?? 0)
 
 /** Lo fiscal de la original: por tratamiento, lo facturado de cada artículo (si hay evidencia), su ámbito y el ajuste de cada tasa. */
@@ -468,6 +503,8 @@ export type FiscalDeLaOriginal = {
   ajustePorTratamiento: Partial<Record<TratamientoDeNota, number>>
   /** T8: el folio del ticket en la global (el `NoIdentificacion` que quedó timbrado); la nota lo lleva en cada concepto. */
   folio?: string
+  /** C3 (M6): el ticket de la global, de la MISMA evaluación memorizada (su forma de pago, sus reales, sus filas D16, lo cobrado por tasa). */
+  ticket?: ReturnType<typeof ordenesDeLaGlobal>[number]
 }
 
 /**
@@ -704,6 +741,7 @@ export function fiscalDelTicketEnLaGlobal(
     // (B): el ajuste de cada tasa en la asignación de lo que se FACTURÓ de cada artículo (sus reales), la que dio `montosPorRenglon`.
     ajustePorTratamiento: reales?.ajustePorTratamiento ?? {},
     folio: d.folios.get(ticket.orderId)!,
+    ticket,
   }
 }
 
@@ -711,8 +749,9 @@ export function fiscalDelTicketEnLaGlobal(
  * C2-12 (v5-v7: C1-30, C1-34/35, C1-39/43): los conceptos reales de un ticket son ORIGEN comercial (con su descuento original): se cuadran
  * con `cuadrarPorTasa` (barrera N3 y cada tasa sola) contra lo COBRADO del ticket por tasa, con sus filas D16 congeladas, y el documento ya
  * cuadrado se reparte con la misma asignación. Devuelve lo de cada artículo y el ajuste de cada tasa ((B)); `null` si no cuadran.
+ * C3 (M7) la usa en `conceptosRemanentes`: el ajuste de cada tasa es la tolerancia de «devuelto completo».
  */
-function asignacionDeReales(
+export function asignacionDeReales(
   reales: ConceptoReal[],
   cobradoPorTasa: Partial<Record<TratamientoDeNota, number>>,
   filasD16: string[][],
@@ -902,7 +941,7 @@ function notaPorTratamientoSinRed(loaded: LoadedRefundForCreditNote): NotaPorTra
 }
 
 /** Ronda 1 (I2): lo que las notas vivas usaron de P8 por ticket, más lo que usa ésta en SU ticket (su redondeo de ámbito `TICKET`). */
-function sumarTolerancias(previas: ToleranciaDeTickets, propias: Redondeo[]): ToleranciaDeTickets {
+export function sumarTolerancias(previas: ToleranciaDeTickets, propias: Redondeo[]): ToleranciaDeTickets {
   const r: ToleranciaDeTickets = {}
   for (const [t, c] of Object.entries(previas) as Array<[TratamientoDeNota, { baseCents: number; ivaCents: number }]>)
     r[t] = { baseCents: c.baseCents, ivaCents: c.ivaCents }
@@ -1092,7 +1131,14 @@ export async function acreditadoContra(
   tx: Prisma.TransactionClient,
   p: { venueId: string; orderId: string | null; originalCfdiId: string; excludeCfdiId?: string; todoElDocumento?: boolean },
 ): Promise<AcreditadoContra> {
-  const r: AcreditadoContra = { alreadyCreditedCents: 0, notas: [], desconocidoCents: 0, porRenglon: new Map(), extraida: false }
+  const r: AcreditadoContra = {
+    alreadyCreditedCents: 0,
+    notas: [],
+    desconocidoCents: 0,
+    porRenglon: new Map(),
+    extraida: false,
+    sinTrazaPorArticulo: false,
+  }
   const liveWhere: Prisma.CfdiWhereInput = {
     venueId: p.venueId,
     type: 'EGRESO',
@@ -1124,17 +1170,21 @@ export async function acreditadoContra(
       if (e.version === 2) {
         acumularNota(r, e)
         if ((e as { causa?: string }).causa === 'EXTRACCION') r.extraida = true
-      } else
+        else if (e.modalidad !== 'POR_ARTICULOS') r.sinTrazaPorArticulo = true // C3 (B9)
+      } else {
         r.notas.push(
           e.originalSinIvaHistorico
             ? { NO_OBJETO: { baseCents: cfdi.totalCents, ivaCents: 0, totalCents: cfdi.totalCents } }
             : { IVA_16: { baseCents: cfdi.subtotalCents, ivaCents: cfdi.taxCents, totalCents: cfdi.totalCents } },
         )
+        r.sinTrazaPorArticulo = true // C3 (B9): una v1 no dice qué artículos devolvió
+      }
       r.alreadyCreditedCents += cfdi.totalCents
     }
     if (page.length < 100) break
     after = page[page.length - 1].id
   }
+  if (r.desconocidoCents > 0) r.sinTrazaPorArticulo = true // C3 (B9): lo ilegible o heredado tampoco
   r.alreadyCreditedCents += r.desconocidoCents
   return r
 }
@@ -1196,6 +1246,11 @@ export function checkCreditNoteEligibility(loaded: LoadedRefundForCreditNote): C
         'La venta no tiene una factura (CFDI de ingreso) timbrada, así que no hay nada que acreditar. Si el cliente necesita comprobante de la devolución, primero se factura la venta.',
     }
   }
+  // C3 (T5), PRIMERO de la rama de la global: el ticket ya salió de ella por su extracción viva, y su factura del cliente aún no está
+  // timbrada (si lo estuviera, el cargador habría elegido a ELLA como original). Va antes de «global cancelada»: con la global cancelada
+  // por fuera el ticket no vuelve a entrar en otra (C1-45), así que «la nota se hace contra la nueva global» sería falso.
+  if (original.esGlobal && loaded.acreditado.extraida)
+    return { eligible: false, reason: 'EXTRAIDA_SIN_FACTURA', message: MOTIVO_EXTRAIDA_SIN_FACTURA }
   if (original.cancelStatus === 'CANCELLED' || original.cancelStatus === 'ACCEPTED' || original.status === 'CANCELLED') {
     return {
       eligible: false,
@@ -1403,8 +1458,13 @@ function leerEgresoV2(cfdi: any, e: EntradaEgresoV2): EntradaEgresoV2 {
     const p = e.params as CreditNoteParams
     const aGlobal = e.originalEsGlobal === true
     const opts = { cobradoPorTasa: e.brutoPorTratamiento, filasD16: SIN_FILAS_D16 }
+    // C3: la extracción lleva su propio texto en cada concepto (el de `descripcionDeExtraccion`), no «Devolución sobre factura …».
+    const extraccion = e.causa === 'EXTRACCION'
+    const textoYFolio = e.originalEsGlobal
+      ? { sku: e.folio, ...(extraccion ? { descripcion: descripcionDeExtraccion(e.folio!, e.etiquetaOriginal) } : {}) }
+      : {}
     const reconstruidos = aplicarAjustes(
-      conceptosDeNota(e.brutoPorTratamiento ?? {}, e.etiquetaOriginal, e.originalEsGlobal ? { sku: e.folio } : {}),
+      conceptosDeNota(e.brutoPorTratamiento ?? {}, e.etiquetaOriginal, textoYFolio),
       e.ajustes ?? [],
       e.devueltoCents,
       opts,
@@ -1422,11 +1482,25 @@ function leerEgresoV2(cfdi: any, e: EntradaEgresoV2): EntradaEgresoV2 {
       cfdi.protocoloIva === 1 &&
       e.version === 2 &&
       e.tipo === 'EGRESO' &&
-      e.causa === 'DEVOLUCION' &&
+      // C3: una DEVOLUCIÓN es la de su reembolso y no trae nada de extracción; una EXTRACCIÓN no tiene reembolso, es la única de su
+      // (global, ticket) —sin generaciones, C3-P9 = B— y congela sus remanentes y sus filas D16. M8 (pre-flight): aquí sólo su FORMA (y la
+      // huella, abajo); la concordancia en dinero con la factura del cliente se exigió al capturarla y no se recalcula con la 6b de hoy.
+      (e.causa === 'DEVOLUCION'
+        ? typeof e.refundPaymentId === 'string' &&
+          creditNoteIdempotencyKey(e.refundPaymentId) === cfdi.idempotencyKey &&
+          e.generacion === undefined &&
+          e.remanentes === undefined &&
+          e.filasD16 === undefined &&
+          e.redondeoDeRemanentes === undefined
+        : e.causa === 'EXTRACCION' &&
+          e.refundPaymentId === null &&
+          aGlobal &&
+          e.modalidad === 'POR_IMPORTE' &&
+          e.generacion === 1 &&
+          cfdi.idempotencyKey === llaveDeExtraccion(e.originalCfdiId, e.orderId) &&
+          remanentesValidos(e)) &&
       e.orderId === cfdi.orderId &&
       e.fiscalEmisorId === cfdi.fiscalEmisorId &&
-      typeof e.refundPaymentId === 'string' &&
-      creditNoteIdempotencyKey(e.refundPaymentId) === cfdi.idempotencyKey &&
       typeof e.originalCfdiId === 'string' &&
       !!e.originalCfdiId &&
       typeof e.originalUuid === 'string' &&
@@ -1496,6 +1570,35 @@ function leerEgresoV2(cfdi: any, e: EntradaEgresoV2): EntradaEgresoV2 {
   }
   if (!ok) throw new ConflictError(ENTRADA_INVALIDA)
   return e
+}
+
+/**
+ * C3 (M8): la forma de lo que congela una extracción —remanentes (los `ConceptoReal` de C1, `realValido`), filas D16 (arreglos de cadenas,
+ * vacío permitido) y, si hay, el centavo con signo de cada artículo devuelto completo (M7: distinto de cero, ≤ `MAX_AJUSTE_DOCUMENTO_CENTS`,
+ * de un artículo que YA no está en los remanentes)—. El dinero no se recalcula aquí.
+ */
+function remanentesValidos(e: EntradaEgresoV2): boolean {
+  const rem = e.remanentes
+  if (!Array.isArray(rem) || !rem.length || !rem.every(realValido)) return false
+  if (!Array.isArray(e.filasD16) || !e.filasD16.every(f => Array.isArray(f) && f.every(x => typeof x === 'string'))) return false
+  const r = e.redondeoDeRemanentes
+  if (r === undefined) return true
+  const quedan = new Set(rem.map(x => x.orderItemId))
+  return (
+    Array.isArray(r) &&
+    r.length > 0 &&
+    r.every(
+      x =>
+        !!x &&
+        typeof x.orderItemId === 'string' &&
+        !!x.orderItemId &&
+        !quedan.has(x.orderItemId) &&
+        TRATAMIENTOS_DE_NOTA.includes(x.tratamiento) &&
+        Number.isSafeInteger(x.cents) &&
+        x.cents !== 0 &&
+        Math.abs(x.cents) <= MAX_AJUSTE_DOCUMENTO_CENTS,
+    )
+  )
 }
 
 /** El lector de las notas v1 (de antes de C2), intacto salvo la clave, que ahora es `CLAVE_NOTA_V1`. */
@@ -2230,7 +2333,7 @@ const CFDI_EMISOR_SELECT = {
  * además compara el emisor ESCALAR, el periodo y los montos de la fila (C2 · Tarea 8). C2 (D5): sin el resumen ni los conceptos del XML, la
  * nota espera (`ESPERA_XML`).
  */
-const SELECT_DE_ORIGINAL = {
+export const SELECT_DE_ORIGINAL = {
   id: true,
   orderId: true,
   stampedAt: true, // ronda 1 (M1): el tope por antigüedad de la espera del XML
@@ -2376,7 +2479,7 @@ export async function loadRefundForCreditNoteFromDb(
   // Legacy sin vínculo fiable cuenta contra la orden; una entrada corrupta cuenta conservadoramente, nunca libera capacidad en silencio.
   const acreditado = original
     ? await acreditadoContra(tx, { venueId, orderId: payment.orderId, originalCfdiId: original.id, excludeCfdiId })
-    : { alreadyCreditedCents: 0, notas: [], desconocidoCents: 0, porRenglon: new Map(), extraida: false }
+    : { alreadyCreditedCents: 0, notas: [], desconocidoCents: 0, porRenglon: new Map(), extraida: false, sinTrazaPorArticulo: false }
   // C2 · Tarea 8 (Codex C2-3): con una global, lo de arriba es lo del TICKET; lo del DOCUMENTO entero son las notas vivas de cualquier ticket
   // contra ella (por `entrada.originalCfdiId`), en la misma transacción cuando la reserva lo pide.
   const acreditadoDelDocumento =
@@ -2448,3 +2551,5 @@ const defaultDeps: EmitRefundCreditNoteDeps = {
       insistir: opts.insistir,
     }),
 }
+/** C3: las mismas dependencias reales de la nota, para la nota de extracción (`cfdiExtraccion.service.ts`). */
+export const defaultCreditNoteDeps = defaultDeps

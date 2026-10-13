@@ -3,6 +3,9 @@ import type { IssueCfdiDeps } from '@/services/fiscal/cfdi.service'
 /** In-memory transaction boundary for the existing service unit suites; real locks/CAS have DB coverage. */
 export function withIssueTransaction<T extends IssueCfdiDeps>(deps: T): T {
   deps.findOrderInvoices ??= jest.fn().mockResolvedValue([])
+  // C3: las lecturas de la venta FUERA de candados (¿está en una global viva? ¿tiene antecedente de extracción?); por default, ninguna.
+  deps.globalVivaDeLaOrdenFuera ??= jest.fn().mockResolvedValue(null)
+  deps.extraccionDeLaOrdenFuera ??= jest.fn().mockResolvedValue(null)
   const tx = {
     $queryRaw: jest.fn().mockResolvedValue([{ venueId: 'v1', organizationId: 'org1' }]),
     $executeRaw: jest.fn().mockResolvedValue(1),

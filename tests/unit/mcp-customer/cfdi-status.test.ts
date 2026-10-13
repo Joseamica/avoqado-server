@@ -7,9 +7,20 @@
 import { registerCfdiTools, TEXTO_CANCELACION_EN_DUDA } from '../../../src/mcp/tools/cfdi'
 import { ENVIO_TERMINADO_MS } from '../../../src/services/fiscal/cfdi.service'
 import type { McpScope } from '../../../src/mcp/scope'
+import { Prisma } from '@prisma/client'
 
 const mockCfdiFindMany = jest.fn()
 const mockCfdiCount = jest.fn().mockResolvedValue(0)
+/**
+ * C3 · T8 (M11): `extraccionesPendientes` hace dos consultas crudas —los conteos (`count(`) y la página—. Por omisión, ninguna extracción.
+ * `conExtracciones` cambia lo que devuelve cada una.
+ */
+/** La consulta tal como la armaría Prisma (los fragmentos anidados, aplanados). */
+const consulta = (a: unknown[]) => Prisma.sql(a[0] as TemplateStringsArray, ...(a.slice(1) as never[]))
+let extracciones: { total: number; enProceso: number; filas: unknown[] } = { total: 0, enProceso: 0, filas: [] }
+const mockQueryRaw = jest.fn(async (...a: unknown[]) =>
+  /count\(/.test(consulta(a).sql) ? [{ total: extracciones.total, enProceso: extracciones.enProceso }] : extracciones.filas,
+)
 jest.mock('@/services/fiscal/cfdiEmail.service', () => ({ sendCfdiByEmail: jest.fn() }))
 jest.mock('@/services/fiscal/cfdiCreditNote.service', () => ({ emitRefundCreditNote: jest.fn(), getRefundCreditNoteStatus: jest.fn() }))
 jest.mock('@/services/fiscal/confirmarContratoDePrecio.service', () => ({
@@ -30,6 +41,7 @@ jest.mock('@/utils/prismaClient', () => ({
       count: (...a: unknown[]) => mockCfdiCount(...(a as [])),
     },
     fiscalEmisor: { findMany: jest.fn().mockResolvedValue([]) },
+    $queryRaw: (...a: unknown[]) => mockQueryRaw(...a),
   },
 }))
 
@@ -130,5 +142,67 @@ describe('cfdi_status — ronda QA (hermanos): timbres en duda', () => {
     expect(mockCfdiCount).toHaveBeenCalledWith({
       where: { venueId: { in: ['v1'] }, status: 'STAMP_FAILED', protocoloIva: 1, enviadoAt: { not: null }, falloDefinitivo: false },
     })
+  })
+})
+
+// C3 · T8 (Codex C3-6/C3-10): las ventas sacadas de la factura global (nota de extracción timbrada y viva) a las que les FALTA la factura del
+// cliente, y cuántas la tienen EN PROCESO (viva sin timbrar): éstas no se vuelven a pedir.
+describe('cfdi_status — C3 · T8: extracciones que esperan la factura del cliente', () => {
+  const T1 = new Date('2026-06-02T18:00:00.000Z')
+  const fila = (id: string, stampedAt: Date) => ({
+    id,
+    venueId: 'v1',
+    orderId: `o-${id}`,
+    serie: 'E',
+    folio: id.slice(1),
+    totalCents: 11600,
+    stampedAt,
+  })
+  async function consultar(args: Record<string, unknown> = {}) {
+    mockCfdiFindMany.mockResolvedValueOnce([])
+    const r = await handlers.get('cfdi_status')!({ venueId: 'v1', limit: 2, ...args }, {})
+    return JSON.parse(r.content[0].text)
+  }
+  afterEach(() => {
+    extracciones = { total: 0, enProceso: 0, filas: [] }
+    mockQueryRaw.mockClear()
+  })
+
+  it('🔴 devuelve { total, enProceso, items, siguiente } acotado por `limit`; con la página llena, `siguiente` sigue de la última', async () => {
+    extracciones = { total: 5, enProceso: 0, filas: [fila('e12', T0), fila('e11', T1)] }
+    const out = await consultar()
+    expect(out.extraccionesPendientes).toEqual({
+      total: 5,
+      enProceso: 0,
+      items: [
+        { id: 'e12', venueId: 'v1', orderId: 'o-e12', folio: 'E12', totalMxn: 116 },
+        { id: 'e11', venueId: 'v1', orderId: 'o-e11', folio: 'E11', totalMxn: 116 },
+      ],
+      siguiente: `${T1.toISOString()}|e11`,
+    })
+    expect(out.extraccionesPendientes).not.toHaveProperty('aviso')
+    // la página pide `limit` filas, en el venue en alcance
+    const pagina = consulta(mockQueryRaw.mock.calls.find(c => !/count\(/.test(consulta(c).sql))!)
+    expect(pagina.values).toEqual(expect.arrayContaining([['v1'], 2]))
+  })
+
+  it('🔴 con `enProceso > 0` dice que se están confirmando con el SAT y que no se vuelvan a pedir', async () => {
+    extracciones = { total: 0, enProceso: 3, filas: [] }
+    const out = await consultar()
+    expect(out.extraccionesPendientes).toMatchObject({ total: 0, enProceso: 3, items: [], siguiente: null })
+    expect(out.extraccionesPendientes.aviso).toBe('3 facturas del cliente se están confirmando con el SAT; no las vuelvas a pedir.')
+  })
+
+  it('🔴 acepta `extraccionesCursor` (el `siguiente` anterior) y lo manda a la consulta de la página', async () => {
+    extracciones = { total: 3, enProceso: 0, filas: [fila('e10', T1)] }
+    const out = await consultar({ extraccionesCursor: `${T1.toISOString()}|e11` })
+    expect(out.extraccionesPendientes).toMatchObject({ total: 3, siguiente: null })
+    const pagina = consulta(mockQueryRaw.mock.calls.find(c => !/count\(/.test(consulta(c).sql))!)
+    expect(pagina.values).toEqual(expect.arrayContaining(['e11', T1]))
+  })
+
+  it('control — un cursor que no salió de aquí se rechaza (nunca se lee como «sin cursor»)', async () => {
+    mockCfdiFindMany.mockResolvedValueOnce([])
+    await expect(handlers.get('cfdi_status')!({ venueId: 'v1', limit: 2, extraccionesCursor: 'basura' }, {})).rejects.toThrow(/cursor/i)
   })
 })

@@ -490,3 +490,45 @@ describe('C2 · ronda 1 (M3, M4): cuándo se calcula y cuándo avisa', () => {
     expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining('montosPorRenglon'))
   })
 })
+
+describe('C3 · `extraccion`: la factura del cliente de un ticket extraído de una global', () => {
+  const extraccion = {
+    cfdiId: 'cfdi-extraccion-1',
+    uuid: 'UUID-EXTRACCION-1',
+    globalCfdiId: 'cfdi-global-1',
+    generacion: 1,
+    folio: 'ORD-2',
+    brutoPorTratamiento: { IVA_0: 10000, IVA_16: 5800 },
+    diferencias: [{ tratamiento: 'IVA_16', componente: 'BASE', cents: 1 }],
+  }
+  const con = async (e: unknown) => {
+    const entrada = capturarEntrada(await construirBundle('extras'), receptor as IssueReceptor, ORDER_ID)
+    return leerEntrada(JSON.parse(JSON.stringify({ ...entrada, extraccion: e })))
+  }
+
+  it('🔴 una entrada con su extracción válida (con diferencias, o sin ellas) se lee tal cual', async () => {
+    expect((await con(extraccion))?.extraccion).toEqual(extraccion)
+    expect((await con({ ...extraccion, diferencias: [] }))?.extraccion).toEqual({ ...extraccion, diferencias: [] })
+  })
+  it.each([
+    ['sin forma (`{ cfdiId: 1 }`)', { cfdiId: 1 }],
+    ['null', null],
+    ['sin uuid', { ...extraccion, uuid: '' }],
+    ['sin folio', { ...extraccion, folio: undefined }],
+    ['generación 0', { ...extraccion, generacion: 0 }],
+    ['generación fraccionaria', { ...extraccion, generacion: 1.5 }],
+    ['un bruto en cero', { ...extraccion, brutoPorTratamiento: { IVA_0: 0 } }],
+    ['un bruto vacío', { ...extraccion, brutoPorTratamiento: {} }],
+    ['un tratamiento que no es de nota', { ...extraccion, brutoPorTratamiento: { IVA_99: 100 } }],
+    ['una diferencia de 2 ¢', { ...extraccion, diferencias: [{ tratamiento: 'IVA_16', componente: 'BASE', cents: 2 }] }],
+    ['una diferencia de −2 ¢', { ...extraccion, diferencias: [{ tratamiento: 'IVA_16', componente: 'IVA', cents: -2 }] }],
+    ['una diferencia en cero', { ...extraccion, diferencias: [{ tratamiento: 'IVA_16', componente: 'TOTAL', cents: 0 }] }],
+    [
+      'un componente que no es BASE/IVA/TOTAL',
+      { ...extraccion, diferencias: [{ tratamiento: 'IVA_16', componente: 'ARTICULO', cents: 1 }] },
+    ],
+    ['diferencias que no son lista', { ...extraccion, diferencias: {} }],
+  ])('🔴 malformada (%s) ⇒ la entrada no se lee', async (_caso, e) => {
+    expect(await con(e)).toBeNull()
+  })
+})

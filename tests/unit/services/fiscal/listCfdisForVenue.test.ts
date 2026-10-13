@@ -13,7 +13,11 @@ jest.mock('../../../../src/utils/prismaClient', () => ({
     cfdi: {
       findMany: jest.fn(),
       count: jest.fn(),
+      // C3 · T8 (C3-14): la página nunca consulta una por fila; si alguien lo hiciera, aquí se vería.
+      findFirst: jest.fn(),
     },
+    // C3 · T8: UNA consulta agrupada clasifica las extracciones de la página.
+    $queryRaw: jest.fn(),
   },
 }))
 
@@ -319,7 +323,17 @@ describe('result shape', () => {
     expect(result).toEqual({
       // C1 · Tarea 11 (S6): cada fila gana `complementariaDe` (null en una individual); nada se quita.
       // C2 · T10 (C2-31), cambio A PROPÓSITO: y `estadoCancelacion` (null = nunca se pidió cancelarla).
-      cfdis: [{ ...SAMPLE_CFDI, complementariaDe: null, estadoCancelacion: null }],
+      // C3 · T8, cambio A PROPÓSITO (aditivo): y `esExtraccion`/`facturaDelCliente`/`facturaDelClientePendiente` (una factura normal: no).
+      cfdis: [
+        {
+          ...SAMPLE_CFDI,
+          complementariaDe: null,
+          estadoCancelacion: null,
+          esExtraccion: false,
+          facturaDelCliente: null,
+          facturaDelClientePendiente: false,
+        },
+      ],
       total: 42,
       page: 2,
       pageSize: 10,
@@ -586,5 +600,93 @@ describe('C2-pulido · G7 — «Con error» no incluye los timbres en duda', () 
     expect((await ids(undefined)).total).toBe(6)
     await listCfdisForVenue({ venueId: VENUE_ID, status: ['STAMPED'], page: 1, pageSize: 20 })
     expect(findMany.mock.calls.at(-1)[0].where.status).toBe('STAMPED')
+  })
+})
+
+// ─── C3 · Tarea 8 (Codex C3-6/C3-10/C3-14): la fila de una nota de extracción dice en qué va la factura del cliente ─────────────────────
+describe('C3 · T8 — `esExtraccion` y `facturaDelCliente` en la lista (C3-6/C3-10/C3-14)', () => {
+  const queryRaw = (prisma as unknown as { $queryRaw: jest.Mock }).$queryRaw
+  const findFirst = prisma.cfdi.findFirst as jest.Mock
+  /** Una nota de extracción timbrada del ticket `orderId` (su llave lleva el prefijo de extracción). */
+  const extraccion = (id: string, orderId: string, over: Record<string, unknown> = {}) => ({
+    ...SAMPLE_CFDI,
+    id,
+    orderId,
+    type: 'EGRESO',
+    receptorNombre: 'PÚBLICO EN GENERAL',
+    idempotencyKey: `cfdi-extraccion-g1-${orderId}`,
+    ...over,
+  })
+  const pagina = () => listCfdisForVenue({ venueId: VENUE_ID, page: 1, pageSize: 50 })
+
+  beforeEach(() => queryRaw.mockReset().mockResolvedValue([]))
+
+  it('🔴 sustitución en curso (dos vivas timbradas) ⇒ TIMBRADA; sin factura ⇒ FALTA y pendiente; la rechazada en recuperación ⇒ EN_PROCESO; una factura normal no es extracción; ninguna trae la llave', async () => {
+    findMany.mockResolvedValueOnce([
+      extraccion('e1', 'o1'),
+      extraccion('e2', 'o2'),
+      extraccion('e3', 'o3'),
+      { ...SAMPLE_CFDI, id: 'n1', idempotencyKey: 'cfdi-o9' },
+    ])
+    // Lo que agrupa la consulta: e1 tiene la original y su sustituta vivas y timbradas; e3, una STAMP_FAILED enviada y no definitiva (viva).
+    queryRaw.mockResolvedValueOnce([
+      { extraccionId: 'e1', timbrada: true },
+      { extraccionId: 'e3', timbrada: false },
+    ])
+    const r = await pagina()
+    expect(r.cfdis.map((c: any) => [c.id, c.esExtraccion, c.facturaDelCliente, c.facturaDelClientePendiente])).toEqual([
+      ['e1', true, 'TIMBRADA', false],
+      ['e2', true, 'FALTA', true],
+      ['e3', true, 'EN_PROCESO', false],
+      ['n1', false, null, false],
+    ])
+    for (const c of r.cfdis) expect(c).not.toHaveProperty('idempotencyKey')
+    // Atada a la página: las extracciones y sus órdenes, dentro del venue.
+    const valores = queryRaw.mock.calls[0].slice(1)
+    expect(valores).toEqual(expect.arrayContaining([VENUE_ID, ['o1', 'o2', 'o3'], ['e1', 'e2', 'e3']]))
+  })
+
+  it('🔴 C3-14: con 3 extracciones y con 30 en la página, UNA consulta agrupada las clasifica; ninguna consulta por fila', async () => {
+    for (const n of [3, 30]) {
+      queryRaw.mockClear()
+      findFirst.mockClear()
+      findMany.mockClear()
+      findMany.mockResolvedValueOnce(Array.from({ length: n }, (_, i) => extraccion(`e${i}`, `o${i}`)))
+      queryRaw.mockResolvedValueOnce([])
+      const r = await pagina()
+      expect(r.cfdis.filter((c: any) => c.facturaDelCliente === 'FALTA')).toHaveLength(n)
+      expect(queryRaw).toHaveBeenCalledTimes(1)
+      expect(findFirst).not.toHaveBeenCalled()
+      expect(findMany).toHaveBeenCalledTimes(1) // sólo la página
+    }
+  })
+
+  it('control — sin extracciones en la página, ninguna consulta de más', async () => {
+    findMany.mockResolvedValueOnce([{ ...SAMPLE_CFDI, idempotencyKey: 'cfdi-o1' }])
+    await pagina()
+    expect(queryRaw).not.toHaveBeenCalled()
+  })
+
+  it('control — una extracción sin timbrar, ya cancelada o con la cancelación EN TRÁMITE se marca como extracción, pero no se clasifica', async () => {
+    findMany.mockResolvedValueOnce([
+      extraccion('e-timbrando', 'o1', { status: 'STAMPING' }),
+      extraccion('e-cancelada', 'o2', { status: 'CANCELLED', cancelStatus: 'ACCEPTED' }),
+      // ruling T8: en trámite ⇒ la admisión responde 409 CFDI_CANCEL_PENDING; «falta» invitaría a un botón que va a fallar
+      extraccion('e-en-tramite', 'o3', { cancelStatus: 'REQUESTED' }),
+    ])
+    const r = await pagina()
+    expect(r.cfdis.map((c: any) => [c.id, c.esExtraccion, c.facturaDelCliente, c.facturaDelClientePendiente])).toEqual([
+      ['e-timbrando', true, null, false],
+      ['e-cancelada', true, null, false],
+      ['e-en-tramite', true, null, false],
+    ])
+    expect(queryRaw).not.toHaveBeenCalled()
+  })
+
+  it('control (ruling T8) — con la cancelación RECHAZADA la extracción vuelve a sostener la venta: se clasifica', async () => {
+    findMany.mockResolvedValueOnce([extraccion('e-rechazada', 'o1', { cancelStatus: 'REJECTED' })])
+    const r = await pagina()
+    expect(r.cfdis.map((c: any) => [c.id, c.facturaDelCliente, c.facturaDelClientePendiente])).toEqual([['e-rechazada', 'FALTA', true]])
+    expect(queryRaw).toHaveBeenCalledTimes(1)
   })
 })

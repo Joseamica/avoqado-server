@@ -18,6 +18,7 @@ import prisma from '@/utils/prismaClient'
 import {
   issueCfdiForOrder,
   cancelCfdi,
+  extraccionesPendientes,
   getCfdiStatus,
   listCfdisForVenue,
   MOTIVO_CONTRATO_DESCONOCIDO,
@@ -77,6 +78,7 @@ export async function issueCfdiForOrderController(req: Request, res: Response): 
       sandbox,
       flow: 'STAFF_B',
       expectedVenueId: venueId,
+      staffId: authContext.userId ?? null, // C3-16: la extracción registra quién la pidió (el mismo actor que `CFDI_ISSUED`)
     })
 
     if (result.status === 'VALIDATION_FAILED') {
@@ -163,7 +165,14 @@ export async function issueCfdiForOrderController(req: Request, res: Response): 
       action: 'CFDI_ISSUED',
       entity: 'Cfdi',
       entityId: result.cfdi.id,
-      data: { orderId, uuid: result.cfdi.uuid, serie: result.cfdi.serie, folio: result.cfdi.folio },
+      data: {
+        orderId,
+        uuid: result.cfdi.uuid,
+        serie: result.cfdi.serie,
+        folio: result.cfdi.folio,
+        // C3: la factura del cliente de un ticket que salió de su global dice de qué extracción sale.
+        ...(result.cfdi.entrada?.extraccion?.cfdiId ? { extraccionCfdiId: result.cfdi.entrada.extraccion.cfdiId } : {}),
+      },
     })
 
     res.status(201).json({
@@ -353,6 +362,32 @@ export async function listCfdisController(req: Request, res: Response): Promise<
     const aviso = `[cfdi.controller] listCfdis failed for venue ${venueId}: ${message}`
     logger.error(aviso)
     res.status(500).json({ error: 'Error interno al listar los CFDIs' })
+  }
+}
+
+/**
+ * GET /api/v1/dashboard/venues/:venueId/cfdi/extracciones-pendientes
+ *
+ * C3 (ola final, I-1): cuántas ventas se sacaron de la factura global (nota de extracción timbrada) y NO tienen factura del cliente
+ * (`total`), y cuántas de ésas ya van en camino (`enProceso`). Alimenta el aviso de Facturación; el detalle de cada una sigue en la lista
+ * y en el MCP. Sólo lectura (sin ActivityLog), acotada: `extraccionesPendientes` impone su propio tope y devuelve el total exacto.
+ * Gated by checkFeatureAccess('CFDI') + checkPermission('cfdi:view'): el mismo permiso que protege la lista de facturas.
+ */
+export async function extraccionesPendientesController(req: Request, res: Response): Promise<void> {
+  const authContext = (req as any).authContext ?? {}
+  const venueId = resolveRequestVenueId(req, authContext)
+  if (!venueId) {
+    res.status(400).json({ error: 'Venue ID requerido' })
+    return
+  }
+  try {
+    // `limit: 1`: sólo importan los dos conteos; la página de `items` no se usa aquí.
+    const { total, enProceso } = await extraccionesPendientes([venueId], { limit: 1 })
+    res.status(200).json({ total, enProceso })
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err)
+    logger.error(`[cfdi.controller] extraccionesPendientes failed for venue ${venueId}: ${message}`)
+    res.status(500).json({ error: 'Error interno al consultar las ventas sin factura del cliente' })
   }
 }
 
