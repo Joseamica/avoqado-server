@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { existingId } from '../common/existingId.schema'
 import { MenuType, ProductType } from '@prisma/client'
 import { isNonInventoriable, NON_INVENTORIABLE_MESSAGE } from '../../services/dashboard/quantityInventoryRow'
 
@@ -61,7 +62,7 @@ export const CreateMenuSchema = z.object({
     availableFrom: z.string().regex(TIME_REGEX, 'Invalid time format. Expected HH:mm').optional().nullable(),
     availableUntil: z.string().regex(TIME_REGEX, 'Invalid time format. Expected HH:mm').optional().nullable(),
     availableDays: z.array(z.enum(DAYS_OF_WEEK)).max(7).optional(),
-    categoryIds: z.array(z.string().cuid()).optional(), // Categories to assign to menu
+    categoryIds: z.array(existingId('El ID de la categoría no es válido')).optional(), // Categories to assign to menu
   }),
   params: z.object({
     venueId: z.string().cuid('Invalid venue ID format'),
@@ -152,7 +153,7 @@ export const ProductBodyBase = z.object({
   gtin: z.string().max(GTIN_MAX_LENGTH).optional().nullable(),
   name: z.string().min(1, 'Name is required').max(255),
   description: z.string().optional().nullable(),
-  categoryId: z.string().cuid('Invalid category ID format'),
+  categoryId: existingId('El ID de la categoría no es válido'),
   type: z.nativeEnum(ProductType).default(ProductType.FOOD), // Keep FOOD default for backwards compatibility
   price: z.number().positive('Price must be positive').multipleOf(0.01),
   cost: z.number().positive('Cost must be positive').multipleOf(0.01).optional().nullable(),
@@ -298,7 +299,7 @@ export const UpdateProductSchema = z.object({
   body: ProductBodyBase.partial().refine(nonInventoriableRefine, nonInventoriableMessage),
   params: z.object({
     venueId: z.string().cuid('Invalid venue ID format'),
-    productId: z.string().cuid('Invalid product ID format'),
+    productId: existingId('El ID del producto no es válido'),
   }),
 })
 export type UpdateProductDto = z.infer<typeof UpdateProductSchema>['body']
@@ -306,7 +307,7 @@ export type UpdateProductDto = z.infer<typeof UpdateProductSchema>['body']
 export const GetProductParamsSchema = z.object({
   params: z.object({
     venueId: z.string().cuid('Invalid venue ID format'),
-    productId: z.string().cuid('Invalid product ID format'),
+    productId: existingId('El ID del producto no es válido'),
   }),
 })
 
@@ -485,7 +486,7 @@ export const MenuCategoryAssignmentSchema = z.object({
 
 export const AssignCategoryToMenuSchema = z.object({
   body: z.object({
-    categoryId: z.string().cuid('Invalid category ID format'),
+    categoryId: existingId('El ID de la categoría no es válido'),
     displayOrder: z.number().int().min(0).optional(),
   }),
   params: z.object({
@@ -509,7 +510,7 @@ export const AssignModifierGroupToProductSchema = z.object({
   }),
   params: z.object({
     venueId: z.string().cuid('Invalid venue ID format'),
-    productId: z.string().cuid('Invalid product ID format'),
+    productId: existingId('El ID del producto no es válido'),
   }),
 })
 export type AssignModifierGroupToProductDto = z.infer<typeof AssignModifierGroupToProductSchema>['body']
@@ -518,7 +519,7 @@ export type AssignModifierGroupToProductDto = z.infer<typeof AssignModifierGroup
 export const RemoveModifierGroupFromProductParamsSchema = z.object({
   params: z.object({
     venueId: z.string().cuid('Invalid venue ID format'),
-    productId: z.string().cuid('Invalid product ID format'),
+    productId: existingId('El ID del producto no es válido'),
     modifierGroupId: z.string().cuid('Invalid modifier group ID format'),
   }),
 })
@@ -572,7 +573,7 @@ export const ProductQuerySchema = z.object({
       .transform(val => val === 'true')
       .pipe(z.boolean())
       .optional(),
-    categoryId: z.string().cuid().optional(),
+    categoryId: existingId('El ID de la categoría no es válido').optional(),
     type: z.nativeEnum(ProductType).optional(),
     featured: z
       .string()
@@ -636,7 +637,7 @@ export const ReorderProductsSchema = z.object({
   body: z
     .array(
       z.object({
-        id: z.string().cuid(),
+        id: existingId('El ID del producto no es válido'),
         displayOrder: z.number().int().min(0),
       }),
     )
@@ -649,11 +650,11 @@ export type ReorderProductsDto = z.infer<typeof ReorderProductsSchema>['body']
 
 export const BulkUpdateProductsSchema = z.object({
   body: z.object({
-    productIds: z.array(z.string().cuid()).min(1, 'At least one product ID is required'),
+    productIds: z.array(existingId('El ID del producto no es válido')).min(1, 'At least one product ID is required'),
     updates: z
       .object({
         active: z.boolean().optional(),
-        categoryId: z.string().cuid().optional(),
+        categoryId: existingId('El ID de la categoría no es válido').optional(),
         price: z.number().positive().multipleOf(0.01).optional(),
         featured: z.boolean().optional(),
       })

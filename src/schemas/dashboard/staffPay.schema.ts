@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { existingId } from '../common/existingId.schema'
 
 export const venueParamsSchema = z.object({ venueId: z.string().cuid('Venue ID inválido') })
 export const fechaSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Fecha inválida (AAAA-MM-DD)')
@@ -23,7 +24,7 @@ export const fechaQuerySchema = z.object({ fecha: fechaSchema.optional() })
 export const tableParamsSchema = venueParamsSchema.extend({ tableId: z.string().cuid('Tabla inválida') })
 export const crearTablaSchema = z.object({
   name: z.string().trim().min(1, 'Escribe un nombre').max(80, 'Máximo 80 caracteres'),
-  productIds: z.array(z.string().cuid('Producto inválido')).max(200, 'Demasiados productos').default([]),
+  productIds: z.array(existingId('Producto inválido')).max(200, 'Demasiados productos').default([]),
 })
 export const publicarVersionSchema = z.object({
   effectiveFrom: fechaSchema,
