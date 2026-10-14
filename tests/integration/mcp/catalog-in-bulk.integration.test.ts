@@ -280,8 +280,10 @@ describe('create_products contra la base real', () => {
         expect(p.inventory?.currentStock.toString()).toBe('0')
       }
       expect(creados.map(p => p.gtin).sort()).toEqual(['8445000000086', '8445000000093'])
+      // Repetirla (p. ej. tras perder la respuesta) no es un error: todo ya existe.
       const otra = await c.call('create_products', { venueId, items })
-      expect(otra).toMatchObject({ ok: false, created: 0 })
+      expect(otra).toMatchObject({ ok: true, created: 0 })
+      expect(otra.message).toContain('ya existen')
       expect(otra.invalid.map((i: { problem: string }) => i.problem)).toEqual(['SKU_YA_USADO', 'SKU_YA_USADO'])
     } finally {
       await c.close()
@@ -296,7 +298,7 @@ describe('create_products contra la base real', () => {
       expect(resultado).toMatchObject({ ok: true, created: 1 })
       const otra = await confirmarPorElCatalogo(c, 'create_products', { venueId, items })
       expect(otra.resultado).toBeNull()
-      expect(otra.vista).toMatchObject({ ok: false, created: 0 })
+      expect(otra.vista).toMatchObject({ ok: true, created: 0 })
       expect(otra.vista.invalid[0].problem).toBe('SKU_YA_USADO')
       expect(await prisma.product.count({ where: { venueId, name: 'Blusa Lino' } })).toBe(1)
     } finally {

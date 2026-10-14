@@ -218,7 +218,7 @@ function skuGenerado(name: string): string {
       .toUpperCase()
       .replace(/[^A-Z0-9]/g, '')
       .slice(0, 8) || 'PROD'
-  return `${inicio}-${operationHash(name.trim().toLowerCase().replace(/\s+/g, ' ')).slice(0, 6).toUpperCase()}`
+  return `${inicio}-${operationHash(name.trim().toLowerCase().replace(/\s+/g, ' ')).slice(0, 8).toUpperCase()}`
 }
 
 type AltaPedida = { name: string; price: number; category: string; sku?: string; barcode?: string; trackStock?: boolean }
@@ -649,6 +649,15 @@ export function registerCatalogInBulkTools(server: McpServer, scope: McpScope) {
         ...(skuGenerated ? { skuGenerated: true } : {}),
       }))
       const resueltos = { invalid, ...(availableCategories ? { availableCategories } : {}) }
+      // Todo lo de la lista ya existe: lo normal al reenviar una confirmación cuya respuesta se perdió. No es un error.
+      if (ready.length === 0 && invalid.every(i => i.problem === 'SKU_YA_USADO' || i.problem === 'CODIGO_YA_USADO'))
+        return text({
+          ok: true,
+          created: 0,
+          invalid,
+          message:
+            'Todos los productos de esta lista ya existen (mismo SKU o código de barras): no hay nada que crear. Si los creaste en una llamada anterior, ya quedaron.',
+        })
       if (ready.length === 0)
         return text({
           ok: false,
