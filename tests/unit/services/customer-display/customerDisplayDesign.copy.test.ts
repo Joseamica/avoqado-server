@@ -4,6 +4,7 @@ import { prismaMock } from '@tests/__helpers__/setup'
 import {
   copyCustomerDisplayDesign,
   getEffectiveDesign,
+  invalidateCustomerDisplayCache,
   previewCopyCustomerDisplay,
 } from '@/services/customer-display/customerDisplayDesign.service'
 
@@ -128,25 +129,57 @@ it('un origen o un destino mal formado es un 400 con su código, no un 500 de la
 // La tablet lee de la caché de 60 s: si copiar no la tirara, cada destino seguiría mostrando su diseño viejo. (La misma
 // regla que guardar; sin esta prueba, quitar la invalidación de la copia no ponía nada en rojo.)
 it('copiar invalida la caché de la ficha de CADA destino escrito', async () => {
-  prismaMock.terminal.findFirst.mockResolvedValue({
-    id: 't2',
+  // DOS destinos (t2 y t3): con uno solo, una invalidación que sólo tirara «el primero» pasaba en verde.
+  prismaMock.terminal.findMany.mockResolvedValue([
+    { id: 't1', type: 'POS_ANDROID' },
+    { id: 't2', type: 'POS_ANDROID' },
+    { id: 't3', type: 'POS_ANDROID' },
+  ] as any)
+  prismaMock.terminal.findFirst.mockImplementation((async ({ where }: any) => ({
+    id: where.id,
     venueId: 'v',
-    name: 'Caja 2',
+    name: `Caja ${where.id}`,
     type: 'POS_ANDROID',
     customerDisplayDesignVersion: 2,
     venue: { logo: null, updatedAt: new Date() },
     customerDisplayDesign: null,
-  } as any)
-  await getEffectiveDesign('v', 't2', { cache: true })
-  await getEffectiveDesign('v', 't2', { cache: true })
-  expect(prismaMock.terminal.findFirst).toHaveBeenCalledTimes(1) // la segunda salió de la caché
+  })) as any)
+  const destinos = ['t2', 't3']
+  try {
+    // Se ceba la caché de los dos: la segunda lectura de cada uno sale de la caché, sin consultar la base.
+    for (const id of destinos) {
+      await getEffectiveDesign('v', id, { cache: true })
+      await getEffectiveDesign('v', id, { cache: true })
+    }
+    expect(prismaMock.terminal.findFirst).toHaveBeenCalledTimes(2) // una consulta por destino; la segunda de cada uno, de la caché
 
-  prismaMock.$transaction.mockResolvedValueOnce({ escritos: [{ terminalId: 't2', changedKeys: [] }], promosOmitted: false })
-  await expect(copyCustomerDisplayDesign(entrada)).resolves.toMatchObject({ copied: ['t2'] })
-  const lecturasTrasCopiar = prismaMock.terminal.findFirst.mock.calls.length
+    prismaMock.$transaction.mockResolvedValueOnce({
+      escritos: [
+        { terminalId: 't2', changedKeys: [] },
+        { terminalId: 't3', changedKeys: [] },
+      ],
+      promosOmitted: false,
+    })
+    await expect(
+      copyCustomerDisplayDesign({
+        ...entrada,
+        targets: [
+          { terminalId: 't2', editToken: 'factory' },
+          { terminalId: 't3', editToken: 'factory' },
+        ],
+      }),
+    ).resolves.toMatchObject({ copied: ['t2', 't3'] })
+    const lecturasTrasCopiar = prismaMock.terminal.findFirst.mock.calls.length
 
-  await getEffectiveDesign('v', 't2', { cache: true })
-  expect(prismaMock.terminal.findFirst.mock.calls.length).toBe(lecturasTrasCopiar + 1) // ya no sale de la caché
+    // Los DOS se vuelven a leer de la base: ninguno quedó en la caché.
+    for (const id of destinos) await getEffectiveDesign('v', id, { cache: true })
+    expect(prismaMock.terminal.findFirst.mock.calls.length).toBe(lecturasTrasCopiar + 2)
+    expect(prismaMock.terminal.findFirst.mock.calls.slice(lecturasTrasCopiar).map(([args]: any) => args.where.id)).toEqual(['t2', 't3'])
+  } finally {
+    // La caché es del módulo: no se deja estado para las pruebas que siguen.
+    invalidateCustomerDisplayCache('t2')
+    invalidateCustomerDisplayCache('t3')
+  }
 })
 
 // MINOR 7: con el plan, TODOS los destinos reciben las mismas imágenes y el mismo logo del origen. Revisar el mismo

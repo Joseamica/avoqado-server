@@ -426,9 +426,10 @@ function revisarActivos(porId: Map<string, TipoDeActivo>, values: DesignValues, 
 
 /**
  * 🔴 Cuánto espera una escritura del diseño el candado de su terminal. Quien lo retiene de verdad —otro guardado, una
- * copia, un traslado— lo suelta en milisegundos, así que 5 s ya significa «algo se cruzó»: mejor un 409 claro que un
- * editor congelado. Es la espera que usa la confirmación del catálogo (`catalogPublicationConfirmation.service.ts`), la
- * otra escritura con candado que un humano espera frente al dashboard.
+ * copia, el gancho `borrarDisenoAlCambiarDeNegocio` (customerDisplayVenueChange.ts)— lo suelta en milisegundos, así que
+ * 5 s ya significa «algo se cruzó»: mejor un 409 claro que un editor congelado. Es la espera que usa la confirmación
+ * del catálogo (`catalogPublicationConfirmation.service.ts`), la otra escritura con candado que un humano espera frente
+ * al dashboard.
  */
 export const ESPERA_DEL_CANDADO_MS = 5_000
 
@@ -451,7 +452,8 @@ function esperaDelCandadoMs(): number {
 
 /**
  * La PRIMERA sentencia de toda transacción de este módulo que toma candados de terminal. La pone cada llamador y nunca
- * `lockTerminalRow`: el traslado comparte esa función y decide su propia espera.
+ * `lockTerminalRow`: el gancho `borrarDisenoAlCambiarDeNegocio` (customerDisplayVenueChange.ts) comparte esa función, toma
+ * el mismo candado de la terminal y la espera la decide la transacción de su llamador.
  */
 async function acotarEsperaDelCandado(tx: Prisma.TransactionClient): Promise<void> {
   // `SET` no acepta parámetros; el valor es un entero que calculamos aquí, no texto de fuera.
@@ -556,8 +558,9 @@ async function escribirConCandado(
     .$transaction(async tx => {
       await acotarEsperaDelCandado(tx)
       const bloqueada = await lockTerminalRow(tx, terminalId)
-      // 🔴 Revalidación BAJO el candado. El candado serializa, no reautoriza: sin esta línea, una
-      // edición que pasó la autorización antes de un traslado escribiría después de él.
+      // 🔴 Revalidación BAJO el candado. El candado serializa, no reautoriza: sin esta línea, una edición que pasó la
+      // autorización antes de un cambio de negocio escribiría después de él. El gancho `borrarDisenoAlCambiarDeNegocio`
+      // (customerDisplayVenueChange.ts) toma este mismo candado de la terminal: cuando esta lectura entra, ya se confirmó.
       if (!bloqueada || bloqueada.venueId !== venueId) throw dispositivoNoEncontrado()
 
       const actualRow = await tx.customerDisplayDesign.findUnique({ where: { terminalId }, select: DESIGN_SELECT })
@@ -576,7 +579,8 @@ async function escribirConCandado(
   invalidateCustomerDisplayCache(terminalId)
 
   // Bitácora FUERA de la transacción: que la auditoría falle no puede tumbar un guardado ya confirmado
-  // (`logAction` nunca lanza). (El traslado sí la escribe dentro: ahí es parte del movimiento, §5.1.)
+  // (`logAction` nunca lanza). (El gancho `borrarDisenoAlCambiarDeNegocio` sí escribe la suya dentro de la transacción del
+  // cambio de negocio: ahí es parte del movimiento, §5.1.)
   await logAction({
     staffId,
     venueId,

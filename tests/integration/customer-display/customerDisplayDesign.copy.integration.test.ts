@@ -89,7 +89,8 @@ afterAll(async () => {
   await prisma.customerDisplayAsset.deleteMany({ where: { venueId: { in: [venueA, venueB] } } })
   await prisma.venue.deleteMany({ where: { id: { in: [venueA, venueB] } } })
   await prisma.organization.deleteMany({ where: { id: orgId } })
-  await prisma.staff.deleteMany({ where: { id: staffId } })
+  // `staffId` queda sin asignar si beforeAll falla antes de crearlo: un `{ id: undefined }` borraría TODO el personal.
+  if (staffId) await prisma.staff.deleteMany({ where: { id: staffId } })
 })
 
 const guardar = (terminalId: string, draft: Record<string, unknown>, expectedEditToken = 'factory') =>

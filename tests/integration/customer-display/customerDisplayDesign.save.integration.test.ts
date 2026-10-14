@@ -80,7 +80,8 @@ afterAll(async () => {
   await prisma.customerDisplayAsset.deleteMany({ where: { venueId: { in: [venueA, venueB] } } })
   await prisma.venue.deleteMany({ where: { id: { in: [venueA, venueB] } } })
   await prisma.organization.deleteMany({ where: { id: orgId } })
-  await prisma.staff.deleteMany({ where: { id: staffId } })
+  // `staffId` queda sin asignar si beforeAll falla antes de crearlo: un `{ id: undefined }` borraría TODO el personal.
+  if (staffId) await prisma.staff.deleteMany({ where: { id: staffId } })
 })
 
 const guardar = (over: Record<string, unknown> = {}) =>
@@ -176,7 +177,7 @@ describe('CAS', () => {
   })
 
   it('el CAS lleva el ID del diseño, no sólo la revisión: un diseño RECREADO no acepta el token viejo', async () => {
-    if (!terminalId) return
+    expect(terminalId).toBeTruthy() // un verde vacío (la prueba sale sin afirmar nada) sería peor que un rojo
     const primero = await guardar()
     // Lo que pasa al mover la terminal y traerla de vuelta: la fila se borra y nace otra, con
     // revisión 1 otra vez. Sólo el id distingue una de otra.

@@ -134,7 +134,8 @@ const guardar = () =>
 const restablecer = () => resetCustomerDisplayDesign({ venueId: 'v', terminalId: 't', expectedEditToken: 'd1:4', staffId: 's' })
 
 // 🔴 La espera del candado tiene tope. Cada operación lo pone ella misma y ANTES de tomar el candado: puesto después, la
-// espera ya habría ocurrido sin límite. (No vive dentro de `lockTerminalRow`: el traslado comparte esa función.)
+// espera ya habría ocurrido sin límite. (No vive dentro de `lockTerminalRow`: el gancho `borrarDisenoAlCambiarDeNegocio`
+// (customerDisplayVenueChange.ts), que toma el mismo candado de la terminal, comparte esa función.)
 describe('la espera del candado', () => {
   it.each([
     ['guardar', guardar],
