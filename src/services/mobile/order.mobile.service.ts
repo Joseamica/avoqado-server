@@ -23,7 +23,7 @@ import { resolveTenderForCharge, computeTenderCommission } from '../dashboard/te
 // response carries an identical `digitalReceipt` shape — mobile and TPV never
 // drift on how the receipt QR (accessKey + receiptUrl + autofactura) is built.
 import { mapDigitalReceiptResponse, resolveAutofacturaAvailable, type OrderInventoryWarning } from '../tpv/payment.tpv.service'
-import { enqueuePaymentCommissionInTx } from '../tpv/paymentEffects.service'
+import { enqueuePaymentCommissionInTx, enqueuePaymentEffect } from '../tpv/paymentEffects.service'
 import {
   buildItemDiscountRow,
   calculateDiscountPesos,
@@ -2361,6 +2361,11 @@ export async function mergeOrders(venueId: string, targetOrderId: string, source
 // MARK: - Cash Payment Types
 
 export interface CashPaymentInput {
+  /**
+   * Huella del reducer offline: corre DENTRO de la transacción que crea el `Payment` (plan
+   * 2026-10-13-sync-retoma-por-llave). Si lanza, el cobro entero se revierte.
+   */
+  dentroDeLaTx?: (tx: Prisma.TransactionClient, cobro: { orderId: string; paymentId: string }) => Promise<void>
   amount: number // cents
   tip?: number // cents
   staffId?: string
@@ -2571,6 +2576,24 @@ async function readOrderBalanceSnapshot(venueId: string, orderId: string): Promi
  * @param input Cash payment parameters
  * @returns Payment confirmation with receipt info
  */
+/**
+ * Una salida idempotente devuelve un cobro que YA existía. Si una caída se llevó el paso posterior de liberar la mesa,
+ * se completa aquí (idempotente: sólo libera si ya no queda cuenta abierta). Nunca desmiente el pago.
+ */
+async function liberarMesaSiQuedoSaldada(venueId: string, tableId: string | null | undefined, orderId: string): Promise<void> {
+  if (!tableId) return
+  try {
+    const { releaseTableIfSettled } = await import('../tpv/table.tpv.service')
+    await releaseTableIfSettled(venueId, tableId)
+  } catch (error) {
+    logger.error('[ORDER.MOBILE] No se pudo completar la liberación de la mesa en un reintento (pago intacto)', {
+      orderId,
+      tableId,
+      error: error instanceof Error ? error.message : String(error),
+    })
+  }
+}
+
 export async function payCashOrder(venueId: string, orderId: string, input: CashPaymentInput): Promise<CashPaymentResponse> {
   const amount = input.amount
   const tip = input.tip || 0
@@ -2590,6 +2613,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
       total: true,
       remainingBalance: true,
       venueId: true,
+      tableId: true,
       areaTicketCheckoutSession: { select: { id: true } },
       // Lealtad: el cliente heredado es el respaldo cuando no hay OrderCustomer.
       customerId: true,
@@ -2639,6 +2663,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
       logger.info(
         `🔄 [ORDER.MOBILE] Reintento idempotente detectado (key=${input.idempotencyKey}) — devuelvo el pago existente ${existingByKey.id}`,
       )
+      await liberarMesaSiQuedoSaldada(venueId, order.tableId, orderId)
       return {
         paymentId: existingByKey.id,
         orderId,
@@ -2721,6 +2746,8 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
   const MAX_PAYMENT_CAS_ATTEMPTS = 3
   let paymentResult:
     | {
+        /** Caja OPEN al cobrar (leída en la misma transacción); el movimiento de efectivo va a ésa o a ninguna. */
+        cajaAlCobrarId: string | null
         newPayment: any
         isFullyPaid: boolean
         areaTicketOrder: boolean
@@ -3106,8 +3133,28 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
         // FT-GRAVES S-EF (medido el 8-oct): el MISMO gancho de comisión que la terminal, con el dinero, en esta transacción. Sin
         // él, este cobro y la cola sin red `PAY_CASH` (que lo reutiliza) no comisionaban. Un efecto por cobro: no se duplica.
         await enqueuePaymentCommissionInTx(tx, newPayment.id)
+        // Referido: obligación durable con el dinero, como la terminal (`payment.tpv.service.ts`). Si el proceso muere antes
+        // de la llamada directa de abajo, el worker de efectos la completa; el consumidor deduplica.
+        if (isFullyPaid) {
+          await enqueuePaymentEffect(tx, {
+            venueId,
+            paymentId: newPayment.id,
+            orderId,
+            kind: 'REFERRAL',
+            dedupeKey: 'referral:' + orderId + ':v1',
+            payload: { expectsSettlement: true },
+          })
+        }
+        // La caja ABIERTA al cobrar se fija aquí: el movimiento de efectivo va a ESA sesión y sólo si sigue abierta. Una caja
+        // abierta DESPUÉS del cobro (cierre + apertura a media transacción) no se lo queda: lo repone el conciliador.
+        const cajaAlCobrar = await tx.cashDrawerSession.findFirst({
+          where: { venueId, status: 'OPEN', openedAt: { lte: newPayment.createdAt } },
+          select: { id: true },
+        })
+        await input.dentroDeLaTx?.(tx, { orderId, paymentId: newPayment.id })
 
         return {
+          cajaAlCobrarId: cajaAlCobrar?.id ?? null,
           newPayment,
           isFullyPaid,
           aplicadoCents,
@@ -3144,6 +3191,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
         if (winner) {
           assertIdempotentPaymentOrder(winner, orderId)
           logger.info(`🔄 [ORDER.MOBILE] Carrera idempotente (P2002) — devuelvo el pago ganador ${winner.id}`)
+          await liberarMesaSiQuedoSaldada(venueId, order.tableId, orderId)
           return {
             paymentId: winner.id,
             orderId,
@@ -3188,6 +3236,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
           })
           if (mine) {
             assertIdempotentPaymentOrder(mine, orderId)
+            await liberarMesaSiQuedoSaldada(venueId, order.tableId, orderId)
             return {
               paymentId: mine.id,
               orderId,
@@ -3269,11 +3318,14 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
   //
   // Los retornos idempotentes de arriba (llave repetida, ganador de la carrera P2002)
   // NO llaman aquí a propósito: el movimiento lo creó la llamada que sí cobró.
-  try {
+  // Sin caja abierta al cobrar no hay movimiento: como el conciliador, una venta sin caja no entra a la que se abra después.
+  if (paymentResult.cajaAlCobrarId) try {
     const { postCashSaleToDrawer } = await import('@/services/shared/cashDrawerPosting')
     await postCashSaleToDrawer({
       venueId,
       paymentId: payment.id,
+      targetSessionId: paymentResult.cajaAlCobrarId,
+      exigirAbierta: true,
       // El método REAL: un cobro declarado a mano (terminal ajena, transferencia)
       // o con un tender del catálogo viaja por este mismo servicio y NUNCA entró al
       // cajón — salvo que el tender diga explícitamente que sí (vale de despensa).
@@ -3657,6 +3709,8 @@ export async function cancelOrderInTransaction(
   orderId: string,
   reason?: string,
   performedBy?: string,
+  /** Huella del reducer offline: corre DENTRO de la transacción de la cancelación (plan 2026-10-13-sync-retoma-por-llave). */
+  dentroDeLaTx?: (tx: Prisma.TransactionClient, cancelada: { orderId: string }) => Promise<void>,
 ) {
   logger.info(`📱 [ORDER.MOBILE] Cancelling order ${orderId} | venue=${venueId} | reason=${reason || 'none'}`)
   let scope: Awaited<ReturnType<typeof lockTableOrderScope>>
@@ -3674,6 +3728,7 @@ export async function cancelOrderInTransaction(
     data: { status: 'CANCELLED', ...(reason ? { specialRequests: `Cancelled: ${reason}` } : {}) },
     select: { tableId: true },
   })
+  await dentroDeLaTx?.(tx, { orderId })
   const boundTable = scope.tables.find(table => table.currentOrderId === orderId)
   const { reconcileTableAfterOrderRemovedInTransaction } = await import('../tpv/table.tpv.service')
   const reconciled = await reconcileTableAfterOrderRemovedInTransaction(tx, scope, orderId)
@@ -3737,9 +3792,15 @@ export async function publishCancelledOrder(
   }
 }
 
-export async function cancelOrder(venueId: string, orderId: string, reason?: string, performedBy?: string): Promise<void> {
+export async function cancelOrder(
+  venueId: string,
+  orderId: string,
+  reason?: string,
+  performedBy?: string,
+  dentroDeLaTx?: (tx: Prisma.TransactionClient, cancelada: { orderId: string }) => Promise<void>,
+): Promise<void> {
   const result = await prisma.$transaction(
-    tx => cancelOrderInTransaction(tx, venueId, orderId, reason, performedBy),
+    tx => cancelOrderInTransaction(tx, venueId, orderId, reason, performedBy, dentroDeLaTx),
     ORDER_LOCK_WAIT_BUDGET,
   )
   await publishCancelledOrder(venueId, result, performedBy, reason)
