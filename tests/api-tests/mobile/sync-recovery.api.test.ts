@@ -72,7 +72,10 @@ describe('Recuperación mobile: porteros reales y lectura sin efectos', () => {
     expect(response.body).toHaveProperty('required', 'orders:read')
     expect(prismaMock.posSyncIntent.findMany).not.toHaveBeenCalled()
   })
-  it('200 con permiso de lectura; conserva PROCESSING y el resultado almacenado exacto', async () => {
+  // Retoma por llave (plan 2026-10-13): una reserva PROCESSING guarda en resultJson su marca interna (protocolo/huella).
+  // No es un resultado: se contesta PROCESSING con result null (lo que las filas legacy, sin resultJson, ya devolvían);
+  // sólo una fila terminada entrega su resultado almacenado exacto. Las apps sólo leen result en ACKED.
+  it('200 con permiso de lectura; PROCESSING conserva su estado y no expone la marca interna', async () => {
     prismaMock.posSyncIntent.findMany.mockResolvedValue([
       {
         idempotencyKey: 'original-intent',
@@ -82,7 +85,7 @@ describe('Recuperación mobile: porteros reales y lectura sin efectos', () => {
         localRef: 'local-original',
         status: 'PROCESSING',
         errorCode: null,
-        resultJson: { amount: 1000, tipAmount: 50 },
+        resultJson: { protocolo: 'huella-v1', retomable: true, huella: { orderId: 'order-real', paymentId: 'p-1' } },
       },
     ] as any)
     prismaMock.order.findMany.mockResolvedValue([{ id: 'order-real', externalId: 'original-order' }] as any)
@@ -100,7 +103,7 @@ describe('Recuperación mobile: porteros reales y lectura sin efectos', () => {
             localRef: 'local-original',
             status: 'PROCESSING',
             errorCode: null,
-            result: { amount: 1000, tipAmount: 50 },
+            result: null,
           },
         ],
         orders: [{ orderId: 'order-real', externalId: 'original-order' }],
@@ -120,6 +123,26 @@ describe('Recuperación mobile: porteros reales y lectura sin efectos', () => {
     expect(prismaMock.order.findMany).toHaveBeenCalledWith(
       expect.objectContaining({ where: { venueId, externalId: { in: ['original-order'] } }, take: 100 }),
     )
+  })
+  it('200 con una fila terminada: entrega el resultado almacenado exacto', async () => {
+    prismaMock.posSyncIntent.findMany.mockResolvedValue([
+      {
+        idempotencyKey: 'original-intent',
+        type: 'PAY_CASH',
+        deviceId: 'original-device',
+        seq: 9,
+        localRef: 'local-original',
+        status: 'ACKED',
+        errorCode: null,
+        resultJson: { orderId: 'order-real', paymentId: 'p-1', amount: 1000, tipAmount: 50 },
+      },
+    ] as any)
+    const response = await post(token(venueId, { dbRole: 'WAITER', permissions: ['orders:read'] }))
+    expect(response.status).toBe(200)
+    expect(response.body.data.intents[0]).toMatchObject({
+      status: 'ACKED',
+      result: { orderId: 'order-real', paymentId: 'p-1', amount: 1000, tipAmount: 50 },
+    })
   })
   it('200 vacío para identidades inexistentes; no crea nada para buscarlas', async () => {
     const response = await post(token())

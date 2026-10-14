@@ -49,13 +49,22 @@ export async function syncIntents(req: Request, res: Response): Promise<void> {
 
     // Resolver permisos UNA vez por batch y evaluar cada intent con el permiso
     // de su ruta online equivalente. El replay no es una puerta trasera.
-    const access = await getUserAccess(staffId, venueId)
+    // Persona dada de baja (o sin su sucursal) con cola pendiente: NO es transitorio. Un 500 hacía que el aparato reintentara
+    // el lote entero para siempre, con los cobros de los demás atorados detrás; ahora cada intent sale PERMISSION_DENIED y
+    // queda visible para el gerente, igual que un permiso revocado. Cualquier otro error sigue siendo 500 (reintento).
+    let access: Awaited<ReturnType<typeof getUserAccess>> | null = null
+    try {
+      access = await getUserAccess(staffId, venueId)
+    } catch (accessError: any) {
+      if (!/has no access to venue/.test(String(accessError?.message))) throw accessError
+      logger.warn(`[SYNC MOBILE CONTROLLER] staff ${staffId} sin acceso a ${venueId}: sus intents se rechazan`)
+    }
     const acks = await syncService.processIntents({
       venueId,
       staffId,
       deviceId,
       intents,
-      authorizeIntent: (_intent, requiredPermission) => hasPermission(access, requiredPermission),
+      authorizeIntent: (_intent, requiredPermission) => access !== null && hasPermission(access, requiredPermission),
     })
     res.status(200).json({ success: true, data: acks })
   } catch (error: any) {
