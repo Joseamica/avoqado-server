@@ -7,6 +7,9 @@
  *     su nota; repetir la misma carga no mueve nada.
  *   - 🔴 Una venta entre la vista previa y la confirmación: no se aplica NADA ni se crea el conteo.
  *   - 🔴 Ligado a Shopify con 2 piezas apartadas: contar 9 deja 7, la respuesta lo dice, y el guardia de la tabla encola −3.
+ *   - 🔴 Reenviar la MISMA confirmación ya aplicada (las ventas regresaron el número): no se vuelve a contar.
+ *   - 🔴 Un producto en un conteo abierto no se carga; el resto sí, y el conteo abierto queda como estaba.
+ *   - 🔴 Otro negocio con el mismo SKU y el mismo código de barras: nunca se encuentra ni se cambia.
  *   - Precios: cambian con UNA bitácora del lote; si otra persona cambió el precio, no se pisa.
  *   - Altas: nacen con su código de barras y su inventario en 0; repetir la lista (con o sin SKU) no crea duplicados.
  */
@@ -15,9 +18,10 @@ import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { resolveScope } from '@/mcp/scope'
 import { registerCatalogInBulkTools } from '@/mcp/tools/catalogInBulk'
+import { createStockCount } from '@/services/mobile/inventory.mobile.service'
 import { conectarPorElCatalogo } from '../../__helpers__/mcp-por-el-catalogo'
 import { confirmarPorElCatalogo } from '../../__helpers__/catalogo-en-bloque'
-import { crearEscenarioShopify, limpiarEscenarioShopify, type EscenarioShopify } from '../shopify/fixtures'
+import { assertTestDatabase, crearEscenarioShopify, limpiarEscenarioShopify, type EscenarioShopify } from '../shopify/fixtures'
 
 // El setup de integración cambia la bitácora por jest.fn(): aquí se restaura la real y se juntan sus escrituras (algunas son
 // «dispara y olvida» en los servicios) para esperarlas antes de afirmar y antes de limpiar.
@@ -43,13 +47,7 @@ let venueId = ''
 let staffId = ''
 let categoryId = ''
 
-function assertTestDatabase(): void {
-  const declared = new URL(process.env.TEST_DATABASE_URL ?? '')
-  const effective = new URL(process.env.DATABASE_URL ?? '')
-  expect(['localhost', '127.0.0.1']).toContain(declared.hostname)
-  expect(declared.pathname.toLowerCase()).toContain('test')
-  expect(effective.toString()).toBe(declared.toString())
-}
+// La guardia de la base es la de las pruebas de Shopify: nunca imprime la URL (la copia local imprimía las dos, con contraseña).
 
 async function clearVenue(id: string): Promise<void> {
   if (!id) return
@@ -201,12 +199,127 @@ describe('set_stock_by_code contra la base real', () => {
         take: 5,
       })
       expect(buzon.map(f => [f.delta.toString(), f.status])).toEqual([['-3', 'PENDING']])
-      const [mov] = await prisma.inventoryMovement.findMany({ where: { inventoryId: e.inventoryId, type: 'COUNT' }, take: 2 })
-      expect(mov).toMatchObject({ createdBy: e.staffId })
-      expect(mov.reason).toContain('apartadas')
+      const movimientos = await prisma.inventoryMovement.findMany({ where: { inventoryId: e.inventoryId, type: 'COUNT' }, take: 5 })
+      expect(movimientos).toHaveLength(1)
+      expect(movimientos[0]).toMatchObject({ createdBy: e.staffId })
+      expect(movimientos[0].reason).toContain('apartadas')
     } finally {
       await flushAudit()
       if (e) await limpiarEscenarioShopify(e)
+    }
+  })
+
+  test('🔴 reenviar la MISMA confirmación ya aplicada, con las ventas de regreso en el número de la vista previa, no vuelve a contar', async () => {
+    const a = await producto({ sku: 'REENVIO-M', stock: 5 })
+    const c = await conexion()
+    try {
+      const vista = await c.call('set_stock_by_code', { venueId, items: [{ code: 'REENVIO-M', quantity: 9 }] })
+      expect(vista.requiresConfirmation).toBe(true)
+      const confirmacion = { ...vista.confirmationArguments, confirm: true, confirmationToken: vista.confirmationToken }
+      expect(await c.call('set_stock_by_code', confirmacion)).toMatchObject({ ok: true, applied: 1 })
+      expect(await stockDe(a.id)).toBe('9')
+      // Cuatro ventas lo regresan a las 5 de la vista previa; la misma confirmación (el token vive 10 min) llega otra vez.
+      await prisma.inventory.update({ where: { productId: a.id }, data: { currentStock: D(5) } })
+      const otra = await c.call('set_stock_by_code', confirmacion)
+      expect(otra).toMatchObject({ ok: false, stale: true, needsInput: true })
+      expect(otra.message).toContain('revisa primero los conteos recientes (stock_counts)')
+      expect(await stockDe(a.id)).toBe('5')
+      expect(await prisma.stockCount.count({ where: { venueId } })).toBe(1)
+    } finally {
+      await c.close()
+    }
+  })
+
+  test('🔴 un producto que ya está en un conteo abierto no se carga: sale con ese conteo, se aplica sólo lo demás y el abierto queda igual', async () => {
+    const p = await producto({ sku: 'ABIERTO-P', stock: 3 })
+    const q = await producto({ sku: 'ABIERTO-Q', stock: 1 })
+    const abierto = await createStockCount(venueId, staffId, 'CYCLE', [p.id]) // el del POS, sin terminar
+    const c = await conexion()
+    try {
+      const { vista, resultado } = await confirmarPorElCatalogo(c, 'set_stock_by_code', {
+        venueId,
+        items: [
+          { code: 'ABIERTO-P', quantity: 8 },
+          { code: 'ABIERTO-Q', quantity: 4 },
+        ],
+      })
+      expect(vista.inOpenCount).toEqual([{ code: 'ABIERTO-P', sku: 'ABIERTO-P', name: 'Prenda ABIERTO-P', countId: abierto.id }])
+      expect(vista.changes).toEqual([expect.objectContaining({ sku: 'ABIERTO-Q', from: 1, to: 4 })])
+      expect(vista.message).toContain('en un conteo abierto 1')
+      expect(resultado).toMatchObject({ ok: true, applied: 1, inOpenCount: [expect.objectContaining({ countId: abierto.id })] })
+      expect(resultado.countId).not.toBe(abierto.id)
+    } finally {
+      await c.close()
+    }
+    expect(await stockDe(q.id)).toBe('4')
+    expect(await stockDe(p.id)).toBe('3')
+    const despues = await prisma.stockCount.findUniqueOrThrow({
+      where: { id: abierto.id },
+      select: { status: true, revision: true, items: { select: { productId: true, countedAt: true, appliedAt: true } } },
+    })
+    expect(despues).toEqual({
+      status: 'IN_PROGRESS',
+      revision: abierto.revision,
+      items: [{ productId: p.id, countedAt: null, appliedAt: null }],
+    })
+  })
+})
+
+describe('otro negocio con el mismo SKU y el mismo código de barras', () => {
+  test('🔴 buscar, poner precios y cargar existencias en este negocio nunca encuentran ni cambian el producto del otro', async () => {
+    const a = await producto({ sku: 'CRUCE-M', gtin: '8445000000123', price: 1000, stock: 2 })
+    let otroId = ''
+    let c: Awaited<ReturnType<typeof conexion>> | null = null
+    try {
+      // Mismo dueño en los dos negocios: su alcance incluye al otro, así que lo único que lo separa es el negocio de la llamada.
+      const otro = await prisma.venue.create({
+        data: { organizationId, name: `${fixture}-otro`, slug: `${fixture}-otro`, timezone: 'America/Mexico_City', currency: 'MXN' },
+      })
+      otroId = otro.id
+      await prisma.staffVenue.create({ data: { staffId, venueId: otroId, role: 'ADMIN', active: true } })
+      const categoriaOtro = await prisma.menuCategory.create({ data: { venueId: otroId, name: 'Vestidos', slug: `${fixture}-otro` } })
+      const b = await prisma.product.create({
+        data: {
+          venueId: otroId,
+          categoryId: categoriaOtro.id,
+          name: 'Prenda del otro negocio',
+          sku: 'CRUCE-M',
+          gtin: '8445000000123',
+          price: D(777),
+          unit: 'UNIT',
+          trackInventory: true,
+          inventoryMethod: 'QUANTITY',
+          inventory: { create: { venueId: otroId, currentStock: D(4) } },
+        },
+      })
+      c = await conexion()
+
+      const encontrados = await c.call('find_products_by_code', { venueId, codes: ['CRUCE-M', '8445000000123'] })
+      expect(encontrados.found.map((f: { productId: string }) => f.productId)).toEqual([a.id, a.id])
+      expect(encontrados).toMatchObject({ notFound: [], ambiguous: [], archived: [] })
+
+      const precios = await confirmarPorElCatalogo(c, 'set_prices_by_code', { venueId, items: [{ code: 'CRUCE-M', price: 1290 }] })
+      expect(precios.resultado).toMatchObject({ ok: true, applied: 1, appliedChanges: [expect.objectContaining({ productId: a.id })] })
+
+      const existencias = await confirmarPorElCatalogo(c, 'set_stock_by_code', {
+        venueId,
+        items: [{ code: '8445000000123', quantity: 9 }],
+      })
+      expect(existencias.resultado).toMatchObject({ ok: true, applied: 1, changes: [expect.objectContaining({ productId: a.id })] })
+
+      expect((await prisma.product.findUniqueOrThrow({ where: { id: a.id } })).price.toString()).toBe('1290')
+      expect(await stockDe(a.id)).toBe('9')
+      expect((await prisma.product.findUniqueOrThrow({ where: { id: b.id } })).price.toString()).toBe('777')
+      expect(await stockDe(b.id)).toBe('4')
+      expect(await prisma.stockCount.count({ where: { venueId: otroId } })).toBe(0)
+    } finally {
+      if (c) await c.close()
+      await clearVenue(otroId)
+      if (otroId) {
+        await prisma.menuCategory.deleteMany({ where: { venueId: otroId } })
+        await prisma.staffVenue.deleteMany({ where: { venueId: otroId } })
+        await prisma.venue.deleteMany({ where: { id: otroId, organizationId } })
+      }
     }
   })
 })
