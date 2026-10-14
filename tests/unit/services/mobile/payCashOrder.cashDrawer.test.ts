@@ -89,6 +89,8 @@ function installFakeStore() {
   prismaMock.shift.findFirst.mockResolvedValue(null)
   prismaMock.staff.findUnique.mockResolvedValue({ id: 'staff-1', firstName: 'Ana', lastName: 'Cajera' })
   prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'sv-1', staffId: 'staff-1', venueId: 'venue-1', active: true })
+  // La caja OPEN al cobrar se lee dentro de la transacción (plan 2026-10-13-sync-retoma-por-llave).
+  prismaMock.cashDrawerSession.findFirst.mockResolvedValue({ id: 'caja-abierta' })
 
   return { row, payments }
 }
@@ -113,7 +115,39 @@ describe('payCashOrder → cajón', () => {
       amount: 100,
       tipAmount: 15,
       orderId: 'order-1',
+      // A la caja abierta AL COBRAR y sólo si sigue abierta: un proceso que despierta tarde no la cambia por otra.
+      targetSessionId: 'caja-abierta',
+      exigirAbierta: true,
     })
+  })
+
+  it('🔴 sin caja abierta al cobrar no hay movimiento (no entra a la que se abra después)', async () => {
+    installFakeStore()
+    prismaMock.cashDrawerSession.findFirst.mockResolvedValue(null)
+
+    const res = await payCashOrder('venue-1', 'order-1', { amount: 10000, tip: 0, staffId: 'staff-1' })
+
+    expect(res.paymentId).toBe('payment-1')
+    expect(postCashSaleToDrawer).not.toHaveBeenCalled()
+  })
+
+  it('🔴 la caja que se ABRIÓ después del cobro no se lo queda (cierre A + apertura B a media transacción)', async () => {
+    installFakeStore()
+    const cobradoEn = new Date('2026-10-13T20:00:00.000Z')
+    prismaMock.payment.create.mockImplementation(async ({ data }: any) => ({ id: 'payment-1', ...data, createdAt: cobradoEn, receipts: [] }))
+    const sesiones = [
+      { id: 'caja-A', status: 'CLOSED', openedAt: new Date('2026-10-13T08:00:00.000Z') },
+      { id: 'caja-B', status: 'OPEN', openedAt: new Date('2026-10-13T20:00:00.500Z') },
+    ]
+    prismaMock.cashDrawerSession.findFirst.mockImplementation(async ({ where }: any) => {
+      const s = sesiones.find(x => x.status === where.status && (!where.openedAt?.lte || x.openedAt <= where.openedAt.lte))
+      return s ? { id: s.id } : null
+    })
+
+    const res = await payCashOrder('venue-1', 'order-1', { amount: 10000, tip: 0, staffId: 'staff-1' })
+
+    expect(res.paymentId).toBe('payment-1')
+    expect(postCashSaleToDrawer).not.toHaveBeenCalled()
   })
 
   it('🔴 un cobro declarado a mano (transferencia) NO toca el cajón', async () => {

@@ -147,6 +147,12 @@ export interface CashSaleDrawerPosting extends TenderSemanticsPayment {
    * resuelve la sesión por ventana [openedAt, closedAt] y la pasa aquí.
    */
   targetSessionId?: string | null
+  /**
+   * Cobro inline con su caja fijada al cobrar (plan 2026-10-13-sync-retoma-por-llave): va a ESA sesión y sólo si sigue
+   * OPEN. Si ya se cerró, no toca un corte firmado (P1 del 27-ago) y lo repone el conciliador en su ventana. Sin esto,
+   * un proceso que despierta tarde metía el efectivo en la caja abierta de AHORA.
+   */
+  exigirAbierta?: boolean
 }
 
 export type CashSaleDrawerOutcome =
@@ -218,7 +224,7 @@ export async function postCashSaleToDrawer(posting: CashSaleDrawerPosting): Prom
     // `createMany` + `skipDuplicates` en vez de `create`: con `create`, el replay de un
     // intent del outbox chocaría con el índice único y lanzaría P2002 DESPUÉS de que el
     // cobro ya está commiteado — un error en la respuesta de una venta que sí ocurrió.
-    const result = await createEventUnderSessionLock(session.id, !posting.targetSessionId, {
+    const result = await createEventUnderSessionLock(session.id, posting.exigirAbierta ?? !posting.targetSessionId, {
       sessionId: session.id,
       venueId: posting.venueId,
       type: 'CASH_SALE',

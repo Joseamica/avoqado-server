@@ -66,7 +66,9 @@ export async function lookupSyncRecovery(venueId: string, input: unknown) {
       localRef: row.localRef,
       status: row.status,
       errorCode: row.errorCode,
-      result: row.resultJson,
+      // Una reserva PROCESSING guarda su marca/huella interna (plan 2026-10-13-sync-retoma-por-llave); hacia afuera
+      // sigue siendo «sin resultado», como antes.
+      result: row.status === 'PROCESSING' ? null : row.resultJson,
     })),
     orders: orders.map(row => ({ externalId: row.externalId, orderId: row.id })),
   }

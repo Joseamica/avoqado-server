@@ -218,6 +218,11 @@ export async function assignTable(
   staffId: string,
   covers: number,
   terminalId?: string | null, // Terminal that created this order (for sales attribution)
+  /**
+   * Huella del reducer offline (plan 2026-10-13-sync-retoma-por-llave): corre DENTRO de esta transacción en sus tres
+   * salidas, así que la admisión y la prueba de que ocurrió commitean juntas — o ninguna.
+   */
+  dentroDeLaTx?: (tx: Prisma.TransactionClient, admitida: { orderId: string; isNewOrder: boolean }) => Promise<void>,
 ): Promise<{ order: Order; isNewOrder: boolean }> {
   logger.info(`🪑 [TABLE SERVICE] Assigning table ${tableId} with ${covers} covers (staff: ${staffId}, terminal: ${terminalId || 'none'})`)
 
@@ -275,6 +280,7 @@ export async function assignTable(
       table.currentOrder.paymentStatus !== 'PAID'
     ) {
       logger.info(`✅ [TABLE SERVICE] Table ${table.number} already has order ${table.currentOrder.orderNumber}`)
+      await dentroDeLaTx?.(tx, { orderId: table.currentOrder.id, isNewOrder: false })
 
       return {
         order: table.currentOrder,
@@ -303,6 +309,7 @@ export async function assignTable(
         : null
       if (sibling) {
         await tx.table.update({ where: { id: table.id }, data: { currentOrderId: sibling.id } })
+        await dentroDeLaTx?.(tx, { orderId: sibling.id, isNewOrder: false })
         return { order: sibling, isNewOrder: false, table, staffVenue }
       }
     }
@@ -373,6 +380,7 @@ export async function assignTable(
     })
 
     logger.info(`✅ [TABLE SERVICE] Created order ${orderNumber} for table ${table.number}`)
+    await dentroDeLaTx?.(tx, { orderId: newOrder.id, isNewOrder: true })
 
     return { order: newOrder, isNewOrder: true, table, staffVenue }
   }, ORDER_LOCK_WAIT_BUDGET)
