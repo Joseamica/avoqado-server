@@ -18,6 +18,10 @@ import { createGuard } from '../guard'
 import { text } from '../respond'
 import { planGateMessage } from '../planGate'
 import { normalizeSku } from '@/services/commerce-channels/shopify/shopify.catalog.service'
+import logger from '@/config/logger'
+import { operationHash } from '@/utils/operationHash'
+import { auditMcpWrite } from '../audit'
+import { updateProduct } from '@/services/dashboard/product.dashboard.service'
 
 // ── Cómo se reconoce un código (lo comparten las cuatro herramientas) ─────────────────────────────────────────────
 
@@ -104,6 +108,42 @@ const sinResolver = (r: Resolucion) => ({
   duplicateCodes: r.duplicateCodes,
 })
 
+/** Para escribir: un producto pedido más de una vez (su código repetido, o dos códigos suyos: su barras y su SKU) no se toca,
+ *  porque no sabemos cuál instrucción vale. Se agrupa por producto ANTES de descartar repetidos: así un código repetido no se
+ *  cuela por el otro código del mismo producto. */
+function unoPorProducto(r: Resolucion) {
+  const repetidos = new Set(r.duplicateCodes)
+  const porProducto = new Map<string, Encontrado[]>()
+  for (const f of r.found) porProducto.set(f.product.id, [...(porProducto.get(f.product.id) ?? []), f])
+  const unicos: Encontrado[] = []
+  const sameProductTwice: Array<{ codes: string[]; sku: string; name: string }> = []
+  for (const grupo of porProducto.values()) {
+    if (grupo.length > 1) sameProductTwice.push({ codes: grupo.map(g => g.code), sku: grupo[0].product.sku, name: grupo[0].product.name })
+    else if (!repetidos.has(grupo[0].code)) unicos.push(grupo[0])
+  }
+  return { unicos, sameProductTwice }
+}
+
+/** Orden estable para la huella: por id de producto. */
+const porId = <T extends { product: { id: string } }>(a: T, b: T) =>
+  a.product.id < b.product.id ? -1 : a.product.id > b.product.id ? 1 : 0
+
+const VISTA_VIEJA = {
+  ok: false,
+  stale: true,
+  needsInput: true,
+  error:
+    'Algo cambió desde la vista previa (un precio, una existencia, un código o una categoría). No se aplicó nada: pide una vista previa nueva y confírmala.',
+}
+
+/** El motivo de UN renglón fallido viaja dentro de la respuesta, donde `instrument.ts` no lo revisa: sólo un error escrito para el
+ *  operador (AppError, `isOperational`) pasa tal cual; lo demás sale genérico y el detalle se queda en el log. */
+function motivoDeFalla(err: unknown, contexto: Record<string, unknown>): string {
+  if ((err as { isOperational?: unknown } | null)?.isOperational === true) return (err as Error).message
+  logger.warn('[MCP] catálogo en bloque: un renglón falló por un error interno', { ...contexto, error: (err as Error)?.message })
+  return 'No se pudo aplicar por un error interno. Vuelve a intentarlo; si se repite, avísale a Avoqado.'
+}
+
 // Funciones, no constantes: una misma instancia de Zod en dos campos sale en el JSON Schema como `$ref` (ver inventory.ts).
 const venueInput = () => z.string().describe('Venue whose catalog to use (must be in your scope)')
 const codeInput = () =>
@@ -113,9 +153,21 @@ const codeInput = () =>
     .min(1, 'El código no puede ir vacío')
     .max(64, 'Un código tiene a lo más 64 caracteres')
     .describe('Barcode (EAN/UPC) or SKU exactly as it appears in the document')
+const fingerprintInput = () => z.string().optional().describe('Exact fingerprint returned by the preview')
+const confirmInput = () => z.boolean().optional().describe('Must be true to apply; without it you get a preview')
+const dosDecimales = (v: number) => new Prisma.Decimal(v).decimalPlaces() <= 2
+const precioNuevoInput = () =>
+  z
+    .number()
+    .finite('El precio debe ser un número')
+    .positive('El precio debe ser mayor que 0')
+    .max(99999999.99, 'El precio máximo es 99,999,999.99')
+    .refine(dosDecimales, 'El precio lleva a lo más 2 decimales')
+    .describe('New price in pesos WITH tax included (what the customer pays), e.g. 1290 or 1290.50')
 
 export function registerCatalogInBulkTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
+  const actor = { type: 'HUMAN', staffId: scope.staffId, impersonating: false } as const
 
   server.tool(
     'find_products_by_code',
@@ -164,6 +216,93 @@ export function registerCatalogInBulkTools(server: McpServer, scope: McpScope) {
         ...(mostrarExistencias
           ? {}
           : { stockHidden: sinPlan ?? 'No se muestran existencias: tu usuario no tiene el permiso inventory:read.' }),
+      })
+    },
+  )
+
+  server.tool(
+    'set_prices_by_code',
+    'Change the price of MANY products of a venue you can access in one go (1-300 rows of { code, price }). Each code is found like find_products_by_code (barcode or SKU). Price in pesos WITH tax included — what the customer pays — with at most 2 decimals. By DEFAULT it only PREVIEWS: current → new price per product, how many already had that price, and the codes not found, ambiguous, archived, repeated, or two codes of the same product (those are never changed). Show it to the operator; then call again with confirm:true and the expectedSourceFingerprint the preview returns. If any of those prices changed in the meantime, or a code now belongs to another product, it applies NOTHING and asks for a new preview. It applies product by product and reports what was applied and what failed; repeating the same request is safe (what is already applied comes back as unchanged). This WRITES — requires products:update.',
+    {
+      venueId: venueInput(),
+      items: z
+        .array(z.object({ code: codeInput(), price: precioNuevoInput() }))
+        .min(1, 'Manda al menos un precio')
+        .max(300, 'A lo más 300 precios por llamada')
+        .describe('Rows of { code, price }'),
+      expectedSourceFingerprint: fingerprintInput(),
+      confirm: confirmInput(),
+    },
+    async ({ venueId, items, expectedSourceFingerprint, confirm }) => {
+      const where = guard.venueFilter(venueId)
+      guard.requirePermission('products:update', venueId)
+      const codes = items.map(i => limpiarCodigo(i.code))
+      const precioDe = new Map(items.map((i, n) => [codes[n], new Prisma.Decimal(i.price)]))
+      const r = resolverCodigos(codes, await productosPorCodigo(where, codes))
+      const { unicos, sameProductTwice } = unoPorProducto(r)
+      const cambios = unicos
+        .map(f => ({ ...f, nuevo: precioDe.get(f.code) as Prisma.Decimal }))
+        .filter(c => !c.product.price.equals(c.nuevo))
+        .sort(porId)
+      // La huella: qué código cayó en qué producto y con qué precio se VIO. Si algo de eso cambia entre la vista previa y la
+      // confirmación (un precio, o un código que pasó a otro producto), nada se aplica.
+      const fingerprint = operationHash(cambios.map(c => ({ code: c.code, id: c.product.id, price: c.product.price.toString() })))
+      const changes = cambios.map(c => ({
+        code: c.code,
+        sku: c.product.sku,
+        name: c.product.name,
+        from: Number(c.product.price),
+        to: c.nuevo.toNumber(),
+      }))
+      const resueltos = { unchanged: unicos.length - cambios.length, ...sinResolver(r), sameProductTwice }
+      if (cambios.length === 0) return text({ ok: true, applied: 0, changes, ...resueltos, message: 'No hay precios que cambiar.' })
+      if (!confirm)
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          expectedSourceFingerprint: fingerprint,
+          changes,
+          ...resueltos,
+          message: `Esto cambiará el precio de ${cambios.length} producto(s): lo que paga el cliente, con IVA. Muéstrale la lista al operador; con su autorización vuelve a llamar con confirm:true.`,
+        })
+      if (expectedSourceFingerprint !== fingerprint) return text(VISTA_VIEJA)
+      const applied: Array<{ productId: string; sku: string; from: number; to: number }> = []
+      const failed: Array<{ code: string; sku: string; name: string; error: string }> = []
+      for (const c of cambios) {
+        try {
+          // El candado optimista de `set_menu_item_price`: si el producto cambió desde esta lectura, no se pisa.
+          await updateProduct(venueId, c.product.id, { price: c.nuevo.toNumber() }, actor, {
+            name: c.product.name,
+            price: c.product.price,
+            active: c.product.active,
+          })
+          applied.push({ productId: c.product.id, sku: c.product.sku, from: Number(c.product.price), to: c.nuevo.toNumber() })
+        } catch (err) {
+          failed.push({
+            code: c.code,
+            sku: c.product.sku,
+            name: c.product.name,
+            error: motivoDeFalla(err, { tool: 'set_prices_by_code', venueId, productId: c.product.id }),
+          })
+        }
+      }
+      await auditMcpWrite(scope, {
+        action: 'MENU_PRICES_SET_BULK',
+        entity: 'Venue',
+        entityId: venueId,
+        venueId,
+        data: { applied, failed: failed.map(({ sku, error }) => ({ sku, error })) },
+      })
+      return text({
+        ok: applied.length > 0,
+        applied: applied.length,
+        appliedChanges: applied,
+        failed,
+        ...resueltos,
+        message:
+          failed.length === 0
+            ? `Listo: ${applied.length} precio(s) cambiado(s).`
+            : `Se cambiaron ${applied.length}; ${failed.length} no se pudieron (ver failed).`,
       })
     },
   )

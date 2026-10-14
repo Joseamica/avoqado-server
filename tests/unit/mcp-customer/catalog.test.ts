@@ -362,6 +362,10 @@ describe('catálogo en bloque (sólo MCP libre)', () => {
     expect(TOOL_EFFECTS.find_products_by_code).toBe('read')
   })
 
+  it('poner precios en bloque escribe', () => {
+    expect(TOOL_EFFECTS.set_prices_by_code).toBe('write')
+  })
+
   it('ninguna de las cuatro está en una tanda del directorio certificado', () => {
     for (const tanda of DIRECTORY_TIERS) for (const nombre of NOMBRES) expect(tanda.tools).not.toContain(nombre)
   })
