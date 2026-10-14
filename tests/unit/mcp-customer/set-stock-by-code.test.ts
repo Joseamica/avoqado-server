@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { Prisma } from '@prisma/client'
+import logger from '@/config/logger' // globally mocked in tests/__helpers__/setup.ts
 import { registerCatalogInBulkTools } from '../../../src/mcp/tools/catalogInBulk'
 import type { McpScope } from '../../../src/mcp/scope'
 import { confirmarPorElCatalogo, filaProducto } from '../../__helpers__/catalogo-en-bloque'
@@ -73,6 +74,12 @@ const p2 = filaProducto({ id: 'p2', name: 'Vestido Dueñas M', sku: 'DUENAS-M', 
 async function confirmar(args: Record<string, unknown>) {
   const vista = parse(await call(args))
   return parse(await call({ ...args, confirm: true, expectedSourceFingerprint: vista.expectedSourceFingerprint }))
+}
+/** `message` va antes de las listas: un cliente que recorte una respuesta de 500 renglones no pierde el aviso de seguridad. */
+function mensajeVaAntesDeLasListas(out: Record<string, unknown>) {
+  const claves = Object.keys(out)
+  expect(claves).toEqual(expect.arrayContaining(['message', 'changes']))
+  expect(claves.indexOf('message')).toBeLessThan(claves.indexOf('changes'))
 }
 
 beforeAll(() => {
@@ -162,6 +169,8 @@ describe('set_stock_by_code', () => {
     expect(out.inactive).toEqual([{ code: 'APAGADO-1', sku: 'APAGADO-1', name: 'Prenda p4' }])
     expect(out.shopifyLinked).toBe(1)
     expect(out.message).toContain('apartadas')
+    expect(out.message).toContain('mientras se conecta la tienda') // Shopify también retiene mientras la tienda se conecta
+    mensajeVaAntesDeLasListas(out)
     expect(mockLinkFindMany.mock.calls[0][0]).toMatchObject({
       where: { venueId: { in: ['v1'] }, productId: { in: ['p1', 'p2'] } },
       take: 2,
@@ -272,6 +281,21 @@ describe('set_stock_by_code', () => {
     expect(out.held).toEqual([expect.objectContaining({ code: 'MAILEN-M', reason: expect.stringContaining('por revisar') })])
   })
 
+  it('🔍 si Shopify retiene TODAS las líneas (ENVIO_EN_CAMINO): no dice «Listo», dice que no se aplicó nada y qué hacer, y el mensaje va antes de las listas', async () => {
+    mockProductFindMany.mockResolvedValue([p1])
+    mockLinkFindMany.mockResolvedValue([{ productId: 'p1' }])
+    mockLineFindMany.mockResolvedValueOnce([linea('p1', 'retenida', 'ENVIO_EN_CAMINO')])
+    const out = await confirmar({ venueId: 'v1', items: [{ code: 'MAILEN-M', quantity: 5 }] })
+    expect(out).toMatchObject({ ok: false, applied: 0 })
+    expect(out.message).toMatch(/^No se aplicó ningún producto del conteo\./)
+    expect(out.message).not.toContain('Listo')
+    expect(out.held).toHaveLength(1)
+    expect(out.held[0].reason).toContain('después de aplicar la conexión')
+    // La retención dura hasta que el dueño aplica la conexión (tienda en CONNECTING o REVIEWING): no es cosa de minutos.
+    expect(out.held[0].reason).not.toContain('unos minutos')
+    mensajeVaAntesDeLasListas(out)
+  })
+
   it('una línea que el conteo no aplicó (el producto dejó de llevar existencias) sale en notApplied', async () => {
     mockProductFindMany.mockResolvedValue([p1, p2])
     mockLineFindMany.mockResolvedValueOnce([linea('p1'), linea('p2', 'pendiente')])
@@ -351,6 +375,11 @@ describe('set_stock_by_code', () => {
     expect(out).toMatchObject({ ok: false, countId: 'sc1' })
     expect(out.message).toContain('Revisa el conteo en el POS')
     expect(out.message).not.toMatch(/abierto|sin aplicar nada/) // otro operador pudo haberlo terminado: no se afirma lo que no se comprobó
+    // La causa de que no se pudiera cancelar no se pierde: queda en el log, con el conteo.
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('set_stock_by_code: no se pudo cancelar el conteo'),
+      expect.objectContaining({ countId: 'sc1', error: 'El conteo cambió desde que lo viste.' }),
+    )
   })
 
   it('🔍 si la confirmación truena una vez, la reintenta sobre el MISMO conteo y termina', async () => {
@@ -365,6 +394,12 @@ describe('set_stock_by_code', () => {
       ['sc1', 'v1', 'staff-1', 1],
     ])
     expect(out).toMatchObject({ ok: true, countId: 'sc1', applied: 1 })
+    // El primer intento que falló deja su causa en el log aunque el reintento termine; el reintento que sale bien no se registra.
+    expect(logger.warn).toHaveBeenCalledTimes(1)
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('set_stock_by_code: falló la confirmación del conteo'),
+      expect.objectContaining({ countId: 'sc1', intento: 1, error: 'connection reset' }),
+    )
   })
 
   it('🔍 si la confirmación truena dos veces: NO cancela, dice qué quedó y manda a terminarlo en el POS, no a recargar la lista', async () => {
@@ -384,10 +419,19 @@ describe('set_stock_by_code', () => {
     expect(out).toMatchObject({ ok: false, countId: 'sc1', applied: 1 })
     expect(out.notApplied).toEqual([expect.objectContaining({ code: 'DUENAS-M', reason: 'No se alcanzó a aplicar.' })])
     expect(out.message).toContain('termínalo en el POS')
-    expect(out.message).toContain('No vuelvas a cargar la lista completa')
+    // Cancelar un conteo abierto NO deshace lo ya sellado: se dice que no lo cancele, además de que no recargue la lista.
+    expect(out.message).toContain('No lo canceles (no deshace lo ya aplicado)')
+    expect(out.message).toContain('ni vuelvas a cargar la lista completa')
     expect(out.message).not.toContain('a medias') // otro operador pudo haberlo terminado: se dice lo guardado, no un estado supuesto
+    mensajeVaAntesDeLasListas(out)
     expect(mockLogAction).toHaveBeenCalledTimes(1)
     expect(mockLogAction.mock.calls[0][0]).toMatchObject({ action: 'STOCK_LEVELS_SET_BULK', data: { countId: 'sc1', partial: true } })
+    // Cada intento fallido deja su causa en el log.
+    for (const intento of [1, 2])
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('set_stock_by_code: falló la confirmación del conteo'),
+        expect.objectContaining({ countId: 'sc1', intento, error: 'Otro dispositivo está aplicando este conteo.' }),
+      )
   })
 
   it('🔍 si la confirmación truena dos veces, el «sin aplicar» cuenta las retenidas y el aviso de apartadas no se pierde', async () => {
@@ -406,7 +450,8 @@ describe('set_stock_by_code', () => {
     expect(out.held).toHaveLength(1)
     expect(out.message).toContain('1 producto(s) aplicados y 1 sin aplicar')
     expect(out.message).toContain('apartadas')
-    expect(out.message).toContain('No vuelvas a cargar la lista completa')
+    expect(out.message).toContain('No lo canceles (no deshace lo ya aplicado)')
+    expect(out.message).toContain('ni vuelvas a cargar la lista completa')
   })
 
   it('🔍 si la confirmación truena dos veces y tampoco se puede leer lo guardado: conserva el conteo, no da cifras y no manda a recargar', async () => {
@@ -416,7 +461,8 @@ describe('set_stock_by_code', () => {
     const out = await confirmar({ venueId: 'v1', items: [{ code: 'MAILEN-M', quantity: 5 }] })
     expect(out).toMatchObject({ ok: false, countId: 'sc1', outcomeUnknown: true })
     expect(out).not.toHaveProperty('applied')
-    expect(out.message).toContain('No vuelvas a cargar la lista completa')
+    expect(out.message).toContain('No lo canceles (no deshace lo ya aplicado)')
+    expect(out.message).toContain('ni vuelvas a cargar la lista completa')
     expect(mockLogAction.mock.calls[0][0]).toMatchObject({
       action: 'STOCK_LEVELS_SET_BULK',
       data: { countId: 'sc1', outcomeUnknown: true, partial: true },
