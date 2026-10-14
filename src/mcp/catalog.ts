@@ -119,6 +119,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   feature_catalog: 'read',
   find_customer: 'read',
   find_order: 'read',
+  find_products_by_code: 'read',
   fiscal_readiness: 'read',
   floor_plan: 'read',
   generate_depreciation: 'write',
