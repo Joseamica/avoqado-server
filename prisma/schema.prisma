@@ -17322,6 +17322,8 @@ model Cfdi {
   @@index([venueId, status])
   @@index([fiscalEmisorId, isGlobal, createdAt])
   @@index([replacesCfdiId])
+  // M-5 (IVA C3/F6): las facturas de una orden se buscan por `orderId` en emisión, extracción, notas y devoluciones.
+  @@index([orderId])
 }
 
 /// IVA por producto, plan 3: el sello de un renglón (`OrderItem`) al facturarlo — a
