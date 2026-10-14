@@ -255,11 +255,27 @@ describe('la caché de la ficha (la que sirve al poll)', () => {
     expect(prismaMock.terminal.findFirst).toHaveBeenCalledTimes(2)
   })
 
-  it('invalidar por terminal tira TODAS sus entradas, sin importar el venue', async () => {
-    await getEffectiveDesign(VENUE, TERMINAL, { cache: true })
+  // Codex 14-oct (P3): con UNA sola entrada preparada, un borrado que sólo quitara la primera coincidencia también pasaba.
+  // Aquí hay DOS entradas de la misma terminal (venues distintos) y una de OTRA terminal.
+  it('invalidar por terminal tira TODAS sus entradas, sin importar el venue, y NO toca las de otra terminal', async () => {
+    const OTRA = 'terminal-2'
+    invalidateCustomerDisplayCache(OTRA) // otras pruebas del archivo pudieron dejar entradas suyas
+    await getEffectiveDesign('venue-a', TERMINAL, { cache: true })
+    await getEffectiveDesign('venue-b', TERMINAL, { cache: true })
+    await getEffectiveDesign('venue-a', OTRA, { cache: true })
+    expect(prismaMock.terminal.findFirst).toHaveBeenCalledTimes(3) // las tres salieron de la base y quedaron guardadas
+
+    prismaMock.terminal.findFirst.mockClear()
     invalidateCustomerDisplayCache(TERMINAL)
-    await getEffectiveDesign(VENUE, TERMINAL, { cache: true })
+
+    // Las DOS entradas de la terminal invalidada vuelven a la base…
+    await getEffectiveDesign('venue-a', TERMINAL, { cache: true })
+    await getEffectiveDesign('venue-b', TERMINAL, { cache: true })
     expect(prismaMock.terminal.findFirst).toHaveBeenCalledTimes(2)
+    // …y la de la otra terminal sigue guardada: invalidar una terminal no vacía la caché de las demás.
+    await getEffectiveDesign('venue-a', OTRA, { cache: true })
+    expect(prismaMock.terminal.findFirst).toHaveBeenCalledTimes(2)
+    invalidateCustomerDisplayCache(OTRA)
   })
 
   // 🔴 El caso que la v1 perdía: el cálculo empezó ANTES de la invalidación y termina DESPUÉS.

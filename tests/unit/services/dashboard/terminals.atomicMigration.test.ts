@@ -160,8 +160,17 @@ describe('el gancho de la pantalla del cliente en el traslado', () => {
   const flush = () => new Promise(r => setImmediate(r))
 
   beforeEach(() => {
-    // Un `tx` DISTINTO del cliente global, con su propio `$queryRaw`: así se ve a quién le pasa el escritor el gancho.
-    tx = { ...db, $queryRaw: jest.fn() }
+    // Un `tx` DISTINTO del cliente global, con delegados PROPIOS (no los mismos objetos de `db`): sólo así una escritura
+    // por `tx.terminal.update` se distingue de una por `prisma.terminal.update` (Codex 14-oct, P3: con `{ ...db }`,
+    // `tx.terminal === db.terminal` y las dos llamadas eran la misma para el doble). Cubre lo que el traslado usa DENTRO de
+    // la transacción: la terminal, los merchants, la cola de comandos, la config de pago y el candado explícito.
+    tx = {
+      $queryRaw: jest.fn(),
+      terminal: { update: jest.fn(async ({ data }: any) => ({ id: 't1', venueId: 'new', ...data })) },
+      merchantAccount: { findMany: jest.fn().mockResolvedValue([{ id: 'm-new', active: true }]) },
+      tpvCommandQueue: { findFirst: jest.fn().mockResolvedValue(null) },
+      venuePaymentConfig: { create: jest.fn() },
+    }
     // La promesa del commit queda retenida: la prueba decide cuándo confirma (o falla) la transacción.
     db.$transaction.mockImplementation(
       (fn: any) =>
@@ -185,9 +194,15 @@ describe('el gancho de la pantalla del cliente en el traslado', () => {
     expect(mockGancho).toHaveBeenCalledWith(tx, { terminalId: 't1', toVenueId: 'new', reason: 'terminal_moved', staffId: 'admin' })
     expect(mockGancho.mock.calls[0][0]).toBe(tx)
     expect(mockGancho.mock.calls[0][0]).not.toBe(prisma)
-    const escrituraDelNegocio = db.terminal.update.mock.calls.findIndex((c: any[]) => c[0].data.venueId === 'new')
+    // La escritura del negocio nuevo va por `tx.terminal.update` (dentro de la transacción) y NUNCA por el cliente global.
+    const escrituraDelNegocio = tx.terminal.update.mock.calls.findIndex((c: any[]) => c[0].data.venueId === 'new')
     expect(escrituraDelNegocio).toBeGreaterThanOrEqual(0)
-    expect(mockGancho.mock.invocationCallOrder[0]).toBeLessThan(db.terminal.update.mock.invocationCallOrder[escrituraDelNegocio])
+    expect(db.terminal.update).not.toHaveBeenCalled()
+    expect(mockGancho.mock.invocationCallOrder[0]).toBeLessThan(tx.terminal.update.mock.invocationCallOrder[escrituraDelNegocio])
+    // El resto de lo que el traslado lee/escribe dentro de la transacción también va por `tx`.
+    expect(tx.merchantAccount.findMany).toHaveBeenCalled()
+    expect(tx.tpvCommandQueue.findFirst).toHaveBeenCalled()
+    expect(queue).toHaveBeenCalledWith(expect.objectContaining({ venueId: 'new' }), tx)
     expect(mockInvalidar).toHaveBeenCalledTimes(0) // todavía sin commit
 
     confirmar()
@@ -222,6 +237,10 @@ describe('el gancho de la pantalla del cliente en el traslado', () => {
     await traslado
 
     expect(tx.$queryRaw).toHaveBeenCalled() // tomó el candado explícito del protocolo 2
+    // Aun sin mudarla, la escritura (nombre, estado…) va por `tx.terminal.update`, sin `venueId`, y no por el cliente global.
+    expect(tx.terminal.update).toHaveBeenCalledTimes(1)
+    expect(tx.terminal.update.mock.calls[0][0].data).not.toHaveProperty('venueId')
+    expect(db.terminal.update).not.toHaveBeenCalled()
     expect(mockGancho).not.toHaveBeenCalled()
     expect(mockInvalidar).not.toHaveBeenCalled()
   })
