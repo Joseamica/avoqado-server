@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { existingId } from '../common/existingId.schema'
 
 // ==========================================
 // CLASS SESSION SCHEMAS
@@ -11,7 +12,7 @@ export const sessionParamsSchema = z.object({
 
 export const createClassSessionSchema = z
   .object({
-    productId: z.string().cuid('Product ID inválido'),
+    productId: existingId('El ID del producto no es válido'),
     startsAt: z.string().datetime({ message: 'Fecha de inicio inválida' }),
     endsAt: z.string().datetime({ message: 'Fecha de fin inválida' }),
     capacity: z.number().int().min(1, 'La capacidad mínima es 1'),
@@ -42,7 +43,7 @@ export const updateClassSessionSchema = z
 export const listClassSessionsQuerySchema = z.object({
   dateFrom: z.coerce.date({ required_error: 'La fecha de inicio es requerida' }),
   dateTo: z.coerce.date({ required_error: 'La fecha de fin es requerida' }),
-  productId: z.string().cuid().optional(),
+  productId: existingId('El ID del producto no es válido').optional(),
   status: z.enum(['SCHEDULED', 'CANCELLED', 'COMPLETED']).optional(),
 })
 
@@ -83,7 +84,7 @@ export const addAttendeeSchema = z
 // runs don't leave the calendar half-populated.
 export const createClassSessionBulkSchema = z
   .object({
-    productId: z.string().cuid('Product ID inválido'),
+    productId: existingId('El ID del producto no es válido'),
     /** ISO date (YYYY-MM-DD) in venue timezone — first occurrence */
     startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Fecha inválida (YYYY-MM-DD)'),
     /** Local time (HH:mm) for every occurrence */

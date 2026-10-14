@@ -247,6 +247,81 @@ describe('sync.mobile.service processIntents', () => {
     )
   })
 
+  it('carrera dedup/fence: devuelve el pago guardado que apareció después de la primera lectura', async () => {
+    const result = { orderId: 'order-9', paymentId: 'payment-1', amount: 100, tipAmount: 0 }
+    ;(prisma.posSyncIntent.findUnique as jest.Mock)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ status: 'ACKED', resultJson: result })
+    ;(prisma.posSyncIntent.findFirst as jest.Mock).mockResolvedValue({ seq: 5 })
+
+    const [ack] = await processIntents(
+      baseParams([{ id: 'same-payment', seq: 5, type: 'PAY_CASH', payload: { orderId: 'order-9', amountCents: 100 } }]),
+    )
+
+    expect(ack).toEqual({ id: 'same-payment', status: 'ACKED', errorCode: undefined, result })
+    expect(orderMobileService.payCashOrder).not.toHaveBeenCalled()
+    expect(prisma.posSyncIntent.create).not.toHaveBeenCalled()
+  })
+
+  it('carrera dedup/fence: PROCESSING devuelve RETRY y detiene el siguiente cobro del carril', async () => {
+    ;(prisma.posSyncIntent.findUnique as jest.Mock)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ status: 'PROCESSING', createdAt: new Date() })
+    ;(prisma.posSyncIntent.findFirst as jest.Mock).mockResolvedValue({ seq: 5 })
+
+    const acks = await processIntents(
+      baseParams([
+        { id: 'same-processing', seq: 5, type: 'PAY_CASH', payload: { orderId: 'order-9', amountCents: 100 } },
+        { id: 'following-cash', seq: 6, type: 'PAY_CASH', payload: { orderId: 'order-9', amountCents: 100 } },
+      ]),
+    )
+
+    expect(acks).toHaveLength(1)
+    expect(acks[0]).toMatchObject({ id: 'same-processing', status: 'RETRY', errorCode: 'INTENT_IN_PROGRESS' })
+    expect(orderMobileService.payCashOrder).not.toHaveBeenCalled()
+    expect(prisma.posSyncIntent.create).not.toHaveBeenCalled()
+  })
+
+  it('carrera dedup/fence: conserva el rechazo terminal del mismo UUID sin volver a aplicar', async () => {
+    ;(prisma.posSyncIntent.findUnique as jest.Mock)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ status: 'REJECTED', errorCode: 'PERMISSION_DENIED' })
+    ;(prisma.posSyncIntent.findFirst as jest.Mock).mockResolvedValue({ seq: 5 })
+
+    const [ack] = await processIntents(
+      baseParams([{ id: 'same-rejected', seq: 5, type: 'PAY_CASH', payload: { orderId: 'order-9', amountCents: 100 } }]),
+    )
+
+    expect(ack).toMatchObject({ id: 'same-rejected', status: 'REJECTED', errorCode: 'PERMISSION_DENIED' })
+    expect(orderMobileService.payCashOrder).not.toHaveBeenCalled()
+    expect(prisma.posSyncIntent.create).not.toHaveBeenCalled()
+  })
+
+  it('carrera dedup/fence: repone la cuenta local del ganador para la ronda que sigue', async () => {
+    ;(prisma.posSyncIntent.findUnique as jest.Mock)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ status: 'ACKED', localRef: 'local-1', resultJson: { orderId: 'order-9' } })
+    ;(prisma.posSyncIntent.findFirst as jest.Mock).mockResolvedValueOnce({ seq: 1 }).mockResolvedValue(null)
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 1, status: 'PENDING' })
+    ;(orderTpvService.addItemsToOrder as jest.Mock).mockResolvedValue({ id: 'order-9', total: 1, version: 2 })
+
+    const acks = await processIntents(
+      baseParams([
+        { id: 'same-opening', seq: 1, type: 'OPEN_TABLE', payload: { tableId: 't1', localOrderId: 'local-1' } },
+        {
+          id: 'next-round',
+          seq: 2,
+          type: 'ADD_ITEMS',
+          payload: { localOrderId: 'local-1', items: [{ quantity: 1, customName: 'Prueba', customUnitPriceCents: 100 }] },
+        },
+      ]),
+    )
+
+    expect(acks.map(x => x.status)).toEqual(['ACKED', 'ACKED'])
+    expect(tableService.assignTable).not.toHaveBeenCalled()
+    expect(orderTpvService.addItemsToOrder).toHaveBeenCalledWith(VENUE, 'order-9', expect.any(Array), 1, true)
+  })
+
   it('secuencia ya utilizada por el dispositivo → STALE_DEVICE_SEQUENCE sin ejecutar', async () => {
     ;(prisma.posSyncIntent.findFirst as jest.Mock).mockResolvedValue({ seq: 12 })
 

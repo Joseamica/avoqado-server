@@ -2725,6 +2725,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
         isFullyPaid: boolean
         areaTicketOrder: boolean
         areaTicketSessionId?: string
+        tableId?: string | null
         postingId?: string | null
         /** Lo que de verdad se registró como pago (≤ saldo) y lo que sobró, en centavos. */
         aplicadoCents: number
@@ -2777,6 +2778,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
             originSystem: true,
             version: true,
             areaTicketCode: true,
+            tableId: true,
           },
         })
         if (!fresh) {
@@ -3112,6 +3114,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
           cambioCents,
           areaTicketOrder: areaFinalization.areaTicketOrder,
           areaTicketSessionId: areaFinalization.sessionId,
+          tableId: fresh.tableId,
           postingId,
           // 🔴 Los MISMOS valores que se acaban de persistir arriba (que van en
           // pesos), no un recálculo: la respuesta no puede contradecir a la
@@ -3238,6 +3241,20 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
   }
 
   logger.info(`✅ [ORDER.MOBILE] Cash payment recorded | paymentId=${payment.id} | order=${order.orderNumber}`)
+
+  // Como la terminal: el plano se libera después del commit y nunca desmiente un pago aprobado.
+  if (orderFullyPaid && !paymentResult.areaTicketOrder && paymentResult.tableId) {
+    try {
+      const { releaseTableIfSettled } = await import('../tpv/table.tpv.service')
+      await releaseTableIfSettled(venueId, paymentResult.tableId)
+    } catch (error) {
+      logger.error('[ORDER.MOBILE] Post-payment table release failed (payment unaffected)', {
+        orderId,
+        tableId: paymentResult.tableId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
 
   // 🔴 EL CAJÓN SUMA LA VENTA (simétrico con el PAY_OUT del reembolso).
   //

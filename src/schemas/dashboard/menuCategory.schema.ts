@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { existingId } from '../common/existingId.schema'
 
 const TIME_REGEX = /^([01]\d|2[0-3]):([0-5]\d)$/ // HH:mm format
 const DAYS_OF_WEEK = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'] as const
@@ -30,7 +31,7 @@ export const CreateMenuCategorySchema = z.object({
     imageUrl: z.string().url().optional().nullable(),
     color: z.string().optional().nullable(),
     icon: z.string().optional().nullable(),
-    parentId: z.string().cuid().optional().nullable(), // This can be string (cuid) or null
+    parentId: existingId('El ID de la categoría no es válido').optional().nullable(), // This can be string (cuid) or null
     active: z.boolean().optional(),
     availableFrom: z.union([z.string().regex(TIME_REGEX, 'Invalid time format. Expected HH:mm'), z.null()]).optional(),
     availableUntil: z.union([z.string().regex(TIME_REGEX, 'Invalid time format. Expected HH:mm'), z.null()]).optional(),
@@ -47,7 +48,7 @@ export const CreateMenuCategorySchema = z.object({
     avoqadoProducts: z
       .array(
         z.object({
-          value: z.string().cuid(),
+          value: existingId('El ID del producto no es válido'),
           label: z.string(),
           disabled: z.boolean().optional(),
         }),
@@ -84,7 +85,7 @@ export const UpdateMenuCategorySchema = z.object({
   body: CreateMenuCategorySchema.shape.body.partial(), // All fields optional
   params: z.object({
     venueId: z.string().cuid('Invalid venue ID format'),
-    categoryId: z.string().cuid('Invalid category ID format'),
+    categoryId: existingId('El ID de la categoría no es válido'),
   }),
 })
 export type UpdateMenuCategoryDto = z.infer<typeof UpdateMenuCategorySchema>['body']
@@ -93,7 +94,7 @@ export type UpdateMenuCategoryDto = z.infer<typeof UpdateMenuCategorySchema>['bo
 export const GetMenuCategoryParamsSchema = z.object({
   params: z.object({
     venueId: z.string().cuid('Invalid venue ID format'),
-    categoryId: z.string().cuid('Invalid category ID format'),
+    categoryId: existingId('El ID de la categoría no es válido'),
   }),
 })
 
@@ -108,7 +109,7 @@ export const ReorderMenuCategoriesSchema = z.object({
   body: z
     .array(
       z.object({
-        id: z.string().cuid(),
+        id: existingId('El ID de la categoría no es válido'),
         displayOrder: z.number().int(),
       }),
     )

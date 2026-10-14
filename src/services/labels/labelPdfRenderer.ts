@@ -101,9 +101,31 @@ export async function renderLabelsPdf(items: LabelItem[], config: LabelConfig): 
 
   for (const item of items) {
     for (let i = 0; i < item.labelQuantity; i++) {
+      // Hoja llena → página nueva ANTES de dibujar (antes sólo saltaba dentro del mismo
+      // artículo, y con cantidad 1 cada etiqueta siguiente caía fuera de la hoja).
+      if (labelIndex === labelTemplate.labelsPerPage) {
+        doc.addPage()
+        labelIndex = 0
+      }
+
       const position = calculateLabelPosition(labelIndex, labelTemplate)
 
       let yOffset = position.y + 5
+      const labelBottom = position.y + labelTemplate.height
+
+      // Un renglón por línea y SÓLO si cabe: un texto que pasa del borde hace que PDFKit
+      // abra páginas solas (en Zebra 1.2x0.85 salían 2 páginas por etiqueta).
+      // La letra se encoge (hasta 5 pt) antes de cortar: en una Zebra de 1.2" la talla es lo
+      // que se perdía con el «…».
+      const line = (text: string, size: number, font: 'Helvetica' | 'Helvetica-Bold') => {
+        const width = labelTemplate.width - 10
+        doc.font(font).fontSize(size)
+        while (size > 5 && doc.widthOfString(text) > width) doc.fontSize((size -= 0.5))
+        const advance = size * 1.15
+        if (yOffset + advance > labelBottom) return
+        doc.text(text, position.x + 5, yOffset, { width, height: advance, ellipsis: true })
+        yOffset += advance
+      }
 
       // Generate barcode
       if (config.barcodeFormat !== 'NONE') {
@@ -120,11 +142,17 @@ export async function renderLabelsPdf(items: LabelItem[], config: LabelConfig): 
               includeText: true,
             })
 
-            doc.image(barcodePNG, position.x + 5, yOffset, {
-              fit: [labelTemplate.width - 10, 30],
-            })
+            // Proporcional a la etiqueta: 30 pt fijos se comían la mitad de una Zebra chica.
+            const maxWidth = labelTemplate.width - 10
+            const maxHeight = Math.min(30, labelTemplate.height * 0.4)
+            // Alto real dibujado (el código suele limitarse por el ancho), para no dejar hueco.
+            // Ancho y alto del PNG viven en su cabecera IHDR (bytes 16-23).
+            const pngWidth = barcodePNG.readUInt32BE(16)
+            const pngHeight = barcodePNG.readUInt32BE(20)
+            const drawnHeight = Math.min(maxHeight, (maxWidth * pngHeight) / pngWidth)
+            doc.image(barcodePNG, position.x + 5, yOffset, { fit: [maxWidth, drawnHeight] })
 
-            yOffset += 35
+            yOffset += drawnHeight + 2
           } catch (error) {
             logger.error('Error generating barcode:', error)
           }
@@ -132,65 +160,15 @@ export async function renderLabelsPdf(items: LabelItem[], config: LabelConfig): 
       }
 
       // Add details based on config
-      if (config.details.itemName) {
-        doc
-          .fontSize(8)
-          .font('Helvetica-Bold')
-          .text(item.name, position.x + 5, yOffset, {
-            width: labelTemplate.width - 10,
-            ellipsis: true,
-          })
-        yOffset += 10
-      }
-
-      if (config.details.sku && item.sku) {
-        doc
-          .fontSize(7)
-          .font('Helvetica')
-          .text(`SKU: ${item.sku}`, position.x + 5, yOffset)
-        yOffset += 9
-      }
-
-      if (config.details.gtin && item.gtin) {
-        doc
-          .fontSize(7)
-          .font('Helvetica')
-          .text(`GTIN: ${item.gtin}`, position.x + 5, yOffset)
-        yOffset += 9
-      }
-
-      if (config.details.variantName && item.variantName) {
-        doc
-          .fontSize(7)
-          .font('Helvetica')
-          .text(item.variantName, position.x + 5, yOffset)
-        yOffset += 9
-      }
-
-      if (config.details.price && item.price != null) {
-        doc
-          .fontSize(9)
-          .font('Helvetica-Bold')
-          .text(`$${item.price}`, position.x + 5, yOffset)
-        yOffset += 10
-      }
-
-      if (config.details.unitAbbr && item.unit) {
-        const unitText = getUnitAbbreviation(item.unit as Unit)
-        doc
-          .fontSize(7)
-          .font('Helvetica')
-          .text(unitText, position.x + 5, yOffset)
-      }
+      if (config.details.itemName) line(item.name, 8, 'Helvetica-Bold')
+      if (config.details.sku && item.sku) line(`SKU: ${item.sku}`, 7, 'Helvetica')
+      if (config.details.gtin && item.gtin) line(`GTIN: ${item.gtin}`, 7, 'Helvetica')
+      if (config.details.variantName && item.variantName) line(item.variantName, 7, 'Helvetica')
+      if (config.details.price && item.price != null) line(`$${item.price}`, 9, 'Helvetica-Bold')
+      if (config.details.unitAbbr && item.unit) line(getUnitAbbreviation(item.unit as Unit), 7, 'Helvetica')
 
       labelIndex++
       totalLabelsGenerated++
-
-      // Add new page if needed
-      if (labelIndex % labelTemplate.labelsPerPage === 0 && i < item.labelQuantity - 1) {
-        doc.addPage()
-        labelIndex = 0
-      }
     }
   }
 

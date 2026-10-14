@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { existingId } from '../common/existingId.schema'
 import {
   RawMaterialCategory,
   PurchaseOrderStatus,
@@ -16,10 +17,10 @@ import { WASTE_KEY_PATTERN } from '../../services/shared/wasteKey'
 import { ProductBodyBase } from './menu.schema'
 
 // Some legacy products and raw materials in production use non-cuid-v1 IDs
-// (e.g. "rb44l0fgk30kp0soskrlys5c", "prod_ad_blanq_003"). Strict z.cuid()
+// (e.g. "rb44l0fgk30kp0soskrlys5c", "prod_ad_blanq_003", UUIDs). Strict z.cuid()
 // rejects them with 400 before the controller can 404. Use cuidLikeId() for
 // productId and rawMaterialId only — venueId/supplierId/etc. remain cuid.
-const cuidLikeId = () => z.string().regex(/^[a-z][a-z0-9_-]{0,49}$/, { message: 'Invalid ID format' })
+const cuidLikeId = () => existingId()
 
 /**
  * Campos NUEVOS y OPCIONALES de las dos rutas `adjust-stock` (spec §4.5): sólo los lee la merma
@@ -705,7 +706,7 @@ export const GetProfitabilityReportSchema = z.object({
     venueId: z.string().cuid(),
   }),
   query: z.object({
-    categoryId: z.string().cuid().optional(),
+    categoryId: existingId('El ID de la categoría no es válido').optional(),
   }),
 })
 
@@ -841,7 +842,7 @@ export const ProductWizardStep1Schema = z.object({
     name: z.string().min(1, 'Product name is required'),
     description: z.string().optional(),
     price: z.number().positive('Price must be positive'),
-    categoryId: z.string().cuid('Valid category ID is required'),
+    categoryId: existingId('El ID de la categoría no es válido'),
     imageUrl: z.union([z.string().url(), z.literal('')]).optional(),
     // SKU optional — if omitted/empty, backend auto-generates.
     // GTIN optional — Global Trade Item Number (UPC/EAN barcode).
@@ -924,7 +925,7 @@ export const CreateProductWithInventorySchema = z.object({
       name: z.string().min(1),
       description: z.string().optional(),
       price: z.number().min(0),
-      categoryId: z.string().cuid(),
+      categoryId: existingId('El ID de la categoría no es válido'),
       imageUrl: z.union([z.string().url(), z.literal('')]).optional(),
       // Los mismos códigos que el paso 1. Sin declararlos zod los tira y el SKU se autogenera (La Galeterie, 5-oct).
       sku: z.string().max(64).optional(),
@@ -1143,7 +1144,7 @@ export const GenerateProductLabelsSchema = z.object({
     items: z
       .array(
         z.object({
-          productId: z.string().cuid({ message: 'El ID del producto no es válido' }),
+          productId: cuidLikeId(),
           quantity: z.number().int().min(1, 'La cantidad debe ser al menos 1'),
         }),
       )
