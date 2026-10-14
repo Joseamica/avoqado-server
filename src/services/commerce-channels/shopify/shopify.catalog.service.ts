@@ -246,9 +246,9 @@ export async function confirmarBajas(
   return { ok: true, data: bajas }
 }
 
-/** Los caracteres que `SKU_REGEX` no acepta se vuelven «-»; el original queda en `originalSku` de la pareja. */
+/** Sin acentos (DUEÑAS → DUENAS); lo demás que `SKU_REGEX` no acepta se vuelve «-». El original queda en `originalSku`. */
 export function normalizeSku(raw: string | null | undefined): string | null {
-  const s = (raw ?? '')
+  const s = sinAcentos(raw ?? '')
     .trim()
     .replace(/[^A-Za-z0-9_-]+/g, '-')
     .replace(/^-+|-+$/g, '')
@@ -434,12 +434,21 @@ const inelegible = (p: Candidato): ShopifyIssueReason | null => motivoNoSincroni
  */
 const archivadoPorShopify = (p: Candidato): boolean => !!p.deletedAt && p.deletedBy === ARCHIVADO_POR_SHOPIFY
 
+/**
+ * «Ñ» → «N», «Ó» → «O»: separa cada letra de su acento (NFKD) y quita el acento. Avoqado no admite acentos en el SKU y el
+ * cargador CSV de IQ los quitó (14-oct): sin esto, el DUEÑAS de Shopify llegaba como DUE-AS y no se reconocía.
+ */
+function sinAcentos(s: string): string {
+  return s.normalize('NFKD').replace(/\p{M}/gu, '')
+}
+
 /** La elegibilidad va ANTES de restaurar (N07): un archivado por el conector que ya no es elegible se queda archivado. */
 function motivoParaNoLigar(p: Candidato, v: VarianteShopify, porSku: boolean): ShopifyIssueReason | 'RESTAURAR' | null {
   if (p.shopifyVariantLink) return porSku ? 'SKU_REPETIDO' : 'CODIGO_REPETIDO'
   if (p.deletedAt && !archivadoPorShopify(p)) return 'PRODUCTO_ARCHIVADO'
-  // El SKU de Shopify sólo coincide después de normalizarlo: es OTRO producto de Avoqado que se llama parecido.
-  if (porSku && p.originSystem !== 'SHOPIFY' && p.sku !== (v.sku ?? '').trim()) return 'SKU_CHOCA'
+  // El SKU de Shopify sólo coincide después de normalizarlo: es OTRO producto de Avoqado que se llama parecido. Un acento
+  // no lo vuelve otro (DUEÑAS = DUENAS); cualquier otra diferencia («CAM/AZ» contra «CAM-AZ») sí.
+  if (porSku && p.originSystem !== 'SHOPIFY' && p.sku !== sinAcentos((v.sku ?? '').trim())) return 'SKU_CHOCA'
   const motivo = inelegible(p)
   if (motivo) return motivo
   return p.deletedAt ? 'RESTAURAR' : null
