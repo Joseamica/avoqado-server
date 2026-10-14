@@ -72,8 +72,8 @@ import * as schemas from '../../schemas/dashboard/customerDisplay.schema'
  *       description: >
  *         CUSTOMER_DISPLAY_CONFLICT — alguien más guardó el diseño (el `editToken` ya no es el vigente; en la copia,
  *         `details.source` o `details.conflicts` dicen cuál). CUSTOMER_DISPLAY_BUSY — otro cambio retiene el dispositivo
- *         (otra edición, o un traslado de la terminal, que por su lado contesta TERMINAL_BUSY); se puede reintentar
- *         con el mismo token.
+ *         (otra edición o un cambio de negocio de la terminal en curso); se puede reintentar con el mismo token. El
+ *         cambio de negocio, por su lado, responde con sus propios 409 (`MIGRATION_NOT_CURRENT`), no con éste.
  */
 
 // ─── Router de UNA terminal: /venues/:venueId/terminals/:terminalId/customer-display ───
@@ -83,7 +83,8 @@ const router = Router({ mergeParams: true })
 // 🔴 `+ 1` a propósito: busboy marca como truncado un archivo que LLEGA al límite (`fileSize === fileSizeLimit`), no sólo
 // uno que lo pasa. Con el límite pelón, una imagen de exactamente 5 MB —que el servicio acepta— la cortaba la ruta. Medido
 // con la prueba del límite en `customer-display.api.test.ts`.
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_ASSET_BYTES + 1, files: 1 } })
+// `fields: 0`: la ruta no usa campos de texto (`kind` va en la query); sin este tope, los campos se acumulan en memoria — Codex 14-oct.
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_ASSET_BYTES + 1, files: 1, fields: 0 } })
 const leerArchivo = preserveContext(upload.single('file'))
 /**
  * 🔴 CUALQUIER error al leer el archivo es un 422, no sólo los de multer (hallazgo menor 5). Un multipart ROTO —sin

@@ -344,6 +344,21 @@ describe('🔴 la subida: TODO se decide antes de leer el archivo (spec §5.4, P
     expect(activos.uploadCustomerDisplayAsset).not.toHaveBeenCalled()
   })
 
+  // Codex 14-oct (P2): `limits` topaba el archivo pero dejaba ilimitada la CANTIDAD de campos de texto, que multer acumula
+  // en memoria (`req.body`); la ruta no usa ninguno (`kind` va en la query). Una subida válida que además trae campos de
+  // texto es 422 y el servicio de subida no se llama.
+  it('🔴 una subida válida que además trae campos de texto es 422 LIMIT_FIELD_COUNT: los campos no se acumulan en memoria', async () => {
+    const res = await como('OWNER')
+      .post(`${RUTA}/assets?kind=logo`)
+      .attach('file', PNG, 'x.png')
+      .field('relleno1', 'a'.repeat(512 * 1024))
+      .field('relleno2', 'a'.repeat(512 * 1024))
+    expect(res.status).toBe(422)
+    expect(res.body.code).toBe('CUSTOMER_DISPLAY_UPLOAD_INVALID')
+    expect(res.body.details).toEqual({ multerCode: 'LIMIT_FIELD_COUNT' })
+    expect(activos.uploadCustomerDisplayAsset).not.toHaveBeenCalled()
+  })
+
   // Hallazgo menor 5: un multipart ROTO no es un MulterError sino un error de busboy; antes caía al manejador global como
   // 500. Es una entrada mal formada del cliente, igual que un archivo de más: 422 con el mismo código.
   it.each([
