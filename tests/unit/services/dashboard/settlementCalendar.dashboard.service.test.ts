@@ -1,4 +1,5 @@
 import {
+  encontrarReglaActiva,
   getSettlementsLandingInWeek,
   projectPaymentSettlement,
   venueWeekBounds,
@@ -285,5 +286,16 @@ describe('getSettlementsLandingInWeek — recorre los pagos por páginas de 500 
     const r = await getSettlementsLandingInWeek('v1', weekStart, weekEnd, TZ)
     expect(prismaMock.payment.findMany).toHaveBeenCalledTimes(1)
     expect(r.weekTotal.count).toBe(2)
+  })
+})
+
+describe('encontrarReglaActiva (R2 del reporte de liquidación)', () => {
+  it('elige por comercio × tipo × vigencia a la fecha del COBRO, igual que projectPaymentSettlement', () => {
+    const vieja = { ...cfg, settlementDays: 3, effectiveFrom: new Date('2025-01-01'), effectiveTo: new Date('2025-12-31T23:59:59Z') }
+    const configs = [cfg, vieja]
+    expect(encontrarReglaActiva('m1', 'CREDIT', new Date('2026-07-01T18:00:00Z'), configs)).toBe(cfg)
+    expect(encontrarReglaActiva('m1', 'CREDIT', new Date('2025-06-01T18:00:00Z'), configs)).toBe(vieja)
+    expect(encontrarReglaActiva('m1', 'DEBIT', new Date('2026-07-01T18:00:00Z'), configs)).toBeNull()
+    expect(encontrarReglaActiva('otro', 'CREDIT', new Date('2026-07-01T18:00:00Z'), configs)).toBeNull()
   })
 })

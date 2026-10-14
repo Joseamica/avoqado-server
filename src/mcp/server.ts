@@ -12,6 +12,7 @@ import { instrumentTools, recordCancelledToolCall } from './instrument'
 import { configureToolCatalog } from './catalog'
 import { registerVenueTools } from './tools/venues'
 import { registerSalesTools } from './tools/sales'
+import { registerSettlementReportTools } from './tools/settlementReport'
 import { registerOrderTools } from './tools/orders'
 import { registerTerminalTools } from './tools/terminals'
 import { registerReservationTools } from './tools/reservations'
@@ -101,6 +102,7 @@ export function registerAllTools(server: McpServer, scope: McpScope, flags: Tool
   registerHelpTools(server, scope) // product guide for everyone; internal docs only when scope.isSuperAdmin
   registerVenueTools(server, scope)
   registerSalesTools(server, scope)
+  registerSettlementReportTools(server, scope)
   registerOrderTools(server, scope)
   registerTerminalTools(server, scope)
   registerReservationTools(server, scope)
