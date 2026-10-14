@@ -58,6 +58,8 @@ const vestidos = { id: 'cat-1', name: 'Vestidos' }
 const categorias = (porNombre: Array<{ id: string; name: string }>, disponibles = [{ name: 'Faldas' }, { name: 'Vestidos' }]) =>
   mockCategoryFindMany.mockImplementation(async (arg: { where: { OR?: unknown } }) => (arg.where.OR ? porNombre : disponibles))
 const alta = (o: Record<string, unknown> = {}) => ({ name: 'Vestido Mailen MEX - M', price: 1290, category: 'Vestidos', ...o })
+const YA_EXISTEN =
+  'Todos los productos de esta lista ya existen (mismo SKU o código de barras): no hay nada que crear. Si los creaste en una llamada anterior, ya quedaron.'
 
 beforeAll(() => {
   registerCatalogInBulkTools(
@@ -203,6 +205,8 @@ describe('create_products', () => {
     expect(a).not.toBe(b)
     expect(a).toMatch(SKU_REGEX)
     expect(b).toMatch(SKU_REGEX)
+    // Inicio legible del nombre + 8 caracteres de su huella (con 6, dos nombres distintos chocaban más fácil).
+    expect(a).toMatch(/^[A-Z0-9]{1,8}-[0-9A-F]{8}$/)
     expect(vista.ready[0].skuGenerated).toBe(true)
     // La misma lista da los mismos SKU: así repetirla los encuentra ocupados.
     expect(parse(await call({ venueId: 'v1', items })).ready.map((r: { sku: string }) => r.sku)).toEqual([a, b])
@@ -221,12 +225,50 @@ describe('create_products', () => {
     const vista = parse(await call({ venueId: 'v1', items }))
     const confirmar = { venueId: 'v1', items, confirm: true, expectedSourceFingerprint: vista.expectedSourceFingerprint }
     expect(parse(await call(confirmar))).toMatchObject({ ok: true, created: 1 })
-    // La segunda vez, el SKU que sale del nombre ya lo ocupa el producto que se acaba de crear.
+    // La segunda vez (p. ej. la respuesta de la primera se perdió), el SKU que sale del nombre ya lo ocupa el producto recién creado:
+    // no es un error, ya quedó.
     mockProductFindMany.mockResolvedValueOnce([{ sku: vista.ready[0].sku, gtin: null, name: 'Blusa Lino', deletedAt: null }])
     const otra = parse(await call(confirmar))
-    expect(otra).toMatchObject({ ok: false, created: 0 })
-    expect(otra.invalid[0].problem).toBe('SKU_YA_USADO')
+    expect(otra).toEqual({
+      ok: true,
+      created: 0,
+      invalid: [expect.objectContaining({ row: 1, problem: 'SKU_YA_USADO' })],
+      message: YA_EXISTEN,
+    })
     expect(mockCreateProduct).toHaveBeenCalledTimes(1)
+  })
+
+  it('🔍 si TODOS los renglones ya existen (mismo SKU o mismo código de barras): ok, no hay nada que crear', async () => {
+    mockProductFindMany.mockResolvedValueOnce([
+      { sku: 'A-M', gtin: null, name: 'Vestido A', deletedAt: null },
+      { sku: 'OTRO-1', gtin: '8445000000031', name: 'Vestido B', deletedAt: null },
+    ])
+    const out = parse(
+      await call({
+        venueId: 'v1',
+        items: [alta({ sku: 'A-M' }), alta({ name: 'Vestido B', sku: 'B-M', barcode: '8445000000031' })],
+      }),
+    )
+    expect(out).toEqual({
+      ok: true,
+      created: 0,
+      invalid: [
+        expect.objectContaining({ row: 1, problem: 'SKU_YA_USADO' }),
+        expect.objectContaining({ row: 2, problem: 'CODIGO_YA_USADO' }),
+      ],
+      message: YA_EXISTEN,
+    })
+    expect(mockCreateProduct).not.toHaveBeenCalled()
+  })
+
+  it('si alguno tiene otro problema (una categoría que no existe), sigue siendo un error: corrige la lista', async () => {
+    mockProductFindMany.mockResolvedValueOnce([{ sku: 'A-M', gtin: null, name: 'Vestido A', deletedAt: null }])
+    const out = parse(await call({ venueId: 'v1', items: [alta({ sku: 'A-M' }), alta({ name: 'Blusa', sku: 'B-M', category: 'Blusas' })] }))
+    expect(out).toMatchObject({
+      ok: false,
+      created: 0,
+      error: 'Ningún renglón está listo para crearse: corrige los problemas de la lista.',
+    })
   })
 
   it('un SKU que otro ocupó después de la vista previa (P2002) se reporta y los demás se crean', async () => {
