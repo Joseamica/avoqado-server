@@ -95,6 +95,9 @@ describe('emparejar y crear (12 bis.13, #11, #20, N07, N05)', () => {
     expect(normalizeSku('')).toBeNull()
     expect(normalizeSku('///')).toBeNull()
     expect(normalizeSku(null)).toBeNull()
+    // IQ (14-oct): los acentos se quitan, no se vuelven «-» (antes DUEÑAS daba DUE-AS).
+    expect(normalizeSku('DUEÑAS-BEIGE-M')).toBe('DUENAS-BEIGE-M')
+    expect(normalizeSku('ROMANCE-MARRÓN-34')).toBe('ROMANCE-MARRON-34')
   })
 
   it('el nivel de la página: inactivo o ausente ⇒ SIN_NIVEL; sin rastrear ⇒ NO_RASTREADO; nunca un cero inventado', () => {
@@ -208,6 +211,22 @@ describe('emparejar y crear (12 bis.13, #11, #20, N07, N05)', () => {
       reason: 'SKU_CHOCA',
     })
     expect(await prisma.shopifyVariantLink.count({ where: { productId: ex.productId } })).toBe(0)
+  })
+
+  it('el SKU de Shopify sólo difiere en acentos (DUEÑAS / DUENAS) ⇒ LIGADO al mismo producto y su SKU no cambia (IQ, 14-oct)', async () => {
+    const e = await conectando()
+    const ex = await agregarProductoShopify(e, { sku: 'DUENAS-M', pareja: false })
+    expect(await upsertShopifyVariant(await contexto(e), variante(11, { sku: 'DUEÑAS-M', barcode: null }))).toMatchObject({
+      kind: 'LIGADO',
+      productId: ex.productId,
+    })
+    // La edición siguiente (products/update) tampoco lo reescribe como DUE-AS-M.
+    expect(await upsertShopifyVariant(await contexto(e), variante(11, { sku: 'DUEÑAS-M', barcode: null }))).toMatchObject({
+      kind: 'ACTUALIZADO',
+      productId: ex.productId,
+    })
+    expect((await prisma.product.findUniqueOrThrow({ where: { id: ex.productId } })).sku).toBe('DUENAS-M')
+    expect(await prisma.product.count({ where: { venueId: e.venueId, sku: { startsWith: 'DUE' } } })).toBe(1)
   })
 
   it.each([
