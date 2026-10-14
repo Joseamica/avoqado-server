@@ -532,7 +532,7 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     expect(leer('tests/unit/scripts/shopify-sandbox-arranque.test.ts')).toContain(
       "const itSi = process.env.SHOPIFY_SANDBOX === '1' ? it : it.skip",
     )
-    // workflow_dispatch con production publica sin importar la rama: la regla no puede dejar de avisarlo.
+    // workflow_dispatch con production es el botón de publicar (desde el 14-oct sólo en main): la regla no puede dejar de avisarlo.
     expect(leer('.github/workflows/ci-cd.yml')).toContain("github.event.inputs.environment == 'production'")
   })
 
