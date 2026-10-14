@@ -586,7 +586,7 @@ export async function migrateCancel(terminalId: string, actor: TerminalActor, sc
       // otra migración pudo tomar la terminal (también B→A, que (a) no ve). `cancelCommand` hace `await findUnique` antes de
       // su CAS: un reloj leído antes de entrar podría quedar viejo por un tiempo no acotado.
       const fila = await lockTerminalRow(tx, terminalId)
-      if (!fila) throw new NotFoundError('Terminal not found')
+      if (!fila) throw new NotFoundError('Terminal no encontrada')
       const orden = await tx.tpvCommandQueue.findUnique({ where: { id: command.id }, select: { expiresAt: true } })
       const ahora = new Date()
       if (!orden || (orden.expiresAt !== null && orden.expiresAt <= ahora))
