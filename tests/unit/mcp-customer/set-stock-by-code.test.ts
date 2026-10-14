@@ -68,6 +68,9 @@ const linea = (productId: string, estado: 'aplicada' | 'retenida' | 'pendiente' 
 /** Un movimiento COUNT del conteo (`filaProducto` nombra el inventario `inv-<id>`). */
 const movimiento = (inventoryId: string, antes: number, despues: number) => ({ inventoryId, previousStock: D(antes), newStock: D(despues) })
 
+/** Cuándo creó el conteo el servicio (`createStockCount` lo devuelve como texto ISO): la relectura de movimientos parte de 1 min antes. */
+const CONTEO_CREADO = '2026-10-14T18:00:00.000Z'
+
 const p1 = filaProducto({ id: 'p1', name: 'Vestido Mailen M', sku: 'MAILEN-M', gtin: '8445000000017', stock: 0 })
 const p2 = filaProducto({ id: 'p2', name: 'Vestido Dueñas M', sku: 'DUENAS-M', stock: 2 })
 /** Vista previa y confirmación con la huella que devolvió la vista previa (llamando al handler directo). */
@@ -115,6 +118,7 @@ beforeEach(() => {
   mockCreateCount.mockImplementation(async (_v: string, _s: string, _t: string, ids: string[]) => ({
     id: 'sc1',
     revision: 0,
+    createdAt: CONTEO_CREADO,
     items: ids.map((productId, i) => ({ id: `l${i + 1}`, productId })),
   }))
   mockUpdateCount.mockResolvedValue({ success: true, revision: 1 })
@@ -221,6 +225,8 @@ describe('set_stock_by_code', () => {
         inventory: { venueId: { in: ['v1'] } },
         type: 'COUNT',
         reason: { startsWith: 'Conteo de inventario #sc1' },
+        // Sólo desde que se creó el conteo (con 1 min de holgura): sin este límite se recorre todo el historial de conteos.
+        createdAt: { gte: new Date('2026-10-14T17:59:00.000Z') },
       },
       take: 2,
     })
@@ -341,7 +347,7 @@ describe('set_stock_by_code', () => {
 
   it('un producto que el conteo ya no aceptó (se desactivó en medio) sale en notApplied; el resto se cuenta', async () => {
     mockProductFindMany.mockResolvedValue([p1, p2])
-    mockCreateCount.mockResolvedValueOnce({ id: 'sc1', revision: 0, items: [{ id: 'l1', productId: 'p1' }] })
+    mockCreateCount.mockResolvedValueOnce({ id: 'sc1', revision: 0, createdAt: CONTEO_CREADO, items: [{ id: 'l1', productId: 'p1' }] })
     mockLineFindMany.mockResolvedValueOnce([linea('p1')])
     mockMovementFindMany.mockResolvedValueOnce([movimiento('inv-p1', 0, 5)])
     const out = await confirmar({

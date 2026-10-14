@@ -321,7 +321,13 @@ type Contable = Encontrado & { actual: Prisma.Decimal; contado: Prisma.Decimal; 
  *  después de su movimiento. No se deduce de la respuesta de la confirmación (si otro aparato ya lo terminó, no trae las retenidas)
  *  ni de releer las existencias (una venta posterior parecería un ajuste). Las apartadas en Shopify NO se calculan: el conteo no las
  *  guarda, y deducirlas de lo pedido miente si otra persona corrigió el conteo o si el producto no se movió (Codex H10/H11, B2/B3). */
-async function resultadoDelConteo(where: { venueId: { in: string[] } }, countId: string, enConteo: Contable[], ligados: Set<string>) {
+async function resultadoDelConteo(
+  where: { venueId: { in: string[] } },
+  countId: string,
+  enConteo: Contable[],
+  ligados: Set<string>,
+  desde: Date,
+) {
   const lineas = await prisma.stockCountItem.findMany({
     where: { stockCountId: countId, stockCount: where },
     select: { productId: true, appliedAt: true, shopifyHeldAt: true, shopifyHeldReason: true },
@@ -329,11 +335,13 @@ async function resultadoDelConteo(where: { venueId: { in: string[] } }, countId:
   })
   // `confirmStockCount` firma cada movimiento con «Conteo de inventario #<id>»: así se encuentran los de ESTE conteo.
   const movimientos = await prisma.inventoryMovement.findMany({
+    // Sólo los movimientos desde que se creó el conteo (1 min de holgura): sin este límite se recorren todos los conteos de la plataforma (3.5 M movimientos: 1.4 s en frío → 2.6 ms).
     where: {
       inventoryId: { in: enConteo.map(c => c.inventoryId) },
       inventory: where,
       type: 'COUNT',
       reason: { startsWith: `Conteo de inventario #${countId}` },
+      createdAt: { gte: desde },
     },
     select: { inventoryId: true, previousStock: true, newStock: true },
     take: enConteo.length,
@@ -816,7 +824,7 @@ export function registerCatalogInBulkTools(server: McpServer, scope: McpScope) {
       }
       let hecho: Awaited<ReturnType<typeof resultadoDelConteo>> | null = null
       try {
-        hecho = await resultadoDelConteo(where, conteo.id, enConteo, ligados)
+        hecho = await resultadoDelConteo(where, conteo.id, enConteo, ligados, new Date(Date.parse(conteo.createdAt) - 60_000))
       } catch (err) {
         logger.warn('[MCP] set_stock_by_code: no se pudo leer cómo quedó el conteo', {
           venueId,
