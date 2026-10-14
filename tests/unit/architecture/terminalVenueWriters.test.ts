@@ -349,6 +349,19 @@ describe('el escáner (si estos fallan, el inventario no vale)', () => {
       `async function mover(){ await writeScopedTerminal(() => prisma.$transaction(async tx => { await borrarDisenoAlCambiarDeNegocio(tx, c); await tx.terminal.update({ where: { id }, data: { venueId: b } }) }), 'x') }`,
       true,
     ],
+    // Los dos de arriba tienen el gancho y la escritura en el MISMO callback: pasan aunque cada callback anónimo fuera
+    // su propio dueño (sabotaje de la Task 10). Éstos separan el gancho de la escritura por un callback anónimo, que
+    // tiene que ser transparente.
+    [
+      'callback transaccional anónimo, con la escritura en un map anónimo',
+      `async function mover(){ await prisma.$transaction(async tx => { await borrarDisenoAlCambiarDeNegocio(tx, c); await Promise.all(ids.map(async id => tx.terminal.update({ where: { id }, data: { venueId: b } }))) }) }`,
+      true,
+    ],
+    [
+      'dentro de writeScopedTerminal, con el gancho antes en la misma transacción',
+      `async function mover(tx){ await borrarDisenoAlCambiarDeNegocio(tx, c); await writeScopedTerminal(() => tx.terminal.update({ where: { id }, data: { venueId: b } }), 'x') }`,
+      true,
+    ],
     [
       'método de clase',
       `class S { async mover(tx){ await borrarDisenoAlCambiarDeNegocio(tx, c); await tx.terminal.updateMany({ where: { id }, data: { venueId: b } }) } }`,
