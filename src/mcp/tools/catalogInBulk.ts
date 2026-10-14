@@ -188,7 +188,9 @@ const codeInput = () =>
     .trim()
     .min(1, 'El código no puede ir vacío')
     .max(64, 'Un código tiene a lo más 64 caracteres')
-    .describe('Barcode (EAN/UPC) or SKU exactly as it appears in the document')
+    .describe(
+      'Barcode (EAN/UPC) or SKU exactly as it appears in the document. A barcode goes without spaces (8 445000 000017 → 8445000000017).',
+    )
 const fingerprintInput = () => z.string().optional().describe('Exact fingerprint returned by the preview')
 const confirmInput = () => z.boolean().optional().describe('Must be true to apply; without it you get a preview')
 const dosDecimales = (v: number) => new Prisma.Decimal(v).decimalPlaces() <= 2
