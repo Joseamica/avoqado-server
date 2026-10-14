@@ -277,16 +277,26 @@ export function registerCfdiTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
   server.tool(
     'cfdi_status',
-    "CFDI 4.0 (facturación) status across your venues: invoice count by status (STAMPED = timbrada/issued; plus drafts, validation/stamp failures, and cancellations), the total stamped amount, and your most recent issued invoices (folio, UUID, receptor, amount). STAMP_FAILED includes `timbresEnDuda`: the PAC gave no clear answer and may have stamped them — they are NOT rejections, never re-issue them; reconciliation confirms them. `extraccionesPendientes`: sales taken OUT of the global invoice (an extraction credit note was stamped) that are still missing the customer's own invoice — `total` (exact) and `items` (page of `limit`; pass `siguiente` back as `extraccionesCursor` for more): invoice those sales again. `enProceso`: those whose customer invoice is being confirmed with the SAT — never request them again. Pass venueId to focus one venue.",
+    "CFDI 4.0 (facturación) status across your venues: invoice count by status (STAMPED = timbrada/issued; plus drafts, validation/stamp failures, and cancellations), the total stamped amount, and your most recent issued invoices (folio, UUID, receptor, amount). STAMP_FAILED includes `timbresEnDuda`: the PAC gave no clear answer and may have stamped them — they are NOT rejections, never re-issue them; reconciliation confirms them. `extraccionesPendientes`: sales taken OUT of the global invoice (an extraction credit note was stamped) that are still missing the customer's own invoice — `total` (exact) and `items` (page of `limit`; pass `siguiente` back as `extraccionesCursor` for more): invoice those sales again. `enProceso`: those whose customer invoice is being confirmed with the SAT — never request them again. Pass venueId to focus one venue. `notasDeDevolucionPendientes`: invoices issued for the full amount of a sale that already had refunds, whose AUTOMATIC credit note for some refund is still missing — `total` (exact) and `items` (with their `venueId`; `refundPaymentIds` in fiscal order; pass `siguiente` back as `notasCursor` for more). Check one with `emit_refund_credit_note` (step 1): `automatica.estado` says whether it goes out by itself (`RECUPERANDO`) or needs a person (`REQUIERE_INTERVENCION`).",
     {
       venueId: z.string().optional().describe('Focus one venue (must be in your scope); omit for all your venues'),
-      limit: z.number().int().min(1).max(20).default(5).describe('Max recent stamped invoices (and pending extractions) to return'),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(20)
+        .default(5)
+        .describe('Max recent stamped invoices (and pending extractions, and invoices missing refund credit notes) to return'),
       extraccionesCursor: z
         .string()
         .optional()
         .describe('The `extraccionesPendientes.siguiente` of the previous call, for the next page of pending extractions'),
+      notasCursor: z
+        .string()
+        .optional()
+        .describe('The `notasDeDevolucionPendientes.siguiente` of the previous call, for the next page of missing refund credit notes'),
     },
-    async ({ venueId, limit, extraccionesCursor }) => {
+    async ({ venueId, limit, extraccionesCursor, notasCursor }) => {
       guard.venueFilter(venueId) // scope check (throws if a given venueId is out of scope)
       // Read gate — mirror the dashboard's checkPermission('cfdi:view'). Single-venue focus throws
       // if the caller lacks it; the all-venues path filters to venues where the caller holds it below.
@@ -358,6 +368,15 @@ export function registerCfdiTools(server: McpServer, scope: McpScope) {
       // tienen EN PROCESO (viva sin timbrar): ésas no se vuelven a pedir. Acotado: dos consultas, página de `limit`, total exacto.
       const extracciones = await extraccionesPendientes(cfdiVenueIds, { limit, cursor: extraccionesCursor ?? null })
 
+      // F6 (R7, N7): ventas facturadas por el total cuya nota de crédito automática de alguna devolución todavía no sale. El contrato de
+      // `extraccionesPendientes`: total exacto, página de `limit` (acotado 1..20 por el esquema) por id de factura y `siguiente` para seguir.
+      // Import perezoso: registrar el tool no carga el módulo.
+      const { contarFacturasConNotasPendientes, facturasConNotasPendientes } = await import('@/services/fiscal/facturaConDevolucion')
+      const [totalConNotas, conNotas] = await Promise.all([
+        contarFacturasConNotasPendientes({ venueIds: cfdiVenueIds }),
+        facturasConNotasPendientes({ venueIds: cfdiVenueIds, despuesDe: notasCursor ?? null, limite: limit }),
+      ])
+
       // ¿Facturapi nos avisa solo cuando el SAT resuelve una cancelación? Sin webhook, la factura cancelada se
       // entera por la revisión de cada hora. Pocos emisores por venue: consulta acotada.
       const emisores = await prisma.fiscalEmisor.findMany({
@@ -398,6 +417,12 @@ export function registerCfdiTools(server: McpServer, scope: McpScope) {
                     : `${extracciones.enProceso} facturas del cliente se están confirmando con el SAT; no las vuelvas a pedir.`,
               }
             : {}),
+        },
+        // F6 (aditivo): las notas de crédito automáticas que faltan, por factura.
+        notasDeDevolucionPendientes: {
+          total: totalConNotas,
+          items: conNotas.map(f => ({ cfdiId: f.cfdiId, venueId: f.venueId, orderId: f.orderId, refundPaymentIds: f.pendientes })), // H6
+          siguiente: conNotas.length === limit ? conNotas[conNotas.length - 1].cfdiId : null,
         },
         stamped: { count: stamped._count._all, totalMxn: (stamped._sum.totalCents ?? 0) / 100 },
         recentStamped: recent.map(r => ({
@@ -487,11 +512,14 @@ export function registerCfdiTools(server: McpServer, scope: McpScope) {
       // Lo que se haría con el estado de AHORA (la misma decisión en los dos pasos): consultar el intento enviado, emitir, o emitir «por
       // importe»; o por qué no.
       const plan = planDeLaNota(status, { refundPaymentId, lookupOnly, modalidad })
-      if ('respuesta' in plan) return text(plan.respuesta)
+      // F6 (R7, nuevo y opcional): si la nota automática de este reembolso sale sola o requiere a una persona.
+      const automatica = status.automatica ? { automatica: status.automatica } : {}
+      if ('respuesta' in plan) return text({ ...plan.respuesta, ...automatica })
       if (!confirm) {
         return text({
           ok: false,
           requiresConfirmation: true,
+          ...automatica,
           // El catálogo copia este campo a confirmationArguments: el token queda atado a lo que se vio.
           expectedSourceFingerprint: plan.huella,
           confirmationArgs: argsDeConfirmacion(args, { expectedSourceFingerprint: plan.huella }),

@@ -20,6 +20,11 @@ jest.mock('@/services/fiscal/cfdiEmail.service', () => ({
 }))
 // Viven en el mismo archivo: se mockean para que registrar las tools no cargue su cadena real (Storage, PAC…).
 jest.mock('@/services/fiscal/cfdiCreditNote.service', () => ({ emitRefundCreditNote: jest.fn(), getRefundCreditNoteStatus: jest.fn() }))
+// F6 · T9 (B4, cambia A PROPÓSITO): `cfdi_status` también dice las notas de devolución automáticas que faltan (import perezoso). Aquí, ninguna.
+jest.mock('@/services/fiscal/facturaConDevolucion', () => ({
+  facturasConNotasPendientes: jest.fn(async () => []),
+  contarFacturasConNotasPendientes: jest.fn(async () => 0),
+}))
 jest.mock('@/services/fiscal/confirmarContratoDePrecio.service', () => ({
   vistaPreviaContrato: jest.fn(),
   confirmarContratoIvaIncluido: jest.fn(),

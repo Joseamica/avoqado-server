@@ -263,6 +263,32 @@ describe('C3 · nominativaPorExtraccion — productos reales, cuadrada y concord
       motivo: MOTIVO_SIN_CONCEPTOS_REALES,
     })
   })
+
+  describe('F6 · sin la asignación de una extracción no hay concordancia que exigir', () => {
+    it('🔴 sin `porTratamiento`: cuadra contra lo que se factura de cada tasa y no registra diferencias', () => {
+      const r = nominativaPorExtraccion({ reales: [reales[0]], filasD16: [], claves, extraido: { brutoPorTratamiento: { IVA_0: 10000 } } })
+      expect('motivo' in r).toBe(false)
+      if ('motivo' in r) return
+      expect(r.montos.totalCents).toBe(10000)
+      expect(r.diferencias).toEqual([])
+      expect(r.renglones).toEqual([{ orderItemId: 'cafe', tratamiento: 'IVA_0' }])
+    })
+    it('🔴 sin `porTratamiento` la barrera N3 sigue: productos de $100 contra $90 de su tasa ⇒ se detiene (nunca $10 de descuento inventado)', () => {
+      expect(
+        nominativaPorExtraccion({ reales: [reales[0]], filasD16: [], claves, extraido: { brutoPorTratamiento: { IVA_0: 9000 } } }),
+      ).toEqual({ motivo: MOTIVO_NO_CONCUERDA })
+    })
+    it('control — con `porTratamiento` la concordancia de C3-9 se sigue exigiendo', () => {
+      expect(
+        nominativaPorExtraccion({
+          reales: [reales[0]],
+          filasD16: [],
+          claves,
+          extraido: conDelta(extraidoDe({ IVA_0: 10000 }), 'IVA_0', 'baseCents', 2),
+        }),
+      ).toEqual({ motivo: MOTIVO_NO_CONCUERDA })
+    })
+  })
 })
 
 // ─── Pendientes que la revisión de la Tarea 3 dejó a la Tarea 2 ────────────────────────────────────────────────────────────

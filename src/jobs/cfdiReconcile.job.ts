@@ -1,5 +1,5 @@
 /**
- * Cada cinco minutos: concilia intentos inciertos y repara archivos de timbres confirmados.
+ * Cada cinco minutos: concilia intentos inciertos, repara archivos de timbres confirmados y emite las notas de devolución que faltan (F6).
  * Consultas de entrada con retry de conexión, páginas acotadas y fallos aislados por CFDI.
  * RESET conserva versión/sellos; nunca autoriza un nuevo envío por el mero paso del tiempo.
  */
@@ -26,6 +26,7 @@ import { asegurarWebhooksFaltantes, defaultAsegurarFaltantesDeps } from '../serv
 import { scheduleJob } from '../observability/jobContext'
 import { PREFIJO_EXTRACCION } from '../services/fiscal/exclusionGlobal'
 import { registrarExtraccionEmitida } from '../services/fiscal/cfdiExtraccion.service'
+import { emitirNotasDeDevolucion, facturasConNotasPendientes } from '../services/fiscal/facturaConDevolucion'
 import { utcTs } from '../utils/sqlDates'
 
 // Antigüedad mínima; el CAS igualmente protege las respuestas concurrentes.
@@ -36,16 +37,24 @@ const MAX_PER_TICK = 200
 
 /**
  * C2 · ronda 1 (I1): lo más que dura la reparación de archivos en una pasada; después no toma más filas (el cursor sigue donde iba). C2 · OF-2
- * (T5 N4): es un presupuesto de la pasada, no un tiempo del PAC: alcanza para ~2.7 reparaciones en el peor caso (`LIMITE_REPARACION_MS`,
- * 45 s cada una) y, sumado a los de cancelaciones (60 s), webhooks (30 s) y atorados (60 s), cabe en los 5 min entre ticks.
+ * (T5 N4): es un presupuesto de la pasada, no un tiempo del PAC: alcanza para 2 reparaciones en el peor caso (`LIMITE_REPARACION_MS`,
+ * 45 s cada una); cedió 30 s a las notas de F6 (`PRESUPUESTO_NOTAS_DE_DEVOLUCION_MS`): el total de la pasada no cambia. Sumado a los de
+ * cancelaciones (60 s), webhooks (30 s), atorados (60 s) y notas (30 s), cabe en los 5 min entre ticks.
  */
-export const PRESUPUESTO_REPARACION_MS = 120_000
+export const PRESUPUESTO_REPARACION_MS = 90_000
 /** OF-1 (T5 N6): lo más que dura la conciliación de timbres atorados en una pasada (cada fila consulta al PAC sin tiempo límite propio). */
 export const PRESUPUESTO_TIMBRES_ATORADOS_MS = 60_000
 /** OF-1: lo más que se espera el alta de webhooks faltantes en una pasada (el SDK de Facturapi no tiene tiempo límite). */
 export const PRESUPUESTO_WEBHOOKS_MS = 30_000
 /** C3 (Codex C3-23): cuántas extracciones sin su evento repara una pasada (con cursor por id). */
 export const EVENTOS_DE_EXTRACCION_POR_PASADA = 50
+/** F6: cuántas facturas con notas de devolución pendientes atiende una pasada (con cursor por factura). */
+export const FACTURAS_CON_NOTAS_POR_PASADA = 20
+/**
+ * F6 (R6/N4): lo más que dura esa parte. Sale del presupuesto de siempre (la reparación de archivos cedió 30 s), y cada nota va con su límite
+ * de tiempo (`emitirNotasDeDevolucion`): una que no contesta no retiene la pasada ni deja `isRunning` colgado.
+ */
+export const PRESUPUESTO_NOTAS_DE_DEVOLUCION_MS = 30_000
 
 export class CfdiReconcileJob {
   private job: CronJob | null = null
@@ -61,6 +70,8 @@ export class CfdiReconcileJob {
   private cierresCursor: CursorDeCierres | null = null
   /** C3 (C3-23): dónde se quedó la pasada de eventos de extracción (por id). */
   private extraccionCursor: string | null = null
+  /** F6: dónde se quedó la pasada de notas de devolución (por id de factura). */
+  private notasCursor: string | null = null
 
   constructor() {
     // Every 5 minutes at :02 offset — avoids aligning with top-of-hour / :00 / :05 cron bursts.
@@ -98,6 +109,7 @@ export class CfdiReconcileJob {
     }
     this.isRunning = true
     const startTime = Date.now()
+    const cutoff = new Date(startTime - STUCK_THRESHOLD_MS)
 
     try {
       // Pase 1: cancelaciones que el SAT dejó «en trámite». Independiente del pase de STAMPING: si falla,
@@ -111,8 +123,6 @@ export class CfdiReconcileJob {
           logger.warn('[cfdiReconcile] el alta de webhooks faltantes no terminó en su presupuesto; queda para la siguiente revisión'),
         )
       }
-
-      const cutoff = new Date(startTime - STUCK_THRESHOLD_MS)
 
       // ── Entry read: stuck STAMPING rows older than the threshold ───────────
       // MANDATORY per .claude/rules/cron-jobs.md: wrap with retry to survive the
@@ -208,6 +218,13 @@ export class CfdiReconcileJob {
     } catch (err) {
       logger.error('[cfdiReconcile] tick failed (top-level)', err)
     } finally {
+      // T7-3 (revisión final de F6): la pasada de notas corre aunque otra haya lanzado antes, y su propio fallo se registra aparte sin
+      // tumbar el tick (como la de cancelaciones).
+      try {
+        await this.repararNotasDeDevolucion(cutoff)
+      } catch (err) {
+        logger.error('[cfdiReconcile] la pasada de notas de devolución falló', err)
+      }
       this.isRunning = false
     }
   }
@@ -285,6 +302,48 @@ export class CfdiReconcileJob {
         logger.error(`[cfdiReconcile] no se pudo registrar la extracción cfdi=${id}`, err)
       }
     }
+  }
+
+  /**
+   * F6 (decisión 3, R1, R5, N4, N5): las notas de crédito AUTOMÁTICAS que faltan, POR FACTURA y SÓLO sus pendientes intentables (H2: ni
+   * canceladas ni enviadas en duda; CX-1: ni rechazadas en definitiva hace menos de una hora), en el orden fiscal congelado (una de importe espera a la de artículos: lo decide el servicio). Sólo facturas
+   * timbradas hace más de `STUCK_THRESHOLD_MS` (antes, el pedido del usuario las está emitiendo); sin vencimiento; sin importar quién confirmó
+   * su timbre (el gancho de «Facturar» o la conciliación de un envío en duda). Sin actor (se perdió con el proceso). Cada nota con su límite;
+   * una factura que falla no detiene a las demás; con el presupuesto agotado, el cursor queda en la última intentada.
+   */
+  private async repararNotasDeDevolucion(cutoff: Date): Promise<void> {
+    const facturas = await retry(
+      () =>
+        facturasConNotasPendientes({
+          timbradaAntesDe: cutoff,
+          despuesDe: this.notasCursor,
+          paraEmitir: true,
+          limite: FACTURAS_CON_NOTAS_POR_PASADA,
+        }),
+      { retries: 2, initialDelay: 1500, shouldRetry: shouldRetryDbConnectionError, context: 'cfdiReconcile.findNotasDeDevolucion' },
+    )
+    const sandbox = NODE_ENV !== 'production'
+    const inicio = Date.now()
+    let intentada: (typeof facturas)[number] | undefined
+    for (const f of facturas) {
+      const restante = PRESUPUESTO_NOTAS_DE_DEVOLUCION_MS - (Date.now() - inicio)
+      if (restante <= 0) break
+      intentada = f
+      try {
+        const notas = await emitirNotasDeDevolucion({ id: f.cfdiId, venueId: f.venueId }, f.pendientes, {
+          sandbox,
+          staffId: null,
+          presupuestoMs: restante,
+        })
+        const pendientes = notas.filter(n => n.status !== 'STAMPED')
+        if (pendientes.length) logger.warn('[cfdiReconcile] notas de devolución todavía pendientes', { cfdiId: f.cfdiId, pendientes })
+      } catch (err) {
+        logger.error(`[cfdiReconcile] no se pudieron emitir las notas de devolución de cfdi=${f.cfdiId}`, err)
+      }
+    }
+    // Página llena, o cortada por presupuesto ⇒ la siguiente pasada sigue después de la última intentada; si no, vuelve al principio.
+    this.notasCursor =
+      intentada && (facturas.length === FACTURAS_CON_NOTAS_POR_PASADA || intentada !== facturas.at(-1)) ? intentada.cfdiId : null
   }
 
   /**

@@ -62,6 +62,9 @@ beforeEach(() => {
   jest.clearAllMocks()
   findMany.mockResolvedValue([SAMPLE_CFDI])
   count.mockResolvedValue(1)
+  // F6 · T9 (B3, cambia A PROPÓSITO): una factura de ingreso timbrada de la página consulta sus notas de devolución pendientes (una consulta
+  // por página). Aquí, ninguna.
+  ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([])
 })
 
 // ─── Tenant isolation ─────────────────────────────────────────────────────────
@@ -661,10 +664,16 @@ describe('C3 · T8 — `esExtraccion` y `facturaDelCliente` en la lista (C3-6/C3
     }
   })
 
-  it('control — sin extracciones en la página, ninguna consulta de más', async () => {
-    findMany.mockResolvedValueOnce([{ ...SAMPLE_CFDI, idempotencyKey: 'cfdi-o1' }])
+  // F6 · T9 (B3, cambia A PROPÓSITO): antes «ninguna consulta de más»; ahora la página consulta las notas de devolución pendientes de sus
+  // facturas de ingreso, UNA vez por página.
+  it('control — sin extracciones: ninguna consulta de extracciones; sólo la de notas (1 por página, nunca una por fila)', async () => {
+    findMany.mockResolvedValueOnce([
+      { ...SAMPLE_CFDI, idempotencyKey: 'cfdi-o1' },
+      { ...SAMPLE_CFDI, id: 'c2', orderId: 'o2', idempotencyKey: 'cfdi-o2' },
+    ])
     await pagina()
-    expect(queryRaw).not.toHaveBeenCalled()
+    expect(queryRaw).toHaveBeenCalledTimes(1)
+    expect(queryRaw.mock.calls[0][0].sql).toMatch(/'CON_NOTA'/)
   })
 
   it('control — una extracción sin timbrar, ya cancelada o con la cancelación EN TRÁMITE se marca como extracción, pero no se clasifica', async () => {
