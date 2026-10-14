@@ -11,7 +11,7 @@
  */
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
-import { Prisma } from '@prisma/client'
+import { Prisma, ProductType } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
@@ -21,7 +21,8 @@ import { normalizeSku } from '@/services/commerce-channels/shopify/shopify.catal
 import logger from '@/config/logger'
 import { operationHash } from '@/utils/operationHash'
 import { auditMcpWrite } from '../audit'
-import { updateProduct } from '@/services/dashboard/product.dashboard.service'
+import { createProduct, updateProduct } from '@/services/dashboard/product.dashboard.service'
+import { GTIN_MAX_LENGTH, SKU_REGEX } from '@/schemas/dashboard/menu.schema'
 
 // ── Cómo se reconoce un código (lo comparten las cuatro herramientas) ─────────────────────────────────────────────
 
@@ -165,6 +166,136 @@ const precioNuevoInput = () =>
     .refine(dosDecimales, 'El precio lleva a lo más 2 decimales')
     .describe('New price in pesos WITH tax included (what the customer pays), e.g. 1290 or 1290.50')
 
+const precioAltaInput = () =>
+  z
+    .number()
+    .finite('El precio debe ser un número')
+    .nonnegative('El precio no puede ser negativo')
+    .max(99999999.99, 'El precio máximo es 99,999,999.99')
+    .refine(dosDecimales, 'El precio lleva a lo más 2 decimales')
+    .describe('Price in pesos WITH tax included (what the customer pays)')
+
+/** SKU de un renglón que no trae uno: sale del NOMBRE (inicio legible + huella del nombre normalizado). Así la vista previa ya lo
+ *  muestra, y repetir la carga —o reenviarla corregida— lo encuentra ocupado en vez de crear otro producto igual (Codex H5). */
+function skuGenerado(name: string): string {
+  const inicio =
+    (normalizeSku(name) ?? '')
+      .toUpperCase()
+      .replace(/[^A-Z0-9]/g, '')
+      .slice(0, 8) || 'PROD'
+  return `${inicio}-${operationHash(name.trim().toLowerCase().replace(/\s+/g, ' ')).slice(0, 6).toUpperCase()}`
+}
+
+type AltaPedida = { name: string; price: number; category: string; sku?: string; barcode?: string; trackStock?: boolean }
+type AltaLista = {
+  row: number
+  name: string
+  price: number
+  category: string
+  categoryId: string
+  sku: string
+  skuGenerated: boolean
+  barcode: string | null
+  trackStock: boolean
+}
+type AltaConProblema = { row: number; name: string; problem: string; detail: string; suggestion?: string }
+type RevisionDeAltas = { error: string } | { ready: AltaLista[]; invalid: AltaConProblema[]; availableCategories?: string[] }
+
+/** Revisa la lista de altas contra el negocio con consultas acotadas: categorías por nombre y SKU/códigos ya ocupados (también por
+ *  archivados, que cuentan en los índices únicos). Un renglón con problema no se crea; se dice el primer problema que tenga. */
+async function revisarAltas(where: { venueId: { in: string[] } }, items: AltaPedida[]): Promise<RevisionDeAltas> {
+  const filas = items.map((it, i) => {
+    const propio = it.sku ? limpiarCodigo(it.sku) : null
+    return {
+      row: i + 1,
+      name: it.name,
+      price: it.price,
+      category: it.category,
+      sku: propio ?? skuGenerado(it.name),
+      skuGenerated: propio === null,
+      barcode: it.barcode ? limpiarCodigo(it.barcode) : null,
+      trackStock: it.trackStock ?? true,
+    }
+  })
+  const nombres = [...new Set(filas.map(f => f.category.toLowerCase()))]
+  const tope = nombres.length * 5
+  const categorias = await prisma.menuCategory.findMany({
+    where: { ...where, OR: nombres.map(n => ({ name: { equals: n, mode: 'insensitive' as const } })) },
+    select: { id: true, name: true },
+    take: tope + 1,
+  })
+  // El nombre de una categoría no es único (el slug sí): con más resultados que el tope, el conjunto está incompleto y no se
+  // resuelve con él (Codex H9).
+  if (categorias.length > tope)
+    return { error: 'Hay demasiadas categorías con esos nombres para saber cuál es cuál. Revisa las categorías repetidas en el dashboard.' }
+  const skus = filas.map(f => f.sku)
+  const barras = filas.flatMap(f => (f.barcode ? [f.barcode] : []))
+  const ocupados = await prisma.product.findMany({
+    where: { ...where, OR: [{ sku: { in: skus } }, { gtin: { in: barras } }] },
+    select: { sku: true, gtin: true, name: true, deletedAt: true },
+    take: skus.length + barras.length,
+  })
+  const quien = (p: { name: string; deletedAt: Date | null }) => `lo usa «${p.name}»${p.deletedAt ? ' (archivado)' : ''}`
+  const skuOcupado = new Map(ocupados.map(p => [p.sku, p]))
+  const barrasOcupadas = new Map(ocupados.flatMap(p => (p.gtin ? [[p.gtin, p] as const] : [])))
+  const veces = (lista: string[]) => lista.reduce((m, v) => m.set(v, (m.get(v) ?? 0) + 1), new Map<string, number>())
+  const vecesSku = veces(skus)
+  const vecesBarras = veces(barras)
+  const ready: AltaLista[] = []
+  const invalid: AltaConProblema[] = []
+  for (const f of filas) {
+    const cats = categorias.filter(c => c.name.toLowerCase() === f.category.toLowerCase())
+    const sugerido = f.skuGenerated ? null : normalizeSku(f.sku)
+    const ocupante = skuOcupado.get(f.sku)
+    const problema: Omit<AltaConProblema, 'row' | 'name'> | null =
+      cats.length === 0
+        ? {
+            problem: 'CATEGORIA_NO_EXISTE',
+            detail: `No hay una categoría «${f.category}»: créala con create_category o usa una de availableCategories.`,
+          }
+        : cats.length > 1
+          ? { problem: 'CATEGORIA_REPETIDA', detail: `Hay ${cats.length} categorías llamadas «${f.category}»: no elijo una.` }
+          : !f.skuGenerated && !SKU_REGEX.test(f.sku)
+            ? {
+                problem: 'SKU_INVALIDO',
+                detail: 'El SKU sólo lleva letras sin acento, números, - y _.',
+                ...(sugerido ? { suggestion: sugerido } : {}),
+              }
+            : (vecesSku.get(f.sku) ?? 0) > 1
+              ? {
+                  problem: 'SKU_REPETIDO_EN_LA_LISTA',
+                  detail: f.skuGenerated
+                    ? 'Otro renglón sin SKU se llama igual: dale a cada uno su propio SKU.'
+                    : `El SKU ${f.sku} viene más de una vez en la lista.`,
+                }
+              : ocupante
+                ? {
+                    problem: 'SKU_YA_USADO',
+                    detail: f.skuGenerated
+                      ? `Ya existe «${ocupante.name}»${ocupante.deletedAt ? ' (archivado)' : ''}, creado antes con este mismo nombre: no lo creo otra vez. Si es otro producto, mándalo con su propio SKU.`
+                      : `El SKU ${f.sku} ya ${quien(ocupante)}.`,
+                  }
+                : f.barcode && (vecesBarras.get(f.barcode) ?? 0) > 1
+                  ? { problem: 'CODIGO_REPETIDO_EN_LA_LISTA', detail: `El código ${f.barcode} viene más de una vez en la lista.` }
+                  : f.barcode && barrasOcupadas.has(f.barcode)
+                    ? { problem: 'CODIGO_YA_USADO', detail: `El código ${f.barcode} ya ${quien(barrasOcupadas.get(f.barcode)!)}.` }
+                    : null
+    if (problema) invalid.push({ row: f.row, name: f.name, ...problema })
+    else ready.push({ ...f, category: cats[0].name, categoryId: cats[0].id })
+  }
+  const availableCategories = invalid.some(i => i.problem === 'CATEGORIA_NO_EXISTE')
+    ? (
+        await prisma.menuCategory.findMany({
+          where: { ...where, active: true },
+          select: { name: true },
+          orderBy: { name: 'asc' },
+          take: 30,
+        })
+      ).map(c => c.name)
+    : undefined
+  return { ready, invalid, ...(availableCategories ? { availableCategories } : {}) }
+}
+
 export function registerCatalogInBulkTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
   const actor = { type: 'HUMAN', staffId: scope.staffId, impersonating: false } as const
@@ -303,6 +434,144 @@ export function registerCatalogInBulkTools(server: McpServer, scope: McpScope) {
           failed.length === 0
             ? `Listo: ${applied.length} precio(s) cambiado(s).`
             : `Se cambiaron ${applied.length}; ${failed.length} no se pudieron (ver failed).`,
+      })
+    },
+  )
+
+  server.tool(
+    'create_products',
+    'Create MANY new products in a venue you can access in one go (1-100 rows): name, price in pesos WITH tax included, and the category BY NAME (it must already exist: see menu_categories, or create it with create_category). Optional: SKU (letters without accents, digits, - and _; if omitted it is derived from the name, shown in the preview, and two rows without SKU must have different names) and barcode (EAN/UPC, up to 14 characters, no spaces). By default each product tracks stock by piece starting at 0 (trackStock:false to skip). By DEFAULT it only PREVIEWS which rows are ready and which have a problem: missing category, SKU or barcode already used in the venue (archived products count too), or repeated in your list. Show it to the operator; then call again with confirm:true and the expectedSourceFingerprint to create the ready rows. Repeating the same list does not create duplicates (those rows come back as already used). This WRITES — requires products:create.',
+    {
+      venueId: venueInput(),
+      items: z
+        .array(
+          z.object({
+            name: z
+              .string()
+              .trim()
+              .min(1, 'El nombre no puede ir vacío')
+              .max(200, 'El nombre tiene a lo más 200 caracteres')
+              .describe('Product name, e.g. "Vestido Mailen - M"'),
+            price: precioAltaInput(),
+            category: z
+              .string()
+              .trim()
+              .min(1, 'La categoría no puede ir vacía')
+              .max(100, 'La categoría tiene a lo más 100 caracteres')
+              .describe('Existing category name (not case-sensitive)'),
+            sku: z
+              .string()
+              .trim()
+              .min(1, 'El SKU no puede ir vacío')
+              .max(64, 'El SKU tiene a lo más 64 caracteres')
+              .optional()
+              .describe('SKU: letters without accents, digits, - and _. Derived from the name if omitted'),
+            barcode: z
+              .string()
+              .trim()
+              .min(1, 'El código de barras no puede ir vacío')
+              .max(GTIN_MAX_LENGTH, `El código de barras tiene a lo más ${GTIN_MAX_LENGTH} caracteres`)
+              .regex(/^\S+$/, 'El código de barras no lleva espacios')
+              .optional()
+              .describe('Barcode (EAN/UPC), up to 14 characters'),
+            trackStock: z.boolean().optional().describe('Track stock by piece starting at 0 (default true)'),
+          }),
+        )
+        .min(1, 'Manda al menos un producto')
+        .max(100, 'A lo más 100 productos por llamada'),
+      expectedSourceFingerprint: fingerprintInput(),
+      confirm: confirmInput(),
+    },
+    async ({ venueId, items, expectedSourceFingerprint, confirm }) => {
+      const where = guard.venueFilter(venueId)
+      guard.requirePermission('products:create', venueId)
+      const revision = await revisarAltas(where, items)
+      if ('error' in revision) return text({ ok: false, error: revision.error })
+      const { ready, invalid, availableCategories } = revision
+      // La huella: qué renglones están listos, en qué categoría y con qué SKU. Si un SKU o código se ocupa, o una categoría cambia,
+      // deja de coincidir.
+      const fingerprint = operationHash(ready.map(a => ({ row: a.row, categoryId: a.categoryId, sku: a.sku })))
+      const listos = ready.map(({ categoryId: _categoryId, skuGenerated, ...a }) => ({
+        ...a,
+        ...(skuGenerated ? { skuGenerated: true } : {}),
+      }))
+      const resueltos = { invalid, ...(availableCategories ? { availableCategories } : {}) }
+      if (ready.length === 0)
+        return text({
+          ok: false,
+          created: 0,
+          ready: listos,
+          ...resueltos,
+          error: 'Ningún renglón está listo para crearse: corrige los problemas de la lista.',
+        })
+      if (!confirm)
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          expectedSourceFingerprint: fingerprint,
+          ready: listos,
+          ...resueltos,
+          message: `Esto creará ${ready.length} producto(s)${invalid.length ? ` y dejará fuera ${invalid.length} con problema` : ''}. Muéstrale la lista al operador; con su autorización vuelve a llamar con confirm:true.`,
+        })
+      if (expectedSourceFingerprint !== fingerprint) return text(VISTA_VIEJA)
+      const created: Array<{ row: number; productId: string; sku: string; barcode: string | null; name: string; price: number }> = []
+      const failed: Array<{ row: number; name: string; error: string }> = []
+      let gobierno: string | null = null
+      for (const a of ready) {
+        try {
+          const p = await createProduct(
+            venueId,
+            {
+              name: a.name,
+              price: a.price,
+              type: ProductType.REGULAR,
+              sku: a.sku,
+              categoryId: a.categoryId,
+              ...(a.barcode ? { gtin: a.barcode } : {}),
+              ...(a.trackStock ? { trackInventory: true, inventoryMethod: 'QUANTITY' as const } : {}),
+            },
+            actor,
+          )
+          created.push({ row: a.row, productId: p.id, sku: a.sku, barcode: a.barcode, name: a.name, price: a.price })
+        } catch (err) {
+          const code = (err as { code?: unknown } | null)?.code
+          // Catálogo maestro: no es un problema de ESTE renglón sino del negocio; se dice tal cual y no se intenta ninguno más.
+          if (code === 'CATALOG_GOVERNANCE_REQUIRED') {
+            gobierno = (err as Error).message
+            break
+          }
+          failed.push({
+            row: a.row,
+            name: a.name,
+            error:
+              code === 'P2002'
+                ? 'El SKU o el código de barras ya lo usa otro producto (se ocupó después de la vista previa).'
+                : motivoDeFalla(err, { tool: 'create_products', venueId, row: a.row }),
+          })
+        }
+      }
+      await auditMcpWrite(scope, {
+        action: 'PRODUCTS_CREATED_BULK',
+        entity: 'Venue',
+        entityId: venueId,
+        venueId,
+        data: {
+          created: created.map(({ productId, sku, barcode, name, price }) => ({ productId, sku, barcode, name, price })),
+          failed,
+          ...(gobierno ? { governanceRequired: true } : {}),
+        },
+      })
+      return text({
+        ok: created.length > 0,
+        created: created.length,
+        products: created,
+        failed,
+        ...resueltos,
+        ...(gobierno ? { governanceRequired: true, error: gobierno } : {}),
+        message:
+          `Se crearon ${created.length} producto(s).` +
+          (failed.length ? ` ${failed.length} no se pudieron (ver failed).` : '') +
+          (gobierno ? ' Este negocio trabaja con catálogo maestro: el resto se da de alta desde ahí.' : ''),
       })
     },
   )
