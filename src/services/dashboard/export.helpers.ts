@@ -65,7 +65,7 @@ function pickColumns<TRow>(allColumns: ExportColumnDef<TRow>[], requestedIds: st
  * Escape a single CSV field per RFC 4180: wrap in quotes if it contains a delimiter,
  * quote, or newline; double any embedded quotes.
  */
-function csvField(raw: unknown): string {
+export function csvField(raw: unknown): string {
   if (raw === null || raw === undefined) return ''
   const s = String(raw)
   if (/[",\n\r]/.test(s)) {

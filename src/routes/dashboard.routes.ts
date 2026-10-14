@@ -45,6 +45,12 @@ import * as attendanceController from '../controllers/dashboard/attendance.dashb
 import * as staffDocumentController from '../controllers/dashboard/staffDocument.controller'
 import * as authDashboardController from '../controllers/dashboard/auth.dashboard.controller'
 import * as availableBalanceController from '../controllers/dashboard/availableBalance.dashboard.controller'
+import * as settlementReportController from '../controllers/dashboard/settlementReport.dashboard.controller'
+import {
+  settlementReportCountSchema,
+  settlementReportExportSchema,
+  settlementReportTerminalOptionsSchema,
+} from '../schemas/dashboard/settlementReport.schema'
 import * as settlementIncidentController from '../controllers/dashboard/settlementIncident.dashboard.controller'
 import * as cashCloseoutController from '../controllers/dashboard/cashCloseout.dashboard.controller'
 import * as creditOfferController from '../controllers/dashboard/creditOffer.dashboard.controller'
@@ -4098,6 +4104,32 @@ router.get(
   checkPermission('settlements:read'),
   checkFeatureAccess('ADVANCED_REPORTS'),
   availableBalanceController.getSettlementWeek,
+)
+
+// Reportes de Transacciones y Dispersiones (spec 2026-10-13): mismo candado que Saldo disponible.
+router.get(
+  '/venues/:venueId/settlement-reports/count',
+  authenticateTokenMiddleware,
+  checkPermission('settlements:read'),
+  checkFeatureAccess('ADVANCED_REPORTS'),
+  validateRequest(settlementReportCountSchema),
+  settlementReportController.countSettlementReport,
+)
+router.get(
+  '/venues/:venueId/settlement-reports/terminal-options',
+  authenticateTokenMiddleware,
+  checkPermission('settlements:read'),
+  checkFeatureAccess('ADVANCED_REPORTS'),
+  validateRequest(settlementReportTerminalOptionsSchema),
+  settlementReportController.settlementReportTerminalOptions,
+)
+router.get(
+  '/venues/:venueId/settlement-reports/export',
+  authenticateTokenMiddleware,
+  checkPermission('settlements:read'),
+  checkFeatureAccess('ADVANCED_REPORTS'),
+  validateRequest(settlementReportExportSchema),
+  settlementReportController.exportSettlementReport,
 )
 
 /**

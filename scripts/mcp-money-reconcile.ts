@@ -16,6 +16,8 @@ import prisma from '@/utils/prismaClient'
 import { venueStartOfDay, venueEndOfDay } from '@/utils/datetime'
 import { registerSalesTools } from '@/mcp/tools/sales'
 import { registerPaymentTools } from '@/mcp/tools/payments'
+import { registerSettlementReportTools } from '@/mcp/tools/settlementReport'
+import { utcTsParam } from '@/utils/sqlDates'
 import type { McpScope } from '@/mcp/scope'
 
 function arg(name: string, fallback?: string): string | undefined {
@@ -88,6 +90,7 @@ async function main() {
   } as unknown as McpScope
   registerSalesTools(server, scope)
   registerPaymentTools(server, scope)
+  registerSettlementReportTools(server, scope)
   const callTool = async (n: string, a: Record<string, unknown>) => {
     const handler = handlers.get(n)
     if (!handler) throw new Error(`Tool ${n} no registrado`)
@@ -180,6 +183,80 @@ async function main() {
   // Internal consistency: staff_tips venue total must equal tips_over_time for the same window.
   const tot = await callTool('tips_over_time', { venueId: VENUE, fromDate: fromStr, toDate: toStr })
   check('total == tips_over_time', st.total, tot.total, st.tippedPayments, tot.count)
+
+  // ---- 4) settlement_deposits_report: Dispersiones == detalle; bruto, comisión, neto y «Sin calcular» contra SQL independiente ----
+  console.log('── settlement_deposits_report ──')
+  // Un solo corte para todas las comprobaciones del reporte (Codex código #4): cada llamada lo recibe y el SQL se limita a min(fin, asOf).
+  const asOfDate = new Date()
+  const asOf = asOfDate.toISOString()
+  const finSql = asOfDate < end ? asOfDate : end
+  const pagina = async (basis: string, extra: Record<string, unknown>) => {
+    const items: any[] = []
+    let cursor: string | null = null
+    do {
+      const pg: any = await callTool('settlement_deposits_report', {
+        venueId: VENUE,
+        fromDate: fromStr,
+        toDate: toStr,
+        dateBasis: basis,
+        asOf,
+        ...extra,
+        limit: 100,
+        ...(cursor ? { cursor } : {}),
+      })
+      items.push(...pg.items)
+      cursor = pg.nextCursor
+    } while (cursor !== null)
+    return items
+  }
+  for (const basis of ['charge', 'deposit'] as const) {
+    const sd = await callTool('settlement_deposits_report', { venueId: VENUE, fromDate: fromStr, toDate: toStr, dateBasis: basis, asOf })
+    let detalle = 0
+    let detalleN = 0
+    for (const d of sd.deposits) {
+      for (const it of await pagina(basis, { depositDate: d.fechaDeposito })) {
+        detalle += it.total
+        detalleN += 1
+      }
+    }
+    const dias = sd.deposits.reduce((s: number, d: any) => s + d.total, 0)
+    const diasN = sd.deposits.reduce((s: number, d: any) => s + d.cobros, 0)
+    check(`dispersiones == detalle (${basis})`, dias, detalle, diasN, detalleN)
+  }
+  // Base cobro, contra SQL independiente. Predicado canónico = paymentIsAvoqadoSettled; binds UTC.
+  const sdc = await callTool('settlement_deposits_report', { venueId: VENUE, fromDate: fromStr, toDate: toStr, dateBasis: 'charge', asOf })
+  const sinFecha = await pagina('charge', { unscheduled: true })
+  const liquidado = `p."venueId"=$1 AND p.status='COMPLETED' AND (p.type IS NULL OR p.type NOT IN ('TEST','ADJUSTMENT'))
+      AND p.method<>'CASH' AND (p."fundsFlow"='AVOQADO_PROCESSED' OR (p."fundsFlow" IS NULL AND NOT (p."tenderTypeId" IS NOT NULL AND p.method='OTHER') AND p.method<>'CASH'))
+      AND NOT EXISTS (SELECT 1 FROM "Payment" o WHERE o."venueId"=p."venueId" AND o.id = p."processorData"->>'originalPaymentId' AND o.type IN ('TEST','ADJUSTMENT'))
+      AND p."createdAt">=${utcTsParam(2)} AND p."createdAt"<=${utcTsParam(3)}`
+  const dbRow = (
+    await prisma.$queryRawUnsafe<{ bruto: number; n: number; com: number; sinTc: number }[]>(
+      `SELECT COALESCE(sum(p.amount + COALESCE(p."tipAmount",0)),0)::float8 bruto, count(*)::int n,
+              COALESCE(sum(round((tc."venueChargeAmount" + tc."venueFixedFee")::numeric, 2)),0)::float8 com,
+              count(*) FILTER (WHERE tc.id IS NULL)::int "sinTc"
+         FROM "Payment" p LEFT JOIN "TransactionCost" tc ON tc."paymentId" = p.id WHERE ${liquidado}`,
+      VENUE,
+      start,
+      finSql,
+    )
+  )[0]
+  const brutoDias = sdc.deposits.reduce((s: number, d: any) => s + d.total, 0)
+  const cobrosDias = sdc.deposits.reduce((s: number, d: any) => s + d.cobros, 0)
+  const brutoReporte = brutoDias + (sdc.unscheduled?.total ?? 0)
+  const cobrosReporte = cobrosDias + (sdc.unscheduled?.cobros ?? 0)
+  check('bruto del reporte == DB', brutoReporte, dbRow.bruto, cobrosReporte, dbRow.n)
+  const comDias = sdc.deposits.reduce((s: number, d: any) => s + d.totalComision, 0)
+  const comSinFecha = sinFecha.reduce((s: number, i: any) => s + (i.totalComision ?? 0), 0)
+  check('total comisión del reporte == DB', comDias + comSinFecha, dbRow.com)
+  const netoDias = sdc.deposits.reduce((s: number, d: any) => s + d.depositoNeto, 0)
+  check(
+    'neto de los días == bruto con fecha − su comisión (DB)',
+    netoDias,
+    dbRow.bruto - (sdc.unscheduled?.total ?? 0) - (dbRow.com - comSinFecha),
+  )
+  const sinFechaConCosto = sinFecha.filter((i: any) => i.totalComision !== null).length
+  check('«Sin calcular» == sin costo + con costo sin regla vigente', sdc.unscheduled?.cobros ?? 0, dbRow.sinTc + sinFechaConCosto)
 
   console.log(`\n  ${pass} ✅ / ${fail} ❌  — todo verde = cada cifra del MCP cuadra al centavo con la DB\n`)
   await prisma.$disconnect()
