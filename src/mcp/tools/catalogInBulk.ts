@@ -16,7 +16,6 @@ import prisma from '@/utils/prismaClient'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
-import { planGateMessage } from '../planGate'
 import { normalizeSku } from '@/services/commerce-channels/shopify/shopify.catalog.service'
 import logger from '@/config/logger'
 import { operationHash } from '@/utils/operationHash'
@@ -302,7 +301,7 @@ export function registerCatalogInBulkTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'find_products_by_code',
-    "Look up products of a venue you can access BY CODE, in bulk (1-500 codes per call). Each code is matched against the barcode (EAN/UPC/GTIN) and the SKU, also the SKU written without accents (DUEÑAS → DUENAS). Per code it returns the product it belongs to: SKU, barcode, name, category, price in pesos with tax included, whether it is active, and the stock (null when the product does not track stock by piece; omitted when your user cannot see inventory or the venue does not have the inventory plan). It also returns the codes not found, the ambiguous ones (a code that is one product's SKU and another's barcode: never guessed), the archived ones and the codes repeated in your list. Use it to cross a packing list, an invoice or a count against the catalog: read the CODES from the document and pass them here — the names on the document can be wrong, the code decides. Read-only.",
+    "Look up products of a venue you can access BY CODE, in bulk (1-500 codes per call). Each code is matched against the barcode (EAN/UPC/GTIN) and the SKU, also the SKU written without accents (DUEÑAS → DUENAS). Per code it returns the product it belongs to: SKU, barcode, name, category, price in pesos with tax included, whether it is active, and the stock (null when the product does not track stock by piece; omitted when your user cannot see inventory). It also returns the codes not found, the ambiguous ones (a code that is one product's SKU and another's barcode: never guessed), the archived ones and the codes repeated in your list. Use it to cross a packing list, an invoice or a count against the catalog: read the CODES from the document and pass them here — the names on the document can be wrong, the code decides. Read-only.",
     {
       venueId: venueInput(),
       codes: z
@@ -314,10 +313,8 @@ export function registerCatalogInBulkTools(server: McpServer, scope: McpScope) {
     async ({ venueId, codes: crudos }) => {
       const where = guard.venueFilter(venueId) // ScopeError si el negocio no es suyo
       guard.requirePermission('menu:read', venueId)
+      // Las existencias por pieza son de todos los planes (decisión del founder, 29-sep; Premium es recetas, conteos, compras, traslados y merma): como menu_item_detail, sólo piden el permiso.
       const verExistencias = guard.tienePermiso('inventory:read', venueId)
-      // Las existencias son datos del plan de inventario (Premium), como en low_stock y stock_value: sin él se ocultan y la respuesta dice por qué.
-      const sinPlan = verExistencias ? await planGateMessage(venueId, 'INVENTORY_TRACKING', 'El control de inventario') : null
-      const mostrarExistencias = verExistencias && !sinPlan
       const codes = crudos.map(limpiarCodigo)
       const r = resolverCodigos(codes, await productosPorCodigo(where, codes))
       return text({
@@ -339,14 +336,12 @@ export function registerCatalogInBulkTools(server: McpServer, scope: McpScope) {
           category: p.category.name,
           price: Number(p.price),
           active: p.active,
-          ...(mostrarExistencias
+          ...(verExistencias
             ? { stock: p.trackInventory && p.inventoryMethod === 'QUANTITY' && p.inventory ? Number(p.inventory.currentStock) : null }
             : {}),
         })),
         ...sinResolver(r),
-        ...(mostrarExistencias
-          ? {}
-          : { stockHidden: sinPlan ?? 'No se muestran existencias: tu usuario no tiene el permiso inventory:read.' }),
+        ...(verExistencias ? {} : { stockHidden: 'No se muestran existencias: tu usuario no tiene el permiso inventory:read.' }),
       })
     },
   )

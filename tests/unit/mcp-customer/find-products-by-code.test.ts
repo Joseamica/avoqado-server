@@ -170,16 +170,15 @@ describe('find_products_by_code', () => {
     expect(out.stockHidden).toContain('inventory:read')
   })
 
-  it('con el permiso de inventario pero sin el plan de inventario, el producto sale igual y las existencias no, con el porqué', async () => {
-    const mensaje = 'El control de inventario no está incluido en el plan actual de este local (requiere INVENTORY_TRACKING).'
-    mockPlanGate.mockResolvedValue(mensaje)
-    mockProductFindMany.mockResolvedValueOnce([filaProducto({ id: 'p1', sku: 'MAILEN-M', price: 1290.5, stock: 3 })])
+  it('las existencias por pieza no piden el plan de inventario (decisión del 29-sep)', async () => {
+    mockPlanGate.mockResolvedValue(
+      'El control de inventario no está incluido en el plan actual de este local (requiere INVENTORY_TRACKING).',
+    )
+    mockProductFindMany.mockResolvedValueOnce([filaProducto({ id: 'p1', sku: 'MAILEN-M', stock: 3 })])
     const out = parse(await call({ venueId: 'v1', codes: ['MAILEN-M'] }))
-    expect(out.ok).toBe(true)
-    expect(out.found[0]).toMatchObject({ code: 'MAILEN-M', sku: 'MAILEN-M', price: 1290.5 })
-    expect(out.found[0]).not.toHaveProperty('stock')
-    expect(out.stockHidden).toBe(mensaje)
-    expect(mockPlanGate).toHaveBeenCalledWith('v1', 'INVENTORY_TRACKING', 'El control de inventario')
+    expect(out.found[0].stock).toBe(3)
+    expect(out).not.toHaveProperty('stockHidden')
+    expect(mockPlanGate).not.toHaveBeenCalled()
   })
 
   it('🔍 un código pegado desde Excel (espacios y apóstrofo) se encuentra igual', async () => {
