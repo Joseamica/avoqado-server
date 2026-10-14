@@ -28,6 +28,7 @@ import prisma from '../../utils/prismaClient'
 import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
 import { logAction } from './activity-log.service'
 import { parseDbDateRange } from '../../utils/datetime'
+import { GiftCardError } from '../giftCards/giftCardErrors'
 
 /** SAT c_FormaPago codes accepted for a tender type. '99 Por definir' is excluded on purpose. */
 const VALID_SAT_FORMA_PAGO = new Set([
@@ -148,7 +149,9 @@ function toCommissionDecimal(percent: number | null | undefined): Prisma.Decimal
  * A concurrent seeder winning the unique-constraint race is tolerated silently.
  */
 export async function ensureSystemTenderTypes(venueId: string): Promise<void> {
-  const existing = await prisma.venueTenderType.count({ where: { venueId, isSystem: true } })
+  // Sólo las cuatro semillas (systemKind nulo): el tender «Tarjeta de regalo» también es isSystem y, si contara, una
+  // semilla faltante nunca se volvería a crear.
+  const existing = await prisma.venueTenderType.count({ where: { venueId, isSystem: true, systemKind: null } })
   if (existing >= SYSTEM_TENDER_SEEDS.length) return
 
   for (const seed of SYSTEM_TENDER_SEEDS) {
@@ -289,6 +292,15 @@ export async function updateTenderType(
 ) {
   const existing = await prisma.venueTenderType.findFirst({ where: { id: tenderTypeId, venueId } })
   if (!existing) throw new NotFoundError('Tipo de pago no encontrado.')
+  // R4: un tender que administra Avoqado (systemKind) no se edita, no se apaga y no se muestra en el POS por decisión
+  // del negocio: ni dinero, ni presentación, ni `active`.
+  if (existing.systemKind != null) {
+    throw new GiftCardError(
+      'GIFT_CARD_TENDER_NOT_ALLOWED',
+      'El tipo de pago «Tarjeta de regalo» lo administra Avoqado: no se puede editar ni apagar. Para dejar de vender tarjetas, apaga la función en Ajustes › Tarjetas de regalo.',
+      400,
+    )
+  }
 
   const touchesMoney = MONEY_SEMANTIC_FIELDS.some(field => input[field] !== undefined)
   if (existing.isSystem && touchesMoney) {
@@ -412,9 +424,18 @@ export async function resolveTenderForCharge(
   // el aislamiento en la FRONTERA del efecto, no sólo en el esquema.
   const tender = await tx.venueTenderType.findFirst({
     where: { id: tenderTypeId, venueId },
-    select: { id: true, baseMethod: true, active: true, revision: true, name: true },
+    select: { id: true, baseMethod: true, active: true, revision: true, name: true, systemKind: true },
   })
   if (!tender) throw new NotFoundError('Tipo de pago no encontrado en este negocio.')
+  // R4 / Review Focus 2: el saldo de una tarjeta de regalo sólo se cobra por «Pagar con saldo» (prueba de posesión,
+  // descuento condicionado de la libreta). Ningún cobro manual —en vivo o reproducido de la cola— lo puede usar.
+  if (tender.systemKind != null) {
+    throw new GiftCardError(
+      'GIFT_CARD_TENDER_NOT_ALLOWED',
+      'El saldo de tarjeta de regalo sólo se cobra con «Pagar con saldo», escaneando o tecleando el código de la tarjeta.',
+      400,
+    )
+  }
 
   // 🔴 Se consultaba `active` y nunca se evaluaba: un POS con la lista vieja seguía
   // cobrando con un tipo apagado indefinidamente. Apagar un tipo tiene que surtir
