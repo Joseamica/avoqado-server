@@ -532,3 +532,35 @@ describe('C3 · `extraccion`: la factura del cliente de un ticket extraído de u
     expect(await con(e)).toBeNull()
   })
 })
+
+describe('F6 · `devoluciones`: la factura de una venta que ya tenía devoluciones', () => {
+  const con = async (d: unknown) => {
+    const entrada = capturarEntrada(await construirBundle('extras'), receptor as IssueReceptor, ORDER_ID)
+    return leerEntrada(JSON.parse(JSON.stringify({ ...entrada, devoluciones: d })))
+  }
+  it('🔴 válidas (DESCONTADAS o CON_NOTA, con sus pagos) se leen tal cual', async () => {
+    for (const d of [
+      { modo: 'DESCONTADAS', pagos: ['r1'] },
+      { modo: 'CON_NOTA', pagos: ['r1', 'r2'] },
+      { modo: 'DESCONTADAS', pagos: ['r1'], redondeoCents: 1 }, // Ruling M7 (controlador): el redondeo registrado, entero
+    ])
+      expect((await con(d))?.devoluciones).toEqual(d)
+  })
+  it('control — sin el campo, la entrada de siempre', async () => {
+    const e = await con(undefined)
+    expect(e).not.toBeNull()
+    expect(e?.devoluciones).toBeUndefined()
+  })
+  it.each([
+    ['null', null],
+    ['modo desconocido', { modo: 'OTRO', pagos: ['r1'] }],
+    ['sin pagos', { modo: 'CON_NOTA', pagos: [] }],
+    ['un pago vacío', { modo: 'DESCONTADAS', pagos: [''] }],
+    ['pagos repetidos', { modo: 'CON_NOTA', pagos: ['r1', 'r1'] }],
+    ['pagos que no son lista', { modo: 'CON_NOTA', pagos: 'r1' }],
+    ['redondeo como texto', { modo: 'DESCONTADAS', pagos: ['r1'], redondeoCents: '1' }],
+    ['redondeo con fracción', { modo: 'DESCONTADAS', pagos: ['r1'], redondeoCents: 1.5 }],
+  ])('🔴 malformadas (%s) ⇒ la entrada no se lee (nunca acredita ni deja de acreditar a ciegas)', async (_c, d) => {
+    expect(await con(d)).toBeNull()
+  })
+})

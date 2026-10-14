@@ -42,8 +42,10 @@ import {
   finalizarEmision,
   sustitutaAtorada,
   importeConceptoCents,
+  esCobroElegible,
   IssueCfdiDeps,
 } from './cfdi.service'
+import { TOPES_POR_ORDEN } from './librosDeOrdenes'
 import { BadRequestError, ConflictError } from '../../errors/AppError'
 import { bloquearOrdenParaFacturar, tomarAdmisionCompartida } from './admisionIva'
 import { huellaDeEntrada, leerEntrada, leerMontosPorRenglon } from './entradaDocumental'
@@ -247,6 +249,18 @@ export interface LoadedRefundForCreditNote {
   acreditadoDelDocumento?: AcreditadoContra
   /** C2 (P10, Tarea 9): «acreditar por importe» elegido por una persona, sólo si por artículos se detuvo por falta de evidencia. */
   modalidadElegida?: 'POR_IMPORTE'
+  /**
+   * F6 (R1/N3/H1, nuevo y opcional): con una original individual que es una factura por el total con notas automáticas (`entrada.devoluciones
+   * .modo = 'CON_NOTA'`): los reembolsos de REPARTO FIJO COMPROBADO de su marca —entrega con reparto legible, o artículos que la factura sí
+   * registra— sin su nota VIVA contra esta original, en el orden de la marca. Lo llena el cargador para cualquier reembolso contra esa factura
+   * (con `tx`, bajo el candado de la orden); la barrera la decide `checkCreditNoteEligibility` por la modalidad efectiva.
+   */
+  notasFijasPendientes?: Array<{ refundPaymentId: string; cents: number }>
+  /**
+   * F6 (D1 del /full-testing, nuevo y opcional): SIN factura (`original: null`), la venta ya se devolvió COMPLETA (la regla de «Facturar»:
+   * `devueltaCompleta`). Entonces «primero se factura la venta» sería falso. Lo llena el cargador sólo cuando no hay original.
+   */
+  ventaDevueltaCompleta?: boolean
 }
 
 export interface EmitRefundCreditNoteParams {
@@ -312,6 +326,10 @@ export type CreditNoteBlockReason =
   | 'ORIGINAL_CANCEL_PENDING'
   | 'ORIGINAL_EN_SUSTITUCION'
   | 'EXTRAIDA_SIN_FACTURA' // C3 (T5): el ticket de la global ya se extrajo y su factura del cliente aún no está timbrada
+  | 'DESCONTADA_EN_LA_FACTURA' // F6: la factura de la venta salió sin lo de este reembolso; una nota lo acreditaría dos veces
+  | 'ESPERA_NOTA_DE_ARTICULOS' // F6 (R1/N3/H1): se reparte en proporción contra una factura con notas automáticas; espera las de reparto fijo
+  | 'NOTA_CANCELADA' // F6 (N6): la nota de este reembolso se canceló; su llave no admite otra
+  | 'VENTA_DEVUELTA_COMPLETA' // F6 (D1): sin factura y la venta ya se devolvió COMPLETA: F6 no la factura, así que tampoco hay nota
   | 'TIP_ONLY'
   | 'EXCEEDS_REMAINING'
   | 'ORIGINAL_IVA_MIXTO' // ya no se emite (C2): se conserva en el tipo
@@ -369,12 +387,26 @@ export function motivoOriginalEnCancelacion(
 export const MOTIVO_ORIGINAL_EN_SUSTITUCION_ATORADA =
   'Esta factura se está sustituyendo y la factura nueva lleva más de una hora sin respuesta del PAC. Escríbenos a soporte para resolverla; después podrás hacer la nota de crédito.'
 
+/** F6 (D1): el panel del reembolso de una venta devuelta completa y sin factura. Texto fijo: el dashboard lo traduce por su motivo. */
+export const MOTIVO_VENTA_DEVUELTA_SIN_FACTURA = 'Esta venta se devolvió completa: ya no se factura por separado.'
 /**
  * C3 (Tarea 5): el ticket de la global ya se EXTRAJO (su nota de extracción está viva) y su factura del cliente todavía no está timbrada: la
  * venta ya no vive en la global, y la nota de la devolución irá contra la factura del cliente cuando exista (el cargador la elige a ella
  * por `stampedAt`). Antes, esperar: una nota contra la global descontaría de un ticket que la extracción ya sacó.
  */
 export const MOTIVO_EXTRAIDA_SIN_FACTURA = 'Esta venta se está facturando aparte; emite la nota de crédito cuando su factura esté timbrada.'
+/** F6 (decisión 2 del founder): el reembolso ya está descontado en la factura (salió sólo con lo que el cliente se quedó). */
+export const MOTIVO_DESCONTADA_EN_LA_FACTURA =
+  'Esta devolución ya está descontada en la factura de la venta (la factura salió sólo con lo que el cliente se quedó), así que no lleva nota de crédito.'
+/**
+ * F6 (R1/N3/H4): lo que se reparte en proporción toma de lo que queda; antes, podría dejar sin saldo a la de reparto fijo. Neutral: dice cuál
+ * devolución revisar (por su importe) y no promete que la otra salga sola.
+ */
+export const motivoEsperaNotaDeArticulos = (cents: number) =>
+  `Esta devolución se reparte sobre lo que queda de la factura: primero tiene que salir la nota de crédito de la devolución de artículos (o de entrega) de esta venta por $${(cents / 100).toFixed(2)}. Revisa esa devolución.`
+/** F6 (N6): la nota de ESTE reembolso se canceló. Una devolución admite una sola nota (`cfdi-refund-<pago>`): no se ofrece emitir otra. */
+export const MOTIVO_NOTA_DEL_REEMBOLSO_CANCELADA =
+  'La nota de crédito de esta devolución se canceló, y una devolución sólo admite una nota. Pide a soporte que revise esta venta.'
 
 export interface CreditNoteEligibility {
   eligible: boolean
@@ -566,6 +598,22 @@ export function refundedItemsDe(processorData: unknown): Array<{ orderItemId: st
       ...(typeof e.productName === 'string' && e.productName.trim() ? { nombre: e.productName.trim() } : {}),
     }
   })
+}
+
+/**
+ * F6 (R9, B11): del `processorData` de un reembolso, sólo la evidencia que leen F6 y C2 —sus artículos (`refundedItemsDe`) y el reparto de un
+ * ajuste de entrega (`repartoCongeladoDeAjuste`)—, proyectada en la base: el resto del JSON (la respuesta del procesador) nunca viaja. Para
+ * `SELECT … ${EVIDENCIA_DE_DEVOLUCION} AS "processorData" FROM "Payment"`.
+ */
+export const EVIDENCIA_DE_DEVOLUCION = Prisma.sql`jsonb_build_object('refundedItems', "processorData"->'refundedItems',
+  'provenance', "processorData"->'provenance', 'fiscalByRateCents', "processorData"->'fiscalByRateCents')`
+
+/**
+ * F6 (R1): la devolución que C2 reparte EN PROPORCIÓN a lo que queda de cada tasa (`proporcional` de `saldoFiscal.ts`): sin artículos y sin
+ * el reparto congelado de un ajuste de entrega. Las demás tienen su reparto fijo. Una regla, para la ruta de F6 y para la guarda del orden.
+ */
+export function esDevolucionPorImporte(processorData: unknown, salesCents: number): boolean {
+  return repartoCongeladoDeAjuste(processorData, salesCents) === null && refundedItemsDe(processorData).length === 0
 }
 
 // ─── C2 · Tarea 8: la nota de un ticket que entró en la factura global ─────────────
@@ -1239,6 +1287,8 @@ export function checkCreditNoteEligibility(loaded: LoadedRefundForCreditNote): C
     }
   }
   if (!original) {
+    if (loaded.ventaDevueltaCompleta)
+      return { eligible: false, reason: 'VENTA_DEVUELTA_COMPLETA', message: MOTIVO_VENTA_DEVUELTA_SIN_FACTURA }
     return {
       eligible: false,
       reason: 'NO_ORIGINAL_CFDI',
@@ -1379,6 +1429,13 @@ export function checkCreditNoteEligibility(loaded: LoadedRefundForCreditNote): C
     if (!valid) return { eligible: false, reason: 'ORIGINAL_ENTRADA_INVALIDA', message: ENTRADA_INVALIDA }
     // C2 (§4.4): una original con IVA distinto de 16 % ya no se detiene (`ORIGINAL_IVA_MIXTO`): su nota sale por tasa (abajo).
   }
+  // F6 (decisión 2): la factura individual de esta venta salió SIN lo de este reembolso. Va antes del reparto: si no, «sin evidencia del
+  // artículo» ofrecería acreditarlo «por importe» (P10) y se acreditaría dos veces. Lo hereda su sustituta (conserva la entrada, Tarea 8).
+  if (!original.esGlobal) {
+    const d = leerEntrada(original.entrada)?.devoluciones
+    if (d?.modo === 'DESCONTADAS' && d.pagos.includes(refund.id))
+      return { eligible: false, reason: 'DESCONTADA_EN_LA_FACTURA', message: MOTIVO_DESCONTADA_EN_LA_FACTURA }
+  }
   if (refund.salesRefundCents <= 0) {
     return {
       eligible: false,
@@ -1386,6 +1443,12 @@ export function checkCreditNoteEligibility(loaded: LoadedRefundForCreditNote): C
       message: 'Este reembolso sólo devolvió propina, y la propina nunca formó parte del CFDI. No hay importe que acreditar fiscalmente.',
     }
   }
+  // F6 (R1/N3/H1): el orden fiscal por la modalidad EFECTIVA —por importe, o «por importe» elegido (P10)— frente a una emisión manual, una
+  // devolución posterior o la vista previa (`alternativaPorImporte` pasa por aquí con la elección puesta). Después de TIP_ONLY: una sólo de
+  // propina nunca lleva nota, no «espera».
+  const enProporcion = loaded.modalidadElegida === 'POR_IMPORTE' || esDevolucionPorImporte(refund.processorData, refund.salesRefundCents)
+  const espera = enProporcion ? loaded.notasFijasPendientes?.[0] : undefined
+  if (espera) return { eligible: false, reason: 'ESPERA_NOTA_DE_ARTICULOS', message: motivoEsperaNotaDeArticulos(espera.cents) }
   // C2 T7: la nota por tratamiento —lo fiscal de la original y de la nota con la misma asignación, la modalidad con evidencia, cada saldo
   // por tratamiento y el redondeo declarado— y su forma de pago (G8). Lo que queda ya no es «total − notas»: lo dice `cabeEnElSaldo`.
   const nota = notaPorTratamiento(loaded)
@@ -1865,7 +1928,11 @@ export async function emitRefundCreditNote(
     const provider = deps.resolveProvider(emisor, { sandbox: params.sandbox })
     if (existing.protocoloIva === null) return emitirLegacy(existing, params, provider, deps)
     if (existing.protocoloIva !== 1) throw new ConflictError(ENTRADA_INVALIDA)
-    const recovered = await consultarIntentoCapturado(existing, provider, deps.runInTransaction)
+    // F6 (R4-2): sin identidad del PAC y sin nada en vuelo —una reserva que nunca se envió, o un intento que el PAC rechazó en definitiva— no
+    // hay qué consultar: va directo a la recaptura protegida (bajo el candado de la orden, con el reclamo atómico del envío). Así una consulta
+    // que no contesta no le cierra el paso a las demás notas de la pasada. Con identidad conocida o un envío incierto, se consulta como siempre.
+    const nadaQueConsultar = !existing.facturapiId && (existing.enviadoAt === null || existing.falloDefinitivo)
+    const recovered = nadaQueConsultar ? null : await consultarIntentoCapturado(existing, provider, deps.runInTransaction)
     if (recovered) return finalizarNota(existing, recovered, provider, params, deps)
     if (params.lookupOnly) throw new ConflictError(PROCESANDO)
   }
@@ -2126,7 +2193,9 @@ export async function getRefundCreditNote(venueId: string, refundPaymentId: stri
   // Aislamiento por tenant: el idempotencyKey es global, la respuesta NO puede serlo.
   if (!cfdi || cfdi.venueId !== venueId || cfdi.type !== 'EGRESO') return null
   const { protocoloIva, enviadoAt, falloDefinitivo, cancelStatus, ...publicNote } = cfdi
-  return { ...publicNote, recoveryOnly: recuperable(cfdi) }
+  // Ruling T9-b: `rechazadaPorElPac` es interna, como `recoveryOnly` (no sale en `creditNote`): el PAC ya dijo «no» a ESTA nota.
+  const rechazadaPorElPac = cfdi.status === 'VALIDATION_FAILED' || (cfdi.status === 'STAMP_FAILED' && falloDefinitivo === true)
+  return { ...publicNote, recoveryOnly: recuperable(cfdi), rechazadaPorElPac }
 }
 
 export interface RefundCreditNoteStatus {
@@ -2172,6 +2241,30 @@ export interface RefundCreditNoteStatus {
       aviso?: string
     }
   } | null
+  /**
+   * F6 (R7, N6, nuevo y opcional): el reembolso es de la marca de su factura por el total (`entrada.devoluciones.modo = 'CON_NOTA'`) y su nota
+   * aún no está timbrada. `RECUPERANDO`: sale sola (la pasada del job la emite). `REQUIERE_INTERVENCION`: no está demostrado que salga sola;
+   * el motivo dice qué revisar.
+   */
+  automatica?: { estado: 'RECUPERANDO' | 'REQUIERE_INTERVENCION' }
+}
+
+/**
+ * F6 (R7, N6, H4): ¿la nota de este reembolso tenía que salir sola (es de la marca `CON_NOTA` de su factura)? Si sí, si sale sola de verdad
+ * —elegible (el job la emite) o esperando el XML— o no está demostrado (cualquier otro motivo, también esperar a otra nota: sin clasificar
+ * esa otra, sin promesa). Una devolución posterior (fuera de la marca) es manual: sin `automatica` (N3). Ruling T9-b: si el PAC ya rechazó
+ * ESTA nota en definitiva (o no pasó la validación), el job la reintenta igual (decisión A), pero mandaría lo mismo: no se promete que salga
+ * sola; el motivo del PAC va en `creditNote.lastError`.
+ */
+function automaticaDe(
+  loaded: LoadedRefundForCreditNote,
+  eligibility: CreditNoteEligibility,
+  rechazadaPorElPac = false,
+): Pick<RefundCreditNoteStatus, 'automatica'> {
+  const marca = loaded.original && !loaded.original.esGlobal ? leerEntrada(loaded.original.entrada)?.devoluciones : undefined
+  if (marca?.modo !== 'CON_NOTA' || !marca.pagos.includes(loaded.refund.id)) return {}
+  const saleSola = !rechazadaPorElPac && (eligibility.eligible || eligibility.reason === 'ESPERA_XML')
+  return { automatica: { estado: saleSola ? 'RECUPERANDO' : 'REQUIERE_INTERVENCION' } }
 }
 
 /**
@@ -2188,7 +2281,7 @@ export async function getRefundCreditNoteStatus(
   const cargar = depsVista.loadRefundForCreditNote ?? loadRefundForCreditNoteFromDb
   const reparar = depsVista.repararArchivos ?? defaultDeps.repararArchivos
   const stored = await getRefundCreditNote(venueId, refundPaymentId)
-  const { recoveryOnly = false, ...publicNote } = stored ?? {}
+  const { recoveryOnly = false, rechazadaPorElPac = false, ...publicNote } = stored ?? {}
   const creditNote = stored ? publicNote : null
   if (recoveryOnly)
     return { creditNote, recoveryOnly: true, eligibility: { eligible: false, reason: null, message: PROCESANDO }, preview: null }
@@ -2205,6 +2298,22 @@ export async function getRefundCreditNoteStatus(
       eligibility: { eligible: false, reason: null, message: 'Este reembolso ya tiene su nota de crédito timbrada.' },
       preview: vistaPrevia(loaded, null, false),
     }
+  // F6 (N6): su nota se CANCELÓ y la llave no admite otra (C2 respondería `PROCESANDO`): no se ofrece «Emitir nota»; se dice. I-2 (revisión
+  // final): salvo que la factura vigente ya lo DESCUENTE (se canceló la nota y la factura y se volvió a facturar neta): ya no lleva nota.
+  if (creditNote?.status === 'CANCELLED') {
+    const descontada = checkCreditNoteEligibility(loaded)
+    const cancelada: CreditNoteEligibility =
+      descontada.reason === 'DESCONTADA_EN_LA_FACTURA'
+        ? descontada
+        : { eligible: false, reason: 'NOTA_CANCELADA', message: MOTIVO_NOTA_DEL_REEMBOLSO_CANCELADA }
+    return {
+      creditNote,
+      recoveryOnly: false,
+      eligibility: cancelada,
+      preview: vistaPrevia(loaded, null, false),
+      ...automaticaDe(loaded, cancelada),
+    }
+  }
   let eligibility = checkCreditNoteEligibility(loaded)
   // C2-13 (D5) y N1: sin el XML de la original se piden sus archivos (fuera de toda transacción; hace red), con un límite corto para no
   // colgar la vista. Un XML ilegible (o sin identidad del PAC) se DICE: nunca «en unos minutos» para siempre.
@@ -2231,7 +2340,13 @@ export async function getRefundCreditNoteStatus(
     if (!tampoco.eligible && tampoco.message) eligibility = { ...eligibility, message: motivoTampocoPorImporte(tampoco.message) }
   }
   const apagada = loaded.original ? await facturacionApagada(loaded.original.fiscalEmisor.id, venueId, loaded.refund.processorData) : false
-  return { creditNote, recoveryOnly: false, eligibility, preview: vistaPrevia(loaded, parcial, apagada, alternativa) }
+  return {
+    creditNote,
+    recoveryOnly: false,
+    eligibility,
+    preview: vistaPrevia(loaded, parcial, apagada, alternativa),
+    ...automaticaDe(loaded, eligibility, rechazadaPorElPac),
+  }
 }
 
 /** La vista previa (lo que se timbraría): campos de siempre más, cuando es elegible, el desglose, el redondeo y el uso; y el aviso de G6. */
@@ -2368,6 +2483,24 @@ export const SELECT_DE_ORIGINAL = {
 } satisfies Prisma.CfdiSelect
 
 /**
+ * F6 (D1): ¿la venta SIN factura ya se devolvió completa? Lo cobrado (cobros elegibles, sin propina: la base de la factura) contra lo
+ * devuelto, con la MISMA regla que «Facturar» (`devueltaCompleta`). Sólo se pregunta cuando no hay original. Acotada al tope de movimientos
+ * de una orden: pasado el tope no se afirma nada.
+ */
+async function ventaDevueltaCompletaDe(tx: Prisma.TransactionClient, venueId: string, orderId: string): Promise<boolean> {
+  const f6 = await import('./facturaConDevolucion') // perezoso: ese módulo importa éste (ciclo)
+  const cobros = await tx.payment.findMany({
+    take: TOPES_POR_ORDEN.movimientos + 1,
+    where: { orderId, venueId, status: 'COMPLETED' },
+    select: { type: true, amount: true },
+  })
+  if (cobros.length > TOPES_POR_ORDEN.movimientos) return false
+  const pagadoCents = cobros.filter(esCobroElegible).reduce((s, p) => s + Math.round(Number(p.amount) * 100), 0)
+  const devoluciones = await f6.devolucionesFiscales(tx, venueId, orderId)
+  return pagadoCents > 0 && !!devoluciones && f6.devueltaCompleta(pagadoCents, devoluciones)
+}
+
+/**
  * Carga el reembolso, su original fiscal y el saldo reservado, sin consultar el catálogo.
  * Extraída de `defaultDeps` para que el guard de tenant sea legible (y auditable) aparte.
  */
@@ -2475,6 +2608,46 @@ export async function loadRefundForCreditNoteFromDb(
   const salesRefundCents = Math.abs(toCents(payment.amount))
   const tipRefundCents = Math.abs(toCents(payment.tipAmount))
 
+  // F6 (R1/N3/H1): en una factura por el total con notas automáticas, lo que se reparte EN PROPORCIÓN —por importe o P10, de la marca o
+  // posterior— espera a las de reparto fijo COMPROBADO de su marca. Una de artículos que la factura no registra no es dependencia: saldrá por
+  // P10, también en proporción, y dos proporcionales no se estorban (H1: nunca se bloquean entre sí). Con `tx` (la reserva), bajo el candado
+  // de la orden: una emisión manual y la automática a la vez se ordenan solas.
+  let notasFijasPendientes: Array<{ refundPaymentId: string; cents: number }> | undefined
+  const entradaOriginal = original && !esGlobal ? leerEntrada(original.entrada) : null
+  const marca = entradaOriginal?.devoluciones
+  if (entradaOriginal && marca?.modo === 'CON_NOTA') {
+    const otras = marca.pagos.filter(id => id !== payment.id)
+    const filas = otras.length
+      ? await tx.$queryRaw<Array<{ id: string; amount: unknown; processorData: unknown }>>`
+          SELECT id, amount, ${EVIDENCIA_DE_DEVOLUCION} AS "processorData"
+          FROM "Payment" WHERE id = ANY(${otras}) AND "venueId" = ${venueId} AND "orderId" = ${payment.orderId}`
+      : []
+    const porId = new Map(filas.map(f => [f.id, f]))
+    const conEvidencia = new Set((leerMontosPorRenglon(entradaOriginal) ?? []).map(m => m.orderItemId))
+    const fijas = otras.flatMap(id => {
+      const f = porId.get(id)
+      if (!f) return []
+      const cents = Math.abs(Math.round(Number(f.amount) * 100))
+      const congelado = repartoCongeladoDeAjuste(f.processorData, cents)
+      const articulos = refundedItemsDe(f.processorData).filter(x => x.amountCents !== 0)
+      const comprobada = congelado
+        ? congelado !== 'INVALIDO'
+        : articulos.length > 0 && articulos.every(x => conEvidencia.has(x.orderItemId))
+      return comprobada ? [{ refundPaymentId: id, cents }] : []
+    })
+    const vivas = fijas.length
+      ? await tx.cfdi.findMany({
+          where: { idempotencyKey: { in: fijas.map(f => creditNoteIdempotencyKey(f.refundPaymentId)) }, ...CFDI_VIVO },
+          select: { idempotencyKey: true, entrada: true },
+          take: fijas.length,
+        })
+      : []
+    const conNota = new Set(
+      vivas.filter(v => (v.entrada as { originalCfdiId?: string } | null)?.originalCfdiId === original!.id).map(v => v.idempotencyKey),
+    )
+    notasFijasPendientes = fijas.filter(f => !conNota.has(creditNoteIdempotencyKey(f.refundPaymentId)))
+  }
+
   // C2 T7: lo acreditado contra ESTA original (por tratamiento y por artículo), dentro de la misma transacción cuando la reserva lo pide.
   // Legacy sin vínculo fiable cuenta contra la orden; una entrada corrupta cuenta conservadoramente, nunca libera capacidad en silencio.
   const acreditado = original
@@ -2522,6 +2695,8 @@ export async function loadRefundForCreditNoteFromDb(
     alreadyCreditedCents,
     acreditado,
     ...(acreditadoDelDocumento ? { acreditadoDelDocumento } : {}),
+    ...(notasFijasPendientes?.length ? { notasFijasPendientes } : {}),
+    ...(!original && (await ventaDevueltaCompletaDe(tx, venueId, payment.orderId)) ? { ventaDevueltaCompleta: true } : {}),
   }
 }
 

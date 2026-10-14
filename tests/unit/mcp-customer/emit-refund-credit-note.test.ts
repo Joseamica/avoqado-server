@@ -617,3 +617,33 @@ describe('emit_refund_credit_note — ronda QA (hermanos): timbre en duda', () =
     expect(out).not.toHaveProperty('enDuda')
   })
 })
+
+// F6 · Tarea 9 (R7): la nota automática de un reembolso de la marca de su factura por el total; el paso 1 dice en qué va.
+describe('emit_refund_credit_note — F6 · T9: `automatica` en el paso 1', () => {
+  it('🔴 F6 (R7): el paso 1 dice si la nota automática sale sola o requiere a una persona', async () => {
+    mockStatus.mockResolvedValueOnce({
+      creditNote: null,
+      recoveryOnly: false,
+      eligibility: { eligible: false, reason: 'ESPERA_NOTA_DE_ARTICULOS', message: 'Primero tiene que salir la nota de artículos.' },
+      preview: null,
+      // Codex código r1 (P3-5): el estado REAL de esta combinación (`automaticaDe`: esperar a otra nota no promete que salga sola).
+      automatica: { estado: 'REQUIERE_INTERVENCION' },
+    })
+    const out = parse(await call('emit_refund_credit_note', { venueId: 'v1', refundPaymentId: 'r1' }))
+    expect(out).toMatchObject({ ok: false, reason: 'ESPERA_NOTA_DE_ARTICULOS', automatica: { estado: 'REQUIERE_INTERVENCION' } })
+  })
+  it('🔴 F6 (R7): también en la vista previa con confirmación (elegible y de la marca)', async () => {
+    mockStatus.mockResolvedValueOnce({
+      ...sinEvidencia,
+      eligibility: { eligible: true, reason: null, message: null },
+      preview: { ...sinEvidencia.preview, alternativa: undefined },
+      automatica: { estado: 'RECUPERANDO' },
+    })
+    const out = parse(await call('emit_refund_credit_note', { venueId: 'v1', refundPaymentId: 'r1' }))
+    expect(out).toMatchObject({ requiresConfirmation: true, automatica: { estado: 'RECUPERANDO' } })
+  })
+  it('control — sin `automatica` en el estado, la respuesta no la trae', async () => {
+    mockStatus.mockResolvedValueOnce(sinEvidencia)
+    expect(parse(await call('emit_refund_credit_note', { venueId: 'v1', refundPaymentId: 'r1' }))).not.toHaveProperty('automatica')
+  })
+})

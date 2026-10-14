@@ -158,6 +158,8 @@ export async function issueCfdiForOrderController(req: Request, res: Response): 
       return
     }
 
+    // F6: cómo se facturó una venta con devoluciones y, con nota, qué pasó con cada una. Aditivos: sin devoluciones, el 201 de siempre.
+    const devoluciones = result.cfdi.entrada?.devoluciones
     // STAMPED — audit + 201 with minimal public fields
     logAction({
       staffId: authContext.userId,
@@ -172,6 +174,7 @@ export async function issueCfdiForOrderController(req: Request, res: Response): 
         folio: result.cfdi.folio,
         // C3: la factura del cliente de un ticket que salió de su global dice de qué extracción sale.
         ...(result.cfdi.entrada?.extraccion?.cfdiId ? { extraccionCfdiId: result.cfdi.entrada.extraccion.cfdiId } : {}),
+        ...(devoluciones ? { devoluciones } : {}),
       },
     })
 
@@ -185,6 +188,8 @@ export async function issueCfdiForOrderController(req: Request, res: Response): 
         xmlUrl: result.cfdi.xmlUrl,
         pdfUrl: result.cfdi.pdfUrl,
       },
+      ...(devoluciones?.modo ? { devoluciones: devoluciones.modo } : {}),
+      ...(result.notasDeDevolucion ? { notasDeDevolucion: result.notasDeDevolucion } : {}),
     })
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)

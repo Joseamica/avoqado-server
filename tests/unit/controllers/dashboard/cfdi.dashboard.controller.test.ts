@@ -494,6 +494,70 @@ describe('issueCfdiForOrderController', () => {
       }),
     )
   })
+
+  describe('F6 — facturar una venta con devoluciones', () => {
+    const emitida = (entrada?: unknown) => ({
+      id: 'c1',
+      uuid: 'U1',
+      serie: 'F',
+      folio: '2',
+      status: 'STAMPED',
+      xmlUrl: 'https://example.com/cfdi.xml',
+      pdfUrl: 'https://example.com/cfdi.pdf',
+      ...(entrada ? { entrada } : {}),
+    })
+    it('🔴 por el total con sus notas ⇒ 201 con `devoluciones` y `notasDeDevolucion` (aditivos) y la bitácora lo registra', async () => {
+      const notas = [{ refundPaymentId: 'r1', status: 'PENDIENTE', motivo: 'Falta el XML.' }]
+      mockIssue.mockResolvedValue({
+        status: 'STAMPED',
+        cfdi: emitida({ devoluciones: { modo: 'CON_NOTA', pagos: ['r1'] } }),
+        notasDeDevolucion: notas,
+      })
+      const res = mockRes()
+      await issueCfdiForOrderController(mockReq(), res)
+      expect(res.status).toHaveBeenCalledWith(201)
+      expect(res.json.mock.calls[0][0]).toEqual({
+        cfdi: {
+          id: 'c1',
+          uuid: 'U1',
+          serie: 'F',
+          folio: '2',
+          status: 'STAMPED',
+          xmlUrl: 'https://example.com/cfdi.xml',
+          pdfUrl: 'https://example.com/cfdi.pdf',
+        },
+        devoluciones: 'CON_NOTA',
+        notasDeDevolucion: notas,
+      })
+      expect(mockLogAction).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: 'CFDI_ISSUED',
+          data: expect.objectContaining({ devoluciones: { modo: 'CON_NOTA', pagos: ['r1'] } }),
+        }),
+      )
+    })
+    it('la factura neta ⇒ 201 con `devoluciones: DESCONTADAS`, sin notas', async () => {
+      mockIssue.mockResolvedValue({ status: 'STAMPED', cfdi: emitida({ devoluciones: { modo: 'DESCONTADAS', pagos: ['r1'] } }) })
+      const res = mockRes()
+      await issueCfdiForOrderController(mockReq(), res)
+      expect(res.json.mock.calls[0][0]).toMatchObject({ devoluciones: 'DESCONTADAS' })
+      expect(res.json.mock.calls[0][0]).not.toHaveProperty('notasDeDevolucion')
+    })
+    it('control — sin devoluciones, el 201 de hoy (sin campos nuevos)', async () => {
+      mockIssue.mockResolvedValue({ status: 'STAMPED', cfdi: emitida() })
+      const res = mockRes()
+      await issueCfdiForOrderController(mockReq(), res)
+      expect(Object.keys(res.json.mock.calls[0][0])).toEqual(['cfdi'])
+    })
+    it('🔴 decisión 1 ⇒ 409 con el código `CFDI_VENTA_DEVUELTA` y su texto', async () => {
+      const msg = 'Esta venta se devolvió completa: no hay nada que facturar.'
+      mockIssue.mockRejectedValue(new ConflictError(msg, 'CFDI_VENTA_DEVUELTA'))
+      const res = mockRes()
+      await issueCfdiForOrderController(mockReq(), res)
+      expect(res.status).toHaveBeenCalledWith(409)
+      expect(res.json).toHaveBeenCalledWith({ error: msg, code: 'CFDI_VENTA_DEVUELTA' })
+    })
+  })
 })
 
 // ──────────────────────────────────────────────────────────────────────────────

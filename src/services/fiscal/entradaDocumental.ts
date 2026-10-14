@@ -59,7 +59,20 @@ export interface EntradaDocumentalV1 {
    * la reutiliza. Opcional: sólo la llevan las facturas por extracción. `leerEntrada` la valida (malformada ⇒ la entrada no se lee).
    */
   extraccion?: ExtraccionDeLaFactura
+  /**
+   * F6 (founder 12-oct, hallazgo #6): la venta tenía devoluciones cuando se facturó desde Pedidos. `DESCONTADAS`: la factura salió sólo con
+   * lo que el cliente se quedó, y esos reembolsos ya NO llevan nota (`checkCreditNoteEligibility`). `CON_NOTA`: la factura es por el total y
+   * cada uno lleva su nota de crédito, emitida sola al timbrar (y por el job, si faltó). Opcional; `leerEntrada` la valida.
+   */
+  devoluciones?: DevolucionesDeLaFactura
 }
+
+/**
+ * F6: cómo se facturó una venta que ya tenía devoluciones (`EntradaDocumentalV1.devoluciones`). `redondeoCents` (Ruling M7 de C3, que F6
+ * hereda: «esa diferencia queda como redondeo registrado»): en la factura neta, (cobrado − devuelto) − lo facturado, sólo si no es 0; la
+ * factura sale por lo comercial de lo que quedó y esta diferencia no se reparte en ningún concepto.
+ */
+export type DevolucionesDeLaFactura = { modo: 'DESCONTADAS' | 'CON_NOTA'; pagos: string[]; redondeoCents?: number }
 
 /** C3 (Codex C3-9): una diferencia de concordancia entre la factura del cliente y su extracción, en centavos con signo (cliente − extracción). */
 export type DiferenciaDeConcordancia = { tratamiento: TratamientoDeNota; componente: 'BASE' | 'IVA' | 'TOTAL'; cents: number }
@@ -285,6 +298,7 @@ export function leerEntrada(json: unknown): EntradaDocumentalV1 | null {
   if (!esObjeto(json.params)) return null
   // C2 ronda 1 (M1): `montosPorRenglon` NO se valida aquí (se queda tal como se guardó, por la huella); lo valida `leerMontosPorRenglon`.
   if (json.extraccion !== undefined && !extraccionValida(json.extraccion)) return null
+  if (json.devoluciones !== undefined && !devolucionesValidas(json.devoluciones)) return null
 
   return json as unknown as EntradaDocumentalV1
 }
@@ -310,6 +324,13 @@ function extraccionValida(x: unknown): x is ExtraccionDeLaFactura {
         Math.abs(d.cents as number) <= REDONDEO_PERMITIDO_CENTS,
     )
   )
+}
+
+/** F6: modo conocido; pagos: una lista no vacía de ids de pago distintos; `redondeoCents`, si viene, entero. */
+function devolucionesValidas(x: unknown): x is DevolucionesDeLaFactura {
+  if (!esObjeto(x) || (x.modo !== 'DESCONTADAS' && x.modo !== 'CON_NOTA') || !Array.isArray(x.pagos) || !x.pagos.length) return false
+  if (x.redondeoCents !== undefined && !Number.isInteger(x.redondeoCents)) return false
+  return x.pagos.every(esTexto) && new Set(x.pagos).size === x.pagos.length
 }
 
 /**

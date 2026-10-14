@@ -58,6 +58,7 @@ import {
   acreditadoContra,
   acreditadoTotal,
   asegurarGlobalVigente,
+  creditNoteIdempotencyKey,
   defaultCreditNoteDeps,
   fiscalDeLaOriginal,
   LIMITE_ESPERA_XML_EN_LA_NOTA_MS,
@@ -104,6 +105,20 @@ export const motivoExtraccionSinGlobal = (e: { serie: string | null; folio: stri
 /** C3-12: la factura del cliente sale con el emisor de la global de la que se saca la venta; si la venta ya factura con otro, se detiene. */
 export const MOTIVO_EMISOR_DISTINTO_DE_LA_GLOBAL =
   'El emisor fiscal que factura esta venta ya no es el de la factura global en la que entró, así que no se puede facturar aparte desde aquí. Escríbenos a soporte.'
+/**
+ * F6 (R4/N1): el ticket ya está en la global y tiene devoluciones SIN su nota TIMBRADA contra ella. Extraerlo dejaría la devolución sin acreditar
+ * (C3 resta notas, no pagos), y restar pagos aquí no la acreditaría: la acredita SU nota (C2, P8 por ticket). La salida que ya existe.
+ */
+export const motivoDevolucionSinNotaEnLaGlobal = (d: { n: number; cents: number; porImporte?: boolean }) => {
+  const una = d.n === 1
+  const faltan = `Esta venta ya está en la factura global y tiene ${una ? 'una devolución' : `${d.n} devoluciones`} por $${(d.cents / 100).toFixed(2)} sin ${una ? 'su nota de crédito timbrada' : 'sus notas de crédito timbradas'} contra esa factura.`
+  const notas = una ? 'esa nota desde el pago de la devolución' : 'esas notas desde el pago de cada devolución'
+  // Codex código r1 (P3-4) y Ruling CX-6: con una por importe o de ajuste de entrega, emitir la nota no basta: C3 no puede comprobar qué
+  // productos quedaron (C3-P6 ⇒ contador).
+  if (d.porImporte)
+    return `${faltan} Emite ${notas} para corregir la factura global. Como ${una ? 'la devolución' : 'alguna'} fue por importe (sin artículos), no se puede comprobar qué productos quedaron: factura esta venta con tu contador.`
+  return `${faltan} Emite primero ${notas} (si ya ${una ? 'la emitiste, espera a que se timbre' : 'las emitiste, espera a que se timbren'}) y vuelve a facturar.`
+}
 const PUBLICO_EN_GENERAL = { rfc: 'XAXX010101000', razonSocial: 'PÚBLICO EN GENERAL', regimenFiscal: '616' } as const
 /** La prueba de dinero de la factura del cliente no depende de las claves SAT (las del catálogo de hoy las pone la Tarea 4). */
 const CLAVES_DE_COMPROBACION = () => ({ satProductKey: '01010101', satUnitKey: 'ACT' })
@@ -662,6 +677,56 @@ async function extraccionDeHoy(
   return { remanentes: c.remanentes, filasD16: c.filasD16, bruto: c.bruto, porTratamiento: c.porTratamiento }
 }
 
+/** N2: ¿hay una extracción VIVA de (global, ticket)? Entonces se retoma (C3), no se inicia. El mismo criterio con el que C2 dice `EXTRAIDA_SIN_FACTURA`. */
+const extraccionViva = (db: Pick<Prisma.TransactionClient, 'cfdi'>, globalId: string, orderId: string) =>
+  db.cfdi.findFirst({ where: { idempotencyKey: llaveDeExtraccion(globalId, orderId), ...CFDI_VIVO }, select: { id: true } })
+
+/**
+ * N1: lo que detiene la extracción por las devoluciones de la venta (REFUND COMPLETED con venta > 0, leídas como en la rama ordinaria:
+ * `devolucionesFiscales`) que no tienen su nota TIMBRADA contra ESTA global y sin cancelación (en trámite o consumada); `null` si nada. El
+ * vínculo se filtra en la base (`entrada.originalCfdiId`): del JSON de la nota no viaja nada. Ruling T4-1: una pendiente ILEGIBLE dice el
+ * motivo de R2 (C2 rechazaría su nota); Ruling T4-b: una cuya nota ya se canceló dice el de R3 (`motivoNotaCancelada`). Pasarse del tope
+ * detiene (nunca se revisa a medias). Perezoso: `facturaConDevolucion` importa este módulo.
+ */
+async function devolucionesSinNotaTimbrada(
+  db: Prisma.TransactionClient,
+  globalId: string,
+  venueId: string,
+  orderId: string,
+): Promise<string | null> {
+  const f6 = await import('./facturaConDevolucion')
+  const devoluciones = await f6.devolucionesFiscales(db, venueId, orderId)
+  if (devoluciones === null) return f6.MOTIVO_DEMASIADAS_DEVOLUCIONES
+  if (!devoluciones.length) return null
+  const timbradas = await db.cfdi.findMany({
+    where: {
+      idempotencyKey: { in: devoluciones.map(d => creditNoteIdempotencyKey(d.id)) },
+      status: 'STAMPED',
+      OR: [{ cancelStatus: null }, { cancelStatus: 'REJECTED' }],
+      entrada: { path: ['originalCfdiId'], equals: globalId },
+    },
+    select: { idempotencyKey: true },
+    take: devoluciones.length,
+  })
+  const conNota = new Set(timbradas.map(n => n.idempotencyKey))
+  const faltan = devoluciones.filter(d => !conNota.has(creditNoteIdempotencyKey(d.id)))
+  if (!faltan.length) return null
+  const ilegible = faltan.find(d => d.tipo === 'ILEGIBLE')
+  if (ilegible) return f6.motivoDevolucionIlegible(ilegible.salesRefundCents)
+  // Ruling T4-b (F6, R3): si la nota de una ya se CANCELÓ, «emite primero esa nota» es imposible (su llave no admite otra): el texto de R3.
+  const cancelada = await f6.motivoDeNotaCancelada(
+    db,
+    faltan.map(d => d.id),
+  )
+  if (cancelada) return cancelada
+  return motivoDevolucionSinNotaEnLaGlobal({
+    n: faltan.length,
+    cents: faltan.reduce((s, d) => s + d.salesRefundCents, 0),
+    // Ruling CX-6: sin rastro por artículo (IMPORTE o ajuste de ENTREGA; ILEGIBLE ya salió arriba) ⇒ C3 no podrá facturarla: contador.
+    porImporte: faltan.some(d => d.tipo !== 'ARTICULOS'),
+  })
+}
+
 /**
  * C3 (spec §4.5; Codex C3-1/C3-7/C3-12, C3-P8): la factura del cliente de un ticket que sale de la global, con los productos que quedan.
  * - **Sin `base`** (comprobación previa, con `prisma`, sin efectos): arma la extracción de hoy y, de sus remanentes, la factura.
@@ -683,9 +748,33 @@ export async function prepararPorExtraccion(
   // el `FOR UPDATE` de la orden que también toman las devoluciones).
   if (params.flow === 'AUTOFACTURA_A' && (await ventaConDevolucion(params.orderId, db)))
     return { entrada: null, reasons: [MOTIVO_AUTOFACTURA_CON_DEVOLUCION] }
+  // F6 (R4/N1/N2): sólo al INICIAR una extracción —en la comprobación previa y, con `tx`, bajo el `FOR UPDATE` de la orden en la reserva
+  // (`comprobarNominativa`)—. No con la extracción YA timbrada (`base.extraccion`: la captura de la factura del cliente) ni al RETOMAR una viva:
+  // ahí C2 ya no admite la nota contra la global (`EXTRAIDA_SIN_FACTURA`) y la devolución va después contra la factura del cliente.
+  if (!base?.extraccion && !(await extraccionViva(db, global.id, params.orderId))) {
+    const detenida = await devolucionesSinNotaTimbrada(db, global.id, bundle.venueId, params.orderId)
+    if (detenida) return { entrada: null, reasons: [detenida] }
+  }
   const reasons = bundle.emisor.id === global.fiscalEmisorId ? [] : [MOTIVO_EMISOR_DISTINTO_DE_LA_GLOBAL]
   const b = base ?? (await extraccionDeHoy(db, params, global.id, bundle.venueId))
   if ('motivo' in b) return { entrada: null, reasons: [...reasons, b.motivo] }
+  return facturaDeRemanentes(params, bundle, b, reasons)
+}
+
+/**
+ * C3 · F6: la factura del cliente con unos productos que quedan, cuadrada a lo que se factura de cada tasa (`bruto`): claves SAT del
+ * catálogo de HOY (B11, por el `OrderItem` de cada concepto), `nominativaPorExtraccion`, receptor/forma/método de hoy y
+ * `validateBeforeStamp`; `paidCents` = Σ `bruto` (B10). Con `porTratamiento` (la asignación de una extracción, C3) exige además la
+ * concordancia; F6 no tiene extracción y no lo pasa. `entrada: null` ⇒ los remanentes no se pudieron facturar (sus motivos lo dicen); con
+ * `entrada` y motivos, son de validación (p. ej. el receptor). No modifica `b` (en C3 son referencias de la memoria compartida de la global).
+ */
+export function facturaDeRemanentes(
+  params: { orderId: string; receptor: IssueReceptor },
+  bundle: LoadedOrderBundle,
+  b: Omit<BaseDeLaFactura, 'porTratamiento'> & { porTratamiento?: FiscalDeNota },
+  previos: string[] = [],
+): { entrada: EntradaDocumentalV1 | null; reasons: string[] } {
+  const reasons = [...previos]
   // B11 / C3-P8: el payload de la factura individual de HOY (el mismo que arma `capturarEntrada`) da las claves; su dinero no se usa.
   let venta: CreateInvoiceParams
   try {
@@ -713,7 +802,7 @@ export async function prepararPorExtraccion(
     reales: b.remanentes,
     filasD16: b.filasD16,
     claves: (_productId, _descripcion, orderItemId) => claves.get(orderItemId)!,
-    extraido: { brutoPorTratamiento: b.bruto, porTratamiento: b.porTratamiento },
+    extraido: { brutoPorTratamiento: b.bruto, ...(b.porTratamiento ? { porTratamiento: b.porTratamiento } : {}) },
   })
   if ('motivo' in nom) return { entrada: null, reasons: [...reasons, nom.motivo] }
   const items = nom.items

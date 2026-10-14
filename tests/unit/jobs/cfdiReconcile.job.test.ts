@@ -1,8 +1,15 @@
 import { Prisma } from '@prisma/client'
 import prisma from '../../../src/utils/prismaClient'
-import { CfdiReconcileJob, PRESUPUESTO_REPARACION_MS, PRESUPUESTO_TIMBRES_ATORADOS_MS } from '../../../src/jobs/cfdiReconcile.job'
+import {
+  CfdiReconcileJob,
+  FACTURAS_CON_NOTAS_POR_PASADA,
+  PRESUPUESTO_NOTAS_DE_DEVOLUCION_MS,
+  PRESUPUESTO_REPARACION_MS,
+  PRESUPUESTO_TIMBRES_ATORADOS_MS,
+} from '../../../src/jobs/cfdiReconcile.job'
 import { completarArchivos, repararArchivosCompartido, repararArchivosDe } from '../../../src/services/fiscal/finalizadorCfdi'
 import { reconcileStuckCfdi } from '../../../src/services/fiscal/cfdiReconcile.service'
+import logger from '../../../src/config/logger'
 jest.mock('../../../src/observability/jobContext', () => ({ scheduleJob: jest.fn(() => ({ start: jest.fn(), stop: jest.fn() })) }))
 jest.mock('../../../src/services/fiscal/cfdi.service', () => ({ tocaRevisarCancelaciones: () => false }))
 jest.mock('../../../src/services/fiscal/cfdiReconcile.service', () => ({ reconcileStuckCfdi: jest.fn() }))
@@ -19,11 +26,18 @@ jest.mock('../../../src/services/fiscal/fiscalProvider.factory', () => ({ resolv
 // C3 · T2 (Codex C3-23): la pasada que repone el `CFDI_EXTRACCION_EMITIDA` perdido llama al ÚNICO escritor del evento; aquí, un doble.
 jest.mock('../../../src/services/fiscal/cfdiExtraccion.service', () => ({ registrarExtraccionEmitida: jest.fn() }))
 import { registrarExtraccionEmitida } from '../../../src/services/fiscal/cfdiExtraccion.service'
+// F6: la pasada de notas de devolución lee y emite con el módulo de F6 (el mismo emisor que «Facturar»); aquí, dobles.
+jest.mock('../../../src/services/fiscal/facturaConDevolucion', () => ({
+  facturasConNotasPendientes: jest.fn(),
+  emitirNotasDeDevolucion: jest.fn(),
+}))
+import { emitirNotasDeDevolucion, facturasConNotasPendientes } from '../../../src/services/fiscal/facturaConDevolucion'
 describe('barrido de archivos CFDI', () => {
   beforeEach(() => {
     jest.clearAllMocks()
     // C3 · T2 (M2 del pre-flight): la pasada de eventos de extracción lee con `$queryRaw`; sin filas por omisión.
     ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([])
+    ;(facturasConNotasPendientes as jest.Mock).mockResolvedValue([])
   })
   it('corre sin STAMPING; selección acotada, orden estable y fallo aislado', async () => {
     const rows = ['a', 'b'].map(id => ({
@@ -227,5 +241,43 @@ describe('barrido de archivos CFDI', () => {
     expect((registrarExtraccionEmitida as jest.Mock).mock.calls[0][0]).toMatchObject({ completa: true }) // la fila entera, releída
     await job.runNow() // la página estaba llena: la siguiente pasada sigue después de la última
     expect((prisma.$queryRaw as jest.Mock).mock.calls[1]).toContain('e49')
+  })
+
+  it('🔴 F6: las notas de devolución — por factura, SÓLO sus pendientes en orden fiscal, sin actor, con el presupuesto y fallo aislado', async () => {
+    const facturas = Array.from({ length: 3 }, (_, i) => ({ cfdiId: `c${i}`, venueId: 'v1', orderId: 'o1', pendientes: ['art', 'imp'] }))
+    ;(prisma.cfdi.findMany as jest.Mock).mockResolvedValue([])
+    ;(facturasConNotasPendientes as jest.Mock).mockResolvedValueOnce(facturas)
+    ;(emitirNotasDeDevolucion as jest.Mock).mockRejectedValueOnce(new Error('una que falla')).mockResolvedValue([{ status: 'STAMPED' }])
+    const before = Date.now()
+    await new CfdiReconcileJob().runNow()
+    const [consulta] = (facturasConNotasPendientes as jest.Mock).mock.calls[0]
+    expect(consulta).toMatchObject({ despuesDe: null, paraEmitir: true, limite: FACTURAS_CON_NOTAS_POR_PASADA })
+    expect(consulta.timbradaAntesDe.getTime()).toBeLessThanOrEqual(Date.now() - 10 * 60_000) // el pedido del usuario ya las intentó
+    expect(consulta.timbradaAntesDe.getTime()).toBeGreaterThanOrEqual(before - 10 * 60_000)
+    const llamadas = (emitirNotasDeDevolucion as jest.Mock).mock.calls
+    expect(llamadas.map(([f, pagos, p]) => [f.id, pagos, p.staffId])).toEqual(facturas.map(f => [f.cfdiId, ['art', 'imp'], null]))
+    expect(llamadas.every(([, , p]) => p.presupuestoMs > 0 && p.presupuestoMs <= PRESUPUESTO_NOTAS_DE_DEVOLUCION_MS)).toBe(true)
+  })
+
+  // T7-3 (revisión final de F6): la pasada de notas no depende de las otras ni las tumba.
+  it('🔴 T7-3: si la pasada de eventos de extracción lanza, la de notas igual corre', async () => {
+    ;(prisma.cfdi.findMany as jest.Mock).mockResolvedValue([])
+    ;(prisma.$queryRaw as jest.Mock).mockRejectedValueOnce(new Error('se cayó la consulta de extracciones'))
+    const facturas = [{ cfdiId: 'c0', venueId: 'v1', orderId: 'o1', pendientes: ['imp'] }]
+    ;(facturasConNotasPendientes as jest.Mock).mockResolvedValueOnce(facturas)
+    ;(emitirNotasDeDevolucion as jest.Mock).mockResolvedValue([{ status: 'STAMPED' }])
+    await new CfdiReconcileJob().runNow()
+    expect(facturasConNotasPendientes).toHaveBeenCalledTimes(1)
+    expect(emitirNotasDeDevolucion).toHaveBeenCalledTimes(1)
+  })
+  it('🔴 T7-3: si la pasada de notas lanza, se registra SU error (no «tick failed») y el siguiente tick corre', async () => {
+    ;(prisma.cfdi.findMany as jest.Mock).mockResolvedValue([])
+    ;(facturasConNotasPendientes as jest.Mock).mockRejectedValueOnce(new Error('se cayó la consulta de notas'))
+    const job = new CfdiReconcileJob()
+    await expect(job.runNow()).resolves.toBeUndefined()
+    expect(logger.error).toHaveBeenCalledWith(expect.stringMatching(/notas de devolución/), expect.any(Error))
+    expect(logger.error).not.toHaveBeenCalledWith(expect.stringMatching(/tick failed/), expect.anything())
+    await job.runNow() // `isRunning` volvió a false
+    expect(facturasConNotasPendientes).toHaveBeenCalledTimes(2)
   })
 })

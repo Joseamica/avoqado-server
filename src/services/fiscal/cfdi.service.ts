@@ -40,6 +40,7 @@ import {
 } from './descuentoPorRenglon'
 import { filasDeDescuentoCompletas } from './filasDeDescuentoTx'
 import { DONDE_TIMBRE_EN_DUDA, timbreEnDuda } from './timbreEnDuda'
+import type { NotaDeDevolucion } from './facturaConDevolucion'
 import { leerReparto } from '../shared/repartoDescuento'
 
 // ─── List CFDIs ───────────────────────────────────────────────────────────────
@@ -199,8 +200,44 @@ export async function listCfdisForVenue(params: ListCfdisParams): Promise<ListCf
   ])
 
   const ahora = new Date()
-  const conSuFactura = await conSuFacturaDelCliente(venueId, filas)
+  const conSuFactura = await conSusNotasPendientes(venueId, await conSuFacturaDelCliente(venueId, filas))
   return { cfdis: (await conSuPrincipal(venueId, conSuFactura)).map(f => vistaDeCancelacion(f, ahora)), total, page, pageSize }
+}
+
+/**
+ * F6 (R7, N10): a cada factura por el total con notas automáticas que faltan, los pagos de devolución sin su nota TIMBRADA contra ella, en
+ * orden fiscal, con su importe y su fecha (para reconocer cada uno). Toda la página en DOS consultas, sea cual sea su tamaño.
+ */
+async function conSusNotasPendientes<T extends { id: string; type: string; isGlobal: boolean; status: string }>(
+  venueId: string,
+  filas: T[],
+) {
+  const candidatas = filas.filter(f => f.type === 'INGRESO' && !f.isGlobal && f.status === 'STAMPED').map(f => f.id)
+  if (!candidatas.length) return filas
+  const { facturasConNotasPendientes } = await moduloDeDevolucion()
+  const conNotas = await facturasConNotasPendientes({ venueIds: [venueId], cfdiIds: candidatas, limite: candidatas.length })
+  if (!conNotas.length) return filas
+  const ids = conNotas.flatMap(f => f.pendientes)
+  const pagos = new Map(
+    (
+      await prisma.payment.findMany({
+        where: { id: { in: ids }, venueId },
+        select: { id: true, amount: true, createdAt: true },
+        take: ids.length,
+      })
+    ).map(p => [p.id, p]),
+  )
+  const pendientes = new Map(
+    conNotas.map(f => [
+      f.cfdiId,
+      f.pendientes.map(id => ({
+        refundPaymentId: id,
+        importeCents: Math.abs(centavos(pagos.get(id)?.amount)),
+        fecha: pagos.get(id)?.createdAt.toISOString() ?? '',
+      })),
+    ]),
+  )
+  return filas.map(f => (pendientes.has(f.id) ? { ...f, notasDeDevolucionPendientes: pendientes.get(f.id)! } : f))
 }
 
 /** C3 · T8: en qué va la factura del cliente de una nota de extracción timbrada y viva. */
@@ -442,9 +479,9 @@ export interface LoadedOrderBundle {
   taxCents: number
   totalCents: number
   /**
-   * Lo que el cliente PAGÓ por la orden (Σ pagos COMPLETED, reembolsos en negativo, SIN propina).
-   * Es la verdad contra la que `issueCfdiForOrder` compara el total de la factura antes de timbrar:
-   * un CFDI por menos (o más) de lo cobrado no se emite. Ausente sólo en bundles construidos a mano.
+   * Lo COBRADO BRUTO de la orden: Σ cobros COMPLETED elegibles (REGULAR/FAST/legado), SIN propina; los reembolsos NO restan (B14: cada
+   * devolución lleva su nota de crédito, o F6 la descuenta de la factura). Es la verdad contra la que `issueCfdiForOrder` compara el
+   * total de la factura antes de timbrar: un CFDI por menos (o más) de lo cobrado no se emite. Ausente sólo en bundles construidos a mano.
    */
   paidCents?: number
   /**
@@ -502,6 +539,8 @@ export interface IssueCfdiDeps {
   despuesDeLaAdmision?: () => Promise<void>
   /** SÓLO PARA PRUEBAS (C3): después de la comprobación previa de la factura del cliente, antes de extraer. */
   despuesDeLaComprobacionPrevia?: () => Promise<void>
+  /** F6: emitir la nota de crédito de un reembolso (por omisión, `emitRefundCreditNote`); las pruebas la sustituyen. */
+  emitRefundCreditNote?: typeof import('./cfdiCreditNote.service').emitRefundCreditNote
 }
 
 export interface IssueCfdiResult {
@@ -523,6 +562,11 @@ export interface IssueCfdiResult {
    * facturada con la devuelta, la original). Quien llama lo dice en vez de «espera a que se cancele».
    */
   sustitutaEnCancelacion?: any
+  /**
+   * F6: la factura por el total de una venta que ya tenía devoluciones (`entrada.devoluciones.modo = 'CON_NOTA'`): qué pasó con la nota de
+   * cada una, en orden fiscal. `PENDIENTE` = no salió todavía (con su motivo); la retoma el job de conciliación. Nuevo y opcional.
+   */
+  notasDeDevolucion?: NotaDeDevolucion[]
 }
 
 /** «A-14», o el UUID si la factura no trae serie/folio. Para mensajes al usuario. */
@@ -633,7 +677,20 @@ export async function issueCfdiForOrder(
     return { status: 'STAMPED', cfdi: existing, alreadyIssued: true }
   }
 
-  if (!existing || existing.protocoloIva === 1) return emitirConEntrada(params, idempotencyKey, deps)
+  if (!existing || existing.protocoloIva === 1) {
+    const r = await emitirConEntrada(params, idempotencyKey, deps)
+    // F6 (decisión 3): sólo la emisión que TIMBRÓ (no la que encontró una ya timbrada) emite las notas congeladas en su entrada, con presupuesto.
+    const dev = r.status === 'STAMPED' && !r.alreadyIssued ? leerEntrada(r.cfdi?.entrada)?.devoluciones : undefined
+    if (dev?.modo !== 'CON_NOTA') return r
+    const { emitirNotasDeDevolucion } = await moduloDeDevolucion()
+    const notasDeDevolucion = await emitirNotasDeDevolucion(
+      { id: r.cfdi.id, venueId: r.cfdi.venueId },
+      dev.pagos,
+      { sandbox: params.sandbox, staffId: params.staffId ?? null, presupuestoMs: PRESUPUESTO_NOTAS_AL_FACTURAR_MS },
+      deps.emitRefundCreditNote,
+    )
+    return { ...r, notasDeDevolucion }
+  }
 
   // 2. Load (legacy rows only)
   // El personal (Pedidos → Facturar) factura a propósito; la autofactura del cliente respeta el interruptor.
@@ -784,6 +841,14 @@ export const PROCESANDO = 'La factura de esta venta se está procesando; intenta
  * texto neutro de siempre; este motivo va sólo al log. La factura del personal, la sustitución y las notas de crédito no lo miran.
  */
 export const MOTIVO_AUTOFACTURA_CON_DEVOLUCION = 'Esta venta tiene una devolución completada: no se autofactura (A7-R10).'
+/**
+ * F6 (founder 12-oct, hallazgo #6): desde Pedidos, una venta cuyo cobro se devolvió COMPLETO no se factura (sería el ingreso de una operación
+ * que no se llevó a cabo). Se decide bajo el `FOR UPDATE` de la orden, antes de reservar: ni PAC ni fila `Cfdi`. Viaja como 409 con su código.
+ */
+export const MOTIVO_VENTA_DEVUELTA_COMPLETA = 'Esta venta se devolvió completa: no hay nada que facturar.'
+export const CODIGO_VENTA_DEVUELTA = 'CFDI_VENTA_DEVUELTA'
+/** F6 (R6/N4): «Facturar» intenta las notas automáticas mientras le quede esto (cada una con su límite); las demás las retoma el job. */
+export const PRESUPUESTO_NOTAS_AL_FACTURAR_MS = 15_000
 /** ¿La venta tiene al menos un `Payment` REFUND `COMPLETED`? (una PENDING o FAILED no cuenta). */
 export async function ventaConDevolucion(orderId: string, db: Pick<Prisma.TransactionClient, 'payment'> = prisma): Promise<boolean> {
   return !!(await db.payment.findFirst({ where: { orderId, type: 'REFUND', status: 'COMPLETED' }, select: { id: true } }))
@@ -813,6 +878,8 @@ type Admitido = { global: GlobalVivaDeLaOrden | null; extraccion: any | null }
  * extracción se arman al cargar su módulo: importada de arriba, según quién cargue primero, quedarían a medias (aviso de la Tarea 2).
  */
 const moduloDeExtraccion = () => import('./cfdiExtraccion.service')
+/** F6: la decisión de una venta con devoluciones, perezosa por la misma razón que la extracción (importa la global y la extracción). */
+const moduloDeDevolucion = () => import('./facturaConDevolucion')
 
 /** Reservar y recapturar son las únicas rutas que leen la venta viva. El PAC sólo recibe la foto. */
 export async function emitirConEntrada(
@@ -953,8 +1020,9 @@ export async function emitirConEntrada(
     await deps.despuesDeLaAdmision?.() // gancho de prueba (C3): con todos los candados de la admisión tomados
     return { global, extraccion }
   }
-  async function capture(tx: Prisma.TransactionClient, admitido: Admitido) {
+  async function capture(tx: Prisma.TransactionClient, admitido: Admitido, recaptura = false) {
     let extraidaDeLaOriginal: EntradaDocumentalV1 | null = null
+    let notasDeLaOriginal: string[] | undefined
     // La original sólo debe seguir vigente al reservar/recapturar; recuperar un envío no depende de ello.
     if (sustitucion) {
       const original = await tx.cfdi.findUnique({ where: { id: sustitucion.id } })
@@ -981,7 +1049,11 @@ export async function emitirConEntrada(
       const relacionado = await documentoRelacionadoVivo(tx, original.id, original)
       if (relacionado) throw new ConflictError(textoDeDocumentoRelacionado(relacionado))
       const deLaOriginal = leerEntrada(original.entrada)
-      if (deLaOriginal?.extraccion) extraidaDeLaOriginal = deLaOriginal
+      // F6: la sustituta de una factura que salió SIN lo devuelto conserva lo de la original (como la de una extracción, C3 Tarea 7); la de
+      // una factura por el total hereda sus notas automáticas (el job emite las que falten contra ella). La sustitución nunca vuelve a decidir.
+      // Ninguna heredada tiene nota TIMBRADA contra la original: viva, la detiene G4 (arriba); cancelada, R3 (rama ordinaria).
+      if (deLaOriginal?.extraccion || deLaOriginal?.devoluciones?.modo === 'DESCONTADAS') extraidaDeLaOriginal = deLaOriginal
+      else if (deLaOriginal?.devoluciones?.modo === 'CON_NOTA') notasDeLaOriginal = deLaOriginal.devoluciones.pagos
     }
     const bundle = await deps.loadOrderForCfdi(
       params.orderId,
@@ -1011,11 +1083,13 @@ export async function emitirConEntrada(
       }).reasons
     let entrada: EntradaDocumentalV1
     let reasons: string[]
+    let descontadas = false
     // C3 (B10): en las dos ramas de extracción la factura es por lo EXTRAÍDO (su `paidCents`), no por lo cobrado de la orden: ni la barrera
     // de lo cobrado ni los motivos del cargador (hablan de reconstruir la orden, y estas facturas no lo hacen) aplican.
     if (extraidaDeLaOriginal) {
       // C3 (Tarea 7; spec §4.5): la sustituta de una factura por extracción CONSERVA lo extraído —mismos conceptos, montos, renglones y
-      // `extraccion`—; sólo cambian el receptor y la relación 04.
+      // `extraccion`—; sólo cambian el receptor y la relación 04. F6 (Review Focus 5): igual la de una factura neta (`devoluciones`
+      // DESCONTADAS): recapturar la orden la volvería por el total.
       entrada = structuredClone({
         ...extraidaDeLaOriginal,
         replacesCfdiId: sustitucion!.id,
@@ -1036,15 +1110,40 @@ export async function emitirConEntrada(
       entrada = preparada.entrada
       reasons = preparada.reasons
     } else {
-      entrada = capturarEntrada(bundle, params.receptor, params.orderId, { replacesCfdiId: sustitucion?.id })
-      if (sustitucion) entrada.params.relation = { tipoRelacion: '04', relatedUuids: [sustitucion.uuid] }
-      reasons = motivosParaMostrar(validar(entrada), bundle.unsupportedReasons ?? [])
+      // F6 (founder 12-oct, hallazgo #6): una venta que ya tuvo devoluciones, decidido aquí, dentro de la admisión y bajo su `FOR UPDATE` de la
+      // orden (el que toman las devoluciones). Sólo una emisión nueva del personal: la autofactura con devolución ya se detuvo en la admisión
+      // (A7-R10) y la sustitución no decide (conserva o hereda lo de su original).
+      const dev =
+        sustitucion || params.flow === 'AUTOFACTURA_A'
+          ? null
+          : await (await moduloDeDevolucion()).facturaConDevolucion(tx, params, bundle)
+      // M1 (revisión final): en la RECAPTURA de una reserva que nunca se envió, la venta devuelta completa es un motivo (la fila pasa a
+      // VALIDATION_FAILED, que no es viva), no un 409 que desharía la transacción y la dejaría «en proceso» para siempre.
+      if (dev?.caso === 'TOTAL' && !recaptura) throw new ConflictError(MOTIVO_VENTA_DEVUELTA_COMPLETA, CODIGO_VENTA_DEVUELTA)
+      if (dev?.caso === 'DESCONTADAS') {
+        entrada = dev.entrada // decisión 2: sólo lo que el cliente se quedó, por lo que pagó (la barrera de lo cobrado no aplica: B10)
+        reasons = dev.reasons
+        descontadas = true
+      } else {
+        entrada = capturarEntrada(bundle, params.receptor, params.orderId, { replacesCfdiId: sustitucion?.id })
+        if (sustitucion) entrada.params.relation = { tipoRelacion: '04', relatedUuids: [sustitucion.uuid] }
+        const heredadas = dev?.caso === 'CON_NOTA' ? dev.pagos : notasDeLaOriginal
+        if (heredadas) entrada.devoluciones = { modo: 'CON_NOTA', pagos: heredadas } // decisión 3, en orden fiscal (R1), o heredada
+        reasons = motivosParaMostrar(validar(entrada), bundle.unsupportedReasons ?? [])
+        if (dev?.caso === 'DETENIDA') reasons.push(dev.motivo) // R2, 8 %, tope: antes de timbrar
+        if (dev?.caso === 'TOTAL') reasons.push(MOTIVO_VENTA_DEVUELTA_COMPLETA) // M1: sólo llega aquí en la recaptura
+        // F6 (R3): una nota anterior de alguna de esas devoluciones se canceló ⇒ no se emite el ingreso (su llave no admite otra nota).
+        const conNota = entrada.devoluciones?.pagos
+        const cancelada = conNota ? await (await moduloDeDevolucion()).motivoDeNotaCancelada(tx, conNota) : null
+        if (cancelada) reasons.push(cancelada)
+      }
     }
     // B3a Tarea 6b: el documento que SE MANDA, sumado como el PAC; tras el ajuste del cargador, la suma por concepto ya no es lo cobrado a propósito.
     const documentoCents = totalSegunElPacCents(entrada.params.items.map(conceptoDesdeElPayload))
     if (
       !extraidaDeLaOriginal &&
       !admitido.extraccion &&
+      !descontadas &&
       !bundle.unsupportedReasons?.length &&
       bundle.paidCents !== undefined &&
       bundle.paidCents !== documentoCents
@@ -1130,7 +1229,7 @@ export async function emitirConEntrada(
         const claimed = await tx.cfdi.updateMany({ where, data: { status: 'STAMPING' } })
         if (claimed.count !== 1) throw new ConflictError(PROCESANDO)
         await liberarSellosDe(tx, previous.id)
-        const captured = await capture(tx, admitido)
+        const captured = await capture(tx, admitido, true)
         const attempts = previous.attempts + (captured.reasons.length ? 0 : 1)
         const { count } = await tx.cfdi.updateMany({
           where: { id: previous.id, status: 'STAMPING', attempts: previous.attempts },
