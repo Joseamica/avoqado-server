@@ -30,6 +30,8 @@ import {
   MEMORIA_DE_GLOBALES,
   MOTIVO_GLOBAL_CANCELADA,
   MOTIVO_EXTRAIDA_SIN_FACTURA,
+  MOTIVO_DESCONTADA_EN_LA_FACTURA,
+  motivoEsperaNotaDeArticulos,
   olvidarGlobalesEvaluadas,
   asegurarGlobalVigente,
   VIGENCIA_MINIMA_ANTES_DE_LOS_CANDADOS_MS,
@@ -245,6 +247,24 @@ describe('checkCreditNoteEligibility (puro) — lo que decide si el botón se pi
       expect(res.eligible).toBe(false)
       expect(res.reason).toBe(reason)
       expect(res.message && res.message.length).toBeGreaterThan(10)
+    }
+  })
+
+  // F6 (D1 del /full-testing): sin factura y con la venta devuelta COMPLETA, «primero se factura la venta» es falso (F6 ya no la factura).
+  it('🔴 F6 D1: sin factura y la venta devuelta completa ⇒ VENTA_DEVUELTA_COMPLETA, y el texto NO manda a facturarla', () => {
+    const res = checkCreditNoteEligibility(makeLoaded({ original: null, ventaDevueltaCompleta: true }))
+    expect(res).toEqual({
+      eligible: false,
+      reason: 'VENTA_DEVUELTA_COMPLETA',
+      message: 'Esta venta se devolvió completa: ya no se factura por separado.',
+    })
+    expect(res.message).not.toMatch(/primero se factura/)
+  })
+  it('control — sin factura y devuelta en parte (o sin dato): sigue NO_ORIGINAL_CFDI, y ahí sí se puede facturar la venta', () => {
+    for (const over of [{}, { ventaDevueltaCompleta: false }]) {
+      const res = checkCreditNoteEligibility(makeLoaded({ original: null, ...over }))
+      expect(res.reason).toBe('NO_ORIGINAL_CFDI')
+      expect(res.message).toMatch(/primero se factura la venta/)
     }
   })
 
@@ -3132,5 +3152,63 @@ describe('micro-ronda final — el «en proceso» de la nota nombra la NOTA', ()
     )
     await expect(consulta).rejects.toThrow(/^La nota de crédito de este reembolso se está procesando/)
     await expect(consulta).rejects.not.toThrow(/La factura de esta venta/)
+  })
+})
+
+describe('F6 · las guardas de la nota de una venta facturada con devoluciones', () => {
+  /** La factura neta de F6: sólo el pan ($58 al 16 %); el reembolso `pay-refund-1` (el de `makeLoaded`) se descontó al facturar. */
+  const neta = (pagos: string[]) =>
+    makeOriginal({ entrada: { ...entradaDe([incluido(5800, 'Tasa', 0.16)], () => 'pan'), devoluciones: { modo: 'DESCONTADAS', pagos } } })
+  const porElTotal = () =>
+    makeOriginal({
+      entrada: {
+        ...entradaDe([incluido(11600, 'Tasa', 0.16)], () => 'pan'),
+        devoluciones: { modo: 'CON_NOTA', pagos: ['art', 'pay-refund-1'] },
+      },
+    })
+  const pendiente = [{ refundPaymentId: 'art', cents: 5800 }]
+  const porImporte = (notasFijasPendientes: Array<{ refundPaymentId: string; cents: number }>) => {
+    const l = { ...makeLoaded({ original: porElTotal() }), notasFijasPendientes }
+    l.refund.salesRefundCents = 5000
+    l.refund.processorData = undefined // sin artículos: por importe
+    return l
+  }
+
+  it('🔴 Review Focus 4: el reembolso descontado no lleva nota — ni por artículos ni «por importe», y la vista previa no ofrece alternativa', () => {
+    const loaded = porArticulo(neta(['pay-refund-1']), 'cafe', 20000)
+    expect(checkCreditNoteEligibility(loaded)).toEqual({
+      eligible: false,
+      reason: 'DESCONTADA_EN_LA_FACTURA',
+      message: MOTIVO_DESCONTADA_EN_LA_FACTURA,
+    })
+    expect(checkCreditNoteEligibility({ ...loaded, modalidadElegida: 'POR_IMPORTE' }).reason).toBe('DESCONTADA_EN_LA_FACTURA')
+    expect(alternativaPorImporte(loaded)).toBeNull()
+  })
+  it('control — un reembolso POSTERIOR de lo que quedó en la factura sí sale por artículos', () => {
+    expect(checkCreditNoteEligibility(porArticulo(neta(['otro-pago']), 'pan', 5800)).eligible).toBe(true)
+  })
+  it('🔴 R1/N3: por importe espera mientras una de reparto fijo no tenga su nota viva (el texto nombra su importe); sin pendientes, sale', () => {
+    expect(checkCreditNoteEligibility(porImporte(pendiente))).toEqual({
+      eligible: false,
+      reason: 'ESPERA_NOTA_DE_ARTICULOS',
+      message: motivoEsperaNotaDeArticulos(5800),
+    })
+    expect(checkCreditNoteEligibility(porImporte([])).eligible).toBe(true)
+  })
+  it('🔴 H1: «acreditar por importe» elegido (P10) también espera; la MISMA devolución por artículos (reparto fijo) no', () => {
+    const conArticulos = { ...porArticulo(porElTotal(), 'cafe', 5000), notasFijasPendientes: pendiente }
+    expect(checkCreditNoteEligibility({ ...conArticulos, modalidadElegida: 'POR_IMPORTE' }).reason).toBe('ESPERA_NOTA_DE_ARTICULOS')
+    expect(checkCreditNoteEligibility(conArticulos).reason).not.toBe('ESPERA_NOTA_DE_ARTICULOS')
+    expect(alternativaPorImporte(conArticulos)).toBeNull() // la vista previa no la ofrece mientras espera
+  })
+  it('el texto de la espera es neutral: nombra la devolución a revisar y no promete emisión automática (H4)', () => {
+    expect(motivoEsperaNotaDeArticulos(5800)).toContain('$58.00')
+    expect(motivoEsperaNotaDeArticulos(5800)).not.toMatch(/sola|autom/i)
+  })
+  it('una devolución sólo de PROPINA sigue diciendo TIP_ONLY (nunca lleva nota), no que espera', () => {
+    const l = porImporte(pendiente)
+    l.refund.salesRefundCents = 0
+    l.refund.tipRefundCents = 1000
+    expect(checkCreditNoteEligibility(l).reason).toBe('TIP_ONLY')
   })
 })

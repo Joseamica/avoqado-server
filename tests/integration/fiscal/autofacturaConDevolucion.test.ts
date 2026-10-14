@@ -204,11 +204,13 @@ describe('T-I2 · A7-R10 — autofactura con devolución (base real)', () => {
     expect(res.status).toBe('STAMPED')
   })
 
-  it('control — la factura del PERSONAL (STAFF_B) de una venta devuelta no cambia', async () => {
+  it('F6 (cambio A PROPÓSITO): la factura del PERSONAL (STAFF_B) de una venta devuelta COMPLETA ya no se timbra — 409 con su código', async () => {
     const { orderId } = await venta()
     await devolucion(orderId, 116, 'COMPLETED')
-    const res = await issueCfdiForOrder({ orderId, receptor, sandbox: true, expectedVenueId: venueId, flow: 'STAFF_B' }, deps)
-    expect(res.status).toBe('STAMPED')
+    await expect(
+      issueCfdiForOrder({ orderId, receptor, sandbox: true, expectedVenueId: venueId, flow: 'STAFF_B' }, deps),
+    ).rejects.toMatchObject({ code: 'CFDI_VENTA_DEVUELTA' })
+    expect(provider.createInvoice).not.toHaveBeenCalled()
   })
 
   it('🔴 (5) carrera: la devolución que hace commit MIENTRAS el POST espera el candado de la orden también bloquea', async () => {

@@ -761,9 +761,23 @@ describe('T-I2 · A7-R10 — la autofactura no se ofrece en una venta con devolu
     expect(deps.resolveProvider).toHaveBeenCalled()
   })
 
-  it('control — la factura del PERSONAL (STAFF_B) de una venta con devolución no cambia: se timbra', async () => {
+  // B5 · F6 (cambio A PROPÓSITO, como su gemela de integración): la devolución TOTAL ya no se timbra desde Pedidos. La decisión lee las
+  // devoluciones con `$queryRaw` bajo el mismo candado; aquí esa consulta contesta la fila del REFUND (las demás, la fila del candado).
+  it('F6 — la factura del PERSONAL (STAFF_B) de una venta devuelta COMPLETA ya no se timbra: 409 CFDI_VENTA_DEVUELTA', async () => {
     const { deps } = conPagos(makeDeps(), tablaPagos([venta, devolucionTotal]))
-    const res = await issueCfdiForOrder({ ...autofactura, flow: 'STAFF_B' }, deps)
-    expect(res.status).toBe('STAMPED')
+    const base = deps.runInTransaction!
+    deps.runInTransaction = work =>
+      base(tx => {
+        const candado = tx.$queryRaw
+        tx.$queryRaw = jest.fn((sql: TemplateStringsArray, ...v: unknown[]) =>
+          /FROM "Payment"/.test(sql.join('?')) ? Promise.resolve([{ id: 'r1', amount: -116, processorData: null }]) : candado(sql, ...v),
+        ) as any
+        return work(tx)
+      })
+    const err = await issueCfdiForOrder({ ...autofactura, flow: 'STAFF_B' }, deps).catch(e => e)
+    expect(err).toBeInstanceOf(ConflictError)
+    expect(err).toMatchObject({ code: 'CFDI_VENTA_DEVUELTA', statusCode: 409 })
+    expect(deps.reserveCfdi).not.toHaveBeenCalled()
+    expect(deps.resolveProvider).not.toHaveBeenCalled()
   })
 })

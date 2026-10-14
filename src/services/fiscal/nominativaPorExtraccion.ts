@@ -118,16 +118,16 @@ const COMPONENTES = [
 /**
  * La factura del cliente con los productos que quedan. 🔴 C3-18: ANTES de cualquier ajuste, lo de cada tasa (monto comercial, con el
  * descuento original) tiene que ser lo extraído de ESA tasa (barrera N3 de `cuadrarPorTasa`); si no, no es redondeo y se detiene sin
- * buscar centavos. El ajuste sólo absorbe el redondeo del PAC, en su tasa. C3-9: con la asignación de C2 (ninguna suma propia), tiene
- * exactamente los tratamientos de la extracción y por tratamiento su base, IVA y total difieren de la extracción a lo más 1 ¢ cada uno; cada
- * diferencia distinta de cero se devuelve (factura del cliente − extracción).
+ * buscar centavos. El ajuste sólo absorbe el redondeo del PAC, en su tasa. C3-9 (sólo con `porTratamiento`: F6 no tiene extracción): con la
+ * asignación de C2 (ninguna suma propia), tiene exactamente los tratamientos de la extracción y por tratamiento su base, IVA y total difieren
+ * de la extracción a lo más 1 ¢ cada uno; cada diferencia distinta de cero se devuelve (factura del cliente − extracción).
  */
 export function nominativaPorExtraccion(p: {
   reales: ConceptoReal[]
   /** v7 (C1-43): las filas D16 del ticket; `filasD16DeReales` cuenta sólo las que tocan estos reales (una fila de un artículo devuelto no). */
   filasD16: string[][]
   claves: Claves
-  extraido: { brutoPorTratamiento: Partial<Record<TratamientoDeNota, number>>; porTratamiento: FiscalPorTratamiento }
+  extraido: { brutoPorTratamiento: Partial<Record<TratamientoDeNota, number>>; porTratamiento?: FiscalPorTratamiento }
 }): NominativaPorExtraccion | { motivo: string } {
   if (!p.reales.length) return { motivo: MOTIVO_SIN_CONCEPTOS_REALES }
   const bruto = p.extraido.brutoPorTratamiento
@@ -150,15 +150,21 @@ export function nominativaPorExtraccion(p: {
     resumenDeConceptos(items),
   )
   if ('invalido' in a) return { motivo: MOTIVO_NO_CONCUERDA }
-  const tratamientos = (f: FiscalPorTratamiento) => TRATAMIENTOS_DE_NOTA.filter(t => f[t]).join(',')
-  if (tratamientos(a.porTratamiento) !== tratamientos(p.extraido.porTratamiento)) return { motivo: MOTIVO_NO_CONCUERDA }
   const diferencias: DiferenciaDeConcordancia[] = []
-  for (const t of TRATAMIENTOS_DE_NOTA.filter(x => a.porTratamiento[x]))
-    for (const [k, componente] of COMPONENTES) {
-      const cents = a.porTratamiento[t]![k] - p.extraido.porTratamiento[t]![k]
-      if (Math.abs(cents) > REDONDEO_PERMITIDO_CENTS) return { motivo: MOTIVO_NO_CONCUERDA }
-      if (cents) diferencias.push({ tratamiento: t, componente, cents })
-    }
+  // F6: sin la asignación de una extracción (`porTratamiento`) no hay documento con qué concordar. `cuadrarPorTasa` sólo cuadra los
+  // remanentes con su propio monto comercial (el `bruto` de F6 sale de ellos): no los compara con lo cobrado menos lo devuelto. Eso lo acota
+  // el tope de redondeo de `facturaConDevolucion` (I-1: nunca arriba de lo que el cliente se quedó). C3 siempre pasa `porTratamiento`.
+  const ext = p.extraido.porTratamiento
+  if (ext) {
+    const tratamientos = (f: FiscalPorTratamiento) => TRATAMIENTOS_DE_NOTA.filter(t => f[t]).join(',')
+    if (tratamientos(a.porTratamiento) !== tratamientos(ext)) return { motivo: MOTIVO_NO_CONCUERDA }
+    for (const t of TRATAMIENTOS_DE_NOTA.filter(x => a.porTratamiento[x]))
+      for (const [k, componente] of COMPONENTES) {
+        const cents = a.porTratamiento[t]![k] - ext[t]![k]
+        if (Math.abs(cents) > REDONDEO_PERMITIDO_CENTS) return { motivo: MOTIVO_NO_CONCUERDA }
+        if (cents) diferencias.push({ tratamiento: t, componente, cents })
+      }
+  }
   // La forma de C2 (`entradaDocumental`): un renglón por artículo, ordenado; un concepto sin artículo no es renglón.
   const montosPorRenglon = [...a.porClave]
     .filter(([k]) => !k.startsWith('__'))

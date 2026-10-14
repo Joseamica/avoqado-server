@@ -21,6 +21,13 @@ let extracciones: { total: number; enProceso: number; filas: unknown[] } = { tot
 const mockQueryRaw = jest.fn(async (...a: unknown[]) =>
   /count\(/.test(consulta(a).sql) ? [{ total: extracciones.total, enProceso: extracciones.enProceso }] : extracciones.filas,
 )
+/** F6 (R7, N7): las facturas por el total con notas automáticas que faltan. El tool importa el módulo perezoso (sólo en `cfdi_status`). */
+const mockNotasPendientes = jest.fn(async (_p: unknown) => [] as unknown[])
+const mockContarNotas = jest.fn(async (_p: unknown) => 0)
+jest.mock('@/services/fiscal/facturaConDevolucion', () => ({
+  facturasConNotasPendientes: (p: unknown) => mockNotasPendientes(p),
+  contarFacturasConNotasPendientes: (p: unknown) => mockContarNotas(p),
+}))
 jest.mock('@/services/fiscal/cfdiEmail.service', () => ({ sendCfdiByEmail: jest.fn() }))
 jest.mock('@/services/fiscal/cfdiCreditNote.service', () => ({ emitRefundCreditNote: jest.fn(), getRefundCreditNoteStatus: jest.fn() }))
 jest.mock('@/services/fiscal/confirmarContratoDePrecio.service', () => ({
@@ -204,5 +211,47 @@ describe('cfdi_status — C3 · T8: extracciones que esperan la factura del clie
   it('control — un cursor que no salió de aquí se rechaza (nunca se lee como «sin cursor»)', async () => {
     mockCfdiFindMany.mockResolvedValueOnce([])
     await expect(handlers.get('cfdi_status')!({ venueId: 'v1', limit: 2, extraccionesCursor: 'basura' }, {})).rejects.toThrow(/cursor/i)
+  })
+
+  it('🔴 F6 (N7): `notasDeDevolucionPendientes` — total exacto, página de `limit` y `siguiente` para seguir (el contrato de extracciones)', async () => {
+    mockContarNotas.mockResolvedValueOnce(3)
+    mockNotasPendientes.mockResolvedValueOnce([{ cfdiId: 'c1', venueId: 'v1', orderId: 'o1', pendientes: ['art', 'imp'] }])
+    const out = await consultar({ venueId: 'v1', limit: 1, notasCursor: 'c0' })
+    expect(mockNotasPendientes).toHaveBeenCalledWith({ venueIds: ['v1'], despuesDe: 'c0', limite: 1 })
+    expect(mockContarNotas).toHaveBeenCalledWith({ venueIds: ['v1'] })
+    expect(out.notasDeDevolucionPendientes).toEqual({
+      total: 3,
+      items: [{ cfdiId: 'c1', venueId: 'v1', orderId: 'o1', refundPaymentIds: ['art', 'imp'] }],
+      siguiente: 'c1',
+    })
+  })
+  // Codex código r1 (P3-5): el alcance REAL de dos locales —sin elegir uno— y el filtro de locales que se manda (con un 3.º sin CFDI fuera).
+  it('🔴 F6 (H6): con dos locales y sin elegir uno, la consulta lleva esos dos y cada elemento trae SU local (emit_refund_credit_note necesita saber cuál)', async () => {
+    const { venuesWithFeatureAccess } = jest.requireMock('@/services/access/basePlan.service')
+    venuesWithFeatureAccess.mockResolvedValueOnce(new Set(['v1', 'v2'])) // v3 está en el alcance pero sin CFDI
+    const antes = scope.allowedVenueIds
+    scope.allowedVenueIds = ['v1', 'v2', 'v3']
+    for (const v of scope.allowedVenueIds) scope.perVenueAccess.set(v, {} as never)
+    try {
+      mockNotasPendientes.mockResolvedValueOnce([
+        { cfdiId: 'c1', venueId: 'v1', orderId: 'o1', pendientes: ['a'] },
+        { cfdiId: 'c2', venueId: 'v2', orderId: 'o2', pendientes: ['b'] },
+      ])
+      const out = await consultar({ venueId: undefined, limit: 5 })
+      expect(mockNotasPendientes).toHaveBeenCalledWith({ venueIds: ['v1', 'v2'], despuesDe: null, limite: 5 })
+      expect(mockContarNotas).toHaveBeenCalledWith({ venueIds: ['v1', 'v2'] })
+      expect(out.notasDeDevolucionPendientes.items.map((x: any) => [x.cfdiId, x.venueId])).toEqual([
+        ['c1', 'v1'],
+        ['c2', 'v2'],
+      ])
+    } finally {
+      scope.allowedVenueIds = antes
+      scope.perVenueAccess.clear()
+    }
+  })
+  it('F6 (N7): la última página ⇒ `siguiente: null`', async () => {
+    mockContarNotas.mockResolvedValueOnce(1)
+    mockNotasPendientes.mockResolvedValueOnce([{ cfdiId: 'c1', venueId: 'v1', orderId: 'o1', pendientes: ['imp'] }])
+    expect((await consultar({ venueId: 'v1', limit: 5 })).notasDeDevolucionPendientes.siguiente).toBeNull()
   })
 })

@@ -31,6 +31,7 @@ import {
   MOTIVO_SIN_SALDO_EN_GLOBAL,
   MOTIVO_XML_DE_LA_GLOBAL_IRRECUPERABLE,
   motivoExtraccionCancelada,
+  motivoDevolucionSinNotaEnLaGlobal,
   motivoExtraccionSinGlobal,
   type ExtraccionArmada,
 } from '@/services/fiscal/cfdiExtraccion.service'
@@ -580,4 +581,26 @@ describe('C3 · M-2: el folio de la nota en los textos al usuario', () => {
     expect(motivoExtraccionSinGlobal(e)).not.toMatch(/null|undefined/)
     expect(motivoExtraccionSinGlobal(e)).toContain('con una nota que todavía se está confirmando por $116.00')
   })
+})
+
+// Codex código r1 (P3-4): con una devolución POR IMPORTE, emitir la nota no basta (C3 sigue sin poder comprobar los productos que quedan,
+// C3-P6 ⇒ contador): el texto no manda a «volver a facturar». Y habla en plural cuando faltan varias.
+describe('F6 · motivoDevolucionSinNotaEnLaGlobal — el texto de la guarda de la global', () => {
+  const inicio = 'Esta venta ya está en la factura global y tiene'
+  it('control — por artículos, una: el texto de siempre (emite esa nota y vuelve a facturar)', () =>
+    expect(motivoDevolucionSinNotaEnLaGlobal({ n: 1, cents: 5800 })).toBe(
+      `${inicio} una devolución por $58.00 sin su nota de crédito timbrada contra esa factura. Emite primero esa nota desde el pago de la devolución (si ya la emitiste, espera a que se timbre) y vuelve a facturar.`,
+    ))
+  it('🔴 por artículos, varias: en plural', () =>
+    expect(motivoDevolucionSinNotaEnLaGlobal({ n: 2, cents: 8000 })).toBe(
+      `${inicio} 2 devoluciones por $80.00 sin sus notas de crédito timbradas contra esa factura. Emite primero esas notas desde el pago de cada devolución (si ya las emitiste, espera a que se timbren) y vuelve a facturar.`,
+    ))
+  it('🔴 por importe, una: emite la nota para corregir la global, y la venta se factura con su contador', () =>
+    expect(motivoDevolucionSinNotaEnLaGlobal({ n: 1, cents: 5000, porImporte: true })).toBe(
+      `${inicio} una devolución por $50.00 sin su nota de crédito timbrada contra esa factura. Emite esa nota desde el pago de la devolución para corregir la factura global. Como la devolución fue por importe (sin artículos), no se puede comprobar qué productos quedaron: factura esta venta con tu contador.`,
+    ))
+  it('🔴 varias y alguna por importe: en plural, y también con su contador', () =>
+    expect(motivoDevolucionSinNotaEnLaGlobal({ n: 2, cents: 8000, porImporte: true })).toBe(
+      `${inicio} 2 devoluciones por $80.00 sin sus notas de crédito timbradas contra esa factura. Emite esas notas desde el pago de cada devolución para corregir la factura global. Como alguna fue por importe (sin artículos), no se puede comprobar qué productos quedaron: factura esta venta con tu contador.`,
+    ))
 })
