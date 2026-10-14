@@ -21,6 +21,8 @@ dist/
 
 # Screenshots and temp files
 *.png
+# Excepto las imágenes REALES de prueba de la pantalla del cliente (las genera generar-imagenes.py, junto a ellas)
+!tests/fixtures/customer-display/*.png
 .playwright-mcp/
 scripts/temp-*
 .eslintcache
