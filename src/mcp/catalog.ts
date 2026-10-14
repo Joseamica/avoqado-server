@@ -86,6 +86,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   create_payment_link: 'write',
   create_percent_promotion: 'write',
   create_product: 'write',
+  create_products: 'write',
   create_promotion: 'write',
   create_raw_material: 'write',
   create_recipe: 'write',
