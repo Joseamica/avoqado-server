@@ -28,6 +28,7 @@ import {
 } from '../../services/master-catalog/catalogGovernance.service'
 import { normalizarIvaDeProducto, traducirErrorDeIva } from '../../services/fiscal/normalizarIvaDeProducto'
 import { bloquearParaCambiarIva } from '../../services/fiscal/exclusionContable'
+import { registrarCambioDeIva } from '../../services/fiscal/encendidoIva.service'
 import { ajustarParejaAlProducto } from '../../services/commerce-channels/shopify/shopify.store.service'
 
 // ---------------------------------------------------------------------------
@@ -218,6 +219,16 @@ export async function createProduct(req: Request, res: Response, next: NextFunct
         throw e
       }
       await ensureQuantityInventoryRow(tx, created)
+      // Plan 6b (H14): el móvil nunca enciende (D2), pero su alta con otro IVA deja rastro en la misma transacción.
+      await registrarCambioDeIva(tx, {
+        venueId,
+        productId: created.id,
+        producto: created.name,
+        antes: null,
+        despues: created.ivaTratamiento,
+        staffId: actor.type === 'HUMAN' ? actor.staffId : null,
+        origen: 'MOVIL',
+      })
       // El `include` se leyó antes de la fila: la respuesta lleva la que quedó en la base.
       if (!created.inventory && created.trackInventory && created.inventoryMethod === 'QUANTITY') {
         created.inventory = await tx.inventory.findUnique({ where: { productId: created.id } })
@@ -230,7 +241,8 @@ export async function createProduct(req: Request, res: Response, next: NextFunct
 
     return res.status(201).json({ success: true, data: withAvailableQuantity(product) })
   } catch (error) {
-    logger.error('Error creating product (mobile)', {
+    const esDelCliente = error instanceof AppError && error.statusCode < 500
+    logger[esDelCliente ? 'warn' : 'error']('Error creating product (mobile)', {
       error: error instanceof Error ? error.message : 'Unknown error',
       venueId: req.params.venueId,
     })
@@ -343,6 +355,16 @@ export async function updateProduct(req: Request, res: Response, next: NextFunct
         traducirErrorDeIva(e)
         throw e
       }
+      // Plan 6b (H14, §5.7): antes → después, autor y origen, en la MISMA transacción del cambio.
+      await registrarCambioDeIva(tx, {
+        venueId,
+        productId,
+        producto: updated.name,
+        antes: actual.ivaTratamiento,
+        despues: updated.ivaTratamiento,
+        staffId: actor.type === 'HUMAN' ? actor.staffId : null,
+        origen: 'MOVIL',
+      })
       // Con el estado FINAL (el tipo puede no venir en el cuerpo): revierte toda la escritura.
       if (isNonInventoriable(updated.type, updated.trackInventory)) throw new AppError(NON_INVENTORIABLE_MESSAGE, 400)
       // P1-2 (Shopify): pasar a kilo o «por peso», a receta o sin control de existencias suspende la pareja; volver a pieza
@@ -361,7 +383,8 @@ export async function updateProduct(req: Request, res: Response, next: NextFunct
 
     return res.json({ success: true, data: withAvailableQuantity(product) })
   } catch (error) {
-    logger.error('Error updating product (mobile)', {
+    const esDelCliente = error instanceof AppError && error.statusCode < 500
+    logger[esDelCliente ? 'warn' : 'error']('Error updating product (mobile)', {
       error: error instanceof Error ? error.message : 'Unknown error',
       venueId: req.params.venueId,
       productId: req.params.productId,

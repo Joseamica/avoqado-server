@@ -4,6 +4,7 @@ import {
   minimoDeVersion,
   parseVersionName,
   posSoportaDiseno,
+  versionAlMenos,
 } from '@/services/dashboard/receiptLayout/readiness.service'
 import prisma from '@/utils/prismaClient'
 
@@ -146,6 +147,20 @@ describe('capacidad de las tablets por nombre de versión (Terminal.version)', (
     expect(posSoportaDiseno('POS_ANDROID', '2.18.3', env)).toBe(false)
     expect(posSoportaDiseno('POS_IOS', '1.11.0', env)).toBe(true)
     expect(posSoportaDiseno('POS_IOS', null, env)).toBe(false)
+  })
+
+  it('versionAlMenos: igual o más nueva cuenta; vacío, sin número o sin mínimo ⇒ false (versión desconocida = no soporta)', () => {
+    expect(versionAlMenos('2.23.0', '2.23.0')).toBe(true)
+    expect(versionAlMenos('2.23.0-dev', '2.23.0')).toBe(true)
+    expect(versionAlMenos('2.24', '2.23.9')).toBe(true)
+    expect(versionAlMenos('3.0.0', '2.99.99')).toBe(true)
+    expect(versionAlMenos('2.22.9', '2.23.0')).toBe(false)
+    expect(versionAlMenos('1.99.99', '2.0.0')).toBe(false)
+    expect(versionAlMenos(null, '2.23.0')).toBe(false)
+    expect(versionAlMenos('', '2.23.0')).toBe(false)
+    expect(versionAlMenos('desconocida', '2.23.0')).toBe(false)
+    expect(versionAlMenos('2.23.0', undefined)).toBe(false)
+    expect(versionAlMenos('2.23.0', 'sin número')).toBe(false)
   })
 
   it('sin la variable de mínimo, ninguna tablet cuenta (el banner no miente antes de publicar)', () => {

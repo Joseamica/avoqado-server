@@ -128,7 +128,9 @@ export const ProductSchema = z.object({
   // y dispare la comparación de normalizarIvaDeProducto. El default fiscal real vive en
   // `Product.ivaTratamiento @default(IVA_16)` (ver src/services/fiscal/ivaTratamiento.ts).
   taxRate: z.number().min(0).max(1).optional(),
-  ivaTratamiento: z.enum(['IVA_16', 'IVA_0', 'EXENTO'], { invalid_type_error: 'IVA inválido' }).optional(),
+  ivaTratamiento: z
+    .enum(['IVA_16', 'IVA_0', 'EXENTO'], { errorMap: () => ({ message: 'IVA inválido: usa 16 %, 0 % o Exento.' }) })
+    .optional(),
   imageUrl: z.string().url().nullable().optional(),
   displayOrder: z.number().int().min(0).default(0),
   featured: z.boolean().default(false),
@@ -158,7 +160,9 @@ export const ProductBodyBase = z.object({
   price: z.number().positive('Price must be positive').multipleOf(0.01),
   cost: z.number().positive('Cost must be positive').multipleOf(0.01).optional().nullable(),
   taxRate: z.number().min(0).max(1).optional(),
-  ivaTratamiento: z.enum(['IVA_16', 'IVA_0', 'EXENTO'], { invalid_type_error: 'IVA inválido' }).optional(),
+  ivaTratamiento: z
+    .enum(['IVA_16', 'IVA_0', 'EXENTO'], { errorMap: () => ({ message: 'IVA inválido: usa 16 %, 0 % o Exento.' }) })
+    .optional(),
   imageUrl: z.string().url().nullable().optional(),
   displayOrder: z.number().int().min(0).optional(),
   featured: z.boolean().optional(),

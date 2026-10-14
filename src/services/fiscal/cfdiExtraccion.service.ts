@@ -19,7 +19,7 @@ import { preserveUnknownStaffId } from '../../lib/activityAuditActor'
 import { validateBeforeStamp } from './cfdiValidation'
 import { conceptoDesdeElPayload, MOTIVO_OCHO_SIN_REGLA, type AjusteAlCobro } from './reglaDelPac'
 import { aplicarAjustes, cuadrarPorTasa, montosDesdeDocumento, SIN_FILAS_D16, type ConceptoReal } from './globalPorTratamiento'
-import { bloquearOrdenParaFacturar, tomarAdmisionCompartida } from './admisionIva'
+import { bloquearOrdenParaFacturar } from './admisionIva'
 import { CFDI_VIVO, EXTRACCION_CANCELADA, globalVivaDeLaOrden, llaveDeExtraccion, PREFIJO_EXTRACCION } from './exclusionGlobal'
 import { huellaDeEntrada, type EntradaDocumentalV1, type ExtraccionDeLaFactura } from './entradaDocumental'
 import {
@@ -389,7 +389,6 @@ export async function emitirExtraccion(
     .runInTransaction(async tx => {
       const scope = await bloquearOrdenParaFacturar(tx, params.orderId)
       if (!scope || scope.venueId !== params.venueId) throw new Error('Venta no encontrada')
-      await tomarAdmisionCompartida(tx, scope.organizationId)
       await tx.$queryRaw`SELECT id FROM "Cfdi" WHERE id = ${gid} FOR UPDATE` // el documento compartido (C2-3), después de la orden y la admisión
       const viva = (await tx.cfdi.findUnique({
         where: { id: gid },

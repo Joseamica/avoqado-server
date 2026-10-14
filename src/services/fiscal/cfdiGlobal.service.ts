@@ -48,7 +48,7 @@ import {
 import { validateBeforeStamp } from './cfdiValidation'
 import { mapFormaPago } from './satCatalog'
 import type { CfdiItemInput, GlobalInvoiceParams } from './providers/fiscal-provider.interface'
-import { tomarAdmisionCompartida, bloquearOrdenesParaFacturar } from './admisionIva'
+import { bloquearOrdenesParaFacturar } from './admisionIva'
 import { liberarSellosDe, sellarRenglones } from './sellosIva'
 import { CFDI_VIVO, EXTRAIDO, esLlaveComplementaria, llavePrincipalDe } from './exclusionGlobal'
 import {
@@ -1065,7 +1065,7 @@ export async function ordenesDelManifiesto(db: Pick<Prisma.TransactionClient, 'c
  * `enviadoAt: null` —el mismo campo que el motor marca con su CAS antes del POST (`enviarIntentoCapturado`)—, así que la anulación y el envío
  * se excluyen sin relojes: o gana la anulación y el envío ya no puede ocurrir, o ganó el envío y la anulación no toca nada (`'PERDIDA'`).
  * Antes, TODO el manifiesto (por páginas) bajo los candados de sus órdenes (por id, sin filtrar negocio: son las de ESTA factura, como en la
- * cancelación, Ruling 4b-R13) → productos → admisión compartida. Gana ⇒ sellos liberados, manifiesto vacío y el rastro en `ActivityLog`, en la
+ * cancelación, Ruling 4b-R13) → productos, con la admisión compartida primero (D10). Gana ⇒ sellos liberados, manifiesto vacío y el rastro en `ActivityLog`, en la
  * misma transacción: sus ventas vuelven a ser candidatas del periodo de su último cobro.
  */
 export async function anularFilaVieja(fila: any, now: Date = new Date()): Promise<'ANULADA' | 'PERDIDA'> {
@@ -1127,9 +1127,10 @@ async function anularFilaViejaConMotivo(fila: any, now: Date): Promise<{ resulta
   const r = await prisma.$transaction(
     async tx => {
       const ordenes = await ordenesDelManifiesto(tx, fila.id)
-      await bloquearOrdenesParaFacturar(tx, ordenes)
+      // Codex código r1 #1 (Ruling CX-1): la admisión del emisor entra en la MISMA pasada ascendente que las de las órdenes, antes de la
+      // primera fila (antes se pedía después de bloquear órdenes y productos).
       const { organizationId } = await tx.venue.findUniqueOrThrow({ where: { id: fila.venueId }, select: { organizationId: true } })
-      await tomarAdmisionCompartida(tx, organizationId)
+      await bloquearOrdenesParaFacturar(tx, ordenes, undefined, { organizacionesExtra: [organizationId] })
       const periodicidad =
         (await tx.fiscalEmisor.findUnique({ where: { id: fila.fiscalEmisorId }, select: { globalPeriodicity: true } }))
           ?.globalPeriodicity ??
@@ -2164,14 +2165,12 @@ async function emitirGlobalDelPeriodo(
   const previous = cfdi
   const reserved = await deps
     .runInTransaction(async tx => {
-      const venue = await tx.venue.findUniqueOrThrow({ where: { id: emisor.venueId }, select: { organizationId: true } })
-      // Match admission order: all order/product locks precede the shared organization lock.
+      // D10 (plan 6b): el helper toma la admisión antes que las órdenes.
       const oldIds = previous ? await ordenesDelManifiesto(tx, previous.id) : []
       // C1-13: la UNIÓN de los tickets de la reserva anterior y de los candidatos: se bloquean todos y se recapturan todos (una reserva
       // sin enviar conserva sus tickets aunque la lista leída fuera de la transacción no los traiga).
       const ids = [...new Set([...oldIds, ...candidateIds])].sort()
       await bloquearOrdenesParaFacturar(tx, ids, emisor.venueId)
-      await tomarAdmisionCompartida(tx, venue.organizationId)
       const current = await tx.cfdi.findUnique({ where: { idempotencyKey: key } })
       if (!previous && current) return { cfdi: current, fresh: false, reasons: [] as string[], empty: false, excluded: 0, excluidas: {} }
       if (previous) {
@@ -2668,8 +2667,6 @@ async function emitirGlobalLegacy(
   const porConfiguracion = await deps.contarExcluidasPorConfiguracion(emisor, period, unSoloEmisor, cfdi.id)
   const reserved = await deps.runInTransaction(async tx => {
     await bloquearOrdenesParaFacturar(tx, ids, emisor.venueId)
-    const venue = await tx.venue.findUniqueOrThrow({ where: { id: emisor.venueId }, select: { organizationId: true } })
-    await tomarAdmisionCompartida(tx, venue.organizationId)
     const captured = await capturarGlobal(tx, emisor, period, ids, unSoloEmisor, cfdi.id, porConfiguracion, {
       key: cfdi.idempotencyKey,
     })

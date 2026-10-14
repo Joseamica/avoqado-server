@@ -7530,6 +7530,32 @@ router.post(
 
 /**
  * @openapi
+ * /api/v1/dashboard/venues/{venueId}/iva-por-producto:
+ *   get:
+ *     tags: [Products]
+ *     summary: Estado del IVA por producto del negocio
+ *     description: "Informativo y sin revisión (`revisado: false`). Encendido o apagado, contabilidad y los avisos de aparatos viejos. Los bloqueos del encendido se toman del 409 al guardar el producto."
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string, format: cuid } }
+ *     responses:
+ *       200:
+ *         description: "{ data: { encendido, habilitadoAt, contabilidad, bloqueos, avisos, facturasSinSello, revisado } }"
+ *       400: { $ref: '#/components/responses/BadRequestError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.get(
+  '/venues/:venueId/iva-por-producto',
+  authenticateTokenMiddleware,
+  checkPermission('menu:read'),
+  validateRequest(VenueIdParamsSchema),
+  productController.getIvaPorProductoHandler,
+)
+
+/**
+ * @openapi
  * /api/v1/dashboard/venues/{venueId}/products/{productId}:
  *   get:
  *     tags: [Products]

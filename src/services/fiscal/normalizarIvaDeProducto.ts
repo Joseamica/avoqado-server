@@ -1,12 +1,13 @@
 import { BadRequestError, ConflictError } from '@/errors/AppError'
 import { IvaTratamiento, TRATAMIENTOS_OFRECIDOS_V1, tratamientoDesdeTupla, tuplaDesdeTratamiento } from './ivaTratamiento'
 
-const MENSAJES = {
+export const DONDE_SE_CAMBIA_EL_IVA = 'dashboard → producto, junto al precio'
+
+export const MENSAJES = {
   IVA_POR_PRODUCTO_APAGADO:
-    'El IVA por producto no está activado para este negocio. Todos los productos se venden con IVA 16 %. Pídele a Avoqado que lo active.',
-  // La pantalla «Productos → IVA» llega en el plan 6; mientras la bandera esté apagada este mensaje es inalcanzable.
-  IVA_REQUIERE_APP_NUEVA: 'Para cambiar el IVA de un producto actualiza la app o hazlo desde el dashboard (Productos → IVA).',
-  IVA_TRATAMIENTO_CONTRADICTORIO: 'El IVA elegido no es válido. Usa 16 %, tasa 0 % o exento.',
+    'Este producto se vende con IVA 16 %. El IVA de cada producto se cambia en el dashboard → producto, junto al precio.',
+  IVA_REQUIERE_APP_NUEVA: 'El IVA de los productos se cambia en el dashboard → producto, junto al precio.',
+  IVA_TRATAMIENTO_CONTRADICTORIO: 'El IVA elegido no es válido. Usa 16 %, 0 % o Exento.',
   IVA_CONTABILIDAD_CON_HISTORIA:
     'Este negocio ya lleva contabilidad en Avoqado (pólizas o periodos cerrados) y la contabilidad todavía no maneja IVA distinto de 16 %. Por eso este producto se queda en IVA 16 %. Escríbenos a hola@avoqado.io si lo necesitas.',
   IVA_NEGOCIO_CAMBIO_DE_ORGANIZACION: 'Este negocio acaba de cambiar de organización. Vuelve a intentarlo.',
@@ -71,10 +72,11 @@ export function normalizarIvaDeProducto(
     mandaTasa ? Number(entrada.taxRate) : tasaActual,
     mandaObjeto ? String(entrada.objetoImp) : objetoActual,
   )
+  // D18 (spec planes 6-7, H16): encendido, una tupla vieja no toca el IVA en NINGUNA dirección: una app abierta antes del cambio a 0 %
+  // lo regresaría a 16 % al guardar el nombre. El reenvío sin cambio ya salió arriba (`sinCambio`).
+  if (encendido) throw new ConflictError(MENSAJES.IVA_REQUIERE_APP_NUEVA, 'IVA_REQUIERE_APP_NUEVA')
   if (derivado === 'IVA_16') return { ivaTratamiento: 'IVA_16' }
-  if (!encendido) throw new ConflictError(MENSAJES.IVA_POR_PRODUCTO_APAGADO, 'IVA_POR_PRODUCTO_APAGADO')
-  // Encendido: una tupla vieja no distingue tasa 0 de exento ⇒ no se adivina.
-  throw new ConflictError(MENSAJES.IVA_REQUIERE_APP_NUEVA, 'IVA_REQUIERE_APP_NUEVA')
+  throw new ConflictError(MENSAJES.IVA_POR_PRODUCTO_APAGADO, 'IVA_POR_PRODUCTO_APAGADO')
 }
 
 /**

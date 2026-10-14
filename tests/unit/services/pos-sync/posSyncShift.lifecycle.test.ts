@@ -15,6 +15,12 @@ import { posSyncStaffService } from '@/services/pos-sync/posSyncStaff.service'
 jest.mock('@/services/pos-sync/posSyncStaff.service', () => ({
   posSyncStaffService: { syncPosStaff: jest.fn() },
 }))
+// Plan 6b (PF-M4): la guardia del IVA por producto, de paso; aquí se prueba el escritor. La guardia la prueban
+// tests/unit/communication/rabbitmq/dispacher.ivaEncendido.test.ts y tests/integration/pos-sync/posSyncWriters.atomic.integration.test.ts.
+jest.mock('@/services/pos-sync/exclusionIva', () => ({
+  exigirIvaApagadoTx: jest.fn(),
+  conIvaApagado: (_venueId: string, escribir: (tx: unknown) => unknown) => escribir(jest.requireMock('@/utils/prismaClient').default),
+}))
 
 const VENUE = 'venue-pos-lifecycle'
 const TURNO = 'turno-pos-lifecycle'

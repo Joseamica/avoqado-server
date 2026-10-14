@@ -93,6 +93,7 @@ describe('recipe-cost graph lock protocol', () => {
   it('locks all affected graph structures before sorted RM rows, with the edited RM exclusive', async () => {
     const queryRaw = jest
       .fn()
+      .mockResolvedValueOnce([{ id: 'product-a' }, { id: 'product-b' }])
       .mockResolvedValueOnce([{ id: 'recipe-a' }])
       .mockResolvedValueOnce([{ id: 'line-a', rawMaterialId: 'raw-z' }])
       .mockResolvedValueOnce([{ id: 'recipe-b' }])
@@ -112,10 +113,12 @@ describe('recipe-cost graph lock protocol', () => {
 
     // WHY: Every mutable graph row is held before any RM cost row; the edited
     // ingredient gets UPDATE while peers use SHARE, all in ordinal ID order.
-    expect(sqlText(queryRaw.mock.calls[0])).toMatch(/FROM "Recipe"[\s\S]*FOR UPDATE OF recipe, product/i)
-    expect(sqlText(queryRaw.mock.calls[3])).toMatch(/FROM "RecipeLine"[\s\S]*FOR UPDATE/i)
-    expect(sqlText(queryRaw.mock.calls[4])).toMatch(/id = \?[\s\S]*FOR SHARE/i)
-    expect(sqlText(queryRaw.mock.calls[5])).toMatch(/id = \?[\s\S]*FOR UPDATE/i)
-    expect(sqlText(queryRaw.mock.calls[6])).toMatch(/id = \?[\s\S]*FOR SHARE/i)
+    // Plan 6b (D10, Codex r2 N1): los productos de TODAS las recetas, por id de PRODUCTO, antes del bucle por receta.
+    expect(sqlText(queryRaw.mock.calls[0])).toMatch(/FROM "Product" AS product[\s\S]*ORDER BY product.id FOR UPDATE OF product/i)
+    expect(sqlText(queryRaw.mock.calls[1])).toMatch(/FROM "Recipe"[\s\S]*FOR UPDATE OF recipe, product/i)
+    expect(sqlText(queryRaw.mock.calls[4])).toMatch(/FROM "RecipeLine"[\s\S]*FOR UPDATE/i)
+    expect(sqlText(queryRaw.mock.calls[5])).toMatch(/id = \?[\s\S]*FOR SHARE/i)
+    expect(sqlText(queryRaw.mock.calls[6])).toMatch(/id = \?[\s\S]*FOR UPDATE/i)
+    expect(sqlText(queryRaw.mock.calls[7])).toMatch(/id = \?[\s\S]*FOR SHARE/i)
   })
 })

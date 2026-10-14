@@ -21,6 +21,8 @@ import {
 } from '../master-catalog/catalogGovernance.service'
 import { normalizarIvaDeProducto, traducirErrorDeIva } from '../fiscal/normalizarIvaDeProducto'
 import { bloquearParaCambiarIva } from '../fiscal/exclusionContable'
+import { encenderBajoCandados, prepararEncendido, registrarCambioDeIva, type OrigenIva } from '../fiscal/encendidoIva.service'
+import type { IvaTratamiento } from '../fiscal/ivaTratamiento'
 import { isRetryableDbError } from '../../utils/serializableRetry'
 import { ajustarParejaAlProducto } from '../commerce-channels/shopify/shopify.store.service'
 
@@ -721,6 +723,16 @@ export async function createProduct(venueId: string, productData: CreateProductD
         }
 
         await ensureQuantityInventoryRow(tx, product)
+        // Plan 6b (H14): un alta con IVA distinto de 16 % deja su rastro en la misma transacción (el alta nunca enciende).
+        await registrarCambioDeIva(tx, {
+          venueId,
+          productId: product.id,
+          producto: product.name,
+          antes: null,
+          despues: product.ivaTratamiento,
+          staffId: actor.type === 'HUMAN' ? actor.staffId : null,
+          origen: 'DASHBOARD',
+        })
 
         // WHY: SERVICE callers have no Staff FK, so their durable provenance must
         // commit atomically with the Product instead of fabricating a HUMAN actor.
@@ -837,7 +849,9 @@ export async function updateProduct(
   productId: string,
   productData: UpdateProductDto,
   actor: CatalogActor,
-  expectedState?: Pick<Product, 'name' | 'price' | 'active'>,
+  // Codex 6b r1 P2-5: con `ivaTratamiento`, una vista previa vieja del IVA también responde «El producto cambió desde la vista previa».
+  expectedState?: Pick<Product, 'name' | 'price' | 'active'> & { ivaTratamiento?: IvaTratamiento },
+  opts: { origen?: OrigenIva } = {},
 ): Promise<Product> {
   // ✅ Validate product data based on type (Square-aligned)
   validateProductByType(productData, true)
@@ -916,9 +930,18 @@ export async function updateProduct(
 
   // Plan 4: con un campo de IVA, la organización se bloquea PRIMERO (orden del catálogo), antes del cerco negocio → producto.
   const traeIva = [productFields.ivaTratamiento, productFields.taxRate, productFields.objetoImp].some(v => v !== undefined && v !== null)
+  const staffId = actor.type === 'HUMAN' ? actor.staffId : null
+  const origen = opts.origen ?? 'DASHBOARD'
+  // Plan 6b (spec §5.2, D11): el XML de las facturas viejas se lee AQUÍ, fuera de la transacción; dentro se revalida. Un encendido
+  // condenado por lo que no depende del candado (fecha, contabilidad, POS, aparatos, ajuste de Uber) sale aquí con su 409 (I-1).
+  const plan = traeIva ? await prepararEncendido(venueId, productFields.ivaTratamiento, existingProduct, staffId) : null
+  // El encendido lee aparatos y documentos y sella las facturas viejas: 5 s no alcanzan con muchas.
+  const opcionesTx = plan ? { timeout: 30_000, maxWait: 5_000 } : undefined
 
   const product = await prisma.$transaction(async tx => {
-    if (traeIva) await bloquearParaCambiarIva(tx, { venueId })
+    // Plan 6b (D10): encender toma la admisión exclusiva ANTES de la organización; sin encendido, el orden de siempre (plan 4).
+    if (plan) await encenderBajoCandados(tx, { venueId, productId, plan, staffId, origen })
+    else if (traeIva) await bloquearParaCambiarIva(tx, { venueId })
     await assertLegacyCatalogProductUpdateGovernance(tx, {
       venueId,
       productId,
@@ -973,8 +996,18 @@ export async function updateProduct(
     // cuadre. Después del Product y ANTES de Inventory (orden de candados del conector).
     await ajustarParejaAlProducto(tx, updated)
     await ensureQuantityInventoryRow(tx, updated)
+    // Plan 6b (H14, §5.7): antes → después, autor y origen, en la MISMA transacción del cambio.
+    await registrarCambioDeIva(tx, {
+      venueId,
+      productId,
+      producto: updated.name,
+      antes: actual.ivaTratamiento,
+      despues: updated.ivaTratamiento,
+      staffId,
+      origen,
+    })
     return updated
-  })
+  }, opcionesTx)
 
   // 🔌 REAL-TIME: Broadcast product update via Socket.IO
   const broadcastingService = socketManager.getBroadcastingService()

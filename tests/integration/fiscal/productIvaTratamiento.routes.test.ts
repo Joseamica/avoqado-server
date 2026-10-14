@@ -58,6 +58,7 @@ describe('PUT /mobile/venues/:venueId/products/:productId — IVA por producto (
 
   afterAll(async () => {
     try {
+      await prisma.activityLog.deleteMany({ where: { venueId } })
       await prisma.venueIvaPorProducto.deleteMany({ where: { venueId } })
       await prisma.product.deleteMany({ where: { venueId } })
       await prisma.menuCategory.deleteMany({ where: { venueId } })
@@ -124,6 +125,44 @@ describe('PUT /mobile/venues/:venueId/products/:productId — IVA por producto (
     expect(producto.objetoImp).toBe('02')
   })
 
+  // Plan 6b (D18 por HTTP): encendido, una app vieja que reenvía la tupla con 16 % no regresa el producto a 16 %.
+  it('6b · D18: encendido, producto IVA_0, { name, taxRate: 0.16 } ⇒ 409 IVA_REQUIERE_APP_NUEVA y el producto sigue IVA_0', async () => {
+    await prisma.venueIvaPorProducto.create({ data: { venueId, habilitadoPorStaffId: staffId } })
+    await prisma.product.update({ where: { id: productId }, data: { ivaTratamiento: 'IVA_0' } })
+
+    const res = await request(server)
+      .put(`/api/v1/mobile/venues/${venueId}/products/${productId}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ name: 'x', taxRate: 0.16 })
+
+    expect(res.status).toBe(409)
+    expect(res.body.code).toBe('IVA_REQUIERE_APP_NUEVA')
+    expect((await prisma.product.findUniqueOrThrow({ where: { id: productId } })).ivaTratamiento).toBe('IVA_0')
+  })
+
+  // Plan 6b (H14, §5.7): el móvil nunca enciende, pero su cambio de IVA deja rastro con autor y origen.
+  it('6b · H14: apagado, producto heredado IVA_0, { taxRate: 0.16 } ⇒ 200, IVA_16 y un PRODUCT_IVA_CHANGED con origen MOVIL', async () => {
+    await prisma.venueIvaPorProducto.create({ data: { venueId, habilitadoPorStaffId: staffId } })
+    await prisma.product.update({ where: { id: productId }, data: { ivaTratamiento: 'IVA_0' } })
+    await prisma.venueIvaPorProducto.deleteMany({ where: { venueId } })
+
+    const res = await request(server)
+      .put(`/api/v1/mobile/venues/${venueId}/products/${productId}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ taxRate: 0.16 })
+
+    expect(res.status).toBe(200)
+    const producto = await prisma.product.findUniqueOrThrow({ where: { id: productId } })
+    expect(producto.ivaTratamiento).toBe('IVA_16')
+    expect(await prisma.activityLog.findMany({ where: { venueId, action: 'PRODUCT_IVA_CHANGED', entityId: productId } })).toEqual([
+      expect.objectContaining({
+        staffId,
+        data: { producto: producto.name, antes: { ivaTratamiento: 'IVA_0' }, despues: { ivaTratamiento: 'IVA_16' }, origen: 'MOVIL' },
+      }),
+    ])
+    expect(await prisma.venueIvaPorProducto.findUnique({ where: { venueId } })).toBeNull()
+  })
+
   it('Minor 1 (Ruling R9): el TRIGGER mismo rechaza sin pasar por el normalizador, y traducirErrorDeIva lo vuelve el mismo 409', async () => {
     // Bypass TOTAL de normalizarIvaDeProducto: escritura de MODELO directa (como haría un script
     // de migración, un import masivo, o cualquier código futuro que olvide pasar por el
@@ -146,7 +185,7 @@ describe('PUT /mobile/venues/:venueId/products/:productId — IVA por producto (
       expect.objectContaining({
         statusCode: 409,
         code: 'IVA_POR_PRODUCTO_APAGADO',
-        message: expect.stringContaining('IVA por producto no está activado'),
+        message: expect.stringContaining('dashboard → producto, junto al precio'),
       }),
     )
 

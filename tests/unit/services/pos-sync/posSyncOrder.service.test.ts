@@ -31,6 +31,12 @@ jest.mock('../../../../src/config/logger', () => ({
 jest.mock('../../../../src/services/pos-sync/posSyncStaff.service')
 jest.mock('../../../../src/services/pos-sync/posSyncTable.service')
 jest.mock('../../../../src/services/pos-sync/posSyncShift.service')
+// Plan 6b (PF-M4): la guardia del IVA por producto, de paso; aquí se prueba el escritor. La guardia la prueban
+// tests/unit/communication/rabbitmq/dispacher.ivaEncendido.test.ts y tests/integration/pos-sync/posSyncWriters.atomic.integration.test.ts.
+jest.mock('@/services/pos-sync/exclusionIva', () => ({
+  exigirIvaApagadoTx: jest.fn(),
+  conIvaApagado: (_venueId: string, escribir: (tx: unknown) => unknown) => escribir(jest.requireMock('@/utils/prismaClient').default),
+}))
 
 function topologySql(query: unknown): string {
   if (Array.isArray(query)) return query.join(' ')
@@ -141,7 +147,7 @@ describe('POS Sync Order Service (posSyncOrder.service.ts)', () => {
       const result = await processPosOrderEvent(fullPayload)
 
       expect(mockPrismaVenueFindUnique).toHaveBeenCalledWith({ where: { id: venueId } })
-      expect(mockSyncPosStaff).toHaveBeenCalledWith(staffData, venueId, organizationId)
+      expect(mockSyncPosStaff).toHaveBeenCalledWith(staffData, venueId, organizationId, expect.anything())
       expect(mockGetOrCreatePosTable).toHaveBeenCalledWith(tableData, venueId)
       expect(mockGetOrCreatePosShift).toHaveBeenCalledWith(shiftData, venueId, mockStaffId)
       expect(mockPrismaOrderUpsert).toHaveBeenCalledTimes(1)
