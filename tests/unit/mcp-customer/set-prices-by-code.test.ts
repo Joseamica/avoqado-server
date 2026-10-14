@@ -53,6 +53,8 @@ const parse = (r: { content: Array<{ text: string }> }) => JSON.parse(r.content[
 const actor = { type: 'HUMAN', staffId: 'staff-1', impersonating: false }
 /** Un error operativo como los de la app (AppError): su mensaje está escrito para el operador. */
 const operativo = (message: string) => Object.assign(new Error(message), { isOperational: true })
+/** En las respuestas que piden revisar la lista: `message` justo después de `ok` y `needsInput`, antes de cualquier lista. */
+const mensajePrimero = (out: Record<string, unknown>) => expect(Object.keys(out).slice(0, 3)).toEqual(['ok', 'needsInput', 'message'])
 
 const p1 = filaProducto({ id: 'p1', name: 'Vestido Mailen M', sku: 'MAILEN-M', gtin: '8445000000017', price: 1000 })
 const p2 = filaProducto({ id: 'p2', name: 'Vestido Mailen L', sku: 'MAILEN-L', gtin: '8445000000024', price: 1200 })
@@ -136,6 +138,7 @@ describe('set_prices_by_code', () => {
     expect(out.message).toBe(
       'No encontré ninguno de los 2 códigos en este negocio. Quedaron fuera: sin encontrar 2 (ver esas listas). Revisa los códigos (un código de barras va sin espacios) antes de seguir.',
     )
+    mensajePrimero(out)
     expect(mockUpdateProduct).not.toHaveBeenCalled()
   })
 
@@ -267,8 +270,14 @@ describe('set_prices_by_code', () => {
         ],
       }),
     )
-    expect(out).toMatchObject({ ok: true, applied: 0 })
+    // Se encontró, pero no queda ningún producto que comparar: no es «ya tienen ese precio» sino una lista que hay que revisar.
+    expect(out).toMatchObject({ ok: false, needsInput: true })
+    expect(out).not.toHaveProperty('applied')
     expect(out.sameProductTwice).toEqual([{ codes: ['8445000000017', 'MAILEN-M'], sku: 'MAILEN-M', name: 'Vestido Mailen M' }])
+    expect(out.message).toBe(
+      'Ningún producto de la lista se puede actualizar. Quedaron fuera: mismo producto dos veces 1 (ver esas listas). Revisa la lista antes de seguir.',
+    )
+    mensajePrimero(out)
   })
 
   it('🔍 un código repetido no se cuela por el otro código del mismo producto', async () => {
@@ -283,9 +292,12 @@ describe('set_prices_by_code', () => {
         ],
       }),
     )
-    expect(out).toMatchObject({ ok: true, applied: 0 })
+    expect(out).toMatchObject({ ok: false, needsInput: true })
     expect(out.duplicateCodes).toEqual(['MAILEN-M'])
     expect(out.sameProductTwice).toEqual([{ codes: ['MAILEN-M', '8445000000017'], sku: 'MAILEN-M', name: 'Vestido Mailen M' }])
+    expect(out.message).toBe(
+      'Ningún producto de la lista se puede actualizar. Quedaron fuera: repetidos en la lista 1, mismo producto dos veces 1 (ver esas listas). Revisa la lista antes de seguir.',
+    )
   })
 
   it('un código repetido en la lista no se aplica ni una vez', async () => {
@@ -299,8 +311,12 @@ describe('set_prices_by_code', () => {
         ],
       }),
     )
-    expect(out.applied).toBe(0)
-    expect(out.duplicateCodes).toEqual(['MAILEN-M'])
+    expect(out).toMatchObject({ ok: false, needsInput: true, duplicateCodes: ['MAILEN-M'] })
+    expect(out).not.toHaveProperty('applied')
+    expect(out.message).toBe(
+      'Ningún producto de la lista se puede actualizar. Quedaron fuera: repetidos en la lista 1 (ver esas listas). Revisa la lista antes de seguir.',
+    )
+    expect(mockUpdateProduct).not.toHaveBeenCalled()
   })
 
   it('🔍 un precio con más de 2 decimales (de una multiplicación) rechaza la llamada con un mensaje en español', () => {

@@ -77,12 +77,14 @@ const pareja = (productId: string, apartadas = 0) => ({
 })
 
 // Textos para el operador, tal cual (el asistente los repite).
-const VISTA_VIEJA_GENERAL =
-  'Algo cambió desde la vista previa (un precio, una existencia, un código o una categoría). No se aplicó nada: pide una vista previa nueva y confírmala.'
+const EXISTENCIA_VIEJA_ERROR = 'Cambió la existencia de algún producto desde la vista previa: no se aplicó nada.'
 const EXISTENCIA_VIEJA =
   'Cambió la existencia de algún producto desde la vista previa (por ejemplo, una venta o un conteo): no se aplicó nada. Si ya habías confirmado esta carga y no viste la respuesta, revisa primero los conteos recientes (stock_counts): probablemente ya quedó. Si no, pide una vista previa nueva y compárala con la anterior: si un producto bajó porque se vendió DESPUÉS de contarlo, réstale esa venta a lo contado antes de confirmar.'
 const NOTA_CONTEO_ABIERTO =
   ' Los que están en un conteo abierto no se cargan: termina ese conteo en el POS (Inventario › Conteos), o cancélalo si no aplicó nada.'
+/** En las respuestas de una confirmación que no terminó: el «no canceles» es de ESTE conteo, así que del otro no se aconseja cancelar. */
+const NOTA_OTRO_CONTEO_ABIERTO =
+  ' Los que están en otro conteo abierto (ver inOpenCount) no se cargaron: termina ese otro conteo en el POS.'
 const ENVIO_EN_CAMINO =
   'Shopify todavía lo está sincronizando (un envío en camino, o la tienda se está conectando): su existencia en Avoqado no cambió. Vuelve a cargar sólo ese producto cuando Shopify termine; si estás conectando la tienda, después de aplicar la conexión.'
 const DUDA_POR_REVISAR =
@@ -104,6 +106,8 @@ function mensajeVaAntesDeLasListas(out: Record<string, unknown>) {
   expect(claves).toEqual(expect.arrayContaining(['message', 'changes']))
   expect(claves.indexOf('message')).toBeLessThan(claves.indexOf('changes'))
 }
+/** En las respuestas que piden revisar la lista: `message` justo después de `ok` y `needsInput`, antes de cualquier lista. */
+const mensajePrimero = (out: Record<string, unknown>) => expect(Object.keys(out).slice(0, 3)).toEqual(['ok', 'needsInput', 'message'])
 /** En las respuestas de una confirmación que no terminó: `message` justo tras `countId`, y lo que quedó fuera al final. */
 function mensajeTrasElConteoYExcluidosAlFinal(out: Record<string, unknown>, ultimaLista?: string) {
   const claves = Object.keys(out)
@@ -272,6 +276,7 @@ describe('set_stock_by_code', () => {
     expect(out.message).toBe(
       'Ningún producto de la lista se puede cargar. Quedaron fuera: sin encontrar 1, sin existencias por pieza 1 (ver esas listas). Revisa la lista antes de seguir.',
     )
+    mensajePrimero(out)
     expect(mockStockCountFindMany).not.toHaveBeenCalled() // nada que contar: ni se pregunta por conteos abiertos
     expect(mockCreateCount).not.toHaveBeenCalled()
   })
@@ -331,6 +336,7 @@ describe('set_stock_by_code', () => {
         NOTA_CONTEO_ABIERTO +
         ' Revisa la lista antes de seguir.',
     )
+    mensajePrimero(out)
     expect(mockCreateCount).not.toHaveBeenCalled()
   })
 
@@ -346,6 +352,7 @@ describe('set_stock_by_code', () => {
       message:
         'Hay demasiados conteos abiertos en este negocio: termina o cancela los que ya no sirvan en el POS (Inventario › Conteos) antes de cargar existencias.',
     })
+    expect(Object.keys(out)).toEqual(['ok', 'needsInput', 'message'])
     expect(mockLinkFindMany).not.toHaveBeenCalled()
     expect(mockCreateCount).not.toHaveBeenCalled()
   })
@@ -522,8 +529,9 @@ describe('set_stock_by_code', () => {
       .mockResolvedValueOnce([filaProducto({ id: 'p1', sku: 'MAILEN-M', stock: 4 })])
       .mockResolvedValueOnce([filaProducto({ id: 'p1', sku: 'MAILEN-M', stock: 3 })])
     const out = await confirmar({ venueId: 'v1', items: [{ code: 'MAILEN-M', quantity: 5 }] })
-    // El aviso general se conserva; el de existencias manda revisar los conteos y restar la venta antes de confirmar otra vez.
-    expect(out).toEqual({ ok: false, stale: true, needsInput: true, error: VISTA_VIEJA_GENERAL, message: EXISTENCIA_VIEJA })
+    // Ningún campo manda a «confirmar» otra vez: el mensaje pide revisar los conteos y restar la venta antes.
+    expect(out).toEqual({ ok: false, stale: true, needsInput: true, error: EXISTENCIA_VIEJA_ERROR, message: EXISTENCIA_VIEJA })
+    expect(JSON.stringify(out)).not.toContain('confírmala')
     expect(mockCreateCount).not.toHaveBeenCalled()
   })
 
@@ -533,7 +541,7 @@ describe('set_stock_by_code', () => {
       .mockResolvedValueOnce([filaProducto({ id: 'p1', sku: 'MAILEN-M', stock: 5 })])
       .mockResolvedValueOnce([filaProducto({ id: 'p1', sku: 'MAILEN-M', stock: 5, lastCountedAt: new Date('2026-10-14T18:01:00.000Z') })])
     const out = await confirmar({ venueId: 'v1', items: [{ code: 'MAILEN-M', quantity: 9 }] })
-    expect(out).toEqual({ ok: false, stale: true, needsInput: true, error: VISTA_VIEJA_GENERAL, message: EXISTENCIA_VIEJA })
+    expect(out).toEqual({ ok: false, stale: true, needsInput: true, error: EXISTENCIA_VIEJA_ERROR, message: EXISTENCIA_VIEJA })
     expect(mockCreateCount).not.toHaveBeenCalled()
   })
 
@@ -542,7 +550,7 @@ describe('set_stock_by_code', () => {
     mockProductFindMany.mockResolvedValue([filaProducto({ id: 'p1', sku: 'MAILEN-M', stock: 7 })])
     mockLinkFindMany.mockResolvedValueOnce([pareja('p1', 2)]).mockResolvedValueOnce([pareja('p1', 1)])
     const out = await confirmar({ venueId: 'v1', items: [{ code: 'MAILEN-M', quantity: 9 }] })
-    expect(out).toEqual({ ok: false, stale: true, needsInput: true, error: VISTA_VIEJA_GENERAL, message: EXISTENCIA_VIEJA })
+    expect(out).toEqual({ ok: false, stale: true, needsInput: true, error: EXISTENCIA_VIEJA_ERROR, message: EXISTENCIA_VIEJA })
     expect(mockCreateCount).not.toHaveBeenCalled()
   })
 
@@ -643,10 +651,10 @@ describe('set_stock_by_code', () => {
     expect(mockCancelCount).not.toHaveBeenCalled()
     expect(out).toMatchObject({ ok: false, countId: 'sc1', applied: 1, notFound: ['NO-EXISTE'] })
     expect(out.notApplied).toEqual([expect.objectContaining({ code: 'DUENAS-M', reason: 'No se alcanzó a aplicar.' })])
-    // Cancelar un conteo abierto NO deshace lo ya sellado: se dice que no lo cancele, además de que no recargue la lista. Lo que quedó
-    // fuera de la lista se cuenta ANTES de esa frase de cierre.
+    // Cancelar un conteo abierto NO deshace lo ya sellado: se dice que no cancele ESTE conteo, además de que no recargue la lista. Lo
+    // que quedó fuera de la lista se cuenta ANTES de esa frase de cierre.
     expect(out.message).toBe(
-      'No pude terminar de confirmar el conteo desde aquí. Según lo guardado: 1 producto(s) aplicados y 1 sin aplicar. Quedaron fuera: sin encontrar 1 (ver esas listas). Revísalo y termínalo en el POS (Inventario › Conteos). No lo canceles (no deshace lo ya aplicado) ni vuelvas a cargar la lista completa (volvería a fijar lo que ya quedó).',
+      'No pude terminar de confirmar el conteo desde aquí. Según lo guardado: 1 producto(s) aplicados y 1 sin aplicar. Quedaron fuera: sin encontrar 1 (ver esas listas). Revísalo y termínalo en el POS (Inventario › Conteos). No canceles este conteo (no deshace lo ya aplicado) ni vuelvas a cargar la lista completa (volvería a fijar lo que ya quedó).',
     )
     expect(out.message).not.toContain('a medias') // otro operador pudo haberlo terminado: se dice lo guardado, no un estado supuesto
     mensajeVaAntesDeLasListas(out)
@@ -677,8 +685,56 @@ describe('set_stock_by_code', () => {
     expect(out.held).toHaveLength(1)
     expect(out.message).toContain('1 producto(s) aplicados y 1 sin aplicar')
     expect(out.message).toContain('apartadas')
-    expect(out.message).toContain('No lo canceles (no deshace lo ya aplicado)')
+    expect(out.message).toContain('No canceles este conteo (no deshace lo ya aplicado)')
     expect(out.message).toContain('ni vuelvas a cargar la lista completa')
+  })
+
+  it('🔍 si la confirmación truena y había productos en OTRO conteo abierto: pide terminar ese otro, sin aconsejar cancelarlo', async () => {
+    mockProductFindMany.mockResolvedValue([p1, p2])
+    mockStockCountFindMany.mockResolvedValue([{ id: 'abierto-1', items: [{ productId: 'p2' }] }])
+    mockConfirmCount.mockRejectedValue(new Error('connection reset'))
+    mockLineFindMany.mockResolvedValueOnce([linea('p1')])
+    mockMovementFindMany.mockResolvedValueOnce([movimiento('inv-p1', 0, 5)])
+    const out = await confirmar({
+      venueId: 'v1',
+      items: [
+        { code: 'MAILEN-M', quantity: 5 },
+        { code: 'DUENAS-M', quantity: 7 },
+      ],
+    })
+    expect(out).toMatchObject({ ok: false, countId: 'sc1', applied: 1, inOpenCount: [expect.objectContaining({ countId: 'abierto-1' })] })
+    expect(out.message).toBe(
+      'No pude terminar de confirmar el conteo desde aquí. Según lo guardado: 1 producto(s) aplicados y 0 sin aplicar. Quedaron fuera: en un conteo abierto 1 (ver esas listas).' +
+        NOTA_OTRO_CONTEO_ABIERTO +
+        ' Revísalo y termínalo en el POS (Inventario › Conteos). No canceles este conteo (no deshace lo ya aplicado) ni vuelvas a cargar la lista completa (volvería a fijar lo que ya quedó).',
+    )
+    expect(out.message).not.toContain('cancélalo')
+  })
+
+  it('🔍 si además no se puede leer lo guardado y había productos en OTRO conteo abierto: lo mismo, sin aconsejar cancelarlo', async () => {
+    mockProductFindMany.mockResolvedValue([p1, p2])
+    mockStockCountFindMany.mockResolvedValue([{ id: 'abierto-1', items: [{ productId: 'p2' }] }])
+    mockConfirmCount.mockRejectedValue(new Error('connection reset'))
+    mockLineFindMany.mockRejectedValueOnce(new Error('connection reset'))
+    const out = await confirmar({
+      venueId: 'v1',
+      items: [
+        { code: 'MAILEN-M', quantity: 5 },
+        { code: 'DUENAS-M', quantity: 7 },
+      ],
+    })
+    expect(out).toMatchObject({
+      ok: false,
+      countId: 'sc1',
+      outcomeUnknown: true,
+      inOpenCount: [expect.objectContaining({ countId: 'abierto-1' })],
+    })
+    expect(out.message).toBe(
+      'No pude terminar de confirmar el conteo ni leer cómo quedó. Quedaron fuera: en un conteo abierto 1 (ver esas listas).' +
+        NOTA_OTRO_CONTEO_ABIERTO +
+        ' Revísalo en el POS (Inventario › Conteos). No canceles este conteo (no deshace lo ya aplicado) ni vuelvas a cargar la lista completa (podría volver a fijar lo que ya quedó).',
+    )
+    expect(out.message).not.toContain('cancélalo')
   })
 
   it('🔍 si la confirmación truena dos veces y tampoco se puede leer lo guardado: conserva el conteo, no da cifras y no manda a recargar', async () => {
@@ -695,7 +751,7 @@ describe('set_stock_by_code', () => {
     expect(out).toMatchObject({ ok: false, countId: 'sc1', outcomeUnknown: true, notFound: ['NO-EXISTE'] })
     expect(out).not.toHaveProperty('applied')
     expect(out.message).toBe(
-      'No pude terminar de confirmar el conteo ni leer cómo quedó. Quedaron fuera: sin encontrar 1 (ver esas listas). Revísalo en el POS (Inventario › Conteos). No lo canceles (no deshace lo ya aplicado) ni vuelvas a cargar la lista completa (podría volver a fijar lo que ya quedó).',
+      'No pude terminar de confirmar el conteo ni leer cómo quedó. Quedaron fuera: sin encontrar 1 (ver esas listas). Revísalo en el POS (Inventario › Conteos). No canceles este conteo (no deshace lo ya aplicado) ni vuelvas a cargar la lista completa (podría volver a fijar lo que ya quedó).',
     )
     mensajeTrasElConteoYExcluidosAlFinal(out)
     expect(mockLogAction.mock.calls[0][0]).toMatchObject({
