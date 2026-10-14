@@ -1,7 +1,13 @@
 /**
  * Tarjetas de regalo · lo que la BASE garantiza por sí sola (Tarea A1), contra Postgres real:
- * la libreta sólo admite inserciones, el saldo nunca es negativo, un sobre cuelga de UNA línea, el tender de sistema
- * es uno por negocio y una línea de tarjeta (NO_OBJETO) no enciende la marca pegajosa de IVA mixto.
+ * - la libreta (`GiftCardActivity`) sólo admite inserciones: UPDATE nunca; DELETE sólo dentro de una transacción que
+ *   declaró `SET LOCAL avoqado.borrado_de_negocio = 'on'` (enmienda E2);
+ * - el saldo de un sobre nunca es negativo (CHECK `GiftCard_balance_no_negativo`);
+ * - un sobre cuelga de UNA sola línea: ninguna otra línea puede tomarlo (índice único `OrderItem_giftCardId_key`) y la
+ *   línea que ya lo tiene no lo suelta ni lo cambia (trigger `TARJETA_LINEA_INMUTABLE`, que también frena el `connect`
+ *   anidado de Prisma: en una relación 1:1 ese `connect` intenta quitarle el sobre a la línea anterior);
+ * - el tender de sistema «Tarjeta de regalo» es uno por negocio (índice único `VenueTenderType_venueId_systemKind_key`);
+ * - una línea de tarjeta (NO_OBJETO con `giftCardId`) no enciende la marca pegajosa `ivaMixtoAlgunaVez`.
  *
  * Correr: source ../urls-tarjetas.sh && TZ=UTC npx jest --selectProjects integration \
  *   --runTestsByPath tests/integration/giftCards/esquemaTarjetas.integration.test.ts --ci --runInBand
@@ -101,24 +107,34 @@ describe('tarjetas de regalo · garantías del esquema', () => {
     expect(releido.balance.toFixed(2)).toBe('500.00')
   })
 
-  it('un sobre cuelga de UNA sola línea de venta (OrderItem.giftCardId es único)', async () => {
+  it('un sobre cuelga de UNA sola línea de venta: ninguna otra lo toma y la suya no lo suelta', async () => {
     const s = await sobre({ status: 'PENDING', balance: new Prisma.Decimal(0) })
-    // Con la columna `giftCardId`, no con `giftCard: { connect }`: en una relación 1:1, el `connect` anidado de Prisma
-    // DESCONECTA en silencio la línea anterior (le pone giftCardId NULL) y mueve el sobre a la nueva, sin P2002
-    // (medido el 14-oct en A1). Quien cree líneas de tarjeta debe escribir la columna, para que la base rechace la segunda.
-    const linea = {
+    const renglon = {
       productName: 'Tarjeta de regalo',
       quantity: 1,
       unitPrice: new Prisma.Decimal(500),
       taxAmount: new Prisma.Decimal(0),
       total: new Prisma.Decimal(500),
       ivaTratamiento: 'NO_OBJETO' as const,
-      giftCardId: s.id,
     }
-    const primera = await orden([linea])
-    await expect(orden([linea])).rejects.toMatchObject({ code: 'P2002' })
+    const primera = await orden([{ ...renglon, giftCardId: s.id }])
+
+    // Otra línea que escribe la columna: el índice único la rechaza.
+    await expect(orden([{ ...renglon, giftCardId: s.id }])).rejects.toMatchObject({
+      code: 'P2002',
+      meta: { target: ['giftCardId'] },
+    })
+    // El `connect` anidado de Prisma, en una relación 1:1, primero le QUITA el sobre a la línea anterior
+    // (UPDATE … SET "giftCardId" = NULL) y luego se lo pone a la nueva, sin P2002 (medido el 14-oct en A1).
+    // El trigger de 20261015090300 rechaza ese UPDATE: el sobre no se mueve.
+    await expect(orden([{ ...renglon, giftCard: { connect: { id: s.id } } }])).rejects.toThrow(/TARJETA_LINEA_INMUTABLE/)
+    // Soltarlo a mano tampoco.
+    await expect(prisma.orderItem.updateMany({ where: { orderId: primera.id }, data: { giftCardId: null } })).rejects.toThrow(
+      /TARJETA_LINEA_INMUTABLE/,
+    )
     // La primera línea sigue dueña del sobre.
     expect(await prisma.orderItem.count({ where: { orderId: primera.id, giftCardId: s.id } })).toBe(1)
+    expect(await prisma.orderItem.count({ where: { giftCardId: s.id } })).toBe(1)
   })
 
   it('una línea de tarjeta (NO_OBJETO con giftCardId) NO enciende ivaMixtoAlgunaVez; una NO_OBJETO sin tarjeta sí', async () => {
@@ -131,7 +147,7 @@ describe('tarjetas de regalo · garantías del esquema', () => {
         taxAmount: new Prisma.Decimal(0),
         total: new Prisma.Decimal(500),
         ivaTratamiento: 'NO_OBJETO',
-        giftCard: { connect: { id: s.id } },
+        giftCardId: s.id,
       },
     ])
     expect((await prisma.organization.findUniqueOrThrow({ where: { id: orgId } })).ivaMixtoAlgunaVez).toBe(false)
@@ -154,7 +170,7 @@ describe('tarjetas de regalo · garantías del esquema', () => {
     await prisma.venueTenderType.create({ data: { ...base, name: 'Regalo A', normalizedName: `${SUF}-a`, systemKind: 'GIFT_CARD' } })
     await expect(
       prisma.venueTenderType.create({ data: { ...base, name: 'Regalo B', normalizedName: `${SUF}-b`, systemKind: 'GIFT_CARD' } }),
-    ).rejects.toMatchObject({ code: 'P2002' })
+    ).rejects.toMatchObject({ code: 'P2002', meta: { target: ['venueId', 'systemKind'] } })
     await prisma.venueTenderType.create({ data: { venueId, baseMethod: 'OTHER', name: 'Vale 1', normalizedName: `${SUF}-v1` } })
     await prisma.venueTenderType.create({ data: { venueId, baseMethod: 'OTHER', name: 'Vale 2', normalizedName: `${SUF}-v2` } })
   })
