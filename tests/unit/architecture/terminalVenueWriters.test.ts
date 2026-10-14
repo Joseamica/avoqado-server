@@ -3,10 +3,18 @@
  * su transacción y ANTES de escribir, a `borrarDisenoAlCambiarDeNegocio`, y el servidor invalida la caché de la ficha tras el
  * commit. Es una red de INVENTARIO (como `orderCancelWriters.test.ts`), no una prueba formal: sin el checker de tipos, lo que
  * no se puede leer (un `data` variable) se inventaría por nombre con su motivo. Un escritor nuevo —directo, anidado desde
- * otro modelo a cualquier profundidad, en SQL crudo o en una migración— tumba esta prueba con su archivo y línea hasta que
- * alguien lo clasifique. La atomicidad NO se prueba aquí: la prueban las integraciones de las Tasks 8 y 9.
+ * otro modelo a cualquier profundidad, en SQL crudo, en una migración o en un `.sql` de scripts/— tumba esta prueba con
+ * su archivo y línea hasta que alguien lo clasifique. La atomicidad NO se prueba aquí: la prueban las integraciones de las
+ * Tasks 8 y 9.
+ *
+ * Límites conocidos (sin el checker de tipos): (1) un alias del delegado no se ve —`const { terminal } = tx`,
+ * `tx['terminal']`—: sólo se lee `x.terminal.update(…)`; (2) una llamada al gancho dentro de un callback diferido
+ * (`setTimeout`, `.then`) cuenta como «antes» si está antes en el texto, aunque corra después; (3) el inventario es por
+ * FUNCIÓN, no por escritura: una segunda escritura de `venueId` en una función ya inventariada entra con la primera.
+ * La atomicidad real (gancho y escritura en la misma transacción) la prueban las integraciones de las Tasks 8 y 9.
  */
 import fs from 'fs'
+import os from 'os'
 import path from 'path'
 import ts from 'typescript'
 
@@ -36,14 +44,17 @@ interface Lectura {
   opaco: boolean
 }
 
-function archivos(dir: string): string[] {
+/** `raiz` sólo cambia en las autopruebas del recorrido (un árbol de mentira en /tmp); el inventario real usa RAIZ. */
+function archivos(dir: string, raiz: string = RAIZ): string[] {
   if (!fs.existsSync(dir)) return []
   return fs.readdirSync(dir, { withFileTypes: true }).flatMap(e => {
     const p = path.join(dir, e.name)
-    if (e.isDirectory()) return ['node_modules', '__tests__'].includes(e.name) ? [] : archivos(p)
-    const rel = path.relative(RAIZ, p).split(path.sep).join('/')
+    if (e.isDirectory()) return ['node_modules', '__tests__'].includes(e.name) ? [] : archivos(p, raiz)
+    const rel = path.relative(raiz, p).split(path.sep).join('/')
     if (/^scripts\/temp-/.test(rel)) return [] // .gitignore: scripts locales de una sesión (los 2 versionados sólo crean)
     if (rel.startsWith('prisma/migrations/')) return e.name === 'migration.sql' ? [p] : []
+    // Un `.sql` suelto de scripts/ (reparaciones a mano, consultas) corre contra la base igual que una migración.
+    if (e.name.endsWith('.sql')) return rel.startsWith('scripts/') ? [p] : []
     return /\.(ts|js|mjs|cjs)$/.test(e.name) && !e.name.endsWith('.d.ts') ? [p] : []
   })
 }
@@ -102,7 +113,8 @@ function anidadoQueMueve(e: ts.Expression): boolean {
     }
     if (!ts.isPropertyAssignment(p)) continue
     const k = nombreDePropiedad(p.name)
-    const mueven = k === 'terminals' ? MUEVEN_DESDE_EL_PADRE : k === 'terminal' ? MUEVEN_DESDE_UN_HIJO : null
+    // Del lado del hijo, la relación a Terminal puede llamarse `terminal` o `…Terminal` (`sourceTerminal`, `claimedByTerminal`).
+    const mueven = k === 'terminals' ? MUEVEN_DESDE_EL_PADRE : k === 'terminal' || /Terminal$/.test(k) ? MUEVEN_DESDE_UN_HIJO : null
     if (mueven) {
       // `llaves()` también resuelve `c ? { connect } : {}` y `c && { set: [] }` (Codex r2). Una relación `terminals`
       // ilegible se acusa: puede mudar terminales.
@@ -259,6 +271,19 @@ describe('el escáner (si estos fallan, el inventario no vale)', () => {
       'caso.ts',
     ],
     ['desde un hijo', `tx.tpvCommandQueue.update({ where: { id }, data: { terminal: { update: { venueId: b } } } })`, 'ANIDADO', 'caso.ts'],
+    // Una relación a Terminal con OTRO nombre (`sourceTerminal`, `claimedByTerminal`: existen en el schema) muda igual.
+    [
+      'desde un hijo con otro nombre (…Terminal)',
+      `tx.areaTicket.update({ where: { id }, data: { sourceTerminal: { update: { venueId: x } } } })`,
+      'ANIDADO',
+      'caso.ts',
+    ],
+    [
+      'desde un hijo con otro nombre, por upsert',
+      `tx.order.update({ where: { id }, data: { claimedByTerminal: { upsert: { create: { name }, update: { venueId: x } } } } })`,
+      'ANIDADO',
+      'caso.ts',
+    ],
     [
       'relación en un ternario',
       `tx.venue.update({ where: { id: destino }, data: { terminals: condicion ? { connect: { id: terminalId } } : {} } })`,
@@ -287,6 +312,16 @@ describe('el escáner (si estos fallan, el inventario no vale)', () => {
       'caso.ts',
     ],
     ['hijo que se liga', `tx.tpvCommandQueue.create({ data: { terminal: { connect: { id: t } }, commandType: 'LOCK' } })`, 'caso.ts'],
+    [
+      'hijo con otro nombre que sólo se liga',
+      `tx.areaTicket.create({ data: { sourceTerminal: { connect: { id: t } }, name } })`,
+      'caso.ts',
+    ],
+    [
+      'otro modelo con «Terminal» en medio del nombre (el sufijo va anclado)',
+      `tx.venue.update({ where: { id }, data: { terminalHealth: { update: { status: 'ok' } } } })`,
+      'caso.ts',
+    ],
     [
       'filtro por relación',
       `tx.tpvCommandQueue.updateMany({ where: { terminal: { venueId: v } }, data: { status: 'EXPIRED' } })`,
@@ -372,10 +407,45 @@ describe('el escáner (si estos fallan, el inventario no vale)', () => {
   )
 })
 
+describe('el recorrido de archivos (si falla, el escáner no está leyendo algo que debería)', () => {
+  it('lee migration.sql y TODO `.sql` de scripts/ (también anidado), no otros .sql ni scripts/temp-*', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'terminal-venue-writers-'))
+    try {
+      for (const rel of [
+        'scripts/reparar.sql',
+        'scripts/sql/embudo.sql',
+        'scripts/temp-local.sql',
+        'scripts/hacer.ts',
+        'prisma/migrations/m1/migration.sql',
+        'prisma/migrations/m1/otro.sql',
+        'prisma/semilla.sql',
+        'src/consulta.sql',
+        'src/servicio.ts',
+      ]) {
+        fs.mkdirSync(path.dirname(path.join(tmp, rel)), { recursive: true })
+        fs.writeFileSync(path.join(tmp, rel), '')
+      }
+      const vistos = ['src', 'scripts', 'prisma']
+        .flatMap(d => archivos(path.join(tmp, d), tmp))
+        .map(f => path.relative(tmp, f).split(path.sep).join('/'))
+        .sort()
+      expect(vistos).toEqual([
+        'prisma/migrations/m1/migration.sql',
+        'scripts/hacer.ts',
+        'scripts/reparar.sql',
+        'scripts/sql/embudo.sql',
+        'src/servicio.ts',
+      ])
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true })
+    }
+  })
+})
+
 describe('Terminal.venueId: cada escritor pasa por el gancho de la pantalla del cliente (spec §5.1)', () => {
   let hallazgos: Hallazgo[] = []
   let llamadas: Llamada[] = []
-  // En un beforeAll y no en el cuerpo del describe: así cuenta el tope de tiempo (con la Mac en carga 90, 2,686 archivos ≈ 10 s).
+  // En un beforeAll y no en el cuerpo del describe: así cuenta el tope de tiempo (con la Mac en carga 90, ~2,700 archivos ≈ 10 s).
   beforeAll(() => {
     const resultados = ['src', 'scripts', 'prisma']
       .flatMap(d => archivos(path.join(RAIZ, d)))
@@ -387,7 +457,7 @@ describe('Terminal.venueId: cada escritor pasa por el gancho de la pantalla del 
   const sitios = (clase: Clase) => [...new Set(de(clase).map(h => h.sitio))].sort()
 
   it('el escáner ve el repo (si esto baja, se rompió el escáner, no el código)', () => {
-    expect(de('LIMPIA').length).toBeGreaterThanOrEqual(35) // 14-oct (21f992e53): 41 en develop; 42 con el gancho
+    expect(de('LIMPIA').length).toBeGreaterThanOrEqual(35) // 43 hoy (umbral ≥ 35)
   })
   it('cada escritura de Terminal.venueId está inventariada — ninguna nueva sin clasificar', () => {
     expect(sitios('VENUE')).toEqual(Object.keys(ESCRITORES).sort())
