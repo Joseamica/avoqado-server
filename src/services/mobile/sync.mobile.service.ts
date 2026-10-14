@@ -115,6 +115,82 @@ const RETRYABLE_ERROR_CODES = CODIGOS_TRANSITORIOS
  */
 const PROCESSING_TIMEOUT_MS = 5 * 60 * 1000
 
+// ─── Huella transaccional y retoma (plan docs/superpowers/plans/2026-10-13-sync-retoma-por-llave.md) ──────────────
+// Medido en el piloto de 32,000 ventas con dos SIGKILL: la reserva PROCESSING de un proceso muerto terminaba en
+// OUTCOME_UNKNOWN aunque el efecto fuera comprobable, y la cuenta abierta absorbía las ventas siguientes de la mesa.
+// La reserva lleva una MARCA desde que nace y el efecto deja su HUELLA dentro de su propia transacción: con huella el
+// efecto ocurrió; sin huella no ocurrió y ya no puede ocurrir (el ejecutor que perdió su turno revierte).
+
+const PROTOCOLO_HUELLA = 'huella-v1'
+/** Tipos con huella transaccional (su efecto principal y la huella commitean juntos). */
+const RETOMABLES: ReadonlySet<string> = new Set(['OPEN_TABLE', 'ADD_ITEMS', 'PAY_CASH', 'CANCEL_ORDER'])
+/** Con la huella, la retoma decide por evidencia y no por el reloj: 60 s sólo evita competir con un ejecutor sano. */
+const RETOMA_MS = 60 * 1000
+
+export interface MarcaDeReserva {
+  protocolo: typeof PROTOCOLO_HUELLA
+  /** Decidido con el payload ORIGINAL: una ronda con promoción commitea en varias transacciones y no se retoma. */
+  retomable: boolean
+  huella?: Record<string, unknown>
+}
+
+/** Lo que un reducer recibe para dejar su huella DENTRO de la transacción de su efecto. */
+export type DejarHuella = (tx: Prisma.TransactionClient, huella: Record<string, unknown>) => Promise<void>
+
+/** El ejecutor perdió su turno (otro request retomó la reserva): su transacción se revierte y nada suyo commitea. */
+export class ReservaPerdida extends Error {
+  readonly errorCode = 'RESERVA_PERDIDA'
+  constructor(intentId: string) {
+    super(`La reserva del intent ${intentId} la retomó otro request`)
+  }
+}
+
+function marcaInicial(intent: SyncIntentInput): MarcaDeReserva | null {
+  if (!RETOMABLES.has(intent.type)) return null
+  const items = Array.isArray(intent.payload?.items) ? (intent.payload.items as any[]) : []
+  return { protocolo: PROTOCOLO_HUELLA, retomable: intent.type !== 'ADD_ITEMS' || !items.some(item => item?.promotionRef) }
+}
+
+function leerMarca(resultJson: unknown): MarcaDeReserva | null {
+  const valor = resultJson as Partial<MarcaDeReserva> | null
+  return valor && typeof valor === 'object' && valor.protocolo === PROTOCOLO_HUELLA ? (valor as MarcaDeReserva) : null
+}
+
+/** Filtro de igualdad exacta sobre la columna Json: SQL NULL se compara con `DbNull`, nunca con `null` ambiguo. */
+function filtroJson(valor: unknown): Prisma.JsonNullableFilter<'PosSyncIntent'> {
+  return valor === null || valor === undefined ? { equals: Prisma.DbNull } : { equals: valor as Prisma.InputJsonValue }
+}
+
+/** Exportada para la prueba de integración del ejecutor lento; en producción sólo la usa processIntents. */
+export function dejarHuellaCon(venueId: string, intentId: string, reclamo: Date, marca: MarcaDeReserva): DejarHuella {
+  return async (tx, huella) => {
+    const { count } = await tx.posSyncIntent.updateMany({
+      where: { venueId, idempotencyKey: intentId, status: 'PROCESSING', createdAt: reclamo },
+      data: { resultJson: { ...marca, huella } as Prisma.InputJsonValue },
+    })
+    if (count !== 1) throw new ReservaPerdida(intentId)
+  }
+}
+
+const enCurso = (intentId: string): SyncIntentAck => ({
+  id: intentId,
+  status: 'RETRY',
+  errorCode: 'INTENT_IN_PROGRESS',
+  message: 'La operación sigue procesándose. Reintenta en unos segundos.',
+})
+
+/** Relee la reserva y contesta lo que diga, sin escribir. Para quien perdió su turno o su cierre. */
+async function contestarVigente(venueId: string, intentId: string): Promise<SyncIntentAck> {
+  const vigente = await prisma.posSyncIntent.findUnique({ where: { venueId_idempotencyKey: { venueId, idempotencyKey: intentId } } })
+  if (!vigente || vigente.status === 'PROCESSING') return enCurso(intentId)
+  return {
+    id: intentId,
+    status: vigente.status as 'ACKED' | 'REJECTED',
+    errorCode: vigente.errorCode ?? undefined,
+    result: (vigente.resultJson as Record<string, unknown> | null) ?? undefined,
+  }
+}
+
 const KNOWN_TYPES: SyncIntentType[] = [
   'OPEN_TABLE',
   'ADD_ITEMS',
@@ -319,7 +395,7 @@ function invalidPromotionLinesReason(items: any[]): string | null {
   return null
 }
 
-async function ackFromExisting(existing: any, intentId: string): Promise<SyncIntentAck> {
+async function ackFromExisting(existing: any, intentId: string, intentType?: string): Promise<SyncIntentAck> {
   if (existing.type === 'HTTP_OP_V1') {
     return {
       id: intentId,
@@ -338,21 +414,42 @@ async function ackFromExisting(existing: any, intentId: string): Promise<SyncInt
   }
 
   const createdAt = existing.createdAt instanceof Date ? existing.createdAt.getTime() : Date.now()
-  if (Date.now() - createdAt < PROCESSING_TIMEOUT_MS) {
+  const edad = Date.now() - createdAt
+  // Una reserva con huella transaccional se RETOMA (paso 1 de processIntents), nunca se da por incierta: ni el tiempo
+  // ni una petición de otro tipo con la misma llave la cierran (cerrarla borraría la huella).
+  if (leerMarca(existing.resultJson)?.retomable) {
+    if (existing.type !== intentType) {
+      return {
+        id: intentId,
+        status: 'REJECTED',
+        errorCode: 'INTENT_TYPE_MISMATCH',
+        message: 'Esta llave pertenece a otra operación. Requiere revisión.',
+      }
+    }
+    if (edad < RETOMA_MS) return enCurso(intentId)
     return {
       id: intentId,
       status: 'RETRY',
-      errorCode: 'INTENT_IN_PROGRESS',
-      message: 'La operación sigue procesándose. Reintenta en unos segundos.',
+      errorCode: 'INTENT_RECOVERING',
+      message: 'La operación se interrumpió; se retoma en el siguiente intento.',
     }
   }
+  if (edad < PROCESSING_TIMEOUT_MS) return enCurso(intentId)
 
   // Resultado incierto: pudo aplicarse el efecto y caer antes del ACK. La
   // alternativa peligrosa sería reejecutarlo y duplicar rondas, splits o caja.
-  await prisma.posSyncIntent.update({
-    where: { venueId_idempotencyKey: { venueId: existing.venueId, idempotencyKey: existing.idempotencyKey } },
-    data: { status: 'REJECTED', errorCode: 'OUTCOME_UNKNOWN' },
+  // Condicionado a lo LEÍDO: una lectura vieja no puede pisar un ACK que otro ya cerró.
+  const { count } = await prisma.posSyncIntent.updateMany({
+    where: {
+      venueId: existing.venueId,
+      idempotencyKey: existing.idempotencyKey,
+      status: 'PROCESSING',
+      createdAt: existing.createdAt,
+      resultJson: filtroJson(existing.resultJson),
+    },
+    data: { status: 'REJECTED', errorCode: 'OUTCOME_UNKNOWN', resultJson: Prisma.DbNull },
   })
+  if (count !== 1) return contestarVigente(existing.venueId, intentId)
   return {
     id: intentId,
     status: 'REJECTED',
@@ -401,16 +498,29 @@ export async function processIntents(params: {
     const existing = await prisma.posSyncIntent.findUnique({
       where: { venueId_idempotencyKey: { venueId, idempotencyKey: intent.id } },
     })
+    /** Turno de este request sobre la reserva: su `createdAt`. Todo cierre y toda huella van condicionados a él. */
+    let reclamo: Date | null = null
+    let marca: MarcaDeReserva | null = null
+    let huellaPrevia: Record<string, unknown> | undefined
     if (existing) {
-      logger.info(`🔁 [POS SYNC] Intent ${intent.id} ya procesado (${existing.status}) — ack repetido, sin re-aplicar`)
-      const ack = await ackFromExisting(existing, intent.id)
-      const result = ack.result
-      // Reponer el mapa local para intents posteriores del mismo batch.
-      if (existing.localRef && result?.orderId) localRefMap.set(existing.localRef, String(result.orderId))
-      acks.push(ack)
-      if (ack.status === 'RETRY') blockedLanes.add(lane)
-      continue
+      const retoma = await intentarRetomar({ existing, intent, venueId, staffId, deviceId, authorizeIntent })
+      if (retoma.tipo === 'contestar') {
+        const ack = retoma.ack
+        // Reponer el mapa local para intents posteriores del mismo batch.
+        if (existing.localRef && ack.result?.orderId) localRefMap.set(existing.localRef, String(ack.result.orderId))
+        acks.push(ack)
+        if (ack.status === 'RETRY') blockedLanes.add(lane)
+        continue
+      }
+      reclamo = retoma.reclamo
+      marca = retoma.marca
+      huellaPrevia = retoma.marca.huella
+      logger.info(
+        `🧭 [POS SYNC] Intent ${intent.type} ${intent.id} retomado tras una caída — ${huellaPrevia ? 'con huella: ya ocurrió' : 'sin huella: no ocurrió'}`,
+      )
     }
+
+    if (!reclamo) {
 
     // Fence monotónico: una reinstalación/bug no puede reutilizar una seq con
     // otro UUID y ejecutar una operación vieja como si fuera nueva. Clientes
@@ -432,7 +542,7 @@ export async function processIntents(params: {
           where: { venueId_idempotencyKey: { venueId, idempotencyKey: intent.id } },
         })
         if (concurrent) {
-          const ack = await ackFromExisting(concurrent, intent.id)
+          const ack = await ackFromExisting(concurrent, intent.id, intent.type)
           if (concurrent.localRef && ack.result?.orderId) localRefMap.set(concurrent.localRef, String(ack.result.orderId))
           acks.push(ack)
           if (ack.status === 'RETRY') blockedLanes.add(lane)
@@ -451,6 +561,8 @@ export async function processIntents(params: {
 
     // 2. Reservar ANTES del efecto. La unique hace de compare-and-set: sólo
     // un request puede ejecutar; los concurrentes observan PROCESSING.
+    marca = marcaInicial(intent)
+    const nuevoReclamo = new Date()
     try {
       await prisma.posSyncIntent.create({
         data: {
@@ -462,15 +574,18 @@ export async function processIntents(params: {
           idempotencyKey: intent.id,
           localRef: typeof intent.payload?.localOrderId === 'string' ? (intent.payload.localOrderId as string) : null,
           status: 'PROCESSING',
+          createdAt: nuevoReclamo,
+          ...(marca ? { resultJson: marca as unknown as Prisma.InputJsonValue } : {}),
         },
       })
+      reclamo = nuevoReclamo
     } catch (reserveError: any) {
       if (reserveError?.code === 'P2002') {
         const winner = await prisma.posSyncIntent.findUnique({
           where: { venueId_idempotencyKey: { venueId, idempotencyKey: intent.id } },
         })
         if (winner) {
-          const winnerAck = await ackFromExisting(winner, intent.id)
+          const winnerAck = await ackFromExisting(winner, intent.id, intent.type)
           acks.push(winnerAck)
           if (winnerAck.status === 'RETRY') blockedLanes.add(lane)
           continue
@@ -507,6 +622,8 @@ export async function processIntents(params: {
       blockedLanes.add(lane)
       continue
     }
+    }
+    const turno = reclamo as Date
 
     // 3. Autorizar + aplicar. El actor persistido evita que una operación
     // encolada por una persona termine atribuida a quien inició sesión después.
@@ -537,9 +654,20 @@ export async function processIntents(params: {
           entityId: intent.id,
           data: { permission: missingPermission, intentType: intent.type, deviceId },
         })
+      } else if (huellaPrevia && intent.type !== 'PAY_CASH') {
+        ack = await ackDesdeHuella(venueId, intent, huellaPrevia, localRefMap)
       } else {
-        ack = await applyIntent({ venueId, staffId, deviceId, intent, localRefMap })
+        const dejarHuella = marca?.retomable ? dejarHuellaCon(venueId, intent.id, turno, marca) : undefined
+        ack = await applyIntent({ venueId, staffId, deviceId, intent, localRefMap, dejarHuella })
       }
+    }
+
+    // Perdió su turno dentro de la transacción del efecto: nada suyo commiteó; contesta lo que haya.
+    if (ack.errorCode === 'RESERVA_PERDIDA') {
+      const vigente = await contestarVigente(venueId, intent.id)
+      acks.push(vigente)
+      if (vigente.status === 'RETRY') blockedLanes.add(lane)
+      continue
     }
 
     // RETRY (transitorio): NO se persiste (para que un próximo replay lo
@@ -548,11 +676,15 @@ export async function processIntents(params: {
     if (ack.status === 'RETRY') {
       // No hubo resultado terminal: liberar la reserva permite el próximo
       // intento. El reducer sólo devuelve RETRY para errores transitorios.
-      await prisma.posSyncIntent
-        .delete({
-          where: { venueId_idempotencyKey: { venueId, idempotencyKey: intent.id } },
-        })
-        .catch(error => logger.error(`❌ [POS SYNC] No se pudo liberar reserva RETRY ${intent.id}`, error))
+      // Sólo la reserva PROPIA (su turno) y SIN huella: si el efecto ya commiteó (falló algo después, o es una retoma
+      // que ya traía huella), la huella se queda y la siguiente retoma decide con ella.
+      if (!huellaPrevia) {
+        await prisma.posSyncIntent
+          .deleteMany({
+            where: { venueId, idempotencyKey: intent.id, status: 'PROCESSING', createdAt: turno, resultJson: filtroJson(marca) },
+          })
+          .catch(error => logger.error(`❌ [POS SYNC] No se pudo liberar reserva RETRY ${intent.id}`, error))
+      }
       acks.push(ack)
       logger.info(`🔁 [POS SYNC] Intent ${intent.id} en RETRY — pauso ${lane} para preservar su FIFO`)
       blockedLanes.add(lane)
@@ -562,14 +694,21 @@ export async function processIntents(params: {
     // 4. Cerrar la reserva con el ACK terminal. Si esta escritura cae después
     // del efecto, PROCESSING impide una segunda ejecución y fuerza revisión.
     try {
-      await prisma.posSyncIntent.update({
-        where: { venueId_idempotencyKey: { venueId, idempotencyKey: intent.id } },
+      const { count } = await prisma.posSyncIntent.updateMany({
+        where: { venueId, idempotencyKey: intent.id, status: 'PROCESSING', createdAt: turno },
         data: {
           status: ack.status,
           errorCode: ack.errorCode ?? null,
           resultJson: ack.result ? (ack.result as Prisma.InputJsonValue) : Prisma.DbNull,
         },
       })
+      if (count !== 1) {
+        // Ya no es su turno (otro la retomó) o un servicio la cerró en su transacción: manda la fila.
+        const vigente = await contestarVigente(venueId, intent.id)
+        acks.push(vigente)
+        if (vigente.status === 'RETRY') blockedLanes.add(lane)
+        continue
+      }
     } catch (persistError: any) {
       logger.error(`❌ [POS SYNC] No se pudo persistir el ack del intent ${intent.id}`, persistError)
       // El efecto ya corrió: devolvemos el resultado a este request, pero el
@@ -585,6 +724,108 @@ export async function processIntents(params: {
   return acks
 }
 
+// ─── Retoma de una reserva huérfana ─────────────────────────────────────────
+
+type Retoma = { tipo: 'contestar'; ack: SyncIntentAck } | { tipo: 'retomar'; reclamo: Date; marca: MarcaDeReserva }
+
+/**
+ * Decide qué hacer con una reserva que ya existe. Sólo se retoma una fila con huella transaccional (`huella-v1`,
+ * retomable), del mismo tipo, con ≥ RETOMA_MS y de SU dueño (mismo aparato, persona y secuencia) con permiso vigente.
+ * Una petición ajena o sin permiso NUNCA toca la fila: se le contesta sin persistir y la reserva queda para su dueño.
+ */
+async function intentarRetomar(p: {
+  existing: any
+  intent: SyncIntentInput
+  venueId: string
+  staffId: string
+  deviceId: string
+  authorizeIntent: (intent: SyncIntentInput, requiredPermission: string) => boolean
+}): Promise<Retoma> {
+  const { existing, intent } = p
+  const marca = leerMarca(existing.resultJson)
+  const edad = Date.now() - (existing.createdAt instanceof Date ? existing.createdAt.getTime() : Date.now())
+  if (existing.status !== 'PROCESSING' || !marca?.retomable || existing.type !== intent.type || edad < RETOMA_MS) {
+    logger.info(`🔁 [POS SYNC] Intent ${intent.id} ya procesado (${existing.status}) — ack repetido, sin re-aplicar`)
+    return { tipo: 'contestar', ack: await ackFromExisting(existing, intent.id, intent.type) }
+  }
+  const mismoDueño =
+    existing.deviceId === p.deviceId &&
+    existing.staffId === p.staffId &&
+    (existing.seq ?? null) === (intent.seq ?? null) &&
+    (!intent.staffId || intent.staffId === p.staffId)
+  if (!mismoDueño) {
+    return {
+      tipo: 'contestar',
+      ack: {
+        id: intent.id,
+        status: 'REJECTED',
+        errorCode: 'ACTOR_MISMATCH',
+        message: 'La operación quedó apartada por otra sesión o aparato. Requiere revisión del gerente.',
+      },
+    }
+  }
+  const sinPermiso = requiredPermissionsForIntent(intent).find(permission => !p.authorizeIntent(intent, permission))
+  if (sinPermiso) {
+    return {
+      tipo: 'contestar',
+      ack: { id: intent.id, status: 'REJECTED', errorCode: 'PERMISSION_DENIED', message: `No tienes permiso para reproducir ${intent.type}.` },
+    }
+  }
+  const reclamo = new Date()
+  const { count } = await prisma.posSyncIntent.updateMany({
+    where: {
+      venueId: p.venueId,
+      idempotencyKey: intent.id,
+      status: 'PROCESSING',
+      createdAt: existing.createdAt,
+      resultJson: filtroJson(existing.resultJson),
+    },
+    data: { createdAt: reclamo },
+  })
+  if (count !== 1) return { tipo: 'contestar', ack: await contestarVigente(p.venueId, intent.id) }
+  return { tipo: 'retomar', reclamo, marca }
+}
+
+/**
+ * El efecto YA ocurrió (su huella commiteó con él): se contesta con ESA cuenta, sin re-ejecutar. Nunca con la cuenta
+ * que hoy tenga la mesa ni buscando renglones en la cuenta original (una división los pudo mover).
+ */
+async function ackDesdeHuella(
+  venueId: string,
+  intent: SyncIntentInput,
+  huella: Record<string, unknown>,
+  localRefMap: Map<string, string>,
+): Promise<SyncIntentAck> {
+  const orderId = typeof huella.orderId === 'string' ? huella.orderId : null
+  if (intent.type === 'CANCEL_ORDER' || !orderId) {
+    // La cancelación commiteó (y liberó la mesa), pero sus avisos, bitácora y reversa de referidos corren después y
+    // pudieron faltar: se deja visible para revisión en vez de inventar que terminó todo.
+    return {
+      id: intent.id,
+      status: 'REJECTED',
+      errorCode: 'OUTCOME_UNKNOWN',
+      message: 'No se pudo confirmar si la operación terminó. Revisa la cuenta antes de repetirla.',
+    }
+  }
+  const orden = await prisma.order.findFirst({ where: { id: orderId, venueId }, select: { orderNumber: true, version: true, total: true } })
+  if (intent.type === 'OPEN_TABLE') {
+    const localOrderId = typeof intent.payload.localOrderId === 'string' ? intent.payload.localOrderId : null
+    if (localOrderId) localRefMap.set(localOrderId, orderId)
+    return {
+      id: intent.id,
+      status: 'ACKED',
+      result: {
+        orderId,
+        orderNumber: orden?.orderNumber ?? null,
+        version: orden?.version ?? 1,
+        isNewOrder: huella.isNewOrder === true,
+        ...(localOrderId ? { localOrderId } : {}),
+      },
+    }
+  }
+  return { id: intent.id, status: 'ACKED', result: { orderId, version: orden?.version ?? undefined, total: Number(orden?.total ?? 0) } }
+}
+
 // ─── Reducers por tipo ───────────────────────────────────────────────────────
 
 async function applyIntent(ctx: {
@@ -593,8 +834,9 @@ async function applyIntent(ctx: {
   deviceId: string
   intent: SyncIntentInput
   localRefMap: Map<string, string>
+  dejarHuella?: DejarHuella
 }): Promise<SyncIntentAck> {
-  const { venueId, staffId, intent, localRefMap } = ctx
+  const { venueId, staffId, intent, localRefMap, dejarHuella } = ctx
 
   if (!KNOWN_TYPES.includes(intent.type)) {
     // Cliente más nuevo que el server: no perdemos el intent, lo rechazamos
@@ -605,11 +847,11 @@ async function applyIntent(ctx: {
   try {
     switch (intent.type) {
       case 'OPEN_TABLE':
-        return await applyOpenTable(venueId, staffId, intent, localRefMap)
+        return await applyOpenTable(venueId, staffId, intent, localRefMap, dejarHuella)
       case 'ADD_ITEMS':
-        return await applyAddItems(venueId, staffId, intent, localRefMap)
+        return await applyAddItems(venueId, staffId, intent, localRefMap, dejarHuella)
       case 'PAY_CASH':
-        return await applyPayCash(venueId, staffId, intent, localRefMap)
+        return await applyPayCash(venueId, staffId, intent, localRefMap, dejarHuella)
       case 'APPLY_DISCOUNT':
       case 'APPLY_SERVICE_CHARGE':
       case 'COMP_ORDER':
@@ -617,7 +859,7 @@ async function applyIntent(ctx: {
       case 'CANCEL_ORDER':
       case 'MOVE_ORDER':
       case 'ASSIGN_ORDER':
-        return await applyOrderMutation(venueId, staffId, intent, localRefMap)
+        return await applyOrderMutation(venueId, staffId, intent, localRefMap, dejarHuella)
       case 'CLEAR_TABLE':
         return await applyClearTable(venueId, staffId, intent)
       case 'SPLIT_ORDER':
@@ -752,6 +994,7 @@ async function applyOpenTable(
   staffId: string,
   intent: SyncIntentInput,
   localRefMap: Map<string, string>,
+  dejarHuella?: DejarHuella,
 ): Promise<SyncIntentAck> {
   await assertTableService(venueId)
   const tableId = String(intent.payload.tableId ?? '')
@@ -778,7 +1021,14 @@ async function applyOpenTable(
     }
   }
 
-  const { order, isNewOrder } = await tableService.assignTable(venueId, tableId, staffId, covers)
+  const { order, isNewOrder } = await tableService.assignTable(
+    venueId,
+    tableId,
+    staffId,
+    covers,
+    undefined,
+    dejarHuella ? (tx, admitida) => dejarHuella(tx, admitida) : undefined,
+  )
   if (localOrderId) localRefMap.set(localOrderId, order.id)
   return {
     id: intent.id,
@@ -904,6 +1154,7 @@ async function applyAddItems(
   staffId: string,
   intent: SyncIntentInput,
   localRefMap: Map<string, string>,
+  dejarHuella?: DejarHuella,
 ): Promise<SyncIntentAck> {
   await assertTableService(venueId)
   const orderId = await resolveOrderId(venueId, intent.payload, localRefMap)
@@ -1012,7 +1263,15 @@ async function applyAddItems(
       conPromocion.length > 0
         ? ((await prisma.order.findFirst({ where: { id: orderId, venueId }, select: { version: true } }))?.version ?? current.version)
         : current.version
-    const updated = await orderTpvService.addItemsToOrder(venueId, orderId, itemsWithKey, versionForAdd, true)
+    // La huella sólo cuando la ronda es UNA transacción (sin promociones: ésas commitean aparte).
+    const updated = await orderTpvService.addItemsToOrder(
+      venueId,
+      orderId,
+      itemsWithKey,
+      versionForAdd,
+      true,
+      dejarHuella && conPromocion.length === 0 ? (tx, ronda) => dejarHuella(tx, ronda) : undefined,
+    )
     return {
       id: intent.id,
       status: 'ACKED',
@@ -1057,6 +1316,7 @@ async function applyPayCash(
   staffId: string,
   intent: SyncIntentInput,
   localRefMap: Map<string, string>,
+  dejarHuella?: DejarHuella,
 ): Promise<SyncIntentAck> {
   const orderId = await resolveOrderId(venueId, intent.payload, localRefMap)
   const amountCents = Number(intent.payload.amountCents ?? NaN)
@@ -1108,8 +1368,13 @@ async function applyPayCash(
       message: 'PAY_CASH requiere orderId/localOrderId y amountCents > 0 (o $0 sin propina para cerrar una cuenta en $0)',
     }
   }
-  // Mismo override que la ruta online del cobro: la caja liquida cualquier cheque.
-  await assertOwnership(venueId, staffId, orderId, PAYMENT_OWNERSHIP_OVERRIDES)
+  // Mismo override que la ruta online del cobro: la caja liquida cualquier cheque. Un cobro que YA existe (misma llave)
+  // no se vuelve a juzgar: la mesa pudo cambiar de mesero después; payCashOrder devuelve ese pago si es de esta cuenta.
+  const yaCobrado = await prisma.payment.findUnique({
+    where: { venueId_idempotencyKey: { venueId, idempotencyKey: intent.id } },
+    select: { id: true },
+  })
+  if (!yaCobrado) await assertOwnership(venueId, staffId, orderId, PAYMENT_OWNERSHIP_OVERRIDES)
 
   const payment = await orderMobileService.payCashOrder(venueId, orderId, {
     amount: amountCents,
@@ -1130,6 +1395,7 @@ async function applyPayCash(
     // La venta YA ocurrió: se honra su revisión aunque el catálogo haya cambiado
     // mientras el dispositivo estaba sin red.
     isOfflineReplay: true,
+    ...(dejarHuella ? { dentroDeLaTx: (tx: Prisma.TransactionClient, cobro: { orderId: string; paymentId: string }) => dejarHuella(tx, cobro) } : {}),
   })
   return {
     id: intent.id,
@@ -1181,6 +1447,7 @@ async function applyOrderMutation(
   staffId: string,
   intent: SyncIntentInput,
   localRefMap: Map<string, string>,
+  dejarHuella?: DejarHuella,
 ): Promise<SyncIntentAck> {
   await assertTableService(venueId)
   const orderId = await resolveOrderId(venueId, intent.payload, localRefMap)
@@ -1222,7 +1489,13 @@ async function applyOrderMutation(
       break
     }
     case 'CANCEL_ORDER': {
-      await orderMobileService.cancelOrder(venueId, orderId, typeof p.reason === 'string' ? p.reason : undefined, staffId)
+      await orderMobileService.cancelOrder(
+        venueId,
+        orderId,
+        typeof p.reason === 'string' ? p.reason : undefined,
+        staffId,
+        dejarHuella ? (tx, cancelada) => dejarHuella(tx, cancelada) : undefined,
+      )
       break
     }
     case 'MOVE_ORDER': {
