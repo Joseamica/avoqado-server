@@ -1,7 +1,11 @@
 // tests/unit/services/customer-display/customerDisplayDesign.copy.test.ts
 import { Prisma } from '@prisma/client'
 import { prismaMock } from '@tests/__helpers__/setup'
-import { copyCustomerDisplayDesign, previewCopyCustomerDisplay } from '@/services/customer-display/customerDisplayDesign.service'
+import {
+  copyCustomerDisplayDesign,
+  getEffectiveDesign,
+  previewCopyCustomerDisplay,
+} from '@/services/customer-display/customerDisplayDesign.service'
 
 jest.mock('@/services/access/basePlan.service', () => ({ venueHasFeatureAccess: jest.fn(async () => true) }))
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn() }))
@@ -119,6 +123,30 @@ it('un origen o un destino mal formado es un 400 con su código, no un 500 de la
     code: 'INVALID_TARGETS',
   })
   expect(prismaMock.terminal.findMany).not.toHaveBeenCalled()
+})
+
+// La tablet lee de la caché de 60 s: si copiar no la tirara, cada destino seguiría mostrando su diseño viejo. (La misma
+// regla que guardar; sin esta prueba, quitar la invalidación de la copia no ponía nada en rojo.)
+it('copiar invalida la caché de la ficha de CADA destino escrito', async () => {
+  prismaMock.terminal.findFirst.mockResolvedValue({
+    id: 't2',
+    venueId: 'v',
+    name: 'Caja 2',
+    type: 'POS_ANDROID',
+    customerDisplayDesignVersion: 2,
+    venue: { logo: null, updatedAt: new Date() },
+    customerDisplayDesign: null,
+  } as any)
+  await getEffectiveDesign('v', 't2', { cache: true })
+  await getEffectiveDesign('v', 't2', { cache: true })
+  expect(prismaMock.terminal.findFirst).toHaveBeenCalledTimes(1) // la segunda salió de la caché
+
+  prismaMock.$transaction.mockResolvedValueOnce({ escritos: [{ terminalId: 't2', changedKeys: [] }], promosOmitted: false })
+  await expect(copyCustomerDisplayDesign(entrada)).resolves.toMatchObject({ copied: ['t2'] })
+  const lecturasTrasCopiar = prismaMock.terminal.findFirst.mock.calls.length
+
+  await getEffectiveDesign('v', 't2', { cache: true })
+  expect(prismaMock.terminal.findFirst.mock.calls.length).toBe(lecturasTrasCopiar + 1) // ya no sale de la caché
 })
 
 // MINOR 7: con el plan, TODOS los destinos reciben las mismas imágenes y el mismo logo del origen. Revisar el mismo
