@@ -4,7 +4,13 @@ import * as admisionIva from '@/services/fiscal/admisionIva'
 import * as sellosIva from '@/services/fiscal/sellosIva'
 import { randomUUID } from 'crypto'
 import prisma from '@/utils/prismaClient'
-import { issueCfdiForOrder, cancelCfdi, refreshPendingCancellation, sincronizarCancelacionExterna } from '@/services/fiscal/cfdi.service'
+import {
+  issueCfdiForOrder,
+  cancelCfdi,
+  refreshPendingCancellation,
+  sincronizarCancelacionExterna,
+  ORIGEN_DUENO,
+} from '@/services/fiscal/cfdi.service'
 import { leerEntrada } from '@/services/fiscal/entradaDocumental'
 import { encenderIvaPorProducto } from '../../__helpers__/iva-por-producto'
 
@@ -227,16 +233,26 @@ describe('liberar sellos al confirmar cancelación', () => {
     }
     await Promise.all([run(), run()])
     expect(release).toHaveBeenCalledTimes(1)
-    // C2 · OF-2 (T2 R4, cambia A PROPÓSITO): en la directa, el ganador deja «solicitada» (`CFDI_CANCELLED`, el controlador) y, como su
-    // petición terminó en el hecho al instante, también «confirmada» (`CFDI_CANCEL_CONFIRMED`, origen DUENO). El perdedor, nada: una de cada una.
     const bitacora = await prisma.activityLog.findMany({
-      where: { entityId: c.id, action: { in: ['CFDI_CANCELLED', 'CFDI_CANCEL_CONFIRMED'] } },
-      select: { action: true },
+      where: { entityId: c.id, action: { in: ['CFDI_CANCELLED', 'CFDI_CANCEL_CONFIRMED', 'CFDI_CANCEL_REQUESTED'] } },
+      select: { action: true, data: true },
       take: 10,
     })
-    expect(bitacora.map(b => b.action).sort()).toEqual(
-      path === 'directa' ? ['CFDI_CANCELLED', 'CFDI_CANCEL_CONFIRMED'] : ['CFDI_CANCEL_CONFIRMED'],
-    )
+    const de = (action: string) => bitacora.filter(b => b.action === action)
+    // La confirmación se audita UNA vez: la del ganador de la escritura.
+    expect(de('CFDI_CANCEL_CONFIRMED')).toHaveLength(1)
+    if (path === 'directa') {
+      // Con las dos respuestas del PAC a la vez, la escritura la puede ganar el dueño del envío o la consulta de la otra petición
+      // (C2-29: un hecho definitivo se aplica también en ENVIANDO). Cuál gana depende de cómo se reparta la CPU: con la integración en
+      // 4 procesos ganó la consulta 3 de 7 veces (14-oct). Las dos son correctas, y cada una exige lo suyo:
+      // - ganó el dueño: deja «solicitada» (`CFDI_CANCELLED`, el controlador) y «confirmada» con origen DUENO (C2 · OF-2, T2 R4);
+      // - ganó la consulta: nadie envió ni escribió desde el dueño, así que no hay `CFDI_CANCELLED`, y quien anotó la intención queda
+      //   registrado como `CFDI_CANCEL_REQUESTED` (C2 ronda 1, M6).
+      const ganoElDueno = (de('CFDI_CANCEL_CONFIRMED')[0].data as any)?.origen === ORIGEN_DUENO
+      expect(de('CFDI_CANCELLED')).toHaveLength(ganoElDueno ? 1 : 0)
+      if (!ganoElDueno) expect(de('CFDI_CANCEL_REQUESTED')).toHaveLength(1)
+      expect(de('CFDI_CANCEL_REQUESTED').length).toBeLessThanOrEqual(1) // sólo una petición anota la intención
+    } else expect(bitacora.map(b => b.action)).toEqual(['CFDI_CANCEL_CONFIRMED'])
     expect(await seals(c.id)).toBe(0)
     expect((await currentItem(o.items[0].id)).ivaTratamiento).toBeNull()
     release.mockRestore()
