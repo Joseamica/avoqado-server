@@ -20,7 +20,9 @@ import { normalizeSku } from '@/services/commerce-channels/shopify/shopify.catal
 import logger from '@/config/logger'
 import { operationHash } from '@/utils/operationHash'
 import { auditMcpWrite } from '../audit'
+import { planGateMessage } from '../planGate'
 import { createProduct, updateProduct } from '@/services/dashboard/product.dashboard.service'
+import { cancelStockCount, confirmStockCount, createStockCount, updateStockCount } from '@/services/mobile/inventory.mobile.service'
 import { GTIN_MAX_LENGTH, SKU_REGEX } from '@/schemas/dashboard/menu.schema'
 
 // ── Cómo se reconoce un código (lo comparten las cuatro herramientas) ─────────────────────────────────────────────
@@ -295,6 +297,77 @@ async function revisarAltas(where: { venueId: { in: string[] } }, items: AltaPed
   return { ready, invalid, ...(availableCategories ? { availableCategories } : {}) }
 }
 
+const cantidadFinalInput = () =>
+  z
+    .number()
+    .finite('La cantidad debe ser un número')
+    .min(0, 'La cantidad no puede ser negativa')
+    .max(999999999.999, 'La cantidad supera el rango permitido')
+    .refine(v => new Prisma.Decimal(v).decimalPlaces() <= 3, 'La cantidad admite hasta 3 decimales')
+    .describe('FINAL amount on hand after counting (not a change), e.g. 4')
+
+/** Lo que el conteo del POS no aplicó por Shopify, dicho como qué hacer (los motivos son los de `shopify.count.service.ts`). */
+const MOTIVO_RETENIDO: Record<string, string> = {
+  ENVIO_EN_CAMINO: 'Se estaba sincronizando con Shopify: no se aplicó. Vuelve a cargarlo en unos minutos.',
+  DUDA_POR_REVISAR:
+    'Tiene un cambio con Shopify por revisar: no se aplicó. Resuélvelo en la página de Shopify del dashboard (Ajustes › Integraciones) y vuelve a cargarlo.',
+}
+const NOTA_POR_OMISION = 'Conteo cargado desde la IA'
+
+type Contable = Encontrado & { actual: Prisma.Decimal; contado: Prisma.Decimal; inventoryId: string }
+
+/** Lo que el conteo hizo DE VERDAD, leído de lo que guardó: cada línea (sellada, retenida por Shopify o sin aplicar) y el antes →
+ *  después de su movimiento. No se deduce de la respuesta de la confirmación (si otro aparato ya lo terminó, no trae las retenidas)
+ *  ni de releer las existencias (una venta posterior parecería un ajuste). Las apartadas en Shopify NO se calculan: el conteo no las
+ *  guarda, y deducirlas de lo pedido miente si otra persona corrigió el conteo o si el producto no se movió (Codex H10/H11, B2/B3). */
+async function resultadoDelConteo(where: { venueId: { in: string[] } }, countId: string, enConteo: Contable[], ligados: Set<string>) {
+  const lineas = await prisma.stockCountItem.findMany({
+    where: { stockCountId: countId, stockCount: where },
+    select: { productId: true, appliedAt: true, shopifyHeldAt: true, shopifyHeldReason: true },
+    take: enConteo.length,
+  })
+  // `confirmStockCount` firma cada movimiento con «Conteo de inventario #<id>»: así se encuentran los de ESTE conteo.
+  const movimientos = await prisma.inventoryMovement.findMany({
+    where: {
+      inventoryId: { in: enConteo.map(c => c.inventoryId) },
+      inventory: where,
+      type: 'COUNT',
+      reason: { startsWith: `Conteo de inventario #${countId}` },
+    },
+    select: { inventoryId: true, previousStock: true, newStock: true },
+    take: enConteo.length,
+  })
+  const lineaDe = new Map(lineas.map(l => [l.productId, l]))
+  const movimientoDe = new Map(movimientos.map(m => [m.inventoryId, m]))
+  const changes: Array<{ code: string; sku: string; name: string; productId: string; from: number; to: number; shopify?: true }> = []
+  const held: Array<{ code: string; sku: string; name: string; reason: string }> = []
+  const pending: Array<{ code: string; sku: string; name: string }> = []
+  let applied = 0
+  let ligadosAplicados = 0
+  for (const c of enConteo) {
+    const base = { code: c.code, sku: c.product.sku, name: c.product.name }
+    const l = lineaDe.get(c.product.id)
+    if (l?.shopifyHeldAt) held.push({ ...base, reason: MOTIVO_RETENIDO[l.shopifyHeldReason ?? ''] ?? MOTIVO_RETENIDO.DUDA_POR_REVISAR })
+    else if (!l?.appliedAt) pending.push(base)
+    else {
+      applied++
+      if (ligados.has(c.product.id)) ligadosAplicados++
+      const m = movimientoDe.get(c.inventoryId)
+      // Sin movimiento la existencia no cambió (el conteo sólo escribe uno cuando hay diferencia). Ligado a Shopify eso NO quiere
+      // decir «ya tenía lo contado»: pudo quedar en lo contado menos lo apartado; lo explica el aviso general de la respuesta.
+      if (m)
+        changes.push({
+          ...base,
+          productId: c.product.id,
+          from: m.previousStock.toNumber(),
+          to: m.newStock.toNumber(),
+          ...(ligados.has(c.product.id) ? { shopify: true as const } : {}),
+        })
+    }
+  }
+  return { applied, ligadosAplicados, changes, held, pending }
+}
+
 export function registerCatalogInBulkTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
   const actor = { type: 'HUMAN', staffId: scope.staffId, impersonating: false } as const
@@ -567,6 +640,259 @@ export function registerCatalogInBulkTools(server: McpServer, scope: McpScope) {
           `Se crearon ${created.length} producto(s).` +
           (failed.length ? ` ${failed.length} no se pudieron (ver failed).` : '') +
           (gobierno ? ' Este negocio trabaja con catálogo maestro: el resto se da de alta desde ahí.' : ''),
+      })
+    },
+  )
+
+  server.tool(
+    'set_stock_by_code',
+    "Load the stock of MANY products of a venue you can access in one go (1-500 rows of { code, quantity }): quantity is the FINAL amount on hand — an opening balance or a physical count — NOT a change. Each code is found like find_products_by_code; only products whose stock is tracked by piece. It is saved as a stock count, so it appears in the venue's count history like a count done at the register. Products linked to Shopify: units Shopify has reserved for online orders are subtracted from what you counted, and a product with a pending Shopify sync is not applied and is reported (count it again later). By DEFAULT it only PREVIEWS current → final per product; call again with confirm:true and the expectedSourceFingerprint. If any of those stocks changed in the meantime (for example a sale), or a code now belongs to another product, it applies NOTHING and asks for a new preview. If the count is left half-applied, finish THAT count at the register; do not load the whole list again. This WRITES — requires inventory:adjust (and the inventory plan).",
+    {
+      venueId: venueInput(),
+      items: z
+        .array(z.object({ code: codeInput(), quantity: cantidadFinalInput() }))
+        .min(1, 'Manda al menos una existencia')
+        .max(500, 'A lo más 500 existencias por llamada')
+        .describe('Rows of { code, quantity }'),
+      reason: z
+        .string()
+        .trim()
+        .min(1, 'La nota no puede ir vacía')
+        .max(200, 'La nota tiene a lo más 200 caracteres')
+        .optional()
+        .describe('Short note saved with the count (default «Conteo cargado desde la IA»)'),
+      expectedSourceFingerprint: fingerprintInput(),
+      confirm: confirmInput(),
+    },
+    async ({ venueId, items, reason, expectedSourceFingerprint, confirm }) => {
+      const where = guard.venueFilter(venueId)
+      // Los tres permisos que pide el conteo del POS en sus tres pasos (confirmar, crear, llenar): la IA no hace más que el usuario.
+      for (const permiso of ['inventory:adjust', 'inventory:create', 'inventory:update']) guard.requirePermission(permiso, venueId)
+      const gate = await planGateMessage(venueId, 'INVENTORY_TRACKING', 'El control de inventario') // Premium, como adjust_stock
+      if (gate) return text({ ok: false, planRequired: true, error: gate })
+      const codes = items.map(i => limpiarCodigo(i.code))
+      const cantidadDe = new Map(items.map((i, n) => [codes[n], new Prisma.Decimal(i.quantity)]))
+      const r = resolverCodigos(codes, await productosPorCodigo(where, codes))
+      const { unicos, sameProductTwice } = unoPorProducto(r)
+      const notTracked: Array<{ code: string; sku: string; name: string; reason: string }> = []
+      const inactive: Array<{ code: string; sku: string; name: string }> = []
+      const contables: Contable[] = []
+      for (const f of unicos) {
+        const p = f.product
+        if (!p.trackInventory || p.inventoryMethod !== 'QUANTITY' || !p.inventory)
+          notTracked.push({
+            code: f.code,
+            sku: p.sku,
+            name: p.name,
+            reason: p.inventoryMethod === 'RECIPE' ? 'Lleva receta: se cuentan sus insumos.' : 'No lleva existencias por pieza.',
+          })
+        // El conteo del POS no cuenta productos desactivados.
+        else if (!p.active) inactive.push({ code: f.code, sku: p.sku, name: p.name })
+        else
+          contables.push({
+            ...f,
+            actual: p.inventory.currentStock,
+            contado: cantidadDe.get(f.code) as Prisma.Decimal,
+            inventoryId: p.inventory.id,
+          })
+      }
+      contables.sort(porId)
+      // La huella: TODO lo que se va a contar (también lo que no cambia: el conteo lo vuelve a fijar), qué código cayó en qué producto
+      // y la existencia que se VIO. Una venta, o un código que pasó a otro producto, la cambian.
+      const fingerprint = operationHash(contables.map(c => ({ code: c.code, id: c.product.id, stock: c.actual.toString() })))
+      const ids = contables.map(c => c.product.id)
+      const ligados = new Set(
+        ids.length === 0
+          ? []
+          : (
+              await prisma.shopifyVariantLink.findMany({
+                where: { ...where, productId: { in: ids } },
+                select: { productId: true },
+                take: ids.length,
+              })
+            ).map(l => l.productId),
+      )
+      const cambios = contables.filter(c => !c.actual.equals(c.contado))
+      const resueltos = { ...sinResolver(r), sameProductTwice, notTracked, inactive }
+      const reporte = {
+        changes: cambios.map(c => ({
+          code: c.code,
+          sku: c.product.sku,
+          name: c.product.name,
+          from: c.actual.toNumber(),
+          to: c.contado.toNumber(),
+          delta: c.contado.minus(c.actual).toNumber(),
+          ...(ligados.has(c.product.id) ? { shopify: true } : {}),
+        })),
+        unchanged: contables.length - cambios.length,
+        ...resueltos,
+        ...(ligados.size > 0 ? { shopifyLinked: ligados.size } : {}),
+      }
+      // Ligado a Shopify, «sin cambio» puede no serlo (lo apartado en línea se resta de lo contado): por eso esos sí se cuentan.
+      if (contables.length === 0 || (cambios.length === 0 && ligados.size === 0))
+        return text({
+          ok: true,
+          applied: 0,
+          ...reporte,
+          message: contables.length === 0 ? 'No hay nada que cargar: revisa los códigos sin resolver.' : 'No hay existencias que cambiar.',
+        })
+      if (!confirm)
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          expectedSourceFingerprint: fingerprint,
+          ...reporte,
+          message:
+            `Esto guardará un conteo de ${contables.length} producto(s) (${cambios.length} cambian).` +
+            (ligados.size
+              ? ` ${ligados.size} están ligados a Shopify: si Shopify tiene piezas apartadas por pedidos en línea, se restan de lo contado.`
+              : '') +
+            ' Muéstrale la lista al operador; con su autorización vuelve a llamar con confirm:true.',
+        })
+      if (expectedSourceFingerprint !== fingerprint) return text(VISTA_VIEJA)
+
+      // El conteo del POS hace lo difícil: relee con candado, resta lo apartado en Shopify, aplaza lo que se está sincronizando, sella
+      // cada línea al aplicarla (nunca dos veces) y firma cada movimiento COUNT con quien confirmó.
+      const nota = reason ?? NOTA_POR_OMISION
+      let conteo: Awaited<ReturnType<typeof createStockCount>>
+      try {
+        conteo = await createStockCount(venueId, scope.staffId, 'CYCLE', ids)
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
+      const lineaDe = new Map(conteo.items.map(i => [i.productId, i.id]))
+      const enConteo = contables.filter(c => lineaDe.has(c.product.id))
+      const fuera = contables
+        .filter(c => !lineaDe.has(c.product.id))
+        .map(c => ({
+          code: c.code,
+          sku: c.product.sku,
+          name: c.product.name,
+          reason: 'Cambió desde la vista previa (se desactivó, se archivó o pasó a receta): no se contó.',
+        }))
+      let revision: number
+      try {
+        const lineas = enConteo.map(c => ({ id: lineaDe.get(c.product.id) as string, counted: c.contado.toNumber() }))
+        revision = (await updateStockCount(conteo.id, venueId, lineas, nota, conteo.revision)).revision
+      } catch (err) {
+        // Nada se aplicó todavía: se cancela el borrador con SU revisión (si alguien más ya lo tocó, no se cancela su trabajo).
+        const cancelado = await cancelStockCount(conteo.id, venueId, scope.staffId, conteo.revision).then(
+          () => true,
+          () => false,
+        )
+        // Sin cancelar no se sabe en qué estado quedó (otra persona pudo haberlo terminado): se da el conteo y no se afirma más (B4).
+        return text({
+          ok: false,
+          error: (err as Error).message,
+          ...(cancelado
+            ? {}
+            : {
+                countId: conteo.id,
+                message:
+                  'No pude llenar ni cancelar el conteo desde aquí. Revisa el conteo en el POS (Inventario › Conteos) antes de volver a cargar la lista.',
+              }),
+        })
+      }
+      // Si la confirmación truena a medias, lo aplicado quedó sellado: UN reintento sobre el MISMO conteo termina sólo lo que falta
+      // (Codex H6). Nunca un conteo nuevo: volvería a fijar lo que ya quedó.
+      let fallo: unknown = null
+      for (let intento = 0; intento < 2; intento++) {
+        try {
+          await confirmStockCount(conteo.id, venueId, scope.staffId, revision)
+          fallo = null
+          break
+        } catch (err) {
+          fallo = err
+        }
+      }
+      let hecho: Awaited<ReturnType<typeof resultadoDelConteo>> | null = null
+      try {
+        hecho = await resultadoDelConteo(where, conteo.id, enConteo, ligados)
+      } catch (err) {
+        logger.warn('[MCP] set_stock_by_code: no se pudo leer cómo quedó el conteo', {
+          venueId,
+          countId: conteo.id,
+          error: (err as Error).message,
+        })
+      }
+      if (!hecho) {
+        // Sin poder leer lo guardado no se inventan cifras, pero el conteo y la advertencia NUNCA se pierden (Codex B1): recargar
+        // la lista abriría otro conteo encima de lo que pudo haberse aplicado.
+        await auditMcpWrite(scope, {
+          action: 'STOCK_LEVELS_SET_BULK',
+          entity: 'Venue',
+          entityId: venueId,
+          venueId,
+          data: { countId: conteo.id, reason: nota, outcomeUnknown: true, ...(fallo ? { partial: true } : {}) },
+        })
+        return text({
+          ok: fallo === null,
+          countId: conteo.id,
+          outcomeUnknown: true,
+          ...(fallo ? { error: (fallo as Error).message } : {}),
+          message:
+            (fallo
+              ? 'No pude terminar de confirmar el conteo ni leer cómo quedó. '
+              : 'Se guardó el conteo, pero no pude leer su detalle. ') +
+            'Revísalo en el POS (Inventario › Conteos). No vuelvas a cargar la lista completa: podría volver a fijar lo que ya quedó.',
+        })
+      }
+      const notApplied = [
+        ...fuera,
+        ...hecho.pending.map(p => ({
+          ...p,
+          reason: fallo ? 'No se alcanzó a aplicar.' : 'Ya no lleva existencias por pieza: no se aplicó.',
+        })),
+      ]
+      await auditMcpWrite(scope, {
+        action: 'STOCK_LEVELS_SET_BULK',
+        entity: 'Venue',
+        entityId: venueId,
+        venueId,
+        data: {
+          countId: conteo.id,
+          reason: nota,
+          changes: hecho.changes.map(({ productId, sku, from, to }) => ({ productId, sku, from, to })),
+          held: hecho.held.map(h => h.sku),
+          notApplied: notApplied.map(n => n.sku),
+          ...(fallo ? { partial: true } : {}),
+        },
+      })
+      // El aviso va en las dos salidas: un ligado sellado sin movimiento quedó en «lo contado − lo apartado» aunque otra línea falle.
+      const avisoShopify = hecho.ligadosAplicados
+        ? ` En los ${hecho.ligadosAplicados} ligados a Shopify se restaron de lo contado las piezas apartadas por pedidos en línea (si había), así que pueden quedar con menos de lo que contaste.`
+        : ''
+      if (fallo)
+        return text({
+          ok: false,
+          countId: conteo.id,
+          error: (fallo as Error).message,
+          applied: hecho.applied,
+          changes: hecho.changes,
+          held: hecho.held,
+          notApplied,
+          // Lo que se afirma es lo que quedó GUARDADO, no un estado supuesto del conteo (otra persona pudo haberlo terminado, B4).
+          // «Sin aplicar» cuenta también las retenidas por Shopify (Codex C1).
+          message:
+            `No pude terminar de confirmar el conteo desde aquí. Según lo guardado: ${hecho.applied} producto(s) aplicados y ` +
+            `${notApplied.length + hecho.held.length} sin aplicar.` +
+            avisoShopify +
+            ' Revísalo y termínalo en el POS (Inventario › Conteos). No vuelvas a cargar la lista completa: volvería a fijar lo que ya quedó.',
+        })
+      return text({
+        ok: hecho.applied > 0,
+        countId: conteo.id,
+        applied: hecho.applied,
+        changes: hecho.changes,
+        unchanged: hecho.applied - hecho.changes.length,
+        held: hecho.held,
+        notApplied,
+        ...resueltos,
+        message:
+          `Listo: se guardó el conteo con ${hecho.applied} producto(s) (${hecho.changes.length} cambiaron).` +
+          avisoShopify +
+          (hecho.held.length ? ` ${hecho.held.length} no se aplicaron por Shopify (ver held).` : '') +
+          (notApplied.length ? ` ${notApplied.length} no se contaron (ver notApplied).` : ''),
       })
     },
   )

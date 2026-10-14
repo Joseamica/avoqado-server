@@ -303,6 +303,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   set_sales_retention: 'write',
   set_service_staff: 'write',
   set_staff_schedule: 'write',
+  set_stock_by_code: 'write',
   set_table_check_details: 'write',
   set_table_status: 'write',
   set_terminal_payment_strict_mode: 'write',
