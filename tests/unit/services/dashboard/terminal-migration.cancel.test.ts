@@ -2,6 +2,7 @@ import { migrateCancel } from '@/services/dashboard/terminal-migration.service'
 import prisma from '@/utils/prismaClient'
 import { tpvCommandQueueService } from '@/services/tpv/command-queue.service'
 import { BadRequestError, ForbiddenError } from '@/errors/AppError'
+import { borrarDisenoAlCambiarDeNegocio, invalidateCustomerDisplayCache } from '@/services/customer-display/customerDisplayVenueChange'
 
 // migrateCancel reverts the terminal DIRECTLY via prisma (bypassing updateTerminal
 // so the "blindar" auto-wipe does NOT re-queue a FACTORY_RESET on the revert).
@@ -19,6 +20,10 @@ jest.mock('@/utils/prismaClient', () => ({
 }))
 jest.mock('@/services/tpv/command-queue.service', () => ({
   tpvCommandQueueService: { cancelCommand: jest.fn() },
+}))
+jest.mock('@/services/customer-display/customerDisplayVenueChange', () => ({
+  borrarDisenoAlCambiarDeNegocio: jest.fn().mockResolvedValue({ cambio: true, disenoBorrado: false, fromVenueId: 'v1' }),
+  invalidateCustomerDisplayCache: jest.fn(),
 }))
 // logAction is best-effort; stub it so the test doesn't depend on prisma.activityLog.
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn().mockResolvedValue(undefined) }))
@@ -335,5 +340,90 @@ describe('migrateCancel — G4: la reversión sigue vigente', () => {
       where: { id: 'term-1' },
       data: { venueId: 'venue-old', assignedMerchantIds: [] },
     })
+  })
+})
+
+// 🔴 §4.3 del plan de la pantalla del cliente: deshacer la migración regresa la terminal a su origen, así que el diseño se
+// borra en la MISMA transacción —después de G4, que decide si la reversión sigue vigente, y antes de escribir `venueId`— y
+// la caché se invalida sólo tras el commit.
+describe('migrateCancel — el gancho de la pantalla del cliente', () => {
+  const mockGancho = borrarDisenoAlCambiarDeNegocio as jest.Mock
+  const mockInvalidar = invalidateCustomerDisplayCache as jest.Mock
+  const actor = { staffId: 'admin-1' }
+  let tx: any
+  let confirmar!: () => void
+  let fallarCommit!: (e: unknown) => void
+  const flush = () => new Promise(r => setImmediate(r))
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    // Un `tx` DISTINTO del cliente global, con su propio `$queryRaw` (el candado de G4).
+    tx = { ...m, $queryRaw: jest.fn().mockResolvedValue([{ id: 'term-1', venueId: 'venue-new' }]) }
+    m.$transaction.mockImplementation(
+      (fn: any) =>
+        new Promise((resolve, reject) => {
+          Promise.resolve(fn(tx)).then(v => {
+            confirmar = () => resolve(v)
+            fallarCommit = reject
+          }, reject)
+        }),
+    )
+    m.tpvCommandQueue.findUnique.mockResolvedValue({ expiresAt: null })
+    m.terminal.update.mockResolvedValue({ id: 'term-1', venueId: 'venue-old' })
+    mockedCancelCommand.mockResolvedValue(undefined)
+  })
+
+  it('(g) migración: gancho con el origen, después del candado de G4 y antes de escribir venueId; invalida tras el commit', async () => {
+    m.tpvCommandQueue.findFirst.mockResolvedValue({
+      id: 'cmd-1',
+      status: 'QUEUED',
+      payload: { migration: { fromVenueId: 'venue-old', toVenueId: 'venue-new', previousMerchantIds: ['ma-1'] } },
+    })
+    const cancelacion = migrateCancel('term-1', actor)
+    await flush()
+
+    expect(mockGancho).toHaveBeenCalledTimes(1)
+    expect(mockGancho).toHaveBeenCalledWith(tx, {
+      terminalId: 'term-1',
+      toVenueId: 'venue-old',
+      reason: 'migration_reverted',
+      staffId: 'admin-1',
+    })
+    expect(mockGancho.mock.calls[0][0]).toBe(tx)
+    expect(mockGancho.mock.calls[0][0]).not.toBe(prisma)
+    expect(tx.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(mockGancho.mock.invocationCallOrder[0])
+    expect(mockGancho.mock.invocationCallOrder[0]).toBeLessThan(m.terminal.update.mock.invocationCallOrder[0])
+    expect(mockInvalidar).toHaveBeenCalledTimes(0)
+
+    confirmar()
+    await cancelacion
+    expect(mockInvalidar).toHaveBeenCalledTimes(1)
+    expect(mockInvalidar).toHaveBeenCalledWith('term-1')
+  })
+
+  it('(g) si el commit falla, no se invalida nada', async () => {
+    m.tpvCommandQueue.findFirst.mockResolvedValue({
+      id: 'cmd-1',
+      status: 'QUEUED',
+      payload: { migration: { fromVenueId: 'venue-old', toVenueId: 'venue-new' } },
+    })
+    const cancelacion = migrateCancel('term-1', actor)
+    await flush()
+    expect(mockGancho).toHaveBeenCalledTimes(1)
+
+    fallarCommit(new Error('commit'))
+    await expect(cancelacion).rejects.toThrow('commit')
+    expect(mockInvalidar).toHaveBeenCalledTimes(0)
+  })
+
+  it('(h) un borrado MANUAL (sin payload.migration) no mueve la terminal: sin gancho', async () => {
+    m.tpvCommandQueue.findFirst.mockResolvedValue({ id: 'cmd-1', status: 'QUEUED', payload: {} })
+    m.terminal.findUnique.mockResolvedValue({ id: 'term-1', venueId: 'venue-current' })
+    const cancelacion = migrateCancel('term-1', actor)
+    await flush()
+    confirmar()
+    await cancelacion
+
+    expect(mockGancho).not.toHaveBeenCalled()
   })
 })

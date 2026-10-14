@@ -14,6 +14,7 @@ import { tpvCommandQueueService } from '@/services/tpv/command-queue.service'
 import type { TerminalWriteScope } from '@/services/shared/terminalScopedWrites'
 import { lockTerminalRow } from '@/services/shared/terminalScopedWrites'
 import { logAction } from '@/services/dashboard/activity-log.service'
+import { borrarDisenoAlCambiarDeNegocio, invalidateCustomerDisplayCache } from '@/services/customer-display/customerDisplayVenueChange'
 
 /**
  * Snapshot del pago del venue ORIGEN, usado sólo por el flujo "migrar el merchant
@@ -594,6 +595,13 @@ export async function migrateCancel(terminalId: string, actor: TerminalActor, sc
           'MIGRATION_NOT_CURRENT',
         )
       asegurarQueLaReversionSigueVigente(fila.venueId, { fromVenueId: migration.fromVenueId, toVenueId: migration.toVenueId })
+      // Pantalla del cliente (§4.3): la terminal regresa a su origen; su diseño y su acuse se borran en esta transacción.
+      await borrarDisenoAlCambiarDeNegocio(tx, {
+        terminalId,
+        toVenueId: migration.fromVenueId,
+        reason: 'migration_reverted',
+        staffId: actor.staffId ?? null,
+      })
       // Bypass updateTerminal: restoring must not enqueue another wipe.
       await tx.terminal.update({
         where: { id: terminalId },
@@ -611,6 +619,8 @@ export async function migrateCancel(terminalId: string, actor: TerminalActor, sc
     if (!terminal) throw new NotFoundError('Terminal not found')
     return { command, migration, restoredVenueId: terminal.venueId }
   })
+  // Después del commit: antes, un cálculo concurrente de la ficha podría leer el diseño todavía sin borrar.
+  invalidateCustomerDisplayCache(terminalId)
   if (migration?.createdVenuePaymentConfigId) {
     await logAction({
       staffId: actor.staffId ?? null,
@@ -757,6 +767,14 @@ export async function migrateDiscard(terminalId: string, actor: TerminalActor, s
     }
 
     if (revert?.fromVenueId) {
+      // Pantalla del cliente (§4.3): la terminal regresa a su origen; su diseño y su acuse se borran en esta transacción,
+      // antes de escribir `venueId` (después, el gancho leería el origen y no borraría nada).
+      await borrarDisenoAlCambiarDeNegocio(tx, {
+        terminalId,
+        toVenueId: revert.fromVenueId,
+        reason: 'migration_reverted',
+        staffId: actor.staffId ?? null,
+      })
       // Direct write, NOT updateTerminal: the "blindar" auto-wipe would queue a fresh
       // FACTORY_RESET on the revert and re-create the very blocker we are clearing.
       await tx.terminal.update({
@@ -770,6 +788,8 @@ export async function migrateDiscard(terminalId: string, actor: TerminalActor, s
 
     return { discardedIds, now }
   })
+  // Después del commit: antes, un cálculo concurrente de la ficha podría leer el diseño todavía sin borrar.
+  invalidateCustomerDisplayCache(terminalId)
 
   const restoredVenueId = revert?.fromVenueId ?? terminal.venueId
 

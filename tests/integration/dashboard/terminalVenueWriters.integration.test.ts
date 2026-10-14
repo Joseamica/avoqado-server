@@ -7,16 +7,33 @@
  * nueva: el dinero se iría por la afiliación equivocada. Las unitarias fingen el candado; aquí la carrera es real, con la
  * barrera de `../customer-display/barrera` metiendo el cambio ENTRE la lectura inicial de la operación y su candado.
  *
+ * Y el gancho de la pantalla del cliente (§4.3 del plan): cada escritor de `venueId` borra el diseño y el acuse de la
+ * terminal en SU transacción. Si el escritor falla después del gancho, el borrado se deshace con todo lo demás.
+ *
  * Run with (base desechable, nunca av-db-25):
  *   TEST_DATABASE_URL='postgresql://…/avoqado_<tarea>_test_<fecha>' \
  *     npx jest --selectProjects=integration --runInBand --runTestsByPath tests/integration/dashboard/terminalVenueWriters.integration.test.ts
  */
 import { Prisma, TpvCommandStatus } from '@prisma/client'
 
+import { ConflictError } from '@/errors/AppError'
+import * as cambioDeNegocio from '@/services/customer-display/customerDisplayVenueChange'
 import { migrateCancel, migrateDiscard } from '@/services/dashboard/terminal-migration.service'
+import { tpvCommandQueueService } from '@/services/tpv/command-queue.service'
 import prisma from '@/utils/prismaClient'
 
 import { esperarBloqueado, retenerTerminal } from '../customer-display/barrera'
+
+// Sólo los emisores de sockets, como en las unitarias del carril: lo demás (Prisma, el gancho, el carril) es real.
+jest.mock('@/communication/sockets', () => ({
+  __esModule: true,
+  default: { getBroadcastingService: jest.fn(() => null), broadcastToVenue: jest.fn() },
+  broadcastTpvCommand: jest.fn(),
+  broadcastTpvCommandStatusChanged: jest.fn(),
+  broadcastTpvCommandQueued: jest.fn(),
+  broadcastTpvStatusUpdate: jest.fn(),
+  broadcastSuperadminTerminalUpdate: jest.fn(),
+}))
 
 const ts = Date.now()
 const suffix = `tvw-${ts}`
@@ -31,6 +48,8 @@ let mViejo: string
 let mNuevo: string
 let m1: string
 let terminalId: string
+let orgId2: string
+let venueB2: string
 
 beforeAll(async () => {
   orgId = (
@@ -67,6 +86,15 @@ beforeAll(async () => {
   mViejo = await crearComercio('m-viejo')
   mNuevo = await crearComercio('m-nuevo')
   m1 = await crearComercio('m1')
+
+  // 9.7: otra organización con su negocio B2, para el permiso de ejecución que apunta a otra organización.
+  orgId2 = (
+    await prisma.organization.create({
+      data: { name: `Org2 ${suffix}`, email: `org2-${suffix}@example.test`, phone: '0000000000' },
+      select: { id: true },
+    })
+  ).id
+  venueB2 = await crearVenue('b2', orgId2)
 })
 
 /** Las terminales de la prueba (y lo que cuelga de ellas) se borran por id: nunca una limpieza amplia. */
@@ -95,7 +123,7 @@ beforeEach(async () => {
 afterAll(async () => {
   if (!venueA || !venueB || !venueC) return
   const terminales = await prisma.terminal.findMany({
-    where: { venueId: { in: [venueA, venueB, venueC] } },
+    where: { venueId: { in: [venueA, venueB, venueC, ...(venueB2 ? [venueB2] : [])] } },
     select: { id: true },
     take: 50,
   })
@@ -104,8 +132,8 @@ afterAll(async () => {
     await prisma.merchantAccount.deleteMany({ where: { providerId } })
     await prisma.paymentProvider.deleteMany({ where: { id: providerId } })
   }
-  await prisma.venue.deleteMany({ where: { id: { in: [venueA, venueB, venueC] } } })
-  await prisma.organization.deleteMany({ where: { id: orgId } })
+  await prisma.venue.deleteMany({ where: { id: { in: [venueA, venueB, venueC, ...(venueB2 ? [venueB2] : [])] } } })
+  await prisma.organization.deleteMany({ where: { id: { in: [orgId, ...(orgId2 ? [orgId2] : [])] } } })
 })
 
 const crearOrden = async (data: {
@@ -261,8 +289,79 @@ describe('G4: deshacer una migración exige que siga vigente (Postgres real)', (
 
     expect(await laTerminal()).toEqual({ venueId: venueA, assignedMerchantIds: [] })
     expect(await estadoDe(M1)).toBe('EXPIRED')
-    // Antes del gancho (9.b) la reversión todavía no toca el diseño.
+    // La reversión regresa la terminal a A: el gancho borra el diseño en la misma transacción y deja su asiento.
+    expect(await elDiseno()).toBeNull()
+    const escritos = await asientos()
+    expect(escritos).toHaveLength(1)
+    expect(escritos[0]).toMatchObject({ venueId: venueA, data: { reason: 'migration_reverted', fromVenueId: venueB, toVenueId: venueA } })
+  })
+})
+
+// 🔴 Ruling #4: el gancho corre DENTRO de la transacción de un escritor real. Si el escritor falla después del gancho, el
+// diseño, el acuse y el asiento se deshacen junto con todo lo demás; si no falla, todo queda junto.
+describe('el gancho en el permiso de ejecución del protocolo 2 (updateCommandStatus, Postgres real)', () => {
+  const ACUSE = { seq: 3, fingerprint: 'abc' }
+
+  beforeEach(async () => {
+    if (!venueA || !venueB || !venueC) return
+    // TPV del protocolo 2 en A (organización 1), con su diseño (del `beforeEach` de arriba) y su acuse: no se muda al
+    // encolar; la muda el permiso de ejecución de la app que reservó su ventana segura.
+    await prisma.terminal.update({
+      where: { id: terminalId },
+      data: { venueId: venueA, commandProtocolVersion: 2, commandSessionId: 'sesion-1', customerDisplayAck: ACUSE },
+    })
+  })
+
+  const ordenConIntencion = (intencion: { toVenueId: string; organizationId: string }) =>
+    crearOrden({
+      status: 'SENT',
+      venueId: venueA,
+      expiresAt: new Date(Date.now() + HORA),
+      payload: {
+        _deliveryProtocol: 2,
+        _migrationIntent: { toVenueId: intencion.toVenueId, assignedMerchantIds: [m1], organizationId: intencion.organizationId },
+        migration: { fromVenueId: venueA, toVenueId: intencion.toVenueId, previousMerchantIds: [] },
+      },
+    })
+
+  const permiso = (id: string) =>
+    tpvCommandQueueService.updateCommandStatus(id, 'EXECUTING', undefined, undefined, terminalId, { executionSessionId: 'sesion-1' })
+
+  it('5. el escritor falla DESPUÉS del gancho ⇒ no queda nada', async () => {
+    // El destino B2 y m1 pasan la validación, el gancho corre (borra el diseño y escribe el asiento), y el `updateMany`
+    // condicionado a la organización 2 no encuentra la terminal, que es de la organización 1 ⇒ ConflictError.
+    const id = await ordenConIntencion({ toVenueId: venueB2, organizationId: orgId2 })
+    const gancho = jest.spyOn(cambioDeNegocio, 'borrarDisenoAlCambiarDeNegocio')
+    try {
+      await expect(permiso(id)).rejects.toBeInstanceOf(ConflictError)
+
+      // El gancho SÍ corrió y borró dentro de la transacción…
+      expect(gancho).toHaveBeenCalledTimes(1)
+      await expect(gancho.mock.results[0].value).resolves.toEqual({ cambio: true, disenoBorrado: true, fromVenueId: venueA })
+    } finally {
+      gancho.mockRestore()
+    }
+    // …y todo se deshizo junto.
     expect(await elDiseno()).toEqual({ welcomeText: 'Hola' })
+    expect(
+      await prisma.terminal.findUniqueOrThrow({ where: { id: terminalId }, select: { venueId: true, customerDisplayAck: true } }),
+    ).toEqual({ venueId: venueA, customerDisplayAck: ACUSE })
     expect(await asientos()).toHaveLength(0)
+    expect(await estadoDe(id)).toBe('SENT')
+  })
+
+  it('6. el mismo camino, válido ⇒ todo junto', async () => {
+    const id = await ordenConIntencion({ toVenueId: venueB, organizationId: orgId })
+
+    await expect(permiso(id)).resolves.toBe(true)
+
+    expect(
+      await prisma.terminal.findUniqueOrThrow({ where: { id: terminalId }, select: { venueId: true, customerDisplayAck: true } }),
+    ).toEqual({ venueId: venueB, customerDisplayAck: null })
+    expect(await elDiseno()).toBeNull()
+    const escritos = await asientos()
+    expect(escritos).toHaveLength(1)
+    expect(escritos[0]).toMatchObject({ venueId: venueB, data: { reason: 'terminal_moved', fromVenueId: venueA, toVenueId: venueB } })
+    expect(await estadoDe(id)).toBe('EXECUTING')
   })
 })

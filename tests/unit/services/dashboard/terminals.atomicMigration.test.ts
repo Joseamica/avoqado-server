@@ -2,8 +2,13 @@ import prisma from '@/utils/prismaClient'
 import { updateTerminal } from '@/services/dashboard/terminals.superadmin.service'
 import { tpvCommandQueueService } from '@/services/tpv/command-queue.service'
 import { broadcastTpvCommand } from '@/communication/sockets'
+import { borrarDisenoAlCambiarDeNegocio, invalidateCustomerDisplayCache } from '@/services/customer-display/customerDisplayVenueChange'
 
 jest.mock('@/communication/sockets', () => ({ broadcastTpvCommand: jest.fn(), broadcastSuperadminTerminalUpdate: jest.fn() }))
+jest.mock('@/services/customer-display/customerDisplayVenueChange', () => ({
+  borrarDisenoAlCambiarDeNegocio: jest.fn().mockResolvedValue({ cambio: true, disenoBorrado: false, fromVenueId: 'v1' }),
+  invalidateCustomerDisplayCache: jest.fn(),
+}))
 
 jest.mock('@/utils/prismaClient', () => {
   const db = {
@@ -141,4 +146,83 @@ it('revalida una intención concurrente después de bloquear la terminal del pro
   })
   await expect(updateTerminal('t1', { venueId: 'new' })).rejects.toMatchObject({ statusCode: 409 })
   expect(queue).not.toHaveBeenCalled()
+})
+
+// 🔴 §4.3 del plan de la pantalla del cliente: el escritor llama al gancho DENTRO de su transacción y ANTES de escribir
+// `venueId` (si fuera después, el gancho leería el negocio nuevo y no borraría nada), y sólo invalida la caché DESPUÉS del
+// commit (antes, un cálculo concurrente podría leer el diseño todavía sin borrar y volver a guardarlo).
+describe('el gancho de la pantalla del cliente en el traslado', () => {
+  const mockGancho = borrarDisenoAlCambiarDeNegocio as jest.Mock
+  const mockInvalidar = invalidateCustomerDisplayCache as jest.Mock
+  let tx: any
+  let confirmar!: () => void
+  let fallarCommit!: (e: unknown) => void
+  const flush = () => new Promise(r => setImmediate(r))
+
+  beforeEach(() => {
+    // Un `tx` DISTINTO del cliente global, con su propio `$queryRaw`: así se ve a quién le pasa el escritor el gancho.
+    tx = { ...db, $queryRaw: jest.fn() }
+    // La promesa del commit queda retenida: la prueba decide cuándo confirma (o falla) la transacción.
+    db.$transaction.mockImplementation(
+      (fn: any) =>
+        new Promise((resolve, reject) => {
+          Promise.resolve(fn(tx)).then(v => {
+            confirmar = () => resolve(v)
+            fallarCommit = reject
+          }, reject)
+        }),
+    )
+  })
+  afterEach(() => {
+    db.$transaction.mockImplementation(async (fn: any) => fn(db))
+  })
+
+  it('(a) protocolo < 2: el gancho va en la transacción, antes de escribir venueId; la caché se invalida tras el commit', async () => {
+    const traslado = updateTerminal('t1', { venueId: 'new', assignedMerchantIds: ['m-new'] }, { staffId: 'admin' })
+    await flush()
+
+    expect(mockGancho).toHaveBeenCalledTimes(1)
+    expect(mockGancho).toHaveBeenCalledWith(tx, { terminalId: 't1', toVenueId: 'new', reason: 'terminal_moved', staffId: 'admin' })
+    expect(mockGancho.mock.calls[0][0]).toBe(tx)
+    expect(mockGancho.mock.calls[0][0]).not.toBe(prisma)
+    const escrituraDelNegocio = db.terminal.update.mock.calls.findIndex((c: any[]) => c[0].data.venueId === 'new')
+    expect(escrituraDelNegocio).toBeGreaterThanOrEqual(0)
+    expect(mockGancho.mock.invocationCallOrder[0]).toBeLessThan(db.terminal.update.mock.invocationCallOrder[escrituraDelNegocio])
+    expect(mockInvalidar).toHaveBeenCalledTimes(0) // todavía sin commit
+
+    confirmar()
+    await traslado
+    expect(mockInvalidar).toHaveBeenCalledTimes(1)
+    expect(mockInvalidar).toHaveBeenCalledWith('t1')
+  })
+
+  it('(b) si el commit falla, el escritor rechaza y la caché no se toca', async () => {
+    const traslado = updateTerminal('t1', { venueId: 'new', assignedMerchantIds: ['m-new'] }, { staffId: 'admin' })
+    await flush()
+    expect(mockGancho).toHaveBeenCalledTimes(1)
+
+    fallarCommit(new Error('commit'))
+    await expect(traslado).rejects.toThrow('commit')
+    expect(mockInvalidar).toHaveBeenCalledTimes(0)
+  })
+
+  it('(c) protocolo 2 (deferMove): la terminal no se muda aquí, así que ni gancho ni invalidación', async () => {
+    db.terminal.findUnique.mockResolvedValue({
+      id: 't1',
+      name: 'PAX',
+      type: 'TPV_ANDROID',
+      status: 'ACTIVE',
+      venueId: 'old',
+      assignedMerchantIds: ['m-old'],
+      commandProtocolVersion: 2,
+    })
+    const traslado = updateTerminal('t1', { venueId: 'new', assignedMerchantIds: ['m-new'] }, { staffId: 'admin' })
+    await flush()
+    confirmar()
+    await traslado
+
+    expect(tx.$queryRaw).toHaveBeenCalled() // tomó el candado explícito del protocolo 2
+    expect(mockGancho).not.toHaveBeenCalled()
+    expect(mockInvalidar).not.toHaveBeenCalled()
+  })
 })

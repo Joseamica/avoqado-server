@@ -39,6 +39,7 @@ import {
 import { assertDeviceActionSupported } from '../device-capabilities.service'
 import { isProviderCompatibleWithBrand } from '../../lib/providerDeviceCompatibility'
 import { getEffectivePaymentConfig } from '../organization-payment-config.service'
+import { borrarDisenoAlCambiarDeNegocio, invalidateCustomerDisplayCache } from '@/services/customer-display/customerDisplayVenueChange'
 
 /**
  * Command configuration per type
@@ -594,6 +595,7 @@ export class TpvCommandQueueService {
       })
       if (updated.count !== 1) return null
       const intent = (command.payload as { _migrationIntent?: QueueCommandInput['migrationIntent'] } | null)?._migrationIntent
+      let terminalMudada = false
       if (newStatus === 'EXECUTING' && intent) {
         if (!executionSessionId || command.commandType !== 'FACTORY_RESET') throw new BadRequestError('Permiso de migración requerido')
         const destination = await tx.venue.findUnique({ where: { id: intent.toVenueId }, select: { id: true, organizationId: true } })
@@ -617,6 +619,14 @@ export class TpvCommandQueueService {
           if (!primary?.active || !isProviderCompatibleWithBrand(primary.provider.code, command.terminal.brand))
             throw new BadRequestError('La configuración de cobro cambió; cancela y vuelve a validar la migración')
         }
+        // Pantalla del cliente (§4.3): el permiso de ejecución muda la terminal; su diseño y su acuse se borran en esta
+        // misma transacción, antes de escribir `venueId`.
+        await borrarDisenoAlCambiarDeNegocio(tx, {
+          terminalId: command.terminalId,
+          toVenueId: intent.toVenueId,
+          reason: 'terminal_moved',
+          staffId: command.requestedBy === 'system' ? null : command.requestedBy,
+        })
         const moved = await tx.terminal.updateMany({
           where: {
             id: command.terminalId,
@@ -626,6 +636,7 @@ export class TpvCommandQueueService {
           data: { venueId: intent.toVenueId, assignedMerchantIds: intent.assignedMerchantIds },
         })
         if (moved.count !== 1) throw new ConflictError('La terminal cambió; cancela y vuelve a validar')
+        terminalMudada = true
         await tx.tpvCommandQueue.update({ where: { id: command.id }, data: { venueId: intent.toVenueId } })
         await tx.activityLog.create({
           data: {
@@ -652,10 +663,12 @@ export class TpvCommandQueueService {
         },
         tx,
       )
-      return { command, terminal }
+      return { command, terminal, moved: terminalMudada }
     })
     if (!transition) return false
     if ('replayed' in transition) return true
+    // Después del commit: antes, un cálculo concurrente de la ficha podría leer el diseño todavía sin borrar.
+    if (transition.moved) invalidateCustomerDisplayCache(transition.command.terminalId)
     await this.broadcastStatusChange(transition.command, transition.command.status, newStatus, resultMessage)
     if (transition.terminal)
       broadcastTpvStatusUpdate(transition.terminal.id, transition.terminal.venueId, {

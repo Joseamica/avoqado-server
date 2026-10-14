@@ -13,6 +13,7 @@ import { migrateDiscard, DISCARD_AFTER_MS } from '@/services/dashboard/terminal-
 import prisma from '@/utils/prismaClient'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '@/errors/AppError'
+import { borrarDisenoAlCambiarDeNegocio, invalidateCustomerDisplayCache } from '@/services/customer-display/customerDisplayVenueChange'
 
 jest.mock('@/utils/prismaClient', () => {
   const client: any = {
@@ -28,6 +29,10 @@ jest.mock('@/utils/prismaClient', () => {
   return { __esModule: true, default: client }
 })
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn().mockResolvedValue(undefined) }))
+jest.mock('@/services/customer-display/customerDisplayVenueChange', () => ({
+  borrarDisenoAlCambiarDeNegocio: jest.fn().mockResolvedValue({ cambio: true, disenoBorrado: false, fromVenueId: 'v1' }),
+  invalidateCustomerDisplayCache: jest.fn(),
+}))
 
 const m = prisma as unknown as {
   terminal: { findUnique: jest.Mock; update: jest.Mock }
@@ -349,5 +354,81 @@ describe('migrateDiscard', () => {
 
       expect(m.terminal.update).not.toHaveBeenCalled()
     })
+  })
+})
+
+// 🔴 §4.3 del plan de la pantalla del cliente: descartar el borrado de una migración la DESHACE (la terminal vuelve a su
+// origen), así que el diseño se borra en la misma transacción —después de G4 y del bucle, antes de escribir `venueId`— y
+// la caché se invalida sólo tras el commit.
+describe('migrateDiscard — el gancho de la pantalla del cliente', () => {
+  const mockGancho = borrarDisenoAlCambiarDeNegocio as jest.Mock
+  const mockInvalidar = invalidateCustomerDisplayCache as jest.Mock
+  let tx: any
+  let confirmar!: () => void
+  let fallarCommit!: (e: unknown) => void
+  const flush = () => new Promise(r => setImmediate(r))
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    m.terminal.findUnique.mockResolvedValue(terminal())
+    m.venue.findUnique.mockResolvedValue({ timezone: 'America/Mexico_City' })
+    m.tpvCommandQueue.updateMany.mockResolvedValue({ count: 1 })
+    // Un `tx` DISTINTO del cliente global, con su propio `$queryRaw` (el candado de la terminal).
+    tx = { ...m, $queryRaw: jest.fn().mockResolvedValue([{ commandSessionId: null, venueId: 'venue-a' }]) }
+    m.$transaction.mockImplementation(
+      (fn: any) =>
+        new Promise((resolve, reject) => {
+          Promise.resolve(fn(tx)).then(v => {
+            confirmar = () => resolve(v)
+            fallarCommit = reject
+          }, reject)
+        }),
+    )
+  })
+
+  it('(i) reversión: gancho con el origen, después de G4 y del bucle, antes de escribir venueId; invalida tras el commit', async () => {
+    m.tpvCommandQueue.findMany.mockResolvedValue([migrationWipe()])
+    const descarte = migrateDiscard('term-1', actor)
+    await flush()
+
+    expect(mockGancho).toHaveBeenCalledTimes(1)
+    expect(mockGancho).toHaveBeenCalledWith(tx, {
+      terminalId: 'term-1',
+      toVenueId: 'venue-origen',
+      reason: 'migration_reverted',
+      staffId: 'owner-1',
+    })
+    expect(mockGancho.mock.calls[0][0]).toBe(tx)
+    expect(mockGancho.mock.calls[0][0]).not.toBe(prisma)
+    expect(tx.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(m.tpvCommandQueue.updateMany.mock.invocationCallOrder[0])
+    expect(m.tpvCommandQueue.updateMany.mock.invocationCallOrder[0]).toBeLessThan(mockGancho.mock.invocationCallOrder[0])
+    expect(mockGancho.mock.invocationCallOrder[0]).toBeLessThan(m.terminal.update.mock.invocationCallOrder[0])
+    expect(mockInvalidar).toHaveBeenCalledTimes(0)
+
+    confirmar()
+    await descarte
+    expect(mockInvalidar).toHaveBeenCalledTimes(1)
+    expect(mockInvalidar).toHaveBeenCalledWith('term-1')
+  })
+
+  it('(i) si el commit falla, no se invalida nada', async () => {
+    m.tpvCommandQueue.findMany.mockResolvedValue([migrationWipe()])
+    const descarte = migrateDiscard('term-1', actor)
+    await flush()
+    expect(mockGancho).toHaveBeenCalledTimes(1)
+
+    fallarCommit(new Error('commit'))
+    await expect(descarte).rejects.toThrow('commit')
+    expect(mockInvalidar).toHaveBeenCalledTimes(0)
+  })
+
+  it('(j) sin reversión (borrado manual): sin gancho', async () => {
+    m.tpvCommandQueue.findMany.mockResolvedValue([wipe({})])
+    const descarte = migrateDiscard('term-1', actor)
+    await flush()
+    confirmar()
+    await descarte
+
+    expect(mockGancho).not.toHaveBeenCalled()
   })
 })
