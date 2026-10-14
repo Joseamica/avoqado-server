@@ -368,6 +368,9 @@ export const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   'printers:manage': ['printers:manage', 'printers:read'],
   'receipt-layout:read': ['receipt-layout:read'],
   'receipt-layout:manage': ['receipt-layout:manage', 'receipt-layout:read'],
+  // CUSTOMER_DISPLAY: la pantalla que ve el cliente en la tablet (marca, textos, promos en reposo)
+  'customer-display:read': ['customer-display:read'],
+  'customer-display:update': ['customer-display:update', 'customer-display:read'],
 
   // ===========================
   // ACCOUNTING - Capa A (estado de resultados, incluido para todos los venues)
@@ -999,6 +1002,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'tender-types:read', // Tipos de pago personalizados: ver el catálogo (editar = ADMIN+)
     'printers:read', // PRINT_STATIONS: ver impresoras, estaciones y ruteo de comandas
     'printers:manage', // PRINT_STATIONS: configurar impresoras, estaciones y ruteo (operativo — MANAGER+)
+    'customer-display:*', // CUSTOMER_DISPLAY: la pantalla que ve el cliente en la tablet — MANAGER SÍ (spec §5.8), al revés que receipt-layout
     'menu:read',
     'menu:create',
     'menu:update',
@@ -1179,6 +1183,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'estimates:create',
     'printers:*', // PRINT_STATIONS: impresoras, estaciones y ruteo de comandas (feature gratis/core)
     'receipt-layout:*', // RECEIPT_LAYOUT: diseñar el ticket en papel — administrativo; MANAGER excluido a propósito
+    'customer-display:*', // CUSTOMER_DISPLAY: la pantalla que ve el cliente en la tablet (marca, textos, pasos)
     'payments:*',
     'payments:resolve-no-instrument', // ya cabe en 'payments:*'; explícito para que la lista se lea sin expandir el comodín
     'payments:reconcile-uncharged', // el cajero también lo tiene; explícito para que la lista se lea sin expandir el comodín
@@ -1318,6 +1323,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'financialConnections:*', // Conectar/leer/desconectar cuentas bancarias del venue (self-connect)
     'printers:*', // PRINT_STATIONS: impresoras, estaciones y ruteo de comandas (feature gratis/core)
     'receipt-layout:*', // RECEIPT_LAYOUT: diseñar el ticket en papel — administrativo; MANAGER excluido a propósito
+    'customer-display:*', // CUSTOMER_DISPLAY: la pantalla que ve el cliente en la tablet (marca, textos, pasos)
     'commissions:*', // Commission system (full control including payout)
     'staffpay:read',
     'staffpay:manage',
@@ -1935,6 +1941,7 @@ export const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   'tender-types': ['tender-types:read', 'tender-types:manage'],
   printers: ['printers:read', 'printers:manage'],
   'receipt-layout': ['receipt-layout:read', 'receipt-layout:manage'],
+  'customer-display': ['customer-display:read', 'customer-display:update'],
   // Singular `payment` namespace for admin-only, one-off payment actions.
   payment: ['payment:create-manual'],
   shifts: ['shifts:read', 'shifts:create', 'shifts:update', 'shifts:delete', 'shifts:close'],

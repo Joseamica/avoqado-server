@@ -364,6 +364,7 @@ import reservationRoutes from './dashboard/reservation.routes'
 import printStationRoutes from './dashboard/printStation.routes'
 import floorPlanRoutes from './dashboard/floorPlan.routes'
 import receiptLayoutRoutes from './dashboard/receiptLayout.routes'
+import customerDisplayRoutes, { customerDisplayDevicesRoutes } from './dashboard/customerDisplay.routes'
 import fiscalProfileRoutes from './dashboard/fiscalProfile.routes'
 import areaTicketRoutes from './dashboard/areaTicket.routes'
 import * as areaTicketController from '../controllers/dashboard/areaTicket.dashboard.controller'
@@ -4612,6 +4613,11 @@ router.use('/venues/:venueId/print-stations', authenticateTokenMiddleware, print
 // PLANO DE MESAS — editor del dashboard (2026-10-08). Permiso y Servicio de mesas dentro del sub-router.
 router.use('/venues/:venueId/floor-plan', authenticateTokenMiddleware, floorPlanRoutes)
 router.use('/venues/:venueId/receipt-layout', authenticateTokenMiddleware, receiptLayoutRoutes)
+// CUSTOMER_DISPLAY — la pantalla que ve el cliente en la tablet. Marca, textos y pasos gratis; las promos en reposo
+// (PRO) se revisan por CAMPO en el servicio, no por ruta: sin plan el negocio tiene que poder seguir editando su marca y
+// apagar lo que ya no puede usar. Permission-gated dentro de los sub-routers (customer-display:read/update).
+router.use('/venues/:venueId/terminals/:terminalId/customer-display', authenticateTokenMiddleware, customerDisplayRoutes)
+router.use('/venues/:venueId/customer-display', authenticateTokenMiddleware, customerDisplayDevicesRoutes)
 // Datos fiscales del venue como RECEPTOR de las facturas de Avoqado — feature gratis/core
 // (sin checkFeatureAccess); permission-gated dentro del sub-router (venue-fiscal-profile:manage, OWNER-only).
 router.use('/venues/:venueId/fiscal-profile', authenticateTokenMiddleware, fiscalProfileRoutes)
