@@ -352,7 +352,8 @@ const MOTIVO_RETENIDO: Record<string, string> = {
 const NOTA_POR_OMISION = 'Conteo cargado desde la IA'
 
 /** Huella vieja en existencias: volver a pedir y confirmar volvería a fijar el conteo anterior encima de la venta que la huella
- *  acaba de atrapar, así que se dice qué revisar antes. */
+ *  acaba de atrapar, así que se dice qué revisar antes. Ningún campo manda a «confirmar» otra vez (ni el `error`). */
+const EXISTENCIA_VIEJA_ERROR = 'Cambió la existencia de algún producto desde la vista previa: no se aplicó nada.'
 const EXISTENCIA_VIEJA =
   'Cambió la existencia de algún producto desde la vista previa (por ejemplo, una venta o un conteo): no se aplicó nada. Si ya habías confirmado esta carga y no viste la respuesta, revisa primero los conteos recientes (stock_counts): probablemente ya quedó. Si no, pide una vista previa nueva y compárala con la anterior: si un producto bajó porque se vendió DESPUÉS de contarlo, réstale esa venta a lo contado antes de confirmar.'
 
@@ -360,6 +361,10 @@ const EXISTENCIA_VIEJA =
 const TOPE_CONTEOS_ABIERTOS = 50
 const NOTA_CONTEO_ABIERTO =
   ' Los que están en un conteo abierto no se cargan: termina ese conteo en el POS (Inventario › Conteos), o cancélalo si no aplicó nada.'
+/** En las respuestas de una confirmación que no terminó: ahí se pide no cancelar ESTE conteo, así que del otro no se aconseja
+ *  cancelarlo. */
+const NOTA_OTRO_CONTEO_ABIERTO =
+  ' Los que están en otro conteo abierto (ver inOpenCount) no se cargaron: termina ese otro conteo en el POS.'
 
 type Contable = Encontrado & { actual: Prisma.Decimal; contado: Prisma.Decimal; inventoryId: string }
 
@@ -511,16 +516,20 @@ export function registerCatalogInBulkTools(server: McpServer, scope: McpScope) {
       }))
       const resueltos = { unchanged: unicos.length - cambios.length, ...sinResolver(r), sameProductTwice }
       const resumen = resumenExcluidos(resueltos)
-      // Sin un solo producto no es «nada que cambiar»: es una lista que hay que revisar.
-      if (r.found.length === 0)
+      // Sin un solo producto que comparar (nada se encontró, o todo quedó fuera por repetido) no es «nada que cambiar»: es una lista que
+      // hay que revisar. `message` va antes de las listas.
+      if (unicos.length === 0)
         return text({
           ok: false,
           needsInput: true,
-          ...sinResolver(r),
           message:
-            `No encontré ninguno de los ${items.length} códigos en este negocio.` +
-            resumen +
-            ' Revisa los códigos (un código de barras va sin espacios) antes de seguir.',
+            r.found.length === 0
+              ? `No encontré ninguno de los ${items.length} códigos en este negocio.` +
+                resumen +
+                ' Revisa los códigos (un código de barras va sin espacios) antes de seguir.'
+              : 'Ningún producto de la lista se puede actualizar.' + resumen + ' Revisa la lista antes de seguir.',
+          ...sinResolver(r),
+          sameProductTwice,
         })
       if (cambios.length === 0)
         return text({
@@ -742,7 +751,7 @@ export function registerCatalogInBulkTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'set_stock_by_code',
-    "Load the stock of MANY products of a venue you can access in one go (1-500 rows of { code, quantity }): quantity is the FINAL amount on hand — an opening balance or a physical count — NOT a change. Each code is found like find_products_by_code; only products whose stock is tracked by quantity (pieces, or kilos with up to 3 decimals). It is saved as a stock count, so it appears in the venue's count history like a count done at the register. Products linked to Shopify: units Shopify has reserved for online orders are subtracted from what you counted, and a product Shopify is still syncing (also while the store connection is being set up) is not applied and is reported with what to do. By DEFAULT it only PREVIEWS current → final per product; call again with confirm:true and the expectedSourceFingerprint. If any of those stocks changed in the meantime (for example a sale), or a code now belongs to another product, it applies NOTHING and asks for a new preview. If the count is left half-applied, finish THAT count at the register; do not cancel it and do not load the whole list again. This WRITES — requires inventory:create, inventory:update and inventory:adjust (and the inventory plan).",
+    "Load the stock of MANY products of a venue you can access in one go (1-500 rows of { code, quantity }): quantity is the FINAL amount on hand — an opening balance or a physical count — NOT a change. Each code is found like find_products_by_code; only products whose stock is tracked by quantity (pieces, or kilos with up to 3 decimals). It is saved as a stock count, so it appears in the venue's count history like a count done at the register. Products already in an open stock count are not loaded: finish (or cancel) that count first. Products linked to Shopify: units Shopify has reserved for online orders are subtracted from what you counted, and a product Shopify is still syncing (also while the store connection is being set up) is not applied and is reported with what to do. By DEFAULT it only PREVIEWS current → final per product; call again with confirm:true and the expectedSourceFingerprint. If any of those stocks changed in the meantime (for example a sale), or a code now belongs to another product, it applies NOTHING and asks for a new preview. If the count is left half-applied, finish THAT count at the register; do not cancel it and do not load the whole list again. This WRITES — requires inventory:create, inventory:update and inventory:adjust (and the inventory plan).",
     {
       venueId: venueInput(),
       items: z
@@ -856,7 +865,10 @@ export function registerCatalogInBulkTools(server: McpServer, scope: McpScope) {
       // Ligado a Shopify nunca es «sin cambio»: lo que queda depende de las piezas que Shopify reste (Codex H3).
       const cambios = contables.filter(c => !c.actual.equals(c.contado) || ligados.has(c.product.id))
       const resueltos = { ...sinResolver(r), sameProductTwice, notTracked, inactive, inOpenCount }
-      const resumen = resumenExcluidos(resueltos) + (inOpenCount.length ? NOTA_CONTEO_ABIERTO : '')
+      const excluidos = resumenExcluidos(resueltos)
+      const resumen = excluidos + (inOpenCount.length ? NOTA_CONTEO_ABIERTO : '')
+      // En las respuestas de una confirmación que no terminó se pide no cancelar ESTE conteo: del otro no se aconseja cancelar.
+      const resumenDeFalla = excluidos + (inOpenCount.length ? NOTA_OTRO_CONTEO_ABIERTO : '')
       const reporte = {
         changes: cambios.map(c => ({
           code: c.code,
@@ -870,13 +882,13 @@ export function registerCatalogInBulkTools(server: McpServer, scope: McpScope) {
         ...resueltos,
         ...(ligados.size > 0 ? { shopifyLinked: ligados.size } : {}),
       }
-      // Nada que contar no es «nada que cambiar»: es una lista que hay que revisar.
+      // Nada que contar no es «nada que cambiar»: es una lista que hay que revisar. `message` va antes de las listas.
       if (contables.length === 0)
         return text({
           ok: false,
           needsInput: true,
-          ...resueltos,
           message: 'Ningún producto de la lista se puede cargar.' + resumen + ' Revisa la lista antes de seguir.',
+          ...resueltos,
         })
       if (cambios.length === 0)
         return text({
@@ -901,7 +913,8 @@ export function registerCatalogInBulkTools(server: McpServer, scope: McpScope) {
         })
       // «Pide otra vista previa y confírmala» volvería a fijar el conteo viejo encima de la venta que la huella atrapó: aquí se dice
       // qué revisar antes (Codex H1, revisión final I1).
-      if (expectedSourceFingerprint !== fingerprint) return text({ ...VISTA_VIEJA, message: EXISTENCIA_VIEJA })
+      if (expectedSourceFingerprint !== fingerprint)
+        return text({ ...VISTA_VIEJA, error: EXISTENCIA_VIEJA_ERROR, message: EXISTENCIA_VIEJA })
 
       // El conteo del POS hace lo difícil: relee con candado, resta lo apartado en Shopify, aplaza lo que se está sincronizando, sella
       // cada línea al aplicarla (nunca dos veces) y firma cada movimiento COUNT con quien confirmó.
@@ -995,8 +1008,8 @@ export function registerCatalogInBulkTools(server: McpServer, scope: McpScope) {
           countId: conteo.id,
           message:
             (fallo ? 'No pude terminar de confirmar el conteo ni leer cómo quedó.' : 'Se guardó el conteo, pero no pude leer su detalle.') +
-            resumen +
-            ' Revísalo en el POS (Inventario › Conteos). No lo canceles (no deshace lo ya aplicado) ni vuelvas a cargar la lista completa (podría volver a fijar lo que ya quedó).',
+            resumenDeFalla +
+            ' Revísalo en el POS (Inventario › Conteos). No canceles este conteo (no deshace lo ya aplicado) ni vuelvas a cargar la lista completa (podría volver a fijar lo que ya quedó).',
           outcomeUnknown: true,
           ...(fallo ? { error: (fallo as Error).message } : {}),
           ...resueltos,
@@ -1039,8 +1052,8 @@ export function registerCatalogInBulkTools(server: McpServer, scope: McpScope) {
             `No pude terminar de confirmar el conteo desde aquí. Según lo guardado: ${hecho.applied} producto(s) aplicados y ` +
             `${notApplied.length + hecho.held.length} sin aplicar.` +
             avisoShopify +
-            resumen +
-            ' Revísalo y termínalo en el POS (Inventario › Conteos). No lo canceles (no deshace lo ya aplicado) ni vuelvas a cargar la lista completa (volvería a fijar lo que ya quedó).',
+            resumenDeFalla +
+            ' Revísalo y termínalo en el POS (Inventario › Conteos). No canceles este conteo (no deshace lo ya aplicado) ni vuelvas a cargar la lista completa (volvería a fijar lo que ya quedó).',
           error: (fallo as Error).message,
           applied: hecho.applied,
           changes: hecho.changes,
