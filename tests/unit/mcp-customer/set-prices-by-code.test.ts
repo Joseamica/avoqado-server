@@ -93,16 +93,73 @@ describe('set_prices_by_code', () => {
     expect(out.changes).toEqual([{ code: '8445000000017', sku: 'MAILEN-M', name: 'Vestido Mailen M', from: 1000, to: 1290.5 }])
     expect(out.unchanged).toBe(1)
     expect(out.notFound).toEqual(['NO-EXISTE'])
+    // El asistente repite el mensaje, no las listas: lo que quedó fuera va contado en el texto.
+    expect(out.message).toBe(
+      'Esto cambiará el precio de 1 producto(s): lo que paga el cliente, con IVA. Quedaron fuera: sin encontrar 1 (ver esas listas). Muéstrale la lista al operador; con su autorización vuelve a llamar con confirm:true.',
+    )
     expect(typeof out.expectedSourceFingerprint).toBe('string')
     expect(mockUpdateProduct).not.toHaveBeenCalled()
     expect(mockLogAction).not.toHaveBeenCalled()
   })
 
-  it('si nada cambia, contesta ok sin pedir confirmación', async () => {
+  it('si nada cambia, contesta ok sin pedir confirmación: cuántos ya tenían ese precio y qué quedó fuera', async () => {
     mockProductFindMany.mockResolvedValueOnce([p2])
-    const out = parse(await call({ venueId: 'v1', items: [{ code: 'MAILEN-L', price: 1200 }] }))
+    const out = parse(
+      await call({
+        venueId: 'v1',
+        items: [
+          { code: 'MAILEN-L', price: 1200 },
+          { code: 'NO-EXISTE', price: 5 },
+        ],
+      }),
+    )
     expect(out).toMatchObject({ ok: true, applied: 0, unchanged: 1 })
     expect(out.requiresConfirmation).toBeUndefined()
+    expect(out.message).toBe(
+      'Los 1 producto(s) encontrados ya tienen ese precio: no hay nada que cambiar. Quedaron fuera: sin encontrar 1 (ver esas listas).',
+    )
+  })
+
+  it('🔍 si ningún código cae en un producto: ok:false con needsInput (nunca «nada que cambiar») y cuántos quedaron fuera', async () => {
+    mockProductFindMany.mockResolvedValueOnce([])
+    const out = parse(
+      await call({
+        venueId: 'v1',
+        items: [
+          { code: '8 445000 000017', price: 10 },
+          { code: 'NO-EXISTE', price: 20 },
+        ],
+      }),
+    )
+    expect(out).toMatchObject({ ok: false, needsInput: true, notFound: ['8 445000 000017', 'NO-EXISTE'] })
+    expect(out).not.toHaveProperty('applied')
+    expect(out.message).toBe(
+      'No encontré ninguno de los 2 códigos en este negocio. Quedaron fuera: sin encontrar 2 (ver esas listas). Revisa los códigos (un código de barras va sin espacios) antes de seguir.',
+    )
+    expect(mockUpdateProduct).not.toHaveBeenCalled()
+  })
+
+  it('un producto desactivado sí cambia de precio: sale marcado inactive y el mensaje dice que no se vende hasta activarlo', async () => {
+    const apagado = filaProducto({ id: 'p3', name: 'Falda Caye S', sku: 'CAYE-S', price: 500, active: false })
+    mockProductFindMany.mockResolvedValue([p1, apagado])
+    const items = [
+      { code: 'MAILEN-M', price: 1290 },
+      { code: 'CAYE-S', price: 650 },
+    ]
+    const vista = parse(await call({ venueId: 'v1', items }))
+    expect(vista.changes).toEqual([
+      { code: 'MAILEN-M', sku: 'MAILEN-M', name: 'Vestido Mailen M', from: 1000, to: 1290 },
+      { code: 'CAYE-S', sku: 'CAYE-S', name: 'Falda Caye S', from: 500, to: 650, inactive: true },
+    ])
+    expect(vista.message).toBe(
+      'Esto cambiará el precio de 2 producto(s): lo que paga el cliente, con IVA. 1 están desactivados: el precio cambia, pero no se venden hasta activarlos. Muéstrale la lista al operador; con su autorización vuelve a llamar con confirm:true.',
+    )
+    const out = parse(await call({ venueId: 'v1', items, confirm: true, expectedSourceFingerprint: vista.expectedSourceFingerprint }))
+    expect(out.appliedChanges).toEqual([
+      { productId: 'p1', sku: 'MAILEN-M', from: 1000, to: 1290 },
+      { productId: 'p3', sku: 'CAYE-S', from: 500, to: 650, inactive: true },
+    ])
+    expect(out.message).toBe('Listo: 2 precio(s) cambiado(s). 1 están desactivados: el precio cambia, pero no se venden hasta activarlos.')
   })
 
   it('con confirm y la huella: un cambio por producto con el candado optimista, la lista de lo aplicado y UNA bitácora', async () => {
@@ -119,6 +176,7 @@ describe('set_prices_by_code', () => {
       { productId: 'p2', sku: 'MAILEN-L', from: 1200, to: 1350 },
     ]
     expect(out).toMatchObject({ ok: true, applied: 2, failed: [], notFound: ['NO-EXISTE'] })
+    expect(out.message).toBe('Listo: 2 precio(s) cambiado(s). Quedaron fuera: sin encontrar 1 (ver esas listas).')
     expect(out.appliedChanges).toEqual(aplicado)
     expect(mockUpdateProduct).toHaveBeenCalledTimes(2)
     expect(mockUpdateProduct).toHaveBeenCalledWith('v1', 'p1', { price: 1290.5 }, actor, {
@@ -177,6 +235,7 @@ describe('set_prices_by_code', () => {
     const vista = parse(await call({ venueId: 'v1', items }))
     const out = parse(await call({ venueId: 'v1', items, confirm: true, expectedSourceFingerprint: vista.expectedSourceFingerprint }))
     expect(out).toMatchObject({ ok: true, applied: 1 })
+    expect(out.message).toBe('Se cambiaron 1; 1 no se pudieron (ver failed).')
     expect(out.failed).toEqual([
       {
         code: 'MAILEN-L',

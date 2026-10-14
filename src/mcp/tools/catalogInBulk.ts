@@ -38,7 +38,9 @@ const PRODUCT_SELECT = {
   trackInventory: true,
   inventoryMethod: true,
   category: { select: { name: true } },
-  inventory: { select: { id: true, currentStock: true } },
+  // `lastCountedAt`: lo fija cada conteo que cambia la existencia; en la huella de las existencias, delata un conteo aplicado
+  // después de la vista previa aunque las ventas hayan regresado el número a lo mismo (Codex H1).
+  inventory: { select: { id: true, currentStock: true, lastCountedAt: true } },
 } satisfies Prisma.ProductSelect
 
 export type ProductoPorCodigo = Prisma.ProductGetPayload<{ select: typeof PRODUCT_SELECT }>
@@ -110,6 +112,32 @@ const sinResolver = (r: Resolucion) => ({
   duplicateCodes: r.duplicateCodes,
 })
 
+/** Lo que se quedó fuera de una escritura, contado en el mensaje: el asistente repite el texto, no las listas. '' si nada. Las tres
+ *  últimas cubetas sólo existen en las existencias. */
+function resumenExcluidos(r: {
+  notFound: unknown[]
+  ambiguous: unknown[]
+  archived: unknown[]
+  duplicateCodes: unknown[]
+  sameProductTwice: unknown[]
+  notTracked?: unknown[]
+  inactive?: unknown[]
+  inOpenCount?: unknown[]
+}): string {
+  const cubetas: Array<[string, unknown[] | undefined]> = [
+    ['sin encontrar', r.notFound],
+    ['ambiguos', r.ambiguous],
+    ['archivados', r.archived],
+    ['repetidos en la lista', r.duplicateCodes],
+    ['mismo producto dos veces', r.sameProductTwice],
+    ['sin existencias por pieza', r.notTracked],
+    ['desactivados', r.inactive],
+    ['en un conteo abierto', r.inOpenCount],
+  ]
+  const partes = cubetas.flatMap(([nombre, lista]) => (lista?.length ? [`${nombre} ${lista.length}`] : []))
+  return partes.length ? ` Quedaron fuera: ${partes.join(', ')} (ver esas listas).` : ''
+}
+
 /** Para escribir: un producto pedido más de una vez (su código repetido, o dos códigos suyos: su barras y su SKU) no se toca,
  *  porque no sabemos cuál instrucción vale. Se agrupa por producto ANTES de descartar repetidos: así un código repetido no se
  *  cuela por el otro código del mismo producto. */
@@ -136,6 +164,12 @@ const VISTA_VIEJA = {
   needsInput: true,
   error:
     'Algo cambió desde la vista previa (un precio, una existencia, un código o una categoría). No se aplicó nada: pide una vista previa nueva y confírmala.',
+}
+
+/** Un producto desactivado sí cambia de precio, pero no se vende: el mensaje lo dice (las filas llevan `inactive: true`). */
+function avisoDesactivados(filas: Array<{ inactive?: true }>): string {
+  const k = filas.filter(f => f.inactive).length
+  return k ? ` ${k} están desactivados: el precio cambia, pero no se venden hasta activarlos.` : ''
 }
 
 /** El motivo de UN renglón fallido viaja dentro de la respuesta, donde `instrument.ts` no lo revisa: sólo un error escrito para el
@@ -309,11 +343,21 @@ const cantidadFinalInput = () =>
 /** Lo que el conteo del POS no aplicó por Shopify, dicho como qué hacer (los motivos son los de `shopify.count.service.ts`). */
 const MOTIVO_RETENIDO: Record<string, string> = {
   ENVIO_EN_CAMINO:
-    'Shopify todavía lo está sincronizando (un envío en camino, o la tienda se está conectando): su existencia en Avoqado no cambió. Vuelve a cargarlo cuando Shopify termine; si estás conectando la tienda, después de aplicar la conexión.',
+    'Shopify todavía lo está sincronizando (un envío en camino, o la tienda se está conectando): su existencia en Avoqado no cambió. Vuelve a cargar sólo ese producto cuando Shopify termine; si estás conectando la tienda, después de aplicar la conexión.',
   DUDA_POR_REVISAR:
-    'Tiene un cambio con Shopify por revisar: no se aplicó. Resuélvelo en la página de Shopify del dashboard (Ajustes › Integraciones) y vuelve a cargarlo.',
+    'Tiene un cambio con Shopify por revisar: no se aplicó. Resuélvelo en la página de Shopify del dashboard (Ajustes › Integraciones) y vuelve a cargar sólo ese producto.',
 }
 const NOTA_POR_OMISION = 'Conteo cargado desde la IA'
+
+/** Huella vieja en existencias: volver a pedir y confirmar volvería a fijar el conteo anterior encima de la venta que la huella
+ *  acaba de atrapar, así que se dice qué revisar antes. */
+const EXISTENCIA_VIEJA =
+  'Cambió la existencia de algún producto desde la vista previa (por ejemplo, una venta o un conteo): no se aplicó nada. Si ya habías confirmado esta carga y no viste la respuesta, revisa primero los conteos recientes (stock_counts): probablemente ya quedó. Si no, pide una vista previa nueva y compárala con la anterior: si un producto bajó porque se vendió DESPUÉS de contarlo, réstale esa venta a lo contado antes de confirmar.'
+
+/** Conteos abiertos (IN_PROGRESS o APPLYING) con productos de la carga: con este tope o más, no se carga nada. */
+const TOPE_CONTEOS_ABIERTOS = 50
+const NOTA_CONTEO_ABIERTO =
+  ' Los que están en un conteo abierto no se cargan: termina ese conteo en el POS (Inventario › Conteos), o cancélalo si no aplicó nada.'
 
 type Contable = Encontrado & { actual: Prisma.Decimal; contado: Prisma.Decimal; inventoryId: string }
 
@@ -461,9 +505,29 @@ export function registerCatalogInBulkTools(server: McpServer, scope: McpScope) {
         name: c.product.name,
         from: Number(c.product.price),
         to: c.nuevo.toNumber(),
+        ...(c.product.active ? {} : { inactive: true as const }),
       }))
       const resueltos = { unchanged: unicos.length - cambios.length, ...sinResolver(r), sameProductTwice }
-      if (cambios.length === 0) return text({ ok: true, applied: 0, changes, ...resueltos, message: 'No hay precios que cambiar.' })
+      const resumen = resumenExcluidos(resueltos)
+      // Sin un solo producto no es «nada que cambiar»: es una lista que hay que revisar.
+      if (r.found.length === 0)
+        return text({
+          ok: false,
+          needsInput: true,
+          ...sinResolver(r),
+          message:
+            `No encontré ninguno de los ${items.length} códigos en este negocio.` +
+            resumen +
+            ' Revisa los códigos (un código de barras va sin espacios) antes de seguir.',
+        })
+      if (cambios.length === 0)
+        return text({
+          ok: true,
+          applied: 0,
+          changes,
+          ...resueltos,
+          message: `Los ${unicos.length} producto(s) encontrados ya tienen ese precio: no hay nada que cambiar.` + resumen,
+        })
       if (!confirm)
         return text({
           ok: false,
@@ -471,10 +535,14 @@ export function registerCatalogInBulkTools(server: McpServer, scope: McpScope) {
           expectedSourceFingerprint: fingerprint,
           changes,
           ...resueltos,
-          message: `Esto cambiará el precio de ${cambios.length} producto(s): lo que paga el cliente, con IVA. Muéstrale la lista al operador; con su autorización vuelve a llamar con confirm:true.`,
+          message:
+            `Esto cambiará el precio de ${cambios.length} producto(s): lo que paga el cliente, con IVA.` +
+            avisoDesactivados(changes) +
+            resumen +
+            ' Muéstrale la lista al operador; con su autorización vuelve a llamar con confirm:true.',
         })
       if (expectedSourceFingerprint !== fingerprint) return text(VISTA_VIEJA)
-      const applied: Array<{ productId: string; sku: string; from: number; to: number }> = []
+      const applied: Array<{ productId: string; sku: string; from: number; to: number; inactive?: true }> = []
       const failed: Array<{ code: string; sku: string; name: string; error: string }> = []
       for (const c of cambios) {
         try {
@@ -484,7 +552,13 @@ export function registerCatalogInBulkTools(server: McpServer, scope: McpScope) {
             price: c.product.price,
             active: c.product.active,
           })
-          applied.push({ productId: c.product.id, sku: c.product.sku, from: Number(c.product.price), to: c.nuevo.toNumber() })
+          applied.push({
+            productId: c.product.id,
+            sku: c.product.sku,
+            from: Number(c.product.price),
+            to: c.nuevo.toNumber(),
+            ...(c.product.active ? {} : { inactive: true as const }),
+          })
         } catch (err) {
           failed.push({
             code: c.code,
@@ -508,9 +582,11 @@ export function registerCatalogInBulkTools(server: McpServer, scope: McpScope) {
         failed,
         ...resueltos,
         message:
-          failed.length === 0
+          (failed.length === 0
             ? `Listo: ${applied.length} precio(s) cambiado(s).`
-            : `Se cambiaron ${applied.length}; ${failed.length} no se pudieron (ver failed).`,
+            : `Se cambiaron ${applied.length}; ${failed.length} no se pudieron (ver failed).`) +
+          avisoDesactivados(applied) +
+          resumen,
       })
     },
   )
@@ -685,7 +761,7 @@ export function registerCatalogInBulkTools(server: McpServer, scope: McpScope) {
       const { unicos, sameProductTwice } = unoPorProducto(r)
       const notTracked: Array<{ code: string; sku: string; name: string; reason: string }> = []
       const inactive: Array<{ code: string; sku: string; name: string }> = []
-      const contables: Contable[] = []
+      const candidatos: Contable[] = []
       for (const f of unicos) {
         const p = f.product
         if (!p.trackInventory || p.inventoryMethod !== 'QUANTITY' || !p.inventory)
@@ -698,31 +774,78 @@ export function registerCatalogInBulkTools(server: McpServer, scope: McpScope) {
         // El conteo del POS no cuenta productos desactivados.
         else if (!p.active) inactive.push({ code: f.code, sku: p.sku, name: p.name })
         else
-          contables.push({
+          candidatos.push({
             ...f,
             actual: p.inventory.currentStock,
             contado: cantidadDe.get(f.code) as Prisma.Decimal,
             inventoryId: p.inventory.id,
           })
       }
-      contables.sort(porId)
-      // La huella: TODO lo que se va a contar (también lo que no cambia: el conteo lo vuelve a fijar), qué código cayó en qué producto
-      // y la existencia que se VIO. Una venta, o un código que pasó a otro producto, la cambian.
-      const fingerprint = operationHash(contables.map(c => ({ code: c.code, id: c.product.id, stock: c.actual.toString() })))
+      candidatos.sort(porId)
+      // Un producto que ya está en un conteo abierto no se cuenta otra vez: si la primera confirmación falló sin aplicar nada, su
+      // conteo sigue abierto y reenviarla abriría otro encima (Codex H1). En varios abiertos, manda el más viejo.
+      const idsCandidatos = candidatos.map(c => c.product.id)
+      const abiertos =
+        idsCandidatos.length === 0
+          ? []
+          : await prisma.stockCount.findMany({
+              where: { ...where, status: { in: ['IN_PROGRESS', 'APPLYING'] }, items: { some: { productId: { in: idsCandidatos } } } },
+              select: {
+                id: true,
+                items: { where: { productId: { in: idsCandidatos } }, select: { productId: true }, take: idsCandidatos.length },
+              },
+              orderBy: { createdAt: 'asc' },
+              take: TOPE_CONTEOS_ABIERTOS,
+            })
+      // En el tope no se sabe si hay más: no se carga nada.
+      if (abiertos.length >= TOPE_CONTEOS_ABIERTOS)
+        return text({
+          ok: false,
+          needsInput: true,
+          message:
+            'Hay demasiados conteos abiertos en este negocio: termina o cancela los que ya no sirvan en el POS (Inventario › Conteos) antes de cargar existencias.',
+        })
+      const conteoAbiertoDe = new Map<string, string>()
+      for (const abierto of abiertos)
+        for (const { productId } of abierto.items)
+          if (productId && !conteoAbiertoDe.has(productId)) conteoAbiertoDe.set(productId, abierto.id)
+      const inOpenCount = candidatos.flatMap(c => {
+        const countId = conteoAbiertoDe.get(c.product.id)
+        return countId ? [{ code: c.code, sku: c.product.sku, name: c.product.name, countId }] : []
+      })
+      const contables = candidatos.filter(c => !conteoAbiertoDe.has(c.product.id))
       const ids = contables.map(c => c.product.id)
-      const ligados = new Set(
+      // Sólo las parejas que pueden tocar el conteo: a una suspendida o de una sucursal desconectada no se le resta nada
+      // (`apartadasBajoCandado`). Lo apartado va en la huella: un despacho de lo apartado no mueve el disponible, pero sí lo que el
+      // conteo le restará a lo contado (Codex H2).
+      const linkDe = new Map(
         ids.length === 0
           ? []
           : (
               await prisma.shopifyVariantLink.findMany({
-                where: { ...where, productId: { in: ids } },
-                select: { productId: true },
+                where: { ...where, productId: { in: ids }, suspendedReason: null, locationLink: { status: { not: 'DISCONNECTED' } } },
+                select: { productId: true, mirrorCommitted: true, initializedAt: true },
                 take: ids.length,
               })
-            ).map(l => l.productId),
+            ).map(l => [l.productId, { apartadas: l.mirrorCommitted, inicializado: !!l.initializedAt }] as const),
       )
-      const cambios = contables.filter(c => !c.actual.equals(c.contado))
-      const resueltos = { ...sinResolver(r), sameProductTwice, notTracked, inactive }
+      const ligados = new Set(linkDe.keys())
+      // La huella: TODO lo que se va a contar (también lo que no cambia: el conteo lo vuelve a fijar), qué código cayó en qué producto,
+      // la existencia que se VIO, cuándo la fijó el último conteo y lo apartado en Shopify. Una venta, un conteo aplicado desde la vista
+      // previa (aunque las ventas regresen el número a lo mismo), un despacho o un código que pasó a otro producto la cambian.
+      const fingerprint = operationHash(
+        contables.map(c => ({
+          code: c.code,
+          id: c.product.id,
+          stock: c.actual.toString(),
+          contadoEl: c.product.inventory?.lastCountedAt?.toISOString() ?? null,
+          shopify: linkDe.get(c.product.id) ?? null,
+        })),
+      )
+      // Ligado a Shopify nunca es «sin cambio»: lo que queda depende de las piezas que Shopify reste (Codex H3).
+      const cambios = contables.filter(c => !c.actual.equals(c.contado) || ligados.has(c.product.id))
+      const resueltos = { ...sinResolver(r), sameProductTwice, notTracked, inactive, inOpenCount }
+      const resumen = resumenExcluidos(resueltos) + (inOpenCount.length ? NOTA_CONTEO_ABIERTO : '')
       const reporte = {
         changes: cambios.map(c => ({
           code: c.code,
@@ -730,20 +853,26 @@ export function registerCatalogInBulkTools(server: McpServer, scope: McpScope) {
           name: c.product.name,
           from: c.actual.toNumber(),
           to: c.contado.toNumber(),
-          delta: c.contado.minus(c.actual).toNumber(),
           ...(ligados.has(c.product.id) ? { shopify: true } : {}),
         })),
         unchanged: contables.length - cambios.length,
         ...resueltos,
         ...(ligados.size > 0 ? { shopifyLinked: ligados.size } : {}),
       }
-      // Ligado a Shopify, «sin cambio» puede no serlo (lo apartado en línea se resta de lo contado): por eso esos sí se cuentan.
-      if (contables.length === 0 || (cambios.length === 0 && ligados.size === 0))
+      // Nada que contar no es «nada que cambiar»: es una lista que hay que revisar.
+      if (contables.length === 0)
+        return text({
+          ok: false,
+          needsInput: true,
+          ...resueltos,
+          message: 'Ningún producto de la lista se puede cargar.' + resumen + ' Revisa la lista antes de seguir.',
+        })
+      if (cambios.length === 0)
         return text({
           ok: true,
           applied: 0,
           ...reporte,
-          message: contables.length === 0 ? 'No hay nada que cargar: revisa los códigos sin resolver.' : 'No hay existencias que cambiar.',
+          message: `Los ${contables.length} producto(s) ya tienen esa existencia: no hay nada que cambiar.` + resumen,
         })
       if (!confirm)
         return text({
@@ -751,14 +880,17 @@ export function registerCatalogInBulkTools(server: McpServer, scope: McpScope) {
           requiresConfirmation: true,
           expectedSourceFingerprint: fingerprint,
           message:
-            `Esto guardará un conteo de ${contables.length} producto(s) (${cambios.length} cambian).` +
+            `Esto guardará un conteo de ${contables.length} producto(s) (${cambios.length} ${ligados.size ? 'cambian o los ajusta Shopify' : 'cambian'}).` +
             (ligados.size
               ? ` ${ligados.size} están ligados a Shopify: se restan de lo contado las piezas apartadas por pedidos en línea, y Shopify puede retener alguno (por ejemplo, mientras se conecta la tienda); la respuesta dirá cuáles.`
               : '') +
+            resumen +
             ' Muéstrale la lista al operador; con su autorización vuelve a llamar con confirm:true.',
           ...reporte,
         })
-      if (expectedSourceFingerprint !== fingerprint) return text(VISTA_VIEJA)
+      // «Pide otra vista previa y confírmala» volvería a fijar el conteo viejo encima de la venta que la huella atrapó: aquí se dice
+      // qué revisar antes (Codex H1, revisión final I1).
+      if (expectedSourceFingerprint !== fingerprint) return text({ ...VISTA_VIEJA, message: EXISTENCIA_VIEJA })
 
       // El conteo del POS hace lo difícil: relee con candado, resta lo apartado en Shopify, aplaza lo que se está sincronizando, sella
       // cada línea al aplicarla (nunca dos veces) y firma cada movimiento COUNT con quien confirmó.
@@ -788,7 +920,11 @@ export function registerCatalogInBulkTools(server: McpServer, scope: McpScope) {
         const cancelado = await cancelStockCount(conteo.id, venueId, scope.staffId, conteo.revision).then(
           () => true,
           err => {
-            logger.warn('[MCP] set_stock_by_code: no se pudo cancelar el conteo', { countId: conteo.id, error: (err as Error)?.message })
+            logger.warn('[MCP] set_stock_by_code: no se pudo cancelar el conteo', {
+              venueId,
+              countId: conteo.id,
+              error: (err as Error)?.message,
+            })
             return false
           },
         )
@@ -815,6 +951,7 @@ export function registerCatalogInBulkTools(server: McpServer, scope: McpScope) {
           break
         } catch (err) {
           logger.warn('[MCP] set_stock_by_code: falló la confirmación del conteo', {
+            venueId,
             countId: conteo.id,
             intento: intento + 1,
             error: (err as Error)?.message,
@@ -845,13 +982,13 @@ export function registerCatalogInBulkTools(server: McpServer, scope: McpScope) {
         return text({
           ok: fallo === null,
           countId: conteo.id,
+          message:
+            (fallo ? 'No pude terminar de confirmar el conteo ni leer cómo quedó.' : 'Se guardó el conteo, pero no pude leer su detalle.') +
+            resumen +
+            ' Revísalo en el POS (Inventario › Conteos). No lo canceles (no deshace lo ya aplicado) ni vuelvas a cargar la lista completa (podría volver a fijar lo que ya quedó).',
           outcomeUnknown: true,
           ...(fallo ? { error: (fallo as Error).message } : {}),
-          message:
-            (fallo
-              ? 'No pude terminar de confirmar el conteo ni leer cómo quedó. '
-              : 'Se guardó el conteo, pero no pude leer su detalle. ') +
-            'Revísalo en el POS (Inventario › Conteos). No lo canceles (no deshace lo ya aplicado) ni vuelvas a cargar la lista completa (podría volver a fijar lo que ya quedó).',
+          ...resueltos,
         })
       }
       const notApplied = [
@@ -891,12 +1028,14 @@ export function registerCatalogInBulkTools(server: McpServer, scope: McpScope) {
             `No pude terminar de confirmar el conteo desde aquí. Según lo guardado: ${hecho.applied} producto(s) aplicados y ` +
             `${notApplied.length + hecho.held.length} sin aplicar.` +
             avisoShopify +
+            resumen +
             ' Revísalo y termínalo en el POS (Inventario › Conteos). No lo canceles (no deshace lo ya aplicado) ni vuelvas a cargar la lista completa (volvería a fijar lo que ya quedó).',
           error: (fallo as Error).message,
           applied: hecho.applied,
           changes: hecho.changes,
           held: hecho.held,
           notApplied,
+          ...resueltos,
         })
       return text({
         ok: hecho.applied > 0,
@@ -908,7 +1047,8 @@ export function registerCatalogInBulkTools(server: McpServer, scope: McpScope) {
             : 'No se aplicó ningún producto del conteo.') +
           avisoShopify +
           (hecho.held.length ? ` ${hecho.held.length} no se aplicaron por Shopify (ver held).` : '') +
-          (notApplied.length ? ` ${notApplied.length} no se aplicaron (ver notApplied).` : ''),
+          (notApplied.length ? ` ${notApplied.length} no se aplicaron (ver notApplied).` : '') +
+          resumen,
         applied: hecho.applied,
         changes: hecho.changes,
         unchanged: hecho.applied - hecho.changes.length,
