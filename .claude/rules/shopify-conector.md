@@ -457,5 +457,6 @@ la guía. La página nunca ofrece comprar Premium para Shopify (§0).
   webhook y MCP `tests/unit/routes/shopify.*`, `tests/unit/controllers/dashboard/shopify.controller.test.ts` y
   `tests/unit/mcp-customer/shopify.tools.test.ts`.
 - **Verificar en GitHub:** sube TU commit a una rama `ci/<tema>` (carril del workspace); los deploys sólo corren en `main`. 🔴 NUNCA
-  `gh workflow run` sobre esta rama: `workflow_dispatch` con `environment=production` publica en producción SIN importar la rama
-  (`ci-cd.yml:286`).
+  `gh workflow run` sobre esta rama: `workflow_dispatch` con `environment=production` es el botón de publicar. Desde el 14-oct
+  sólo despliega si corre en `main` (antes publicaba main desde CUALQUIER rama); en otra rama gasta una corrida completa y no
+  verifica nada que el carril no verifique.
