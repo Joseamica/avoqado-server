@@ -7,6 +7,7 @@ import { filaProducto } from '../../__helpers__/catalogo-en-bloque'
 const mockProductFindMany = jest.fn()
 const mockRequirePermission = jest.fn()
 const mockTienePermiso = jest.fn()
+const mockPlanGate = jest.fn()
 
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
@@ -25,7 +26,7 @@ jest.mock('@/mcp/guard', () => ({
   }),
 }))
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn() }))
-jest.mock('@/mcp/planGate', () => ({ planGateMessage: jest.fn().mockResolvedValue(null) }))
+jest.mock('@/mcp/planGate', () => ({ planGateMessage: (...a: unknown[]) => mockPlanGate(...(a as [])) }))
 jest.mock('@/services/access/basePlan.service', () => ({
   venueHasFeatureAccess: jest.fn(async () => true),
   venuesWithFeatureAccess: jest.fn(async (ids: string[]) => ids),
@@ -59,6 +60,7 @@ beforeAll(() => {
 beforeEach(() => {
   jest.clearAllMocks()
   mockTienePermiso.mockReturnValue(true)
+  mockPlanGate.mockResolvedValue(null)
 })
 
 describe('resolverCodigos', () => {
@@ -163,8 +165,21 @@ describe('find_products_by_code', () => {
     mockProductFindMany.mockResolvedValueOnce([filaProducto({ sku: 'MAILEN-M', stock: 3 })])
     const out = parse(await call({ venueId: 'v1', codes: ['MAILEN-M'] }))
     expect(mockTienePermiso).toHaveBeenCalledWith('inventory:read', 'v1')
+    expect(mockPlanGate).not.toHaveBeenCalled()
     expect(out.found[0]).not.toHaveProperty('stock')
     expect(out.stockHidden).toContain('inventory:read')
+  })
+
+  it('con el permiso de inventario pero sin el plan de inventario, el producto sale igual y las existencias no, con el porqué', async () => {
+    const mensaje = 'El control de inventario no está incluido en el plan actual de este local (requiere INVENTORY_TRACKING).'
+    mockPlanGate.mockResolvedValue(mensaje)
+    mockProductFindMany.mockResolvedValueOnce([filaProducto({ id: 'p1', sku: 'MAILEN-M', price: 1290.5, stock: 3 })])
+    const out = parse(await call({ venueId: 'v1', codes: ['MAILEN-M'] }))
+    expect(out.ok).toBe(true)
+    expect(out.found[0]).toMatchObject({ code: 'MAILEN-M', sku: 'MAILEN-M', price: 1290.5 })
+    expect(out.found[0]).not.toHaveProperty('stock')
+    expect(out.stockHidden).toBe(mensaje)
+    expect(mockPlanGate).toHaveBeenCalledWith('v1', 'INVENTORY_TRACKING', 'El control de inventario')
   })
 
   it('🔍 un código pegado desde Excel (espacios y apóstrofo) se encuentra igual', async () => {
