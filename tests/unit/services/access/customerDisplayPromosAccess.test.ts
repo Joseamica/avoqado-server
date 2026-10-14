@@ -17,13 +17,21 @@ jest.mock('../../../../src/utils/prismaClient', () => ({
     venue: { findUnique: jest.fn() },
     venueFeature: { findFirst: jest.fn(), findMany: jest.fn() },
     // Cobro híbrido: sin concesiones sueltas ni contrato de plan; el acceso sale sólo del plan clásico.
-    capabilityGrant: { findFirst: jest.fn().mockResolvedValue(null) },
+    // `groupBy` lo usa `getVenuePlanInfo` (vía `grantedCapabilityCodes`): sin concesiones sueltas devuelve [].
+    capabilityGrant: { findFirst: jest.fn().mockResolvedValue(null), groupBy: jest.fn().mockResolvedValue([]) },
     hybridContract: { findFirst: jest.fn().mockResolvedValue(null) },
   },
 }))
 
 import prisma from '../../../../src/utils/prismaClient'
-import { elPlanConcede, FREE_TIER_CODES, PREMIUM_ONLY_CODES, venueHasFeatureAccess } from '../../../../src/services/access/basePlan.service'
+import {
+  elPlanConcede,
+  FREE_TIER_CODES,
+  getVenuePlanInfo,
+  PREMIUM_ONLY_CODES,
+  venueHasFeatureAccess,
+} from '../../../../src/services/access/basePlan.service'
+import { FEATURE_CATALOG } from '../../../../src/config/featureCatalog'
 
 const CODIGO = 'CUSTOMER_DISPLAY_PROMOS'
 const db = prisma as any
@@ -54,9 +62,28 @@ describe('pantalla del cliente — promos en reposo: espejo de tiers (F0-A)', ()
     expect(elPlanConcede('PRO', CODIGO)).toBe(true)
   })
 
+  it('🔴 no está en FEATURE_CATALOG todavía', () => {
+    // Decisión del founder: sin catálogo ni fila Feature hasta F3; F3 voltea esta aserción.
+    expect(FEATURE_CATALOG.some(e => e.featureCode === CODIGO)).toBe(false)
+  })
+
   it('un negocio PRO la tiene', async () => {
     sede({ plan: 'PLAN_PRO' })
     await expect(venueHasFeatureAccess('v1', CODIGO)).resolves.toBe(true)
+  })
+
+  it('un negocio PRO la recibe en `grantedFeatureCodes` del payload del plan (lo que leen las apps)', async () => {
+    sede({ plan: 'PLAN_PRO' })
+    const info = await getVenuePlanInfo('v1')
+    expect(info.tier).toBe('PRO')
+    expect(info.grantedFeatureCodes).toContain(CODIGO)
+  })
+
+  it('un negocio SIN plan NO la recibe en `grantedFeatureCodes`', async () => {
+    sede()
+    const info = await getVenuePlanInfo('v1')
+    expect(info.tier).toBe('FREE')
+    expect(info.grantedFeatureCodes).not.toContain(CODIGO)
   })
 
   it('un negocio PREMIUM la tiene', async () => {
