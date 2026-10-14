@@ -341,6 +341,35 @@ describe('migrateCancel — G4: la reversión sigue vigente', () => {
       data: { venueId: 'venue-old', assignedMerchantIds: [] },
     })
   })
+
+  it('10. un payload de migración sin toVenueId no se deshace a ciegas: 409, aunque la terminal siga en el origen', async () => {
+    // El negocio leído bajo el candado ES el origen de la migración, y la orden está vigente: lo único que puede dar el
+    // 409 es que falta el destino.
+    m.tpvCommandQueue.findFirst.mockResolvedValue(
+      ordenVieja({ fromVenueId: 'venue-old', previousMerchantIds: ['ma-1'] }, { expiresAt: new Date(T0 + 60 * 60 * 1000) }),
+    )
+    m.tpvCommandQueue.findUnique.mockResolvedValue({ expiresAt: new Date(T0 + 60 * 60 * 1000) })
+    m.$queryRaw.mockResolvedValue([{ id: 'term-1', venueId: 'venue-old' }])
+
+    await expect(migrateCancel('term-1', actor)).rejects.toMatchObject({ statusCode: 409, code: 'MIGRATION_NOT_CURRENT' })
+    expect(m.terminal.update).not.toHaveBeenCalled()
+  })
+
+  it('11. el vencimiento que vale es el de la RELECTURA bajo candado, no el de la búsqueda inicial', async () => {
+    // La búsqueda inicial vio la orden vigente por una hora; bajo los dos candados la orden ya dice que vencía en T0 + 1 s
+    // (otra transacción la acortó mientras se esperaba), y el reloj nuevo ya va en T0 + 5 s.
+    m.tpvCommandQueue.findFirst.mockResolvedValue(
+      ordenVieja({ fromVenueId: 'venue-old', toVenueId: 'venue-new' }, { expiresAt: new Date(T0 + 60 * 60 * 1000) }),
+    )
+    m.tpvCommandQueue.findUnique.mockResolvedValue({ expiresAt: new Date(T0 + 1_000) })
+    m.$queryRaw.mockImplementation(async () => {
+      jest.setSystemTime(T0 + 5_000)
+      return [{ id: 'term-1', venueId: 'venue-new' }]
+    })
+
+    await expect(migrateCancel('term-1', actor)).rejects.toMatchObject({ statusCode: 409, code: 'MIGRATION_NOT_CURRENT' })
+    expect(m.terminal.update).not.toHaveBeenCalled()
+  })
 })
 
 // 🔴 §4.3 del plan de la pantalla del cliente: deshacer la migración regresa la terminal a su origen, así que el diseño se

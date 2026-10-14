@@ -349,6 +349,9 @@ describe('migrateDiscard', () => {
       m.tpvCommandQueue.findMany.mockResolvedValue([
         wipe({ payload: { migration: { fromVenueId: 'venue-origen', previousMerchantIds: ['ma-1'] } } }),
       ])
+      // Bajo el candado la terminal está en el ORIGEN de esa migración: el negocio coincide, así que lo único que puede dar
+      // el 409 es que falta el destino.
+      m.$queryRaw.mockResolvedValue([{ commandSessionId: null, venueId: 'venue-origen' }])
 
       await expect(migrateDiscard('term-1', actor)).rejects.toMatchObject({ statusCode: 409, code: 'MIGRATION_NOT_CURRENT' })
 
