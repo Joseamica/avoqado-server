@@ -80,10 +80,11 @@ beforeEach(async () => {
 afterAll(async () => {
   if (!venueA || !venueB) return
   await prisma.terminal.deleteMany({ where: { venueId: { in: [venueA, venueB] } } })
-  await prisma.activityLog.deleteMany({ where: { OR: [{ venueId: { in: [venueA, venueB] } }, { staffId }] } })
+  // `staffId` queda sin asignar si beforeAll falla antes de crearlo: un `{ staffId: undefined }` en el OR borraría TODA la bitácora.
+  await prisma.activityLog.deleteMany({ where: { OR: [{ venueId: { in: [venueA, venueB] } }, ...(staffId ? [{ staffId }] : [])] } })
   await prisma.venue.deleteMany({ where: { id: { in: [venueA, venueB] } } })
   await prisma.organization.deleteMany({ where: { id: orgId } })
-  await prisma.staff.deleteMany({ where: { id: staffId } })
+  if (staffId) await prisma.staff.deleteMany({ where: { id: staffId } })
 })
 
 const terminal = () =>

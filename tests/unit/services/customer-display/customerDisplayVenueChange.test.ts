@@ -75,7 +75,8 @@ describe('borrarDisenoAlCambiarDeNegocio', () => {
     expect(delegados.terminal.update).toHaveBeenCalledTimes(1)
     const { where, data } = delegados.terminal.update.mock.calls[0][0]
     expect(where).toEqual({ id: 't1' })
-    expect(data).toEqual(LIMPIEZA_DEL_REPORTE) // exactamente las 5 columnas: ni una más, ni una menos
+    // toStrictEqual y no toEqual: sólo el estricto distingue `Prisma.DbNull` de `Prisma.JsonNull` (otra clase, mismo aspecto).
+    expect(data).toStrictEqual(LIMPIEZA_DEL_REPORTE) // exactamente las 5 columnas: ni una más, ni una menos
     expect(Object.keys(data)).toHaveLength(5)
 
     expect(delegados.activityLog.create).toHaveBeenCalledTimes(1)
@@ -130,7 +131,7 @@ describe('borrarDisenoAlCambiarDeNegocio', () => {
     expect(r).toEqual({ cambio: true, disenoBorrado: false, fromVenueId: 'vA' })
     expect(delegados.customerDisplayDesign.deleteMany).toHaveBeenCalledTimes(1)
     expect(delegados.terminal.update).toHaveBeenCalledTimes(1)
-    expect(delegados.terminal.update.mock.calls[0][0].data).toEqual(LIMPIEZA_DEL_REPORTE)
+    expect(delegados.terminal.update.mock.calls[0][0].data).toStrictEqual(LIMPIEZA_DEL_REPORTE) // estricto: DbNull ≠ JsonNull
     expect(delegados.activityLog.create).not.toHaveBeenCalled()
     nadaPorElClienteGlobal()
   })
