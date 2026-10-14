@@ -22,6 +22,8 @@ export function filaProducto(
     trackInventory?: boolean
     inventoryMethod?: 'QUANTITY' | 'RECIPE' | null
     stock?: number | null
+    /** Cuándo lo fijó por última vez un conteo que lo cambió. */
+    lastCountedAt?: Date | null
     category?: string
   } = {},
 ): ProductoPorCodigo {
@@ -37,7 +39,8 @@ export function filaProducto(
     trackInventory: o.trackInventory ?? true,
     inventoryMethod: o.inventoryMethod === undefined ? 'QUANTITY' : o.inventoryMethod,
     category: { name: o.category ?? 'Vestidos' },
-    inventory: o.stock === null ? null : { id: `inv-${id}`, currentStock: new Prisma.Decimal(o.stock ?? 0) },
+    inventory:
+      o.stock === null ? null : { id: `inv-${id}`, currentStock: new Prisma.Decimal(o.stock ?? 0), lastCountedAt: o.lastCountedAt ?? null },
   }
 }
 
