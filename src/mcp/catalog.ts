@@ -305,6 +305,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   set_table_status: 'write',
   set_terminal_payment_strict_mode: 'write',
   settlement_calendar: 'read',
+  settlement_deposits_report: 'read',
   settlement_week: 'read',
   shopify_connect_apply: 'write',
   shopify_connect_preview: 'read',

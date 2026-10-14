@@ -1472,6 +1472,8 @@ export async function addItemsToOrder(
    *   (cazado en smoke de hardware 2026-07-19).
    */
   asNewRound: boolean = false,
+  /** Huella del reducer offline: corre DENTRO de la transacción de la ronda (plan 2026-10-13-sync-retoma-por-llave). */
+  dentroDeLaTx?: (tx: Prisma.TransactionClient, ronda: { orderId: string }) => Promise<void>,
 ): Promise<Order & { tableName: string | null }> {
   logger.info(`📝 [ORDER SERVICE] Adding ${items.length} items to order ${orderId} (expected version: ${expectedVersion})`)
   await assertPreparationAuthoringAccess(venueId, items)
@@ -2220,6 +2222,7 @@ export async function addItemsToOrder(
         },
       })
       if (casBump.count === 0) throw conflictoDeVersion()
+      await dentroDeLaTx?.(tx, { orderId })
       const updatedOrder = await tx.order.findUniqueOrThrow({
         where: { id: orderId },
         include: {

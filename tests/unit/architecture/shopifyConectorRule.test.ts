@@ -1084,7 +1084,7 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     const cortas: Record<string, [string, string]> = {
       '`:72`': [de('connect.service'), 'const tiendasPiloto'],
       '`:49`': [de('crypto'), 'export function verifyOAuthQueryHmac('],
-      '`:1188`': [de('catalog.service'), 'export async function archivarPareja('],
+      '`:1197`': [de('catalog.service'), 'export async function archivarPareja('],
     }
     const enLaRegla = [
       ...regla.matchAll(/`((?:shopify\.)?(?:connect|catalog|reconcile|mirror|outbox|store|worker)\.service\.ts|shopify\.crypto\.ts):\d+`/g),
