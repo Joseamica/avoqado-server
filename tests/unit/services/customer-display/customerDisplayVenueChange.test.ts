@@ -21,6 +21,16 @@ function nuevoTx(opciones: { fila?: { id: string; venueId: string } | null; borr
   return { delegados, tx: delegados as unknown as Prisma.TransactionClient }
 }
 
+// El cliente GLOBAL contesta lo mismo que un Prisma real. Sin esto, un gancho que usara `prisma` en vez de `tx` truena
+// con un TypeError (`deleteMany` del mock devuelve undefined) antes de llegar a la aserción que lo denuncia: la prueba
+// caería, pero por accidente (sabotaje 3 de la tarea 8).
+beforeEach(() => {
+  prismaMock.$queryRaw.mockResolvedValue([{ id: 't1', venueId: 'vA' }])
+  prismaMock.customerDisplayDesign.deleteMany.mockResolvedValue({ count: 1 })
+  prismaMock.terminal.update.mockResolvedValue({ id: 't1' })
+  prismaMock.activityLog.create.mockResolvedValue({})
+})
+
 const LIMPIEZA_DEL_REPORTE = {
   customerDisplayAck: Prisma.DbNull,
   customerDisplayInstallationId: null,
