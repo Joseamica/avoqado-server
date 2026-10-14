@@ -74,7 +74,9 @@ describe('migrateDiscard', () => {
     m.terminal.findUnique.mockResolvedValue(terminal())
     m.venue.findUnique.mockResolvedValue({ timezone: 'America/Mexico_City' })
     m.tpvCommandQueue.updateMany.mockResolvedValue({ count: 1 })
-    m.$queryRaw.mockResolvedValue([{ lastActivationStatusCheckAt: null }])
+    // G4: el candado lee también el negocio de la terminal. `venue-a` es el destino de `migrationWipe`: en v1 la terminal
+    // ya se mudó, así que ahí la dejó esa migración.
+    m.$queryRaw.mockResolvedValue([{ commandSessionId: null, venueId: 'venue-a' }])
     m.$transaction.mockImplementation((fn: any) => fn(prisma))
   })
 
@@ -204,7 +206,7 @@ describe('migrateDiscard', () => {
   it('una consulta pública de estado no se usa como prueba de un borrado legacy', async () => {
     m.tpvCommandQueue.findMany.mockResolvedValue([migrationWipe()])
     m.terminal.findUnique.mockResolvedValueOnce(terminal(null)) // lectura inicial: no rebotó
-    m.$queryRaw.mockResolvedValueOnce([{ lastActivationStatusCheckAt: new Date() }]) // bajo lock: YA rebotó
+    m.$queryRaw.mockResolvedValueOnce([{ lastActivationStatusCheckAt: new Date(), venueId: 'venue-a' }]) // bajo lock: YA rebotó
 
     await expect(migrateDiscard('term-1', actor)).resolves.toMatchObject({ discarded: 1 })
     expect(m.terminal.update).toHaveBeenCalled()
@@ -264,5 +266,88 @@ describe('migrateDiscard', () => {
   it('throws NotFoundError for an unknown terminal', async () => {
     m.terminal.findUnique.mockResolvedValue(null)
     await expect(migrateDiscard('nope', actor)).rejects.toThrow(NotFoundError)
+  })
+
+  // 🔴 G4 (auditoría de Codex del plan, 14-oct): deshacer una migración sólo vale si la terminal sigue donde la dejó ESA
+  // migración y si la orden seguía vigente frente a un reloj leído DESPUÉS del candado. Si no, otra mudanza mandó
+  // después, y revertir se llevaría la terminal (y sus comercios de cobro) de un negocio que no la pidió.
+  describe('G4: la reversión sigue vigente', () => {
+    const T0 = Date.parse('2026-10-14T18:00:00.000Z')
+
+    beforeEach(() => {
+      // Sólo se finge el reloj: las promesas y los temporizadores siguen siendo los reales.
+      jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'setTimeout', 'setInterval', 'queueMicrotask'] })
+      jest.setSystemTime(T0)
+    })
+    afterEach(() => {
+      jest.useRealTimers()
+    })
+
+    it('1. el reloj de la vigencia se lee DESPUÉS del candado', async () => {
+      m.tpvCommandQueue.findMany.mockResolvedValue([migrationWipe()])
+      m.$queryRaw.mockImplementation(async () => {
+        jest.setSystemTime(T0 + 5_000) // el candado tardó: el reloj que vale es el de ahora
+        return [{ commandSessionId: null, venueId: 'venue-a' }]
+      })
+
+      await migrateDiscard('term-1', actor)
+
+      expect(m.tpvCommandQueue.updateMany).toHaveBeenCalledWith({
+        where: expect.objectContaining({
+          id: 'cmd-1',
+          OR: [{ expiresAt: null }, { expiresAt: { gt: new Date(T0 + 5_000) } }],
+        }),
+        data: expect.objectContaining({ status: 'EXPIRED', expiresAt: new Date(T0 + 5_000) }),
+      })
+      // La bitácora mide el silencio con ese mismo reloj, el que la transacción devuelve.
+      expect(mockedLogAction).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ silentForMs: 30 * HOUR + 5_000 }) }),
+      )
+    })
+
+    it('2. una orden que venció mientras se esperaba el candado no se descarta, y la terminal no se mueve', async () => {
+      m.tpvCommandQueue.findMany.mockResolvedValue([migrationWipe()])
+      // La fila en la base: SENT y vencida 1 s después de T0. El CAS sólo la toca si se cumplen el estado y la vigencia
+      // de su `where` (un `where` sin `OR` no exige vigencia, como en Postgres).
+      const fila = { status: 'SENT', expiresAt: new Date(T0 + 1_000) }
+      m.tpvCommandQueue.updateMany.mockImplementation(async ({ where }: any) => {
+        const estado = where.status?.in ? where.status.in.includes(fila.status) : where.status === fila.status
+        const vigente =
+          !where.OR ||
+          where.OR.some((c: any) =>
+            c.expiresAt === null ? fila.expiresAt === null : !!fila.expiresAt && fila.expiresAt.getTime() > c.expiresAt.gt.getTime(),
+          )
+        return { count: estado && vigente ? 1 : 0 }
+      })
+      m.$queryRaw.mockImplementation(async () => {
+        jest.setSystemTime(T0 + 5_000)
+        return [{ commandSessionId: null, venueId: 'venue-a' }]
+      })
+
+      await expect(migrateDiscard('term-1', actor)).rejects.toMatchObject({ statusCode: 409, code: 'MIGRATION_NOT_CURRENT' })
+
+      expect(m.terminal.update).not.toHaveBeenCalled()
+      expect(m.venuePaymentConfig.deleteMany).not.toHaveBeenCalled()
+    })
+
+    it('3. B→C mientras esperaba el candado: 409, y no se descarta ni se mueve nada', async () => {
+      m.tpvCommandQueue.findMany.mockResolvedValue([migrationWipe()])
+      m.$queryRaw.mockResolvedValue([{ commandSessionId: null, venueId: 'venue-c' }])
+
+      await expect(migrateDiscard('term-1', actor)).rejects.toMatchObject({ statusCode: 409, code: 'MIGRATION_NOT_CURRENT' })
+
+      expect(m.tpvCommandQueue.updateMany).not.toHaveBeenCalled()
+      expect(m.terminal.update).not.toHaveBeenCalled()
+    })
+
+    it('4. un payload de migración sin toVenueId no se deshace a ciegas: 409', async () => {
+      m.tpvCommandQueue.findMany.mockResolvedValue([
+        wipe({ payload: { migration: { fromVenueId: 'venue-origen', previousMerchantIds: ['ma-1'] } } }),
+      ])
+
+      await expect(migrateDiscard('term-1', actor)).rejects.toMatchObject({ statusCode: 409, code: 'MIGRATION_NOT_CURRENT' })
+
+      expect(m.terminal.update).not.toHaveBeenCalled()
+    })
   })
 })
