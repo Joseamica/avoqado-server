@@ -12,6 +12,9 @@ describe('búsqueda de clientes (integración)', () => {
   let orgId: string | undefined
   let venueA: string | undefined
   let venueB: string | undefined
+  // Negocio aparte para el nombre fuera de la tabla de 44 letras: así «a» sigue casando con 4 en A (pruebas del tope).
+  let venueC: string | undefined
+  let joseDeA: string | undefined
   const sello = `${Date.now()}${Math.random().toString(36).slice(2, 6)}`
 
   beforeAll(async () => {
@@ -35,6 +38,7 @@ describe('búsqueda de clientes (integración)', () => {
       })
     venueA = (await venue(`itest-busq-a-${sello}`)).id
     venueB = (await venue(`itest-busq-b-${sello}`)).id
+    venueC = (await venue(`itest-busq-c-${sello}`)).id
     // `createdAt` explícito: el orden «más nuevos primero» de las pruebas del tope no puede depender del reloj.
     const dia = (d: number) => new Date(Date.UTC(2026, 9, d, 18, 0, 0))
     await prisma.customer.createMany({
@@ -53,8 +57,11 @@ describe('búsqueda de clientes (integración)', () => {
         { venueId: venueA, firstName: 'Mariana', tags: ['vip'], createdAt: dia(4) },
         { venueId: venueA, firstName: 'Sara', createdAt: dia(5) },
         { venueId: venueB, firstName: 'José', lastName: 'Pérez', phone: '+525543453965', createdAt: dia(1) },
+        { venueId: venueC, firstName: 'João', lastName: 'Conceição', createdAt: dia(1) },
+        { venueId: venueC, firstName: 'ŁUKASZ', lastName: 'ØSTERGÅRD', createdAt: dia(2) },
       ],
     })
+    joseDeA = (await prisma.customer.findFirstOrThrow({ where: { venueId: venueA, firstName: 'José' }, select: { id: true } })).id
     // Saldo pendiente (para el filtro del dashboard dentro del SQL): Ana y Dany deben; la cuenta CANCELADA de Sara no cuenta.
     const deudores = await prisma.customer.findMany({
       where: { venueId: venueA, firstName: { in: ['Ana', 'Dany', 'Sara'] } },
@@ -80,10 +87,11 @@ describe('búsqueda de clientes (integración)', () => {
 
   afterAll(async () => {
     // 🔴 Sin fixture no se limpia NADA: un filtro con venueId undefined borraría tablas enteras.
-    if (!venueA || !venueB || !orgId) return
-    await prisma.order.deleteMany({ where: { venueId: { in: [venueA, venueB] } } }) // sus OrderCustomer caen en cascada
-    await prisma.customer.deleteMany({ where: { venueId: { in: [venueA, venueB] } } })
-    await prisma.venue.deleteMany({ where: { id: { in: [venueA, venueB] } } })
+    if (!venueA || !venueB || !venueC || !orgId) return
+    const negocios = [venueA, venueB, venueC]
+    await prisma.order.deleteMany({ where: { venueId: { in: negocios } } }) // sus OrderCustomer caen en cascada
+    await prisma.customer.deleteMany({ where: { venueId: { in: negocios } } })
+    await prisma.venue.deleteMany({ where: { id: { in: negocios } } })
     await prisma.organization.deleteMany({ where: { id: orgId } })
     await prisma.$disconnect()
   })
@@ -111,6 +119,23 @@ describe('búsqueda de clientes (integración)', () => {
     expect(await nombres(texto)).toEqual(['José'])
   })
 
+  // 🔴 Revisión de S7, ronda 1: con la tabla de 44 letras, «João» escrito EXACTO no encontraba a nadie (JS 'joao', SQL 'joão');
+  // el ILIKE de antes sí. Ahora los dos lados pliegan igual todo el latino (U+00C0–U+017F).
+  const enC = async (search: string) => (await getCustomers(venueC!, 1, 50, search)).data.map(c => `${c.firstName} ${c.lastName}`).sort()
+  it.each([['joão'], ['JOÃO'], ['João'], ['joao'], ['conceicao'], ['Conceição'], ['CONCEIÇÃO'], ['joao conceicao']])(
+    'nombre con letras fuera de las 44 de antes: %p encuentra a «João Conceição»',
+    async texto => {
+      expect(await enC(texto)).toEqual(['João Conceição'])
+    },
+  )
+  // `Ł` y `Ø` no se descomponen (NFD): se pliegan a `ł`/`ø` en los DOS lados, así que «lukasz» no los encuentra (tampoco antes).
+  it.each([['łukasz'], ['ŁUKASZ'], ['østergård'], ['ØSTERGÅRD'], ['łukasz østergård']])(
+    'guardado en MAYÚSCULAS fuera de ASCII (lower() de la base no las baja con lc_ctype C): %p',
+    async texto => {
+      expect(await enC(texto)).toEqual(['ŁUKASZ ØSTERGÅRD'])
+    },
+  )
+
   it('dos palabras: «ana lopez»', async () => {
     expect(await nombres('ana lopez')).toEqual(['Ana'])
   })
@@ -121,8 +146,11 @@ describe('búsqueda de clientes (integración)', () => {
 
   it('🔴 el cliente de OTRO negocio jamás aparece', async () => {
     const r = await getCustomers(venueA!, 1, 100, 'jose')
-    expect(r.data.every(c => c.id)).toBe(true)
+    // El José de B se llama igual y tiene el mismo teléfono: sólo puede salir el id del José de A.
+    expect(r.data.map(c => c.id)).toEqual([joseDeA])
     expect(r.meta.totalCount).toBe(1)
+    const porTelefono = await getCustomers(venueA!, 1, 100, '5543453965')
+    expect(porTelefono.data.map(c => c.id)).toEqual([joseDeA])
     const enB = await getCustomers(venueB!, 1, 100, 'a')
     expect(enB.data).toHaveLength(0) // «José Pérez» de B no tiene «a»; Ana, Dany, Mariana y Sara son de A
   })

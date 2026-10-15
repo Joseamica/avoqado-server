@@ -1,5 +1,6 @@
 import {
   SEARCH_PREFILTER_CAP,
+  TABLA_DE_PLEGADO_SQL,
   interpretarBusquedaDeClientes,
   plegarTexto,
   sqlDeConteoDeClientes,
@@ -42,6 +43,69 @@ describe('interpretarBusquedaDeClientes', () => {
   it('plegarTexto quita acentos y mayúsculas', () => {
     expect(plegarTexto('JOSÉ Ñoño Ü')).toBe('jose nono u')
   })
+})
+
+/**
+ * 🔴 Revisión de S7, ronda 1: el texto se pliega en JS con `plegarTexto` (NFD, quita TODA marca, minúsculas) y la columna en
+ * SQL con `translate(lower(col), de, a)`. Si los dos lados no pliegan igual, el nombre se busca escrito EXACTO y no aparece
+ * («João» → 'joao' en JS pero 'joão' en SQL: el ILIKE de antes sí lo encontraba). Aquí se simula el lado SQL en JS bajo los
+ * dos `lower()` que tenemos: el de la base local y el CI (lc_ctype C, sólo ASCII) y el de una base con locale UTF-8 (towlower
+ * carácter por carácter).
+ */
+describe('paridad del plegado: plegarTexto (JS) ≡ translate(lower(col)) (SQL)', () => {
+  const { de, a } = TABLA_DE_PLEGADO_SQL
+  const traducir = (s: string) =>
+    [...s]
+      .map(c => {
+        const i = [...de].indexOf(c)
+        return i >= 0 ? [...a][i] : c
+      })
+      .join('')
+  // lc_ctype C: lower() sólo baja A-Z.
+  const lowerC = (s: string) => s.replace(/[A-Z]/g, c => c.toLowerCase())
+  // locale UTF-8: towlower() por carácter, que nunca devuelve más de uno (el `'İ'.toLowerCase()` de JS da dos: se deja igual).
+  const lowerUtf8 = (s: string) =>
+    [...s]
+      .map(c => {
+        const l = c.toLowerCase()
+        return [...l].length === 1 ? l : c
+      })
+      .join('')
+  const sqlC = (s: string) => traducir(lowerC(s))
+  const sqlUtf8 = (s: string) => traducir(lowerUtf8(s))
+
+  const LATINAS = Array.from({ length: 0x017f - 0x00c0 + 1 }, (_, i) => String.fromCharCode(0x00c0 + i)) // Latin-1 Supl. + Extendido-A
+  const ASCII = Array.from({ length: 0x7e - 0x20 + 1 }, (_, i) => String.fromCharCode(0x20 + i))
+
+  it('las dos cadenas de translate miden lo mismo (si no, translate BORRA los sobrantes)', () => {
+    expect([...de].length).toBe([...a].length)
+    expect(new Set([...de]).size).toBe([...de].length) // sin repetidos
+  })
+
+  it.each([
+    ['lc_ctype C (local y CI)', sqlC],
+    ['locale UTF-8', sqlUtf8],
+  ])('🔴 cada letra latina (U+00C0–U+017F) y cada ASCII se pliega IGUAL en los dos lados — %s', (_, sql) => {
+    const distintas = [...LATINAS, ...ASCII].filter(c => sql(c) !== plegarTexto(c)).map(c => `${c}: js=${plegarTexto(c)} sql=${sql(c)}`)
+    expect(distintas).toEqual([])
+  })
+
+  it.each([['João'], ['JOÃO'], ['Conceição'], ['CONCEIÇÃO'], ['Łukasz'], ['Øyvind'], ['Ÿves'], ['José Ñoño Ü'], ['Ana López']])(
+    'nombre completo %p: mismo resultado en JS y en SQL',
+    nombre => {
+      expect(sqlC(nombre)).toBe(plegarTexto(nombre))
+      expect(sqlUtf8(nombre)).toBe(plegarTexto(nombre))
+    },
+  )
+})
+
+it('🔴 el rango de marcas combinantes se escribe con escapes visibles, no con caracteres invisibles', () => {
+  const fuente: string = require('fs').readFileSync(
+    require('path').join(__dirname, '../../../../src/services/shared/customerSearch.ts'),
+    'utf8',
+  )
+  expect(fuente).not.toMatch(/[\u0300-\u036f]/)
+  expect(fuente).toContain('\\u0300-\\u036f')
 })
 
 describe('sqlDeIdsDeClientes', () => {

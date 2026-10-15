@@ -8,7 +8,9 @@ import { Prisma } from '@prisma/client'
  * debe aparecer en nombre, apellido o correo, sin importar mayúsculas ni acentos.
  *
  * 🔴 Acentos sin `unaccent`: la extensión no está instalada en local ni en las bases de prueba, y la base local tiene
- * lc_ctype C (`lower('É')` = 'É'). `translate` con mayúsculas y minúsculas acentuadas pliega igual en todas partes.
+ * lc_ctype C (`lower('É')` = 'É'). `translate` con una tabla GENERADA desde `plegarTexto` (todo el latino U+00C0–U+017F,
+ * mayúsculas y minúsculas) pliega igual que el texto buscado, en local, en CI y en producción. Fuera de ese rango (p. ej.
+ * vietnamita «ạ» o mayúsculas cirílicas con lc_ctype C) el lado SQL no pliega y esa letra sólo casa escrita igual.
  *
  * 🔴 UNA sola regla, siempre (auditoría A #7). La versión anterior buscaba con un `contains` de Prisma, que no pliega acentos
  * ni dígitos: «jose» no encontraba «José» y «55 4345 3965» no encontraba «+525543453965». Pasado el tope de 5000 coincidencias
@@ -25,14 +27,39 @@ const SEARCH_MAX_WORDS = 6
 
 export type CustomerSearch = { kind: 'PHONE'; digits: string } | { kind: 'WORDS'; words: string[] }
 
-// 44 ↔ 44 caracteres, en el mismo orden. Probado en la base local: «JOSÉ ÁNGEL Ñoño Çé Ü» → «jose angel nono ce u».
-const ACENTOS_DE = 'áéíóúüñàèìòùâêîôûäëïöçÁÉÍÓÚÜÑÀÈÌÒÙÂÊÎÔÛÄËÏÖÇ'
-const ACENTOS_A = 'aeiouunaeiouaeiouaeiocaeiouunaeiouaeiouaeioc'
-
 /** Minúsculas y sin acentos (el texto que escribe el cajero; la columna se pliega igual en SQL con `translate`). */
 export function plegarTexto(texto: string): string {
-  return texto.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase()
+  return texto
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
 }
+
+/**
+ * La tabla de `translate`, GENERADA con `plegarTexto` para que los dos lados plieguen igual (revisión de S7, ronda 1: con una
+ * tabla escrita a mano de 44 letras, «João» quedaba 'joao' en JS y 'joão' en SQL y escrito EXACTO no encontraba a nadie).
+ * Cubre todo el latino de Latin-1 Suplemento y Latin Extendido-A (U+00C0–U+017F): cada letra `c` cuyo plegado es UNA sola
+ * letra distinta de `c` se mapea a ese plegado (173 ↔ 173). Lleva mayúsculas y minúsculas porque con lc_ctype C (local y
+ * CI) `lower()` sólo baja A-Z; con un locale UTF-8 `lower()` baja primero y la minúscula también está en la tabla. Las que
+ * no se descomponen (ø, ł, æ, ß, đ…) quedan como su minúscula en los DOS lados. La paridad la fija una prueba unitaria.
+ */
+function construirTablaDePlegado(): { de: string; a: string } {
+  let de = ''
+  let a = ''
+  for (let punto = 0x00c0; punto <= 0x017f; punto++) {
+    const letra = String.fromCharCode(punto)
+    const plegada = plegarTexto(letra)
+    if (plegada !== letra && [...plegada].length === 1) {
+      de += letra
+      a += plegada
+    }
+  }
+  return { de, a }
+}
+/** La tabla que recibe `translate` (exportada para la prueba de paridad con `plegarTexto`). */
+export const TABLA_DE_PLEGADO_SQL: Readonly<{ de: string; a: string }> = Object.freeze(construirTablaDePlegado())
+const ACENTOS_DE = TABLA_DE_PLEGADO_SQL.de
+const ACENTOS_A = TABLA_DE_PLEGADO_SQL.a
 
 /** `null` = sin búsqueda (vacío, sólo espacios o un parámetro que no es texto, p. ej. `?search=a&search=b`). */
 export function interpretarBusquedaDeClientes(raw: unknown): CustomerSearch | null {
