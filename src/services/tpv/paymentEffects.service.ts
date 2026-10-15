@@ -57,9 +57,14 @@ const rastroDelError = (error: unknown) => ({
 export async function enqueuePaymentEffect(tx: Prisma.TransactionClient, input: PaymentEffectInput): Promise<void> {
   const source = await tx.payment.findFirst({
     where: { id: input.paymentId, venueId: input.venueId, orderId: input.orderId ?? undefined, status: 'COMPLETED' },
-    select: { orderId: true },
+    // Tarjetas de regalo (R1): la marca de la cuenta viaja en esta MISMA lectura (un renglón con `giftCardId` basta: no se mezclan).
+    select: { orderId: true, order: { select: { items: { where: { giftCardId: { not: null } }, select: { id: true }, take: 1 } } } },
   })
   if (!source || source.orderId !== input.orderId) throw new Error('PAYMENT_EFFECT_SOURCE_MISMATCH')
+  // R1 (tarjetas de regalo): VENDER tarjetas no genera comisión ni califica referidos, así que tampoco tiene reversas. Aquí pasan todas
+  // esas obligaciones —la comisión congelada de cada cobro, el referido y las reversas de una devolución—. Usar la tarjeta sí comisiona:
+  // la cuenta de mercancía pagada con saldo no es de tarjetas.
+  if ((input.kind === 'COMMISSION' || input.kind === 'REFERRAL') && (source.order?.items?.length ?? 0) > 0) return
   await tx.paymentEffect.createMany({ data: [{ ...input, version: 1 }], skipDuplicates: true })
 }
 

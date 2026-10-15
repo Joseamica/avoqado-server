@@ -1,6 +1,7 @@
 import { isOrderFullyReversed } from './referralReversalPolicy.service'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
+import { leerSiEsCuentaDeTarjetas } from '@/services/giftCards/giftCardMarks'
 import {
   Prisma,
   ReferralTier,
@@ -388,6 +389,8 @@ interface OnOrderPaidTxResult {
 export async function onOrderPaid(input: OnOrderPaidInput): Promise<void> {
   const txResult = await prisma.$transaction(async tx => {
     await tx.$queryRaw(Prisma.sql`SELECT id FROM "Order" WHERE id = ${input.orderId} AND "venueId" = ${input.venueId} FOR UPDATE`)
+    // R1 (tarjetas de regalo): vender una tarjeta no califica un referido; queda PENDING para la primera compra de verdad.
+    if (await leerSiEsCuentaDeTarjetas(tx, input.orderId)) return null
     if (await isOrderFullyReversed(input.orderId, input.venueId, tx)) {
       await tx.referral.updateMany({
         where: { qualifyingOrderId: input.orderId, venueId: input.venueId, status: 'PENDING' },
