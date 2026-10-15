@@ -3784,10 +3784,10 @@ export async function addCustomerToOrder(
 ): Promise<{ orderCustomers: Awaited<ReturnType<typeof getOrderCustomers>>; loyalty: SaleStampOutcome | null }> {
   logger.info(`👤 [ORDER SERVICE] Adding customer ${customerId} to order ${orderId}`)
 
-  // Verify order exists and belongs to venue. `paymentStatus` decide si hace falta reabrir la lealtad (F1, abajo).
+  // Verify order exists and belongs to venue
   const order = await prisma.order.findUnique({
     where: { id: orderId, venueId },
-    select: { id: true, orderNumber: true, paymentStatus: true },
+    select: { id: true, orderNumber: true },
   })
 
   if (!order) {
@@ -3825,6 +3825,12 @@ export async function addCustomerToOrder(
     try {
       const result = await prisma.$transaction(
         async tx => {
+          // 🔴 F1, segunda ola (recheck de Codex, 15-oct-2026): el estado VIGENTE de la venta, leído aquí dentro y como primera
+          // sentencia (también en cada reintento). Con el de la lectura de afuera, una cuenta que se cobraba —y cerraba su
+          // lealtad «sin cliente»— entre esa lectura y esta transacción quedaba sin reabrir, y el sello se perdía si fallaba el
+          // intento inmediato.
+          const vigente = await tx.order.findFirst({ where: { id: orderId, venueId }, select: { paymentStatus: true } })
+
           // Check if this will be the first customer (primary) - inside transaction for consistency
           const existingCustomersCount = await tx.orderCustomer.count({
             where: { orderId },
@@ -3846,10 +3852,10 @@ export async function addCustomerToOrder(
           // reapertura incluida; si la reapertura falla, la liga falla entera (el cajero reintenta).
           // 🔴 Y es la ÚLTIMA escritura antes del commit (ruling tras S3b/S4): deja la MARCA de fila que detiene al cierre
           // «sin cliente» que esté esperando el candado de la orden. La TPV no escribe `Order.customerId`: la marca la cubre.
-          // 🔴 F1 (revisión final Minor 1, 15-oct-2026): sólo sobre una venta YA pagada. Sobre una cuenta abierta (lo normal en
-          // la TPV) no hay nada que reabrir —la lealtad corre al cobrar, con este cliente ya primario— y la lectura de la venta
-          // dentro de esta transacción `Serializable` sólo ensancharía su conjunto de lectura (más `P2034`).
-          if (isPrimary && order.paymentStatus === PaymentStatus.PAID) {
+          // 🔴 F1 (revisión final Minor 1, 15-oct-2026): sólo sobre una venta YA pagada (según `vigente`, arriba). Sobre una
+          // cuenta abierta (lo normal en la TPV) no hay nada que reabrir —la lealtad corre al cobrar, con este cliente ya
+          // primario— y las lecturas amplias de la lealtad sólo ensancharían el conjunto de lectura `Serializable` (más `P2034`).
+          if (isPrimary && vigente?.paymentStatus === PaymentStatus.PAID) {
             await reabrirLealtadSiAplica(tx, { venueId, orderId, customerId, staffId: staffId ?? null })
           }
 
@@ -3975,10 +3981,10 @@ export async function createAndAddCustomerToOrder(
   // Normalize email to lowercase for consistent lookups
   const normalizedEmail = customerData.email?.toLowerCase()
 
-  // Verify order exists and belongs to venue. `paymentStatus` decide si hace falta reabrir la lealtad (F1, abajo).
+  // Verify order exists and belongs to venue
   const order = await prisma.order.findUnique({
     where: { id: orderId, venueId },
-    select: { id: true, orderNumber: true, paymentStatus: true },
+    select: { id: true, orderNumber: true },
   })
 
   if (!order) {
@@ -4018,6 +4024,9 @@ export async function createAndAddCustomerToOrder(
     try {
       await prisma.$transaction(
         async tx => {
+          // 🔴 F1, segunda ola: el estado VIGENTE de la venta, aquí dentro y primero (igual que `addCustomerToOrder`).
+          const vigente = await tx.order.findFirst({ where: { id: orderId, venueId }, select: { paymentStatus: true } })
+
           // Check if this will be the first customer (primary) - INSIDE transaction for consistency
           const existingCustomersCount = await tx.orderCustomer.count({
             where: { orderId },
@@ -4047,8 +4056,8 @@ export async function createAndAddCustomerToOrder(
 
           // 🔴 Auditoría A #1, igual que `addCustomerToOrder`: el cliente NUEVO y primario reabre la lealtad durable de la
           // venta en esta misma transacción, como ÚLTIMA escritura (marca de fila).
-          // F1: igual que `addCustomerToOrder`, sólo sobre una venta YA pagada.
-          if (isPrimary && order.paymentStatus === PaymentStatus.PAID) {
+          // F1: igual que `addCustomerToOrder`, sólo sobre una venta YA pagada (según `vigente`).
+          if (isPrimary && vigente?.paymentStatus === PaymentStatus.PAID) {
             await reabrirLealtadSiAplica(tx, { venueId, orderId, customerId: newCustomer.id, staffId: staffId ?? null })
           }
 

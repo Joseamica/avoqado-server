@@ -18,9 +18,15 @@ const SELLO = { stampsEnabled: true, stamped: true, reason: null, stampsEarned: 
 
 let enTransaccion = false
 let reabrioDentro: boolean | null = null
+/** El `paymentStatus` que ve cada lectura DENTRO de la transacción (en orden); vacío ⇒ PAID. */
+let estadoDentro: string[] = []
+/** ¿Cada lectura de estado ocurrió dentro de la transacción? */
+let lecturasDeEstado: boolean[] = []
 
 beforeEach(() => {
   reabrioDentro = null
+  estadoDentro = []
+  lecturasDeEstado = []
   prismaMock.$transaction.mockImplementation(async (cb: any) => {
     enTransaccion = true
     try {
@@ -29,7 +35,13 @@ beforeEach(() => {
       enTransaccion = false
     }
   })
-  prismaMock.order.findUnique.mockResolvedValue({ id: 'order-1', orderNumber: 'ORD-1', paymentStatus: 'PAID' } as any)
+  prismaMock.order.findUnique.mockResolvedValue({ id: 'order-1', orderNumber: 'ORD-1' } as any)
+  // F1 (segunda ola): el estado de la venta se lee DENTRO de la transacción de la liga (tx = prismaMock aquí).
+  prismaMock.order.findFirst.mockReset()
+  prismaMock.order.findFirst.mockImplementation((async () => {
+    lecturasDeEstado.push(enTransaccion)
+    return { paymentStatus: estadoDentro.shift() ?? 'PAID' }
+  }) as never)
   prismaMock.orderCustomer.findUnique.mockResolvedValue(null)
   prismaMock.orderCustomer.count.mockResolvedValue(0)
   prismaMock.orderCustomer.create.mockResolvedValue({ id: 'oc-1' } as any)
@@ -116,7 +128,7 @@ describe('TPV addCustomerToOrder', () => {
   it.each(['PENDING', 'PARTIAL'])(
     '🔴 F1: cuenta %s (lo normal en la TPV): NO se llama a la reapertura (no ensancha la lectura Serializable de una cuenta abierta)',
     async paymentStatus => {
-      prismaMock.order.findUnique.mockResolvedValue({ id: 'order-1', orderNumber: 'ORD-1', paymentStatus } as any)
+      estadoDentro = [paymentStatus]
       mockLate.mockResolvedValue(null) // cuenta abierta: el helper no pinta nada
       const r = await addCustomerToOrder(VENUE, 'order-1', 'cust-1', 'staff-1')
       expect(prismaMock.orderCustomer.create).toHaveBeenCalledWith({ data: { orderId: 'order-1', customerId: 'cust-1', isPrimary: true } })
@@ -125,12 +137,36 @@ describe('TPV addCustomerToOrder', () => {
     },
   )
 
-  it('F1: la lectura previa a la transacción pide paymentStatus (y sigue filtrando por negocio)', async () => {
+  // ── F1, segunda ola (recheck de Codex, 15-oct-2026): el estado VIGENTE, leído dentro de la transacción ───────────────────
+  it('🔴 F1: el estado se lee DENTRO de la transacción, como PRIMERA sentencia, filtrando por negocio', async () => {
     await addCustomerToOrder(VENUE, 'order-1', 'cust-1', 'staff-1')
-    expect(prismaMock.order.findUnique).toHaveBeenCalledWith({
-      where: { id: 'order-1', venueId: VENUE },
-      select: { id: true, orderNumber: true, paymentStatus: true },
-    })
+    expect(prismaMock.order.findFirst).toHaveBeenCalledWith({ where: { id: 'order-1', venueId: VENUE }, select: { paymentStatus: true } })
+    expect(lecturasDeEstado).toEqual([true])
+    expect(prismaMock.order.findFirst.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.orderCustomer.count.mock.invocationCallOrder[0])
+  })
+
+  it('🔴 F1: PENDIENTE en la lectura previa y PAGADA dentro de la transacción (se cobró en medio) ⇒ SÍ reabre', async () => {
+    prismaMock.order.findUnique.mockResolvedValue({ id: 'order-1', orderNumber: 'ORD-1', paymentStatus: 'PENDING' } as any)
+    estadoDentro = ['PAID']
+    await addCustomerToOrder(VENUE, 'order-1', 'cust-1', 'staff-1')
+    expect(mockReabrir).toHaveBeenCalledTimes(1)
+    expect(reabrioDentro).toBe(true)
+  })
+
+  it('🔴 F1: un reintento por P2034 vuelve a leer el estado: PENDIENTE en el 1.er intento, PAGADA en el 2.º ⇒ reabre en el 2.º', async () => {
+    estadoDentro = ['PENDING', 'PAID']
+    prismaMock.$transaction.mockImplementationOnce((async (cb: any) => {
+      enTransaccion = true
+      try {
+        await cb(prismaMock)
+      } finally {
+        enTransaccion = false
+      }
+      throw Object.assign(new Error('could not serialize access'), { code: 'P2034' })
+    }) as never)
+    await addCustomerToOrder(VENUE, 'order-1', 'cust-1', 'staff-1')
+    expect(lecturasDeEstado).toEqual([true, true])
+    expect(mockReabrir).toHaveBeenCalledTimes(1)
   })
 
   it('camino de rescate por P2002 (otro quedó primario a la vez): lo liga NO primario y no reabre', async () => {
@@ -167,15 +203,20 @@ describe('TPV createAndAddCustomerToOrder', () => {
     expect(reapertura).toBeGreaterThan(prismaMock.orderCustomer.create.mock.invocationCallOrder[0])
   })
 
-  it('🔴 F1: cuenta abierta: el cliente nuevo queda primario pero NO se llama a la reapertura', async () => {
-    prismaMock.order.findUnique.mockResolvedValue({ id: 'order-1', orderNumber: 'ORD-1', paymentStatus: 'PENDING' } as any)
+  it('🔴 F1: cuenta abierta DENTRO de la transacción: el cliente nuevo queda primario pero NO se llama a la reapertura', async () => {
+    estadoDentro = ['PENDING']
     await createAndAddCustomerToOrder(VENUE, 'order-1', { firstName: 'Dany' }, 'staff-1')
     expect(prismaMock.orderCustomer.create).toHaveBeenCalledWith({ data: { orderId: 'order-1', customerId: 'nuevo', isPrimary: true } })
     expect(mockReabrir).not.toHaveBeenCalled()
-    expect(prismaMock.order.findUnique).toHaveBeenCalledWith({
-      where: { id: 'order-1', venueId: VENUE },
-      select: { id: true, orderNumber: true, paymentStatus: true },
-    })
+    expect(lecturasDeEstado).toEqual([true])
+  })
+
+  it('🔴 F1: PENDIENTE en la lectura previa y PAGADA dentro de la transacción ⇒ el cliente NUEVO SÍ reabre', async () => {
+    prismaMock.order.findUnique.mockResolvedValue({ id: 'order-1', orderNumber: 'ORD-1', paymentStatus: 'PENDING' } as any)
+    estadoDentro = ['PAID']
+    await createAndAddCustomerToOrder(VENUE, 'order-1', { firstName: 'Dany' }, 'staff-1')
+    expect(mockReabrir).toHaveBeenCalledWith(prismaMock, { venueId: VENUE, orderId: 'order-1', customerId: 'nuevo', staffId: 'staff-1' })
+    expect(prismaMock.order.findFirst.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.customer.create.mock.invocationCallOrder[0])
   })
 
   it('cuenta que ya tenía primario: el cliente nuevo entra NO primario y no reabre', async () => {
