@@ -31,6 +31,7 @@ import {
   interpretarBusquedaDeClientes,
   sqlDeConteoDeClientes,
   sqlDeIdsDeClientes,
+  sqlDeSaldosPendientesDeClientes,
   type FiltrosDeClientes,
 } from '@/services/shared/customerSearch'
 
@@ -272,27 +273,24 @@ export async function getCustomers(
         tags: true,
         active: true,
         createdAt: true,
-        orderAssociations: {
-          where: {
-            order: {
-              paymentStatus: { in: ['PENDING', 'PARTIAL'] },
-              remainingBalance: { gt: 0 },
-              ...CUENTA_NO_CANCELADA,
-            },
-          },
-          include: {
-            order: {
-              select: {
-                id: true,
-                remainingBalance: true,
-              },
-            },
-          },
-        },
       },
     }),
     prisma.customer.count({ where: whereCondition }),
   ])
+
+  // 🔴 H6 (auditoría de Codex del código, 15-oct-2026): las cuentas por cobrar de los clientes de ESTA página, en UN agregado
+  // de la base (antes: todas las cuentas pendientes de cada cliente, sin tope, sumadas en JavaScript). Mismos campos.
+  const saldos = new Map<string, { pendientes: number; saldo: number }>()
+  if (customers.length > 0) {
+    const filas =
+      (await prisma.$queryRaw<Array<{ customerId: string; pendientes: number; saldo: Prisma.Decimal | number | string }>>(
+        sqlDeSaldosPendientesDeClientes(
+          venueId,
+          customers.map(c => c.id),
+        ),
+      )) ?? []
+    for (const f of filas) saldos.set(f.customerId, { pendientes: Number(f.pendientes), saldo: Number(f.saldo) })
+  }
 
   // 🔴 Ruling B3: `totalCount` es SIEMPRE lo que Prisma puede paginar con este `where`. Sin tope ya es el total exacto; con la
   // búsqueda topada son las `tope` más nuevas (lo ALCANZABLE), así el dashboard —que pinta tantas páginas como
@@ -308,9 +306,8 @@ export async function getCustomers(
       // Map backend field names to frontend expected names
       visitCount: customer.totalVisits,
       lastVisit: customer.lastVisitAt,
-      pendingOrderCount: customer.orderAssociations?.length || 0,
-      pendingBalance: customer.orderAssociations?.reduce((sum, oc) => sum + Number(oc.order.remainingBalance), 0) || 0,
-      orderAssociations: undefined, // Remove from response to keep it clean
+      pendingOrderCount: saldos.get(customer.id)?.pendientes ?? 0,
+      pendingBalance: saldos.get(customer.id)?.saldo ?? 0,
     })),
     meta: {
       totalCount,

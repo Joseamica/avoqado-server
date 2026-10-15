@@ -6,6 +6,7 @@ import {
   sqlDeConteoDeClientes,
   sqlDeFiltrosDeClientes,
   sqlDeIdsDeClientes,
+  sqlDeSaldosPendientesDeClientes,
 } from '@/services/shared/customerSearch'
 
 /** C2 (Testarudo, 14-oct): «Dany no aparece». La tablet comparaba el teléfono letra por letra y sólo veía 20 clientes. */
@@ -176,5 +177,24 @@ describe('sqlDeConteoDeClientes (total EXACTO cuando la búsqueda pasa del tope)
     expect(q.text).toMatch(/LIKE \$2 AND "tags" && \$3::text\[\]/)
     expect(q.text).not.toMatch(/LIMIT|ORDER BY/)
     expect(q.values).toEqual(['venue-A', '%3965%', ['vip']])
+  })
+})
+
+// ── H6 (auditoría de Codex del código, 15-oct-2026) ──────────────────────────────────────────────────────────────────────
+describe('sqlDeSaldosPendientesDeClientes (cuentas por cobrar de los clientes de UNA página, agregadas en la base)', () => {
+  it('cuenta y suma en SQL sólo para los ids de la página, con la MISMA regla del filtro «con saldo pendiente»', () => {
+    const q = sqlDeSaldosPendientesDeClientes('venue-A', ['c1', 'c2'])
+    expect(q.text).toMatch(/COUNT\(\*\)::int AS "pendientes"/)
+    expect(q.text).toMatch(/SUM\(o\."remainingBalance"\)/)
+    expect(q.text).toMatch(/FROM "OrderCustomer" oc JOIN "Order" o ON o\."id" = oc\."orderId"/)
+    // El negocio, por el cliente (los ids ya vienen de una consulta del negocio; esto no cambia ningún valor).
+    expect(q.text).toMatch(/JOIN "Customer" c ON c\."id" = oc\."customerId" AND c\."venueId" = \$1/)
+    expect(q.text).toMatch(/oc\."customerId" IN \(\$2,\$3\)/)
+    // La MISMA regla que `sqlDeFiltrosDeClientes` y que el `include` de antes: pendiente o parcial, saldo > 0, sin canceladas.
+    expect(q.text).toMatch(
+      /o\."paymentStatus" IN \('PENDING', 'PARTIAL'\) AND o\."remainingBalance" > 0 AND o\."status" NOT IN \('CANCELLED', 'DELETED'\)/,
+    )
+    expect(q.text).toMatch(/GROUP BY oc\."customerId"/)
+    expect(q.values).toEqual(['venue-A', 'c1', 'c2'])
   })
 })

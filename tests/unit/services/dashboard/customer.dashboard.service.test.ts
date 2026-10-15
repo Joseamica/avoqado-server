@@ -61,6 +61,8 @@ const createMockCustomer = (overrides: Record<string, any> = {}) => ({
 describe('Customer Dashboard Service', () => {
   beforeEach(() => {
     jest.clearAllMocks()
+    // Sin colas «Once» sobrantes de `$queryRaw` entre pruebas (ids de la búsqueda, el agregado de saldos de H6, métricas).
+    prismaMock.$queryRaw.mockReset()
   })
 
   describe('getCustomers', () => {
@@ -129,14 +131,49 @@ describe('Customer Dashboard Service', () => {
     // ($2,871). Cancelar no pone el saldo en 0, así que el filtro «con saldo pendiente» y el saldo mostrado
     // le cobraban al cliente ventas que ya no existen.
     it('🔴 el filtro «con saldo pendiente» y el saldo mostrado no cuentan cuentas canceladas', async () => {
-      prismaMock.$transaction.mockResolvedValue([[], 0] as any)
+      prismaMock.$transaction.mockResolvedValue([[createMockCustomer({ id: 'c1' })], 1] as any)
+      prismaMock.$queryRaw.mockResolvedValueOnce([] as any)
 
       await getCustomers('venue-123', 1, 10, undefined, undefined, undefined, undefined, 'createdAt', 'desc', true)
 
       const args = prismaMock.customer.findMany.mock.calls[0][0] as any
       const noCancelada = { status: { notIn: ['CANCELLED', 'DELETED'] } }
       expect(args.where.orderAssociations.some.order).toMatchObject(noCancelada)
-      expect(args.select.orderAssociations.where.order).toMatchObject(noCancelada)
+      // H6: el saldo mostrado sale del agregado en SQL, con la misma exclusión.
+      const saldo = prismaMock.$queryRaw.mock.calls[0][0] as Prisma.Sql
+      expect(saldo.text).toContain(`o."status" NOT IN ('CANCELLED', 'DELETED')`)
+    })
+
+    // ── H6 (auditoría de Codex del código, 15-oct-2026) ───────────────────────────────────────────────────────────────
+    it('🔴 H6: la página NO hidrata las cuentas de cada cliente (antes: todas sus cuentas pendientes, sin tope)', async () => {
+      prismaMock.$transaction.mockResolvedValue([[createMockCustomer({ id: 'c1' })], 1] as any)
+      prismaMock.$queryRaw.mockResolvedValueOnce([] as any)
+      await getCustomers('venue-123', 1, 10)
+      const args = prismaMock.customer.findMany.mock.calls[0][0] as any
+      expect(args.select.orderAssociations).toBeUndefined()
+    })
+
+    it('🔴 H6: pendingOrderCount y pendingBalance salen de UN agregado para los clientes de la página (mismos campos)', async () => {
+      prismaMock.$transaction.mockResolvedValue([
+        [createMockCustomer({ id: 'customer-1' }), createMockCustomer({ id: 'customer-2' })],
+        2,
+      ] as any)
+      prismaMock.$queryRaw.mockResolvedValueOnce([{ customerId: 'customer-1', pendientes: 2, saldo: new Prisma.Decimal('120.75') }] as any)
+
+      const r = await getCustomers('venue-123', 1, 10)
+
+      expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(1)
+      const saldo = prismaMock.$queryRaw.mock.calls[0][0] as Prisma.Sql
+      expect(saldo.values).toEqual(['venue-123', 'customer-1', 'customer-2'])
+      expect(r.data[0]).toMatchObject({ id: 'customer-1', pendingOrderCount: 2, pendingBalance: 120.75 })
+      expect(r.data[1]).toMatchObject({ id: 'customer-2', pendingOrderCount: 0, pendingBalance: 0 })
+      expect(r.data.every(c => (c as Record<string, unknown>).orderAssociations === undefined)).toBe(true)
+    })
+
+    it('H6: página vacía ⇒ sin agregado', async () => {
+      prismaMock.$transaction.mockResolvedValue([[], 0] as any)
+      await getCustomers('venue-123', 1, 10)
+      expect(prismaMock.$queryRaw).not.toHaveBeenCalled()
     })
 
     it('should calculate pagination metadata correctly (last page)', async () => {
