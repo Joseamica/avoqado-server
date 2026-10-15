@@ -315,6 +315,8 @@ describe('alRegistrarReembolsoEnTx', () => {
       refundPaymentId: 'ref-1',
       reason: 'SALE_CANCELLED',
       staffId: 's1',
+      // El panel: el dinero todavía no sale; la libreta vuelve a validar R2 bajo su candado.
+      dineroYaDevuelto: false,
     })
     expect(recordGiftCardAnomaly).not.toHaveBeenCalled()
     // No es la salida de «venta sin pagar»: la cuenta no se cancela aquí ni se tocan sobres PENDING.
@@ -335,6 +337,8 @@ describe('alRegistrarReembolsoEnTx', () => {
       refundPaymentId: 'ref-1',
       reason: 'SALE_CANCELLED',
       staffId: 's1',
+      // r1 M6: la terminal YA devolvió el dinero (como E1): la libreta no puede rechazar aquí y dejar el dinero fuera sin asiento.
+      dineroYaDevuelto: true,
     })
     expect(recordGiftCardAnomaly).not.toHaveBeenCalled()
   })

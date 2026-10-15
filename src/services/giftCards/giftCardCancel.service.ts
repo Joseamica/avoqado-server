@@ -329,6 +329,9 @@ async function devolverVentaDeTarjetasEnTx(tx: Tx, p: AlRegistrarReembolsoInput,
         refundPaymentId: p.refundPaymentId,
         reason: 'SALE_CANCELLED',
         staffId: p.staffId ?? null,
+        // r1 M6: como E1. Desde la terminal el dinero YA salió: la libreta no debe poder rechazar aquí y dejarlo fuera sin asiento.
+        // Desde el panel (false) la libreta vuelve a validar R2 bajo su candado y, si rechaza, el reembolso entero se deshace.
+        dineroYaDevuelto: p.dineroYaDevuelto === true,
       })
       return SIN_CANCELAR
     }
@@ -472,9 +475,11 @@ interface EvaluacionDeCancelacion extends CancelacionDeVenta {
  *     gerente no tiene nada más que hacer (una venta sin pagar que se canceló también cae aquí).
  *  2. Sin pagar ⇒ NOT_PAID: se cancela la cuenta desde el POS (o se devuelve el abono, B1).
  *  3. En curso va antes que el día: una cancelación iniciada ayer se LIBERA (o se devuelve) aunque ya no se pueda iniciar otra.
- *  4. Mismo día del cobro (zona del venue) · 5. ningún REDEEM.
- *  6. PAGADA con un sobre PENDING ⇒ NOT_PAID (nota 2): F8 negó la activación. Su salida NO es «Cancelar venta» sino devolver el cobro
- *     desde el panel: el gancho de B1 la trata como una venta sin pagar y la cierra en $0 (B1 r2).
+ *  4. PAGADA con un sobre PENDING ⇒ NOT_PAID (nota 2), también antes que el día (r1 M1): F8 negó la activación. Con TODOS
+ *     PENDING su salida NO es «Cancelar venta» sino devolver el cobro desde el panel, que el gancho de B1 trata como una venta sin
+ *     pagar y cierra en $0 (B1 r2), sin importar el día; mandarlo a «sólo el mismo día» lo alejaba de esa salida. Con una mezcla
+ *     (algún sobre ya activo) no hay salida automática y el texto no promete ninguna (r1 M2).
+ *  5. Mismo día del cobro (zona del venue) · 6. ningún REDEEM.
  *  7. Un sobre bloqueado por OTRO motivo ⇒ `reason: null` + GIFT_CARD_BLOCKED (primero se desbloquea).
  */
 async function evaluarCancelacionDeVenta(
@@ -511,6 +516,21 @@ async function evaluarCancelacionDeVenta(
   }
   const motivos = await motivosDeBloqueoVigentes(db, p.ids)
   if (todosEnCancelacion(sobres, motivos)) return { allowed: false, reason: 'IN_PROGRESS', error: null, orderNumber, sobres }
+  if (sobres.some(s => s.status === 'PENDING')) {
+    // r1 M2: «reembolsa el cobro, se cancela sola» sólo es verdad con TODOS los sobres PENDING (el gancho de B1 usa `every`). Una
+    // mezcla con un sobre ya activo no tiene esa salida: texto neutro, sin prometer ninguna.
+    const todosPendientes = sobres.every(s => s.status === 'PENDING')
+    return no(
+      'NOT_PAID',
+      new GiftCardError(
+        'GIFT_CARD_SALE_NOT_PAID',
+        todosPendientes
+          ? 'Las tarjetas de esta venta no se activaron: no hace falta cancelarla. Para devolver el dinero, reembolsa el cobro; al quedar en $0 la venta se cancela sola.'
+          : 'Una de las tarjetas de esta venta todavía no se activa, así que la venta no se puede cancelar desde aquí. Repórtalo a soporte para revisarla.',
+        409,
+      ),
+    )
+  }
   const cobro = await db.payment.findFirst({
     where: { venueId: p.venueId, orderId: p.orderId, status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] },
     orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
@@ -531,16 +551,6 @@ async function evaluarCancelacionDeVenta(
     return no(
       'ALREADY_USED',
       new GiftCardError('GIFT_CARD_ALREADY_USED', 'Una de las tarjetas de esta venta ya se usó: la venta no se puede cancelar.', 409),
-    )
-  }
-  if (sobres.some(s => s.status === 'PENDING')) {
-    return no(
-      'NOT_PAID',
-      new GiftCardError(
-        'GIFT_CARD_SALE_NOT_PAID',
-        'Las tarjetas de esta venta no se activaron: no hace falta cancelarla. Para devolver el dinero, reembolsa el cobro; al quedar en $0 la venta se cancela sola.',
-        409,
-      ),
     )
   }
   if (sobres.some(s => s.status === 'BLOCKED' && motivos.get(s.id) !== GiftCardReason.CANCEL_IN_PROGRESS)) {
@@ -576,7 +586,9 @@ export async function estadoDeCancelacionDeVenta(venueId: string, orderId: strin
  * Paso 1 de cancelar la venta (spec §5.6): bloquea TODOS sus sobres con `CANCEL_IN_PROGRESS` ANTES de pedir el reembolso real, así
  * nadie puede gastarlos mientras se devuelve el dinero. Bajo el candado: mismo día del cobro (zona del venue) y ningún `REDEEM`.
  * Idempotente por `operationKey` (una llave derivada por sobre, `claveDeSobre`): el reintento con la misma llave no escribe nada
- * y devuelve lo mismo; si otra operación ya ocupa una de esas llaves ⇒ 409 IDEMPOTENCY_KEY_REUSED. La bitácora
+ * y devuelve lo mismo mientras esa cancelación siga en curso o haya terminado con la devolución; si ya se liberó ⇒ 409
+ * GIFT_CARD_CANCEL_NOT_STARTED (r1 M3: una cancelación nueva lleva llave nueva); si otra operación ya ocupa una de esas llaves ⇒
+ * 409 IDEMPOTENCY_KEY_REUSED. La bitácora
  * `GIFT_CARD_SALE_CANCEL_STARTED` sólo se escribe si esta llamada bloqueó algo (F9: lo decide la libreta bajo candado).
  */
 export async function iniciarCancelacionDeVenta(
@@ -594,7 +606,23 @@ export async function iniciarCancelacionDeVenta(
     const op = bloqueoDeCancelacion(orden?.orderNumber ?? null)
     // Reintento de la MISMA operación (el dashboard reintenta, `api.ts`): la libreta lo reconoce por su huella y no escribe.
     const repetidos = await sobresYaOperadosConLaLlaveEnTx(tx, { venueId, staffId: p.staffId, operationKey: p.operationKey, ids, op })
-    if (repetidos.size === ids.length) return { giftCardIds: ids, nueva: false }
+    if (repetidos.size === ids.length) {
+      // r1 M3: el reintento COMPLETO responde según el estado de HOY, bajo el candado de los sobres. Si esa cancelación sigue en
+      // curso, o ya terminó con la devolución (todos DEACTIVATED), es la misma respuesta. Si se liberó después (los sobres volvieron
+      // a ACTIVE, o cambiaron por otra cosa), responder «iniciada» le mentiría al panel con las tarjetas gastables: 409. Para
+      // cancelar otra vez el panel acuña una llave NUEVA por intento (D4); la misma llave sólo sirve para reintentar ese intento.
+      const hoy = await tx.giftCard.findMany({ where: { id: { in: ids }, venueId }, select: { id: true, status: true }, take: ids.length })
+      const sigue =
+        hoy.length > 0 && (hoy.every(s => s.status === 'DEACTIVATED') || todosEnCancelacion(hoy, await motivosDeBloqueoVigentes(tx, ids)))
+      if (!sigue) {
+        throw new GiftCardError(
+          'GIFT_CARD_CANCEL_NOT_STARTED',
+          'Esta cancelación ya se liberó y las tarjetas volvieron a estar disponibles. Si quieres cancelar la venta, inicia una nueva cancelación.',
+          409,
+        )
+      }
+      return { giftCardIds: ids, nueva: false }
+    }
 
     // La MISMA regla que pinta el botón del detalle (C4): `evaluarCancelacionDeVenta` (decisión 1 del coordinador).
     const e = await evaluarCancelacionDeVenta(tx, { venueId, orderId, ids, timezone, ahora: new Date() })

@@ -297,6 +297,27 @@ describe('B2 · cancelar la venta de una tarjeta de regalo', () => {
     expect((await prisma.giftCard.findUniqueOrThrow({ where: { id: v.giftCardIds[0] } })).status).toBe('DEACTIVATED')
   })
 
+  it('🔴 B2 r1 M3: el reintento tardío de iniciar con una llave cuya cancelación ya se liberó ⇒ 409, sin escribir; una llave nueva sí cancela', async () => {
+    const v = await venta({ montos: [300, 200] })
+    await iniciarCancelacionDeVenta(venueId, v.orderId, { staffId, operationKey: 'cancelar-tardio-0001' })
+    await liberarCancelacionDeVenta(venueId, v.orderId, { staffId, operationKey: 'liberar-tardio-0001', confirmacionNoDevuelto: true })
+    const antes = await prisma.giftCardActivity.count({ where: { giftCardId: { in: v.giftCardIds } } })
+    ;(logAction as jest.Mock).mockClear()
+    await expect(iniciarCancelacionDeVenta(venueId, v.orderId, { staffId, operationKey: 'cancelar-tardio-0001' })).rejects.toMatchObject({
+      code: 'GIFT_CARD_CANCEL_NOT_STARTED',
+      statusCode: 409,
+    })
+    expect(await prisma.giftCardActivity.count({ where: { giftCardId: { in: v.giftCardIds } } })).toBe(antes)
+    const sobres = await prisma.giftCard.findMany({ where: { id: { in: v.giftCardIds } }, take: 2 })
+    expect(sobres.every(s => s.status === 'ACTIVE')).toBe(true)
+    expect(logAction).not.toHaveBeenCalled()
+
+    // Una cancelación NUEVA lleva su propia llave; después de la devolución, su reintento (todos DEACTIVATED) responde lo mismo.
+    const nueva = await iniciarCancelacionDeVenta(venueId, v.orderId, { staffId, operationKey: 'cancelar-tardio-0002' })
+    await issueRefund({ venueId, paymentId: v.pagos[0].id, amount: 50000, reason: 'CANCELLED_ORDER', staffId })
+    await expect(iniciarCancelacionDeVenta(venueId, v.orderId, { staffId, operationKey: 'cancelar-tardio-0002' })).resolves.toEqual(nueva)
+  })
+
   it('🔴 r1 F6: liberar SIN confirmar que la devolución no se hizo ⇒ 400 y los sobres siguen bloqueados (lo incierto no se libera)', async () => {
     const v = await venta()
     await iniciarCancelacionDeVenta(venueId, v.orderId, { staffId, operationKey: 'cancelar-incierto-0001' })
