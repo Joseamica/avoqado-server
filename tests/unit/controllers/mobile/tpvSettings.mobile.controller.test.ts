@@ -391,13 +391,14 @@ describe('getVenueTpvSettings (mobile) — receiptInfo (encabezado del ticket im
           // con sus cuentas de cobro y SIN `take: 1`. El `orderBy` se conserva porque es
           // justo lo que define cuál es el principal.
           fiscalEmisors: {
-            orderBy: { createdAt: 'asc' },
+            // 🔴 Orden TOTAL (E3/F3 de la 5ª ronda): a igual fecha decide el id; antes Postgres elegía el principal.
+            orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
             select: {
               id: true,
               legalName: true,
               rfc: true,
               lugarExpedicion: true,
-              merchantConfigs: { select: { merchantAccountId: true } },
+              merchantConfigs: { orderBy: [{ merchantAccountId: 'asc' }, { id: 'asc' }], select: { merchantAccountId: true } },
             },
           },
         }),
