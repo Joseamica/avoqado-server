@@ -19,7 +19,7 @@ import { NotFoundError } from '../../errors/AppError'
 const DAY_CODES = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'] as const
 
 /** "11:00" → 660 minutos. Devuelve null si el string no sirve. */
-function toMinutes(hhmm?: string | null): number | null {
+export function toMinutes(hhmm?: string | null): number | null {
   if (!hhmm) return null
   const match = /^(\d{1,2}):(\d{2})$/.exec(hhmm.trim())
   if (!match) return null
@@ -33,7 +33,7 @@ function toMinutes(hhmm?: string | null): number | null {
  * ¿Este menú aplica en `now` (hora del venue)? Un menú sin horario ni días
  * aplica siempre — así el "Menú Principal" de toda la vida sigue funcionando.
  */
-function appliesNow(
+export function appliesNow(
   menu: {
     availableFrom: string | null
     availableUntil: string | null
