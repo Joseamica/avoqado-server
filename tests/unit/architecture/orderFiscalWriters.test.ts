@@ -731,7 +731,10 @@ const CANCEL = (marker: string) => ({
 
 /** Every other function that writes an Order row: none touches money columns or fiscal children. */
 const NON_FISCAL_ORDER_WRITERS: Record<string, OrderWriter> = {
-  'src/services/tpv/order.tpv.service.ts#updateGuestInfo': { class: 'METADATA', why: 'covers/name/phone/requests/customerId' },
+  'src/services/tpv/order.tpv.service.ts#updateGuestInfo': {
+    class: 'METADATA',
+    why: 'covers/name/phone/requests/customerId (on a paid sale only with payments:create, under the link lock — R3-4)',
+  },
   'src/services/dashboard/order.dashboard.service.ts#updateOrder': {
     class: 'METADATA',
     why: 'status/customer/table/staff/createdAt/number/type; money inputs ignored; CANCELLED/DELETED go through the cancel guard',
@@ -1061,6 +1064,10 @@ const ORDER_LOCK_TRANSACTIONS: Record<string, number> = {
   'src/services/tpv/order.tpv.service.ts#removeCustomerFromOrder': 1,
   // … y el «Agregar cliente» del POS toma el MISMO candado primero (mismo orden que la TPV: sin bloqueos mutuos)
   'src/services/mobile/order.mobile.service.ts#attachCustomerToOrder': 1,
+  // Ronda 3: editar los datos del invitado (R3-4: Order.customerId en una venta cobrada exige payments:create, decidido bajo
+  // el candado) y el relleno de cliente de /fast (R3-2: venta → vínculo, como el POS; antes vínculo → venta, cruce A)
+  'src/services/tpv/order.tpv.service.ts#updateGuestInfo': 1,
+  'src/services/tpv/fastPaymentCustomer.ts#linkCustomerToExistingOrder': 1,
   // Already on the budget before the final wave
   'src/services/tpv/order.tpv.service.ts#addItemsToOrder': 1,
   'src/services/tpv/order.tpv.service.ts#removeOrderItem': 1,
@@ -1154,7 +1161,9 @@ function hasVenueFenceBeforeOrderedOrderClaim(body: string): boolean {
 function orderLockHelpers(code: Map<string, string>, calls: Call[]): Set<string> {
   const calleesByOwner = new Map<string, Set<string>>()
   for (const c of calls) calleesByOwner.set(c.owner, (calleesByOwner.get(c.owner) ?? new Set()).add(c.callee))
-  const helpers = new Set(['lockExistingOrderForPayment'])
+  // `bloquearVentaParaLiga` (sellos tardíos, ronda 3): el candado de la venta de las LIGAS de cliente — la MISMA fila, en modo
+  // `FOR NO KEY UPDATE` (serializa contra el cobro y las demás ligas sin chocar con las llaves foráneas de las métricas).
+  const helpers = new Set(['lockExistingOrderForPayment', 'bloquearVentaParaLiga'])
   if (hasOrderedOrderClaim(code.get('src/services/shared/tableOrderLock.ts#lockTableOrderScope') ?? '')) helpers.add('lockTableOrderScope')
   for (let grew = true; grew; ) {
     grew = false

@@ -37,8 +37,13 @@ import {
 } from '../shared/repartoDescuentoTx'
 import { baseDeCargos, recalcularCargosPorServicio } from '../shared/serviceCharges'
 import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
-import { clienteYaLigadoALaVenta, esChoqueDeUnico } from '../shared/ligaDeClienteEnVenta'
-import { isDeadlockError, isRetryableDbError } from '../../utils/serializableRetry'
+import {
+  bloquearVentaParaLiga,
+  clienteYaLigadoALaVenta,
+  esChoqueDeUnico,
+  etiquetaDeReintento,
+  motivoDeReintentoDeLiga,
+} from '../shared/ligaDeClienteEnVenta'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
 import { debeMarcarCocina, assertPreparationAuthoringAccess } from '../kds/kitchenDisplayStations'
 import { armarComandasTrasCommit, retirarComandasDeVentaAnulada, tomarCandadoDeComandas } from '../kds/kitchenTicketAuthoring.service'
@@ -2347,77 +2352,92 @@ export async function updateGuestInfo(
   venueId: string,
   orderId: string,
   guestInfo: UpdateGuestInfoInput,
+  opciones: OpcionesDeLigaTpv = {},
 ): Promise<Order & { tableName: string | null }> {
   logger.info(`👥 [ORDER SERVICE] Updating guest info for order ${orderId}`)
-
-  // Fetch order
-  const order = await prisma.order.findUnique({
-    where: { id: orderId, venueId },
-  })
-
-  if (!order) {
-    throw new NotFoundError('Order not found')
-  }
+  const puedeFijarClienteEnVentaCobrada = opciones.otorgarLealtad === true
 
   // Validate covers if provided
   if (guestInfo.covers !== undefined && guestInfo.covers < 1) {
     throw new BadRequestError('Covers must be at least 1')
   }
 
-  // Update order with new guest info
-  const updatedOrder = await prisma.order.update({
-    where: { id: orderId },
-    data: {
-      ...(guestInfo.covers !== undefined && { covers: guestInfo.covers }),
-      ...(guestInfo.customerName !== undefined && { customerName: guestInfo.customerName }),
-      ...(guestInfo.customerPhone !== undefined && { customerPhone: guestInfo.customerPhone }),
-      ...(guestInfo.specialRequests !== undefined && { specialRequests: guestInfo.specialRequests }),
-      ...(guestInfo.customerId !== undefined && { customerId: guestInfo.customerId }),
-    },
-    include: {
-      items: {
+  const { order, updatedOrder } = await prisma.$transaction(
+    async tx => {
+      // 🔴 R3-4 (ronda 3; «vía vieja» de Codex recheck-7): `Order.customerId` es el respaldo heredado de la lealtad — en una venta
+      // pagada con la lealtad pendiente y SIN primario, el reconciliador premia a ese cliente. Por eso, en una venta COBRADA
+      // (PAID/REFUNDED), quien no tiene `payments:create` edita los datos del invitado pero NO fija ni cambia `Order.customerId`
+      // (decisión «A»); con permiso, como hoy. Decidido bajo el candado de la venta, como las ligas (`bloquearVentaParaLiga`).
+      if (!(await bloquearVentaParaLiga(tx, { venueId, orderId }))) throw new NotFoundError('Order not found')
+      const order = await tx.order.findUnique({ where: { id: orderId, venueId } })
+      if (!order) {
+        throw new NotFoundError('Order not found')
+      }
+      const cobrada = VENTA_COBRADA.has(order.paymentStatus)
+      const fijaCliente = guestInfo.customerId !== undefined && (!cobrada || puedeFijarClienteEnVentaCobrada)
+      if (guestInfo.customerId !== undefined && !fijaCliente) {
+        logger.info(`🔒 [ORDER SERVICE] Paid order ${orderId}: guest edit without payments:create keeps Order.customerId`)
+      }
+
+      // Update order with new guest info
+      const updatedOrder = await tx.order.update({
+        where: { id: orderId },
+        data: {
+          ...(guestInfo.covers !== undefined && { covers: guestInfo.covers }),
+          ...(guestInfo.customerName !== undefined && { customerName: guestInfo.customerName }),
+          ...(guestInfo.customerPhone !== undefined && { customerPhone: guestInfo.customerPhone }),
+          ...(guestInfo.specialRequests !== undefined && { specialRequests: guestInfo.specialRequests }),
+          ...(fijaCliente && { customerId: guestInfo.customerId }),
+        },
         include: {
-          product: {
+          items: {
+            include: {
+              product: {
+                select: {
+                  id: true,
+                  name: true,
+                  price: true,
+                },
+              },
+              modifiers: {
+                include: {
+                  modifier: true,
+                },
+              },
+            },
+          },
+          payments: {
+            include: {
+              allocations: true,
+            },
+          },
+          table: {
             select: {
               id: true,
-              name: true,
-              price: true,
+              number: true,
             },
           },
-          modifiers: {
-            include: {
-              modifier: true,
+          createdBy: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+            },
+          },
+          servedBy: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
             },
           },
         },
-      },
-      payments: {
-        include: {
-          allocations: true,
-        },
-      },
-      table: {
-        select: {
-          id: true,
-          number: true,
-        },
-      },
-      createdBy: {
-        select: {
-          id: true,
-          firstName: true,
-          lastName: true,
-        },
-      },
-      servedBy: {
-        select: {
-          id: true,
-          firstName: true,
-          lastName: true,
-        },
-      },
+      })
+      return { order, updatedOrder }
     },
-  })
+    // El presupuesto de toda transacción que toma el candado de la venta (`ORDER_LOCK_WAIT_BUDGET`, T8-R2).
+    { timeout: 15_000, maxWait: 5_000 },
+  )
 
   logger.info(
     `✅ [ORDER SERVICE] Updated guest info for order ${order.orderNumber} | covers=${updatedOrder.covers} | customer=${updatedOrder.customerName || 'N/A'}`,
@@ -3780,7 +3800,8 @@ async function leerVentaBajoCandado(
   venueId: string,
   orderId: string,
 ): Promise<{ paymentStatus: PaymentStatus | null; cobrada: boolean }> {
-  if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Order not found')
+  // R3-2: `FOR NO KEY UPDATE` (ver `bloquearVentaParaLiga`): serializa contra el cobro sin interbloquearse con sus métricas.
+  if (!(await bloquearVentaParaLiga(tx, { venueId, orderId }))) throw new NotFoundError('Order not found')
   const vigente = await tx.order.findFirst({ where: { id: orderId, venueId }, select: { paymentStatus: true } })
   return { paymentStatus: vigente?.paymentStatus ?? null, cobrada: vigente ? VENTA_COBRADA.has(vigente.paymentStatus) : false }
 }
@@ -3844,11 +3865,19 @@ async function selloTardioTrasLigar(
   orderId: string,
   customerId: string,
   staffId: string | null | undefined,
-  ligaNueva: boolean,
+  liga: { ligaNueva: boolean; cobrada: boolean },
 ): Promise<SaleStampOutcome | null> {
   try {
     const { awardLoyaltyForLateCustomer } = await import('../shared/loyaltyOnLateCustomer')
-    return await awardLoyaltyForLateCustomer({ venueId, orderId, customerId, staffId: staffId ?? null, ligaNueva })
+    // R3-1: con lo que esta llamada SABE de la venta (leído bajo el candado): si la lectura del helper truena, audita igual.
+    return await awardLoyaltyForLateCustomer({
+      venueId,
+      orderId,
+      customerId,
+      staffId: staffId ?? null,
+      ligaNueva: liga.ligaNueva,
+      ventaCobrada: liga.cobrada,
+    })
   } catch (error) {
     logger.error('[ORDER SERVICE] Sello tardío falló (la liga ya quedó)', {
       orderId,
@@ -3863,18 +3892,20 @@ async function selloTardioTrasLigar(
  * lealtad — y si ESTA llamada creó la liga a una venta cobrada, su fila de auditoría con `lealtad: 'SIN_PERMISO'` (F2).
  */
 async function lealtadTrasLigar(
-  args: { venueId: string; orderId: string; customerId: string; staffId?: string | null; otorgarLealtad: boolean },
+  args: { venueId: string; orderId: string; orderNumber: string; customerId: string; staffId?: string | null; otorgarLealtad: boolean },
   liga: { ligaNueva: boolean; cobrada: boolean },
 ): Promise<SaleStampOutcome | null> {
-  if (args.otorgarLealtad) return selloTardioTrasLigar(args.venueId, args.orderId, args.customerId, args.staffId, liga.ligaNueva)
+  if (args.otorgarLealtad) return selloTardioTrasLigar(args.venueId, args.orderId, args.customerId, args.staffId, liga)
   if (liga.ligaNueva && liga.cobrada) {
     try {
       const { auditarLigaSinPermisoDeCobro } = await import('../shared/loyaltyOnLateCustomer')
+      // R3-1: con el número de la venta que ya se leyó: si la relectura de la auditoría truena, la fila sale igual.
       await auditarLigaSinPermisoDeCobro({
         venueId: args.venueId,
         orderId: args.orderId,
         customerId: args.customerId,
         staffId: args.staffId ?? null,
+        orderNumber: args.orderNumber,
       })
     } catch (error) {
       logger.error('[ORDER SERVICE] Auditoría de la liga sin permiso falló (la liga ya quedó)', {
@@ -3958,18 +3989,14 @@ export async function addCustomerToOrder(
       // 🔴 BAJO-3 + M1 (ronda 1): CUALQUIER choque de único ⇒ se relee la liga y se reintenta la transacción entera bajo el
       // candado: si otra llamada ya ligó a este cliente, el reintento lo trata como re-liga (éxito, sin duplicar); si fue el
       // primario de OTRO cliente a la vez, el reintento lo liga como acompañante (el rescate de siempre).
-      // La serialización llega como P2034 en una consulta de modelo y como P2010/40001 en el `SELECT … FOR UPDATE` crudo del
-      // candado (Prisma no lo traduce): las dos, y un bloqueo mutuo, se reintentan igual.
-      const choco = esChoqueDeUnico(error)
-      if (!choco && !isRetryableDbError(error) && !isDeadlockError(error)) throw error
-      if (choco) {
-        const yaLigado = await clienteYaLigadoALaVenta(orderId, customerId)
-        logger.warn(
-          `⚠️ [ORDER SERVICE] Unique conflict linking customer ${customerId} | yaLigado=${yaLigado} | attempt ${attempt}/${MAX_RETRIES}`,
-        )
-      } else {
-        logger.warn(`⚠️ [ORDER SERVICE] Serialization conflict, retrying... (attempt ${attempt}/${MAX_RETRIES})`)
-      }
+      // La serialización llega como P2034 en una consulta de modelo y como P2010/40001 en el `SELECT … FOR NO KEY UPDATE` crudo
+      // del candado (Prisma no lo traduce): las dos, y un interbloqueo (40P01), se reintentan igual (`motivoDeReintentoDeLiga`).
+      const motivo = motivoDeReintentoDeLiga(error)
+      if (!motivo) throw error
+      const yaLigado = motivo === 'UNICO' ? await clienteYaLigadoALaVenta(orderId, customerId) : undefined
+      logger.warn(
+        `⚠️ [ORDER SERVICE] ${etiquetaDeReintento(motivo)} linking customer ${customerId}${motivo === 'UNICO' ? ` | yaLigado=${yaLigado}` : ''} | retrying (attempt ${attempt}/${MAX_RETRIES})`,
+      )
       if (attempt < MAX_RETRIES) {
         // Exponential backoff: 50ms, 100ms, 200ms, 400ms, 800ms
         await new Promise(resolve => setTimeout(resolve, 50 * Math.pow(2, attempt - 1)))
@@ -3979,7 +4006,7 @@ export async function addCustomerToOrder(
     }
   }
 
-  const loyalty = await lealtadTrasLigar({ venueId, orderId, customerId, staffId, otorgarLealtad }, liga!)
+  const loyalty = await lealtadTrasLigar({ venueId, orderId, orderNumber: order.orderNumber, customerId, staffId, otorgarLealtad }, liga!)
   return { orderCustomers: await getOrderCustomers(venueId, orderId), loyalty }
 }
 
@@ -4156,38 +4183,39 @@ export async function createAndAddCustomerToOrder(
       // Success - exit the retry loop
       break
     } catch (error: any) {
-      // Handle unique constraint violation (partial unique index on isPrimary)
-      if (error.code === 'P2002') {
-        // Could be duplicate email/phone OR isPrimary constraint
+      // Correo o teléfono duplicados (otra alta ganó la carrera): su 400 específico, sin reintentar.
+      if (esChoqueDeUnico(error)) {
         if (error.meta?.target?.includes('email')) {
           throw new BadRequestError('Ya existe un cliente con ese email en este venue')
         }
         if (error.meta?.target?.includes('phone')) {
           throw new BadRequestError('Ya existe un cliente con ese teléfono en este venue')
         }
-        // isPrimary constraint - this shouldn't happen in normal flow due to count check
-        logger.warn(`⚠️ [ORDER SERVICE] Race condition on isPrimary detected during createAndAdd`)
-        throw new BadRequestError('Conflicto de concurrencia, por favor intente de nuevo')
-      } else if (error.code === 'P2034') {
-        // Serialization failure - retry with exponential backoff
-        logger.warn(`⚠️ [ORDER SERVICE] Serialization conflict in createAndAddCustomerToOrder (attempt ${attempt}/${MAX_RETRIES})`)
-        if (attempt < MAX_RETRIES) {
-          // Exponential backoff: 50ms, 100ms, 200ms, 400ms, 800ms
-          await new Promise(resolve => setTimeout(resolve, 50 * Math.pow(2, attempt - 1)))
-          continue // Retry
-        }
-        // Max retries reached
-        throw new BadRequestError('Conflicto de concurrencia persistente, por favor intente de nuevo')
-      } else {
-        throw error
       }
+      // 🔴 R3-3 (ronda 3; Important N1): el MISMO reintento que `addCustomerToOrder`. El candado crudo deja la serialización como
+      // P2010/40001 y el interbloqueo como 40P01 —antes: 500—; y cualquier otro choque de único (el primario de otro a la vez) se
+      // reintenta bajo el candado: el reintento lo liga como acompañante. Cada intento crea su cliente en su propia transacción.
+      const motivo = motivoDeReintentoDeLiga(error)
+      if (!motivo) throw error
+      logger.warn(
+        `⚠️ [ORDER SERVICE] ${etiquetaDeReintento(motivo)} in createAndAddCustomerToOrder | retrying (attempt ${attempt}/${MAX_RETRIES})`,
+      )
+      if (attempt < MAX_RETRIES) {
+        // Exponential backoff: 50ms, 100ms, 200ms, 400ms, 800ms
+        await new Promise(resolve => setTimeout(resolve, 50 * Math.pow(2, attempt - 1)))
+        continue // Retry
+      }
+      throw new BadRequestError('Conflicto de concurrencia persistente, por favor intente de nuevo')
     }
   }
 
   // 🎁 Después del commit: con permiso, el sello tardío del cliente NUEVO; sin permiso, su auditoría si la venta estaba cobrada.
   // El cliente es nuevo: la liga siempre la creó ESTA llamada.
   const loyalty: SaleStampOutcome | null = nuevoClienteId
-    ? await lealtadTrasLigar({ venueId, orderId, customerId: nuevoClienteId, staffId, otorgarLealtad }, { ligaNueva: true, cobrada })
+    ? await lealtadTrasLigar(
+        { venueId, orderId, orderNumber: order.orderNumber, customerId: nuevoClienteId, staffId, otorgarLealtad },
+        { ligaNueva: true, cobrada },
+      )
     : null
   return { orderCustomers: await getOrderCustomers(venueId, orderId), loyalty }
 }

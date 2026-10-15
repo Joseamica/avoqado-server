@@ -566,6 +566,13 @@ describe('awardLoyaltyForPaidOrder', () => {
       expect(result).toEqual({ complete: true, errors: [], leyoSinCliente: false, otorgado: { sello: true, puntos: false } })
     })
 
+    it('🔴 R3-1: earnPoints truena DESPUÉS de otorgar (trae el hecho en el error): el resultado conserva `otorgado`', async () => {
+      orderCustomerFindMany.mockResolvedValue([PRIMARIO])
+      earnPointsMock.mockRejectedValue(Object.assign(new Error('sello'), { otorgadoAntesDelFallo: { sello: false, puntos: true } }))
+      const result = await awardLoyaltyForPaidOrder({ venueId: VENUE, orderId: ORDER, orderTotal: 90 }, { cerrar: false })
+      expect(result).toMatchObject({ complete: false, errors: ['loyalty:cust-A'], otorgado: { sello: false, puntos: true } })
+    })
+
     it('un reintento idempotente (nada nuevo): sin `otorgado`', async () => {
       orderCustomerFindMany.mockResolvedValue([PRIMARIO])
       earnPointsMock.mockResolvedValue({ pointsEarned: 50, newBalance: 7 })

@@ -354,7 +354,8 @@ describe('🔴 F1: COCINA (sin payments:create) liga a una venta PAGADA con su l
       })
       const pidCobro = await aTiempo(aparcada.pid, 15_000, 'el cobro aparcado con el candado de la venta')
       liga = ligarPorTpv(cocina, 'KITCHEN', orderId, { customerId: kev })
-      const espera = await esperarBloqueado(prisma, { bloqueadoPor: [pidCobro], consulta: /FOR UPDATE/ })
+      // R3-2: la liga espera con su propio modo (`FOR NO KEY UPDATE`), que choca con el `FOR UPDATE` del cobro.
+      const espera = await esperarBloqueado(prisma, { bloqueadoPor: [pidCobro], consulta: /FOR NO KEY UPDATE/ })
       expect(espera).not.toBeNull() // la liga ESPERA el candado del cobro: no decide con la venta «abierta» de antes
       aparcada.soltar()
       await cobro

@@ -363,7 +363,9 @@ export async function earnPoints(
   // the durable paid-order reconciler can retry the missing stamp. Swallowing it
   // here would mark the order processed forever with a visibly missing reward.
   const finish = <T extends object>(result: T, puntosCreados = false): T => {
-    if (deferredStampError) throw deferredStampError
+    // R3-1 (ronda 3): si ESTA llamada sí escribió los puntos, el error del sello lo dice: es un hecho que la auditoría de una
+    // liga tardía necesita aunque la función termine en error.
+    if (deferredStampError) throw conLoOtorgado(deferredStampError, { sello: false, puntos: puntosCreados })
     const selloCreado = sello?.granted === true
     // F2: sólo cuando ESTA llamada creó algo; los resultados de siempre no cambian de forma.
     return selloCreado || puntosCreados ? { ...result, otorgado: { sello: selloCreado, puntos: puntosCreados } } : result
@@ -514,8 +516,22 @@ export async function earnPoints(
         newBalance: customer?.loyaltyPoints ?? 0,
       })
     }
-    throw error
+    // R3-1: el sello de esta llamada ya quedó (va antes que los puntos) aunque los puntos fallen: el error lo dice.
+    throw sello?.granted === true ? conLoOtorgado(error, { sello: true, puntos: false }) : error
   }
+}
+
+/**
+ * R3-1 (ronda 3 post-QA de sellos tardíos, 15-oct-2026): cuelga del error el hecho «esta llamada otorgó X antes de fallar»
+ * (`otorgadoAntesDelFallo`), sin cambiar el error (mismo objeto, mismo mensaje). No pisa uno que ya lo traiga; sin nada
+ * otorgado, no toca nada.
+ */
+function conLoOtorgado(error: unknown, otorgado: { sello: boolean; puntos: boolean }): unknown {
+  if (!otorgado.sello && !otorgado.puntos) return error
+  if (error && typeof error === 'object' && !('otorgadoAntesDelFallo' in error)) {
+    Object.assign(error, { otorgadoAntesDelFallo: otorgado })
+  }
+  return error
 }
 
 /**

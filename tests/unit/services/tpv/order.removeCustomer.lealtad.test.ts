@@ -96,7 +96,7 @@ describe('TPV removeCustomerFromOrder — la promoción del siguiente en una ven
     await removeCustomerFromOrder(VENUE, ORDER, 'cust-P', { otorgarLealtad: false })
     expect(candadosDentro).toEqual([true])
     const [sql] = prismaMock.$queryRaw.mock.calls[0] as unknown as [TemplateStringsArray]
-    expect(sql.join('?')).toMatch(/FROM "Order"[\s\S]*FOR UPDATE/)
+    expect(sql.join('?')).toMatch(/FROM "Order"[\s\S]*FOR NO KEY UPDATE/)
     expect(prismaMock.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.order.findFirst.mock.invocationCallOrder[0])
     expect(prismaMock.order.findFirst.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.orderCustomer.delete.mock.invocationCallOrder[0])
     expect(prismaMock.$transaction).toHaveBeenCalledWith(expect.any(Function), { timeout: 15_000, maxWait: 5_000 })

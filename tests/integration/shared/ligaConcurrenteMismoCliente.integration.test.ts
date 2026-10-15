@@ -7,8 +7,9 @@
  *
  * Ahora la liga es idempotente: ese choque quiere decir «ya está ligado» (se reintenta y sigue como éxito), también en la TPV
  * (F3, ronda 1: el MISMO cliente ya ligado es éxito, no 400). Auditoría (F2, ronda 1): la llamada que CREÓ la liga escribe
- * SIEMPRE su fila (`ligaNueva: true`); una re-liga, sólo si ESTA llamada otorgó el sello (o los puntos de una venta sin sello).
- * En una carrera pueden quedar 2 filas, ambas ciertas: exactamente UNA con `ligaNueva: true`.
+ * SIEMPRE su fila (`ligaNueva: true`); una re-liga, sólo si ESTA llamada otorgó algo (el sello o los puntos — R3-1, ronda 3: los
+ * puntos cuentan aunque la venta ya tuviera sello). En una carrera pueden quedar hasta 3 filas, todas ciertas: exactamente UNA con
+ * `ligaNueva: true`, y cada re-liga con `otorgo: true`.
  *
  * Todo real contra Postgres: la liga del POS (`attachCustomerToOrder`), la de la TPV (`addCustomerToOrder`), la lealtad
  * (`earnPoints`/`grantStamp`) y la bitácora. Los cruces se FUERZAN y se OBSERVAN en `pg_stat_activity` (no se suponen por tiempos).
@@ -135,11 +136,14 @@ async function loQueQuedo(orderId: string, customerId: string) {
   }
 }
 
-/** F2: exactamente UNA fila de la llamada que creó la liga, y a lo más otra de la que otorgó (≤ 2, todas ciertas). */
+/**
+ * F2 + R3-1: exactamente UNA fila de la llamada que creó la liga; las demás, sólo de re-ligas que otorgaron algo (el sello o los
+ * puntos: a lo más una por pieza ⇒ ≤ 3 filas, todas ciertas).
+ */
 function auditoriaDeUnaLiga(quedo: Awaited<ReturnType<typeof loQueQuedo>>) {
   const nuevas = quedo.filas.filter(f => (f.data as { ligaNueva?: boolean }).ligaNueva === true)
   expect(nuevas).toHaveLength(1)
-  expect(quedo.auditoria).toBeLessThanOrEqual(2)
+  expect(quedo.auditoria).toBeLessThanOrEqual(3)
   for (const f of quedo.filas) {
     const d = f.data as { ligaNueva?: boolean; otorgo?: boolean }
     // Una re-liga sólo escribe si otorgó.
@@ -167,7 +171,7 @@ describe('🔴 BAJO-3: el MISMO cliente agregado varias veces a la vez a una ven
         ok => ({ ok, error: undefined as unknown }),
         error => ({ ok: undefined, error }),
       )
-      const espera = await esperarBloqueado(prisma, { bloqueadoPor: [pidPrimera], consulta: /FOR UPDATE/ })
+      const espera = await esperarBloqueado(prisma, { bloqueadoPor: [pidPrimera], consulta: /FOR NO KEY UPDATE/ })
       expect(espera).not.toBeNull() // el cruce SÍ ocurrió: la segunda esperaba el candado que la primera tenía tomado
       aparcada.soltar()
 

@@ -37,7 +37,13 @@ import { applyPromotionToOrder } from '../promotions/promotion.service'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
 import { paymentCountsAsDrawerCash } from '../shared/tenderSemantics'
 import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
-import { clienteYaLigadoALaVenta, esChoqueDeUnico } from '../shared/ligaDeClienteEnVenta'
+import {
+  bloquearVentaParaLiga,
+  clienteYaLigadoALaVenta,
+  esChoqueDeUnico,
+  etiquetaDeReintento,
+  motivoDeReintentoDeLiga,
+} from '../shared/ligaDeClienteEnVenta'
 import { assertNoLiveTerminalCharge, assertOrderCancellableUnderLock, avisarOrdenCancelada } from '../shared/orderCancelGuard'
 import { combinarContratos } from '../fiscal/contratoDePrecio'
 import {
@@ -3664,7 +3670,9 @@ export async function attachCustomerToOrder(venueId: string, orderId: string, cu
       // 🔴 Ronda 1 (F1/F3): PRIMERA sentencia, el candado canónico de la venta — el MISMO que toman el cobro y la liga de la TPV.
       // Sin él, una liga del POS (inserta la liga y luego escribe la venta) y una de la TPV (candado de la venta y luego la liga)
       // se tomaban los candados en orden inverso y Postgres mataba a una por bloqueo mutuo (40P01), medido con 3 POS + 3 TPV.
-      if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Order not found')
+      // R3-2 (ronda 3): `FOR NO KEY UPDATE` (`bloquearVentaParaLiga`): serializa contra el cobro y las demás ligas sin
+      // interbloquearse con el `FOR KEY SHARE` de las llaves foráneas (las métricas del cobro).
+      if (!(await bloquearVentaParaLiga(tx, { venueId, orderId }))) throw new NotFoundError('Order not found')
       const existingAssociation = await tx.orderCustomer.findUnique({
         where: {
           orderId_customerId: {
@@ -3718,6 +3726,8 @@ export async function attachCustomerToOrder(venueId: string, orderId: string, cu
           customerName: true,
           customerPhone: true,
           customerEmail: true,
+          // R3-1: el hecho «venta cobrada», leído bajo el candado, para la auditoría del sello tardío. No va en la respuesta.
+          paymentStatus: true,
         },
       })
 
@@ -3732,7 +3742,8 @@ export async function attachCustomerToOrder(venueId: string, orderId: string, cu
       // H5: con el actor de la liga, para que el reconciliador selle a nombre de quien agregó al cliente.
       await reabrirLealtadSiAplica(tx, { venueId, orderId, customerId: normalizedCustomerId, staffId: staffId ?? null })
 
-      return { ligada, ligaNueva }
+      const { paymentStatus, ...respuesta } = ligada
+      return { ligada: respuesta, ligaNueva, ventaCobrada: paymentStatus === 'PAID' || paymentStatus === 'REFUNDED' }
     }, ORDER_LOCK_WAIT_BUDGET)
 
   let liga: Awaited<ReturnType<typeof ligarEnTransaccion>> | undefined
@@ -3742,14 +3753,22 @@ export async function attachCustomerToOrder(venueId: string, orderId: string, cu
     } catch (error) {
       // 🔴 BAJO-3 + M1: otra llamada ligó a ESTE cliente mientras ésta lo intentaba: ya está ligado. Se reintenta (la
       // transacción entera se revirtió) y la relectura ve la liga de la otra; nunca un 500 por un doble toque.
-      if (intento < INTENTOS_DE_LIGA && esChoqueDeUnico(error) && (await clienteYaLigadoALaVenta(orderId, normalizedCustomerId))) {
-        logger.info(`ℹ️ [ORDER.MOBILE] Customer ${normalizedCustomerId} was linked to order ${orderId} by a concurrent call; retrying`)
+      // R3-2 (ronda 3), como defensa: un interbloqueo (40P01) también se reintenta, acotado. Lo demás sube como antes.
+      const motivo = motivoDeReintentoDeLiga(error)
+      const reintenta =
+        intento < INTENTOS_DE_LIGA &&
+        ((motivo === 'UNICO' && esChoqueDeUnico(error) && (await clienteYaLigadoALaVenta(orderId, normalizedCustomerId))) ||
+          motivo === 'INTERBLOQUEO')
+      if (reintenta) {
+        logger.warn(
+          `⚠️ [ORDER.MOBILE] ${etiquetaDeReintento(motivo!)} linking customer ${normalizedCustomerId} to order ${orderId}; retrying`,
+        )
         continue
       }
       throw error
     }
   }
-  const { ligada: result, ligaNueva } = liga
+  const { ligada: result, ligaNueva, ventaCobrada } = liga
 
   logger.info(`✅ [ORDER.MOBILE] Customer attached to payment order | order=${order.orderNumber} | customer=${normalizedCustomerId}`)
 
@@ -3769,7 +3788,14 @@ export async function attachCustomerToOrder(venueId: string, orderId: string, cu
   // try/catch es la última red.
   let loyalty: SaleStampOutcome | null = null
   try {
-    loyalty = await awardLoyaltyForLateCustomer({ venueId, orderId, customerId: normalizedCustomerId, staffId: staffId ?? null, ligaNueva })
+    loyalty = await awardLoyaltyForLateCustomer({
+      venueId,
+      orderId,
+      customerId: normalizedCustomerId,
+      staffId: staffId ?? null,
+      ligaNueva,
+      ventaCobrada,
+    })
   } catch (error) {
     logger.error('[ORDER.MOBILE] Sello tardío falló (la liga del cliente ya quedó)', {
       orderId,

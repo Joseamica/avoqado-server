@@ -73,7 +73,14 @@ describe('attachCustomerToPayment — sello tardío', () => {
   it('🔴 llama al helper DESPUÉS de ligar, con el actor, y devuelve loyalty junto a los campos de siempre', async () => {
     const r = await attachCustomerToPayment(VENUE, 'pay-1', 'cust-1', 'staff-1')
     expect(prismaMock.orderCustomer.create).toHaveBeenCalledWith({ data: { orderId: 'order-1', customerId: 'cust-1', isPrimary: true } })
-    expect(mockLate).toHaveBeenCalledWith({ venueId: VENUE, orderId: 'order-1', customerId: 'cust-1', staffId: 'staff-1', ligaNueva: true })
+    expect(mockLate).toHaveBeenCalledWith({
+      venueId: VENUE,
+      orderId: 'order-1',
+      customerId: 'cust-1',
+      staffId: 'staff-1',
+      ligaNueva: true,
+      ventaCobrada: false,
+    })
     expect(r).toEqual({ ...ORDEN_LIGADA, loyalty: SELLO })
   })
 
@@ -143,12 +150,37 @@ describe('attachCustomerToPayment — sello tardío', () => {
   })
 })
 
+describe('🔴 R3-1/R3-2 (ronda 3): hechos de la venta para la auditoría y reintento ante bloqueo mutuo', () => {
+  it('R3-1: le pasa al sello tardío si la venta estaba cobrada (leído bajo el candado), sin agregar campos a la respuesta', async () => {
+    prismaMock.order.update.mockResolvedValue({ ...ORDEN_LIGADA, paymentStatus: 'PAID' } as any)
+    const r = await attachCustomerToPayment(VENUE, 'pay-1', 'cust-1', 'staff-1')
+    expect(mockLate).toHaveBeenCalledWith(expect.objectContaining({ ventaCobrada: true }))
+    expect(r).toEqual({ ...ORDEN_LIGADA, loyalty: SELLO })
+  })
+
+  it.each([
+    ['un bloqueo mutuo en una consulta cruda (P2010/40P01)', { code: 'P2010', meta: { code: '40P01' } }],
+    ['un bloqueo mutuo reportado directo (40P01)', { code: '40P01' }],
+  ])('🔴 R3-2: %s se reintenta (acotado) y la liga sale', async (_c, forma) => {
+    prismaMock.$transaction.mockRejectedValueOnce(Object.assign(new Error('deadlock detected'), forma))
+    await expect(attachCustomerToPayment(VENUE, 'pay-1', 'cust-1', 'staff-1')).resolves.toMatchObject({ id: 'order-1' })
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(2)
+  })
+
+  it('R3-2: el reintento por bloqueo mutuo tiene tope (3)', async () => {
+    const d = Object.assign(new Error('deadlock detected'), { code: 'P2010', meta: { code: '40P01' } })
+    prismaMock.$transaction.mockRejectedValueOnce(d).mockRejectedValueOnce(d).mockRejectedValueOnce(d)
+    await expect(attachCustomerToPayment(VENUE, 'pay-1', 'cust-1', 'staff-1')).rejects.toBe(d)
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(3)
+  })
+})
+
 describe('🔴 ronda 1: la liga del POS toma el candado de la venta PRIMERO (mismo orden que la TPV: sin bloqueos mutuos)', () => {
   it('la primera sentencia es el `SELECT … FOR UPDATE` de la venta, y la transacción lleva el presupuesto de ese candado', async () => {
     await attachCustomerToPayment(VENUE, 'pay-1', 'cust-1', 'staff-1')
     expect(candadosDentro).toEqual([true])
     const [sql] = prismaMock.$queryRaw.mock.calls[0] as unknown as [TemplateStringsArray]
-    expect(sql.join('?')).toMatch(/FROM "Order"[\s\S]*FOR UPDATE/)
+    expect(sql.join('?')).toMatch(/FROM "Order"[\s\S]*FOR NO KEY UPDATE/)
     expect(prismaMock.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.orderCustomer.findUnique.mock.invocationCallOrder[0])
     expect(prismaMock.$transaction).toHaveBeenCalledWith(expect.any(Function), { timeout: 15_000, maxWait: 5_000 })
   })
@@ -204,7 +236,7 @@ describe('🔴 BAJO-3: la liga es idempotente ante el MISMO cliente agregado a l
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(2)
     expect(prismaMock.orderCustomer.create).not.toHaveBeenCalled()
     expect(r).toEqual({ ...ORDEN_LIGADA, loyalty: SELLO })
-    // La lealtad se completa (idempotente) y la reapertura corre como en cualquier re-liga, pero NO audita: la otra llamada sí.
+    // La lealtad se completa (idempotente) y la reapertura corre como en cualquier re-liga; audita sólo si ESTA otorgó algo.
     expect(mockReabrir).toHaveBeenCalledTimes(1)
     expect(mockLate).toHaveBeenCalledWith({
       venueId: VENUE,
@@ -212,6 +244,7 @@ describe('🔴 BAJO-3: la liga es idempotente ante el MISMO cliente agregado a l
       customerId: 'cust-1',
       staffId: 'staff-1',
       ligaNueva: false,
+      ventaCobrada: false,
     })
   })
 

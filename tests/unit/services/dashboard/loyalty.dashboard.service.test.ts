@@ -1097,6 +1097,32 @@ describe('earnPoints + sellos (Plan B)', () => {
     expect(r).toEqual({ pointsEarned: 50, newBalance: 7 })
   })
 
+  // ── R3-1 (ronda 3): lo que ESTA llamada otorgó viaja también cuando la función termina en error ─────────────────────────────
+  it('🔴 R3-1: el sello TRUENA pero los puntos SÍ se escribieron: el error que sube lleva el hecho «puntos otorgados»', async () => {
+    prismaMock.loyaltyConfig.findUnique.mockResolvedValue(createMockLoyaltyConfig({ pointsPerDollar: new Decimal(1) }) as any)
+    prismaMock.loyaltyTransaction.findFirst.mockResolvedValue(null)
+    prismaMock.stampEvent.findFirst.mockResolvedValue(null)
+    prismaMock.$transaction.mockImplementation((async (cb: any) => cb(prismaMock)) as never)
+    prismaMock.loyaltyTransaction.create.mockResolvedValue(createMockTransaction({ points: 50 }) as any)
+    prismaMock.customer.update.mockResolvedValue({ loyaltyPoints: 550 } as any)
+    mockedGrantStamp.mockRejectedValue(new Error('la base se cayó'))
+    await expect(earnPoints('venue-123', 'customer-123', 50, 'order-123')).rejects.toMatchObject({
+      message: 'la base se cayó',
+      otorgadoAntesDelFallo: { sello: false, puntos: true },
+    })
+  })
+
+  it('🔴 R3-1: el sello SÍ se otorgó y la escritura de puntos truena: el error lleva el hecho «sello otorgado»', async () => {
+    prismaMock.loyaltyConfig.findUnique.mockResolvedValue(createMockLoyaltyConfig({ pointsPerDollar: new Decimal(1) }) as any)
+    prismaMock.loyaltyTransaction.findFirst.mockResolvedValue(null)
+    mockedGrantStamp.mockResolvedValue({ granted: true, stampsEarned: 1, stampsRequired: 7 })
+    prismaMock.$transaction.mockRejectedValueOnce(new Error('connection reset'))
+    await expect(earnPoints('venue-123', 'customer-123', 50, 'order-123')).rejects.toMatchObject({
+      message: 'connection reset',
+      otorgadoAntesDelFallo: { sello: true, puntos: false },
+    })
+  })
+
   it('pasa el autor del sello, para que quede atribuible', async () => {
     const mockConfig = createMockLoyaltyConfig({ pointsPerDollar: new Decimal(1) })
     prismaMock.loyaltyConfig.findUnique.mockResolvedValue(mockConfig as any)

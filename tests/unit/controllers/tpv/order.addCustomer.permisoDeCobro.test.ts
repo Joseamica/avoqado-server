@@ -22,7 +22,13 @@ jest.mock('@/services/shared/loyaltyOnLateCustomer', () => ({
 
 import type { NextFunction, Request, Response } from 'express'
 import { prismaMock } from '@tests/__helpers__/setup'
-import { addCustomerToOrder, createAndAddCustomerToOrder, removeCustomerFromOrder } from '@/controllers/tpv/order.tpv.controller'
+import {
+  addCustomerToOrder,
+  createAndAddCustomerToOrder,
+  removeCustomerFromOrder,
+  updateGuestInfo,
+} from '@/controllers/tpv/order.tpv.controller'
+import * as orderTpvService from '@/services/tpv/order.tpv.service'
 import { checkPermission } from '@/middlewares/checkPermission.middleware'
 
 const VENUE = 'v1'
@@ -148,7 +154,13 @@ describe('🔴 MEDIO-1: TPV orders/:orderId/customers — el sello tardío exige
     expect(mockReabrir).not.toHaveBeenCalled()
     expect(mockLate).not.toHaveBeenCalled()
     // F2: la liga que crea audita también sin permiso.
-    expect(mockAuditSinPermiso).toHaveBeenCalledWith({ venueId: VENUE, orderId: ORDER, customerId: 'cust-1', staffId: STAFF })
+    expect(mockAuditSinPermiso).toHaveBeenCalledWith({
+      venueId: VENUE,
+      orderId: ORDER,
+      customerId: 'cust-1',
+      staffId: STAFF,
+      orderNumber: 'ORD-1',
+    })
     expect(await elPosLoDejaria()).toBe(false) // el mismo criterio que la ruta del POS
   })
 
@@ -241,7 +253,13 @@ describe('🔴 MEDIO-1: TPV orders/:orderId/customers/create — lo mismo con el
     expect(prismaMock.orderCustomer.create).toHaveBeenCalledWith({ data: { orderId: ORDER, customerId: 'nuevo', isPrimary: false } })
     expect(mockReabrir).not.toHaveBeenCalled()
     expect(mockLate).not.toHaveBeenCalled()
-    expect(mockAuditSinPermiso).toHaveBeenCalledWith({ venueId: VENUE, orderId: ORDER, customerId: 'nuevo', staffId: STAFF })
+    expect(mockAuditSinPermiso).toHaveBeenCalledWith({
+      venueId: VENUE,
+      orderId: ORDER,
+      customerId: 'nuevo',
+      staffId: STAFF,
+      orderNumber: 'ORD-1',
+    })
   })
 
   it('CASHIER: crea, liga y sella al cliente NUEVO', async () => {
@@ -315,5 +333,54 @@ describe('🔴 Ronda 2: TPV DELETE orders/:orderId/customers/:customerId — pro
     prismaMock.order.findFirst.mockResolvedValue({ paymentStatus: 'PENDING' } as any)
     await quitar()
     expect(prismaMock.orderCustomer.update).toHaveBeenCalledWith({ where: { id: 'oc-C' }, data: { isPrimary: true } })
+  })
+})
+
+/**
+ * 🔴 R3-4 (ronda 3): editar los datos del invitado en una venta cobrada no fija `Order.customerId` sin `payments:create`. El
+ * controller resuelve el permiso (mismo resolvedor efectivo, falla cerrado) y se lo pasa al servicio. Como hoy, el controller NO
+ * reenvía el `customerId` del body (la TPV lo manda; la ruta nunca lo escribió): el candado del servicio protege a cualquier
+ * otro llamador.
+ */
+describe('🔴 R3-4: TPV PATCH orders/:orderId/guest — Order.customerId en una venta cobrada exige payments:create', () => {
+  let espia: jest.SpyInstance
+  beforeEach(() => {
+    espia = jest.spyOn(orderTpvService, 'updateGuestInfo')
+    prismaMock.order.findUnique.mockResolvedValue({ id: ORDER, orderNumber: 'ORD-1', paymentStatus: 'PAID' } as any)
+    prismaMock.order.update.mockResolvedValue({
+      id: ORDER,
+      orderNumber: 'ORD-1',
+      tableId: null,
+      items: [],
+      payments: [],
+      table: null,
+    } as any)
+  })
+  afterEach(() => espia.mockRestore())
+
+  async function editar() {
+    const r = res()
+    const next = jest.fn()
+    const q = { ...req({ customerName: 'Kev', customerId: 'cust-K' }), method: 'PATCH' }
+    await updateGuestInfo(q as unknown as Request<any>, r, next as unknown as NextFunction)
+    return { status: r.status.mock.calls[0]?.[0], next }
+  }
+
+  it('🔴 KITCHEN: el servicio recibe otorgarLealtad: false; se guarda el nombre y Order.customerId NO se toca', async () => {
+    quienLiga({ rol: 'KITCHEN' })
+    const { status, next } = await editar()
+    expect(next).not.toHaveBeenCalled()
+    expect(status).toBe(200)
+    expect(espia).toHaveBeenCalledWith(VENUE, ORDER, expect.any(Object), { otorgarLealtad: false })
+    expect((prismaMock.order.update.mock.calls[0] as any)[0].data).toEqual({ customerName: 'Kev' })
+  })
+
+  it('CASHIER: el servicio recibe otorgarLealtad: true; como hoy, el controller no reenvía el customerId del body', async () => {
+    quienLiga({ rol: 'CASHIER' })
+    await editar()
+    expect(espia).toHaveBeenCalledWith(VENUE, ORDER, expect.not.objectContaining({ customerId: expect.anything() }), {
+      otorgarLealtad: true,
+    })
+    expect((prismaMock.order.update.mock.calls[0] as any)[0].data).toEqual({ customerName: 'Kev' })
   })
 })

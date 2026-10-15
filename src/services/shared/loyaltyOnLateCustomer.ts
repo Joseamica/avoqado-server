@@ -224,6 +224,11 @@ export async function reabrirLealtadSiAplica(
   return reabierta.count === 1
 }
 
+/** R3-1: quien llama se entera de lo otorgado en cuanto ocurre (ver `otorgarLealtadRespetandoReembolsos`). */
+export interface ObservadorDeOtorgamiento {
+  alOtorgar?: (otorgado: { sello: boolean; puntos: boolean }) => void
+}
+
 export interface ResultadoDeLealtadRespetandoReembolsos extends AwardLoyaltyForPaidOrderResult {
   /** La venta ya tenía —o recibió MIENTRAS se otorgaba— un reembolso COMPLETED: no se otorgó, o el sello se revirtió. */
   reembolsada: boolean
@@ -332,6 +337,7 @@ async function cerrarSinLanzar(venueId: string, orderId: string, leyoSinCliente:
  */
 export async function otorgarLealtadRespetandoReembolsos(
   args: AwardLoyaltyForPaidOrderArgs,
+  observador: ObservadorDeOtorgamiento = {},
 ): Promise<ResultadoDeLealtadRespetandoReembolsos> {
   const { venueId, orderId } = args
   if ((await contarReembolsos(prisma, venueId, orderId)) > 0) {
@@ -365,6 +371,9 @@ export async function otorgarLealtadRespetandoReembolsos(
         { cerrar: false, beneficiario: foto.beneficiario },
       )
     : await awardLoyaltyForPaidOrder(args, { cerrar: false })
+  // 🔴 R3-1 (ronda 3): lo otorgado se avisa EN CUANTO ocurre, antes de cualquier lectura posterior que pueda tronar (el 2.º
+  // conteo de reembolsos, la reversión, el cierre): quien audita no puede perder un sello o unos puntos que sí se dieron.
+  if (resultado.otorgado) observador.alOtorgar?.(resultado.otorgado)
   const errores = [...resultado.errors]
   // H4, tercera ola: otro intento ganó la venta para OTRO cliente mientras ésta acreditaba; se cierra como OTHER_CUSTOMER.
   // F2 (ronda 1): y lo que ESTA corrida creó, para la auditoría de una re-liga.
@@ -507,13 +516,17 @@ function auditarLigaAVentaCobrada(args: {
  * no pinta nada.
  *
  * `ligaNueva` — ¿ESTA llamada creó (o promovió a primario) la liga del cliente? Decide la fila de auditoría
- * `CUSTOMER_ATTACHED_TO_PAID_ORDER` (BAJO-3 + F2 de la ronda 1 post-QA, 15-oct-2026):
- *   · `true`: audita SIEMPRE (también si la lealtad truena después de leer la venta: `reason: 'ERROR'`). Una fila por liga.
- *   · `false` (re-liga: la liga ya existía): audita SÓLO si ESTA llamada otorgó — creó el sello, o los puntos de una venta que
- *     no tiene sello (si el sello lo creó otra llamada simultánea, ésa audita): así una carrera deja ≤ 2 filas, las dos ciertas.
- *     Antes, una re-liga nunca auditaba, y la COCINA ligaba sin fila (ruta sin permiso) y el cajero re-ligaba y sellaba: CERO.
+ * `CUSTOMER_ATTACHED_TO_PAID_ORDER` (BAJO-3 + F2 de la ronda 1 post-QA; R3-1 de la ronda 3, 15-oct-2026):
+ *   · `true`: audita SIEMPRE, pase lo que pase después (también si una lectura truena). Una fila por liga.
+ *   · `false` (re-liga: la liga ya existía): audita SÓLO si ESTA llamada otorgó algo — el sello o los puntos (recuperar los
+ *     puntos de una venta que ya tenía sello también cuenta). En una carrera puede haber hasta 3 filas (la del creador y la de
+ *     cada re-liga que otorgó una pieza distinta): todas ciertas, ninguna silenciada.
  *   · `undefined` (quien llama no lo sabe): la regla de antes — no se audita la re-liga de una venta ya sellada para él.
- * La fila lleva `ligaNueva` y `otorgo` cuando quien llama lo dijo.
+ *
+ * 🔴 R3-1 (Codex recheck-7 P2-1 + N4): la fila se arma con los HECHOS de esta llamada (`ligaNueva`, `otorgoSello`,
+ * `otorgoPuntos`), anotados en cuanto ocurren y fuera del alcance de las lecturas que sólo arman la respuesta (la cartilla, la
+ * relectura, el programa). Si una de ésas truena, la fila sale igual y dice la verdad: lo otorgado no se reporta como «sin
+ * sello». `ventaCobrada` = lo que quien llama leyó bajo SU candado; sólo se usa si la lectura de la venta aquí falla.
  */
 export async function awardLoyaltyForLateCustomer(args: {
   venueId: string
@@ -521,41 +534,59 @@ export async function awardLoyaltyForLateCustomer(args: {
   customerId: string
   staffId?: string | null
   ligaNueva?: boolean
+  ventaCobrada?: boolean
 }): Promise<SaleStampOutcome | null> {
   const { venueId, orderId, customerId } = args
   const nowMs = Date.now()
-  // Fuera del try: si la lealtad truena DESPUÉS de leer la venta, la liga nueva se audita igual (F2).
+  // R3-1: lo que esta llamada SABE y HIZO vive fuera del try: el catch audita con ello.
   let venta: Venta | null = null
   let antes: SaleStampDecision | null = null
+  /** La decisión después de otorgar y releer; null mientras no se conozca. */
+  let despuesDeOtorgar: SaleStampDecision | null = null
+  const hechos = { otorgoSello: false, otorgoPuntos: false }
+  const anotar = (otorgado?: { sello: boolean; puntos: boolean }) => {
+    if (otorgado?.sello) hechos.otorgoSello = true
+    if (otorgado?.puntos) hechos.otorgoPuntos = true
+  }
+  const otorgo = () => hechos.otorgoSello || hechos.otorgoPuntos
+  const datosDeLaLiga = () =>
+    args.ligaNueva === undefined
+      ? {}
+      : { ligaNueva: args.ligaNueva, otorgo: otorgo(), otorgoSello: hechos.otorgoSello, otorgoPuntos: hechos.otorgoPuntos }
   try {
-    const [leida, programa] = await Promise.all([leerVenta(prisma, venueId, orderId), leerPrograma(venueId)])
-    venta = leida
+    // `allSettled`: si sólo falla el programa, la venta leída sigue sirviendo a la auditoría (antes se perdía con el `all`).
+    const [leida, programaLeido] = await Promise.allSettled([leerVenta(prisma, venueId, orderId), leerPrograma(venueId)])
+    if (leida.status === 'rejected') throw leida.reason
+    venta = leida.value
     if (!venta) return null
     const foto = fotoPara(venta, customerId)
     antes = decideSaleStamp(foto, nowMs)
     // Cuenta aún sin saldar: quien la salde corre la lealtad, y este cliente ya es su primario. Decir «no suma» sería falso.
     if (antes === 'OPEN') return null
+    if (programaLeido.status === 'rejected') throw programaLeido.reason
+    const programa = programaLeido.value
 
     // Tipo explícito: `antes` ya viene sin 'OPEN' y una relectura puede devolver cualquier decisión.
     let decision: SaleStampDecision = antes
-    // F2: ¿ESTA llamada otorgó? (el sello, o los puntos de una venta sin sello).
-    let otorgo = false
     // 🔴 SIEMPRE que sea elegible, aunque el sello de ESTE cliente ya exista (auditoría A #1): la llamada es idempotente y
     // completa los puntos o la visita que una caída entre el sello y los puntos hubiera dejado pendientes.
     if (esElegibleParaLealtad(foto, nowMs)) {
       // Base: venta y cargos sin propina — la misma que el cobro y el reconciliador (la propina es del personal).
-      const resultado = await otorgarLealtadRespetandoReembolsos({
-        venueId,
-        orderId,
-        orderTotal: Math.max(0, Number(venta.total) - Number(venta.tipAmount ?? 0)),
-        staffId: args.staffId ?? null,
-        legacyCustomer: null,
-      })
+      const resultado = await otorgarLealtadRespetandoReembolsos(
+        {
+          venueId,
+          orderId,
+          orderTotal: Math.max(0, Number(venta.total) - Number(venta.tipAmount ?? 0)),
+          staffId: args.staffId ?? null,
+          legacyCustomer: null,
+        },
+        { alOtorgar: anotar },
+      )
+      anotar(resultado.otorgado)
       if (!resultado.complete) {
         // No se pierde: la liga reabrió la venta en su transacción y el reconciliador la reintenta.
         logger.warn('[LEALTAD TARDÍA] la lealtad de la venta quedó incompleta', { venueId, orderId, customerId, errors: resultado.errors })
       }
-      let ventaConSello = true // sin relectura (reembolso u otro cliente), unos puntos sueltos no cuentan como «otorgó»
       if (resultado.reembolsada) {
         // El reembolso entró entre la lectura y el otorgamiento, o mientras se otorgaba (el envoltorio ya revirtió el sello).
         logger.warn('[LEALTAD TARDÍA] la venta se reembolsó mientras se ligaba: no suma sello', { venueId, orderId, customerId })
@@ -565,11 +596,9 @@ export async function awardLoyaltyForLateCustomer(args: {
         decision = 'OTHER_CUSTOMER'
       } else {
         const despues = await leerVenta(prisma, venueId, orderId)
-        const fotoDespues = despues ? fotoPara(despues, customerId) : null
-        decision = fotoDespues ? decideSaleStamp(fotoDespues, nowMs) : antes
-        ventaConSello = fotoDespues ? fotoDespues.stampOwnerCustomerId !== null : true
+        decision = despues ? decideSaleStamp(fotoPara(despues, customerId), nowMs) : antes
       }
-      otorgo = resultado.otorgado?.sello === true || (resultado.otorgado?.puntos === true && !ventaConSello)
+      despuesDeOtorgar = decision
     }
     if (decision === 'NO_ANCHOR') {
       logger.warn('[LEALTAD TARDÍA] venta pagada sin hora de cobro: no se puede medir el plazo, no se sella', { venueId, orderId })
@@ -584,7 +613,7 @@ export async function awardLoyaltyForLateCustomer(args: {
       await motivo(decision, venueId, customerId, programa, nowMs),
     )
 
-    const auditar = args.ligaNueva === undefined ? antes !== 'STAMPED' : args.ligaNueva || otorgo
+    const auditar = args.ligaNueva === undefined ? antes !== 'STAMPED' : args.ligaNueva || otorgo()
     if (auditar && esVentaCobrada(venta.paymentStatus)) {
       auditarLigaAVentaCobrada({
         venueId,
@@ -598,7 +627,7 @@ export async function awardLoyaltyForLateCustomer(args: {
           stamped: outcome.stamped,
           reason: outcome.reason,
           minutosDesdeElCobro: minutosDesde(foto.settledAt, nowMs),
-          ...(args.ligaNueva === undefined ? {} : { ligaNueva: args.ligaNueva, otorgo }),
+          ...datosDeLaLiga(),
         },
       })
     }
@@ -606,22 +635,26 @@ export async function awardLoyaltyForLateCustomer(args: {
   } catch (error) {
     const mensaje = error instanceof Error ? error.message : String(error)
     logger.error('[LEALTAD TARDÍA] falló; el cliente ya quedó ligado a la venta', { venueId, orderId, customerId, error: mensaje })
-    // 🔴 F2: la llamada que CREÓ la liga audita siempre — también cuando su lealtad truena (antes la fila se perdía).
-    if (args.ligaNueva === true && venta && esVentaCobrada(venta.paymentStatus)) {
+    // 🔴 R3-1: la llamada que CREÓ la liga audita siempre; una re-liga, si otorgó algo. Con los hechos, no con lo que faltó leer.
+    const auditar = args.ligaNueva === true || (args.ligaNueva === false && otorgo())
+    // La venta leída aquí manda; si su lectura fue la que tronó, lo que quien llama leyó bajo su candado.
+    const cobrada = venta ? esVentaCobrada(venta.paymentStatus) : args.ventaCobrada === true
+    if (auditar && cobrada) {
+      // N4: si se otorgó el sello (y no se supo después que se revirtió), la fila lo dice: nada de un falso «sin sello».
+      const stamped = despuesDeOtorgar !== null ? despuesDeOtorgar === 'STAMPED' : hechos.otorgoSello || antes === 'STAMPED'
       auditarLigaAVentaCobrada({
         venueId,
         orderId,
         customerId,
         staffId: args.staffId,
         data: {
-          orderNumber: venta.orderNumber,
+          orderNumber: venta?.orderNumber ?? null,
           decision: antes,
-          stamped: false,
-          reason: 'ERROR',
+          stamped,
+          reason: stamped ? null : 'ERROR',
           error: mensaje.slice(0, 500),
-          minutosDesdeElCobro: minutosDesde(fotoPara(venta, customerId).settledAt, nowMs),
-          ligaNueva: true,
-          otorgo: false,
+          minutosDesdeElCobro: venta ? minutosDesde(fotoPara(venta, customerId).settledAt, nowMs) : null,
+          ...datosDeLaLiga(),
         },
       })
     }
@@ -634,37 +667,47 @@ export async function awardLoyaltyForLateCustomer(args: {
  * sello tardío (decisión «A»: entra como acompañante y no otorga nada), pero el hecho «X ligó a Y a una venta cobrada» se
  * audita igual — es justo lo que un dueño quiere ver de un rol restringido. La fila dice `lealtad: 'SIN_PERMISO'`. Sólo la
  * llama quien CREÓ la liga. Nunca lanza: corre después de que la liga ya quedó.
+ *
+ * R3-1 (ronda 3): `orderNumber` = la venta que quien llama ya leyó COBRADA bajo su candado. Con él, si la relectura de aquí
+ * truena, la fila sale igual con lo que se sabe (sin minutos). Sin él, como antes: sin lectura no hay fila.
  */
 export async function auditarLigaSinPermisoDeCobro(args: {
   venueId: string
   orderId: string
   customerId: string
   staffId?: string | null
+  orderNumber?: string
 }): Promise<void> {
-  try {
-    const venta = await leerVenta(prisma, args.venueId, args.orderId)
-    if (!venta || !esVentaCobrada(venta.paymentStatus)) return
+  const { orderNumber, ...liga } = args
+  const fila = (numero: string, minutos: number | null) =>
     auditarLigaAVentaCobrada({
-      ...args,
+      ...liga,
       data: {
-        orderNumber: venta.orderNumber,
+        orderNumber: numero,
         decision: null,
         stamped: false,
         reason: 'SIN_PERMISO',
         lealtad: 'SIN_PERMISO',
         ligaNueva: true,
         otorgo: false,
-        minutosDesdeElCobro: minutosDesde(fotoPara(venta, args.customerId).settledAt, Date.now()),
+        minutosDesdeElCobro: minutos,
       },
     })
+  let venta: Venta | null
+  try {
+    venta = await leerVenta(prisma, args.venueId, args.orderId)
   } catch (error) {
-    logger.error('[LEALTAD TARDÍA] no se pudo auditar una liga sin permiso de cobro (la liga ya quedó)', {
+    logger.error('[LEALTAD TARDÍA] no se pudo releer la venta para auditar una liga sin permiso de cobro (la liga ya quedó)', {
       venueId: args.venueId,
       orderId: args.orderId,
       customerId: args.customerId,
       error: error instanceof Error ? error.message : String(error),
     })
+    if (orderNumber) fila(orderNumber, null)
+    return
   }
+  if (!venta || !esVentaCobrada(venta.paymentStatus)) return
+  fila(venta.orderNumber, minutosDesde(fotoPara(venta, args.customerId).settledAt, Date.now()))
 }
 
 /**

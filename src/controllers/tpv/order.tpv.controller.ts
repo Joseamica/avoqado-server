@@ -177,12 +177,20 @@ export async function updateGuestInfo(
     const orderId: string = req.params.orderId
     const { covers, customerName, customerPhone, specialRequests } = req.body
 
-    const updatedOrder = await orderTpvService.updateGuestInfo(venueId, orderId, {
-      covers,
-      customerName,
-      customerPhone,
-      specialRequests,
-    })
+    // R3-4 (ronda 3): en una venta cobrada, `Order.customerId` sólo con `payments:create` (el servicio decide bajo el candado).
+    // Como hoy, el `customerId` del body NO se reenvía (la TPV lo manda; esta ruta nunca lo escribió).
+    const otorgarLealtad = await puedeOtorgarLealtadTardia(req)
+    const updatedOrder = await orderTpvService.updateGuestInfo(
+      venueId,
+      orderId,
+      {
+        covers,
+        customerName,
+        customerPhone,
+        specialRequests,
+      },
+      { otorgarLealtad },
+    )
 
     res.status(200).json({
       success: true,

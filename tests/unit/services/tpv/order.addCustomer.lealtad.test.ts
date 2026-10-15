@@ -83,7 +83,14 @@ describe('TPV addCustomerToOrder', () => {
 
   it('🔴 liga, llama al helper con el actor y conserva la lista de siempre', async () => {
     const r = await addCustomerToOrder(VENUE, 'order-1', 'cust-1', 'staff-1', CON_PERMISO)
-    expect(mockLate).toHaveBeenCalledWith({ venueId: VENUE, orderId: 'order-1', customerId: 'cust-1', staffId: 'staff-1', ligaNueva: true })
+    expect(mockLate).toHaveBeenCalledWith({
+      venueId: VENUE,
+      orderId: 'order-1',
+      customerId: 'cust-1',
+      staffId: 'staff-1',
+      ligaNueva: true,
+      ventaCobrada: true,
+    })
     expect(r).toEqual({ orderCustomers: LISTA, loyalty: SELLO })
   })
 
@@ -118,6 +125,7 @@ describe('TPV addCustomerToOrder', () => {
       customerId: 'cust-1',
       staffId: 'staff-1',
       ligaNueva: false,
+      ventaCobrada: true,
     })
   })
 
@@ -215,7 +223,7 @@ describe('TPV addCustomerToOrder', () => {
     await addCustomerToOrder(VENUE, 'order-1', 'cust-1', 'staff-1', SIN_PERMISO)
     expect(candadosDentro).toEqual([true])
     const [sql] = prismaMock.$queryRaw.mock.calls[0] as unknown as [TemplateStringsArray]
-    expect(sql.join('?')).toMatch(/FROM "Order"[\s\S]*FOR UPDATE/)
+    expect(sql.join('?')).toMatch(/FROM "Order"[\s\S]*FOR NO KEY UPDATE/)
     expect(prismaMock.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.order.findFirst.mock.invocationCallOrder[0])
     expect(prismaMock.$transaction).toHaveBeenCalledWith(expect.any(Function), OPCIONES_DE_LA_TX)
   })
@@ -292,7 +300,13 @@ describe('TPV addCustomerToOrder', () => {
     expect(mockLate).not.toHaveBeenCalled()
     expect(r).toEqual({ orderCustomers: LISTA, loyalty: null })
     // F2: la llamada que CREA la liga audita siempre; sin permiso, la fila lo dice.
-    expect(mockAuditSinPermiso).toHaveBeenCalledWith({ venueId: VENUE, orderId: 'order-1', customerId: 'cust-1', staffId: 'staff-1' })
+    expect(mockAuditSinPermiso).toHaveBeenCalledWith({
+      venueId: VENUE,
+      orderId: 'order-1',
+      customerId: 'cust-1',
+      staffId: 'staff-1',
+      orderNumber: 'ORD-1',
+    })
   })
 
   it.each(['REFUNDED'])('F1: venta %s (ya cobrada) sin permiso: también acompañante', async paymentStatus => {
@@ -356,7 +370,14 @@ describe('TPV createAndAddCustomerToOrder', () => {
 
   it('🔴 crea, liga y llama al helper con el id del cliente NUEVO', async () => {
     const r = await createAndAddCustomerToOrder(VENUE, 'order-1', { firstName: 'Dany', phone: '5543453965' }, 'staff-1', CON_PERMISO)
-    expect(mockLate).toHaveBeenCalledWith({ venueId: VENUE, orderId: 'order-1', customerId: 'nuevo', staffId: 'staff-1', ligaNueva: true })
+    expect(mockLate).toHaveBeenCalledWith({
+      venueId: VENUE,
+      orderId: 'order-1',
+      customerId: 'nuevo',
+      staffId: 'staff-1',
+      ligaNueva: true,
+      ventaCobrada: true,
+    })
     expect(r).toEqual({ orderCustomers: LISTA, loyalty: SELLO })
   })
 
@@ -412,7 +433,13 @@ describe('TPV createAndAddCustomerToOrder', () => {
     expect(mockReabrir).not.toHaveBeenCalled()
     expect(mockLate).not.toHaveBeenCalled()
     expect(r).toEqual({ orderCustomers: LISTA, loyalty: null })
-    expect(mockAuditSinPermiso).toHaveBeenCalledWith({ venueId: VENUE, orderId: 'order-1', customerId: 'nuevo', staffId: 'staff-1' })
+    expect(mockAuditSinPermiso).toHaveBeenCalledWith({
+      venueId: VENUE,
+      orderId: 'order-1',
+      customerId: 'nuevo',
+      staffId: 'staff-1',
+      orderNumber: 'ORD-1',
+    })
   })
 
   it('F1: cuenta ABIERTA y sin permiso: el cliente nuevo queda primario (el cobro acreditará), sin auditoría', async () => {
@@ -425,6 +452,9 @@ describe('TPV createAndAddCustomerToOrder', () => {
   it('🔴 F1: el candado de la venta es la PRIMERA sentencia, con su presupuesto de espera', async () => {
     await createAndAddCustomerToOrder(VENUE, 'order-1', { firstName: 'Dany' }, 'staff-1', CON_PERMISO)
     expect(candadosDentro).toEqual([true])
+    const [sql] = prismaMock.$queryRaw.mock.calls[0] as unknown as [TemplateStringsArray]
+    // R3-2: `FOR NO KEY UPDATE` — serializa contra el cobro (`FOR UPDATE`) sin chocar con el `FOR KEY SHARE` de las llaves foráneas.
+    expect(sql.join('?')).toMatch(/FROM "Order"[\s\S]*FOR NO KEY UPDATE/)
     expect(prismaMock.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.order.findFirst.mock.invocationCallOrder[0])
     expect(prismaMock.$transaction).toHaveBeenCalledWith(expect.any(Function), OPCIONES_DE_LA_TX)
   })
@@ -434,6 +464,45 @@ describe('TPV createAndAddCustomerToOrder', () => {
     expect(mockReabrir).not.toHaveBeenCalled()
     expect(mockLate).not.toHaveBeenCalled()
     expect(r.loyalty).toBeNull()
+  })
+
+  // ── R3-3 (ronda 3; Important N1 + Codex P2-3): mismo reintento que «agregar cliente» ────────────────────────────────────────
+  it.each([
+    ['la serialización del candado crudo (P2010/40001)', { code: 'P2010', meta: { code: '40001' } }],
+    ['un bloqueo mutuo (P2010/40P01)', { code: 'P2010', meta: { code: '40P01' } }],
+    ['la serialización de una consulta de modelo (P2034)', { code: 'P2034' }],
+  ])('🔴 R3-3: %s se reintenta y el cliente se crea y liga UNA vez (antes: 500)', async (_c, forma) => {
+    prismaMock.$transaction.mockRejectedValueOnce(Object.assign(new Error('conflicto'), forma))
+    const r = await createAndAddCustomerToOrder(VENUE, 'order-1', { firstName: 'Dany' }, 'staff-1', CON_PERMISO)
+    expect(r).toEqual({ orderCustomers: LISTA, loyalty: SELLO })
+    expect(prismaMock.customer.create).toHaveBeenCalledTimes(1)
+    expect(prismaMock.orderCustomer.create).toHaveBeenCalledTimes(1)
+  })
+
+  it('🔴 R3-3: un P2002 que NO es correo/teléfono (el primario de otro a la vez) se reintenta bajo el candado', async () => {
+    prismaMock.$transaction.mockRejectedValueOnce(choque(['orderId']))
+    prismaMock.orderCustomer.findFirst.mockResolvedValue({ id: 'oc-otro', customerId: 'cust-otro' } as any)
+    const r = await createAndAddCustomerToOrder(VENUE, 'order-1', { firstName: 'Dany' }, 'staff-1', CON_PERMISO)
+    expect(r.orderCustomers).toEqual(LISTA)
+    expect(prismaMock.orderCustomer.create).toHaveBeenCalledWith({ data: { orderId: 'order-1', customerId: 'nuevo', isPrimary: false } })
+  })
+
+  it.each([
+    ['correo', ['venueId', 'email'], 'Ya existe un cliente con ese email en este venue'],
+    ['teléfono', ['venueId', 'phone'], 'Ya existe un cliente con ese teléfono en este venue'],
+  ])('regresión R3-3: un P2002 por %s duplicado (carrera) sigue siendo su 400 específico, sin reintentar', async (_c, target, mensaje) => {
+    prismaMock.$transaction.mockRejectedValueOnce(choque(target))
+    await expect(createAndAddCustomerToOrder(VENUE, 'order-1', { firstName: 'Dany' }, 'staff-1', CON_PERMISO)).rejects.toThrow(mensaje)
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
+  })
+
+  it('R3-3: el reintento tiene tope: conflicto persistente ⇒ 400, sin sello', async () => {
+    const c = { code: 'P2010', meta: { code: '40001' } }
+    for (let i = 0; i < 5; i++) prismaMock.$transaction.mockRejectedValueOnce(Object.assign(new Error('conflicto'), c))
+    await expect(createAndAddCustomerToOrder(VENUE, 'order-1', { firstName: 'Dany' }, 'staff-1', CON_PERMISO)).rejects.toThrow(
+      'Conflicto de concurrencia persistente',
+    )
+    expect(mockLate).not.toHaveBeenCalled()
   })
 
   it('regresión: teléfono repetido ⇒ 400, sin alta ni lealtad', async () => {

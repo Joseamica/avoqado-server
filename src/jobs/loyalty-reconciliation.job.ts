@@ -18,7 +18,8 @@ interface LoyaltyReconciliationDependencies {
   prisma: typeof prisma
   cron?: CronHandle
   now: () => Date
-  award: typeof awardLoyaltyForPaidOrder
+  // Sólo `args`: el reconciliador nunca pasa opciones (el envoltorio de abajo acepta un observador opcional, R3-1).
+  award: (args: Parameters<typeof awardLoyaltyForPaidOrder>[0]) => ReturnType<typeof awardLoyaltyForPaidOrder>
 }
 
 const defaults: LoyaltyReconciliationDependencies = {

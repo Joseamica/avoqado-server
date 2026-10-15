@@ -1,6 +1,7 @@
 import { Prisma } from '@prisma/client'
 import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
+import { bloquearVentaParaLiga, motivoDeReintentoDeLiga } from '../shared/ligaDeClienteEnVenta'
 
 /**
  * El CLIENTE de una venta rápida (`POST /fast`).
@@ -233,11 +234,16 @@ interface OrderAttribution {
  * Se lee con el venue del token: el pago se resolvió por `referenceNumber`/`idempotencyKey`,
  * no por tenant, así que aquí se vuelve a anclar la orden a su negocio.
  */
-async function readOrderAttribution(venueId: string, orderId: string, customerId?: string): Promise<OrderAttribution | null> {
-  const order = await prisma.order.findFirst({ where: { id: orderId, venueId }, select: { id: true, customerId: true } })
+async function readOrderAttribution(
+  venueId: string,
+  orderId: string,
+  customerId?: string,
+  db: Pick<Prisma.TransactionClient, 'order' | 'orderCustomer'> = prisma,
+): Promise<OrderAttribution | null> {
+  const order = await db.order.findFirst({ where: { id: orderId, venueId }, select: { id: true, customerId: true } })
   if (!order) return null
 
-  const filas = await prisma.orderCustomer.findMany({
+  const filas = await db.orderCustomer.findMany({
     where: { orderId },
     select: { id: true, customerId: true, isPrimary: true },
   })
@@ -339,33 +345,80 @@ export async function linkCustomerToExistingOrder(
       return { status: 'LINKED', customerId: customer.id, requestedCustomerId, warning: null }
     }
 
-    try {
-      await prisma.$transaction(async tx => {
-        if (!estado.ourRow) {
-          // 🔴 `isPrimary` NO se hardcodea a `true`: hay un índice único PARCIAL
-          // (`OrderCustomer_orderId_isPrimary_unique`, migración 20251211171115) que
-          // permite UN solo primario por orden. Escribir `true` a ciegas revienta con
-          // P2002 sobre una orden que ya tenía primario. Es exactamente lo que hace la
-          // referencia que este módulo espeja (`attachCustomerToOrder`,
-          // `order.mobile.service.ts:2823`): `isPrimary: !hasPrimaryCustomer`.
-          await tx.orderCustomer.create({ data: { orderId, customerId: customer.id, isPrimary: !estado.primaryId } })
-        } else if (!estado.ourRow.isPrimary && !estado.primaryId) {
-          // Ya estaba vinculado pero SIN primario en la orden: se promueve, igual que
-          // `order.mobile.service.ts:2826-2829`. Sin esto la lealtad (que lee
-          // `isPrimary`) y los denormalizados de la orden apuntarían a personas
-          // distintas — la atribución partida en dos.
-          await tx.orderCustomer.update({ where: { id: estado.ourRow.id }, data: { isPrimary: true } })
-        }
-        await tx.order.update({
-          where: { id: orderId },
-          data: {
-            customerId: customer.id,
-            customerName: customerDisplayName(customer),
-            customerPhone: customer.phone || null,
-            customerEmail: customer.email || null,
-          },
-        })
+    /** Lo que decidió la relectura BAJO el candado: escribir (`fill`), o devolver sin escribir. */
+    type DesenlaceDentro = { kind: 'escrito' } | { kind: 'conflict'; holder: string } | { kind: 'alreadyOurs' } | { kind: 'gone' }
+    const escribirBajoCandado = () =>
+      prisma.$transaction(
+        async (tx): Promise<DesenlaceDentro> => {
+          // 🔴 R3-2 (ronda 3; Codex recheck-7 P2-2, cruce A): PRIMERO el candado de la venta —el mismo modo que toman las ligas del
+          // POS y de la TPV (`FOR NO KEY UPDATE`)— y DESPUÉS el vínculo. Antes escribía `OrderCustomer` y luego `Order` sin
+          // candado: al revés que el POS (venta → vínculo), y con un acompañante sin primario los dos se esperaban (40P01).
+          if (!(await bloquearVentaParaLiga(tx, { venueId, orderId }))) return { kind: 'gone' }
+          // La atribución se RELEE bajo el candado: la de afuera pudo cambiar mientras se esperaba.
+          const vigente = await readOrderAttribution(venueId, orderId, customer.id, tx)
+          if (!vigente) return { kind: 'gone' }
+          const veredictoDentro = judgeAttribution(vigente, customer.id)
+          if (veredictoDentro.kind !== 'fill') return veredictoDentro
+          await escribir(tx, vigente)
+          return { kind: 'escrito' }
+        },
+        // El presupuesto de toda transacción que toma el candado de la venta (`ORDER_LOCK_WAIT_BUDGET`, T8-R2).
+        { timeout: 15_000, maxWait: 5_000 },
+      )
+    const escribir = async (tx: Prisma.TransactionClient, estado: OrderAttribution) => {
+      if (!estado.ourRow) {
+        // 🔴 `isPrimary` NO se hardcodea a `true`: hay un índice único PARCIAL
+        // (`OrderCustomer_orderId_isPrimary_unique`, migración 20251211171115) que
+        // permite UN solo primario por orden. Escribir `true` a ciegas revienta con
+        // P2002 sobre una orden que ya tenía primario. Es exactamente lo que hace la
+        // referencia que este módulo espeja (`attachCustomerToOrder`,
+        // `order.mobile.service.ts:2823`): `isPrimary: !hasPrimaryCustomer`.
+        await tx.orderCustomer.create({ data: { orderId, customerId: customer.id, isPrimary: !estado.primaryId } })
+      } else if (!estado.ourRow.isPrimary && !estado.primaryId) {
+        // Ya estaba vinculado pero SIN primario en la orden: se promueve, igual que
+        // `order.mobile.service.ts:2826-2829`. Sin esto la lealtad (que lee
+        // `isPrimary`) y los denormalizados de la orden apuntarían a personas
+        // distintas — la atribución partida en dos.
+        await tx.orderCustomer.update({ where: { id: estado.ourRow.id }, data: { isPrimary: true } })
+      }
+      await tx.order.update({
+        where: { id: orderId },
+        data: {
+          customerId: customer.id,
+          customerName: customerDisplayName(customer),
+          customerPhone: customer.phone || null,
+          customerEmail: customer.email || null,
+        },
       })
+    }
+
+    try {
+      // R3-2, como defensa: un interbloqueo (40P01) se reintenta, acotado (3 intentos). Lo demás va al manejo de siempre.
+      let desenlace: DesenlaceDentro | undefined
+      for (let intento = 1; !desenlace; intento++) {
+        try {
+          desenlace = await escribirBajoCandado()
+        } catch (err) {
+          if (intento < 3 && motivoDeReintentoDeLiga(err) === 'INTERBLOQUEO') {
+            logger.warn('⚠️ [FastPayment] interbloqueo (40P01) al rellenar el cliente; reintentando', { venueId, orderId, intento })
+            continue
+          }
+          throw err
+        }
+      }
+      if (desenlace.kind === 'gone') return unverified
+      if (desenlace.kind === 'conflict') {
+        logger.warn('⚠️ [FastPayment] Bajo el candado, la venta ya tenía otro cliente — no se reasigna', {
+          venueId,
+          orderId,
+          clienteActual: desenlace.holder,
+          clienteSolicitado: customer.id,
+        })
+        return { status: 'CONFLICT', customerId: desenlace.holder, requestedCustomerId, warning: WARNING_CONFLICT }
+      }
+      if (desenlace.kind === 'alreadyOurs') {
+        return { status: 'LINKED', customerId: customer.id, requestedCustomerId, warning: null }
+      }
     } catch (err) {
       // 🔴 Carrera perdida contra el índice único parcial: otro escritor se volvió
       // primario entre nuestra lectura y nuestra escritura. NO es "no se pudo verificar"

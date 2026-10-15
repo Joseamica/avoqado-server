@@ -254,12 +254,20 @@ export async function awardLoyaltyForPaidOrder(
     const message = `marker:${markerError?.message ?? String(markerError)}`
     errors.push(message)
     logger.error('⚠️ Loyalty outcome marker failed; reconciler will retry', { orderId, venueId, error: message })
-    return { complete: false, errors }
+    // R3-1: lo otorgado es un hecho aunque la marca falle; quien audita lo necesita.
+    return { complete: false, errors, ...(otorgado ? { otorgado } : {}) }
   }
 
   const conOtro = otroCliente ? { otroCliente: true as const } : {}
   const conOtorgado = otorgado ? { otorgado } : {}
   return cerrar ? { complete, errors, ...conOtro, ...conOtorgado } : { complete, errors, leyoSinCliente, ...conOtro, ...conOtorgado }
+}
+
+/** R3-1: el hecho «esta llamada otorgó X antes de fallar» que `earnPoints` cuelga de su error, si lo trae. */
+function otorgadoDelError(error: unknown): { sello: boolean; puntos: boolean } | undefined {
+  const hecho = (error as { otorgadoAntesDelFallo?: { sello?: unknown; puntos?: unknown } } | null)?.otorgadoAntesDelFallo
+  if (!hecho || (hecho.sello !== true && hecho.puntos !== true)) return undefined
+  return { sello: hecho.sello === true, puntos: hecho.puntos === true }
 }
 
 async function acreditar(
@@ -294,6 +302,9 @@ async function acreditar(
       error: message,
       reason: message.includes('not enabled') ? 'LOYALTY_DISABLED' : 'LOYALTY_ERROR',
     })
-    return { estado: 'FALLO' }
+    // 🔴 R3-1 (ronda 3): `earnPoints` pudo otorgar una pieza ANTES de tronar (los puntos, si falló el sello; el sello, si falló
+    // la escritura de los puntos) y lo trae en el error. Es un hecho: viaja para que la auditoría de la liga no lo pierda.
+    const otorgado = otorgadoDelError(loyaltyError)
+    return { estado: 'FALLO', ...(otorgado ? { otorgado } : {}) }
   }
 }
