@@ -1,4 +1,7 @@
+import fs from 'fs'
+import path from 'path'
 import type { NextFunction, Request, Response } from 'express'
+import { NotFoundError } from '@/errors/AppError'
 
 const mockAttach = jest.fn()
 const mockAttachLatest = jest.fn()
@@ -6,8 +9,10 @@ jest.mock('@/services/mobile/order.mobile.service', () => ({
   attachCustomerToPayment: (...a: unknown[]) => mockAttach(...a),
   attachCustomerToLatestPayment: (...a: unknown[]) => mockAttachLatest(...a),
 }))
+const mockDescribe = jest.fn()
+jest.mock('@/services/shared/loyaltyOnLateCustomer', () => ({ describeSaleStampForPayment: (...a: unknown[]) => mockDescribe(...a) }))
 
-import { attachCustomerToLatestPayment, attachCustomerToPayment } from '@/controllers/mobile/payment.mobile.controller'
+import { attachCustomerToLatestPayment, attachCustomerToPayment, getPaymentLoyalty } from '@/controllers/mobile/payment.mobile.controller'
 
 function res() {
   const r: any = {}
@@ -67,5 +72,44 @@ describe('payment.mobile.controller — el actor sale del token', () => {
     )
     expect(next).toHaveBeenCalledWith(boom)
     expect(r.json).not.toHaveBeenCalled()
+  })
+})
+
+describe('GET /mobile/venues/:venueId/payments/:paymentId/loyalty', () => {
+  beforeEach(() => jest.clearAllMocks())
+
+  it('responde { success, data } con el resultado del sello', async () => {
+    const SELLO = { stampsEnabled: true, stamped: false, reason: 'PENDING', stampsEarned: 2, stampsRequired: 7, rewardReady: false }
+    mockDescribe.mockResolvedValue(SELLO)
+    const r = res()
+    await getPaymentLoyalty({ params: { venueId: 'v1', paymentId: 'p1' } } as unknown as Request, r, next)
+    expect(mockDescribe).toHaveBeenCalledWith({ venueId: 'v1', paymentId: 'p1' })
+    expect(r.status).toHaveBeenCalledWith(200)
+    expect(r.json).toHaveBeenCalledWith({ success: true, data: SELLO })
+  })
+
+  it('venta sin cliente: data null', async () => {
+    mockDescribe.mockResolvedValue(null)
+    const r = res()
+    await getPaymentLoyalty({ params: { venueId: 'v1', paymentId: 'p1' } } as unknown as Request, r, next)
+    expect(r.json).toHaveBeenCalledWith({ success: true, data: null })
+  })
+
+  it('pago de otro negocio: el 404 del servicio va a next', async () => {
+    const n = jest.fn()
+    mockDescribe.mockRejectedValue(new NotFoundError('Pago no encontrado'))
+    const r = res()
+    await getPaymentLoyalty({ params: { venueId: 'v1', paymentId: 'ajeno' } } as unknown as Request, r, n as NextFunction)
+    expect(n).toHaveBeenCalledWith(expect.any(NotFoundError))
+    expect(r.json).not.toHaveBeenCalled()
+  })
+
+  it('🔴 la ruta exige token y loyalty:read (guardia estática)', () => {
+    const rutas = fs.readFileSync(path.join(__dirname, '../../../../src/routes/mobile.routes.ts'), 'utf8')
+    expect(rutas).toMatch(
+      /'\/venues\/:venueId\/payments\/:paymentId\/loyalty',\s*authenticateTokenMiddleware,\s*checkPermission\('loyalty:read'\),\s*paymentMobileController\.getPaymentLoyalty/,
+    )
+    // Es una LECTURA: va por GET (nunca un POST que la app pudiera confundir con «ligar»).
+    expect(rutas).toMatch(/router\.get\(\s*'\/venues\/:venueId\/payments\/:paymentId\/loyalty'/)
   })
 })

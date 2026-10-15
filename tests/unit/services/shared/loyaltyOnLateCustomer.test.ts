@@ -504,6 +504,16 @@ describe('describeSaleStampForPayment (GET de la app)', () => {
     conVenta({ loyaltyProcessedAt: null })
     expect(await describeSaleStampForPayment({ venueId: VENUE, paymentId: 'p1' })).toMatchObject({ stamped: false, reason: 'PENDING' })
   })
+  it('🔴 venta que una liga tardía REABRIÓ (marca de fila) y espera su sello: PENDING, no «no suma»', async () => {
+    // Así la deja `reabrirLealtadSiAplica`: cobrada sin cliente, `loyaltyEligibleAt` puesto al último cobro (era null),
+    // `loyaltyProcessedAt` en null y la marca. El cliente ya es primario y el sello aún no llega (intento inmediato caído).
+    conVenta({ loyaltyEligibleAt: hace(30 * MIN), loyaltyProcessedAt: null, loyaltyLastError: MARCA })
+    expect(await describeSaleStampForPayment({ venueId: VENUE, paymentId: 'p1' })).toMatchObject({
+      stampsEnabled: true,
+      stamped: false,
+      reason: 'PENDING',
+    })
+  })
   it('ya sellada: stamped true aunque loyaltyProcessedAt siga null', async () => {
     eventosDeLaVenta = [EARN(CUST)]
     conVenta({ loyaltyProcessedAt: null, stampEvents: eventosDeLaVenta })

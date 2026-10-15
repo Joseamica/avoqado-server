@@ -1660,6 +1660,19 @@ router.post(
   paymentMobileController.attachCustomerToLatestPayment,
 )
 
+/**
+ * GET /api/v1/mobile/venues/:venueId/payments/:paymentId/loyalty
+ * Sello de la venta de ese pago para su cliente principal (spec 2026-10-14 §3.1). Sólo lee.
+ * data: { stampsEnabled, stamped, reason, stampsEarned, stampsRequired, rewardReady } | null
+ * Sin checkFeatureAccess a propósito: un negocio sin el plan recibe `stampsEnabled: false` y la app no pinta nada.
+ */
+router.get(
+  '/venues/:venueId/payments/:paymentId/loyalty',
+  authenticateTokenMiddleware,
+  checkPermission('loyalty:read'),
+  paymentMobileController.getPaymentLoyalty,
+)
+
 // ============================================================================
 // TERMINAL PAYMENTS (Socket.IO Bridge)
 // Authenticated endpoints - requires valid JWT

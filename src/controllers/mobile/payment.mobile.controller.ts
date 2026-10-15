@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express'
 import * as orderMobileService from '../../services/mobile/order.mobile.service'
 import * as paymentTpvService from '../../services/tpv/payment.tpv.service'
+import { describeSaleStampForPayment } from '../../services/shared/loyaltyOnLateCustomer'
 
 /**
  * Record a fast payment (no order, just amount)
@@ -63,6 +64,21 @@ export async function attachCustomerToLatestPayment(req: Request, res: Response,
       data: order,
       message: 'Customer attached to latest payment successfully',
     })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * GET /mobile/venues/:venueId/payments/:paymentId/loyalty — el renglón del sello en «Cobro exitoso» cuando el cliente venía
+ * desde el carrito. `data: null` si la venta no tiene cliente (o sigue abierta); `reason: 'PENDING'` si la lealtad aún corre
+ * (también la venta que una liga tardía reabrió y espera su sello). Sólo lee; el pago se busca dentro del negocio de la URL.
+ */
+export async function getPaymentLoyalty(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { venueId, paymentId } = req.params
+    const data = await describeSaleStampForPayment({ venueId, paymentId })
+    res.status(200).json({ success: true, data })
   } catch (error) {
     next(error)
   }
