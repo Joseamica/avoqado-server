@@ -44,83 +44,91 @@ function toCardType(t: string): CardType {
 }
 
 export async function computeRevenueReport(filters: ReportFilters): Promise<MerchantRevenueRow[]> {
-  const txs = await prisma.transactionCost.findMany({
-    where: {
-      createdAt: { gte: filters.from, lte: filters.to },
-      ...(filters.venueId && { payment: { venueId: filters.venueId } }),
-    },
-    include: {
-      merchantAccount: {
-        select: {
-          id: true,
-          alias: true,
-          displayName: true,
-          externalMerchantId: true,
-          provider: { select: { code: true } },
-          merchantRevenueShare: true,
+  const byMerchant = new Map<string, MerchantRevenueRow>()
+  let cursor: string | undefined
+  while (true) {
+    const txs = await prisma.transactionCost.findMany({
+      take: 500,
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      ...(cursor && { cursor: { id: cursor }, skip: 1 }),
+      where: {
+        createdAt: { gte: filters.from, lte: filters.to },
+        ...(filters.venueId && { payment: { venueId: filters.venueId } }),
+      },
+      include: {
+        merchantAccount: {
+          select: {
+            id: true,
+            alias: true,
+            displayName: true,
+            externalMerchantId: true,
+            provider: { select: { code: true } },
+            merchantRevenueShare: true,
+          },
         },
       },
-    },
-  })
-
-  const byMerchant = new Map<string, MerchantRevenueRow>()
-
-  for (const tc of txs) {
-    const m = tc.merchantAccount
-    const mid = m.id
-    const cardType = toCardType(tc.transactionType)
-
-    // Si el merchant tiene config, la convertimos al shape que espera la función
-    // pura. Decimal de Prisma llega como objeto; usamos Number() para extraer.
-    const ms = m.merchantRevenueShare
-    const share: MerchantRevenueShareConfig | null = ms
-      ? {
-          aggregatorPrice:
-            ms.aggregatorPrice && typeof ms.aggregatorPrice === 'object' && !Array.isArray(ms.aggregatorPrice)
-              ? (ms.aggregatorPrice as Record<CardType, number>)
-              : null,
-          aggregatorPriceIncludesTax: ms.aggregatorPriceIncludesTax,
-          avoqadoShareOfProviderMargin: Number(ms.avoqadoShareOfProviderMargin),
-          avoqadoShareOfAggregatorMargin: ms.avoqadoShareOfAggregatorMargin == null ? null : Number(ms.avoqadoShareOfAggregatorMargin),
-          taxRate: Number(ms.taxRate),
-        }
-      : null
-
-    // Las tasas en TransactionCost son SNAPSHOTS post-`applyTaxIfNeeded`: ya
-    // tienen el IVA aplicado si la estructura era "+ IVA". Por eso pasamos
-    // `includesTax: true` — la función pura las trata como tasas finales y
-    // extrae el monto pre-IVA para el reparto.
-    const split = computeRevenueSplit({
-      amount: Number(tc.amount),
-      cardType,
-      providerCostRate: Number(tc.providerRate),
-      providerCostIncludesTax: true,
-      venueChargeRate: Number(tc.venueRate),
-      venueChargeIncludesTax: true,
-      share,
     })
 
-    let row = byMerchant.get(mid)
-    if (!row) {
-      row = {
-        merchantAccountId: mid,
-        merchantLabel: m.displayName || m.alias || m.externalMerchantId,
-        providerCode: m.provider.code,
-        hasAggregator: !!share?.aggregatorPrice,
-        hasShareConfig: !!share,
-        txCount: 0,
-        volume: 0,
-        providerNet: 0,
-        avoqadoNet: 0,
-        aggregatorNet: 0,
+    for (const tc of txs) {
+      const m = tc.merchantAccount
+      const mid = m.id
+      const cardType = toCardType(tc.transactionType)
+
+      // Si el merchant tiene config, la convertimos al shape que espera la función
+      // pura. Decimal de Prisma llega como objeto; usamos Number() para extraer.
+      const ms = m.merchantRevenueShare
+      const share: MerchantRevenueShareConfig | null = ms
+        ? {
+            aggregatorPrice:
+              ms.aggregatorPrice && typeof ms.aggregatorPrice === 'object' && !Array.isArray(ms.aggregatorPrice)
+                ? (ms.aggregatorPrice as Record<CardType, number>)
+                : null,
+            aggregatorPriceIncludesTax: ms.aggregatorPriceIncludesTax,
+            avoqadoShareOfProviderMargin: Number(ms.avoqadoShareOfProviderMargin),
+            intermediaryFeeRate: Number(ms.intermediaryFeeRate ?? 0),
+            avoqadoShareOfAggregatorMargin: ms.avoqadoShareOfAggregatorMargin == null ? null : Number(ms.avoqadoShareOfAggregatorMargin),
+            taxRate: Number(ms.taxRate),
+          }
+        : null
+
+      // Las tasas en TransactionCost son SNAPSHOTS post-`applyTaxIfNeeded`: ya
+      // tienen el IVA aplicado si la estructura era "+ IVA". Por eso pasamos
+      // `includesTax: true` — la función pura las trata como tasas finales y
+      // extrae el monto pre-IVA para el reparto.
+      const split = computeRevenueSplit({
+        amount: Number(tc.amount),
+        cardType,
+        providerCostRate: Number(tc.providerRate),
+        providerCostIncludesTax: true,
+        venueChargeRate: Number(tc.venueRate),
+        venueChargeIncludesTax: true,
+        share,
+      })
+
+      let row = byMerchant.get(mid)
+      if (!row) {
+        row = {
+          merchantAccountId: mid,
+          merchantLabel: m.displayName || m.alias || m.externalMerchantId,
+          providerCode: m.provider.code,
+          hasAggregator: !!share?.aggregatorPrice,
+          hasShareConfig: !!share,
+          txCount: 0,
+          volume: 0,
+          providerNet: 0,
+          avoqadoNet: 0,
+          aggregatorNet: 0,
+        }
+        byMerchant.set(mid, row)
       }
-      byMerchant.set(mid, row)
+      row.txCount += 1
+      row.volume += Number(tc.amount)
+      row.providerNet += split.providerNet
+      row.avoqadoNet += split.avoqadoNet
+      row.aggregatorNet += split.aggregatorNet
     }
-    row.txCount += 1
-    row.volume += Number(tc.amount)
-    row.providerNet += split.providerNet
-    row.avoqadoNet += split.avoqadoNet
-    row.aggregatorNet += split.aggregatorNet
+    if (txs.length < 500) break
+    cursor = txs[txs.length - 1].id
   }
 
   // Redondea cada fila al final para minimizar drift acumulado.
