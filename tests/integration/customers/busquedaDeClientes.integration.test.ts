@@ -159,6 +159,14 @@ describe('búsqueda de clientes (integración)', () => {
     expect((await getCustomers(venueA!, 1, 100000)).meta.pageSize).toBe(100)
   })
 
+  // 🔴 BAJO-1 (full-testing, 15-oct-2026): `?search=jo%00se` respondía 500 (Postgres 22021: el byte nulo no cabe en un texto).
+  it('un byte nulo en el texto no truena contra Postgres: se quita y se busca lo demás', async () => {
+    expect(await nombres('jo\u0000se')).toEqual(['José'])
+    expect(await nombres('55\u00004345\u00003965')).toEqual(['José'])
+    const soloNulo = await getCustomers(venueA!, 1, 50, '\u0000')
+    expect(soloNulo.meta.totalCount).toBe((await getCustomers(venueA!, 1, 50)).meta.totalCount) // sin búsqueda = la lista normal
+  })
+
   it('un comodín del texto no se lee como comodín («%» no encuentra a todos)', async () => {
     expect(await nombres('%')).toEqual([])
     expect(await nombres('_')).toEqual([])

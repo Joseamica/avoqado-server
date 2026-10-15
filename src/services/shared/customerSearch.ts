@@ -61,10 +61,15 @@ export const TABLA_DE_PLEGADO_SQL: Readonly<{ de: string; a: string }> = Object.
 const ACENTOS_DE = TABLA_DE_PLEGADO_SQL.de
 const ACENTOS_A = TABLA_DE_PLEGADO_SQL.a
 
-/** `null` = sin búsqueda (vacío, sólo espacios o un parámetro que no es texto, p. ej. `?search=a&search=b`). */
+/**
+ * `null` = sin búsqueda (vacío, sólo espacios o un parámetro que no es texto, p. ej. `?search=a&search=b`).
+ *
+ * 🔴 BAJO-1 (full-testing, 15-oct-2026): el byte nulo se quita ANTES de todo. Postgres no lo acepta en un texto (22021) y
+ * `?search=jo%00se` respondía 500; sin él, «jose» se busca normal.
+ */
 export function interpretarBusquedaDeClientes(raw: unknown): CustomerSearch | null {
   if (typeof raw !== 'string') return null
-  const texto = raw.trim().slice(0, SEARCH_MAX_CHARS)
+  const texto = raw.split('\u0000').join('').trim().slice(0, SEARCH_MAX_CHARS)
   if (!texto) return null
   let digitos = texto.replace(/\D/g, '')
   if (/^[0-9 +\-()]+$/.test(texto) && digitos.length >= 4) {

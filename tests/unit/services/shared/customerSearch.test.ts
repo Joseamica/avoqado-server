@@ -44,6 +44,31 @@ describe('interpretarBusquedaDeClientes', () => {
   it('plegarTexto quita acentos y mayúsculas', () => {
     expect(plegarTexto('JOSÉ Ñoño Ü')).toBe('jose nono u')
   })
+
+  // 🔴 BAJO-1 (full-testing, 15-oct-2026): `?search=jo%00se` respondía 500. Postgres no acepta el byte nulo en un texto
+  // (22021 «invalid byte sequence for encoding UTF8: 0x00») y el valor viajaba tal cual como parámetro del SQL. Se quita
+  // ANTES de interpretar y el resto se busca normal.
+  describe('byte nulo (\\u0000) en el texto', () => {
+    it.each<[string, unknown]>([
+      ['jo\u0000se', { kind: 'WORDS', words: ['jose'] }],
+      ['José\u0000 López', { kind: 'WORDS', words: ['jose', 'lopez'] }],
+      ['55\u00004345\u00003965', { kind: 'PHONE', digits: '5543453965' }],
+      ['\u0000', null],
+      [' \u0000\u0000 ', null],
+    ])('%j', (entrada, esperado) => {
+      expect(interpretarBusquedaDeClientes(entrada)).toEqual(esperado)
+    })
+
+    it('ningún parámetro del SQL lleva el byte nulo', () => {
+      for (const entrada of ['jo\u0000se', '55\u00004345\u00003965']) {
+        const busqueda = interpretarBusquedaDeClientes(entrada)
+        expect(busqueda).not.toBeNull()
+        const q = sqlDeIdsDeClientes('venue-A', busqueda!)
+        const conNulo = q.values.filter(v => typeof v === 'string' && v.includes('\u0000'))
+        expect(conNulo).toEqual([])
+      }
+    })
+  })
 })
 
 /**
