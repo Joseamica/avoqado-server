@@ -185,6 +185,8 @@ model Zone {
 
 model Venue {
   documentRequestLinks DocumentRequestVenueLink[]
+  onlineOrderingSettings OnlineOrderingSettings?
+  onlineOrders           OnlineOrder[]
   capabilityGrants CapabilityGrant[]
   hybridPurchases HybridPurchase[]
   hybridContracts HybridContract[]
@@ -1823,6 +1825,8 @@ model MenuCategoryAssignment {
 // ==========================================
 
 model Product {
+  /// Pedidos en línea: el platillo sólo se muestra en la tienda pública si el restaurante lo marcó.
+  availableOnline Boolean @default(false)
   id      String @id @default(cuid())
   venueId String
   venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
@@ -3961,6 +3965,7 @@ enum PromoterLocationSource {
 }
 
 model Order {
+  onlineOrder    OnlineOrder?
   paymentEffects PaymentEffect[]
   id             String          @id @default(cuid())
   venueId        String
@@ -19940,4 +19945,101 @@ model DocumentRequestVenueLink {
   @@index([requestId, linkedAt, id])
   @@index([submissionId])
   @@index([actorId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Pedidos en línea (tienda web del restaurante) — spec 2026-10-15, ronda 1 aplicada
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Ciclo de vida en línea. La fase 2 (tarjeta) agregará sus valores después: agregar un valor de enum es aditivo.
+enum OnlineOrderStatus {
+  PENDING_ACCEPTANCE // «por aceptar»
+  ACCEPTED // en preparación
+  READY // listo para recoger
+  COMPLETED // entregado
+  REJECTED // el restaurante no lo aceptó
+  EXPIRED // sin respuesta en 10 minutos
+  CANCELLED_BY_CUSTOMER
+  CANCELLED_BY_STAFF
+}
+
+enum OnlineOrderPaymentMode {
+  PAY_AT_PICKUP
+}
+
+enum OnlineOrderRejectReason {
+  OUT_OF_ITEMS
+  CLOSED
+  TOO_BUSY
+  OTHER
+}
+
+/// Ajustes de la tienda en línea de un negocio (1:1 con Venue). Sólo aceptación manual en la v1 (decisión F1).
+model OnlineOrderingSettings {
+  id      String @id @default(cuid())
+  venueId String @unique
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  enabled            Boolean   @default(false)
+  minOrderAmount     Decimal   @default(0) @db.Decimal(10, 2)
+  defaultPrepMinutes Int       @default(15)
+  acceptsPayAtPickup Boolean   @default(true)
+  /// Pausa del gerente (ajustes, `online-orders:manage`).
+  manualPause        Boolean   @default(false)
+  /// Pausa temporal: la pone el gerente o, desde el piso, cocina y caja (15/30/60 min, `orders:update`).
+  pausedUntil        DateTime?
+  /// Mismo formato `HorarioSemanal` de `delivery-channels/core/deliveryHours.service.ts`. NULL = sin restricción. Al crear la
+  /// fila se precarga el horario de reservas si existe y es válido.
+  hours              Json?
+  /// Último sondeo de la BANDEJA ABIERTA (cabecera `x-online-orders-tray: 1`): es el «latido» de presencia.
+  lastInboxPollAt    DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+/// Ciclo de vida en línea de un pedido (1:1 con Order; aísla lo nuevo para no tocar `Order`).
+model OnlineOrder {
+  id      String @id @default(cuid())
+  orderId String @unique
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  status      OnlineOrderStatus      @default(PENDING_ACCEPTANCE)
+  paymentMode OnlineOrderPaymentMode
+
+  /// Capacidad de seguimiento (192 bits). En claro, como `Reservation.cancelSecret`: la repetición idempotente de
+  /// «crear pedido» devuelve el MISMO token. Lee el estado de ESTE pedido y lo cancela mientras está «por aceptar».
+  /// Es un secreto: el logger lo redacta de la ruta (`SECRET_SEGMENT_AFTER`).
+  trackingToken String @unique
+
+  acceptDeadlineAt DateTime
+  acceptedAt       DateTime?
+  estimatedReadyAt DateTime?
+  readyAt          DateTime?
+  completedAt      DateTime?
+  rejectedAt       DateTime?
+  rejectReason     OnlineOrderRejectReason?
+  rejectNote       String?
+  expiredAt        DateTime?
+  cancelledAt      DateTime?
+  /// `'CUSTOMER'`, el id del staff que canceló, `'STAFF'` si no se supo, u `'ORDER_CANCELLED_ELSEWHERE'` cuando la cuenta se
+  /// canceló por otra vía (POS, panel, anular) y el pedido se sincronizó al leer.
+  cancelledBy      String?
+
+  whatsappConsent Boolean @default(false)
+
+  /// Quién imprime la comanda (mismo mecanismo de reclamo con TTL que la pantalla de cocina).
+  printClaimedAt DateTime?
+  printClaimedBy String?
+  printedAt      DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([venueId, status, acceptDeadlineAt])
+  @@index([venueId, createdAt])
+  /// El job de vencimiento barre TODOS los negocios: sin venueId al frente, este índice evita el barrido completo.
+  @@index([status, acceptDeadlineAt])
 }
