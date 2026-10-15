@@ -12,12 +12,18 @@
 //
 // Es un comando cuyo permiso depende del TIPO que viene en el cuerpo (regla
 // «Endpoints with sub-actions» de `.claude/rules/permissions-policy.md`): el permiso genérico de
-// la ruta se queda como está y, sólo si el comando es FACTORY_RESET, se exige además éste.
+// la ruta se queda como está y, sólo si el comando es crítico, se exige además el candado.
 //
-// Se evalúa con el resolvedor canónico (`tienePermisoEnElVenue`: las mismas piezas y el mismo
-// orden que `checkPermission` — superadmin de verdad, rol vigente en el venue con el dueño de la
-// organización como respaldo, conjunto de permisos, personalizaciones y EXCLUSIONES del venue).
-// Nunca por nombre de rol: un negocio puede dárselo a otro rol o quitárselo al dueño.
+// Dos candados, uno por eje:
+//   · Rutas del VENUE: `tpv-factory-reset:execute` con el resolvedor canónico
+//     (`tienePermisoEnElVenue`: las mismas piezas y el mismo orden que `checkPermission` —
+//     superadmin de verdad, rol vigente en el venue con el dueño de la organización como
+//     respaldo, conjunto de permisos, personalizaciones y EXCLUSIONES del venue). Nunca por
+//     nombre de rol: un negocio puede dárselo a otro rol o quitárselo al dueño.
+//   · Ruta de la ORGANIZACIÓN: FACTORY_RESET y UPDATE_MERCHANT son del DUEÑO DE LA ORGANIZACIÓN,
+//     con la regla de `requireOrgOwner` (`esDuenoDeEstaOrganizacionOSuperadmin`), la misma del
+//     asistente de migración (decisión del 15-oct). Un dueño de la org que además es ADMIN en una
+//     tienda sigue siendo el dueño.
 //
 // Diferencia deliberada con `checkPermission`: NO honra el override por PIN de gerente. Ese PIN
 // autoriza una acción del piso; borrar una terminal que cobra es decisión del dueño.
@@ -25,6 +31,7 @@
 import { NextFunction, Request, Response } from 'express'
 import { ForbiddenError, NotFoundError } from '../errors/AppError'
 import { logAction } from '../services/dashboard/activity-log.service'
+import { esDuenoDeEstaOrganizacionOSuperadmin } from '../services/access/duenoDeEstaOrganizacion'
 import prisma from '../utils/prismaClient'
 import { tienePermisoEnElVenue } from './permissionFlag.middleware'
 
@@ -92,13 +99,29 @@ export const soloElDuenoBorraDeFabrica =
   }
 
 /**
- * Para `POST /organizations/:orgId/terminals/:terminalId/command`. La URL no trae venue: se toma
- * el de la terminal, acotada a la organización (mismas respuestas que `validateTerminalInOrg`),
- * y el permiso se evalúa AHÍ — el dueño de la organización entra por el respaldo del resolvedor.
+ * Lo que en la ruta de la ORGANIZACIÓN sólo manda el dueño de la organización: a qué comercio va el
+ * dinero (UPDATE_MERCHANT) y el borrado de la terminal (FACTORY_RESET).
  */
-export async function soloElDuenoBorraDeFabricaEnLaOrganizacion(req: Request, _res: Response, next: NextFunction): Promise<void> {
+const MENSAJES_SOLO_DUENO_DE_LA_ORG: Record<string, string> = {
+  FACTORY_RESET: 'Sólo el dueño de la organización puede borrar de fábrica una terminal desde aquí. Pídeselo al dueño.',
+  UPDATE_MERCHANT: 'Sólo el dueño de la organización puede cambiar el comercio con el que cobra una terminal. Pídeselo al dueño.',
+}
+export const COMANDOS_SOLO_DUENO_DE_LA_ORG = Object.keys(MENSAJES_SOLO_DUENO_DE_LA_ORG)
+export const CODIGO_SOLO_DUENO_DE_LA_ORG = 'ORG_OWNER_REQUIRED'
+
+/**
+ * Para `POST /organizations/:orgId/terminals/:terminalId/command`, después de `requireOrgManager`
+ * y del esquema. Si el comando es crítico: la terminal se acota a la organización (mismas
+ * respuestas que `validateTerminalInOrg`) y sólo pasa el dueño de la org o un superadmin de
+ * verdad; la denegación queda en la bitácora con el venue de la terminal.
+ */
+export async function soloElDuenoDeLaOrgEnComandosCriticos(req: Request, _res: Response, next: NextFunction): Promise<void> {
   try {
-    if (!esBorradoDeFabrica(req.body?.command)) return next()
+    const comando = String(req.body?.command ?? '')
+      .trim()
+      .toUpperCase()
+    const mensaje = MENSAJES_SOLO_DUENO_DE_LA_ORG[comando]
+    if (!mensaje) return next()
 
     const terminal = await prisma.terminal.findUnique({
       where: { id: req.params.terminalId },
@@ -107,8 +130,27 @@ export async function soloElDuenoBorraDeFabricaEnLaOrganizacion(req: Request, _r
     if (!terminal) throw new NotFoundError('Terminal no encontrada')
     if (terminal.venue.organizationId !== req.params.orgId) throw new ForbiddenError('La terminal no pertenece a esta organización')
 
-    await exigirPermisoDeBorradoDeFabrica(req, terminal.venueId)
-    next()
+    const authContext = (req as any).authContext
+    if (await esDuenoDeEstaOrganizacionOSuperadmin(authContext, req.params.orgId)) return next()
+
+    void logAction({
+      staffId: authContext?.userId ?? null,
+      venueId: terminal.venueId,
+      action: 'PERMISSION_DENIED',
+      entity: 'organization-owner',
+      entityId: comando,
+      data: {
+        required: 'organization-owner',
+        command: comando,
+        organizationId: req.params.orgId,
+        terminalId: req.params.terminalId,
+        method: req.method,
+        path: req.originalUrl,
+      },
+      ipAddress: req.ip,
+      userAgent: typeof req.get === 'function' ? req.get('user-agent') : undefined,
+    })
+    throw new ForbiddenError(mensaje, CODIGO_SOLO_DUENO_DE_LA_ORG)
   } catch (error) {
     next(error)
   }

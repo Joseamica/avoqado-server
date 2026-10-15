@@ -23,7 +23,6 @@ const sendCommandMock = jest.fn()
 const getTerminalHealthMock = jest.fn()
 const executeCommandMock = jest.fn()
 const sendCommandToTerminalMock = jest.fn()
-const sendCommandForOrgMock = jest.fn()
 
 jest.mock('@/services/tpv/tpv-health.service', () => ({
   tpvHealthService: {
@@ -38,11 +37,6 @@ jest.mock('@/services/tpv/command-execution.service', () => ({
     executeCommand: (...args: unknown[]) => executeCommandMock(...args),
     sendCommandToTerminal: (...args: unknown[]) => sendCommandToTerminalMock(...args),
   },
-}))
-
-jest.mock('@/services/organization-dashboard/orgTerminals.service', () => ({
-  ...jest.requireActual('@/services/organization-dashboard/orgTerminals.service'),
-  sendCommandForOrg: (...args: unknown[]) => sendCommandForOrgMock(...args),
 }))
 
 jest.mock('@/middlewares/authenticateToken.middleware', () => ({
@@ -121,7 +115,6 @@ beforeEach(() => {
   getTerminalHealthMock.mockResolvedValue({ status: 'ACTIVE' })
   executeCommandMock.mockResolvedValue({ commandId: 'cmd-new', queued: true })
   sendCommandToTerminalMock.mockResolvedValue(undefined)
-  sendCommandForOrgMock.mockResolvedValue({ commandId: 'cmd-org' })
 
   prismaMock.terminal.findFirst.mockResolvedValue(TERMINAL as any)
   prismaMock.terminal.findUnique.mockImplementation((({ where }: any) =>
@@ -318,50 +311,5 @@ describe('POST /venues/:venueId/tpv-commands/:commandId/retry (re-arma un comand
   })
 })
 
-describe('POST /organizations/:orgId/terminals/:terminalId/command (dashboard de la organización)', () => {
-  const ruta = `/organizations/${ORG}/terminals/${TERMINAL.id}/command`
-
-  it.each([
-    ['un cajero de una sucursal de la org', 'cashier-a', 'CASHIER'],
-    ['el ADMIN de la sucursal', 'admin-a', 'ADMIN'],
-    ['el MANAGER de la sucursal', 'manager-a', 'MANAGER'],
-  ])('🔴 %s NO puede borrar de fábrica (antes bastaba con ser miembro de la org)', async (_label, userId, rol) => {
-    const res = await post(ruta, como(userId, rol), { command: 'FACTORY_RESET' })
-
-    expect(res.status).toBe(403)
-    expect(res.body.code).toBe('FACTORY_RESET_OWNER_ONLY')
-    expect(sendCommandForOrgMock).not.toHaveBeenCalled()
-    expect(denegacionesDeBorrado()[0][0]).toMatchObject({ staffId: userId, venueId: VENUE })
-  })
-
-  it('el dueño de la ORGANIZACIÓN sí puede, aunque no tenga fila en esa sucursal', async () => {
-    const res = await post(ruta, como('org-owner', 'OWNER'), { command: 'FACTORY_RESET' })
-
-    expect(res.status).toBe(200)
-    expect(sendCommandForOrgMock).toHaveBeenCalledWith(ORG, TERMINAL.id, 'FACTORY_RESET', 'org-owner', expect.anything(), undefined)
-  })
-
-  it('el dueño de la sucursal sí puede', async () => {
-    const res = await post(ruta, como('owner-a', 'OWNER'), { command: 'FACTORY_RESET' })
-
-    expect(res.status).toBe(200)
-    expect(sendCommandForOrgMock).toHaveBeenCalled()
-  })
-
-  it('una terminal de OTRA organización: no se evalúa ni se encola nada', async () => {
-    prismaMock.terminal.findUnique.mockResolvedValue({ ...TERMINAL, venue: { id: 'venue-z', organizationId: 'org-z' } } as any)
-
-    const res = await post(ruta, como('owner-a', 'OWNER'), { command: 'FACTORY_RESET' })
-
-    expect([403, 404]).toContain(res.status)
-    expect(sendCommandForOrgMock).not.toHaveBeenCalled()
-  })
-
-  it('REGRESIÓN: los comandos que no borran siguen como estaban', async () => {
-    const res = await post(ruta, como('admin-a', 'ADMIN'), { command: 'RESTART' })
-
-    expect(res.status).toBe(200)
-    expect(sendCommandForOrgMock).toHaveBeenCalledWith(ORG, TERMINAL.id, 'RESTART', 'admin-a', expect.anything(), undefined)
-    expect(denegacionesDeBorrado()).toHaveLength(0)
-  })
-})
+// La ruta de la ORGANIZACIÓN (`/organizations/:orgId/terminals/:terminalId/command`) tiene su propio candado —el
+// dueño de la organización, no este permiso de venue— y su prueba: organizationDashboard.terminalCommand.routes.test.ts.
