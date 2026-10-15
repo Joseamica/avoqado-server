@@ -25,6 +25,7 @@ import { registerCommissionTools } from './tools/commissions'
 import { registerStaffPayTools } from './tools/staffPay'
 import { registerSubscriptionTools } from './tools/subscriptions'
 import { registerMenuTools } from './tools/menu'
+import { registerCatalogInBulkTools } from './tools/catalogInBulk'
 import { registerStaffTools } from './tools/staff'
 import { registerRhTools } from './tools/rh'
 import { registerReviewTools } from './tools/reviews'
@@ -115,6 +116,7 @@ export function registerAllTools(server: McpServer, scope: McpScope, flags: Tool
   registerStaffPayTools(server, scope)
   registerSubscriptionTools(server, scope)
   registerMenuTools(server, scope)
+  registerCatalogInBulkTools(server, scope) // catálogo en bloque (buscar por código, precios, altas, existencias): sólo el MCP libre
   registerStaffTools(server, scope)
   registerRhTools(server, scope)
   registerReviewTools(server, scope)
