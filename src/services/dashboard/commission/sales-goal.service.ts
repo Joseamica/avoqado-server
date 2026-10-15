@@ -278,9 +278,18 @@ export async function getSalesGoal(venueId: string, goalId: string): Promise<Sal
 }
 
 /**
+ * Quién hizo el cambio y de qué organización, para la bitácora: sin ellos el asiento no tenía autor
+ * (regla del repo: nunca `staffId: null` si se sabe quién fue). Opcional para no romper llamadores.
+ */
+export interface AuditoriaDeMeta {
+  staffId?: string | null
+  organizationId?: string | null
+}
+
+/**
  * Create a new sales goal
  */
-export async function createSalesGoal(venueId: string, input: CreateSalesGoalInput): Promise<SalesGoal> {
+export async function createSalesGoal(venueId: string, input: CreateSalesGoalInput, auditoria?: AuditoriaDeMeta): Promise<SalesGoal> {
   // Validate staff exists if provided
   if (input.staffId) {
     const staff = await prisma.staff.findUnique({
@@ -329,7 +338,9 @@ export async function createSalesGoal(venueId: string, input: CreateSalesGoalInp
   })
 
   logAction({
+    staffId: auditoria?.staffId ?? null,
     venueId,
+    organizationId: auditoria?.organizationId ?? null,
     action: 'SALES_GOAL_CREATED',
     entity: 'SalesGoal',
     entityId: newGoal.id,
@@ -342,7 +353,12 @@ export async function createSalesGoal(venueId: string, input: CreateSalesGoalInp
 /**
  * Update a sales goal
  */
-export async function updateSalesGoal(venueId: string, goalId: string, input: UpdateSalesGoalInput): Promise<SalesGoal> {
+export async function updateSalesGoal(
+  venueId: string,
+  goalId: string,
+  input: UpdateSalesGoalInput,
+  auditoria?: AuditoriaDeMeta,
+): Promise<SalesGoal> {
   const venueModule = await getOrCreateVenueModule(venueId)
   const storedGoals = getSalesGoalsFromConfig(venueModule.config)
 
@@ -378,7 +394,9 @@ export async function updateSalesGoal(venueId: string, goalId: string, input: Up
   })
 
   logAction({
+    staffId: auditoria?.staffId ?? null,
     venueId,
+    organizationId: auditoria?.organizationId ?? null,
     action: 'SALES_GOAL_UPDATED',
     entity: 'SalesGoal',
     entityId: goalId,
@@ -391,7 +409,7 @@ export async function updateSalesGoal(venueId: string, goalId: string, input: Up
 /**
  * Delete a sales goal
  */
-export async function deleteSalesGoal(venueId: string, goalId: string): Promise<void> {
+export async function deleteSalesGoal(venueId: string, goalId: string, auditoria?: AuditoriaDeMeta): Promise<void> {
   const venueModule = await getOrCreateVenueModule(venueId)
   const storedGoals = getSalesGoalsFromConfig(venueModule.config)
 
@@ -415,7 +433,9 @@ export async function deleteSalesGoal(venueId: string, goalId: string): Promise<
   })
 
   logAction({
+    staffId: auditoria?.staffId ?? null,
     venueId,
+    organizationId: auditoria?.organizationId ?? null,
     action: 'SALES_GOAL_DELETED',
     entity: 'SalesGoal',
     entityId: goalId,
