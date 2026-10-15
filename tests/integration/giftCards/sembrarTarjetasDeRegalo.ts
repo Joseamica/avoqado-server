@@ -176,6 +176,8 @@ export async function sembrarVentaDeTarjetasSinPagar(p: {
   montos: number[]
   /** Abonos en efectivo, en pesos, uno por cobro. */
   abonosEnEfectivo?: number[]
+  /** Abonos con tarjeta en NUESTRA terminal (para devolverlos con `recordRefund`), en pesos; van después de los de efectivo. */
+  abonosConTerminal?: number[]
 }): Promise<{ orderId: string; giftCardIds: string[]; abonos: Payment[] }> {
   const total = p.montos.reduce((s, m) => s + m, 0)
   const order = await prisma.order.create({
@@ -205,11 +207,42 @@ export async function sembrarVentaDeTarjetasSinPagar(p: {
   for (const abono of p.abonosEnEfectivo ?? []) {
     await payCashOrder(p.venueId, order.id, { amount: Math.round(abono * 100), tip: 0, staffId: p.staffId, idempotencyKey: folio('abono') })
   }
+  const conTerminal = p.abonosConTerminal ?? []
+  for (const abono of conTerminal) {
+    await prisma.payment.create({
+      data: {
+        venueId: p.venueId,
+        orderId: order.id,
+        amount: D(abono),
+        tipAmount: D(0),
+        netAmount: D(abono),
+        feePercentage: 0,
+        feeAmount: D(0),
+        method: 'CREDIT_CARD',
+        status: 'COMPLETED',
+        type: 'REGULAR',
+        splitType: 'CUSTOMAMOUNT',
+        source: 'TPV',
+        fundsFlow: 'AVOQADO_PROCESSED',
+        processedById: p.staffId,
+      },
+    })
+  }
+  const cuantos = (p.abonosEnEfectivo ?? []).length + conTerminal.length
   const abonos = await prisma.payment.findMany({
     where: { venueId: p.venueId, orderId: order.id, status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] },
     orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-    take: (p.abonosEnEfectivo ?? []).length,
+    take: cuantos,
   })
+  if (conTerminal.length > 0) {
+    // Lo que deja un cobro de la terminal en la cuenta: lo pagado y el saldo pendiente (nunca la deja pagada: es un abono).
+    const pagado = abonos.reduce((suma, a) => suma.plus(a.amount), D(0))
+    if (!pagado.lessThan(total)) throw new Error('La siembra de una venta SIN pagar no admite abonos que la completen.')
+    await prisma.order.update({
+      where: { id: order.id },
+      data: { paidAmount: pagado, remainingBalance: D(total).minus(pagado), paymentStatus: 'PARTIAL' },
+    })
+  }
   return { orderId: order.id, giftCardIds, abonos }
 }
 

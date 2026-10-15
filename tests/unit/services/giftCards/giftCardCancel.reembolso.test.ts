@@ -305,6 +305,65 @@ describe('alRegistrarReembolsoEnTx', () => {
   })
 })
 
+describe('B1 r2 · fix 1: una venta PAGADA con TODOS sus sobres PENDING (F8 negó la activación) se trata como una sin pagar', () => {
+  const todosPendientes: Sobre[] = [
+    { id: 'gc1', status: 'PENDING' },
+    { id: 'gc2', status: 'PENDING' },
+  ]
+
+  it.each([
+    ['el panel', false],
+    ['la terminal', true],
+  ])(
+    '🔴 desde %s: sin rechazo, sin anomalía y sin la desactivación de R2; al quedar en $0 la cuenta se cierra en la misma tx',
+    async (_canal, dineroYaDevuelto) => {
+      const tx = txFalso({ esDeTarjetas: true, sobres: todosPendientes, dinero: { cobrado: 500, devuelto: 500 } })
+      await expect(
+        alRegistrarReembolsoEnTx(tx, { ...base, amount: D(300), dineroYaDevuelto, original: { orderId: 'o-gc', tenderSystemKind: null } }),
+      ).resolves.toEqual({ cuentaCancelada: true })
+      expect(tx.order.updateMany).toHaveBeenCalledWith({
+        where: { id: 'o-gc', venueId: 'v1', status: { notIn: ['CANCELLED', 'DELETED'] } },
+        data: { status: 'CANCELLED', version: { increment: 1 } },
+      })
+      expect(desactivarSobresPendientesDeCuentaEnTx).toHaveBeenCalledWith(tx, { venueId: 'v1', orderId: 'o-gc', staffId: 's1' })
+      expect(desactivarSobresDeCuentaEnTx).not.toHaveBeenCalled()
+      expect(recordGiftCardAnomaly).not.toHaveBeenCalled()
+    },
+  )
+
+  it('🔴 mientras quede dinero se acepta y la cuenta sigue abierta (se devuelve cobro por cobro)', async () => {
+    const tx = txFalso({ esDeTarjetas: true, sobres: todosPendientes, dinero: { cobrado: 500, devuelto: 200 } })
+    await expect(alRegistrarReembolsoEnTx(tx, { ...base, original: { orderId: 'o-gc', tenderSystemKind: null } })).resolves.toEqual({
+      cuentaCancelada: false,
+    })
+    expect(tx.order.updateMany).not.toHaveBeenCalled()
+    expect(desactivarSobresPendientesDeCuentaEnTx).not.toHaveBeenCalled()
+  })
+
+  it('regresión: una venta pagada con UN sobre vivo (no todos PENDING) sigue en el flujo de B2 ⇒ GIFT_CARD_CANCEL_NOT_STARTED', async () => {
+    const tx = txFalso({
+      esDeTarjetas: true,
+      sobres: [
+        { id: 'gc1', status: 'ACTIVE' },
+        { id: 'gc2', status: 'PENDING' },
+      ],
+      dinero: { cobrado: 500, devuelto: 500 },
+    })
+    await expect(alRegistrarReembolsoEnTx(tx, { ...base, original: { orderId: 'o-gc', tenderSystemKind: null } })).rejects.toMatchObject({
+      code: 'GIFT_CARD_CANCEL_NOT_STARTED',
+    })
+    expect(tx.order.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('regresión: todos PENDING pero con un canje en la libreta (imposible hoy) NO toma el atajo: GIFT_CARD_ALREADY_USED', async () => {
+    const tx = txFalso({ esDeTarjetas: true, sobres: todosPendientes, canjes: 1, dinero: { cobrado: 500, devuelto: 500 } })
+    await expect(alRegistrarReembolsoEnTx(tx, { ...base, original: { orderId: 'o-gc', tenderSystemKind: null } })).rejects.toMatchObject({
+      code: 'GIFT_CARD_ALREADY_USED',
+    })
+    expect(tx.order.updateMany).not.toHaveBeenCalled()
+  })
+})
+
 describe('bloquearSobresDelReembolsoEnTx (orden de candados: Order → Payment → sobres → Shift)', () => {
   it('cobro con saldo: bloquea los sobres de sus canjes', async () => {
     const tx = txFalso({ sobresDelCanje: ['gc2', 'gc1', 'gc2'] })

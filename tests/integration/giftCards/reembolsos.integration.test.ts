@@ -13,6 +13,11 @@ jest.mock('@/services/tpv/digitalReceipt.tpv.service', () => ({ generateDigitalR
 jest.mock('@/services/wallet/notifyPassUpdated.service', () => ({
   notifyCustomerPassUpdated: jest.fn().mockResolvedValue({ notified: 0 }),
 }))
+// El aviso a las pantallas de una cuenta cancelada, contado (r2, fix 2). El resto del guardia (cobro de terminal vivo) es el REAL.
+jest.mock('@/services/shared/orderCancelGuard', () => ({
+  ...jest.requireActual('@/services/shared/orderCancelGuard'),
+  avisarOrdenCancelada: jest.fn().mockResolvedValue(undefined),
+}))
 // El cajón REAL, espiado: la prueba lee qué respondió por cada reembolso (fix 6a).
 jest.mock('@/services/shared/cashDrawerPosting', () => {
   const real = jest.requireActual('@/services/shared/cashDrawerPosting')
@@ -30,6 +35,7 @@ import { postCashRefundToDrawer } from '@/services/shared/cashDrawerPosting'
 import { payCashOrder } from '@/services/mobile/order.mobile.service'
 // `integration-setup.ts` mockea la bitácora (fire-and-forget): se comprueba la llamada.
 import { logAction } from '@/services/dashboard/activity-log.service'
+import { avisarOrdenCancelada } from '@/services/shared/orderCancelGuard'
 import {
   crearNegocioDePrueba,
   limpiarEfectosDePagoDelNegocio,
@@ -319,6 +325,7 @@ describe('B1 · reembolsos con tarjetas de regalo', () => {
       prisma.moneyAnomaly.findFirst({ where: { stripeEventId: `giftcard:ACTIVATION_AMOUNT_MISMATCH:${orderId}` } })
     const cancelacionesEnBitacora = (orderId: string) =>
       (logAction as jest.Mock).mock.calls.filter(([a]) => a.action === 'ORDER_CANCELLED' && a.entityId === orderId).map(([a]) => a)
+    const avisosDeCancelacion = (orderId: string) => (avisarOrdenCancelada as jest.Mock).mock.calls.filter(([, id]) => id === orderId)
 
     it('🔴 (b) venta de $500 con un abono de $200 en efectivo: devolver los $200 desde el panel ⇒ 1 REFUND, la cuenta CANCELLED y sus sobres DEACTIVATED', async () => {
       const venta = await sembrarVentaDeTarjetasSinPagar({ venueId, organizationId, staffId, montos: [500], abonosEnEfectivo: [200] })
@@ -340,6 +347,7 @@ describe('B1 · reembolsos con tarjetas de regalo', () => {
       expect(cancelacionesEnBitacora(venta.orderId)).toEqual([
         expect.objectContaining({ staffId, venueId, entity: 'Order', data: expect.objectContaining({ refundPaymentId: r.refundId }) }),
       ])
+      expect(avisosDeCancelacion(venta.orderId)).toEqual([[venueId, venta.orderId, 'CANCELLED']])
     })
 
     it('🔴 (c) dos abonos de $100: el primer reembolso deja la cuenta PARTIAL con sus sobres PENDING; el segundo la cierra', async () => {
@@ -409,6 +417,54 @@ describe('B1 · reembolsos con tarjetas de regalo', () => {
       ).rejects.toMatchObject({ code: 'GIFT_CARD_CANCEL_NOT_STARTED' })
       expect(await refundsDe(venta.orderId)).toBe(0)
       expect((await sobresDe(venta.giftCardIds)).map(x => x.status)).toEqual(['ACTIVE'])
+    })
+
+    it('🔴 r2 · fix 1: la cuenta del caso (d) —PAGADA con sus sobres PENDING porque F8 negó la activación— se devuelve cobro por cobro y en $0 se cierra', async () => {
+      const venta = await sembrarVentaDeTarjetasSinPagar({ venueId, organizationId, staffId, montos: [500], abonosEnEfectivo: [200] })
+      await issueRefund({ venueId, paymentId: venta.abonos[0].id, amount: 10000, reason: 'RETURNED_GOODS', staffId })
+      await payCashOrder(venueId, venta.orderId, { amount: 30000, tip: 0, staffId, idempotencyKey: `b1r2-resto-${venta.orderId}` })
+      expect((await ordenDe(venta.orderId)).paymentStatus).toBe('PAID')
+      expect((await sobresDe(venta.giftCardIds)).map(x => x.status)).toEqual(['PENDING'])
+      const cobros = await prisma.payment.findMany({
+        where: { venueId, orderId: venta.orderId, status: 'COMPLETED', type: { not: 'REFUND' } },
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        take: 5,
+      })
+      expect(cobros.map(c => c.amount.toFixed(2))).toEqual(['200.00', '300.00'])
+
+      // Lo que queda del abono ($100): todavía hay dinero, la cuenta sigue abierta y nada se cancela.
+      await issueRefund({ venueId, paymentId: cobros[0].id, amount: 10000, reason: 'RETURNED_GOODS', staffId })
+      expect((await ordenDe(venta.orderId)).status).not.toBe('CANCELLED')
+      expect((await sobresDe(venta.giftCardIds)).map(x => x.status)).toEqual(['PENDING'])
+      expect(cancelacionesEnBitacora(venta.orderId)).toEqual([])
+
+      // El cobro que la completó ($300): $0 ⇒ la misma transacción la cancela y apaga sus sobres en $0.
+      const ultimo = await issueRefund({ venueId, paymentId: cobros[1].id, amount: 30000, reason: 'RETURNED_GOODS', staffId })
+      expect(await refundsDe(venta.orderId)).toBe(3)
+      expect((await ordenDe(venta.orderId)).status).toBe('CANCELLED')
+      expect((await sobresDe(venta.giftCardIds)).map(x => [x.status, x.balance.toFixed(2)])).toEqual([['DEACTIVATED', '0.00']])
+      expect(await prisma.giftCardActivity.count({ where: { giftCardId: venta.giftCardIds[0], type: 'ACTIVATE' } })).toBe(0)
+      expect(cancelacionesEnBitacora(venta.orderId)).toEqual([
+        expect.objectContaining({ data: expect.objectContaining({ refundPaymentId: ultimo.refundId }) }),
+      ])
+      expect(avisosDeCancelacion(venta.orderId)).toHaveLength(1)
+    })
+
+    it('🔴 r2 · fix 2: por la TERMINAL (recordRefund) una venta sin pagar se devuelve hasta $0 y se cierra: CANCELLED, sobres DEACTIVATED, un aviso y una bitácora', async () => {
+      const venta = await sembrarVentaDeTarjetasSinPagar({ venueId, organizationId, staffId, montos: [500], abonosConTerminal: [200] })
+      expect((await ordenDe(venta.orderId)).paymentStatus).toBe('PARTIAL')
+
+      const r = await terminalDevuelveLaVenta(venta.abonos[0].id, 20000, 'gc-r2-terminal')
+
+      expect(await refundsDe(venta.orderId)).toBe(1)
+      expect((await ordenDe(venta.orderId)).status).toBe('CANCELLED')
+      expect((await sobresDe(venta.giftCardIds)).map(x => [x.status, x.balance.toFixed(2)])).toEqual([['DEACTIVATED', '0.00']])
+      expect(avisosDeCancelacion(venta.orderId)).toEqual([[venueId, venta.orderId, 'CANCELLED']])
+      expect(cancelacionesEnBitacora(venta.orderId)).toEqual([
+        expect.objectContaining({ staffId, venueId, entity: 'Order', data: expect.objectContaining({ refundPaymentId: r.id }) }),
+      ])
+      // Una venta sin pagar devuelta no es anomalía (r1).
+      expect(await prisma.moneyAnomaly.count({ where: { stripeEventId: `giftcard:REFUND_WITHOUT_CANCEL:${r.id}` } })).toBe(0)
     })
   })
 

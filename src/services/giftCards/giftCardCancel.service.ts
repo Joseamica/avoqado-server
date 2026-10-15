@@ -171,7 +171,7 @@ async function dineroConservado(tx: Tx, venueId: string, orderId: string): Promi
 
 /**
  * r1 (fix 1, ruling del coordinador): devolver un abono de una venta de tarjetas SIN pagar es un camino normal —el cliente se
- * arrepiente a media compra—. Sus sobres siguen PENDING: no valen nada, y F8 impide activarlos si lo conservado no cubre la venta.
+ * arrepiente a media compra—. r2: también una PAGADA con todos sus sobres PENDING (F8 negó la activación), que es lo mismo. Sus sobres siguen PENDING: no valen nada, y F8 impide activarlos si lo conservado no cubre la venta.
  * Así que mientras quede dinero no se lee, bloquea ni desactiva ningún sobre (E4) y la cuenta sigue abierta. Cuando ESTE reembolso
  * deja lo conservado en $0, la misma transacción cancela la cuenta con las piezas de `deleteOrder` (estado con CAS + versión, y
  * `desactivarSobresPendientesDeCuentaEnTx`): si no, quedaría PARTIAL para siempre, porque ningún reembolso escribe `paymentStatus`
@@ -187,8 +187,11 @@ async function cerrarVentaSinPagarSiYaNoQuedaDinero(
   orderId: string,
 ): Promise<AlRegistrarReembolsoResultado> {
   if ((await dineroConservado(tx, p.venueId, orderId)).greaterThan(0)) return SIN_CANCELAR
-  // Un cobro de terminal vivo todavía puede traer dinero: la cancelación general tampoco cancela con uno así. La cuenta sigue y su
-  // desenlace decide (si cobra, ese dinero se devuelve como cualquier abono y la cuenta se cierra entonces).
+  // Un cobro de terminal vivo todavía puede traer dinero: la cancelación general tampoco cancela con uno así, y la cuenta sigue.
+  // Si ese cobro ENTRA, la cuenta queda PAGADA (`computeOrderBalance` no resta las devoluciones) y F8 niega la activación: queda
+  // PAGADA con todos sus sobres PENDING. Su salida es devolver ese dinero desde el panel: la rama «pagada con todo PENDING» de
+  // `devolverVentaDeTarjetasEnTx` la trata como una venta sin pagar y la cierra aquí al llegar a $0 (B1 r2). Si el cobro FALLA,
+  // la cuenta queda abierta en $0 con sus sobres PENDING (no hay dinero atrapado).
   const vivo = await findLiveTerminalCharge(tx, { venueId: p.venueId, orderId })
   if (vivo) {
     logger.warn('[TARJETAS DE REGALO] Venta sin pagar devuelta completa con un cobro de terminal vivo: la cuenta sigue abierta', {
@@ -242,6 +245,14 @@ async function devolverVentaDeTarjetasEnTx(tx: Tx, p: AlRegistrarReembolsoInput,
   // Nota 2 de B1 (A6): tampoco atrapa el dinero que llegó DESPUÉS a una venta pagada con todo desactivado.
   if (sobres.length > 0 && sobres.every(s => s.status === 'DEACTIVATED')) return SIN_CANCELAR
   const canjes = await tx.giftCardActivity.count({ where: { giftCardId: { in: ids }, type: 'REDEEM' } })
+  // B1 r2 (fix 1): PAGADA pero con TODOS sus sobres PENDING y ningún canje = F8 negó la activación (se devolvió dinero antes de
+  // completarla, o entró tarde un cobro de terminal que estaba vivo al llegar a $0). Esos sobres nunca se pudieron usar y valen $0,
+  // así que la cuenta se trata EXACTAMENTE como una sin pagar: se devuelve sin tocar sobres y, en $0, se cierra. Sin esto el dinero
+  // quedaba atrapado: aquí abajo `GIFT_CARD_CANCEL_NOT_STARTED`, «Cancelar venta» de B2 rechaza sobres PENDING y la cancelación
+  // general rechaza una cuenta PAGADA. Cualquier otra venta pagada (un sobre vivo, bloqueado o desactivado) sigue el flujo de B2.
+  if (canjes === 0 && sobres.length > 0 && sobres.every(s => s.status === 'PENDING')) {
+    return cerrarVentaSinPagarSiYaNoQuedaDinero(tx, p, orderId)
+  }
   if (!p.dineroYaDevuelto) {
     if (canjes > 0) {
       throw new GiftCardError('GIFT_CARD_ALREADY_USED', 'Una de las tarjetas de esta venta ya se usó: la venta no se puede devolver.', 409)
