@@ -123,8 +123,8 @@ export async function requireOrgOwner(req: Request, res: Response, next: NextFun
 
 /**
  * Middleware: require a SUPERVISOR-or-above role for the target organization.
- * Used for fleet-affecting terminal operations (create/delete terminal, bulk
- * commands, org-wide broadcast/message). `checkOrgAccess` alone only proves
+ * Used for fleet-affecting terminal operations (create / edit / activate a terminal,
+ * single and bulk commands, org-wide broadcast/message). `checkOrgAccess` alone only proves
  * membership, which would let a floor employee (cashier/waiter/promoter) provision
  * terminals or message the whole fleet.
  *
@@ -1017,15 +1017,21 @@ router.post(
 /**
  * PATCH /dashboard/organizations/:orgId/terminals/:terminalId
  * Updates terminal metadata
+ *
+ * 🔴 Antes bastaba ser MIEMBRO de la org: un cajero o un promotor de cualquier sucursal cambiaba nombre, marca,
+ * modelo y ESTADO de cualquier terminal (`status: 'ACTIVE'` sobre una nunca activada la ACTIVA; `RETIRED` /
+ * `INACTIVE` la sacan de servicio). Ahora: supervisor o más (`requireOrgManager`), el piso de `/command` y
+ * `/bulk-command`. Fijado en tests/unit/routes/organizationDashboard.terminalEdit.routes.test.ts.
  */
 router.patch(
   '/:orgId/terminals/:terminalId',
   authenticateTokenMiddleware,
   checkOrgAccess,
+  requireOrgManager,
   validateRequest(UpdateOrgTerminalSchema),
-  // 🔴 Los comercios (a dónde va el dinero): dueño de la org o el permiso de la ruta del negocio en esa sucursal.
-  // «La ruta de la organización nunca concede más de lo que concedería la ruta del negocio.» Nombre, estado, marca y
-  // modelo quedan como estaban. Fijado en tests/unit/routes/organizationDashboard.terminalMerchants.routes.test.ts.
+  // 🔴 Los comercios (a dónde va el dinero), encima del piso: dueño de la org o el permiso de la ruta del negocio en
+  // esa sucursal. «La ruta de la organización nunca concede más de lo que concedería la ruta del negocio.»
+  // Fijado en tests/unit/routes/organizationDashboard.terminalMerchants.routes.test.ts.
   soloQuienPuedeCambiarComerciosDeLaTerminal('assignedMerchantIds', { sinCambioEsNoOp: true }),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -1074,11 +1080,15 @@ router.delete(
 /**
  * POST /dashboard/organizations/:orgId/terminals/:terminalId/generate-activation-code
  * Generates activation code for a terminal
+ *
+ * 🔴 Con el código, un aparato reclama la terminal. Supervisor o más, igual que el PATCH (antes bastaba ser
+ * miembro de la org). Fijado en tests/unit/routes/organizationDashboard.terminalEdit.routes.test.ts.
  */
 router.post(
   '/:orgId/terminals/:terminalId/generate-activation-code',
   authenticateTokenMiddleware,
   checkOrgAccess,
+  requireOrgManager,
   validateRequest(GenerateActivationCodeSchema),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -1100,11 +1110,15 @@ router.post(
 /**
  * POST /dashboard/organizations/:orgId/terminals/:terminalId/remote-activate
  * Sends remote activation command
+ *
+ * 🔴 Supervisor o más, igual que el PATCH y que `REMOTE_ACTIVATE` por `/command` (antes bastaba ser miembro de
+ * la org). Fijado en tests/unit/routes/organizationDashboard.terminalEdit.routes.test.ts.
  */
 router.post(
   '/:orgId/terminals/:terminalId/remote-activate',
   authenticateTokenMiddleware,
   checkOrgAccess,
+  requireOrgManager,
   validateRequest(RemoteActivateSchema),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
