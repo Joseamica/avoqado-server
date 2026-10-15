@@ -24,11 +24,18 @@ import { logAction } from '../../services/dashboard/activity-log.service'
 import { resolveStoresAnalysisVenueIds } from '../../services/organization-dashboard/storesAnalysisScope.service'
 import * as supervisorSalesExportService from '../../services/organization-dashboard/supervisorSalesExport.service'
 import { BadRequestError } from '../../errors/AppError'
+import { checkPermission } from '../../middlewares/checkPermission.middleware'
+import { esSupervisorOMasDeLaOrganizacion, MENSAJE_SE_REQUIERE_SUPERVISOR } from '../../services/access/supervisorDeLaOrganizacion'
+import { esDuenoDeEstaOrganizacionOSuperadmin } from '../../services/access/duenoDeEstaOrganizacion'
+import { ROLE_HIERARCHY } from '../../lib/permissions'
 
 // mergeParams: true allows access to :venueId from parent route
 const router = Router({ mergeParams: true })
 
-// Unified middleware for white-label stores analysis routes
+// Unified middleware for white-label stores analysis routes.
+// 🔴 Sólo prueba sesión + membresía de la sucursal + módulo white-label: NO pide rol ni permiso. Una
+// escritura nunca va con esto solo (un cajero o un promotor de cualquier sucursal la haría): lleva
+// además su permiso canónico (`checkPermission`) o el piso de supervisor (`soloSupervisorOMas`).
 const whiteLabelAccess = [authenticateTokenMiddleware, verifyAccess({ requireWhiteLabel: true })]
 
 /**
@@ -40,6 +47,36 @@ async function getOrgIdFromVenue(venueId: string): Promise<string | null> {
     select: { organizationId: true },
   })
   return venue?.organizationId || null
+}
+
+/**
+ * Piso de supervisor para las escrituras que ningún permiso canónico le da a un MANAGER (las metas
+ * por tienda: `commissions:create` es de ADMIN para arriba, y los supervisores de PlayTelecom las
+ * ponen hoy). La regla es la de `requireOrgManager` (`supervisorDeLaOrganizacion.ts`), con la org
+ * sacada de la sucursal de la petición. Deja rastro de la negativa en la bitácora.
+ */
+async function soloSupervisorOMas(req: Request, res: Response, next: NextFunction) {
+  try {
+    const authContext = (req as any).authContext
+    const venueId = req.params.venueId || authContext?.venueId
+    const orgId = venueId ? await getOrgIdFromVenue(venueId) : null
+    if (await esSupervisorOMasDeLaOrganizacion(authContext, orgId)) return next()
+
+    void logAction({
+      staffId: authContext?.userId ?? null,
+      venueId: venueId ?? null,
+      organizationId: orgId,
+      action: 'PERMISSION_DENIED',
+      entity: 'stores-analysis',
+      entityId: req.route?.path ?? req.originalUrl,
+      data: { required: 'supervisor', method: req.method, path: req.originalUrl },
+      ipAddress: req.ip,
+      userAgent: typeof req.get === 'function' ? req.get('user-agent') : undefined,
+    })
+    return res.status(403).json({ success: false, error: 'insufficient_role', message: MENSAJE_SE_REQUIERE_SUPERVISOR })
+  } catch (error) {
+    next(error)
+  }
 }
 
 async function getOrgExportContextFromVenue(venueId: string): Promise<{ organizationId: string; timezone: string } | null> {
@@ -569,79 +606,96 @@ router.get('/staff-attendance', whiteLabelAccess, async (req: Request, res: Resp
 /**
  * POST /dashboard/venues/:venueId/stores-analysis/time-entry/:timeEntryId/validate
  * Validates a time entry (approve/reject)
- * Body: { status: 'APPROVED' | 'REJECTED', note?: string }
+ * Body: { status: 'APPROVED' | 'REJECTED', note?: string, depositAmount?: number }
+ *
+ * 🔴 `attendance:manage` en la sucursal de la petición (MANAGER, ADMIN y OWNER; nunca roles de piso).
+ * Antes bastaba ser miembro: un cajero aprobaba checadas de toda la org, las suyas incluidas, y con
+ * `depositAmount` creaba un `CashDeposit` APROBADO. Nadie valida la suya: lo impone el servicio.
+ * Fijado en tests/unit/routes/storesAnalysis.writes.routes.test.ts.
  */
-router.post('/time-entry/:timeEntryId/validate', whiteLabelAccess, async (req: Request, res: Response, next: NextFunction) => {
-  try {
-    const venueId = req.params.venueId || (req as any).authContext?.venueId
-    const { timeEntryId } = req.params
-    const { userId } = (req as any).authContext
-    const orgId = await getOrgIdFromVenue(venueId)
+router.post(
+  '/time-entry/:timeEntryId/validate',
+  whiteLabelAccess,
+  checkPermission('attendance:manage'),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const venueId = req.params.venueId || (req as any).authContext?.venueId
+      const { timeEntryId } = req.params
+      const { userId } = (req as any).authContext
+      const orgId = await getOrgIdFromVenue(venueId)
 
-    if (!orgId) {
-      return res.status(404).json({
-        success: false,
-        error: 'not_found',
-        message: 'Organization not found for this venue',
+      if (!orgId) {
+        return res.status(404).json({
+          success: false,
+          error: 'not_found',
+          message: 'Organization not found for this venue',
+        })
+      }
+
+      const { status, note, depositAmount } = req.body
+
+      if (!status || !['APPROVED', 'REJECTED'].includes(status)) {
+        return res.status(400).json({
+          success: false,
+          error: 'invalid_status',
+          message: 'Status must be APPROVED or REJECTED',
+        })
+      }
+
+      const result = await organizationDashboardService.validateTimeEntry(
+        timeEntryId,
+        orgId,
+        userId,
+        status,
+        note,
+        depositAmount != null ? Number(depositAmount) : undefined,
+      )
+
+      res.json({
+        success: true,
+        data: result,
       })
+    } catch (error) {
+      next(error)
     }
-
-    const { status, note, depositAmount } = req.body
-
-    if (!status || !['APPROVED', 'REJECTED'].includes(status)) {
-      return res.status(400).json({
-        success: false,
-        error: 'invalid_status',
-        message: 'Status must be APPROVED or REJECTED',
-      })
-    }
-
-    const result = await organizationDashboardService.validateTimeEntry(
-      timeEntryId,
-      orgId,
-      userId,
-      status,
-      note,
-      depositAmount != null ? Number(depositAmount) : undefined,
-    )
-
-    res.json({
-      success: true,
-      data: result,
-    })
-  } catch (error) {
-    next(error)
-  }
-})
+  },
+)
 
 /**
  * POST /dashboard/venues/:venueId/stores-analysis/time-entry/:timeEntryId/reset-validation
  * Resets a time entry validation back to PENDING
+ *
+ * 🔴 Mismo candado que validar (`attendance:manage`) y nadie regresa la suya (lo impone el servicio).
  */
-router.post('/time-entry/:timeEntryId/reset-validation', whiteLabelAccess, async (req: Request, res: Response, next: NextFunction) => {
-  try {
-    const venueId = req.params.venueId || (req as any).authContext?.venueId
-    const { timeEntryId } = req.params
-    const orgId = await getOrgIdFromVenue(venueId)
+router.post(
+  '/time-entry/:timeEntryId/reset-validation',
+  whiteLabelAccess,
+  checkPermission('attendance:manage'),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const venueId = req.params.venueId || (req as any).authContext?.venueId
+      const { timeEntryId } = req.params
+      const orgId = await getOrgIdFromVenue(venueId)
 
-    if (!orgId) {
-      return res.status(404).json({
-        success: false,
-        error: 'not_found',
-        message: 'Organization not found for this venue',
+      if (!orgId) {
+        return res.status(404).json({
+          success: false,
+          error: 'not_found',
+          message: 'Organization not found for this venue',
+        })
+      }
+
+      const result = await organizationDashboardService.resetTimeEntryValidation(timeEntryId, orgId, (req as any).authContext?.userId)
+
+      res.json({
+        success: true,
+        data: result,
       })
+    } catch (error) {
+      next(error)
     }
-
-    const result = await organizationDashboardService.resetTimeEntryValidation(timeEntryId, orgId)
-
-    res.json({
-      success: true,
-      data: result,
-    })
-  } catch (error) {
-    next(error)
-  }
-})
+  },
+)
 
 /**
  * GET /dashboard/venues/:venueId/stores-analysis/closing-report
@@ -917,97 +971,189 @@ router.post('/admin/reset-password/:userId', whiteLabelAccess, async (req: Reque
  * PATCH /dashboard/venues/:venueId/stores-analysis/team/:staffId/venues
  * Sync venue assignments for a staff member within the organization.
  * Adds new assignments and deactivates removed ones.
+ *
+ * 🔴 Antes bastaba ser miembro: un cajero le cambiaba a CUALQUIERA sus sucursales (dejaba sin acceso a
+ * un gerente o al dueño de sucursal, o reactivaba a alguien dado de baja). Ahora:
+ *   · `teams:update` en la sucursal de la petición (MANAGER, ADMIN, OWNER; nunca roles de piso);
+ *   · jerarquía: nadie toca a alguien de rol mayor que el suyo (cuenta el rol más alto que la persona
+ *     tiene o tuvo en la org, y su rol de org OWNER/ADMIN); al DUEÑO de la org sólo lo toca el dueño
+ *     de la org (o un superadmin);
+ *   · nadie se quita su último acceso, y nadie se da sucursales a sí mismo salvo el dueño de la org;
+ *   · no reactiva a quien está dado de baja (`Staff.active=false`) ni a quien ya no es de la org;
+ *     quitarle sucursales sigue siendo borrado suave.
+ * Fijado en tests/unit/routes/storesAnalysis.writes.routes.test.ts.
  */
-router.patch('/team/:staffId/venues', whiteLabelAccess, async (req: Request, res: Response, next: NextFunction) => {
-  try {
-    const venueId = req.params.venueId || (req as any).authContext?.venueId
-    const { staffId } = req.params
-    const { venueIds } = req.body as { venueIds: string[] }
-    const authContext = (req as any).authContext
+router.patch(
+  '/team/:staffId/venues',
+  whiteLabelAccess,
+  checkPermission('teams:update'),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const venueId = req.params.venueId || (req as any).authContext?.venueId
+      const { staffId } = req.params
+      const { venueIds } = req.body as { venueIds: string[] }
+      const authContext = (req as any).authContext
 
-    if (!Array.isArray(venueIds)) {
-      return res.status(400).json({ success: false, error: 'venueIds must be an array' })
-    }
+      if (!Array.isArray(venueIds)) {
+        return res.status(400).json({ success: false, error: 'venueIds must be an array' })
+      }
 
-    const orgId = await getOrgIdFromVenue(venueId)
-    if (!orgId) {
-      return res.status(404).json({ success: false, error: 'Organization not found' })
-    }
+      const orgId = await getOrgIdFromVenue(venueId)
+      if (!orgId) {
+        return res.status(404).json({ success: false, error: 'Organization not found' })
+      }
 
-    // Get all org venues (to validate the requested venueIds belong to this org)
-    const orgVenues = await prisma.venue.findMany({
-      where: { organizationId: orgId },
-      select: { id: true, name: true },
-    })
-    const orgVenueIds = new Set(orgVenues.map(v => v.id))
-    const validVenueIds = venueIds.filter(id => orgVenueIds.has(id))
+      // La persona tiene que seguir siendo de ESTA organización (fila activa): a quien sacaron de la org no
+      // se le devuelven sucursales por aquí, y un id de otra org no se cuela.
+      const [membresiaDelObjetivo, persona] = await Promise.all([
+        prisma.staffOrganization.findFirst({
+          where: { staffId, organizationId: orgId, isActive: true },
+          select: { role: true },
+        }),
+        prisma.staff.findUnique({ where: { id: staffId }, select: { active: true } }),
+      ])
+      if (!membresiaDelObjetivo || !persona) {
+        return res.status(404).json({ success: false, error: 'not_found', message: 'Esa persona no es parte de esta organización.' })
+      }
 
-    // Get current StaffVenue records for this staff in the org
-    const currentAssignments = await prisma.staffVenue.findMany({
-      where: {
-        staffId,
-        venueId: { in: Array.from(orgVenueIds) },
-      },
-      include: { venue: { select: { name: true } } },
-    })
+      // Get all org venues (to validate the requested venueIds belong to this org)
+      const orgVenues = await prisma.venue.findMany({
+        where: { organizationId: orgId },
+        select: { id: true, name: true },
+      })
+      const orgVenueIds = new Set(orgVenues.map(v => v.id))
+      const validVenueIds = venueIds.filter(id => orgVenueIds.has(id))
 
-    const currentActiveIds = new Set(currentAssignments.filter(a => a.active).map(a => a.venueId))
-    const requestedIds = new Set(validVenueIds)
-
-    // Determine what to add and remove
-    const toAdd = validVenueIds.filter(id => !currentActiveIds.has(id))
-    const toRemove = Array.from(currentActiveIds).filter(id => !requestedIds.has(id))
-
-    // Get the user's role from the requesting venue (use as default for new assignments)
-    const currentVenueAssignment = currentAssignments.find(a => a.venueId === venueId)
-    const defaultRole = currentVenueAssignment?.role || 'VIEWER'
-
-    // Add new venue assignments
-    for (const addVenueId of toAdd) {
-      await prisma.staffVenue.upsert({
-        where: { staffId_venueId: { staffId, venueId: addVenueId } },
-        update: { active: true, role: defaultRole },
-        create: { staffId, venueId: addVenueId, role: defaultRole, active: true },
+      // Get current StaffVenue records for this staff in the org
+      const currentAssignments = await prisma.staffVenue.findMany({
+        where: {
+          staffId,
+          venueId: { in: Array.from(orgVenueIds) },
+        },
+        include: { venue: { select: { name: true } } },
       })
 
-      const venueName = orgVenues.find(v => v.id === addVenueId)?.name || addVenueId
-      logAction({
-        staffId: authContext?.userId || null,
-        venueId,
-        action: 'VENUE_ASSIGNED',
-        entity: 'Staff',
-        entityId: staffId,
-        data: { venueId: addVenueId, venueName },
+      const currentActiveIds = new Set(currentAssignments.filter(a => a.active).map(a => a.venueId))
+      const requestedIds = new Set(validVenueIds)
+
+      // Determine what to add and remove
+      const toAdd = validVenueIds.filter(id => !currentActiveIds.has(id))
+      const toRemove = Array.from(currentActiveIds).filter(id => !requestedIds.has(id))
+
+      // Get the user's role from the requesting venue (use as default for new assignments)
+      const currentVenueAssignment = currentAssignments.find(a => a.venueId === venueId)
+      const defaultRole = currentVenueAssignment?.role || 'VIEWER'
+
+      // ── Quién puede tocar a quién (todo ANTES de escribir) ──
+      const actorId: string = authContext?.userId
+      const actorEsDuenoDeLaOrg = await esDuenoDeEstaOrganizacionOSuperadmin(authContext, orgId)
+      if (membresiaDelObjetivo.role === 'OWNER' && !actorEsDuenoDeLaOrg) {
+        return res.status(403).json({
+          success: false,
+          error: 'owner_required',
+          message: 'Sólo el dueño de la organización puede cambiar las sucursales de un dueño de la organización.',
+        })
+      }
+
+      // El rol del que actúa: el RESUELTO en esta sucursal por `checkPermission` y, si es más alto, el de la org.
+      const membresiaDelActor = await prisma.staffOrganization.findFirst({
+        where: { staffId: actorId, organizationId: orgId, isActive: true },
+        select: { role: true },
       })
+      const nivelEnLaOrg = (rolDeOrg?: string | null) =>
+        rolDeOrg === 'OWNER' ? ROLE_HIERARCHY.OWNER : rolDeOrg === 'ADMIN' ? ROLE_HIERARCHY.ADMIN : 0
+      const nivelDelActor = Math.max(
+        ROLE_HIERARCHY[(req as any).resolvedRole as keyof typeof ROLE_HIERARCHY] ?? 0,
+        nivelEnLaOrg(membresiaDelActor?.role),
+      )
+      // El del objetivo: el rol más alto que tiene O TUVO en la org (una fila apagada de OWNER cuenta: el
+      // `upsert` de abajo reactiva filas) y su rol de org.
+      const nivelDelObjetivo = Math.max(
+        nivelEnLaOrg(membresiaDelObjetivo.role),
+        ...currentAssignments.map(a => ROLE_HIERARCHY[a.role as keyof typeof ROLE_HIERARCHY] ?? 0),
+        0,
+      )
+      if (nivelDelObjetivo > nivelDelActor) {
+        return res.status(403).json({
+          success: false,
+          error: 'role_above',
+          message: 'No puedes cambiar las sucursales de alguien con un rol mayor al tuyo.',
+        })
+      }
+
+      if (staffId === actorId) {
+        if (currentActiveIds.size > 0 && validVenueIds.length === 0) {
+          return res
+            .status(409)
+            .json({ success: false, error: 'last_access', message: 'No puedes quitarte tu último acceso a la organización.' })
+        }
+        if (toAdd.length > 0 && !actorEsDuenoDeLaOrg) {
+          return res.status(403).json({
+            success: false,
+            error: 'self_assignment',
+            message: 'No puedes darte acceso a otras sucursales: pídeselo al dueño de la organización.',
+          })
+        }
+      }
+
+      // Dada de baja = borrado suave: no se le devuelven sucursales (sí se le pueden quitar).
+      if (!persona.active && toAdd.length > 0) {
+        return res.status(409).json({
+          success: false,
+          error: 'staff_deactivated',
+          message: 'Esa persona está dada de baja. Reactívala antes de asignarle sucursales.',
+        })
+      }
+
+      // Add new venue assignments
+      for (const addVenueId of toAdd) {
+        await prisma.staffVenue.upsert({
+          where: { staffId_venueId: { staffId, venueId: addVenueId } },
+          update: { active: true, role: defaultRole },
+          create: { staffId, venueId: addVenueId, role: defaultRole, active: true },
+        })
+
+        const venueName = orgVenues.find(v => v.id === addVenueId)?.name || addVenueId
+        logAction({
+          staffId: authContext?.userId || null,
+          venueId: addVenueId,
+          organizationId: orgId,
+          action: 'VENUE_ASSIGNED',
+          entity: 'Staff',
+          entityId: staffId,
+          data: { venueId: addVenueId, venueName, role: defaultRole, fromVenueId: venueId },
+        })
+      }
+
+      // Remove (deactivate) venue assignments. pin: null frees the PIN for reuse —
+      // the @@unique([venueId, pin]) counts inactive rows too.
+      for (const removeVenueId of toRemove) {
+        await prisma.staffVenue.update({
+          where: { staffId_venueId: { staffId, venueId: removeVenueId } },
+          data: { active: false, pin: null },
+        })
+
+        const venueName = orgVenues.find(v => v.id === removeVenueId)?.name || removeVenueId
+        logAction({
+          staffId: authContext?.userId || null,
+          venueId: removeVenueId,
+          organizationId: orgId,
+          action: 'VENUE_REMOVED',
+          entity: 'Staff',
+          entityId: staffId,
+          data: { venueId: removeVenueId, venueName, fromVenueId: venueId },
+        })
+      }
+
+      res.json({
+        success: true,
+        data: { added: toAdd.length, removed: toRemove.length },
+      })
+    } catch (error) {
+      next(error)
     }
-
-    // Remove (deactivate) venue assignments. pin: null frees the PIN for reuse —
-    // the @@unique([venueId, pin]) counts inactive rows too.
-    for (const removeVenueId of toRemove) {
-      await prisma.staffVenue.update({
-        where: { staffId_venueId: { staffId, venueId: removeVenueId } },
-        data: { active: false, pin: null },
-      })
-
-      const venueName = orgVenues.find(v => v.id === removeVenueId)?.name || removeVenueId
-      logAction({
-        staffId: authContext?.userId || null,
-        venueId,
-        action: 'VENUE_REMOVED',
-        entity: 'Staff',
-        entityId: staffId,
-        data: { venueId: removeVenueId, venueName },
-      })
-    }
-
-    res.json({
-      success: true,
-      data: { added: toAdd.length, removed: toRemove.length },
-    })
-  } catch (error) {
-    next(error)
-  }
-})
+  },
+)
 
 /**
  * GET /dashboard/venues/:venueId/stores-analysis/team/:staffId/activity
@@ -1271,6 +1417,7 @@ router.get('/store/:storeId/inventory-summary', whiteLabelAccess, async (req: Re
 // STORE GOAL ENDPOINTS
 // These endpoints manage sales goals for child stores via the parent venue.
 // They reuse salesGoalService and validate that the store belongs to the org.
+// 🔴 Escribir (POST/PATCH/DELETE) pide supervisor o más (`soloSupervisorOMas`): antes bastaba ser miembro.
 // =============================================================================
 
 /**
@@ -1303,7 +1450,7 @@ router.get('/store/:storeId/goals', whiteLabelAccess, async (req: Request, res: 
  * POST /dashboard/venues/:venueId/stores-analysis/store/:storeId/goals
  * Creates a new sales goal for a specific store
  */
-router.post('/store/:storeId/goals', whiteLabelAccess, async (req: Request, res: Response, next: NextFunction) => {
+router.post('/store/:storeId/goals', whiteLabelAccess, soloSupervisorOMas, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const venueId = req.params.venueId || (req as any).authContext?.venueId
     const { storeId } = req.params
@@ -1319,12 +1466,16 @@ router.post('/store/:storeId/goals', whiteLabelAccess, async (req: Request, res:
     }
 
     const { staffId, goal, goalType, period } = req.body
-    const created = await salesGoalService.createSalesGoal(storeId, {
-      staffId: staffId ?? null,
-      goal: Number(goal),
-      goalType,
-      period,
-    })
+    const created = await salesGoalService.createSalesGoal(
+      storeId,
+      {
+        staffId: staffId ?? null,
+        goal: Number(goal),
+        goalType,
+        period,
+      },
+      { staffId: (req as any).authContext?.userId ?? null, organizationId: orgId },
+    )
     res.status(201).json({ success: true, data: created })
   } catch (error) {
     next(error)
@@ -1335,59 +1486,74 @@ router.post('/store/:storeId/goals', whiteLabelAccess, async (req: Request, res:
  * PATCH /dashboard/venues/:venueId/stores-analysis/store/:storeId/goals/:goalId
  * Updates an existing sales goal for a specific store
  */
-router.patch('/store/:storeId/goals/:goalId', whiteLabelAccess, async (req: Request, res: Response, next: NextFunction) => {
-  try {
-    const venueId = req.params.venueId || (req as any).authContext?.venueId
-    const { storeId, goalId } = req.params
-    const orgId = await getOrgIdFromVenue(venueId)
+router.patch(
+  '/store/:storeId/goals/:goalId',
+  whiteLabelAccess,
+  soloSupervisorOMas,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const venueId = req.params.venueId || (req as any).authContext?.venueId
+      const { storeId, goalId } = req.params
+      const orgId = await getOrgIdFromVenue(venueId)
 
-    if (!orgId) {
-      return res.status(404).json({ success: false, error: 'not_found', message: 'Organization not found for this venue' })
+      if (!orgId) {
+        return res.status(404).json({ success: false, error: 'not_found', message: 'Organization not found for this venue' })
+      }
+
+      const storeVenue = await prisma.venue.findUnique({ where: { id: storeId }, select: { organizationId: true } })
+      if (!storeVenue || storeVenue.organizationId !== orgId) {
+        return res.status(403).json({ success: false, error: 'forbidden', message: 'Store does not belong to this organization' })
+      }
+
+      const { goal, goalType, period, active } = req.body
+      const updated = await salesGoalService.updateSalesGoal(
+        storeId,
+        goalId,
+        {
+          ...(goal !== undefined && { goal: Number(goal) }),
+          ...(goalType !== undefined && { goalType }),
+          ...(period !== undefined && { period }),
+          ...(active !== undefined && { active }),
+        },
+        { staffId: (req as any).authContext?.userId ?? null, organizationId: orgId },
+      )
+      res.json({ success: true, data: updated })
+    } catch (error) {
+      next(error)
     }
-
-    const storeVenue = await prisma.venue.findUnique({ where: { id: storeId }, select: { organizationId: true } })
-    if (!storeVenue || storeVenue.organizationId !== orgId) {
-      return res.status(403).json({ success: false, error: 'forbidden', message: 'Store does not belong to this organization' })
-    }
-
-    const { goal, goalType, period, active } = req.body
-    const updated = await salesGoalService.updateSalesGoal(storeId, goalId, {
-      ...(goal !== undefined && { goal: Number(goal) }),
-      ...(goalType !== undefined && { goalType }),
-      ...(period !== undefined && { period }),
-      ...(active !== undefined && { active }),
-    })
-    res.json({ success: true, data: updated })
-  } catch (error) {
-    next(error)
-  }
-})
+  },
+)
 
 /**
  * DELETE /dashboard/venues/:venueId/stores-analysis/store/:storeId/goals/:goalId
  * Deletes a sales goal for a specific store
  */
-router.delete('/store/:storeId/goals/:goalId', whiteLabelAccess, async (req: Request, res: Response, next: NextFunction) => {
-  try {
-    const venueId = req.params.venueId || (req as any).authContext?.venueId
-    const { storeId, goalId } = req.params
-    const orgId = await getOrgIdFromVenue(venueId)
+router.delete(
+  '/store/:storeId/goals/:goalId',
+  whiteLabelAccess,
+  soloSupervisorOMas,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const venueId = req.params.venueId || (req as any).authContext?.venueId
+      const { storeId, goalId } = req.params
+      const orgId = await getOrgIdFromVenue(venueId)
 
-    if (!orgId) {
-      return res.status(404).json({ success: false, error: 'not_found', message: 'Organization not found for this venue' })
+      if (!orgId) {
+        return res.status(404).json({ success: false, error: 'not_found', message: 'Organization not found for this venue' })
+      }
+
+      const storeVenue = await prisma.venue.findUnique({ where: { id: storeId }, select: { organizationId: true } })
+      if (!storeVenue || storeVenue.organizationId !== orgId) {
+        return res.status(403).json({ success: false, error: 'forbidden', message: 'Store does not belong to this organization' })
+      }
+
+      await salesGoalService.deleteSalesGoal(storeId, goalId, { staffId: (req as any).authContext?.userId ?? null, organizationId: orgId })
+      res.json({ success: true, data: { message: 'Goal deleted' } })
+    } catch (error) {
+      next(error)
     }
-
-    const storeVenue = await prisma.venue.findUnique({ where: { id: storeId }, select: { organizationId: true } })
-    if (!storeVenue || storeVenue.organizationId !== orgId) {
-      return res.status(403).json({ success: false, error: 'forbidden', message: 'Store does not belong to this organization' })
-    }
-
-    await salesGoalService.deleteSalesGoal(storeId, goalId)
-    res.json({ success: true, data: { message: 'Goal deleted' } })
-  } catch (error) {
-    next(error)
-  }
-})
+  },
+)
 
 // =============================================================================
 // ORG-LEVEL GOAL ENDPOINTS

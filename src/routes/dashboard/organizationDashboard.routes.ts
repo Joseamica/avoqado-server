@@ -6,6 +6,7 @@
 import { Router, Request, Response, NextFunction } from 'express'
 import { esSuperadminDeLaSesion, esSuperadminReal } from '@/services/access/rolVigente'
 import { esDuenoDeEstaOrganizacionOSuperadmin } from '@/services/access/duenoDeEstaOrganizacion'
+import { esSupervisorOMasDeLaOrganizacion, MENSAJE_SE_REQUIERE_SUPERVISOR } from '@/services/access/supervisorDeLaOrganizacion'
 import { z } from 'zod'
 import { authenticateTokenMiddleware } from '../../middlewares/authenticateToken.middleware'
 import { validateRequest } from '../../middlewares/validation'
@@ -133,37 +134,13 @@ export async function requireOrgOwner(req: Request, res: Response, next: NextFun
  * venue of the org (supervisors are venue-level MANAGER but org-level MEMBER, so an
  * OrgRole-only check would wrongly block them), OR is an org-level OWNER/ADMIN.
  * SUPERADMIN bypasses. Floor staff (WAITER, CASHIER, HOST, VIEWER) are blocked.
+ * The rule lives in `services/access/supervisorDeLaOrganizacion.ts`, shared with the venue-side
+ * white-label routes (`storesAnalysis`).
  */
 async function requireOrgManager(req: Request, res: Response, next: NextFunction) {
   try {
-    const authContext = (req as any).authContext
-    const orgId = req.params.orgId
-
-    if (await esSuperadminDeLaSesion(authContext)) return next()
-
-    const [venueRole, orgRole] = await Promise.all([
-      prisma.staffVenue.findFirst({
-        where: {
-          staffId: authContext?.userId,
-          active: true,
-          venue: { organizationId: orgId },
-          role: { in: ['SUPERADMIN', 'OWNER', 'ADMIN', 'MANAGER'] },
-        },
-        select: { id: true },
-      }),
-      prisma.staffOrganization.findFirst({
-        where: {
-          staffId: authContext?.userId,
-          organizationId: orgId,
-          isActive: true,
-          role: { in: ['OWNER', 'ADMIN'] },
-        },
-        select: { id: true },
-      }),
-    ])
-
-    if (!venueRole && !orgRole) {
-      return res.status(403).json({ success: false, error: 'insufficient_role', message: 'Se requiere rol de supervisor o superior' })
+    if (!(await esSupervisorOMasDeLaOrganizacion((req as any).authContext, req.params.orgId))) {
+      return res.status(403).json({ success: false, error: 'insufficient_role', message: MENSAJE_SE_REQUIERE_SUPERVISOR })
     }
 
     next()
@@ -777,7 +754,7 @@ router.post(
         return res.status(400).json({ success: false, error: 'missing_fields', message: 'name and slug are required' })
       }
 
-      const zone = await organizationDashboardService.createZone(orgId, name, slug)
+      const zone = await organizationDashboardService.createZone(orgId, name, slug, (req as any).authContext?.userId)
       res.status(201).json({ success: true, data: zone })
     } catch (error) {
       next(error)
@@ -799,7 +776,7 @@ router.put(
       const { orgId, zoneId } = req.params
       const { name, slug } = req.body
 
-      const zone = await organizationDashboardService.updateZone(orgId, zoneId, { name, slug })
+      const zone = await organizationDashboardService.updateZone(orgId, zoneId, { name, slug }, (req as any).authContext?.userId)
       res.json({ success: true, data: zone })
     } catch (error) {
       next(error)
@@ -818,7 +795,7 @@ router.delete(
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { orgId, zoneId } = req.params
-      await organizationDashboardService.deleteZone(orgId, zoneId)
+      await organizationDashboardService.deleteZone(orgId, zoneId, (req as any).authContext?.userId)
       res.json({ success: true })
     } catch (error) {
       next(error)
