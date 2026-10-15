@@ -15,7 +15,6 @@ jest.mock('@/services/venueSalesGuard', () => ({
 import { Decimal } from '@prisma/client/runtime/library'
 import { Prisma } from '@prisma/client'
 import { cancelOrder, createOrderWithItems, payCashOrder } from '@/services/mobile/order.mobile.service'
-import { capItemNote } from '@/services/shared/inputCaps'
 import { prismaMock } from '../../../__helpers__/setup'
 
 jest.mock('@/communication/sockets', () => ({
@@ -208,9 +207,10 @@ describe('order.mobile.service', () => {
     )
   })
 
-  // D5 (mesas40, 14-oct): `buildOrderItemsData` escribía la nota cruda. Se recorta (nunca se rechaza: la venta ya
-  // ocurrió) a 500 caracteres completos, en la línea de producto Y en la de monto libre.
-  it('D5: una nota de 10,038 caracteres se guarda recortada a 500 caracteres completos (producto y monto libre)', async () => {
+  // D5 v5 (mesas40, 15-oct): el server NO recorta `OrderItem.notes`. La nota es identidad de la línea en el carrito
+  // completo de la TPV y una fila recortada por un escritor deja de reconocerse ahí ($100 → $200, Codex r3). El tope vive
+  // donde nace la nota: la captura del aparato. Producto y monto libre la guardan entera, como en `a2e999c0f`.
+  it('D5 v5: una nota de 10,038 caracteres se guarda COMPLETA (producto y monto libre)', async () => {
     mockBaseOrderCreate()
     const notaLarga = 'a'.repeat(499) + '🌮' + 'b'.repeat(9_537)
 
@@ -224,9 +224,8 @@ describe('order.mobile.service', () => {
     })
 
     const creados = (prismaMock.order.create as jest.Mock).mock.calls[0][0].data.items.create
-    // D5 v3: prefijo + «…» + huella (`capItemNote`, formato fijado en `inputCaps.test.ts`).
-    expect(creados.map((item: { notes: string | null }) => item.notes)).toEqual([capItemNote(notaLarga), capItemNote(notaLarga)])
-    expect(creados[0].notes).toMatch(/…[0-9a-f]{8}$/)
+    expect(notaLarga).toHaveLength(10_038)
+    expect(creados.map((item: { notes: string | null }) => item.notes)).toEqual([notaLarga, notaLarga])
   })
 
   // ── Per-item discountId (mirrors TPV's itemDiscountId — order.tpv.service.ts) ──

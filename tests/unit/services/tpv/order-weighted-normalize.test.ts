@@ -7,7 +7,6 @@
  * separate lines; merging them would corrupt quantity (1+1=2) with one weight.
  */
 import { normalizeAddItems } from '@/services/tpv/order.tpv.service'
-import { capItemNote } from '@/services/shared/inputCaps'
 
 describe('normalizeAddItems — D9 weighted lines never merge', () => {
   it('keeps two weighings of the same product as separate lines', () => {
@@ -62,29 +61,23 @@ describe('normalizeAddItems — D9 weighted lines never merge', () => {
 })
 
 /**
- * D5 (mesas40, 14-oct): `OrderItem.notes` no tenía tope — `normalizeNotes` sólo hacía trim y una nota de 10,038
- * caracteres llegaba entera a la cuenta, a la comanda y al ticket. Ahora se RECORTA (nunca se rechaza: la ronda ya
- * ocurrió) a 500 caracteres completos: un emoji en el borde queda entero o fuera, nunca partido a la mitad.
- * D5 v4: esto es el default de `normalizeAddItems` = las RONDAS (`asNewRound=true`). El carrito completo le pasa sólo
- * trim, sin tope (pruebas en `order.atomic.test.ts`).
+ * D5 v5 (mesas40, 15-oct): el server NO recorta `OrderItem.notes`. La nota es la llave de la fusión en `normalizeAddItems`
+ * y del match contra filas existentes; cuatro rondas de recorte (pelón, con huella, sólo en rondas) chocaron con esa
+ * identidad. La nota queda como en `a2e999c0f`: sólo trim. El tope vive en la captura del aparato.
  */
-describe('normalizeAddItems — D5: la nota de un artículo tiene tope de 500 caracteres', () => {
-  // 490 letras + un emoji (2 unidades UTF-16) justo en el borde del prefijo + relleno = 10,038 unidades.
+describe('normalizeAddItems — D5 v5: la nota de un artículo no lleva tope en el server', () => {
   const notaLarga = 'a'.repeat(490) + '🌮' + 'b'.repeat(9_546)
 
-  it('una nota de 10,038 caracteres se recorta a 500 caracteres completos (prefijo + «…» + huella), con el emoji del borde ENTERO', () => {
+  it('🔴 una nota de 10,038 caracteres queda COMPLETA', () => {
     expect(notaLarga).toHaveLength(10_038)
 
     const [line] = normalizeAddItems([{ productId: 'prod-taco', quantity: 1, notes: notaLarga }])
 
-    expect(Array.from(line.notes!)).toHaveLength(500)
-    // Un `.slice()` pelón por unidades UTF-16 dejaría medio emoji (un surrogate suelto) antes de la huella.
-    expect(line.notes).toBe(capItemNote(notaLarga))
-    expect(line.notes).toMatch(new RegExp('^' + 'a'.repeat(490) + '🌮…[0-9a-f]{8}$', 'u'))
+    expect(line.notes).toBe(notaLarga)
   })
 
-  // D5 v3 (Codex P1): el recorte pelón fusionaba dos líneas DISTINTAS en una con `_count = 2`, y el carrito reenviado
-  // sumaba esa cantidad a la fila existente.
+  // D5 v3 (Codex P1): un recorte fusionaba dos líneas DISTINTAS en una con `_count = 2`, y el carrito reenviado sumaba
+  // esa cantidad a la fila existente. Sin recorte no pasa; la prueba se queda de guarda.
   it('🔴 dos líneas del mismo producto cuyas notas comparten los primeros 500 caracteres NO se fusionan', () => {
     const base = 'a'.repeat(500)
 
@@ -101,7 +94,7 @@ describe('normalizeAddItems — D5: la nota de un artículo tiene tope de 500 ca
     expect(lineas[0].notes).not.toBe(lineas[1].notes)
   })
 
-  it('una nota normal queda igual (sólo se recorta lo que pasa del tope)', () => {
+  it('una nota normal sólo pierde los espacios de las orillas', () => {
     const [line] = normalizeAddItems([{ productId: 'prod-taco', quantity: 1, notes: '  sin cebolla 🌶️ ' }])
 
     expect(line.notes).toBe('sin cebolla 🌶️')

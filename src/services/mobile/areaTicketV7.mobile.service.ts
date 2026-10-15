@@ -55,7 +55,6 @@ import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
 import { assertOrderCancellableUnderLock, avisarOrdenCancelada } from '../shared/orderCancelGuard'
 import { externalRouteBlockers } from './areaTicketExternalCodes'
 import { buildOrderItemsData, CreateOrderItemInput } from './order.mobile.service'
-import { capItemNote, MAX_ITEM_NOTE_CHARS } from '../shared/inputCaps'
 
 const DEFAULT_CLAIM_TTL_SECONDS = 300
 const DEFAULT_SESSION_MAX_AGE_MINUTES = 30
@@ -608,23 +607,9 @@ function issueIntentFromTicket(ticket: any) {
   }))
 }
 
-/**
- * D5 (mesas40): la nota con la que se compara la repetición de un vale. Un vale nuevo guarda la nota RECORTADA
- * (`buildOrderItemsData`): la entrante se compara recortada, para que repetir el mismo vale no sea un 409. Un vale anterior
- * al tope guarda la nota ENTERA (más de 500): se compara el texto íntegro, como antes de D5 — recortar los dos lados
- * confundía una nota larga con su forma recortada escrita literalmente (Codex r2).
- */
-function notaComparable(entrante: string | null, guardada: string | null | undefined): string | null {
-  if (guardada != null && Array.from(guardada).length > MAX_ITEM_NOTE_CHARS) return entrante
-  return capItemNote(entrante) ?? null
-}
-
 function assertIssueIdempotencyMatch(ticket: any, lines: AreaTicketLineInput[]): void {
+  const incomingIntent = issueIntentFromInput(lines)
   const persistedIntent = issueIntentFromTicket(ticket)
-  const incomingIntent = issueIntentFromInput(lines).map((line, index) => ({
-    ...line,
-    notes: notaComparable(line.notes, persistedIntent[index]?.notes),
-  }))
   if (JSON.stringify(incomingIntent) !== JSON.stringify(persistedIntent)) {
     throw domainError(
       409,
@@ -1494,8 +1479,7 @@ function orderItemFromSnapshot(line: any, fulfillmentAreaId: string) {
     total: line.total,
     weightQuantity: line.weightKg,
     weightUnit: line.weightKg == null ? null : ('KILOGRAM' as const),
-    // D5 v3: un vale emitido antes del tope guarda la nota entera; el renglón nace recortado (el vale no se reescribe).
-    notes: capItemNote(line.notes),
+    notes: line.notes,
     fulfillmentAreaId,
     areaTicketLineId: line.id,
     modifiers:

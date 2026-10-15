@@ -43,7 +43,6 @@ import { armarComandasTrasCommit, retirarComandasDeVentaAnulada, tomarCandadoDeC
 import { parseServiceCourseSnapshot, legacyCourseForSnapshot, type ServiceCourseSnapshot } from '../service-courses/serviceCourseContract'
 import { applyPromotionToOrder, type PromotionSelection } from '../promotions/promotion.service'
 import { venueHasFeatureAccess } from '../access/basePlan.service'
-import { capItemNote } from '../shared/inputCaps'
 
 /**
  * Helper function to flatten OrderItemModifier structure for Android compatibility
@@ -553,16 +552,10 @@ interface NormalizedAddOrderItemInput extends AddOrderItemInput {
   _count: number
 }
 
-/** Texto libre: trim, y vacío ⇒ null. Sin tope (la nota de la orden y el motivo de la cortesía se guardan enteros). */
-function trimOrNull(text?: string | null): string | null {
-  if (!text) return null
-  const trimmed = text.trim()
-  return trimmed.length > 0 ? trimmed : null
-}
-
-/** Nota de un ARTÍCULO: además lleva el tope de 500 (D5 mesas40; se recorta, nunca se rechaza — `../shared/inputCaps`). */
 function normalizeNotes(notes?: string | null): string | null {
-  return capItemNote(trimOrNull(notes)) ?? null
+  if (!notes) return null
+  const trimmed = notes.trim()
+  return trimmed.length > 0 ? trimmed : null
 }
 
 function normalizeExternalId(externalId?: string | null): string | null {
@@ -600,15 +593,11 @@ function buildAddItemKey(productId: string, modifierIds: string[], notes: string
 }
 
 // Exported for unit tests (D9: weighted lines must never merge).
-// `normalizarNota`: con tope en las rondas (default); sólo trim en el carrito completo (D5 v4, ver `addItemsToOrder`).
-export function normalizeAddItems(
-  items: AddOrderItemInput[],
-  normalizarNota: (notes?: string | null) => string | null = normalizeNotes,
-): NormalizedAddOrderItemInput[] {
+export function normalizeAddItems(items: AddOrderItemInput[]): NormalizedAddOrderItemInput[] {
   const map = new Map<string, NormalizedAddOrderItemInput>()
 
   for (const [index, item] of items.entries()) {
-    const normalizedNotes = normalizarNota(item.notes)
+    const normalizedNotes = normalizeNotes(item.notes)
     const normalizedModifiers = normalizeModifierIds(item.modifierIds)
     const normalizedExternalId = normalizeExternalId(item.externalId)
     const serviceCourse = parseServiceCourseSnapshot(item.serviceCourse)
@@ -1233,7 +1222,7 @@ export async function createOrderWithItems(
           paidAmount: 0,
           remainingBalance: decimalFromPesos(totalPesos),
           completedAt: isFreeCart ? new Date() : null,
-          specialRequests: trimOrNull(input.note),
+          specialRequests: normalizeNotes(input.note),
           version: 1,
         },
       })
@@ -1254,7 +1243,7 @@ export async function createOrderWithItems(
             taxAmount: 0,
             total: decimalFromPesos(line.lineGrossPesos),
             isCortesia: !!line.input.isCortesia,
-            cortesiaReason: line.input.isCortesia ? trimOrNull(line.input.cortesiaReason) : null,
+            cortesiaReason: line.input.isCortesia ? normalizeNotes(line.input.cortesiaReason) : null,
             appliedDiscountId: line.appliedDiscount?.id || null,
             notes: normalizeNotes(line.input.notes),
             modifiers: {
@@ -1517,15 +1506,7 @@ export async function addItemsToOrder(
     items = items.filter(item => !item.promotionRef)
   }
 
-  // 🔴 D5 v4 (Codex r2): en el carrito completo (asNewRound=false) la nota es la IDENTIDAD de la línea — llave de la
-  // fusión, match contra las filas existentes y `_count` —. Cualquier recorte confunde notas distintas (una escrita igual
-  // que la forma recortada de otra ⇒ $200 → $400) o vuelve visible una vacía (501 espacios ⇒ otro renglón). Ahí la nota
-  // queda EXACTAMENTE como antes de D5: sólo trim, sin tope. El tope con huella se queda en las rondas (asNewRound=true),
-  // que nunca hacen match por nota: una fusión dentro de la ronda sólo junta cantidades en un renglón nuevo.
-  const nota = asNewRound ? normalizeNotes : trimOrNull
-  /** Nota que conserva un renglón al actualizarse sin nota nueva: en el carrito completo, tal cual (como antes de D5). */
-  const notaHeredada = (vieja: string | null) => (asNewRound ? normalizeNotes(vieja) : vieja)
-  const normalizedItems = normalizeAddItems(items, nota)
+  const normalizedItems = normalizeAddItems(items)
   if (normalizedItems.length !== items.length) {
     logger.warn(
       `⚠️ [ADD ITEMS] Normalized ${items.length} items → ${normalizedItems.length} unique (duplicates merged by product+modifiers+notes)`,
@@ -1776,7 +1757,7 @@ export async function addItemsToOrder(
                 total: customComped ? 0 : customTotal,
                 isCortesia: customComped,
                 cortesiaReason: customComped ? item.cortesiaReason?.trim() || null : null,
-                notes: nota(item.notes),
+                notes: normalizeNotes(item.notes),
                 course: item.course ?? null,
                 ...(item.serviceCourse ? { serviceCourse: item.serviceCourse as Prisma.InputJsonValue } : {}),
                 seat: item.seat ?? null,
@@ -1804,7 +1785,7 @@ export async function addItemsToOrder(
         }
 
         const product = products.find(p => p.id === item.productId)!
-        const normalizedNotes = nota(item.notes)
+        const normalizedNotes = normalizeNotes(item.notes)
 
         // Calculate modifier total
         const itemModifiers = item.modifierIds || []
@@ -1876,7 +1857,7 @@ export async function addItemsToOrder(
                 // inventory deduction go stale (review 2026-07-19, fix #1).
                 weightQuantity: weightKg != null ? new Prisma.Decimal(weightKg) : null,
                 weightUnit: weightKg != null ? ('KILOGRAM' as const) : null,
-                notes: normalizedNotes ?? notaHeredada(existingByExternal.notes),
+                notes: normalizedNotes ?? existingByExternal.notes,
                 externalId: existingByExternal.externalId ?? normalizedExternalId,
               },
               include: {
@@ -1933,7 +1914,7 @@ export async function addItemsToOrder(
                 total: updatedTotal,
                 weightQuantity: weightKg != null ? new Prisma.Decimal(weightKg) : null,
                 weightUnit: weightKg != null ? ('KILOGRAM' as const) : null,
-                notes: normalizedNotes ?? notaHeredada(existingById.notes),
+                notes: normalizedNotes ?? existingById.notes,
                 externalId: existingById.externalId ?? normalizedExternalId,
               },
               include: {
@@ -2041,7 +2022,7 @@ export async function addItemsToOrder(
             : existingItemsWithModifiers.find(existing => {
                 if (existing.isCortesia) return false
                 const existingModifierIds = existing.modifiers.map(m => m.modifierId).sort()
-                const notesMatch = nota(existing.notes) === normalizedNotes
+                const notesMatch = normalizeNotes(existing.notes) === normalizedNotes
                 // TABLE_SERVICE: lines in different courses never merge.
                 const courseMatch = (existing.course ?? null) === (item.course ?? null)
                 // TABLE_SERVICE: lines for different seats never merge either.
@@ -2067,7 +2048,7 @@ export async function addItemsToOrder(
               // was weighed before soldByWeight was toggled off (review 2026-07-19).
               weightQuantity: weightKg != null ? new Prisma.Decimal(weightKg) : null,
               weightUnit: weightKg != null ? ('KILOGRAM' as const) : null,
-              notes: normalizedNotes ?? notaHeredada(existingItemWithModifiers.notes),
+              notes: normalizedNotes ?? existingItemWithModifiers.notes,
             },
             include: {
               product: {
@@ -4179,7 +4160,7 @@ export async function addSerializedItemToOrder(
         data: {
           orderId,
           ...orderItemData, // Includes: productName, productSku, unitPrice, quantity, total, taxAmount, productId
-          notes: capItemNote(input.notes),
+          notes: input.notes,
         },
       })
 
@@ -4357,7 +4338,7 @@ export async function sellSerializedItem(
         items: {
           create: {
             ...orderItemData, // Includes: productName, productSku, unitPrice, quantity, total, taxAmount, productId
-            notes: capItemNote(input.notes),
+            notes: input.notes,
           },
         },
       },

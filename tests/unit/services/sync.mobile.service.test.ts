@@ -564,7 +564,7 @@ describe('sync.mobile.service processIntents', () => {
   })
 
   // D5 (mesas40, 14-oct): ni la nota larga ni el efectivo gigante son motivo de cuarentena. La cola reproduce algo que
-  // YA ocurrió: el tope de la nota lo pone `addItemsToOrder` recortando, y el importe se conserva exacto.
+  // YA ocurrió: la nota pasa entera (el server no la recorta, D5 v5) y el importe se conserva exacto.
   it('D5: ADD_ITEMS con una nota de 10,038 caracteres ⇒ ACKED (el reducer la pasa; nunca la rechaza)', async () => {
     ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 3, status: 'PENDING' })
     ;(orderTpvService.addItemsToOrder as jest.Mock).mockResolvedValue({ version: 4, total: 50 })

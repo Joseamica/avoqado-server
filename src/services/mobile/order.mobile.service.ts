@@ -52,7 +52,7 @@ import {
 import { claseDeEstado, computeOrderBalance, impuestoQueSeCobraAparte, summarizeRefunds, type RefundState } from '../shared/orderBalance'
 import { rechazarSiEsImportada } from '../shared/ordenImportada'
 import { RECIBO_CANONICO } from '../shared/reciboCanonico'
-import { capItemNote, MAX_TERMINAL_PAYMENT_CENTS } from '../shared/inputCaps'
+import { MAX_TERMINAL_PAYMENT_CENTS } from '../shared/inputCaps'
 import {
   CobroYaRegistrado,
   assertIdempotentPaymentOrder,
@@ -720,7 +720,7 @@ export async function buildOrderItemsData(
       appliedDiscountId: appliedDiscount?.id || null,
       taxAmount: new Prisma.Decimal(0),
       total: new Prisma.Decimal(itemTotal),
-      notes: capItemNote(item.notes) || null,
+      notes: item.notes || null,
       fulfillmentAreaId: fulfillmentAreaId || null,
       modifiers: {
         create: itemModifierIds.map(modifierId => {
@@ -760,7 +760,7 @@ export async function buildOrderItemsData(
       appliedDiscountId: appliedDiscount?.id || null,
       taxAmount: new Prisma.Decimal(0),
       total: new Prisma.Decimal(itemTotal),
-      notes: capItemNote(item.notes) || null,
+      notes: item.notes || null,
       fulfillmentAreaId: fulfillmentAreaId || null,
     }
   })

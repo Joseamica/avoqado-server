@@ -1,7 +1,8 @@
 /**
- * D5 v3 (Codex P3, 15-oct): el tope de 500 es SÓLO para `OrderItem.notes`. La nota general de la orden
- * (`specialRequests`) y el motivo de la cortesía (`cortesiaReason`) vuelven a sólo `trim`: la cortesía tiene que decir
- * lo mismo en `OrderItem`, `OrderDiscount.compReason` y la bitácora `OrderAction`, que guardan el motivo completo.
+ * D5 v5 (mesas40, 15-oct): el alta de la TPV no recorta ningún texto, como en `a2e999c0f`. La nota general de la orden
+ * (`specialRequests`), el motivo de la cortesía (`cortesiaReason`, que debe decir lo mismo en `OrderItem`,
+ * `OrderDiscount.compReason` y `OrderAction`) y la nota del artículo (`OrderItem.notes`, identidad de la línea en el
+ * carrito completo) se guardan enteros, sólo con trim. El tope de la nota vive en la captura del aparato.
  */
 import { prismaMock } from '../../../__helpers__/setup'
 
@@ -15,7 +16,6 @@ jest.mock('@/services/kds/kitchenDisplayStations', () => ({ debeMarcarCocina: je
 jest.mock('@/services/kds/kitchenTicketAuthoring.service', () => ({ armarComandasTrasCommit: jest.fn().mockResolvedValue(undefined) }))
 
 import { createOrderWithItems } from '@/services/tpv/order.tpv.service'
-import { capItemNote } from '@/services/shared/inputCaps'
 
 beforeEach(() => {
   jest.clearAllMocks()
@@ -34,14 +34,16 @@ beforeEach(() => {
   prismaMock.order.findUniqueOrThrow.mockResolvedValue({ id: 'order-1', orderNumber: 'ORD-1', table: null, items: [], payments: [] } as any)
 })
 
-describe('createOrderWithItems (TPV) — D5 v3: sólo la nota del artículo lleva tope', () => {
-  it('🔴 specialRequests y cortesiaReason largos se guardan COMPLETOS (sólo trim); la nota del artículo, recortada', async () => {
+describe('createOrderWithItems (TPV) — D5 v5: ningún texto del alta lleva tope', () => {
+  it('🔴 specialRequests, cortesiaReason y una nota de artículo de 10,038 se guardan COMPLETOS (sólo trim)', async () => {
     const notaDeOrden = 'x'.repeat(800)
     const motivo = 'r'.repeat(800)
-    const notaDeArticulo = 'n'.repeat(800)
+    const notaDeArticulo = 'n'.repeat(10_038)
 
     await createOrderWithItems('venue-1', {
-      items: [{ productId: 'p1', quantity: 1, unitPrice: 100, isCortesia: true, cortesiaReason: `  ${motivo} `, notes: notaDeArticulo }],
+      items: [
+        { productId: 'p1', quantity: 1, unitPrice: 100, isCortesia: true, cortesiaReason: `  ${motivo} `, notes: ` ${notaDeArticulo}  ` },
+      ],
       staffId: 'staff-1',
       taxAmount: 0,
       subtotal: 100,
@@ -53,7 +55,6 @@ describe('createOrderWithItems (TPV) — D5 v3: sólo la nota del artículo llev
     expect((prismaMock.order.create as jest.Mock).mock.calls[0][0].data.specialRequests).toBe(notaDeOrden)
     const renglon = (prismaMock.orderItem.create as jest.Mock).mock.calls[0][0].data
     expect(renglon.cortesiaReason).toBe(motivo)
-    expect(renglon.notes).toBe(capItemNote(notaDeArticulo))
-    expect(renglon.notes).toMatch(/…[0-9a-f]{8}$/)
+    expect(renglon.notes).toBe(notaDeArticulo)
   })
 })

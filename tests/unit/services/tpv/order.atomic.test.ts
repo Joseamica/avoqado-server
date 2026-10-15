@@ -24,7 +24,7 @@ import {
 } from '@/services/tpv/order.tpv.service'
 import { serializedInventoryService } from '@/services/serialized-inventory/serializedInventory.service'
 import { getProductInventoryStatus } from '@/services/dashboard/productInventoryIntegration.service'
-import { capItemNote } from '@/services/shared/inputCaps'
+import { buildOrderItemsData } from '@/services/mobile/order.mobile.service'
 import { createHash } from 'crypto'
 
 const globalDb = prisma as any
@@ -532,44 +532,44 @@ describe('R11 (Codex r5): una importada de SoftRestaurant se rechaza bajo el can
   })
 })
 
-/** D5 (mesas40, 14-oct): la venta serializada escribía la nota cruda. Se recorta (nunca se rechaza) a 500 caracteres completos. */
-describe('D5: la nota de la venta serializada se recorta a 500 caracteres completos', () => {
+/** D5 v5 (mesas40, 15-oct): la venta serializada guarda la nota COMPLETA, como en `a2e999c0f` (el server no recorta notas). */
+describe('D5 v5: la nota de la venta serializada se guarda completa', () => {
   const notaLarga = 'a'.repeat(499) + '🌮' + 'b'.repeat(9_537)
-  // D5 v3: prefijo + «…» + huella (`capItemNote`, formato fijado en `inputCaps.test.ts`).
-  const recortada = capItemNote(notaLarga)
 
-  it('addSerializedItemToOrder guarda la nota recortada, con el emoji del borde entero', async () => {
+  it('🔴 addSerializedItemToOrder guarda la nota de 10,038 completa', async () => {
+    expect(notaLarga).toHaveLength(10_038)
     await addSerializedItemToOrder('venue', 'order', { serialNumber: 'SERIAL', price: 20, notes: notaLarga }, 1, 'staff')
 
-    expect(tx.orderItem.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ notes: recortada }) }))
-    expect(tx.orderItem.create.mock.calls[0][0].data.notes).toMatch(/…[0-9a-f]{8}$/)
+    expect(tx.orderItem.create.mock.calls[0][0].data.notes).toBe(notaLarga)
   })
 
-  it('sellSerializedItem (venta rápida) guarda la nota recortada en el renglón que nace con la orden', async () => {
+  it('🔴 sellSerializedItem (venta rápida) guarda la nota completa en el renglón que nace con la orden', async () => {
     globalDb.venue.findUnique.mockResolvedValue({ id: 'venue', name: 'Venue', salesEnabled: true, organizationId: 'org' })
     tx.shift = { findFirst: jest.fn(async () => null) }
 
     await sellSerializedItem('venue', { serialNumber: 'SERIAL', price: 20, notes: notaLarga }, 'staff')
 
-    expect(tx.order.create.mock.calls[0][0].data.items.create.notes).toBe(recortada)
-    expect(recortada).toMatch(/…[0-9a-f]{8}$/)
+    expect(tx.order.create.mock.calls[0][0].data.items.create.notes).toBe(notaLarga)
   })
 })
 
 /**
- * D5 en el carrito completo de la TPV (`addItemsToOrder` con `asNewRound=false`). Ahí la nota es la IDENTIDAD de la línea:
- * llave de la fusión en `normalizeAddItems`, match contra las filas existentes y `_count`.
+ * D5 en `addItemsToOrder`. En el carrito completo de la TPV (`asNewRound=false`) la nota es la IDENTIDAD de la línea:
+ * llave de la fusión en `normalizeAddItems`, match contra las filas existentes y `_count`. Cada recorte en el server
+ * chocó con eso:
  * - v3 (Codex P1): un recorte pelón fusionaba `500a+A` con `500a+B` y el carrito reenviado SUMABA ($200 → $400).
- * - v4 (Codex r2): la huella tampoco basta. Una nota escrita LITERALMENTE igual que la forma recortada de otra se confunde
- *   con ella, y una nota vieja de 501 espacios se volvía visible y duplicaba el renglón. En este camino la nota queda
- *   EXACTAMENTE como en `a2e999c0f` (sólo trim, sin tope); el tope con huella se queda en las rondas (`asNewRound=true`),
- *   que nunca hacen match por nota.
- * Prisma simulado con las filas en memoria y la versión que avanza como en el server (CAS de `order.updateMany`).
+ * - v4 (Codex r2): con huella, una nota escrita LITERALMENTE igual que la forma recortada de otra se confundía con ella, y
+ *   una nota vieja de 501 espacios se volvía visible y duplicaba el renglón.
+ * - v5 (Codex r3): una fila guardada RECORTADA por otro escritor (alta mobile, vale) dejaba de reconocerse cuando llegaba
+ *   el carrito completo con la nota original ($100 → $200).
+ * Decisión v5: el server no recorta `OrderItem.notes` en ningún camino (exactamente `a2e999c0f`: sólo trim). Estas
+ * pruebas se quedan de guarda. Prisma simulado con las filas en memoria y la versión que avanza como en el server (CAS de
+ * `order.updateMany`).
  */
-describe('D5: la nota en addItemsToOrder — carrito completo como antes de D5, rondas con tope', () => {
+describe('D5: la nota en addItemsToOrder — sin tope en el carrito completo ni en las rondas', () => {
   const base = 'a'.repeat(500)
   const X = base + 'A'
-  // La forma recortada de X escrita LITERALMENTE como la nota de otra línea (contraejemplo de Codex r2).
+  // La forma que le daba el recorte v3 a X, escrita LITERALMENTE como la nota de otra línea (contraejemplo de Codex r2).
   const Y = 'a'.repeat(491) + '…' + createHash('sha256').update(X).digest('hex').slice(0, 8)
   const linea = (notes?: string) => ({ productId: 'product', quantity: 1, ...(notes === undefined ? {} : { notes }) })
   const vieja = (id: string, notes: string) => ({
@@ -650,7 +650,6 @@ describe('D5: la nota en addItemsToOrder — carrito completo como antes de D5, 
   })
 
   it('🔴 v4: X y su forma recortada escrita literalmente (Y) — guardar y reenviar deja $200 → $200', async () => {
-    expect(capItemNote(X)).toBe(Y) // la colisión existe: el recorte de X es exactamente Y
     const cuenta = cuentaEnMemoria()
 
     expect(await guardarYReenviar([linea(X), linea(Y)], cuenta)).toEqual([200, 200])
@@ -692,26 +691,49 @@ describe('D5: la nota en addItemsToOrder — carrito completo como antes de D5, 
     expect(cuenta.filas[0].notes).toBe(larga)
   })
 
-  it('rondas (asNewRound=true): X y Y en una ronda nueva sobre dos filas viejas — no tocan las viejas y la ronda suma $200', async () => {
+  it('🔴 rondas (asNewRound=true): X y Y en una ronda nueva sobre dos filas viejas — dos renglones nuevos con sus notas COMPLETAS', async () => {
     const cuenta = cuentaEnMemoria([vieja('vieja-X', X), vieja('vieja-Y', Y)])
 
     await addItemsToOrder('venue', 'order', [linea(X), linea(Y)], 1, true)
 
     expect(totalGuardado()).toBe(400)
     expect(tx.orderItem.update).not.toHaveBeenCalled()
-    const [viejaX, viejaY, ...nuevas] = cuenta.filas
-    expect([viejaX.quantity, viejaX.notes, viejaY.quantity, viejaY.notes]).toEqual([1, X, 1, Y])
-    // Dentro de la ronda, X y Y recortadas colisionan: se juntan en UN renglón nuevo con la cantidad sumada (mismo importe).
-    expect(nuevas.reduce((suma, fila) => suma + fila.quantity, 0)).toBe(2)
-    expect(nuevas.every(fila => fila.notes === Y)).toBe(true)
+    expect(cuenta.filas.map(fila => [fila.quantity, fila.notes])).toEqual([
+      [1, X],
+      [1, Y],
+      [1, X],
+      [1, Y],
+    ])
+  })
+
+  it('🔴 v5: una ronda nueva guarda la nota de 10,038 COMPLETA (sólo trim), como en a2e999c0f', async () => {
+    const larga = 'n'.repeat(10_038)
+    const cuenta = cuentaEnMemoria()
+
+    await addItemsToOrder('venue', 'order', [linea(`  ${larga} `)], 1, true)
+
+    expect(totalGuardado()).toBe(100)
+    expect(cuenta.filas.map(fila => fila.notes)).toEqual([larga])
+  })
+
+  // Codex r3: la fila la escribió OTRO camino (aquí el alta mobile, `buildOrderItemsData`; el vale v7 usa el mismo dato) y
+  // después llega el carrito completo SIN `externalId` con la misma nota. Si el escritor la hubiera recortado, el match
+  // por nota fallaba y nacía un segundo renglón ($100 → $200).
+  it('🔴 v5 (Codex r3): fila del alta mobile con nota de 10,038 + carrito completo sin externalId con la misma nota ⇒ $100 → $100, una sola fila', async () => {
+    const larga = 'n'.repeat(10_038)
+    const { itemsData } = await buildOrderItemsData('venue', [{ productId: 'product', quantity: 1, notes: larga }])
+    const cuenta = cuentaEnMemoria([vieja('del-alta', itemsData[0].notes)])
+
+    expect(await guardarYReenviar([linea(larga)], cuenta)).toEqual([100, 100])
+    expect(cuenta.filas.map(fila => [fila.id, fila.quantity])).toEqual([['del-alta', 1]])
+    expect(tx.orderItem.create).not.toHaveBeenCalled()
   })
 })
 
 /**
- * Updates de una línea que CONSERVA su nota (`normalizedNotes ?? existing.notes`).
- * - Carrito completo (`asNewRound=false`): la nota heredada queda tal cual, como en `a2e999c0f` (v4). Recortarla la
- *   cambiaba de identidad: 501 espacios pasaban a «491 espacios…huella» y el siguiente envío creaba otro renglón.
- * - Ronda (`asNewRound=true`, sólo alcanzable por el respaldo de id): la nota heredada se guarda con el tope.
+ * Updates de una línea que CONSERVA su nota (`normalizedNotes ?? existing.notes`): la nota heredada queda tal cual, como
+ * en `a2e999c0f`, en el carrito completo y en las rondas. Recortarla la cambiaba de identidad: 501 espacios pasaban a
+ * «491 espacios…huella» y el siguiente envío creaba otro renglón (Codex r2).
  */
 describe('D5: un update que hereda la nota de una fila vieja', () => {
   const notaVieja = 'n'.repeat(10_038)
@@ -735,13 +757,11 @@ describe('D5: un update que hereda la nota de una fila vieja', () => {
     expect(tx.orderItem.update.mock.calls[0][0].data.notes).toBe(notaVieja)
   })
 
-  it('ronda (asNewRound=true) por el respaldo de id — la nota heredada se guarda recortada', async () => {
+  it('🔴 v5: ronda (asNewRound=true) por el respaldo de id — la nota heredada también queda tal cual', async () => {
     tx.orderItem.findFirst.mockImplementation(async ({ where }: any) => (where.id === 'fila-vieja' ? filaVieja : null))
 
     await addItemsToOrder('venue', 'order', [{ productId: 'product', quantity: 2, externalId: 'fila-vieja' }], 1, true)
 
-    const notes = tx.orderItem.update.mock.calls[0][0].data.notes
-    expect(notes).toBe(capItemNote(notaVieja))
-    expect(notes).toMatch(/…[0-9a-f]{8}$/)
+    expect(tx.orderItem.update.mock.calls[0][0].data.notes).toBe(notaVieja)
   })
 })

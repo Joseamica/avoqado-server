@@ -1,18 +1,15 @@
 import { AreaTicketCheckoutStatus, AreaTicketStatus, FulfillmentMode, Prisma } from '@prisma/client'
 
 import { canonicalSnapshotHash, issueAreaTicket, materializeAreaTicketCheckout } from '@/services/mobile/areaTicketV7.mobile.service'
-import { capItemNote } from '@/services/shared/inputCaps'
 import { createHash } from 'crypto'
 import { prismaMock } from '../../../__helpers__/setup'
 
 /**
- * D5 (mesas40, 14-oct): la nota de un artículo se guarda recortada a 500 caracteres (`buildOrderItemsData`). El vale
- * congela esa nota recortada; la REPETICIÓN del mismo vale (misma llave, la misma nota larga que manda el aparato)
- * tiene que reconocerlo y devolverlo — no responder un 409 de idempotencia por comparar la nota cruda contra la guardada.
+ * D5 v5 (mesas40, 15-oct): el server NO recorta `OrderItem.notes` (decisión tras Codex r3; el tope vive en la captura del
+ * aparato). El vale congela la nota COMPLETA, como en `a2e999c0f`; la repetición del mismo vale se compara con el texto
+ * íntegro y el renglón que nace al materializar lleva la nota entera.
  */
 const notaLarga = 'a'.repeat(499) + '🌮' + 'b'.repeat(9_537)
-// D5 v3: prefijo + «…» + huella (`capItemNote`, formato fijado en `inputCaps.test.ts`).
-const recortada = capItemNote(notaLarga)
 
 function valeGuardado(notes: string) {
   const cero = new Prisma.Decimal(0)
@@ -63,29 +60,23 @@ const repeticion = (notes: string) => ({
   lines: [{ clientLineId: 'l1', productId: 'p-latte', quantity: '1', notes }],
 })
 
-describe('D5: repetir un vale con nota larga devuelve el MISMO vale', () => {
+describe('D5: repetir un vale con nota larga', () => {
   beforeEach(() => jest.clearAllMocks())
 
-  it('🔴 el vale guardado con la nota recortada se reconoce al repetirse con la nota larga (no 409)', async () => {
-    prismaMock.areaTicket.findUnique.mockResolvedValue(valeGuardado(recortada))
-
-    await expect(issueAreaTicket('venue-1', repeticion(notaLarga))).resolves.toMatchObject({ id: 'ticket-1' })
-  })
-
-  it('un vale emitido ANTES del tope (nota larga guardada entera) también se reconoce al repetirse', async () => {
+  it('un vale con la nota larga guardada entera se reconoce al repetirse con la misma nota (no 409)', async () => {
     prismaMock.areaTicket.findUnique.mockResolvedValue(valeGuardado(notaLarga))
 
     await expect(issueAreaTicket('venue-1', repeticion(notaLarga))).resolves.toMatchObject({ id: 'ticket-1' })
   })
 
   it('control: una nota DISTINTA con la misma llave sigue siendo conflicto de idempotencia', async () => {
-    prismaMock.areaTicket.findUnique.mockResolvedValue(valeGuardado(recortada))
+    prismaMock.areaTicket.findUnique.mockResolvedValue(valeGuardado(notaLarga))
 
     await expect(issueAreaTicket('venue-1', repeticion('sin hielo'))).rejects.toMatchObject({ code: 'AREA_TICKET_IDEMPOTENCY_CONFLICT' })
   })
 
-  // D5 v3 (Codex P2): con el recorte pelón, los dos lados quedaban en «500 letras» y el reintento con OTRA nota se
-  // aceptaba como el mismo vale. Con la huella, la diferencia después del carácter 500 vuelve a contar.
+  // D5 v3 (Codex P2): con un recorte, los dos lados quedaban en «500 letras» y el reintento con OTRA nota se aceptaba como
+  // el mismo vale. Sin recorte la diferencia después del carácter 500 cuenta; la prueba se queda de guarda.
   it('🔴 vale viejo con «500 letras + A» contra reintento «500 letras + B» ⇒ 409 AREA_TICKET_IDEMPOTENCY_CONFLICT', async () => {
     const base = 'a'.repeat(500)
     prismaMock.areaTicket.findUnique.mockResolvedValue(valeGuardado(base + 'A'))
@@ -93,12 +84,11 @@ describe('D5: repetir un vale con nota larga devuelve el MISMO vale', () => {
     await expect(issueAreaTicket('venue-1', repeticion(base + 'B'))).rejects.toMatchObject({ code: 'AREA_TICKET_IDEMPOTENCY_CONFLICT' })
   })
 
-  // D5 v4 (Codex r2): recortar los dos lados confundía la nota larga X con su forma recortada escrita LITERALMENTE (Y).
-  // Un vale anterior al tope (nota guardada de más de 500) se compara con el texto íntegro, como antes de D5.
+  // D5 v4 (Codex r2): recortar los dos lados confundía la nota larga X con la forma que le daba el recorte v3, escrita
+  // LITERALMENTE (Y). Con el texto íntegro, como antes de D5, son distintas; la prueba se queda de guarda.
   it('🔴 vale viejo con X (500a+A, guardado entero) contra reintento con su forma recortada literal Y ⇒ 409', async () => {
     const X = 'a'.repeat(500) + 'A'
     const Y = 'a'.repeat(491) + '…' + createHash('sha256').update(X).digest('hex').slice(0, 8)
-    expect(capItemNote(X)).toBe(Y)
     prismaMock.areaTicket.findUnique.mockResolvedValue(valeGuardado(X))
 
     await expect(issueAreaTicket('venue-1', repeticion(Y))).rejects.toMatchObject({ code: 'AREA_TICKET_IDEMPOTENCY_CONFLICT' })
@@ -106,13 +96,13 @@ describe('D5: repetir un vale con nota larga devuelve el MISMO vale', () => {
 })
 
 /**
- * D5 v3 (Codex P2): materializar un vale v7 emitido ANTES del tope copiaba `line.notes` completa al `OrderItem` nuevo.
- * El renglón nace con la nota recortada; el vale histórico NO se reescribe.
+ * D5 v5: materializar un vale v7 copia `line.notes` COMPLETA al `OrderItem` nuevo, como en `a2e999c0f`. Si el renglón
+ * naciera recortado, el carrito completo de la TPV con la nota original ya no lo reconocería ($100 → $200, Codex r3).
  */
-describe('D5 v3: materializar un vale viejo con nota larga escribe el renglón con la nota recortada', () => {
+describe('D5 v5: materializar un vale con nota larga escribe el renglón con la nota completa', () => {
   beforeEach(() => jest.clearAllMocks())
 
-  it('🔴 la nota del OrderItem queda recortada y el vale guardado conserva la suya', async () => {
+  it('🔴 la nota del OrderItem queda completa y el vale guardado no se reescribe', async () => {
     const now = new Date()
     const cero = new Prisma.Decimal(0)
     const lineaVieja = {
@@ -204,9 +194,7 @@ describe('D5 v3: materializar un vale viejo con nota larga escribe el renglón c
 
     await materializeAreaTicketCheckout('venue-1', session.id, { idempotencyKey: 'materializar-viejo', deviceUid: 'checkout-device' })
 
-    const notes = (prismaMock.orderItem.create as jest.Mock).mock.calls[0][0].data.notes
-    expect(notes).toBe(capItemNote(notaLarga))
-    expect(notes).toMatch(/…[0-9a-f]{8}$/)
+    expect((prismaMock.orderItem.create as jest.Mock).mock.calls[0][0].data.notes).toBe(notaLarga)
     // El vale histórico no se toca: ninguna escritura a sus líneas, y la que se leyó sigue completa.
     expect(prismaMock.areaTicketLine.update).not.toHaveBeenCalled()
     expect(lineaVieja.notes).toBe(notaLarga)
