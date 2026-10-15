@@ -18,6 +18,8 @@ interface ToolCallContext {
   org: string
   /** Platform SUPERADMIN connection → thrown errors are passed through RAW (useful for debugging). */
   isSuperAdmin?: boolean
+  /** OAuth app behind the connection (the token's `cid`: ChatGPT, Claude…); null/absent for dev-server tokens. */
+  clientId?: string | null
 }
 
 /**
@@ -95,9 +97,11 @@ function resultOutcome(result: unknown): { ok: boolean; detail?: string } {
         error?: string
         requiresConfirmation?: boolean
         needsInput?: boolean
-        ambiguous?: boolean
+        ambiguous?: boolean | unknown[]
       }
-      if (parsed?.requiresConfirmation || parsed?.needsInput || parsed?.ambiguous) return { ok: true, detail: 'needs_input' }
+      // Las herramientas en bloque SIEMPRE traen la lista `ambiguous`: vacía no es una duda (antes contaba como verdadera).
+      const ambiguous = Array.isArray(parsed?.ambiguous) ? parsed.ambiguous.length > 0 : Boolean(parsed?.ambiguous)
+      if (parsed?.requiresConfirmation || parsed?.needsInput || ambiguous) return { ok: true, detail: 'needs_input' }
       if (parsed && parsed.ok === false) return { ok: false, detail: parsed.error ?? 'ok:false' }
     } catch {
       // non-JSON prose content → treat as success
@@ -116,6 +120,7 @@ async function recordMcpCall(row: {
   toolName: string
   staffId: string | null
   orgId: string | null
+  clientId: string | null
   venueId: string | null
   outcome: 'ok' | 'error' | 'threw'
   detail: string | null
@@ -143,12 +148,13 @@ export function recordCancelledToolCall(row: {
   toolName: string
   staffId: string | null
   orgId: string | null
+  clientId?: string | null
   venueId: string | null
   reason: string
   durationMs: number
 }): void {
-  const { reason, ...rest } = row
-  void recordMcpCall({ ...rest, outcome: 'error', detail: `cancelada:${reason}` })
+  const { reason, clientId, ...rest } = row
+  void recordMcpCall({ ...rest, clientId: clientId ?? null, outcome: 'error', detail: `cancelada:${reason}` })
 }
 
 /**
@@ -201,14 +207,14 @@ function makePatched(original: ToolFn, ctx: ToolCallContext): ToolFn {
     const name = typeof toolArgs[0] === 'string' ? toolArgs[0] : 'unknown'
     const cbIndex = toolArgs.length - 1
     const cb = toolArgs[cbIndex] as ToolFn
-    const base = { mcp: true as const, tool: name, staffId: ctx.staffId, org: ctx.org }
+    const base = { mcp: true as const, tool: name, staffId: ctx.staffId, org: ctx.org, ...(ctx.clientId ? { clientId: ctx.clientId } : {}) }
     const wrapped: ToolFn = async (...cbArgs: unknown[]) => {
       const start = Date.now()
       // The handler is called (params, extra); pull venueId from params when present.
       const params = cbArgs[0] as { venueId?: unknown } | undefined
       const venueId = typeof params?.venueId === 'string' ? params.venueId : null
       const meta = venueId ? { ...base, venueId } : base
-      const audit = { toolName: name, staffId: ctx.staffId, orgId: ctx.org, venueId }
+      const audit = { toolName: name, staffId: ctx.staffId, orgId: ctx.org, clientId: ctx.clientId ?? null, venueId }
       // A running tool holds its caller's slot even if the client already hung up (see the MCP guard).
       const endWork = beginWork()
       try {

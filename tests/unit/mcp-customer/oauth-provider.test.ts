@@ -34,8 +34,14 @@ it('verifyAccessToken returns AuthInfo with staffId/activeOrg in extra', async (
   const token = issueMcpToken('s1', 'o1', 3600, 'c1')
   const info = await provider.verifyAccessToken(token)
   expect(info.clientId).toBe('c1')
-  expect(info.extra).toEqual({ staffId: 's1', activeOrg: 'o1', scopes: ['mcp:read'] })
+  expect(info.extra).toEqual({ staffId: 's1', activeOrg: 'o1', scopes: ['mcp:read'], clientId: 'c1' })
   expect(info.scopes).toContain('mcp:read')
+})
+
+// Evidencia (15-oct): sin `cid` no se inventa una app con el id de la persona (el `clientId` del SDK sí cae en `sub`).
+it('un token sin app (cid) deja extra.clientId en null', async () => {
+  const info = await provider.verifyAccessToken(issueMcpToken('s1', 'o1', 3600))
+  expect(info.extra?.clientId).toBeNull()
 })
 
 it('verifyAccessToken throws on a non-MCP token', async () => {
@@ -58,7 +64,7 @@ it('exchangeAuthorizationCode consumes the code and returns access+refresh', asy
   expect(tokens.token_type).toBe('Bearer')
   const verified = await provider.verifyAccessToken(tokens.access_token)
   // The granted scope now round-trips through the token (was dropped at mint → hardcoded full set).
-  expect(verified.extra).toEqual({ staffId: 's1', activeOrg: 'o1', scopes: ['mcp:read'] })
+  expect(verified.extra).toEqual({ staffId: 's1', activeOrg: 'o1', scopes: ['mcp:read'], clientId: 'c1' })
   expect(verified.scopes).toEqual(['mcp:read']) // NOT the full supported set — only what was granted
 })
 

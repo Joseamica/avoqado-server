@@ -938,6 +938,9 @@ export async function updateProduct(
   // El encendido lee aparatos y documentos y sella las facturas viejas: 5 s no alcanzan con muchas.
   const opcionesTx = plan ? { timeout: 30_000, maxWait: 5_000 } : undefined
 
+  // El precio vigente BAJO el candado del catálogo (Codex 15-oct): `existingProduct` se leyó antes y otra edición pudo
+  // cambiarlo en medio; la bitácora no debe atribuirle a esta persona un cambio de precio ajeno.
+  let precioBajoCandado: Prisma.Decimal | undefined
   const product = await prisma.$transaction(async tx => {
     // Plan 6b (D10): encender toma la admisión exclusiva ANTES de la organización; sin encendido, el orden de siempre (plan 4).
     if (plan) await encenderBajoCandados(tx, { venueId, productId, plan, staffId, origen })
@@ -958,8 +961,9 @@ export async function updateProduct(
     // directo) — el trigger de Product deriva la tupla desde ese único valor.
     const actual = await tx.product.findFirstOrThrow({
       where: { id: productId, venueId },
-      select: { ivaTratamiento: true, taxRate: true, objetoImp: true },
+      select: { ivaTratamiento: true, taxRate: true, objetoImp: true, price: true },
     })
+    precioBajoCandado = actual.price
     const encendido = (await tx.venueIvaPorProducto.count({ where: { venueId } })) > 0
     Object.assign(
       updateData,
@@ -1094,7 +1098,22 @@ export async function updateProduct(
     })
   }
 
-  logAction({ venueId, action: 'PRODUCT_UPDATED', entity: 'Product', entityId: product.id, data: { changes: Object.keys(productData) } })
+  // Quién lo cambió y de cuánto a cuánto quedó el precio (founder, 15-oct): antes no quedaba ni la persona.
+  logAction({
+    venueId,
+    staffId: actor.type === 'HUMAN' ? actor.staffId : undefined,
+    action: 'PRODUCT_UPDATED',
+    entity: 'Product',
+    entityId: product.id,
+    data: {
+      changes: Object.keys(productData),
+      // Sólo si ESTA petición cambió el precio, y desde el precio vigente bajo el candado.
+      ...(productData.price !== undefined && precioBajoCandado != null && Number(precioBajoCandado) !== Number(product.price)
+        ? { price: { from: Number(precioBajoCandado), to: Number(product.price) } }
+        : {}),
+      ...(actor.type === 'SERVICE' ? { servicePrincipalId: actor.servicePrincipalId } : actor.impersonating ? { impersonating: true } : {}),
+    },
+  })
 
   return product
 }
