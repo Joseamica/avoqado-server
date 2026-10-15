@@ -67,6 +67,13 @@ const INVENTARIO: Record<string, Clase> = {
     clase: 'PROTEGIDA',
     marcadores: ['lockTableOrderScope(', 'assertNoLiveTerminalCharge'],
   },
+  // Tarjetas de regalo (B1 r1, clasificada en B2): el reembolso que deja en $0 una venta de tarjetas SIN pagar la cancela en la MISMA
+  // tx del reembolso, que ya tiene el candado de la Order (issueRefund / recordRefund → lockExistingOrderForPayment). Con un cobro de
+  // terminal vivo NO cancela (la cuenta sigue y su desenlace decide), igual que el guardia general; CAS sobre el estado + versión.
+  'services/giftCards/giftCardCancel.service.ts#cerrarVentaSinPagarSiYaNoQuedaDinero': {
+    clase: 'PROTEGIDA',
+    marcadores: ['findLiveTerminalCharge(tx', 'if (vivo)', "status: { notIn: ['CANCELLED', 'DELETED'] }", 'version: { increment: 1 }'],
+  },
   'services/dashboard/order.dashboard.service.ts#deleteOrder': { clase: 'PROTEGIDA', marcadores: PROTEGIDA_POR_EL_GUARD },
   'services/mobile/areaTicketV7.mobile.service.ts#cancelAreaTicketCheckout': { clase: 'PROTEGIDA', marcadores: PROTEGIDA_POR_EL_GUARD },
   // Fusión: candado de LAS DOS órdenes en una sentencia + cobro vivo del ORIGEN.

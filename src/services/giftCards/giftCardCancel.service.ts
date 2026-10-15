@@ -7,19 +7,29 @@
  *   Order → sobres → Shift; un reembolso que tomara Shift → sobres se abrazaría con él (40P01). Jerarquía de un reembolso:
  *   Order → Payment → sobres → Shift.
  * - Una venta de tarjetas SIN pagar se devuelve como cualquier abono; la devolución que deja su dinero en $0 la cancela (r1, fix 1).
- * - La cancelación de la venta (iniciar / liberar) vive aquí también (B2).
+ * - La cancelación de la venta (iniciar / liberar) vive aquí también (B2): `iniciarCancelacionDeVenta` bloquea TODOS los sobres
+ *   con `CANCEL_IN_PROGRESS` antes del reembolso real; el gancho de arriba los desactiva cuando ese reembolso se registra; y
+ *   `liberarCancelacionDeVenta` los desbloquea sólo si el gerente comprobó que la devolución NO se hizo (r1 F6).
  */
-import { Prisma, type PrismaClient } from '@prisma/client'
+import { createHash } from 'crypto'
+import { GiftCardReason, Prisma, type GiftCardStatus, type PrismaClient } from '@prisma/client'
+import { formatInTimeZone } from 'date-fns-tz'
 import logger from '@/config/logger'
+import { BadRequestError } from '@/errors/AppError'
+import { DEFAULT_TIMEZONE } from '@/utils/datetime'
+import prisma from '@/utils/prismaClient'
 import { logAction } from '../dashboard/activity-log.service'
 import { avisarOrdenCancelada, findLiveTerminalCharge } from '../shared/orderCancelGuard'
+import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
 import { recordGiftCardAnomaly } from './giftCardAnomaly'
 import { GiftCardError } from './giftCardErrors'
 import {
   desactivarSobresDeCuentaEnTx,
   desactivarSobresPendientesDeCuentaEnTx,
   lockGiftCardsForUpdate,
+  operarSobreDeGerenteEnTx,
   revertirCanjeEnTx,
+  type OperacionDeGerente,
 } from './giftCardLedger'
 import { leerSiEsCuentaDeTarjetas } from './giftCardMarks'
 import { isGiftCardTenderKind } from './giftCardTender'
@@ -101,6 +111,60 @@ async function sobresDelCanje(tx: Tx, venueId: string, paymentId: string): Promi
     take: TOPE_LECTURA_SOBRES_DEL_REEMBOLSO,
   })
   return [...new Set(canjes.map(c => c.giftCardId))]
+}
+
+/** «En tienda, sólo el mismo día del cobro» (R2), en la zona del venue: nunca con la fecha del servidor. */
+export function mismoDiaDelVenue(a: Date, b: Date, timezone: string): boolean {
+  return formatInTimeZone(a, timezone, 'yyyy-MM-dd') === formatInTimeZone(b, timezone, 'yyyy-MM-dd')
+}
+
+/**
+ * La libreta deduplica por `[venueId, operationKey]` (un renglón por llave). El gerente manda UNA llave por diálogo; cada sobre de la
+ * cuenta recibe la suya derivada, así un reintento con la misma llave encuentra todos sus renglones y no escribe nada nuevo.
+ */
+export function claveDeSobre(operationKey: string, giftCardId: string): string {
+  const clave = `${operationKey}:${giftCardId}`
+  // La libreta (A4) acepta llaves de 8 a 128 y la ruta deja llegar hasta 128 (C3): una llave larga se resume con su sha256
+  // (64 + 1 + id ≤ 128). Determinista, así el reintento con la misma llave encuentra los mismos renglones.
+  return clave.length <= 128 ? clave : `${createHash('sha256').update(operationKey).digest('hex')}:${giftCardId}`
+}
+
+/** El bloqueo VIGENTE de un sobre: el de su último BLOCK/UNBLOCK, si fue BLOCK. */
+export interface BloqueoVigente {
+  reason: GiftCardReason | null
+  note: string | null
+  at: Date
+}
+
+/**
+ * El bloqueo VIGENTE de cada sobre: su último BLOCK/UNBLOCK (una consulta, índice `[giftCardId, createdAt]`). Sólo trae entrada el
+ * sobre cuyo último movimiento de bloqueo es BLOCK. r1 D-2: el detalle del dashboard (C4, `currentBlock`) lee de aquí el motivo
+ * vigente; nunca de la primera página de la libreta, que tras varios ajustes ya no lo trae. Es la misma regla con la que la libreta
+ * (A4, `desactivarSobresDeCuentaEnTx`) decide si una cancelación está iniciada.
+ */
+export async function bloqueosVigentes(db: Db, ids: string[]): Promise<Map<string, BloqueoVigente>> {
+  if (ids.length === 0) return new Map()
+  const filas = await db.$queryRaw<
+    Array<{ giftCardId: string; type: string; reason: GiftCardReason | null; note: string | null; createdAt: Date }>
+  >(Prisma.sql`
+    SELECT DISTINCT ON (a."giftCardId") a."giftCardId" AS "giftCardId", a.type::text AS type, a.reason::text AS reason,
+           a.note AS note, a."createdAt" AS "createdAt"
+    FROM "GiftCardActivity" a
+    WHERE a."giftCardId" IN (${Prisma.join(ids)})
+      AND a.type IN ('BLOCK', 'UNBLOCK')
+    ORDER BY a."giftCardId", a."createdAt" DESC, a.id DESC`)
+  return new Map(filas.filter(f => f.type === 'BLOCK').map(f => [f.giftCardId, { reason: f.reason, note: f.note, at: f.createdAt }]))
+}
+
+/** El motivo del bloqueo VIGENTE de cada sobre. `null` = no está bloqueado por la libreta. Misma lectura que `bloqueosVigentes`. */
+async function motivosDeBloqueoVigentes(db: Db, ids: string[]): Promise<Map<string, GiftCardReason | null>> {
+  const vigentes = await bloqueosVigentes(db, ids)
+  return new Map(ids.map(id => [id, vigentes.get(id)?.reason ?? null]))
+}
+
+/** Todos los sobres BLOCKED y su bloqueo vigente es `CANCEL_IN_PROGRESS` (R2: la cancelación de la venta está iniciada). */
+function todosEnCancelacion(sobres: Array<{ id: string; status: GiftCardStatus }>, motivos: Map<string, GiftCardReason | null>): boolean {
+  return sobres.length > 0 && sobres.every(s => s.status === 'BLOCKED' && motivos.get(s.id) === GiftCardReason.CANCEL_IN_PROGRESS)
 }
 
 /**
@@ -253,6 +317,22 @@ async function devolverVentaDeTarjetasEnTx(tx: Tx, p: AlRegistrarReembolsoInput,
   if (canjes === 0 && sobres.length > 0 && sobres.every(s => s.status === 'PENDING')) {
     return cerrarVentaSinPagarSiYaNoQuedaDinero(tx, p, orderId)
   }
+  // B2 (R2): la cancelación se inició —TODOS sus sobres BLOCKED y su bloqueo vigente es CANCEL_IN_PROGRESS— y nunca se usó ⇒ este
+  // reembolso cancela la venta: un DEACTIVATE por sobre, ligado a él, sin anomalía (por cualquier canal: es el camino previsto). El
+  // motivo vigente se lee bajo el candado de los sobres que ya tomó esta tx; sólo se consulta si todos están BLOCKED. Con un canje
+  // que se coló, o un sobre bloqueado por otro motivo, sigue abajo (ALREADY_USED / CANCEL_NOT_STARTED / E1 de la terminal).
+  if (canjes === 0 && sobres.length > 0 && sobres.every(s => s.status === 'BLOCKED')) {
+    if (todosEnCancelacion(sobres, await motivosDeBloqueoVigentes(tx, ids))) {
+      await desactivarSobresDeCuentaEnTx(tx, {
+        venueId: p.venueId,
+        orderId,
+        refundPaymentId: p.refundPaymentId,
+        reason: 'SALE_CANCELLED',
+        staffId: p.staffId ?? null,
+      })
+      return SIN_CANCELAR
+    }
+  }
   if (!p.dineroYaDevuelto) {
     if (canjes > 0) {
       throw new GiftCardError('GIFT_CARD_ALREADY_USED', 'Una de las tarjetas de esta venta ya se usó: la venta no se puede devolver.', 409)
@@ -292,4 +372,325 @@ async function devolverVentaDeTarjetasEnTx(tx: Tx, p: AlRegistrarReembolsoInput,
     },
   })
   return SIN_CANCELAR
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+// B2 · «Cancelar venta» (spec §5.6; índice R2 y Review Focus 5)
+// ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+const NO_ES_VENTA_DE_TARJETAS = 'No encontramos esa venta de tarjetas de regalo en este negocio.'
+const noEsVentaDeTarjetas = () => new GiftCardError('GIFT_CARD_NOT_FOUND', NO_ES_VENTA_DE_TARJETAS, 404)
+
+/**
+ * El BLOQUEAR que escribe «Cancelar venta» en cada sobre. Una sola función para el inicio y para comprobar un reintento (r1 B-7):
+ * la libreta (A4) compara la huella de ESTE contenido (sobre, tipo, motivo, nota) con la del renglón que ya ocupa la llave.
+ */
+function bloqueoDeCancelacion(orderNumber: string | null): OperacionDeGerente {
+  return {
+    tipo: 'BLOQUEAR',
+    reason: GiftCardReason.CANCEL_IN_PROGRESS,
+    note: orderNumber ? `Cancelación de la venta ${orderNumber}` : 'Cancelación de la venta',
+  }
+}
+
+/** El DESBLOQUEAR de «liberar»: contenido fijo, así el reintento con la misma llave tiene la misma huella. */
+const DESBLOQUEO_DE_CANCELACION: OperacionDeGerente = {
+  tipo: 'DESBLOQUEAR',
+  reason: GiftCardReason.CANCEL_IN_PROGRESS,
+  note: 'Se liberó la cancelación: el reembolso no se hizo.',
+}
+
+/**
+ * Abre la cuenta bajo su candado y comprueba que es de tarjetas; después toma los candados de TODOS sus sobres y devuelve sus ids.
+ * Jerarquía fija: Order (la de la VENTA) → sobres, como el reembolso (Order → Payment → sobres → Shift) y el canje (Order de la
+ * mercancía → sobres → Shift): nadie que tenga un sobre espera esta Order, así que nunca se cruzan. Nota 3 (A4 menor 2): se REUSA
+ * `lockGiftCardsForUpdate`, el mismo helper (y el mismo orden) que el canje y el reembolso; un orden propio aquí (p. ej. por id)
+ * sí podría cruzarse con el de ellos.
+ */
+async function abrirVentaDeTarjetasEnTx(tx: Tx, venueId: string, orderId: string): Promise<string[]> {
+  if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw noEsVentaDeTarjetas()
+  if (!(await leerSiEsCuentaDeTarjetas(tx, orderId))) throw noEsVentaDeTarjetas()
+  const ids = await sobresDeLaCuenta(tx, orderId)
+  if (ids.length === 0) throw noEsVentaDeTarjetas()
+  await lockGiftCardsForUpdate(tx, ids)
+  return ids
+}
+
+/**
+ * Nota 4 (r1 B-7): las llaves derivadas de ESTA operación (`claveDeSobre(operationKey, sobre)`) que ya tienen renglón en la libreta.
+ * Que la llave exista NO basta: las llaves públicas admiten `:` y otra operación —incluso sobre OTRO sobre— pudo ocupar
+ * `<operationKey>:<giftCardId>`. Cada llave ocupada se valida con la libreta (A4) sobre el sobre de ESTA venta al que corresponde, que
+ * compara la huella del contenido BAJO su candado: el mismo contenido ⇒ `replay` (no escribe nada); otro ⇒ 409
+ * IDEMPOTENCY_KEY_REUSED y la transacción entera se deshace. Los sobres ya están tomados (`abrirVentaDeTarjetasEnTx`): pedirlos otra
+ * vez no espera. Devuelve los sobres cuya operación ya estaba registrada.
+ */
+async function sobresYaOperadosConLaLlaveEnTx(
+  tx: Tx,
+  p: { venueId: string; staffId: string; operationKey: string; ids: string[]; op: OperacionDeGerente },
+): Promise<Set<string>> {
+  const claves = p.ids.map(id => claveDeSobre(p.operationKey, id))
+  const previas = await tx.giftCardActivity.findMany({
+    where: { venueId: p.venueId, operationKey: { in: claves } },
+    select: { operationKey: true },
+    take: claves.length,
+  })
+  const ocupadas = new Set(previas.map(a => a.operationKey))
+  const repetidos = new Set<string>()
+  for (const id of p.ids) {
+    const operationKey = claveDeSobre(p.operationKey, id)
+    if (!ocupadas.has(operationKey)) continue
+    await operarSobreDeGerenteEnTx(tx, { venueId: p.venueId, giftCardId: id, staffId: p.staffId, operationKey, op: p.op })
+    repetidos.add(id)
+  }
+  return repetidos
+}
+
+/** Por qué hoy no se puede cancelar una venta de tarjetas (lo que pinta el detalle del dashboard, C4). */
+export type MotivoSinCancelarVenta = 'NOT_PAID' | 'NOT_SAME_DAY' | 'ALREADY_USED' | 'ALREADY_CANCELLED' | 'IN_PROGRESS'
+
+/**
+ * Decisión 1 del coordinador: `cancel` del detalle de una tarjeta. `reason: null` con `allowed: false` = sin venta (no es de este
+ * negocio o no es de tarjetas), o un sobre de la venta bloqueado por OTRO motivo (iniciar respondería 409 `GIFT_CARD_BLOCKED`).
+ */
+export interface CancelacionDeVenta {
+  allowed: boolean
+  reason: MotivoSinCancelarVenta | null
+}
+
+interface EvaluacionDeCancelacion extends CancelacionDeVenta {
+  /** El rechazo que lanza `iniciarCancelacionDeVenta`; `null` si se puede o si ya está en curso. */
+  error: GiftCardError | null
+  orderNumber: string | null
+  sobres: Array<{ id: string; status: GiftCardStatus }>
+}
+
+/**
+ * La ÚNICA regla de «¿se puede cancelar esta venta de tarjetas?» (R2, spec §5.6). La usan `iniciarCancelacionDeVenta` (bajo el
+ * candado de la cuenta y de sus sobres, y lanza `error`) y el detalle del dashboard (`estadoDeCancelacionDeVenta`, sin candados, sólo
+ * para pintar el botón). Orden:
+ *  1. Ya cancelada (algún sobre DEACTIVATED) va antes que «sin pagar» y que «otro día»: es lo que de verdad le pasa a la venta, y el
+ *     gerente no tiene nada más que hacer (una venta sin pagar que se canceló también cae aquí).
+ *  2. Sin pagar ⇒ NOT_PAID: se cancela la cuenta desde el POS (o se devuelve el abono, B1).
+ *  3. En curso va antes que el día: una cancelación iniciada ayer se LIBERA (o se devuelve) aunque ya no se pueda iniciar otra.
+ *  4. Mismo día del cobro (zona del venue) · 5. ningún REDEEM.
+ *  6. PAGADA con un sobre PENDING ⇒ NOT_PAID (nota 2): F8 negó la activación. Su salida NO es «Cancelar venta» sino devolver el cobro
+ *     desde el panel: el gancho de B1 la trata como una venta sin pagar y la cierra en $0 (B1 r2).
+ *  7. Un sobre bloqueado por OTRO motivo ⇒ `reason: null` + GIFT_CARD_BLOCKED (primero se desbloquea).
+ */
+async function evaluarCancelacionDeVenta(
+  db: Db,
+  p: { venueId: string; orderId: string; ids: string[]; timezone: string; ahora: Date },
+): Promise<EvaluacionDeCancelacion> {
+  const orden = await db.order.findFirst({
+    where: { id: p.orderId, venueId: p.venueId },
+    select: { paymentStatus: true, orderNumber: true },
+  })
+  const orderNumber = orden?.orderNumber ?? null
+  const sobres = await db.giftCard.findMany({
+    where: { id: { in: p.ids }, venueId: p.venueId },
+    select: { id: true, status: true },
+    orderBy: { id: 'asc' },
+    take: p.ids.length,
+  })
+  const no = (reason: MotivoSinCancelarVenta | null, error: GiftCardError): EvaluacionDeCancelacion => ({
+    allowed: false,
+    reason,
+    error,
+    orderNumber,
+    sobres,
+  })
+  if (!orden || sobres.length === 0) return no(null, noEsVentaDeTarjetas())
+  if (sobres.some(s => s.status === 'DEACTIVATED')) {
+    return no('ALREADY_CANCELLED', new GiftCardError('GIFT_CARD_SALE_ALREADY_CANCELLED', 'Esta venta de tarjetas ya se canceló.', 409))
+  }
+  if (orden.paymentStatus !== 'PAID') {
+    return no(
+      'NOT_PAID',
+      new GiftCardError('GIFT_CARD_SALE_NOT_PAID', 'Esta venta de tarjetas todavía no está pagada: cancela la cuenta desde el POS.', 409),
+    )
+  }
+  const motivos = await motivosDeBloqueoVigentes(db, p.ids)
+  if (todosEnCancelacion(sobres, motivos)) return { allowed: false, reason: 'IN_PROGRESS', error: null, orderNumber, sobres }
+  const cobro = await db.payment.findFirst({
+    where: { venueId: p.venueId, orderId: p.orderId, status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] },
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    select: { createdAt: true },
+  })
+  if (!cobro || !mismoDiaDelVenue(cobro.createdAt, p.ahora, p.timezone)) {
+    return no(
+      'NOT_SAME_DAY',
+      new GiftCardError(
+        'GIFT_CARD_CANCEL_WINDOW_CLOSED',
+        'La venta de una tarjeta de regalo sólo se cancela en tienda el mismo día en que se cobró.',
+        409,
+      ),
+    )
+  }
+  const canjes = await db.giftCardActivity.count({ where: { giftCardId: { in: p.ids }, type: 'REDEEM' } })
+  if (canjes > 0) {
+    return no(
+      'ALREADY_USED',
+      new GiftCardError('GIFT_CARD_ALREADY_USED', 'Una de las tarjetas de esta venta ya se usó: la venta no se puede cancelar.', 409),
+    )
+  }
+  if (sobres.some(s => s.status === 'PENDING')) {
+    return no(
+      'NOT_PAID',
+      new GiftCardError(
+        'GIFT_CARD_SALE_NOT_PAID',
+        'Las tarjetas de esta venta no se activaron: no hace falta cancelarla. Para devolver el dinero, reembolsa el cobro; al quedar en $0 la venta se cancela sola.',
+        409,
+      ),
+    )
+  }
+  if (sobres.some(s => s.status === 'BLOCKED' && motivos.get(s.id) !== GiftCardReason.CANCEL_IN_PROGRESS)) {
+    return no(
+      null,
+      new GiftCardError(
+        'GIFT_CARD_BLOCKED',
+        'Una de las tarjetas de esta venta está bloqueada por otro motivo; desbloquéala antes de cancelar la venta.',
+        409,
+      ),
+    )
+  }
+  return { allowed: true, reason: null, error: null, orderNumber, sobres }
+}
+
+const SIN_VENTA: CancelacionDeVenta = Object.freeze({ allowed: false, reason: null })
+
+/**
+ * Para el detalle de una tarjeta en el dashboard (C4): ¿se puede cancelar SU venta, y si no, por qué? Sin candados (sólo pinta el
+ * botón; `iniciarCancelacionDeVenta` vuelve a evaluar bajo candado). Mismas reglas: `evaluarCancelacionDeVenta`.
+ */
+export async function estadoDeCancelacionDeVenta(venueId: string, orderId: string, ahora: Date = new Date()): Promise<CancelacionDeVenta> {
+  const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
+  if (!venue) return SIN_VENTA
+  if (!(await leerSiEsCuentaDeTarjetas(prisma, orderId))) return SIN_VENTA
+  const ids = await sobresDeLaCuenta(prisma, orderId)
+  if (ids.length === 0) return SIN_VENTA
+  const e = await evaluarCancelacionDeVenta(prisma, { venueId, orderId, ids, timezone: venue.timezone || DEFAULT_TIMEZONE, ahora })
+  return { allowed: e.allowed, reason: e.reason }
+}
+
+/**
+ * Paso 1 de cancelar la venta (spec §5.6): bloquea TODOS sus sobres con `CANCEL_IN_PROGRESS` ANTES de pedir el reembolso real, así
+ * nadie puede gastarlos mientras se devuelve el dinero. Bajo el candado: mismo día del cobro (zona del venue) y ningún `REDEEM`.
+ * Idempotente por `operationKey` (una llave derivada por sobre, `claveDeSobre`): el reintento con la misma llave no escribe nada
+ * y devuelve lo mismo; si otra operación ya ocupa una de esas llaves ⇒ 409 IDEMPOTENCY_KEY_REUSED. La bitácora
+ * `GIFT_CARD_SALE_CANCEL_STARTED` sólo se escribe si esta llamada bloqueó algo (F9: lo decide la libreta bajo candado).
+ */
+export async function iniciarCancelacionDeVenta(
+  venueId: string,
+  orderId: string,
+  p: { staffId: string; operationKey: string },
+): Promise<{ giftCardIds: string[] }> {
+  const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
+  if (!venue) throw noEsVentaDeTarjetas()
+  const timezone = venue.timezone || DEFAULT_TIMEZONE
+
+  const r = await prisma.$transaction(async tx => {
+    const ids = await abrirVentaDeTarjetasEnTx(tx, venueId, orderId)
+    const orden = await tx.order.findFirst({ where: { id: orderId, venueId }, select: { orderNumber: true } })
+    const op = bloqueoDeCancelacion(orden?.orderNumber ?? null)
+    // Reintento de la MISMA operación (el dashboard reintenta, `api.ts`): la libreta lo reconoce por su huella y no escribe.
+    const repetidos = await sobresYaOperadosConLaLlaveEnTx(tx, { venueId, staffId: p.staffId, operationKey: p.operationKey, ids, op })
+    if (repetidos.size === ids.length) return { giftCardIds: ids, nueva: false }
+
+    // La MISMA regla que pinta el botón del detalle (C4): `evaluarCancelacionDeVenta` (decisión 1 del coordinador).
+    const e = await evaluarCancelacionDeVenta(tx, { venueId, orderId, ids, timezone, ahora: new Date() })
+    if (e.error) throw e.error
+    // Ya en cancelación (otra persona la inició con otra llave): se respeta tal cual y no se escribe nada.
+    if (e.reason === 'IN_PROGRESS') return { giftCardIds: ids, nueva: false }
+    let nueva = false
+    for (const s of e.sobres) {
+      // Sólo los ACTIVE: los que ya están BLOCKED aquí son de esta misma cancelación (la regla rechaza cualquier otro motivo).
+      if (s.status !== 'ACTIVE' || repetidos.has(s.id)) continue
+      const hecho = await operarSobreDeGerenteEnTx(tx, {
+        venueId,
+        giftCardId: s.id,
+        staffId: p.staffId,
+        operationKey: claveDeSobre(p.operationKey, s.id),
+        op,
+      })
+      if (!hecho.replay) nueva = true
+    }
+    return { giftCardIds: ids, nueva }
+  }, ORDER_LOCK_WAIT_BUDGET)
+
+  if (r.nueva) {
+    void logAction({
+      staffId: p.staffId,
+      venueId,
+      action: 'GIFT_CARD_SALE_CANCEL_STARTED',
+      entity: 'Order',
+      entityId: orderId,
+      data: { giftCardIds: r.giftCardIds },
+    })
+  }
+  return { giftCardIds: r.giftCardIds }
+}
+
+/**
+ * El gerente COMPROBÓ que el reembolso real NO se hizo (la terminal lo rechazó de forma definitiva, o el cliente cambió de opinión
+ * antes de devolverle nada): los sobres vuelven a ACTIVE con `UNBLOCK`. r1 F6: un timeout de la terminal NO prueba que el dinero no
+ * salió (la devolución puede registrarse después), así que liberar exige `confirmacionNoDevuelto: true` —la casilla del panel—, y
+ * sin ella responde 400 ANTES de abrir la transacción; lo incierto se queda bloqueado y B7 avisa a las 24 h (`CANCEL_STUCK`). Nada
+ * libera solo. Una venta ya devuelta no se libera (GIFT_CARD_SALE_ALREADY_CANCELLED). Idempotente por `operationKey` como iniciar:
+ * el reintento no escribe otro UNBLOCK; otra operación con esa llave ⇒ IDEMPOTENCY_KEY_REUSED.
+ */
+export async function liberarCancelacionDeVenta(
+  venueId: string,
+  orderId: string,
+  p: { staffId: string; operationKey: string; confirmacionNoDevuelto: true },
+): Promise<void> {
+  if (p?.confirmacionNoDevuelto !== true) {
+    throw new BadRequestError(
+      'Para liberar confirma que comprobaste que la devolución NO se hizo. Si no lo sabes, la tarjeta se queda bloqueada.',
+    )
+  }
+  const liberadas = await prisma.$transaction(async tx => {
+    const ids = await abrirVentaDeTarjetasEnTx(tx, venueId, orderId)
+    const repetidos = await sobresYaOperadosConLaLlaveEnTx(tx, {
+      venueId,
+      staffId: p.staffId,
+      operationKey: p.operationKey,
+      ids,
+      op: DESBLOQUEO_DE_CANCELACION,
+    })
+    if (repetidos.size === ids.length) return []
+    const filas = await tx.giftCard.findMany({ where: { id: { in: ids }, venueId }, select: { id: true, status: true }, take: ids.length })
+    const estado = new Map(filas.map(s => [s.id, s.status]))
+    if (filas.some(s => s.status === 'DEACTIVATED')) {
+      throw new GiftCardError(
+        'GIFT_CARD_SALE_ALREADY_CANCELLED',
+        'Esta venta ya se canceló y su dinero ya se devolvió: no hay nada que liberar.',
+        409,
+      )
+    }
+    const motivos = await motivosDeBloqueoVigentes(tx, ids)
+    const hechas: string[] = []
+    for (const id of ids) {
+      if (repetidos.has(id) || estado.get(id) !== 'BLOCKED' || motivos.get(id) !== GiftCardReason.CANCEL_IN_PROGRESS) continue
+      const hecho = await operarSobreDeGerenteEnTx(tx, {
+        venueId,
+        giftCardId: id,
+        staffId: p.staffId,
+        operationKey: claveDeSobre(p.operationKey, id),
+        op: DESBLOQUEO_DE_CANCELACION,
+      })
+      if (!hecho.replay) hechas.push(id)
+    }
+    return hechas
+  }, ORDER_LOCK_WAIT_BUDGET)
+
+  if (liberadas.length > 0) {
+    void logAction({
+      staffId: p.staffId,
+      venueId,
+      action: 'GIFT_CARD_SALE_CANCEL_RELEASED',
+      entity: 'Order',
+      entityId: orderId,
+      data: { giftCardIds: liberadas },
+    })
+  }
 }

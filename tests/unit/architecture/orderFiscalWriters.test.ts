@@ -838,6 +838,10 @@ const NON_FISCAL_ORDER_WRITERS: Record<string, OrderWriter> = {
   'src/services/mobile/order.mobile.service.ts#cancelOrderInTransaction': CANCEL('assertOrderCancellableUnderLock'),
   // Tarjetas de regalo (A8): cancela bajo el candado de topología después de regresar el saldo; sin columnas de dinero.
   'src/services/mobile/order.mobile.service.ts#returnGiftBalanceAndCancelOrder': CANCEL('assertNoLiveTerminalCharge'),
+  // Tarjetas de regalo (B1 r1, clasificada en B2): el reembolso que deja en $0 una venta de tarjetas SIN pagar la cancela dentro de
+  // la tx del reembolso, que ya tiene la Order (issueRefund / recordRefund → lockExistingOrderForPayment); con un cobro de terminal
+  // vivo no cancela. Sólo `status` + `version` (CAS); ninguna columna de dinero.
+  'src/services/giftCards/giftCardCancel.service.ts#cerrarVentaSinPagarSiYaNoQuedaDinero': CANCEL('findLiveTerminalCharge('),
   'src/services/dashboard/order.dashboard.service.ts#deleteOrder': CANCEL('assertOrderCancellableUnderLock'),
   'src/services/mobile/areaTicketV7.mobile.service.ts#cancelAreaTicketCheckout': CANCEL('assertOrderCancellableUnderLock'),
   // R11-8 (sellos tardíos): otro canal cerró la venta de vales; la sesión cierra con ella. Sólo suelta el reclamo de la terminal
@@ -1134,6 +1138,10 @@ const ORDER_LOCK_TRANSACTIONS: Record<string, number> = {
   'src/services/delivery-channels/core/applyDeliveryRefund.service.ts#applyDeliveryRefund': 1,
   // Pedidos en línea (plan 1a): cada transición toma el candado de la orden y la relee bajo él.
   'src/services/online-ordering/transitions.service.ts#casTransition': 1,
+  // Tarjetas de regalo (B2): iniciar y liberar la cancelación de una venta toman la Order (abrirVentaDeTarjetasEnTx →
+  // lockExistingOrderForPayment) y después sus sobres, con el presupuesto único.
+  'src/services/giftCards/giftCardCancel.service.ts#iniciarCancelacionDeVenta': 1,
+  'src/services/giftCards/giftCardCancel.service.ts#liberarCancelacionDeVenta': 1,
 }
 
 /** Lock-taking transactions whose wait is governed by their own protocol, pinned verbatim so a change is re-reviewed. */

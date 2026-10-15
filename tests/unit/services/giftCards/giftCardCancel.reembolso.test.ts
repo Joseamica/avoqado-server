@@ -30,7 +30,7 @@ interface Escenario {
   esDeTarjetas?: boolean
   sobres?: Sobre[]
   canjes?: number
-  /** Último BLOCK/UNBLOCK de cada sobre (lo usa B2). */
+  /** Último BLOCK/UNBLOCK de cada sobre (lo usa B2: `bloqueosVigentes`, una consulta `$queryRaw`). */
   bloqueos?: Array<{ giftCardId: string; type: 'BLOCK' | 'UNBLOCK'; reason: string | null }>
   sobresDelCanje?: string[]
   cobroLeido?: { orderId: string; tenderType: { systemKind: string | null } | null } | null
@@ -292,6 +292,102 @@ describe('alRegistrarReembolsoEnTx', () => {
       cuentaCancelada: false,
     })
     expect(pagadaYa.order.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('🔴 R2: con la cancelación iniciada (todos BLOCKED con CANCEL_IN_PROGRESS) y sin canjes ⇒ desactiva, sin anomalía', async () => {
+    const tx = txFalso({
+      esDeTarjetas: true,
+      sobres: [
+        { id: 'gc1', status: 'BLOCKED' },
+        { id: 'gc2', status: 'BLOCKED' },
+      ],
+      bloqueos: [
+        { giftCardId: 'gc1', type: 'BLOCK', reason: 'CANCEL_IN_PROGRESS' },
+        { giftCardId: 'gc2', type: 'BLOCK', reason: 'CANCEL_IN_PROGRESS' },
+      ],
+    })
+    await expect(alRegistrarReembolsoEnTx(tx, { ...base, original: { orderId: 'o-gc', tenderSystemKind: null } })).resolves.toEqual({
+      cuentaCancelada: false,
+    })
+    expect(desactivarSobresDeCuentaEnTx).toHaveBeenCalledWith(tx, {
+      venueId: 'v1',
+      orderId: 'o-gc',
+      refundPaymentId: 'ref-1',
+      reason: 'SALE_CANCELLED',
+      staffId: 's1',
+    })
+    expect(recordGiftCardAnomaly).not.toHaveBeenCalled()
+    // No es la salida de «venta sin pagar»: la cuenta no se cancela aquí ni se tocan sobres PENDING.
+    expect(tx.order.updateMany).not.toHaveBeenCalled()
+    expect(desactivarSobresPendientesDeCuentaEnTx).not.toHaveBeenCalled()
+  })
+
+  it('🔴 R2: la terminal (dinero ya devuelto) con la cancelación iniciada ⇒ la desactivación normal, sin E1 ni anomalía', async () => {
+    const tx = txFalso({
+      esDeTarjetas: true,
+      sobres: [{ id: 'gc1', status: 'BLOCKED' }],
+      bloqueos: [{ giftCardId: 'gc1', type: 'BLOCK', reason: 'CANCEL_IN_PROGRESS' }],
+    })
+    await alRegistrarReembolsoEnTx(tx, { ...base, dineroYaDevuelto: true, original: { orderId: 'o-gc', tenderSystemKind: null } })
+    expect(desactivarSobresDeCuentaEnTx).toHaveBeenCalledWith(tx, {
+      venueId: 'v1',
+      orderId: 'o-gc',
+      refundPaymentId: 'ref-1',
+      reason: 'SALE_CANCELLED',
+      staffId: 's1',
+    })
+    expect(recordGiftCardAnomaly).not.toHaveBeenCalled()
+  })
+
+  it('🔴 R2: un sobre bloqueado por OTRO motivo no cuenta como cancelación iniciada ⇒ GIFT_CARD_CANCEL_NOT_STARTED', async () => {
+    const tx = txFalso({
+      esDeTarjetas: true,
+      sobres: [{ id: 'gc1', status: 'BLOCKED' }],
+      bloqueos: [{ giftCardId: 'gc1', type: 'BLOCK', reason: 'SUSPICIOUS_ACTIVITY' }],
+    })
+    await expect(alRegistrarReembolsoEnTx(tx, { ...base, original: { orderId: 'o-gc', tenderSystemKind: null } })).rejects.toMatchObject({
+      code: 'GIFT_CARD_CANCEL_NOT_STARTED',
+    })
+    expect(desactivarSobresDeCuentaEnTx).not.toHaveBeenCalled()
+  })
+
+  it('🔴 R2: si sólo UNO de los sobres está en cancelación (el otro sigue ACTIVE) no cuenta ⇒ GIFT_CARD_CANCEL_NOT_STARTED', async () => {
+    const tx = txFalso({
+      esDeTarjetas: true,
+      sobres: [
+        { id: 'gc1', status: 'BLOCKED' },
+        { id: 'gc2', status: 'ACTIVE' },
+      ],
+      bloqueos: [{ giftCardId: 'gc1', type: 'BLOCK', reason: 'CANCEL_IN_PROGRESS' }],
+    })
+    await expect(alRegistrarReembolsoEnTx(tx, { ...base, original: { orderId: 'o-gc', tenderSystemKind: null } })).rejects.toMatchObject({
+      code: 'GIFT_CARD_CANCEL_NOT_STARTED',
+    })
+    expect(desactivarSobresDeCuentaEnTx).not.toHaveBeenCalled()
+  })
+
+  it('🔴 R2: un sobre BLOCKED cuyo último movimiento fue UNBLOCK (liberado y bloqueado por la base) no cuenta como cancelación', async () => {
+    const tx = txFalso({
+      esDeTarjetas: true,
+      sobres: [{ id: 'gc1', status: 'BLOCKED' }],
+      bloqueos: [{ giftCardId: 'gc1', type: 'UNBLOCK', reason: 'CANCEL_IN_PROGRESS' }],
+    })
+    await expect(alRegistrarReembolsoEnTx(tx, { ...base, original: { orderId: 'o-gc', tenderSystemKind: null } })).rejects.toMatchObject({
+      code: 'GIFT_CARD_CANCEL_NOT_STARTED',
+    })
+  })
+
+  it('🔴 R2: iniciada pero con un canje que se coló ⇒ GIFT_CARD_ALREADY_USED (nunca se devuelve dinero de un sobre usado)', async () => {
+    const tx = txFalso({
+      esDeTarjetas: true,
+      sobres: [{ id: 'gc1', status: 'BLOCKED' }],
+      canjes: 1,
+      bloqueos: [{ giftCardId: 'gc1', type: 'BLOCK', reason: 'CANCEL_IN_PROGRESS' }],
+    })
+    await expect(alRegistrarReembolsoEnTx(tx, { ...base, original: { orderId: 'o-gc', tenderSystemKind: null } })).rejects.toMatchObject({
+      code: 'GIFT_CARD_ALREADY_USED',
+    })
+    expect(desactivarSobresDeCuentaEnTx).not.toHaveBeenCalled()
   })
 
   it('sin `original`, lee el cobro bajo la transacción del reembolso', async () => {
