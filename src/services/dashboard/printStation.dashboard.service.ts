@@ -394,13 +394,23 @@ export async function getRouting(venueId: string, query: RoutingQuery = {}) {
       })
       .then(rows => rows.map(({ _count, ...category }) => ({ ...category, productCount: _count.products })))
   const productPage = (skip: number, take: number) =>
-    prisma.product.findMany({
-      where: productWhere,
-      select: { id: true, name: true, categoryId: true, printStationId: true },
-      orderBy: [{ name: 'asc' }, { id: 'asc' }],
-      skip: skip,
-      take: take,
-    })
+    prisma.product
+      .findMany({
+        where: productWhere,
+        // Variantes: la impresora de una talla es de su padre; el dashboard necesita saber cuáles son variantes (campos planos, opcionales).
+        select: {
+          id: true,
+          name: true,
+          categoryId: true,
+          printStationId: true,
+          productGroupId: true,
+          productGroup: { select: { name: true } },
+        },
+        orderBy: [{ name: 'asc' }, { id: 'asc' }],
+        skip: skip,
+        take: take,
+      })
+      .then(rows => rows.map(({ productGroup, ...product }) => ({ ...product, productGroupName: productGroup?.name ?? null })))
 
   if (query.section) {
     const page = Math.max(1, Math.floor(query.page ?? 1))
