@@ -40,6 +40,19 @@ export async function tienePermisoEnVenue(req: Request, permiso: string): Promis
   const venueId = resolveRequestVenueId(req, authContext)
   if (!venueId) return false
 
+  return tienePermisoEnElVenue(req, venueId, permiso)
+}
+
+/**
+ * Lo mismo que `tienePermisoEnVenue`, pero en un venue que el llamador YA resolvió y que no
+ * tiene por qué ser el de la URL: el de la terminal sobre la que se actúa, por ejemplo, cuando
+ * la ruta es de organización (`/organizations/:orgId/terminals/:terminalId/...`). Misma regla,
+ * mismas piezas, mismo orden; también falla CERRADO.
+ */
+export async function tienePermisoEnElVenue(req: Request, venueId: string, permiso: string): Promise<boolean> {
+  const authContext = (req as any).authContext
+  if (!authContext?.userId || !venueId) return false
+
   // SUPERADMIN lo ve todo, salvo mientras impersona: ahí manda el rol efectivo, igual
   // que en `checkPermission`.
   // Superadmin de verdad: fila activa de una persona activa (Codex H6, 24-sep).
