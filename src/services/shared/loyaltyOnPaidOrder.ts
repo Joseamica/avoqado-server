@@ -67,6 +67,8 @@ function nombre(c: { firstName: string | null; lastName: string | null } | null 
 export async function awardLoyaltyForPaidOrder(args: AwardLoyaltyForPaidOrderArgs): Promise<AwardLoyaltyForPaidOrderResult> {
   const { venueId, orderId, orderTotal } = args
   const errors: string[] = []
+  // ¿Esta corrida leyó la orden SIN ningún cliente? Su cierre lleva una guarda (B1, abajo).
+  let leyoSinCliente = false
   try {
     let staffVenueId: string | undefined
     if (args.staffId) {
@@ -134,6 +136,7 @@ export async function awardLoyaltyForPaidOrder(args: AwardLoyaltyForPaidOrderArg
       const credited = await acreditar(venueId, legacy.id, nombre(legacy), orderTotal, orderId, staffVenueId, 'legacy single customer')
       if (!credited) errors.push(`loyalty:${legacy.id}`)
     } else {
+      leyoSinCliente = true
       logger.info('⏭️ Loyalty points skipped: Order has no customer', {
         orderId,
         hasCustomerId: false,
@@ -154,7 +157,18 @@ export async function awardLoyaltyForPaidOrder(args: AwardLoyaltyForPaidOrderArg
   try {
     if (complete) {
       await prisma.order.updateMany({
-        where: { id: orderId, venueId, loyaltyEligibleAt: { not: null }, loyaltyProcessedAt: null },
+        where: {
+          id: orderId,
+          venueId,
+          loyaltyEligibleAt: { not: null },
+          loyaltyProcessedAt: null,
+          // 🔴 B1 (auditoría de Codex, ronda B, 14-oct-2026): una corrida que leyó «sin cliente» sólo cierra si la orden
+          // SIGUE sin cliente. El cobro corre esto en el instante; si el barista liga al cliente justo entonces, la liga
+          // REABRE la lealtad en su transacción (`reabrirLealtadSiAplica`) y este cierre, ya viejo, la borraría: si además
+          // falla el intento de la liga, el reconciliador nunca vuelve a ver la venta y el sello se pierde en silencio.
+          // La corrida que SÍ vio clientes cierra como siempre (idempotente).
+          ...(leyoSinCliente ? { orderCustomers: { none: {} } } : {}),
+        },
         data: { loyaltyProcessedAt: new Date(), loyaltyProcessingAt: null, loyaltyLastError: null },
       })
     } else {

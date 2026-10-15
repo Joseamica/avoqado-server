@@ -176,4 +176,66 @@ describe('awardLoyaltyForPaidOrder', () => {
 
     expect(earnPointsMock).toHaveBeenCalledWith(VENUE, 'cust-A', 50, ORDER, 'sv-1')
   })
+
+  /**
+   * 🔴 B1 (auditoría de Codex, ronda B, 14-oct-2026). El cobro corre su lealtad en el instante; el barista liga al cliente
+   * en «Cobro exitoso» y esa liga REABRE la lealtad en su transacción. Si la corrida del cobro ya había leído «sin cliente»
+   * y cierra DESPUÉS de la reapertura, borra la recuperación: si además falla el intento de la liga, el reconciliador ya
+   * no ve la venta y el sello se pierde otra vez, en silencio.
+   */
+  describe('🔴 B1: una corrida que leyó «sin cliente» no cierra la venta si mientras tanto se ligó un cliente', () => {
+    /** La fila de la orden y un `updateMany` que SÍ evalúa la guarda de clientes. */
+    function ordenConClientes() {
+      const fila = { loyaltyProcessedAt: null as Date | null, clientes: 0 }
+      orderUpdateMany.mockImplementation(async ({ where, data }: any) => {
+        const sinClientes = where.orderCustomers?.none ? fila.clientes === 0 : true
+        if (where.loyaltyProcessedAt !== null || fila.loyaltyProcessedAt !== null || !sinClientes) return { count: 0 }
+        if ('loyaltyProcessedAt' in data) fila.loyaltyProcessedAt = data.loyaltyProcessedAt
+        return { count: 1 }
+      })
+      return fila
+    }
+
+    it('lee «sin cliente» → se crea un OrderCustomer → intenta cerrar ⇒ loyaltyProcessedAt sigue null', async () => {
+      const fila = ordenConClientes()
+      orderCustomerFindMany.mockImplementation(async () => {
+        fila.clientes = 1 // la liga tardía entra justo después de esta lectura
+        return []
+      })
+
+      const result = await awardLoyaltyForPaidOrder({ venueId: VENUE, orderId: ORDER, orderTotal: 90, legacyCustomer: null })
+
+      expect(result).toEqual({ complete: true, errors: [] })
+      expect(fila.loyaltyProcessedAt).toBeNull()
+      expect(orderUpdateMany).toHaveBeenCalledWith({
+        where: { id: ORDER, venueId: VENUE, loyaltyEligibleAt: { not: null }, loyaltyProcessedAt: null, orderCustomers: { none: {} } },
+        data: { loyaltyProcessedAt: expect.any(Date), loyaltyProcessingAt: null, loyaltyLastError: null },
+      })
+    })
+
+    it('control: sin liga de por medio, la venta sin cliente se cierra como hoy', async () => {
+      const fila = ordenConClientes()
+      orderCustomerFindMany.mockResolvedValue([])
+
+      await awardLoyaltyForPaidOrder({ venueId: VENUE, orderId: ORDER, orderTotal: 90, legacyCustomer: null })
+
+      expect(fila.loyaltyProcessedAt).toBeInstanceOf(Date)
+    })
+
+    it('la corrida que SÍ vio un cliente (el heredado) cierra sin la guarda, como hoy', async () => {
+      orderCustomerFindMany.mockResolvedValue([])
+
+      await awardLoyaltyForPaidOrder({
+        venueId: VENUE,
+        orderId: ORDER,
+        orderTotal: 90,
+        legacyCustomer: { id: 'cust-L', firstName: 'Lucía', lastName: null },
+      })
+
+      expect(orderUpdateMany).toHaveBeenCalledWith({
+        where: { id: ORDER, venueId: VENUE, loyaltyEligibleAt: { not: null }, loyaltyProcessedAt: null },
+        data: { loyaltyProcessedAt: expect.any(Date), loyaltyProcessingAt: null, loyaltyLastError: null },
+      })
+    })
+  })
 })
