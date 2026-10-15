@@ -763,6 +763,11 @@ const NON_FISCAL_ORDER_WRITERS: Record<string, OrderWriter> = {
     markers: ['ORDER_REOPENED_BY_CAPTURED_PAYMENT'],
   },
   'src/services/shared/loyaltyOnPaidOrder.ts#awardLoyaltyForPaidOrder': { class: 'METADATA', why: 'loyalty award marks' },
+  'src/services/shared/loyaltyOnPaidOrder.ts#registrarErrorDeLealtad': {
+    class: 'METADATA',
+    why: 'loyalty error mark; never overwrites the REABIERTA marker of a late customer link (H2)',
+    markers: ['MARCA_LEALTAD_REABIERTA'],
+  },
   'src/services/shared/loyaltyOnLateCustomer.ts#reabrirLealtadSiAplica': {
     class: 'METADATA',
     why: 'reopens the loyalty marks (processedAt/processingAt/lastError, eligibleAt if null) inside the customer-link tx',
@@ -775,7 +780,11 @@ const NON_FISCAL_ORDER_WRITERS: Record<string, OrderWriter> = {
     class: 'METADATA',
     why: 'KDS stage 3 sweep: only the kitchenPendingAt marker',
   },
-  'src/jobs/loyalty-reconciliation.job.ts#LoyaltyReconciliationJob.runNow': { class: 'METADATA', why: 'loyalty claim marks' },
+  'src/jobs/loyalty-reconciliation.job.ts#LoyaltyReconciliationJob.runNow': {
+    class: 'METADATA',
+    why: 'loyalty claim marks; its failure write keeps the REABIERTA marker (H2)',
+    markers: ['MARCA_LEALTAD_REABIERTA'],
+  },
   'src/jobs/playtelecomEventSimReassignment.job.ts#reassignEventSimSalesForRule': {
     class: 'METADATA',
     why: 'moves a sale between venues of one organization (PlayTelecom); capture rechecks the expected venue',

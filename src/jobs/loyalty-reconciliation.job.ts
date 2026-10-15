@@ -1,6 +1,7 @@
 import type { CronJob } from 'cron'
 import logger from '../config/logger'
 import { scheduleJob } from '../observability/jobContext'
+import { MARCA_LEALTAD_REABIERTA } from '../services/shared/lealtadReabierta'
 import { otorgarLealtadRespetandoReembolsos } from '../services/shared/loyaltyOnLateCustomer'
 import type { awardLoyaltyForPaidOrder } from '../services/shared/loyaltyOnPaidOrder'
 import prisma from '../utils/prismaClient'
@@ -103,6 +104,35 @@ export class LoyaltyReconciliationJob {
       let failed = 0
       let skipped = 0
 
+      /**
+       * Suelta SU reclamo dejando el error, sin pisar la marca de una liga tardía (H2, auditoría de Codex del código +
+       * revisión final Minor 3, 15-oct-2026). Si la fila trae la marca, se suelta el reclamo igual (la siguiente vuelta la
+       * vuelve a tomar) y el error queda sólo en el log: la marca es lo que detiene a un cierre «sin cliente» que espera.
+       */
+      const soltarConError = async (orderId: string, venueId: string, claimStamp: Date, texto: string): Promise<void> => {
+        const escrita = await this.dependencies.prisma.order.updateMany({
+          where: {
+            id: orderId,
+            loyaltyProcessedAt: null,
+            loyaltyProcessingAt: claimStamp,
+            OR: [{ loyaltyLastError: null }, { loyaltyLastError: { not: MARCA_LEALTAD_REABIERTA } }],
+          },
+          data: { loyaltyProcessingAt: null, loyaltyLastError: texto.slice(0, 4000) },
+        })
+        if (escrita.count === 1) return
+        const soltada = await this.dependencies.prisma.order.updateMany({
+          where: { id: orderId, loyaltyProcessedAt: null, loyaltyProcessingAt: claimStamp },
+          data: { loyaltyProcessingAt: null },
+        })
+        if (soltada.count === 1) {
+          logger.warn('Loyalty reconciliation failed on a reopened order; marker kept, error only logged', {
+            orderId,
+            venueId,
+            error: texto.slice(0, 4000),
+          })
+        }
+      }
+
       for (const order of candidates) {
         const claimStamp = new Date(now)
         const claim = await this.dependencies.prisma.order.updateMany({
@@ -141,20 +171,11 @@ export class LoyaltyReconciliationJob {
             })
             applied += 1
           } else {
-            await this.dependencies.prisma.order.updateMany({
-              where: { id: order.id, loyaltyProcessedAt: null, loyaltyProcessingAt: claimStamp },
-              data: { loyaltyProcessingAt: null, loyaltyLastError: result.errors.join(' | ').slice(0, 4000) },
-            })
+            await soltarConError(order.id, order.venueId, claimStamp, result.errors.join(' | '))
             failed += 1
           }
         } catch (error) {
-          await this.dependencies.prisma.order.updateMany({
-            where: { id: order.id, loyaltyProcessedAt: null, loyaltyProcessingAt: claimStamp },
-            data: {
-              loyaltyProcessingAt: null,
-              loyaltyLastError: (error instanceof Error ? error.message : String(error)).slice(0, 4000),
-            },
-          })
+          await soltarConError(order.id, order.venueId, claimStamp, error instanceof Error ? error.message : String(error))
           failed += 1
           logger.error('Loyalty reconciliation candidate failed', { orderId: order.id, venueId: order.venueId, error })
         }

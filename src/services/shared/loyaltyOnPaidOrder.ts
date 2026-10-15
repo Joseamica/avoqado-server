@@ -182,10 +182,7 @@ export async function awardLoyaltyForPaidOrder(args: AwardLoyaltyForPaidOrderArg
         data: { loyaltyProcessedAt: new Date(), loyaltyProcessingAt: null, loyaltyLastError: null },
       })
     } else {
-      await prisma.order.updateMany({
-        where: { id: orderId, venueId, loyaltyEligibleAt: { not: null }, loyaltyProcessedAt: null },
-        data: { loyaltyLastError: errors.join(' | ').slice(0, 4000) },
-      })
+      await registrarErrorDeLealtad(venueId, orderId, errors.join(' | '))
     }
   } catch (markerError: any) {
     const message = `marker:${markerError?.message ?? String(markerError)}`
@@ -195,6 +192,30 @@ export async function awardLoyaltyForPaidOrder(args: AwardLoyaltyForPaidOrderArg
   }
 
   return { complete, errors }
+}
+
+/**
+ * Deja el error de una corrida de lealtad en la venta (que sigue pendiente para el reconciliador).
+ *
+ * 🔴 H2 (auditoría de Codex del código + revisión final Minor 3, 15-oct-2026): NUNCA pisa la marca de una liga tardía
+ * (`MARCA_LEALTAD_REABIERTA`). El cruce de tres: la liga tiene el candado de la fila (ya escribió la marca); esta escritura de
+ * fallo espera PRIMERO; detrás espera el cierre «sin cliente» de otra corrida. Al soltarse la liga, esta escritura pasaba antes,
+ * cambiaba la marca por su texto, y el cierre —que sólo relee las columnas de la fila— ya no la veía. La condición va en la
+ * MISMA sentencia: Postgres la relee al soltarse el candado. Con la marca puesta el error sólo queda en el log (ya se registró
+ * arriba, paso por paso); la venta sigue pendiente igual.
+ */
+export async function registrarErrorDeLealtad(venueId: string, orderId: string, texto: string): Promise<void> {
+  await prisma.order.updateMany({
+    where: {
+      id: orderId,
+      venueId,
+      loyaltyEligibleAt: { not: null },
+      loyaltyProcessedAt: null,
+      // `{ not }` en SQL deja fuera el NULL: por eso va junto con `null` en un OR.
+      OR: [{ loyaltyLastError: null }, { loyaltyLastError: { not: MARCA_LEALTAD_REABIERTA } }],
+    },
+    data: { loyaltyLastError: texto.slice(0, 4000) },
+  })
 }
 
 async function acreditar(

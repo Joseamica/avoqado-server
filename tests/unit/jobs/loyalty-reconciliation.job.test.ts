@@ -3,6 +3,9 @@ import { prismaMock } from '@tests/__helpers__/setup'
 import { tablaDeUnaVenta, type FilaDeLealtad } from '@tests/__helpers__/ordenConMarcasDeLealtad'
 import { LoyaltyReconciliationJob } from '@/jobs/loyalty-reconciliation.job'
 
+/** La marca de fila que deja la liga tardía al reabrir (`reabrirLealtadSiAplica`). Texto EXACTO del ruling. */
+const MARCA = 'REABIERTA: cliente ligado después del cobro'
+
 function candidate(overrides: Record<string, unknown> = {}) {
   return {
     id: 'order-1',
@@ -80,11 +83,72 @@ describe('LoyaltyReconciliationJob', () => {
 
     expect(order.updateMany).toHaveBeenLastCalledWith(
       expect.objectContaining({
-        where: { id: 'order-1', loyaltyProcessedAt: null, loyaltyProcessingAt: new Date('2026-09-01T21:00:00.000Z') },
+        where: {
+          id: 'order-1',
+          loyaltyProcessedAt: null,
+          loyaltyProcessingAt: new Date('2026-09-01T21:00:00.000Z'),
+          // H2: el error no pisa la marca de una liga tardía.
+          OR: [{ loyaltyLastError: null }, { loyaltyLastError: { not: MARCA } }],
+        },
         data: { loyaltyProcessingAt: null, loyaltyLastError: 'loyalty:cust-legacy' },
       }),
     )
     expect(result).toEqual(expect.objectContaining({ scanned: 1, applied: 0, failed: 1 }))
+  })
+
+  // ── H2 (auditoría de Codex del código + revisión final Minor 3, 15-oct-2026) ───────────────────────────────────────────
+  describe('🔴 H2: la escritura de FALLO suelta el reclamo pero conserva la marca REABIERTA', () => {
+    const AHORA = new Date('2026-10-14T18:00:00.000Z')
+    const cron = () => ({ start: jest.fn(), stop: jest.fn() })
+    function reabierta(over: Partial<FilaDeLealtad> = {}): FilaDeLealtad {
+      // La liga tardía reabrió la venta (marca) y su intento inmediato no llegó: el reconciliador la toma.
+      return {
+        id: 'order-1',
+        venueId: 'venue-1',
+        total: new Decimal(90),
+        tipAmount: new Decimal(10),
+        loyaltyEligibleAt: new Date('2026-10-14T17:30:00.000Z'),
+        loyaltyProcessedAt: null,
+        loyaltyProcessingAt: null,
+        loyaltyLastError: MARCA,
+        loyaltyAttempts: 0,
+        loyaltyStaffId: null,
+        customer: null,
+        clientes: 1,
+        ...over,
+      }
+    }
+
+    it.each<[string, jest.Mock]>([
+      ['la lealtad termina incompleta', jest.fn().mockResolvedValue({ complete: false, errors: ['loyalty:cust-1'] })],
+      ['la lealtad LANZA', jest.fn().mockRejectedValue(new Error('P1001'))],
+    ])('%s: la marca se queda, el reclamo se suelta y la siguiente vuelta la vuelve a tomar', async (_n, award) => {
+      const fila = reabierta()
+      const tabla = tablaDeUnaVenta(fila)
+      const job = new LoyaltyReconciliationJob({ prisma: { order: tabla } as never, cron: cron(), award, now: () => AHORA })
+
+      expect(await job.runNow()).toMatchObject({ scanned: 1, applied: 0, failed: 1 })
+
+      expect(fila.loyaltyLastError).toBe(MARCA)
+      expect(fila.loyaltyProcessingAt).toBeNull()
+      expect(fila.loyaltyProcessedAt).toBeNull()
+      expect(fila.loyaltyAttempts).toBe(1)
+      // La siguiente vuelta la encuentra (nada la dejó colgada en un reclamo de 10 minutos).
+      const ok = jest.fn().mockResolvedValue({ complete: true, errors: [] })
+      const despues = new Date(AHORA.getTime() + 5 * 60_000)
+      const siguiente = new LoyaltyReconciliationJob({ prisma: { order: tabla } as never, cron: cron(), award: ok, now: () => despues })
+      expect(await siguiente.runNow()).toMatchObject({ scanned: 1, applied: 1 })
+      expect(fila.loyaltyLastError).toBeNull()
+    })
+
+    it('regresión: sin marca, el error SÍ queda escrito y el reclamo se suelta', async () => {
+      const fila = reabierta({ loyaltyLastError: null })
+      const tabla = tablaDeUnaVenta(fila)
+      const award = jest.fn().mockResolvedValue({ complete: false, errors: ['loyalty:cust-1'] })
+      await new LoyaltyReconciliationJob({ prisma: { order: tabla } as never, cron: cron(), award, now: () => AHORA }).runNow()
+      expect(fila.loyaltyLastError).toBe('loyalty:cust-1')
+      expect(fila.loyaltyProcessingAt).toBeNull()
+    })
   })
 
   it('does not overlap two sweeps in the same process', async () => {

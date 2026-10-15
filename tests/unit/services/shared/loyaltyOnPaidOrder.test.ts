@@ -308,6 +308,46 @@ describe('awardLoyaltyForPaidOrder', () => {
       expect(venta.loyaltyLastError).toBeNull()
     })
 
+    // ── H2 (auditoría de Codex del código + revisión final Minor 3, 15-oct-2026) ─────────────────────────────────────────
+    it('🔴 H2: una corrida que FALLA no pisa la marca con su error (si la pisara, el cierre «sin cliente» que espera detrás ya no la vería)', async () => {
+      const venta = fila({ loyaltyLastError: MARCA, clientes: 1 })
+      orderUpdateMany.mockImplementation(tablaDeUnaVenta(venta).updateMany)
+      orderCustomerFindMany.mockResolvedValue([
+        { customerId: 'cust-A', isPrimary: true, customer: { id: 'cust-A', firstName: 'Dany', lastName: null } },
+      ])
+      earnPointsMock.mockRejectedValue(new Error('P1001'))
+
+      const result = await awardLoyaltyForPaidOrder({ venueId: VENUE, orderId: ORDER, orderTotal: 50, legacyCustomer: null })
+
+      expect(result.complete).toBe(false)
+      expect(venta.loyaltyProcessedAt).toBeNull()
+      expect(venta.loyaltyLastError).toBe(MARCA)
+      // La condición va en la MISMA sentencia (Postgres la relee al soltarse un candado): null, o distinto de la marca.
+      expect(orderUpdateMany).toHaveBeenCalledWith({
+        where: {
+          id: ORDER,
+          venueId: VENUE,
+          loyaltyEligibleAt: { not: null },
+          loyaltyProcessedAt: null,
+          OR: [{ loyaltyLastError: null }, { loyaltyLastError: { not: MARCA } }],
+        },
+        data: { loyaltyLastError: expect.stringContaining('loyalty:cust-A') },
+      })
+    })
+
+    it('regresión H2: sin marca, la corrida que falla SÍ deja su error (también sobre un error viejo)', async () => {
+      const venta = fila({ loyaltyLastError: 'query:P1001', clientes: 1 })
+      orderUpdateMany.mockImplementation(tablaDeUnaVenta(venta).updateMany)
+      orderCustomerFindMany.mockResolvedValue([
+        { customerId: 'cust-A', isPrimary: true, customer: { id: 'cust-A', firstName: 'Dany', lastName: null } },
+      ])
+      earnPointsMock.mockRejectedValue(new Error('P1001'))
+
+      await awardLoyaltyForPaidOrder({ venueId: VENUE, orderId: ORDER, orderTotal: 50, legacyCustomer: null })
+
+      expect(venta.loyaltyLastError).toBe('loyalty:cust-A')
+    })
+
     it('la corrida que SÍ vio al cliente cierra aunque la fila traiga la marca, y la borra (lealtad completa)', async () => {
       const venta = fila({ loyaltyLastError: MARCA, clientes: 1 })
       orderUpdateMany.mockImplementation(tablaDeUnaVenta(venta).updateMany)

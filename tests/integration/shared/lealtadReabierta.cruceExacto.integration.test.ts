@@ -29,6 +29,7 @@ import * as tardia from '@/services/shared/loyaltyOnLateCustomer'
 import { awardLoyaltyForPaidOrder } from '@/services/shared/loyaltyOnPaidOrder'
 import { attachCustomerToOrder } from '@/services/mobile/order.mobile.service'
 import { LoyaltyReconciliationJob } from '@/jobs/loyalty-reconciliation.job'
+import { esperarBloqueado } from '@tests/__helpers__/candadosDePostgres'
 
 /** Texto EXACTO del ruling: la marca de fila que deja la reapertura. */
 const MARCA = 'REABIERTA: cliente ligado después del cobro'
@@ -247,5 +248,117 @@ describe('🔴 cruce exacto: el cierre «sin cliente» espera el candado de la l
 
     const fila = await prisma.order.findUniqueOrThrow({ where: { id: orderId }, select: { loyaltyProcessedAt: true } })
     expect(fila.loyaltyProcessedAt).toBeInstanceOf(Date)
+  })
+})
+
+/**
+ * 🔴 H2 (auditoría de Codex del código + revisión final Minor 3, 15-oct-2026): las escrituras de FALLO no pueden borrar la
+ * marca. El cruce de TRES participantes: la liga tiene el candado de la fila (ya escribió la marca); un trabajador cuya
+ * lealtad falló llega a su escritura de fallo y espera PRIMERO; detrás espera el cierre «sin cliente» de otra corrida. Al
+ * soltarse la liga, el fallo pasaba primero y PISABA la marca con su texto de error; el cierre, que relee sólo las columnas
+ * de la fila y conserva su foto vieja de los clientes, ya no veía la marca y cerraba la venta: el sello se perdía otra vez.
+ */
+describe('🔴 H2: la escritura de fallo conserva la marca de la reapertura (Postgres real)', () => {
+  /** Acota el reconciliador real a ESTA venta (otras pruebas comparten la base). */
+  const reconciliadorDe = (orderId: string, award: jest.Mock) => {
+    const soloEsta = (args: any) => ({ ...args, where: { AND: [args.where, { id: orderId }] } })
+    return new LoyaltyReconciliationJob({
+      prisma: {
+        order: {
+          findMany: (args: any) => prisma.order.findMany(soloEsta(args)),
+          updateMany: (args: any) => prisma.order.updateMany(soloEsta(args)),
+        },
+      } as never,
+      cron: { start: jest.fn(), stop: jest.fn() },
+      award,
+      now: () => new Date(),
+    })
+  }
+
+  it('🔴 tres participantes: liga con el candado → fallo esperando → cierre «sin cliente» esperando detrás ⇒ la venta sigue pendiente y con su marca', async () => {
+    const c = await cliente()
+    const orderId = await ventaCobradaSinCliente()
+
+    // 1) La liga: crea el OrderCustomer, reabre (deja la marca) y se queda con el candado de la fila, sin commit.
+    let soltarLiga: () => void = () => undefined
+    const ligaPuedeTerminar = new Promise<void>(r => (soltarLiga = r))
+    let avisarPid: (pid: number) => void = () => undefined
+    const pidDeLaLiga = new Promise<number>(r => (avisarPid = r))
+    const liga = prisma.$transaction(
+      async tx => {
+        await tx.orderCustomer.create({ data: { orderId, customerId: c, isPrimary: true } })
+        const reabrio = await tardia.reabrirLealtadSiAplica(tx, { venueId: venueId!, orderId, customerId: c })
+        const [{ pid }] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`
+        avisarPid(Number(pid))
+        await ligaPuedeTerminar
+        return reabrio
+      },
+      { timeout: 30_000 },
+    )
+    liga.catch(() => undefined)
+
+    // La 1.ª lectura de clientes (el trabajador que falla) truena; la 2.ª (la corrida vieja) lee la base de verdad: «sin
+    // clientes», porque la liga todavía no hace commit.
+    const leerClientes = prisma.orderCustomer.findMany.bind(prisma.orderCustomer)
+    let lecturas = 0
+    const espia = jest.spyOn(prisma.orderCustomer, 'findMany').mockImplementation((async (args: any) => {
+      lecturas += 1
+      if (lecturas === 1) throw new Error('P1001: simulado (la base se cayó a media lealtad)')
+      return leerClientes(args)
+    }) as never)
+
+    let fallida: ReturnType<typeof awardLoyaltyForPaidOrder> | undefined
+    let vieja: ReturnType<typeof awardLoyaltyForPaidOrder> | undefined
+    try {
+      const pidLiga = await aTiempo(pidDeLaLiga, 8_000, 'la liga no llegó a su barrera')
+      // 2) El trabajador que falló llega a su escritura de fallo y espera el candado de la liga (PRIMERO en la fila).
+      fallida = awardLoyaltyForPaidOrder({ venueId: venueId!, orderId, orderTotal: 50 })
+      const esperaDelFallo = await esperarBloqueado(prisma, {
+        bloqueadoPor: [pidLiga],
+        consulta: /UPDATE[\s\S]*"Order"[\s\S]*SET\s+"loyaltyLastError"/,
+      })
+      expect(esperaDelFallo).not.toBeNull()
+      // 3) DETRÁS de él, el cierre «sin cliente» de otra corrida.
+      vieja = awardLoyaltyForPaidOrder({ venueId: venueId!, orderId, orderTotal: 50 })
+      const esperaDelCierre = await esperarBloqueado(prisma, {
+        bloqueadoPor: [pidLiga, esperaDelFallo!.pid],
+        consulta: /UPDATE[\s\S]*"Order"[\s\S]*SET\s+"loyaltyProcessedAt"/,
+        excepto: [esperaDelFallo!.pid],
+      })
+      expect(esperaDelCierre).not.toBeNull()
+    } finally {
+      // 4) Se suelta la liga: primero pasa el fallo, después el cierre.
+      soltarLiga()
+    }
+    const [resultadoFallido, resultadoViejo, reabrio] = await Promise.all([fallida!, vieja!, liga]).finally(() => espia.mockRestore())
+    expect(reabrio).toBe(true)
+    expect(resultadoFallido.complete).toBe(false)
+    expect(resultadoViejo).toEqual({ complete: true, errors: [] })
+
+    // La venta sigue para el reconciliador, con la marca intacta, y él la termina.
+    await elReconciliadorLaTermina(orderId)
+  })
+
+  it('🔴 el reconciliador: si su lealtad falla sobre una venta REABIERTA, suelta su reclamo SIN borrar la marca', async () => {
+    const c = await cliente()
+    const orderId = await ventaCobradaSinCliente()
+    // La liga hace commit (marca) y su intento inmediato no llega (el proceso murió).
+    await prisma.$transaction(async tx => {
+      await tx.orderCustomer.create({ data: { orderId, customerId: c, isPrimary: true } })
+      expect(await tardia.reabrirLealtadSiAplica(tx, { venueId: venueId!, orderId, customerId: c })).toBe(true)
+    })
+
+    // El reconciliador la reclama y su lealtad falla.
+    const fallo = jest.fn().mockResolvedValue({ complete: false, errors: ['loyalty:caída'] })
+    expect(await reconciliadorDe(orderId, fallo).runNow()).toMatchObject({ scanned: 1, failed: 1 })
+
+    const fila = await prisma.order.findUniqueOrThrow({
+      where: { id: orderId },
+      select: { loyaltyProcessedAt: true, loyaltyProcessingAt: true, loyaltyLastError: true },
+    })
+    expect(fila).toEqual({ loyaltyProcessedAt: null, loyaltyProcessingAt: null, loyaltyLastError: MARCA })
+
+    // Y la siguiente vuelta la termina.
+    await elReconciliadorLaTermina(orderId)
   })
 })
