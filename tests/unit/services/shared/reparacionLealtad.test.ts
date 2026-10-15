@@ -1,18 +1,32 @@
 import { readFileSync } from 'fs'
 import { join } from 'path'
 import {
+  OTRA_HISTORIA,
   PAR_AUTORIZADO,
+  TOPE_PASES,
+  aplicarTelefonosYPar,
   completarLealtadDeVentas,
   decidirFusionAutorizada,
   decidirReparacionDeSello,
+  filaDeBitacora,
+  interpretarBanderas,
   planearTelefonos,
   revalidarVenta,
+  revisarBase,
+  type CambioDeTelefono,
+  type ChoqueDeTelefono,
+  type DecisionDeFusion,
   type EstadoDeLealtad,
+  type FilaDeBitacora,
   type FilaTelefono,
+  type OtraHistoria,
+  type PuertoDeTransaccion,
   type ResumenCliente,
   type VentaPorReparar,
 } from '@/services/shared/reparacionLealtad'
 import { esElegibleParaLealtad, type SaleStampSnapshot } from '@/services/shared/loyaltyOnLateCustomer'
+
+const SCRIPT = 'scripts/lealtad/reparar-telefonos-y-sellos.ts'
 
 describe('planearTelefonos', () => {
   const fila = (id: string, venueId: string | null, phone: string): FilaTelefono => ({ id, venueId, phone })
@@ -51,15 +65,24 @@ describe('planearTelefonos', () => {
 })
 
 describe('decidirFusionAutorizada (auditoría A #5: sólo el par de la spec, y revalidado)', () => {
+  const sinOtraHistoria = Object.fromEntries(Object.keys(OTRA_HISTORIA).map(k => [k, 0])) as Record<OtraHistoria, number>
   const limpio = (id: string, phone: string): ResumenCliente => ({
     id,
     venueId: PAR_AUTORIZADO.venueId,
     active: true,
     phone,
+    email: null,
+    birthDate: null,
+    loyaltyPoints: 0,
+    referralCount: 0,
+    referredByCustomerId: null,
+    notes: null,
+    tags: [],
     sellos: 0,
     ventas: 0,
     reservas: 0,
     paquetes: 0,
+    otros: sinOtraHistoria,
   })
   const viejo = limpio(PAR_AUTORIZADO.retirar, '+8129440042')
   const nuevo = limpio(PAR_AUTORIZADO.conservar, '+528129440042')
@@ -97,6 +120,72 @@ describe('decidirFusionAutorizada (auditoría A #5: sólo el par de la spec, y r
     const r = decidirFusionAutorizada({ ...viejo, ...v }, { ...nuevo, ...n })
     expect(r.decision).toBe('SOLO_REPORTAR')
     expect(r.decision === 'SOLO_REPORTAR' && r.motivo.length).toBeGreaterThan(10)
+  })
+
+  // Fix ronda 1 (#1): toda relación del Customer que guarda historia cuenta. Una por clase.
+  it.each(Object.entries(OTRA_HISTORIA) as [OtraHistoria, string][])(
+    '🔴 el VIEJO tiene «%s» ⇒ no se fusiona y el motivo lo nombra',
+    (clase, etiqueta) => {
+      const r = decidirFusionAutorizada({ ...viejo, otros: { ...sinOtraHistoria, [clase]: 1 } }, nuevo)
+      expect(r).toEqual({ decision: 'SOLO_REPORTAR', motivo: expect.stringContaining(etiqueta) })
+    },
+  )
+
+  it('las clases nuevas sólo se exigen al VIEJO: el conservado conserva su historia', () => {
+    const conTodo = Object.fromEntries(Object.keys(OTRA_HISTORIA).map(k => [k, 3])) as Record<OtraHistoria, number>
+    expect(decidirFusionAutorizada(viejo, { ...nuevo, otros: conTodo, loyaltyPoints: 40, email: 'x@y.mx' })).toEqual({
+      decision: 'FUSIONAR',
+    })
+  })
+
+  it('las clases son las que pidió la ronda 1, con el nombre de la relación en el esquema', () => {
+    expect(Object.keys(OTRA_HISTORIA).sort()).toEqual(
+      [
+        'loyaltyTransactions',
+        'stampRewards',
+        'stampCards',
+        'externalIdentities',
+        'taxProfiles',
+        'referralsAsReferrer',
+        'referralsAsReferred',
+        'referralGrants',
+        'referralTierUnlocks',
+        'referredCustomers',
+        'couponRedemptions',
+        'customerDiscounts',
+        'waitlistEntries',
+        'consentEvents',
+        'campaignDeliveries',
+        'customerOrderMetrics',
+        'approvalOutbox',
+        'kioskOutreachOutbox',
+        'captureTokens',
+      ].sort(),
+    )
+  })
+
+  it.each<[string, Partial<ResumenCliente>, Partial<ResumenCliente>, RegExp]>([
+    ['el viejo tiene un correo que el conservado no tiene', { email: 'dany@correo.mx' }, {}, /correo/],
+    ['el viejo tiene OTRO correo que el conservado', { email: 'dany@correo.mx' }, { email: 'otra@correo.mx' }, /correo/],
+    ['el viejo tiene puntos', { loyaltyPoints: 15 }, {}, /puntos/],
+    ['el viejo refirió a alguien (contador)', { referralCount: 1 }, {}, /referid/],
+    ['al viejo lo refirió alguien', { referredByCustomerId: 'cAlguien' }, {}, /refiri/],
+    ['el viejo tiene un cumpleaños distinto', { birthDate: '1990-05-01' }, {}, /cumpleaños/],
+    ['el viejo tiene notas', { notes: 'alérgico a la nuez' }, {}, /notas/],
+    ['el viejo tiene etiquetas', { tags: ['VIP'] }, {}, /etiquetas/],
+  ])('🔴 %s ⇒ no se fusiona', (_n, v, n, motivo) => {
+    const r = decidirFusionAutorizada({ ...viejo, ...v }, { ...nuevo, ...n })
+    expect(r.decision).toBe('SOLO_REPORTAR')
+    expect(r.decision === 'SOLO_REPORTAR' && r.motivo).toMatch(motivo)
+  })
+
+  it('el mismo correo o el mismo cumpleaños en los dos NO impide fusionar (no se pierde nada)', () => {
+    expect(
+      decidirFusionAutorizada(
+        { ...viejo, email: 'dany@correo.mx', birthDate: '1990-05-01' },
+        { ...nuevo, email: 'dany@correo.mx', birthDate: '1990-05-01' },
+      ),
+    ).toEqual({ decision: 'FUSIONAR' })
   })
 })
 
@@ -166,13 +255,31 @@ describe('🔴 revalidarVenta: la elegibilidad completa salvo el plazo, también
   })
 })
 
-describe('🔴 completarLealtadDeVentas: reanudable (auditoría A #6) y revalidada al aplicar (B2)', () => {
+describe('🔴 completarLealtadDeVentas: reanudable, revalidada al aplicar (B2) y con bitácora que se recupera (ronda 1 #2c)', () => {
   const venta: VentaPorReparar = { orderNumber: 'ORD-1790121567183', orderId: 'o1', clienteId: 'c1', base: 80 }
   const elegible = async () => ({ elegible: true as const })
 
+  /** Un libro de la venta y su bitácora, en memoria. `completar` imita al envoltorio: sella primero y después acredita. */
+  function libroDeVenta() {
+    const libro = { sellos: 0, puntos: 0 }
+    const bitacora: string[] = []
+    return {
+      libro,
+      bitacora,
+      completar: jest.fn(async () => {
+        if (libro.sellos === 0) libro.sellos += 1
+        if (libro.puntos === 0) libro.puntos += 1
+        return { complete: true, reembolsada: false }
+      }),
+      estado: async (): Promise<EstadoDeLealtad> => ({ conSello: libro.sellos > 0, conPuntos: libro.puntos > 0, conVisita: false }),
+      yaAuditada: jest.fn(async (v: VentaPorReparar) => bitacora.includes(v.orderId)),
+      auditar: jest.fn(async (v: VentaPorReparar) => {
+        bitacora.push(v.orderId)
+      }),
+    }
+  }
+
   it('una corrida que se corta entre el sello y los puntos se completa en la siguiente, sin otro sello', async () => {
-    // El libro de una venta. `completar` imita al envoltorio de la lealtad: sella primero (earnPoints → grantStamp) y
-    // después acredita; lo que ya está no se repite.
     const libro = { sellos: 0, puntos: 0 }
     let elProcesoMuere = true
     const completar = jest.fn(async () => {
@@ -184,34 +291,74 @@ describe('🔴 completarLealtadDeVentas: reanudable (auditoría A #6) y revalida
     const estado = jest.fn(
       async (): Promise<EstadoDeLealtad> => ({ conSello: libro.sellos > 0, conPuntos: libro.puntos > 0, conVisita: false }),
     )
-    const registrar = jest.fn(async () => undefined)
+    const auditar = jest.fn(async () => undefined)
+    const deps = { revalidar: elegible, completar, estado, yaAuditada: async () => false, auditar }
 
-    // 1.ª corrida: se cae a la mitad.
-    await expect(completarLealtadDeVentas([venta], { revalidar: elegible, completar, estado, registrar })).rejects.toThrow(
-      'el proceso murió',
-    )
+    await expect(completarLealtadDeVentas([venta], deps)).rejects.toThrow('el proceso murió')
     expect(libro).toEqual({ sellos: 1, puntos: 0 })
-    expect(registrar).not.toHaveBeenCalled()
+    expect(auditar).not.toHaveBeenCalled()
 
-    // 2.ª corrida: la misma venta vuelve a decidirse COMPLETAR (la decisión no mira «ya sellada») y se completa.
     elProcesoMuere = false
     expect(decidirReparacionDeSello({ coincidencias: 1, clienteId: 'c1', programaActivo: true, elegible: true })).toBe('COMPLETAR')
-    const r = await completarLealtadDeVentas([venta], { revalidar: elegible, completar, estado, registrar })
+    const r = await completarLealtadDeVentas([venta], deps)
 
     expect(completar).toHaveBeenCalledTimes(2)
     expect(libro).toEqual({ sellos: 1, puntos: 1 })
-    const esperado = { orderNumber: 'ORD-1790121567183', omitida: null, completa: true, conSello: true, reembolsada: false, cambio: true }
+    const esperado = {
+      orderNumber: 'ORD-1790121567183',
+      omitida: null,
+      completa: true,
+      conSello: true,
+      reembolsada: false,
+      cambio: true,
+      auditoria: 'ESCRITA',
+    }
     expect(r).toEqual([esperado])
-    expect(registrar).toHaveBeenCalledWith(venta, esperado)
+    expect(auditar).toHaveBeenCalledTimes(1)
+    expect(auditar).toHaveBeenCalledWith(venta, esperado)
   })
 
-  it('🔴 re-correr una venta YA completa: se llama otra vez (idempotente) pero no cambia nada y lo dice (sin bitácora)', async () => {
-    const completar = jest.fn(async () => ({ complete: true, reembolsada: false }))
-    const estado = async (): Promise<EstadoDeLealtad> => ({ conSello: true, conPuntos: true, conVisita: true })
-    const r = await completarLealtadDeVentas([venta], { revalidar: elegible, completar, estado })
-    expect(completar).toHaveBeenCalledTimes(1)
+  it('🔴 #2c: se cae ENTRE otorgar y escribir la bitácora ⇒ la re-corrida la escribe (aunque ya no haya cambio), sin duplicar', async () => {
+    const l = libroDeVenta()
+    let laBitacoraFalla = true
+    const auditar = jest.fn(async (v: VentaPorReparar) => {
+      if (laBitacoraFalla) throw new Error('se cayó la conexión al escribir la bitácora')
+      l.bitacora.push(v.orderId)
+    })
+    const deps = { revalidar: elegible, completar: l.completar, estado: l.estado, yaAuditada: l.yaAuditada, auditar }
+
+    await expect(completarLealtadDeVentas([venta], deps)).rejects.toThrow('bitácora')
+    expect(l.libro).toEqual({ sellos: 1, puntos: 1 }) // la lealtad SÍ quedó
+    expect(l.bitacora).toEqual([]) // la bitácora no
+
+    laBitacoraFalla = false
+    const r = await completarLealtadDeVentas([venta], deps)
+    // Ya no hay cambio (estaba completa), pero falta su renglón: se escribe. Decide la existencia del renglón, no el diff.
+    expect(r[0]).toMatchObject({ cambio: false, auditoria: 'ESCRITA' })
+    expect(l.bitacora).toEqual(['o1'])
+
+    const otraVez = await completarLealtadDeVentas([venta], deps)
+    expect(otraVez[0]).toMatchObject({ cambio: false, auditoria: 'YA_EXISTIA' })
+    expect(l.bitacora).toEqual(['o1']) // sin duplicado
+  })
+
+  it('🔴 re-correr una venta ya completa Y auditada: se llama otra vez (idempotente) y no escribe otro renglón', async () => {
+    const l = libroDeVenta()
+    const deps = { revalidar: elegible, completar: l.completar, estado: l.estado, yaAuditada: l.yaAuditada, auditar: l.auditar }
+    await completarLealtadDeVentas([venta], deps)
+    const r = await completarLealtadDeVentas([venta], deps)
+    expect(l.completar).toHaveBeenCalledTimes(2)
+    expect(l.auditar).toHaveBeenCalledTimes(1)
     expect(r).toEqual([
-      { orderNumber: venta.orderNumber, omitida: null, completa: true, conSello: true, reembolsada: false, cambio: false },
+      {
+        orderNumber: venta.orderNumber,
+        omitida: null,
+        completa: true,
+        conSello: true,
+        reembolsada: false,
+        cambio: false,
+        auditoria: 'YA_EXISTIA',
+      },
     ])
   })
 
@@ -220,30 +367,36 @@ describe('🔴 completarLealtadDeVentas: reanudable (auditoría A #6) y revalida
       revalidar: elegible,
       completar: async () => ({ complete: true, reembolsada: false }),
       estado: async () => ({ conSello: false, conPuntos: false, conVisita: true }),
+      yaAuditada: async () => false,
+      auditar: async () => undefined,
     })
-    expect(r).toEqual([{ orderNumber: 'ORD-2', omitida: null, completa: true, conSello: false, reembolsada: false, cambio: false }])
+    expect(r).toEqual([
+      { orderNumber: 'ORD-2', omitida: null, completa: true, conSello: false, reembolsada: false, cambio: false, auditoria: 'ESCRITA' },
+    ])
   })
 
-  it('🔴 B2: preparada elegible → entra un reembolso → al aplicar NO se otorga y queda sin sello válido', async () => {
-    // El plan (simulación o la lectura del inicio de --apply) la vio COMPLETAR. Antes de su turno, la venta se devuelve.
+  it('🔴 B2: preparada elegible → entra un reembolso → al aplicar NO se otorga, sin sello válido y sin bitácora', async () => {
     let reembolsada = false
-    const libro = { sellos: 0 }
+    const l = libroDeVenta()
     const revalidar = jest.fn(async () =>
       reembolsada ? { elegible: false as const, motivo: 'ya no es elegible (NOT_PAID)' } : { elegible: true as const },
     )
-    const completar = jest.fn(async () => {
-      libro.sellos += 1
-      return { complete: true, reembolsada: false }
-    })
-    const estado = async (): Promise<EstadoDeLealtad> => ({ conSello: libro.sellos > 0, conPuntos: false, conVisita: false })
-    const registrar = jest.fn(async () => undefined)
+    const informar = jest.fn()
 
     reembolsada = true // ← el reembolso entra entre preparar y aplicar
-    const r = await completarLealtadDeVentas([venta], { revalidar, completar, estado, registrar })
+    const r = await completarLealtadDeVentas([venta], {
+      revalidar,
+      completar: l.completar,
+      estado: l.estado,
+      yaAuditada: l.yaAuditada,
+      auditar: l.auditar,
+      informar,
+    })
 
     expect(revalidar).toHaveBeenCalledWith(venta)
-    expect(completar).not.toHaveBeenCalled()
-    expect(libro.sellos).toBe(0)
+    expect(l.completar).not.toHaveBeenCalled()
+    expect(l.auditar).not.toHaveBeenCalled()
+    expect(l.libro.sellos).toBe(0)
     expect(r).toEqual([
       {
         orderNumber: venta.orderNumber,
@@ -252,25 +405,37 @@ describe('🔴 completarLealtadDeVentas: reanudable (auditoría A #6) y revalida
         conSello: false,
         reembolsada: false,
         cambio: false,
+        auditoria: 'NO_APLICA',
       },
     ])
-    expect(registrar).toHaveBeenCalledWith(venta, r[0])
+    expect(informar).toHaveBeenCalledWith(venta, r[0])
   })
 
   it('🔴 B2: el reembolso entra MIENTRAS se otorga ⇒ el envoltorio revierte y el resultado lo dice (sin sello válido)', async () => {
     const r = await completarLealtadDeVentas([venta], {
       revalidar: elegible,
-      // El envoltorio otorgó, volvió a contar, vio el reembolso y revirtió el sello: EARN + REVERSAL = sin sello válido.
       completar: async () => ({ complete: true, reembolsada: true }),
       estado: jest
         .fn<Promise<EstadoDeLealtad>, [VentaPorReparar]>()
         .mockResolvedValueOnce({ conSello: false, conPuntos: false, conVisita: false })
         .mockResolvedValueOnce({ conSello: false, conPuntos: true, conVisita: true }),
+      yaAuditada: async () => false,
+      auditar: async () => undefined,
     })
-    expect(r).toEqual([{ orderNumber: venta.orderNumber, omitida: null, completa: true, conSello: false, reembolsada: true, cambio: true }])
+    expect(r).toEqual([
+      {
+        orderNumber: venta.orderNumber,
+        omitida: null,
+        completa: true,
+        conSello: false,
+        reembolsada: true,
+        cambio: true,
+        auditoria: 'ESCRITA',
+      },
+    ])
   })
 
-  it('cada venta se revalida en SU turno, no todas al principio', async () => {
+  it('cada venta se revalida en SU turno, y su bitácora se escribe en cuanto termina (antes de la siguiente)', async () => {
     const orden: string[] = []
     const ventas: VentaPorReparar[] = [venta, { orderNumber: 'ORD-2', orderId: 'o2', clienteId: 'c2', base: 50 }]
     await completarLealtadDeVentas(ventas, {
@@ -283,8 +448,243 @@ describe('🔴 completarLealtadDeVentas: reanudable (auditoría A #6) y revalida
         return { complete: true, reembolsada: false }
       },
       estado: async () => ({ conSello: true, conPuntos: false, conVisita: false }),
+      yaAuditada: async () => false,
+      auditar: async v => {
+        orden.push(`auditar ${v.orderId}`)
+      },
     })
-    expect(orden).toEqual(['revalidar o1', 'completar o1', 'revalidar o2', 'completar o2'])
+    expect(orden).toEqual(['revalidar o1', 'completar o1', 'auditar o1', 'revalidar o2', 'completar o2', 'auditar o2'])
+  })
+})
+
+describe('🔴 aplicarTelefonosYPar: (a)+(b) y SU bitácora en la MISMA transacción (ronda 1 #2a/b, #3 ii/iii/vi)', () => {
+  const cambioCliente: CambioDeTelefono = { id: 'cAna', venueId: 'v1', de: '+5543453965', a: '+525543453965' }
+  const cambioConsumer: CambioDeTelefono = { id: 'kAna', venueId: null, de: '+5543453965', a: '+525543453965' }
+  const choqueDelPar: ChoqueDeTelefono = {
+    id: PAR_AUTORIZADO.retirar,
+    venueId: PAR_AUTORIZADO.venueId,
+    de: '+8129440042',
+    a: '+528129440042',
+    ocupadoPor: PAR_AUTORIZADO.conservar,
+  }
+
+  /** Un puerto falso que anota cada llamada en orden: así se ve qué pasa dentro de la transacción y en qué orden. */
+  function puertoFalso(over: Partial<PuertoDeTransaccion> = {}) {
+    const llamadas: string[] = []
+    const bitacora: FilaDeBitacora[] = []
+    const anota =
+      <A extends unknown[], R>(nombre: string, f: (...a: A) => Promise<R>) =>
+      async (...a: A): Promise<R> => {
+        llamadas.push(nombre)
+        return f(...a)
+      }
+    const base: PuertoDeTransaccion = {
+      bloquearPar: async () => undefined,
+      cambiarTelefonoDeCliente: async () => 1,
+      consumerConTelefono: async () => null,
+      cambiarTelefonoDeConsumer: async () => 1,
+      decidirPar: async (): Promise<DecisionDeFusion> => ({ decision: 'FUSIONAR' }),
+      pasesDelViejo: async () => ['pase1'],
+      moverPases: async ids => ids.length,
+      desactivarViejo: async () => 1,
+      escribirBitacora: async filas => {
+        bitacora.push(...filas)
+      },
+    }
+    const p = { ...base, ...over }
+    const puerto: PuertoDeTransaccion = {
+      bloquearPar: anota('bloquearPar', p.bloquearPar),
+      cambiarTelefonoDeCliente: anota('cambiarTelefonoDeCliente', p.cambiarTelefonoDeCliente),
+      consumerConTelefono: anota('consumerConTelefono', p.consumerConTelefono),
+      cambiarTelefonoDeConsumer: anota('cambiarTelefonoDeConsumer', p.cambiarTelefonoDeConsumer),
+      decidirPar: anota('decidirPar', p.decidirPar),
+      pasesDelViejo: anota('pasesDelViejo', p.pasesDelViejo),
+      moverPases: anota('moverPases', p.moverPases),
+      desactivarViejo: anota('desactivarViejo', p.desactivarViejo),
+      escribirBitacora: anota('escribirBitacora', p.escribirBitacora),
+    }
+    return { puerto, llamadas, bitacora }
+  }
+  const plan = { script: SCRIPT, cambiosDeClientes: [cambioCliente], cambiosDeConsumidores: [cambioConsumer], parPorFusionar: choqueDelPar }
+
+  it('🔴 #3iii: el candado FOR UPDATE del par es lo PRIMERO; la bitácora es lo ÚLTIMO, dentro de la misma llamada', async () => {
+    const f = puertoFalso()
+    const r = await aplicarTelefonosYPar(f.puerto, plan)
+    expect(f.llamadas).toEqual([
+      'bloquearPar',
+      'cambiarTelefonoDeCliente',
+      'consumerConTelefono',
+      'cambiarTelefonoDeConsumer',
+      'decidirPar',
+      'pasesDelViejo',
+      'moverPases',
+      'desactivarViejo',
+      'escribirBitacora',
+    ])
+    expect(r.fusion).toEqual({ aplicada: true, pases: ['pase1'] })
+    expect(f.bitacora).toEqual([
+      filaDeBitacora('CUSTOMER_PHONE_NORMALIZED', 'Customer', 'cAna', 'v1', { de: '+5543453965', a: '+525543453965', script: SCRIPT }),
+      filaDeBitacora('CONSUMER_PHONE_NORMALIZED', 'Consumer', 'kAna', null, { de: '+5543453965', a: '+525543453965', script: SCRIPT }),
+      filaDeBitacora('CUSTOMER_MERGED_DUPLICATE', 'Customer', PAR_AUTORIZADO.retirar, PAR_AUTORIZADO.venueId, {
+        conservado: PAR_AUTORIZADO.conservar,
+        telefonoViejo: '+8129440042',
+        pasesMovidos: ['pase1'],
+        script: SCRIPT,
+      }),
+    ])
+    expect(r.bitacora).toBe(3)
+  })
+
+  it('sin par por fusionar no se toma el candado del par', async () => {
+    const f = puertoFalso()
+    await aplicarTelefonosYPar(f.puerto, { ...plan, parPorFusionar: null })
+    expect(f.llamadas).not.toContain('bloquearPar')
+    expect(f.llamadas).not.toContain('decidirPar')
+  })
+
+  it('🔴 #2a: un CAS que falla aborta TODO y la bitácora nunca se escribe (cambio y bitácora caen juntos)', async () => {
+    const f = puertoFalso({ cambiarTelefonoDeCliente: async () => 0 })
+    await expect(aplicarTelefonosYPar(f.puerto, plan)).rejects.toThrow('cambió por debajo')
+    expect(f.llamadas).not.toContain('escribirBitacora')
+  })
+
+  it('🔴 #2a: si escribir la bitácora falla, la llamada falla (el llamador la corre dentro de la transacción: se deshace todo)', async () => {
+    const f = puertoFalso({
+      escribirBitacora: async () => {
+        throw new Error('la bitácora no se pudo escribir')
+      },
+    })
+    await expect(aplicarTelefonosYPar(f.puerto, plan)).rejects.toThrow('bitácora')
+  })
+
+  it('🔴 #3ii: otro Consumer YA tiene el +52 (apareció después del plan) ⇒ ese no se cambia, se reporta y no va a la bitácora', async () => {
+    const f = puertoFalso({ consumerConTelefono: async () => 'kOtro' })
+    const r = await aplicarTelefonosYPar(f.puerto, plan)
+    expect(f.llamadas).not.toContain('cambiarTelefonoDeConsumer')
+    expect(r.consumidores).toEqual([])
+    expect(r.consumidoresOmitidos).toEqual([{ ...cambioConsumer, ocupadoPor: 'kOtro' }])
+    expect(f.bitacora.map(b => b.action)).toEqual(['CUSTOMER_PHONE_NORMALIZED', 'CUSTOMER_MERGED_DUPLICATE'])
+  })
+
+  it('🔴 la revalidación DENTRO de la transacción rechaza ⇒ no se mueven pases ni se desactiva; (a) sí se aplica', async () => {
+    const f = puertoFalso({ decidirPar: async () => ({ decision: 'SOLO_REPORTAR', motivo: 'el viejo tiene 1 reservas' }) })
+    const r = await aplicarTelefonosYPar(f.puerto, plan)
+    expect(r.fusion).toEqual({ aplicada: false, motivo: 'el viejo tiene 1 reservas' })
+    expect(f.llamadas).not.toContain('moverPases')
+    expect(f.llamadas).not.toContain('desactivarViejo')
+    expect(f.bitacora.map(b => b.action)).toEqual(['CUSTOMER_PHONE_NORMALIZED', 'CONSUMER_PHONE_NORMALIZED'])
+  })
+
+  it(`🔴 #3vi: más de ${TOPE_PASES} pases del viejo ⇒ no se fusiona y se dice por qué (nunca se mueve una parte)`, async () => {
+    const muchos = Array.from({ length: TOPE_PASES + 1 }, (_, i) => `pase${i}`)
+    const pasesDelViejo = jest.fn(async () => muchos)
+    const f = puertoFalso({ pasesDelViejo })
+    const r = await aplicarTelefonosYPar(f.puerto, plan)
+    expect(pasesDelViejo).toHaveBeenCalledWith(TOPE_PASES + 1)
+    expect(r.fusion).toEqual({ aplicada: false, motivo: expect.stringContaining(`más de ${TOPE_PASES} pases`) })
+    expect(f.llamadas).not.toContain('moverPases')
+    expect(f.llamadas).not.toContain('desactivarViejo')
+  })
+
+  it('🔴 #3vi: mover pases toca un número distinto de los que se leyeron ⇒ se aborta TODO', async () => {
+    const f = puertoFalso({ moverPases: async () => 0 })
+    await expect(aplicarTelefonosYPar(f.puerto, plan)).rejects.toThrow('pases')
+    expect(f.llamadas).not.toContain('escribirBitacora')
+  })
+
+  it('el viejo cambió por debajo al desactivarlo ⇒ se aborta TODO', async () => {
+    const f = puertoFalso({ desactivarViejo: async () => 0 })
+    await expect(aplicarTelefonosYPar(f.puerto, plan)).rejects.toThrow('cambió por debajo')
+  })
+
+  it('sin nada que cambiar no escribe una bitácora vacía', async () => {
+    const f = puertoFalso()
+    const r = await aplicarTelefonosYPar(f.puerto, {
+      script: SCRIPT,
+      cambiosDeClientes: [],
+      cambiosDeConsumidores: [],
+      parPorFusionar: null,
+    })
+    expect(f.llamadas).toEqual([])
+    expect(r.bitacora).toBe(0)
+  })
+
+  it('filaDeBitacora lleva los MISMOS campos que escribe logAction (actor nulo, sin organización, IP ni agente)', () => {
+    expect(filaDeBitacora('X', 'Order', 'o1', 'v1', { a: 1 })).toEqual({
+      staffId: null,
+      venueId: 'v1',
+      organizationId: null,
+      action: 'X',
+      entity: 'Order',
+      entityId: 'o1',
+      data: { a: 1 },
+      ipAddress: null,
+      userAgent: null,
+    })
+  })
+})
+
+describe('🔴 interpretarBanderas: sólo las conocidas y sin contradicciones (ronda 1 #3v)', () => {
+  it.each<[string[], { base: 'render' | 'local' | null; aplicar: boolean; confirmHost: string | null }]>([
+    [[], { base: null, aplicar: false, confirmHost: null }],
+    [['--dry-run'], { base: null, aplicar: false, confirmHost: null }],
+    [['--base', 'render'], { base: 'render', aplicar: false, confirmHost: null }],
+    [['--base', 'local', '--dry-run'], { base: 'local', aplicar: false, confirmHost: null }],
+    [['--base', 'render', '--apply', '--confirm-host', 'db.x.com'], { base: 'render', aplicar: true, confirmHost: 'db.x.com' }],
+  ])('%p ⇒ válido', (args, esperado) => {
+    expect(interpretarBanderas(args)).toEqual({ ok: true, banderas: esperado })
+  })
+
+  it.each<[string[], RegExp]>([
+    [['--aplicar'], /desconocida/],
+    [['--base=render'], /desconocida/],
+    [['render'], /desconocida/],
+    [['--dry-run', '--apply'], /contradic/],
+    [['--apply', '--apply'], /repetida/],
+    [['--base', 'render', '--base', 'local'], /repetida/],
+    [['--base'], /valor/],
+    [['--base', '--apply'], /valor/],
+    [['--confirm-host'], /valor/],
+    [['--base', 'prod'], /render.*local/],
+  ])('%p ⇒ rechazo', (args, motivo) => {
+    const r = interpretarBanderas(args)
+    expect(r.ok).toBe(false)
+    expect(r.ok === false && r.error).toMatch(motivo)
+  })
+})
+
+describe('🔴 revisarBase: la base por defecto nunca es prod; para escribir sin --base render, sólo loopback (ronda 1 #3iv)', () => {
+  const HOST_RENDER = 'dpg-abc.oregon-postgres.render.com'
+  it.each<[string, Parameters<typeof revisarBase>[0]]>([
+    ['simulación local', { base: null, aplicar: false, host: 'localhost', hostRender: HOST_RENDER }],
+    ['aplicar en localhost', { base: null, aplicar: true, host: 'localhost', hostRender: HOST_RENDER }],
+    ['aplicar en 127.0.0.1', { base: 'local', aplicar: true, host: '127.0.0.1', hostRender: HOST_RENDER }],
+    ['aplicar en ::1', { base: null, aplicar: true, host: '[::1]', hostRender: HOST_RENDER }],
+    ['simulación contra una copia en otra máquina (sólo lee)', { base: null, aplicar: false, host: 'copia.lan', hostRender: HOST_RENDER }],
+    ['--base render (simulación)', { base: 'render', aplicar: false, host: HOST_RENDER, hostRender: HOST_RENDER }],
+    ['--base render --apply', { base: 'render', aplicar: true, host: HOST_RENDER, hostRender: HOST_RENDER }],
+  ])('%s ⇒ ok', (_n, e) => {
+    expect(revisarBase(e)).toEqual({ ok: true })
+  })
+
+  it.each<[string, Parameters<typeof revisarBase>[0], RegExp]>([
+    [
+      'default apuntando al host de RENDER_DATABASE_URL',
+      { base: null, aplicar: false, host: HOST_RENDER, hostRender: HOST_RENDER },
+      /producción/,
+    ],
+    ['default apuntando a *.render.com', { base: null, aplicar: false, host: 'otro.render.com', hostRender: null }, /producción/],
+    [
+      '🔴 aplicar sin --base render contra un host que no es loopback',
+      { base: null, aplicar: true, host: 'copia.lan', hostRender: null },
+      /local/,
+    ],
+    ['🔴 aplicar con --base local contra un host remoto', { base: 'local', aplicar: true, host: '10.0.0.5', hostRender: null }, /local/],
+    ['localhost.evil.com no es loopback', { base: null, aplicar: true, host: 'localhost.evil.com', hostRender: null }, /local/],
+  ])('%s ⇒ rechazo', (_n, e, motivo) => {
+    const r = revisarBase(e)
+    expect(r.ok).toBe(false)
+    expect(r.ok === false && r.motivo).toMatch(motivo)
   })
 })
 
@@ -295,11 +695,24 @@ describe('🔴 el script elige la base ANTES de cargar Prisma: nada que cargue e
 
   it('reparacionLealtad.ts sólo depende de utilidades puras (si importara el cliente de Prisma, `--base render` llegaría tarde)', () => {
     expect(importsDe('src/services/shared/reparacionLealtad.ts')).toEqual(['@/utils/phone'])
+    expect(importsDe('src/utils/phone.ts')).toEqual(['libphonenumber-js'])
   })
 
   it('el script no importa estáticamente nada que construya el cliente de Prisma', () => {
-    expect(importsDe('scripts/lealtad/reparar-telefonos-y-sellos.ts').sort()).toEqual(
-      ['../../src/services/shared/reparacionLealtad', '@prisma/client', 'dotenv/config'].sort(),
+    expect(importsDe(SCRIPT).sort()).toEqual(
+      ['../../src/services/shared/reparacionLealtad', '../../src/utils/phone', '@prisma/client', 'dotenv/config'].sort(),
     )
+  })
+
+  it('🔴 #3i: el script usa normalizarTelefonoMx para buscar los teléfonos ocupados (no re-implementa la regla)', () => {
+    const fuente = readFileSync(join(raiz, SCRIPT), 'utf8')
+    expect(fuente).not.toMatch(/`\+52\$\{/)
+    expect(fuente).toMatch(/normalizarTelefonoMx\(/)
+  })
+
+  it('🔴 #2a: el script escribe la bitácora de (a)+(b) con el cliente de la transacción, no con logAction', () => {
+    const fuente = readFileSync(join(raiz, SCRIPT), 'utf8')
+    expect(fuente).toMatch(/tx\.activityLog\.createMany\(/)
+    expect(fuente).not.toMatch(/logAction/)
   })
 })
