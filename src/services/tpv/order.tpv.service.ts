@@ -553,11 +553,16 @@ interface NormalizedAddOrderItemInput extends AddOrderItemInput {
   _count: number
 }
 
+/** Texto libre: trim, y vacío ⇒ null. Sin tope (la nota de la orden y el motivo de la cortesía se guardan enteros). */
+function trimOrNull(text?: string | null): string | null {
+  if (!text) return null
+  const trimmed = text.trim()
+  return trimmed.length > 0 ? trimmed : null
+}
+
+/** Nota de un ARTÍCULO: además lleva el tope de 500 (D5 mesas40; se recorta, nunca se rechaza — `../shared/inputCaps`). */
 function normalizeNotes(notes?: string | null): string | null {
-  if (!notes) return null
-  const trimmed = notes.trim()
-  // D5 (mesas40): tope de 500 caracteres completos; se recorta, nunca se rechaza (`../shared/inputCaps`).
-  return trimmed.length > 0 ? capItemNote(trimmed) : null
+  return capItemNote(trimOrNull(notes)) ?? null
 }
 
 function normalizeExternalId(externalId?: string | null): string | null {
@@ -1224,7 +1229,7 @@ export async function createOrderWithItems(
           paidAmount: 0,
           remainingBalance: decimalFromPesos(totalPesos),
           completedAt: isFreeCart ? new Date() : null,
-          specialRequests: normalizeNotes(input.note),
+          specialRequests: trimOrNull(input.note),
           version: 1,
         },
       })
@@ -1245,7 +1250,7 @@ export async function createOrderWithItems(
             taxAmount: 0,
             total: decimalFromPesos(line.lineGrossPesos),
             isCortesia: !!line.input.isCortesia,
-            cortesiaReason: line.input.isCortesia ? normalizeNotes(line.input.cortesiaReason) : null,
+            cortesiaReason: line.input.isCortesia ? trimOrNull(line.input.cortesiaReason) : null,
             appliedDiscountId: line.appliedDiscount?.id || null,
             notes: normalizeNotes(line.input.notes),
             modifiers: {
@@ -1859,7 +1864,8 @@ export async function addItemsToOrder(
                 // inventory deduction go stale (review 2026-07-19, fix #1).
                 weightQuantity: weightKg != null ? new Prisma.Decimal(weightKg) : null,
                 weightUnit: weightKg != null ? ('KILOGRAM' as const) : null,
-                notes: normalizedNotes ?? existingByExternal.notes,
+                // D5 v3: la nota heredada de una fila vieja también se escribe recortada.
+                notes: capItemNote(normalizedNotes ?? existingByExternal.notes),
                 externalId: existingByExternal.externalId ?? normalizedExternalId,
               },
               include: {
@@ -1916,7 +1922,7 @@ export async function addItemsToOrder(
                 total: updatedTotal,
                 weightQuantity: weightKg != null ? new Prisma.Decimal(weightKg) : null,
                 weightUnit: weightKg != null ? ('KILOGRAM' as const) : null,
-                notes: normalizedNotes ?? existingById.notes,
+                notes: capItemNote(normalizedNotes ?? existingById.notes),
                 externalId: existingById.externalId ?? normalizedExternalId,
               },
               include: {
@@ -2050,7 +2056,7 @@ export async function addItemsToOrder(
               // was weighed before soldByWeight was toggled off (review 2026-07-19).
               weightQuantity: weightKg != null ? new Prisma.Decimal(weightKg) : null,
               weightUnit: weightKg != null ? ('KILOGRAM' as const) : null,
-              notes: normalizedNotes ?? existingItemWithModifiers.notes,
+              notes: capItemNote(normalizedNotes ?? existingItemWithModifiers.notes),
             },
             include: {
               product: {

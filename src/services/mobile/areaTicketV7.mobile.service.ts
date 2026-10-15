@@ -586,6 +586,7 @@ function issueIntentFromInput(lines: AreaTicketLineInput[]) {
     weightKg: normalized[index].weightQuantity == null ? null : quantity(normalized[index].weightQuantity),
     // D5 (mesas40): el vale guarda la nota RECORTADA (`buildOrderItemsData`); se compara recortada de los dos lados
     // para que repetir el mismo vale no sea un 409 (y un vale guardado antes del tope, con la nota entera, tampoco).
+    // El recorte lleva la huella de la nota completa: una nota DISTINTA después del carácter 500 sigue siendo 409.
     notes: capItemNote(line.notes) ?? null,
     modifierIds: [...new Set(line.modifierIds ?? [])].sort(),
     discountId: line.discountId ?? null,
@@ -1482,7 +1483,8 @@ function orderItemFromSnapshot(line: any, fulfillmentAreaId: string) {
     total: line.total,
     weightQuantity: line.weightKg,
     weightUnit: line.weightKg == null ? null : ('KILOGRAM' as const),
-    notes: line.notes,
+    // D5 v3: un vale emitido antes del tope guarda la nota entera; el renglón nace recortado (el vale no se reescribe).
+    notes: capItemNote(line.notes),
     fulfillmentAreaId,
     areaTicketLineId: line.id,
     modifiers:

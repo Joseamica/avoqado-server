@@ -24,6 +24,7 @@ import {
 } from '@/services/tpv/order.tpv.service'
 import { serializedInventoryService } from '@/services/serialized-inventory/serializedInventory.service'
 import { getProductInventoryStatus } from '@/services/dashboard/productInventoryIntegration.service'
+import { capItemNote } from '@/services/shared/inputCaps'
 
 const globalDb = prisma as any
 let tx: any
@@ -533,12 +534,14 @@ describe('R11 (Codex r5): una importada de SoftRestaurant se rechaza bajo el can
 /** D5 (mesas40, 14-oct): la venta serializada escribía la nota cruda. Se recorta (nunca se rechaza) a 500 caracteres completos. */
 describe('D5: la nota de la venta serializada se recorta a 500 caracteres completos', () => {
   const notaLarga = 'a'.repeat(499) + '🌮' + 'b'.repeat(9_537)
-  const recortada = 'a'.repeat(499) + '🌮'
+  // D5 v3: prefijo + «…» + huella (`capItemNote`, formato fijado en `inputCaps.test.ts`).
+  const recortada = capItemNote(notaLarga)
 
   it('addSerializedItemToOrder guarda la nota recortada, con el emoji del borde entero', async () => {
     await addSerializedItemToOrder('venue', 'order', { serialNumber: 'SERIAL', price: 20, notes: notaLarga }, 1, 'staff')
 
     expect(tx.orderItem.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ notes: recortada }) }))
+    expect(tx.orderItem.create.mock.calls[0][0].data.notes).toMatch(/…[0-9a-f]{8}$/)
   })
 
   it('sellSerializedItem (venta rápida) guarda la nota recortada en el renglón que nace con la orden', async () => {
@@ -548,5 +551,116 @@ describe('D5: la nota de la venta serializada se recorta a 500 caracteres comple
     await sellSerializedItem('venue', { serialNumber: 'SERIAL', price: 20, notes: notaLarga }, 'staff')
 
     expect(tx.order.create.mock.calls[0][0].data.items.create.notes).toBe(recortada)
+    expect(recortada).toMatch(/…[0-9a-f]{8}$/)
+  })
+})
+
+/**
+ * D5 v3 (Codex P1 del código, 15-oct): la nota es parte de la IDENTIDAD de la línea. Con un recorte pelón, dos líneas del
+ * mismo producto sin `externalId` cuyas notas comparten los primeros 500 caracteres se fusionaban (`_count = 2`) y el
+ * carrito completo reenviado (`asNewRound=false`) SUMABA esa cantidad a la fila existente: $200 → $400.
+ * Prisma simulado con las filas en memoria: lo que se crea o actualiza es lo que la siguiente lectura ve.
+ */
+describe('D5 v3: el carrito completo reenviado con notas largas de prefijo común NO cambia el importe', () => {
+  const base = 'a'.repeat(500)
+  const carrito = [
+    { productId: 'product', quantity: 1, notes: base + 'A' },
+    { productId: 'product', quantity: 1, notes: base + 'B' },
+  ]
+
+  function cuentaEnMemoria(iniciales: any[] = []) {
+    const filas: any[] = iniciales.map(fila => ({ ...fila }))
+    let siguiente = 0
+    tx.orderItem.findMany.mockImplementation(async ({ where }: any = {}) =>
+      filas
+        .filter(
+          fila =>
+            (!where?.orderId || fila.orderId === where.orderId) &&
+            (!where?.productId || fila.productId === where.productId) &&
+            !(where?.id?.notIn ?? []).includes(fila.id),
+        )
+        .map(fila => ({ ...fila, modifiers: [] })),
+    )
+    tx.orderItem.create.mockImplementation(async ({ data }: any) => {
+      // `modifiers` es el `create` anidado de Prisma, no una columna: la fila guardada no lo lleva.
+      const fila = { id: `fila-${++siguiente}`, isCortesia: false, course: null, seat: null, ...data, modifiers: undefined }
+      filas.push(fila)
+      return { ...fila, modifiers: [] }
+    })
+    tx.orderItem.update.mockImplementation(async ({ where, data }: any) => {
+      const fila = filas.find(f => f.id === where.id)
+      Object.assign(fila, data)
+      return { ...fila, modifiers: [] }
+    })
+    return filas
+  }
+  const totalGuardado = () => tx.order.updateMany.mock.calls.at(-1)[0].data.total
+
+  it('🔴 desde cero: guardar y reenviar el MISMO carrito deja $200 (antes del arreglo, $400)', async () => {
+    const filas = cuentaEnMemoria()
+
+    await addItemsToOrder('venue', 'order', carrito, 1)
+    expect(totalGuardado()).toBe(200)
+
+    await addItemsToOrder('venue', 'order', carrito, 1)
+
+    expect(totalGuardado()).toBe(200)
+    expect(filas.map(fila => fila.quantity)).toEqual([1, 1])
+    expect(filas[0].notes).not.toBe(filas[1].notes)
+  })
+
+  it('🔴 desde dos filas guardadas ANTES del tope (notas completas): reenviar el carrito deja $200', async () => {
+    const vieja = (id: string, notes: string) => ({
+      id,
+      orderId: 'order',
+      productId: 'product',
+      quantity: 1,
+      total: new Prisma.Decimal(100),
+      notes,
+      isCortesia: false,
+      course: null,
+      seat: null,
+    })
+    const filas = cuentaEnMemoria([vieja('vieja-A', base + 'A'), vieja('vieja-B', base + 'B')])
+
+    await addItemsToOrder('venue', 'order', carrito, 1)
+
+    expect(totalGuardado()).toBe(200)
+    expect(filas.map(fila => [fila.id, fila.quantity])).toEqual([
+      ['vieja-A', 1],
+      ['vieja-B', 1],
+    ])
+    expect(tx.orderItem.create).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * D5 v3 (Codex P2): los updates de una línea que CONSERVA su nota (`normalizedNotes ?? existing.notes`) volvían a escribir
+ * una nota vieja de 10,038 caracteres sin recortar. Ahora lo que se escribe pasa por `capItemNote`.
+ */
+describe('D5 v3: un update que hereda una nota vieja larga la guarda recortada', () => {
+  const notaVieja = 'n'.repeat(10_038)
+  const filaVieja = { ...line, id: 'fila-vieja', orderId: 'order', notes: notaVieja, externalId: null as string | null }
+
+  it('🔴 por externalId (carrito completo, sin nota en la línea)', async () => {
+    tx.orderItem.findFirst.mockImplementation(async ({ where }: any) =>
+      where.externalId === 'ext-1' ? { ...filaVieja, externalId: 'ext-1' } : null,
+    )
+
+    await addItemsToOrder('venue', 'order', [{ productId: 'product', quantity: 2, externalId: 'ext-1' }], 1)
+
+    const notes = tx.orderItem.update.mock.calls[0][0].data.notes
+    expect(notes).toBe(capItemNote(notaVieja))
+    expect(notes).toMatch(/…[0-9a-f]{8}$/)
+  })
+
+  it('🔴 por el respaldo de id (el externalId que manda el aparato es el id de la fila)', async () => {
+    tx.orderItem.findFirst.mockImplementation(async ({ where }: any) => (where.id === 'fila-vieja' ? filaVieja : null))
+
+    await addItemsToOrder('venue', 'order', [{ productId: 'product', quantity: 2, externalId: 'fila-vieja' }], 1)
+
+    const notes = tx.orderItem.update.mock.calls[0][0].data.notes
+    expect(notes).toBe(capItemNote(notaVieja))
+    expect(notes).toMatch(/…[0-9a-f]{8}$/)
   })
 })

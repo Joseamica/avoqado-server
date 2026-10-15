@@ -7,6 +7,7 @@
  * separate lines; merging them would corrupt quantity (1+1=2) with one weight.
  */
 import { normalizeAddItems } from '@/services/tpv/order.tpv.service'
+import { capItemNote } from '@/services/shared/inputCaps'
 
 describe('normalizeAddItems — D9 weighted lines never merge', () => {
   it('keeps two weighings of the same product as separate lines', () => {
@@ -66,17 +67,36 @@ describe('normalizeAddItems — D9 weighted lines never merge', () => {
  * ocurrió) a 500 caracteres completos: un emoji en el borde queda entero o fuera, nunca partido a la mitad.
  */
 describe('normalizeAddItems — D5: la nota de un artículo tiene tope de 500 caracteres', () => {
-  // 499 letras + un emoji (2 unidades UTF-16) justo en el borde + relleno = 10,038 unidades.
-  const notaLarga = 'a'.repeat(499) + '🌮' + 'b'.repeat(9_537)
+  // 490 letras + un emoji (2 unidades UTF-16) justo en el borde del prefijo + relleno = 10,038 unidades.
+  const notaLarga = 'a'.repeat(490) + '🌮' + 'b'.repeat(9_546)
 
-  it('una nota de 10,038 caracteres se recorta a 500 caracteres completos, con el emoji del borde ENTERO', () => {
+  it('una nota de 10,038 caracteres se recorta a 500 caracteres completos (prefijo + «…» + huella), con el emoji del borde ENTERO', () => {
     expect(notaLarga).toHaveLength(10_038)
 
     const [line] = normalizeAddItems([{ productId: 'prod-taco', quantity: 1, notes: notaLarga }])
 
     expect(Array.from(line.notes!)).toHaveLength(500)
-    // Un `.slice(0, 500)` pelón dejaría medio emoji (un surrogate suelto) al final.
-    expect(line.notes).toBe('a'.repeat(499) + '🌮')
+    // Un `.slice()` pelón por unidades UTF-16 dejaría medio emoji (un surrogate suelto) antes de la huella.
+    expect(line.notes).toBe(capItemNote(notaLarga))
+    expect(line.notes).toMatch(new RegExp('^' + 'a'.repeat(490) + '🌮…[0-9a-f]{8}$', 'u'))
+  })
+
+  // D5 v3 (Codex P1): el recorte pelón fusionaba dos líneas DISTINTAS en una con `_count = 2`, y el carrito reenviado
+  // sumaba esa cantidad a la fila existente.
+  it('🔴 dos líneas del mismo producto cuyas notas comparten los primeros 500 caracteres NO se fusionan', () => {
+    const base = 'a'.repeat(500)
+
+    const lineas = normalizeAddItems([
+      { productId: 'prod-taco', quantity: 1, notes: base + 'A' },
+      { productId: 'prod-taco', quantity: 1, notes: base + 'B' },
+    ])
+
+    expect(lineas).toHaveLength(2)
+    expect(lineas.map(linea => [linea.quantity, linea._count])).toEqual([
+      [1, 1],
+      [1, 1],
+    ])
+    expect(lineas[0].notes).not.toBe(lineas[1].notes)
   })
 
   it('una nota normal queda igual (sólo se recorta lo que pasa del tope)', () => {

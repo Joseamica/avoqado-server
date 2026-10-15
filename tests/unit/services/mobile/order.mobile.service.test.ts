@@ -15,6 +15,7 @@ jest.mock('@/services/venueSalesGuard', () => ({
 import { Decimal } from '@prisma/client/runtime/library'
 import { Prisma } from '@prisma/client'
 import { cancelOrder, createOrderWithItems, payCashOrder } from '@/services/mobile/order.mobile.service'
+import { capItemNote } from '@/services/shared/inputCaps'
 import { prismaMock } from '../../../__helpers__/setup'
 
 jest.mock('@/communication/sockets', () => ({
@@ -223,7 +224,9 @@ describe('order.mobile.service', () => {
     })
 
     const creados = (prismaMock.order.create as jest.Mock).mock.calls[0][0].data.items.create
-    expect(creados.map((item: { notes: string | null }) => item.notes)).toEqual(['a'.repeat(499) + '🌮', 'a'.repeat(499) + '🌮'])
+    // D5 v3: prefijo + «…» + huella (`capItemNote`, formato fijado en `inputCaps.test.ts`).
+    expect(creados.map((item: { notes: string | null }) => item.notes)).toEqual([capItemNote(notaLarga), capItemNote(notaLarga)])
+    expect(creados[0].notes).toMatch(/…[0-9a-f]{8}$/)
   })
 
   // ── Per-item discountId (mirrors TPV's itemDiscountId — order.tpv.service.ts) ──
