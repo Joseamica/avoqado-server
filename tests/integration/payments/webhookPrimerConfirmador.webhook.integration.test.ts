@@ -1416,7 +1416,9 @@ describe('Codex R6 · R6-2: EXCLUSIÓN por intento — el vínculo y todo escrit
    */
   const instrumentar = (A: string, pausarLaPrimera?: ReturnType<typeof barrera>) => {
     // `pids`: las transacciones que toman el candado del intento A, en orden, SIN contar el INGRESO del evento (Codex R14-1: el
-    // ingreso también lo toma, antes que nadie); las del ingreso van aparte en `pids.ingresos`.
+    // ingreso también lo toma, antes que nadie); las del ingreso van aparte en `pids.ingresos`. Una entrada POR TRANSACCIÓN, no
+    // por PID (15-oct): el pool de Prisma recicla conexiones, y una transacción que empieza después de que otra commiteó puede
+    // tocar el mismo backend — deduplicar por PID contaba dos actores como uno (`[841]`, run 38659701895).
     const pids: number[] & { ingresos: number[] } = Object.assign([] as number[], { ingresos: [] as number[] })
     let pausada = false
     const realTx = prisma.$transaction.bind(prisma)
@@ -1440,9 +1442,9 @@ describe('Codex R6 · R6-2: EXCLUSIÓN por intento — el vínculo y todo escrit
               : Reflect.get(objetivo, prop),
         })
         const r = await (fn as (t: unknown) => Promise<unknown>)(proxy)
-        if (pidDelCandado !== null && esIngreso && !pids.ingresos.includes(pidDelCandado)) pids.ingresos.push(pidDelCandado)
+        if (pidDelCandado !== null && esIngreso) pids.ingresos.push(pidDelCandado)
         if (pidDelCandado !== null && !esIngreso) {
-          if (!pids.includes(pidDelCandado)) pids.push(pidDelCandado)
+          pids.push(pidDelCandado)
           if (pausarLaPrimera && !pausada) {
             pausada = true
             pausarLaPrimera.pausado()
