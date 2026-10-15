@@ -539,6 +539,23 @@ describe('generate_journal_entries (write) — gated CFDI + accounting:manage', 
     expect(out.omitidos).toBe(2)
   })
 
+  it('tarjetas de regalo (spec §7, fase 1): responde cuántos cobros quedaron pendientes de revisión contable, sin pólizas', async () => {
+    mockPlanGate.mockResolvedValue(null)
+    mockGenerate.mockResolvedValue({
+      needsFiscalSetup: false,
+      missingMappings: [],
+      period: '2026-10',
+      candidates: 5,
+      posted: 3,
+      alreadyPosted: 0,
+      skipped: 0,
+      pendientesDeRevision: 2,
+    })
+    const out = parse(await call('generate_journal_entries', { venueId: 'v1', period: '2026-10' }))
+    expect(out).toMatchObject({ ok: true, pagosElegibles: 5, polizasGeneradas: 3, yaEstaban: 0, omitidos: 0, pendientesDeRevision: 2 })
+    expect(out.nota).toContain('tarjetas de regalo')
+  })
+
   it('faltan mapeos → needsMapping, NO ok', async () => {
     mockPlanGate.mockResolvedValue(null)
     mockGenerate.mockResolvedValue({

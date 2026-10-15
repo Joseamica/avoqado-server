@@ -14,6 +14,7 @@ import { generateCogsPolicyForVenue } from './cogs.service'
 import { ivaDeDevolucion, processorDataDeDevoluciones } from './deliveryFiscalDelta'
 import { contabilidadPausada, contabilidadPausadaError, esExclusionContable } from './exclusionContable'
 import logger from '../../config/logger'
+import { isGiftCardTenderKind } from '../giftCards/giftCardTender'
 
 /**
  * Motor de POSTEO AUTOMÁTICO de pólizas (Capa B, slice 2). Genera asientos de doble partida
@@ -65,6 +66,11 @@ export interface GenerateResult {
   alreadyPosted: number
   /** Pagos omitidos por reglas (cancelados/cero/cripto/ajuste). */
   skipped: number
+  /**
+   * Tarjetas de regalo (spec §7, fase 1): cobros que el motor NO postea —la venta de una tarjeta y lo pagado con saldo—, porque su
+   * póliza correcta (pasivo de tarjetas) es la fase 2. El listado del contador los enseña con `WHERE_PAGO_PENDIENTE_DE_REVISION_CONTABLE`.
+   */
+  pendientesDeRevision: number
   /** Costo de ventas del periodo posteado, en centavos (solo cuando se pasa `period` y hubo consumo). */
   cogsCents?: number
 }
@@ -81,7 +87,15 @@ interface PaymentRow {
   createdAt: Date
   merchantAccount: { fiscalConfig: { includeInAccounting: boolean } | null } | null
   ecommerceMerchant: { fiscalConfig: { includeInAccounting: boolean } | null } | null
-  order: (OrdenParaIva & { status: OrderStatus; orderNumber: string | null }) | null
+  /** Tarjetas de regalo: la marca del tender de sistema (un REFUND la hereda del cobro). */
+  tenderType?: { systemKind: string | null } | null
+  order:
+    | (OrdenParaIva & {
+        status: OrderStatus
+        orderNumber: string | null
+        items?: Array<RenglonParaIva & { giftCardId?: string | null }>
+      })
+    | null
 }
 
 /**
@@ -160,6 +174,15 @@ function isEligible(p: PaymentRow): boolean {
   return true
 }
 
+/** ¿Este cobro es de tarjetas de regalo (venta de tarjetas o cobro con saldo)? Mismo criterio que `WHERE_PAGO_PENDIENTE_DE_REVISION_CONTABLE`. */
+export function esPendienteDeRevisionContable(p: {
+  tenderType?: { systemKind: string | null } | null
+  order?: { items?: Array<{ giftCardId?: string | null }> } | null
+}): boolean {
+  if (isGiftCardTenderKind(p.tenderType?.systemKind)) return true
+  return (p.order?.items ?? []).some(it => !!it.giftCardId)
+}
+
 /**
  * Genera (o completa) las pólizas automáticas de los pagos COMPLETED de un local.
  * Idempotente: re-correr no duplica. Si falta algún mapeo, no postea y lo reporta.
@@ -177,6 +200,7 @@ export async function generatePoliciesForVenue(
     posted: 0,
     alreadyPosted: 0,
     skipped: 0,
+    pendientesDeRevision: 0,
   }
 
   const scope = await resolveScopeOrNull(venueId)
@@ -240,11 +264,15 @@ export async function generatePoliciesForVenue(
         // Toggle por-merchant: excluir un merchant de los libros fiscales (no del gerencial).
         merchantAccount: { select: { fiscalConfig: { select: { includeInAccounting: true } } } },
         ecommerceMerchant: { select: { fiscalConfig: { select: { includeInAccounting: true } } } },
+        // Tarjetas de regalo: la marca del tender de sistema.
+        tenderType: { select: { systemKind: true } },
         order: {
           select: {
             status: true,
             orderNumber: true,
             ...ordenParaIvaSelect,
+            // Tarjetas de regalo: la marca de cada renglón (mismos renglones, mismo tope, mismo orden que la póliza).
+            items: { ...ordenParaIvaSelect.items, select: { ...ordenParaIvaSelect.items.select, giftCardId: true } },
           },
         },
       },
@@ -274,6 +302,12 @@ export async function generatePoliciesForVenue(
     )
 
     for (const p of eligible) {
+      // Tarjetas de regalo (spec §7, fase 1): ni la venta de una tarjeta ni lo pagado con saldo se postean; el motor los trataría como
+      // venta con entrada a banco. Se cuentan y el contador los ve en «pendientes de revisión contable».
+      if (esPendienteDeRevisionContable(p)) {
+        base.pendientesDeRevision++
+        continue
+      }
       // Alcance fiscal configurable: merchant excluido o efectivo sin opt-in → no se postea a los libros
       // (el gerencial lo sigue mostrando). Mismo predicado que el read-model de ingresos.
       const merchantFlag = p.merchantAccount?.fiscalConfig?.includeInAccounting ?? p.ecommerceMerchant?.fiscalConfig?.includeInAccounting

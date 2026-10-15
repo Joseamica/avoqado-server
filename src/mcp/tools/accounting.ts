@@ -683,9 +683,11 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
         polizasGeneradas: r.posted,
         yaEstaban: r.alreadyPosted,
         omitidos: r.skipped,
+        // Tarjetas de regalo (spec §7, fase 1): venta de tarjetas y cobros con saldo, sin póliza; el contador los registra a mano.
+        pendientesDeRevision: r.pendientesDeRevision,
         // Costo de ventas del periodo (inventario consumido → cuenta de costo de ventas), si hubo consumo.
         costoDeVentas: r.cogsCents != null ? pesos(r.cogsCents) : 0,
-        nota: 'Idempotente: re-correr no duplica. Devoluciones y voids se postean como contracuenta (402.01). El costo de ventas se agrega una vez por periodo (conviene generar al cierre del mes).',
+        nota: 'Idempotente: re-correr no duplica. Devoluciones y voids se postean como contracuenta (402.01). El costo de ventas se agrega una vez por periodo (conviene generar al cierre del mes). Las tarjetas de regalo (su venta y lo pagado con saldo) no generan póliza por ahora: quedan en pendientesDeRevision para que tu contador las registre a mano.',
       })
     },
   )
