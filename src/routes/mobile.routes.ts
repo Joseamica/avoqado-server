@@ -62,6 +62,7 @@ import * as permissionOverrideMobileController from '../controllers/mobile/permi
 import * as switchUserMobileController from '../controllers/mobile/switch-user.mobile.controller'
 import { createPermissionOverrideSchema } from '../schemas/mobile/permissionOverride.mobile.schema'
 import { switchUserSchema } from '../schemas/mobile/switchUser.mobile.schema'
+import { attachCustomerToLatestPaymentSchema, attachCustomerToPaymentSchema } from '../schemas/mobile/paymentCustomer.mobile.schema'
 import { handoffSchema, confirmExternalSettlementSchema, notChargedSchema } from '../schemas/mobile/areaTicketExternal.schema'
 import { areaTicketResolveRateLimiter } from '../middlewares/area-ticket-rate-limit.middleware'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
@@ -1655,10 +1656,13 @@ router.post(
   paymentMobileController.recordFastPayment,
 )
 
+// BAJO-2 (full-testing, 15-oct-2026): el body se valida (un `customerId` numérico respondía 500). El schema nombra TODOS los
+// campos que lee cada controller: `validateRequest` quita los demás.
 router.post(
   '/venues/:venueId/payments/:paymentId/customer',
   authenticateTokenMiddleware,
   checkPermission('payments:create'),
+  validateRequest(attachCustomerToPaymentSchema),
   paymentMobileController.attachCustomerToPayment,
 )
 
@@ -1666,6 +1670,7 @@ router.post(
   '/venues/:venueId/payments/customer',
   authenticateTokenMiddleware,
   checkPermission('payments:create'),
+  validateRequest(attachCustomerToLatestPaymentSchema),
   paymentMobileController.attachCustomerToLatestPayment,
 )
 
