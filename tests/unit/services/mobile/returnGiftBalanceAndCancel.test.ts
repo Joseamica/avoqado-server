@@ -203,3 +203,78 @@ describe('returnGiftBalanceAndCancelOrder — rulings del coordinador', () => {
     expect(bloquearMock).not.toHaveBeenCalled()
   })
 })
+
+/** Ronda 1 de A8: el reintento cuando ya no había nada que regresar (fix 1) y el mensaje de más de 20 cobros (fix 5). */
+describe('returnGiftBalanceAndCancelOrder — ronda 1', () => {
+  const todoDevuelto = () =>
+    bloquearMock.mockImplementation(async (_tx: unknown, p: { paymentId: string }) => ({
+      original: { id: p.paymentId, amount: D(200), tipAmount: D(10) },
+      refundedSalesCents: 20000,
+      refundedTipsCents: 1000,
+    }))
+  const llamar = () => returnGiftBalanceAndCancelOrder('venue-1', 'order-1', { staffId: 'staff-1', operationKey: LLAVE })
+
+  it('🔴 fix 1: todo ya estaba devuelto — la 1.ª llamada cancela sin escribir dinero; su reintento (sin llave :0) es `replay: true` y no escribe nada', async () => {
+    todoDevuelto()
+    await expect(llamar()).resolves.toEqual({ replay: false })
+    expect(reembolsoMock).not.toHaveBeenCalled()
+    expect(revertirMock).not.toHaveBeenCalled()
+    expect(prismaMock.order.update).toHaveBeenCalledTimes(1)
+
+    // El reintento de la cola: la cuenta ya está CANCELLED y no existe la llave :0 (no hubo nada que devolver).
+    jest.clearAllMocks()
+    prismaMock.order.findUnique.mockResolvedValue({ id: 'order-1', status: 'CANCELLED', paymentStatus: 'PARTIAL' })
+    await expect(llamar()).resolves.toEqual({ replay: true })
+    expect(reembolsoMock).not.toHaveBeenCalled()
+    expect(revertirMock).not.toHaveBeenCalled()
+    expect(lockMock).not.toHaveBeenCalled()
+    expect(prismaMock.order.update).not.toHaveBeenCalled()
+    expect(prismaMock.payment.create).not.toHaveBeenCalled()
+    expect(prismaMock.giftCardActivity.create).not.toHaveBeenCalled()
+    expect(logAction).not.toHaveBeenCalled()
+  })
+
+  it('fix 1: cancelada, sin llave :0 y con un cobro con saldo que todavía tiene algo por devolver: sigue el 400', async () => {
+    prismaMock.order.findUnique.mockResolvedValue({ id: 'order-1', status: 'CANCELLED', paymentStatus: 'PARTIAL' })
+    await expect(llamar()).rejects.toMatchObject({ statusCode: 400, code: 'ORDER_ALREADY_CANCELLED' })
+  })
+
+  it('fix 1: cancelada, sin llave :0 y con un pago que no es de saldo (aunque esté devuelto): sigue el 400', async () => {
+    todoDevuelto()
+    prismaMock.order.findUnique.mockResolvedValue({ id: 'order-1', status: 'CANCELLED', paymentStatus: 'PARTIAL' })
+    prismaMock.payment.findMany.mockResolvedValue([
+      { id: 'pay-1', tenderTypeId: 'tt-gift' },
+      { id: 'pay-cash', tenderTypeId: null },
+    ])
+    await expect(llamar()).rejects.toMatchObject({ statusCode: 400, code: 'ORDER_ALREADY_CANCELLED' })
+  })
+
+  it('fix 1: cancelada, sin llave :0 y sin ningún pago: sigue el 400 (no es una operación de saldo)', async () => {
+    prismaMock.order.findUnique.mockResolvedValue({ id: 'order-1', status: 'CANCELLED', paymentStatus: 'PENDING' })
+    prismaMock.payment.findMany.mockResolvedValue([])
+    await expect(llamar()).rejects.toMatchObject({ statusCode: 400, code: 'ORDER_ALREADY_CANCELLED' })
+  })
+
+  it('🔴 fix 5: más de 20 cobros con saldo tiene su propio mensaje (no «pagos que no son de saldo»)', async () => {
+    prismaMock.payment.findMany.mockResolvedValue(Array.from({ length: 21 }, (_v, i) => ({ id: `pay-${i}`, tenderTypeId: 'tt-gift' })))
+    const error = await llamar().catch(e => e)
+    expect(error).toMatchObject({
+      code: 'GIFT_CARD_TENDER_NOT_ALLOWED',
+      statusCode: 409,
+      details: { motivo: 'DEMASIADOS_COBROS', maximo: 20 },
+    })
+    expect(error.message).toContain('más de 20 cobros')
+    expect(error.message).not.toContain('únicos pagos')
+    expect(bloquearMock).not.toHaveBeenCalled()
+  })
+
+  it('fix 5: entre los primeros 21 hay un pago que no es de saldo: manda ESE mensaje', async () => {
+    prismaMock.payment.findMany.mockResolvedValue([
+      ...Array.from({ length: 20 }, (_v, i) => ({ id: `pay-${i}`, tenderTypeId: 'tt-gift' })),
+      { id: 'pay-cash', tenderTypeId: null },
+    ])
+    const error = await llamar().catch(e => e)
+    expect(error).toMatchObject({ code: 'GIFT_CARD_TENDER_NOT_ALLOWED' })
+    expect(error.message).toContain('únicos pagos son con tarjeta de regalo')
+  })
+})

@@ -28,9 +28,10 @@ import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { encryptGiftCardCode, generateGiftCardCode, generateOpaqueToken, hashGiftCardCode } from '@/services/giftCards/giftCardCode'
 import { createGiftCardOrder } from '@/services/giftCards/giftCardOrder.service'
-import { lockGiftCardsForUpdate, operarSobreDeGerenteEnTx } from '@/services/giftCards/giftCardLedger'
+import { lockGiftCardsForUpdate, operarSobreDeGerenteEnTx, revertirCanjeEnTx } from '@/services/giftCards/giftCardLedger'
 import { ensureGiftCardTender } from '@/services/giftCards/giftCardTender'
 import { payCashOrder, payGiftCardBalanceOnOrder, returnGiftBalanceAndCancelOrder } from '@/services/mobile/order.mobile.service'
+import { writeRefundInTx } from '@/services/shared/writeRefundInTx'
 
 jest.setTimeout(90000)
 
@@ -453,5 +454,55 @@ describe('cobro con saldo · Postgres real', () => {
     // El cobro con saldo sigue vivo y visible en la cuenta abierta.
     expect((await prisma.order.findUniqueOrThrow({ where: { id: orderId } })).status).toBe('CONFIRMED')
     expect(await prisma.payment.count({ where: { venueId, orderId, status: 'COMPLETED', type: 'REGULAR' } })).toBe(1)
+  })
+
+  it('🔴 ronda 1 (fix 1): todo lo pagado con saldo ya estaba devuelto — regresar el saldo cancela sin escribir dinero, y su reintento es `replay: true` sin escribir nada', async () => {
+    const t = await tarjeta(1000)
+    const orderId = await cuentaDeMercancia(1000)
+    const r = await payGiftCardBalanceOnOrder(venueId, orderId, {
+      idempotencyKey: `${SUF}-f1`,
+      proof: { kind: 'CODE' as const, code: t.codigo },
+      amount: D(300),
+      tip: D(20),
+      staffId,
+      deviceId: null,
+    })
+    // Ese cobro ya se devolvió completo a la tarjeta (lo que hará el reembolso de B1): REFUND del tender + REDEEM_REVERSAL.
+    await prisma.$transaction(async tx => {
+      const { refundPaymentId } = await writeRefundInTx(tx, {
+        originalPaymentId: r.paymentId,
+        venueId,
+        salesRefundCents: 30000,
+        tipRefundCents: 2000,
+        refundedItems: [],
+        reason: 'CANCELLED_ORDER',
+        staffId,
+        idempotencyKey: `${SUF}-f1-devuelto`,
+        tenderCommission: 'NONE',
+        shift: 'CLAIM_LIVE',
+        provenance: 'MANUAL',
+      })
+      await revertirCanjeEnTx(tx, { venueId, originalPaymentId: r.paymentId, refundPaymentId, amount: D(320), staffId })
+    }, PRESUPUESTO)
+    expect(await saldoDe(t.id)).toBe('1000.00')
+    const huella = async () => ({
+      pagos: await prisma.payment.count({ where: { venueId, orderId } }),
+      movimientosDeLaTarjeta: await prisma.giftCardActivity.count({ where: { giftCardId: t.id } }),
+      saldo: await saldoDe(t.id),
+    })
+    const antes = await huella()
+
+    await expect(returnGiftBalanceAndCancelOrder(venueId, orderId, { staffId, operationKey: `${SUF}-regresa-f1` })).resolves.toEqual({
+      replay: false,
+    })
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: orderId } })).status).toBe('CANCELLED')
+    expect(await huella()).toEqual(antes) // no había nada que regresar: ni REFUND ni REDEEM_REVERSAL nuevos
+
+    // El reintento de la cola (la respuesta se perdió): misma operación, sin la llave :0 → repetición, no un 400.
+    await expect(returnGiftBalanceAndCancelOrder(venueId, orderId, { staffId, operationKey: `${SUF}-regresa-f1` })).resolves.toEqual({
+      replay: true,
+    })
+    expect(await huella()).toEqual(antes)
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: orderId } })).status).toBe('CANCELLED')
   })
 })

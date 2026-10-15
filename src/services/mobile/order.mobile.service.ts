@@ -3859,6 +3859,8 @@ export async function payGiftCardBalanceOnOrder(
     select: {
       id: true,
       orderNumber: true,
+      // Ronda 1 (fix 2): las salidas de repetición completan la liberación de la mesa, como `payCashOrder`.
+      tableId: true,
       areaTicketCheckoutSession: { select: { id: true } },
       customer: { select: { id: true, firstName: true, lastName: true } },
     },
@@ -3895,6 +3897,8 @@ export async function payGiftCardBalanceOnOrder(
   if (yaExiste) {
     const previo = await getGiftCardPaymentByKey(venueId, input.idempotencyKey)
     if (!previo || !mismoCobro(previo)) throw conflicto()
+    // Si una caída se llevó la liberación de la mesa del primer cobro (que saldó la cuenta), el reintento la completa.
+    await liberarMesaSiQuedoSaldada(venueId, order.tableId, orderId)
     return { ...previo, replay: true }
   }
 
@@ -3993,9 +3997,23 @@ export async function payGiftCardBalanceOnOrder(
     // (cuenta PAGADA, GIFT_CARD_INSUFFICIENT_BALANCE, GIFT_CARD_AMOUNT_OUT_OF_RANGE por pendiente, CAS perdido). Antes
     // de mostrar CUALQUIER error se busca el cobro de la ganadora por la llave: mismo contenido ⇒ su respuesta, como
     // repetición; otro contenido ⇒ IDEMPOTENCY_KEY_REUSED. Sin ganadora, el error es real y sigue su camino.
-    const ganador = await getGiftCardPaymentByKey(venueId, input.idempotencyKey)
+    // Ronda 1 (fix 3): si la búsqueda de la ganadora falla (la base no contesta), sale el error ORIGINAL del cobro.
+    let ganador: PayGiftCardBalanceResult | null
+    try {
+      ganador = await getGiftCardPaymentByKey(venueId, input.idempotencyKey)
+    } catch (busqueda) {
+      logger.warn('[ORDER.MOBILE] No se pudo buscar el cobro con saldo de esta llave tras un error; sale el error original', {
+        venueId,
+        orderId,
+        error: busqueda instanceof Error ? busqueda.message : String(busqueda),
+      })
+      throw err
+    }
     if (ganador) {
-      if (mismoCobro(ganador)) return { ...ganador, replay: true }
+      if (mismoCobro(ganador)) {
+        await liberarMesaSiQuedoSaldada(venueId, order.tableId, orderId)
+        return { ...ganador, replay: true }
+      }
       throw conflicto()
     }
     if (err?.code === 'P2002' || err instanceof CobroYaRegistrado) throw conflicto()
@@ -4152,6 +4170,11 @@ export async function returnGiftBalanceAndCancelOrder(
   const raiz = 'gr' + createHash('sha256').update(input.operationKey).digest('hex').slice(0, 48)
   const llaveDeReverso = (i: number) => `${raiz}:${i}`
   const { bloquearCobroParaReembolso, writeRefundInTx } = await import('../shared/writeRefundInTx')
+  /** Lo que falta devolver de un cobro ya bloqueado (venta y propina por separado), en centavos. */
+  const pendienteDeDevolver = (b: Awaited<ReturnType<typeof bloquearCobroParaReembolso>>) => ({
+    ventaCents: Math.max(0, pesosToCents(Number(b.original.amount)) - b.refundedSalesCents),
+    propinaCents: Math.max(0, pesosToCents(Number(b.original.tipAmount)) - b.refundedTipsCents),
+  })
 
   const resultado = await prisma.$transaction(async tx => {
     let scope: Awaited<ReturnType<typeof lockTableOrderScope>>
@@ -4163,6 +4186,16 @@ export async function returnGiftBalanceAndCancelOrder(
     }
     const cuenta = await tx.order.findUnique({ where: { id: orderId, venueId }, select: { id: true, status: true, paymentStatus: true } })
     if (!cuenta) throw new NotFoundError('Order not found')
+    /** El tender de regalo y los pagos vivos de la cuenta (uno de más para saber si pasan del tope). */
+    const leerCobros = async () => ({
+      tender: await tx.venueTenderType.findFirst({ where: { venueId, systemKind: 'GIFT_CARD' }, select: { id: true } }),
+      cobros: await tx.payment.findMany({
+        where: { venueId, orderId, status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] },
+        select: { id: true, tenderTypeId: true },
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        take: MAX_SOBRES_POR_CUENTA + 1,
+      }),
+    })
 
     // La primera devolución ESCRITA lleva siempre la llave `:0` (abajo): si existe, esta operación ya corrió.
     const previo = await tx.payment.findUnique({
@@ -4178,6 +4211,25 @@ export async function returnGiftBalanceAndCancelOrder(
     }
     if (claseDeEstado(cuenta.status) === 'CANCELADA') {
       if (previo) return null // reintento de una operación que ya terminó
+      // Ronda 1 (fix 1): si ya no quedaba nada que regresar, la primera llamada canceló SIN escribir ninguna devolución y
+      // no existe `:0`. Su reintento (la respuesta se perdió y la cola lo reenvía) se reconoce porque TODOS los pagos vivos
+      // de la cuenta son del tender de regalo y ya están devueltos completos: es una repetición y nada se escribe. Este
+      // camino es el único que cancela esa cuenta (el guardia general rechaza una PARTIAL), así que no se rechaza antes.
+      const { tender, cobros } = await leerCobros()
+      const soloSaldo = Boolean(tender) && cobros.length > 0 && cobros.length <= MAX_SOBRES_POR_CUENTA
+      if (soloSaldo && cobros.every(c => c.tenderTypeId === tender?.id)) {
+        let todoDevuelto = true
+        for (const cobro of cobros) {
+          const pendiente = pendienteDeDevolver(
+            await bloquearCobroParaReembolso(tx, { venueId, paymentId: cobro.id, expectedOrderId: orderId }),
+          )
+          if (pendiente.ventaCents + pendiente.propinaCents > 0) {
+            todoDevuelto = false
+            break
+          }
+        }
+        if (todoDevuelto) return null
+      }
       throw new BadRequestError('Esta cuenta ya está cancelada.', 'ORDER_ALREADY_CANCELLED')
     }
     if (cuenta.paymentStatus === 'PAID') {
@@ -4186,18 +4238,21 @@ export async function returnGiftBalanceAndCancelOrder(
 
     const kds = await retirarComandasDeVentaAnulada(tx, venueId, orderId, { staffId, reason: 'Saldo de tarjeta de regalo regresado' })
     await assertNoLiveTerminalCharge(tx, { venueId, orderId })
-    const tender = await tx.venueTenderType.findFirst({ where: { venueId, systemKind: 'GIFT_CARD' }, select: { id: true } })
-    const cobros = await tx.payment.findMany({
-      where: { venueId, orderId, status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] },
-      select: { id: true, tenderTypeId: true },
-      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-      take: MAX_SOBRES_POR_CUENTA + 1,
-    })
-    if (!tender || cobros.length === 0 || cobros.length > MAX_SOBRES_POR_CUENTA || cobros.some(c => c.tenderTypeId !== tender.id)) {
+    const { tender, cobros } = await leerCobros()
+    if (!tender || cobros.length === 0 || cobros.some(c => c.tenderTypeId !== tender.id)) {
       throw new GiftCardError(
         'GIFT_CARD_TENDER_NOT_ALLOWED',
         'Sólo se regresa el saldo y se cancela una cuenta cuyos únicos pagos son con tarjeta de regalo.',
         409,
+      )
+    }
+    // Ronda 1 (fix 5): pasar del tope tiene su propio mensaje (antes decía que había pagos que no eran de saldo).
+    if (cobros.length > MAX_SOBRES_POR_CUENTA) {
+      throw new GiftCardError(
+        'GIFT_CARD_TENDER_NOT_ALLOWED',
+        `Esta cuenta tiene más de ${MAX_SOBRES_POR_CUENTA} cobros con saldo de tarjeta de regalo: no se pueden regresar todos de una vez. Pide al gerente que la revise.`,
+        409,
+        { motivo: 'DEMASIADOS_COBROS', maximo: MAX_SOBRES_POR_CUENTA },
       )
     }
 
@@ -4213,12 +4268,7 @@ export async function returnGiftBalanceAndCancelOrder(
     }
     // Lo que falta devolver de cada cobro. Uno ya devuelto completo no se toca (ni su sobre se bloquea).
     const porDevolver = cobros
-      .map((cobro, i) => ({
-        cobro,
-        bloqueado: bloqueos[i],
-        ventaCents: Math.max(0, pesosToCents(Number(bloqueos[i].original.amount)) - bloqueos[i].refundedSalesCents),
-        propinaCents: Math.max(0, pesosToCents(Number(bloqueos[i].original.tipAmount)) - bloqueos[i].refundedTipsCents),
-      }))
+      .map((cobro, i) => ({ cobro, bloqueado: bloqueos[i], ...pendienteDeDevolver(bloqueos[i]) }))
       .filter(p => p.ventaCents + p.propinaCents > 0)
     const sobresDeLosCobros: string[] = []
     for (const p of porDevolver) sobresDeLosCobros.push(...(await sobresDelCanje(tx, { venueId, paymentId: p.cobro.id })))

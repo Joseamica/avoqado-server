@@ -41,6 +41,11 @@ jest.mock('@/services/giftCards/giftCardTender', () => ({
     fundsFlow: 'EXTERNAL_RECORDED',
   }),
 }))
+// Ronda 1 (fix 2): el reintento completa la liberación de la mesa que una caída se llevó, como `payCashOrder`.
+jest.mock('@/services/tpv/table.tpv.service', () => ({
+  ...jest.requireActual('@/services/tpv/table.tpv.service'),
+  releaseTableIfSettled: jest.fn().mockResolvedValue(undefined),
+}))
 const lockGiftCardsMock = jest.fn()
 const canjearMock = jest.fn()
 jest.mock('@/services/giftCards/giftCardLedger', () => ({
@@ -54,6 +59,7 @@ import { generateAndStoreReceipt } from '@/services/dashboard/receipt.dashboard.
 import { generateGiftCardCode, hashGiftCardCode } from '@/services/giftCards/giftCardCode'
 import { payGiftCardBalanceOnOrder } from '@/services/mobile/order.mobile.service'
 import { mapDigitalReceiptResponse } from '@/services/tpv/payment.tpv.service'
+import { releaseTableIfSettled } from '@/services/tpv/table.tpv.service'
 import { prismaMock } from '../../../__helpers__/setup'
 
 const D = (v: number) => new Prisma.Decimal(v)
@@ -424,5 +430,57 @@ describe('payGiftCardBalanceOnOrder — rulings del coordinador', () => {
       }),
     })
     expect(JSON.stringify(prismaMock.activityLog.create.mock.calls)).not.toContain('payCashOrder')
+  })
+})
+
+/** Ronda 1 de A8: los reintentos liberan la mesa (fix 2) y un fallo al buscar a la ganadora no tapa el error real (fix 3). */
+describe('payGiftCardBalanceOnOrder — ronda 1', () => {
+  const pagoGuardado = () => ({
+    id: 'payment-1',
+    orderId: 'order-1',
+    amount: D(400),
+    tipAmount: D(50),
+    tenderType: { systemKind: 'GIFT_CARD' },
+    order: { orderNumber: 'ORD-1' },
+    receipts: [],
+  })
+  beforeEach(() => {
+    prismaMock.giftCardActivity.findMany.mockResolvedValue([
+      { giftCardId: 'gc-1', amount: D(450), balanceAfter: D(550), giftCard: { codeLast4: codigo.last4 } },
+    ])
+    // La cuenta con mesa que el primer cobro dejó SALDADA (la caída se llevó la liberación de la mesa).
+    cuenta({ tableId: 'mesa-1', paymentStatus: 'PAID', status: 'COMPLETED', paidAmount: D(1050), remainingBalance: D(0), total: D(1050) })
+  })
+
+  it('🔴 fix 2: el reintento por llave (repetición) libera la mesa de la cuenta saldada', async () => {
+    prismaMock.payment.findUnique.mockResolvedValueOnce({ id: 'payment-1' }).mockResolvedValueOnce(pagoGuardado())
+    await expect(payGiftCardBalanceOnOrder('venue-1', 'order-1', cobro())).resolves.toMatchObject({ paymentId: 'payment-1', replay: true })
+    expect(releaseTableIfSettled).toHaveBeenCalledWith('venue-1', 'mesa-1')
+    expect(prismaMock.$transaction).not.toHaveBeenCalled()
+  })
+
+  it('🔴 fix 2: la carrera perdida (la ganadora ya saldó la cuenta) también libera la mesa', async () => {
+    prismaMock.payment.findUnique.mockResolvedValueOnce(null).mockResolvedValueOnce(pagoGuardado())
+    await expect(payGiftCardBalanceOnOrder('venue-1', 'order-1', cobro())).resolves.toMatchObject({ paymentId: 'payment-1', replay: true })
+    expect(releaseTableIfSettled).toHaveBeenCalledWith('venue-1', 'mesa-1')
+    expect(prismaMock.payment.create).not.toHaveBeenCalled()
+  })
+
+  it('fix 2: una cuenta sin mesa no intenta liberar nada', async () => {
+    cuenta({ tableId: null, paymentStatus: 'PAID', paidAmount: D(1050), remainingBalance: D(0), total: D(1050) })
+    prismaMock.payment.findUnique.mockResolvedValueOnce({ id: 'payment-1' }).mockResolvedValueOnce(pagoGuardado())
+    await payGiftCardBalanceOnOrder('venue-1', 'order-1', cobro())
+    expect(releaseTableIfSettled).not.toHaveBeenCalled()
+  })
+
+  it('🔴 fix 3: si buscar a la ganadora por la llave falla, sale el error ORIGINAL del cobro (no el de la búsqueda)', async () => {
+    cuenta()
+    lockGiftCardsMock.mockResolvedValue([sobreBloqueado({ balance: D(100) })])
+    prismaMock.payment.findUnique.mockResolvedValueOnce(null).mockRejectedValueOnce(new Error('la base no contesta'))
+    await expect(payGiftCardBalanceOnOrder('venue-1', 'order-1', cobro())).rejects.toMatchObject({
+      code: 'GIFT_CARD_INSUFFICIENT_BALANCE',
+      message: 'Quedan $100.00 en la tarjeta de regalo.',
+    })
+    expect(prismaMock.payment.create).not.toHaveBeenCalled()
   })
 })

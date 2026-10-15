@@ -114,3 +114,61 @@ describe('lookupGiftCardsByCode', () => {
     expect(prismaMock.giftCard.findFirst).not.toHaveBeenCalled()
   })
 })
+
+/** Ronda 1 de A8 (fix 4): el límite aguanta peticiones simultáneas y su 429 dice QUÉ límite se agotó. */
+describe('lookupGiftCardsByCode — límite con peticiones simultáneas (r1)', () => {
+  /** Una consulta a la base que no contesta hasta que la prueba la suelta: todas las peticiones quedan «en vuelo». */
+  function baseEnEspera<T>(valor: T): () => void {
+    let soltar!: () => void
+    const respuesta = new Promise<T>(resolve => (soltar = () => resolve(valor)))
+    prismaMock.giftCard.findFirst.mockReturnValue(respuesta as never)
+    return soltar
+  }
+  const codigos = (r: PromiseSettledResult<unknown>[]) =>
+    r.map(x => (x.status === 'rejected' ? (x.reason as { statusCode: number }).statusCode : 200)).sort()
+
+  it('🔴 25 consultas A LA VEZ desde un aparato: sólo 20 llegan a la base; las otras 5 son 429', async () => {
+    const soltar = baseEnEspera(null)
+    const intentos = Array.from({ length: 25 }, () => lookupGiftCardsByCode(VENUE, codigo.normalized, { deviceId: 'dev-1' }))
+    soltar()
+    const r = await Promise.allSettled(intentos)
+
+    expect(codigos(r)).toEqual([...Array(20).fill(404), ...Array(5).fill(429)])
+    expect(prismaMock.giftCard.findFirst).toHaveBeenCalledTimes(20)
+  })
+
+  // Apartar el lugar ANTES de consultar significa que un aparato tiene a lo más 20 consultas en vuelo a la vez (cada una
+  // aparta uno). Las que encuentran la tarjeta lo devuelven al terminar: no gastan el límite de fallos.
+  it('las consultas simultáneas que SÍ encuentran la tarjeta devuelven su lugar: no gastan el límite de fallos', async () => {
+    const soltar = baseEnEspera(sobre())
+    const intentos = Array.from({ length: 20 }, () => lookupGiftCardsByCode(VENUE, codigo.normalized, { deviceId: 'dev-1' }))
+    soltar()
+    expect(codigos(await Promise.allSettled(intentos))).toEqual(Array(20).fill(200))
+
+    prismaMock.giftCard.findFirst.mockReset().mockResolvedValue(null)
+    for (let i = 0; i < 20; i++) {
+      await expect(lookupGiftCardsByCode(VENUE, codigo.normalized, { deviceId: 'dev-1' })).rejects.toMatchObject({ statusCode: 404 })
+    }
+    await expect(lookupGiftCardsByCode(VENUE, codigo.normalized, { deviceId: 'dev-1' })).rejects.toMatchObject({ statusCode: 429 })
+  })
+
+  it('si la base falla, el lugar apartado se devuelve (no es un código inexistente)', async () => {
+    prismaMock.giftCard.findFirst.mockRejectedValue(new Error('la base no contesta'))
+    for (let i = 0; i < 25; i++) {
+      await expect(lookupGiftCardsByCode(VENUE, codigo.normalized, { deviceId: 'dev-1' })).rejects.toThrow('la base no contesta')
+    }
+    prismaMock.giftCard.findFirst.mockReset().mockResolvedValue(null)
+    await expect(lookupGiftCardsByCode(VENUE, codigo.normalized, { deviceId: 'dev-1' })).rejects.toMatchObject({ statusCode: 404 })
+  })
+
+  it.each([
+    ['el aparato', 20, (i: number) => ({ deviceId: 'dev-1', ip: `10.0.0.${i}` }), 'APARATO', 'desde este aparato'],
+    ['la red (IP)', 40, (i: number) => ({ deviceId: `dev-${i}`, ip: '10.9.9.9' }), 'IP', 'desde esta red'],
+    ['el negocio (sin aparato ni IP)', 60, () => ({}), 'NEGOCIO', 'en este negocio'],
+  ])('el 429 nombra el límite que se agotó: %s', async (_caso, maximo, origen, limite, texto) => {
+    for (let i = 0; i < maximo; i++) await lookupGiftCardsByCode(VENUE, codigo.normalized, origen(i)).catch(() => undefined)
+    const error = await lookupGiftCardsByCode(VENUE, codigo.normalized, origen(maximo)).catch(e => e)
+    expect(error).toMatchObject({ statusCode: 429, code: 'GIFT_CARD_LOOKUP_RATE_LIMITED', details: { retryAfter: 600, limite } })
+    expect(error.message).toContain(texto)
+  })
+})
