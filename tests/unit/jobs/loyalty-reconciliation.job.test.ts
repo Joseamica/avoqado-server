@@ -1,4 +1,6 @@
 import { Decimal } from '@prisma/client/runtime/library'
+import { prismaMock } from '@tests/__helpers__/setup'
+import { tablaDeUnaVenta, type FilaDeLealtad } from '@tests/__helpers__/ordenConMarcasDeLealtad'
 import { LoyaltyReconciliationJob } from '@/jobs/loyalty-reconciliation.job'
 
 function candidate(overrides: Record<string, unknown> = {}) {
@@ -97,5 +99,103 @@ describe('LoyaltyReconciliationJob', () => {
 
     expect(second).toEqual({ scanned: 0, applied: 0, failed: 0, skipped: 1 })
     expect(order.findMany).toHaveBeenCalledTimes(1)
+  })
+
+  it('🔴 B1: the success close applies only to ITS OWN claim — a customer link that reopened the order invalidated it', async () => {
+    const { job, order } = setup()
+
+    await job.runNow()
+
+    expect(order.updateMany).toHaveBeenLastCalledWith({
+      where: { id: 'order-1', loyaltyProcessedAt: null, loyaltyProcessingAt: new Date('2026-09-01T21:00:00.000Z') },
+      data: { loyaltyProcessedAt: new Date('2026-09-01T21:00:00.000Z'), loyaltyProcessingAt: null, loyaltyLastError: null },
+    })
+  })
+})
+
+/**
+ * 🔴 B1 de punta a punta, con la lealtad REAL (`awardLoyaltyForPaidOrder`) y el envoltorio de reembolsos que el
+ * reconciliador usa por defecto (B2). Codex, ronda B: «detener la ejecución vieja después de leer "sin cliente", ligar,
+ * liberarla y hacer fallar el intento nuevo. La venta debe seguir recuperable».
+ */
+describe('🔴 B1: una vuelta del reconciliador que leyó «sin cliente» no borra la reapertura de una liga tardía', () => {
+  const AHORA = new Date('2026-10-14T18:00:00.000Z')
+  const cron = () => ({ start: jest.fn(), stop: jest.fn() })
+
+  function ventaPendienteSinCliente(): FilaDeLealtad {
+    // El intento del cobro falló (P1001): la venta quedó pendiente y el reconciliador la toma.
+    return {
+      id: 'order-1',
+      venueId: 'venue-1',
+      total: new Decimal(90),
+      tipAmount: new Decimal(10),
+      loyaltyEligibleAt: new Date('2026-10-14T17:30:00.000Z'),
+      loyaltyProcessedAt: null,
+      loyaltyProcessingAt: null,
+      loyaltyLastError: 'query:P1001',
+      loyaltyAttempts: 0,
+      loyaltyStaffId: null,
+      customer: null,
+      clientes: 0,
+    }
+  }
+
+  beforeEach(() => {
+    prismaMock.payment.count.mockResolvedValue(0) // sin reembolsos: el envoltorio deja pasar a la lealtad
+  })
+
+  it('lee «sin cliente» → la liga crea el OrderCustomer y REABRE → la vuelta termina ⇒ la venta sigue pendiente', async () => {
+    const fila = ventaPendienteSinCliente()
+    const tabla = tablaDeUnaVenta(fila)
+    prismaMock.order.updateMany.mockImplementation(tabla.updateMany) // el cierre propio de la lealtad
+    prismaMock.orderCustomer.findMany.mockImplementation(async () => {
+      // Justo después de esta lectura, el barista liga a Dany: el OrderCustomer nace y la MISMA transacción reabre
+      // la lealtad (`reabrirLealtadSiAplica`: processedAt/processingAt/lastError en null).
+      fila.clientes = 1
+      Object.assign(fila, { loyaltyProcessedAt: null, loyaltyProcessingAt: null, loyaltyLastError: null })
+      return []
+    })
+
+    const job = new LoyaltyReconciliationJob({ prisma: { order: tabla } as never, cron: cron(), now: () => AHORA })
+    await job.runNow()
+
+    // Ni el cierre de la lealtad (guarda «sin clientes») ni el del reconciliador (su reclamo quedó invalidado) cerraron.
+    expect(fila.loyaltyProcessedAt).toBeNull()
+
+    // Y la siguiente vuelta SÍ la encuentra: ahora con su cliente.
+    const despues = new Date(AHORA.getTime() + 5 * 60_000)
+    const siguiente = new LoyaltyReconciliationJob({
+      prisma: { order: tabla } as never,
+      cron: cron(),
+      award: jest.fn().mockResolvedValue({ complete: true, errors: [] }),
+      now: () => despues,
+    })
+    expect(await siguiente.runNow()).toMatchObject({ scanned: 1, applied: 1 })
+    expect(fila.loyaltyProcessedAt).toEqual(despues)
+  })
+
+  it('control: sin liga de por medio, la venta sin cliente se cierra como hoy', async () => {
+    const fila = ventaPendienteSinCliente()
+    const tabla = tablaDeUnaVenta(fila)
+    prismaMock.order.updateMany.mockImplementation(tabla.updateMany)
+    prismaMock.orderCustomer.findMany.mockResolvedValue([])
+
+    const job = new LoyaltyReconciliationJob({ prisma: { order: tabla } as never, cron: cron(), now: () => AHORA })
+    expect(await job.runNow()).toMatchObject({ scanned: 1, applied: 1, failed: 0 })
+
+    expect(fila.loyaltyProcessedAt).toBeInstanceOf(Date)
+  })
+
+  it('🔴 B2: por defecto el reconciliador pasa por el envoltorio — una venta ya reembolsada se cierra SIN otorgar', async () => {
+    const fila = ventaPendienteSinCliente()
+    const tabla = tablaDeUnaVenta(fila)
+    prismaMock.order.updateMany.mockImplementation(tabla.updateMany)
+    prismaMock.payment.count.mockResolvedValue(1)
+
+    const job = new LoyaltyReconciliationJob({ prisma: { order: tabla } as never, cron: cron(), now: () => AHORA })
+    expect(await job.runNow()).toMatchObject({ scanned: 1, applied: 1, failed: 0 })
+
+    expect(prismaMock.orderCustomer.findMany).not.toHaveBeenCalled() // la lealtad ni siquiera corrió
+    expect(fila.loyaltyProcessedAt).toBeInstanceOf(Date)
   })
 })

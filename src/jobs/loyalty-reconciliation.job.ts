@@ -1,7 +1,8 @@
 import type { CronJob } from 'cron'
 import logger from '../config/logger'
 import { scheduleJob } from '../observability/jobContext'
-import { awardLoyaltyForPaidOrder } from '../services/shared/loyaltyOnPaidOrder'
+import { otorgarLealtadRespetandoReembolsos } from '../services/shared/loyaltyOnLateCustomer'
+import type { awardLoyaltyForPaidOrder } from '../services/shared/loyaltyOnPaidOrder'
 import prisma from '../utils/prismaClient'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { DATABASE_JOB_SCHEDULES } from './jobSchedules'
@@ -22,7 +23,10 @@ interface LoyaltyReconciliationDependencies {
 const defaults: LoyaltyReconciliationDependencies = {
   prisma,
   now: () => new Date(),
-  award: awardLoyaltyForPaidOrder,
+  // 🔴 B2 (auditoría de Codex, ronda B, 14-oct-2026): NUNCA `awardLoyaltyForPaidOrder` directo. Esa función no mira
+  // reembolsos: si el intento inmediato fallaba antes del sello y luego se devolvía el pago, este barrido creaba el sello
+  // sobre una venta devuelta. El envoltorio no otorga a una venta reembolsada y revierte si el reembolso entra a media.
+  award: otorgarLealtadRespetandoReembolsos,
 }
 
 /**
@@ -126,12 +130,13 @@ export class LoyaltyReconciliationJob {
           })
 
           if (result.complete) {
+            // 🔴 B1 (auditoría de Codex, ronda B): sólo SU reclamo. Una liga tardía que reabrió la venta pone
+            // `loyaltyProcessingAt` en null; si este barrido leyó la venta «sin cliente» antes de esa liga, cerrarla aquí
+            // borraría la reapertura y el sello se perdería si el intento de la liga también falla. Antes también se
+            // aceptaba `loyaltyProcessingAt: null`, que justo es lo que escribe la reapertura. Cuando la lealtad sí cerró
+            // la venta (lo normal), esto no cambia nada: `loyaltyProcessedAt` ya no es null.
             await this.dependencies.prisma.order.updateMany({
-              where: {
-                id: order.id,
-                loyaltyProcessedAt: null,
-                OR: [{ loyaltyProcessingAt: claimStamp }, { loyaltyProcessingAt: null }],
-              },
+              where: { id: order.id, loyaltyProcessedAt: null, loyaltyProcessingAt: claimStamp },
               data: { loyaltyProcessedAt: now, loyaltyProcessingAt: null, loyaltyLastError: null },
             })
             applied += 1

@@ -763,6 +763,14 @@ const NON_FISCAL_ORDER_WRITERS: Record<string, OrderWriter> = {
     markers: ['ORDER_REOPENED_BY_CAPTURED_PAYMENT'],
   },
   'src/services/shared/loyaltyOnPaidOrder.ts#awardLoyaltyForPaidOrder': { class: 'METADATA', why: 'loyalty award marks' },
+  'src/services/shared/loyaltyOnLateCustomer.ts#reabrirLealtadSiAplica': {
+    class: 'METADATA',
+    why: 'reopens the loyalty marks (processedAt/processingAt/lastError, eligibleAt if null) inside the customer-link tx',
+  },
+  'src/services/shared/loyaltyOnLateCustomer.ts#otorgarLealtadRespetandoReembolsos': {
+    class: 'METADATA',
+    why: 'closes the loyalty marks of an already-refunded sale without awarding (B2, ronda B)',
+  },
   'src/jobs/kitchen-tickets-reconciliation.job.ts#KitchenTicketsReconciliationJob.runNow': {
     class: 'METADATA',
     why: 'KDS stage 3 sweep: only the kitchenPendingAt marker',
