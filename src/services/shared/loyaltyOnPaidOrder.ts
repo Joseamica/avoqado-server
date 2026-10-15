@@ -2,6 +2,7 @@ import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { earnPoints } from '../dashboard/loyalty.dashboard.service'
 import { updateCustomerMetrics } from '../dashboard/customer.dashboard.service'
+import { MARCA_LEALTAD_REABIERTA } from './lealtadReabierta'
 
 /**
  * Lealtad al quedar PAGADA una orden: métricas de visita y puntos/sellos.
@@ -167,7 +168,16 @@ export async function awardLoyaltyForPaidOrder(args: AwardLoyaltyForPaidOrderArg
           // REABRE la lealtad en su transacción (`reabrirLealtadSiAplica`) y este cierre, ya viejo, la borraría: si además
           // falla el intento de la liga, el reconciliador nunca vuelve a ver la venta y el sello se pierde en silencio.
           // La corrida que SÍ vio clientes cierra como siempre (idempotente).
-          ...(leyoSinCliente ? { orderCustomers: { none: {} } } : {}),
+          // 🔴 Y la MARCA de fila (medición de S3b contra Postgres): si este cierre ESPERA el candado de fila que tiene la
+          // transacción de la liga, al soltarse Postgres relee sólo las columnas de la fila y la subconsulta de arriba sigue
+          // diciendo «sin clientes». La reapertura deja `loyaltyLastError = MARCA_LEALTAD_REABIERTA`; con ella puesta, este
+          // cierre no pasa. `{ not }` en SQL deja fuera el NULL: por eso va junto con `null` en un OR.
+          ...(leyoSinCliente
+            ? {
+                orderCustomers: { none: {} },
+                OR: [{ loyaltyLastError: null }, { loyaltyLastError: { not: MARCA_LEALTAD_REABIERTA } }],
+              }
+            : {}),
         },
         data: { loyaltyProcessedAt: new Date(), loyaltyProcessingAt: null, loyaltyLastError: null },
       })

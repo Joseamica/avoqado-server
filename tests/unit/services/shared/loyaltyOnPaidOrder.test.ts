@@ -38,6 +38,8 @@ jest.mock('@/config/logger', () => ({
   default: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
 }))
 
+import { Prisma } from '@prisma/client'
+import { tablaDeUnaVenta, type FilaDeLealtad } from '@tests/__helpers__/ordenConMarcasDeLealtad'
 import prisma from '@/utils/prismaClient'
 import { earnPoints } from '@/services/dashboard/loyalty.dashboard.service'
 import { updateCustomerMetrics } from '@/services/dashboard/customer.dashboard.service'
@@ -51,6 +53,8 @@ const metricsMock = updateCustomerMetrics as jest.Mock
 
 const VENUE = 'venue-1'
 const ORDER = 'order-1'
+/** La marca de fila que deja la liga tardía al reabrir (`reabrirLealtadSiAplica`). Texto EXACTO del ruling. */
+const MARCA = 'REABIERTA: cliente ligado después del cobro'
 
 describe('awardLoyaltyForPaidOrder', () => {
   beforeEach(() => {
@@ -208,7 +212,14 @@ describe('awardLoyaltyForPaidOrder', () => {
       expect(result).toEqual({ complete: true, errors: [] })
       expect(fila.loyaltyProcessedAt).toBeNull()
       expect(orderUpdateMany).toHaveBeenCalledWith({
-        where: { id: ORDER, venueId: VENUE, loyaltyEligibleAt: { not: null }, loyaltyProcessedAt: null, orderCustomers: { none: {} } },
+        where: {
+          id: ORDER,
+          venueId: VENUE,
+          loyaltyEligibleAt: { not: null },
+          loyaltyProcessedAt: null,
+          orderCustomers: { none: {} },
+          OR: [{ loyaltyLastError: null }, { loyaltyLastError: { not: MARCA } }],
+        },
         data: { loyaltyProcessedAt: expect.any(Date), loyaltyProcessingAt: null, loyaltyLastError: null },
       })
     })
@@ -236,6 +247,80 @@ describe('awardLoyaltyForPaidOrder', () => {
         where: { id: ORDER, venueId: VENUE, loyaltyEligibleAt: { not: null }, loyaltyProcessedAt: null },
         data: { loyaltyProcessedAt: expect.any(Date), loyaltyProcessingAt: null, loyaltyLastError: null },
       })
+    })
+  })
+
+  /**
+   * 🔴 Cruce EXACTO de B1 (medido por S3b contra Postgres, 14-oct): el cierre «sin cliente» llega mientras la transacción de
+   * la liga tiene el candado de la fila de la orden. Al soltarse, Postgres (READ COMMITTED) relee SÓLO las columnas de la
+   * fila; la subconsulta `orderCustomers none` sigue con su foto vieja y dice «sin clientes». Por eso la reapertura deja una
+   * MARCA en `loyaltyLastError` y este cierre exige que no esté. Aquí el doble reproduce esa foto vieja con `clientes: 0`.
+   */
+  describe('🔴 marca de reapertura: el cierre «sin cliente» no cierra una venta que una liga reabrió', () => {
+    function fila(over: Partial<FilaDeLealtad> = {}): FilaDeLealtad {
+      return {
+        id: ORDER,
+        venueId: VENUE,
+        total: new Prisma.Decimal(50),
+        tipAmount: new Prisma.Decimal(0),
+        loyaltyEligibleAt: new Date('2026-10-14T17:59:00.000Z'),
+        loyaltyProcessedAt: null,
+        loyaltyProcessingAt: null,
+        loyaltyLastError: null,
+        loyaltyAttempts: 0,
+        loyaltyStaffId: null,
+        customer: null,
+        clientes: 0, // la foto vieja de la subconsulta: no ve el OrderCustomer que llegó después
+        ...over,
+      }
+    }
+
+    it('🔴 la fila trae la marca (la liga reabrió) y la subconsulta no ve al cliente ⇒ NO cierra: el reconciliador la ve', async () => {
+      const venta = fila({ loyaltyLastError: MARCA })
+      orderUpdateMany.mockImplementation(tablaDeUnaVenta(venta).updateMany)
+      orderCustomerFindMany.mockResolvedValue([])
+
+      const result = await awardLoyaltyForPaidOrder({ venueId: VENUE, orderId: ORDER, orderTotal: 50, legacyCustomer: null })
+
+      expect(result).toEqual({ complete: true, errors: [] })
+      expect(venta.loyaltyProcessedAt).toBeNull()
+      expect(venta.loyaltyLastError).toBe(MARCA)
+    })
+
+    it('regresión: venta de mostrador sin cliente y sin marca (null) se cierra como hoy', async () => {
+      const venta = fila()
+      orderUpdateMany.mockImplementation(tablaDeUnaVenta(venta).updateMany)
+      orderCustomerFindMany.mockResolvedValue([])
+
+      await awardLoyaltyForPaidOrder({ venueId: VENUE, orderId: ORDER, orderTotal: 50, legacyCustomer: null })
+
+      expect(venta.loyaltyProcessedAt).toBeInstanceOf(Date)
+    })
+
+    it('regresión: un error VIEJO de otra corrida (no la marca) no detiene el cierre de una venta sin cliente, y se limpia', async () => {
+      const venta = fila({ loyaltyLastError: 'query:P1001' })
+      orderUpdateMany.mockImplementation(tablaDeUnaVenta(venta).updateMany)
+      orderCustomerFindMany.mockResolvedValue([])
+
+      await awardLoyaltyForPaidOrder({ venueId: VENUE, orderId: ORDER, orderTotal: 50, legacyCustomer: null })
+
+      expect(venta.loyaltyProcessedAt).toBeInstanceOf(Date)
+      expect(venta.loyaltyLastError).toBeNull()
+    })
+
+    it('la corrida que SÍ vio al cliente cierra aunque la fila traiga la marca, y la borra (lealtad completa)', async () => {
+      const venta = fila({ loyaltyLastError: MARCA, clientes: 1 })
+      orderUpdateMany.mockImplementation(tablaDeUnaVenta(venta).updateMany)
+      orderCustomerFindMany.mockResolvedValue([
+        { customerId: 'cust-A', isPrimary: true, customer: { id: 'cust-A', firstName: 'Dany', lastName: null } },
+      ])
+
+      const result = await awardLoyaltyForPaidOrder({ venueId: VENUE, orderId: ORDER, orderTotal: 50, legacyCustomer: null })
+
+      expect(result).toEqual({ complete: true, errors: [] })
+      expect(earnPointsMock).toHaveBeenCalledWith(VENUE, 'cust-A', 50, ORDER, undefined)
+      expect(venta.loyaltyProcessedAt).toBeInstanceOf(Date)
+      expect(venta.loyaltyLastError).toBeNull()
     })
   })
 })

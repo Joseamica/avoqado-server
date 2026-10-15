@@ -41,6 +41,9 @@ export function cumpleElWhere(fila: FilaDeLealtad, where: Condiciones): boolean 
     if (typeof condicion === 'object') {
       const c = condicion as Record<string, unknown>
       if ('not' in c && c.not === null) return valor !== null && valor !== undefined
+      // `{ not: 'texto' }` sobre una columna que admite NULL es `col <> 'texto'` en SQL: NULL no pasa (por eso el cierre «sin
+      // cliente» lo combina con `{ col: null }` en un OR). El doble respeta esa regla de SQL, no la de JavaScript.
+      if ('not' in c && typeof c.not === 'string') return typeof valor === 'string' && valor !== c.not
       if ('lt' in c) return valor !== null && valor !== undefined && (valor as number | Date) < (c.lt as number | Date)
       throw new Error(`El doble no entiende ${campo}=${JSON.stringify(condicion)}`)
     }

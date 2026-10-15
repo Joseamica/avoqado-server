@@ -7,6 +7,10 @@ import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
 import { getStampCardStatus, reverseStampForOrder } from '@/services/wallet/stampLedger.service'
 import { venueEndOfDay, venueStartOfDay } from '@/utils/datetime'
 import { awardLoyaltyForPaidOrder, type AwardLoyaltyForPaidOrderArgs, type AwardLoyaltyForPaidOrderResult } from './loyaltyOnPaidOrder'
+import { MARCA_LEALTAD_REABIERTA } from './lealtadReabierta'
+
+/** La marca de fila que deja la reapertura (ver `lealtadReabierta.ts`). */
+export { MARCA_LEALTAD_REABIERTA }
 
 /**
  * Sello TARDÍO: el cliente se liga a una venta que YA se cobró (spec 2026-10-14 §3.1).
@@ -186,6 +190,11 @@ export async function fotoDeLaVenta(
  *
  * Poner `loyaltyProcessingAt` en null también invalida el reclamo de una vuelta del reconciliador que esté en curso: esa vuelta
  * ya no puede cerrar la venta con lo que leyó antes de la liga (B1, ronda B; el cierre del reconciliador exige SU reclamo).
+ *
+ * 🔴 Deja la MARCA de fila `loyaltyLastError = MARCA_LEALTAD_REABIERTA` (no null), y el llamador la escribe como ÚLTIMA
+ * escritura de su transacción: el cierre «sin cliente» de `awardLoyaltyForPaidOrder` que esté esperando el candado de esta
+ * fila sólo relee sus columnas al soltarse, y la marca lo detiene (medido contra Postgres por S3b; ver `lealtadReabierta.ts`).
+ * Los cierres buenos la borran (`loyaltyLastError = null`).
  */
 export async function reabrirLealtadSiAplica(
   tx: Prisma.TransactionClient,
@@ -202,7 +211,7 @@ export async function reabrirLealtadSiAplica(
     data: {
       loyaltyProcessedAt: null,
       loyaltyProcessingAt: null,
-      loyaltyLastError: null,
+      loyaltyLastError: MARCA_LEALTAD_REABIERTA,
       ...(venta.loyaltyEligibleAt ? {} : { loyaltyEligibleAt: foto.settledAt }),
     },
   })

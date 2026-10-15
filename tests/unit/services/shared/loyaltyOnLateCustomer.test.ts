@@ -23,6 +23,7 @@ import logger from '@/config/logger'
 import { NotFoundError } from '@/errors/AppError'
 import {
   LATE_STAMP_WINDOW_MS,
+  MARCA_LEALTAD_REABIERTA,
   awardLoyaltyForLateCustomer,
   decideSaleStamp,
   describeSaleStamp,
@@ -53,6 +54,11 @@ const hace = (ms: number) => new Date(AHORA_FIJO - ms)
 const D = (n: number) => new Prisma.Decimal(n)
 const EARN = (customerId: string) => ({ type: 'EARN', stampCard: { customerId } })
 const cron = () => ({ start: jest.fn(), stop: jest.fn() })
+/**
+ * La MARCA de fila que deja la reapertura (ruling del coordinador tras la medición de S3b): el cierre «sin cliente» de
+ * `awardLoyaltyForPaidOrder` que esperó el candado de la liga sólo relee las columnas de la fila; esta columna lo detiene.
+ */
+const MARCA = 'REABIERTA: cliente ligado después del cobro'
 
 type Evento = { type: string; stampCard: { customerId: string } }
 let eventosDeLaVenta: Evento[]
@@ -528,11 +534,15 @@ describe('reabrirLealtadSiAplica (DENTRO de la transacción de la liga — audit
   const tx = () => prismaMock as unknown as Parameters<typeof reabrirLealtadSiAplica>[0]
   beforeEach(() => prismaMock.order.updateMany.mockResolvedValue({ count: 1 } as any))
 
-  it('🔴 venta elegible y el cliente quedó primario: reabre los tres marcadores, por negocio', async () => {
+  it('la marca es el texto EXACTO del ruling y se exporta (la lee el cierre «sin cliente» de awardLoyaltyForPaidOrder)', () => {
+    expect(MARCA_LEALTAD_REABIERTA).toBe(MARCA)
+  })
+
+  it('🔴 venta elegible y el cliente quedó primario: reabre (processedAt/processingAt en null) y deja la MARCA de fila', async () => {
     expect(await reabrirLealtadSiAplica(tx(), { venueId: VENUE, orderId: ORDER, customerId: CUST })).toBe(true)
     expect(prismaMock.order.updateMany).toHaveBeenCalledWith({
       where: { id: ORDER, venueId: VENUE },
-      data: { loyaltyProcessedAt: null, loyaltyProcessingAt: null, loyaltyLastError: null },
+      data: { loyaltyProcessedAt: null, loyaltyProcessingAt: null, loyaltyLastError: MARCA },
     })
   })
 
@@ -543,7 +553,7 @@ describe('reabrirLealtadSiAplica (DENTRO de la transacción de la liga — audit
     expect(prismaMock.order.updateMany.mock.calls[0][0].data).toEqual({
       loyaltyProcessedAt: null,
       loyaltyProcessingAt: null,
-      loyaltyLastError: null,
+      loyaltyLastError: MARCA,
       loyaltyEligibleAt: cobro,
     })
   })
@@ -587,6 +597,7 @@ describe('🔴 recuperación durable de punta a punta (auditoría A #1)', () => 
     // 1) Dentro de la transacción de la liga.
     expect(await reabrirLealtadSiAplica(prismaMock as never, { venueId: VENUE, orderId: ORDER, customerId: CUST })).toBe(true)
     expect(fila.loyaltyProcessedAt).toBeNull()
+    expect(fila.loyaltyLastError).toBe(MARCA)
 
     // 2) El intento inmediato falla (la base se cae a media lealtad): nadie vuelve a marcar la venta como procesada.
     awardMock.mockResolvedValueOnce({ complete: false, errors: ['loyalty:cust-1'] })

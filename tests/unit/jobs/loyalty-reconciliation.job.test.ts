@@ -150,9 +150,13 @@ describe('🔴 B1: una vuelta del reconciliador que leyó «sin cliente» no bor
     prismaMock.order.updateMany.mockImplementation(tabla.updateMany) // el cierre propio de la lealtad
     prismaMock.orderCustomer.findMany.mockImplementation(async () => {
       // Justo después de esta lectura, el barista liga a Dany: el OrderCustomer nace y la MISMA transacción reabre
-      // la lealtad (`reabrirLealtadSiAplica`: processedAt/processingAt/lastError en null).
+      // la lealtad (`reabrirLealtadSiAplica`: processedAt/processingAt en null y la MARCA de fila en lastError).
       fila.clientes = 1
-      Object.assign(fila, { loyaltyProcessedAt: null, loyaltyProcessingAt: null, loyaltyLastError: null })
+      Object.assign(fila, {
+        loyaltyProcessedAt: null,
+        loyaltyProcessingAt: null,
+        loyaltyLastError: 'REABIERTA: cliente ligado después del cobro',
+      })
       return []
     })
 
