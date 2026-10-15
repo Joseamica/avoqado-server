@@ -58,6 +58,30 @@ beforeAll(() => {
 beforeEach(() => jest.clearAllMocks())
 
 describe('issue_refund (critical money write, confirm-gated)', () => {
+  it('🔴 tarjeta de regalo: con refundMethod se rechaza con GIFT_CARD_REFUND_TO_BALANCE_ONLY; sin él, la vista previa dice que regresa al saldo', async () => {
+    const conSaldo = {
+      ...completedPayment,
+      method: 'OTHER',
+      fundsFlow: 'EXTERNAL_RECORDED',
+      tenderTypeId: 'tender-gc',
+      tenderCountsAsCash: false,
+      tenderSatFormaPago: '01',
+      externalSource: null,
+      source: 'POS',
+      tenderType: { systemKind: 'GIFT_CARD' },
+    }
+    mockPaymentFindFirst.mockResolvedValueOnce(conSaldo)
+    const rechazo = parse(await call({ ...base, refundMethod: 'CASH', confirm: true }))
+    expect(rechazo).toMatchObject({ ok: false, code: 'GIFT_CARD_REFUND_TO_BALANCE_ONLY' })
+    expect(mockIssue).not.toHaveBeenCalled()
+
+    mockPaymentFindFirst.mockResolvedValueOnce(conSaldo)
+    const vista = parse(await call(base))
+    expect(vista.requiresConfirmation).toBe(true)
+    expect(vista.preview.regresaAlSaldoDeRegalo).toBe(true)
+    expect(mockPaymentFindFirst.mock.calls[1][0].select.tenderType).toEqual({ select: { systemKind: true } })
+  })
+
   it('rejects out-of-scope / no-perm — no reads, no refund', async () => {
     await expect(call({ ...base, venueId: 'foreign' })).rejects.toThrow('out of scope')
     await expect(call({ ...base, venueId: 'no-perm' })).rejects.toThrow('Forbidden')

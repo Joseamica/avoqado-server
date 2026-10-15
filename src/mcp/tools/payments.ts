@@ -11,6 +11,7 @@ import { issueRefund, type RefundReason } from '@/services/dashboard/refund.dash
 import { createManualPayment, MENSAJE_VENTA_YA_COBRADA } from '@/services/dashboard/manualPayment.service'
 import { paymentCountsAsDrawerCash, TENDER_SEMANTICS_SELECT } from '@/services/shared/tenderSemantics'
 import { devolverConEfectivo, sePuedeEscogerComoDevolver, seDevuelveEnTerminal } from '@/services/tpv/terminalRefundTarget'
+import { isGiftCardTenderKind } from '@/services/giftCards/giftCardTender'
 // El carril del reembolso: la MISMA definición que usan los cuatro canales de
 // cobro, para que el MCP no pueda contradecir al saldo persistido.
 import { esVentaCerrada, summarizeRefunds } from '@/services/shared/orderBalance'
@@ -449,6 +450,7 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
           type: true,
           createdAt: true,
           order: { select: { orderNumber: true } },
+          tenderType: { select: { systemKind: true } },
         },
       })
       if (!payment) return text({ ok: false, error: 'No encontré ese pago en tus locales.' })
@@ -468,8 +470,22 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
           useInstead: 'refund_card_on_terminal',
         })
       }
+      const cobroParaDevolver = { ...payment, tenderSystemKind: payment.tenderType?.systemKind ?? null }
+      const esSaldoDeRegalo = isGiftCardTenderKind(cobroParaDevolver.tenderSystemKind)
+      // Tarjetas de regalo (spec §5.5): lo pagado con saldo sólo regresa al saldo. El servicio lo rechaza igual; aquí se dice antes.
+      if (esSaldoDeRegalo && refundMethod) {
+        return text({
+          ok: false,
+          code: 'GIFT_CARD_REFUND_TO_BALANCE_ONLY',
+          error: 'Lo pagado con tarjeta de regalo sólo regresa al saldo de la tarjeta; quita refundMethod para devolverlo al saldo.',
+        })
+      }
       // Escoger con qué se devuelve sólo aplica a lo que no fue tarjeta ni liquida un procesador (misma regla del servicio).
-      if (refundMethod && devolverConEfectivo(payment, refundMethod) !== undefined && !sePuedeEscogerComoDevolver(payment)) {
+      if (
+        refundMethod &&
+        devolverConEfectivo(cobroParaDevolver, refundMethod) !== undefined &&
+        !sePuedeEscogerComoDevolver(cobroParaDevolver)
+      ) {
         return text({ ok: false, error: 'Este cobro sólo se devuelve por el mismo medio con que se pagó.' })
       }
       const originalTotal = round2(num(payment.amount) + num(payment.tipAmount))
@@ -501,13 +517,15 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
             note: note ?? null,
             saleDeCajonDeEfectivo,
             refundMethod: refundMethod ?? null,
+            ...(esSaldoDeRegalo ? { regresaAlSaldoDeRegalo: true } : {}),
           },
           message:
             `Esto DEVOLVERÁ $${amount} del pago de $${originalTotal} (orden ${payment.order?.orderNumber ?? 's/n'}).` +
             (saleDeCajonDeEfectivo
               ? ` Saldrá en EFECTIVO: si el local tiene la caja abierta, se registrará la salida de $${amount} del cajón y alguien tendrá que entregarlo físicamente.`
               : '') +
-            ' Vuelve a llamar con confirm:true para ejecutar.',
+            ' Vuelve a llamar con confirm:true para ejecutar.' +
+            (esSaldoDeRegalo ? ' Regresa al saldo de la tarjeta de regalo del cliente.' : ''),
         })
       }
 

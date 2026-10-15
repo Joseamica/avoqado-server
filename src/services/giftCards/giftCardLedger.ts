@@ -331,18 +331,51 @@ export async function canjearSobresEnTx(
   return resultado
 }
 
+/**
+ * B1 (nota 1; ruling 7 de A8): un sobre DEACTIVATED nunca recibe saldo de vuelta. Sumarle saldo a una tarjeta muerta lo
+ * dejaría fuera de la vista de todos: se rechaza con su terminación ANTES de escribir, y el gerente decide. Recibe los
+ * sobres ya BLOQUEADOS (su estado se leyó bajo candado); sólo consulta las terminaciones si hay alguno desactivado.
+ */
+export async function rechazarSiRegresaASobreDesactivado(
+  tx: Tx,
+  venueId: string,
+  cards: ReadonlyArray<{ id: string; status: GiftCardStatus }>,
+): Promise<void> {
+  const desactivados = [...new Set(cards.filter(c => c.status === 'DEACTIVATED').map(c => c.id))]
+  if (desactivados.length === 0) return
+  const terminaciones = await tx.giftCard.findMany({
+    where: { venueId, id: { in: desactivados } },
+    select: { id: true, codeLast4: true },
+    orderBy: { id: 'asc' },
+    take: desactivados.length,
+  })
+  const cuales = terminaciones.map(t => t.codeLast4).join(', ')
+  throw new GiftCardError(
+    'GIFT_CARD_TENDER_NOT_ALLOWED',
+    desactivados.length === 1
+      ? `La tarjeta de regalo terminación ${cuales} ya fue cancelada: lo pagado con ella no puede regresar a su saldo. Pide al gerente que lo revise.`
+      : `Las tarjetas de regalo terminación ${cuales} ya fueron canceladas: lo pagado con ellas no puede regresar a su saldo. Pide al gerente que lo revise.`,
+    409,
+    { motivo: 'SOBRE_DESACTIVADO', giftCardIds: desactivados },
+  )
+}
+
 /** Regresa al saldo lo de un cobro con saldo (spec § 5.5). Idempotente por `refundPaymentId`; nunca pasa de lo canjeado. */
 export async function revertirCanjeEnTx(
   tx: Tx,
   p: { venueId: string; originalPaymentId: string; refundPaymentId: string; amount: Prisma.Decimal; staffId?: string | null },
 ): Promise<Array<{ giftCardId: string; amount: Prisma.Decimal; balanceAfter: Prisma.Decimal }>> {
-  const yaEscrito = await tx.giftCardActivity.findMany({
-    where: { venueId: p.venueId, refundPaymentId: p.refundPaymentId, type: 'REDEEM_REVERSAL' },
-    select: { giftCardId: true, amount: true, balanceAfter: true },
-    orderBy: { id: 'asc' },
-    take: MAX_SOBRES_POR_CUENTA,
-  })
-  if (yaEscrito.length > 0) return yaEscrito.map(r => ({ giftCardId: r.giftCardId, amount: r.amount, balanceAfter: r.balanceAfter }))
+  const reversoYaEscrito = async () => {
+    const filas = await tx.giftCardActivity.findMany({
+      where: { venueId: p.venueId, refundPaymentId: p.refundPaymentId, type: 'REDEEM_REVERSAL' },
+      select: { giftCardId: true, amount: true, balanceAfter: true },
+      orderBy: { id: 'asc' },
+      take: MAX_SOBRES_POR_CUENTA,
+    })
+    return filas.map(r => ({ giftCardId: r.giftCardId, amount: r.amount, balanceAfter: r.balanceAfter }))
+  }
+  const yaEscrito = await reversoYaEscrito()
+  if (yaEscrito.length > 0) return yaEscrito
   if (!p.amount.greaterThan(0) || p.amount.decimalPlaces() > 2) {
     throw new GiftCardError(
       'GIFT_CARD_AMOUNT_OUT_OF_RANGE',
@@ -364,6 +397,11 @@ export async function revertirCanjeEnTx(
     tx,
     canjes.map(c => c.giftCardId),
   )
+  // B1 (nota 4): la idempotencia por `refundPaymentId` se vuelve a mirar BAJO el candado. La primera lectura sólo es un atajo:
+  // un duplicado simultáneo del MISMO reembolso la pasa vacía, espera el candado y, sin esta segunda, en un cobro de dos sobres
+  // acreditaría el canje que el primero no tocó (doble saldo con la misma devolución).
+  const escritoMientrasEsperaba = await reversoYaEscrito()
+  if (escritoMientrasEsperaba.length > 0) return escritoMientrasEsperaba
   // Lo ya regresado se lee DESPUÉS del candado: todo REDEEM_REVERSAL se escribe con el sobre bloqueado, así que dos
   // reembolsos simultáneos del mismo cobro se serializan aquí y el segundo ve lo que regresó el primero.
   const previos = await tx.giftCardActivity.groupBy({
@@ -388,15 +426,29 @@ export async function revertirCanjeEnTx(
     )
   }
 
+  // Se PLANEA todo antes de escribir (qué canje regresa cuánto a qué sobre): así un sobre ajeno o uno desactivado se rechaza
+  // sin dejar medio reverso, aunque el llamador atrape el error.
+  const plan: Array<{ canje: (typeof canjes)[number]; card: LockedGiftCard; toma: Prisma.Decimal }> = []
   let falta = p.amount
-  const resultado: Array<{ giftCardId: string; amount: Prisma.Decimal; balanceAfter: Prisma.Decimal }> = []
   for (const canje of canjes) {
     if (falta.isZero()) break
     const pendiente = canje.amount.minus(yaRegresado.get(canje.id) ?? CERO())
     if (!pendiente.greaterThan(0)) continue
-    const toma = Prisma.Decimal.min(pendiente, falta)
     const card = porId.get(canje.giftCardId)
     if (!card || card.venueId !== p.venueId) throw noEncontrada()
+    const toma = Prisma.Decimal.min(pendiente, falta)
+    plan.push({ canje, card, toma })
+    falta = falta.minus(toma)
+  }
+  // B1 (nota 1; ruling 7 de A8): sólo los sobres que de verdad recibirían saldo. Uno DEACTIVATED se rechaza con su terminación.
+  await rechazarSiRegresaASobreDesactivado(
+    tx,
+    p.venueId,
+    plan.map(x => x.card),
+  )
+
+  const resultado: Array<{ giftCardId: string; amount: Prisma.Decimal; balanceAfter: Prisma.Decimal }> = []
+  for (const { canje, card, toma } of plan) {
     const vencida = card.expiresAt !== null && card.expiresAt.getTime() <= ahora.getTime()
     const nuevaVigencia = vencida ? addDays(ahora, DIAS_DE_GRACIA_TRAS_REVERSO) : null
     const r = await tx.giftCard.updateMany({
@@ -421,7 +473,6 @@ export async function revertirCanjeEnTx(
       },
     })
     resultado.push({ giftCardId: card.id, amount: toma, balanceAfter })
-    falta = falta.minus(toma)
   }
   return resultado
 }

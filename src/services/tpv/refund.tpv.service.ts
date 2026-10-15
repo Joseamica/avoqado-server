@@ -38,6 +38,9 @@ import { asegurarObligacionDeCostoNegativo, costearYProyectarReembolso } from '.
 import { restockOrderItems } from '../dashboard/inventoryRestock.service'
 import { logAction } from '../dashboard/activity-log.service'
 import { resolveAutofacturaAvailable } from './payment.tpv.service'
+import { GiftCardError } from '../giftCards/giftCardErrors'
+import { alRegistrarReembolsoEnTx, bloquearSobresDelReembolsoEnTx } from '../giftCards/giftCardCancel.service'
+import { isGiftCardTenderKind } from '../giftCards/giftCardTender'
 
 /**
  * Refund request data from TPV Android app
@@ -315,6 +318,8 @@ export async function recordRefund(
     include: {
       order: true,
       receipts: RECIBO_CANONICO,
+      // Tarjetas de regalo (B1): la marca del tender de sistema. El `tenderTypeId` de un cobro nunca cambia: se puede leer fuera del candado.
+      tenderType: { select: { systemKind: true } },
     },
   })
 
@@ -333,6 +338,16 @@ export async function recordRefund(
       status: originalPayment.status,
     })
     throw new BadRequestError(`Cannot refund payment with status: ${originalPayment.status}`)
+  }
+
+  // Tarjetas de regalo (spec §5.5, Review Focus 2): la terminal nunca devuelve lo pagado con saldo —ningún SDK movió ese dinero— y una
+  // devolución registrada aquí no regresaría al saldo. Se rechaza antes de tocar nada.
+  if (isGiftCardTenderKind(originalPayment.tenderType?.systemKind)) {
+    throw new GiftCardError(
+      'GIFT_CARD_REFUND_TO_BALANCE_ONLY',
+      'Lo pagado con tarjeta de regalo no se devuelve en la terminal: devuélvelo desde el POS o el panel y regresa al saldo de la tarjeta.',
+      400,
+    )
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -616,6 +631,14 @@ export async function recordRefund(
           )
         }
       }
+
+      // Tarjetas de regalo (B1): sobres antes que el turno, como en `issueRefund` (Order → Payment → sobres → Shift).
+      if (locked.orderId)
+        await bloquearSobresDelReembolsoEnTx(tx, {
+          venueId,
+          originalPaymentId: locked.id,
+          original: { orderId: locked.orderId, tenderSystemKind: originalPayment.tenderType?.systemKind ?? null },
+        })
 
       const lockedProcessorData = (locked.processorData as Record<string, unknown> | null) ?? {}
 
@@ -1005,6 +1028,18 @@ export async function recordRefund(
       // pago sólo si ganó. Mismo split proporcional, una sola escritura.
 
       await enqueueRefundPaymentEffectsInTx(tx, refundPayment.id, originalPayment.id)
+      // Tarjetas de regalo (B1/B2, R2): aquí el SDK YA devolvió el dinero. Una venta de tarjetas sin cancelación iniciada NO se rechaza
+      // —dejaría el dinero fuera sin asiento y el sobre vivo—: sus sobres se desactivan y queda una anomalía para revisarla.
+      if (locked.orderId)
+        await alRegistrarReembolsoEnTx(tx, {
+          venueId,
+          originalPaymentId: locked.id,
+          refundPaymentId: refundPayment.id,
+          amount: new Decimal(refundData.amount).div(100),
+          staffId: userId,
+          dineroYaDevuelto: true,
+          original: { orderId: locked.orderId, tenderSystemKind: originalPayment.tenderType?.systemKind ?? null },
+        })
       // Codex R12-15: el costo negativo del reembolso es una obligación DURABLE (misma transacción, mutex del original).
       await asegurarObligacionDeCostoNegativo(tx, originalPayment.id, refundPayment.id)
 

@@ -485,6 +485,63 @@ describe('revertirCanjeEnTx', () => {
   it('un cobro sin canjes de tarjeta no tiene saldo que regresar', async () => {
     await expect(revertirCanjeEnTx(prismaMock, { ...base, amount: D(10) })).rejects.toMatchObject({ code: 'GIFT_CARD_NOT_FOUND' })
   })
+
+  it('🔴 B1 nota 4: un duplicado simultáneo del MISMO reembolso vuelve a mirar su reverso DESPUÉS del candado y no acredita otra vez', async () => {
+    // El duplicado pasó la primera lectura (vacía: el otro aún no confirmaba) y esperó el candado. Al obtenerlo, el reverso del
+    // primero ya existe: devuelve ése. Sin la segunda lectura, en un cobro de DOS sobres acreditaría el otro canje (doble saldo).
+    prismaMock.giftCardActivity.findMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        { id: 'red-1', giftCardId: 'gc-1', amount: D(100), orderId: 'order-1' },
+        { id: 'red-2', giftCardId: 'gc-2', amount: D(100), orderId: 'order-1' },
+      ])
+      .mockResolvedValueOnce([{ giftCardId: 'gc-1', amount: D(100), balanceAfter: D(100) }])
+    prismaMock.giftCardActivity.groupBy.mockResolvedValue([{ reversesActivityId: 'red-1', _sum: { amount: D(100) } }])
+    prismaMock.$queryRaw.mockResolvedValue([sobre({ balance: D(100) }), sobre({ id: 'gc-2', balance: D(0) })])
+
+    await expect(revertirCanjeEnTx(prismaMock, { ...base, amount: D(100) })).resolves.toEqual([
+      { giftCardId: 'gc-1', amount: D(100), balanceAfter: D(100) },
+    ])
+    expect(prismaMock.giftCard.updateMany).not.toHaveBeenCalled()
+    expect(prismaMock.giftCardActivity.create).not.toHaveBeenCalled()
+    // La segunda lectura por `refundPaymentId` va DESPUÉS del candado de los sobres.
+    expect(prismaMock.giftCardActivity.findMany.mock.calls[2][0]).toMatchObject({
+      where: { venueId: VENUE, refundPaymentId: 'refund-1', type: 'REDEEM_REVERSAL' },
+    })
+    expect(prismaMock.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.giftCardActivity.findMany.mock.invocationCallOrder[2])
+  })
+
+  it('🔴 B1 nota 1: un sobre DEACTIVATED no recibe saldo de vuelta: 409 con su terminación y nada se escribe', async () => {
+    prismaMock.giftCardActivity.findMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{ id: 'red-1', giftCardId: 'gc-1', amount: D(400), orderId: 'order-1' }])
+    prismaMock.$queryRaw.mockResolvedValue([sobre({ status: 'DEACTIVATED', balance: D(0) })])
+    prismaMock.giftCard.findMany.mockResolvedValue([{ id: 'gc-1', codeLast4: '4321' }])
+
+    const intento = revertirCanjeEnTx(prismaMock, { ...base, amount: D(150) })
+    await expect(intento).rejects.toMatchObject({
+      code: 'GIFT_CARD_TENDER_NOT_ALLOWED',
+      statusCode: 409,
+      details: { motivo: 'SOBRE_DESACTIVADO', giftCardIds: ['gc-1'] },
+    })
+    await expect(intento).rejects.toThrow(/terminación 4321/)
+    expect(prismaMock.giftCard.updateMany).not.toHaveBeenCalled()
+    expect(prismaMock.giftCardActivity.create).not.toHaveBeenCalled()
+  })
+
+  it('B1 nota 1: sólo cuentan los sobres que de verdad recibirían saldo (uno desactivado ya devuelto completo no estorba)', async () => {
+    prismaMock.giftCardActivity.findMany.mockResolvedValueOnce([]).mockResolvedValueOnce([
+      { id: 'red-1', giftCardId: 'gc-1', amount: D(100), orderId: 'order-1' },
+      { id: 'red-2', giftCardId: 'gc-2', amount: D(100), orderId: 'order-1' },
+    ])
+    prismaMock.giftCardActivity.groupBy.mockResolvedValue([{ reversesActivityId: 'red-1', _sum: { amount: D(100) } }])
+    prismaMock.$queryRaw.mockResolvedValue([sobre({ status: 'DEACTIVATED', balance: D(0) }), sobre({ id: 'gc-2', balance: D(0) })])
+
+    await expect(revertirCanjeEnTx(prismaMock, { ...base, amount: D(100) })).resolves.toEqual([
+      { giftCardId: 'gc-2', amount: D(100), balanceAfter: D(100) },
+    ])
+    expect(prismaMock.giftCard.findMany).not.toHaveBeenCalled()
+  })
 })
 
 describe('operarSobreDeGerenteEnTx', () => {
