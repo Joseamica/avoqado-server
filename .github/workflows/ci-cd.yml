@@ -92,8 +92,23 @@ jobs:
       - name: 📦 Install dependencies
         run: npm ci
 
+      # CI más rápido (14-oct-2026, medido en docs/proyectos/pruebas-mas-rapidas-del-server--medicion-ci-14-oct.md):
+      # lint 2 → 0 min y typecheck 4 → 0.5 min cuando casi nada cambió. Va DESPUÉS de `npm ci`, que borra node_modules.
+      # Es seguro: el lint revisa cada archivo por separado (ninguna regla mira otros archivos) y su caché se invalida si
+      # cambia el contenido del archivo o la configuración; tsc incremental vuelve a revisar todo lo que depende de un
+      # archivo cambiado. Si cambian dependencias o configuración (también la de Prettier, que ESLint aplica), la llave
+      # cambia y se arranca en frío.
+      - name: 💾 Caché de lint y typecheck
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules/.cache/tsc
+            node_modules/.cache/eslint
+          key: lint-tsc-${{ runner.os }}-${{ hashFiles('package-lock.json', 'eslint.config.mjs', '.prettierrc', '.prettierignore', 'tsconfig*.json') }}-${{ github.sha }}
+          restore-keys: lint-tsc-${{ runner.os }}-${{ hashFiles('package-lock.json', 'eslint.config.mjs', '.prettierrc', '.prettierignore', 'tsconfig*.json') }}-
+
       - name: 📏 Run ESLint
-        run: npm run lint
+        run: npm run lint -- --cache --cache-location node_modules/.cache/eslint/ --cache-strategy content
 
       - name: 🔍 TypeScript compilation check
         run: npm run typecheck
@@ -105,9 +120,17 @@ jobs:
         run: npm run build
 
       - name: 🏪 Run integration tests
+        # 4 procesos en vez de 1 (24 → ~8 min, mismas pruebas; medido el 14-oct). Cada proceso usa su propia copia de la
+        # base desechable (`<nombre>_<n>`, la crea TEMPLATE después de migrar; tests/__helpers__/base-por-proceso.ts la
+        # elige con CI_DB_POR_PROCESO=1), así dos archivos nunca se pisan los datos. Mismo filtro que `npm run test:integration`.
         run: |
           npm run migrate:deploy:bounded
-          npm run test:integration
+          for w in 1 2 3 4; do
+            docker exec "${{ job.services.postgres.id }}" psql -U postgres -v ON_ERROR_STOP=1 \
+              -c "CREATE DATABASE avoqado_h1a_test_20260808_$w TEMPLATE avoqado_h1a_test_20260808"
+          done
+          CI_DB_POR_PROCESO=1 npx jest --selectProjects=integration --maxWorkers=4 --detectOpenHandles=false --workerIdleMemoryLimit=2GB \
+            --testPathIgnorePatterns='tests/integration/master-catalog/h1a-migration(?:-(?:lock-safety|replay))?\.integration\.test\.ts$'
         env:
           ACCESS_TOKEN_SECRET: test-access-token-secret
           REFRESH_TOKEN_SECRET: test-refresh-token-secret
@@ -118,9 +141,9 @@ jobs:
           OPENAI_API_KEY: test-openai-api-key
           STRIPE_SECRET_KEY: sk_test_ci_placeholder
           NODE_ENV: test
-          # La integración corre en UN proceso (--runInBand) y la memoria se acumula archivo tras archivo. Con 331
-          # archivos el tope por defecto (~4 GB) se agotó en el 290 (run 38042072801, exit 134, cero pruebas fallidas);
-          # develop solo, con 315, ya va cerca. 8 GB es lo mismo que usa test:unit; el runner trae 16 GB.
+          # Tope por proceso. En UN proceso la memoria se acumulaba archivo tras archivo y los ~4 GB por defecto se
+          # agotaron (run 38042072801, exit 134). Con 4 procesos, --workerIdleMemoryLimit=2GB reinicia el que pase de 2 GB
+          # al terminar un archivo, así que los 8 GB son sólo techo; el runner trae 16 GB.
           NODE_OPTIONS: --max-old-space-size=8192
 
       - name: 📋 Get package version
@@ -145,14 +168,11 @@ jobs:
           path: prisma/
           retention-days: 7
 
-  # 🧪 Unit tests are sharded so every test still runs, but wall-clock time drops.
+  # 🧪 Unit tests: UNA máquina con 4 procesos (14-oct-2026). Antes eran 4 máquinas con 2 procesos cada una: cada una
+  # instalaba todo otra vez (~2 min) y sumaban 28.8 min facturables; así son ~8.7 min con las mismas 26,911 pruebas.
   unit-tests:
-    name: 🧪 Unit Tests (${{ matrix.shard }}/4)
+    name: 🧪 Unit Tests
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2, 3, 4]
 
     steps:
       - name: 📥 Checkout code
@@ -178,12 +198,13 @@ jobs:
           restore-keys: |
             jest-${{ runner.os }}-node20-
 
-      - name: 🧪 Run unit tests shard ${{ matrix.shard }}/4
+      - name: 🧪 Run unit tests
+        # Lo mismo que `npm run test:unit:ci`, con 4 procesos en vez de 2 (el runner trae 4 núcleos).
         run: |
           START=$(date +%s)
-          npm run test:unit:ci -- --shard=${{ matrix.shard }}/4
+          NODE_OPTIONS='--max-old-space-size=4096' npx jest tests/unit --maxWorkers=4 --workerIdleMemoryLimit=512MB --detectOpenHandles=false --verbose=false --cacheDirectory=node_modules/.cache/jest
           END=$(date +%s)
-          echo "Unit test shard ${{ matrix.shard }}/4 duration: $((END - START)) seconds" >> "$GITHUB_STEP_SUMMARY"
+          echo "Unit tests (1 job, 4 workers) duration: $((END - START)) seconds" >> "$GITHUB_STEP_SUMMARY"
 
   # 🌐 API middleware tests: route mounting + auth + checkPermission + Zod on
   # every endpoint. Mock-based (setup.ts forces a dummy DATABASE_URL) — needs
