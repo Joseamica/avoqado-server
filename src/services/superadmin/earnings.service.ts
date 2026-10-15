@@ -56,6 +56,7 @@ function mapShare(
     aggregatorPriceIncludesTax: boolean
     avoqadoShareOfProviderMargin: unknown
     avoqadoShareOfAggregatorMargin: unknown
+    intermediaryFeeRate?: unknown
     taxRate: unknown
   } | null,
 ): MerchantRevenueShareConfig | null {
@@ -67,6 +68,7 @@ function mapShare(
         : null,
     aggregatorPriceIncludesTax: ms.aggregatorPriceIncludesTax,
     avoqadoShareOfProviderMargin: Number(ms.avoqadoShareOfProviderMargin),
+    intermediaryFeeRate: Number(ms.intermediaryFeeRate ?? 0),
     avoqadoShareOfAggregatorMargin: ms.avoqadoShareOfAggregatorMargin == null ? null : Number(ms.avoqadoShareOfAggregatorMargin),
     taxRate: Number(ms.taxRate),
   }
