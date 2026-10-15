@@ -2,6 +2,14 @@
 jest.mock('@/utils/prismaClient', () => ({ __esModule: true, default: { $transaction: jest.fn() } }))
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn() }))
 import { Prisma } from '@prisma/client'
+// Tarjetas de regalo: este doble de transacción no modela sobres; la guardia de cuentas de tarjetas tiene su propia
+// suite (tests/unit/services/giftCards/cuentaDeTarjetas.test.ts y la integración de la cuenta).
+jest.mock('@/services/giftCards/cuentaDeTarjetas', () => ({
+  ...jest.requireActual('@/services/giftCards/cuentaDeTarjetas'),
+  rechazarSiEsCuentaDeTarjetas: jest.fn().mockResolvedValue(undefined),
+  esCuentaDeTarjetasEnTx: jest.fn().mockResolvedValue(false),
+  desactivarSobresPendientesDeCuentaEnTx: jest.fn().mockResolvedValue({ desactivados: [] }),
+}))
 import prisma from '@/utils/prismaClient'
 import * as tpv from '@/services/tpv/discount.tpv.service'
 import * as engine from '@/services/dashboard/discountEngine.service'

@@ -61,6 +61,7 @@ import {
 import { claseDeEstado, computeOrderBalance, impuestoQueSeCobraAparte, summarizeRefunds, type RefundState } from '../shared/orderBalance'
 import { rechazarSiEsImportada } from '../shared/ordenImportada'
 import { rechazarSiLaCuentaTieneVales } from '../shared/cuentaConVales'
+import { desactivarSobresPendientesDeCuentaEnTx, rechazarSiEsCuentaDeTarjetas } from '../giftCards/cuentaDeTarjetas'
 import { RECIBO_CANONICO } from '../shared/reciboCanonico'
 import { MAX_TERMINAL_PAYMENT_CENTS } from '../shared/inputCaps'
 import type { SaleStampOutcome } from '../shared/loyaltyOnLateCustomer'
@@ -1596,6 +1597,7 @@ export async function applyOrderDiscountInTransaction(
   // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
   // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
   rechazarSiEsImportada(order)
+  await rechazarSiEsCuentaDeTarjetas(tx, orderId, 'descuentos')
   if (order.paymentStatus === 'PAID' || order.paymentStatus === 'PARTIAL') {
     throw new BadRequestError('No se puede descontar una orden ya pagada')
   }
@@ -1701,6 +1703,7 @@ export async function removeOrderDiscountInTransaction(
   // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
   // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
   rechazarSiEsImportada(order)
+  await rechazarSiEsCuentaDeTarjetas(tx, orderId, 'cambios de descuento')
   if (order.paymentStatus === 'PAID' || order.paymentStatus === 'PARTIAL') {
     throw new BadRequestError('No se puede modificar una orden ya pagada')
   }
@@ -1800,6 +1803,7 @@ export async function splitOrderItemsInTransaction(
   // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
   // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
   rechazarSiEsImportada(source)
+  await rechazarSiEsCuentaDeTarjetas(tx, orderId, 'divisiones de cuenta')
   if (['COMPLETED', 'CANCELLED', 'DELETED'].includes(source.status)) {
     throw new BadRequestError('La cuenta ya está cerrada')
   }
@@ -1980,6 +1984,7 @@ export async function splitOrderBySeatInTransaction(tx: Prisma.TransactionClient
   // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
   // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
   rechazarSiEsImportada(source)
+  await rechazarSiEsCuentaDeTarjetas(tx, orderId, 'divisiones de cuenta')
   if (['COMPLETED', 'CANCELLED', 'DELETED'].includes(source.status)) {
     throw new BadRequestError('La cuenta ya está cerrada')
   }
@@ -2218,6 +2223,8 @@ export async function mergeOrdersInTransaction(
   // cualquiera de los dos lados) rearmaría su dinero aquí y cobraría el IVA dos veces (P12). Se junta en el POS externo.
   rechazarSiEsImportada(freshSource)
   rechazarSiEsImportada(freshTarget)
+  await rechazarSiEsCuentaDeTarjetas(tx, sourceOrderId, 'uniones con otra cuenta')
+  await rechazarSiEsCuentaDeTarjetas(tx, targetOrderId, 'uniones con otra cuenta')
   if (freshSource._count.items === 0) {
     throw new BadRequestError('La cuenta origen no tiene artículos')
   }
@@ -3905,6 +3912,9 @@ export async function cancelOrderInTransaction(
     data: { status: 'CANCELLED', ...(reason ? { specialRequests: `Cancelled: ${reason}` } : {}) },
     select: { tableId: true },
   })
+  // Spec § 5.1.8: una cuenta de tarjetas cancelada ANTES de cobrarse deja sus sobres DEACTIVATED sin activarse.
+  // Para cualquier otra cuenta es una consulta que no encuentra sobres.
+  await desactivarSobresPendientesDeCuentaEnTx(tx, { venueId, orderId, staffId: performedBy ?? null })
   await dentroDeLaTx?.(tx, { orderId })
   const boundTable = scope.tables.find(table => table.currentOrderId === orderId)
   const { reconcileTableAfterOrderRemovedInTransaction } = await import('../tpv/table.tpv.service')

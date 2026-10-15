@@ -851,6 +851,11 @@ const NON_FISCAL_ORDER_WRITERS: Record<string, OrderWriter> = {
     why: 'online order: new Order, lines and modifiers in one admission transaction',
     markers: NEW_ORDER,
   },
+  'src/services/giftCards/giftCardOrder.service.ts#createGiftCardOrder': {
+    class: 'PRIVATE_CREATION',
+    why: 'new gift-card order (spec 2026-10-14 § 5.1): PENDING gift cards and one nested line per card in one transaction; replays return the committed order by externalId',
+    markers: NEW_ORDER,
+  },
   'src/services/tpv/order.tpv.service.ts#sellSerializedItem': {
     class: 'PRIVATE_CREATION',
     why: 'new order with its nested serialized line; registration shares the transaction (T2)',

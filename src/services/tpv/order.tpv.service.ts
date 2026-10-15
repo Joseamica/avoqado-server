@@ -25,6 +25,7 @@ import {
 import { computeStoredOrderTotal, impuestoQueSeCobraAparte } from '../shared/orderBalance'
 import { assertNoLiveTerminalCharge } from '../shared/orderCancelGuard'
 import { rechazarSiEsImportada } from '../shared/ordenImportada'
+import { rechazarSiEsCuentaDeTarjetas } from '../giftCards/cuentaDeTarjetas'
 import { lockExistingOrderForPayment, ORDER_LOCK_WAIT_BUDGET } from '../shared/paymentShiftClaim'
 import { comoJson, importesDeLasFilas, nuevoRepartoDeCuenta, nuevoRepartoDirigido } from '../shared/repartoDescuento'
 import {
@@ -1576,6 +1577,7 @@ export async function addItemsToOrder(
       // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
       // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
       rechazarSiEsImportada(order)
+      await rechazarSiEsCuentaDeTarjetas(tx, orderId, 'cambios de artículos')
 
       // Optimistic concurrency check
       // ✅ P1 FIX: Use 409 Conflict instead of 400 Bad Request for version mismatch
@@ -2506,6 +2508,7 @@ export async function removeOrderItem(
       // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
       // el IVA dos veces (P12). Esos cambios se hacen en el POS externo. Antes de R9 (`retirarImpuestoDeRenglones`).
       rechazarSiEsImportada(order)
+      await rechazarSiEsCuentaDeTarjetas(tx, orderId, 'retiros de renglones')
 
       // Optimistic concurrency check
       // ✅ P1 FIX: Use 409 Conflict instead of 400 Bad Request for version mismatch
@@ -2776,6 +2779,7 @@ export async function compItems(venueId: string, orderId: string, input: CompIte
       // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
       // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
       rechazarSiEsImportada(order)
+      await rechazarSiEsCuentaDeTarjetas(tx, orderId, 'cortesías')
 
       // Validate order is not already paid
       if (order.paymentStatus === 'PAID') {
@@ -3073,6 +3077,7 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
       // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
       // el IVA dos veces (P12). Esos cambios se hacen en el POS externo. Antes de R9 y de las guardas de cobro.
       rechazarSiEsImportada(order)
+      await rechazarSiEsCuentaDeTarjetas(tx, orderId, 'anulaciones de renglones')
 
       // Optimistic concurrency check
       // ✅ P1 FIX: Use 409 Conflict instead of 400 Bad Request for version mismatch
@@ -3456,6 +3461,7 @@ export async function applyDiscount(
       // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
       // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
       rechazarSiEsImportada(order)
+      await rechazarSiEsCuentaDeTarjetas(tx, orderId, 'descuentos')
 
       // Optimistic concurrency check
       if (order.version !== input.expectedVersion) {
@@ -4309,6 +4315,8 @@ export async function addSerializedItemToOrder(
       if (!order) {
         throw new NotFoundError('Order not found')
       }
+      // Tarjetas de regalo (R11): una cuenta de tarjetas no admite mercancía, tampoco serializada.
+      await rechazarSiEsCuentaDeTarjetas(tx, orderId, 'artículos serializados')
 
       if (order.version !== expectedVersion) {
         throw new ConflictError('Order was modified by another user. Please refresh and try again.')

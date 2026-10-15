@@ -28,6 +28,7 @@ import { summarizeRefunds } from '../shared/orderBalance'
 import { ORDEN_RECIBO_CANONICO } from '../shared/reciboCanonico'
 import { rechazarCobroNuevoSobreCancelada } from '../shared/cuentaCancelada'
 import { retirarComandasDeVentaAnulada } from '../kds/kitchenTicketAuthoring.service'
+import { desactivarSobresPendientesDeCuentaEnTx } from '../giftCards/cuentaDeTarjetas'
 
 /**
  * Flatten order modifiers from nested structure to flat array
@@ -618,7 +619,10 @@ export async function updateOrder(
           notFoundMessage: `Order with ID ${orderId} not found in this venue`,
         },
       )
-    return { updatedOrder: await escribir(client), cancelando }
+    const updatedOrder = await escribir(client)
+    // Spec § 5.1.8: cancelar una cuenta de tarjetas sin cobrar desactiva sus sobres PENDING en la misma transacción.
+    if (cancelando) await desactivarSobresPendientesDeCuentaEnTx(client, { venueId, orderId, staffId: null })
+    return { updatedOrder, cancelando }
   }
   const { updatedOrder, cancelando } =
     topologyWrite || tocaCliente ? await prisma.$transaction(update, { timeout: 15_000, maxWait: 5_000 }) : await update(prisma)
@@ -680,11 +684,14 @@ export async function deleteOrder(venueId: string, orderId: string) {
           notFoundMessage: `Order with ID ${orderId} not found in this venue`,
         },
       )
-      return tx.order.update({
+      const cancelada = await tx.order.update({
         where: { id: orderId },
         // La versión sube para que los escritores con CAS (anular, descontar) se enteren de la cancelación.
         data: { status: 'CANCELLED', version: { increment: 1 } },
       })
+      // Spec § 5.1.8: los sobres PENDING de una cuenta de tarjetas sin cobrar quedan DEACTIVATED.
+      await desactivarSobresPendientesDeCuentaEnTx(tx, { venueId, orderId, staffId: null })
+      return cancelada
     },
     { timeout: 15_000, maxWait: 5_000 },
   )
