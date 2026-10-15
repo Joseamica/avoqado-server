@@ -20,7 +20,9 @@ import { logAction } from '@/services/dashboard/activity-log.service'
  * comercios es de la consola de superadmin.) Hoy ningún rol de negocio trae `system:config`, así que
  * el OWNER de una sola sucursal tampoco pasa — la ruta del negocio tampoco se lo da.
  *
- * Lo demás del PATCH (nombre, estado, marca, modelo) queda como estaba.
+ * Lo demás del PATCH (nombre, estado, marca, modelo) pide, desde el 15-oct (ronda 4), supervisor o más
+ * (`requireOrgManager`), y ese piso corre ANTES de este candado: un cajero ya se frena ahí. Ese piso se
+ * prueba en `organizationDashboard.terminalEdit.routes.test.ts`; este candado no cambió.
  */
 
 const assignMerchantsForOrgMock = jest.fn()
@@ -171,7 +173,6 @@ describe.each([
   ],
 ])('%s', (_label, cambiar, servicio) => {
   it.each([
-    ['🔴 un cajero de la sucursal', 'cajero', 'CASHIER'],
     ['🔴 el gerente de la sucursal', 'gerente', 'MANAGER'],
     ['🔴 el OWNER de la sucursal sin el permiso del negocio (la ruta del negocio tampoco se lo da)', 'dueno-sucursal-a', 'OWNER'],
     ['🔴 el OWNER de OTRA sucursal', 'dueno-sucursal-b', 'OWNER'],
@@ -200,13 +201,41 @@ describe.each([
   })
 })
 
-describe('PATCH sin cambiar comercios: queda como estaba', () => {
-  it('REGRESIÓN: un cajero de la org sigue editando el nombre, el estado, la marca y el modelo (como hoy)', async () => {
+describe('🔴 un cajero de la sucursal', () => {
+  it('PUT .../merchants → lo frena este candado: 403 en español, bitácora y nada escrito', async () => {
+    const res = await cambiarComercios('cajero', 'CASHIER')
+
+    expect(res.status).toBe(403)
+    expect(res.body.code).toBe('ORG_OWNER_REQUIRED')
+    expect(res.body.message).toMatch(/comercios/)
+    expect(assignMerchantsForOrgMock).not.toHaveBeenCalled()
+    expect(denegaciones()).toHaveLength(1)
+    expect(denegaciones()[0][0]).toMatchObject({ staffId: 'cajero', venueId: VENUE_A })
+  })
+
+  it('PATCH con assignedMerchantIds → lo frena antes el piso de supervisor (ronda 4): 403 y nada escrito', async () => {
+    const res = await editarTerminal('cajero', 'CASHIER', { name: 'Caja 1', assignedMerchantIds: ['ma-9'] })
+
+    expect(res.status).toBe(403)
+    expect(res.body.error).toBe('insufficient_role')
+    expect(updateTerminalForOrgMock).not.toHaveBeenCalled()
+  })
+})
+
+describe('PATCH sin cambiar comercios', () => {
+  it('REGRESIÓN: el gerente de la sucursal sigue editando el nombre, el estado, la marca y el modelo', async () => {
     const body = { name: 'Caja nueva', status: 'MAINTENANCE', brand: 'PAX', model: 'A920' }
-    const res = await editarTerminal('cajero', 'CASHIER', body)
+    const res = await editarTerminal('gerente', 'MANAGER', body)
 
     expect(res.status).toBe(200)
-    expect(updateTerminalForOrgMock).toHaveBeenCalledWith(ORG, TERMINAL, body, 'cajero')
+    expect(updateTerminalForOrgMock).toHaveBeenCalledWith(ORG, TERMINAL, body, 'gerente')
+  })
+
+  it('🔴 un cajero ya NO edita nombre, estado, marca ni modelo (ronda 4: supervisor o más)', async () => {
+    const res = await editarTerminal('cajero', 'CASHIER', { name: 'Caja nueva', status: 'MAINTENANCE', brand: 'PAX', model: 'A920' })
+
+    expect(res.status).toBe(403)
+    expect(updateTerminalForOrgMock).not.toHaveBeenCalled()
   })
 
   it('reenviar los MISMOS comercios (el diálogo de editar siempre los manda) no es un cambio: pasa y no se escriben', async () => {
