@@ -29,7 +29,7 @@ beforeEach(() => {
       enTransaccion = false
     }
   })
-  prismaMock.order.findUnique.mockResolvedValue({ id: 'order-1', orderNumber: 'ORD-1' } as any)
+  prismaMock.order.findUnique.mockResolvedValue({ id: 'order-1', orderNumber: 'ORD-1', paymentStatus: 'PAID' } as any)
   prismaMock.orderCustomer.findUnique.mockResolvedValue(null)
   prismaMock.orderCustomer.count.mockResolvedValue(0)
   prismaMock.orderCustomer.create.mockResolvedValue({ id: 'oc-1' } as any)
@@ -112,6 +112,27 @@ describe('TPV addCustomerToOrder', () => {
     expect(mockReabrir).not.toHaveBeenCalled()
   })
 
+  // ── F1 (revisión final Minor 1, 15-oct-2026) ─────────────────────────────────────────────────────────────────────────
+  it.each(['PENDING', 'PARTIAL'])(
+    '🔴 F1: cuenta %s (lo normal en la TPV): NO se llama a la reapertura (no ensancha la lectura Serializable de una cuenta abierta)',
+    async paymentStatus => {
+      prismaMock.order.findUnique.mockResolvedValue({ id: 'order-1', orderNumber: 'ORD-1', paymentStatus } as any)
+      mockLate.mockResolvedValue(null) // cuenta abierta: el helper no pinta nada
+      const r = await addCustomerToOrder(VENUE, 'order-1', 'cust-1', 'staff-1')
+      expect(prismaMock.orderCustomer.create).toHaveBeenCalledWith({ data: { orderId: 'order-1', customerId: 'cust-1', isPrimary: true } })
+      expect(mockReabrir).not.toHaveBeenCalled()
+      expect(r).toEqual({ orderCustomers: LISTA, loyalty: null })
+    },
+  )
+
+  it('F1: la lectura previa a la transacción pide paymentStatus (y sigue filtrando por negocio)', async () => {
+    await addCustomerToOrder(VENUE, 'order-1', 'cust-1', 'staff-1')
+    expect(prismaMock.order.findUnique).toHaveBeenCalledWith({
+      where: { id: 'order-1', venueId: VENUE },
+      select: { id: true, orderNumber: true, paymentStatus: true },
+    })
+  })
+
   it('camino de rescate por P2002 (otro quedó primario a la vez): lo liga NO primario y no reabre', async () => {
     prismaMock.$transaction.mockRejectedValueOnce(Object.assign(new Error('unique'), { code: 'P2002' }))
     await addCustomerToOrder(VENUE, 'order-1', 'cust-1', 'staff-1')
@@ -144,6 +165,17 @@ describe('TPV createAndAddCustomerToOrder', () => {
     const reapertura = mockReabrir.mock.invocationCallOrder[0]
     expect(reapertura).toBeGreaterThan(prismaMock.customer.create.mock.invocationCallOrder[0])
     expect(reapertura).toBeGreaterThan(prismaMock.orderCustomer.create.mock.invocationCallOrder[0])
+  })
+
+  it('🔴 F1: cuenta abierta: el cliente nuevo queda primario pero NO se llama a la reapertura', async () => {
+    prismaMock.order.findUnique.mockResolvedValue({ id: 'order-1', orderNumber: 'ORD-1', paymentStatus: 'PENDING' } as any)
+    await createAndAddCustomerToOrder(VENUE, 'order-1', { firstName: 'Dany' }, 'staff-1')
+    expect(prismaMock.orderCustomer.create).toHaveBeenCalledWith({ data: { orderId: 'order-1', customerId: 'nuevo', isPrimary: true } })
+    expect(mockReabrir).not.toHaveBeenCalled()
+    expect(prismaMock.order.findUnique).toHaveBeenCalledWith({
+      where: { id: 'order-1', venueId: VENUE },
+      select: { id: true, orderNumber: true, paymentStatus: true },
+    })
   })
 
   it('cuenta que ya tenía primario: el cliente nuevo entra NO primario y no reabre', async () => {

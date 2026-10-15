@@ -1,6 +1,6 @@
 import { lockTableOrderScope } from '@/services/shared/tableOrderLock'
 import prisma from '../../utils/prismaClient'
-import { AreaTicketInventoryReservationStatus, Order, Prisma } from '@prisma/client'
+import { AreaTicketInventoryReservationStatus, Order, PaymentStatus, Prisma } from '@prisma/client'
 import { NotFoundError, BadRequestError, ConflictError, ValidationError, ForbiddenError } from '../../errors/AppError'
 import logger from '../../config/logger'
 import socketManager from '../../communication/sockets'
@@ -3784,10 +3784,10 @@ export async function addCustomerToOrder(
 ): Promise<{ orderCustomers: Awaited<ReturnType<typeof getOrderCustomers>>; loyalty: SaleStampOutcome | null }> {
   logger.info(`👤 [ORDER SERVICE] Adding customer ${customerId} to order ${orderId}`)
 
-  // Verify order exists and belongs to venue
+  // Verify order exists and belongs to venue. `paymentStatus` decide si hace falta reabrir la lealtad (F1, abajo).
   const order = await prisma.order.findUnique({
     where: { id: orderId, venueId },
-    select: { id: true, orderNumber: true },
+    select: { id: true, orderNumber: true, paymentStatus: true },
   })
 
   if (!order) {
@@ -3846,7 +3846,10 @@ export async function addCustomerToOrder(
           // reapertura incluida; si la reapertura falla, la liga falla entera (el cajero reintenta).
           // 🔴 Y es la ÚLTIMA escritura antes del commit (ruling tras S3b/S4): deja la MARCA de fila que detiene al cierre
           // «sin cliente» que esté esperando el candado de la orden. La TPV no escribe `Order.customerId`: la marca la cubre.
-          if (isPrimary) {
+          // 🔴 F1 (revisión final Minor 1, 15-oct-2026): sólo sobre una venta YA pagada. Sobre una cuenta abierta (lo normal en
+          // la TPV) no hay nada que reabrir —la lealtad corre al cobrar, con este cliente ya primario— y la lectura de la venta
+          // dentro de esta transacción `Serializable` sólo ensancharía su conjunto de lectura (más `P2034`).
+          if (isPrimary && order.paymentStatus === PaymentStatus.PAID) {
             await reabrirLealtadSiAplica(tx, { venueId, orderId, customerId, staffId: staffId ?? null })
           }
 
@@ -3972,10 +3975,10 @@ export async function createAndAddCustomerToOrder(
   // Normalize email to lowercase for consistent lookups
   const normalizedEmail = customerData.email?.toLowerCase()
 
-  // Verify order exists and belongs to venue
+  // Verify order exists and belongs to venue. `paymentStatus` decide si hace falta reabrir la lealtad (F1, abajo).
   const order = await prisma.order.findUnique({
     where: { id: orderId, venueId },
-    select: { id: true, orderNumber: true },
+    select: { id: true, orderNumber: true, paymentStatus: true },
   })
 
   if (!order) {
@@ -4044,7 +4047,8 @@ export async function createAndAddCustomerToOrder(
 
           // 🔴 Auditoría A #1, igual que `addCustomerToOrder`: el cliente NUEVO y primario reabre la lealtad durable de la
           // venta en esta misma transacción, como ÚLTIMA escritura (marca de fila).
-          if (isPrimary) {
+          // F1: igual que `addCustomerToOrder`, sólo sobre una venta YA pagada.
+          if (isPrimary && order.paymentStatus === PaymentStatus.PAID) {
             await reabrirLealtadSiAplica(tx, { venueId, orderId, customerId: newCustomer.id, staffId: staffId ?? null })
           }
 
