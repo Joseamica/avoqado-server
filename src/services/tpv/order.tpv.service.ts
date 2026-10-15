@@ -43,6 +43,7 @@ import { armarComandasTrasCommit, retirarComandasDeVentaAnulada, tomarCandadoDeC
 import { parseServiceCourseSnapshot, legacyCourseForSnapshot, type ServiceCourseSnapshot } from '../service-courses/serviceCourseContract'
 import { applyPromotionToOrder, type PromotionSelection } from '../promotions/promotion.service'
 import { venueHasFeatureAccess } from '../access/basePlan.service'
+import type { SaleStampOutcome } from '../shared/loyaltyOnLateCustomer'
 
 /**
  * Helper function to flatten OrderItemModifier structure for Android compatibility
@@ -3747,10 +3748,40 @@ export async function getOrderCustomers(venueId: string, orderId: string) {
 }
 
 /**
+ * Sello TARDÍO desde la TPV (spec 2026-10-14 §3.1): si la venta ya está pagada, ligar aquí sella igual que en el POS. Sobre una
+ * cuenta abierta (lo normal en la TPV) devuelve null y la lealtad corre al cobrar. Nunca rompe la liga: ya quedó.
+ */
+async function selloTardioTrasLigar(
+  venueId: string,
+  orderId: string,
+  customerId: string,
+  staffId?: string | null,
+): Promise<SaleStampOutcome | null> {
+  try {
+    const { awardLoyaltyForLateCustomer } = await import('../shared/loyaltyOnLateCustomer')
+    return await awardLoyaltyForLateCustomer({ venueId, orderId, customerId, staffId: staffId ?? null })
+  } catch (error) {
+    logger.error('[ORDER SERVICE] Sello tardío falló (la liga ya quedó)', {
+      orderId,
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return null
+  }
+}
+
+/**
  * Add a customer to an order (multi-customer support)
  * First customer added becomes primary (receives loyalty points)
+ *
+ * `staffId` = quien LIGA (authContext.userId del controller): actor del sello tardío y de la bitácora. Devuelve la lista de
+ * siempre (`orderCustomers`) y `loyalty` (`SaleStampOutcome | null`): el controller lo manda HERMANO de `data`.
  */
-export async function addCustomerToOrder(venueId: string, orderId: string, customerId: string) {
+export async function addCustomerToOrder(
+  venueId: string,
+  orderId: string,
+  customerId: string,
+  staffId?: string | null,
+): Promise<{ orderCustomers: Awaited<ReturnType<typeof getOrderCustomers>>; loyalty: SaleStampOutcome | null }> {
   logger.info(`👤 [ORDER SERVICE] Adding customer ${customerId} to order ${orderId}`)
 
   // Verify order exists and belongs to venue
@@ -3782,6 +3813,9 @@ export async function addCustomerToOrder(venueId: string, orderId: string, custo
     throw new BadRequestError('Customer already added to this order')
   }
 
+  // Import dinámico, como en `attachCustomerToOrder` (móvil): ANTES de abrir la transacción, para no cargar módulos dentro de ella.
+  const { reabrirLealtadSiAplica } = await import('../shared/loyaltyOnLateCustomer')
+
   // 🔒 RACE CONDITION FIX: Use Serializable isolation to prevent multiple primaries
   // Combined with partial unique index on (orderId) WHERE isPrimary=true as defense-in-depth
   // Retry up to 5 times on serialization conflicts with exponential backoff
@@ -3805,6 +3839,16 @@ export async function addCustomerToOrder(venueId: string, orderId: string, custo
               isPrimary,
             },
           })
+
+          // 🔴 Auditoría A #1: misma transacción que la liga. Si la venta ya está pagada y es elegible, se reabre su trabajo
+          // durable de lealtad; si el intento inmediato (`selloTardioTrasLigar`) falla, el reconciliador la termina. Sólo el
+          // primario: un segundo cliente no suma el sello de esta venta. Un `P2034` reintenta la transacción entera,
+          // reapertura incluida; si la reapertura falla, la liga falla entera (el cajero reintenta).
+          // 🔴 Y es la ÚLTIMA escritura antes del commit (ruling tras S3b/S4): deja la MARCA de fila que detiene al cierre
+          // «sin cliente» que esté esperando el candado de la orden. La TPV no escribe `Order.customerId`: la marca la cubre.
+          if (isPrimary) {
+            await reabrirLealtadSiAplica(tx, { venueId, orderId, customerId })
+          }
 
           return { isPrimary }
         },
@@ -3851,8 +3895,9 @@ export async function addCustomerToOrder(venueId: string, orderId: string, custo
     }
   }
 
-  // Return updated list of order customers
-  return getOrderCustomers(venueId, orderId)
+  // 🎁 Después del commit de la liga: si la venta ya se cobró, el sello tardío (nunca lanza; null = no pintar nada).
+  const loyalty: SaleStampOutcome | null = await selloTardioTrasLigar(venueId, orderId, customerId, staffId)
+  return { orderCustomers: await getOrderCustomers(venueId, orderId), loyalty }
 }
 
 /**
@@ -3913,12 +3958,15 @@ export async function removeCustomerFromOrder(venueId: string, orderId: string, 
 /**
  * Create a new customer and immediately add them to an order
  * Allows creating customer with minimal info (firstName OR phone OR email)
+ *
+ * `staffId` = quien LIGA (authContext.userId del controller). Devuelve la lista de siempre y `loyalty` del cliente NUEVO.
  */
 export async function createAndAddCustomerToOrder(
   venueId: string,
   orderId: string,
   customerData: { firstName?: string; phone?: string; email?: string },
-) {
+  staffId?: string | null,
+): Promise<{ orderCustomers: Awaited<ReturnType<typeof getOrderCustomers>>; loyalty: SaleStampOutcome | null }> {
   logger.info(`🆕 [ORDER SERVICE] Creating customer and adding to order ${orderId}`)
 
   // Normalize email to lowercase for consistent lookups
@@ -3953,10 +4001,15 @@ export async function createAndAddCustomerToOrder(
     }
   }
 
+  // Import dinámico, como en `addCustomerToOrder`: ANTES de abrir la transacción.
+  const { reabrirLealtadSiAplica } = await import('../shared/loyaltyOnLateCustomer')
+
   // 🔒 RACE CONDITION FIX: Create customer and add to order in Serializable transaction
   // Combined with partial unique index on (orderId) WHERE isPrimary=true as defense-in-depth
   // Retry up to 5 times on serialization conflicts with exponential backoff
   const MAX_RETRIES = 5
+  // El id del cliente creado por el intento que hizo commit (un `P2034` reintenta y crea otro; sólo el último cuenta).
+  let nuevoClienteId: string | undefined
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     try {
@@ -3978,6 +4031,7 @@ export async function createAndAddCustomerToOrder(
               firstVisitAt: new Date(),
             },
           })
+          nuevoClienteId = newCustomer.id
 
           // Add to order
           await tx.orderCustomer.create({
@@ -3987,6 +4041,12 @@ export async function createAndAddCustomerToOrder(
               isPrimary,
             },
           })
+
+          // 🔴 Auditoría A #1, igual que `addCustomerToOrder`: el cliente NUEVO y primario reabre la lealtad durable de la
+          // venta en esta misma transacción, como ÚLTIMA escritura (marca de fila).
+          if (isPrimary) {
+            await reabrirLealtadSiAplica(tx, { venueId, orderId, customerId: newCustomer.id })
+          }
 
           logger.info(
             `✅ [ORDER SERVICE] Created customer ${newCustomer.id} and added to order ${order.orderNumber} | isPrimary=${isPrimary}`,
@@ -4028,8 +4088,9 @@ export async function createAndAddCustomerToOrder(
     }
   }
 
-  // Return updated list of order customers
-  return getOrderCustomers(venueId, orderId)
+  // 🎁 Después del commit: sello tardío del cliente NUEVO si la venta ya se cobró (nunca lanza; null = no pintar nada).
+  const loyalty: SaleStampOutcome | null = nuevoClienteId ? await selloTardioTrasLigar(venueId, orderId, nuevoClienteId, staffId) : null
+  return { orderCustomers: await getOrderCustomers(venueId, orderId), loyalty }
 }
 
 // ==========================================

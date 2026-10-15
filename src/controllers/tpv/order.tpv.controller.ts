@@ -309,11 +309,14 @@ export async function addCustomerToOrder(
     const orderId: string = req.params.orderId
     const { customerId } = req.body
 
-    const orderCustomers = await orderTpvService.addCustomerToOrder(venueId, orderId, customerId)
+    // El actor del sello tardío es quien LIGA (el usuario autenticado).
+    const { orderCustomers, loyalty } = await orderTpvService.addCustomerToOrder(venueId, orderId, customerId, req.authContext?.userId)
 
     res.status(201).json({
       success: true,
       data: orderCustomers,
+      // Hermano de `data` (no dentro): `data` es el arreglo que la TPV publicada parsea como lista. Campo nuevo y opcional.
+      loyalty,
       message: 'Customer added to order successfully',
     })
   } catch (error) {
@@ -353,15 +356,18 @@ export async function createAndAddCustomerToOrder(
     const orderId: string = req.params.orderId
     const { firstName, phone, email } = req.body
 
-    const orderCustomers = await orderTpvService.createAndAddCustomerToOrder(venueId, orderId, {
-      firstName,
-      phone,
-      email,
-    })
+    const { orderCustomers, loyalty } = await orderTpvService.createAndAddCustomerToOrder(
+      venueId,
+      orderId,
+      { firstName, phone, email },
+      req.authContext?.userId,
+    )
 
     res.status(201).json({
       success: true,
       data: orderCustomers,
+      // Hermano de `data`, igual que en `addCustomerToOrder`.
+      loyalty,
       message: 'Customer created and added to order successfully',
     })
   } catch (error) {
