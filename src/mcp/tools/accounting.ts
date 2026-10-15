@@ -1034,6 +1034,16 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
         retencionesIsrVentas: pesos(r.retencionesIsrCents), // capturada por el contador (set_sales_retention)
         isrAPagarEstimado: pesos(r.isrAPagarCents),
         sinVentas: r.zeroActivity,
+        // Tarjetas de regalo (B4 r1): la base no se recalcula en la fase 1; la diferencia va aparte y sólo cuando la hay.
+        ...(r.avisoTarjetasDeRegalo
+          ? {
+              tarjetasDeRegalo: {
+                cobradasNoIncluidas: pesos(r.tarjetasCobradasNoIncluidasCents),
+                pagadoConSaldoIncluido: pesos(r.pagadoConSaldoIncluidoCents),
+                aviso: r.avisoTarjetasDeRegalo,
+              },
+            }
+          : {}),
         nota: 'ESTIMACIÓN — resta la retención de ISR en ventas que hayas capturado del periodo y, en régimen GENERAL, las pérdidas de ejercicios anteriores topadas a la utilidad; no resta PTU. La tarifa art-96 es la 2024/2025 (vigente en 2026 salvo publicación nueva). Confírmalo con tu contador.',
       })
     },

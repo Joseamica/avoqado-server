@@ -165,7 +165,7 @@ export function buildRefundLines(
 }
 
 /** ¿El pago es elegible para auto-postear? (espejo de las exclusiones del read-model de ingresos). */
-function isEligible(p: PaymentRow): boolean {
+export function isEligible(p: PaymentRow): boolean {
   if (p.type === PaymentType.TEST) return false // pagos de prueba no son contables
   if (p.type === PaymentType.ADJUSTMENT) return false // semántica ambigua → revisión manual
   if (p.method === PaymentMethod.CRYPTOCURRENCY) return false // no-MXN → manual (diferido)
@@ -173,6 +173,24 @@ function isEligible(p: PaymentRow): boolean {
   if (Math.abs(toCents(p.amount)) === 0 && Math.abs(toCents(p.tipAmount)) === 0) return false // nada que registrar
   return true
 }
+
+/**
+ * B4 r1 (fix 3): en Prisma, lo mismo que el motor admite —su consulta (`COMPLETED`, orden no cancelada) más `isEligible`—. El listado
+ * del contador (C4) lo combina con `WHERE_PAGO_PENDIENTE_DE_REVISION_CONTABLE` para enseñar exactamente lo que el motor saltó. Va en `AND`
+ * para combinarse sin pisar el `OR` de otra marca: `{ venueId, createdAt, AND: [WHERE_PAGO_CONTABILIZABLE, WHERE_PAGO_PENDIENTE_…] }`.
+ * Una prueba de integración pasa las mismas filas por los dos y exige el mismo conjunto.
+ */
+export const WHERE_PAGO_CONTABILIZABLE = {
+  AND: [
+    { status: TransactionStatus.COMPLETED },
+    { order: { status: { not: OrderStatus.CANCELLED } } },
+    // NULL-safe: `type` es opcional y una fila vieja sin tipo cuenta como venta; `notIn` sola la descartaría (NOT IN con NULL).
+    { OR: [{ type: null }, { type: { notIn: [PaymentType.TEST, PaymentType.ADJUSTMENT] } }] },
+    { method: { not: PaymentMethod.CRYPTOCURRENCY } },
+    // «Nada que registrar»: monto y propina en cero. Las dos columnas son NOT NULL con 2 decimales: `= 0` ⇔ 0 centavos.
+    { NOT: { amount: 0, tipAmount: 0 } },
+  ],
+} satisfies Prisma.PaymentWhereInput
 
 /** ¿Este cobro es de tarjetas de regalo (venta de tarjetas o cobro con saldo)? Mismo criterio que `WHERE_PAGO_PENDIENTE_DE_REVISION_CONTABLE`. */
 export function esPendienteDeRevisionContable(p: {

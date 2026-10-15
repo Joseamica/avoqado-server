@@ -24,6 +24,7 @@ import { resolveScopeOrNull } from '../../../../src/services/fiscal/chartOfAccou
 import { getMappings } from '../../../../src/services/fiscal/accountMapping.service'
 import { postJournalEntry } from '../../../../src/services/fiscal/journalEntry.service'
 import { esPendienteDeRevisionContable, generatePoliciesForVenue } from '../../../../src/services/fiscal/autoPosting.service'
+import { ordenParaIvaSelect } from '../../../../src/services/fiscal/ivaDeOrden'
 
 const p = prisma as unknown as {
   venue: { findUnique: jest.Mock }
@@ -111,6 +112,26 @@ describe('generatePoliciesForVenue · tarjetas de regalo', () => {
     const select = p.payment.findMany.mock.calls[0][0].select
     expect(select.tenderType).toEqual({ select: { systemKind: true } })
     expect(select.order.select.items.select.giftCardId).toBe(true)
+    // B4 r1 (fix 5): los MISMOS renglones que la póliza (mismo tope y mismo orden) y, además de la marca, los mismos campos.
+    expect(select.order.select.items.take).toBe(ordenParaIvaSelect.items.take)
+    expect(select.order.select.items.orderBy).toEqual(ordenParaIvaSelect.items.orderBy)
+    expect(select.order.select.items.select).toEqual({ ...ordenParaIvaSelect.items.select, giftCardId: true })
+  })
+
+  it('B4 r1 (fix 5) · la venta de una tarjeta en EFECTIVO fuera de los libros (sin opt-in del efectivo) cuenta como pendiente, no como omitida', async () => {
+    p.fiscalEmisor.findFirst.mockResolvedValue({ includeCashInAccounting: false })
+    p.payment.findMany.mockResolvedValueOnce([
+      cobro({
+        id: 'p-venta-efectivo',
+        amount: 500,
+        method: PaymentMethod.CASH,
+        order: { status: OrderStatus.COMPLETED, orderNumber: 'GC', items: [renglonDeTarjeta] },
+      }),
+    ])
+    const r = await generatePoliciesForVenue('v1')
+    // Mismo criterio que el listado del contador (que no filtra por alcance): lo que el motor salta por tarjetas, se cuenta ahí.
+    expect(r).toMatchObject({ candidates: 1, posted: 0, skipped: 0, pendientesDeRevision: 1 })
+    expect(postJournalEntry).not.toHaveBeenCalled()
   })
 })
 
