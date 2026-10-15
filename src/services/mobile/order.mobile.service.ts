@@ -36,7 +36,8 @@ import { conservarDescuentoHistorico, revertirDescuentoDelRenglon, sincronizarRe
 import { applyPromotionToOrder } from '../promotions/promotion.service'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
 import { paymentCountsAsDrawerCash } from '../shared/tenderSemantics'
-import { esChoqueDelUnico, turnoAbiertoDelNegocio, type UnicoParcial } from '../shared/turnoDeCaja'
+import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
+import { clienteYaLigadoALaVenta, esChoqueDeUnico } from '../shared/ligaDeClienteEnVenta'
 import { assertNoLiveTerminalCharge, assertOrderCancellableUnderLock, avisarOrdenCancelada } from '../shared/orderCancelGuard'
 import { combinarContratos } from '../fiscal/contratoDePrecio'
 import {
@@ -3598,13 +3599,12 @@ export async function attachCustomerToLatestPayment(
 }
 
 /**
- * 🔴 BAJO-3 (full-testing, 15-oct-2026): el único `(orderId, customerId)` de `OrderCustomer`. Dos «Agregar cliente» del MISMO
- * cliente a la vez leían «sin liga» y los dos creaban: el segundo chocaba aquí (P2002) y respondía 500. Chocar con él quiere
- * decir «ya está ligado»: la liga se reintenta (la relectura ve la de la otra llamada) y sigue como éxito. Cualquier otro
- * choque (el primario de OTRO cliente a la vez) sube como antes.
+ * 🔴 BAJO-3 (full-testing, 15-oct-2026) + M1 (ronda 1): dos «Agregar cliente» del MISMO cliente a la vez leían «sin liga» y los
+ * dos creaban: el segundo chocaba con un único (P2002) y respondía 500. Ante CUALQUIER choque se relee la liga (no se decide
+ * por el índice que reportó Postgres: ver `ligaDeClienteEnVenta.ts`): si este cliente ya quedó ligado, se reintenta (la
+ * relectura ve la liga de la otra llamada) y sigue como éxito; si no (el primario de OTRO cliente a la vez), sube como antes.
+ * El tope sólo evita un ciclo si la liga aparece y desaparece.
  */
-const UNICO_CLIENTE_EN_LA_VENTA: UnicoParcial = { indice: 'OrderCustomer_orderId_customerId_key', columnas: ['orderId', 'customerId'] }
-/** Intentos de la liga ante ese choque: el segundo ya ve la liga; el tope sólo evita un ciclo si la liga aparece y desaparece. */
 const INTENTOS_DE_LIGA = 3
 
 /**
@@ -3661,6 +3661,10 @@ export async function attachCustomerToOrder(venueId: string, orderId: string, cu
 
   const ligarEnTransaccion = () =>
     prisma.$transaction(async tx => {
+      // 🔴 Ronda 1 (F1/F3): PRIMERA sentencia, el candado canónico de la venta — el MISMO que toman el cobro y la liga de la TPV.
+      // Sin él, una liga del POS (inserta la liga y luego escribe la venta) y una de la TPV (candado de la venta y luego la liga)
+      // se tomaban los candados en orden inverso y Postgres mataba a una por bloqueo mutuo (40P01), medido con 3 POS + 3 TPV.
+      if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Order not found')
       const existingAssociation = await tx.orderCustomer.findUnique({
         where: {
           orderId_customerId: {
@@ -3729,16 +3733,16 @@ export async function attachCustomerToOrder(venueId: string, orderId: string, cu
       await reabrirLealtadSiAplica(tx, { venueId, orderId, customerId: normalizedCustomerId, staffId: staffId ?? null })
 
       return { ligada, ligaNueva }
-    })
+    }, ORDER_LOCK_WAIT_BUDGET)
 
   let liga: Awaited<ReturnType<typeof ligarEnTransaccion>> | undefined
   for (let intento = 1; !liga; intento++) {
     try {
       liga = await ligarEnTransaccion()
     } catch (error) {
-      // 🔴 BAJO-3: otra llamada ligó a ESTE cliente mientras ésta lo intentaba: ya está ligado. Se reintenta (la transacción
-      // entera se revirtió) y la relectura ve la liga de la otra; nunca un 500 por un doble toque.
-      if (intento < INTENTOS_DE_LIGA && esChoqueDelUnico(error, UNICO_CLIENTE_EN_LA_VENTA)) {
+      // 🔴 BAJO-3 + M1: otra llamada ligó a ESTE cliente mientras ésta lo intentaba: ya está ligado. Se reintenta (la
+      // transacción entera se revirtió) y la relectura ve la liga de la otra; nunca un 500 por un doble toque.
+      if (intento < INTENTOS_DE_LIGA && esChoqueDeUnico(error) && (await clienteYaLigadoALaVenta(orderId, normalizedCustomerId))) {
         logger.info(`ℹ️ [ORDER.MOBILE] Customer ${normalizedCustomerId} was linked to order ${orderId} by a concurrent call; retrying`)
         continue
       }

@@ -20,7 +20,10 @@ export interface FilaDeLealtad {
   loyaltyAttempts: number
   loyaltyStaffId: string | null
   customer: { id: string; firstName: string | null; lastName: string | null } | null
-  /** Cuántos `OrderCustomer` tiene la venta: lo lee `orderCustomers: { none: {} }`. */
+  /**
+   * Cuántos `OrderCustomer` PRIMARIOS tiene la venta: lo lee la guarda del cierre «sin cliente»
+   * (`orderCustomers: { none: { isPrimary: true } }`; F1, ronda 1 post-QA: un acompañante no cuenta).
+   */
   clientes: number
 }
 
@@ -33,6 +36,7 @@ export function cumpleElWhere(fila: FilaDeLealtad, where: Condiciones): boolean 
     if (campo === 'orderCustomers') {
       const relacion = condicion as { none?: Condiciones }
       if (relacion.none && Object.keys(relacion.none).length === 0) return fila.clientes === 0
+      if (relacion.none && JSON.stringify(relacion.none) === JSON.stringify({ isPrimary: true })) return fila.clientes === 0
       throw new Error(`El doble no entiende orderCustomers=${JSON.stringify(condicion)}`)
     }
     const valor = campos[campo]

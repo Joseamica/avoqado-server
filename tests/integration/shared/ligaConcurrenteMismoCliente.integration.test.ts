@@ -5,8 +5,10 @@
  *     único `(orderId, customerId)` (P2002) — evidencia `C3a-mismo-movil-3.json`;
  *   · quedaron DOS filas `CUSTOMER_ATTACHED_TO_PAID_ORDER` para un solo hecho (`activitylog-trail.txt`).
  *
- * Ahora la liga es idempotente: ese choque quiere decir «ya está ligado» (se reintenta y sigue como éxito) y sólo la llamada que
- * CREÓ la liga escribe la fila de auditoría.
+ * Ahora la liga es idempotente: ese choque quiere decir «ya está ligado» (se reintenta y sigue como éxito), también en la TPV
+ * (F3, ronda 1: el MISMO cliente ya ligado es éxito, no 400). Auditoría (F2, ronda 1): la llamada que CREÓ la liga escribe
+ * SIEMPRE su fila (`ligaNueva: true`); una re-liga, sólo si ESTA llamada otorgó el sello (o los puntos de una venta sin sello).
+ * En una carrera pueden quedar 2 filas, ambas ciertas: exactamente UNA con `ligaNueva: true`.
  *
  * Todo real contra Postgres: la liga del POS (`attachCustomerToOrder`), la de la TPV (`addCustomerToOrder`), la lealtad
  * (`earnPoints`/`grantStamp`) y la bitácora. Los cruces se FUERZAN y se OBSERVAN en `pg_stat_activity` (no se suponen por tiempos).
@@ -125,29 +127,52 @@ async function loQueQuedo(orderId: string, customerId: string) {
     sellos: await prisma.stampEvent.count({ where: { venueId, orderId, type: 'EARN' } }),
     puntos: await prisma.loyaltyTransaction.count({ where: { orderId, customerId, type: 'EARN' } }),
     auditoria: await prisma.activityLog.count({ where: { venueId, action: AUDITORIA, entityId: orderId } }),
+    filas: await prisma.activityLog.findMany({
+      where: { venueId, action: AUDITORIA, entityId: orderId },
+      select: { staffId: true, data: true },
+      take: 10,
+    }),
   }
 }
 
+/** F2: exactamente UNA fila de la llamada que creó la liga, y a lo más otra de la que otorgó (≤ 2, todas ciertas). */
+function auditoriaDeUnaLiga(quedo: Awaited<ReturnType<typeof loQueQuedo>>) {
+  const nuevas = quedo.filas.filter(f => (f.data as { ligaNueva?: boolean }).ligaNueva === true)
+  expect(nuevas).toHaveLength(1)
+  expect(quedo.auditoria).toBeLessThanOrEqual(2)
+  for (const f of quedo.filas) {
+    const d = f.data as { ligaNueva?: boolean; otorgo?: boolean }
+    // Una re-liga sólo escribe si otorgó.
+    if (d.ligaNueva === false) expect(d.otorgo).toBe(true)
+  }
+  return nuevas[0]
+}
+
 describe('🔴 BAJO-3: el MISMO cliente agregado varias veces a la vez a una venta pagada (Postgres real)', () => {
-  it('🔴 la segunda liga choca con la primera en el único (orderId, customerId): espera, ve la liga y responde ÉXITO (antes: 500)', async () => {
+  it('🔴 la segunda liga del MISMO cliente espera a la primera (candado de la venta), ve su liga y responde ÉXITO (antes: P2002 ⇒ 500)', async () => {
     const hugo = await cliente('Hugo')
     const orderId = await ventaCobradaSinCliente()
     const aparcada = aparcarLaSiguienteTransaccion(prisma)
+    // Fuera del try: si una aserción truena, se esperan igual (no se cuelan a la prueba siguiente).
+    let primera: ReturnType<typeof attachCustomerToOrder> | undefined
+    let segunda: Promise<{ ok: Awaited<ReturnType<typeof attachCustomerToOrder>> | undefined; error: unknown }> | undefined
     try {
       // La primera liga crea el OrderCustomer y se queda ANTES del commit, con sus candados.
-      const primera = attachCustomerToOrder(venueId!, orderId, hugo, cajero)
+      primera = attachCustomerToOrder(venueId!, orderId, hugo, cajero)
       const pidPrimera = await aTiempo(aparcada.pid, 15_000, 'la primera liga aparcada antes del commit')
-      // La segunda (doble toque desde otro aparato) lee «sin liga» y su INSERT espera a la primera.
-      const segunda = attachCustomerToOrder(venueId!, orderId, hugo, cajero).then(
+      // La segunda (doble toque desde otro aparato). Ronda 1: las dos ligas toman PRIMERO el candado de la venta (el mismo que
+      // la TPV y el cobro), así que la segunda espera ahí —antes esperaba el INSERT y chocaba con el único—; al soltarse, la
+      // relectura ve la liga de la primera.
+      segunda = attachCustomerToOrder(venueId!, orderId, hugo, cajero).then(
         ok => ({ ok, error: undefined as unknown }),
         error => ({ ok: undefined, error }),
       )
-      const espera = await esperarBloqueado(prisma, { bloqueadoPor: [pidPrimera], consulta: /INSERT[\s\S]*"OrderCustomer"/ })
-      expect(espera).not.toBeNull() // el cruce SÍ ocurrió: la segunda esperaba el único que la primera tenía tomado
+      const espera = await esperarBloqueado(prisma, { bloqueadoPor: [pidPrimera], consulta: /FOR UPDATE/ })
+      expect(espera).not.toBeNull() // el cruce SÍ ocurrió: la segunda esperaba el candado que la primera tenía tomado
       aparcada.soltar()
 
-      const r1 = await primera
-      const r2 = await segunda
+      const r1 = await primera!
+      const r2 = await segunda!
       expect(r2.error).toBeUndefined() // antes: P2002 «Unique constraint failed on the fields: (`orderId`,`customerId`)» ⇒ 500
       expect(r1.loyalty).toMatchObject({ stamped: true })
       expect(r2.ok?.loyalty).toMatchObject({ stamped: true })
@@ -157,10 +182,11 @@ describe('🔴 BAJO-3: el MISMO cliente agregado varias veces a la vez a una ven
       expect(quedo.ligas).toEqual([{ customerId: hugo, isPrimary: true }])
       expect(quedo.sellos).toBe(1)
       expect(quedo.puntos).toBe(1)
-      expect(quedo.auditoria).toBe(1)
+      auditoriaDeUnaLiga(quedo)
     } finally {
       aparcada.soltar()
       aparcada.restaurar()
+      await Promise.allSettled([primera, segunda].filter(Boolean) as Promise<unknown>[])
     }
   })
 
@@ -199,19 +225,15 @@ describe('🔴 BAJO-3: el MISMO cliente agregado varias veces a la vez a una ven
       expect(quedo.ligas).toEqual([{ customerId: ivan, isPrimary: true }])
       expect(quedo.sellos).toBe(1)
       expect(quedo.puntos).toBe(1)
-      expect(quedo.auditoria).toBe(1)
-      const fila = await prisma.activityLog.findFirstOrThrow({
-        where: { venueId, action: AUDITORIA, entityId: orderId },
-        select: { staffId: true, data: true },
-      })
+      const fila = auditoriaDeUnaLiga(quedo)
       expect(fila.staffId).toBe(cajero)
-      expect(fila.data).toMatchObject({ customerId: ivan, decision: 'ELIGIBLE' })
+      expect(fila.data).toMatchObject({ customerId: ivan, decision: 'ELIGIBLE', ligaNueva: true })
     } finally {
       barrera.mockRestore()
     }
   })
 
-  it('🔴 seis a la vez, 3 desde el POS y 3 desde la TPV (como en el full-testing): ningún 500, una liga, un sello, unos puntos, UNA fila', async () => {
+  it('🔴 seis a la vez, 3 desde el POS y 3 desde la TPV (como en el full-testing): TODAS con éxito, una liga, un sello, unos puntos, UNA fila de la liga nueva', async () => {
     const juan = await cliente('Juan')
     const orderId = await ventaCobradaSinCliente()
     const llamadas = [
@@ -220,19 +242,14 @@ describe('🔴 BAJO-3: el MISMO cliente agregado varias veces a la vez a una ven
     ]
     const resultados = await Promise.allSettled(llamadas)
 
-    // Ninguna respuesta de servidor roto. La TPV conserva sus 400 de siempre («ya estaba agregado», conflicto persistente),
-    // pero nada que no sea un error de negocio con su estado 4xx.
-    const rechazos = resultados.filter((r): r is PromiseRejectedResult => r.status === 'rejected').map(r => r.reason)
-    for (const rechazo of rechazos) {
-      expect({ mensaje: rechazo?.message, estado: rechazo?.statusCode }).toEqual({ mensaje: expect.any(String), estado: 400 })
-    }
-    // Las tres del POS nunca fallan: la liga del POS es idempotente.
-    expect(resultados.slice(0, 3).every(r => r.status === 'fulfilled')).toBe(true)
+    // 🔴 F3 (ronda 1): TODAS con éxito, TPV incluida (antes la TPV respondía 400 «Customer already added to this order»).
+    const rechazos = resultados.filter((r): r is PromiseRejectedResult => r.status === 'rejected').map(r => r.reason?.message)
+    expect(rechazos).toEqual([])
 
     const quedo = await loQueQuedo(orderId, juan)
     expect(quedo.ligas).toEqual([{ customerId: juan, isPrimary: true }])
     expect(quedo.sellos).toBe(1)
     expect(quedo.puntos).toBe(1)
-    expect(quedo.auditoria).toBe(1)
+    auditoriaDeUnaLiga(quedo)
   })
 })

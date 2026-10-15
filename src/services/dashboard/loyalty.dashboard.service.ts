@@ -300,6 +300,12 @@ export async function earnPoints(
    * distintos). No se acreditó nada a éste. Sólo aparece en ese caso; los cobros de siempre no lo ven nunca.
    */
   otroCliente?: true
+  /**
+   * F2 (ronda 1 post-QA de sellos tardíos, 15-oct-2026): lo que ESTA llamada creó — el sello (`grantStamp` lo otorgó) y/o el
+   * EARN de puntos. Sólo aparece si creó algo; un reintento idempotente no lo trae. Lo lee la auditoría de una re-liga
+   * (`awardLoyaltyForLateCustomer`): audita sólo la llamada que de verdad otorgó.
+   */
+  otorgado?: { sello: boolean; puntos: boolean }
 }> {
   // Paid entitlement and venue activation are BOTH required. Automatic award
   // paths must not create an active config merely because a payment happened.
@@ -356,9 +362,11 @@ export async function earnPoints(
   // charge. We therefore persist points first, then surface a stamp failure so
   // the durable paid-order reconciler can retry the missing stamp. Swallowing it
   // here would mark the order processed forever with a visibly missing reward.
-  const finish = <T>(result: T): T => {
+  const finish = <T extends object>(result: T, puntosCreados = false): T => {
     if (deferredStampError) throw deferredStampError
-    return result
+    const selloCreado = sello?.granted === true
+    // F2: sólo cuando ESTA llamada creó algo; los resultados de siempre no cambian de forma.
+    return selloCreado || puntosCreados ? { ...result, otorgado: { sello: selloCreado, puntos: puntosCreados } } : result
   }
   const saldoActual = async (): Promise<number> =>
     (await prisma.customer.findUnique({ where: { id: customerId }, select: { loyaltyPoints: true } }))?.loyaltyPoints ?? 0
@@ -477,10 +485,13 @@ export async function earnPoints(
       return finish({ pointsEarned: 0, newBalance: await saldoActual(), otroCliente: true as const })
     }
     if (escrito.tipo === 'YA_ESTABA') return finish({ pointsEarned: escrito.puntos, newBalance: await saldoActual() })
-    return finish({
-      pointsEarned,
-      newBalance: escrito.saldo,
-    })
+    return finish(
+      {
+        pointsEarned,
+        newBalance: escrito.saldo,
+      },
+      true,
+    )
   } catch (error: any) {
     // Handle unique constraint violation from partial unique index
     // This happens when concurrent calls race past the idempotency check

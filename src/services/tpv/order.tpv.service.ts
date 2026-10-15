@@ -36,7 +36,9 @@ import {
   sincronizarRepartos,
 } from '../shared/repartoDescuentoTx'
 import { baseDeCargos, recalcularCargosPorServicio } from '../shared/serviceCharges'
-import { esChoqueDelUnico, turnoAbiertoDelNegocio, type UnicoParcial } from '../shared/turnoDeCaja'
+import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
+import { clienteYaLigadoALaVenta, esChoqueDeUnico } from '../shared/ligaDeClienteEnVenta'
+import { isDeadlockError, isRetryableDbError } from '../../utils/serializableRetry'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
 import { debeMarcarCocina, assertPreparationAuthoringAccess } from '../kds/kitchenDisplayStations'
 import { armarComandasTrasCommit, retirarComandasDeVentaAnulada, tomarCandadoDeComandas } from '../kds/kitchenTicketAuthoring.service'
@@ -3748,24 +3750,94 @@ export async function getOrderCustomers(venueId: string, orderId: string) {
 }
 
 /**
- * 🔴 MEDIO-1 (full-testing, 15-oct-2026; decisión «A» del founder): ligar un cliente a una venta YA pagada le da su sello y sus
+ * 🔴 MEDIO-1 (full-testing, 15-oct-2026; decisión «A» del founder): ligar un cliente a una venta YA cobrada le da su sello y sus
  * puntos SÓLO si quien liga tiene `payments:create` en el negocio — el mismo permiso que el «Agregar cliente» del POS
  * (`POST /mobile/venues/:venueId/payments/:paymentId/customer`). Estas rutas de la TPV sólo exigen `orders:update`, que también
- * tiene un KITCHEN. El controller lo resuelve con el resolvedor EFECTIVO (`tienePermisoEnVenue`) y lo pasa aquí. Sin él la liga
- * queda exactamente igual que siempre, pero no se reabre la lealtad ni se llama al sello tardío (`loyalty: null`).
+ * tiene un KITCHEN. El controller lo resuelve con el resolvedor EFECTIVO (`tienePermisoEnVenue`) y lo pasa aquí.
  * Por defecto `false`: un llamador que no lo dice falla CERRADO.
+ *
+ * 🔴 F1 (ronda 1 post-QA, P1 de Codex): «ya cobrada» incluye la venta cuya lealtad sigue PENDIENTE (el cobro no la cerró, o
+ * falló y el reconciliador la reintenta). Sin el permiso, la liga a una venta cobrada entra como ACOMPAÑANTE (no primaria):
+ * la lealtad del cobro en curso y la del reconciliador sólo acreditan al primario, y una venta sin primario cuenta como «sin
+ * cliente» (`awardLoyaltyForPaidOrder`), así que el resultado es el de la venta sin esa liga. La decisión se toma con el
+ * estado leído bajo el candado canónico de la venta (`lockExistingOrderForPayment`, el mismo del cobro). La liga sigue visible
+ * (`data`). Una re-liga del mismo cliente por alguien CON permiso lo promueve a primario y pasa por el sello tardío.
  */
 export interface OpcionesDeLigaTpv {
   otorgarLealtad?: boolean
 }
 
-/** El único `(orderId, customerId)` de `OrderCustomer`: chocar con él quiere decir «este cliente YA está ligado a la venta». */
-const UNICO_CLIENTE_EN_LA_VENTA: UnicoParcial = { indice: 'OrderCustomer_orderId_customerId_key', columnas: ['orderId', 'customerId'] }
+/** «Ya cobrada» para la decisión A: pagada (también con su lealtad pendiente) o reembolsada. */
+const VENTA_COBRADA: ReadonlySet<string> = new Set([PaymentStatus.PAID, PaymentStatus.REFUNDED])
+
+/**
+ * 🔴 F1: PRIMERA sentencia de la transacción de la liga — el candado canónico de la venta (`SELECT … FOR UPDATE`, el del
+ * cobro). En Serializable, si un cobro la escribió mientras esperábamos, Postgres aborta (P2034) y el reintento lee el estado
+ * nuevo. Después, el estado VIGENTE (F1, segunda ola: también en cada reintento).
+ */
+async function leerVentaBajoCandado(
+  tx: Prisma.TransactionClient,
+  venueId: string,
+  orderId: string,
+): Promise<{ paymentStatus: PaymentStatus | null; cobrada: boolean }> {
+  if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Order not found')
+  const vigente = await tx.order.findFirst({ where: { id: orderId, venueId }, select: { paymentStatus: true } })
+  return { paymentStatus: vigente?.paymentStatus ?? null, cobrada: vigente ? VENTA_COBRADA.has(vigente.paymentStatus) : false }
+}
+
+/**
+ * La liga de UN cliente dentro de la transacción de la TPV, con el candado de la venta ya tomado (`leerVentaBajoCandado`).
+ * Devuelve si ESTA llamada creó o promovió la liga (`ligaNueva`) y si el cliente quedó primario.
+ *   · Cliente sin liga: primario si la venta no tiene primario y (está abierta o quien liga puede otorgar lealtad); si no,
+ *     acompañante (F1).
+ *   · Cliente YA ligado (F3, ronda 1): éxito idempotente; si la venta no tiene primario y (está abierta o quien liga puede
+ *     otorgar), se PROMUEVE — condicional (`isPrimary: false`), así sólo una llamada simultánea cuenta como la que promovió.
+ * Si queda primario de una venta PAGADA y quien liga puede otorgar, reabre la lealtad durable como ÚLTIMA escritura (marca).
+ */
+async function ligarClienteBajoCandado(
+  tx: Prisma.TransactionClient,
+  venta: { paymentStatus: PaymentStatus | null; cobrada: boolean },
+  args: { venueId: string; orderId: string; customerId: string; staffId: string | null; otorgarLealtad: boolean },
+  reabrirLealtad: ReabrirLealtad,
+): Promise<{ ligaNueva: boolean; esPrimario: boolean }> {
+  const { venueId, orderId, customerId, otorgarLealtad } = args
+  const puedeSerPrimario = !venta.cobrada || otorgarLealtad
+  const existente = await tx.orderCustomer.findUnique({ where: { orderId_customerId: { orderId, customerId } } })
+  const primario = await tx.orderCustomer.findFirst({ where: { orderId, isPrimary: true }, select: { id: true, customerId: true } })
+
+  let ligaNueva = false
+  let esPrimario: boolean
+  if (!existente) {
+    esPrimario = !primario && puedeSerPrimario
+    await tx.orderCustomer.create({ data: { orderId, customerId, isPrimary: esPrimario } })
+    ligaNueva = true
+  } else if (!existente.isPrimary && !primario && puedeSerPrimario) {
+    const promovida = await tx.orderCustomer.updateMany({ where: { id: existente.id, isPrimary: false }, data: { isPrimary: true } })
+    ligaNueva = promovida.count === 1
+    esPrimario = true
+  } else {
+    esPrimario = existente.isPrimary
+  }
+
+  // 🔴 Auditoría A #1: misma transacción que la liga, y ÚLTIMA escritura (deja la MARCA de fila que detiene a un cierre «sin
+  // cliente» que espere el candado). Sólo el primario, sólo sobre una venta YA pagada (F1: una cuenta abierta no tiene nada
+  // que reabrir) y sólo si quien liga puede otorgar (MEDIO-1: reabierta, el reconciliador le daría el sello de todas formas).
+  if (esPrimario && venta.paymentStatus === PaymentStatus.PAID && otorgarLealtad) {
+    await reabrirLealtad(tx, { venueId, orderId, customerId, staffId: args.staffId })
+  }
+  return { ligaNueva, esPrimario }
+}
+
+/** `reabrirLealtadSiAplica`; se importa ANTES de abrir la transacción (para no cargar módulos dentro de ella) y se pasa. */
+type ReabrirLealtad = (
+  tx: Prisma.TransactionClient,
+  a: { venueId: string; orderId: string; customerId: string; staffId: string | null },
+) => Promise<boolean>
 
 /**
  * Sello TARDÍO desde la TPV (spec 2026-10-14 §3.1): si la venta ya está pagada, ligar aquí sella igual que en el POS. Sobre una
  * cuenta abierta (lo normal en la TPV) devuelve null y la lealtad corre al cobrar. Nunca rompe la liga: ya quedó.
- * `ligaNueva` = ¿ESTA llamada creó la liga? Sólo ésa audita (BAJO-3; ver `awardLoyaltyForLateCustomer`).
+ * `ligaNueva` = ¿ESTA llamada creó o promovió la liga? Decide la auditoría (ver `awardLoyaltyForLateCustomer`).
  */
 async function selloTardioTrasLigar(
   venueId: string,
@@ -3787,12 +3859,41 @@ async function selloTardioTrasLigar(
 }
 
 /**
+ * Después del commit de la liga: con permiso, el sello tardío (nunca lanza; null = no pintar nada). Sin permiso, nada de
+ * lealtad — y si ESTA llamada creó la liga a una venta cobrada, su fila de auditoría con `lealtad: 'SIN_PERMISO'` (F2).
+ */
+async function lealtadTrasLigar(
+  args: { venueId: string; orderId: string; customerId: string; staffId?: string | null; otorgarLealtad: boolean },
+  liga: { ligaNueva: boolean; cobrada: boolean },
+): Promise<SaleStampOutcome | null> {
+  if (args.otorgarLealtad) return selloTardioTrasLigar(args.venueId, args.orderId, args.customerId, args.staffId, liga.ligaNueva)
+  if (liga.ligaNueva && liga.cobrada) {
+    try {
+      const { auditarLigaSinPermisoDeCobro } = await import('../shared/loyaltyOnLateCustomer')
+      await auditarLigaSinPermisoDeCobro({
+        venueId: args.venueId,
+        orderId: args.orderId,
+        customerId: args.customerId,
+        staffId: args.staffId ?? null,
+      })
+    } catch (error) {
+      logger.error('[ORDER SERVICE] Auditoría de la liga sin permiso falló (la liga ya quedó)', {
+        orderId: args.orderId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
+  return null
+}
+
+/**
  * Add a customer to an order (multi-customer support)
  * First customer added becomes primary (receives loyalty points)
  *
  * `staffId` = quien LIGA (authContext.userId del controller): actor del sello tardío y de la bitácora. Devuelve la lista de
  * siempre (`orderCustomers`) y `loyalty` (`SaleStampOutcome | null`): el controller lo manda HERMANO de `data`.
- * `opciones.otorgarLealtad`: ver `OpcionesDeLigaTpv` (MEDIO-1); sin `true`, `loyalty` es null y la lealtad no se toca.
+ * `opciones.otorgarLealtad`: ver `OpcionesDeLigaTpv` (MEDIO-1 + F1); sin `true`, `loyalty` es null y la venta cobrada no gana
+ * beneficiario. El MISMO cliente ya ligado es éxito idempotente (F3, ronda 1; antes: 400 «Customer already added»).
  */
 export async function addCustomerToOrder(
   venueId: string,
@@ -3824,126 +3925,61 @@ export async function addCustomerToOrder(
     throw new NotFoundError('Customer not found')
   }
 
-  // Check if customer already added to order
-  const existingAssociation = await prisma.orderCustomer.findUnique({
-    where: { orderId_customerId: { orderId, customerId } },
-  })
-
-  if (existingAssociation) {
-    throw new BadRequestError('Customer already added to this order')
-  }
-
   // Import dinámico, como en `attachCustomerToOrder` (móvil): ANTES de abrir la transacción, para no cargar módulos dentro de ella.
   const { reabrirLealtadSiAplica } = await import('../shared/loyaltyOnLateCustomer')
 
-  // 🔒 RACE CONDITION FIX: Use Serializable isolation to prevent multiple primaries
-  // Combined with partial unique index on (orderId) WHERE isPrimary=true as defense-in-depth
-  // Retry up to 5 times on serialization conflicts with exponential backoff
+  // 🔒 Serializable + el candado de la venta; el índice parcial del primario es la defensa de fondo. Reintentos con backoff ante
+  // P2034 (serialización) y P2002 (choque de únicos): el reintento relee todo bajo el candado.
   const MAX_RETRIES = 5
-  // BAJO-3: ¿ESTA llamada creó la liga? Si otra simultánea ligó al MISMO cliente, ésta sigue como éxito pero no audita.
-  let ligaNueva = false
+  let liga: { ligaNueva: boolean; esPrimario: boolean; cobrada: boolean } | undefined
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     try {
-      const result = await prisma.$transaction(
+      liga = await prisma.$transaction(
         async tx => {
-          // 🔴 F1, segunda ola (recheck de Codex, 15-oct-2026): el estado VIGENTE de la venta, leído aquí dentro y como primera
-          // sentencia (también en cada reintento). Con el de la lectura de afuera, una cuenta que se cobraba —y cerraba su
-          // lealtad «sin cliente»— entre esa lectura y esta transacción quedaba sin reabrir, y el sello se perdía si fallaba el
-          // intento inmediato.
-          const vigente = await tx.order.findFirst({ where: { id: orderId, venueId }, select: { paymentStatus: true } })
-
-          // Check if this will be the first customer (primary) - inside transaction for consistency
-          const existingCustomersCount = await tx.orderCustomer.count({
-            where: { orderId },
-          })
-          const isPrimary = existingCustomersCount === 0
-
-          // Add customer to order
-          await tx.orderCustomer.create({
-            data: {
-              orderId,
-              customerId,
-              isPrimary,
-            },
-          })
-
-          // 🔴 Auditoría A #1: misma transacción que la liga. Si la venta ya está pagada y es elegible, se reabre su trabajo
-          // durable de lealtad; si el intento inmediato (`selloTardioTrasLigar`) falla, el reconciliador la termina. Sólo el
-          // primario: un segundo cliente no suma el sello de esta venta. Un `P2034` reintenta la transacción entera,
-          // reapertura incluida; si la reapertura falla, la liga falla entera (el cajero reintenta).
-          // 🔴 Y es la ÚLTIMA escritura antes del commit (ruling tras S3b/S4): deja la MARCA de fila que detiene al cierre
-          // «sin cliente» que esté esperando el candado de la orden. La TPV no escribe `Order.customerId`: la marca la cubre.
-          // 🔴 F1 (revisión final Minor 1, 15-oct-2026): sólo sobre una venta YA pagada (según `vigente`, arriba). Sobre una
-          // cuenta abierta (lo normal en la TPV) no hay nada que reabrir —la lealtad corre al cobrar, con este cliente ya
-          // primario— y las lecturas amplias de la lealtad sólo ensancharían el conjunto de lectura `Serializable` (más `P2034`).
-          // 🔴 MEDIO-1: y sólo si quien liga puede otorgar la lealtad (`payments:create`). Sin eso la venta NO se reabre: si se
-          // reabriera, el reconciliador le daría el sello de todas formas.
-          if (isPrimary && vigente?.paymentStatus === PaymentStatus.PAID && otorgarLealtad) {
-            await reabrirLealtadSiAplica(tx, { venueId, orderId, customerId, staffId: staffId ?? null })
-          }
-
-          return { isPrimary }
+          const venta = await leerVentaBajoCandado(tx, venueId, orderId)
+          const r = await ligarClienteBajoCandado(
+            tx,
+            venta,
+            { venueId, orderId, customerId, staffId: staffId ?? null, otorgarLealtad },
+            reabrirLealtadSiAplica,
+          )
+          return { ...r, cobrada: venta.cobrada }
         },
-        {
-          isolationLevel: 'Serializable', // Prevents race conditions
-          timeout: 10000, // 10 second timeout
-        },
+        // El presupuesto de toda transacción que toma el candado de la venta (`ORDER_LOCK_WAIT_BUDGET`, T8-R2), en Serializable.
+        { isolationLevel: 'Serializable', timeout: 15_000, maxWait: 5_000 },
       )
 
       logger.info(
-        `✅ [ORDER SERVICE] Added customer ${customer.firstName || 'N/A'} ${customer.lastName || ''} to order ${order.orderNumber} | isPrimary=${result.isPrimary}`,
+        `✅ [ORDER SERVICE] Added customer ${customer.firstName || 'N/A'} ${customer.lastName || ''} to order ${order.orderNumber} | isPrimary=${liga.esPrimario} | nueva=${liga.ligaNueva}`,
       )
-      ligaNueva = true
-      // Success - exit the retry loop
       break
     } catch (error: any) {
-      // Handle unique constraint violation (partial unique index on isPrimary)
-      if (error.code === 'P2002') {
-        logger.warn(`⚠️ [ORDER SERVICE] Race condition detected - another customer was set as primary simultaneously`)
-        // The customer was likely added with isPrimary=false due to timing, which is correct behavior
-        // Re-check and add with isPrimary=false
-        const existingAfterRace = await prisma.orderCustomer.findUnique({
-          where: { orderId_customerId: { orderId, customerId } },
-        })
-        if (!existingAfterRace) {
-          try {
-            await prisma.orderCustomer.create({
-              data: { orderId, customerId, isPrimary: false },
-            })
-            ligaNueva = true
-            logger.info(`✅ [ORDER SERVICE] Added customer as non-primary after race condition resolution`)
-          } catch (rescate) {
-            // 🔴 BAJO-3: otro «agregar cliente» del MISMO cliente lo ligó entre la relectura y este create: ya está ligado.
-            if (!esChoqueDelUnico(rescate, UNICO_CLIENTE_EN_LA_VENTA)) throw rescate
-            logger.info(`ℹ️ [ORDER SERVICE] Customer ${customerId} was linked to order ${orderId} by a concurrent call`)
-          }
-        } else {
-          // 🔴 BAJO-3: el choque fue con OTRA llamada que ligó a este MISMO cliente: ya está ligado, éxito sin crear otra vez.
-          logger.info(`ℹ️ [ORDER SERVICE] Customer ${customerId} was linked to order ${orderId} by a concurrent call`)
-        }
-        break // Successfully handled
-      } else if (error.code === 'P2034') {
-        // Serialization failure - another transaction was modifying the same data
-        logger.warn(`⚠️ [ORDER SERVICE] Serialization conflict, retrying... (attempt ${attempt}/${MAX_RETRIES})`)
-        if (attempt < MAX_RETRIES) {
-          // Exponential backoff: 50ms, 100ms, 200ms, 400ms, 800ms
-          await new Promise(resolve => setTimeout(resolve, 50 * Math.pow(2, attempt - 1)))
-          continue // Retry
-        }
-        // Max retries reached
-        throw new BadRequestError('Conflicto de concurrencia persistente, por favor intente de nuevo')
+      // 🔴 BAJO-3 + M1 (ronda 1): CUALQUIER choque de único ⇒ se relee la liga y se reintenta la transacción entera bajo el
+      // candado: si otra llamada ya ligó a este cliente, el reintento lo trata como re-liga (éxito, sin duplicar); si fue el
+      // primario de OTRO cliente a la vez, el reintento lo liga como acompañante (el rescate de siempre).
+      // La serialización llega como P2034 en una consulta de modelo y como P2010/40001 en el `SELECT … FOR UPDATE` crudo del
+      // candado (Prisma no lo traduce): las dos, y un bloqueo mutuo, se reintentan igual.
+      const choco = esChoqueDeUnico(error)
+      if (!choco && !isRetryableDbError(error) && !isDeadlockError(error)) throw error
+      if (choco) {
+        const yaLigado = await clienteYaLigadoALaVenta(orderId, customerId)
+        logger.warn(
+          `⚠️ [ORDER SERVICE] Unique conflict linking customer ${customerId} | yaLigado=${yaLigado} | attempt ${attempt}/${MAX_RETRIES}`,
+        )
       } else {
-        throw error
+        logger.warn(`⚠️ [ORDER SERVICE] Serialization conflict, retrying... (attempt ${attempt}/${MAX_RETRIES})`)
       }
+      if (attempt < MAX_RETRIES) {
+        // Exponential backoff: 50ms, 100ms, 200ms, 400ms, 800ms
+        await new Promise(resolve => setTimeout(resolve, 50 * Math.pow(2, attempt - 1)))
+        continue
+      }
+      throw new BadRequestError('Conflicto de concurrencia persistente, por favor intente de nuevo')
     }
   }
 
-  // 🎁 Después del commit de la liga: si la venta ya se cobró, el sello tardío (nunca lanza; null = no pintar nada).
-  // 🔴 MEDIO-1: sólo si quien liga tiene `payments:create`; si no, la liga queda y `loyalty` es null.
-  const loyalty: SaleStampOutcome | null = otorgarLealtad
-    ? await selloTardioTrasLigar(venueId, orderId, customerId, staffId, ligaNueva)
-    : null
+  const loyalty = await lealtadTrasLigar({ venueId, orderId, customerId, staffId, otorgarLealtad }, liga!)
   return { orderCustomers: await getOrderCustomers(venueId, orderId), loyalty }
 }
 
@@ -4054,25 +4090,19 @@ export async function createAndAddCustomerToOrder(
   // Import dinámico, como en `addCustomerToOrder`: ANTES de abrir la transacción.
   const { reabrirLealtadSiAplica } = await import('../shared/loyaltyOnLateCustomer')
 
-  // 🔒 RACE CONDITION FIX: Create customer and add to order in Serializable transaction
-  // Combined with partial unique index on (orderId) WHERE isPrimary=true as defense-in-depth
-  // Retry up to 5 times on serialization conflicts with exponential backoff
+  // 🔒 Serializable + el candado de la venta (igual que `addCustomerToOrder`); el índice parcial del primario es la defensa de
+  // fondo. Reintentos con backoff ante P2034.
   const MAX_RETRIES = 5
   // El id del cliente creado por el intento que hizo commit (un `P2034` reintenta y crea otro; sólo el último cuenta).
   let nuevoClienteId: string | undefined
+  let cobrada = false
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     try {
       await prisma.$transaction(
         async tx => {
-          // 🔴 F1, segunda ola: el estado VIGENTE de la venta, aquí dentro y primero (igual que `addCustomerToOrder`).
-          const vigente = await tx.order.findFirst({ where: { id: orderId, venueId }, select: { paymentStatus: true } })
-
-          // Check if this will be the first customer (primary) - INSIDE transaction for consistency
-          const existingCustomersCount = await tx.orderCustomer.count({
-            where: { orderId },
-          })
-          const isPrimary = existingCustomersCount === 0
+          // 🔴 F1: el candado de la venta PRIMERO, y el estado vigente bajo él.
+          const venta = await leerVentaBajoCandado(tx, venueId, orderId)
 
           // Create the customer
           const newCustomer = await tx.customer.create({
@@ -4085,32 +4115,23 @@ export async function createAndAddCustomerToOrder(
             },
           })
           nuevoClienteId = newCustomer.id
+          cobrada = venta.cobrada
 
-          // Add to order
-          await tx.orderCustomer.create({
-            data: {
-              orderId,
-              customerId: newCustomer.id,
-              isPrimary,
-            },
-          })
-
-          // 🔴 Auditoría A #1, igual que `addCustomerToOrder`: el cliente NUEVO y primario reabre la lealtad durable de la
-          // venta en esta misma transacción, como ÚLTIMA escritura (marca de fila).
-          // F1: igual que `addCustomerToOrder`, sólo sobre una venta YA pagada (según `vigente`).
-          // 🔴 MEDIO-1: y sólo si quien liga puede otorgar la lealtad (`payments:create`).
-          if (isPrimary && vigente?.paymentStatus === PaymentStatus.PAID && otorgarLealtad) {
-            await reabrirLealtadSiAplica(tx, { venueId, orderId, customerId: newCustomer.id, staffId: staffId ?? null })
-          }
+          // La liga, con la MISMA regla que `addCustomerToOrder`: primario sólo si no hay primario y (cuenta abierta o con
+          // permiso); a una venta cobrada sin permiso, acompañante (F1). Reapertura como ÚLTIMA escritura si aplica.
+          const liga = await ligarClienteBajoCandado(
+            tx,
+            venta,
+            { venueId, orderId, customerId: newCustomer.id, staffId: staffId ?? null, otorgarLealtad },
+            reabrirLealtadSiAplica,
+          )
 
           logger.info(
-            `✅ [ORDER SERVICE] Created customer ${newCustomer.id} and added to order ${order.orderNumber} | isPrimary=${isPrimary}`,
+            `✅ [ORDER SERVICE] Created customer ${newCustomer.id} and added to order ${order.orderNumber} | isPrimary=${liga.esPrimario}`,
           )
         },
-        {
-          isolationLevel: 'Serializable', // Prevents race conditions
-          timeout: 10000, // 10 second timeout
-        },
+        // El presupuesto de toda transacción que toma el candado de la venta (`ORDER_LOCK_WAIT_BUDGET`, T8-R2), en Serializable.
+        { isolationLevel: 'Serializable', timeout: 15_000, maxWait: 5_000 },
       )
       // Success - exit the retry loop
       break
@@ -4143,10 +4164,11 @@ export async function createAndAddCustomerToOrder(
     }
   }
 
-  // 🎁 Después del commit: sello tardío del cliente NUEVO si la venta ya se cobró (nunca lanza; null = no pintar nada).
-  // 🔴 MEDIO-1: sólo si quien liga tiene `payments:create`. El cliente es nuevo: la liga siempre la creó ESTA llamada.
-  const loyalty: SaleStampOutcome | null =
-    otorgarLealtad && nuevoClienteId ? await selloTardioTrasLigar(venueId, orderId, nuevoClienteId, staffId, true) : null
+  // 🎁 Después del commit: con permiso, el sello tardío del cliente NUEVO; sin permiso, su auditoría si la venta estaba cobrada.
+  // El cliente es nuevo: la liga siempre la creó ESTA llamada.
+  const loyalty: SaleStampOutcome | null = nuevoClienteId
+    ? await lealtadTrasLigar({ venueId, orderId, customerId: nuevoClienteId, staffId, otorgarLealtad }, { ligaNueva: true, cobrada })
+    : null
   return { orderCustomers: await getOrderCustomers(venueId, orderId), loyalty }
 }
 

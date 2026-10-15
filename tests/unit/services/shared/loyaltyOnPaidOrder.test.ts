@@ -356,7 +356,8 @@ describe('awardLoyaltyForPaidOrder', () => {
           venueId: VENUE,
           loyaltyEligibleAt: { not: null },
           loyaltyProcessedAt: null,
-          orderCustomers: { none: {} },
+          // F1 (ronda 1): «sin cliente» = sin PRIMARIO. Un acompañante ligado sin permiso a la venta cobrada no la detiene.
+          orderCustomers: { none: { isPrimary: true } },
           OR: [{ loyaltyLastError: null }, { loyaltyLastError: { not: MARCA } }],
         },
         data: { loyaltyProcessedAt: expect.any(Date), loyaltyProcessingAt: null, loyaltyLastError: null },
@@ -500,6 +501,76 @@ describe('awardLoyaltyForPaidOrder', () => {
       expect(earnPointsMock).toHaveBeenCalledWith(VENUE, 'cust-A', 50, ORDER, undefined)
       expect(venta.loyaltyProcessedAt).toBeInstanceOf(Date)
       expect(venta.loyaltyLastError).toBeNull()
+    })
+  })
+  // ── F1 (ronda 1 post-QA, P1 de Codex; decisión «A»): una liga SIN permiso a una venta cobrada entra como ACOMPAÑANTE (no
+  // primaria). Para la lealtad las ligas sin primario no cuentan: el resultado es el de la venta sin esas ligas.
+  describe('🔴 F1: ligas SIN primario (acompañantes de una venta cobrada) no hacen beneficiario a nadie', () => {
+    const ACOMPANANTE = { customerId: 'cust-K', isPrimary: false, customer: { id: 'cust-K', firstName: 'Kev', lastName: null } }
+
+    it('🔴 sólo un acompañante y sin heredado: ni puntos/sello ni visita; la corrida lee «sin cliente» y cierra con la guarda del primario', async () => {
+      orderCustomerFindMany.mockResolvedValue([ACOMPANANTE])
+      const result = await awardLoyaltyForPaidOrder({ venueId: VENUE, orderId: ORDER, orderTotal: 90, legacyCustomer: null })
+      expect(earnPointsMock).not.toHaveBeenCalled()
+      expect(metricsMock).not.toHaveBeenCalled()
+      expect(result).toEqual({ complete: true, errors: [] })
+      expect(orderUpdateMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: expect.objectContaining({ orderCustomers: { none: { isPrimary: true } } }) }),
+      )
+    })
+
+    it('sólo un acompañante y CON heredado: se acredita al heredado, como si la liga no existiera', async () => {
+      orderCustomerFindMany.mockResolvedValue([ACOMPANANTE])
+      await awardLoyaltyForPaidOrder({
+        venueId: VENUE,
+        orderId: ORDER,
+        orderTotal: 90,
+        legacyCustomer: { id: 'cust-L', firstName: 'Leo', lastName: null },
+      })
+      expect(earnPointsMock).toHaveBeenCalledTimes(1)
+      expect(earnPointsMock).toHaveBeenCalledWith(VENUE, 'cust-L', 90, ORDER, undefined)
+      expect(metricsMock).toHaveBeenCalledWith('cust-L', 90, ORDER, VENUE)
+      expect(metricsMock).not.toHaveBeenCalledWith('cust-K', expect.anything(), expect.anything(), expect.anything())
+    })
+
+    it('con beneficiario validado «sin cliente» (el envoltorio) y sólo un acompañante: no acredita y lee «sin cliente»', async () => {
+      orderCustomerFindMany.mockResolvedValue([ACOMPANANTE])
+      const result = await awardLoyaltyForPaidOrder(
+        { venueId: VENUE, orderId: ORDER, orderTotal: 90, legacyCustomer: null },
+        { cerrar: false, beneficiario: null },
+      )
+      expect(earnPointsMock).not.toHaveBeenCalled()
+      expect(metricsMock).not.toHaveBeenCalled()
+      expect(result).toEqual({ complete: true, errors: [], leyoSinCliente: true })
+    })
+
+    it('regresión: con primario, el acompañante sigue contando su visita (la de siempre)', async () => {
+      orderCustomerFindMany.mockResolvedValue([
+        { customerId: 'cust-A', isPrimary: true, customer: { id: 'cust-A', firstName: 'Ana', lastName: null } },
+        ACOMPANANTE,
+      ])
+      await awardLoyaltyForPaidOrder({ venueId: VENUE, orderId: ORDER, orderTotal: 90 })
+      expect(metricsMock).toHaveBeenCalledWith('cust-K', 90, ORDER, VENUE)
+      expect(earnPointsMock).toHaveBeenCalledWith(VENUE, 'cust-A', 90, ORDER, undefined)
+    })
+  })
+
+  // ── F2 (ronda 1): el resultado dice si ESTA corrida otorgó el sello o los puntos (la auditoría de una re-liga lo necesita) ─
+  describe('F2: `otorgado` — lo que ESTA corrida creó', () => {
+    const PRIMARIO = { customerId: 'cust-A', isPrimary: true, customer: { id: 'cust-A', firstName: 'Ana', lastName: null } }
+
+    it('🔴 earnPoints dice que esta llamada creó el sello: el resultado lo trae', async () => {
+      orderCustomerFindMany.mockResolvedValue([PRIMARIO])
+      earnPointsMock.mockResolvedValue({ pointsEarned: 0, newBalance: 0, otorgado: { sello: true, puntos: false } })
+      const result = await awardLoyaltyForPaidOrder({ venueId: VENUE, orderId: ORDER, orderTotal: 90 }, { cerrar: false })
+      expect(result).toEqual({ complete: true, errors: [], leyoSinCliente: false, otorgado: { sello: true, puntos: false } })
+    })
+
+    it('un reintento idempotente (nada nuevo): sin `otorgado`', async () => {
+      orderCustomerFindMany.mockResolvedValue([PRIMARIO])
+      earnPointsMock.mockResolvedValue({ pointsEarned: 50, newBalance: 7 })
+      const result = await awardLoyaltyForPaidOrder({ venueId: VENUE, orderId: ORDER, orderTotal: 90 })
+      expect(result).toEqual({ complete: true, errors: [] })
     })
   })
 })

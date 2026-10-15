@@ -32,7 +32,9 @@ export async function cerrarLealtadDeLaVenta(venueId: string, orderId: string, c
       loyaltyProcessedAt: null,
       ...(cierre.leyoSinCliente
         ? {
-            orderCustomers: { none: {} },
+            // F1 (ronda 1 post-QA): «sigue sin cliente» = sigue sin PRIMARIO. Un acompañante ligado sin `payments:create` a la
+            // venta cobrada no es beneficiario (la lealtad no lo cuenta) y no debe dejarla pendiente para siempre.
+            orderCustomers: { none: { isPrimary: true } },
             OR: [{ loyaltyLastError: null }, { loyaltyLastError: { not: MARCA_LEALTAD_REABIERTA } }],
           }
         : {}),

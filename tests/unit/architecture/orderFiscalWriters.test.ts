@@ -765,8 +765,8 @@ const NON_FISCAL_ORDER_WRITERS: Record<string, OrderWriter> = {
   // H1 (15-oct): awardLoyaltyForPaidOrder and otorgarLealtadRespetandoReembolsos close/mark ONLY through these two.
   'src/services/shared/cierreDeLealtad.ts#cerrarLealtadDeLaVenta': {
     class: 'METADATA',
-    why: 'closes the loyalty marks; the B1 guard (no customers + no REABIERTA marker) for a run that read no customer',
-    markers: ['orderCustomers: { none: {} }', 'MARCA_LEALTAD_REABIERTA'],
+    why: 'closes the loyalty marks; the B1 guard (no PRIMARY customer + no REABIERTA marker) for a run that read no customer (F1: a companion linked without payments:create is not a beneficiary)',
+    markers: ['orderCustomers: { none: { isPrimary: true } }', 'MARCA_LEALTAD_REABIERTA'],
   },
   'src/services/shared/cierreDeLealtad.ts#registrarErrorDeLealtad': {
     class: 'METADATA',
@@ -1054,6 +1054,11 @@ const ORDER_LOCK_TRANSACTIONS: Record<string, number> = {
   'src/services/kds/kitchenTicketAuthoring.service.ts#authorKitchenTickets': 1,
   // develop f97a82b1: the abandoned-order cleanup rereads each order under the lock
   'src/jobs/abandoned-orders-cleanup.job.ts#AbandonedOrdersCleanupJob.runOnce': 1,
+  // Sellos tardíos, ronda 1 post-QA (F1): «agregar cliente» de la TPV decide primario/acompañante bajo el candado de la venta
+  'src/services/tpv/order.tpv.service.ts#addCustomerToOrder': 1,
+  'src/services/tpv/order.tpv.service.ts#createAndAddCustomerToOrder': 1,
+  // … y el «Agregar cliente» del POS toma el MISMO candado primero (mismo orden que la TPV: sin bloqueos mutuos)
+  'src/services/mobile/order.mobile.service.ts#attachCustomerToOrder': 1,
   // Already on the budget before the final wave
   'src/services/tpv/order.tpv.service.ts#addItemsToOrder': 1,
   'src/services/tpv/order.tpv.service.ts#removeOrderItem': 1,

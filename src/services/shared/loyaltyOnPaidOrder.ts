@@ -23,6 +23,12 @@ import { cerrarLealtadDeLaVenta, registrarErrorDeLealtad } from './cierreDeLealt
  *   3. Puntos —y el sello, que va DENTRO de `earnPoints`— SÓLO para el primario.
  *      Sin `OrderCustomer`, cae al `customerId` heredado que la orden ya trae.
  *
+ * 🔴 F1 (ronda 1 post-QA de sellos tardíos, P1 de Codex; decisión «A» del founder): ligas SIN primario no cuentan para la
+ * lealtad — ni puntos/sello ni visita—: la venta se trata como si esas ligas no existieran (cae al heredado, o «sin
+ * cliente»). Es el estado que deja la TPV cuando alguien SIN `payments:create` liga un cliente a una venta YA cobrada: lo liga
+ * como acompañante (`order.tpv.service.ts`), y ni este cobro en curso ni el reconciliador lo hacen beneficiario. Con primario,
+ * todo sigue igual (los acompañantes cuentan su visita).
+ *
  * 🔴 NUNCA lanza. Corre después de que el dinero ya entró: un fallo de lealtad no
  * puede hacer ver como fallido un cobro que ya se registró. Cada paso va en su
  * propio try/catch para que las métricas de un cliente no le quiten el sello a
@@ -75,6 +81,8 @@ export interface AwardLoyaltyForPaidOrderResult {
    * recibió sus puntos o su sello. A éste no se le dio nada (y, con beneficiario fijado, ni la visita). Sólo aparece entonces.
    */
   otroCliente?: true
+  /** F2 (ronda 1 post-QA): lo que ESTA corrida creó (sello y/o puntos), según `earnPoints`. Sólo aparece si creó algo. */
+  otorgado?: { sello: boolean; puntos: boolean }
 }
 
 export interface OpcionesDeLealtad {
@@ -109,6 +117,8 @@ export async function awardLoyaltyForPaidOrder(
   let leyoSinCliente = false
   // H4, tercera ola: `earnPoints` dijo que OTRO cliente ya recibió la lealtad de esta venta (dos intentos a la vez).
   let otroCliente = false
+  // F2: lo que ESTA corrida creó (lo dice `earnPoints`).
+  let otorgado: { sello: boolean; puntos: boolean } | undefined
   try {
     let staffVenueId: string | undefined
     if (args.staffId) {
@@ -121,12 +131,14 @@ export async function awardLoyaltyForPaidOrder(
 
     // `?? []`: un mock sin lista (o una consulta rara) no puede convertir esto en
     // un TypeError que se trague el resto.
-    const orderCustomers =
+    const todasLasLigas =
       (await prisma.orderCustomer.findMany({
         where: { orderId },
         include: { customer: { select: { id: true, firstName: true, lastName: true } } },
         orderBy: { addedAt: 'asc' },
       })) ?? []
+    // 🔴 F1: sin primario, las ligas no cuentan (acompañantes de una liga sin `payments:create` a una venta ya cobrada).
+    const orderCustomers = todasLasLigas.some(oc => oc.isPrimary) ? todasLasLigas : []
 
     // H4 (segunda ola): con un beneficiario fijado, el que esta lectura resolvería tiene que ser ése, o no se acredita a nadie.
     const fijado = opciones.beneficiario !== undefined
@@ -165,8 +177,9 @@ export async function awardLoyaltyForPaidOrder(
       const acreditarSiEsPrimario = async (oc: (typeof orderCustomers)[number]) => {
         if (!oc.isPrimary || (fijado && oc.customerId !== opciones.beneficiario)) return
         const r = await acreditar(venueId, oc.customerId, nombre(oc.customer), orderTotal, orderId, staffVenueId, 'PRIMARY customer')
-        if (r === 'FALLO') errors.push(`loyalty:${oc.customerId}`)
-        if (r === 'OTRO_CLIENTE') otroCliente = true
+        if (r.estado === 'FALLO') errors.push(`loyalty:${oc.customerId}`)
+        if (r.estado === 'OTRO_CLIENTE') otroCliente = true
+        if (r.otorgado) otorgado = r.otorgado
       }
 
       if (fijado) {
@@ -197,8 +210,9 @@ export async function awardLoyaltyForPaidOrder(
       }
       const acreditarHeredado = async () => {
         const r = await acreditar(venueId, legacy.id, nombre(legacy), orderTotal, orderId, staffVenueId, 'legacy single customer')
-        if (r === 'FALLO') errors.push(`loyalty:${legacy.id}`)
-        if (r === 'OTRO_CLIENTE') otroCliente = true
+        if (r.estado === 'FALLO') errors.push(`loyalty:${legacy.id}`)
+        if (r.estado === 'OTRO_CLIENTE') otroCliente = true
+        if (r.otorgado) otorgado = r.otorgado
       }
       if (fijado) {
         await acreditarHeredado()
@@ -213,6 +227,8 @@ export async function awardLoyaltyForPaidOrder(
         orderId,
         hasCustomerId: false,
         orderCustomersCount: 0,
+        // F1: ligas sin primario (acompañantes sin permiso de cobro) que la lealtad no cuenta.
+        ligasSinPrimario: todasLasLigas.length,
         isGuestOrder: true,
       })
     }
@@ -242,7 +258,8 @@ export async function awardLoyaltyForPaidOrder(
   }
 
   const conOtro = otroCliente ? { otroCliente: true as const } : {}
-  return cerrar ? { complete, errors, ...conOtro } : { complete, errors, leyoSinCliente, ...conOtro }
+  const conOtorgado = otorgado ? { otorgado } : {}
+  return cerrar ? { complete, errors, ...conOtro, ...conOtorgado } : { complete, errors, leyoSinCliente, ...conOtro, ...conOtorgado }
 }
 
 async function acreditar(
@@ -253,12 +270,12 @@ async function acreditar(
   orderId: string,
   staffVenueId: string | undefined,
   quien: string,
-): Promise<'ACREDITADO' | 'FALLO' | 'OTRO_CLIENTE'> {
+): Promise<{ estado: 'ACREDITADO' | 'FALLO' | 'OTRO_CLIENTE'; otorgado?: { sello: boolean; puntos: boolean } }> {
   try {
     const loyaltyResult = await earnPoints(venueId, customerId, orderTotal, orderId, staffVenueId)
     if (loyaltyResult.otroCliente) {
       logger.warn(`⚠️ Loyalty not credited (${quien}): another customer already earned this order`, { orderId, customerId })
-      return 'OTRO_CLIENTE'
+      return { estado: 'OTRO_CLIENTE' }
     }
     logger.info(`🎁 Loyalty points earned (${quien})`, {
       orderId,
@@ -268,7 +285,7 @@ async function acreditar(
       pointsEarned: loyaltyResult.pointsEarned,
       newBalance: loyaltyResult.newBalance,
     })
-    return 'ACREDITADO'
+    return { estado: 'ACREDITADO', ...(loyaltyResult.otorgado ? { otorgado: loyaltyResult.otorgado } : {}) }
   } catch (loyaltyError: any) {
     const message: string = loyaltyError?.message ?? ''
     logger.error('⚠️ Failed to earn loyalty points (payment still succeeded)', {
@@ -277,6 +294,6 @@ async function acreditar(
       error: message,
       reason: message.includes('not enabled') ? 'LOYALTY_DISABLED' : 'LOYALTY_ERROR',
     })
-    return 'FALLO'
+    return { estado: 'FALLO' }
   }
 }

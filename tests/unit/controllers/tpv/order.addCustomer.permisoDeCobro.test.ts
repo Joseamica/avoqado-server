@@ -13,9 +13,11 @@
  */
 const mockLate = jest.fn()
 const mockReabrir = jest.fn()
+const mockAuditSinPermiso = jest.fn()
 jest.mock('@/services/shared/loyaltyOnLateCustomer', () => ({
   awardLoyaltyForLateCustomer: (...a: unknown[]) => mockLate(...a),
   reabrirLealtadSiAplica: (...a: unknown[]) => mockReabrir(...a),
+  auditarLigaSinPermisoDeCobro: (...a: unknown[]) => mockAuditSinPermiso(...a),
 }))
 
 import type { NextFunction, Request, Response } from 'express'
@@ -81,9 +83,15 @@ beforeEach(() => {
   // La venta YA pagada (lectura previa y la de DENTRO de la transacción).
   prismaMock.order.findUnique.mockResolvedValue({ id: ORDER, orderNumber: 'ORD-1' } as any)
   prismaMock.order.findFirst.mockResolvedValue({ paymentStatus: 'PAID' } as any)
+  // F1 (ronda 1): el candado canónico de la venta y el primario vigente, dentro de la transacción.
+  prismaMock.$queryRaw.mockReset()
+  prismaMock.$queryRaw.mockResolvedValue([{ id: ORDER }] as never)
+  prismaMock.orderCustomer.findUnique.mockReset()
   prismaMock.orderCustomer.findUnique.mockResolvedValue(null)
-  prismaMock.orderCustomer.count.mockResolvedValue(0)
+  prismaMock.orderCustomer.findFirst.mockReset()
+  prismaMock.orderCustomer.findFirst.mockResolvedValue(null)
   prismaMock.orderCustomer.create.mockResolvedValue({ id: 'oc-1' } as any)
+  mockAuditSinPermiso.mockResolvedValue(undefined)
   prismaMock.orderCustomer.findMany.mockResolvedValue(LISTA as any)
   mockLate.mockResolvedValue(SELLO)
   mockReabrir.mockImplementation(async () => {
@@ -129,15 +137,18 @@ async function ligarExistente(): Promise<{ status: number; cuerpo: any; next: je
 }
 
 describe('🔴 MEDIO-1: TPV orders/:orderId/customers — el sello tardío exige payments:create', () => {
-  it('🔴 KITCHEN (sólo orders:update): liga a la venta PAGADA (201, la lista de siempre), pero sin sello: no reabre, no llama al sello, loyalty null', async () => {
+  it('🔴 KITCHEN (sólo orders:update): liga a la venta PAGADA (201, la lista de siempre) como ACOMPAÑANTE: no reabre, no sella, loyalty null, y audita', async () => {
     quienLiga({ rol: 'KITCHEN' })
     const { status, cuerpo, next } = await ligarExistente()
     expect(next).not.toHaveBeenCalled()
     expect(status).toBe(201)
     expect(cuerpo).toEqual({ success: true, data: LISTA, loyalty: null, message: 'Customer added to order successfully' })
-    expect(prismaMock.orderCustomer.create).toHaveBeenCalledWith({ data: { orderId: ORDER, customerId: 'cust-1', isPrimary: true } })
+    // F1 (ronda 1): nunca primaria de una venta ya cobrada sin `payments:create` ⇒ el cobro en curso y el reconciliador no la ven.
+    expect(prismaMock.orderCustomer.create).toHaveBeenCalledWith({ data: { orderId: ORDER, customerId: 'cust-1', isPrimary: false } })
     expect(mockReabrir).not.toHaveBeenCalled()
     expect(mockLate).not.toHaveBeenCalled()
+    // F2: la liga que crea audita también sin permiso.
+    expect(mockAuditSinPermiso).toHaveBeenCalledWith({ venueId: VENUE, orderId: ORDER, customerId: 'cust-1', staffId: STAFF })
     expect(await elPosLoDejaria()).toBe(false) // el mismo criterio que la ruta del POS
   })
 
@@ -206,6 +217,7 @@ describe('🔴 MEDIO-1: TPV orders/:orderId/customers — el sello tardío exige
     expect(status).toBe(201)
     expect(cuerpo.loyalty).toBeNull()
     expect(prismaMock.orderCustomer.create).toHaveBeenCalledWith({ data: { orderId: ORDER, customerId: 'cust-1', isPrimary: true } })
+    expect(mockAuditSinPermiso).not.toHaveBeenCalled() // cuenta abierta: no es una venta cobrada
   })
 })
 
@@ -219,15 +231,17 @@ describe('🔴 MEDIO-1: TPV orders/:orderId/customers/create — lo mismo con el
     return { status: r.status.mock.calls[0]?.[0], cuerpo: r.json.mock.calls[0]?.[0], next }
   }
 
-  it('🔴 KITCHEN: crea y liga al cliente (201), pero sin sello', async () => {
+  it('🔴 KITCHEN: crea y liga al cliente (201) como ACOMPAÑANTE de la venta pagada: sin sello, y audita', async () => {
     quienLiga({ rol: 'KITCHEN' })
     const { status, cuerpo, next } = await crear()
     expect(next).not.toHaveBeenCalled()
     expect(status).toBe(201)
     expect(cuerpo).toEqual({ success: true, data: LISTA, loyalty: null, message: 'Customer created and added to order successfully' })
     expect(prismaMock.customer.create).toHaveBeenCalled()
+    expect(prismaMock.orderCustomer.create).toHaveBeenCalledWith({ data: { orderId: ORDER, customerId: 'nuevo', isPrimary: false } })
     expect(mockReabrir).not.toHaveBeenCalled()
     expect(mockLate).not.toHaveBeenCalled()
+    expect(mockAuditSinPermiso).toHaveBeenCalledWith({ venueId: VENUE, orderId: ORDER, customerId: 'nuevo', staffId: STAFF })
   })
 
   it('CASHIER: crea, liga y sella al cliente NUEVO', async () => {

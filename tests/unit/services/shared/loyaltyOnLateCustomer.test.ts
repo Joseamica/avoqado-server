@@ -24,6 +24,7 @@ import { NotFoundError } from '@/errors/AppError'
 import {
   LATE_STAMP_WINDOW_MS,
   MARCA_LEALTAD_REABIERTA,
+  auditarLigaSinPermisoDeCobro,
   awardLoyaltyForLateCustomer,
   decideSaleStamp,
   describeSaleStamp,
@@ -482,6 +483,59 @@ describe('awardLoyaltyForLateCustomer', () => {
     expect(logActionMock.mock.calls[0][0]).toMatchObject({ action: 'CUSTOMER_ATTACHED_TO_PAID_ORDER', entityId: ORDER })
   })
 
+  // ── F2 (ronda 1 post-QA): la llamada que CREA o PROMUEVE la liga audita siempre; una re-liga, sólo si ESTA llamada otorgó ──
+  it('🔴 F2: la fila de la llamada que creó la liga dice `ligaNueva` y si ESTA llamada otorgó (`otorgo`)', async () => {
+    awardMock.mockImplementationOnce(async () => {
+      eventosDeLaVenta.push(EARN(CUST))
+      return { complete: true, errors: [], otorgado: { sello: true, puntos: true } }
+    })
+    await awardLoyaltyForLateCustomer({ venueId: VENUE, orderId: ORDER, customerId: CUST, staffId: STAFF, ligaNueva: true })
+    expect(logActionMock).toHaveBeenCalledTimes(1)
+    expect(logActionMock.mock.calls[0][0].data).toMatchObject({ ligaNueva: true, otorgo: true, stamped: true, decision: 'ELIGIBLE' })
+  })
+
+  it('🔴 F2: una RE-liga (ligaNueva: false) que SÍ otorgó el sello audita — antes: CERO filas si la liga original no auditó (COCINA)', async () => {
+    awardMock.mockImplementationOnce(async () => {
+      eventosDeLaVenta.push(EARN(CUST))
+      return { complete: true, errors: [], otorgado: { sello: true, puntos: false } }
+    })
+    await awardLoyaltyForLateCustomer({ venueId: VENUE, orderId: ORDER, customerId: CUST, staffId: STAFF, ligaNueva: false })
+    expect(logActionMock).toHaveBeenCalledTimes(1)
+    expect(logActionMock.mock.calls[0][0]).toMatchObject({ action: 'CUSTOMER_ATTACHED_TO_PAID_ORDER', staffId: STAFF })
+    expect(logActionMock.mock.calls[0][0].data).toMatchObject({ ligaNueva: false, otorgo: true, stamped: true })
+  })
+
+  it('F2: una re-liga que sólo creó los PUNTOS mientras OTRA llamada creó el sello no audita (audita la del sello: ≤ 2 filas)', async () => {
+    awardMock.mockImplementationOnce(async () => {
+      eventosDeLaVenta.push(EARN(CUST)) // el sello lo creó otra llamada simultánea
+      return { complete: true, errors: [], otorgado: { sello: false, puntos: true } }
+    })
+    await awardLoyaltyForLateCustomer({ venueId: VENUE, orderId: ORDER, customerId: CUST, staffId: STAFF, ligaNueva: false })
+    expect(logActionMock).not.toHaveBeenCalled()
+  })
+
+  it('F2: una re-liga que creó los puntos de una venta SIN sello (negocio sin sellos) sí audita', async () => {
+    prismaMock.loyaltyConfig.findUnique.mockResolvedValue({ active: true, stampsEnabled: false, maxStampsPerDay: 0 } as any)
+    awardMock.mockImplementationOnce(async () => ({ complete: true, errors: [], otorgado: { sello: false, puntos: true } }))
+    await awardLoyaltyForLateCustomer({ venueId: VENUE, orderId: ORDER, customerId: CUST, staffId: STAFF, ligaNueva: false })
+    expect(logActionMock).toHaveBeenCalledTimes(1)
+    expect(logActionMock.mock.calls[0][0].data).toMatchObject({ ligaNueva: false, otorgo: true })
+  })
+
+  it('🔴 F2: la que creó la liga audita aunque la lealtad truene después de leer la venta (reason ERROR); la liga ya quedó', async () => {
+    cardMock.mockRejectedValue(new Error('P1001'))
+    const r = await awardLoyaltyForLateCustomer({ venueId: VENUE, orderId: ORDER, customerId: CUST, staffId: STAFF, ligaNueva: true })
+    expect(r).toBeNull()
+    expect(logActionMock).toHaveBeenCalledTimes(1)
+    expect(logActionMock.mock.calls[0][0].data).toMatchObject({ ligaNueva: true, stamped: false, reason: 'ERROR' })
+  })
+
+  it('F2: una re-liga cuya lealtad truena no audita (no creó la liga ni se sabe que otorgara)', async () => {
+    cardMock.mockRejectedValue(new Error('P1001'))
+    await awardLoyaltyForLateCustomer({ venueId: VENUE, orderId: ORDER, customerId: CUST, staffId: STAFF, ligaNueva: false })
+    expect(logActionMock).not.toHaveBeenCalled()
+  })
+
   it('🔴 BAJO-3: la que creó la liga audita AUNQUE otra llamada simultánea ya le haya dado el sello antes de que ésta leyera', async () => {
     // Sin esto, en la carrera la única fila podía perderse: la que creó leía «ya sellada» y las demás no auditan.
     eventosDeLaVenta = [EARN(CUST)]
@@ -577,11 +631,31 @@ describe('otorgarLealtadRespetandoReembolsos (B2: UN envoltorio para la liga tar
         venueId: VENUE,
         loyaltyEligibleAt: { not: null },
         loyaltyProcessedAt: null,
-        orderCustomers: { none: {} },
+        orderCustomers: { none: { isPrimary: true } },
         OR: [{ loyaltyLastError: null }, { loyaltyLastError: { not: MARCA } }],
       },
       data: { loyaltyProcessedAt: expect.any(Date), loyaltyProcessingAt: null, loyaltyLastError: null },
     })
+  })
+
+  // ── F1 (ronda 1 post-QA): sin PRIMARIO las ligas no cuentan; el beneficiario es el que tendría la venta sin ellas ─────────
+  it('🔴 F1: ligas sin primario (acompañante de una liga sin permiso) ⇒ el beneficiario validado es el heredado de la orden', async () => {
+    prismaMock.$queryRaw.mockResolvedValueOnce([{ staffId: null, primario: null, clientes: 1, sellos: [], puntos: [] }] as never)
+    const legacy = { id: 'cust-heredado', firstName: 'Leo', lastName: null }
+    await otorgarLealtadRespetandoReembolsos({ ...ARGS, legacyCustomer: legacy })
+    expect(awardMock).toHaveBeenCalledWith({ ...ARGS, legacyCustomer: legacy }, { cerrar: false, beneficiario: 'cust-heredado' })
+  })
+
+  it('F1: ligas sin primario y sin heredado ⇒ beneficiario «sin cliente» (null)', async () => {
+    prismaMock.$queryRaw.mockResolvedValueOnce([{ staffId: null, primario: null, clientes: 1, sellos: [], puntos: [] }] as never)
+    await otorgarLealtadRespetandoReembolsos(ARGS)
+    expect(awardMock).toHaveBeenCalledWith(ARGS, { cerrar: false, beneficiario: null })
+  })
+
+  it('F2: el envoltorio pasa `otorgado` de la lealtad (lo que ESTA corrida creó)', async () => {
+    awardMock.mockResolvedValueOnce({ complete: true, errors: [], leyoSinCliente: false, otorgado: { sello: true, puntos: false } })
+    const r = await otorgarLealtadRespetandoReembolsos(ARGS)
+    expect(r).toEqual({ complete: true, errors: [], reembolsada: false, otorgado: { sello: true, puntos: false } })
   })
 
   // ── H4 (auditoría de Codex del código, 15-oct-2026) ─────────────────────────────────────────────────────────────────────
@@ -656,6 +730,47 @@ describe('otorgarLealtadRespetandoReembolsos (B2: UN envoltorio para la liga tar
     prismaMock.order.updateMany.mockRejectedValueOnce(new Error('P1001'))
     const r = await otorgarLealtadRespetandoReembolsos(ARGS)
     expect(r).toEqual({ complete: false, errors: [expect.stringContaining('marker:P1001')], reembolsada: false })
+  })
+})
+
+/**
+ * 🔴 F2 (ronda 1 post-QA): la liga SIN `payments:create` a una venta cobrada (TPV) no pasa por el sello tardío, pero el hecho
+ * «X ligó a Y a una venta YA cobrada» se audita igual, y la fila dice que no hubo lealtad por falta de permiso.
+ */
+describe('auditarLigaSinPermisoDeCobro', () => {
+  it('🔴 venta cobrada: UNA fila CUSTOMER_ATTACHED_TO_PAID_ORDER con el actor, ligaNueva y lealtad SIN_PERMISO', async () => {
+    await auditarLigaSinPermisoDeCobro({ venueId: VENUE, orderId: ORDER, customerId: CUST, staffId: STAFF })
+    expect(logActionMock).toHaveBeenCalledWith({
+      action: 'CUSTOMER_ATTACHED_TO_PAID_ORDER',
+      entity: 'Order',
+      entityId: ORDER,
+      staffId: STAFF,
+      venueId: VENUE,
+      data: {
+        customerId: CUST,
+        orderNumber: 'ORD-1',
+        decision: null,
+        stamped: false,
+        reason: 'SIN_PERMISO',
+        lealtad: 'SIN_PERMISO',
+        ligaNueva: true,
+        otorgo: false,
+        minutosDesdeElCobro: 30,
+      },
+    })
+    expect(awardMock).not.toHaveBeenCalled()
+  })
+
+  it('cuenta abierta: no audita (no es una venta cobrada)', async () => {
+    conVenta({ paymentStatus: 'PENDING' })
+    await auditarLigaSinPermisoDeCobro({ venueId: VENUE, orderId: ORDER, customerId: CUST, staffId: STAFF })
+    expect(logActionMock).not.toHaveBeenCalled()
+  })
+
+  it('nunca lanza: si la lectura truena, la liga (que ya quedó) no se entera', async () => {
+    prismaMock.order.findFirst.mockRejectedValueOnce(new Error('P1001'))
+    await expect(auditarLigaSinPermisoDeCobro({ venueId: VENUE, orderId: ORDER, customerId: CUST, staffId: null })).resolves.toBeUndefined()
+    expect(logActionMock).not.toHaveBeenCalled()
   })
 })
 

@@ -265,7 +265,9 @@ async function fotoDelBeneficiario(args: AwardLoyaltyForPaidOrderArgs): Promise<
       FROM "Order" o WHERE o."id" = ${args.orderId} AND o."venueId" = ${args.venueId}`)) ?? []
   const foto = filas[0]
   if (!foto) return null
-  const beneficiario = Number(foto.clientes) > 0 ? (foto.primario ?? null) : (args.legacyCustomer?.id ?? null)
+  // 🔴 F1 (ronda 1 post-QA): la MISMA regla que `awardLoyaltyForPaidOrder`: ligas sin primario (acompañantes de una liga sin
+  // `payments:create` a una venta cobrada) no cuentan; el beneficiario es el de la venta sin ellas (el heredado, o nadie).
+  const beneficiario = foto.primario ?? args.legacyCustomer?.id ?? null
   const duenos = [...(foto.sellos ?? []), ...(foto.puntos ?? [])]
   return { beneficiario, otroDueno: duenos.find(d => d !== beneficiario) ?? null, staffId: foto.staffId ?? null }
 }
@@ -365,7 +367,11 @@ export async function otorgarLealtadRespetandoReembolsos(
     : await awardLoyaltyForPaidOrder(args, { cerrar: false })
   const errores = [...resultado.errors]
   // H4, tercera ola: otro intento ganó la venta para OTRO cliente mientras ésta acreditaba; se cierra como OTHER_CUSTOMER.
-  const conOtro = resultado.otroCliente ? { otroCliente: true as const } : {}
+  // F2 (ronda 1): y lo que ESTA corrida creó, para la auditoría de una re-liga.
+  const conOtro = {
+    ...(resultado.otroCliente ? { otroCliente: true as const } : {}),
+    ...(resultado.otorgado ? { otorgado: resultado.otorgado } : {}),
+  }
 
   if ((await contarReembolsos(prisma, venueId, orderId)) > 0) {
     // 🔴 Auditoría A #2: el reembolso entró MIENTRAS se otorgaba. Si su reversa corrió antes de que el sello existiera, no
@@ -379,9 +385,10 @@ export async function otorgarLealtadRespetandoReembolsos(
     return { complete: true, errors: errores, reembolsada: true, ...conOtro }
   }
 
-  if (!resultado.complete) return { complete: false, errors: errores, reembolsada: false }
+  const conOtorgado = resultado.otorgado ? { otorgado: resultado.otorgado } : {}
+  if (!resultado.complete) return { complete: false, errors: errores, reembolsada: false, ...conOtorgado }
   const falloAlCerrar = await cerrarSinLanzar(venueId, orderId, resultado.leyoSinCliente === true)
-  if (falloAlCerrar) return { complete: false, errors: [...errores, falloAlCerrar], reembolsada: false }
+  if (falloAlCerrar) return { complete: false, errors: [...errores, falloAlCerrar], reembolsada: false, ...conOtorgado }
   return { complete: true, errors: errores, reembolsada: false, ...conOtro }
 }
 
@@ -470,17 +477,43 @@ export async function describeSaleStamp(args: { venueId: string; orderId: string
   return describir(args.venueId, args.customerId, venta, programa, nowMs)
 }
 
+const esVentaCobrada = (paymentStatus: string): boolean => paymentStatus === 'PAID' || paymentStatus === 'REFUNDED'
+
+/**
+ * La ÚNICA escritura de `CUSTOMER_ATTACHED_TO_PAID_ORDER` (spec §3.1): quién ligó a quién a una venta YA cobrada, y qué pasó
+ * con su lealtad. Fire-and-forget (`logAction` nunca lanza), fuera de toda transacción.
+ */
+function auditarLigaAVentaCobrada(args: {
+  venueId: string
+  orderId: string
+  customerId: string
+  staffId?: string | null
+  data: Record<string, unknown>
+}): void {
+  void logAction({
+    action: 'CUSTOMER_ATTACHED_TO_PAID_ORDER',
+    entity: 'Order',
+    entityId: args.orderId,
+    staffId: args.staffId ?? null,
+    venueId: args.venueId,
+    data: { customerId: args.customerId, ...args.data } as Prisma.InputJsonValue,
+  })
+}
+
 /**
  * Después de ligar al cliente: si la venta está saldada, dentro de 24 h y el cliente es (o será) su primario, corre la
  * lealtad completa (visita, puntos y sello, todo idempotente) — también si el sello de este cliente ya existe, para completar
  * lo que falte. Siempre por `otorgarLealtadRespetandoReembolsos` (B2). `null` = venta abierta o inexistente o falla: la app
  * no pinta nada.
  *
- * `ligaNueva` (BAJO-3, full-testing 15-oct-2026): ¿ESTA llamada creó (o promovió a primario) la liga del cliente? La fila de
- * auditoría `CUSTOMER_ATTACHED_TO_PAID_ORDER` es del hecho «X ligó a Y», y ese hecho lo hizo UNA llamada. Seis «Agregar
- * cliente» del mismo cliente a la vez leían la venta sin sello y cada una auditaba (quedaron dos filas). Con `false` la
- * lealtad corre igual (idempotente) pero no se audita; con `true` se audita (una vez por liga creada); sin decirlo
- * (`undefined`), la regla de antes.
+ * `ligaNueva` — ¿ESTA llamada creó (o promovió a primario) la liga del cliente? Decide la fila de auditoría
+ * `CUSTOMER_ATTACHED_TO_PAID_ORDER` (BAJO-3 + F2 de la ronda 1 post-QA, 15-oct-2026):
+ *   · `true`: audita SIEMPRE (también si la lealtad truena después de leer la venta: `reason: 'ERROR'`). Una fila por liga.
+ *   · `false` (re-liga: la liga ya existía): audita SÓLO si ESTA llamada otorgó — creó el sello, o los puntos de una venta que
+ *     no tiene sello (si el sello lo creó otra llamada simultánea, ésa audita): así una carrera deja ≤ 2 filas, las dos ciertas.
+ *     Antes, una re-liga nunca auditaba, y la COCINA ligaba sin fila (ruta sin permiso) y el cajero re-ligaba y sellaba: CERO.
+ *   · `undefined` (quien llama no lo sabe): la regla de antes — no se audita la re-liga de una venta ya sellada para él.
+ * La fila lleva `ligaNueva` y `otorgo` cuando quien llama lo dijo.
  */
 export async function awardLoyaltyForLateCustomer(args: {
   venueId: string
@@ -490,17 +523,23 @@ export async function awardLoyaltyForLateCustomer(args: {
   ligaNueva?: boolean
 }): Promise<SaleStampOutcome | null> {
   const { venueId, orderId, customerId } = args
+  const nowMs = Date.now()
+  // Fuera del try: si la lealtad truena DESPUÉS de leer la venta, la liga nueva se audita igual (F2).
+  let venta: Venta | null = null
+  let antes: SaleStampDecision | null = null
   try {
-    const nowMs = Date.now()
-    const [venta, programa] = await Promise.all([leerVenta(prisma, venueId, orderId), leerPrograma(venueId)])
+    const [leida, programa] = await Promise.all([leerVenta(prisma, venueId, orderId), leerPrograma(venueId)])
+    venta = leida
     if (!venta) return null
     const foto = fotoPara(venta, customerId)
-    const antes = decideSaleStamp(foto, nowMs)
+    antes = decideSaleStamp(foto, nowMs)
     // Cuenta aún sin saldar: quien la salde corre la lealtad, y este cliente ya es su primario. Decir «no suma» sería falso.
     if (antes === 'OPEN') return null
 
     // Tipo explícito: `antes` ya viene sin 'OPEN' y una relectura puede devolver cualquier decisión.
     let decision: SaleStampDecision = antes
+    // F2: ¿ESTA llamada otorgó? (el sello, o los puntos de una venta sin sello).
+    let otorgo = false
     // 🔴 SIEMPRE que sea elegible, aunque el sello de ESTE cliente ya exista (auditoría A #1): la llamada es idempotente y
     // completa los puntos o la visita que una caída entre el sello y los puntos hubiera dejado pendientes.
     if (esElegibleParaLealtad(foto, nowMs)) {
@@ -516,6 +555,7 @@ export async function awardLoyaltyForLateCustomer(args: {
         // No se pierde: la liga reabrió la venta en su transacción y el reconciliador la reintenta.
         logger.warn('[LEALTAD TARDÍA] la lealtad de la venta quedó incompleta', { venueId, orderId, customerId, errors: resultado.errors })
       }
+      let ventaConSello = true // sin relectura (reembolso u otro cliente), unos puntos sueltos no cuentan como «otorgó»
       if (resultado.reembolsada) {
         // El reembolso entró entre la lectura y el otorgamiento, o mientras se otorgaba (el envoltorio ya revirtió el sello).
         logger.warn('[LEALTAD TARDÍA] la venta se reembolsó mientras se ligaba: no suma sello', { venueId, orderId, customerId })
@@ -525,8 +565,11 @@ export async function awardLoyaltyForLateCustomer(args: {
         decision = 'OTHER_CUSTOMER'
       } else {
         const despues = await leerVenta(prisma, venueId, orderId)
-        decision = despues ? decideSaleStamp(fotoPara(despues, customerId), nowMs) : antes
+        const fotoDespues = despues ? fotoPara(despues, customerId) : null
+        decision = fotoDespues ? decideSaleStamp(fotoDespues, nowMs) : antes
+        ventaConSello = fotoDespues ? fotoDespues.stampOwnerCustomerId !== null : true
       }
+      otorgo = resultado.otorgado?.sello === true || (resultado.otorgado?.puntos === true && !ventaConSello)
     }
     if (decision === 'NO_ANCHOR') {
       logger.warn('[LEALTAD TARDÍA] venta pagada sin hora de cobro: no se puede medir el plazo, no se sella', { venueId, orderId })
@@ -541,38 +584,86 @@ export async function awardLoyaltyForLateCustomer(args: {
       await motivo(decision, venueId, customerId, programa, nowMs),
     )
 
-    // Auditoría (spec §3.1): quién ligó a quién a una venta YA cobrada, y si sumó. 🔴 BAJO-3: cuando quien llama sabe si
-    // ESTA llamada creó la liga (`ligaNueva`), eso decide: audita sólo la que la creó — también si otra llamada simultánea ya
-    // le dio el sello antes de que ésta leyera (si no, la fila se perdía) — y nunca las demás. Sin saberlo, la regla de
-    // antes: no se audita una re-liga de una venta que ya tenía su sello para este cliente (doble toque, no un hecho nuevo).
-    const auditar = args.ligaNueva ?? antes !== 'STAMPED'
-    if (auditar && (venta.paymentStatus === 'PAID' || venta.paymentStatus === 'REFUNDED')) {
-      void logAction({
-        action: 'CUSTOMER_ATTACHED_TO_PAID_ORDER',
-        entity: 'Order',
-        entityId: orderId,
-        staffId: args.staffId ?? null,
+    const auditar = args.ligaNueva === undefined ? antes !== 'STAMPED' : args.ligaNueva || otorgo
+    if (auditar && esVentaCobrada(venta.paymentStatus)) {
+      auditarLigaAVentaCobrada({
         venueId,
+        orderId,
+        customerId,
+        staffId: args.staffId,
         data: {
-          customerId,
           orderNumber: venta.orderNumber,
           // La decisión ANTES de otorgar (ELIGIBLE, WINDOW_EXPIRED…): con `stamped` dice qué se pidió y qué pasó.
           decision: antes,
           stamped: outcome.stamped,
           reason: outcome.reason,
           minutosDesdeElCobro: minutosDesde(foto.settledAt, nowMs),
+          ...(args.ligaNueva === undefined ? {} : { ligaNueva: args.ligaNueva, otorgo }),
         },
       })
     }
     return outcome
   } catch (error) {
-    logger.error('[LEALTAD TARDÍA] falló; el cliente ya quedó ligado a la venta', {
-      venueId,
-      orderId,
-      customerId,
+    const mensaje = error instanceof Error ? error.message : String(error)
+    logger.error('[LEALTAD TARDÍA] falló; el cliente ya quedó ligado a la venta', { venueId, orderId, customerId, error: mensaje })
+    // 🔴 F2: la llamada que CREÓ la liga audita siempre — también cuando su lealtad truena (antes la fila se perdía).
+    if (args.ligaNueva === true && venta && esVentaCobrada(venta.paymentStatus)) {
+      auditarLigaAVentaCobrada({
+        venueId,
+        orderId,
+        customerId,
+        staffId: args.staffId,
+        data: {
+          orderNumber: venta.orderNumber,
+          decision: antes,
+          stamped: false,
+          reason: 'ERROR',
+          error: mensaje.slice(0, 500),
+          minutosDesdeElCobro: minutosDesde(fotoPara(venta, customerId).settledAt, nowMs),
+          ligaNueva: true,
+          otorgo: false,
+        },
+      })
+    }
+    return null
+  }
+}
+
+/**
+ * 🔴 F2 (ronda 1 post-QA): la liga de la TPV hecha por alguien SIN `payments:create` a una venta YA cobrada no pasa por el
+ * sello tardío (decisión «A»: entra como acompañante y no otorga nada), pero el hecho «X ligó a Y a una venta cobrada» se
+ * audita igual — es justo lo que un dueño quiere ver de un rol restringido. La fila dice `lealtad: 'SIN_PERMISO'`. Sólo la
+ * llama quien CREÓ la liga. Nunca lanza: corre después de que la liga ya quedó.
+ */
+export async function auditarLigaSinPermisoDeCobro(args: {
+  venueId: string
+  orderId: string
+  customerId: string
+  staffId?: string | null
+}): Promise<void> {
+  try {
+    const venta = await leerVenta(prisma, args.venueId, args.orderId)
+    if (!venta || !esVentaCobrada(venta.paymentStatus)) return
+    auditarLigaAVentaCobrada({
+      ...args,
+      data: {
+        orderNumber: venta.orderNumber,
+        decision: null,
+        stamped: false,
+        reason: 'SIN_PERMISO',
+        lealtad: 'SIN_PERMISO',
+        ligaNueva: true,
+        otorgo: false,
+        minutosDesdeElCobro: minutosDesde(fotoPara(venta, args.customerId).settledAt, Date.now()),
+      },
+    })
+  } catch (error) {
+    logger.error('[LEALTAD TARDÍA] no se pudo auditar una liga sin permiso de cobro (la liga ya quedó)', {
+      venueId: args.venueId,
+      orderId: args.orderId,
+      customerId: args.customerId,
       error: error instanceof Error ? error.message : String(error),
     })
-    return null
   }
 }
 

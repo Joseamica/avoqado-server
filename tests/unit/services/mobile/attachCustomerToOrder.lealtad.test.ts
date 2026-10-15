@@ -19,6 +19,8 @@ import { attachCustomerToLatestPayment, attachCustomerToPayment } from '@/servic
 const VENUE = 'venue-1'
 let enTransaccion = false
 let reabrioDentroDeLaTransaccion: boolean | null = null
+/** ¿Cada `SELECT … FOR UPDATE` de la venta ocurrió dentro de la transacción de la liga? */
+let candadosDentro: boolean[] = []
 const SELLO = { stampsEnabled: true, stamped: true, reason: null, stampsEarned: 2, stampsRequired: 7, rewardReady: false }
 const ORDEN_LIGADA = {
   id: 'order-1',
@@ -31,6 +33,13 @@ const ORDEN_LIGADA = {
 
 beforeEach(() => {
   reabrioDentroDeLaTransaccion = null
+  candadosDentro = []
+  // Ronda 1: la liga toma primero el candado canónico de la venta (`lockExistingOrderForPayment`).
+  prismaMock.$queryRaw.mockReset()
+  prismaMock.$queryRaw.mockImplementation((async () => {
+    candadosDentro.push(enTransaccion)
+    return [{ id: 'order-1' }]
+  }) as never)
   prismaMock.$transaction.mockImplementation(async (cb: any) => {
     enTransaccion = true
     try {
@@ -134,6 +143,24 @@ describe('attachCustomerToPayment — sello tardío', () => {
   })
 })
 
+describe('🔴 ronda 1: la liga del POS toma el candado de la venta PRIMERO (mismo orden que la TPV: sin bloqueos mutuos)', () => {
+  it('la primera sentencia es el `SELECT … FOR UPDATE` de la venta, y la transacción lleva el presupuesto de ese candado', async () => {
+    await attachCustomerToPayment(VENUE, 'pay-1', 'cust-1', 'staff-1')
+    expect(candadosDentro).toEqual([true])
+    const [sql] = prismaMock.$queryRaw.mock.calls[0] as unknown as [TemplateStringsArray]
+    expect(sql.join('?')).toMatch(/FROM "Order"[\s\S]*FOR UPDATE/)
+    expect(prismaMock.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.orderCustomer.findUnique.mock.invocationCallOrder[0])
+    expect(prismaMock.$transaction).toHaveBeenCalledWith(expect.any(Function), { timeout: 15_000, maxWait: 5_000 })
+  })
+
+  it('la venta ya no es de este negocio bajo el candado ⇒ 404, sin liga ni lealtad', async () => {
+    prismaMock.$queryRaw.mockResolvedValue([] as never)
+    await expect(attachCustomerToPayment(VENUE, 'pay-1', 'cust-1', 'staff-1')).rejects.toThrow('Order not found')
+    expect(prismaMock.orderCustomer.create).not.toHaveBeenCalled()
+    expect(mockLate).not.toHaveBeenCalled()
+  })
+})
+
 describe('attachCustomerToLatestPayment — el actor no es el staffId del body', () => {
   it('🔴 el body filtra processedById; el sello lleva al usuario AUTENTICADO', async () => {
     await attachCustomerToLatestPayment(VENUE, {
@@ -203,12 +230,27 @@ describe('🔴 BAJO-3: la liga es idempotente ante el MISMO cliente agregado a l
     expect(mockLate).toHaveBeenCalledWith(expect.objectContaining({ ligaNueva: false }))
   })
 
-  it('regresión: OTRO P2002 (no es la liga de este cliente, p. ej. el primario de otro cliente a la vez) se propaga, sin reintentar', async () => {
+  it('regresión + M1: un P2002 tras el cual ESTE cliente NO quedó ligado (p. ej. el primario de otro cliente a la vez) se propaga, sin reintentar', async () => {
     const otro = choque(['orderId'])
     prismaMock.$transaction.mockRejectedValueOnce(otro)
+    // La relectura de la liga (orderId, customerId) no la encuentra.
     await expect(attachCustomerToPayment(VENUE, 'pay-1', 'cust-1', 'staff-1')).rejects.toBe(otro)
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
+    expect(prismaMock.orderCustomer.findUnique).toHaveBeenCalledWith({
+      where: { orderId_customerId: { orderId: 'order-1', customerId: 'cust-1' } },
+      select: { id: true },
+    })
     expect(mockLate).not.toHaveBeenCalled()
+  })
+
+  it('🔴 M1: el choque reportado sobre el índice del PRIMARIO (otro orden de revisión de índices) pero con ESTE cliente ya ligado ⇒ se reintenta y es éxito', async () => {
+    prismaMock.$transaction.mockRejectedValueOnce(choque(['orderId']))
+    prismaMock.orderCustomer.findUnique.mockResolvedValue({ id: 'oc-1', isPrimary: true } as any)
+    prismaMock.orderCustomer.findFirst.mockResolvedValue({ id: 'oc-1' } as any)
+    await expect(attachCustomerToPayment(VENUE, 'pay-1', 'cust-1', 'staff-1')).resolves.toMatchObject({ id: 'order-1' })
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(2)
+    expect(prismaMock.orderCustomer.create).not.toHaveBeenCalled()
+    expect(mockLate).toHaveBeenCalledWith(expect.objectContaining({ ligaNueva: false }))
   })
 
   it('regresión: un error que no es choque (la base cayó) se propaga, sin reintentar', async () => {
@@ -220,6 +262,7 @@ describe('🔴 BAJO-3: la liga es idempotente ante el MISMO cliente agregado a l
   it('el reintento tiene tope: si el choque se repite (la liga aparece y desaparece), al tercer intento el error sube', async () => {
     const c = choque(['orderId', 'customerId'])
     prismaMock.$transaction.mockRejectedValueOnce(c).mockRejectedValueOnce(c).mockRejectedValueOnce(c)
+    prismaMock.orderCustomer.findUnique.mockResolvedValue({ id: 'oc-1', isPrimary: true } as any)
     await expect(attachCustomerToPayment(VENUE, 'pay-1', 'cust-1', 'staff-1')).rejects.toBe(c)
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(3)
     expect(mockLate).not.toHaveBeenCalled()
