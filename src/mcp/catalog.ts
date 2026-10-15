@@ -11,6 +11,11 @@ import { directoryInputSchema } from './directory/input'
 
 /** Explicit effects, never guessed from a name or permission suffix. New tools must declare one. */
 export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
+  venue_administration: 'read',
+  update_venue_business_profile: 'write',
+  update_venue_organization: 'write',
+  update_venue_responsible_contact: 'write',
+  change_venue_administrative_status: 'write',
   accept_hybrid_purchase: 'write',
   account_ledger: 'read',
   account_mapping: 'read',

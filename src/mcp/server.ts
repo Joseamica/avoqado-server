@@ -11,6 +11,7 @@ import { beginWork, isRequestCancelledError, pendingCancellation } from '@/utils
 import { instrumentTools, recordCancelledToolCall } from './instrument'
 import { configureToolCatalog } from './catalog'
 import { registerVenueTools } from './tools/venues'
+import { registerVenueAdministrationTools } from './tools/venueAdministration'
 import { registerSalesTools } from './tools/sales'
 import { registerSettlementReportTools } from './tools/settlementReport'
 import { registerOrderTools } from './tools/orders'
@@ -102,6 +103,7 @@ export interface ToolRegistrationFlags {
 export function registerAllTools(server: McpServer, scope: McpScope, flags: ToolRegistrationFlags): void {
   registerHelpTools(server, scope) // product guide for everyone; internal docs only when scope.isSuperAdmin
   registerVenueTools(server, scope)
+  registerVenueAdministrationTools(server, scope)
   registerSalesTools(server, scope)
   registerSettlementReportTools(server, scope)
   registerOrderTools(server, scope)
