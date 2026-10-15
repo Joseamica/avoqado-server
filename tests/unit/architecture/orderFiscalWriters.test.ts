@@ -836,6 +836,8 @@ const NON_FISCAL_ORDER_WRITERS: Record<string, OrderWriter> = {
     why: 'provider status marks',
   },
   'src/services/mobile/order.mobile.service.ts#cancelOrderInTransaction': CANCEL('assertOrderCancellableUnderLock'),
+  // Tarjetas de regalo (A8): cancela bajo el candado de topología después de regresar el saldo; sin columnas de dinero.
+  'src/services/mobile/order.mobile.service.ts#returnGiftBalanceAndCancelOrder': CANCEL('assertNoLiveTerminalCharge'),
   'src/services/dashboard/order.dashboard.service.ts#deleteOrder': CANCEL('assertOrderCancellableUnderLock'),
   'src/services/mobile/areaTicketV7.mobile.service.ts#cancelAreaTicketCheckout': CANCEL('assertOrderCancellableUnderLock'),
   // R11-8 (sellos tardíos): otro canal cerró la venta de vales; la sesión cierra con ella. Sólo suelta el reclamo de la terminal
@@ -1119,6 +1121,9 @@ const ORDER_LOCK_TRANSACTIONS: Record<string, number> = {
   'src/services/pos-sync/posSyncOrderItem.service.ts#applyPosOrderItemEvent': 1,
   // Payment, refund and delivery lanes that take the same lock (outside the review's list; same rule)
   'src/services/mobile/order.mobile.service.ts#payCashOrder': 1,
+  // Tarjetas de regalo (A8): el cobro con saldo abre su tx y el núcleo toma la Order; regresar el saldo toma la topología.
+  'src/services/mobile/order.mobile.service.ts#payGiftCardBalanceOnOrder': 1,
+  'src/services/mobile/order.mobile.service.ts#returnGiftBalanceAndCancelOrder': 1,
   'src/services/dashboard/order.dashboard.service.ts#settleOrder': 1,
   'src/services/dashboard/manualPayment.service.ts#createManualPayment': 1,
   'src/services/dashboard/customer.dashboard.service.ts#settleCustomerBalance': 1,

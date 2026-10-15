@@ -61,6 +61,12 @@ const VERDAD_EXTERNA_VIGILADA = ['lockExistingOrderForPayment', 'findLiveTermina
 
 const INVENTARIO: Record<string, Clase> = {
   'services/mobile/order.mobile.service.ts#cancelOrderInTransaction': { clase: 'PROTEGIDA', marcadores: PROTEGIDA_POR_EL_GUARD },
+  // Tarjetas de regalo (spec § 5.4.4): regresar el saldo y cancelar. Candado de topología (comandas → Order → mesas) +
+  // cobro de terminal vivo; el guardia general no se relaja: este camino exige que TODOS los pagos sean de saldo.
+  'services/mobile/order.mobile.service.ts#returnGiftBalanceAndCancelOrder': {
+    clase: 'PROTEGIDA',
+    marcadores: ['lockTableOrderScope(', 'assertNoLiveTerminalCharge'],
+  },
   'services/dashboard/order.dashboard.service.ts#deleteOrder': { clase: 'PROTEGIDA', marcadores: PROTEGIDA_POR_EL_GUARD },
   'services/mobile/areaTicketV7.mobile.service.ts#cancelAreaTicketCheckout': { clase: 'PROTEGIDA', marcadores: PROTEGIDA_POR_EL_GUARD },
   // Fusión: candado de LAS DOS órdenes en una sentencia + cobro vivo del ORIGEN.

@@ -10,6 +10,7 @@ import type { AutomaticServiceChargeCapture } from './service-charge.mobile.serv
  * - Order Payment: Create order first, then pay via TPV
  */
 
+import { createHash } from 'crypto'
 import { OrderSource, OrderType, PaymentFundsFlow, PaymentMethod, Prisma } from '@prisma/client'
 import type { ContratoDePrecio, OrderStatus, OriginSystem, PaymentStatus, PaymentType } from '@prisma/client'
 import socketManager from '../../communication/sockets'
@@ -24,7 +25,7 @@ import { resolveTenderForCharge, computeTenderCommission, type ResolvedTenderCha
 // response carries an identical `digitalReceipt` shape — mobile and TPV never
 // drift on how the receipt QR (accessKey + receiptUrl + autofactura) is built.
 import { mapDigitalReceiptResponse, resolveAutofacturaAvailable, type OrderInventoryWarning } from '../tpv/payment.tpv.service'
-import { enqueuePaymentCommissionInTx, enqueuePaymentEffect } from '../tpv/paymentEffects.service'
+import { enqueuePaymentCommissionInTx, enqueuePaymentEffect, enqueueRefundPaymentEffectsInTx } from '../tpv/paymentEffects.service'
 import {
   buildItemDiscountRow,
   calculateDiscountPesos,
@@ -55,6 +56,7 @@ import {
   lockExistingOrderForPayment,
   recordPendingPaymentShiftReconciliation,
   resolvePaymentShiftReconciliationEnabled,
+  type CapturedPaymentChannel,
 } from '../shared/paymentShiftClaim'
 // La aritmética canónica del saldo: UNA sola definición de "cuánto se lleva
 // pagado y cuánto falta" para los cuatro caminos de cobro. Se extrajo de este
@@ -62,8 +64,20 @@ import {
 import { claseDeEstado, computeOrderBalance, impuestoQueSeCobraAparte, summarizeRefunds, type RefundState } from '../shared/orderBalance'
 import { rechazarSiEsImportada } from '../shared/ordenImportada'
 import { rechazarSiLaCuentaTieneVales } from '../shared/cuentaConVales'
-import { desactivarSobresPendientesDeCuentaEnTx, rechazarSiEsCuentaDeTarjetas } from '../giftCards/cuentaDeTarjetas'
-import { activarSobresDeCuentaPagadaEnTx } from '../giftCards/giftCardLedger'
+import { desactivarSobresPendientesDeCuentaEnTx, esCuentaDeTarjetasEnTx, rechazarSiEsCuentaDeTarjetas } from '../giftCards/cuentaDeTarjetas'
+import {
+  activarSobresDeCuentaPagadaEnTx,
+  canjearSobresEnTx,
+  lockGiftCardsForUpdate,
+  revertirCanjeEnTx,
+  saldoUsable,
+  sobresDelCanje,
+  type LockedGiftCard,
+} from '../giftCards/giftCardLedger'
+import { hashGiftCardCode, normalizeGiftCardCode } from '../giftCards/giftCardCode'
+import { GiftCardError } from '../giftCards/giftCardErrors'
+import { MAX_SOBRES_POR_CUENTA, formatoPesos } from '../giftCards/giftCardLimits'
+import { ensureGiftCardTender, isGiftCardTenderKind, resolveGiftCardTenderForChargeInTx } from '../giftCards/giftCardTender'
 import { RECIBO_CANONICO } from '../shared/reciboCanonico'
 import { MAX_TERMINAL_PAYMENT_CENTS } from '../shared/inputCaps'
 import type { SaleStampOutcome } from '../shared/loyaltyOnLateCustomer'
@@ -2660,9 +2674,13 @@ async function liberarMesaSiQuedoSaldada(venueId: string, tableId: string | null
   }
 }
 
-/** La cuenta como la ve el núcleo justo después de tomar su candado (relectura + pagos previos, paso 3 del cobro). */
+/**
+ * La cuenta como la ve el núcleo justo después de tomar su candado (relectura + pagos previos, paso 3 del cobro).
+ * De SÓLO LECTURA (A8, ruling 4): el gancho recibe los objetos vivos que el núcleo usa después —`fresh.version` en la
+ * CAS, `previousPayments` en la aritmética—; un gancho que los mutara cambiaría el cobro sin que nadie lo viera.
+ */
 export interface CuentaBajoCandado {
-  fresh: {
+  readonly fresh: Readonly<{
     id: string
     orderNumber: string
     paymentStatus: PaymentStatus
@@ -2676,8 +2694,8 @@ export interface CuentaBajoCandado {
     version: number
     areaTicketCode: string | null
     tableId: string | null
-  }
-  previousPayments: Array<{ amount: Prisma.Decimal; tipAmount: Prisma.Decimal; type: PaymentType | null }>
+  }>
+  readonly previousPayments: ReadonlyArray<Readonly<{ amount: Prisma.Decimal; tipAmount: Prisma.Decimal; type: PaymentType | null }>>
 }
 
 /** Lo que el núcleo recibe ya resuelto FUERA de la transacción (una caída de settings jamás revierte un cobro). */
@@ -2701,6 +2719,12 @@ export interface AbonoEnTxEntrada {
   /** Corre bajo el candado de la Order, con la cuenta releída y sus pagos previos, ANTES de cualquier escritura. */
   trasCandadoDeOrden?: (tx: Prisma.TransactionClient, cuenta: CuentaBajoCandado) => Promise<void>
   dentroDeLaTx?: CashPaymentInput['dentroDeLaTx']
+  /**
+   * A quién atribuye la auditoría este abono (A8, ruling 3): `turno` va a `PAYMENT_WITHOUT_SHIFT.data.channel` y al aviso
+   * de cobro sobre una cuenta con reembolsos; `reapertura`, a `ORDER_REOPENED_BY_CAPTURED_PAYMENT.data.canal`. Sin él,
+   * los de `payCashOrder` de siempre, byte por byte (`'payCashOrder'` y `'payCashOrder:cola'` / `'payCashOrder:registro'`).
+   */
+  canal?: { turno: CapturedPaymentChannel; reapertura: string }
 }
 
 export interface AbonoEnTx {
@@ -2753,6 +2777,9 @@ export async function registrarAbonoEnTx(
     tenderTypeId: entrada.tender && 'ref' in entrada.tender ? entrada.tender.ref.id : undefined,
     tenderRevision: entrada.tender && 'ref' in entrada.tender ? entrada.tender.ref.revision : undefined,
   }
+  // Tarea A8 (ruling 3): quién registra el abono en la auditoría. Sin `canal`, `payCashOrder` como siempre.
+  const canalDeTurno: CapturedPaymentChannel = entrada.canal?.turno ?? 'payCashOrder'
+  const canalDeReapertura = entrada.canal?.reapertura ?? (input.isOfflineReplay ? 'payCashOrder:cola' : 'payCashOrder:registro')
 
   // 🔴 R13-1 (Codex r17 #1): el medio se resuelve ANTES de la sesión de vales (sólo lee; ningún candado), para que ella sepa si
   // el dinero ya se capturó. También va antes del saldo: decide si un exceso es cambio (una tarjeta o transferencia externa ya
@@ -2900,7 +2927,7 @@ export async function registrarAbonoEnTx(
           originSystem: fresh.originSystem,
           cobrado: new Prisma.Decimal(amount + tip).dividedBy(100),
           cubreComoCancelada,
-          canal: input.isOfflineReplay ? 'payCashOrder:cola' : 'payCashOrder:registro',
+          canal: canalDeReapertura,
           idempotencyKey: input.idempotencyKey ?? null,
           staffId: effectiveStaffId ?? null,
         })
@@ -2939,7 +2966,7 @@ export async function registrarAbonoEnTx(
     logger.warn('⚠️ [Reembolso] cobro sobre una cuenta con reembolsos — el saldo NO los cuenta, revisar', {
       orderId,
       venueId,
-      channel: 'payCashOrder',
+      channel: canalDeTurno,
       refundState: balance.refundState,
       refundedAmount: balance.refundedAmount.toFixed(2),
     })
@@ -3056,7 +3083,7 @@ export async function registrarAbonoEnTx(
     paymentId: newPayment.id,
     orderId,
     staffId: effectiveStaffId ?? null,
-    channel: 'payCashOrder',
+    channel: canalDeTurno,
     amountPesos: shiftAmount,
     tipPesos: shiftTip,
   })
@@ -3688,6 +3715,590 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
     // El POS ya no tiene que deducirlo del carrito.
     ...balance,
   }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// TARJETAS DE REGALO — cobrar con saldo (spec 2026-10-14 § 5.4, R5)
+// ══════════════════════════════════════════════════════════════════════════════
+
+const LLAVE_DE_COBRO_CON_SALDO = /^[A-Za-z0-9_-]{8,64}$/
+const LLAVE_DE_OPERACION_DE_SALDO = /^[A-Za-z0-9_:-]{8,128}$/
+/**
+ * A8, ruling 3: el cobro con saldo comparte el núcleo con `payCashOrder`, pero la auditoría del turno
+ * (`PAYMENT_WITHOUT_SHIFT`) y la de una reapertura lo nombran a él, nunca al efectivo.
+ */
+const CANAL_DEL_COBRO_CON_SALDO = { turno: 'payGiftCardBalanceOnOrder', reapertura: 'payGiftCardBalanceOnOrder' } as const
+
+/** Formas del índice («Adiciones al contrato» § 2, enmienda E7). C3 convierte los montos a Decimal desde su texto. */
+export interface PayGiftCardBalanceInput {
+  /** 8–64 [A-Za-z0-9_-]; la MISMA en cada reintento (Payment [venueId, idempotencyKey], R12). */
+  idempotencyKey: string
+  /** Prueba de posesión: el código tecleado o escaneado. La 1c agrega `{ kind: 'WALLET_PASS'; qrToken }`. */
+  proof: { kind: 'CODE'; code: string }
+  /** Pesos, venta SIN propina, > 0, centavos exactos. Nunca más de lo que debe la cuenta (R5). */
+  amount: Prisma.Decimal
+  /** Pesos, ≥ 0 (el tender de regalo captura propina, D8). */
+  tip: Prisma.Decimal
+  /** `Staff.id`. */
+  staffId: string
+  /** `X-Device-Id`. */
+  deviceId: string | null
+}
+
+export interface PayGiftCardBalanceResult {
+  paymentId: string
+  orderId: string
+  orderNumber: string
+  /** Pesos. */
+  amount: number
+  tipAmount: number
+  /** Un renglón por sobre descontado (venta + propina), con el saldo que le quedó. */
+  redeemed: Array<{ giftCardId: string; last4: string; amount: number; balanceAfter: number }>
+  /** Pesos que todavía debe la cuenta. */
+  orderRemaining: number
+  orderPaymentStatus: 'PARTIAL' | 'PAID'
+  /**
+   * Decisión del coordinador (conciliación 14-oct): el recibo digital con la MISMA forma y el MISMO armado que la respuesta
+   * de `payCashOrder` (`generateAndStoreReceipt` + `mapDigitalReceiptResponse`, después del commit). Un recibo que falla
+   * nunca tumba el cobro: llega `null`. En un reintento por llave, el recibo que ya se guardó.
+   */
+  digitalReceipt?: { accessKey: string; receiptUrl: string; autofacturaAvailable: boolean } | null
+  /**
+   * r1 (F9): `true` = la llave ya tenía su cobro —reintento o carrera perdida—; es la respuesta del primer cobro y no se
+   * movió saldo. `payGiftCardBalanceOnOrder` siempre lo manda (`false` sólo si ESTA llamada creó el Payment); C3 escribe
+   * `GIFT_CARD_REDEEMED` sólo con `false`. `getGiftCardPaymentByKey` no lo pone (es una consulta).
+   */
+  replay?: boolean
+}
+
+function pesosExactos(valor: unknown, campo: string): Prisma.Decimal {
+  if (!Prisma.Decimal.isDecimal(valor) || !valor.isFinite() || valor.isNegative()) {
+    throw new BadRequestError(`${campo} debe ser un monto en pesos (no negativo).`)
+  }
+  if (valor.decimalPlaces() > 2) throw new BadRequestError(`${campo} debe llevar centavos exactos.`)
+  return valor
+}
+
+/** Centavos enteros → pesos, exacto (no hay `centsToPesos` en el repo). */
+function centavosAPesos(centavos: number | undefined): number {
+  return new Prisma.Decimal(centavos ?? 0).dividedBy(100).toNumber()
+}
+
+function tarjetaNoEncontrada(): GiftCardError {
+  return new GiftCardError('GIFT_CARD_NOT_FOUND', 'No encontramos esa tarjeta de regalo en este negocio. Revisa el código.', 404)
+}
+
+/** El cobro con saldo de una llave, tal como lo devolvería el primer intento. `null` si no existe o no es de saldo. */
+export async function getGiftCardPaymentByKey(venueId: string, idempotencyKey: string): Promise<PayGiftCardBalanceResult | null> {
+  const payment = await prisma.payment.findUnique({
+    where: { venueId_idempotencyKey: { venueId, idempotencyKey } },
+    select: {
+      id: true,
+      orderId: true,
+      amount: true,
+      tipAmount: true,
+      tenderType: { select: { systemKind: true } },
+      order: { select: { orderNumber: true } },
+      receipts: RECIBO_CANONICO,
+    },
+  })
+  if (!payment?.orderId || !isGiftCardTenderKind(payment.tenderType?.systemKind)) return null
+  // Un cobro con saldo descuenta UN sobre en la 1a (una prueba de posesión), y nunca más de MAX_SOBRES_POR_CUENTA: este
+  // `take` lee todos (ruling 6).
+  const canjes = await prisma.giftCardActivity.findMany({
+    where: { venueId, paymentId: payment.id, type: 'REDEEM' },
+    select: { giftCardId: true, amount: true, balanceAfter: true, giftCard: { select: { codeLast4: true } } },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    take: MAX_SOBRES_POR_CUENTA,
+  })
+  const saldo = await readOrderBalanceSnapshot(venueId, payment.orderId)
+  return {
+    paymentId: payment.id,
+    orderId: payment.orderId,
+    orderNumber: payment.order?.orderNumber ?? '',
+    amount: Number(payment.amount),
+    tipAmount: Number(payment.tipAmount),
+    redeemed: canjes.map(c => ({
+      giftCardId: c.giftCardId,
+      last4: c.giftCard.codeLast4,
+      amount: Number(c.amount),
+      balanceAfter: Number(c.balanceAfter),
+    })),
+    orderRemaining: centavosAPesos(saldo.remainingBalanceCents),
+    orderPaymentStatus: saldo.orderPaymentStatus ?? 'PARTIAL',
+    // Como el reintento de `payCashOrder`: el recibo que ya se guardó para este cobro.
+    digitalReceipt: payment.receipts?.[0]
+      ? mapDigitalReceiptResponse(payment.receipts[0], await resolveAutofacturaAvailable(payment.orderId))
+      : null,
+  }
+}
+
+/**
+ * Cobrar con saldo de tarjeta de regalo en UNA transacción (R5): Order → sobre → turno; descuento condicionado; un REDEEM
+ * por sobre y UN Payment del tender de sistema. Online-only. Nunca efectivo ni cambio: el monto no pasa de lo que debe la
+ * cuenta y nunca hay vuelto. Cobrar no se gatea por plan (§ 6): una tarjeta vendida se honra aunque la función se apague.
+ */
+export async function payGiftCardBalanceOnOrder(
+  venueId: string,
+  orderId: string,
+  input: PayGiftCardBalanceInput,
+): Promise<PayGiftCardBalanceResult> {
+  if (!LLAVE_DE_COBRO_CON_SALDO.test(input?.idempotencyKey ?? '')) {
+    throw new BadRequestError('idempotencyKey debe tener de 8 a 64 caracteres (letras, números, guion o guion bajo).')
+  }
+  if (input?.proof?.kind !== 'CODE' || typeof input.proof.code !== 'string') {
+    throw new BadRequestError('Por ahora el saldo se cobra con el código de la tarjeta (proof.kind = CODE).')
+  }
+  const monto = pesosExactos(input.amount, 'amount')
+  const propina = pesosExactos(input.tip ?? new Prisma.Decimal(0), 'tip')
+  if (!monto.greaterThan(0))
+    throw new GiftCardError('GIFT_CARD_AMOUNT_OUT_OF_RANGE', 'El monto a pagar con saldo debe ser mayor a cero.', 422)
+
+  const order = await prisma.order.findUnique({
+    where: { id: orderId, venueId },
+    select: {
+      id: true,
+      orderNumber: true,
+      areaTicketCheckoutSession: { select: { id: true } },
+      customer: { select: { id: true, firstName: true, lastName: true } },
+    },
+  })
+  if (!order) throw new NotFoundError('Order not found')
+  if (order.areaTicketCheckoutSession) {
+    throw new GiftCardError(
+      'GIFT_CARD_TENDER_NOT_ALLOWED',
+      'Las ventas con vales por área no se pagan con saldo de tarjeta de regalo.',
+      409,
+    )
+  }
+
+  const normalizado = normalizeGiftCardCode(input.proof.code)
+  // La huella de la prueba presentada: resuelve el sobre aquí y se vuelve a comparar BAJO el candado (r1, A-1).
+  const huellaPresentada = normalizado ? hashGiftCardCode(normalizado) : null
+  const sobre = huellaPresentada
+    ? await prisma.giftCard.findFirst({ where: { venueId, codeHash: huellaPresentada }, select: { id: true, codeLast4: true } })
+    : null
+  if (!sobre) throw tarjetaNoEncontrada()
+
+  const conflicto = () =>
+    new GiftCardError('IDEMPOTENCY_KEY_REUSED', 'Esta llave ya registró otro cobro. Genera una llave nueva para este cobro.', 409)
+  const mismoCobro = (previo: PayGiftCardBalanceResult) =>
+    previo.orderId === orderId &&
+    new Prisma.Decimal(previo.amount).equals(monto) &&
+    new Prisma.Decimal(previo.tipAmount).equals(propina) &&
+    previo.redeemed.every(s => s.giftCardId === sobre.id)
+
+  const yaExiste = await prisma.payment.findUnique({
+    where: { venueId_idempotencyKey: { venueId, idempotencyKey: input.idempotencyKey } },
+    select: { id: true },
+  })
+  if (yaExiste) {
+    const previo = await getGiftCardPaymentByKey(venueId, input.idempotencyKey)
+    if (!previo || !mismoCobro(previo)) throw conflicto()
+    return { ...previo, replay: true }
+  }
+
+  await ensureGiftCardTender(prisma, venueId)
+  const effectiveStaffId = await validateStaffVenue(input.staffId, venueId)
+  // El gate se resuelve FUERA de la transacción, como en `payCashOrder`, y viaja como 4º argumento del núcleo: la
+  // guardia AST de turnos lo sigue de llamada en llamada hasta esta lectura canónica (ruling 1 de A8).
+  const reconciliationEnabled = await resolvePaymentShiftReconciliationEnabled(prisma, venueId)
+  const marcarCocina = await debeMarcarCocina(venueId, { orderId })
+
+  let bloqueados: LockedGiftCard[] = []
+  let canje: Array<{ giftCardId: string; amount: Prisma.Decimal; balanceAfter: Prisma.Decimal }> = []
+  let abono: AbonoEnTx
+  try {
+    abono = await prisma.$transaction(async tx => {
+      const tenderResuelto = await resolveGiftCardTenderForChargeInTx(tx, venueId)
+      return await registrarAbonoEnTx(
+        tx,
+        { venueId, orderId, effectiveStaffId, marcarCocina },
+        {
+          amountCents: pesosToCents(monto.toNumber()),
+          tipCents: pesosToCents(propina.toNumber()),
+          method: 'OTHER',
+          idempotencyKey: input.idempotencyKey,
+          isOfflineReplay: false,
+          tender: { resuelto: tenderResuelto },
+          canal: CANAL_DEL_COBRO_CON_SALDO,
+          // Bajo el candado de la Order y ANTES de que el núcleo reclame el turno: aquí se rechaza todo lo que no puede
+          // pagar y se bloquea el sobre (E4: Order → sobre → turno; ruling 5). Después del turno no se toma ningún sobre.
+          trasCandadoDeOrden: async (txCandado, cuenta) => {
+            // Un cobro con saldo es un cobro NUEVO: sobre una cancelada no se registra (el núcleo la reabriría).
+            rechazarCobroNuevoSobreCancelada(cuenta.fresh.status)
+            // D8 / ruling 8: una tarjeta no se paga con saldo de otra (spec: no se compran tarjetas con saldo).
+            if (await esCuentaDeTarjetasEnTx(txCandado, orderId)) {
+              throw new GiftCardError(
+                'GIFT_CARD_TENDER_NOT_ALLOWED',
+                'Una tarjeta de regalo no se paga con saldo de otra tarjeta de regalo.',
+                409,
+              )
+            }
+            const pendiente = computeOrderBalance(cuenta.fresh, cuenta.previousPayments).remainingBalance
+            if (monto.greaterThan(pendiente)) {
+              throw new GiftCardError(
+                'GIFT_CARD_AMOUNT_OUT_OF_RANGE',
+                `Esta cuenta debe ${formatoPesos(pendiente)}: el saldo de la tarjeta no paga de más.`,
+                422,
+                { pendiente: pendiente.toNumber() },
+              )
+            }
+            // Una prueba de posesión = un sobre (ruling 6: un cobro nunca descuenta más de MAX_SOBRES_POR_CUENTA, así
+            // que las lecturas acotadas de la libreta —`sobresDelCanje`, `revertirCanjeEnTx`— lo ven completo).
+            bloqueados = await lockGiftCardsForUpdate(txCandado, [sobre.id])
+            const [card] = bloqueados
+            if (!card || card.venueId !== venueId || card.status === 'PENDING' || card.status === 'DEACTIVATED') throw tarjetaNoEncontrada()
+            // r1 (A-1): el código se resolvió a un sobre ANTES de la transacción; si el gerente lo reemplazó mientras
+            // esperábamos el candado, la huella vigente ya no es la de la prueba presentada: el código anterior no sirve.
+            if (card.codeHash !== huellaPresentada) throw tarjetaNoEncontrada()
+            if (card.status === 'BLOCKED') {
+              throw new GiftCardError('GIFT_CARD_BLOCKED', 'Esta tarjeta de regalo está bloqueada. Pide al gerente que la revise.', 409)
+            }
+            if (card.status !== 'ACTIVE') throw tarjetaNoEncontrada()
+            if (card.expiresAt && card.expiresAt.getTime() <= Date.now()) {
+              throw new GiftCardError('GIFT_CARD_EXPIRED', 'Esta tarjeta de regalo ya venció.', 409)
+            }
+            const disponible = saldoUsable(bloqueados, new Date())
+            if (disponible.lessThan(monto.plus(propina))) {
+              throw new GiftCardError(
+                'GIFT_CARD_INSUFFICIENT_BALANCE',
+                `Quedan ${formatoPesos(disponible)} en la tarjeta de regalo.`,
+                409,
+                {
+                  saldoDisponible: disponible.toNumber(),
+                },
+              )
+            }
+          },
+          // El descuento escribe en el sobre que el gancho YA bloqueó: no toma candado nuevo después del turno.
+          dentroDeLaTx: async (txCobro, cobro) => {
+            canje = await canjearSobresEnTx(txCobro, {
+              venueId,
+              orderId,
+              paymentId: cobro.paymentId,
+              amount: monto.plus(propina),
+              cards: bloqueados,
+              staffId: effectiveStaffId ?? null,
+              deviceId: input.deviceId ?? null,
+            })
+          },
+        },
+        reconciliationEnabled,
+      )
+    }, ORDER_LOCK_WAIT_BUDGET)
+  } catch (err: any) {
+    // r1 (A-2): carrera idempotente. Dos peticiones con la MISMA llave pasan la consulta de arriba; la segunda espera la
+    // Order y, cuando entra, la cuenta ya está pagada o el saldo ya se consumió: falla ANTES del índice único de Payment
+    // (cuenta PAGADA, GIFT_CARD_INSUFFICIENT_BALANCE, GIFT_CARD_AMOUNT_OUT_OF_RANGE por pendiente, CAS perdido). Antes
+    // de mostrar CUALQUIER error se busca el cobro de la ganadora por la llave: mismo contenido ⇒ su respuesta, como
+    // repetición; otro contenido ⇒ IDEMPOTENCY_KEY_REUSED. Sin ganadora, el error es real y sigue su camino.
+    const ganador = await getGiftCardPaymentByKey(venueId, input.idempotencyKey)
+    if (ganador) {
+      if (mismoCobro(ganador)) return { ...ganador, replay: true }
+      throw conflicto()
+    }
+    if (err?.code === 'P2002' || err instanceof CobroYaRegistrado) throw conflicto()
+    if (err?.code === 'PAY_CASH_CAS_LOST') {
+      throw new ConflictError(
+        'La cuenta cambió mientras se cobraba con saldo. Vuelve a intentar con la MISMA llave.',
+        'ORDER_PAYMENT_CONFLICT',
+      )
+    }
+    throw err
+  }
+
+  const { newPayment: payment, isFullyPaid, postingId, balance, loyaltyBase } = abono
+  logger.info(`🎁 [ORDER.MOBILE] Cobro con saldo de tarjeta de regalo | paymentId=${payment.id} | order=${order.orderNumber}`)
+
+  if (isFullyPaid && !abono.areaTicketOrder && abono.tableId) {
+    try {
+      const { releaseTableIfSettled } = await import('../tpv/table.tpv.service')
+      await releaseTableIfSettled(venueId, abono.tableId)
+    } catch (error) {
+      logger.error('[ORDER.MOBILE] Liberar la mesa tras el cobro con saldo falló (el cobro quedó)', {
+        orderId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
+  if (isFullyPaid && postingId) {
+    try {
+      const { applySalePosting } = await import('@/services/inventory/inventoryPosting.service')
+      await applySalePosting(postingId, effectiveStaffId || input.staffId || null)
+    } catch (error) {
+      logger.error('[ORDER.MOBILE] El inventario tras el cobro con saldo falló (el cobro quedó)', {
+        orderId,
+        postingId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
+  if (isFullyPaid) {
+    void (async () => {
+      try {
+        const { runAutoReorderForVenue } = await import('@/services/dashboard/autoReorder.service')
+        await runAutoReorderForVenue(venueId)
+      } catch (error) {
+        logger.error('[ORDER.MOBILE] Auto-reorden tras el cobro con saldo falló', {
+          orderId,
+          error: error instanceof Error ? error.message : String(error),
+        })
+      }
+    })()
+  }
+  // El recibo digital, armado IGUAL que en `payCashOrder` (después del commit, esperado para que el accessKey viaje en ESTA
+  // respuesta); si falla, el cobro no se cae y llega `null` (decisión del coordinador, conciliación 14-oct).
+  let digitalReceipt: PayGiftCardBalanceResult['digitalReceipt'] = null
+  try {
+    const receipt = await generateAndStoreReceipt(venueId, payment.id)
+    digitalReceipt = mapDigitalReceiptResponse(receipt, await resolveAutofacturaAvailable(orderId))
+  } catch (error) {
+    logger.error('[ORDER.MOBILE] Recibo del cobro con saldo falló', {
+      paymentId: payment.id,
+      error: error instanceof Error ? error.message : String(error),
+    })
+  }
+  if (isFullyPaid) {
+    try {
+      const { onOrderPaid } = await import('@/services/referrals/referralQualification.service')
+      await onOrderPaid({ orderId, venueId })
+    } catch (error) {
+      logger.error('[ORDER.MOBILE] Referidos tras el cobro con saldo fallaron', {
+        orderId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+    // R1: USAR la tarjeta sí da sellos y puntos, como cualquier compra (spec § 5.4.5).
+    try {
+      const { awardLoyaltyForPaidOrder } = await import('@/services/shared/loyaltyOnPaidOrder')
+      await awardLoyaltyForPaidOrder({
+        venueId,
+        orderId,
+        orderTotal: loyaltyBase,
+        staffId: effectiveStaffId,
+        legacyCustomer: order.customer
+          ? { id: order.customer.id, firstName: order.customer.firstName, lastName: order.customer.lastName }
+          : null,
+      })
+    } catch (error) {
+      logger.error('[ORDER.MOBILE] Lealtad tras el cobro con saldo falló', {
+        orderId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
+  if (isFullyPaid && marcarCocina) await armarComandasTrasCommit(venueId, orderId, 'PAID')
+
+  const broadcastingService = socketManager.getBroadcastingService()
+  if (broadcastingService) {
+    broadcastingService.broadcastToVenue(venueId, SocketEventType.PAYMENT_COMPLETED, {
+      paymentId: payment.id,
+      orderId,
+      orderNumber: order.orderNumber,
+      amount: monto.toNumber(),
+      tipAmount: propina.toNumber(),
+      method: 'OTHER',
+      status: 'completed',
+    })
+    broadcastingService.broadcastToVenue(venueId, SocketEventType.ORDER_UPDATED, {
+      orderId,
+      orderNumber: order.orderNumber,
+      paymentStatus: balance.orderPaymentStatus,
+    })
+  }
+
+  return {
+    paymentId: payment.id,
+    orderId,
+    orderNumber: order.orderNumber,
+    amount: monto.toNumber(),
+    tipAmount: propina.toNumber(),
+    redeemed: canje.map(c => ({
+      giftCardId: c.giftCardId,
+      last4: sobre.codeLast4,
+      amount: c.amount.toNumber(),
+      balanceAfter: c.balanceAfter.toNumber(),
+    })),
+    orderRemaining: centavosAPesos(balance.remainingBalanceCents),
+    orderPaymentStatus: balance.orderPaymentStatus,
+    digitalReceipt,
+    replay: false,
+  }
+}
+
+/**
+ * «Regresar el saldo y cancelar la cuenta» (spec § 5.4.4): el cliente se fue después de pagar una parte con saldo. Sólo
+ * para cuentas NO pagadas cuyos únicos pagos vivos son del tender de regalo. Un camino propio bajo el mismo candado que
+ * `cancelOrderInTransaction`; el guardia general de cancelación no se relaja. Devuelve `replay: true` si la cuenta ya la
+ * había cancelado esta misma `operationKey` (r1, F9: la bitácora la escribe C3 sólo con `replay: false`; aquí no).
+ *
+ * Ruling 7 (A8): un sobre DEACTIVATED (la terminal ya devolvió el dinero de su compra, E1) nunca recibe saldo de vuelta en
+ * silencio: la operación se rechaza entera ANTES de escribir nada. El cobro con saldo sigue vivo y a la vista en la cuenta
+ * abierta, y ese sobre lleva su anomalía `REFUND_WITHOUT_CANCEL` (E1: la escribe el gancho de reembolsos de B1); el
+ * gerente decide.
+ */
+export async function returnGiftBalanceAndCancelOrder(
+  venueId: string,
+  orderId: string,
+  input: { staffId: string; operationKey: string },
+): Promise<{ replay: boolean }> {
+  if (!LLAVE_DE_OPERACION_DE_SALDO.test(input?.operationKey ?? '')) {
+    throw new BadRequestError(
+      'La llave de la operación debe tener de 8 a 128 caracteres (letras, números, guion, guion bajo o dos puntos).',
+    )
+  }
+  const staffId = await validateStaffVenue(input.staffId, venueId)
+  const raiz = 'gr' + createHash('sha256').update(input.operationKey).digest('hex').slice(0, 48)
+  const llaveDeReverso = (i: number) => `${raiz}:${i}`
+  const { bloquearCobroParaReembolso, writeRefundInTx } = await import('../shared/writeRefundInTx')
+
+  const resultado = await prisma.$transaction(async tx => {
+    let scope: Awaited<ReturnType<typeof lockTableOrderScope>>
+    try {
+      scope = await lockTableOrderScope(tx, { venueId, orderIds: [orderId], kdsOrderIds: [orderId] })
+    } catch (error) {
+      if (error instanceof NotFoundError && error.message === 'Venue not found') throw new NotFoundError('Order not found')
+      throw error
+    }
+    const cuenta = await tx.order.findUnique({ where: { id: orderId, venueId }, select: { id: true, status: true, paymentStatus: true } })
+    if (!cuenta) throw new NotFoundError('Order not found')
+
+    // La primera devolución ESCRITA lleva siempre la llave `:0` (abajo): si existe, esta operación ya corrió.
+    const previo = await tx.payment.findUnique({
+      where: { venueId_idempotencyKey: { venueId, idempotencyKey: llaveDeReverso(0) } },
+      select: { orderId: true },
+    })
+    if (previo && previo.orderId !== orderId) {
+      throw new GiftCardError(
+        'IDEMPOTENCY_KEY_REUSED',
+        'Esta llave ya se usó para regresar el saldo de otra cuenta. Vuelve a intentarlo desde la cuenta.',
+        409,
+      )
+    }
+    if (claseDeEstado(cuenta.status) === 'CANCELADA') {
+      if (previo) return null // reintento de una operación que ya terminó
+      throw new BadRequestError('Esta cuenta ya está cancelada.', 'ORDER_ALREADY_CANCELLED')
+    }
+    if (cuenta.paymentStatus === 'PAID') {
+      throw new GiftCardError('GIFT_CARD_TENDER_NOT_ALLOWED', 'Esta cuenta ya está pagada: para devolver dinero usa un reembolso.', 409)
+    }
+
+    const kds = await retirarComandasDeVentaAnulada(tx, venueId, orderId, { staffId, reason: 'Saldo de tarjeta de regalo regresado' })
+    await assertNoLiveTerminalCharge(tx, { venueId, orderId })
+    const tender = await tx.venueTenderType.findFirst({ where: { venueId, systemKind: 'GIFT_CARD' }, select: { id: true } })
+    const cobros = await tx.payment.findMany({
+      where: { venueId, orderId, status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] },
+      select: { id: true, tenderTypeId: true },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      take: MAX_SOBRES_POR_CUENTA + 1,
+    })
+    if (!tender || cobros.length === 0 || cobros.length > MAX_SOBRES_POR_CUENTA || cobros.some(c => c.tenderTypeId !== tender.id)) {
+      throw new GiftCardError(
+        'GIFT_CARD_TENDER_NOT_ALLOWED',
+        'Sólo se regresa el saldo y se cancela una cuenta cuyos únicos pagos son con tarjeta de regalo.',
+        409,
+      )
+    }
+
+    // r1 (A-3) y ruling 5: Order → cobros originales → sobres → turno, TODO antes del primer `writeRefundInTx` (que reclama
+    // el turno, `claimShiftForRefund`). Con dos o más cobros, bloquear los sobres del segundo teniendo ya el turno abriría
+    // un ciclo de espera con otra caja que tenga ese sobre y espere el mismo turno (E4). Se bloquean los cobros en el orden
+    // de `cobros` y la UNIÓN de sus sobres en UNA llamada (el ORDER BY de `lockGiftCardsForUpdate` es el orden canónico).
+    // El bucle de abajo reusa esos candados: el que vuelve a pedir `revertirCanjeEnTx` es sobre filas ya tomadas (cada
+    // cobro descuenta un solo sobre, ruling 6, así que `sobresDelCanje` y la libreta leen el mismo conjunto).
+    const bloqueos: Array<Awaited<ReturnType<typeof bloquearCobroParaReembolso>>> = []
+    for (const cobro of cobros) {
+      bloqueos.push(await bloquearCobroParaReembolso(tx, { venueId, paymentId: cobro.id, expectedOrderId: orderId }))
+    }
+    // Lo que falta devolver de cada cobro. Uno ya devuelto completo no se toca (ni su sobre se bloquea).
+    const porDevolver = cobros
+      .map((cobro, i) => ({
+        cobro,
+        bloqueado: bloqueos[i],
+        ventaCents: Math.max(0, pesosToCents(Number(bloqueos[i].original.amount)) - bloqueos[i].refundedSalesCents),
+        propinaCents: Math.max(0, pesosToCents(Number(bloqueos[i].original.tipAmount)) - bloqueos[i].refundedTipsCents),
+      }))
+      .filter(p => p.ventaCents + p.propinaCents > 0)
+    const sobresDeLosCobros: string[] = []
+    for (const p of porDevolver) sobresDeLosCobros.push(...(await sobresDelCanje(tx, { venueId, paymentId: p.cobro.id })))
+    const sobres = await lockGiftCardsForUpdate(tx, sobresDeLosCobros)
+
+    // Ruling 7: un sobre DEACTIVATED no recibe saldo de vuelta (`revertirCanjeEnTx` le sumaría saldo a una tarjeta muerta,
+    // fuera de la vista de todos). Se rechaza todo antes de escribir: el cobro con saldo sigue en la cuenta abierta.
+    const desactivados = sobres.filter(s => s.status === 'DEACTIVATED')
+    if (desactivados.length > 0) {
+      const terminaciones = await tx.giftCard.findMany({
+        where: { venueId, id: { in: desactivados.map(s => s.id) } },
+        select: { id: true, codeLast4: true },
+        orderBy: { id: 'asc' },
+        take: MAX_SOBRES_POR_CUENTA,
+      })
+      const cuales = terminaciones.map(t => t.codeLast4).join(', ')
+      throw new GiftCardError(
+        'GIFT_CARD_TENDER_NOT_ALLOWED',
+        desactivados.length === 1
+          ? `La tarjeta de regalo terminación ${cuales} ya fue cancelada: su saldo no se puede regresar. Cobra lo que falta con otro medio o pide al gerente que la revise.`
+          : `Las tarjetas de regalo terminación ${cuales} ya fueron canceladas: su saldo no se puede regresar. Cobra lo que falta con otro medio o pide al gerente que las revise.`,
+        409,
+        { motivo: 'SOBRE_DESACTIVADO', giftCardIds: desactivados.map(s => s.id) },
+      )
+    }
+
+    // Llaves `:0`, `:1`… en el orden en que se ESCRIBEN: la primera devolución siempre es `:0` (la que reconoce el reintento).
+    let escritas = 0
+    for (const p of porDevolver) {
+      const { refundPaymentId } = await writeRefundInTx(tx, {
+        originalPaymentId: p.cobro.id,
+        venueId,
+        salesRefundCents: p.ventaCents,
+        tipRefundCents: p.propinaCents,
+        refundedItems: [],
+        reason: 'CANCELLED_ORDER',
+        note: 'Saldo de tarjeta de regalo regresado al cancelar la cuenta',
+        staffId: staffId ?? null,
+        idempotencyKey: llaveDeReverso(escritas),
+        tenderCommission: 'NONE',
+        shift: 'CLAIM_LIVE',
+        provenance: 'MANUAL',
+        bloqueado: p.bloqueado,
+      })
+      escritas += 1
+      await enqueueRefundPaymentEffectsInTx(tx, refundPaymentId, p.cobro.id)
+      await revertirCanjeEnTx(tx, {
+        venueId,
+        originalPaymentId: p.cobro.id,
+        refundPaymentId,
+        amount: new Prisma.Decimal(p.ventaCents + p.propinaCents).dividedBy(100),
+        staffId: staffId ?? null,
+      })
+    }
+
+    const cancelada = await tx.order.update({
+      where: { id: orderId, venueId },
+      data: { status: 'CANCELLED', version: { increment: 1 } },
+      select: { tableId: true },
+    })
+    const boundTable = scope.tables.find(table => table.currentOrderId === orderId)
+    const { reconcileTableAfterOrderRemovedInTransaction } = await import('../tpv/table.tpv.service')
+    const reconciled = await reconcileTableAfterOrderRemovedInTransaction(tx, scope, orderId)
+    const ownTable = reconciled.tables.find(table => table.id === cancelada.tableId)
+    const table = reconciled.tables.find(row => row.id === boundTable?.id) ?? ownTable ?? null
+    const tpvTableFreed = Boolean(ownTable?.status === 'AVAILABLE' && ownTable.currentOrderId === null)
+    const affectedRefs: HttpEnvelope['affectedRefs'] = [
+      { kind: 'Order', id: orderId },
+      ...reconciled.tables.map(row => ({ kind: 'Table' as const, id: row.id })),
+      ...kds.kdsOrderIds.map(id => ({ kind: 'KdsOrder' as const, id })),
+      ...kds.kdsOrderItemIds.map(id => ({ kind: 'KdsOrderItem' as const, id })),
+    ]
+    return { orderId, table, tables: reconciled.tables, hadBoundTable: Boolean(boundTable), tpvTableFreed, affectedRefs }
+  }, ORDER_LOCK_WAIT_BUDGET)
+
+  if (!resultado) return { replay: true }
+  await publishCancelledOrder(venueId, resultado, staffId, 'Saldo de tarjeta de regalo regresado')
+  // r1 (F9): sin `logAction` aquí. `GIFT_CARD_BALANCE_RETURNED_ORDER_CANCELLED` tiene un solo dueño: el controller de C3,
+  // fuera de la transacción y sólo con `replay: false`.
+  return { replay: false }
 }
 
 /**

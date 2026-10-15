@@ -2637,6 +2637,27 @@ describe('paymentShiftClaim — inventario AST de carriles de caja', () => {
       Boolean(certifiedAuditor(parseCalls('src/services/helper-unproven-fixture.ts', helperWithUnprovenCaller), 'writeInHelper')),
     ).toBe(false)
 
+    // Tarea A8 (revisión de A7): `registrarAbonoEnTx` tiene DOS llamadores con `prisma.$transaction` real. El gate de la
+    // auditoría debe salir de `resolvePaymentShiftReconciliationEnabled` en CADA llamada del helper: un literal `true`
+    // dentro de una transacción canónica no lo certifica, ni como única llamada ni junto a una llamada buena.
+    const helperWithLiteralGate = `${imports}
+      async function writeInHelper(tx: any, reconciliationEnabled: boolean) { ${writer} }
+      async function lane() {
+        await prisma.$transaction(async tx => { await writeInHelper(tx, true) })
+      }
+    `
+    expect(
+      Boolean(certifiedAuditor(parseCalls('src/services/helper-literal-gate-fixture.ts', helperWithLiteralGate), 'writeInHelper')),
+    ).toBe(false)
+    const helperWithSecondLiteralCaller = `${helper}
+      async function secondLane() {
+        await prisma.$transaction(async tx => { await writeInHelper(tx, true) })
+      }
+    `
+    expect(
+      Boolean(certifiedAuditor(parseCalls('src/services/helper-mixed-gate-fixture.ts', helperWithSecondLiteralCaller), 'writeInHelper')),
+    ).toBe(false)
+
     const escapedClaimHelper = `${imports}
       async function writeEscapedClaim(tx: any, claimFromCaller: any, reconciliationEnabled: boolean) {
         const payment = await tx.payment.create({ data: { status: 'COMPLETED' } })
@@ -3282,5 +3303,43 @@ describe('paymentShiftClaim — inventario AST de carriles de caja', () => {
       preparacionDespuesDelArbitraje: Boolean(arbitraje && preparacion && arbitraje.position < preparacion.position),
       preparacionAntesDelTurno: Boolean(preparacion && turno && preparacion.position < turno.position),
     }).toEqual({ jerarquiaAntesDelArbitraje: true, preparacionDespuesDelArbitraje: true, preparacionAntesDelTurno: true })
+  })
+
+  // Tarea A8 (revisión de A7): esta guardia sigue el gate y la transacción SÓLO entre llamadas del MISMO archivo, y
+  // `registrarAbonoEnTx` se exporta (lo usan `payCashOrder` y `payGiftCardBalanceOnOrder`). Un llamador en otro archivo
+  // quedaría fuera de su vista; por eso ningún otro archivo de `src/` puede nombrarlo (identificador o texto; un
+  // comentario no cuenta).
+  it('ningún archivo de src/ fuera de order.mobile.service.ts referencia registrarAbonoEnTx', () => {
+    const DUENO = 'src/services/mobile/order.mobile.service.ts'
+    const referenciasFuera = (archivos: Array<{ file: string; source: string }>): string[] => {
+      const fuera: string[] = []
+      for (const { file, source } of archivos) {
+        if (file === DUENO) continue
+        const sourceFile = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+        const visitar = (node: ts.Node): void => {
+          if ((ts.isIdentifier(node) || ts.isStringLiteralLike(node)) && node.text === 'registrarAbonoEnTx') {
+            fuera.push(`${file}:${sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1}`)
+          }
+          ts.forEachChild(node, visitar)
+        }
+        visitar(sourceFile)
+      }
+      return fuera
+    }
+    // Autoprueba: el detector ve import, import() desestructurado, acceso por propiedad y por texto; no un comentario.
+    expect(
+      referenciasFuera([
+        { file: 'src/a.ts', source: `import { registrarAbonoEnTx } from './mobile/order.mobile.service'` },
+        { file: 'src/b.ts', source: `async function f() { const { registrarAbonoEnTx: abono } = await import('./x'); return abono }` },
+        { file: 'src/c.ts', source: `import * as m from './x'\nexport const g = (tx: any) => m.registrarAbonoEnTx(tx)` },
+        { file: 'src/d.ts', source: `import * as m from './x'\nexport const h = (tx: any) => m['registrarAbonoEnTx'](tx)` },
+        { file: 'src/e.ts', source: `// registrarAbonoEnTx en un comentario no es una referencia\nexport const i = 1` },
+        { file: DUENO, source: `export async function registrarAbonoEnTx() {}` },
+      ]),
+    ).toEqual(['src/a.ts:1', 'src/b.ts:1', 'src/c.ts:2', 'src/d.ts:2'])
+
+    const vivos = allSourceFiles.map(file => ({ file, source: fs.readFileSync(path.join(process.cwd(), file), 'utf8') }))
+    expect(vivos.some(({ file }) => file === DUENO)).toBe(true)
+    expect(referenciasFuera(vivos)).toEqual([])
   })
 })

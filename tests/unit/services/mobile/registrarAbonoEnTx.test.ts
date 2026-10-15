@@ -18,7 +18,7 @@ jest.mock('@/services/mobile/areaTicketV7.mobile.service', () => ({
 }))
 
 import { Prisma } from '@prisma/client'
-import { registrarAbonoEnTx, type CuentaBajoCandado } from '@/services/mobile/order.mobile.service'
+import { registrarAbonoEnTx, type AbonoEnTxEntrada, type CuentaBajoCandado } from '@/services/mobile/order.mobile.service'
 import type { ResolvedTenderCharge } from '@/services/dashboard/tenderType.dashboard.service'
 import { prismaMock } from '../../../__helpers__/setup'
 
@@ -187,5 +187,87 @@ describe('registrarAbonoEnTx', () => {
       expect.objectContaining({ where: { id: 'tt-vale', venueId: 'venue-1' } }),
     )
     expect(r.tenderResuelto).toMatchObject({ tenderTypeId: 'tt-vale', tenderSatFormaPago: '08' })
+  })
+
+  // Tarea A8 (ruling 3 del coordinador): la auditoría dice QUIÉN registró el abono. Sin `canal`, los textos de
+  // `payCashOrder` de siempre, byte por byte; con él, los del llamador (el cobro con saldo no se atribuye al efectivo).
+  describe('canal de auditoría', () => {
+    const cancelada = () =>
+      prismaMock.order.findUnique.mockResolvedValue({
+        id: 'order-1',
+        orderNumber: 'ORD-1',
+        paymentStatus: 'PENDING',
+        subtotal: D(1000),
+        discountAmount: D(0),
+        serviceChargeAmount: D(0),
+        status: 'CANCELLED',
+        contratoDePrecio: 'IVA_INCLUIDO',
+        taxAmount: D(0),
+        originSystem: 'AVOQADO',
+        version: 3,
+        areaTicketCode: null,
+        tableId: null,
+      })
+    const datosDe = (accion: string) =>
+      prismaMock.activityLog.create.mock.calls.map((c: any) => c[0].data).find((d: any) => d.action === accion)?.data
+
+    it('sin `canal`: PAYMENT_WITHOUT_SHIFT y la reapertura siguen diciendo payCashOrder (registro en vivo)', async () => {
+      cancelada()
+      prismaMock.order.update.mockResolvedValue({ id: 'order-1' })
+      await registrarAbonoEnTx(prismaMock, CTX, { amountCents: 30000, tipCents: 0, method: 'CREDIT_CARD', tender: null }, true)
+
+      expect(datosDe('PAYMENT_WITHOUT_SHIFT')).toMatchObject({ channel: 'payCashOrder', reason: 'NO_SHIFT' })
+      expect(datosDe('ORDER_REOPENED_BY_CAPTURED_PAYMENT')).toMatchObject({ canal: 'payCashOrder:registro' })
+    })
+
+    it('sin `canal` y desde la cola sin red: la reapertura dice payCashOrder:cola', async () => {
+      cancelada()
+      prismaMock.order.update.mockResolvedValue({ id: 'order-1' })
+      await registrarAbonoEnTx(
+        prismaMock,
+        CTX,
+        { amountCents: 30000, tipCents: 0, method: 'CREDIT_CARD', tender: null, isOfflineReplay: true },
+        true,
+      )
+      expect(datosDe('ORDER_REOPENED_BY_CAPTURED_PAYMENT')).toMatchObject({ canal: 'payCashOrder:cola' })
+    })
+
+    it('con `canal`: los dos registros llevan el canal del llamador', async () => {
+      cancelada()
+      prismaMock.order.update.mockResolvedValue({ id: 'order-1' })
+      await registrarAbonoEnTx(
+        prismaMock,
+        CTX,
+        {
+          amountCents: 30000,
+          tipCents: 0,
+          method: 'CREDIT_CARD',
+          tender: null,
+          canal: { turno: 'payGiftCardBalanceOnOrder', reapertura: 'payGiftCardBalanceOnOrder' },
+        },
+        true,
+      )
+      expect(datosDe('PAYMENT_WITHOUT_SHIFT')).toMatchObject({ channel: 'payGiftCardBalanceOnOrder' })
+      expect(datosDe('ORDER_REOPENED_BY_CAPTURED_PAYMENT')).toMatchObject({ canal: 'payGiftCardBalanceOnOrder' })
+    })
+  })
+
+  // Tarea A8 (ruling 4 del coordinador): el gancho recibe objetos VIVOS que el núcleo usa después (`fresh.version` en la CAS,
+  // `previousPayments` en la aritmética). Su tipo es de sólo lectura: una mutación no compila. Lo hace cumplir
+  // `npm run typecheck` (cada `@ts-expect-error` sin error que esperar truena el typecheck).
+  it('el gancho trasCandadoDeOrden recibe la cuenta de SÓLO lectura (lo verifica el typecheck)', async () => {
+    const gancho: NonNullable<AbonoEnTxEntrada['trasCandadoDeOrden']> = async (_tx, cuenta) => {
+      // @ts-expect-error — la versión que usa la CAS no se reescribe
+      cuenta.fresh.version = 99
+      // @ts-expect-error — el estado leído bajo el candado no se reescribe
+      cuenta.fresh.status = 'CANCELLED'
+      // @ts-expect-error — los pagos previos no se alteran
+      cuenta.previousPayments.push({ amount: D(1), tipAmount: D(0), type: 'REGULAR' })
+      // @ts-expect-error — ni un pago previo por dentro
+      cuenta.previousPayments[0].amount = D(0)
+      // @ts-expect-error — ni se reemplaza la cuenta
+      cuenta.fresh = { ...cuenta.fresh }
+    }
+    expect(typeof gancho).toBe('function')
   })
 })

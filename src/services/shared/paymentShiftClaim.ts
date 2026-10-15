@@ -4,7 +4,9 @@ import { Prisma, ShiftStatus } from '@prisma/client'
 import logger from '../../config/logger'
 import { turnoVivoWhere } from './turnoDeCaja'
 
-export type CapturedPaymentChannel = 'recordOrderPayment' | 'recordFastPayment' | 'payCashOrder'
+// `payGiftCardBalanceOnOrder` (tarjetas de regalo, A8): el cobro con saldo comparte el núcleo de `payCashOrder` pero su
+// auditoría no se atribuye al efectivo.
+export type CapturedPaymentChannel = 'recordOrderPayment' | 'recordFastPayment' | 'payCashOrder' | 'payGiftCardBalanceOnOrder'
 export type RefundPaymentChannel = 'recordRefund' | 'issueRefund' | 'createRefund'
 export type PaymentShiftReconciliationChannel =
   | CapturedPaymentChannel
