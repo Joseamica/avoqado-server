@@ -472,6 +472,8 @@ export function pertenenciaAlEmisor(
  *   `PRODUCTO_POR_REVISAR`, `CARGO_POR_SERVICIO`, `OCHO_SIN_REGLA`, `IVA_APARTE_MIXTA`, `CONTRATO_DESCONOCIDO`, `DESCUENTO_SIN_REPARTO`,
  *   `NO_CUADRA` y `OTRO` (el detalle dice cuál).
  * - Del listado y la complementaria: `CORREGIDA_DESPUES` (Tareas 11 y 12) y `YA_EXTRAIDO` (C3).
+ * - `DEVUELTA` (regla de F6, decisión 1: devuelta completa ⇒ no se factura): de contenido, leída bajo el candado de la captura; gana sobre los
+ *   demás de contenido (`ticketsDeLaGlobal`, `cfdiGlobal.service.ts`).
  */
 export type MotivoExclusionGlobal =
   | 'EFECTIVO'
@@ -490,6 +492,7 @@ export type MotivoExclusionGlobal =
   | 'NO_CUADRA'
   | 'CORREGIDA_DESPUES'
   | 'YA_EXTRAIDO'
+  | 'DEVUELTA'
   | 'OTRO'
 
 /** Lo que ve quien factura (pantalla y MCP), en español llano: qué pasó y qué hacer. */
@@ -526,6 +529,7 @@ export const TEXTO_EXCLUSION_GLOBAL: Readonly<Record<MotivoExclusionGlobal, stri
   // v9 (Codex C1-47): menciona soporte; la prueba del listado (Tarea 12) y la de C3 (Tarea 5) lo comprueban en `texto`.
   YA_EXTRAIDO:
     'Ya está documentada por una nota de extracción de su factura nominativa (viva o cancelada) y no vuelve sola a ninguna factura global; pídelo a soporte.',
+  DEVUELTA: 'Se devolvió completa antes de emitir la factura global: no hay nada que facturar.',
   OTRO: 'No se pudo armar su concepto para la factura global; el detalle dice por qué. Si no sabes cómo corregirla, repórtala a soporte.',
 })
 

@@ -187,6 +187,31 @@ export async function devolucionesFiscales(
 }
 
 /**
+ * La decisión 1 en la factura GLOBAL (QA de la guía, 14-oct; ruling GD-1): de las ventas de una página (lo cobrado de cada una), las
+ * devueltas completas, en UNA consulta agrupada por orden. Lo devuelto con la MISMA definición que `devolucionesFiscales`: REFUND `COMPLETED`
+ * del venue, venta sin propina = |`amount`| (`Decimal(12,2)`: ×100 es entero, igual que `salesRefundCents`; las de venta 0 suman 0). Y la
+ * MISMA comparación que `devueltaCompleta`: lo devuelto ≥ lo cobrado (con lo cobrado > 0, «hay alguna devolución» va implícito). Sin tope
+ * por venta: el agregado suma todas sus devoluciones, así que pasar el tope de movimientos nunca deja entrar una devuelta. En la captura corre
+ * con la transacción que ya tiene las órdenes `FOR UPDATE` (`bloquearOrdenesParaFacturar`, el candado que toma toda devolución).
+ */
+export async function devueltasCompletas(
+  db: Pick<Prisma.TransactionClient, '$queryRaw'>,
+  venueId: string,
+  ventas: Array<{ orderId: string; paidCents: number }>,
+): Promise<Set<string>> {
+  const pagado = new Map(ventas.filter(v => v.paidCents > 0).map(v => [v.orderId, v.paidCents]))
+  const devueltas = new Set<string>()
+  if (!pagado.size) return devueltas
+  const filas = await db.$queryRaw<Array<{ orderId: string; devueltoCents: bigint | number }>>`
+    SELECT "orderId", (SUM(ABS(amount)) * 100)::bigint AS "devueltoCents"
+    FROM "Payment"
+    WHERE "venueId" = ${venueId} AND "orderId" = ANY(${[...pagado.keys()]}::text[]) AND type = 'REFUND' AND status = 'COMPLETED'
+    GROUP BY "orderId"`
+  for (const f of filas) if (Number(f.devueltoCents) >= (pagado.get(f.orderId) ?? Infinity)) devueltas.add(f.orderId)
+  return devueltas
+}
+
+/**
  * F6: qué factura sale de una venta con devoluciones, decidido DENTRO de la transacción de la admisión, después de su `FOR UPDATE` de la
  * orden (el mismo candado que toma toda devolución): una devolución que llega antes se ve; una que llega después de la reserva es de una
  * venta ya facturada (nota manual, como hoy). Caso 2: los conceptos reales con la MISMA foto que congelaría la global (C1 → C3) y la factura de

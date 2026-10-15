@@ -5,6 +5,7 @@
 import { Prisma } from '@prisma/client'
 import {
   devueltaCompleta,
+  devueltasCompletas,
   emitirNotasDeDevolucion,
   facturaConDevolucion,
   leerDevolucion,
@@ -388,9 +389,22 @@ describe('F6 · facturaDeRemanentes sin extracción (el camino de la decisión 2
       paymentMethod: 'CREDIT_CARD',
       tenderSatFormaPago: null,
       metodoPago: 'PUE',
-      order: { venueType: 'RESTAURANT', tipAmount: D(0), pricesIncludeIva: true, contratoDePrecio: 'IVA_INCLUIDO', paymentStatus: 'PAID', items },
+      order: {
+        venueType: 'RESTAURANT',
+        tipAmount: D(0),
+        pricesIncludeIva: true,
+        contratoDePrecio: 'IVA_INCLUIDO',
+        paymentStatus: 'PAID',
+        items,
+      },
     }) as any
-  const receptor = { rfc: 'EKU9003173C9', razonSocial: 'ESCUELA KEMPER URGATE', regimenFiscal: '601', codigoPostal: '64000', usoCfdi: 'G03' }
+  const receptor = {
+    rfc: 'EKU9003173C9',
+    razonSocial: 'ESCUELA KEMPER URGATE',
+    regimenFiscal: '601',
+    codigoPostal: '64000',
+    usoCfdi: 'G03',
+  }
   const params = { orderId: 'o1', receptor }
 
   it('arma la factura con lo que quedó (sin `extraccion`), conserva los motivos previos y no modifica `b` ni `previos`', () => {
@@ -611,5 +625,23 @@ describe('F6 · sqlDeNotasPendientes — el límite', () => {
   it('control — `limite: 20` ⇒ LIMIT 20; sin `limite` (el conteo) ⇒ sin LIMIT', () => {
     expect(sqlDeNotasPendientes({ limite: 20 }).values.at(-1)).toBe(20)
     expect(sqlDeNotasPendientes({}).sql).not.toMatch(/LIMIT/)
+  })
+})
+
+describe('Global (QA 14-oct, ruling GD-1) · devueltasCompletas — UNA consulta por página, sin tope por venta', () => {
+  const ventas = Array.from({ length: 100 }, (_, i) => ({ orderId: `o${i}`, paidCents: 17400 }))
+  it('🔴 100 ventas con devolución ⇒ una sola consulta (no crece con las devueltas); devuelta = lo devuelto sin propina ≥ lo cobrado', async () => {
+    // Lo que contesta la base: lo devuelto (venta, sin propina) de cada orden, en centavos (`bigint`).
+    const $queryRaw = jest.fn(async () =>
+      ventas.map((v, i) => ({ orderId: v.orderId, devueltoCents: BigInt(i === 0 ? 17400 : i === 1 ? 17401 : 17399) })),
+    )
+    const r = await devueltasCompletas({ $queryRaw } as any, 'v1', ventas)
+    expect($queryRaw).toHaveBeenCalledTimes(1)
+    expect([...r].sort()).toEqual(['o0', 'o1'])
+  })
+  it('control — sin nada cobrado no hay qué preguntar: ninguna consulta', async () => {
+    const $queryRaw = jest.fn()
+    expect((await devueltasCompletas({ $queryRaw } as any, 'v1', [{ orderId: 'o0', paidCents: 0 }])).size).toBe(0)
+    expect($queryRaw).not.toHaveBeenCalled()
   })
 })
