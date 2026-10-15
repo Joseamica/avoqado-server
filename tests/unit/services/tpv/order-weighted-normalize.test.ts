@@ -65,6 +65,8 @@ describe('normalizeAddItems — D9 weighted lines never merge', () => {
  * D5 (mesas40, 14-oct): `OrderItem.notes` no tenía tope — `normalizeNotes` sólo hacía trim y una nota de 10,038
  * caracteres llegaba entera a la cuenta, a la comanda y al ticket. Ahora se RECORTA (nunca se rechaza: la ronda ya
  * ocurrió) a 500 caracteres completos: un emoji en el borde queda entero o fuera, nunca partido a la mitad.
+ * D5 v4: esto es el default de `normalizeAddItems` = las RONDAS (`asNewRound=true`). El carrito completo le pasa sólo
+ * trim, sin tope (pruebas en `order.atomic.test.ts`).
  */
 describe('normalizeAddItems — D5: la nota de un artículo tiene tope de 500 caracteres', () => {
   // 490 letras + un emoji (2 unidades UTF-16) justo en el borde del prefijo + relleno = 10,038 unidades.

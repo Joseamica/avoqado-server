@@ -15,11 +15,13 @@ export const MAX_ITEM_NOTE_CHARS = 500
  * borde queda entero o fuera, nunca medio surrogate). Lo que cabe se devuelve idéntico (sin trim: cada camino
  * conserva su normalización de hoy). Nulo/vacío pasa tal cual.
  *
- * 🔴 El recorte es INYECTIVO (D5 v3, Codex P1): la nota es parte de la IDENTIDAD de la línea (la llave de
- * `normalizeAddItems` y el match contra filas existentes en `addItemsToOrder`). Un recorte pelón fusionaba dos notas
- * distintas con el mismo prefijo y el carrito reenviado SUMABA cantidades ($200 → $400). Por eso lo que pasa del tope
- * se guarda como `primeros N + «…» + 8 hex de sha256(nota completa)`, con N tal que el total sea exactamente
- * `MAX_ITEM_NOTE_CHARS`. Determinista e idempotente: el resultado ya cabe, así que `cap(cap(x)) === cap(x)`.
+ * Lo que pasa del tope se guarda como `primeros N + «…» + 8 hex de sha256(nota completa)`, con N tal que el total sea
+ * exactamente `MAX_ITEM_NOTE_CHARS`: dos notas largas distintas con el mismo prefijo siguen distintas (D5 v3, Codex P1).
+ * Determinista e idempotente: el resultado ya cabe, así que `cap(cap(x)) === cap(x)`.
+ *
+ * 🔴 NO sirve como IDENTIDAD de una línea: una nota escrita literalmente igual que la forma recortada de otra colisiona
+ * con ella (Codex r2). Por eso el carrito completo de la TPV (`addItemsToOrder` con `asNewRound=false`), donde la nota es
+ * llave de la fusión y del match contra filas existentes, NO recorta (D5 v4); el tope va sólo en caminos que crean.
  */
 export function capItemNote(note: string): string
 export function capItemNote(note: string | null | undefined): string | null | undefined

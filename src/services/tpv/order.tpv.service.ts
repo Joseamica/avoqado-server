@@ -600,11 +600,15 @@ function buildAddItemKey(productId: string, modifierIds: string[], notes: string
 }
 
 // Exported for unit tests (D9: weighted lines must never merge).
-export function normalizeAddItems(items: AddOrderItemInput[]): NormalizedAddOrderItemInput[] {
+// `normalizarNota`: con tope en las rondas (default); sólo trim en el carrito completo (D5 v4, ver `addItemsToOrder`).
+export function normalizeAddItems(
+  items: AddOrderItemInput[],
+  normalizarNota: (notes?: string | null) => string | null = normalizeNotes,
+): NormalizedAddOrderItemInput[] {
   const map = new Map<string, NormalizedAddOrderItemInput>()
 
   for (const [index, item] of items.entries()) {
-    const normalizedNotes = normalizeNotes(item.notes)
+    const normalizedNotes = normalizarNota(item.notes)
     const normalizedModifiers = normalizeModifierIds(item.modifierIds)
     const normalizedExternalId = normalizeExternalId(item.externalId)
     const serviceCourse = parseServiceCourseSnapshot(item.serviceCourse)
@@ -1513,7 +1517,15 @@ export async function addItemsToOrder(
     items = items.filter(item => !item.promotionRef)
   }
 
-  const normalizedItems = normalizeAddItems(items)
+  // 🔴 D5 v4 (Codex r2): en el carrito completo (asNewRound=false) la nota es la IDENTIDAD de la línea — llave de la
+  // fusión, match contra las filas existentes y `_count` —. Cualquier recorte confunde notas distintas (una escrita igual
+  // que la forma recortada de otra ⇒ $200 → $400) o vuelve visible una vacía (501 espacios ⇒ otro renglón). Ahí la nota
+  // queda EXACTAMENTE como antes de D5: sólo trim, sin tope. El tope con huella se queda en las rondas (asNewRound=true),
+  // que nunca hacen match por nota: una fusión dentro de la ronda sólo junta cantidades en un renglón nuevo.
+  const nota = asNewRound ? normalizeNotes : trimOrNull
+  /** Nota que conserva un renglón al actualizarse sin nota nueva: en el carrito completo, tal cual (como antes de D5). */
+  const notaHeredada = (vieja: string | null) => (asNewRound ? normalizeNotes(vieja) : vieja)
+  const normalizedItems = normalizeAddItems(items, nota)
   if (normalizedItems.length !== items.length) {
     logger.warn(
       `⚠️ [ADD ITEMS] Normalized ${items.length} items → ${normalizedItems.length} unique (duplicates merged by product+modifiers+notes)`,
@@ -1764,7 +1776,7 @@ export async function addItemsToOrder(
                 total: customComped ? 0 : customTotal,
                 isCortesia: customComped,
                 cortesiaReason: customComped ? item.cortesiaReason?.trim() || null : null,
-                notes: normalizeNotes(item.notes),
+                notes: nota(item.notes),
                 course: item.course ?? null,
                 ...(item.serviceCourse ? { serviceCourse: item.serviceCourse as Prisma.InputJsonValue } : {}),
                 seat: item.seat ?? null,
@@ -1792,7 +1804,7 @@ export async function addItemsToOrder(
         }
 
         const product = products.find(p => p.id === item.productId)!
-        const normalizedNotes = normalizeNotes(item.notes)
+        const normalizedNotes = nota(item.notes)
 
         // Calculate modifier total
         const itemModifiers = item.modifierIds || []
@@ -1864,8 +1876,7 @@ export async function addItemsToOrder(
                 // inventory deduction go stale (review 2026-07-19, fix #1).
                 weightQuantity: weightKg != null ? new Prisma.Decimal(weightKg) : null,
                 weightUnit: weightKg != null ? ('KILOGRAM' as const) : null,
-                // D5 v3: la nota heredada de una fila vieja también se escribe recortada.
-                notes: capItemNote(normalizedNotes ?? existingByExternal.notes),
+                notes: normalizedNotes ?? notaHeredada(existingByExternal.notes),
                 externalId: existingByExternal.externalId ?? normalizedExternalId,
               },
               include: {
@@ -1922,7 +1933,7 @@ export async function addItemsToOrder(
                 total: updatedTotal,
                 weightQuantity: weightKg != null ? new Prisma.Decimal(weightKg) : null,
                 weightUnit: weightKg != null ? ('KILOGRAM' as const) : null,
-                notes: capItemNote(normalizedNotes ?? existingById.notes),
+                notes: normalizedNotes ?? notaHeredada(existingById.notes),
                 externalId: existingById.externalId ?? normalizedExternalId,
               },
               include: {
@@ -2030,7 +2041,7 @@ export async function addItemsToOrder(
             : existingItemsWithModifiers.find(existing => {
                 if (existing.isCortesia) return false
                 const existingModifierIds = existing.modifiers.map(m => m.modifierId).sort()
-                const notesMatch = normalizeNotes(existing.notes) === normalizedNotes
+                const notesMatch = nota(existing.notes) === normalizedNotes
                 // TABLE_SERVICE: lines in different courses never merge.
                 const courseMatch = (existing.course ?? null) === (item.course ?? null)
                 // TABLE_SERVICE: lines for different seats never merge either.
@@ -2056,7 +2067,7 @@ export async function addItemsToOrder(
               // was weighed before soldByWeight was toggled off (review 2026-07-19).
               weightQuantity: weightKg != null ? new Prisma.Decimal(weightKg) : null,
               weightUnit: weightKg != null ? ('KILOGRAM' as const) : null,
-              notes: capItemNote(normalizedNotes ?? existingItemWithModifiers.notes),
+              notes: normalizedNotes ?? notaHeredada(existingItemWithModifiers.notes),
             },
             include: {
               product: {

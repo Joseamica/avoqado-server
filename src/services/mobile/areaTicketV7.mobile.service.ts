@@ -55,7 +55,7 @@ import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
 import { assertOrderCancellableUnderLock, avisarOrdenCancelada } from '../shared/orderCancelGuard'
 import { externalRouteBlockers } from './areaTicketExternalCodes'
 import { buildOrderItemsData, CreateOrderItemInput } from './order.mobile.service'
-import { capItemNote } from '../shared/inputCaps'
+import { capItemNote, MAX_ITEM_NOTE_CHARS } from '../shared/inputCaps'
 
 const DEFAULT_CLAIM_TTL_SECONDS = 300
 const DEFAULT_SESSION_MAX_AGE_MINUTES = 30
@@ -584,10 +584,7 @@ function issueIntentFromInput(lines: AreaTicketLineInput[]) {
     productId: line.productId,
     quantity: quantity(normalized[index].quantity),
     weightKg: normalized[index].weightQuantity == null ? null : quantity(normalized[index].weightQuantity),
-    // D5 (mesas40): el vale guarda la nota RECORTADA (`buildOrderItemsData`); se compara recortada de los dos lados
-    // para que repetir el mismo vale no sea un 409 (y un vale guardado antes del tope, con la nota entera, tampoco).
-    // El recorte lleva la huella de la nota completa: una nota DISTINTA después del carácter 500 sigue siendo 409.
-    notes: capItemNote(line.notes) ?? null,
+    notes: line.notes ?? null,
     modifierIds: [...new Set(line.modifierIds ?? [])].sort(),
     discountId: line.discountId ?? null,
   }))
@@ -599,7 +596,7 @@ function issueIntentFromTicket(ticket: any) {
     productId: line.productId,
     quantity: quantity(line.quantity),
     weightKg: line.weightKg == null ? null : quantity(line.weightKg),
-    notes: capItemNote(line.notes) ?? null,
+    notes: line.notes ?? null,
     modifierIds: [
       ...new Set(
         (Array.isArray(line.modifiersSnapshot) ? line.modifiersSnapshot : [])
@@ -611,9 +608,23 @@ function issueIntentFromTicket(ticket: any) {
   }))
 }
 
+/**
+ * D5 (mesas40): la nota con la que se compara la repetición de un vale. Un vale nuevo guarda la nota RECORTADA
+ * (`buildOrderItemsData`): la entrante se compara recortada, para que repetir el mismo vale no sea un 409. Un vale anterior
+ * al tope guarda la nota ENTERA (más de 500): se compara el texto íntegro, como antes de D5 — recortar los dos lados
+ * confundía una nota larga con su forma recortada escrita literalmente (Codex r2).
+ */
+function notaComparable(entrante: string | null, guardada: string | null | undefined): string | null {
+  if (guardada != null && Array.from(guardada).length > MAX_ITEM_NOTE_CHARS) return entrante
+  return capItemNote(entrante) ?? null
+}
+
 function assertIssueIdempotencyMatch(ticket: any, lines: AreaTicketLineInput[]): void {
-  const incomingIntent = issueIntentFromInput(lines)
   const persistedIntent = issueIntentFromTicket(ticket)
+  const incomingIntent = issueIntentFromInput(lines).map((line, index) => ({
+    ...line,
+    notes: notaComparable(line.notes, persistedIntent[index]?.notes),
+  }))
   if (JSON.stringify(incomingIntent) !== JSON.stringify(persistedIntent)) {
     throw domainError(
       409,

@@ -2,6 +2,7 @@ import { AreaTicketCheckoutStatus, AreaTicketStatus, FulfillmentMode, Prisma } f
 
 import { canonicalSnapshotHash, issueAreaTicket, materializeAreaTicketCheckout } from '@/services/mobile/areaTicketV7.mobile.service'
 import { capItemNote } from '@/services/shared/inputCaps'
+import { createHash } from 'crypto'
 import { prismaMock } from '../../../__helpers__/setup'
 
 /**
@@ -90,6 +91,17 @@ describe('D5: repetir un vale con nota larga devuelve el MISMO vale', () => {
     prismaMock.areaTicket.findUnique.mockResolvedValue(valeGuardado(base + 'A'))
 
     await expect(issueAreaTicket('venue-1', repeticion(base + 'B'))).rejects.toMatchObject({ code: 'AREA_TICKET_IDEMPOTENCY_CONFLICT' })
+  })
+
+  // D5 v4 (Codex r2): recortar los dos lados confundía la nota larga X con su forma recortada escrita LITERALMENTE (Y).
+  // Un vale anterior al tope (nota guardada de más de 500) se compara con el texto íntegro, como antes de D5.
+  it('🔴 vale viejo con X (500a+A, guardado entero) contra reintento con su forma recortada literal Y ⇒ 409', async () => {
+    const X = 'a'.repeat(500) + 'A'
+    const Y = 'a'.repeat(491) + '…' + createHash('sha256').update(X).digest('hex').slice(0, 8)
+    expect(capItemNote(X)).toBe(Y)
+    prismaMock.areaTicket.findUnique.mockResolvedValue(valeGuardado(X))
+
+    await expect(issueAreaTicket('venue-1', repeticion(Y))).rejects.toMatchObject({ code: 'AREA_TICKET_IDEMPOTENCY_CONFLICT' })
   })
 })
 
