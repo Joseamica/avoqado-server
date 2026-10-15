@@ -144,6 +144,24 @@ async function ligarPorTpv(quien: { staffId: string }, role: string, orderId: st
   return { status: res.status.mock.calls[0]?.[0], cuerpo: res.json.mock.calls[0]?.[0] }
 }
 
+/** «Quitar cliente» de la TPV de verdad (ronda 2): el controller resuelve `payments:create` de quien quita. */
+async function quitarPorTpv(quien: { staffId: string }, role: string, orderId: string, customerId: string) {
+  const req = {
+    params: { venueId: venueId!, orderId, customerId },
+    body: {},
+    headers: {},
+    query: {},
+    method: 'DELETE',
+    originalUrl: `/api/v1/tpv/venues/${venueId}/orders/${orderId}/customers/${customerId}`,
+    authContext: { userId: quien.staffId, venueId: venueId!, orgId: orgId!, role },
+  } as unknown as Request<any, any, any>
+  const res = respuesta()
+  const next = jest.fn()
+  await tpv.removeCustomerFromOrder(req, res, next as unknown as NextFunction)
+  if (next.mock.calls.length) throw next.mock.calls[0][0]
+  return { status: res.status.mock.calls[0]?.[0], cuerpo: res.json.mock.calls[0]?.[0] }
+}
+
 /** El reconciliador REAL, acotado a ESTA venta (otras pruebas comparten la base). */
 function reconciliadorDe(orderId: string) {
   const soloEsta = (args: any) => ({ ...args, where: { AND: [args.where, { id: orderId }] } })
@@ -350,5 +368,71 @@ describe('🔴 F1: COCINA (sin payments:create) liga a una venta PAGADA con su l
     }
     await awardLoyaltyForPaidOrder({ venueId: venueId!, orderId, orderTotal: 20, staffId: cajero.staffId, legacyCustomer: null })
     expect(await loQueRecibio(orderId, kev)).toMatchObject(NADA)
+  })
+})
+
+/**
+ * 🔴 Ronda 2 (cierra el riesgo 1 de la ronda 1): quitar al PRIMARIO de una venta cobrada promovía al siguiente. COCINA quitaba
+ * al primario de una venta pagada con la lealtad pendiente y su acompañante se volvía beneficiario. Ahora, en una venta
+ * cobrada, sólo se promueve si quien quita tiene `payments:create`.
+ */
+describe('🔴 Ronda 2: quitar al primario de una venta PAGADA con la lealtad pendiente', () => {
+  /** Venta pagada pendiente con P primario, y C ligado por COCINA (acompañante, F1). */
+  async function ventaConPrimarioYAcompanante() {
+    const p = await cliente('Pepe')
+    const c = await cliente('Kev')
+    const orderId = await venta()
+    await prisma.orderCustomer.create({ data: { orderId, customerId: p, isPrimary: true } })
+    const { cuerpo } = await ligarPorTpv(cocina, 'KITCHEN', orderId, { customerId: c })
+    expect(cuerpo.data).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ customerId: p, isPrimary: true }),
+        expect.objectContaining({ customerId: c, isPrimary: false }),
+      ]),
+    )
+    return { p, c, orderId }
+  }
+
+  it('🔴 COCINA quita a P ⇒ C sigue acompañante; el cobro en curso y el reconciliador ⇒ nada para C y la venta cierra «sin cliente»', async () => {
+    const { p, c, orderId } = await ventaConPrimarioYAcompanante()
+    const { status, cuerpo } = await quitarPorTpv(cocina, 'KITCHEN', orderId, p)
+    expect(status).toBe(200)
+    expect(cuerpo.data).toEqual([expect.objectContaining({ customerId: c, isPrimary: false })])
+
+    await awardLoyaltyForPaidOrder({ venueId: venueId!, orderId, orderTotal: 20, staffId: cajero.staffId, legacyCustomer: null })
+    await reconciliadorDe(orderId).runNow()
+    const r = await loQueRecibio(orderId, c)
+    expect(r).toMatchObject(NADA)
+    expect(r.orden.loyaltyProcessedAt).toBeInstanceOf(Date)
+    expect(await prisma.stampEvent.count({ where: { venueId, orderId, type: 'EARN' } })).toBe(0)
+  })
+
+  it('(1b) lo mismo si sólo corre el reconciliador', async () => {
+    const { p, c, orderId } = await ventaConPrimarioYAcompanante()
+    await quitarPorTpv(cocina, 'KITCHEN', orderId, p)
+    expect(await reconciliadorDe(orderId).runNow()).toMatchObject({ scanned: 1, applied: 1, failed: 0 })
+    const r = await loQueRecibio(orderId, c)
+    expect(r).toMatchObject(NADA)
+    expect(r.orden.loyaltyProcessedAt).toBeInstanceOf(Date)
+  })
+
+  it('🔴 el CAJERO (con payments:create) quita a P ⇒ C se promueve y la lealtad pendiente se la acredita (el camino de siempre)', async () => {
+    const { p, c, orderId } = await ventaConPrimarioYAcompanante()
+    const { cuerpo } = await quitarPorTpv(cajero, 'CASHIER', orderId, p)
+    expect(cuerpo.data).toEqual([expect.objectContaining({ customerId: c, isPrimary: true })])
+    await awardLoyaltyForPaidOrder({ venueId: venueId!, orderId, orderTotal: 20, staffId: cajero.staffId, legacyCustomer: null })
+    const r = await loQueRecibio(orderId, c)
+    expect(r.sellos).toBe(1)
+    expect(r.puntos).toBe(1)
+  })
+
+  it('regresión: cuenta ABIERTA y COCINA quita al primario ⇒ el siguiente se promueve como siempre', async () => {
+    const p = await cliente('Pepe')
+    const c = await cliente('Kev')
+    const orderId = await venta({ abierta: true })
+    await ligarPorTpv(cocina, 'KITCHEN', orderId, { customerId: p })
+    await ligarPorTpv(cocina, 'KITCHEN', orderId, { customerId: c })
+    const { cuerpo } = await quitarPorTpv(cocina, 'KITCHEN', orderId, p)
+    expect(cuerpo.data).toEqual([expect.objectContaining({ customerId: c, isPrimary: true })])
   })
 })

@@ -22,7 +22,7 @@ jest.mock('@/services/shared/loyaltyOnLateCustomer', () => ({
 
 import type { NextFunction, Request, Response } from 'express'
 import { prismaMock } from '@tests/__helpers__/setup'
-import { addCustomerToOrder, createAndAddCustomerToOrder } from '@/controllers/tpv/order.tpv.controller'
+import { addCustomerToOrder, createAndAddCustomerToOrder, removeCustomerFromOrder } from '@/controllers/tpv/order.tpv.controller'
 import { checkPermission } from '@/middlewares/checkPermission.middleware'
 
 const VENUE = 'v1'
@@ -257,5 +257,63 @@ describe('🔴 MEDIO-1: TPV orders/:orderId/customers/create — lo mismo con el
     const { cuerpo } = await crear()
     expect(cuerpo.loyalty).toBeNull()
     expect(mockLate).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * 🔴 Ronda 2: quitar al PRIMARIO de una venta cobrada promueve al siguiente SÓLO si quien quita tiene `payments:create` (el
+ * mismo resolvedor efectivo, falla cerrado). La ruta sigue exigiendo `orders:update`.
+ */
+describe('🔴 Ronda 2: TPV DELETE orders/:orderId/customers/:customerId — promover en una venta cobrada exige payments:create', () => {
+  beforeEach(() => {
+    prismaMock.orderCustomer.findUnique.mockResolvedValue({ id: 'oc-P', orderId: ORDER, customerId: 'cust-P', isPrimary: true } as any)
+    prismaMock.orderCustomer.delete.mockResolvedValue({ id: 'oc-P' } as any)
+    prismaMock.orderCustomer.findFirst.mockResolvedValue({ id: 'oc-C', orderId: ORDER, customerId: 'cust-C', isPrimary: false } as any)
+    prismaMock.orderCustomer.update.mockResolvedValue({ id: 'oc-C' } as any)
+  })
+
+  async function quitar() {
+    const r = res()
+    const next = jest.fn()
+    const q = { ...req({}), params: { venueId: VENUE, orderId: ORDER, customerId: 'cust-P' }, method: 'DELETE' }
+    await removeCustomerFromOrder(q as unknown as Request<any>, r, next as unknown as NextFunction)
+    return { status: r.status.mock.calls[0]?.[0], cuerpo: r.json.mock.calls[0]?.[0], next }
+  }
+
+  it('🔴 KITCHEN quita al primario de una venta PAGADA: 200, pero NADIE queda primario', async () => {
+    quienLiga({ rol: 'KITCHEN' })
+    const { status, next } = await quitar()
+    expect(next).not.toHaveBeenCalled()
+    expect(status).toBe(200)
+    expect(prismaMock.orderCustomer.delete).toHaveBeenCalled()
+    expect(prismaMock.orderCustomer.update).not.toHaveBeenCalled()
+    expect(await elPosLoDejaria()).toBe(false)
+  })
+
+  it('CASHIER (tiene payments:create): promueve al siguiente, como siempre', async () => {
+    quienLiga({ rol: 'CASHIER' })
+    await quitar()
+    expect(prismaMock.orderCustomer.update).toHaveBeenCalledWith({ where: { id: 'oc-C' }, data: { isPrimary: true } })
+  })
+
+  it('🔴 override que QUITA payments:create al CASHIER: no promueve', async () => {
+    quienLiga({ rol: 'CASHIER', personalizado: { deniedPermissions: SIN_COBRAR } })
+    await quitar()
+    expect(prismaMock.orderCustomer.update).not.toHaveBeenCalled()
+  })
+
+  it('🔴 si el permiso no se puede resolver: falla CERRADO (quita, sin promover)', async () => {
+    quienLiga({ rol: 'CASHIER' })
+    prismaMock.venueRolePermission.findUnique.mockRejectedValue(new Error('P1001'))
+    const { status } = await quitar()
+    expect(status).toBe(200)
+    expect(prismaMock.orderCustomer.update).not.toHaveBeenCalled()
+  })
+
+  it('regresión: cuenta ABIERTA y KITCHEN: promueve como siempre', async () => {
+    quienLiga({ rol: 'KITCHEN' })
+    prismaMock.order.findFirst.mockResolvedValue({ paymentStatus: 'PENDING' } as any)
+    await quitar()
+    expect(prismaMock.orderCustomer.update).toHaveBeenCalledWith({ where: { id: 'oc-C' }, data: { isPrimary: true } })
   })
 })

@@ -363,7 +363,9 @@ export async function removeCustomerFromOrder(
     const orderId: string = req.params.orderId
     const customerId: string = req.params.customerId
 
-    const orderCustomers = await orderTpvService.removeCustomerFromOrder(venueId, orderId, customerId)
+    // Ronda 2: en una venta cobrada, quitar al primario sólo promueve al siguiente si quien quita tiene `payments:create`.
+    const otorgarLealtad = await puedeOtorgarLealtadTardia(req)
+    const orderCustomers = await orderTpvService.removeCustomerFromOrder(venueId, orderId, customerId, { otorgarLealtad })
 
     res.status(200).json({
       success: true,

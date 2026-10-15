@@ -3986,9 +3986,18 @@ export async function addCustomerToOrder(
 /**
  * Remove a customer from an order
  * If removing primary customer, the next oldest customer becomes primary
+ *
+ * 🔴 Ronda 2 post-QA de sellos tardíos (decisión «A», cierra el riesgo 1 de la ronda 1): en una venta YA cobrada (pagada o
+ * reembolsada; con la lealtad pendiente o ya procesada) la promoción del siguiente SÓLO ocurre si quien quita tiene
+ * `payments:create` (`opciones.otorgarLealtad`, resuelto por el controller con el resolvedor efectivo; por defecto `false`:
+ * falla cerrado). Sin él no se promueve a nadie: los demás quedan acompañantes y, para la lealtad, la venta queda «sin
+ * cliente» (las ligas sin primario no cuentan; ver `awardLoyaltyForPaidOrder`). Si no, COCINA quitaba al primario de una venta
+ * pagada con la lealtad pendiente y volvía beneficiario a su acompañante. Una cuenta abierta promueve como siempre. Todo bajo
+ * el candado canónico de la venta (el del cobro): un cobro o el reconciliador no se cuelan entre la lectura y la decisión.
  */
-export async function removeCustomerFromOrder(venueId: string, orderId: string, customerId: string) {
+export async function removeCustomerFromOrder(venueId: string, orderId: string, customerId: string, opciones: OpcionesDeLigaTpv = {}) {
   logger.info(`🗑️ [ORDER SERVICE] Removing customer ${customerId} from order ${orderId}`)
+  const puedePromoverEnVentaCobrada = opciones.otorgarLealtad === true
 
   // Verify order exists and belongs to venue
   const order = await prisma.order.findUnique({
@@ -4000,37 +4009,48 @@ export async function removeCustomerFromOrder(venueId: string, orderId: string, 
     throw new NotFoundError('Order not found')
   }
 
-  // Find the association to remove
-  const association = await prisma.orderCustomer.findUnique({
-    where: { orderId_customerId: { orderId, customerId } },
-  })
+  await prisma.$transaction(
+    async tx => {
+      // 🔴 PRIMERA sentencia: el candado de la venta, y el estado vigente bajo él (igual que la liga).
+      const venta = await leerVentaBajoCandado(tx, venueId, orderId)
 
-  if (!association) {
-    throw new NotFoundError('Customer not associated with this order')
-  }
-
-  const wasPrimary = association.isPrimary
-
-  // Remove the association
-  await prisma.orderCustomer.delete({
-    where: { orderId_customerId: { orderId, customerId } },
-  })
-
-  // If removed customer was primary, promote the next oldest customer
-  if (wasPrimary) {
-    const nextCustomer = await prisma.orderCustomer.findFirst({
-      where: { orderId },
-      orderBy: { addedAt: 'asc' },
-    })
-
-    if (nextCustomer) {
-      await prisma.orderCustomer.update({
-        where: { id: nextCustomer.id },
-        data: { isPrimary: true },
+      // Find the association to remove
+      const association = await tx.orderCustomer.findUnique({
+        where: { orderId_customerId: { orderId, customerId } },
       })
-      logger.info(`👑 [ORDER SERVICE] Promoted customer ${nextCustomer.customerId} to primary for order ${orderId}`)
-    }
-  }
+
+      if (!association) {
+        throw new NotFoundError('Customer not associated with this order')
+      }
+
+      // Remove the association
+      await tx.orderCustomer.delete({
+        where: { orderId_customerId: { orderId, customerId } },
+      })
+
+      // If removed customer was primary, promote the next oldest customer — en una venta cobrada, sólo con permiso.
+      if (association.isPrimary) {
+        if (venta.cobrada && !puedePromoverEnVentaCobrada) {
+          logger.info(`🔒 [ORDER SERVICE] Paid order ${orderId}: primary removed without payments:create, nobody promoted`)
+          return
+        }
+        const nextCustomer = await tx.orderCustomer.findFirst({
+          where: { orderId },
+          orderBy: { addedAt: 'asc' },
+        })
+
+        if (nextCustomer) {
+          await tx.orderCustomer.update({
+            where: { id: nextCustomer.id },
+            data: { isPrimary: true },
+          })
+          logger.info(`👑 [ORDER SERVICE] Promoted customer ${nextCustomer.customerId} to primary for order ${orderId}`)
+        }
+      }
+    },
+    // El presupuesto de toda transacción que toma el candado de la venta (`ORDER_LOCK_WAIT_BUDGET`, T8-R2).
+    { timeout: 15_000, maxWait: 5_000 },
+  )
 
   logger.info(`✅ [ORDER SERVICE] Removed customer from order ${order.orderNumber}`)
 

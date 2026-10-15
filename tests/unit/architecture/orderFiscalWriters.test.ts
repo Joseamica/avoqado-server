@@ -1057,6 +1057,8 @@ const ORDER_LOCK_TRANSACTIONS: Record<string, number> = {
   // Sellos tardíos, ronda 1 post-QA (F1): «agregar cliente» de la TPV decide primario/acompañante bajo el candado de la venta
   'src/services/tpv/order.tpv.service.ts#addCustomerToOrder': 1,
   'src/services/tpv/order.tpv.service.ts#createAndAddCustomerToOrder': 1,
+  // … y «quitar cliente» (ronda 2): promover en una venta cobrada exige payments:create, decidido bajo el MISMO candado
+  'src/services/tpv/order.tpv.service.ts#removeCustomerFromOrder': 1,
   // … y el «Agregar cliente» del POS toma el MISMO candado primero (mismo orden que la TPV: sin bloqueos mutuos)
   'src/services/mobile/order.mobile.service.ts#attachCustomerToOrder': 1,
   // Already on the budget before the final wave
