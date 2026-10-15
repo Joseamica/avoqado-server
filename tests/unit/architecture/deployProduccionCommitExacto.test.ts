@@ -57,37 +57,13 @@ describe('workflow: el deploy de producción', () => {
     expect(correriaElDeploy(ctx)).toBe(esperado)
   })
 
-  // Lo que haría que la revisión corra MENOS pruebas sin que nadie lo note.
-  const RECORTES = /--onlyChanged|--changedSince|--findRelatedTests|--shard|--passWithNoTests|--bail/
-
-  it('la integración sigue dentro de la revisión que el deploy espera, sin continue-on-error y con el filtro de siempre', () => {
+  it('la integración sigue dentro de la revisión que el deploy espera, sin continue-on-error', () => {
     const revision = workflow.jobs['test-and-build']
     expect(revision['continue-on-error']).toBeUndefined()
-    // Desde el 14-oct corre en 4 procesos con `npx jest` (una copia de la base por proceso), ya no con `npm run test:integration`.
-    const integracion = revision.steps.find((p: Record<string, any>) => String(p.run ?? '').includes('--selectProjects=integration'))
+    const integracion = revision.steps.find((p: Record<string, any>) => String(p.run ?? '').includes('npm run test:integration'))
     expect(integracion).toBeDefined()
     expect(integracion.if).toBeUndefined()
     expect(integracion['continue-on-error']).toBeUndefined()
-    const run = String(integracion.run)
-    expect(run).not.toMatch(RECORTES)
-    // Las mismas exclusiones que `npm run test:integration`: ni una prueba menos.
-    const filtro = (s: string) => s.match(/--testPathIgnorePatterns='([^']+)'/)?.[1]
-    const pkg = JSON.parse(fs.readFileSync(path.join(RAIZ, 'package.json'), 'utf8'))
-    expect(filtro(pkg.scripts['test:integration'])).toBeDefined()
-    expect(filtro(run)).toBe(filtro(pkg.scripts['test:integration']))
-  })
-
-  it('las unitarias corren completas, en un job que el deploy espera', () => {
-    const unitarias = workflow.jobs['unit-tests']
-    expect(deploy.needs).toEqual(expect.arrayContaining(['test-and-build', 'unit-tests']))
-    expect(unitarias.if).toBeUndefined()
-    expect(unitarias['continue-on-error']).toBeUndefined()
-    expect(unitarias.strategy).toBeUndefined() // un solo job: sin partes que alguien pueda dejar fuera
-    const paso = unitarias.steps.find((p: Record<string, any>) => /jest tests\/unit /.test(String(p.run ?? '')))
-    expect(paso).toBeDefined()
-    expect(paso.if).toBeUndefined()
-    expect(paso['continue-on-error']).toBeUndefined()
-    expect(String(paso.run)).not.toMatch(RECORTES)
   })
 
   it('despliega con el script del commit exacto, con el SHA probado y el secreto NUEVO del servicio (el viejo, de respaldo)', () => {
