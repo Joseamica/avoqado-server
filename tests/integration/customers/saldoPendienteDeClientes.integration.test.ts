@@ -128,7 +128,7 @@ describe('saldo pendiente de cada cliente de la lista: mismos valores, sin hidra
     expect(de('Carla')).toMatchObject({ pendingOrderCount: 0, pendingBalance: 0 })
     expect(de('Dany')).toMatchObject({ pendingOrderCount: 0, pendingBalance: 0 })
     // La respuesta no lleva la relación (antes se borraba con `orderAssociations: undefined`).
-    expect(ahora.data.every(c => (c as Record<string, unknown>).orderAssociations === undefined)).toBe(true)
+    expect(ahora.data.every(c => !('orderAssociations' in c))).toBe(true)
   })
 
   it('una página parcial calcula sólo sus clientes y con los mismos valores', async () => {

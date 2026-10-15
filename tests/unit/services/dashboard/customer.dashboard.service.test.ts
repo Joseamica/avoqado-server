@@ -167,7 +167,7 @@ describe('Customer Dashboard Service', () => {
       expect(saldo.values).toEqual(['venue-123', 'customer-1', 'customer-2'])
       expect(r.data[0]).toMatchObject({ id: 'customer-1', pendingOrderCount: 2, pendingBalance: 120.75 })
       expect(r.data[1]).toMatchObject({ id: 'customer-2', pendingOrderCount: 0, pendingBalance: 0 })
-      expect(r.data.every(c => (c as Record<string, unknown>).orderAssociations === undefined)).toBe(true)
+      expect(r.data.every(c => !('orderAssociations' in c))).toBe(true)
     })
 
     it('H6: página vacía ⇒ sin agregado', async () => {
