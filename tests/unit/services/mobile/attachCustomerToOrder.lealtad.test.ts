@@ -88,11 +88,12 @@ describe('attachCustomerToPayment — sello tardío', () => {
   it('sin actor (cliente viejo del servicio): staffId null', async () => {
     await attachCustomerToPayment(VENUE, 'pay-1', 'cust-1')
     expect(mockLate).toHaveBeenCalledWith(expect.objectContaining({ staffId: null }))
+    expect(mockReabrir).toHaveBeenCalledWith(prismaMock, expect.objectContaining({ staffId: null }))
   })
 
   it('🔴 reabre la lealtad DENTRO de la transacción de la liga y ANTES del intento inmediato (auditoría A #1)', async () => {
     await attachCustomerToPayment(VENUE, 'pay-1', 'cust-1', 'staff-1')
-    expect(mockReabrir).toHaveBeenCalledWith(prismaMock, { venueId: VENUE, orderId: 'order-1', customerId: 'cust-1' })
+    expect(mockReabrir).toHaveBeenCalledWith(prismaMock, { venueId: VENUE, orderId: 'order-1', customerId: 'cust-1', staffId: 'staff-1' })
     expect(reabrioDentroDeLaTransaccion).toBe(true)
     expect(mockReabrir.mock.invocationCallOrder[0]).toBeLessThan(mockLate.mock.invocationCallOrder[0])
   })
@@ -111,7 +112,7 @@ describe('attachCustomerToPayment — sello tardío', () => {
     prismaMock.orderCustomer.findUnique.mockResolvedValue({ id: 'oc-1', isPrimary: false } as any)
     await attachCustomerToPayment(VENUE, 'pay-1', 'cust-1', 'staff-1')
     expect(prismaMock.orderCustomer.update).toHaveBeenCalledWith({ where: { id: 'oc-1' }, data: { isPrimary: true } })
-    expect(mockReabrir).toHaveBeenCalledWith(prismaMock, { venueId: VENUE, orderId: 'order-1', customerId: 'cust-1' })
+    expect(mockReabrir).toHaveBeenCalledWith(prismaMock, { venueId: VENUE, orderId: 'order-1', customerId: 'cust-1', staffId: 'staff-1' })
   })
 
   it('si reabrir falla, la liga falla entera (misma transacción) y no se intenta la lealtad: el cajero reintenta', async () => {

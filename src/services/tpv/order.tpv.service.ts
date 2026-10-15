@@ -3847,7 +3847,7 @@ export async function addCustomerToOrder(
           // 🔴 Y es la ÚLTIMA escritura antes del commit (ruling tras S3b/S4): deja la MARCA de fila que detiene al cierre
           // «sin cliente» que esté esperando el candado de la orden. La TPV no escribe `Order.customerId`: la marca la cubre.
           if (isPrimary) {
-            await reabrirLealtadSiAplica(tx, { venueId, orderId, customerId })
+            await reabrirLealtadSiAplica(tx, { venueId, orderId, customerId, staffId: staffId ?? null })
           }
 
           return { isPrimary }
@@ -4045,7 +4045,7 @@ export async function createAndAddCustomerToOrder(
           // 🔴 Auditoría A #1, igual que `addCustomerToOrder`: el cliente NUEVO y primario reabre la lealtad durable de la
           // venta en esta misma transacción, como ÚLTIMA escritura (marca de fila).
           if (isPrimary) {
-            await reabrirLealtadSiAplica(tx, { venueId, orderId, customerId: newCustomer.id })
+            await reabrirLealtadSiAplica(tx, { venueId, orderId, customerId: newCustomer.id, staffId: staffId ?? null })
           }
 
           logger.info(

@@ -68,6 +68,15 @@ describe('LoyaltyReconciliationJob', () => {
     expect(result).toEqual(expect.objectContaining({ scanned: 1, applied: 1, failed: 0 }))
   })
 
+  it('🔴 H5: the claim pins the loyaltyStaffId it read, so the award uses the CURRENT actor (a late link may have changed it)', async () => {
+    const { job, order } = setup()
+    await job.runNow()
+    expect(order.updateMany.mock.calls[0][0]).toMatchObject({
+      where: { id: 'order-1', loyaltyStaffId: 'staff-1' },
+      data: { loyaltyProcessingAt: expect.any(Date), loyaltyAttempts: { increment: 1 } },
+    })
+  })
+
   it('recovery awards the same net-of-tip amount as immediate settlement', async () => {
     const { job, order, award } = setup()
     order.findMany.mockResolvedValue([candidate({ total: new Decimal(110), tipAmount: new Decimal(20) })])

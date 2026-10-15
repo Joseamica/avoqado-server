@@ -3705,7 +3705,8 @@ export async function attachCustomerToOrder(venueId: string, orderId: string, cu
     // 🔴 Y es la ÚLTIMA escritura antes del commit (ruling tras la medición de S3b): la reapertura deja una MARCA en la fila
     // (`loyaltyLastError`). La lealtad del cobro que leyó la venta «sin cliente» puede estar esperando el candado de esta fila
     // para cerrarla; al soltarse, Postgres sólo relee las columnas de la fila, y la marca es lo que la detiene.
-    await reabrirLealtadSiAplica(tx, { venueId, orderId, customerId: normalizedCustomerId })
+    // H5: con el actor de la liga, para que el reconciliador selle a nombre de quien agregó al cliente.
+    await reabrirLealtadSiAplica(tx, { venueId, orderId, customerId: normalizedCustomerId, staffId: staffId ?? null })
 
     return ligada
   })

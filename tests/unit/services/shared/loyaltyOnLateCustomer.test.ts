@@ -679,6 +679,20 @@ describe('reabrirLealtadSiAplica (DENTRO de la transacción de la liga — audit
     })
   })
 
+  // ── H5 (auditoría de Codex del código + revisión final Minor 5, 15-oct-2026) ──────────────────────────────────────────
+  it('🔴 H5: guarda al actor de la liga en loyaltyStaffId: si el intento inmediato falla, el reconciliador sella a nombre de quien LIGÓ', async () => {
+    await reabrirLealtadSiAplica(tx(), { venueId: VENUE, orderId: ORDER, customerId: CUST, staffId: 'barista' })
+    expect(prismaMock.order.updateMany).toHaveBeenCalledWith({
+      where: { id: ORDER, venueId: VENUE },
+      data: { loyaltyProcessedAt: null, loyaltyProcessingAt: null, loyaltyLastError: MARCA, loyaltyStaffId: 'barista' },
+    })
+  })
+
+  it('H5: sin actor conocido no se toca loyaltyStaffId (se conserva quien cobró)', async () => {
+    await reabrirLealtadSiAplica(tx(), { venueId: VENUE, orderId: ORDER, customerId: CUST, staffId: null })
+    expect(prismaMock.order.updateMany.mock.calls[0][0].data).not.toHaveProperty('loyaltyStaffId')
+  })
+
   it('sin loyaltyEligibleAt: lo pone a la hora del último cobro (la MISMA ancla del plazo) para que el reconciliador la vea', async () => {
     const cobro = hace(45 * MIN)
     conVenta({ loyaltyEligibleAt: null, payments: [{ createdAt: cobro }] })
@@ -749,6 +763,55 @@ describe('🔴 recuperación durable de punta a punta (auditoría A #1)', () => 
     expect(reintento).toHaveBeenCalledWith(expect.objectContaining({ venueId: VENUE, orderId: ORDER, orderTotal: 80 }))
     expect(r).toMatchObject({ scanned: 1, applied: 1 })
     expect(fila.loyaltyProcessedAt).toBeInstanceOf(Date)
+  })
+})
+
+describe('🔴 H5: el reconciliador sella a nombre de quien LIGÓ al cliente, no de quien cobró', () => {
+  it('la liga reabre con su actor; el intento inmediato falla; el reconciliador usa el actor de la liga', async () => {
+    const fila = { ...filaYaProcesada(), loyaltyStaffId: 'cajero' }
+    const tabla = tablaDeUnaVenta(fila)
+    prismaMock.order.updateMany.mockImplementation(tabla.updateMany as never)
+    expect(
+      await reabrirLealtadSiAplica(prismaMock as never, { venueId: VENUE, orderId: ORDER, customerId: CUST, staffId: 'barista' }),
+    ).toBe(true)
+    expect(fila.loyaltyStaffId).toBe('barista')
+
+    const reintento = jest.fn().mockResolvedValue({ complete: true, errors: [] })
+    const job = new LoyaltyReconciliationJob({
+      prisma: { order: tabla } as never,
+      cron: cron(),
+      award: reintento,
+      now: () => new Date(Date.now()),
+    })
+    expect(await job.runNow()).toMatchObject({ scanned: 1, applied: 1 })
+    expect(reintento).toHaveBeenCalledWith(expect.objectContaining({ staffId: 'barista' }))
+  })
+
+  it('la liga cambia el actor ENTRE la lectura del reconciliador y su reclamo: esa vuelta no la toma con el actor viejo; la siguiente sí, con el nuevo', async () => {
+    const fila = { ...filaYaProcesada(), loyaltyProcessedAt: null, loyaltyStaffId: 'cajero' }
+    const tabla = tablaDeUnaVenta(fila)
+    prismaMock.order.updateMany.mockImplementation(tabla.updateMany as never)
+    let primeraLectura = true
+    const lectura = {
+      ...tabla,
+      // La lectura devuelve una COPIA (como Postgres); justo después, la liga reabre con su actor.
+      findMany: jest.fn(async (a: any) => {
+        const copia = (await tabla.findMany(a)).map(f => ({ ...f }))
+        if (primeraLectura) {
+          primeraLectura = false
+          await reabrirLealtadSiAplica(prismaMock as never, { venueId: VENUE, orderId: ORDER, customerId: CUST, staffId: 'barista' })
+        }
+        return copia
+      }),
+    }
+    const reintento = jest.fn().mockResolvedValue({ complete: true, errors: [] })
+    const job = () =>
+      new LoyaltyReconciliationJob({ prisma: { order: lectura } as never, cron: cron(), award: reintento, now: () => new Date(Date.now()) })
+
+    expect(await job().runNow()).toMatchObject({ scanned: 1, applied: 0, skipped: 1 })
+    expect(reintento).not.toHaveBeenCalled()
+    expect(await job().runNow()).toMatchObject({ scanned: 1, applied: 1 })
+    expect(reintento).toHaveBeenCalledWith(expect.objectContaining({ staffId: 'barista' }))
   })
 })
 

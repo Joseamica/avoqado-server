@@ -65,6 +65,7 @@ describe('TPV addCustomerToOrder', () => {
   it('sin actor (llamador viejo del servicio): staffId null', async () => {
     await addCustomerToOrder(VENUE, 'order-1', 'cust-1')
     expect(mockLate).toHaveBeenCalledWith(expect.objectContaining({ staffId: null }))
+    expect(mockReabrir).toHaveBeenCalledWith(prismaMock, expect.objectContaining({ staffId: null }))
   })
 
   it('regresión: cliente ya ligado ⇒ 400 y sin lealtad', async () => {
@@ -84,7 +85,7 @@ describe('TPV addCustomerToOrder', () => {
 
   it('🔴 el primer cliente (primario) reabre la lealtad DENTRO de la transacción, antes del intento inmediato (auditoría A #1)', async () => {
     await addCustomerToOrder(VENUE, 'order-1', 'cust-1', 'staff-1')
-    expect(mockReabrir).toHaveBeenCalledWith(prismaMock, { venueId: VENUE, orderId: 'order-1', customerId: 'cust-1' })
+    expect(mockReabrir).toHaveBeenCalledWith(prismaMock, { venueId: VENUE, orderId: 'order-1', customerId: 'cust-1', staffId: 'staff-1' })
     expect(reabrioDentro).toBe(true)
     expect(mockReabrir.mock.invocationCallOrder[0]).toBeLessThan(mockLate.mock.invocationCallOrder[0])
   })
@@ -133,7 +134,7 @@ describe('TPV createAndAddCustomerToOrder', () => {
 
   it('el cliente nuevo y primario también reabre la lealtad dentro de la transacción', async () => {
     await createAndAddCustomerToOrder(VENUE, 'order-1', { firstName: 'Dany' }, 'staff-1')
-    expect(mockReabrir).toHaveBeenCalledWith(prismaMock, { venueId: VENUE, orderId: 'order-1', customerId: 'nuevo' })
+    expect(mockReabrir).toHaveBeenCalledWith(prismaMock, { venueId: VENUE, orderId: 'order-1', customerId: 'nuevo', staffId: 'staff-1' })
     expect(reabrioDentro).toBe(true)
     expect(mockReabrir.mock.invocationCallOrder[0]).toBeLessThan(mockLate.mock.invocationCallOrder[0])
   })

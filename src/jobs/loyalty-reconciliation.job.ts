@@ -141,6 +141,10 @@ export class LoyaltyReconciliationJob {
             loyaltyEligibleAt: { not: null },
             loyaltyProcessedAt: null,
             loyaltyAttempts: { lt: MAX_ATTEMPTS },
+            // 🔴 H5 (auditoría de Codex del código, 15-oct-2026): el reclamo exige el MISMO actor que se leyó. Una liga tardía
+            // guarda a quien agregó al cliente en `loyaltyStaffId`; si lo cambió entre la lectura y este reclamo, esta vuelta
+            // no la toma (sellaría a nombre de quien cobró) y la siguiente lee el valor vigente.
+            loyaltyStaffId: order.loyaltyStaffId,
             OR: [{ loyaltyProcessingAt: null }, { loyaltyProcessingAt: { lt: staleBefore } }],
           },
           data: { loyaltyProcessingAt: claimStamp, loyaltyAttempts: { increment: 1 } },

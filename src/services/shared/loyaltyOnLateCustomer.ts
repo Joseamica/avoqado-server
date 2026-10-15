@@ -196,10 +196,14 @@ export async function fotoDeLaVenta(
  * escritura de su transacción: el cierre «sin cliente» de `awardLoyaltyForPaidOrder` que esté esperando el candado de esta
  * fila sólo relee sus columnas al soltarse, y la marca lo detiene (medido contra Postgres por S3b; ver `lealtadReabierta.ts`).
  * Los cierres buenos la borran (`loyaltyLastError = null`).
+ *
+ * 🔴 H5 (auditoría de Codex del código + revisión final Minor 5, 15-oct-2026): guarda al actor de la liga (`staffId`, quien
+ * agregó al cliente) en `Order.loyaltyStaffId`. Si el intento inmediato falla, el reconciliador sella con ESE valor (spec:
+ * cada sello lleva a quien agregó al cliente), no con el de quien cobró. Sin actor conocido no se toca.
  */
 export async function reabrirLealtadSiAplica(
   tx: Prisma.TransactionClient,
-  args: { venueId: string; orderId: string; customerId: string },
+  args: { venueId: string; orderId: string; customerId: string; staffId?: string | null },
   nowMs: number = Date.now(),
 ): Promise<boolean> {
   const venta = await leerVenta(tx, args.venueId, args.orderId)
@@ -213,6 +217,7 @@ export async function reabrirLealtadSiAplica(
       loyaltyProcessedAt: null,
       loyaltyProcessingAt: null,
       loyaltyLastError: MARCA_LEALTAD_REABIERTA,
+      ...(args.staffId ? { loyaltyStaffId: args.staffId } : {}),
       ...(venta.loyaltyEligibleAt ? {} : { loyaltyEligibleAt: foto.settledAt }),
     },
   })
