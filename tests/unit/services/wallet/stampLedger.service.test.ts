@@ -39,6 +39,7 @@ describe('grantStamp', () => {
   beforeEach(() => {
     jest.clearAllMocks()
     prismaMock.stampEvent.findFirst.mockResolvedValue(null)
+    prismaMock.loyaltyTransaction.findFirst.mockResolvedValue(null)
     prismaMock.stampEvent.count.mockResolvedValue(0)
     prismaMock.stampCard.findFirst.mockResolvedValue(null)
     prismaMock.stampCard.create.mockResolvedValue({ id: 'sc1', cycle: 1, stampsRequired: 7, stampsEarned: 0 } as any)
@@ -236,13 +237,23 @@ describe('grantStamp', () => {
       orden.push('BEGIN')
       return cb(prismaMock)
     }) as never)
-    prismaMock.$executeRaw.mockImplementationOnce((async () => {
-      orden.push('candado')
-      return 0
-    }) as never)
+    prismaMock.$executeRaw
+      .mockImplementationOnce((async () => {
+        orden.push('candado')
+        return 0
+      }) as never)
+      .mockImplementationOnce((async () => {
+        orden.push('candado de la venta')
+        return 0
+      }) as never)
     // F2: el atajo de AFUERA (antes de BEGIN) no cuenta; dentro del candado la primera lectura es el sello de ESTA orden.
     prismaMock.stampEvent.findFirst.mockImplementation((async () => {
       if (orden.includes('BEGIN')) orden.push('propio')
+      return null
+    }) as never)
+    // H4, tercera ola: y luego, si OTRO cliente ya recibió los puntos de esta venta.
+    prismaMock.loyaltyTransaction.findFirst.mockImplementation((async () => {
+      orden.push('puntos de otro')
       return null
     }) as never)
     prismaMock.stampEvent.count.mockImplementationOnce((async () => {
@@ -262,10 +273,26 @@ describe('grantStamp', () => {
     const r = await grantStamp('v1', 'c1', 'o1')
 
     expect(r.granted).toBe(true)
-    expect(orden).toEqual(['BEGIN', 'candado', 'propio', 'tope', 'cartilla', 'sello'])
+    expect(orden).toEqual(['BEGIN', 'candado', 'candado de la venta', 'propio', 'puntos de otro', 'tope', 'cartilla', 'sello'])
     const [plantilla, ...valores] = prismaMock.$executeRaw.mock.calls[0] as unknown as [TemplateStringsArray, ...unknown[]]
     expect(plantilla.join('?')).toContain('pg_advisory_xact_lock(hashtext(?), hashtext(?))')
     expect(valores).toEqual(['v1', 'c1'])
+    // H4, tercera ola: el SEGUNDO candado es el de la VENTA, el mismo que toma la escritura de los puntos.
+    const [plantilla2, ...valores2] = prismaMock.$executeRaw.mock.calls[1] as unknown as [TemplateStringsArray, ...unknown[]]
+    expect(plantilla2.join('?')).toContain('pg_advisory_xact_lock(hashtext(?), hashtext(?))')
+    expect(valores2).toEqual(['v1', 'o1'])
+  })
+
+  it('🔴 H4 (tercera ola): OTRO cliente ya recibió los PUNTOS de esta venta ⇒ OTHER_CUSTOMER, sin sello', async () => {
+    mockConfig()
+    prismaMock.loyaltyTransaction.findFirst.mockResolvedValue({ customerId: 'ana' } as any)
+    const r = await grantStamp('v1', 'c1', 'o1')
+    expect(r).toEqual({ granted: false, reason: 'OTHER_CUSTOMER' })
+    expect(prismaMock.stampEvent.create).not.toHaveBeenCalled()
+    expect(prismaMock.loyaltyTransaction.findFirst).toHaveBeenCalledWith({
+      where: { orderId: 'o1', type: 'EARN', customerId: { not: 'c1' }, customer: { venueId: 'v1' } },
+      select: { customerId: true },
+    })
   })
 
   // ── F2 (S3b minor #2, rulings del código 15-oct): la MISMA orden dos veces a la vez ──────────────────────────────────────

@@ -19,10 +19,10 @@
 
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import prisma from '@/utils/prismaClient'
-import { StampRewardType, LoyaltyTransactionType, Prisma } from '@prisma/client'
+import { StampRewardType, LoyaltyTransactionType, Prisma, StampEventType } from '@prisma/client'
 import logger from '@/config/logger'
 import { logAction } from './activity-log.service'
-import { grantStamp } from '../wallet/stampLedger.service'
+import { grantStamp, type GrantStampResult } from '../wallet/stampLedger.service'
 import { venueHasFeatureAccess } from '../access/basePlan.service'
 
 /**
@@ -270,7 +270,15 @@ export async function earnPoints(
   amount: number,
   orderId: string,
   staffId?: string,
-): Promise<{ pointsEarned: number; newBalance: number }> {
+): Promise<{
+  pointsEarned: number
+  newBalance: number
+  /**
+   * 🔴 H4, tercera ola: OTRO cliente ya recibió los puntos o el sello de esta venta (dos intentos validaron a clientes
+   * distintos). No se acreditó nada a éste. Sólo aparece en ese caso; los cobros de siempre no lo ven nunca.
+   */
+  otroCliente?: true
+}> {
   // Paid entitlement and venue activation are BOTH required. Automatic award
   // paths must not create an active config merely because a payment happened.
   if (!(await venueHasFeatureAccess(venueId, 'LOYALTY_PROGRAM'))) {
@@ -309,8 +317,9 @@ export async function earnPoints(
   // Se le pasa la config que ya tenemos: esta función corre en CADA cobro de CADA
   // negocio, y releerla serían miles de consultas diarias que no aportan nada.
   let deferredStampError: unknown
+  let sello: GrantStampResult | undefined
   try {
-    await grantStamp(venueId, customerId, orderId, { staffVenueId: staffId, config })
+    sello = await grantStamp(venueId, customerId, orderId, { staffVenueId: staffId, config })
   } catch (stampError: any) {
     deferredStampError = stampError
     logger.error('⚠️ Falló el sellado — los puntos siguen su curso', {
@@ -328,6 +337,15 @@ export async function earnPoints(
   const finish = <T>(result: T): T => {
     if (deferredStampError) throw deferredStampError
     return result
+  }
+  const saldoActual = async (): Promise<number> =>
+    (await prisma.customer.findUnique({ where: { id: customerId }, select: { loyaltyPoints: true } }))?.loyaltyPoints ?? 0
+
+  // 🔴 H4, tercera ola (recheck 2 de Codex, 15-oct-2026): el sellado ya vio, con el candado de la VENTA, que OTRO cliente
+  // recibió los puntos de esta venta. A éste no se le da nada.
+  if (sello?.reason === 'OTHER_CUSTOMER') {
+    logger.warn('⚠️ [LOYALTY] Another customer already earned this order: no points', { venueId, orderId, customerId })
+    return finish({ pointsEarned: 0, newBalance: await saldoActual(), otroCliente: true as const })
   }
 
   // 🔒 IDEMPOTENCY CHECK: Prevent double-earning on payment retries
@@ -358,15 +376,43 @@ export async function earnPoints(
   const pointsEarned = await calculatePointsForAmount(venueId, amount)
 
   if (pointsEarned === 0) {
+    // H4, tercera ola: negocio de sólo sellos. «Ya sellada» con el sello de OTRO cliente quiere decir que la venta es de él:
+    // quien llama no le cuenta la visita a éste. (Sólo se pregunta cuando el sellado dijo «ya sellada».)
+    if (sello?.reason === 'ALREADY_STAMPED') {
+      const selloDeLaVenta = await prisma.stampEvent.findFirst({
+        where: { venueId, orderId, type: StampEventType.EARN },
+        select: { stampCard: { select: { customerId: true } } },
+      })
+      if (selloDeLaVenta && selloDeLaVenta.stampCard.customerId !== customerId) {
+        return finish({ pointsEarned: 0, newBalance: 0, otroCliente: true as const })
+      }
+    }
     return finish({ pointsEarned: 0, newBalance: 0 })
   }
 
   // 🔒 RACE CONDITION FIX: Database has partial unique index to prevent duplicates
   // If concurrent calls occur, the DB will reject duplicates with P2002
   try {
-    // Create transaction and update customer balance in a transaction
-    const [_transaction, customer] = await prisma.$transaction([
-      prisma.loyaltyTransaction.create({
+    // 🔴 H4, tercera ola (recheck 2 de Codex, 15-oct-2026): la escritura de los puntos y su comprobación van en UNA transacción
+    // con el candado de la VENTA como PRIMERA sentencia (el mismo que toma `grantStamp` después del suyo). Dos intentos que
+    // validaron a clientes distintos se forman aquí: el segundo ve los puntos o el sello del primero y no acredita. La
+    // deduplicación de antes era por cliente + venta, así que no excluía a otro cliente.
+    const escrito = await prisma.$transaction(async tx => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${venueId}), hashtext(${orderId}))`
+      const puntosDeOtro = await tx.loyaltyTransaction.findFirst({
+        where: { orderId, type: LoyaltyTransactionType.EARN, customerId: { not: customerId }, customer: { venueId } },
+        select: { customerId: true },
+      })
+      if (puntosDeOtro) return { tipo: 'OTRO_CLIENTE' as const }
+      const selloDeOtro = await tx.stampEvent.findFirst({
+        where: { venueId, orderId, type: StampEventType.EARN, stampCard: { customerId: { not: customerId } } },
+        select: { id: true },
+      })
+      if (selloDeOtro) return { tipo: 'OTRO_CLIENTE' as const }
+      // La otra llamada del MISMO cliente pudo escribir mientras ésta esperaba el candado: idempotente.
+      const propio = await tx.loyaltyTransaction.findFirst({ where: { customerId, orderId, type: LoyaltyTransactionType.EARN } })
+      if (propio) return { tipo: 'YA_ESTABA' as const, puntos: propio.points }
+      await tx.loyaltyTransaction.create({
         data: {
           customerId,
           type: LoyaltyTransactionType.EARN,
@@ -375,8 +421,8 @@ export async function earnPoints(
           reason: `Earned ${pointsEarned} points for purchase of $${amount.toFixed(2)}`,
           createdById: staffId,
         },
-      }),
-      prisma.customer.update({
+      })
+      const customer = await tx.customer.update({
         where: { id: customerId },
         data: {
           loyaltyPoints: { increment: pointsEarned },
@@ -384,12 +430,18 @@ export async function earnPoints(
         select: {
           loyaltyPoints: true,
         },
-      }),
-    ])
+      })
+      return { tipo: 'ACREDITADO' as const, saldo: customer.loyaltyPoints }
+    })
 
+    if (escrito.tipo === 'OTRO_CLIENTE') {
+      logger.warn('⚠️ [LOYALTY] Another customer already earned this order: no points', { venueId, orderId, customerId })
+      return finish({ pointsEarned: 0, newBalance: await saldoActual(), otroCliente: true as const })
+    }
+    if (escrito.tipo === 'YA_ESTABA') return finish({ pointsEarned: escrito.puntos, newBalance: await saldoActual() })
     return finish({
       pointsEarned,
-      newBalance: customer.loyaltyPoints,
+      newBalance: escrito.saldo,
     })
   } catch (error: any) {
     // Handle unique constraint violation from partial unique index

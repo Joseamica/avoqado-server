@@ -357,13 +357,15 @@ export async function otorgarLealtadRespetandoReembolsos(
 
   // H4 (segunda ola): la lealtad acredita SÓLO al beneficiario de esta foto. H5 (segunda ola): con `actorDeLaVenta`, el autor
   // del sello es el `loyaltyStaffId` de la MISMA foto, nunca el que quien llama leyó antes (una liga pudo cambiar los dos).
-  const resultado = foto
+  const resultado: AwardLoyaltyForPaidOrderResult = foto
     ? await awardLoyaltyForPaidOrder(
         { ...args, staffId: args.actorDeLaVenta ? foto.staffId : args.staffId },
         { cerrar: false, beneficiario: foto.beneficiario },
       )
     : await awardLoyaltyForPaidOrder(args, { cerrar: false })
   const errores = [...resultado.errors]
+  // H4, tercera ola: otro intento ganó la venta para OTRO cliente mientras ésta acreditaba; se cierra como OTHER_CUSTOMER.
+  const conOtro = resultado.otroCliente ? { otroCliente: true as const } : {}
 
   if ((await contarReembolsos(prisma, venueId, orderId)) > 0) {
     // 🔴 Auditoría A #2: el reembolso entró MIENTRAS se otorgaba. Si su reversa corrió antes de que el sello existiera, no
@@ -374,13 +376,13 @@ export async function otorgarLealtadRespetandoReembolsos(
     if (!resultado.complete) return { complete: false, errors: errores, reembolsada: true }
     const falloAlCerrar = await cerrarSinLanzar(venueId, orderId, false)
     if (falloAlCerrar) return { complete: false, errors: [...errores, falloAlCerrar], reembolsada: true }
-    return { complete: true, errors: errores, reembolsada: true }
+    return { complete: true, errors: errores, reembolsada: true, ...conOtro }
   }
 
   if (!resultado.complete) return { complete: false, errors: errores, reembolsada: false }
   const falloAlCerrar = await cerrarSinLanzar(venueId, orderId, resultado.leyoSinCliente === true)
   if (falloAlCerrar) return { complete: false, errors: [...errores, falloAlCerrar], reembolsada: false }
-  return { complete: true, errors: errores, reembolsada: false }
+  return { complete: true, errors: errores, reembolsada: false, ...conOtro }
 }
 
 /** Los tres candados que ya exigen `earnPoints` + `grantStamp`: plan, programa activo y sellos prendidos. */

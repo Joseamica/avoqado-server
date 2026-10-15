@@ -81,6 +81,18 @@ describe('awardLoyaltyForPaidOrder', () => {
     expect(earnPointsMock).toHaveBeenCalledWith(VENUE, 'cust-A', 90, ORDER, 'sv-1')
   })
 
+  it('regresión H4 tercera ola: en el COBRO (sin beneficiario) el orden de siempre — visita primero, luego puntos — y otroCliente no rompe nada', async () => {
+    orderCustomerFindMany.mockResolvedValue([
+      { customerId: 'cust-A', isPrimary: true, customer: { id: 'cust-A', firstName: 'Ana', lastName: null } },
+    ])
+    await awardLoyaltyForPaidOrder({ venueId: VENUE, orderId: ORDER, orderTotal: 90 })
+    expect(metricsMock.mock.invocationCallOrder[0]).toBeLessThan(earnPointsMock.mock.invocationCallOrder[0])
+
+    earnPointsMock.mockResolvedValue({ pointsEarned: 0, newBalance: 0, otroCliente: true })
+    const r = await awardLoyaltyForPaidOrder({ venueId: VENUE, orderId: ORDER, orderTotal: 90 })
+    expect(r).toEqual({ complete: true, errors: [], otroCliente: true })
+  })
+
   it('marks the paid order processed only after every loyalty step succeeds', async () => {
     orderCustomerFindMany.mockResolvedValue([
       { customerId: 'cust-A', isPrimary: true, customer: { id: 'cust-A', firstName: 'Ana', lastName: null } },
@@ -264,6 +276,25 @@ describe('awardLoyaltyForPaidOrder', () => {
         { cerrar: false, beneficiario: null },
       )
       expect(r).toEqual({ complete: true, errors: [], leyoSinCliente: true })
+    })
+
+    // ── H4, tercera ola (recheck 2 de Codex): earnPoints dice que OTRO cliente ya ganó la venta (dos intentos a la vez) ─────
+    it('🔴 con beneficiario: earnPoints dice otroCliente ⇒ ni visita ni error; el resultado lo dice y la venta se puede cerrar', async () => {
+      conPrimario('cust-B')
+      earnPointsMock.mockResolvedValue({ pointsEarned: 0, newBalance: 0, otroCliente: true })
+      const r = await awardLoyaltyForPaidOrder(
+        { venueId: VENUE, orderId: ORDER, orderTotal: 50 },
+        { cerrar: false, beneficiario: 'cust-B' },
+      )
+      expect(earnPointsMock).toHaveBeenCalledWith(VENUE, 'cust-B', 50, ORDER, undefined)
+      expect(metricsMock).not.toHaveBeenCalled() // B no suma la visita de una venta que ganó otro
+      expect(r).toEqual({ complete: true, errors: [], leyoSinCliente: false, otroCliente: true })
+    })
+
+    it('con beneficiario: primero se acredita y DESPUÉS la visita (así otroCliente no deja visita)', async () => {
+      conPrimario('cust-A')
+      await awardLoyaltyForPaidOrder({ venueId: VENUE, orderId: ORDER, orderTotal: 50 }, { cerrar: false, beneficiario: 'cust-A' })
+      expect(earnPointsMock.mock.invocationCallOrder[0]).toBeLessThan(metricsMock.mock.invocationCallOrder[0])
     })
 
     it('dos primarios (dato raro): sólo acredita al validado', async () => {

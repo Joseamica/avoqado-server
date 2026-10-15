@@ -370,3 +370,84 @@ describe('🔴 F1: la TPV decide reabrir con el estado de la venta leído DENTRO
     expect(fila).toEqual({ loyaltyLastError: null, loyaltyEligibleAt: null })
   })
 })
+
+/**
+ * 🔴 H4, tercera ola (recheck 2 de Codex, 15-oct-2026): DOS intentos validan a dos clientes distintos ANTES del primer EARN.
+ * El intento 1 valida a Ana y lee sus clientes; la TPV cambia a Ana por Beto; el intento 2 valida a Beto y lee los suyos.
+ * Los dos se detienen ahí (barrera en la lectura de clientes de la lealtad) y se sueltan a la vez. Antes: Ana recibía el sello
+ * y 50 puntos y Beto, con «ya sellada», otros 50 (la deduplicación de puntos es por cliente + venta y el candado de
+ * `grantStamp`, por cliente). Ahora el candado por VENTA en `earnPoints` y en `grantStamp` deja a UN solo cliente.
+ */
+describe('🔴 H4: dos intentos validados para clientes distintos antes del primer EARN (Postgres real)', () => {
+  it('exactamente UN cliente recibe sello y puntos; el otro intento termina como otroCliente', async () => {
+    const ana = await cliente('Ana')
+    const beto = await cliente('Beto')
+    const orderId = await ventaPendienteCon(ana)
+
+    // Barrera determinista: cada lectura de clientes de la lealtad de ESTA venta avisa y espera a que la prueba la suelte.
+    const leer = prisma.orderCustomer.findMany.bind(prisma.orderCustomer)
+    const avisos: Array<(v: void) => void> = []
+    const llego = [0, 1].map(i => new Promise<void>(r => (avisos[i] = r)))
+    let soltar: () => void = () => undefined
+    const suelta = new Promise<void>(r => (soltar = r))
+    let vistas = 0
+    const espia = jest.spyOn(prisma.orderCustomer, 'findMany').mockImplementation((async (args: any) => {
+      const r = await leer(args)
+      if (args?.where?.orderId === orderId && vistas < 2) {
+        const i = vistas++
+        avisos[i]()
+        await suelta
+      }
+      return r
+    }) as never)
+
+    const argumentos = { venueId: venueId!, orderId, orderTotal: 50, staffId: null, legacyCustomer: null }
+    let resultados: Array<Awaited<ReturnType<typeof tardia.otorgarLealtadRespetandoReembolsos>>>
+    try {
+      // 1) Intento 1: valida a Ana y lee sus clientes (Ana) — se queda en la barrera, sin ningún EARN todavía.
+      const intento1 = tardia.otorgarLealtadRespetandoReembolsos(argumentos)
+      await aTiempoLocal(llego[0], 'el intento 1 no llegó a la barrera')
+      // 2) La TPV cambia a Ana por Beto.
+      await prisma.orderCustomer.deleteMany({ where: { orderId, customerId: ana } })
+      await prisma.orderCustomer.create({ data: { orderId, customerId: beto, isPrimary: true } })
+      // 3) Intento 2: valida a Beto (aún nadie tiene EARN) y lee sus clientes (Beto) — también se queda en la barrera.
+      const intento2 = tardia.otorgarLealtadRespetandoReembolsos(argumentos)
+      await aTiempoLocal(llego[1], 'el intento 2 no llegó a la barrera')
+      expect(await prisma.loyaltyTransaction.count({ where: { orderId } })).toBe(0)
+      expect(await prisma.stampEvent.count({ where: { venueId, orderId } })).toBe(0)
+      // 4) Se sueltan a la vez.
+      soltar()
+      resultados = await Promise.all([intento1, intento2])
+    } finally {
+      soltar()
+      espia.mockRestore()
+    }
+
+    const puntos = await prisma.loyaltyTransaction.findMany({
+      where: { orderId, type: 'EARN' },
+      select: { customerId: true, points: true },
+      take: 5,
+    })
+    const sellos = await prisma.stampEvent.findMany({
+      where: { venueId, orderId, type: 'EARN' },
+      select: { stampCard: { select: { customerId: true } } },
+      take: 5,
+    })
+    // UN solo cliente con puntos, y el sello es de ESE mismo cliente.
+    expect(puntos).toHaveLength(1)
+    expect(sellos).toHaveLength(1)
+    const ganador = puntos[0].customerId
+    expect([ana, beto]).toContain(ganador)
+    expect(sellos[0].stampCard.customerId).toBe(ganador)
+    const perdedor = ganador === ana ? beto : ana
+    expect((await prisma.customer.findUniqueOrThrow({ where: { id: perdedor }, select: { loyaltyPoints: true } })).loyaltyPoints).toBe(0)
+    expect(await prisma.customerOrderMetric.count({ where: { orderId, customerId: perdedor } })).toBe(0)
+    // Uno de los dos intentos terminó diciendo que la venta era de otro cliente; ninguno quedó a medias.
+    expect(resultados!.filter(r => r.otroCliente)).toHaveLength(1)
+    expect(resultados!.every(r => r.complete)).toBe(true)
+  })
+})
+
+function aTiempoLocal<T>(p: Promise<T>, que: string, ms = 8_000): Promise<T> {
+  return Promise.race([p, new Promise<T>((_, reject) => setTimeout(() => reject(new Error(`timeout: ${que}`)), ms).unref())])
+}

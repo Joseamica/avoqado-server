@@ -1,4 +1,4 @@
-import { LoyaltyConfig, Prisma, StampEventType, StampRewardStatus } from '@prisma/client'
+import { LoyaltyConfig, LoyaltyTransactionType, Prisma, StampEventType, StampRewardStatus } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import { venueStartOfDay, venueEndOfDay } from '../../utils/datetime'
 import logger from '../../config/logger'
@@ -27,7 +27,7 @@ import { sendFirstStampEmailIfDue } from './firstStampEmail.service'
  *    de cartón, donde el empleado sella de más a un conocido y nadie se entera.
  */
 
-export type GrantStampReason = 'STAMPS_DISABLED' | 'ALREADY_STAMPED' | 'DAILY_LIMIT_REACHED' | 'PROGRAM_INACTIVE'
+export type GrantStampReason = 'STAMPS_DISABLED' | 'ALREADY_STAMPED' | 'DAILY_LIMIT_REACHED' | 'PROGRAM_INACTIVE' | 'OTHER_CUSTOMER'
 
 // ── Avisos al pase y correos del primer sello, en SEGUNDO PLANO (H7) ───────────────────────────────────────────────────
 //
@@ -166,6 +166,7 @@ function esChoqueDelSelloDeLaOrden(error: unknown): boolean {
 type DentroDelCandado =
   | { otorgado: false; reason: 'DAILY_LIMIT_REACHED' }
   | { otorgado: false; reason: 'ALREADY_STAMPED'; cardId: string }
+  | { otorgado: false; reason: 'OTHER_CUSTOMER' }
   | { otorgado: true; cardId: string; ganados: number; meta: number; completed: boolean; rewardId?: string }
 
 export async function grantStamp(
@@ -201,15 +202,28 @@ export async function grantStamp(
       // tope de 1 al día, o las dos llenaban la misma cartilla y el sello de la segunda se perdía al chocar con el premio.
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${venueId}), hashtext(${customerId}))`
 
-      // 🔴 F2 (rulings del código, 15-oct-2026): la PRIMERA lectura dentro del candado es el sello de ESTA orden. Dos llamadas
+      // 🔴 H4, tercera ola (recheck 2 de Codex, 15-oct-2026): y en seguida el candado de la VENTA —el mismo que toma la escritura
+      // de los puntos en `earnPoints`—. Los puntos y el sello de una venta son de UN cliente: dos intentos pueden validar a
+      // clientes distintos (la TPV cambió al primario entre uno y otro) antes del primer EARN, y el candado de arriba es por
+      // CLIENTE, no los forma. Siempre en este orden: candado del cliente → candado de la venta; nadie toma el inverso.
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${venueId}), hashtext(${orderId}))`
+
+      // 🔴 F2 (rulings del código, 15-oct-2026): la PRIMERA lectura dentro de los candados es el sello de ESTA orden. Dos llamadas
       // de la MISMA venta a la vez (doble toque, liga + reconciliador) pasan las dos el atajo de afuera; la segunda espera aquí
       // y, sin esta relectura, contaba el sello que la primera acababa de dar como «el de hoy» y respondía DAILY_LIMIT: falso
-      // para esta venta, que sí quedó sellada.
+      // para esta venta, que sí quedó sellada. (Un segundo sello, de quien sea, también lo impide el índice único por venta.)
       const propio = await tx.stampEvent.findFirst({
         where: { venueId, orderId, type: StampEventType.EARN },
         select: { id: true, stampCardId: true },
       })
       if (propio) return { otorgado: false, reason: 'ALREADY_STAMPED', cardId: propio.stampCardId }
+
+      // H4, tercera ola: si OTRO cliente ya recibió los PUNTOS de esta venta, este sello tampoco se da.
+      const puntosDeOtro = await tx.loyaltyTransaction.findFirst({
+        where: { orderId, type: LoyaltyTransactionType.EARN, customerId: { not: customerId }, customer: { venueId } },
+        select: { customerId: true },
+      })
+      if (puntosDeOtro) return { otorgado: false, reason: 'OTHER_CUSTOMER' }
 
       // 🔴 El tope se cuenta en el día del VENUE, y DENTRO del candado.
       if (tz) {

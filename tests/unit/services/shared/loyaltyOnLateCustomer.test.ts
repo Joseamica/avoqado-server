@@ -614,6 +614,13 @@ describe('otorgarLealtadRespetandoReembolsos (B2: UN envoltorio para la liga tar
     expect(awardMock).toHaveBeenCalledWith(ARGS, { cerrar: false })
   })
 
+  it('🔴 H4 (tercera ola): la lealtad dice que OTRO intento ganó la venta para otro cliente ⇒ otroCliente y la venta se cierra', async () => {
+    awardMock.mockResolvedValueOnce({ complete: true, errors: [], leyoSinCliente: false, otroCliente: true })
+    const r = await otorgarLealtadRespetandoReembolsos(ARGS)
+    expect(r).toEqual({ complete: true, errors: [], reembolsada: false, otroCliente: true })
+    expect(cierres()).toHaveLength(1)
+  })
+
   it('H1: la lealtad incompleta no se cierra (sin reembolso de por medio)', async () => {
     awardMock.mockResolvedValue({ complete: false, errors: ['loyalty:cust-1'] })
     await otorgarLealtadRespetandoReembolsos(ARGS)

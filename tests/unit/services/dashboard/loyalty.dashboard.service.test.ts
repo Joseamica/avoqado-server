@@ -431,6 +431,15 @@ describe('Loyalty Dashboard Service', () => {
   })
 
   describe('earnPoints', () => {
+    // Tercera ola (H4, recheck 2 de Codex): los puntos se escriben en una transacción interactiva con el candado por VENTA.
+    beforeEach(() => {
+      prismaMock.$transaction.mockImplementation((async (cb: any) => (typeof cb === 'function' ? cb(prismaMock) : cb)) as never)
+      prismaMock.loyaltyTransaction.findFirst.mockResolvedValue(null)
+      prismaMock.stampEvent.findFirst.mockResolvedValue(null)
+      prismaMock.$executeRaw.mockResolvedValue(0 as never)
+      ;(stampLedger.grantStamp as jest.Mock).mockResolvedValue({ granted: false, reason: 'STAMPS_DISABLED' })
+    })
+
     it('does not create config or rewards when the venue has no paid loyalty access', async () => {
       ;(venueHasFeatureAccess as jest.Mock).mockResolvedValue(false)
 
@@ -448,7 +457,8 @@ describe('Loyalty Dashboard Service', () => {
       const mockCustomer = { loyaltyPoints: 600 }
 
       prismaMock.loyaltyConfig.findUnique.mockResolvedValue(mockConfig as any)
-      prismaMock.$transaction.mockResolvedValue([mockTransaction, mockCustomer] as any)
+      prismaMock.loyaltyTransaction.create.mockResolvedValue(mockTransaction as any)
+      prismaMock.customer.update.mockResolvedValue(mockCustomer as any)
 
       const result = await earnPoints('venue-123', 'customer-123', 100, 'order-123', 'staff-123')
 
@@ -487,7 +497,8 @@ describe('Loyalty Dashboard Service', () => {
       const mockCustomer = { loyaltyPoints: 550 }
 
       prismaMock.loyaltyConfig.findUnique.mockResolvedValue(mockConfig as any)
-      prismaMock.$transaction.mockResolvedValue([mockTransaction, mockCustomer] as any)
+      prismaMock.loyaltyTransaction.create.mockResolvedValue(mockTransaction as any)
+      prismaMock.customer.update.mockResolvedValue(mockCustomer as any)
 
       const result = await earnPoints('venue-123', 'customer-123', 50, 'order-123', 'staff-123')
 
@@ -495,6 +506,129 @@ describe('Loyalty Dashboard Service', () => {
       expect(result.pointsEarned).toBe(50)
       expect(result.newBalance).toBe(550)
       expect(prismaMock.$transaction).toHaveBeenCalled()
+      expect(prismaMock.loyaltyTransaction.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          customerId: 'customer-123',
+          orderId: 'order-123',
+          points: 50,
+          type: 'EARN',
+          createdById: 'staff-123',
+        }),
+      })
+      expect(prismaMock.customer.update).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: 'customer-123' }, data: { loyaltyPoints: { increment: 50 } } }),
+      )
+    })
+
+    // ── H4, tercera ola (recheck 2 de Codex, 15-oct-2026): UN cliente por venta, también con dos intentos a la vez ─────────
+    describe('🔴 H4: los puntos de una venta son de UN solo cliente', () => {
+      beforeEach(() => {
+        prismaMock.loyaltyConfig.findUnique.mockResolvedValue(createMockLoyaltyConfig() as any)
+        prismaMock.loyaltyTransaction.create.mockResolvedValue(createMockTransaction() as any)
+        prismaMock.customer.update.mockResolvedValue({ loyaltyPoints: 550 } as any)
+        prismaMock.customer.findUnique.mockResolvedValue({ loyaltyPoints: 7 } as any)
+      })
+
+      it('🔴 el candado por VENTA es la PRIMERA sentencia de la transacción de los puntos; dentro se mira si OTRO cliente ya cobró algo', async () => {
+        const orden: string[] = []
+        let dentro = false
+        prismaMock.$transaction.mockImplementation((async (cb: any) => {
+          orden.push('BEGIN')
+          dentro = true
+          try {
+            return await cb(prismaMock)
+          } finally {
+            dentro = false
+          }
+        }) as never)
+        prismaMock.$executeRaw.mockImplementation((async () => {
+          orden.push('candado')
+          return 0
+        }) as never)
+        prismaMock.loyaltyTransaction.findFirst.mockImplementation((async (a: any) => {
+          if (dentro) orden.push(a.where.customerId?.not ? 'puntos de otro' : 'puntos propios')
+          return null
+        }) as never)
+        prismaMock.stampEvent.findFirst.mockImplementation((async () => {
+          if (dentro) orden.push('sello de otro')
+          return null
+        }) as never)
+        prismaMock.loyaltyTransaction.create.mockImplementation((async () => {
+          orden.push('EARN')
+          return createMockTransaction()
+        }) as never)
+
+        const r = await earnPoints('venue-123', 'customer-123', 50, 'order-123')
+
+        expect(r).toEqual({ pointsEarned: 50, newBalance: 550 })
+        expect(orden).toEqual(['BEGIN', 'candado', 'puntos de otro', 'sello de otro', 'puntos propios', 'EARN'])
+        const [plantilla, ...valores] = prismaMock.$executeRaw.mock.calls[0] as unknown as [TemplateStringsArray, ...unknown[]]
+        expect(plantilla.join('?')).toContain('pg_advisory_xact_lock(hashtext(?), hashtext(?))')
+        expect(valores).toEqual(['venue-123', 'order-123'])
+      })
+
+      it('🔴 OTRO cliente ya tiene los PUNTOS de esta venta (ganó el otro intento): no acredita y lo dice (otroCliente)', async () => {
+        prismaMock.loyaltyTransaction.findFirst.mockImplementation((async (a: any) =>
+          a.where.customerId?.not ? { customerId: 'ana' } : null) as never)
+        const r = await earnPoints('venue-123', 'customer-123', 50, 'order-123')
+        expect(r).toEqual({ pointsEarned: 0, newBalance: 7, otroCliente: true })
+        expect(prismaMock.loyaltyTransaction.create).not.toHaveBeenCalled()
+        expect(prismaMock.customer.update).not.toHaveBeenCalled()
+      })
+
+      it('🔴 OTRO cliente ya tiene el SELLO de esta venta: tampoco acredita puntos', async () => {
+        prismaMock.stampEvent.findFirst.mockResolvedValue({ id: 'se-ana' } as any)
+        const r = await earnPoints('venue-123', 'customer-123', 50, 'order-123')
+        expect(r).toMatchObject({ pointsEarned: 0, otroCliente: true })
+        expect(prismaMock.loyaltyTransaction.create).not.toHaveBeenCalled()
+        expect(prismaMock.stampEvent.findFirst).toHaveBeenCalledWith(
+          expect.objectContaining({
+            where: { venueId: 'venue-123', orderId: 'order-123', type: 'EARN', stampCard: { customerId: { not: 'customer-123' } } },
+          }),
+        )
+      })
+
+      it('🔴 el sellado ya dijo OTHER_CUSTOMER: ni siquiera abre la transacción de puntos', async () => {
+        ;(stampLedger.grantStamp as jest.Mock).mockResolvedValue({ granted: false, reason: 'OTHER_CUSTOMER' })
+        const r = await earnPoints('venue-123', 'customer-123', 50, 'order-123')
+        expect(r).toMatchObject({ pointsEarned: 0, otroCliente: true })
+        expect(prismaMock.$transaction).not.toHaveBeenCalled()
+      })
+
+      it('🔴 negocio de SÓLO sellos (0 puntos): «ya sellada» con el sello de OTRO cliente ⇒ otroCliente (no se le cuenta la visita)', async () => {
+        prismaMock.loyaltyConfig.findUnique.mockResolvedValue(createMockLoyaltyConfig({ pointsPerDollar: new Decimal(0) }) as any)
+        ;(stampLedger.grantStamp as jest.Mock).mockResolvedValue({ granted: false, reason: 'ALREADY_STAMPED' })
+        prismaMock.stampEvent.findFirst.mockResolvedValue({ stampCard: { customerId: 'ana' } } as any)
+        const r = await earnPoints('venue-123', 'customer-123', 50, 'order-123')
+        expect(r).toMatchObject({ pointsEarned: 0, otroCliente: true })
+      })
+
+      it('regresión: «ya sellada» con SU propio sello (reintento del cobro) ⇒ puntos como siempre', async () => {
+        ;(stampLedger.grantStamp as jest.Mock).mockResolvedValue({ granted: false, reason: 'ALREADY_STAMPED', stampCardId: 'sc1' })
+        prismaMock.stampEvent.findFirst.mockImplementation((async (a: any) =>
+          a.where.stampCard?.customerId?.not ? null : { stampCard: { customerId: 'customer-123' } }) as never)
+        const r = await earnPoints('venue-123', 'customer-123', 50, 'order-123')
+        expect(r).toEqual({ pointsEarned: 50, newBalance: 550 })
+      })
+
+      it('regresión: el MISMO cliente ya tenía sus puntos (reintento): idempotente, sin candado ni escritura', async () => {
+        prismaMock.loyaltyTransaction.findFirst.mockResolvedValue(createMockTransaction({ points: 50 }) as any)
+        const r = await earnPoints('venue-123', 'customer-123', 50, 'order-123')
+        expect(r).toEqual({ pointsEarned: 50, newBalance: 7 })
+        expect(prismaMock.$transaction).not.toHaveBeenCalled()
+      })
+
+      it('un reintento del MISMO cliente que ganó dentro del candado (la otra llamada escribió mientras ésta esperaba): idempotente', async () => {
+        let llamadas = 0
+        prismaMock.loyaltyTransaction.findFirst.mockImplementation((async (a: any) => {
+          if (a.where.customerId?.not) return null
+          llamadas += 1
+          return llamadas === 1 ? null : createMockTransaction({ points: 50 }) // afuera no había; adentro, ya
+        }) as never)
+        const r = await earnPoints('venue-123', 'customer-123', 50, 'order-123')
+        expect(r).toEqual({ pointsEarned: 50, newBalance: 7 })
+        expect(prismaMock.loyaltyTransaction.create).not.toHaveBeenCalled()
+      })
     })
   })
 
@@ -831,13 +965,16 @@ describe('earnPoints + sellos (Plan B)', () => {
 
     prismaMock.loyaltyConfig.findUnique.mockResolvedValue(mockConfig as any)
     prismaMock.loyaltyTransaction.findFirst.mockResolvedValue(null)
-    prismaMock.$transaction.mockResolvedValue([mockTransaction, { loyaltyPoints: 550 }] as any)
+    prismaMock.stampEvent.findFirst.mockResolvedValue(null)
+    // H4, tercera ola: los puntos se escriben en una transacción INTERACTIVA (con el candado de la venta).
+    prismaMock.$transaction.mockImplementation((async (cb: any) => cb(prismaMock)) as never)
+    prismaMock.loyaltyTransaction.create.mockResolvedValue(mockTransaction as any)
+    prismaMock.customer.update.mockResolvedValue({ loyaltyPoints: 550 } as any)
 
     const result = await earnPoints('venue-123', 'customer-123', 50, 'order-123')
 
     // Los puntos siguen su curso, intactos.
-    expect(result.pointsEarned).toBe(50)
-    expect(result.newBalance).toBe(550)
+    expect(result).toEqual({ pointsEarned: 50, newBalance: 550 })
   })
 
   it('🔴 un negocio con sellos y CERO puntos SÍ sella', async () => {

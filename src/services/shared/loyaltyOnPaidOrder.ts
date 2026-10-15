@@ -70,6 +70,11 @@ export interface AwardLoyaltyForPaidOrderResult {
    * (`cerrarLealtadDeLaVenta`) lo necesita para aplicar la MISMA guarda B1 que habría aplicado este cierre.
    */
   leyoSinCliente?: boolean
+  /**
+   * 🔴 H4, tercera ola (recheck 2 de Codex, 15-oct-2026): `earnPoints` vio, con el candado de la venta, que OTRO cliente ya
+   * recibió sus puntos o su sello. A éste no se le dio nada (y, con beneficiario fijado, ni la visita). Sólo aparece entonces.
+   */
+  otroCliente?: true
 }
 
 export interface OpcionesDeLealtad {
@@ -102,6 +107,8 @@ export async function awardLoyaltyForPaidOrder(
   const errors: string[] = []
   // ¿Esta corrida leyó la orden SIN ningún cliente? Su cierre lleva una guarda (B1, abajo).
   let leyoSinCliente = false
+  // H4, tercera ola: `earnPoints` dijo que OTRO cliente ya recibió la lealtad de esta venta (dos intentos a la vez).
+  let otroCliente = false
   try {
     let staffVenueId: string | undefined
     if (args.staffId) {
@@ -135,7 +142,8 @@ export async function awardLoyaltyForPaidOrder(
         ahora: resuelto,
       })
     } else if (orderCustomers.length > 0) {
-      for (const oc of orderCustomers) {
+      // La visita (métricas) de UN cliente de la venta; un fallo no le quita el sello a nadie.
+      const medirVisita = async (oc: (typeof orderCustomers)[number]) => {
         try {
           await updateCustomerMetrics(oc.customerId, orderTotal, orderId, venueId)
           logger.info('📊 Customer metrics updated', {
@@ -152,35 +160,53 @@ export async function awardLoyaltyForPaidOrder(
             error: metricsError?.message,
           })
         }
+      }
+      // Puntos y sello SÓLO al primario (el primero que se agregó a la cuenta) — y, con beneficiario fijado, sólo a ése.
+      const acreditarSiEsPrimario = async (oc: (typeof orderCustomers)[number]) => {
+        if (!oc.isPrimary || (fijado && oc.customerId !== opciones.beneficiario)) return
+        const r = await acreditar(venueId, oc.customerId, nombre(oc.customer), orderTotal, orderId, staffVenueId, 'PRIMARY customer')
+        if (r === 'FALLO') errors.push(`loyalty:${oc.customerId}`)
+        if (r === 'OTRO_CLIENTE') otroCliente = true
+      }
 
-        // Puntos y sello SÓLO al primario (el primero que se agregó a la cuenta) — y, con beneficiario fijado, sólo a ése.
-        if (oc.isPrimary && (!fijado || oc.customerId === opciones.beneficiario)) {
-          const credited = await acreditar(
-            venueId,
-            oc.customerId,
-            nombre(oc.customer),
-            orderTotal,
-            orderId,
-            staffVenueId,
-            'PRIMARY customer',
-          )
-          if (!credited) errors.push(`loyalty:${oc.customerId}`)
+      if (fijado) {
+        // 🔴 H4, tercera ola: en la recuperación se acredita PRIMERO y la visita va después. Si `earnPoints` dice que OTRO
+        // cliente ya ganó esta venta (dos intentos a la vez), a nadie de esta corrida se le cuenta la visita: la venta no es suya.
+        for (const oc of orderCustomers) await acreditarSiEsPrimario(oc)
+        if (!otroCliente) for (const oc of orderCustomers) await medirVisita(oc)
+      } else {
+        // Los cobros: el orden de siempre, cliente por cliente (visita y luego, si es el primario, puntos y sello).
+        for (const oc of orderCustomers) {
+          await medirVisita(oc)
+          await acreditarSiEsPrimario(oc)
         }
       }
     } else if (args.legacyCustomer?.id) {
       const legacy = args.legacyCustomer
-      try {
-        await updateCustomerMetrics(legacy.id, orderTotal, orderId, venueId)
-      } catch (metricsError: any) {
-        errors.push(`metrics:${legacy.id}:${metricsError?.message ?? String(metricsError)}`)
-        logger.error('⚠️ Failed to update customer metrics (continuing)', {
-          orderId,
-          customerId: legacy.id,
-          error: metricsError?.message,
-        })
+      const medirVisitaHeredada = async () => {
+        try {
+          await updateCustomerMetrics(legacy.id, orderTotal, orderId, venueId)
+        } catch (metricsError: any) {
+          errors.push(`metrics:${legacy.id}:${metricsError?.message ?? String(metricsError)}`)
+          logger.error('⚠️ Failed to update customer metrics (continuing)', {
+            orderId,
+            customerId: legacy.id,
+            error: metricsError?.message,
+          })
+        }
       }
-      const credited = await acreditar(venueId, legacy.id, nombre(legacy), orderTotal, orderId, staffVenueId, 'legacy single customer')
-      if (!credited) errors.push(`loyalty:${legacy.id}`)
+      const acreditarHeredado = async () => {
+        const r = await acreditar(venueId, legacy.id, nombre(legacy), orderTotal, orderId, staffVenueId, 'legacy single customer')
+        if (r === 'FALLO') errors.push(`loyalty:${legacy.id}`)
+        if (r === 'OTRO_CLIENTE') otroCliente = true
+      }
+      if (fijado) {
+        await acreditarHeredado()
+        if (!otroCliente) await medirVisitaHeredada()
+      } else {
+        await medirVisitaHeredada()
+        await acreditarHeredado()
+      }
     } else {
       leyoSinCliente = true
       logger.info('⏭️ Loyalty points skipped: Order has no customer', {
@@ -215,7 +241,8 @@ export async function awardLoyaltyForPaidOrder(
     return { complete: false, errors }
   }
 
-  return cerrar ? { complete, errors } : { complete, errors, leyoSinCliente }
+  const conOtro = otroCliente ? { otroCliente: true as const } : {}
+  return cerrar ? { complete, errors, ...conOtro } : { complete, errors, leyoSinCliente, ...conOtro }
 }
 
 async function acreditar(
@@ -226,9 +253,13 @@ async function acreditar(
   orderId: string,
   staffVenueId: string | undefined,
   quien: string,
-): Promise<boolean> {
+): Promise<'ACREDITADO' | 'FALLO' | 'OTRO_CLIENTE'> {
   try {
     const loyaltyResult = await earnPoints(venueId, customerId, orderTotal, orderId, staffVenueId)
+    if (loyaltyResult.otroCliente) {
+      logger.warn(`⚠️ Loyalty not credited (${quien}): another customer already earned this order`, { orderId, customerId })
+      return 'OTRO_CLIENTE'
+    }
     logger.info(`🎁 Loyalty points earned (${quien})`, {
       orderId,
       customerId,
@@ -237,7 +268,7 @@ async function acreditar(
       pointsEarned: loyaltyResult.pointsEarned,
       newBalance: loyaltyResult.newBalance,
     })
-    return true
+    return 'ACREDITADO'
   } catch (loyaltyError: any) {
     const message: string = loyaltyError?.message ?? ''
     logger.error('⚠️ Failed to earn loyalty points (payment still succeeded)', {
@@ -246,6 +277,6 @@ async function acreditar(
       error: message,
       reason: message.includes('not enabled') ? 'LOYALTY_DISABLED' : 'LOYALTY_ERROR',
     })
-    return false
+    return 'FALLO'
   }
 }
