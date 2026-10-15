@@ -98,6 +98,8 @@ describe('POST /mobile/venues/:venueId/payments/:paymentId/customer — body val
     expect(error?.statusCode).toBe(400)
     expect(error?.message).toMatch(/^Error de validación: customerId: /)
     expect(error?.message).not.toMatch(/Expected|Required|Invalid/)
+    // M3 (ronda 1): el campo se dice UNA vez (lo antepone validateRequest), no «customerId: customerId es requerido».
+    expect(error?.message).not.toMatch(/\b(\w+): \1\b/)
     expect(mockAttach).not.toHaveBeenCalled()
   })
 
@@ -131,6 +133,7 @@ describe('POST /mobile/venues/:venueId/payments/customer — body validado (últ
     const { error } = await correr(ULTIMO_PAGO, body, params)
     expect(error?.statusCode).toBe(400)
     expect(error?.message).toMatch(/customerId: /)
+    expect(error?.message).not.toMatch(/\b(\w+): \1\b/) // M3
     expect(mockAttachLatest).not.toHaveBeenCalled()
   })
 
@@ -144,7 +147,13 @@ describe('POST /mobile/venues/:venueId/payments/customer — body validado (últ
     expect(error?.statusCode).toBe(400)
     expect(error?.message).toMatch(campo)
     expect(error?.message).not.toMatch(/Expected|Required|Invalid/)
+    expect(error?.message).not.toMatch(/\b(\w+): \1\b/) // M3
     expect(mockAttachLatest).not.toHaveBeenCalled()
+  })
+
+  it('M3: el mensaje dice una vez qué falta', async () => {
+    const { error } = await correr(ULTIMO_PAGO, { amountCents: 5000 }, params)
+    expect(error?.message).toBe('Error de validación: customerId: es requerido')
   })
 
   it('🔴 regresión: lo que mandan Android e iOS llega COMPLETO al controller (validateRequest no se come ningún campo)', async () => {
