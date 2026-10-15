@@ -2,7 +2,7 @@ import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { earnPoints } from '../dashboard/loyalty.dashboard.service'
 import { updateCustomerMetrics } from '../dashboard/customer.dashboard.service'
-import { MARCA_LEALTAD_REABIERTA } from './lealtadReabierta'
+import { cerrarLealtadDeLaVenta, registrarErrorDeLealtad } from './cierreDeLealtad'
 
 /**
  * Lealtad al quedar PAGADA una orden: métricas de visita y puntos/sellos.
@@ -59,13 +59,31 @@ export interface AwardLoyaltyForPaidOrderArgs {
 export interface AwardLoyaltyForPaidOrderResult {
   complete: boolean
   errors: string[]
+  /**
+   * SÓLO con `{ cerrar: false }`: si esta corrida leyó la venta «sin cliente». Quien cierra después
+   * (`cerrarLealtadDeLaVenta`) lo necesita para aplicar la MISMA guarda B1 que habría aplicado este cierre.
+   */
+  leyoSinCliente?: boolean
+}
+
+export interface OpcionesDeLealtad {
+  /**
+   * 🔴 H1 (auditoría de Codex del código, 15-oct-2026): `false` = NO marcar `loyaltyProcessedAt` al terminar bien. Lo pide el
+   * envoltorio `otorgarLealtadRespetandoReembolsos`: él cierra SÓLO después de su comprobación final de reembolso y de
+   * completar la reversión. Si esta función cerrara antes y la reversión fallara, el reconciliador ya no vería la venta y el
+   * sello quedaría vivo sobre una venta devuelta. Los demás llamadores (los cobros) no lo pasan y cierran como siempre.
+   */
+  cerrar?: boolean
 }
 
 function nombre(c: { firstName: string | null; lastName: string | null } | null | undefined): string {
   return `${c?.firstName || ''} ${c?.lastName || ''}`.trim()
 }
 
-export async function awardLoyaltyForPaidOrder(args: AwardLoyaltyForPaidOrderArgs): Promise<AwardLoyaltyForPaidOrderResult> {
+export async function awardLoyaltyForPaidOrder(
+  args: AwardLoyaltyForPaidOrderArgs,
+  opciones: OpcionesDeLealtad = {},
+): Promise<AwardLoyaltyForPaidOrderResult> {
   const { venueId, orderId, orderTotal } = args
   const errors: string[] = []
   // ¿Esta corrida leyó la orden SIN ningún cliente? Su cierre lleva una guarda (B1, abajo).
@@ -155,32 +173,11 @@ export async function awardLoyaltyForPaidOrder(args: AwardLoyaltyForPaidOrderArg
   }
 
   const complete = errors.length === 0
+  const cerrar = opciones.cerrar !== false
   try {
     if (complete) {
-      await prisma.order.updateMany({
-        where: {
-          id: orderId,
-          venueId,
-          loyaltyEligibleAt: { not: null },
-          loyaltyProcessedAt: null,
-          // 🔴 B1 (auditoría de Codex, ronda B, 14-oct-2026): una corrida que leyó «sin cliente» sólo cierra si la orden
-          // SIGUE sin cliente. El cobro corre esto en el instante; si el barista liga al cliente justo entonces, la liga
-          // REABRE la lealtad en su transacción (`reabrirLealtadSiAplica`) y este cierre, ya viejo, la borraría: si además
-          // falla el intento de la liga, el reconciliador nunca vuelve a ver la venta y el sello se pierde en silencio.
-          // La corrida que SÍ vio clientes cierra como siempre (idempotente).
-          // 🔴 Y la MARCA de fila (medición de S3b contra Postgres): si este cierre ESPERA el candado de fila que tiene la
-          // transacción de la liga, al soltarse Postgres relee sólo las columnas de la fila y la subconsulta de arriba sigue
-          // diciendo «sin clientes». La reapertura deja `loyaltyLastError = MARCA_LEALTAD_REABIERTA`; con ella puesta, este
-          // cierre no pasa. `{ not }` en SQL deja fuera el NULL: por eso va junto con `null` en un OR.
-          ...(leyoSinCliente
-            ? {
-                orderCustomers: { none: {} },
-                OR: [{ loyaltyLastError: null }, { loyaltyLastError: { not: MARCA_LEALTAD_REABIERTA } }],
-              }
-            : {}),
-        },
-        data: { loyaltyProcessedAt: new Date(), loyaltyProcessingAt: null, loyaltyLastError: null },
-      })
+      // B1 + la marca de fila: la guarda del cierre «sin cliente» vive en `cerrarLealtadDeLaVenta`.
+      if (cerrar) await cerrarLealtadDeLaVenta(venueId, orderId, { leyoSinCliente })
     } else {
       await registrarErrorDeLealtad(venueId, orderId, errors.join(' | '))
     }
@@ -191,31 +188,7 @@ export async function awardLoyaltyForPaidOrder(args: AwardLoyaltyForPaidOrderArg
     return { complete: false, errors }
   }
 
-  return { complete, errors }
-}
-
-/**
- * Deja el error de una corrida de lealtad en la venta (que sigue pendiente para el reconciliador).
- *
- * 🔴 H2 (auditoría de Codex del código + revisión final Minor 3, 15-oct-2026): NUNCA pisa la marca de una liga tardía
- * (`MARCA_LEALTAD_REABIERTA`). El cruce de tres: la liga tiene el candado de la fila (ya escribió la marca); esta escritura de
- * fallo espera PRIMERO; detrás espera el cierre «sin cliente» de otra corrida. Al soltarse la liga, esta escritura pasaba antes,
- * cambiaba la marca por su texto, y el cierre —que sólo relee las columnas de la fila— ya no la veía. La condición va en la
- * MISMA sentencia: Postgres la relee al soltarse el candado. Con la marca puesta el error sólo queda en el log (ya se registró
- * arriba, paso por paso); la venta sigue pendiente igual.
- */
-export async function registrarErrorDeLealtad(venueId: string, orderId: string, texto: string): Promise<void> {
-  await prisma.order.updateMany({
-    where: {
-      id: orderId,
-      venueId,
-      loyaltyEligibleAt: { not: null },
-      loyaltyProcessedAt: null,
-      // `{ not }` en SQL deja fuera el NULL: por eso va junto con `null` en un OR.
-      OR: [{ loyaltyLastError: null }, { loyaltyLastError: { not: MARCA_LEALTAD_REABIERTA } }],
-    },
-    data: { loyaltyLastError: texto.slice(0, 4000) },
-  })
+  return cerrar ? { complete, errors } : { complete, errors, leyoSinCliente }
 }
 
 async function acreditar(

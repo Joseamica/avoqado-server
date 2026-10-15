@@ -181,6 +181,37 @@ describe('awardLoyaltyForPaidOrder', () => {
     expect(earnPointsMock).toHaveBeenCalledWith(VENUE, 'cust-A', 50, ORDER, 'sv-1')
   })
 
+  // ── H1 (auditoría de Codex del código, 15-oct-2026): el envoltorio de reembolsos es quien CIERRA ─────────────────────
+  it('🔴 H1: con { cerrar: false } NO marca loyaltyProcessedAt y devuelve leyoSinCliente para cerrar con la misma guarda', async () => {
+    orderCustomerFindMany.mockResolvedValue([
+      { customerId: 'cust-A', isPrimary: true, customer: { id: 'cust-A', firstName: 'Ana', lastName: null } },
+    ])
+    expect(await awardLoyaltyForPaidOrder({ venueId: VENUE, orderId: ORDER, orderTotal: 90 }, { cerrar: false })).toEqual({
+      complete: true,
+      errors: [],
+      leyoSinCliente: false,
+    })
+    expect(orderUpdateMany).not.toHaveBeenCalled()
+
+    orderCustomerFindMany.mockResolvedValue([])
+    expect(
+      await awardLoyaltyForPaidOrder({ venueId: VENUE, orderId: ORDER, orderTotal: 90, legacyCustomer: null }, { cerrar: false }),
+    ).toEqual({ complete: true, errors: [], leyoSinCliente: true })
+    expect(orderUpdateMany).not.toHaveBeenCalled()
+  })
+
+  it('H1: con { cerrar: false } una corrida que FALLA sí deja su error (no es un cierre)', async () => {
+    orderCustomerFindMany.mockResolvedValue([
+      { customerId: 'cust-A', isPrimary: true, customer: { id: 'cust-A', firstName: 'Ana', lastName: null } },
+    ])
+    earnPointsMock.mockRejectedValue(new Error('P1001'))
+    const r = await awardLoyaltyForPaidOrder({ venueId: VENUE, orderId: ORDER, orderTotal: 90 }, { cerrar: false })
+    expect(r.complete).toBe(false)
+    expect(orderUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ data: { loyaltyLastError: expect.stringContaining('loyalty:cust-A') } }),
+    )
+  })
+
   /**
    * 🔴 B1 (auditoría de Codex, ronda B, 14-oct-2026). El cobro corre su lealtad en el instante; el barista liga al cliente
    * en «Cobro exitoso» y esa liga REABRE la lealtad en su transacción. Si la corrida del cobro ya había leído «sin cliente»

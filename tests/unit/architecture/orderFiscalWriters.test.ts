@@ -762,8 +762,13 @@ const NON_FISCAL_ORDER_WRITERS: Record<string, OrderWriter> = {
     why: 'status PENDING al recibir dinero ya capturado; lo llaman payCashOrder, settleStandalonePaymentInTx y updateOrderTotalsForStandalonePayment bajo su candado',
     markers: ['ORDER_REOPENED_BY_CAPTURED_PAYMENT'],
   },
-  'src/services/shared/loyaltyOnPaidOrder.ts#awardLoyaltyForPaidOrder': { class: 'METADATA', why: 'loyalty award marks' },
-  'src/services/shared/loyaltyOnPaidOrder.ts#registrarErrorDeLealtad': {
+  // H1 (15-oct): awardLoyaltyForPaidOrder and otorgarLealtadRespetandoReembolsos close/mark ONLY through these two.
+  'src/services/shared/cierreDeLealtad.ts#cerrarLealtadDeLaVenta': {
+    class: 'METADATA',
+    why: 'closes the loyalty marks; the B1 guard (no customers + no REABIERTA marker) for a run that read no customer',
+    markers: ['orderCustomers: { none: {} }', 'MARCA_LEALTAD_REABIERTA'],
+  },
+  'src/services/shared/cierreDeLealtad.ts#registrarErrorDeLealtad': {
     class: 'METADATA',
     why: 'loyalty error mark; never overwrites the REABIERTA marker of a late customer link (H2)',
     markers: ['MARCA_LEALTAD_REABIERTA'],
@@ -771,10 +776,6 @@ const NON_FISCAL_ORDER_WRITERS: Record<string, OrderWriter> = {
   'src/services/shared/loyaltyOnLateCustomer.ts#reabrirLealtadSiAplica': {
     class: 'METADATA',
     why: 'reopens the loyalty marks (processedAt/processingAt/lastError, eligibleAt if null) inside the customer-link tx',
-  },
-  'src/services/shared/loyaltyOnLateCustomer.ts#otorgarLealtadRespetandoReembolsos': {
-    class: 'METADATA',
-    why: 'closes the loyalty marks of an already-refunded sale without awarding (B2, ronda B)',
   },
   'src/jobs/kitchen-tickets-reconciliation.job.ts#KitchenTicketsReconciliationJob.runNow': {
     class: 'METADATA',

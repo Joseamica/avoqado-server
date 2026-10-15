@@ -7,6 +7,7 @@ import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
 import { getStampCardStatus, reverseStampForOrder } from '@/services/wallet/stampLedger.service'
 import { venueEndOfDay, venueStartOfDay } from '@/utils/datetime'
 import { awardLoyaltyForPaidOrder, type AwardLoyaltyForPaidOrderArgs, type AwardLoyaltyForPaidOrderResult } from './loyaltyOnPaidOrder'
+import { cerrarLealtadDeLaVenta, registrarErrorDeLealtad } from './cierreDeLealtad'
 import { MARCA_LEALTAD_REABIERTA } from './lealtadReabierta'
 
 /** La marca de fila que deja la reapertura (ver `lealtadReabierta.ts`). */
@@ -224,6 +225,38 @@ export interface ResultadoDeLealtadRespetandoReembolsos extends AwardLoyaltyForP
 }
 
 /**
+ * Revierte el sello de una venta devuelta SIN lanzar. `null` = revertido (o no había nada que revertir); texto = el error,
+ * que además queda en la venta (sin pisar la marca de una liga tardía) y en el log.
+ */
+async function revertirSelloDeVentaDevuelta(venueId: string, orderId: string): Promise<string | null> {
+  try {
+    await reverseStampForOrder(venueId, orderId)
+    return null
+  } catch (error) {
+    const texto = `reversal:${error instanceof Error ? error.message : String(error)}`
+    logger.error('[LEALTAD] no se pudo revertir el sello de una venta reembolsada: queda pendiente para el reconciliador', {
+      venueId,
+      orderId,
+      error: texto,
+    })
+    await registrarErrorDeLealtad(venueId, orderId, texto).catch(() => undefined)
+    return texto
+  }
+}
+
+/** Cierra la venta como procesada sin lanzar: un fallo aquí la deja pendiente y se reporta en `errors`. */
+async function cerrarSinLanzar(venueId: string, orderId: string, leyoSinCliente: boolean): Promise<string | null> {
+  try {
+    await cerrarLealtadDeLaVenta(venueId, orderId, { leyoSinCliente })
+    return null
+  } catch (error) {
+    const texto = `marker:${error instanceof Error ? error.message : String(error)}`
+    logger.error('[LEALTAD] no se pudo cerrar la lealtad de la venta; el reconciliador la reintenta', { venueId, orderId, error: texto })
+    return texto
+  }
+}
+
+/**
  * 🔴 B2 (auditoría de Codex, ronda B, 14-oct-2026): el ÚNICO camino para otorgar la lealtad de una venta FUERA del cobro.
  * Lo usan la liga tardía (`awardLoyaltyForLateCustomer`), el reconciliador (`loyalty-reconciliation.job.ts`) y la
  * reparación de datos (S9, al APLICAR cada venta).
@@ -232,39 +265,54 @@ export interface ResultadoDeLealtadRespetandoReembolsos extends AwardLoyaltyForP
  * no encuentra sello que revertir; después, el reconciliador llamaba directo a `awardLoyaltyForPaidOrder` —que no mira
  * reembolsos—, creaba el sello y daba la venta por terminada. Un cliente sumaba su sello por un café que le devolvieron.
  *
- *   1. Si la venta YA tiene un reembolso COMPLETED (conteo exacto), no otorga nada y la deja cerrada como procesada: el
- *      reconciliador no vuelve a tomar una venta devuelta.
- *   2. Si no, corre la lealtad de siempre (idempotente).
+ * 🔴 H1 (auditoría de Codex del código, 15-oct-2026): ESTE envoltorio es quien CIERRA la venta (`loyaltyProcessedAt`), y
+ * sólo después de la comprobación final de reembolso y de completar la reversión. Antes la lealtad cerraba primero: si luego
+ * fallaba la reversión, la venta quedaba «procesada» con el sello vivo y el reconciliador ya no la buscaba.
+ *
+ *   1. Si la venta YA tiene un reembolso COMPLETED (conteo exacto), no otorga nada: revierte un sello que la venta hubiera dado
+ *      antes (idempotente) y SÓLO entonces la cierra: el reconciliador no vuelve a tomar una venta devuelta.
+ *   2. Si no, corre la lealtad de siempre (idempotente) SIN que cierre (`{ cerrar: false }`).
  *   3. Vuelve a contar: si el reembolso entró MIENTRAS se otorgaba, revierte el sello (`reverseStampForOrder`, idempotente:
  *      si la reversa del reembolso también lo hace, la segunda no hace nada).
+ *   4. Cierra si la lealtad terminó, con la MISMA guarda B1 que habría usado la lealtad.
  *
- * Sin candado de reembolso (el motor escribe en transacciones propias) y sin reiniciar la ventana de 24 h. Un fallo al
- * revertir SUBE: la liga y el reconciliador ya registran sus fallos; tragárselo dejaría el sello vivo sin que nadie se
- * entere. `awardLoyaltyForPaidOrder` en sí nunca lanza.
+ * Si la reversión falla, NO cierra: devuelve `complete: false` con el error (también queda en la venta y en el log) y el
+ * reconciliador la reintenta (en su vuelta, el paso 1 revierte y cierra). Sin candado de reembolso (el motor escribe en
+ * transacciones propias) y sin reiniciar la ventana de 24 h. `awardLoyaltyForPaidOrder` en sí nunca lanza; un conteo que
+ * truena sí sube (sus llamadores lo registran).
  */
 export async function otorgarLealtadRespetandoReembolsos(
   args: AwardLoyaltyForPaidOrderArgs,
 ): Promise<ResultadoDeLealtadRespetandoReembolsos> {
   const { venueId, orderId } = args
   if ((await contarReembolsos(prisma, venueId, orderId)) > 0) {
-    await prisma.order.updateMany({
-      where: { id: orderId, venueId, loyaltyEligibleAt: { not: null }, loyaltyProcessedAt: null },
-      data: { loyaltyProcessedAt: new Date(), loyaltyProcessingAt: null, loyaltyLastError: null },
-    })
+    const falloAlRevertir = await revertirSelloDeVentaDevuelta(venueId, orderId)
+    if (falloAlRevertir) return { complete: false, errors: [falloAlRevertir], reembolsada: true }
+    const falloAlCerrar = await cerrarSinLanzar(venueId, orderId, false)
+    if (falloAlCerrar) return { complete: false, errors: [falloAlCerrar], reembolsada: true }
     logger.info('[LEALTAD] venta con reembolso: no se otorga lealtad y queda cerrada', { venueId, orderId })
     return { complete: true, errors: [], reembolsada: true }
   }
 
-  const resultado = await awardLoyaltyForPaidOrder(args)
+  const resultado = await awardLoyaltyForPaidOrder(args, { cerrar: false })
+  const errores = [...resultado.errors]
 
   if ((await contarReembolsos(prisma, venueId, orderId)) > 0) {
     // 🔴 Auditoría A #2: el reembolso entró MIENTRAS se otorgaba. Si su reversa corrió antes de que el sello existiera, no
     // encontró nada que revertir; este sello quedaría vivo sobre una venta devuelta.
     logger.warn('[LEALTAD] la venta se reembolsó mientras se otorgaba su lealtad: se revierte el sello', { venueId, orderId })
-    await reverseStampForOrder(venueId, orderId)
-    return { ...resultado, reembolsada: true }
+    const falloAlRevertir = await revertirSelloDeVentaDevuelta(venueId, orderId)
+    if (falloAlRevertir) return { complete: false, errors: [...errores, falloAlRevertir], reembolsada: true }
+    if (!resultado.complete) return { complete: false, errors: errores, reembolsada: true }
+    const falloAlCerrar = await cerrarSinLanzar(venueId, orderId, false)
+    if (falloAlCerrar) return { complete: false, errors: [...errores, falloAlCerrar], reembolsada: true }
+    return { complete: true, errors: errores, reembolsada: true }
   }
-  return { ...resultado, reembolsada: false }
+
+  if (!resultado.complete) return { complete: false, errors: errores, reembolsada: false }
+  const falloAlCerrar = await cerrarSinLanzar(venueId, orderId, resultado.leyoSinCliente === true)
+  if (falloAlCerrar) return { complete: false, errors: [...errores, falloAlCerrar], reembolsada: false }
+  return { complete: true, errors: errores, reembolsada: false }
 }
 
 /** Los tres candados que ya exigen `earnPoints` + `grantStamp`: plan, programa activo y sellos prendidos. */

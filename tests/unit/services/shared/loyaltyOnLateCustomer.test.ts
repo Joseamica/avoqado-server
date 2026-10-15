@@ -89,6 +89,17 @@ function conVenta(over: Record<string, unknown> = {}) {
   prismaMock.order.findFirst.mockImplementation(async () => venta(over))
 }
 
+/** Las escrituras de `order.updateMany` que CIERRAN la venta (marcan `loyaltyProcessedAt`). */
+const cierres = () =>
+  (prismaMock.order.updateMany.mock.calls as unknown as Array<[{ data: Record<string, unknown> }]>).filter(
+    ([a]) => a.data.loyaltyProcessedAt instanceof Date,
+  )
+/** Los textos de error que se dejaron en la venta (escrituras de FALLO). */
+const erroresEscritos = () =>
+  (prismaMock.order.updateMany.mock.calls as unknown as Array<[{ data: Record<string, unknown> }]>)
+    .filter(([a]) => !('loyaltyProcessedAt' in a.data) && typeof a.data.loyaltyLastError === 'string')
+    .map(([a]) => a.data.loyaltyLastError)
+
 /** La venta del ejemplo como fila con marcas: ya cobrada SIN cliente, su lealtad corrió y quedó procesada. */
 function filaYaProcesada(): FilaDeLealtad {
   return {
@@ -111,6 +122,8 @@ let relojFijo: jest.SpyInstance
 afterEach(() => relojFijo.mockRestore())
 
 beforeEach(() => {
+  // Sin colas «Once» sobrantes de la prueba anterior (una prueba que falla dejaría su rechazo para la siguiente).
+  for (const m of [awardMock, reverseMock, prismaMock.order.updateMany, prismaMock.payment.count] as jest.Mock[]) m.mockReset()
   relojFijo = jest.spyOn(Date, 'now').mockReturnValue(AHORA_FIJO)
   eventosDeLaVenta = []
   puntosDeLaVenta = []
@@ -211,7 +224,11 @@ describe('awardLoyaltyForLateCustomer', () => {
   it('🔴 venta pagada hace 30 min: llama la lealtad con el actor y la base sin propina, y sella', async () => {
     cardMock.mockResolvedValue({ stampsEarned: 4, stampsRequired: 7, rewardLabel: 'Café', pendingRewards: 0 })
     const r = await awardLoyaltyForLateCustomer({ venueId: VENUE, orderId: ORDER, customerId: CUST, staffId: STAFF })
-    expect(awardMock).toHaveBeenCalledWith({ venueId: VENUE, orderId: ORDER, orderTotal: 80, staffId: STAFF, legacyCustomer: null })
+    // H1: la lealtad NO cierra la venta; la cierra el envoltorio después de su comprobación final de reembolso.
+    expect(awardMock).toHaveBeenCalledWith(
+      { venueId: VENUE, orderId: ORDER, orderTotal: 80, staffId: STAFF, legacyCustomer: null },
+      { cerrar: false },
+    )
     expect(r).toEqual({ stampsEnabled: true, stamped: true, reason: null, stampsEarned: 4, stampsRequired: 7, rewardReady: false })
   })
 
@@ -297,7 +314,8 @@ describe('awardLoyaltyForLateCustomer', () => {
     prismaMock.payment.count.mockResolvedValueOnce(0).mockResolvedValue(1)
     const r = await awardLoyaltyForLateCustomer({ venueId: VENUE, orderId: ORDER, customerId: CUST, staffId: STAFF })
     expect(awardMock).not.toHaveBeenCalled()
-    expect(reverseMock).not.toHaveBeenCalled()
+    // H1: la reversión (idempotente) corre ANTES de cerrar: un sello previo de esta venta no queda vivo.
+    expect(reverseMock).toHaveBeenCalledWith(VENUE, ORDER)
     expect(r).toMatchObject({ stamped: false, reason: 'NOT_PAID' })
   })
 
@@ -429,7 +447,7 @@ describe('otorgarLealtadRespetandoReembolsos (B2: UN envoltorio para la liga tar
 
   it('sin reembolso: otorga con los MISMOS argumentos, no revierte y devuelve el resultado de la lealtad', async () => {
     const r = await otorgarLealtadRespetandoReembolsos(ARGS)
-    expect(awardMock).toHaveBeenCalledWith(ARGS)
+    expect(awardMock).toHaveBeenCalledWith(ARGS, { cerrar: false })
     expect(reverseMock).not.toHaveBeenCalled()
     expect(r).toEqual({ complete: true, errors: [], reembolsada: false })
     // Antes y después de otorgar, y las dos veces EXACTO (un count por la orden, sin lista con tope).
@@ -438,16 +456,28 @@ describe('otorgarLealtadRespetandoReembolsos (B2: UN envoltorio para la liga tar
     expect(prismaMock.payment.count).toHaveBeenNthCalledWith(2, REEMBOLSO_EXACTO)
   })
 
-  it('🔴 la venta ya está reembolsada: NO otorga y la deja cerrada como procesada (el reconciliador no la vuelve a tomar)', async () => {
+  it('🔴 la venta ya está reembolsada: NO otorga, revierte un sello previo (H1) y SÓLO entonces la deja cerrada', async () => {
     prismaMock.payment.count.mockResolvedValue(1)
     const r = await otorgarLealtadRespetandoReembolsos(ARGS)
     expect(awardMock).not.toHaveBeenCalled()
-    expect(reverseMock).not.toHaveBeenCalled()
+    // H1 (Codex): con el reembolso ya al entrar, un sello que esta venta hubiera dado antes no puede quedar vivo.
+    expect(reverseMock).toHaveBeenCalledWith(VENUE, ORDER)
     expect(prismaMock.order.updateMany).toHaveBeenCalledWith({
       where: { id: ORDER, venueId: VENUE, loyaltyEligibleAt: { not: null }, loyaltyProcessedAt: null },
       data: { loyaltyProcessedAt: expect.any(Date), loyaltyProcessingAt: null, loyaltyLastError: null },
     })
+    expect(reverseMock.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.order.updateMany.mock.invocationCallOrder[0])
     expect(r).toEqual({ complete: true, errors: [], reembolsada: true })
+  })
+
+  it('🔴 H1: ya reembolsada al entrar y la reversión FALLA: NO cierra (queda para el reconciliador) y deja el error', async () => {
+    prismaMock.payment.count.mockResolvedValue(1)
+    reverseMock.mockRejectedValueOnce(new Error('P1001'))
+    const r = await otorgarLealtadRespetandoReembolsos(ARGS)
+    expect(r).toEqual({ complete: false, errors: [expect.stringContaining('reversal:')], reembolsada: true })
+    expect(cierres()).toHaveLength(0)
+    expect(erroresEscritos()).toEqual([expect.stringContaining('reversal:P1001')])
+    expect(logger.error).toHaveBeenCalled()
   })
 
   it('🔴 el reembolso aparece MIENTRAS otorga: revierte el sello (idempotente) y lo dice', async () => {
@@ -465,10 +495,54 @@ describe('otorgarLealtadRespetandoReembolsos (B2: UN envoltorio para la liga tar
     expect(reverseMock).not.toHaveBeenCalled()
   })
 
-  it('si revertir truena, el error sube (el reconciliador y la liga ya saben registrar un fallo; tragárselo dejaría el sello vivo en silencio)', async () => {
+  it('🔴 H1: el reembolso aparece MIENTRAS otorga y la reversión FALLA: la venta NO se cierra (el reconciliador la ve) y el error queda', async () => {
+    // Antes: la lealtad ya había marcado `loyaltyProcessedAt` y la reversión fallida dejaba el sello vivo para siempre.
     prismaMock.payment.count.mockResolvedValueOnce(0).mockResolvedValueOnce(1)
     reverseMock.mockRejectedValueOnce(new Error('P1001'))
-    await expect(otorgarLealtadRespetandoReembolsos(ARGS)).rejects.toThrow('P1001')
+    const r = await otorgarLealtadRespetandoReembolsos(ARGS)
+    expect(r).toEqual({ complete: false, errors: [expect.stringContaining('reversal:P1001')], reembolsada: true })
+    expect(cierres()).toHaveLength(0)
+    expect(erroresEscritos()).toEqual([expect.stringContaining('reversal:P1001')])
+  })
+
+  it('🔴 H1: sin reembolso, el envoltorio CIERRA después de la comprobación final (no antes)', async () => {
+    await otorgarLealtadRespetandoReembolsos(ARGS)
+    expect(cierres()).toHaveLength(1)
+    const segundoConteo = prismaMock.payment.count.mock.invocationCallOrder[1]
+    expect(segundoConteo).toBeLessThan(prismaMock.order.updateMany.mock.invocationCallOrder[0])
+    expect(prismaMock.order.updateMany).toHaveBeenCalledWith({
+      where: { id: ORDER, venueId: VENUE, loyaltyEligibleAt: { not: null }, loyaltyProcessedAt: null },
+      data: { loyaltyProcessedAt: expect.any(Date), loyaltyProcessingAt: null, loyaltyLastError: null },
+    })
+  })
+
+  it('🔴 H1: si la corrida leyó «sin cliente», el envoltorio cierra con la MISMA guarda (sin clientes y sin la marca)', async () => {
+    awardMock.mockResolvedValueOnce({ complete: true, errors: [], leyoSinCliente: true })
+    const r = await otorgarLealtadRespetandoReembolsos(ARGS)
+    expect(r).toEqual({ complete: true, errors: [], reembolsada: false })
+    expect(prismaMock.order.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: ORDER,
+        venueId: VENUE,
+        loyaltyEligibleAt: { not: null },
+        loyaltyProcessedAt: null,
+        orderCustomers: { none: {} },
+        OR: [{ loyaltyLastError: null }, { loyaltyLastError: { not: MARCA } }],
+      },
+      data: { loyaltyProcessedAt: expect.any(Date), loyaltyProcessingAt: null, loyaltyLastError: null },
+    })
+  })
+
+  it('H1: la lealtad incompleta no se cierra (sin reembolso de por medio)', async () => {
+    awardMock.mockResolvedValue({ complete: false, errors: ['loyalty:cust-1'] })
+    await otorgarLealtadRespetandoReembolsos(ARGS)
+    expect(cierres()).toHaveLength(0)
+  })
+
+  it('H1: si el cierre del envoltorio truena, la venta queda pendiente y el resultado lo dice (complete false)', async () => {
+    prismaMock.order.updateMany.mockRejectedValueOnce(new Error('P1001'))
+    const r = await otorgarLealtadRespetandoReembolsos(ARGS)
+    expect(r).toEqual({ complete: false, errors: [expect.stringContaining('marker:P1001')], reembolsada: false })
   })
 })
 
@@ -652,6 +726,38 @@ describe('🔴 B2: el reembolso manda también en la recuperación (rulings rond
     expect(eventosDeLaVenta.filter(e => e.type === 'EARN')).toHaveLength(0)
     expect(fila.loyaltyProcessedAt).toBeInstanceOf(Date) // cerrada: no se reintenta 15 veces una venta devuelta
     expect(r).toMatchObject({ scanned: 1, applied: 1, failed: 0 })
+  })
+
+  it('🔴 H1: el reembolso entra mientras el reconciliador sella y la reversión FALLA ⇒ la venta queda pendiente; la siguiente vuelta revierte y cierra', async () => {
+    const fila = filaYaProcesada()
+    const tabla = tablaDeUnaVenta(fila)
+    prismaMock.order.updateMany.mockImplementation(tabla.updateMany as never)
+    await reabrirLealtadSiAplica(prismaMock as never, { venueId: VENUE, orderId: ORDER, customerId: CUST })
+
+    let reembolsado = false
+    prismaMock.payment.count.mockImplementation((async () => (reembolsado ? 1 : 0)) as never)
+    awardMock.mockImplementationOnce(async () => {
+      eventosDeLaVenta.push(EARN(CUST))
+      reembolsado = true // el reembolso entra justo mientras el reconciliador otorga…
+      return { complete: true, errors: [] }
+    })
+    reverseMock.mockRejectedValueOnce(new Error('P1001')) // …y la reversión se cae
+
+    const ahora = Date.now()
+    const primera = new LoyaltyReconciliationJob({ prisma: { order: tabla } as never, cron: cron(), now: () => new Date(ahora) })
+    expect(await primera.runNow()).toMatchObject({ scanned: 1, applied: 0, failed: 1 })
+    // Antes: la lealtad ya la había cerrado y el sello quedaba vivo sobre una venta devuelta, sin que nadie la volviera a ver.
+    expect(fila.loyaltyProcessedAt).toBeNull()
+    expect(eventosDeLaVenta.map(e => e.type)).toEqual(['EARN'])
+
+    const siguiente = new LoyaltyReconciliationJob({
+      prisma: { order: tabla } as never,
+      cron: cron(),
+      now: () => new Date(ahora + 11 * 60_000),
+    })
+    expect(await siguiente.runNow()).toMatchObject({ scanned: 1, applied: 1, failed: 0 })
+    expect(eventosDeLaVenta.map(e => e.type)).toEqual(['EARN', 'REVERSAL'])
+    expect(fila.loyaltyProcessedAt).toBeInstanceOf(Date)
   })
 
   it('el reembolso entra MIENTRAS el reconciliador sella: el sello se revierte y no queda ninguno válido', async () => {
