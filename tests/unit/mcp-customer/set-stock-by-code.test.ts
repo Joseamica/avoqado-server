@@ -56,6 +56,7 @@ jest.mock('@/services/mobile/inventory.mobile.service', () => ({
 type Handler = (a: Record<string, unknown>, e: unknown) => Promise<{ content: Array<{ text: string }> }>
 const handlers = new Map<string, Handler>()
 const schemas = new Map<string, Record<string, z.ZodTypeAny>>()
+const descripciones = new Map<string, string>()
 const scope = { staffId: 'staff-1', activeOrg: 'o1', allowedVenueIds: ['v1'], perVenueAccess: new Map() } as McpScope
 const call = (args: Record<string, unknown>) => handlers.get('set_stock_by_code')!(args, {})
 const parse = (r: { content: Array<{ text: string }> }) => JSON.parse(r.content[0].text)
@@ -77,11 +78,13 @@ const pareja = (productId: string, apartadas = 0) => ({
 })
 
 // Textos para el operador, tal cual (el asistente los repite).
-const EXISTENCIA_VIEJA_ERROR = 'Cambió la existencia de algún producto desde la vista previa: no se aplicó nada.'
+// La huella vieja puede venir de una venta, de otro conteo, de Shopify o de los productos: el texto no presume que fue la existencia.
+const EXISTENCIA_VIEJA_ERROR = 'Algo cambió desde la vista previa (una venta, otro conteo, Shopify o los productos): no se aplicó nada.'
 const EXISTENCIA_VIEJA =
-  'Cambió la existencia de algún producto desde la vista previa (por ejemplo, una venta o un conteo): no se aplicó nada. Si ya habías confirmado esta carga y no viste la respuesta, revisa primero los conteos recientes (stock_counts): probablemente ya quedó. Si no, pide una vista previa nueva y compárala con la anterior: si un producto bajó porque se vendió DESPUÉS de contarlo, réstale esa venta a lo contado antes de confirmar.'
+  'Algo cambió desde la vista previa (por ejemplo, una venta, otro conteo o un cambio en Shopify): no se aplicó nada. Si ya habías confirmado esta carga y no viste la respuesta, revisa primero los conteos recientes (stock_counts): probablemente ya quedó. Si no, pide una vista previa nueva y compárala con la anterior: si un producto bajó porque se vendió DESPUÉS de contarlo, réstale esa venta a lo contado antes de confirmar.'
+// Cancelar siempre va con su condición (sólo un conteo que no aplicó nada), y se dice con qué se ve y con qué se cancela.
 const NOTA_CONTEO_ABIERTO =
-  ' Los que están en un conteo abierto no se cargan: termina ese conteo en el POS (Inventario › Conteos), o cancélalo si no aplicó nada.'
+  ' Los que están en un conteo abierto no se cargan: termina ese conteo en el POS (Inventario › Conteos), o cancélalo si no aplicó nada (stock_counts lo muestra; cancel_stock_count lo cancela).'
 /** En las respuestas de una confirmación que no terminó: el «no canceles» es de ESTE conteo, así que del otro no se aconseja cancelar. */
 const NOTA_OTRO_CONTEO_ABIERTO =
   ' Los que están en otro conteo abierto (ver inOpenCount) no se cargaron: termina ese otro conteo en el POS.'
@@ -131,6 +134,7 @@ beforeAll(() => {
       tool: (...a: unknown[]) => {
         handlers.set(a[0] as string, a[a.length - 1] as Handler)
         schemas.set(a[0] as string, a[2] as Record<string, z.ZodTypeAny>)
+        descripciones.set(a[0] as string, a[1] as string)
       },
     } as never,
     scope,
@@ -253,6 +257,8 @@ describe('set_stock_by_code', () => {
     expect(out.message).toBe(
       'Los 1 producto(s) ya tienen esa existencia: no hay nada que cambiar. Quedaron fuera: sin encontrar 1 (ver esas listas).',
     )
+    // `message` antes de `changes` y de las listas.
+    expect(Object.keys(out).slice(0, 2)).toEqual(['ok', 'message'])
   })
 
   it('🔍 si ningún producto de la lista se puede cargar: ok:false con needsInput (nunca «nada que cambiar») y lo que quedó fuera', async () => {
@@ -340,7 +346,7 @@ describe('set_stock_by_code', () => {
     expect(mockCreateCount).not.toHaveBeenCalled()
   })
 
-  it('🔍 con 50 conteos abiertos con esos productos no carga nada: pide terminar o cancelar los que sobran', async () => {
+  it('🔍 con 50 conteos abiertos con esos productos no carga nada: pide terminar los que siguen y cancelar sólo los que no aplicaron nada', async () => {
     mockProductFindMany.mockResolvedValue([p1])
     mockStockCountFindMany.mockResolvedValueOnce(
       Array.from({ length: 50 }, (_, i) => ({ id: `abierto-${i}`, items: [{ productId: 'p1' }] })),
@@ -350,7 +356,7 @@ describe('set_stock_by_code', () => {
       ok: false,
       needsInput: true,
       message:
-        'Hay demasiados conteos abiertos en este negocio: termina o cancela los que ya no sirvan en el POS (Inventario › Conteos) antes de cargar existencias.',
+        'Hay demasiados conteos abiertos en este negocio: termina en el POS (Inventario › Conteos) los que sigan, y cancela sólo los que no aplicaron nada, antes de cargar existencias.',
     })
     expect(Object.keys(out)).toEqual(['ok', 'needsInput', 'message'])
     expect(mockLinkFindMany).not.toHaveBeenCalled()
@@ -786,6 +792,12 @@ describe('set_stock_by_code', () => {
     expect(out.duplicateCodes).toEqual(['MAILEN-M'])
     expect(out.sameProductTwice).toEqual([{ codes: ['MAILEN-M', '8445000000017'], sku: 'MAILEN-M', name: 'Vestido Mailen M' }])
     expect(out.message).toContain('Quedaron fuera: repetidos en la lista 1, mismo producto dos veces 1 (ver esas listas).')
+  })
+
+  it('la descripción dice que lo que ya está en un conteo abierto no se carga, y cancelar va con su condición', () => {
+    expect(descripciones.get('set_stock_by_code')).toContain(
+      'Products already in an open stock count are not loaded: finish that count first (or cancel it if it applied nothing).',
+    )
   })
 
   it('topes: 500 renglones sí, 501 no; cantidad negativa o con 4 decimales no', () => {

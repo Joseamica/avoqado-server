@@ -99,6 +99,8 @@ describe('set_prices_by_code', () => {
     expect(out.message).toBe(
       'Esto cambiará el precio de 1 producto(s): lo que paga el cliente, con IVA. Quedaron fuera: sin encontrar 1 (ver esas listas). Muéstrale la lista al operador; con su autorización vuelve a llamar con confirm:true.',
     )
+    // `message` antes de `changes` y de las listas: un cliente que recorte una respuesta larga no pierde el aviso.
+    expect(Object.keys(out).slice(0, 5)).toEqual(['ok', 'requiresConfirmation', 'expectedSourceFingerprint', 'message', 'changes'])
     expect(typeof out.expectedSourceFingerprint).toBe('string')
     expect(mockUpdateProduct).not.toHaveBeenCalled()
     expect(mockLogAction).not.toHaveBeenCalled()
@@ -120,6 +122,32 @@ describe('set_prices_by_code', () => {
     expect(out.message).toBe(
       'Los 1 producto(s) encontrados ya tienen ese precio: no hay nada que cambiar. Quedaron fuera: sin encontrar 1 (ver esas listas).',
     )
+    expect(Object.keys(out).slice(0, 2)).toEqual(['ok', 'message'])
+  })
+
+  it('🔍 si todos los códigos son archivados o ambiguos: «Ningún producto… se puede actualizar», nunca «No encontré ninguno»', async () => {
+    mockProductFindMany.mockResolvedValueOnce([
+      filaProducto({ id: 'pa', sku: 'DOBLE-1' }),
+      filaProducto({ id: 'pb', sku: 'B-M', gtin: 'DOBLE-1' }), // el SKU de uno es el código de barras del otro
+      filaProducto({ id: 'pc', sku: 'VIEJO-1', deletedAt: new Date('2026-09-01') }),
+    ])
+    const out = parse(
+      await call({
+        venueId: 'v1',
+        items: [
+          { code: 'DOBLE-1', price: 10 },
+          { code: 'VIEJO-1', price: 20 },
+        ],
+      }),
+    )
+    expect(out).toMatchObject({ ok: false, needsInput: true, notFound: [] })
+    expect(out.ambiguous).toHaveLength(1)
+    expect(out.archived).toHaveLength(1)
+    expect(out.message).toBe(
+      'Ningún producto de la lista se puede actualizar. Quedaron fuera: ambiguos 1, archivados 1 (ver esas listas). Revisa la lista antes de seguir.',
+    )
+    mensajePrimero(out)
+    expect(mockUpdateProduct).not.toHaveBeenCalled()
   })
 
   it('🔍 si ningún código cae en un producto: ok:false con needsInput (nunca «nada que cambiar») y cuántos quedaron fuera', async () => {
@@ -180,6 +208,7 @@ describe('set_prices_by_code', () => {
     ]
     expect(out).toMatchObject({ ok: true, applied: 2, failed: [], notFound: ['NO-EXISTE'] })
     expect(out.message).toBe('Listo: 2 precio(s) cambiado(s). Quedaron fuera: sin encontrar 1 (ver esas listas).')
+    expect(Object.keys(out).slice(0, 2)).toEqual(['ok', 'message'])
     expect(out.appliedChanges).toEqual(aplicado)
     expect(mockUpdateProduct).toHaveBeenCalledTimes(2)
     expect(mockUpdateProduct).toHaveBeenCalledWith('v1', 'p1', { price: 1290.5 }, actor, {

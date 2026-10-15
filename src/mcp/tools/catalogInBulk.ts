@@ -236,7 +236,15 @@ type AltaLista = {
   trackStock: boolean
 }
 type AltaConProblema = { row: number; name: string; problem: string; detail: string; suggestion?: string }
-type RevisionDeAltas = { error: string } | { ready: AltaLista[]; invalid: AltaConProblema[]; availableCategories?: string[] }
+type RevisionDeAltas =
+  | { error: string }
+  | {
+      ready: AltaLista[]
+      invalid: AltaConProblema[]
+      availableCategories?: string[]
+      /** Cada renglón con problema choca sólo con un producto que se llama igual: ya existen (no sale en la respuesta). */
+      todoYaExiste: boolean
+    }
 
 /** Revisa la lista de altas contra el negocio con consultas acotadas: categorías por nombre y SKU/códigos ya ocupados (también por
  *  archivados, que cuentan en los índices únicos). Un renglón con problema no se crea; se dice el primer problema que tenga. */
@@ -280,6 +288,7 @@ async function revisarAltas(where: { venueId: { in: string[] } }, items: AltaPed
   const vecesBarras = veces(barras)
   const ready: AltaLista[] = []
   const invalid: AltaConProblema[] = []
+  const yaExisten = new Set<number>() // renglones cuyo SKU o código lo usa un producto con su MISMO nombre
   for (const f of filas) {
     const cats = categorias.filter(c => c.name.toLowerCase() === f.category.toLowerCase())
     const sugerido = f.skuGenerated ? null : normalizeSku(f.sku)
@@ -319,6 +328,14 @@ async function revisarAltas(where: { venueId: { in: string[] } }, items: AltaPed
                     : null
     if (problema) invalid.push({ row: f.row, name: f.name, ...problema })
     else ready.push({ ...f, category: cats[0].name, categoryId: cats[0].id })
+    // Ocupado por un producto que se llama igual (sin espacios a los lados ni mayúsculas): es el mismo, creado antes.
+    const ocupadoPor =
+      problema?.problem === 'SKU_YA_USADO'
+        ? ocupante
+        : problema?.problem === 'CODIGO_YA_USADO' && f.barcode
+          ? barrasOcupadas.get(f.barcode)
+          : undefined
+    if (ocupadoPor && ocupadoPor.name.trim().toLowerCase() === f.name.trim().toLowerCase()) yaExisten.add(f.row)
   }
   const availableCategories = invalid.some(i => i.problem === 'CATEGORIA_NO_EXISTE')
     ? (
@@ -330,7 +347,12 @@ async function revisarAltas(where: { venueId: { in: string[] } }, items: AltaPed
         })
       ).map(c => c.name)
     : undefined
-  return { ready, invalid, ...(availableCategories ? { availableCategories } : {}) }
+  return {
+    ready,
+    invalid,
+    ...(availableCategories ? { availableCategories } : {}),
+    todoYaExiste: invalid.length > 0 && invalid.every(i => yaExisten.has(i.row)),
+  }
 }
 
 const cantidadFinalInput = () =>
@@ -352,15 +374,17 @@ const MOTIVO_RETENIDO: Record<string, string> = {
 const NOTA_POR_OMISION = 'Conteo cargado desde la IA'
 
 /** Huella vieja en existencias: volver a pedir y confirmar volvería a fijar el conteo anterior encima de la venta que la huella
- *  acaba de atrapar, así que se dice qué revisar antes. Ningún campo manda a «confirmar» otra vez (ni el `error`). */
-const EXISTENCIA_VIEJA_ERROR = 'Cambió la existencia de algún producto desde la vista previa: no se aplicó nada.'
+ *  acaba de atrapar, así que se dice qué revisar antes. Ningún campo manda a «confirmar» otra vez (ni el `error`). La causa puede
+ *  ser una venta, otro conteo, Shopify o los productos: el texto no presume cuál. */
+const EXISTENCIA_VIEJA_ERROR = 'Algo cambió desde la vista previa (una venta, otro conteo, Shopify o los productos): no se aplicó nada.'
 const EXISTENCIA_VIEJA =
-  'Cambió la existencia de algún producto desde la vista previa (por ejemplo, una venta o un conteo): no se aplicó nada. Si ya habías confirmado esta carga y no viste la respuesta, revisa primero los conteos recientes (stock_counts): probablemente ya quedó. Si no, pide una vista previa nueva y compárala con la anterior: si un producto bajó porque se vendió DESPUÉS de contarlo, réstale esa venta a lo contado antes de confirmar.'
+  'Algo cambió desde la vista previa (por ejemplo, una venta, otro conteo o un cambio en Shopify): no se aplicó nada. Si ya habías confirmado esta carga y no viste la respuesta, revisa primero los conteos recientes (stock_counts): probablemente ya quedó. Si no, pide una vista previa nueva y compárala con la anterior: si un producto bajó porque se vendió DESPUÉS de contarlo, réstale esa venta a lo contado antes de confirmar.'
 
 /** Conteos abiertos (IN_PROGRESS o APPLYING) con productos de la carga: con este tope o más, no se carga nada. */
 const TOPE_CONTEOS_ABIERTOS = 50
+/** Cancelar siempre va con su condición (sólo un conteo que no aplicó nada), y se dice con qué se ve y con qué se cancela. */
 const NOTA_CONTEO_ABIERTO =
-  ' Los que están en un conteo abierto no se cargan: termina ese conteo en el POS (Inventario › Conteos), o cancélalo si no aplicó nada.'
+  ' Los que están en un conteo abierto no se cargan: termina ese conteo en el POS (Inventario › Conteos), o cancélalo si no aplicó nada (stock_counts lo muestra; cancel_stock_count lo cancela).'
 /** En las respuestas de una confirmación que no terminó: ahí se pide no cancelar ESTE conteo, así que del otro no se aconseja
  *  cancelarlo. */
 const NOTA_OTRO_CONTEO_ABIERTO =
@@ -522,8 +546,9 @@ export function registerCatalogInBulkTools(server: McpServer, scope: McpScope) {
         return text({
           ok: false,
           needsInput: true,
+          // «No encontré» sólo si ningún código cayó en un producto (ni ambiguo ni archivado): todos están en notFound.
           message:
-            r.found.length === 0
+            r.found.length === 0 && r.ambiguous.length === 0 && r.archived.length === 0
               ? `No encontré ninguno de los ${items.length} códigos en este negocio.` +
                 resumen +
                 ' Revisa los códigos (un código de barras va sin espacios) antes de seguir.'
@@ -531,26 +556,27 @@ export function registerCatalogInBulkTools(server: McpServer, scope: McpScope) {
           ...sinResolver(r),
           sameProductTwice,
         })
+      // En las respuestas de abajo `message` va antes de `changes` y de las listas: si un cliente recorta, el aviso no se pierde.
       if (cambios.length === 0)
         return text({
           ok: true,
+          message: `Los ${unicos.length} producto(s) encontrados ya tienen ese precio: no hay nada que cambiar.` + resumen,
           applied: 0,
           changes,
           ...resueltos,
-          message: `Los ${unicos.length} producto(s) encontrados ya tienen ese precio: no hay nada que cambiar.` + resumen,
         })
       if (!confirm)
         return text({
           ok: false,
           requiresConfirmation: true,
           expectedSourceFingerprint: fingerprint,
-          changes,
-          ...resueltos,
           message:
             `Esto cambiará el precio de ${cambios.length} producto(s): lo que paga el cliente, con IVA.` +
             avisoDesactivados(changes) +
             resumen +
             ' Muéstrale la lista al operador; con su autorización vuelve a llamar con confirm:true.',
+          changes,
+          ...resueltos,
         })
       if (expectedSourceFingerprint !== fingerprint) return text(VISTA_VIEJA)
       const applied: Array<{ productId: string; sku: string; from: number; to: number; inactive?: true }> = []
@@ -588,16 +614,16 @@ export function registerCatalogInBulkTools(server: McpServer, scope: McpScope) {
       })
       return text({
         ok: applied.length > 0,
-        applied: applied.length,
-        appliedChanges: applied,
-        failed,
-        ...resueltos,
         message:
           (failed.length === 0
             ? `Listo: ${applied.length} precio(s) cambiado(s).`
             : `Se cambiaron ${applied.length}; ${failed.length} no se pudieron (ver failed).`) +
           avisoDesactivados(applied) +
           resumen,
+        applied: applied.length,
+        appliedChanges: applied,
+        failed,
+        ...resueltos,
       })
     },
   )
@@ -651,7 +677,7 @@ export function registerCatalogInBulkTools(server: McpServer, scope: McpScope) {
       guard.requirePermission('products:create', venueId)
       const revision = await revisarAltas(where, items)
       if ('error' in revision) return text({ ok: false, error: revision.error })
-      const { ready, invalid, availableCategories } = revision
+      const { ready, invalid, availableCategories, todoYaExiste } = revision
       // La huella: qué renglones están listos, en qué categoría y con qué SKU. Si un SKU o código se ocupa, o una categoría cambia,
       // deja de coincidir.
       const fingerprint = operationHash(ready.map(a => ({ row: a.row, categoryId: a.categoryId, sku: a.sku })))
@@ -660,8 +686,9 @@ export function registerCatalogInBulkTools(server: McpServer, scope: McpScope) {
         ...(skuGenerated ? { skuGenerated: true } : {}),
       }))
       const resueltos = { invalid, ...(availableCategories ? { availableCategories } : {}) }
-      // Todo lo de la lista ya existe: lo normal al reenviar una confirmación cuya respuesta se perdió. No es un error.
-      if (ready.length === 0 && invalid.every(i => i.problem === 'SKU_YA_USADO' || i.problem === 'CODIGO_YA_USADO'))
+      // Todo lo de la lista ya existe (cada SKU o código ya usado lo usa un producto con su mismo nombre): lo normal al reenviar una
+      // confirmación cuya respuesta se perdió. No es un error. Si el que lo usa se llama distinto, es la respuesta de siempre.
+      if (ready.length === 0 && todoYaExiste)
         return text({
           ok: true,
           created: 0,
@@ -751,7 +778,7 @@ export function registerCatalogInBulkTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'set_stock_by_code',
-    "Load the stock of MANY products of a venue you can access in one go (1-500 rows of { code, quantity }): quantity is the FINAL amount on hand — an opening balance or a physical count — NOT a change. Each code is found like find_products_by_code; only products whose stock is tracked by quantity (pieces, or kilos with up to 3 decimals). It is saved as a stock count, so it appears in the venue's count history like a count done at the register. Products already in an open stock count are not loaded: finish (or cancel) that count first. Products linked to Shopify: units Shopify has reserved for online orders are subtracted from what you counted, and a product Shopify is still syncing (also while the store connection is being set up) is not applied and is reported with what to do. By DEFAULT it only PREVIEWS current → final per product; call again with confirm:true and the expectedSourceFingerprint. If any of those stocks changed in the meantime (for example a sale), or a code now belongs to another product, it applies NOTHING and asks for a new preview. If the count is left half-applied, finish THAT count at the register; do not cancel it and do not load the whole list again. This WRITES — requires inventory:create, inventory:update and inventory:adjust (and the inventory plan).",
+    "Load the stock of MANY products of a venue you can access in one go (1-500 rows of { code, quantity }): quantity is the FINAL amount on hand — an opening balance or a physical count — NOT a change. Each code is found like find_products_by_code; only products whose stock is tracked by quantity (pieces, or kilos with up to 3 decimals). It is saved as a stock count, so it appears in the venue's count history like a count done at the register. Products already in an open stock count are not loaded: finish that count first (or cancel it if it applied nothing). Products linked to Shopify: units Shopify has reserved for online orders are subtracted from what you counted, and a product Shopify is still syncing (also while the store connection is being set up) is not applied and is reported with what to do. By DEFAULT it only PREVIEWS current → final per product; call again with confirm:true and the expectedSourceFingerprint. If any of those stocks changed in the meantime (for example a sale), or a code now belongs to another product, it applies NOTHING and asks for a new preview. If the count is left half-applied, finish THAT count at the register; do not cancel it and do not load the whole list again. This WRITES — requires inventory:create, inventory:update and inventory:adjust (and the inventory plan).",
     {
       venueId: venueInput(),
       items: z
@@ -823,7 +850,7 @@ export function registerCatalogInBulkTools(server: McpServer, scope: McpScope) {
           ok: false,
           needsInput: true,
           message:
-            'Hay demasiados conteos abiertos en este negocio: termina o cancela los que ya no sirvan en el POS (Inventario › Conteos) antes de cargar existencias.',
+            'Hay demasiados conteos abiertos en este negocio: termina en el POS (Inventario › Conteos) los que sigan, y cancela sólo los que no aplicaron nada, antes de cargar existencias.',
         })
       const conteoAbiertoDe = new Map<string, string>()
       for (const abierto of abiertos)
@@ -893,9 +920,9 @@ export function registerCatalogInBulkTools(server: McpServer, scope: McpScope) {
       if (cambios.length === 0)
         return text({
           ok: true,
+          message: `Los ${contables.length} producto(s) ya tienen esa existencia: no hay nada que cambiar.` + resumen,
           applied: 0,
           ...reporte,
-          message: `Los ${contables.length} producto(s) ya tienen esa existencia: no hay nada que cambiar.` + resumen,
         })
       if (!confirm)
         return text({

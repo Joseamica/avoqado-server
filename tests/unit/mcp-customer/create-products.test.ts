@@ -238,15 +238,16 @@ describe('create_products', () => {
     expect(mockCreateProduct).toHaveBeenCalledTimes(1)
   })
 
-  it('🔍 si TODOS los renglones ya existen (mismo SKU o mismo código de barras): ok, no hay nada que crear', async () => {
+  it('🔍 si TODOS los renglones ya existen (su SKU o su código lo usa un producto con su MISMO nombre): ok, no hay nada que crear', async () => {
     mockProductFindMany.mockResolvedValueOnce([
-      { sku: 'A-M', gtin: null, name: 'Vestido A', deletedAt: null },
+      { sku: 'A-M', gtin: null, name: 'Vestido Mailen MEX - M', deletedAt: null },
       { sku: 'OTRO-1', gtin: '8445000000031', name: 'Vestido B', deletedAt: null },
     ])
     const out = parse(
       await call({
         venueId: 'v1',
-        items: [alta({ sku: 'A-M' }), alta({ name: 'Vestido B', sku: 'B-M', barcode: '8445000000031' })],
+        // El nombre se compara sin espacios a los lados y sin distinguir mayúsculas.
+        items: [alta({ sku: 'A-M' }), alta({ name: ' vestido b ', sku: 'B-M', barcode: '8445000000031' })],
       }),
     )
     expect(out).toEqual({
@@ -257,6 +258,30 @@ describe('create_products', () => {
         expect.objectContaining({ row: 2, problem: 'CODIGO_YA_USADO' }),
       ],
       message: YA_EXISTEN,
+    })
+    expect(mockCreateProduct).not.toHaveBeenCalled()
+  })
+
+  it('🔍 un renglón cuyo código de barras ya lo usa un producto con OTRO nombre no «ya existe»: es la respuesta de siempre, con el detalle', async () => {
+    mockProductFindMany.mockResolvedValueOnce([
+      { sku: 'A-M', gtin: null, name: 'Vestido Mailen MEX - M', deletedAt: null },
+      { sku: 'OTRO-1', gtin: '8445000000031', name: 'Falda Caye', deletedAt: null },
+    ])
+    const out = parse(
+      await call({
+        venueId: 'v1',
+        items: [alta({ sku: 'A-M' }), alta({ name: 'Vestido B', sku: 'B-M', barcode: '8445000000031' })],
+      }),
+    )
+    expect(out).toEqual({
+      ok: false,
+      created: 0,
+      ready: [],
+      invalid: [
+        expect.objectContaining({ row: 1, problem: 'SKU_YA_USADO' }),
+        expect.objectContaining({ row: 2, problem: 'CODIGO_YA_USADO', detail: expect.stringContaining('Falda Caye') }),
+      ],
+      error: 'Ningún renglón está listo para crearse: corrige los problemas de la lista.',
     })
     expect(mockCreateProduct).not.toHaveBeenCalled()
   })
