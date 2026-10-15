@@ -6,6 +6,7 @@ jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.
  * ganó. Con un café son centavos; con siete clientes haciéndolo, es una cartilla
  * completa regalada cada semana.
  */
+import { Prisma } from '@prisma/client'
 import { reverseStampForOrder } from '../../../../src/services/wallet/stampLedger.service'
 import { prismaMock } from '../../../__helpers__/setup'
 import { logAction } from '@/services/dashboard/activity-log.service'
@@ -13,6 +14,9 @@ import { logAction } from '@/services/dashboard/activity-log.service'
 describe('reverseStampForOrder', () => {
   beforeEach(() => {
     jest.clearAllMocks()
+    // Sin colas «Once» sobrantes (un rechazo P2028 de una prueba no puede caer en la siguiente).
+    prismaMock.$transaction.mockReset()
+    prismaMock.$transaction.mockImplementation(((cb: any) => cb(prismaMock)) as never)
     prismaMock.stampEvent.findFirst.mockResolvedValue({ id: 'se1', stampCardId: 'sc1', quantity: 1 } as any)
     prismaMock.stampEvent.count.mockResolvedValue(0)
     prismaMock.stampEvent.create.mockResolvedValue({ id: 'se2' } as any)
@@ -150,6 +154,27 @@ describe('reverseStampForOrder', () => {
     expect(prismaMock.stampEvent.create).not.toHaveBeenCalled()
     expect(prismaMock.stampCard.update).not.toHaveBeenCalled()
     expect(logAction).not.toHaveBeenCalled()
+  })
+
+  // ── Quinta ola (recheck 4 de Codex, 15-oct-2026): el MISMO presupuesto que el otorgamiento ───────────────────────────────
+  it('🔴 la reversión espera el candado del cliente con el MISMO presupuesto que el otorgamiento (maxWait 10 s, timeout 15 s)', async () => {
+    await reverseStampForOrder('v1', 'o1')
+    expect(prismaMock.$transaction).toHaveBeenCalledWith(expect.any(Function), { maxWait: 10_000, timeout: 15_000 })
+  })
+
+  it('🔴 un P2028 (se venció esperando el candado) se reintenta: UNA sola reversa', async () => {
+    const p2028 = new Prisma.PrismaClientKnownRequestError('Transaction already closed', { code: 'P2028', clientVersion: 'test' })
+    prismaMock.$transaction.mockRejectedValueOnce(p2028)
+    const r = await reverseStampForOrder('v1', 'o1')
+    expect(r.reversed).toBe(true)
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(2)
+    expect(prismaMock.stampEvent.create).toHaveBeenCalledTimes(1)
+  })
+
+  it('otro error de la transacción NO se reintenta', async () => {
+    prismaMock.$transaction.mockRejectedValueOnce(new Error('connection reset'))
+    await expect(reverseStampForOrder('v1', 'o1')).rejects.toThrow('connection reset')
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
   })
 
   it('🔴 deja rastro en la bitácora, porque quitar un sello es una ANOMALÍA', async () => {

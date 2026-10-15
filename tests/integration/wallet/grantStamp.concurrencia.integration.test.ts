@@ -275,3 +275,45 @@ describe('H3: la reversión toma el MISMO candado (negocio, cliente) que el otor
     expect(await prisma.stampReward.count({ where: { venueId, customerId: c, status: 'CANCELLED' } })).toBe(1)
   })
 })
+
+/**
+ * 🔴 Quinta ola (recheck 4 de Codex, 15-oct-2026): el otorgamiento puede retener el candado del cliente hasta 15 s (espera el
+ * candado de la venta con su presupuesto); la reversión esperaba ese mismo candado con los 5 s por defecto de Prisma. Un
+ * reembolso cuya reversión se vencía dejaba vivo el sello de una venta devuelta (el reembolso sólo lo registra).
+ */
+describe('🔴 quinta ola: la reversión espera más de 5 s detrás de un otorgamiento del mismo cliente (Postgres real)', () => {
+  it('el otorgamiento de otra venta retiene el candado del cliente 6 s ⇒ la reversión espera y queda UNA, con la cartilla correcta', async () => {
+    await programa(0, 7) // sin tope; cartillas de 7
+    const c = await cliente()
+    await prisma.stampCard.create({ data: { venueId: venueId!, customerId: c, cycle: 1, stampsRequired: 7, stampsEarned: 0 } })
+    const [devuelta, otra] = [await venta(), await venta()]
+    expect((await grantStamp(venueId!, c, devuelta)).granted).toBe(true) // 1 de 7
+
+    const aparcada = aparcarLaSiguienteTransaccion(prisma)
+    let otorgar: Promise<Awaited<ReturnType<typeof grantStamp>>> | undefined
+    let revertir: Promise<Awaited<ReturnType<typeof reverseStampForOrder>>> | undefined
+    let espera: Awaited<ReturnType<typeof esperarBloqueado>> = null
+    try {
+      otorgar = grantStamp(venueId!, c, otra) // 2 de 7, sin commit, con el candado del cliente
+      const pidOtorgar = await aTiempo(aparcada.pid, 8_000, 'el otorgamiento no llegó al commit')
+      revertir = reverseStampForOrder(venueId!, devuelta) // el reembolso de la primera venta
+      espera = await esperarBloqueado(prisma, { bloqueadoPor: [pidOtorgar], consulta: /pg_advisory_xact_lock/ })
+      await new Promise(r => setTimeout(r, 6_000)) // más que los 5 s por defecto de Prisma
+    } finally {
+      aparcada.soltar()
+      aparcada.restaurar()
+    }
+    const [otorgado, revertido] = await Promise.all([otorgar!, revertir!])
+    expect(espera).toMatchObject({ waitEvent: 'advisory' })
+    expect(otorgado.granted).toBe(true)
+    expect(revertido.reversed).toBe(true)
+    expect(await prisma.stampEvent.count({ where: { venueId, orderId: devuelta, type: 'REVERSAL' } })).toBe(1)
+    const cartillas = await prisma.stampCard.findMany({
+      where: { venueId, customerId: c },
+      select: { cycle: true, stampsEarned: true, completedAt: true },
+      orderBy: { cycle: 'asc' },
+      take: 3,
+    })
+    expect(cartillas).toEqual([{ cycle: 1, stampsEarned: 1, completedAt: null }]) // 2 sellos − 1 reversa
+  })
+})

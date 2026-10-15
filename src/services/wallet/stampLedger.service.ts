@@ -444,72 +444,91 @@ export async function reverseStampForOrder(
   const customerId = original.customerId
 
   let revertida = false
-  try {
-    await prisma.$transaction(async tx => {
-      // 🔴 PRIMERA sentencia: el candado (negocio, cliente). Un otorgamiento del mismo cliente que esté completando la cartilla
-      // termina antes de que aquí se lea nada.
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${venueId}), hashtext(${customerId}))`
+  // 🔴 Quinta ola (recheck 4 de Codex, 15-oct-2026): el MISMO presupuesto que `grantStamp` (`PRESUPUESTO_DEL_SELLO`), porque
+  // espera el mismo candado del cliente y un otorgamiento puede retenerlo hasta 15 s mientras espera el de su venta. Con los
+  // 5 s por defecto, la reversión de un reembolso se vencía y el sello de la venta devuelta quedaba vivo (el reembolso sólo lo
+  // registra). Y si aun así se vence (P2028), hasta 2 reintentos (100 ms, 300 ms): es idempotente porque cada intento vuelve a
+  // tomar el candado y relee las reversas de la venta antes de escribir, con el índice único de la reversa detrás.
+  const revertirConReintento = async () => {
+    for (let intento = 0; ; intento++) {
+      try {
+        revertida = false
+        return await prisma.$transaction(revertirDentroDelCandado, PRESUPUESTO_DEL_SELLO)
+      } catch (error) {
+        const vencida = error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2028'
+        if (!vencida || intento >= 2) throw error
+        logger.warn('Reversa de sello vencida esperando el candado (P2028): se reintenta', { venueId, orderId, intento: intento + 1 })
+        await new Promise(resolve => setTimeout(resolve, 100 * 3 ** intento))
+      }
+    }
+  }
+  const revertirDentroDelCandado = async (tx: Prisma.TransactionClient) => {
+    // 🔴 PRIMERA sentencia: el candado (negocio, cliente). Un otorgamiento del mismo cliente que esté completando la cartilla
+    // termina antes de que aquí se lea nada.
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${venueId}), hashtext(${customerId}))`
 
-      // Otra reversión de esta venta pudo hacer commit mientras ésta esperaba el candado.
-      const reversasDentro = await tx.stampEvent.count({ where: { venueId, orderId, type: StampEventType.REVERSAL } })
-      if (reversasDentro > 0) return
+    // Otra reversión de esta venta pudo hacer commit mientras ésta esperaba el candado.
+    const reversasDentro = await tx.stampEvent.count({ where: { venueId, orderId, type: StampEventType.REVERSAL } })
+    if (reversasDentro > 0) return
 
-      const card = await tx.stampCard.findUnique({
-        where: { id: otorgado.stampCardId },
-        select: { id: true, venueId: true, customerId: true, cycle: true, stampsEarned: true, completedAt: true },
+    const card = await tx.stampCard.findUnique({
+      where: { id: otorgado.stampCardId },
+      select: { id: true, venueId: true, customerId: true, cycle: true, stampsEarned: true, completedAt: true },
+    })
+    if (!card) return
+
+    let targetCardId = card.id
+    let reopenCompletedCard = false
+
+    if (card.completedAt) {
+      const current = await tx.stampCard.findFirst({
+        where: { venueId, customerId: card.customerId, completedAt: null, id: { not: card.id } },
+        orderBy: { cycle: 'desc' },
+        select: { id: true, stampsEarned: true, completedAt: true },
       })
-      if (!card) return
 
-      let targetCardId = card.id
-      let reopenCompletedCard = false
-
-      if (card.completedAt) {
-        const current = await tx.stampCard.findFirst({
-          where: { venueId, customerId: card.customerId, completedAt: null, id: { not: card.id } },
-          orderBy: { cycle: 'desc' },
-          select: { id: true, stampsEarned: true, completedAt: true },
+      // Purchases made after completing the old card already replace the refunded
+      // stamp. Consume that newer progress first, preserving the legitimately earned
+      // reward and avoiding two simultaneously-open cards.
+      if (current && current.stampsEarned >= cantidad) {
+        targetCardId = current.id
+      } else {
+        const cancelled = await tx.stampReward.updateMany({
+          where: { stampCardId: card.id, status: StampRewardStatus.PENDING },
+          data: { status: StampRewardStatus.CANCELLED },
         })
-
-        // Purchases made after completing the old card already replace the refunded
-        // stamp. Consume that newer progress first, preserving the legitimately earned
-        // reward and avoiding two simultaneously-open cards.
-        if (current && current.stampsEarned >= cantidad) {
-          targetCardId = current.id
-        } else {
-          const cancelled = await tx.stampReward.updateMany({
-            where: { stampCardId: card.id, status: StampRewardStatus.PENDING },
-            data: { status: StampRewardStatus.CANCELLED },
-          })
-          reopenCompletedCard = cancelled.count > 0
-          if (reopenCompletedCard && current?.stampsEarned === 0) {
-            await tx.stampCard.delete({ where: { id: current.id } })
-          }
+        reopenCompletedCard = cancelled.count > 0
+        if (reopenCompletedCard && current?.stampsEarned === 0) {
+          await tx.stampCard.delete({ where: { id: current.id } })
         }
       }
+    }
 
-      await tx.stampEvent.create({
-        data: {
-          stampCardId: targetCardId,
-          venueId,
-          orderId,
-          type: StampEventType.REVERSAL,
-          // Negativo: el libro se lee sumando, así que el asiento contrario resta.
-          quantity: -cantidad,
-          createdById: options.staffVenueId,
-        },
-      })
-
-      // El contador vive en la MISMA transacción que su asiento. Si se separan, un
-      // fallo a medias deja al cliente viendo un avance que el libro no respalda.
-      await tx.stampCard.update({
-        where: { id: targetCardId },
-        data: {
-          stampsEarned: { decrement: cantidad },
-          ...(reopenCompletedCard ? { completedAt: null } : {}),
-        },
-      })
-      revertida = true
+    await tx.stampEvent.create({
+      data: {
+        stampCardId: targetCardId,
+        venueId,
+        orderId,
+        type: StampEventType.REVERSAL,
+        // Negativo: el libro se lee sumando, así que el asiento contrario resta.
+        quantity: -cantidad,
+        createdById: options.staffVenueId,
+      },
     })
+
+    // El contador vive en la MISMA transacción que su asiento. Si se separan, un
+    // fallo a medias deja al cliente viendo un avance que el libro no respalda.
+    await tx.stampCard.update({
+      where: { id: targetCardId },
+      data: {
+        stampsEarned: { decrement: cantidad },
+        ...(reopenCompletedCard ? { completedAt: null } : {}),
+      },
+    })
+    revertida = true
+  }
+  try {
+    await revertirConReintento()
   } catch (error: any) {
     if (error?.code === 'P2002') {
       logger.info('Reversa de sello duplicada evitada por el índice único', { venueId, orderId })
