@@ -375,7 +375,7 @@ describe('getVenueTpvSettings (mobile) — receiptInfo (encabezado del ticket im
     expect(Array.isArray(res.__json.data.receiptLayout.blocks)).toBe(true)
   })
 
-  it('queries the FIRST emisor by createdAt (the same rule nomina/accounting use) — shape of the query', async () => {
+  it('queries the emisores por (createdAt, id) — orden TOTAL: el primero es el principal — shape of the query', async () => {
     // El mock contesta lo que sea; esta prueba fija la FORMA de la consulta,
     // que es lo que un mock deja pasar gratis.
     mockVenueLookups({ name: 'X', fiscalEmisors: [] })

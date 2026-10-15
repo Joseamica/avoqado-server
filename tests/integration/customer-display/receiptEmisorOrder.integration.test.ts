@@ -1,7 +1,9 @@
 // tests/integration/customer-display/receiptEmisorOrder.integration.test.ts
 import cuid from 'cuid'
+import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { getDeviceReceiptPayload } from '@/services/dashboard/receiptLayout/devicePayload.service'
+import { cargarVenueInfo } from '@/services/dashboard/receiptLayout/readiness.service'
 
 /**
  * El emisor PRINCIPAL del ticket con dos emisores de la MISMA fecha, contra Postgres de verdad: sólo la base decide el
@@ -41,8 +43,8 @@ afterAll(async () => {
   await prisma.organization.deleteMany({ where: { id: orgId } })
 })
 
-const crearEmisor = (id: string, rfc: string) =>
-  prisma.fiscalEmisor.create({
+const crearEmisor = (id: string, rfc: string, db: Prisma.TransactionClient | typeof prisma = prisma) =>
+  db.fiscalEmisor.create({
     data: { id, venueId, rfc, legalName: `Emisor ${rfc}`, regimenFiscal: '601', lugarExpedicion: '06600', createdAt: MISMA_FECHA },
   })
 
@@ -76,4 +78,23 @@ it('🔴 aunque la base los entregue en orden de RFC (el de id MAYOR primero), e
   expect(receiptInfo?.principalEmisorId).toBe(idMenor)
   expect(receiptInfo?.rfc).toBe('ZZZ010101ZZZ')
   expect(receiptInfo?.fiscalEmisors.map(e => e.id)).toEqual([idMenor, idMayor])
+})
+
+/**
+ * 🔴 La vista previa del ticket en el dashboard (`cargarVenueInfo`) tiene que elegir el MISMO principal que imprime el
+ * aparato. Sin el desempate por id, los dos planes ponen primero al de id MAYOR: el índice `(venueId, rfc)` porque su RFC
+ * es «AAA», y el recorrido de la tabla porque se guardó primero, por UNA sola conexión (dos `create` sueltos pueden ir por
+ * conexiones distintas del pool, cada una con su propia página).
+ */
+it('🔴 la vista previa del dashboard elige el MISMO emisor principal que imprime el aparato', async () => {
+  await prisma.$transaction(async tx => {
+    await crearEmisor(idMayor, 'AAA010101AAA', tx)
+    await crearEmisor(idMenor, 'ZZZ010101ZZZ', tx)
+  })
+
+  const [vistaPrevia, { receiptInfo }] = await Promise.all([cargarVenueInfo(venueId), getDeviceReceiptPayload(venueId)])
+
+  expect(receiptInfo?.principalEmisorId).toBe(idMenor)
+  expect(vistaPrevia.principalEmisorId).toBe(receiptInfo?.principalEmisorId)
+  expect(vistaPrevia.fiscalEmisors.map(e => e.id)).toEqual(receiptInfo?.fiscalEmisors.map(e => e.id))
 })

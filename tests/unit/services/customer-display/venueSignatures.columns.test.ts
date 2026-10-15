@@ -10,14 +10,28 @@ import { venueSignaturesSql } from '@/services/customer-display/venueSignatures'
 describe('la firma del venue cubre TODO lo que consume el recibo', () => {
   const sql = venueSignaturesSql('venue-1').sql
 
+  /**
+   * Las columnas que de verdad entran a cada hash: lo que va dentro de su `json_build_array(...)`. Buscarlas en TODO el
+   * texto no basta: `e."createdAt"` también está en el ORDER BY, y `m."merchantAccountId"` y `m."fiscalEmisorId"` en el
+   * ORDER BY o el JOIN. Medido: quitar cualquiera de las tres del hash dejaba la versión anterior de estas pruebas en verde.
+   */
+  const listaHasheada = (alias: 'e' | 'm'): string[] => {
+    const listas = [...sql.matchAll(/json_build_array\(([^)]*)\)/g)].map(([, dentro]) => dentro.split(',').map(c => c.trim()))
+    const delAlias = listas.filter(lista => lista.every(c => c.startsWith(`${alias}."`)))
+    expect(delAlias).toHaveLength(1) // UN hash por tabla
+    return delAlias[0]
+  }
+
   it('cada columna del emisor que lee el recibo entra al hash de emisores', () => {
-    for (const c of RECEIPT_EMISOR_COLUMNS) expect(sql).toContain(`e."${c}"`)
-    expect(sql).toContain('e."createdAt"') // el orden decide el principal: también entra
+    const hasheadas = listaHasheada('e')
+    for (const c of RECEIPT_EMISOR_COLUMNS) expect(hasheadas).toContain(`e."${c}"`)
+    expect(hasheadas).toContain('e."createdAt"') // el orden decide el principal: también entra
   })
 
   it('cada columna de la asociación que lee el recibo entra al hash de asociaciones', () => {
-    for (const c of RECEIPT_ASSOCIATION_COLUMNS) expect(sql).toContain(`m."${c}"`)
-    expect(sql).toContain('m."fiscalEmisorId"') // una reasignación cambia la firma
+    const hasheadas = listaHasheada('m')
+    for (const c of RECEIPT_ASSOCIATION_COLUMNS) expect(hasheadas).toContain(`m."${c}"`)
+    expect(hasheadas).toContain('m."fiscalEmisorId"') // una reasignación cambia la firma
   })
 
   it('lo demás del recibo son columnas del Venue: las cubre Venue.updatedAt', () => {

@@ -19,10 +19,19 @@ let m1: string
 let m2: string
 
 const firma = async () => (await readVenueSignatures(venueId))!
-const emisor = (rfc: string, opciones: { id?: string; createdAt?: Date } = {}) =>
-  prisma.fiscalEmisor.create({
+const emisor = (rfc: string, opciones: { id?: string; createdAt?: Date } = {}, db: Prisma.TransactionClient | typeof prisma = prisma) =>
+  db.fiscalEmisor.create({
     data: { venueId, rfc, legalName: `Emisor ${rfc}`, regimenFiscal: '601', lugarExpedicion: '06600', ...opciones },
     select: { id: true },
+  })
+/**
+ * Guarda los emisores EN ESTE ORDEN y por UNA sola conexión. Dos `create` sueltos pueden ir por conexiones distintas del
+ * pool, y cada conexión de Postgres elige por su cuenta la página donde inserta: el orden de guardado podría no ser el de
+ * inserción y la comprobación por `ctid` fallaría sin que haya defecto.
+ */
+const guardarEnUnaConexion = (emisores: Array<[rfc: string, opciones: { id: string; createdAt: Date }]>) =>
+  prisma.$transaction(async tx => {
+    for (const [rfc, opciones] of emisores) await emisor(rfc, opciones, tx)
   })
 
 /**
@@ -146,14 +155,18 @@ describe('readVenueSignatures', () => {
   it('dos emisores de la MISMA fecha: la firma no depende del orden en que se guardaron', async () => {
     const fecha = new Date('2026-01-01T00:00:00.000Z')
     const [idMenor, idMayor] = [cuid(), cuid()].sort()
-    await emisor('ZZZ010101ZZZ', { id: idMayor, createdAt: fecha })
-    await emisor('AAA010101AAA', { id: idMenor, createdAt: fecha })
+    await guardarEnUnaConexion([
+      ['ZZZ010101ZZZ', { id: idMayor, createdAt: fecha }],
+      ['AAA010101AAA', { id: idMenor, createdAt: fecha }],
+    ])
     const guardadoUno = await ordenDeGuardado()
     const unOrden = await firma()
     const unOrdenRecorrido = await firmaEnOrdenDeGuardado()
     await prisma.fiscalEmisor.deleteMany({ where: { venueId } })
-    await emisor('AAA010101AAA', { id: idMenor, createdAt: fecha })
-    await emisor('ZZZ010101ZZZ', { id: idMayor, createdAt: fecha })
+    await guardarEnUnaConexion([
+      ['AAA010101AAA', { id: idMenor, createdAt: fecha }],
+      ['ZZZ010101ZZZ', { id: idMayor, createdAt: fecha }],
+    ])
     // La prueba sólo vale si de verdad quedaron guardados al revés; si no, que lo diga en vez de pasar sin probar nada.
     expect(await ordenDeGuardado()).toEqual([...guardadoUno].reverse())
     expect((await firma()).emisores).toBe(unOrden.emisores)
