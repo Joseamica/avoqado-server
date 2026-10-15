@@ -23,7 +23,7 @@
  * suman FUERA, porque no son mercancía y un descuento no debe comérselos.
  *
  * Estas pruebas ejercitan las FUNCIONES REALES, no un espejo de su fórmula: un espejo sigue en
- * verde mientras el servicio se rompe debajo (`orderTotal.negative.test.ts` es justamente eso).
+ * verde mientras el servicio se rompe debajo; por eso se retiró la réplica `orderTotal.negative.test.ts`.
  */
 
 import { applyCouponCode } from '../../../../src/services/tpv/discount.tpv.service'
