@@ -1045,6 +1045,13 @@ jest.mock('@/services/dashboard/activity-log.service', () => ({
   logAction: (...a: unknown[]) => logActionMock(...a),
 }))
 
+// R8 (tarjetas de regalo): observar que liquidar el saldo de un cliente activa los sobres de una cuenta de tarjetas.
+const activarSobresMock = jest.fn().mockResolvedValue({ activated: [] })
+jest.mock('@/services/giftCards/giftCardLedger', () => ({
+  __esModule: true,
+  activarSobresDeCuentaPagadaEnTx: (...a: unknown[]) => activarSobresMock(...a),
+}))
+
 describe('settleCustomerBalance — CAS por orden + vale de deducción', () => {
   const CLIENTE = 'cust-1'
   const ORDEN = { id: 'order-1', orderNumber: 'ORD-1', remainingBalance: new Decimal(100), total: new Decimal(100) }
@@ -1125,6 +1132,23 @@ describe('settleCustomerBalance — CAS por orden + vale de deducción', () => {
       expect.anything(),
       expect.objectContaining({ venueId: 'venue-1', orderId: 'order-1' }),
     )
+  })
+
+  it('R8: la orden que gana el CAS activa los sobres de una cuenta de tarjetas en la MISMA transacción', async () => {
+    prismaMock.order.updateMany.mockResolvedValue({ count: 1 } as any)
+    await settleCustomerBalance('venue-1', CLIENTE)
+    expect(activarSobresMock).toHaveBeenCalledWith(prismaMock, {
+      venueId: 'venue-1',
+      orderId: 'order-1',
+      staffId: null,
+      items: [{ id: 'oi-1', productId: 'p1', quantity: 1, weightQuantity: null, modifiers: [] }],
+    })
+  })
+
+  it('R8: la orden que pierde el CAS no activa nada', async () => {
+    prismaMock.order.updateMany.mockResolvedValue({ count: 0 } as any)
+    await settleCustomerBalance('venue-1', CLIENTE)
+    expect(activarSobresMock).not.toHaveBeenCalled()
   })
 
   // ── El hook de referidos sigue al CAS, no a la lista de candidatas ──────────

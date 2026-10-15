@@ -92,6 +92,12 @@ jest.mock('@/services/inventory/inventoryPosting.service', () => ({
   applySalePosting: (...a: any[]) => applySalePosting(...a),
 }))
 
+// R8 (tarjetas de regalo): la transición real a pagado por cripto activa los sobres de una cuenta de tarjetas.
+const activarSobres = jest.fn()
+jest.mock('@/services/giftCards/giftCardLedger', () => ({
+  activarSobresDeCuentaPagadaEnTx: (...a: any[]) => activarSobres(...a),
+}))
+
 import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { processWebhook } from '@/services/b4bit/b4bit.service'
@@ -186,6 +192,7 @@ beforeEach(() => {
   mockPrisma.orderItem.findMany.mockResolvedValue(ITEMS)
   createSalePostingInTx.mockResolvedValue({ id: POSTING_ID })
   applySalePosting.mockResolvedValue({ postingId: POSTING_ID, applied: true, issues: [] })
+  activarSobres.mockResolvedValue({ activated: [] })
 })
 
 describe('b4bit — el vale de inventario de la venta saldada', () => {
@@ -201,6 +208,27 @@ describe('b4bit — el vale de inventario de la venta saldada', () => {
       expect.anything(),
       expect.objectContaining({ venueId: VENUE_ID, orderId: ORDER_ID, items: ITEMS, staffId: STAFF_ID }),
     )
+  })
+
+  it('R8: la transición real a pagado activa los sobres en la MISMA transacción, con los renglones leídos', async () => {
+    mockPrisma.payment.findUnique.mockResolvedValue(cryptoPayment())
+    mockPrisma.order.findUnique.mockResolvedValue(freshOrder({ paymentStatus: 'PARTIAL' }))
+    mockPrisma.payment.findMany.mockResolvedValue(pagosQueSaldan())
+
+    await processWebhook(webhookCO())
+
+    expect(activarSobres).toHaveBeenCalledTimes(1)
+    expect(activarSobres).toHaveBeenCalledWith(prisma, { venueId: VENUE_ID, orderId: ORDER_ID, staffId: STAFF_ID, items: ITEMS })
+  })
+
+  it('R8: un abono cripto que no salda la cuenta no activa nada', async () => {
+    mockPrisma.payment.findUnique.mockResolvedValue(cryptoPayment())
+    mockPrisma.order.findUnique.mockResolvedValue(freshOrder())
+    mockPrisma.payment.findMany.mockResolvedValue([{ amount: d('50.00'), tipAmount: d('0.00') }])
+
+    await processWebhook(webhookCO())
+
+    expect(activarSobres).not.toHaveBeenCalled()
   })
 
   it('el vale nace DENTRO de la transacción que cierra la orden (mismo commit)', async () => {

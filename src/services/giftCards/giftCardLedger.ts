@@ -116,11 +116,66 @@ export async function sobresDelCanje(tx: Tx, p: { venueId: string; paymentId: st
 }
 
 /**
+ * El dinero de la cuenta, sólo el importe de venta (la propina nunca entra a los sobres): lo cobrado sin REFUND, lo
+ * devuelto y lo que el negocio conservó. r1 (F8): los REFUND se guardan NEGATIVOS (`summarizeRefunds`,
+ * src/services/shared/orderBalance.ts); se toma su valor absoluto.
+ */
+async function dineroDeLaCuenta(
+  tx: Tx,
+  p: { venueId: string; orderId: string },
+): Promise<{ cobrado: Prisma.Decimal; reembolsado: Prisma.Decimal; conservado: Prisma.Decimal }> {
+  const cobros = await tx.payment.aggregate({
+    where: { venueId: p.venueId, orderId: p.orderId, status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] },
+    _sum: { amount: true },
+  })
+  const cobrado = cobros._sum.amount ?? CERO()
+  const devoluciones = await tx.payment.aggregate({
+    where: { venueId: p.venueId, orderId: p.orderId, status: 'COMPLETED', type: 'REFUND' },
+    _sum: { amount: true },
+  })
+  const reembolsado = (devoluciones._sum.amount ?? CERO()).abs()
+  return { cobrado, reembolsado, conservado: cobrado.minus(reembolsado) }
+}
+
+/**
+ * Ruling del coordinador (A6): llega dinero a una cuenta de tarjetas que se CANCELÓ y cuyos sobres ya están DEACTIVATED
+ * —la reabre `reabrirSiRecibeDinero`, un `PAY_CASH` reproducido de la cola o un cobro tardío de la terminal— y la cuenta
+ * queda PAGADA sin ningún sobre PENDING. Los sobres NUNCA se reactivan: uno desactivado pudo cancelarse por fraude o por
+ * un reembolso, y revivirlo en silencio regalaría saldo. Tampoco se deja pasar callado: el negocio se quedó con ese
+ * dinero sin tarjetas vivas que lo respalden, así que queda un MoneyAnomaly para que el gerente devuelva o vuelva a vender.
+ * Si el dinero ya se devolvió completo (la cancelación con reembolso de R2), no hay nada que avisar.
+ */
+async function avisarSiCobraSobresDesactivados(tx: Tx, p: { venueId: string; orderId: string }): Promise<void> {
+  const sobres = await tx.giftCard.findMany({
+    where: { venueId: p.venueId, orderItem: { is: { orderId: p.orderId } } },
+    select: { id: true, status: true },
+    orderBy: { id: 'asc' },
+    take: MAX_SOBRES_POR_CUENTA + 1,
+  })
+  if (!sobres.some(s => s.status === 'DEACTIVATED')) return
+  const { cobrado, reembolsado, conservado } = await dineroDeLaCuenta(tx, p)
+  if (!conservado.greaterThan(0)) return
+  await recordGiftCardAnomaly(tx, {
+    check: 'PAID_WITH_DEACTIVATED',
+    id: p.orderId,
+    venueId: p.venueId,
+    detail: {
+      motivo: 'COBRO_CON_SOBRES_DESACTIVADOS',
+      orderId: p.orderId,
+      cobrado: cobrado.toFixed(2),
+      reembolsado: reembolsado.toFixed(2),
+      sobres: sobres.map(s => ({ id: s.id, status: s.status })),
+    },
+  })
+}
+
+/**
  * Una sola función activa los sobres (R8), llamada junto a CADA `createSalePostingInTx` que salda por primera vez y por
  * la revisión nocturna. Comprueba que lo cobrado (sin propina) sea EXACTAMENTE la suma de los sobres y (r1, F8) que el
  * dinero CONSERVADO —cobros menos reembolsos de la cuenta— la cubra: `computeOrderBalance` no resta los reembolsos, así
  * que una venta con un abono devuelto por la terminal puede quedar «pagada» con menos dinero del que vale. Si algo no
  * cuadra, no activa y deja un MoneyAnomaly (spec § 5.1.6). Idempotente: sólo pasa a ACTIVE lo que bajo candado sigue PENDING.
+ * Sin sobres PENDING y con alguno DEACTIVATED (cuenta cancelada que recibió dinero), no reactiva y avisa (ruling A6).
  */
 export async function activarSobresDeCuentaPagadaEnTx(
   tx: Tx,
@@ -134,7 +189,10 @@ export async function activarSobresDeCuentaPagadaEnTx(
     orderBy: { id: 'asc' },
     take: MAX_SOBRES_POR_CUENTA + 1,
   })
-  if (pendientes.length === 0) return { activated: [] }
+  if (pendientes.length === 0) {
+    await avisarSiCobraSobresDesactivados(tx, p)
+    return { activated: [] }
+  }
 
   const renglones = await tx.orderItem.findMany({
     where: { orderId: p.orderId },
@@ -143,19 +201,7 @@ export async function activarSobresDeCuentaPagadaEnTx(
     take: MAX_SOBRES_POR_CUENTA + 1,
   })
   const esperado = renglones.reduce((suma, r) => suma.plus(r.total), CERO())
-  const cobros = await tx.payment.aggregate({
-    where: { venueId: p.venueId, orderId: p.orderId, status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] },
-    _sum: { amount: true },
-  })
-  const cobrado = cobros._sum.amount ?? CERO()
-  // r1 (F8): los REFUND se guardan NEGATIVOS (`summarizeRefunds`, src/services/shared/orderBalance.ts); se toma su valor
-  // absoluto. Sólo el importe de venta: la propina nunca entra a los sobres.
-  const devoluciones = await tx.payment.aggregate({
-    where: { venueId: p.venueId, orderId: p.orderId, status: 'COMPLETED', type: 'REFUND' },
-    _sum: { amount: true },
-  })
-  const reembolsado = (devoluciones._sum.amount ?? CERO()).abs()
-  const conservado = cobrado.minus(reembolsado)
+  const { cobrado, reembolsado, conservado } = await dineroDeLaCuenta(tx, p)
   const mixta = renglones.length === 0 || renglones.length > MAX_SOBRES_POR_CUENTA || renglones.some(r => r.giftCardId == null)
   const dineroDevuelto = conservado.lessThan(esperado)
   if (mixta || dineroDevuelto || !cobrado.equals(esperado)) {

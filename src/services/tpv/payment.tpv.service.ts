@@ -424,6 +424,7 @@ import {
 import { getAreaTicketLineIdsCoveredByInventoryReservations } from './order.tpv.service'
 import { resolveFastPaymentTarget } from './fastPaymentTarget'
 import { linkCustomerToExistingOrder, normalizeRequestedCustomerId, resolveFastOrderCustomer } from './fastPaymentCustomer'
+import { activarSobresDeCuentaPagadaEnTx } from '../giftCards/giftCardLedger'
 import { debeMarcarCocina } from '../kds/kitchenDisplayStations'
 import { armarComandasTrasCommit } from '../kds/kitchenTicketAuthoring.service'
 
@@ -1427,6 +1428,8 @@ export async function settleStandalonePaymentInTx(
   })
   const { createSalePostingInTx } = await import('@/services/inventory/inventoryPosting.service')
   const posting = firstSettlement ? await createSalePostingInTx(tx, { venueId, orderId, items: order.items, staffId }) : null
+  // R8: la cuenta de tarjetas pagada por terminal activa sus sobres en la MISMA transacción que la salda.
+  if (firstSettlement) await activarSobresDeCuentaPagadaEnTx(tx, { venueId, orderId, staffId: staffId ?? null, items: order.items })
   return { firstSettlement, postingId: posting?.id ?? null, ventaCerrada: cobro.cerrada }
 }
 
@@ -1993,6 +1996,11 @@ async function updateOrderTotalsForStandalonePayment(
               staffId,
             })
             tpvPostingId = posting?.id ?? null
+          }
+          // R8: también cuando los cobros YA cubrían la cuenta (reconciliador de pagadas): ahí no nace vale, pero los
+          // sobres de una cuenta de tarjetas sí se activan. La activación es idempotente.
+          if (isFullyPaid) {
+            await activarSobresDeCuentaPagadaEnTx(tx, { venueId: updated.venueId, orderId, staffId: staffId ?? null, items: updated.items })
           }
 
           return updated

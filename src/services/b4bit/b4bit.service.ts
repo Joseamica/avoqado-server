@@ -21,6 +21,7 @@ import logger from '../../config/logger'
 import { BadRequestError, InternalServerError } from '../../errors/AppError'
 import { logAction } from '../dashboard/activity-log.service'
 import prisma from '../../utils/prismaClient'
+import { activarSobresDeCuentaPagadaEnTx } from '../giftCards/giftCardLedger'
 import { applySalePosting, createSalePostingInTx } from '../inventory/inventoryPosting.service'
 import { computeOrderBalance, estadoDeCobroAlRecibirDinero } from '../shared/orderBalance'
 import {
@@ -1391,6 +1392,13 @@ async function settleOrderForConfirmedCryptoPayment(
               orderId: payment.orderId,
             })
           }
+          // R8: una cuenta de tarjetas pagada con cripto activa sus sobres en la MISMA transacción.
+          await activarSobresDeCuentaPagadaEnTx(tx, {
+            venueId: payment.venueId,
+            orderId: payment.orderId,
+            staffId: payment.processedById ?? null,
+            items: txItems,
+          })
         }
 
         // R9-2: lo que se ESCRIBIÓ (el estado y el saldo conservados de una venta cerrada), no la aritmética, para el log de abajo.

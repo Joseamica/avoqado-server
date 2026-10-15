@@ -10,6 +10,7 @@ import { updateCustomerMetrics } from '@/services/dashboard/customer.dashboard.s
 import type { CreateManualPaymentInput } from '@/schemas/dashboard/manualPayment.schema'
 import { assertVenueSalesEnabled } from '@/services/venueSalesGuard'
 import { applySalePosting, createSalePostingInTx } from '@/services/inventory/inventoryPosting.service'
+import { activarSobresDeCuentaPagadaEnTx } from '../giftCards/giftCardLedger'
 import { postCashSaleToDrawer } from '@/services/shared/cashDrawerPosting'
 import {
   claimShiftForCapturedPayment,
@@ -555,6 +556,13 @@ export async function createManualPayment(
             // 🔴 R11-8: este vale ya tomó todos los renglones (también los del vale v7): la sesión deja de presentarse cobrable.
             if (vales)
               sesionState.cerrada = await cerrarSesionDeValesAlCerrarLaVenta(tx, vales.session, { venueId, orderId: anchorOrderId })
+            // R8: el pago manual que salda una cuenta de tarjetas activa sus sobres en la MISMA transacción.
+            await activarSobresDeCuentaPagadaEnTx(tx, {
+              venueId,
+              orderId: anchorOrderId,
+              staffId,
+              items: orderItems as Array<{ giftCardId?: string | null }>,
+            })
           }
         }
         // Reference unused vars so TS doesn't complain — they're captured for

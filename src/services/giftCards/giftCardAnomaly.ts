@@ -17,6 +17,8 @@ export type GiftCardAnomalyCheck =
   | 'REFUND_WITHOUT_CANCEL'
   | 'REFUND_WITHOUT_REVERSAL'
   | 'CANCEL_STUCK'
+  // Ruling A6: una cuenta de tarjetas cancelada (sobres DEACTIVATED) recibió dinero y quedó PAGADA; los sobres no se reviven.
+  | 'PAID_WITH_DEACTIVATED'
 
 export async function recordGiftCardAnomaly(
   db: Prisma.TransactionClient | PrismaClient,

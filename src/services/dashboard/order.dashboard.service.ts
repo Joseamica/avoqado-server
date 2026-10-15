@@ -11,6 +11,7 @@ import logger from '../../config/logger'
 import { Order, OrderStatus, PaymentType, Prisma } from '@prisma/client'
 import { logAction } from './activity-log.service'
 import { applySalePosting, createSalePostingInTx } from '../inventory/inventoryPosting.service'
+import { activarSobresDeCuentaPagadaEnTx } from '../giftCards/giftCardLedger'
 import { postCashSaleToDrawer } from '../shared/cashDrawerPosting'
 import {
   ORDER_LOCK_WAIT_BUDGET,
@@ -919,6 +920,8 @@ export async function settleOrder(
       staffId: null,
     })
     postingId = posting?.id ?? null
+    // R8 / Review Focus 3: liquidar desde el dashboard activa los sobres de una cuenta de tarjetas en esta transacción.
+    await activarSobresDeCuentaPagadaEnTx(tx, { venueId, orderId, staffId: actorStaffId, items: itemsParaPosting })
     settlementPaymentId = settlementPayment.id
     // 🔴 R11-8: este vale ya tomó todos los renglones (también los del vale v7): la sesión deja de presentarse cobrable.
     if (vales) sesionDeValesCerrada = await cerrarSesionDeValesAlCerrarLaVenta(tx, vales.session, { venueId, orderId })

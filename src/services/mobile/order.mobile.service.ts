@@ -63,6 +63,7 @@ import { claseDeEstado, computeOrderBalance, impuestoQueSeCobraAparte, summarize
 import { rechazarSiEsImportada } from '../shared/ordenImportada'
 import { rechazarSiLaCuentaTieneVales } from '../shared/cuentaConVales'
 import { desactivarSobresPendientesDeCuentaEnTx, rechazarSiEsCuentaDeTarjetas } from '../giftCards/cuentaDeTarjetas'
+import { activarSobresDeCuentaPagadaEnTx } from '../giftCards/giftCardLedger'
 import { RECIBO_CANONICO } from '../shared/reciboCanonico'
 import { MAX_TERMINAL_PAYMENT_CENTS } from '../shared/inputCaps'
 import type { SaleStampOutcome } from '../shared/loyaltyOnLateCustomer'
@@ -3111,6 +3112,8 @@ export async function registrarAbonoEnTx(
       staffId: effectiveStaffId,
     })
     postingId = posting?.id ?? null
+    // R8 (tarjetas de regalo): la cuenta de tarjetas que queda pagada activa sus sobres en ESTA transacción.
+    await activarSobresDeCuentaPagadaEnTx(tx, { venueId, orderId, staffId: effectiveStaffId ?? null, items: txItems })
   }
 
   // FT-GRAVES S-EF (medido el 8-oct): el MISMO gancho de comisión que la terminal, con el dinero, en esta transacción. Sin

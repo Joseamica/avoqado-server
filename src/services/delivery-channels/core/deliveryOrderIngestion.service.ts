@@ -19,6 +19,7 @@ import { socketManager } from '../../../communication/sockets/managers/socketMan
 import { SocketEventType } from '../../../communication/sockets/types'
 import { dispatchOrderStatus } from './statusDispatcher.service'
 import { applySalePosting, createSalePostingInTx } from '../../inventory/inventoryPosting.service'
+import { activarSobresDeCuentaPagadaEnTx } from '../../giftCards/giftCardLedger'
 import { NormalizedDeliveryOrder } from './types'
 import { assertDeliveryMoneyInvariants } from './money'
 import { computeTenderCommission } from '../../dashboard/tenderType.dashboard.service'
@@ -428,6 +429,13 @@ export async function ingestDeliveryOrder(
             items: createdItems as any,
           })
           postingState.id = posting?.id ?? null
+          // R8: un pedido de reparto pagado activa los sobres que tuviera (hoy ninguno: sus renglones vienen del catálogo).
+          await activarSobresDeCuentaPagadaEnTx(tx, {
+            venueId: venue.id,
+            orderId: order.id,
+            staffId: null,
+            items: createdItems as Array<{ giftCardId?: string | null }>,
+          })
         }
       }
       return order

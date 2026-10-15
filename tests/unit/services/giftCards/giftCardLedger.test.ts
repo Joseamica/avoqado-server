@@ -316,6 +316,75 @@ describe('activarSobresDeCuentaPagadaEnTx', () => {
     await expect(activarSobresDeCuentaPagadaEnTx(prismaMock, { venueId: VENUE, orderId: 'order-1' })).resolves.toEqual({ activated: [] })
     expect(prismaMock.giftCard.updateMany).not.toHaveBeenCalled()
   })
+
+  // Ruling A6 (coordinador): una cuenta de tarjetas CANCELADA —sobres DEACTIVATED— recibe dinero tarde (reabrirSiRecibeDinero,
+  // PAY_CASH reproducido, terminal tardía) y queda PAGADA. Nunca se reviven los sobres; se avisa con un MoneyAnomaly propio.
+  describe('ruling A6: cuenta cancelada con sobres DEACTIVATED que queda pagada', () => {
+    /** La consulta de PENDING no encuentra nada; la de todos los sobres de la cuenta devuelve `todos`. */
+    const sobresDeLaCuenta = (todos: Array<{ id: string; status: string }>) =>
+      prismaMock.giftCard.findMany.mockImplementation(async ({ where }: any) =>
+        where.status === 'PENDING' ? todos.filter(s => s.status === 'PENDING').map(s => ({ id: s.id })) : todos,
+      )
+
+    it('🔴 NO reactiva y deja UN MoneyAnomaly PAID_WITH_DEACTIVATED con la cuenta, lo cobrado y cada sobre con su estado', async () => {
+      sobresDeLaCuenta([
+        { id: 'gc-1', status: 'DEACTIVATED' },
+        { id: 'gc-2', status: 'DEACTIVATED' },
+      ])
+      cobradoYDevuelto(1500)
+
+      await expect(
+        activarSobresDeCuentaPagadaEnTx(prismaMock, {
+          venueId: VENUE,
+          orderId: 'order-1',
+          staffId: 'staff-1',
+          items: [{ giftCardId: 'gc-1' }, { giftCardId: 'gc-2' }],
+        }),
+      ).resolves.toEqual({ activated: [] })
+
+      expect(prismaMock.$queryRaw).not.toHaveBeenCalled()
+      expect(prismaMock.giftCard.updateMany).not.toHaveBeenCalled()
+      expect(prismaMock.giftCardActivity.create).not.toHaveBeenCalled()
+      expect(prismaMock.moneyAnomaly.createMany).toHaveBeenCalledTimes(1)
+      expect(prismaMock.moneyAnomaly.createMany).toHaveBeenCalledWith({
+        data: [
+          {
+            category: 'GIFT_CARD_PAID_WITH_DEACTIVATED',
+            stripeEventId: 'giftcard:PAID_WITH_DEACTIVATED:order-1',
+            expectedState: { venueId: VENUE, id: 'order-1', check: 'PAID_WITH_DEACTIVATED' },
+            observedState: {
+              motivo: 'COBRO_CON_SOBRES_DESACTIVADOS',
+              orderId: 'order-1',
+              cobrado: '1500.00',
+              reembolsado: '0.00',
+              sobres: [
+                { id: 'gc-1', status: 'DEACTIVATED' },
+                { id: 'gc-2', status: 'DEACTIVATED' },
+              ],
+            },
+          },
+        ],
+        skipDuplicates: true,
+      })
+    })
+
+    it('sobres ya ACTIVE (otro camino los activó: re-llamada idempotente): ni anomalía ni consulta del dinero', async () => {
+      sobresDeLaCuenta([{ id: 'gc-1', status: 'ACTIVE' }])
+
+      await expect(activarSobresDeCuentaPagadaEnTx(prismaMock, { venueId: VENUE, orderId: 'order-1' })).resolves.toEqual({ activated: [] })
+      expect(prismaMock.payment.aggregate).not.toHaveBeenCalled()
+      expect(prismaMock.moneyAnomaly.createMany).not.toHaveBeenCalled()
+    })
+
+    it('venta cancelada CON el dinero devuelto completo (R2): no hay nada que avisar', async () => {
+      sobresDeLaCuenta([{ id: 'gc-1', status: 'DEACTIVATED' }])
+      cobradoYDevuelto(500, 500)
+
+      await expect(activarSobresDeCuentaPagadaEnTx(prismaMock, { venueId: VENUE, orderId: 'order-1' })).resolves.toEqual({ activated: [] })
+      expect(prismaMock.moneyAnomaly.createMany).not.toHaveBeenCalled()
+      expect(prismaMock.giftCard.updateMany).not.toHaveBeenCalled()
+    })
+  })
 })
 
 describe('revertirCanjeEnTx', () => {
