@@ -5,11 +5,12 @@
  */
 import { Router, Request, Response, NextFunction } from 'express'
 import { esSuperadminDeLaSesion, esSuperadminReal } from '@/services/access/rolVigente'
+import { esDuenoDeEstaOrganizacionOSuperadmin } from '@/services/access/duenoDeEstaOrganizacion'
 import { z } from 'zod'
 import { authenticateTokenMiddleware } from '../../middlewares/authenticateToken.middleware'
 import { validateRequest } from '../../middlewares/validation'
 import { checkPermission } from '../../middlewares/checkPermission.middleware'
-import { soloElDuenoBorraDeFabricaEnLaOrganizacion } from '../../middlewares/soloElDuenoBorraDeFabrica.middleware'
+import { soloElDuenoDeLaOrgEnComandosCriticos } from '../../middlewares/soloElDuenoBorraDeFabrica.middleware'
 import * as manualSaleController from '../../controllers/dashboard/manualSale.controller'
 import { bulkManualSalesSchema } from '../../schemas/dashboard/manualSale.schema'
 import { organizationDashboardService } from '../../services/organization-dashboard/organizationDashboard.service'
@@ -103,26 +104,9 @@ export async function checkOrgAccess(req: Request, res: Response, next: NextFunc
  */
 export async function requireOrgOwner(req: Request, res: Response, next: NextFunction) {
   try {
-    const authContext = (req as any).authContext
-    const orgId = req.params.orgId
-
-    // SUPERADMIN has full access to all organizations — si LO ES de verdad (H1, Codex).
-    if (authContext?.role === 'SUPERADMIN' && (await esSuperadminReal(authContext.userId))) {
-      return next()
-    }
-
-    const ownership = await prisma.staffOrganization.findFirst({
-      where: {
-        staffId: authContext?.userId,
-        organizationId: orgId,
-        isActive: true,
-        role: 'OWNER',
-        staff: { active: true },
-      },
-      select: { id: true },
-    })
-
-    if (!ownership) {
+    // La regla vive en `esDuenoDeEstaOrganizacionOSuperadmin` (superadmin de verdad, o fila ACTIVA de
+    // dueño de ESTA org de una persona activa): la comparte con los comandos críticos de la terminal.
+    if (!(await esDuenoDeEstaOrganizacionOSuperadmin((req as any).authContext, req.params.orgId))) {
       return res.status(403).json({
         success: false,
         error: 'owner_required',
@@ -1137,15 +1121,19 @@ router.post(
 /**
  * POST /dashboard/organizations/:orgId/terminals/:terminalId/command
  * Sends a remote command to a terminal (org-level safe commands only)
+ *
+ * 🔴 Antes bastaba ser MIEMBRO de la org (un cajero o un promotor de cualquier sucursal mandaba LOCK,
+ * UPDATE_MERCHANT o FACTORY_RESET a cualquier terminal). Ahora: supervisor o más para todo comando (igual
+ * que `/bulk-command`), y UPDATE_MERCHANT / FACTORY_RESET sólo el dueño de la organización (la regla de
+ * `requireOrgOwner`). Fijado en tests/unit/routes/organizationDashboard.terminalCommand.routes.test.ts.
  */
 router.post(
   '/:orgId/terminals/:terminalId/command',
   authenticateTokenMiddleware,
   checkOrgAccess,
+  requireOrgManager,
   validateRequest(SendOrgCommandSchema),
-  // 🔴 Ser miembro de la org bastaba para borrar de fábrica cualquier terminal suya: ahora FACTORY_RESET exige
-  // `tpv-factory-reset:execute` en el venue de la terminal (el dueño de la org entra por el respaldo del resolvedor).
-  soloElDuenoBorraDeFabricaEnLaOrganizacion,
+  soloElDuenoDeLaOrgEnComandosCriticos,
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { orgId, terminalId } = req.params

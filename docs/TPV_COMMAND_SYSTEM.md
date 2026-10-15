@@ -278,9 +278,15 @@ is `FACTORY_RESET` it also requires `tpv-factory-reset:execute`, evaluated in th
 (`tienePermisoEnElVenue`: real superadmin, venue role with org-owner fallback, permission set, venue customizations and exclusions — never
 by role name, and without the manager-PIN override). 403 `FACTORY_RESET_OWNER_ONLY` with a Spanish message, plus `PERMISSION_DENIED` in
 `ActivityLog`. Covered: both venue command routes, `POST /venues/:venueId/tpv-commands` (its `confirmationPin` is never validated, so it is
-not a lock), `POST /venues/:venueId/tpv-commands/:commandId/retry` (re-arming a wipe is sending it again) and the org command route. Bulk
-and scheduled reject `FACTORY_RESET` in their schemas; the org migration wizard is `requireOrgOwner` and wipes by design; superadmin routes
-are SUPERADMIN-only. Tests: `tests/unit/routes/tpv-factory-reset.soloElDueno.routes.test.ts`.
+not a lock), `POST /venues/:venueId/tpv-commands/:commandId/retry` (re-arming a wipe is sending it again). Bulk and scheduled reject
+`FACTORY_RESET` in their schemas; the org migration wizard is `requireOrgOwner` and wipes by design; superadmin routes are SUPERADMIN-only.
+Tests: `tests/unit/routes/tpv-factory-reset.soloElDueno.routes.test.ts`.
+
+**The ORG command route has its own locks** (same day, round 2): `requireOrgManager` for every command (parity with `/bulk-command`; floor
+staff and promoters are out), and `UPDATE_MERCHANT` / `FACTORY_RESET` only for the ORGANIZATION OWNER — the `requireOrgOwner` rule
+(`services/access/duenoDeEstaOrganizacion.ts`: active `StaffOrganization` OWNER row of that org, or a real superadmin), so an org owner who
+also holds a lower venue role still passes. 403 `ORG_OWNER_REQUIRED` + `PERMISSION_DENIED` stamped with the terminal's venue. Tests:
+`tests/unit/routes/organizationDashboard.terminalCommand.routes.test.ts`.
 
 ## Key File Locations
 
