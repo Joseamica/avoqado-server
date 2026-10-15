@@ -27,7 +27,9 @@ describe('TPV — loyalty va HERMANO de data (data sigue siendo el arreglo que p
     mockAdd.mockResolvedValue({ orderCustomers: LISTA, loyalty: SELLO })
     const r = res()
     await addCustomerToOrder(req({ customerId: 'c1' }), r, jest.fn() as NextFunction)
-    expect(mockAdd).toHaveBeenCalledWith('v1', 'o1', 'c1', 'staff-1')
+    // 5.º argumento: ¿quien liga tiene payments:create? (MEDIO-1). Aquí la base de prueba no tiene su rol ⇒ falla cerrado.
+    // El permiso real (KITCHEN, CASHIER, override del negocio) lo prueba `order.addCustomer.permisoDeCobro.test.ts`.
+    expect(mockAdd).toHaveBeenCalledWith('v1', 'o1', 'c1', 'staff-1', { otorgarLealtad: false })
     expect(r.status).toHaveBeenCalledWith(201)
     expect(r.json).toHaveBeenCalledWith({ success: true, data: LISTA, loyalty: SELLO, message: 'Customer added to order successfully' })
     // `data` es el ARREGLO de siempre: la TPV publicada lo parsea como lista (OrderCustomerDto).
@@ -38,7 +40,9 @@ describe('TPV — loyalty va HERMANO de data (data sigue siendo el arreglo que p
     mockCreateAdd.mockResolvedValue({ orderCustomers: LISTA, loyalty: null })
     const r = res()
     await createAndAddCustomerToOrder(req({ firstName: 'Dany' }), r, jest.fn() as NextFunction)
-    expect(mockCreateAdd).toHaveBeenCalledWith('v1', 'o1', { firstName: 'Dany', phone: undefined, email: undefined }, 'staff-1')
+    expect(mockCreateAdd).toHaveBeenCalledWith('v1', 'o1', { firstName: 'Dany', phone: undefined, email: undefined }, 'staff-1', {
+      otorgarLealtad: false,
+    })
     expect(r.status).toHaveBeenCalledWith(201)
     expect(r.json).toHaveBeenCalledWith({
       success: true,

@@ -1,5 +1,7 @@
 import { NextFunction, Request, Response } from 'express'
 
+import logger from '../../config/logger'
+import { tienePermisoEnVenue } from '../../middlewares/permissionFlag.middleware'
 import * as orderTpvService from '../../services/tpv/order.tpv.service'
 
 export async function getOrders(req: Request<{ venueId: string }>, res: Response, next: NextFunction): Promise<void> {
@@ -299,6 +301,30 @@ export async function getOrderCustomers(
   }
 }
 
+/**
+ * 🔴 MEDIO-1 (full-testing, 15-oct-2026; decisión «A» del founder): el permiso que da el sello y los puntos al ligar un cliente
+ * a una venta YA pagada. Es el MISMO que exige el «Agregar cliente» del POS (`POST /mobile/venues/:venueId/payments/:paymentId/
+ * customer`) y la tool MCP `attach_customer_to_sale`. Las dos rutas de la TPV de abajo sólo exigen `orders:update` (lo tiene un
+ * KITCHEN): con eso se liga, pero no se sella.
+ */
+const PERMISO_DE_LEALTAD_TARDIA = 'payments:create'
+
+/**
+ * ¿Quien liga puede otorgar la lealtad? Con el resolvedor EFECTIVO de siempre (`tienePermisoEnVenue`: el mismo de
+ * `checkPermission`, con las personalizaciones del negocio y los conjuntos de permisos; `permissionEquivalence.test.ts` los
+ * mantiene iguales). Falla CERRADO: si no se puede resolver, se liga sin sello (lo seguro) y queda en el log.
+ */
+async function puedeOtorgarLealtadTardia(req: Request<any, any, any>): Promise<boolean> {
+  try {
+    return await tienePermisoEnVenue(req as unknown as Request, PERMISO_DE_LEALTAD_TARDIA)
+  } catch (error) {
+    logger.warn('[TPV] No se pudo resolver payments:create para el sello tardío: se liga sin sello', {
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return false
+  }
+}
+
 export async function addCustomerToOrder(
   req: Request<{ venueId: string; orderId: string }, any, { customerId: string }>,
   res: Response,
@@ -309,8 +335,11 @@ export async function addCustomerToOrder(
     const orderId: string = req.params.orderId
     const { customerId } = req.body
 
-    // El actor del sello tardío es quien LIGA (el usuario autenticado).
-    const { orderCustomers, loyalty } = await orderTpvService.addCustomerToOrder(venueId, orderId, customerId, req.authContext?.userId)
+    // El actor del sello tardío es quien LIGA (el usuario autenticado), y sólo sella si tiene `payments:create` (MEDIO-1).
+    const otorgarLealtad = await puedeOtorgarLealtadTardia(req)
+    const { orderCustomers, loyalty } = await orderTpvService.addCustomerToOrder(venueId, orderId, customerId, req.authContext?.userId, {
+      otorgarLealtad,
+    })
 
     res.status(201).json({
       success: true,
@@ -356,11 +385,14 @@ export async function createAndAddCustomerToOrder(
     const orderId: string = req.params.orderId
     const { firstName, phone, email } = req.body
 
+    // MEDIO-1: igual que `addCustomerToOrder`, el cliente NUEVO sólo sella si quien liga tiene `payments:create`.
+    const otorgarLealtad = await puedeOtorgarLealtadTardia(req)
     const { orderCustomers, loyalty } = await orderTpvService.createAndAddCustomerToOrder(
       venueId,
       orderId,
       { firstName, phone, email },
       req.authContext?.userId,
+      { otorgarLealtad },
     )
 
     res.status(201).json({

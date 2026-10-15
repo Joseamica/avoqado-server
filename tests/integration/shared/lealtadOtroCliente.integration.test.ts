@@ -34,6 +34,8 @@ import { esperarBloqueado } from '@tests/__helpers__/candadosDePostgres'
 
 /** Texto EXACTO del ruling: la marca de fila que deja la reapertura. */
 const MARCA = 'REABIERTA: cliente ligado después del cobro'
+/** MEDIO-1 (15-oct-2026): la TPV sólo toca la lealtad si quien liga tiene `payments:create` (lo resuelve el controller). */
+const CON_PERMISO_DE_COBRO = { otorgarLealtad: true }
 
 const sello = `${Date.now()}${Math.random().toString(36).slice(2, 6)}`
 let orgId: string | undefined
@@ -160,7 +162,7 @@ describe('🔴 H4: la recuperación no le acredita a OTRO cliente lo que la vent
 
     // La TPV quita a Ana y agrega a Beto, que queda como primario.
     await removeCustomerFromOrder(venueId!, orderId, ana)
-    const ligada = await addCustomerToOrder(venueId!, orderId, beto)
+    const ligada = await addCustomerToOrder(venueId!, orderId, beto, undefined, CON_PERMISO_DE_COBRO)
     expect(ligada.loyalty).toMatchObject({ stamped: false, reason: 'OTHER_CUSTOMER' })
 
     // El reconciliador de siempre toma la venta pendiente.
@@ -247,7 +249,7 @@ describe('🔴 H5: el sello lleva a quien ligó al cliente aunque la liga llegue
     const intento = jest.spyOn(tardia, 'awardLoyaltyForLateCustomer').mockResolvedValue(null)
     try {
       await reconciliadorDe(orderId, async () => {
-        await addCustomerToOrder(venueId!, orderId, dany, barista.staffId)
+        await addCustomerToOrder(venueId!, orderId, dany, barista.staffId, CON_PERMISO_DE_COBRO)
       }).runNow()
     } finally {
       intento.mockRestore()
@@ -327,7 +329,7 @@ describe('🔴 F1: la TPV decide reabrir con el estado de la venta leído DENTRO
     const { orderId, restaurar } = await cuentaQueSeCobraEnMedio()
     const intento = jest.spyOn(tardia, 'awardLoyaltyForLateCustomer').mockResolvedValue(null)
     try {
-      await addCustomerToOrder(venueId!, orderId, dany, barista.staffId)
+      await addCustomerToOrder(venueId!, orderId, dany, barista.staffId, CON_PERMISO_DE_COBRO)
     } finally {
       restaurar()
       intento.mockRestore()
@@ -340,7 +342,7 @@ describe('🔴 F1: la TPV decide reabrir con el estado de la venta leído DENTRO
     const { orderId, restaurar } = await cuentaQueSeCobraEnMedio()
     const intento = jest.spyOn(tardia, 'awardLoyaltyForLateCustomer').mockResolvedValue(null)
     try {
-      await createAndAddCustomerToOrder(venueId!, orderId, { firstName: 'Nueva' }, barista.staffId)
+      await createAndAddCustomerToOrder(venueId!, orderId, { firstName: 'Nueva' }, barista.staffId, CON_PERMISO_DE_COBRO)
     } finally {
       restaurar()
       intento.mockRestore()
@@ -363,7 +365,7 @@ describe('🔴 F1: la TPV decide reabrir con el estado de la venta leído DENTRO
         },
       })
     ).id
-    await addCustomerToOrder(venueId!, orderId, dany)
+    await addCustomerToOrder(venueId!, orderId, dany, undefined, CON_PERMISO_DE_COBRO)
     const fila = await prisma.order.findUniqueOrThrow({
       where: { id: orderId },
       select: { loyaltyLastError: true, loyaltyEligibleAt: true },
