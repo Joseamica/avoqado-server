@@ -19,6 +19,24 @@ export function phoneLast10(input: string): string | null {
   return digits.length >= 10 ? digits.slice(-10) : null
 }
 
+// Teléfono mexicano por defecto (spec 2026-10-14 §2). Lo usan los dos pasos del OTP (pedir y verificar) y la reparación de datos,
+// así el reto, el Consumer y el Customer quedan con el MISMO valor. 10 dígitos (con o sin «+») ⇒ «+52» + 10; «52» + 10 ⇒ «+52…»;
+// «521» + 10 ⇒ «+52» + los últimos 10; cualquier otro ⇒ «+» + dígitos (no se inventa lada). Sin dígitos ⇒ '' y quien llama decide.
+export function normalizarTelefonoMx(input: string): string {
+  const digitos = (input ?? '').replace(/\D/g, '')
+  if (!digitos) return ''
+  if (digitos.length === 10) return `+52${digitos}`
+  if (digitos.length === 12 && digitos.startsWith('52')) return `+${digitos}`
+  if (digitos.length === 13 && digitos.startsWith('521')) return `+52${digitos.slice(3)}`
+  return `+${digitos}`
+}
+
+// Cómo guardaba el OTP viejo (antes del 14-oct-2026) un celular mexicano: «+» + 10 dígitos, sin lada. Sirve para encontrar al
+// Consumer que ya existe en vez de crearle otro. `null` si `normalizado` no es un «+52» + 10.
+export function formaLegadaDeTelefonoMx(normalizado: string): string | null {
+  return /^\+52\d{10}$/.test(normalizado) ? `+${normalizado.slice(3)}` : null
+}
+
 // Formatos mexicanos viejos que libphonenumber ya no acepta: `+521`/`521` (celular) y `044`/`045` (marcación a celular),
 // seguidos de los 10 dígitos. Se reescriben a `+52` + 10 dígitos; lo demás se deja como venía.
 function sinPrefijoMexicanoViejo(input: string): string {
