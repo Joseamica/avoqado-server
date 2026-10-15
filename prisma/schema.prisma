@@ -17059,6 +17059,7 @@ model McpToolCall {
   venueId    String? // the ONLY tool argument kept (opaque id, already in logs)
   outcome    String // 'ok' | 'error' | 'threw'  (see McpCallOutcome literals in code)
   detail     String? // short reason when not ok (permission denied / out of scope / not found / ambiguous / thrown message)
+  clientId   String? // OAuth app that made the call (mcp_oauth_clients.clientId: ChatGPT, Claude…); null for dev tokens and older rows
   durationMs Int
   createdAt  DateTime @default(now())
 

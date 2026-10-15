@@ -21,6 +21,8 @@ export interface McpScope {
    * When present, the guard requires mcp:write for write actions.
    */
   scopes?: string[]
+  /** App OAuth detrás de esta conexión (el `cid` del token: ChatGPT, Claude…). La bitácora de cada escritura la guarda. */
+  clientId?: string
 }
 
 /**
