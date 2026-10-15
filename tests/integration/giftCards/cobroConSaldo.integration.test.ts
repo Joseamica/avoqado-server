@@ -32,6 +32,7 @@ import { lockGiftCardsForUpdate, operarSobreDeGerenteEnTx, revertirCanjeEnTx } f
 import { ensureGiftCardTender } from '@/services/giftCards/giftCardTender'
 import { payCashOrder, payGiftCardBalanceOnOrder, returnGiftBalanceAndCancelOrder } from '@/services/mobile/order.mobile.service'
 import { writeRefundInTx } from '@/services/shared/writeRefundInTx'
+import { limpiarEfectosDePagoDelNegocio } from './sembrarTarjetasDeRegalo'
 
 jest.setTimeout(90000)
 
@@ -51,6 +52,12 @@ beforeAll(async () => {
   await prisma.staffVenue.create({ data: { staffId, venueId, role: 'CASHIER', active: true } })
   await prisma.giftCardSettings.create({ data: { venueId, enabled: true, suggestedAmounts: [500, 1000, 2000] } })
   tenderId = (await ensureGiftCardTender(prisma, venueId)).id
+})
+
+// B1 r1 (fix 7): los `PaymentEffect` de ESTE negocio no se quedan para el worker de otra suite que barre toda la base.
+// La libreta (`GiftCardActivity`) nunca se borra.
+afterAll(async () => {
+  await limpiarEfectosDePagoDelNegocio(venueId)
 })
 
 /** Un sobre ACTIVE con su código real y su ACTIVATE (saldo = suma de la libreta). */

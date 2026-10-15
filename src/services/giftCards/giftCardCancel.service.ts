@@ -6,15 +6,19 @@
  * - `bloquearSobresDelReembolsoEnTx` toma los candados de los sobres ANTES de que el núcleo reclame el turno. Un canje toma
  *   Order → sobres → Shift; un reembolso que tomara Shift → sobres se abrazaría con él (40P01). Jerarquía de un reembolso:
  *   Order → Payment → sobres → Shift.
+ * - Una venta de tarjetas SIN pagar se devuelve como cualquier abono; la devolución que deja su dinero en $0 la cancela (r1, fix 1).
  * - La cancelación de la venta (iniciar / liberar) vive aquí también (B2).
  */
 import { Prisma, type PrismaClient } from '@prisma/client'
+import logger from '@/config/logger'
+import { logAction } from '../dashboard/activity-log.service'
+import { avisarOrdenCancelada, findLiveTerminalCharge } from '../shared/orderCancelGuard'
 import { recordGiftCardAnomaly } from './giftCardAnomaly'
 import { GiftCardError } from './giftCardErrors'
 import {
   desactivarSobresDeCuentaEnTx,
+  desactivarSobresPendientesDeCuentaEnTx,
   lockGiftCardsForUpdate,
-  rechazarSiRegresaASobreDesactivado,
   revertirCanjeEnTx,
 } from './giftCardLedger'
 import { leerSiEsCuentaDeTarjetas } from './giftCardMarks'
@@ -54,6 +58,17 @@ export interface AlRegistrarReembolsoInput {
   /** Si el llamador ya lo leyó bajo su candado, no se vuelve a leer. */
   original?: CobroOriginalDeTarjetas
 }
+
+export interface AlRegistrarReembolsoResultado {
+  /**
+   * r1 (fix 1): este reembolso dejó en $0 el dinero de una venta de tarjetas SIN pagar y la misma transacción la canceló. El llamador
+   * escribe `ORDER_CANCELLED` y avisa a las pantallas DESPUÉS del commit, como `deleteOrder`.
+   */
+  cuentaCancelada: boolean
+}
+
+const SIN_CANCELAR: AlRegistrarReembolsoResultado = Object.freeze({ cuentaCancelada: false })
+const CERO = () => new Prisma.Decimal(0)
 
 async function leerCobroOriginal(tx: Tx, venueId: string, paymentId: string): Promise<CobroOriginalDeTarjetas | null> {
   const fila = await tx.payment.findFirst({
@@ -107,14 +122,11 @@ export async function bloquearSobresDelReembolsoEnTx(
   const original = p.original ?? (await leerCobroOriginal(tx, p.venueId, p.originalPaymentId))
   if (!original) return
   let ids: string[] = []
-  if (isGiftCardTenderKind(original.tenderSystemKind)) {
-    const delCanje = await sobresDelCanje(tx, p.venueId, p.originalPaymentId)
-    if (delCanje.length === 0) return
-    // Nota 1 de B1 (ruling 7 de A8): con el sobre ya bloqueado, uno DEACTIVATED se rechaza AQUÍ, antes de que el núcleo reclame
-    // el turno y escriba el REFUND; así nada se escribe. `revertirCanjeEnTx` repite la guardia para quien lo llame sin esto.
-    await rechazarSiRegresaASobreDesactivado(tx, p.venueId, await lockGiftCardsForUpdate(tx, delCanje))
-    return
-  } else if (await leerSiEsCuentaDeTarjetas(tx, original.orderId)) {
+  // r1 (fix 2): aquí sólo se BLOQUEA. Un sobre DEACTIVATED entre los del canje NO se rechaza: quién recibe saldo depende del monto, y
+  // eso lo decide `revertirCanjeEnTx` (nota 1) dentro de esta MISMA transacción, que se revierte entera si rechaza. Rechazar aquí
+  // por cualquier sobre muerto —aunque ya se le hubiera devuelto todo— atrapaba la parte que le toca a uno vivo del mismo cobro.
+  if (isGiftCardTenderKind(original.tenderSystemKind)) ids = await sobresDelCanje(tx, p.venueId, p.originalPaymentId)
+  else if (await leerSiEsCuentaDeTarjetas(tx, original.orderId)) {
     // E4 (excepción escrita): la venta PAGADA se comprueba ANTES de cualquier candado de sobre.
     if (!(await ventaPagada(tx, p.venueId, original.orderId))) return
     ids = await sobresDeLaCuenta(tx, original.orderId)
@@ -122,9 +134,9 @@ export async function bloquearSobresDelReembolsoEnTx(
   if (ids.length > 0) await lockGiftCardsForUpdate(tx, ids)
 }
 
-export async function alRegistrarReembolsoEnTx(tx: Tx, p: AlRegistrarReembolsoInput): Promise<void> {
+export async function alRegistrarReembolsoEnTx(tx: Tx, p: AlRegistrarReembolsoInput): Promise<AlRegistrarReembolsoResultado> {
   const original = p.original ?? (await leerCobroOriginal(tx, p.venueId, p.originalPaymentId))
-  if (!original) return
+  if (!original) return SIN_CANCELAR
   if (isGiftCardTenderKind(original.tenderSystemKind)) {
     // Spec §5.5: lo pagado con saldo regresa al saldo; `revertirCanjeEnTx` nunca pasa de lo canjeado y aún reembolsable.
     await revertirCanjeEnTx(tx, {
@@ -134,38 +146,101 @@ export async function alRegistrarReembolsoEnTx(tx: Tx, p: AlRegistrarReembolsoIn
       amount: p.amount,
       staffId: p.staffId ?? null,
     })
-    return
+    return SIN_CANCELAR
   }
-  if (!(await leerSiEsCuentaDeTarjetas(tx, original.orderId))) return
-  await devolverVentaDeTarjetasEnTx(tx, p, original.orderId)
+  if (!(await leerSiEsCuentaDeTarjetas(tx, original.orderId))) return SIN_CANCELAR
+  return devolverVentaDeTarjetasEnTx(tx, p, original.orderId)
 }
 
-/** R2: devolver dinero de una cuenta de tarjetas = cancelarla. */
-async function devolverVentaDeTarjetasEnTx(tx: Tx, p: AlRegistrarReembolsoInput, orderId: string): Promise<void> {
-  // E4 (excepción escrita): antes de leer o bloquear un solo sobre, la venta tiene que estar PAGADA. Sin pagar, sus sobres
-  // siguen PENDING (no valen nada) y no se tocan: el panel rechaza; la terminal, que YA devolvió el dinero (E1), registra
-  // y deja la anomalía para que una persona lo revise.
-  if (!(await ventaPagada(tx, p.venueId, orderId))) {
-    if (!p.dineroYaDevuelto) {
-      throw new GiftCardError(
-        'GIFT_CARD_CANCEL_NOT_STARTED',
-        'Esta venta de tarjetas todavía no está pagada: cancela la cuenta desde el POS.',
-        409,
-      )
-    }
-    await recordGiftCardAnomaly(tx, {
-      check: 'REFUND_WITHOUT_CANCEL',
-      id: p.refundPaymentId,
+/**
+ * El dinero que la cuenta conserva YA con este reembolso escrito: cobros COMPLETED menos devoluciones COMPLETED, venta Y propina
+ * (la propina también es dinero que el negocio guarda). Las devoluciones se guardan negativas (`summarizeRefunds`).
+ */
+async function dineroConservado(tx: Tx, venueId: string, orderId: string): Promise<Prisma.Decimal> {
+  const cobros = await tx.payment.aggregate({
+    where: { venueId, orderId, status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] },
+    _sum: { amount: true, tipAmount: true },
+  })
+  const devoluciones = await tx.payment.aggregate({
+    where: { venueId, orderId, status: 'COMPLETED', type: 'REFUND' },
+    _sum: { amount: true, tipAmount: true },
+  })
+  const total = (s: { amount: Prisma.Decimal | null; tipAmount: Prisma.Decimal | null }) => (s.amount ?? CERO()).plus(s.tipAmount ?? CERO())
+  return total(cobros._sum).minus(total(devoluciones._sum).abs())
+}
+
+/**
+ * r1 (fix 1, ruling del coordinador): devolver un abono de una venta de tarjetas SIN pagar es un camino normal —el cliente se
+ * arrepiente a media compra—. Sus sobres siguen PENDING: no valen nada, y F8 impide activarlos si lo conservado no cubre la venta.
+ * Así que mientras quede dinero no se lee, bloquea ni desactiva ningún sobre (E4) y la cuenta sigue abierta. Cuando ESTE reembolso
+ * deja lo conservado en $0, la misma transacción cancela la cuenta con las piezas de `deleteOrder` (estado con CAS + versión, y
+ * `desactivarSobresPendientesDeCuentaEnTx`): si no, quedaría PARTIAL para siempre, porque ningún reembolso escribe `paymentStatus`
+ * y la cancelación general rechaza una cuenta PARTIAL o con pagos.
+ *
+ * Candados: el llamador ya tiene la Order (Order → Payment → Shift). Tomar aquí los sobres PENDING después del turno es la misma
+ * excepción escrita de E4 que la activación, y es segura por la misma razón: quien bloquea un sobre PENDING de esta cuenta
+ * (activarla, cancelarla) toma ANTES la Order que este reembolso ya tiene, y nadie que tenga un sobre PENDING espera un turno.
+ */
+async function cerrarVentaSinPagarSiYaNoQuedaDinero(
+  tx: Tx,
+  p: AlRegistrarReembolsoInput,
+  orderId: string,
+): Promise<AlRegistrarReembolsoResultado> {
+  if ((await dineroConservado(tx, p.venueId, orderId)).greaterThan(0)) return SIN_CANCELAR
+  // Un cobro de terminal vivo todavía puede traer dinero: la cancelación general tampoco cancela con uno así. La cuenta sigue y su
+  // desenlace decide (si cobra, ese dinero se devuelve como cualquier abono y la cuenta se cierra entonces).
+  const vivo = await findLiveTerminalCharge(tx, { venueId: p.venueId, orderId })
+  if (vivo) {
+    logger.warn('[TARJETAS DE REGALO] Venta sin pagar devuelta completa con un cobro de terminal vivo: la cuenta sigue abierta', {
       venueId: p.venueId,
-      detail: { orderId, originalPaymentId: p.originalPaymentId, ventaPagada: false, monto: p.amount.toString() },
+      orderId,
+      refundPaymentId: p.refundPaymentId,
+      requestId: vivo.requestId,
     })
-    return
+    return SIN_CANCELAR
   }
+  const cancelada = await tx.order.updateMany({
+    where: { id: orderId, venueId: p.venueId, status: { notIn: ['CANCELLED', 'DELETED'] } },
+    // La versión sube para que los escritores con CAS (anular, descontar) se enteren de la cancelación (como `deleteOrder`).
+    data: { status: 'CANCELLED', version: { increment: 1 } },
+  })
+  // Spec § 5.1.8: una cuenta de tarjetas que se cancela sin haberse pagado deja sus sobres PENDING en DEACTIVATED. Idempotente.
+  await desactivarSobresPendientesDeCuentaEnTx(tx, { venueId: p.venueId, orderId, staffId: p.staffId ?? null })
+  return { cuentaCancelada: cancelada.count === 1 }
+}
+
+/**
+ * DESPUÉS del commit (r1, fix 1): la venta sin pagar que su reembolso dejó en $0 quedó cancelada. Lo mismo que hace `deleteOrder`
+ * tras cancelar: bitácora `ORDER_CANCELLED` (fuera de la transacción, sin esperar) y aviso a las pantallas abiertas. Nunca lanza.
+ */
+export async function avisarVentaDeTarjetasCanceladaPorReembolso(p: {
+  venueId: string
+  orderId: string
+  refundPaymentId: string
+  staffId?: string | null
+}): Promise<void> {
+  void logAction({
+    staffId: p.staffId ?? null,
+    venueId: p.venueId,
+    action: 'ORDER_CANCELLED',
+    entity: 'Order',
+    entityId: p.orderId,
+    data: { status: 'CANCELLED', motivo: 'VENTA_DE_TARJETAS_DEVUELTA', refundPaymentId: p.refundPaymentId },
+  })
+  await avisarOrdenCancelada(p.venueId, p.orderId, 'CANCELLED')
+}
+
+/** R2: devolver dinero de una cuenta de tarjetas PAGADA = cancelarla. Sin pagar: un abono más (r1, fix 1). */
+async function devolverVentaDeTarjetasEnTx(tx: Tx, p: AlRegistrarReembolsoInput, orderId: string): Promise<AlRegistrarReembolsoResultado> {
+  // E4 (excepción escrita): antes de leer o bloquear un solo sobre, la venta tiene que estar PAGADA. Sin pagar, sus sobres siguen
+  // PENDING (no valen nada): la devolución se acepta por cualquier canal y, si deja la cuenta en $0, la cancela.
+  if (!(await ventaPagada(tx, p.venueId, orderId))) return cerrarVentaSinPagarSiYaNoQuedaDinero(tx, p, orderId)
   const ids = await sobresDeLaCuenta(tx, orderId)
-  if (ids.length > 0) await lockGiftCardsForUpdate(tx, ids)
+  const bloqueados = ids.length > 0 ? await lockGiftCardsForUpdate(tx, ids) : []
   const sobres = await tx.giftCard.findMany({ where: { id: { in: ids } }, select: { id: true, status: true }, take: ids.length })
   // Ya cancelada por otro cobro de la misma cuenta (una venta pagada en dos cobros se devuelve en dos reembolsos): nada que desactivar.
-  if (sobres.length > 0 && sobres.every(s => s.status === 'DEACTIVATED')) return
+  // Nota 2 de B1 (A6): tampoco atrapa el dinero que llegó DESPUÉS a una venta pagada con todo desactivado.
+  if (sobres.length > 0 && sobres.every(s => s.status === 'DEACTIVATED')) return SIN_CANCELAR
   const canjes = await tx.giftCardActivity.count({ where: { giftCardId: { in: ids }, type: 'REDEEM' } })
   if (!p.dineroYaDevuelto) {
     if (canjes > 0) {
@@ -188,10 +263,22 @@ async function devolverVentaDeTarjetasEnTx(tx: Tx, p: AlRegistrarReembolsoInput,
     staffId: p.staffId ?? null,
     dineroYaDevuelto: true,
   })
+  // r1 (fix 4): la desactivación es de la CUENTA entera aunque la terminal haya devuelto sólo una parte. La anomalía dice si fue
+  // parcial (lo devuelto contra lo que vale la venta) y cuánto saldo vivo se apagó, leídos bajo el candado de los sobres.
+  const valorDeLaVenta = bloqueados.reduce((suma, c) => suma.plus(c.initialAmount), CERO())
+  const saldoDesactivado = bloqueados.filter(c => c.status !== 'DEACTIVATED').reduce((suma, c) => suma.plus(c.balance), CERO())
   await recordGiftCardAnomaly(tx, {
     check: 'REFUND_WITHOUT_CANCEL',
     id: p.refundPaymentId,
     venueId: p.venueId,
-    detail: { orderId, originalPaymentId: p.originalPaymentId, canjes, monto: p.amount.toString() },
+    detail: {
+      orderId,
+      originalPaymentId: p.originalPaymentId,
+      canjes,
+      monto: p.amount.toString(),
+      parcial: p.amount.lessThan(valorDeLaVenta),
+      saldoDesactivado: saldoDesactivado.toFixed(2),
+    },
   })
+  return SIN_CANCELAR
 }

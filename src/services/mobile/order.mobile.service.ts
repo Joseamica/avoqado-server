@@ -69,6 +69,7 @@ import {
   activarSobresDeCuentaPagadaEnTx,
   canjearSobresEnTx,
   lockGiftCardsForUpdate,
+  rechazarSiRegresaASobreDesactivado,
   revertirCanjeEnTx,
   saldoUsable,
   sobresDelCanje,
@@ -4275,25 +4276,13 @@ export async function returnGiftBalanceAndCancelOrder(
     const sobres = await lockGiftCardsForUpdate(tx, sobresDeLosCobros)
 
     // Ruling 7: un sobre DEACTIVATED no recibe saldo de vuelta (`revertirCanjeEnTx` le sumaría saldo a una tarjeta muerta,
-    // fuera de la vista de todos). Se rechaza todo antes de escribir: el cobro con saldo sigue en la cuenta abierta.
-    const desactivados = sobres.filter(s => s.status === 'DEACTIVATED')
-    if (desactivados.length > 0) {
-      const terminaciones = await tx.giftCard.findMany({
-        where: { venueId, id: { in: desactivados.map(s => s.id) } },
-        select: { id: true, codeLast4: true },
-        orderBy: { id: 'asc' },
-        take: MAX_SOBRES_POR_CUENTA,
-      })
-      const cuales = terminaciones.map(t => t.codeLast4).join(', ')
-      throw new GiftCardError(
-        'GIFT_CARD_TENDER_NOT_ALLOWED',
-        desactivados.length === 1
-          ? `La tarjeta de regalo terminación ${cuales} ya fue cancelada: su saldo no se puede regresar. Cobra lo que falta con otro medio o pide al gerente que la revise.`
-          : `Las tarjetas de regalo terminación ${cuales} ya fueron canceladas: su saldo no se puede regresar. Cobra lo que falta con otro medio o pide al gerente que las revise.`,
-        409,
-        { motivo: 'SOBRE_DESACTIVADO', giftCardIds: desactivados.map(s => s.id) },
-      )
-    }
+    // fuera de la vista de todos). Se rechaza todo antes de escribir: el cobro con saldo sigue en la cuenta abierta. La regla es la
+    // de la libreta (B1 r1, fix 5); aquí sólo cambia el texto.
+    await rechazarSiRegresaASobreDesactivado(tx, venueId, sobres, (cuales, cuantos) =>
+      cuantos === 1
+        ? `La tarjeta de regalo terminación ${cuales} ya fue cancelada: su saldo no se puede regresar. Cobra lo que falta con otro medio o pide al gerente que la revise.`
+        : `Las tarjetas de regalo terminación ${cuales} ya fueron canceladas: su saldo no se puede regresar. Cobra lo que falta con otro medio o pide al gerente que las revise.`,
+    )
 
     // Llaves `:0`, `:1`… en el orden en que se ESCRIBEN: la primera devolución siempre es `:0` (la que reconoce el reintento).
     let escritas = 0

@@ -12,6 +12,7 @@ import { createManualPayment, MENSAJE_VENTA_YA_COBRADA } from '@/services/dashbo
 import { paymentCountsAsDrawerCash, TENDER_SEMANTICS_SELECT } from '@/services/shared/tenderSemantics'
 import { devolverConEfectivo, sePuedeEscogerComoDevolver, seDevuelveEnTerminal } from '@/services/tpv/terminalRefundTarget'
 import { isGiftCardTenderKind } from '@/services/giftCards/giftCardTender'
+import AppError from '@/errors/AppError'
 // El carril del reembolso: la MISMA definición que usan los cuatro canales de
 // cobro, para que el MCP no pueda contradecir al saldo persistido.
 import { esVentaCerrada, summarizeRefunds } from '@/services/shared/orderBalance'
@@ -563,7 +564,14 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
           },
         })
       } catch (err) {
-        return text({ ok: false, error: (err as Error).message })
+        // Tarjetas de regalo (B1 r1): el `code` y los `details` de un rechazo de negocio viajan al agente, para que distinga
+        // `GIFT_CARD_CANCEL_NOT_STARTED` de `SOBRE_DESACTIVADO` (y cualquier otro AppError) sin leer el texto.
+        return text({
+          ok: false,
+          error: (err as Error).message,
+          ...(err instanceof AppError && err.code ? { code: err.code } : {}),
+          ...(err instanceof AppError && err.details !== undefined ? { details: err.details } : {}),
+        })
       }
     },
   )

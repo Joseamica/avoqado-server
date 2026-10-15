@@ -22,7 +22,12 @@ import { logAction } from './activity-log.service'
 import type { FiscalCongelado } from '../fiscal/deliveryFiscalDelta'
 import { devolverConEfectivo, sePuedeEscogerComoDevolver, type DevolverCon } from '../tpv/terminalRefundTarget'
 import { GiftCardError } from '../giftCards/giftCardErrors'
-import { MENSAJE_SALDO_SOLO_A_SALDO, alRegistrarReembolsoEnTx, bloquearSobresDelReembolsoEnTx } from '../giftCards/giftCardCancel.service'
+import {
+  MENSAJE_SALDO_SOLO_A_SALDO,
+  alRegistrarReembolsoEnTx,
+  avisarVentaDeTarjetasCanceladaPorReembolso,
+  bloquearSobresDelReembolsoEnTx,
+} from '../giftCards/giftCardCancel.service'
 import { isGiftCardTenderKind } from '../giftCards/giftCardTender'
 import { postCashRefundToDrawer } from '../shared/cashDrawerPosting'
 import { parteDeUnidades as getUnitRefundCents } from '../shared/parteDeUnidades'
@@ -197,6 +202,8 @@ interface RefundTransactionResult {
     tenderTypeId: string | null
     tenderCountsAsCash: boolean | null
   }
+  /** Tarjetas de regalo (B1 r1): este reembolso dejó en $0 una venta de tarjetas sin pagar y la canceló en la misma tx. */
+  cuentaDeTarjetasCancelada: boolean
 }
 
 function toCents(value: unknown): number {
@@ -1138,15 +1145,16 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
       await enqueueRefundPaymentEffectsInTx(tx, refundPaymentId, original.id)
       // Tarjetas de regalo (B1/B2, R2): el gancho único, en la MISMA transacción que el REFUND y sus reversas. Un cobro con saldo
       // vuelve al saldo; la venta de tarjetas exige la cancelación iniciada. Un replay ya lo corrió cuando se escribió la fila.
-      if (!replay)
-        await alRegistrarReembolsoEnTx(tx, {
-          venueId: input.venueId,
-          originalPaymentId: original.id,
-          refundPaymentId,
-          amount: centsToDecimal(refundCents),
-          staffId: input.staffId ?? null,
-          original: { orderId: original.orderId, tenderSystemKind: original.tenderSystemKind },
-        })
+      const tarjetas = replay
+        ? { cuentaCancelada: false }
+        : await alRegistrarReembolsoEnTx(tx, {
+            venueId: input.venueId,
+            originalPaymentId: original.id,
+            refundPaymentId,
+            amount: centsToDecimal(refundCents),
+            staffId: input.staffId ?? null,
+            original: { orderId: original.orderId, tenderSystemKind: original.tenderSystemKind },
+          })
       const devolverCon = devolverConEfectivo(original, input.refundMethod)
 
       return {
@@ -1171,6 +1179,7 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
               tenderTypeId: original.tenderTypeId,
               tenderCountsAsCash: original.tenderCountsAsCash,
             },
+        cuentaDeTarjetasCancelada: tarjetas.cuentaCancelada,
       }
     }, ORDER_LOCK_WAIT_BUDGET)
   } catch (error) {
@@ -1324,6 +1333,16 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
       source: 'DASHBOARD',
     },
   })
+
+  // Tarjetas de regalo (B1 r1, fix 1): si este reembolso cerró una venta de tarjetas sin pagar, se avisa como `deleteOrder`.
+  if (result.cuentaDeTarjetasCancelada) {
+    await avisarVentaDeTarjetasCanceladaPorReembolso({
+      venueId: input.venueId,
+      orderId: result.originalOrderId,
+      refundPaymentId: result.refundPaymentId,
+      staffId: input.staffId ?? null,
+    })
+  }
 
   return {
     refundId: result.refundPaymentId,

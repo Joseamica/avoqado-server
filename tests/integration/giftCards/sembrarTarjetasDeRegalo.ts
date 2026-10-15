@@ -13,6 +13,7 @@ import { encryptGiftCardCode, generateGiftCardCode, generateOpaqueToken, hashGif
 import { ensureGiftCardTender } from '@/services/giftCards/giftCardTender'
 import { activarSobresDeCuentaPagadaEnTx, canjearSobresEnTx, lockGiftCardsForUpdate } from '@/services/giftCards/giftCardLedger'
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
+import { payCashOrder } from '@/services/mobile/order.mobile.service'
 
 const D = (pesos: number) => new Prisma.Decimal(pesos)
 const folio = (prefijo: string) => `${prefijo}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
@@ -27,6 +28,55 @@ export async function crearNegocioDePrueba(prefijo: string): Promise<{ organizat
   ).id
   await prisma.staffVenue.create({ data: { staffId, venueId, role: 'CASHIER', active: true } })
   return { organizationId, venueId, staffId }
+}
+
+/**
+ * Aislamiento (B1 r1, fix 7): los cobros y reembolsos de una prueba encolan `PaymentEffect`, y un worker que barre TODA la base
+ * (p. ej. `webhookPrimerConfirmador.costoReal`) los reclamaría como suyos. Se borran SÓLO los del negocio de la prueba, en su
+ * `afterAll`. La libreta (`GiftCardActivity`) nunca se toca.
+ */
+export async function limpiarEfectosDePagoDelNegocio(venueId: string): Promise<number> {
+  if (!venueId) return 0
+  const r = await prisma.paymentEffect.deleteMany({ where: { venueId } })
+  return r.count
+}
+
+/** Un sobre PENDING por monto, cada uno con su renglón en la cuenta (R11: productId nulo, NO_OBJETO, cantidad 1). */
+async function crearSobresPendientes(p: { venueId: string; organizationId: string; orderId: string; montos: number[] }): Promise<string[]> {
+  const giftCardIds: string[] = []
+  for (const monto of p.montos) {
+    const codigo = generateGiftCardCode()
+    const sobre = await prisma.giftCard.create({
+      data: {
+        venueId: p.venueId,
+        organizationId: p.organizationId,
+        codeHash: hashGiftCardCode(codigo.normalized),
+        codeEnc: encryptGiftCardCode(codigo.normalized),
+        codeLast4: codigo.last4,
+        pageToken: generateOpaqueToken(),
+        initialAmount: D(monto),
+        balance: D(0),
+        status: 'PENDING',
+        termsVersion: '2026-10-14',
+        deliveryChannel: 'HANDED_TO_BUYER',
+      },
+    })
+    await prisma.orderItem.create({
+      data: {
+        orderId: p.orderId,
+        productId: null,
+        productName: 'Tarjeta de regalo',
+        quantity: 1,
+        unitPrice: D(monto),
+        taxAmount: D(0),
+        total: D(monto),
+        ivaTratamiento: 'NO_OBJETO',
+        giftCardId: sobre.id,
+      },
+    })
+    giftCardIds.push(sobre.id)
+  }
+  return giftCardIds
 }
 
 export interface VentaDeTarjetasSembrada {
@@ -70,39 +120,12 @@ export async function sembrarVentaDeTarjetas(p: {
       createdAt: cuando,
     },
   })
-  const giftCardIds: string[] = []
-  for (const monto of p.montos) {
-    const codigo = generateGiftCardCode()
-    const sobre = await prisma.giftCard.create({
-      data: {
-        venueId: p.venueId,
-        organizationId: p.organizationId,
-        codeHash: hashGiftCardCode(codigo.normalized),
-        codeEnc: encryptGiftCardCode(codigo.normalized),
-        codeLast4: codigo.last4,
-        pageToken: generateOpaqueToken(),
-        initialAmount: D(monto),
-        balance: D(0),
-        status: 'PENDING',
-        termsVersion: '2026-10-14',
-        deliveryChannel: 'HANDED_TO_BUYER',
-      },
-    })
-    await prisma.orderItem.create({
-      data: {
-        orderId: order.id,
-        productId: null,
-        productName: 'Tarjeta de regalo',
-        quantity: 1,
-        unitPrice: D(monto),
-        taxAmount: D(0),
-        total: D(monto),
-        ivaTratamiento: 'NO_OBJETO',
-        giftCardId: sobre.id,
-      },
-    })
-    giftCardIds.push(sobre.id)
-  }
+  const giftCardIds = await crearSobresPendientes({
+    venueId: p.venueId,
+    organizationId: p.organizationId,
+    orderId: order.id,
+    montos: p.montos,
+  })
   const pagos: Payment[] = []
   for (const monto of p.cobros ?? [total]) {
     pagos.push(
@@ -142,6 +165,54 @@ export async function sembrarVentaDeTarjetas(p: {
   return { orderId: order.id, giftCardIds, pagos }
 }
 
+/**
+ * Una cuenta de tarjetas SIN pagar (sobres PENDING) y, si se pide, abonos en efectivo por el camino REAL (`payCashOrder`, que la
+ * deja PARTIAL). Para devolver o terminar de pagar desde la prueba. El archivo que la use con abonos mockea los sockets.
+ */
+export async function sembrarVentaDeTarjetasSinPagar(p: {
+  venueId: string
+  organizationId: string
+  staffId: string
+  montos: number[]
+  /** Abonos en efectivo, en pesos, uno por cobro. */
+  abonosEnEfectivo?: number[]
+}): Promise<{ orderId: string; giftCardIds: string[]; abonos: Payment[] }> {
+  const total = p.montos.reduce((s, m) => s + m, 0)
+  const order = await prisma.order.create({
+    data: {
+      venueId: p.venueId,
+      orderNumber: folio('GCP'),
+      type: 'TAKEOUT',
+      source: 'TPV',
+      status: 'PENDING',
+      subtotal: D(total),
+      taxAmount: D(0),
+      tipAmount: D(0),
+      total: D(total),
+      paidAmount: D(0),
+      remainingBalance: D(total),
+      paymentStatus: 'PENDING',
+      contratoDePrecio: 'IVA_INCLUIDO',
+      createdById: p.staffId,
+    },
+  })
+  const giftCardIds = await crearSobresPendientes({
+    venueId: p.venueId,
+    organizationId: p.organizationId,
+    orderId: order.id,
+    montos: p.montos,
+  })
+  for (const abono of p.abonosEnEfectivo ?? []) {
+    await payCashOrder(p.venueId, order.id, { amount: Math.round(abono * 100), tip: 0, staffId: p.staffId, idempotencyKey: folio('abono') })
+  }
+  const abonos = await prisma.payment.findMany({
+    where: { venueId: p.venueId, orderId: order.id, status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    take: (p.abonosEnEfectivo ?? []).length,
+  })
+  return { orderId: order.id, giftCardIds, abonos }
+}
+
 /** Una cuenta de mercancía SIN pagar (para cobrarla con saldo dentro de una transacción de la prueba). */
 export async function crearCuentaDeMercancia(p: { venueId: string; staffId: string; total: number }): Promise<{ orderId: string }> {
   const order = await prisma.order.create({
@@ -169,16 +240,17 @@ export async function crearCuentaDeMercancia(p: { venueId: string; staffId: stri
 /** El `Payment` de un cobro con saldo, con el tender de sistema y su forma SAT 01 (como lo escribe A8). */
 export async function crearCobroConSaldoEnTx(
   tx: Prisma.TransactionClient,
-  p: { venueId: string; orderId: string; monto: number; staffId: string },
+  p: { venueId: string; orderId: string; monto: number; staffId: string; propina?: number },
 ): Promise<Payment> {
   const tender = await ensureGiftCardTender(tx, p.venueId)
+  const propina = p.propina ?? 0
   return tx.payment.create({
     data: {
       venueId: p.venueId,
       orderId: p.orderId,
       amount: D(p.monto),
-      tipAmount: D(0),
-      netAmount: D(p.monto),
+      tipAmount: D(propina),
+      netAmount: D(p.monto + propina),
       feePercentage: 0,
       feeAmount: D(0),
       method: 'OTHER',
@@ -206,8 +278,11 @@ export async function sembrarCanje(p: {
   total: number
   conSaldo: number
   restoEnEfectivo?: number
+  /** Propina del cobro con saldo: también sale del sobre (A8 canjea venta + propina). */
+  propina?: number
 }): Promise<{ orderId: string; pagoConSaldo: Payment; pagoEnEfectivo: Payment | null }> {
   const resto = p.restoEnEfectivo ?? 0
+  const propina = p.propina ?? 0
   if (p.conSaldo + resto !== p.total) throw new Error('La siembra sólo arma cuentas pagadas completas.')
   const { orderId } = await crearCuentaDeMercancia({ venueId: p.venueId, staffId: p.staffId, total: p.total })
   // El tender se asegura con el cliente GLOBAL, fuera de la transacción de dinero (contrato de `ensureGiftCardTender`: su `create`
@@ -216,12 +291,12 @@ export async function sembrarCanje(p: {
   return prisma.$transaction(async tx => {
     await lockExistingOrderForPayment(tx, { venueId: p.venueId, orderId })
     const cards = await lockGiftCardsForUpdate(tx, p.giftCardIds)
-    const pagoConSaldo = await crearCobroConSaldoEnTx(tx, { venueId: p.venueId, orderId, monto: p.conSaldo, staffId: p.staffId })
+    const pagoConSaldo = await crearCobroConSaldoEnTx(tx, { venueId: p.venueId, orderId, monto: p.conSaldo, staffId: p.staffId, propina })
     await canjearSobresEnTx(tx, {
       venueId: p.venueId,
       orderId,
       paymentId: pagoConSaldo.id,
-      amount: D(p.conSaldo),
+      amount: D(p.conSaldo + propina),
       cards,
       staffId: p.staffId,
     })
@@ -248,7 +323,14 @@ export async function sembrarCanje(p: {
         : null
     await tx.order.update({
       where: { id: orderId },
-      data: { status: 'COMPLETED', paymentStatus: 'PAID', paidAmount: D(p.total), remainingBalance: D(0), completedAt: new Date() },
+      data: {
+        status: 'COMPLETED',
+        paymentStatus: 'PAID',
+        tipAmount: D(propina),
+        paidAmount: D(p.total + propina),
+        remainingBalance: D(0),
+        completedAt: new Date(),
+      },
     })
     return { orderId, pagoConSaldo, pagoEnEfectivo }
   }, ORDER_LOCK_WAIT_BUDGET)

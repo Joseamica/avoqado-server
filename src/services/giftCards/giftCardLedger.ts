@@ -331,15 +331,25 @@ export async function canjearSobresEnTx(
   return resultado
 }
 
+/** El texto de un reembolso (B1). `cuales` = las terminaciones separadas por coma; `cuantos` = cuántos sobres. */
+function mensajeDeSobreDesactivadoEnReembolso(cuales: string, cuantos: number): string {
+  return cuantos === 1
+    ? `La tarjeta de regalo terminación ${cuales} ya fue cancelada: lo pagado con ella no puede regresar a su saldo. Pide al gerente que lo revise.`
+    : `Las tarjetas de regalo terminación ${cuales} ya fueron canceladas: lo pagado con ellas no puede regresar a su saldo. Pide al gerente que lo revise.`
+}
+
 /**
  * B1 (nota 1; ruling 7 de A8): un sobre DEACTIVATED nunca recibe saldo de vuelta. Sumarle saldo a una tarjeta muerta lo
  * dejaría fuera de la vista de todos: se rechaza con su terminación ANTES de escribir, y el gerente decide. Recibe los
  * sobres ya BLOQUEADOS (su estado se leyó bajo candado); sólo consulta las terminaciones si hay alguno desactivado.
+ * Una sola regla para los dos que regresan saldo (r1, fix 5): `revertirCanjeEnTx` y «regresar el saldo y cancelar» de A8, que
+ * sólo cambia el texto (allí el cajero cobra lo que falta con otro medio).
  */
 export async function rechazarSiRegresaASobreDesactivado(
   tx: Tx,
   venueId: string,
   cards: ReadonlyArray<{ id: string; status: GiftCardStatus }>,
+  mensaje: (cuales: string, cuantos: number) => string = mensajeDeSobreDesactivadoEnReembolso,
 ): Promise<void> {
   const desactivados = [...new Set(cards.filter(c => c.status === 'DEACTIVATED').map(c => c.id))]
   if (desactivados.length === 0) return
@@ -349,12 +359,9 @@ export async function rechazarSiRegresaASobreDesactivado(
     orderBy: { id: 'asc' },
     take: desactivados.length,
   })
-  const cuales = terminaciones.map(t => t.codeLast4).join(', ')
   throw new GiftCardError(
     'GIFT_CARD_TENDER_NOT_ALLOWED',
-    desactivados.length === 1
-      ? `La tarjeta de regalo terminación ${cuales} ya fue cancelada: lo pagado con ella no puede regresar a su saldo. Pide al gerente que lo revise.`
-      : `Las tarjetas de regalo terminación ${cuales} ya fueron canceladas: lo pagado con ellas no puede regresar a su saldo. Pide al gerente que lo revise.`,
+    mensaje(terminaciones.map(t => t.codeLast4).join(', '), desactivados.length),
     409,
     { motivo: 'SOBRE_DESACTIVADO', giftCardIds: desactivados },
   )

@@ -32,6 +32,7 @@ import { cancelOrder, payCashOrder } from '@/services/mobile/order.mobile.servic
 import { settleOrder } from '@/services/dashboard/order.dashboard.service'
 import { lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
 import { settleStandalonePaymentInTx } from '@/services/tpv/payment.tpv.service'
+import { limpiarEfectosDePagoDelNegocio } from './sembrarTarjetasDeRegalo'
 
 jest.setTimeout(60000)
 
@@ -46,6 +47,12 @@ beforeAll(async () => {
   staffId = (await prisma.staff.create({ data: { email: `${SUF}@staff.test`, firstName: 'Caja', lastName: 'QA', active: true } })).id
   await prisma.staffVenue.create({ data: { staffId, venueId, role: 'CASHIER', active: true } })
   await prisma.giftCardSettings.create({ data: { venueId, enabled: true, suggestedAmounts: [500, 1000, 2000], validityMonths: 12 } })
+})
+
+// B1 r1 (fix 7): los `PaymentEffect` de ESTE negocio no se quedan para el worker de otra suite que barre toda la base.
+// La libreta (`GiftCardActivity`) nunca se borra.
+afterAll(async () => {
+  await limpiarEfectosDePagoDelNegocio(venueId)
 })
 
 async function cuenta(llave: string, montos: number[]) {

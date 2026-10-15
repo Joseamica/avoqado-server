@@ -39,7 +39,11 @@ import { restockOrderItems } from '../dashboard/inventoryRestock.service'
 import { logAction } from '../dashboard/activity-log.service'
 import { resolveAutofacturaAvailable } from './payment.tpv.service'
 import { GiftCardError } from '../giftCards/giftCardErrors'
-import { alRegistrarReembolsoEnTx, bloquearSobresDelReembolsoEnTx } from '../giftCards/giftCardCancel.service'
+import {
+  alRegistrarReembolsoEnTx,
+  avisarVentaDeTarjetasCanceladaPorReembolso,
+  bloquearSobresDelReembolsoEnTx,
+} from '../giftCards/giftCardCancel.service'
 import { isGiftCardTenderKind } from '../giftCards/giftCardTender'
 
 /**
@@ -1030,16 +1034,17 @@ export async function recordRefund(
       await enqueueRefundPaymentEffectsInTx(tx, refundPayment.id, originalPayment.id)
       // Tarjetas de regalo (B1/B2, R2): aquí el SDK YA devolvió el dinero. Una venta de tarjetas sin cancelación iniciada NO se rechaza
       // —dejaría el dinero fuera sin asiento y el sobre vivo—: sus sobres se desactivan y queda una anomalía para revisarla.
-      if (locked.orderId)
-        await alRegistrarReembolsoEnTx(tx, {
-          venueId,
-          originalPaymentId: locked.id,
-          refundPaymentId: refundPayment.id,
-          amount: new Decimal(refundData.amount).div(100),
-          staffId: userId,
-          dineroYaDevuelto: true,
-          original: { orderId: locked.orderId, tenderSystemKind: originalPayment.tenderType?.systemKind ?? null },
-        })
+      const tarjetas = locked.orderId
+        ? await alRegistrarReembolsoEnTx(tx, {
+            venueId,
+            originalPaymentId: locked.id,
+            refundPaymentId: refundPayment.id,
+            amount: new Decimal(refundData.amount).div(100),
+            staffId: userId,
+            dineroYaDevuelto: true,
+            original: { orderId: locked.orderId, tenderSystemKind: originalPayment.tenderType?.systemKind ?? null },
+          })
+        : { cuentaCancelada: false }
       // Codex R12-15: el costo negativo del reembolso es una obligación DURABLE (misma transacción, mutex del original).
       await asegurarObligacionDeCostoNegativo(tx, originalPayment.id, refundPayment.id)
 
@@ -1051,6 +1056,8 @@ export async function recordRefund(
           fundsFlow: locked.fundsFlow,
           tenderTypeId: locked.tenderTypeId,
           tenderCountsAsCash: locked.tenderCountsAsCash,
+          // Tarjetas de regalo (B1 r1): este reembolso dejó en $0 una venta de tarjetas sin pagar y la canceló en la misma tx.
+          cuentaDeTarjetasCancelada: tarjetas.cuentaCancelada,
           // 🔴 El reparto que NO se pudo honrar viaja fuera de la transacción para dejar rastro.
           // Va aquí, y no como una escritura dentro de `tx`, por la misma razón que este riel no
           // rechaza: cuando esto corre el procesador YA devolvió el dinero, así que un fallo de
@@ -1212,6 +1219,16 @@ export async function recordRefund(
       source: 'TPV',
     },
   })
+
+  // Tarjetas de regalo (B1 r1, fix 1): si este reembolso cerró una venta de tarjetas sin pagar, se avisa como `deleteOrder`.
+  if (postCommitAuthority.cuentaDeTarjetasCancelada && postCommitAuthority.orderId) {
+    await avisarVentaDeTarjetasCanceladaPorReembolso({
+      venueId,
+      orderId: postCommitAuthority.orderId,
+      refundPaymentId: result.id,
+      staffId: userId,
+    })
+  }
 
   // El referido NO se revierte aquí: su obligación ya quedó encolada en la transacción de la devolución
   // (`enqueueRefundPaymentEffectsInTx`) y la cumple el worker (A6 F4, Codex bloque A r1).
