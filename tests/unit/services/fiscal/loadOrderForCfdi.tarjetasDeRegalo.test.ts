@@ -182,6 +182,79 @@ describe('loadOrderForCfdiFromDb · tarjetas de regalo', () => {
     })
   })
 
+  // B3 r1 (fix 1, decisión del coordinador): la regla de MAYOR importe sólo en cuentas con un cobro con saldo. Sin saldo, la forma sale del
+  // cobro que resuelve el emisor, EXACTAMENTE como en la base `4a558eccc` (`paymentMethod: pay.method`, `tenderSatFormaPago: pay.… ?? null`).
+  describe('r1 fix 1 · cuenta mixta SIN saldo: la forma es la de siempre (la del cobro con comercio), aunque otra forma cobre más', () => {
+    const tarjeta = (monto: number) => ({
+      method: 'CREDIT_CARD',
+      merchantAccountId: 'm1',
+      ecommerceMerchantId: null,
+      tenderSatFormaPago: null,
+      amount: D(monto),
+      type: 'REGULAR',
+      tenderType: null,
+    })
+    const sinComercio = (method: string, monto: number, tenderSatFormaPago: string | null = null) => ({
+      method,
+      merchantAccountId: null,
+      ecommerceMerchantId: null,
+      tenderSatFormaPago,
+      amount: D(monto),
+      type: 'REGULAR',
+      tenderType: null,
+    })
+
+    it('🔴 tarjeta $16 (comercio) + efectivo $100, factura del personal ⇒ sigue CREDIT_CARD / null (forma 04), no la del efectivo', async () => {
+      orderMock.mockResolvedValue(cuenta({ payments: [tarjeta(16), sinComercio('CASH', 100)] }))
+      cfgMock.mockResolvedValue({ facturacionEnabled: true, autofacturaEnabled: true, fiscalEmisor: emisor })
+      const bundle = await loadOrderForCfdiFromDb('o1', { permitirEfectivo: true })
+      expect(bundle).not.toBeNull()
+      expect([bundle!.paymentMethod, bundle!.tenderSatFormaPago]).toEqual(['CREDIT_CARD', null])
+      expect(mapFormaPago(bundle!.paymentMethod, bundle!.tenderSatFormaPago)).toBe('04')
+      expect(bundle!.unsupportedReasons).toBeUndefined()
+    })
+
+    it('🔴 tarjeta $16 (comercio) + OTHER sin forma SAT $100 ⇒ sigue timbrando con la forma de la tarjeta (04), no se detiene en 99', async () => {
+      orderMock.mockResolvedValue(cuenta({ payments: [tarjeta(16), sinComercio('OTHER', 100)] }))
+      cfgMock.mockResolvedValue({ facturacionEnabled: true, autofacturaEnabled: true, fiscalEmisor: emisor })
+      const bundle = await loadOrderForCfdiFromDb('o1')
+      expect(bundle).not.toBeNull()
+      expect([bundle!.paymentMethod, bundle!.tenderSatFormaPago]).toEqual(['CREDIT_CARD', null])
+      expect(mapFormaPago(bundle!.paymentMethod, bundle!.tenderSatFormaPago)).toBe('04')
+      expect(bundle!.unsupportedReasons).toBeUndefined()
+    })
+  })
+
+  it('🔴 r1 fix 3 · cuenta MEZCLADA (un renglón de tarjeta + mercancía; A5 no la deja nacer): se detiene con el motivo de tarjetas', async () => {
+    orderMock.mockResolvedValue(
+      cuenta({
+        subtotal: D(600),
+        total: D(616),
+        payments: [
+          { method: 'CREDIT_CARD', merchantAccountId: 'm1', ecommerceMerchantId: null, amount: D(616), type: 'REGULAR', tenderType: null },
+        ],
+        items: [
+          {
+            productName: 'Tarjeta de regalo',
+            quantity: 1,
+            unitPrice: D(500),
+            discountAmount: D(0),
+            total: D(500),
+            weightQuantity: null,
+            modifiers: [],
+            ivaTratamiento: 'NO_OBJETO',
+            giftCardId: 'gc1',
+            product: null,
+          },
+          renglon16,
+        ],
+      }),
+    )
+    cfgMock.mockResolvedValue({ facturacionEnabled: true, autofacturaEnabled: true, fiscalEmisor: emisor })
+    const bundle = await loadOrderForCfdiFromDb('o1')
+    expect(bundle?.unsupportedReasons).toEqual([MOTIVO_TARJETA_DE_REGALO])
+  })
+
   it('el select pide la marca del tender de cada cobro y la de cada renglón', async () => {
     orderMock.mockResolvedValue(null)
     await loadOrderForCfdiFromDb('o1')

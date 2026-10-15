@@ -2361,7 +2361,8 @@ export async function loadOrderForCfdiFromDb(
 
   // Tarjetas de regalo (spec §7): una cuenta de VENTA de tarjetas nunca se factura al venderse. Este motivo sustituye a los demás
   // para que el ticket (sin autofactura) y el portal digan exactamente por qué; y con un motivo, el cuadre de abajo no corre.
-  if (order.items.length > 0 && order.items.every(it => !!it.giftCardId)) {
+  // B3 r1 (fix 3): `some` (falla cerrada): una cuenta mezclada (A5 no la deja nacer) tampoco se factura.
+  if (order.items.some(it => !!it.giftCardId)) {
     unsupportedReasons.splice(0, unsupportedReasons.length, MOTIVO_TARJETA_DE_REGALO)
   }
 
@@ -2407,9 +2408,11 @@ export async function loadOrderForCfdiFromDb(
     }
   }
 
-  // r1 B-2 (Anexo 20, spec §7): la forma del CFDI es la de MAYOR importe, con la MISMA regla que la global. `pay` sigue siendo
-  // sólo quien resuelve el emisor (el cobro con comercio, arriba): $500 de saldo + $100 con tarjeta ⇒ 01, no la forma de la tarjeta.
-  const porForma = formaGanadoraDeCobros(pays).pagos[0] ?? pay
+  // r1 B-2 (Anexo 20, spec §7): en una cuenta con cobro con SALDO, la forma del CFDI es la de MAYOR importe, con la MISMA regla que la
+  // global; `pay` sigue siendo sólo quien resuelve el emisor (el cobro con comercio, arriba): $500 de saldo + $100 con tarjeta ⇒ 01.
+  // B3 r1 (fix 1): SÓLO con saldo. Sin él, la forma es la de siempre (la de `pay`): generalizar la regla es decisión del proyecto fiscal.
+  const conSaldo = pays.some(pp => isGiftCardTenderKind(pp.tenderType?.systemKind))
+  const porForma = conSaldo ? (formaGanadoraDeCobros(pays).pagos[0] ?? pay) : pay
   return {
     venueId: order.venueId,
     venueSlug: order.venue.slug,

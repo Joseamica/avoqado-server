@@ -441,8 +441,11 @@ export type ConfigFiscal = { fiscalEmisorId: string; facturacionEnabled: boolean
  * Precondición: `pagos` son SÓLO los cobros elegibles (`COBRO` de `cfdiGlobal.service.ts`: completados, tipo `REGULAR`/`FAST`/nulo; nunca `TEST` ni reembolsos).
  */
 export function pertenenciaAlEmisor(
-  pagos: Array<{ method: string; conComercio: boolean; config: ConfigFiscal | null }>,
-  emisor: { id: string; invoiceCashSales: boolean; includeOffTerminalSalesInGlobal: boolean },
+  // Tarjetas de regalo (B3 r1): `saldoDeRegalo` = cobro con saldo (tender de sistema GIFT_CARD).
+  pagos: Array<{ method: string; conComercio: boolean; config: ConfigFiscal | null; saldoDeRegalo?: boolean }>,
+  // Tarjetas de regalo (B3 r1): `comercioEnLaGlobal` = algún comercio de este RFC entra a la global (`configQueEntraALaGlobal`; lo contrario de
+  // «apagada» de `estaApagadaLaGlobal` con un RFC y el interruptor apagado). Sin el dato, `false`: la clase de siempre.
+  emisor: { id: string; invoiceCashSales: boolean; includeOffTerminalSalesInGlobal: boolean; comercioEnLaGlobal?: boolean },
   unSoloEmisor: boolean,
 ): Pertenencia {
   const conComercio = pagos.filter(p => p.conComercio)
@@ -452,7 +455,10 @@ export function pertenenciaAlEmisor(
   // (`includeOffTerminalSalesInGlobal`, apagado de fábrica), y el efectivo además con «Facturar efectivo».
   if (!conComercio.length) {
     if (!unSoloEmisor) return 'SIN_EMISOR'
-    if (!emisor.includeOffTerminalSalesInGlobal) return 'SIN_TERMINAL'
+    // Tarjetas de regalo (B3 r1, opción A del coordinador): el canje con SALDO cuenta como de terminal, pero sólo con la global de Avoqado
+    // ENCENDIDA para este RFC. Apagada, la global la emite el contador: Avoqado nunca timbra un segundo CFDI del mismo ingreso.
+    const canje = emisor.comercioEnLaGlobal === true && pagos.some(p => p.saldoDeRegalo === true)
+    if (!emisor.includeOffTerminalSalesInGlobal && !canje) return 'SIN_TERMINAL'
     return efectivoFuera ? 'EFECTIVO' : 'CANDIDATA'
   }
   const nuestros = conComercio.filter(p => p.config?.fiscalEmisorId === emisor.id)

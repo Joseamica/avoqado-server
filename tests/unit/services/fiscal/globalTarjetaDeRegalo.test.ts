@@ -4,7 +4,12 @@
  */
 import { Prisma } from '@prisma/client'
 import { ORDER_SELECT, ticketParaGlobal } from '@/services/fiscal/cfdiGlobal.service'
-import { MOTIVOS_DE_CONFIGURACION, MOTIVOS_DE_IVA, TEXTO_EXCLUSION_GLOBAL } from '@/services/fiscal/globalPorTratamiento'
+import {
+  MOTIVOS_DE_CONFIGURACION,
+  MOTIVOS_DE_IVA,
+  TEXTO_EXCLUSION_GLOBAL,
+  pertenenciaAlEmisor,
+} from '@/services/fiscal/globalPorTratamiento'
 
 const Dc = (n: number) => new Prisma.Decimal(n)
 const renglonDeTarjeta = (id: string, total: number) => ({
@@ -98,7 +103,87 @@ describe('ticketParaGlobal · tarjetas de regalo', () => {
     expect(MOTIVOS_DE_CONFIGURACION as readonly string[]).not.toContain('TARJETA_DE_REGALO')
   })
 
+  it('🔴 r1 fix 3 · cuenta MEZCLADA (tarjeta + mercancía; A5 no la deja nacer): sale con TARJETA_DE_REGALO, no entra el renglón de tarjeta como objeto 01', () => {
+    expect(ticketParaGlobal(ticket([renglonDeTarjeta('a', 500), renglonDe16('playera', 116)], [cobro(616)], 616) as any)).toEqual({
+      ok: false,
+      motivo: 'TARJETA_DE_REGALO',
+      detalle: TEXTO_EXCLUSION_GLOBAL.TARJETA_DE_REGALO,
+    })
+  })
+
   it('la captura lee la marca de cada renglón', () => {
     expect(ORDER_SELECT.items.select.giftCardId).toBe(true)
+  })
+})
+
+/**
+ * B3 r1 (fix 2, opción A del coordinador): el canje sólo con SALDO no tiene comercio, así que caía en `SIN_TERMINAL` con el interruptor de
+ * fábrica y ese ingreso nunca se facturaba (la venta de la tarjeta tampoco). Ahora el cobro con saldo cuenta como de terminal, pero SÓLO si la
+ * global de Avoqado está encendida para ese RFC (algún comercio suyo en la global, `comercioEnLaGlobal`). Apagada, la emite el contador y
+ * Avoqado nunca timbra un segundo CFDI del mismo ingreso. Toda venta SIN saldo conserva su clase exacta.
+ */
+describe('pertenenciaAlEmisor · canje con saldo (B3 r1, fix 2)', () => {
+  const e = { id: 'e1', invoiceCashSales: true, includeOffTerminalSalesInGlobal: false }
+  const encendida = { ...e, comercioEnLaGlobal: true }
+  const apagada = { ...e, comercioEnLaGlobal: false }
+  const ok = { fiscalEmisorId: 'e1', facturacionEnabled: true, includeInGlobal: true }
+  const saldo = { method: 'OTHER', conComercio: false, config: null, saldoDeRegalo: true }
+  const efectivo = { method: 'CASH', conComercio: false, config: null }
+  const transferencia = { method: 'BANK_TRANSFER', conComercio: false, config: null }
+  const vale = { method: 'OTHER', conComercio: false, config: null }
+  const tarjeta = (config: any) => ({ method: 'CREDIT_CARD', conComercio: true, config })
+
+  it.each([
+    ['🔴 (a) global ENCENDIDA + canje sólo con saldo ⇒ CANDIDATA', [saldo], encendida, true, 'CANDIDATA'],
+    ['🔴 (b) global APAGADA (Testarudo) + canje sólo con saldo ⇒ SIN_TERMINAL', [saldo], apagada, true, 'SIN_TERMINAL'],
+    ['(b) sin el dato de la global (quien no lo manda) ⇒ SIN_TERMINAL, como antes', [saldo], e, true, 'SIN_TERMINAL'],
+    ['🔴 encendida + saldo y efectivo, «facturar efectivo» encendido ⇒ CANDIDATA entera', [saldo, efectivo], encendida, true, 'CANDIDATA'],
+    [
+      '🔴 encendida + saldo y efectivo, «facturar efectivo» APAGADO ⇒ EFECTIVO (igual que tarjeta + efectivo)',
+      [saldo, efectivo],
+      { ...encendida, invoiceCashSales: false },
+      true,
+      'EFECTIVO',
+    ],
+    ['encendida + canje con VARIOS RFC ⇒ SIN_EMISOR (sin comercio nadie sabe de quién es)', [saldo], encendida, false, 'SIN_EMISOR'],
+    [
+      'interruptor encendido + canje ⇒ CANDIDATA aunque la global esté «apagada» (regla de antes)',
+      [saldo],
+      { ...apagada, includeOffTerminalSalesInGlobal: true },
+      true,
+      'CANDIDATA',
+    ],
+    ['saldo + tarjeta nuestra ⇒ manda el comercio (regla de antes)', [saldo, tarjeta(ok)], apagada, true, 'CANDIDATA'],
+  ])('%s', (_n, pagos, emisor, unSolo, esperado) => {
+    expect(pertenenciaAlEmisor(pagos as any, emisor as any, unSolo as boolean)).toBe(esperado)
+  })
+
+  it('🔴 (c) venta fuera de la terminal SIN saldo, con el interruptor apagado ⇒ SIN_TERMINAL con la global encendida y apagada', () => {
+    for (const pagos of [[efectivo], [transferencia], [vale], [efectivo, transferencia]])
+      for (const emisor of [encendida, apagada, e]) expect(pertenenciaAlEmisor(pagos as any, emisor as any, true)).toBe('SIN_TERMINAL')
+  })
+
+  it('🔴 toda venta SIN saldo conserva su clase: con la global encendida, apagada o sin el dato, da lo mismo', () => {
+    const configs = [ok, null, { ...ok, fiscalEmisorId: 'e2' }, { ...ok, facturacionEnabled: false }, { ...ok, includeInGlobal: false }]
+    const cobros = [efectivo, transferencia, vale, ...configs.map(tarjeta)]
+    const juegos: any[][] = [[]]
+    for (const a of cobros) {
+      juegos.push([a])
+      for (const b of cobros) juegos.push([a, b])
+    }
+    let comparados = 0
+    for (const pagos of juegos)
+      for (const invoiceCashSales of [true, false])
+        for (const includeOffTerminalSalesInGlobal of [true, false])
+          for (const unSolo of [true, false]) {
+            const base = { id: 'e1', invoiceCashSales, includeOffTerminalSalesInGlobal }
+            const sinDato = pertenenciaAlEmisor(pagos, base, unSolo)
+            expect([
+              pertenenciaAlEmisor(pagos, { ...base, comercioEnLaGlobal: true } as any, unSolo),
+              pertenenciaAlEmisor(pagos, { ...base, comercioEnLaGlobal: false } as any, unSolo),
+            ]).toEqual([sinDato, sinDato])
+            comparados++
+          }
+    expect(comparados).toBe((1 + 8 + 64) * 8)
   })
 })

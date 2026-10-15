@@ -47,6 +47,7 @@ import {
 } from './globalPeriod'
 import { validateBeforeStamp } from './cfdiValidation'
 import { formaGanadoraDeCobros } from './formaDePagoGanadora'
+import { WHERE_COBRO_ES_SALDO_DE_REGALO } from '../giftCards/giftCardMarks'
 import type { CfdiItemInput, GlobalInvoiceParams } from './providers/fiscal-provider.interface'
 import { bloquearOrdenesParaFacturar } from './admisionIva'
 import { liberarSellosDe, sellarRenglones } from './sellosIva'
@@ -2370,6 +2371,19 @@ export function dondePertenece(
   // Ajuste del founder (7-oct): lo cobrado SÓLO fuera de la terminal (ningún cobro con comercio), con un solo RFC, se revisa como efectivo o
   // candidata únicamente si el dueño pidió esas ventas en su global; si no, es SIN_TERMINAL. Con varios RFC sigue siendo SIN_EMISOR.
   const pedida = fueraDeTerminalPedida(emisor, unSoloEmisor)
+  // Tarjetas de regalo (B3 r1, opción A del coordinador): con un RFC y el interruptor apagado, una venta sin comercio CON un cobro con saldo
+  // se revisa como una de terminal (efectivo o candidata) sólo si la global de Avoqado está ENCENDIDA para este RFC: algún comercio suyo en
+  // ella (`configQueEntraALaGlobal`, la misma regla que `comercioEnLaGlobal`/`estaApagadaLaGlobal`). Apagada, sigue SIN_TERMINAL.
+  const canje: Prisma.OrderWhereInput | null =
+    unSoloEmisor && !emisor.includeOffTerminalSalesInGlobal
+      ? {
+          AND: [
+            ninguno(conComercio),
+            algun(WHERE_COBRO_ES_SALDO_DE_REGALO),
+            { venue: { fiscalEmisors: { some: { merchantConfigs: { some: configQueEntraALaGlobal(emisor.id) } } } } },
+          ],
+        }
+      : null
   switch (p) {
     case 'AJENA':
       return { AND: [ninguno(nuestro), algun(ajeno)] }
@@ -2382,6 +2396,7 @@ export function dondePertenece(
         OR: [
           { AND: [algun(compatible), ninguno(incompatible), conEfectivo] },
           pedida ? { AND: [ninguno(conComercio), conEfectivo] } : NUNCA,
+          ...(canje ? [{ AND: [canje, conEfectivo] }] : []),
         ],
       }
     case 'CANDIDATA':
@@ -2389,10 +2404,11 @@ export function dondePertenece(
         OR: [
           { AND: [algun(compatible), ninguno(incompatible), sinEfectivo] },
           pedida ? { AND: [ninguno(conComercio), sinEfectivo] } : NUNCA,
+          ...(canje ? [{ AND: [canje, sinEfectivo] }] : []),
         ],
       }
     case 'SIN_TERMINAL':
-      return unSoloEmisor && !emisor.includeOffTerminalSalesInGlobal ? ninguno(conComercio) : NUNCA
+      return canje ? { AND: [ninguno(conComercio), { NOT: canje }] } : NUNCA
   }
 }
 
@@ -3104,7 +3120,8 @@ export function ticketParaGlobal(o: GlobalCandidateOrder): TicketGlobal {
   // listado de excluidas, la captura y el conteo de corregidas lean siempre este motivo y no `SIN_PAGAR` ni `CONTRATO_DESCONOCIDO`:
   // sus renglones son NO_OBJETO ⇒ la cuenta es MIXTA ⇒ con IVA incluido ENTRARÍA a la global como concepto objeto 01. (Encima sólo queda
   // `DEVUELTA`, que pone `ticketsDeLaGlobal`: una venta de tarjetas cancelada con su dinero devuelto; fuera igual.)
-  if (o.items.length > 0 && o.items.every(it => !!it.giftCardId)) return fuera('TARJETA_DE_REGALO')
+  // B3 r1 (fix 3): `some` (falla cerrada): una cuenta mezclada (A5 no la deja nacer) sale entera, sin un concepto objeto 01 de tarjeta.
+  if (o.items.some(it => !!it.giftCardId)) return fuera('TARJETA_DE_REGALO')
   const pagos = o.payments.filter(p => esCobroElegible(p))
   if (!pagos.length) return fuera('SIN_PAGAR')
   const paidCents = pagos.reduce((s, p) => s + aCentavos(p.amount), 0)
