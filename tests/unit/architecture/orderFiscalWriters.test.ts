@@ -575,7 +575,13 @@ const WRITERS: Record<string, Writer> = {
     ],
   },
   // ── Payment lanes (pre-existing, unchanged by Plan 3b; lock order guarded by the payment inventory) ──
-  'src/services/mobile/order.mobile.service.ts#payCashOrder': { class: 'LOCKED', lock: LOCK, proof: PAYMENT_LANE('payCashOrder') },
+  // Tarea A7: la escritura de la Order se movió al núcleo `registrarAbonoEnTx`; `payCashOrder` sigue ABRIENDO la
+  // transacción con el presupuesto único (ORDER_LOCK_TRANSACTIONS) y el núcleo toma el candado (helper de candado).
+  'src/services/mobile/order.mobile.service.ts#registrarAbonoEnTx': {
+    class: 'LOCKED',
+    lock: LOCK,
+    proof: PAYMENT_LANE('registrarAbonoEnTx'),
+  },
   'src/services/dashboard/order.dashboard.service.ts#settleOrder': { class: 'LOCKED', lock: LOCK, proof: PAYMENT_LANE('settleOrder') },
   'src/services/dashboard/manualPayment.service.ts#createManualPayment': {
     class: 'LOCKED',

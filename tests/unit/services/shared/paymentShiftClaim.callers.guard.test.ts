@@ -97,11 +97,13 @@ const INVENTORY: Record<string, InventoryDecision> = {
     lane: 'deliveryIngestion',
     reason: 'delivery platform settles the money',
   },
-  'src/services/mobile/order.mobile.service.ts#payCashOrder#create': {
+  // Tarea A7 (tarjetas de regalo): el núcleo del abono se extrajo de `payCashOrder` sin cambiar comportamiento. Lo abren
+  // `payCashOrder` y `payGiftCardBalanceOnOrder` con `prisma.$transaction` de ESTE archivo (molde `writeRefundInTx`).
+  'src/services/mobile/order.mobile.service.ts#registrarAbonoEnTx#create': {
     decision: 'include',
     lane: 'payCashOrder',
-    auditFunction: 'payCashOrder',
-    transactionPath: [],
+    auditFunction: 'registrarAbonoEnTx',
+    transactionPath: ['registrarAbonoEnTx'],
   },
   'src/services/mobile/refund.mobile.service.ts#createRefund#create': {
     decision: 'include',
@@ -3110,7 +3112,7 @@ describe('paymentShiftClaim — inventario AST de carriles de caja', () => {
 
   it('las rutas con Order existente bloquean Order antes de Payment/Shift', () => {
     const lanes = [
-      ['src/services/mobile/order.mobile.service.ts', 'payCashOrder', 'claimShiftForCapturedPayment'],
+      ['src/services/mobile/order.mobile.service.ts', 'registrarAbonoEnTx', 'claimShiftForCapturedPayment'],
       ['src/services/tpv/payment.tpv.service.ts', 'recordOrderPayment', 'claimShiftForCompletedPayment'],
       ['src/services/dashboard/order.dashboard.service.ts', 'settleOrder', 'claimShiftForCapturedPayment'],
     ] as const
@@ -3215,7 +3217,7 @@ describe('paymentShiftClaim — inventario AST de carriles de caja', () => {
 
   it('mobile/TPV preservan session → tickets → Order → Shift para vales por área', () => {
     for (const [file, functionName, areaLockCallee] of [
-      ['src/services/mobile/order.mobile.service.ts', 'payCashOrder', 'areaTicketPayment.lockAreaTicketCheckoutForPayment'],
+      ['src/services/mobile/order.mobile.service.ts', 'registrarAbonoEnTx', 'areaTicketPayment.lockAreaTicketCheckoutForPayment'],
       // S0 (13-sep): en la TPV el CANDADO de vales es la jerarquía (session → tickets → Order); la PREPARACIÓN del
       // intento (`lockAreaTicketCheckoutForPayment`) va después del arbitraje de la solicitud — ver la prueba siguiente.
       ['src/services/tpv/payment.tpv.service.ts', 'recordOrderPayment', 'areaTicketPayment.lockAreaTicketCheckoutHierarchy'],
