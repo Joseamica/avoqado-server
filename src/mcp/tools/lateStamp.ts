@@ -1,6 +1,9 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
+import { formatInTimeZone } from 'date-fns-tz'
+import { PaymentType, TransactionStatus } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
+import { DEFAULT_TIMEZONE } from '@/utils/datetime'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
@@ -10,6 +13,18 @@ import { previewSaleStamp, type SaleStampPreview } from '@/services/shared/loyal
 
 /** Cuántas ventas candidatas se le muestran al operador cuando el número de orden se repite (se pide una más para saber si hay más). */
 const CANDIDATAS_A_MOSTRAR = 5
+
+const NO_ENCONTRE_LA_VENTA = 'No encontré esa venta en este negocio.'
+const NO_EXISTE_EL_CLIENTE = 'Ese cliente no existe en este negocio. Búscalo primero con find_customer.'
+
+/**
+ * El servicio del POS (`attachCustomerToOrder`) lanza estos dos en inglés. Aquí sólo llegan por una carrera (la venta o el cliente
+ * desaparecieron entre la vista previa y el `confirm`): el operador los lee con los mismos textos de la validación de arriba.
+ */
+const EN_ESPANOL = new Map<string, string>([
+  ['Order not found', NO_ENCONTRE_LA_VENTA],
+  ['Customer not found', NO_EXISTE_EL_CLIENTE],
+])
 
 /**
  * «¿suma sello?» en palabras del operador. Misma regla que el POS (`loyaltyOnLateCustomer.ts`).
@@ -48,7 +63,7 @@ export function registerLateStampTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'attach_customer_to_sale',
-    'Link a customer to a sale that was ALREADY charged (the cashier forgot to add them at checkout). The receipt and invoice then carry that customer and, if the venue runs a stamp card, the sale adds its stamp when it qualifies: fully paid, paid less than 24 hours ago, no other main customer on it, and the customer has not reached the stamps-per-day limit. Identify the sale with exactly ONE of orderNumber (as printed on the receipt) or paymentId, and the customer with customerId (look it up first with find_customer). By DEFAULT it only PREVIEWS ("Venta X · cliente Y · ¿suma sello? sí/no y por qué"); call again with confirm:true to link. If the order number matches more than one sale it lists them and asks which — it never picks one. Requires payments:create.',
+    'Link a customer to a sale that was ALREADY charged (the cashier forgot to add them at checkout). The receipt and invoice then carry that customer and, if the venue runs a stamp card, the sale adds its stamp when it qualifies: fully paid, paid less than 24 hours ago, no other main customer on it, and the customer has not reached the stamps-per-day limit. Identify the sale with exactly ONE of orderNumber (as printed on the receipt) or paymentId, and the customer with customerId (look it up first with find_customer). By DEFAULT it only PREVIEWS ("Venta X · cliente Y · ¿suma sello? sí/no y por qué"); call again with confirm:true to link. If the order number matches more than one sale it lists them, each with its paymentId and venue-local time, and asks which — it never picks one; call again with that paymentId. Requires payments:create.',
     {
       venueId: z.string().describe('Venue where the sale was charged (must be in your scope)'),
       orderNumber: z.string().optional().describe('Order number as printed on the receipt, e.g. ORD-1790121567183'),
@@ -81,22 +96,43 @@ export function registerLateStampTools(server: McpServer, scope: McpScope) {
       } else {
         const ventas = await prisma.order.findMany({
           where: { venueId, orderNumber: { equals: numero!, mode: 'insensitive' } },
-          select: { id: true, orderNumber: true, total: true, createdAt: true, paymentStatus: true },
+          select: {
+            id: true,
+            orderNumber: true,
+            total: true,
+            createdAt: true,
+            paymentStatus: true,
+            // El id del último COBRO completado: es lo que el operador le pasa de vuelta a esta tool (`paymentId`) para elegir una de
+            // las ventas con el mismo número. 🔴 `type` es opcional: `not REFUND` solo dejaría fuera los NULL (mismo filtro que el
+            // ancla del sello tardío en `loyaltyOnLateCustomer.ts`).
+            payments: {
+              where: { status: TransactionStatus.COMPLETED, OR: [{ type: null }, { type: { not: PaymentType.REFUND } }] },
+              select: { id: true },
+              orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+              take: 1,
+            },
+          },
           orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
           take: CANDIDATAS_A_MOSTRAR + 1,
         })
         if (ventas.length > 1) {
           const hayMasCoincidencias = ventas.length > CANDIDATAS_A_MOSTRAR
+          const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
+          const timezone = venue?.timezone || DEFAULT_TIMEZONE
           return text({
             ok: false,
             ambiguous: true,
-            error: `El número ${numero} coincide con varias ventas de este negocio: dime cuál (o pásame el id del pago).${
+            error: `El número ${numero} coincide con varias ventas de este negocio: dime cuál y pásame el paymentId de la que sea.${
               hayMasCoincidencias ? ` Te muestro las ${CANDIDATAS_A_MOSTRAR} más recientes; hay más.` : ''
             }`,
+            timezone,
             matches: ventas.slice(0, CANDIDATAS_A_MOSTRAR).map(v => ({
               orderNumber: v.orderNumber,
+              // null = la cuenta no tiene ningún cobro completado (sigue abierta): no hay pago con qué elegirla.
+              paymentId: v.payments[0]?.id ?? null,
               total: Number(v.total),
               createdAt: v.createdAt.toISOString(),
+              createdAtLocal: formatInTimeZone(v.createdAt, timezone, 'yyyy-MM-dd HH:mm'),
               paymentStatus: v.paymentStatus,
             })),
             hayMasCoincidencias,
@@ -104,13 +140,13 @@ export function registerLateStampTools(server: McpServer, scope: McpScope) {
         }
         venta = ventas[0] ?? null
       }
-      if (!venta) return text({ ok: false, error: 'No encontré esa venta en este negocio.' })
+      if (!venta) return text({ ok: false, error: NO_ENCONTRE_LA_VENTA })
 
       const cliente = await prisma.customer.findFirst({
         where: { id: customerId, venueId },
         select: { id: true, firstName: true, lastName: true, phone: true },
       })
-      if (!cliente) return text({ ok: false, error: 'Ese cliente no existe en este negocio. Búscalo primero con find_customer.' })
+      if (!cliente) return text({ ok: false, error: NO_EXISTE_EL_CLIENTE })
       const nombre = `${cliente.firstName ?? ''} ${cliente.lastName ?? ''}`.trim() || cliente.phone || '(sin nombre)'
 
       if (!confirm) {
@@ -149,7 +185,8 @@ export function registerLateStampTools(server: McpServer, scope: McpScope) {
         })
         return text({ ok: true, venta: venta.orderNumber, cliente: nombre, loyalty: resultado.loyalty })
       } catch (err) {
-        return text({ ok: false, error: (err as Error).message })
+        const mensaje = (err as Error).message
+        return text({ ok: false, error: EN_ESPANOL.get(mensaje) ?? mensaje })
       }
     },
   )

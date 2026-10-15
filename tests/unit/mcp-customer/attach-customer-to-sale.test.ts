@@ -12,6 +12,7 @@ const mockAudit = jest.fn()
 const mockOrderFindMany = jest.fn()
 const mockPaymentFindFirst = jest.fn()
 const mockCustomerFindFirst = jest.fn()
+const mockVenueFindUnique = jest.fn()
 const mockRequirePermission = jest.fn()
 
 jest.mock('@/services/mobile/order.mobile.service', () => ({ attachCustomerToOrder: (...a: unknown[]) => mockAttach(...a) }))
@@ -32,6 +33,7 @@ jest.mock('@/utils/prismaClient', () => ({
     order: { findMany: (...a: unknown[]) => mockOrderFindMany(...a) },
     payment: { findFirst: (...a: unknown[]) => mockPaymentFindFirst(...a) },
     customer: { findFirst: (...a: unknown[]) => mockCustomerFindFirst(...a) },
+    venue: { findUnique: (...a: unknown[]) => mockVenueFindUnique(...a) },
   },
 }))
 
@@ -46,6 +48,7 @@ const VENTA = {
   total: 85,
   createdAt: new Date('2026-10-14T16:09:00Z'),
   paymentStatus: 'PAID',
+  payments: [{ id: 'pay-1' }],
 }
 const DANY = { id: 'cust-1', firstName: 'Dany', lastName: null, phone: '+525543453965' }
 const VISTA_SI = {
@@ -66,6 +69,7 @@ beforeEach(() => {
   mockCustomerFindFirst.mockResolvedValue(DANY)
   mockPreview.mockResolvedValue(VISTA_SI)
   mockAttach.mockResolvedValue({ id: 'order-1', loyalty: SELLO })
+  mockVenueFindUnique.mockResolvedValue({ timezone: 'America/Mexico_City' })
 })
 
 describe('attach_customer_to_sale', () => {
@@ -96,6 +100,42 @@ describe('attach_customer_to_sale', () => {
     expect(out).toMatchObject({ ok: false, ambiguous: true })
     expect(out.matches).toHaveLength(2)
     expect(mockAttach).not.toHaveBeenCalled()
+  })
+
+  it('🔴 cada candidata trae el paymentId de su cobro (algo que la tool SÍ acepta) y con él se resuelve la venta', async () => {
+    const otra = { ...VENTA, id: 'order-2', createdAt: new Date('2026-10-14T18:30:00Z'), payments: [{ id: 'pay-2' }] }
+    mockOrderFindMany.mockResolvedValue([VENTA, otra])
+    const out = parse(await call({ venueId: 'v1', orderNumber: VENTA.orderNumber, customerId: 'cust-1' }))
+    expect(out.ambiguous).toBe(true)
+    expect(out.error).toMatch(/pásame el paymentId de la que sea/)
+    expect(out.matches.map((m: { paymentId: string }) => m.paymentId)).toEqual(['pay-1', 'pay-2'])
+    // El cobro que se lee es el último COMPLETADO que no es reembolso, y `type` puede venir NULL (mismo filtro que el sello tardío).
+    expect(mockOrderFindMany.mock.calls[0][0].select.payments).toEqual({
+      where: { status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] },
+      select: { id: true },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: 1,
+    })
+
+    mockPaymentFindFirst.mockResolvedValue({ order: { id: 'order-2', orderNumber: VENTA.orderNumber } })
+    const elegida = parse(await call({ venueId: 'v1', paymentId: out.matches[1].paymentId, customerId: 'cust-1' }))
+    expect(mockPaymentFindFirst.mock.calls[0][0].where).toEqual({ id: 'pay-2', venueId: 'v1' })
+    expect(elegida.requiresConfirmation).toBe(true)
+    expect(mockPreview).toHaveBeenCalledWith({ venueId: 'v1', orderId: 'order-2', customerId: 'cust-1' })
+  })
+
+  it('candidata sin cobro completado (cuenta abierta): paymentId null, no inventa uno', async () => {
+    mockOrderFindMany.mockResolvedValue([VENTA, { ...VENTA, id: 'order-2', payments: [] }])
+    const out = parse(await call({ venueId: 'v1', orderNumber: VENTA.orderNumber, customerId: 'cust-1' }))
+    expect(out.matches[1].paymentId).toBeNull()
+  })
+
+  it('cada candidata trae también la hora LOCAL del negocio (16:09Z = 10:09 en CDMX)', async () => {
+    mockOrderFindMany.mockResolvedValue([VENTA, { ...VENTA, id: 'order-2' }])
+    const out = parse(await call({ venueId: 'v1', orderNumber: VENTA.orderNumber, customerId: 'cust-1' }))
+    expect(mockVenueFindUnique.mock.calls[0][0]).toEqual({ where: { id: 'v1' }, select: { timezone: true } })
+    expect(out.timezone).toBe('America/Mexico_City')
+    expect(out.matches[0]).toMatchObject({ createdAt: '2026-10-14T16:09:00.000Z', createdAtLocal: '2026-10-14 10:09' })
   })
 
   it('número con más coincidencias de las que se muestran: lo DICE (no recorta en silencio) y no elige', async () => {
@@ -166,6 +206,16 @@ describe('attach_customer_to_sale', () => {
       venueId: 'v1',
       data: { customerId: 'cust-1', orderNumber: VENTA.orderNumber, stamped: true, reason: null },
     })
+  })
+
+  it.each([
+    ['Order not found', 'No encontré esa venta en este negocio.'],
+    ['Customer not found', 'Ese cliente no existe en este negocio. Búscalo primero con find_customer.'],
+  ])('carrera: el servicio dice «%s» y el operador lo lee en español', async (delServicio, enEspanol) => {
+    mockAttach.mockRejectedValue(new Error(delServicio))
+    const out = parse(await call({ venueId: 'v1', orderNumber: VENTA.orderNumber, customerId: 'cust-1', confirm: true }))
+    expect(out).toEqual({ ok: false, error: enEspanol })
+    expect(mockAudit).not.toHaveBeenCalled()
   })
 
   it('cliente de otro negocio: no escribe', async () => {
