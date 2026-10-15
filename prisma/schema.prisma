@@ -7183,6 +7183,10 @@ model MerchantRevenueShare {
   /// El resto va al agregador. `null` cuando es venta directa.
   avoqadoShareOfAggregatorMargin Decimal? @db.Decimal(5, 4)
 
+  /// Cargo FINAL del banco/intermediario sobre lo recibido tras la tarifa del procesador.
+  /// No se suma IVA ni forma parte del margen del procesador. 0 conserva acuerdos anteriores.
+  intermediaryFeeRate Decimal @default(0) @db.Decimal(7, 6)
+
   taxRate   Decimal  @default(0.16) @db.Decimal(5, 4)
   active    Boolean  @default(true)
   notes     String?

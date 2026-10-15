@@ -394,7 +394,6 @@ const INVENTARIO: Record<string, number> = {
   'src/services/organization/organization.service.ts': 7,
   'src/services/partner/partner.service.ts': 1,
   'src/services/payments/reservation-deposit-webhook.service.ts': 3,
-  'src/services/payments/revenueShareReport.service.ts': 1,
   'src/services/printing/printConfig.service.ts': 4,
   'src/services/promoters/promoterLocation.service.ts': 3,
   'src/services/promoters/promoters.service.ts': 4,
