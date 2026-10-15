@@ -713,6 +713,9 @@ export interface TerminalSettingsScope {
   deviceUid?: string
 }
 
+/** Tiempos explícitos de las transacciones con candado de los ajustes (S1 de F1), los mismos del diseño de la pantalla del cliente. */
+const OPCIONES_DE_TRANSACCION_DE_AJUSTES = { timeout: 15_000, maxWait: 5_000 } as const
+
 function terminalWhere(tpvId: string, scope: TerminalSettingsScope): { id: string; venueId?: string } {
   return scope.venueId ? { id: tpvId, venueId: scope.venueId } : { id: tpvId }
 }
@@ -865,7 +868,7 @@ export async function updateTpvSettings(
     })
 
     return { venueId: terminal.venueId, newSettings, overrides }
-  })
+  }, OPCIONES_DE_TRANSACCION_DE_AJUSTES)
 
   // La bitácora va DESPUÉS del commit y fuera de la transacción: `logAction` nunca lanza y no puede tumbar un guardado
   // confirmado, ni quedar escrita si el guardado se deshace.
@@ -1273,10 +1276,13 @@ export async function updateVenueTpvSettings(venueId: string, settingsUpdate: Pa
   //    TODAS las terminales del negocio en UNA sentencia ordenada por id (el mismo orden que copiar el diseño: así no hay
   //    interbloqueo entre los dos) ANTES de leerlas. El horario del negocio y las terminales siguen en UNA transacción
   //    (todo o nada, auditoría de Codex C2), con el horario DESPUÉS de los candados: el mismo orden Terminal → VenueSettings
-  //    que el carril de la terminal PAX.
+  //    que el carril de la terminal PAX. `FOR NO KEY UPDATE` y no `FOR UPDATE`: sigue chocando con `lockTerminalRow`, con
+  //    copiar el diseño, con cualquier UPDATE y con otra cascada, pero NO con el KEY SHARE que toma un INSERT con llave
+  //    foránea a Terminal (p. ej. `TpvMessageDelivery` para todas las terminales del negocio, sin orden): con FOR UPDATE
+  //    eso podía interbloquearse (40P01) con esta cascada ordenada.
   const { terminalsCount, terminalWrites, terminalsUpdated } = await prisma.$transaction(async tx => {
     const bloqueadas = await tx.$queryRaw<{ id: string }[]>`
-      SELECT id FROM "Terminal" WHERE "venueId" = ${venueId} ORDER BY id FOR UPDATE
+      SELECT id FROM "Terminal" WHERE "venueId" = ${venueId} ORDER BY id FOR NO KEY UPDATE
     `
     if (bloqueadas.length === 0) {
       throw new NotFoundError('No hay terminales en este venue.')
@@ -1330,7 +1336,7 @@ export async function updateVenueTpvSettings(venueId: string, settingsUpdate: Pa
       }
     }
     return { terminalsCount: terminals.length, terminalWrites: resultados.length, terminalsUpdated: countUpdatedTerminals(resultados) }
-  })
+  }, OPCIONES_DE_TRANSACCION_DE_AJUSTES)
 
   const terminalsOmitted = terminalWrites - terminalsUpdated
   if (terminalsOmitted > 0) {

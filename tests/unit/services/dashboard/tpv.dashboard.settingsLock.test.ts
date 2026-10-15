@@ -2,9 +2,12 @@
 /**
  * S1 de F1 (Codex F1 r1 #2): `updateTpvSettings` toma el candado de la fila ANTES de leer, y lee y escribe por la
  * transacción. La transacción usa delegados PROPIOS: si alguien vuelve a leer o escribir con el cliente global, cae aquí.
+ * La bitácora va DESPUÉS del commit: si el commit falla, no queda ningún asiento (ronda de arreglos 1).
  */
+import { Prisma } from '@prisma/client'
 import { prismaMock } from '@tests/__helpers__/setup'
 import { NotFoundError } from '@/errors/AppError'
+import { logAction } from '@/services/dashboard/activity-log.service'
 import { updateTpvSettings, updateVenueTpvSettings } from '@/services/dashboard/tpv.dashboard.service'
 
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn() }))
@@ -13,8 +16,17 @@ const leida = {
   venueId: 'v1',
   config: { settings: { showTipScreen: true, showReviewScreen: true }, otra: 'se conserva' },
   configOverrides: null,
-  venue: { organizationId: null },
+  // Con organización: los defaults de la organización también se leen bajo el candado, por la transacción.
+  venue: { organizationId: 'org1' },
 }
+/** Los tiempos explícitos de las dos transacciones con candado (los mismos del diseño de la pantalla del cliente). */
+const OPCIONES = { timeout: 15_000, maxWait: 5_000 }
+/** El callback corre ENTERO y después el commit falla: lo que se haya hecho dentro «ocurrió» pero no se confirmó. */
+const commitQueFalla = (tx: unknown) =>
+  (async (cb: any) => {
+    await cb(tx)
+    throw new Error('falló el commit')
+  }) as any
 function txPropia(venueBajoCandado = 'v1') {
   return {
     $queryRaw: jest.fn().mockResolvedValue([{ id: 't1', venueId: venueBajoCandado }]),
@@ -33,6 +45,26 @@ describe('updateTpvSettings bajo el candado de la fila', () => {
     expect(tx.terminal.update).toHaveBeenCalledTimes(1)
     expect(prismaMock.terminal.findUnique).not.toHaveBeenCalled()
     expect(prismaMock.terminal.update).not.toHaveBeenCalled()
+    expect(prismaMock.$transaction).toHaveBeenCalledWith(expect.any(Function), OPCIONES)
+  })
+
+  it('🔴 los defaults de la organización se leen por la transacción (nunca por el cliente global) y deciden las excepciones', async () => {
+    const tx = txPropia()
+    // La organización ya trae la propina apagada: apagarla en la terminal NO es una excepción propia.
+    tx.organizationAttendanceConfig.findUnique.mockResolvedValue({ settings: { showTipScreen: false } })
+    prismaMock.$transaction.mockImplementation((cb: any) => cb(tx))
+    await updateTpvSettings('t1', { showTipScreen: false }, { venueId: 'v1' })
+    expect(tx.organizationAttendanceConfig.findUnique).toHaveBeenCalledWith(expect.objectContaining({ where: { organizationId: 'org1' } }))
+    expect(prismaMock.organizationAttendanceConfig.findUnique).not.toHaveBeenCalled()
+    expect(tx.terminal.update.mock.calls[0][0].data.configOverrides).toBe(Prisma.JsonNull)
+  })
+
+  it('🔴 si el COMMIT falla, no queda bitácora: el asiento va después de confirmar, fuera de la transacción', async () => {
+    const tx = txPropia()
+    prismaMock.$transaction.mockImplementation(commitQueFalla(tx))
+    await expect(updateTpvSettings('t1', { showTipScreen: false }, { venueId: 'v1' })).rejects.toThrow('falló el commit')
+    expect(tx.terminal.update).toHaveBeenCalledTimes(1) // el callback sí corrió entero
+    expect(logAction).not.toHaveBeenCalled()
   })
 
   it('la respuesta no cambia: los ajustes mezclados con lo pedido, y config conserva lo ajeno', async () => {
@@ -88,7 +120,7 @@ describe('updateVenueTpvSettings bajo los candados de las terminales del negocio
     prismaMock.$transaction.mockImplementation((cb: any) => cb(tx))
     await updateVenueTpvSettings('v1', { enableBarcodeScanner: false })
     expect(tx.$queryRaw).toHaveBeenCalledTimes(1)
-    expect((tx.$queryRaw.mock.calls[0][0] as TemplateStringsArray).join('?')).toMatch(/WHERE "venueId" = \? ORDER BY id FOR UPDATE/)
+    expect((tx.$queryRaw.mock.calls[0][0] as TemplateStringsArray).join('?')).toMatch(/WHERE "venueId" = \? ORDER BY id FOR NO KEY UPDATE/)
     expect(tx.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(tx.terminal.findMany.mock.invocationCallOrder[0])
     expect(tx.terminal.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { id: { in: ids } } }))
     expect(tx.terminal.updateMany).toHaveBeenCalledTimes(2)
@@ -98,6 +130,15 @@ describe('updateVenueTpvSettings bajo los candados de las terminales del negocio
     })
     expect(prismaMock.terminal.findMany).not.toHaveBeenCalled()
     expect(prismaMock.terminal.updateMany).not.toHaveBeenCalled()
+    expect(prismaMock.$transaction).toHaveBeenCalledWith(expect.any(Function), OPCIONES)
+  })
+
+  it('🔴 si el COMMIT de la cascada falla, no queda bitácora del negocio', async () => {
+    const tx = txDelNegocio()
+    prismaMock.$transaction.mockImplementation(commitQueFalla(tx))
+    await expect(updateVenueTpvSettings('v1', { enableBarcodeScanner: false })).rejects.toThrow('falló el commit')
+    expect(tx.terminal.updateMany).toHaveBeenCalledTimes(2) // el callback sí corrió entero
+    expect(logAction).not.toHaveBeenCalled()
   })
 
   it('el horario del negocio se escribe DESPUÉS de los candados y en la misma transacción', async () => {
