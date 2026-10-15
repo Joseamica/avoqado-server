@@ -2,7 +2,7 @@ import logger from '@/config/logger'
 import { DeviceFormFactor, Prisma, Terminal, TerminalStatus, TerminalType } from '@prisma/client'
 import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
 import { normalizeTerminalBrand } from '../../lib/providerDeviceCompatibility'
-import { countUpdatedTerminals, scopedTerminalWhere, writeScopedTerminal } from '../shared/terminalScopedWrites'
+import { countUpdatedTerminals, lockTerminalRow, scopedTerminalWhere, writeScopedTerminal } from '../shared/terminalScopedWrites'
 import { CreateTpvBody, PaginatedTerminalsResponse, UpdateTpvBody } from '../../schemas/dashboard/tpv.schema'
 import { venueStartOfDay } from '../../utils/datetime'
 import { normalizeTerminalSerialNumber } from '../../utils/terminalSerial'
@@ -736,9 +736,14 @@ interface ScopedTerminalSettingsWrite {
  * la prueba de arquitectura (`tests/unit/architecture/terminalVenueWriters.test.ts`) lee este `data` literal y
  * falla si alguien lo vuelve a abrir.
  */
-async function updateScopedTerminal(tpvId: string, scope: TerminalSettingsScope, campos: ScopedTerminalSettingsWrite): Promise<void> {
+async function updateScopedTerminal(
+  cliente: Prisma.TransactionClient,
+  tpvId: string,
+  scope: TerminalSettingsScope,
+  campos: ScopedTerminalSettingsWrite,
+): Promise<void> {
   try {
-    await prisma.terminal.update({
+    await cliente.terminal.update({
       where: terminalWhere(tpvId, scope),
       data: { config: campos.config, configOverrides: campos.configOverrides, updatedAt: new Date() },
     })
@@ -800,63 +805,73 @@ export async function updateTpvSettings(
   settingsUpdate: Partial<TpvSettings> & { trackPromoterLocation?: boolean | null },
   scope: TerminalSettingsScope = {},
 ): Promise<TpvSettings> {
-  // 1. Get terminal with venue → org relationship for org defaults lookup
-  const terminal = await prisma.terminal.findUnique({
-    where: terminalWhere(tpvId, scope),
-    select: {
-      venueId: true,
-      config: true,
-      configOverrides: true,
-      venue: { select: { organizationId: true } },
-    },
-  })
-
-  if (!terminal) {
-    throw new NotFoundError(`Terminal con ID ${tpvId} no encontrada.`)
-  }
-
   // Pull trackPromoterLocation out before it ever touches config.settings / the diff.
   const { trackPromoterLocation, ...restSettingsUpdate } = settingsUpdate
 
-  // 2. Get org defaults (if org exists)
-  const orgDefaults = await getOrgDefaultsForTerminal(terminal.venue.organizationId)
+  // 🔴 Leer y escribir BAJO el candado de la fila (S1 de F1, Codex F1 r1 #2). Antes se leía fuera de toda transacción y se
+  // escribía el JSON COMPLETO: dos guardados de llaves distintas (dos pestañas, o el POS y el dashboard) leían lo mismo y
+  // el segundo devolvía la llave del primero a su valor viejo, con 200 para los dos. `lockTerminalRow` es el MISMO candado
+  // del diseño de la pantalla del cliente y del gancho del cambio de negocio.
+  const { venueId, newSettings, overrides } = await prisma.$transaction(async tx => {
+    const bloqueada = await lockTerminalRow(tx, tpvId)
+    // Revalidación bajo el candado: si se mudó de negocio mientras esperábamos, el mismo 404 de siempre.
+    if (!bloqueada || (scope.venueId !== undefined && bloqueada.venueId !== scope.venueId)) {
+      throw new NotFoundError(`Terminal con ID ${tpvId} no encontrada.`)
+    }
 
-  // 3. Build full merged settings
-  const existingConfig = (terminal.config as any) || {}
-  const existingSettings = existingConfig.settings || {}
-  const newSettings: TpvSettings = {
-    ...DEFAULT_TPV_SETTINGS,
-    ...existingSettings,
-    ...restSettingsUpdate,
-  }
+    // 1. Get terminal with venue → org relationship for org defaults lookup (ya con el candado)
+    const terminal = await tx.terminal.findUnique({
+      where: terminalWhere(tpvId, scope),
+      select: { venueId: true, config: true, configOverrides: true, venue: { select: { organizationId: true } } },
+    })
+    if (!terminal) {
+      throw new NotFoundError(`Terminal con ID ${tpvId} no encontrada.`)
+    }
 
-  // 4. Compute overrides: only fields that differ from org defaults
-  const baseSettings = { ...DEFAULT_TPV_SETTINGS, ...orgDefaults }
-  const overrides = computeOverrides(newSettings, baseSettings)
+    // 2. Get org defaults (if org exists)
+    const orgDefaults = await getOrgDefaultsForTerminal(terminal.venue.organizationId, tx)
 
-  // 4b. Tri-state trackPromoterLocation override (explicit, not diff-based):
-  //   true/false → set the override explicitly
-  //   null       → explicit "clear the override" (back to inherit)
-  //   undefined  → untouched by this call; preserve whatever override already existed so an
-  //                unrelated settings save doesn't silently wipe it
-  const prevOverrides = (terminal.configOverrides as Record<string, any>) || {}
-  if (trackPromoterLocation === true || trackPromoterLocation === false) {
-    overrides.trackPromoterLocation = trackPromoterLocation
-  } else if (trackPromoterLocation === null) {
-    delete overrides.trackPromoterLocation
-  } else if (prevOverrides.trackPromoterLocation !== undefined) {
-    overrides.trackPromoterLocation = prevOverrides.trackPromoterLocation
-  }
+    // 3. Build full merged settings
+    const existingConfig = (terminal.config as any) || {}
+    const existingSettings = existingConfig.settings || {}
+    const newSettings: TpvSettings = {
+      ...DEFAULT_TPV_SETTINGS,
+      ...existingSettings,
+      ...restSettingsUpdate,
+    }
 
-  // 5. Save full merged config.settings (TPV Android compat) + configOverrides (diff only)
-  await updateScopedTerminal(tpvId, scope, {
-    config: { ...existingConfig, settings: newSettings },
-    configOverrides: Object.keys(overrides).length > 0 ? overrides : Prisma.JsonNull,
+    // 4. Compute overrides: only fields that differ from org defaults
+    const baseSettings = { ...DEFAULT_TPV_SETTINGS, ...orgDefaults }
+    const overrides = computeOverrides(newSettings, baseSettings)
+
+    // 4b. Tri-state trackPromoterLocation override (explicit, not diff-based):
+    //   true/false → set the override explicitly
+    //   null       → explicit "clear the override" (back to inherit)
+    //   undefined  → untouched by this call; preserve whatever override already existed so an
+    //                unrelated settings save doesn't silently wipe it
+    const prevOverrides = (terminal.configOverrides as Record<string, any>) || {}
+    if (trackPromoterLocation === true || trackPromoterLocation === false) {
+      overrides.trackPromoterLocation = trackPromoterLocation
+    } else if (trackPromoterLocation === null) {
+      delete overrides.trackPromoterLocation
+    } else if (prevOverrides.trackPromoterLocation !== undefined) {
+      overrides.trackPromoterLocation = prevOverrides.trackPromoterLocation
+    }
+
+    // 5. Save full merged config.settings (TPV Android compat) + configOverrides (diff only)
+    await updateScopedTerminal(tx, tpvId, scope, {
+      config: { ...existingConfig, settings: newSettings },
+      configOverrides: Object.keys(overrides).length > 0 ? overrides : Prisma.JsonNull,
+    })
+
+    return { venueId: terminal.venueId, newSettings, overrides }
   })
 
+  // La bitácora va DESPUÉS del commit y fuera de la transacción: `logAction` nunca lanza y no puede tumbar un guardado
+  // confirmado, ni quedar escrita si el guardado se deshace.
   logAction({
     staffId: scope.staffId,
-    venueId: terminal.venueId,
+    venueId,
     action: 'TPV_SETTINGS_UPDATED',
     entity: 'Terminal',
     entityId: tpvId,
@@ -877,13 +892,15 @@ export async function updateTpvSettings(
 /**
  * Get org-level TPV defaults for a terminal's organization.
  * Returns the settings JSON from OrganizationAttendanceConfig, or empty object.
+ * `cliente` es la transacción de quien ya tiene el candado de la terminal (`updateTpvSettings`); los demás llamadores
+ * no lo pasan y leen con el cliente global, como siempre.
  */
-export async function getOrgDefaultsForTerminal(organizationId: string | null): Promise<Record<string, any>> {
+export async function getOrgDefaultsForTerminal(
+  organizationId: string | null,
+  cliente: Prisma.TransactionClient = prisma,
+): Promise<Record<string, any>> {
   if (!organizationId) return {}
-  const config = await prisma.organizationAttendanceConfig.findUnique({
-    where: { organizationId },
-    select: { settings: true },
-  })
+  const config = await cliente.organizationAttendanceConfig.findUnique({ where: { organizationId }, select: { settings: true } })
   return (config?.settings as Record<string, any>) || {}
 }
 
@@ -933,7 +950,7 @@ export async function resetTerminalToDefaults(tpvId: string, scope: TerminalSett
     kioskDefaultMerchantId: existingSettings.kioskDefaultMerchantId ?? null,
   }
 
-  await updateScopedTerminal(tpvId, scope, {
+  await updateScopedTerminal(prisma, tpvId, scope, {
     config: { ...existingConfig, settings: resetSettings },
     configOverrides: Prisma.JsonNull,
   })
@@ -1232,17 +1249,7 @@ export async function updateVenueTpvSettings(venueId: string, settingsUpdate: Pa
     throw new NotFoundError('El ID del Venue es requerido.')
   }
 
-  // 1. Find all terminals in the venue
-  const terminals = await prisma.terminal.findMany({
-    where: { venueId },
-    select: { id: true, config: true, configOverrides: true },
-  })
-
-  if (terminals.length === 0) {
-    throw new NotFoundError('No hay terminales en este venue.')
-  }
-
-  // 2. Separate venue-level VenueSettings fields from TpvConfig fields
+  // 1. Separate venue-level VenueSettings fields from TpvConfig fields
   const { expectedCheckInTime, latenessThresholdMinutes, geofenceRadiusMeters, trackPromoterLocation, ...tpvFields } = settingsUpdate
   const settingsToMerge: Partial<TpvSettings> = { ...tpvFields }
 
@@ -1254,80 +1261,90 @@ export async function updateVenueTpvSettings(venueId: string, settingsUpdate: Pa
     settingsToMerge.attendanceTracking = tpvFields.attendanceTracking
   }
 
-  // 3. Update VenueSettings if attendance config fields are provided
+  // 2. Update VenueSettings if attendance config fields are provided
   const venueSettingsData: Record<string, any> = {}
   if (expectedCheckInTime !== undefined) venueSettingsData.expectedCheckInTime = expectedCheckInTime
   if (latenessThresholdMinutes !== undefined) venueSettingsData.latenessThresholdMinutes = latenessThresholdMinutes
   if (geofenceRadiusMeters !== undefined) venueSettingsData.geofenceRadiusMeters = geofenceRadiusMeters
   if (trackPromoterLocation !== undefined) venueSettingsData.trackPromoterLocation = trackPromoterLocation
 
-  // 4. El horario del negocio y las terminales se guardan en UNA transacción: o se guarda todo o nada. Antes el
-  //    horario se confirmaba primero, y un error en las terminales dejaba la mitad guardada (auditoría de Codex, C2).
-  const writes: Prisma.PrismaPromise<unknown>[] = []
-  if (Object.keys(venueSettingsData).length > 0) {
-    writes.push(
-      prisma.venueSettings.upsert({
+  // 3. 🔴 Bajo los candados (S1 de F1, Codex F1 r2). Antes se leía el `config` de las terminales FUERA de la transacción y
+  //    se reescribía entero: un guardado de UNA terminal que cayera en medio se perdía. Ahora se toman los candados de
+  //    TODAS las terminales del negocio en UNA sentencia ordenada por id (el mismo orden que copiar el diseño: así no hay
+  //    interbloqueo entre los dos) ANTES de leerlas. El horario del negocio y las terminales siguen en UNA transacción
+  //    (todo o nada, auditoría de Codex C2), con el horario DESPUÉS de los candados: el mismo orden Terminal → VenueSettings
+  //    que el carril de la terminal PAX.
+  const { terminalsCount, terminalWrites, terminalsUpdated } = await prisma.$transaction(async tx => {
+    const bloqueadas = await tx.$queryRaw<{ id: string }[]>`
+      SELECT id FROM "Terminal" WHERE "venueId" = ${venueId} ORDER BY id FOR UPDATE
+    `
+    if (bloqueadas.length === 0) {
+      throw new NotFoundError('No hay terminales en este venue.')
+    }
+    // Se leen EXACTAMENTE las bloqueadas: una que llegue al negocio después no tiene candado y no se toca.
+    const terminals = await tx.terminal.findMany({
+      where: { id: { in: bloqueadas.map(t => t.id) } },
+      select: { id: true, config: true, configOverrides: true },
+      orderBy: { id: 'asc' },
+    })
+
+    if (Object.keys(venueSettingsData).length > 0) {
+      await tx.venueSettings.upsert({
         where: { venueId },
         update: venueSettingsData,
         create: { venueId, ...venueSettingsData },
-      }),
-    )
-  }
-  const firstTerminalWrite = writes.length
+      })
+    }
 
-  // Cascade: venue settings + per-terminal overrides
-  if (Object.keys(settingsToMerge).length > 0) {
-    for (const terminal of terminals) {
-      const existingConfig = (terminal.config as any) || {}
-      const existingSettings = existingConfig.settings || {}
-      const overrides = (terminal.configOverrides as Record<string, any>) || {}
+    // Cascade: venue settings + per-terminal overrides
+    const resultados: unknown[] = []
+    if (Object.keys(settingsToMerge).length > 0) {
+      for (const terminal of terminals) {
+        const existingConfig = (terminal.config as any) || {}
+        const existingSettings = existingConfig.settings || {}
+        const overrides = (terminal.configOverrides as Record<string, any>) || {}
 
-      // Cascade: existing base + venue update + per-terminal overrides
-      const updatedConfig = {
-        ...existingConfig,
-        settings: {
-          ...existingSettings,
-          ...settingsToMerge,
-          ...overrides,
-          // kioskDefaultMerchantId is always per-terminal
-          kioskDefaultMerchantId: overrides.kioskDefaultMerchantId ?? existingSettings.kioskDefaultMerchantId ?? null,
-        },
-      }
-
-      // Acotada al venue que escogió las terminales. Una que se mudó a media operación ya no es de este negocio:
-      // cuenta cero y se omite, en vez de recibir los ajustes del dueño anterior (auditorías de Codex, 2026-09-16/17).
-      writes.push(
-        prisma.terminal.updateMany({
-          where: scopedTerminalWhere(terminal.id, { venueId }),
-          data: {
-            config: updatedConfig,
-            updatedAt: new Date(),
+        // Cascade: existing base + venue update + per-terminal overrides
+        const updatedConfig = {
+          ...existingConfig,
+          settings: {
+            ...existingSettings,
+            ...settingsToMerge,
+            ...overrides,
+            // kioskDefaultMerchantId is always per-terminal
+            kioskDefaultMerchantId: overrides.kioskDefaultMerchantId ?? existingSettings.kioskDefaultMerchantId ?? null,
           },
-        }),
-      )
-    }
-  }
+        }
 
-  let terminalsUpdated = 0
-  let terminalsOmitted = 0
-  if (writes.length > 0) {
-    const results = await prisma.$transaction(writes)
-    const terminalWrites = writes.length - firstTerminalWrite
-    terminalsUpdated = countUpdatedTerminals(results.slice(firstTerminalWrite))
-    terminalsOmitted = terminalWrites - terminalsUpdated
-    if (terminalsOmitted > 0) {
-      logger.info('Ajustes del negocio: se omitieron terminales que cambiaron de negocio a media operación', {
-        venueId,
-        omittedTerminals: terminalsOmitted,
-      })
+        // Acotada al venue que escogió las terminales (como siempre). Con el candado ya no puede mudarse en medio; el
+        // conteo se conserva como cinturón y porque es el contrato de la respuesta.
+        resultados.push(
+          await tx.terminal.updateMany({
+            where: scopedTerminalWhere(terminal.id, { venueId }),
+            data: {
+              config: updatedConfig,
+              updatedAt: new Date(),
+            },
+          }),
+        )
+      }
     }
-    if (terminalWrites > 0 && terminalsUpdated === 0) {
-      // Ninguna terminal recibió los ajustes: se guardó lo del negocio y nada más. No puede pasar en silencio.
-      logger.warn('Ajustes del negocio: NINGUNA terminal recibió los ajustes; todas cambiaron de negocio a media operación', {
-        venueId,
-        omittedTerminals: terminalsOmitted,
-      })
-    }
+    return { terminalsCount: terminals.length, terminalWrites: resultados.length, terminalsUpdated: countUpdatedTerminals(resultados) }
+  })
+
+  const terminalsOmitted = terminalWrites - terminalsUpdated
+  if (terminalsOmitted > 0) {
+    logger.info('Ajustes del negocio: se omitieron terminales que cambiaron de negocio a media operación', {
+      venueId,
+      omittedTerminals: terminalsOmitted,
+    })
+  }
+  if (terminalWrites > 0 && terminalsUpdated === 0) {
+    // Ninguna terminal recibió los ajustes: se guardó lo del negocio y nada más. No puede pasar en silencio.
+    logger.warn('Ajustes del negocio: NINGUNA terminal recibió los ajustes; todas cambiaron de negocio a media operación', {
+      venueId,
+      omittedTerminals: terminalsOmitted,
+    })
   }
 
   logAction({
@@ -1337,7 +1354,7 @@ export async function updateVenueTpvSettings(venueId: string, settingsUpdate: Pa
     entityId: venueId,
   })
 
-  logger.info(`Venue-level TPV settings updated for venue ${venueId} (${terminals.length} terminals)`, {
+  logger.info(`Venue-level TPV settings updated for venue ${venueId} (${terminalsCount} terminals)`, {
     settings: settingsUpdate,
   })
 

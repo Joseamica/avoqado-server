@@ -107,6 +107,11 @@ function settingsAuditCalls() {
 beforeEach(() => {
   jest.clearAllMocks()
   prismaMock.terminal.findUnique.mockImplementation(fakeTerminalLookup as any)
+  // S1 de F1: guardar los ajustes toma el candado de la fila (`SELECT id, "venueId" … FOR UPDATE`) dentro de una
+  // transacción. El candado devuelve la terminal del path con su negocio REAL, igual que la base.
+  prismaMock.$transaction.mockImplementation((cb: any) => cb(prismaMock))
+  prismaMock.$queryRaw.mockImplementation((async (_sql: TemplateStringsArray, id: string) =>
+    TERMINALS.filter(t => t.id === id).map(t => ({ id: t.id, venueId: t.venueId }))) as any)
   prismaMock.terminal.update.mockResolvedValue({} as any)
   prismaMock.organizationAttendanceConfig.findUnique.mockResolvedValue(null)
   prismaMock.merchantAccount.findMany.mockResolvedValue([{ id: 'merchant-a', displayName: 'Comercio A', active: true }] as any)

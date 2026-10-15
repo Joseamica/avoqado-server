@@ -26,6 +26,10 @@ const escrito = () => prismaMock.terminal.update.mock.calls[0][0] as { where: un
 beforeEach(() => {
   prismaMock.terminal.findUnique.mockResolvedValue(leida as any)
   prismaMock.terminal.update.mockResolvedValue({} as any)
+  // S1 de F1: `updateTpvSettings` lee y escribe dentro de una transacción, después del candado de la fila. La transacción
+  // corre con el mismo mock y el candado devuelve la fila de la terminal en su negocio.
+  prismaMock.$transaction.mockImplementation((cb: any) => cb(prismaMock))
+  prismaMock.$queryRaw.mockResolvedValue([{ id: 't1', venueId: 'v1' }])
 })
 
 it('updateTpvSettings escribe EXACTAMENTE config, configOverrides y updatedAt, con el ámbito con que leyó', async () => {
