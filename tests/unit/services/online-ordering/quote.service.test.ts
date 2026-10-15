@@ -8,7 +8,7 @@ jest.mock('@/services/online-ordering/menu.service', () => ({
 }))
 jest.mock('@/services/online-ordering/settings.service', () => ({ __esModule: true, getSettings: jest.fn() }))
 
-import { loadCategoryVisibility } from '@/services/online-ordering/menu.service'
+import { loadCategoryVisibility, ONLINE_PRODUCT_WHERE } from '@/services/online-ordering/menu.service'
 import { getSettings } from '@/services/online-ordering/settings.service'
 import { quoteCart, toPublicQuote } from '@/services/online-ordering/quote.service'
 
@@ -87,8 +87,7 @@ describe('quoteCart', () => {
     expect(args.where).toMatchObject({
       venueId: 'v1',
       id: { in: ['p-flautas'] },
-      availableOnline: true,
-      soldByWeight: false,
+      ...ONLINE_PRODUCT_WHERE,
       category: { active: true },
     })
     expect(args.take).toBe(50)
@@ -135,6 +134,17 @@ describe('quoteCart', () => {
     const q = await quoteCart('v1', [{ productId: 'p-flautas', quantity: 1, modifiers: [{ modifierId: 'm1' }, { modifierId: 'm2' }] }])
     expect(q.ok).toBe(false)
     expect(q.issues.map(i => i.code)).toContain('MODIFIER_GROUP_SINGLE')
+  })
+
+  it('D6: un extra ×N se guarda por UNIDAD del platillo y el total lo multiplica por ambas cantidades', async () => {
+    ROWS = [{ ...flautas, modifierGroups: [group({ allowMultiple: true, required: false, minSelections: 0, maxSelections: null })] }]
+    const q = await quoteCart('v1', [{ productId: 'p-flautas', quantity: 3, modifiers: [{ modifierId: 'm2', quantity: 2 }] }])
+    expect(q.ok).toBe(true)
+    // (93 + 10 × 2) × 3
+    expect(q.lines[0].lineTotal.toFixed(2)).toBe('339.00')
+    // por unidad del platillo, y el precio del extra es el unitario (no multiplicado por la cantidad del platillo)
+    expect(q.lines[0].modifiers[0].quantity).toBe(2)
+    expect(q.lines[0].modifiers[0].unitPrice.toFixed(2)).toBe('10.00')
   })
 
   it('respeta el máximo de selecciones de un grupo múltiple', async () => {
