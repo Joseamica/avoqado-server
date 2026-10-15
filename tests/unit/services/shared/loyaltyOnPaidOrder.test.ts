@@ -573,6 +573,13 @@ describe('awardLoyaltyForPaidOrder', () => {
       expect(result).toMatchObject({ complete: false, errors: ['loyalty:cust-A'], otorgado: { sello: false, puntos: true } })
     })
 
+    it('🔴 R4-1: carrera H4 — ESTA llamada selló y luego otro intento ganó los puntos (otroCliente): el resultado conserva `otorgado`', async () => {
+      orderCustomerFindMany.mockResolvedValue([PRIMARIO])
+      earnPointsMock.mockResolvedValue({ pointsEarned: 0, newBalance: 0, otroCliente: true, otorgado: { sello: true, puntos: false } })
+      const result = await awardLoyaltyForPaidOrder({ venueId: VENUE, orderId: ORDER, orderTotal: 90 }, { cerrar: false })
+      expect(result).toMatchObject({ otroCliente: true, otorgado: { sello: true, puntos: false } })
+    })
+
     it('un reintento idempotente (nada nuevo): sin `otorgado`', async () => {
       orderCustomerFindMany.mockResolvedValue([PRIMARIO])
       earnPointsMock.mockResolvedValue({ pointsEarned: 50, newBalance: 7 })

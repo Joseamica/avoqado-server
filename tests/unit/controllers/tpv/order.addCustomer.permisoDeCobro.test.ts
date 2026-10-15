@@ -337,10 +337,13 @@ describe('🔴 Ronda 2: TPV DELETE orders/:orderId/customers/:customerId — pro
 })
 
 /**
- * 🔴 R3-4 (ronda 3): editar los datos del invitado en una venta cobrada no fija `Order.customerId` sin `payments:create`. El
- * controller resuelve el permiso (mismo resolvedor efectivo, falla cerrado) y se lo pasa al servicio. Como hoy, el controller NO
- * reenvía el `customerId` del body (la TPV lo manda; la ruta nunca lo escribió): el candado del servicio protege a cualquier
- * otro llamador.
+ * 🔴 R3-4 (ronda 3): editar los datos del invitado en una venta cobrada no fija `Order.customerId` sin `payments:create`. Como
+ * hoy, el controller NO reenvía el `customerId` del body (la TPV lo manda; la ruta nunca lo escribió): el candado del servicio
+ * protege a cualquier otro llamador.
+ *
+ * R4-3 (ronda 4, minor del revisor): el controller ya NO resuelve `payments:create` en cada edición — nunca reenvía
+ * `customerId`, así que la respuesta no decidía nada y costaba una consulta de permisos por edición. La guarda del servicio
+ * queda con su default CERRADO (sin la opción, no fija el cliente en una venta cobrada).
  */
 describe('🔴 R3-4: TPV PATCH orders/:orderId/guest — Order.customerId en una venta cobrada exige payments:create', () => {
   let espia: jest.SpyInstance
@@ -366,21 +369,19 @@ describe('🔴 R3-4: TPV PATCH orders/:orderId/guest — Order.customerId en una
     return { status: r.status.mock.calls[0]?.[0], next }
   }
 
-  it('🔴 KITCHEN: el servicio recibe otorgarLealtad: false; se guarda el nombre y Order.customerId NO se toca', async () => {
-    quienLiga({ rol: 'KITCHEN' })
-    const { status, next } = await editar()
-    expect(next).not.toHaveBeenCalled()
-    expect(status).toBe(200)
-    expect(espia).toHaveBeenCalledWith(VENUE, ORDER, expect.any(Object), { otorgarLealtad: false })
-    expect((prismaMock.order.update.mock.calls[0] as any)[0].data).toEqual({ customerName: 'Kev' })
-  })
-
-  it('CASHIER: el servicio recibe otorgarLealtad: true; como hoy, el controller no reenvía el customerId del body', async () => {
-    quienLiga({ rol: 'CASHIER' })
-    await editar()
-    expect(espia).toHaveBeenCalledWith(VENUE, ORDER, expect.not.objectContaining({ customerId: expect.anything() }), {
-      otorgarLealtad: true,
-    })
-    expect((prismaMock.order.update.mock.calls[0] as any)[0].data).toEqual({ customerName: 'Kev' })
-  })
+  it.each([['KITCHEN'], ['CASHIER']])(
+    '🔴 R4-3 %s: el controller NO consulta permisos; el servicio queda con su default cerrado y Order.customerId NO se toca',
+    async rol => {
+      quienLiga({ rol })
+      const { status, next } = await editar()
+      expect(next).not.toHaveBeenCalled()
+      expect(status).toBe(200)
+      // Sin opciones (default cerrado) y, como hoy, sin reenviar el customerId del body.
+      expect(espia).toHaveBeenCalledWith(VENUE, ORDER, expect.not.objectContaining({ customerId: expect.anything() }))
+      expect(espia.mock.calls[0]).toHaveLength(3)
+      expect(prismaMock.staffVenue.findUnique).not.toHaveBeenCalled()
+      expect(prismaMock.venueRolePermission.findUnique).not.toHaveBeenCalled()
+      expect((prismaMock.order.update.mock.calls[0] as any)[0].data).toEqual({ customerName: 'Kev' })
+    },
+  )
 })

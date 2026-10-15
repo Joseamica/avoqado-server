@@ -178,19 +178,14 @@ export async function updateGuestInfo(
     const { covers, customerName, customerPhone, specialRequests } = req.body
 
     // R3-4 (ronda 3): en una venta cobrada, `Order.customerId` sólo con `payments:create` (el servicio decide bajo el candado).
-    // Como hoy, el `customerId` del body NO se reenvía (la TPV lo manda; esta ruta nunca lo escribió).
-    const otorgarLealtad = await puedeOtorgarLealtadTardia(req)
-    const updatedOrder = await orderTpvService.updateGuestInfo(
-      venueId,
-      orderId,
-      {
-        covers,
-        customerName,
-        customerPhone,
-        specialRequests,
-      },
-      { otorgarLealtad },
-    )
+    // Como hoy, el `customerId` del body NO se reenvía (la TPV lo manda; esta ruta nunca lo escribió). R4-3 (ronda 4): por eso
+    // aquí no se resuelve el permiso (no decidiría nada); la guarda del servicio queda con su default CERRADO.
+    const updatedOrder = await orderTpvService.updateGuestInfo(venueId, orderId, {
+      covers,
+      customerName,
+      customerPhone,
+      specialRequests,
+    })
 
     res.status(200).json({
       success: true,

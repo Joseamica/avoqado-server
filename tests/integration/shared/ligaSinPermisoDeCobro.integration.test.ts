@@ -32,6 +32,7 @@ jest.mock('@/services/access/basePlan.service', () => ({
 
 import type { NextFunction, Request, Response } from 'express'
 import * as tpv from '@/controllers/tpv/order.tpv.controller'
+import * as panel from '@/controllers/dashboard/order.dashboard.controller'
 import { attachCustomerToOrder } from '@/services/mobile/order.mobile.service'
 import { awardLoyaltyForPaidOrder } from '@/services/shared/loyaltyOnPaidOrder'
 import { LoyaltyReconciliationJob } from '@/jobs/loyalty-reconciliation.job'
@@ -48,7 +49,7 @@ let cocina: { staffId: string; staffVenueId: string }
 let cajero: { staffId: string; staffVenueId: string }
 let espiaBitacora: jest.SpyInstance
 
-async function empleado(nombre: string, role: 'KITCHEN' | 'CASHIER') {
+async function empleado(nombre: string, role: 'KITCHEN' | 'CASHIER' | 'MANAGER') {
   const s = await prisma.staff.create({ data: { email: `itest-sinperm-${sello}-${++n}@test.com`, firstName: nombre, lastName: 'Prueba' } })
   const sv = await prisma.staffVenue.create({ data: { staffId: s.id, venueId: venueId!, role } })
   return { staffId: s.id, staffVenueId: sv.id }
@@ -159,6 +160,25 @@ async function quitarPorTpv(quien: { staffId: string }, role: string, orderId: s
   const next = jest.fn()
   await tpv.removeCustomerFromOrder(req, res, next as unknown as NextFunction)
   if (next.mock.calls.length) throw next.mock.calls[0][0]
+  return { status: res.status.mock.calls[0]?.[0], cuerpo: res.json.mock.calls[0]?.[0] }
+}
+
+/** El PUT del panel de verdad (R4-2): el controller resuelve `payments:create` contra el StaffVenue real de quien edita. */
+async function editarPorPanel(quien: { staffId: string }, role: string, orderId: string, body: Record<string, unknown>) {
+  const req = {
+    params: { venueId: venueId!, orderId },
+    body,
+    headers: {},
+    query: {},
+    method: 'PUT',
+    originalUrl: `/api/v1/dashboard/venues/${venueId}/orders/${orderId}`,
+    authContext: { userId: quien.staffId, venueId: venueId!, orgId: orgId!, role },
+  } as unknown as Request<{ venueId: string; orderId: string }>
+  const res = respuesta()
+  const next = jest.fn()
+  await panel.updateOrder(req, res, next as unknown as NextFunction)
+  const error = next.mock.calls[0]?.[0] as { statusCode?: number; message?: string } | undefined
+  if (error) return { status: error.statusCode, mensaje: error.message }
   return { status: res.status.mock.calls[0]?.[0], cuerpo: res.json.mock.calls[0]?.[0] }
 }
 
@@ -435,5 +455,68 @@ describe('🔴 Ronda 2: quitar al primario de una venta PAGADA con la lealtad pe
     await ligarPorTpv(cocina, 'KITCHEN', orderId, { customerId: c })
     const { cuerpo } = await quitarPorTpv(cocina, 'KITCHEN', orderId, p)
     expect(cuerpo.data).toEqual([expect.objectContaining({ customerId: c, isPrimary: true })])
+  })
+})
+
+/**
+ * 🔴 R4-2 (ronda 4): el PUT del panel (`orders:update`, que COCINA trae por default) escribía `Order.customerId` en una venta
+ * pagada; con la lealtad pendiente y sin primario, el reconciliador premiaba a ese cliente por el respaldo heredado. Ahora, en
+ * una venta COBRADA, cambiar el cliente sin `payments:create` ⇒ 403 y no se guarda nada de esa petición.
+ */
+describe('🔴 R4-2: el PUT del panel respeta la decisión «A»', () => {
+  const clienteYNombre = (orderId: string) =>
+    prisma.order.findUniqueOrThrow({ where: { id: orderId }, select: { customerId: true, customerName: true } })
+
+  it('🔴 COCINA cambia el cliente de una venta PAGADA pendiente ⇒ 403, nada cambia y el reconciliador no premia a nadie', async () => {
+    const kev = await cliente('Kev')
+    const orderId = await venta()
+    const r = await editarPorPanel(cocina, 'KITCHEN', orderId, { customerId: kev, customerName: 'Kev' })
+    expect(r).toEqual({
+      status: 403,
+      mensaje: 'Para cambiar el cliente de una venta ya cobrada necesitas el permiso de cobrar. Pídeselo a tu administrador.',
+    })
+    expect(await clienteYNombre(orderId)).toEqual({ customerId: null, customerName: null }) // ni el cliente ni el nombre
+    expect(await reconciliadorDe(orderId).runNow()).toMatchObject({ scanned: 1, applied: 1, failed: 0 })
+    const recibio = await loQueRecibio(orderId, kev)
+    expect(recibio).toMatchObject(NADA)
+    expect(recibio.orden.loyaltyProcessedAt).toBeInstanceOf(Date) // cerrada «sin cliente»
+    expect(await prisma.stampEvent.count({ where: { venueId, orderId } })).toBe(0)
+  })
+
+  it('🔴 COCINA tampoco puede QUITAR el cliente de una venta pagada (le quitaría su sello pendiente) ⇒ 403', async () => {
+    const kev = await cliente('Kev')
+    const orderId = await venta()
+    await prisma.order.update({ where: { id: orderId }, data: { customerId: kev } })
+    expect((await editarPorPanel(cocina, 'KITCHEN', orderId, { customerId: null })).status).toBe(403)
+    expect(await clienteYNombre(orderId)).toEqual({ customerId: kev, customerName: null })
+  })
+
+  it('el MISMO cliente que ya tiene (el panel lo reenvía) ⇒ 200, como hoy', async () => {
+    const kev = await cliente('Kev')
+    const orderId = await venta()
+    await prisma.order.update({ where: { id: orderId }, data: { customerId: kev } })
+    const r = await editarPorPanel(cocina, 'KITCHEN', orderId, { customerId: kev, customerName: 'Kevin' })
+    expect(r.status).toBe(200)
+    expect(await clienteYNombre(orderId)).toEqual({ customerId: kev, customerName: 'Kevin' })
+  })
+
+  it('un GERENTE (con payments:create) ⇒ como hoy: fija el cliente y el respaldo heredado lo acredita', async () => {
+    const gerente = await empleado('Gerente', 'MANAGER')
+    const kev = await cliente('Kev')
+    const orderId = await venta()
+    const r = await editarPorPanel(gerente, 'MANAGER', orderId, { customerId: kev })
+    expect(r.status).toBe(200)
+    expect(await clienteYNombre(orderId)).toEqual({ customerId: kev, customerName: null })
+    await reconciliadorDe(orderId).runNow()
+    const recibio = await loQueRecibio(orderId, kev)
+    expect(recibio.sellos).toBe(1)
+    expect(recibio.puntos).toBe(1)
+  })
+
+  it('regresión: cuenta ABIERTA y COCINA ⇒ como hoy, fija el cliente', async () => {
+    const ana = await cliente('Ana')
+    const orderId = await venta({ abierta: true })
+    expect((await editarPorPanel(cocina, 'KITCHEN', orderId, { customerId: ana })).status).toBe(200)
+    expect(await clienteYNombre(orderId)).toEqual({ customerId: ana, customerName: null })
   })
 })

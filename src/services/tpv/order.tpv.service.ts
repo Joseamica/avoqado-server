@@ -3780,8 +3780,8 @@ export async function getOrderCustomers(venueId: string, orderId: string) {
  * falló y el reconciliador la reintenta). Sin el permiso, la liga a una venta cobrada entra como ACOMPAÑANTE (no primaria):
  * la lealtad del cobro en curso y la del reconciliador sólo acreditan al primario, y una venta sin primario cuenta como «sin
  * cliente» (`awardLoyaltyForPaidOrder`), así que el resultado es el de la venta sin esa liga. La decisión se toma con el
- * estado leído bajo el candado canónico de la venta (`lockExistingOrderForPayment`, el mismo del cobro). La liga sigue visible
- * (`data`). Una re-liga del mismo cliente por alguien CON permiso lo promueve a primario y pasa por el sello tardío.
+ * estado leído bajo el candado de la venta (`bloquearVentaParaLiga`: la fila en `FOR NO KEY UPDATE`, que serializa contra el
+ * `FOR UPDATE` del cobro y no bloquea las revisiones de llaves foráneas). La liga sigue visible (`data`). Una re-liga del mismo cliente por alguien CON permiso lo promueve a primario y pasa por el sello tardío.
  */
 export interface OpcionesDeLigaTpv {
   otorgarLealtad?: boolean
@@ -3791,9 +3791,12 @@ export interface OpcionesDeLigaTpv {
 const VENTA_COBRADA: ReadonlySet<string> = new Set([PaymentStatus.PAID, PaymentStatus.REFUNDED])
 
 /**
- * 🔴 F1: PRIMERA sentencia de la transacción de la liga — el candado canónico de la venta (`SELECT … FOR UPDATE`, el del
- * cobro). En Serializable, si un cobro la escribió mientras esperábamos, Postgres aborta (P2034) y el reintento lee el estado
- * nuevo. Después, el estado VIGENTE (F1, segunda ola: también en cada reintento).
+ * 🔴 F1 / R3-2: PRIMERA sentencia de la transacción de la liga — el candado de la venta (`bloquearVentaParaLiga`: la fila en
+ * `SELECT … FOR NO KEY UPDATE`). Serializa contra el `FOR UPDATE` del cobro (`lockExistingOrderForPayment`) y entre ligas, y no
+ * bloquea el `FOR KEY SHARE` de las revisiones de llaves foráneas (las métricas del cobro). En Serializable, si un cobro escribió
+ * la venta mientras esperábamos, Postgres aborta la liga con un error de serialización (P2010/40001 en esta sentencia cruda;
+ * P2034 en una consulta de modelo) y el reintento lee el estado nuevo. Después, el estado VIGENTE (F1, segunda ola: también en
+ * cada reintento).
  */
 async function leerVentaBajoCandado(
   tx: Prisma.TransactionClient,
@@ -3960,7 +3963,8 @@ export async function addCustomerToOrder(
   const { reabrirLealtadSiAplica } = await import('../shared/loyaltyOnLateCustomer')
 
   // 🔒 Serializable + el candado de la venta; el índice parcial del primario es la defensa de fondo. Reintentos con backoff ante
-  // P2034 (serialización) y P2002 (choque de únicos): el reintento relee todo bajo el candado.
+  // lo que clasifica `motivoDeReintentoDeLiga`: serialización (P2034, P2010/40001), interbloqueo (40P01) y P2002 (choque de
+  // únicos): el reintento relee todo bajo el candado.
   const MAX_RETRIES = 5
   let liga: { ligaNueva: boolean; esPrimario: boolean; cobrada: boolean } | undefined
 
@@ -4138,9 +4142,11 @@ export async function createAndAddCustomerToOrder(
   const { reabrirLealtadSiAplica } = await import('../shared/loyaltyOnLateCustomer')
 
   // 🔒 Serializable + el candado de la venta (igual que `addCustomerToOrder`); el índice parcial del primario es la defensa de
-  // fondo. Reintentos con backoff ante P2034.
+  // fondo. Reintentos con backoff ante lo que clasifica `motivoDeReintentoDeLiga` (serialización P2034 o P2010/40001,
+  // interbloqueo 40P01, choque de únicos que no sea el correo/teléfono duplicado).
   const MAX_RETRIES = 5
-  // El id del cliente creado por el intento que hizo commit (un `P2034` reintenta y crea otro; sólo el último cuenta).
+  // El id del cliente creado por el intento que hizo commit (un intento que se reintenta revierte el suyo y el siguiente crea
+  // otro; sólo el último cuenta).
   let nuevoClienteId: string | undefined
   let cobrada = false
 

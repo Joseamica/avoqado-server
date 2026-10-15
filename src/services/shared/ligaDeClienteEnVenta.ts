@@ -1,4 +1,5 @@
 import type { Prisma } from '@prisma/client'
+import { ForbiddenError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { isDeadlockError, isRetryableDbError } from '../../utils/serializableRetry'
 
@@ -73,4 +74,58 @@ export async function bloquearVentaParaLiga(
     FOR NO KEY UPDATE
   `
   return Array.isArray(filas) && filas.length === 1
+}
+
+/** ¿La venta ya está cobrada (PAID o REFUNDED)? Ahí aplica la decisión «A» del founder. */
+export function esVentaYaCobrada(paymentStatus: string | null | undefined): boolean {
+  return paymentStatus === 'PAID' || paymentStatus === 'REFUNDED'
+}
+
+export const MENSAJE_CLIENTE_DE_VENTA_COBRADA =
+  'Para cambiar el cliente de una venta ya cobrada necesitas el permiso de cobrar. Pídeselo a tu administrador.'
+export const CODIGO_CLIENTE_DE_VENTA_COBRADA = 'CUSTOMER_CHANGE_REQUIRES_PAYMENTS_CREATE'
+
+/**
+ * 🔴 R4-2 (ronda 4 post-QA de sellos tardíos; decisión «A» del founder): `Order.customerId` es el respaldo heredado de la
+ * lealtad — en una venta pagada con la lealtad pendiente y SIN primario, el reconciliador premia a ese cliente. Por eso, en una
+ * venta COBRADA (PAID/REFUNDED), CAMBIAR el cliente (ponerlo donde no había, cambiarlo por otro o quitarlo) exige
+ * `payments:create`; sin él ⇒ 403 en español y quien llama no guarda NADA de esa petición. El mismo cliente que ya tiene, una
+ * venta abierta o quien tiene el permiso ⇒ pasa. Lo usan los editores genéricos de la venta que devuelven el `customerId`
+ * guardado (el PUT del panel y el «detalle de la cuenta» del POS): ignorarlo en silencio haría que la pantalla dijera
+ * «guardado» con el cliente viejo. Quien llama lo decide con lo que leyó BAJO el candado de la venta.
+ */
+export function asegurarCambioDeClienteEnVentaCobrada(args: {
+  paymentStatus: string | null | undefined
+  clienteActual: string | null
+  clienteNuevo: string | null
+  puedeCobrar: boolean
+}): void {
+  if (args.clienteNuevo === args.clienteActual) return
+  if (!esVentaYaCobrada(args.paymentStatus)) return
+  if (args.puedeCobrar) return
+  throw new ForbiddenError(MENSAJE_CLIENTE_DE_VENTA_COBRADA, CODIGO_CLIENTE_DE_VENTA_COBRADA)
+}
+
+/**
+ * R4-2: la misma regla, leyendo la venta con `tx` — para los editores de METADATOS de la cuenta que no leen su estado de cobro
+ * (el «detalle de la cuenta» del POS, clasificado como escritor de metadatos en `orderFiscalWriters.test.ts`). Quien llama YA
+ * tomó el candado de la venta en esa transacción; la lectura de aquí es la vigente. Con el permiso no lee nada. Si la venta no
+ * está (no es de este negocio), no decide: quien llama ya responde 404.
+ */
+export async function asegurarCambioDeClienteBajoCandado(
+  tx: Pick<Prisma.TransactionClient, 'order'>,
+  args: { venueId: string; orderId: string; clienteNuevo: string | null; puedeCobrar: boolean },
+): Promise<void> {
+  if (args.puedeCobrar) return
+  const venta = await tx.order.findFirst({
+    where: { id: args.orderId, venueId: args.venueId },
+    select: { paymentStatus: true, customerId: true },
+  })
+  if (!venta) return
+  asegurarCambioDeClienteEnVentaCobrada({
+    paymentStatus: venta.paymentStatus,
+    clienteActual: venta.customerId ?? null,
+    clienteNuevo: args.clienteNuevo,
+    puedeCobrar: false,
+  })
 }

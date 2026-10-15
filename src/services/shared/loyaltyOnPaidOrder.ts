@@ -283,7 +283,9 @@ async function acreditar(
     const loyaltyResult = await earnPoints(venueId, customerId, orderTotal, orderId, staffVenueId)
     if (loyaltyResult.otroCliente) {
       logger.warn(`⚠️ Loyalty not credited (${quien}): another customer already earned this order`, { orderId, customerId })
-      return { estado: 'OTRO_CLIENTE' }
+      // 🔴 R4-1 (ronda 4): en la carrera H4 esta llamada pudo SELLAR antes de ver que otro cliente ya tenía los puntos. Es un
+      // hecho: viaja para que la auditoría de la liga no lo pierda.
+      return { estado: 'OTRO_CLIENTE', ...(loyaltyResult.otorgado ? { otorgado: loyaltyResult.otorgado } : {}) }
     }
     logger.info(`🎁 Loyalty points earned (${quien})`, {
       orderId,

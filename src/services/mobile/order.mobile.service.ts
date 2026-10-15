@@ -43,6 +43,7 @@ import {
   esChoqueDeUnico,
   etiquetaDeReintento,
   motivoDeReintentoDeLiga,
+  asegurarCambioDeClienteBajoCandado,
 } from '../shared/ligaDeClienteEnVenta'
 import { assertNoLiveTerminalCharge, assertOrderCancellableUnderLock, avisarOrdenCancelada } from '../shared/orderCancelGuard'
 import { combinarContratos } from '../fiscal/contratoDePrecio'
@@ -1447,6 +1448,15 @@ export interface OrderDetailsInput {
   orderType?: string | null
 }
 
+export interface OpcionesDeDetalleDeCuenta {
+  /**
+   * 🔴 R4-2 (ronda 4 post-QA de sellos tardíos): ¿quien edita tiene `payments:create`? Lo resuelven el controller (resolvedor
+   * efectivo), el reducer offline (`authorizeIntent`) y el MCP (`guard.tienePermiso`). Sin él, en una venta COBRADA no se cambia
+   * el cliente (403). Sin decirlo, falla CERRADO.
+   */
+  puedeCambiarClienteEnVentaCobrada?: boolean
+}
+
 /**
  * TABLE_SERVICE — partial update of the check's details. Only provided keys
  * change; covers also synchronizes automatic service charges atomically.
@@ -1456,6 +1466,7 @@ export async function updateOrderDetailsInTransaction(
   venueId: string,
   orderId: string,
   input: OrderDetailsInput,
+  opciones: OpcionesDeDetalleDeCuenta = {},
 ) {
   if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Order not found')
   const charges: AutomaticServiceChargeCapture = { createdIds: [], deletedIds: [], recalculatedIds: [] }
@@ -1466,6 +1477,18 @@ export async function updateOrderDetailsInTransaction(
   if (!order) throw new NotFoundError('Order not found')
   if (['COMPLETED', 'CANCELLED', 'DELETED'].includes(order.status)) {
     throw new BadRequestError('La cuenta ya está cerrada')
+  }
+  // 🔴 R4-2 (ronda 4 post-QA de sellos tardíos; decisión «A»): una venta YA COBRADA puede no estar COMPLETED (la liquidó el panel
+  // con `settleOrder`, que no cambia el estado, o el PUT del panel le cambió el estado). `Order.customerId` es el respaldo
+  // heredado de la lealtad: cambiar el cliente de una venta cobrada sin `payments:create` ⇒ 403 y no se guarda nada (la misma
+  // regla que el PUT del panel). Decidido bajo el candado de la venta, tomado arriba. `null` = «sin cambio» (ver abajo).
+  if (input.customerId !== undefined && input.customerId !== null) {
+    await asegurarCambioDeClienteBajoCandado(tx, {
+      venueId,
+      orderId,
+      clienteNuevo: input.customerId || null,
+      puedeCobrar: opciones.puedeCambiarClienteEnVentaCobrada === true,
+    })
   }
 
   // Partial-update semantics tolerant to clients that serialize defaults
@@ -1530,8 +1553,16 @@ export async function updateOrderDetailsInTransaction(
   }
 }
 
-export async function updateOrderDetails(venueId: string, orderId: string, input: OrderDetailsInput) {
-  const result = await prisma.$transaction(tx => updateOrderDetailsInTransaction(tx, venueId, orderId, input), ORDER_LOCK_WAIT_BUDGET)
+export async function updateOrderDetails(
+  venueId: string,
+  orderId: string,
+  input: OrderDetailsInput,
+  opciones: OpcionesDeDetalleDeCuenta = {},
+) {
+  const result = await prisma.$transaction(
+    tx => updateOrderDetailsInTransaction(tx, venueId, orderId, input, opciones),
+    ORDER_LOCK_WAIT_BUDGET,
+  )
   return result.data
 }
 
@@ -3667,9 +3698,10 @@ export async function attachCustomerToOrder(venueId: string, orderId: string, cu
 
   const ligarEnTransaccion = () =>
     prisma.$transaction(async tx => {
-      // 🔴 Ronda 1 (F1/F3): PRIMERA sentencia, el candado canónico de la venta — el MISMO que toman el cobro y la liga de la TPV.
-      // Sin él, una liga del POS (inserta la liga y luego escribe la venta) y una de la TPV (candado de la venta y luego la liga)
-      // se tomaban los candados en orden inverso y Postgres mataba a una por bloqueo mutuo (40P01), medido con 3 POS + 3 TPV.
+      // 🔴 Ronda 1 (F1/F3): PRIMERA sentencia, el candado de la venta — el MISMO que toman la liga de la TPV, quitar cliente,
+      // editar invitado y `/fast` (el cobro toma el `FOR UPDATE` canónico, que choca con éste). Sin él, una liga del POS (inserta
+      // la liga y luego escribe la venta) y una de la TPV (candado de la venta y luego la liga) se tomaban los candados en orden
+      // inverso y Postgres mataba a una por bloqueo mutuo (40P01), medido con 3 POS + 3 TPV.
       // R3-2 (ronda 3): `FOR NO KEY UPDATE` (`bloquearVentaParaLiga`): serializa contra el cobro y las demás ligas sin
       // interbloquearse con el `FOR KEY SHARE` de las llaves foráneas (las métricas del cobro).
       if (!(await bloquearVentaParaLiga(tx, { venueId, orderId }))) throw new NotFoundError('Order not found')

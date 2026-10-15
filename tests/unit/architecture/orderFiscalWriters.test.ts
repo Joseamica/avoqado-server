@@ -737,7 +737,7 @@ const NON_FISCAL_ORDER_WRITERS: Record<string, OrderWriter> = {
   },
   'src/services/dashboard/order.dashboard.service.ts#updateOrder': {
     class: 'METADATA',
-    why: 'status/customer/table/staff/createdAt/number/type; money inputs ignored; CANCELLED/DELETED go through the cancel guard',
+    why: 'status/customer (on a paid sale only with payments:create, under the link lock — R4-2)/table/staff/createdAt/number/type; money inputs ignored; CANCELLED/DELETED go through the cancel guard',
   },
   'src/services/mobile/order.mobile.service.ts#attachCustomerToOrder': {
     class: 'METADATA',
