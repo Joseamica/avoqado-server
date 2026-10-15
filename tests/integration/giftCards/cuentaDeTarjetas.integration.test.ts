@@ -20,6 +20,7 @@ jest.mock('@/services/access/basePlan.service', () => ({
 import prisma from '@/utils/prismaClient'
 import { createGiftCardOrder } from '@/services/giftCards/giftCardOrder.service'
 import { applyOrderDiscount, cancelOrder } from '@/services/mobile/order.mobile.service'
+import { deleteOrder, updateOrder } from '@/services/dashboard/order.dashboard.service'
 
 jest.setTimeout(60000)
 
@@ -90,5 +91,41 @@ describe('cuenta de tarjetas · Postgres real', () => {
       ['DEACTIVATE', 'SALE_CANCELLED', '0.00'],
       ['DEACTIVATE', 'SALE_CANCELLED', '0.00'],
     ])
+
+    // A5 r1: el reintento de la MISMA venta después de cancelarla dice que está cancelada y que sus sobres no sirven.
+    const reintento = await venta(`${SUF}-d`, [500, 600])
+    expect(reintento).toMatchObject({ replay: true, orderId: r.orderId, status: 'CANCELLED' })
+    expect(reintento.sobres.map(s => s.status)).toEqual(['DEACTIVATED', 'DEACTIVATED'])
+  })
+
+  /** A5 r1: los dos caminos del dashboard que cancelan, sobre una cuenta de tarjetas REAL con sobres. */
+  async function sobresTrasCancelar(llave: string, cancelar: (orderId: string) => Promise<unknown>) {
+    const r = await venta(llave, [500, 700])
+    expect(r.sobres.map(s => s.status)).toEqual(['PENDING', 'PENDING'])
+    await cancelar(r.orderId)
+    const sobres = await prisma.giftCard.findMany({ where: { venueId, id: { in: r.sobres.map(s => s.id) } }, take: 5 })
+    const filas = await prisma.giftCardActivity.findMany({ where: { venueId, giftCardId: { in: r.sobres.map(s => s.id) } }, take: 5 })
+    return {
+      cuenta: (await prisma.order.findUniqueOrThrow({ where: { id: r.orderId } })).status,
+      sobres: sobres.map(s => [s.status, s.balance.toFixed(2), s.activatedAt]),
+      filas: filas.map(f => [f.type, f.reason, f.orderId === r.orderId]),
+    }
+  }
+
+  it.each([
+    ['dashboard · updateOrder a CANCELLED', (orderId: string) => updateOrder(venueId, orderId, { status: 'CANCELLED' })],
+    ['dashboard · deleteOrder', (orderId: string) => deleteOrder(venueId, orderId)],
+  ])('%s deja los sobres PENDING DEACTIVATED (nunca activados) con su DEACTIVATE', async (caso, cancelar) => {
+    expect(await sobresTrasCancelar(`${SUF}-${caso.includes('update') ? 'u' : 'x'}`, cancelar)).toEqual({
+      cuenta: 'CANCELLED',
+      sobres: [
+        ['DEACTIVATED', '0.00', null],
+        ['DEACTIVATED', '0.00', null],
+      ],
+      filas: [
+        ['DEACTIVATE', 'SALE_CANCELLED', true],
+        ['DEACTIVATE', 'SALE_CANCELLED', true],
+      ],
+    })
   })
 })

@@ -63,6 +63,8 @@ describe('updateGiftCardSettings', () => {
     })
     expect(venueHasFeatureAccess).toHaveBeenCalledWith(VENUE, 'GIFT_CARDS')
     expect(ensureGiftCardTender).not.toHaveBeenCalled()
+    // A5 r1: el plan se pregunta ANTES de abrir la transacción (no se pide otra conexión con el candado tomado).
+    expect(prismaMock.$transaction).not.toHaveBeenCalled()
   })
 
   it('prender con plan y términos: crea el tender de sistema, guarda y deja rastro en ActivityLog', async () => {
@@ -81,6 +83,13 @@ describe('updateGiftCardSettings', () => {
       }),
     )
     expect(vista).toMatchObject({ enabled: true, validityMonths: 24 })
+    // A5 r1: el plan, antes de la transacción; el candado, la primera sentencia dentro de ella.
+    expect((venueHasFeatureAccess as jest.Mock).mock.invocationCallOrder[0]).toBeLessThan(
+      prismaMock.$transaction.mock.invocationCallOrder[0],
+    )
+    expect(prismaMock.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(
+      prismaMock.giftCardSettings.findUnique.mock.invocationCallOrder[0],
+    )
     expect(logAction).toHaveBeenCalledWith(
       expect.objectContaining({ action: 'GIFT_CARD_SETTINGS_UPDATED', venueId: VENUE, staffId: 'owner-1' }),
     )
@@ -97,6 +106,14 @@ describe('updateGiftCardSettings', () => {
     prismaMock.giftCardSettings.findUnique.mockResolvedValue(fila())
     await expect(updateGiftCardSettings(VENUE, input as any, 'owner-1')).rejects.toThrow(mensaje)
     expect(prismaMock.giftCardSettings.upsert).not.toHaveBeenCalled()
+  })
+
+  it('A5 r1: un `enabled` que no es `true` exacto nunca prende (ni pide el plan)', async () => {
+    prismaMock.giftCardSettings.findUnique.mockResolvedValue(fila({ enabled: false }))
+    await updateGiftCardSettings(VENUE, { enabled: 'true' as unknown as boolean, aceptaTerminos: true }, 'owner-1')
+    expect(venueHasFeatureAccess).not.toHaveBeenCalled()
+    expect(ensureGiftCardTender).not.toHaveBeenCalled()
+    expect(prismaMock.giftCardSettings.upsert.mock.calls[0][0].update).toMatchObject({ enabled: false })
   })
 
   it('apagar no pide términos ni plan (apagar siempre se puede) y no toca el tender', async () => {
@@ -160,7 +177,8 @@ describe('assertGiftCardsSellable', () => {
     try {
       await expect(assertGiftCardsSellable(VENUE)).rejects.toMatchObject({ code: 'GIFT_CARD_KEYS_MISSING' })
     } finally {
-      process.env.GIFT_CARD_HMAC_KEY = antes
+      if (antes === undefined) delete process.env.GIFT_CARD_HMAC_KEY
+      else process.env.GIFT_CARD_HMAC_KEY = antes
     }
   })
 })

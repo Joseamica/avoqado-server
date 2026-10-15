@@ -113,14 +113,16 @@ export async function assertGiftCardsSellable(venueId: string): Promise<void> {
       403,
     )
   }
-  if (!(await venueHasFeatureAccess(venueId, FUNCION_TARJETAS_DE_REGALO))) {
-    throw new GiftCardError(
-      'GIFT_CARDS_NOT_IN_PLAN',
-      'Las tarjetas de regalo vienen en el plan Pro o como función suelta. Revísalo en tu panel: Ajustes › Plan.',
-      403,
-    )
-  }
+  if (!(await venueHasFeatureAccess(venueId, FUNCION_TARJETAS_DE_REGALO))) throw sinPlan()
   assertGiftCardKeys()
+}
+
+function sinPlan(): GiftCardError {
+  return new GiftCardError(
+    'GIFT_CARDS_NOT_IN_PLAN',
+    'Las tarjetas de regalo vienen en el plan Pro o como función suelta. Revísalo en tu panel: Ajustes › Plan.',
+    403,
+  )
 }
 
 /** r1 (A-4): un guardado a la vez por negocio (molde `floorPlan.service.ts`: candado consultivo de la transacción). */
@@ -134,6 +136,11 @@ export async function updateGiftCardSettings(
   // r1 (A-4): leer, validar y escribir en UNA transacción serializada por negocio, y escribir SÓLO lo que llegó: guardar
   // montos con una foto vieja nunca vuelve a prender un interruptor que otra sesión apagó, ni se salta la validación de
   // «prendiendo». `enabled` sólo cambia cuando el cuerpo lo trae (y la ruta, C3, pide el plan sólo con `enabled: true`).
+  // El plan se pregunta ANTES de abrir la transacción (A5 r1): `venueHasFeatureAccess` usa el cliente global y no debe pedir
+  // otra conexión mientras ésta retiene la suya y el candado. Sólo cuando el cuerpo trae `enabled: true` (igual que la ruta,
+  // C3); apagar o guardar montos nunca lo pide.
+  if (input.enabled === true && !(await venueHasFeatureAccess(venueId, FUNCION_TARJETAS_DE_REGALO))) throw sinPlan()
+
   const { actual, guardado } = await prisma.$transaction(async tx => {
     await tx.$queryRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${llaveDeAjustes(venueId)}, 0))::text`)
     const actual = (await tx.giftCardSettings.findUnique({ where: { venueId }, select: SELECT_AJUSTES })) ?? porDefecto()
@@ -165,19 +172,14 @@ export async function updateGiftCardSettings(
       throw new BadRequestError('La vigencia debe ser 12, 24, 36 o 60 meses, o sin vencimiento.')
     }
 
-    const enabled = input.enabled ?? actual.enabled
+    // Sólo un `true` explícito prende: cualquier otro valor que llegue apaga (nunca prende sin pasar por el plan de arriba).
+    const enabled = input.enabled !== undefined ? input.enabled === true : actual.enabled
     const prendiendo = enabled && !actual.enabled
     if (prendiendo) {
       if (input.aceptaTerminos !== true) {
         throw new BadRequestError('Para activar las tarjetas de regalo acepta los términos.', 'GIFT_CARD_TERMS_REQUIRED')
       }
-      if (!(await venueHasFeatureAccess(venueId, FUNCION_TARJETAS_DE_REGALO))) {
-        throw new GiftCardError(
-          'GIFT_CARDS_NOT_IN_PLAN',
-          'Las tarjetas de regalo vienen en el plan Pro o como función suelta. Revísalo en tu panel: Ajustes › Plan.',
-          403,
-        )
-      }
+      // El plan ya se comprobó antes de la transacción (`prendiendo` implica `input.enabled === true`).
       assertGiftCardKeys()
       // R4: el tender de sistema nace al prender, en ESTA transacción (si falla, no queda prendida sin tender). Es la
       // excepción a «fuera de transacciones» de A3: dos «prender» se serializan por el candado de arriba y el otro creador

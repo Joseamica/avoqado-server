@@ -17,7 +17,7 @@ import { DiscountScope, DiscountType, Prisma } from '@prisma/client'
 import { logAction, type LogActionParams } from './activity-log.service'
 import { computeStoredOrderTotal } from '../shared/orderBalance'
 import { esOrdenImportada, rechazarSiEsImportada } from '../shared/ordenImportada'
-import { esCuentaDeTarjetas, rechazarSiEsCuentaDeTarjetas } from '../giftCards/cuentaDeTarjetas'
+import { rechazarSiEsCuentaDeTarjetas, tieneRenglonDeTarjeta } from '../giftCards/cuentaDeTarjetas'
 import {
   aCentavos,
   comoJson,
@@ -1248,7 +1248,8 @@ export async function applyAutomaticDiscounts(
     // R11 (Codex r5): lo automático no truena sobre una importada de SoftRestaurant, pero tampoco la rearma (su cabecera manda y
     // sus renglones traen el IVA dentro): el resultado vacío, antes de evaluar.
     if (esOrdenImportada(order)) return { applied: [], total: 0 }
-    if (esCuentaDeTarjetas(order.items)) return { applied: [], total: 0 }
+    // Tarjetas de regalo (R11): basta UN renglón de tarjeta para no rearmar la cuenta (como las demás guardias).
+    if (tieneRenglonDeTarjeta(order.items)) return { applied: [], total: 0 }
 
     const discounts = await evaluateOrderDiscounts(order, undefined, tx)
 

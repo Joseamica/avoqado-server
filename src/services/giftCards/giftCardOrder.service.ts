@@ -5,7 +5,7 @@
  * del POS deduplica por `Order[venueId, externalId]` con `externalId = 'giftcard:' + idempotencyKey` y huella del pedido.
  * Sin red NO se vende (online-only a propósito): el POS lo dice antes de llamar aquí.
  */
-import { Prisma, type GiftCardDeliveryChannel, type OrderSource } from '@prisma/client'
+import { Prisma, type GiftCardDeliveryChannel, type GiftCardStatus, type OrderSource, type OrderStatus } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import { operationHash } from '@/utils/operationHash'
@@ -56,6 +56,11 @@ export interface CreateGiftCardOrderResult {
   /** Pesos. */
   total: number
   replay: boolean
+  /**
+   * A5 r1: estado de la CUENTA al responder (`CONFIRMED` al crearla). Un reintento después de cancelarla responde
+   * `CANCELLED` y cada sobre `DEACTIVATED`: el POS no debe entregar esos códigos. Opcional por compatibilidad.
+   */
+  status?: OrderStatus
   sobres: Array<{
     id: string
     /** `XXXX-XXXX-XXXX-XXXX-X`: sólo a quien vende (permiso `giftCards:sell`), para el QR o el certificado. */
@@ -66,6 +71,8 @@ export interface CreateGiftCardOrderResult {
     deliveryChannel: GiftCardDeliveryChannel
     venceEnMeses: number | null
     termsVersion: string
+    /** A5 r1: estado del sobre al responder (`PENDING` hasta que la cuenta se paga). */
+    status?: GiftCardStatus
   }>
 }
 
@@ -73,6 +80,7 @@ const SELECT_CUENTA = {
   id: true,
   orderNumber: true,
   total: true,
+  status: true,
   items: {
     where: { giftCardId: { not: null } },
     orderBy: { sequence: 'asc' },
@@ -81,6 +89,7 @@ const SELECT_CUENTA = {
       giftCard: {
         select: {
           id: true,
+          status: true,
           codeEnc: true,
           codeLast4: true,
           initialAmount: true,
@@ -199,6 +208,7 @@ function respuesta(c: CuentaGuardada, replay: boolean): CreateGiftCardOrderResul
     orderNumber: c.orderNumber,
     total: Number(c.total),
     replay,
+    status: c.status,
     sobres: sobres.map(s => ({
       id: s.id,
       codigo: formatGiftCardCode(decryptGiftCardCode(s.codeEnc)),
@@ -208,6 +218,7 @@ function respuesta(c: CuentaGuardada, replay: boolean): CreateGiftCardOrderResul
       deliveryChannel: s.deliveryChannel,
       venceEnMeses: s.validityMonths,
       termsVersion: s.termsVersion,
+      status: s.status,
     })),
   }
 }

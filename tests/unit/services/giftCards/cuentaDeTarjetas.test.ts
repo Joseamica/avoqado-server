@@ -1,4 +1,9 @@
-import { esCuentaDeTarjetas, esCuentaDeTarjetasEnTx, rechazarSiEsCuentaDeTarjetas } from '@/services/giftCards/cuentaDeTarjetas'
+import {
+  esCuentaDeTarjetas,
+  esCuentaDeTarjetasEnTx,
+  rechazarSiEsCuentaDeTarjetas,
+  tieneRenglonDeTarjeta,
+} from '@/services/giftCards/cuentaDeTarjetas'
 import * as contrato from '@/services/giftCards/giftCardOrder.service'
 import { prismaMock } from '../../../__helpers__/setup'
 
@@ -12,6 +17,13 @@ describe('cuenta de tarjetas — guardias', () => {
     expect(esCuentaDeTarjetas([{ giftCardId: 'gc-1' }, { giftCardId: 'gc-2' }])).toBe(true)
     expect(esCuentaDeTarjetas([])).toBe(false)
     expect(esCuentaDeTarjetas([{ giftCardId: 'gc-1' }, { giftCardId: null }])).toBe(false)
+  })
+
+  it('A5 r1: tieneRenglonDeTarjeta (la de las guardias) basta con UNA línea de tarjeta; vacía o sin sobres, no', () => {
+    expect(tieneRenglonDeTarjeta([{ giftCardId: 'gc-1' }, { giftCardId: null }])).toBe(true)
+    expect(tieneRenglonDeTarjeta([{ giftCardId: 'gc-1' }])).toBe(true)
+    expect(tieneRenglonDeTarjeta([])).toBe(false)
+    expect(tieneRenglonDeTarjeta([{ giftCardId: null }])).toBe(false)
   })
 
   it('esCuentaDeTarjetasEnTx busca UN renglón con sobre de esa cuenta, con la transacción recibida', async () => {

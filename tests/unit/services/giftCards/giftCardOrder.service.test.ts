@@ -40,6 +40,7 @@ function armar() {
     id: 'order-1',
     orderNumber: data.orderNumber,
     total: data.total,
+    status: data.status,
     items: data.items.create.map((it: any) => ({ giftCard: creados.get(it.giftCardId) })),
   }))
 }
@@ -61,15 +62,17 @@ const pedido = (over: Record<string, unknown> = {}) => ({
 })
 
 /** La cuenta como la devuelve la base para un reintento del pedido de arriba. */
-function cuentaGuardada(montos: number[]) {
+function cuentaGuardada(montos: number[], estado: { cuenta: string; sobres: string } = { cuenta: 'CONFIRMED', sobres: 'PENDING' }) {
   const codigos = montos.map(() => generateGiftCardCode())
   return {
     id: 'order-1',
     orderNumber: 'ORD-1',
     total: D(montos.reduce((a, b) => a + b, 0)),
+    status: estado.cuenta,
     items: montos.map((m, i) => ({
       giftCard: {
         id: `gc-${i + 1}`,
+        status: estado.sobres,
         codeEnc: encryptGiftCardCode(codigos[i].normalized),
         codeLast4: codigos[i].last4,
         initialAmount: D(m),
@@ -99,6 +102,9 @@ describe('createGiftCardOrder', () => {
 
     expect(r.replay).toBe(false)
     expect(r.sobres).toHaveLength(2)
+    // A5 r1: la primera respuesta también trae los estados (la cuenta abierta, los sobres por activarse).
+    expect(r.status).toBe('CONFIRMED')
+    expect(r.sobres.map(s => s.status)).toEqual(['PENDING', 'PENDING'])
     const [uno, dos] = [creados.get('gc-1'), creados.get('gc-2')]
     for (const [s, sobre] of [
       [uno, r.sobres[0]],
@@ -184,6 +190,16 @@ describe('createGiftCardOrder', () => {
     expect(prismaMock.order.findUnique).toHaveBeenCalledWith(
       expect.objectContaining({ where: { venueId_externalId: { venueId: VENUE, externalId: 'giftcard:venta-tarjeta-0001' } } }),
     )
+  })
+
+  it('🔴 A5 r1: el reintento DESPUÉS de cancelar la cuenta dice CANCELLED y cada sobre DEACTIVATED (el POS no entrega esos códigos)', async () => {
+    prismaMock.order.findUnique.mockResolvedValue(cuentaGuardada([500, 1000], { cuenta: 'CANCELLED', sobres: 'DEACTIVATED' }))
+
+    const r = await createGiftCardOrder(VENUE, 'staff-1', pedido())
+
+    expect(r).toMatchObject({ replay: true, status: 'CANCELLED' })
+    expect(r.sobres.map(s => s.status)).toEqual(['DEACTIVATED', 'DEACTIVATED'])
+    expect(prismaMock.giftCard.create).not.toHaveBeenCalled()
   })
 
   it('🔴 la misma llave con OTRO contenido: IDEMPOTENCY_KEY_REUSED (409)', async () => {

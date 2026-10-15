@@ -10,8 +10,17 @@ import { GiftCardError } from './giftCardErrors'
 
 export { desactivarSobresPendientesDeCuentaEnTx } from './giftCardLedger'
 
+/** La definición de R11 (TODAS las líneas son de tarjeta). Para GUARDAR una escritura usa `tieneRenglonDeTarjeta`. */
 export function esCuentaDeTarjetas(items: ReadonlyArray<{ giftCardId: string | null }>): boolean {
   return items.length > 0 && items.every(item => item.giftCardId != null)
+}
+
+/**
+ * ¿Alguna línea es de tarjeta? Es la versión en memoria de `esCuentaDeTarjetasEnTx` y la que usan las guardias: basta UNA
+ * línea de tarjeta para no tocar la cuenta (defensa en profundidad si alguna vez quedara mezclada).
+ */
+export function tieneRenglonDeTarjeta(items: ReadonlyArray<{ giftCardId: string | null }>): boolean {
+  return items.some(item => item.giftCardId != null)
 }
 
 /** ¿La cuenta tiene líneas de tarjeta? Las líneas de tarjeta sólo nacen con la cuenta: nunca se agregan después. */
