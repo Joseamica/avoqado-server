@@ -30,6 +30,7 @@ import { earnPoints } from '@/services/dashboard/loyalty.dashboard.service'
 import { addCustomerToOrder, createAndAddCustomerToOrder, removeCustomerFromOrder } from '@/services/tpv/order.tpv.service'
 import { LoyaltyReconciliationJob } from '@/jobs/loyalty-reconciliation.job'
 import * as tardia from '@/services/shared/loyaltyOnLateCustomer'
+import { esperarBloqueado } from '@tests/__helpers__/candadosDePostgres'
 
 /** Texto EXACTO del ruling: la marca de fila que deja la reapertura. */
 const MARCA = 'REABIERTA: cliente ligado después del cobro'
@@ -451,3 +452,86 @@ describe('🔴 H4: dos intentos validados para clientes distintos antes del prim
 function aTiempoLocal<T>(p: Promise<T>, que: string, ms = 8_000): Promise<T> {
   return Promise.race([p, new Promise<T>((_, reject) => setTimeout(() => reject(new Error(`timeout: ${que}`)), ms).unref())])
 }
+
+/**
+ * 🔴 Cuarta ola (recheck 3 de Codex + re-revisión, 15-oct-2026): la escritura de los puntos pasó a una transacción interactiva
+ * con el candado de la venta. Con los tiempos por defecto de Prisma (5 s), una espera más larga —un solo cliente cuyo saldo
+ * está bloqueado por otra operación, o la venta tomada por otro intento— vencía la transacción (P2028), revertía el EARN y el
+ * saldo, y el cobro manual o la liga de pago sólo lo registraban: el cliente se quedaba sin sus puntos.
+ */
+describe('🔴 cuarta ola: una espera de más de 5 s no pierde los puntos (Postgres real)', () => {
+  async function ventaPagadaSinCliente(): Promise<string> {
+    return (
+      await prisma.order.create({
+        data: {
+          venueId: venueId!,
+          orderNumber: `ORD-OTRO-${sello}-${++n}`,
+          subtotal: 50,
+          taxAmount: 0,
+          total: 50,
+          status: 'COMPLETED',
+          paymentStatus: 'PAID',
+        },
+      })
+    ).id
+  }
+
+  /** Abre una transacción que toma `tomar` y la retiene hasta que se suelte. Devuelve su pid y cómo soltarla. */
+  async function retener(tomar: (tx: any) => Promise<unknown>) {
+    let soltar: () => void = () => undefined
+    const suelta = new Promise<void>(r => (soltar = r))
+    let avisar: (pid: number) => void = () => undefined
+    const pid = new Promise<number>(r => (avisar = r))
+    const tx = prisma.$transaction(
+      async t => {
+        await tomar(t)
+        const [{ pid: propio }] = await t.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`
+        avisar(Number(propio))
+        await suelta
+      },
+      { timeout: 60_000 },
+    )
+    tx.catch(() => undefined)
+    return { pid: await pid, soltar: () => soltar(), fin: tx }
+  }
+
+  it('🔴 UN cliente cuyo saldo está bloqueado por otra operación más de 5 s: los puntos esperan y se acreditan UNA vez', async () => {
+    const dany = await cliente('Dany')
+    const orderId = await ventaPagadaSinCliente()
+    const retenido = await retener(t => t.$queryRaw`SELECT "id" FROM "Customer" WHERE "id" = ${dany} FOR NO KEY UPDATE`)
+    let acreditar: ReturnType<typeof earnPoints> | undefined
+    try {
+      acreditar = earnPoints(venueId!, dany, 50, orderId)
+      acreditar.catch(() => undefined)
+      const espera = await esperarBloqueado(prisma, { bloqueadoPor: [retenido.pid], consulta: /UPDATE[\s\S]*"Customer"/ })
+      expect(espera).not.toBeNull() // la escritura del saldo está esperando la fila
+      await new Promise(r => setTimeout(r, 6_000)) // más que los 5 s por defecto de Prisma
+    } finally {
+      retenido.soltar()
+    }
+    await retenido.fin
+    expect(await acreditar!).toMatchObject({ pointsEarned: 50, newBalance: 50 })
+    expect(await prisma.loyaltyTransaction.count({ where: { orderId, customerId: dany, type: 'EARN' } })).toBe(1)
+    expect((await prisma.customer.findUniqueOrThrow({ where: { id: dany }, select: { loyaltyPoints: true } })).loyaltyPoints).toBe(50)
+  })
+
+  it('🔴 la VENTA está tomada más de 5 s (otro intento acreditándola): el sello y los puntos esperan y quedan UNA vez', async () => {
+    const eva = await cliente('Eva')
+    const orderId = await ventaPagadaSinCliente()
+    const retenido = await retener(t => t.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${venueId!}), hashtext(${orderId}))`)
+    let acreditar: ReturnType<typeof earnPoints> | undefined
+    try {
+      acreditar = earnPoints(venueId!, eva, 50, orderId)
+      acreditar.catch(() => undefined)
+      const espera = await esperarBloqueado(prisma, { bloqueadoPor: [retenido.pid], consulta: /pg_advisory_xact_lock/ })
+      expect(espera).toMatchObject({ waitEvent: 'advisory' })
+      await new Promise(r => setTimeout(r, 6_000))
+    } finally {
+      retenido.soltar()
+    }
+    await retenido.fin
+    expect(await acreditar!).toMatchObject({ pointsEarned: 50 })
+    expect(await prisma.loyaltyTransaction.count({ where: { orderId, customerId: eva, type: 'EARN' } })).toBe(1)
+    expect(await prisma.stampEvent.count({ where: { venueId, orderId, type: 'EARN', stampCard: { customerId: eva } } })).toBe(1)
+  })
+})

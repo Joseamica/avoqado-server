@@ -32,7 +32,7 @@ jest.mock('../../../../src/services/mobile/loyalty.mobile.service', () => ({
   redeemPointsToOrder: jest.fn(),
 }))
 import { BadRequestError, NotFoundError } from '../../../../src/errors/AppError'
-import { LoyaltyTransactionType } from '@prisma/client'
+import { LoyaltyTransactionType, Prisma } from '@prisma/client'
 import { Decimal } from '@prisma/client/runtime/library'
 
 // Helper to create mock loyalty config
@@ -433,6 +433,8 @@ describe('Loyalty Dashboard Service', () => {
   describe('earnPoints', () => {
     // Tercera ola (H4, recheck 2 de Codex): los puntos se escriben en una transacción interactiva con el candado por VENTA.
     beforeEach(() => {
+      // Sin colas «Once» sobrantes (los rechazos P2028 de una prueba no pueden caer en la siguiente).
+      prismaMock.$transaction.mockReset()
       prismaMock.$transaction.mockImplementation((async (cb: any) => (typeof cb === 'function' ? cb(prismaMock) : cb)) as never)
       prismaMock.loyaltyTransaction.findFirst.mockResolvedValue(null)
       prismaMock.stampEvent.findFirst.mockResolvedValue(null)
@@ -616,6 +618,58 @@ describe('Loyalty Dashboard Service', () => {
         const r = await earnPoints('venue-123', 'customer-123', 50, 'order-123')
         expect(r).toEqual({ pointsEarned: 50, newBalance: 7 })
         expect(prismaMock.$transaction).not.toHaveBeenCalled()
+      })
+
+      // ── Cuarta ola (recheck 3 de Codex + re-revisión, 15-oct-2026): presupuesto explícito y reintento sólo por P2028 ─────
+      const p2028 = () =>
+        new Prisma.PrismaClientKnownRequestError('Transaction already closed: the timeout for this transaction was exceeded', {
+          code: 'P2028',
+          clientVersion: 'test',
+        })
+
+      it('🔴 la transacción de los puntos lleva un presupuesto EXPLÍCITO (maxWait 10 s como pool_timeout, timeout 15 s)', async () => {
+        await earnPoints('venue-123', 'customer-123', 50, 'order-123')
+        expect(prismaMock.$transaction).toHaveBeenCalledWith(expect.any(Function), { maxWait: 10_000, timeout: 15_000 })
+      })
+
+      it('🔴 un P2028 (se venció la transacción esperando un candado o una fila) se REINTENTA y acredita UNA sola vez', async () => {
+        prismaMock.$transaction.mockRejectedValueOnce(p2028())
+        const r = await earnPoints('venue-123', 'customer-123', 50, 'order-123')
+        expect(r).toEqual({ pointsEarned: 50, newBalance: 550 })
+        expect(prismaMock.$transaction).toHaveBeenCalledTimes(2)
+        expect(prismaMock.loyaltyTransaction.create).toHaveBeenCalledTimes(1)
+      })
+
+      it('🔴 el reintento es idempotente: si el intento vencido SÍ alcanzó a escribir, el siguiente lo lee dentro del candado y no acredita otra vez', async () => {
+        let intentos = 0
+        prismaMock.$transaction.mockImplementation((async (cb: any) => {
+          intentos += 1
+          const r = await cb(prismaMock)
+          if (intentos === 1) throw p2028() // escribió, pero Prisma reporta el vencimiento
+          return r
+        }) as never)
+        let escrito = false
+        prismaMock.loyaltyTransaction.create.mockImplementation((async () => {
+          escrito = true
+          return createMockTransaction()
+        }) as never)
+        prismaMock.loyaltyTransaction.findFirst.mockImplementation((async (a: any) =>
+          a.where.customerId?.not ? null : escrito ? createMockTransaction({ points: 50 }) : null) as never)
+        const r = await earnPoints('venue-123', 'customer-123', 50, 'order-123')
+        expect(r).toEqual({ pointsEarned: 50, newBalance: 7 })
+        expect(prismaMock.loyaltyTransaction.create).toHaveBeenCalledTimes(1)
+      })
+
+      it('acotado: tres P2028 seguidos ⇒ sube el error (quien llama lo registra), sin más intentos', async () => {
+        prismaMock.$transaction.mockRejectedValueOnce(p2028()).mockRejectedValueOnce(p2028()).mockRejectedValueOnce(p2028())
+        await expect(earnPoints('venue-123', 'customer-123', 50, 'order-123')).rejects.toMatchObject({ code: 'P2028' })
+        expect(prismaMock.$transaction).toHaveBeenCalledTimes(3)
+      })
+
+      it('otro error NO se reintenta (sólo el vencimiento de la transacción)', async () => {
+        prismaMock.$transaction.mockRejectedValueOnce(new Error('connection reset'))
+        await expect(earnPoints('venue-123', 'customer-123', 50, 'order-123')).rejects.toThrow('connection reset')
+        expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
       })
 
       it('un reintento del MISMO cliente que ganó dentro del candado (la otra llamada escribió mientras ésta esperaba): idempotente', async () => {

@@ -283,6 +283,12 @@ describe('grantStamp', () => {
     expect(valores2).toEqual(['v1', 'o1'])
   })
 
+  it('cuarta ola: la transacción del sello lleva el MISMO presupuesto explícito que la de los puntos (también espera el candado de la venta)', async () => {
+    mockConfig()
+    await grantStamp('v1', 'c1', 'o1')
+    expect(prismaMock.$transaction).toHaveBeenCalledWith(expect.any(Function), { maxWait: 10_000, timeout: 15_000 })
+  })
+
   it('🔴 H4 (tercera ola): OTRO cliente ya recibió los PUNTOS de esta venta ⇒ OTHER_CUSTOMER, sin sello', async () => {
     mockConfig()
     prismaMock.loyaltyTransaction.findFirst.mockResolvedValue({ customerId: 'ana' } as any)

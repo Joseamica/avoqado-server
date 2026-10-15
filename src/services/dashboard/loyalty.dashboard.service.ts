@@ -257,6 +257,28 @@ export async function canRedeemPoints(venueId: string, customerId: string, point
 }
 
 /**
+ * 🔴 Cuarta ola (recheck 3 de Codex + re-revisión, 15-oct-2026): presupuesto EXPLÍCITO de la transacción de los puntos.
+ *
+ * Antes la escritura era un `$transaction([...])` por lotes: sin tope propio, sólo esperaba una conexión del pool
+ * (`pool_timeout`, 10 s por defecto; ver `utils/prismaClient.ts`). Al volverse interactiva (H4, tercera ola: el candado de la
+ * venta) heredaba los tiempos por defecto de Prisma —2 s para conseguir conexión, 5 s para TODO, esperas de candado
+ * incluidas—, y un vencimiento (P2028) revertía el EARN y el saldo. Con un solo cliente basta una fila de saldo bloqueada por
+ * otra operación. Por eso:
+ *   · `maxWait` 10 s: lo mismo que el lote esperaba por una conexión (`pool_timeout`).
+ *   · `timeout` 15 s: el mismo presupuesto que el repo da a las transacciones que esperan un candado
+ *     (`ORDER_LOCK_WAIT_BUDGET.timeout`, `paymentShiftClaim.ts`). El trabajo de adentro son cuatro lecturas por índice y dos
+ *     escrituras; lo que puede tardar es la espera del candado de la venta (otro intento de la MISMA venta) o de la fila del
+ *     cliente (otro movimiento de su saldo), y ambas son cortas.
+ * Lo usa también la transacción de `grantStamp`, que espera el mismo candado de la venta.
+ */
+export const PRESUPUESTO_DE_LA_LEALTAD_DE_LA_VENTA = { maxWait: 10_000, timeout: 15_000 } as const
+
+/** Reintentos EXTRA de la escritura de puntos, sólo si la transacción se venció (P2028). Idempotente: ver `earnPoints`. */
+const REINTENTOS_POR_VENCIMIENTO = 2
+
+const seVencioLaTransaccion = (error: unknown): boolean => error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2028'
+
+/**
  * Award loyalty points to customer for a purchase
  * Called automatically when order payment is completed
  *
@@ -397,7 +419,7 @@ export async function earnPoints(
     // con el candado de la VENTA como PRIMERA sentencia (el mismo que toma `grantStamp` después del suyo). Dos intentos que
     // validaron a clientes distintos se forman aquí: el segundo ve los puntos o el sello del primero y no acredita. La
     // deduplicación de antes era por cliente + venta, así que no excluía a otro cliente.
-    const escrito = await prisma.$transaction(async tx => {
+    const escribirPuntos = async (tx: Prisma.TransactionClient) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${venueId}), hashtext(${orderId}))`
       const puntosDeOtro = await tx.loyaltyTransaction.findFirst({
         where: { orderId, type: LoyaltyTransactionType.EARN, customerId: { not: customerId }, customer: { venueId } },
@@ -432,7 +454,23 @@ export async function earnPoints(
         },
       })
       return { tipo: 'ACREDITADO' as const, saldo: customer.loyaltyPoints }
-    })
+    }
+
+    // 🔴 Cuarta ola: presupuesto explícito y, si aun así la transacción se vence (P2028), un reintento ACOTADO. Es
+    // idempotente: cada intento vuelve a tomar el candado de la venta y relee el EARN de este cliente antes de escribir (si
+    // el intento vencido alcanzó a escribir, el siguiente lo encuentra), y el índice único (cliente, venta) respalda.
+    const escribirConReintento = async () => {
+      for (let intento = 0; ; intento++) {
+        try {
+          return await prisma.$transaction(escribirPuntos, PRESUPUESTO_DE_LA_LEALTAD_DE_LA_VENTA)
+        } catch (error) {
+          if (!seVencioLaTransaccion(error) || intento >= REINTENTOS_POR_VENCIMIENTO) throw error
+          logger.warn('⚠️ [LOYALTY] Points transaction expired (P2028); retrying', { venueId, orderId, customerId, intento: intento + 1 })
+          await new Promise(resolve => setTimeout(resolve, 100 * 3 ** intento)) // 100 ms, 300 ms
+        }
+      }
+    }
+    const escrito = await escribirConReintento()
 
     if (escrito.tipo === 'OTRO_CLIENTE') {
       logger.warn('⚠️ [LOYALTY] Another customer already earned this order: no points', { venueId, orderId, customerId })

@@ -3,6 +3,14 @@ import prisma from '../../utils/prismaClient'
 import { venueStartOfDay, venueEndOfDay } from '../../utils/datetime'
 import logger from '../../config/logger'
 import { logAction } from '../dashboard/activity-log.service'
+
+/**
+ * Cuarta ola (15-oct-2026): el MISMO presupuesto que la escritura de los puntos (`PRESUPUESTO_DE_LA_LEALTAD_DE_LA_VENTA` en
+ * `loyalty.dashboard.service.ts`, con su porqué): esta transacción espera también el candado de la VENTA, y con los 5 s por
+ * defecto de Prisma un intento que la esperara más se vencía y el sello quedaba para otro día. No se importa de allá porque
+ * aquel módulo importa éste.
+ */
+const PRESUPUESTO_DEL_SELLO = { maxWait: 10_000, timeout: 15_000 } as const
 import { notifyCustomerPassUpdated } from './notifyPassUpdated.service'
 import { sendFirstStampEmailIfDue } from './firstStampEmail.service'
 
@@ -314,7 +322,7 @@ export async function grantStamp(
       })
 
       return { otorgado: true, cardId: card.id, ganados, meta, completed: true, rewardId: premio.id }
-    })
+    }, PRESUPUESTO_DEL_SELLO)
 
     if (!resultado.otorgado) {
       return resultado.reason === 'ALREADY_STAMPED'
