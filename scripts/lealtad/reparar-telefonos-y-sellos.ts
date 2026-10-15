@@ -30,6 +30,12 @@
  * de la misma transacción que los cambios (se confirman juntos o ninguno); la de (c), una por venta en cuanto termina, y sólo si
  * esa venta aún no tiene su renglón `STAMP_REPAIRED_FOR_LATE_CUSTOMER`.
  *
+ * 🔴 H7 (15-oct-2026): sellar le manda al cliente el correo del primer sello y actualiza su pase, con la BASE_URL y las
+ * credenciales de Wallet de ESTE proceso. Con `--base render --apply`, BASE_URL tiene que ser https://api.avoqado.io (si no,
+ * salida 2 sin escribir nada); la simulación imprime el host de BASE_URL y si Apple/Google Wallet están disponibles. Al
+ * terminar (c), el script ESPERA los avisos al pase y los correos que dejó corriendo antes de desconectarse, y dice cuántos
+ * fueron. Lo más seguro es correrlo desde una shell de Render (ahí el entorno ya es el de producción).
+ *
  * 🔴 Escribir exige repetir el host de la base: es la única defensa contra un DATABASE_URL heredado de otra pestaña.
  * `--base render` cambia DATABASE_URL por RENDER_DATABASE_URL ANTES de cargar Prisma; ninguna URL se imprime. Sin
  * `--base render`, la base nunca puede ser producción, y para escribir tiene que ser loopback (localhost, 127.0.0.1, ::1).
@@ -48,9 +54,11 @@ import {
   decidirReparacionDeSello,
   filaDeBitacora,
   interpretarBanderas,
+  lineaDeEntornoPublico,
   planearTelefonos,
   revalidarVenta,
   revisarBase,
+  revisarEntornoPublico,
   type Banderas,
   type ChoqueDeTelefono,
   type DecisionDeFusion,
@@ -163,6 +171,12 @@ async function main(): Promise<void> {
     console.error(confirmHost === null ? 'No recibí --confirm-host.' : `Recibí «${confirmHost}».`)
     throw new Rechazo(2)
   }
+  // 🔴 H7: en producción, los avisos al cliente (correo del primer sello, pases) tienen que salir con la API de producción.
+  const entorno = revisarEntornoPublico({ base, aplicar, baseUrl: process.env.BASE_URL })
+  if (!entorno.ok) {
+    console.error(`🔴 No se escribió NADA. ${entorno.motivo}`)
+    throw new Rechazo(2)
+  }
 
   // Imports dinámicos: el cliente de Prisma lee DATABASE_URL al cargarse, y `elegirBase` ya la eligió.
   const { default: prisma } = await import('../../src/utils/prismaClient')
@@ -171,6 +185,20 @@ async function main(): Promise<void> {
     '../../src/services/shared/loyaltyOnLateCustomer'
   )
   const { notifyCustomerPassUpdated } = await import('../../src/services/wallet/notifyPassUpdated.service')
+  const { esperarEfectosDeSellos } = await import('../../src/services/wallet/stampLedger.service')
+  const { apnsAvailable } = await import('../../src/services/wallet/apnsClient')
+  const { googleWalletAvailable } = await import('../../src/services/wallet/googleWalletClient')
+  const { env } = await import('../../src/config/env')
+
+  // H7: lo que este proceso usaría para avisarle al cliente (sólo el host de BASE_URL; ninguna llave se imprime).
+  console.log(
+    lineaDeEntornoPublico({
+      baseUrl: process.env.BASE_URL,
+      apple: apnsAvailable(),
+      apnsProduccion: env.NODE_ENV === 'production',
+      google: googleWalletAvailable(),
+    }),
+  )
 
   /** Todo lo que hace «vacío» o no a un cliente. Se usa al planear y OTRA VEZ dentro de la transacción que aplica. */
   const resumen = async (db: Prisma.TransactionClient, id: string): Promise<ResumenCliente | null> => {
@@ -400,7 +428,11 @@ async function main(): Promise<void> {
 
     if (!aplicar) {
       console.log('\nSimulación: no se tocó nada.')
-      console.log(`Para aplicar:  npx tsx ${SCRIPT}${base ? ` --base ${base}` : ''} --apply --confirm-host ${host}`)
+      // H7: en producción, aplicar exige la BASE_URL de la API de producción; si este proceso no la trae, el comando la antepone.
+      const conBaseUrl = revisarEntornoPublico({ base, aplicar: true, baseUrl: process.env.BASE_URL }).ok
+        ? ''
+        : 'BASE_URL=https://api.avoqado.io '
+      console.log(`Para aplicar:  ${conBaseUrl}npx tsx ${SCRIPT}${base ? ` --base ${base}` : ''} --apply --confirm-host ${host}`)
       return
     }
 
@@ -424,7 +456,10 @@ async function main(): Promise<void> {
       console.log(`    ⚠️  Consumer ${c.id} NO se cambió: ${c.ocupadoPor} ya tenía ${c.a} al aplicar`)
     }
     if (!r.fusion.aplicada && r.fusion.motivo) console.log(`    ⚠️  El par autorizado NO se fusionó: ${r.fusion.motivo}`)
-    if (r.fusion.aplicada && r.fusion.pases.length) await notifyCustomerPassUpdated(PAR_AUTORIZADO.venueId, PAR_AUTORIZADO.conservar)
+    if (r.fusion.aplicada && r.fusion.pases.length) {
+      const aviso = await notifyCustomerPassUpdated(PAR_AUTORIZADO.venueId, PAR_AUTORIZADO.conservar)
+      console.log(`    Pase del cliente conservado: ${aviso.notified} tarjeta(s) avisada(s)${aviso.failed ? ' (🔴 el aviso falló)' : ''}.`)
+    }
 
     // ── Aplicar (c): el envoltorio de lealtad de cada venta, revalidada en su turno; su renglón en cuanto termina ─────────
     const porCompletar: VentaPorReparar[] = reparaciones.flatMap(rep =>
@@ -444,6 +479,9 @@ async function main(): Promise<void> {
           legacyCustomer: null,
         })
         if (!otorgada.complete) console.log(`    ⚠️  ${v.orderNumber}: la lealtad dejó errores: ${otorgada.errors.join(' | ')}`)
+        if (otorgada.otroCliente) {
+          console.log(`    ⚠️  ${v.orderNumber}: la venta ya le dio sello o puntos a OTRO cliente: no se acreditó a ${v.clienteId}`)
+        }
         return { complete: otorgada.complete, reembolsada: otorgada.reembolsada }
       },
       estado: estadoEnLaBase,
@@ -481,6 +519,19 @@ async function main(): Promise<void> {
       },
     })
   } finally {
+    if (aplicar) {
+      // 🔴 H7: los avisos al pase y los correos del primer sello salen en segundo plano desde `grantStamp`; si el proceso se
+      // desconecta y sale antes, quedan a medias. Se esperan aquí (también si (c) se cortó con un error), con tope.
+      const efectos = await esperarEfectosDeSellos({ maxMs: 120_000 }).catch(() => null)
+      if (efectos) {
+        console.log(
+          `\nAvisos de esta corrida, esperados antes de salir: ${efectos.avisosAlPase} al pase ` +
+            `(${efectos.tarjetasAvisadas} tarjeta(s) actualizada(s)${efectos.avisosFallidos ? `, 🔴 ${efectos.avisosFallidos} fallaron` : ''}) · ` +
+            `${efectos.correosDePrimerSello} correo(s) de primer sello revisado(s)` +
+            (efectos.pendientes ? ` · 🔴 ${efectos.pendientes} seguían en vuelo a los 2 min` : ''),
+        )
+      }
+    }
     await prisma.$disconnect().catch(() => undefined)
   }
 }

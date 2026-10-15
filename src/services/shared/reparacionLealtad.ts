@@ -79,6 +79,64 @@ export function revisarBase(e: {
   return { ok: true }
 }
 
+// ── Avisos al cliente (H7) ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/** El host público de la API de PRODUCCIÓN: con él salen las ligas del correo del primer sello y los pases de Wallet. */
+export const HOST_API_PRODUCCION = 'api.avoqado.io'
+
+const hostDeUrl = (url: string | undefined): string | null => {
+  if (!url) return null
+  try {
+    return new URL(url).hostname || null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 🔴 H7 (auditoría de Codex del código + revisión final Important 1, 15-oct-2026): sellar en PRODUCCIÓN le manda al cliente el
+ * correo de «guarda tu tarjeta» y actualiza su pase, con la `BASE_URL` del proceso. Corriendo desde la Mac, esa es el túnel de
+ * ngrok: el correo llegaría con ligas a la máquina de alguien. Con `--base render --apply` la BASE_URL tiene que ser la API de
+ * producción (https), o no se escribe nada. La simulación y la base local no mandan nada a clientes reales: pasan.
+ */
+export function revisarEntornoPublico(e: {
+  base: Banderas['base']
+  aplicar: boolean
+  baseUrl: string | undefined
+}): { ok: true } | { ok: false; motivo: string } {
+  if (e.base !== 'render' || !e.aplicar) return { ok: true }
+  let url: URL | null = null
+  try {
+    url = e.baseUrl ? new URL(e.baseUrl) : null
+  } catch {
+    url = null
+  }
+  if (url && url.protocol === 'https:' && url.hostname === HOST_API_PRODUCCION) return { ok: true }
+  return {
+    ok: false,
+    motivo:
+      `para aplicar en producción BASE_URL tiene que ser https://${HOST_API_PRODUCCION} (es «${hostDeUrl(e.baseUrl) ?? 'sin BASE_URL'}»): ` +
+      `con otra, el correo del primer sello y los pases saldrían con ligas que no son de producción. ` +
+      `Córrelo desde una shell de Render, o antepón BASE_URL=https://${HOST_API_PRODUCCION}.`,
+  }
+}
+
+/** Lo que la simulación dice de los avisos al cliente ANTES de aplicar (sólo el host de BASE_URL, nunca la URL completa). */
+export function lineaDeEntornoPublico(e: {
+  baseUrl: string | undefined
+  apple: boolean
+  apnsProduccion: boolean
+  google: boolean
+}): string {
+  const apple = e.apple
+    ? `disponible (${e.apnsProduccion ? 'APNs de producción' : 'APNs de PRUEBAS: los iPhone de clientes reales no se actualizan'})`
+    : 'NO disponible'
+  return (
+    `Avisos al cliente: BASE_URL → ${hostDeUrl(e.baseUrl) ?? '(sin BASE_URL)'} · Apple Wallet: ${apple} · ` +
+    `Google Wallet: ${e.google ? 'disponible' : 'NO disponible'}`
+  )
+}
+
 // ── (a) Teléfonos ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
 /** Lo que guardó el OTP viejo: «+» + 10 dígitos, sin lada. */

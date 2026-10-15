@@ -29,6 +29,65 @@ import { sendFirstStampEmailIfDue } from './firstStampEmail.service'
 
 export type GrantStampReason = 'STAMPS_DISABLED' | 'ALREADY_STAMPED' | 'DAILY_LIMIT_REACHED' | 'PROGRAM_INACTIVE'
 
+// ── Avisos al pase y correos del primer sello, en SEGUNDO PLANO (H7) ───────────────────────────────────────────────────
+//
+// 🔴 H7 (auditoría de Codex del código + revisión final Important 1, 15-oct-2026): el cobro NO espera estos avisos (nunca
+// lanzan y no pueden demorar el dinero), pero un proceso corto —el script de reparación— terminaba con `process.exit` y los
+// cortaba a medias. Se rastrean los que siguen en vuelo para que quien termina el proceso los espere. En el servidor esto
+// sólo guarda promesas vivas (se sueltan al terminar) y cuatro contadores.
+
+const efectosEnVuelo = new Set<Promise<void>>()
+const efectosTerminados = { avisosAlPase: 0, tarjetasAvisadas: 0, avisosFallidos: 0, correosDePrimerSello: 0 }
+
+function enSegundoPlano(tipo: 'aviso' | 'correo', trabajo: unknown): void {
+  const p: Promise<void> = Promise.resolve(trabajo).then(
+    resultado => {
+      if (tipo === 'correo') {
+        efectosTerminados.correosDePrimerSello += 1
+        return
+      }
+      const aviso = resultado as { notified?: number; failed?: boolean } | undefined
+      efectosTerminados.avisosAlPase += 1
+      efectosTerminados.tarjetasAvisadas += aviso?.notified ?? 0
+      if (aviso?.failed) efectosTerminados.avisosFallidos += 1
+    },
+    () => {
+      // Ninguno de los dos lanza; si algún día lo hiciera, aquí no tumba nada y queda contado.
+      if (tipo === 'aviso') efectosTerminados.avisosFallidos += 1
+    },
+  )
+  efectosEnVuelo.add(p)
+  void p.finally(() => efectosEnVuelo.delete(p))
+}
+
+export interface ResumenDeEfectosDeSellos {
+  /** Avisos al pase que terminaron en este proceso. */
+  avisosAlPase: number
+  /** Suma de tarjetas (aparatos o pases de Google) que esos avisos actualizaron. */
+  tarjetasAvisadas: number
+  avisosFallidos: number
+  /** Revisiones del correo del primer sello que terminaron (sólo se manda si es el primero y hay correo). */
+  correosDePrimerSello: number
+  /** Los que seguían en vuelo al vencer `maxMs`. */
+  pendientes: number
+}
+
+/** Espera (con tope) los avisos y correos que los sellos dejaron corriendo, y devuelve lo acumulado en este proceso. */
+export async function esperarEfectosDeSellos(opciones: { maxMs?: number } = {}): Promise<ResumenDeEfectosDeSellos> {
+  const limite = Date.now() + (opciones.maxMs ?? 60_000)
+  while (efectosEnVuelo.size > 0 && Date.now() < limite) {
+    let vence: ReturnType<typeof setTimeout> | undefined
+    await Promise.race([
+      Promise.allSettled([...efectosEnVuelo]),
+      new Promise<void>(resolve => {
+        vence = setTimeout(resolve, Math.max(0, limite - Date.now()))
+      }),
+    ])
+    if (vence) clearTimeout(vence)
+  }
+  return { ...efectosTerminados, pendientes: efectosEnVuelo.size }
+}
+
 export interface GrantStampResult {
   granted: boolean
   reason?: GrantStampReason
@@ -249,10 +308,10 @@ export async function grantStamp(
         : { granted: false, reason: resultado.reason }
     }
 
-    // 🔴 El sello subió: avisarle al teléfono del cliente (fire-and-forget; `notifyCustomerPassUpdated` nunca lanza).
-    void notifyCustomerPassUpdated(venueId, customerId)
+    // 🔴 El sello subió: avisarle al teléfono del cliente (en segundo plano; `notifyCustomerPassUpdated` nunca lanza).
+    enSegundoPlano('aviso', notifyCustomerPassUpdated(venueId, customerId))
     // 🔴 Y si es su PRIMER sello, mandarle la liga para que guarde la tarjeta (`sendFirstStampEmailIfDue` decide y nunca lanza).
-    void sendFirstStampEmailIfDue(venueId, customerId, resultado.cardId)
+    enSegundoPlano('correo', sendFirstStampEmailIfDue(venueId, customerId, resultado.cardId))
 
     return {
       granted: true,
@@ -456,7 +515,7 @@ export async function reverseStampForOrder(
   })
 
   // El sello se fue: la tarjeta tiene que reflejarlo igual que cuando sube.
-  void notifyCustomerPassUpdated(venueId, customerId)
+  enSegundoPlano('aviso', notifyCustomerPassUpdated(venueId, customerId))
 
   logger.info('Sello revertido por reembolso', { venueId, orderId, stampCardId: otorgado.stampCardId })
 

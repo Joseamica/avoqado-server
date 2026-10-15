@@ -13,6 +13,8 @@ import {
   planearTelefonos,
   revalidarVenta,
   revisarBase,
+  revisarEntornoPublico,
+  lineaDeEntornoPublico,
   type CambioDeTelefono,
   type ChoqueDeTelefono,
   type DecisionDeFusion,
@@ -688,6 +690,52 @@ describe('🔴 revisarBase: la base por defecto nunca es prod; para escribir sin
   })
 })
 
+// ── H7 (auditoría de Codex del código + revisión final Important 1, 15-oct-2026) ─────────────────────────────────────────
+describe('🔴 H7 revisarEntornoPublico: escribir en PRODUCCIÓN exige que los avisos al cliente salgan con la API de producción', () => {
+  it.each<[string, Parameters<typeof revisarEntornoPublico>[0]]>([
+    ['--base render --apply con https://api.avoqado.io', { base: 'render', aplicar: true, baseUrl: 'https://api.avoqado.io' }],
+    ['… con diagonal final', { base: 'render', aplicar: true, baseUrl: 'https://api.avoqado.io/' }],
+    [
+      'simulación contra render con ngrok (sólo lee: no se manda nada)',
+      { base: 'render', aplicar: false, baseUrl: 'https://x.ngrok-free.dev' },
+    ],
+    ['simulación sin BASE_URL', { base: 'render', aplicar: false, baseUrl: undefined }],
+    ['aplicar en la base LOCAL con ngrok (no es producción)', { base: null, aplicar: true, baseUrl: 'https://x.ngrok-free.dev' }],
+    ['aplicar con --base local', { base: 'local', aplicar: true, baseUrl: undefined }],
+  ])('%s ⇒ ok', (_n, e) => {
+    expect(revisarEntornoPublico(e)).toEqual({ ok: true })
+  })
+
+  it.each<[string, string | undefined]>([
+    ['el túnel de ngrok de la Mac', 'https://patchiest-noncommemorational-willia.ngrok-free.dev'],
+    ['el dashboard local', 'http://localhost:5173'],
+    ['sin BASE_URL', undefined],
+    ['vacía', ''],
+    ['no es URL', 'api.avoqado.io'],
+    ['http (sin TLS)', 'http://api.avoqado.io'],
+    ['un host que sólo EMPIEZA igual', 'https://api.avoqado.io.evil.com'],
+    ['otro subdominio', 'https://staging.avoqado.io'],
+  ])('🔴 --base render --apply con %s ⇒ rechazo (salida 2 en el script)', (_n, baseUrl) => {
+    const r = revisarEntornoPublico({ base: 'render', aplicar: true, baseUrl })
+    expect(r.ok).toBe(false)
+    expect(r.ok === false && r.motivo).toMatch(/api\.avoqado\.io/)
+  })
+})
+
+describe('H7 lineaDeEntornoPublico: lo que la simulación dice ANTES de aplicar', () => {
+  it('nombra el host de BASE_URL (nunca la URL completa) y si Apple/Google Wallet están disponibles', () => {
+    expect(
+      lineaDeEntornoPublico({ baseUrl: 'https://api.avoqado.io/x?token=secreto', apple: true, apnsProduccion: true, google: false }),
+    ).toBe('Avisos al cliente: BASE_URL → api.avoqado.io · Apple Wallet: disponible (APNs de producción) · Google Wallet: NO disponible')
+    expect(lineaDeEntornoPublico({ baseUrl: undefined, apple: false, apnsProduccion: false, google: true })).toBe(
+      'Avisos al cliente: BASE_URL → (sin BASE_URL) · Apple Wallet: NO disponible · Google Wallet: disponible',
+    )
+    expect(lineaDeEntornoPublico({ baseUrl: 'https://x.ngrok-free.dev', apple: true, apnsProduccion: false, google: true })).toContain(
+      'Apple Wallet: disponible (APNs de PRUEBAS: los iPhone de clientes reales no se actualizan)',
+    )
+  })
+})
+
 describe('🔴 el script elige la base ANTES de cargar Prisma: nada que cargue el cliente entra por import estático', () => {
   const raiz = join(__dirname, '..', '..', '..', '..')
   const importsDe = (archivo: string): string[] =>
@@ -714,5 +762,19 @@ describe('🔴 el script elige la base ANTES de cargar Prisma: nada que cargue e
     const fuente = readFileSync(join(raiz, SCRIPT), 'utf8')
     expect(fuente).toMatch(/tx\.activityLog\.createMany\(/)
     expect(fuente).not.toMatch(/logAction/)
+  })
+
+  it('🔴 H7: revisa BASE_URL antes de conectarse y ESPERA los avisos/correos de la reparación antes de desconectar', () => {
+    const fuente = readFileSync(join(raiz, SCRIPT), 'utf8')
+    const revisa = fuente.indexOf('revisarEntornoPublico(')
+    const conecta = fuente.indexOf("await import('../../src/utils/prismaClient')")
+    expect(revisa).toBeGreaterThan(-1)
+    expect(revisa).toBeLessThan(conecta)
+    expect(fuente).toMatch(/process\.env\.BASE_URL/)
+    const espera = fuente.indexOf('esperarEfectosDeSellos(')
+    const desconecta = fuente.indexOf('prisma.$disconnect()')
+    expect(espera).toBeGreaterThan(-1)
+    expect(espera).toBeLessThan(desconecta)
+    expect(fuente).toMatch(/lineaDeEntornoPublico\(/)
   })
 })
