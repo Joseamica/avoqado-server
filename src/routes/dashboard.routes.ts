@@ -93,6 +93,7 @@ import * as textToSqlAssistantController from '../controllers/dashboard/text-to-
 import * as tokenBudgetController from '../controllers/dashboard/token-budget.dashboard.controller'
 import * as tpvController from '../controllers/dashboard/tpv.dashboard.controller'
 import { bindTpvCommandTarget } from '../middlewares/bindTpvCommandTarget.middleware'
+import { soloElDuenoBorraDeFabrica } from '../middlewares/soloElDuenoBorraDeFabrica.middleware'
 import { bindTpvSettingsTarget } from '../middlewares/bindTpvSettingsTarget.middleware'
 import * as displayModeRequestController from '../controllers/dashboard/displayModeRequest.dashboard.controller'
 import * as tpvCommandController from '../controllers/dashboard/tpv-command.dashboard.controller'
@@ -5502,11 +5503,14 @@ router.get(
  *       404:
  *         description: Terminal not found or offline
  */
+// 🔴 `tpv:command` abre los comandos del piso (bloquear, reiniciar…); borrar de fábrica exige además
+// `tpv-factory-reset:execute` (dueño). Fijado en tests/unit/routes/tpv-factory-reset.soloElDueno.routes.test.ts.
 router.post(
   '/tpv/:terminalId/command',
   authenticateTokenMiddleware,
   bindTpvCommandTarget,
   checkPermission('tpv:command'),
+  soloElDuenoBorraDeFabrica(req => req.body?.command),
   tpvController.sendTpvCommand,
 )
 
@@ -5609,6 +5613,7 @@ router.post(
   authenticateTokenMiddleware,
   bindTpvCommandTarget,
   checkPermission('tpv:command'),
+  soloElDuenoBorraDeFabrica(req => req.body?.command),
   tpvController.sendTpvCommand,
 )
 
@@ -5680,6 +5685,8 @@ router.post(
   authenticateTokenMiddleware,
   checkPermission('tpv-commands:write'),
   validateRequest(sendCommandSchema),
+  // El `confirmationPin` que exige el esquema para FACTORY_RESET no se valida contra nada: el candado es este permiso.
+  soloElDuenoBorraDeFabrica(req => req.body?.commandType),
   tpvCommandController.sendCommand,
 )
 

@@ -50,6 +50,7 @@ import {
   RetryCommandBody,
 } from '../../schemas/dashboard/tpv-command.schema'
 import { TpvCommandType } from '@prisma/client'
+import { esBorradoDeFabrica, exigirPermisoDeBorradoDeFabrica } from '../../middlewares/soloElDuenoBorraDeFabrica.middleware'
 
 // ==========================================
 // COMMAND OPERATIONS
@@ -329,6 +330,9 @@ export async function retryCommand(
     if (!['FAILED', 'EXPIRED'].includes(command.status)) {
       throw new BadRequestError(`Command ${commandId} cannot be retried (status: ${command.status})`)
     }
+
+    // 🔴 Re-armar un borrado de fábrica es VOLVER a mandarlo: exige el mismo permiso del dueño que mandarlo.
+    if (esBorradoDeFabrica(command.commandType)) await exigirPermisoDeBorradoDeFabrica(req, venueId)
 
     // Reset command for retry
     const updatedCommand = await prisma.tpvCommandQueue.update({

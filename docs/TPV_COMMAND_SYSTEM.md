@@ -266,6 +266,22 @@ only server-side check lived in the ACK — after the wipe.
   and invited endless retries of an ACK that can never be accepted. Serial comparison is `sameTerminalSerial()` (`utils/terminalSerial.ts`)
   on both paths — with or without `AVQD-`, any case, both directions.
 
+### 7. FACTORY_RESET requires `tpv-factory-reset:execute` at every entry (2026-10-15)
+
+**Problem Solved:** the permission existed (OWNER yes, ADMIN/MANAGER no) but no route asked for it.
+`POST /dashboard/tpv/:terminalId/command` (and its `/venues/:venueId/...` twin) only required `tpv:command`, which MANAGER has and ADMIN
+covers with `tpv:*`; the org route `POST /dashboard/organizations/:orgId/terminals/:terminalId/command` only required org MEMBERSHIP. The
+dashboard hiding the button from non-owners was not a lock (Codex audit, 2026-10-14, finding 1).
+
+**Design:** `src/middlewares/soloElDuenoBorraDeFabrica.middleware.ts`. The route keeps its generic permission; only when the body's command
+is `FACTORY_RESET` it also requires `tpv-factory-reset:execute`, evaluated in the TERMINAL's venue with the canonical resolver
+(`tienePermisoEnElVenue`: real superadmin, venue role with org-owner fallback, permission set, venue customizations and exclusions — never
+by role name, and without the manager-PIN override). 403 `FACTORY_RESET_OWNER_ONLY` with a Spanish message, plus `PERMISSION_DENIED` in
+`ActivityLog`. Covered: both venue command routes, `POST /venues/:venueId/tpv-commands` (its `confirmationPin` is never validated, so it is
+not a lock), `POST /venues/:venueId/tpv-commands/:commandId/retry` (re-arming a wipe is sending it again) and the org command route. Bulk
+and scheduled reject `FACTORY_RESET` in their schemas; the org migration wizard is `requireOrgOwner` and wipes by design; superadmin routes
+are SUPERADMIN-only. Tests: `tests/unit/routes/tpv-factory-reset.soloElDueno.routes.test.ts`.
+
 ## Key File Locations
 
 ```

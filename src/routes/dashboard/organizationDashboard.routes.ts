@@ -9,6 +9,7 @@ import { z } from 'zod'
 import { authenticateTokenMiddleware } from '../../middlewares/authenticateToken.middleware'
 import { validateRequest } from '../../middlewares/validation'
 import { checkPermission } from '../../middlewares/checkPermission.middleware'
+import { soloElDuenoBorraDeFabricaEnLaOrganizacion } from '../../middlewares/soloElDuenoBorraDeFabrica.middleware'
 import * as manualSaleController from '../../controllers/dashboard/manualSale.controller'
 import { bulkManualSalesSchema } from '../../schemas/dashboard/manualSale.schema'
 import { organizationDashboardService } from '../../services/organization-dashboard/organizationDashboard.service'
@@ -1142,6 +1143,9 @@ router.post(
   authenticateTokenMiddleware,
   checkOrgAccess,
   validateRequest(SendOrgCommandSchema),
+  // 🔴 Ser miembro de la org bastaba para borrar de fábrica cualquier terminal suya: ahora FACTORY_RESET exige
+  // `tpv-factory-reset:execute` en el venue de la terminal (el dueño de la org entra por el respaldo del resolvedor).
+  soloElDuenoBorraDeFabricaEnLaOrganizacion,
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { orgId, terminalId } = req.params
