@@ -1,5 +1,5 @@
 // src/services/customer-display/customerDisplayDesign.effective.ts
-import { createHash } from 'crypto'
+import { fingerprintOf } from './canonicalHash'
 import { recognizeStorageUrl } from './storageOrigins'
 import { FACTORY_DESIGN, HEX_COLOR, type DesignValues } from './customerDisplayDesign.validation'
 
@@ -108,16 +108,6 @@ function urlPublica(objectPath: string, bucket: string): string {
   return `https://storage.googleapis.com/${bucket}/${objectPath}`
 }
 
-/** Serialización estable: la huella no puede depender del orden en que JS enumeró las llaves. */
-function canonico(valor: unknown): string {
-  if (valor === null || typeof valor !== 'object') return JSON.stringify(valor) ?? 'null'
-  if (Array.isArray(valor)) return `[${valor.map(canonico).join(',')}]`
-  const entradas = Object.entries(valor as Record<string, unknown>)
-    .filter(([, v]) => v !== undefined)
-    .sort(([a], [b]) => (a < b ? -1 : 1))
-  return `{${entradas.map(([k, v]) => `${JSON.stringify(k)}:${canonico(v)}`).join(',')}}`
-}
-
 export function buildEffectiveDesign(input: EffectiveInput): { ficha: FichaEfectiva; assetRejected: string[] } {
   const design = input.design ?? FACTORY_DESIGN
   const assetRejected: string[] = []
@@ -169,6 +159,6 @@ export function buildEffectiveDesign(input: EffectiveInput): { ficha: FichaEfect
     poweredBy: true,
   }
 
-  const fingerprint = createHash('sha256').update(canonico(ficha)).digest('hex').slice(0, 32)
+  const fingerprint = fingerprintOf(ficha)
   return { ficha: { ...ficha, fingerprint }, assetRejected }
 }
