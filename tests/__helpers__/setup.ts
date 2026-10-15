@@ -481,6 +481,10 @@ const prismaMock: any = {
   cfdi: createMockModel(),
   orderItemSelloIva: createMockModel(),
   cfdiGlobalOrden: createMockModel(),
+  // Pedidos en línea (plan 1a): este mock es una LISTA FIJA. Sin estas dos entradas cualquier prueba que toque los modelos
+  // nuevos revienta con «Cannot read properties of undefined» en vez de fallar por su aserción.
+  onlineOrderingSettings: createMockModel(),
+  onlineOrder: createMockModel(),
   // Add $connect and $disconnect for connection management
   $connect: jest.fn(),
   $disconnect: jest.fn(),
