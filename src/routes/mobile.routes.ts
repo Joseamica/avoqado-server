@@ -1477,10 +1477,19 @@ router.post('/push/test', authenticateTokenMiddleware, pushMobileController.send
  *         schema:
  *           type: string
  *       - in: query
+ *         name: page
+ *         schema: { type: integer, default: 1 }
+ *       - in: query
+ *         name: pageSize
+ *         schema: { type: integer, default: 20, maximum: 100 }
+ *       - in: query
  *         name: limit
- *         schema:
- *           type: integer
- *           default: 50
+ *         description: Alias de pageSize (clientes viejos). Tope 100. Si vienen los dos, gana pageSize.
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: search
+ *         description: Teléfono (se comparan dígitos; 52/521 sobrantes se ignoran) o palabras de nombre/apellido/correo, sin acentos ni mayúsculas. Con más de 5000 coincidencias se paginan las más nuevas, meta.totalCount = las alcanzables (5000), meta.totalMatches = el total exacto y meta.searchCapped = true.
+ *         schema: { type: string }
  *       - in: query
  *         name: sortBy
  *         schema:
@@ -1492,7 +1501,7 @@ router.post('/push/test', authenticateTokenMiddleware, pushMobileController.send
  *           enum: [asc, desc]
  *     responses:
  *       200:
- *         description: List of customers
+ *         description: "{ data, meta: { totalCount, pageSize, currentPage, totalPages, hasNextPage, hasPrevPage, totalMatches?, searchCapped? } } — totalMatches y searchCapped sólo vienen cuando la búsqueda se topó en 5000."
  */
 router.get('/venues/:venueId/customers', authenticateTokenMiddleware, checkPermission('customers:read'), customerController.getCustomers)
 
