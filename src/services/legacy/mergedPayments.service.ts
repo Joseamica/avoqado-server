@@ -44,6 +44,7 @@ import { Prisma, TransactionStatus } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { MINDFORM_NEW_VENUE_ID, forEachLegacyPaymentPage } from './qrPayments.legacy.service'
+import { WHERE_ORDEN_DE_TARJETAS, WHERE_ORDEN_SIN_TARJETAS } from '../giftCards/giftCardMarks'
 
 export interface AnalyticsPaymentFilters {
   fromDate: Date
@@ -220,22 +221,37 @@ export interface AnalyticsMethodTotal {
 
 export async function aggregatePaymentsByMethod(venueId: string, filters: AnalyticsPaymentFilters): Promise<AnalyticsMethodTotal[]> {
   const grupos = await prisma.payment.groupBy({
-    by: ['method'],
-    where: analyticsWhere(venueId, filters),
+    by: ['method', 'tenderTypeId'],
+    // Tarjetas de regalo (spec §7): la venta de tarjetas no es venta (va en `aggregateGiftCardLoads`).
+    where: { AND: [analyticsWhere(venueId, filters), { order: WHERE_ORDEN_SIN_TARJETAS }] },
     _sum: { amount: true, tipAmount: true },
     _count: { _all: true },
   })
 
+  // Lo pagado con saldo se separa como GIFT_CARD (nunca mezclado con OTHER). Un tender de sistema por venue: consulta acotada.
+  const tenders = [...new Set(grupos.map(g => g.tenderTypeId).filter((id): id is string => !!id))]
+  const deSaldo =
+    tenders.length > 0
+      ? new Set(
+          (
+            await prisma.venueTenderType.findMany({
+              where: { venueId, id: { in: tenders }, systemKind: 'GIFT_CARD' },
+              select: { id: true },
+              take: tenders.length,
+            })
+          ).map(t => t.id),
+        )
+      : new Set<string>()
+
   const porMetodo = new Map<string, AnalyticsMethodTotal>()
   let nativeCount = 0
   for (const g of grupos) {
-    const method = String(g.method)
-    porMetodo.set(method, {
-      method,
-      amount: Number(g._sum.amount ?? 0),
-      tips: Number(g._sum.tipAmount ?? 0),
-      count: g._count._all,
-    })
+    const method = g.tenderTypeId && deSaldo.has(g.tenderTypeId) ? 'GIFT_CARD' : String(g.method)
+    const e = porMetodo.get(method) ?? { method, amount: 0, tips: 0, count: 0 }
+    e.amount += Number(g._sum.amount ?? 0)
+    e.tips += Number(g._sum.tipAmount ?? 0)
+    e.count += g._count._all
+    porMetodo.set(method, e)
     nativeCount += g._count._all
   }
 
@@ -248,6 +264,19 @@ export async function aggregatePaymentsByMethod(venueId: string, filters: Analyt
   })
 
   return [...porMetodo.values()]
+}
+
+/** Tarjetas de regalo cargadas (spec §7): los cobros de cuentas de tarjetas, con sus cancelaciones restando (filas negativas). */
+export async function aggregateGiftCardLoads(
+  venueId: string,
+  filters: AnalyticsPaymentFilters,
+): Promise<{ amount: number; count: number }> {
+  const r = await prisma.payment.aggregate({
+    where: { AND: [analyticsWhere(venueId, filters), { order: WHERE_ORDEN_DE_TARJETAS }] },
+    _sum: { amount: true },
+    _count: { _all: true },
+  })
+  return { amount: Number(r._sum.amount ?? 0), count: r._count._all }
 }
 
 /**

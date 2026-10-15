@@ -19,6 +19,7 @@ import { SHIFT_CLOSE_STALE_MS } from './shiftCloseClaim.constants'
 import { abrirTurnoDeCaja, cerrarTurnoDeCaja, esperadoDelCajonAbierto } from '../shared/turnoDeCaja'
 import { asegurarLaLiga } from '../shared/parejaDeCierre'
 import { lockShiftLifecycleForVenue } from '../shared/shiftLifecycleLock'
+import { WHERE_ORDEN_DE_TARJETAS } from '../giftCards/giftCardMarks'
 
 interface ShiftFilters {
   staffId?: string
@@ -131,7 +132,6 @@ export async function getCurrentShift(venueId: string, _orgId?: string, _posName
     const amount = new Decimal(fila._sum?.amount ?? 0)
     const tipAmount = new Decimal(fila._sum?.tipAmount ?? 0)
 
-    totalSales = totalSales.add(amount)
     totalTips = totalTips.add(tipAmount)
 
     // Group by payment method — el MISMO reparto de siempre, incluido el `default` a «otros».
@@ -153,6 +153,23 @@ export async function getCurrentShift(venueId: string, _orgId?: string, _posName
         break
     }
   }
+
+  // R3 (r1 B-3, r2 #2): `totalSales` sale de UNA consulta agregada que ya excluye las cuentas de tarjetas de regalo (su dinero sí
+  // entró: los totales por método y el cajón no cambian). Nunca la resta de dos lecturas: una carga que entrara entre ambas dejaría
+  // el total en negativo. Este endpoint lo sondea la PAX: sigue siendo una agregación en la base.
+  // 🔴 `NOT` de la marca, y sin rama `orderId: null`: `Payment.orderId` es obligatorio (Prisma rechaza `null` en ese filtro, medido
+  // el 15-oct), y el SQL que genera es `NOT (EXISTS(renglón con tarjeta) AND la orden existe)`: un cobro cuya orden no se pudiera
+  // unir seguiría contando, nunca se pierde en silencio (memoria «predicado-not-en-sql-con-columnas-null-excluye-en-silencio»).
+  const ventasDelTurno = await prisma.payment.aggregate({
+    where: {
+      venueId,
+      shiftId: shift.id,
+      status: 'COMPLETED',
+      NOT: { order: WHERE_ORDEN_DE_TARJETAS },
+    },
+    _sum: { amount: true },
+  })
+  totalSales = new Decimal(ventasDelTurno?._sum?.amount ?? 0)
 
   // Get order count
   const orderCount = await prisma.order.count({
@@ -278,6 +295,9 @@ interface RollupDelTurno {
 
 const ROLLUP_VACIO = (): RollupDelTurno => ({ totalSales: new Decimal(0), totalTips: new Decimal(0), tipsCount: 0 })
 
+/** Tarjetas de regalo (R3): un renglón con `giftCardId` basta para saber que la cuenta es de tarjetas (no se mezclan, A5). */
+const ORDEN_DE_TARJETAS_SELECT = { items: { where: { giftCardId: { not: null } }, select: { id: true }, take: 1 } } as const
+
 /**
  * La proyección MÍNIMA de un `Payment` con la que se pueden calcular los totales de un turno —
  * exactamente lo que selecciona el cierre. Vive aquí arriba porque la usan DOS: el cursor del
@@ -297,6 +317,7 @@ const SHIFT_PAYMENT_TOTALS_SELECT = {
   fundsFlow: true,
   tenderTypeId: true,
   tenderCountsAsCash: true,
+  order: { select: ORDEN_DE_TARJETAS_SELECT },
 } satisfies Prisma.PaymentSelect
 
 /** La proyección del cobro que el rollup necesita: los totales + con qué decidir de quién es. */
@@ -308,7 +329,8 @@ const COBRO_DEL_ROLLUP_SELECT = {
   // cae de la pantalla se ve y se investiga; dinero contado en dos turnos, no.
   shiftId: true,
   createdAt: true,
-  order: { select: { shiftId: true } },
+  // `order` se repite completo: un spread de arriba lo pisaría y se perdería la marca de tarjetas.
+  order: { select: { shiftId: true, ...ORDEN_DE_TARJETAS_SELECT } },
 } satisfies Prisma.PaymentSelect
 
 type CobroDelRollup = Prisma.PaymentGetPayload<{ select: typeof COBRO_DEL_ROLLUP_SELECT }>
@@ -756,6 +778,8 @@ export async function getShiftsSummary(venueId: string, filters: ShiftFilters = 
           processedById: true,
           createdAt: true,
           method: true,
+          // R3 (r1 B-3): la marca de cuenta de tarjetas (un renglón basta), la misma de `SHIFT_PAYMENT_TOTALS_SELECT`.
+          order: { select: ORDEN_DE_TARJETAS_SELECT },
           processedBy: {
             select: {
               id: true,
@@ -814,6 +838,8 @@ export async function getShiftsSummary(venueId: string, filters: ShiftFilters = 
       processedById: true,
       createdAt: true,
       method: true,
+      // R3 (r1 B-3): la marca de cuenta de tarjetas (un renglón basta), la misma de `SHIFT_PAYMENT_TOTALS_SELECT`.
+      order: { select: ORDEN_DE_TARJETAS_SELECT },
       processedBy: {
         select: {
           id: true,
@@ -867,7 +893,8 @@ export async function getShiftsSummary(venueId: string, filters: ShiftFilters = 
       const tipAmount = Number(payment.tipAmount || 0)
 
       if (!isNaN(paymentAmount)) {
-        totalSales += paymentAmount
+        // R3 (r1 B-3): la venta de tarjetas no suma a las ventas del resumen; su método, su tendencia y su cajón, sí (dinero que entró).
+        if ((payment.order?.items?.length ?? 0) === 0) totalSales += paymentAmount
 
         // Track payment method
         const method = payment.method || 'OTHER'
@@ -925,7 +952,8 @@ export async function getShiftsSummary(venueId: string, filters: ShiftFilters = 
     const tipAmount = Number(payment.tipAmount || 0)
 
     if (!isNaN(paymentAmount)) {
-      totalSales += paymentAmount
+      // R3 (r1 B-3): la venta de tarjetas no suma a las ventas del resumen; su método, su tendencia y su cajón, sí (dinero que entró).
+      if ((payment.order?.items?.length ?? 0) === 0) totalSales += paymentAmount
 
       const method = payment.method || 'OTHER'
       paymentMethodMap.set(method, (paymentMethodMap.get(method) || 0) + paymentAmount)
@@ -1005,10 +1033,12 @@ export async function getShiftsSummary(venueId: string, filters: ShiftFilters = 
     .sort((a, b) => b.amount - a.amount) // Sort by highest amount first
 
   // Convert payment method map to array
+  // R3 (r1 B-3): sobre la suma de los métodos (incluye la venta de tarjetas, que sí entró); con `totalSales` sumarían más de 100 %.
+  const totalDeMetodos = Array.from(paymentMethodMap.values()).reduce((suma, total) => suma + total, 0)
   const paymentMethodBreakdown = Array.from(paymentMethodMap.entries()).map(([method, total]) => ({
     method: method,
     total: Number(total.toFixed(2)),
-    percentage: totalSales > 0 ? Number(((total / totalSales) * 100).toFixed(2)) : 0,
+    percentage: totalDeMetodos > 0 ? Number(((total / totalDeMetodos) * 100).toFixed(2)) : 0,
   }))
 
   // Generate time-series sales data based on date range
@@ -1537,6 +1567,12 @@ export interface ShiftPaymentForTotals {
    * resta solo. Ramificar aquí sería cambiar la regla, no extraerla.
    */
   type?: PaymentType | string | null
+  /**
+   * Tarjetas de regalo (R3): si la cuenta del cobro es de tarjetas, NO suma a `totalSales` (sí a los totales por método: el dinero
+   * entró). Opcional: sin él (o sin `items`), todo cuenta como siempre. La firma de índice admite la `order` de otra proyección (el
+   * script de reatribución trae `{ shiftId, orderNumber }`) sin que TypeScript la rechace por no compartir campos.
+   */
+  order?: { readonly items?: ReadonlyArray<unknown> | null; readonly [campo: string]: unknown } | null
 }
 
 /** Los ocho totales con los que se cierra un turno. Todos `Decimal`: dinero nunca en float. */
@@ -1594,7 +1630,9 @@ export function aggregateShiftPayments(payments: ShiftPaymentForTotals[]): Shift
   payments.forEach(payment => {
     const amount = new Decimal(payment.amount || 0)
     const tipAmount = new Decimal(payment.tipAmount || 0)
-    totalSales = totalSales.add(amount)
+    // R3: la venta de tarjetas de regalo no es venta del turno; el efectivo esperado no cambia (lo deciden las ramas de abajo).
+    const esVentaDeTarjetas = (payment.order?.items?.length ?? 0) > 0
+    if (!esVentaDeTarjetas) totalSales = totalSales.add(amount)
     totalTips = totalTips.add(tipAmount)
 
     if (payment.method !== 'CASH' && paymentCountsAsDrawerCash(payment)) {

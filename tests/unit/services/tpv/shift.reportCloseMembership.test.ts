@@ -162,6 +162,8 @@ function esperarMembresiaCanonica(args: any) {
     fundsFlow: true,
     tenderTypeId: true,
     tenderCountsAsCash: true,
+    // Tarjetas de regalo (R3, B5): la marca de cuenta de tarjetas, para no sumarla a `totalSales` del cierre.
+    order: { select: { items: { where: { giftCardId: { not: null } }, select: { id: true }, take: 1 } } },
   })
   expect(args.orderBy).toEqual({ id: 'asc' })
   expect(args.take).toBe(500)

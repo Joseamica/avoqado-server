@@ -16,6 +16,7 @@ import { DateTime } from 'luxon'
 // See: src/services/legacy/mergedPayments.service.ts for full context.
 import { fetchPaymentsForAnalytics } from '../legacy/mergedPayments.service'
 import { MINDFORM_NEW_VENUE_ID, forEachLegacyPaymentPage, getLegacyPayments } from '../legacy/qrPayments.legacy.service'
+import { WHERE_ORDEN_SIN_TARJETAS, sqlOrdenSinTarjetas } from '../giftCards/giftCardMarks'
 
 /**
  * ── Reescritura 2026-09-01 (incidente del event loop) ────────────────────────
@@ -523,6 +524,7 @@ export async function getBasicMetricsData(venueId: string, filters: BasicMetrics
         AND p."type" <> 'REFUND'
         AND p."createdAt" >= ${utcTs(fromDate)} AND p."createdAt" <= ${utcTs(toDate)}
         AND (o."id" IS NULL OR o."status" <> 'CANCELLED')
+        AND ${sqlOrdenSinTarjetas('p."orderId"')}
       GROUP BY 1, 2
       ORDER BY 1, 2
     `,
@@ -638,7 +640,8 @@ async function fetchLegacyBasicMetricPayments(venueId: string, fromDate: Date, t
         status: TransactionStatus.COMPLETED,
         type: { not: 'REFUND' },
         createdAt: { gte: fromDate, lte: toDate },
-        order: { status: { not: 'CANCELLED' } },
+        // Tarjetas de regalo (spec §7): la venta de una tarjeta no es venta; mismo filtro que el KPI de arriba.
+        order: { status: { not: 'CANCELLED' }, ...WHERE_ORDEN_SIN_TARJETAS },
       },
       select: { id: true, amount: true, tipAmount: true, method: true, createdAt: true },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
@@ -747,7 +750,8 @@ export async function getBasicMetricsDetailsPage(venueId: string, filters: Basic
         status: TransactionStatus.COMPLETED,
         type: { not: 'REFUND' },
         createdAt: { gte: fromDate, lte: toDate },
-        order: { status: { not: 'CANCELLED' } },
+        // Tarjetas de regalo (spec §7): la venta de una tarjeta no es venta; mismo filtro que el KPI de arriba.
+        order: { status: { not: 'CANCELLED' }, ...WHERE_ORDEN_SIN_TARJETAS },
         ...(boundary
           ? {
               AND: [
@@ -793,7 +797,8 @@ export async function getBasicMetricsDetailsPage(venueId: string, filters: Basic
         status: TransactionStatus.COMPLETED,
         type: { not: 'REFUND' },
         createdAt: { gte: fromDate, lte: toDate },
-        order: { status: { not: 'CANCELLED' } },
+        // Tarjetas de regalo (spec §7): la venta de una tarjeta no es venta; mismo filtro que el KPI de arriba.
+        order: { status: { not: 'CANCELLED' }, ...WHERE_ORDEN_SIN_TARJETAS },
       },
       select: { id: true, amount: true, tipAmount: true, method: true, createdAt: true },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
