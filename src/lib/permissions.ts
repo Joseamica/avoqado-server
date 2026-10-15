@@ -1245,6 +1245,12 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'settings:manage', // Can manage role permissions
     'role-config:*', // Can customize role display names
     // TPV-specific permissions (all except factory-reset)
+    // Ajustes de CADA aparato: pasos del cobro (propina, estrellas, recibo), pestaña de configuración de la terminal
+    // y lo que el POS cambia de su propia ficha. Decisión del founder (15-oct-2026): el ADMIN los ve y los edita —
+    // antes el GERENTE podía (vía `scale:configure`) y el ADMIN no, al revés de la jerarquía. Explícitos y no
+    // `tpv-settings:*`, para que una acción nueva de ese recurso se decida aparte.
+    'tpv-settings:read',
+    'tpv-settings:update',
     'tpv-terminal:settings', // Can modify terminal configuration
     'tpv-devices:manage', // Can link external devices (iPad, tablets) for BLE payments
     'tpv-kiosk:enable', // Can enable/disable kiosk mode
@@ -1284,7 +1290,6 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'calendar:connect_self',
     'calendar:disconnect_staff',
     'calendar:view_status',
-    // NO: tpv-settings:* (OWNER only - org-level TPV config)
     // NO: venue-crypto:manage (SUPERADMIN only)
     // NO: tpv-factory-reset:execute (OWNER only - destructive)
     // NO: commissions:payout (OWNER only - financial)

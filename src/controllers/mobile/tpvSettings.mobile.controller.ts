@@ -309,7 +309,8 @@ export const updateDisplayMode = async (req: Request, res: Response, next: NextF
  * El POS cambia un ajuste de SU PROPIA ficha (hoy: las pantallas del cobro).
  *
  * 🔴 Tres candados, y ninguno sustituye a los otros:
- *   1. `checkPermission('tpv-settings:update')` en la ruta — QUIÉN (hoy, por defecto, sólo el dueño).
+ *   1. `checkPermission('tpv-settings:update')` en la ruta — QUIÉN (por defecto: dueño, administrador y gerente;
+ *      el administrador desde el 15-oct-2026, decisión del founder).
  *   2. El binding `id + venueId + deviceUid` de abajo — SOBRE QUÉ: sólo la ficha de este aparato.
  *      Sin el `deviceUid`, un dueño podría reconfigurar la PAX (o la tablet del otro mostrador)
  *      desde su propia tablet, que es justo lo que la pestaña del dashboard evita mostrando sólo
