@@ -43,7 +43,12 @@ function llamar<T>(trabajo: () => Promise<T>): Promise<T> {
 
 export class PollWorkLimiter {
   private activos = 0
-  constructor(private readonly maximo: number) {}
+  constructor(private readonly maximo: number) {
+    // Un tope que no es entero ≥ 0 dejaría pasar trabajo sin límite: `activos >= NaN` nunca es cierto.
+    if (!Number.isInteger(maximo) || maximo < 0) {
+      throw new RangeError(`El tope de trabajos del poll debe ser un entero ≥ 0; llegó ${maximo}`)
+    }
+  }
 
   get enVuelo(): number {
     return this.activos
@@ -90,6 +95,10 @@ export class SingleFlightCache<V> {
   private readonly ahora: () => number
 
   constructor(private readonly opciones: { ttlMs: number; maxEntradas: number; ahora?: () => number }) {
+    // 🔴 Con `maxEntradas` < 1 la purga borraría de un mapa vacío para siempre: el proceso entero se congela.
+    if (!Number.isInteger(opciones.maxEntradas) || opciones.maxEntradas < 1) {
+      throw new RangeError(`El tope de entradas de la caché debe ser un entero ≥ 1; llegó ${opciones.maxEntradas}`)
+    }
     // 🔴 `() => Date.now()` y no `Date.now`: guardar la referencia congela la función original y un reloj simulado
     // en una prueba (jest.spyOn(Date, 'now')) dejaría de verse — la caché viviría en otro tiempo que el resto.
     this.ahora = opciones.ahora ?? (() => Date.now())
@@ -108,7 +117,11 @@ export class SingleFlightCache<V> {
     return this.arrancar(llave, calcular, o.limiter)
   }
 
-  /** Siempre calcula de nuevo: no lee lo guardado ni se une a lo que está en vuelo. Sin tope: lo pide una persona. */
+  /**
+   * Siempre calcula de nuevo: no lee lo guardado ni se une a lo que está en vuelo. Sin tope: lo pide una persona.
+   * Mientras corre, `get` sigue entregando lo guardado antes (si hay algo vigente); sólo sin nada guardado se une a este
+   * cálculo. Al terminar, lo nuevo reemplaza a lo guardado.
+   */
   refresh(llave: string, calcular: () => Promise<V>): Promise<V> {
     this.anularVuelo(llave)
     return this.arrancar(llave, calcular)
@@ -181,7 +194,16 @@ export async function dentroDelPlazo<K extends string>(
         valor => {
           listos[clave] = valor
         },
-        error => opciones.alFallar?.(clave, error),
+        error => {
+          // 🔴 `alFallar` sólo reporta: si él mismo truena, la huella sigue «omitida», nunca un error del poll. Este
+          // módulo es PURO y no tiene logger (como `effective.ts` y `customerDisplayCache.ts`): quien pasa `alFallar`
+          // registra ahí, y la falla de su propio reporte se descarta aquí a propósito.
+          try {
+            opciones.alFallar?.(clave, error)
+          } catch {
+            // descartado a propósito (ver arriba)
+          }
+        },
       ),
     ),
   )

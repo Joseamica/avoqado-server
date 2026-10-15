@@ -45,6 +45,15 @@ describe('PollWorkLimiter', () => {
     await expect(p).rejects.toThrow('sync')
     expect(limiter.enVuelo).toBe(0)
   })
+
+  // Fix round 1 (#2): `activos >= NaN` nunca es cierto, así que un tope inválido dejaba pasar trabajo sin límite.
+  it.each([NaN, -1, 1.5, Infinity])('un tope que no es entero ≥ 0 (%p) se rechaza al construir', maximo => {
+    expect(() => new PollWorkLimiter(maximo)).toThrow(RangeError)
+  })
+
+  it('el tope 0 es válido: no deja arrancar nada', () => {
+    expect(new PollWorkLimiter(0).intentar(async () => 'x')).toBeNull()
+  })
 })
 
 describe('esperarTodas — lo que corre dentro de UN lugar (Codex r1 #2)', () => {
@@ -122,6 +131,35 @@ describe('SingleFlightCache', () => {
     expect(cache.sizeForTests().enVuelo).toBe(0)
   })
 
+  // Fix round 1 (#3a, Review Focus #6): unirse a un cálculo en vuelo no pide lugar; sólo arrancar uno.
+  it('🔴 con el tope lleno, una lectura de la MISMA llave se une al cálculo en vuelo (no se rechaza)', async () => {
+    const cache = nueva()
+    const limiter = new PollWorkLimiter(1)
+    const d = diferida<string>()
+    const calcular = jest.fn(() => d.promesa)
+    const primera = cache.get('k', calcular, { limiter })
+    expect(limiter.enVuelo).toBe(1) // el único lugar ya está tomado…
+    const segunda = cache.get('k', calcular, { limiter }) // …y aun así ésta no se rechaza
+    d.resolver('v')
+    await expect(Promise.all([primera, segunda])).resolves.toEqual(['v', 'v'])
+    expect(calcular).toHaveBeenCalledTimes(1)
+    expect(limiter.enVuelo).toBe(0)
+  })
+
+  // Fix round 1 (#3b, Review Focus #6): anular un vuelo no detiene su lectura en la base; su lugar sigue contado.
+  it('🔴 refresh no le quita el lugar al cálculo que reemplaza: sigue ocupado hasta que ése termina', async () => {
+    const cache = nueva()
+    const limiter = new PollWorkLimiter(1)
+    const viejo = diferida<string>()
+    const lectura = cache.get('k', () => viejo.promesa, { limiter })
+    await expect(cache.refresh('k', async () => 'nuevo')).resolves.toBe('nuevo')
+    expect(limiter.enVuelo).toBe(1) // la lectura vieja sigue tocando la base
+    await expect(cache.get('otra', async () => 'x', { limiter })).rejects.toBeInstanceOf(PollWorkSaturated)
+    viejo.resolver('viejo')
+    await expect(lectura).resolves.toBe('viejo')
+    expect(limiter.enVuelo).toBe(0)
+  })
+
   // 🔴 El orden que importa: lo fresco nunca queda debajo de lo viejo.
   it('refresh no se une al cálculo en vuelo, y el cálculo VIEJO no pisa lo nuevo al terminar', async () => {
     const cache = nueva()
@@ -134,7 +172,7 @@ describe('SingleFlightCache', () => {
     expect(cache.peek('k')).toBe('nuevo') // …pero no se guarda encima de lo nuevo
   })
 
-  it('después de un refresh, una lectura nueva se une a lo NUEVO, nunca al cálculo viejo', async () => {
+  it('sin nada guardado todavía: después de un refresh, una lectura nueva se une a lo NUEVO, nunca al cálculo viejo', async () => {
     const cache = nueva()
     const viejo = diferida<string>()
     const nuevo = diferida<string>()
@@ -148,11 +186,40 @@ describe('SingleFlightCache', () => {
     expect(otra).not.toHaveBeenCalled()
   })
 
+  // Fix round 1 (#4): lo que dice el JSDoc de `refresh`, con prueba.
+  it('con algo guardado: mientras corre un refresh, get sigue entregando lo guardado antes', async () => {
+    const cache = nueva()
+    await cache.get('k', async () => 'guardado')
+    const nuevo = diferida<string>()
+    const fresco = cache.refresh('k', () => nuevo.promesa)
+    const otra = jest.fn(async () => 'no-debe-calcular')
+    const lectura = cache.get('k', otra)
+    nuevo.resolver('nuevo')
+    await expect(lectura).resolves.toBe('guardado')
+    expect(otra).not.toHaveBeenCalled()
+    await expect(fresco).resolves.toBe('nuevo')
+    await vaciarMicrotareas()
+    expect(cache.peek('k')).toBe('nuevo') // y al terminar, lo nuevo reemplaza a lo guardado
+  })
+
   it('tiene tope: por muchas llaves que se lean, no pasa de maxEntradas', async () => {
     const cache = nueva(3)
     for (let i = 0; i < 10; i++) await cache.get(`k${i}`, async () => `v${i}`)
     expect(cache.sizeForTests().entradas).toBeLessThanOrEqual(3)
     expect(cache.peek('k9')).toBe('v9') // se van las más viejas, no la recién guardada
+  })
+
+  // Fix round 1 (#2): con 0 la purga borraría de un mapa vacío para siempre y congelaría el proceso.
+  it.each([0, -1, 1.5, NaN])('un maxEntradas que no es entero ≥ 1 (%p) se rechaza al construir', maxEntradas => {
+    expect(() => new SingleFlightCache<string>({ ttlMs: 60_000, maxEntradas })).toThrow(RangeError)
+  })
+
+  it('maxEntradas 1 es válido: guarda sólo la última', async () => {
+    const cache = nueva(1)
+    await cache.get('a', async () => 'A')
+    await cache.get('b', async () => 'B')
+    expect(cache.sizeForTests().entradas).toBe(1)
+    expect(cache.peek('b')).toBe('B')
   })
 })
 
@@ -195,6 +262,31 @@ describe('dentroDelPlazo', () => {
     const r = await dentroDelPlazo({ nunca: new Promise<string>(() => {}) }, 20)
     expect(r).toEqual({})
     expect(Date.now() - inicio).toBeLessThan(1_000)
+  })
+
+  // Fix round 1 (#1): `alFallar` sólo reporta; si él mismo truena, la huella sigue siendo «omitida», no un error.
+  it('🔴 un alFallar que truena ANTES del plazo no convierte la huella omitida en un error', async () => {
+    const alFallar = jest.fn(() => {
+      throw new Error('el reporte falló')
+    })
+    const r = await dentroDelPlazo({ mala: Promise.reject(new Error('x')), buena: Promise.resolve('B') }, 150, {
+      esperar: () => new Promise(() => {}),
+      alFallar,
+    })
+    expect(r).toEqual({ buena: 'B' })
+    expect(alFallar).toHaveBeenCalledWith('mala', expect.any(Error))
+  })
+
+  // Fix round 1 (#3c, Review Focus #6): en el camino rápido no queda un temporizador vivo por cada poll.
+  it('🔴 si todo llega antes, el reloj del plazo se apaga (no queda ningún temporizador)', async () => {
+    jest.useFakeTimers()
+    try {
+      const r = await dentroDelPlazo({ a: Promise.resolve('A') }, 150)
+      expect(r).toEqual({ a: 'A' })
+      expect(jest.getTimerCount()).toBe(0)
+    } finally {
+      jest.useRealTimers()
+    }
   })
 })
 
