@@ -16,8 +16,18 @@ describe('POST /public/venues/:venueSlug/auth/otp/verify — firstName', () => {
     mockVerify.mockResolvedValue({ token: 't', approvalStatus: 'APPROVED', customer: { id: 'c1' } })
     const res = { json: jest.fn() } as unknown as Response
     const next = jest.fn()
-    await verifyOtp({ params: { venueSlug: 'cafe' }, body: { phone: '5543453965', code: '123456', firstName: 'Dany' } } as unknown as Request, res, next)
+    await verifyOtp(
+      { params: { venueSlug: 'cafe' }, body: { phone: '5543453965', code: '123456', firstName: 'Dany' } } as unknown as Request,
+      res,
+      next,
+    )
     expect(next).not.toHaveBeenCalled()
-    expect(mockVerify).toHaveBeenCalledWith({ venueId: 'v1', channel: 'whatsapp', destination: '5543453965', code: '123456', firstName: 'Dany' })
+    expect(mockVerify).toHaveBeenCalledWith({
+      venueId: 'v1',
+      channel: 'whatsapp',
+      destination: '5543453965',
+      code: '123456',
+      firstName: 'Dany',
+    })
   })
 })

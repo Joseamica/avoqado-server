@@ -3320,33 +3320,34 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
   // Los retornos idempotentes de arriba (llave repetida, ganador de la carrera P2002)
   // NO llaman aquí a propósito: el movimiento lo creó la llamada que sí cobró.
   // Sin caja abierta al cobrar no hay movimiento: como el conciliador, una venta sin caja no entra a la que se abra después.
-  if (paymentResult.cajaAlCobrarId) try {
-    const { postCashSaleToDrawer } = await import('@/services/shared/cashDrawerPosting')
-    await postCashSaleToDrawer({
-      venueId,
-      paymentId: payment.id,
-      targetSessionId: paymentResult.cajaAlCobrarId,
-      exigirAbierta: true,
-      // El método REAL: un cobro declarado a mano (terminal ajena, transferencia)
-      // o con un tender del catálogo viaja por este mismo servicio y NUNCA entró al
-      // cajón — salvo que el tender diga explícitamente que sí (vale de despensa).
-      method: tenderState.resolved?.method ?? paymentMethod,
-      tenderCountsAsCash: tenderState.resolved?.tenderCountsAsCash ?? null,
-      fundsFlow: tenderState.resolved?.fundsFlow ?? null,
-      tenderTypeId: tenderState.resolved?.tenderTypeId ?? null,
-      status: 'COMPLETED',
-      type: 'REGULAR',
-      amount: amountDecimal,
-      tipAmount: tipDecimal,
-      staffId: effectiveStaffId || input.staffId || null,
-      orderId,
-    })
-  } catch (err) {
-    logger.error('[ORDER.MOBILE] Cash drawer posting failed (payment unaffected)', {
-      paymentId: payment.id,
-      error: err instanceof Error ? err.message : String(err),
-    })
-  }
+  if (paymentResult.cajaAlCobrarId)
+    try {
+      const { postCashSaleToDrawer } = await import('@/services/shared/cashDrawerPosting')
+      await postCashSaleToDrawer({
+        venueId,
+        paymentId: payment.id,
+        targetSessionId: paymentResult.cajaAlCobrarId,
+        exigirAbierta: true,
+        // El método REAL: un cobro declarado a mano (terminal ajena, transferencia)
+        // o con un tender del catálogo viaja por este mismo servicio y NUNCA entró al
+        // cajón — salvo que el tender diga explícitamente que sí (vale de despensa).
+        method: tenderState.resolved?.method ?? paymentMethod,
+        tenderCountsAsCash: tenderState.resolved?.tenderCountsAsCash ?? null,
+        fundsFlow: tenderState.resolved?.fundsFlow ?? null,
+        tenderTypeId: tenderState.resolved?.tenderTypeId ?? null,
+        status: 'COMPLETED',
+        type: 'REGULAR',
+        amount: amountDecimal,
+        tipAmount: tipDecimal,
+        staffId: effectiveStaffId || input.staffId || null,
+        orderId,
+      })
+    } catch (err) {
+      logger.error('[ORDER.MOBILE] Cash drawer posting failed (payment unaffected)', {
+        paymentId: payment.id,
+        error: err instanceof Error ? err.message : String(err),
+      })
+    }
 
   // Inventory deduction on full payment (platform rule: stock deducts ONLY when
   // fully paid). This path historically skipped deduction entirely — cash sales

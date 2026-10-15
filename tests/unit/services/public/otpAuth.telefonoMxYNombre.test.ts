@@ -62,7 +62,9 @@ describe('OTP — teléfono mexicano por defecto', () => {
 
   it('🔴 un «teléfono» sin dígitos es 400 y no crea reto (nunca cae al camino del correo con email undefined)', async () => {
     await expect(requestOtp({ venueId: VENUE, channel: 'whatsapp', destination: 'abcdefgh' })).rejects.toThrow(BadRequestError)
-    await expect(verifyOtp({ venueId: VENUE, channel: 'whatsapp', destination: 'abcdefgh', code: CODE })).rejects.toThrow('Teléfono inválido')
+    await expect(verifyOtp({ venueId: VENUE, channel: 'whatsapp', destination: 'abcdefgh', code: CODE })).rejects.toThrow(
+      'Teléfono inválido',
+    )
     expect(prismaMock.otpChallenge.create).not.toHaveBeenCalled()
     expect(prismaMock.consumer.findFirst).not.toHaveBeenCalled()
   })
@@ -70,7 +72,13 @@ describe('OTP — teléfono mexicano por defecto', () => {
   it('verificar busca el reto con el MISMO valor normalizado', async () => {
     sembrarReto()
     prismaMock.consumer.findMany.mockResolvedValue([{ id: 'cons1', phone: NORM }] as any)
-    prismaMock.customer.findUnique.mockResolvedValue({ id: 'c1', active: true, firstName: 'Dany', lastName: null, consumerId: 'cons1' } as any)
+    prismaMock.customer.findUnique.mockResolvedValue({
+      id: 'c1',
+      active: true,
+      firstName: 'Dany',
+      lastName: null,
+      consumerId: 'cons1',
+    } as any)
     await verifyOtp({ venueId: VENUE, channel: 'whatsapp', destination: '55 4345 3965', code: CODE })
     expect((prismaMock.otpChallenge.findFirst as jest.Mock).mock.calls[0][0].where).toMatchObject({ destination: NORM })
   })
@@ -123,26 +131,50 @@ describe('OTP — nombre en el alta (nunca pisa uno existente)', () => {
   })
 
   it('«María José Pérez» sin nombre ni apellido: primera palabra → firstName, resto → lastName', async () => {
-    prismaMock.customer.findUnique.mockResolvedValue({ id: 'c1', active: true, firstName: null, lastName: null, consumerId: 'cons1' } as any)
+    prismaMock.customer.findUnique.mockResolvedValue({
+      id: 'c1',
+      active: true,
+      firstName: null,
+      lastName: null,
+      consumerId: 'cons1',
+    } as any)
     await verifyOtp({ venueId: VENUE, channel: 'whatsapp', destination: NORM, code: CODE, firstName: 'María José Pérez' })
     expect(prismaMock.customer.update).toHaveBeenCalledWith({ where: { id: 'c1' }, data: { firstName: 'María', lastName: 'José Pérez' } })
   })
 
   it('🔴 no pisa un nombre que ya existe', async () => {
-    prismaMock.customer.findUnique.mockResolvedValue({ id: 'c1', active: true, firstName: 'Daniela', lastName: 'Ruiz', consumerId: 'cons1' } as any)
+    prismaMock.customer.findUnique.mockResolvedValue({
+      id: 'c1',
+      active: true,
+      firstName: 'Daniela',
+      lastName: 'Ruiz',
+      consumerId: 'cons1',
+    } as any)
     const r = await verifyOtp({ venueId: VENUE, channel: 'whatsapp', destination: NORM, code: CODE, firstName: 'Dany' })
     expect(prismaMock.customer.update).not.toHaveBeenCalled()
     expect(r.customer.firstName).toBe('Daniela')
   })
 
   it('sin nombre pero CON apellido: pone el nombre y no toca el apellido', async () => {
-    prismaMock.customer.findUnique.mockResolvedValue({ id: 'c1', active: true, firstName: null, lastName: 'López', consumerId: 'cons1' } as any)
+    prismaMock.customer.findUnique.mockResolvedValue({
+      id: 'c1',
+      active: true,
+      firstName: null,
+      lastName: 'López',
+      consumerId: 'cons1',
+    } as any)
     await verifyOtp({ venueId: VENUE, channel: 'whatsapp', destination: NORM, code: CODE, firstName: 'Ana Gómez' })
     expect(prismaMock.customer.update).toHaveBeenCalledWith({ where: { id: 'c1' }, data: { firstName: 'Ana' } })
   })
 
   it('regresión: sin firstName no escribe nada extra', async () => {
-    prismaMock.customer.findUnique.mockResolvedValue({ id: 'c1', active: true, firstName: null, lastName: null, consumerId: 'cons1' } as any)
+    prismaMock.customer.findUnique.mockResolvedValue({
+      id: 'c1',
+      active: true,
+      firstName: null,
+      lastName: null,
+      consumerId: 'cons1',
+    } as any)
     await verifyOtp({ venueId: VENUE, channel: 'whatsapp', destination: NORM, code: CODE })
     expect(prismaMock.customer.update).not.toHaveBeenCalled()
   })
