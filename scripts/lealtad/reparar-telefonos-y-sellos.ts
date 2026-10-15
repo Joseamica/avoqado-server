@@ -49,6 +49,7 @@ import {
   OTRA_HISTORIA,
   PAR_AUTORIZADO,
   aplicarTelefonosYPar,
+  clientesPorAvisar,
   completarLealtadDeVentas,
   decidirFusionAutorizada,
   decidirReparacionDeSello,
@@ -67,6 +68,7 @@ import {
   type FilaTelefono,
   type OtraHistoria,
   type PuertoDeTransaccion,
+  type ResultadoDeReparacion,
   type ResumenCliente,
   type RevalidacionDeVenta,
   type VentaPorReparar,
@@ -311,6 +313,9 @@ async function main(): Promise<void> {
     return { conSello: sellos > 0 && reversas === 0, conPuntos: puntos > 0, conVisita: visitas > 0 }
   }
 
+  /** (c) Lo que ya terminó, venta por venta: decide a quién se le actualiza el pase al final (H7, segunda ola). */
+  const reparadas: Array<{ venta: VentaPorReparar; resultado: ResultadoDeReparacion }> = []
+
   try {
     // ── (a) Teléfonos ────────────────────────────────────────────────────────────────────────────────────────────────
     const clientes = await prisma.$queryRaw<FilaTelefono[]>(
@@ -502,6 +507,7 @@ async function main(): Promise<void> {
         await prisma.activityLog.create({ data: { ...fila, data: fila.data as Prisma.InputJsonValue } })
       },
       informar: (v, rep) => {
+        reparadas.push({ venta: v, resultado: rep })
         if (rep.omitida) {
           console.log(`    ${v.orderNumber}: ⏭️  NO se tocó — ${rep.omitida}`)
           return
@@ -520,6 +526,22 @@ async function main(): Promise<void> {
     })
   } finally {
     if (aplicar) {
+      // 🔴 H7, segunda ola: el pase de CADA cliente reparado se actualiza aquí, esperando la respuesta, también el de las ventas
+      // que ya estaban selladas (una corrida anterior pudo sellar y cortarse antes del aviso; `grantStamp` no vuelve a avisar).
+      const porAvisar = clientesPorAvisar(reparadas)
+      let tarjetas = 0
+      let fallidos = 0
+      for (const clienteId of porAvisar) {
+        const aviso = await notifyCustomerPassUpdated(venueSellos, clienteId)
+        tarjetas += aviso.notified
+        if (aviso.failed) fallidos += 1
+      }
+      if (porAvisar.length) {
+        console.log(
+          `\nPases de los clientes reparados: ${porAvisar.length} cliente(s) avisado(s), ${tarjetas} tarjeta(s) actualizada(s)` +
+            (fallidos ? ` · 🔴 ${fallidos} aviso(s) fallaron` : ''),
+        )
+      }
       // 🔴 H7: los avisos al pase y los correos del primer sello salen en segundo plano desde `grantStamp`; si el proceso se
       // desconecta y sale antes, quedan a medias. Se esperan aquí (también si (c) se cortó con un error), con tope.
       const efectos = await esperarEfectosDeSellos({ maxMs: 120_000 }).catch(() => null)

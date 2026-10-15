@@ -5,6 +5,7 @@ import {
   PAR_AUTORIZADO,
   TOPE_PASES,
   aplicarTelefonosYPar,
+  clientesPorAvisar,
   completarLealtadDeVentas,
   decidirFusionAutorizada,
   decidirReparacionDeSello,
@@ -23,6 +24,7 @@ import {
   type FilaTelefono,
   type OtraHistoria,
   type PuertoDeTransaccion,
+  type ResultadoDeReparacion,
   type ResumenCliente,
   type VentaPorReparar,
 } from '@/services/shared/reparacionLealtad'
@@ -722,6 +724,38 @@ describe('🔴 H7 revisarEntornoPublico: escribir en PRODUCCIÓN exige que los a
   })
 })
 
+// ── H7, segunda ola (recheck de Codex, 15-oct-2026) ──────────────────────────────────────────────────────────────────────
+describe('🔴 H7 clientesPorAvisar: a quién se le actualiza el pase al terminar (c), aunque el sello ya existiera', () => {
+  const v = (orderNumber: string, clienteId: string): VentaPorReparar => ({ orderNumber, orderId: `o-${orderNumber}`, clienteId, base: 80 })
+  const r = (over: Partial<ResultadoDeReparacion> = {}): ResultadoDeReparacion => ({
+    orderNumber: 'X',
+    omitida: null,
+    completa: true,
+    conSello: true,
+    reembolsada: false,
+    cambio: true,
+    auditoria: 'ESCRITA',
+    ...over,
+  })
+
+  it('🔴 REANUDACIÓN: una corrida anterior selló y se cortó antes del aviso; ésta sólo encuentra el sello ⇒ también se avisa', () => {
+    expect(clientesPorAvisar([{ venta: v('A', 'ana'), resultado: r({ cambio: false, auditoria: 'YA_EXISTIA' }) }])).toEqual(['ana'])
+  })
+
+  it('completadas en esta corrida, sin repetir cliente; nunca las omitidas, las reembolsadas ni las que quedaron sin sello', () => {
+    expect(
+      clientesPorAvisar([
+        { venta: v('A', 'ana'), resultado: r() },
+        { venta: v('B', 'ana'), resultado: r({ cambio: false }) },
+        { venta: v('C', 'beto'), resultado: r() },
+        { venta: v('D', 'carla'), resultado: r({ omitida: 'ya no es elegible (NOT_PAID)', conSello: false, auditoria: 'NO_APLICA' }) },
+        { venta: v('E', 'dany'), resultado: r({ reembolsada: true, conSello: false }) },
+        { venta: v('F', 'eva'), resultado: r({ conSello: false }) },
+      ]),
+    ).toEqual(['ana', 'beto'])
+  })
+})
+
 describe('H7 lineaDeEntornoPublico: lo que la simulación dice ANTES de aplicar', () => {
   it('nombra el host de BASE_URL (nunca la URL completa) y si Apple/Google Wallet están disponibles', () => {
     expect(
@@ -776,5 +810,16 @@ describe('🔴 el script elige la base ANTES de cargar Prisma: nada que cargue e
     expect(espera).toBeGreaterThan(-1)
     expect(espera).toBeLessThan(desconecta)
     expect(fuente).toMatch(/lineaDeEntornoPublico\(/)
+  })
+
+  it('🔴 H7 (segunda ola): después de (c) llama y ESPERA el aviso al pase de cada cliente reparado (también si su sello ya existía), antes de esperar los correos y desconectar', () => {
+    const fuente = readFileSync(join(raiz, SCRIPT), 'utf8')
+    const quienes = fuente.indexOf('clientesPorAvisar(')
+    const avisa = fuente.indexOf('await notifyCustomerPassUpdated(venueSellos')
+    const espera = fuente.indexOf('esperarEfectosDeSellos(')
+    expect(quienes).toBeGreaterThan(-1)
+    expect(avisa).toBeGreaterThan(quienes)
+    expect(avisa).toBeLessThan(espera)
+    expect(espera).toBeLessThan(fuente.indexOf('prisma.$disconnect()'))
   })
 })

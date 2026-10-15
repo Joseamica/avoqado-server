@@ -603,3 +603,17 @@ export async function completarLealtadDeVentas(
   }
   return resultados
 }
+
+/**
+ * 🔴 H7, segunda ola (recheck de Codex, 15-oct-2026): a qué clientes hay que actualizarles el pase al terminar (c). Los que
+ * quedaron con sello VÁLIDO: los que esta corrida selló y TAMBIÉN los que ya estaban sellados. `grantStamp` sólo avisa cuando
+ * sella; si una corrida anterior selló y se cortó antes del aviso, la siguiente encuentra el sello (`ALREADY_STAMPED`), completa
+ * los puntos y no avisaba a nadie: el pase quedaba viejo. Sin repetir cliente; nunca las omitidas ni las reembolsadas.
+ */
+export function clientesPorAvisar(reparadas: ReadonlyArray<{ venta: VentaPorReparar; resultado: ResultadoDeReparacion }>): string[] {
+  const clientes = new Set<string>()
+  for (const { venta, resultado } of reparadas) {
+    if (resultado.omitida === null && resultado.conSello && !resultado.reembolsada) clientes.add(venta.clienteId)
+  }
+  return [...clientes]
+}
