@@ -374,6 +374,10 @@ describe('activarSobresDeCuentaPagadaEnTx', () => {
       await expect(activarSobresDeCuentaPagadaEnTx(prismaMock, { venueId: VENUE, orderId: 'order-1' })).resolves.toEqual({ activated: [] })
       expect(prismaMock.payment.aggregate).not.toHaveBeenCalled()
       expect(prismaMock.moneyAnomaly.createMany).not.toHaveBeenCalled()
+      // A6 r1: el segundo cierre de una cuenta normal de tarjetas (terminal, reconciliador) no escribe NADA ni toma candados.
+      expect(prismaMock.$queryRaw).not.toHaveBeenCalled()
+      expect(prismaMock.giftCard.updateMany).not.toHaveBeenCalled()
+      expect(prismaMock.giftCardActivity.create).not.toHaveBeenCalled()
     })
 
     it('venta cancelada CON el dinero devuelto completo (R2): no hay nada que avisar', async () => {

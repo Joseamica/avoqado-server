@@ -1136,8 +1136,14 @@ describe('settleCustomerBalance — CAS por orden + vale de deducción', () => {
 
   it('R8: la orden que gana el CAS activa los sobres de una cuenta de tarjetas en la MISMA transacción', async () => {
     prismaMock.order.updateMany.mockResolvedValue({ count: 1 } as any)
+    // A6 r1: una transacción DISTINGUIBLE del cliente global (delega en él por prototipo): si la activación se llamara con
+    // `prisma` en vez de con `tx`, la identidad no cuadraría.
+    const tx = Object.create(prismaMock)
+    prismaMock.$transaction.mockImplementation(async (cb: any) => cb(tx))
     await settleCustomerBalance('venue-1', CLIENTE)
-    expect(activarSobresMock).toHaveBeenCalledWith(prismaMock, {
+    expect(activarSobresMock).toHaveBeenCalledTimes(1)
+    expect(activarSobresMock.mock.calls[0][0]).toBe(tx)
+    expect(activarSobresMock.mock.calls[0][1]).toEqual({
       venueId: 'venue-1',
       orderId: 'order-1',
       staffId: null,

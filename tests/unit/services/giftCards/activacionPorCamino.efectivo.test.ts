@@ -33,11 +33,15 @@ import { payCashOrder } from '@/services/mobile/order.mobile.service'
 import { prismaMock } from '../../../__helpers__/setup'
 
 const RENGLONES = [{ id: 'oi-1', giftCardId: 'gc-1', productId: null, modifiers: [] }]
+// A6 r1: la transacción recibe un cliente DISTINGUIBLE del global (delega en él por prototipo, así que ve los mismos
+// dobles): si la activación se llamara con `prisma` en vez de con `tx`, la identidad no cuadraría.
+let txDoble: typeof prismaMock
 
 beforeEach(() => {
   jest.clearAllMocks()
   activarSobresMock.mockResolvedValue({ activated: ['gc-1'] })
-  prismaMock.$transaction.mockImplementation(async (cb: any) => cb(prismaMock))
+  txDoble = Object.create(prismaMock)
+  prismaMock.$transaction.mockImplementation(async (cb: any) => cb(txDoble))
   prismaMock.order.findUnique.mockResolvedValue({
     id: 'order-1',
     orderNumber: 'ORD-1',
@@ -76,7 +80,8 @@ describe('R8 · efectivo del POS móvil', () => {
   it('cobro en vivo que salda la cuenta: activa los sobres con la MISMA tx y los renglones leídos', async () => {
     await payCashOrder('venue-1', 'order-1', { amount: 50000, tip: 0, staffId: 'staff-1', idempotencyKey: 'vivo-0001' })
     expect(activarSobresMock).toHaveBeenCalledTimes(1)
-    expect(activarSobresMock).toHaveBeenCalledWith(prismaMock, {
+    expect(activarSobresMock.mock.calls[0][0]).toBe(txDoble)
+    expect(activarSobresMock.mock.calls[0][1]).toEqual({
       venueId: 'venue-1',
       orderId: 'order-1',
       staffId: 'staff-1',
@@ -93,7 +98,9 @@ describe('R8 · efectivo del POS móvil', () => {
       isOfflineReplay: true,
     })
     expect(r.status).toBe('COMPLETED')
-    expect(activarSobresMock).toHaveBeenCalledWith(prismaMock, expect.objectContaining({ venueId: 'venue-1', orderId: 'order-1' }))
+    expect(activarSobresMock).toHaveBeenCalledTimes(1)
+    expect(activarSobresMock.mock.calls[0][0]).toBe(txDoble)
+    expect(activarSobresMock.mock.calls[0][1]).toEqual(expect.objectContaining({ venueId: 'venue-1', orderId: 'order-1' }))
   })
 
   it('un abono parcial no activa nada (la cuenta no quedó pagada)', async () => {

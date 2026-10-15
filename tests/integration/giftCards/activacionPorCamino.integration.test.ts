@@ -2,7 +2,8 @@
  * R8 contra Postgres REAL: una cuenta de tarjetas pagada en efectivo (en vivo y por la cola sin red) o liquidada desde
  * el dashboard deja sus sobres ACTIVE con su ACTIVATE; si lo cobrado no cuadra con los sobres, no activa y deja un
  * MoneyAnomaly. Ruling A6: una cuenta CANCELADA (sobres DEACTIVATED) que recibe dinero tarde se reabre y queda pagada,
- * pero sus sobres NO se reviven y queda un MoneyAnomaly propio.
+ * pero sus sobres NO se reviven y queda un MoneyAnomaly propio; también si la venta pagada se devolvió y luego llega un cobro
+ * tardío de la terminal (r1), y repetirlo no duplica la fila.
  *
  * Correr: source ../urls-tarjetas.sh && TZ=UTC npx jest --selectProjects integration \
  *   --runTestsByPath tests/integration/giftCards/activacionPorCamino.integration.test.ts --ci --runInBand
@@ -23,10 +24,14 @@ jest.mock('@/services/access/basePlan.service', () => ({
   venueHasFeatureAccess: jest.fn().mockResolvedValue(true),
 }))
 
+import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { createGiftCardOrder } from '@/services/giftCards/giftCardOrder.service'
+import { activarSobresDeCuentaPagadaEnTx } from '@/services/giftCards/giftCardLedger'
 import { cancelOrder, payCashOrder } from '@/services/mobile/order.mobile.service'
 import { settleOrder } from '@/services/dashboard/order.dashboard.service'
+import { lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
+import { settleStandalonePaymentInTx } from '@/services/tpv/payment.tpv.service'
 
 jest.setTimeout(60000)
 
@@ -47,6 +52,15 @@ async function cuenta(llave: string, montos: number[]) {
   return createGiftCardOrder(venueId, staffId, {
     idempotencyKey: llave,
     sobres: montos.map(amount => ({ amount, deliveryChannel: 'HANDED_TO_BUYER' as const })),
+  })
+}
+
+/** Las anomalías de tarjetas de UNA cuenta (la llave determinista lleva su id en `expectedState.id`). */
+async function anomaliasDe(orderId: string) {
+  return prisma.moneyAnomaly.findMany({
+    where: { stripeEventId: { startsWith: 'giftcard:' }, expectedState: { path: ['id'], equals: orderId } },
+    orderBy: { id: 'asc' },
+    take: 10,
   })
 }
 
@@ -110,10 +124,7 @@ describe('R8 · activación de sobres · Postgres real', () => {
     const venta = await prisma.order.findUniqueOrThrow({ where: { id: r.orderId }, select: { status: true, paymentStatus: true } })
     expect(venta).toEqual({ status: 'COMPLETED', paymentStatus: 'PAID' })
     expect(await estadoDe([r.sobres[0].id])).toEqual({ sobres: [['DEACTIVATED', '0.00', false]], activaciones: 0 })
-    const anomalias = await prisma.moneyAnomaly.findMany({
-      where: { stripeEventId: { startsWith: 'giftcard:' }, expectedState: { path: ['id'], equals: r.orderId } },
-      take: 10,
-    })
+    const anomalias = await anomaliasDe(r.orderId)
     expect(anomalias.map(a => [a.category, a.stripeEventId])).toEqual([
       ['GIFT_CARD_PAID_WITH_DEACTIVATED', `giftcard:PAID_WITH_DEACTIVATED:${r.orderId}`],
     ])
@@ -124,5 +135,91 @@ describe('R8 · activación de sobres · Postgres real', () => {
       reembolsado: '0.00',
       sobres: [{ id: r.sobres[0].id, status: 'DEACTIVATED' }],
     })
+
+    // A6 r1: la activación se vuelve a pedir (otro cierre, la revisión) sobre la MISMA cuenta: sigue UNA sola anomalía.
+    await prisma.$transaction(tx => activarSobresDeCuentaPagadaEnTx(tx, { venueId, orderId: r.orderId, staffId }))
+    expect((await anomaliasDe(r.orderId)).map(a => a.category)).toEqual(['GIFT_CARD_PAID_WITH_DEACTIVATED'])
+    expect(await estadoDe([r.sobres[0].id])).toEqual({ sobres: [['DEACTIVATED', '0.00', false]], activaciones: 0 })
+  })
+
+  it('🔴 r1: pagada, devuelta completa y con su sobre DEACTIVATED; un cobro tardío de la terminal NO lo revive y deja UNA anomalía (también al volver a saldar)', async () => {
+    const r = await cuenta(`${SUF}-devuelta`, [900])
+    await payCashOrder(venueId, r.orderId, { amount: 90000, tip: 0, staffId, idempotencyKey: `${SUF}-cobro-devuelta` })
+    const sobreId = r.sobres[0].id
+    expect(await estadoDe([sobreId])).toEqual({ sobres: [['ACTIVE', '900.00', true]], activaciones: 1 })
+
+    // El estado que deja «Cancelar venta» con su reembolso (R2). Su camino (B1/B2) aún no existe: las filas se escriben a mano,
+    // igual que las escribiría `desactivarSobresDeCuentaEnTx` (REFUND negativo, sobre en 0 y su DEACTIVATE ligado al reembolso).
+    const reembolso = await prisma.payment.create({
+      data: {
+        venueId,
+        orderId: r.orderId,
+        amount: new Prisma.Decimal(-900),
+        tipAmount: 0,
+        method: 'CASH',
+        source: 'OTHER',
+        status: 'COMPLETED',
+        type: 'REFUND',
+        feePercentage: 0,
+        feeAmount: 0,
+        netAmount: new Prisma.Decimal(-900),
+      },
+    })
+    await prisma.giftCard.update({ where: { id: sobreId }, data: { status: 'DEACTIVATED', balance: 0, deactivatedAt: new Date() } })
+    await prisma.giftCardActivity.create({
+      data: {
+        giftCardId: sobreId,
+        venueId,
+        type: 'DEACTIVATE',
+        amount: 900,
+        balanceAfter: 0,
+        reason: 'SALE_CANCELLED',
+        refundPaymentId: reembolso.id,
+        orderId: r.orderId,
+        staffId,
+      },
+    })
+
+    // Un cobro tardío (o duplicado) de la terminal sobre la cuenta ya saldada: el mismo cierre que `recordOrderPayment`.
+    const cobroDeTerminal = (llave: string) =>
+      prisma.$transaction(async tx => {
+        await lockExistingOrderForPayment(tx, { venueId, orderId: r.orderId })
+        const pago = await tx.payment.create({
+          data: {
+            venueId,
+            orderId: r.orderId,
+            amount: 900,
+            tipAmount: 0,
+            method: 'CREDIT_CARD',
+            source: 'TPV',
+            status: 'COMPLETED',
+            type: 'REGULAR',
+            feePercentage: 0,
+            feeAmount: 0,
+            netAmount: 900,
+            idempotencyKey: llave,
+          },
+        })
+        return settleStandalonePaymentInTx(tx, venueId, r.orderId, pago, staffId)
+      })
+
+    expect(await cobroDeTerminal(`${SUF}-terminal-1`)).toMatchObject({ firstSettlement: false })
+    expect(await estadoDe([sobreId])).toEqual({ sobres: [['DEACTIVATED', '0.00', true]], activaciones: 1 })
+    const anomalias = await anomaliasDe(r.orderId)
+    expect(anomalias.map(a => [a.category, a.stripeEventId])).toEqual([
+      ['GIFT_CARD_PAID_WITH_DEACTIVATED', `giftcard:PAID_WITH_DEACTIVATED:${r.orderId}`],
+    ])
+    expect(anomalias[0].observedState).toEqual({
+      motivo: 'COBRO_CON_SOBRES_DESACTIVADOS',
+      orderId: r.orderId,
+      cobrado: '1800.00',
+      reembolsado: '900.00',
+      sobres: [{ id: sobreId, status: 'DEACTIVATED' }],
+    })
+
+    // A6 r1: volver a saldar (otro cobro duplicado) re-entra a la misma rama: sigue UNA sola fila.
+    await cobroDeTerminal(`${SUF}-terminal-2`)
+    expect((await anomaliasDe(r.orderId)).map(a => a.category)).toEqual(['GIFT_CARD_PAID_WITH_DEACTIVATED'])
+    expect(await estadoDe([sobreId])).toEqual({ sobres: [['DEACTIVATED', '0.00', true]], activaciones: 1 })
   })
 })

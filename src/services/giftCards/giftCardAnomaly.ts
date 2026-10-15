@@ -24,8 +24,7 @@ export async function recordGiftCardAnomaly(
   db: Prisma.TransactionClient | PrismaClient,
   a: { check: GiftCardAnomalyCheck; id: string; venueId: string; detail: Record<string, unknown> },
 ): Promise<void> {
-  const venue = await db.venue.findUnique({ where: { id: a.venueId }, select: { name: true } })
-  await db.moneyAnomaly.createMany({
+  const insertadas = await db.moneyAnomaly.createMany({
     data: [
       {
         category: `GIFT_CARD_${a.check}`,
@@ -36,6 +35,13 @@ export async function recordGiftCardAnomaly(
     ],
     skipDuplicates: true,
   })
+  // A6 r1: la activación corre en cada cierre de una cuenta pagada (terminal, reconciliador) y vuelve a pedir la MISMA anomalía.
+  // `skipDuplicates` no inserta nada la segunda vez; el 🚨 suena sólo con la fila NUEVA para no repetir la alerta.
+  if (insertadas.count === 0) {
+    logger.info('[TARJETAS DE REGALO] Anomalía ya registrada; no se vuelve a alertar', { check: a.check, id: a.id, venueId: a.venueId })
+    return
+  }
+  const venue = await db.venue.findUnique({ where: { id: a.venueId }, select: { name: true } })
   logger.error('🚨 [TARJETAS DE REGALO] Anomalía de dinero', {
     check: a.check,
     id: a.id,

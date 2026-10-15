@@ -31,6 +31,10 @@ import { prismaMock } from '../../../__helpers__/setup'
 const VENUE = 'venue-1'
 const RENGLONES = [{ id: 'oi-1', giftCardId: 'gc-1', productId: null, modifiers: [] }]
 
+/**
+ * A6 r1: la transacción recibe un cliente DISTINGUIBLE del global (delega en él por prototipo, así que ve los mismos dobles):
+ * si la activación se llamara con `prisma` en vez de con `tx`, la identidad no cuadraría.
+ */
 function armarOrden(casGana = true) {
   ;(prismaMock as any).order = {
     findFirst: jest.fn().mockResolvedValue({
@@ -51,7 +55,9 @@ function armarOrden(casGana = true) {
     create: jest.fn().mockImplementation(async (args: any) => ({ id: 'pay-1', ...args.data })),
   }
   ;(prismaMock as any).orderItem = { findMany: jest.fn().mockResolvedValue(RENGLONES) }
-  ;(prismaMock as any).$transaction = jest.fn().mockImplementation(async (fn: any) => fn(prismaMock))
+  const txDoble = Object.create(prismaMock)
+  ;(prismaMock as any).$transaction = jest.fn().mockImplementation(async (fn: any) => fn(txDoble))
+  return txDoble
 }
 
 beforeEach(() => {
@@ -61,10 +67,11 @@ beforeEach(() => {
 
 describe('R8 · liquidar desde el dashboard', () => {
   it('🔴 la liquidación que gana el CAS activa los sobres con la MISMA tx, después de crear el Payment', async () => {
-    armarOrden()
+    const tx = armarOrden()
     await settleOrder(VENUE, 'order-1', 'Pagó en efectivo', 'owner-1')
     expect(activarSobresMock).toHaveBeenCalledTimes(1)
-    expect(activarSobresMock).toHaveBeenCalledWith(prismaMock, { venueId: VENUE, orderId: 'order-1', staffId: 'owner-1', items: RENGLONES })
+    expect(activarSobresMock.mock.calls[0][0]).toBe(tx)
+    expect(activarSobresMock.mock.calls[0][1]).toEqual({ venueId: VENUE, orderId: 'order-1', staffId: 'owner-1', items: RENGLONES })
     const ordenDeLlamadas = [(prismaMock as any).payment.create.mock.invocationCallOrder[0], activarSobresMock.mock.invocationCallOrder[0]]
     expect(ordenDeLlamadas[0]).toBeLessThan(ordenDeLlamadas[1])
   })

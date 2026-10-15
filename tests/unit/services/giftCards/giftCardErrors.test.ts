@@ -66,4 +66,18 @@ describe('recordGiftCardAnomaly', () => {
     ).resolves.toBeUndefined()
     expect(prismaMock.moneyAnomaly.create).not.toHaveBeenCalled()
   })
+
+  // A6 r1: la activación corre en cada cierre de una cuenta pagada (terminal, reconciliador); la misma anomalía se vuelve a
+  // pedir y `skipDuplicates` no inserta nada. El 🚨 sólo suena cuando la fila es NUEVA: si no, la alerta se repetiría.
+  it('🔴 si la anomalía ya estaba registrada (no se insertó nada) NO vuelve a gritar: sólo deja una línea informativa', async () => {
+    prismaMock.moneyAnomaly.createMany.mockResolvedValue({ count: 0 })
+
+    await recordGiftCardAnomaly(prismaMock, { check: 'PAID_WITH_DEACTIVATED', id: 'order-3', venueId: 'venue-1', detail: {} })
+
+    expect(logger.error).not.toHaveBeenCalled()
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringContaining('ya registrada'),
+      expect.objectContaining({ check: 'PAID_WITH_DEACTIVATED', id: 'order-3', venueId: 'venue-1' }),
+    )
+  })
 })

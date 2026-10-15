@@ -214,11 +214,24 @@ describe('b4bit — el vale de inventario de la venta saldada', () => {
     mockPrisma.payment.findUnique.mockResolvedValue(cryptoPayment())
     mockPrisma.order.findUnique.mockResolvedValue(freshOrder({ paymentStatus: 'PARTIAL' }))
     mockPrisma.payment.findMany.mockResolvedValue(pagosQueSaldan())
+    // A6 r1: la transacción recibe un cliente DISTINGUIBLE del global (mismo patrón que la prueba del vale de abajo): si la
+    // activación se llamara con `prisma`, la identidad no cuadraría.
+    const txClient = {
+      payment: mockPrisma.payment,
+      order: mockPrisma.order,
+      orderItem: mockPrisma.orderItem,
+      shift: mockPrisma.shift,
+      venueSettings: (prisma as any).venueSettings,
+      activityLog: (prisma as any).activityLog,
+      $queryRaw: mockPrisma.$queryRaw,
+    }
+    mockPrisma.$transaction.mockImplementation((cb: any) => cb(txClient))
 
     await processWebhook(webhookCO())
 
     expect(activarSobres).toHaveBeenCalledTimes(1)
-    expect(activarSobres).toHaveBeenCalledWith(prisma, { venueId: VENUE_ID, orderId: ORDER_ID, staffId: STAFF_ID, items: ITEMS })
+    expect(activarSobres.mock.calls[0][0]).toBe(txClient)
+    expect(activarSobres.mock.calls[0][1]).toEqual({ venueId: VENUE_ID, orderId: ORDER_ID, staffId: STAFF_ID, items: ITEMS })
   })
 
   it('R8: un abono cripto que no salda la cuenta no activa nada', async () => {

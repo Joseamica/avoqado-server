@@ -1428,8 +1428,13 @@ export async function settleStandalonePaymentInTx(
   })
   const { createSalePostingInTx } = await import('@/services/inventory/inventoryPosting.service')
   const posting = firstSettlement ? await createSalePostingInTx(tx, { venueId, orderId, items: order.items, staffId }) : null
-  // R8: la cuenta de tarjetas pagada por terminal activa sus sobres en la MISMA transacción que la salda.
-  if (firstSettlement) await activarSobresDeCuentaPagadaEnTx(tx, { venueId, orderId, staffId: staffId ?? null, items: order.items })
+  // R8: la cuenta de tarjetas pagada por terminal activa sus sobres en la MISMA transacción que la salda. A6 r1: en CADA cierre
+  // con efectos (`efectosDeCierre && saldada`), no sólo en el primero: `paid` no cuenta los REFUND, así que tras devolver la
+  // venta los cobros previos la siguen «cubriendo» y un cobro tardío no es `firstSettlement`; sin esto ese cobro nunca llegaba a
+  // la alerta PAID_WITH_DEACTIVATED (el reconciliador, sitio 3, sí). Idempotente y sin consultas en una cuenta sin tarjetas.
+  if (efectosDeCierre && saldada) {
+    await activarSobresDeCuentaPagadaEnTx(tx, { venueId, orderId, staffId: staffId ?? null, items: order.items })
+  }
   return { firstSettlement, postingId: posting?.id ?? null, ventaCerrada: cobro.cerrada }
 }
 

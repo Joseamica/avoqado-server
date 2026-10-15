@@ -27,6 +27,7 @@ jest.mock('@/services/giftCards/giftCardLedger', () => ({
 }))
 
 import { Decimal } from '@prisma/client/runtime/library'
+import { createSalePostingInTx } from '@/services/inventory/inventoryPosting.service'
 import { settleStandalonePaymentInTx } from '@/services/tpv/payment.tpv.service'
 
 const D = (v: number) => new Decimal(v)
@@ -69,12 +70,28 @@ describe('R8 · terminal', () => {
     const r = await settleStandalonePaymentInTx(tx, 'venue-1', 'order-1', { id: 'pay-1', amount: D(500), tipAmount: D(0) }, 'staff-1')
     expect(r.firstSettlement).toBe(true)
     expect(activarSobresMock).toHaveBeenCalledWith(tx, { venueId: 'venue-1', orderId: 'order-1', staffId: 'staff-1', items: RENGLONES })
+    expect(activarSobresMock.mock.calls[0][0]).toBe(tx)
   })
 
   it('un abono parcial por terminal no activa nada', async () => {
     const tx = txDoble(200)
     await settleStandalonePaymentInTx(tx, 'venue-1', 'order-1', { id: 'pay-1', amount: D(200), tipAmount: D(0) }, 'staff-1')
     expect(activarSobresMock).not.toHaveBeenCalled()
+  })
+
+  // A6 r1 (revisión): el cobro sobre una cuenta que YA estaba saldada no es su primer saldado —`paid` no cuenta los REFUND, así
+  // que tras devolver todo los cobros previos la siguen «cubriendo»—, pero la activación tiene que correr igual: es la que
+  // avisa con PAID_WITH_DEACTIVATED si la venta de tarjetas se canceló y devolvió. Ni vale ni lealtad nuevos.
+  it('🔴 r1: un cobro tardío sobre una cuenta YA saldada (no es el primer saldado) también pasa por la activación', async () => {
+    const tx = txDoble(1000, 2)
+    const r = await settleStandalonePaymentInTx(tx, 'venue-1', 'order-1', { id: 'pay-2', amount: D(500), tipAmount: D(0) }, 'staff-1')
+    expect(r.firstSettlement).toBe(false)
+    expect(activarSobresMock).toHaveBeenCalledTimes(1)
+    expect(activarSobresMock.mock.calls[0][0]).toBe(tx)
+    expect(activarSobresMock.mock.calls[0][1]).toEqual({ venueId: 'venue-1', orderId: 'order-1', staffId: 'staff-1', items: RENGLONES })
+    // Lo demás del sitio no cambia: sin vale nuevo ni marca de lealtad.
+    expect(createSalePostingInTx).not.toHaveBeenCalled()
+    expect(tx.order.update.mock.calls[0][0].data).not.toHaveProperty('loyaltyEligibleAt')
   })
 
   it('la reasignación de un cobro (efectosDeCierre = false) guarda totales sin efectos de cierre: no activa', async () => {
