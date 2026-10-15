@@ -231,35 +231,43 @@ export interface ResultadoDeLealtadRespetandoReembolsos extends AwardLoyaltyForP
   otroCliente?: true
 }
 
+interface FotoDelBeneficiario {
+  /** El cliente que la lealtad acreditaría: el primario, o sin `OrderCustomer` el heredado que pasa quien llama. */
+  beneficiario: string | null
+  /** Un cliente DISTINTO del beneficiario que ya recibió sello o puntos de esta venta, o null. */
+  otroDueno: string | null
+  /** `Order.loyaltyStaffId` vigente (H5). */
+  staffId: string | null
+}
+
 /**
  * 🔴 H4 (auditoría de Codex del código, 15-oct-2026): ¿esta venta ya le dio sello o puntos a un cliente DISTINTO del que la
  * lealtad acreditaría ahora? El caso: Ana recibió el sello y los puntos, la venta quedó pendiente por otro efecto, la TPV quitó
  * a Ana y puso a Beto. El reconciliador corría la lealtad para Beto: `grantStamp` decía «ya sellada» (el sello es POR VENTA),
  * pero `earnPoints` deduplica por cliente + venta y le daba a Beto los puntos de la compra de Ana. Es la MISMA regla de dueño
- * que `decideSaleStamp` (OTHER_CUSTOMER), aplicada también a la recuperación. El beneficiario es el que acreditaría
- * `awardLoyaltyForPaidOrder`: el primario, o sin `OrderCustomer` el cliente heredado que le pasa quien llama. Devuelve el otro
- * dueño, o null.
+ * que `decideSaleStamp` (OTHER_CUSTOMER), aplicada también a la recuperación.
+ *
+ * 🔴 Segunda ola (recheck de Codex): UNA sola sentencia —una sola foto de la base— con el primario, cuántos clientes hay, el
+ * actor vigente (`loyaltyStaffId`, H5) y los dueños de los EARN. El beneficiario validado aquí viaja a la lealtad
+ * (`{ beneficiario }`), que acredita SÓLO a ése: si la TPV cambia al cliente entre esta foto y la lealtad, no se acredita a
+ * nadie y la vuelta siguiente valida otra vez. `null` = la venta no existe en este negocio.
  */
-async function otroDuenoDeLaVenta(args: AwardLoyaltyForPaidOrderArgs): Promise<string | null> {
-  const venta = await prisma.order.findFirst({
-    where: { id: args.orderId, venueId: args.venueId },
-    select: {
-      orderCustomers: { where: { isPrimary: true }, select: { customerId: true }, take: 1 },
-      stampEvents: {
-        where: { type: StampEventType.EARN },
-        select: { type: true, stampCard: { select: { customerId: true } } },
-        take: 10,
-      },
-      loyaltyTransactions: { where: { type: LoyaltyTransactionType.EARN }, select: { customerId: true }, take: 10 },
-    },
-  })
-  if (!venta) return null
-  const beneficiario = venta.orderCustomers[0]?.customerId ?? args.legacyCustomer?.id ?? null
-  const duenos = [
-    ...venta.stampEvents.filter(e => e.type === StampEventType.EARN).map(e => e.stampCard.customerId),
-    ...venta.loyaltyTransactions.map(t => t.customerId),
-  ]
-  return duenos.find(d => d !== beneficiario) ?? null
+async function fotoDelBeneficiario(args: AwardLoyaltyForPaidOrderArgs): Promise<FotoDelBeneficiario | null> {
+  const filas =
+    (await prisma.$queryRaw<
+      Array<{ staffId: string | null; primario: string | null; clientes: number; sellos: string[] | null; puntos: string[] | null }>
+    >(Prisma.sql`SELECT o."loyaltyStaffId" AS "staffId",
+      (SELECT oc."customerId" FROM "OrderCustomer" oc WHERE oc."orderId" = o."id" AND oc."isPrimary" = true ORDER BY oc."addedAt" ASC LIMIT 1) AS "primario",
+      (SELECT COUNT(*)::int FROM "OrderCustomer" oc WHERE oc."orderId" = o."id") AS "clientes",
+      ARRAY(SELECT DISTINCT sc."customerId" FROM "StampEvent" se JOIN "StampCard" sc ON sc."id" = se."stampCardId"
+            WHERE se."orderId" = o."id" AND se."venueId" = o."venueId" AND se."type" = 'EARN') AS "sellos",
+      ARRAY(SELECT DISTINCT lt."customerId" FROM "LoyaltyTransaction" lt WHERE lt."orderId" = o."id" AND lt."type" = 'EARN') AS "puntos"
+      FROM "Order" o WHERE o."id" = ${args.orderId} AND o."venueId" = ${args.venueId}`)) ?? []
+  const foto = filas[0]
+  if (!foto) return null
+  const beneficiario = Number(foto.clientes) > 0 ? (foto.primario ?? null) : (args.legacyCustomer?.id ?? null)
+  const duenos = [...(foto.sellos ?? []), ...(foto.puntos ?? [])]
+  return { beneficiario, otroDueno: duenos.find(d => d !== beneficiario) ?? null, staffId: foto.staffId ?? null }
 }
 
 /**
@@ -335,19 +343,26 @@ export async function otorgarLealtadRespetandoReembolsos(
 
   // 🔴 H4: lo que esta venta ya le dio a OTRO cliente no se le vuelve a dar al primario de ahora. Se cierra: no hay nada que
   // recuperar para él (la liga tardía ya responde OTHER_CUSTOMER con la misma regla).
-  const otroDueno = await otroDuenoDeLaVenta(args)
-  if (otroDueno) {
+  const foto = await fotoDelBeneficiario(args)
+  if (foto?.otroDueno) {
     logger.warn('[LEALTAD] la venta ya le dio sello o puntos a otro cliente: no se acredita al primario actual', {
       venueId,
       orderId,
-      otroDueno,
+      otroDueno: foto.otroDueno,
     })
     const falloAlCerrar = await cerrarSinLanzar(venueId, orderId, false)
     if (falloAlCerrar) return { complete: false, errors: [falloAlCerrar], reembolsada: false }
     return { complete: true, errors: [], reembolsada: false, otroCliente: true }
   }
 
-  const resultado = await awardLoyaltyForPaidOrder(args, { cerrar: false })
+  // H4 (segunda ola): la lealtad acredita SÓLO al beneficiario de esta foto. H5 (segunda ola): con `actorDeLaVenta`, el autor
+  // del sello es el `loyaltyStaffId` de la MISMA foto, nunca el que quien llama leyó antes (una liga pudo cambiar los dos).
+  const resultado = foto
+    ? await awardLoyaltyForPaidOrder(
+        { ...args, staffId: args.actorDeLaVenta ? foto.staffId : args.staffId },
+        { cerrar: false, beneficiario: foto.beneficiario },
+      )
+    : await awardLoyaltyForPaidOrder(args, { cerrar: false })
   const errores = [...resultado.errors]
 
   if ((await contarReembolsos(prisma, venueId, orderId)) > 0) {

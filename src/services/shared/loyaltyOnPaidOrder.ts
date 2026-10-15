@@ -54,6 +54,12 @@ export interface AwardLoyaltyForPaidOrderArgs {
    * orden otra vez en el camino del dinero.
    */
   legacyCustomer?: LegacyOrderCustomer | null
+  /**
+   * 🔴 H5, segunda ola (recheck de Codex, 15-oct-2026): SÓLO lo lee `otorgarLealtadRespetandoReembolsos`. `true` = el autor
+   * del sello sale del `Order.loyaltyStaffId` VIGENTE, leído en la MISMA sentencia que el cliente que se acredita (lo pide el
+   * reconciliador: una liga tardía después de su reclamo cambia los dos a la vez). Esta función lo ignora.
+   */
+  actorDeLaVenta?: boolean
 }
 
 export interface AwardLoyaltyForPaidOrderResult {
@@ -74,6 +80,14 @@ export interface OpcionesDeLealtad {
    * sello quedaría vivo sobre una venta devuelta. Los demás llamadores (los cobros) no lo pasan y cierran como siempre.
    */
   cerrar?: boolean
+  /**
+   * 🔴 H4, segunda ola (recheck de Codex, 15-oct-2026): el cliente que el envoltorio YA validó (nadie más recibió sello ni puntos
+   * de esta venta). Con él, esta función acredita SÓLO a ese cliente y nunca vuelve a resolver otro: si al leer las
+   * asociaciones el primario (o, sin `OrderCustomer`, el heredado) ya no es ése —la TPV lo cambió en medio— no acredita a
+   * nadie (ni la visita) y deja la venta pendiente para la vuelta siguiente, que vuelve a validar. `null` = validó «sin
+   * cliente». Sin la opción (los cobros), todo sigue como siempre.
+   */
+  beneficiario?: string | null
 }
 
 function nombre(c: { firstName: string | null; lastName: string | null } | null | undefined): string {
@@ -107,7 +121,20 @@ export async function awardLoyaltyForPaidOrder(
         orderBy: { addedAt: 'asc' },
       })) ?? []
 
-    if (orderCustomers.length > 0) {
+    // H4 (segunda ola): con un beneficiario fijado, el que esta lectura resolvería tiene que ser ése, o no se acredita a nadie.
+    const fijado = opciones.beneficiario !== undefined
+    const resuelto =
+      orderCustomers.length > 0 ? (orderCustomers.find(oc => oc.isPrimary)?.customerId ?? null) : (args.legacyCustomer?.id ?? null)
+
+    if (fijado && resuelto !== opciones.beneficiario) {
+      errors.push(`beneficiario:cambió (validado ${opciones.beneficiario ?? 'ninguno'}, ahora ${resuelto ?? 'ninguno'})`)
+      logger.warn('⚠️ Loyalty skipped: the order customer changed after it was validated; the next pass revalidates', {
+        orderId,
+        venueId,
+        validado: opciones.beneficiario ?? null,
+        ahora: resuelto,
+      })
+    } else if (orderCustomers.length > 0) {
       for (const oc of orderCustomers) {
         try {
           await updateCustomerMetrics(oc.customerId, orderTotal, orderId, venueId)
@@ -126,8 +153,8 @@ export async function awardLoyaltyForPaidOrder(
           })
         }
 
-        // Puntos y sello SÓLO al primario (el primero que se agregó a la cuenta).
-        if (oc.isPrimary) {
+        // Puntos y sello SÓLO al primario (el primero que se agregó a la cuenta) — y, con beneficiario fijado, sólo a ése.
+        if (oc.isPrimary && (!fijado || oc.customerId === opciones.beneficiario)) {
           const credited = await acreditar(
             venueId,
             oc.customerId,

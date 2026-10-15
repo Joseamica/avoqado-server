@@ -123,11 +123,27 @@ afterEach(() => relojFijo.mockRestore())
 
 beforeEach(() => {
   // Sin colas «Once» sobrantes de la prueba anterior (una prueba que falla dejaría su rechazo para la siguiente).
-  for (const m of [awardMock, reverseMock, prismaMock.order.updateMany, prismaMock.payment.count] as jest.Mock[]) m.mockReset()
+  for (const m of [awardMock, reverseMock, prismaMock.order.updateMany, prismaMock.payment.count, prismaMock.$queryRaw] as jest.Mock[])
+    m.mockReset()
   relojFijo = jest.spyOn(Date, 'now').mockReturnValue(AHORA_FIJO)
   eventosDeLaVenta = []
   puntosDeLaVenta = []
   conVenta()
+  // La foto de UNA sentencia del envoltorio (H4/H5): primario, clientes, actor y dueños de EARN, sacada de la MISMA venta simulada.
+  prismaMock.$queryRaw.mockImplementation((async () => {
+    const leer = prismaMock.order.findFirst.getMockImplementation() as ((a?: unknown) => Promise<any>) | undefined
+    const v = leer ? await leer({}) : null
+    if (!v) return []
+    return [
+      {
+        staffId: v.loyaltyStaffId ?? null,
+        primario: v.orderCustomers[0]?.customerId ?? null,
+        clientes: v.orderCustomers.length,
+        sellos: v.stampEvents.filter((e: Evento) => e.type === 'EARN').map((e: Evento) => e.stampCard.customerId),
+        puntos: v.loyaltyTransactions.map((t: { customerId: string }) => t.customerId),
+      },
+    ]
+  }) as never)
   prismaMock.payment.count.mockResolvedValue(0) // sin reembolsos
   prismaMock.order.updateMany.mockResolvedValue({ count: 1 } as any)
   prismaMock.loyaltyConfig.findUnique.mockResolvedValue({ active: true, stampsEnabled: true, maxStampsPerDay: 1 } as any)
@@ -227,7 +243,8 @@ describe('awardLoyaltyForLateCustomer', () => {
     // H1: la lealtad NO cierra la venta; la cierra el envoltorio después de su comprobación final de reembolso.
     expect(awardMock).toHaveBeenCalledWith(
       { venueId: VENUE, orderId: ORDER, orderTotal: 80, staffId: STAFF, legacyCustomer: null },
-      { cerrar: false },
+      // H4 (segunda ola): el beneficiario VALIDADO viaja a la lealtad; si el primario cambia, no acredita a nadie.
+      { cerrar: false, beneficiario: CUST },
     )
     expect(r).toEqual({ stampsEnabled: true, stamped: true, reason: null, stampsEarned: 4, stampsRequired: 7, rewardReady: false })
   })
@@ -456,7 +473,7 @@ describe('otorgarLealtadRespetandoReembolsos (B2: UN envoltorio para la liga tar
 
   it('sin reembolso: otorga con los MISMOS argumentos, no revierte y devuelve el resultado de la lealtad', async () => {
     const r = await otorgarLealtadRespetandoReembolsos(ARGS)
-    expect(awardMock).toHaveBeenCalledWith(ARGS, { cerrar: false })
+    expect(awardMock).toHaveBeenCalledWith(ARGS, { cerrar: false, beneficiario: CUST })
     expect(reverseMock).not.toHaveBeenCalled()
     expect(r).toEqual({ complete: true, errors: [], reembolsada: false })
     // Antes y después de otorgar, y las dos veces EXACTO (un count por la orden, sin lista con tope).
@@ -573,13 +590,28 @@ describe('otorgarLealtadRespetandoReembolsos (B2: UN envoltorio para la liga tar
     expect(r).not.toHaveProperty('otroCliente')
   })
 
-  it('H4: la comprobación lee SÓLO esta venta de este negocio, con listas acotadas', async () => {
+  it('H4: la comprobación es UNA sentencia sobre esta venta de este negocio (primario, clientes, actor y dueños de EARN juntos)', async () => {
     await otorgarLealtadRespetandoReembolsos(ARGS)
-    const args = (prismaMock.order.findFirst as jest.Mock).mock.calls[0][0]
-    expect(args.where).toEqual({ id: ORDER, venueId: VENUE })
-    expect(args.select.stampEvents.take).toBeGreaterThan(0)
-    expect(args.select.loyaltyTransactions.take).toBeGreaterThan(0)
-    expect(args.select.orderCustomers).toMatchObject({ where: { isPrimary: true }, take: 1 })
+    const q = prismaMock.$queryRaw.mock.calls[0][0] as unknown as Prisma.Sql
+    expect(q.text).toMatch(/FROM "Order" o WHERE o\."id" = \$1 AND o\."venueId" = \$2/)
+    expect(q.text).toMatch(/"isPrimary" = true ORDER BY oc\."addedAt" ASC LIMIT 1\) AS "primario"/)
+    expect(q.text).toMatch(/AS "clientes"/)
+    expect(q.text).toMatch(/o\."loyaltyStaffId" AS "staffId"/)
+    expect(q.text).toMatch(/AS "sellos"/)
+    expect(q.text).toMatch(/AS "puntos"/)
+    expect(q.values).toEqual([ORDER, VENUE])
+  })
+
+  it('🔴 H4 (segunda ola): sin OrderCustomer el beneficiario validado es el heredado que pasa quien llama', async () => {
+    conVenta({ orderCustomers: [] })
+    await otorgarLealtadRespetandoReembolsos({ ...ARGS, legacyCustomer: { id: 'heredado', firstName: null, lastName: null } })
+    expect(awardMock).toHaveBeenCalledWith(expect.anything(), { cerrar: false, beneficiario: 'heredado' })
+  })
+
+  it('H4 (segunda ola): la venta ya no existe (o no es del negocio): la lealtad corre sin beneficiario fijado (no acredita a nadie de otro lado)', async () => {
+    prismaMock.order.findFirst.mockResolvedValue(null)
+    await otorgarLealtadRespetandoReembolsos(ARGS)
+    expect(awardMock).toHaveBeenCalledWith(ARGS, { cerrar: false })
   })
 
   it('H1: la lealtad incompleta no se cierra (sin reembolso de por medio)', async () => {
@@ -812,6 +844,45 @@ describe('🔴 H5: el reconciliador sella a nombre de quien LIGÓ al cliente, no
     expect(reintento).not.toHaveBeenCalled()
     expect(await job().runNow()).toMatchObject({ scanned: 1, applied: 1 })
     expect(reintento).toHaveBeenCalledWith(expect.objectContaining({ staffId: 'barista' }))
+  })
+})
+
+describe('🔴 H5, segunda ola: la liga llega DESPUÉS del reclamo del reconciliador', () => {
+  it('el reconciliador reclama (actor leído: cajero) → el barista liga a CUST y reabre → la lealtad sella con el BARISTA', async () => {
+    // Venta pendiente sin cliente, cobrada por el cajero.
+    const fila = { ...filaYaProcesada(), loyaltyProcessedAt: null, loyaltyStaffId: 'cajero', clientes: 0 }
+    conVenta({ orderCustomers: [], loyaltyStaffId: 'cajero' })
+    const tabla = tablaDeUnaVenta(fila)
+    prismaMock.order.updateMany.mockImplementation(tabla.updateMany as never)
+    const conLigaTrasElReclamo = {
+      ...tabla,
+      updateMany: jest.fn(async (a: any) => {
+        const r = await tabla.updateMany(a)
+        if (a.data?.loyaltyAttempts && r.count === 1) {
+          // La liga: OrderCustomer primario + reapertura con su actor (processingAt en null, marca, loyaltyStaffId).
+          fila.clientes = 1
+          conVenta({ orderCustomers: [{ customerId: CUST }], loyaltyStaffId: 'barista' })
+          await reabrirLealtadSiAplica(prismaMock as never, { venueId: VENUE, orderId: ORDER, customerId: CUST, staffId: 'barista' })
+        }
+        return r
+      }),
+    }
+    const job = new LoyaltyReconciliationJob({
+      prisma: { order: conLigaTrasElReclamo } as never,
+      cron: cron(),
+      now: () => new Date(Date.now()),
+    })
+    await job.runNow()
+
+    expect(fila.loyaltyStaffId).toBe('barista')
+    // El actor sale de la MISMA lectura que el cliente que se acredita: nunca «cajero + cliente nuevo».
+    expect(awardMock).toHaveBeenCalledWith(expect.objectContaining({ staffId: 'barista' }), { cerrar: false, beneficiario: CUST })
+  })
+
+  it('el envoltorio sólo cambia el actor si quien llama lo pide (la liga y la reparación pasan el suyo)', async () => {
+    conVenta({ loyaltyStaffId: 'cajero' })
+    await otorgarLealtadRespetandoReembolsos({ venueId: VENUE, orderId: ORDER, orderTotal: 80, staffId: STAFF, legacyCustomer: null })
+    expect(awardMock).toHaveBeenCalledWith(expect.objectContaining({ staffId: STAFF }), expect.anything())
   })
 })
 

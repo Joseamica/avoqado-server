@@ -200,6 +200,83 @@ describe('awardLoyaltyForPaidOrder', () => {
     expect(orderUpdateMany).not.toHaveBeenCalled()
   })
 
+  // ── H4, segunda ola (recheck de Codex, 15-oct-2026): acredita SÓLO al beneficiario que el envoltorio validó ───────────
+  describe('🔴 H4: { beneficiario } — nunca vuelve a resolver un cliente distinto del validado', () => {
+    const conPrimario = (id: string) =>
+      orderCustomerFindMany.mockResolvedValue([{ customerId: id, isPrimary: true, customer: { id, firstName: null, lastName: null } }])
+
+    it('🔴 el primario CAMBIÓ entre la comprobación y la lealtad: no acredita a nadie (ni visita) y la venta queda pendiente', async () => {
+      conPrimario('cust-B') // el envoltorio validó a A; la TPV puso a B en medio
+      const r = await awardLoyaltyForPaidOrder(
+        { venueId: VENUE, orderId: ORDER, orderTotal: 50 },
+        { cerrar: false, beneficiario: 'cust-A' },
+      )
+      expect(earnPointsMock).not.toHaveBeenCalled()
+      expect(metricsMock).not.toHaveBeenCalled()
+      expect(r.complete).toBe(false)
+      expect(r.errors).toEqual([expect.stringContaining('beneficiario')])
+      // Ni cierre ni nada que la saque de la cola: sólo el error (que no pisa la marca).
+      expect(orderUpdateMany).toHaveBeenCalledTimes(1)
+      expect(orderUpdateMany.mock.calls[0][0].data).toEqual({ loyaltyLastError: expect.stringContaining('beneficiario') })
+    })
+
+    it('el primario es el validado: acredita a ése, como siempre', async () => {
+      conPrimario('cust-A')
+      const r = await awardLoyaltyForPaidOrder(
+        { venueId: VENUE, orderId: ORDER, orderTotal: 50 },
+        { cerrar: false, beneficiario: 'cust-A' },
+      )
+      expect(earnPointsMock).toHaveBeenCalledWith(VENUE, 'cust-A', 50, ORDER, undefined)
+      expect(r).toEqual({ complete: true, errors: [], leyoSinCliente: false })
+    })
+
+    it('sin OrderCustomer: el heredado es el validado ⇒ lo acredita; otro heredado ⇒ nadie', async () => {
+      orderCustomerFindMany.mockResolvedValue([])
+      const legacy = { id: 'cust-L', firstName: null, lastName: null }
+      await awardLoyaltyForPaidOrder(
+        { venueId: VENUE, orderId: ORDER, orderTotal: 50, legacyCustomer: legacy },
+        { cerrar: false, beneficiario: 'cust-L' },
+      )
+      expect(earnPointsMock).toHaveBeenCalledWith(VENUE, 'cust-L', 50, ORDER, undefined)
+      earnPointsMock.mockClear()
+      const r = await awardLoyaltyForPaidOrder(
+        { venueId: VENUE, orderId: ORDER, orderTotal: 50, legacyCustomer: legacy },
+        { cerrar: false, beneficiario: 'cust-OTRO' },
+      )
+      expect(earnPointsMock).not.toHaveBeenCalled()
+      expect(r.complete).toBe(false)
+    })
+
+    it('validó «sin cliente» y ahora hay un cliente (una liga en medio): no lo acredita aquí; la liga reabrió y lo hará', async () => {
+      conPrimario('cust-X')
+      const r = await awardLoyaltyForPaidOrder(
+        { venueId: VENUE, orderId: ORDER, orderTotal: 50, legacyCustomer: null },
+        { cerrar: false, beneficiario: null },
+      )
+      expect(earnPointsMock).not.toHaveBeenCalled()
+      expect(r.complete).toBe(false)
+    })
+
+    it('validó «sin cliente» y sigue sin cliente: la corrida «sin cliente» de siempre (leyoSinCliente)', async () => {
+      orderCustomerFindMany.mockResolvedValue([])
+      const r = await awardLoyaltyForPaidOrder(
+        { venueId: VENUE, orderId: ORDER, orderTotal: 50, legacyCustomer: null },
+        { cerrar: false, beneficiario: null },
+      )
+      expect(r).toEqual({ complete: true, errors: [], leyoSinCliente: true })
+    })
+
+    it('dos primarios (dato raro): sólo acredita al validado', async () => {
+      orderCustomerFindMany.mockResolvedValue([
+        { customerId: 'cust-A', isPrimary: true, customer: { id: 'cust-A', firstName: null, lastName: null } },
+        { customerId: 'cust-B', isPrimary: true, customer: { id: 'cust-B', firstName: null, lastName: null } },
+      ])
+      await awardLoyaltyForPaidOrder({ venueId: VENUE, orderId: ORDER, orderTotal: 50 }, { cerrar: false, beneficiario: 'cust-A' })
+      expect(earnPointsMock).toHaveBeenCalledTimes(1)
+      expect(earnPointsMock).toHaveBeenCalledWith(VENUE, 'cust-A', 50, ORDER, undefined)
+    })
+  })
+
   it('H1: con { cerrar: false } una corrida que FALLA sí deja su error (no es un cierre)', async () => {
     orderCustomerFindMany.mockResolvedValue([
       { customerId: 'cust-A', isPrimary: true, customer: { id: 'cust-A', firstName: 'Ana', lastName: null } },

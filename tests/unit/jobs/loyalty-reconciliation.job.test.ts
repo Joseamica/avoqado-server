@@ -57,6 +57,8 @@ describe('LoyaltyReconciliationJob', () => {
       orderId: 'order-1',
       orderTotal: 90,
       staffId: 'staff-1',
+      // H5, segunda ola: el envoltorio toma el actor VIGENTE en la misma lectura que el cliente que acredita.
+      actorDeLaVenta: true,
       legacyCustomer: { id: 'cust-legacy', firstName: 'Ana', lastName: 'Ruiz' },
     })
     expect(order.updateMany).toHaveBeenCalledWith(

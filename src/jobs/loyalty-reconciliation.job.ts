@@ -160,6 +160,10 @@ export class LoyaltyReconciliationJob {
             orderId: order.id,
             orderTotal: Math.max(0, Number(order.total) - Number(order.tipAmount ?? 0)),
             staffId: order.loyaltyStaffId,
+            // 🔴 H5, segunda ola (recheck de Codex): una liga DESPUÉS de este reclamo cambia el cliente y `loyaltyStaffId` a la
+            // vez. El envoltorio toma el actor de la MISMA lectura que el cliente que acredita; `staffId` de arriba es sólo el
+            // respaldo de un `award` inyectado.
+            actorDeLaVenta: true,
             legacyCustomer: order.customer,
           })
 
