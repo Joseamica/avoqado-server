@@ -475,12 +475,19 @@ export async function describeSaleStamp(args: { venueId: string; orderId: string
  * lealtad completa (visita, puntos y sello, todo idempotente) — también si el sello de este cliente ya existe, para completar
  * lo que falte. Siempre por `otorgarLealtadRespetandoReembolsos` (B2). `null` = venta abierta o inexistente o falla: la app
  * no pinta nada.
+ *
+ * `ligaNueva` (BAJO-3, full-testing 15-oct-2026): ¿ESTA llamada creó (o promovió a primario) la liga del cliente? La fila de
+ * auditoría `CUSTOMER_ATTACHED_TO_PAID_ORDER` es del hecho «X ligó a Y», y ese hecho lo hizo UNA llamada. Seis «Agregar
+ * cliente» del mismo cliente a la vez leían la venta sin sello y cada una auditaba (quedaron dos filas). Con `false` la
+ * lealtad corre igual (idempotente) pero no se audita; con `true` se audita (una vez por liga creada); sin decirlo
+ * (`undefined`), la regla de antes.
  */
 export async function awardLoyaltyForLateCustomer(args: {
   venueId: string
   orderId: string
   customerId: string
   staffId?: string | null
+  ligaNueva?: boolean
 }): Promise<SaleStampOutcome | null> {
   const { venueId, orderId, customerId } = args
   try {
@@ -534,9 +541,12 @@ export async function awardLoyaltyForLateCustomer(args: {
       await motivo(decision, venueId, customerId, programa, nowMs),
     )
 
-    // Auditoría (spec §3.1): quién ligó a quién a una venta YA cobrada, y si sumó. No en una re-liga de una venta que ya
-    // tenía su sello para este cliente: eso es un doble toque, no un hecho nuevo.
-    if (antes !== 'STAMPED' && (venta.paymentStatus === 'PAID' || venta.paymentStatus === 'REFUNDED')) {
+    // Auditoría (spec §3.1): quién ligó a quién a una venta YA cobrada, y si sumó. 🔴 BAJO-3: cuando quien llama sabe si
+    // ESTA llamada creó la liga (`ligaNueva`), eso decide: audita sólo la que la creó — también si otra llamada simultánea ya
+    // le dio el sello antes de que ésta leyera (si no, la fila se perdía) — y nunca las demás. Sin saberlo, la regla de
+    // antes: no se audita una re-liga de una venta que ya tenía su sello para este cliente (doble toque, no un hecho nuevo).
+    const auditar = args.ligaNueva ?? antes !== 'STAMPED'
+    if (auditar && (venta.paymentStatus === 'PAID' || venta.paymentStatus === 'REFUNDED')) {
       void logAction({
         action: 'CUSTOMER_ATTACHED_TO_PAID_ORDER',
         entity: 'Order',

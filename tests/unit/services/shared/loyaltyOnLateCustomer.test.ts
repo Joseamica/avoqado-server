@@ -465,6 +465,31 @@ describe('awardLoyaltyForLateCustomer', () => {
     await awardLoyaltyForLateCustomer({ venueId: VENUE, orderId: ORDER, customerId: CUST, staffId: STAFF })
     expect(logActionMock).not.toHaveBeenCalled()
   })
+
+  // 🔴 BAJO-3 (full-testing, 15-oct-2026): seis «Agregar cliente» del MISMO cliente a la vez dejaron DOS filas de auditoría:
+  // las llamadas que llegaron juntas leyeron la venta sin sello (ELIGIBLE) y cada una auditó. La fila es del hecho «X ligó
+  // a Y», y ese hecho lo hizo UNA llamada: la que creó (o promovió) la liga. Las demás no auditan.
+  it('🔴 BAJO-3: la llamada que NO creó la liga (ligaNueva: false) completa la lealtad pero NO audita', async () => {
+    const r = await awardLoyaltyForLateCustomer({ venueId: VENUE, orderId: ORDER, customerId: CUST, staffId: STAFF, ligaNueva: false })
+    expect(awardMock).toHaveBeenCalledTimes(1) // la lealtad corre igual (idempotente): completa lo que falte
+    expect(r?.stamped).toBe(true)
+    expect(logActionMock).not.toHaveBeenCalled()
+  })
+
+  it('BAJO-3: la llamada que SÍ creó la liga (ligaNueva: true) audita como siempre', async () => {
+    await awardLoyaltyForLateCustomer({ venueId: VENUE, orderId: ORDER, customerId: CUST, staffId: STAFF, ligaNueva: true })
+    expect(logActionMock).toHaveBeenCalledTimes(1)
+    expect(logActionMock.mock.calls[0][0]).toMatchObject({ action: 'CUSTOMER_ATTACHED_TO_PAID_ORDER', entityId: ORDER })
+  })
+
+  it('🔴 BAJO-3: la que creó la liga audita AUNQUE otra llamada simultánea ya le haya dado el sello antes de que ésta leyera', async () => {
+    // Sin esto, en la carrera la única fila podía perderse: la que creó leía «ya sellada» y las demás no auditan.
+    eventosDeLaVenta = [EARN(CUST)]
+    conVenta({ stampEvents: eventosDeLaVenta })
+    await awardLoyaltyForLateCustomer({ venueId: VENUE, orderId: ORDER, customerId: CUST, staffId: STAFF, ligaNueva: true })
+    expect(logActionMock).toHaveBeenCalledTimes(1)
+    expect(logActionMock.mock.calls[0][0].data).toMatchObject({ decision: 'STAMPED', stamped: true })
+  })
 })
 
 describe('otorgarLealtadRespetandoReembolsos (B2: UN envoltorio para la liga tardía, el reconciliador y la reparación S9)', () => {

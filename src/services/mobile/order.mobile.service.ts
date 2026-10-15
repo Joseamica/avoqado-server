@@ -36,7 +36,7 @@ import { conservarDescuentoHistorico, revertirDescuentoDelRenglon, sincronizarRe
 import { applyPromotionToOrder } from '../promotions/promotion.service'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
 import { paymentCountsAsDrawerCash } from '../shared/tenderSemantics'
-import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
+import { esChoqueDelUnico, turnoAbiertoDelNegocio, type UnicoParcial } from '../shared/turnoDeCaja'
 import { assertNoLiveTerminalCharge, assertOrderCancellableUnderLock, avisarOrdenCancelada } from '../shared/orderCancelGuard'
 import { combinarContratos } from '../fiscal/contratoDePrecio'
 import {
@@ -3598,9 +3598,22 @@ export async function attachCustomerToLatestPayment(
 }
 
 /**
+ * 🔴 BAJO-3 (full-testing, 15-oct-2026): el único `(orderId, customerId)` de `OrderCustomer`. Dos «Agregar cliente» del MISMO
+ * cliente a la vez leían «sin liga» y los dos creaban: el segundo chocaba aquí (P2002) y respondía 500. Chocar con él quiere
+ * decir «ya está ligado»: la liga se reintenta (la relectura ve la de la otra llamada) y sigue como éxito. Cualquier otro
+ * choque (el primario de OTRO cliente a la vez) sube como antes.
+ */
+const UNICO_CLIENTE_EN_LA_VENTA: UnicoParcial = { indice: 'OrderCustomer_orderId_customerId_key', columnas: ['orderId', 'customerId'] }
+/** Intentos de la liga ante ese choque: el segundo ya ve la liga; el tope sólo evita un ciclo si la liga aparece y desaparece. */
+const INTENTOS_DE_LIGA = 3
+
+/**
  * Liga un cliente a una venta (la del «Agregar cliente» después de cobrar) y, si la venta ya se cobró, le da su sello
  * tardío (spec 2026-10-14 §3.1). Devuelve los campos de orden de siempre más `loyalty` (`SaleStampOutcome | null`, campo
  * nuevo y opcional para las apps: `null` = no pintar nada).
+ *
+ * Idempotente ante el mismo cliente agregado varias veces (BAJO-3): una sola liga, ningún 500, y la fila de auditoría sólo
+ * desde la llamada que CREÓ (o promovió a primario) la liga (`ligaNueva`).
  */
 export async function attachCustomerToOrder(venueId: string, orderId: string, customerId: string, staffId?: string | null) {
   const normalizedCustomerId = customerId?.trim()
@@ -3646,70 +3659,93 @@ export async function attachCustomerToOrder(venueId: string, orderId: string, cu
   // candado de la fila de la orden tomado.
   const { reabrirLealtadSiAplica, awardLoyaltyForLateCustomer } = await import('@/services/shared/loyaltyOnLateCustomer')
 
-  const result = await prisma.$transaction(async tx => {
-    const existingAssociation = await tx.orderCustomer.findUnique({
-      where: {
-        orderId_customerId: {
-          orderId,
-          customerId: normalizedCustomerId,
+  const ligarEnTransaccion = () =>
+    prisma.$transaction(async tx => {
+      const existingAssociation = await tx.orderCustomer.findUnique({
+        where: {
+          orderId_customerId: {
+            orderId,
+            customerId: normalizedCustomerId,
+          },
         },
-      },
-    })
+      })
 
-    const hasPrimaryCustomer = await tx.orderCustomer.findFirst({
-      where: {
-        orderId,
-        isPrimary: true,
-      },
-      select: { id: true },
-    })
+      const hasPrimaryCustomer = await tx.orderCustomer.findFirst({
+        where: {
+          orderId,
+          isPrimary: true,
+        },
+        select: { id: true },
+      })
 
-    if (!existingAssociation) {
-      await tx.orderCustomer.create({
+      // BAJO-3: ¿ESTA llamada creó la liga (o la promovió a primario)? Sólo ésa audita.
+      let ligaNueva = false
+      if (!existingAssociation) {
+        await tx.orderCustomer.create({
+          data: {
+            orderId,
+            customerId: normalizedCustomerId,
+            isPrimary: !hasPrimaryCustomer,
+          },
+        })
+        ligaNueva = true
+      } else if (!hasPrimaryCustomer && !existingAssociation.isPrimary) {
+        // Condicional (`isPrimary: false`): si otra llamada simultánea ya la promovió, ésta espera su candado de fila, relee y
+        // no toca nada (count 0) — así sólo UNA cuenta como la que promovió.
+        const promovida = await tx.orderCustomer.updateMany({
+          where: { id: existingAssociation.id, isPrimary: false },
+          data: { isPrimary: true },
+        })
+        ligaNueva = promovida.count === 1
+      }
+
+      const ligada = await tx.order.update({
+        where: { id: orderId },
         data: {
-          orderId,
           customerId: normalizedCustomerId,
-          isPrimary: !hasPrimaryCustomer,
+          customerName: displayName,
+          customerPhone: customer.phone || null,
+          customerEmail: customer.email || null,
+        },
+        select: {
+          id: true,
+          orderNumber: true,
+          customerId: true,
+          customerName: true,
+          customerPhone: true,
+          customerEmail: true,
         },
       })
-    } else if (!hasPrimaryCustomer && !existingAssociation.isPrimary) {
-      await tx.orderCustomer.update({
-        where: { id: existingAssociation.id },
-        data: { isPrimary: true },
-      })
-    }
 
-    const ligada = await tx.order.update({
-      where: { id: orderId },
-      data: {
-        customerId: normalizedCustomerId,
-        customerName: displayName,
-        customerPhone: customer.phone || null,
-        customerEmail: customer.email || null,
-      },
-      select: {
-        id: true,
-        orderNumber: true,
-        customerId: true,
-        customerName: true,
-        customerPhone: true,
-        customerEmail: true,
-      },
+      // 🔴 Auditoría A #1: en la MISMA transacción que la liga se reabre el trabajo durable de lealtad de la venta
+      // (`loyaltyProcessedAt = null`, …) si es elegible y ESTE cliente quedó como primario. Si el intento inmediato de abajo
+      // falla, el reconciliador de siempre la termina. Sin esto, la venta —cobrada sin cliente y ya «procesada»— no volvía a la
+      // cola nunca y el sello se perdía otra vez, en silencio. Si falla, la liga falla entera y el cajero reintenta: nunca queda
+      // una liga sin su trabajo de lealtad reabierto.
+      // 🔴 Y es la ÚLTIMA escritura antes del commit (ruling tras la medición de S3b): la reapertura deja una MARCA en la fila
+      // (`loyaltyLastError`). La lealtad del cobro que leyó la venta «sin cliente» puede estar esperando el candado de esta fila
+      // para cerrarla; al soltarse, Postgres sólo relee las columnas de la fila, y la marca es lo que la detiene.
+      // H5: con el actor de la liga, para que el reconciliador selle a nombre de quien agregó al cliente.
+      await reabrirLealtadSiAplica(tx, { venueId, orderId, customerId: normalizedCustomerId, staffId: staffId ?? null })
+
+      return { ligada, ligaNueva }
     })
 
-    // 🔴 Auditoría A #1: en la MISMA transacción que la liga se reabre el trabajo durable de lealtad de la venta
-    // (`loyaltyProcessedAt = null`, …) si es elegible y ESTE cliente quedó como primario. Si el intento inmediato de abajo
-    // falla, el reconciliador de siempre la termina. Sin esto, la venta —cobrada sin cliente y ya «procesada»— no volvía a la
-    // cola nunca y el sello se perdía otra vez, en silencio. Si falla, la liga falla entera y el cajero reintenta: nunca queda
-    // una liga sin su trabajo de lealtad reabierto.
-    // 🔴 Y es la ÚLTIMA escritura antes del commit (ruling tras la medición de S3b): la reapertura deja una MARCA en la fila
-    // (`loyaltyLastError`). La lealtad del cobro que leyó la venta «sin cliente» puede estar esperando el candado de esta fila
-    // para cerrarla; al soltarse, Postgres sólo relee las columnas de la fila, y la marca es lo que la detiene.
-    // H5: con el actor de la liga, para que el reconciliador selle a nombre de quien agregó al cliente.
-    await reabrirLealtadSiAplica(tx, { venueId, orderId, customerId: normalizedCustomerId, staffId: staffId ?? null })
-
-    return ligada
-  })
+  let liga: Awaited<ReturnType<typeof ligarEnTransaccion>> | undefined
+  for (let intento = 1; !liga; intento++) {
+    try {
+      liga = await ligarEnTransaccion()
+    } catch (error) {
+      // 🔴 BAJO-3: otra llamada ligó a ESTE cliente mientras ésta lo intentaba: ya está ligado. Se reintenta (la transacción
+      // entera se revirtió) y la relectura ve la liga de la otra; nunca un 500 por un doble toque.
+      if (intento < INTENTOS_DE_LIGA && esChoqueDelUnico(error, UNICO_CLIENTE_EN_LA_VENTA)) {
+        logger.info(`ℹ️ [ORDER.MOBILE] Customer ${normalizedCustomerId} was linked to order ${orderId} by a concurrent call; retrying`)
+        continue
+      }
+      throw error
+    }
+  }
+  const { ligada: result, ligaNueva } = liga
 
   logger.info(`✅ [ORDER.MOBILE] Customer attached to payment order | order=${order.orderNumber} | customer=${normalizedCustomerId}`)
 
@@ -3729,7 +3765,7 @@ export async function attachCustomerToOrder(venueId: string, orderId: string, cu
   // try/catch es la última red.
   let loyalty: SaleStampOutcome | null = null
   try {
-    loyalty = await awardLoyaltyForLateCustomer({ venueId, orderId, customerId: normalizedCustomerId, staffId: staffId ?? null })
+    loyalty = await awardLoyaltyForLateCustomer({ venueId, orderId, customerId: normalizedCustomerId, staffId: staffId ?? null, ligaNueva })
   } catch (error) {
     logger.error('[ORDER.MOBILE] Sello tardío falló (la liga del cliente ya quedó)', {
       orderId,
