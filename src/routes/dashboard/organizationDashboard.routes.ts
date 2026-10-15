@@ -124,9 +124,10 @@ export async function requireOrgOwner(req: Request, res: Response, next: NextFun
 /**
  * Middleware: require a SUPERVISOR-or-above role for the target organization.
  * Used for fleet-affecting terminal operations (create / edit / activate a terminal,
- * single and bulk commands, org-wide broadcast/message). `checkOrgAccess` alone only proves
- * membership, which would let a floor employee (cashier/waiter/promoter) provision
- * terminals or message the whole fleet.
+ * single and bulk commands, org-wide broadcast/message) and for org-level writes (goals,
+ * zones, time-entry validation). `checkOrgAccess` alone only proves membership, which would
+ * let a floor employee (cashier/waiter/promoter) provision terminals, message the whole
+ * fleet or approve attendance.
  *
  * "Supervisor or above" = holds StaffRole MANAGER/ADMIN/OWNER/SUPERADMIN in ANY
  * venue of the org (supervisors are venue-level MANAGER but org-level MEMBER, so an
@@ -549,37 +550,46 @@ router.get(
  * PUT /dashboard/organizations/:orgId/goals
  * Update or create goals for a specific period
  * Body: { period, periodDate, salesTarget, volumeTarget }
+ *
+ * 🔴 Supervisor o más (antes bastaba ser miembro de la org: un cajero fijaba las metas de toda la org).
+ * Fijado en tests/unit/routes/organizationDashboard.orgWrites.routes.test.ts.
  */
-router.put('/:orgId/goals', authenticateTokenMiddleware, checkOrgAccess, async (req: Request, res: Response, next: NextFunction) => {
-  try {
-    const { orgId } = req.params
-    const { period, periodDate, salesTarget, volumeTarget } = req.body
+router.put(
+  '/:orgId/goals',
+  authenticateTokenMiddleware,
+  checkOrgAccess,
+  requireOrgManager,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { orgId } = req.params
+      const { period, periodDate, salesTarget, volumeTarget } = req.body
 
-    if (!period || !periodDate || !salesTarget || !volumeTarget) {
-      return res.status(400).json({
-        success: false,
-        error: 'missing_fields',
-        message: 'period, periodDate, salesTarget, and volumeTarget are required',
+      if (!period || !periodDate || !salesTarget || !volumeTarget) {
+        return res.status(400).json({
+          success: false,
+          error: 'missing_fields',
+          message: 'period, periodDate, salesTarget, and volumeTarget are required',
+        })
+      }
+
+      const goal = await organizationDashboardService.updateOrganizationGoal(
+        orgId,
+        period,
+        new Date(periodDate),
+        salesTarget,
+        volumeTarget,
+        (req as any).authContext?.userId,
+      )
+
+      res.json({
+        success: true,
+        data: goal,
       })
+    } catch (error) {
+      next(error)
     }
-
-    const goal = await organizationDashboardService.updateOrganizationGoal(
-      orgId,
-      period,
-      new Date(periodDate),
-      salesTarget,
-      volumeTarget,
-      (req as any).authContext?.userId,
-    )
-
-    res.json({
-      success: true,
-      data: goal,
-    })
-  } catch (error) {
-    next(error)
-  }
-})
+  },
+)
 
 /**
  * GET /dashboard/organizations/:orgId/staff/attendance
@@ -693,11 +703,16 @@ router.get(
 /**
  * PATCH /dashboard/organizations/:orgId/time-entries/:timeEntryId/validate
  * Body: { status: 'APPROVED' | 'REJECTED', note?: string }
+ *
+ * 🔴 Supervisor o más. Antes bastaba ser miembro de la org: un cajero o un promotor aprobaba o rechazaba
+ * checadas de toda la org, las suyas incluidas (asistencia → nómina). Fijado en
+ * tests/unit/routes/organizationDashboard.orgWrites.routes.test.ts.
  */
 router.patch(
   '/:orgId/time-entries/:timeEntryId/validate',
   authenticateTokenMiddleware,
   checkOrgAccess,
+  requireOrgManager,
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { orgId, timeEntryId } = req.params
@@ -744,22 +759,31 @@ router.get('/:orgId/zones', authenticateTokenMiddleware, checkOrgAccess, async (
 /**
  * POST /dashboard/organizations/:orgId/zones
  * Body: { name: string, slug: string }
+ *
+ * 🔴 Crear, renombrar y borrar zonas: supervisor o más (antes bastaba ser miembro de la org). Leerlas
+ * sigue abierto a los miembros. Fijado en tests/unit/routes/organizationDashboard.orgWrites.routes.test.ts.
  */
-router.post('/:orgId/zones', authenticateTokenMiddleware, checkOrgAccess, async (req: Request, res: Response, next: NextFunction) => {
-  try {
-    const { orgId } = req.params
-    const { name, slug } = req.body
+router.post(
+  '/:orgId/zones',
+  authenticateTokenMiddleware,
+  checkOrgAccess,
+  requireOrgManager,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { orgId } = req.params
+      const { name, slug } = req.body
 
-    if (!name || !slug) {
-      return res.status(400).json({ success: false, error: 'missing_fields', message: 'name and slug are required' })
+      if (!name || !slug) {
+        return res.status(400).json({ success: false, error: 'missing_fields', message: 'name and slug are required' })
+      }
+
+      const zone = await organizationDashboardService.createZone(orgId, name, slug)
+      res.status(201).json({ success: true, data: zone })
+    } catch (error) {
+      next(error)
     }
-
-    const zone = await organizationDashboardService.createZone(orgId, name, slug)
-    res.status(201).json({ success: true, data: zone })
-  } catch (error) {
-    next(error)
-  }
-})
+  },
+)
 
 /**
  * PUT /dashboard/organizations/:orgId/zones/:zoneId
@@ -769,6 +793,7 @@ router.put(
   '/:orgId/zones/:zoneId',
   authenticateTokenMiddleware,
   checkOrgAccess,
+  requireOrgManager,
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { orgId, zoneId } = req.params
@@ -789,6 +814,7 @@ router.delete(
   '/:orgId/zones/:zoneId',
   authenticateTokenMiddleware,
   checkOrgAccess,
+  requireOrgManager,
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { orgId, zoneId } = req.params
