@@ -49,12 +49,39 @@ describe('aggregatePaymentsByMethod · tarjetas de regalo', () => {
   })
 })
 
+describe('aggregatePaymentsByMethod · vista de DINERO (r1, Fix 1)', () => {
+  it('🔴 la carga de una tarjeta se queda en su método real y lo pagado con saldo no entra (no es dinero nuevo)', async () => {
+    ;(prismaMock.payment.groupBy as jest.Mock).mockResolvedValue([
+      { method: 'CASH', tenderTypeId: null, _sum: { amount: 300, tipAmount: 0 }, _count: { _all: 1 } },
+      { method: 'CREDIT_CARD', tenderTypeId: null, _sum: { amount: 500, tipAmount: 0 }, _count: { _all: 1 } },
+      { method: 'OTHER', tenderTypeId: 'vale', _sum: { amount: 50, tipAmount: 0 }, _count: { _all: 1 } },
+    ])
+    const filas = await aggregatePaymentsByMethod('v1', filtros, 'dinero')
+    expect(filas).toEqual([
+      { method: 'CASH', amount: 300, tips: 0, count: 1 },
+      { method: 'CREDIT_CARD', amount: 500, tips: 0, count: 1 },
+      { method: 'OTHER', amount: 50, tips: 0, count: 1 },
+    ])
+    const llamada = (prismaMock.payment.groupBy as jest.Mock).mock.calls[0][0]
+    // Sin el filtro de cuentas de tarjetas (la carga es dinero real) y SIN lo pagado con saldo (la marca NULL-safe de B1).
+    expect(llamada.where.AND[1]).toEqual({ OR: [{ tenderTypeId: null }, { tenderType: { is: { systemKind: null } } }] })
+    // Sin saldo en el resultado no hace falta preguntar qué tender es el de sistema.
+    expect(prismaMock.venueTenderType.findMany).not.toHaveBeenCalled()
+  })
+})
+
 describe('aggregateGiftCardLoads', () => {
-  it('suma sólo los cobros de cuentas de tarjetas (cargas menos cancelaciones, porque los REFUND vienen negativos)', async () => {
-    ;(prismaMock.payment.aggregate as jest.Mock).mockResolvedValue({ _sum: { amount: 500 }, _count: { _all: 3 } })
-    expect(await aggregateGiftCardLoads('v1', filtros)).toEqual({ amount: 500, count: 3 })
-    expect((prismaMock.payment.aggregate as jest.Mock).mock.calls[0][0].where.AND[1]).toEqual({
-      order: { items: { some: { giftCardId: { not: null } } } },
+  it('suma sólo cuentas de tarjetas PAGADAS (cargas menos cancelaciones) y cuenta sólo las cargas, no los reembolsos (r1, M-1)', async () => {
+    ;(prismaMock.payment.groupBy as jest.Mock).mockResolvedValue([
+      { type: 'REGULAR', _sum: { amount: 800 }, _count: { _all: 2 } },
+      { type: 'REFUND', _sum: { amount: -300 }, _count: { _all: 1 } },
+    ])
+    expect(await aggregateGiftCardLoads('v1', filtros)).toEqual({ amount: 500, count: 2 })
+    const llamada = (prismaMock.payment.groupBy as jest.Mock).mock.calls[0][0]
+    expect(llamada.by).toEqual(['type'])
+    // Un abono a una venta de tarjetas SIN pagar no es una tarjeta cargada (sus sobres siguen PENDING, valen $0).
+    expect(llamada.where.AND[1]).toEqual({
+      order: { AND: [{ items: { some: { giftCardId: { not: null } } } }, { paymentStatus: 'PAID' }] },
     })
   })
 })

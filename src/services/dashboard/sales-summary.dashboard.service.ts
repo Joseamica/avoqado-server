@@ -1116,12 +1116,15 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
   })
 
   // 8. Transaction Count - Completed payments
+  // Tarjetas de regalo (B5 r1, M-2): sin filtro de método, los cobros se cuentan como las ventas brutas, sin los de cuentas de
+  // tarjetas (lo pagado con saldo SÍ cuenta). Con filtro es la vista de dinero y no se toca.
   const transactionCountResult = await prisma.payment.count({
     where: {
       venueId,
       ...dateFilter,
       status: 'COMPLETED',
       ...paymentLevelFilter,
+      ...(!isFiltered ? { AND: [{ order: WHERE_ORDEN_SIN_TARJETAS }] } : {}),
     },
   })
 
@@ -1608,7 +1611,7 @@ export function flattenSalesSummaryForExport(
       rows.push(t('Tarjetas de regalo cargadas (no es venta)', s.giftCardLoads, s.giftCardLoadsCount ?? null))
     }
     if (s.paidWithGiftCardBalance !== undefined) {
-      rows.push(t('Pagado con saldo de tarjeta de regalo (incluido en ventas)', s.paidWithGiftCardBalance))
+      rows.push(t('Pagado con saldo de tarjeta de regalo (incluido en ventas y propinas)', s.paidWithGiftCardBalance))
     }
   }
   if (want.has('paymentMethods') && report.byPaymentMethod) {

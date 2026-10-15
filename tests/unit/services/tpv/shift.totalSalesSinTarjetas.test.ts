@@ -101,4 +101,38 @@ describe('getShiftsSummary · tarjetas de regalo (R3, r1 B-3)', () => {
     expect(prismaMock.shift.findMany.mock.calls[0][0].include.payments.select.order).toEqual(marca)
     expect(prismaMock.payment.findMany.mock.calls[0][0].select.order).toEqual(marca)
   })
+
+  it('🔴 r1 · las ventas por cajero y la tendencia tampoco cuentan la venta de tarjetas: suman lo mismo que totalSales', async () => {
+    const cajero = (id: string) => ({ id, firstName: id, lastName: 'Caja' })
+    const pago = (id: string, amount: number, deTarjetas: boolean, staffId: string, tip = 0) => ({
+      id,
+      amount: new Prisma.Decimal(amount),
+      tipAmount: new Prisma.Decimal(tip),
+      processedById: staffId,
+      processedBy: cajero(staffId),
+      createdAt: new Date('2026-10-14T16:00:00Z'),
+      method: 'CASH',
+      order: { items: deTarjetas ? [{ id: 'oi-gc' }] : [] },
+    })
+    // Ana vende $300 de mercancía; Beto sólo vende una tarjeta de $500 (en turno) y otra de $100 (huérfana), con $10 de propina.
+    prismaMock.shift.findMany.mockResolvedValue([
+      { id: 'shift-1', orders: [], payments: [pago('p1', 300, false, 'ana'), pago('p2', 500, true, 'beto', 10)] },
+    ])
+    prismaMock.payment.findMany.mockResolvedValue([pago('p3', 100, true, 'beto')])
+    prismaMock.order.count.mockResolvedValue(0)
+    prismaMock.review.count.mockResolvedValue(0)
+    const r = await getShiftsSummary('v1', { startTime: '2026-10-14T06:00:00.000Z', endTime: '2026-10-15T05:59:59.999Z' })
+    expect(r.summary.totalSales).toBe(300)
+    expect(r.staffSales.reduce((suma, s) => suma + s.totalSales, 0)).toBe(r.summary.totalSales)
+    // Beto sigue en la lista (sus propinas y sus cobros cuentan como siempre), con ventas en 0.
+    expect(r.staffSales.find(s => s.staffId === 'beto')).toEqual({
+      staffId: 'beto',
+      name: 'beto Caja',
+      totalSales: 0,
+      totalOrders: 2,
+      totalTips: 10,
+    })
+    expect(r.staffSales.find(s => s.staffId === 'ana')?.totalSales).toBe(300)
+    expect(r.salesTrend.reduce((suma, punto) => suma + punto.value, 0)).toBe(300)
+  })
 })

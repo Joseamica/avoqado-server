@@ -10,7 +10,7 @@
  * 🔴 Una sola definición. Factura, contabilidad, ventas, turno, lealtad, comisiones y la revisión nocturna importan de aquí; una
  * copia local de la regla es cómo nacen dos cifras distintas del mismo dinero.
  */
-import { Prisma, PrismaClient, TenderSystemKind } from '@prisma/client'
+import { PaymentStatus, Prisma, PrismaClient, TenderSystemKind } from '@prisma/client'
 
 /** ¿La orden es una cuenta de tarjetas? Una consulta para toda venta normal; la segunda sólo si ya apareció una tarjeta. */
 export async function leerSiEsCuentaDeTarjetas(db: Prisma.TransactionClient | PrismaClient, orderId: string): Promise<boolean> {
@@ -23,6 +23,14 @@ export async function leerSiEsCuentaDeTarjetas(db: Prisma.TransactionClient | Pr
 export const WHERE_ORDEN_DE_TARJETAS = { items: { some: { giftCardId: { not: null } } } } satisfies Prisma.OrderWhereInput
 
 export const WHERE_ORDEN_SIN_TARJETAS = { items: { none: { giftCardId: { not: null } } } } satisfies Prisma.OrderWhereInput
+
+/**
+ * Cuenta de tarjetas PAGADA: la única que «carga» tarjetas. Un abono a una venta que no se termina de pagar no carga nada (sus sobres
+ * siguen PENDING, en $0); los reportes de «tarjetas cargadas» usan esta población (B5 r1, M-1).
+ */
+export const WHERE_CUENTA_DE_TARJETAS_PAGADA = {
+  AND: [WHERE_ORDEN_DE_TARJETAS, { paymentStatus: PaymentStatus.PAID }],
+} satisfies Prisma.OrderWhereInput
 
 export const WHERE_COBRO_ES_SALDO_DE_REGALO = {
   tenderType: { is: { systemKind: TenderSystemKind.GIFT_CARD } },

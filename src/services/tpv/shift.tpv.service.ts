@@ -295,8 +295,11 @@ interface RollupDelTurno {
 
 const ROLLUP_VACIO = (): RollupDelTurno => ({ totalSales: new Decimal(0), totalTips: new Decimal(0), tipsCount: 0 })
 
-/** Tarjetas de regalo (R3): un renglón con `giftCardId` basta para saber que la cuenta es de tarjetas (no se mezclan, A5). */
-const ORDEN_DE_TARJETAS_SELECT = { items: { where: { giftCardId: { not: null } }, select: { id: true }, take: 1 } } as const
+/**
+ * Tarjetas de regalo (R3): un renglón con `giftCardId` basta para saber que la cuenta es de tarjetas (no se mezclan, A5). Exportada
+ * para que todo `select` que alimente `aggregateShiftPayments` (también el script de reatribución) traiga la MISMA marca.
+ */
+export const ORDEN_DE_TARJETAS_SELECT = { items: { where: { giftCardId: { not: null } }, select: { id: true }, take: 1 } } as const
 
 /**
  * La proyección MÍNIMA de un `Payment` con la que se pueden calcular los totales de un turno —
@@ -893,18 +896,23 @@ export async function getShiftsSummary(venueId: string, filters: ShiftFilters = 
       const tipAmount = Number(payment.tipAmount || 0)
 
       if (!isNaN(paymentAmount)) {
-        // R3 (r1 B-3): la venta de tarjetas no suma a las ventas del resumen; su método, su tendencia y su cajón, sí (dinero que entró).
-        if ((payment.order?.items?.length ?? 0) === 0) totalSales += paymentAmount
+        // R3 (r1 B-3; B5 r1): la venta de tarjetas no suma a las ventas del resumen, ni a las de cada cajero, ni a la tendencia; su
+        // método y su cajón, sí (dinero que entró). Propinas y número de cobros, como siempre.
+        const esVentaDeTarjetas = (payment.order?.items?.length ?? 0) > 0
+        const venta = esVentaDeTarjetas ? 0 : paymentAmount
+        totalSales += venta
 
         // Track payment method
         const method = payment.method || 'OTHER'
         paymentMethodMap.set(method, (paymentMethodMap.get(method) || 0) + paymentAmount)
 
         // Store for time-series data
-        allPayments.push({
-          createdAt: payment.createdAt,
-          amount: paymentAmount,
-        })
+        if (!esVentaDeTarjetas) {
+          allPayments.push({
+            createdAt: payment.createdAt,
+            amount: paymentAmount,
+          })
+        }
 
         // Track per-staff sales
         const pStaffId = payment.processedById
@@ -912,11 +920,11 @@ export async function getShiftsSummary(venueId: string, filters: ShiftFilters = 
           const sName = payment.processedBy ? `${payment.processedBy.firstName} ${payment.processedBy.lastName}` : 'Unknown'
           if (staffSalesMap.has(pStaffId)) {
             const d = staffSalesMap.get(pStaffId)!
-            d.totalSales += paymentAmount
+            d.totalSales += venta
             d.totalTips += tipAmount
             d.totalOrders += 1
           } else {
-            staffSalesMap.set(pStaffId, { name: sName, totalSales: paymentAmount, totalTips: tipAmount, totalOrders: 1 })
+            staffSalesMap.set(pStaffId, { name: sName, totalSales: venta, totalTips: tipAmount, totalOrders: 1 })
           }
         }
       }
@@ -952,16 +960,21 @@ export async function getShiftsSummary(venueId: string, filters: ShiftFilters = 
     const tipAmount = Number(payment.tipAmount || 0)
 
     if (!isNaN(paymentAmount)) {
-      // R3 (r1 B-3): la venta de tarjetas no suma a las ventas del resumen; su método, su tendencia y su cajón, sí (dinero que entró).
-      if ((payment.order?.items?.length ?? 0) === 0) totalSales += paymentAmount
+      // R3 (r1 B-3; B5 r1): la venta de tarjetas no suma a las ventas del resumen, ni a las de cada cajero, ni a la tendencia; su
+      // método y su cajón, sí (dinero que entró). Propinas y número de cobros, como siempre.
+      const esVentaDeTarjetas = (payment.order?.items?.length ?? 0) > 0
+      const venta = esVentaDeTarjetas ? 0 : paymentAmount
+      totalSales += venta
 
       const method = payment.method || 'OTHER'
       paymentMethodMap.set(method, (paymentMethodMap.get(method) || 0) + paymentAmount)
 
-      allPayments.push({
-        createdAt: payment.createdAt,
-        amount: paymentAmount,
-      })
+      if (!esVentaDeTarjetas) {
+        allPayments.push({
+          createdAt: payment.createdAt,
+          amount: paymentAmount,
+        })
+      }
 
       // Track per-staff sales (orphan payments)
       const oStaffId = payment.processedById
@@ -969,11 +982,11 @@ export async function getShiftsSummary(venueId: string, filters: ShiftFilters = 
         const sName = payment.processedBy ? `${payment.processedBy.firstName} ${payment.processedBy.lastName}` : 'Unknown'
         if (staffSalesMap.has(oStaffId)) {
           const d = staffSalesMap.get(oStaffId)!
-          d.totalSales += paymentAmount
+          d.totalSales += venta
           d.totalTips += tipAmount
           d.totalOrders += 1
         } else {
-          staffSalesMap.set(oStaffId, { name: sName, totalSales: paymentAmount, totalTips: tipAmount, totalOrders: 1 })
+          staffSalesMap.set(oStaffId, { name: sName, totalSales: venta, totalTips: tipAmount, totalOrders: 1 })
         }
       }
     }
@@ -1569,10 +1582,10 @@ export interface ShiftPaymentForTotals {
   type?: PaymentType | string | null
   /**
    * Tarjetas de regalo (R3): si la cuenta del cobro es de tarjetas, NO suma a `totalSales` (sí a los totales por método: el dinero
-   * entró). Opcional: sin él (o sin `items`), todo cuenta como siempre. La firma de índice admite la `order` de otra proyección (el
-   * script de reatribución trae `{ shiftId, orderNumber }`) sin que TypeScript la rechace por no compartir campos.
+   * entró). Opcional: sin `order`, todo cuenta como siempre. Sin firma de índice a propósito (B5 r1, M-3): un `select` que trae
+   * `order` SIN la marca (`ORDEN_DE_TARJETAS_SELECT`) no compila, en vez de contar la venta de tarjetas en silencio.
    */
-  order?: { readonly items?: ReadonlyArray<unknown> | null; readonly [campo: string]: unknown } | null
+  order?: { items?: ReadonlyArray<unknown> | null } | null
 }
 
 /** Los ocho totales con los que se cierra un turno. Todos `Decimal`: dinero nunca en float. */

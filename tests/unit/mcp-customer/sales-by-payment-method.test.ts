@@ -129,13 +129,38 @@ describe('sales_by_payment_method — gross vs net, venue-local window', () => {
 })
 
 describe('sales_by_payment_method · tarjetas de regalo', () => {
-  it('reporta las tarjetas cargadas aparte (no son venta)', async () => {
+  // r1 (Fix 1): grossCollected es la vista de DINERO (lo que entró: la carga de una tarjeta se queda en su método real y lo pagado
+  // con saldo NO es dinero nuevo); netSales es la vista de VENTAS (sin la carga; lo pagado con saldo como GIFT_CARD).
+  // Ejemplo del revisor: $300 en efectivo + $500 de una tarjeta vendida con tarjeta bancaria + $200 pagados con saldo.
+  it('🔴 r1 · grossCollected = dinero ($300 CASH + $500 CREDIT_CARD, sin GIFT_CARD); netSales = ventas ($300 CASH + $200 GIFT_CARD)', async () => {
     mockFetch
-      .mockResolvedValueOnce([{ method: 'GIFT_CARD', amount: 200, tips: 0, count: 1 }])
-      .mockResolvedValueOnce([{ method: 'GIFT_CARD', amount: 200, tips: 0, count: 1 }])
+      .mockResolvedValueOnce([
+        { method: 'CASH', amount: 300, tips: 0, count: 1 },
+        { method: 'CREDIT_CARD', amount: 500, tips: 0, count: 1 },
+      ])
+      .mockResolvedValueOnce([
+        { method: 'CASH', amount: 300, tips: 0, count: 1 },
+        { method: 'GIFT_CARD', amount: 200, tips: 0, count: 1 },
+      ])
     mockLoads.mockResolvedValueOnce({ amount: 500, count: 1 })
     const out = parse(await call('sales_by_payment_method', { venueId: 'v1', fromDate: '2026-10-14', toDate: '2026-10-14' }))
+    // Cada cifra pide SU vista: el dinero (gross) y las ventas (net).
+    expect(mockFetch.mock.calls[0][2]).toBe('dinero')
+    expect(mockFetch.mock.calls[1][2]).toBe('ventas')
+    expect(out.grossCollected).toEqual({
+      total: 800,
+      byMethod: [
+        { method: 'CREDIT_CARD', total: 500, count: 1 },
+        { method: 'CASH', total: 300, count: 1 },
+      ],
+    })
+    expect(out.netSales).toEqual({
+      total: 500,
+      byMethod: [
+        { method: 'CASH', total: 300, count: 1 },
+        { method: 'GIFT_CARD', total: 200, count: 1 },
+      ],
+    })
     expect(out.giftCardLoads).toEqual({ total: 500, count: 1 })
-    expect(out.grossCollected.byMethod[0]).toMatchObject({ method: 'GIFT_CARD', total: 200 })
   })
 })

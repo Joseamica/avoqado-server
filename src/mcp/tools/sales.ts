@@ -14,7 +14,7 @@ import {
   type AnalyticsMethodTotal,
   type AnalyticsProcessorTips,
 } from '@/services/legacy/mergedPayments.service'
-import { WHERE_ORDEN_DE_TARJETAS, WHERE_ORDEN_SIN_TARJETAS } from '@/services/giftCards/giftCardMarks'
+import { WHERE_CUENTA_DE_TARJETAS_PAGADA, WHERE_ORDEN_DE_TARJETAS, WHERE_ORDEN_SIN_TARJETAS } from '@/services/giftCards/giftCardMarks'
 import { planGateMessage } from '../planGate'
 import {
   computeSettlementProjection,
@@ -351,7 +351,7 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
   server.tool(
     'daily_sales',
-    'Sales for a local calendar day across your venues (or one venue). Each venue is evaluated in its own timezone, so an all-venues total does not shift Cancún/Tijuana edge-of-day payments into the wrong day. Returns completed-payment count, gross total, and a breakdown by payment method, type (REGULAR/FAST), and merchant account (card money by merchantAccountId; cash excluded). Defaults to today; pass venueId to focus one venue (must be in your scope). Gift cards: payments that SELL gift cards are not sales — they are left out of gross/byMethod and reported in giftCardLoads; payments made WITH gift-card balance appear in byMethod as GIFT_CARD (never mixed into OTHER).',
+    'Sales for a local calendar day across your venues (or one venue). Each venue is evaluated in its own timezone, so an all-venues total does not shift Cancún/Tijuana edge-of-day payments into the wrong day. Returns completed-payment count, gross total, and a breakdown by payment method, type (REGULAR/FAST), and merchant account (card money by merchantAccountId; cash excluded). Defaults to today; pass venueId to focus one venue (must be in your scope). Gift cards: payments that SELL gift cards are not sales — they are left out of gross/byMethod/byType and reported in giftCardLoads (paid gift-card sales, net of cancellations); byMerchantAccount is card money, so a gift card sold by card stays in it; payments made WITH gift-card balance appear in byMethod as GIFT_CARD (never mixed into OTHER).',
     {
       venueId: z.string().optional().describe('Focus one venue (must be in your scope); omit for all your venues'),
       date: isoVenueDay().optional().describe("ISO date YYYY-MM-DD; defaults to today, evaluated independently in each venue's timezone"),
@@ -403,18 +403,27 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
         : windows.length
           ? { ...where, OR: windows.map(w => ({ venueId: w.venueId, createdAt: { gte: w.start, lte: w.end } })) }
           : { venueId: { in: [] as string[] } }
-      const groups = await prisma.payment.groupBy({
-        by: ['venueId', 'method', 'type', 'merchantAccountId', 'tenderTypeId'],
-        where: { ...paymentWhere, status: 'COMPLETED', AND: [{ order: WHERE_ORDEN_SIN_TARJETAS }] },
-        _sum: { amount: true, tipAmount: true },
-        _count: { _all: true },
-      })
-      // Tarjetas de regalo (spec §7): lo cargado en tarjetas no es venta; va en `giftCardLoads` (una consulta, no una por sucursal).
-      const cargas = await prisma.payment.groupBy({
-        by: ['venueId'],
-        where: { ...paymentWhere, status: 'COMPLETED', AND: [{ order: WHERE_ORDEN_DE_TARJETAS }] },
-        _sum: { amount: true },
-      })
+      // Tarjetas de regalo (spec §7): lo cargado en tarjetas no es venta; va en `giftCardLoads`. Tres consultas en paralelo, nunca
+      // una por sucursal: las ventas; las cargas (cuentas de tarjetas PAGADAS, r1 M-1); y el dinero de cuentas de tarjetas que cayó en
+      // un comercio (r1, Fix 1): `byMerchantAccount` es dinero por comercio y tiene que cuadrar con su depósito.
+      const [groups, cargas, dineroDeTarjetasPorComercio] = await Promise.all([
+        prisma.payment.groupBy({
+          by: ['venueId', 'method', 'type', 'merchantAccountId', 'tenderTypeId'],
+          where: { ...paymentWhere, status: 'COMPLETED', AND: [{ order: WHERE_ORDEN_SIN_TARJETAS }] },
+          _sum: { amount: true, tipAmount: true },
+          _count: { _all: true },
+        }),
+        prisma.payment.groupBy({
+          by: ['venueId'],
+          where: { ...paymentWhere, status: 'COMPLETED', AND: [{ order: WHERE_CUENTA_DE_TARJETAS_PAGADA }] },
+          _sum: { amount: true },
+        }),
+        prisma.payment.groupBy({
+          by: ['venueId', 'merchantAccountId'],
+          where: { ...paymentWhere, status: 'COMPLETED', merchantAccountId: { not: null }, AND: [{ order: WHERE_ORDEN_DE_TARJETAS }] },
+          _sum: { amount: true, tipAmount: true },
+        }),
+      ])
       const tendersDeSaldo = await tendersDeSaldoDeRegalo(groups.map(g => g.tenderTypeId))
       const rows = groups.map(group => ({
         venueId: group.venueId ?? venueId,
@@ -433,12 +442,27 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
         const moneda = currencies.get(c.venueId) ?? 'UNKNOWN'
         cargasPorMoneda.set(moneda, (cargasPorMoneda.get(moneda) ?? 0) + Number(c._sum.amount ?? 0))
       }
-      const totalsByCurrency = [...new Set(currencies.values())].sort().map(currency => ({
-        currency,
-        ...summarizeSales(rows.filter(row => currencies.get(row.venueId!) === currency)),
-        giftCardLoads: round2(cargasPorMoneda.get(currency) ?? 0),
-      }))
+      // El dinero de tarjetas vendidas con tarjeta bancaria, sumado al de su comercio (con propina, como `summarizeSales`). Lo pagado
+      // con saldo nunca llega aquí: no tiene comercio.
+      const conDineroDeTarjetas = (porComercio: Record<string, number>, moneda?: string): Record<string, number> => {
+        const total = { ...porComercio }
+        for (const f of dineroDeTarjetasPorComercio) {
+          if (!f.merchantAccountId || (moneda && (currencies.get(f.venueId) ?? 'UNKNOWN') !== moneda)) continue
+          total[f.merchantAccountId] = (total[f.merchantAccountId] ?? 0) + Number(f._sum.amount ?? 0) + Number(f._sum.tipAmount ?? 0)
+        }
+        return total
+      }
+      const totalsByCurrency = [...new Set(currencies.values())].sort().map(currency => {
+        const deLaMoneda = summarizeSales(rows.filter(row => currencies.get(row.venueId!) === currency))
+        return {
+          currency,
+          ...deLaMoneda,
+          byMerchantAccount: conDineroDeTarjetas(deLaMoneda.byMerchantAccount, currency),
+          giftCardLoads: round2(cargasPorMoneda.get(currency) ?? 0),
+        }
+      })
       const summary = summarizeSales(rows)
+      summary.byMerchantAccount = conDineroDeTarjetas(summary.byMerchantAccount)
       const mixedCurrencies = totalsByCurrency.length > 1
       const window = venueId
         ? { start: windows[0].start.toISOString(), end: windows[0].end.toISOString(), timezone: windows[0].timezone }
@@ -548,7 +572,7 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'sales_by_payment_method',
-    'Sales by payment method (cash, card, etc.) in a venue you can access, over a date range (default last 7 days). Returns TWO figures per method: `grossCollected` = everything that landed by method INCLUDING tips, net of refunds (refunds are negative Payment rows) and including cancelled orders — this is the figure that reconciles 1:1 with the dashboard "Métodos de Pago" panel. `netSales` = net SALES: sale value minus refunds, EXCLUDING cancelled orders and EXCLUDING tips. The difference is net tips plus the net contribution of cancelled-order payments; do not assume either figure is always greater. Answers "¿cuánto en efectivo vs tarjeta?". Dates are venue-LOCAL and the full toDate day is included. Pass venueId; optionally fromDate/toDate (YYYY-MM-DD). Gift-card SALES are not sales: they are excluded from both figures and reported in giftCardLoads; payments made WITH gift-card balance appear as GIFT_CARD.',
+    'Sales by payment method (cash, card, etc.) in a venue you can access, over a date range (default last 7 days). Returns TWO figures per method: `grossCollected` = everything that landed by method INCLUDING tips, net of refunds (refunds are negative Payment rows) and including cancelled orders — this is the figure that reconciles 1:1 with the dashboard "Métodos de Pago" panel. `netSales` = net SALES: sale value minus refunds, EXCLUDING cancelled orders and EXCLUDING tips. The difference is net tips plus the net contribution of cancelled-order payments; do not assume either figure is always greater. Answers "¿cuánto en efectivo vs tarjeta?". Dates are venue-LOCAL and the full toDate day is included. Pass venueId; optionally fromDate/toDate (YYYY-MM-DD). Gift cards: grossCollected is money received, so a gift card SOLD stays in the method it was paid with and payments made WITH gift-card balance are left out (no new money); netSales is sales, so it leaves gift-card sales out (reported apart in giftCardLoads) and shows payments made with gift-card balance as GIFT_CARD. So when gift cards are involved, the difference between the two figures also includes gift cards sold (only in grossCollected) and payments made with balance (only in netSales).',
     {
       venueId: z.string().describe('Venue to analyze (must be in your scope)'),
       fromDate: z.string().optional().describe('Start date YYYY-MM-DD venue-local (default: 7 days ago)'),
@@ -576,9 +600,11 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
       //   refunds" that ignored them). excludeCancelledOrders=true keeps it a clean sales figure.
       // Summed in Postgres (one row per method) — the per-payment fetch materialized the
       // whole range in Node (2026-09-01 query-guard incident, "this year" = 24k rows).
+      // Tarjetas de regalo (B5 r1): gross es la vista de DINERO (la venta de una tarjeta en su método real, sin lo pagado con saldo);
+      // net es la vista de VENTAS (sin la venta de tarjetas, con lo pagado con saldo como GIFT_CARD).
       const [grossRows, netRows, cargas] = await Promise.all([
-        aggregatePaymentsByMethod(venueId, { fromDate: from, toDate: to, includeRefunds: true, excludeCancelledOrders: false }),
-        aggregatePaymentsByMethod(venueId, { fromDate: from, toDate: to, includeRefunds: true, excludeCancelledOrders: true }),
+        aggregatePaymentsByMethod(venueId, { fromDate: from, toDate: to, includeRefunds: true, excludeCancelledOrders: false }, 'dinero'),
+        aggregatePaymentsByMethod(venueId, { fromDate: from, toDate: to, includeRefunds: true, excludeCancelledOrders: true }, 'ventas'),
         aggregateGiftCardLoads(venueId, { fromDate: from, toDate: to, includeRefunds: true, excludeCancelledOrders: true }),
       ])
       // grossCollected is tips-INCLUSIVE (true) to match the dashboard panel; netSales is
@@ -594,7 +620,7 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
         giftCardLoads: { total: round2(cargas.amount), count: cargas.count },
         note:
           'grossCollected = todo lo que entró por método INCLUYENDO propinas, ya neteados los reembolsos (filas negativas) e incluyendo órdenes canceladas — cuadra 1:1 con el panel "Métodos de Pago" del dashboard. netSales = ventas netas: valor de venta menos reembolsos, SIN canceladas y SIN propinas.' +
-          ' Las ventas de tarjetas de regalo no son venta: van aparte en giftCardLoads; lo pagado con saldo aparece como GIFT_CARD.',
+          ' Tarjetas de regalo: grossCollected es dinero, así que la venta de una tarjeta se queda en el método con que se pagó y lo pagado con saldo no entra (no es dinero nuevo); netSales es venta, así que deja fuera la venta de tarjetas (va aparte en giftCardLoads) y muestra lo pagado con saldo como GIFT_CARD. Por eso, con tarjetas de regalo, la diferencia entre las dos cifras también incluye las tarjetas vendidas (sólo en grossCollected) y lo pagado con saldo (sólo en netSales).',
       })
     },
   )

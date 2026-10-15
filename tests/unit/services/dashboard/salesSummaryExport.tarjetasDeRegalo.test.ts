@@ -36,7 +36,7 @@ describe('exportación de Ventas · tarjetas de regalo', () => {
       { section: 'totals', label: 'Tarjetas de regalo cargadas (no es venta)', count: 2, amount: 500, percentage: null },
       {
         section: 'totals',
-        label: 'Pagado con saldo de tarjeta de regalo (incluido en ventas)',
+        label: 'Pagado con saldo de tarjeta de regalo (incluido en ventas y propinas)',
         count: null,
         amount: 200,
         percentage: null,

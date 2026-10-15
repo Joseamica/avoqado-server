@@ -68,12 +68,23 @@ it('🔴 daily_sales: la venta de tarjetas sale de gross (va en giftCardLoads) y
       },
     ])
     .mockResolvedValueOnce([{ venueId: 'v1', _sum: { amount: 500 } }])
+    // r1 (Fix 1): el dinero de cuentas de tarjetas que cayó en un comercio (la tarjeta vendida con tarjeta bancaria).
+    .mockResolvedValueOnce([{ venueId: 'v1', merchantAccountId: 'ma-1', _sum: { amount: 500, tipAmount: 0 } }])
   mockTenders.mockResolvedValue([{ id: 'tender-gc' }])
   const out = parse(await handlers.get('daily_sales')!({ venueId: 'v1', date: '2026-10-14' }, {}))
   expect(out.gross).toBe(500)
   expect(out.byMethod).toEqual({ CASH: 300, GIFT_CARD: 200 })
   expect(out.giftCardLoads).toBe(500)
-  expect(out.totalsByCurrency[0]).toMatchObject({ currency: 'MXN', gross: 500, giftCardLoads: 500 })
+  // byMerchantAccount es DINERO por comercio (cuadra con el depósito): la tarjeta vendida con tarjeta bancaria SÍ está.
+  expect(out.byMerchantAccount).toEqual({ 'ma-1': 500 })
+  expect(out.totalsByCurrency[0]).toMatchObject({ currency: 'MXN', gross: 500, giftCardLoads: 500, byMerchantAccount: { 'ma-1': 500 } })
   expect(mockGroupBy.mock.calls[0][0].where.AND).toEqual([{ order: { items: { none: { giftCardId: { not: null } } } } }])
-  expect(mockGroupBy.mock.calls[1][0].where.AND).toEqual([{ order: { items: { some: { giftCardId: { not: null } } } } }])
+  // r1 (M-1): las cargas son de cuentas de tarjetas PAGADAS (un abono a una venta sin pagar no carga nada).
+  expect(mockGroupBy.mock.calls[1][0].where.AND).toEqual([
+    { order: { AND: [{ items: { some: { giftCardId: { not: null } } } }, { paymentStatus: 'PAID' }] } },
+  ])
+  expect(mockGroupBy.mock.calls[2][0]).toMatchObject({
+    by: ['venueId', 'merchantAccountId'],
+    where: { merchantAccountId: { not: null }, AND: [{ order: { items: { some: { giftCardId: { not: null } } } } }] },
+  })
 })
