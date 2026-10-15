@@ -102,6 +102,56 @@ describe('reverseStampForOrder', () => {
     expect(prismaMock.stampCard.update).not.toHaveBeenCalled()
   })
 
+  // ── H3 (auditoría de Codex del código, 15-oct-2026) ─────────────────────────────────────────────────────────────────────
+  // Sin candado, la reversión leía la cartilla en 2/3; otra venta la completaba (premio + cartilla nueva) y la reversión
+  // restaba con su lectura vieja: «2 de 3 y un premio pendiente». Ahora toma el MISMO candado que `grantStamp`.
+  it('🔴 H3: el candado (negocio, cliente DEL SELLO ORIGINAL) es la PRIMERA sentencia de la transacción; la cartilla se lee detrás', async () => {
+    const orden: string[] = []
+    prismaMock.$transaction.mockImplementationOnce((async (cb: any) => {
+      orden.push('BEGIN')
+      return cb(prismaMock)
+    }) as never)
+    prismaMock.$executeRaw.mockImplementationOnce((async () => {
+      orden.push('candado')
+      return 0
+    }) as never)
+    prismaMock.stampEvent.count.mockImplementation((async () => {
+      if (orden.includes('BEGIN')) orden.push('reversas')
+      return 0
+    }) as never)
+    prismaMock.stampCard.findUnique.mockImplementation((async () => {
+      if (orden.includes('BEGIN')) orden.push('cartilla')
+      return { id: 'sc1', venueId: 'v1', customerId: 'c1', cycle: 1, stampsEarned: 6, stampsRequired: 7, completedAt: null }
+    }) as never)
+    prismaMock.stampEvent.create.mockImplementationOnce((async () => {
+      orden.push('reversa')
+      return { id: 'se2' }
+    }) as never)
+
+    const r = await reverseStampForOrder('v1', 'o1')
+
+    expect(r.reversed).toBe(true)
+    expect(orden.slice(0, 4)).toEqual(['BEGIN', 'candado', 'reversas', 'cartilla'])
+    expect(orden).toContain('reversa')
+    const [plantilla, ...valores] = prismaMock.$executeRaw.mock.calls[0] as unknown as [TemplateStringsArray, ...unknown[]]
+    expect(plantilla.join('?')).toContain('pg_advisory_xact_lock(hashtext(?), hashtext(?))')
+    // El MISMO candado que `grantStamp`: (negocio, cliente), con el cliente de la cartilla donde cayó el sello original.
+    expect(valores).toEqual(['v1', 'c1'])
+  })
+
+  it('🔴 H3: otra reversión de la MISMA venta hizo commit mientras ésta esperaba el candado: no revierte dos veces', async () => {
+    // Afuera no había reversa; dentro del candado, ya está.
+    let conteos = 0
+    prismaMock.stampEvent.count.mockImplementation((async () => (++conteos === 1 ? 0 : 1)) as never)
+
+    const r = await reverseStampForOrder('v1', 'o1')
+
+    expect(r).toEqual({ reversed: false, stampCardId: 'sc1' })
+    expect(prismaMock.stampEvent.create).not.toHaveBeenCalled()
+    expect(prismaMock.stampCard.update).not.toHaveBeenCalled()
+    expect(logAction).not.toHaveBeenCalled()
+  })
+
   it('🔴 deja rastro en la bitácora, porque quitar un sello es una ANOMALÍA', async () => {
     // Otorgar un sello NO se registra: pasa en cada cobro de cada negocio e inflaría
     // la bitácora hasta volverla inútil (regla del repo: registrar las anomalías que

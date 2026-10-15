@@ -18,9 +18,10 @@ import prisma from '@/utils/prismaClient'
 jest.mock('@/services/wallet/notifyPassUpdated.service', () => ({ notifyCustomerPassUpdated: jest.fn() }))
 jest.mock('@/services/wallet/firstStampEmail.service', () => ({ sendFirstStampEmailIfDue: jest.fn() }))
 
-import { grantStamp } from '@/services/wallet/stampLedger.service'
+import { grantStamp, reverseStampForOrder } from '@/services/wallet/stampLedger.service'
 import { awardLoyaltyForPaidOrder } from '@/services/shared/loyaltyOnPaidOrder'
 import { reabrirLealtadSiAplica } from '@/services/shared/loyaltyOnLateCustomer'
+import { aTiempo, aparcarLaSiguienteTransaccion, esperarBloqueado } from '@tests/__helpers__/candadosDePostgres'
 
 const sello = `${Date.now()}${Math.random().toString(36).slice(2, 6)}`
 let orgId: string | undefined
@@ -197,5 +198,80 @@ describe('B1: la corrida del cobro que leyó «sin cliente» no cierra una venta
     expect(r).toEqual({ complete: true, errors: [] })
     const fila = await prisma.order.findUniqueOrThrow({ where: { id: orderId }, select: { loyaltyProcessedAt: true } })
     expect(fila.loyaltyProcessedAt).toBeInstanceOf(Date)
+  })
+})
+
+// ── Ola final del servidor (rulings del código, 15-oct-2026) ────────────────────────────────────────────────────────────────
+//
+// Estos cruces NO dependen de tiempos: la primera transacción se APARCA con sus candados tomados (antes del commit) y la prueba
+// OBSERVA en `pg_stat_activity` / `pg_blocking_pids` a la segunda esperándola, antes de soltarla.
+
+describe('F2: la MISMA venta dos veces a la vez — la segunda dice ALREADY_STAMPED, no un DAILY_LIMIT engañoso (Postgres real)', () => {
+  it('🔴 la segunda espera el candado del cliente y, al entrar, ve el sello de SU orden antes que el tope del día', async () => {
+    await programa(1, 7) // tope 1 al día: sin la relectura, la segunda leería «ya tuvo su sello de hoy»
+    const c = await cliente()
+    const o = await venta()
+    const aparcada = aparcarLaSiguienteTransaccion(prisma)
+    let primera: Promise<Awaited<ReturnType<typeof grantStamp>>> | undefined
+    let segunda: Promise<Awaited<ReturnType<typeof grantStamp>>> | undefined
+    try {
+      primera = grantStamp(venueId!, c, o)
+      const pidPrimera = await aTiempo(aparcada.pid, 8_000, 'la primera no llegó al commit')
+      // La segunda pasa el atajo de afuera (la primera aún no hace commit) y se forma en el candado (negocio, cliente).
+      segunda = grantStamp(venueId!, c, o)
+      const espera = await esperarBloqueado(prisma, { bloqueadoPor: [pidPrimera], consulta: /pg_advisory_xact_lock/ })
+      expect(espera).toMatchObject({ waitEvent: 'advisory' })
+    } finally {
+      aparcada.soltar()
+      aparcada.restaurar()
+    }
+    const [r1, r2] = await Promise.all([primera!, segunda!])
+    expect(r1.granted).toBe(true)
+    expect(r2).toMatchObject({ granted: false, reason: 'ALREADY_STAMPED' })
+    expect(await earnsDe(c)).toBe(1)
+  })
+})
+
+describe('H3: la reversión toma el MISMO candado (negocio, cliente) que el otorgamiento (Postgres real)', () => {
+  it('🔴 otra venta completa la cartilla mientras se revierte un sello: la reversión espera, ve la cartilla completa y deja todo cuadrado', async () => {
+    await programa(0, 3) // sin tope; cartillas de 3
+    const c = await cliente()
+    await prisma.stampCard.create({ data: { venueId: venueId!, customerId: c, cycle: 1, stampsRequired: 3, stampsEarned: 0 } })
+    const [o1, o2, o3] = [await venta(), await venta(), await venta()]
+    expect((await grantStamp(venueId!, c, o1)).granted).toBe(true)
+    expect((await grantStamp(venueId!, c, o2)).granted).toBe(true) // 2 de 3
+
+    // La tercera venta COMPLETA la cartilla (premio + cartilla nueva) y se queda con sus candados, sin commit.
+    const aparcada = aparcarLaSiguienteTransaccion(prisma)
+    let otorgar: Promise<Awaited<ReturnType<typeof grantStamp>>> | undefined
+    let revertir: Promise<Awaited<ReturnType<typeof reverseStampForOrder>>> | undefined
+    let espera: Awaited<ReturnType<typeof esperarBloqueado>> = null
+    try {
+      otorgar = grantStamp(venueId!, c, o3)
+      const pidOtorgar = await aTiempo(aparcada.pid, 8_000, 'el otorgamiento no llegó al commit')
+      // Se reembolsa o1 justo entonces. Sin el candado, la reversión leía la cartilla en 2/3 (abierta), restaba sobre la
+      // cartilla que la otra venta ya había completado y dejaba «2 de 3 y un premio pendiente».
+      revertir = reverseStampForOrder(venueId!, o1)
+      espera = await esperarBloqueado(prisma, { bloqueadoPor: [pidOtorgar], consulta: /./ })
+    } finally {
+      aparcada.soltar()
+      aparcada.restaurar()
+    }
+    const [otorgado, revertido] = await Promise.all([otorgar!, revertir!])
+    // La reversión esperó el candado de ASESORÍA del cliente (no una fila a media escritura).
+    expect(espera).toMatchObject({ waitEvent: 'advisory' })
+    expect(otorgado).toMatchObject({ granted: true, completed: true })
+    expect(revertido.reversed).toBe(true)
+
+    const cartillas = await prisma.stampCard.findMany({
+      where: { venueId, customerId: c },
+      orderBy: { cycle: 'asc' },
+      select: { cycle: true, stampsEarned: true, completedAt: true },
+      take: 5,
+    })
+    // El premio de una cartilla que ya no está completa se cancela, la cartilla vuelve a 2 de 3 y la nueva (vacía) se va.
+    expect(cartillas).toEqual([{ cycle: 1, stampsEarned: 2, completedAt: null }])
+    expect(await prisma.stampReward.count({ where: { venueId, customerId: c, status: 'PENDING' } })).toBe(0)
+    expect(await prisma.stampReward.count({ where: { venueId, customerId: c, status: 'CANCELLED' } })).toBe(1)
   })
 })

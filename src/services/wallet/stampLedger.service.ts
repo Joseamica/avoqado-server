@@ -19,7 +19,7 @@ import { sendFirstStampEmailIfDue } from './firstStampEmail.service'
  *    índice `StampEvent_venueId_orderId_earn_unique`; el chequeo sólo evita el
  *    viaje. Por eso una violación de ESE índice se traduce a "ya estaba sellado"; cualquier otro único
  *    (premio, cartilla) se propaga. Y dos ventas del mismo cliente se forman en un candado por (negocio, cliente):
- *    el tope y la cartilla se leen dentro.
+ *    el sello propio, el tope y la cartilla se leen dentro. La reversión toma el MISMO candado.
  * 2. **El día es el del NEGOCIO.** Producción corre en UTC: un día "de servidor"
  *    se corta a las 6 de la tarde en México, y el mismo cliente podría sellar dos
  *    veces la misma noche.
@@ -106,6 +106,7 @@ function esChoqueDelSelloDeLaOrden(error: unknown): boolean {
 
 type DentroDelCandado =
   | { otorgado: false; reason: 'DAILY_LIMIT_REACHED' }
+  | { otorgado: false; reason: 'ALREADY_STAMPED'; cardId: string }
   | { otorgado: true; cardId: string; ganados: number; meta: number; completed: boolean; rewardId?: string }
 
 export async function grantStamp(
@@ -140,6 +141,16 @@ export async function grantStamp(
       // forman aquí; la segunda lee el tope y la cartilla DESPUÉS de que la primera hizo commit. Sin él, las dos pasaban el
       // tope de 1 al día, o las dos llenaban la misma cartilla y el sello de la segunda se perdía al chocar con el premio.
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${venueId}), hashtext(${customerId}))`
+
+      // 🔴 F2 (rulings del código, 15-oct-2026): la PRIMERA lectura dentro del candado es el sello de ESTA orden. Dos llamadas
+      // de la MISMA venta a la vez (doble toque, liga + reconciliador) pasan las dos el atajo de afuera; la segunda espera aquí
+      // y, sin esta relectura, contaba el sello que la primera acababa de dar como «el de hoy» y respondía DAILY_LIMIT: falso
+      // para esta venta, que sí quedó sellada.
+      const propio = await tx.stampEvent.findFirst({
+        where: { venueId, orderId, type: StampEventType.EARN },
+        select: { id: true, stampCardId: true },
+      })
+      if (propio) return { otorgado: false, reason: 'ALREADY_STAMPED', cardId: propio.stampCardId }
 
       // 🔴 El tope se cuenta en el día del VENUE, y DENTRO del candado.
       if (tz) {
@@ -232,7 +243,11 @@ export async function grantStamp(
       return { otorgado: true, cardId: card.id, ganados, meta, completed: true, rewardId: premio.id }
     })
 
-    if (!resultado.otorgado) return { granted: false, reason: resultado.reason }
+    if (!resultado.otorgado) {
+      return resultado.reason === 'ALREADY_STAMPED'
+        ? { granted: false, reason: 'ALREADY_STAMPED', stampCardId: resultado.cardId }
+        : { granted: false, reason: resultado.reason }
+    }
 
     // 🔴 El sello subió: avisarle al teléfono del cliente (fire-and-forget; `notifyCustomerPassUpdated` nunca lanza).
     void notifyCustomerPassUpdated(venueId, customerId)
@@ -316,6 +331,12 @@ export interface ReverseStampResult {
  *
  * Nunca lanza por no encontrar nada: la inmensa mayoría de los reembolsos son de
  * ventas sin cartilla, y este camino corre en todos.
+ *
+ * 🔴 H3 (auditoría de Codex del código, 15-oct-2026): toma el MISMO candado (negocio, cliente) que `grantStamp`, como
+ * PRIMERA sentencia de su transacción, y lee la cartilla DESPUÉS. Sin él, la reversión leía la cartilla en 2/3; otra venta
+ * del mismo cliente la completaba (premio + cartilla nueva) y la reversión restaba con su lectura vieja: la cartilla quedaba
+ * «2 de 3, completada, con un premio pendiente» que el cliente ya no se había ganado. El cliente sale de la cartilla del
+ * sello ORIGINAL (una cartilla nunca cambia de dueño).
  */
 export async function reverseStampForOrder(
   venueId: string,
@@ -336,9 +357,22 @@ export async function reverseStampForOrder(
   if (yaRevertido > 0) return { reversed: false, stampCardId: otorgado.stampCardId }
 
   const cantidad = otorgado.quantity ?? 1
+  // El dueño de la cartilla del sello original: con él se forma el candado, igual que en `grantStamp`.
+  const original = await prisma.stampCard.findUnique({ where: { id: otorgado.stampCardId }, select: { customerId: true } })
+  if (!original) return { reversed: false }
+  const customerId = original.customerId
 
+  let revertida = false
   try {
     await prisma.$transaction(async tx => {
+      // 🔴 PRIMERA sentencia: el candado (negocio, cliente). Un otorgamiento del mismo cliente que esté completando la cartilla
+      // termina antes de que aquí se lea nada.
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${venueId}), hashtext(${customerId}))`
+
+      // Otra reversión de esta venta pudo hacer commit mientras ésta esperaba el candado.
+      const reversasDentro = await tx.stampEvent.count({ where: { venueId, orderId, type: StampEventType.REVERSAL } })
+      if (reversasDentro > 0) return
+
       const card = await tx.stampCard.findUnique({
         where: { id: otorgado.stampCardId },
         select: { id: true, venueId: true, customerId: true, cycle: true, stampsEarned: true, completedAt: true },
@@ -393,6 +427,7 @@ export async function reverseStampForOrder(
           ...(reopenCompletedCard ? { completedAt: null } : {}),
         },
       })
+      revertida = true
     })
   } catch (error: any) {
     if (error?.code === 'P2002') {
@@ -401,6 +436,7 @@ export async function reverseStampForOrder(
     }
     throw error
   }
+  if (!revertida) return { reversed: false, stampCardId: otorgado.stampCardId }
 
   // 🔴 Quitar un sello SÍ se registra; otorgarlo NO.
   //
@@ -420,8 +456,7 @@ export async function reverseStampForOrder(
   })
 
   // El sello se fue: la tarjeta tiene que reflejarlo igual que cuando sube.
-  const cliente = await prisma.stampCard.findUnique({ where: { id: otorgado.stampCardId }, select: { customerId: true } })
-  if (cliente) void notifyCustomerPassUpdated(venueId, cliente.customerId)
+  void notifyCustomerPassUpdated(venueId, customerId)
 
   logger.info('Sello revertido por reembolso', { venueId, orderId, stampCardId: otorgado.stampCardId })
 

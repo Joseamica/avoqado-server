@@ -240,6 +240,11 @@ describe('grantStamp', () => {
       orden.push('candado')
       return 0
     }) as never)
+    // F2: el atajo de AFUERA (antes de BEGIN) no cuenta; dentro del candado la primera lectura es el sello de ESTA orden.
+    prismaMock.stampEvent.findFirst.mockImplementation((async () => {
+      if (orden.includes('BEGIN')) orden.push('propio')
+      return null
+    }) as never)
     prismaMock.stampEvent.count.mockImplementationOnce((async () => {
       orden.push('tope')
       return 0
@@ -257,10 +262,33 @@ describe('grantStamp', () => {
     const r = await grantStamp('v1', 'c1', 'o1')
 
     expect(r.granted).toBe(true)
-    expect(orden).toEqual(['BEGIN', 'candado', 'tope', 'cartilla', 'sello'])
+    expect(orden).toEqual(['BEGIN', 'candado', 'propio', 'tope', 'cartilla', 'sello'])
     const [plantilla, ...valores] = prismaMock.$executeRaw.mock.calls[0] as unknown as [TemplateStringsArray, ...unknown[]]
     expect(plantilla.join('?')).toContain('pg_advisory_xact_lock(hashtext(?), hashtext(?))')
     expect(valores).toEqual(['v1', 'c1'])
+  })
+
+  // ── F2 (S3b minor #2, rulings del código 15-oct): la MISMA orden dos veces a la vez ──────────────────────────────────────
+  it('🔴 F2: el sello de ESTA orden aparece DENTRO del candado (la otra llamada lo hizo mientras ésta esperaba): ALREADY_STAMPED, no un DAILY_LIMIT engañoso', async () => {
+    mockConfig({ maxStampsPerDay: 1 })
+    // Afuera no había sello (la otra aún no hacía commit); al entrar al candado, ya está. Y el tope del día ya está lleno
+    // por ESE mismo sello: sin la relectura, la respuesta diría «ya recibió su sello de hoy», que es falso para esta venta.
+    // Con un contador y no con «Once»: si la relectura faltara, un valor «Once» sobrante se colaría en la prueba siguiente.
+    let lecturas = 0
+    prismaMock.stampEvent.findFirst.mockImplementation((async () => (++lecturas === 1 ? null : { id: 'ya', stampCardId: 'sc9' })) as never)
+    prismaMock.stampEvent.count.mockResolvedValue(1)
+
+    const r = await grantStamp('v1', 'c1', 'o1')
+
+    expect(r).toEqual({ granted: false, reason: 'ALREADY_STAMPED', stampCardId: 'sc9' })
+    expect(prismaMock.stampEvent.count).not.toHaveBeenCalled()
+    expect(prismaMock.stampEvent.create).not.toHaveBeenCalled()
+    expect(prismaMock.stampCard.create).not.toHaveBeenCalled()
+    // La relectura es DENTRO del candado y busca el EARN de esta orden en este negocio.
+    expect(prismaMock.stampEvent.findFirst).toHaveBeenNthCalledWith(2, {
+      where: { venueId: 'v1', orderId: 'o1', type: 'EARN' },
+      select: { id: true, stampCardId: true },
+    })
   })
 
   it('el tope alcanzado DENTRO del candado: DAILY_LIMIT_REACHED, sin sello ni cartilla nueva', async () => {
