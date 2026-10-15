@@ -11,6 +11,7 @@ import { authenticateTokenMiddleware } from '../../middlewares/authenticateToken
 import { validateRequest } from '../../middlewares/validation'
 import { checkPermission } from '../../middlewares/checkPermission.middleware'
 import { soloElDuenoDeLaOrgEnComandosCriticos } from '../../middlewares/soloElDuenoBorraDeFabrica.middleware'
+import { soloQuienPuedeCambiarComerciosDeLaTerminal } from '../../middlewares/comerciosDeLaTerminalEnLaOrg.middleware'
 import * as manualSaleController from '../../controllers/dashboard/manualSale.controller'
 import { bulkManualSalesSchema } from '../../schemas/dashboard/manualSale.schema'
 import { organizationDashboardService } from '../../services/organization-dashboard/organizationDashboard.service'
@@ -1022,6 +1023,10 @@ router.patch(
   authenticateTokenMiddleware,
   checkOrgAccess,
   validateRequest(UpdateOrgTerminalSchema),
+  // 🔴 Los comercios (a dónde va el dinero): dueño de la org o el permiso de la ruta del negocio en esa sucursal.
+  // «La ruta de la organización nunca concede más de lo que concedería la ruta del negocio.» Nombre, estado, marca y
+  // modelo quedan como estaban. Fijado en tests/unit/routes/organizationDashboard.terminalMerchants.routes.test.ts.
+  soloQuienPuedeCambiarComerciosDeLaTerminal('assignedMerchantIds', { sinCambioEsNoOp: true }),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { orgId, terminalId } = req.params
@@ -1209,6 +1214,8 @@ router.put(
   authenticateTokenMiddleware,
   checkOrgAccess,
   validateRequest(AssignMerchantsSchema),
+  // 🔴 Mismo candado que el `assignedMerchantIds` del PATCH: dueño de la org o el permiso de la ruta del negocio.
+  soloQuienPuedeCambiarComerciosDeLaTerminal('merchantIds'),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { orgId, terminalId } = req.params
