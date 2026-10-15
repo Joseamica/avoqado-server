@@ -1642,7 +1642,42 @@ export function getEffectiveRolePermissions(
   })
 
   const sobreviven = abiertos.filter(p => !negados.has(p))
-  return Array.from(resolvePermissions(sobreviven))
+
+  // 🔴 QUITAR NUNCA CONCEDE (auditoría de Codex, 14-oct-2026). Al abrir un comodín, sus
+  // piezas sueltas arrastran dependencias que el comodín compacto nunca arrastró:
+  // VIEWER + `scale:*` no tiene `tpv-settings:update`, pero al excluir `scale:use` aparecía
+  // `scale:configure` suelto y con él `tpv-settings:update`. Y cualquier exclusión, aunque no
+  // tocara nada, disparaba una segunda vuelta de dependencias (las de las dependencias).
+  // Por eso lo que sobrevive se recorta a lo que la base SIN exclusiones ya concedía, medido
+  // con la misma regla de comodines con la que se autoriza. La decisión del 18-ago queda
+  // intacta: lo implicado por un permiso que el rol conserva vuelve — si la base lo concedía.
+  return Array.from(resolvePermissions(sobreviven)).filter(p => permissionListGrants(resuelto, p))
+}
+
+/**
+ * ¿Una lista de permisos YA resuelta concede `requiredPermission`?
+ *
+ * Es la ÚNICA regla de comodines del backend: el permiso exacto, `recurso:*`, `*:acción`
+ * o `*:*`. La usan `hasPermission`, `evaluatePermissionList` y el recorte de exclusiones
+ * de `getEffectiveRolePermissions`, para que "lo que la base ya concedía" se mida con la
+ * misma vara con la que después se autoriza. Una segunda copia de esta regla sería otra
+ * forma de que dos candados contesten distinto.
+ */
+export function permissionListGrants(permissions: ReadonlySet<string> | readonly string[], requiredPermission: string): boolean {
+  const lista: ReadonlySet<string> = permissions instanceof Set ? permissions : new Set(permissions)
+
+  // Check for wildcard (all permissions)
+  if (lista.has('*:*')) return true
+
+  // Check exact permission
+  if (lista.has(requiredPermission)) return true
+
+  // Check wildcard permissions (e.g., 'tpv:*' matches 'tpv:create')
+  const [resource, action] = requiredPermission.split(':')
+  if (lista.has(`${resource}:*`)) return true
+  if (lista.has(`*:${action}`)) return true
+
+  return false
 }
 
 /**
@@ -1656,20 +1691,7 @@ export function hasPermission(
   /** Ver `getEffectiveRolePermissions`: lo que el venue QUITA, aparte de lo que agrega. */
   deniedPermissions?: string[] | null,
 ): boolean {
-  const allPermissions = getEffectiveRolePermissions(role, customPermissions, deniedPermissions)
-
-  // Check for wildcard (all permissions)
-  if (allPermissions.includes('*:*')) return true
-
-  // Check exact permission
-  if (allPermissions.includes(requiredPermission)) return true
-
-  // Check wildcard permissions (e.g., 'tpv:*' matches 'tpv:create')
-  const [resource, action] = requiredPermission.split(':')
-  if (allPermissions.includes(`${resource}:*`)) return true
-  if (allPermissions.includes(`*:${action}`)) return true
-
-  return false
+  return permissionListGrants(getEffectiveRolePermissions(role, customPermissions, deniedPermissions), requiredPermission)
 }
 
 /**
@@ -1679,17 +1701,7 @@ export function hasPermission(
  * instead of extending them.
  */
 export function evaluatePermissionList(effectivePermissions: string[], requiredPermission: string): boolean {
-  const resolvedSet = resolvePermissions(effectivePermissions)
-  const allPermissions = Array.from(resolvedSet)
-
-  if (allPermissions.includes('*:*')) return true
-  if (allPermissions.includes(requiredPermission)) return true
-
-  const [resource, action] = requiredPermission.split(':')
-  if (allPermissions.includes(`${resource}:*`)) return true
-  if (allPermissions.includes(`*:${action}`)) return true
-
-  return false
+  return permissionListGrants(resolvePermissions(effectivePermissions), requiredPermission)
 }
 
 /**
