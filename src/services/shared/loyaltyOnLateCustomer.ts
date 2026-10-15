@@ -222,6 +222,39 @@ export async function reabrirLealtadSiAplica(
 export interface ResultadoDeLealtadRespetandoReembolsos extends AwardLoyaltyForPaidOrderResult {
   /** La venta ya tenía —o recibió MIENTRAS se otorgaba— un reembolso COMPLETED: no se otorgó, o el sello se revirtió. */
   reembolsada: boolean
+  /** H4: la venta ya le había dado sello o puntos a OTRO cliente: no se acreditó al primario actual y quedó cerrada. */
+  otroCliente?: true
+}
+
+/**
+ * 🔴 H4 (auditoría de Codex del código, 15-oct-2026): ¿esta venta ya le dio sello o puntos a un cliente DISTINTO del que la
+ * lealtad acreditaría ahora? El caso: Ana recibió el sello y los puntos, la venta quedó pendiente por otro efecto, la TPV quitó
+ * a Ana y puso a Beto. El reconciliador corría la lealtad para Beto: `grantStamp` decía «ya sellada» (el sello es POR VENTA),
+ * pero `earnPoints` deduplica por cliente + venta y le daba a Beto los puntos de la compra de Ana. Es la MISMA regla de dueño
+ * que `decideSaleStamp` (OTHER_CUSTOMER), aplicada también a la recuperación. El beneficiario es el que acreditaría
+ * `awardLoyaltyForPaidOrder`: el primario, o sin `OrderCustomer` el cliente heredado que le pasa quien llama. Devuelve el otro
+ * dueño, o null.
+ */
+async function otroDuenoDeLaVenta(args: AwardLoyaltyForPaidOrderArgs): Promise<string | null> {
+  const venta = await prisma.order.findFirst({
+    where: { id: args.orderId, venueId: args.venueId },
+    select: {
+      orderCustomers: { where: { isPrimary: true }, select: { customerId: true }, take: 1 },
+      stampEvents: {
+        where: { type: StampEventType.EARN },
+        select: { type: true, stampCard: { select: { customerId: true } } },
+        take: 10,
+      },
+      loyaltyTransactions: { where: { type: LoyaltyTransactionType.EARN }, select: { customerId: true }, take: 10 },
+    },
+  })
+  if (!venta) return null
+  const beneficiario = venta.orderCustomers[0]?.customerId ?? args.legacyCustomer?.id ?? null
+  const duenos = [
+    ...venta.stampEvents.filter(e => e.type === StampEventType.EARN).map(e => e.stampCard.customerId),
+    ...venta.loyaltyTransactions.map(t => t.customerId),
+  ]
+  return duenos.find(d => d !== beneficiario) ?? null
 }
 
 /**
@@ -271,7 +304,8 @@ async function cerrarSinLanzar(venueId: string, orderId: string, leyoSinCliente:
  *
  *   1. Si la venta YA tiene un reembolso COMPLETED (conteo exacto), no otorga nada: revierte un sello que la venta hubiera dado
  *      antes (idempotente) y SÓLO entonces la cierra: el reconciliador no vuelve a tomar una venta devuelta.
- *   2. Si no, corre la lealtad de siempre (idempotente) SIN que cierre (`{ cerrar: false }`).
+ *   2. Si la venta ya le dio sello o puntos a OTRO cliente (H4), no acredita al primario actual y la cierra (`otroCliente`).
+ *      Si no, corre la lealtad de siempre (idempotente) SIN que cierre (`{ cerrar: false }`).
  *   3. Vuelve a contar: si el reembolso entró MIENTRAS se otorgaba, revierte el sello (`reverseStampForOrder`, idempotente:
  *      si la reversa del reembolso también lo hace, la segunda no hace nada).
  *   4. Cierra si la lealtad terminó, con la MISMA guarda B1 que habría usado la lealtad.
@@ -292,6 +326,20 @@ export async function otorgarLealtadRespetandoReembolsos(
     if (falloAlCerrar) return { complete: false, errors: [falloAlCerrar], reembolsada: true }
     logger.info('[LEALTAD] venta con reembolso: no se otorga lealtad y queda cerrada', { venueId, orderId })
     return { complete: true, errors: [], reembolsada: true }
+  }
+
+  // 🔴 H4: lo que esta venta ya le dio a OTRO cliente no se le vuelve a dar al primario de ahora. Se cierra: no hay nada que
+  // recuperar para él (la liga tardía ya responde OTHER_CUSTOMER con la misma regla).
+  const otroDueno = await otroDuenoDeLaVenta(args)
+  if (otroDueno) {
+    logger.warn('[LEALTAD] la venta ya le dio sello o puntos a otro cliente: no se acredita al primario actual', {
+      venueId,
+      orderId,
+      otroDueno,
+    })
+    const falloAlCerrar = await cerrarSinLanzar(venueId, orderId, false)
+    if (falloAlCerrar) return { complete: false, errors: [falloAlCerrar], reembolsada: false }
+    return { complete: true, errors: [], reembolsada: false, otroCliente: true }
   }
 
   const resultado = await awardLoyaltyForPaidOrder(args, { cerrar: false })
@@ -443,6 +491,9 @@ export async function awardLoyaltyForLateCustomer(args: {
         // El reembolso entró entre la lectura y el otorgamiento, o mientras se otorgaba (el envoltorio ya revirtió el sello).
         logger.warn('[LEALTAD TARDÍA] la venta se reembolsó mientras se ligaba: no suma sello', { venueId, orderId, customerId })
         decision = 'NOT_PAID'
+      } else if (resultado.otroCliente) {
+        // H4: otro cliente recibió el sello o los puntos de esta venta entre la lectura y el otorgamiento.
+        decision = 'OTHER_CUSTOMER'
       } else {
         const despues = await leerVenta(prisma, venueId, orderId)
         decision = despues ? decideSaleStamp(fotoPara(despues, customerId), nowMs) : antes

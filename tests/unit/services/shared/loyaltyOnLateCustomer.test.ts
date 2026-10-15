@@ -319,6 +319,15 @@ describe('awardLoyaltyForLateCustomer', () => {
     expect(r).toMatchObject({ stamped: false, reason: 'NOT_PAID' })
   })
 
+  it('🔴 H4: otro cliente recibió el sello ENTRE la lectura de la liga y el otorgamiento: OTHER_CUSTOMER y no se acredita', async () => {
+    let lecturas = 0
+    prismaMock.order.findFirst.mockImplementation((async () =>
+      ++lecturas === 1 ? venta() : venta({ stampEvents: [EARN('ana')] })) as never)
+    const r = await awardLoyaltyForLateCustomer({ venueId: VENUE, orderId: ORDER, customerId: CUST, staffId: STAFF })
+    expect(awardMock).not.toHaveBeenCalled()
+    expect(r).toMatchObject({ stamped: false, reason: 'OTHER_CUSTOMER' })
+  })
+
   it('sin reembolso después de otorgar: no revierte nada', async () => {
     await awardLoyaltyForLateCustomer({ venueId: VENUE, orderId: ORDER, customerId: CUST })
     expect(reverseMock).not.toHaveBeenCalled()
@@ -531,6 +540,46 @@ describe('otorgarLealtadRespetandoReembolsos (B2: UN envoltorio para la liga tar
       },
       data: { loyaltyProcessedAt: expect.any(Date), loyaltyProcessingAt: null, loyaltyLastError: null },
     })
+  })
+
+  // ── H4 (auditoría de Codex del código, 15-oct-2026) ─────────────────────────────────────────────────────────────────────
+  it('🔴 H4: la venta ya le dio su SELLO a otro cliente (el primario cambió): no se acredita al primario nuevo y se cierra como OTHER_CUSTOMER', async () => {
+    eventosDeLaVenta = [EARN('ana')] // Ana recibió el sello; luego la TPV la quitó y quedó CUST como primario
+    const r = await otorgarLealtadRespetandoReembolsos(ARGS)
+    expect(awardMock).not.toHaveBeenCalled()
+    expect(r).toEqual({ complete: true, errors: [], reembolsada: false, otroCliente: true })
+    expect(cierres()).toHaveLength(1) // cerrada: el reconciliador no la vuelve a tomar
+  })
+
+  it('🔴 H4: la venta ya le dio PUNTOS a otro cliente: «ya sellada» nunca habilita puntos para alguien distinto', async () => {
+    puntosDeLaVenta = [{ customerId: 'ana' }]
+    const r = await otorgarLealtadRespetandoReembolsos(ARGS)
+    expect(awardMock).not.toHaveBeenCalled()
+    expect(r).toMatchObject({ complete: true, otroCliente: true })
+  })
+
+  it('H4: el EARN es del MISMO primario (corrida cortada entre el sello y los puntos): sí completa', async () => {
+    eventosDeLaVenta = [EARN(CUST)]
+    const r = await otorgarLealtadRespetandoReembolsos(ARGS)
+    expect(awardMock).toHaveBeenCalledTimes(1)
+    expect(r).toEqual({ complete: true, errors: [], reembolsada: false })
+  })
+
+  it('H4: sin OrderCustomer, el beneficiario es el cliente heredado que la lealtad acreditaría: su propio EARN no estorba', async () => {
+    eventosDeLaVenta = [EARN('heredado')]
+    conVenta({ orderCustomers: [] })
+    const r = await otorgarLealtadRespetandoReembolsos({ ...ARGS, legacyCustomer: { id: 'heredado', firstName: null, lastName: null } })
+    expect(awardMock).toHaveBeenCalledTimes(1)
+    expect(r).not.toHaveProperty('otroCliente')
+  })
+
+  it('H4: la comprobación lee SÓLO esta venta de este negocio, con listas acotadas', async () => {
+    await otorgarLealtadRespetandoReembolsos(ARGS)
+    const args = (prismaMock.order.findFirst as jest.Mock).mock.calls[0][0]
+    expect(args.where).toEqual({ id: ORDER, venueId: VENUE })
+    expect(args.select.stampEvents.take).toBeGreaterThan(0)
+    expect(args.select.loyaltyTransactions.take).toBeGreaterThan(0)
+    expect(args.select.orderCustomers).toMatchObject({ where: { isPrimary: true }, take: 1 })
   })
 
   it('H1: la lealtad incompleta no se cierra (sin reembolso de por medio)', async () => {
@@ -757,6 +806,23 @@ describe('🔴 B2: el reembolso manda también en la recuperación (rulings rond
     })
     expect(await siguiente.runNow()).toMatchObject({ scanned: 1, applied: 1, failed: 0 })
     expect(eventosDeLaVenta.map(e => e.type)).toEqual(['EARN', 'REVERSAL'])
+    expect(fila.loyaltyProcessedAt).toBeInstanceOf(Date)
+  })
+
+  it('🔴 H4: Ana sellada y con puntos → la TPV quita a Ana y pone a CUST → el reconciliador ⇒ CUST no recibe nada y la venta se cierra', async () => {
+    // La venta quedó pendiente (otro efecto falló) DESPUÉS de darle sello y puntos a Ana.
+    const fila = { ...filaYaProcesada(), loyaltyProcessedAt: null, loyaltyLastError: 'metrics:ana:deadlock' }
+    const tabla = tablaDeUnaVenta(fila)
+    prismaMock.order.updateMany.mockImplementation(tabla.updateMany as never)
+    eventosDeLaVenta = [EARN('ana')]
+    puntosDeLaVenta = [{ customerId: 'ana' }]
+    conVenta({ orderCustomers: [{ customerId: CUST }] }) // la TPV quitó a Ana y CUST quedó primario
+
+    const job = new LoyaltyReconciliationJob({ prisma: { order: tabla } as never, cron: cron(), now: () => new Date(Date.now()) })
+    expect(await job.runNow()).toMatchObject({ scanned: 1, applied: 1, failed: 0 })
+
+    expect(awardMock).not.toHaveBeenCalled() // ni sello ni puntos ni visita para CUST por una compra que ya era de Ana
+    expect(puntosDeLaVenta).toEqual([{ customerId: 'ana' }])
     expect(fila.loyaltyProcessedAt).toBeInstanceOf(Date)
   })
 
