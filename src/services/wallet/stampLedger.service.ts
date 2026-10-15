@@ -17,7 +17,9 @@ import { sendFirstStampEmailIfDue } from './firstStampEmail.service'
  * 1. **Un pago = exactamente un sello.** La garantía NO es el chequeo previo de
  *    este archivo — entre un SELECT y un INSERT cabe otro cobro. La garantía es el
  *    índice `StampEvent_venueId_orderId_earn_unique`; el chequeo sólo evita el
- *    viaje. Por eso una violación de unicidad se traduce a "ya estaba sellado".
+ *    viaje. Por eso una violación de ESE índice se traduce a "ya estaba sellado"; cualquier otro único
+ *    (premio, cartilla) se propaga. Y dos ventas del mismo cliente se forman en un candado por (negocio, cliente):
+ *    el tope y la cartilla se leen dentro.
  * 2. **El día es el del NEGOCIO.** Producción corre en UTC: un día "de servidor"
  *    se corta a las 6 de la tarde en México, y el mismo cliente podría sellar dos
  *    veces la misma noche.
@@ -74,6 +76,38 @@ export interface GrantStampOptions {
   config?: StampConfigView | null
 }
 
+/** El índice que garantiza «un pago = un sello» (migración 20260826145859; parcial y crudo: Prisma no lo conoce por nombre). */
+const UNICO_SELLO_DE_LA_ORDEN = 'StampEvent_venueId_orderId_earn_unique'
+
+/**
+ * ¿Este P2002 es el sello de ESTA orden, y no el premio ni la cartilla siguiente? (auditoría A #3, 14-oct-2026)
+ *
+ * Antes cualquier P2002 se leía como «ya estaba sellado». Si el choque era del premio (`StampReward.stampCardId`) o de la
+ * cartilla siguiente (`StampCard[customerId, venueId, cycle]`), la transacción se revertía y el sello de una venta DISTINTA se
+ * perdía en silencio. Se aceptan las formas que `esChoqueDelUnico` (turnoDeCaja.ts) midió contra Postgres: el nombre del índice
+ * en `meta.constraint` / `meta.target` (suelto o en un arreglo de uno), o la lista EXACTA de columnas `['venueId','orderId']` del
+ * modelo StampEvent. El otro único de esas columnas (`…_reversal_unique`) no se puede tocar aquí: sólo se insertan EARN.
+ * Sin descriptor no se adivina: se relanza (`earnPoints` lo difiere y el reconciliador reintenta).
+ */
+function esChoqueDelSelloDeLaOrden(error: unknown): boolean {
+  if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002') return false
+  const meta = error.meta as { modelName?: unknown; target?: unknown; constraint?: unknown } | undefined
+  const descriptor = meta?.constraint ?? meta?.target
+  if (descriptor === UNICO_SELLO_DE_LA_ORDEN) return true
+  if (Array.isArray(descriptor) && descriptor.length === 1 && descriptor[0] === UNICO_SELLO_DE_LA_ORDEN) return true
+  return (
+    (meta?.modelName === undefined || meta.modelName === 'StampEvent') &&
+    Array.isArray(descriptor) &&
+    descriptor.length === 2 &&
+    descriptor[0] === 'venueId' &&
+    descriptor[1] === 'orderId'
+  )
+}
+
+type DentroDelCandado =
+  | { otorgado: false; reason: 'DAILY_LIMIT_REACHED' }
+  | { otorgado: true; cardId: string; ganados: number; meta: number; completed: boolean; rewardId?: string }
+
 export async function grantStamp(
   venueId: string,
   customerId: string,
@@ -93,57 +127,59 @@ export async function grantStamp(
   })
   if (yaSellado) return { granted: false, reason: 'ALREADY_STAMPED', stampCardId: yaSellado.stampCardId }
 
-  // 🔴 El tope se cuenta en el día del VENUE. Un tope de 0 significa SIN tope:
-  // un negocio que escribe 0 quiere decir "ilimitado", y leerlo como "cero sellos
-  // al día" apagaría su programa entero sin avisarle a nadie.
-  if (config.maxStampsPerDay > 0) {
-    const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
-    const tz = venue?.timezone ?? 'America/Mexico_City'
-    const hoy = await prisma.stampEvent.count({
-      where: {
-        venueId,
-        type: StampEventType.EARN,
-        stampCard: { customerId },
-        createdAt: { gte: venueStartOfDay(tz), lte: venueEndOfDay(tz) },
-      },
-    })
-    if (hoy >= config.maxStampsPerDay) return { granted: false, reason: 'DAILY_LIMIT_REACHED' }
-  }
-
-  // La cartilla en curso, o una nueva. `stampsRequired` se COPIA aquí y queda
-  // congelado: si el negocio cambia la regla mañana, quien ya empezó conserva la
-  // suya. Cambiarla bajo los pies del cliente es la queja más cara de un programa
-  // de lealtad.
-  let card = await prisma.stampCard.findFirst({
-    where: { venueId, customerId, completedAt: null },
-    orderBy: { cycle: 'desc' },
-  })
-  if (!card) {
-    const ultima = await prisma.stampCard.findFirst({
-      where: { venueId, customerId },
-      orderBy: { cycle: 'desc' },
-      select: { cycle: true },
-    })
-    card = await prisma.stampCard.create({
-      data: {
-        venueId,
-        customerId,
-        cycle: (ultima?.cycle ?? 0) + 1,
-        stampsRequired: config.stampsRequired,
-        stampsEarned: 0,
-      },
-    })
-  }
-
-  const cardId = card.id
-  const requeridos = card.stampsRequired
-  const cycleActual = card.cycle
+  // La zona del venue no es parte de la carrera: se lee fuera. Un tope de 0 significa SIN tope: un negocio que escribe 0
+  // quiere decir "ilimitado", y leerlo como "cero sellos al día" apagaría su programa entero sin avisarle a nadie.
+  const tz =
+    config.maxStampsPerDay > 0
+      ? ((await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } }))?.timezone ?? 'America/Mexico_City')
+      : null
 
   try {
-    const resultado = await prisma.$transaction(async tx => {
+    const resultado = await prisma.$transaction(async (tx): Promise<DentroDelCandado> => {
+      // 🔴 PRIMERA sentencia (auditoría A #3): un candado por (negocio, cliente). Dos ventas DISTINTAS del mismo cliente se
+      // forman aquí; la segunda lee el tope y la cartilla DESPUÉS de que la primera hizo commit. Sin él, las dos pasaban el
+      // tope de 1 al día, o las dos llenaban la misma cartilla y el sello de la segunda se perdía al chocar con el premio.
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${venueId}), hashtext(${customerId}))`
+
+      // 🔴 El tope se cuenta en el día del VENUE, y DENTRO del candado.
+      if (tz) {
+        const hoy = await tx.stampEvent.count({
+          where: {
+            venueId,
+            type: StampEventType.EARN,
+            stampCard: { customerId },
+            createdAt: { gte: venueStartOfDay(tz), lte: venueEndOfDay(tz) },
+          },
+        })
+        if (hoy >= config.maxStampsPerDay) return { otorgado: false, reason: 'DAILY_LIMIT_REACHED' }
+      }
+
+      // La cartilla en curso, o una nueva — también DENTRO del candado. `stampsRequired` se COPIA aquí y queda congelado: si
+      // el negocio cambia la regla mañana, quien ya empezó conserva la suya.
+      let card = await tx.stampCard.findFirst({
+        where: { venueId, customerId, completedAt: null },
+        orderBy: { cycle: 'desc' },
+      })
+      if (!card) {
+        const ultima = await tx.stampCard.findFirst({
+          where: { venueId, customerId },
+          orderBy: { cycle: 'desc' },
+          select: { cycle: true },
+        })
+        card = await tx.stampCard.create({
+          data: {
+            venueId,
+            customerId,
+            cycle: (ultima?.cycle ?? 0) + 1,
+            stampsRequired: config.stampsRequired,
+            stampsEarned: 0,
+          },
+        })
+      }
+
       await tx.stampEvent.create({
         data: {
-          stampCardId: cardId,
+          stampCardId: card.id,
           venueId,
           orderId,
           type: StampEventType.EARN,
@@ -155,25 +191,22 @@ export async function grantStamp(
       // El contador se mueve en la MISMA transacción que su evento: si viven
       // separados, un fallo a medias deja el cache mintiendo sobre el libro.
       const actualizada = await tx.stampCard.update({
-        where: { id: cardId },
+        where: { id: card.id },
         data: { stampsEarned: { increment: 1 } },
         select: { stampsEarned: true, stampsRequired: true },
       })
 
       const ganados = actualizada.stampsEarned
-      const meta = actualizada.stampsRequired ?? requeridos
-      if (ganados < meta) return { ganados, meta, completed: false as const, rewardId: undefined }
+      const meta = actualizada.stampsRequired ?? card.stampsRequired
+      if (ganados < meta) return { otorgado: true, cardId: card.id, ganados, meta, completed: false }
 
       // ── La cartilla se llenó ────────────────────────────────────────────────
-      await tx.stampCard.update({ where: { id: cardId }, data: { completedAt: new Date() } })
+      await tx.stampCard.update({ where: { id: card.id }, data: { completedAt: new Date() } })
 
-      // 🔴 El premio CONGELA sus condiciones. Si el negocio cambia mañana "un
-      // café" por "10% de descuento", quien ya lo ganó recibe lo que se le
-      // prometió — cambiárselo después es la forma más rápida de perder al
-      // cliente que más veces volvió.
+      // 🔴 El premio CONGELA sus condiciones (quien ya lo ganó recibe lo que se le prometió).
       const premio = await tx.stampReward.create({
         data: {
-          stampCardId: cardId,
+          stampCardId: card.id,
           customerId,
           venueId,
           status: StampRewardStatus.PENDING,
@@ -185,55 +218,41 @@ export async function grantStamp(
         select: { id: true },
       })
 
-      // 🔴 Y la siguiente cartilla arranca AQUÍ, no al canjear el premio.
-      //
-      // Entre que el cliente llena su cartilla y vuelve a pasar por su café gratis
-      // pueden pasar semanas — y todo lo que compre mientras tanto se tiraría a la
-      // basura. Es el hallazgo C7 de la auditoría y la corrección de mi diseño
-      // original, que decía justamente lo contrario.
-      //
-      // La nueva nace con la regla de HOY (al revés que la congelada): el ciclo
-      // que empieza usa la configuración vigente.
+      // 🔴 Y la siguiente cartilla arranca AQUÍ, no al canjear el premio (hallazgo C7), con la regla de HOY.
       await tx.stampCard.create({
         data: {
           venueId,
           customerId,
-          cycle: cycleActual + 1,
+          cycle: card.cycle + 1,
           stampsRequired: config.stampsRequired,
           stampsEarned: 0,
         },
       })
 
-      return { ganados, meta, completed: true as const, rewardId: premio.id }
+      return { otorgado: true, cardId: card.id, ganados, meta, completed: true, rewardId: premio.id }
     })
 
-    // 🔴 El sello subió: avisarle al teléfono del cliente. Sin esto su tarjeta sigue
-    // mostrando el número anterior hasta que la vuelva a descargar — que en la
-    // práctica no ocurre nunca. Fire-and-forget: el aviso es un extra, el cobro es el
-    // negocio, y `notifyCustomerPassUpdated` nunca lanza.
-    void notifyCustomerPassUpdated(venueId, customerId)
+    if (!resultado.otorgado) return { granted: false, reason: resultado.reason }
 
-    // 🔴 Y si es su PRIMER sello, mandarle la liga para que guarde la tarjeta. Sin
-    // esto la tarjeta existe y el cliente no se entera: el motor lleva semanas
-    // funcionando sin que nadie tenga una. Mismo fire-and-forget que el aviso de
-    // arriba — `sendFirstStampEmailIfDue` decide si toca y nunca lanza.
-    void sendFirstStampEmailIfDue(venueId, customerId, cardId)
+    // 🔴 El sello subió: avisarle al teléfono del cliente (fire-and-forget; `notifyCustomerPassUpdated` nunca lanza).
+    void notifyCustomerPassUpdated(venueId, customerId)
+    // 🔴 Y si es su PRIMER sello, mandarle la liga para que guarde la tarjeta (`sendFirstStampEmailIfDue` decide y nunca lanza).
+    void sendFirstStampEmailIfDue(venueId, customerId, resultado.cardId)
 
     return {
       granted: true,
-      stampCardId: cardId,
+      stampCardId: resultado.cardId,
       stampsEarned: resultado.ganados,
       stampsRequired: resultado.meta,
       completed: resultado.completed,
       rewardId: resultado.rewardId,
     }
-  } catch (error: any) {
-    // 🔴 P2002 = el índice único hizo su trabajo: otro cobro simultáneo ya selló
-    // esta orden. NO es un error que deba propagarse — si se propaga, el cobro se
-    // ve fallido aunque el dinero entró, que es mucho peor que no sellar.
-    if (error?.code === 'P2002') {
+  } catch (error: unknown) {
+    // 🔴 SÓLO el índice del sello de esta orden es «otro cobro simultáneo ya la selló». No se propaga: el cobro se vería
+    // fallido aunque el dinero entró. Cualquier otro P2002 (premio, cartilla) SÍ se propaga (auditoría A #3).
+    if (esChoqueDelSelloDeLaOrden(error)) {
       logger.info('Sello duplicado evitado por el índice único', { venueId, orderId, customerId })
-      return { granted: false, reason: 'ALREADY_STAMPED', stampCardId: cardId }
+      return { granted: false, reason: 'ALREADY_STAMPED' }
     }
     throw error
   }
