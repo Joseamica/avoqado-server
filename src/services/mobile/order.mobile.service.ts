@@ -52,6 +52,7 @@ import {
 import { claseDeEstado, computeOrderBalance, impuestoQueSeCobraAparte, summarizeRefunds, type RefundState } from '../shared/orderBalance'
 import { rechazarSiEsImportada } from '../shared/ordenImportada'
 import { RECIBO_CANONICO } from '../shared/reciboCanonico'
+import type { SaleStampOutcome } from '../shared/loyaltyOnLateCustomer'
 import {
   CobroYaRegistrado,
   assertIdempotentPaymentOrder,
@@ -3513,7 +3514,11 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
   }
 }
 
-export async function attachCustomerToPayment(venueId: string, paymentId: string, customerId: string) {
+/**
+ * «Agregar cliente» en «Cobro exitoso» (POST /mobile/venues/:venueId/payments/:paymentId/customer).
+ * `staffId` = quien LIGA (authContext.userId del controller): es el actor del sello tardío y de la bitácora.
+ */
+export async function attachCustomerToPayment(venueId: string, paymentId: string, customerId: string, staffId?: string | null) {
   const normalizedPaymentId = paymentId?.trim()
   const normalizedCustomerId = customerId?.trim()
 
@@ -3539,7 +3544,7 @@ export async function attachCustomerToPayment(venueId: string, paymentId: string
     throw new NotFoundError('Payment not found')
   }
 
-  return attachCustomerToOrder(venueId, payment.orderId, normalizedCustomerId)
+  return attachCustomerToOrder(venueId, payment.orderId, normalizedCustomerId, staffId)
 }
 
 export async function attachCustomerToLatestPayment(
@@ -3549,6 +3554,8 @@ export async function attachCustomerToLatestPayment(
     amountCents: number
     tipCents?: number
     staffId?: string | null
+    /** Quien LIGA (authContext.userId). `staffId` sigue siendo quien COBRÓ: filtra processedById. */
+    actorStaffId?: string | null
   },
 ) {
   const normalizedCustomerId = input.customerId?.trim()
@@ -3586,10 +3593,15 @@ export async function attachCustomerToLatestPayment(
     throw new NotFoundError('Payment not found')
   }
 
-  return attachCustomerToOrder(venueId, payment.orderId, normalizedCustomerId)
+  return attachCustomerToOrder(venueId, payment.orderId, normalizedCustomerId, input.actorStaffId)
 }
 
-export async function attachCustomerToOrder(venueId: string, orderId: string, customerId: string) {
+/**
+ * Liga un cliente a una venta (la del «Agregar cliente» después de cobrar) y, si la venta ya se cobró, le da su sello
+ * tardío (spec 2026-10-14 §3.1). Devuelve los campos de orden de siempre más `loyalty` (`SaleStampOutcome | null`, campo
+ * nuevo y opcional para las apps: `null` = no pintar nada).
+ */
+export async function attachCustomerToOrder(venueId: string, orderId: string, customerId: string, staffId?: string | null) {
   const normalizedCustomerId = customerId?.trim()
 
   if (!normalizedCustomerId) {
@@ -3629,6 +3641,10 @@ export async function attachCustomerToOrder(venueId: string, orderId: string, cu
 
   const displayName = customerDisplayName(customer)
 
+  // Import dinámico, como `loyaltyOnPaidOrder` en `payCashOrder`; ANTES de abrir la transacción, para no cargar módulos con el
+  // candado de la fila de la orden tomado.
+  const { reabrirLealtadSiAplica, awardLoyaltyForLateCustomer } = await import('@/services/shared/loyaltyOnLateCustomer')
+
   const result = await prisma.$transaction(async tx => {
     const existingAssociation = await tx.orderCustomer.findUnique({
       where: {
@@ -3662,7 +3678,7 @@ export async function attachCustomerToOrder(venueId: string, orderId: string, cu
       })
     }
 
-    return tx.order.update({
+    const ligada = await tx.order.update({
       where: { id: orderId },
       data: {
         customerId: normalizedCustomerId,
@@ -3679,6 +3695,18 @@ export async function attachCustomerToOrder(venueId: string, orderId: string, cu
         customerEmail: true,
       },
     })
+
+    // 🔴 Auditoría A #1: en la MISMA transacción que la liga se reabre el trabajo durable de lealtad de la venta
+    // (`loyaltyProcessedAt = null`, …) si es elegible y ESTE cliente quedó como primario. Si el intento inmediato de abajo
+    // falla, el reconciliador de siempre la termina. Sin esto, la venta —cobrada sin cliente y ya «procesada»— no volvía a la
+    // cola nunca y el sello se perdía otra vez, en silencio. Si falla, la liga falla entera y el cajero reintenta: nunca queda
+    // una liga sin su trabajo de lealtad reabierto.
+    // 🔴 Y es la ÚLTIMA escritura antes del commit (ruling tras la medición de S3b): la reapertura deja una MARCA en la fila
+    // (`loyaltyLastError`). La lealtad del cobro que leyó la venta «sin cliente» puede estar esperando el candado de esta fila
+    // para cerrarla; al soltarse, Postgres sólo relee las columnas de la fila, y la marca es lo que la detiene.
+    await reabrirLealtadSiAplica(tx, { venueId, orderId, customerId: normalizedCustomerId })
+
+    return ligada
   })
 
   logger.info(`✅ [ORDER.MOBILE] Customer attached to payment order | order=${order.orderNumber} | customer=${normalizedCustomerId}`)
@@ -3693,7 +3721,21 @@ export async function attachCustomerToOrder(venueId: string, orderId: string, cu
     })
   }
 
-  return result
+  // 🎁 Sello TARDÍO (spec 2026-10-14 §3.1): este es el «Agregar cliente» de «Cobro exitoso». La lealtad de la venta ya corrió
+  // al cobrar —sin cliente— y nunca volvía. Después del commit de la liga: si algo de aquí falla, la liga ya quedó (y la
+  // venta quedó reabierta para el reconciliador) y la respuesta sale igual con `loyalty: null`. El helper nunca lanza; el
+  // try/catch es la última red.
+  let loyalty: SaleStampOutcome | null = null
+  try {
+    loyalty = await awardLoyaltyForLateCustomer({ venueId, orderId, customerId: normalizedCustomerId, staffId: staffId ?? null })
+  } catch (error) {
+    logger.error('[ORDER.MOBILE] Sello tardío falló (la liga del cliente ya quedó)', {
+      orderId,
+      error: error instanceof Error ? error.message : String(error),
+    })
+  }
+
+  return { ...result, loyalty }
 }
 
 /**

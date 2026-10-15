@@ -30,8 +30,9 @@ export async function attachCustomerToPayment(req: Request, res: Response, next:
   try {
     const { venueId, paymentId } = req.params
     const { customerId } = req.body
-
-    const order = await orderMobileService.attachCustomerToPayment(venueId, paymentId, customerId)
+    // El actor sale del TOKEN, nunca del body (regla authContext): es quien queda en el sello y en la bitácora.
+    // `data` lleva los campos de la orden de siempre más `loyalty` (sello tardío; campo nuevo y opcional para las apps).
+    const order = await orderMobileService.attachCustomerToPayment(venueId, paymentId, customerId, req.authContext?.userId)
 
     res.status(200).json({
       success: true,
@@ -52,7 +53,9 @@ export async function attachCustomerToLatestPayment(req: Request, res: Response,
       customerId,
       amountCents,
       tipCents,
+      // `staffId` del body = quién COBRÓ (filtra el pago, como siempre). El actor = quien liga, del token.
       staffId,
+      actorStaffId: req.authContext?.userId,
     })
 
     res.status(200).json({
