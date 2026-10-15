@@ -59,3 +59,29 @@ describe('normalizeAddItems — D9 weighted lines never merge', () => {
     expect(result).toHaveLength(2)
   })
 })
+
+/**
+ * D5 (mesas40, 14-oct): `OrderItem.notes` no tenía tope — `normalizeNotes` sólo hacía trim y una nota de 10,038
+ * caracteres llegaba entera a la cuenta, a la comanda y al ticket. Ahora se RECORTA (nunca se rechaza: la ronda ya
+ * ocurrió) a 500 caracteres completos: un emoji en el borde queda entero o fuera, nunca partido a la mitad.
+ */
+describe('normalizeAddItems — D5: la nota de un artículo tiene tope de 500 caracteres', () => {
+  // 499 letras + un emoji (2 unidades UTF-16) justo en el borde + relleno = 10,038 unidades.
+  const notaLarga = 'a'.repeat(499) + '🌮' + 'b'.repeat(9_537)
+
+  it('una nota de 10,038 caracteres se recorta a 500 caracteres completos, con el emoji del borde ENTERO', () => {
+    expect(notaLarga).toHaveLength(10_038)
+
+    const [line] = normalizeAddItems([{ productId: 'prod-taco', quantity: 1, notes: notaLarga }])
+
+    expect(Array.from(line.notes!)).toHaveLength(500)
+    // Un `.slice(0, 500)` pelón dejaría medio emoji (un surrogate suelto) al final.
+    expect(line.notes).toBe('a'.repeat(499) + '🌮')
+  })
+
+  it('una nota normal queda igual (sólo se recorta lo que pasa del tope)', () => {
+    const [line] = normalizeAddItems([{ productId: 'prod-taco', quantity: 1, notes: '  sin cebolla 🌶️ ' }])
+
+    expect(line.notes).toBe('sin cebolla 🌶️')
+  })
+})

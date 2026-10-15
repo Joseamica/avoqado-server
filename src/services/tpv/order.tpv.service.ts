@@ -43,6 +43,7 @@ import { armarComandasTrasCommit, retirarComandasDeVentaAnulada, tomarCandadoDeC
 import { parseServiceCourseSnapshot, legacyCourseForSnapshot, type ServiceCourseSnapshot } from '../service-courses/serviceCourseContract'
 import { applyPromotionToOrder, type PromotionSelection } from '../promotions/promotion.service'
 import { venueHasFeatureAccess } from '../access/basePlan.service'
+import { capItemNote } from '../shared/inputCaps'
 
 /**
  * Helper function to flatten OrderItemModifier structure for Android compatibility
@@ -555,7 +556,8 @@ interface NormalizedAddOrderItemInput extends AddOrderItemInput {
 function normalizeNotes(notes?: string | null): string | null {
   if (!notes) return null
   const trimmed = notes.trim()
-  return trimmed.length > 0 ? trimmed : null
+  // D5 (mesas40): tope de 500 caracteres completos; se recorta, nunca se rechaza (`../shared/inputCaps`).
+  return trimmed.length > 0 ? capItemNote(trimmed) : null
 }
 
 function normalizeExternalId(externalId?: string | null): string | null {
@@ -4160,7 +4162,7 @@ export async function addSerializedItemToOrder(
         data: {
           orderId,
           ...orderItemData, // Includes: productName, productSku, unitPrice, quantity, total, taxAmount, productId
-          notes: input.notes,
+          notes: capItemNote(input.notes),
         },
       })
 
@@ -4338,7 +4340,7 @@ export async function sellSerializedItem(
         items: {
           create: {
             ...orderItemData, // Includes: productName, productSku, unitPrice, quantity, total, taxAmount, productId
-            notes: input.notes,
+            notes: capItemNote(input.notes),
           },
         },
       },

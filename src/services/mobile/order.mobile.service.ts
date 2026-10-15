@@ -52,6 +52,7 @@ import {
 import { claseDeEstado, computeOrderBalance, impuestoQueSeCobraAparte, summarizeRefunds, type RefundState } from '../shared/orderBalance'
 import { rechazarSiEsImportada } from '../shared/ordenImportada'
 import { RECIBO_CANONICO } from '../shared/reciboCanonico'
+import { capItemNote, MAX_TERMINAL_PAYMENT_CENTS } from '../shared/inputCaps'
 import {
   CobroYaRegistrado,
   assertIdempotentPaymentOrder,
@@ -719,7 +720,7 @@ export async function buildOrderItemsData(
       appliedDiscountId: appliedDiscount?.id || null,
       taxAmount: new Prisma.Decimal(0),
       total: new Prisma.Decimal(itemTotal),
-      notes: item.notes || null,
+      notes: capItemNote(item.notes) || null,
       fulfillmentAreaId: fulfillmentAreaId || null,
       modifiers: {
         create: itemModifierIds.map(modifierId => {
@@ -759,7 +760,7 @@ export async function buildOrderItemsData(
       appliedDiscountId: appliedDiscount?.id || null,
       taxAmount: new Prisma.Decimal(0),
       total: new Prisma.Decimal(itemTotal),
-      notes: item.notes || null,
+      notes: capItemNote(item.notes) || null,
       fulfillmentAreaId: fulfillmentAreaId || null,
     }
   })
@@ -2599,6 +2600,19 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
   const tip = input.tip || 0
 
   logger.info(`💵 [ORDER.MOBILE] Recording cash payment | venue=${venueId} | order=${orderId} | amount=${amount} cents | tip=${tip} cents`)
+  // D5 (mesas40): sólo se GRITA. Ni recorte ni 400: recortar el cambio altera lo registrado (aplicado = recibido −
+  // cambio) y un rechazo perdería cobros que YA ocurrieron fuera (tarjeta de una terminal ajena, transferencia). El
+  // tope de verdad va en el teclado del aparato, antes de confirmar; pasar de él aquí es un cliente raro o la API cruda.
+  if (amount > MAX_TERMINAL_PAYMENT_CENTS) {
+    logger.error('🚨 [Sobrepago] payCash recibió más que el tope del teclado; se registra exacto como siempre', {
+      venueId,
+      orderId,
+      amountCents: amount,
+      topeCents: MAX_TERMINAL_PAYMENT_CENTS,
+      method: input.method ?? 'CASH',
+      idempotencyKey: input.idempotencyKey ?? null,
+    })
+  }
 
   // Find and validate order
   const order = await prisma.order.findUnique({

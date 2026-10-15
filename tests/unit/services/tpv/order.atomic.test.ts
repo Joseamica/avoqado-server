@@ -20,6 +20,7 @@ import {
   voidItems,
   applyDiscount,
   addSerializedItemToOrder,
+  sellSerializedItem,
 } from '@/services/tpv/order.tpv.service'
 import { serializedInventoryService } from '@/services/serialized-inventory/serializedInventory.service'
 import { getProductInventoryStatus } from '@/services/dashboard/productInventoryIntegration.service'
@@ -526,5 +527,26 @@ describe('R11 (Codex r5): una importada de SoftRestaurant se rechaza bajo el can
     tx.order.findUniqueOrThrow.mockResolvedValue({ contratoDePrecio: 'IVA_APARTE', taxAmount: new Prisma.Decimal(16) })
     await expect(correr()).rejects.toMatchObject({ code: 'ORDEN_IMPORTADA_DEL_POS' })
     expect(nadaEscrito()).toEqual(cero)
+  })
+})
+
+/** D5 (mesas40, 14-oct): la venta serializada escribía la nota cruda. Se recorta (nunca se rechaza) a 500 caracteres completos. */
+describe('D5: la nota de la venta serializada se recorta a 500 caracteres completos', () => {
+  const notaLarga = 'a'.repeat(499) + '🌮' + 'b'.repeat(9_537)
+  const recortada = 'a'.repeat(499) + '🌮'
+
+  it('addSerializedItemToOrder guarda la nota recortada, con el emoji del borde entero', async () => {
+    await addSerializedItemToOrder('venue', 'order', { serialNumber: 'SERIAL', price: 20, notes: notaLarga }, 1, 'staff')
+
+    expect(tx.orderItem.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ notes: recortada }) }))
+  })
+
+  it('sellSerializedItem (venta rápida) guarda la nota recortada en el renglón que nace con la orden', async () => {
+    globalDb.venue.findUnique.mockResolvedValue({ id: 'venue', name: 'Venue', salesEnabled: true, organizationId: 'org' })
+    tx.shift = { findFirst: jest.fn(async () => null) }
+
+    await sellSerializedItem('venue', { serialNumber: 'SERIAL', price: 20, notes: notaLarga }, 'staff')
+
+    expect(tx.order.create.mock.calls[0][0].data.items.create.notes).toBe(recortada)
   })
 })

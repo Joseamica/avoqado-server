@@ -55,6 +55,7 @@ import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
 import { assertOrderCancellableUnderLock, avisarOrdenCancelada } from '../shared/orderCancelGuard'
 import { externalRouteBlockers } from './areaTicketExternalCodes'
 import { buildOrderItemsData, CreateOrderItemInput } from './order.mobile.service'
+import { capItemNote } from '../shared/inputCaps'
 
 const DEFAULT_CLAIM_TTL_SECONDS = 300
 const DEFAULT_SESSION_MAX_AGE_MINUTES = 30
@@ -583,7 +584,9 @@ function issueIntentFromInput(lines: AreaTicketLineInput[]) {
     productId: line.productId,
     quantity: quantity(normalized[index].quantity),
     weightKg: normalized[index].weightQuantity == null ? null : quantity(normalized[index].weightQuantity),
-    notes: line.notes ?? null,
+    // D5 (mesas40): el vale guarda la nota RECORTADA (`buildOrderItemsData`); se compara recortada de los dos lados
+    // para que repetir el mismo vale no sea un 409 (y un vale guardado antes del tope, con la nota entera, tampoco).
+    notes: capItemNote(line.notes) ?? null,
     modifierIds: [...new Set(line.modifierIds ?? [])].sort(),
     discountId: line.discountId ?? null,
   }))
@@ -595,7 +598,7 @@ function issueIntentFromTicket(ticket: any) {
     productId: line.productId,
     quantity: quantity(line.quantity),
     weightKg: line.weightKg == null ? null : quantity(line.weightKg),
-    notes: line.notes ?? null,
+    notes: capItemNote(line.notes) ?? null,
     modifierIds: [
       ...new Set(
         (Array.isArray(line.modifiersSnapshot) ? line.modifiersSnapshot : [])
