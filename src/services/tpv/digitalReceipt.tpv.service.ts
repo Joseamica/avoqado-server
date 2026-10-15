@@ -227,7 +227,7 @@ export async function generateDigitalReceipt(paymentId: string): Promise<Digital
         },
         items: paymentData.order.items.map(item => ({
           id: item.id,
-          productName: item.product?.name || item.productName || 'Item',
+          productName: item.productName || item.product?.name || 'Item',
           quantity: item.quantity,
           unitPrice: Number(item.unitPrice),
           total: Number(item.total),

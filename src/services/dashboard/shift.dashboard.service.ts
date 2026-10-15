@@ -391,6 +391,8 @@ export async function getShiftById(venueId: string, shiftId: string, incluirEspe
           items: {
             select: {
               id: true,
+              // Name the line was SOLD under (sales snapshot): a renamed product must not rewrite past shifts.
+              productName: true,
               quantity: true,
               unitPrice: true,
               discountAmount: true,
@@ -526,7 +528,7 @@ export async function getShiftById(venueId: string, shiftId: string, incluirEspe
 
   for (const order of shift.orders) {
     for (const item of order.items) {
-      const productName = item.product?.name || 'Unknown Product'
+      const productName = item.productName || item.product?.name || 'Unknown Product'
       const quantity = item.quantity || 1
       // Revenue is net of the line's own discount — charging it at list price
       // overstated every shift that sold a combo or a discounted item.
@@ -573,7 +575,7 @@ export async function getShiftById(venueId: string, shiftId: string, incluirEspe
       createdAt: order.createdAt,
       itemsCount: order.items.reduce((sum, item) => sum + item.quantity, 0),
       items: order.items.map(item => ({
-        name: item.product?.name || 'Unknown Product',
+        name: item.productName || item.product?.name || 'Unknown Product',
         quantity: item.quantity,
         price: Number(item.unitPrice || 0),
       })),

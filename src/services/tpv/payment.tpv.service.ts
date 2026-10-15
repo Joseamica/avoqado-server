@@ -2205,7 +2205,7 @@ async function updateOrderTotalsForStandalonePayment(
         logger.info('✅ Stock deducted successfully for product', {
           orderId,
           productId: item.productId,
-          productName: item.product?.name || item.productName,
+          productName: item.productName || item.product?.name,
           quantity: item.quantity,
           modifiersCount: orderModifiers.length,
         })
@@ -2245,7 +2245,7 @@ async function updateOrderTotalsForStandalonePayment(
         logger.error('❌ Failed to deduct stock for product', {
           orderId,
           productId: item.productId,
-          productName: item.product?.name || item.productName,
+          productName: item.productName || item.product?.name,
           quantity: item.quantity,
           error: deductionError.message,
           reason: errorReason,
@@ -2258,7 +2258,7 @@ async function updateOrderTotalsForStandalonePayment(
         if (errorReason !== 'NO_RECIPE') {
           deductionErrors.push({
             productId: item.productId!,
-            productName: item.product?.name || item.productName || 'Unknown',
+            productName: item.productName || item.product?.name || 'Unknown',
             requested: item.weightQuantity != null ? Number(item.weightQuantity) : item.quantity,
             error: deductionError.message,
           })
@@ -2272,7 +2272,7 @@ async function updateOrderTotalsForStandalonePayment(
             data: {
               source: 'TPV',
               productId: item.productId,
-              productName: item.product?.name || item.productName || 'Unknown',
+              productName: item.productName || item.product?.name || 'Unknown',
               quantity: item.quantity,
               reason: errorReason,
               error: deductionError.message,

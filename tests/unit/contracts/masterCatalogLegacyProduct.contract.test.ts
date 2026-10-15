@@ -142,11 +142,23 @@ const legacyMobileProductReturn = {
   recipe: null,
 }
 
+// Variantes (2026-10-14): los 4 campos opcionales del contrato salen de estas dos relaciones; nunca un campo `variants`.
+const variantInclude = {
+  productGroup: { select: { id: true, name: true, imageUrl: true } },
+  variantValues: {
+    select: {
+      option: { select: { name: true, position: true } },
+      optionValue: { select: { value: true, position: true } },
+    },
+  },
+}
+
 const dashboardProductQuery = {
   where: { venueId, deletedAt: null },
   include: {
     category: true,
     inventory: true,
+    ...variantInclude,
     modifierGroups: {
       include: { group: { include: { modifiers: { where: { active: true } } } } },
       orderBy: { displayOrder: 'asc' },
@@ -180,6 +192,7 @@ const mobileProductQuery = {
   include: {
     category: true,
     inventory: true,
+    ...variantInclude,
     modifierGroups: {
       include: { group: { include: { modifiers: { where: { active: true } } } } },
       orderBy: { displayOrder: 'asc' },

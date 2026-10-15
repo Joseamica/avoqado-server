@@ -185,6 +185,14 @@ const prismaMock: any = {
   cashDrawerSession: createMockModel(),
   cashDrawerEvent: createMockModel(),
   product: createMockModel(),
+  productGroup: createMockModel(),
+  productGroupOption: createMockModel(),
+  productGroupOptionValue: createMockModel(),
+  productGroupModifierGroup: createMockModel(),
+  productVariantValue: createMockModel(),
+  // Biblioteca de opciones del POS (product-option.mobile.service).
+  productOption: createMockModel(),
+  productOptionValue: createMockModel(),
   // IVA por producto (plan 1): `createProduct`/`updateProduct` consultan este modelo para
   // saber si el flag está encendido ANTES de escribir `ivaTratamiento` (normalizarIvaDeProducto).
   // Sin esta entrada, cualquier test que ejercite esos escritores revienta con "Cannot read
@@ -500,6 +508,9 @@ prismaMock.$queryRaw = jest.fn()
 
 // Set safe default return values for mocks that are frequently queried
 prismaMock.productModifierGroup.findMany.mockResolvedValue([])
+// Variantes (tarea 11): `archivarProductos` (todo borrado de producto y «Reemplazar menú») busca los padres que se quedaron sin
+// variantes vivas, y «Reemplazar» las familias vivas cuya categoría vuelve al menú. Casi ningún negocio tiene familias: ninguna.
+prismaMock.productGroup.findMany.mockResolvedValue([])
 prismaMock.externalBusyBlock.findFirst.mockResolvedValue(null)
 // Terminal list endpoints (getOrgTerminals / getAllTerminals) run an incidental
 // migration-badge query (prisma.tpvCommandQueue.findMany) for the page's terminals.

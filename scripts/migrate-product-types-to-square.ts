@@ -50,6 +50,9 @@ async function migrateProductTypes(dryRun: boolean = false, venueId?: string) {
   }
 
   const whereClause = venueId ? { venueId } : {}
+  // Variantes: el tipo de una variante es del padre (el trigger rechaza cambiarlo aquí y tumbaría el updateMany entero). Se
+  // saltan; su familia se cambia desde el padre.
+  const sueltos = { ...whereClause, productGroupId: null }
 
   // Get counts before migration
   const countsByType = await prisma.product.groupBy({
@@ -69,7 +72,7 @@ async function migrateProductTypes(dryRun: boolean = false, venueId?: string) {
   console.log('Step 1: FOOD → FOOD_AND_BEV (isAlcoholic: false)')
   try {
     const foodProducts = await prisma.product.findMany({
-      where: { ...whereClause, type: 'FOOD' as ProductType },
+      where: { ...sueltos, type: 'FOOD' as ProductType },
       select: { id: true, name: true, venueId: true },
     })
 
@@ -78,7 +81,7 @@ async function migrateProductTypes(dryRun: boolean = false, venueId?: string) {
 
     if (!dryRun && foodProducts.length > 0) {
       await prisma.product.updateMany({
-        where: { ...whereClause, type: 'FOOD' as ProductType },
+        where: { ...sueltos, type: 'FOOD' as ProductType },
         data: {
           type: 'FOOD_AND_BEV' as ProductType,
           isAlcoholic: false,
@@ -96,7 +99,7 @@ async function migrateProductTypes(dryRun: boolean = false, venueId?: string) {
   console.log('Step 2: BEVERAGE → FOOD_AND_BEV (isAlcoholic: false)')
   try {
     const beverageProducts = await prisma.product.findMany({
-      where: { ...whereClause, type: 'BEVERAGE' as ProductType },
+      where: { ...sueltos, type: 'BEVERAGE' as ProductType },
       select: { id: true, name: true, venueId: true },
     })
 
@@ -105,7 +108,7 @@ async function migrateProductTypes(dryRun: boolean = false, venueId?: string) {
 
     if (!dryRun && beverageProducts.length > 0) {
       await prisma.product.updateMany({
-        where: { ...whereClause, type: 'BEVERAGE' as ProductType },
+        where: { ...sueltos, type: 'BEVERAGE' as ProductType },
         data: {
           type: 'FOOD_AND_BEV' as ProductType,
           isAlcoholic: false,
@@ -123,7 +126,7 @@ async function migrateProductTypes(dryRun: boolean = false, venueId?: string) {
   console.log('Step 3: ALCOHOL → FOOD_AND_BEV (isAlcoholic: true)')
   try {
     const alcoholProducts = await prisma.product.findMany({
-      where: { ...whereClause, type: 'ALCOHOL' as ProductType },
+      where: { ...sueltos, type: 'ALCOHOL' as ProductType },
       select: { id: true, name: true, venueId: true },
     })
 
@@ -132,7 +135,7 @@ async function migrateProductTypes(dryRun: boolean = false, venueId?: string) {
 
     if (!dryRun && alcoholProducts.length > 0) {
       await prisma.product.updateMany({
-        where: { ...whereClause, type: 'ALCOHOL' as ProductType },
+        where: { ...sueltos, type: 'ALCOHOL' as ProductType },
         data: {
           type: 'FOOD_AND_BEV' as ProductType,
           isAlcoholic: true,
@@ -150,7 +153,7 @@ async function migrateProductTypes(dryRun: boolean = false, venueId?: string) {
   console.log('Step 4: RETAIL → REGULAR')
   try {
     const retailProducts = await prisma.product.findMany({
-      where: { ...whereClause, type: 'RETAIL' as ProductType },
+      where: { ...sueltos, type: 'RETAIL' as ProductType },
       select: { id: true, name: true, venueId: true },
     })
 
@@ -159,7 +162,7 @@ async function migrateProductTypes(dryRun: boolean = false, venueId?: string) {
 
     if (!dryRun && retailProducts.length > 0) {
       await prisma.product.updateMany({
-        where: { ...whereClause, type: 'RETAIL' as ProductType },
+        where: { ...sueltos, type: 'RETAIL' as ProductType },
         data: {
           type: 'REGULAR' as ProductType,
         },
@@ -184,6 +187,10 @@ async function migrateProductTypes(dryRun: boolean = false, venueId?: string) {
   console.log(`  RETAIL → REGULAR:        ${stats.retail}`)
   console.log('')
   console.log(`Total migrated: ${stats.food + stats.beverage + stats.alcohol + stats.retail}`)
+  const variantesSaltadas = await prisma.product.count({
+    where: { ...whereClause, productGroupId: { not: null }, type: { in: ['FOOD', 'BEVERAGE', 'ALCOHOL', 'RETAIL'] as ProductType[] } },
+  })
+  console.log(`Skipped (variants — change the type from their parent product): ${variantesSaltadas}`)
   console.log(`Errors: ${stats.errors}`)
   console.log('')
 

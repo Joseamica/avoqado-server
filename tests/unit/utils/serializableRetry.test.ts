@@ -1,7 +1,13 @@
 import { Prisma } from '@prisma/client'
 
 import { ConflictError } from '@/errors/AppError'
-import { isDeadlockError, isModelLockTimeoutError, isRetryableDbError, withSerializableRetry } from '@/utils/serializableRetry'
+import {
+  isDeadlockError,
+  isModelLockTimeoutError,
+  isRetryableDbError,
+  isSerializationFailure,
+  withSerializableRetry,
+} from '@/utils/serializableRetry'
 import { prismaMock } from '../../__helpers__/setup'
 
 describe('serializableRetry', () => {
@@ -25,6 +31,21 @@ describe('serializableRetry', () => {
 
   // Forma MEDIDA el 28-sep contra Postgres (Prisma 6.19.3): un lock_timeout vencido en una consulta de MODELO llega sin `code`
   // ni `meta`; el SQLSTATE sólo viaja en el `QueryError(PostgresError { code: "55P03", … })` del mensaje.
+  describe('isSerializationFailure', () => {
+    it('reconoce P2034, el 40001 directo y el 40001 envuelto en P2010 (consulta cruda)', () => {
+      expect(isSerializationFailure({ code: 'P2034' })).toBe(true)
+      expect(isSerializationFailure({ code: '40001' })).toBe(true)
+      expect(isSerializationFailure({ code: 'P2010', meta: { code: '40001' } })).toBe(true)
+    })
+
+    it('no reconoce un candado vencido (55P03), un deadlock (40P01), otro P2010 ni un error vacío', () => {
+      expect(isSerializationFailure({ code: 'P2010', meta: { code: '55P03' } })).toBe(false)
+      expect(isSerializationFailure({ code: 'P2010', meta: { code: '40P01' } })).toBe(false)
+      expect(isSerializationFailure({ code: 'P2002' })).toBe(false)
+      expect(isSerializationFailure(null)).toBe(false)
+    })
+  })
+
   describe('isModelLockTimeoutError', () => {
     const conPostgres = (sqlState: string, mensaje: string) =>
       '\nInvalid `prisma.journalEntry.create()` invocation:\n\n\nError occurred during query execution:\n' +
