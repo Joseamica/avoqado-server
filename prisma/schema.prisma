@@ -601,6 +601,7 @@ model Venue {
   // PRODUCT OPTIONS (Variants)
   // ==========================================
   productOptions ProductOption[]
+  productGroups  ProductGroup[]
 
   // ==========================================
   // MEASUREMENT UNITS
@@ -1728,8 +1729,9 @@ model MenuCategory {
   availableDays  String[] // ["MON", "TUE", "WED"]
 
   // Relations
-  products Product[]
-  menus    MenuCategoryAssignment[]
+  products      Product[]
+  menus         MenuCategoryAssignment[]
+  productGroups ProductGroup[]
 
   // Commission System
   commissionMilestones CommissionMilestone[]
@@ -1860,6 +1862,17 @@ model Product {
   imageUrl     String?
   displayOrder Int     @default(0)
   featured     Boolean @default(false)
+
+  /// Variantes (spec 2026-10-14): si no es null, este producto es una VARIANTE de `productGroup`. Los campos del padre
+  /// (name, categoryId, ivaTratamiento, satProductKey, satUnitKey, description, printStationId, type, imageUrl) son COPIAS
+  /// que sólo escribe `productGroup.service.ts`; el trigger "Product_zz_grupo_escritor_unico" lo impone.
+  productGroupId  String?
+  productGroup    ProductGroup?         @relation(fields: [productGroupId], references: [id], onDelete: Restrict)
+  /// Ids de sus valores en el orden de las opciones, unidos con «|». Impide dos «M · Azul» en el mismo padre.
+  variantKey      String?
+  /// Foto propia de la variante (la playera roja). `imageUrl` es la efectiva: esta foto, o la del padre si no hay.
+  variantImageUrl String?
+  variantValues   ProductVariantValue[]
 
   // Dietary info
   tags      String[] // ["vegetarian", "gluten-free", "spicy"]
@@ -2051,6 +2064,8 @@ model Product {
   @@index([type])
   @@index([syncStatus]) // ✅ NUEVO ÍNDICE
   @@index([venueId, upsellEnabled])
+  // Also serves lookups by productGroupId alone (leading column): no separate index.
+  @@unique([productGroupId, variantKey])
 }
 
 model Inventory {
@@ -4373,8 +4388,9 @@ model ModifierGroup {
   displayOrder Int     @default(0)
   active       Boolean @default(true)
 
-  modifiers Modifier[]
-  products  ProductModifierGroup[]
+  modifiers         Modifier[]
+  products          ProductModifierGroup[]
+  productGroupLinks ProductGroupModifierGroup[]
 
   // ✅ Variable ingredients that can be substituted by modifiers from this group
   linkedRecipeLines RecipeLine[]
@@ -15755,6 +15771,97 @@ model ProductOptionValue {
   sortOrder Int           @default(0)
 }
 
+enum ProductGroupSource {
+  MANUAL
+  SHOPIFY
+}
+
+/// Producto con variantes («Playera básica»). Lo compartido vive aquí y se COPIA a sus variantes (spec 2026-10-14 §4-§6).
+model ProductGroup {
+  id             String             @id @default(cuid())
+  venueId        String
+  venue          Venue              @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  name           String
+  description    String?
+  imageUrl       String?
+  categoryId     String
+  category       MenuCategory       @relation(fields: [categoryId], references: [id])
+  type           ProductType        @default(REGULAR)
+  ivaTratamiento IvaTratamiento     @default(IVA_16)
+  satProductKey  String?
+  satUnitKey     String?
+  printStationId String?
+  printStation   PrintStation?      @relation(fields: [printStationId], references: [id], onDelete: SetNull)
+  source         ProductGroupSource @default(MANUAL)
+  /// Con source = SHOPIFY: el GID del producto de Shopify.
+  externalId     String?
+  deletedAt      DateTime?
+  deletedBy      String?
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+
+  options        ProductGroupOption[]
+  modifierGroups ProductGroupModifierGroup[]
+  products       Product[]
+
+  @@unique([venueId, source, externalId])
+  @@index([venueId, deletedAt])
+}
+
+/// Un eje de la familia («Talla»). Máximo 3 por padre (lo impone el servicio).
+model ProductGroupOption {
+  id            String                    @id @default(cuid())
+  groupId       String
+  group         ProductGroup              @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  name          String
+  position      Int
+  values        ProductGroupOptionValue[]
+  variantValues ProductVariantValue[]
+
+  @@unique([groupId, name])
+  @@unique([groupId, position])
+}
+
+/// Un valor de un eje («M», «Azul»).
+model ProductGroupOptionValue {
+  id            String                @id @default(cuid())
+  optionId      String
+  option        ProductGroupOption    @relation(fields: [optionId], references: [id], onDelete: Cascade)
+  value         String
+  position      Int
+  variantValues ProductVariantValue[]
+
+  @@unique([optionId, value])
+  @@index([optionId, position])
+}
+
+/// Extras (grupos de modificadores) del padre; el motor los copia a ProductModifierGroup de cada variante.
+model ProductGroupModifierGroup {
+  id              String        @id @default(cuid())
+  groupId         String
+  group           ProductGroup  @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  modifierGroupId String
+  modifierGroup   ModifierGroup @relation(fields: [modifierGroupId], references: [id], onDelete: Cascade)
+  displayOrder    Int           @default(0)
+
+  @@unique([groupId, modifierGroupId])
+  @@index([modifierGroupId])
+}
+
+/// Qué valor tiene cada variante en cada eje.
+model ProductVariantValue {
+  productId     String
+  product       Product                 @relation(fields: [productId], references: [id], onDelete: Cascade)
+  optionId      String
+  option        ProductGroupOption      @relation(fields: [optionId], references: [id], onDelete: Cascade)
+  optionValueId String
+  optionValue   ProductGroupOptionValue @relation(fields: [optionValueId], references: [id], onDelete: Restrict)
+
+  @@id([productId, optionId])
+  @@index([optionValueId])
+  @@index([optionId])
+}
+
 // ==========================================
 // MEASUREMENT UNITS (Custom units per venue)
 // ==========================================
@@ -16155,9 +16262,10 @@ model PrintStation {
   displayOrder        Int       @default(0)
 
   // Routing back-relations (cascade resolves product override ?? category default ?? venue default)
-  categories MenuCategory[]
-  products   Product[]
-  orderItems OrderItem[]
+  categories    MenuCategory[]
+  products      Product[]
+  orderItems    OrderItem[]
+  productGroups ProductGroup[]
   printJobs  PrintJob[]
   kdsOrders  KdsOrder[]
 
@@ -19378,6 +19486,7 @@ enum ShopifyIssueReason {
   NO_RASTREADO
   SIN_INVENTARIO
   ERROR_IMPORTACION
+  PRODUCTO_CON_VARIANTES
 }
 
 /// Una tienda de Shopify ligada a una organización. El token va cifrado (SHOPIFY_TOKEN_KEY).

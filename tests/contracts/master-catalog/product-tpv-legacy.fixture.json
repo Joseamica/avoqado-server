@@ -69,7 +69,11 @@
           "availableQuantity": null,
           "availableQuantityExact": null,
           "limitingIngredient": null,
-          "insufficientIngredients": null
+          "insufficientIngredients": null,
+          "productGroupId": null,
+          "productGroupName": null,
+          "productGroupImageUrl": null,
+          "variantOptions": null
         }
       ],
       "correlationId": "<correlation-id>"

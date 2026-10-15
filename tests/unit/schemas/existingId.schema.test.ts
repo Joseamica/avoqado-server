@@ -3,6 +3,7 @@ import { existingId } from '../../../src/schemas/common/existingId.schema'
 import * as tpv from '../../../src/schemas/tpv.schema'
 import * as menu from '../../../src/schemas/dashboard/menu.schema'
 import * as menuCategory from '../../../src/schemas/dashboard/menuCategory.schema'
+import * as modifierAnalytics from '../../../src/schemas/dashboard/modifierInventoryAnalytics.schema'
 import * as inventory from '../../../src/schemas/dashboard/inventory.schema'
 import * as classSession from '../../../src/schemas/dashboard/classSession.schema'
 import * as staffPay from '../../../src/schemas/dashboard/staffPay.schema'
@@ -36,6 +37,24 @@ const CAMPOS: Array<[string, z.ZodTypeAny, string[]]> = [
   ['menu RemoveModifierGroup', menu.RemoveModifierGroupFromProductParamsSchema, ['params', 'productId']],
   ['menu ReorderProducts', menu.ReorderProductsSchema, ['body', 'id']],
   ['menu BulkUpdate productIds', menu.BulkUpdateProductsSchema, ['body', 'productIds']],
+  // Menú: grupos de extras (13-oct: `modifierGroupIds` de ProductBodyBase seguía en `.cuid()`)
+  ['menu CreateProduct modifierGroupIds', menu.CreateProductSchema, ['body', 'modifierGroupIds']],
+  ['menu UpdateProduct modifierGroupIds', menu.UpdateProductSchema, ['body', 'modifierGroupIds']],
+  ['menu AssignModifierGroup modifierGroupId', menu.AssignModifierGroupToProductSchema, ['body', 'modifierGroupId']],
+  ['menu RemoveModifierGroup modifierGroupId', menu.RemoveModifierGroupFromProductParamsSchema, ['params', 'modifierGroupId']],
+  ['menu UpdateModifierGroup', menu.UpdateModifierGroupSchema, ['params', 'modifierGroupId']],
+  ['menu GetModifierGroupParams', menu.GetModifierGroupParamsSchema, ['params', 'modifierGroupId']],
+  ['menu GetModifierParams group', menu.GetModifierParamsSchema, ['params', 'modifierGroupId']],
+  ['menu GetModifierParams modifier', menu.GetModifierParamsSchema, ['params', 'modifierId']],
+  ['menu CreateModifier group', menu.CreateModifierSchema, ['params', 'modifierGroupId']],
+  ['menu CreateModifier rawMaterialId', menu.CreateModifierSchema, ['body', 'rawMaterialId']],
+  ['menu UpdateModifier group', menu.UpdateModifierSchema, ['params', 'modifierGroupId']],
+  ['menu UpdateModifier modifier', menu.UpdateModifierSchema, ['params', 'modifierId']],
+  ['menu ConfigureModifierInventory group', menu.ConfigureModifierInventorySchema, ['params', 'modifierGroupId']],
+  ['menu ConfigureModifierInventory modifier', menu.ConfigureModifierInventorySchema, ['params', 'modifierId']],
+  ['menu ConfigureModifierInventory rawMaterialId', menu.ConfigureModifierInventorySchema, ['body', 'rawMaterialId']],
+  ['modifierAnalytics UsageStats group', modifierAnalytics.GetModifierUsageStatsSchema, ['query', 'modifierGroupId']],
+  ['modifierAnalytics ModifiersWithInventory groupId', modifierAnalytics.GetModifiersWithInventorySchema, ['query', 'groupId']],
   // Menú: categoría
   ['menu CreateProduct categoryId', menu.CreateProductSchema, ['body', 'categoryId']],
   ['menu BulkUpdate categoryId', menu.BulkUpdateProductsSchema, ['body', 'updates', 'categoryId']],
@@ -76,4 +95,25 @@ describe.each(CAMPOS)('%s', (_nombre, schema, path) => {
   it.each(IDS_REALES)('acepta %s', id => expect(field(schema, ...path).safeParse(id).success).toBe(true))
   it('acepta cuid v1', () => expect(field(schema, ...path).safeParse(CUID_V1).success).toBe(true))
   it('rechaza basura', () => expect(field(schema, ...path).safeParse("x'; DROP TABLE").success).toBe(false))
+})
+
+describe('ProductBodyBase.modifierGroupIds', () => {
+  // Id real de un grupo de extras que no empieza con «c» (caso del brief de la tarea 15).
+  const ID_NO_CUID = 't5ijfz9h610aeor1c93boa5r0'
+  const crear = (modifierGroupIds: unknown) =>
+    menu.CreateProductSchema.safeParse({
+      params: { venueId: CUID_V1 },
+      body: { name: 'Latte', sku: 'LATTE', categoryId: CUID_V1, price: 50, modifierGroupIds },
+    })
+
+  it('acepta un id que no empieza con «c»', () => {
+    expect(crear([ID_NO_CUID, CUID_V1]).success).toBe(true)
+  })
+  it('un producto sin grupos de extras sigue siendo válido', () => {
+    expect(crear(undefined).success).toBe(true)
+    expect(crear([]).success).toBe(true)
+  })
+  it.each(['', ' ', "x'; DROP TABLE"])('rechaza basura %p dentro de la lista', basura => {
+    expect(crear([ID_NO_CUID, basura]).success).toBe(false)
+  })
 })

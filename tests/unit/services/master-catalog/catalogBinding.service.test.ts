@@ -162,6 +162,41 @@ describe('catalogBinding.service — explicit preview', () => {
     })
   })
 
+  it('🔴 variantes: una variante (producto con padre) no se liga al catálogo maestro', async () => {
+    const tx = bindingTransaction()
+    tx.product.findMany.mockResolvedValue([product({ productGroupId: 'group-1' })])
+    const preview = await bindingHarness(tx).service.preview(context, {
+      lines: [{ catalogItemId: 'item-1', venueId: 'venue-1', decision: { decision: 'LINK', productId: 'product-1' } }],
+    })
+    expect(preview).toMatchObject({ canConfirm: false, lines: [{ status: 'INVALID', errorCode: 'CATALOG_BINDING_PRODUCT_HAS_VARIANTS' }] })
+  })
+
+  it.each([
+    ['LINK de un suelto', { decision: 'LINK' as const, productId: 'product-1' }],
+    ['CREATE', { decision: 'CREATE' as const, create: { categoryId: 'category-1', localSku: 'LOCAL-1', initialPrice: '10.00' } }],
+  ])('🔴 Codex #5: un negocio con productos con variantes no se liga al catálogo maestro (%s)', async (_caso, decision) => {
+    const tx = bindingTransaction()
+    tx.product.findMany.mockImplementation(async (args: { take: number }) => (args.take === 2 ? [] : [product()]))
+    tx.productGroup.count.mockResolvedValue(1)
+    const preview = await bindingHarness(tx).service.preview(context, {
+      lines: [{ catalogItemId: 'item-1', venueId: 'venue-1', decision }],
+    })
+    expect(preview).toMatchObject({ canConfirm: false, lines: [{ status: 'INVALID', errorCode: 'CATALOG_BINDING_VENUE_HAS_VARIANTS' }] })
+    expect(tx.productGroup.count).toHaveBeenCalledWith({ where: { venueId: 'venue-1' } })
+    // Ronda 2 (deadlock nuevo): la vista previa NO bloquea el negocio; el candado lo toma sólo la confirmación, una vez por lote.
+    const sqls = tx.$queryRaw.mock.calls.map(c => ((c[0] as unknown as TemplateStringsArray) ?? []).join('?'))
+    expect(sqls.filter(sql => /FOR SHARE/.test(sql))).toEqual([])
+  })
+
+  it('Codex #5: SKIP no se bloquea por las familias (no liga nada)', async () => {
+    const tx = bindingTransaction()
+    tx.productGroup.count.mockResolvedValue(1)
+    const preview = await bindingHarness(tx).service.preview(context, {
+      lines: [{ catalogItemId: 'item-1', venueId: 'venue-1', decision: { decision: 'SKIP' } }],
+    })
+    expect(preview).toMatchObject({ canConfirm: true, lines: [{ status: 'READY', errorCode: null }] })
+  })
+
   it.each([
     [
       'foreign category',

@@ -10,6 +10,17 @@ export const SKU_REGEX = /^[A-Za-z0-9_-]+$/ // Alphanumeric (both cases), unders
 /** Longest gtin (barcode) the product schemas accept: GTIN-14. The Shopify loader drops longer ones before importing. */
 export const GTIN_MAX_LENGTH = 14
 
+/** Claves SAT (CFDI 4.0): UNA regla para el producto suelto y para el producto con variantes (productGroup.schema). */
+export const satProductKeySchema = z
+  .string()
+  .trim()
+  .regex(/^\d{8}$/, 'La clave de producto SAT debe tener 8 dígitos')
+export const satUnitKeySchema = z
+  .string()
+  .trim()
+  .min(1, 'La clave de unidad SAT es requerida')
+  .max(20, 'La clave de unidad SAT no puede exceder 20 caracteres')
+
 /** Máximo del SKU de un extra; el MCP (Task 5) usa el mismo. */
 export const MODIFIER_SKU_MAX = 64
 /** Formato del SKU de un extra: el MCP muestra el mismo texto que la API (el agente no ve un «Invalid» pelón). */
@@ -173,7 +184,7 @@ export const ProductBodyBase = z.object({
   active: z.boolean().optional(),
   availableFrom: z.string().datetime().optional().nullable(),
   availableUntil: z.string().datetime().optional().nullable(),
-  modifierGroupIds: z.array(z.string().cuid()).optional(),
+  modifierGroupIds: z.array(existingId('Grupo de extras inválido')).optional(),
 
   // ═══════════════════════════════════════════════════════════════
   // Square-aligned contextual fields
@@ -249,19 +260,8 @@ export const ProductBodyBase = z.object({
   // ═══════════════════════════════════════════════════════════════
   // Campos fiscales SAT (CFDI 4.0)
   // ═══════════════════════════════════════════════════════════════
-  satProductKey: z
-    .string()
-    .trim()
-    .regex(/^\d{8}$/, 'La clave de producto SAT debe tener 8 dígitos')
-    .optional()
-    .nullable(),
-  satUnitKey: z
-    .string()
-    .trim()
-    .min(1, 'La clave de unidad SAT es requerida')
-    .max(20, 'La clave de unidad SAT no puede exceder 20 caracteres')
-    .optional()
-    .nullable(),
+  satProductKey: satProductKeySchema.optional().nullable(),
+  satUnitKey: satUnitKeySchema.optional().nullable(),
   objetoImp: z.enum(['01', '02', '03', '04'], { invalid_type_error: 'ObjetoImp inválido' }).optional(),
 
   // Estación de impresión (ruteo de comandas)
@@ -405,7 +405,7 @@ export const UpdateModifierGroupSchema = z.object({
     ),
   params: z.object({
     venueId: z.string().cuid('Invalid venue ID format'),
-    modifierGroupId: z.string().cuid('Invalid modifier group ID format'),
+    modifierGroupId: existingId('El ID del grupo de extras no es válido'),
   }),
 })
 export type UpdateModifierGroupDto = z.infer<typeof UpdateModifierGroupSchema>['body']
@@ -425,7 +425,7 @@ export const CreateModifierSchema = z.object({
     active: z.boolean().optional(),
     sku: ModifierSkuSchema,
     durationMin: z.number().int().min(0).max(480).nullable().optional(),
-    rawMaterialId: z.string().cuid('Invalid raw material ID format').nullable().optional(),
+    rawMaterialId: existingId('El ID de la materia prima no es válido').nullable().optional(),
     quantityPerUnit: z.number().positive('Quantity must be positive').nullable().optional(),
     unit: z
       .enum(['UNIT', 'KILOGRAM', 'GRAM', 'LITER', 'MILLILITER', 'OUNCE', 'POUND', 'CUP', 'TABLESPOON', 'TEASPOON'])
@@ -435,7 +435,7 @@ export const CreateModifierSchema = z.object({
   }),
   params: z.object({
     venueId: z.string().cuid('Invalid venue ID format'),
-    modifierGroupId: z.string().cuid('Invalid modifier group ID format'),
+    modifierGroupId: existingId('El ID del grupo de extras no es válido'),
   }),
 })
 export type CreateModifierDto = z.infer<typeof CreateModifierSchema>['body']
@@ -444,8 +444,8 @@ export const UpdateModifierSchema = z.object({
   body: CreateModifierSchema.shape.body.partial(),
   params: z.object({
     venueId: z.string().cuid('Invalid venue ID format'),
-    modifierGroupId: z.string().cuid('Invalid modifier group ID format'),
-    modifierId: z.string().cuid('Invalid modifier ID format'),
+    modifierGroupId: existingId('El ID del grupo de extras no es válido'),
+    modifierId: existingId('El ID del extra no es válido'),
   }),
 })
 export type UpdateModifierDto = z.infer<typeof UpdateModifierSchema>['body']
@@ -460,15 +460,15 @@ export type UpdateModifierDto = z.infer<typeof UpdateModifierSchema>['body']
  */
 export const ConfigureModifierInventorySchema = z.object({
   body: z.object({
-    rawMaterialId: z.string().cuid('Invalid raw material ID format').nullable(),
+    rawMaterialId: existingId('El ID de la materia prima no es válido').nullable(),
     quantityPerUnit: z.number().positive('Quantity must be positive'),
     unit: z.enum(['UNIT', 'KILOGRAM', 'GRAM', 'LITER', 'MILLILITER', 'OUNCE', 'POUND', 'CUP', 'TABLESPOON', 'TEASPOON']),
     inventoryMode: z.enum(['ADDITION', 'SUBSTITUTION']),
   }),
   params: z.object({
     venueId: z.string().cuid('Invalid venue ID format'),
-    modifierGroupId: z.string().cuid('Invalid modifier group ID format'),
-    modifierId: z.string().cuid('Invalid modifier ID format'),
+    modifierGroupId: existingId('El ID del grupo de extras no es válido'),
+    modifierId: existingId('El ID del extra no es válido'),
   }),
 })
 export type ConfigureModifierInventoryDto = z.infer<typeof ConfigureModifierInventorySchema>['body']
@@ -505,7 +505,7 @@ export const ProductModifierGroupAssignmentSchema = z.object({
 
 export const AssignModifierGroupToProductSchema = z.object({
   body: z.object({
-    modifierGroupId: z.string().cuid('Invalid modifier group ID format'),
+    modifierGroupId: existingId('El ID del grupo de extras no es válido'),
     displayOrder: z.number().int().min(0).optional(),
   }),
   params: z.object({
@@ -520,7 +520,7 @@ export const RemoveModifierGroupFromProductParamsSchema = z.object({
   params: z.object({
     venueId: z.string().cuid('Invalid venue ID format'),
     productId: existingId('El ID del producto no es válido'),
-    modifierGroupId: z.string().cuid('Invalid modifier group ID format'),
+    modifierGroupId: existingId('El ID del grupo de extras no es válido'),
   }),
 })
 
@@ -759,14 +759,14 @@ export const VenueIdParamsSchema = z.object({
 export const GetModifierGroupParamsSchema = z.object({
   params: z.object({
     venueId: z.string().cuid('Invalid venue ID format'),
-    modifierGroupId: z.string().cuid('Invalid modifier group ID format'),
+    modifierGroupId: existingId('El ID del grupo de extras no es válido'),
   }),
 })
 
 export const GetModifierParamsSchema = z.object({
   params: z.object({
     venueId: z.string().cuid('Invalid venue ID format'),
-    modifierGroupId: z.string().cuid('Invalid modifier group ID format'),
-    modifierId: z.string().cuid('Invalid modifier ID format'),
+    modifierGroupId: existingId('El ID del grupo de extras no es válido'),
+    modifierId: existingId('El ID del extra no es válido'),
   }),
 })

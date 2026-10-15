@@ -238,6 +238,20 @@ describe('catalogBinding.service — confirm guards', () => {
     expect(h.dependencies.writeCatalogAudit).not.toHaveBeenCalled()
   })
 
+  it('🔴 ronda 3: un 40001 crudo (P2010, p. ej. del FOR SHARE del negocio) es el mismo conflicto que P2034: 409, nunca 500', async () => {
+    const h = bindingHarness()
+    const { preview } = await stageConfirmablePreview(h, { decision: 'LINK', productId: 'product-1' })
+    h.prisma.$transaction
+      .mockReset()
+      .mockRejectedValueOnce({ code: 'P2010', meta: { code: '40001', message: 'could not serialize access due to concurrent update' } })
+      .mockImplementationOnce(async (callback: (client: typeof h.tx) => unknown) => callback(h.tx))
+
+    await expect(
+      h.service.confirm(context, confirmInput(preview.bindingBatchId as string, preview.previewToken as string, 'binding-40001')),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'CATALOG_BINDING_CONCURRENT_CHANGE' })
+    expect(h.tx.catalogVenueBinding.create).not.toHaveBeenCalled()
+  })
+
   it('does not recover a P2034 winner through a different idempotency key', async () => {
     const h = bindingHarness()
     const { preview, storedBatch } = await stageConfirmablePreview(h, { decision: 'LINK', productId: 'product-1' })

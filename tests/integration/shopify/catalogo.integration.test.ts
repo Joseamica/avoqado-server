@@ -33,6 +33,7 @@ import {
   UBICACION_PRUEBA,
 } from './fixtures'
 import { atenderFalla, leerNiveles, MIN_HTTP_MS, TOKEN_ILEGIBLE } from '@/services/commerce-channels/shopify/shopify.store.service'
+import { markProductGroupWriter } from '@/services/product-variants/productGroup.service'
 import {
   conPlan,
   contexto,
@@ -232,6 +233,25 @@ describe('emparejar y crear (12 bis.13, #11, #20, N07, N05)', () => {
     })
     expect(await prisma.product.findUniqueOrThrow({ where: { id: ex.productId } })).toEqual(antes)
     expect(await problema(e, 11)).toMatchObject({ reason: motivo, productId: ex.productId })
+  })
+
+  it('🔴 variantes (A12): un existente que es variante de un producto de Avoqado ⇒ PRODUCTO_CON_VARIANTES; no se liga ni cambia', async () => {
+    const e = await conectando()
+    const ex = await agregarProductoShopify(e, { sku: 'VAR-LIGA', pareja: false })
+    await prisma.$transaction(async tx => {
+      await markProductGroupWriter(tx) // meterlo a una familia sólo lo hace el motor
+      const p = await tx.product.findUniqueOrThrow({ where: { id: ex.productId } })
+      const g = await tx.productGroup.create({ data: { venueId: e.venueId, name: p.name, categoryId: p.categoryId } })
+      await tx.product.update({ where: { id: ex.productId }, data: { productGroupId: g.id, originSystem: 'SHOPIFY' } })
+    })
+    const antes = await prisma.product.findUniqueOrThrow({ where: { id: ex.productId } })
+    expect(await upsertShopifyVariant(await contexto(e), variante(12, { sku: 'VAR-LIGA', barcode: null }))).toEqual({
+      kind: 'PROBLEMA',
+      reason: 'PRODUCTO_CON_VARIANTES',
+    })
+    expect(await prisma.product.findUniqueOrThrow({ where: { id: ex.productId } })).toEqual(antes)
+    expect(await prisma.shopifyVariantLink.count({ where: { productId: ex.productId } })).toBe(0)
+    expect(await problema(e, 12)).toMatchObject({ reason: 'PRODUCTO_CON_VARIANTES', productId: ex.productId })
   })
 
   it('#14: el plan se revisa DENTRO de la transacción común, con la sucursal ya bloqueada: sin plan, nada se escribe', async () => {

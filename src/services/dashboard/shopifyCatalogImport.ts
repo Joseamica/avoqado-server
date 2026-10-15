@@ -83,7 +83,7 @@ export interface ShopifyConversion {
   variants: ShopifyVariant[]
 }
 
-const COLUMNS = {
+export const COLUMNS = {
   handle: ['handle', 'url handle'],
   title: ['title'],
   type: ['type'],
@@ -93,13 +93,16 @@ const COLUMNS = {
   option1: ['option1 value'],
   option2: ['option2 value'],
   option3: ['option3 value'],
+  option1Name: ['option1 name'],
+  option2Name: ['option2 name'],
+  option3Name: ['option3 name'],
   sku: ['variant sku', 'sku'],
   price: ['variant price', 'price'],
   barcode: ['variant barcode', 'variant barcodes', 'barcodes', 'barcode'],
   imageSrc: ['image src', 'product image url'],
   variantImage: ['variant image', 'variant image url'],
 } as const
-type Column = keyof typeof COLUMNS
+export type Column = keyof typeof COLUMNS
 
 const NO_CATEGORY = 'Sin categoría'
 const DEFAULT_TITLE = 'Default Title'
@@ -112,7 +115,7 @@ const SCIENTIFIC = /^\d+([.,]\d+)?e\+?\d+$/i
 // Product.price is Decimal(10, 2).
 const MAX_PRICE = new Prisma.Decimal('99999999.99')
 
-function parseCsv(text: string): { rows: Record<string, string>[]; fields: string[] } {
+export function parseCsv(text: string): { rows: Record<string, string>[]; fields: string[] } {
   const parsed = Papa.parse<Record<string, string>>(text.replace(/^\uFEFF/, ''), {
     header: true,
     skipEmptyLines: 'greedy',
@@ -143,7 +146,7 @@ export function parsePriceListCsv(text: string): Map<string, string> {
  * «gtin:0001234; upc:5678» → ['0001234', '5678']. Shopify allows up to 20, with an optional type prefix, and writes a
  * leading apostrophe («'8435732763015») so a spreadsheet keeps the zeros: the scanner reads the digits without it.
  */
-function barcodesOf(value: string): string[] {
+export function barcodesOf(value: string): string[] {
   return value
     .split(';')
     .map(code =>

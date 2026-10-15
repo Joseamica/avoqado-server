@@ -41,6 +41,11 @@ const EXPECTED_WRITES: Record<string, Partial<Record<ProductMutation, number>>> 
   'src/services/onboarding/demoSeed.service.ts': { create: 1, update: 2 },
   'src/services/onboarding/venueCreation.service.ts': { create: 1 },
   'src/services/pos-sync/posSyncOrderItem.service.ts': { upsert: 1 },
+  // Variantes (spec 2026-10-14): el motor único escribe las copias del padre (alta, edición, agregar/renombrar/foto) tras el
+  // cerco del catálogo; archivar y separar sólo apagan o sacan de la familia (nunca activan).
+  'src/services/product-variants/productGroup.service.ts': { create: 1, update: 4, updateMany: 3 },
+  // Agrupar productos que ya existen: los mete en la familia tras el cerco del catálogo; nunca toca `active`.
+  'src/services/product-variants/groupExisting.service.ts': { update: 1 },
   'src/services/upsell/upsell.service.ts': { updateMany: 1 },
 }
 

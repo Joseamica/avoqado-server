@@ -13,6 +13,7 @@ import {
   type CatalogBindingDependencyAuthorityV1,
 } from './catalogBindingRecoverySchema.service'
 import { canonicalJsonV1, hashCanonicalJsonV1 } from './catalogHash.service'
+import { isSerializationFailure } from '../../utils/serializableRetry'
 
 const OPERATION = 'CATALOG_BINDING'
 const MAX_LINES = 100
@@ -90,8 +91,9 @@ export function isCatalogBindingDomainWriteConflict(error: unknown): boolean {
   return false
 }
 
+/** P2034, o el 40001 crudo que llega como P2010 (el `FOR SHARE` de los negocios en la confirmación): misma respuesta, 409. */
 export function isCatalogBindingSerializationConflict(error: unknown): boolean {
-  return isRecord(error) && error.code === 'P2034'
+  return isSerializationFailure(error)
 }
 
 function tokenMatches(raw: string, digest: string): boolean {

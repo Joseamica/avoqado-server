@@ -532,6 +532,9 @@ export async function deleteVenue(orgId: string, venueId: string, options?: { sk
       })
       logger.info(`  ✓ Deleted ${deletedProducts.count} Products`)
     }
+    // Variantes: el padre va después de sus productos (Product.productGroupId es RESTRICT). Fuera del `if`: un padre sin
+    // productos también bloquearía el borrado de su categoría (ProductGroup.categoryId es RESTRICT).
+    await tx.productGroup.deleteMany({ where: { venueId } })
 
     // 8. Delete Modifiers and ModifierGroups
     const modifierGroupIds = await tx.modifierGroup.findMany({

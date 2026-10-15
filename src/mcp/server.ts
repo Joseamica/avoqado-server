@@ -49,6 +49,7 @@ import { registerDeliveryActivationTools } from './tools/deliveryActivation'
 import { registerDeliveryCourierTools } from './tools/deliveryCourier'
 import { registerDeliveryLineActionTools } from './tools/deliveryLineActions'
 import { registerProductTools } from './tools/products'
+import { registerProductVariantTools } from './tools/productVariants'
 import { registerTrendTools } from './tools/trends'
 import { registerOrganizationTools } from './tools/organizations'
 import { registerPaymentLinkTools } from './tools/paymentLinks'
@@ -140,6 +141,7 @@ export function registerAllTools(server: McpServer, scope: McpScope, flags: Tool
   registerDeliveryCourierTools(server, scope)
   registerDeliveryLineActionTools(server, scope)
   registerProductTools(server, scope)
+  registerProductVariantTools(server, scope) // free mode only: not in the certified directory
   registerTrendTools(server, scope)
   registerOrganizationTools(server, scope)
   registerPaymentLinkTools(server, scope)

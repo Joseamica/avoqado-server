@@ -23,6 +23,9 @@ import { normalizarIvaDeProducto, traducirErrorDeIva } from '../fiscal/normaliza
 import { bloquearParaCambiarIva } from '../fiscal/exclusionContable'
 import { isRetryableDbError } from '../../utils/serializableRetry'
 import { ajustarParejaAlProducto } from '../commerce-channels/shopify/shopify.store.service'
+import { productGroupInclude, withVariantFields } from '../product-variants/variantPayload'
+import { assertLooseProductForModifiers, assertNoGroupOwnedChanges } from '../product-variants/groupOwnedFields'
+import { groupOwnedFieldError, isGroupWriterViolation } from '../product-variants/variantErrors'
 
 export interface CreateProductDto {
   name: string
@@ -470,6 +473,7 @@ export async function getProducts(
     include: {
       category: true,
       inventory: true, // ✅ For QUANTITY tracking
+      ...productGroupInclude, // Variantes: 4 campos opcionales del contrato (nunca `variants`)
       ...(includeModifiers && {
         modifierGroups: {
           include: {
@@ -514,7 +518,8 @@ export async function getProducts(
 
   // availableQuantity needs the recipe tree — only compute it when recipe was loaded. Light callers
   // (includeRecipe:false) don't use availableQuantity, so we skip the per-product availability work.
-  return includeRecipe ? products.map(product => ({ ...product, ...computeInventoryAvailability(product) })) : products
+  const salida = includeRecipe ? products.map(product => ({ ...product, ...computeInventoryAvailability(product) })) : products
+  return salida.map(withVariantFields)
 }
 
 /**
@@ -533,6 +538,7 @@ export async function getProduct(venueId: string, productId: string): Promise<an
     include: {
       category: true,
       inventory: true, // ✅ For QUANTITY tracking
+      ...productGroupInclude,
       modifierGroups: {
         include: {
           group: {
@@ -572,10 +578,10 @@ export async function getProduct(venueId: string, productId: string): Promise<an
   }
 
   // ✅ Calculate availableQuantity + ingredient shortage (Toast POS pattern)
-  return {
+  return withVariantFields({
     ...product,
     ...computeInventoryAvailability(product), // availableQuantity + limitingIngredient + insufficientIngredients
-  }
+  })
 }
 
 /**
@@ -930,6 +936,29 @@ export async function updateProduct(
       categoryId: productData.categoryId,
       printStationId: productData.printStationId,
     })
+    // Variantes (spec §6): los datos del padre se editan en el padre; el trigger lo impone, aquí se dice en español.
+    // La guardia de gobierno ya tomó la fila (FOR NO KEY UPDATE): basta releer dentro de la transacción (ronda 2).
+    const fila = await tx.product.findFirst({
+      where: { id: productId, venueId },
+      select: {
+        id: true,
+        productGroupId: true,
+        name: true,
+        description: true,
+        type: true,
+        imageUrl: true,
+        categoryId: true,
+        printStationId: true,
+        satProductKey: true,
+        satUnitKey: true,
+        ivaTratamiento: true,
+        taxRate: true,
+        objetoImp: true,
+      },
+    })
+    if (fila) await assertNoGroupOwnedChanges(tx, fila, productData as unknown as Record<string, unknown>)
+    // Variante con el mismo conjunto de extras (ronda 1, N3): no se reescriben sus uniones ni su orden (son del padre).
+    if (fila?.productGroupId) delete updateData.modifierGroups
 
     // IVA por producto: sólo se escribe `ivaTratamiento` (nunca `taxRate`/`objetoImp`
     // directo) — el trigger de Product deriva la tupla desde ese único valor.
@@ -964,6 +993,8 @@ export async function updateProduct(
     } catch (e) {
       if (expectedState && (e as { code?: string }).code === 'P2025')
         throw new ConflictError('El producto cambió desde la vista previa. Revisa y confirma de nuevo.')
+      // El trigger del escritor único ganó una carrera (lo agruparon mientras se editaba): 409, nunca 500.
+      if (isGroupWriterViolation(e)) throw groupOwnedFieldError('con variantes')
       traducirErrorDeIva(e)
       throw e
     }
@@ -1073,14 +1104,52 @@ export async function updateProduct(
  * limpiar `deletedAt`/`deletedBy` (lo hace la importación por SKU).
  */
 export async function archivarProductos(
-  db: Pick<Prisma.TransactionClient, 'product'>,
+  db: Pick<Prisma.TransactionClient, 'product' | 'productGroup' | '$queryRaw'>,
   where: { venueId: string; id?: string; sku?: { notIn: string[] } },
   deletedBy: string | null,
+  /** Salida opcional: los padres archivados por quedarse sin variantes vivas, para su ActivityLog DESPUÉS del commit. */
+  archivedGroupIds?: string[],
+  /**
+   * `false` SÓLO para quien ya bloqueó el producto antes (Shopify, §10.3: Product → sucursal → tienda): tomar el negocio
+   * después invertiría el orden contra la importación y las ediciones (negocio → producto). Sus productos nunca son variantes.
+   */
+  venueFirst = true,
 ): Promise<number> {
+  if (where.id) {
+    // Variantes: orden de candados del motor (negocio → padre → variantes). Sin esto, borrar una talla mientras otra persona
+    // edita su familia se trababa (deadlock) entre la fila de la talla y la del padre. Los masivos (reemplazar menú) ya
+    // corren detrás del cerco del negocio, que el motor también espera. Codex #2: el negocio va ANTES de leer si es variante
+    // (quien agrupa toma su cerco y espera); leída después, una agrupación en medio dejaba el padre fuera del orden.
+    if (venueFirst) await db.$queryRaw`SELECT id FROM "Venue" WHERE id = ${where.venueId} FOR SHARE`
+    const p = await db.product.findFirst({ where: { id: where.id, venueId: where.venueId }, select: { productGroupId: true } })
+    if (p?.productGroupId) {
+      if (!venueFirst) await db.$queryRaw`SELECT id FROM "Venue" WHERE id = ${where.venueId} FOR SHARE`
+      await db.$queryRaw`SELECT id FROM "ProductGroup" WHERE id = ${p.productGroupId} FOR UPDATE`
+    }
+  }
+  const deletedAt = new Date()
   const { count } = await db.product.updateMany({
     where: { ...where, deletedAt: null },
-    data: { deletedAt: new Date(), deletedBy, active: false },
+    data: { deletedAt, deletedBy, active: false },
   })
+  // Variantes (decisión 3c): una familia que con esto se quedó sin variantes vivas se archiva igual que en detachVariant. Sólo
+  // las que perdieron una variante en ESTA sentencia (mismo `deletedAt`). Por páginas y por id (ronda 1, N2: hay que saber
+  // cuáles, para su bitácora): cada vuelta archiva las que encontró, que salen del filtro, así que termina sola.
+  if (count) {
+    const vacias: Prisma.ProductGroupWhereInput = {
+      venueId: where.venueId,
+      deletedAt: null,
+      products: { some: { deletedAt }, none: { deletedAt: null } },
+    }
+    for (;;) {
+      const grupos = await db.productGroup.findMany({ where: vacias, select: { id: true }, orderBy: { id: 'asc' }, take: 500 })
+      if (!grupos.length) break
+      const ids = grupos.map(g => g.id)
+      await db.productGroup.updateMany({ where: { id: { in: ids }, deletedAt: null }, data: { deletedAt, deletedBy } })
+      archivedGroupIds?.push(...ids)
+      if (grupos.length < 500) break
+    }
+  }
   return count
 }
 
@@ -1122,17 +1191,25 @@ export async function deleteProduct(venueId: string, productId: string, userId: 
     throw new AppError(`Product with ID ${productId} not found in venue ${venueId}`, 404)
   }
 
-  // Delete image from Firebase Storage if it exists
-  if (existingProduct.imageUrl) {
-    logger.info(`🗑️  Deleting product image from storage: ${existingProduct.imageUrl}`)
-    await deleteFileFromStorage(existingProduct.imageUrl).catch(error => {
+  // Delete image from Firebase Storage if nobody else uses it. Una variante (o una ya separada, auditoría A6) trae la foto del
+  // padre: borrarla dejaría sin foto a la familia entera.
+  const url = existingProduct.imageUrl
+  const otrosLaUsan = url
+    ? (await prisma.product.count({ where: { venueId, imageUrl: url, id: { not: existingProduct.id } } })) +
+      (await prisma.productGroup.count({ where: { venueId, imageUrl: url } }))
+    : 0
+  if (url && otrosLaUsan === 0) {
+    logger.info(`🗑️  Deleting product image from storage: ${url}`)
+    await deleteFileFromStorage(url).catch(error => {
       logger.error(`❌ Failed to delete product image from storage`, error)
       // Continue with soft delete even if storage cleanup fails
     })
   }
 
-  // Plan 5 (D1): archivar = deletedAt + deletedBy + active=false (el widget y la app de clientes filtran sólo `active`)
-  await archivarProductos(prisma, { venueId, id: productId }, userId)
+  // Plan 5 (D1): archivar = deletedAt + deletedBy + active=false (el widget y la app de clientes filtran sólo `active`).
+  // En transacción: si era la última variante viva, el padre se archiva junto con ella (decisión 3c).
+  const padresArchivados: string[] = []
+  await prisma.$transaction(tx => archivarProductos(tx, { venueId, id: productId }, userId, padresArchivados))
 
   // 🔌 REAL-TIME: Broadcast product deletion via Socket.IO
   const broadcastingService = socketManager.getBroadcastingService()
@@ -1169,6 +1246,17 @@ export async function deleteProduct(venueId: string, productId: string, userId: 
     entityId: productId,
     data: { name: existingProduct.name },
   })
+  // Ronda 1 (N2): era la última variante viva y el padre se archivó con ella (3c).
+  for (const groupId of padresArchivados) {
+    logAction({
+      staffId: userId,
+      venueId,
+      action: 'PRODUCT_GROUP_ARCHIVED',
+      entity: 'ProductGroup',
+      entityId: groupId,
+      data: { reason: 'LAST_VARIANT_ARCHIVED', productId },
+    })
+  }
 }
 
 /**
@@ -1193,67 +1281,57 @@ export async function assignModifierGroupToProduct(
   productId: string,
   data: { modifierGroupId: string; displayOrder?: number },
 ): Promise<any> {
-  // Check if product exists and belongs to venue
-  const product = await prisma.product.findFirst({
-    where: { id: productId, venueId },
-  })
+  return prisma.$transaction(async tx => {
+    // Check if product exists, belongs to venue and is not a variant (its extras belong to the parent)
+    await assertLooseProductForModifiers(tx, venueId, productId, `Product with ID ${productId} not found in venue ${venueId}`)
 
-  if (!product) {
-    throw new AppError(`Product with ID ${productId} not found in venue ${venueId}`, 404)
-  }
-
-  // Check if modifier group exists and belongs to venue
-  const modifierGroup = await prisma.modifierGroup.findFirst({
-    where: { id: data.modifierGroupId, venueId },
-  })
-
-  if (!modifierGroup) {
-    throw new AppError(`Modifier group with ID ${data.modifierGroupId} not found in venue ${venueId}`, 404)
-  }
-
-  // Get next display order if not provided
-  let displayOrder = data.displayOrder
-  if (displayOrder === undefined) {
-    const maxOrder = await prisma.productModifierGroup.findFirst({
-      where: { productId },
-      orderBy: { displayOrder: 'desc' },
-      select: { displayOrder: true },
+    // Check if modifier group exists and belongs to venue
+    const modifierGroup = await tx.modifierGroup.findFirst({
+      where: { id: data.modifierGroupId, venueId },
     })
-    displayOrder = (maxOrder?.displayOrder || 0) + 1
-  }
 
-  const assignment = await prisma.productModifierGroup.create({
-    data: {
-      productId,
-      groupId: data.modifierGroupId,
-      displayOrder,
-    },
-    include: {
-      group: true,
-    },
+    if (!modifierGroup) {
+      throw new AppError(`Modifier group with ID ${data.modifierGroupId} not found in venue ${venueId}`, 404)
+    }
+
+    // Get next display order if not provided
+    let displayOrder = data.displayOrder
+    if (displayOrder === undefined) {
+      const maxOrder = await tx.productModifierGroup.findFirst({
+        where: { productId },
+        orderBy: { displayOrder: 'desc' },
+        select: { displayOrder: true },
+      })
+      displayOrder = (maxOrder?.displayOrder || 0) + 1
+    }
+
+    return tx.productModifierGroup.create({
+      data: {
+        productId,
+        groupId: data.modifierGroupId,
+        displayOrder,
+      },
+      include: {
+        group: true,
+      },
+    })
   })
-
-  return assignment
 }
 
 /**
  * Remove a modifier group from a product
  */
 export async function removeModifierGroupFromProduct(venueId: string, productId: string, modifierGroupId: string): Promise<void> {
-  // Check if product exists and belongs to venue
-  const product = await prisma.product.findFirst({
-    where: { id: productId, venueId },
-  })
+  await prisma.$transaction(async tx => {
+    // Check if product exists, belongs to venue and is not a variant (its extras belong to the parent)
+    await assertLooseProductForModifiers(tx, venueId, productId, `Product with ID ${productId} not found in venue ${venueId}`)
 
-  if (!product) {
-    throw new AppError(`Product with ID ${productId} not found in venue ${venueId}`, 404)
-  }
-
-  await prisma.productModifierGroup.deleteMany({
-    where: {
-      productId,
-      groupId: modifierGroupId,
-    },
+    await tx.productModifierGroup.deleteMany({
+      where: {
+        productId,
+        groupId: modifierGroupId,
+      },
+    })
   })
 }
 
@@ -1274,6 +1352,7 @@ export async function getProductByBarcode(venueId: string, barcode: string): Pro
     include: {
       category: true,
       inventory: true,
+      ...productGroupInclude,
       modifierGroups: {
         include: {
           group: {
@@ -1312,10 +1391,10 @@ export async function getProductByBarcode(venueId: string, barcode: string): Pro
   }
 
   // ✅ Calculate availableQuantity + ingredient shortage (Toast POS pattern)
-  return {
+  return withVariantFields({
     ...product,
     ...computeInventoryAvailability(product), // availableQuantity + limitingIngredient + insufficientIngredients
-  }
+  })
 }
 
 // ═══════════════════════════════════════════════════════════════

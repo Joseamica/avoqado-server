@@ -12,6 +12,10 @@ import { archivarProductos, computeInventoryAvailability } from '../../services/
 import { Unit } from '@prisma/client'
 import logger from '../../config/logger'
 import { toLegacyProductPayload } from '../../utils/legacyProductPayload'
+import { productGroupInclude, withVariantFields } from '../../services/product-variants/variantPayload'
+import { assertNoGroupOwnedChanges } from '../../services/product-variants/groupOwnedFields'
+import { groupOwnedFieldError, isGroupWriterViolation } from '../../services/product-variants/variantErrors'
+import { logAction } from '../../services/dashboard/activity-log.service'
 import {
   ensureQuantityInventoryRow,
   inventoryMethodForNewProduct,
@@ -40,6 +44,8 @@ import { ajustarParejaAlProducto } from '../../services/commerce-channels/shopif
 const productInclude = {
   category: true,
   inventory: true,
+  // Variantes: los 4 campos opcionales del contrato (productGroupId/Name/ImageUrl, variantOptions). Nunca `variants`.
+  ...productGroupInclude,
   modifierGroups: {
     include: {
       group: {
@@ -64,6 +70,9 @@ const productInclude = {
   },
 }
 
+/** The only product types avoqado-android knows (ArticlesModels.kt `productType`); anything else it reads as REGULAR. */
+const ANDROID_KNOWN_PRODUCT_TYPES: readonly string[] = ['REGULAR', 'FOOD_AND_BEV', 'APPOINTMENTS_SERVICE', 'OTHER']
+
 /**
  * Attach computed availability to a product — the SAME shape the TPV/dashboard
  * clients get (availableQuantity + limitingIngredient + insufficientIngredients),
@@ -71,7 +80,7 @@ const productInclude = {
  * old clients keep reading availableQuantity and ignore the rest.
  */
 function withAvailableQuantity(product: any) {
-  const legacyProduct = toLegacyProductPayload(product)
+  const legacyProduct = withVariantFields(toLegacyProductPayload(product))
   return { ...legacyProduct, ...computeInventoryAvailability(legacyProduct) }
 }
 
@@ -255,7 +264,19 @@ export async function updateProduct(req: Request, res: Response, next: NextFunct
     // Verify the product belongs to this venue and is not deleted
     const existing = await prisma.product.findFirst({
       where: { id: productId, venueId, deletedAt: null },
-      select: { id: true, active: true },
+      select: {
+        id: true,
+        active: true,
+        productGroupId: true,
+        name: true,
+        description: true,
+        type: true,
+        imageUrl: true,
+        categoryId: true,
+        ivaTratamiento: true,
+        taxRate: true,
+        objetoImp: true,
+      },
     })
 
     if (!existing) {
@@ -305,6 +326,14 @@ export async function updateProduct(req: Request, res: Response, next: NextFunct
     if (data.price !== undefined && data.price !== null) data.price = parseFloat(String(data.price))
     if (data.cost !== undefined && data.cost !== null) data.cost = parseFloat(String(data.cost))
 
+    // Android maps every type it doesn't know to REGULAR and sends `type` on every save (ArticlesModels.kt `productType`,
+    // ArticlesViewModel.updateProduct). On a variant of an inherited type (RETAIL, FOOD…) that echo is not a change: drop it.
+    if (existing.productGroupId && data.type === 'REGULAR' && !ANDROID_KNOWN_PRODUCT_TYPES.includes(existing.type)) delete data.type
+
+    // Variantes (spec §6): nombre, categoría, foto, tipo e IVA son del padre; la app manda el formulario entero y sólo un
+    // cambio REAL responde 409. Una carrera con el agrupado la cierra el trigger (mapeado abajo).
+    await assertNoGroupOwnedChanges(prisma, existing, { ...data, ivaTratamiento: req.body?.ivaTratamiento, taxRate: req.body?.taxRate })
+
     const actor = resolveLegacyCatalogActor(req.authContext!.userId, Boolean(req.authContext?.isImpersonating))
     const product = await prisma.$transaction(async tx => {
       // Plan 4: con un campo de IVA, la organización se bloquea PRIMERO (orden del catálogo), antes del cerco negocio → producto.
@@ -340,6 +369,7 @@ export async function updateProduct(req: Request, res: Response, next: NextFunct
       try {
         updated = await tx.product.update({ where: { id: productId }, data, include: productInclude })
       } catch (e) {
+        if (isGroupWriterViolation(e)) throw groupOwnedFieldError('con variantes')
         traducirErrorDeIva(e)
         throw e
       }
@@ -361,11 +391,14 @@ export async function updateProduct(req: Request, res: Response, next: NextFunct
 
     return res.json({ success: true, data: withAvailableQuantity(product) })
   } catch (error) {
-    logger.error('Error updating product (mobile)', {
+    const meta = {
       error: error instanceof Error ? error.message : 'Unknown error',
       venueId: req.params.venueId,
       productId: req.params.productId,
-    })
+    }
+    // A 4xx is an expected rejection (e.g. renaming a variant → 409): a warn, not a false alert (/full-testing I-5).
+    if (error instanceof AppError && error.statusCode < 500) logger.warn('Product update rejected (mobile)', meta)
+    else logger.error('Error updating product (mobile)', meta)
     next(error)
   }
 }
@@ -391,8 +424,22 @@ export async function deleteProduct(req: Request, res: Response, next: NextFunct
       return res.status(404).json({ success: false, message: 'Producto no encontrado' })
     }
 
-    // Plan 5 (D1): la misma función de archivado que el dashboard y «Reemplazar menú»
-    await archivarProductos(prisma, { venueId, id: productId }, req.authContext?.userId || null)
+    // Plan 5 (D1): la misma función de archivado que el dashboard y «Reemplazar menú». En transacción: si era la última
+    // variante viva, el padre se archiva con ella (decisión 3c).
+    const staffId = req.authContext?.userId || null
+    const padresArchivados: string[] = []
+    await prisma.$transaction(tx => archivarProductos(tx, { venueId, id: productId }, staffId, padresArchivados))
+    // Ronda 1 (N2): el padre archivado con su última variante deja su renglón (después del commit).
+    for (const groupId of padresArchivados) {
+      void logAction({
+        staffId,
+        venueId,
+        action: 'PRODUCT_GROUP_ARCHIVED',
+        entity: 'ProductGroup',
+        entityId: groupId,
+        data: { reason: 'LAST_VARIANT_ARCHIVED', productId },
+      })
+    }
 
     return res.json({ success: true, data: { id: productId } })
   } catch (error) {

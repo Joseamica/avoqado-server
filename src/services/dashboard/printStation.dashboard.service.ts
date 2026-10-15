@@ -19,6 +19,8 @@ import { Prisma, PrinterConnectionType } from '@prisma/client'
 import { BadRequestError, ForbiddenError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { logAction } from './activity-log.service'
+import { assertNoGroupedProducts } from '../product-variants/groupOwnedFields'
+import { groupOwnedFieldError, isGroupWriterViolation } from '../product-variants/variantErrors'
 import { isActiveSuperAdmin } from '../../mcp/scope'
 import { venueHasFeatureAccess } from '../access/basePlan.service'
 import { PANTALLA_ABIERTA_A_CLIENTES } from '../kds/kitchenDisplayRelease'
@@ -312,8 +314,13 @@ async function assertPuedePrenderPantalla(venueId: string, performedBy?: string)
 export async function deleteStation(venueId: string, stationId: string, performedBy?: string) {
   const station = await prisma.printStation.findFirst({ where: { id: stationId, venueId } })
   if (!station) throw new NotFoundError('Estación no encontrada')
-  // FK SetNull en MenuCategory/Product/OrderItem/PrintJob.printStationId.
-  await prisma.printStation.delete({ where: { id: stationId } })
+  // FK SetNull en MenuCategory/Product/ProductGroup/OrderItem/PrintJob.printStationId. Codex #4: el negocio primero, como el
+  // motor de variantes (cerco → padre → variantes): sin él, el SET NULL esperaba al padre bloqueado mientras la variante
+  // nueva, por su FK, esperaba a esta estación: deadlock.
+  await prisma.$transaction(async tx => {
+    await tx.$queryRaw`SELECT id FROM "Venue" WHERE id = ${venueId} FOR SHARE`
+    await tx.printStation.delete({ where: { id: stationId } })
+  })
   void logAction({
     staffId: performedBy ?? null,
     venueId,
@@ -443,17 +450,30 @@ export async function assignRouting(venueId: string, input: AssignRoutingInput, 
 
   let categoriesUpdated = 0
   let productsUpdated = 0
-  await prisma.$transaction(async tx => {
-    for (const entry of input.categories ?? []) {
-      // venueId en el where = aislamiento multi-tenant (ignora ids ajenos).
-      const r = await tx.menuCategory.updateMany({ where: { id: entry.id, venueId }, data: { printStationId: entry.printStationId } })
-      categoriesUpdated += r.count
-    }
-    for (const entry of input.products ?? []) {
-      const r = await tx.product.updateMany({ where: { id: entry.id, venueId }, data: { printStationId: entry.printStationId } })
-      productsUpdated += r.count
-    }
-  })
+  await prisma
+    .$transaction(async tx => {
+      // Variantes (A9): la impresora de una talla es la de su padre; se cambia desde ese producto, no en la matriz de ruteo.
+      await assertNoGroupedProducts(
+        tx,
+        venueId,
+        (input.products ?? []).map(p => p.id),
+        'la impresora',
+      )
+      for (const entry of input.categories ?? []) {
+        // venueId en el where = aislamiento multi-tenant (ignora ids ajenos).
+        const r = await tx.menuCategory.updateMany({ where: { id: entry.id, venueId }, data: { printStationId: entry.printStationId } })
+        categoriesUpdated += r.count
+      }
+      for (const entry of input.products ?? []) {
+        const r = await tx.product.updateMany({ where: { id: entry.id, venueId }, data: { printStationId: entry.printStationId } })
+        productsUpdated += r.count
+      }
+    })
+    .catch(e => {
+      // Lo agruparon entre la revisión y la escritura: el trigger del escritor único lo frena; 409, nunca 500.
+      if (isGroupWriterViolation(e)) throw groupOwnedFieldError('con variantes')
+      throw e
+    })
 
   void logAction({
     staffId: performedBy ?? null,

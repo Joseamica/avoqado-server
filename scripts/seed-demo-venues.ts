@@ -398,6 +398,7 @@ async function wipeSeededData(venueId: string): Promise<void> {
 
   // --- Products (must precede categories: Product.categoryId FK) ---
   await prisma.product.deleteMany({ where: { venueId } })
+  await prisma.productGroup.deleteMany({ where: { venueId } })
 
   // --- Menu structure ---
   const categories = await prisma.menuCategory.findMany({ where: { venueId }, select: { id: true } })

@@ -9,6 +9,7 @@ import { isDeepStrictEqual } from 'util'
 import { prismaMock } from '@tests/__helpers__/setup'
 import * as menuService from '@/services/dashboard/menu.dashboard.service'
 import { deleteFileFromStorage } from '@/services/storage.service'
+import { productGroupInclude } from '@/services/product-variants/variantPayload'
 
 jest.mock('@/communication/sockets', () => ({ __esModule: true, default: { getBroadcastingService: jest.fn().mockReturnValue(null) } }))
 jest.mock('@/services/storage.service', () => ({ deleteFileFromStorage: jest.fn().mockResolvedValue(undefined) }))
@@ -23,7 +24,8 @@ describe('plan 5 · las lecturas del menú sólo traen productos vigentes', () =
   it('getMenus (dashboard y /tpv/venues/:id/menus)', async () => {
     prismaMock.menu.findMany.mockResolvedValue([])
     await menuService.getMenus(V)
-    expect(productosDelMenu(prismaMock.menu.findMany.mock.calls[0][0])).toEqual({ where: VIGENTES })
+    // Variantes (2026-10-14): también los 4 campos del contrato (`productGroupInclude`); sigue pidiendo sólo los vigentes.
+    expect(productosDelMenu(prismaMock.menu.findMany.mock.calls[0][0])).toEqual({ where: VIGENTES, include: productGroupInclude })
   })
 
   it('getMenuById conserva su orden y sus modificadores', async () => {

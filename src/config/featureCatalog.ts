@@ -638,6 +638,17 @@ export const FEATURE_CATALOG: readonly FeatureCatalogEntry[] = Object.freeze(
           fr: 'Catalogue central',
         },
       },
+      {
+        id: 'PRODUCT_VARIANTS',
+        featureCode: 'PRODUCT_VARIANTS',
+        name: 'Variantes de producto',
+        description: 'Da de alta tallas, colores o presentaciones de un producto de un jalón y elígelas en el POS.',
+        category: 'inventory',
+        minimumTier: 'PRO',
+        offering: 'CONFIGURABLE',
+        requirement: null,
+        names: { es: 'Variantes de producto', en: 'Product variants', fr: 'Variantes de produit' },
+      },
     ] as FeatureCatalogEntry[]
   ).map(entry => Object.freeze({ ...entry, names: Object.freeze(entry.names) })),
 )
