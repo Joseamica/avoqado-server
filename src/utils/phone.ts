@@ -39,7 +39,13 @@ export function formaLegadaDeTelefonoMx(normalizado: string): string | null {
 
 // Formatos mexicanos viejos que libphonenumber ya no acepta: `+521`/`521` (celular) y `044`/`045` (marcación a celular),
 // seguidos de los 10 dígitos. Se reescriben a `+52` + 10 dígitos; lo demás se deja como venía.
+// 🔴 Y «+» + EXACTAMENTE 10 dígitos: es NUESTRO mal guardado (el OTP antes del 14-oct-2026 guardaba «'+' + dígitos» sin lada:
+// 71 clientes y 73 consumidores en 4 negocios). En este mercado no es un E.164 extranjero real; se lee como celular mexicano.
+// Existen E.164 válidos de 10 dígitos (Islandia: +354 + 7); si algún día se atiende ese mercado, esto se revisa. No abre una puerta:
+// el OTP manda el código a `normalizarTelefonoMx(entrada)`, así que nadie recibe el código de un número que no es suyo.
 function sinPrefijoMexicanoViejo(input: string): string {
+  const limpio = input.trim()
+  if (/^\+\d{10}$/.test(limpio)) return `+52${limpio.slice(1)}`
   const digits = input.replace(/\D/g, '')
   return /^(521|04[45])\d{10}$/.test(digits) ? `+52${digits.slice(3)}` : input
 }

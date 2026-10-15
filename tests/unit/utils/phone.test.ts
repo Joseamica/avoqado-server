@@ -74,6 +74,20 @@ describe('phonesMatch', () => {
   it('un número que no se entiende no empata con nada (falla cerrada)', () => {
     expect(phonesMatch('5512345678', '99-5512345678')).toBe(false)
   })
+  // Addendum 14-oct: «+» + 10 dígitos es NUESTRO mal guardado del OTP viejo, no un número extranjero.
+  it('«+» + 10 dígitos (OTP viejo) es el mismo celular mexicano', () => {
+    expect(phonesMatch('+5544422262', '5544422262')).toBe(true)
+    expect(phonesMatch('+5544422262', '+525544422262')).toBe(true)
+    expect(phonesMatch('+5543453965', '+52 55 4345 3965')).toBe(true)
+  })
+
+  it('regresión: lo que hoy NO empata sigue sin empatar (medido el 14-oct)', () => {
+    // Hoy: '+14155550100' → +14155550100 y '4155550100' → +524155550100 (lada 415 es válida en México): distintos.
+    expect(phonesMatch('+14155550100', '4155550100')).toBe(false)
+    expect(phonesMatch('+14155550100', '+14155550100')).toBe(true)
+    // «+» + 11 dígitos no se toca: un +1 sigue siendo de EE. UU.
+    expect(phonesMatch('+15512345678', '+525512345678')).toBe(false)
+  })
 })
 
 /**
