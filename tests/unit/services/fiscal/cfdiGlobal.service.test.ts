@@ -832,6 +832,7 @@ describe('C1 · motivos de exclusión (lista cerrada)', () => {
     'CORREGIDA_DESPUES',
     'YA_EXTRAIDO',
     'DEVUELTA',
+    'TARJETA_DE_REGALO',
     'OTRO',
   ]
   it('control — cada motivo tiene su texto, y YA_EXTRAIDO manda a soporte (C1-47)', () => {

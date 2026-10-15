@@ -6,6 +6,8 @@ export function withIssueTransaction<T extends IssueCfdiDeps>(deps: T): T {
   // C3: las lecturas de la venta FUERA de candados (¿está en una global viva? ¿tiene antecedente de extracción?); por default, ninguna.
   deps.globalVivaDeLaOrdenFuera ??= jest.fn().mockResolvedValue(null)
   deps.extraccionDeLaOrdenFuera ??= jest.fn().mockResolvedValue(null)
+  // Tarjetas de regalo (B3): ¿es una cuenta de VENTA de tarjetas? (lectura FUERA de candados); por default, no.
+  deps.cuentaDeTarjetasFuera ??= jest.fn().mockResolvedValue(null)
   const tx = {
     $queryRaw: jest.fn().mockResolvedValue([{ venueId: 'v1', organizationId: 'org1' }]),
     $executeRaw: jest.fn().mockResolvedValue(1),

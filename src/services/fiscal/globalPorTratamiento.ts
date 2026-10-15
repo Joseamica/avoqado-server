@@ -468,7 +468,8 @@ export function pertenenciaAlEmisor(
  * C1 (§4.3): por qué una venta del periodo NO entra a la factura global. Lista CERRADA: una venta, un motivo.
  * - De configuración (`dondePertenece`, antes de leer la venta): `EFECTIVO`, `COMERCIO_FUERA`, `SIN_EMISOR`, `SIN_TERMINAL`
  *   (`MOTIVOS_DE_CONFIGURACION`; los cuenta `contarExcluidasPorConfiguracion`).
- * - De contenido (`ticketParaGlobal`, `cfdiGlobal.service.ts`): `SIN_PAGAR`, `SIN_IMPORTE`, `FORMA_DE_PAGO_SIN_DEFINIR`,
+ * - De contenido (`ticketParaGlobal`, `cfdiGlobal.service.ts`): `TARJETA_DE_REGALO` (primero que todos: la venta de una tarjeta se factura
+ *   al usarla), `SIN_PAGAR`, `SIN_IMPORTE`, `FORMA_DE_PAGO_SIN_DEFINIR`,
  *   `PRODUCTO_POR_REVISAR`, `CARGO_POR_SERVICIO`, `OCHO_SIN_REGLA`, `IVA_APARTE_MIXTA`, `CONTRATO_DESCONOCIDO`, `DESCUENTO_SIN_REPARTO`,
  *   `NO_CUADRA` y `OTRO` (el detalle dice cuál).
  * - Del listado y la complementaria: `CORREGIDA_DESPUES` (Tareas 11 y 12) y `YA_EXTRAIDO` (C3).
@@ -493,6 +494,7 @@ export type MotivoExclusionGlobal =
   | 'CORREGIDA_DESPUES'
   | 'YA_EXTRAIDO'
   | 'DEVUELTA'
+  | 'TARJETA_DE_REGALO'
   | 'OTRO'
 
 /** Lo que ve quien factura (pantalla y MCP), en español llano: qué pasó y qué hacer. */
@@ -530,6 +532,9 @@ export const TEXTO_EXCLUSION_GLOBAL: Readonly<Record<MotivoExclusionGlobal, stri
   YA_EXTRAIDO:
     'Ya está documentada por una nota de extracción de su factura nominativa (viva o cancelada) y no vuelve sola a ninguna factura global; pídelo a soporte.',
   DEVUELTA: 'Se devolvió completa antes de emitir la factura global: no hay nada que facturar.',
+  // Tarjetas de regalo (1a, spec §7; LIVA y guía de CFDI: se factura una sola vez, al usarla, con forma 01).
+  TARJETA_DE_REGALO:
+    'Es la venta de una tarjeta de regalo: no es venta de mercancía y no se factura al venderla. Se factura cuando el cliente usa el saldo para pagar su compra.',
   OTRO: 'No se pudo armar su concepto para la factura global; el detalle dice por qué. Si no sabes cómo corregirla, repórtala a soporte.',
 })
 
