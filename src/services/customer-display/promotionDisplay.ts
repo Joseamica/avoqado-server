@@ -128,8 +128,13 @@ function sumarDias(fecha: string, dias: number): string {
 }
 
 const MINUTO = 60_000
+const HORIZONTE_MAXIMO_MS = 24 * 60 * MINUTO
 
-/** El desfase de la zona (hora local − UTC, en ms) en un instante, leído de Intl. Ver la nota de `getTimezoneOffset` arriba. */
+/**
+ * El desfase de la zona (hora local − UTC, en ms) en un instante, leído de Intl. 🔴 NO con `getTimezoneOffset` de date-fns-tz:
+ * alrededor del cambio de horario de Tijuana devuelve el desfase según la zona del PROCESO (en `2026-03-08T04:00Z` da −7 h;
+ * Intl, −8 h). El token `xxx` de `formatInTimeZone` sí lee el instante real.
+ */
 function desfase(zona: string, t: number): number {
   const s = formatInTimeZone(new Date(t), zona, 'xxx') // «-08:00»
   const signo = s.startsWith('-') ? -1 : 1
@@ -178,8 +183,14 @@ function tramoDeLaZona(zona: string, desde: number, hasta: number): TramoDeLaZon
  *   desfase del tramo: en otoño la misma hora local ocurre dos veces y las dos cuentan;
  * - el instante del salto: en primavera, una ventana que empezaba en la hora que no existe abre justo ahí.
  * Una ventana que cruza la medianoche no abre a medianoche (el día que cuenta es el que la abrió): no necesita candidato.
+ *
+ * 🔴 `horizonteMs` es de 24 h como máximo: los candidatos sólo cubren hoy, mañana y pasado, y el tramo supone a lo más UN
+ * cambio de horario. Con más, lanza `RangeError` en vez de contestar `null` cuando sí abría (p. ej. el domingo a 7 días).
  */
 export function proximaApertura(h: HorarioDePromocion, ahora: Date, zona: string, horizonteMs: number): Date | null {
+  if (horizonteMs > HORIZONTE_MAXIMO_MS) {
+    throw new RangeError(`proximaApertura: el horizonte máximo es de 24 h (se pidieron ${horizonteMs} ms)`)
+  }
   const desde = ahora.getTime()
   const limite = desde + horizonteMs
   const { desfases, salto } = tramoDeLaZona(zona, desde, limite)

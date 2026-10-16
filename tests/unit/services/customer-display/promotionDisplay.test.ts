@@ -149,6 +149,11 @@ describe('vigencia y próxima apertura', () => {
     expect(vigenteEn(horario({ validUntil: new Date('2026-09-24T20:00:00Z') }), AHORA, MX)).toBe(false)
   })
 
+  it('vigenteEn: las dos fechas son INCLUSIVAS, como isLiveAt del catálogo del POS', () => {
+    expect(vigenteEn(horario({ validUntil: AHORA }), AHORA, MX)).toBe(true)
+    expect(vigenteEn(horario({ validFrom: AHORA }), AHORA, MX)).toBe(true)
+  })
+
   it('abre hoy más tarde: hoy a su hora de apertura', () => {
     expect(proximaApertura(horario({ timeFrom: '18:00', timeUntil: '20:00' }), AHORA, MX, H24)).toEqual(
       new Date('2026-09-25T00:00:00.000Z'),
@@ -172,7 +177,7 @@ describe('vigencia y próxima apertura', () => {
     expect(proximaApertura(horario({ validFrom, timeFrom: '18:00', timeUntil: '20:00' }), AHORA, MX, H24)).toEqual(validFrom)
   })
 
-  it('por fecha futura con el horario cerrado a esa hora: abre en la siguiente ventana', () => {
+  it('por fecha futura con el horario cerrado a esa hora: null, porque la siguiente ventana cae fuera del horizonte', () => {
     const validFrom = new Date('2026-09-25T03:00:00.000Z') // 21:00 CDMX, después de la ventana 18-20
     expect(proximaApertura(horario({ validFrom, timeFrom: '18:00', timeUntil: '20:00' }), AHORA, MX, H24)).toBeNull() // mañana 18:00 > 24 h
   })
@@ -224,5 +229,11 @@ describe('vigencia y próxima apertura', () => {
   it('nunca devuelve una apertura en el pasado ni pasado el horizonte', () => {
     const abre = proximaApertura(horario({ timeFrom: '14:00', timeUntil: '14:30' }), AHORA, MX, H24)
     expect(abre).toEqual(new Date('2026-09-25T20:00:00.000Z')) // mañana 14:00: hoy ya pasó
+  })
+
+  it('un horizonte de más de 24 h lanza en vez de contestar null a medias (el domingo a 7 días sí abría)', () => {
+    expect(() => proximaApertura(horario({ daysOfWeek: [0] }), AHORA, MX, 7 * H24)).toThrow(RangeError)
+    expect(() => proximaApertura(horario({ daysOfWeek: [0] }), AHORA, MX, H24 + 1)).toThrow(RangeError)
+    expect(proximaApertura(horario({ daysOfWeek: [5] }), AHORA, MX, H24)).toEqual(new Date('2026-09-25T06:00:00.000Z')) // 24 h justas
   })
 })
