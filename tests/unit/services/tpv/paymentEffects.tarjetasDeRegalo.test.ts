@@ -48,7 +48,7 @@ describe('enqueuePaymentEffect · tarjetas de regalo (R1)', () => {
     expect(tx.paymentEffect.createMany).toHaveBeenCalledTimes(1)
   })
 
-  it('la marca viaja en la MISMA lectura de siempre (sin consulta nueva)', async () => {
+  it('la marca viaja en la MISMA lectura de siempre (sin consulta nueva), y sólo para comisión y referido', async () => {
     const tx = txFalso(false)
     await enqueuePaymentEffect(tx, efecto('COMMISSION'))
     expect(tx.payment.findFirst).toHaveBeenCalledTimes(1)
@@ -56,6 +56,11 @@ describe('enqueuePaymentEffect · tarjetas de regalo (R1)', () => {
       orderId: true,
       order: { select: { items: { where: { giftCardId: { not: null } }, select: { id: true }, take: 1 } } },
     })
+    // B6 r1: sin `relationJoins`, la marca anidada son 2 SQL más dentro de la transacción del cobro (con el FOR UPDATE tomado). Los
+    // demás efectos —recibo, reseña, costo— no la usan, así que leen lo de siempre.
+    const recibo = txFalso(false)
+    await enqueuePaymentEffect(recibo, efecto('RECEIPT'))
+    expect(recibo.payment.findFirst.mock.calls[0][0].select).toEqual({ orderId: true })
   })
 
   it('regresión: el doble de Prisma sin `order` (pruebas viejas) se comporta como antes', async () => {

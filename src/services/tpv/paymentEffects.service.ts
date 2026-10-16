@@ -55,16 +55,26 @@ const rastroDelError = (error: unknown) => ({
 
 /** Must be invoked from the financial transaction; dedupe never rewrites its snapshot. */
 export async function enqueuePaymentEffect(tx: Prisma.TransactionClient, input: PaymentEffectInput): Promise<void> {
-  const source = await tx.payment.findFirst({
-    where: { id: input.paymentId, venueId: input.venueId, orderId: input.orderId ?? undefined, status: 'COMPLETED' },
-    // Tarjetas de regalo (R1): la marca de la cuenta viaja en esta MISMA lectura (un renglón con `giftCardId` basta: no se mezclan).
-    select: { orderId: true, order: { select: { items: { where: { giftCardId: { not: null } }, select: { id: true }, take: 1 } } } },
-  })
+  const premiaVenta = input.kind === 'COMMISSION' || input.kind === 'REFERRAL'
+  const where = {
+    id: input.paymentId,
+    venueId: input.venueId,
+    orderId: input.orderId ?? undefined,
+    status: 'COMPLETED',
+  } satisfies Prisma.PaymentWhereInput
+  // Tarjetas de regalo (R1): la marca de la cuenta viaja en esta MISMA lectura (un renglón con `giftCardId` basta: no se mezclan), y
+  // sólo para comisión y referido: sin `relationJoins` son 2 SQL más dentro de la transacción del cobro (con el FOR UPDATE tomado).
+  const source: { orderId: string; order?: { items: Array<{ id: string }> } } | null = premiaVenta
+    ? await tx.payment.findFirst({
+        where,
+        select: { orderId: true, order: { select: { items: { where: { giftCardId: { not: null } }, select: { id: true }, take: 1 } } } },
+      })
+    : await tx.payment.findFirst({ where, select: { orderId: true } })
   if (!source || source.orderId !== input.orderId) throw new Error('PAYMENT_EFFECT_SOURCE_MISMATCH')
   // R1 (tarjetas de regalo): VENDER tarjetas no genera comisión ni califica referidos, así que tampoco tiene reversas. Aquí pasan todas
   // esas obligaciones —la comisión congelada de cada cobro, el referido y las reversas de una devolución—. Usar la tarjeta sí comisiona:
   // la cuenta de mercancía pagada con saldo no es de tarjetas.
-  if ((input.kind === 'COMMISSION' || input.kind === 'REFERRAL') && (source.order?.items?.length ?? 0) > 0) return
+  if (premiaVenta && (source.order?.items?.length ?? 0) > 0) return
   await tx.paymentEffect.createMany({ data: [{ ...input, version: 1 }], skipDuplicates: true })
 }
 

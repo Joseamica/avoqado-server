@@ -389,7 +389,9 @@ interface OnOrderPaidTxResult {
 export async function onOrderPaid(input: OnOrderPaidInput): Promise<void> {
   const txResult = await prisma.$transaction(async tx => {
     await tx.$queryRaw(Prisma.sql`SELECT id FROM "Order" WHERE id = ${input.orderId} AND "venueId" = ${input.venueId} FOR UPDATE`)
-    // R1 (tarjetas de regalo): vender una tarjeta no califica un referido; queda PENDING para la primera compra de verdad.
+    // R1 (tarjetas de regalo): vender una tarjeta no califica un referido; uno atado a una cuenta de tarjetas nunca califica. Por eso
+    // la captura sobre esa cuenta se rechaza (`GIFT_CARD_SALE`) y comprar la tarjeta no cuenta como compra previa: el referido se
+    // captura en la primera compra real (`referralCapture.service`).
     if (await leerSiEsCuentaDeTarjetas(tx, input.orderId)) return null
     if (await isOrderFullyReversed(input.orderId, input.venueId, tx)) {
       await tx.referral.updateMany({

@@ -19,6 +19,7 @@ import {
   manualVoidReferral,
 } from '@/services/referrals/referralCapture.service'
 import prisma from '@/utils/prismaClient'
+import { WHERE_ORDEN_SIN_TARJETAS } from '@/services/giftCards/giftCardMarks'
 
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
@@ -28,6 +29,8 @@ jest.mock('@/utils/prismaClient', () => ({
     referral: { create: jest.fn(), update: jest.fn(), findUnique: jest.fn() },
     staffVenue: { findFirst: jest.fn() },
     order: { count: jest.fn(), findFirst: jest.fn() },
+    // La marca de cuenta de tarjetas (`leerSiEsCuentaDeTarjetas`): sin respuesta ⇒ cuenta normal, así las pruebas viejas no cambian.
+    orderItem: { findFirst: jest.fn() },
     activityLog: { create: jest.fn() },
   },
 }))
@@ -317,6 +320,80 @@ describe('referralCapture.service', () => {
           capturedByStaffVenueId: 'sv_1',
         }),
       ).rejects.toThrow(/PROGRAM_INACTIVE/)
+    })
+  })
+
+  /**
+   * Tarjetas de regalo (R1, B6 r1): vender una tarjeta no es una compra. La captura sobre una cuenta de tarjetas se rechaza
+   * (`GIFT_CARD_SALE`) —un referido atado ahí nunca calificaría— y esa cuenta no hace al comprador «cliente existente», así que el
+   * referido se captura en su primera compra real.
+   */
+  describe('tarjetas de regalo (R1)', () => {
+    const ctx = { venueId: 'venue_1', referralCode: 'TESTMF-JOSE2K7', newCustomerId: 'cust_new' }
+    const capturar = (intendedOrderId?: string) =>
+      captureReferral({ ...ctx, capturedByStaffVenueId: 'sv_1', ...(intendedOrderId ? { intendedOrderId } : {}) })
+    /** Cuenta de tarjetas: un renglón con `giftCardId` y ninguno sin él (las dos lecturas de `leerSiEsCuentaDeTarjetas`). */
+    const laCuentaEsDeTarjetas = () => mockedPrisma.orderItem.findFirst.mockResolvedValueOnce({ id: 'oi_gc' }).mockResolvedValueOnce(null)
+    /** La base en chico: las cuentas PAGADAS previas del cliente; el conteo respeta la exclusión de cuentas de tarjetas si viene. */
+    const cuentasPagadasPrevias = (previas: Array<{ esDeTarjetas: boolean }>) =>
+      mockedPrisma.order.count.mockImplementation(async ({ where }: any) => {
+        const excluyeTarjetas = (where.AND ?? []).some((c: unknown) => JSON.stringify(c) === JSON.stringify(WHERE_ORDEN_SIN_TARJETAS))
+        return previas.filter(o => !(excluyeTarjetas && o.esDeTarjetas)).length
+      })
+
+    beforeEach(() => {
+      mockedPrisma.referralProgramConfig.findUnique.mockResolvedValue({ active: true, newCustomerDiscountPercent: 10 })
+      mockedPrisma.customer.findFirst.mockResolvedValue({ id: 'cust_ref', firstName: 'Jose', lastName: 'P' })
+      mockedPrisma.referral.create.mockResolvedValue({ id: 'ref_1', status: 'PENDING' })
+      cuentasPagadasPrevias([])
+    })
+
+    it('🔴 validar sobre una venta de tarjetas ⇒ GIFT_CARD_SALE con un texto en español que el POS muestra tal cual', async () => {
+      laCuentaEsDeTarjetas()
+      const result = await validateReferralCode({ ...ctx, intendedOrderId: 'order_gc' })
+      expect(result).toEqual({
+        valid: false,
+        reason: 'GIFT_CARD_SALE',
+        message: 'El referido se registra en la primera compra; la venta de una tarjeta de regalo no cuenta.',
+      })
+    })
+
+    it('🔴 capturar sobre una venta de tarjetas se rechaza con GIFT_CARD_SALE y no crea el referido', async () => {
+      laCuentaEsDeTarjetas()
+      await expect(capturar('order_gc')).rejects.toThrow('GIFT_CARD_SALE')
+      expect(mockedPrisma.referral.create).not.toHaveBeenCalled()
+    })
+
+    it('🔴 si su única compra pagada previa es una tarjeta de regalo, NO es cliente existente: el referido se captura', async () => {
+      cuentasPagadasPrevias([{ esDeTarjetas: true }])
+      await expect(validateReferralCode(ctx)).resolves.toMatchObject({ valid: true })
+      // `AND`, nunca una llave suelta: el `OR` de las dos señales de dinero sigue entero.
+      const where = mockedPrisma.order.count.mock.calls[0][0].where
+      expect(where.AND).toContainEqual(WHERE_ORDEN_SIN_TARJETAS)
+      expect(where.OR).toHaveLength(2)
+    })
+
+    it('regresión: una compra de mercancía pagada previa sigue siendo EXISTING_CUSTOMER (también junto a una tarjeta)', async () => {
+      cuentasPagadasPrevias([{ esDeTarjetas: false }])
+      await expect(validateReferralCode(ctx)).resolves.toMatchObject({ valid: false, reason: 'EXISTING_CUSTOMER' })
+      cuentasPagadasPrevias([{ esDeTarjetas: true }, { esDeTarjetas: false }])
+      await expect(validateReferralCode(ctx)).resolves.toMatchObject({ valid: false, reason: 'EXISTING_CUSTOMER' })
+    })
+
+    it('regresión: capturar sobre una venta de mercancía funciona como siempre (la marca se lee de ESA cuenta)', async () => {
+      mockedPrisma.orderItem.findFirst.mockResolvedValueOnce(null)
+      await capturar('order_merc')
+      expect(mockedPrisma.orderItem.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { orderId: 'order_merc', giftCardId: { not: null } } }),
+      )
+      expect(mockedPrisma.referral.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({ status: 'PENDING', qualifyingOrderId: 'order_merc' }),
+      })
+    })
+
+    it('sin venta en curso (validar antes de cobrar) no se lee ninguna marca', async () => {
+      await expect(validateReferralCode(ctx)).resolves.toMatchObject({ valid: true })
+      expect(mockedPrisma.orderItem.findFirst).not.toHaveBeenCalled()
     })
   })
 
