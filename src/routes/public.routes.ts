@@ -89,6 +89,7 @@ import { optionalLaunchCampaignCode, utmSchema } from '../schemas/acquisition.sc
 import { featuredVerticalParams, LANDING_SLUG_RE } from '../services/launchCampaigns/launchCampaign.schema'
 import { featureCatalogQuery } from '../services/launchCampaigns/featureCatalog.service'
 import { getFeatureCatalog } from '../controllers/public/featureCatalog.public.controller'
+import onlineOrderingPublicRoutes from './public/onlineOrdering.public.routes'
 
 const router = Router()
 
@@ -126,6 +127,9 @@ const cfdiPerKeyLimit = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
 })
+
+// Pedidos en línea (tienda del restaurante): /venues/:venueSlug/ordering/*
+router.use('/venues/:venueSlug/ordering', onlineOrderingPublicRoutes)
 
 // Digital Receipt routes
 router.get('/receipt/:accessKey', getPublicReceipt)
