@@ -60,7 +60,7 @@ export const menuAvailabilityBody = z
     message: 'Indica qué platillos cambiar',
   })
 
-/** R12: lo que cocina y caja pueden frenar desde el piso; `null` reanuda. */
+/** R12: lo que se puede frenar desde el piso (permiso `online-orders:pause`); `null` reanuda. */
 export const floorPauseMinutes = z
   .union([z.literal(15), z.literal(30), z.literal(60)], { errorMap: () => ({ message: 'Elige 15, 30 o 60 minutos' }) })
   .nullable()

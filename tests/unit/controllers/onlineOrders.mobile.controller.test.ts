@@ -35,6 +35,7 @@ import {
 } from '@/services/online-ordering/transitions.service'
 import { claimOnlineOrderPrint } from '@/services/online-ordering/printClaim.service'
 import * as ctrl from '@/controllers/mobile/onlineOrders.mobile.controller'
+import mobileRouter from '@/routes/mobile/onlineOrders.mobile.routes'
 
 const LISTA = { serverTime: 'x', counts: { pending: 0, active: 0, done: 0 }, orders: [], truncated: false }
 /** La fila de `StaffVenue` que `resolveUserRoleForVenue` lee para el rol en este negocio. */
@@ -225,5 +226,75 @@ describe('onlineOrders.mobile.controller', () => {
     await ctrl.pause(req, res, next)
     expect(pauseOnlineOrdering).toHaveBeenCalledWith('v1', 30, 'staff1')
     expect(res.json).toHaveBeenCalledWith({ success: true, data: { pausedUntil: '2026-10-14T19:00:00.000Z' } })
+  })
+})
+
+/**
+ * Founder, 16-oct: pausar desde el piso es de gerente para arriba. La ruta REAL de la app pasa por
+ * `checkPermission('online-orders:pause')` (el middleware real, con la resolución real del rol), así que el PIN del gerente que
+ * ya tiene el POS (`x-permission-override`) la cubre sin nada nuevo.
+ */
+describe('POST /pause: permiso propio y PIN del gerente', () => {
+  beforeEach(() => prismaMock.venueSettings.findUnique.mockResolvedValue(null))
+
+  const permisoDeLaPausa = () => {
+    const capa = (mobileRouter as any).stack.find((l: any) => l.route?.path === '/pause' && l.route.methods.post)
+    const conPermiso = capa.route.stack.map((s: any) => s.handle).filter((h: any) => h.requiredPermission)
+    expect(conPermiso.map((h: any) => h.requiredPermission)).toEqual(['online-orders:pause'])
+    return conPermiso[0]
+  }
+  const pedir = (headers: Record<string, string> = {}) => {
+    const res: any = {}
+    res.status = jest.fn(() => res)
+    res.json = jest.fn(() => res)
+    const req: any = {
+      params: { venueId: 'v1' },
+      headers,
+      authContext: { userId: 'staff1' },
+      method: 'POST',
+      originalUrl: '/api/v1/mobile/venues/v1/online-orders/pause',
+      get: () => undefined,
+    }
+    return { req, res, next: jest.fn() }
+  }
+
+  it('una cajera recibe 403 (con `overridable` si el negocio activó el PIN, para que el POS lo pida)', async () => {
+    prismaMock.venueSettings.findUnique.mockResolvedValue({ managerPinOverrideEnabled: true } as any)
+    const { req, res, next } = pedir()
+    await permisoDeLaPausa()(req, res, next)
+    expect(next).not.toHaveBeenCalled()
+    expect(res.status).toHaveBeenCalledWith(403)
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ required: 'online-orders:pause', overridable: true }))
+  })
+
+  it('un gerente pasa', async () => {
+    prismaMock.staffVenue.findUnique.mockResolvedValue(enElNegocio('MANAGER') as any)
+    const { req, res, next } = pedir()
+    await permisoDeLaPausa()(req, res, next)
+    expect(next).toHaveBeenCalled()
+    expect(res.status).not.toHaveBeenCalled()
+  })
+
+  it('una cajera a la que el negocio le dio online-orders:pause pasa (se puede otorgar por rol)', async () => {
+    prismaMock.venueRolePermission.findUnique.mockResolvedValue({ permissions: ['online-orders:pause'], deniedPermissions: [] } as any)
+    const { req, res, next } = pedir()
+    await permisoDeLaPausa()(req, res, next)
+    expect(next).toHaveBeenCalled()
+  })
+
+  it('una cajera con el PIN del gerente (token consumido para online-orders:pause) pasa', async () => {
+    prismaMock.venueSettings.findUnique.mockResolvedValue({ managerPinOverrideEnabled: true } as any)
+    prismaMock.permissionOverride.updateMany.mockResolvedValue({ count: 1 } as any)
+    prismaMock.permissionOverride.findUnique.mockResolvedValue({ authorizedById: 'sv_gerente' } as any)
+    const { req, res, next } = pedir({ 'x-permission-override': 'tok_gerente' })
+    await permisoDeLaPausa()(req, res, next)
+    expect(next).toHaveBeenCalled()
+    expect(res.status).not.toHaveBeenCalled()
+    expect((prismaMock.permissionOverride.updateMany.mock.calls[0][0] as any).where).toMatchObject({
+      token: 'tok_gerente',
+      venueId: 'v1',
+      permission: 'online-orders:pause',
+    })
+    expect(req.authContext.overrideAuthorizedBy).toBe('sv_gerente')
   })
 })
