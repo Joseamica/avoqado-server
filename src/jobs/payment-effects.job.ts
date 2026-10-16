@@ -1,4 +1,5 @@
 import {
+import { conTrazaDelEfecto, marcarErrorEnLaTraza, propagacionActiva } from '../observability/expTraza' // 🧪 EXPERIMENTO OTel
   PaymentEffectClaim,
   claimPaymentEffects,
   runClaimedPaymentEffect,
@@ -52,17 +53,32 @@ export class PaymentEffectsJob {
     try {
       const claims = await this.dependencies.claim({ now: this.dependencies.now(), limit: 25 })
       for (const claim of claims) {
-        try {
-          if (await this.dependencies.apply(claim)) applied++
-          else skipped++
-        } catch (error) {
-          failed++
+        // 🧪 EXPERIMENTO OTel: cada efecto corre con la llave del cobro que lo encoló (A+/B). No-op en A y prod.
+        await conTrazaDelEfecto(claim, async () => {
           try {
-            await this.dependencies.fail(claim, this.dependencies.now(), error)
-          } catch {
-            logger.warn('Payment effect failure remains leased for recovery', { paymentId: claim.paymentId, venueId: claim.venueId })
+            if (await this.dependencies.apply(claim)) applied++
+            else skipped++
+          } catch (error) {
+            failed++
+            if (propagacionActiva()) {
+              // 🧪 EXPERIMENTO OTel (1c): hoy el error del efecto se descarta sin rastro; en A+ y B queda observable por
+              // efecto, con la MISMA frontera en los dos brazos.
+              marcarErrorEnLaTraza(error)
+              logger.warn('[PAYMENT_EFFECTS] El efecto falló', {
+                effectId: claim.id,
+                kind: claim.kind,
+                paymentId: claim.paymentId,
+                errorName: error instanceof Error ? error.name : typeof error,
+                errorMessage: error instanceof Error ? error.message.slice(0, 120) : undefined,
+              })
+            }
+            try {
+              await this.dependencies.fail(claim, this.dependencies.now(), error)
+            } catch {
+              logger.warn('Payment effect failure remains leased for recovery', { paymentId: claim.paymentId, venueId: claim.venueId })
+            }
           }
-        }
+        })
       }
       return { applied, failed, skipped }
     } finally {

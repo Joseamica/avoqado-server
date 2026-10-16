@@ -16,10 +16,14 @@
  * Salida: JSON por stdout (ids, seriales, PIN) — sin secretos.
  */
 import { PrismaClient, Prisma } from '@prisma/client'
+import bcrypt from 'bcryptjs'
+import { CLAVE_POS } from '../lib/constantes'
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const cuid: () => string = require('cuid')
 
-const N_TERMINALES = Number(process.env.N_TERMINALES || 6)
+const N_TERMINALES = Number(process.env.N_TERMINALES || 40)
+const N_MESAS = Number(process.env.N_MESAS || 600)
+
 
 async function main() {
   const url = process.env.DATABASE_URL || ''
@@ -57,7 +61,15 @@ async function main() {
     },
   })
   await prisma.staff.create({
-    data: { id: staffId, email: 'exp-otel-mesero@exp.test', firstName: 'Mesero', lastName: 'Experimento', active: true },
+    data: {
+      id: staffId,
+      email: 'exp-otel-mesero@exp.test',
+      firstName: 'Mesero',
+      lastName: 'Experimento',
+      active: true,
+      emailVerified: true,
+      password: bcrypt.hashSync(CLAVE_POS, 10),
+    } as any,
   })
   await prisma.staffOrganization.create({ data: { id: id(), staffId, organizationId: orgId, role: 'MEMBER', isPrimary: true } as any })
   await prisma.staffVenue.create({ data: { id: id(), staffId, venueId, role: 'WAITER', pin: PIN, active: true } })
@@ -91,9 +103,18 @@ async function main() {
     data: { id: productId, venueId, sku: 'EXP-001', name: 'Plato del experimento', categoryId, price: new Prisma.Decimal('100.00') } as any,
   })
   const areaId = id()
-  const tableId = id()
   await prisma.area.create({ data: { id: areaId, venueId, name: 'Salón' } as any })
-  await prisma.table.create({ data: { id: tableId, venueId, number: '1', capacity: 4, qrCode: `exp-otel-${tableId}`, areaId } as any })
+  // Muchas mesas: con carga, un cobro nunca cae en una mesa con otra cuenta abierta.
+  const mesas = Array.from({ length: N_MESAS }, (_, i) => ({ id: id(), venueId, number: String(i + 1), capacity: 4, areaId }))
+  await prisma.table.createMany({ data: mesas.map(m => ({ ...m, qrCode: `exp-otel-${m.id}` })) as any })
+  const tableId = mesas[0].id
+
+  // Segunda sucursal (sólo lecturas): prueba de contextos con dos venues concurrentes (corrección 7).
+  const venue2Id = id()
+  await prisma.venue.create({
+    data: { id: venue2Id, organizationId: orgId, name: 'Exp OTel Segunda', slug: 'exp-otel-segunda', status: 'ACTIVE', type: 'RESTAURANT' },
+  })
+  await prisma.staffVenue.create({ data: { id: id(), staffId, venueId: venue2Id, role: 'WAITER', active: true } })
 
   // Afiliación y tarifas SINTÉTICAS.
   const provider =
@@ -182,7 +203,21 @@ async function main() {
   await prisma.$disconnect()
   process.stdout.write(
     JSON.stringify(
-      { orgId, venueId, staffId, rolStaff: 'WAITER', pin: PIN, productId, precioProducto: 100, tableId, merchantAccountId, terminales },
+      {
+        orgId,
+        venueId,
+        venue2Id,
+        staffId,
+        email: 'exp-otel-mesero@exp.test',
+        rolStaff: 'WAITER',
+        pin: PIN,
+        productId,
+        precioProducto: 100,
+        tableId,
+        mesas: mesas.map(m => m.id),
+        merchantAccountId,
+        terminales,
+      },
       null,
       2,
     ) + '\n',

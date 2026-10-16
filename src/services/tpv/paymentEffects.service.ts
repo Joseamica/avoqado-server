@@ -1,4 +1,6 @@
 import { randomUUID } from 'crypto'
+import { trazaParaLaFila } from '@/observability/expTraza' // 🧪 EXPERIMENTO OTel
+import { inyectarEnEfecto } from '@/observability/expInyector' // 🧪 EXPERIMENTO OTel
 import { PaymentEffect, Prisma, PrismaClient } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { utcTs } from '@/utils/sqlDates'
@@ -60,7 +62,16 @@ export async function enqueuePaymentEffect(tx: Prisma.TransactionClient, input: 
     select: { orderId: true },
   })
   if (!source || source.orderId !== input.orderId) throw new Error('PAYMENT_EFFECT_SOURCE_MISMATCH')
-  await tx.paymentEffect.createMany({ data: [{ ...input, version: 1 }], skipDuplicates: true })
+  // 🧪 EXPERIMENTO OTel: la fila guarda la llave del cobro que la encoló (A+/B). En A y prod `traza` es undefined y la
+  // fila queda idéntica a hoy. COMMISSION se excluye: su payload se pasa TAL CUAL a `prisma.create`
+  // (commission-calculation.service.ts) y un campo extra lo rompería — una versión de producción necesita una columna
+  // propia (`PaymentEffect.origen`), no el payload. En el fixture del experimento no hay comisiones.
+  const traza = input.kind === 'COMMISSION' ? undefined : trazaParaLaFila()
+  const payload: Prisma.InputJsonValue =
+    traza && input.payload !== null && typeof input.payload === 'object' && !Array.isArray(input.payload)
+      ? ({ ...(input.payload as Prisma.InputJsonObject), _traza: traza } as Prisma.InputJsonValue)
+      : input.payload
+  await tx.paymentEffect.createMany({ data: [{ ...input, payload, version: 1 }], skipDuplicates: true })
 }
 
 /** Both pending and abandoned work are bounded and claimed atomically across processes. */
@@ -121,6 +132,7 @@ export async function runClaimedPaymentEffect(claim: PaymentEffectClaim, db: Pri
     // These existing consumers own their transaction and dedupe. In particular,
     // referral qualification must reread an already-committed PAID order.
     if (external.kind === 'RECEIPT') {
+      await inyectarEnEfecto(external.kind) // 🧪 EXPERIMENTO OTel: no-op sin EXP_INYECTOR
       const { generateDigitalReceipt } = await import('./digitalReceipt.tpv.service')
       await generateDigitalReceipt(external.paymentId)
     } else if (external.kind === 'TRANSACTION_COST') {

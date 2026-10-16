@@ -8,10 +8,20 @@
  * SocketManager.kt): ④ ACK `{accepted:true, requestId}` → ⑤ `terminal:payment_attempt_opened {requestId, attemptId}`
  * → BANCO SIMULADO (declara la aprobación; no hay SDK ni procesador) → ⑥ `POST /api/v1/tpv/venues/:venueId/orders/:orderId`
  * con `terminalPaymentRequestId` e `idempotencyKey = attemptId` → `terminal:payment_result {status:'success', paymentId}`.
+ *
+ * Fase 2: el login por PIN tiene tope de 10 por IP cada 15 min en producción, y la carga usa 40 terminales. Por eso la
+ * terminal 1 entra por el login REAL y las demás con un token firmado con la MISMA forma que
+ * `security.generateAccessToken` (sub/orgId/venueId/role/terminalSerialNumber, iss avoqado-api, aud avoqado-clients);
+ * se comparan las claves de los dos tokens y se anota. Igual en TODOS los brazos.
+ *
+ * Llave (plan, corrección 5): en A la TPV de hoy no manda ninguna. En A+ repite el `correlationId` que le llegó en la
+ * solicitud (en los eventos de socket y en `x-correlation-id` del registro). En B continúa el `traceparent` recibido
+ * (mismo trace-id, span-id nuevo) en los eventos y en el encabezado `traceparent` del registro.
  */
-import { randomInt, randomUUID } from 'node:crypto'
+import { randomBytes, randomInt, randomUUID } from 'node:crypto'
+import jwt from 'jsonwebtoken'
 import { io, Socket } from 'socket.io-client'
-import type { Fixture } from './pos'
+import type { Fixture, ModoCliente } from './pos'
 
 export interface LineaDeTiempoTpv {
   requestId: string
@@ -32,6 +42,8 @@ export interface LineaDeTiempoTpv {
   ackResultado?: any
   error?: string
   payload?: any
+  registroCuerpo?: any
+  registroInicio?: number
 }
 
 export class TpvDeScript {
@@ -41,12 +53,46 @@ export class TpvDeScript {
   private esperas = new Map<string, (l: LineaDeTiempoTpv) => void>()
   eventosInesperados: Array<{ evento: string; at: string }> = []
 
+  ocupada = false
+  modoToken: 'login' | 'firmado' = 'login'
+
   constructor(
     private readonly base: string,
     private readonly f: Fixture,
     readonly serial: string,
-    private readonly encabezadosExtra: () => Record<string, string> = () => ({}),
+    private readonly modo: ModoCliente = 'ninguna',
   ) {}
+
+  /** Token con la forma EXACTA de `security.generateAccessToken` (ver arriba). */
+  firmar(secreto: string) {
+    const ahora = Math.floor(Date.now() / 1000)
+    this.token = jwt.sign(
+      {
+        sub: this.f.staffId,
+        orgId: this.f.orgId,
+        venueId: this.f.venueId,
+        role: this.f.rolStaff,
+        terminalSerialNumber: this.serial,
+        iat: ahora,
+        exp: ahora + 30 * 86400,
+      },
+      secreto,
+      { algorithm: 'HS256', issuer: 'avoqado-api', audience: 'avoqado-clients' },
+    )
+    this.modoToken = 'firmado'
+  }
+
+  /** La llave a reenviar: en socket (cuerpo) y en HTTP (encabezado). */
+  private llave(payload: any): { cuerpo: Record<string, string>; encabezados: Record<string, string> } {
+    if (this.modo === 'correlationId' && typeof payload?.correlationId === 'string')
+      return { cuerpo: { correlationId: payload.correlationId }, encabezados: { 'x-correlation-id': payload.correlationId } }
+    if (this.modo === 'traceparent' && typeof payload?.traceparent === 'string') {
+      const traceId = payload.traceparent.split('-')[1]
+      const tp = () => `00-${traceId}-${randomBytes(8).toString('hex')}-01`
+      return { cuerpo: { traceparent: tp() }, encabezados: { traceparent: tp() } }
+    }
+    return { cuerpo: {}, encabezados: {} }
+  }
 
   async login(): Promise<void> {
     const r = await fetch(`${this.base}/api/v1/tpv/venues/${this.f.venueId}/auth`, {
@@ -110,6 +156,7 @@ export class TpvDeScript {
     const requestId: string = payload?.requestId
     const l: LineaDeTiempoTpv = { requestId, recibido: performance.now(), payload }
     this.lineas.set(requestId, l)
+    const llave = this.llave(payload)
     try {
       // ④ ACK durable (la APK lo manda tras guardar la solicitud en su bandeja).
       ack?.({ accepted: true, requestId })
@@ -119,7 +166,7 @@ export class TpvDeScript {
       const attemptId = randomUUID()
       l.attemptId = attemptId
       l.intentoAbiertoIni = performance.now()
-      l.ackIntento = await this.socket!.timeout(15_000).emitWithAck('terminal:payment_attempt_opened', { requestId, attemptId })
+      l.ackIntento = await this.socket!.timeout(15_000).emitWithAck('terminal:payment_attempt_opened', { requestId, attemptId, ...llave.cuerpo })
       l.intentoAbiertoFin = performance.now()
       if (!l.ackIntento?.success || l.ackIntento?.executionAuthorized !== true) {
         throw new Error(`attempt_opened no autorizó ejecutar: ${JSON.stringify(l.ackIntento)}`)
@@ -131,9 +178,10 @@ export class TpvDeScript {
 
       // ⑥ registrar el cobro (como OrderPaymentRecorder.buildAngelPayOrderPaymentRequest).
       l.registroIni = performance.now()
+      l.registroInicio = Date.now()
       const r = await fetch(`${this.base}/api/v1/tpv/venues/${this.f.venueId}/orders/${payload.orderId}`, {
         method: 'POST',
-        headers: { authorization: `Bearer ${this.token}`, 'content-type': 'application/json', ...this.encabezadosExtra() },
+        headers: { authorization: `Bearer ${this.token}`, 'content-type': 'application/json', ...llave.encabezados },
         body: JSON.stringify({
           venueId: this.f.venueId,
           amount: payload.amountCents,
@@ -168,6 +216,7 @@ export class TpvDeScript {
       }
       if (r.status !== 201 || !cuerpo?.data?.id) throw new Error(`registro del cobro: HTTP ${r.status} ${txt.slice(0, 600)}`)
       l.paymentId = cuerpo.data.id
+      l.registroCuerpo = cuerpo
 
       // y el resultado por socket (la APK lo emite tras persistirlo en su bandeja).
       l.resultadoIni = performance.now()
@@ -179,6 +228,7 @@ export class TpvDeScript {
         errorMessage: null,
         cardDetails: { maskedPan: '************4242', cardBrand: 'VISA', entryMode: 'CONTACTLESS', authorizationNumber: autorizacion },
         completedAt: new Date().toISOString(),
+        ...llave.cuerpo,
       })
       l.resultadoFin = performance.now()
     } catch (e: any) {

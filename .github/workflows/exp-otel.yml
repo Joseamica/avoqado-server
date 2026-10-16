@@ -3,7 +3,11 @@
 # no toca producción ni manda nada fuera del runner: el server corre en una red docker --internal (sin internet).
 # Plan: docs/investigaciones/otel-trazas/plan-medicion.md del workspace (las «Correcciones» del final mandan).
 #
-# Fase 1 (este archivo hoy): HUMO del brazo A — el cobro congelado de 8 pasos, N=5 veces seguidas, de punta a punta.
+# Qué corre según el nombre del carril:
+#   …humo…      fase 1: el cobro congelado, 5 veces, brazo A
+#   …calibrar…  la tasa del ~50 % de CPU en A+ (se congela a mano en scripts/exp-otel/config/tasa.json)
+#   …prueba…    el arnés de la fase 2 en versión CORTA (depurar, no medir)
+#   …medir…     la medición completa: costo ×3, utilidad (4 brazos ×3), colector caído (6 variantes ×3), suite ×4, reporte
 name: 🧪 Experimento OTel (medición)
 
 on:
@@ -21,53 +25,227 @@ permissions:
 env:
   TZ: UTC
   OUT_DIR: ${{ github.workspace }}/exp-out
+  # Versiones FIJAS de OpenTelemetry (línea 2.x: sdk-node 0.223.0 / SDK 2.12.0, publicadas el 6-oct-2026) y
+  # @prisma/instrumentation alineada con @prisma/client 6.19.x. Se instalan sin tocar package.json.
+  OTEL_PAQUETES: >-
+    @opentelemetry/api@1.9.1 @opentelemetry/sdk-node@0.223.0 @opentelemetry/sdk-trace-base@2.12.0
+    @opentelemetry/exporter-trace-otlp-proto@0.223.0 @opentelemetry/instrumentation-http@0.223.0
+    @opentelemetry/instrumentation-express@0.71.0 @opentelemetry/instrumentation-socket.io@0.70.0
+    @opentelemetry/instrumentation-amqplib@0.70.0 @opentelemetry/instrumentation-winston@0.67.0
+    @prisma/instrumentation@6.19.3
 
 jobs:
   humo:
     name: Humo brazo A (5 cobros de punta a punta)
+    if: ${{ contains(github.ref_name, 'humo') }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
-        with:
-          node-version: '20' # = engines.node y el CI de producción
-          cache: 'npm'
-
-      - name: Instalar y compilar (npm ci + npm run build)
+        with: { node-version: '20', cache: 'npm' }
+      - name: Instalar y compilar
         run: |
-          npm ci
-          npm run build
-          # El build parcha el runtime de Prisma (scripts/parchar-prisma-runtime.cjs): se deja constancia de la marca.
-          mkdir -p exp-out
-          echo "marca __avqCamposPorModelo en runtime/library.js: $(grep -c __avqCamposPorModelo node_modules/@prisma/client/runtime/library.js)" | tee exp-out/marca-parche-prisma.txt
+          npm ci && npm install --no-save $OTEL_PAQUETES && npm run build
           docker pull -q postgres:16 && docker pull -q node:20-bookworm
-
-      - name: Humo (orquestador)
-        env:
-          N_COBROS: '5'
+      - name: Humo
+        env: { N_COBROS: '5' }
         run: node_modules/.bin/tsx scripts/exp-otel/orq/humo.ts
-
-      - name: Resumen
+      - uses: actions/upload-artifact@v4
         if: always()
-        run: |
-          if [ -f exp-out/humo-A.json ]; then
-            node -e '
-              const h=require(process.env.OUT_DIR+"/humo-A.json");
-              const l=[`## Humo brazo A: ${h.exitosos}/${h.n} → ${h.veredicto}`, `listo (respuesta autenticada): ${h.listoMs} ms`, "", "| # | terminal | ok | ①ms | ②ms | ③ms | ⑥ms | ⑧ espera ms | efectos |", "|---|---|---|---|---|---|---|---|---|"];
-              const d=p=>p&&p.fin!=null&&p.ini!=null?Math.round(p.fin-p.ini):"—";
-              for (const c of h.cobros) l.push(`| ${c.n} | ${c.terminal} | ${c.ok?"✅":"❌ "+c.fallas.join("; ").slice(0,200)} | ${d(c.pasos["1_crear_orden"])} | ${d(c.pasos["2_agregar_ronda"])} | ${d(c.pasos["3_cobro_en_terminal"])} | ${d(c.pasos["6_registro_del_cobro"])} | ${d(c.pasos["8_efectos_done"])} | ${(c.efectos||[]).map(e=>e.kind+":"+e.status).join(", ")} |`);
-              console.log(l.join("\n"));
-            ' | tee -a "$GITHUB_STEP_SUMMARY"
-          else
-            echo "Sin humo-A.json (el orquestador falló antes de los actores)" | tee -a "$GITHUB_STEP_SUMMARY"
-          fi
-          echo "--- últimas líneas del server ---"; tail -n 60 exp-out/servidor-A.log 2>/dev/null || true
+        with: { name: humo-A, path: exp-out/, retention-days: 14 }
 
+  calibrar:
+    name: Calibrar la tasa (A+, ~50 % de 1 CPU)
+    if: ${{ contains(github.ref_name, 'calibrar') || contains(github.ref_name, 'prueba') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20', cache: 'npm' }
+      - name: Instalar y compilar
+        run: |
+          npm ci && npm install --no-save $OTEL_PAQUETES && npm run build
+          docker pull -q postgres:16 && docker pull -q node:20-bookworm
+      - name: Calibrar
+        env:
+          MODO: calibrar
+          CORTO: ${{ contains(github.ref_name, 'prueba') && '1' || '0' }}
+        run: node_modules/.bin/tsx scripts/exp-otel/orq/costo.ts
+      - run: cat exp-out/calibracion.json | tee -a "$GITHUB_STEP_SUMMARY"
+        if: always()
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: calibracion, path: exp-out/, retention-days: 14 }
+
+  costo:
+    name: Costo rep ${{ matrix.rep }}
+    if: ${{ contains(github.ref_name, 'medir') || contains(github.ref_name, 'prueba') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        rep: ${{ fromJSON(contains(github.ref_name, 'prueba') && '[1]' || '[1,2,3]') }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20', cache: 'npm' }
+      - name: Instalar y compilar
+        run: |
+          npm ci && npm install --no-save $OTEL_PAQUETES && npm run build
+          docker pull -q postgres:16 && docker pull -q node:20-bookworm && docker pull -q otel/opentelemetry-collector-contrib:0.115.1 && docker pull -q curlimages/curl:8.10.1
+      - name: Costo
+        env:
+          MODO: medir
+          REP: ${{ matrix.rep }}
+          CORTO: ${{ contains(github.ref_name, 'prueba') && '1' || '0' }}
+        run: node_modules/.bin/tsx scripts/exp-otel/orq/costo.ts
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: 'costo-rep${{ matrix.rep }}', path: exp-out/, retention-days: 14 }
+
+  utilidad:
+    name: Utilidad ${{ matrix.brazo }} rep ${{ matrix.rep }}
+    if: ${{ contains(github.ref_name, 'medir') || contains(github.ref_name, 'prueba') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        brazo: ${{ fromJSON(contains(github.ref_name, 'prueba') && '["A+","B"]' || '["A","A+","B","BmP"]') }}
+        rep: ${{ fromJSON(contains(github.ref_name, 'prueba') && '[1]' || '[1,2,3]') }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20', cache: 'npm' }
+      - name: Instalar y compilar
+        run: |
+          npm ci && npm install --no-save $OTEL_PAQUETES && npm run build
+          docker pull -q postgres:16 && docker pull -q node:20-bookworm && docker pull -q otel/opentelemetry-collector-contrib:0.115.1
+      - name: Utilidad
+        env:
+          BRAZO: ${{ matrix.brazo }}
+          REP: ${{ matrix.rep }}
+        run: node_modules/.bin/tsx scripts/exp-otel/orq/utilidad.ts
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: 'utilidad-${{ matrix.brazo == ''A+'' && ''Amas'' || matrix.brazo }}-rep${{ matrix.rep }}', path: exp-out/, retention-days: 14 }
+
+  caido:
+    name: C ${{ matrix.variante }} rep ${{ matrix.rep }}
+    if: ${{ contains(github.ref_name, 'medir') || contains(github.ref_name, 'prueba') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        variante: ${{ fromJSON(contains(github.ref_name, 'prueba') && '["recuperacion"]' || '["puerto_muerto","sin_respuesta","rechazo","lento","recuperacion","destino_caido"]') }}
+        rep: ${{ fromJSON(contains(github.ref_name, 'prueba') && '[1]' || '[1,2,3]') }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20', cache: 'npm' }
+      - name: Instalar y compilar
+        run: |
+          npm ci && npm install --no-save $OTEL_PAQUETES && npm run build
+          docker pull -q postgres:16 && docker pull -q node:20-bookworm && docker pull -q otel/opentelemetry-collector-contrib:0.115.1 && docker pull -q curlimages/curl:8.10.1
+      - name: Colector caído
+        env:
+          VARIANTE: ${{ matrix.variante }}
+          REP: ${{ matrix.rep }}
+          CORTO: ${{ contains(github.ref_name, 'prueba') && '1' || '0' }}
+        run: node_modules/.bin/tsx scripts/exp-otel/orq/caido.ts
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: 'caido-${{ matrix.variante }}-rep${{ matrix.rep }}', path: exp-out/, retention-days: 14 }
+
+  suite:
+    name: Suite ${{ matrix.parte }} ${{ matrix.modo }} SDK
+    if: ${{ contains(github.ref_name, 'medir') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        modo: [sin, con]
+        parte: [unit, integracion]
+    # Igual que ci-cd.yml (misma base desechable con el nombre que exigen las pruebas destructivas).
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/avoqado_h1a_test_20260808
+      TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/avoqado_h1a_test_20260808
+      ACCESS_TOKEN_SECRET: test-access-token-secret
+      REFRESH_TOKEN_SECRET: test-refresh-token-secret
+      SESSION_SECRET: test-session-secret
+      COOKIE_SECRET: test-cookie-secret
+      OTP_PEPPER: test-otp-pepper-secret
+      RABBITMQ_URL: amqp://localhost:5672
+      OPENAI_API_KEY: test-openai-api-key
+      STRIPE_SECRET_KEY: sk_test_ci_placeholder
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: avoqado_h1a_test_20260808
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres -d avoqado_h1a_test_20260808" --health-interval 10s --health-timeout 5s --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20', cache: 'npm' }
+      - name: Instalar
+        run: npm ci && npm install --no-save $OTEL_PAQUETES && npx prisma generate
+      - name: Suite (jest --json)
+        run: |
+          mkdir -p exp-out
+          PRE=""
+          if [ "${{ matrix.modo }}" = "con" ]; then
+            # SDK precargado con TODAS las instrumentaciones, sin exportar. Ojo: Jest carga los módulos con su propio
+            # registro, así que el parcheo de require puede no alcanzar los módulos dentro de las pruebas (se reporta).
+            PRE="--require $GITHUB_WORKSPACE/scripts/exp-otel/otel/preload.cjs"
+            export EXP_OTEL=suite OTEL_TRACES_EXPORTER=none OTEL_METRICS_EXPORTER=none OTEL_LOGS_EXPORTER=none
+          fi
+          if [ "${{ matrix.parte }}" = "unit" ]; then
+            NODE_OPTIONS="--max-old-space-size=4096 $PRE" npx jest tests/unit --maxWorkers=4 --workerIdleMemoryLimit=512MB --detectOpenHandles=false --ci --json --outputFile=exp-out/suite-${{ matrix.modo }}-unit.json || true
+          else
+            NODE_ENV=test npm run migrate:deploy:bounded
+            for w in 1 2 3 4; do
+              docker exec "${{ job.services.postgres.id }}" psql -U postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE avoqado_h1a_test_20260808_$w TEMPLATE avoqado_h1a_test_20260808"
+            done
+            NODE_ENV=test CI_DB_POR_PROCESO=1 NODE_OPTIONS="--max-old-space-size=8192 $PRE" npx jest --selectProjects=integration --maxWorkers=4 --detectOpenHandles=false --workerIdleMemoryLimit=2GB --ci --json --outputFile=exp-out/suite-${{ matrix.modo }}-integracion.json \
+              --testPathIgnorePatterns='tests/integration/master-catalog/h1a-migration(?:-(?:lock-safety|replay))?\.integration\.test\.ts$' || true
+          fi
+          node -e 'const j=require(process.argv[1]);console.log(JSON.stringify({pasan:j.numPassedTests,fallan:j.numFailedTests,total:j.numTotalTests}))' exp-out/suite-${{ matrix.modo }}-${{ matrix.parte }}.json | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: 'suite-${{ matrix.modo }}-${{ matrix.parte }}', path: exp-out/, retention-days: 14 }
+
+  reporte:
+    name: Reporte y veredicto
+    needs: [costo, utilidad, caido, suite]
+    if: ${{ always() && (contains(github.ref_name, 'medir') || contains(github.ref_name, 'prueba')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20', cache: 'npm' }
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with: { path: exp-all }
+      - name: Calificar (ciego), juntar y aplicar el criterio
+        run: |
+          node_modules/.bin/tsx scripts/exp-otel/orq/reporte.ts exp-all
+          cat exp-all/resumen.md >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: humo-A
-          path: exp-out/
-          retention-days: 14
+          name: resumen
+          path: |
+            exp-all/resumen.md
+            exp-all/resumen.json
+          retention-days: 30

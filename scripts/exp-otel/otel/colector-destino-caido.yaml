@@ -1,0 +1,21 @@
+# 🧪 EXPERIMENTO OTel — brazo C «colector vivo con destino caído»: el colector acepta, pero su exportador apunta a un
+# destino que no existe (como si Better Stack no respondiera). Cola y reintentos con los valores por defecto del colector.
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+processors:
+  batch: {}
+exporters:
+  otlphttp:
+    endpoint: http://destino-inexistente.invalid:4318
+service:
+  telemetry:
+    metrics:
+      level: none
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlphttp]

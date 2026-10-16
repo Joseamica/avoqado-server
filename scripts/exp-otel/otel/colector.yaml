@@ -1,0 +1,21 @@
+# 🧪 EXPERIMENTO OTel — colector LOCAL en el runner (nada sale a internet). Recibe OTLP/HTTP del proxy de «servicios»
+# y escribe los spans tal cual a un archivo JSON (lo lee el calificador ciego). Imagen fijada en el orquestador.
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+processors:
+  batch: {}
+exporters:
+  file:
+    path: /salida/spans.jsonl
+service:
+  telemetry:
+    metrics:
+      level: none
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [file]

@@ -1,4 +1,5 @@
 import { performance } from 'node:perf_hooks'
+import { inyectarDbLenta } from '@/observability/expInyector' // 🧪 EXPERIMENTO OTel
 import { Payment, PaymentMethod, SplitType, OrderSource, PaymentSource, Prisma, type DigitalReceipt } from '@prisma/client'
 import logger from '../../config/logger'
 import { BadRequestError, ConflictError, NotFoundError, ServiceUnavailableError } from '../../errors/AppError'
@@ -1326,6 +1327,7 @@ async function enqueueCommittedPaymentEffects(
   expectsSettlement: boolean,
 ): Promise<void> {
   if (payment.status !== 'COMPLETED') return
+  await inyectarDbLenta(tx) // 🧪 EXPERIMENTO OTel: no-op sin EXP_INYECTOR (paso ⑦, dentro de la transacción del dinero)
   const source = { venueId: payment.venueId, paymentId: payment.id, orderId: payment.orderId }
   await enqueuePaymentEffect(tx, { ...source, kind: 'RECEIPT', dedupeKey: 'receipt:' + payment.id + ':v1', payload: {} })
   const rating = reviewRating ? mapTpvRatingToNumeric(reviewRating) : null

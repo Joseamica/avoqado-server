@@ -18,6 +18,7 @@
  */
 
 import { v4 as uuidv4 } from 'uuid'
+import { llaveDelCobro } from '../observability/expTraza' // 🧪 EXPERIMENTO OTel
 import { Prisma, TerminalPaymentRequestStatus, TransactionStatus, PaymentMethod, PaymentType } from '@prisma/client'
 import type { TerminalPaymentRequest as FilaDeCobroRemoto } from '@prisma/client'
 import prisma from '../utils/prismaClient'
@@ -1977,6 +1978,8 @@ class TerminalPaymentService {
         venueId,
         timestamp: new Date().toISOString(),
         attemptLinkVersion: TERMINAL_ATTEMPT_LINK_VERSION,
+        // 🧪 EXPERIMENTO OTel: la llave del cobro viaja a la terminal (A+ correlationId / B traceparent). Vacío en A y prod.
+        ...llaveDelCobro(),
       }
 
       const directSocket = io.sockets.sockets.get(socketId)

@@ -1,5 +1,6 @@
 import type { Socket } from 'socket.io'
 import { runWithContext } from './executionContext'
+import { conTrazaDeSocket } from './expTraza' // 🧪 EXPERIMENTO OTel
 import { resolveCorrelationId } from './correlationId'
 import { getVenueName } from './venueNames'
 
@@ -44,7 +45,8 @@ export function onWithContext(socket: Socket, event: string, handler: Handler): 
     const payload = args[0] as { correlationId?: unknown } | undefined
     const fromPayload = payload && typeof payload === 'object' ? payload.correlationId : undefined
 
-    return runWithContext(
+    // 🧪 EXPERIMENTO OTel: en el brazo B el evento continúa la traza que trae el mensaje (no-op en A, A+ y prod).
+    return conTrazaDeSocket(payload, event, () => runWithContext(
       {
         correlationId: resolveCorrelationId(fromPayload ?? withAuth.correlationId),
         source: 'socket',
@@ -55,6 +57,6 @@ export function onWithContext(socket: Socket, event: string, handler: Handler): 
         role: withAuth.authContext?.role,
       },
       () => handler(...args),
-    )
+    ))
   })
 }

@@ -1,4 +1,5 @@
 import { NextFunction, Request, Response } from 'express'
+import { inyectarCpu } from '../../observability/expInyector' // 🧪 EXPERIMENTO OTel
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 
 import * as paymentTpvService from '../../services/tpv/payment.tpv.service'
@@ -62,6 +63,7 @@ export async function recordPayment(req: Request, res: Response, next: NextFunct
 
     // Extract payment data from request body (already validated by schema)
     const paymentData = req.body
+    inyectarCpu() // 🧪 EXPERIMENTO OTel: no-op sin EXP_INYECTOR (paso ⑥, CPU síncrono en el handler)
 
     // 🔴 La TERMINAL es un aparato de tarjeta: sus medios son efectivo y tarjeta, no el
     // catálogo de tipos propios del negocio ("Uber Eats", vales). Ese catálogo vive en
