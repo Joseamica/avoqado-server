@@ -94,17 +94,22 @@ describe('Pedidos en línea — ciclo de vida (integration, real DB)', () => {
     await touchInboxPoll(venueId!)
   }
   const pay = (orderId: string) => payCashOrder(venueId!, orderId, { amount: 20_600, tip: 0, idempotencyKey: `itest-pay-${orderId}` })
-  /** H6: espera a que alguien quede BLOQUEADO en el `SELECT … FOR UPDATE` de una orden (la carrera es real, no secuencial). */
-  const esperarBloqueoEnLaOrden = async () => {
-    for (let i = 0; i < 100; i++) {
+  /** Preparación que muerde: si aceptar no deja el pedido ACCEPTED, el caso no arranca desde un estado equivocado. */
+  const aceptar = (orderId: string) =>
+    expect(acceptOnlineOrder({ venueId: venueId!, orderId, staffId: null })).resolves.toMatchObject({ outcome: 'OK', status: 'ACCEPTED' })
+  /**
+   * H6: espera a que alguna sesión quede BLOQUEADA por la del cobro (la carrera es real, no secuencial). Se ata al proceso de
+   * Postgres que retiene el candado (`pg_blocking_pids`), no al texto de la consulta. Acotada: si no ocurre, INCONCLUSO.
+   */
+  const esperarQueAlguienEspereAlCobro = async (pidDelCobro: number | undefined) => {
+    for (let i = 0; pidDelCobro !== undefined && i < 100; i++) {
       const [{ n }] = await prisma.$queryRaw<Array<{ n: number }>>`
         SELECT count(*)::int AS n FROM pg_stat_activity
-        WHERE datname = current_database() AND wait_event_type = 'Lock'
-          AND query LIKE '%"Order"%' AND query LIKE '%FOR UPDATE%'`
+        WHERE wait_event_type = 'Lock' AND ${pidDelCobro}::int = ANY(pg_blocking_pids(pid))`
       if (n > 0) return
       await new Promise(resolve => setTimeout(resolve, 50))
     }
-    throw new Error('INCONCLUSO: el rechazo nunca quedó esperando el candado de la orden')
+    throw new Error('INCONCLUSO: el rechazo nunca quedó esperando el candado que retiene el cobro')
   }
 
   beforeAll(async () => {
@@ -221,7 +226,7 @@ describe('Pedidos en línea — ciclo de vida (integration, real DB)', () => {
     const phone = nextPhone()
     const one = [{ productId, quantity: 1, modifiers: [{ modifierId }] }]
     const first = await newOrder({ key, phone, items: one, expectedTotal: '103.00' })
-    await acceptOnlineOrder({ venueId: venueId!, orderId: first.orderId, staffId: null })
+    await aceptar(first.orderId)
     const again = await newOrder({ key, phone, items: one, expectedTotal: '103.00' })
     expect(again).toMatchObject({ replay: true, orderId: first.orderId, trackingToken: first.trackingToken, status: 'ACCEPTED' })
     await expect(newOrder({ key, items: one, expectedTotal: '103.00', customer: otherCustomerId })).rejects.toMatchObject({
@@ -282,6 +287,7 @@ describe('Pedidos en línea — ciclo de vida (integration, real DB)', () => {
       outcome: 'OK',
       status: 'REJECTED',
     })
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: orderId } })).status).toBe('CANCELLED')
     await expect(rejectOnlineOrder({ venueId: venueId!, orderId, staffId: null, reason: 'OTHER' })).resolves.toMatchObject({
       outcome: 'STALE',
     })
@@ -321,14 +327,15 @@ describe('Pedidos en línea — ciclo de vida (integration, real DB)', () => {
   it(TITULO_COBRADO_NO_SE_CANCELA, async () => {
     await beat()
     const { orderId, onlineOrderId } = await newOrder()
-    await pay(orderId)
+    await expect(pay(orderId)).resolves.toMatchObject({ status: 'COMPLETED' })
     await prisma.onlineOrder.update({ where: { id: onlineOrderId }, data: { acceptDeadlineAt: new Date(Date.now() - 1_000) } })
 
     await expect(expireOnlineOrder({ venueId: venueId!, orderId })).resolves.toEqual({ outcome: 'HAS_PAYMENTS' })
     await expect(rejectOnlineOrder({ venueId: venueId!, orderId, staffId: null, reason: 'TOO_BUSY' })).resolves.toEqual({
       outcome: 'HAS_PAYMENTS',
     })
-    expect((await prisma.order.findUniqueOrThrow({ where: { id: orderId } })).paymentStatus).toBe('PAID')
+    // `payCashOrder` salda y cierra la cuenta (`COMPLETED`); ni vencer ni rechazar la movieron a CANCELLED.
+    expect(await prisma.order.findUniqueOrThrow({ where: { id: orderId } })).toMatchObject({ paymentStatus: 'PAID', status: 'COMPLETED' })
     expect((await prisma.onlineOrder.findUniqueOrThrow({ where: { id: onlineOrderId } })).status).toBe('PENDING_ACCEPTANCE')
     // Un pedido ya cobrado no vence: se acepta aunque haya pasado la hora límite.
     await expect(acceptOnlineOrder({ venueId: venueId!, orderId, staffId: null })).resolves.toMatchObject({
@@ -352,7 +359,7 @@ describe('Pedidos en línea — ciclo de vida (integration, real DB)', () => {
   it('cancelar por personal usa la cancelación existente: cuenta CANCELLED y pedido CANCELLED_BY_STAFF en la misma transacción (R1)', async () => {
     await beat()
     const { orderId, onlineOrderId } = await newOrder()
-    await acceptOnlineOrder({ venueId: venueId!, orderId, staffId: null })
+    await aceptar(orderId)
     await expect(cancelOnlineOrderByStaff({ venueId: venueId!, orderId, staffId: null })).resolves.toEqual({
       outcome: 'OK',
       status: 'CANCELLED_BY_STAFF',
@@ -375,7 +382,7 @@ describe('Pedidos en línea — ciclo de vida (integration, real DB)', () => {
   it('el reclamo de impresión lo gana un solo aparato', async () => {
     await beat()
     const { orderId } = await newOrder()
-    await acceptOnlineOrder({ venueId: venueId!, orderId, staffId: null })
+    await aceptar(orderId)
     const [a, b] = await Promise.all([claimOnlineOrderPrint(venueId!, orderId, 'dev-A'), claimOnlineOrderPrint(venueId!, orderId, 'dev-B')])
     expect([a.claimed, b.claimed].sort()).toEqual([false, true])
   })
@@ -383,7 +390,7 @@ describe('Pedidos en línea — ciclo de vida (integration, real DB)', () => {
   it('un reclamo de impresión vencido (más de 90 s) lo toma otro aparato, y sólo el nuevo dueño confirma el papel', async () => {
     await beat()
     const { orderId, onlineOrderId } = await newOrder()
-    await acceptOnlineOrder({ venueId: venueId!, orderId, staffId: null })
+    await aceptar(orderId)
     await expect(claimOnlineOrderPrint(venueId!, orderId, 'dev-A')).resolves.toEqual({ claimed: true })
     // El aparato A se apagó a media impresión: su reclamo envejece más allá del TTL de 90 s.
     await prisma.onlineOrder.update({ where: { id: onlineOrderId }, data: { printClaimedAt: new Date(Date.now() - 91_000) } })
@@ -393,6 +400,18 @@ describe('Pedidos en línea — ciclo de vida (integration, real DB)', () => {
     expect(await prisma.onlineOrder.findUniqueOrThrow({ where: { id: onlineOrderId } })).toMatchObject({ printClaimedBy: 'dev-B' })
   })
 
+  it('un reclamo de impresión de 89 s sigue vigente: otro aparato NO lo toma', async () => {
+    await beat()
+    const { orderId, onlineOrderId } = await newOrder()
+    await aceptar(orderId)
+    await expect(claimOnlineOrderPrint(venueId!, orderId, 'dev-A')).resolves.toEqual({ claimed: true })
+    // Reloj fijo para B: el reclamo de A tiene exactamente 89 s, un segundo antes del TTL de 90 s.
+    const ahora = new Date()
+    await prisma.onlineOrder.update({ where: { id: onlineOrderId }, data: { printClaimedAt: new Date(ahora.getTime() - 89_000) } })
+    await expect(claimOnlineOrderPrint(venueId!, orderId, 'dev-B', ahora)).resolves.toEqual({ claimed: false })
+    expect(await prisma.onlineOrder.findUniqueOrThrow({ where: { id: onlineOrderId } })).toMatchObject({ printClaimedBy: 'dev-A' })
+  })
+
   it('H6: un rechazo que llega mientras el cobro real retiene el candado de la orden espera, y al soltarse pierde (HAS_PAYMENTS)', async () => {
     await beat()
     const { orderId, onlineOrderId } = await newOrder()
@@ -400,24 +419,31 @@ describe('Pedidos en línea — ciclo de vida (integration, real DB)', () => {
     const retenido = new Promise<void>(resolve => (soltar = resolve))
     let avisarDentro!: () => void
     const cobroDentro = new Promise<void>(resolve => (avisarDentro = resolve))
+    let pidDelCobro: number | undefined
 
-    // El cobro toma el candado de la orden, crea su Payment y se queda esperando DENTRO de su transacción, sin commit.
+    // El cobro toma el candado de la orden, crea su Payment y se queda esperando DENTRO de su transacción, sin commit. Anota
+    // el proceso de Postgres de ESA transacción: es el que retiene el candado.
     const cobro = payCashOrder(venueId!, orderId, {
       amount: 20_600,
       tip: 0,
       idempotencyKey: `itest-pay-carrera-${orderId}`,
-      dentroDeLaTx: async () => {
+      dentroDeLaTx: async tx => {
+        pidDelCobro = (await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`)[0].pid
         avisarDentro()
         await retenido
       },
     })
-    await cobroDentro
+    await Promise.race([cobroDentro, cobro]) // si el cobro lanza antes del gancho, falla aquí en vez de colgarse
     const rechazo = rejectOnlineOrder({ venueId: venueId!, orderId, staffId: null, reason: 'TOO_BUSY' })
-    await esperarBloqueoEnLaOrden() // el rechazo ya está formado en el candado
-    soltar()
-
-    await expect(cobro).resolves.toMatchObject({ status: 'COMPLETED' })
-    await expect(rechazo).resolves.toEqual({ outcome: 'HAS_PAYMENTS' })
+    // El cobro se suelta pase lo que pase, y los tres se esperan antes de afirmar: nada queda corriendo ni sin manejar.
+    const [espera, pago, rechazado] = await Promise.allSettled([
+      esperarQueAlguienEspereAlCobro(pidDelCobro).finally(soltar),
+      cobro,
+      rechazo,
+    ])
+    if (espera.status === 'rejected') throw espera.reason // el rechazo nunca quedó formado detrás del cobro
+    expect(pago).toMatchObject({ status: 'fulfilled', value: { status: 'COMPLETED' } })
+    expect(rechazado).toEqual({ status: 'fulfilled', value: { outcome: 'HAS_PAYMENTS' } })
     // nada incoherente: la venta cobrada sigue cobrada, el pedido sigue por aceptar y hay un solo pago
     expect(await prisma.order.findUniqueOrThrow({ where: { id: orderId } })).toMatchObject({ paymentStatus: 'PAID', status: 'COMPLETED' })
     expect((await prisma.onlineOrder.findUniqueOrThrow({ where: { id: onlineOrderId } })).status).toBe('PENDING_ACCEPTANCE')
@@ -427,17 +453,18 @@ describe('Pedidos en línea — ciclo de vida (integration, real DB)', () => {
   it('H6: si el CAS del pedido pierde DENTRO de la cancelación existente, Postgres revierte la cancelación de la Order', async () => {
     await beat()
     const { orderId, onlineOrderId } = await newOrder()
-    await acceptOnlineOrder({ venueId: venueId!, orderId, staffId: null })
+    await aceptar(orderId)
     // Otro actor "cambió" el pedido entre la lectura y el CAS: un disparador efímero hace que el UPDATE de ESTE pedido a
     // CANCELLED_BY_STAFF no toque ninguna fila (count 0, igual que un CAS perdido). `orderId` es un cuid que creó esta prueba.
     const sufijo = `${RUN}_${++seq}`
     const fn = `itest_cas_pierde_fn_${sufijo}`
     const tr = `itest_cas_pierde_tr_${sufijo}`
-    await prisma.$executeRawUnsafe(
-      `CREATE FUNCTION "${fn}"() RETURNS trigger LANGUAGE plpgsql AS $b$ BEGIN IF NEW."orderId" = '${orderId}' AND NEW.status = 'CANCELLED_BY_STAFF' THEN RETURN NULL; END IF; RETURN NEW; END $b$`,
-    )
-    await prisma.$executeRawUnsafe(`CREATE TRIGGER "${tr}" BEFORE UPDATE ON "OnlineOrder" FOR EACH ROW EXECUTE FUNCTION "${fn}"()`)
     try {
+      // Dentro del `try`: si algo falla a medio crear, el `finally` borra lo que sí se creó.
+      await prisma.$executeRawUnsafe(
+        `CREATE FUNCTION "${fn}"() RETURNS trigger LANGUAGE plpgsql AS $b$ BEGIN IF NEW."orderId" = '${orderId}' AND NEW.status = 'CANCELLED_BY_STAFF' THEN RETURN NULL; END IF; RETURN NEW; END $b$`,
+      )
+      await prisma.$executeRawUnsafe(`CREATE TRIGGER "${tr}" BEFORE UPDATE ON "OnlineOrder" FOR EACH ROW EXECUTE FUNCTION "${fn}"()`)
       await expect(cancelOnlineOrderByStaff({ venueId: venueId!, orderId, staffId: null })).resolves.toEqual({
         outcome: 'STALE',
         status: 'ACCEPTED',
