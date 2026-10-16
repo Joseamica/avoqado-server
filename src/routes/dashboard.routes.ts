@@ -353,6 +353,7 @@ import {
   financialProviderRoutes,
 } from './dashboard/financialConnection.routes'
 import paymentLinkRoutes from './dashboard/paymentLink.routes'
+import onlineOrderingDashboardRoutes from './dashboard/onlineOrdering.dashboard.routes'
 import manualPaymentRoutes from './dashboard/manualPayment.routes'
 import activityLogRoutes from './dashboard/activityLog.routes'
 import reportsRoutes from './dashboard/reports.routes'
@@ -4536,6 +4537,7 @@ router.use('/', authenticateTokenMiddleware, financialProviderRoutes)
 
 // Payment Link Management routes (ADMIN+)
 router.use('/venues/:venueId/payment-links', authenticateTokenMiddleware, checkPermission('payment-link:read'), paymentLinkRoutes)
+router.use('/venues/:venueId/online-ordering', authenticateTokenMiddleware, onlineOrderingDashboardRoutes)
 
 // Venue Crypto Config routes (OWNER+) - Per-venue B4Bit device management
 router.post(

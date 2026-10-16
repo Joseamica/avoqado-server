@@ -62,6 +62,9 @@ export const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   // un dueño parado frente al POS no podría tocar el botón que sí ve su cocinero.
   'delivery-channels:manage': ['delivery-channels:manage', 'delivery-channels:read', 'delivery-channels:snooze'],
   'delivery-channels:snooze': ['delivery-channels:snooze'],
+  // Pedidos en línea: ajustes y menú en línea. Aceptar, rechazar y pausar usan `orders:update` (cocina y caja ya lo tienen);
+  // cancelar, `orders:cancel-unpaid`.
+  'online-orders:manage': ['online-orders:manage', 'orders:read', 'orders:update', 'products:read', 'menu:read'],
 
   'orders:read': [
     'orders:read',
@@ -1145,6 +1148,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     // NO: tpv-factory-reset (OWNER only)
     // NO: commissions:create/update/delete/approve/payout (ADMIN+ only)
     // NO: cfdi:configure (OWNER/ADMIN only)
+    'online-orders:manage', // Pedidos en línea: ajustes y menú
     // Facturación CFDI 4.0 (Pro-tier) — MANAGER can issue and view invoices
     'cfdi:issue',
     'cfdi:view',
@@ -1283,6 +1287,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     // NO: venue-crypto:manage (SUPERADMIN only)
     // NO: tpv-factory-reset:execute (OWNER only - destructive)
     // NO: commissions:payout (OWNER only - financial)
+    'online-orders:manage', // Pedidos en línea: ajustes y menú
     // Facturación CFDI 4.0 (Pro-tier) — ADMIN has full CFDI access
     'cfdi:configure',
     'cfdi:issue',
@@ -1438,6 +1443,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     // Situación Fiscal). OWNER-only, NO ADMIN/MANAGER: son los datos legales del negocio
     // (RFC, razón social, régimen fiscal) y el dueño es quien responde por ellos ante el SAT.
     'venue-fiscal-profile:manage',
+    'online-orders:manage', // Pedidos en línea: ajustes y menú
     // Facturación CFDI 4.0 (Pro-tier) — OWNER has full CFDI access
     'cfdi:configure',
     'cfdi:issue',
@@ -2112,6 +2118,8 @@ export const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   'venue-fiscal-profile': ['venue-fiscal-profile:manage'],
   // Delivery Channels (Uber Eats, Rappi, DiDi vía Deliverect — Premium tier, Task 10/11)
   'delivery-channels': ['delivery-channels:read', 'delivery-channels:manage', 'delivery-channels:request', 'delivery-channels:snooze'],
+  // Pedidos en línea (tienda del restaurante): ajustes y menú en línea (Pro, `ONLINE_ORDERING`).
+  'online-orders': ['online-orders:manage'],
 }
 
 /**
