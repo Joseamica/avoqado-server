@@ -101,6 +101,14 @@ describe('onlineOrders.mobile.controller', () => {
     expect(touchInboxPoll).toHaveBeenCalledWith('v1')
   })
 
+  it('soporte suplantando (aunque el suplantado sea cajera) mira la bandeja pero NO mantiene abierta la tienda: no puede contestar', async () => {
+    const { req, res, next } = mock({ headers: { 'x-online-orders-tray': '1' } })
+    req.authContext.isImpersonating = true
+    await ctrl.inbox(req, res, next)
+    expect(touchInboxPoll).not.toHaveBeenCalled()
+    expect(res.json).toHaveBeenCalledWith({ success: true, data: { ...LISTA, store: { status: 'OPEN', reason: null } } })
+  })
+
   it('si la lista falla no hay latido: una bandeja rota no mantiene abierta la tienda', async () => {
     ;(listInbox as jest.Mock).mockRejectedValue(new Error('db'))
     const { req, res, next } = mock({ headers: { 'x-online-orders-tray': '1' } })
@@ -158,7 +166,33 @@ describe('onlineOrders.mobile.controller', () => {
     await ctrl.cancel(req, res, next)
     expect(cancelOnlineOrderByStaff).toHaveBeenCalledWith({ venueId: 'v1', orderId: 'ord1', staffId: 'staff1' })
     expect(res.status).toHaveBeenCalledWith(409)
-    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'ORDER_HAS_PAYMENTS' }))
+    expect(res.json).toHaveBeenCalledWith({
+      success: false,
+      code: 'ORDER_HAS_PAYMENTS',
+      error:
+        'El pedido ya tiene un cobro, o uno en curso en la terminal. Espera a que termine; si ya se cobró, usa el reembolso de la cuenta.',
+    })
+  })
+
+  it('sólo NOT_FOUND es 404; un resultado desconocido es un error del servidor, nunca «No encontramos ese pedido»', async () => {
+    ;(markOnlineOrderReady as jest.Mock).mockResolvedValueOnce({ outcome: 'NOT_FOUND' })
+    const a = mock()
+    await ctrl.ready(a.req, a.res, a.next)
+    expect(a.res.status).toHaveBeenCalledWith(404)
+    expect(a.res.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'ORDER_NOT_FOUND' }))
+    ;(markOnlineOrderReady as jest.Mock).mockResolvedValueOnce({ outcome: 'ALGO_NUEVO' })
+    const b = mock()
+    await ctrl.ready(b.req, b.res, b.next)
+    expect(b.next).toHaveBeenCalledWith(expect.any(Error))
+    expect(b.res.status).not.toHaveBeenCalled()
+    expect(b.res.json).not.toHaveBeenCalled()
+  })
+
+  it('rechazar con una nota de puros espacios guarda `null`, no una cadena vacía', async () => {
+    ;(rejectOnlineOrder as jest.Mock).mockResolvedValueOnce({ outcome: 'OK', status: 'REJECTED' })
+    const { req, res, next } = mock({ body: { reason: 'OTHER', note: '   ' } })
+    await ctrl.reject(req, res, next)
+    expect(rejectOnlineOrder).toHaveBeenCalledWith({ venueId: 'v1', orderId: 'ord1', staffId: 'staff1', reason: 'OTHER', note: null })
   })
 
   it('el reclamo de impresión exige x-device-id', async () => {

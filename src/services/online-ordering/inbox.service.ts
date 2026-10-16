@@ -2,7 +2,7 @@ import { OnlineOrderStatus, Prisma, type OnlineOrderPaymentMode } from '@prisma/
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
 import { syncOnlineOrdersOfCancelledOrders } from './cancelledOrderSync'
-import { INBOX_PAGE_SIZE } from './constants'
+import { INBOX_PAGE_SIZE, MAX_CART_LINES } from './constants'
 import { onlineOrderNeedsPrint } from './printClaim.service'
 
 export type InboxFilter = 'pending' | 'active' | 'done' | 'all'
@@ -57,8 +57,11 @@ const SELECT = {
       customerName: true,
       customerPhone: true,
       specialRequests: true,
+      // Topes que nunca recortan lo que pidió el comensal: la tienda crea la cuenta con ≤ MAX_CART_LINES renglones y ≤ 30
+      // opciones por renglón (esquema público `onlineOrdering.schema.ts`). El doble de renglones deja lugar a lo que la caja
+      // agregue después a la cuenta; 50 opciones cubren las 30 del pedido.
       items: {
-        take: 100,
+        take: 2 * MAX_CART_LINES,
         orderBy: [{ sequence: 'asc' as const }, { id: 'asc' as const }],
         select: { productName: true, quantity: true, notes: true, modifiers: { take: 50, select: { name: true, quantity: true } } },
       },

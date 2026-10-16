@@ -45,10 +45,14 @@ function reply(res: Response, r: TransitionResult) {
       return res.status(409).json({
         success: false,
         code: 'ORDER_HAS_PAYMENTS',
-        error: 'El pedido ya tiene un cobro (o uno en curso en la terminal). Usa el reembolso de la cuenta.',
+        error:
+          'El pedido ya tiene un cobro, o uno en curso en la terminal. Espera a que termine; si ya se cobró, usa el reembolso de la cuenta.',
       })
-    default:
+    case 'NOT_FOUND':
       return res.status(404).json({ success: false, code: 'ORDER_NOT_FOUND', error: 'No encontramos ese pedido.' })
+    default:
+      // Un resultado que este mapa no conoce es un error del servidor (500), nunca un «no existe» que engañe a la caja.
+      throw new Error(`Resultado de transición desconocido: ${String((r as { outcome?: unknown }).outcome)}`)
   }
 }
 
@@ -58,6 +62,8 @@ function reply(res: Response, r: TransitionResult) {
  * por el `checkPermission('orders:read')` de la ruta.
  */
 async function canAnswerOrders(req: Request, venueId: string): Promise<boolean> {
+  // Suplantando, `userId` es el suplantado pero la sesión es de sólo lectura: no puede contestar, así que no late.
+  if ((req as any).authContext?.isImpersonating) return false
   const userId: string | undefined = (req as any).authContext?.userId
   if (!userId) return false
   const { role, permissionSet } = await resolveUserRoleForVenue({ userId, targetVenueId: venueId, req })
@@ -96,7 +102,9 @@ export const reject = async (req: Request, res: Response, next: NextFunction) =>
   try {
     const { venueId, orderId } = req.params
     const reason = req.body.reason as OnlineOrderRejectReason
-    return reply(res, await rejectOnlineOrder({ venueId, orderId, staffId: staffOf(req), reason, note: req.body.note ?? null }))
+    // Una nota de puros espacios no es nota: se guarda `null`, no `""`.
+    const note = typeof req.body.note === 'string' ? req.body.note.trim() || null : null
+    return reply(res, await rejectOnlineOrder({ venueId, orderId, staffId: staffOf(req), reason, note }))
   } catch (e) {
     return next(e)
   }
