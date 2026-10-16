@@ -252,6 +252,45 @@ async function resolverRolEnLaBase(userId: string, targetVenueId: string): Promi
 }
 
 /**
+ * ¿Este rol, en este negocio, tiene el permiso? La evaluación de `checkPermission`, exportada tal cual (pedidos en línea, H3: el
+ * latido de la bandeja exige `orders:update` efectivo). Con lista propia del empleado (`permissionSet`) se evalúa esa lista; si
+ * no, el rol con los permisos personalizados del negocio (`VenueRolePermission`, también los quitados).
+ */
+export async function evaluateRolePermission(p: {
+  venueId: string
+  role: StaffRole
+  permissionSet?: PermissionSet | null
+  permission: string
+}): Promise<boolean> {
+  // If a permission set is assigned, evaluate that effective list directly.
+  if (p.permissionSet) return evaluatePermissionList(p.permissionSet.permissions, p.permission)
+
+  // Load custom permissions from VenueRolePermission table
+  let customPermissions: string[] | null = null
+  const venueRolePermission = await prisma.venueRolePermission.findUnique({
+    where: {
+      venueId_role: {
+        venueId: p.venueId,
+        role: p.role,
+      },
+    },
+    select: {
+      permissions: true,
+      deniedPermissions: true,
+    },
+  })
+
+  let deniedPermissions: string[] | null = null
+  if (venueRolePermission) {
+    customPermissions = venueRolePermission.permissions as string[]
+    deniedPermissions = (venueRolePermission.deniedPermissions as string[]) ?? null
+  }
+
+  // Check if user has permission (uses override mode for wildcard roles)
+  return hasPermission(p.role, customPermissions, p.permission, deniedPermissions)
+}
+
+/**
  * Middleware to check if user has required permission
  *
  * ⚠️ CRITICAL: Must match frontend permission logic in:
@@ -381,36 +420,7 @@ export const checkPermission = (requiredPermission: string) => {
       // never their raw JWT role (which may belong to a different venue).
       ;(req as any).resolvedRole = userRole
 
-      // If a permission set is assigned, evaluate that effective list directly.
-      let authorized: boolean
-      if (permissionSet) {
-        authorized = evaluatePermissionList(permissionSet.permissions, requiredPermission)
-      } else {
-        // Load custom permissions from VenueRolePermission table
-        let customPermissions: string[] | null = null
-
-        const venueRolePermission = await prisma.venueRolePermission.findUnique({
-          where: {
-            venueId_role: {
-              venueId,
-              role: userRole,
-            },
-          },
-          select: {
-            permissions: true,
-            deniedPermissions: true,
-          },
-        })
-
-        let deniedPermissions: string[] | null = null
-        if (venueRolePermission) {
-          customPermissions = venueRolePermission.permissions as string[]
-          deniedPermissions = (venueRolePermission.deniedPermissions as string[]) ?? null
-        }
-
-        // Check if user has permission (uses override mode for wildcard roles)
-        authorized = hasPermission(userRole, customPermissions, requiredPermission, deniedPermissions)
-      }
+      const authorized = await evaluateRolePermission({ venueId, role: userRole, permissionSet, permission: requiredPermission })
 
       if (!authorized) {
         // 🔴 PIN de autorización de gerente. Este es el ÚNICO punto de integración

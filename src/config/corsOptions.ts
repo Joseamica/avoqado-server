@@ -156,6 +156,8 @@ export const getCorsConfig = (env: Environment): CorsOptions => {
       'X-App-Version-Code',
       // Correlation ID for request tracing (used across sim-custody logs + others).
       'X-Correlation-Id',
+      // Pedidos en línea (H2): sólo la página de bandeja en primer plano la manda con `1`; es el latido de presencia.
+      'x-online-orders-tray',
       'Origin',
       'X-Requested-With',
       'Accept',

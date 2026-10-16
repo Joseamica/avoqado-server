@@ -69,6 +69,7 @@ import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.mi
 import { httpOperationGuard } from '../middlewares/httpOperation.middleware'
 import * as httpOperationMobileController from '../controllers/mobile/http-operation.mobile.controller'
 import { checkFeatureAccess } from '../middlewares/checkFeatureAccess.middleware'
+import onlineOrdersMobileRoutes from './mobile/onlineOrders.mobile.routes'
 import { checkPermission } from '../middlewares/checkPermission.middleware'
 import { marcarPermiso, PERMISO_VER_ESPERADO } from '../middlewares/permissionFlag.middleware'
 import { PAYMENT_OWNERSHIP_OVERRIDES, checkTableOwnership } from '../middlewares/checkTableOwnership.middleware'
@@ -796,6 +797,9 @@ router.delete(
   checkPermission('delivery-channels:snooze'),
   deliveryChannelMobileController.resumeChannel,
 )
+
+// Pedidos en línea: bandeja, acciones, impresión de la comanda y pausa desde el piso (auth y permiso por ruta, sin plan: R14).
+router.use('/venues/:venueId/online-orders', onlineOrdersMobileRoutes)
 
 /**
  * @openapi
