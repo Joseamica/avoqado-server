@@ -65,6 +65,10 @@ jest.mock('@/utils/prismaClient', () => ({
     // El resolutor de rol confirma que la persona siga ACTIVA (Codex H2, 24-sep).
     staff: { findUnique: jest.fn(async () => ({ active: true })) },
     venueRolePermission: { findUnique: jest.fn() },
+    // Con una fila menor que OWNER, el resolutor pregunta si la persona es DUEÑA de la org (ronda 7, P2-6):
+    // aquí nadie lo es.
+    venue: { findUnique: jest.fn(async () => ({ organizationId: 'org-1' })) },
+    staffOrganization: { findUnique: jest.fn(async () => null) },
   },
 }))
 

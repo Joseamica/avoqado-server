@@ -14,7 +14,8 @@ import * as goalResolutionService from '../../services/dashboard/commission/goal
 import { logAction } from '../../services/dashboard/activity-log.service'
 import prisma from '../../utils/prismaClient'
 import { StaffRole } from '@prisma/client'
-import { canAssignRole } from '../../lib/permissions'
+import { canAssignRole, ROLE_HIERARCHY } from '../../lib/permissions'
+import { revisarCambioDeSucursales } from '../../services/organization-dashboard/reglasDeSucursalesDeUnaPersona'
 
 const router = Router({ mergeParams: true })
 
@@ -721,6 +722,13 @@ router.patch('/team/:staffId/status', orgOwnerAccess, async (req: Request, res: 
  * Sync venue assignments for a staff member within the organization.
  * Body: { venueIds: string[] }
  * Adds new assignments, deactivates removed ones (soft-delete).
+ *
+ * 🔴 `requireOrgOwner` de este router acepta ser OWNER de UNA sucursal, y aquí no había más reglas: el dueño de la
+ * tienda A se agregaba la B como OWNER, tocaba al dueño de la org o reactivaba a alguien dado de baja (auditoría de
+ * Codex, 15-oct, P1-4). Ahora aplica las MISMAS reglas que la puerta de la sucursal (`revisarCambioDeSucursales`):
+ * al dueño de la org sólo lo toca el dueño de la org (comprobación estricta), nadie toca un rol mayor, nadie se quita
+ * su último acceso ni se da sucursales (salvo el dueño de la org), y no se reactiva a nadie dado de baja.
+ * Fijado en tests/unit/routes/storesAnalysis.writes.routes.test.ts.
  */
 router.patch('/team/:staffId/venues', orgOwnerAccess, async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -755,6 +763,19 @@ router.patch('/team/:staffId/venues', orgOwnerAccess, async (req: Request, res: 
     // Determine what to add and remove
     const toAdd = validVenueIds.filter(id => !currentActiveIds.has(id))
     const toRemove = Array.from(currentActiveIds).filter(id => !requestedIds.has(id))
+
+    // ── Quién puede tocar a quién (ANTES de escribir) — las mismas reglas que la puerta de la sucursal ──
+    // `requireOrgOwner` ya garantizó una fila ACTIVA de OWNER en una sucursal de esta org (o un superadmin real):
+    // ése es el nivel del que actúa por su sucursal.
+    const rechazo = await revisarCambioDeSucursales({
+      orgId,
+      staffId,
+      sesion: authContext,
+      nivelDelActorEnSucursal: (await esSuperadminDeLaSesion(authContext)) ? ROLE_HIERARCHY.SUPERADMIN : ROLE_HIERARCHY.OWNER,
+      filasDelObjetivo: currentAssignments,
+      sucursalesPedidas: validVenueIds,
+    })
+    if (rechazo) return res.status(rechazo.status).json(rechazo.body)
 
     // ── Safety checks before removing venues ──
     if (toRemove.length > 0) {
@@ -820,10 +841,11 @@ router.patch('/team/:staffId/venues', orgOwnerAccess, async (req: Request, res: 
       logAction({
         staffId: authContext?.userId || null,
         venueId: addVenueId,
+        organizationId: orgId,
         action: 'VENUE_ASSIGNED',
         entity: 'Staff',
         entityId: staffId,
-        data: { venueId: addVenueId, venueName },
+        data: { venueId: addVenueId, venueName, role: defaultRole },
       })
     }
 
@@ -839,6 +861,7 @@ router.patch('/team/:staffId/venues', orgOwnerAccess, async (req: Request, res: 
       logAction({
         staffId: authContext?.userId || null,
         venueId: removeVenueId,
+        organizationId: orgId,
         action: 'VENUE_REMOVED',
         entity: 'Staff',
         entityId: staffId,

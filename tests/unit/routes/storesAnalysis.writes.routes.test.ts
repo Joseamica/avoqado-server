@@ -65,6 +65,7 @@ jest.mock('@/middlewares/verifyAccess.middleware', () => ({
 
 import storesAnalysisRouter from '@/routes/dashboard/storesAnalysis.routes'
 import organizationDashboardRoutes from '@/routes/dashboard/organizationDashboard.routes'
+import organizationConfigRoutes from '@/routes/dashboard/organizationConfig.routes'
 
 const ORG = 'org-pt'
 const VA = 'venue-a' // la sucursal de la petición
@@ -87,6 +88,7 @@ const SUCURSAL: Array<{ staffId: string; venueId: string; role: string; active: 
   { staffId: 'ex-gerente', venueId: VA, role: 'CASHIER', active: true },
   { staffId: 'ex-gerente', venueId: VB, role: 'OWNER', active: false }, // fila vieja, apagada, de rol mayor
   { staffId: 'super-1', venueId: 'venue-plataforma', role: 'SUPERADMIN', active: true },
+  { staffId: 'dueno-org-cajero', venueId: VA, role: 'CASHIER', active: true }, // dueño de la org con una fila MENOR en la tienda
 ]
 /** Filas `StaffOrganization` de la org. */
 const ORGANIZACION: Array<{ staffId: string; role: string; isActive: boolean }> = [
@@ -96,10 +98,12 @@ const ORGANIZACION: Array<{ staffId: string; role: string; isActive: boolean }> 
   { staffId: 'dueno-org', role: 'OWNER', isActive: true }, // Isaac: dueño de la org, sin fila de sucursal
   { staffId: 'admin-org', role: 'ADMIN', isActive: true },
   { staffId: 'ex-miembro', role: 'MEMBER', isActive: false }, // sacado de la org
+  { staffId: 'dueno-org-cajero', role: 'OWNER', isActive: true },
 ]
 const DADOS_DE_BAJA = new Set(['baja'])
 
 /** Checadas: id → de quién y de qué sucursal. */
+let ESTADO: Record<string, { id: string; staffId: string; venueId: string; validationStatus: string; validatedAt: Date | null }> = {}
 const CHECADAS: Record<string, { staffId: string; venueId: string }> = {
   'te-cajero': { staffId: 'cajero', venueId: VA },
   'te-gerente': { staffId: 'gerente', venueId: VA },
@@ -117,6 +121,7 @@ function makeApp() {
   app.use(express.json())
   app.use('/dashboard/venues/:venueId/stores-analysis', storesAnalysisRouter)
   app.use('/dashboard/organizations', organizationDashboardRoutes)
+  app.use('/dashboard/organizations/:orgId', organizationConfigRoutes)
   app.use((error: any, _req: Request, res: Response, _next: NextFunction) => {
     res.status(error.statusCode ?? 500).json({ message: error.message, code: error.code })
   })
@@ -135,7 +140,11 @@ const ROL_DEL_TOKEN: Record<string, string> = {
   'dueno-suc': 'OWNER',
   'dueno-org': 'OWNER',
   'super-1': 'SUPERADMIN',
+  'dueno-org-cajero': 'CASHIER',
 }
+
+/** `VenueRolePermission` por `venueId:rol` (lo que el negocio personalizó); se cambia por prueba. */
+let PERSONALIZACION: Record<string, { permissions: string[]; deniedPermissions: string[] }> = {}
 
 function como(userId: string) {
   return { 'x-test-auth-context': JSON.stringify({ userId, orgId: ORG, venueId: VA, role: ROL_DEL_TOKEN[userId] ?? 'CASHIER' }) }
@@ -222,14 +231,36 @@ beforeEach(() => {
     const fila = organizationId === ORG ? ORGANIZACION.find(f => f.staffId === staffId) : undefined
     return Promise.resolve(fila ? { role: fila.role, isActive: fila.isActive } : null)
   }) as any)
-  prismaMock.venueRolePermission.findUnique.mockResolvedValue(null as any)
-
-  prismaMock.timeEntry.findFirst.mockImplementation((({ where }: any) => {
-    const checada = CHECADAS[where?.id]
-    if (!checada || ORG_DE_LA_SUCURSAL[checada.venueId] !== where?.venue?.organizationId) return Promise.resolve(null)
-    return Promise.resolve({ id: where.id, ...checada, validatedAt: null })
+  PERSONALIZACION = {}
+  prismaMock.venueRolePermission.findUnique.mockImplementation((({ where }: any) => {
+    const { venueId, role } = where?.venueId_role ?? {}
+    return Promise.resolve(PERSONALIZACION[`${venueId}:${role}`] ?? null)
   }) as any)
-  prismaMock.timeEntry.update.mockImplementation((({ where, data }: any) => Promise.resolve({ id: where.id, ...data })) as any)
+
+  // Estado de cada checada en la «base»: la transición atómica (`updateMany` con el estado previo en el
+  // `where`) sólo escribe si la fila sigue en ese estado, como Postgres.
+  ESTADO = Object.fromEntries(
+    Object.entries(CHECADAS).map(([id, c]) => [id, { id, ...c, validationStatus: 'PENDING', validatedAt: null as Date | null }]),
+  )
+  prismaMock.timeEntry.findFirst.mockImplementation((({ where }: any) => {
+    const checada = ESTADO[where?.id]
+    if (!checada || ORG_DE_LA_SUCURSAL[checada.venueId] !== where?.venue?.organizationId) return Promise.resolve(null)
+    return Promise.resolve({ ...checada })
+  }) as any)
+  prismaMock.timeEntry.findUnique.mockImplementation((({ where }: any) =>
+    Promise.resolve(ESTADO[where?.id] ? { ...ESTADO[where.id] } : null)) as any)
+  prismaMock.timeEntry.updateMany.mockImplementation((({ where, data }: any) => {
+    const checada = ESTADO[where?.id]
+    if (!checada || (where?.validationStatus !== undefined && checada.validationStatus !== where.validationStatus)) {
+      return Promise.resolve({ count: 0 })
+    }
+    Object.assign(checada, data)
+    return Promise.resolve({ count: 1 })
+  }) as any)
+  prismaMock.timeEntry.update.mockImplementation((({ where, data }: any) => {
+    if (ESTADO[where?.id]) Object.assign(ESTADO[where.id], data)
+    return Promise.resolve({ id: where.id, ...data })
+  }) as any)
   prismaMock.cashDeposit.create.mockResolvedValue({ id: 'dep-1' } as any)
   prismaMock.cashDeposit.deleteMany.mockResolvedValue({ count: 0 } as any)
 })
@@ -253,6 +284,7 @@ function validarEnLaOrg(userId: string, checada: string) {
 
 function nadaEscritoEnLaChecada() {
   expect(prismaMock.timeEntry.update).not.toHaveBeenCalled()
+  expect(prismaMock.timeEntry.updateMany).not.toHaveBeenCalled()
   expect(prismaMock.cashDeposit.create).not.toHaveBeenCalled()
   expect(prismaMock.cashDeposit.deleteMany).not.toHaveBeenCalled()
 }
@@ -274,8 +306,11 @@ describe('POST .../time-entry/:id/validate (aprobar con depósito = dinero)', ()
     const res = await validarEnSucursal(userId, 'te-cajero')
 
     expect(res.status).toBe(200)
-    expect(prismaMock.timeEntry.update).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { id: 'te-cajero' }, data: expect.objectContaining({ validatedBy: userId }) }),
+    expect(prismaMock.timeEntry.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'te-cajero', validationStatus: 'PENDING' },
+        data: expect.objectContaining({ validatedBy: userId }),
+      }),
     )
     expect(prismaMock.cashDeposit.create).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ staffId: 'cajero', approvedById: userId }) }),
@@ -337,7 +372,7 @@ describe('la misma regla por la puerta de la ORGANIZACIÓN (PATCH /organizations
     const res = await validarEnLaOrg('gerente', 'te-cajero')
 
     expect(res.status).toBe(200)
-    expect(prismaMock.timeEntry.update).toHaveBeenCalled()
+    expect(prismaMock.timeEntry.updateMany).toHaveBeenCalled()
   })
 
   it.each([
@@ -512,6 +547,212 @@ describe('PATCH .../team/:staffId/venues — quién sí, y a quién', () => {
     const res = await cambiarSucursales('dueno-org', 'ex-miembro', [VA])
 
     expect(res.status).toBe(404)
+    nadaEscritoEnSucursales()
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// P2-6 (Codex, 15-oct): el dueño de la ORGANIZACIÓN con una fila MENOR en la tienda
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('el dueño de la organización que además es CAJERO en la tienda', () => {
+  it('🔴 checkPermission lo trata como OWNER, igual que getUserAccess: valida checadas ajenas (attendance:manage)', async () => {
+    const res = await validarEnSucursal('dueno-org-cajero', 'te-cajero')
+
+    expect(res.status).toBe(200)
+    expect(prismaMock.cashDeposit.create).toHaveBeenCalledTimes(1)
+  })
+
+  it('🔴 …y cambia las sucursales de un cajero (teams:update)', async () => {
+    const res = await cambiarSucursales('dueno-org-cajero', 'cajero', [VA, VB])
+
+    expect(res.status).toBe(200)
+    expect(prismaMock.staffVenue.upsert).toHaveBeenCalled()
+  })
+
+  it('conserva las exclusiones del negocio para el rol OWNER: si la tienda le quitó attendance:manage al OWNER, 403', async () => {
+    PERSONALIZACION[`${VA}:OWNER`] = { permissions: [], deniedPermissions: ['attendance:manage'] }
+
+    const res = await validarEnSucursal('dueno-org-cajero', 'te-cajero')
+
+    expect(res.status).toBe(403)
+    expect(res.body.required).toBe('attendance:manage')
+    nadaEscritoEnLaChecada()
+  })
+
+  it('regresión: un cajero que NO es dueño de la org sigue siendo cajero (403)', async () => {
+    const res = await validarEnSucursal('cajero', 'te-gerente')
+
+    expect(res.status).toBe(403)
+    nadaEscritoEnLaChecada()
+  })
+
+  it('regresión: el ADMIN de la org con fila de cajero NO sube a OWNER (sólo el dueño tiene precedencia)', async () => {
+    const res = await validarEnSucursal('admin-org', 'te-cajero')
+
+    expect(res.status).toBe(403)
+    nadaEscritoEnLaChecada()
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// P1-5 (Codex, 15-oct): repetir una aprobación con depósito creaba DOS depósitos aprobados
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('aprobar es idempotente: la repetición no crea otro depósito', () => {
+  it('🔴 por la puerta de la sucursal: la misma aprobación con $150 dos veces → un solo depósito, y la 2ª responde la checada ya aprobada', async () => {
+    const primera = await validarEnSucursal('gerente', 'te-cajero')
+    const segunda = await validarEnSucursal('gerente', 'te-cajero')
+
+    expect(primera.status).toBe(200)
+    expect(segunda.status).toBe(200)
+    expect(segunda.body.data).toMatchObject({ id: 'te-cajero', validationStatus: 'APPROVED', validatedBy: 'gerente' })
+    expect(prismaMock.cashDeposit.create).toHaveBeenCalledTimes(1)
+    // La repetición no es otra aprobación: un solo asiento en la bitácora.
+    expect(bitacora('TIME_ENTRY_APPROVED')).toHaveLength(1)
+  })
+
+  it('🔴 dos supervisores distintos aprobando la misma checada: un solo depósito, a nombre del primero', async () => {
+    await validarEnSucursal('gerente', 'te-cajero')
+    const segunda = await validarEnSucursal('dueno-org', 'te-cajero')
+
+    expect(segunda.status).toBe(200)
+    expect(segunda.body.data.validatedBy).toBe('gerente')
+    expect(prismaMock.cashDeposit.create).toHaveBeenCalledTimes(1)
+  })
+
+  it('🔴 por la puerta de la organización la repetición tampoco escribe de nuevo', async () => {
+    await validarEnLaOrg('gerente', 'te-cajero')
+    const segunda = await validarEnLaOrg('gerente', 'te-cajero')
+
+    expect(segunda.status).toBe(200)
+    expect(prismaMock.timeEntry.updateMany).toHaveBeenCalledTimes(2) // la 2ª intenta la transición y no ocurre
+    expect(ESTADO['te-cajero'].validationStatus).toBe('APPROVED')
+    expect(bitacora('TIME_ENTRY_APPROVED')).toHaveLength(1)
+  })
+
+  it('🔴 aprobar una checada ya RECHAZADA (sin regresarla a pendiente) → 409 en español y ni depósito ni cambio', async () => {
+    await validarEnSucursal('gerente', 'te-cajero', { status: 'REJECTED' })
+    const res = await validarEnSucursal('gerente', 'te-cajero')
+
+    expect(res.status).toBe(409)
+    expect(res.body.code).toBe('TIME_ENTRY_ALREADY_VALIDATED')
+    expect(res.body.message).toMatch(/pendiente/)
+    expect(ESTADO['te-cajero'].validationStatus).toBe('REJECTED')
+    expect(prismaMock.cashDeposit.create).not.toHaveBeenCalled()
+  })
+
+  it('regresión: regresarla a pendiente y volver a aprobar sí crea el depósito nuevo (el viejo lo borra el reinicio)', async () => {
+    await validarEnSucursal('gerente', 'te-cajero')
+    await regresarAPendiente('gerente', 'te-cajero')
+    const res = await validarEnSucursal('gerente', 'te-cajero')
+
+    expect(res.status).toBe(200)
+    expect(prismaMock.cashDeposit.create).toHaveBeenCalledTimes(2)
+    expect(prismaMock.cashDeposit.deleteMany).toHaveBeenCalledTimes(1)
+  })
+
+  it('regresión: rechazar no crea depósito aunque traiga monto', async () => {
+    const res = await validarEnSucursal('gerente', 'te-cajero', { status: 'REJECTED', depositAmount: 150 })
+
+    expect(res.status).toBe(200)
+    expect(prismaMock.cashDeposit.create).not.toHaveBeenCalled()
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// P1-4 (Codex, 15-oct): la OTRA puerta — PATCH /organizations/:orgId/team/:staffId/venues
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * El panel de la organización tiene su propia ruta para lo mismo, con otro `requireOrgOwner` que acepta ser
+ * OWNER de UNA sucursal y sin ninguna de las reglas de arriba: el dueño de la tienda A se agregaba la B como
+ * OWNER (200). Ahora las dos puertas usan la MISMA función (`revisarCambioDeSucursales`).
+ */
+describe('PATCH /organizations/:orgId/team/:staffId/venues — las mismas reglas que la puerta de la sucursal', () => {
+  function cambiarPorLaOrg(actor: string, staffId: string, venueIds: string[]) {
+    return request(makeApp()).patch(`/dashboard/organizations/${ORG}/team/${staffId}/venues`).set(como(actor)).send({ venueIds })
+  }
+
+  beforeEach(() => {
+    // Revisiones de seguridad de la ruta al quitar sucursales (turno abierto, corte abierto): no hay ninguno.
+    prismaMock.timeEntry.findMany.mockResolvedValue([] as any)
+    prismaMock.shift.findMany.mockResolvedValue([] as any)
+  })
+
+  it('🔴 el caso de Codex: el dueño de UNA sucursal no se agrega otra a sí mismo → 403 y nada escrito', async () => {
+    const res = await cambiarPorLaOrg('dueno-suc', 'dueno-suc', [VA, VB])
+
+    expect(res.status).toBe(403)
+    expect(res.body.error).toBe('self_assignment')
+    nadaEscritoEnSucursales()
+  })
+
+  it('🔴 el dueño de una sucursal no toca al dueño de la organización → 403', async () => {
+    const res = await cambiarPorLaOrg('dueno-suc', 'dueno-org', [VA])
+
+    expect(res.status).toBe(403)
+    expect(res.body.error).toBe('owner_required')
+    nadaEscritoEnSucursales()
+  })
+
+  it('🔴 nadie se quita su último acceso → 409', async () => {
+    const res = await cambiarPorLaOrg('dueno-suc', 'dueno-suc', [])
+
+    expect(res.status).toBe(409)
+    expect(res.body.error).toBe('last_access')
+    nadaEscritoEnSucursales()
+  })
+
+  it('🔴 no le devuelve sucursales a quien está dado de baja → 409', async () => {
+    const res = await cambiarPorLaOrg('dueno-suc', 'baja', [VA, VB])
+
+    expect(res.status).toBe(409)
+    expect(res.body.error).toBe('staff_deactivated')
+    nadaEscritoEnSucursales()
+  })
+
+  it('🔴 a quien ya no es de la organización: 404 y nada escrito (antes el upsert le creaba filas)', async () => {
+    const res = await cambiarPorLaOrg('dueno-suc', 'ex-miembro', [VA])
+
+    expect(res.status).toBe(404)
+    nadaEscritoEnSucursales()
+  })
+
+  it('el dueño de una sucursal sí le agrega la tienda B a un cajero, con autor y org en la bitácora', async () => {
+    const res = await cambiarPorLaOrg('dueno-suc', 'cajero', [VA, VB])
+
+    expect(res.status).toBe(200)
+    expect(prismaMock.staffVenue.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { staffId_venueId: { staffId: 'cajero', venueId: VB } } }),
+    )
+    expect(bitacora('VENUE_ASSIGNED')).toEqual([
+      expect.objectContaining({ staffId: 'dueno-suc', venueId: VB, organizationId: ORG, entityId: 'cajero' }),
+    ])
+  })
+
+  it('el superadmin de verdad sí cambia las sucursales del dueño de la org', async () => {
+    const res = await cambiarPorLaOrg('super-1', 'dueno-org', [VA])
+
+    expect(res.status).toBe(200)
+    expect(prismaMock.staffVenue.upsert).toHaveBeenCalled()
+  })
+
+  it('quitarle una tienda sigue siendo borrado suave, con autor y org en la bitácora', async () => {
+    const res = await cambiarPorLaOrg('dueno-suc', 'cajero', [])
+
+    expect(res.status).toBe(200)
+    expect(prismaMock.staffVenue.update).toHaveBeenCalledWith({
+      where: { staffId_venueId: { staffId: 'cajero', venueId: VA } },
+      data: { active: false, pin: null },
+    })
+    expect(bitacora('VENUE_REMOVED')).toEqual([expect.objectContaining({ staffId: 'dueno-suc', venueId: VA, organizationId: ORG })])
+  })
+
+  it('regresión: un gerente no pasa la puerta de la org (sigue siendo de dueño) → 403', async () => {
+    const res = await cambiarPorLaOrg('gerente', 'cajero', [VA, VB])
+
+    expect(res.status).toBe(403)
     nadaEscritoEnSucursales()
   })
 })

@@ -239,7 +239,7 @@ describe('checkPermission Middleware', () => {
             venueId: 'different_venue_456',
           },
         },
-        select: { role: true, active: true, permissionSetId: true, permissionSet: true },
+        select: { role: true, active: true, permissionSetId: true, permissionSet: true, venue: { select: { organizationId: true } } },
       })
       expect(permissionsLib.hasPermission).toHaveBeenCalledWith(StaffRole.ADMIN, null, 'menu:read', null)
     })
@@ -299,7 +299,7 @@ describe('checkPermission Middleware', () => {
 
         expect(prisma.staffVenue.findUnique).toHaveBeenCalledWith({
           where: { staffId_venueId: { staffId: 'user_123', venueId: 'venue_from_header' } },
-          select: { role: true, active: true, permissionSetId: true, permissionSet: true },
+          select: { role: true, active: true, permissionSetId: true, permissionSet: true, venue: { select: { organizationId: true } } },
         })
         expect(mockNext).toHaveBeenCalledWith()
       })

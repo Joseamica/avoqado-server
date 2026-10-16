@@ -26,7 +26,7 @@ import * as supervisorSalesExportService from '../../services/organization-dashb
 import { BadRequestError } from '../../errors/AppError'
 import { checkPermission } from '../../middlewares/checkPermission.middleware'
 import { esSupervisorOMasDeLaOrganizacion, MENSAJE_SE_REQUIERE_SUPERVISOR } from '../../services/access/supervisorDeLaOrganizacion'
-import { esDuenoDeEstaOrganizacionOSuperadmin } from '../../services/access/duenoDeEstaOrganizacion'
+import { revisarCambioDeSucursales } from '../../services/organization-dashboard/reglasDeSucursalesDeUnaPersona'
 import { ROLE_HIERARCHY } from '../../lib/permissions'
 
 // mergeParams: true allows access to :venueId from parent route
@@ -981,6 +981,8 @@ router.post('/admin/reset-password/:userId', whiteLabelAccess, async (req: Reque
  *   · nadie se quita su último acceso, y nadie se da sucursales a sí mismo salvo el dueño de la org;
  *   · no reactiva a quien está dado de baja (`Staff.active=false`) ni a quien ya no es de la org;
  *     quitarle sucursales sigue siendo borrado suave.
+ * Las reglas viven en `services/organization-dashboard/reglasDeSucursalesDeUnaPersona.ts` y las comparte la
+ * puerta de la org (`PATCH /organizations/:orgId/team/:staffId/venues`).
  * Fijado en tests/unit/routes/storesAnalysis.writes.routes.test.ts.
  */
 router.patch(
@@ -1001,19 +1003,6 @@ router.patch(
       const orgId = await getOrgIdFromVenue(venueId)
       if (!orgId) {
         return res.status(404).json({ success: false, error: 'Organization not found' })
-      }
-
-      // La persona tiene que seguir siendo de ESTA organización (fila activa): a quien sacaron de la org no
-      // se le devuelven sucursales por aquí, y un id de otra org no se cuela.
-      const [membresiaDelObjetivo, persona] = await Promise.all([
-        prisma.staffOrganization.findFirst({
-          where: { staffId, organizationId: orgId, isActive: true },
-          select: { role: true },
-        }),
-        prisma.staff.findUnique({ where: { id: staffId }, select: { active: true } }),
-      ])
-      if (!membresiaDelObjetivo || !persona) {
-        return res.status(404).json({ success: false, error: 'not_found', message: 'Esa persona no es parte de esta organización.' })
       }
 
       // Get all org venues (to validate the requested venueIds belong to this org)
@@ -1044,66 +1033,17 @@ router.patch(
       const currentVenueAssignment = currentAssignments.find(a => a.venueId === venueId)
       const defaultRole = currentVenueAssignment?.role || 'VIEWER'
 
-      // ── Quién puede tocar a quién (todo ANTES de escribir) ──
-      const actorId: string = authContext?.userId
-      const actorEsDuenoDeLaOrg = await esDuenoDeEstaOrganizacionOSuperadmin(authContext, orgId)
-      if (membresiaDelObjetivo.role === 'OWNER' && !actorEsDuenoDeLaOrg) {
-        return res.status(403).json({
-          success: false,
-          error: 'owner_required',
-          message: 'Sólo el dueño de la organización puede cambiar las sucursales de un dueño de la organización.',
-        })
-      }
-
-      // El rol del que actúa: el RESUELTO en esta sucursal por `checkPermission` y, si es más alto, el de la org.
-      const membresiaDelActor = await prisma.staffOrganization.findFirst({
-        where: { staffId: actorId, organizationId: orgId, isActive: true },
-        select: { role: true },
+      // ── Quién puede tocar a quién (todo ANTES de escribir) — las MISMAS reglas que la puerta de la org ──
+      // El nivel del que actúa por su sucursal: el rol que `checkPermission` resolvió en ESTA sucursal.
+      const rechazo = await revisarCambioDeSucursales({
+        orgId,
+        staffId,
+        sesion: authContext,
+        nivelDelActorEnSucursal: ROLE_HIERARCHY[(req as any).resolvedRole as keyof typeof ROLE_HIERARCHY] ?? 0,
+        filasDelObjetivo: currentAssignments,
+        sucursalesPedidas: validVenueIds,
       })
-      const nivelEnLaOrg = (rolDeOrg?: string | null) =>
-        rolDeOrg === 'OWNER' ? ROLE_HIERARCHY.OWNER : rolDeOrg === 'ADMIN' ? ROLE_HIERARCHY.ADMIN : 0
-      const nivelDelActor = Math.max(
-        ROLE_HIERARCHY[(req as any).resolvedRole as keyof typeof ROLE_HIERARCHY] ?? 0,
-        nivelEnLaOrg(membresiaDelActor?.role),
-      )
-      // El del objetivo: el rol más alto que tiene O TUVO en la org (una fila apagada de OWNER cuenta: el
-      // `upsert` de abajo reactiva filas) y su rol de org.
-      const nivelDelObjetivo = Math.max(
-        nivelEnLaOrg(membresiaDelObjetivo.role),
-        ...currentAssignments.map(a => ROLE_HIERARCHY[a.role as keyof typeof ROLE_HIERARCHY] ?? 0),
-        0,
-      )
-      if (nivelDelObjetivo > nivelDelActor) {
-        return res.status(403).json({
-          success: false,
-          error: 'role_above',
-          message: 'No puedes cambiar las sucursales de alguien con un rol mayor al tuyo.',
-        })
-      }
-
-      if (staffId === actorId) {
-        if (currentActiveIds.size > 0 && validVenueIds.length === 0) {
-          return res
-            .status(409)
-            .json({ success: false, error: 'last_access', message: 'No puedes quitarte tu último acceso a la organización.' })
-        }
-        if (toAdd.length > 0 && !actorEsDuenoDeLaOrg) {
-          return res.status(403).json({
-            success: false,
-            error: 'self_assignment',
-            message: 'No puedes darte acceso a otras sucursales: pídeselo al dueño de la organización.',
-          })
-        }
-      }
-
-      // Dada de baja = borrado suave: no se le devuelven sucursales (sí se le pueden quitar).
-      if (!persona.active && toAdd.length > 0) {
-        return res.status(409).json({
-          success: false,
-          error: 'staff_deactivated',
-          message: 'Esa persona está dada de baja. Reactívala antes de asignarle sucursales.',
-        })
-      }
+      if (rechazo) return res.status(rechazo.status).json(rechazo.body)
 
       // Add new venue assignments
       for (const addVenueId of toAdd) {
