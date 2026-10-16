@@ -44,7 +44,7 @@ import {
   etiquetaDeReintento,
   motivoDeReintentoDeLiga,
   asegurarCambioDeClienteBajoCandado,
-  ventaYaCobradaBajoCandado,
+  esVentaYaCobrada,
 } from '../shared/ligaDeClienteEnVenta'
 import { assertNoLiveTerminalCharge, assertOrderCancellableUnderLock, avisarOrdenCancelada } from '../shared/orderCancelGuard'
 import { combinarContratos } from '../fiscal/contratoDePrecio'
@@ -3776,9 +3776,8 @@ export async function attachCustomerToOrder(venueId: string, orderId: string, cu
       await reabrirLealtadSiAplica(tx, { venueId, orderId, customerId: normalizedCustomerId, staffId: staffId ?? null })
 
       const { paymentStatus, ...respuesta } = ligada
-      // R6-1: «cobrada» por la regla compartida (también la venta ya cobrada alguna vez), con la marca leída bajo este candado.
-      const ventaCobrada = await ventaYaCobradaBajoCandado(tx, { venueId, orderId, paymentStatus })
-      return { ligada: respuesta, ligaNueva, ventaCobrada }
+      // «Cobrada» por la regla compartida, con el estado leído bajo este candado.
+      return { ligada: respuesta, ligaNueva, ventaCobrada: esVentaYaCobrada({ paymentStatus }) }
     }, ORDER_LOCK_WAIT_BUDGET)
 
   let liga: Awaited<ReturnType<typeof ligarEnTransaccion>> | undefined

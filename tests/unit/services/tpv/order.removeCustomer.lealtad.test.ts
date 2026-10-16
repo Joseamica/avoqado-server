@@ -36,7 +36,7 @@ beforeEach(() => {
   }) as never)
   prismaMock.order.findFirst.mockReset()
   prismaMock.order.findFirst.mockImplementation((async () => ({ paymentStatus: estado })) as never)
-  // R6-1: la marca de «ya se cobró alguna vez» (reembolsos COMPLETED); por defecto, ninguno.
+  // R7-2: los reembolsos ya no deciden «cobrada»; el conteo no debe preguntarse (las pruebas lo vigilan).
   prismaMock.payment.count.mockReset()
   prismaMock.payment.count.mockResolvedValue(0)
   prismaMock.orderCustomer.findUnique.mockReset()
@@ -80,16 +80,13 @@ describe('TPV removeCustomerFromOrder — la promoción del siguiente en una ven
     expect(prismaMock.orderCustomer.update).toHaveBeenCalledWith({ where: { id: 'oc-2' }, data: { isPrimary: true } })
   })
 
-  // 🔴 R6-1 (ronda 6; Codex recheck-10 P2): la venta que YA se cobró (con reembolso) y que un abono dejó PARTIAL sigue cobrada.
-  it.each(['PARTIAL', 'PENDING'])('🔴 R6-1: cuenta %s que YA se cobró (con reembolso) y SIN permiso: NO promueve', async paymentStatus => {
+  // 🔴 R7-2 (ronda 7; Codex recheck-11 P2): una cuenta con un abono devuelto NUNCA se saldó: promueve como antes de la ronda 6.
+  it.each(['PARTIAL', 'PENDING'])('🔴 R7-2: cuenta %s con un abono devuelto, sin permiso: promueve como siempre', async paymentStatus => {
     estado = paymentStatus
     prismaMock.payment.count.mockResolvedValue(1)
     await removeCustomerFromOrder(VENUE, ORDER, 'cust-P', { otorgarLealtad: false })
-    expect(prismaMock.orderCustomer.delete).toHaveBeenCalled()
-    expect(prismaMock.orderCustomer.update).not.toHaveBeenCalled()
-    expect(prismaMock.payment.count).toHaveBeenCalledWith({
-      where: { orderId: ORDER, venueId: VENUE, type: 'REFUND', status: 'COMPLETED' },
-    })
+    expect(prismaMock.orderCustomer.update).toHaveBeenCalledWith({ where: { id: 'oc-2' }, data: { isPrimary: true } })
+    expect(prismaMock.payment.count).not.toHaveBeenCalled()
   })
 
   it('regresión: quitar a un acompañante no promueve a nadie', async () => {

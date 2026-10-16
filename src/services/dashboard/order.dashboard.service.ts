@@ -523,9 +523,7 @@ export async function updateOrder(
     // una venta COBRADA, CAMBIAR el cliente sin `payments:create` (`orders:update` lo trae COCINA) ⇒ 403 y no se guarda nada
     // de esta petición. Mismo cliente, venta abierta o con permiso ⇒ como hoy.
     if (tocaCliente)
-      await asegurarCambioDeClienteEnVentaCobrada(client, {
-        venueId,
-        orderId,
+      asegurarCambioDeClienteEnVentaCobrada({
         paymentStatus: currentOrder.paymentStatus,
         clienteActual: currentOrder.customerId ?? null,
         clienteNuevo: customerId || null,

@@ -43,7 +43,7 @@ import {
   esChoqueDeUnico,
   etiquetaDeReintento,
   motivoDeReintentoDeLiga,
-  ventaYaCobradaBajoCandado,
+  esVentaYaCobrada,
 } from '../shared/ligaDeClienteEnVenta'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
 import { debeMarcarCocina, assertPreparationAuthoringAccess } from '../kds/kitchenDisplayStations'
@@ -2374,11 +2374,8 @@ export async function updateGuestInfo(
       if (!order) {
         throw new NotFoundError('Order not found')
       }
-      // «Cobrada»: la regla compartida (R6-1: también la venta ya cobrada alguna vez); sólo se pregunta si hace falta.
-      const fijaCliente =
-        guestInfo.customerId !== undefined &&
-        (puedeFijarClienteEnVentaCobrada ||
-          !(await ventaYaCobradaBajoCandado(tx, { venueId, orderId, paymentStatus: order.paymentStatus })))
+      // «Cobrada»: la regla compartida.
+      const fijaCliente = guestInfo.customerId !== undefined && (puedeFijarClienteEnVentaCobrada || !esVentaYaCobrada(order))
       if (guestInfo.customerId !== undefined && !fijaCliente) {
         logger.info(`🔒 [ORDER SERVICE] Paid order ${orderId}: guest edit without payments:create keeps Order.customerId`)
       }
@@ -3808,10 +3805,8 @@ async function leerVentaBajoCandado(
   // R3-2: `FOR NO KEY UPDATE` (ver `bloquearVentaParaLiga`): serializa contra el cobro sin interbloquearse con sus métricas.
   if (!(await bloquearVentaParaLiga(tx, { venueId, orderId }))) throw new NotFoundError('Order not found')
   const vigente = await tx.order.findFirst({ where: { id: orderId, venueId }, select: { paymentStatus: true } })
-  // «Ya cobrada» para la decisión A: la regla compartida (pagada —también con su lealtad pendiente—, reembolsada, o R6-1: ya
-  // cobrada alguna vez aunque un abono posterior la deje PARTIAL), con la marca leída bajo este mismo candado.
-  const cobrada = vigente ? await ventaYaCobradaBajoCandado(tx, { venueId, orderId, paymentStatus: vigente.paymentStatus }) : false
-  return { paymentStatus: vigente?.paymentStatus ?? null, cobrada }
+  // «Ya cobrada» para la decisión A: la regla compartida (pagada —también con su lealtad pendiente— o reembolsada).
+  return { paymentStatus: vigente?.paymentStatus ?? null, cobrada: vigente ? esVentaYaCobrada(vigente) : false }
 }
 
 /**

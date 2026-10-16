@@ -33,7 +33,7 @@ beforeEach(() => {
   }) as never)
   prismaMock.order.findUnique.mockReset()
   prismaMock.order.findUnique.mockImplementation((async () => ({ id: ORDER, orderNumber: 'ORD-1', paymentStatus: estado })) as never)
-  // R6-1: la marca de «ya se cobró alguna vez» (reembolsos COMPLETED); por defecto, ninguno.
+  // R7-2: los reembolsos ya no deciden «cobrada»; el conteo no debe preguntarse (las pruebas lo vigilan).
   prismaMock.payment.count.mockReset()
   prismaMock.payment.count.mockResolvedValue(0)
   prismaMock.order.update.mockReset()
@@ -85,17 +85,15 @@ describe('TPV updateGuestInfo — en una venta COBRADA, Order.customerId sólo c
     },
   )
 
-  // 🔴 R6-1 (ronda 6; Codex recheck-10 P2): la venta que YA se cobró (con reembolso) y que un abono dejó PARTIAL sigue cobrada.
+  // 🔴 R7-2 (ronda 7; Codex recheck-11 P2): una cuenta con un abono devuelto NUNCA se saldó: fija el cliente como antes de la ronda 6.
   it.each(['PARTIAL', 'PENDING'])(
-    '🔴 R6-1: cuenta %s que YA se cobró (con reembolso) y SIN permiso: guarda el invitado pero NO fija Order.customerId',
+    '🔴 R7-2: cuenta %s con un abono devuelto, sin permiso: como hoy, fija Order.customerId sin contar reembolsos',
     async paymentStatus => {
       estado = paymentStatus
       prismaMock.payment.count.mockResolvedValue(1)
       await updateGuestInfo(VENUE, ORDER, { customerName: 'Kev', customerId: 'cust-K' }, { otorgarLealtad: false })
-      expect(datosEscritos()).toEqual({ customerName: 'Kev' })
-      expect(prismaMock.payment.count).toHaveBeenCalledWith({
-        where: { orderId: ORDER, venueId: VENUE, type: 'REFUND', status: 'COMPLETED' },
-      })
+      expect(datosEscritos()).toEqual({ customerName: 'Kev', customerId: 'cust-K' })
+      expect(prismaMock.payment.count).not.toHaveBeenCalled()
     },
   )
 

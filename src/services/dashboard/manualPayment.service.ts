@@ -22,7 +22,15 @@ import { contratoDePagoManual } from '@/services/fiscal/contratoDePrecio'
 import { operationHash } from '@/utils/operationHash'
 import { isRetryableDbError } from '@/utils/serializableRetry'
 import { enqueuePaymentCommissionInTx } from '@/services/tpv/paymentEffects.service'
-import { asegurarCambioDeClienteEnVentaCobrada } from '@/services/shared/ligaDeClienteEnVenta'
+import { asegurarCambioDeClienteEnVentaCobrada, esVentaYaCobrada } from '@/services/shared/ligaDeClienteEnVenta'
+
+/**
+ * 🔴 R7-1 (ronda 7 post-QA de sellos tardíos; decisión del founder del 16-oct, «como Square»): una venta cobrada queda CERRADA. El
+ * pago manual rechaza una venta existente PAID o REFUNDED para TODOS (con o sin permiso: es regla de producto); lo extra se registra
+ * como venta nueva. Precedente en `docs/decisiones-de-producto/precedentes.md` (el último del 16-oct).
+ */
+export const MENSAJE_VENTA_YA_COBRADA = 'Esta venta ya está cobrada. Para cobrar algo extra, registra una venta nueva.'
+export const CODIGO_VENTA_YA_COBRADA = 'ORDER_ALREADY_PAID'
 
 /**
  * Record a manual payment (admin-only). Two modes:
@@ -185,30 +193,29 @@ export async function createManualPayment(
         // Order, así que conserva el camino seguro Shift → INSERT Order.
         if (input.orderId) {
           await lockExistingOrderForPayment(tx, { venueId, orderId: input.orderId })
-          // 🔴 R5-1 (ronda 5 post-QA de sellos tardíos; Codex recheck-9 P2; decisión «A» del founder): sobre una venta YA cobrada
-          // (PAID/REFUNDED; tras un reembolso vuelve a tener saldo — y R6-1: también si un abono posterior la dejó PARTIAL, ver
-          // `esVentaYaCobrada`), el `customerId` de este pago crea el primario o desplaza la lealtad del que ya había. Cambiar el
-          // cliente (primario; si no hay, el heredado) exige `payments:create`: sin él ⇒ 403 aquí, bajo el candado y antes de la
-          // primera escritura (el turno). Mismo cliente o venta que nunca se cobró ⇒ como hoy.
-          if (input.customerId && opciones.puedeCambiarClienteEnVentaCobrada !== true) {
-            const venta = await tx.order.findFirst({
-              where: { id: input.orderId, venueId },
-              select: {
-                paymentStatus: true,
-                customerId: true,
-                orderCustomers: { where: { isPrimary: true }, select: { customerId: true }, take: 1 },
-              },
+          // Bajo ese candado y antes de la primera escritura (el reclamo del turno), lo que la venta dice HOY. El reintento por
+          // serialización vuelve a entrar aquí desde cero, así que también vuelve a evaluar las dos reglas.
+          const venta = await tx.order.findFirst({
+            where: { id: input.orderId, venueId },
+            select: {
+              paymentStatus: true,
+              customerId: true,
+              orderCustomers: { where: { isPrimary: true }, select: { customerId: true }, take: 1 },
+            },
+          })
+          // 🔴 R7-1: venta ya cobrada (PAID/REFUNDED) ⇒ 400 para todos. Cierra de raíz re-cobrar una venta cobrada (tras un
+          // reembolso, o tras corregir/cancelar su cobro en el panel, la venta sigue PAID y el saldo de aquí se reabría) y, con eso,
+          // colar un cliente con su lealtad (Codex r9/r10/r11). La caja del POS ya lo rechazaba («Order is already paid»).
+          if (venta && esVentaYaCobrada(venta)) throw new BadRequestError(MENSAJE_VENTA_YA_COBRADA, CODIGO_VENTA_YA_COBRADA)
+          // R5-1 (ronda 5; decisión «A»): cambiar el cliente de una venta YA cobrada exige `payments:create`. Con R7-1 una venta
+          // cobrada ya no llega aquí; se conserva por si la regla de arriba cambia (misma lectura, sin consulta extra).
+          if (venta && input.customerId && opciones.puedeCambiarClienteEnVentaCobrada !== true)
+            asegurarCambioDeClienteEnVentaCobrada({
+              paymentStatus: venta.paymentStatus,
+              clienteActual: venta.orderCustomers[0]?.customerId ?? venta.customerId ?? null,
+              clienteNuevo: input.customerId,
+              puedeCobrar: false,
             })
-            if (venta)
-              await asegurarCambioDeClienteEnVentaCobrada(tx, {
-                venueId,
-                orderId: input.orderId,
-                paymentStatus: venta.paymentStatus,
-                clienteActual: venta.orderCustomers[0]?.customerId ?? venta.customerId ?? null,
-                clienteNuevo: input.customerId,
-                puedeCobrar: false,
-              })
-          }
         }
         const priorCompletedPaymentCount = input.orderId ? await countPriorCompletedPayments(tx, { venueId, orderId: input.orderId }) : 0
 

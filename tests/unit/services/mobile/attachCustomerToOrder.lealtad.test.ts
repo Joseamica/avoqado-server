@@ -158,22 +158,25 @@ describe('🔴 R3-1/R3-2 (ronda 3): hechos de la venta para la auditoría y rein
     expect(r).toEqual({ ...ORDEN_LIGADA, loyalty: SELLO })
   })
 
+  // 🔴 R7-2 (ronda 7; Codex recheck-11 P2): «cobrada» = PAID/REFUNDED; un reembolso de un abono no la vuelve cobrada.
   it.each([
-    [1, true],
-    [0, false],
-  ])(
-    '🔴 R6-1: venta PARTIAL con %i reembolso(s) ⇒ ventaCobrada %s (la regla compartida, con la marca leída bajo el candado)',
-    async (n, cobrada) => {
-      prismaMock.order.update.mockResolvedValue({ ...ORDEN_LIGADA, paymentStatus: 'PARTIAL' } as any)
-      prismaMock.payment.count.mockResolvedValueOnce(n)
+    ['PARTIAL', false],
+    ['PAID', true],
+    ['REFUNDED', true],
+  ])('🔴 R7-2: venta %s ⇒ ventaCobrada %s (la regla compartida), sin contar reembolsos', async (paymentStatus, cobrada) => {
+    prismaMock.order.update.mockResolvedValue({ ...ORDEN_LIGADA, paymentStatus } as any)
+    prismaMock.payment.count.mockResolvedValue(1) // un abono devuelto: no cambia nada
+    try {
       const r = await attachCustomerToPayment(VENUE, 'pay-1', 'cust-1', 'staff-1')
       expect(mockLate).toHaveBeenCalledWith(expect.objectContaining({ ventaCobrada: cobrada }))
-      expect(prismaMock.payment.count).toHaveBeenCalledWith({
-        where: { orderId: 'order-1', venueId: VENUE, type: 'REFUND', status: 'COMPLETED' },
-      })
+      expect(prismaMock.payment.count).not.toHaveBeenCalledWith(
+        expect.objectContaining({ where: expect.objectContaining({ type: 'REFUND' }) }),
+      )
       expect(r).toEqual({ ...ORDEN_LIGADA, loyalty: SELLO })
-    },
-  )
+    } finally {
+      prismaMock.payment.count.mockReset()
+    }
+  })
 
   it.each([
     ['un bloqueo mutuo en una consulta cruda (P2010/40P01)', { code: 'P2010', meta: { code: '40P01' } }],

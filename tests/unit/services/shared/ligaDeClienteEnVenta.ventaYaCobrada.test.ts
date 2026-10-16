@@ -1,10 +1,10 @@
 /**
- * 🔴 R6-1 (ronda 6 post-QA de sellos tardíos; Codex recheck-10 P2; decisión «A» del founder): «venta ya cobrada» = PAID o
- * REFUNDED **o ya se cobró por completo alguna vez**. Partir el pago esquivaba la regla: venta PAID de $100 → reembolso de $20 →
- * abono manual de $10 SIN cliente (queda PARTIAL) → abono de $10 + cliente nuevo ⇒ pasaba (sólo se miraba PAID/REFUNDED).
+ * 🔴 R7-2 (ronda 7 post-QA de sellos tardíos; Codex recheck-11 P2): «venta ya cobrada» vuelve a ser lo que dice la venta — PAID o
+ * REFUNDED —, sin la marca «tiene un reembolso» de la ronda 6. Esa marca bloqueaba cuentas que NUNCA se saldaron (abono de $20 y
+ * devolución de $10) y no cubría corregir/cancelar un cobro desde el panel. Lo que la ronda 6 quería cerrar (re-cobrar una venta ya
+ * cobrada con el pago manual) lo cierra R7-1 de raíz: el pago manual rechaza la venta PAID/REFUNDED para todos.
  *
- * La marca es el reembolso COMPLETED de la venta (ver el porqué en `esVentaYaCobrada`). Una venta que nunca se cobró (PENDING,
- * abonos normales) sigue igual que hoy.
+ * Se conserva lo bueno de la ronda 6: UN solo predicado (sin copias locales), sin consulta extra.
  */
 import { ForbiddenError } from '@/errors/AppError'
 import {
@@ -12,52 +12,39 @@ import {
   asegurarCambioDeClienteEnVentaCobrada,
   CODIGO_CLIENTE_DE_VENTA_COBRADA,
   esVentaYaCobrada,
-  ventaYaCobradaBajoCandado,
 } from '@/services/shared/ligaDeClienteEnVenta'
 
-const VENUE = 'venue-r6'
-const ORDER = 'order-r6'
-const DONDE_REEMBOLSO = { where: { orderId: ORDER, venueId: VENUE, type: 'REFUND', status: 'COMPLETED' } }
+const VENUE = 'venue-r7'
+const ORDER = 'order-r7'
 
-/** Una `db` que sólo sabe contar reembolsos (la marca). */
-const conReembolsos = (n: number) => ({ payment: { count: jest.fn().mockResolvedValue(n) } }) as any
+/** Llama a la regla SIN `await`: si (como en la ronda 6) devolviera una promesa, la prueba lo ve y no deja un rechazo suelto. */
+function llamar(args: Record<string, unknown>): unknown {
+  const r: unknown = asegurarCambioDeClienteEnVentaCobrada(args as never)
+  if (r instanceof Promise) r.catch(() => undefined)
+  return r
+}
 
-describe('🔴 R6-1: esVentaYaCobrada — la regla pura', () => {
+describe('🔴 R7-2: esVentaYaCobrada — PAID o REFUNDED, nada más', () => {
   it.each([
-    ['PAID', false, true],
-    ['REFUNDED', false, true],
-    ['PARTIAL con marca (ya se cobró y se devolvió dinero)', true, true],
-    ['PARTIAL sin marca (abono normal)', false, false],
-    ['PENDING sin marca', false, false],
-    ['PENDING con marca', true, true],
-  ])('%s', (nombre, reembolsada, esperado) => {
-    const paymentStatus = nombre.split(' ')[0]
-    expect(esVentaYaCobrada({ paymentStatus, reembolsada })).toBe(esperado)
+    ['PAID', true],
+    ['REFUNDED', true],
+    ['PARTIAL', false],
+    ['PENDING', false],
+    [null, false],
+    [undefined, false],
+  ])('%s ⇒ %s', (paymentStatus, esperado) => {
+    expect(esVentaYaCobrada({ paymentStatus })).toBe(esperado)
+  })
+
+  it('🔴 un reembolso NO convierte en cobrada una cuenta abierta (Codex r11: abono $20 y devolución $10 nunca se saldó)', () => {
+    // La ronda 6 la marcaba cobrada por tener un reembolso; la marca se ignora.
+    expect(esVentaYaCobrada({ paymentStatus: 'PARTIAL', reembolsada: true } as never)).toBe(false)
+    expect(esVentaYaCobrada({ paymentStatus: 'PENDING', reembolsada: true } as never)).toBe(false)
   })
 })
 
-describe('🔴 R6-1: ventaYaCobradaBajoCandado — lee la marca con la db del candado, sólo si el estado no lo dice', () => {
-  it.each(['PAID', 'REFUNDED'])('%s ⇒ cobrada, sin leer nada más', async paymentStatus => {
-    const db = conReembolsos(0)
-    expect(await ventaYaCobradaBajoCandado(db, { venueId: VENUE, orderId: ORDER, paymentStatus })).toBe(true)
-    expect(db.payment.count).not.toHaveBeenCalled()
-  })
-
-  it.each([
-    ['PARTIAL', 1, true],
-    ['PARTIAL', 0, false],
-    ['PENDING', 0, false],
-  ])('%s con %i reembolso(s) ⇒ %s, contado EXACTO por la venta y el negocio', async (paymentStatus, n, esperado) => {
-    const db = conReembolsos(n)
-    expect(await ventaYaCobradaBajoCandado(db, { venueId: VENUE, orderId: ORDER, paymentStatus })).toBe(esperado)
-    expect(db.payment.count).toHaveBeenCalledWith(DONDE_REEMBOLSO)
-  })
-})
-
-describe('🔴 R6-1: asegurarCambioDeClienteEnVentaCobrada — la venta PARTIAL que ya se cobró también exige payments:create', () => {
+describe('🔴 R7-2: asegurarCambioDeClienteEnVentaCobrada — síncrona, sin consulta', () => {
   const pide = (over: Record<string, unknown> = {}) => ({
-    venueId: VENUE,
-    orderId: ORDER,
     paymentStatus: 'PARTIAL',
     clienteActual: null,
     clienteNuevo: 'cust-nuevo',
@@ -65,37 +52,39 @@ describe('🔴 R6-1: asegurarCambioDeClienteEnVentaCobrada — la venta PARTIAL 
     ...over,
   })
 
-  it('🔴 PARTIAL con reembolso + cliente nuevo + sin permiso ⇒ 403 con el código de la regla', async () => {
-    const error = await asegurarCambioDeClienteEnVentaCobrada(conReembolsos(1), pide()).catch(e => e)
+  it('🔴 cuenta PARTIAL + cliente nuevo + sin permiso ⇒ pasa (cuenta abierta), sin promesa ni lectura', () => {
+    expect(llamar(pide())).toBeUndefined()
+  })
+
+  it.each(['PAID', 'REFUNDED'])('%s + cliente nuevo + sin permiso ⇒ 403 con el código de la regla', paymentStatus => {
+    let error: unknown
+    try {
+      llamar(pide({ paymentStatus }))
+    } catch (e) {
+      error = e
+    }
     expect(error).toBeInstanceOf(ForbiddenError)
     expect(error).toMatchObject({ statusCode: 403, code: CODIGO_CLIENTE_DE_VENTA_COBRADA })
   })
 
-  it('PARTIAL sin reembolso (abono normal) + cliente nuevo + sin permiso ⇒ como hoy, pasa', async () => {
-    await expect(asegurarCambioDeClienteEnVentaCobrada(conReembolsos(0), pide())).resolves.toBeUndefined()
+  it('PAID + mismo cliente, o con el permiso ⇒ pasa', () => {
+    expect(llamar(pide({ paymentStatus: 'PAID', clienteActual: 'cust-nuevo' }))).toBeUndefined()
+    expect(llamar(pide({ paymentStatus: 'PAID', puedeCobrar: true }))).toBeUndefined()
   })
+})
 
-  it('mismo cliente o con el permiso ⇒ pasa sin leer la marca', async () => {
-    const db = conReembolsos(1)
-    await asegurarCambioDeClienteEnVentaCobrada(db, pide({ clienteActual: 'cust-nuevo' }))
-    await asegurarCambioDeClienteEnVentaCobrada(db, pide({ puedeCobrar: true }))
-    expect(db.payment.count).not.toHaveBeenCalled()
-  })
+describe('🔴 R7-2: asegurarCambioDeClienteBajoCandado — sólo lee la venta (la `tx` no necesita pagos)', () => {
+  const tx = (paymentStatus: string) => ({ order: { findFirst: jest.fn().mockResolvedValue({ paymentStatus, customerId: null }) } }) as any
 
-  it('regresión: PAID + cliente nuevo + sin permiso ⇒ 403 sin leer la marca', async () => {
-    const db = conReembolsos(0)
-    await expect(asegurarCambioDeClienteEnVentaCobrada(db, pide({ paymentStatus: 'PAID' }))).rejects.toMatchObject({ statusCode: 403 })
-    expect(db.payment.count).not.toHaveBeenCalled()
-  })
-
-  it('🔴 la versión que lee la venta (detalle de la cuenta del POS): PARTIAL con reembolso ⇒ 403', async () => {
-    const tx = {
-      order: { findFirst: jest.fn().mockResolvedValue({ paymentStatus: 'PARTIAL', customerId: null }) },
-      payment: { count: jest.fn().mockResolvedValue(1) },
-    } as any
+  it('🔴 cuenta PARTIAL (aunque tenga una devolución) ⇒ pasa sin contar reembolsos', async () => {
     await expect(
-      asegurarCambioDeClienteBajoCandado(tx, { venueId: VENUE, orderId: ORDER, clienteNuevo: 'cust-nuevo', puedeCobrar: false }),
+      asegurarCambioDeClienteBajoCandado(tx('PARTIAL'), { venueId: VENUE, orderId: ORDER, clienteNuevo: 'cust-nuevo', puedeCobrar: false }),
+    ).resolves.toBeUndefined()
+  })
+
+  it('PAID ⇒ 403', async () => {
+    await expect(
+      asegurarCambioDeClienteBajoCandado(tx('PAID'), { venueId: VENUE, orderId: ORDER, clienteNuevo: 'cust-nuevo', puedeCobrar: false }),
     ).rejects.toMatchObject({ statusCode: 403, code: CODIGO_CLIENTE_DE_VENTA_COBRADA })
-    expect(tx.payment.count).toHaveBeenCalledWith(DONDE_REEMBOLSO)
   })
 })

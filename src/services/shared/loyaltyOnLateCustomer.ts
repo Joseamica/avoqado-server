@@ -147,8 +147,8 @@ interface Programa {
 async function leerVenta(db: LectorDeVenta, venueId: string, orderId: string): Promise<Venta | null> {
   const venta = await db.order.findFirst({ where: { id: orderId, venueId }, select: VENTA_SELECT })
   if (!venta) return null
-  // 🔴 Reembolso EXACTO (auditoría A #2): un `count` por la orden, sin tope de lista que esconda nada. Es la MISMA marca de
-  // «ya cobrada» de la decisión A (`esVentaYaCobrada`, R6-1).
+  // 🔴 Reembolso EXACTO (auditoría A #2): un `count` por la orden, sin tope de lista que esconda nada. Decide `NOT_PAID`, no
+  // «ya cobrada» (R7-2: eso es `esVentaYaCobrada`, sólo el estado).
   return { ...venta, reembolsada: await ventaTieneReembolso(db, { venueId, orderId }) }
 }
 
@@ -610,7 +610,7 @@ export async function awardLoyaltyForLateCustomer(args: {
     )
 
     const auditar = args.ligaNueva === undefined ? antes !== 'STAMPED' : args.ligaNueva || otorgo()
-    // R6-1: «cobrada» por la regla compartida de la decisión A (también la venta ya cobrada alguna vez, con reembolso).
+    // «Cobrada» por la regla compartida de la decisión A (PAID/REFUNDED).
     if (auditar && esVentaYaCobrada(venta)) {
       auditarLigaAVentaCobrada({
         venueId,

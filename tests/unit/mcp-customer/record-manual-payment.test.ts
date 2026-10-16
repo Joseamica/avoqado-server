@@ -186,3 +186,14 @@ describe('🔴 R5-1: record_manual_payment le dice al servicio si quien está co
     expect(mockAudit).not.toHaveBeenCalled()
   })
 })
+
+describe('🔴 R7-1: venta ya cobrada ⇒ el rechazo del servicio llega al LLM tal cual (decisión del founder, 16-oct)', () => {
+  it('400 ORDER_ALREADY_PAID ⇒ `ok:false` con el mensaje en español, sin auditar (no hubo escritura)', async () => {
+    const { BadRequestError } = jest.requireActual('@/errors/AppError')
+    const mensaje = 'Esta venta ya está cobrada. Para cobrar algo extra, registra una venta nueva.'
+    mockCreate.mockRejectedValueOnce(new BadRequestError(mensaje, 'ORDER_ALREADY_PAID'))
+    const r = parse(await call({ venueId: 'v1', amount: 20, method: 'cash', orderId: 'ord-1', confirm: true }))
+    expect(r).toEqual({ ok: false, error: mensaje })
+    expect(mockAudit).not.toHaveBeenCalled()
+  })
+})

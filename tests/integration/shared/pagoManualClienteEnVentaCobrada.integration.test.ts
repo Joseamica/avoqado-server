@@ -1,22 +1,18 @@
 /**
- * 🔴 R5-1 (ronda 5 post-QA de sellos tardíos; Codex recheck-9 P2; decisión «A» del founder): el escenario EXACTO de Codex, todo
- * real contra Postgres — el controller del pago manual con el resolvedor de permisos (StaffVenue y `VenueRolePermission` de
- * verdad), el servicio, el reembolso del panel y la lealtad.
+ * 🔴 R7 (ronda 7 post-QA de sellos tardíos; decisión del founder del 16-oct, «como Square»: una venta cobrada queda CERRADA), todo
+ * real contra Postgres — el controller del pago manual con el resolvedor de permisos (StaffVenue y `VenueRolePermission` de verdad),
+ * la tool MCP `record_manual_payment` (guard y scope reales), el servicio, el reembolso y la corrección de cobros del panel, la liga
+ * de la TPV y la lealtad.
  *
- *   venta de $100 sin cliente, PAID (pago manual del dueño)
- *        ↓
- *   reembolso de $20 desde el panel (sigue PAID; el saldo vuelve a ser $20)
- *        ↓
- *   pago manual de $20 + cliente NUEVO, por un ADMIN al que el negocio le quitó `payments:create`
- *        ⇒ 403 y la base queda IGUAL (pagos, ligas, sellos, puntos, turno, estado de la venta)
- *   … el mismo pago por el DUEÑO (con el permiso) ⇒ como hoy: liga primaria y lealtad sobre $100.
- *
- * 🔴 Ronda 6 (Codex recheck-10, dos P2):
- *   R6-1 — partir el pago: tras el reembolso, un abono de $10 SIN cliente deja la venta PARTIAL y el abono siguiente de $10 + cliente
- *          nuevo pasaba (sólo se miraba PAID/REFUNDED). Por HTTP y por MCP ⇒ 403 / `ok:false` y nada escrito. Y el PUT del panel
- *          sobre esa venta PARTIAL-que-ya-se-cobró, por COCINA ⇒ 403.
- *   R6-2 — el pago manual por HTTP usaba la sucursal del TOKEN para escribir y la de la URL para los permisos: sesión de A, URL de B
- *          (donde el mismo actor sí puede cobrar), venta y cliente de A ⇒ se aceptaba. Ahora una sola sucursal, la de la URL.
+ *   R7-1 — el pago manual RECHAZA una venta existente PAID o REFUNDED, para TODOS (también el dueño): 400 `ORDER_ALREADY_PAID` y la
+ *          base queda IGUAL. Cierra de raíz los caminos de Codex, que empezaban todos con un pago manual sobre una venta que seguía
+ *          PAID:
+ *            r9  — venta PAID → reembolso de $20 → pago manual de $20 + cliente nuevo;
+ *            r10 — venta PAID → reembolso → abono de $10 SIN cliente (ya no llega a PARTIAL);
+ *            r11 — venta PAID → corregir su cobro a $80 en el panel (o cancelarlo) → abono de $10.
+ *   R7-2 — «cobrada» vuelve a ser PAID/REFUNDED: una cuenta que NUNCA se saldó (abono de $20 y devolución de $10) recibe un abono
+ *          con cliente nuevo como en `8b32aef13` (201, liga primaria), y por la TPV el cliente queda primario.
+ *   R6-2 — (se conserva) el pago manual opera en la sucursal de la URL.
  */
 import '../../__helpers__/integration-setup'
 import prisma from '@/utils/prismaClient'
@@ -44,7 +40,9 @@ import { resolveScope } from '@/mcp/scope'
 import { createGuard } from '@/mcp/guard'
 import { issueRefund } from '@/services/dashboard/refund.dashboard.service'
 import { tienePermisoEnVenue } from '@/middlewares/permissionFlag.middleware'
-import { CODIGO_CLIENTE_DE_VENTA_COBRADA, MENSAJE_CLIENTE_DE_VENTA_COBRADA } from '@/services/shared/ligaDeClienteEnVenta'
+import { updatePayment } from '@/services/dashboard/payment.dashboard.service'
+import { addCustomerToOrder } from '@/services/tpv/order.tpv.service'
+import { CODIGO_VENTA_YA_COBRADA, MENSAJE_VENTA_YA_COBRADA } from '@/services/dashboard/manualPayment.service'
 
 const sello = `${Date.now()}${Math.random().toString(36).slice(2, 6)}`
 /**
@@ -181,9 +179,16 @@ async function pagoManual(
   return { status: r.status.mock.calls[0]?.[0], cuerpo: r.json.mock.calls[0]?.[0] }
 }
 
-/** Venta de $100 sin cliente, cobrada por el dueño (PAID) y con $20 reembolsados desde el panel: el saldo vuelve a ser $20. */
-async function ventaCobradaConReembolso(): Promise<string> {
-  const orderId = (
+/** Venta de $100 sin cliente cobrada por el dueño con un pago manual: PAID. */
+async function ventaCobrada(): Promise<{ orderId: string; pagoId: string }> {
+  const orderId = await ventaAbierta()
+  const cobro = await pagoManual(dueno, 'OWNER', { orderId, amount: '100.00', tipAmount: '0', method: 'CASH', source: 'POS' })
+  expect(cobro.status).toBe(201)
+  return { orderId, pagoId: cobro.cuerpo.data.id }
+}
+
+async function ventaAbierta(): Promise<string> {
+  return (
     await prisma.order.create({
       data: {
         venueId: venueId!,
@@ -196,17 +201,41 @@ async function ventaCobradaConReembolso(): Promise<string> {
       },
     })
   ).id
-  const cobro = await pagoManual(dueno, 'OWNER', { orderId, amount: '100.00', tipAmount: '0', method: 'CASH', source: 'POS' })
-  expect(cobro.status).toBe(201)
+}
+
+/** r9/r10: la venta cobrada con $20 reembolsados desde el panel (sigue PAID; el saldo del pago manual se reabría a $20). */
+async function ventaCobradaConReembolso(): Promise<string> {
+  const { orderId, pagoId } = await ventaCobrada()
+  await issueRefund({ venueId: venueId!, paymentId: pagoId, amount: 2000, reason: 'CUSTOMER_REQUEST' as never, staffId: dueno.staffId })
+  const venta = await prisma.order.findUniqueOrThrow({ where: { id: orderId }, select: { paymentStatus: true } })
+  expect(venta.paymentStatus).toBe('PAID') // el reembolso del panel no cambia el estado de cobro
+  return orderId
+}
+
+/** r11: la venta cobrada cuyo cobro se corrige en el panel ($80) o se cancela (FAILED). Sigue PAID: el panel no recalcula la venta. */
+async function ventaCobradaConCobroCorregido(como: 'corregir' | 'cancelar'): Promise<string> {
+  const { orderId, pagoId } = await ventaCobrada()
+  await updatePayment(venueId!, pagoId, como === 'corregir' ? { amount: 80 } : { status: 'FAILED' as never })
+  const venta = await prisma.order.findUniqueOrThrow({ where: { id: orderId }, select: { paymentStatus: true } })
+  expect(venta.paymentStatus).toBe('PAID')
+  return orderId
+}
+
+/** R7-2: cuenta de $100 que NUNCA se saldó — abono de $20 del dueño y devolución de $10 de ese abono. */
+async function cuentaNuncaSaldadaConDevolucion(): Promise<string> {
+  const orderId = await ventaAbierta()
+  const abono = await pagoManual(dueno, 'OWNER', { orderId, amount: '20.00', tipAmount: '0', method: 'CASH', source: 'POS' })
+  expect(abono.status).toBe(201)
   await issueRefund({
     venueId: venueId!,
-    paymentId: cobro.cuerpo.data.id,
-    amount: 2000,
+    paymentId: abono.cuerpo.data.id,
+    amount: 1000,
     reason: 'CUSTOMER_REQUEST' as never,
     staffId: dueno.staffId,
   })
+  expect(await prisma.payment.count({ where: { orderId, type: 'REFUND', status: 'COMPLETED' } })).toBe(1)
   const venta = await prisma.order.findUniqueOrThrow({ where: { id: orderId }, select: { paymentStatus: true } })
-  expect(venta.paymentStatus).toBe('PAID') // el reembolso del panel no cambia el estado de cobro
+  expect(venta.paymentStatus).toBe('PARTIAL')
   return orderId
 }
 
@@ -235,57 +264,15 @@ async function foto(orderId: string, customerId: string) {
   return JSON.parse(JSON.stringify({ pagos, ligas, sellos, movimientos, venta, turno, transacciones, asignaciones, persona }))
 }
 
-const pagoDe20 = (orderId: string, customerId: string) => ({
+const pagoDe20 = (orderId: string, customerId?: string) => ({
   orderId,
-  customerId,
+  ...(customerId ? { customerId } : {}),
   amount: '20.00',
   tipAmount: '0',
   method: 'CASH',
   source: 'POS',
 })
-
-describe('🔴 R5-1: pago manual + cliente nuevo sobre una venta pagada con reembolso (Codex recheck-9 P2)', () => {
-  it('🔴 ADMIN con payment:create-manual y SIN payments:create ⇒ 403 en español y la base queda IGUAL', async () => {
-    const orderId = await ventaCobradaConReembolso()
-    const nuevo = await cliente('Nuevo')
-    // Precondición: es justo el actor de Codex.
-    const req = peticion(adminSinCobrar, 'ADMIN', {})
-    expect(await tienePermisoEnVenue(req, 'payment:create-manual')).toBe(true)
-    expect(await tienePermisoEnVenue(req, 'payments:create')).toBe(false)
-
-    const antes = await foto(orderId, nuevo)
-    const r = await pagoManual(adminSinCobrar, 'ADMIN', pagoDe20(orderId, nuevo))
-    expect(r).toEqual({ status: 403, code: CODIGO_CLIENTE_DE_VENTA_COBRADA, mensaje: MENSAJE_CLIENTE_DE_VENTA_COBRADA })
-    expect(await foto(orderId, nuevo)).toEqual(antes)
-    expect(antes.ligas).toEqual([])
-  })
-
-  it('el MISMO pago por el dueño (con payments:create) ⇒ como hoy: liga primaria, sello y puntos sobre $100', async () => {
-    const orderId = await ventaCobradaConReembolso()
-    const nuevo = await cliente('Nuevo')
-    const antes = await foto(orderId, nuevo)
-    const r = await pagoManual(dueno, 'OWNER', pagoDe20(orderId, nuevo))
-    expect(r.status).toBe(201)
-    const despues = await foto(orderId, nuevo)
-    expect(despues.pagos).toBe(antes.pagos + 1)
-    expect(despues.ligas).toEqual([{ customerId: nuevo, isPrimary: true }])
-    expect(despues.venta.paymentStatus).toBe('PAID')
-    expect(await prisma.stampEvent.count({ where: { venueId, orderId, stampCard: { customerId: nuevo } } })).toBe(1)
-    expect(despues.persona.loyaltyPoints).toBe(100)
-  })
-})
-
-/** La venta del escenario de Codex en recheck-10: cobrada, reembolso de $20 y un abono de $10 SIN cliente ⇒ PARTIAL. */
-async function ventaCobradaReembolsadaYAbonada(): Promise<string> {
-  const orderId = await ventaCobradaConReembolso()
-  const abono = await pagoManual(adminSinCobrar, 'ADMIN', { orderId, amount: '10.00', tipAmount: '0', method: 'CASH', source: 'POS' })
-  expect(abono.status).toBe(201)
-  const venta = await prisma.order.findUniqueOrThrow({ where: { id: orderId }, select: { paymentStatus: true } })
-  expect(venta.paymentStatus).toBe('PARTIAL') // el abono sin cliente la dejó PARTIAL: el estado ya no dice «cobrada»
-  return orderId
-}
-
-const pagoDe10 = (orderId: string, customerId: string) => ({ ...pagoDe20(orderId, customerId), amount: '10.00' })
+const pagoDe10 = (orderId: string, customerId?: string) => ({ ...pagoDe20(orderId, customerId), amount: '10.00' })
 
 /** El scope REAL del actor en el MCP (StaffVenue y personalizaciones de la base), con permiso de escritura. */
 async function scopeDe(quien: { staffId: string }) {
@@ -299,63 +286,168 @@ async function pagoManualPorMcp(quien: { staffId: string }, args: Record<string,
     { tool: (...a: unknown[]) => herramientas.set(a[0] as string, a[a.length - 1] as never) } as never,
     await scopeDe(quien),
   )
-  const r = await herramientas.get('record_manual_payment')!({ idempotencyKey: `r6-mcp-${sello}-${++n}`, confirm: true, ...args }, {})
+  const r = await herramientas.get('record_manual_payment')!({ idempotencyKey: `r7-mcp-${sello}-${++n}`, confirm: true, ...args }, {})
   return JSON.parse(r.content[0].text)
 }
 
-describe('🔴 R6-1: partir el pago no esquiva la regla (Codex recheck-10 P2)', () => {
-  it('🔴 HTTP: $10 sin cliente (PARTIAL) y luego $10 + cliente nuevo, por el ADMIN sin payments:create ⇒ 403 y la base queda IGUAL', async () => {
-    const orderId = await ventaCobradaReembolsadaYAbonada()
-    const nuevo = await cliente('Nuevo')
-    const antes = await foto(orderId, nuevo)
-    const r = await pagoManual(adminSinCobrar, 'ADMIN', pagoDe10(orderId, nuevo))
-    expect(r).toEqual({ status: 403, code: CODIGO_CLIENTE_DE_VENTA_COBRADA, mensaje: MENSAJE_CLIENTE_DE_VENTA_COBRADA })
-    expect(await foto(orderId, nuevo)).toEqual(antes)
-    expect(antes.venta.paymentStatus).toBe('PARTIAL')
-    expect(antes.ligas).toEqual([])
-  })
+const RECHAZO_HTTP = { status: 400, code: CODIGO_VENTA_YA_COBRADA, mensaje: MENSAJE_VENTA_YA_COBRADA }
+const RECHAZO_MCP = { ok: false, error: MENSAJE_VENTA_YA_COBRADA }
 
-  it('🔴 MCP (record_manual_payment): la misma secuencia ⇒ ok:false con el mensaje y la base queda IGUAL', async () => {
-    const orderId = await ventaCobradaReembolsadaYAbonada()
-    const nuevo = await cliente('Nuevo')
-    // Precondición: el mismo actor, visto por el guard del MCP — registra pagos manuales y NO puede cobrar.
+describe('precondiciones: los actores son los de Codex', () => {
+  it('el ADMIN registra pagos manuales y NO puede cobrar, por HTTP y por el MCP; el dueño puede todo', async () => {
+    const req = peticion(adminSinCobrar, 'ADMIN', {})
+    expect(await tienePermisoEnVenue(req, 'payment:create-manual')).toBe(true)
+    expect(await tienePermisoEnVenue(req, 'payments:create')).toBe(false)
     const guard = createGuard(await scopeDe(adminSinCobrar))
     expect(guard.tienePermiso('payment:create-manual', venueId!)).toBe(true)
     expect(guard.tienePermiso('payments:create', venueId!)).toBe(false)
+    const delDueno = createGuard(await scopeDe(dueno))
+    expect(delDueno.tienePermiso('payments:create', venueId!)).toBe(true)
+  })
+})
+
+describe('🔴 R7-1: el pago manual rechaza una venta ya cobrada — HTTP', () => {
+  it('🔴 r9: PAID → reembolso $20 → $20 + cliente nuevo (ADMIN sin cobrar) ⇒ 400 y la base queda IGUAL', async () => {
+    const orderId = await ventaCobradaConReembolso()
+    const nuevo = await cliente('Nuevo')
     const antes = await foto(orderId, nuevo)
-    const salida = await pagoManualPorMcp(adminSinCobrar, { venueId: venueId!, orderId, customerId: nuevo, amount: 10, method: 'cash' })
-    expect(salida).toEqual({ ok: false, error: MENSAJE_CLIENTE_DE_VENTA_COBRADA })
+    expect(await pagoManual(adminSinCobrar, 'ADMIN', pagoDe20(orderId, nuevo))).toEqual(RECHAZO_HTTP)
+    expect(await foto(orderId, nuevo)).toEqual(antes)
+    expect(antes.ligas).toEqual([])
+  })
+
+  it('🔴 r10: PAID → reembolso → $10 SIN cliente ⇒ 400 (ya no llega a PARTIAL) y la base queda IGUAL', async () => {
+    const orderId = await ventaCobradaConReembolso()
+    const testigo = await cliente('Testigo')
+    const antes = await foto(orderId, testigo)
+    expect(await pagoManual(adminSinCobrar, 'ADMIN', pagoDe10(orderId))).toEqual(RECHAZO_HTTP)
+    expect(await foto(orderId, testigo)).toEqual(antes)
+    expect(antes.venta.paymentStatus).toBe('PAID')
+  })
+
+  it.each(['corregir', 'cancelar'] as const)(
+    '🔴 r11: PAID → %s el cobro en el panel → $10 (sin y con cliente) ⇒ 400 y la base queda IGUAL',
+    async como => {
+      const orderId = await ventaCobradaConCobroCorregido(como)
+      const nuevo = await cliente('Nuevo')
+      const antes = await foto(orderId, nuevo)
+      expect(await pagoManual(adminSinCobrar, 'ADMIN', pagoDe10(orderId))).toEqual(RECHAZO_HTTP)
+      expect(await pagoManual(adminSinCobrar, 'ADMIN', pagoDe10(orderId, nuevo))).toEqual(RECHAZO_HTTP)
+      expect(await foto(orderId, nuevo)).toEqual(antes)
+    },
+  )
+
+  it('🔴 f: el DUEÑO (todos los permisos) sobre una venta PAID ⇒ también 400, con y sin cliente', async () => {
+    const orderId = await ventaCobradaConReembolso()
+    const nuevo = await cliente('Nuevo')
+    const antes = await foto(orderId, nuevo)
+    expect(await pagoManual(dueno, 'OWNER', pagoDe20(orderId, nuevo))).toEqual(RECHAZO_HTTP)
+    expect(await pagoManual(dueno, 'OWNER', pagoDe20(orderId))).toEqual(RECHAZO_HTTP)
     expect(await foto(orderId, nuevo)).toEqual(antes)
   })
 
-  it('regresión: el MCP del ADMIN sin payments:create sí registra el abono SIN cliente (no es cambio de cliente)', async () => {
+  it('regresión: el reintento con la MISMA llave del pago que saldó la venta devuelve ese pago (no es un cobro nuevo)', async () => {
+    const orderId = await ventaAbierta()
+    const cuerpo = { orderId, amount: '100.00', tipAmount: '0', method: 'CASH', source: 'POS', idempotencyKey: `r7-llave-${sello}` }
+    const primero = await pagoManual(dueno, 'OWNER', cuerpo)
+    expect(primero.status).toBe(201)
+    const repetido = await pagoManual(dueno, 'OWNER', cuerpo)
+    expect(repetido.status).toBe(201)
+    expect(repetido.cuerpo.data.id).toBe(primero.cuerpo.data.id)
+    expect(await prisma.payment.count({ where: { orderId } })).toBe(1)
+  })
+})
+
+describe('🔴 R7-1: el pago manual rechaza una venta ya cobrada — MCP (record_manual_payment)', () => {
+  it('🔴 r9: $20 + cliente nuevo por el ADMIN sin cobrar ⇒ ok:false con el mensaje y la base queda IGUAL', async () => {
     const orderId = await ventaCobradaConReembolso()
-    const salida = await pagoManualPorMcp(adminSinCobrar, { venueId: venueId!, orderId, amount: 10, method: 'cash' })
-    expect(salida).toMatchObject({ ok: true, payment: { orderId } })
-  })
-
-  it('con payments:create (el dueño) ⇒ como hoy: el abono con cliente liga al primario y salda la venta', async () => {
-    const orderId = await ventaCobradaReembolsadaYAbonada()
     const nuevo = await cliente('Nuevo')
-    const r = await pagoManual(dueno, 'OWNER', pagoDe10(orderId, nuevo))
-    expect(r.status).toBe(201)
-    const despues = await foto(orderId, nuevo)
-    expect(despues.ligas).toEqual([{ customerId: nuevo, isPrimary: true }])
-    expect(despues.venta.paymentStatus).toBe('PAID')
+    const antes = await foto(orderId, nuevo)
+    const salida = await pagoManualPorMcp(adminSinCobrar, { venueId: venueId!, orderId, customerId: nuevo, amount: 20, method: 'cash' })
+    expect(salida).toEqual(RECHAZO_MCP)
+    expect(await foto(orderId, nuevo)).toEqual(antes)
   })
 
-  it('regresión: una venta que NUNCA se cobró (abono normal de $10 sin reembolso) + cliente nuevo, sin el permiso ⇒ como hoy', async () => {
-    const orderId = (
-      await prisma.order.create({
-        data: { venueId: venueId!, orderNumber: `ORD-PAGOMAN-${sello}-${++n}`, subtotal: 100, taxAmount: 0, total: 100, status: 'PENDING' },
-      })
-    ).id
+  it('🔴 r10: $10 SIN cliente ⇒ ok:false y la base queda IGUAL', async () => {
+    const orderId = await ventaCobradaConReembolso()
+    const testigo = await cliente('Testigo')
+    const antes = await foto(orderId, testigo)
+    expect(await pagoManualPorMcp(adminSinCobrar, { venueId: venueId!, orderId, amount: 10, method: 'cash' })).toEqual(RECHAZO_MCP)
+    expect(await foto(orderId, testigo)).toEqual(antes)
+  })
+
+  it('🔴 r11: cobro cancelado en el panel → $10 ⇒ ok:false y la base queda IGUAL', async () => {
+    const orderId = await ventaCobradaConCobroCorregido('cancelar')
+    const testigo = await cliente('Testigo')
+    const antes = await foto(orderId, testigo)
+    expect(await pagoManualPorMcp(adminSinCobrar, { venueId: venueId!, orderId, amount: 10, method: 'cash' })).toEqual(RECHAZO_MCP)
+    expect(await foto(orderId, testigo)).toEqual(antes)
+  })
+
+  it('🔴 f: el DUEÑO por el MCP sobre una venta PAID ⇒ también ok:false', async () => {
+    const orderId = await ventaCobradaConReembolso()
+    const nuevo = await cliente('Nuevo')
+    const antes = await foto(orderId, nuevo)
+    const salida = await pagoManualPorMcp(dueno, { venueId: venueId!, orderId, customerId: nuevo, amount: 20, method: 'cash' })
+    expect(salida).toEqual(RECHAZO_MCP)
+    expect(await foto(orderId, nuevo)).toEqual(antes)
+  })
+})
+
+describe('🔴 R7-2: una cuenta que NUNCA se saldó (abono $20, devolución $10) sigue abierta, como en 8b32aef13', () => {
+  it('🔴 d HTTP: abono con cliente nuevo por el ADMIN sin payments:create ⇒ 201 y liga PRIMARIA', async () => {
+    const orderId = await cuentaNuncaSaldadaConDevolucion()
+    const nuevo = await cliente('Nuevo')
+    const r = await pagoManual(adminSinCobrar, 'ADMIN', pagoDe20(orderId, nuevo))
+    expect(r.status).toBe(201)
+    expect((await foto(orderId, nuevo)).ligas).toEqual([{ customerId: nuevo, isPrimary: true }])
+  })
+
+  it('🔴 d MCP: el mismo abono por el MCP ⇒ ok:true y liga PRIMARIA', async () => {
+    const orderId = await cuentaNuncaSaldadaConDevolucion()
+    const nuevo = await cliente('Nuevo')
+    const salida = await pagoManualPorMcp(adminSinCobrar, { venueId: venueId!, orderId, customerId: nuevo, amount: 20, method: 'cash' })
+    expect(salida).toMatchObject({ ok: true, payment: { orderId } })
+    expect((await foto(orderId, nuevo)).ligas).toEqual([{ customerId: nuevo, isPrimary: true }])
+  })
+
+  it('🔴 d TPV: «agregar cliente» sin payments:create ⇒ el cliente queda PRIMARIO (como antes de la ronda 6)', async () => {
+    const orderId = await cuentaNuncaSaldadaConDevolucion()
+    const nuevo = await cliente('Nuevo')
+    const r = await addCustomerToOrder(venueId!, orderId, nuevo, adminSinCobrar.staffId, { otorgarLealtad: false })
+    expect(r.loyalty).toBeNull()
+    expect((await foto(orderId, nuevo)).ligas).toEqual([{ customerId: nuevo, isPrimary: true }])
+  })
+
+  it('d panel: COCINA le pone cliente con el PUT ⇒ 200 y fija el cliente', async () => {
+    const orderId = await cuentaNuncaSaldadaConDevolucion()
+    const nuevo = await cliente('Nuevo')
+    expect((await editarPorPanel(cocina, 'KITCHEN', orderId, { customerId: nuevo })).status).toBe(200)
+    expect(await prisma.order.findUniqueOrThrow({ where: { id: orderId }, select: { customerId: true } })).toEqual({ customerId: nuevo })
+  })
+})
+
+describe('e: ventas abiertas normales ⇒ como hoy', () => {
+  it('abono de $10 + cliente nuevo por el ADMIN sin payments:create ⇒ 201, PARTIAL, liga primaria', async () => {
+    const orderId = await ventaAbierta()
     const nuevo = await cliente('Nuevo')
     const r = await pagoManual(adminSinCobrar, 'ADMIN', pagoDe10(orderId, nuevo))
     expect(r.status).toBe(201)
     const despues = await foto(orderId, nuevo)
     expect(despues.venta.paymentStatus).toBe('PARTIAL')
     expect(despues.ligas).toEqual([{ customerId: nuevo, isPrimary: true }])
+  })
+
+  it('el saldo exacto con cliente por el dueño ⇒ PAID, liga primaria, sello y puntos sobre $100', async () => {
+    const orderId = await ventaAbierta()
+    const nuevo = await cliente('Nuevo')
+    const r = await pagoManual(dueno, 'OWNER', { ...pagoDe20(orderId, nuevo), amount: '100.00' })
+    expect(r.status).toBe(201)
+    const despues = await foto(orderId, nuevo)
+    expect(despues.venta.paymentStatus).toBe('PAID')
+    expect(despues.ligas).toEqual([{ customerId: nuevo, isPrimary: true }])
+    expect(await prisma.stampEvent.count({ where: { venueId, orderId, stampCard: { customerId: nuevo } } })).toBe(1)
+    expect(despues.persona.loyaltyPoints).toBe(100)
   })
 })
 
@@ -380,31 +472,6 @@ async function editarPorPanel(quien: { staffId: string }, role: string, orderId:
   return { status: r.status.mock.calls[0]?.[0] ?? 200 }
 }
 
-describe('🔴 R6-1: el PUT del panel sobre una venta PARTIAL que YA se cobró', () => {
-  it('🔴 COCINA le pone cliente ⇒ 403 y la venta no cambia', async () => {
-    const orderId = await ventaCobradaReembolsadaYAbonada()
-    const nuevo = await cliente('Nuevo')
-    const antes = await foto(orderId, nuevo)
-    const r = await editarPorPanel(cocina, 'KITCHEN', orderId, { customerId: nuevo, customerName: 'Nuevo' })
-    expect(r).toEqual({ status: 403, mensaje: MENSAJE_CLIENTE_DE_VENTA_COBRADA })
-    expect(await foto(orderId, nuevo)).toEqual(antes)
-    expect(await prisma.order.findUniqueOrThrow({ where: { id: orderId }, select: { customerName: true } })).toEqual({ customerName: null })
-  })
-
-  it('regresión: COCINA en una cuenta que nunca se cobró (abono normal) ⇒ como hoy, fija el cliente', async () => {
-    const orderId = (
-      await prisma.order.create({
-        data: { venueId: venueId!, orderNumber: `ORD-PAGOMAN-${sello}-${++n}`, subtotal: 100, taxAmount: 0, total: 100, status: 'PENDING' },
-      })
-    ).id
-    expect((await pagoManual(dueno, 'OWNER', { orderId, amount: '10.00', tipAmount: '0', method: 'CASH', source: 'POS' })).status).toBe(201)
-    const nuevo = await cliente('Nuevo')
-    const r = await editarPorPanel(cocina, 'KITCHEN', orderId, { customerId: nuevo })
-    expect(r.status).toBe(200)
-    expect(await prisma.order.findUniqueOrThrow({ where: { id: orderId }, select: { customerId: true } })).toEqual({ customerId: nuevo })
-  })
-})
-
 describe('🔴 R6-2: una sola sucursal por operación — la de la URL (Codex recheck-10 P2)', () => {
   /** Todo lo de la sucursal B que un pago manual podría tocar. */
   async function fotoDeB() {
@@ -417,7 +484,7 @@ describe('🔴 R6-2: una sola sucursal por operación — la de la URL (Codex re
   }
 
   it('🔴 sesión de A, URL de B (donde el actor SÍ puede cobrar), venta y cliente de A ⇒ rechazado y NADA se escribe en A ni en B', async () => {
-    const orderId = await ventaCobradaConReembolso()
+    const orderId = await ventaAbierta()
     const nuevo = await cliente('Nuevo')
     // Precondición: el actor de Codex — en B tiene los dos permisos; en A le quitaron «cobrar».
     const enB = peticion(adminSinCobrar, 'ADMIN', {}, { url: venueB!, token: venueId! })
@@ -428,21 +495,15 @@ describe('🔴 R6-2: una sola sucursal por operación — la de la URL (Codex re
     const conCliente = await pagoManual(adminSinCobrar, 'ADMIN', pagoDe20(orderId, nuevo), { url: venueB!, token: venueId! })
     // El servicio opera en B: el cliente de A no es de B ⇒ 400, antes de abrir la transacción.
     expect(conCliente).toMatchObject({ status: 400, mensaje: 'El cliente seleccionado no pertenece a este venue' })
-    const sinCliente = await pagoManual(
-      adminSinCobrar,
-      'ADMIN',
-      { ...pagoDe20(orderId, nuevo), customerId: undefined },
-      { url: venueB!, token: venueId! },
-    )
+    const sinCliente = await pagoManual(adminSinCobrar, 'ADMIN', pagoDe20(orderId), { url: venueB!, token: venueId! })
     // Sin cliente: la venta de A no existe en B ⇒ 404 y la transacción entera se revierte (también el turno de B).
     expect(sinCliente).toMatchObject({ status: 404, mensaje: 'Orden no encontrada' })
     expect({ a: await foto(orderId, nuevo), b: await fotoDeB() }).toEqual(antes)
   })
 
-  it('regresión: sesión y URL de A ⇒ como hoy (el ADMIN sin payments:create recibe el 403 de la decisión «A»)', async () => {
+  it('regresión: sesión y URL de A sobre una venta cobrada ⇒ el 400 de R7-1', async () => {
     const orderId = await ventaCobradaConReembolso()
     const nuevo = await cliente('Nuevo')
-    const r = await pagoManual(adminSinCobrar, 'ADMIN', pagoDe20(orderId, nuevo), { url: venueId!, token: venueId! })
-    expect(r).toEqual({ status: 403, code: CODIGO_CLIENTE_DE_VENTA_COBRADA, mensaje: MENSAJE_CLIENTE_DE_VENTA_COBRADA })
+    expect(await pagoManual(adminSinCobrar, 'ADMIN', pagoDe20(orderId, nuevo), { url: venueId!, token: venueId! })).toEqual(RECHAZO_HTTP)
   })
 })

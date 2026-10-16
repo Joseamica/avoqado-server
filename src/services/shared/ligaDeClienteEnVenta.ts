@@ -77,25 +77,23 @@ export async function bloquearVentaParaLiga(
 }
 
 /**
- * ¿La venta ya está cobrada? Ahí aplica la decisión «A» del founder: PAID o REFUNDED, **o ya se cobró por completo alguna vez**.
+ * ¿La venta ya está cobrada? PAID o REFUNDED: lo que dice la venta leída BAJO el candado de quien llama. Ahí aplica la decisión «A»
+ * del founder. Es el ÚNICO predicado: nadie guarda una copia local.
  *
- * 🔴 R6-1 (ronda 6 post-QA de sellos tardíos; Codex recheck-10 P2): mirar sólo el estado se esquivaba partiendo el pago. Venta
- * PAID de $100 → reembolso de $20 (sigue PAID; el pago manual vuelve a ver $20 de saldo) → abono manual de $10 SIN cliente (queda
- * PARTIAL) → abono de $10 + cliente nuevo: pasaba, creaba el primario y `earnPoints` sobre los $100.
- *
- * La marca de «ya se cobró alguna vez» es `reembolsada` = la venta tiene un `Payment` REFUND COMPLETED (`ventaTieneReembolso`).
- * Por qué ésa y no `loyaltyEligibleAt` ni `completedAt`: ninguna de las dos la escriben todos los caminos que saldan una venta
- * (el pago manual, la liga de pago, el checkout y la venta manual no escriben `loyaltyEligibleAt`; el cobro en efectivo del POS
- * no escribe `completedAt`). En cambio, una venta saldada sólo vuelve a tener saldo si se devolvió dinero: un reembolso no reabre
- * el saldo en los cobros del POS ni de la TPV (`orderBalance.ts`) y ninguno agrega renglones a una venta PAID; el pago manual sí
- * lo reabre (su saldo resta el reembolso), que es justo la vía de Codex. Límite conocido (falla CERRADO): una cuenta que NUNCA se
- * saldó y a la que se le devolvió un abono también cuenta como cobrada — cambiarle el cliente pide `payments:create`.
+ * 🔴 R7-2 (ronda 7 post-QA de sellos tardíos; Codex recheck-11 P2): la ronda 6 sumaba «tiene un reembolso COMPLETED» como marca de
+ * «ya se cobró alguna vez». Se quitó: (1) bloqueaba cuentas que NUNCA se saldaron (abono de $20 y devolución de $10); (2) no era
+ * universal — corregir o cancelar un cobro desde el panel (`payment.dashboard.service.ts#updatePayment`) también deja saldo en una
+ * venta PAID sin ningún reembolso. Lo que la marca quería cerrar (volver a cobrar una venta ya cobrada con el pago manual y colar un
+ * cliente) lo cierra R7-1 de raíz: el pago manual rechaza la venta PAID/REFUNDED para todos (`manualPayment.service.ts`).
  */
-export function esVentaYaCobrada(venta: { paymentStatus: string | null | undefined; reembolsada: boolean }): boolean {
-  return venta.paymentStatus === 'PAID' || venta.paymentStatus === 'REFUNDED' || venta.reembolsada
+export function esVentaYaCobrada(venta: { paymentStatus: string | null | undefined }): boolean {
+  return venta.paymentStatus === 'PAID' || venta.paymentStatus === 'REFUNDED'
 }
 
-/** La marca de `esVentaYaCobrada`: ¿hay un reembolso COMPLETED de esta venta? Conteo EXACTO, sin lista con tope. */
+/**
+ * ¿Hay un reembolso COMPLETED de esta venta? Conteo EXACTO, sin lista con tope (auditoría A #2). Lo usa la lealtad tardía para decir
+ * `NOT_PAID` (una venta con dinero devuelto no da sello). NO decide «cobrada» (R7-2).
+ */
 export async function ventaTieneReembolso(
   db: Pick<Prisma.TransactionClient, 'payment'>,
   venta: { venueId: string; orderId: string },
@@ -104,18 +102,6 @@ export async function ventaTieneReembolso(
     where: { orderId: venta.orderId, venueId: venta.venueId, type: 'REFUND', status: 'COMPLETED' },
   })
   return reembolsos > 0
-}
-
-/**
- * `esVentaYaCobrada` con el estado que quien llama leyó BAJO el candado de la venta, y la marca leída con la misma `db` (la
- * transacción del candado). Si el estado ya lo dice (PAID/REFUNDED), no lee nada más.
- */
-export async function ventaYaCobradaBajoCandado(
-  db: Pick<Prisma.TransactionClient, 'payment'>,
-  venta: { venueId: string; orderId: string; paymentStatus: string | null | undefined },
-): Promise<boolean> {
-  if (esVentaYaCobrada({ paymentStatus: venta.paymentStatus, reembolsada: false })) return true
-  return esVentaYaCobrada({ paymentStatus: venta.paymentStatus, reembolsada: await ventaTieneReembolso(db, venta) })
 }
 
 export const MENSAJE_CLIENTE_DE_VENTA_COBRADA =
@@ -131,21 +117,15 @@ export const CODIGO_CLIENTE_DE_VENTA_COBRADA = 'CUSTOMER_CHANGE_REQUIRES_PAYMENT
  * guardado (el PUT del panel y el «detalle de la cuenta» del POS): ignorarlo en silencio haría que la pantalla dijera
  * «guardado» con el cliente viejo. Quien llama lo decide con lo que leyó BAJO el candado de la venta.
  */
-export async function asegurarCambioDeClienteEnVentaCobrada(
-  db: Pick<Prisma.TransactionClient, 'payment'>,
-  args: {
-    venueId: string
-    orderId: string
-    paymentStatus: string | null | undefined
-    clienteActual: string | null
-    clienteNuevo: string | null
-    puedeCobrar: boolean
-  },
-): Promise<void> {
+export function asegurarCambioDeClienteEnVentaCobrada(args: {
+  paymentStatus: string | null | undefined
+  clienteActual: string | null
+  clienteNuevo: string | null
+  puedeCobrar: boolean
+}): void {
   if (args.clienteNuevo === args.clienteActual) return
+  if (!esVentaYaCobrada(args)) return
   if (args.puedeCobrar) return
-  // R6-1: «cobrada» también es la venta que ya se cobró alguna vez (con reembolso), aunque un abono la haya dejado PARTIAL.
-  if (!(await ventaYaCobradaBajoCandado(db, args))) return
   throw new ForbiddenError(MENSAJE_CLIENTE_DE_VENTA_COBRADA, CODIGO_CLIENTE_DE_VENTA_COBRADA)
 }
 
@@ -156,7 +136,7 @@ export async function asegurarCambioDeClienteEnVentaCobrada(
  * está (no es de este negocio), no decide: quien llama ya responde 404.
  */
 export async function asegurarCambioDeClienteBajoCandado(
-  tx: Pick<Prisma.TransactionClient, 'order' | 'payment'>,
+  tx: Pick<Prisma.TransactionClient, 'order'>,
   args: { venueId: string; orderId: string; clienteNuevo: string | null; puedeCobrar: boolean },
 ): Promise<void> {
   if (args.puedeCobrar) return
@@ -165,9 +145,7 @@ export async function asegurarCambioDeClienteBajoCandado(
     select: { paymentStatus: true, customerId: true },
   })
   if (!venta) return
-  await asegurarCambioDeClienteEnVentaCobrada(tx, {
-    venueId: args.venueId,
-    orderId: args.orderId,
+  asegurarCambioDeClienteEnVentaCobrada({
     paymentStatus: venta.paymentStatus,
     clienteActual: venta.customerId ?? null,
     clienteNuevo: args.clienteNuevo,

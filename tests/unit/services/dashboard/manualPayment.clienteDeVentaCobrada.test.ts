@@ -1,15 +1,14 @@
 /**
- * 🔴 R5-1 (ronda 5 post-QA de sellos tardíos; Codex recheck-9 P2; decisión «A» del founder): el pago manual (`payment:create-manual`)
- * sobre una venta YA cobrada no liga un cliente nuevo sin `payments:create`.
+ * 🔴 R7-1 (ronda 7 post-QA de sellos tardíos; decisión del founder del 16-oct, «como Square»): una venta cobrada queda CERRADA. El
+ * pago manual (panel HTTP y MCP `record_manual_payment`) RECHAZA una venta existente PAID o REFUNDED, para TODOS (con o sin permiso):
+ * 400 `ORDER_ALREADY_PAID` en español, decidido bajo el candado que el servicio YA toma (`lockExistingOrderForPayment`) y antes de
+ * cualquier escritura (también del reclamo del turno). Lo extra se registra como venta nueva.
  *
- * Cómo se llegaba: venta PAID de $100 sin cliente → reembolso de $20 (el saldo vuelve a ser $20: `paidSoFar` resta el reembolso) →
- * pago manual de $20 con `customerId` ⇒ creaba el `OrderCustomer` PRIMARIO y `earnPoints` sobre $100. Y con un primario existente,
- * el `customerId` del pago DESPLAZABA la lealtad al cliente nuevo.
+ * Cierra de raíz los caminos de Codex r9/r10/r11 (reembolso + abono, partir el pago, corregir/cancelar el cobro + abono): todos
+ * empezaban con un pago manual sobre una venta que seguía PAID. Ventas PENDING/PARTIAL ⇒ como hoy (también con un abono devuelto).
  *
- * Ahora, en el modo «venta existente», bajo el candado que el servicio YA toma (`lockExistingOrderForPayment`) y antes de cualquier
- * escritura: venta PAID/REFUNDED + `customerId` distinto del cliente actual (primario; si no hay, `Order.customerId`) + sin el
- * permiso ⇒ 403 con el código y el mensaje de la regla compartida, sin escribir NADA. Mismo cliente, venta no cobrada o con permiso
- * ⇒ como hoy. Sin decir el permiso, cerrado.
+ * Historia: R5-1 (ronda 5) pedía `payments:create` para cambiar el cliente con un pago manual sobre una venta cobrada; con R7-1 ese
+ * caso ya no llega a esa regla (la venta cobrada se rechaza antes, para todos).
  */
 jest.mock('@/services/tpv/paymentEffects.service', () => ({
   ...jest.requireActual('@/services/tpv/paymentEffects.service'),
@@ -62,20 +61,22 @@ jest.mock('@/services/referrals/referralQualification.service', () => ({ onOrder
 
 import * as manualPaymentService from '@/services/dashboard/manualPayment.service'
 import prisma from '@/utils/prismaClient'
-import { ForbiddenError } from '@/errors/AppError'
-import { CODIGO_CLIENTE_DE_VENTA_COBRADA, MENSAJE_CLIENTE_DE_VENTA_COBRADA } from '@/services/shared/ligaDeClienteEnVenta'
+import { BadRequestError } from '@/errors/AppError'
 
 const prismaMock = prisma as jest.Mocked<typeof prisma>
-const VENUE = 'venue-r5'
-const STAFF = 'staff-r5'
-const ORDER = 'order-r5'
+const VENUE = 'venue-r7'
+const STAFF = 'staff-r7'
+const ORDER = 'order-r7'
+/** El contrato del rechazo (texto y código EXACTOS: los lee el panel y el LLM del MCP). */
+const MENSAJE = 'Esta venta ya está cobrada. Para cobrar algo extra, registra una venta nueva.'
+const CODIGO = 'ORDER_ALREADY_PAID'
 const NUEVO = 'cust-nuevo'
 
 type Liga = { customerId: string; isPrimary: boolean }
 
 /**
  * Venta de $100 ($100 cobrados − $20 reembolsados ⇒ saldo $20), con su `paymentStatus`, su cliente heredado y sus ligas. La
- * transacción anota cada ESCRITURA en orden: un 403 debe dejar la lista vacía.
+ * transacción anota cada ESCRITURA en orden: un rechazo debe dejar la lista vacía.
  */
 function ventaYTransaccion(opciones: { paymentStatus: string; customerId?: string | null; ligas?: Liga[]; reembolsos?: number }) {
   const escrituras: string[] = []
@@ -122,12 +123,12 @@ function ventaYTransaccion(opciones: { paymentStatus: string; customerId?: strin
       update: escribe('order.update'),
     },
     payment: {
-      // R6-1: los reembolsos COMPLETED (la marca de «ya cobrada») se cuentan aparte de los cobros previos del turno. Por
-      // defecto la venta tiene su reembolso de $20 (el escenario de Codex); una venta que nunca se cobró pasa `reembolsos: 0`.
+      // La venta tiene su reembolso de $20 (el escenario de Codex). R7-2: los reembolsos ya NO deciden «cobrada» — las pruebas
+      // vigilan que no se pregunten.
       count: jest.fn(async (args: any) => (args?.where?.type === 'REFUND' ? (opciones.reembolsos ?? 1) : 1)),
       findUnique: jest.fn().mockResolvedValue(null),
       create: escribe('payment.create', {
-        id: 'pay-r5',
+        id: 'pay-r7',
         orderId: ORDER,
         method: 'CASH',
         fundsFlow: 'CASH_DRAWER',
@@ -138,7 +139,7 @@ function ventaYTransaccion(opciones: { paymentStatus: string; customerId?: strin
       }),
     },
     shift: {
-      findFirst: jest.fn().mockResolvedValue({ id: 'shift-r5', status: 'OPEN' }),
+      findFirst: jest.fn().mockResolvedValue({ id: 'shift-r7', status: 'OPEN' }),
       updateMany: escribe('shift.updateMany', { count: 1 }),
     },
     orderCustomer: { create: escribe('orderCustomer.create') },
@@ -159,13 +160,14 @@ const pagoDe20 = (customerId?: string) => ({
   ...(customerId ? { customerId } : {}),
 })
 
-async function rechazo(promesa: Promise<unknown>): Promise<ForbiddenError> {
+/** El rechazo de R7-1, con su contrato completo. */
+async function rechazoVentaCobrada(promesa: Promise<unknown>): Promise<void> {
   const error = await promesa.then(
     () => null,
     (e: unknown) => e,
   )
-  expect(error).toBeInstanceOf(ForbiddenError)
-  return error as ForbiddenError
+  expect(error).toBeInstanceOf(BadRequestError)
+  expect(error).toMatchObject({ statusCode: 400, code: CODIGO, message: MENSAJE })
 }
 
 function nadaSeEscribio(escrituras: string[]) {
@@ -184,140 +186,91 @@ beforeEach(() => {
   createSalePostingInTxMock.mockResolvedValue(null)
   postCashSaleToDrawerMock.mockResolvedValue(undefined)
   ;(prismaMock.customer.findFirst as jest.Mock).mockImplementation(async (args: any) => ({ id: args.where.id }))
-  ;(prismaMock.staffVenue.findFirst as jest.Mock).mockResolvedValue({ staffId: STAFF, id: 'sv-r5' })
+  ;(prismaMock.staffVenue.findFirst as jest.Mock).mockResolvedValue({ staffId: STAFF, id: 'sv-r7' })
   ;(prismaMock.venueSettings.findUnique as jest.Mock).mockResolvedValue({ enableShifts: true })
   ;(prismaMock.payment.findUnique as jest.Mock).mockResolvedValue(null)
 })
 
-describe('🔴 R5-1: pago manual + cliente sobre una venta YA cobrada, sin payments:create ⇒ 403 sin escribir nada', () => {
-  it.each(['PAID', 'REFUNDED'])('%s sin cliente + cliente NUEVO, sin decir el permiso (cerrado por default) ⇒ 403', async estado => {
+const CON_PERMISO = { puedeCambiarClienteEnVentaCobrada: true }
+
+describe('🔴 R7-1: el pago manual rechaza una venta YA cobrada (PAID/REFUNDED), para todos y sin escribir nada', () => {
+  it.each([
+    ['PAID', 'sin cliente', undefined, {}],
+    ['REFUNDED', 'sin cliente', undefined, {}],
+    ['PAID', 'cliente nuevo, sin el permiso', NUEVO, {}],
+    ['REFUNDED', 'cliente nuevo, sin el permiso', NUEVO, {}],
+    ['PAID', 'cliente nuevo, CON payments:create (dueño)', NUEVO, CON_PERMISO],
+    ['REFUNDED', 'cliente nuevo, CON payments:create (dueño)', NUEVO, CON_PERMISO],
+  ])('%s, %s ⇒ 400 ORDER_ALREADY_PAID', async (estado, _caso, cliente, opciones) => {
     const { escrituras } = ventaYTransaccion({ paymentStatus: estado })
-    const error = await rechazo(manualPaymentService.createManualPayment(VENUE, STAFF, pagoDe20(NUEVO)))
-    expect(error.statusCode).toBe(403)
-    expect(error.code).toBe(CODIGO_CLIENTE_DE_VENTA_COBRADA)
-    expect(error.message).toBe(MENSAJE_CLIENTE_DE_VENTA_COBRADA)
+    await rechazoVentaCobrada(manualPaymentService.createManualPayment(VENUE, STAFF, pagoDe20(cliente), opciones))
     nadaSeEscribio(escrituras)
   })
 
-  it('PAID + permiso explícitamente en false ⇒ 403 sin escribir nada', async () => {
-    const { escrituras } = ventaYTransaccion({ paymentStatus: 'PAID' })
-    await rechazo(manualPaymentService.createManualPayment(VENUE, STAFF, pagoDe20(NUEVO), { puedeCambiarClienteEnVentaCobrada: false }))
+  it('PAID + el MISMO cliente que el primario ⇒ también 400 (no es asunto del cliente: la venta está cerrada)', async () => {
+    const { escrituras } = ventaYTransaccion({ paymentStatus: 'PAID', ligas: [{ customerId: 'cust-ana', isPrimary: true }] })
+    await rechazoVentaCobrada(manualPaymentService.createManualPayment(VENUE, STAFF, pagoDe20('cust-ana'), CON_PERMISO))
     nadaSeEscribio(escrituras)
   })
 
-  it.each(['PAID', 'REFUNDED'])('%s con PRIMARIO Ana + cliente distinto (Beto) ⇒ 403: no desplaza la lealtad', async estado => {
-    const { escrituras } = ventaYTransaccion({ paymentStatus: estado, ligas: [{ customerId: 'cust-ana', isPrimary: true }] })
-    await rechazo(manualPaymentService.createManualPayment(VENUE, STAFF, pagoDe20('cust-beto')))
-    nadaSeEscribio(escrituras)
-  })
-
-  it('PAID sin primario pero con el cliente heredado (Order.customerId) Ana + Beto ⇒ 403', async () => {
-    const { escrituras } = ventaYTransaccion({ paymentStatus: 'PAID', customerId: 'cust-ana' })
-    await rechazo(manualPaymentService.createManualPayment(VENUE, STAFF, pagoDe20('cust-beto')))
-    nadaSeEscribio(escrituras)
-  })
-
-  it('el cliente actual es el PRIMARIO, no el heredado: primario Ana + heredado Beto + pago con Beto ⇒ 403', async () => {
-    const { escrituras } = ventaYTransaccion({
-      paymentStatus: 'PAID',
-      customerId: 'cust-beto',
-      ligas: [{ customerId: 'cust-ana', isPrimary: true }],
-    })
-    await rechazo(manualPaymentService.createManualPayment(VENUE, STAFF, pagoDe20('cust-beto')))
-    nadaSeEscribio(escrituras)
-  })
-
-  it('un ACOMPAÑANTE (no primario) no es el cliente actual: acompañante Beto + pago con Beto ⇒ 403', async () => {
-    const { escrituras } = ventaYTransaccion({ paymentStatus: 'PAID', ligas: [{ customerId: 'cust-beto', isPrimary: false }] })
-    await rechazo(manualPaymentService.createManualPayment(VENUE, STAFF, pagoDe20('cust-beto')))
-    nadaSeEscribio(escrituras)
-  })
-
-  // 🔴 R6-1 (ronda 6; Codex recheck-10 P2): partir el pago esquivaba la regla. Tras el reembolso, un abono SIN cliente deja la
-  // venta PARTIAL; el abono siguiente con cliente nuevo pasaba (sólo se miraba PAID/REFUNDED). La venta ya se cobró: 403.
-  it.each(['PARTIAL', 'PENDING'])(
-    '🔴 R6-1: venta %s que YA se cobró (tiene reembolso) + cliente nuevo, sin el permiso ⇒ 403 sin escribir nada',
-    async estado => {
-      const { escrituras, tx } = ventaYTransaccion({ paymentStatus: estado, reembolsos: 1 })
-      const error = await rechazo(manualPaymentService.createManualPayment(VENUE, STAFF, pagoDe20(NUEVO)))
-      expect(error.code).toBe(CODIGO_CLIENTE_DE_VENTA_COBRADA)
-      nadaSeEscribio(escrituras)
-      // La marca se lee bajo el candado y antes del turno.
-      expect(tx.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(tx.payment.count.mock.invocationCallOrder[0])
-      expect(tx.shift.findFirst).not.toHaveBeenCalled()
-    },
-  )
-
-  it('R6-1: venta PARTIAL que ya se cobró + el MISMO cliente que el primario ⇒ pasa (no es cambio de cliente)', async () => {
-    const { escrituras } = ventaYTransaccion({
-      paymentStatus: 'PARTIAL',
-      reembolsos: 1,
-      ligas: [{ customerId: 'cust-ana', isPrimary: true }],
-    })
-    await manualPaymentService.createManualPayment(VENUE, STAFF, pagoDe20('cust-ana'))
-    expect(escrituras).toContain('payment.create')
-  })
-
-  it('R6-1: venta PARTIAL que ya se cobró + cliente nuevo CON payments:create ⇒ como hoy', async () => {
-    const { escrituras } = ventaYTransaccion({ paymentStatus: 'PARTIAL', reembolsos: 1 })
-    await manualPaymentService.createManualPayment(VENUE, STAFF, pagoDe20(NUEVO), { puedeCambiarClienteEnVentaCobrada: true })
-    expect(escrituras).toEqual(expect.arrayContaining(['payment.create', 'orderCustomer.create']))
-  })
-
-  it('🔴 la decisión se toma BAJO el candado del cobro y antes de la primera escritura (el turno)', async () => {
+  it('🔴 la decisión se toma BAJO el candado del cobro (ninguno nuevo) y antes de la primera escritura (el turno)', async () => {
     const { tx, lecturasDeLaVenta } = ventaYTransaccion({ paymentStatus: 'PAID' })
-    await rechazo(manualPaymentService.createManualPayment(VENUE, STAFF, pagoDe20(NUEVO)))
-    expect(tx.$queryRaw).toHaveBeenCalledTimes(1) // el candado de siempre; ninguno nuevo
+    await rechazoVentaCobrada(manualPaymentService.createManualPayment(VENUE, STAFF, pagoDe20(NUEVO), CON_PERMISO))
+    expect(tx.$queryRaw).toHaveBeenCalledTimes(1) // el candado de siempre
     expect(lecturasDeLaVenta).toHaveLength(1)
     expect(lecturasDeLaVenta[0]).toEqual(expect.objectContaining({ where: { id: ORDER, venueId: VENUE } }))
     expect(tx.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(tx.order.findFirst.mock.invocationCallOrder[0])
     expect(tx.shift.findFirst).not.toHaveBeenCalled()
+    expect(tx.payment.count).not.toHaveBeenCalled() // ni los cobros previos del turno ni reembolsos
+  })
+
+  it('🔴 el reintento por serialización vuelve a evaluar la regla: en el 2.º intento la venta ya está PAID ⇒ 400', async () => {
+    const abierta = ventaYTransaccion({ paymentStatus: 'PARTIAL' })
+    const cobrada = ventaYTransaccion({ paymentStatus: 'PAID' })
+    let intento = 0
+    ;(prismaMock.$transaction as jest.Mock).mockImplementation(async (cb: any) => {
+      intento += 1
+      if (intento === 1) {
+        await cb(abierta.tx).catch(() => undefined)
+        throw Object.assign(new Error('could not serialize access'), { code: 'P2034' })
+      }
+      return cb(cobrada.tx)
+    })
+    await rechazoVentaCobrada(
+      manualPaymentService.createManualPayment(VENUE, STAFF, { ...pagoDe20(NUEVO), idempotencyKey: 'r7-reintento-0001' }),
+    )
+    expect(intento).toBe(2)
+    expect(cobrada.escrituras).toEqual([])
+    expect(earnPointsMock).not.toHaveBeenCalled()
   })
 })
 
-describe('R5-1: lo que sigue igual que hoy', () => {
-  it('PAID + mismo cliente que el primario ⇒ pasa; la lealtad va a ese cliente', async () => {
-    const { escrituras } = ventaYTransaccion({ paymentStatus: 'PAID', ligas: [{ customerId: 'cust-ana', isPrimary: true }] })
+describe('R7-1: lo que sigue igual que hoy', () => {
+  it.each(['PARTIAL', 'PENDING'])(
+    '🔴 R7-2: cuenta %s con un abono devuelto (nunca se saldó) + cliente nuevo, sin el permiso ⇒ como en 8b32aef13: liga primaria',
+    async estado => {
+      const { escrituras, tx } = ventaYTransaccion({ paymentStatus: estado, reembolsos: 1 })
+      await manualPaymentService.createManualPayment(VENUE, STAFF, pagoDe20(NUEVO))
+      expect(escrituras).toEqual(expect.arrayContaining(['payment.create', 'orderCustomer.create']))
+      expect(tx.payment.count).not.toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ type: 'REFUND' }) }))
+    },
+  )
+
+  it.each(['PARTIAL', 'PENDING'])('venta %s (abono normal) sin cliente ⇒ como hoy', async estado => {
+    const { escrituras } = ventaYTransaccion({ paymentStatus: estado, reembolsos: 0 })
+    await manualPaymentService.createManualPayment(VENUE, STAFF, pagoDe20())
+    expect(escrituras).toEqual(expect.arrayContaining(['shift.updateMany', 'payment.create', 'order.update']))
+  })
+
+  it('cuenta PARTIAL con primario Ana + pago con Ana ⇒ como hoy (no crea otra liga)', async () => {
+    const { escrituras } = ventaYTransaccion({
+      paymentStatus: 'PARTIAL',
+      reembolsos: 0,
+      ligas: [{ customerId: 'cust-ana', isPrimary: true }],
+    })
     await manualPaymentService.createManualPayment(VENUE, STAFF, pagoDe20('cust-ana'))
     expect(escrituras).toContain('payment.create')
     expect(escrituras).not.toContain('orderCustomer.create')
-    expect(earnPointsMock).toHaveBeenCalledWith(VENUE, 'cust-ana', 100, ORDER, 'sv-r5')
-  })
-
-  it('PAID + mismo cliente que el heredado (sin primario) ⇒ pasa', async () => {
-    const { escrituras } = ventaYTransaccion({ paymentStatus: 'PAID', customerId: 'cust-ana' })
-    await manualPaymentService.createManualPayment(VENUE, STAFF, pagoDe20('cust-ana'))
-    expect(escrituras).toContain('payment.create')
-    expect(earnPointsMock).toHaveBeenCalledWith(VENUE, 'cust-ana', 100, ORDER, 'sv-r5')
-  })
-
-  it.each(['PAID', 'REFUNDED'])('%s + cliente nuevo CON payments:create ⇒ como hoy: liga primaria y lealtad', async estado => {
-    const { escrituras } = ventaYTransaccion({ paymentStatus: estado })
-    await manualPaymentService.createManualPayment(VENUE, STAFF, pagoDe20(NUEVO), { puedeCambiarClienteEnVentaCobrada: true })
-    expect(escrituras).toEqual(expect.arrayContaining(['shift.updateMany', 'payment.create', 'orderCustomer.create', 'order.update']))
-    expect(earnPointsMock).toHaveBeenCalledWith(VENUE, NUEVO, 100, ORDER, 'sv-r5')
-  })
-
-  it('con el permiso no se hace la lectura extra de la venta', async () => {
-    const { lecturasDeLaVenta } = ventaYTransaccion({ paymentStatus: 'PAID' })
-    await manualPaymentService.createManualPayment(VENUE, STAFF, pagoDe20(NUEVO), { puedeCambiarClienteEnVentaCobrada: true })
-    expect(lecturasDeLaVenta).toHaveLength(1) // sólo la de siempre (con `include`)
-    expect(lecturasDeLaVenta[0]).toEqual(expect.objectContaining({ include: expect.anything() }))
-  })
-
-  it.each(['PARTIAL', 'PENDING'])('venta %s que NUNCA se cobró (abono normal con cliente) sin el permiso ⇒ como hoy', async estado => {
-    const { escrituras, tx } = ventaYTransaccion({ paymentStatus: estado, reembolsos: 0 })
-    await manualPaymentService.createManualPayment(VENUE, STAFF, pagoDe20(NUEVO))
-    expect(escrituras).toEqual(expect.arrayContaining(['payment.create', 'orderCustomer.create']))
-    // R6-1: la marca se preguntó (bajo el candado) y dijo «nunca se cobró».
-    expect(tx.payment.count).toHaveBeenCalledWith({ where: { orderId: ORDER, venueId: VENUE, type: 'REFUND', status: 'COMPLETED' } })
-  })
-
-  it('PAID sin customerId en la petición, sin el permiso ⇒ como hoy (no hay cambio de cliente)', async () => {
-    const { escrituras, lecturasDeLaVenta } = ventaYTransaccion({ paymentStatus: 'PAID', customerId: 'cust-ana' })
-    await manualPaymentService.createManualPayment(VENUE, STAFF, pagoDe20())
-    expect(escrituras).toContain('payment.create')
-    expect(lecturasDeLaVenta).toHaveLength(1)
   })
 
   it('modo «sin venta» (orden sombra) con cliente, sin el permiso ⇒ como hoy: es una venta nueva', async () => {

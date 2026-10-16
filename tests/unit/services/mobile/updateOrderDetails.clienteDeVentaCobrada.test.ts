@@ -13,7 +13,7 @@ jest.mock('@/communication/sockets', () => ({ __esModule: true, default: { getBr
 
 const MENSAJE = 'Para cambiar el cliente de una venta ya cobrada necesitas el permiso de cobrar. Pídeselo a tu administrador.'
 
-/** `reembolsos`: los `Payment` REFUND COMPLETED de la venta — la marca de «ya se cobró alguna vez» (R6-1). */
+/** `reembolsos`: los `Payment` REFUND COMPLETED de la venta (R7-2: ya no cuentan para «cobrada»; la prueba lo vigila). */
 function crearTx(orden: Record<string, unknown>, reembolsos = 0) {
   return {
     $queryRaw: jest.fn().mockResolvedValue([{ id: 'order' }]),
@@ -91,31 +91,16 @@ describe('🔴 R4-2: detalle de la cuenta del POS — cambiar el cliente de una 
     expect(r.data.customerId).toBe('cust-B')
   })
 
-  // 🔴 R6-1 (ronda 6; Codex recheck-10 P2): la cuenta que YA se cobró (tiene reembolso) y que un abono dejó PARTIAL sigue cobrada.
+  // 🔴 R7-2 (ronda 7; Codex recheck-11 P2): una cuenta con un abono devuelto que NUNCA se saldó ya no cuenta como «cobrada».
   it.each(['PARTIAL', 'PENDING'])(
-    '🔴 R6-1: cuenta %s que YA se cobró (con reembolso), SIN permiso ⇒ 403 y no se guarda nada',
+    '🔴 R7-2: cuenta %s con un abono devuelto (nunca se saldó), SIN permiso ⇒ como hoy, sin contar reembolsos',
     async estado => {
       const tx = crearTx({ paymentStatus: estado, customerId: null }, 1)
-      const error = await updateOrderDetailsInTransaction(tx as any, 'venue', 'order', { name: 'Kev', customerId: 'cust-B' }, {}).catch(
-        e => e,
-      )
-      expect(error).toMatchObject({ statusCode: 403, message: MENSAJE })
-      expect(tx.order.update).not.toHaveBeenCalled()
-      expect(tx.payment.count).toHaveBeenCalledWith({ where: { orderId: 'order', venueId: 'venue', type: 'REFUND', status: 'COMPLETED' } })
+      const r = await updateOrderDetailsInTransaction(tx as any, 'venue', 'order', { name: 'Kev', customerId: 'cust-B' }, {})
+      expect(r.data.customerId).toBe('cust-B')
+      expect(tx.payment.count).not.toHaveBeenCalled()
     },
   )
-
-  it('R6-1: cuenta PARTIAL que YA se cobró, CON payments:create ⇒ como hoy', async () => {
-    const tx = crearTx({ paymentStatus: 'PARTIAL', customerId: null }, 1)
-    const r = await updateOrderDetailsInTransaction(
-      tx as any,
-      'venue',
-      'order',
-      { customerId: 'cust-B' },
-      { puedeCambiarClienteEnVentaCobrada: true },
-    )
-    expect(r.data.customerId).toBe('cust-B')
-  })
 
   it('regresión: una cuenta COMPLETED sigue cerrada (400), como siempre', async () => {
     const tx = crearTx({ status: 'COMPLETED', paymentStatus: 'PAID', customerId: null })
