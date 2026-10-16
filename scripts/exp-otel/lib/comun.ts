@@ -122,9 +122,11 @@ export function arrancarServer(nombre: string, env: Record<string, string>) {
   const flags = Object.entries(env)
     .map(([k, v]) => `-e ${k}=${JSON.stringify(v)}`)
     .join(' ')
-  // cgroup de 1 CPU / 2 GB como Render (corrección 9). `--init` para que las señales lleguen a npm → node.
+  // cgroup de 1 CPU / 2 GB como Render (corrección 9). `--init` + TINI_KILL_PROCESS_GROUP: el SIGTERM llega al GRUPO
+  // (npm y node). Sin esto (corrida 38927605201) npm moría con 143 y node nunca corría su gracefulShutdown — la fase 2
+  // necesita el apagado con flush (brazo C).
   sh(
-    `docker run -d --name ${nombre} --init --cpus=1 --memory=2g --network ${RED} --network-alias srv ` +
+    `docker run -d --name ${nombre} --init -e TINI_KILL_PROCESS_GROUP=1 --cpus=1 --memory=2g --network ${RED} --network-alias srv ` +
       `-v ${REPO}:${REPO} -w ${REPO} ${flags} ${NODE_IMAGE} npm start`,
     { quiet: true },
   )

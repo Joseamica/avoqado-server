@@ -88,7 +88,14 @@ async function main() {
   sh(`docker stop -t 30 ${SRV}`, { quiet: true, allowFail: true })
   fs.writeFileSync(path.join(OUT, `servidor-${BRAZO}.log`), logsDe(SRV))
   const exit = sh(`docker inspect -f '{{.State.ExitCode}}' ${SRV}`, { quiet: true, allowFail: true })
-  log(`código de salida del server tras SIGTERM: ${exit}`)
+  const registro = logsDe(SRV)
+  const apagado = {
+    codigoDeSalida: Number(exit),
+    recibioSigterm: registro.includes('Received SIGTERM'),
+    ultimaLinea: registro.trim().split('\n').slice(-1)[0]?.slice(0, 300) ?? null,
+  }
+  escribirJson(`apagado-${BRAZO}.json`, apagado)
+  log(`apagado del server: ${JSON.stringify(apagado)}`)
   if (codigo !== 0) process.exit(codigo)
   if (!vivo) process.exit(3)
 }
