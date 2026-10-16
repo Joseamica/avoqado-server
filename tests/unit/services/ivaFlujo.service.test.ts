@@ -13,7 +13,7 @@ jest.mock('../../../src/utils/prismaClient', () => ({
   __esModule: true,
   default: {
     venue: { findMany: jest.fn(), findUnique: jest.fn() },
-    cfdi: { aggregate: jest.fn() },
+    cfdi: { groupBy: jest.fn() },
   },
 }))
 jest.mock('../../../src/services/fiscal/chartOfAccounts.service', () => ({
@@ -45,7 +45,7 @@ import { getIvaCashflow } from '../../../src/services/fiscal/ivaFlujo.service'
 
 const p = prisma as unknown as {
   venue: { findMany: jest.Mock; findUnique: jest.Mock }
-  cfdi: { aggregate: jest.Mock }
+  cfdi: { groupBy: jest.Mock }
 }
 const mockScope = resolveScopeOrNull as jest.Mock
 const mockIncome = getIncomeStatement as jest.Mock
@@ -85,7 +85,7 @@ const income = (grossCents: number, salesCount = 1) => {
 beforeEach(() => {
   jest.clearAllMocks()
   mockScope.mockResolvedValue({ organizationId: 'org1', rfc: 'EKU9003173C9', venueType: 'FOOD_SERVICE' })
-  p.cfdi.aggregate.mockResolvedValue({ _sum: { taxCents: 0 }, _count: { _all: 0 } })
+  p.cfdi.groupBy.mockResolvedValue([])
   mockAcreditable.mockResolvedValue(acreditableResult(0)) // por defecto: sin gastos acreditables
   mockSalesRet.mockResolvedValue(null) // sin retención de ventas capturada por default
 })
@@ -193,13 +193,30 @@ it('RFC que abarca >1 organización → flag rfcSpansMultipleOrgs (igual se suma
 it('CFDI contraste: Σ Cfdi.taxCents se reporta como ivaAmparadoPorCfdi (NO como base)', async () => {
   p.venue.findMany.mockResolvedValue([{ id: 'v1', organizationId: 'org1', timezone: 'America/Mexico_City' }])
   mockIncome.mockResolvedValue(income(116000))
-  p.cfdi.aggregate.mockResolvedValue({ _sum: { taxCents: 9999 }, _count: { _all: 3 } })
+  p.cfdi.groupBy.mockResolvedValue([{ type: 'INGRESO', _sum: { taxCents: 9999 }, _count: { _all: 3 } }])
 
   const r = await getIvaCashflow('v1', '2026-06')
   expect(r.ivaAmparadoPorCfdiCents).toBe(9999)
   expect(r.cfdiCount).toBe(3)
   // el contraste NO cambia la base derivada de Payments
   expect(r.ivaTrasladadoCobradoCents).toBe(16000)
+})
+
+it('🔴 CFDI contraste: el IVA de las notas de crédito (EGRESO) RESTA; antes se sumaba (full-testing integral 15-oct, D1)', async () => {
+  p.venue.findMany.mockResolvedValue([{ id: 'v1', organizationId: 'org1', timezone: 'America/Mexico_City' }])
+  mockIncome.mockResolvedValue(income(116000))
+  p.cfdi.groupBy.mockResolvedValue([
+    { type: 'INGRESO', _sum: { taxCents: 9999 }, _count: { _all: 3 } },
+    { type: 'EGRESO', _sum: { taxCents: 2000 }, _count: { _all: 2 } },
+  ])
+
+  const r = await getIvaCashflow('v1', '2026-06')
+  expect(r.ivaAmparadoPorCfdiCents).toBe(7999)
+  expect(r.cfdiCount).toBe(5)
+  // Sólo facturas y notas: un complemento de pago repetiría el IVA de su factura.
+  expect(p.cfdi.groupBy).toHaveBeenCalledWith(
+    expect.objectContaining({ by: ['type'], where: expect.objectContaining({ type: { in: ['INGRESO', 'EGRESO'] } }) }),
+  )
 })
 
 it('plan 4b · suma por local las bases de tasa 0, exenta y no objeto; la base gravable sigue siendo la suma de taxableBaseCents', async () => {
@@ -331,7 +348,7 @@ describe('B4b · I2 (revisión final): UN presupuesto por petición, para que el
     expect(error).toBeInstanceOf(ServiceUnavailableError)
     expect(error).toMatchObject({ message: MENSUAL, code: 'REPORT_TIMEOUT', statusCode: 503 })
     expect(mockIncome).toHaveBeenCalledTimes(2) // el tercero nunca arranca
-    expect(p.cfdi.aggregate).not.toHaveBeenCalled() // ni nada de lo que sigue
+    expect(p.cfdi.groupBy).not.toHaveBeenCalled() // ni nada de lo que sigue
   })
 
   it('🔴 si la petición ya gastó su presupuesto antes de empezar (buscar los locales), no arranca ninguno', async () => {
