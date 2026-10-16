@@ -22,6 +22,7 @@ import {
   validateDesignDraft,
   type DesignValues,
 } from '@/services/customer-display/customerDisplayDesign.validation'
+import { enLaTablet } from '@/services/customer-display/customerDisplayAckView'
 
 /**
  * El diseño de la PANTALLA DEL CLIENTE de una tablet Android (spec §5.2): 1 lectura y 3 escrituras.
@@ -137,7 +138,7 @@ export function registerCustomerDisplayTools(server: McpServer, scope: McpScope)
 
   server.tool(
     'customer_display_design',
-    "How the CUSTOMER-FACING screen of a venue's Android POS tablet looks today: theme, brand color, logo, welcome and thank-you texts, idle images, and whether the device is actually reporting that second screen. Returns the editToken you need to change it. Omit terminalId to LIST the venue's Android POS tablets (paged, with total) — not only the ones with a customer screen, since not every tablet has one and some haven't reported yet; each one in the list says whether it actually has that screen, doesn't, or it's unknown — and pick one by id; never guess which. Answers \"¿cómo se ve la pantalla del cliente?\", \"¿por qué no sale mi logo en la segunda pantalla?\". Requires customer-display:read.",
+    "How the CUSTOMER-FACING screen of a venue's Android POS tablet looks today: theme, brand color, logo, welcome and thank-you texts, idle images, and whether the device is actually reporting that second screen. enLaTablet says whether the tablet already shows the saved design (shown, stored, pending, kiosk mode, or the app needs updating). Returns the editToken you need to change it. Omit terminalId to LIST the venue's Android POS tablets (paged, with total) — not only the ones with a customer screen, since not every tablet has one and some haven't reported yet; each one in the list says whether it actually has that screen, doesn't, or it's unknown — and pick one by id; never guess which. Answers \"¿cómo se ve la pantalla del cliente?\", \"¿por qué no sale mi logo en la segunda pantalla?\". Requires customer-display:read.",
     {
       venueId: z.string().describe('Venue that owns the device (must be in your scope)'),
       terminalId: z.string().min(1).optional().describe('The Android POS tablet. Omit it to list the venue devices and choose one'),
@@ -167,6 +168,8 @@ export function registerCustomerDisplayTools(server: McpServer, scope: McpScope)
         plan: vista.entitlements,
         imagenesRechazadas: vista.assetRejected,
         aparato: vista.device,
+        // Qué muestra la tablet AHORA, decidido al leer con la regla del panel (R4): la IA no compara huellas.
+        enLaTablet: enLaTablet(vista.device.ack, vista.ficha.fingerprint, vista.device.designVersion),
       })
     },
   )

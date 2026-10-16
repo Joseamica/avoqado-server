@@ -39,6 +39,8 @@ import { updateDisplayModeSchema, updateTerminalSettingsSchema } from '../schema
 import * as tpvSettingsMobileController from '../controllers/mobile/tpvSettings.mobile.controller'
 import { reportDeviceCapabilitiesSchema } from '../schemas/mobile/deviceCapabilities.mobile.schema'
 import * as deviceCapabilitiesMobileController from '../controllers/mobile/deviceCapabilities.mobile.controller'
+import * as customerDisplayMobileController from '../controllers/mobile/customerDisplay.mobile.controller'
+import { customerDisplayAckSchema } from '../schemas/mobile/customerDisplay.mobile.schema'
 import * as notificationMobileController from '../controllers/mobile/notification.mobile.controller'
 import * as supplierMobileController from '../controllers/mobile/supplier.mobile.controller'
 import * as cashDrawerMobileController from '../controllers/mobile/cash-drawer.mobile.controller'
@@ -2270,6 +2272,135 @@ router.get(
   authenticateTokenMiddleware,
   requireVenueMembership,
   tpvSettingsMobileController.getDisplayModeRequest,
+)
+
+/**
+ * @openapi
+ * /api/v1/mobile/venues/{venueId}/customer-display:
+ *   get:
+ *     tags: [Mobile - TPV Settings]
+ *     summary: La ficha de diseño de la pantalla del cliente de ESTE aparato
+ *     description: |
+ *       El aparato se identifica por el binding EXACTO `{ venueId, X-Device-ID, POS_ANDROID }`, sin respaldo a otra
+ *       terminal. La ficha se calcula fresca (y renueva la caché del poll): su `fingerprint` es la que el poll anunciará.
+ *       `imageOrigins` es la lista blanca de orígenes desde los que la tablet puede descargar las imágenes de la ficha.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: header
+ *         name: X-Device-ID
+ *         required: true
+ *         schema: { type: string, maxLength: 64 }
+ *     responses:
+ *       200:
+ *         description: La ficha vigente
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 data:
+ *                   type: object
+ *                   required: [terminalId, ficha, imageOrigins]
+ *                   properties:
+ *                     terminalId: { type: string, description: El id que devolvió el binding }
+ *                     ficha:
+ *                       type: object
+ *                       description: La ficha efectiva (lo que ve el cliente), con su `fingerprint` de 32 hex
+ *                     imageOrigins:
+ *                       type: array
+ *                       items: { type: string, example: 'https://storage.googleapis.com' }
+ *       400: { description: Falta X-Device-ID (DEVICE_ID_REQUIRED) }
+ *       401: { description: Sin sesión }
+ *       403: { description: No pertenece al venue }
+ *       404: { description: El aparato no está ligado a este negocio como POS Android (DEVICE_NOT_FOUND) — usa la fábrica }
+ */
+router.get(
+  '/venues/:venueId/customer-display',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  customerDisplayMobileController.getCustomerDisplay,
+)
+
+/**
+ * @openapi
+ * /api/v1/mobile/venues/{venueId}/customer-display/ack:
+ *   put:
+ *     tags: [Mobile - TPV Settings]
+ *     summary: El acuse de la tablet — qué ficha dice tener guardada o mostrada
+ *     description: |
+ *       Es un REPORTE del cliente, no una prueba física. El aparato se identifica por el binding EXACTO
+ *       `{ venueId, X-Device-ID, POS_ANDROID }` y la instalación tiene que ser la registrada por el reporte de capacidades.
+ *       Se guarda con una escritura condicionada al acuse leído; un REENVÍO del mismo contenido se acepta sin escribir.
+ *       Las horas se guardan en ISO-8601 con `Z`; una hora de la tablet más de 5 min por delante se sustituye por la del
+ *       servidor y se marca `clientClockSkew`. `accepted` significa «guardado», no «es lo vigente»:
+ *       - `{ accepted: true, current: true }`: guardado y es la huella vigente.
+ *       - `{ accepted: true, current: false, currentFingerprint }`: guardado, pero ya hay otra vigente.
+ *       - `{ accepted: true }` (sin `current`): guardado, pero no se pudo recalcular la ficha vigente.
+ *       - `{ accepted: false, reason: STALE_SEQ }`: ya hay uno legible con `seq` mayor o igual (la app cierra ese ack).
+ *       - `{ accepted: false, reason: OTHER_INSTALLATION }`: la instalación no es la registrada (primero el reporte).
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: header
+ *         name: X-Device-ID
+ *         required: true
+ *         schema: { type: string, maxLength: 64 }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             additionalProperties: false
+ *             required: [installationId, fingerprint, seq, storedAt, shownAt, surface, imagesReady, imagesPending, imagesFailed, unsupportedSchema]
+ *             properties:
+ *               installationId: { type: string, pattern: '^[A-Za-z0-9-]{1,64}$' }
+ *               fingerprint: { type: string, pattern: '^[0-9a-f]{32}$' }
+ *               seq: { type: integer, minimum: 0, maximum: 9007199254740991 }
+ *               storedAt: { type: string, format: date-time }
+ *               shownAt: { type: string, format: date-time, nullable: true }
+ *               surface: { type: string, nullable: true, enum: [presentation, activity, kiosk, window] }
+ *               imagesReady: { type: integer, minimum: 0, maximum: 100 }
+ *               imagesPending: { type: integer, minimum: 0, maximum: 100 }
+ *               imagesFailed: { type: integer, minimum: 0, maximum: 100 }
+ *               unsupportedSchema: { type: boolean }
+ *     responses:
+ *       200:
+ *         description: El resultado del acuse (ver la lista de arriba)
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 data:
+ *                   type: object
+ *                   required: [accepted]
+ *                   properties:
+ *                     accepted: { type: boolean }
+ *                     current: { type: boolean }
+ *                     currentFingerprint: { type: string, pattern: '^[0-9a-f]{32}$' }
+ *                     reason: { type: string, enum: [STALE_SEQ, OTHER_INSTALLATION] }
+ *       400: { description: Cuerpo inválido o falta X-Device-ID (DEVICE_ID_REQUIRED) }
+ *       401: { description: Sin sesión }
+ *       403: { description: No pertenece al venue }
+ *       404: { description: El aparato no está ligado a este negocio como POS Android (DEVICE_NOT_FOUND) }
+ *       503: { description: Otros acuses se guardaron en medio tres veces seguidas (CUSTOMER_DISPLAY_ACK_BUSY); reintentar con espera y conservar el ack }
+ */
+router.put(
+  '/venues/:venueId/customer-display/ack',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  validateRequest(customerDisplayAckSchema),
+  customerDisplayMobileController.acknowledgeCustomerDisplayRoute,
 )
 
 // Mostrador invertido (customer-display grande/chico) — por DISPOSITIVO. El POS

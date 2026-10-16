@@ -25,6 +25,12 @@ export interface StorageRef {
 const ADMIN_HOST = 'storage.googleapis.com'
 const BROWSER_HOST = 'firebasestorage.googleapis.com'
 
+/**
+ * Los orígenes desde los que la tablet PUEDE descargar imágenes (spec §8.1: lista blanca que manda el servidor). Son
+ * EXACTAMENTE los dos hosts que este reconocedor acepta: la tablet no descarga lo que el servidor no reconocería.
+ */
+export const STORAGE_ORIGINS = [`https://${ADMIN_HOST}`, `https://${BROWSER_HOST}`] as const
+
 /** El bucket con el que escribe `uploadFileToStorage`. Sin Firebase inicializado, no hay bucket que reconocer. */
 export function configuredStorageBucket(): string | null {
   const app = getFirebaseApp()

@@ -141,6 +141,23 @@ describe('customer_display_design (lectura)', () => {
     await call('customer_display_design', { venueId: 'v1', cursor: 't9' })
     expect(servicio.listCustomerDisplayDevices).toHaveBeenCalledWith({ venueId: 'v1', cursor: 't9', take: 50 })
   })
+
+  it('dice qué muestra la tablet, decidido al leer con la regla del panel (la IA no compara huellas)', async () => {
+    servicio.getCustomerDisplayForDashboard.mockResolvedValue({
+      editToken: 'd1:4',
+      design: {},
+      ficha: { fingerprint: 'f'.repeat(32) },
+      entitlements: {},
+      assetRejected: [],
+      device: {
+        designVersion: 1,
+        ack: { fingerprint: 'f'.repeat(32), receivedAt: '2026-10-15T18:00:00.000Z', shownAt: '2026-10-15T17:59:00.000Z' },
+      },
+    })
+    const r = parse(await call('customer_display_design', { venueId: 'v1', terminalId: 't1' }))
+    expect(r.enLaTablet).toEqual({ estado: 'MOSTRADO', fecha: '2026-10-15T18:00:00.000Z', imagenesDescargandose: 0, imagenesFallidas: 0 })
+    expect(r.aparato.ack).toBeDefined() // el crudo se conserva
+  })
 })
 
 describe.each(MUTACIONES)('%s', (tool, entrada, metodo, accion) => {
