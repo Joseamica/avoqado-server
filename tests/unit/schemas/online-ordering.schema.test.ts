@@ -30,8 +30,9 @@ describe('settingsPatchBody: monto mínimo y pausa con fecha (validados en la ru
     for (const mal of [-1, 10.555, 0.1 + 0.2, 1e-7]) expect(settingsPatchBody.safeParse({ minOrderAmount: mal }).success).toBe(false)
   })
 
-  it('`pausedUntil` es una fecha ISO o null', () => {
+  it('`pausedUntil` es una fecha ISO (en UTC o con desfase, como la manda el MCP) o null', () => {
     expect(settingsPatchBody.safeParse({ pausedUntil: '2026-10-14T19:00:00.000Z' }).success).toBe(true)
+    expect(settingsPatchBody.safeParse({ pausedUntil: '2026-10-14T13:00:00-06:00' }).success).toBe(true)
     expect(settingsPatchBody.safeParse({ pausedUntil: null }).success).toBe(true)
     for (const mal of ['2026-10-14', 'mañana', '']) expect(settingsPatchBody.safeParse({ pausedUntil: mal }).success).toBe(false)
   })

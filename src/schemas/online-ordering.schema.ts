@@ -42,7 +42,8 @@ export const settingsPatchBody = z
     defaultPrepMinutes: z.number().int('Debe ser un número entero').min(1, 'Mínimo 1 minuto').max(240, 'Máximo 240 minutos'),
     acceptsPayAtPickup: z.boolean(),
     manualPause: z.boolean(),
-    pausedUntil: z.string().datetime({ message: 'Fecha inválida' }).nullable(),
+    // ISO 8601 en UTC (`…Z`) o con desfase (`…-06:00`): el MCP (tarea 14) comparte este esquema y puede mandar hora local.
+    pausedUntil: z.string().datetime({ offset: true, message: 'Fecha inválida' }).nullable(),
     hours: hoursSchema.nullable(),
   })
   .partial()
