@@ -68,7 +68,10 @@ export async function verifyOtp(args: {
   purpose?: 'ORDERING'
 }): Promise<{
   token: string
-  /** Fase 1: estado de aprobación resultante de activar la cuenta; el controller lo compone en `bookingAccess`. */
+  /**
+   * Fase 1: estado de aprobación de la cuenta de reservas. Sin `purpose`, el que resulta de activarla, y el controller lo compone
+   * en `bookingAccess`. Con `purpose: 'ORDERING'` la cuenta no se activa: es el de la ficha sin tocar y el controller no lo responde.
+   */
   approvalStatus: CustomerApprovalStatus
   customer: { id: string; firstName: string | null; lastName: string | null; email: string | null; phone: string | null }
 }> {
@@ -142,7 +145,7 @@ export async function verifyOtp(args: {
       : generateCustomerToken(customer.id, args.venueId)
   return {
     token,
-    /** Fase 1: el controller lo compone en `bookingAccess`. */
+    /** Fase 1: sin `purpose`, el controller lo compone en `bookingAccess`. */
     approvalStatus,
     customer: { id: customer.id, firstName: customer.firstName, lastName: customer.lastName, email: customer.email, phone: customer.phone },
   }
