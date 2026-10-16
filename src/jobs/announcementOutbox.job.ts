@@ -17,7 +17,7 @@ import prisma from '../utils/prismaClient'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { DATABASE_JOB_SCHEDULES } from './jobSchedules'
 import { scheduleJob } from '../observability/jobContext'
-import { claimDeliveries, deliverClaimed } from '../services/announcements/announcementOutbox.service'
+import { claimDeliveries, deliverClaimed, retireExhaustedDeliveries } from '../services/announcements/announcementOutbox.service'
 
 const TIMEZONE = 'America/Mexico_City'
 const BATCH_SIZE = 200
@@ -53,30 +53,7 @@ export class AnnouncementOutboxJob {
     if (this.isRunning) return
     this.isRunning = true
     try {
-      const now = new Date()
-
-      // El read de entrada va con retry: al top de cada hora todos los crons se alinean y
-      // la ráfaga de conexiones nuevas lo mata con P1001 (`.claude/rules/cron-jobs.md`).
-      // Es un COUNT puro, seguro de repetir. El reclamo y la entrega NO se envuelven.
-      const pendientes = await retry(
-        () =>
-          prisma.platformAnnouncementDelivery.count({
-            where: { status: { in: ['PENDING', 'FAILED'] }, nextAttemptAt: { lte: now } },
-          }),
-        {
-          retries: 2,
-          initialDelay: 1500,
-          shouldRetry: shouldRetryDbConnectionError,
-          context: 'announcement-outbox.count',
-        },
-      )
-      if (pendientes === 0) return
-
-      const ids = await claimDeliveries({ limit: BATCH_SIZE, now })
-      if (ids.length === 0) return
-
-      const r = await deliverClaimed(ids, { now })
-      if (r.sent || r.failed) logger.info('[Anuncios] entregas procesadas', r)
+      await this.processNow(new Date())
     } catch (err) {
       // Un tick que truena no puede tumbar el proceso: las filas siguen en la tabla y el
       // siguiente tick vuelve a intentarlo.
@@ -84,6 +61,35 @@ export class AnnouncementOutboxJob {
     } finally {
       this.isRunning = false
     }
+  }
+
+  /** Una vuelta de la bandeja. El cron entra por `process()`; las pruebas de integración, por aquí. */
+  async processNow(now: Date): Promise<void> {
+    // El read de entrada va con retry: al top de cada hora todos los crons se alinean y
+    // la ráfaga de conexiones nuevas lo mata con P1001 (`.claude/rules/cron-jobs.md`).
+    // Es un COUNT puro, seguro de repetir. El reclamo y la entrega NO se envuelven.
+    const pendientes = await retry(
+      () =>
+        prisma.platformAnnouncementDelivery.count({
+          where: { status: { in: ['PENDING', 'FAILED'] }, nextAttemptAt: { lte: now } },
+        }),
+      {
+        retries: 2,
+        initialDelay: 1500,
+        shouldRetry: shouldRetryDbConnectionError,
+        context: 'announcement-outbox.count',
+      },
+    )
+    if (pendientes === 0) return
+
+    const retiradas = await retireExhaustedDeliveries({ now })
+    if (retiradas) logger.warn('[Anuncios] entregas que agotaron sus intentos quedaron FAILED', { retiradas })
+
+    const ids = await claimDeliveries({ limit: BATCH_SIZE, now })
+    if (ids.length === 0) return
+
+    const r = await deliverClaimed(ids, { now })
+    if (r.sent || r.failed) logger.info('[Anuncios] entregas procesadas', r)
   }
 }
 
