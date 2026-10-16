@@ -71,6 +71,14 @@ async function main() {
   await prisma.venueFeature.create({
     data: { id: id(), venueId, featureId: feature.id, active: true, monthlyPrice: new Prisma.Decimal(0) },
   })
+  // En producción todas las Feature ya tienen su precio de Stripe; sin esto el arranque intenta sincronizarlas
+  // (sin red: ~10 s de reintentos y CPU encima del primer cobro — medido en la corrida 38924934529). Ids de relleno.
+  for (const f of await prisma.feature.findMany({ where: { stripePriceId: null }, select: { id: true, code: true }, take: 500 })) {
+    await prisma.feature.update({
+      where: { id: f.id },
+      data: { stripeProductId: `prod_exp_otel_${f.code}`, stripePriceId: `price_exp_otel_${f.code}` },
+    })
+  }
 
   // Catálogo.
   const menuId = id()
@@ -133,6 +141,23 @@ async function main() {
       active: true,
     } as any,
   })
+
+  // Liquidación de la afiliación (sin ella el efecto TRANSACTION_COST queda PENDING con AWAITING_SETTLEMENT_CONFIGURATION:
+  // medido en la corrida 38924934529 — hueco del fixture, no del server).
+  for (const cardType of ['DEBIT', 'CREDIT', 'AMEX', 'INTERNATIONAL', 'OTHER'] as const) {
+    await prisma.settlementConfiguration.create({
+      data: {
+        id: id(),
+        merchantAccountId,
+        cardType,
+        settlementDays: 1,
+        settlementDayType: 'BUSINESS_DAYS',
+        cutoffTime: '23:00',
+        cutoffTimezone: 'America/Mexico_City',
+        effectiveFrom: desde,
+      } as any,
+    })
+  }
 
   // Terminales TPV activadas.
   const terminales: Array<{ id: string; serial: string }> = []

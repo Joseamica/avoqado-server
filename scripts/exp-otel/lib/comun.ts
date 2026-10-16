@@ -34,6 +34,7 @@ export const SECRETOS = {
   COOKIE_SECRET: 'exp-otel-cookie-secret-desechable-0001',
   OTP_PEPPER: 'exp-otel-otp-pepper-desechable-00001',
   SESSION_SUCCESSOR_ENC_KEY: '0'.repeat(63) + '1',
+  AUDIT_LOG_ENCRYPTION_KEY: 'exp-otel-audit-key-desechable-000001',
 }
 
 export const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))

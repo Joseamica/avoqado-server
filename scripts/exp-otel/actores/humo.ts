@@ -63,7 +63,8 @@ async function main() {
   const cobros: ResultadoDelCobro[] = []
   for (let i = 1; i <= N; i++) {
     const tpv = tpvs[(i - 1) % tpvs.length]
-    const r = await unCobro(i, f, pos, tpv, db, { esperaEfectosMs: 150_000 })
+    // El job de efectos corre a los segundos 16 y 46: 90 s cubren dos vueltas aunque una se pierda.
+    const r = await unCobro(i, f, pos, tpv, db, { esperaEfectosMs: 90_000 })
     cobros.push(r)
     console.log(
       `${r.ok ? '✅' : '❌'} cobro ${i}/${N} terminal=${r.terminal} orden=${r.orderId} pago=${r.paymentId} ` +
@@ -84,7 +85,7 @@ async function main() {
     n: N,
     exitosos: ok,
     veredicto: ok === N ? 'VERDE' : 'ROJO',
-    eventosDeSocketNoEsperados: inesperados,
+    otrosEventosDeSocket: inesperados // difusiones normales (order_created, payment_completed…), no errores,
     cobros,
   }
   fs.mkdirSync(OUT, { recursive: true })
