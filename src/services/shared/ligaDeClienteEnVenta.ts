@@ -76,9 +76,46 @@ export async function bloquearVentaParaLiga(
   return Array.isArray(filas) && filas.length === 1
 }
 
-/** ¿La venta ya está cobrada (PAID o REFUNDED)? Ahí aplica la decisión «A» del founder. */
-export function esVentaYaCobrada(paymentStatus: string | null | undefined): boolean {
-  return paymentStatus === 'PAID' || paymentStatus === 'REFUNDED'
+/**
+ * ¿La venta ya está cobrada? Ahí aplica la decisión «A» del founder: PAID o REFUNDED, **o ya se cobró por completo alguna vez**.
+ *
+ * 🔴 R6-1 (ronda 6 post-QA de sellos tardíos; Codex recheck-10 P2): mirar sólo el estado se esquivaba partiendo el pago. Venta
+ * PAID de $100 → reembolso de $20 (sigue PAID; el pago manual vuelve a ver $20 de saldo) → abono manual de $10 SIN cliente (queda
+ * PARTIAL) → abono de $10 + cliente nuevo: pasaba, creaba el primario y `earnPoints` sobre los $100.
+ *
+ * La marca de «ya se cobró alguna vez» es `reembolsada` = la venta tiene un `Payment` REFUND COMPLETED (`ventaTieneReembolso`).
+ * Por qué ésa y no `loyaltyEligibleAt` ni `completedAt`: ninguna de las dos la escriben todos los caminos que saldan una venta
+ * (el pago manual, la liga de pago, el checkout y la venta manual no escriben `loyaltyEligibleAt`; el cobro en efectivo del POS
+ * no escribe `completedAt`). En cambio, una venta saldada sólo vuelve a tener saldo si se devolvió dinero: un reembolso no reabre
+ * el saldo en los cobros del POS ni de la TPV (`orderBalance.ts`) y ninguno agrega renglones a una venta PAID; el pago manual sí
+ * lo reabre (su saldo resta el reembolso), que es justo la vía de Codex. Límite conocido (falla CERRADO): una cuenta que NUNCA se
+ * saldó y a la que se le devolvió un abono también cuenta como cobrada — cambiarle el cliente pide `payments:create`.
+ */
+export function esVentaYaCobrada(venta: { paymentStatus: string | null | undefined; reembolsada: boolean }): boolean {
+  return venta.paymentStatus === 'PAID' || venta.paymentStatus === 'REFUNDED' || venta.reembolsada
+}
+
+/** La marca de `esVentaYaCobrada`: ¿hay un reembolso COMPLETED de esta venta? Conteo EXACTO, sin lista con tope. */
+export async function ventaTieneReembolso(
+  db: Pick<Prisma.TransactionClient, 'payment'>,
+  venta: { venueId: string; orderId: string },
+): Promise<boolean> {
+  const reembolsos = await db.payment.count({
+    where: { orderId: venta.orderId, venueId: venta.venueId, type: 'REFUND', status: 'COMPLETED' },
+  })
+  return reembolsos > 0
+}
+
+/**
+ * `esVentaYaCobrada` con el estado que quien llama leyó BAJO el candado de la venta, y la marca leída con la misma `db` (la
+ * transacción del candado). Si el estado ya lo dice (PAID/REFUNDED), no lee nada más.
+ */
+export async function ventaYaCobradaBajoCandado(
+  db: Pick<Prisma.TransactionClient, 'payment'>,
+  venta: { venueId: string; orderId: string; paymentStatus: string | null | undefined },
+): Promise<boolean> {
+  if (esVentaYaCobrada({ paymentStatus: venta.paymentStatus, reembolsada: false })) return true
+  return esVentaYaCobrada({ paymentStatus: venta.paymentStatus, reembolsada: await ventaTieneReembolso(db, venta) })
 }
 
 export const MENSAJE_CLIENTE_DE_VENTA_COBRADA =
@@ -88,21 +125,27 @@ export const CODIGO_CLIENTE_DE_VENTA_COBRADA = 'CUSTOMER_CHANGE_REQUIRES_PAYMENT
 /**
  * 🔴 R4-2 (ronda 4 post-QA de sellos tardíos; decisión «A» del founder): `Order.customerId` es el respaldo heredado de la
  * lealtad — en una venta pagada con la lealtad pendiente y SIN primario, el reconciliador premia a ese cliente. Por eso, en una
- * venta COBRADA (PAID/REFUNDED), CAMBIAR el cliente (ponerlo donde no había, cambiarlo por otro o quitarlo) exige
+ * venta COBRADA (`esVentaYaCobrada`), CAMBIAR el cliente (ponerlo donde no había, cambiarlo por otro o quitarlo) exige
  * `payments:create`; sin él ⇒ 403 en español y quien llama no guarda NADA de esa petición. El mismo cliente que ya tiene, una
  * venta abierta o quien tiene el permiso ⇒ pasa. Lo usan los editores genéricos de la venta que devuelven el `customerId`
  * guardado (el PUT del panel y el «detalle de la cuenta» del POS): ignorarlo en silencio haría que la pantalla dijera
  * «guardado» con el cliente viejo. Quien llama lo decide con lo que leyó BAJO el candado de la venta.
  */
-export function asegurarCambioDeClienteEnVentaCobrada(args: {
-  paymentStatus: string | null | undefined
-  clienteActual: string | null
-  clienteNuevo: string | null
-  puedeCobrar: boolean
-}): void {
+export async function asegurarCambioDeClienteEnVentaCobrada(
+  db: Pick<Prisma.TransactionClient, 'payment'>,
+  args: {
+    venueId: string
+    orderId: string
+    paymentStatus: string | null | undefined
+    clienteActual: string | null
+    clienteNuevo: string | null
+    puedeCobrar: boolean
+  },
+): Promise<void> {
   if (args.clienteNuevo === args.clienteActual) return
-  if (!esVentaYaCobrada(args.paymentStatus)) return
   if (args.puedeCobrar) return
+  // R6-1: «cobrada» también es la venta que ya se cobró alguna vez (con reembolso), aunque un abono la haya dejado PARTIAL.
+  if (!(await ventaYaCobradaBajoCandado(db, args))) return
   throw new ForbiddenError(MENSAJE_CLIENTE_DE_VENTA_COBRADA, CODIGO_CLIENTE_DE_VENTA_COBRADA)
 }
 
@@ -113,7 +156,7 @@ export function asegurarCambioDeClienteEnVentaCobrada(args: {
  * está (no es de este negocio), no decide: quien llama ya responde 404.
  */
 export async function asegurarCambioDeClienteBajoCandado(
-  tx: Pick<Prisma.TransactionClient, 'order'>,
+  tx: Pick<Prisma.TransactionClient, 'order' | 'payment'>,
   args: { venueId: string; orderId: string; clienteNuevo: string | null; puedeCobrar: boolean },
 ): Promise<void> {
   if (args.puedeCobrar) return
@@ -122,7 +165,9 @@ export async function asegurarCambioDeClienteBajoCandado(
     select: { paymentStatus: true, customerId: true },
   })
   if (!venta) return
-  asegurarCambioDeClienteEnVentaCobrada({
+  await asegurarCambioDeClienteEnVentaCobrada(tx, {
+    venueId: args.venueId,
+    orderId: args.orderId,
     paymentStatus: venta.paymentStatus,
     clienteActual: venta.customerId ?? null,
     clienteNuevo: args.clienteNuevo,

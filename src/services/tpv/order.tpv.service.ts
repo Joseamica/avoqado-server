@@ -43,6 +43,7 @@ import {
   esChoqueDeUnico,
   etiquetaDeReintento,
   motivoDeReintentoDeLiga,
+  ventaYaCobradaBajoCandado,
 } from '../shared/ligaDeClienteEnVenta'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
 import { debeMarcarCocina, assertPreparationAuthoringAccess } from '../kds/kitchenDisplayStations'
@@ -2373,8 +2374,11 @@ export async function updateGuestInfo(
       if (!order) {
         throw new NotFoundError('Order not found')
       }
-      const cobrada = VENTA_COBRADA.has(order.paymentStatus)
-      const fijaCliente = guestInfo.customerId !== undefined && (!cobrada || puedeFijarClienteEnVentaCobrada)
+      // «Cobrada»: la regla compartida (R6-1: también la venta ya cobrada alguna vez); sólo se pregunta si hace falta.
+      const fijaCliente =
+        guestInfo.customerId !== undefined &&
+        (puedeFijarClienteEnVentaCobrada ||
+          !(await ventaYaCobradaBajoCandado(tx, { venueId, orderId, paymentStatus: order.paymentStatus })))
       if (guestInfo.customerId !== undefined && !fijaCliente) {
         logger.info(`🔒 [ORDER SERVICE] Paid order ${orderId}: guest edit without payments:create keeps Order.customerId`)
       }
@@ -3788,9 +3792,6 @@ export interface OpcionesDeLigaTpv {
   otorgarLealtad?: boolean
 }
 
-/** «Ya cobrada» para la decisión A: pagada (también con su lealtad pendiente) o reembolsada. */
-const VENTA_COBRADA: ReadonlySet<string> = new Set([PaymentStatus.PAID, PaymentStatus.REFUNDED])
-
 /**
  * 🔴 F1 / R3-2: PRIMERA sentencia de la transacción de la liga — el candado de la venta (`bloquearVentaParaLiga`: la fila en
  * `SELECT … FOR NO KEY UPDATE`). Serializa contra el `FOR UPDATE` del cobro (`lockExistingOrderForPayment`) y entre ligas, y no
@@ -3807,7 +3808,10 @@ async function leerVentaBajoCandado(
   // R3-2: `FOR NO KEY UPDATE` (ver `bloquearVentaParaLiga`): serializa contra el cobro sin interbloquearse con sus métricas.
   if (!(await bloquearVentaParaLiga(tx, { venueId, orderId }))) throw new NotFoundError('Order not found')
   const vigente = await tx.order.findFirst({ where: { id: orderId, venueId }, select: { paymentStatus: true } })
-  return { paymentStatus: vigente?.paymentStatus ?? null, cobrada: vigente ? VENTA_COBRADA.has(vigente.paymentStatus) : false }
+  // «Ya cobrada» para la decisión A: la regla compartida (pagada —también con su lealtad pendiente—, reembolsada, o R6-1: ya
+  // cobrada alguna vez aunque un abono posterior la deje PARTIAL), con la marca leída bajo este mismo candado.
+  const cobrada = vigente ? await ventaYaCobradaBajoCandado(tx, { venueId, orderId, paymentStatus: vigente.paymentStatus }) : false
+  return { paymentStatus: vigente?.paymentStatus ?? null, cobrada }
 }
 
 /**

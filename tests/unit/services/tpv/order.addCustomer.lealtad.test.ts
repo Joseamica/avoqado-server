@@ -60,6 +60,9 @@ beforeEach(() => {
     candadosDentro.push(enTransaccion)
     return [{ id: 'order-1' }]
   }) as never)
+  // R6-1: la marca de «ya se cobró alguna vez» (reembolsos COMPLETED); por defecto, ninguno.
+  prismaMock.payment.count.mockReset()
+  prismaMock.payment.count.mockResolvedValue(0)
   prismaMock.orderCustomer.findUnique.mockReset()
   prismaMock.orderCustomer.findUnique.mockResolvedValue(null)
   // El primario VIGENTE (dentro de la transacción): sin primario por defecto.
@@ -326,6 +329,26 @@ describe('TPV addCustomerToOrder', () => {
     },
   )
 
+  // 🔴 R6-1 (ronda 6; Codex recheck-10 P2): la venta que YA se cobró (con reembolso) y que un abono dejó PARTIAL sigue cobrada.
+  it.each(['PARTIAL', 'PENDING'])(
+    '🔴 R6-1: cuenta %s que YA se cobró (con reembolso) sin permiso: ACOMPAÑANTE, sin reabrir ni sellar, y SÍ audita',
+    async paymentStatus => {
+      estadoDentro = [paymentStatus]
+      prismaMock.payment.count.mockResolvedValue(1)
+      const r = await addCustomerToOrder(VENUE, 'order-1', 'cust-1', 'staff-1', SIN_PERMISO)
+      expect(prismaMock.orderCustomer.create).toHaveBeenCalledWith({ data: { orderId: 'order-1', customerId: 'cust-1', isPrimary: false } })
+      expect(mockReabrir).not.toHaveBeenCalled()
+      expect(mockLate).not.toHaveBeenCalled()
+      expect(mockAuditSinPermiso).toHaveBeenCalledWith(expect.objectContaining({ orderId: 'order-1', customerId: 'cust-1' }))
+      expect(r.loyalty).toBeNull()
+      // La marca se lee bajo el candado de la venta (después del `FOR NO KEY UPDATE`).
+      expect(prismaMock.payment.count).toHaveBeenCalledWith({
+        where: { orderId: 'order-1', venueId: VENUE, type: 'REFUND', status: 'COMPLETED' },
+      })
+      expect(prismaMock.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.payment.count.mock.invocationCallOrder[0])
+    },
+  )
+
   it('🔴 MEDIO-1: sin decir el permiso (llamador interno viejo) falla CERRADO: liga como acompañante, sin lealtad', async () => {
     const r = await addCustomerToOrder(VENUE, 'order-1', 'cust-1', 'staff-1')
     expect(prismaMock.orderCustomer.create).toHaveBeenCalledWith({ data: { orderId: 'order-1', customerId: 'cust-1', isPrimary: false } })
@@ -447,6 +470,15 @@ describe('TPV createAndAddCustomerToOrder', () => {
     await createAndAddCustomerToOrder(VENUE, 'order-1', { firstName: 'Dany' }, 'staff-1', SIN_PERMISO)
     expect(prismaMock.orderCustomer.create).toHaveBeenCalledWith({ data: { orderId: 'order-1', customerId: 'nuevo', isPrimary: true } })
     expect(mockAuditSinPermiso).not.toHaveBeenCalled()
+  })
+
+  it('🔴 R6-1: cuenta PARTIAL que YA se cobró (con reembolso) sin permiso: el cliente nuevo entra ACOMPAÑANTE y SÍ audita', async () => {
+    estadoDentro = ['PARTIAL']
+    prismaMock.payment.count.mockResolvedValue(1)
+    await createAndAddCustomerToOrder(VENUE, 'order-1', { firstName: 'Dany' }, 'staff-1', SIN_PERMISO)
+    expect(prismaMock.orderCustomer.create).toHaveBeenCalledWith({ data: { orderId: 'order-1', customerId: 'nuevo', isPrimary: false } })
+    expect(mockLate).not.toHaveBeenCalled()
+    expect(mockAuditSinPermiso).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'nuevo' }))
   })
 
   it('🔴 F1: el candado de la venta es la PRIMERA sentencia, con su presupuesto de espera', async () => {

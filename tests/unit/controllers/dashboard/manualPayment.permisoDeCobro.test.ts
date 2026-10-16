@@ -9,7 +9,7 @@
  */
 import type { NextFunction, Request, Response } from 'express'
 import { prismaMock } from '@tests/__helpers__/setup'
-import { createManualPayment } from '@/controllers/dashboard/manualPayment.controller'
+import { createManualPayment, getEligibleWaiters, getExternalSources } from '@/controllers/dashboard/manualPayment.controller'
 import * as manualPaymentService from '@/services/dashboard/manualPayment.service'
 import { tienePermisoEnVenue } from '@/middlewares/permissionFlag.middleware'
 
@@ -111,5 +111,61 @@ describe('🔴 R5-1: el pago manual del panel resuelve payments:create de quien 
     const { next, status } = await registrar(LIGAR)
     expect(status).toBeUndefined()
     expect(next).toHaveBeenCalledWith(prohibido)
+  })
+})
+
+/**
+ * 🔴 R6-2 (ronda 6 post-QA de sellos tardíos; Codex recheck-10 P2): UNA sola sucursal por operación — la de la URL, la misma que
+ * evalúan `checkPermission('payment:create-manual')` y `tienePermisoEnVenue`. Antes el servicio recibía la del TOKEN: con sesión
+ * de A y URL de B, el permiso se comprobaba en B y se escribía en A.
+ */
+describe('🔴 R6-2: los tres handlers del pago manual operan en la sucursal de la URL, no en la del token', () => {
+  /** Sesión de la sucursal A (token) pidiendo la URL de la sucursal B. */
+  const cruzada = (body: Record<string, unknown> = {}, query: Record<string, unknown> = {}) =>
+    ({
+      params: { venueId: 'venue-B' },
+      body,
+      headers: {},
+      query,
+      method: 'POST',
+      originalUrl: '/api/v1/dashboard/venues/venue-B/payments/manual',
+      authContext: { userId: STAFF, venueId: 'venue-A', orgId: 'org-1', role: 'ADMIN' },
+    }) as unknown as Request
+  const respuesta = () => {
+    const r: any = {}
+    r.status = jest.fn(() => r)
+    r.json = jest.fn(() => r)
+    return r as Response
+  }
+
+  it('🔴 crear: el servicio recibe la sucursal de la URL (B), y el permiso de cobrar se resolvió sobre B', async () => {
+    quienRegistra('ADMIN')
+    const next = jest.fn()
+    await createManualPayment(cruzada(LIGAR), respuesta(), next as unknown as NextFunction)
+    expect(next).not.toHaveBeenCalled()
+    expect(espia).toHaveBeenCalledWith('venue-B', STAFF, LIGAR, { puedeCambiarClienteEnVentaCobrada: true })
+    expect(prismaMock.venueRolePermission.findUnique).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { venueId_role: { venueId: 'venue-B', role: 'ADMIN' } } }),
+    )
+  })
+
+  it('fuentes externas y meseros: también la sucursal de la URL', async () => {
+    const fuentes = jest.spyOn(manualPaymentService, 'getExternalSources').mockResolvedValue([] as any)
+    const meseros = jest.spyOn(manualPaymentService, 'getEligibleWaiters').mockResolvedValue([] as any)
+    try {
+      await getExternalSources(cruzada({}, { limit: '5' }), respuesta(), jest.fn() as unknown as NextFunction)
+      await getEligibleWaiters(cruzada(), respuesta(), jest.fn() as unknown as NextFunction)
+      expect(fuentes).toHaveBeenCalledWith('venue-B', 5)
+      expect(meseros).toHaveBeenCalledWith('venue-B')
+    } finally {
+      fuentes.mockRestore()
+      meseros.mockRestore()
+    }
+  })
+
+  it('regresión: sesión y URL de la MISMA sucursal ⇒ como hoy', async () => {
+    quienRegistra('ADMIN')
+    await registrar(LIGAR)
+    expect(espia).toHaveBeenCalledWith(VENUE, STAFF, LIGAR, { puedeCambiarClienteEnVentaCobrada: true })
   })
 })

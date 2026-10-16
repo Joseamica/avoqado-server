@@ -450,6 +450,28 @@ describe('awardLoyaltyForLateCustomer', () => {
     })
   })
 
+  // 🔴 R6-1 (ronda 6; Codex recheck-10 P2): «cobrada» para la auditoría es la regla compartida de la decisión A. La venta que YA
+  // se cobró (con reembolso) y que un abono dejó PARTIAL: ligarle un cliente es ligarlo a una venta cobrada — se audita (y no
+  // sella: con reembolso es NOT_PAID). Antes se miraba sólo PAID/REFUNDED y la fila no salía.
+  it('🔴 R6-1: venta PARTIAL que YA se cobró (con reembolso): no sella (NOT_PAID) y SÍ audita la liga a una venta cobrada', async () => {
+    conVenta({ paymentStatus: 'PARTIAL' })
+    prismaMock.payment.count.mockResolvedValue(1)
+    const r = await awardLoyaltyForLateCustomer({ venueId: VENUE, orderId: ORDER, customerId: CUST, staffId: STAFF, ligaNueva: true })
+    expect(awardMock).not.toHaveBeenCalled()
+    expect(r).toMatchObject({ stamped: false, reason: 'NOT_PAID' })
+    expect(logActionMock).toHaveBeenCalledTimes(1)
+    expect(logActionMock.mock.calls[0][0]).toMatchObject({ action: 'CUSTOMER_ATTACHED_TO_PAID_ORDER', staffId: STAFF })
+    expect(logActionMock.mock.calls[0][0].data).toMatchObject({ decision: 'NOT_PAID', ligaNueva: true })
+  })
+
+  it('regresión R6-1: venta PARTIAL que nunca se cobró (sin reembolso): cuenta abierta ⇒ null y sin auditoría', async () => {
+    conVenta({ paymentStatus: 'PARTIAL' })
+    expect(
+      await awardLoyaltyForLateCustomer({ venueId: VENUE, orderId: ORDER, customerId: CUST, staffId: STAFF, ligaNueva: true }),
+    ).toBeNull()
+    expect(logActionMock).not.toHaveBeenCalled()
+  })
+
   it('fuera de plazo también se audita (la liga sí quedó)', async () => {
     conVenta({ loyaltyEligibleAt: hace(LATE_STAMP_WINDOW_MS + MIN) })
     await awardLoyaltyForLateCustomer({ venueId: VENUE, orderId: ORDER, customerId: CUST, staffId: STAFF })
@@ -868,6 +890,14 @@ describe('auditarLigaSinPermisoDeCobro', () => {
     conVenta({ paymentStatus: 'PENDING' })
     await auditarLigaSinPermisoDeCobro({ venueId: VENUE, orderId: ORDER, customerId: CUST, staffId: STAFF })
     expect(logActionMock).not.toHaveBeenCalled()
+  })
+
+  it('🔴 R6-1: cuenta PARTIAL que YA se cobró (con reembolso): es una venta cobrada, SÍ audita', async () => {
+    conVenta({ paymentStatus: 'PARTIAL' })
+    prismaMock.payment.count.mockResolvedValue(1)
+    await auditarLigaSinPermisoDeCobro({ venueId: VENUE, orderId: ORDER, customerId: CUST, staffId: STAFF })
+    expect(logActionMock).toHaveBeenCalledTimes(1)
+    expect(logActionMock.mock.calls[0][0].data).toMatchObject({ lealtad: 'SIN_PERMISO', ligaNueva: true })
   })
 
   it('nunca lanza: si la lectura truena, la liga (que ya quedó) no se entera', async () => {

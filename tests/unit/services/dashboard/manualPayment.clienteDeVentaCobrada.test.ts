@@ -77,7 +77,7 @@ type Liga = { customerId: string; isPrimary: boolean }
  * Venta de $100 ($100 cobrados − $20 reembolsados ⇒ saldo $20), con su `paymentStatus`, su cliente heredado y sus ligas. La
  * transacción anota cada ESCRITURA en orden: un 403 debe dejar la lista vacía.
  */
-function ventaYTransaccion(opciones: { paymentStatus: string; customerId?: string | null; ligas?: Liga[] }) {
+function ventaYTransaccion(opciones: { paymentStatus: string; customerId?: string | null; ligas?: Liga[]; reembolsos?: number }) {
   const escrituras: string[] = []
   const lecturasDeLaVenta: unknown[] = []
   const escribe = (nombre: string, valor?: unknown) =>
@@ -122,7 +122,9 @@ function ventaYTransaccion(opciones: { paymentStatus: string; customerId?: strin
       update: escribe('order.update'),
     },
     payment: {
-      count: jest.fn().mockResolvedValue(1),
+      // R6-1: los reembolsos COMPLETED (la marca de «ya cobrada») se cuentan aparte de los cobros previos del turno. Por
+      // defecto la venta tiene su reembolso de $20 (el escenario de Codex); una venta que nunca se cobró pasa `reembolsos: 0`.
+      count: jest.fn(async (args: any) => (args?.where?.type === 'REFUND' ? (opciones.reembolsos ?? 1) : 1)),
       findUnique: jest.fn().mockResolvedValue(null),
       create: escribe('payment.create', {
         id: 'pay-r5',
@@ -231,6 +233,37 @@ describe('🔴 R5-1: pago manual + cliente sobre una venta YA cobrada, sin payme
     nadaSeEscribio(escrituras)
   })
 
+  // 🔴 R6-1 (ronda 6; Codex recheck-10 P2): partir el pago esquivaba la regla. Tras el reembolso, un abono SIN cliente deja la
+  // venta PARTIAL; el abono siguiente con cliente nuevo pasaba (sólo se miraba PAID/REFUNDED). La venta ya se cobró: 403.
+  it.each(['PARTIAL', 'PENDING'])(
+    '🔴 R6-1: venta %s que YA se cobró (tiene reembolso) + cliente nuevo, sin el permiso ⇒ 403 sin escribir nada',
+    async estado => {
+      const { escrituras, tx } = ventaYTransaccion({ paymentStatus: estado, reembolsos: 1 })
+      const error = await rechazo(manualPaymentService.createManualPayment(VENUE, STAFF, pagoDe20(NUEVO)))
+      expect(error.code).toBe(CODIGO_CLIENTE_DE_VENTA_COBRADA)
+      nadaSeEscribio(escrituras)
+      // La marca se lee bajo el candado y antes del turno.
+      expect(tx.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(tx.payment.count.mock.invocationCallOrder[0])
+      expect(tx.shift.findFirst).not.toHaveBeenCalled()
+    },
+  )
+
+  it('R6-1: venta PARTIAL que ya se cobró + el MISMO cliente que el primario ⇒ pasa (no es cambio de cliente)', async () => {
+    const { escrituras } = ventaYTransaccion({
+      paymentStatus: 'PARTIAL',
+      reembolsos: 1,
+      ligas: [{ customerId: 'cust-ana', isPrimary: true }],
+    })
+    await manualPaymentService.createManualPayment(VENUE, STAFF, pagoDe20('cust-ana'))
+    expect(escrituras).toContain('payment.create')
+  })
+
+  it('R6-1: venta PARTIAL que ya se cobró + cliente nuevo CON payments:create ⇒ como hoy', async () => {
+    const { escrituras } = ventaYTransaccion({ paymentStatus: 'PARTIAL', reembolsos: 1 })
+    await manualPaymentService.createManualPayment(VENUE, STAFF, pagoDe20(NUEVO), { puedeCambiarClienteEnVentaCobrada: true })
+    expect(escrituras).toEqual(expect.arrayContaining(['payment.create', 'orderCustomer.create']))
+  })
+
   it('🔴 la decisión se toma BAJO el candado del cobro y antes de la primera escritura (el turno)', async () => {
     const { tx, lecturasDeLaVenta } = ventaYTransaccion({ paymentStatus: 'PAID' })
     await rechazo(manualPaymentService.createManualPayment(VENUE, STAFF, pagoDe20(NUEVO)))
@@ -272,10 +305,12 @@ describe('R5-1: lo que sigue igual que hoy', () => {
     expect(lecturasDeLaVenta[0]).toEqual(expect.objectContaining({ include: expect.anything() }))
   })
 
-  it.each(['PARTIAL', 'PENDING'])('venta %s (abono normal con cliente) sin el permiso ⇒ como hoy', async estado => {
-    const { escrituras } = ventaYTransaccion({ paymentStatus: estado })
+  it.each(['PARTIAL', 'PENDING'])('venta %s que NUNCA se cobró (abono normal con cliente) sin el permiso ⇒ como hoy', async estado => {
+    const { escrituras, tx } = ventaYTransaccion({ paymentStatus: estado, reembolsos: 0 })
     await manualPaymentService.createManualPayment(VENUE, STAFF, pagoDe20(NUEVO))
     expect(escrituras).toEqual(expect.arrayContaining(['payment.create', 'orderCustomer.create']))
+    // R6-1: la marca se preguntó (bajo el candado) y dijo «nunca se cobró».
+    expect(tx.payment.count).toHaveBeenCalledWith({ where: { orderId: ORDER, venueId: VENUE, type: 'REFUND', status: 'COMPLETED' } })
   })
 
   it('PAID sin customerId en la petición, sin el permiso ⇒ como hoy (no hay cambio de cliente)', async () => {

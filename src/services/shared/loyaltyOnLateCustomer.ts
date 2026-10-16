@@ -9,6 +9,7 @@ import { venueEndOfDay, venueStartOfDay } from '@/utils/datetime'
 import { awardLoyaltyForPaidOrder, type AwardLoyaltyForPaidOrderArgs, type AwardLoyaltyForPaidOrderResult } from './loyaltyOnPaidOrder'
 import { cerrarLealtadDeLaVenta, registrarErrorDeLealtad } from './cierreDeLealtad'
 import { MARCA_LEALTAD_REABIERTA } from './lealtadReabierta'
+import { esVentaYaCobrada, ventaTieneReembolso } from './ligaDeClienteEnVenta'
 
 /** La marca de fila que deja la reapertura (ver `lealtadReabierta.ts`). */
 export { MARCA_LEALTAD_REABIERTA }
@@ -143,15 +144,12 @@ interface Programa {
   maxStampsPerDay: number
 }
 
-/** 🔴 Reembolso EXACTO (auditoría A #2): un `count` por la orden, sin tope de lista que esconda nada. */
-async function contarReembolsos(db: LectorDeVenta, venueId: string, orderId: string): Promise<number> {
-  return db.payment.count({ where: { orderId, venueId, type: PaymentType.REFUND, status: TransactionStatus.COMPLETED } })
-}
-
 async function leerVenta(db: LectorDeVenta, venueId: string, orderId: string): Promise<Venta | null> {
   const venta = await db.order.findFirst({ where: { id: orderId, venueId }, select: VENTA_SELECT })
   if (!venta) return null
-  return { ...venta, reembolsada: (await contarReembolsos(db, venueId, orderId)) > 0 }
+  // 🔴 Reembolso EXACTO (auditoría A #2): un `count` por la orden, sin tope de lista que esconda nada. Es la MISMA marca de
+  // «ya cobrada» de la decisión A (`esVentaYaCobrada`, R6-1).
+  return { ...venta, reembolsada: await ventaTieneReembolso(db, { venueId, orderId }) }
 }
 
 function fotoPara(venta: Venta, customerId: string): SaleStampSnapshot {
@@ -340,7 +338,7 @@ export async function otorgarLealtadRespetandoReembolsos(
   observador: ObservadorDeOtorgamiento = {},
 ): Promise<ResultadoDeLealtadRespetandoReembolsos> {
   const { venueId, orderId } = args
-  if ((await contarReembolsos(prisma, venueId, orderId)) > 0) {
+  if (await ventaTieneReembolso(prisma, { venueId, orderId })) {
     const falloAlRevertir = await revertirSelloDeVentaDevuelta(venueId, orderId)
     if (falloAlRevertir) return { complete: false, errors: [falloAlRevertir], reembolsada: true }
     const falloAlCerrar = await cerrarSinLanzar(venueId, orderId, false)
@@ -382,7 +380,7 @@ export async function otorgarLealtadRespetandoReembolsos(
     ...(resultado.otorgado ? { otorgado: resultado.otorgado } : {}),
   }
 
-  if ((await contarReembolsos(prisma, venueId, orderId)) > 0) {
+  if (await ventaTieneReembolso(prisma, { venueId, orderId })) {
     // 🔴 Auditoría A #2: el reembolso entró MIENTRAS se otorgaba. Si su reversa corrió antes de que el sello existiera, no
     // encontró nada que revertir; este sello quedaría vivo sobre una venta devuelta.
     logger.warn('[LEALTAD] la venta se reembolsó mientras se otorgaba su lealtad: se revierte el sello', { venueId, orderId })
@@ -485,8 +483,6 @@ export async function describeSaleStamp(args: { venueId: string; orderId: string
   if (!venta) return armarResultado(args.venueId, args.customerId, programa, false, 'ERROR')
   return describir(args.venueId, args.customerId, venta, programa, nowMs)
 }
-
-const esVentaCobrada = (paymentStatus: string): boolean => paymentStatus === 'PAID' || paymentStatus === 'REFUNDED'
 
 /**
  * La ÚNICA escritura de `CUSTOMER_ATTACHED_TO_PAID_ORDER` (spec §3.1): quién ligó a quién a una venta YA cobrada, y qué pasó
@@ -614,7 +610,8 @@ export async function awardLoyaltyForLateCustomer(args: {
     )
 
     const auditar = args.ligaNueva === undefined ? antes !== 'STAMPED' : args.ligaNueva || otorgo()
-    if (auditar && esVentaCobrada(venta.paymentStatus)) {
+    // R6-1: «cobrada» por la regla compartida de la decisión A (también la venta ya cobrada alguna vez, con reembolso).
+    if (auditar && esVentaYaCobrada(venta)) {
       auditarLigaAVentaCobrada({
         venueId,
         orderId,
@@ -638,7 +635,7 @@ export async function awardLoyaltyForLateCustomer(args: {
     // 🔴 R3-1: la llamada que CREÓ la liga audita siempre; una re-liga, si otorgó algo. Con los hechos, no con lo que faltó leer.
     const auditar = args.ligaNueva === true || (args.ligaNueva === false && otorgo())
     // La venta leída aquí manda; si su lectura fue la que tronó, lo que quien llama leyó bajo su candado.
-    const cobrada = venta ? esVentaCobrada(venta.paymentStatus) : args.ventaCobrada === true
+    const cobrada = venta ? esVentaYaCobrada(venta) : args.ventaCobrada === true
     if (auditar && cobrada) {
       // N4: si se otorgó el sello (y no se supo después que se revirtió), la fila lo dice: nada de un falso «sin sello».
       const stamped = despuesDeOtorgar !== null ? despuesDeOtorgar === 'STAMPED' : hechos.otorgoSello || antes === 'STAMPED'
@@ -706,7 +703,7 @@ export async function auditarLigaSinPermisoDeCobro(args: {
     if (orderNumber) fila(orderNumber, null)
     return
   }
-  if (!venta || !esVentaCobrada(venta.paymentStatus)) return
+  if (!venta || !esVentaYaCobrada(venta)) return
   fila(venta.orderNumber, minutosDesde(fotoPara(venta, args.customerId).settledAt, Date.now()))
 }
 

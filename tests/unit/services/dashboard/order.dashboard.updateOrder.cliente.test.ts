@@ -27,7 +27,13 @@ function orden(over: Record<string, unknown> = {}) {
 
 beforeEach(() => {
   sentencias = []
-  for (const m of [prismaMock.$queryRaw, prismaMock.order.findFirst, prismaMock.order.update, prismaMock.customer.findFirst] as jest.Mock[])
+  for (const m of [
+    prismaMock.$queryRaw,
+    prismaMock.order.findFirst,
+    prismaMock.order.update,
+    prismaMock.customer.findFirst,
+    prismaMock.payment.count,
+  ] as jest.Mock[])
     m.mockReset()
   prismaMock.$transaction.mockImplementation(async (cb: any) => cb(prismaMock))
   prismaMock.$queryRaw.mockImplementation(async (query: unknown) => {
@@ -114,7 +120,33 @@ describe('🔴 R4-2: PUT del panel — cambiar el cliente de una venta COBRADA e
 
   it.each([['PENDING'], ['PARTIAL']])('regresión: venta ABIERTA (%s) y sin permiso ⇒ como hoy, fija el cliente', async paymentStatus => {
     prismaMock.order.findFirst.mockResolvedValue(orden({ status: 'PENDING', paymentStatus }))
+    prismaMock.payment.count.mockResolvedValue(0) // nunca se cobró: sin reembolso
     await updateOrder(VENUE, ORDER, { customerId: 'cust-B' } as any)
+    expect(prismaMock.order.update.mock.calls[0][0].data).toMatchObject({ customerId: 'cust-B' })
+  })
+
+  // 🔴 R6-1 (ronda 6; Codex recheck-10 P2): una venta que YA se cobró (tiene reembolso) y que un abono posterior dejó PARTIAL
+  // sigue siendo «cobrada»: COCINA no le cambia el cliente.
+  it.each([['PARTIAL'], ['PENDING']])(
+    '🔴 R6-1: venta %s que YA se cobró (con reembolso), SIN permiso ⇒ 403 y no se guarda nada; la marca se lee bajo el candado',
+    async paymentStatus => {
+      prismaMock.order.findFirst.mockResolvedValue(orden({ status: 'PENDING', paymentStatus }))
+      prismaMock.payment.count.mockResolvedValue(1)
+      const error = await updateOrder(VENUE, ORDER, { customerId: 'cust-B', customerName: 'Kev' } as any).catch(e => e)
+      expect(error).toBeInstanceOf(ForbiddenError)
+      expect(error).toMatchObject({ statusCode: 403, message: MENSAJE })
+      expect(escribio()).toBe(false)
+      expect(prismaMock.payment.count).toHaveBeenCalledWith({
+        where: { orderId: ORDER, venueId: VENUE, type: 'REFUND', status: 'COMPLETED' },
+      })
+      expect(prismaMock.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.payment.count.mock.invocationCallOrder[0])
+    },
+  )
+
+  it('R6-1: venta PARTIAL que ya se cobró CON payments:create ⇒ como hoy, fija el cliente', async () => {
+    prismaMock.order.findFirst.mockResolvedValue(orden({ status: 'PENDING', paymentStatus: 'PARTIAL' }))
+    prismaMock.payment.count.mockResolvedValue(1)
+    await updateOrder(VENUE, ORDER, { customerId: 'cust-B' } as any, { puedeCambiarClienteEnVentaCobrada: true })
     expect(prismaMock.order.update.mock.calls[0][0].data).toMatchObject({ customerId: 'cust-B' })
   })
 

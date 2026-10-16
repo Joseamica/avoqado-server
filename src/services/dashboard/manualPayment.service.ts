@@ -186,9 +186,10 @@ export async function createManualPayment(
         if (input.orderId) {
           await lockExistingOrderForPayment(tx, { venueId, orderId: input.orderId })
           // 🔴 R5-1 (ronda 5 post-QA de sellos tardíos; Codex recheck-9 P2; decisión «A» del founder): sobre una venta YA cobrada
-          // (PAID/REFUNDED; tras un reembolso vuelve a tener saldo), el `customerId` de este pago crea el primario o desplaza la
-          // lealtad del que ya había. Cambiar el cliente (primario; si no hay, el heredado) exige `payments:create`: sin él ⇒ 403
-          // aquí, bajo el candado y antes de la primera escritura (el turno). Mismo cliente o venta abierta ⇒ como hoy.
+          // (PAID/REFUNDED; tras un reembolso vuelve a tener saldo — y R6-1: también si un abono posterior la dejó PARTIAL, ver
+          // `esVentaYaCobrada`), el `customerId` de este pago crea el primario o desplaza la lealtad del que ya había. Cambiar el
+          // cliente (primario; si no hay, el heredado) exige `payments:create`: sin él ⇒ 403 aquí, bajo el candado y antes de la
+          // primera escritura (el turno). Mismo cliente o venta que nunca se cobró ⇒ como hoy.
           if (input.customerId && opciones.puedeCambiarClienteEnVentaCobrada !== true) {
             const venta = await tx.order.findFirst({
               where: { id: input.orderId, venueId },
@@ -199,7 +200,9 @@ export async function createManualPayment(
               },
             })
             if (venta)
-              asegurarCambioDeClienteEnVentaCobrada({
+              await asegurarCambioDeClienteEnVentaCobrada(tx, {
+                venueId,
+                orderId: input.orderId,
                 paymentStatus: venta.paymentStatus,
                 clienteActual: venta.orderCustomers[0]?.customerId ?? venta.customerId ?? null,
                 clienteNuevo: input.customerId,

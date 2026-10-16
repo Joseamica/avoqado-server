@@ -159,6 +159,23 @@ describe('🔴 R3-1/R3-2 (ronda 3): hechos de la venta para la auditoría y rein
   })
 
   it.each([
+    [1, true],
+    [0, false],
+  ])(
+    '🔴 R6-1: venta PARTIAL con %i reembolso(s) ⇒ ventaCobrada %s (la regla compartida, con la marca leída bajo el candado)',
+    async (n, cobrada) => {
+      prismaMock.order.update.mockResolvedValue({ ...ORDEN_LIGADA, paymentStatus: 'PARTIAL' } as any)
+      prismaMock.payment.count.mockResolvedValueOnce(n)
+      const r = await attachCustomerToPayment(VENUE, 'pay-1', 'cust-1', 'staff-1')
+      expect(mockLate).toHaveBeenCalledWith(expect.objectContaining({ ventaCobrada: cobrada }))
+      expect(prismaMock.payment.count).toHaveBeenCalledWith({
+        where: { orderId: 'order-1', venueId: VENUE, type: 'REFUND', status: 'COMPLETED' },
+      })
+      expect(r).toEqual({ ...ORDEN_LIGADA, loyalty: SELLO })
+    },
+  )
+
+  it.each([
     ['un bloqueo mutuo en una consulta cruda (P2010/40P01)', { code: 'P2010', meta: { code: '40P01' } }],
     ['un bloqueo mutuo reportado directo (40P01)', { code: '40P01' }],
   ])('🔴 R3-2: %s se reintenta (acotado) y la liga sale', async (_c, forma) => {
