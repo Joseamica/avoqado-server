@@ -33,6 +33,53 @@ export const PERMISO_COMERCIOS_DEL_NEGOCIO = 'system:config'
 export const MENSAJE_COMERCIOS_SOLO_EL_DUENO =
   'Sólo el dueño de la organización puede cambiar con qué comercios cobra una terminal. Pídeselo al dueño.'
 
+/** La regla, en un solo lugar: el dueño de la org (o un superadmin real), o `system:config` EN ESE venue. */
+export async function puedeCambiarComerciosEnElVenue(req: Request, orgId: string, venueId: string): Promise<boolean> {
+  if (await esDuenoDeEstaOrganizacionOSuperadmin((req as any).authContext, orgId)) return true
+  return tienePermisoEnElVenue(req, venueId, PERMISO_COMERCIOS_DEL_NEGOCIO)
+}
+
+/** 403 `ORG_OWNER_REQUIRED` + `PERMISSION_DENIED` en la bitácora, con el venue de la terminal. */
+function negarComercios(req: Request, venueId: string, terminalId: string | undefined): never {
+  const authContext = (req as any).authContext
+  void logAction({
+    staffId: authContext?.userId ?? null,
+    venueId,
+    action: 'PERMISSION_DENIED',
+    entity: 'terminal-merchants',
+    entityId: terminalId ?? 'nueva',
+    data: {
+      required: `organization-owner | ${PERMISO_COMERCIOS_DEL_NEGOCIO}`,
+      organizationId: req.params.orgId,
+      terminalId: terminalId ?? null,
+      method: req.method,
+      path: req.originalUrl,
+    },
+    ipAddress: req.ip,
+    userAgent: typeof req.get === 'function' ? req.get('user-agent') : undefined,
+  })
+  throw new ForbiddenError(MENSAJE_COMERCIOS_SOLO_EL_DUENO, 'ORG_OWNER_REQUIRED')
+}
+
+/**
+ * 🔴 Alta de terminal por la org (`POST /organizations/:orgId/terminals`, P1-1 de Codex, 15-oct): la asignación
+ * INICIAL respeta el mismo candado que cambiarla después. Si el cuerpo trae `assignedMerchantIds`, sólo pasa quien
+ * podría cambiarlos en el venue de la terminal nueva (`venueId` del cuerpo). Y deja en `res.locals.puedeAsignarComercios`
+ * si quien crea pasa ese candado: el alta sólo ANEXA SOLA (por serial) los comercios de la org a quien sí pasa.
+ */
+export const soloQuienPuedeAsignarComerciosAlCrear = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const venueId: unknown = req.body?.venueId
+    const puede = typeof venueId === 'string' && (await puedeCambiarComerciosEnElVenue(req, req.params.orgId, venueId))
+    const pedidos = req.body?.assignedMerchantIds
+    if (!puede && Array.isArray(pedidos) && pedidos.length > 0) negarComercios(req, String(venueId), undefined)
+    res.locals.puedeAsignarComercios = puede
+    next()
+  } catch (error) {
+    next(error)
+  }
+}
+
 function mismaLista(a: readonly string[], b: readonly string[]): boolean {
   return a.length === b.length && a.every((id, i) => id === b[i])
 }
@@ -60,27 +107,8 @@ export const soloQuienPuedeCambiarComerciosDeLaTerminal =
         return next()
       }
 
-      const authContext = (req as any).authContext
-      if (await esDuenoDeEstaOrganizacionOSuperadmin(authContext, req.params.orgId)) return next()
-      if (await tienePermisoEnElVenue(req, terminal.venueId, PERMISO_COMERCIOS_DEL_NEGOCIO)) return next()
-
-      void logAction({
-        staffId: authContext?.userId ?? null,
-        venueId: terminal.venueId,
-        action: 'PERMISSION_DENIED',
-        entity: 'terminal-merchants',
-        entityId: req.params.terminalId,
-        data: {
-          required: `organization-owner | ${PERMISO_COMERCIOS_DEL_NEGOCIO}`,
-          organizationId: req.params.orgId,
-          terminalId: req.params.terminalId,
-          method: req.method,
-          path: req.originalUrl,
-        },
-        ipAddress: req.ip,
-        userAgent: typeof req.get === 'function' ? req.get('user-agent') : undefined,
-      })
-      throw new ForbiddenError(MENSAJE_COMERCIOS_SOLO_EL_DUENO, 'ORG_OWNER_REQUIRED')
+      if (await puedeCambiarComerciosEnElVenue(req, req.params.orgId, terminal.venueId)) return next()
+      negarComercios(req, terminal.venueId, req.params.terminalId)
     } catch (error) {
       next(error)
     }

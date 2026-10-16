@@ -366,6 +366,7 @@ describe('OrgTerminals Service', () => {
           type: 'TPV_ANDROID',
         },
         staffId,
+        { puedeAsignarComercios: false },
       )
 
       expect(superadminCreateTerminal).toHaveBeenCalledWith(
@@ -375,6 +376,8 @@ describe('OrgTerminals Service', () => {
           name: 'Terminal 1',
           type: 'TPV_ANDROID',
           staffId,
+          // Sin el candado de comercios, el alta no anexa ninguno sola (ronda 7, P1-1).
+          comerciosAutoAdjuntables: null,
         }),
       )
       expect(result.terminal).toBeDefined()
@@ -384,7 +387,9 @@ describe('OrgTerminals Service', () => {
       prismaMock.venue.findFirst.mockResolvedValue(null)
 
       await expect(
-        createTerminalForOrg(orgId, { venueId: 'foreign-venue', serialNumber: 'SN-1', name: 'T1', type: 'TPV_ANDROID' }, staffId),
+        createTerminalForOrg(orgId, { venueId: 'foreign-venue', serialNumber: 'SN-1', name: 'T1', type: 'TPV_ANDROID' }, staffId, {
+          puedeAsignarComercios: true,
+        }),
       ).rejects.toThrow(ForbiddenError)
     })
   })
@@ -607,7 +612,9 @@ describe('OrgTerminals Service', () => {
       prismaMock.venue.findFirst.mockResolvedValue(null) // Venue not in org
 
       await expect(
-        createTerminalForOrg(orgId, { venueId: 'v-hack', serialNumber: 'S', name: 'T', type: 'TPV_ANDROID' }, staffId),
+        createTerminalForOrg(orgId, { venueId: 'v-hack', serialNumber: 'S', name: 'T', type: 'TPV_ANDROID' }, staffId, {
+          puedeAsignarComercios: true,
+        }),
       ).rejects.toThrow(ForbiddenError)
 
       expect(superadminCreateTerminal).not.toHaveBeenCalled()

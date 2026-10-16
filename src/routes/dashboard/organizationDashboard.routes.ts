@@ -12,7 +12,10 @@ import { authenticateTokenMiddleware } from '../../middlewares/authenticateToken
 import { validateRequest } from '../../middlewares/validation'
 import { checkPermission } from '../../middlewares/checkPermission.middleware'
 import { soloElDuenoDeLaOrgEnComandosCriticos } from '../../middlewares/soloElDuenoBorraDeFabrica.middleware'
-import { soloQuienPuedeCambiarComerciosDeLaTerminal } from '../../middlewares/comerciosDeLaTerminalEnLaOrg.middleware'
+import {
+  soloQuienPuedeAsignarComerciosAlCrear,
+  soloQuienPuedeCambiarComerciosDeLaTerminal,
+} from '../../middlewares/comerciosDeLaTerminalEnLaOrg.middleware'
 import * as manualSaleController from '../../controllers/dashboard/manualSale.controller'
 import { bulkManualSalesSchema } from '../../schemas/dashboard/manualSale.schema'
 import { organizationDashboardService } from '../../services/organization-dashboard/organizationDashboard.service'
@@ -993,6 +996,11 @@ router.get(
 /**
  * POST /dashboard/organizations/:orgId/terminals
  * Creates a new terminal for a venue within the organization
+ *
+ * 🔴 Los comercios del alta (a dónde va el dinero) pasan por el MISMO candado que cambiarlos después: dueño de la
+ * org o `system:config` en el venue de la terminal. Y lo que el alta anexa sola por serial es sólo de ESTA org y sólo
+ * para quien pasa ese candado (P1-1 de Codex, 15-oct: un serial virtual de otra org le anexaba su comercio).
+ * Fijado en tests/unit/routes/organizationDashboard.terminalCreate.routes.test.ts.
  */
 router.post(
   '/:orgId/terminals',
@@ -1000,12 +1008,15 @@ router.post(
   checkOrgAccess,
   requireOrgManager,
   validateRequest(CreateOrgTerminalSchema),
+  soloQuienPuedeAsignarComerciosAlCrear,
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { orgId } = req.params
       const { userId } = (req as any).authContext
 
-      const result = await orgTerminalsService.createTerminalForOrg(orgId, req.body, userId)
+      const result = await orgTerminalsService.createTerminalForOrg(orgId, req.body, userId, {
+        puedeAsignarComercios: res.locals.puedeAsignarComercios === true,
+      })
 
       res.status(201).json({
         success: true,
