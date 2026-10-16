@@ -274,8 +274,14 @@ describe('POST /venues/:venueId/tpv-commands/:commandId/retry (re-arma un comand
   const ruta = `/venues/${VENUE}/tpv-commands/cmd-1/retry`
 
   function comandoFallido(commandType: string) {
-    prismaMock.tpvCommandQueue.findUnique.mockResolvedValue({ id: 'cmd-1', venueId: VENUE, status: 'FAILED', commandType } as any)
-    prismaMock.tpvCommandQueue.update.mockResolvedValue({ id: 'cmd-1', status: 'PENDING', commandType } as any)
+    prismaMock.tpvCommandQueue.findUnique.mockResolvedValue({
+      id: 'cmd-1',
+      venueId: VENUE,
+      terminalId: TERMINAL.id, // la terminal sigue en el venue del comando (ronda 7: si no, no se re-arma)
+      status: 'FAILED',
+      commandType,
+    } as any)
+    prismaMock.tpvCommandQueue.updateMany.mockResolvedValue({ count: 1 } as any)
   }
 
   it('🔴 un ADMIN con `tpv-commands:write` NO puede re-armar un FACTORY_RESET', async () => {
@@ -286,7 +292,7 @@ describe('POST /venues/:venueId/tpv-commands/:commandId/retry (re-arma un comand
 
     expect(res.status).toBe(403)
     expect(res.body.code).toBe('FACTORY_RESET_OWNER_ONLY')
-    expect(prismaMock.tpvCommandQueue.update).not.toHaveBeenCalled()
+    expect(prismaMock.tpvCommandQueue.updateMany).not.toHaveBeenCalled()
     expect(sendCommandToTerminalMock).not.toHaveBeenCalled()
   })
 
@@ -297,7 +303,7 @@ describe('POST /venues/:venueId/tpv-commands/:commandId/retry (re-arma un comand
     const res = await post(ruta, como('admin-a', 'ADMIN'), {})
 
     expect(res.status).toBe(200)
-    expect(prismaMock.tpvCommandQueue.update).toHaveBeenCalled()
+    expect(prismaMock.tpvCommandQueue.updateMany).toHaveBeenCalled()
   })
 
   it('el dueño con `tpv-commands:write` sí re-arma el FACTORY_RESET', async () => {
