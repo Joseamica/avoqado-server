@@ -138,6 +138,20 @@ function parsePlatform(value: string | undefined): DevicePlatformHeader | undefi
 }
 
 /**
+ * El número de compilación de la app (F0-B, Task 11): `x-app-version-code`, el MISMO nombre que ya manda la TPV
+ * (`tpv-version-gate.middleware.ts:137`). Sólo un entero positivo de 32 bits sin ceros a la izquierda; cualquier otra cosa
+ * se ignora, nunca truena (esto cuelga del camino del cobro). Una cabecera repetida (arreglo, o «55, 56» como la junta Node)
+ * es ambigua: se ignora, a diferencia de las de texto, que toman la primera.
+ */
+function parseVersionCode(raw: string | string[] | undefined): number | undefined {
+  if (typeof raw !== 'string') return undefined
+  const value = raw.trim()
+  if (!/^[1-9]\d{0,9}$/.test(value)) return undefined
+  const n = Number(value)
+  return n <= 2_147_483_647 ? n : undefined
+}
+
+/**
  * Fuente única para normalizar los headers de identidad. La usa tanto el hook
  * pasivo como el PUT explícito de capacidades, para que un mismo request nunca se
  * vincule a dos deviceUid distintos por diferencias de trim/case/límites.
@@ -155,6 +169,7 @@ export function readDeviceIdentityFromRequest(req: Request): DeviceIdentity | nu
     formFactor: parseFormFactor(readHeader(req, 'x-device-form-factor')),
     osVersion: readHeader(req, 'x-device-os-version'),
     appVersion: readHeader(req, 'x-app-version'),
+    appVersionCode: parseVersionCode(req.headers['x-app-version-code']),
     serialNumber: readHeader(req, 'x-device-serial'),
   }
 }
