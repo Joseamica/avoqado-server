@@ -286,6 +286,8 @@ describe('🔴 PENDIENTE 2 DE F0-A por HTTP: poll → reporte → mudanza → po
 
     // El contrato REAL: si la tablet sigue apuntando al negocio viejo, el registro explícito la da de alta AHÍ como aparato
     // NUEVO (otra fila); la fila mudada no se toca. No es lo que decía el helper («SIN_BINDING»): es lo que pasa por HTTP.
+    // Vale para un cliente SIN `x-device-serial` (Android hoy no lo manda). Con serial chocaría con el `@unique` global de
+    // `Terminal.serialNumber` y respondería 503 DEVICE_REGISTRY_UNAVAILABLE (revisión de la Task 8, menor 2).
     const aDestiempo = await reporte(venueA)
     expect(aDestiempo.status).toBe(200)
     expect(aDestiempo.body.data.terminalId).not.toBe(t2)
