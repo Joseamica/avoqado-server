@@ -201,5 +201,7 @@ export const otpVerifySchema = z
     phone: z.string().min(8, 'Teléfono inválido').optional(),
     email: z.string().email('Correo inválido').optional(),
     code: z.string().regex(/^\d{6}$/, 'El código debe ser de 6 dígitos'),
+    /** R7/H1 (pedidos en línea): verificar para PEDIR no activa la cuenta de reservas y devuelve el token de pedidos. */
+    purpose: z.enum(['ORDERING'], { errorMap: () => ({ message: 'Propósito inválido' }) }).optional(),
   })
   .refine(d => Boolean(d.phone) || Boolean(d.email), { message: 'Proporciona teléfono o correo', path: ['phone'] })

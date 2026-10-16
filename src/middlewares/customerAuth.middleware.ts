@@ -22,13 +22,15 @@
  */
 
 import { Request, Response, NextFunction } from 'express'
-import { verifyCustomerToken } from '../jwt.service'
+import { verifyCustomerToken, verifyOrderingCustomerToken } from '../jwt.service'
 import prisma from '../utils/prismaClient'
 import logger from '../config/logger'
 
 export interface CustomerAuthContext {
   customerId: string
   venueId: string
+  /** H1: sólo con el token de PEDIDOS (`authenticateOrderingCustomerOptional`). Pedir y pagar al recoger lo exige. */
+  verifiedPhone?: string
 }
 
 export interface PublicVenueContext {
@@ -59,6 +61,7 @@ const FAIL: Record<AuthFailure['code'], AuthFailure> = {
  */
 async function resolveCustomerAuth(
   req: Request,
+  verify: (token: string) => { sub: string; venueId: string; verifiedPhone?: string } = verifyCustomerToken,
 ): Promise<{ ok: true; auth: CustomerAuthContext | null } | { ok: false; failure: AuthFailure }> {
   const authHeader = req.headers.authorization
   // Sólo la AUSENCIA del header es invitado. Un header presente pero vacío (`Authorization: `)
@@ -75,9 +78,9 @@ async function resolveCustomerAuth(
     return { ok: false, failure: FAIL.CUSTOMER_TOKEN_INVALID }
   }
 
-  let payload: { sub: string; venueId: string }
+  let payload: { sub: string; venueId: string; verifiedPhone?: string }
   try {
-    payload = verifyCustomerToken(token)
+    payload = verify(token)
   } catch {
     return { ok: false, failure: FAIL.CUSTOMER_TOKEN_INVALID }
   }
@@ -105,17 +108,30 @@ async function resolveCustomerAuth(
     return { ok: false, failure: FAIL.CUSTOMER_INACTIVE }
   }
 
-  return { ok: true, auth: { customerId: customer.id, venueId: customer.venueId } }
+  return {
+    ok: true,
+    auth: {
+      customerId: customer.id,
+      venueId: customer.venueId,
+      ...(payload.verifiedPhone ? { verifiedPhone: payload.verifiedPhone } : {}),
+    },
+  }
 }
 
 function reply(res: Response, failure: AuthFailure) {
   return res.status(failure.status).json({ message: failure.message, code: failure.code })
 }
 
-async function run(req: Request, res: Response, next: NextFunction, required: boolean) {
+async function run(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+  required: boolean,
+  verify: (token: string) => { sub: string; venueId: string; verifiedPhone?: string } = verifyCustomerToken,
+) {
   let result: Awaited<ReturnType<typeof resolveCustomerAuth>>
   try {
-    result = await resolveCustomerAuth(req)
+    result = await resolveCustomerAuth(req, verify)
   } catch (err) {
     logger.error('customerAuth: fallo interno', { error: (err as Error).message })
     return res.status(500).json({ message: 'Error interno de autenticación', code: 'CUSTOMER_AUTH_INTERNAL' })
@@ -145,4 +161,13 @@ export function authenticateCustomer(req: Request, res: Response, next: NextFunc
 /** Sesión de cliente opcional: sin header ⇒ invitado; header presente ⇒ se valida igual. */
 export function authenticateCustomerOptional(req: Request, res: Response, next: NextFunction) {
   return run(req, res, next, false)
+}
+
+/**
+ * H1: sesión OPCIONAL para crear pedidos en línea. Sólo acepta el token de PEDIDOS (`customer_ordering`, prueba el teléfono);
+ * un token de cliente general responde 401 `CUSTOMER_TOKEN_INVALID`. Sin cabecera ⇒ invitado, y el servicio responde 401
+ * `PHONE_VERIFICATION_REQUIRED`.
+ */
+export function authenticateOrderingCustomerOptional(req: Request, res: Response, next: NextFunction) {
+  return run(req, res, next, false, verifyOrderingCustomerToken)
 }
