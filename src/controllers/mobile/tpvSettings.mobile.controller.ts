@@ -26,13 +26,14 @@ import {
   parseDisplayModeRequest,
   updateLocalDisplayMode,
 } from '../../services/display-mode-request.service'
-
-function requestDeviceUid(req: Request): string | null {
-  const raw = req.headers?.['x-device-id']
-  const value = Array.isArray(raw) ? raw[0] : raw
-  const trimmed = typeof value === 'string' ? value.trim().slice(0, 64) : ''
-  return trimmed || null
-}
+import {
+  POLL_TERMINAL_SELECT,
+  capabilityReportRequested,
+  collectPollFingerprints,
+  type PollFingerprints,
+} from '../../services/customer-display/posPollFingerprints'
+import { CUSTOMER_DISPLAY_DESIGN_CAPABILITY } from '../../services/customer-display/customerDisplayDesign.validation'
+import { requestDeviceUid } from '../../utils/requestDeviceUid'
 
 function requireRequestDeviceUid(req: Request): string {
   const deviceUid = requestDeviceUid(req)
@@ -202,27 +203,36 @@ export const getVenueTpvSettings = async (req: Request, res: Response, next: Nex
 }
 
 /**
- * Entrega ligera de la intención vigente al POS Android que hizo la solicitud.
- * No expira ni resuelve nada durante la lectura.
+ * Entrega ligera de la intención vigente al POS Android que hizo la solicitud, y el SOBRE de la pantalla del cliente
+ * (spec §5.7.2). No expira ni resuelve nada durante la lectura.
  * @route GET /api/v1/mobile/venues/:venueId/display-mode-request
  */
 export const getDisplayModeRequest = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { venueId } = req.params
     const deviceUid = requireRequestDeviceUid(req)
+    // 🔴 La BASE primero (spec §5.7.1; pendiente de F0-A): el binding exacto decide qué aparato es y de qué negocio.
+    // Ninguna caché se consulta antes, y después sólo con el id que devolvió esta lectura.
     const terminal = await prisma.terminal.findFirst({
       where: { venueId, deviceUid, type: TerminalType.POS_ANDROID },
-      select: {
-        id: true,
-        customerDisplayRequest: true,
-        customerDisplayRequestExpiresAt: true,
-      },
+      select: POLL_TERMINAL_SELECT,
     })
     if (!terminal) throw new NotFoundError('Dispositivo POS Android no encontrado.', 'DEVICE_NOT_FOUND')
 
     const stored = parseDisplayModeRequest(terminal.customerDisplayRequest)
     const now = Date.now()
     const deliverable = stored?.status === 'PENDING' && new Date(stored.expiresAt).getTime() > now ? stored : null
+
+    // Cada huella se aísla por dentro; esto es el cinturón: un fallo inesperado nunca retrasa ni tumba la entrega.
+    let fingerprints: PollFingerprints = {}
+    try {
+      fingerprints = await collectPollFingerprints({ venueId, terminal, hasRequest: deliverable !== null })
+    } catch (error) {
+      logger.warn('[pantalla-del-cliente] las huellas del poll fallaron; se entrega el sobre sin ellas', {
+        venueId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
 
     res.status(200).json({
       data: {
@@ -235,6 +245,10 @@ export const getDisplayModeRequest = async (req: Request, res: Response, next: N
               expiresAt: deliverable.expiresAt,
             }
           : null,
+        // — lo nuevo, aditivo y opcional (Android decodifica con ignoreUnknownKeys; iOS y la TPV no llaman esta ruta) —
+        fingerprints,
+        capabilities: { customerDisplayDesign: CUSTOMER_DISPLAY_DESIGN_CAPABILITY },
+        capabilityReport: { requested: capabilityReportRequested(terminal) },
       },
     })
   } catch (error) {

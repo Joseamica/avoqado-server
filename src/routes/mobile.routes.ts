@@ -2118,6 +2118,76 @@ router.put(
 
 // Entrega v1 ligera: el terminalId viene del vínculo exacto del propio X-Device-ID.
 // No se mezcla con /settings y una lectura nunca expira ni muta la intención.
+/**
+ * @openapi
+ * /api/v1/mobile/venues/{venueId}/display-mode-request:
+ *   get:
+ *     tags: [Mobile - TPV Settings]
+ *     summary: El poll del POS Android — la solicitud de inversión vigente y el sobre de la pantalla del cliente
+ *     description: |
+ *       El aparato se identifica por el binding EXACTO `{ venueId, X-Device-ID, POS_ANDROID }`, leído en la base antes de
+ *       consultar cualquier caché. `terminalId` y `request` no cambian (versiones viejas de la app los leen así).
+ *       Lo demás es aditivo:
+ *       - `fingerprints`: cada huella OMITIDA significa «desconocida» — la tablet conserva lo que tenga guardado; nunca
+ *         significa «vacío». Sin versión de diseño reportada sale `{}`. Con una solicitud entregable sólo trae lo que ya
+ *         estaba en caché (la entrega no espera); sin ella, lo que falte se calcula con un plazo conjunto de 150 ms.
+ *       - `capabilities.customerDisplayDesign`: la versión de diseño que entiende este servidor; la tablet reporta
+ *         `min(la suya, ésta)`.
+ *       - `capabilityReport.requested`: `true` mientras el servidor no sepa la versión o la instalación de ESTE aparato
+ *         en ESTE negocio (app vieja, primera vez o recién mudada); la tablet reporta en ese momento, sin esperar 24 h.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: header
+ *         name: X-Device-ID
+ *         required: true
+ *         schema: { type: string, maxLength: 64 }
+ *     responses:
+ *       200:
+ *         description: La solicitud vigente (o null) y el sobre
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 data:
+ *                   type: object
+ *                   required: [terminalId, request, fingerprints, capabilities, capabilityReport]
+ *                   properties:
+ *                     terminalId: { type: string, description: El id que devolvió el binding (sin cambios) }
+ *                     request:
+ *                       type: object
+ *                       nullable: true
+ *                       description: Sólo una solicitud PENDING y vigente (sin cambios)
+ *                       properties:
+ *                         requestId: { type: string }
+ *                         desiredInverted: { type: boolean }
+ *                         requestedAt: { type: string, format: date-time }
+ *                         expiresAt: { type: string, format: date-time }
+ *                     fingerprints:
+ *                       type: object
+ *                       description: Omitida = desconocida (conserva lo guardado)
+ *                       properties:
+ *                         customerDisplay: { type: string, pattern: '^[0-9a-f]{32}$', description: Huella de la ficha de diseño de este aparato }
+ *                         settings: { type: string, pattern: '^[0-9a-f]{32}$', description: Huella de lo que entrega /settings a este aparato }
+ *                         promotions: { type: string, pattern: '^[0-9a-f]{32}$', description: Sólo versión ≥ 2. Ceros = el plan no incluye PROMOTIONS }
+ *                     capabilities:
+ *                       type: object
+ *                       properties:
+ *                         customerDisplayDesign: { type: integer, example: 2 }
+ *                     capabilityReport:
+ *                       type: object
+ *                       properties:
+ *                         requested: { type: boolean }
+ *       400: { description: Falta X-Device-ID (DEVICE_ID_REQUIRED) }
+ *       401: { description: Sin sesión }
+ *       403: { description: No pertenece al venue }
+ *       404: { description: El aparato no está ligado a este negocio como POS Android (DEVICE_NOT_FOUND) }
+ */
 router.get(
   '/venues/:venueId/display-mode-request',
   authenticateTokenMiddleware,

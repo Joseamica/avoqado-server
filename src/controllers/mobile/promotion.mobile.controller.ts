@@ -2,13 +2,7 @@ import { Request, Response } from 'express'
 import { listPromotionsForPos } from '../../services/promotions/promotionCatalog.service'
 import { carouselForDevice } from '../../services/customer-display/promotionCarousel.service'
 import logger from '../../config/logger'
-
-function deviceUidDe(req: Request): string | null {
-  const raw = req.headers?.['x-device-id']
-  const value = Array.isArray(raw) ? raw[0] : raw
-  const recortado = typeof value === 'string' ? value.trim().slice(0, 64) : ''
-  return recortado || null
-}
+import { requestDeviceUid } from '../../utils/requestDeviceUid'
 
 /** GET /api/v1/mobile/venues/:venueId/promotions */
 export async function getPromotions(req: Request, res: Response) {
@@ -17,7 +11,7 @@ export async function getPromotions(req: Request, res: Response) {
     const [catalogo, carrusel] = await Promise.all([
       listPromotionsForPos(venueId),
       // 🔴 El carrusel nunca tumba la ruta: el catálogo de siempre es lo que usa el POS para cobrar.
-      carouselForDevice(venueId, deviceUidDe(req)).catch(error => {
+      carouselForDevice(venueId, requestDeviceUid(req)).catch(error => {
         logger.warn('[pantalla-del-cliente] carrusel no disponible', {
           venueId,
           error: error instanceof Error ? error.message : 'desconocido',
