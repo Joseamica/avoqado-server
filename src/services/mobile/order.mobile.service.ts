@@ -3151,10 +3151,10 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
         // deducción" nace EN ESTA transacción — si el proceso muere después del
         // commit y antes de deducir, queda un posting PENDING visible que el
         // job de respaldo reaplica, en vez de una deducción perdida invisible.
-        // Área-tickets ya dedujeron dentro de su propia finalización → SKIPPED
-        // con razón durable, nunca silencio.
+        // Área-tickets: su propia finalización ya dedujo y dejó su vale SKIPPED
+        // (`AREA_TICKET_TRANSACTIONAL`, R10-1) en esta misma transacción — aquí no se crea otro.
         let postingId: string | null = null
-        if (isFullyPaid) {
+        if (isFullyPaid && !areaFinalization.areaTicketOrder) {
           const { createSalePostingInTx } = await import('@/services/inventory/inventoryPosting.service')
           const txItems = await tx.orderItem.findMany({
             where: { orderId },
@@ -3165,7 +3165,6 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
             orderId,
             items: txItems as any,
             staffId: effectiveStaffId,
-            skipReason: areaFinalization.areaTicketOrder ? 'AREA_TICKET_TRANSACTIONAL' : undefined,
           })
           postingId = posting?.id ?? null
         }

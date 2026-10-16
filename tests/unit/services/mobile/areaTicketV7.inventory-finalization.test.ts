@@ -401,7 +401,8 @@ describe('AreaTicket v7 inventory finalization', () => {
         loyaltyStaffId: 'staff-paid',
       }),
     })
-    expect(result).toEqual({ areaTicketOrder: true, sessionId, fullyPaid: true })
+    // R10-3: este cobro es el primer saldado ⇒ quien llama corre sus efectos una vez.
+    expect(result).toEqual({ areaTicketOrder: true, sessionId, fullyPaid: true, primerSaldado: true })
   })
 })
 
@@ -413,6 +414,8 @@ describe('🔴 R8-1: el cobro capturado de una sesión de vales sobre una venta 
   beforeEach(() => primePaidCheckout())
 
   const conciliar = (pagos: string[]) => {
+    // La venta la cerró OTRO canal: su vale de inventario SALE existe (R10-3: sin él la habría cerrado el barrido).
+    prismaMock.inventoryPosting.findUnique.mockResolvedValue({ id: 'posting-del-otro-canal' })
     prismaMock.order.findFirst.mockResolvedValue({
       paymentStatus: 'PAID',
       status: 'COMPLETED',
@@ -576,7 +579,7 @@ describe('🔴 R9-1: la sesión de vales de una venta que YA estaba cerrada', ()
       ])
       expect([ultimaOrden().status, ultimaOrden().completedAt, ultimaOrden().loyaltyEligibleAt]).toEqual([undefined, undefined, undefined])
       // La TPV recibe «PAID» y quien la llama sabe que la venta ya estaba cerrada (no repite cupones, referido, lealtad ni comanda).
-      expect(resultado).toEqual({ areaTicketOrder: true, sessionId, fullyPaid: true, ventaYaCerrada: true })
+      expect(resultado).toEqual({ areaTicketOrder: true, sessionId, fullyPaid: true, ventaYaCerrada: true, primerSaldado: false })
     },
   )
 
@@ -609,9 +612,11 @@ describe('🔴 R9-1: la sesión de vales de una venta que YA estaba cerrada', ()
       expect.objectContaining({ where: { id: RESERVA.id }, data: expect.objectContaining({ status: 'CONSUMED' }) }),
     )
     expect(prismaMock.orderItem.findMany).toHaveBeenCalled()
-    // La venta no se vuelve a cerrar (ni fecha ni lealtad nuevas) y quien llama sabe que ya estaba cerrada.
-    expect([ultimaOrden().paymentStatus, ultimaOrden().status, ultimaOrden().loyaltyEligibleAt]).toEqual(['PAID', undefined, undefined])
-    expect(resultado).toEqual({ areaTicketOrder: true, sessionId, fullyPaid: true, ventaYaCerrada: true })
+    // La venta no se vuelve a cerrar (ni estado ni fecha nuevos); R10-3: el barrido no le dio lealtad ⇒ este cobro la deja durable
+    // y es su primer saldado (quien llama corre sus efectos UNA vez).
+    expect([ultimaOrden().paymentStatus, ultimaOrden().status, ultimaOrden().completedAt]).toEqual(['PAID', undefined, undefined])
+    expect([ultimaOrden().loyaltyEligibleAt, ultimaOrden().loyaltyStaffId]).toEqual([expect.any(Date), 'staff-paid'])
+    expect(resultado).toEqual({ areaTicketOrder: true, sessionId, fullyPaid: true, ventaYaCerrada: true, primerSaldado: true })
   })
 
   it('regresión: una venta PARTIAL que no se cubre ⇒ la sesión queda PARTIALLY_PAID y sin consumir (como hoy)', async () => {
@@ -620,7 +625,7 @@ describe('🔴 R9-1: la sesión de vales de una venta que YA estaba cerrada', ()
     expect(estadoDeLaSesion()).toEqual([AreaTicketCheckoutStatus.PARTIALLY_PAID])
     expect(consumioInventario()).toBe(false)
     expect([ultimaOrden().paymentStatus, Number(ultimaOrden().remainingBalance)]).toEqual(['PARTIAL', 40])
-    expect(resultado).toEqual({ areaTicketOrder: true, sessionId, fullyPaid: false })
+    expect(resultado).toEqual({ areaTicketOrder: true, sessionId, fullyPaid: false, primerSaldado: false })
   })
 
   it.each(['PENDING', 'PARTIAL'] as const)(
@@ -634,7 +639,256 @@ describe('🔴 R9-1: la sesión de vales de una venta que YA estaba cerrada', ()
       )
       expect(prismaMock.orderItem.findMany).toHaveBeenCalled()
       expect([ultimaOrden().paymentStatus, ultimaOrden().status]).toEqual(['PAID', 'COMPLETED'])
-      expect(resultado).toEqual({ areaTicketOrder: true, sessionId, fullyPaid: true })
+      expect(resultado).toEqual({ areaTicketOrder: true, sessionId, fullyPaid: true, primerSaldado: true })
     },
   )
+})
+
+/**
+ * 🔴 Ronda 10 (Codex recheck-14): la venta de vales $100 (un vale de $60 con su reserva + un producto suelto de $40).
+ *   · R10-1: la sesión que consume deja su vale SALE `SKIPPED / AREA_TICKET_TRANSACTIONAL` en la MISMA transacción; con él, «existe un
+ *     vale SALE» es la señal fiel de «alguien ya tiene la obligación de inventario» y un reenvío no vuelve a consumir.
+ *   · R10-2: si el vale SALE es de otro canal (ya descontó TODO), las reservas ACTIVE de la sesión se sueltan sin mover stock.
+ *   · R10-3: la venta que cerró el barrido (sin vale ni efectos) recupera con ESTE cobro su lealtad durable y su marca de cocina.
+ *   · R10-4: la salida temprana (este mismo cobro ya se finalizó) dice lo PERSISTIDO y no corre efectos.
+ */
+describe('🔴 R10: constancia del consumo, reservas de otro canal, recuperación tras el barrido y salida temprana', () => {
+  const RESERVA = {
+    id: 'reservation-r10',
+    areaTicketLineId: 'line-r10',
+    inventoryKind: AreaTicketInventoryTarget.QUANTITY_INVENTORY,
+    inventoryId: 'inventory-r10',
+    quantityBaseUnits: new Prisma.Decimal('1.000'),
+  }
+
+  beforeEach(() => {
+    primePaidCheckout()
+    prismaMock.areaTicket.findMany.mockResolvedValue([{ id: 'ticket-r10', fulfillmentModeSnapshot: 'HOLD_UNTIL_PAID' }])
+    prismaMock.areaTicketInventoryReservation.findMany.mockResolvedValue([RESERVA])
+    prismaMock.areaTicketInventoryReservation.updateMany.mockResolvedValue({ count: 1 } as any)
+    prismaMock.orderItem.findMany.mockResolvedValue([
+      {
+        id: 'item-suelto',
+        areaTicketLineId: null,
+        quantity: 1,
+        weightQuantity: null,
+        product: {
+          id: 'product-suelto',
+          name: 'Producto suelto',
+          trackInventory: true,
+          inventoryMethod: 'QUANTITY',
+          inventory: { id: 'inventory-suelto' },
+          recipe: null,
+        },
+        modifiers: [],
+      },
+    ])
+    prismaMock.inventoryMovement.create.mockResolvedValue({ id: 'movement-r10' })
+    prismaMock.inventoryPosting.create.mockResolvedValue({ id: 'posting-de-la-sesion', status: 'SKIPPED' } as any)
+    prismaMock.$queryRaw.mockImplementation(async (query: unknown) => {
+      const sql = sqlText(query)
+      if (sql.includes('UPDATE "Inventory"')) {
+        return [{ id: 'inventory-r10', currentStock: new Prisma.Decimal('9.000'), previousStock: new Prisma.Decimal('10.000') }]
+      }
+      if (sql.includes('FROM "Inventory"')) return [{ id: 'inventory-suelto', currentStock: new Prisma.Decimal('10.000') }]
+      return []
+    })
+  })
+
+  /** `vale`: el vale SALE de la venta (de otro canal o de la propia sesión), o `null` si no hay (la cerró el barrido). */
+  const conciliar = (
+    paymentStatus: 'PAID' | 'PARTIAL' | 'PENDING',
+    pagos: string[],
+    opciones: {
+      vale?: { id: string; status?: string; skipReason?: string } | null
+      orden?: Record<string, unknown>
+      cocina?: boolean
+    } = {},
+  ) => {
+    prismaMock.inventoryPosting.findUnique.mockResolvedValue((opciones.vale ?? null) as any)
+    prismaMock.order.findFirst.mockResolvedValue({
+      paymentStatus,
+      status: paymentStatus === 'PAID' ? 'COMPLETED' : 'PENDING',
+      subtotal: new Prisma.Decimal('100.00'),
+      discountAmount: new Prisma.Decimal('0.00'),
+      serviceChargeAmount: new Prisma.Decimal('0.00'),
+      servedById: 'staff-paid',
+      createdById: 'staff-paid',
+      areaTicketCode: 'VALE-R10',
+      loyaltyEligibleAt: null,
+      kitchenPendingAt: null,
+      ...opciones.orden,
+    })
+    prismaMock.payment.findMany.mockResolvedValue(
+      pagos.map(p => ({ amount: new Prisma.Decimal(p), tipAmount: new Prisma.Decimal('0.00') })),
+    )
+    return finalizeAreaTicketPaymentInTransaction(prismaMock, {
+      venueId,
+      orderId,
+      paymentId: 'payment-r10',
+      fullyPaid: false,
+      staffId: 'staff-del-cobro',
+      marcarCocina: opciones.cocina ?? false,
+      locked: { sessionId, attemptId },
+      reconcileCapturedPayment: true,
+    } as any)
+  }
+  const ultimaOrden = () => (prismaMock.order.update as jest.Mock).mock.calls.at(-1)?.[0]?.data
+  const valesCreados = () => (prismaMock.inventoryPosting.create as jest.Mock).mock.calls.map(([a]: any[]) => a.data)
+  const consumio = () =>
+    (prismaMock.$queryRaw as jest.Mock).mock.calls.some(([q]: any[]) => sqlText(q).includes('UPDATE "Inventory"')) ||
+    (prismaMock.inventoryMovement.create as jest.Mock).mock.calls.length > 0 ||
+    (prismaMock.areaTicketInventoryReservation.update as jest.Mock).mock.calls.length > 0
+  const reservasSoltadas = () =>
+    (prismaMock.areaTicketInventoryReservation.updateMany as jest.Mock).mock.calls.filter(([a]: any[]) => a?.data?.status === 'RELEASED')
+
+  describe('R10-1: la constancia durable del consumo de la sesión', () => {
+    it('🔴 la venta que el cobro de la sesión salda ⇒ consume UNA vez y deja su vale SALE SKIPPED AREA_TICKET_TRANSACTIONAL en la misma tx', async () => {
+      await conciliar('PARTIAL', ['50.00', '50.00'])
+
+      expect(consumio()).toBe(true)
+      expect(valesCreados()).toEqual([
+        expect.objectContaining({
+          venueId,
+          sourceKind: 'ORDER',
+          sourceId: orderId,
+          effectKind: 'SALE',
+          orderId,
+          status: 'SKIPPED',
+          skipReason: 'AREA_TICKET_TRANSACTIONAL',
+        }),
+      ])
+      // Sin renglones: nadie aplica ni revierte este vale (los movimientos ya los escribió la sesión).
+      expect(valesCreados()[0].lines).toBeUndefined()
+    })
+
+    it('🔴 el efectivo del POS (sin conciliar) también deja el vale SKIPPED al consumir', async () => {
+      prismaMock.inventoryPosting.findUnique.mockResolvedValue(null as any)
+
+      await finalize()
+
+      expect(consumio()).toBe(true)
+      expect(valesCreados()).toEqual([expect.objectContaining({ status: 'SKIPPED', skipReason: 'AREA_TICKET_TRANSACTIONAL' })])
+    })
+
+    it('🔴 la cadena de Codex: la sesión ya consumió (su vale SKIPPED) y un catch tardío la degradó ⇒ el reenvío NO vuelve a consumir (10 → 9, no → 8)', async () => {
+      const resultado = await conciliar('PAID', ['100.00'], {
+        vale: { id: 'posting-de-la-sesion', status: 'SKIPPED', skipReason: 'AREA_TICKET_TRANSACTIONAL' },
+      })
+
+      expect(consumio()).toBe(false)
+      expect(valesCreados()).toEqual([])
+      expect(prismaMock.areaTicketCheckoutSession.update).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ status: AreaTicketCheckoutStatus.PAID }) }),
+      )
+      // No es el primer saldado: los efectos ya corrieron con quien finalizó primero.
+      expect(resultado).toEqual({ areaTicketOrder: true, sessionId, fullyPaid: true, ventaYaCerrada: true, primerSaldado: false })
+    })
+
+    it('regresión: un abono parcial (no salda) no consume ni deja vale', async () => {
+      await conciliar('PENDING', ['50.00'])
+
+      expect(consumio()).toBe(false)
+      expect(valesCreados()).toEqual([])
+    })
+  })
+
+  describe('R10-2: las reservas de una venta que cerró otro canal', () => {
+    it('🔴 venta PAID con el vale SALE de otro canal ⇒ sus reservas ACTIVE pasan a RELEASED SIN mover stock', async () => {
+      await conciliar('PAID', ['80.00', '20.00'], { vale: { id: 'posting-del-pago-manual', status: 'APPLIED' } })
+
+      expect(reservasSoltadas()).toEqual([
+        [
+          {
+            where: { venueId, areaTicket: { checkoutSessionId: sessionId }, status: 'ACTIVE' },
+            data: { status: 'RELEASED', releasedAt: expect.any(Date) },
+          },
+        ],
+      ])
+      expect(consumio()).toBe(false)
+      expect(valesCreados()).toEqual([])
+    })
+
+    it('regresión: cuando la sesión consume (primer descuento) las reservas se CONSUMEN, no se sueltan', async () => {
+      await conciliar('PENDING', ['100.00'])
+
+      expect(reservasSoltadas()).toEqual([])
+      expect(prismaMock.areaTicketInventoryReservation.update).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: RESERVA.id }, data: expect.objectContaining({ status: 'CONSUMED' }) }),
+      )
+    })
+  })
+
+  describe('R10-3: la venta que cerró el barrido recupera su lealtad con ESTE cobro', () => {
+    it('🔴 PAID sin vale (barrido) ⇒ consume, lealtad durable con el empleado del cobro, marca de cocina y primer saldado', async () => {
+      const resultado = await conciliar('PAID', ['100.00'], { cocina: true })
+
+      expect(consumio()).toBe(true)
+      expect(ultimaOrden()).toMatchObject({
+        paymentStatus: 'PAID',
+        loyaltyEligibleAt: expect.any(Date),
+        loyaltyStaffId: 'staff-del-cobro',
+        kitchenPendingAt: expect.any(Date),
+      })
+      // No se vuelve a cerrar: ni estado ni fecha de cierre nuevos.
+      expect([ultimaOrden().status, ultimaOrden().completedAt]).toEqual([undefined, undefined])
+      expect(resultado).toEqual({ areaTicketOrder: true, sessionId, fullyPaid: true, ventaYaCerrada: true, primerSaldado: true })
+    })
+
+    it('🔴 no pisa la lealtad ni la marca que la venta ya tenga (una liga tardía con permiso ya abrió la suya, con SU actor)', async () => {
+      const antes = new Date('2026-10-16T10:00:00Z')
+      await conciliar('PAID', ['100.00'], { cocina: true, orden: { loyaltyEligibleAt: antes, kitchenPendingAt: antes } })
+
+      expect([ultimaOrden().loyaltyEligibleAt, ultimaOrden().loyaltyStaffId, ultimaOrden().kitchenPendingAt]).toEqual([
+        undefined,
+        undefined,
+        undefined,
+      ])
+    })
+
+    it('regresión: la venta que cerró OTRO canal (con su vale) no es primer saldado: ni lealtad ni marca otra vez', async () => {
+      const resultado = await conciliar('PAID', ['80.00', '20.00'], { cocina: true, vale: { id: 'posting-del-pago-manual' } })
+
+      expect([ultimaOrden().loyaltyEligibleAt, ultimaOrden().loyaltyStaffId, ultimaOrden().kitchenPendingAt]).toEqual([
+        undefined,
+        undefined,
+        undefined,
+      ])
+      expect(resultado.primerSaldado).toBe(false)
+    })
+  })
+
+  describe('R10-4: la salida temprana (este mismo cobro ya se finalizó) dice lo persistido', () => {
+    const yaFinalizado = (estadoDeLaSesion: AreaTicketCheckoutStatus) => {
+      prismaMock.areaTicketPaymentAttempt.findFirst.mockResolvedValue({
+        id: attemptId,
+        status: AreaTicketPaymentAttemptStatus.SUCCEEDED,
+        paymentId: 'payment-r10',
+      })
+      prismaMock.areaTicketCheckoutSession.findFirst.mockResolvedValue({ id: sessionId, orderId, status: estadoDeLaSesion })
+    }
+
+    it.each([
+      ['$80 + $10 (la aritmética dice «parcial»)', ['80.00', '10.00']],
+      ['$80 + $20 (vuelve a cubrir)', ['80.00', '20.00']],
+    ])('🔴 venta cerrada, %s ⇒ PAID (la sesión guardada), venta cerrada y SIN efectos', async (_caso, pagos) => {
+      yaFinalizado(AreaTicketCheckoutStatus.PAID)
+
+      const resultado = await conciliar('PAID', pagos as string[], { vale: { id: 'posting-del-pago-manual' } })
+
+      expect(resultado).toEqual({ areaTicketOrder: true, sessionId, fullyPaid: true, ventaYaCerrada: true, primerSaldado: false })
+      expect(consumio()).toBe(false)
+      expect(valesCreados()).toEqual([])
+      expect(prismaMock.areaTicketCheckoutSession.update).not.toHaveBeenCalled()
+      expect(prismaMock.areaTicketPaymentAttempt.update).not.toHaveBeenCalled()
+    })
+
+    it('regresión: el abono parcial ya finalizado ⇒ PARTIALLY_PAID (la sesión guardada) y sin efectos', async () => {
+      yaFinalizado(AreaTicketCheckoutStatus.PARTIALLY_PAID)
+
+      const resultado = await conciliar('PARTIAL', ['50.00'])
+
+      expect(resultado).toEqual({ areaTicketOrder: true, sessionId, fullyPaid: false, primerSaldado: false })
+    })
+  })
 })

@@ -1486,6 +1486,12 @@ async function updateOrderTotalsForStandalonePayment(
      * después de ese commit (la ve PAID igual que si este cobro la hubiera saldado), así que sólo ese aviso evita repetir los efectos.
      */
     ventaYaCerrada?: boolean
+    /**
+     * R10-3/R10-4 (sólo con `areaTicketAlreadyFinalized`): la finalización decidió bajo sus candados, con evidencia durable (el vale
+     * SALE), si ESTE cobro es el primer saldado de la venta. Cuando viene, manda sobre la aritmética de esta pasada: `true` corre UNA
+     * vez cupones, referido, lealtad y comanda (también si el barrido la había cerrado sin ellos); `false`, ninguno.
+     */
+    primerSaldado?: boolean
     venueId?: string
     committedSettlement?: CommittedStandaloneSettlement
     /** Internal: this pass already reran once after its inputs moved under the Order lock. */
@@ -1688,6 +1694,9 @@ async function updateOrderTotalsForStandalonePayment(
   const settledBeforeThisPayment = options?.committedSettlement
     ? !options.committedSettlement.firstSettlement
     : ventaCerrada || (order.payments.length > 0 && previousPayments >= totalesDeLaOrden(previousTips, estado) - 0.01)
+  // R10-3/R10-4: con el veredicto de la finalización del vale, ése decide los efectos de saldar (no los importes de esta pasada).
+  const veredictoDelVale = options?.areaTicketAlreadyFinalized ? options.primerSaldado : undefined
+  const correnEfectosDeSaldar = veredictoDelVale ?? (isFullyPaid && !settledBeforeThisPayment)
   const coveredAreaTicketLines = isFullyPaid
     ? await getAreaTicketLineIdsCoveredByInventoryReservations(order.venueId, order.items)
     : new Set<string>()
@@ -2356,7 +2365,7 @@ async function updateOrderTotalsForStandalonePayment(
   // por área ya consumieron inventario dentro de su transacción, pero también
   // deben redimir cupones, calificar referidos y acreditar lealtad. Antes esos
   // tres hooks vivían dentro del `!areaTicketAlreadyFinalized` y nunca corrían.
-  if (isFullyPaid && !settledBeforeThisPayment) {
+  if (correnEfectosDeSaldar) {
     try {
       await finalizeCouponsForOrder(updatedOrder.venueId, orderId)
     } catch (couponError: any) {
@@ -3095,29 +3104,68 @@ async function resolveTerminalIdFromSerial(venueId: string, deviceSerialNumber: 
  * @param orgId Organization ID
  * @returns Created payment with order information
  */
-async function markAreaTicketPaymentForReconciliation(input: {
+/**
+ * El dinero ya entró y la finalización del vale no se pudo confirmar: congela lo INCIERTO para conciliación. Devuelve el estado de
+ * la sesión que quedó.
+ *
+ * 🔴 R10-1 (Codex recheck-14 #1): revalida bajo el candado de la sesión y NUNCA degrada lo que ya cerró. Dos peticiones del MISMO
+ * cobro coinciden; una finaliza (intento SUCCEEDED, sesión PAID, inventario 10 → 9) y el `catch` de la otra corría después: pisaba el
+ * intento a UNKNOWN y la sesión a RECONCILIATION_REQUIRED, y el reenvío siguiente volvía a consumir (9 → 8) con un solo cobro.
+ *   · intento SUCCEEDED ⇒ no se toca (ni su `paymentId`: es la constancia de QUIÉN lo cerró);
+ *   · sesión PAID, o la que ese intento ya cerró con ESTE cobro (PARTIALLY_PAID) ⇒ no se toca;
+ *   · lo demás (el intento que quedó pendiente, una sesión cancelada con dinero encima…) se congela como siempre.
+ */
+export async function markAreaTicketPaymentForReconciliation(input: {
   venueId: string
   sessionId: string
   attemptId: string
   paymentId: string
-}): Promise<void> {
-  await prisma.$transaction(async tx => {
-    await tx.areaTicketPaymentAttempt.updateMany({
-      where: { id: input.attemptId, checkoutSessionId: input.sessionId },
-      data: {
-        status: 'UNKNOWN',
-        paymentId: input.paymentId,
-        lastCheckedAt: new Date(),
-      },
-    })
-    await tx.areaTicketCheckoutSession.updateMany({
+}): Promise<'PAID' | 'PARTIALLY_PAID' | 'RECONCILIATION_REQUIRED'> {
+  return prisma.$transaction(async tx => {
+    await tx.$queryRaw`SELECT id FROM "AreaTicketCheckoutSession" WHERE id = ${input.sessionId} AND "venueId" = ${input.venueId} FOR UPDATE`
+    const sesion = await tx.areaTicketCheckoutSession.findFirst({
       where: { id: input.sessionId, venueId: input.venueId },
-      data: {
-        status: 'RECONCILIATION_REQUIRED',
-        activePaymentAttemptId: input.attemptId,
-        version: { increment: 1 },
-      },
+      select: { status: true },
     })
+    const intento = await tx.areaTicketPaymentAttempt.findFirst({
+      where: { id: input.attemptId, checkoutSessionId: input.sessionId },
+      select: { status: true, paymentId: true },
+    })
+    const intentoCerrado = intento?.status === 'SUCCEEDED'
+    const cerradaConEsteCobro = intentoCerrado && intento.paymentId === input.paymentId && sesion?.status === 'PARTIALLY_PAID'
+    const sesionCerrada = sesion?.status === 'PAID' || cerradaConEsteCobro
+    if (!intentoCerrado) {
+      await tx.areaTicketPaymentAttempt.updateMany({
+        where: { id: input.attemptId, checkoutSessionId: input.sessionId },
+        data: {
+          status: 'UNKNOWN',
+          paymentId: input.paymentId,
+          lastCheckedAt: new Date(),
+        },
+      })
+    }
+    if (!sesionCerrada) {
+      await tx.areaTicketCheckoutSession.updateMany({
+        where: { id: input.sessionId, venueId: input.venueId },
+        data: {
+          status: 'RECONCILIATION_REQUIRED',
+          activePaymentAttemptId: input.attemptId,
+          version: { increment: 1 },
+        },
+      })
+      return 'RECONCILIATION_REQUIRED'
+    }
+    if (!intentoCerrado || intento.paymentId !== input.paymentId) {
+      // La sesión la cerró OTRO cobro: éste queda registrado (su `Payment`) y su intento congelado, sin reabrir la venta.
+      logger.error('🚨 [AREA TICKETS v7] Cobro capturado sobre una sesión ya cerrada por otro cobro: requiere conciliación', {
+        venueId: input.venueId,
+        checkoutSessionId: input.sessionId,
+        paymentAttemptId: input.attemptId,
+        paymentId: input.paymentId,
+        cerradaPorPaymentId: intentoCerrado ? intento.paymentId : null,
+      })
+    }
+    return sesion?.status === 'PAID' ? 'PAID' : 'PARTIALLY_PAID'
   })
 }
 
@@ -3130,7 +3178,7 @@ async function finalizeCapturedAreaTicketPayment(input: {
   staffId?: string | null
   /** Etapa 3 del KDS: el saldado del vale deja la marca de cocina (el armado sólo toma los productos sueltos). */
   marcarCocina?: boolean
-}): Promise<{ estado: 'PAID' | 'PARTIALLY_PAID'; ventaYaCerrada: boolean }> {
+}): Promise<{ estado: 'PAID' | 'PARTIALLY_PAID'; ventaYaCerrada: boolean; primerSaldado?: boolean }> {
   const areaTicketPayment = await import('../mobile/areaTicketV7.mobile.service')
   const finalization = await prisma.$transaction(
     tx =>
@@ -3147,13 +3195,23 @@ async function finalizeCapturedAreaTicketPayment(input: {
       }),
     { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
   )
-  return { estado: finalization.fullyPaid ? 'PAID' : 'PARTIALLY_PAID', ventaYaCerrada: finalization.ventaYaCerrada === true }
+  return {
+    estado: finalization.fullyPaid ? 'PAID' : 'PARTIALLY_PAID',
+    ventaYaCerrada: finalization.ventaYaCerrada === true,
+    // R10-3/R10-4: la finalización decidió bajo sus candados si este cobro es el primer saldado (y sus efectos van aquí).
+    primerSaldado: finalization.primerSaldado,
+  }
 }
 
 async function resumeCapturedAreaTicketPayment(
   venueId: string,
   orderId: string,
-  payment: { id: string; processedById?: string | null },
+  payment: {
+    id: string
+    processedById?: string | null
+    amount?: Prisma.Decimal | number | string | null
+    tipAmount?: Prisma.Decimal | number | string | null
+  },
   idempotencyKey?: string | null,
 ): Promise<'PAID' | 'PARTIALLY_PAID' | 'RECONCILIATION_REQUIRED' | null> {
   const session = await prisma.areaTicketCheckoutSession.findFirst({
@@ -3189,23 +3247,88 @@ async function resumeCapturedAreaTicketPayment(
       staffId: payment.processedById,
       marcarCocina,
     })
+    // 🔴 R10-3 (Codex recheck-14 #3): este reenvío fue el primer saldado de la venta (la finalización original falló; el barrido, si
+    // la cerró, no corrió nada). Sus efectos de después del commit corren UNA vez aquí, con el empleado del cobro, como en el cobro
+    // en vivo: cupones, referido (idempotente; su efecto durable también lo recupera), lealtad y comanda. Un segundo reenvío ya no es
+    // primer saldado (el vale SALE de esta finalización lo prueba) y no repite nada. Nunca tumba la respuesta: el dinero ya está.
+    if (finalizacion.primerSaldado) {
+      try {
+        const propina = Number(payment.tipAmount ?? 0)
+        await updateOrderTotalsForStandalonePayment(
+          orderId,
+          Number(payment.amount ?? 0) + propina,
+          propina,
+          payment.id,
+          payment.processedById ?? undefined,
+          {
+            areaTicketAlreadyFinalized: true,
+            primerSaldado: true,
+            ventaYaCerrada: finalizacion.ventaYaCerrada,
+            venueId,
+            marcarCocina: marcarCocina && finalizacion.estado === 'PAID',
+          },
+        )
+      } catch (sideEffectError) {
+        logger.error('[AREA TICKETS v7] El reenvío finalizó el cobro, pero fallaron efectos secundarios no monetarios', {
+          venueId,
+          orderId,
+          paymentId: payment.id,
+          error: sideEffectError instanceof Error ? sideEffectError.message : String(sideEffectError),
+        })
+      }
+    }
     return finalizacion.estado
   } catch (error) {
-    await markAreaTicketPaymentForReconciliation({
+    const estado = await markAreaTicketPaymentForReconciliation({
       venueId,
       sessionId: session.id,
       attemptId: attempt.id,
       paymentId: payment.id,
     })
-    logger.error('[AREA TICKETS v7] Reintento del pago capturado sigue requiriendo conciliación', {
+    const detalle = {
       venueId,
       orderId,
       paymentId: payment.id,
       checkoutSessionId: session.id,
       error: error instanceof Error ? error.message : String(error),
-    })
-    return 'RECONCILIATION_REQUIRED'
+    }
+    if (estado === 'RECONCILIATION_REQUIRED') {
+      logger.error('[AREA TICKETS v7] Reintento del pago capturado sigue requiriendo conciliación', detalle)
+    } else {
+      logger.warn('[AREA TICKETS v7] Otra petición de este cobro ya cerró la sesión; no se degradó', { ...detalle, estado })
+    }
+    return estado
   }
+}
+
+/**
+ * 🔴 R10-3 (Codex recheck-14 #3): el barrido de pagadas-abiertas, ANTES de cerrar sólo el estado de una venta de vales, retoma el
+ * cobro capturado cuya finalización falló (sesión RECONCILIATION_REQUIRED con su intento UNKNOWN). Es EL MISMO camino que el reenvío
+ * de la terminal (`resumeCapturedAreaTicketPayment`): consume el inventario, cierra la sesión y corre una vez los efectos de saldar
+ * con el empleado del cobro — la lealtad va al primario de la venta, como en el cobro en vivo (una liga sin `payments:create` a una
+ * venta ya cobrada entra como acompañante y no cuenta). Sin él, la venta que la terminal nunca reenvía (lo normal: ya recibió su
+ * 201) quedaba cerrada sin lealtad, sin cupones, sin comanda y sin descontar. `null` = la venta no tiene tal cobro.
+ */
+export async function retomarCobroDeValesAtorado(
+  venueId: string,
+  orderId: string,
+): Promise<'PAID' | 'PARTIALLY_PAID' | 'RECONCILIATION_REQUIRED' | null> {
+  const sesion = await prisma.areaTicketCheckoutSession.findFirst({
+    where: { venueId, orderId, status: 'RECONCILIATION_REQUIRED' },
+    select: { activePaymentAttemptId: true },
+  })
+  if (!sesion?.activePaymentAttemptId) return null
+  const intento = await prisma.areaTicketPaymentAttempt.findFirst({
+    where: { id: sesion.activePaymentAttemptId, orderId, status: 'UNKNOWN' },
+    select: { paymentId: true, idempotencyKey: true },
+  })
+  if (!intento?.paymentId) return null
+  const cobro = await prisma.payment.findFirst({
+    where: { id: intento.paymentId, venueId, orderId, status: 'COMPLETED' },
+    select: { id: true, processedById: true, amount: true, tipAmount: true },
+  })
+  if (!cobro) return null
+  return resumeCapturedAreaTicketPayment(venueId, orderId, cobro, intento.idempotencyKey)
 }
 
 /**
@@ -4365,6 +4488,10 @@ export async function recordOrderPayment(
       if (capturedAreaCheckout && payment.status === 'COMPLETED') {
         // R9-1: la finalización leyó bajo su candado que la venta YA estaba cerrada ⇒ la pasada de abajo no repite efectos de saldar.
         let ventaYaCerrada = false
+        // R10-3/R10-4: lo decide la finalización (¿este cobro es el primer saldado?). Sin finalizar aquí no hay efectos: si otra
+        // petición de este cobro la cerró, son de ella.
+        let primerSaldado: boolean | undefined
+        let finalizoAqui = false
         try {
           const finalizacion = await finalizeCapturedAreaTicketPayment({
             venueId,
@@ -4377,31 +4504,42 @@ export async function recordOrderPayment(
           })
           areaTicketCheckoutState = finalizacion.estado
           ventaYaCerrada = finalizacion.ventaYaCerrada
+          primerSaldado = finalizacion.primerSaldado
+          finalizoAqui = true
         } catch (finalizationError) {
           // El proveedor ya confirmó el dinero. Nunca habilitar otro cobro:
           // congela la sesión y conserva el mismo intento para conciliación.
-          await markAreaTicketPaymentForReconciliation({
+          // R10-1: salvo que otra petición de ESTE cobro ya la haya cerrado; entonces se responde lo que quedó, sin degradarla.
+          areaTicketCheckoutState = await markAreaTicketPaymentForReconciliation({
             venueId,
             sessionId: capturedAreaCheckout.sessionId,
             attemptId: capturedAreaCheckout.attemptId,
             paymentId: payment.id,
           })
-          logger.error('[AREA TICKETS v7] Pago capturado; finalización requiere conciliación', {
+          const detalle = {
             venueId,
             orderId,
             paymentId: payment.id,
             checkoutSessionId: capturedAreaCheckout.sessionId,
             error: finalizationError instanceof Error ? finalizationError.message : String(finalizationError),
-          })
-          areaTicketCheckoutState = 'RECONCILIATION_REQUIRED'
+          }
+          if (areaTicketCheckoutState === 'RECONCILIATION_REQUIRED') {
+            logger.error('[AREA TICKETS v7] Pago capturado; finalización requiere conciliación', detalle)
+          } else {
+            logger.warn('[AREA TICKETS v7] Otra petición de este cobro ya cerró la sesión; no se degradó', {
+              ...detalle,
+              estado: areaTicketCheckoutState,
+            })
+          }
         }
-        if (areaTicketCheckoutState !== 'RECONCILIATION_REQUIRED') {
+        if (finalizoAqui) {
           try {
             // The atomic area-ticket transaction already persisted totals and
             // inventory. Re-enter only the coupon/referral/loyalty side effects.
             await updateOrderTotalsForStandalonePayment(activeOrder.id, totalAmount + tipAmount, tipAmount, payment.id, validatedStaffId, {
               areaTicketAlreadyFinalized: true,
               ventaYaCerrada,
+              primerSaldado,
               venueId,
               // Codex 3.6 (S3): la finalización ya puso la marca al saldar; aquí sólo se arman los sueltos.
               marcarCocina: marcarCocina && areaTicketCheckoutState === 'PAID',

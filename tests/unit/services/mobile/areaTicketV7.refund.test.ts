@@ -29,7 +29,11 @@ const ATTEMPT_ID = 'cattempt00000000000000001'
 
 type FakePayment = { amount: Prisma.Decimal; tipAmount: Prisma.Decimal; type: string }
 
-function makeTx(order: Record<string, any>, payments: FakePayment[]) {
+/**
+ * `sesionGuardada`: lo que dejó la finalización anterior de ESTE mismo cobro. R10-4 (ronda 10 post-QA de sellos tardíos): la salida
+ * temprana responde `fullyPaid` desde la sesión GUARDADA, ya no desde la aritmética de esta pasada.
+ */
+function makeTx(order: Record<string, any>, payments: FakePayment[], sesionGuardada: 'PAID' | 'PARTIALLY_PAID' = 'PAID') {
   const paymentSelects: any[] = []
   const orderUpdates: any[] = []
   const tx: any = {
@@ -58,7 +62,12 @@ function makeTx(order: Record<string, any>, payments: FakePayment[]) {
       findFirst: jest.fn().mockResolvedValue({ id: ATTEMPT_ID, status: 'SUCCEEDED', paymentId: PAYMENT_ID }),
       update: jest.fn().mockResolvedValue({}),
     },
-    areaTicketCheckoutSession: { update: jest.fn().mockResolvedValue({}) },
+    areaTicketCheckoutSession: {
+      update: jest.fn().mockResolvedValue({}),
+      findFirst: jest.fn().mockResolvedValue({ status: sesionGuardada }),
+    },
+    // R10-1/R10-3: con la venta ya cerrada, la finalización mira si alguien tiene su vale de inventario (aquí: nadie).
+    inventoryPosting: { findUnique: jest.fn().mockResolvedValue(null) },
   }
   return { tx, paymentSelects, orderUpdates }
 }
@@ -140,7 +149,7 @@ describe('vales por área v7 — un reembolso previo no reabre saldo', () => {
   })
 
   it('REGRESIÓN: un abono parcial sigue quedando PARTIAL con el restante real', async () => {
-    const { tx, orderUpdates } = makeTx(baseOrder(), [{ amount: d('50.00'), tipAmount: d('0.00'), type: 'REGULAR' }])
+    const { tx, orderUpdates } = makeTx(baseOrder(), [{ amount: d('50.00'), tipAmount: d('0.00'), type: 'REGULAR' }], 'PARTIALLY_PAID')
 
     const result = await run(tx)
 

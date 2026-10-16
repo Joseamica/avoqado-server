@@ -41,6 +41,8 @@ type SalePostingItem = {
   quantity: number
   weightQuantity?: Prisma.Decimal | number | string | null
   modifiers?: Array<{ quantity: number; modifier: Record<string, unknown> | null }> | null
+  /** El renglón vino de un vale por área v7 (puede tener su reserva de inventario ACTIVE). */
+  areaTicketLineId?: string | null
 }
 
 const itemHasInventoryModifiers = (item: SalePostingItem): boolean =>
@@ -183,6 +185,22 @@ export async function createSalePostingInTx(
   const resolvedSkip =
     skipReason ??
     (lines.length > 0 ? undefined : items.length === 0 ? 'NO_ITEMS' : items.some(i => i.productId) ? 'NO_TRACKED_ITEMS' : 'CUSTOM_ITEM')
+
+  // 🔴 R10-2 (ronda 10 post-QA de sellos tardíos; Codex recheck-14 #2): este vale toma la obligación de inventario de TODOS los
+  // renglones, también los de un vale por área v7 con su reserva ACTIVE (la apartó al emitirse y nadie la consumió: otro canal
+  // —pago manual, liquidar desde el panel o el saldo del cliente, cripto— cierra la venta sin conocer la sesión). La reserva se
+  // suelta AQUÍ, en la misma transacción del cierre y SIN mover stock (como al cancelar un vale sin cobrar): si se quedaba, restaba
+  // disponibilidad para siempre y el siguiente vale se rechazaba con mercancía en el anaquel. Con `skipReason` (la sesión o el
+  // efectivo del POS que ya consumieron en su propia transacción) no se toca nada. Sin renglones de vale no hay consulta.
+  const lineasDeVale = [
+    ...new Set(items.map(i => i.areaTicketLineId).filter((id): id is string => typeof id === 'string' && id.length > 0)),
+  ]
+  if (!skipReason && lineasDeVale.length > 0) {
+    await tx.areaTicketInventoryReservation.updateMany({
+      where: { venueId, areaTicketLineId: { in: lineasDeVale }, status: 'ACTIVE' },
+      data: { status: 'RELEASED', releasedAt: new Date() },
+    })
+  }
 
   return await tx.inventoryPosting.create({
     data: {

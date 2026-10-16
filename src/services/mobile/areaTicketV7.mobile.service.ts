@@ -3277,6 +3277,12 @@ export async function finalizeAreaTicketPaymentInTransaction(
   fullyPaid?: boolean
   /** R9-1: la venta ya estaba cerrada (PAID) antes de este cobro: quien llama NO repite cupones, referido, lealtad ni comanda. */
   ventaYaCerrada?: boolean
+  /**
+   * R10-3/R10-4 (sólo al conciliar un cobro capturado): ESTA finalización es el primer saldado de la venta —lo saldó este cobro, o
+   * la cerró el barrido sin vale ni efectos y este cobro la recupera—. Quien llama corre UNA vez cupones, referido, lealtad y comanda;
+   * con `false`, ninguno (ya los corrió quien cerró, o los correrá quien finalizó este mismo cobro).
+   */
+  primerSaldado?: boolean
 }> {
   if (!input.locked) return { areaTicketOrder: false }
   await tx.$queryRaw`SELECT id FROM "AreaTicketCheckoutSession" WHERE id = ${input.locked.sessionId} AND "venueId" = ${input.venueId} FOR UPDATE`
@@ -3307,6 +3313,9 @@ export async function finalizeAreaTicketPaymentInTransaction(
       servedById: true,
       createdById: true,
       areaTicketCode: true,
+      // R10-3: la recuperación tras el barrido no pisa una lealtad ni una marca de cocina que ya tenga la venta.
+      loyaltyEligibleAt: true,
+      kitchenPendingAt: true,
     },
   })
   if (!lockedOrder) {
@@ -3317,6 +3326,8 @@ export async function finalizeAreaTicketPaymentInTransaction(
   }
   let finalFullyPaid = input.fullyPaid
   let ventaYaCerrada = false
+  let inventarioYaTomado = false
+  let primerSaldado = false
   if (input.reconcileCapturedPayment) {
     // 🔴 `type` NO es decorativo: un reembolso vive como un `Payment` NEGATIVO
     // `type: REFUND` colgado de la MISMA orden. Sin ese campo, este recálculo
@@ -3360,6 +3371,30 @@ export async function finalizeAreaTicketPaymentInTransaction(
     })
     const saldaAqui = finalFullyPaid && !cobro.cerrada
     ventaYaCerrada = cobro.cerrada
+    // R9-1 / R10-1: ¿alguien ya tiene la obligación de inventario de esta venta? Todo cierre la deja en su vale SALE, en la MISMA
+    // transacción que la pasa a PAID: el pago manual, liquidar desde el panel, cripto, la terminal y —desde R10-1— la propia sesión
+    // (`AREA_TICKET_TRANSACTIONAL`, abajo). En CUALQUIER estado: PENDING/APPLYING/PARTIAL_FAILED los termina su dueño (el sweeper o
+    // la conciliación manual); exigir APPLIED duplicaría lo ya aplicado. El barrido de pagadas-abiertas es el único que cierra sin él.
+    inventarioYaTomado =
+      ventaYaCerrada &&
+      Boolean(
+        await tx.inventoryPosting.findUnique({
+          where: {
+            venueId_sourceKind_sourceId_effectKind: {
+              venueId: input.venueId,
+              sourceKind: 'ORDER',
+              sourceId: input.orderId,
+              effectKind: 'SALE',
+            },
+          },
+          select: { id: true },
+        }),
+      )
+    // 🔴 R10-3 (Codex recheck-14 #3): cerrada SIN vale = la cerró el barrido (`ORDER_STATUS_ONLY`: sin lealtad, cupones ni comanda).
+    // Este cobro, que la cubre, es su primer saldado real: deja la lealtad durable (el reconciliador la termina si lo de después
+    // del commit falla) y la marca de cocina, sin pisar las que ya tenga (una liga tardía con permiso ya abrió la suya).
+    const recuperaSaldado = ventaYaCerrada && !inventarioYaTomado
+    primerSaldado = saldaAqui || recuperaSaldado
     await tx.order.update({
       where: { id: input.orderId },
       data: {
@@ -3381,6 +3416,8 @@ export async function finalizeAreaTicketPaymentInTransaction(
               ...(input.marcarCocina ? { kitchenPendingAt: new Date() } : {}),
             }
           : {}),
+        ...(recuperaSaldado && !lockedOrder.loyaltyEligibleAt ? { loyaltyEligibleAt: new Date(), loyaltyStaffId: input.staffId } : {}),
+        ...(recuperaSaldado && input.marcarCocina && !lockedOrder.kitchenPendingAt ? { kitchenPendingAt: new Date() } : {}),
         ...(!lockedOrder.servedById && input.staffId
           ? { servedById: input.staffId, createdById: lockedOrder.createdById ?? input.staffId }
           : {}),
@@ -3411,10 +3448,20 @@ export async function finalizeAreaTicketPaymentInTransaction(
         paymentId: attempt.paymentId,
       })
     }
+    // 🔴 R10-4 (Codex recheck-14 #4): otra petición de ESTE mismo cobro ya lo finalizó. Lo que se responde es lo PERSISTIDO (con un
+    // cobro tardío de $10 sobre una venta cerrada la aritmética dice «parcial», pero la sesión quedó PAID) y los efectos de saldar
+    // NO se corren aquí: son de quien finalizó (que, desde R10-3, también los corre si fue un reenvío).
+    const sesion = input.reconcileCapturedPayment
+      ? await tx.areaTicketCheckoutSession.findFirst({
+          where: { id: input.locked.sessionId, venueId: input.venueId },
+          select: { status: true },
+        })
+      : null
     return {
       areaTicketOrder: true,
       sessionId: input.locked.sessionId,
-      ...(input.reconcileCapturedPayment ? { fullyPaid: finalFullyPaid } : {}),
+      ...(input.reconcileCapturedPayment ? { fullyPaid: sesion?.status === AreaTicketCheckoutStatus.PAID, primerSaldado: false } : {}),
+      ...(ventaYaCerrada ? { ventaYaCerrada: true } : {}),
     }
   }
   // Sin condición A PROPÓSITO: el bloque de arriba ya cubre el caso SUCCEEDED —
@@ -3446,33 +3493,42 @@ export async function finalizeAreaTicketPaymentInTransaction(
     return {
       areaTicketOrder: true,
       sessionId: input.locked.sessionId,
-      ...(input.reconcileCapturedPayment ? { fullyPaid: false } : {}),
+      ...(input.reconcileCapturedPayment ? { fullyPaid: false, primerSaldado: false } : {}),
     }
   }
 
-  // R9-1: el inventario no se descuenta dos veces. Si el primer cierre ya lo tomó —todo camino que salda fuera de la sesión (pago
-  // manual, liquidar desde el panel, cripto, la terminal) deja su vale de inventario SALE, con TODOS los renglones—, la sesión no
+  // R9-1: el inventario no se descuenta dos veces. Si el primer cierre ya lo tomó (`inventarioYaTomado`, arriba), la sesión no
   // consume nada. Si no lo tomó —el barrido de pagadas-abiertas cierra SIN vale ni descuento—, el consumo de la sesión es el PRIMERO
-  // de la venta, no una repetición, y corre como siempre. Las reservas que el otro cierre no consumió se quedan como están.
-  const inventarioYaTomado =
-    ventaYaCerrada &&
-    Boolean(
-      await tx.inventoryPosting.findUnique({
-        where: {
-          venueId_sourceKind_sourceId_effectKind: {
-            venueId: input.venueId,
-            sourceKind: 'ORDER',
-            sourceId: input.orderId,
-            effectKind: 'SALE',
-          },
-        },
-        select: { id: true },
-      }),
-    )
+  // de la venta, no una repetición, y corre como siempre.
   if (!inventarioYaTomado) {
     await lockAreaOrderInventoryFootprint(tx, input.venueId, input.locked.sessionId, input.orderId)
     await consumeAreaTicketReservations(tx, input.venueId, input.locked.sessionId, input.orderId, input.staffId)
     await consumeUnreservedAreaOrderInventory(tx, input.venueId, input.orderId, input.staffId)
+    // 🔴 R10-1 (Codex recheck-14 #1): la constancia DURABLE de este consumo, en la misma transacción —como el efectivo del POS móvil—.
+    // Sin ella, un `catch` tardío que degradara la sesión dejaba la venta PAID sin vale y el reenvío volvía a consumir (10 → 9 → 8).
+    // Sin renglones ni foto: los movimientos ya los escribió la sesión (referencia = la orden o la reserva); nadie aplica ni revierte
+    // este vale. Si ya existe uno (no debería: la venta no estaba cerrada o no tenía vale), lo devuelve sin tocar nada.
+    const { createSalePostingInTx } = await import('../inventory/inventoryPosting.service')
+    await createSalePostingInTx(tx, {
+      venueId: input.venueId,
+      orderId: input.orderId,
+      items: [],
+      staffId: input.staffId,
+      skipReason: 'AREA_TICKET_TRANSACTIONAL',
+    })
+  } else {
+    // 🔴 R10-2 (Codex recheck-14 #2): el vale de VENTA del otro cierre ya descontó TODOS los renglones, también los del vale. Sus
+    // reservas ACTIVE quedaban apartando mercancía ya vendida para siempre (la expiración sólo libera sesiones OPEN). Se sueltan SIN
+    // mover stock, como al cancelar un vale sin cobrar. Hoy el cierre ya las suelta al crear su vale (`createSalePostingInTx`); esto
+    // cubre las ventas cerradas antes de ese cambio.
+    await tx.areaTicketInventoryReservation.updateMany({
+      where: {
+        venueId: input.venueId,
+        areaTicket: { checkoutSessionId: input.locked.sessionId },
+        status: AreaTicketInventoryReservationStatus.ACTIVE,
+      },
+      data: { status: AreaTicketInventoryReservationStatus.RELEASED, releasedAt: new Date() },
+    })
   }
   const paidAt = new Date()
   const immediateTicketIds = tickets.filter(ticket => ticket.fulfillmentModeSnapshot === FulfillmentMode.IMMEDIATE).map(ticket => ticket.id)
@@ -3517,7 +3573,7 @@ export async function finalizeAreaTicketPaymentInTransaction(
   return {
     areaTicketOrder: true,
     sessionId: input.locked.sessionId,
-    ...(input.reconcileCapturedPayment ? { fullyPaid: true } : {}),
+    ...(input.reconcileCapturedPayment ? { fullyPaid: true, primerSaldado } : {}),
     ...(ventaYaCerrada ? { ventaYaCerrada: true } : {}),
   }
 }

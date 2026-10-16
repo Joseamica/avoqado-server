@@ -29,7 +29,7 @@ jest.mock('@/observability/jobContext', () => ({ scheduleJob: jest.fn(() => ({ s
 import logger from '@/config/logger'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { PaidOrderReconcilerJob, defaults } from '@/jobs/paid-order-reconciler.job'
-import { reconcileOrderFromPayments } from '@/services/tpv/payment.tpv.service'
+import { reconcileOrderFromPayments, retomarCobroDeValesAtorado } from '@/services/tpv/payment.tpv.service'
 
 const noopCron = { start: jest.fn(), stop: jest.fn() }
 const AHORA = new Date('2026-09-02T20:00:00Z')
@@ -55,6 +55,8 @@ function job(over: Overrides = {}) {
     retryEntry: (fn: () => Promise<unknown>) => fn() as never,
     findCandidates: jest.fn().mockResolvedValue([candidata('a'), candidata('b')]),
     reconcile: jest.fn().mockResolvedValue({ orderId: 'x', warning: null, written: true }),
+    // Sin venta de vales atorada (lo normal): la candidata se cierra de estado como siempre.
+    retomarVale: jest.fn().mockResolvedValue(null),
     ...over,
   })
 }
@@ -159,5 +161,58 @@ describe('paid-order-reconciler', () => {
     const desde = new Date('2025-01-01T00:00:00Z')
     await job({ findCandidates: explicito }).runNow({ dryRun: true, since: desde })
     expect(explicito).toHaveBeenCalledWith(expect.objectContaining({ since: desde }))
+  })
+
+  /**
+   * 🔴 R10-3 (Codex recheck-14 #3): la venta de vales cuyo cobro capturado quedó en conciliación (su finalización falló) y la
+   * terminal nunca reenvía —lo normal: ya recibió su 201—. Cerrarla sólo de estado la dejaba sin lealtad, cupones, comanda ni
+   * descuento para siempre. El barrido la cierra primero por SU sesión (el mismo camino que el reenvío) y sólo si no se puede, de
+   * estado.
+   */
+  describe('🔴 R10-3: la venta de vales con su cobro atorado', () => {
+    it('se cierra por su sesión (con inventario y efectos) y NO de estado; el asiento lo dice', async () => {
+      const reconcile = jest.fn().mockResolvedValue({ orderId: 'b', warning: null, written: true })
+      const retomarVale = jest.fn().mockImplementation(async (_v: string, id: string) => (id === 'a' ? 'PAID' : null))
+      const r = await job({ reconcile, retomarVale }).runNow()
+
+      expect(retomarVale).toHaveBeenNthCalledWith(1, 'v1', 'a')
+      expect(reconcile).toHaveBeenCalledTimes(1)
+      expect(reconcile).toHaveBeenCalledWith('b')
+      expect(r).toMatchObject({ scanned: 2, reconciled: 2, failed: 0 })
+      expect(logAction).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: 'ORDER_RECONCILED_PAID',
+          entityId: 'a',
+          data: expect.objectContaining({ effects: 'AREA_TICKET_SESSION_FINALIZED' }),
+        }),
+      )
+      expect(logAction).toHaveBeenCalledWith(
+        expect.objectContaining({ entityId: 'b', data: expect.objectContaining({ effects: 'ORDER_STATUS_ONLY' }) }),
+      )
+    })
+
+    it.each(['RECONCILIATION_REQUIRED', 'PARTIALLY_PAID'])(
+      'si la sesión tampoco ahora se puede cerrar (%s) ⇒ de estado, como siempre',
+      async estado => {
+        const reconcile = jest.fn().mockResolvedValue({ orderId: 'a', warning: null, written: true })
+        const r = await job({ reconcile, retomarVale: jest.fn().mockResolvedValue(estado) }).runNow()
+
+        expect(reconcile).toHaveBeenCalledTimes(2)
+        expect(r).toMatchObject({ reconciled: 2, failed: 0 })
+      },
+    )
+
+    it('un fallo al retomar no detiene el cierre de estado (y se reporta)', async () => {
+      const reconcile = jest.fn().mockResolvedValue({ orderId: 'a', warning: null, written: true })
+      const r = await job({ reconcile, retomarVale: jest.fn().mockRejectedValue(new Error('base caída')) }).runNow()
+
+      expect(reconcile).toHaveBeenCalledTimes(2)
+      expect(r).toMatchObject({ reconciled: 2, failed: 0 })
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('retomar'), expect.objectContaining({ orderId: 'a' }))
+    })
+
+    it('🔴 retoma por el MISMO camino que el reenvío de la terminal', () => {
+      expect(defaults.retomarVale).toBe(retomarCobroDeValesAtorado)
+    })
   })
 })

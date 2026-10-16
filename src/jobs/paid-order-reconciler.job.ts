@@ -3,7 +3,7 @@ import logger from '../config/logger'
 import { scheduleJob } from '../observability/jobContext'
 import { logAction } from '../services/dashboard/activity-log.service'
 import { findPaidButOpenOrders, type CandidataPagadaAbierta } from '../services/shared/pagadaPeroAbierta'
-import { reconcileOrderFromPayments } from '../services/tpv/payment.tpv.service'
+import { reconcileOrderFromPayments, retomarCobroDeValesAtorado } from '../services/tpv/payment.tpv.service'
 import prisma from '../utils/prismaClient'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { DATABASE_JOB_SCHEDULES } from './jobSchedules'
@@ -42,6 +42,12 @@ import { DATABASE_JOB_SCHEDULES } from './jobSchedules'
  * `effects: 'ORDER_STATUS_ONLY'`— es el vale de inventario y la lealtad: el camino del cobro ya
  * los daba por hechos cuando la orden tiene al menos un `Payment`, que es justo lo que el
  * criterio exige.
+ *
+ * 🔴 Excepción (R10-3, 16-oct-2026): una venta de vales v7 cuyo cobro capturado quedó en conciliación
+ * (la finalización de su sesión falló) se cierra por esa sesión — `retomarCobroDeValesAtorado`, el
+ * mismo camino que el reenvío de la terminal —, con su inventario y sus efectos de saldar, y el
+ * asiento dice `effects: 'AREA_TICKET_SESSION_FINALIZED'`. Sólo si eso tampoco se puede, se cierra
+ * de estado como cualquier otra.
  *
  * 🔴 Y cierra SIEMPRE por ese camino, nunca por `computeOrderBalance`: el criterio y el cierre
  * tienen que compartir aritmética, o una orden quedaría elegida por uno y rechazada por el otro
@@ -86,6 +92,8 @@ interface Dependencies {
   retryEntry: typeof retry
   findCandidates: (opts: { graceMs: number; limit: number; now: Date; since: Date }) => Promise<CandidataPagadaAbierta[]>
   reconcile: (orderId: string) => Promise<{ orderId: string; warning: unknown; written: boolean }>
+  /** R10-3: retoma el cobro capturado de una sesión de vales atorada (el mismo camino que el reenvío); `null` = no hay tal cobro. */
+  retomarVale: (venueId: string, orderId: string) => Promise<string | null>
 }
 
 export const defaults: Dependencies = {
@@ -93,6 +101,7 @@ export const defaults: Dependencies = {
   retryEntry: retry,
   findCandidates: opts => findPaidButOpenOrders(prisma, opts),
   reconcile: reconcileOrderFromPayments,
+  retomarVale: retomarCobroDeValesAtorado,
 }
 
 export class PaidOrderReconcilerJob {
@@ -150,6 +159,37 @@ export class PaidOrderReconcilerJob {
       if (dryRun) return result
       for (const c of candidates) {
         try {
+          // 🔴 R10-3: una venta de vales cuyo cobro capturado no se pudo finalizar se cierra por SU sesión (consume el inventario y
+          // corre una vez cupones, referido, lealtad y comanda con el empleado del cobro), no sólo de estado. Si tampoco ahora se puede
+          // (p. ej. sigue sin existencia), se cierra de estado como siempre; su sesión queda en conciliación y un reenvío la recupera.
+          const vale = await this.d.retomarVale(c.venueId, c.id).catch(error => {
+            logger.warn('🧾 [paid-order-reconciler] no se pudo retomar el cobro del vale; se cierra sólo de estado', {
+              orderId: c.id,
+              venueId: c.venueId,
+              error: error instanceof Error ? error.message : String(error),
+            })
+            return null
+          })
+          if (vale === 'PAID') {
+            result.reconciled += 1
+            await logAction({
+              staffId: null,
+              venueId: c.venueId,
+              action: 'ORDER_RECONCILED_PAID',
+              entity: 'Order',
+              entityId: c.id,
+              data: {
+                orderNumber: c.orderNumber,
+                before: { status: c.status, paymentStatus: c.paymentStatus },
+                base: c.base,
+                pagado: c.pagado,
+                paymentIds: c.paymentIds,
+                sweep: 'paid-order-reconciler',
+                effects: 'AREA_TICKET_SESSION_FINALIZED',
+              },
+            })
+            continue
+          }
           const { written } = await this.d.reconcile(c.id)
           if (!written) {
             // T8-R3: the order changed under its lock twice and nothing was written; it is a candidate again next tick.
