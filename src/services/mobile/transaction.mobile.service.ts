@@ -94,6 +94,9 @@ export async function getTransactions(venueId: string, page: number, pageSize: n
         order: {
           select: {
             orderNumber: true,
+            // D4 (mesas40): la reimpresión dice «Mesa N» / «Para llevar» como el ticket del cobro.
+            type: true,
+            table: { select: { number: true } },
           },
         },
         processedBy: {
@@ -127,6 +130,9 @@ export async function getTransactions(venueId: string, page: number, pageSize: n
       createdAt: p.createdAt.toISOString(),
       orderNumber: p.order?.orderNumber ?? null,
       staffName: p.processedBy ? `${p.processedBy.firstName ?? ''} ${p.processedBy.lastName ?? ''}`.trim() : null,
+      // Aditivos (D4, mesas40): opcionales; sin orden o sin mesa, null.
+      orderType: p.order?.type ?? null,
+      tableNumber: p.order?.table?.number ?? null,
     })),
     meta: {
       total,
@@ -178,6 +184,9 @@ export async function getTransactionDetail(venueId: string, paymentId: string) {
       order: {
         select: {
           orderNumber: true,
+          // D4 (mesas40): la reimpresión dice «Mesa N» / «Para llevar» como el ticket del cobro.
+          type: true,
+          table: { select: { number: true } },
           items: {
             select: {
               id: true,
@@ -271,6 +280,9 @@ export async function getTransactionDetail(venueId: string, paymentId: string) {
     createdAt: payment.createdAt.toISOString(),
     orderNumber: payment.order?.orderNumber ?? null,
     staffName: payment.processedBy ? `${payment.processedBy.firstName ?? ''} ${payment.processedBy.lastName ?? ''}`.trim() : null,
+    // Aditivos (D4, mesas40): opcionales; sin orden o sin mesa, null.
+    orderType: payment.order?.type ?? null,
+    tableNumber: payment.order?.table?.number ?? null,
     remainingRefundable,
     remainingRefundableSale,
     remainingRefundableTip,
