@@ -125,7 +125,10 @@ async function reconcileInvoice(venueId: string, purchaseId: string, invoiceId: 
         where: { purchaseId, venueId },
         select: {
           id: true,
-          selections: { where: { effectiveAt: { lte: new Date(start * 1000) } }, orderBy: { effectiveAt: 'desc' }, take: 1 },
+          // La última fila vigente al empezar el periodo, contando el SEGUNDO de la frontera: Stripe da segundos enteros y
+          // ahí viven las ampliaciones de la puesta al día de funciones de plan (+1 ms…; hybridPlanCatchUp.ts), porque el
+          // historial es inmutable por trigger. Ningún otro escritor usa fracciones de segundo.
+          selections: { where: { effectiveAt: { lt: new Date((start + 1) * 1000) } }, orderBy: { effectiveAt: 'desc' }, take: 1 },
         },
         orderBy: { id: 'asc' },
         take: 9,

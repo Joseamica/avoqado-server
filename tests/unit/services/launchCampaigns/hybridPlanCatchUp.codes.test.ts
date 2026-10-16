@@ -7,7 +7,7 @@ jest.mock('@/utils/prismaClient', () => {
     $queryRaw: jest.fn().mockResolvedValue([]),
     hybridPurchase: { findUniqueOrThrow: jest.fn() },
     hybridContract: { findUniqueOrThrow: jest.fn(), update: jest.fn() },
-    hybridContractSelection: { findUnique: jest.fn(), create: jest.fn() },
+    hybridContractSelection: { findUnique: jest.fn(), findFirst: jest.fn(), create: jest.fn() },
     hybridPaymentPeriod: { findMany: jest.fn() },
     capabilityGrant: { findFirst: jest.fn(), createMany: jest.fn() },
     activityLog: { create: jest.fn() },
@@ -55,6 +55,7 @@ function unContratoPro(featureCodes: string[]) {
     planTier: 'PRO',
   })
   tx.hybridContractSelection.findUnique.mockResolvedValue(null)
+  tx.hybridContractSelection.findFirst.mockResolvedValue(null)
   tx.hybridPaymentPeriod.findMany.mockResolvedValue([
     { id: 'per1', startsAt: new Date('2026-10-01T06:00:00.000Z'), endsAt: PAGADO_HASTA, composition: [{ contractId: 'k1' }] },
   ])
@@ -135,5 +136,49 @@ describe('puesta al día de una función de plan en los contratos vivos', () => 
   it('🔴 rechaza una función que no es de plan antes de leer un solo contrato', async () => {
     await expect(addPlanFeatureToLivePlanContracts('CFDI' as never, AHORA)).rejects.toThrow(/no es una función de plan/)
     expect(db.hybridContract.findMany).not.toHaveBeenCalled()
+  })
+})
+
+describe('🔴 C2 r1: la otra puesta al día ya escribió la frontera en ESTE periodo (el historial es inmutable por trigger)', () => {
+  it('se agrega una fila POSTERIOR dentro del mismo segundo de la frontera, con las dos funciones, y el acceso de hoy se escribe', async () => {
+    unContratoPro(['RESERVATIONS', 'SERVICE_PAY'])
+    tx.hybridContractSelection.findFirst.mockResolvedValue({ effectiveAt: PAGADO_HASTA, featureCodes: ['RESERVATIONS', 'SERVICE_PAY'] })
+    const r = await addPlanFeatureToLivePlanContracts('GIFT_CARDS', AHORA)
+    // Busca la ÚLTIMA fila del segundo que empieza en la frontera (ahí viven las ampliaciones anteriores).
+    expect(tx.hybridContractSelection.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { contractId: 'k1', effectiveAt: { gte: PAGADO_HASTA, lt: new Date(PAGADO_HASTA.getTime() + 1000) } },
+        orderBy: { effectiveAt: 'desc' },
+      }),
+    )
+    const conLasDos = ['GIFT_CARDS', 'RESERVATIONS', 'SERVICE_PAY']
+    expect(tx.hybridContractSelection.create).toHaveBeenCalledWith({
+      data: { contractId: 'k1', effectiveAt: new Date(PAGADO_HASTA.getTime() + 1), featureCodes: conLasDos },
+    })
+    expect(tx.hybridContract.update).toHaveBeenCalledWith({ where: { id: 'k1' }, data: { featureCodes: conLasDos } })
+    expect(tx.capabilityGrant.createMany).toHaveBeenCalledWith({
+      data: [expect.objectContaining({ featureCode: 'GIFT_CARDS', sourceId: 'per1:k1', paymentPeriodId: 'per1', revokedAt: null })],
+      skipDuplicates: true,
+    })
+    expect(r).toMatchObject({ contracts: 1, grants: 1, skippedContracts: [] })
+  })
+
+  it('una segunda ampliación va después de la primera (+1 ms sobre la última fila del segundo)', async () => {
+    unContratoPro(['GIFT_CARDS', 'RESERVATIONS'])
+    const primera = new Date(PAGADO_HASTA.getTime() + 1)
+    tx.hybridContractSelection.findFirst.mockResolvedValue({ effectiveAt: primera, featureCodes: ['GIFT_CARDS', 'RESERVATIONS'] })
+    await addServicePayToLivePlanContracts(AHORA)
+    expect(tx.hybridContractSelection.create).toHaveBeenCalledWith({
+      data: { contractId: 'k1', effectiveAt: new Date(primera.getTime() + 1), featureCodes: ['GIFT_CARDS', 'RESERVATIONS', 'SERVICE_PAY'] },
+    })
+  })
+
+  it('regresión: una fila en la frontera que NO refleja el contrato sigue sin adivinarse (se salta, sin acceso)', async () => {
+    unContratoPro(['RESERVATIONS'])
+    tx.hybridContractSelection.findFirst.mockResolvedValue({ effectiveAt: PAGADO_HASTA, featureCodes: ['RESERVATIONS', 'SERVICE_PAY'] })
+    const r = await addPlanFeatureToLivePlanContracts('GIFT_CARDS', AHORA)
+    expect(r.skippedContracts).toEqual([{ contractId: 'k1', reason: 'SELECTION_ALREADY_AT_EFFECTIVE_DATE' }])
+    expect(tx.hybridContractSelection.create).not.toHaveBeenCalled()
+    expect(tx.capabilityGrant.createMany).not.toHaveBeenCalled()
   })
 })

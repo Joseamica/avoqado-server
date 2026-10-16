@@ -1,6 +1,6 @@
 /**
  * Candado de plan de las tarjetas de regalo (índice R9): sólo VENDER y PRENDER piden GIFT_CARDS, y la negativa dice qué
- * falta, cuánto cuesta y a quién pedírselo, con `code` (regla del repo: un 403 pelón obliga a cada cliente a inventar).
+ * falta, cómo se habilita y a quién pedírselo, con `code` (regla del repo: un 403 pelón obliga a cada cliente a inventar).
  */
 import express from 'express'
 import request from 'supertest'
@@ -46,7 +46,7 @@ describe('candado de plan de las tarjetas de regalo (R9: sólo vender y prender)
     expect(mockPortero).toHaveBeenCalledWith(GIFT_CARDS_FEATURE, expect.anything(), expect.anything(), expect.any(Function))
   })
 
-  it('sin el plan, el 403 dice qué falta, cuánto cuesta y a quién pedírselo, con código', async () => {
+  it('sin el plan, el 403 dice qué falta, cómo se habilita y a quién pedírselo, con código', async () => {
     mockPortero.mockImplementation(niega())
     const r = await request(app).post('/vender').send({})
     expect(r.status).toBe(403)
@@ -58,7 +58,9 @@ describe('candado de plan de las tarjetas de regalo (R9: sólo vender y prender)
       featureCode: 'GIFT_CARDS',
       requiredPlan: 'PRO',
     })
-    expect(r.body.message).toMatch(/plan Pro.*\$249 al mes con IVA.*Configuración → Plan/)
+    expect(r.body.message).toMatch(/plan Pro.*función suelta.*Configuración → Plan/)
+    // C2 r1 (b): sin precio fijo — superadmin puede cambiar el de lista y el 403 le mentiría al cliente.
+    expect(r.body.message).not.toMatch(/\$|\d/)
   })
 
   it.each([

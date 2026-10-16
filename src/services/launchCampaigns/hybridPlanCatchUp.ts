@@ -12,6 +12,13 @@ export const PLAN_CATCH_UP_CODES = ['SERVICE_PAY', 'GIFT_CARDS'] as const
 export type PlanCatchUpCode = (typeof PLAN_CATCH_UP_CODES)[number]
 const TIERS = ['PRO', 'PREMIUM']
 const LOTE = 100
+/**
+ * Las fronteras de periodo son segundos enteros (Stripe): las ampliaciones de una puesta al día viven dentro del segundo
+ * que empieza en la frontera. El mismo segundo que lee la entrega (`hybridDelivery.service.ts`, historial `lt start + 1 s`).
+ */
+const SEGUNDO_DE_LA_FRONTERA_MS = 1000
+
+const mismoConjunto = (a: string[], b: string[]) => a.length === b.length && a.every(code => b.includes(code))
 
 function assertCatchUpCode(code: string): asserts code is PlanCatchUpCode {
   const enLista = (PLAN_CATCH_UP_CODES as readonly string[]).includes(code)
@@ -53,6 +60,8 @@ function reasonOf(error: unknown): string {
  * (p. ej. su fila de historial ya existe sin sus `featureCodes`) va a `skippedContracts` y no detiene a los demás.
  * Corre bajo el candado de entrega de cada compra y es idempotente: se vuelve a correr después de republicar las ofertas.
  * Generalizada el 14-oct (tarjetas de regalo): el mismo camino para cualquier código de `PLAN_CATCH_UP_CODES`.
+ * C2 r1: dos puestas al día en el MISMO periodo, en cualquier orden, ya no se pisan: la segunda agrega su fila después de la
+ * de la primera, dentro del segundo de la frontera, y escribe su acceso (antes saltaba el contrato sin acceso).
  */
 export async function addPlanFeatureToLivePlanContracts(featureCode: PlanCatchUpCode, now: Date = new Date()) {
   assertCatchUpCode(featureCode)
@@ -89,14 +98,21 @@ export async function addPlanFeatureToLivePlanContracts(featureCode: PlanCatchUp
             if (selection) {
               const featureCodes = [...contract.featureCodes, featureCode].sort()
               // Rige desde el próximo periodo SIN entregar (los de Stripe son contiguos), no desde hoy: una renovación que
-              // empezó antes y se entrega tarde la lee igual (`effectiveAt <= start`, hybridDelivery.service.ts:128).
-              const effectiveAt = contract.paidThrough ?? contract.startsAt
-              // El historial es inmutable: si ya hay fila en esa fecha y `featureCodes` no la refleja, no se adivina cuál vale.
-              const existing = await tx.hybridContractSelection.findUnique({
-                where: { contractId_effectiveAt: { contractId: id, effectiveAt } },
-                select: { id: true },
+              // empezó antes y se entrega tarde la lee igual (historial `lt start + 1 s`, hybridDelivery.service.ts).
+              const frontera = contract.paidThrough ?? contract.startsAt
+              // El historial es inmutable POR TRIGGER (`hybrid_selection_immutable`): la fila que otra puesta al día ya dejó en
+              // esta frontera no se amplía. Se agrega otra POSTERIOR dentro del mismo segundo (+1 ms sobre la última), que la
+              // entrega lee como de la frontera (`lt start + 1 s`, hybridDelivery.service.ts). Sólo si la última refleja el
+              // contrato: si no, no se adivina cuál vale.
+              const ultima = await tx.hybridContractSelection.findFirst({
+                where: { contractId: id, effectiveAt: { gte: frontera, lt: new Date(frontera.getTime() + SEGUNDO_DE_LA_FRONTERA_MS) } },
+                orderBy: { effectiveAt: 'desc' },
+                select: { effectiveAt: true, featureCodes: true },
               })
-              if (existing) throw new SkipContract('SELECTION_ALREADY_AT_EFFECTIVE_DATE')
+              if (ultima && !mismoConjunto(ultima.featureCodes, contract.featureCodes))
+                throw new SkipContract('SELECTION_ALREADY_AT_EFFECTIVE_DATE')
+              const effectiveAt = ultima ? new Date(ultima.effectiveAt.getTime() + 1) : frontera
+              if (effectiveAt.getTime() >= frontera.getTime() + SEGUNDO_DE_LA_FRONTERA_MS) throw new SkipContract('SELECTION_BOUNDARY_FULL')
               await tx.hybridContractSelection.create({ data: { contractId: id, effectiveAt, featureCodes } })
               await tx.hybridContract.update({ where: { id }, data: { featureCodes } })
             }

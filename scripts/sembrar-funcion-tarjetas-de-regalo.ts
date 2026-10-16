@@ -124,6 +124,12 @@ export async function sembrarFuncionTarjetasDeRegalo(
     staffId = staff.id
   }
 
+  // Las negativas del tablero, ANTES de escribir nada (C2 r1): una NegativaDeSiembra significa «no se escribió nada».
+  const fila = (await listPriceBoard()).find(r => r.productKey === PRODUCTO)
+  if (!fila)
+    throw new NegativaDeSiembra(`${PRODUCTO} no está en el catálogo: despliega primero el server con GIFT_CARDS en FEATURE_CATALOG.`)
+  if (!fila.editable) throw new NegativaDeSiembra(`${PRODUCTO} no admite precio de lista (${fila.notEditableReason}).`)
+
   // 1. La fila Feature. Nunca se le cambia el precio a una que ya existe.
   const existente = await prisma.feature.findUnique({ where: { code: CODIGO }, select: { active: true } })
   const feature: ResultadoDeFeature = !existente ? 'CREATE' : existente.active ? 'EXISTS' : 'REACTIVATE'
@@ -142,11 +148,7 @@ export async function sembrarFuncionTarjetasDeRegalo(
     })
   log(`Feature ${CODIGO}: ${MENSAJE_FEATURE[feature](opciones.apply)}`)
 
-  // 2. El precio de lista suelto, por el camino de la pantalla «Precios» de superadmin.
-  const fila = (await listPriceBoard()).find(r => r.productKey === PRODUCTO)
-  if (!fila)
-    throw new NegativaDeSiembra(`${PRODUCTO} no está en el catálogo: despliega primero el server con GIFT_CARDS en FEATURE_CATALOG.`)
-  if (!fila.editable) throw new NegativaDeSiembra(`${PRODUCTO} no admite precio de lista (${fila.notEditableReason}).`)
+  // 2. El precio de lista suelto, por el camino de la pantalla «Precios» de superadmin (la fila del tablero leída arriba).
   const outcome = planSeedOutcome(fila, PRECIO_SUELTO)
   const listPrice = { outcome, current: fila.price, pending: fila.pendingPrice }
   if (opciones.apply && outcome === 'CREATE')

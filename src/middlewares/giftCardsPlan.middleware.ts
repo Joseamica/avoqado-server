@@ -5,7 +5,7 @@
  * ya vendido es una deuda del negocio con su cliente y se honra aunque el negocio baje de plan (spec §6).
  *
  * `checkFeatureAccess` niega con un 403 en inglés. Esto reescribe SÓLO ese cuerpo (el que trae `featureCode: GIFT_CARDS`) a
- * uno que el POS y el dashboard muestran tal cual: qué falta, cuánto cuesta y a quién pedírselo (molde: los pases,
+ * uno que el POS y el dashboard muestran tal cual: qué falta, cómo se habilita y a quién pedírselo (molde: los pases,
  * `routes/dashboard/passIntegrations.routes.ts`). No reimplementa el candado: exentos, demos, superadmin y accesos sueltos
  * siguen resolviéndose donde siempre.
  */
@@ -14,7 +14,8 @@ import { checkFeatureAccess } from './checkFeatureAccess.middleware'
 
 export const GIFT_CARDS_FEATURE = 'GIFT_CARDS'
 const PEDIRLO = 'Pídele al dueño del negocio que las active desde el dashboard (Configuración → Plan).'
-export const MENSAJE_PLAN_DE_TARJETAS = `Las tarjetas de regalo vienen en el plan Pro, o como función suelta a $249 al mes con IVA. ${PEDIRLO}`
+// Sin precio fijo (C2 r1): el de lista lo cambia superadmin y este texto no se enteraría.
+export const MENSAJE_PLAN_DE_TARJETAS = `Las tarjetas de regalo vienen en el plan Pro, o se pueden contratar como función suelta. ${PEDIRLO}`
 
 interface NegativaDelPortero {
   featureCode?: string
