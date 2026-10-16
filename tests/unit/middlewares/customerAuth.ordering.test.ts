@@ -56,6 +56,25 @@ describe('middleware de pedidos (H1)', () => {
     expect((req as any).customerAuth).toBeNull()
   })
 
+  it('🔴 un token de pedidos de OTRO negocio es 401 CUSTOMER_TOKEN_VENUE_MISMATCH', async () => {
+    const res = mkRes()
+    const next = jest.fn()
+    await authenticateOrderingCustomerOptional(mkReq(generateOrderingCustomerToken('c1', 'venue_B', PHONE)), res, next)
+    expect(res.status).toHaveBeenCalledWith(401)
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'CUSTOMER_TOKEN_VENUE_MISMATCH' }))
+    expect(next).not.toHaveBeenCalled()
+  })
+
+  it('🔴 un token de pedidos de un cliente desactivado es 401 CUSTOMER_INACTIVE', async () => {
+    ;(prisma.customer.findFirst as jest.Mock).mockResolvedValue({ id: 'c1', venueId: 'venue_A', active: false })
+    const res = mkRes()
+    const next = jest.fn()
+    await authenticateOrderingCustomerOptional(mkReq(generateOrderingCustomerToken('c1', 'venue_A', PHONE)), res, next)
+    expect(res.status).toHaveBeenCalledWith(401)
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'CUSTOMER_INACTIVE' }))
+    expect(next).not.toHaveBeenCalled()
+  })
+
   it('🔴 el token de pedidos en una ruta de reservas (authenticateCustomer) es 401: no se salta la aprobación', async () => {
     const res = mkRes()
     const next = jest.fn()
