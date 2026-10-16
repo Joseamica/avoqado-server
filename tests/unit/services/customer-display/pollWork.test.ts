@@ -3,6 +3,7 @@ import {
   POLL_WORK_MAX_IN_FLIGHT,
   PollWorkLimiter,
   PollWorkSaturated,
+  REFRESH_COALESCE_MS,
   SingleFlightCache,
   dentroDelPlazo,
   esperarTodas,
@@ -152,7 +153,10 @@ describe('SingleFlightCache', () => {
     const limiter = new PollWorkLimiter(1)
     const viejo = diferida<string>()
     const lectura = cache.get('k', () => viejo.promesa, { limiter })
-    await expect(cache.refresh('k', async () => 'nuevo')).resolves.toBe('nuevo')
+    const calcular = jest.fn(async () => 'nuevo')
+    const fresco = cache.refresh('k', calcular)
+    expect(calcular).toHaveBeenCalledTimes(1) // en sincronía: si se uniera al vuelo viejo, cae aquí y no por tiempo
+    await expect(fresco).resolves.toBe('nuevo')
     expect(limiter.enVuelo).toBe(1) // la lectura vieja sigue tocando la base
     await expect(cache.get('otra', async () => 'x', { limiter })).rejects.toBeInstanceOf(PollWorkSaturated)
     viejo.resolver('viejo')
@@ -165,7 +169,10 @@ describe('SingleFlightCache', () => {
     const cache = nueva()
     const viejo = diferida<string>()
     const lectura = cache.get('k', () => viejo.promesa)
-    await expect(cache.refresh('k', async () => 'nuevo')).resolves.toBe('nuevo')
+    const calcular = jest.fn(async () => 'nuevo')
+    const fresco = cache.refresh('k', calcular)
+    expect(calcular).toHaveBeenCalledTimes(1) // en sincronía: si se uniera al vuelo viejo, cae aquí y no por tiempo
+    await expect(fresco).resolves.toBe('nuevo')
     viejo.resolver('viejo')
     await expect(lectura).resolves.toBe('viejo') // quien lo pidió recibe lo suyo…
     await vaciarMicrotareas()
@@ -200,6 +207,76 @@ describe('SingleFlightCache', () => {
     await expect(fresco).resolves.toBe('nuevo')
     await vaciarMicrotareas()
     expect(cache.peek('k')).toBe('nuevo') // y al terminar, lo nuevo reemplaza a lo guardado
+  })
+
+  // 🔴 Ruling de la Task 6: tras una edición, las N tablets del venue piden refresh casi a la vez. Sin unirse, eran N
+  // construcciones idénticas fuera del pool. Con la ventana: a lo más una nueva por llave cada REFRESH_COALESCE_MS.
+  describe('refresh se une a un refresh RECIENTE de la misma llave (ventana REFRESH_COALESCE_MS)', () => {
+    it.each([0, REFRESH_COALESCE_MS])('iniciado hace %p ms: UN cálculo, el mismo resultado para los dos', async transcurrido => {
+      const cache = nueva()
+      const d = diferida<string>()
+      const calcular = jest.fn(() => d.promesa)
+      const otra = jest.fn(async () => 'no-debe-calcular')
+      const primero = cache.refresh('k', calcular)
+      reloj += transcurrido
+      const segundo = cache.refresh('k', otra)
+      d.resolver('v')
+      await expect(Promise.all([primero, segundo])).resolves.toEqual(['v', 'v'])
+      expect(calcular).toHaveBeenCalledTimes(1)
+      expect(otra).not.toHaveBeenCalled()
+    })
+
+    it('iniciado hace MÁS de la ventana: lo anula y arranca otro; el viejo no pisa lo nuevo, y uno anulado nunca se comparte', async () => {
+      const cache = nueva()
+      const viejo = diferida<string>()
+      const nuevo = diferida<string>()
+      const primero = cache.refresh('k', () => viejo.promesa)
+      reloj += REFRESH_COALESCE_MS + 1
+      const calcularNuevo = jest.fn(() => nuevo.promesa)
+      const segundo = cache.refresh('k', calcularNuevo)
+      expect(calcularNuevo).toHaveBeenCalledTimes(1)
+      reloj += 1
+      const tercera = jest.fn(async () => 'no-debe-calcular')
+      const tercero = cache.refresh('k', tercera) // dentro de la ventana del SEGUNDO: se une a él, nunca al anulado
+      nuevo.resolver('nuevo')
+      viejo.resolver('viejo')
+      await expect(Promise.all([primero, segundo, tercero])).resolves.toEqual(['viejo', 'nuevo', 'nuevo'])
+      expect(tercera).not.toHaveBeenCalled()
+      await vaciarMicrotareas()
+      expect(cache.peek('k')).toBe('nuevo')
+    })
+
+    it('🔴 NO se une a un get (con tope) en vuelo, aunque haya empezado en el mismo instante: lo anula y arranca otro', async () => {
+      const cache = nueva()
+      const limiter = new PollWorkLimiter(2)
+      const viejo = diferida<string>()
+      const lectura = cache.get('k', () => viejo.promesa, { limiter })
+      const calcular = jest.fn(async () => 'nuevo')
+      const fresco = cache.refresh('k', calcular)
+      expect(calcular).toHaveBeenCalledTimes(1) // en sincronía: si se uniera al get, cae aquí y no por tiempo
+      viejo.resolver('viejo')
+      await expect(fresco).resolves.toBe('nuevo')
+      await expect(lectura).resolves.toBe('viejo')
+      await vaciarMicrotareas()
+      expect(cache.peek('k')).toBe('nuevo')
+    })
+
+    it('el error del refresh al que se unieron llega a los DOS y no se guarda', async () => {
+      const cache = nueva()
+      const d = diferida<string>()
+      const otra = jest.fn(async () => 'no-debe-calcular')
+      const primero = cache.refresh('k', () => d.promesa)
+      reloj += 1
+      const segundo = cache.refresh('k', otra)
+      d.rechazar(new Error('base caída'))
+      await expect(primero).rejects.toThrow('base caída')
+      await expect(segundo).rejects.toThrow('base caída')
+      expect(otra).not.toHaveBeenCalled()
+      await vaciarMicrotareas()
+      expect(cache.peek('k')).toBeUndefined()
+      expect(cache.sizeForTests().enVuelo).toBe(0)
+      await expect(cache.refresh('k', async () => 'ya')).resolves.toBe('ya') // y el siguiente vuelve a calcular
+    })
   })
 
   it('tiene tope: por muchas llaves que se lean, no pasa de maxEntradas', async () => {
@@ -293,4 +370,8 @@ describe('dentroDelPlazo', () => {
 it('🔴 el tope del proceso es 8 (decisión 2: el pool de Prisma es de 18 conexiones para TODO el proceso)', () => {
   expect(POLL_WORK_MAX_IN_FLIGHT).toBe(8)
   expect(pollWorkLimiter.enVuelo).toBe(0) // nadie lo deja ocupado al cargar el módulo
+})
+
+it('la ventana de refresh es de 2 s (ruling de la Task 6: ≤ 1 construcción nueva por llave cada 2 s; la Task 13 la mide)', () => {
+  expect(REFRESH_COALESCE_MS).toBe(2_000)
 })

@@ -7,7 +7,8 @@
  *   arranca y la huella se omite hasta el siguiente poll (una huella omitida es «desconocida», nunca un error).
  * - `esperarTodas`: lo que corre en paralelo DENTRO de un lugar. No se asienta hasta que todo lo arrancado se asentó.
  * - `SingleFlightCache`: un solo cálculo por llave; lo guardado vence; un error nunca se guarda; `refresh` anula lo que
- *   estaba en vuelo para que un cálculo VIEJO jamás quede encima de uno nuevo.
+ *   estaba en vuelo para que un cálculo VIEJO jamás quede encima de uno nuevo — salvo otro refresh de hace ≤ 2 s, al que
+ *   se une (`REFRESH_COALESCE_MS`).
  * - `dentroDelPlazo`: espera a lo más `plazoMs` a un grupo de cálculos en paralelo; lo que no llegó se omite, sigue
  *   corriendo para llenar su caché, y su error (si lo hay) se reporta — nunca queda un rechazo sin manejar.
  *
@@ -84,9 +85,20 @@ export async function esperarTodas<T extends readonly unknown[] | []>(promesas: 
   }
 }
 
+/**
+ * 🔴 Ruling de la Task 6: la ventana en que un `refresh` se UNE a otro `refresh` de la misma llave que ya está en vuelo.
+ * Tras una edición, las N tablets de un venue piden `/promotions` casi a la vez; sin ventana eran N construcciones
+ * idénticas fuera del pool. Con ella: a lo más una nueva por llave cada 2 s. La Task 13 la mide.
+ */
+export const REFRESH_COALESCE_MS = 2_000
+
 interface Vuelo<V> {
   promesa: Promise<V>
   anulado: boolean
+  /** Con el reloj de la caché (`ahora`), no `Date.now()`: las pruebas lo mueven. */
+  iniciadoEn: number
+  /** Sólo un vuelo de `refresh` se comparte con otro `refresh`; uno de `get` (con tope, quizá viejo) jamás. */
+  esRefresh: boolean
 }
 
 export class SingleFlightCache<V> {
@@ -118,13 +130,21 @@ export class SingleFlightCache<V> {
   }
 
   /**
-   * Siempre calcula de nuevo: no lee lo guardado ni se une a lo que está en vuelo. Sin tope: lo pide una persona.
-   * Mientras corre, `get` sigue entregando lo guardado antes (si hay algo vigente); sólo sin nada guardado se une a este
-   * cálculo. Al terminar, lo nuevo reemplaza a lo guardado.
+   * Calcula de nuevo: no lee lo guardado ni se une a un `get` en vuelo (lo anula). Sin tope: lo pide una persona (o su
+   * aparato). Mientras corre, `get` sigue entregando lo guardado antes (si hay algo vigente); sólo sin nada guardado se une
+   * a este cálculo. Al terminar, lo nuevo reemplaza a lo guardado.
+   *
+   * 🔴 Una excepción (ruling de la Task 6): se UNE a otro `refresh` de la misma llave iniciado hace ≤ `REFRESH_COALESCE_MS`.
+   * Es seguro porque la tablet se entera del cambio por un poll calculado DESPUÉS de la escritura, y el primer refresh
+   * arranca después de ese poll: ya ve la escritura. Si cae OTRA escritura dentro de la ventana, el siguiente poll trae
+   * otra huella y la tablet vuelve a pedir: se corrige sola en ≤ 60 s. Más viejo que la ventana, se anula como siempre.
+   * Un vuelo anulado sale del mapa al anularse: nunca se comparte.
    */
   refresh(llave: string, calcular: () => Promise<V>): Promise<V> {
+    const vuelo = this.vuelos.get(llave)
+    if (vuelo && vuelo.esRefresh && this.ahora() - vuelo.iniciadoEn <= REFRESH_COALESCE_MS) return vuelo.promesa
     this.anularVuelo(llave)
-    return this.arrancar(llave, calcular)
+    return this.arrancar(llave, calcular, undefined, true)
   }
 
   sizeForTests(): { entradas: number; enVuelo: number } {
@@ -143,10 +163,11 @@ export class SingleFlightCache<V> {
     this.vuelos.delete(llave)
   }
 
-  private arrancar(llave: string, calcular: () => Promise<V>, limiter?: PollWorkLimiter): Promise<V> {
+  private arrancar(llave: string, calcular: () => Promise<V>, limiter?: PollWorkLimiter, esRefresh = false): Promise<V> {
+    const iniciadoEn = this.ahora()
     const iniciado = limiter ? limiter.intentar(calcular) : llamar(calcular)
     if (iniciado === null) return Promise.reject(new PollWorkSaturated())
-    const vuelo: Vuelo<V> = { promesa: iniciado, anulado: false }
+    const vuelo: Vuelo<V> = { promesa: iniciado, anulado: false, iniciadoEn, esRefresh }
     this.vuelos.set(llave, vuelo)
     iniciado.then(
       valor => {
