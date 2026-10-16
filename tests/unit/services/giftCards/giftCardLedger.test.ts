@@ -321,7 +321,7 @@ describe('activarSobresDeCuentaPagadaEnTx', () => {
   // PAY_CASH reproducido, terminal tardía) y queda PAGADA. Nunca se reviven los sobres; se avisa con un MoneyAnomaly propio.
   describe('ruling A6: cuenta cancelada con sobres DEACTIVATED que queda pagada', () => {
     /** La consulta de PENDING no encuentra nada; la de todos los sobres de la cuenta devuelve `todos`. */
-    const sobresDeLaCuenta = (todos: Array<{ id: string; status: string }>) =>
+    const sobresDeLaCuenta = (todos: Array<{ id: string; status: string; initialAmount?: Prisma.Decimal }>) =>
       prismaMock.giftCard.findMany.mockImplementation(async ({ where }: any) =>
         where.status === 'PENDING' ? todos.filter(s => s.status === 'PENDING').map(s => ({ id: s.id })) : todos,
       )
@@ -357,6 +357,9 @@ describe('activarSobresDeCuentaPagadaEnTx', () => {
               orderId: 'order-1',
               cobrado: '1500.00',
               reembolsado: '0.00',
+              conservado: '1500.00',
+              canjeado: '0.00',
+              respaldo: '0.00',
               sobres: [
                 { id: 'gc-1', status: 'DEACTIVATED' },
                 { id: 'gc-2', status: 'DEACTIVATED' },
@@ -387,6 +390,46 @@ describe('activarSobresDeCuentaPagadaEnTx', () => {
       await expect(activarSobresDeCuentaPagadaEnTx(prismaMock, { venueId: VENUE, orderId: 'order-1' })).resolves.toEqual({ activated: [] })
       expect(prismaMock.moneyAnomaly.createMany).not.toHaveBeenCalled()
       expect(prismaMock.giftCard.updateMany).not.toHaveBeenCalled()
+    })
+
+    // B7 r1 (Important #1): un sobre DESACTIVADO respalda lo que alcanzó a entregarse en mercancía (REDEEM − REDEEM_REVERSAL).
+    /** Lo que los sobres desactivados canjearon y lo que se les regresó, como lo devuelve el `groupBy` por tipo. */
+    const canjesDeLosMuertos = (canjeado: number, regresado = 0) =>
+      prismaMock.giftCardActivity.groupBy.mockResolvedValue([
+        { type: 'REDEEM', _sum: { amount: D(canjeado) } },
+        { type: 'REDEEM_REVERSAL', _sum: { amount: D(regresado) } },
+      ])
+
+    it('🔴 E1: tarjeta de $500 de la que se gastaron $300 y la terminal devolvió $200: los $300 conservados ya se entregaron ⇒ sin anomalía', async () => {
+      sobresDeLaCuenta([{ id: 'gc-1', status: 'DEACTIVATED' }])
+      cobradoYDevuelto(500, 200)
+      canjesDeLosMuertos(300)
+
+      await expect(activarSobresDeCuentaPagadaEnTx(prismaMock, { venueId: VENUE, orderId: 'order-1' })).resolves.toEqual({ activated: [] })
+      expect(prismaMock.giftCardActivity.groupBy).toHaveBeenCalledWith({
+        by: ['type'],
+        where: { venueId: VENUE, giftCardId: { in: ['gc-1'] }, type: { in: ['REDEEM', 'REDEEM_REVERSAL'] } },
+        _sum: { amount: true },
+      })
+      expect(prismaMock.moneyAnomaly.createMany).not.toHaveBeenCalled()
+    })
+
+    it('🔴 lo conservado pasa de lo canjeado (menos lo regresado) y de los sobres vivos ⇒ anomalía con lo canjeado y el respaldo', async () => {
+      sobresDeLaCuenta([
+        { id: 'gc-1', status: 'DEACTIVATED' },
+        { id: 'gc-2', status: 'ACTIVE', initialAmount: D(200) },
+      ])
+      cobradoYDevuelto(700, 100)
+      canjesDeLosMuertos(300, 50)
+
+      await activarSobresDeCuentaPagadaEnTx(prismaMock, { venueId: VENUE, orderId: 'order-1' })
+
+      // conservado $600 > respaldo $450 (vivo $200 + canjeado $300 − regresado $50).
+      expect(prismaMock.moneyAnomaly.createMany.mock.calls[0][0].data[0].observedState).toMatchObject({
+        conservado: '600.00',
+        canjeado: '250.00',
+        respaldo: '450.00',
+      })
     })
   })
 })

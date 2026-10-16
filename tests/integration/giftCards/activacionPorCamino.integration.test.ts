@@ -140,6 +140,10 @@ describe('R8 · activación de sobres · Postgres real', () => {
       orderId: r.orderId,
       cobrado: '600.00',
       reembolsado: '0.00',
+      // B7 r1: la medición compartida con la noche dice también lo conservado, lo que canjearon los desactivados y el respaldo.
+      conservado: '600.00',
+      canjeado: '0.00',
+      respaldo: '0.00',
       sobres: [{ id: r.sobres[0].id, status: 'DEACTIVATED' }],
     })
 
@@ -221,6 +225,10 @@ describe('R8 · activación de sobres · Postgres real', () => {
       orderId: r.orderId,
       cobrado: '1800.00',
       reembolsado: '900.00',
+      // B7 r1: la medición compartida con la noche dice también lo conservado, lo que canjearon los desactivados y el respaldo.
+      conservado: '900.00',
+      canjeado: '0.00',
+      respaldo: '0.00',
       sobres: [{ id: sobreId, status: 'DEACTIVATED' }],
     })
 

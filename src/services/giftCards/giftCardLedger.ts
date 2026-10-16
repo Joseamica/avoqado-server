@@ -143,30 +143,77 @@ export async function dineroDeLaCuenta(
  * queda PAGADA sin ningún sobre PENDING. Los sobres NUNCA se reactivan: uno desactivado pudo cancelarse por fraude o por
  * un reembolso, y revivirlo en silencio regalaría saldo. Tampoco se deja pasar callado: el negocio se quedó con ese
  * dinero sin tarjetas vivas que lo respalden, así que queda un MoneyAnomaly para que el gerente devuelva o vuelva a vender.
- * Si el dinero ya se devolvió completo (la cancelación con reembolso de R2), no hay nada que avisar.
+ * Si el dinero ya se devolvió completo (la cancelación con reembolso de R2) o lo que queda ya se entregó en mercancía con esos sobres
+ * antes de desactivarlos (B7 r1, `medirDineroSinRespaldo`), no hay nada que avisar.
  */
 async function avisarSiCobraSobresDesactivados(tx: Tx, p: { venueId: string; orderId: string }): Promise<void> {
-  const sobres = await tx.giftCard.findMany({
-    where: { venueId: p.venueId, orderItem: { is: { orderId: p.orderId } } },
-    select: { id: true, status: true },
-    orderBy: { id: 'asc' },
-    take: MAX_SOBRES_POR_CUENTA + 1,
-  })
-  if (!sobres.some(s => s.status === 'DEACTIVATED')) return
-  const { cobrado, reembolsado, conservado } = await dineroDeLaCuenta(tx, p)
-  if (!conservado.greaterThan(0)) return
+  const m = await medirDineroSinRespaldo(tx, p)
+  if (!m?.sinRespaldo) return
   await recordGiftCardAnomaly(tx, {
     check: 'PAID_WITH_DEACTIVATED',
     id: p.orderId,
     venueId: p.venueId,
-    detail: {
-      motivo: 'COBRO_CON_SOBRES_DESACTIVADOS',
-      orderId: p.orderId,
-      cobrado: cobrado.toFixed(2),
-      reembolsado: reembolsado.toFixed(2),
-      sobres: sobres.map(s => ({ id: s.id, status: s.status })),
-    },
+    detail: { motivo: 'COBRO_CON_SOBRES_DESACTIVADOS', orderId: p.orderId, ...dineroSinRespaldoEnTexto(m) },
   })
+}
+
+export interface DineroSinRespaldo {
+  cobrado: Prisma.Decimal
+  reembolsado: Prisma.Decimal
+  conservado: Prisma.Decimal
+  /** Lo que los sobres DESACTIVADOS alcanzaron a entregar en mercancía: sus REDEEM menos sus REDEEM_REVERSAL. */
+  canjeado: Prisma.Decimal
+  /** Lo que respalda lo conservado: `initialAmount` de cada sobre NO desactivado + `canjeado`. */
+  respaldo: Prisma.Decimal
+  sobres: Array<{ id: string; status: GiftCardStatus }>
+  /** `conservado > respaldo`: el negocio se quedó dinero que ni un sobre vivo ni una mercancía entregada respaldan. */
+  sinRespaldo: boolean
+}
+
+/**
+ * B7 r1 (Important #1): ¿el dinero que el negocio conservó de una cuenta de tarjetas con sobres DESACTIVADOS tiene qué lo respalde?
+ * Un sobre vivo respalda su monto; uno desactivado, lo que alcanzó a gastarse antes (E1: tarjeta de $500, se gastan $300, la terminal
+ * devuelve $200 y la cuenta entera se desactiva ⇒ los $300 conservados ya salieron como mercancía, no son «dinero sin tarjeta»).
+ * 🔴 Una sola definición: la usan el cobro (A6, `avisarSiCobraSobresDesactivados`) y la revisión nocturna (B7).
+ * `null` = ningún sobre desactivado: cada sobre respalda su monto y ni se consulta el dinero (el segundo cierre de una venta normal).
+ */
+export async function medirDineroSinRespaldo(tx: Tx, p: { venueId: string; orderId: string }): Promise<DineroSinRespaldo | null> {
+  const sobres = await tx.giftCard.findMany({
+    where: { venueId: p.venueId, orderItem: { is: { orderId: p.orderId } } },
+    select: { id: true, status: true, initialAmount: true },
+    orderBy: { id: 'asc' },
+    take: MAX_SOBRES_POR_CUENTA + 1,
+  })
+  const desactivados = sobres.filter(s => s.status === 'DEACTIVATED').map(s => s.id)
+  if (desactivados.length === 0) return null
+  const dinero = await dineroDeLaCuenta(tx, p)
+  const movimientos = await tx.giftCardActivity.groupBy({
+    by: ['type'],
+    where: { venueId: p.venueId, giftCardId: { in: desactivados }, type: { in: ['REDEEM', 'REDEEM_REVERSAL'] } },
+    _sum: { amount: true },
+  })
+  const sumaDe = (tipo: 'REDEEM' | 'REDEEM_REVERSAL') => movimientos.find(m => m.type === tipo)?._sum.amount ?? CERO()
+  const canjeado = Prisma.Decimal.max(CERO(), sumaDe('REDEEM').minus(sumaDe('REDEEM_REVERSAL')))
+  const respaldo = sobres.filter(s => s.status !== 'DEACTIVATED').reduce((suma, s) => suma.plus(s.initialAmount), canjeado)
+  return {
+    ...dinero,
+    canjeado,
+    respaldo,
+    sobres: sobres.map(s => ({ id: s.id, status: s.status })),
+    sinRespaldo: dinero.conservado.greaterThan(respaldo),
+  }
+}
+
+/** El `detail` de `PAID_WITH_DEACTIVATED` (cobro y noche): pesos con dos decimales y cada sobre con su estado (nunca el código). */
+export function dineroSinRespaldoEnTexto(m: DineroSinRespaldo) {
+  return {
+    cobrado: m.cobrado.toFixed(2),
+    reembolsado: m.reembolsado.toFixed(2),
+    conservado: m.conservado.toFixed(2),
+    canjeado: m.canjeado.toFixed(2),
+    respaldo: m.respaldo.toFixed(2),
+    sobres: m.sobres,
+  }
 }
 
 /**

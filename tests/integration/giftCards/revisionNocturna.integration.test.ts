@@ -5,6 +5,8 @@
  * r1 B-1 (F8): la secuencia completa con los servicios REALES —abono, devolución, abono final, noche— no activa saldo por dinero que
  * ya se devolvió. Notas del coordinador: dinero conservado sin sobres vivos ⇒ `PAID_WITH_DEACTIVATED` (la llave de A6); cuenta en $0
  * abierta con sobres PENDING ⇒ `OPEN_AT_ZERO_WITH_PENDING`; una cuenta pagada con PENDING + DEACTIVATED no se activa.
+ * B7 r1: lo que un sobre desactivado alcanzó a canjear SÍ respalda lo conservado (#1, el caso E1, en la noche y en el cobro de A6);
+ * las notas 1-2 sólo miran cuentas que se movieron en 7 días (M1); REFUND_WITHOUT_REVERSAL y CANCEL_STUCK encuentran lo sembrado (M5).
  *
  * Correr: source ../urls-tarjetas.sh && TZ=UTC npx jest --selectProjects=integration --runInBand \
  *   --runTestsByPath tests/integration/giftCards/revisionNocturna.integration.test.ts
@@ -24,14 +26,16 @@ import prisma from '@/utils/prismaClient'
 import { GiftCardReconciliationJob } from '@/jobs/giftCardReconciliation.job'
 import { issueRefund } from '@/services/dashboard/refund.dashboard.service'
 import { payCashOrder } from '@/services/mobile/order.mobile.service'
-import { desactivarSobresPendientesDeCuentaEnTx } from '@/services/giftCards/giftCardLedger'
+import { recordRefund } from '@/services/tpv/refund.tpv.service'
+import { activarSobresDeCuentaPagadaEnTx, desactivarSobresPendientesDeCuentaEnTx } from '@/services/giftCards/giftCardLedger'
 import { ensureGiftCardTender } from '@/services/giftCards/giftCardTender'
-import { ORDER_LOCK_WAIT_BUDGET } from '@/services/shared/paymentShiftClaim'
+import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
 import {
   crearCobroConSaldoEnTx,
   crearCuentaDeMercancia,
   crearNegocioDePrueba,
   limpiarEfectosDePagoDelNegocio,
+  sembrarCanje,
   sembrarVentaDeTarjetas,
   sembrarVentaDeTarjetasSinPagar,
 } from './sembrarTarjetasDeRegalo'
@@ -54,6 +58,12 @@ const estados = async (ids: string[]) =>
 /** Lo que la ventana de la noche ve como «sin movimiento»: los pagos de la cuenta, dos días atrás. */
 const envejecerPagos = (orderId: string) =>
   prisma.$executeRaw`UPDATE "Payment" SET "createdAt" = "createdAt" - interval '2 days', "updatedAt" = "updatedAt" - interval '2 days' WHERE "orderId" = ${orderId}`
+/** r1 M1: todo lo que la ventana mira de una cuenta (pagos, desactivación de sus sobres y la Order), ocho días atrás. */
+const envejecerOchoDias = async (orderId: string) => {
+  await prisma.$executeRaw`UPDATE "Payment" SET "createdAt" = "createdAt" - interval '8 days', "updatedAt" = "updatedAt" - interval '8 days' WHERE "orderId" = ${orderId}`
+  await prisma.$executeRaw`UPDATE "GiftCard" SET "deactivatedAt" = "deactivatedAt" - interval '8 days' WHERE id IN (SELECT "giftCardId" FROM "OrderItem" WHERE "orderId" = ${orderId} AND "giftCardId" IS NOT NULL)`
+  await prisma.$executeRaw`UPDATE "Order" SET "updatedAt" = "updatedAt" - interval '8 days' WHERE id = ${orderId}`
+}
 
 describe('B7 · revisión nocturna', () => {
   let venueId: string
@@ -101,6 +111,27 @@ describe('B7 · revisión nocturna', () => {
     })
     await pagoDirecto(venta.orderId, total)
     await prisma.$executeRaw`UPDATE "Order" SET "updatedAt" = "updatedAt" - interval '1 hour' WHERE id = ${venta.orderId}`
+    return venta
+  }
+
+  /** Lo que deja el caso de B1: el reembolso llevó la cuenta a $0 pero no la cerró (había un cobro de terminal vivo que falló). */
+  const enCeroSinCerrar = async (montos: number[]) => {
+    const venta = await sembrarVentaDeTarjetasSinPagar({ venueId, organizationId, staffId, montos, abonosEnEfectivo: [200] })
+    await pagoDirecto(venta.orderId, -200, {
+      type: 'REFUND',
+      splitType: 'FULLPAYMENT',
+      netAmount: D(-200),
+      processorData: { originalPaymentId: venta.abonos[0].id },
+    })
+    return venta
+  }
+
+  /** Venta sin pagar con abono de $200 devuelto completo por el panel (se cancela, B1 r1) y un cobro tardío de `tardio` que nadie devolvió. */
+  const canceladaConDineroTardio = async (tardio: number) => {
+    const venta = await sembrarVentaDeTarjetasSinPagar({ venueId, organizationId, staffId, montos: [500], abonosEnEfectivo: [200] })
+    await issueRefund({ venueId, paymentId: venta.abonos[0].id, amount: 20000, reason: 'CANCELLED_ORDER', staffId })
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: venta.orderId } })).status).toBe('CANCELLED')
+    await pagoDirecto(venta.orderId, tardio)
     return venta
   }
 
@@ -193,12 +224,9 @@ describe('B7 · revisión nocturna', () => {
 
   describe('nota 1: dinero conservado sin sobres vivos que lo respalden ⇒ PAID_WITH_DEACTIVATED', () => {
     it('🔴 dinero tardío PARCIAL sobre una venta cancelada (queda PARTIAL, A6 no avisa): la noche lo avisa con la llave de A6 y no revive nada', async () => {
-      // Abono de $200 devuelto completo por el panel: la venta sin pagar se cancela y su sobre queda DEACTIVATED (B1 r1).
-      const venta = await sembrarVentaDeTarjetasSinPagar({ venueId, organizationId, staffId, montos: [500], abonosEnEfectivo: [200] })
-      await issueRefund({ venueId, paymentId: venta.abonos[0].id, amount: 20000, reason: 'CANCELLED_ORDER', staffId })
-      expect((await prisma.order.findUniqueOrThrow({ where: { id: venta.orderId } })).status).toBe('CANCELLED')
-      // Llega tarde un cobro de $150 (una terminal que contestó después): nadie lo devolvió.
-      await pagoDirecto(venta.orderId, 150)
+      // Abono de $200 devuelto completo (la venta se cancela y su sobre queda DEACTIVATED) y llega tarde un cobro de $150 que nadie
+      // devolvió (una terminal que contestó después). El sobre nunca se activó ni canjeó: nada respalda esos $150.
+      const venta = await canceladaConDineroTardio(150)
 
       const r = await noche()
 
@@ -211,9 +239,68 @@ describe('B7 · revisión nocturna', () => {
         cobrado: '350.00',
         reembolsado: '200.00',
         conservado: '150.00',
+        canjeado: '0.00',
         respaldo: '0.00',
         sobres: [{ id: venta.giftCardIds[0], status: 'DEACTIVATED' }],
       })
+    })
+
+    it('🔴 r1 #1 (E1): tarjeta de $500, se gastan $300, la terminal devuelve $200 y la cuenta se desactiva entera ⇒ los $300 ya se entregaron: ni la noche ni el cobro (A6) avisan', async () => {
+      const venta = await sembrarVentaDeTarjetas({ venueId, organizationId, staffId, montos: [500], metodo: 'CREDIT_CARD' })
+      await sembrarCanje({ venueId, staffId, giftCardIds: venta.giftCardIds, total: 300, conSaldo: 300 })
+      const devolucion = await recordRefund(
+        venueId,
+        {
+          venueId,
+          originalPaymentId: venta.pagos[0].id,
+          amount: 20000,
+          reason: 'CUSTOMER_REQUEST',
+          authorizationNumber: 'AUT-B7-E1',
+          referenceNumber: 'REF-B7-E1',
+          isPartialRefund: true,
+          currency: 'MXN',
+          idempotencyKey: `tpv-b7-e1-${venta.orderId}`,
+        },
+        staffId,
+      )
+      expect(await estados(venta.giftCardIds)).toEqual(['DEACTIVATED'])
+      expect(await anomalia('REFUND_WITHOUT_CANCEL', devolucion.id)).toBe(1)
+      const otroCierre = () =>
+        prisma.$transaction(async tx => {
+          await lockExistingOrderForPayment(tx, { venueId, orderId: venta.orderId })
+          await activarSobresDeCuentaPagadaEnTx(tx, { venueId, orderId: venta.orderId })
+        }, ORDER_LOCK_WAIT_BUDGET)
+
+      await noche()
+      // A6: un cierre más de la cuenta PAGADA y sin PENDING (terminal, reconciliador) mide con la MISMA función.
+      await otroCierre()
+      expect(await anomalia('PAID_WITH_DEACTIVATED', venta.orderId)).toBe(0)
+
+      // Y si encima llega un cobro de $100 que nadie devolvió, ESO sí queda sin respaldo: conservado $400 > canjeado $300.
+      await pagoDirecto(venta.orderId, 100)
+      await otroCierre()
+      await noche()
+      expect(await anomalia('PAID_WITH_DEACTIVATED', venta.orderId)).toBe(1)
+      expect(await observado('PAID_WITH_DEACTIVATED', venta.orderId)).toMatchObject({
+        motivo: 'COBRO_CON_SOBRES_DESACTIVADOS',
+        cobrado: '600.00',
+        reembolsado: '200.00',
+        conservado: '400.00',
+        canjeado: '300.00',
+        respaldo: '300.00',
+      })
+    })
+
+    it('🔴 r1 M1: una cuenta sin movimiento en los últimos 7 días no se vuelve a medir (notas 1 y 2)', async () => {
+      const sinRespaldo = await canceladaConDineroTardio(150)
+      const enCero = await enCeroSinCerrar([500])
+      await envejecerOchoDias(sinRespaldo.orderId)
+      await envejecerOchoDias(enCero.orderId)
+
+      await noche()
+
+      expect(await anomalia('PAID_WITH_DEACTIVATED', sinRespaldo.orderId)).toBe(0)
+      expect(await anomalia('OPEN_AT_ZERO_WITH_PENDING', enCero.orderId)).toBe(0)
     })
 
     it('regresión: la venta cancelada con TODO devuelto, la cancelada que nunca recibió dinero y una cuenta de mercancía cancelada no avisan', async () => {
@@ -239,18 +326,6 @@ describe('B7 · revisión nocturna', () => {
   })
 
   describe('nota 2: cuenta en $0 que se quedó abierta con sobres PENDING ⇒ OPEN_AT_ZERO_WITH_PENDING', () => {
-    /** Lo que deja el caso de B1: el reembolso llevó la cuenta a $0 pero no la cerró (había un cobro de terminal vivo que falló). */
-    const enCeroSinCerrar = async (montos: number[]) => {
-      const venta = await sembrarVentaDeTarjetasSinPagar({ venueId, organizationId, staffId, montos, abonosEnEfectivo: [200] })
-      await pagoDirecto(venta.orderId, -200, {
-        type: 'REFUND',
-        splitType: 'FULLPAYMENT',
-        netAmount: D(-200),
-        processorData: { originalPaymentId: venta.abonos[0].id },
-      })
-      return venta
-    }
-
     it('🔴 sin movimiento en 24 h: la noche la avisa y no la cancela', async () => {
       const venta = await enCeroSinCerrar([500])
       await envejecerPagos(venta.orderId)
@@ -294,6 +369,56 @@ describe('B7 · revisión nocturna', () => {
       for (const orderId of [reciente.orderId, sinDinero.orderId, cerrada.orderId, mercancia.orderId]) {
         expect({ orderId, filas: await anomalia('OPEN_AT_ZERO_WITH_PENDING', orderId) }).toEqual({ orderId, filas: 0 })
       }
+    })
+  })
+
+  describe('r1 M5: los dos avisos de la conciliación encuentran lo sembrado', () => {
+    it('🔴 un REFUND del tender de saldo sin su REDEEM_REVERSAL deja REFUND_WITHOUT_REVERSAL', async () => {
+      const venta = await sembrarVentaDeTarjetas({ venueId, organizationId, staffId, montos: [500], metodo: 'CASH' })
+      const { orderId, pagoConSaldo } = await sembrarCanje({ venueId, staffId, giftCardIds: venta.giftCardIds, total: 200, conSaldo: 200 })
+      // La devolución quedó escrita con el tender de sistema pero su reverso al saldo no (lo que el gancho de B1 existe para impedir).
+      const devolucion = await pagoDirecto(orderId, -200, {
+        type: 'REFUND',
+        splitType: 'FULLPAYMENT',
+        netAmount: D(-200),
+        method: 'OTHER',
+        fundsFlow: 'EXTERNAL_RECORDED',
+        tenderTypeId: pagoConSaldo.tenderTypeId,
+        tenderRevision: pagoConSaldo.tenderRevision,
+        tenderLabel: pagoConSaldo.tenderLabel,
+        tenderCountsAsCash: pagoConSaldo.tenderCountsAsCash,
+        tenderCaptureTip: pagoConSaldo.tenderCaptureTip,
+        tenderSatFormaPago: pagoConSaldo.tenderSatFormaPago,
+        processorData: { originalPaymentId: pagoConSaldo.id },
+      })
+
+      await noche()
+
+      expect(await observado('REFUND_WITHOUT_REVERSAL', devolucion.id)).toEqual({ originalPaymentId: pagoConSaldo.id })
+    })
+
+    it('🔴 un sobre BLOCKED por CANCEL_IN_PROGRESS hace más de 24 h deja CANCEL_STUCK (el «incierto» del spec §5.6)', async () => {
+      const venta = await sembrarVentaDeTarjetas({ venueId, organizationId, staffId, montos: [500], metodo: 'CASH' })
+      const sobreId = venta.giftCardIds[0]
+      const bloqueadoEn = new Date(Date.now() - 25 * 60 * 60 * 1000)
+      await prisma.giftCard.update({ where: { id: sobreId }, data: { status: 'BLOCKED' } })
+      await prisma.giftCardActivity.create({
+        data: {
+          giftCardId: sobreId,
+          venueId,
+          type: 'BLOCK',
+          amount: D(0),
+          balanceAfter: D(500),
+          reason: 'CANCEL_IN_PROGRESS',
+          orderId: venta.orderId,
+          staffId,
+          createdAt: bloqueadoEn,
+        },
+      })
+
+      await noche()
+
+      expect(await observado('CANCEL_STUCK', sobreId)).toEqual({ bloqueadoEn: bloqueadoEn.toISOString() })
     })
   })
 })

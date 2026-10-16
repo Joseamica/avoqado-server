@@ -3,48 +3,70 @@
  * log con el nombre del negocio; una cuenta pagada con sobres PENDING además se ACTIVA con la misma función que el cobro.
  * Notas del coordinador (B7): dos barridos más —dinero conservado sin sobres vivos que lo respalden (`PAID_WITH_DEACTIVATED`, la
  * MISMA llave que A6) y la cuenta en $0 que se quedó abierta con sobres PENDING (`OPEN_AT_ZERO_WITH_PENDING`)—, sólo avisan.
+ * B7 r1: la activación corre PRIMERO y escribe su `PAID_WITH_PENDING` dentro de su transacción (M3); cada barrido y cada hallazgo
+ * están aislados (M2); el resumen sale en `warn` si algo falló (M6).
  */
 jest.mock('@/config/logger', () => ({
   __esModule: true,
   default: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
 }))
 jest.mock('@/observability/jobContext', () => ({ scheduleJob: jest.fn(() => ({ start: jest.fn(), stop: jest.fn() })) }))
+// M3: `activarCuentaEnDb` con dobles de la libreta, del candado y de la anomalía (la tx la entrega el `$transaction` del doble).
+jest.mock('@/services/giftCards/giftCardLedger', () => ({
+  activarSobresDeCuentaPagadaEnTx: jest.fn(),
+  dineroDeLaCuenta: jest.fn(),
+  medirDineroSinRespaldo: jest.fn(),
+  dineroSinRespaldoEnTexto: jest.fn(),
+}))
+jest.mock('@/services/giftCards/giftCardAnomaly', () => ({ recordGiftCardAnomaly: jest.fn() }))
+jest.mock('@/services/shared/paymentShiftClaim', () => ({
+  ORDER_LOCK_WAIT_BUDGET: { timeout: 15_000, maxWait: 5_000 },
+  lockExistingOrderForPayment: jest.fn(),
+}))
 
+import logger from '@/config/logger'
 import { scheduleJob } from '@/observability/jobContext'
-import { GiftCardReconciliationJob, hallazgosPorPaginas } from '@/jobs/giftCardReconciliation.job'
+import { GiftCardReconciliationJob, defaults } from '@/jobs/giftCardReconciliation.job'
 import { DATABASE_JOB_SCHEDULES } from '@/jobs/jobSchedules'
+import { activarSobresDeCuentaPagadaEnTx } from '@/services/giftCards/giftCardLedger'
+import { recordGiftCardAnomaly } from '@/services/giftCards/giftCardAnomaly'
+import { lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
+import prisma from '@/utils/prismaClient'
 import { shouldRetryDbConnectionError } from '@/utils/retry'
 
 const noopCron = { start: jest.fn(), stop: jest.fn() }
 const AHORA = new Date('2026-10-15T09:37:27Z')
+const SIN_RESPALDO = {
+  orderId: 'o3',
+  venueId: 'v1',
+  cobrado: '350.00',
+  reembolsado: '200.00',
+  conservado: '150.00',
+  canjeado: '0.00',
+  respaldo: '0.00',
+  sobres: [{ id: 'gc3', status: 'DEACTIVATED' as const }],
+}
+const EN_CERO = { orderId: 'o4', venueId: 'v1', cobrado: '200.00', reembolsado: '200.00', conservado: '0.00' }
+
+beforeEach(() => jest.clearAllMocks())
 
 function job(over: Partial<ConstructorParameters<typeof GiftCardReconciliationJob>[0]> = {}) {
   return new GiftCardReconciliationJob({
     cron: noopCron,
     now: () => AHORA,
     retryEntry: ((fn: () => Promise<unknown>) => fn()) as never,
-    buscarSaldosDescuadrados: jest.fn().mockResolvedValue([{ giftCardId: 'gc1', venueId: 'v1', balance: '300.00', libreta: '500.00' }]),
     buscarCuentasPagadasConPendientes: jest.fn().mockResolvedValue([{ orderId: 'o1', venueId: 'v1' }]),
     activarCuenta: jest.fn().mockResolvedValue({ activated: ['gc9'] }),
+    buscarSaldosDescuadrados: jest.fn().mockResolvedValue([{ giftCardId: 'gc1', venueId: 'v1', balance: '300.00', libreta: '500.00' }]),
     buscarCobrosConSaldoSinCanje: jest.fn().mockResolvedValue([{ paymentId: 'pay1', venueId: 'v1', orderId: 'o2' }]),
     buscarReembolsosSinReverso: jest.fn().mockResolvedValue([{ refundPaymentId: 'ref1', venueId: 'v1', originalPaymentId: 'pay1' }]),
     buscarCancelacionesAtoradas: jest
       .fn()
       .mockResolvedValue([{ giftCardId: 'gc7', venueId: 'v1', bloqueadoEn: new Date('2026-10-13T20:00:00Z') }]),
-    buscarCuentasConDineroSinRespaldo: jest.fn().mockResolvedValue([
-      {
-        orderId: 'o3',
-        venueId: 'v1',
-        cobrado: '350.00',
-        reembolsado: '200.00',
-        conservado: '150.00',
-        respaldo: '0.00',
-        sobres: [{ id: 'gc3', status: 'DEACTIVATED' }],
-      },
-    ]),
-    buscarCuentasEnCeroAbiertas: jest
-      .fn()
-      .mockResolvedValue([{ orderId: 'o4', venueId: 'v1', cobrado: '200.00', reembolsado: '200.00', conservado: '0.00' }]),
+    buscarCandidatasSinRespaldo: jest.fn().mockResolvedValue([{ orderId: 'o3', venueId: 'v1' }]),
+    medirSinRespaldo: jest.fn().mockResolvedValue(SIN_RESPALDO),
+    buscarCandidatasEnCero: jest.fn().mockResolvedValue([{ orderId: 'o4', venueId: 'v1' }]),
+    medirEnCero: jest.fn().mockResolvedValue(EN_CERO),
     registrarAnomalia: jest.fn().mockResolvedValue(undefined),
     nombresDeNegocios: jest.fn().mockResolvedValue(new Map([['v1', 'IQ Collection']])),
     ...over,
@@ -52,12 +74,11 @@ function job(over: Partial<ConstructorParameters<typeof GiftCardReconciliationJo
 }
 
 describe('GiftCardReconciliationJob', () => {
-  it('🔴 cada hallazgo deja su anomalía con su check e id', async () => {
+  it('🔴 cada hallazgo deja su anomalía con su check e id (PAID_WITH_PENDING la escribe la activación, en su transacción)', async () => {
     const registrar = jest.fn().mockResolvedValue(undefined)
     const r = await job({ registrarAnomalia: registrar }).runNow()
     expect(registrar.mock.calls.map(c => [c[0].check, c[0].id])).toEqual([
       ['BALANCE_MISMATCH', 'gc1'],
-      ['PAID_WITH_PENDING', 'o1'],
       ['TENDER_WITHOUT_REDEEM', 'pay1'],
       ['REFUND_WITHOUT_REVERSAL', 'ref1'],
       ['CANCEL_STUCK', 'gc7'],
@@ -77,7 +98,7 @@ describe('GiftCardReconciliationJob', () => {
     })
   })
 
-  it('🔴 nota 1: el dinero sin respaldo usa la llave de A6 (orderId) y dice lo cobrado, lo devuelto, lo conservado y cada sobre', async () => {
+  it('🔴 nota 1 + r1 #1: el dinero sin respaldo usa la llave de A6 (orderId) y dice lo cobrado, lo devuelto, lo conservado, lo canjeado y cada sobre', async () => {
     const registrar = jest.fn().mockResolvedValue(undefined)
     await job({ registrarAnomalia: registrar }).runNow()
     const fila = registrar.mock.calls.map(c => c[0]).find(a => a.check === 'PAID_WITH_DEACTIVATED')
@@ -91,10 +112,22 @@ describe('GiftCardReconciliationJob', () => {
         cobrado: '350.00',
         reembolsado: '200.00',
         conservado: '150.00',
+        canjeado: '0.00',
         respaldo: '0.00',
         sobres: [{ id: 'gc3', status: 'DEACTIVATED' }],
       },
     })
+  })
+
+  it('una candidata que la medición descarta (hay respaldo, o no está en $0) no se cuenta ni se avisa', async () => {
+    const registrar = jest.fn().mockResolvedValue(undefined)
+    const r = await job({
+      medirSinRespaldo: jest.fn().mockResolvedValue(null),
+      medirEnCero: jest.fn().mockResolvedValue(null),
+      registrarAnomalia: registrar,
+    }).runNow()
+    expect(r).toMatchObject({ cuentasCanceladasConDinero: 0, cuentasEnCeroAbiertas: 0, fallidas: 0 })
+    expect(registrar.mock.calls.map(c => c[0].check)).not.toEqual(expect.arrayContaining(['PAID_WITH_DEACTIVATED']))
   })
 
   it('🔴 Review Focus 3: una cuenta pagada con sobres PENDING se activa con la función del cobro', async () => {
@@ -103,11 +136,22 @@ describe('GiftCardReconciliationJob', () => {
     expect(activar).toHaveBeenCalledWith({ orderId: 'o1', venueId: 'v1' })
   })
 
+  it('🔴 r1 M2: la activación (la única reparación) corre PRIMERO, antes de cualquier otra búsqueda', async () => {
+    const orden: string[] = []
+    const anota = <T>(nombre: string, valor: T) => jest.fn(async () => (orden.push(nombre), valor))
+    await job({
+      buscarCuentasPagadasConPendientes: anota('pagadas', [{ orderId: 'o1', venueId: 'v1' }]),
+      activarCuenta: anota('activar', { activated: ['gc9'] }),
+      buscarSaldosDescuadrados: anota('saldos', []),
+      buscarCobrosConSaldoSinCanje: anota('cobros', []),
+    }).runNow()
+    expect(orden.slice(0, 3)).toEqual(['pagadas', 'activar', 'saldos'])
+  })
+
   it('si la activación no activa nada (lo cobrado no cuadra: la función deja su propia anomalía), no se reporta como activada', async () => {
-    const registrar = jest.fn().mockResolvedValue(undefined)
-    const r = await job({ activarCuenta: jest.fn().mockResolvedValue({ activated: [] }), registrarAnomalia: registrar }).runNow()
+    const r = await job({ activarCuenta: jest.fn().mockResolvedValue({ activated: [] }) }).runNow()
     expect(r.cuentasActivadas).toBe(0)
-    expect(registrar.mock.calls.map(c => c[0].check)).not.toContain('PAID_WITH_PENDING')
+    expect(r.cuentasPagadasConPendientes).toBe(1)
   })
 
   it('una activación que falla no detiene al resto', async () => {
@@ -124,6 +168,44 @@ describe('GiftCardReconciliationJob', () => {
     const r = await job({ registrarAnomalia: registrar }).runNow()
     expect(r.fallidas).toBe(1)
     expect(registrar.mock.calls.map(c => c[0].check)).toContain('OPEN_AT_ZERO_WITH_PENDING')
+  })
+
+  it('🔴 r1 M2: un barrido cuya búsqueda truena suma a fallidas, sale en logger.error y los demás barridos corren', async () => {
+    const r = await job({ buscarSaldosDescuadrados: jest.fn().mockRejectedValue(new Error('statement timeout')) }).runNow()
+    expect(r).toMatchObject({
+      saldosDescuadrados: 0,
+      fallidas: 1,
+      cobrosSinCanje: 1,
+      cuentasCanceladasConDinero: 1,
+      cuentasEnCeroAbiertas: 1,
+    })
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('barrido'), expect.objectContaining({ barrido: 'saldos' }))
+  })
+
+  it('🔴 r1 M2: la medición de UNA cuenta que truena (notas 1 y 2) no frena a las siguientes', async () => {
+    const medir = jest.fn(async (c: { orderId: string }) => {
+      if (c.orderId === 'o3a') throw new Error('agregado')
+      return { ...SIN_RESPALDO, orderId: c.orderId }
+    })
+    const registrar = jest.fn().mockResolvedValue(undefined)
+    const r = await job({
+      buscarCandidatasSinRespaldo: jest.fn().mockResolvedValue([
+        { orderId: 'o3a', venueId: 'v1' },
+        { orderId: 'o3b', venueId: 'v1' },
+      ]),
+      medirSinRespaldo: medir,
+      registrarAnomalia: registrar,
+    }).runNow()
+    expect(r).toMatchObject({ cuentasCanceladasConDinero: 1, fallidas: 1 })
+    expect(registrar.mock.calls.filter(c => c[0].check === 'PAID_WITH_DEACTIVATED').map(c => c[0].id)).toEqual(['o3b'])
+  })
+
+  it('🔴 r1 M6: el resumen de la corrida sale en warn si algo falló, y en info si no', async () => {
+    await job().runNow()
+    expect(logger.info).toHaveBeenCalledWith('🎁 [tarjetas de regalo] revisión nocturna', expect.objectContaining({ fallidas: 0 }))
+    jest.clearAllMocks()
+    await job({ activarCuenta: jest.fn().mockRejectedValue(new Error('candado')) }).runNow()
+    expect(logger.warn).toHaveBeenCalledWith('🎁 [tarjetas de regalo] revisión nocturna', expect.objectContaining({ fallidas: 1 }))
   })
 
   it('🔴 r1 B-6: recorre TODAS las páginas en la misma corrida; 200 hallazgos que persisten no esconden al 201', async () => {
@@ -161,17 +243,14 @@ describe('GiftCardReconciliationJob', () => {
     expect(r).toMatchObject({ cuentasPagadasConPendientes: 250, cuentasActivadas: 50, fallidas: 200 })
   })
 
-  it('🔴 notas 1-2: las búsquedas con filtro de dinero regresan una página de HALLAZGOS y retoman justo después del último', async () => {
-    // 10 candidatas por keyset en páginas de 3; sólo las pares son hallazgo (la cifra la decide la fórmula de la libreta).
-    const ids = Array.from({ length: 10 }, (_, i) => ({ orderId: `o-${i}` }))
-    const candidatas = jest.fn(async ({ despuesDe, limite }: { despuesDe: string | null; limite: number }) =>
-      ids.filter(c => despuesDe === null || c.orderId > despuesDe).slice(0, limite),
-    )
-    const esHallazgo = async (c: { orderId: string }) => (Number(c.orderId.slice(2)) % 2 === 0 ? c.orderId : null)
-    // Se llena a media página: regresa 3 y el cursor del job (el último hallazgo) retoma sin saltarse ninguna.
-    expect(await hallazgosPorPaginas({ despuesDe: null, limite: 3 }, candidatas, esHallazgo)).toEqual(['o-0', 'o-2', 'o-4'])
-    expect(await hallazgosPorPaginas({ despuesDe: 'o-4', limite: 3 }, candidatas, esHallazgo)).toEqual(['o-6', 'o-8'])
-    expect(candidatas.mock.calls.map(c => c[0].despuesDe)).toEqual([null, 'o-2', 'o-4', 'o-7'])
+  it('🔴 r1 M1: las candidatas de las notas 1 y 2 se limitan a cuentas con movimiento en los últimos 7 días', async () => {
+    const sinRespaldo = jest.fn().mockResolvedValue([])
+    const enCero = jest.fn().mockResolvedValue([])
+    await job({ buscarCandidatasSinRespaldo: sinRespaldo, buscarCandidatasEnCero: enCero }).runNow()
+    const hace7Dias = new Date(AHORA.getTime() - 7 * 24 * 60 * 60 * 1000)
+    const hace24Horas = new Date(AHORA.getTime() - 24 * 60 * 60 * 1000)
+    expect(sinRespaldo).toHaveBeenCalledWith({ movidasDesde: hace7Dias, despuesDe: null, limite: 200 })
+    expect(enCero).toHaveBeenCalledWith({ movidasDesde: hace7Dias, sinMovimientoDesde: hace24Horas, despuesDe: null, limite: 200 })
   })
 
   it('dryRun sólo cuenta: no activa ni registra', async () => {
@@ -189,12 +268,16 @@ describe('GiftCardReconciliationJob', () => {
     expect(registrar).not.toHaveBeenCalled()
   })
 
-  it('cada lectura de entrada va con el reintento de conexión (regla de cron)', async () => {
+  it('cada lectura de entrada va con el reintento de conexión (regla de cron), también la medición por cuenta', async () => {
     const retryEntry = jest.fn((fn: () => Promise<unknown>) => fn())
     await job({ retryEntry: retryEntry as never }).runNow()
     expect(retryEntry).toHaveBeenCalledWith(
       expect.any(Function),
       expect.objectContaining({ shouldRetry: shouldRetryDbConnectionError, retries: 2 }),
+    )
+    const contextos = retryEntry.mock.calls.map(c => (c as unknown as [unknown, { context: string }])[1].context)
+    expect(contextos).toEqual(
+      expect.arrayContaining(['gift-card-reconciliation.sin-respaldo.medir', 'gift-card-reconciliation.en-cero.medir']),
     )
   })
 
@@ -222,5 +305,31 @@ describe('GiftCardReconciliationJob', () => {
       false,
       'America/Mexico_City',
     )
+  })
+
+  describe('🔴 r1 M3: activarCuentaEnDb', () => {
+    const tx = { soy: 'la tx de la activación' }
+    beforeEach(() => {
+      ;(prisma.$transaction as jest.Mock).mockImplementationOnce(async (fn: (t: unknown) => unknown) => fn(tx))
+      ;(lockExistingOrderForPayment as jest.Mock).mockResolvedValue(true)
+    })
+
+    it('escribe PAID_WITH_PENDING con la MISMA tx que activó (si la anomalía falla, la activación se deshace con ella)', async () => {
+      ;(activarSobresDeCuentaPagadaEnTx as jest.Mock).mockResolvedValue({ activated: ['gc9'] })
+      await expect(defaults.activarCuenta({ orderId: 'o1', venueId: 'v1' })).resolves.toEqual({ activated: ['gc9'] })
+      expect(activarSobresDeCuentaPagadaEnTx).toHaveBeenCalledWith(tx, { venueId: 'v1', orderId: 'o1', staffId: null })
+      expect(recordGiftCardAnomaly).toHaveBeenCalledWith(tx, {
+        check: 'PAID_WITH_PENDING',
+        id: 'o1',
+        venueId: 'v1',
+        detail: { activated: ['gc9'] },
+      })
+    })
+
+    it('sin sobres activados no escribe PAID_WITH_PENDING (la activación ya dejó su propia anomalía)', async () => {
+      ;(activarSobresDeCuentaPagadaEnTx as jest.Mock).mockResolvedValue({ activated: [] })
+      await defaults.activarCuenta({ orderId: 'o1', venueId: 'v1' })
+      expect(recordGiftCardAnomaly).not.toHaveBeenCalled()
+    })
   })
 })

@@ -3,7 +3,12 @@ import { Prisma } from '@prisma/client'
 import logger from '../config/logger'
 import { scheduleJob } from '../observability/jobContext'
 import { recordGiftCardAnomaly } from '../services/giftCards/giftCardAnomaly'
-import { activarSobresDeCuentaPagadaEnTx, dineroDeLaCuenta } from '../services/giftCards/giftCardLedger'
+import {
+  activarSobresDeCuentaPagadaEnTx,
+  dineroDeLaCuenta,
+  dineroSinRespaldoEnTexto,
+  medirDineroSinRespaldo,
+} from '../services/giftCards/giftCardLedger'
 import { sqlOrdenEsCuentaDeTarjetas } from '../services/giftCards/giftCardMarks'
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '../services/shared/paymentShiftClaim'
 import prisma from '../utils/prismaClient'
@@ -17,17 +22,19 @@ import { DATABASE_JOB_SCHEDULES } from './jobSchedules'
  * `MoneyAnomaly` con llave determinista (`giftcard:<check>:<id>`, R6: repetirla no duplica); `recordGiftCardAnomaly` suena el 🚨
  * con el negocio sólo cuando la fila es NUEVA, así que un hallazgo que persiste no repite la alerta cada noche.
  *
- * Sólo REPARA una cosa: la cuenta pagada con sobres PENDING, que se activa con la MISMA función que el cobro. Todo lo demás se
- * observa: reescribir dinero de noche, sin una persona, es peor que avisar.
+ * Sólo REPARA una cosa: la cuenta pagada con sobres PENDING, que se activa con la MISMA función que el cobro, y va PRIMERO (r1 M2).
+ * Todo lo demás se observa: reescribir dinero de noche, sin una persona, es peor que avisar.
  *
- * Lecturas acotadas POR PÁGINA: cada búsqueda devuelve a lo más `LIMITE` hallazgos, con cursor por id (keyset); los cobros, de los
- * últimos 7 días. r1 B-6: la corrida recorre TODAS las páginas de cada búsqueda (patrón de `hybridPlanCatchUp.ts`): con un solo
- * `LIMIT 200` sin cursor, 200 hallazgos que persisten (registrar la anomalía no quita su condición) escondían para siempre a los de
- * después, y los contadores parecían totales siendo una muestra.
+ * Lecturas acotadas POR PÁGINA: cada búsqueda devuelve a lo más `LIMITE` filas, con cursor por id (keyset); los cobros, los
+ * reembolsos y las cuentas de las notas 1-2, de los últimos 7 días. r1 B-6: la corrida recorre TODAS las páginas de cada búsqueda
+ * (patrón de `hybridPlanCatchUp.ts`): con un solo `LIMIT 200` sin cursor, 200 hallazgos que persisten (registrar la anomalía no quita
+ * su condición) escondían para siempre a los de después, y los contadores parecían totales siendo una muestra.
+ * r1 M2: cada barrido y cada hallazgo están aislados; lo que truena suma a `fallidas` y lo demás sigue.
  */
 
 const LIMITE = 200
-const VENTANA_DE_COBROS_MS = 7 * 24 * 60 * 60 * 1000
+/** Cobros y reembolsos con saldo, y (r1 M1) las cuentas que se movieron: la anomalía ya escrita persiste y deduplica. */
+const VENTANA_MS = 7 * 24 * 60 * 60 * 1000
 const GRACIA_MS = 10 * 60 * 1000
 const CANCELACION_ATORADA_MS = 24 * 60 * 60 * 1000
 const SIN_MOVIMIENTO_MS = 24 * 60 * 60 * 1000
@@ -42,7 +49,8 @@ export interface SaldoDescuadrado {
   balance: string
   libreta: string
 }
-export interface CuentaPagadaConPendientes {
+/** Una cuenta (Order) de tarjetas: la que se activa, o la candidata de las notas 1 y 2 antes de medirla. */
+export interface CuentaDeTarjetas {
   orderId: string
   venueId: string
 }
@@ -61,20 +69,10 @@ export interface CancelacionAtorada {
   venueId: string
   bloqueadoEn: Date
 }
-/** Nota 1 del coordinador: dinero conservado mayor que lo que respaldan los sobres NO desactivados (pesos con 2 decimales). */
-export interface CuentaConDineroSinRespaldo {
-  orderId: string
-  venueId: string
-  cobrado: string
-  reembolsado: string
-  conservado: string
-  respaldo: string
-  sobres: Array<{ id: string; status: string }>
-}
-/** Nota 2 del coordinador: tuvo reembolso, quedó en $0 o menos, sigue abierta con sobres PENDING y nadie la ha movido en 24 h. */
-export interface CuentaEnCeroAbierta {
-  orderId: string
-  venueId: string
+/** Nota 1 (r1 #1): lo conservado pasa de lo que respaldan sus sobres (vivos + lo que los desactivados canjearon). Pesos en texto. */
+export interface CuentaConDineroSinRespaldo extends CuentaDeTarjetas, ReturnType<typeof dineroSinRespaldoEnTexto> {}
+/** Nota 2: tuvo reembolso, quedó en $0 o menos, sigue abierta con sobres PENDING y nadie la ha movido en 24 h. */
+export interface CuentaEnCeroAbierta extends CuentaDeTarjetas {
   cobrado: string
   reembolsado: string
   conservado: string
@@ -103,14 +101,17 @@ interface Dependencies {
   now: () => Date
   retryEntry: typeof retry
   // r1 B-6: cada búsqueda es UNA página: los de id > `despuesDe` (null = desde el principio), en orden de id, a lo más `limite`.
+  buscarCuentasPagadasConPendientes: (o: { antesDe: Date } & Pagina) => Promise<CuentaDeTarjetas[]>
+  activarCuenta: (c: CuentaDeTarjetas) => Promise<{ activated: string[] }>
   buscarSaldosDescuadrados: (o: Pagina) => Promise<SaldoDescuadrado[]>
-  buscarCuentasPagadasConPendientes: (o: { antesDe: Date } & Pagina) => Promise<CuentaPagadaConPendientes[]>
-  activarCuenta: (c: CuentaPagadaConPendientes) => Promise<{ activated: string[] }>
   buscarCobrosConSaldoSinCanje: (o: { desde: Date } & Pagina) => Promise<CobroSinCanje[]>
   buscarReembolsosSinReverso: (o: { desde: Date } & Pagina) => Promise<ReembolsoSinReverso[]>
   buscarCancelacionesAtoradas: (o: { antesDe: Date } & Pagina) => Promise<CancelacionAtorada[]>
-  buscarCuentasConDineroSinRespaldo: (o: Pagina) => Promise<CuentaConDineroSinRespaldo[]>
-  buscarCuentasEnCeroAbiertas: (o: { sinMovimientoDesde: Date } & Pagina) => Promise<CuentaEnCeroAbierta[]>
+  // Notas 1-2: el SQL trae candidatas (un superconjunto) y la medición por cuenta decide; `null` = no es hallazgo.
+  buscarCandidatasSinRespaldo: (o: { movidasDesde: Date } & Pagina) => Promise<CuentaDeTarjetas[]>
+  medirSinRespaldo: (c: CuentaDeTarjetas) => Promise<CuentaConDineroSinRespaldo | null>
+  buscarCandidatasEnCero: (o: { movidasDesde: Date; sinMovimientoDesde: Date } & Pagina) => Promise<CuentaDeTarjetas[]>
+  medirEnCero: (c: CuentaDeTarjetas) => Promise<CuentaEnCeroAbierta | null>
   registrarAnomalia: (a: AnomaliaDeTarjeta) => Promise<void>
   nombresDeNegocios: (venueIds: string[]) => Promise<Map<string, string>>
 }
@@ -119,29 +120,18 @@ interface Dependencies {
 const despuesDeId = (columna: 'g.id' | 'o.id' | 'p.id', despuesDe: string | null): Prisma.Sql =>
   despuesDe === null ? Prisma.empty : Prisma.sql`AND ${Prisma.raw(columna)} > ${despuesDe}`
 
-/**
- * Notas 1-2: búsquedas cuya cifra decide `dineroDeLaCuenta` (la MISMA fórmula que la activación; no hay copia en SQL). Las candidatas
- * salen por keyset en SQL y cada una se mide; regresa una página de HALLAZGOS —a lo más `limite`, en orden de id; menos de `limite` =
- * se agotaron las candidatas—. Si se llena a media página, el cursor del job (el último hallazgo) retoma justo después.
- */
-export async function hallazgosPorPaginas<C extends { orderId: string }, H>(
-  o: Pagina,
-  candidatas: (p: Pagina) => Promise<C[]>,
-  hallazgo: (c: C) => Promise<H | null>,
-): Promise<H[]> {
-  const hallazgos: H[] = []
-  let despuesDe = o.despuesDe
-  for (;;) {
-    const pagina = await candidatas({ despuesDe, limite: o.limite })
-    for (const c of pagina) {
-      const h = await hallazgo(c)
-      if (h !== null) hallazgos.push(h)
-      if (hallazgos.length === o.limite) return hallazgos
-    }
-    if (pagina.length < o.limite) return hallazgos
-    despuesDe = pagina[pagina.length - 1].orderId
-  }
-}
+/** r1 M1: la cuenta `o` se movió desde `desde`: un pago suyo creado o tocado, un sobre suyo desactivado o la Order misma tocada. */
+const seMovioDesde = (desde: Date): Prisma.Sql => Prisma.sql`(
+  o."updatedAt" >= ${utcTs(desde)}
+  OR EXISTS (
+    SELECT 1 FROM "Payment" mp
+    WHERE mp."venueId" = o."venueId" AND mp."orderId" = o.id AND (mp."createdAt" >= ${utcTs(desde)} OR mp."updatedAt" >= ${utcTs(desde)})
+  )
+  OR EXISTS (
+    SELECT 1 FROM "OrderItem" mi JOIN "GiftCard" mg ON mg.id = mi."giftCardId"
+    WHERE mi."orderId" = o.id AND mg."deactivatedAt" >= ${utcTs(desde)}
+  )
+)`
 
 /**
  * El saldo de un sobre es la suma con signo de su libreta (spec §4.2): suman ACTIVATE, REDEEM_REVERSAL y ADJUST_INCREMENT; restan
@@ -170,10 +160,10 @@ async function buscarSaldosDescuadradosEnDb(o: Pagina): Promise<SaldoDescuadrado
     LIMIT ${o.limite}`)
 }
 
-async function buscarCuentasPagadasConPendientesEnDb(o: { antesDe: Date } & Pagina): Promise<CuentaPagadaConPendientes[]> {
+async function buscarCuentasPagadasConPendientesEnDb(o: { antesDe: Date } & Pagina): Promise<CuentaDeTarjetas[]> {
   // Nota 3: una cuenta con algún sobre DEACTIVATED no se intenta activar (un sobre desactivado nunca revive); la avisa el barrido
   // de dinero sin respaldo con la llave de A6.
-  return prisma.$queryRaw<CuentaPagadaConPendientes[]>(Prisma.sql`
+  return prisma.$queryRaw<CuentaDeTarjetas[]>(Prisma.sql`
     SELECT DISTINCT o.id AS "orderId", o."venueId" AS "venueId"
     FROM "GiftCard" g
     JOIN "OrderItem" oi ON oi."giftCardId" = g.id
@@ -190,11 +180,22 @@ async function buscarCuentasPagadasConPendientesEnDb(o: { antesDe: Date } & Pagi
     LIMIT ${o.limite}`)
 }
 
-async function activarCuentaEnDb(c: CuentaPagadaConPendientes): Promise<{ activated: string[] }> {
+async function activarCuentaEnDb(c: CuentaDeTarjetas): Promise<{ activated: string[] }> {
   return prisma.$transaction(async tx => {
     // Mismo candado que el cobro: Order primero (la activación toma los sobres después).
     if (!(await lockExistingOrderForPayment(tx, { venueId: c.venueId, orderId: c.orderId }))) return { activated: [] }
-    return activarSobresDeCuentaPagadaEnTx(tx, { venueId: c.venueId, orderId: c.orderId, staffId: null })
+    const resultado = await activarSobresDeCuentaPagadaEnTx(tx, { venueId: c.venueId, orderId: c.orderId, staffId: null })
+    // r1 M3: el rastro va en la MISMA transacción que activa: si no se puede escribir, la activación se deshace y la noche que
+    // sigue lo vuelve a intentar; nunca quedan sobres activados de noche sin su anomalía.
+    if (resultado.activated.length > 0) {
+      await recordGiftCardAnomaly(tx, {
+        check: 'PAID_WITH_PENDING',
+        id: c.orderId,
+        venueId: c.venueId,
+        detail: { activated: resultado.activated },
+      })
+    }
+    return resultado
   }, ORDER_LOCK_WAIT_BUDGET)
 }
 
@@ -249,66 +250,39 @@ async function buscarCancelacionesAtoradasEnDb(o: { antesDe: Date } & Pagina): P
 }
 
 /**
- * Nota 1: candidatas = cuenta de tarjetas (R11) con algún sobre DEACTIVATED o la Order CANCELLED, y con al menos un cobro (sin
- * cobros no hay dinero conservado: condición necesaria; la cifra la decide `dineroDeLaCuenta`). `respaldo` = suma de `initialAmount`
- * de los sobres NO desactivados.
- * ponytail: toda venta de tarjetas cancelada con cobro se vuelve a medir cada noche (2 agregados por cuenta); si pasan de decenas de
- * miles, ventana por el último movimiento de la cuenta o el gemelo en SQL de `dineroDeLaCuenta`.
+ * Nota 1, candidatas: cuenta de tarjetas (R11) con algún sobre DEACTIVATED, al menos un cobro (sin cobros no hay dinero conservado)
+ * y movimiento en la ventana (r1 M1). Es un superconjunto: la cifra la decide `medirDineroSinRespaldo`, la MISMA del cobro (A6).
  */
-async function candidatasSinRespaldoEnDb(
-  o: Pagina,
-): Promise<Array<{ orderId: string; venueId: string; respaldo: string; sobres: Array<{ id: string; status: string }> }>> {
-  return prisma.$queryRaw(Prisma.sql`
-    WITH candidatas AS (
-      SELECT DISTINCT o.id, o."venueId"
-      FROM "GiftCard" g
-      JOIN "OrderItem" oi ON oi."giftCardId" = g.id
-      JOIN "Order" o ON o.id = oi."orderId"
-      WHERE (g.status = 'DEACTIVATED' OR o.status = 'CANCELLED')
-        AND ${sqlOrdenEsCuentaDeTarjetas('o.id')}
-        AND EXISTS (
-          SELECT 1 FROM "Payment" p
-          WHERE p."venueId" = o."venueId" AND p."orderId" = o.id AND p.status = 'COMPLETED' AND p.type IS DISTINCT FROM 'REFUND'
-        )
-        ${despuesDeId('o.id', o.despuesDe)}
-      ORDER BY o.id
-      LIMIT ${o.limite}
-    )
-    SELECT c.id AS "orderId", c."venueId" AS "venueId", s.respaldo::text AS respaldo, s.sobres
-    FROM candidatas c
-    JOIN LATERAL (
-      SELECT COALESCE(SUM(g."initialAmount") FILTER (WHERE g.status <> 'DEACTIVATED'), 0) AS respaldo,
-             json_agg(json_build_object('id', g.id, 'status', g.status) ORDER BY g.id) AS sobres
-      FROM "OrderItem" oi
-      JOIN "GiftCard" g ON g.id = oi."giftCardId"
-      WHERE oi."orderId" = c.id
-    ) s ON TRUE
-    ORDER BY c.id`)
+async function buscarCandidatasSinRespaldoEnDb(o: { movidasDesde: Date } & Pagina): Promise<CuentaDeTarjetas[]> {
+  return prisma.$queryRaw<CuentaDeTarjetas[]>(Prisma.sql`
+    SELECT DISTINCT o.id AS "orderId", o."venueId" AS "venueId"
+    FROM "GiftCard" g
+    JOIN "OrderItem" oi ON oi."giftCardId" = g.id
+    JOIN "Order" o ON o.id = oi."orderId"
+    WHERE g.status = 'DEACTIVATED'
+      AND ${sqlOrdenEsCuentaDeTarjetas('o.id')}
+      AND EXISTS (
+        SELECT 1 FROM "Payment" p
+        WHERE p."venueId" = o."venueId" AND p."orderId" = o.id AND p.status = 'COMPLETED' AND p.type IS DISTINCT FROM 'REFUND'
+      )
+      AND ${seMovioDesde(o.movidasDesde)}
+      ${despuesDeId('o.id', o.despuesDe)}
+    ORDER BY o.id
+    LIMIT ${o.limite}`)
 }
 
-async function buscarCuentasConDineroSinRespaldoEnDb(o: Pagina): Promise<CuentaConDineroSinRespaldo[]> {
-  return hallazgosPorPaginas(o, candidatasSinRespaldoEnDb, async c => {
-    const dinero = await dineroDeLaCuenta(prisma, c)
-    const respaldo = new Prisma.Decimal(c.respaldo)
-    if (!dinero.conservado.greaterThan(respaldo)) return null
-    return {
-      orderId: c.orderId,
-      venueId: c.venueId,
-      cobrado: dinero.cobrado.toFixed(2),
-      reembolsado: dinero.reembolsado.toFixed(2),
-      conservado: dinero.conservado.toFixed(2),
-      respaldo: respaldo.toFixed(2),
-      sobres: c.sobres,
-    }
-  })
+async function medirSinRespaldoEnDb(c: CuentaDeTarjetas): Promise<CuentaConDineroSinRespaldo | null> {
+  const m = await medirDineroSinRespaldo(prisma, c)
+  return m?.sinRespaldo ? { orderId: c.orderId, venueId: c.venueId, ...dineroSinRespaldoEnTexto(m) } : null
 }
 
 /**
- * Nota 2: candidatas = cuenta de tarjetas (R11) con sobres PENDING, abierta (ni cancelada ni cerrada; una PAGADA la avisa la
- * activación con `DINERO_DEVUELTO`), con algún reembolso y sin pagos creados ni tocados desde `sinMovimientoDesde`.
+ * Nota 2, candidatas: cuenta de tarjetas (R11) con sobres PENDING, abierta (ni cancelada ni cerrada; una PAGADA la avisa la
+ * activación con `DINERO_DEVUELTO`), con algún reembolso, movida en la ventana (r1 M1) y sin pagos creados ni tocados desde
+ * `sinMovimientoDesde`. La medición con `dineroDeLaCuenta` decide si quedó en $0.
  */
-async function candidatasEnCeroEnDb(o: { sinMovimientoDesde: Date } & Pagina): Promise<Array<{ orderId: string; venueId: string }>> {
-  return prisma.$queryRaw(Prisma.sql`
+async function buscarCandidatasEnCeroEnDb(o: { movidasDesde: Date; sinMovimientoDesde: Date } & Pagina): Promise<CuentaDeTarjetas[]> {
+  return prisma.$queryRaw<CuentaDeTarjetas[]>(Prisma.sql`
     SELECT DISTINCT o.id AS "orderId", o."venueId" AS "venueId"
     FROM "GiftCard" g
     JOIN "OrderItem" oi ON oi."giftCardId" = g.id
@@ -326,27 +300,22 @@ async function candidatasEnCeroEnDb(o: { sinMovimientoDesde: Date } & Pagina): P
         WHERE p."venueId" = o."venueId" AND p."orderId" = o.id
           AND (p."createdAt" >= ${utcTs(o.sinMovimientoDesde)} OR p."updatedAt" >= ${utcTs(o.sinMovimientoDesde)})
       )
+      AND ${seMovioDesde(o.movidasDesde)}
       ${despuesDeId('o.id', o.despuesDe)}
     ORDER BY o.id
     LIMIT ${o.limite}`)
 }
 
-async function buscarCuentasEnCeroAbiertasEnDb(o: { sinMovimientoDesde: Date } & Pagina): Promise<CuentaEnCeroAbierta[]> {
-  return hallazgosPorPaginas(
-    o,
-    p => candidatasEnCeroEnDb({ ...p, sinMovimientoDesde: o.sinMovimientoDesde }),
-    async c => {
-      const dinero = await dineroDeLaCuenta(prisma, c)
-      if (!dinero.reembolsado.greaterThan(0) || dinero.conservado.greaterThan(0)) return null
-      return {
-        orderId: c.orderId,
-        venueId: c.venueId,
-        cobrado: dinero.cobrado.toFixed(2),
-        reembolsado: dinero.reembolsado.toFixed(2),
-        conservado: dinero.conservado.toFixed(2),
-      }
-    },
-  )
+async function medirEnCeroEnDb(c: CuentaDeTarjetas): Promise<CuentaEnCeroAbierta | null> {
+  const dinero = await dineroDeLaCuenta(prisma, c)
+  if (!dinero.reembolsado.greaterThan(0) || dinero.conservado.greaterThan(0)) return null
+  return {
+    orderId: c.orderId,
+    venueId: c.venueId,
+    cobrado: dinero.cobrado.toFixed(2),
+    reembolsado: dinero.reembolsado.toFixed(2),
+    conservado: dinero.conservado.toFixed(2),
+  }
 }
 
 async function nombresDeNegociosEnDb(venueIds: string[]): Promise<Map<string, string>> {
@@ -358,14 +327,16 @@ async function nombresDeNegociosEnDb(venueIds: string[]): Promise<Map<string, st
 export const defaults: Dependencies = {
   now: () => new Date(),
   retryEntry: retry,
-  buscarSaldosDescuadrados: buscarSaldosDescuadradosEnDb,
   buscarCuentasPagadasConPendientes: buscarCuentasPagadasConPendientesEnDb,
   activarCuenta: activarCuentaEnDb,
+  buscarSaldosDescuadrados: buscarSaldosDescuadradosEnDb,
   buscarCobrosConSaldoSinCanje: buscarCobrosConSaldoSinCanjeEnDb,
   buscarReembolsosSinReverso: buscarReembolsosSinReversoEnDb,
   buscarCancelacionesAtoradas: buscarCancelacionesAtoradasEnDb,
-  buscarCuentasConDineroSinRespaldo: buscarCuentasConDineroSinRespaldoEnDb,
-  buscarCuentasEnCeroAbiertas: buscarCuentasEnCeroAbiertasEnDb,
+  buscarCandidatasSinRespaldo: buscarCandidatasSinRespaldoEnDb,
+  medirSinRespaldo: medirSinRespaldoEnDb,
+  buscarCandidatasEnCero: buscarCandidatasEnCeroEnDb,
+  medirEnCero: medirEnCeroEnDb,
   registrarAnomalia: a => recordGiftCardAnomaly(prisma, a),
   nombresDeNegocios: nombresDeNegociosEnDb,
 }
@@ -401,7 +372,7 @@ export class GiftCardReconciliationJob {
     logger.info('Gift-card reconciliation stopped')
   }
 
-  /** `dryRun` cuenta sin activar ni registrar: es lo que hace seguro correrla a mano contra producción. */
+  /** `dryRun` cuenta (y mide, que sólo lee) sin activar ni registrar: es lo que hace seguro correrla a mano contra producción. */
   async runNow(opts: { dryRun?: boolean } = {}): Promise<GiftCardReconciliationResult> {
     const dryRun = opts.dryRun === true
     const r: GiftCardReconciliationResult = {
@@ -421,6 +392,7 @@ export class GiftCardReconciliationJob {
     this.running = true
     try {
       const ahora = this.d.now()
+      const hace = (ms: number) => new Date(ahora.getTime() - ms)
       // Cada lectura es pura y va con el reintento de conexión (regla de cron): una a la vez, para no sumar a la estampida.
       const leer = <T>(contexto: string, fn: () => Promise<T>) =>
         this.d.retryEntry(fn, {
@@ -429,7 +401,6 @@ export class GiftCardReconciliationJob {
           shouldRetry: shouldRetryDbConnectionError,
           context: `gift-card-reconciliation.${contexto}`,
         })
-      const desde = new Date(ahora.getTime() - VENTANA_DE_COBROS_MS)
       const nombres = new Map<string, string>()
       const conNombres = async (venueIds: string[]) => {
         const faltan = [...new Set(venueIds)].filter(id => !nombres.has(id))
@@ -438,6 +409,7 @@ export class GiftCardReconciliationJob {
         for (const [id, nombre] of nuevos) nombres.set(id, nombre)
       }
       const avisar = async (check: AnomaliaDeTarjeta['check'], id: string, venueId: string, detail: Record<string, unknown>) => {
+        if (dryRun) return
         // info, no error: el 🚨 lo suena `recordGiftCardAnomaly` sólo con la fila NUEVA; aquí queda el inventario de cada noche.
         logger.info(`🎁 [tarjetas de regalo] revisión nocturna: ${check}`, {
           venueId,
@@ -445,121 +417,131 @@ export class GiftCardReconciliationJob {
           id,
           ...detail,
         })
-        try {
-          await this.d.registrarAnomalia({ check, id, venueId, detail })
-        } catch (error) {
-          r.fallidas += 1
-          logger.warn('🎁 [tarjetas de regalo] no se pudo registrar la anomalía', { check, id, venueId, error: (error as Error)?.message })
-        }
+        await this.d.registrarAnomalia({ check, id, venueId, detail })
       }
       /**
-       * r1 B-6: recorre TODAS las páginas de una búsqueda dentro de esta corrida (keyset por id, `LIMITE` por página) y procesa
-       * cada una antes de pedir la siguiente. El cursor avanza pase lo que pase con cada hallazgo: uno que persiste o que truena
-       * no esconde ni frena a los de después. Devuelve cuántos recorrió. En `dryRun` sólo cuenta.
+       * r1 B-6: recorre TODAS las páginas de un barrido dentro de esta corrida (keyset por id, `LIMITE` por página). r1 M2: cada
+       * hallazgo se procesa aislado —uno que truena suma a `fallidas` y sigue el siguiente: el cursor avanza pase lo que pase— y si la
+       * búsqueda misma truena (ya con su reintento), suma a `fallidas`, sale en `logger.error` y siguen los demás barridos.
        */
       const recorrer = async <T extends { venueId: string }>(
-        contexto: string,
+        barrido: string,
         buscar: (despuesDe: string | null) => Promise<T[]>,
         idDe: (x: T) => string,
         procesar: (x: T) => Promise<void>,
-      ): Promise<number> => {
+      ): Promise<void> => {
         let despuesDe: string | null = null
-        let recorridos = 0
-        for (;;) {
-          const cursor = despuesDe
-          const pagina = await leer(contexto, () => buscar(cursor))
-          recorridos += pagina.length
-          if (!dryRun && pagina.length > 0) {
-            await conNombres(pagina.map(x => x.venueId))
-            for (const x of pagina) await procesar(x)
+        try {
+          for (;;) {
+            const cursor = despuesDe
+            const pagina = await leer(barrido, () => buscar(cursor))
+            if (!dryRun && pagina.length > 0) await conNombres(pagina.map(x => x.venueId))
+            for (const x of pagina) {
+              try {
+                await procesar(x)
+              } catch (error) {
+                r.fallidas += 1
+                logger.warn('🎁 [tarjetas de regalo] revisión nocturna: un hallazgo falló; siguen los demás', {
+                  barrido,
+                  id: idDe(x),
+                  venueId: x.venueId,
+                  error: (error as Error)?.message,
+                })
+              }
+            }
+            if (pagina.length < LIMITE) return
+            despuesDe = idDe(pagina[pagina.length - 1])
           }
-          if (pagina.length < LIMITE) return recorridos
-          despuesDe = idDe(pagina[pagina.length - 1])
+        } catch (error) {
+          r.fallidas += 1
+          logger.error('🎁 [tarjetas de regalo] revisión nocturna: un barrido falló; siguen los demás', {
+            barrido,
+            error: (error as Error)?.message,
+          })
         }
       }
 
-      r.saldosDescuadrados = await recorrer(
+      // r1 M2: la única reparación va primero; que un barrido de sólo-aviso truene no la deja sin correr.
+      await recorrer(
+        'pagadas',
+        despuesDe => this.d.buscarCuentasPagadasConPendientes({ antesDe: hace(GRACIA_MS), despuesDe, limite: LIMITE }),
+        c => c.orderId,
+        async c => {
+          r.cuentasPagadasConPendientes += 1
+          if (dryRun) return
+          // Sin sobres activados: lo cobrado no cuadra con los sobres (o se devolvió dinero, r1 F8) y la activación ya dejó su
+          // ACTIVATION_AMOUNT_MISMATCH. Con sobres activados, `PAID_WITH_PENDING` ya quedó escrita en su transacción (r1 M3).
+          const { activated } = await this.d.activarCuenta(c)
+          if (activated.length > 0) r.cuentasActivadas += 1
+        },
+      )
+      await recorrer(
         'saldos',
         despuesDe => this.d.buscarSaldosDescuadrados({ despuesDe, limite: LIMITE }),
         s => s.giftCardId,
-        s => avisar('BALANCE_MISMATCH', s.giftCardId, s.venueId, { balance: s.balance, libreta: s.libreta }),
-      )
-      r.cuentasPagadasConPendientes = await recorrer(
-        'pagadas',
-        despuesDe =>
-          this.d.buscarCuentasPagadasConPendientes({ antesDe: new Date(ahora.getTime() - GRACIA_MS), despuesDe, limite: LIMITE }),
-        c => c.orderId,
-        async c => {
-          try {
-            const { activated } = await this.d.activarCuenta(c)
-            // Sin sobres activados: lo cobrado no cuadra con los sobres (o se devolvió dinero, r1 F8) y la activación ya dejó su
-            // ACTIVATION_AMOUNT_MISMATCH.
-            if (activated.length === 0) return
-            r.cuentasActivadas += 1
-            await avisar('PAID_WITH_PENDING', c.orderId, c.venueId, { activated })
-          } catch (error) {
-            r.fallidas += 1
-            logger.warn('🎁 [tarjetas de regalo] no se pudo activar una cuenta pagada', {
-              orderId: c.orderId,
-              venueId: c.venueId,
-              error: (error as Error)?.message,
-            })
-          }
+        async s => {
+          r.saldosDescuadrados += 1
+          await avisar('BALANCE_MISMATCH', s.giftCardId, s.venueId, { balance: s.balance, libreta: s.libreta })
         },
       )
-      r.cobrosSinCanje = await recorrer(
+      await recorrer(
         'cobros',
-        despuesDe => this.d.buscarCobrosConSaldoSinCanje({ desde, despuesDe, limite: LIMITE }),
+        despuesDe => this.d.buscarCobrosConSaldoSinCanje({ desde: hace(VENTANA_MS), despuesDe, limite: LIMITE }),
         c => c.paymentId,
-        c => avisar('TENDER_WITHOUT_REDEEM', c.paymentId, c.venueId, { orderId: c.orderId }),
+        async c => {
+          r.cobrosSinCanje += 1
+          await avisar('TENDER_WITHOUT_REDEEM', c.paymentId, c.venueId, { orderId: c.orderId })
+        },
       )
-      r.reembolsosSinReverso = await recorrer(
+      await recorrer(
         'reembolsos',
-        despuesDe => this.d.buscarReembolsosSinReverso({ desde, despuesDe, limite: LIMITE }),
+        despuesDe => this.d.buscarReembolsosSinReverso({ desde: hace(VENTANA_MS), despuesDe, limite: LIMITE }),
         x => x.refundPaymentId,
-        x => avisar('REFUND_WITHOUT_REVERSAL', x.refundPaymentId, x.venueId, { originalPaymentId: x.originalPaymentId }),
+        async x => {
+          r.reembolsosSinReverso += 1
+          await avisar('REFUND_WITHOUT_REVERSAL', x.refundPaymentId, x.venueId, { originalPaymentId: x.originalPaymentId })
+        },
       )
-      r.cancelacionesAtoradas = await recorrer(
+      await recorrer(
         'cancelaciones',
-        despuesDe =>
-          this.d.buscarCancelacionesAtoradas({ antesDe: new Date(ahora.getTime() - CANCELACION_ATORADA_MS), despuesDe, limite: LIMITE }),
+        despuesDe => this.d.buscarCancelacionesAtoradas({ antesDe: hace(CANCELACION_ATORADA_MS), despuesDe, limite: LIMITE }),
         a => a.giftCardId,
-        a => avisar('CANCEL_STUCK', a.giftCardId, a.venueId, { bloqueadoEn: a.bloqueadoEn.toISOString() }),
+        async a => {
+          r.cancelacionesAtoradas += 1
+          await avisar('CANCEL_STUCK', a.giftCardId, a.venueId, { bloqueadoEn: a.bloqueadoEn.toISOString() })
+        },
       )
-      // Nota 1: la MISMA llave que A6 (`PAID_WITH_DEACTIVATED` + orderId): si el cobro ya avisó, esta fila no se duplica.
-      r.cuentasCanceladasConDinero = await recorrer(
+      // Nota 1: la MISMA llave que A6 (`PAID_WITH_DEACTIVATED` + orderId) y la MISMA medición: si el cobro ya avisó, no se duplica.
+      await recorrer(
         'sin-respaldo',
-        despuesDe => this.d.buscarCuentasConDineroSinRespaldo({ despuesDe, limite: LIMITE }),
+        despuesDe => this.d.buscarCandidatasSinRespaldo({ movidasDesde: hace(VENTANA_MS), despuesDe, limite: LIMITE }),
         c => c.orderId,
-        c =>
-          avisar('PAID_WITH_DEACTIVATED', c.orderId, c.venueId, {
-            motivo: 'REVISION_NOCTURNA',
-            orderId: c.orderId,
-            cobrado: c.cobrado,
-            reembolsado: c.reembolsado,
-            conservado: c.conservado,
-            respaldo: c.respaldo,
-            sobres: c.sobres,
-          }),
+        async c => {
+          const h = await leer('sin-respaldo.medir', () => this.d.medirSinRespaldo(c))
+          if (!h) return
+          r.cuentasCanceladasConDinero += 1
+          const { orderId, venueId, ...dinero } = h
+          await avisar('PAID_WITH_DEACTIVATED', orderId, venueId, { motivo: 'REVISION_NOCTURNA', orderId, ...dinero })
+        },
       )
       // Nota 2: sólo avisa; cerrar la cuenta mueve su estado y no le toca a la noche.
-      r.cuentasEnCeroAbiertas = await recorrer(
+      await recorrer(
         'en-cero',
         despuesDe =>
-          this.d.buscarCuentasEnCeroAbiertas({
-            sinMovimientoDesde: new Date(ahora.getTime() - SIN_MOVIMIENTO_MS),
+          this.d.buscarCandidatasEnCero({
+            movidasDesde: hace(VENTANA_MS),
+            sinMovimientoDesde: hace(SIN_MOVIMIENTO_MS),
             despuesDe,
             limite: LIMITE,
           }),
         c => c.orderId,
-        c =>
-          avisar('OPEN_AT_ZERO_WITH_PENDING', c.orderId, c.venueId, {
-            motivo: 'REVISION_NOCTURNA',
-            orderId: c.orderId,
-            cobrado: c.cobrado,
-            reembolsado: c.reembolsado,
-            conservado: c.conservado,
-          }),
+        async c => {
+          const h = await leer('en-cero.medir', () => this.d.medirEnCero(c))
+          if (!h) return
+          r.cuentasEnCeroAbiertas += 1
+          const { orderId, venueId, ...dinero } = h
+          await avisar('OPEN_AT_ZERO_WITH_PENDING', orderId, venueId, { motivo: 'REVISION_NOCTURNA', orderId, ...dinero })
+        },
       )
       if (dryRun) return r
 
@@ -571,7 +553,9 @@ export class GiftCardReconciliationJob {
         r.cancelacionesAtoradas +
         r.cuentasCanceladasConDinero +
         r.cuentasEnCeroAbiertas
-      if (hallazgos > 0) logger.info('🎁 [tarjetas de regalo] revisión nocturna', { ...r })
+      // r1 M6: una corrida con fallas se ve aunque no haya hallazgos.
+      if (r.fallidas > 0) logger.warn('🎁 [tarjetas de regalo] revisión nocturna', { ...r })
+      else if (hallazgos > 0) logger.info('🎁 [tarjetas de regalo] revisión nocturna', { ...r })
       return r
     } finally {
       this.running = false
