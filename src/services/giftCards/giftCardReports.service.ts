@@ -21,6 +21,7 @@ import { csvField } from '@/services/dashboard/export.helpers'
 import { WHERE_PAGO_CONTABILIZABLE_SIN_ESTADO_DE_ORDEN } from '@/services/fiscal/autoPosting.service'
 import { SIN_VENTA, bloqueosVigentes, estadoDeCancelacionDeVenta, type CancelacionDeVenta } from './giftCardCancel.service'
 import { GiftCardError } from './giftCardErrors'
+import { isGiftCardTenderKind } from './giftCardTender'
 import {
   WHERE_COBRO_ES_SALDO_DE_REGALO,
   WHERE_COBRO_NO_ES_SALDO_DE_REGALO,
@@ -282,13 +283,14 @@ function busquedaWhere(termino: string): Prisma.GiftCardWhereInput {
 // ── Lista ───────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 /**
- * El filtro de estado. `EXPIRED` (decisión 1) = ACTIVE con `expiresAt < ahora` en UTC; mezclado con otros estados va dentro
- * de un `AND` para no chocar con el `OR` de la búsqueda.
+ * El filtro de estado. `EXPIRED` (decisión 1) = ACTIVE con `expiresAt <= ahora` en UTC: la misma frontera que el resumen, la
+ * consulta del saldo y la libreta (vencida ⇔ ya no se puede usar). Mezclado con otros estados va dentro de un `AND` para no
+ * chocar con el `OR` de la búsqueda.
  */
 function filtroDeEstados(estados: EstadoDeListaDeTarjetas[], ahora: Date): Prisma.GiftCardWhereInput {
   const reales = estados.filter((e): e is GiftCardStatus => e !== 'EXPIRED')
   if (!estados.includes('EXPIRED')) return { status: { in: reales } }
-  const vencidas: Prisma.GiftCardWhereInput = { status: GiftCardStatus.ACTIVE, expiresAt: { lt: ahora } }
+  const vencidas: Prisma.GiftCardWhereInput = { status: GiftCardStatus.ACTIVE, expiresAt: { lte: ahora } }
   if (reales.length === 0) return vencidas
   return { AND: [{ OR: [{ status: { in: reales } }, vencidas] }] }
 }
@@ -558,7 +560,7 @@ const PENDIENTE_SELECT = Prisma.validator<Prisma.PaymentSelect>()({
 })
 
 function claseDe(p: { type: PaymentType | null; tenderType: { systemKind: string | null } | null }): PendingAccountingKind {
-  const conSaldo = p.tenderType?.systemKind === 'GIFT_CARD'
+  const conSaldo = isGiftCardTenderKind(p.tenderType?.systemKind)
   const devolucion = p.type === 'REFUND'
   if (conSaldo) return devolucion ? 'REVERSO_DE_SALDO' : 'COBRO_CON_SALDO'
   return devolucion ? 'CANCELACION_DE_VENTA' : 'VENTA_DE_TARJETAS'
@@ -566,7 +568,7 @@ function claseDe(p: { type: PaymentType | null; tenderType: { systemKind: string
 
 /** B4: el canje no lleva póliza de ingreso, pero el costo de su mercancía sí entra a la póliza de costo de ventas (`generateCogsPolicyForVenue`). */
 export const AVISO_PENDIENTES_CONTABLES =
-  'Estos cobros no generan póliza automática: regístralos con tu contador. El costo de la mercancía que se pagó con saldo ya está en la póliza de costo de ventas; falta el ingreso del canje y, en la venta de tarjetas, el saldo que se le debe al cliente.'
+  'Estos cobros no generan póliza automática: regístralos a mano en la contabilidad. El costo de la mercancía que se pagó con saldo ya está en la póliza de costo de ventas; falta el ingreso del canje y, en la venta de tarjetas, el saldo que se le debe al cliente.'
 
 /**
  * Los pagos que la contabilidad automática NO postea en la fase 1 (B4): la venta de tarjetas (y su cancelación) y el cobro
@@ -691,18 +693,23 @@ const CSV_SELECT = Prisma.validator<Prisma.GiftCardSelect>()({
  * `id` y las escribe al vuelo: memoria constante aunque el negocio tenga 100× las tarjetas de hoy. Sólo corre tras el clic.
  * Auditoría r1 C-5: si el receptor va lento (`write` devuelve `false`), espera `'drain'` antes de seguir —así el búfer de
  * salida nunca acumula páginas—, y si el cliente se desconecta (`'close'`) deja de consultar. Sin jobs: CSV directo.
+ * C4 r1 #1: una respuesta ya destruida (el cliente se fue antes de colgar el `'close'`, p. ej. durante la lectura de la zona)
+ * cuenta como cerrada: su `write` devuelve `false` y nunca emite `'drain'` ni `'close'`, así que esperarlos la colgaba para siempre.
  */
 export async function streamGiftCardBalancesCsv(venueId: string, res: Response): Promise<void> {
   const timezone = await getVenueTimezone(venueId)
   const dia = (d: Date | null): string | null => (d ? formatInVenueTimezone(d, timezone, 'yyyy-MM-dd') : null)
   let cerrada = false
+  /** ¿El cliente ya se fue? El `'close'` lo avisa; `destroyed`, aunque se haya ido antes de que lo escucháramos. */
+  const seFue = (): boolean => (cerrada ||= res.destroyed)
+  if (seFue()) return // antes de cualquier lectura de la base: no hay a quién mandarle nada
   const alCerrar = () => {
     cerrada = true
   }
   res.once('close', alCerrar)
   /** Escribe una línea; si el búfer se llenó, espera a que se vacíe o a que el cliente se vaya (nunca se cuelga). */
   const escribir = async (linea: string): Promise<void> => {
-    if (res.write(linea) || cerrada) return
+    if (seFue() || res.write(linea) || seFue()) return
     await new Promise<void>(resolve => {
       const listo = () => {
         res.off('drain', listo)
@@ -719,7 +726,7 @@ export async function streamGiftCardBalancesCsv(venueId: string, res: Response):
   try {
     await escribir(`\uFEFF${ENCABEZADO.map(c => celdaCsv(c)).join(',')}\r\n`)
     let despues: string | undefined
-    while (!cerrada) {
+    while (!seFue()) {
       const lote = await prisma.giftCard.findMany({
         where: { venueId, status: { in: VIVOS }, balance: { gt: 0 }, ...(despues ? { id: { gt: despues } } : {}) },
         select: CSV_SELECT,
@@ -731,7 +738,7 @@ export async function streamGiftCardBalancesCsv(venueId: string, res: Response):
         lote.map(t => t.customerId),
       )
       for (const t of lote) {
-        if (cerrada) break
+        if (seFue()) break
         const celdas = [
           t.codeLast4,
           ESTADO_ES[t.status],
@@ -746,11 +753,11 @@ export async function streamGiftCardBalancesCsv(venueId: string, res: Response):
         ]
         await escribir(`${celdas.map(c => celdaCsv(c)).join(',')}\r\n`)
       }
-      if (cerrada || lote.length < LOTE_CSV) break
+      if (seFue() || lote.length < LOTE_CSV) break
       despues = lote[lote.length - 1].id
     }
   } finally {
     res.off('close', alCerrar)
   }
-  if (!cerrada) res.end() // un cliente que ya se fue no tiene a quién terminarle la respuesta
+  if (!seFue()) res.end() // un cliente que ya se fue no tiene a quién terminarle la respuesta
 }

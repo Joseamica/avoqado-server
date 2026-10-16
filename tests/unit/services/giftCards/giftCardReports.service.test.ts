@@ -204,15 +204,15 @@ describe('lista', () => {
     })
   })
 
-  it('🔴 EXPIRED (decisión 1): ACTIVE con expiresAt ya pasado en UTC; mezclado con otro estado, dentro de un AND que no choca con la búsqueda', async () => {
+  it('🔴 EXPIRED (decisión 1; r1 #3: una sola frontera, vencida ⇔ expiresAt <= ahora): ACTIVE ya vencida en UTC; mezclado con otro estado, dentro de un AND que no choca con la búsqueda', async () => {
     const ahora = new Date('2026-10-14T18:00:00.000Z')
     prismaMock.giftCard.aggregate.mockResolvedValue({ _count: { _all: 0 }, _sum: { balance: null } })
     prismaMock.giftCard.findMany.mockResolvedValue([])
     await listGiftCards('v1', { status: ['EXPIRED'] }, ahora)
-    expect(prismaMock.giftCard.findMany.mock.calls[0][0].where).toEqual({ venueId: 'v1', status: 'ACTIVE', expiresAt: { lt: ahora } })
+    expect(prismaMock.giftCard.findMany.mock.calls[0][0].where).toEqual({ venueId: 'v1', status: 'ACTIVE', expiresAt: { lte: ahora } })
     await listGiftCards('v1', { status: ['BLOCKED', 'EXPIRED'], search: 'Ana María' }, ahora)
     const where = prismaMock.giftCard.findMany.mock.calls[1][0].where
-    expect(where.AND).toEqual([{ OR: [{ status: { in: ['BLOCKED'] } }, { status: 'ACTIVE', expiresAt: { lt: ahora } }] }])
+    expect(where.AND).toEqual([{ OR: [{ status: { in: ['BLOCKED'] } }, { status: 'ACTIVE', expiresAt: { lte: ahora } }] }])
     expect(Array.isArray(where.OR)).toBe(true) // la búsqueda sigue en su propio OR
     expect(prismaMock.giftCard.aggregate.mock.calls[1][0].where).toEqual(where)
   })
@@ -521,6 +521,11 @@ describe('pendientes de revisión contable', () => {
 })
 
 describe('exportar saldos vivos (CSV)', () => {
+  // `clearAllMocks` no tira los `mockResolvedValueOnce` que una prueba dejó sin consumir (la del «close» deja un lote): sin esto,
+  // la siguiente recibe el lote de otra.
+  beforeEach(() => {
+    prismaMock.giftCard.findMany.mockReset().mockResolvedValue([])
+  })
   const loteLleno = () =>
     Array.from({ length: LOTE_CSV }, (_, i) => ({
       id: `gc${String(i).padStart(4, '0')}`,
@@ -537,7 +542,7 @@ describe('exportar saldos vivos (CSV)', () => {
     }))
   /** Una respuesta HTTP de mentiras que SÍ emite eventos ('drain', 'close'), como la de Express. */
   const respuestaFalsa = (write: (s: string) => boolean) =>
-    Object.assign(new EventEmitter(), { setHeader: jest.fn(), write: jest.fn(write), end: jest.fn() }) as any
+    Object.assign(new EventEmitter(), { destroyed: false, setHeader: jest.fn(), write: jest.fn(write), end: jest.fn() }) as any
   const vueltas = async () => {
     for (let i = 0; i < 10; i++) await new Promise(r => setImmediate(r))
   }
@@ -616,6 +621,45 @@ describe('exportar saldos vivos (CSV)', () => {
     expect(prismaMock.giftCard.findMany).toHaveBeenCalledTimes(1)
     expect(res.end).not.toHaveBeenCalled()
     expect(res.listenerCount('close')).toBe(0)
+  })
+
+  it('🔴 C4 r1 #1: el cliente ya se fue ANTES de que se escuchara su «close» (destroyed, `write` → false, sin eventos): termina sin leer la base', async () => {
+    const res: any = respuestaFalsa(() => false)
+    res.destroyed = true
+    await streamGiftCardBalancesCsv('v1', res) // con el defecto, esta promesa nunca terminaba
+    expect(prismaMock.giftCard.findMany).not.toHaveBeenCalled()
+    expect(res.write).not.toHaveBeenCalled()
+    expect(res.end).not.toHaveBeenCalled()
+    expect(res.listenerCount('close') + res.listenerCount('drain')).toBe(0)
+  })
+
+  it('🔴 C4 r1 #1: el socket muere ENTRE lotes (sin «close»): no escribe más, no pide otro lote ni deja un «drain» pendiente', async () => {
+    let res: any = null
+    prismaMock.giftCard.findMany.mockResolvedValueOnce(loteLleno()).mockImplementationOnce(async () => {
+      res.destroyed = true // se fue mientras se leía el segundo lote
+      return loteLleno()
+    })
+    res = respuestaFalsa(() => !res.destroyed)
+    await streamGiftCardBalancesCsv('v1', res)
+    expect(res.write).toHaveBeenCalledTimes(LOTE_CSV + 1) // encabezado + el primer lote; nada del segundo
+    expect(prismaMock.giftCard.findMany).toHaveBeenCalledTimes(2)
+    expect(res.end).not.toHaveBeenCalled()
+    expect(res.listenerCount('close') + res.listenerCount('drain')).toBe(0)
+  })
+
+  it('🔴 C4 r1 #1: el socket muere EN un `write` (devuelve false y ya no emitirá nada): no espera un «drain» que nunca llega', async () => {
+    prismaMock.giftCard.findMany.mockResolvedValueOnce(loteLleno()).mockResolvedValueOnce(loteLleno())
+    let n = 0
+    const res: any = respuestaFalsa(() => {
+      n += 1
+      if (n === 3) res.destroyed = true
+      return n < 3
+    })
+    await streamGiftCardBalancesCsv('v1', res)
+    expect(res.write).toHaveBeenCalledTimes(3)
+    expect(prismaMock.giftCard.findMany).toHaveBeenCalledTimes(1)
+    expect(res.end).not.toHaveBeenCalled()
+    expect(res.listenerCount('close') + res.listenerCount('drain')).toBe(0)
   })
 
   it('celdas a prueba de fórmulas y de comas', () => {

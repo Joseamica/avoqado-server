@@ -86,11 +86,13 @@ async function renglon(
 }
 
 beforeAll(async () => {
-  if (!/test/i.test(new URL(process.env.TEST_DATABASE_URL!).pathname))
+  if (!/test/i.test(new URL(process.env.TEST_DATABASE_URL!).pathname)) {
     throw new Error('Se requiere la base desechable')
-    // La zona de fábrica de `Venue.timezone` es America/Mexico_City: la de las fronteras del día que miden estas pruebas.
+  }
   ;({ organizationId, venueId, staffId } = await crearNegocioDePrueba('reportes'))
   negocios.push(venueId)
+  // Las fronteras del día que miden estas pruebas son las de America/Mexico_City: se fijan, no se suponen de la de fábrica.
+  await prisma.venue.update({ where: { id: venueId }, data: { timezone: 'America/Mexico_City' } })
   customerId = (
     await prisma.customer.create({ data: { venueId, firstName: 'Brenda', lastName: 'Saldaña', phone: `55${stamp.slice(-8)}` } })
   ).id

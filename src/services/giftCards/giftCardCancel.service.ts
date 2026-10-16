@@ -461,6 +461,8 @@ export interface CancelacionDeVenta {
   /**
    * C4 (nota 2 del coordinador): el texto del rechazo que lanzaría `iniciarCancelacionDeVenta` (el mismo `GiftCardError`), para que el
    * panel diga cuál de los tres `NOT_PAID` es. `null` si se puede o si ya está en curso, y en `SIN_VENTA` (no es cuenta de tarjetas).
+   * Siempre que `evaluarCancelacionDeVenta` rechaza trae texto, también con `reason: null` (un sobre bloqueado por OTRO motivo, o
+   * la cuenta de otro negocio): de los rechazos, sólo `SIN_VENTA` va en `null`.
    */
   message: string | null
 }
