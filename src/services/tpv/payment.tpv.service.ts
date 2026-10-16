@@ -1397,11 +1397,15 @@ export async function settleStandalonePaymentInTx(
   const previous = computeOrderBalance(cuenta, [{ amount: amount.minus(payment.amount), tipAmount: tipAmount.minus(payment.tipAmount) }])
   const saldada = balance.isFullyPaid && cierreAutomaticoPermitido(status)
   // 🔴 R8-1 (Codex recheck-12 P2): una venta que YA estaba cerrada (PAID/REFUNDED, leída bajo el candado de quien llama) y recibe
-  // dinero no se reabre ni repite los efectos de saldar. El origen de una reasignación (sin dinero) sí vuelve a deber, como hoy.
-  const cobro = estadoDeCobroAlRecibirDinero(order.paymentStatus, payment.amount.plus(payment.tipAmount).greaterThan(0), {
-    paymentStatus: saldada ? 'PAID' : balance.paidAmount.greaterThan(0) ? 'PARTIAL' : order.paymentStatus,
-    remainingBalance: balance.remainingBalance,
-  })
+  // dinero no se reabre ni repite los efectos de saldar. El origen de una reasignación (sin dinero) se recalcula como hoy.
+  const cobro = estadoDeCobroAlRecibirDinero(
+    order.paymentStatus,
+    new Prisma.Decimal(payment.amount).plus(payment.tipAmount).greaterThan(0),
+    {
+      paymentStatus: saldada ? 'PAID' : balance.paidAmount.greaterThan(0) ? 'PARTIAL' : order.paymentStatus,
+      remainingBalance: balance.remainingBalance,
+    },
+  )
   // Codex r10 #6: la reasignación guarda así los totales del ORIGEN dentro de su transacción (`efectosDeCierre = false`): ni
   // lealtad, ni marca de cocina, ni vale de inventario — el origen ya los tuvo cuando se saldó.
   const firstSettlement = efectosDeCierre && saldada && !cobro.cerrada && !(paid._count > 1 && previous.isFullyPaid)

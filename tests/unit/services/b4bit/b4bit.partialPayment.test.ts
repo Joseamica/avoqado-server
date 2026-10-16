@@ -400,9 +400,10 @@ describe('b4bit — CAS: qué pasa si otro cobro gana la carrera', () => {
     await processWebhook(webhookCO())
 
     expect(onOrderPaid).not.toHaveBeenCalled()
-    // Y `completedAt` no se mueve: la venta se cerró una vez, no dos.
+    // Y `completedAt` no se mueve: la venta se cerró una vez, no dos. R8-1 (ronda 8): una venta cerrada que recibe dinero ya ni
+    // reescribe `status`/`completedAt` (antes los reescribía con el mismo valor); sigue PAID con saldo 0.
     const data = orderWrite()
-    expect(data.completedAt).toEqual(new Date('2026-08-17T10:00:00Z'))
+    expect([data.completedAt, data.status, data.paymentStatus, Number(data.remainingBalance)]).toEqual([undefined, undefined, 'PAID', 0])
   })
 })
 
