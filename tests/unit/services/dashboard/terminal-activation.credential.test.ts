@@ -53,3 +53,18 @@ it('does not issue a secret from the public already-activated path', async () =>
   expect(await activateTerminal('AVQD-123', 'anything')).not.toHaveProperty('commandToken')
   expect(db.terminal.updateMany).not.toHaveBeenCalled()
 })
+it('🔴 the public already-activated path (app reinstall, no code) never takes a terminal out of MAINTENANCE', async () => {
+  // Sólo el dueño la saca de mantenimiento (EXIT_MAINTENANCE). Antes, cualquiera con el serial impreso la dejaba ACTIVA.
+  db.terminal.findFirst.mockResolvedValue({ ...terminal, status: 'MAINTENANCE', activatedAt: new Date() })
+  expect(await activateTerminal('AVQD-123', 'ZZZ999')).toMatchObject({ terminalId: 't1', venueId: 'v1' })
+  expect(db.terminal.update).not.toHaveBeenCalled()
+  expect(db.terminal.updateMany).not.toHaveBeenCalled()
+})
+it('🔴 the INACTIVE → ACTIVE re-sync only writes if the row is still INACTIVE (an owner MAINTENANCE saved meanwhile wins)', async () => {
+  // Codex r1 P2: leer INACTIVE, el dueño guarda MAINTENANCE, y un update sólo por id lo pisaba con ACTIVE.
+  db.terminal.findFirst.mockResolvedValue({ ...terminal, status: 'INACTIVE', activatedAt: new Date() })
+  db.terminal.updateMany.mockResolvedValue({ count: 0 })
+  expect(await activateTerminal('AVQD-123', 'ZZZ999')).toMatchObject({ terminalId: 't1' })
+  expect(db.terminal.update).not.toHaveBeenCalled()
+  expect(db.terminal.updateMany).toHaveBeenCalledWith({ where: { id: 't1', status: 'INACTIVE' }, data: { status: 'ACTIVE' } })
+})
