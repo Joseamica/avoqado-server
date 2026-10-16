@@ -12,6 +12,8 @@ name: 🗺️ Schema Map
 
 on:
   push:
+    # EXPERIMENTO OTel (sólo en la rama exp/otel-trazas): nunca en sus carriles de medición.
+    branches-ignore: ['ci/exp-otel-**']
     paths:
       - 'prisma/schema.prisma'
   pull_request:

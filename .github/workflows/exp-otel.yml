@@ -1,0 +1,73 @@
+# EXPERIMENTO OpenTelemetry vs correlationId (16-oct-2026) — SÓLO MEDICIÓN.
+# Vive sólo en la rama exp/otel-trazas y corre sólo en carriles ci/exp-otel-** (o a mano). No publica, no despliega,
+# no toca producción ni manda nada fuera del runner: el server corre en una red docker --internal (sin internet).
+# Plan: docs/investigaciones/otel-trazas/plan-medicion.md del workspace (las «Correcciones» del final mandan).
+#
+# Fase 1 (este archivo hoy): HUMO del brazo A — el cobro congelado de 8 pasos, N=5 veces seguidas, de punta a punta.
+name: 🧪 Experimento OTel (medición)
+
+on:
+  push:
+    branches: ['ci/exp-otel-**']
+  workflow_dispatch:
+
+concurrency:
+  group: exp-otel-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  TZ: UTC
+  OUT_DIR: ${{ github.workspace }}/exp-out
+
+jobs:
+  humo:
+    name: Humo brazo A (5 cobros de punta a punta)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20' # = engines.node y el CI de producción
+          cache: 'npm'
+
+      - name: Instalar y compilar (npm ci + npm run build)
+        run: |
+          npm ci
+          npm run build
+          # El build parcha el runtime de Prisma (scripts/parchar-prisma-runtime.cjs): se deja constancia de la marca.
+          mkdir -p exp-out
+          echo "marca __avqCamposPorModelo en runtime/library.js: $(grep -c __avqCamposPorModelo node_modules/@prisma/client/runtime/library.js)" | tee exp-out/marca-parche-prisma.txt
+          docker pull -q postgres:16 && docker pull -q node:20-bookworm
+
+      - name: Humo (orquestador)
+        env:
+          N_COBROS: '5'
+        run: node_modules/.bin/tsx scripts/exp-otel/orq/humo.ts
+
+      - name: Resumen
+        if: always()
+        run: |
+          if [ -f exp-out/humo-A.json ]; then
+            node -e '
+              const h=require(process.env.OUT_DIR+"/humo-A.json");
+              const l=[`## Humo brazo A: ${h.exitosos}/${h.n} → ${h.veredicto}`, `listo (respuesta autenticada): ${h.listoMs} ms`, "", "| # | terminal | ok | ①ms | ②ms | ③ms | ⑥ms | ⑧ espera ms | efectos |", "|---|---|---|---|---|---|---|---|---|"];
+              const d=p=>p&&p.fin!=null&&p.ini!=null?Math.round(p.fin-p.ini):"—";
+              for (const c of h.cobros) l.push(`| ${c.n} | ${c.terminal} | ${c.ok?"✅":"❌ "+c.fallas.join("; ").slice(0,200)} | ${d(c.pasos["1_crear_orden"])} | ${d(c.pasos["2_agregar_ronda"])} | ${d(c.pasos["3_cobro_en_terminal"])} | ${d(c.pasos["6_registro_del_cobro"])} | ${d(c.pasos["8_efectos_done"])} | ${(c.efectos||[]).map(e=>e.kind+":"+e.status).join(", ")} |`);
+              console.log(l.join("\n"));
+            ' | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Sin humo-A.json (el orquestador falló antes de los actores)" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "--- últimas líneas del server ---"; tail -n 60 exp-out/servidor-A.log 2>/dev/null || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: humo-A
+          path: exp-out/
+          retention-days: 14
