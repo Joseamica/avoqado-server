@@ -300,6 +300,8 @@ describe('PUT /tpv/:tpvId/settings — el tope de 6 propinas del POS también aq
     ['más de 100', { tipSuggestions: [101] }, 'Un porcentaje de propina no puede pasar de 100'],
     ['texto', { tipSuggestions: ['10'] }, 'Los porcentajes de propina deben ser números'],
     ['decimales', { tipSuggestions: [12.5] }, 'Los porcentajes de propina deben ser números enteros'],
+    ['no es una lista', { tipSuggestions: '10' }, 'Los porcentajes de propina deben ser una lista'],
+    ['null', { tipSuggestions: null }, 'Los porcentajes de propina deben ser una lista'],
   ])('%s → 400 sin escribir', async (_caso, body, mensaje) => {
     const response = await send('PUT', '/tpv/terminal-a/settings', as('manager-a', 'MANAGER'), body)
 

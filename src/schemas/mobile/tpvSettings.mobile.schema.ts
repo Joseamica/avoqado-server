@@ -62,6 +62,7 @@ export const tipSuggestionsRule = z
       .int('Los porcentajes de propina deben ser números enteros')
       .min(1, 'Un porcentaje de propina debe ser al menos 1')
       .max(100, 'Un porcentaje de propina no puede pasar de 100'),
+    { invalid_type_error: 'Los porcentajes de propina deben ser una lista' },
   )
   .min(1, 'Deja al menos un porcentaje de propina')
   .max(6, 'No puedes ofrecer más de 6 porcentajes de propina')

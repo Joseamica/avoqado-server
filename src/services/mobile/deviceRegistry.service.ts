@@ -112,6 +112,9 @@ const TIPOS_CON_VERSION_DE_APP: ReadonlySet<TerminalType> = new Set([TerminalTyp
  *
  * 🔴 Codex r1 #10: si la app CAMBIÓ de `x-app-version` y no mandó un número válido, el guardado ya no es de ella (p. ej. volvió
  * a una app vieja): se borra esa llave y el panel vuelve a «Actualiza la app». Lo demás de `systemInfo` se queda.
+ *
+ * ponytail: lee-mezcla-escribe sin CAS; hoy este registro es el ÚNICO escritor de `systemInfo` en filas POS (el latido de
+ * `tpv-health` sólo escribe filas TPV). Si otro proceso empieza a escribir aquí, pasar a `jsonb_set` o a un CAS.
  */
 export function systemInfoConVersionDeLaApp(
   tipo: TerminalType,
