@@ -2753,7 +2753,28 @@ class OrganizationDashboardService {
 
     asegurarQueNoEsSuPropiaChecada(timeEntry.staffId, performedBy, 'regresar a pendiente')
 
+    // 🔴 CAS sobre la validación que se LEYÓ (Codex r2, 16-oct): la lectura de arriba es anterior a la transacción.
+    // Dos «deshacer» que leen la misma checada rechazada: el primero termina, alguien la aprueba ($150), y el segundo,
+    // tarde, la regresaba a PENDING (borrando por la fecha VIEJA, o sea sin tocar el depósito nuevo) → otra
+    // aprobación = $300. Ahora sólo se regresa si sigue en el mismo estado, con la misma fecha y el mismo autor de
+    // validación; y el borrado de depósitos va DESPUÉS de ganar esa transición, en la misma transacción.
     const result = await prisma.$transaction(async tx => {
+      const transicion = await tx.timeEntry.updateMany({
+        where: {
+          id: timeEntryId,
+          validationStatus: timeEntry.validationStatus,
+          validatedAt: timeEntry.validatedAt,
+          validatedBy: timeEntry.validatedBy,
+        },
+        data: {
+          validationStatus: 'PENDING',
+          validatedBy: null,
+          validatedAt: null,
+          validationNote: null,
+        },
+      })
+      if (transicion.count !== 1) return null
+
       // Delete any CashDeposit created around the same time as validation
       if (timeEntry.validatedAt) {
         const windowStart = new Date(timeEntry.validatedAt.getTime() - 5000)
@@ -2768,16 +2789,19 @@ class OrganizationDashboardService {
         })
       }
 
-      return tx.timeEntry.update({
-        where: { id: timeEntryId },
-        data: {
-          validationStatus: 'PENDING',
-          validatedBy: null,
-          validatedAt: null,
-          validationNote: null,
-        },
-      })
+      return tx.timeEntry.findUnique({ where: { id: timeEntryId } })
     })
+
+    if (!result) {
+      // Ya no era la validación que se leyó. Si ya está pendiente, es una repetición (doble clic, reintento de red):
+      // se responde como está, sin borrar nada ni otro asiento. Si alguien la volvió a validar, se dice.
+      const actual = await prisma.timeEntry.findFirst({ where: { id: timeEntryId, venue: { organizationId: orgId } } })
+      if (actual?.validationStatus === 'PENDING') return actual
+      throw new ConflictError(
+        'La checada cambió mientras la regresabas a pendiente (alguien la volvió a validar). Actualiza y vuelve a intentar.',
+        'TIME_ENTRY_CHANGED',
+      )
+    }
 
     logAction({
       staffId: performedBy,

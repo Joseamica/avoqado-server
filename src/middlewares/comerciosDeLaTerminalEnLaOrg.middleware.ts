@@ -64,8 +64,9 @@ function negarComercios(req: Request, venueId: string, terminalId: string | unde
 /**
  * 🔴 Alta de terminal por la org (`POST /organizations/:orgId/terminals`, P1-1 de Codex, 15-oct): la asignación
  * INICIAL respeta el mismo candado que cambiarla después. Si el cuerpo trae `assignedMerchantIds`, sólo pasa quien
- * podría cambiarlos en el venue de la terminal nueva (`venueId` del cuerpo). Y deja en `res.locals.puedeAsignarComercios`
- * si quien crea pasa ese candado: el alta sólo ANEXA SOLA (por serial) los comercios de la org a quien sí pasa.
+ * podría cambiarlos en el venue de la terminal nueva (`venueId` del cuerpo), y deja el veredicto en
+ * `res.locals.puedeAsignarComercios`. Lo que el alta anexa SOLA por serial no pasa por aquí: va para cualquier creador
+ * autorizado, siempre acotado a los comercios de la org (decisión del founder, B, 16-oct; `createTerminalForOrg`).
  */
 export const soloQuienPuedeAsignarComerciosAlCrear = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {

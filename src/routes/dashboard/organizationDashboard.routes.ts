@@ -997,9 +997,10 @@ router.get(
  * POST /dashboard/organizations/:orgId/terminals
  * Creates a new terminal for a venue within the organization
  *
- * 🔴 Los comercios del alta (a dónde va el dinero) pasan por el MISMO candado que cambiarlos después: dueño de la
- * org o `system:config` en el venue de la terminal. Y lo que el alta anexa sola por serial es sólo de ESTA org y sólo
- * para quien pasa ese candado (P1-1 de Codex, 15-oct: un serial virtual de otra org le anexaba su comercio).
+ * 🔴 Los comercios EXPLÍCITOS del alta (a dónde va el dinero) pasan por el MISMO candado que cambiarlos después: dueño
+ * de la org o `system:config` en el venue de la terminal. Lo que el alta anexa sola por serial es sólo de ESTA org
+ * (P1-1 de Codex, 15-oct: un serial virtual de otra org le anexaba su comercio), para cualquier creador autorizado
+ * (decisión del founder, B, 16-oct).
  * Fijado en tests/unit/routes/organizationDashboard.terminalCreate.routes.test.ts.
  */
 router.post(

@@ -121,7 +121,7 @@ export async function createTerminalForOrg(
     generateActivationCode?: boolean
   },
   staffId: string,
-  /** Si quien crea pasa el candado de comercios (dueño de la org o `system:config` en el venue de la terminal). */
+  /** Si quien crea pasa el candado de comercios (dueño de la org o `system:config` en el venue): para lo EXPLÍCITO. */
   opciones: { puedeAsignarComercios: boolean },
 ) {
   // Validate venue belongs to org
@@ -139,10 +139,11 @@ export async function createTerminalForOrg(
   const result = await superadminCreateTerminal({
     ...data,
     staffId,
-    // 🔴 Lo que el alta anexa SOLA por serial (P1-1, Codex, 15-oct): sólo comercios de ESTA organización —un
-    // serial virtual de Blumon de otra org no tiene fila `Terminal`, así que nada más lo frenaba— y sólo si quien
-    // crea podría asignarlos a mano. Sin el candado, la terminal nace sin comercios anexados.
-    comerciosAutoAdjuntables: opciones.puedeAsignarComercios ? comerciosDeLaOrganizacion(orgId, await getOrgVenueIds(orgId)) : null,
+    // 🔴 Lo que el alta anexa SOLA por serial (P1-1, Codex, 15-oct): SIEMPRE acotado a los comercios de ESTA
+    // organización —un serial virtual de Blumon de otra org no tiene fila `Terminal`, así que nada más lo frenaba—,
+    // para cualquier creador autorizado (decisión del founder, B, 16-oct: gerente, OWNER de sucursal o dueño de la
+    // org). Lo EXPLÍCITO (`assignedMerchantIds`) sigue con el candado de comercios, arriba y en la ruta.
+    comerciosAutoAdjuntables: comerciosDeLaOrganizacion(orgId, await getOrgVenueIds(orgId)),
   })
 
   logAction({

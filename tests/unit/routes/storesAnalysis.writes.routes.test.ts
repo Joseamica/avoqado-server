@@ -103,7 +103,10 @@ const ORGANIZACION: Array<{ staffId: string; role: string; isActive: boolean }> 
 const DADOS_DE_BAJA = new Set(['baja'])
 
 /** Checadas: id → de quién y de qué sucursal. */
-let ESTADO: Record<string, { id: string; staffId: string; venueId: string; validationStatus: string; validatedAt: Date | null }> = {}
+let ESTADO: Record<
+  string,
+  { id: string; staffId: string; venueId: string; validationStatus: string; validatedAt: Date | null; validatedBy: string | null }
+> = {}
 const CHECADAS: Record<string, { staffId: string; venueId: string }> = {
   'te-cajero': { staffId: 'cajero', venueId: VA },
   'te-gerente': { staffId: 'gerente', venueId: VA },
@@ -216,9 +219,11 @@ beforeEach(() => {
   prismaMock.staffVenue.update.mockResolvedValue({} as any)
 
   prismaMock.staffOrganization.findFirst.mockImplementation((({ where }: any) => {
+    // La org puede venir directa o por el venue (`organization.venues.some.id`, el resolutor de rol, P2-6).
+    const orgPedida = where?.organizationId ?? ORG_DE_LA_SUCURSAL[where?.organization?.venues?.some?.id]
     const fila = ORGANIZACION.find(
       f =>
-        where?.organizationId === ORG &&
+        orgPedida === ORG &&
         f.staffId === where?.staffId &&
         (where?.isActive !== true || f.isActive) &&
         (where?.staff?.active !== true || !DADOS_DE_BAJA.has(f.staffId)) &&
@@ -240,7 +245,10 @@ beforeEach(() => {
   // Estado de cada checada en la «base»: la transición atómica (`updateMany` con el estado previo en el
   // `where`) sólo escribe si la fila sigue en ese estado, como Postgres.
   ESTADO = Object.fromEntries(
-    Object.entries(CHECADAS).map(([id, c]) => [id, { id, ...c, validationStatus: 'PENDING', validatedAt: null as Date | null }]),
+    Object.entries(CHECADAS).map(([id, c]) => [
+      id,
+      { id, ...c, validationStatus: 'PENDING', validatedAt: null as Date | null, validatedBy: null as string | null },
+    ]),
   )
   prismaMock.timeEntry.findFirst.mockImplementation((({ where }: any) => {
     const checada = ESTADO[where?.id]
@@ -251,7 +259,13 @@ beforeEach(() => {
     Promise.resolve(ESTADO[where?.id] ? { ...ESTADO[where.id] } : null)) as any)
   prismaMock.timeEntry.updateMany.mockImplementation((({ where, data }: any) => {
     const checada = ESTADO[where?.id]
-    if (!checada || (where?.validationStatus !== undefined && checada.validationStatus !== where.validationStatus)) {
+    const mismaFecha = (a: Date | null, b: Date | null) => (a?.getTime() ?? null) === (b?.getTime() ?? null)
+    if (
+      !checada ||
+      (where?.validationStatus !== undefined && checada.validationStatus !== where.validationStatus) ||
+      ('validatedAt' in (where ?? {}) && !mismaFecha(checada.validatedAt, where.validatedAt)) ||
+      ('validatedBy' in (where ?? {}) && checada.validatedBy !== where.validatedBy)
+    ) {
       return Promise.resolve({ count: 0 })
     }
     Object.assign(checada, data)
@@ -349,7 +363,10 @@ describe('POST .../time-entry/:id/reset-validation', () => {
     const res = await regresarAPendiente(userId, 'te-cajero')
 
     expect(res.status).toBe(200)
-    expect(prismaMock.timeEntry.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'te-cajero' } }))
+    // Regresar a pendiente es un CAS sobre la validación leída (ronda 8).
+    expect(prismaMock.timeEntry.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ id: 'te-cajero', validationStatus: 'PENDING' }) }),
+    )
     expect(bitacora('TIME_ENTRY_VALIDATION_RESET')).toEqual([
       expect.objectContaining({ staffId: userId, venueId: VA, organizationId: ORG, entityId: 'te-cajero' }),
     ])
@@ -754,5 +771,66 @@ describe('PATCH /organizations/:orgId/team/:staffId/venues — las mismas reglas
 
     expect(res.status).toBe(403)
     nadaEscritoEnSucursales()
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Ronda 8 (Codex r2, 16-oct): un «deshacer» ATRASADO duplicaba depósitos
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * `resetTimeEntryValidation` leía la checada ANTES de la transacción y escribía PENDING sin comprobar que siguiera
+ * siendo la misma validación. La secuencia de Codex: dos «deshacer» leen la checada rechazada → el primero termina →
+ * se aprueba ($150) → el segundo, tarde, la regresa a PENDING (y borra por la fecha VIEJA, así que no toca el depósito
+ * nuevo) → se aprueba otra vez ($300). Ahora la vuelta a pendiente es un CAS sobre el estado Y la marca de la
+ * validación que se leyó; si no coincide, 409 y no se borra nada.
+ */
+describe('regresar a pendiente es un CAS sobre la validación que se leyó', () => {
+  it('🔴 la secuencia de Codex: el «deshacer» atrasado → 409, nada borrado, y la re-aprobación NO crea un segundo depósito', async () => {
+    await validarEnSucursal('gerente', 'te-cajero', { status: 'REJECTED' })
+    const lecturaVieja = { ...ESTADO['te-cajero'] } // lo que leyó el segundo «deshacer» antes de que pasara nada
+
+    const primero = await regresarAPendiente('gerente', 'te-cajero')
+    const aprobacion = await validarEnSucursal('gerente', 'te-cajero') // $150
+    prismaMock.timeEntry.findFirst.mockImplementationOnce((() => Promise.resolve({ ...lecturaVieja })) as any)
+    const segundo = await regresarAPendiente('gerente', 'te-cajero')
+    const reaprobacion = await validarEnSucursal('gerente', 'te-cajero')
+
+    expect(primero.status).toBe(200)
+    expect(aprobacion.status).toBe(200)
+    expect(segundo.status).toBe(409)
+    expect(segundo.body.code).toBe('TIME_ENTRY_CHANGED')
+    expect(segundo.body.message).toMatch(/cambió/)
+    expect(ESTADO['te-cajero'].validationStatus).toBe('APPROVED')
+    expect(prismaMock.cashDeposit.deleteMany).toHaveBeenCalledTimes(1) // sólo el primer «deshacer»
+    expect(reaprobacion.status).toBe(200) // repetición idempotente de la ronda 7
+    expect(prismaMock.cashDeposit.create).toHaveBeenCalledTimes(1) // $150, no $300
+    expect(bitacora('TIME_ENTRY_VALIDATION_RESET')).toHaveLength(1)
+  })
+
+  it('🔴 dos «deshacer» de la misma aprobación (doble clic, o el reintento de red): el segundo no vuelve a borrar', async () => {
+    await validarEnSucursal('gerente', 'te-cajero')
+    const lecturaVieja = { ...ESTADO['te-cajero'] }
+
+    const primero = await regresarAPendiente('gerente', 'te-cajero')
+    prismaMock.timeEntry.findFirst.mockImplementationOnce((() => Promise.resolve({ ...lecturaVieja })) as any)
+    const segundo = await regresarAPendiente('gerente', 'te-cajero')
+
+    expect(primero.status).toBe(200)
+    // Ya quedó en pendiente: es una repetición, se responde como está, sin borrar ni otro asiento.
+    expect(segundo.status).toBe(200)
+    expect(segundo.body.data.validationStatus).toBe('PENDING')
+    expect(prismaMock.cashDeposit.deleteMany).toHaveBeenCalledTimes(1)
+    expect(bitacora('TIME_ENTRY_VALIDATION_RESET')).toHaveLength(1)
+  })
+
+  it('regresión: un «deshacer» normal regresa a pendiente y borra el depósito de esa aprobación', async () => {
+    await validarEnSucursal('gerente', 'te-cajero')
+
+    const res = await regresarAPendiente('gerente', 'te-cajero')
+
+    expect(res.status).toBe(200)
+    expect(ESTADO['te-cajero']).toMatchObject({ validationStatus: 'PENDING', validatedAt: null, validatedBy: null })
+    expect(prismaMock.cashDeposit.deleteMany).toHaveBeenCalledTimes(1)
   })
 })
