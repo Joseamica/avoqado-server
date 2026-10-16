@@ -479,3 +479,58 @@ describe('Codex r3: el latido atrasado no cancela lo que sí es de la terminal',
     expect((await tpvHealthService.getPendingCommands(terminal.id)).map(c => c.commandId)).toEqual([commandId])
   })
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Ronda 10 (Codex r4, 16-oct): con la lectura vieja, un durable legítimo no puede quedar sin despertar
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * En la ronda 9 el socket dejó de emitir con cualquier discrepancia LEÍDA (para no cancelar ni emitir a la sala de un
+ * venue viejo), pero en el protocolo 2 eso también se saltaba la SUGERENCIA. Los latidos normales no entregan
+ * durables (`heartbeat.tpv.controller.ts` los excluye), así que el comando quedaba PENDING, sin vencimiento y sin
+ * aviso, hasta otro evento o una reconexión (Codex lo reprodujo con el reintento: 200 y cero avisos). Ahora, si no se
+ * retiró, la TPV durable recibe la sugerencia «hay comandos»: sólo la despierta; lo que se entrega lo decide su pull
+ * con la ubicación de HOY (reclamo condicionado y permiso).
+ */
+describe('Codex r4: un durable legítimo con la lectura vieja recibe la sugerencia y se entrega', () => {
+  it('🔴 la secuencia de Codex: lectura vieja → NO se cancela, la TPV recibe la sugerencia y su pull lo entrega', async () => {
+    const { commandId } = await tpvCommandQueueService.queueCommand({
+      terminalId: terminal.id,
+      venueId: A,
+      commandType: 'LOCK',
+      requestedBy: 'dueno-a',
+    })
+    broadcastTpvCommandMock.mockClear() // la sugerencia del encolado no cuenta: es la del reintento la que se medía
+    prismaMock.tpvCommandQueue.findUnique.mockImplementationOnce((({ where }: any) =>
+      Promise.resolve({ ...conTerminal(comando(where.id)), terminal: { ...terminal, venueId: B } })) as any)
+
+    await tpvCommandExecutionService.sendCommandToTerminal(commandId)
+
+    expect(comando(commandId).status).not.toBe('CANCELLED')
+    expect(broadcastTpvCommandMock).toHaveBeenCalledTimes(1)
+    expect(broadcastTpvCommandMock).toHaveBeenCalledWith(
+      terminal.serialNumber,
+      A,
+      expect.objectContaining({ commandId, payload: { _deliveryProtocol: 2 } }),
+    )
+    // La sugerencia no lleva el comando: la TPV hace su pull durable, que decide con la ubicación de hoy.
+    expect((await tpvHealthService.getPendingCommands(terminal.id, true)).map(c => c.commandId)).toEqual([commandId])
+    expect(comando(commandId).status).toBe('SENT')
+  })
+
+  it('regresión: si la discrepancia es REAL (la terminal ya está en B), el durable de A se retira y NO hay sugerencia', async () => {
+    const { commandId } = await tpvCommandQueueService.queueCommand({
+      terminalId: terminal.id,
+      venueId: A,
+      commandType: 'LOCK',
+      requestedBy: 'dueno-a',
+    })
+    broadcastTpvCommandMock.mockClear()
+    terminal.venueId = B
+
+    await tpvCommandExecutionService.sendCommandToTerminal(commandId)
+
+    expect(comando(commandId).status).toBe('CANCELLED')
+    expect(broadcastTpvCommandMock).not.toHaveBeenCalled()
+  })
+})
