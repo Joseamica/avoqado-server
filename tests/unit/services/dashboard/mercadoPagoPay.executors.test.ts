@@ -35,6 +35,7 @@ const payload = {
 }
 let session: any
 let providerStatus: string
+let paymentTypeId: string | undefined
 let requestNumber: number
 const paths = ['liga', 'venue', 'IPN'] as const
 async function execute(path: (typeof paths)[number]) {
@@ -46,6 +47,7 @@ async function execute(path: (typeof paths)[number]) {
 beforeEach(() => {
   jest.clearAllMocks()
   providerStatus = 'authorized'
+  paymentTypeId = undefined
   requestNumber = 0
   session = {
     id: 'cs-db-1',
@@ -83,7 +85,14 @@ beforeEach(() => {
   jest
     .mocked(connectionService.loadCredentials)
     .mockResolvedValue({ accessToken: 'test-seller', publicKey: 'test-pk', mpUserId: '123' } as any)
-  const payment = () => ({ id: 777, status: providerStatus, status_detail: 'test', external_reference: session.sessionId, order: null })
+  const payment = () => ({
+    id: 777,
+    status: providerStatus,
+    status_detail: 'test',
+    external_reference: session.sessionId,
+    order: null,
+    payment_type_id: paymentTypeId,
+  })
   jest.mocked(paymentService.createPayment).mockImplementation(async () => payment() as any)
   jest.mocked(paymentService.getPayment).mockImplementation(async () => payment() as any)
 })
@@ -136,6 +145,18 @@ for (const path of paths) {
       expect(mockCreatePosting).toHaveBeenCalledTimes(1)
       expect(mockApplyPosting).toHaveBeenCalledTimes(1)
       expect(prismaMock.payment.create.mock.calls[0][0].data.idempotencyKey).toBe('777')
+    })
+    // 16-oct (producción): un SPEI quedó como CREDIT_CARD. Cada camino debe pasar el `payment_type_id` que manda MP.
+    it('la venta guarda el tipo de pago que manda Mercado Pago', async () => {
+      if (path === 'venue') {
+        session.paymentLink = null
+        session.metadata = { type: 'venue_checkout' }
+      }
+      paymentTypeId = path === 'IPN' ? 'bank_transfer' : 'debit_card'
+      providerStatus = 'approved'
+      await execute(path)
+      expect(prismaMock.payment.create.mock.calls[0][0].data.method).toBe(path === 'IPN' ? 'BANK_TRANSFER' : 'DEBIT_CARD')
+      expect(prismaMock.payment.create.mock.calls[0][0].data.fundsFlow).toBe('AVOQADO_PROCESSED')
     })
   })
 }

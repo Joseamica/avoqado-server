@@ -8,7 +8,7 @@
  */
 
 import prisma from '@/utils/prismaClient'
-import { Prisma } from '@prisma/client'
+import { PaymentMethod, Prisma } from '@prisma/client'
 import { BadRequestError, ConflictError, NotFoundError, PaymentOutcomeUnknownError, UnauthorizedError } from '@/errors/AppError'
 import logger from '@/config/logger'
 import { nanoid } from 'nanoid'
@@ -3249,7 +3249,7 @@ export async function executeMercadoPagoPaymentForPaymentLink(
   // lands first wins. Non-fatal: the payment already succeeded on MP, so a
   // finalize hiccup must not fail the response — the IPN will reconcile.
   if (optimisticStatus === 'COMPLETED') {
-    await finalizeMercadoPagoCheckout({ sessionId, mpPaymentId: payment.id }).catch(err =>
+    await finalizeMercadoPagoCheckout({ sessionId, mpPaymentId: payment.id, paymentTypeId: payment.payment_type_id }).catch(err =>
       logger.error('finalizeMercadoPagoCheckout failed (optimistic path)', {
         sessionId,
         error: err instanceof Error ? err.message : String(err),
@@ -3287,7 +3287,36 @@ export async function executeMercadoPagoPaymentForPaymentLink(
  * unique `Payment(venueId, idempotencyKey=mpPaymentId)` index — a duplicate
  * call throws P2002 and no-ops. Safe to call twice concurrently.
  */
-export async function finalizeMercadoPagoCheckout(args: { sessionId: string; mpPaymentId: string | number }): Promise<void> {
+/**
+ * El método del cobro sale del `payment_type_id` de Mercado Pago (16-oct: un SPEI quedaba como tarjeta).
+ * OXXO (`ticket`/`atm`) NO es CASH: varios lectores (conciliación, saldo disponible, dispersión, póliza, corte del turno)
+ * deciden por `method === CASH` sin mirar `fundsFlow` y lo tratarían como efectivo del negocio (Codex r2). Va como OTHER con
+ * forma SAT 01 sellada en `tenderSatFormaPago`: se factura como efectivo y todo lo demás lo trata como antes. El saldo de
+ * Mercado Pago es dinero electrónico (SAT 06): sin el sello, DIGITAL_WALLET caería en '99' y bloquearía la factura.
+ * Sin tipo (llamada que no lo trae) queda CREDIT_CARD, como antes; un tipo desconocido queda OTHER ('99', por revisar).
+ */
+export function metodoDeMercadoPago(paymentTypeId?: string | null): { method: PaymentMethod; tenderSatFormaPago: string | null } {
+  if (!paymentTypeId) return { method: 'CREDIT_CARD', tenderSatFormaPago: null }
+  const sellados: Record<string, { method: PaymentMethod; tenderSatFormaPago: string }> = {
+    ticket: { method: 'OTHER', tenderSatFormaPago: '01' },
+    atm: { method: 'OTHER', tenderSatFormaPago: '01' },
+    account_money: { method: 'DIGITAL_WALLET', tenderSatFormaPago: '06' },
+  }
+  if (sellados[paymentTypeId]) return sellados[paymentTypeId]
+  const metodos: Record<string, PaymentMethod> = {
+    credit_card: 'CREDIT_CARD',
+    debit_card: 'DEBIT_CARD',
+    prepaid_card: 'DEBIT_CARD',
+    bank_transfer: 'BANK_TRANSFER',
+  }
+  return { method: metodos[paymentTypeId] ?? 'OTHER', tenderSatFormaPago: null }
+}
+
+export async function finalizeMercadoPagoCheckout(args: {
+  sessionId: string
+  mpPaymentId: string | number
+  paymentTypeId?: string | null
+}): Promise<void> {
   const session = await prisma.checkoutSession.findUnique({
     where: { sessionId: args.sessionId },
     include: {
@@ -3427,7 +3456,10 @@ export async function finalizeMercadoPagoCheckout(args: { sessionId: string; mpP
           ecommerceMerchantId: session.ecommerceMerchant.id,
           amount: subtotal,
           tipAmount,
-          method: 'CREDIT_CARD',
+          ...metodoDeMercadoPago(args.paymentTypeId),
+          // Lo liquida Mercado Pago, nunca el cajón (igual que Stripe): sin el sello, una devolución SPEI no se descontaba en
+          // la conciliación bancaria (la devolución hereda este valor).
+          fundsFlow: 'AVOQADO_PROCESSED',
           source: 'WEB',
           status: 'COMPLETED',
           // FAST significa "sin inventario ni cumplimiento operativo"; una
