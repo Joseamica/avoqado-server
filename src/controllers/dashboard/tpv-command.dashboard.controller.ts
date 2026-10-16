@@ -359,10 +359,12 @@ export async function retryCommand(
       },
     })
     if (rearmado.count !== 1) throw new ConflictError(MENSAJE_TERMINAL_TRASLADADA, 'TERMINAL_MOVED')
-    const updatedCommand = await prisma.tpvCommandQueue.findUnique({ where: { id: commandId } })
 
-    // Attempt to send again
+    // Attempt to send again. La entrega vuelve a exigir que la terminal siga aquí (ronda 8): si se trasladó justo
+    // después del re-armado, no emite y deja el comando retirado; el reintento lo dice en vez de responder «en cola».
     await tpvCommandExecutionService.sendCommandToTerminal(commandId)
+    const updatedCommand = await prisma.tpvCommandQueue.findUnique({ where: { id: commandId } })
+    if (updatedCommand?.status === 'CANCELLED') throw new ConflictError(MENSAJE_TERMINAL_TRASLADADA, 'TERMINAL_MOVED')
 
     res.status(200).json({
       success: true,

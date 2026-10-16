@@ -220,6 +220,10 @@ export class TpvCommandExecutionService {
       throw new NotFoundError(`Command ${commandId} not found`)
     }
 
+    // 🔴 La entrega va a la terminal donde esté HOY; el comando se autorizó contra SU venue. Si ya no coinciden (la
+    // terminal se trasladó después de encolar o re-armar), no se emite nada y el comando queda retirado (Codex r2).
+    if (await tpvCommandQueueService.noSeEntregaPorTraslado(command, command.terminal.venueId, 'entrega')) return
+
     if ((command.payload as { _deliveryProtocol?: number } | null)?._deliveryProtocol === 2) {
       if (['PENDING', 'QUEUED', 'SENT'].includes(command.status) && (!command.scheduledFor || command.scheduledFor <= new Date())) {
         broadcastTpvCommand(command.terminal.serialNumber || command.terminal.id, command.venueId, {

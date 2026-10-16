@@ -529,7 +529,7 @@ export class TpvHealthService {
       // Find terminal by ID or serial number (case-insensitive)
       let terminal = await prisma.terminal.findUnique({
         where: { id: terminalId },
-        select: { id: true },
+        select: { id: true, venueId: true },
       })
 
       if (!terminal) {
@@ -540,7 +540,7 @@ export class TpvHealthService {
               mode: 'insensitive',
             },
           },
-          select: { id: true },
+          select: { id: true, venueId: true },
         })
       }
 
@@ -552,7 +552,7 @@ export class TpvHealthService {
               mode: 'insensitive',
             },
           },
-          select: { id: true },
+          select: { id: true, venueId: true },
         })
       }
 
@@ -624,10 +624,14 @@ export class TpvHealthService {
       // after the read; never return a command whose claim we did not acquire.
       const delivered: typeof pendingCommands = []
       for (const command of pendingCommands) {
+        // 🔴 Un comando de OTRO venue (la terminal se trasladó o se migró después de encolarlo) no se entrega:
+        // queda CANCELLED con TERMINAL_MOVED (Codex r2, 16-oct). Y el reclamo lo vuelve a exigir en el mismo UPDATE.
+        if (await tpvCommandQueueService.noSeEntregaPorTraslado(command, terminal.venueId, 'latido')) continue
         const claimed = await prisma.tpvCommandQueue.updateMany({
           where: {
             id: command.id,
             status: command.status,
+            terminal: { venueId: command.venueId },
             ...(command.status === 'SENT' ? { OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: now } }] } : {}),
           },
           data: {
