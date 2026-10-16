@@ -1,10 +1,23 @@
 import prisma from '@/utils/prismaClient'
 import { writeLegacyActivityAuditTx } from '@/services/activityAudit.service'
+import { elPlanConcede } from '@/services/access/basePlan.service'
 import { isTransientDbConnectionError } from '@/utils/retry'
 
-const CODE = 'SERVICE_PAY'
+/**
+ * Funciones que entraron a PRO y PREMIUM cuando ya había contratos de plan vivos: SERVICE_PAY (founder D3, 5-oct) y
+ * GIFT_CARDS (founder D1, 14-oct). Lista CERRADA: poner al día un contrato escribe accesos pagados de otro, así que sólo se
+ * hace con una función que el código ya concede a los dos planes.
+ */
+export const PLAN_CATCH_UP_CODES = ['SERVICE_PAY', 'GIFT_CARDS'] as const
+export type PlanCatchUpCode = (typeof PLAN_CATCH_UP_CODES)[number]
 const TIERS = ['PRO', 'PREMIUM']
 const LOTE = 100
+
+function assertCatchUpCode(code: string): asserts code is PlanCatchUpCode {
+  const enLista = (PLAN_CATCH_UP_CODES as readonly string[]).includes(code)
+  if (!enLista || !elPlanConcede('PRO', code) || !elPlanConcede('PREMIUM', code))
+    throw new Error(`${code} no es una función de plan que se pueda poner al día en los contratos vivos`)
+}
 
 /** Un contrato que no se puede poner al día sin adivinar: se reporta con su motivo y la corrida sigue con los demás. */
 class SkipContract extends Error {
@@ -39,8 +52,10 @@ function reasonOf(error: unknown): string {
  * `inFlightPurchases` y se ponen al día en la siguiente corrida, ya completadas. Un contrato que no se puede poner al día
  * (p. ej. su fila de historial ya existe sin sus `featureCodes`) va a `skippedContracts` y no detiene a los demás.
  * Corre bajo el candado de entrega de cada compra y es idempotente: se vuelve a correr después de republicar las ofertas.
+ * Generalizada el 14-oct (tarjetas de regalo): el mismo camino para cualquier código de `PLAN_CATCH_UP_CODES`.
  */
-export async function addServicePayToLivePlanContracts(now: Date = new Date()) {
+export async function addPlanFeatureToLivePlanContracts(featureCode: PlanCatchUpCode, now: Date = new Date()) {
+  assertCatchUpCode(featureCode)
   let contracts = 0
   let grants = 0
   const skippedContracts: Array<{ contractId: string; reason: string }> = []
@@ -70,9 +85,9 @@ export async function addServicePayToLivePlanContracts(now: Date = new Date()) {
             if (purchase.status !== 'COMPLETED') throw new SkipContract(`PURCHASE_NOT_COMPLETED:${purchase.status}`)
             const contract = await tx.hybridContract.findUniqueOrThrow({ where: { id } })
             if (contract.endedAt) return { selection: false, grants: 0 }
-            const selection = !contract.featureCodes.includes(CODE)
+            const selection = !contract.featureCodes.includes(featureCode)
             if (selection) {
-              const featureCodes = [...contract.featureCodes, CODE].sort()
+              const featureCodes = [...contract.featureCodes, featureCode].sort()
               // Rige desde el próximo periodo SIN entregar (los de Stripe son contiguos), no desde hoy: una renovación que
               // empezó antes y se entrega tarde la lee igual (`effectiveAt <= start`, hybridDelivery.service.ts:128).
               const effectiveAt = contract.paidThrough ?? contract.startsAt
@@ -107,7 +122,7 @@ export async function addServicePayToLivePlanContracts(now: Date = new Date()) {
                 data: [
                   {
                     venueId: contract.venueId,
-                    featureCode: CODE,
+                    featureCode: featureCode,
                     sourceId: `${periodo.id}:${id}`,
                     contractId: id,
                     paymentPeriodId: periodo.id,
@@ -126,7 +141,7 @@ export async function addServicePayToLivePlanContracts(now: Date = new Date()) {
                 action: 'HYBRID_PLAN_FEATURE_ADDED',
                 entity: 'HybridContract',
                 entityId: id,
-                data: { featureCode: CODE, planTier: contract.planTier, selection, grants: count },
+                data: { featureCode: featureCode, planTier: contract.planTier, selection, grants: count },
               })
             return { selection, grants: count }
           },
@@ -144,7 +159,12 @@ export async function addServicePayToLivePlanContracts(now: Date = new Date()) {
     if (page.length < LOTE) break
     after = page[page.length - 1].id
   }
-  return { contracts, grants, staleCampaigns: await staleCampaigns(), inFlightPurchases, skippedContracts }
+  return { contracts, grants, staleCampaigns: await staleCampaigns(featureCode), inFlightPurchases, skippedContracts }
+}
+
+/** Pago al personal (fase 3): el nombre de siempre, que usan su script y sus pruebas de integración. */
+export async function addServicePayToLivePlanContracts(now: Date = new Date()) {
+  return addPlanFeatureToLivePlanContracts('SERVICE_PAY', now)
 }
 
 /** Compras con contratos de plan vivos que todavía no se completan, por estado: se ponen al día en otra corrida. */
@@ -165,7 +185,7 @@ async function countInFlightPurchases(): Promise<Array<{ status: string; purchas
  * `take` sin seguir, 500 campañas ajenas (funciones sueltas, listas de precios) antes por id escondían una oferta PRO vieja y
  * el script terminaba sin pedir republicarla. `currentPublicationId` no es relación, así que el filtro de plan va por página.
  */
-export async function staleCampaigns(): Promise<Array<{ id: string; code: string }>> {
+export async function staleCampaigns(featureCode: PlanCatchUpCode = 'SERVICE_PAY'): Promise<Array<{ id: string; code: string }>> {
   const stale: Array<{ id: string; code: string }> = []
   let after: string | undefined
   for (;;) {
@@ -178,7 +198,7 @@ export async function staleCampaigns(): Promise<Array<{ id: string; code: string
     if (page.length) {
       const ids = page.map(c => c.currentPublicationId!)
       const viejas = await prisma.hybridOfferPublication.findMany({
-        where: { id: { in: ids }, definition: { path: ['kind'], equals: 'PLAN' }, NOT: { includedFeatureCodes: { has: CODE } } },
+        where: { id: { in: ids }, definition: { path: ['kind'], equals: 'PLAN' }, NOT: { includedFeatureCodes: { has: featureCode } } },
         select: { id: true },
         take: ids.length,
       })
