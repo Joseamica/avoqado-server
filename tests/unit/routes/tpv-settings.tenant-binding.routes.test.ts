@@ -289,3 +289,45 @@ describe('Controladores de ajustes: sin terminal amarrada NO operan', () => {
     expect(prismaMock.terminal.update).not.toHaveBeenCalled()
   })
 })
+
+describe('PUT /tpv/:tpvId/settings — el tope de 6 propinas del POS también aquí (F0-B, Task 12)', () => {
+  // 🔴 Review Focus 5: cada forma rara responde 400 en español y NO escribe.
+  it.each([
+    ['siete porcentajes', { tipSuggestions: [5, 10, 15, 18, 20, 25, 30] }, 'No puedes ofrecer más de 6 porcentajes de propina'],
+    ['lista vacía', { tipSuggestions: [] }, 'Deja al menos un porcentaje de propina'],
+    ['repetidos', { tipSuggestions: [10, 10] }, 'No repitas el mismo porcentaje'],
+    ['cero', { tipSuggestions: [0, 10] }, 'Un porcentaje de propina debe ser al menos 1'],
+    ['más de 100', { tipSuggestions: [101] }, 'Un porcentaje de propina no puede pasar de 100'],
+    ['texto', { tipSuggestions: ['10'] }, 'Los porcentajes de propina deben ser números'],
+    ['decimales', { tipSuggestions: [12.5] }, 'Los porcentajes de propina deben ser números enteros'],
+  ])('%s → 400 sin escribir', async (_caso, body, mensaje) => {
+    const response = await send('PUT', '/tpv/terminal-a/settings', as('manager-a', 'MANAGER'), body)
+
+    expect(response.status).toBe(400)
+    expect(response.body.message).toContain(mensaje)
+    expect(prismaMock.terminal.update).not.toHaveBeenCalled()
+  })
+
+  it('seis porcentajes sí se guardan', async () => {
+    const response = await send('PUT', '/tpv/terminal-a/settings', as('manager-a', 'MANAGER'), { tipSuggestions: [5, 10, 15, 18, 20, 25] })
+
+    expect(response.status).toBe(200)
+    expect(response.body.tipSuggestions).toEqual([5, 10, 15, 18, 20, 25])
+  })
+
+  it('🔴 Review Focus 5: un cuerpo SIN propinas pasa intacto (otras llaves, también trackPromoterLocation null)', async () => {
+    const response = await send('PUT', '/tpv/terminal-a/settings', as('manager-a', 'MANAGER'), {
+      showTipScreen: false,
+      trackPromoterLocation: null,
+    })
+
+    expect(response.status).toBe(200)
+    expect(response.body.showTipScreen).toBe(false)
+  })
+
+  it('el permiso va ANTES que la forma: un cajero recibe 403, no un 400 que describa el cuerpo', async () => {
+    const response = await send('PUT', '/tpv/terminal-a/settings', as('cashier-a', 'CASHIER'), { tipSuggestions: [1, 2, 3, 4, 5, 6, 7] })
+
+    expect(response.status).toBe(403)
+  })
+})

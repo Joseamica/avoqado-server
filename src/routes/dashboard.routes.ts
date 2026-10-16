@@ -171,7 +171,7 @@ import {
   bulkConfirmIncidentSchema,
 } from '../schemas/dashboard/settlementIncident.schema'
 import { createCloseoutSchema, closeoutHistoryQuerySchema } from '../schemas/dashboard/cashCloseout.schema'
-import { updateTpvSchema } from '../schemas/dashboard/tpv.schema'
+import { updateTerminalTpvSettingsSchema, updateTpvSchema } from '../schemas/dashboard/tpv.schema'
 import {
   loginSchema,
   requestPasswordResetSchema,
@@ -5306,8 +5306,14 @@ router.get(
  *                 nullable: true
  *               tipSuggestions:
  *                 type: array
+ *                 description: Porcentajes de propina que ofrece el POS (1 a 100, enteros, sin repetir, de 1 a 6)
+ *                 minItems: 1
+ *                 maxItems: 6
+ *                 uniqueItems: true
  *                 items:
- *                   type: number
+ *                   type: integer
+ *                   minimum: 1
+ *                   maximum: 100
  *               requirePinLogin:
  *                 type: boolean
  *     responses:
@@ -5333,6 +5339,8 @@ router.get(
  *                     type: number
  *                 requirePinLogin:
  *                   type: boolean
+ *       400:
+ *         description: tipSuggestions con forma inválida (más de 6, vacía, repetidos, fuera de 1-100 o no enteros); no se escribe nada
  *       403:
  *         description: Forbidden (missing tpv-settings:update permission)
  *       404:
@@ -5343,6 +5351,8 @@ router.put(
   authenticateTokenMiddleware,
   bindTpvSettingsTarget,
   checkPermission('tpv-settings:update'),
+  // F0-B (Task 12): el tope de 6 propinas del POS, DESPUÉS del permiso.
+  validateRequest(updateTerminalTpvSettingsSchema),
   tpvController.updateTpvSettings,
 )
 
