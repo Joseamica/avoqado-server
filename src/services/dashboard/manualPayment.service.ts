@@ -22,6 +22,7 @@ import { contratoDePagoManual } from '@/services/fiscal/contratoDePrecio'
 import { operationHash } from '@/utils/operationHash'
 import { isRetryableDbError } from '@/utils/serializableRetry'
 import { enqueuePaymentCommissionInTx } from '@/services/tpv/paymentEffects.service'
+import { asegurarCambioDeClienteEnVentaCobrada } from '@/services/shared/ligaDeClienteEnVenta'
 
 /**
  * Record a manual payment (admin-only). Two modes:
@@ -48,6 +49,14 @@ export async function createManualPayment(
   venueId: string,
   staffId: string,
   input: CreateManualPaymentInput & { idempotencyKey?: string },
+  opciones: {
+    /**
+     * 🔴 R5-1 (ronda 5 post-QA de sellos tardíos; Codex recheck-9 P2): ¿quien registra tiene `payments:create`? Lo resuelven el
+     * controller (resolvedor efectivo) y la tool MCP. Sin él, en una venta YA cobrada no se cambia el cliente (403). Sin decirlo,
+     * falla CERRADO.
+     */
+    puedeCambiarClienteEnVentaCobrada?: boolean
+  } = {},
   retryAttempt = 0,
 ): Promise<Payment> {
   const amount = new Prisma.Decimal(input.amount)
@@ -176,6 +185,27 @@ export async function createManualPayment(
         // Order, así que conserva el camino seguro Shift → INSERT Order.
         if (input.orderId) {
           await lockExistingOrderForPayment(tx, { venueId, orderId: input.orderId })
+          // 🔴 R5-1 (ronda 5 post-QA de sellos tardíos; Codex recheck-9 P2; decisión «A» del founder): sobre una venta YA cobrada
+          // (PAID/REFUNDED; tras un reembolso vuelve a tener saldo), el `customerId` de este pago crea el primario o desplaza la
+          // lealtad del que ya había. Cambiar el cliente (primario; si no hay, el heredado) exige `payments:create`: sin él ⇒ 403
+          // aquí, bajo el candado y antes de la primera escritura (el turno). Mismo cliente o venta abierta ⇒ como hoy.
+          if (input.customerId && opciones.puedeCambiarClienteEnVentaCobrada !== true) {
+            const venta = await tx.order.findFirst({
+              where: { id: input.orderId, venueId },
+              select: {
+                paymentStatus: true,
+                customerId: true,
+                orderCustomers: { where: { isPrimary: true }, select: { customerId: true }, take: 1 },
+              },
+            })
+            if (venta)
+              asegurarCambioDeClienteEnVentaCobrada({
+                paymentStatus: venta.paymentStatus,
+                clienteActual: venta.orderCustomers[0]?.customerId ?? venta.customerId ?? null,
+                clienteNuevo: input.customerId,
+                puedeCobrar: false,
+              })
+          }
         }
         const priorCompletedPaymentCount = input.orderId ? await countPriorCompletedPayments(tx, { venueId, orderId: input.orderId }) : 0
 
@@ -561,7 +591,7 @@ export async function createManualPayment(
             throw new ConflictError('Conflicto de concurrencia. Reintenta con la misma llave de idempotencia.', 'PAYMENT_RETRY_REQUIRED')
           await new Promise(resolve => setTimeout(resolve, 50 * 2 ** retryAttempt))
           // Fresh invocation resets every post-commit effect; the outer attempt must not repeat them.
-          const retried = await createManualPayment(venueId, staffId, input, retryAttempt + 1)
+          const retried = await createManualPayment(venueId, staffId, input, opciones, retryAttempt + 1)
           replayed = true
           return retried
         }

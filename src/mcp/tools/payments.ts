@@ -632,18 +632,26 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
       }
 
       try {
-        const payment = await createManualPayment(venueId, scope.staffId, {
-          idempotencyKey,
-          amount: money2(amount),
-          tipAmount: money2(tipAmount ?? 0),
-          method: MANUAL_METHOD_MAP[method],
-          source: MANUAL_SOURCE_MAP[src],
-          ...(orderId ? { orderId } : {}),
-          ...(customerId ? { customerId } : {}),
-          ...(waiterId ? { waiterId } : {}),
-          ...(externalSource ? { externalSource } : {}),
-          ...(reason ? { reason } : {}),
-        })
+        // 🔴 R5-1 (ronda 5 post-QA de sellos tardíos; decisión «A»): ligar un cliente a una venta YA cobrada exige
+        // `payments:create`; el servicio lo decide bajo el candado de la venta (sin el permiso ⇒ 403, `ok: false` abajo).
+        const opciones = orderId && customerId ? { puedeCambiarClienteEnVentaCobrada: guard.tienePermiso('payments:create', venueId) } : {}
+        const payment = await createManualPayment(
+          venueId,
+          scope.staffId,
+          {
+            idempotencyKey,
+            amount: money2(amount),
+            tipAmount: money2(tipAmount ?? 0),
+            method: MANUAL_METHOD_MAP[method],
+            source: MANUAL_SOURCE_MAP[src],
+            ...(orderId ? { orderId } : {}),
+            ...(customerId ? { customerId } : {}),
+            ...(waiterId ? { waiterId } : {}),
+            ...(externalSource ? { externalSource } : {}),
+            ...(reason ? { reason } : {}),
+          },
+          opciones,
+        )
         await auditMcpWrite(scope, {
           action: 'MANUAL_PAYMENT_RECORDED',
           entity: 'Payment',

@@ -3781,7 +3781,8 @@ export async function getOrderCustomers(venueId: string, orderId: string) {
  * la lealtad del cobro en curso y la del reconciliador sólo acreditan al primario, y una venta sin primario cuenta como «sin
  * cliente» (`awardLoyaltyForPaidOrder`), así que el resultado es el de la venta sin esa liga. La decisión se toma con el
  * estado leído bajo el candado de la venta (`bloquearVentaParaLiga`: la fila en `FOR NO KEY UPDATE`, que serializa contra el
- * `FOR UPDATE` del cobro y no bloquea las revisiones de llaves foráneas). La liga sigue visible (`data`). Una re-liga del mismo cliente por alguien CON permiso lo promueve a primario y pasa por el sello tardío.
+ * `FOR UPDATE` del cobro y no bloquea las revisiones de llaves foráneas). La liga sigue visible (`data`). Una re-liga del
+ * mismo cliente por alguien CON permiso lo promueve a primario y pasa por el sello tardío.
  */
 export interface OpcionesDeLigaTpv {
   otorgarLealtad?: boolean

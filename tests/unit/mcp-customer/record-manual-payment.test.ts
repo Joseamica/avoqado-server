@@ -14,6 +14,7 @@ import type { McpScope } from '../../../src/mcp/scope'
 
 const mockCreate = jest.fn()
 const mockAudit = jest.fn()
+const permisos = new Set<string>()
 
 jest.mock('@/mcp/guard', () => ({
   createGuard: () => ({
@@ -24,6 +25,7 @@ jest.mock('@/mcp/guard', () => ({
     requirePermission: (_perm: string, v: string) => {
       if (v === 'no-perm') throw new Error('Forbidden: missing payment:create-manual')
     },
+    tienePermiso: (perm: string) => permisos.has(perm),
   }),
 }))
 jest.mock('@/mcp/audit', () => ({ auditMcpWrite: (...a: unknown[]) => mockAudit(...(a as [])) }))
@@ -54,6 +56,7 @@ beforeAll(() => {
 })
 beforeEach(() => {
   jest.clearAllMocks()
+  permisos.clear()
   mockCreate.mockResolvedValue({
     id: 'pay-9',
     amount: '123.45',
@@ -150,3 +153,36 @@ it.each(['record_manual_payment', 'issue_refund'])(
     for (const valid of [0.01, 45.5, 123.45]) expect(amount.safeParse(valid).success).toBe(true)
   },
 )
+
+describe('🔴 R5-1: record_manual_payment le dice al servicio si quien está conectado puede cobrar (Codex recheck-9 P2)', () => {
+  const ligar = { venueId: 'v1', amount: 20, method: 'cash', orderId: 'ord-1', customerId: 'cust-K', confirm: true }
+
+  it('🔴 con payment:create-manual y SIN payments:create ⇒ puedeCambiarClienteEnVentaCobrada: false', async () => {
+    permisos.add('payment:create-manual')
+    await call(ligar)
+    expect(mockCreate).toHaveBeenCalledWith('v1', 's1', expect.objectContaining({ orderId: 'ord-1', customerId: 'cust-K' }), {
+      puedeCambiarClienteEnVentaCobrada: false,
+    })
+  })
+
+  it('con payments:create ⇒ true', async () => {
+    permisos.add('payment:create-manual').add('payments:create')
+    await call(ligar)
+    expect(mockCreate).toHaveBeenCalledWith('v1', 's1', expect.any(Object), { puedeCambiarClienteEnVentaCobrada: true })
+  })
+
+  it('sin cliente o sin venta existente no se pregunta (como hoy)', async () => {
+    await call({ ...ligar, customerId: undefined })
+    await call({ ...ligar, orderId: undefined })
+    expect(mockCreate.mock.calls.map(c => c[3])).toEqual([{}, {}])
+  })
+
+  it('el 403 del servicio sale como `ok: false` con su mensaje en español (sin auditar una escritura que no ocurrió)', async () => {
+    mockCreate.mockRejectedValueOnce(
+      Object.assign(new Error('Para cambiar el cliente de una venta ya cobrada necesitas el permiso de cobrar.'), { statusCode: 403 }),
+    )
+    const r = parse(await call(ligar))
+    expect(r).toEqual({ ok: false, error: 'Para cambiar el cliente de una venta ya cobrada necesitas el permiso de cobrar.' })
+    expect(mockAudit).not.toHaveBeenCalled()
+  })
+})
