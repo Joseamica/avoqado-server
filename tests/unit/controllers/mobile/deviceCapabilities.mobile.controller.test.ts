@@ -191,6 +191,22 @@ describe('PUT /mobile/venues/:venueId/device-capabilities', () => {
     expect(registerDeviceSeenMock).not.toHaveBeenCalled()
   })
 
+  // Por la ruta real: `validateRequest` reemplaza el cuerpo por el normalizado, así que el servicio nunca ve el null.
+  it('los dos campos nuevos en null (encodeDefaults=true): 200 y la escritura de la app vieja, no un 400 eterno', async () => {
+    const response = await request(makeApp())
+      .put(ENDPOINT)
+      .set(authHeader())
+      .set(deviceHeaders())
+      .send({ ...validBody, customerDisplayDesignVersion: null, installationId: null })
+
+    expect(response.status).toBe(200)
+    expect(prismaMock.terminal.findFirst).not.toHaveBeenCalled()
+    expect(prismaMock.terminal.updateMany.mock.calls[0][0].data).toMatchObject({
+      customerDisplayDesignVersion: null,
+      customerDisplayAck: Prisma.DbNull,
+    })
+  })
+
   it('rechaza atómicamente cuando el binding exacto dejó de existir antes de escribir', async () => {
     prismaMock.terminal.updateMany.mockResolvedValue({ count: 0 })
 

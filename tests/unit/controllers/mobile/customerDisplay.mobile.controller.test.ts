@@ -113,6 +113,21 @@ describe('PUT /customer-display/ack', () => {
     expect(acknowledgeCustomerDisplayMock).toHaveBeenCalledWith(VENUE, 'dev-1', ack)
   })
 
+  // Por la ruta real: `validateRequest` reemplaza el cuerpo por el normalizado, así que el servicio recibe null, no undefined.
+  it('shownAt y surface omitidos (encodeDefaults=false): 200 y llegan al servicio en null', async () => {
+    acknowledgeCustomerDisplayMock.mockResolvedValue({ accepted: true, current: true })
+    const sinVacios: Record<string, unknown> = { ...ack }
+    delete sinVacios.shownAt
+    delete sinVacios.surface
+    const r = await request(app())
+      .put(`/api/v1/mobile/venues/${VENUE}/customer-display/ack`)
+      .set(auth())
+      .set('x-device-id', 'dev-1')
+      .send(sinVacios)
+    expect(r.status).toBe(200)
+    expect(acknowledgeCustomerDisplayMock).toHaveBeenCalledWith(VENUE, 'dev-1', { ...sinVacios, shownAt: null, surface: null })
+  })
+
   // R1 por la ruta real (la integración llama al servicio directo y no pasa por la validación).
   it('la ventana de Windows llega al servicio con su superficie (R1)', async () => {
     acknowledgeCustomerDisplayMock.mockResolvedValue({ accepted: true, current: true })

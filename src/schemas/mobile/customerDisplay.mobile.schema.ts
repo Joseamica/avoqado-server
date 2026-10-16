@@ -27,11 +27,14 @@ export const customerDisplayAckSchema = z.object({
         .min(0, 'La secuencia no puede ser negativa')
         .max(Number.MAX_SAFE_INTEGER, 'La secuencia es demasiado grande'),
       storedAt: fechaIso('storedAt'),
-      shownAt: fechaIso('shownAt').nullable(),
+      // «Vacío» = omitido O null (encodeDefaults false o true): el omitido se normaliza a null AQUÍ, antes de `armarAcuse`
+      // (un `shownAt` undefined que llegara al servicio se leería «mostrado»). El servicio nunca ve undefined.
+      shownAt: fechaIso('shownAt').nullable().default(null),
       // R1: `window` es la ventana del cliente del POS de Windows; sin ella su ack sería 400 para siempre.
       surface: z
         .enum(['presentation', 'activity', 'kiosk', 'window'], { errorMap: () => ({ message: 'La superficie no es válida' }) })
-        .nullable(),
+        .nullable()
+        .default(null),
       imagesReady: conteo('imagesReady'),
       imagesPending: conteo('imagesPending'),
       imagesFailed: conteo('imagesFailed'),

@@ -9,6 +9,7 @@ import {
   armarAcuse,
 } from '@/services/customer-display/customerDisplayMobile.service'
 import { customerDisplayAckSchema } from '@/schemas/mobile/customerDisplay.mobile.schema'
+import { enLaTablet } from '@/services/customer-display/customerDisplayAckView'
 
 const RECIBIDO = new Date('2026-09-25T18:00:00.000Z')
 
@@ -27,6 +28,11 @@ describe('acotarHoraDelCliente — las horas de la tablet, acotadas contra la de
   })
   it('null sigue siendo null («guardado, aún no mostrado»)', () => {
     expect(acotarHoraDelCliente(null, RECIBIDO)).toEqual({ valor: null, adelantada: false })
+  })
+  // Defensa en profundidad: `Date.parse(undefined)` es NaN, y sin esta guarda salía la hora del servidor con `adelantada`
+  // ⇒ un diseño que NO se mostró quedaba «mostrado».
+  it('undefined (un campo omitido que llegara sin normalizar) vale lo mismo que null, no la hora del servidor', () => {
+    expect(acotarHoraDelCliente(undefined, RECIBIDO)).toEqual({ valor: null, adelantada: false })
   })
 })
 
@@ -89,6 +95,31 @@ describe('customerDisplayAckSchema', () => {
 
   it('acepta la ventana de Windows como superficie (R1)', () => {
     expect(parse({ ...valido, surface: 'window', shownAt: '2026-09-25T17:00:00.000Z' }).success).toBe(true)
+  })
+
+  // «Vacío» = omitido O null: la app puede serializar con encodeDefaults=false (omite) o true (manda null). Un omitido que
+  // diera 400 dejaría el panel en «Sin acuse» para siempre.
+  it('shownAt y surface OMITIDOS (encodeDefaults=false): válido, y al servicio le llegan en null, nunca undefined', () => {
+    const sinVacios: Record<string, unknown> = { ...valido }
+    delete sinVacios.shownAt
+    delete sinVacios.surface
+    const r = parse(sinVacios)
+    expect(r.success).toBe(true)
+    if (r.success) {
+      expect(r.data.body.shownAt).toBeNull()
+      expect(r.data.body.surface).toBeNull()
+    }
+  })
+
+  it('🔴 un shownAt OMITIDO es «guardado, aún no mostrado», no «mostrado» con la hora del servidor', () => {
+    const sinShownAt: Record<string, unknown> = { ...valido, surface: 'presentation' }
+    delete sinShownAt.shownAt
+    const r = parse(sinShownAt)
+    expect(r.success).toBe(true)
+    if (!r.success) return
+    const acuse = armarAcuse(r.data.body, RECIBIDO)
+    expect(acuse).toMatchObject({ shownAt: null, clientClockSkew: false, storedAt: '2026-09-25T17:00:00.000Z' })
+    expect(enLaTablet(acuse, valido.fingerprint, 1).estado).toBe('GUARDADO')
   })
 })
 

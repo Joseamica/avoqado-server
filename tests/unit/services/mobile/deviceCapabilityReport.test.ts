@@ -57,6 +57,25 @@ describe('reportDeviceCapabilitiesSchema — los dos campos nuevos van JUNTOS', 
     expect(r.success).toBe(false)
     if (!r.success) expect(r.error.errors[0].message).toMatch(/[áéíóúñ]|debe|va|es|no/i)
   })
+
+  // «Vacío» = omitido O null: la app puede serializar con encodeDefaults=false (omite) o true (manda null). Un null que
+  // diera 400 dejaría al poll pidiendo el reporte para siempre.
+  it('los dos en null (encodeDefaults=true) = ninguno: válido, y al servicio le llegan AUSENTES, como la app vieja', () => {
+    const r = valida({ ...base, customerDisplayDesignVersion: null, installationId: null })
+    expect(r.success).toBe(true)
+    if (r.success) {
+      expect(r.data.body.customerDisplayDesignVersion).toBeUndefined()
+      expect(r.data.body.installationId).toBeUndefined()
+    }
+  })
+  it.each([[{ customerDisplayDesignVersion: 1, installationId: null }], [{ customerDisplayDesignVersion: null, installationId: 'abc' }]])(
+    'uno en null y el otro con valor %j: el MISMO 400 de «van juntas»',
+    extra => {
+      const r = valida({ ...base, ...extra })
+      expect(r.success).toBe(false)
+      if (!r.success) expect(r.error.errors.map(e => e.message)).toEqual(['La versión de diseño y la instalación van juntas'])
+    },
+  )
 })
 
 describe('recordCapabilityReport — la ficha cacheada se tira SÓLO tras un reporte que se guardó', () => {

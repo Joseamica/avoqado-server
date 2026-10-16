@@ -23,19 +23,22 @@ export const reportDeviceCapabilitiesSchema = z.object({
         errorMap: () => ({ message: 'La versión del protocolo de pantalla debe ser exactamente 1' }),
       }),
       // — Pantalla del cliente (spec §5.7.2). La app los manda SÓLO si el poll anunció la capacidad; una app vieja no
-      // los manda y su cuerpo sigue siendo válido tal cual. —
+      // los manda y su cuerpo sigue siendo válido tal cual. «Vacío» = omitido O null (encodeDefaults false o true): el
+      // null se normaliza a AUSENTE aquí, así que el servicio sólo ve número/texto o undefined. —
       customerDisplayDesignVersion: z
         .number({ invalid_type_error: 'La versión de diseño debe ser un número' })
         .int('La versión de diseño debe ser un entero')
         .min(1, 'La versión de diseño mínima es 1')
         .max(CUSTOMER_DISPLAY_DESIGN_CAPABILITY, `La versión de diseño máxima es ${CUSTOMER_DISPLAY_DESIGN_CAPABILITY}`)
-        .optional(),
+        .nullish()
+        .transform(v => v ?? undefined),
       installationId: z
         .string({ invalid_type_error: 'La instalación debe ser un texto' })
         .min(1, 'La instalación no puede ir vacía')
         .max(64, 'La instalación es demasiado larga')
         .regex(/^[A-Za-z0-9-]+$/, 'La instalación sólo admite letras, números y guiones')
-        .optional(),
+        .nullish()
+        .transform(v => v ?? undefined),
     })
     .strict()
     .refine(b => (b.customerDisplayDesignVersion === undefined) === (b.installationId === undefined), {

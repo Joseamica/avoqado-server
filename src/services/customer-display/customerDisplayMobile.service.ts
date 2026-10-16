@@ -35,9 +35,12 @@ export async function getMobileCustomerDisplay(
 
 export const CLIENT_CLOCK_TOLERANCE_MS = 5 * 60_000
 
-/** Una hora de la tablet más de 5 min POR DELANTE de la llegada se sustituye por la del servidor y se marca. */
-export function acotarHoraDelCliente(declarada: string | null, recibida: Date): { valor: string | null; adelantada: boolean } {
-  if (declarada === null) return { valor: null, adelantada: false }
+/**
+ * Una hora de la tablet más de 5 min POR DELANTE de la llegada se sustituye por la del servidor y se marca. `undefined` vale
+ * lo mismo que null (defensa en profundidad: el esquema ya normaliza; `Date.parse(undefined)` es NaN y saldría «mostrado»).
+ */
+export function acotarHoraDelCliente(declarada: string | null | undefined, recibida: Date): { valor: string | null; adelantada: boolean } {
+  if (declarada == null) return { valor: null, adelantada: false }
   const t = Date.parse(declarada)
   if (!Number.isFinite(t) || t - recibida.getTime() > CLIENT_CLOCK_TOLERANCE_MS) return { valor: recibida.toISOString(), adelantada: true }
   return { valor: new Date(t).toISOString(), adelantada: false }

@@ -2120,7 +2120,8 @@ router.get(
  *       El aparato se identifica por `X-Device-ID` + `X-Device-Platform: ANDROID` (registro explícito); la escritura va
  *       condicionada al binding EXACTO `{ terminalId, venueId, deviceUid, POS_ANDROID }`. La respuesta no cambia.
  *       `customerDisplayDesignVersion` e `installationId` son OPCIONALES y van JUNTOS o ninguno: la app los manda sólo
- *       si el poll anunció `capabilities.customerDisplayDesign`. Todas las horas son del servidor.
+ *       si el poll anunció `capabilities.customerDisplayDesign`. Cada uno puede omitirse o ser null (los dos en null =
+ *       ninguno; uno en null y el otro con valor = 400). Todas las horas son del servidor.
  *       - Sin los campos nuevos (app vieja, o una que bajó de versión): versión `null`, el ack se limpia, la instalación
  *         y su lista de cambios se conservan.
  *       - Con la misma instalación: se guarda la versión; ack, instalación y lista igual.
@@ -2163,11 +2164,13 @@ router.get(
  *                 type: integer
  *                 minimum: 1
  *                 maximum: 2
- *                 description: Opcional, junto con installationId. min(la versión de la app, la que anuncia el poll)
+ *                 nullable: true
+ *                 description: Puede omitirse o ser null; junto con installationId. min(la versión de la app, la que anuncia el poll)
  *               installationId:
  *                 type: string
  *                 pattern: '^[A-Za-z0-9-]{1,64}$'
- *                 description: Opcional, junto con customerDisplayDesignVersion. Identifica la instalación de la app
+ *                 nullable: true
+ *                 description: Puede omitirse o ser null; junto con customerDisplayDesignVersion. Identifica la instalación de la app
  *     responses:
  *       200:
  *         description: Reporte guardado
@@ -2361,14 +2364,14 @@ router.get(
  *           schema:
  *             type: object
  *             additionalProperties: false
- *             required: [installationId, fingerprint, seq, storedAt, shownAt, surface, imagesReady, imagesPending, imagesFailed, unsupportedSchema]
+ *             required: [installationId, fingerprint, seq, storedAt, imagesReady, imagesPending, imagesFailed, unsupportedSchema]
  *             properties:
  *               installationId: { type: string, pattern: '^[A-Za-z0-9-]{1,64}$' }
  *               fingerprint: { type: string, pattern: '^[0-9a-f]{32}$' }
  *               seq: { type: integer, minimum: 0, maximum: 9007199254740991 }
  *               storedAt: { type: string, format: date-time }
- *               shownAt: { type: string, format: date-time, nullable: true }
- *               surface: { type: string, nullable: true, enum: [presentation, activity, kiosk, window] }
+ *               shownAt: { type: string, format: date-time, nullable: true, description: 'Puede omitirse o ser null (= aún no mostrado)' }
+ *               surface: { type: string, nullable: true, enum: [presentation, activity, kiosk, window], description: 'Puede omitirse o ser null' }
  *               imagesReady: { type: integer, minimum: 0, maximum: 100 }
  *               imagesPending: { type: integer, minimum: 0, maximum: 100 }
  *               imagesFailed: { type: integer, minimum: 0, maximum: 100 }
