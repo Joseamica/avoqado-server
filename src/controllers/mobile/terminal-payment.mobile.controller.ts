@@ -18,11 +18,10 @@ import AppError, {
 } from '../../errors/AppError'
 import { validateStaffVenue } from '../../utils/staff-venue.util'
 import { normalizeRequestedCustomerId } from '../../services/tpv/fastPaymentCustomer'
+import { MAX_TERMINAL_PAYMENT_CENTS } from '../../services/shared/inputCaps'
 
 /** Cota del id de cliente: la misma que `/fast` (`tpv.schema.ts`). */
 const MAX_CUSTOMER_ID_LENGTH = 64
-/** Coincide con la cota del teclado POS Android: $1,000,000.00 por cobro. */
-const MAX_TERMINAL_PAYMENT_CENTS = 100_000_000
 
 /**
  * El cliente que el POS adjunta al cobro: se normaliza y, si no cabe o no es un string,
