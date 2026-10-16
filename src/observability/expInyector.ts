@@ -10,6 +10,7 @@
  *   efecto_falla  el efecto RECEIPT lanza un error (1c)
  */
 import http from 'node:http'
+import { performance } from 'node:perf_hooks'
 import type { Prisma } from '@prisma/client'
 
 const falla = (): string | undefined => process.env.EXP_INYECTOR || undefined

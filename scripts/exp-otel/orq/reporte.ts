@@ -307,6 +307,7 @@ function volumen() {
 }
 
 function main() {
+  fs.mkdirSync(RAIZ, { recursive: true })
   const c = costo()
   const k = caido()
   const u = utilidad()
