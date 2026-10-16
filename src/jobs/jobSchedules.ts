@@ -64,4 +64,8 @@ export const DATABASE_JOB_SCHEDULES = {
   // (CDMX), hueco entre el sweeper de inventario (:44) y los efectos de pago (:46): sólo pide la vuelta; la corre el worker.
   shopifyWorker: '21,51 * * * * *',
   shopifyReconcile: '45 14 6 * * *',
+  // Pedidos en línea: vence lo que el restaurante no contestó en 10 min. Cada 30 s en :10/:40 — huecos libres
+  // (:08/:38 watchdog de pagos, :11/:41 conciliador de Blumon, :13/:43 AngelPay); lectura barata por índice
+  // (status, acceptDeadlineAt).
+  onlineOrderAcceptanceExpiry: '10,40 * * * * *',
 } as const
