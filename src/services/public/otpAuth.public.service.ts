@@ -5,8 +5,8 @@ import logger from '../../config/logger'
 import { generateOtpCode, hashOtpCode, normalizeEmail } from '../../lib/otp'
 import { sendOtpWhatsApp } from '../whatsapp.service'
 import emailService from '../email.service'
-import { generateCustomerToken } from '../../jwt.service'
-import { phonesMatch, phoneLast10, normalizarTelefonoMx, formaLegadaDeTelefonoMx } from '@/utils/phone'
+import { generateCustomerToken, generateOrderingCustomerToken } from '../../jwt.service'
+import { canonicalPhoneE164, phonesMatch, phoneLast10, normalizarTelefonoMx, formaLegadaDeTelefonoMx } from '@/utils/phone'
 import { findCustomerIdByPhone } from '@/services/public/customerPhoneLookup'
 import { activateCustomerAccount } from '@/services/public/customerBookingAccess.service'
 
@@ -70,6 +70,7 @@ export async function verifyOtp(args: {
   channel: 'whatsapp' | 'email'
   destination: string
   code: string
+  purpose?: 'ORDERING'
   /** Spec 2026-10-14 §3.3: nombre del alta. Sólo se usa si el cliente no tiene uno. */
   firstName?: string | null
 }): Promise<{
@@ -79,6 +80,12 @@ export async function verifyOtp(args: {
   customer: { id: string; firstName: string | null; lastName: string | null; email: string | null; phone: string | null }
 }> {
   const destination = destinoDelReto(args.channel, args.destination)
+
+  // H1 (pedidos en línea): verificar para PEDIR prueba un TELÉFONO; un código por correo no lo prueba. Se rechaza antes de tocar
+  // el reto: no se gasta un intento y el código sigue sirviendo.
+  if (args.purpose === 'ORDERING' && args.channel !== 'whatsapp') {
+    throw new BadRequestError('Para pedir, verifica tu teléfono por WhatsApp.', 'ORDERING_REQUIRES_PHONE')
+  }
 
   // Fase 0.B: sólo retos de ESTE venue y canal. Un reto legacy con venueId NULL no entra
   // aquí nunca (no puede probar de qué venue vino) — muere por TTL.
@@ -127,13 +134,20 @@ export async function verifyOtp(args: {
       throw new UnauthorizedError('Esta cuenta está desactivada', 'CUSTOMER_INACTIVE')
     }
 
+    // R7: verificar el teléfono para PEDIR no activa la cuenta de reservas (no pide aprobación ni manda sus avisos).
+    if (args.purpose === 'ORDERING') return { customer, approvalStatus: customer.approvalStatus }
     const conNombre = await ponerNombreSiFalta(tx, customer, args.firstName)
     const activation = await activateCustomerAccount(tx, { customerId: conNombre.id, venueId: args.venueId, origin: 'OTP' })
     return { customer: conNombre, approvalStatus: activation.approvalStatus }
   })
 
   // Post-commit: si la transacción falló, nadie recibe sesión.
-  const token = generateCustomerToken(customer.id, args.venueId)
+  // H1: para PEDIR, el token de PEDIDOS (prueba el teléfono; reservas y portal lo rechazan). Sin `purpose`, el de siempre.
+  // El teléfono va en la forma canónica (`+521…` → `+52…`), la misma con la que el pedido lo guarda y cuenta su tope.
+  const token =
+    args.purpose === 'ORDERING'
+      ? generateOrderingCustomerToken(customer.id, args.venueId, canonicalPhoneE164(destination) ?? destination)
+      : generateCustomerToken(customer.id, args.venueId)
   return {
     token,
     /** Fase 1: el controller lo compone en `bookingAccess`. */

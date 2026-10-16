@@ -356,6 +356,49 @@ export function verifyCustomerToken(token: string): CustomerTokenPayload {
 }
 
 /**
+ * H1 (pedidos en línea, ronda 2): el token de PEDIDOS es otro tipo. Lo emite sólo el OTP por WhatsApp con
+ * `purpose: 'ORDERING'` y prueba el TELÉFONO (`verifiedPhone`, E.164). `verifyCustomerToken` lo rechaza por su `type`: no sirve
+ * para reservar, apartar ni para el portal del cliente, así que verificar para pedir no se salta la aprobación de reservas.
+ */
+export interface OrderingCustomerTokenPayload extends jwt.JwtPayload {
+  sub: string // Customer.id
+  venueId: string
+  type: 'customer_ordering'
+  verifiedPhone: string
+}
+
+/** Token de pedidos (tienda en línea). Expiración: 30 días, igual que el token de cliente. */
+export function generateOrderingCustomerToken(customerId: string, venueId: string, verifiedPhone: string): string {
+  const payload: Omit<OrderingCustomerTokenPayload, 'iat' | 'exp'> = {
+    sub: customerId,
+    venueId,
+    type: 'customer_ordering',
+    verifiedPhone,
+  }
+  return jwt.sign(payload, ACCESS_TOKEN_SECRET!, {
+    expiresIn: 2592000, // 30 days
+    algorithm: 'HS256',
+  })
+}
+
+/** Verifica un token de pedidos: SÓLO `type: 'customer_ordering'` con teléfono verificado. */
+export function verifyOrderingCustomerToken(token: string): OrderingCustomerTokenPayload {
+  const decoded = jwt.verify(token, ACCESS_TOKEN_SECRET!, {
+    algorithms: ['HS256'],
+  }) as OrderingCustomerTokenPayload
+  if (
+    !decoded.sub ||
+    !decoded.venueId ||
+    decoded.type !== 'customer_ordering' ||
+    typeof decoded.verifiedPhone !== 'string' ||
+    !decoded.verifiedPhone
+  ) {
+    throw new jwt.JsonWebTokenError('Token de pedidos inválido.')
+  }
+  return decoded
+}
+
+/**
  * Genera un token para consumidores de la app publica de Avoqado.
  * Expiracion: 30 dias. El refresh se puede agregar cuando haya sesiones multi-device.
  */
