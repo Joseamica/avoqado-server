@@ -66,7 +66,9 @@ function cumpleWhere(where: any): boolean {
     if (!estados.includes(comando.status)) return false
   }
   const filtroTerminal = where?.terminal?.is ?? where?.terminal
-  if (filtroTerminal?.venueId && filtroTerminal.venueId !== terminal.venueId) return false
+  const venueFiltro = filtroTerminal?.venueId
+  if (typeof venueFiltro === 'string' && venueFiltro !== terminal.venueId) return false
+  if (venueFiltro?.not !== undefined && venueFiltro.not === terminal.venueId) return false // la terminal de HOY
   return true
 }
 

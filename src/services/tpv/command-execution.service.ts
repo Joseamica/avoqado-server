@@ -220,9 +220,10 @@ export class TpvCommandExecutionService {
       throw new NotFoundError(`Command ${commandId} not found`)
     }
 
-    // 🔴 La entrega va a la terminal donde esté HOY; el comando se autorizó contra SU venue. Si ya no coinciden (la
-    // terminal se trasladó después de encolar o re-armar), no se emite nada y el comando queda retirado (Codex r2).
-    if (await tpvCommandQueueService.noSeEntregaPorTraslado(command, command.terminal.venueId, 'entrega')) return
+    // 🔴 La entrega va a la terminal donde esté HOY; el comando se autorizó contra SU venue. Si lo leído no coincide,
+    // no se emite nada: el comando queda retirado si la discrepancia es real (Codex r2) y, si la lectura era vieja, se
+    // queda en cola para el latido, que decide con la ubicación de hoy (Codex r3: una lectura vieja no cancela).
+    if ((await tpvCommandQueueService.revisarTraslado(command, command.terminal.venueId, 'entrega')).discrepanciaLeida) return
 
     if ((command.payload as { _deliveryProtocol?: number } | null)?._deliveryProtocol === 2) {
       if (['PENDING', 'QUEUED', 'SENT'].includes(command.status) && (!command.scheduledFor || command.scheduledFor <= new Date())) {

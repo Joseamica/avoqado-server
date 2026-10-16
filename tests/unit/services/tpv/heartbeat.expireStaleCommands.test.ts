@@ -38,7 +38,10 @@ jest.mock('@/services/tpv/command-queue.service', () => ({
   __esModule: true,
   // La regla «un comando no viaja con la terminal» (ronda 8) se prueba REAL en comandoNoViajaConLaTerminal.test.ts;
   // aquí ningún comando es de otro venue.
-  tpvCommandQueueService: { queueCommand: jest.fn(), noSeEntregaPorTraslado: jest.fn(async () => false) },
+  tpvCommandQueueService: {
+    queueCommand: jest.fn(),
+    revisarTraslado: jest.fn(async () => ({ discrepanciaLeida: false, retirado: false })),
+  },
 }))
 
 const mockedTerminalFindUnique = prisma.terminal.findUnique as jest.Mock

@@ -605,7 +605,8 @@ export class TpvCommandQueueService {
         const r = await this.retirarSiLaTerminalSeFue(command, command.terminal.venueId, tx)
         if (r.retiradoAhora)
           retiradosPorTraslado.push({ command, venueActual: command.terminal.venueId, via: newStatus === 'SENT' ? 'entrega' : 'permiso' })
-        if (r.seFue) return null
+        // Con la discrepancia leída no se entrega ni se autoriza ESTA vez, se haya podido retirar o no (seguro).
+        if (r.discrepanciaLeida) return null
       }
       if (newStatus === 'EXECUTING' && executionSessionId) {
         if (command.terminal.commandSessionId !== executionSessionId) return null
@@ -714,15 +715,25 @@ export class TpvCommandQueueService {
    */
   private async retirarSiLaTerminalSeFue(
     command: ComandoConVenue,
-    venueActual: string,
+    venueLeido: string,
     db: Prisma.TransactionClient = prisma,
-  ): Promise<{ seFue: boolean; retiradoAhora: boolean }> {
-    if (command.venueId === venueActual) return { seFue: false, retiradoAhora: false }
+  ): Promise<{ discrepanciaLeida: boolean; retiradoAhora: boolean }> {
+    if (command.venueId === venueLeido) return { discrepanciaLeida: false, retiradoAhora: false }
+    // 🔴 Una lectura VIEJA nunca basta para cancelar (Codex r3, 16-oct): el latido lee la terminal al empezar y, si a
+    // mitad una migración la mueve con su borrado a B, comparaba ese borrado de B contra la «A» vieja y lo cancelaba —
+    // la terminal quedaba trasladada sin el borrado que exige el cambio de credenciales de cobro. El UPDATE vuelve a
+    // exigir, en la MISMA sentencia (la relación va en el `where`, un subquery), que la terminal esté HOY en otro venue
+    // que el comando, que el comando siga siendo de su venue y que siga vivo. Si no, no se cancela nada.
     const retirado = await db.tpvCommandQueue.updateMany({
-      where: { id: command.id, status: { in: AUN_POR_ENTREGAR_O_EJECUTAR } },
+      where: {
+        id: command.id,
+        venueId: command.venueId,
+        status: { in: AUN_POR_ENTREGAR_O_EJECUTAR },
+        terminal: { venueId: { not: command.venueId } },
+      },
       data: { status: 'CANCELLED', resultStatus: 'REJECTED', resultMessage: MENSAJE_TERMINAL_TRASLADADA },
     })
-    return { seFue: true, retiradoAhora: retirado.count === 1 }
+    return { discrepanciaLeida: true, retiradoAhora: retirado.count === 1 }
   }
 
   /** La bitácora del retiro, en el venue que mandó el comando (fuera de cualquier transacción). */
@@ -749,11 +760,20 @@ export class TpvCommandQueueService {
     })
   }
 
-  /** Para la entrega fuera de una transacción: `true` = no se entrega (ya no es de la terminal; queda retirado). */
-  async noSeEntregaPorTraslado(command: ComandoConVenue, venueActual: string, via: 'entrega' | 'latido'): Promise<boolean> {
-    const r = await this.retirarSiLaTerminalSeFue(command, venueActual)
-    if (r.retiradoAhora) this.registrarRetiroPorTraslado(command, venueActual, via)
-    return r.seFue
+  /**
+   * Para la entrega fuera de una transacción. `retirado`: la discrepancia es REAL y el comando quedó CANCELLED (no se
+   * entrega nunca). `discrepanciaLeida` sin `retirado`: lo que se leyó ya no vale — quien llama decide con la ubicación
+   * de HOY (el latido reclama con `terminal.venueId` = el del comando en el mismo UPDATE) o simplemente no entrega esta
+   * vez (el socket), que es seguro: no entregar de más está bien, cancelar de más no.
+   */
+  async revisarTraslado(
+    command: ComandoConVenue,
+    venueLeido: string,
+    via: 'entrega' | 'latido',
+  ): Promise<{ discrepanciaLeida: boolean; retirado: boolean }> {
+    const r = await this.retirarSiLaTerminalSeFue(command, venueLeido)
+    if (r.retiradoAhora) this.registrarRetiroPorTraslado(command, venueLeido, via)
+    return { discrepanciaLeida: r.discrepanciaLeida, retirado: r.retiradoAhora }
   }
 
   async handleCommandAck(commandId: string, terminalId: string): Promise<void> {

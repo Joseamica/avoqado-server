@@ -625,8 +625,10 @@ export class TpvHealthService {
       const delivered: typeof pendingCommands = []
       for (const command of pendingCommands) {
         // 🔴 Un comando de OTRO venue (la terminal se trasladó o se migró después de encolarlo) no se entrega:
-        // queda CANCELLED con TERMINAL_MOVED (Codex r2, 16-oct). Y el reclamo lo vuelve a exigir en el mismo UPDATE.
-        if (await tpvCommandQueueService.noSeEntregaPorTraslado(command, terminal.venueId, 'latido')) continue
+        // queda CANCELLED con TERMINAL_MOVED (Codex r2, 16-oct). La ubicación de arriba puede ser VIEJA (una migración a
+        // mitad de este latido): el retiro sólo cancela si la discrepancia es real HOY, y si no lo era, el reclamo de
+        // abajo entrega sólo si la terminal está HOY en el venue del comando (Codex r3).
+        if ((await tpvCommandQueueService.revisarTraslado(command, terminal.venueId, 'latido')).retirado) continue
         const claimed = await prisma.tpvCommandQueue.updateMany({
           where: {
             id: command.id,
