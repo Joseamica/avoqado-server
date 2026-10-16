@@ -9,10 +9,10 @@
  *   GET /dashboard/tpv/:tpvId/settings
  */
 
-import { TerminalType } from '@prisma/client'
+import { TerminalStatus, TerminalType } from '@prisma/client'
 import { NextFunction, Request, Response } from 'express'
 import logger from '../../config/logger'
-import { getDeviceReceiptPayload } from '../../services/dashboard/receiptLayout/devicePayload.service'
+import { type DeviceReceiptPayload, getDeviceReceiptPayloadWithStatus } from '../../services/dashboard/receiptLayout/devicePayload.service'
 import AppError, { BadRequestError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { VenuePlanInfo, getVenuePlanInfo } from '../../services/access/basePlan.service'
@@ -27,11 +27,14 @@ import {
   updateLocalDisplayMode,
 } from '../../services/display-mode-request.service'
 import {
+  ESTADOS_DE_FUENTE_PROPIA,
+  ORDEN_DEL_RESPALDO,
   POLL_TERMINAL_SELECT,
   capabilityReportRequested,
   collectPollFingerprints,
   type PollFingerprints,
 } from '../../services/customer-display/posPollFingerprints'
+import { customerDisplayBlockFor, readSettingsFingerprint } from '../../services/customer-display/settingsEnvelope.service'
 import { CUSTOMER_DISPLAY_DESIGN_CAPABILITY } from '../../services/customer-display/customerDisplayDesign.validation'
 import { requestDeviceUid } from '../../utils/requestDeviceUid'
 
@@ -56,12 +59,18 @@ function mapDisplayModeRequestError(error: unknown): unknown {
 export const getVenueTpvSettings = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { venueId } = req.params
+    const deviceUid = requestDeviceUid(req)
+
+    // 0. 🔴 ORDEN DE LECTURA (spec §5.7.4, hallazgo D5): la huella PRIMERO, el cuerpo DESPUÉS — por eso NO va en el
+    //    `Promise.all` de abajo. Si alguien escribe en medio, el cuerpo sale más nuevo que la huella (un refresco de más,
+    //    inofensivo); al revés se confirmaría una versión que nunca se entregó. Nunca lanza (Codex r1 #8).
+    const huella = await readSettingsFingerprint(venueId, deviceUid)
 
     // 1. Fetch all terminals (lightweight fields + config for merge), in parallel with the
     //    venue's plan-tier info (additive `plan` field — POS apps gate UI by plan).
     //    RESILIENT: a plan-lookup failure must NEVER break venue-select on the POS — log it
     //    and return the settings WITHOUT the plan field (apps fail open).
-    const [terminals, plan, venueSettings, receiptPayload] = await Promise.all([
+    const [terminals, plan, venueSettingsLeido, recibo, pantalla] = await Promise.all([
       prisma.terminal.findMany({
         where: { venueId },
         select: {
@@ -86,7 +95,9 @@ export const getVenueTpvSettings = async (req: Request, res: Response, next: Nex
           defaultWorkspace: true,
           customerDisplayInverted: true,
         },
-        orderBy: { name: 'asc' },
+        // `id` desempata (R11): «la primera activa» del cuerpo es la MISMA fila que lee la huella aunque dos terminales
+        // se llamen igual — el orden de LA regla de la Task 7, no una copia.
+        orderBy: ORDEN_DEL_RESPALDO,
       }),
       getVenuePlanInfo(venueId).catch((error): VenuePlanInfo | undefined => {
         logger.error('Failed to resolve plan info for mobile venue settings — returning settings without plan', { venueId, error })
@@ -95,39 +106,46 @@ export const getVenueTpvSettings = async (req: Request, res: Response, next: Nex
       // Dónde pinta el POS el panel de promociones. Es preferencia de LAYOUT del
       // venue (VenueSettings), no configuración de terminal — por eso va en su
       // propio bloque y no dentro de `settings`, que es TpvSettings por terminal.
+      // «No hay fila» (los defaults son la verdad: `ok`) NO es lo mismo que «la lectura falló» (`failed`).
       prisma.venueSettings
         .findUnique({
           where: { venueId },
           select: { promotionsPanelCashier: true, promotionsPanelCustomer: true, managerPinOverrideEnabled: true },
         })
-        .catch(error => {
-          logger.error('Failed to resolve venue-level POS settings — returning defaults', { venueId, error })
-          return null
-        }),
+        .then(
+          fila => ({ ok: true as const, fila }),
+          error => {
+            logger.error('Failed to resolve venue-level POS settings — returning defaults', { venueId, error })
+            return { ok: false as const, fila: null }
+          },
+        ),
       // Encabezado Y DISEÑO del ticket impreso (spec § 7.3). Un solo constructor compartido
       // con el servicio de la PAX: si cada uno armara lo suyo, las tablets y la terminal
       // imprimirían distinto y los casos dorados NO lo cazarían. Falla en blando: si algo no
       // se resuelve, el campo se omite y los settings salen igual — un POS sin settings no cobra.
-      getDeviceReceiptPayload(venueId).catch(error => {
+      getDeviceReceiptPayloadWithStatus(venueId).catch(error => {
         logger.error('Failed to resolve receipt payload for mobile venue settings — returning settings without it', { venueId, error })
-        return {}
+        return { payload: {} as DeviceReceiptPayload, status: 'failed' as const }
       }),
+      // Con `bindingStatus`: «no pude saberlo» sale `failed`, no `not_applicable` (Codex r1 #8). Nunca lanza.
+      customerDisplayBlockFor(venueId, huella),
     ])
+    const venueSettings = venueSettingsLeido.fila
 
     // 2. Prefer the terminal that made this request. A venue can have an area
     //    station, a checkout and a café terminal at the same time; choosing the
     //    first active row would leak one device's workspace/settings into another.
     //    Headerless legacy clients keep the previous first-active fallback.
-    const deviceUid = requestDeviceUid(req)
     // POS Android devices can be marked INACTIVE by terminal-health liveness even
     // while authenticated mobile requests keep updating their lastHeartbeat.
     // Status is not the identity or permission boundary here: the exact deviceUid,
     // staff permissions and the downstream feature endpoints are. Still exclude
     // terminals that have not been activated, are in maintenance or were retired.
+    // LA regla de la Task 7 (`ESTADOS_DE_FUENTE_PROPIA`), no una copia: la huella y el cuerpo eligen la MISMA fuente.
     const deviceTerminal = deviceUid
-      ? (terminals.find(t => (t.status === 'ACTIVE' || t.status === 'INACTIVE') && t.deviceUid === deviceUid) ?? null)
+      ? (terminals.find(t => ESTADOS_DE_FUENTE_PROPIA.includes(t.status) && t.deviceUid === deviceUid) ?? null)
       : null
-    const activeTerminal = deviceTerminal ?? terminals.find(t => t.status === 'ACTIVE') ?? null
+    const activeTerminal = deviceTerminal ?? terminals.find(t => t.status === TerminalStatus.ACTIVE) ?? null
 
     // 3. If there is an active terminal, get its merged settings
     let settings: TpvSettings | null = null
@@ -194,7 +212,17 @@ export const getVenueTpvSettings = async (req: Request, res: Response, next: Nex
         // Encabezado y diseño del ticket (aditivo y opcional, mismo contrato que `plan`):
         // un POS viejo los ignora. `receiptInfo` conserva EXACTAMENTE sus campos de siempre
         // y suma los emisores por venta; `receiptLayout` es nuevo (spec § 7.3).
-        ...receiptPayload,
+        ...recibo.payload,
+        // — Pantalla del cliente (spec §5.7.2, §5.7.4): aditivo y opcional; lo de arriba sale idéntico. —
+        ...(huella.fingerprint ? { fingerprints: { settings: huella.fingerprint } } : {}),
+        // `failed` = «conserva lo que tenías»; `not_applicable` = «no esperes este bloque». Ausente ≠ null.
+        componentsStatus: {
+          receipt: recibo.status,
+          plan: plan ? 'ok' : 'failed',
+          promotionsPanel: venueSettingsLeido.ok ? 'ok' : 'failed', // cubre también managerPinOverrideEnabled (misma fila)
+          customerDisplay: pantalla.status,
+        },
+        ...(pantalla.block ? { customerDisplay: pantalla.block } : {}),
       },
     })
   } catch (error) {

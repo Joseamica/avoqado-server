@@ -2101,6 +2101,83 @@ router.patch(
 // TPV SETTINGS (combined terminals + settings in one call)
 // ============================================================================
 
+/**
+ * @openapi
+ * /api/v1/mobile/venues/{venueId}/settings:
+ *   get:
+ *     tags: [Mobile - TPV Settings]
+ *     summary: Los ajustes del POS — terminales, ajustes de la terminal del aparato, plan, ticket y pantalla del cliente
+ *     description: |
+ *       Lo consumen las apps POS (Android, iOS, Windows). Los campos de siempre salen IDÉNTICOS; lo de la pantalla del
+ *       cliente es aditivo y opcional. Los ajustes salen de la terminal del propio aparato (`X-Device-ID`) si está ACTIVE o
+ *       INACTIVE; si no, de la primera ACTIVE del negocio por nombre e id (la misma fuente que firma la huella del poll).
+ *       - `fingerprints.settings`: sólo para un POS_ANDROID con binding exacto `{ venueId, X-Device-ID, POS_ANDROID }` y
+ *         versión de diseño ≥ 1. Se lee ANTES que el cuerpo: si alguien escribe en medio, el cuerpo sale más nuevo que la
+ *         huella y el siguiente poll pide un refresco de más (nunca se confirma algo que no se entregó). Omitida = desconocida.
+ *       - `componentsStatus`: SIEMPRE presente. Por componente: `ok`; `failed` = «no se pudo leer: conserva lo que
+ *         tenías» (el cuerpo trae lo de siempre: defaults o el campo omitido); `not_applicable` = «no esperes este bloque».
+ *         `receipt` es `ok` sólo con `receiptInfo` Y `receiptLayout`; `promotionsPanel` cubre la fila entera de
+ *         `VenueSettings` (`promotions` y `managerPinOverrideEnabled`); sin fila es `ok` (los defaults son la verdad).
+ *         `customerDisplay` es `not_applicable` sin cabecera, sin binding POS_ANDROID (p. ej. iPad) o sin versión; `failed`
+ *         si no se pudo leer el aparato o armar la ficha.
+ *       - `customerDisplay`: el MISMO bloque que `GET /customer-display`, sólo con `componentsStatus.customerDisplay = ok`.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: header
+ *         name: X-Device-ID
+ *         required: false
+ *         schema: { type: string, maxLength: 64 }
+ *     responses:
+ *       200:
+ *         description: Los ajustes (los campos de siempre, sin cambios, más los aditivos de abajo)
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean }
+ *                 data:
+ *                   type: object
+ *                   required: [terminals, settings, activeTerminalId, deviceTerminal, promotions, managerPinOverrideEnabled, componentsStatus]
+ *                   properties:
+ *                     terminals: { type: array, items: { type: object } }
+ *                     settings: { type: object, nullable: true }
+ *                     activeTerminalId: { type: string, nullable: true }
+ *                     deviceTerminal: { type: object, nullable: true }
+ *                     plan: { type: object, description: Omitido si no se pudo leer }
+ *                     promotions: { type: object }
+ *                     managerPinOverrideEnabled: { type: boolean }
+ *                     receiptInfo: { type: object, description: Omitido si no se pudo leer }
+ *                     receiptLayout: { type: object, description: Omitido si no se pudo leer }
+ *                     fingerprints:
+ *                       type: object
+ *                       description: Sólo POS_ANDROID con binding exacto y versión ≥ 1
+ *                       properties:
+ *                         settings: { type: string, pattern: '^[0-9a-f]{32}$', description: La misma huella que anuncia el poll para este estado }
+ *                     componentsStatus:
+ *                       type: object
+ *                       required: [receipt, plan, promotionsPanel, customerDisplay]
+ *                       properties:
+ *                         receipt: { type: string, enum: [ok, failed] }
+ *                         plan: { type: string, enum: [ok, failed] }
+ *                         promotionsPanel: { type: string, enum: [ok, failed], description: Cubre promotions y managerPinOverrideEnabled }
+ *                         customerDisplay: { type: string, enum: [ok, failed, not_applicable] }
+ *                     customerDisplay:
+ *                       type: object
+ *                       description: Sólo con componentsStatus.customerDisplay = ok
+ *                       required: [terminalId, ficha, imageOrigins]
+ *                       properties:
+ *                         terminalId: { type: string }
+ *                         ficha: { type: object, description: La ficha efectiva, con su `fingerprint` de 32 hex }
+ *                         imageOrigins: { type: array, items: { type: string } }
+ *       401: { description: Sin sesión }
+ *       403: { description: No pertenece al venue }
+ */
 router.get(
   '/venues/:venueId/settings',
   authenticateTokenMiddleware,

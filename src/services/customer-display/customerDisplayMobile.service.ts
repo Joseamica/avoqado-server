@@ -22,15 +22,26 @@ function dispositivoNoEncontrado(): NotFoundError {
 
 const bindingDe = (venueId: string, deviceUid: string) => ({ venueId, deviceUid, type: TerminalType.POS_ANDROID })
 
-export async function getMobileCustomerDisplay(
-  venueId: string,
-  deviceUid: string,
-): Promise<{ terminalId: string; ficha: FichaEfectiva; imageOrigins: string[] }> {
+export interface BloqueDelAparato {
+  terminalId: string
+  ficha: FichaEfectiva
+  imageOrigins: string[]
+}
+
+/**
+ * EL bloque de la pantalla del cliente: el de la ruta propia y el de `/settings` son el mismo, por construcción. 🔴 Quien
+ * llama ya resolvió `terminalId` con el binding acotado a `venueId` (`'refresh'` invalida la caché de esa llave).
+ */
+export async function armarBloqueDelAparato(venueId: string, terminalId: string): Promise<BloqueDelAparato> {
+  // Fresca y escrita a través de la caché: la huella que la tablet guarda es la que verá en su siguiente poll.
+  const { ficha } = await getEffectiveDesign(venueId, terminalId, { cache: 'refresh' })
+  return { terminalId, ficha, imageOrigins: [...STORAGE_ORIGINS] }
+}
+
+export async function getMobileCustomerDisplay(venueId: string, deviceUid: string): Promise<BloqueDelAparato> {
   const aparato = await prisma.terminal.findFirst({ where: bindingDe(venueId, deviceUid), select: { id: true } })
   if (!aparato) throw dispositivoNoEncontrado()
-  // Fresca y escrita a través de la caché: la huella que la tablet guarda es la que verá en su siguiente poll.
-  const { ficha } = await getEffectiveDesign(venueId, aparato.id, { cache: 'refresh' })
-  return { terminalId: aparato.id, ficha, imageOrigins: [...STORAGE_ORIGINS] }
+  return armarBloqueDelAparato(venueId, aparato.id)
 }
 
 export const CLIENT_CLOCK_TOLERANCE_MS = 5 * 60_000
