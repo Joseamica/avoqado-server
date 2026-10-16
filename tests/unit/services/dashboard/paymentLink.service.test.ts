@@ -85,6 +85,8 @@ import { prismaMock } from '../../../__helpers__/setup'
 import { OPCIONES_DE_TRANSACCION_DEL_INTENTO } from '../../../../src/services/tpv/candadoDeIntento'
 import { BadRequestError, NotFoundError, PaymentOutcomeUnknownError } from '../../../../src/errors/AppError'
 import { Decimal } from '@prisma/client/runtime/library'
+import { mapFormaPago } from '../../../../src/services/fiscal/satCatalog'
+import { paymentCountsAsDrawerCash } from '../../../../src/services/shared/tenderSemantics'
 
 // ==========================================
 // MOCK HELPERS
@@ -992,6 +994,41 @@ describe('PaymentLink Service', () => {
         expect(prismaMock.order.create).toHaveBeenCalledWith(
           expect.objectContaining({ data: expect.objectContaining({ type: 'MANUAL_ENTRY' }) }),
         )
+      })
+
+      // 16-oct (producción): un SPEI de $10 quedó como CREDIT_CARD porque el método iba fijo. El tipo lo dice Mercado
+      // Pago (`payment_type_id`). OXXO NO es CASH (conciliación, saldo, póliza y corte deciden por `method === CASH`):
+      // va como OTHER con forma SAT 01 sellada. Todo tipo conocido debe poder facturarse (forma SAT distinta de '99').
+      it.each([
+        ['bank_transfer', 'BANK_TRANSFER', '03'],
+        ['ticket', 'OTHER', '01'],
+        ['atm', 'OTHER', '01'],
+        ['debit_card', 'DEBIT_CARD', '28'],
+        ['prepaid_card', 'DEBIT_CARD', '28'],
+        ['credit_card', 'CREDIT_CARD', '04'],
+        ['account_money', 'DIGITAL_WALLET', '06'],
+        ['algo_nuevo_de_mp', 'OTHER', '99'],
+      ])('el cobro se registra con el tipo que dice Mercado Pago: %s → %s (SAT %s)', async (paymentTypeId, method, formaSat) => {
+        prismaMock.checkoutSession.findUnique.mockResolvedValueOnce(mpSession())
+        armarMp()
+
+        await finalizeMercadoPagoCheckout({ sessionId: 'mp_sess_1', mpPaymentId: 777, paymentTypeId })
+
+        const data = prismaMock.payment.create.mock.calls[0][0].data
+        expect(data.method).toBe(method)
+        expect(mapFormaPago(data.method, data.tenderSatFormaPago)).toBe(formaSat)
+        // La devolución hereda este sello: sin él, un reembolso SPEI no se descontaba en la conciliación bancaria.
+        expect(data.fundsFlow).toBe('AVOQADO_PROCESSED')
+        expect(paymentCountsAsDrawerCash(data)).toBe(false)
+      })
+
+      it('sin tipo (llamada que no lo trae) conserva CREDIT_CARD, como antes', async () => {
+        prismaMock.checkoutSession.findUnique.mockResolvedValueOnce(mpSession())
+        armarMp()
+
+        await finalizeMercadoPagoCheckout({ sessionId: 'mp_sess_1', mpPaymentId: 777 })
+
+        expect(prismaMock.payment.create.mock.calls[0][0].data.method).toBe('CREDIT_CARD')
       })
     })
 
