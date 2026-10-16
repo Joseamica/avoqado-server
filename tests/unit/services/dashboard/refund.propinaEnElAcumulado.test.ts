@@ -122,7 +122,7 @@ describe('Task 5r — la propina ya devuelta cuenta en el acumulado del dashboar
       .mockResolvedValueOnce([cobroConPropina({ processorData: { refundedAmount: 110, refundedAmountCents: 11000 } })])
       .mockResolvedValueOnce([REEMBOLSO_A, REEMBOLSO_B])
 
-    await expect(reembolsar(1000)).rejects.toThrow(/exceeds remaining refundable/i)
+    await expect(reembolsar(1000)).rejects.toThrow(/de este cobro sólo quedan \$[\d.]+ por devolver/)
     expect(prismaMock.payment.create).not.toHaveBeenCalled()
   })
 
@@ -141,7 +141,7 @@ describe('Task 5r — la propina ya devuelta cuenta en el acumulado del dashboar
   it('🔴 un TERCER reembolso de $10 sobre esos mismos $120 ya no cabe', async () => {
     prismaMock.$queryRaw.mockResolvedValueOnce([cobroConPropina()]).mockResolvedValueOnce([REEMBOLSO_A, REEMBOLSO_B])
 
-    await expect(reembolsar(1000)).rejects.toThrow(/exceeds remaining refundable/i)
+    await expect(reembolsar(1000)).rejects.toThrow(/de este cobro sólo quedan \$[\d.]+ por devolver/)
     expect(prismaMock.payment.create).not.toHaveBeenCalled()
   })
 
@@ -194,7 +194,7 @@ describe('Task 5r — la propina ya devuelta cuenta en el acumulado del dashboar
       .mockResolvedValueOnce([cobroConPropina({ processorData: { refundedAmountCents: 12000, refundedAmount: 120 } })])
       .mockResolvedValueOnce([REEMBOLSO_A])
 
-    await expect(reembolsar(1000)).rejects.toThrow(/exceeds remaining refundable/i)
+    await expect(reembolsar(1000)).rejects.toThrow(/de este cobro sólo quedan \$[\d.]+ por devolver/)
     expect(prismaMock.payment.create).not.toHaveBeenCalled()
   })
 })
