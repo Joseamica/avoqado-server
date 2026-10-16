@@ -44,7 +44,8 @@ export async function recordOpen(announcementId: string, staffId: string, venueI
   return prisma.platformAnnouncementClick.upsert({
     where: { announcementId_staffId: { announcementId, staffId } },
     create: { announcementId, staffId, venueId },
-    update: {},
+    // Una actualización no vacía permite el UPSERT atómico de Postgres sin cambiar la primera interacción.
+    update: { announcementId },
   })
 }
 
