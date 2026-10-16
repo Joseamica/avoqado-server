@@ -73,7 +73,7 @@ describe('API del restaurante: permiso, candado de plan y esquema por ruta', () 
     expect(r.body).toEqual({ perms: ['orders:cancel-unpaid'], plans: [], schemas: ['orderActionSchema'] })
   })
 
-  it('aceptar, rechazar, listo, entregado, imprimir y pausar usan orders:update, sin candado de plan, cada una con su esquema', async () => {
+  it('aceptar, rechazar, listo, entregado e imprimir usan orders:update, sin candado de plan, cada una con su esquema', async () => {
     const casos: Array<[string, string]> = [
       ['ord1/accept', 'acceptSchema'],
       ['ord1/reject', 'rejectSchema'],
@@ -81,12 +81,16 @@ describe('API del restaurante: permiso, candado de plan y esquema por ruta', () 
       ['ord1/delivered', 'orderActionSchema'],
       ['ord1/print/claim', 'orderActionSchema'],
       ['ord1/print/confirm', 'orderActionSchema'],
-      ['pause', 'pauseSchema'],
     ]
     for (const [path, schema] of casos) {
       const r = await request(app).post(`${M}/${path}`)
       expect({ path, ...r.body }).toEqual({ path, perms: ['orders:update'], plans: [], schemas: [schema] })
     }
+  })
+
+  it('pausar desde el piso exige su propio permiso online-orders:pause (founder, 16-oct), sin candado de plan', async () => {
+    const r = await request(app).post(`${M}/pause`)
+    expect(r.body).toEqual({ perms: ['online-orders:pause'], plans: [], schemas: ['pauseSchema'] })
   })
 
   it('la bandeja usa orders:read sin candado de plan: perder el plan no deja varados los pedidos (R14)', async () => {

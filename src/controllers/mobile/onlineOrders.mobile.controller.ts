@@ -137,7 +137,7 @@ export const cancel = async (req: Request, res: Response, next: NextFunction) =>
   }
 }
 
-/** R12: cocina y caja frenan la tienda 15/30/60 minutos o la reanudan (`minutes: null`). */
+/** R12: se frena la tienda 15/30/60 minutos o se reanuda (`minutes: null`). Permiso `online-orders:pause` (founder, 16-oct). */
 export const pause = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { venueId } = req.params
