@@ -63,6 +63,13 @@ export const MAX_ASSET_BYTES = 5 * 1024 * 1024
 export const MAX_COPY_TARGETS = 20
 
 /**
+ * La versión de diseño que ESTE servidor entiende (spec §5.7.2): 1 = marca, textos y pasos; 2 = además carrusel y
+ * promos. El poll la anuncia; la tablet reporta `min(la suya, ésta)`. Vive en el módulo PURO para que el esquema Zod
+ * del reporte la use sin importar servicios.
+ */
+export const CUSTOMER_DISPLAY_DESIGN_CAPABILITY = 2
+
+/**
  * La forma del acento. Una sola fuente: la ficha efectiva la usa para no mandar a la tablet un color guardado que no la
  * cumpla. Sin la bandera `g` a propósito: así `test()` no guarda estado entre llamadas de módulos distintos.
  */
