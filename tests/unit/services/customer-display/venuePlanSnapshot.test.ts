@@ -103,6 +103,22 @@ describe('readVenuePlanSnapshot', () => {
     expect(limiter.enVuelo).toBe(0)
   })
 
+  // 🔴 La red de `readPlanGrants` (revisión de la Task 3, menor 1): el plan ya resolvió, un grant falla YA y el otro sigue en
+  // la base. Con `Promise.all` dentro de `readPlanGrants`, el lugar se soltaría con la lectura de PROMOTIONS todavía viva.
+  it('🔴 si un grant falla PRIMERO con el otro en la base, el lugar del poll no se suelta hasta que el otro termina', async () => {
+    let soltar!: (v: boolean) => void
+    acceso.mockRejectedValueOnce(new Error('grant caído')).mockReturnValueOnce(new Promise<boolean>(r => (soltar = r)))
+    const limiter = new PollWorkLimiter(1)
+    let asentada = false
+    const lectura = readVenuePlanSnapshot('venue-a', { limiter }).catch(e => ((asentada = true), e))
+    await new Promise(r => setImmediate(r))
+    expect(asentada).toBe(false)
+    expect(limiter.enVuelo).toBe(1) // PROMOTIONS sigue en la base: el lugar no se suelta
+    soltar(true)
+    expect(await lectura).toEqual(new Error('grant caído'))
+    expect(limiter.enVuelo).toBe(0)
+  })
+
   it('sin PROMOTIONS, las tarjetas quedan fuera aunque el código nuevo esté', async () => {
     acceso.mockImplementation(async (_v: string, code: string) => code === 'CUSTOMER_DISPLAY_PROMOS')
     const s = await readVenuePlanSnapshot('venue-a')

@@ -35,8 +35,15 @@ it('🔴 con la espera completa, getVenuePlanInfo no se asienta mientras una de 
 
 // 🔴 Codex r3 N2: el POS, la TPV, el dashboard y el MCP la llaman SIN la opción y no pueden esperar a la rama lenta.
 it('🔴 sin la opción, se rinde al PRIMER fallo, como hoy (la rama viva no retiene a nadie)', async () => {
-  await expect(getVenuePlanInfo('v1')).rejects.toThrow('base caída') // con la del contrato todavía en la base
-  soltarContrato(null)
+  let asentada = false
+  const lectura = getVenuePlanInfo('v1').catch(e => ((asentada = true), e))
+  await vaciar()
+  try {
+    expect(asentada).toBe(true) // ya rechazó, con la rama del contrato todavía en la base
+  } finally {
+    soltarContrato(null) // aunque la aserción falle: la prueba cae al momento, no por el timeout de jest
+  }
+  expect(await lectura).toEqual(new Error('base caída'))
 })
 
 it('🔴 y el lugar del poll sigue ocupado hasta entonces (la reproducción de Codex r2, en pequeño)', async () => {
