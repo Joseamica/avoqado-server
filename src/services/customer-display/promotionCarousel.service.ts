@@ -219,6 +219,11 @@ export function readCarouselCached(venueId: string, o: { limiter?: PollWorkLimit
   return cache.get(venueId, () => buildPromotionCarousel(venueId), { limiter: o.limiter })
 }
 
+/**
+ * Lo pide una tablet que ya vio una huella calculada DESPUÉS del cambio. 🔴 Nunca lo uses para invalidar tras una
+ * escritura (un hook al editar una promoción): con la ventana de `REFRESH_COALESCE_MS` se uniría a un refresh iniciado
+ * ANTES de la escritura y guardaría lo viejo como fresco por 60 s (revisión de la Task 6, menor 6).
+ */
 export function refreshCarousel(venueId: string): Promise<CarouselResult> {
   return cache.refresh(venueId, () => buildPromotionCarousel(venueId))
 }
@@ -249,6 +254,9 @@ export type CarouselForDevice =
  * Fresco (`refresh`) y escrito a través de la caché: la huella que ve la tablet aquí es la que verá en el poll. Tras una
  * edición, las N tablets del venue llegan casi a la vez: `refresh` se une a la construcción que otra empezó hace ≤ 2 s
  * (`REFRESH_COALESCE_MS`, ruling de la Task 6), así que son ≤ 1 construcción por venue cada 2 s, no N.
+ * 🔴 Contrato para F2: si esta función truena ANTES de su `try` (la búsqueda del aparato), el controlador responde la
+ * forma de siempre, SIN `carouselStatus`. Una tablet v2 trata un `carouselStatus` ausente como «no sé» y conserva su
+ * último carrusel —igual que contra un servidor viejo—, nunca como «no hay promociones» (revisión de la Task 6, menor 1).
  */
 export async function carouselForDevice(venueId: string, deviceUid: string | null): Promise<CarouselForDevice | null> {
   if (!deviceUid) return null
