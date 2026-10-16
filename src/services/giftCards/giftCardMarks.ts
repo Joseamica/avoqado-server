@@ -60,6 +60,14 @@ export function sqlOrdenSinTarjetas(columna: ColumnaDeOrden): Prisma.Sql {
   return Prisma.raw(sqlOrdenSinTarjetasTexto(columna))
 }
 
+/** El gemelo en SQL de `leerSiEsCuentaDeTarjetas` (R11 completa: al menos un renglón con tarjeta y ninguno sin ella). */
+export function sqlOrdenEsCuentaDeTarjetas(columna: ColumnaDeOrden): Prisma.Sql {
+  return Prisma.raw(
+    `(EXISTS (SELECT 1 FROM "OrderItem" gc_oi WHERE gc_oi."orderId" = ${columna} AND gc_oi."giftCardId" IS NOT NULL)` +
+      ` AND NOT EXISTS (SELECT 1 FROM "OrderItem" gc_ni WHERE gc_ni."orderId" = ${columna} AND gc_ni."giftCardId" IS NULL))`,
+  )
+}
+
 export function sqlCobroNoEsSaldoDeRegaloTexto(alias: 'p'): string {
   return `NOT EXISTS (SELECT 1 FROM "VenueTenderType" gc_t WHERE gc_t."venueId" = ${alias}."venueId" AND gc_t.id = ${alias}."tenderTypeId" AND gc_t."systemKind" = 'GIFT_CARD')`
 }

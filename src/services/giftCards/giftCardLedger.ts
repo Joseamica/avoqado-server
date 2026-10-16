@@ -118,9 +118,9 @@ export async function sobresDelCanje(tx: Tx, p: { venueId: string; paymentId: st
 /**
  * El dinero de la cuenta, sólo el importe de venta (la propina nunca entra a los sobres): lo cobrado sin REFUND, lo
  * devuelto y lo que el negocio conservó. r1 (F8): los REFUND se guardan NEGATIVOS (`summarizeRefunds`,
- * src/services/shared/orderBalance.ts); se toma su valor absoluto.
+ * src/services/shared/orderBalance.ts); se toma su valor absoluto. La revisión nocturna (B7) mide con esta MISMA función.
  */
-async function dineroDeLaCuenta(
+export async function dineroDeLaCuenta(
   tx: Tx,
   p: { venueId: string; orderId: string },
 ): Promise<{ cobrado: Prisma.Decimal; reembolsado: Prisma.Decimal; conservado: Prisma.Decimal }> {

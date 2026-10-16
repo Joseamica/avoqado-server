@@ -1142,6 +1142,8 @@ const ORDER_LOCK_TRANSACTIONS: Record<string, number> = {
   // lockExistingOrderForPayment) y después sus sobres, con el presupuesto único.
   'src/services/giftCards/giftCardCancel.service.ts#iniciarCancelacionDeVenta': 1,
   'src/services/giftCards/giftCardCancel.service.ts#liberarCancelacionDeVenta': 1,
+  // Tarjetas de regalo (B7): la revisión nocturna activa una cuenta pagada bajo el mismo candado que el cobro (Order → sobres).
+  'src/jobs/giftCardReconciliation.job.ts#activarCuentaEnDb': 1,
 }
 
 /** Lock-taking transactions whose wait is governed by their own protocol, pinned verbatim so a change is re-reviewed. */
