@@ -54,6 +54,16 @@ import * as kdsMobileController from '../controllers/mobile/kds.mobile.controlle
 import * as tableMobileController from '../controllers/mobile/table.mobile.controller'
 import * as syncMobileController from '../controllers/mobile/sync.mobile.controller'
 import * as creditPackMobileController from '../controllers/mobile/creditPack.mobile.controller'
+import * as giftCardMobileController from '../controllers/mobile/giftCard.mobile.controller'
+import * as giftCardSaleController from '../controllers/shared/giftCardSale.controller'
+import * as giftCardMobileSchemas from '../schemas/mobile/giftCard.mobile.schema'
+import {
+  liberarCancelacionSchema as giftCardLiberarCancelacionSchema,
+  operationKeyOnOrderSchema as giftCardOperationKeyOnOrderSchema,
+  soloVenueSchema as giftCardVenueSchema,
+} from '../schemas/common/giftCard.common.schema'
+import { exigirPlanDeTarjetas } from '../middlewares/giftCardsPlan.middleware'
+import { giftCardLookupRateLimiters, giftCardPayFailureRateLimiters } from '../middlewares/gift-card-lookup-rate-limit.middleware'
 import * as printMobileController from '../controllers/mobile/print.mobile.controller'
 import * as areaTicketMobileController from '../controllers/mobile/areaTicket.mobile.controller'
 import * as areaTicketV7MobileController from '../controllers/mobile/areaTicketV7.mobile.controller'
@@ -1582,6 +1592,79 @@ router.post(
   authenticateTokenMiddleware,
   checkPermission('creditPacks:redeem'),
   creditPackMobileController.redeemCredit,
+)
+
+// ─── TARJETAS DE REGALO (fase 1a) ───
+// Contrato para las apps: docs/superpowers/plans/2026-10-14-tarjetas-de-regalo-contrato-api-1b.md (workspace).
+// Sólo con internet (spec §10): ninguna tiene intent de cola. Sólo VENDER pide el plan (R9): cobrar con saldo, consultar,
+// regresar el saldo y cancelar una venta siguen funcionando aunque el negocio baje de plan (spec §6).
+// Orden: autenticar → validar (español) → permiso exacto → [plan | límite de intentos | propiedad de mesa] → controller.
+router.get(
+  '/venues/:venueId/gift-cards/settings',
+  authenticateTokenMiddleware,
+  validateRequest(giftCardVenueSchema),
+  checkPermission('giftCards:read'),
+  giftCardSaleController.getSettings,
+)
+router.post(
+  '/venues/:venueId/gift-cards/orders',
+  authenticateTokenMiddleware,
+  validateRequest(giftCardMobileSchemas.createGiftCardOrderSchema),
+  checkPermission('giftCards:sell'),
+  exigirPlanDeTarjetas,
+  giftCardMobileController.createOrder,
+)
+// El código viaja en la query: `redactUrlSecrets` ya borra `code` de la URL que se escribe en el log.
+router.get(
+  '/venues/:venueId/gift-cards/lookup',
+  authenticateTokenMiddleware,
+  validateRequest(giftCardMobileSchemas.lookupSchema),
+  checkPermission('giftCards:read'),
+  ...giftCardLookupRateLimiters,
+  giftCardMobileController.lookup,
+)
+router.get(
+  '/venues/:venueId/gift-cards/payments/:idempotencyKey',
+  authenticateTokenMiddleware,
+  validateRequest(giftCardMobileSchemas.paymentByKeySchema),
+  checkPermission('giftCards:redeem'),
+  giftCardMobileController.getPaymentByKey,
+)
+// Cobrar con saldo y regresarlo son de CAJA, como `/orders/:orderId/pay`: con la propiedad de mesa encendida, la caja
+// liquida (y deshace su propio cobro con saldo en) un cheque ajeno con `tables:pay-any`, sin ganar el derecho a editarlo.
+// Nota 1 del coordinador: un código que no existe responde 404, así que cobrar lleva su límite de intentos FALLIDOS (sólo
+// cuentan las respuestas ≥ 400; un cobro que sale bien nunca gasta el tope).
+router.post(
+  '/venues/:venueId/orders/:orderId/pay-gift-card',
+  authenticateTokenMiddleware,
+  validateRequest(giftCardMobileSchemas.payGiftCardSchema),
+  checkPermission('giftCards:redeem'),
+  ...giftCardPayFailureRateLimiters,
+  checkTableOwnership('order', PAYMENT_OWNERSHIP_OVERRIDES),
+  giftCardMobileController.payWithBalance,
+)
+router.post(
+  '/venues/:venueId/orders/:orderId/gift-balance-return-and-cancel',
+  authenticateTokenMiddleware,
+  validateRequest(giftCardOperationKeyOnOrderSchema),
+  checkPermission('giftCards:redeem'),
+  checkTableOwnership('order', PAYMENT_OWNERSHIP_OVERRIDES),
+  giftCardMobileController.returnBalanceAndCancel,
+)
+router.post(
+  '/venues/:venueId/gift-cards/orders/:orderId/cancel-sale',
+  authenticateTokenMiddleware,
+  validateRequest(giftCardOperationKeyOnOrderSchema),
+  checkPermission('giftCards:manage'),
+  giftCardSaleController.cancelSale,
+)
+// F6: liberar exige `confirmacionNoDevuelto: true`; un timeout de la terminal no prueba que el dinero no salió.
+router.post(
+  '/venues/:venueId/gift-cards/orders/:orderId/release-cancel',
+  authenticateTokenMiddleware,
+  validateRequest(giftCardLiberarCancelacionSchema),
+  checkPermission('giftCards:manage'),
+  giftCardSaleController.releaseCancel,
 )
 
 /**
