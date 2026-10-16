@@ -59,7 +59,12 @@ describe('M1 · PAGADA con todos sus sobres PENDING: su salida es el reembolso, 
 
   it('🔴 cobrada hace tres días ⇒ NOT_PAID (no NOT_SAME_DAY) en el detalle del dashboard', async () => {
     escenario({ sobres: pendientes, cobradoEn: HACE_TRES_DIAS() })
-    await expect(estadoDeCancelacionDeVenta('v1', 'o-gc', new Date())).resolves.toEqual({ allowed: false, reason: 'NOT_PAID' })
+    // C4 nota 2: el detalle lleva el MISMO texto que el rechazo de iniciar, así el panel dice la salida (reembolsar el cobro).
+    await expect(estadoDeCancelacionDeVenta('v1', 'o-gc', new Date())).resolves.toEqual({
+      allowed: false,
+      reason: 'NOT_PAID',
+      message: expect.stringContaining('reembolsa el cobro'),
+    })
   })
 
   it('🔴 iniciar ⇒ GIFT_CARD_SALE_NOT_PAID con la salida del reembolso (no WINDOW_CLOSED) y nada se bloquea', async () => {
@@ -76,12 +81,20 @@ describe('M1 · PAGADA con todos sus sobres PENDING: su salida es el reembolso, 
       cobradoEn: HACE_TRES_DIAS(),
       bloqueos: [{ giftCardId: 'cgc1', type: 'BLOCK', reason: 'CANCEL_IN_PROGRESS' }],
     })
-    await expect(estadoDeCancelacionDeVenta('v1', 'o-gc', new Date())).resolves.toEqual({ allowed: false, reason: 'IN_PROGRESS' })
+    await expect(estadoDeCancelacionDeVenta('v1', 'o-gc', new Date())).resolves.toEqual({
+      allowed: false,
+      reason: 'IN_PROGRESS',
+      message: null,
+    })
   })
 
   it('regresión: una venta con sus sobres ACTIVE de otro día sigue en NOT_SAME_DAY', async () => {
     escenario({ sobres: [{ id: 'cgc1', status: 'ACTIVE' }], cobradoEn: HACE_TRES_DIAS() })
-    await expect(estadoDeCancelacionDeVenta('v1', 'o-gc', new Date())).resolves.toEqual({ allowed: false, reason: 'NOT_SAME_DAY' })
+    await expect(estadoDeCancelacionDeVenta('v1', 'o-gc', new Date())).resolves.toEqual({
+      allowed: false,
+      reason: 'NOT_SAME_DAY',
+      message: expect.stringContaining('el mismo día'),
+    })
     await expect(iniciar()).rejects.toMatchObject({ code: 'GIFT_CARD_CANCEL_WINDOW_CLOSED' })
   })
 })
@@ -94,7 +107,9 @@ describe('M2 · el mensaje del reembolso sólo cuando TODOS los sobres están PE
         { id: 'cgc2', status: 'ACTIVE' },
       ],
     })
-    await expect(estadoDeCancelacionDeVenta('v1', 'o-gc', new Date())).resolves.toEqual({ allowed: false, reason: 'NOT_PAID' })
+    const estado = await estadoDeCancelacionDeVenta('v1', 'o-gc', new Date())
+    expect(estado).toEqual({ allowed: false, reason: 'NOT_PAID', message: expect.stringContaining('soporte') })
+    expect(estado.message).not.toMatch(/reembolsa|se cancela sola/)
     const error = await iniciar().catch((e: unknown) => e)
     expect(error).toMatchObject({ code: 'GIFT_CARD_SALE_NOT_PAID', statusCode: 409 })
     expect((error as Error).message).not.toMatch(/reembolsa|se cancela sola/)

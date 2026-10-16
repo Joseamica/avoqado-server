@@ -175,21 +175,29 @@ export function isEligible(p: PaymentRow): boolean {
 }
 
 /**
- * B4 r1 (fix 3): en Prisma, lo mismo que el motor admite —su consulta (`COMPLETED`, orden no cancelada) más `isEligible`—. El listado
- * del contador (C4) lo combina con `WHERE_PAGO_PENDIENTE_DE_REVISION_CONTABLE` para enseñar exactamente lo que el motor saltó. Va en `AND`
- * para combinarse sin pisar el `OR` de otra marca: `{ venueId, createdAt, AND: [WHERE_PAGO_CONTABILIZABLE, WHERE_PAGO_PENDIENTE_…] }`.
- * Una prueba de integración pasa las mismas filas por los dos y exige el mismo conjunto.
+ * C4 (nota 1 del coordinador): todo lo de `WHERE_PAGO_CONTABILIZABLE` MENOS «orden no cancelada». Lo usa el listado del contador:
+ * una venta de tarjetas devuelta entera deja su `Order` en CANCELLED, y con esa cláusula la venta y su cancelación desaparecerían
+ * del listado (también de periodos que el contador ya registró a mano, que nunca vería el reverso).
  */
-export const WHERE_PAGO_CONTABILIZABLE = {
+export const WHERE_PAGO_CONTABILIZABLE_SIN_ESTADO_DE_ORDEN = {
   AND: [
     { status: TransactionStatus.COMPLETED },
-    { order: { status: { not: OrderStatus.CANCELLED } } },
     // NULL-safe: `type` es opcional y una fila vieja sin tipo cuenta como venta; `notIn` sola la descartaría (NOT IN con NULL).
     { OR: [{ type: null }, { type: { notIn: [PaymentType.TEST, PaymentType.ADJUSTMENT] } }] },
     { method: { not: PaymentMethod.CRYPTOCURRENCY } },
     // «Nada que registrar»: monto y propina en cero. Las dos columnas son NOT NULL con 2 decimales: `= 0` ⇔ 0 centavos.
     { NOT: { amount: 0, tipAmount: 0 } },
   ],
+} satisfies Prisma.PaymentWhereInput
+
+/**
+ * B4 r1 (fix 3): en Prisma, lo mismo que el motor admite —su consulta (`COMPLETED`, orden no cancelada) más `isEligible`—. Va en `AND`
+ * para combinarse sin pisar el `OR` de otra marca: `{ venueId, createdAt, AND: [WHERE_PAGO_CONTABILIZABLE, WHERE_PAGO_PENDIENTE_…] }`.
+ * Una prueba de integración pasa las mismas filas por los dos y exige el mismo conjunto. El listado del contador (C4) usa la versión
+ * sin el estado de la orden (arriba).
+ */
+export const WHERE_PAGO_CONTABILIZABLE = {
+  AND: [WHERE_PAGO_CONTABILIZABLE_SIN_ESTADO_DE_ORDEN, { order: { status: { not: OrderStatus.CANCELLED } } }],
 } satisfies Prisma.PaymentWhereInput
 
 /** ¿Este cobro es de tarjetas de regalo (venta de tarjetas o cobro con saldo)? Mismo criterio que `WHERE_PAGO_PENDIENTE_DE_REVISION_CONTABLE`. */

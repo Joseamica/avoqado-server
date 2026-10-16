@@ -458,9 +458,14 @@ export type MotivoSinCancelarVenta = 'NOT_PAID' | 'NOT_SAME_DAY' | 'ALREADY_USED
 export interface CancelacionDeVenta {
   allowed: boolean
   reason: MotivoSinCancelarVenta | null
+  /**
+   * C4 (nota 2 del coordinador): el texto del rechazo que lanzaría `iniciarCancelacionDeVenta` (el mismo `GiftCardError`), para que el
+   * panel diga cuál de los tres `NOT_PAID` es. `null` si se puede o si ya está en curso, y en `SIN_VENTA` (no es cuenta de tarjetas).
+   */
+  message: string | null
 }
 
-interface EvaluacionDeCancelacion extends CancelacionDeVenta {
+interface EvaluacionDeCancelacion extends Omit<CancelacionDeVenta, 'message'> {
   /** El rechazo que lanza `iniciarCancelacionDeVenta`; `null` si se puede o si ya está en curso. */
   error: GiftCardError | null
   orderNumber: string | null
@@ -566,7 +571,7 @@ async function evaluarCancelacionDeVenta(
   return { allowed: true, reason: null, error: null, orderNumber, sobres }
 }
 
-const SIN_VENTA: CancelacionDeVenta = Object.freeze({ allowed: false, reason: null })
+export const SIN_VENTA: CancelacionDeVenta = Object.freeze({ allowed: false, reason: null, message: null })
 
 /**
  * Para el detalle de una tarjeta en el dashboard (C4): ¿se puede cancelar SU venta, y si no, por qué? Sin candados (sólo pinta el
@@ -579,7 +584,7 @@ export async function estadoDeCancelacionDeVenta(venueId: string, orderId: strin
   const ids = await sobresDeLaCuenta(prisma, orderId)
   if (ids.length === 0) return SIN_VENTA
   const e = await evaluarCancelacionDeVenta(prisma, { venueId, orderId, ids, timezone: venue.timezone || DEFAULT_TIMEZONE, ahora })
-  return { allowed: e.allowed, reason: e.reason }
+  return { allowed: e.allowed, reason: e.reason, message: e.error?.message ?? null }
 }
 
 /**

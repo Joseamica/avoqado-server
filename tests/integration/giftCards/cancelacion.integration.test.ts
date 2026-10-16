@@ -125,22 +125,42 @@ describe('B2 · cancelar la venta de una tarjeta de regalo', () => {
 
   it('estadoDeCancelacionDeVenta (lo que pinta el detalle del dashboard) sale de la MISMA regla que iniciar', async () => {
     const libre = await venta()
-    await expect(estadoDeCancelacionDeVenta(venueId, libre.orderId)).resolves.toEqual({ allowed: true, reason: null })
+    await expect(estadoDeCancelacionDeVenta(venueId, libre.orderId)).resolves.toEqual({ allowed: true, reason: null, message: null })
     await iniciarCancelacionDeVenta(venueId, libre.orderId, { staffId, operationKey: 'cancelar-estado-0001' })
-    await expect(estadoDeCancelacionDeVenta(venueId, libre.orderId)).resolves.toEqual({ allowed: false, reason: 'IN_PROGRESS' })
+    await expect(estadoDeCancelacionDeVenta(venueId, libre.orderId)).resolves.toEqual({
+      allowed: false,
+      reason: 'IN_PROGRESS',
+      message: null,
+    })
     const ayer = await venta({ cobradaEn: new Date(Date.now() - 30 * 60 * 60 * 1000) })
-    await expect(estadoDeCancelacionDeVenta(venueId, ayer.orderId)).resolves.toEqual({ allowed: false, reason: 'NOT_SAME_DAY' })
+    await expect(estadoDeCancelacionDeVenta(venueId, ayer.orderId)).resolves.toEqual({
+      allowed: false,
+      reason: 'NOT_SAME_DAY',
+      message: expect.any(String),
+    })
     const usada = await venta()
     await sembrarCanje({ venueId, staffId, giftCardIds: usada.giftCardIds, total: 100, conSaldo: 100 })
-    await expect(estadoDeCancelacionDeVenta(venueId, usada.orderId)).resolves.toEqual({ allowed: false, reason: 'ALREADY_USED' })
+    await expect(estadoDeCancelacionDeVenta(venueId, usada.orderId)).resolves.toEqual({
+      allowed: false,
+      reason: 'ALREADY_USED',
+      message: expect.any(String),
+    })
     // Ya devuelta: «ya se canceló», no «otro día» ni «ya se usó».
     await issueRefund({ venueId, paymentId: libre.pagos[0].id, amount: 50000, reason: 'CANCELLED_ORDER', staffId })
-    await expect(estadoDeCancelacionDeVenta(venueId, libre.orderId)).resolves.toEqual({ allowed: false, reason: 'ALREADY_CANCELLED' })
+    await expect(estadoDeCancelacionDeVenta(venueId, libre.orderId)).resolves.toEqual({
+      allowed: false,
+      reason: 'ALREADY_CANCELLED',
+      message: expect.any(String),
+    })
     // Una cuenta que no es de tarjetas, o de otro negocio: sin venta que cancelar.
     const { orderId: mercancia } = await crearCuentaDeMercancia({ venueId, staffId, total: 100 })
-    await expect(estadoDeCancelacionDeVenta(venueId, mercancia)).resolves.toEqual({ allowed: false, reason: null })
+    await expect(estadoDeCancelacionDeVenta(venueId, mercancia)).resolves.toEqual({ allowed: false, reason: null, message: null })
     const otro = await crearNegocioDePrueba('b2-cancelacion-otro')
-    await expect(estadoDeCancelacionDeVenta(otro.venueId, usada.orderId)).resolves.toEqual({ allowed: false, reason: null })
+    await expect(estadoDeCancelacionDeVenta(otro.venueId, usada.orderId)).resolves.toEqual({
+      allowed: false,
+      reason: null,
+      message: expect.any(String),
+    })
   })
 
   it('🔴 iniciar al día siguiente (zona del venue) ⇒ GIFT_CARD_CANCEL_WINDOW_CLOSED y nada se bloquea', async () => {
@@ -213,7 +233,11 @@ describe('B2 · cancelar la venta de una tarjeta de regalo', () => {
     await expect(iniciarCancelacionDeVenta(venueId, v.orderId, { staffId, operationKey: 'cancelar-bloqueada-1' })).rejects.toMatchObject({
       code: 'GIFT_CARD_BLOCKED',
     })
-    await expect(estadoDeCancelacionDeVenta(venueId, v.orderId)).resolves.toEqual({ allowed: false, reason: null })
+    await expect(estadoDeCancelacionDeVenta(venueId, v.orderId)).resolves.toEqual({
+      allowed: false,
+      reason: null,
+      message: expect.stringContaining('bloqueada por otro motivo'),
+    })
     await expect(
       issueRefund({ venueId, paymentId: v.pagos[0].id, amount: 50000, reason: 'CANCELLED_ORDER', staffId }),
     ).rejects.toMatchObject({
@@ -282,7 +306,7 @@ describe('B2 · cancelar la venta de una tarjeta de regalo', () => {
       expect.objectContaining({ staffId, venueId, entity: 'Order', data: { giftCardIds: v.giftCardIds } }),
     ])
     // Liberada, la venta se puede volver a cancelar.
-    await expect(estadoDeCancelacionDeVenta(venueId, v.orderId)).resolves.toEqual({ allowed: true, reason: null })
+    await expect(estadoDeCancelacionDeVenta(venueId, v.orderId)).resolves.toEqual({ allowed: true, reason: null, message: null })
 
     await iniciarCancelacionDeVenta(venueId, v.orderId, { staffId, operationKey: 'cancelar-liberar-0002' })
     // El reintento TARDÍO de la primera liberación (misma llave) no suelta la cancelación nueva: es la respuesta de la vieja.
@@ -332,6 +356,7 @@ describe('B2 · cancelar la venta de una tarjeta de regalo', () => {
     await expect(estadoDeCancelacionDeVenta(venueId, v.orderId, new Date(Date.now() + 26 * 60 * 60 * 1000))).resolves.toEqual({
       allowed: false,
       reason: 'IN_PROGRESS',
+      message: null,
     })
   })
 
@@ -386,7 +411,11 @@ describe('B2 · cancelar la venta de una tarjeta de regalo', () => {
     await expect(iniciarCancelacionDeVenta(venueId, v.orderId, { staffId, operationKey: 'cancelar-sin-pagar-1' })).rejects.toMatchObject({
       code: 'GIFT_CARD_SALE_NOT_PAID',
     })
-    await expect(estadoDeCancelacionDeVenta(venueId, v.orderId)).resolves.toEqual({ allowed: false, reason: 'NOT_PAID' })
+    await expect(estadoDeCancelacionDeVenta(venueId, v.orderId)).resolves.toEqual({
+      allowed: false,
+      reason: 'NOT_PAID',
+      message: expect.stringContaining('cancela la cuenta desde el POS'),
+    })
     expect(await bloqueosDe(v.giftCardIds)).toHaveLength(0)
   })
 
