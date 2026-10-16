@@ -24,6 +24,14 @@ export const cache = new Map<string, { hasta: number; valor: { ficha: FichaEfect
 export const enVuelo = new Map<string, { generacion: number; calculos: number }>() // por terminal, sólo con cálculos activos
 
 /**
+ * La llave de la caché y de los vuelos: UN solo formato. La terminal va PRIMERO porque invalidar borra por el prefijo de la
+ * terminal (`llaveDe('', terminalId)`), sin importar el venue.
+ */
+export function llaveDe(venueId: string, terminalId: string): string {
+  return `${terminalId}:${venueId}`
+}
+
+/**
  * F0-B: el cálculo en vuelo de cada LLAVE (`terminalId:venueId`) con la generación de su terminal al arrancar. Quien pide la
  * misma llave se UNE a él sólo si la generación sigue siendo la misma: uno que empezó antes de una invalidación no se
  * comparte (es la misma marca que ya impide que se guarde). Se borra al terminar.
@@ -32,7 +40,7 @@ export const vuelosPorLlave = new Map<string, { promesa: Promise<{ ficha: FichaE
 
 /** La huella guardada de ESTE aparato en ESTE negocio, si vale. Nunca calcula: la usa el poll con solicitud de inversión. */
 export function peekEffectiveFingerprint(venueId: string, terminalId: string): string | undefined {
-  const guardado = cache.get(`${terminalId}:${venueId}`)
+  const guardado = cache.get(llaveDe(venueId, terminalId))
   return guardado && guardado.hasta > Date.now() ? guardado.valor.ficha.fingerprint : undefined
 }
 
@@ -58,7 +66,8 @@ export function purgar(ahora: number): void {
 }
 
 export function invalidateCustomerDisplayCache(terminalId: string): void {
-  for (const llave of [...cache.keys()]) if (llave.startsWith(`${terminalId}:`)) cache.delete(llave)
+  const prefijo = llaveDe('', terminalId) // `terminalId:`: todas sus entradas, de cualquier venue
+  for (const llave of [...cache.keys()]) if (llave.startsWith(prefijo)) cache.delete(llave)
   const vuelo = enVuelo.get(terminalId)
   if (vuelo) vuelo.generacion += 1 // los cálculos en vuelo de ESTA terminal ya no se guardarán
 }

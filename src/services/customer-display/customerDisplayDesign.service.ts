@@ -7,7 +7,7 @@ import { logAction } from '@/services/dashboard/activity-log.service'
 import { lockTerminalRow } from '@/services/shared/terminalScopedWrites'
 import { esEsperaVencida, esInterbloqueo, esperaCortaAleatoria } from '@/services/shared/lockWait'
 import { resolveEffectiveDeviceCapabilities } from '@/services/device-capabilities.service'
-import { cache, congelar, enVuelo, invalidateCustomerDisplayCache, purgar, TTL_MS, vuelosPorLlave } from './customerDisplayCache'
+import { cache, congelar, enVuelo, invalidateCustomerDisplayCache, llaveDe, purgar, TTL_MS, vuelosPorLlave } from './customerDisplayCache'
 import { buildEffectiveDesign, type AssetRow, type FichaEfectiva } from './customerDisplayDesign.effective'
 import {
   DEVICES_PAGE_MAX,
@@ -207,7 +207,7 @@ export async function getEffectiveDesign(
     return armarFicha(terminal, designValuesOf(terminal.customerDisplayDesign), await readFichaContext(venueId))
   }
 
-  const llave = `${terminalId}:${venueId}`
+  const llave = llaveDe(venueId, terminalId)
   if (modo === true) {
     const guardado = cache.get(llave)
     if (guardado && guardado.hasta > Date.now()) return guardado.valor
@@ -234,7 +234,9 @@ export async function getEffectiveDesign(
       const valor = congelar(crudo)
       if (vuelo.generacion === generacionAlEmpezar) {
         const ahora = Date.now()
-        // `set` sobre una llave que ya existe conserva su lugar en la fila: el `delete` va ANTES de purgar (F0-A).
+        // `set` sobre una llave que ya existe conserva su lugar en la fila: el `delete` va ANTES de purgar (F0-A). Es
+        // DEFENSA: con un solo cálculo por llave y la generación, por la API pública una entrada vigente de esta llave sólo
+        // sigue aquí si el reloj retrocedió (con el reloj hacia adelante, `purgar` ya la habría tirado por vencida).
         cache.delete(llave)
         purgar(ahora)
         // DD4: nunca más que el plan con que se armó (60 s de plan + 60 s de ficha serían hasta 120 s de retraso).

@@ -12,7 +12,7 @@ import {
   previewCustomerDisplay,
 } from '@/services/customer-display/customerDisplayDesign.service'
 import { resetVenuePlanSnapshotsForTests } from '@/services/customer-display/venuePlanSnapshot'
-import { vuelosPorLlave } from '@/services/customer-display/customerDisplayCache'
+import { llaveDe, vuelosPorLlave } from '@/services/customer-display/customerDisplayCache'
 
 jest.mock('@/services/access/basePlan.service', () => ({
   venueHasFeatureAccess: jest.fn(async (_venueId: string, code: string) => code !== 'CUSTOMER_DISPLAY_PROMOS'),
@@ -363,7 +363,7 @@ describe('la caché: lo que se entrega y cuánto dura en la fila', () => {
       // F0-B (Task 4): con «un solo cálculo por llave», el segundo pedido se UNIRÍA al primero y por la API pública ya no
       // hay dos cálculos de la misma llave y generación. Se suelta el registro a mano para forzar el caso que el `delete`
       // previo a `purgar` sigue protegiendo (defensa), sin cambiar lo que la prueba afirma.
-      vuelosPorLlave.delete(`${TERMINAL}:${VENUE}`)
+      vuelosPorLlave.delete(llaveDe(VENUE, TERMINAL))
       const calculo2 = getEffectiveDesign(VENUE, TERMINAL, { cache: true }) // dos cálculos de la MISMA llave en vuelo
       primero.resolver(terminalRow())
       await calculo1 // la llave entra primero: es la más vieja de la fila

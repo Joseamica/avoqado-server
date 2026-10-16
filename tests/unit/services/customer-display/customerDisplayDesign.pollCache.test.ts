@@ -111,6 +111,7 @@ describe('cache: true — el camino del poll', () => {
     await getEffectiveDesign(VENUE, TERMINAL, { cache: true })
     await getEffectiveDesign(VENUE, 't2', { cache: true })
     expect(acceso).toHaveBeenCalledTimes(2) // dos códigos, una sola vez
+    expect(plan).toHaveBeenCalledTimes(1) // y el plan del venue, una sola vez
   })
 
   // Sabotaje «la terminal antes que el plan»: con el plan caído, una lectura de la terminal sería trabajo tirado.
@@ -168,6 +169,28 @@ describe("cache: 'refresh' — la ficha móvil, el ack y /settings", () => {
     lenta.resolver(terminalRow({ customerDisplayDesign: disenoCon({ welcomeText: 'Viejo' }) }))
     await delPoll
     expect(peekEffectiveFingerprint(VENUE, TERMINAL)).toBe(fresca.ficha.fingerprint)
+  })
+
+  // 🔴 El plan cambió hace < 60 s: el refresco calcula con el plan NUEVO y el poll tiene el VIEJO en caché. Si el poll que
+  // llega a la mitad arrancara su propio cálculo, la tablet vería una huella distinta de la que el refresco le acaba de dar.
+  it('🔴 un poll que llega a la MITAD de un refresco se une a él: una lectura y la misma huella', async () => {
+    const conTarjetas = terminalRow({ customerDisplayDesign: disenoCon({ showPromotions: true }) })
+    acceso.mockResolvedValueOnce(false).mockResolvedValueOnce(false)
+    await readVenuePlanSnapshot(VENUE) // el plan VIEJO (sin tarjetas) queda en la caché del poll
+    const lenta = diferida<unknown>()
+    prismaMock.terminal.findFirst.mockReturnValueOnce(lenta.promesa as any).mockResolvedValue(conTarjetas as any)
+
+    const refresco = getEffectiveDesign(VENUE, TERMINAL, { cache: 'refresh' }) // plan NUEVO (con tarjetas)
+    await new Promise(r => setImmediate(r))
+    expect(prismaMock.terminal.findFirst).toHaveBeenCalledTimes(1) // el refresco ya está leyendo la terminal
+    const delPoll = getEffectiveDesign(VENUE, TERMINAL, { cache: true })
+    lenta.resolver(conTarjetas)
+    const [r, p] = await Promise.all([refresco, delPoll])
+
+    expect(prismaMock.terminal.findFirst).toHaveBeenCalledTimes(1)
+    expect(r.ficha.promotionCards.enabled).toBe(true)
+    expect(p.ficha.fingerprint).toBe(r.ficha.fingerprint)
+    expect(peekEffectiveFingerprint(VENUE, TERMINAL)).toBe(r.ficha.fingerprint)
   })
 
   it('no respeta el tope: lo pide una persona (o su aparato), no el trabajo de fondo', async () => {
