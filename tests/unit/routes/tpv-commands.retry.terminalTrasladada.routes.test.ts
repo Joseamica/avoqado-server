@@ -189,6 +189,28 @@ describe('POST /venues/:venueId/tpv-commands/:commandId/retry — la terminal ya
     )
   })
 
+  // Ronda 8 (Codex r2, 16-oct): el traslado llega DESPUÉS del re-armado y antes de la entrega.
+  it.each(['FACTORY_RESET', 'LOCK'])(
+    '🔴 %s: traslado después del re-armado → la entrega real no emite a B, el comando queda retirado y el reintento responde 409',
+    async tipo => {
+      comando.commandType = tipo
+      const rearmar = prismaMock.tpvCommandQueue.updateMany.getMockImplementation()!
+      prismaMock.tpvCommandQueue.updateMany.mockImplementationOnce(((args: any) =>
+        (rearmar(args) as Promise<any>).then(r => {
+          terminal.venueId = VENUE_B // otra petición mueve la terminal justo después de que el re-armado escribe
+          return r
+        })) as any)
+
+      const res = await reintentarComoDuenoDeA()
+
+      expect(res.status).toBe(409)
+      expect(res.body.code).toBe('TERMINAL_MOVED')
+      expect(broadcastToTerminalMock).not.toHaveBeenCalled()
+      expect(broadcastTpvCommandMock).not.toHaveBeenCalled()
+      expect(comando).toMatchObject({ status: 'CANCELLED', resultMessage: expect.stringMatching(/^TERMINAL_MOVED/) })
+    },
+  )
+
   it('regresión: un LOCK fallido de una terminal que se fue tampoco se re-arma (cualquier comando, no sólo el borrado)', async () => {
     comando.commandType = 'LOCK'
     terminal.venueId = VENUE_B

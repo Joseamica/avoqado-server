@@ -39,6 +39,15 @@ import {
 import { assertDeviceActionSupported } from '../device-capabilities.service'
 import { isProviderCompatibleWithBrand } from '../../lib/providerDeviceCompatibility'
 import { getEffectivePaymentConfig } from '../organization-payment-config.service'
+import { logAction } from '../dashboard/activity-log.service'
+
+/** Estados en los que un comando todavía puede entregarse o pedir permiso para ejecutarse. */
+const AUN_POR_ENTREGAR_O_EJECUTAR: TpvCommandStatus[] = ['PENDING', 'QUEUED', 'SENT', 'RECEIVED']
+
+export const MENSAJE_TERMINAL_TRASLADADA =
+  'TERMINAL_MOVED: la terminal ya no está en la sucursal que mandó el comando; no se entrega ni se ejecuta.'
+
+type ComandoConVenue = { id: string; venueId: string; terminalId: string; commandType: TpvCommandType | string }
 
 /**
  * Command configuration per type
@@ -421,6 +430,23 @@ export class TpvCommandQueueService {
       throw new BadRequestError('Terminal does not belong to this venue')
     }
 
+    // 🔴 Migración DIFERIDA en curso (Codex r2, 16-oct): la terminal sigue en este venue sólo hasta que ejecute su
+    // borrado de migración, y en ese momento pasa al destino. Un comando nuevo de aquí quedaría huérfano (y antes,
+    // otro borrado de este venue le llegaba ya en el destino). Nada nuevo hasta que la migración termine o se cancele.
+    // No estorba a la migración: su propio borrado se encola cuando no hay otro en vuelo (lo exige `updateTerminal`).
+    // Una migración SIN diferir ya movió la terminal: ahí manda el venue nuevo, y el viejo no pasa el `if` de arriba.
+    const borradosEnVuelo = await db.tpvCommandQueue.findMany({
+      where: { terminalId, venueId, commandType: 'FACTORY_RESET', status: { in: AUN_POR_ENTREGAR_O_EJECUTAR } },
+      select: { payload: true },
+      take: 20,
+    })
+    if (borradosEnVuelo.some(c => (c.payload as { _migrationIntent?: unknown } | null)?._migrationIntent)) {
+      throw new ConflictError(
+        'Esta terminal se está migrando a otra sucursal: no se le pueden mandar comandos hasta que la migración termine o se cancele.',
+        'TERMINAL_MIGRATION_PENDING',
+      )
+    }
+
     assertDeviceActionSupported(terminal, { kind: 'REMOTE_COMMAND', commandType })
 
     // Validate command against terminal state
@@ -559,6 +585,8 @@ export class TpvCommandQueueService {
     terminalId?: string,
     resultPayload?: Record<string, any>,
   ): Promise<boolean> {
+    // Lo que se retiró por traslado se registra en la bitácora DESPUÉS de la transacción (nunca dentro).
+    const retiradosPorTraslado: Array<{ command: ComandoConVenue; venueActual: string; via: 'entrega' | 'permiso' }> = []
     const transition = await prisma.$transaction(async tx => {
       const command = await tx.tpvCommandQueue.findUnique({
         where: { id: commandId },
@@ -570,6 +598,15 @@ export class TpvCommandQueueService {
       }
       if (['COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED'].includes(command.status)) return null
       const executionSessionId = resultPayload?.executionSessionId
+      // 🔴 Entregar (SENT) o autorizar la ejecución (el permiso de la TPV de protocolo 2) sólo mientras la terminal siga
+      // en el venue del comando. Los resultados y los acuses sí se registran: lo que ya pasó no se esconde.
+      const esEntregaOPermiso = newStatus === 'SENT' || (newStatus === 'EXECUTING' && !!executionSessionId)
+      if (esEntregaOPermiso) {
+        const r = await this.retirarSiLaTerminalSeFue(command, command.terminal.venueId, tx)
+        if (r.retiradoAhora)
+          retiradosPorTraslado.push({ command, venueActual: command.terminal.venueId, via: newStatus === 'SENT' ? 'entrega' : 'permiso' })
+        if (r.seFue) return null
+      }
       if (newStatus === 'EXECUTING' && executionSessionId) {
         if (command.terminal.commandSessionId !== executionSessionId) return null
         if (command.status === 'EXECUTING') {
@@ -582,7 +619,8 @@ export class TpvCommandQueueService {
       const order = ['PENDING', 'QUEUED', 'SENT', 'RECEIVED', 'EXECUTING']
       if (order.includes(newStatus) && order.indexOf(newStatus) <= order.indexOf(command.status)) return null
       const updated = await tx.tpvCommandQueue.updateMany({
-        where: { id: command.id, status: command.status },
+        // Para entregar o autorizar, la terminal tiene que seguir en el venue del comando EN el mismo UPDATE.
+        where: { id: command.id, status: command.status, ...(esEntregaOPermiso && { terminal: { venueId: command.venueId } }) },
         data: {
           status: newStatus,
           resultStatus,
@@ -654,6 +692,7 @@ export class TpvCommandQueueService {
       )
       return { command, terminal }
     })
+    for (const r of retiradosPorTraslado) this.registrarRetiroPorTraslado(r.command, r.venueActual, r.via)
     if (!transition) return false
     if ('replayed' in transition) return true
     await this.broadcastStatusChange(transition.command, transition.command.status, newStatus, resultMessage)
@@ -664,6 +703,57 @@ export class TpvCommandQueueService {
         lastHeartbeat: transition.terminal.lastHeartbeat ?? undefined,
       })
     return true
+  }
+
+  /**
+   * 🔴 Un comando NO viaja con la terminal a otro negocio (Codex r2, 16-oct, P1-2). Se autoriza contra SU venue
+   * (`TpvCommandQueue.venueId`); si la terminal ya está en otro, no se entrega ni se ejecuta: queda CANCELLED con
+   * `TERMINAL_MOVED`. Es el punto común de la entrega por socket (`sendCommandToTerminal`), el latido
+   * (`getPendingCommands`) y el permiso de ejecución (`updateCommandStatus`). El borrado de una migración no choca:
+   * sin diferir se encola ya con el venue destino; diferida, su permiso mueve la terminal y el comando a la vez.
+   */
+  private async retirarSiLaTerminalSeFue(
+    command: ComandoConVenue,
+    venueActual: string,
+    db: Prisma.TransactionClient = prisma,
+  ): Promise<{ seFue: boolean; retiradoAhora: boolean }> {
+    if (command.venueId === venueActual) return { seFue: false, retiradoAhora: false }
+    const retirado = await db.tpvCommandQueue.updateMany({
+      where: { id: command.id, status: { in: AUN_POR_ENTREGAR_O_EJECUTAR } },
+      data: { status: 'CANCELLED', resultStatus: 'REJECTED', resultMessage: MENSAJE_TERMINAL_TRASLADADA },
+    })
+    return { seFue: true, retiradoAhora: retirado.count === 1 }
+  }
+
+  /** La bitácora del retiro, en el venue que mandó el comando (fuera de cualquier transacción). */
+  private registrarRetiroPorTraslado(command: ComandoConVenue, venueActual: string, via: 'entrega' | 'latido' | 'permiso'): void {
+    logger.warn('[TPV] comando retirado: la terminal ya no está en el venue del comando', {
+      commandId: command.id,
+      commandVenueId: command.venueId,
+      terminalVenueId: venueActual,
+      via,
+    })
+    void logAction({
+      staffId: null,
+      venueId: command.venueId,
+      action: 'TPV_COMMAND_CANCELLED_TERMINAL_MOVED',
+      entity: 'TpvCommandQueue',
+      entityId: command.id,
+      data: {
+        terminalId: command.terminalId,
+        commandType: command.commandType,
+        commandVenueId: command.venueId,
+        terminalVenueId: venueActual,
+        via,
+      },
+    })
+  }
+
+  /** Para la entrega fuera de una transacción: `true` = no se entrega (ya no es de la terminal; queda retirado). */
+  async noSeEntregaPorTraslado(command: ComandoConVenue, venueActual: string, via: 'entrega' | 'latido'): Promise<boolean> {
+    const r = await this.retirarSiLaTerminalSeFue(command, venueActual)
+    if (r.retiradoAhora) this.registrarRetiroPorTraslado(command, venueActual, via)
+    return r.seFue
   }
 
   async handleCommandAck(commandId: string, terminalId: string): Promise<void> {
