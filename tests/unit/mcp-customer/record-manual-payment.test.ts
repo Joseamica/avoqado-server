@@ -29,14 +29,22 @@ jest.mock('@/mcp/guard', () => ({
   }),
 }))
 jest.mock('@/mcp/audit', () => ({ auditMcpWrite: (...a: unknown[]) => mockAudit(...(a as [])) }))
-jest.mock('@/services/dashboard/manualPayment.service', () => ({ createManualPayment: (...a: unknown[]) => mockCreate(...(a as [])) }))
+jest.mock('@/services/dashboard/manualPayment.service', () => ({
+  createManualPayment: (...a: unknown[]) => mockCreate(...(a as [])),
+  MENSAJE_VENTA_YA_COBRADA: 'Esta venta ya está cobrada. Para cobrar algo extra, registra una venta nueva.',
+}))
 jest.mock('@/services/dashboard/refund.dashboard.service', () => ({ issueRefund: jest.fn() }))
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
-  default: { payment: { findFirst: jest.fn(), findMany: jest.fn(), groupBy: jest.fn() }, venue: { findUnique: jest.fn() } },
+  default: {
+    payment: { findFirst: jest.fn(), findMany: jest.fn(), groupBy: jest.fn() },
+    venue: { findUnique: jest.fn() },
+    order: { findFirst: jest.fn() },
+  },
 }))
 
 const schemas = new Map<string, Record<string, import('zod').ZodTypeAny>>()
+const descripciones = new Map<string, string>()
 const handlers = new Map<string, (a: Record<string, unknown>, e: unknown) => Promise<{ content: Array<{ text: string }> }>>()
 const scope = { staffId: 's1', activeOrg: 'o1', allowedVenueIds: ['v1'], perVenueAccess: new Map() } as McpScope
 const call = (args: Record<string, unknown>) =>
@@ -48,6 +56,7 @@ beforeAll(() => {
     {
       tool: (...a: unknown[]) => {
         schemas.set(a[0] as string, a[2] as never)
+        descripciones.set(a[0] as string, a[1] as string)
         handlers.set(a[0] as string, a[a.length - 1] as never)
       },
     } as never,
@@ -154,36 +163,49 @@ it.each(['record_manual_payment', 'issue_refund'])(
   },
 )
 
-describe('🔴 R5-1: record_manual_payment le dice al servicio si quien está conectado puede cobrar (Codex recheck-9 P2)', () => {
-  const ligar = { venueId: 'v1', amount: 20, method: 'cash', orderId: 'ord-1', customerId: 'cust-K', confirm: true }
-
-  it('🔴 con payment:create-manual y SIN payments:create ⇒ puedeCambiarClienteEnVentaCobrada: false', async () => {
+describe('R8-3a: la tool ya no pregunta payments:create (la regla R5-1 quedó muerta tras R7-1 y se quitó)', () => {
+  it('con cliente y venta existente ⇒ el servicio recibe sólo (venueId, staffId, input), sin opciones de permiso', async () => {
     permisos.add('payment:create-manual')
-    await call(ligar)
-    expect(mockCreate).toHaveBeenCalledWith('v1', 's1', expect.objectContaining({ orderId: 'ord-1', customerId: 'cust-K' }), {
-      puedeCambiarClienteEnVentaCobrada: false,
-    })
+    await call({ venueId: 'v1', amount: 20, method: 'cash', orderId: 'ord-1', customerId: 'cust-K', confirm: true })
+    expect(mockCreate.mock.calls[0]).toEqual(['v1', 's1', expect.objectContaining({ orderId: 'ord-1', customerId: 'cust-K' })])
+  })
+})
+
+/**
+ * 🔴 R8-3b (Codex recheck-12 P3): la vista previa (sin `confirm`) de una venta YA cobrada devuelve de una vez el rechazo de R7-1: no
+ * se le pide al humano confirmar algo que se va a rechazar. La confirmación la sigue decidiendo el servicio, bajo su candado.
+ */
+describe('🔴 R8-3b: record_manual_payment no ofrece confirmar un pago sobre una venta cerrada', () => {
+  const prisma = jest.requireMock('@/utils/prismaClient').default
+  const MENSAJE = 'Esta venta ya está cobrada. Para cobrar algo extra, registra una venta nueva.'
+
+  it.each(['PAID', 'REFUNDED'])(
+    'venta %s, sin confirm ⇒ `ok:false` con el mensaje de R7-1, sin vista previa ni escritura',
+    async estado => {
+      prisma.order.findFirst.mockResolvedValue({ paymentStatus: estado })
+      const r = parse(await call({ venueId: 'v1', amount: 20, method: 'cash', orderId: 'ord-1' }))
+      expect(r).toEqual({ ok: false, error: MENSAJE })
+      expect(prisma.order.findFirst).toHaveBeenCalledWith({ where: { id: 'ord-1', venueId: 'v1' }, select: { paymentStatus: true } })
+      expect(mockCreate).not.toHaveBeenCalled()
+      expect(mockAudit).not.toHaveBeenCalled()
+    },
+  )
+
+  it.each(['PENDING', 'PARTIAL'])('venta %s, sin confirm ⇒ la vista previa de siempre', async estado => {
+    prisma.order.findFirst.mockResolvedValue({ paymentStatus: estado })
+    const r = parse(await call({ venueId: 'v1', amount: 20, method: 'cash', orderId: 'ord-1' }))
+    expect(r).toMatchObject({ requiresConfirmation: true, preview: { mode: 'attach-to-order', orderId: 'ord-1' } })
   })
 
-  it('con payments:create ⇒ true', async () => {
-    permisos.add('payment:create-manual').add('payments:create')
-    await call(ligar)
-    expect(mockCreate).toHaveBeenCalledWith('v1', 's1', expect.any(Object), { puedeCambiarClienteEnVentaCobrada: true })
+  it('asiento contable (sin orderId) ⇒ vista previa sin leer ninguna venta', async () => {
+    await call({ venueId: 'v1', amount: 20, method: 'cash' })
+    expect(prisma.order.findFirst).not.toHaveBeenCalled()
   })
 
-  it('sin cliente o sin venta existente no se pregunta (como hoy)', async () => {
-    await call({ ...ligar, customerId: undefined })
-    await call({ ...ligar, orderId: undefined })
-    expect(mockCreate.mock.calls.map(c => c[3])).toEqual([{}, {}])
-  })
-
-  it('el 403 del servicio sale como `ok: false` con su mensaje en español (sin auditar una escritura que no ocurrió)', async () => {
-    mockCreate.mockRejectedValueOnce(
-      Object.assign(new Error('Para cambiar el cliente de una venta ya cobrada necesitas el permiso de cobrar.'), { statusCode: 403 }),
+  it('la descripción lo dice: una venta ya cobrada no admite más pagos', () => {
+    expect(descripciones.get('record_manual_payment')).toContain(
+      'Una venta ya cobrada no admite más pagos; lo extra se registra como venta nueva.',
     )
-    const r = parse(await call(ligar))
-    expect(r).toEqual({ ok: false, error: 'Para cambiar el cliente de una venta ya cobrada necesitas el permiso de cobrar.' })
-    expect(mockAudit).not.toHaveBeenCalled()
   })
 })
 

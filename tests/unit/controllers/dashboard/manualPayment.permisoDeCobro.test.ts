@@ -1,17 +1,17 @@
 /**
- * 🔴 R5-1 (ronda 5 post-QA de sellos tardíos; Codex recheck-9 P2; decisión «A» del founder): el pago manual del panel
- * (`POST /dashboard/venues/:venueId/payments/manual`, `payment:create-manual`) resuelve `payments:create` de quien registra — con
- * el resolvedor EFECTIVO de siempre (`tienePermisoEnVenue`: el de `checkPermission`, con personalizaciones del negocio y conjuntos
- * de permisos), cerrado ante falla — y se lo pasa al servicio, que decide bajo el candado de la venta. Sólo cuando la petición
- * trae `customerId` Y `orderId` (ligar a una venta existente): un pago sin cliente o una orden sombra no cuestan una consulta de más.
+ * El pago manual del panel (`POST /dashboard/venues/:venueId/payments/manual`, `payment:create-manual`).
  *
- * Controller REAL con el resolvedor real; la base es el prismaMock y el servicio se espía.
+ * 🔴 R8-3a (ronda 8 post-QA de sellos tardíos; Codex recheck-12 P3): el controller YA NO resuelve `payments:create`. Lo hacía para
+ * la regla R5-1 (cambiar el cliente de una venta cobrada pide el permiso de cobrar), que quedó muerta con R7-1: el servicio rechaza
+ * la venta PAID/REFUNDED para todos antes de esa regla, y en cualquier otro estado la regla no exigía nada. Una consulta que no
+ * decidía nada.
+ *
+ * Controller REAL; la base es el prismaMock y el servicio se espía.
  */
 import type { NextFunction, Request, Response } from 'express'
 import { prismaMock } from '@tests/__helpers__/setup'
 import { createManualPayment, getEligibleWaiters, getExternalSources } from '@/controllers/dashboard/manualPayment.controller'
 import * as manualPaymentService from '@/services/dashboard/manualPayment.service'
-import { tienePermisoEnVenue } from '@/middlewares/permissionFlag.middleware'
 
 const VENUE = 'v1'
 const STAFF = 'staff-1'
@@ -61,62 +61,33 @@ beforeEach(() => {
 })
 afterEach(() => espia.mockRestore())
 
-describe('🔴 R5-1: el pago manual del panel resuelve payments:create de quien liga un cliente a una venta', () => {
-  it('🔴 ADMIN al que el negocio le QUITÓ payments:create (conserva payment:create-manual) ⇒ false', async () => {
+describe('🔴 R8-3a: el pago manual del panel ya no pregunta payments:create', () => {
+  it('🔴 ligar un cliente a una venta ⇒ el servicio recibe (venueId, staffId, body) y NO se consulta ningún permiso de más', async () => {
     quienRegistra('ADMIN', { deniedPermissions: SIN_COBRAR })
-    // Precondición: es justo el actor de Codex — puede registrar pagos manuales y NO puede cobrar.
-    expect(await tienePermisoEnVenue(peticion(LIGAR, 'ADMIN'), 'payment:create-manual')).toBe(true)
-    expect(await tienePermisoEnVenue(peticion(LIGAR, 'ADMIN'), 'payments:create')).toBe(false)
     const { status, next } = await registrar(LIGAR)
     expect(next).not.toHaveBeenCalled()
     expect(status).toBe(201)
-    expect(espia).toHaveBeenCalledWith(VENUE, STAFF, LIGAR, { puedeCambiarClienteEnVentaCobrada: false })
-  })
-
-  it.each([['OWNER'], ['ADMIN']])('%s con sus permisos de siempre ⇒ true', async rol => {
-    quienRegistra(rol)
-    await registrar(LIGAR, rol)
-    expect(espia).toHaveBeenCalledWith(VENUE, STAFF, LIGAR, { puedeCambiarClienteEnVentaCobrada: true })
-  })
-
-  it('🔴 si el permiso no se puede resolver (falla la base) ⇒ CERRADO: false, y la petición sigue al servicio', async () => {
-    quienRegistra('OWNER')
-    prismaMock.staffVenue.findUnique.mockRejectedValue(new Error('se cayó la base'))
-    const { next } = await registrar(LIGAR, 'OWNER')
-    expect(next).not.toHaveBeenCalled()
-    expect(espia).toHaveBeenCalledWith(VENUE, STAFF, LIGAR, { puedeCambiarClienteEnVentaCobrada: false })
-  })
-
-  it('un pago SIN customerId no consulta permisos de más (como hoy)', async () => {
-    quienRegistra('ADMIN')
-    const sinCliente = { ...LIGAR, customerId: undefined }
-    await registrar(sinCliente)
-    expect(espia).toHaveBeenCalledWith(VENUE, STAFF, sinCliente, {})
+    expect(espia.mock.calls[0]).toEqual([VENUE, STAFF, LIGAR])
     expect(prismaMock.staffVenue.findUnique).not.toHaveBeenCalled()
     expect(prismaMock.venueRolePermission.findUnique).not.toHaveBeenCalled()
   })
 
-  it('una orden SOMBRA (sin orderId) con cliente no consulta permisos: es una venta nueva', async () => {
-    quienRegistra('ADMIN')
-    const sombra = { ...LIGAR, orderId: undefined }
-    await registrar(sombra)
-    expect(espia).toHaveBeenCalledWith(VENUE, STAFF, sombra, {})
-    expect(prismaMock.staffVenue.findUnique).not.toHaveBeenCalled()
-  })
-
-  it('el 403 del servicio llega al manejador de errores (no se traga)', async () => {
-    quienRegistra('ADMIN', { deniedPermissions: SIN_COBRAR })
-    const prohibido = Object.assign(new Error('Para cambiar el cliente…'), { statusCode: 403 })
-    espia.mockRejectedValueOnce(prohibido)
-    const { next, status } = await registrar(LIGAR)
+  it('el rechazo del servicio (400 ORDER_ALREADY_PAID) llega al manejador de errores (no se traga)', async () => {
+    quienRegistra('OWNER')
+    const rechazo = Object.assign(new Error('Esta venta ya está cobrada. Para cobrar algo extra, registra una venta nueva.'), {
+      statusCode: 400,
+      code: 'ORDER_ALREADY_PAID',
+    })
+    espia.mockRejectedValueOnce(rechazo)
+    const { next, status } = await registrar(LIGAR, 'OWNER')
     expect(status).toBeUndefined()
-    expect(next).toHaveBeenCalledWith(prohibido)
+    expect(next).toHaveBeenCalledWith(rechazo)
   })
 })
 
 /**
  * 🔴 R6-2 (ronda 6 post-QA de sellos tardíos; Codex recheck-10 P2): UNA sola sucursal por operación — la de la URL, la misma que
- * evalúan `checkPermission('payment:create-manual')` y `tienePermisoEnVenue`. Antes el servicio recibía la del TOKEN: con sesión
+ * evalúa `checkPermission('payment:create-manual')`. Antes el servicio recibía la del TOKEN: con sesión
  * de A y URL de B, el permiso se comprobaba en B y se escribía en A.
  */
 describe('🔴 R6-2: los tres handlers del pago manual operan en la sucursal de la URL, no en la del token', () => {
@@ -138,15 +109,12 @@ describe('🔴 R6-2: los tres handlers del pago manual operan en la sucursal de 
     return r as Response
   }
 
-  it('🔴 crear: el servicio recibe la sucursal de la URL (B), y el permiso de cobrar se resolvió sobre B', async () => {
+  it('🔴 crear: el servicio recibe la sucursal de la URL (B)', async () => {
     quienRegistra('ADMIN')
     const next = jest.fn()
     await createManualPayment(cruzada(LIGAR), respuesta(), next as unknown as NextFunction)
     expect(next).not.toHaveBeenCalled()
-    expect(espia).toHaveBeenCalledWith('venue-B', STAFF, LIGAR, { puedeCambiarClienteEnVentaCobrada: true })
-    expect(prismaMock.venueRolePermission.findUnique).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { venueId_role: { venueId: 'venue-B', role: 'ADMIN' } } }),
-    )
+    expect(espia.mock.calls[0]).toEqual(['venue-B', STAFF, LIGAR])
   })
 
   it('fuentes externas y meseros: también la sucursal de la URL', async () => {
@@ -166,6 +134,6 @@ describe('🔴 R6-2: los tres handlers del pago manual operan en la sucursal de 
   it('regresión: sesión y URL de la MISMA sucursal ⇒ como hoy', async () => {
     quienRegistra('ADMIN')
     await registrar(LIGAR)
-    expect(espia).toHaveBeenCalledWith(VENUE, STAFF, LIGAR, { puedeCambiarClienteEnVentaCobrada: true })
+    expect(espia.mock.calls[0]).toEqual([VENUE, STAFF, LIGAR])
   })
 })

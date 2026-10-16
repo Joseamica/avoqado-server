@@ -13,6 +13,9 @@
  *   R7-2 — «cobrada» vuelve a ser PAID/REFUNDED: una cuenta que NUNCA se saldó (abono de $20 y devolución de $10) recibe un abono
  *          con cliente nuevo como en `8b32aef13` (201, liga primaria), y por la TPV el cliente queda primario.
  *   R6-2 — (se conserva) el pago manual opera en la sucursal de la URL.
+ *   R8   — (ronda 8; Codex recheck-12 P2) la cadena exacta de Codex: venta $100 PAID → el panel corrige su cobro a $80 (con y sin
+ *          reembolso de $20) → un cobro tardío de la TPV de $10. El recálculo la bajaba a PARTIAL y con eso volvían a pasar el pago
+ *          manual con cliente y el cambio de cliente sin `payments:create`. Ahora sigue PAID (R8-1) y los cuatro caminos rechazan.
  */
 import '../../__helpers__/integration-setup'
 import prisma from '@/utils/prismaClient'
@@ -43,6 +46,8 @@ import { tienePermisoEnVenue } from '@/middlewares/permissionFlag.middleware'
 import { updatePayment } from '@/services/dashboard/payment.dashboard.service'
 import { addCustomerToOrder } from '@/services/tpv/order.tpv.service'
 import { CODIGO_VENTA_YA_COBRADA, MENSAJE_VENTA_YA_COBRADA } from '@/services/dashboard/manualPayment.service'
+import { recordOrderPayment } from '@/services/tpv/payment.tpv.service'
+import { updateOrderDetails } from '@/services/mobile/order.mobile.service'
 
 const sello = `${Date.now()}${Math.random().toString(36).slice(2, 6)}`
 /**
@@ -505,5 +510,136 @@ describe('🔴 R6-2: una sola sucursal por operación — la de la URL (Codex re
     const orderId = await ventaCobradaConReembolso()
     const nuevo = await cliente('Nuevo')
     expect(await pagoManual(adminSinCobrar, 'ADMIN', pagoDe20(orderId, nuevo), { url: venueId!, token: venueId! })).toEqual(RECHAZO_HTTP)
+  })
+})
+
+/** El cobro de la TERMINAL de verdad (`recordOrderPayment`), en efectivo y como lo manda la TPV: el importe en centavos. */
+async function cobroDeLaTerminal(orderId: string, pesos: number) {
+  return recordOrderPayment(
+    venueId!,
+    orderId,
+    {
+      venueId: venueId!,
+      amount: pesos * 100,
+      tip: 0,
+      status: 'COMPLETED',
+      method: 'CASH',
+      source: 'TPV',
+      splitType: 'FULLPAYMENT',
+      tpvId: `tpv-${sello}`,
+      staffId: dueno.staffId,
+      paidProductsId: [],
+      idempotencyKey: `r8-tpv-${sello}-${++n}`,
+      currency: 'MXN',
+      isInternational: false,
+    } as never,
+    dueno.staffId,
+  )
+}
+
+/** `record_manual_payment` SIN `confirm`: la vista previa (R8-3b). */
+async function vistaPreviaPorMcp(quien: { staffId: string }, args: Record<string, unknown>) {
+  const herramientas = new Map<string, (a: Record<string, unknown>, e: unknown) => Promise<{ content: Array<{ text: string }> }>>()
+  registerPaymentTools(
+    { tool: (...a: unknown[]) => herramientas.set(a[0] as string, a[a.length - 1] as never) } as never,
+    await scopeDe(quien),
+  )
+  const r = await herramientas.get('record_manual_payment')!({ idempotencyKey: `r8-vista-${sello}-${++n}`, ...args }, {})
+  return JSON.parse(r.content[0].text)
+}
+
+/** Lo que la venta dice de su cierre (estado, fecha, lealtad) y sus vales de inventario. */
+async function cierreDe(orderId: string) {
+  const [venta, vales] = await Promise.all([
+    prisma.order.findUniqueOrThrow({
+      where: { id: orderId },
+      select: { paymentStatus: true, status: true, completedAt: true, loyaltyEligibleAt: true, paidAmount: true, remainingBalance: true },
+    }),
+    prisma.inventoryPosting.count({ where: { venueId, orderId } }),
+  ])
+  return JSON.parse(JSON.stringify({ ...venta, vales }))
+}
+
+describe('🔴 R8: la cadena exacta de Codex r12 — un cobro tardío de la TPV no reabre la venta cerrada', () => {
+  // El recálculo :1831 (cuentas con vales por área sin sesión) se prueba en `payment.refund-balance.test.ts`: armarlo aquí pide toda
+  // la cadena de vales. Una integrada de SoftRestaurant no llega a ninguno de los dos: la TPV le manda el cobro a SoftRestaurant.
+  it.each([
+    ['sin reembolso', false],
+    ['con reembolso de $20', true],
+  ])(
+    '🔴 %s: PAID → corregir a $80 → TPV $10 ⇒ sigue PAID, y el pago manual (HTTP y MCP), el PUT de COCINA y el detalle del POS rechazan sin escribir',
+    async (_caso, conReembolso) => {
+      const { orderId, pagoId } = await ventaCobrada()
+      if (conReembolso) {
+        await issueRefund({
+          venueId: venueId!,
+          paymentId: pagoId,
+          amount: 2000,
+          reason: 'CUSTOMER_REQUEST' as never,
+          staffId: dueno.staffId,
+        })
+      }
+      await updatePayment(venueId!, pagoId, { amount: 80 })
+      const cerrada = await cierreDe(orderId)
+      expect(cerrada.paymentStatus).toBe('PAID')
+
+      await cobroDeLaTerminal(orderId, 10)
+
+      // R8-1: el dinero se registra (2 cobros, $90 pagados) y la venta sigue CERRADA: PAID, saldo 0, sin otro cierre, lealtad ni vale.
+      expect(await prisma.payment.count({ where: { orderId, status: 'COMPLETED', type: { not: 'REFUND' } } })).toBe(2)
+      expect(await cierreDe(orderId)).toEqual({ ...cerrada, paidAmount: '90', remainingBalance: '0' })
+
+      const nuevo = await cliente('Nuevo')
+      const antes = await foto(orderId, nuevo)
+      expect(await pagoManual(adminSinCobrar, 'ADMIN', pagoDe10(orderId, nuevo))).toEqual(RECHAZO_HTTP)
+      const porMcp = { venueId: venueId!, orderId, customerId: nuevo, amount: 10, method: 'cash' }
+      expect(await pagoManualPorMcp(adminSinCobrar, porMcp)).toEqual(RECHAZO_MCP)
+      expect(await vistaPreviaPorMcp(adminSinCobrar, porMcp)).toEqual(RECHAZO_MCP) // R8-3b: ni siquiera ofrece confirmar
+      expect(await editarPorPanel(cocina, 'KITCHEN', orderId, { customerId: nuevo })).toMatchObject({ status: 403 })
+      await expect(
+        updateOrderDetails(venueId!, orderId, { customerId: nuevo }, { puedeCambiarClienteEnVentaCobrada: false }),
+      ).rejects.toMatchObject({
+        statusCode: 400,
+      })
+      expect(await foto(orderId, nuevo)).toEqual(antes)
+      expect(antes.ligas).toEqual([])
+    },
+  )
+
+  it('🔴 aunque el panel le regrese el estado operativo a PENDING, el detalle del POS sin payments:create da 403: la venta sigue PAID', async () => {
+    const { orderId, pagoId } = await ventaCobrada()
+    await updatePayment(venueId!, pagoId, { amount: 80 })
+    await cobroDeLaTerminal(orderId, 10)
+    expect((await editarPorPanel(dueno, 'OWNER', orderId, { status: 'PENDING' })).status).toBe(200)
+    const nuevo = await cliente('Nuevo')
+    const antes = await foto(orderId, nuevo)
+    expect(antes.venta).toMatchObject({ status: 'PENDING', paymentStatus: 'PAID' })
+    await expect(
+      updateOrderDetails(venueId!, orderId, { customerId: nuevo }, { puedeCambiarClienteEnVentaCobrada: false }),
+    ).rejects.toMatchObject({
+      statusCode: 403,
+      code: 'CUSTOMER_CHANGE_REQUIRES_PAYMENTS_CREATE',
+    })
+    expect(await foto(orderId, nuevo)).toEqual(antes)
+  })
+
+  it('regresión: una venta PENDING que recibe $10 de la TPV ⇒ PARTIAL con $90 por cobrar', async () => {
+    const orderId = await ventaAbierta()
+    await cobroDeLaTerminal(orderId, 10)
+    expect(await cierreDe(orderId)).toMatchObject({
+      paymentStatus: 'PARTIAL',
+      paidAmount: '10',
+      remainingBalance: '90',
+      loyaltyEligibleAt: null,
+    })
+  })
+
+  it('regresión: el cobro completo de la TPV ⇒ PAID y COMPLETED, con su lealtad pendiente y su vale', async () => {
+    const orderId = await ventaAbierta()
+    await cobroDeLaTerminal(orderId, 100)
+    const venta = await cierreDe(orderId)
+    expect(venta).toMatchObject({ paymentStatus: 'PAID', status: 'COMPLETED', remainingBalance: '0', vales: 1 })
+    expect(venta.loyaltyEligibleAt).not.toBeNull()
+    expect(venta.completedAt).not.toBeNull()
   })
 })

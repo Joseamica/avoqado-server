@@ -385,6 +385,7 @@ import {
   claseDeEstado,
   computeOrderBalance,
   computeStoredOrderTotal,
+  estadoDeCobroAlRecibirDinero,
   REFUND_PAYMENT_TYPE,
   type CompletedPaymentForBalance,
 } from '../shared/orderBalance'
@@ -1395,18 +1396,24 @@ export async function settleStandalonePaymentInTx(
   const balance = computeOrderBalance(cuenta, [{ amount, tipAmount }])
   const previous = computeOrderBalance(cuenta, [{ amount: amount.minus(payment.amount), tipAmount: tipAmount.minus(payment.tipAmount) }])
   const saldada = balance.isFullyPaid && cierreAutomaticoPermitido(status)
+  // 🔴 R8-1 (Codex recheck-12 P2): una venta que YA estaba cerrada (PAID/REFUNDED, leída bajo el candado de quien llama) y recibe
+  // dinero no se reabre ni repite los efectos de saldar. El origen de una reasignación (sin dinero) sí vuelve a deber, como hoy.
+  const cobro = estadoDeCobroAlRecibirDinero(order.paymentStatus, payment.amount.plus(payment.tipAmount).greaterThan(0), {
+    paymentStatus: saldada ? 'PAID' : balance.paidAmount.greaterThan(0) ? 'PARTIAL' : order.paymentStatus,
+    remainingBalance: balance.remainingBalance,
+  })
   // Codex r10 #6: la reasignación guarda así los totales del ORIGEN dentro de su transacción (`efectosDeCierre = false`): ni
   // lealtad, ni marca de cocina, ni vale de inventario — el origen ya los tuvo cuando se saldó.
-  const firstSettlement = efectosDeCierre && saldada && !(paid._count > 1 && previous.isFullyPaid)
+  const firstSettlement = efectosDeCierre && saldada && !cobro.cerrada && !(paid._count > 1 && previous.isFullyPaid)
   await tx.order.update({
     where: { id: orderId, venueId },
     data: {
       paidAmount: balance.paidAmount,
-      remainingBalance: balance.remainingBalance,
+      remainingBalance: cobro.remainingBalance,
       tipAmount: balance.tipAmount,
       total: balance.total,
-      paymentStatus: saldada ? 'PAID' : balance.paidAmount.greaterThan(0) ? 'PARTIAL' : order.paymentStatus,
-      ...(saldada && { status: 'COMPLETED', completedAt: order.completedAt ?? new Date() }),
+      paymentStatus: cobro.paymentStatus,
+      ...(saldada && !cobro.cerrada && { status: 'COMPLETED', completedAt: order.completedAt ?? new Date() }),
       ...(!order.servedById && staffId && { servedById: staffId, createdById: order.createdById ?? staffId }),
       ...(firstSettlement && { loyaltyEligibleAt: new Date(), loyaltyStaffId: staffId }),
       ...(firstSettlement && marcarCocina && { kitchenPendingAt: new Date() }),
@@ -1643,6 +1650,15 @@ async function updateOrderTotalsForStandalonePayment(
   const remainingAmount = Math.max(0, newTotal - totalPaid)
   // Account for floating point precision. Founder 3-oct: una cancelada nunca queda saldada (si cubría, ya salió de CANCELADA).
   const isFullyPaid = remainingAmount <= 0.01 && cierreAutomaticoPermitido(estado)
+  const newPaymentStatus = isFullyPaid ? 'PAID' : totalPaid > 0 ? 'PARTIAL' : order.paymentStatus
+  // 🔴 R8-1 (Codex recheck-12 P2): un cobro que ENTRA nunca reabre una venta cerrada (PAID/REFUNDED). Sólo cuando ESTA función
+  // escribe (con `committedSettlement` lo aplicó ya el cierre transaccional; con el vale finalizado no se escribe). El estado previo
+  // se leyó antes del candado, pero la huella de abajo (`standaloneTotalsInputs`, que incluye `paymentStatus`) lo revalida bajo él.
+  const cobro = estadoDeCobroAlRecibirDinero(
+    order.paymentStatus,
+    paymentAmount > 0 && !options?.committedSettlement && !options?.areaTicketAlreadyFinalized,
+    { paymentStatus: newPaymentStatus, remainingBalance: remainingAmount },
+  )
 
   // 🔴 ¿La cuenta YA estaba saldada ANTES de este pago? (audit Codex 2026-08-12, P1)
   //
@@ -1659,7 +1675,7 @@ async function updateOrderTotalsForStandalonePayment(
   // pagos aún NO está saldada — su primer cobro de $0 sí debe deducir.
   const settledBeforeThisPayment = options?.committedSettlement
     ? !options.committedSettlement.firstSettlement
-    : order.payments.length > 0 && previousPayments >= totalesDeLaOrden(previousTips, estado) - 0.01
+    : cobro.cerrada || (order.payments.length > 0 && previousPayments >= totalesDeLaOrden(previousTips, estado) - 0.01)
   const coveredAreaTicketLines = isFullyPaid
     ? await getAreaTicketLineIdsCoveredByInventoryReservations(order.venueId, order.items)
     : new Set<string>()
@@ -1823,14 +1839,6 @@ async function updateOrderTotalsForStandalonePayment(
     }
   }
 
-  // Determine new payment status
-  let newPaymentStatus = order.paymentStatus
-  if (isFullyPaid) {
-    newPaymentStatus = 'PAID'
-  } else if (totalPaid > 0) {
-    newPaymentStatus = 'PARTIAL'
-  }
-
   // Update order totals and status (including partial payment tracking)
   // ⭐ KIOSK MODE FIX: If servedById is null, assign the staff who processed the payment
   const shouldAssignServer = !order.servedById && staffId
@@ -1902,10 +1910,10 @@ async function updateOrderTotalsForStandalonePayment(
           const updated = await tx.order.update({
             where: { id: orderId, ...(options?.venueId ? { venueId: options.venueId } : {}) },
             data: {
-              paymentStatus: newPaymentStatus,
+              paymentStatus: cobro.paymentStatus,
               // ⭐ Partial payment tracking: Persist paidAmount and remainingBalance
               paidAmount: totalPaid,
-              remainingBalance: remainingAmount,
+              remainingBalance: cobro.remainingBalance,
               // ✅ FIX: Update order.tipAmount with cumulative tip from all payments
               tipAmount: totalTip,
               // ✅ FIX: Update order.total to include cumulative tips (consistent with fast payments)
@@ -1915,10 +1923,11 @@ async function updateOrderTotalsForStandalonePayment(
                 servedById: staffId,
                 createdById: order.createdById || staffId, // Also set createdById if null
               }),
-              ...(isFullyPaid && {
-                status: 'COMPLETED',
-                completedAt: new Date(),
-              }),
+              ...(isFullyPaid &&
+                !cobro.cerrada && {
+                  status: 'COMPLETED',
+                  completedAt: new Date(),
+                }),
               ...(debeRegistrarPosting && { loyaltyEligibleAt: new Date(), loyaltyStaffId: staffId }),
               ...(debeRegistrarPosting && options?.marcarCocina && { kitchenPendingAt: new Date() }),
             },
@@ -2010,7 +2019,7 @@ async function updateOrderTotalsForStandalonePayment(
     totalPaid,
     remainingAmount,
     isFullyPaid,
-    newPaymentStatus,
+    newPaymentStatus: cobro.paymentStatus,
     // ⭐ KIOSK MODE: Log if we assigned the server from payment processor
     kioskModeServerAssigned: shouldAssignServer,
     assignedServerId: shouldAssignServer ? staffId : null,

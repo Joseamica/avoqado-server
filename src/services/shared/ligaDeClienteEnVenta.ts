@@ -2,6 +2,7 @@ import type { Prisma } from '@prisma/client'
 import { ForbiddenError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { isDeadlockError, isRetryableDbError } from '../../utils/serializableRetry'
+import { esVentaCerrada } from './orderBalance'
 
 /**
  * La liga de un cliente a una venta (`OrderCustomer`) ante choques de únicos, en UN solo lugar para el POS (móvil y MCP) y la
@@ -77,8 +78,9 @@ export async function bloquearVentaParaLiga(
 }
 
 /**
- * ¿La venta ya está cobrada? PAID o REFUNDED: lo que dice la venta leída BAJO el candado de quien llama. Ahí aplica la decisión «A»
- * del founder. Es el ÚNICO predicado: nadie guarda una copia local.
+ * ¿La venta ya está cobrada? PAID o REFUNDED (`esVentaCerrada`, la definición única de `orderBalance.ts`): lo que dice la venta leída
+ * BAJO el candado de quien llama. Ahí aplica la decisión «A» del founder. Nadie guarda una copia local. R8-1 (ronda 8): ningún cobro
+ * que ENTRA la baja a PARTIAL (`estadoDeCobroAlRecibirDinero`), así que este predicado no se puede esquivar recibiendo dinero.
  *
  * 🔴 R7-2 (ronda 7 post-QA de sellos tardíos; Codex recheck-11 P2): la ronda 6 sumaba «tiene un reembolso COMPLETED» como marca de
  * «ya se cobró alguna vez». Se quitó: (1) bloqueaba cuentas que NUNCA se saldaron (abono de $20 y devolución de $10); (2) no era
@@ -87,7 +89,7 @@ export async function bloquearVentaParaLiga(
  * cliente) lo cierra R7-1 de raíz: el pago manual rechaza la venta PAID/REFUNDED para todos (`manualPayment.service.ts`).
  */
 export function esVentaYaCobrada(venta: { paymentStatus: string | null | undefined }): boolean {
-  return venta.paymentStatus === 'PAID' || venta.paymentStatus === 'REFUNDED'
+  return esVentaCerrada(venta.paymentStatus)
 }
 
 /**

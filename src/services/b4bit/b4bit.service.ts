@@ -21,7 +21,7 @@ import logger from '../../config/logger'
 import { BadRequestError, InternalServerError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { applySalePosting, createSalePostingInTx } from '../inventory/inventoryPosting.service'
-import { computeOrderBalance } from '../shared/orderBalance'
+import { computeOrderBalance, estadoDeCobroAlRecibirDinero } from '../shared/orderBalance'
 import {
   ORDER_LOCK_WAIT_BUDGET,
   claimShiftForCapturedPayment,
@@ -1287,30 +1287,41 @@ async function settleOrderForConfirmedCryptoPayment(
           })
         }
 
-        const wasAlreadyPaid = fresh.paymentStatus === 'PAID'
+        // 🔴 R8-1 (Codex recheck-12 P2): el dinero cripto que ENTRA nunca reabre una venta cerrada (PAID/REFUNDED): conserva su
+        // estado, saldo 0, sin cierre nuevo ni efectos de saldar (un REFUNDED que la cubría daba un segundo vale). La iniciación
+        // rechaza una cuenta PAID, pero entre iniciar y confirmar la venta pudo saldarse por otro camino. `cerrada` es además el
+        // «ya estaba pagada» de siempre (un `CO` reentregado no re-marca ni crea otro vale).
+        const cobro = estadoDeCobroAlRecibirDinero(fresh.paymentStatus, true, {
+          paymentStatus: balance.isFullyPaid ? ('PAID' as const) : ('PARTIAL' as const),
+          remainingBalance: balance.remainingBalance,
+        })
 
         const transition = await tx.order.updateMany({
           // El filtro de `status` cierra la carrera: si cancelan la orden entre la
           // relectura y este write, la CAS no encuentra fila (count 0) y el
           // reintento la relee ya CANCELLED, donde el guard de arriba la ataja.
+          // R8-1: y el de `paymentStatus`, la del estado previo — si otro camino la saldó en medio, el reintento lo relee.
           where: {
             id: payment.orderId,
             venueId: payment.venueId,
             version: fresh.version,
+            paymentStatus: fresh.paymentStatus,
             status: { notIn: ['CANCELLED', 'DELETED'] },
           },
           data: {
             // Sólo el derivado del cobro. `total`/`tipAmount` NO se tocan — ver el
             // bloque de `Order.total` en el docstring (cuota de envío de agregador).
-            paymentStatus: balance.isFullyPaid ? 'PAID' : 'PARTIAL',
+            paymentStatus: cobro.paymentStatus,
             paidAmount: balance.paidAmount,
-            remainingBalance: balance.remainingBalance,
+            remainingBalance: cobro.remainingBalance,
             version: { increment: 1 },
             // `completedAt` se conserva si ya existía: la venta se cerró una vez,
             // no una por cada reentrega del webhook.
-            ...(balance.isFullyPaid ? { status: 'COMPLETED' as const, completedAt: fresh.completedAt ?? new Date() } : {}),
+            ...(balance.isFullyPaid && !cobro.cerrada
+              ? { status: 'COMPLETED' as const, completedAt: fresh.completedAt ?? new Date() }
+              : {}),
             // Sólo en la TRANSICIÓN real a pagado, igual que el vale de inventario: un CO reentregado no re-marca.
-            ...(balance.isFullyPaid && !wasAlreadyPaid && marcarCocina ? { kitchenPendingAt: new Date() } : {}),
+            ...(balance.isFullyPaid && !cobro.cerrada && marcarCocina ? { kitchenPendingAt: new Date() } : {}),
           },
         })
 
@@ -1337,7 +1348,7 @@ async function settleOrderForConfirmedCryptoPayment(
         // 🔑 Sólo en la TRANSICIÓN REAL a pagado, igual que el hook de referidos: un
         // abono parcial no descuenta (regla de `payments.md`), y un `CO` reentregado
         // sobre una cuenta que ya estaba PAID descontaría la venta DOS veces.
-        const becamePaid = balance.isFullyPaid && !wasAlreadyPaid
+        const becamePaid = balance.isFullyPaid && !cobro.cerrada
         let postingId: string | null = null
         if (becamePaid) {
           // Los renglones se leen con la MISMA tx, no con `prisma`: fuera de ella

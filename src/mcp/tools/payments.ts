@@ -8,12 +8,12 @@ import { createGuard } from '../guard'
 import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
 import { issueRefund, type RefundReason } from '@/services/dashboard/refund.dashboard.service'
-import { createManualPayment } from '@/services/dashboard/manualPayment.service'
+import { createManualPayment, MENSAJE_VENTA_YA_COBRADA } from '@/services/dashboard/manualPayment.service'
 import { paymentCountsAsDrawerCash, TENDER_SEMANTICS_SELECT } from '@/services/shared/tenderSemantics'
 import { devolverConEfectivo, sePuedeEscogerComoDevolver, seDevuelveEnTerminal } from '@/services/tpv/terminalRefundTarget'
 // El carril del reembolso: la MISMA definición que usan los cuatro canales de
 // cobro, para que el MCP no pueda contradecir al saldo persistido.
-import { summarizeRefunds } from '@/services/shared/orderBalance'
+import { esVentaCerrada, summarizeRefunds } from '@/services/shared/orderBalance'
 
 // Maps the tool's friendly reasons to the service's RefundReason values.
 const REFUND_REASON_MAP: Record<string, RefundReason> = {
@@ -552,7 +552,7 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'record_manual_payment',
-    'Record a payment manually (registrar un pago a mano) in a venue you can access — cash, transfer, card-on-file, or money that came through an external channel (delivery app, etc.). Two modes: pass orderId to attach it to an existing order (cannot exceed the order total), or omit orderId for a bookkeeping entry that never passed through Avoqado (a shadow MANUAL_ENTRY order is created so revenue reports still count it). Amounts in pesos (1 = 1 peso, e.g. 150.50). By DEFAULT this only PREVIEWS what will be recorded; call again with confirm:true to actually write it. This WRITES — requires the payment:create-manual permission.',
+    'Record a payment manually (registrar un pago a mano) in a venue you can access — cash, transfer, card-on-file, or money that came through an external channel (delivery app, etc.). Two modes: pass orderId to attach it to an existing order (cannot exceed the order total), or omit orderId for a bookkeeping entry that never passed through Avoqado (a shadow MANUAL_ENTRY order is created so revenue reports still count it). Amounts in pesos (1 = 1 peso, e.g. 150.50). By DEFAULT this only PREVIEWS what will be recorded; call again with confirm:true to actually write it. This WRITES — requires the payment:create-manual permission. Una venta ya cobrada no admite más pagos; lo extra se registra como venta nueva.',
     {
       venueId: z.string().describe('Venue to record the payment in (must be in your scope)'),
       idempotencyKey: z
@@ -615,6 +615,13 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
       }
 
       if (!confirm) {
+        // 🔴 R8-3b (Codex recheck-12 P3): una venta YA cobrada (PAID/REFUNDED) se rechaza desde la vista previa, con el mismo mensaje
+        // que la confirmación (R7-1): no se le pide al humano confirmar algo que se va a rechazar. La confirmación la sigue decidiendo
+        // el servicio bajo su candado.
+        if (orderId) {
+          const venta = await prisma.order.findFirst({ where: { id: orderId, venueId }, select: { paymentStatus: true } })
+          if (venta && esVentaCerrada(venta.paymentStatus)) return text({ ok: false, error: MENSAJE_VENTA_YA_COBRADA })
+        }
         return text({
           ok: false,
           requiresConfirmation: true,
@@ -632,26 +639,18 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
       }
 
       try {
-        // 🔴 R5-1 (ronda 5 post-QA de sellos tardíos; decisión «A»): ligar un cliente a una venta YA cobrada exige
-        // `payments:create`; el servicio lo decide bajo el candado de la venta (sin el permiso ⇒ 403, `ok: false` abajo).
-        const opciones = orderId && customerId ? { puedeCambiarClienteEnVentaCobrada: guard.tienePermiso('payments:create', venueId) } : {}
-        const payment = await createManualPayment(
-          venueId,
-          scope.staffId,
-          {
-            idempotencyKey,
-            amount: money2(amount),
-            tipAmount: money2(tipAmount ?? 0),
-            method: MANUAL_METHOD_MAP[method],
-            source: MANUAL_SOURCE_MAP[src],
-            ...(orderId ? { orderId } : {}),
-            ...(customerId ? { customerId } : {}),
-            ...(waiterId ? { waiterId } : {}),
-            ...(externalSource ? { externalSource } : {}),
-            ...(reason ? { reason } : {}),
-          },
-          opciones,
-        )
+        const payment = await createManualPayment(venueId, scope.staffId, {
+          idempotencyKey,
+          amount: money2(amount),
+          tipAmount: money2(tipAmount ?? 0),
+          method: MANUAL_METHOD_MAP[method],
+          source: MANUAL_SOURCE_MAP[src],
+          ...(orderId ? { orderId } : {}),
+          ...(customerId ? { customerId } : {}),
+          ...(waiterId ? { waiterId } : {}),
+          ...(externalSource ? { externalSource } : {}),
+          ...(reason ? { reason } : {}),
+        })
         await auditMcpWrite(scope, {
           action: 'MANUAL_PAYMENT_RECORDED',
           entity: 'Payment',

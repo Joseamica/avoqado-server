@@ -404,3 +404,56 @@ describe('AreaTicket v7 inventory finalization', () => {
     expect(result).toEqual({ areaTicketOrder: true, sessionId, fullyPaid: true })
   })
 })
+
+/**
+ * 🔴 R8-1 (Codex recheck-12 P2): conciliar el cobro capturado de una sesión de vales (dinero que ENTRA) nunca reabre una venta
+ * cerrada. La sesión sólo admite OPEN/PARTIALLY_PAID, pero la venta pudo saldarse por otro camino y luego corregirse su cobro.
+ */
+describe('🔴 R8-1: el cobro capturado de una sesión de vales sobre una venta PAID', () => {
+  beforeEach(() => primePaidCheckout())
+
+  const conciliar = (pagos: string[]) => {
+    prismaMock.order.findFirst.mockResolvedValue({
+      paymentStatus: 'PAID',
+      status: 'COMPLETED',
+      subtotal: new Prisma.Decimal('100.00'),
+      discountAmount: new Prisma.Decimal('0.00'),
+      serviceChargeAmount: new Prisma.Decimal('0.00'),
+      servedById: 'staff-paid',
+      createdById: 'staff-paid',
+    })
+    prismaMock.payment.findMany.mockResolvedValue(
+      pagos.map(p => ({ amount: new Prisma.Decimal(p), tipAmount: new Prisma.Decimal('0.00') })),
+    )
+    prismaMock.orderItem.findMany.mockResolvedValue([])
+    return finalizeAreaTicketPaymentInTransaction(prismaMock, {
+      venueId,
+      orderId,
+      paymentId: 'payment-paid',
+      fullyPaid: false,
+      staffId: 'staff-paid',
+      locked: { sessionId, attemptId },
+      reconcileCapturedPayment: true,
+    } as any)
+  }
+  const escrito = () => (prismaMock.order.update as jest.Mock).mock.calls.at(-1)?.[0]?.data
+
+  it('🔴 $80 + $10 ($90 < $100) ⇒ sigue PAID con saldo 0 (antes: PARTIAL con $10 por cobrar)', async () => {
+    await conciliar(['80.00', '10.00'])
+    const data = escrito()
+    expect([data.paymentStatus, Number(data.remainingBalance), Number(data.paidAmount)]).toEqual(['PAID', 0, 90])
+    expect([data.status, data.completedAt, data.loyaltyEligibleAt]).toEqual([undefined, undefined, undefined])
+  })
+
+  it('🔴 $80 + $20 que vuelve a cubrir ⇒ sin cierre con fecha nueva ni lealtad otra vez', async () => {
+    await conciliar(['80.00', '20.00'])
+    const data = escrito()
+    expect([data.paymentStatus, Number(data.remainingBalance)]).toEqual(['PAID', 0])
+    expect([data.status, data.completedAt, data.loyaltyEligibleAt, data.loyaltyStaffId]).toEqual([
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+    ])
+  })
+})

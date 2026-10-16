@@ -22,7 +22,7 @@ import { contratoDePagoManual } from '@/services/fiscal/contratoDePrecio'
 import { operationHash } from '@/utils/operationHash'
 import { isRetryableDbError } from '@/utils/serializableRetry'
 import { enqueuePaymentCommissionInTx } from '@/services/tpv/paymentEffects.service'
-import { asegurarCambioDeClienteEnVentaCobrada, esVentaYaCobrada } from '@/services/shared/ligaDeClienteEnVenta'
+import { esVentaYaCobrada } from '@/services/shared/ligaDeClienteEnVenta'
 
 /**
  * 🔴 R7-1 (ronda 7 post-QA de sellos tardíos; decisión del founder del 16-oct, «como Square»): una venta cobrada queda CERRADA. El
@@ -57,14 +57,6 @@ export async function createManualPayment(
   venueId: string,
   staffId: string,
   input: CreateManualPaymentInput & { idempotencyKey?: string },
-  opciones: {
-    /**
-     * 🔴 R5-1 (ronda 5 post-QA de sellos tardíos; Codex recheck-9 P2): ¿quien registra tiene `payments:create`? Lo resuelven el
-     * controller (resolvedor efectivo) y la tool MCP. Sin él, en una venta YA cobrada no se cambia el cliente (403). Sin decirlo,
-     * falla CERRADO.
-     */
-    puedeCambiarClienteEnVentaCobrada?: boolean
-  } = {},
   retryAttempt = 0,
 ): Promise<Payment> {
   const amount = new Prisma.Decimal(input.amount)
@@ -194,28 +186,14 @@ export async function createManualPayment(
         if (input.orderId) {
           await lockExistingOrderForPayment(tx, { venueId, orderId: input.orderId })
           // Bajo ese candado y antes de la primera escritura (el reclamo del turno), lo que la venta dice HOY. El reintento por
-          // serialización vuelve a entrar aquí desde cero, así que también vuelve a evaluar las dos reglas.
-          const venta = await tx.order.findFirst({
-            where: { id: input.orderId, venueId },
-            select: {
-              paymentStatus: true,
-              customerId: true,
-              orderCustomers: { where: { isPrimary: true }, select: { customerId: true }, take: 1 },
-            },
-          })
+          // serialización vuelve a entrar aquí desde cero, así que también vuelve a evaluar la regla.
+          const venta = await tx.order.findFirst({ where: { id: input.orderId, venueId }, select: { paymentStatus: true } })
           // 🔴 R7-1: venta ya cobrada (PAID/REFUNDED) ⇒ 400 para todos. Cierra de raíz re-cobrar una venta cobrada (tras un
           // reembolso, o tras corregir/cancelar su cobro en el panel, la venta sigue PAID y el saldo de aquí se reabría) y, con eso,
-          // colar un cliente con su lealtad (Codex r9/r10/r11). La caja del POS ya lo rechazaba («Order is already paid»).
+          // colar un cliente con su lealtad (Codex r9/r10/r11). La caja del POS ya lo rechazaba («Order is already paid»). R8-1: ningún
+          // cobro que entra por otro canal la baja a PARTIAL, así que esta regla no se esquiva. (R8-3a: la regla R5-1 —cambiar el
+          // cliente de una venta cobrada pedía `payments:create`— quedó muerta detrás de ésta y se quitó.)
           if (venta && esVentaYaCobrada(venta)) throw new BadRequestError(MENSAJE_VENTA_YA_COBRADA, CODIGO_VENTA_YA_COBRADA)
-          // R5-1 (ronda 5; decisión «A»): cambiar el cliente de una venta YA cobrada exige `payments:create`. Con R7-1 una venta
-          // cobrada ya no llega aquí; se conserva por si la regla de arriba cambia (misma lectura, sin consulta extra).
-          if (venta && input.customerId && opciones.puedeCambiarClienteEnVentaCobrada !== true)
-            asegurarCambioDeClienteEnVentaCobrada({
-              paymentStatus: venta.paymentStatus,
-              clienteActual: venta.orderCustomers[0]?.customerId ?? venta.customerId ?? null,
-              clienteNuevo: input.customerId,
-              puedeCobrar: false,
-            })
         }
         const priorCompletedPaymentCount = input.orderId ? await countPriorCompletedPayments(tx, { venueId, orderId: input.orderId }) : 0
 
@@ -601,7 +579,7 @@ export async function createManualPayment(
             throw new ConflictError('Conflicto de concurrencia. Reintenta con la misma llave de idempotencia.', 'PAYMENT_RETRY_REQUIRED')
           await new Promise(resolve => setTimeout(resolve, 50 * 2 ** retryAttempt))
           // Fresh invocation resets every post-commit effect; the outer attempt must not repeat them.
-          const retried = await createManualPayment(venueId, staffId, input, opciones, retryAttempt + 1)
+          const retried = await createManualPayment(venueId, staffId, input, retryAttempt + 1)
           replayed = true
           return retried
         }

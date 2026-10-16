@@ -50,7 +50,7 @@ import { validateStaffVenue } from '../../utils/staff-venue.util'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
 // La aritmética canónica del saldo: UNA sola definición de "cuánto se lleva
 // pagado y cuánto falta" para los cuatro caminos de cobro.
-import { computeOrderBalance } from '../shared/orderBalance'
+import { computeOrderBalance, estadoDeCobroAlRecibirDinero } from '../shared/orderBalance'
 import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
 import { assertOrderCancellableUnderLock, avisarOrdenCancelada } from '../shared/orderCancelGuard'
 import { externalRouteBlockers } from './areaTicketExternalCodes'
@@ -3345,21 +3345,27 @@ export async function finalizeAreaTicketPaymentInTransaction(
       })
     }
 
-    const paymentStatus = finalFullyPaid ? 'PAID' : totalPaid.greaterThan(0) ? 'PARTIAL' : 'PENDING'
+    // 🔴 R8-1 (Codex recheck-12 P2): el cobro capturado ENTRA dinero y nunca reabre una venta cerrada (leída bajo el `FOR UPDATE` de
+    // arriba; REFUNDED ya se rechazó): conserva PAID, saldo 0, sin cierre nuevo ni lealtad ni marca de cocina otra vez.
+    const cobro = estadoDeCobroAlRecibirDinero(lockedOrder.paymentStatus, true, {
+      paymentStatus: finalFullyPaid ? 'PAID' : totalPaid.greaterThan(0) ? 'PARTIAL' : 'PENDING',
+      remainingBalance,
+    })
+    const saldaAqui = finalFullyPaid && !cobro.cerrada
     await tx.order.update({
       where: { id: input.orderId },
       data: {
-        paymentStatus,
+        paymentStatus: cobro.paymentStatus,
         // 🔴 Un cobro PARCIAL no toca `Order.status`: escribía `PENDING` y
         // devolvía a la etapa inicial una orden ya `CONFIRMED`/`PREPARING`.
         // `status` dice "¿la cuenta sigue abierta?" — el dinero lo dice
         // `paymentStatus`. Sólo AVANZA a COMPLETED al quedar saldada.
-        ...(finalFullyPaid ? { status: 'COMPLETED' as const } : {}),
+        ...(saldaAqui ? { status: 'COMPLETED' as const } : {}),
         paidAmount: totalPaid,
-        remainingBalance,
+        remainingBalance: cobro.remainingBalance,
         tipAmount: totalTip,
         total,
-        ...(finalFullyPaid
+        ...(saldaAqui
           ? {
               completedAt: new Date(),
               loyaltyEligibleAt: new Date(),

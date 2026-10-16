@@ -8,7 +8,8 @@
  * empezaban con un pago manual sobre una venta que seguía PAID. Ventas PENDING/PARTIAL ⇒ como hoy (también con un abono devuelto).
  *
  * Historia: R5-1 (ronda 5) pedía `payments:create` para cambiar el cliente con un pago manual sobre una venta cobrada; con R7-1 ese
- * caso ya no llega a esa regla (la venta cobrada se rechaza antes, para todos).
+ * caso ya no llegaba a esa regla (la venta cobrada se rechaza antes, para todos). R8-3a (ronda 8) la quitó: el servicio ya no
+ * recibe el permiso y la lectura bajo el candado sólo pide el estado de cobro.
  */
 jest.mock('@/services/tpv/paymentEffects.service', () => ({
   ...jest.requireActual('@/services/tpv/paymentEffects.service'),
@@ -191,34 +192,31 @@ beforeEach(() => {
   ;(prismaMock.payment.findUnique as jest.Mock).mockResolvedValue(null)
 })
 
-const CON_PERMISO = { puedeCambiarClienteEnVentaCobrada: true }
-
 describe('🔴 R7-1: el pago manual rechaza una venta YA cobrada (PAID/REFUNDED), para todos y sin escribir nada', () => {
   it.each([
-    ['PAID', 'sin cliente', undefined, {}],
-    ['REFUNDED', 'sin cliente', undefined, {}],
-    ['PAID', 'cliente nuevo, sin el permiso', NUEVO, {}],
-    ['REFUNDED', 'cliente nuevo, sin el permiso', NUEVO, {}],
-    ['PAID', 'cliente nuevo, CON payments:create (dueño)', NUEVO, CON_PERMISO],
-    ['REFUNDED', 'cliente nuevo, CON payments:create (dueño)', NUEVO, CON_PERMISO],
-  ])('%s, %s ⇒ 400 ORDER_ALREADY_PAID', async (estado, _caso, cliente, opciones) => {
+    ['PAID', 'sin cliente', undefined],
+    ['REFUNDED', 'sin cliente', undefined],
+    ['PAID', 'cliente nuevo', NUEVO],
+    ['REFUNDED', 'cliente nuevo', NUEVO],
+  ])('%s, %s ⇒ 400 ORDER_ALREADY_PAID', async (estado, _caso, cliente) => {
     const { escrituras } = ventaYTransaccion({ paymentStatus: estado })
-    await rechazoVentaCobrada(manualPaymentService.createManualPayment(VENUE, STAFF, pagoDe20(cliente), opciones))
+    await rechazoVentaCobrada(manualPaymentService.createManualPayment(VENUE, STAFF, pagoDe20(cliente)))
     nadaSeEscribio(escrituras)
   })
 
   it('PAID + el MISMO cliente que el primario ⇒ también 400 (no es asunto del cliente: la venta está cerrada)', async () => {
     const { escrituras } = ventaYTransaccion({ paymentStatus: 'PAID', ligas: [{ customerId: 'cust-ana', isPrimary: true }] })
-    await rechazoVentaCobrada(manualPaymentService.createManualPayment(VENUE, STAFF, pagoDe20('cust-ana'), CON_PERMISO))
+    await rechazoVentaCobrada(manualPaymentService.createManualPayment(VENUE, STAFF, pagoDe20('cust-ana')))
     nadaSeEscribio(escrituras)
   })
 
   it('🔴 la decisión se toma BAJO el candado del cobro (ninguno nuevo) y antes de la primera escritura (el turno)', async () => {
     const { tx, lecturasDeLaVenta } = ventaYTransaccion({ paymentStatus: 'PAID' })
-    await rechazoVentaCobrada(manualPaymentService.createManualPayment(VENUE, STAFF, pagoDe20(NUEVO), CON_PERMISO))
+    await rechazoVentaCobrada(manualPaymentService.createManualPayment(VENUE, STAFF, pagoDe20(NUEVO)))
     expect(tx.$queryRaw).toHaveBeenCalledTimes(1) // el candado de siempre
     expect(lecturasDeLaVenta).toHaveLength(1)
-    expect(lecturasDeLaVenta[0]).toEqual(expect.objectContaining({ where: { id: ORDER, venueId: VENUE } }))
+    // R8-3a: sólo el estado de cobro — el cliente y el primario los pedía la regla R5-1, ya quitada.
+    expect(lecturasDeLaVenta[0]).toEqual({ where: { id: ORDER, venueId: VENUE }, select: { paymentStatus: true } })
     expect(tx.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(tx.order.findFirst.mock.invocationCallOrder[0])
     expect(tx.shift.findFirst).not.toHaveBeenCalled()
     expect(tx.payment.count).not.toHaveBeenCalled() // ni los cobros previos del turno ni reembolsos
