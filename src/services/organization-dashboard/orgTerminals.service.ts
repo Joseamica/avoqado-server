@@ -1,5 +1,7 @@
+import { Prisma } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
+import { MENSAJE_COMERCIOS_SOLO_EL_DUENO } from '../../middlewares/comerciosDeLaTerminalEnLaOrg.middleware'
 import { ForbiddenError, NotFoundError, BadRequestError } from '../../errors/AppError'
 import {
   createTerminal as superadminCreateTerminal,
@@ -119,12 +121,16 @@ export async function createTerminalForOrg(
     generateActivationCode?: boolean
   },
   staffId: string,
+  /** Si quien crea pasa el candado de comercios (dueño de la org o `system:config` en el venue de la terminal). */
+  opciones: { puedeAsignarComercios: boolean },
 ) {
   // Validate venue belongs to org
   await validateVenueInOrg(data.venueId, orgId)
 
   // Validate merchant accounts belong to org if provided
   if (data.assignedMerchantIds && data.assignedMerchantIds.length > 0) {
+    // Defensa en profundidad: la ruta ya lo frenó (`soloQuienPuedeAsignarComerciosAlCrear`).
+    if (!opciones.puedeAsignarComercios) throw new ForbiddenError(MENSAJE_COMERCIOS_SOLO_EL_DUENO, 'ORG_OWNER_REQUIRED')
     await validateMerchantsInOrg(orgId, data.assignedMerchantIds)
   }
 
@@ -133,6 +139,10 @@ export async function createTerminalForOrg(
   const result = await superadminCreateTerminal({
     ...data,
     staffId,
+    // 🔴 Lo que el alta anexa SOLA por serial (P1-1, Codex, 15-oct): sólo comercios de ESTA organización —un
+    // serial virtual de Blumon de otra org no tiene fila `Terminal`, así que nada más lo frenaba— y sólo si quien
+    // crea podría asignarlos a mano. Sin el candado, la terminal nace sin comercios anexados.
+    comerciosAutoAdjuntables: opciones.puedeAsignarComercios ? comerciosDeLaOrganizacion(orgId, await getOrgVenueIds(orgId)) : null,
   })
 
   logAction({
@@ -481,22 +491,31 @@ export async function assignMerchantsForOrg(orgId: string, terminalId: string, m
 /**
  * Validate that merchant accounts belong to the organization
  */
+/**
+ * Los comercios de una organización: los de la configuración de pago de sus sucursales activas
+ * (primario/secundario/terciario) o la de la org. Una sola definición para validar lo asignado, listar lo
+ * disponible y acotar lo que el alta anexa sola por serial.
+ */
+function comerciosDeLaOrganizacion(orgId: string, venueIds: string[]): Prisma.MerchantAccountWhereInput {
+  return {
+    OR: [
+      { venueConfigsPrimary: { some: { venueId: { in: venueIds } } } },
+      { venueConfigsSecondary: { some: { venueId: { in: venueIds } } } },
+      { venueConfigsTertiary: { some: { venueId: { in: venueIds } } } },
+      { orgConfigsPrimary: { some: { organizationId: orgId } } },
+      { orgConfigsSecondary: { some: { organizationId: orgId } } },
+      { orgConfigsTertiary: { some: { organizationId: orgId } } },
+    ],
+  }
+}
+
 async function validateMerchantsInOrg(orgId: string, merchantIds: string[]) {
   const venueIds = await getOrgVenueIds(orgId)
 
-  // Get merchants linked to org venues (via VenuePaymentConfig primary/secondary/tertiary)
-  // or directly to the org (via OrganizationPaymentConfig primary/secondary/tertiary)
   const validMerchants = await prisma.merchantAccount.findMany({
     where: {
       id: { in: merchantIds },
-      OR: [
-        { venueConfigsPrimary: { some: { venueId: { in: venueIds } } } },
-        { venueConfigsSecondary: { some: { venueId: { in: venueIds } } } },
-        { venueConfigsTertiary: { some: { venueId: { in: venueIds } } } },
-        { orgConfigsPrimary: { some: { organizationId: orgId } } },
-        { orgConfigsSecondary: { some: { organizationId: orgId } } },
-        { orgConfigsTertiary: { some: { organizationId: orgId } } },
-      ],
+      ...comerciosDeLaOrganizacion(orgId, venueIds),
     },
     select: { id: true },
   })
@@ -517,14 +536,7 @@ export async function getOrgMerchantAccounts(orgId: string) {
   const merchants = await prisma.merchantAccount.findMany({
     where: {
       active: true,
-      OR: [
-        { venueConfigsPrimary: { some: { venueId: { in: venueIds } } } },
-        { venueConfigsSecondary: { some: { venueId: { in: venueIds } } } },
-        { venueConfigsTertiary: { some: { venueId: { in: venueIds } } } },
-        { orgConfigsPrimary: { some: { organizationId: orgId } } },
-        { orgConfigsSecondary: { some: { organizationId: orgId } } },
-        { orgConfigsTertiary: { some: { organizationId: orgId } } },
-      ],
+      ...comerciosDeLaOrganizacion(orgId, venueIds),
     },
     select: {
       id: true,
