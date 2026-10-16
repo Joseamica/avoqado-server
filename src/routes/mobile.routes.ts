@@ -1990,12 +1990,86 @@ router.get(
 )
 
 /**
- * GET /api/v1/mobile/venues/:venueId/promotions
- * Promociones vigentes y las que abren en las próximas 4 horas.
+ * @openapi
+ * /api/v1/mobile/venues/{venueId}/promotions:
+ *   get:
+ *     tags: [Mobile - Promotions]
+ *     summary: Promociones del POS (vigentes y próximas) y, para la tablet que lo entiende, el carrusel de la pantalla del cliente
+ *     description: |
+ *       `active` y `upcoming` son el catálogo de siempre (vigentes ahora y las que abren en las próximas 4 horas); no
+ *       cambian. `timezone` y `fetchedAt` son aditivos y van para todos.
  *
- * `requireVenueMembership` va ANTES del candado de plan por la misma razón
- * documentada arriba para upsell: un extraño no se entera del plan de un
- * negocio ajeno antes de que se le diga que no pertenece.
+ *       **Carrusel (sólo POS_ANDROID con binding exacto por `X-Device-Id` y versión de diseño ≥ 2):** `carousel`,
+ *       `carouselTruncated`, `carouselEvaluated`, `carouselStatus` y `fingerprints.promotions`. Si el carrusel falla,
+ *       la ruta NO falla: `active`/`upcoming` salen igual y `carouselStatus` es `failed`, sin `carousel` (ausente ≠
+ *       vacío). Con carrusel, `timezone` es la zona con que se calculó su huella.
+ *
+ *       `requireVenueMembership` va ANTES del candado de plan (`PROMOTIONS`) por la misma razón documentada arriba
+ *       para upsell: un extraño no se entera del plan de un negocio ajeno antes de que se le diga que no pertenece.
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: header
+ *         name: X-Device-Id
+ *         required: false
+ *         schema: { type: string, maxLength: 64 }
+ *         description: El `deviceUid` del aparato. Sólo con él (y binding POS_ANDROID versión ≥ 2) viaja el carrusel.
+ *     responses:
+ *       200:
+ *         description: Catálogo de promociones (y el carrusel, si aplica)
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean, example: true }
+ *                 data:
+ *                   type: object
+ *                   required: [active, upcoming, timezone, fetchedAt]
+ *                   properties:
+ *                     active: { type: array, items: { type: object }, description: Vigentes ahora (sin cambios) }
+ *                     upcoming: { type: array, items: { type: object }, description: Abren en ≤ 4 h, con `startsAt` (sin cambios) }
+ *                     timezone: { type: string, example: America/Mexico_City, description: La zona CRUDA del venue; con carrusel, la de su huella }
+ *                     fetchedAt: { type: string, format: date-time, description: Hora del servidor al responder }
+ *                     carousel:
+ *                       type: array
+ *                       description: Sólo POS_ANDROID con versión de diseño ≥ 2 y carouselStatus ok. ≤ 50 tarjetas, en orden de descarga
+ *                       items:
+ *                         type: object
+ *                         properties:
+ *                           id: { type: string }
+ *                           name: { type: string }
+ *                           displayOrder: { type: integer }
+ *                           presentationRank: { type: integer, description: Orden de presentación 0..n-1 (la tablet no compara cadenas) }
+ *                           schedule:
+ *                             type: object
+ *                             properties:
+ *                               daysOfWeek: { type: array, items: { type: integer } }
+ *                               timeFrom: { type: string, nullable: true }
+ *                               timeUntil: { type: string, nullable: true }
+ *                               validFrom: { type: string, format: date-time, nullable: true }
+ *                               validUntil: { type: string, format: date-time, nullable: true }
+ *                           displayPriceCents: { type: integer, nullable: true, description: Sólo si el precio cobrado es demostrable }
+ *                           displayBadge: { type: string, nullable: true, example: 2x1 }
+ *                           photo:
+ *                             type: object
+ *                             nullable: true
+ *                             properties:
+ *                               url: { type: string }
+ *                               version: { type: string }
+ *                     carouselTruncated: { type: boolean, description: Sólo POS_ANDROID versión ≥ 2. Se topó un escaneo (1,000 vigentes o 200 futuras) }
+ *                     carouselEvaluated: { type: integer, description: Sólo POS_ANDROID versión ≥ 2. Candidatas evaluadas (no el total de elegibles) }
+ *                     carouselStatus: { type: string, enum: [ok, failed], description: Sólo POS_ANDROID versión ≥ 2 }
+ *                     fingerprints:
+ *                       type: object
+ *                       description: Sólo POS_ANDROID versión ≥ 2 con carouselStatus ok
+ *                       properties:
+ *                         promotions: { type: string, pattern: '^[0-9a-f]{32}$', description: 'Huella de { timezone, carousel }, sin fetchedAt' }
+ *       401: { description: Sin sesión }
+ *       403: { description: No pertenece al venue, o el plan no incluye PROMOTIONS }
+ *       500: { description: Error interno (el catálogo no se pudo leer) }
  */
 router.get(
   '/venues/:venueId/promotions',

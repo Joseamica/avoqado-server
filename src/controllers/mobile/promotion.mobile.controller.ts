@@ -1,13 +1,36 @@
 import { Request, Response } from 'express'
 import { listPromotionsForPos } from '../../services/promotions/promotionCatalog.service'
+import { carouselForDevice } from '../../services/customer-display/promotionCarousel.service'
 import logger from '../../config/logger'
+
+function deviceUidDe(req: Request): string | null {
+  const raw = req.headers?.['x-device-id']
+  const value = Array.isArray(raw) ? raw[0] : raw
+  const recortado = typeof value === 'string' ? value.trim().slice(0, 64) : ''
+  return recortado || null
+}
 
 /** GET /api/v1/mobile/venues/:venueId/promotions */
 export async function getPromotions(req: Request, res: Response) {
   try {
     const { venueId } = req.params
-    const data = await listPromotionsForPos(venueId)
-    return res.status(200).json({ success: true, data })
+    const [catalogo, carrusel] = await Promise.all([
+      listPromotionsForPos(venueId),
+      // 🔴 El carrusel nunca tumba la ruta: el catálogo de siempre es lo que usa el POS para cobrar.
+      carouselForDevice(venueId, deviceUidDe(req)).catch(error => {
+        logger.warn('[pantalla-del-cliente] carrusel no disponible', {
+          venueId,
+          error: error instanceof Error ? error.message : 'desconocido',
+        })
+        return null
+      }),
+    ])
+    return res.status(200).json({
+      success: true,
+      // El carrusel va DESPUÉS: con carrusel, su `timezone` (la de su huella) reemplaza la del catálogo (Codex r1 #6). El
+      // catálogo de siempre no se toca: el carrusel no trae `active` ni `upcoming`.
+      data: { ...catalogo, fetchedAt: new Date().toISOString(), ...(carrusel ?? {}) },
+    })
   } catch (error) {
     logger.error('Error in getPromotions', { error: error instanceof Error ? error.message : 'desconocido', venueId: req.params.venueId })
     return res.status(500).json({ success: false, message: 'Error interno del servidor' })
