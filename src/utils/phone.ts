@@ -26,6 +26,12 @@ function sinPrefijoMexicanoViejo(input: string): string {
   return /^(521|04[45])\d{10}$/.test(digits) ? `+52${digits.slice(3)}` : input
 }
 
+// La forma que se GUARDA: la misma que `phonesMatch` compara (formatos mexicanos viejos → `+52`, luego E.164). Así un `+521…`
+// que pasó la identidad no se guarda aparte del `+52…` de la misma persona. null si no se entiende.
+export function canonicalPhoneE164(input: string): string | null {
+  return normalizePhoneE164(sinPrefijoMexicanoViejo(input))
+}
+
 // True when a and b are the same phone number: E.164 idéntico tras convertir los formatos mexicanos viejos. 🔴 Si un lado no
 // se entiende, NO empata (auditoría 2026-10-01): comparar sólo los últimos 10 dígitos le daba a un `+1 551…` la cuenta de un
 // `+521 55…`. `phoneLast10` sigue sirviendo como prefiltro SQL. Returns false if either side is empty.

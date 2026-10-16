@@ -1,4 +1,20 @@
-import { normalizePhoneE164, phoneLast10, phonesMatch } from '@/utils/phone'
+import { canonicalPhoneE164, normalizePhoneE164, phoneLast10, phonesMatch } from '@/utils/phone'
+
+// Lo que se GUARDA (y se compara en SQL) debe ser la misma forma que `phonesMatch` considera igual: si no, un `+521…` pasa la
+// identidad y se guarda aparte del `+52…` de la misma persona (tope por teléfono partido en dos).
+describe('canonicalPhoneE164', () => {
+  it('convierte el formato mexicano viejo +521 a +52', () => {
+    expect(canonicalPhoneE164('+5215543453965')).toBe('+525543453965')
+  })
+
+  it('deja igual un E.164 ya canónico', () => {
+    expect(canonicalPhoneE164('+525543453965')).toBe('+525543453965')
+  })
+
+  it('devuelve null con basura', () => {
+    expect(canonicalPhoneE164('not a phone')).toBeNull()
+  })
+})
 
 describe('normalizePhoneE164', () => {
   it('normalizes 10-digit Mexican number', () => {

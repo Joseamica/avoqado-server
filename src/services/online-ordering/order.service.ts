@@ -17,7 +17,7 @@ import prisma from '@/utils/prismaClient'
 import { BadRequestError, ConflictError, UnauthorizedError } from '@/errors/AppError'
 import { socketManager } from '@/communication/sockets/managers/socketManager'
 import { SocketEventType } from '@/communication/sockets/types'
-import { normalizePhoneE164, phonesMatch } from '@/utils/phone'
+import { canonicalPhoneE164, phonesMatch } from '@/utils/phone'
 import { ACCEPT_TIMEOUT_MINUTES, MAX_PENDING_PER_PHONE, MAX_PENDING_PER_VENUE, OPEN_ORDER_STATUSES } from './constants'
 import { generateOrderNumber } from './orderNumber'
 import { getAcceptingStatus } from './presence.service'
@@ -108,8 +108,9 @@ export async function createOnlineOrder(input: CreateOnlineOrderInput): Promise<
     throw new UnauthorizedError('Verifica tu teléfono por WhatsApp para pedir y pagar al recoger.', 'PHONE_VERIFICATION_REQUIRED')
   }
   const customerId = input.customerId
-  // R23: el normalizador de la casa; si no lo entiende, «+» y sólo dígitos.
-  const phone = normalizePhoneE164(input.verifiedPhone) ?? `+${input.verifiedPhone.replace(/\D/g, '')}`
+  // R23: la forma canónica de la casa (la misma que compara `phonesMatch`: `+521…` → `+52…`); si no la entiende, «+» y sólo
+  // dígitos.
+  const phone = canonicalPhoneE164(input.verifiedPhone) ?? `+${input.verifiedPhone.replace(/\D/g, '')}`
 
   // 2. Repetición idempotente (R8). Antes de mirar si la tienda abre: un reintento tras perder la respuesta recibe SU pedido.
   const replay = await findReplay(prisma, input.venueId, externalId, customerId)
