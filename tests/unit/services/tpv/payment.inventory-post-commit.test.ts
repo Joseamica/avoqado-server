@@ -848,6 +848,54 @@ describe('recordOrderPayment — cuenta con vale por área cobrada con terminal 
     expect(armarComandasMock).not.toHaveBeenCalled()
   })
 
+  // 🔴 R9-1 (Codex recheck-13 #3): la finalización leyó, bajo el candado de la orden, que la venta YA estaba cerrada (PAID por otro
+  // canal, su cobro corregido a $80) y llega un cobro tardío de $20 por la sesión. Con los importes, la pasada de después la daba por
+  // «saldada ahora» ($80 < $100 antes de este cobro) y repetía cupones, referido, lealtad y la comanda. El dinero sí se registra.
+  it('🔴 R9-1: la venta ya estaba cerrada ⇒ ni cupones ni referido ni lealtad ni comanda otra vez; el cobro sí se registra', async () => {
+    const { onOrderPaid } = jest.requireMock('@/services/referrals/referralQualification.service')
+    const cerrada = makeOrder({
+      ...conVale(),
+      paymentStatus: 'PAID',
+      status: 'COMPLETED',
+      remainingBalance: new Decimal(0),
+      payments: [{ amount: new Decimal(80), tipAmount: new Decimal(0), type: null }],
+    })
+    ;(prisma.order.findUnique as jest.Mock).mockImplementation(async (args: any) =>
+      args?.select?.paymentStatus ? { paymentStatus: 'PAID' } : cerrada,
+    )
+    ;(prisma.payment.create as jest.Mock).mockResolvedValue({
+      id: 'payment-tardio',
+      status: 'COMPLETED',
+      feeAmount: 0,
+      netAmount: 20,
+      amount: new Decimal(20),
+      tipAmount: new Decimal(0),
+      venueId: VENUE_ID,
+      orderId: ORDER_ID,
+    })
+    lockAreaTicketCheckoutMock.mockResolvedValue({ sessionId: 'session-1', attemptId: 'attempt-1' })
+    finalizeAreaTicketPaymentMock.mockResolvedValue({
+      areaTicketOrder: true,
+      sessionId: 'session-1',
+      fullyPaid: true,
+      ventaYaCerrada: true,
+    })
+
+    const result: any = await (paymentService as any).recordOrderPayment(
+      VENUE_ID,
+      ORDER_ID,
+      { ...paymentData, amount: 2000, idempotencyKey: 'vale-r9' },
+      'user-1',
+    )
+
+    expect(prisma.payment.create).toHaveBeenCalledTimes(1)
+    expect(result.areaTicketCheckoutState).toBe('PAID')
+    expect(awardLoyaltyForPaidOrder).not.toHaveBeenCalled()
+    expect(onOrderPaid).not.toHaveBeenCalled()
+    expect(armarComandasMock).not.toHaveBeenCalled()
+    expect(productInventoryService.deductInventoryForProduct).not.toHaveBeenCalled()
+  })
+
   it('sin pantalla: con sesión de vales ni marca ni comanda', async () => {
     debeMarcarCocinaMock.mockResolvedValue(false)
     lockAreaTicketCheckoutMock.mockResolvedValue({ sessionId: 'session-1', attemptId: 'attempt-1' })
@@ -913,6 +961,43 @@ describe('recordOrderPayment — un pago que NO se capturó no salda la cuenta',
 
     expect(dejoLaVentaPagada()).toBe(true)
     expect(productInventoryService.deductInventoryForProduct).toHaveBeenCalled()
+  })
+})
+
+// R9-2 (re-revisión de la ronda 8): con el cierre transaccional (`committedSettlement`) el log de después calculaba por su cuenta y
+// decía PARTIAL con $10 por cobrar, mientras la base guardaba PAID con saldo 0 (R8-1). Ahora dice lo que quedó escrito.
+describe('recordOrderPayment — el log de los totales dice lo que se escribió (R9-2)', () => {
+  const logDeTotales = () =>
+    (logger.info as jest.Mock).mock.calls.find(([, m]: any[]) => m && 'newPaymentStatus' in m && m.orderId === ORDER_ID)?.[1]
+
+  it('R9-2: venta PAID con su cobro corregido a $80 + $10 de la terminal ⇒ PAID, saldo 0 y «se conservó cerrada»', async () => {
+    // La lectura después del commit ya trae lo que escribió el cierre transaccional (PAID, saldo 0).
+    const order = makeOrder({
+      paymentStatus: 'PAID',
+      status: 'COMPLETED',
+      remainingBalance: new Decimal(0),
+      payments: [{ amount: new Decimal(80), tipAmount: new Decimal(0), type: null }],
+    })
+    ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(order)
+    ;(prisma.order.update as jest.Mock).mockResolvedValue({ ...order, items: order.items })
+    ;(productInventoryService.getProductInventoryStatus as jest.Mock).mockResolvedValue(STOCK_OK)
+    ;(prisma.payment.create as jest.Mock).mockResolvedValue({
+      id: 'payment-1',
+      status: 'COMPLETED',
+      feeAmount: 0,
+      netAmount: 10,
+      amount: new Decimal(10),
+      tipAmount: new Decimal(0),
+      venueId: VENUE_ID,
+      orderId: ORDER_ID,
+    })
+
+    await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, { ...paymentData, amount: 1000 }, 'user-1')
+
+    const escrito = (prisma.order.update as jest.Mock).mock.calls.at(-1)?.[0]?.data
+    expect([escrito.paymentStatus, Number(escrito.remainingBalance)]).toEqual(['PAID', 0]) // R8-1, en el cierre transaccional
+    const log = logDeTotales()
+    expect([log.newPaymentStatus, Number(log.remainingBalance), log.ventaCerrada]).toEqual(['PAID', 0, true])
   })
 })
 

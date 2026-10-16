@@ -900,7 +900,11 @@ interface CryptoSettlementResult {
   /** `true` SÓLO si esta ejecución fue la que llevó la cuenta de abierta a pagada. */
   becamePaid: boolean
   paidAmount: string
+  /** R9-2: el saldo y el estado que quedaron ESCRITOS (una venta cerrada conserva PAID/REFUNDED con saldo 0, R8-1). */
   remainingBalance: string
+  paymentStatus: string
+  /** R9-2: la venta ya estaba cerrada y se conservó así (R8-1). */
+  ventaCerrada: boolean
   /**
    * Motivo por el que el saldo de la orden NO se recalculó. El `Payment` SÍ queda
    * COMPLETED: el dinero llegó de verdad y no se puede perder.
@@ -1219,6 +1223,8 @@ async function settleOrderForConfirmedCryptoPayment(
           becamePaid: false,
           paidAmount: Number(fresh.paidAmount ?? 0).toFixed(2),
           remainingBalance: Number(fresh.remainingBalance ?? 0).toFixed(2),
+          paymentStatus: fresh.paymentStatus,
+          ventaCerrada: false,
           balanceSkipped: reason,
         })
 
@@ -1367,11 +1373,14 @@ async function settleOrderForConfirmedCryptoPayment(
           postingId = posting?.id ?? null
         }
 
+        // R9-2: lo que se ESCRIBIÓ (el estado y el saldo conservados de una venta cerrada), no la aritmética, para el log de abajo.
         return {
           isFullyPaid: balance.isFullyPaid,
           becamePaid,
           paidAmount: balance.paidAmount.toFixed(2),
-          remainingBalance: balance.remainingBalance.toFixed(2),
+          remainingBalance: new Prisma.Decimal(cobro.remainingBalance).toFixed(2),
+          paymentStatus: cobro.paymentStatus,
+          ventaCerrada: cobro.cerrada,
           postingId,
         }
       }, ORDER_LOCK_WAIT_BUDGET)
@@ -1564,11 +1573,21 @@ async function handlePaymentConfirmed(
 
   if (payment.orderId && settlement) {
     if (!settlement.balanceSkipped) {
-      logger.info(settlement.isFullyPaid ? '📦 Order marked as PAID' : '📦 Order partially paid — balance still open', {
-        orderId: payment.orderId,
-        paidAmount: settlement.paidAmount,
-        remainingBalance: settlement.remainingBalance,
-      })
+      // R9-2: dice lo que quedó escrito. Una venta ya cerrada que recibe el cobro se conserva cerrada (R8-1): no es «partially paid».
+      logger.info(
+        settlement.ventaCerrada
+          ? '📦 Order already closed — crypto payment recorded, the sale stays closed'
+          : settlement.isFullyPaid
+            ? '📦 Order marked as PAID'
+            : '📦 Order partially paid — balance still open',
+        {
+          orderId: payment.orderId,
+          paymentStatus: settlement.paymentStatus,
+          paidAmount: settlement.paidAmount,
+          remainingBalance: settlement.remainingBalance,
+          ventaCerrada: settlement.ventaCerrada,
+        },
+      )
     }
 
     // 🔴 SE APLICA EL VALE, YA COMMITEADO EL COBRO — y nunca puede tumbarlo.

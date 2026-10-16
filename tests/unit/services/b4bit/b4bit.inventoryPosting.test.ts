@@ -381,4 +381,34 @@ describe('🔴 R8-1: el `CO` sobre una venta CERRADA', () => {
 
     expect([escrito().paymentStatus, Number(escrito().remainingBalance)]).toEqual(['PARTIAL', 150])
   })
+
+  // R9-2 (re-revisión de la ronda 8): el log de la liquidación decía «partially paid» con $30 por cobrar mientras la base guardaba
+  // PAID con saldo 0. Ahora registra lo que se escribió y dice si la venta se conservó cerrada.
+  const logDeLiquidacion = () =>
+    (jest.requireMock('@/config/logger').default.info as jest.Mock).mock.calls.find(
+      ([, m]: any[]) => m?.orderId === ORDER_ID && m && 'remainingBalance' in m,
+    )?.[1]
+
+  it('R9-2: PAID con $120 + $50 ⇒ el log dice PAID, saldo 0.00 y que la venta se conservó cerrada', async () => {
+    mockPrisma.payment.findUnique.mockResolvedValue(cryptoPayment())
+    mockPrisma.order.findUnique.mockResolvedValue(cerrada('PAID'))
+    mockPrisma.payment.findMany.mockResolvedValue([
+      { amount: d('120.00'), tipAmount: d('0.00') },
+      { amount: d('50.00'), tipAmount: d('0.00') },
+    ])
+
+    await processWebhook(webhookCO())
+
+    expect(logDeLiquidacion()).toMatchObject({ paymentStatus: 'PAID', remainingBalance: '0.00', ventaCerrada: true, paidAmount: '170.00' })
+  })
+
+  it('R9-2 regresión: un abono sobre una cuenta PENDING ⇒ el log dice PARTIAL con su saldo real', async () => {
+    mockPrisma.payment.findUnique.mockResolvedValue(cryptoPayment())
+    mockPrisma.order.findUnique.mockResolvedValue(freshOrder())
+    mockPrisma.payment.findMany.mockResolvedValue([{ amount: d('50.00'), tipAmount: d('0.00') }])
+
+    await processWebhook(webhookCO())
+
+    expect(logDeLiquidacion()).toMatchObject({ paymentStatus: 'PARTIAL', remainingBalance: '150.00', ventaCerrada: false })
+  })
 })

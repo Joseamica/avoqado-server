@@ -1347,7 +1347,8 @@ async function enqueueCommittedPaymentEffects(
   if (payment.type !== 'TEST') await enqueuePaymentCommissionInTx(tx, payment.id)
 }
 
-type CommittedStandaloneSettlement = { firstSettlement: boolean; postingId: string | null }
+/** `ventaCerrada` (R9-2): la venta ya estaba cerrada y se conservó (R8-1) — lo dice el log de después. */
+type CommittedStandaloneSettlement = { firstSettlement: boolean; postingId: string | null; ventaCerrada: boolean }
 
 /** Caller holds the Order lock; money and its inventory/loyalty obligation share one commit. */
 export async function settleStandalonePaymentInTx(
@@ -1425,7 +1426,7 @@ export async function settleStandalonePaymentInTx(
   })
   const { createSalePostingInTx } = await import('@/services/inventory/inventoryPosting.service')
   const posting = firstSettlement ? await createSalePostingInTx(tx, { venueId, orderId, items: order.items, staffId }) : null
-  return { firstSettlement, postingId: posting?.id ?? null }
+  return { firstSettlement, postingId: posting?.id ?? null, ventaCerrada: cobro.cerrada }
 }
 
 /**
@@ -1480,6 +1481,11 @@ async function updateOrderTotalsForStandalonePayment(
   staffId?: string,
   options?: {
     areaTicketAlreadyFinalized?: boolean
+    /**
+     * R9-1: la finalización del vale leyó bajo su candado que la venta YA estaba cerrada antes de este cobro. La lectura de aquí corre
+     * después de ese commit (la ve PAID igual que si este cobro la hubiera saldado), así que sólo ese aviso evita repetir los efectos.
+     */
+    ventaYaCerrada?: boolean
     venueId?: string
     committedSettlement?: CommittedStandaloneSettlement
     /** Internal: this pass already reran once after its inputs moved under the Order lock. */
@@ -1677,9 +1683,11 @@ async function updateOrderTotalsForStandalonePayment(
   // totalTip): la propina nueva no convierte una cuenta saldada en pendiente.
   // Y exige pagos PREVIOS: una orden 100% cortesía (total clampado a 0) sin
   // pagos aún NO está saldada — su primer cobro de $0 sí debe deducir.
+  // R9-2: la venta se conservó cerrada (R8-1) en ESTA escritura, en la del cierre transaccional o en la finalización del vale.
+  const ventaCerrada = cobro.cerrada || options?.committedSettlement?.ventaCerrada === true || options?.ventaYaCerrada === true
   const settledBeforeThisPayment = options?.committedSettlement
     ? !options.committedSettlement.firstSettlement
-    : cobro.cerrada || (order.payments.length > 0 && previousPayments >= totalesDeLaOrden(previousTips, estado) - 0.01)
+    : ventaCerrada || (order.payments.length > 0 && previousPayments >= totalesDeLaOrden(previousTips, estado) - 0.01)
   const coveredAreaTicketLines = isFullyPaid
     ? await getAreaTicketLineIdsCoveredByInventoryReservations(order.venueId, order.items)
     : new Set<string>()
@@ -2013,6 +2021,9 @@ async function updateOrderTotalsForStandalonePayment(
   }
   if (options?.outcome) options.outcome.written = true
 
+  // R9-2: el estado y el saldo QUE QUEDARON ESCRITOS — los de la escritura de arriba o, si la hizo otro (el cierre transaccional o la
+  // finalización del vale), los releídos después de su commit —, nunca la aritmética de esta pasada: con una venta conservada cerrada
+  // (R8-1) ésa dice PARTIAL con saldo mientras la base guarda PAID con 0.
   logger.info('Order totals updated for standalone payment', {
     orderId,
     orderSubtotal,
@@ -2021,9 +2032,10 @@ async function updateOrderTotalsForStandalonePayment(
     tipAmount,
     totalTip, // ✅ Cumulative tip from all payments
     totalPaid,
-    remainingAmount,
+    remainingBalance: updatedOrder.remainingBalance,
     isFullyPaid,
-    newPaymentStatus: cobro.paymentStatus,
+    newPaymentStatus: updatedOrder.paymentStatus,
+    ventaCerrada,
     // ⭐ KIOSK MODE: Log if we assigned the server from payment processor
     kioskModeServerAssigned: shouldAssignServer,
     assignedServerId: shouldAssignServer ? staffId : null,
@@ -3118,7 +3130,7 @@ async function finalizeCapturedAreaTicketPayment(input: {
   staffId?: string | null
   /** Etapa 3 del KDS: el saldado del vale deja la marca de cocina (el armado sólo toma los productos sueltos). */
   marcarCocina?: boolean
-}): Promise<'PAID' | 'PARTIALLY_PAID'> {
+}): Promise<{ estado: 'PAID' | 'PARTIALLY_PAID'; ventaYaCerrada: boolean }> {
   const areaTicketPayment = await import('../mobile/areaTicketV7.mobile.service')
   const finalization = await prisma.$transaction(
     tx =>
@@ -3135,7 +3147,7 @@ async function finalizeCapturedAreaTicketPayment(input: {
       }),
     { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
   )
-  return finalization.fullyPaid ? 'PAID' : 'PARTIALLY_PAID'
+  return { estado: finalization.fullyPaid ? 'PAID' : 'PARTIALLY_PAID', ventaYaCerrada: finalization.ventaYaCerrada === true }
 }
 
 async function resumeCapturedAreaTicketPayment(
@@ -3168,7 +3180,7 @@ async function resumeCapturedAreaTicketPayment(
   // Aquí no se arma tras el commit: la marca basta, el barrido arma la comanda ≤ 90 s después. `debeMarcarCocina` nunca lanza.
   const marcarCocina = await debeMarcarCocina(venueId)
   try {
-    return await finalizeCapturedAreaTicketPayment({
+    const finalizacion = await finalizeCapturedAreaTicketPayment({
       venueId,
       orderId,
       paymentId: payment.id,
@@ -3177,6 +3189,7 @@ async function resumeCapturedAreaTicketPayment(
       staffId: payment.processedById,
       marcarCocina,
     })
+    return finalizacion.estado
   } catch (error) {
     await markAreaTicketPaymentForReconciliation({
       venueId,
@@ -4350,8 +4363,10 @@ export async function recordOrderPayment(
       } | null
 
       if (capturedAreaCheckout && payment.status === 'COMPLETED') {
+        // R9-1: la finalización leyó bajo su candado que la venta YA estaba cerrada ⇒ la pasada de abajo no repite efectos de saldar.
+        let ventaYaCerrada = false
         try {
-          areaTicketCheckoutState = await finalizeCapturedAreaTicketPayment({
+          const finalizacion = await finalizeCapturedAreaTicketPayment({
             venueId,
             orderId: activeOrder.id,
             paymentId: payment.id,
@@ -4360,6 +4375,8 @@ export async function recordOrderPayment(
             staffId: validatedStaffId,
             marcarCocina,
           })
+          areaTicketCheckoutState = finalizacion.estado
+          ventaYaCerrada = finalizacion.ventaYaCerrada
         } catch (finalizationError) {
           // El proveedor ya confirmó el dinero. Nunca habilitar otro cobro:
           // congela la sesión y conserva el mismo intento para conciliación.
@@ -4384,6 +4401,7 @@ export async function recordOrderPayment(
             // inventory. Re-enter only the coupon/referral/loyalty side effects.
             await updateOrderTotalsForStandalonePayment(activeOrder.id, totalAmount + tipAmount, tipAmount, payment.id, validatedStaffId, {
               areaTicketAlreadyFinalized: true,
+              ventaYaCerrada,
               venueId,
               // Codex 3.6 (S3): la finalización ya puso la marca al saldar; aquí sólo se arman los sueltos.
               marcarCocina: marcarCocina && areaTicketCheckoutState === 'PAID',

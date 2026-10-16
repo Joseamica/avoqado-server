@@ -517,6 +517,29 @@ describe('recordOrderPayment (TPV) — un reembolso previo no reabre saldo', () 
       expect([lastOrderUpdate().paymentStatus, Number(lastOrderUpdate().remainingBalance)]).toEqual(['PARTIAL', 10])
     })
 
+    // R9-2 (re-revisión de la ronda 8): el log del recálculo decía PARTIAL con $10 mientras la base guardaba PAID con saldo 0.
+    const logDelRecalculo = () =>
+      (logger.info as jest.Mock).mock.calls.find(([, m]: any[]) => m && 'newPaymentStatus' in m && m.orderId === ORDER_ID)?.[1]
+
+    it('R9-2: PAID + $10 ⇒ el log del recálculo dice lo que se escribió (PAID, saldo 0) y que la venta se conservó cerrada', async () => {
+      cerradaCon80('PAID')
+      await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, paymentData(1000), 'user-1')
+      const log = logDelRecalculo()
+      expect([log.newPaymentStatus, Number(log.remainingBalance), log.ventaCerrada]).toEqual(['PAID', 0, true])
+    })
+
+    it('R9-2 regresión: PARTIAL + $10 ⇒ el log dice PARTIAL con $10 por cobrar', async () => {
+      seedOrder([{ amount: new Decimal(80), tipAmount: new Decimal(0), type: 'REGULAR' }], {
+        subtotal: new Decimal(100),
+        contratoDePrecio: 'IVA_INCLUIDO',
+        taxAmount: new Decimal(0),
+        paymentStatus: 'PARTIAL',
+      })
+      await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, paymentData(1000), 'user-1')
+      const log = logDelRecalculo()
+      expect([log.newPaymentStatus, Number(log.remainingBalance), log.ventaCerrada]).toEqual(['PARTIAL', 10, false])
+    })
+
     it('regresión: PARTIAL con $80 + $20 que la salda ⇒ PAID, COMPLETED, vale y lealtad (como hoy)', async () => {
       seedOrder([{ amount: new Decimal(80), tipAmount: new Decimal(0), type: 'REGULAR' }], {
         subtotal: new Decimal(100),
@@ -742,7 +765,7 @@ describe('🔴 R8-1: el cierre transaccional de la terminal (:1408) no reabre un
         undefined,
         undefined,
       ])
-      expect(r).toEqual({ firstSettlement: false, postingId: null })
+      expect(r).toEqual({ firstSettlement: false, postingId: null, ventaCerrada: true })
     },
   )
 
@@ -755,7 +778,7 @@ describe('🔴 R8-1: el cierre transaccional de la terminal (:1408) no reabre un
       undefined,
       undefined,
     ])
-    expect(r).toEqual({ firstSettlement: false, postingId: null })
+    expect(r).toEqual({ firstSettlement: false, postingId: null, ventaCerrada: true })
     expect(createSalePostingInTx).not.toHaveBeenCalled()
   })
 
@@ -771,7 +794,7 @@ describe('🔴 R8-1: el cierre transaccional de la terminal (:1408) no reabre un
     expect(data.completedAt).toEqual(expect.any(Date))
     expect(data.loyaltyEligibleAt).toEqual(expect.any(Date))
     expect(data.kitchenPendingAt).toEqual(expect.any(Date))
-    expect(r).toEqual({ firstSettlement: true, postingId: 'posting-1' })
+    expect(r).toEqual({ firstSettlement: true, postingId: 'posting-1', ventaCerrada: false })
   })
 
   it('regresión: el ORIGEN de una reasignación (no entra dinero: `null`, sin efectos) sí vuelve a deber, como hoy', async () => {

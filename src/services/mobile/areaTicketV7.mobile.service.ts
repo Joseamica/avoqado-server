@@ -3271,7 +3271,13 @@ export async function finalizeAreaTicketPaymentInTransaction(
     marcarCocina?: boolean
     locked: LockedAreaTicketPayment | null
   },
-): Promise<{ areaTicketOrder: boolean; sessionId?: string; fullyPaid?: boolean }> {
+): Promise<{
+  areaTicketOrder: boolean
+  sessionId?: string
+  fullyPaid?: boolean
+  /** R9-1: la venta ya estaba cerrada (PAID) antes de este cobro: quien llama NO repite cupones, referido, lealtad ni comanda. */
+  ventaYaCerrada?: boolean
+}> {
   if (!input.locked) return { areaTicketOrder: false }
   await tx.$queryRaw`SELECT id FROM "AreaTicketCheckoutSession" WHERE id = ${input.locked.sessionId} AND "venueId" = ${input.venueId} FOR UPDATE`
   const tickets = await tx.areaTicket.findMany({
@@ -3310,6 +3316,7 @@ export async function finalizeAreaTicketPaymentInTransaction(
     throw domainError(409, 'CHECKOUT_ORDER_NOT_PAYABLE', 'La orden materializada ya no admite pagos.')
   }
   let finalFullyPaid = input.fullyPaid
+  let ventaYaCerrada = false
   if (input.reconcileCapturedPayment) {
     // 🔴 `type` NO es decorativo: un reembolso vive como un `Payment` NEGATIVO
     // `type: REFUND` colgado de la MISMA orden. Sin ese campo, este recálculo
@@ -3352,6 +3359,7 @@ export async function finalizeAreaTicketPaymentInTransaction(
       remainingBalance,
     })
     const saldaAqui = finalFullyPaid && !cobro.cerrada
+    ventaYaCerrada = cobro.cerrada
     await tx.order.update({
       where: { id: input.orderId },
       data: {
@@ -3376,7 +3384,7 @@ export async function finalizeAreaTicketPaymentInTransaction(
         ...(!lockedOrder.servedById && input.staffId
           ? { servedById: input.staffId, createdById: lockedOrder.createdById ?? input.staffId }
           : {}),
-        ...(finalFullyPaid && lockedOrder.areaTicketCode ? { claimedByTerminalId: null, claimedAt: null } : {}),
+        ...((finalFullyPaid || ventaYaCerrada) && lockedOrder.areaTicketCode ? { claimedByTerminalId: null, claimedAt: null } : {}),
       },
     })
   } else if ((lockedOrder.paymentStatus === 'PAID') !== finalFullyPaid) {
@@ -3423,7 +3431,10 @@ export async function finalizeAreaTicketPaymentInTransaction(
     },
   })
 
-  if (!finalFullyPaid) {
+  // 🔴 R9-1 (Codex recheck-13 #3): la venta YA estaba cerrada (PAID, leída arriba bajo el `FOR UPDATE` de la orden; la saldó otro
+  // canal, como el pago manual, que no conoce la sesión) y entra un cobro tardío por la sesión. La sesión no se queda PARTIALLY_PAID
+  // (Android e iOS la restauran como carrito cobrable): cierra PAID como una venta pagada, con sus vales.
+  if (!finalFullyPaid && !ventaYaCerrada) {
     await tx.areaTicketCheckoutSession.update({
       where: { id: input.locked.sessionId },
       data: {
@@ -3439,9 +3450,30 @@ export async function finalizeAreaTicketPaymentInTransaction(
     }
   }
 
-  await lockAreaOrderInventoryFootprint(tx, input.venueId, input.locked.sessionId, input.orderId)
-  await consumeAreaTicketReservations(tx, input.venueId, input.locked.sessionId, input.orderId, input.staffId)
-  await consumeUnreservedAreaOrderInventory(tx, input.venueId, input.orderId, input.staffId)
+  // R9-1: el inventario no se descuenta dos veces. Si el primer cierre ya lo tomó —todo camino que salda fuera de la sesión (pago
+  // manual, liquidar desde el panel, cripto, la terminal) deja su vale de inventario SALE, con TODOS los renglones—, la sesión no
+  // consume nada. Si no lo tomó —el barrido de pagadas-abiertas cierra SIN vale ni descuento—, el consumo de la sesión es el PRIMERO
+  // de la venta, no una repetición, y corre como siempre. Las reservas que el otro cierre no consumió se quedan como están.
+  const inventarioYaTomado =
+    ventaYaCerrada &&
+    Boolean(
+      await tx.inventoryPosting.findUnique({
+        where: {
+          venueId_sourceKind_sourceId_effectKind: {
+            venueId: input.venueId,
+            sourceKind: 'ORDER',
+            sourceId: input.orderId,
+            effectKind: 'SALE',
+          },
+        },
+        select: { id: true },
+      }),
+    )
+  if (!inventarioYaTomado) {
+    await lockAreaOrderInventoryFootprint(tx, input.venueId, input.locked.sessionId, input.orderId)
+    await consumeAreaTicketReservations(tx, input.venueId, input.locked.sessionId, input.orderId, input.staffId)
+    await consumeUnreservedAreaOrderInventory(tx, input.venueId, input.orderId, input.staffId)
+  }
   const paidAt = new Date()
   const immediateTicketIds = tickets.filter(ticket => ticket.fulfillmentModeSnapshot === FulfillmentMode.IMMEDIATE).map(ticket => ticket.id)
   const deferredTicketIds = tickets.filter(ticket => ticket.fulfillmentModeSnapshot !== FulfillmentMode.IMMEDIATE).map(ticket => ticket.id)
@@ -3486,5 +3518,6 @@ export async function finalizeAreaTicketPaymentInTransaction(
     areaTicketOrder: true,
     sessionId: input.locked.sessionId,
     ...(input.reconcileCapturedPayment ? { fullyPaid: true } : {}),
+    ...(ventaYaCerrada ? { ventaYaCerrada: true } : {}),
   }
 }
