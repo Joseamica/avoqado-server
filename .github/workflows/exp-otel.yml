@@ -8,6 +8,7 @@
 #   …calibrar…  la tasa del ~50 % de CPU en A+ (se congela a mano en scripts/exp-otel/config/tasa.json)
 #   …prueba…    el arnés de la fase 2 en versión CORTA (depurar, no medir)
 #   …medir…     la medición completa: costo ×3, utilidad (4 brazos ×3), colector caído (6 variantes ×3), suite ×4, reporte
+#   …node24…    Node 20 vs Node 24, brazo A (mejoras-de-lo-nuestro/4): node24 ×4 y su reporte
 #   …reporte…   vuelve a correr SÓLO el reporte sobre los artefactos de la corrida medida (scripts/exp-otel/config/corrida-medida.json)
 name: 🧪 Experimento OTel (medición)
 
@@ -282,4 +283,73 @@ jobs:
           path: |
             exp-all/resumen.md
             exp-all/resumen.json
+          retention-days: 30
+
+  # ───────────── MEJORAS DE LO NUESTRO · 4: Node 24 vs Node 20 (carriles ci/exp-otel-node24-*) ─────────────
+  # Brazo A en las dos versiones, en el MISMO runner (diferencias pareadas). Criterio: scripts/exp-otel/config/criterio-node24.md
+  node24:
+    name: Node 20 vs 24 rep ${{ matrix.rep }}
+    if: ${{ contains(github.ref_name, 'node24') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        rep: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v4
+        with: { path: v20 }
+      - uses: actions/checkout@v4
+        with: { path: v24 }
+      - uses: actions/setup-node@v4
+        with: { node-version: '24' }
+      - name: Compilar con Node 24 (npm ci + npm run build)
+        working-directory: v24
+        run: |
+          node -v | tee node-build.txt
+          npm ci && npm run build
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - name: Compilar con Node 20 (npm ci + npm run build)
+        working-directory: v20
+        run: |
+          node -v | tee node-build.txt
+          npm ci && npm run build
+          docker pull -q postgres:16 && docker pull -q node:20-bookworm && docker pull -q node:24-bookworm
+      - name: Medir (humo + carga, las dos versiones en este runner)
+        working-directory: v20
+        env:
+          REP: ${{ matrix.rep }}
+          WS_V20: ${{ github.workspace }}/v20
+          WS_V24: ${{ github.workspace }}/v24
+          OUT_DIR: ${{ github.workspace }}/v20/exp-out
+        run: node_modules/.bin/tsx scripts/exp-otel/orq/node24.ts
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: 'node24-rep${{ matrix.rep }}', path: v20/exp-out/, retention-days: 30 }
+
+  reporte-node24:
+    name: Reporte Node 24 vs 20
+    needs: [node24]
+    if: ${{ always() && contains(github.ref_name, 'node24') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20', cache: 'npm' }
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with: { path: exp-all, pattern: 'node24-rep*' }
+      - name: Aplicar el criterio fijado antes de medir
+        run: |
+          node_modules/.bin/tsx scripts/exp-otel/orq/reporte-node24.ts exp-all
+          cat exp-all/node24.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: node24-resumen
+          path: |
+            exp-all/node24.md
+            exp-all/node24.json
           retention-days: 30

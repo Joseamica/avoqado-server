@@ -30,6 +30,8 @@ import {
   urlRed,
   SECRETOS,
   verificarSinSalida,
+  REPO,
+  ServidorNode,
 } from '../lib/comun'
 
 export const PLANTILLA = 'exp_plantilla'
@@ -62,6 +64,8 @@ export interface OpcionesDeLevantar {
   modoProxy?: string
   /** brazos A/A+ con la falla (ii): sólo el externo falso */
   conExternoFalso?: boolean
+  /** imagen de Node y árbol compilado del server (comparación Node 20 vs 24); por defecto, el de siempre */
+  servidor?: ServidorNode
 }
 
 /** Base nueva (clon de la plantilla), servicios OTel si el brazo los usa, y el server con su entorno. */
@@ -75,8 +79,10 @@ export async function levantar(brazo: Brazo, etiqueta: string, dirSalida: string
   else detenerServiciosOtel()
   await sleep(conOtel || op.conExternoFalso ? 3000 : 0)
   const env = entornoDelServer(db, entornoDelBrazo(brazo, op.extra))
+  // la precarga de medición se toma del árbol que corre el server (el otro no está montado en su contenedor)
+  if (op.servidor && env.NODE_OPTIONS) env.NODE_OPTIONS = env.NODE_OPTIONS.split(REPO).join(op.servidor.repo)
   const t0 = Date.now()
-  arrancarServer(SRV, env, op.comando)
+  arrancarServer(SRV, env, op.comando, op.servidor)
   await sleep(2000)
   if (!corriendo(SRV)) throw new Error(`el server (${brazo}) murió al arrancar:\n${logsDe(SRV).slice(-5000)}`)
   fs.writeFileSync(
@@ -85,6 +91,8 @@ export async function levantar(brazo: Brazo, etiqueta: string, dirSalida: string
       {
         brazo,
         comando: op.comando ?? 'npm start',
+        imagenServer: op.servidor?.imagen ?? 'node:20-bookworm',
+        nodeDelServer: sh(`docker exec ${SRV} node -v`, { quiet: true, allowFail: true }),
         variables: Object.keys(env).filter(k => k !== 'EXP_INYECTOR').sort(),
         // EXP_INYECTOR NO se escribe aquí: el calificador ciego no debe poder saber qué falla se sembró.
         otel: Object.fromEntries(Object.entries(env).filter(([k]) => (k.startsWith('OTEL_') || k.startsWith('EXP_')) && k !== 'EXP_INYECTOR')),

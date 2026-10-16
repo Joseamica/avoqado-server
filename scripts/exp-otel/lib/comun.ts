@@ -120,7 +120,17 @@ export function entornoDelServer(db: string, extra: Record<string, string> = {})
 /** `npm start` es lo que corre Render (render.yaml: startCommand). `node-directo` SÓLO para la sub-prueba de apagado. */
 export const COMANDO_NODE_DIRECTO = 'node -r tsconfig-paths/register dist/src/server.js'
 
-export function arrancarServer(nombre: string, env: Record<string, string>, comando = 'npm start') {
+/**
+ * `servidor`: qué IMAGEN de Node corre el server y desde qué ÁRBOL compilado (node_modules + dist). Por defecto, el de
+ * siempre (node:20-bookworm y este mismo repo). La comparación Node 20 vs Node 24 (4-node24-rendimiento) pasa otro árbol,
+ * compilado con `npm ci && npm run build` en ESA versión, y la imagen node:24-bookworm. Postgres y actores no cambian.
+ */
+export interface ServidorNode {
+  imagen: string
+  repo: string
+}
+
+export function arrancarServer(nombre: string, env: Record<string, string>, comando = 'npm start', servidor: ServidorNode = { imagen: NODE_IMAGE, repo: REPO }) {
   sh(`docker rm -f ${nombre}`, { quiet: true, allowFail: true })
   const flags = Object.entries(env)
     .map(([k, v]) => `-e ${k}=${JSON.stringify(v)}`)
@@ -130,7 +140,7 @@ export function arrancarServer(nombre: string, env: Record<string, string>, coma
   // necesita el apagado con flush (brazo C).
   sh(
     `docker run -d --name ${nombre} --init -e TINI_KILL_PROCESS_GROUP=1 --cpus=1 --memory=2g --network ${RED} --network-alias srv ` +
-      `-v ${REPO}:${REPO} -w ${REPO} ${flags} ${NODE_IMAGE} ${comando}`,
+      `-v ${servidor.repo}:${servidor.repo} -w ${servidor.repo} ${flags} ${servidor.imagen} ${comando}`,
     { quiet: true },
   )
 }
