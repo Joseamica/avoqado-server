@@ -41,6 +41,7 @@ import { deliveryWebhookReconciliationJob } from './jobs/delivery-webhook-reconc
 import { stripeWebhookReconciliationJob } from './jobs/stripe-webhook-reconciliation.job'
 import { moneyIntegrityWatchdogJob } from './jobs/money-integrity-watchdog.job'
 import { displayModeRequestExpiryJob } from './jobs/display-mode-request-expiry.job'
+import { onlineOrderAcceptanceExpiryJob } from './jobs/online-order-acceptance-expiry.job'
 import { terminalPaymentWatchdogJob } from './jobs/terminal-payment-watchdog.job'
 import { reservationDepositReconciliationJob } from './jobs/reservation-deposit-reconciliation.job'
 import { reservationReminderJob } from './jobs/reservation-reminder.job'
@@ -169,6 +170,7 @@ const gracefulShutdown = async (signal: string) => {
 
       // Stop terminal-payment watchdog
       displayModeRequestExpiryJob.stop()
+      onlineOrderAcceptanceExpiryJob.stop()
       terminalPaymentWatchdogJob.stop()
 
       // WHY: Publication delivery and expired attempts have independent
@@ -509,6 +511,7 @@ const startApplication = async (retries = 3) => {
 
       // Start terminal-payment arbitration watchdog (reconciles stale charge rows)
       displayModeRequestExpiryJob.start()
+      onlineOrderAcceptanceExpiryJob.start()
       terminalPaymentWatchdogJob.start()
 
       // WHY: APPLIED delivery and abandoned APPLYING reservations recover only
