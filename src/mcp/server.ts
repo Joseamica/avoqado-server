@@ -47,6 +47,7 @@ import { registerOverviewTools } from './tools/overview'
 import { registerTableTools } from './tools/tables'
 import { registerFeatureTools } from './tools/features'
 import { registerDeliveryChannelTools } from './tools/deliveryChannels'
+import { registerOnlineOrderingTools } from './tools/onlineOrdering'
 import { registerDeliveryActivationTools } from './tools/deliveryActivation'
 import { registerDeliveryCourierTools } from './tools/deliveryCourier'
 import { registerDeliveryLineActionTools } from './tools/deliveryLineActions'
@@ -143,6 +144,7 @@ export function registerAllTools(server: McpServer, scope: McpScope, flags: Tool
   registerFeatureTools(server, scope)
   registerHybridBillingTools(server, scope)
   registerDeliveryChannelTools(server, scope)
+  registerOnlineOrderingTools(server, scope)
   registerDeliveryActivationTools(server, scope)
   registerDeliveryCourierTools(server, scope)
   registerDeliveryLineActionTools(server, scope)
