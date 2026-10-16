@@ -264,6 +264,75 @@ describe('createOnlineOrder', () => {
     })
     expect(prismaMock.order.create).not.toHaveBeenCalled()
   })
+
+  it('un teléfono verificado en formato viejo (+521) se guarda y se topa en su forma canónica +52 (R23)', async () => {
+    await createOnlineOrder(input({ verifiedPhone: '+5215543453965', customer: { name: 'M', phone: '+525543453965' } }))
+    const where = (prismaMock.onlineOrder.count.mock.calls[0][0] as any).where
+    expect(where.order.customerPhone).toBe(PHONE)
+    expect((prismaMock.order.create.mock.calls[0][0] as any).data.customerPhone).toBe(PHONE)
+  })
+
+  it('una tienda abierta que no acepta pagar al recoger responde 400 PAYMENT_MODE_NOT_ACCEPTED y no cotiza ni crea', async () => {
+    ;(getAcceptingStatus as jest.Mock).mockResolvedValue({ ...OPEN, config: { ...OPEN.config, acceptsPayAtPickup: false } })
+    await expect(createOnlineOrder(input())).rejects.toMatchObject({ statusCode: 400, code: 'PAYMENT_MODE_NOT_ACCEPTED' })
+    expect(quoteCart).not.toHaveBeenCalled()
+    expect(prismaMock.order.create).not.toHaveBeenCalled()
+  })
+
+  it('el candado se toma en la transacción ANTES de los topes, el folio y las escrituras, y todo eso corre en la transacción (R4)', async () => {
+    const tx = {
+      $executeRaw: jest.fn().mockResolvedValue(0),
+      order: {
+        findUnique: jest.fn().mockResolvedValue(null),
+        findFirst: jest.fn().mockResolvedValue(null),
+        create: jest.fn().mockResolvedValue({ id: 'ord1', orderNumber: 'WABCD' }),
+      },
+      onlineOrder: {
+        count: jest.fn().mockResolvedValue(0),
+        create: jest.fn().mockImplementation(async (a: any) => ({ id: 'oo1', ...a.data })),
+      },
+    }
+    ;(prismaMock.$transaction as jest.Mock).mockImplementationOnce(async (fn: any) => fn(tx))
+
+    await createOnlineOrder(input())
+
+    expect(tx.$executeRaw).toHaveBeenCalledTimes(1)
+    expect(tx.$executeRaw.mock.calls[0][1]).toBe('online-order-admission:v1')
+    const lockAt = tx.$executeRaw.mock.invocationCallOrder[0]
+    expect(tx.onlineOrder.count).toHaveBeenCalledTimes(2)
+    for (const later of [
+      tx.order.findUnique.mock.invocationCallOrder[0],
+      ...tx.onlineOrder.count.mock.invocationCallOrder,
+      tx.order.findFirst.mock.invocationCallOrder[0],
+      tx.order.create.mock.invocationCallOrder[0],
+      tx.onlineOrder.create.mock.invocationCallOrder[0],
+    ]) {
+      expect(lockAt).toBeLessThan(later)
+    }
+    // Nada de la admisión corre en el cliente raíz (fuera del candado): sólo la repetición previa.
+    expect(prismaMock.$executeRaw).not.toHaveBeenCalled()
+    expect(prismaMock.onlineOrder.count).not.toHaveBeenCalled()
+    expect(prismaMock.order.findFirst).not.toHaveBeenCalled()
+    expect(prismaMock.order.create).not.toHaveBeenCalled()
+    expect(prismaMock.onlineOrder.create).not.toHaveBeenCalled()
+    expect(prismaMock.order.findUnique).toHaveBeenCalledTimes(1)
+  })
+
+  it('una carrera (P2002) cuyo ganador es de OTRO cliente es 409 IDEMPOTENCY_KEY_CONFLICT sin su token (R8)', async () => {
+    prismaMock.order.findUnique.mockResolvedValueOnce(null).mockResolvedValueOnce(
+      existing({
+        id: 'ord9',
+        customerId: 'otro-cliente',
+        onlineOrder: { id: 'oo9', status: 'PENDING_ACCEPTANCE', trackingToken: 'W'.repeat(32), acceptDeadlineAt: NOW },
+      }) as any,
+    )
+    ;(prismaMock.$transaction as jest.Mock).mockRejectedValueOnce(
+      new Prisma.PrismaClientKnownRequestError('dup', { code: 'P2002', clientVersion: 'x' }),
+    )
+    const err = await createOnlineOrder(input()).catch((e: unknown) => e)
+    expect(err).toMatchObject({ statusCode: 409, code: 'IDEMPOTENCY_KEY_CONFLICT' })
+    expect(JSON.stringify(err) + (err as Error).message).not.toContain('W'.repeat(32))
+  })
 })
 
 describe('getTrackingByToken', () => {
