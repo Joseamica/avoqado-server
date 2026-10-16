@@ -46,13 +46,16 @@ const body = {
   expectedTotal: '93.00',
   customer: { name: 'María G.', phone: '55 4345 3965' },
 }
-const post = (slug: string) => request(app).post(`/venues/${slug}/ordering/orders`).set('Idempotency-Key', 'k'.repeat(32)).send(body)
+const post = (slug: string, ip = '198.51.100.10') =>
+  request(app).post(`/venues/${slug}/ordering/orders`).set('CF-Connecting-IP', ip).set('Idempotency-Key', 'k'.repeat(32)).send(body)
 
-it('el sexto pedido del mismo visitante al mismo negocio en un minuto es 429; otro negocio tiene su propio tope (R10)', async () => {
+it('el sexto pedido del mismo visitante al mismo negocio en un minuto es 429; otro negocio u otro visitante tienen su propio tope (R10)', async () => {
   for (let i = 0; i < 5; i++) expect((await post('flautas')).status).toBe(201)
   const sexto = await post('flautas')
   expect(sexto.status).toBe(429)
   // El 429 también habla el sobre JSON de la API y en español (restricción global 5).
   expect(sexto.body).toMatchObject({ success: false, code: 'RATE_LIMIT_EXCEEDED' })
   expect((await post('tacos')).status).toBe(201)
+  // Otra IP REAL (la que manda Cloudflare) en el MISMO negocio tiene su propia cubeta.
+  expect((await post('flautas', '203.0.113.7')).status).toBe(201)
 })

@@ -1,8 +1,12 @@
 import express from 'express'
 import request from 'supertest'
 import { prismaMock } from '@tests/__helpers__/setup'
+import logger from '@/config/logger'
 import { ConflictError, UnauthorizedError } from '@/errors/AppError'
 import { generateCustomerToken } from '@/jwt.service'
+
+/** Qué candados corrieron, en orden: cada simulacro de abajo se anota aquí (prueba el CABLEADO de cada ruta). */
+const mockRan: string[] = []
 
 // R23: el limitador real se prueba aparte (onlineOrdering.public.rateLimit.test.ts); aquí sólo estorbaría.
 jest.mock('express-rate-limit', () => ({
@@ -13,6 +17,7 @@ jest.mock('express-rate-limit', () => ({
 jest.mock('@/middlewares/resolveOperationalVenueBySlug.middleware', () => ({
   __esModule: true,
   resolveOperationalVenueBySlug: (req: any, _res: any, next: any) => {
+    mockRan.push('operational')
     req.publicVenue = { id: 'v1', slug: req.params.venueSlug }
     next()
   },
@@ -20,13 +25,17 @@ jest.mock('@/middlewares/resolveOperationalVenueBySlug.middleware', () => ({
 jest.mock('@/middlewares/resolveVenueBySlug.middleware', () => ({
   __esModule: true,
   resolveVenueBySlug: (req: any, _res: any, next: any) => {
+    mockRan.push('plain')
     req.publicVenue = { id: 'v1', slug: req.params.venueSlug }
     next()
   },
 }))
 jest.mock('@/middlewares/requirePublicVenueFeatureStrict.middleware', () => ({
   __esModule: true,
-  requirePublicVenueFeatureStrict: () => (_req: any, _res: any, next: any) => next(),
+  requirePublicVenueFeatureStrict: (featureCode: string) => (_req: any, _res: any, next: any) => {
+    mockRan.push(`strict:${featureCode}`)
+    next()
+  },
 }))
 jest.mock('@/middlewares/customerAuth.middleware', () => {
   const real = jest.requireActual('@/middlewares/customerAuth.middleware')
@@ -35,6 +44,7 @@ jest.mock('@/middlewares/customerAuth.middleware', () => {
     // El resto del módulo es el REAL: si la ruta montara `authenticateCustomerOptional`, un token general pasaría (H1).
     ...real,
     authenticateOrderingCustomerOptional: (req: any, res: any, next: any) => {
+      mockRan.push('ordering-auth')
       // Con `Authorization` corre el middleware REAL de pedidos; sin ella, la cabecera de prueba simula su sesión.
       if (req.headers.authorization) return real.authenticateOrderingCustomerOptional(req, res, next)
       req.customerAuth = req.headers['x-test-customer'] ? { customerId: 'cust1', venueId: 'v1', verifiedPhone: '+525543453965' } : null
@@ -60,12 +70,15 @@ import router from '@/routes/public/onlineOrdering.public.routes'
 import { createOnlineOrder, getTrackingByToken } from '@/services/online-ordering/order.service'
 import { cancelOnlineOrderByCustomer } from '@/services/online-ordering/transitions.service'
 import { getPublicMenu } from '@/services/online-ordering/menu.service'
+import { getAcceptingStatus } from '@/services/online-ordering/presence.service'
+import { quoteCart } from '@/services/online-ordering/quote.service'
 
 const app = express()
 app.use(express.json())
 app.use('/venues/:venueSlug/ordering', router)
 
 const KEY = 'k'.repeat(32)
+const TOKEN = 'T'.repeat(32)
 const body = {
   items: [{ productId: 'p1', quantity: 2, modifiers: [{ modifierId: 'm1' }] }],
   paymentMode: 'PAY_AT_PICKUP',
@@ -79,6 +92,11 @@ const post = (o: { key?: string | null; customer?: boolean; auth?: string; paylo
   if (o.auth) r = r.set('Authorization', o.auth)
   return r.send(o.payload ?? body)
 }
+const cancel = (token = TOKEN) => request(app).post(`/venues/flautas/ordering/orders/${token}/cancel`)
+
+beforeEach(() => {
+  mockRan.length = 0
+})
 
 describe('API pública de pedidos en línea', () => {
   it('GET /menu responde la carta', async () => {
@@ -105,11 +123,33 @@ describe('API pública de pedidos en línea', () => {
     expect((await post({ payload: { ...body, items: [] } })).status).toBe(400)
   })
 
-  it('rechaza un carrito hostil: 51 renglones, cantidad 21 o una nota de 301 caracteres', async () => {
+  it('rechaza un carrito hostil: 51 renglones, cantidad 21, una nota de 301 caracteres o ids de más de 40', async () => {
     const one = { productId: 'p1', quantity: 1 }
     expect((await post({ payload: { ...body, items: Array.from({ length: 51 }, () => one) } })).status).toBe(400)
     expect((await post({ payload: { ...body, items: [{ ...one, quantity: 21 }] } })).status).toBe(400)
     expect((await post({ payload: { ...body, note: 'x'.repeat(301) } })).status).toBe(400)
+    expect((await post({ payload: { ...body, items: [{ ...one, productId: 'p'.repeat(41) }] } })).status).toBe(400)
+    expect((await post({ payload: { ...body, items: [{ ...one, modifiers: [{ modifierId: 'm'.repeat(41) }] }] } })).status).toBe(400)
+    expect(createOnlineOrder).not.toHaveBeenCalled()
+  })
+
+  it('🔴 ESC/POS: un `ESC p` en una nota llega SIN el carácter de control; el salto de línea de una nota se queda', async () => {
+    ;(createOnlineOrder as jest.Mock).mockResolvedValue({ orderId: 'ord1', trackingToken: TOKEN, replay: false })
+    const r = await post({
+      customer: true,
+      payload: {
+        ...body,
+        items: [{ productId: 'p1', quantity: 1, note: 'Sin cebolla\u001bp\u0000\nBien dorada' }],
+        customer: { name: 'María\n G.\u0007', phone: '55 4345 3965' },
+        note: 'Toco el timbre\u001bp\nGracias',
+      },
+    })
+    expect(r.status).toBe(201)
+    const input = (createOnlineOrder as jest.Mock).mock.calls[0][0]
+    expect(input.items[0].note).toBe('Sin cebollap\nBien dorada')
+    expect(input.note).toBe('Toco el timbrep\nGracias')
+    // En el nombre tampoco se queda el salto de línea.
+    expect(input.customer.name).toBe('María G.')
   })
 
   it('sin expectedTotal, o sin dos decimales, es 400 (R5)', async () => {
@@ -121,7 +161,7 @@ describe('API pública de pedidos en línea', () => {
   })
 
   it('la identidad sale de la SESIÓN (cliente y teléfono verificado), no del cuerpo; 201 con la llave y el total esperado', async () => {
-    ;(createOnlineOrder as jest.Mock).mockResolvedValue({ orderId: 'ord1', trackingToken: 'T'.repeat(32), replay: false })
+    ;(createOnlineOrder as jest.Mock).mockResolvedValue({ orderId: 'ord1', trackingToken: TOKEN, replay: false })
     const r = await post({ customer: true })
     expect(r.status).toBe(201)
     expect(createOnlineOrder).toHaveBeenCalledWith(
@@ -144,6 +184,13 @@ describe('API pública de pedidos en línea', () => {
     expect(r.body).toMatchObject({ success: false, code: 'PHONE_VERIFICATION_REQUIRED' })
   })
 
+  it('R6: un customerId y un verifiedPhone en el CUERPO, sin sesión, llegan al servicio como null', async () => {
+    ;(createOnlineOrder as jest.Mock).mockRejectedValue(new UnauthorizedError('Verifica tu teléfono', 'PHONE_VERIFICATION_REQUIRED'))
+    const r = await post({ payload: { ...body, customerId: 'cust1', verifiedPhone: '+525543453965' } })
+    expect(r.status).toBe(401)
+    expect(createOnlineOrder).toHaveBeenCalledWith(expect.objectContaining({ customerId: null, verifiedPhone: null }))
+  })
+
   it('H1: un token de cliente GENERAL no basta para pedir: 401 y no se crea nada', async () => {
     // El cliente existe y está activo en este negocio: si la ruta montara el middleware general, este token pasaría.
     prismaMock.customer.findFirst.mockResolvedValue({ id: 'cust1', venueId: 'v1', active: true })
@@ -154,7 +201,7 @@ describe('API pública de pedidos en línea', () => {
   })
 
   it('una repetición idempotente responde 200', async () => {
-    ;(createOnlineOrder as jest.Mock).mockResolvedValue({ orderId: 'ord1', trackingToken: 'T'.repeat(32), replay: true })
+    ;(createOnlineOrder as jest.Mock).mockResolvedValue({ orderId: 'ord1', trackingToken: TOKEN, replay: true })
     expect((await post({ customer: true })).status).toBe(200)
   })
 
@@ -165,8 +212,19 @@ describe('API pública de pedidos en línea', () => {
     expect(r.body).toMatchObject({ success: false, code: 'PRICE_CHANGED', details: { quote: { total: 210 } } })
   })
 
+  it('un 5xx no le enseña al comensal el código interno; nombre y pila quedan en el log del servidor', async () => {
+    ;(createOnlineOrder as jest.Mock).mockRejectedValue(Object.assign(new Error('se cayó la base'), { code: 'P2034' }))
+    const r = await post({ customer: true })
+    expect(r.status).toBe(500)
+    expect(r.body).toEqual({ success: false, error: 'No se pudo crear tu pedido' })
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ error: 'se cayó la base', name: 'Error', stack: expect.stringContaining('se cayó la base') }),
+    )
+  })
+
   it('el seguimiento de OTRO venue es el MISMO 404 que un token inexistente y nunca expone el venueId', async () => {
-    const url = `/venues/flautas/ordering/orders/${'T'.repeat(32)}`
+    const url = `/venues/flautas/ordering/orders/${TOKEN}`
     ;(getTrackingByToken as jest.Mock).mockResolvedValue({ venueId: 'OTRO', orderNumber: 'W1' })
     const ajeno = await request(app).get(url)
     ;(getTrackingByToken as jest.Mock).mockResolvedValue(null)
@@ -179,22 +237,89 @@ describe('API pública de pedidos en línea', () => {
 
   it('el seguimiento propio no incluye venueId', async () => {
     ;(getTrackingByToken as jest.Mock).mockResolvedValue({ venueId: 'v1', orderNumber: 'WABCD', status: 'ACCEPTED' })
-    const r = await request(app).get(`/venues/flautas/ordering/orders/${'T'.repeat(32)}`)
+    const r = await request(app).get(`/venues/flautas/ordering/orders/${TOKEN}`)
     expect(r.status).toBe(200)
     expect(r.body.data).toEqual({ orderNumber: 'WABCD', status: 'ACCEPTED' })
   })
 
-  it('cancelar traduce STALE a 409 ORDER_STATE_CHANGED', async () => {
+  it('cancelar traduce STALE a 409 ORDER_STATE_CHANGED con su texto', async () => {
     ;(cancelOnlineOrderByCustomer as jest.Mock).mockResolvedValue({ outcome: 'STALE', status: 'ACCEPTED' })
-    const r = await request(app).post(`/venues/flautas/ordering/orders/${'T'.repeat(32)}/cancel`)
+    const r = await cancel()
     expect(r.status).toBe(409)
-    expect(r.body).toMatchObject({ code: 'ORDER_STATE_CHANGED', status: 'ACCEPTED' })
+    expect(r.body).toEqual({
+      success: false,
+      code: 'ORDER_STATE_CHANGED',
+      status: 'ACCEPTED',
+      error: 'Tu pedido ya no está por aceptar, así que no se puede cancelar desde aquí. Revisa su estado o llama al negocio.',
+    })
   })
 
-  it('cancelar un pedido con dinero encima es 409 ORDER_HAS_PAYMENTS (R1)', async () => {
+  it('cancelar un pedido con dinero encima es 409 ORDER_HAS_PAYMENTS con su texto (R1)', async () => {
     ;(cancelOnlineOrderByCustomer as jest.Mock).mockResolvedValue({ outcome: 'HAS_PAYMENTS' })
-    const r = await request(app).post(`/venues/flautas/ordering/orders/${'T'.repeat(32)}/cancel`)
+    const r = await cancel()
     expect(r.status).toBe(409)
-    expect(r.body).toMatchObject({ code: 'ORDER_HAS_PAYMENTS' })
+    expect(r.body).toEqual({
+      success: false,
+      code: 'ORDER_HAS_PAYMENTS',
+      error: 'Tu pedido ya tiene un cobro en curso o registrado. Para cancelarlo, llama al negocio.',
+    })
+  })
+
+  it('sólo NOT_FOUND es 404; un desenlace desconocido es 500, nunca «No encontramos ese pedido»', async () => {
+    ;(cancelOnlineOrderByCustomer as jest.Mock).mockResolvedValue({ outcome: 'NOT_FOUND' })
+    const noEsta = await cancel()
+    expect(noEsta.status).toBe(404)
+    expect(noEsta.body).toEqual({ success: false, code: 'ORDER_NOT_FOUND', error: 'No encontramos ese pedido.' })
+    ;(cancelOnlineOrderByCustomer as jest.Mock).mockResolvedValue({ outcome: 'PAYMENT_REQUIRED' })
+    const raro = await cancel()
+    expect(raro.status).toBe(500)
+    expect(raro.body).toEqual({ success: false, error: 'No se pudo cancelar tu pedido' })
+  })
+})
+
+describe('cableado: qué candados corre cada ruta', () => {
+  const NUEVOS = ['operational', 'strict:ONLINE_ORDERING']
+
+  beforeEach(() => {
+    ;(getAcceptingStatus as jest.Mock).mockResolvedValue({
+      status: 'OPEN',
+      reason: null,
+      config: { hours: null, acceptsPayAtPickup: true, minOrderAmount: 0, defaultPrepMinutes: 20 },
+    })
+    ;(getPublicMenu as jest.Mock).mockResolvedValue({ categories: [] })
+    ;(quoteCart as jest.Mock).mockResolvedValue({ total: 93 })
+    ;(createOnlineOrder as jest.Mock).mockResolvedValue({ orderId: 'ord1', trackingToken: TOKEN, replay: false })
+    ;(getTrackingByToken as jest.Mock).mockResolvedValue({ venueId: 'v1', orderNumber: 'WABCD' })
+    ;(cancelOnlineOrderByCustomer as jest.Mock).mockResolvedValue({ outcome: 'OK', status: 'CANCELLED_BY_CUSTOMER' })
+  })
+
+  it.each([
+    ['GET /info', () => request(app).get('/venues/flautas/ordering/info')],
+    ['GET /menu', () => request(app).get('/venues/flautas/ordering/menu')],
+    ['POST /quote', () => request(app).post('/venues/flautas/ordering/quote').send({ items: body.items })],
+  ])('%s: venue operativo (sin demo) y candado de plan en modo cerrado (R10, R14)', async (_ruta, llamar) => {
+    expect((await llamar()).status).toBe(200)
+    expect(mockRan).toEqual(NUEVOS)
+  })
+
+  it('POST /orders: venue operativo → token de PEDIDOS → candado de plan, en ese orden', async () => {
+    expect((await post({ customer: true })).status).toBe(201)
+    expect(mockRan).toEqual(['operational', 'ordering-auth', 'strict:ONLINE_ORDERING'])
+  })
+
+  it('seguimiento y cancelar: sólo el venue activo, SIN candado de plan ni exigir operativo (R14)', async () => {
+    expect((await request(app).get(`/venues/flautas/ordering/orders/${TOKEN}`)).status).toBe(200)
+    expect(mockRan).toEqual(['plain'])
+    mockRan.length = 0
+    expect((await cancel()).status).toBe(200)
+    expect(mockRan).toEqual(['plain'])
+  })
+
+  it('un token mal formado se rechaza ANTES de buscar el negocio (no cuesta una consulta)', async () => {
+    expect((await request(app).get('/venues/flautas/ordering/orders/corto')).status).toBe(400)
+    expect((await cancel('corto')).status).toBe(400)
+    expect(mockRan).toEqual([])
+    expect(getTrackingByToken).not.toHaveBeenCalled()
+    expect(cancelOnlineOrderByCustomer).not.toHaveBeenCalled()
   })
 })

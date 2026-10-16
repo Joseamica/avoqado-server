@@ -15,10 +15,12 @@ const venueOf = (req: Request) => (req as any).publicVenue as { id: string; slug
 
 function fail(res: Response, error: any, fallback: string) {
   const status: number = error?.statusCode ?? 500
-  if (status >= 500) logger.error('[OnlineOrdering] error público', { error: error?.message })
+  // Nombre y pila SÓLO al log del servidor (para diagnosticar un 5xx en producción); al comensal, el texto genérico.
+  if (status >= 500) logger.error('[OnlineOrdering] error público', { error: error?.message, name: error?.name, stack: error?.stack })
   return res.status(status).json({
     success: false,
-    code: error?.code,
+    // Un 5xx no expone su código interno (p. ej. el de Prisma).
+    code: status >= 500 ? undefined : error?.code,
     error: status >= 500 ? fallback : error.message,
     details: status >= 500 ? undefined : error?.details,
   })
@@ -146,17 +148,21 @@ export async function postCancel(req: Request, res: Response) {
         success: false,
         code: 'ORDER_STATE_CHANGED',
         status: r.status,
-        error: 'Tu pedido ya no se puede cancelar desde aquí. Llama al negocio.',
+        error: 'Tu pedido ya no está por aceptar, así que no se puede cancelar desde aquí. Revisa su estado o llama al negocio.',
       })
     }
     if (r.outcome === 'HAS_PAYMENTS') {
       return res.status(409).json({
         success: false,
         code: 'ORDER_HAS_PAYMENTS',
-        error: 'Tu pedido ya tiene un pago registrado. Para cancelarlo, llama al negocio.',
+        error: 'Tu pedido ya tiene un cobro en curso o registrado. Para cancelarlo, llama al negocio.',
       })
     }
-    return res.status(404).json({ success: false, code: 'ORDER_NOT_FOUND', error: 'No encontramos ese pedido.' })
+    if (r.outcome === 'NOT_FOUND') {
+      return res.status(404).json({ success: false, code: 'ORDER_NOT_FOUND', error: 'No encontramos ese pedido.' })
+    }
+    // Un desenlace que cancelar no debería dar (p. ej. PAYMENT_REQUIRED) es un 500, nunca «no encontramos ese pedido».
+    throw new Error(`Desenlace inesperado al cancelar un pedido en línea: ${r.outcome}`)
   } catch (error) {
     return fail(res, error, 'No se pudo cancelar tu pedido')
   }
