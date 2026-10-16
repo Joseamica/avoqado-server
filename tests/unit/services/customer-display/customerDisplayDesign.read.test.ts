@@ -11,9 +11,13 @@ import {
   invalidateCustomerDisplayCache,
   previewCustomerDisplay,
 } from '@/services/customer-display/customerDisplayDesign.service'
+import { resetVenuePlanSnapshotsForTests } from '@/services/customer-display/venuePlanSnapshot'
+import { vuelosPorLlave } from '@/services/customer-display/customerDisplayCache'
 
 jest.mock('@/services/access/basePlan.service', () => ({
   venueHasFeatureAccess: jest.fn(async (_venueId: string, code: string) => code !== 'CUSTOMER_DISPLAY_PROMOS'),
+  // F0-B (Task 4): el camino `cache: true` lee el plan del snapshot por venue.
+  getVenuePlanInfo: jest.fn(async () => ({ tier: 'FREE', grandfathered: false, exempt: false })),
 }))
 jest.mock('@/services/customer-display/storageOrigins', () => ({
   ...jest.requireActual('@/services/customer-display/storageOrigins'),
@@ -55,6 +59,7 @@ function diferida<T>() {
 
 beforeEach(() => {
   invalidateCustomerDisplayCache(TERMINAL)
+  resetVenuePlanSnapshotsForTests()
   accesoAlPlan.mockClear()
   // `clearAllMocks` (setup global) NO restaura implementaciones: una prueba que cambie el plan no puede contaminar a la siguiente.
   accesoAlPlan.mockImplementation(async (_venueId: string, code: string) => code !== 'CUSTOMER_DISPLAY_PROMOS')
@@ -355,6 +360,10 @@ describe('la caché: lo que se entrega y cuánto dura en la fila', () => {
       const segundo = diferida<unknown>()
       prismaMock.terminal.findFirst.mockReturnValueOnce(primero.promesa as any).mockReturnValueOnce(segundo.promesa as any)
       const calculo1 = getEffectiveDesign(VENUE, TERMINAL, { cache: true })
+      // F0-B (Task 4): con «un solo cálculo por llave», el segundo pedido se UNIRÍA al primero y por la API pública ya no
+      // hay dos cálculos de la misma llave y generación. Se suelta el registro a mano para forzar el caso que el `delete`
+      // previo a `purgar` sigue protegiendo (defensa), sin cambiar lo que la prueba afirma.
+      vuelosPorLlave.delete(`${TERMINAL}:${VENUE}`)
       const calculo2 = getEffectiveDesign(VENUE, TERMINAL, { cache: true }) // dos cálculos de la MISMA llave en vuelo
       primero.resolver(terminalRow())
       await calculo1 // la llave entra primero: es la más vieja de la fila

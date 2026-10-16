@@ -8,7 +8,11 @@ import {
   previewCopyCustomerDisplay,
 } from '@/services/customer-display/customerDisplayDesign.service'
 
-jest.mock('@/services/access/basePlan.service', () => ({ venueHasFeatureAccess: jest.fn(async () => true) }))
+jest.mock('@/services/access/basePlan.service', () => ({
+  venueHasFeatureAccess: jest.fn(async () => true),
+  // F0-B (Task 4): el camino `cache: true` lee el plan del snapshot por venue.
+  getVenuePlanInfo: jest.fn(async () => ({ tier: 'PRO', grandfathered: false, exempt: false })),
+}))
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn() }))
 
 const entrada = {

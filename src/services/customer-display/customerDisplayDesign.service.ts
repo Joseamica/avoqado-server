@@ -7,7 +7,7 @@ import { logAction } from '@/services/dashboard/activity-log.service'
 import { lockTerminalRow } from '@/services/shared/terminalScopedWrites'
 import { esEsperaVencida, esInterbloqueo, esperaCortaAleatoria } from '@/services/shared/lockWait'
 import { resolveEffectiveDeviceCapabilities } from '@/services/device-capabilities.service'
-import { cache, congelar, enVuelo, invalidateCustomerDisplayCache, purgar, TTL_MS } from './customerDisplayCache'
+import { cache, congelar, enVuelo, invalidateCustomerDisplayCache, purgar, TTL_MS, vuelosPorLlave } from './customerDisplayCache'
 import { buildEffectiveDesign, type AssetRow, type FichaEfectiva } from './customerDisplayDesign.effective'
 import {
   DEVICES_PAGE_MAX,
@@ -18,8 +18,9 @@ import {
   type DesignDraft,
   type DesignValues,
 } from './customerDisplayDesign.validation'
+import { PollWorkSaturated, type PollWorkLimiter } from './pollWork'
 import { configuredStorageBucket } from './storageOrigins'
-import { entitlementsFrom, readPlanGrants, type Entitlements } from './venuePlanSnapshot'
+import { entitlementsFrom, PLAN_SNAPSHOT_TTL_MS, readPlanGrants, readVenuePlanSnapshot, type Entitlements } from './venuePlanSnapshot'
 // M5 (revisión final): re-exportado, no redefinido — el tope de destinos vive en el módulo PURO (mismo patrón que
 // `MAX_ASSET_BYTES` en `customerDisplayAsset.service.ts`, 949bf907), para que la ruta HTTP y el MCP lean el MISMO
 // número que este servicio en vez de arrastrar una segunda copia hardcodeada.
@@ -40,6 +41,8 @@ export type { Entitlements }
 export interface FichaContext {
   entitlements: Entitlements
   bucket: string | null
+  /** Hasta cuándo vale el plan con que se armó (sólo el contexto cacheado lo trae; DD4). */
+  vigenteHasta?: number
 }
 
 const TERMINAL_SELECT = {
@@ -114,14 +117,23 @@ export async function readEntitlements(venueId: string): Promise<Entitlements> {
 }
 
 let bucketAvisado = false
-export async function readFichaContext(venueId: string): Promise<FichaContext> {
-  const entitlements = await readEntitlements(venueId)
+function bucketConAviso(): string | null {
   const bucket = configuredStorageBucket()
   if (!bucket && !bucketAvisado) {
     bucketAvisado = true
     logger.error('[pantalla-del-cliente] Firebase Storage no está configurado: la ficha sale sin imágenes')
   }
-  return { entitlements, bucket }
+  return bucket
+}
+
+export async function readFichaContext(venueId: string): Promise<FichaContext> {
+  return { entitlements: await readEntitlements(venueId), bucket: bucketConAviso() }
+}
+
+/** El contexto del POLL: el plan sale de la caché por venue (Task 3) y el contexto dice hasta cuándo vale. */
+export async function readFichaContextCached(venueId: string, o: { limiter?: PollWorkLimiter } = {}): Promise<FichaContext> {
+  const plan = await readVenuePlanSnapshot(venueId, o)
+  return { entitlements: plan.entitlements, bucket: bucketConAviso(), vigenteHasta: plan.calculadoEn + PLAN_SNAPSHOT_TTL_MS }
 }
 
 async function cargarActivos(values: DesignValues, venueId: string): Promise<Map<string, AssetRow>> {
@@ -156,43 +168,87 @@ export async function armarFicha(
 
 // La caché de la ficha vive en su propio módulo, sin dependencias en tiempo de ejecución, para que quien cambia una
 // terminal de negocio la invalide sin importar este servicio. Se re-exporta lo que ya se importaba desde aquí.
-export { CACHE_MAX_ENTRIES, cacheSizeForTests, invalidateCustomerDisplayCache } from './customerDisplayCache'
+export { CACHE_MAX_ENTRIES, cacheSizeForTests, invalidateCustomerDisplayCache, peekEffectiveFingerprint } from './customerDisplayCache'
+
+export type ModoDeCache = boolean | 'refresh'
+type ValorEnCache = { ficha: FichaEfectiva; assetRejected: string[] }
+
+/**
+ * El cálculo de una ficha para la caché (poll y 'refresh'). 🔴 Nunca un lugar dentro de otro (Codex r1 #2): el plan va
+ * PRIMERO y fuera de todo lugar —su caché toma el suyo sólo si tiene que calcular—, y después la terminal y sus activos
+ * ocupan UN lugar, sólo en el poll, hasta que las dos lecturas (seguidas, no en paralelo) se asientan.
+ */
+async function calcularParaLaCache(
+  venueId: string,
+  terminalId: string,
+  modo: true | 'refresh',
+  limiter: PollWorkLimiter | undefined,
+): Promise<{ valor: ValorEnCache; vigenteHasta?: number }> {
+  const ctx = modo === true ? await readFichaContextCached(venueId, { limiter }) : await readFichaContext(venueId)
+  const leer = async () => {
+    const terminal = await loadTerminalForCustomerDisplay(venueId, terminalId)
+    return armarFicha(terminal, designValuesOf(terminal.customerDisplayDesign), ctx)
+  }
+  // El tope SÓLO para el poll: 'refresh' lo pide una persona (o su aparato), no el trabajo de fondo.
+  const enSuLugar = modo === true && limiter ? limiter.intentar(leer) : leer()
+  if (enSuLugar === null) throw new PollWorkSaturated()
+  return { valor: await enSuLugar, vigenteHasta: ctx.vigenteHasta }
+}
 
 export async function getEffectiveDesign(
   venueId: string,
   terminalId: string,
-  opciones: { cache?: boolean } = {},
-): Promise<{ ficha: FichaEfectiva; assetRejected: string[] }> {
-  const calcular = async () => {
+  opciones: { cache?: ModoDeCache; limiter?: PollWorkLimiter } = {},
+): Promise<ValorEnCache> {
+  const modo = opciones.cache ?? false
+  if (modo === false) {
+    // El dashboard: fresco y sin tocar la caché, IGUAL que F0-A.
     const terminal = await loadTerminalForCustomerDisplay(venueId, terminalId)
     return armarFicha(terminal, designValuesOf(terminal.customerDisplayDesign), await readFichaContext(venueId))
   }
-  if (!opciones.cache) return calcular()
 
   const llave = `${terminalId}:${venueId}`
-  const guardado = cache.get(llave)
-  if (guardado && guardado.hasta > Date.now()) return guardado.valor
+  if (modo === true) {
+    const guardado = cache.get(llave)
+    if (guardado && guardado.hasta > Date.now()) return guardado.valor
+    // 🔴 Un solo cálculo por llave (spec §5.7.4) — pero NUNCA unirse a uno que empezó antes de una invalidación: la
+    // generación de la terminal lo distingue (la misma marca que ya impide que ese cálculo se guarde).
+    const vueloDeLaTerminal = enVuelo.get(terminalId)
+    const compartido = vuelosPorLlave.get(llave)
+    if (vueloDeLaTerminal && compartido && compartido.generacion === vueloDeLaTerminal.generacion) return compartido.promesa
+  } else {
+    // 'refresh': lo de antes (guardado o en vuelo) ya no vale para NADIE; lo que calculemos aquí lo reemplaza.
+    invalidateCustomerDisplayCache(terminalId)
+  }
 
+  // Todo esto ANTES del primer `await`: un segundo pedido de la misma llave ya encuentra el vuelo y se une.
   const vuelo = enVuelo.get(terminalId) ?? { generacion: 0, calculos: 0 }
   enVuelo.set(terminalId, vuelo)
   const generacionAlEmpezar = vuelo.generacion
   vuelo.calculos += 1
-  try {
-    const valor = congelar(await calcular())
-    if (vuelo.generacion === generacionAlEmpezar) {
-      const ahora = Date.now()
-      // `set` sobre una llave que ya existe conserva su lugar en la fila: sin este `delete`, un valor recién guardado se
-      // quedaría donde estaba el viejo y el tope lo tiraría antes que entradas más viejas de verdad. Va ANTES de purgar
-      // para que reemplazar una llave no cuente como una entrada de más.
-      cache.delete(llave)
-      purgar(ahora)
-      cache.set(llave, { hasta: ahora + TTL_MS, valor })
-    }
-    return valor
-  } finally {
-    vuelo.calculos -= 1
-    if (vuelo.calculos === 0) enVuelo.delete(terminalId)
-  }
+
+  // 🔴 Codex r1 #1: `.then().finally()` sobre el cálculo ya arrancado. El `finally` corre DESPUÉS, cuando `promesa` ya
+  // existe; una función async inmediata que se nombrara a sí misma en su `finally` no compila (TS2454).
+  const promesa: Promise<ValorEnCache> = calcularParaLaCache(venueId, terminalId, modo, opciones.limiter)
+    .then(({ valor: crudo, vigenteHasta }) => {
+      const valor = congelar(crudo)
+      if (vuelo.generacion === generacionAlEmpezar) {
+        const ahora = Date.now()
+        // `set` sobre una llave que ya existe conserva su lugar en la fila: el `delete` va ANTES de purgar (F0-A).
+        cache.delete(llave)
+        purgar(ahora)
+        // DD4: nunca más que el plan con que se armó (60 s de plan + 60 s de ficha serían hasta 120 s de retraso).
+        cache.set(llave, { hasta: Math.min(ahora + TTL_MS, vigenteHasta ?? Number.POSITIVE_INFINITY), valor })
+      }
+      return valor
+    })
+    .finally(() => {
+      vuelo.calculos -= 1
+      if (vuelo.calculos === 0) enVuelo.delete(terminalId)
+      if (vuelosPorLlave.get(llave)?.promesa === promesa) vuelosPorLlave.delete(llave)
+    })
+  vuelosPorLlave.set(llave, { promesa, generacion: generacionAlEmpezar })
+  return promesa
 }
 
 export interface DashboardView {

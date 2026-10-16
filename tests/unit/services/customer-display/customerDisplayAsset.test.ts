@@ -36,7 +36,11 @@ jest.mock('@/services/storage.service', () => ({
     jest.requireActual('@/services/storage.service').uploadFileToStorage(buffer, ruta, tipo),
   ),
 }))
-jest.mock('@/services/access/basePlan.service', () => ({ venueHasFeatureAccess: jest.fn(async () => true) }))
+jest.mock('@/services/access/basePlan.service', () => ({
+  venueHasFeatureAccess: jest.fn(async () => true),
+  // F0-B (Task 4): el camino `cache: true` lee el plan del snapshot por venue.
+  getVenuePlanInfo: jest.fn(async () => ({ tier: 'PRO', grandfathered: false, exempt: false })),
+}))
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn() }))
 
 const img = (nombre: string) => readFileSync(join(__dirname, '../../../fixtures/customer-display', nombre))

@@ -14,13 +14,27 @@ import type { FichaEfectiva } from './customerDisplayDesign.effective'
  *   cálculos en vuelo de esa terminal (no por reloj: un cálculo lento puede durar lo que sea), y se borra cuando el
  *   último termina. Invalidar una terminal sin caché ni cálculos en vuelo no crea nada (Codex r8, N7).
  *
- * Lo que esta caché NO hace todavía, a propósito: «un solo cálculo por llave» y «máximo 32 cálculos en vuelo»
- * (spec §5.7.4) son del poll de la tablet, que llega en F0-B.
+ * F0-B suma lo que pide el poll de la tablet (spec §5.7.4): «un solo cálculo por llave» (`vuelosPorLlave`, que sólo se
+ * comparte dentro de la MISMA generación de la terminal) y la huella sin calcular (`peekEffectiveFingerprint`). El tope de
+ * cálculos en vuelo vive en `pollWork.ts` y lo aplica `getEffectiveDesign`.
  */
 export const TTL_MS = 60_000
 export const CACHE_MAX_ENTRIES = 2_000
 export const cache = new Map<string, { hasta: number; valor: { ficha: FichaEfectiva; assetRejected: string[] } }>()
 export const enVuelo = new Map<string, { generacion: number; calculos: number }>() // por terminal, sólo con cálculos activos
+
+/**
+ * F0-B: el cálculo en vuelo de cada LLAVE (`terminalId:venueId`) con la generación de su terminal al arrancar. Quien pide la
+ * misma llave se UNE a él sólo si la generación sigue siendo la misma: uno que empezó antes de una invalidación no se
+ * comparte (es la misma marca que ya impide que se guarde). Se borra al terminar.
+ */
+export const vuelosPorLlave = new Map<string, { promesa: Promise<{ ficha: FichaEfectiva; assetRejected: string[] }>; generacion: number }>()
+
+/** La huella guardada de ESTE aparato en ESTE negocio, si vale. Nunca calcula: la usa el poll con solicitud de inversión. */
+export function peekEffectiveFingerprint(venueId: string, terminalId: string): string | undefined {
+  const guardado = cache.get(`${terminalId}:${venueId}`)
+  return guardado && guardado.hasta > Date.now() ? guardado.valor.ficha.fingerprint : undefined
+}
 
 /**
  * Congela a fondo lo que se guarda en la caché. Cada acierto devuelve el MISMO objeto (y quien lo calculó recibe justo
@@ -50,6 +64,6 @@ export function invalidateCustomerDisplayCache(terminalId: string): void {
 }
 
 /** Sólo para las pruebas del tope. */
-export function cacheSizeForTests(): { entradas: number; enVuelo: number } {
-  return { entradas: cache.size, enVuelo: enVuelo.size }
+export function cacheSizeForTests(): { entradas: number; enVuelo: number; vuelos: number } {
+  return { entradas: cache.size, enVuelo: enVuelo.size, vuelos: vuelosPorLlave.size }
 }
