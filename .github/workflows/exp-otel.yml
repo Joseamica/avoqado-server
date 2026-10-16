@@ -8,6 +8,7 @@
 #   …calibrar…  la tasa del ~50 % de CPU en A+ (se congela a mano en scripts/exp-otel/config/tasa.json)
 #   …prueba…    el arnés de la fase 2 en versión CORTA (depurar, no medir)
 #   …medir…     la medición completa: costo ×3, utilidad (4 brazos ×3), colector caído (6 variantes ×3), suite ×4, reporte
+#   …reporte…   vuelve a correr SÓLO el reporte sobre los artefactos de la corrida medida (scripts/exp-otel/config/corrida-medida.json)
 name: 🧪 Experimento OTel (medición)
 
 on:
@@ -245,6 +246,39 @@ jobs:
         if: always()
         with:
           name: resumen
+          path: |
+            exp-all/resumen.md
+            exp-all/resumen.json
+          retention-days: 30
+
+  reporte-de-corrida:
+    name: Reporte sobre la corrida medida (sin volver a medir)
+    if: ${{ contains(github.ref_name, 'reporte') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20', cache: 'npm' }
+      - run: npm ci
+      - name: Bajar los artefactos de la corrida medida
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          RUN_ID=$(node -p 'require("./scripts/exp-otel/config/corrida-medida.json").runId')
+          echo "corrida medida: $RUN_ID"
+          gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" -D exp-all
+      - name: Calificar (ciego), juntar y aplicar el criterio
+        run: |
+          node_modules/.bin/tsx scripts/exp-otel/orq/reporte.ts exp-all
+          cat exp-all/resumen.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: resumen-final
           path: |
             exp-all/resumen.md
             exp-all/resumen.json

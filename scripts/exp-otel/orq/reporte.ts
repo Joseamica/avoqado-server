@@ -239,7 +239,10 @@ function suite() {
     const j = leer(f)
     totales[`${m[1]}-${m[2]}`] = { pasan: j.numPassedTests, fallan: j.numFailedTests, pendientes: j.numPendingTests, total: j.numTotalTests }
     for (const t of j.testResults ?? [])
-      for (const a of t.assertionResults ?? []) casos[m[1]][`${m[2]}::${path.relative(process.cwd(), t.name)}::${a.fullName}`] = a.status
+      // Declarado en el reporte: una prueba lleva una FECHA de ejecución en su nombre (supplierInvoiceInventory, «deletedAt»);
+      // sin normalizarla, el mismo caso aparecía como «ausente» de un lado y «nuevo» del otro (corrida 38944055828).
+      for (const a of t.assertionResults ?? [])
+        casos[m[1]][`${m[2]}::${path.relative(process.cwd(), t.name)}::${String(a.fullName).replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z/g, '<fecha>')}`] = a.status
   }
   const llaves = new Set([...Object.keys(casos.sin), ...Object.keys(casos.con)])
   const distintos = [...llaves].filter(k => casos.sin[k] !== casos.con[k]).map(k => ({ caso: k, sin: casos.sin[k] ?? 'AUSENTE', con: casos.con[k] ?? 'AUSENTE' }))
@@ -376,12 +379,18 @@ function main() {
   for (const [b, x] of Object.entries(u.porBrazo) as any)
     L.push(`| ${b} | ${x.hilo}/8 | ${x.hiloEstricto}/8 | ${x.enlacesFalsos} | ${x.duplicados} | ${x.puntos1b.db_lenta ?? '—'} | ${x.puntos1b.cpu ?? '—'} | ${x.puntos1b.externa_lenta ?? '—'} | ${x.ec1c ? 'sí' : 'no'} |`)
   L.push('', `Victorias incrementales de B sobre A+ en 1b: ${victorias1b.join(', ') || 'ninguna'}`, '')
+  L.push('CPU del server en la ventana alta, por repetición (el runner varía entre jobs; por eso las comparaciones son PAREADAS dentro del mismo job):', '')
+  for (const [b, xs] of Object.entries(c.porBrazo) as any) L.push(`- ${b}: ${xs.map((x: any) => `rep${x.rep} ${r1(x.alta.cpuFraccion * 100)} % · p95 ${r1(x.alta.p95)} ms · cobros ${x.alta.cobrosOk}/${x.alta.cobros}`).join(' | ')}`)
+  L.push('')
   L.push('## 2. Costo (vs A+, diferencias pareadas por repetición)', '', '| brazo | Δp95 ms | ΔCPU/petición % | ΔRSS pico MB | Δarranque s | p95 | CPU | RSS | arranque |', '|---|---|---|---|---|---|---|---|---|')
   for (const x of c.contraAmas) L.push(`| ${x.brazo} | ${x.dp95Ms.join(' / ')} | ${x.dCpuPorPeticionPct.join(' / ')} | ${x.dRssPicoMB.join(' / ')} | ${x.dArranqueS.join(' / ')} | ${x.veredictos.p95} | ${x.veredictos.cpuPorPeticion} | ${x.veredictos.rssPico} | ${x.veredictos.arranque} |`)
   L.push('', '## 3. Colector caído (C vs B)', '', '| variante | p95 (+20 % máx) | se cayó | memoria | Δp95 % por rep |', '|---|---|---|---|---|')
   for (const x of k.veredictos) L.push(`| ${x.variante} | ${x.p95} | ${x.seCayo ? 'SÍ' : 'no'} | ${x.memoriaSinTope} | ${k.filas.filter(f => f.variante === x.variante).map(f => f.dp95Pct).join(' / ')} |`)
+  L.push('', 'Contadores del SDK y apagado (por variante y repetición): perdidos = terminados − exportados − en cola.', '', '| variante | rep | perdidos en C (antes de apagar) | cola máx C | perdidos al salir B (node directo) | perdidos al salir C | ms hasta salir B / C | warn+error B / C |', '|---|---|---|---|---|---|---|---|')
+  for (const f of k.filas)
+    L.push(`| ${f.variante} | ${f.rep} | ${f.C.perdidosAntesDeApagar} de ${f.C.contadoresAntesDeApagar?.terminados ?? '?'} | ${f.C.contadoresAntesDeApagar?.pendienteMax ?? '?'} | ${f.apagadoB.perdidosAlSalir} | ${f.apagadoC.perdidosAlSalir} | ${f.apagadoB.msHastaSalir} / ${f.apagadoC.msHastaSalir} | ${f.B.lineasWarnError} / ${f.C.lineasWarnError} |`)
   L.push('', '## 4. Que no cambie nada', '', `Suite (mismo commit, con y sin SDK): ${s.casosComparados} casos comparados, ${s.nDistintos} distintos. Totales: ${JSON.stringify(s.totales)}`, `Respuestas de la API A vs B (normalizadas): ${api.comparado ? `${(api as any).nDiferencias} diferencias` : 'no comparado'}`, '')
-  L.push('## 5. Volumen y precio', '', `Spans por cobro: ${v.spansPorCobro} · por lectura: ${v.spansPorLectura} · bytes comprimidos por span: ${v.bytesPorSpanComprimido}`, `Con ${VOL_COBROS_MES} cobros/mes y ${VOL_PETICIONES_MES} peticiones/mes (PARÁMETROS, no medidos): ${v.gbMes100} GB/mes al 100 %; ${v.gbMesMuestreado} GB/mes con 100 % de cobros y ${MUESTREO_RESTO * 100} % del resto. Precio: ${JSON.stringify(v.precioMuestreado)} (${v.fuentePrecio})`, '')
+  L.push('## 5. Volumen y precio', '', `Spans por cobro: ${v.spansPorCobro} · por lectura: ${v.spansPorLectura} · de fondo (jobs del cron, una instancia): ${v.spansDeFondoPorMinuto}/min · bytes comprimidos por span: ${v.bytesPorSpanComprimido}`, `Con ${VOL_COBROS_MES} cobros/mes y ${VOL_PETICIONES_MES} peticiones/mes (PARÁMETROS, no medidos): ${v.gbMes100} GB/mes al 100 %; ${v.gbMesMuestreado} GB/mes con 100 % de cobros y ${MUESTREO_RESTO * 100} % del resto. Precio: ${JSON.stringify(v.precioMuestreado)} (${v.fuentePrecio})`, '')
   fs.writeFileSync(path.join(RAIZ, 'resumen.md'), L.join('\n'))
   console.log(L.join('\n'))
 }
