@@ -616,15 +616,35 @@ export interface VenueSchedule {
   timeUntil: string | null
 }
 
+/**
+ * Un formateador por zona. Construirlo cuesta ~50 µs y `/promotions` evalúa miles de instantes por llamada (hasta 48 por
+ * promoción): con uno nuevo cada vez, 500 promociones gastaban ~0.5 s de CPU. Sólo se guarda lo que se construyó bien: una
+ * zona inválida vuelve a lanzar en cada llamada, como antes.
+ */
+const formateadoresPorZona = new Map<string, Intl.DateTimeFormat>()
+// ponytail: se vacía entero al llegar a 1,000 llaves. Las zonas reales son pocas, pero Intl acepta cualquier mezcla de
+// mayúsculas («america/MEXICO_city») y desfases («+05:30»): sin techo, una zona hostil haría crecer el mapa. LRU si hiciera falta.
+const FORMATEADORES_MAX = 1_000
+
+function formateadorDeZona(timezone: string): Intl.DateTimeFormat {
+  let formateador = formateadoresPorZona.get(timezone)
+  if (!formateador) {
+    formateador = new Intl.DateTimeFormat('en-US', {
+      timeZone: timezone,
+      hour12: false,
+      weekday: 'short',
+      hour: '2-digit',
+      minute: '2-digit',
+    })
+    if (formateadoresPorZona.size >= FORMATEADORES_MAX) formateadoresPorZona.clear()
+    formateadoresPorZona.set(timezone, formateador)
+  }
+  return formateador
+}
+
 /** Hora "HH:mm" y día de la semana de un instante, leídos en una zona dada. */
 function venueLocalParts(instant: Date, timezone: string): { time: string; day: number } {
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: timezone,
-    hour12: false,
-    weekday: 'short',
-    hour: '2-digit',
-    minute: '2-digit',
-  }).formatToParts(instant)
+  const parts = formateadorDeZona(timezone).formatToParts(instant)
 
   const get = (type: string) => parts.find(p => p.type === type)?.value ?? ''
   // `hour12: false` devuelve "24" a medianoche en algunos entornos — es una
