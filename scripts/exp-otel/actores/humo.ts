@@ -85,7 +85,8 @@ async function main() {
     n: N,
     exitosos: ok,
     veredicto: ok === N ? 'VERDE' : 'ROJO',
-    otrosEventosDeSocket: inesperados // difusiones normales (order_created, payment_completed…), no errores,
+    // difusiones normales (order_created, payment_completed…), no errores
+    otrosEventosDeSocket: inesperados,
     cobros,
   }
   fs.mkdirSync(OUT, { recursive: true })
