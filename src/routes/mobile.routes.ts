@@ -2108,6 +2108,83 @@ router.get(
 
 // Hechos técnicos observados por el POS Android. El dispositivo se identifica por
 // X-Device-ID; no requiere activación y no acepta un terminalId elegido por el body.
+/**
+ * @openapi
+ * /api/v1/mobile/venues/{venueId}/device-capabilities:
+ *   put:
+ *     tags: [Mobile - TPV Settings]
+ *     summary: El reporte de capacidades del POS Android — pantalla del cliente, versión de diseño e instalación
+ *     description: |
+ *       El aparato se identifica por `X-Device-ID` + `X-Device-Platform: ANDROID` (registro explícito); la escritura va
+ *       condicionada al binding EXACTO `{ terminalId, venueId, deviceUid, POS_ANDROID }`. La respuesta no cambia.
+ *       `customerDisplayDesignVersion` e `installationId` son OPCIONALES y van JUNTOS o ninguno: la app los manda sólo
+ *       si el poll anunció `capabilities.customerDisplayDesign`. Todas las horas son del servidor.
+ *       - Sin los campos nuevos (app vieja, o una que bajó de versión): versión `null`, el ack se limpia, la instalación
+ *         y su lista de cambios se conservan.
+ *       - Con la misma instalación: se guarda la versión; ack, instalación y lista igual.
+ *       - Con instalación sobre un aparato SIN instalación (primera vez o recién mudado): se adopta desde ahora, el ack
+ *         se limpia y NO cuenta como cambio.
+ *       - Con OTRA instalación: se guarda desde ahora, el ack se limpia y la hora entra a la lista de cambios (últimas
+ *         5); queda en la bitácora (`CUSTOMER_DISPLAY_INSTALLATION_CHANGED`).
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: header
+ *         name: X-Device-ID
+ *         required: true
+ *         schema: { type: string, maxLength: 64 }
+ *       - in: header
+ *         name: X-Device-Platform
+ *         required: true
+ *         schema: { type: string, enum: [ANDROID] }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             additionalProperties: false
+ *             required: [customerDisplay, displayModeProtocolVersion]
+ *             properties:
+ *               customerDisplay:
+ *                 type: object
+ *                 required: [present, invertible]
+ *                 properties:
+ *                   present: { type: boolean }
+ *                   invertible: { type: boolean, description: Sólo puede ser true si present es true }
+ *               displayModeProtocolVersion: { type: integer, enum: [1] }
+ *               customerDisplayDesignVersion:
+ *                 type: integer
+ *                 minimum: 1
+ *                 maximum: 2
+ *                 description: Opcional, junto con installationId. min(la versión de la app, la que anuncia el poll)
+ *               installationId:
+ *                 type: string
+ *                 pattern: '^[A-Za-z0-9-]{1,64}$'
+ *                 description: Opcional, junto con customerDisplayDesignVersion. Identifica la instalación de la app
+ *     responses:
+ *       200:
+ *         description: Reporte guardado
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     terminalId: { type: string }
+ *                     observedAt: { type: string, format: date-time }
+ *       400: { description: Cuerpo inválido o faltan X-Device-ID / X-Device-Platform ANDROID }
+ *       401: { description: Sin sesión }
+ *       403: { description: El aparato no pertenece a este venue o no es un POS Android }
+ *       409: { description: Otra instalación reportó al mismo tiempo dos veces seguidas (CUSTOMER_DISPLAY_INSTALLATION_RACE); reintentar }
+ *       503: { description: No se pudo registrar el aparato (DEVICE_REGISTRY_UNAVAILABLE); reintentar }
+ */
 router.put(
   '/venues/:venueId/device-capabilities',
   authenticateTokenMiddleware,
