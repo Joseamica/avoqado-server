@@ -31,7 +31,7 @@ jest.mock('@/utils/prismaClient', () => ({
     staff: { findUnique: async () => ({ active: true }) },
     staffVenue: { findUnique: jest.fn(), findFirst: jest.fn() },
     venue: { findUnique: jest.fn() },
-    staffOrganization: { findUnique: jest.fn() },
+    staffOrganization: { findUnique: jest.fn(), findFirst: jest.fn() },
   },
 }))
 
@@ -50,6 +50,7 @@ beforeEach(() => {
   // Por defecto nadie lo es: sin esto, el «dueño de la org» de una prueba se filtraba a las siguientes.
   ;(prisma.venue.findUnique as jest.Mock).mockResolvedValue({ organizationId: 'org-1' })
   ;(prisma.staffOrganization.findUnique as jest.Mock).mockResolvedValue(null)
+  ;(prisma.staffOrganization.findFirst as jest.Mock).mockResolvedValue(null)
 })
 
 describe('el permiso propio del empleado (PermissionSet) NO se puede ignorar en línea', () => {

@@ -29,6 +29,9 @@ jest.mock('@/utils/prismaClient', () => ({
     },
     staffOrganization: {
       findUnique: jest.fn(),
+      // Con una fila menor que OWNER, el resolutor pregunta en UNA consulta si es dueña de la org (P2-6). Función
+      // normal: nadie lo es en estas pruebas, y sobrevive a los reset de mocks.
+      findFirst: async () => null,
     },
     venueRolePermission: {
       findUnique: jest.fn(),
@@ -239,7 +242,7 @@ describe('checkPermission Middleware', () => {
             venueId: 'different_venue_456',
           },
         },
-        select: { role: true, active: true, permissionSetId: true, permissionSet: true, venue: { select: { organizationId: true } } },
+        select: { role: true, active: true, permissionSetId: true, permissionSet: true },
       })
       expect(permissionsLib.hasPermission).toHaveBeenCalledWith(StaffRole.ADMIN, null, 'menu:read', null)
     })
@@ -299,7 +302,7 @@ describe('checkPermission Middleware', () => {
 
         expect(prisma.staffVenue.findUnique).toHaveBeenCalledWith({
           where: { staffId_venueId: { staffId: 'user_123', venueId: 'venue_from_header' } },
-          select: { role: true, active: true, permissionSetId: true, permissionSet: true, venue: { select: { organizationId: true } } },
+          select: { role: true, active: true, permissionSetId: true, permissionSet: true },
         })
         expect(mockNext).toHaveBeenCalledWith()
       })
