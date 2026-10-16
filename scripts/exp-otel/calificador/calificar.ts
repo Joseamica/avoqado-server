@@ -272,7 +272,10 @@ function main() {
       const conPadre = efectos.filter(s => s.parent && s.parent !== '').length
       const hijos = (s: Span) => spans.filter(x => x.traceId === s.traceId && x.spanId !== s.spanId)
       const cerradoAntes = efectos.filter(s => hijos(s).some(x => x.fin > s.fin + 1)).length
-      contextos = { trazasConDosSucursales: mezcladas, lineasDeCobroConOtraSucursal: cobroEnOtraSucursal, spansDeEfecto: efectos.length, efectosConPadre: conPadre, efectosCerradosAntesQueSuTrabajo: cerradoAntes }
+      // plan 4: con el SDK cargado, los logs SIGUEN llevando su correlationId
+      const conEntrada = log.filter(l => l.entrypoint)
+      const sinCorrelation = conEntrada.filter(l => !l.correlationId).length
+      contextos = { lineasConEntrypoint: conEntrada.length, lineasSinCorrelationId: sinCorrelation, trazasConDosSucursales: mezcladas, lineasDeCobroConOtraSucursal: cobroEnOtraSucursal, spansDeEfecto: efectos.length, efectosConPadre: conPadre, efectosCerradosAntesQueSuTrabajo: cerradoAntes }
     }
     return { id, meta, b, cobros, contextos, nLog: log.length, nSpans: spans.length }
   })

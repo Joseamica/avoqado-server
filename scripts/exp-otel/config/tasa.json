@@ -1,4 +1,7 @@
 {
-  "cobrosPorSegundo": 2,
-  "estado": "PROVISIONAL — sólo para el carril de prueba del arnés; se reemplaza por la tasa CALIBRADA (y se congela con su commit) antes de medir"
+  "cobrosPorSegundo": 2.75,
+  "estado": "CONGELADA el 16-oct-2026 antes de medir A, B, B0, B−P y C (regla preregistrada del coordinador)",
+  "regla": "tasa abierta de cobros (cada uno con 3 lecturas del POS) que deja el CPU del server, en su cgroup de 1 CPU, cerca del 50 %, medida en A+",
+  "fuente": "corrida 38939940852 (ci/exp-otel-calibrar): 0.5→14.8 %, 1→20.6 %, 1.5→27.1 %, 2→37.3 %, 2.5→45.5 %, 3→54.6 %; interpolación lineal al 50 % = 2.747 → 2.75",
+  "bajaCobrosPorSegundo": 1
 }
