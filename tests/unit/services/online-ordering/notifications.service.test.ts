@@ -6,7 +6,7 @@ jest.mock('@/services/whatsapp.service', () => ({ __esModule: true, sendOrderSta
 
 import emailService from '@/services/email.service'
 import { sendOrderStatusUpdateWhatsApp } from '@/services/whatsapp.service'
-import { buildOrderMessage, notifyOrderEvent } from '@/services/online-ordering/notifications.service'
+import { __resetStorefrontBaseWarningForTests, buildOrderMessage, notifyOrderEvent } from '@/services/online-ordering/notifications.service'
 
 const ORDER = {
   orderNumber: 'WABCD',
@@ -24,6 +24,7 @@ const ORDER = {
 
 beforeEach(() => {
   delete process.env.ONLINE_ORDERING_WHATSAPP_ENABLED
+  delete process.env.ORDERING_STOREFRONT_BASE_URL
   prismaMock.order.findUnique.mockResolvedValue(ORDER as any)
   ;(emailService.sendEmailWithResult as jest.Mock).mockResolvedValue({ ok: true, transient: false })
   ;(sendOrderStatusUpdateWhatsApp as jest.Mock).mockResolvedValue(true)
@@ -69,6 +70,10 @@ describe('notifyOrderEvent', () => {
     prismaMock.order.findUnique.mockResolvedValue({ ...ORDER, customerName: null } as any)
     await notifyOrderEvent('ord1', 'READY')
     expect((emailService.sendEmailWithResult as jest.Mock).mock.calls[0][0].html).toContain('<p>Hola,</p>')
+
+    prismaMock.order.findUnique.mockResolvedValue({ ...ORDER, customerName: '   ' } as any)
+    await notifyOrderEvent('ord1', 'READY')
+    expect((emailService.sendEmailWithResult as jest.Mock).mock.calls[1][0].html).toContain('<p>Hola,</p>')
   })
 
   it('WhatsApp sólo con la bandera encendida y con consentimiento', async () => {
@@ -115,5 +120,102 @@ describe('notifyOrderEvent', () => {
     prismaMock.order.findUnique.mockResolvedValue(null)
     await expect(notifyOrderEvent('nope', 'READY')).resolves.toBeUndefined()
     expect(emailService.sendEmailWithResult).not.toHaveBeenCalled()
+  })
+})
+
+describe('notifyOrderEvent: URL base de la tienda', () => {
+  beforeEach(() => {
+    __resetStorefrontBaseWarningForTests()
+  })
+
+  const sentMail = () => (emailService.sendEmailWithResult as jest.Mock).mock.calls[0][0]
+
+  it('usa ORDERING_STOREFRONT_BASE_URL cuando está configurada, sin avisar', async () => {
+    process.env.ORDERING_STOREFRONT_BASE_URL = 'https://tienda.example.com'
+    await notifyOrderEvent('ord1', 'READY')
+    expect(sentMail().html).toContain(`href="https://tienda.example.com/flautas-coyoacan/pedido/${'T'.repeat(32)}"`)
+    expect(sentMail().text).toContain(`https://tienda.example.com/flautas-coyoacan/pedido/${'T'.repeat(32)}`)
+    expect(logger.warn).not.toHaveBeenCalled()
+  })
+
+  it('le quita las diagonales finales a la URL base', async () => {
+    process.env.ORDERING_STOREFRONT_BASE_URL = 'https://tienda.example.com//'
+    await notifyOrderEvent('ord1', 'READY')
+    expect(sentMail().html).toContain(`href="https://tienda.example.com/flautas-coyoacan/pedido/`)
+    expect(sentMail().html).not.toContain('.com//')
+  })
+
+  it('sin configurar usa el dominio por omisión y avisa UNA sola vez por proceso', async () => {
+    await notifyOrderEvent('ord1', 'ACCEPTED')
+    await notifyOrderEvent('ord1', 'READY')
+    expect(sentMail().html).toContain(`href="https://pedidos.avoqado.io/flautas-coyoacan/pedido/${'T'.repeat(32)}"`)
+    expect(logger.warn).toHaveBeenCalledTimes(1)
+    expect((logger.warn as jest.Mock).mock.calls[0][0]).toContain('ORDERING_STOREFRONT_BASE_URL')
+  })
+
+  it.each(['', '   '])('una URL base vacía (%j) cuenta como sin configurar', async value => {
+    process.env.ORDERING_STOREFRONT_BASE_URL = value
+    await notifyOrderEvent('ord1', 'READY')
+    expect(sentMail().html).toContain('href="https://pedidos.avoqado.io/')
+    expect(logger.warn).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('notifyOrderEvent: escapado y liga codificada', () => {
+  const sentMail = () => (emailService.sendEmailWithResult as jest.Mock).mock.calls[0][0]
+
+  it('el nombre del cliente con <script> y comillas sale escapado en el HTML', async () => {
+    prismaMock.order.findUnique.mockResolvedValue({ ...ORDER, customerName: '<script>alert("x")</script>' } as any)
+    await notifyOrderEvent('ord1', 'READY')
+    expect(sentMail().html).toContain('Hola &lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;,')
+    expect(sentMail().html).not.toContain('<script>')
+  })
+
+  it('el nombre del negocio con <b> y & sale escapado en el HTML', async () => {
+    prismaMock.order.findUnique.mockResolvedValue({ ...ORDER, venue: { name: 'Tacos <b>&', slug: 'tacos' } } as any)
+    await notifyOrderEvent('ord1', 'READY')
+    expect(sentMail().html).toContain('Tacos &lt;b&gt;&amp;')
+    expect(sentMail().html).not.toContain('<b>')
+  })
+
+  it('un slug o token con comillas no puede salirse del atributo href', async () => {
+    prismaMock.order.findUnique.mockResolvedValue({
+      ...ORDER,
+      venue: { name: 'Flautas', slug: 'a"b' },
+      onlineOrder: { ...ORDER.onlineOrder, trackingToken: 'T"x y' },
+    } as any)
+    await notifyOrderEvent('ord1', 'READY')
+    const { html, text } = sentMail()
+    expect(html).toContain('href="https://pedidos.avoqado.io/a%22b/pedido/T%22x%20y"')
+    expect(html).toMatch(/<a href="[^"]*">Ver mi pedido<\/a>/)
+    expect(text).toContain('/a%22b/pedido/T%22x%20y')
+  })
+})
+
+describe('notifyOrderEvent: variables de WhatsApp', () => {
+  beforeEach(() => {
+    process.env.ONLINE_ORDERING_WHATSAPP_ENABLED = 'true'
+  })
+
+  const sentData = () => (sendOrderStatusUpdateWhatsApp as jest.Mock).mock.calls[0][1]
+
+  it('venueName y status pasan por sanitizeTemplateVar (sin saltos ni ligas)', async () => {
+    prismaMock.order.findUnique.mockResolvedValue({ ...ORDER, venue: { name: 'Flautas\nhttps://malo.example', slug: 'f' } } as any)
+    await notifyOrderEvent('ord1', 'READY')
+    expect(sentData().venueName).toBe('Flautas [enlace]')
+    expect(sentData().status).toBe('Tu pedido WABCD en Flautas [enlace] ya está listo para recoger.')
+  })
+
+  it('respetan los topes de la plantilla: venueName 60 y status 200', async () => {
+    prismaMock.order.findUnique.mockResolvedValue({ ...ORDER, venue: { name: 'V'.repeat(300), slug: 'f' } } as any)
+    await notifyOrderEvent('ord1', 'READY')
+    expect(sentData().venueName).toHaveLength(60)
+    expect(sentData().status).toHaveLength(200)
+  })
+
+  it.each([[null], [''], ['   '], ['\u0001']])('un nombre vacío (%j) se manda como "cliente", nunca como parámetro vacío', async name => {
+    prismaMock.order.findUnique.mockResolvedValue({ ...ORDER, customerName: name } as any)
+    await notifyOrderEvent('ord1', 'READY')
+    expect(sentData().customerName).toBe('cliente')
   })
 })
