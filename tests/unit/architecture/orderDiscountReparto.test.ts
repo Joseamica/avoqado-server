@@ -259,6 +259,10 @@ const ORIGEN_DE_LA_CABECERA: Record<string, Origen> = {
     nota: 'P4 + P13: recorta lo dirigido a lo anulado y recalcula como borrar',
   },
   'src/services/tpv/order.tpv.service.ts#createOrder': { origen: 'CERO', nota: 'la cuenta nace vacía, sin descuento' },
+  'src/services/online-ordering/order.service.ts#createOnlineOrder': {
+    origen: 'CERO',
+    nota: 'pedido en línea: la orden nace sin descuento (la tienda no aplica descuentos en la v1)',
+  },
   'src/services/tpv/table.tpv.service.ts#assignTable': { origen: 'CERO', nota: 'la cuenta de la mesa nace vacía, sin descuento' },
   'src/services/dashboard/venueCheckout.service.ts#finalizeVenueCheckout': {
     origen: 'CERO',
@@ -532,6 +536,10 @@ const MUTADORES_DE_RENGLONES: Record<string, Mutador> = {
   'src/services/tpv/order.tpv.service.ts#sellSerializedItem': {
     clase: 'CREACION',
     nota: 'venta serializada: orden nueva de un solo renglón',
+  },
+  'src/services/online-ordering/order.service.ts#createOnlineOrder': {
+    clase: 'CREACION',
+    nota: 'pedido en línea: orden, renglones y extras nuevos en la misma transacción, sin filas de descuento',
   },
   // Órdenes que nunca llevan filas con reparto.
   'src/services/delivery-channels/core/lineRemoval.service.ts#applyLineRemoval': {

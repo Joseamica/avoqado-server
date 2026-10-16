@@ -243,6 +243,7 @@ const CAPTURE = 'tests/integration/fiscal/writerCapture.test.ts'
 const RECONCILE = 'tests/integration/payments/reconcileFromPayments.atomic.integration.test.ts'
 const PAYMENT_GUARD = 'tests/unit/services/shared/paymentShiftClaim.callers.guard.test.ts'
 const REPARTO = 'tests/integration/payments/repartoDescuento.integration.test.ts'
+const ONLINE = 'tests/integration/online-ordering/lifecycle.integration.test.ts'
 const proof = (file: string, mentions: string, ...titles: string[]): Proof[] => titles.map(title => ({ file, title, mentions }))
 
 const LOCK = ['lockExistingOrderForPayment(']
@@ -643,6 +644,17 @@ const WRITERS: Record<string, Writer> = {
     creates: ['.order.create('],
     note: 'retroactive manual sale: new Order and line in one transaction',
   },
+  // Pedidos en línea (plan 1a, R1/R22): la máquina de estados mueve `Order.status` bajo el candado de la orden, tras releerla.
+  'src/services/online-ordering/transitions.service.ts#casTransition': {
+    class: 'LOCKED',
+    lock: LOCK,
+    proof: proof(
+      ONLINE,
+      'casTransition',
+      'el cobro real deja la orden cobrada y aceptar, listo y entregar no la reabren',
+      'vencer o rechazar un pedido ya cobrado no cancela la venta, y aceptarlo sigue posible',
+    ),
+  },
   // ── Fiscal sealing: runs inside the capture/cancel transaction that already holds the Order ──
   'src/services/fiscal/sellosIva.ts#sellarRenglones': {
     class: 'EXCLUDED',
@@ -806,6 +818,11 @@ const NON_FISCAL_ORDER_WRITERS: Record<string, OrderWriter> = {
     why: 'contract confirmation: one CAS UPDATE of contratoDePrecio (orderContratoDePrecioWriters), no money or lines',
   },
   'src/services/tpv/order.tpv.service.ts#createOrder': { class: 'PRIVATE_CREATION', why: 'new empty order', markers: NEW_ORDER },
+  'src/services/online-ordering/order.service.ts#createOnlineOrder': {
+    class: 'PRIVATE_CREATION',
+    why: 'online order: new Order, lines and modifiers in one admission transaction',
+    markers: NEW_ORDER,
+  },
   'src/services/tpv/order.tpv.service.ts#sellSerializedItem': {
     class: 'PRIVATE_CREATION',
     why: 'new order with its nested serialized line; registration shares the transaction (T2)',
@@ -1060,6 +1077,8 @@ const ORDER_LOCK_TRANSACTIONS: Record<string, number> = {
   'src/services/tpv/refund.tpv.service.ts#recordRefund': 1,
   'src/services/delivery-channels/core/cancelDeliveryOrder.service.ts#cancelDeliveryOrder': 1,
   'src/services/delivery-channels/core/applyDeliveryRefund.service.ts#applyDeliveryRefund': 1,
+  // Pedidos en línea (plan 1a): cada transición toma el candado de la orden y la relee bajo él.
+  'src/services/online-ordering/transitions.service.ts#casTransition': 1,
 }
 
 /** Lock-taking transactions whose wait is governed by their own protocol, pinned verbatim so a change is re-reviewed. */

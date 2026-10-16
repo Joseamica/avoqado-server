@@ -40,6 +40,8 @@ const EXPECTED_WRITES: Record<string, Partial<Record<ProductMutation, number>>> 
   'src/services/onboarding/demoCleanup.service.ts': { deleteMany: 1 },
   'src/services/onboarding/demoSeed.service.ts': { create: 1, update: 2 },
   'src/services/onboarding/venueCreation.service.ts': { create: 1 },
+  // Pedidos en línea (plan 1a): marcar/desmarcar platillos para la tienda. Sólo `availableOnline`, nunca `active`.
+  'src/services/online-ordering/menuAvailability.service.ts': { updateMany: 1 },
   'src/services/pos-sync/posSyncOrderItem.service.ts': { upsert: 1 },
   'src/services/upsell/upsell.service.ts': { updateMany: 1 },
 }
