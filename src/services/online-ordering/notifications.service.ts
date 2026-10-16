@@ -6,7 +6,26 @@ import { sanitizeTemplateVar } from '@/utils/whatsappSanitize'
 
 export type OrderNotificationEvent = 'ACCEPTED' | 'READY' | 'REJECTED' | 'EXPIRED' | 'CANCELLED'
 
-const storefrontBase = (): string => process.env.ORDERING_STOREFRONT_BASE_URL || 'https://pedidos.avoqado.io'
+const DEFAULT_STOREFRONT_BASE_URL = 'https://pedidos.avoqado.io'
+let warnedDefaultStorefrontBase = false
+
+/** Sin diagonal final. Si falta la variable se usa el dominio propuesto en el spec (aún por confirmar) y se avisa UNA vez por proceso. */
+const storefrontBase = (): string => {
+  const configured = process.env.ORDERING_STOREFRONT_BASE_URL?.trim()
+  if (configured) return configured.replace(/\/+$/, '')
+  if (!warnedDefaultStorefrontBase) {
+    warnedDefaultStorefrontBase = true
+    logger.warn(
+      `[OnlineOrdering] ORDERING_STOREFRONT_BASE_URL no está configurada: las ligas de seguimiento de los avisos usan ${DEFAULT_STOREFRONT_BASE_URL}`,
+    )
+  }
+  return DEFAULT_STOREFRONT_BASE_URL
+}
+
+/** Sólo para pruebas: vuelve a permitir el aviso de «URL base sin configurar». */
+export const __resetStorefrontBaseWarningForTests = (): void => {
+  warnedDefaultStorefrontBase = false
+}
 
 const escapeHtml = (s: string): string => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 
@@ -43,6 +62,11 @@ export function buildOrderMessage(
  * Avisa al comensal por los canales disponibles. NUNCA lanza: un aviso fallido no puede tumbar una operación.
  * R18: sin bitácora de envíos; el correo lleva su llave idempotente y un fallo queda en `logger.error`. La página de
  * seguimiento es el canal garantizado (spec §5.6).
+ *
+ * Contrato para quien la llama (tarea 9, transiciones):
+ * - Llamarla DESPUÉS de que la transacción del CAS ganador haya confirmado (commit), y sólo desde el ganador.
+ * - NO esperarla (`await`) dentro de una transacción: lee con el `prisma` global, así que dentro de una tx vería datos
+ *   viejos (por ejemplo, sin `acceptedAt` y por lo tanto sin hora estimada) y alargaría la tx con llamadas de red.
  */
 export async function notifyOrderEvent(orderId: string, event: OrderNotificationEvent): Promise<void> {
   try {
@@ -68,10 +92,13 @@ export async function notifyOrderEvent(orderId: string, event: OrderNotification
       venueName: order.venue.name,
       estimatedMinutes: minutes,
     })
-    const trackUrl = `${storefrontBase()}/${order.venue.slug}/pedido/${order.onlineOrder.trackingToken}`
+    const trackUrl = `${storefrontBase()}/${encodeURIComponent(order.venue.slug)}/pedido/${encodeURIComponent(
+      order.onlineOrder.trackingToken,
+    )}`
 
     if (order.customerEmail) {
-      const greeting = order.customerName ? `Hola ${escapeHtml(order.customerName)},` : 'Hola,'
+      const name = order.customerName?.trim()
+      const greeting = name ? `Hola ${escapeHtml(name)},` : 'Hola,'
       const html =
         `<p>${greeting}</p><p>${escapeHtml(text)}</p>` +
         `<p><a href="${escapeHtml(trackUrl)}">Ver mi pedido</a></p><p style="color:#666">${escapeHtml(order.venue.name)}</p>`
@@ -106,7 +133,7 @@ export async function notifyOrderEvent(orderId: string, event: OrderNotification
     if (process.env.ONLINE_ORDERING_WHATSAPP_ENABLED === 'true' && order.onlineOrder.whatsappConsent && order.customerPhone) {
       try {
         const ok = await sendOrderStatusUpdateWhatsApp(order.customerPhone, {
-          customerName: sanitizeTemplateVar(order.customerName ?? 'cliente', 40),
+          customerName: sanitizeTemplateVar(order.customerName ?? '', 40) || 'cliente',
           venueName: sanitizeTemplateVar(order.venue.name, 60),
           status: sanitizeTemplateVar(text, 200),
         })
