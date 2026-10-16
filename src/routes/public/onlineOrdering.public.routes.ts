@@ -50,8 +50,9 @@ router.post(
   ctrl.postOrder,
 )
 
-// Superficie de lo YA pedido: SIN candado de plan (un cliente con un pedido siempre puede verlo o cancelarlo).
-router.get('/orders/:trackingToken', readLimit, resolveVenueBySlug, validateRequest(trackingSchema), ctrl.getOrder)
-router.post('/orders/:trackingToken/cancel', cancelLimit, resolveVenueBySlug, validateRequest(trackingSchema), ctrl.postCancel)
+// Superficie de lo YA pedido: SIN candado de plan (un cliente con un pedido siempre puede verlo o cancelarlo). El token se
+// valida ANTES de buscar el negocio: uno mal formado no cuesta una consulta.
+router.get('/orders/:trackingToken', readLimit, validateRequest(trackingSchema), resolveVenueBySlug, ctrl.getOrder)
+router.post('/orders/:trackingToken/cancel', cancelLimit, validateRequest(trackingSchema), resolveVenueBySlug, ctrl.postCancel)
 
 export default router

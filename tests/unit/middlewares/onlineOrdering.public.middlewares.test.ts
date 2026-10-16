@@ -21,8 +21,7 @@ describe('resolveOperationalVenueBySlug', () => {
     await resolveOperationalVenueBySlug(req, res(), next)
     const where = (prismaMock.venue.findFirst.mock.calls[0][0] as any).where
     expect(where).toMatchObject({ slug: 'flautas', active: true })
-    expect(where.status.in).toEqual(expect.arrayContaining(['TRIAL', 'ONBOARDING', 'PENDING_ACTIVATION', 'ACTIVE']))
-    expect(where.status.in).not.toContain('LIVE_DEMO')
+    expect(where.status.in).toEqual(['TRIAL', 'ONBOARDING', 'PENDING_ACTIVATION', 'ACTIVE'])
     expect(req.publicVenue).toEqual({ id: 'v1', slug: 'flautas' })
     expect(next).toHaveBeenCalled()
   })
@@ -48,14 +47,12 @@ describe('requirePublicVenueFeatureStrict', () => {
     expect(next).toHaveBeenCalled()
   })
 
-  it('403 PLAN_REQUIRED con mensaje para el CLIENTE (no habla de planes)', async () => {
+  it('403 PLAN_REQUIRED en el sobre de la API, con mensaje para el CLIENTE (no habla de planes)', async () => {
     ;(venueHasFeatureAccess as jest.Mock).mockResolvedValue(false)
     const r = res()
     await requirePublicVenueFeatureStrict('ONLINE_ORDERING', 'Este negocio no recibe pedidos en línea.')(req, r, jest.fn())
     expect(r.status).toHaveBeenCalledWith(403)
-    expect(r.json).toHaveBeenCalledWith(
-      expect.objectContaining({ code: 'PLAN_REQUIRED', message: 'Este negocio no recibe pedidos en línea.' }),
-    )
+    expect(r.json).toHaveBeenCalledWith({ success: false, code: 'PLAN_REQUIRED', error: 'Este negocio no recibe pedidos en línea.' })
   })
 
   it('🔴 FALLA CERRADO: si la verificación truena responde 503 y NO deja pasar', async () => {
@@ -64,6 +61,20 @@ describe('requirePublicVenueFeatureStrict', () => {
     const next = jest.fn()
     await requirePublicVenueFeatureStrict('ONLINE_ORDERING')(req, r, next)
     expect(r.status).toHaveBeenCalledWith(503)
+    expect(r.json).toHaveBeenCalledWith({
+      success: false,
+      code: 'FEATURE_CHECK_UNAVAILABLE',
+      error: 'No pudimos verificar la disponibilidad. Intenta de nuevo.',
+    })
+    expect(next).not.toHaveBeenCalled()
+  })
+
+  it('sin venue resuelto (ruta mal cableada) es 500 y NO deja pasar', async () => {
+    const r = res()
+    const next = jest.fn()
+    await requirePublicVenueFeatureStrict('ONLINE_ORDERING')({} as any, r, next)
+    expect(r.status).toHaveBeenCalledWith(500)
+    expect(r.json).toHaveBeenCalledWith({ success: false, code: 'PUBLIC_VENUE_NOT_RESOLVED', error: 'No se pudo identificar el negocio.' })
     expect(next).not.toHaveBeenCalled()
   })
 })
