@@ -170,6 +170,61 @@ describe('correo de bienvenida de una campaña', () => {
   })
 })
 
+// Founder (16-oct): el lead no entendía que tenía que instalar la app. El correo trae un botón por tienda.
+describe('botones para descargar la app', () => {
+  const TIENDAS = [
+    'https://apps.apple.com/mx/app/avoqado/id6758351745',
+    'https://play.google.com/store/apps/details?id=com.avoqado.pos',
+    'https://apps.microsoft.com/detail/9PCZG05M3PVC',
+  ]
+
+  it('el lead nuevo recibe iPhone/iPad, Android y Windows en el HTML y en el texto', async () => {
+    mockOferta.mockResolvedValue(null)
+
+    await submit({ launchCampaignCode: 'pos-10-rest' })
+
+    const correo = correoDelCliente()
+    for (const url of TIENDAS) {
+      expect(correo.html).toContain(`href="${url}"`)
+      expect(correo.text).toContain(url)
+    }
+    // Insignias oficiales en PNG (Gmail y Outlook no pintan SVG) y el aparato escrito debajo.
+    for (const insignia of ['app-store-es.png', 'google-play-es.png', 'microsoft-store-es.png']) {
+      expect(correo.html).toContain(`src="https://avoqado.io/badges/${insignia}"`)
+    }
+    for (const aparato of ['iPhone y iPad', 'Android', 'PC con Windows']) {
+      expect(correo.html).toContain(aparato)
+    }
+    expect(correo.html).toContain('Descarga y empieza a usar tu punto de venta')
+  })
+
+  it('el orden es claro: paso 1 la contraseña, paso 2 la app', async () => {
+    mockOferta.mockResolvedValue(null)
+
+    await submit()
+
+    const { html, text } = correoDelCliente()
+    expect(html.indexOf('Paso 1')).toBeGreaterThan(-1)
+    expect(html.indexOf('Paso 1')).toBeLessThan(html.indexOf('Paso 2'))
+    expect(html.indexOf('Elige tu contraseña')).toBeLessThan(html.indexOf('/badges/'))
+    expect(text.indexOf('Paso 1')).toBeLessThan(text.indexOf('Paso 2'))
+  })
+
+  it('a quien ya es cliente no le cambia el correo', async () => {
+    mockSignup.mockResolvedValue({
+      staff: { id: 'staff-1', email: body.email },
+      organizationId: 'org-1',
+      magicLinkToken: null,
+      alreadyExisted: true,
+      yaEsCliente: true,
+    })
+
+    await submit()
+
+    expect(correoDelCliente().html).not.toContain('/badges/')
+  })
+})
+
 describe('enlace del correo (continuarOnboarding)', () => {
   const continuar = async () => {
     const res = makeResponse()

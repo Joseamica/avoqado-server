@@ -1,6 +1,7 @@
 import { Resend } from 'resend'
 import logger from '../config/logger'
 import { isDeliverableRecipient } from '../utils/undeliverableEmail'
+import { descargarAppHtml, descargarAppTexto } from './emailDescargarApp'
 
 // Initialize Resend client
 const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null
@@ -4585,6 +4586,10 @@ Servicios Tecnologicos Avo S.A. de C.V.`
     const mesesEs = introMonths === 1 ? 'el primer mes' : `los primeros ${introMonths} meses`
     const monthsEn = introMonths === 1 ? 'the first month' : `the first ${introMonths} months`
     const planName = data.planName ?? 'Pro'
+    // Al terminar el onboarding éste es el único correo que llega: también dice dónde bajar la app
+    // (founder, 16-oct). Va antes de la facturación, que es lo menos urgente.
+    const idioma = data.locale === 'en' ? 'en' : 'es'
+    const descargaTexto = descargarAppTexto({ idioma })
 
     let subject: string
     let greeting: string
@@ -4619,6 +4624,8 @@ Your Avoqado ${planName} plan for ${data.venueName} is active. ${
 
 Next renewal: ${dateFormatted} · ${nextAmount}/${intervalLabel}.
 
+${descargaTexto}
+
 View billing: ${data.billingPortalUrl}
 
 Avoqado Team`
@@ -4645,6 +4652,8 @@ Tu plan Avoqado ${planName} para ${data.venueName} está activo. ${
 
 Próxima renovación: ${dateFormatted} · ${nextAmount}/${intervalLabel}.
 
+${descargaTexto}
+
 Ver facturación: ${data.billingPortalUrl}
 
 Equipo de Avoqado`
@@ -4664,6 +4673,8 @@ Equipo de Avoqado`
 
 Your 30-day trial is active. Your first charge of ${firstAmount} is on ${dateFormatted}.
 
+${descargaTexto}
+
 View billing: ${data.billingPortalUrl}
 
 Avoqado Team`
@@ -4678,6 +4689,8 @@ Avoqado Team`
 
 Tu prueba de 30 días está activa. Tu primer cobro será de ${firstAmount} el ${dateFormatted}.
 
+${descargaTexto}
+
 Ver facturación: ${data.billingPortalUrl}
 
 Equipo de Avoqado`
@@ -4688,7 +4701,7 @@ Equipo de Avoqado`
       locale: data.locale,
       title: subject,
       venueName: data.venueName,
-      bodyHtml,
+      bodyHtml: bodyHtml + descargarAppHtml({ idioma }),
       ctaLabel,
       ctaUrl: data.billingPortalUrl,
     })
