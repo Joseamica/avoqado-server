@@ -16,9 +16,9 @@ import { logAction } from '@/services/dashboard/activity-log.service'
  *   · `assignedMerchantIds` en el alta no pasaba por el candado que sí tiene cambiarlos después (ronda 3:
  *     dueño de la org o `system:config` en el venue de la terminal).
  *
- * Ahora la asignación inicial respeta el MISMO candado que su modificación, y lo que se anexa solo es sólo de la
- * organización y sólo si quien crea podría asignarlo a mano. El alta del superadmin (consola de superadmin) no
- * cambia: el servicio sin alcance sigue anexando por serial exacto, como siempre.
+ * Ahora la asignación EXPLÍCITA inicial respeta el MISMO candado que su modificación, y lo que se anexa solo por serial
+ * es SÓLO de la organización, para cualquier creador autorizado (decisión del founder, B, 16-oct). El alta del
+ * superadmin (consola de superadmin) no cambia: el servicio sin alcance sigue anexando por serial exacto, como siempre.
  *
  * La autorización, el servicio de la org y el alta real (`createTerminal`) corren de verdad; sólo se simulan la
  * autenticación, la capa de datos y el aviso a las terminales.
@@ -189,8 +189,24 @@ describe('lo que el alta anexa SOLA por serial', () => {
     expect(comerciosDeLaTerminal()).toEqual(['ma-a-virtual'])
   })
 
-  it('🔴 un gerente (sin el candado de comercios) crea la terminal, pero NO se le anexa ningún comercio', async () => {
-    const res = await crear('gerente', 'MANAGER', { serialNumber: '2840744167' })
+  // Decisión del founder (B, 16-oct): el anexado automático es para CUALQUIER creador autorizado, siempre acotado a
+  // los comercios de SU organización. La asignación EXPLÍCITA sigue con su candado (abajo).
+  it.each([
+    ['el gerente', 'gerente', 'MANAGER'],
+    ['el OWNER de la sucursal que no es dueño de la org', 'dueno-sucursal', 'OWNER'],
+  ])('%s: el comercio de SU org con el mismo serial sí se anexa solo', async (_l, userId, rol) => {
+    const res = await crear(userId, rol, { serialNumber: '2840744167' })
+
+    expect(res.status).toBe(201)
+    expect(comerciosDeLaTerminal()).toEqual(['ma-a-1'])
+    expect(notifyAffectedTerminalsMock).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([
+    ['el gerente', 'gerente', 'MANAGER'],
+    ['el OWNER de la sucursal', 'dueno-sucursal', 'OWNER'],
+  ])('🔴 %s tampoco recibe el comercio de OTRA org por su serial virtual', async (_l, userId, rol) => {
+    const res = await crear(userId, rol, { serialNumber: '28415486242' })
 
     expect(res.status).toBe(201)
     expect(comerciosDeLaTerminal()).toEqual([])
