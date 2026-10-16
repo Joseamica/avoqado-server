@@ -3,7 +3,6 @@ import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError, ValidationError } from '@/errors/AppError'
-import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { lockTerminalRow } from '@/services/shared/terminalScopedWrites'
 import { esEsperaVencida, esInterbloqueo, esperaCortaAleatoria } from '@/services/shared/lockWait'
@@ -20,6 +19,7 @@ import {
   type DesignValues,
 } from './customerDisplayDesign.validation'
 import { configuredStorageBucket } from './storageOrigins'
+import { entitlementsFrom, readPlanGrants, type Entitlements } from './venuePlanSnapshot'
 // M5 (revisión final): re-exportado, no redefinido — el tope de destinos vive en el módulo PURO (mismo patrón que
 // `MAX_ASSET_BYTES` en `customerDisplayAsset.service.ts`, 949bf907), para que la ruta HTTP y el MCP lean el MISMO
 // número que este servicio en vez de arrastrar una segunda copia hardcodeada.
@@ -33,10 +33,8 @@ export { MAX_COPY_TARGETS }
  * ese id existe en otra parte.
  */
 
-export interface Entitlements {
-  slides: boolean
-  promotionCards: boolean
-}
+// La regla vive en `venuePlanSnapshot` (Task 3 de F0-B); el tipo se re-exporta para que los importadores de F0-A no cambien.
+export type { Entitlements }
 
 /** Todo lo que la ficha necesita además de la terminal. Se lee UNA vez por operación y viaja como parámetro. */
 export interface FichaContext {
@@ -111,16 +109,8 @@ export function designValuesOf(row: DesignRow | null): DesignValues {
 }
 
 export async function readEntitlements(venueId: string): Promise<Entitlements> {
-  // Los dos son códigos de `Feature` (el catálogo móvil gatea `PROMOTIONS` con `checkFeatureAccess`, que REPRODUCE la
-  // lógica de este mismo resolver —y sólo lo llama para una fila propia vencida o suspendida—): cruzarlo con el de
-  // módulos pasaría para todos los venues grandfathered sin avisar.
-  const [promos, promotions] = await Promise.all([
-    venueHasFeatureAccess(venueId, 'CUSTOMER_DISPLAY_PROMOS'),
-    venueHasFeatureAccess(venueId, 'PROMOTIONS'),
-  ])
-  // 🔴 Las tarjetas exigen las DOS: el catálogo móvil de promociones ya exige `PROMOTIONS`, así que
-  // prometerlas con sólo el código nuevo dejaría la pantalla anunciando un catálogo vacío.
-  return { slides: promos, promotionCards: promos && promotions }
+  // UNA regla para toda la pantalla del cliente: la del snapshot del plan (Task 3 de F0-B).
+  return entitlementsFrom(await readPlanGrants(venueId))
 }
 
 let bucketAvisado = false

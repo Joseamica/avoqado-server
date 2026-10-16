@@ -3,6 +3,7 @@ import prisma from '@/utils/prismaClient'
 import { moduleService, MODULE_CODES } from '@/services/modules/module.service'
 import { GRANDFATHER_SELECT, resolveGrandfathered } from './grandfather'
 import { grantedCapabilityCodes, hasCapabilityGrant, venuesWithCapabilityGrant } from './capabilityGrants.service'
+import { esperarTodas } from '@/services/customer-display/pollWork' // PURO y sin imports: no arrastra nada
 
 // Re-exported so the grandfather resolver is discoverable from the access service everyone
 // already imports. Callers OUTSIDE this module should prefer importing from './grandfather'
@@ -331,9 +332,14 @@ export async function getVenueGrantedFeatureCodes(venueId: string): Promise<stri
   return [...new Set([...filas.map(f => f.feature.code), ...commercial])].sort()
 }
 
-export async function getVenuePlanInfo(venueId: string): Promise<VenuePlanInfo> {
+/**
+ * `esperarTodasLasRamas` (sólo el snapshot del poll de la pantalla del cliente): las 5 ramas terminan antes de propagar un
+ * error, para que el lugar del poll no se suelte con consultas vivas (F0-B, Codex r2 #2). Sin la opción —el `/settings` del POS,
+ * la TPV, el dashboard y el MCP—, el `Promise.all` de siempre: misma latencia y el mismo primer rechazo (Codex r3 N2).
+ */
+export async function getVenuePlanInfo(venueId: string, o: { esperarTodasLasRamas?: boolean } = {}): Promise<VenuePlanInfo> {
   const accessObservedAt = new Date().toISOString()
-  const [commercialTier, venue, individualCodes, legacyTier, billingPlan] = await Promise.all([
+  const ramas = [
     getContractBaseTier(venueId),
     prisma.venue.findUnique({ where: { id: venueId }, select: { ...GRANDFATHER_SELECT, status: true } }),
     getVenueGrantedFeatureCodes(venueId),
@@ -349,7 +355,10 @@ export async function getVenuePlanInfo(venueId: string): Promise<VenuePlanInfo> 
       select: { planTier: true },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     }),
-  ])
+  ] as const
+  const [commercialTier, venue, individualCodes, legacyTier, billingPlan] = await (o.esperarTodasLasRamas
+    ? esperarTodas(ramas)
+    : Promise.all(ramas))
   const grandfathered = resolveGrandfathered(venue)
   const exempt = grandfathered || (venue != null && (DEMO_VENUE_STATUSES as readonly string[]).includes(venue.status as string))
   const grantedFeatureCodes = [
