@@ -2673,9 +2673,15 @@ class OrganizationDashboardService {
     // validan (la de la organización y la del panel white-label de la sucursal). Antes de escribir nada.
     asegurarQueNoEsSuPropiaChecada(timeEntry.staffId, validatedById, 'validar')
 
+    // 🔴 IDEMPOTENTE (P1-5, Codex, 15-oct): repetir la aprobación —el dashboard reintenta ante un error de red,
+    // o dos supervisores aprueban la misma— creaba un SEGUNDO `CashDeposit` APROBADO. La transición es atómica:
+    // sólo una checada PENDIENTE pasa a aprobada o rechazada (`updateMany` con el estado previo en el `where`;
+    // Postgres vuelve a evaluar el `where` tras el candado de fila, así que de dos peticiones simultáneas sólo
+    // una escribe), y el depósito se crea sólo si ESA transición ocurrió, en la misma transacción. Sin cambio de
+    // esquema: no hace falta un vínculo único checada↔depósito para esto.
     const result = await prisma.$transaction(async tx => {
-      const updated = await tx.timeEntry.update({
-        where: { id: timeEntryId },
+      const transicion = await tx.timeEntry.updateMany({
+        where: { id: timeEntryId, validationStatus: 'PENDING' },
         data: {
           validationStatus: status,
           validatedBy: validatedById,
@@ -2683,6 +2689,7 @@ class OrganizationDashboardService {
           validationNote: note || null,
         },
       })
+      if (transicion.count !== 1) return null
 
       // Create CashDeposit when approving with a deposit amount
       if (status === 'APPROVED' && depositAmount != null && depositAmount > 0) {
@@ -2699,8 +2706,19 @@ class OrganizationDashboardService {
         })
       }
 
-      return updated
+      return tx.timeEntry.findUnique({ where: { id: timeEntryId } })
     })
+
+    if (!result) {
+      // Ya no estaba pendiente. Si ya quedó en lo que se pide, es una repetición: se responde la checada como está,
+      // sin otro depósito ni otro asiento. Si quedó en lo contrario (aprobar una rechazada o al revés), se dice.
+      const actual = await prisma.timeEntry.findFirst({ where: { id: timeEntryId, venue: { organizationId: orgId } } })
+      if (actual?.validationStatus === status) return actual
+      throw new ConflictError(
+        `Esta checada ya fue ${actual?.validationStatus === 'APPROVED' ? 'aprobada' : 'rechazada'}. Regrésala a pendiente antes de cambiarla.`,
+        'TIME_ENTRY_ALREADY_VALIDATED',
+      )
+    }
 
     logAction({
       staffId: validatedById,

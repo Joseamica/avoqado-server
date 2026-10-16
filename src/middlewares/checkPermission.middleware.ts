@@ -188,34 +188,36 @@ async function resolverRolEnLaBase(userId: string, targetVenueId: string): Promi
       active: true,
       permissionSetId: true,
       permissionSet: true,
+      venue: { select: { organizationId: true } },
     },
   })
 
-  if (staffVenue?.active) {
-    return {
-      role: staffVenue.role,
-      source: 'staffVenue',
-      permissionSet: staffVenue.permissionSetId ? staffVenue.permissionSet : null,
-    }
-  }
+  const filaVigente: ResolvedUserRole | null = staffVenue?.active
+    ? { role: staffVenue.role, source: 'staffVenue', permissionSet: staffVenue.permissionSetId ? staffVenue.permissionSet : null }
+    : null
+  // Una fila OWNER (o superadmin) ya es lo más alto: no hace falta preguntar por la organización.
+  if (filaVigente && (staffVenue!.role === StaffRole.OWNER || staffVenue!.role === StaffRole.SUPERADMIN)) return filaVigente
 
-  const targetVenue = await prisma.venue.findUnique({
-    where: { id: targetVenueId },
-    select: { organizationId: true },
-  })
+  // 🔴 El DUEÑO DE LA ORGANIZACIÓN manda sobre una fila MENOR en la sucursal (P2-6, Codex, 15-oct). Antes la
+  // fila ganaba: un dueño de la org que además era CAJERO en una tienda recibía 403 en `attendance:manage` y
+  // `teams:update`, mientras `getUserAccess` (dashboard, apps, MCP) ya lo trataba como OWNER. Misma precedencia
+  // que `getUserAccess`, con sus mismas piezas: el rol OWNER con lo que el venue le personalizó y le QUITÓ al
+  // OWNER (se cargan por rol más abajo) y, si su fila trae un Conjunto de Permisos, ese conjunto.
+  // Costo: para una fila menor, UNA consulta más por petición (la membresía, por su llave única; la org ya vino
+  // con la fila) y memoizada. Sin fila, las mismas dos de siempre.
+  const organizationId =
+    staffVenue?.venue?.organizationId ??
+    (await prisma.venue.findUnique({ where: { id: targetVenueId }, select: { organizationId: true } }))?.organizationId
 
-  if (!targetVenue) {
-    return {
-      role: null,
-      source: 'none',
-    }
+  if (!organizationId) {
+    return filaVigente ?? { role: null, source: 'none' }
   }
 
   const orgMembership = await prisma.staffOrganization.findUnique({
     where: {
       staffId_organizationId: {
         staffId: userId,
-        organizationId: targetVenue.organizationId,
+        organizationId,
       },
     },
     select: {
@@ -228,13 +230,11 @@ async function resolverRolEnLaBase(userId: string, targetVenueId: string): Promi
     return {
       role: StaffRole.OWNER,
       source: 'orgOwner',
+      permissionSet: staffVenue?.permissionSetId ? staffVenue.permissionSet : null,
     }
   }
 
-  return {
-    role: null,
-    source: 'none',
-  }
+  return filaVigente ?? { role: null, source: 'none' }
 }
 
 /**
