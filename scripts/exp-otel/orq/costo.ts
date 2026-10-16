@@ -86,7 +86,8 @@ async function bloque(brazo: Brazo, etiqueta: string, ventanas: unknown[], repos
 async function main() {
   await prepararBase()
   if (MODO === 'calibrar') {
-    const tasas = CORTO ? [1, 3] : [1, 2, 3, 4, 6, 8]
+    // corrida de prueba (38934339944, ventanas de 30 s): 1/s → 33 % y 3/s → 96 % de 1 CPU; la escalera fina va por ahí
+    const tasas = CORTO ? [1, 3] : [0.5, 1, 1.5, 2, 2.5, 3]
     const ventanas = [{ nombre: 'calentamiento', tasa: 1, duracionS: CORTO ? 20 : 45 }, ...tasas.map(t => ({ nombre: `t${t}`, tasa: t, duracionS: CORTO ? 30 : 60 }))]
     const r = await bloque('A+', 'calibracion', ventanas, 0)
     const escalones = r.ventanas.filter((v: any) => v.nombre !== 'calentamiento').map((v: any) => ({ tasa: v.tasa, cpu: v.cpuFraccion, cobrosOk: v.cobros?.ok, iniciados: v.cobros?.iniciados }))
@@ -104,10 +105,12 @@ async function main() {
   const tasa = JSON.parse(fs.readFileSync('scripts/exp-otel/config/tasa.json', 'utf8')).cobrosPorSegundo
   const brazos: Brazo[] = barajar(['A', 'A+', 'B', 'B0', 'BmP'], REP * 7919)
   log(`rep ${REP}: orden de brazos ${brazos.join(' → ')} · tasa congelada ${tasa}/s`)
+  // La BAJA va primero: el job de efectos procesa a lo más 25 por vuelta (cada 30 s) y la alta deja cola; medida así,
+  // «hasta DONE» de la baja no hereda la cola de la alta. La alta hereda la de la baja igual en todos los brazos.
   const ventanas = [
+    { nombre: 'baja', tasa: 1, duracionS: CORTO ? 30 : 120, medirDone: true, alinearSegundo: 20 },
     { nombre: 'calentamiento', tasa, duracionS: CORTO ? 15 : 60 },
     { nombre: 'alta', tasa, duracionS: CORTO ? 40 : 180, alinearSegundo: 20 },
-    { nombre: 'baja', tasa: 1, duracionS: CORTO ? 30 : 120, medirDone: true, alinearSegundo: 20 },
   ]
   const res = []
   for (const b of brazos) res.push(await bloque(b, `r${REP}-${b}`, ventanas, 20))

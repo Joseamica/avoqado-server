@@ -16,7 +16,7 @@ import type { Prisma } from '@prisma/client'
 const falla = (): string | undefined => process.env.EXP_INYECTOR || undefined
 
 export async function inyectarDbLenta(tx: Prisma.TransactionClient): Promise<void> {
-  if (falla() === 'db_lenta') await tx.$queryRaw`SELECT pg_sleep(0.8)`
+  if (falla() === 'db_lenta') await tx.$queryRaw`SELECT pg_sleep(0.8)::text AS dormido` // ::text: Prisma no deserializa `void`
 }
 
 export function inyectarCpu(): void {

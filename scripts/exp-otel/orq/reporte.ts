@@ -84,6 +84,8 @@ function costo() {
           rssPicoMB: baja?.rssPicoMB,
           doneTotalP50: med(done.map((x: any) => x.completado - x.creado)),
           doneSinEsperaDelCronP50: med(done.map((x: any) => x.completado - x.creado - espera(x.creado))),
+          // el job procesa ≤25 efectos por vuelta (cada 30 s): a 1 cobro/s hay cola; cuántos estaban DONE 65 s después
+          fraccionDoneA65s: (baja?.done ?? []).length ? done.length / (baja?.done ?? []).length : null,
           efectos: (baja?.done ?? []).length,
           efectosDone: done.length,
         },
@@ -153,6 +155,10 @@ function caido() {
         msHastaSalir: b.msHastaSalir,
         contadoresAntesDeApagar: contAntes,
         contadoresAlSalir: contFinal,
+        // el contador interno de descartes del BatchSpanProcessor se REINICIA cada vez que avisa: lo perdido se calcula
+        // como terminados − exportados con éxito − pendientes en la cola
+        perdidosAntesDeApagar: contAntes ? contAntes.terminados - contAntes.exportadosOk - (contAntes.pendiente ?? 0) : null,
+        perdidosAlSalir: contFinal ? contFinal.terminados - contFinal.exportadosOk : null,
         lineasWarnError: ruido,
       }
     }
@@ -280,23 +286,32 @@ function volumen() {
     const proxy = existe(path.join(dir, 'proxy-otlp.json')) ? (() => { try { return leer(path.join(dir, 'proxy-otlp.json')) } catch { return null } })() : null
     const bytesPorSpan = proxy?.bytes && spans.length ? proxy.bytes / spans.length : NaN
     const claves = new Set((llaves.cobros as any[]).map(c => c.llave))
-    const enlazadas = new Set(spans.filter(s => (s.links ?? []).some((k: any) => claves.has(k.traceId))).map(s => s.traceId))
-    const delCobro = spans.filter(s => claves.has(s.traceId) || enlazadas.has(s.traceId)).length / claves.size
-    const raices = spans.filter(s => !s.parentSpanId && s.kind === 2 && /GET/.test(s.name))
-    const trazasLectura = new Set(raices.map(s => s.traceId))
-    const porLectura = trazasLectura.size ? spans.filter(s => trazasLectura.has(s.traceId)).length / trazasLectura.size : NaN
-    out.push({ dir: path.basename(dir), spansTotales: spans.length, bytesComprimidosTotales: proxy?.bytes ?? null, bytesPorSpan: r1(bytesPorSpan), spansPorCobro: r1(delCobro), spansPorLectura: r1(porLectura) })
+    const porTraza = new Map<string, any[]>()
+    for (const sp of spans) (porTraza.get(sp.traceId) ?? porTraza.set(sp.traceId, []).get(sp.traceId)!).push(sp)
+    const enlazadas = new Set(spans.filter(sp => (sp.links ?? []).some((k: any) => claves.has(k.traceId))).map(sp => sp.traceId))
+    const delCobro = [...porTraza.entries()].filter(([t]) => claves.has(t) || enlazadas.has(t)).reduce((a, [, xs]) => a + xs.length, 0) / claves.size
+    const esLectura = (xs: any[]) => xs.some(sp => sp.kind === 2 && /^GET /.test(sp.name))
+    const trazasLectura = [...porTraza.entries()].filter(([t, xs]) => !claves.has(t) && !enlazadas.has(t) && esLectura(xs))
+    const porLectura = trazasLectura.length ? trazasLectura.reduce((a, [, xs]) => a + xs.length, 0) / trazasLectura.length : NaN
+    // fondo = todo lo que no es un cobro ni una lectura (jobs del cron, difusiones por socket, arranque)
+    const deFondo = spans.length - delCobro * claves.size - (trazasLectura.reduce((a, [, xs]) => a + xs.length, 0))
+    const tiempos = spans.map(sp => Number(BigInt(sp.startTimeUnixNano) / 1000000n))
+    const minutos = (Math.max(...tiempos) - Math.min(...tiempos)) / 60_000
+    out.push({ dir: path.basename(dir), spansTotales: spans.length, bytesComprimidosTotales: proxy?.bytes ?? null, bytesPorSpan: r1(bytesPorSpan), spansPorCobro: r1(delCobro), spansPorLectura: r1(porLectura), spansDeFondoPorMinuto: r1(deFondo / minutos) })
   }
   const bps = med(out.map(o => o.bytesPorSpan))
   const spc = med(out.map(o => o.spansPorCobro))
   const spl = med(out.map(o => o.spansPorLectura))
-  const gb = (fraccionResto: number) => (VOL_COBROS_MES * spc * bps + VOL_PETICIONES_MES * fraccionResto * spl * bps) / 1e9
+  const fondo = med(out.map(o => o.spansDeFondoPorMinuto))
+  // + los spans de fondo (jobs del cron) de UNA instancia todo el mes, muestreados igual que «el resto»
+  const gb = (fraccionResto: number) => (VOL_COBROS_MES * spc * bps + (VOL_PETICIONES_MES * spl + fondo * 60 * 24 * 30) * fraccionResto * bps) / 1e9
   const precio = (g: number) => ({ ingestaEU: r1(g * 0.1), ingestaUS: r1(g * 0.15), retencionMesEU: r1(g * 0.05), retencionMesUS: r1(g * 0.08), libre3GB: g <= 3 })
   return {
     medido: out,
     bytesPorSpanComprimido: r1(bps),
     spansPorCobro: r1(spc),
     spansPorLectura: r1(spl),
+    spansDeFondoPorMinuto: r1(fondo),
     parametros: { VOL_COBROS_MES, VOL_PETICIONES_MES, MUESTREO_RESTO },
     gbMes100: r1(gb(1)),
     gbMesMuestreado: r1(gb(MUESTREO_RESTO)),

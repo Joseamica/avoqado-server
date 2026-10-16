@@ -58,7 +58,7 @@ export function sh(cmd: string, opts: { quiet?: boolean; allowFail?: boolean; en
 }
 
 export function escribirJson(nombre: string, datos: unknown) {
-  fs.mkdirSync(OUT, { recursive: true })
+  fs.mkdirSync(path.dirname(path.join(OUT, nombre)), { recursive: true })
   fs.writeFileSync(path.join(OUT, nombre), JSON.stringify(datos, null, 2))
 }
 
