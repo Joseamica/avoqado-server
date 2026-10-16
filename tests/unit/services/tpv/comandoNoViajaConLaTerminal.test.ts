@@ -76,7 +76,7 @@ function cumple(c: Fila, where: any): boolean {
       if ((c.payload as any)?.[p.path[0]] !== p.equals) return false
     } else if (k === 'terminal') {
       const t = (f as any).is ?? f
-      if (t.venueId !== undefined && terminal.venueId !== t.venueId) return false
+      if (!vale(terminal.venueId, t.venueId)) return false // la terminal de HOY, como el subquery de Postgres
     } else if (!vale(c[k], f)) return false
   }
   return true
@@ -393,5 +393,89 @@ describe('migración SIN diferir (TPV vieja): la terminal ya está en B y su bor
 
     expect(entregados.map(c => c.commandId)).toEqual([borrado])
     expect(comando(lockDeA).status).toBe('CANCELLED')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Ronda 9 (Codex r3, 16-oct): una lectura VIEJA de la ubicación nunca basta para cancelar
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * El latido lee el venue de la terminal al empezar. Si mientras corre una migración mueve la terminal (y su borrado, o
+ * un comando nuevo del destino) a B, el mismo latido comparaba ese comando de B contra la «A» vieja y lo cancelaba:
+ * la terminal quedaba trasladada SIN el borrado que exige el cambio de credenciales de cobro. Ahora el retiro vuelve a
+ * exigir la discrepancia ACTUAL dentro de su propio UPDATE, y la entrega sólo ocurre si la terminal está HOY en el
+ * venue del comando (el reclamo condicionado). No entregar de más está bien; cancelar de más, no.
+ */
+describe('Codex r3: el latido atrasado no cancela lo que sí es de la terminal', () => {
+  it('🔴 migración SIN diferir a mitad del latido: el borrado de B se entrega (SENT) y NO se cancela', async () => {
+    terminal.commandProtocolVersion = null // TPV vieja: la migración no se difiere
+    prismaMock.terminal.findUnique.mockImplementationOnce((() => {
+      const leida = { ...terminal } // el latido ve la terminal en A…
+      // …y justo después, otra petición la migra: la mueve a B y encola su borrado con el venue B (como `updateTerminal`).
+      terminal.venueId = B
+      comandos.push({
+        id: 'cmd-borrado-b',
+        correlationId: 'corr-b',
+        createdAt: new Date(),
+        terminalId: terminal.id,
+        venueId: B,
+        commandType: 'FACTORY_RESET',
+        status: 'QUEUED',
+        priority: 'CRITICAL',
+        attempts: 0,
+        payload: { migration: { fromVenueId: A, previousMerchantIds: [], toVenueId: B } },
+        expiresAt: null,
+        scheduledFor: null,
+        requestedBy: 'dueno-org',
+      })
+      return Promise.resolve(leida)
+    }) as any)
+
+    const entregados = await tpvHealthService.getPendingCommands(terminal.id)
+
+    expect(comando('cmd-borrado-b').status).toBe('SENT')
+    expect(entregados.map(c => c.commandId)).toEqual(['cmd-borrado-b'])
+    expect(cancelacionesPorTraslado()).toEqual([])
+  })
+
+  it('🔴 variante durable: tras el permiso de la migración, un latido con la lectura vieja NO cancela el LOCK que B acaba de encolar', async () => {
+    const migracion = await empezarMigracionDiferida()
+    expect(await permiso(migracion)).toBe(true) // la terminal ya está en B
+    const { commandId: lockDeB } = await tpvCommandQueueService.queueCommand({
+      terminalId: terminal.id,
+      venueId: B,
+      commandType: 'LOCK',
+      requestedBy: 'dueno-b',
+    })
+    // Un latido que leyó la terminal ANTES del traslado (todavía en A) llega tarde.
+    prismaMock.terminal.findUnique.mockImplementationOnce((() => Promise.resolve({ ...terminal, venueId: A })) as any)
+
+    const entregados = await tpvHealthService.getPendingCommands(terminal.id, true)
+
+    expect(comando(lockDeB).status).not.toBe('CANCELLED')
+    expect(entregados.map(c => c.commandId)).toContain(lockDeB)
+    expect(cancelacionesPorTraslado()).toEqual([])
+  })
+
+  it('🔴 la entrega por socket con una lectura vieja tampoco cancela: no emite (la terminal ya no está donde leyó) y lo deja para el latido', async () => {
+    terminal.commandProtocolVersion = null
+    const { commandId } = await tpvCommandQueueService.queueCommand({
+      terminalId: terminal.id,
+      venueId: A,
+      commandType: 'LOCK',
+      requestedBy: 'dueno-a',
+    })
+    // `sendCommandToTerminal` leyó el comando con la terminal en B (lectura vieja de un traslado que se deshizo: la
+    // migración se canceló y la terminal regresó a A).
+    prismaMock.tpvCommandQueue.findUnique.mockImplementationOnce((({ where }: any) =>
+      Promise.resolve({ ...conTerminal(comando(where.id)), terminal: { ...terminal, venueId: B } })) as any)
+
+    await tpvCommandExecutionService.sendCommandToTerminal(commandId)
+
+    expect(comando(commandId).status).not.toBe('CANCELLED')
+    expect(cancelacionesPorTraslado()).toEqual([])
+    // …y el siguiente latido, con la ubicación de HOY, sí se lo entrega.
+    expect((await tpvHealthService.getPendingCommands(terminal.id)).map(c => c.commandId)).toEqual([commandId])
   })
 })
