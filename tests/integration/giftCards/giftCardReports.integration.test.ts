@@ -180,6 +180,15 @@ describe('reportes de tarjetas de regalo contra Postgres', () => {
     expect((await listGiftCards(venueId, { last4 })).items.map(t => t.id)).toEqual([ids.E])
   })
 
+  it('⭐ (D3 menor 6) «Activa» = se puede usar hoy: trae A y no E (vencida); la lista, el total y el saldo cuadran con la misma frontera', async () => {
+    const activas = await listGiftCards(venueId, { status: ['ACTIVE'] })
+    expect([activas.items.map(t => t.id), activas.total, activas.totalBalance]).toEqual([[ids.A], 1, 400])
+    const vencidas = await listGiftCards(venueId, { status: ['EXPIRED'] })
+    expect([vencidas.items.map(t => t.id), vencidas.total, vencidas.totalBalance]).toEqual([[ids.E], 1, 250])
+    const lasDos = await listGiftCards(venueId, { status: ['ACTIVE', 'EXPIRED'] })
+    expect([[...lasDos.items.map(t => t.id)].sort(), lasDos.total, lasDos.totalBalance]).toEqual([[ids.A, ids.E].sort(), 2, 650])
+  })
+
   it('pagina en orden estable con el total real: tres páginas de 2 traen las 5 sin repetir', async () => {
     const paginas = await Promise.all([1, 2, 3].map(page => listGiftCards(venueId, { page, pageSize: 2 })))
     expect(paginas.map(p => p.total)).toEqual([5, 5, 5])

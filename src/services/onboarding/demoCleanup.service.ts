@@ -45,10 +45,15 @@
  * - Real VenuePaymentConfig (post-KYC setup with real merchant accounts)
  * - Real VenuePricingStructure (configured for real accounts)
  * - Real ProviderCostStructure (for real merchant accounts)
+ *
+ * 🔴 Tarjetas de regalo (⭐ C6 concern 1, legal): si el negocio vendió ALGUNA tarjeta, no se borra NADA. Su saldo es dinero de sus
+ * clientes y la libreta es de sólo inserción: borrar las cuentas y cobros del demo dejaría sobres con saldo vivo sin la venta que
+ * los respalda. Se regresa con `skippedReason: 'GIFT_CARDS'`, un aviso en el log y en ActivityLog; la conversión sigue.
  */
 
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
+import { logAction } from '@/services/dashboard/activity-log.service'
 
 interface CleanupResult {
   // Transactional data (all deleted)
@@ -73,6 +78,8 @@ interface CleanupResult {
   deletedCustomerGroups: number
   deletedLoyaltyConfig: number
   deletedRawMaterials: number
+  /** ⭐ (C6 concern 1): por qué no se borró nada. `GIFT_CARDS` = el negocio vendió tarjetas de regalo. Sin el campo, se limpió. */
+  skippedReason?: 'GIFT_CARDS'
 }
 
 /**
@@ -80,9 +87,10 @@ interface CleanupResult {
  * Call this when converting from demo to real (KYC approval)
  *
  * @param venueId - Venue ID to clean
+ * @param staffId - Who converts the venue (actor of the ActivityLog entry when the cleanup is skipped)
  * @returns Cleanup statistics
  */
-export async function cleanDemoData(venueId: string): Promise<CleanupResult> {
+export async function cleanDemoData(venueId: string, staffId?: string | null): Promise<CleanupResult> {
   logger.info(`🧹 Starting demo data cleanup for venue: ${venueId}`)
 
   const result: CleanupResult = {
@@ -111,6 +119,12 @@ export async function cleanDemoData(venueId: string): Promise<CleanupResult> {
   // Use transaction to ensure atomicity
   await prisma.$transaction(
     async tx => {
+      // ⭐ (C6 concern 1): con una sola tarjeta vendida no se borra nada (ver la cabecera). Dentro de la transacción, antes de borrar.
+      if (await tx.giftCard.findFirst({ where: { venueId }, select: { id: true } })) {
+        result.skippedReason = 'GIFT_CARDS'
+        return
+      }
+
       // ==========================================
       // PHASE 1: Delete ALL transactional data
       // (These are always temporary demo data)
@@ -464,6 +478,22 @@ export async function cleanDemoData(venueId: string): Promise<CleanupResult> {
       timeout: 120000, // 2 minute timeout for comprehensive cleanup
     },
   )
+
+  if (result.skippedReason) {
+    logger.warn(`⚠️ Demo cleanup skipped for venue ${venueId}: it sold gift cards (their balance is customer money)`, {
+      venueId,
+      skippedReason: result.skippedReason,
+    })
+    await logAction({
+      staffId: staffId ?? null,
+      venueId,
+      action: 'DEMO_CLEANUP_SKIPPED',
+      entity: 'Venue',
+      entityId: venueId,
+      data: { reason: result.skippedReason },
+    })
+    return result
+  }
 
   logger.info(`🎉 Demo data cleanup complete for venue ${venueId}`)
   logger.info(`   Transactional: ${result.deletedOrders} orders, ${result.deletedPayments} payments`)

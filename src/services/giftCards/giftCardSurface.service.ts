@@ -164,6 +164,22 @@ export async function operarSobreDeGerente(
       operationKey: input.operationKey,
       op: aOperacionDeLaLibreta(input),
     })
+    // ⭐ (D4, estado de HOY): repetir un bloqueo o un desbloqueo con su llave responde «hecho» sólo si la tarjeta sigue como esa
+    // operación la dejó. Un bloqueo en duda que sí llegó y que otra pestaña ya desbloqueó no se vuelve a anunciar: 409. El sobre
+    // ya está bloqueado por la libreta en esta transacción: la lectura es la de hoy.
+    if (replay && (input.tipo === 'BLOQUEAR' || input.tipo === 'DESBLOQUEAR')) {
+      const hoy = await tx.giftCard.findFirst({ where: { id: giftCardId, venueId }, select: { status: true } })
+      const bloqueo = input.tipo === 'BLOQUEAR'
+      if (hoy?.status !== (bloqueo ? 'BLOCKED' : 'ACTIVE')) {
+        throw new GiftCardError(
+          'GIFT_CARD_BLOCKED',
+          bloqueo
+            ? 'Este bloqueo ya se había registrado, pero la tarjeta cambió después: hoy no está bloqueada. Vuelve a abrirla para ver su estado.'
+            : 'Este desbloqueo ya se había registrado, pero la tarjeta cambió después: hoy no está activa. Vuelve a abrirla para ver su estado.',
+          409,
+        )
+      }
+    }
     return { ...resultado, replayed: replay }
   }, ORDER_LOCK_WAIT_BUDGET)
 }

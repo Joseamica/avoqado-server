@@ -8,9 +8,11 @@
  * La libreta no se puede borrar (trigger): la base es desechable y este archivo no limpia; usa nombres únicos.
  */
 import { Prisma } from '@prisma/client'
+import cuid from 'cuid'
 import prisma from '@/utils/prismaClient'
 import { canjearSobresEnTx, lockGiftCardsForUpdate, operarSobreDeGerenteEnTx, revertirCanjeEnTx } from '@/services/giftCards/giftCardLedger'
 import { GiftCardError } from '@/services/giftCards/giftCardErrors'
+import { operarSobreDeGerente } from '@/services/giftCards/giftCardSurface.service'
 
 jest.setTimeout(60000)
 
@@ -19,7 +21,8 @@ const PRESUPUESTO = { timeout: 15_000, maxWait: 5_000 }
 const D = (v: number) => new Prisma.Decimal(v)
 let orgId: string
 let venueId: string
-const staffId = `staff-${SUF}`
+// ⭐ (A4 menor 6): todo id escrito a mano es cuid v1, como `@default(cuid())`.
+const staffId = cuid()
 let n = 0
 
 beforeAll(async () => {
@@ -51,12 +54,23 @@ async function sobreActivo(monto: number) {
   return s
 }
 
-/** Espera a que OTRA sesión esté detenida en el candado del sobre (la prueba de que la segunda caja de verdad esperó). */
-async function esperarAQueAlguienEspereElSobre(): Promise<void> {
+/** El proceso de Postgres de ESTA transacción: el que sostiene el candado. */
+async function pidDe(tx: Prisma.TransactionClient): Promise<number> {
+  const [{ pid }] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`
+  return pid
+}
+
+/**
+ * Espera a que OTRA sesión esté detenida en el candado del sobre que sostiene `pidQueTiene` (la prueba de que la segunda caja de
+ * verdad esperó). ⭐ (A4 menor 5): se filtra por `pg_blocking_pids`, así la espera de otra sesión —otra prueba u otro agente en
+ * la misma base— nunca la satisface.
+ */
+async function esperarAQueAlguienEspereElSobre(pidQueTiene: number): Promise<void> {
   for (let i = 0; i < 200; i++) {
     const [fila] = await prisma.$queryRaw<Array<{ n: bigint }>>`
       SELECT count(*)::bigint AS n FROM pg_stat_activity
-      WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%FROM "GiftCard"%FOR UPDATE%'`
+      WHERE datname = current_database() AND ${pidQueTiene}::int = ANY(pg_blocking_pids(pid))
+        AND query LIKE '%FROM "GiftCard"%FOR UPDATE%'`
     if (Number(fila.n) > 0) return
     await new Promise(resolve => setTimeout(resolve, 25))
   }
@@ -72,13 +86,13 @@ describe('libreta de tarjetas de regalo · Postgres real', () => {
     const cajaUno = prisma.$transaction(async tx => {
       const cards = await lockGiftCardsForUpdate(tx, [s.id])
       avisarQueTieneCandado()
-      await esperarAQueAlguienEspereElSobre()
-      return canjearSobresEnTx(tx, { venueId, orderId: `orden-1-${SUF}`, paymentId: `pago-1-${SUF}`, amount: D(600), cards, staffId })
+      await esperarAQueAlguienEspereElSobre(await pidDe(tx))
+      return canjearSobresEnTx(tx, { venueId, orderId: cuid(), paymentId: cuid(), amount: D(600), cards, staffId })
     }, PRESUPUESTO)
     const cajaDos = cajaUnoTieneElCandado.then(() =>
       prisma.$transaction(async tx => {
         const cards = await lockGiftCardsForUpdate(tx, [s.id])
-        return canjearSobresEnTx(tx, { venueId, orderId: `orden-2-${SUF}`, paymentId: `pago-2-${SUF}`, amount: D(600), cards, staffId })
+        return canjearSobresEnTx(tx, { venueId, orderId: cuid(), paymentId: cuid(), amount: D(600), cards, staffId })
       }, PRESUPUESTO),
     )
 
@@ -96,12 +110,35 @@ describe('libreta de tarjetas de regalo · Postgres real', () => {
     expect(canjes.map(c => [c.amount.toFixed(2), c.balanceAfter.toFixed(2)])).toEqual([['600.00', '400.00']])
   })
 
+  it('⭐ (A4 menor 3) un canje con una foto VIEJA del sobre no escribe un saldo inventado: 409 de concurrencia y el saldo intacto', async () => {
+    const s = await sobreActivo(1000)
+    // La foto se toma bajo candado y la transacción termina: queda vieja en cuanto otra caja cobra.
+    const fotoVieja = await prisma.$transaction(tx => lockGiftCardsForUpdate(tx, [s.id]), PRESUPUESTO)
+    await prisma.$transaction(async tx => {
+      const cards = await lockGiftCardsForUpdate(tx, [s.id])
+      return canjearSobresEnTx(tx, { venueId, orderId: cuid(), paymentId: cuid(), amount: D(300), cards, staffId })
+    }, PRESUPUESTO)
+
+    await expect(
+      prisma.$transaction(
+        tx => canjearSobresEnTx(tx, { venueId, orderId: cuid(), paymentId: cuid(), amount: D(100), cards: fotoVieja, staffId }),
+        PRESUPUESTO,
+      ),
+    ).rejects.toMatchObject({ code: 'ORDER_PAYMENT_CONFLICT', statusCode: 409 })
+
+    expect((await prisma.giftCard.findUniqueOrThrow({ where: { id: s.id } })).balance.toFixed(2)).toBe('700.00')
+    const canjes = await prisma.giftCardActivity.findMany({ where: { giftCardId: s.id, type: 'REDEEM' }, take: 10 })
+    expect(canjes.map(c => c.balanceAfter.toFixed(2))).toEqual(['700.00'])
+  })
+
   it('el mismo cobro no puede descontar dos veces el mismo sobre (paymentId, giftCardId, REDEEM es único)', async () => {
     const s = await sobreActivo(1000)
+    const orderId = cuid()
+    const paymentId = cuid()
     const cobrar = () =>
       prisma.$transaction(async tx => {
         const cards = await lockGiftCardsForUpdate(tx, [s.id])
-        return canjearSobresEnTx(tx, { venueId, orderId: `orden-r-${SUF}`, paymentId: `pago-r-${SUF}`, amount: D(100), cards, staffId })
+        return canjearSobresEnTx(tx, { venueId, orderId, paymentId, amount: D(100), cards, staffId })
       }, PRESUPUESTO)
     await cobrar()
     await expect(cobrar()).rejects.toMatchObject({ code: 'P2002' })
@@ -144,7 +181,7 @@ describe('libreta de tarjetas de regalo · Postgres real', () => {
     const s = await sobreActivo(800)
     await prisma.$transaction(async tx => {
       const cards = await lockGiftCardsForUpdate(tx, [s.id])
-      return canjearSobresEnTx(tx, { venueId, orderId: `orden-s-${SUF}`, paymentId: `pago-s-${SUF}`, amount: D(300), cards, staffId })
+      return canjearSobresEnTx(tx, { venueId, orderId: cuid(), paymentId: cuid(), amount: D(300), cards, staffId })
     }, PRESUPUESTO)
     await prisma.$transaction(
       tx =>
@@ -167,10 +204,10 @@ describe('libreta de tarjetas de regalo · Postgres real', () => {
 
   it('🔴 r1 (F7): $10,000 → canje $5,000 → ajuste +$5,000 rechazado → el reverso del canje sí entra y queda en $10,000, nunca $15,000', async () => {
     const s = await sobreActivo(10000)
-    const pago = `pago-techo-${SUF}`
+    const pago = cuid()
     await prisma.$transaction(async tx => {
       const cards = await lockGiftCardsForUpdate(tx, [s.id])
-      return canjearSobresEnTx(tx, { venueId, orderId: `orden-techo-${SUF}`, paymentId: pago, amount: D(5000), cards, staffId })
+      return canjearSobresEnTx(tx, { venueId, orderId: cuid(), paymentId: pago, amount: D(5000), cards, staffId })
     }, PRESUPUESTO)
 
     await expect(
@@ -190,8 +227,7 @@ describe('libreta de tarjetas de regalo · Postgres real', () => {
 
     // El reverso nunca se rechaza por el techo: regresa los $5,000 del canje.
     await prisma.$transaction(
-      tx =>
-        revertirCanjeEnTx(tx, { venueId, originalPaymentId: pago, refundPaymentId: `reembolso-techo-${SUF}`, amount: D(5000), staffId }),
+      tx => revertirCanjeEnTx(tx, { venueId, originalPaymentId: pago, refundPaymentId: cuid(), amount: D(5000), staffId }),
       PRESUPUESTO,
     )
     expect((await prisma.giftCard.findUniqueOrThrow({ where: { id: s.id } })).balance.toFixed(2)).toBe('10000.00')
@@ -214,7 +250,7 @@ describe('libreta de tarjetas de regalo · Postgres real', () => {
     const primera = prisma.$transaction(async tx => {
       await lockGiftCardsForUpdate(tx, [s.id])
       avisarQueTieneCandado()
-      await esperarAQueAlguienEspereElSobre() // la segunda ya pasó su validación y está detenida en el candado
+      await esperarAQueAlguienEspereElSobre(await pidDe(tx)) // la segunda ya pasó su validación y está detenida en el candado
       return operarSobreDeGerenteEnTx(tx, { venueId, giftCardId: s.id, staffId, operationKey: llave, op })
     }, PRESUPUESTO)
     const segunda = primeraTieneElCandado.then(() =>
@@ -230,10 +266,10 @@ describe('libreta de tarjetas de regalo · Postgres real', () => {
 
   it('🔴 dos reembolsos DISTINTOS del mismo cobro con saldo a la vez: sólo se regresa lo canjeado, nunca el doble', async () => {
     const s = await sobreActivo(1000)
-    const pago = `pago-doble-reverso-${SUF}`
+    const pago = cuid()
     await prisma.$transaction(async tx => {
       const cards = await lockGiftCardsForUpdate(tx, [s.id])
-      return canjearSobresEnTx(tx, { venueId, orderId: `orden-doble-reverso-${SUF}`, paymentId: pago, amount: D(300), cards, staffId })
+      return canjearSobresEnTx(tx, { venueId, orderId: cuid(), paymentId: pago, amount: D(300), cards, staffId })
     }, PRESUPUESTO)
     let avisarQueTieneCandado!: () => void
     const primeroTieneElCandado = new Promise<void>(resolve => (avisarQueTieneCandado = resolve))
@@ -241,12 +277,12 @@ describe('libreta de tarjetas de regalo · Postgres real', () => {
     const primero = prisma.$transaction(async tx => {
       await lockGiftCardsForUpdate(tx, [s.id])
       avisarQueTieneCandado()
-      await esperarAQueAlguienEspereElSobre() // el segundo ya leyó sus canjes y está detenido en el candado
-      return revertirCanjeEnTx(tx, { venueId, originalPaymentId: pago, refundPaymentId: `reembolso-a-${SUF}`, amount: D(300), staffId })
+      await esperarAQueAlguienEspereElSobre(await pidDe(tx)) // el segundo ya leyó sus canjes y está detenido en el candado
+      return revertirCanjeEnTx(tx, { venueId, originalPaymentId: pago, refundPaymentId: cuid(), amount: D(300), staffId })
     }, PRESUPUESTO)
     const segundo = primeroTieneElCandado.then(() =>
       prisma.$transaction(
-        tx => revertirCanjeEnTx(tx, { venueId, originalPaymentId: pago, refundPaymentId: `reembolso-b-${SUF}`, amount: D(300), staffId }),
+        tx => revertirCanjeEnTx(tx, { venueId, originalPaymentId: pago, refundPaymentId: cuid(), amount: D(300), staffId }),
         PRESUPUESTO,
       ),
     )
@@ -257,5 +293,56 @@ describe('libreta de tarjetas de regalo · Postgres real', () => {
     expect((dos as PromiseRejectedResult).reason).toMatchObject({ code: 'GIFT_CARD_AMOUNT_OUT_OF_RANGE' })
     expect((await prisma.giftCard.findUniqueOrThrow({ where: { id: s.id } })).balance.toFixed(2)).toBe('1000.00')
     expect(await prisma.giftCardActivity.count({ where: { giftCardId: s.id, type: 'REDEEM_REVERSAL' } })).toBe(1)
+  })
+})
+
+/**
+ * ⭐ (D4, estado de HOY): el panel reintenta un bloqueo o un desbloqueo EN DUDA con la misma llave. Si el estado ya se movió después
+ * (el bloqueo sí llegó y otra pestaña desbloqueó), la llave vieja no vuelve a responder «hecho»: 409 con código y sin escribir.
+ */
+describe('panel · bloquear y desbloquear repetidos con la misma llave', () => {
+  const bloquear = (giftCardId: string, operationKey: string) =>
+    operarSobreDeGerente(venueId, giftCardId, staffId, { operationKey, tipo: 'BLOQUEAR', reason: 'SUSPICIOUS_ACTIVITY' })
+  const desbloquear = (giftCardId: string, operationKey: string) =>
+    operarSobreDeGerente(venueId, giftCardId, staffId, { operationKey, tipo: 'DESBLOQUEAR', reason: 'CUSTOMER_REQUEST' })
+  const estado = async (id: string) => (await prisma.giftCard.findUniqueOrThrow({ where: { id } })).status
+  const movimientos = (giftCardId: string) => prisma.giftCardActivity.count({ where: { giftCardId } })
+
+  it('🔴 el bloqueo en duda que sí llegó y otra pestaña desbloqueó ⇒ repetirlo responde 409 y la tarjeta sigue activa', async () => {
+    const s = await sobreActivo(500)
+    const llave = `${SUF}-bloqueo-duda`
+    await expect(bloquear(s.id, llave)).resolves.toMatchObject({ replayed: false })
+    // Mientras el estado no se mueva, el reintento es la misma respuesta.
+    await expect(bloquear(s.id, llave)).resolves.toMatchObject({ replayed: true })
+    await desbloquear(s.id, `${SUF}-desbloqueo-otra-pestana`)
+    const antes = await movimientos(s.id)
+
+    await expect(bloquear(s.id, llave)).rejects.toMatchObject({
+      code: 'GIFT_CARD_BLOCKED',
+      statusCode: 409,
+      message:
+        'Este bloqueo ya se había registrado, pero la tarjeta cambió después: hoy no está bloqueada. Vuelve a abrirla para ver su estado.',
+    })
+    expect(await estado(s.id)).toBe('ACTIVE')
+    expect(await movimientos(s.id)).toBe(antes)
+  })
+
+  it('🔴 el desbloqueo en duda que sí llegó y luego se volvió a bloquear ⇒ repetirlo responde 409 y la tarjeta sigue bloqueada', async () => {
+    const s = await sobreActivo(500)
+    await bloquear(s.id, `${SUF}-bloqueo-1`)
+    const llave = `${SUF}-desbloqueo-duda`
+    await expect(desbloquear(s.id, llave)).resolves.toMatchObject({ replayed: false })
+    await expect(desbloquear(s.id, llave)).resolves.toMatchObject({ replayed: true })
+    await bloquear(s.id, `${SUF}-bloqueo-2`)
+    const antes = await movimientos(s.id)
+
+    await expect(desbloquear(s.id, llave)).rejects.toMatchObject({
+      code: 'GIFT_CARD_BLOCKED',
+      statusCode: 409,
+      message:
+        'Este desbloqueo ya se había registrado, pero la tarjeta cambió después: hoy no está activa. Vuelve a abrirla para ver su estado.',
+    })
+    expect(await estado(s.id)).toBe('BLOCKED')
+    expect(await movimientos(s.id)).toBe(antes)
   })
 })

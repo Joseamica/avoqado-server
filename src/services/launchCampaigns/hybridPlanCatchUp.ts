@@ -14,9 +14,16 @@ const TIERS = ['PRO', 'PREMIUM']
 const LOTE = 100
 /**
  * Las fronteras de periodo son segundos enteros (Stripe): las ampliaciones de una puesta al día viven dentro del segundo
- * que empieza en la frontera. El mismo segundo que lee la entrega (`hybridDelivery.service.ts`, historial `lt start + 1 s`).
+ * que empieza en la frontera. ⭐ Una sola definición para los dos lados: la entrega (`hybridDelivery.service.ts`) lee el historial
+ * con `lt finDelSegundoDeLaFrontera(start)` y esta puesta al día escribe dentro de ese mismo segundo. Nadie más escribe
+ * `effectiveAt` con milisegundos (guarda: tests/unit/architecture/seleccionDeContratoHibrido.test.ts).
  */
-const SEGUNDO_DE_LA_FRONTERA_MS = 1000
+export const SEGUNDO_DE_LA_FRONTERA_MS = 1000
+
+/** El primer instante DESPUÉS del segundo que empieza en `frontera` (límite exclusivo de la ventana). */
+export function finDelSegundoDeLaFrontera(frontera: Date): Date {
+  return new Date(frontera.getTime() + SEGUNDO_DE_LA_FRONTERA_MS)
+}
 
 const mismoConjunto = (a: string[], b: string[]) => a.length === b.length && a.every(code => b.includes(code))
 
@@ -105,14 +112,14 @@ export async function addPlanFeatureToLivePlanContracts(featureCode: PlanCatchUp
               // entrega lee como de la frontera (`lt start + 1 s`, hybridDelivery.service.ts). Sólo si la última refleja el
               // contrato: si no, no se adivina cuál vale.
               const ultima = await tx.hybridContractSelection.findFirst({
-                where: { contractId: id, effectiveAt: { gte: frontera, lt: new Date(frontera.getTime() + SEGUNDO_DE_LA_FRONTERA_MS) } },
+                where: { contractId: id, effectiveAt: { gte: frontera, lt: finDelSegundoDeLaFrontera(frontera) } },
                 orderBy: { effectiveAt: 'desc' },
                 select: { effectiveAt: true, featureCodes: true },
               })
               if (ultima && !mismoConjunto(ultima.featureCodes, contract.featureCodes))
                 throw new SkipContract('SELECTION_ALREADY_AT_EFFECTIVE_DATE')
               const effectiveAt = ultima ? new Date(ultima.effectiveAt.getTime() + 1) : frontera
-              if (effectiveAt.getTime() >= frontera.getTime() + SEGUNDO_DE_LA_FRONTERA_MS) throw new SkipContract('SELECTION_BOUNDARY_FULL')
+              if (effectiveAt.getTime() >= finDelSegundoDeLaFrontera(frontera).getTime()) throw new SkipContract('SELECTION_BOUNDARY_FULL')
               await tx.hybridContractSelection.create({ data: { contractId: id, effectiveAt, featureCodes } })
               await tx.hybridContract.update({ where: { id }, data: { featureCodes } })
             }

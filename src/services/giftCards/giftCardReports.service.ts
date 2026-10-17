@@ -284,15 +284,20 @@ function busquedaWhere(termino: string): Prisma.GiftCardWhereInput {
 
 /**
  * El filtro de estado. `EXPIRED` (decisión 1) = ACTIVE con `expiresAt <= ahora` en UTC: la misma frontera que el resumen, la
- * consulta del saldo y la libreta (vencida ⇔ ya no se puede usar). Mezclado con otros estados va dentro de un `AND` para no
- * chocar con el `OR` de la búsqueda.
+ * consulta del saldo y la libreta (vencida ⇔ ya no se puede usar). ⭐ (D3 menor 6): `ACTIVE` es su complemento —ACTIVE que se puede
+ * usar HOY, `expiresAt` nulo o posterior—, así «Activa» nunca trae (ni suma al saldo) una tarjeta que el panel pinta «Vencida».
+ * Cualquier mezcla, o `ACTIVE`, va dentro de un `AND` para no chocar con el `OR` de la búsqueda.
  */
 function filtroDeEstados(estados: EstadoDeListaDeTarjetas[], ahora: Date): Prisma.GiftCardWhereInput {
-  const reales = estados.filter((e): e is GiftCardStatus => e !== 'EXPIRED')
-  if (!estados.includes('EXPIRED')) return { status: { in: reales } }
-  const vencidas: Prisma.GiftCardWhereInput = { status: GiftCardStatus.ACTIVE, expiresAt: { lte: ahora } }
-  if (reales.length === 0) return vencidas
-  return { AND: [{ OR: [{ status: { in: reales } }, vencidas] }] }
+  const otros = estados.filter((e): e is GiftCardStatus => e !== 'EXPIRED' && e !== GiftCardStatus.ACTIVE)
+  const clausulas: Prisma.GiftCardWhereInput[] = []
+  if (otros.length > 0) clausulas.push({ status: { in: otros } })
+  if (estados.includes(GiftCardStatus.ACTIVE)) {
+    clausulas.push({ status: GiftCardStatus.ACTIVE, OR: [{ expiresAt: null }, { expiresAt: { gt: ahora } }] })
+  }
+  if (estados.includes('EXPIRED')) clausulas.push({ status: GiftCardStatus.ACTIVE, expiresAt: { lte: ahora } })
+  if (clausulas.length === 1 && !clausulas[0].OR) return clausulas[0]
+  return { AND: [{ OR: clausulas }] }
 }
 
 export async function listGiftCards(venueId: string, q: ListGiftCardsQuery, ahora: Date = new Date()): Promise<GiftCardListPage> {

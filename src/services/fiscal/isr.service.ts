@@ -140,11 +140,22 @@ export interface IsrProvisionalResult {
 
 const pesosMx = (centavos: number) => (centavos / 100).toLocaleString('es-MX', { style: 'currency', currency: 'MXN' })
 
-/** El aviso de tarjetas de regalo del ISR (B4 r1), o `undefined` si no hay diferencia. */
+/**
+ * El aviso de tarjetas de regalo del ISR (B4 r1), o `undefined` si no hay diferencia. ⭐ Un importe negativo (más devoluciones que
+ * ventas en el tramo) se dice como devuelto y en positivo: «no descuenta $300.00 … devueltas», nunca «no incluye -$300.00 … cobradas».
+ */
 function avisoDeTarjetas(regime: IsrRegime, cobradasNoIncluidasCents: number, pagadoConSaldoIncluidoCents: number): string | undefined {
   if (cobradasNoIncluidasCents === 0 && pagadoConSaldoIncluidoCents === 0) return undefined
   const cuando = regime === 'RESICO' ? 'en el periodo' : 'en lo que va del ejercicio'
-  return `El ISR estimado no incluye ${pesosMx(cobradasNoIncluidasCents)} de tarjetas de regalo cobradas ${cuando} y sí incluye ${pesosMx(pagadoConSaldoIncluidoCents)} pagado con saldo de tarjetas; tu contador debe ajustarlo con el reporte de tarjetas.`
+  const cargas =
+    cobradasNoIncluidasCents < 0
+      ? `no descuenta ${pesosMx(-cobradasNoIncluidasCents)} de tarjetas de regalo devueltas ${cuando}`
+      : `no incluye ${pesosMx(cobradasNoIncluidasCents)} de tarjetas de regalo cobradas ${cuando}`
+  const saldo =
+    pagadoConSaldoIncluidoCents < 0
+      ? `sí resta ${pesosMx(-pagadoConSaldoIncluidoCents)} de devoluciones de lo pagado con saldo de tarjetas`
+      : `sí incluye ${pesosMx(pagadoConSaldoIncluidoCents)} pagado con saldo de tarjetas`
+  return `El ISR estimado ${cargas} y ${saldo}; tu contador debe ajustarlo con el reporte de tarjetas.`
 }
 
 /**
@@ -202,6 +213,8 @@ async function ingresosPorMes(
   venues: Array<{ id: string; name: string; timezone: string | null }>,
   period: string,
   quien: { venueName: string },
+  /** ⭐ RESICO usa las tarjetas sólo del mes pedido: los meses anteriores no las leen (quedan en 0). GENERAL las usa todas. */
+  tarjetasSoloDelMes: boolean,
 ): Promise<Array<{ netCents: number; sales: number } & TarjetasEnElIsr>> {
   const { year, month, to } = monthRange(period)
   return conFotoDeReporte(
@@ -226,6 +239,7 @@ async function ingresosPorMes(
           netCents += r.fiscalRevenue.ingresosSinIvaCents ?? r.fiscalRevenue.taxableBaseCents
           sales += r.metrics.salesCount
           // B4 r1 (fix 2): la diferencia de las tarjetas de regalo, en la misma foto y con la misma lectura que la base.
+          if (tarjetasSoloDelMes && m < month) continue
           const t = await tarjetasDeRegaloEnFoto(tx, v, { from: rango.from, to: rango.to }, LIMITES_DEL_REPORTE)
           cargasCents += t.cargasCents
           pagadoConSaldoSinIvaCents += t.pagadoConSaldoSinIvaCents
@@ -325,11 +339,14 @@ export async function getIsrProvisional(venueId: string, period: string, regime:
   const { year, month, to } = monthRange(period)
   // B4b: cada mes del ejercicio, uno tras otro, en UNA foto; el mes pedido es el último y el acumulado, la suma. T6 M5: si no se
   // puede calcular, el texto es el mensual (aquí no hay rango que acortar), salvo el de una venta que pasa un tope (nombra su folio).
-  const meses = await ingresosPorMes(venues, period, { venueName: venues.find(v => v.id === venueId)?.name ?? venueId }).catch(
-    (e: unknown) => {
-      throw comoErrorDelMes(e)
-    },
-  )
+  const meses = await ingresosPorMes(
+    venues,
+    period,
+    { venueName: venues.find(v => v.id === venueId)?.name ?? venueId },
+    regime === 'RESICO',
+  ).catch((e: unknown) => {
+    throw comoErrorDelMes(e)
+  })
   const mes = meses[meses.length - 1]
   const acumIngreso = { netCents: sumaDeIngresos(meses) }
   base.ingresosMesCents = mes.netCents

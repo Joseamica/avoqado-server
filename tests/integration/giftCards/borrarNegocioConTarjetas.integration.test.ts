@@ -9,12 +9,20 @@
 import { randomUUID } from 'crypto'
 import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
-import { deleteVenue } from '@/services/dashboard/venue.dashboard.service'
+import { convertDemoVenue, deleteVenue } from '@/services/dashboard/venue.dashboard.service'
+import { cleanDemoData } from '@/services/onboarding/demoCleanup.service'
+// `integration-setup.ts` mockea la bitácora (fire-and-forget): se comprueba la llamada, no la fila.
+import { logAction } from '@/services/dashboard/activity-log.service'
 import { encryptGiftCardCode, generateGiftCardCode, generateOpaqueToken, hashGiftCardCode } from '@/services/giftCards/giftCardCode'
+import { crearCuentaDeMercancia, crearNegocioDePrueba, sembrarVentaDeTarjetas } from './sembrarTarjetasDeRegalo'
 
 jest.mock('@/services/modules/module.service', () => ({
   ...jest.requireActual('@/services/modules/module.service'),
   moduleService: { isModuleEnabled: jest.fn().mockResolvedValue(false) },
+}))
+// convertDemoVenue avisa a superadmin (correo/notificación) al final: aquí no sale nada.
+jest.mock('@/services/superadmin/kycReview.service', () => ({
+  notifySuperadminsNewKycSubmission: jest.fn().mockResolvedValue(undefined),
 }))
 // deleteVenue borra también la carpeta del negocio en el almacenamiento: aquí nunca sale una llamada de red.
 jest.mock('@/services/storage.service', () => ({
@@ -71,7 +79,7 @@ describe('deleteVenue × tarjetas de regalo', () => {
       },
     })
 
-    await expect(deleteVenue(n.orgId, n.venueId)).rejects.toMatchObject({ statusCode: 409, message: MENSAJE })
+    await expect(deleteVenue(n.orgId, n.venueId)).rejects.toMatchObject({ statusCode: 409, code: 'VENUE_HAS_GIFT_CARDS', message: MENSAJE })
 
     expect(await prisma.venue.count({ where: { id: n.venueId } })).toBe(1)
     expect(await prisma.product.count({ where: { id: n.productId } })).toBe(1)
@@ -88,5 +96,57 @@ describe('deleteVenue × tarjetas de regalo', () => {
     expect(await prisma.venue.count({ where: { id: n.venueId } })).toBe(0)
     expect(await prisma.product.count({ where: { id: n.productId } })).toBe(0)
     await prisma.organization.deleteMany({ where: { id: n.orgId } })
+  })
+})
+
+/**
+ * ⭐ (C6 concern 1, legal) La conversión TRIAL → negocio real limpia los datos del demo (`cleanDemoData`). Si el negocio vendió
+ * tarjetas, borrar sus cuentas y cobros dejaría sobres con saldo vivo sin la venta que los respalda: la limpieza no borra NADA,
+ * lo deja en el log y en la bitácora, y la conversión sigue (ya no se bloquea si la limpieza no corre).
+ */
+describe('convertDemoVenue × tarjetas de regalo (limpieza del demo)', () => {
+  const documentos = {
+    entityType: 'PERSONA_FISICA' as const,
+    idDocumentUrl: 'https://example.test/id.pdf',
+    rfcDocumentUrl: 'https://example.test/rfc.pdf',
+    comprobanteDomicilioUrl: 'https://example.test/domicilio.pdf',
+    caratulaBancariaUrl: 'https://example.test/caratula.pdf',
+  }
+  const enBitacora = (venueId: string) =>
+    (logAction as jest.Mock).mock.calls.map(([a]) => a).filter(a => a.action === 'DEMO_CLEANUP_SKIPPED' && a.venueId === venueId)
+  const cuentas = (venueId: string) =>
+    Promise.all([prisma.order.count({ where: { venueId } }), prisma.payment.count({ where: { venueId } })])
+
+  it('🔴 un TRIAL que vendió una tarjeta: la limpieza no borra nada, avisa con GIFT_CARDS y la conversión sigue', async () => {
+    const n = await crearNegocioDePrueba('demo-con-tarjeta')
+    const venta = await sembrarVentaDeTarjetas({ ...n, montos: [500], metodo: 'CASH' })
+    await crearCuentaDeMercancia({ venueId: n.venueId, staffId: n.staffId, total: 80 })
+    await prisma.venue.update({ where: { id: n.venueId }, data: { status: 'TRIAL' } })
+    const antes = await cuentas(n.venueId)
+    const libreta = await prisma.giftCardActivity.count({ where: { venueId: n.venueId } })
+
+    await expect(cleanDemoData(n.venueId, n.staffId)).resolves.toMatchObject({ skippedReason: 'GIFT_CARDS', deletedOrders: 0 })
+    const convertida = await convertDemoVenue(n.organizationId, n.venueId, n.staffId, documentos)
+
+    expect(convertida.status).toBe('PENDING_ACTIVATION')
+    expect(await cuentas(n.venueId)).toEqual(antes)
+    expect(await prisma.giftCard.count({ where: { id: { in: venta.giftCardIds } } })).toBe(1)
+    expect(await prisma.giftCardActivity.count({ where: { venueId: n.venueId } })).toBe(libreta)
+    expect(enBitacora(n.venueId)).toEqual([
+      expect.objectContaining({ staffId: n.staffId, entity: 'Venue', entityId: n.venueId, data: { reason: 'GIFT_CARDS' } }),
+      expect.objectContaining({ staffId: n.staffId, entity: 'Venue', entityId: n.venueId, data: { reason: 'GIFT_CARDS' } }),
+    ])
+  })
+
+  it('sin tarjetas, la limpieza borra las cuentas del demo como hoy y la conversión sigue', async () => {
+    const n = await crearNegocioDePrueba('demo-sin-tarjeta')
+    await crearCuentaDeMercancia({ venueId: n.venueId, staffId: n.staffId, total: 80 })
+    await prisma.venue.update({ where: { id: n.venueId }, data: { status: 'TRIAL' } })
+
+    const convertida = await convertDemoVenue(n.organizationId, n.venueId, n.staffId, documentos)
+
+    expect(convertida.status).toBe('PENDING_ACTIVATION')
+    expect(await cuentas(n.venueId)).toEqual([0, 0])
+    expect(enBitacora(n.venueId)).toEqual([])
   })
 })

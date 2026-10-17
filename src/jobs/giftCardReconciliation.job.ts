@@ -162,7 +162,8 @@ async function buscarSaldosDescuadradosEnDb(o: Pagina): Promise<SaldoDescuadrado
 
 async function buscarCuentasPagadasConPendientesEnDb(o: { antesDe: Date } & Pagina): Promise<CuentaDeTarjetas[]> {
   // Nota 3: una cuenta con algún sobre DEACTIVATED no se intenta activar (un sobre desactivado nunca revive); la avisa el barrido
-  // de dinero sin respaldo con la llave de A6.
+  // de dinero sin respaldo con la llave de A6. ⭐ (B7 r1): una cuenta CANCELLED tampoco, aunque diga PAID (ningún reembolso escribe
+  // `paymentStatus`): sus sobres no se activan de noche.
   return prisma.$queryRaw<CuentaDeTarjetas[]>(Prisma.sql`
     SELECT DISTINCT o.id AS "orderId", o."venueId" AS "venueId"
     FROM "GiftCard" g
@@ -170,6 +171,7 @@ async function buscarCuentasPagadasConPendientesEnDb(o: { antesDe: Date } & Pagi
     JOIN "Order" o ON o.id = oi."orderId"
     WHERE g.status = 'PENDING'
       AND o."paymentStatus" = 'PAID'
+      AND o.status <> 'CANCELLED'
       AND o."updatedAt" < ${utcTs(o.antesDe)}
       AND NOT EXISTS (
         SELECT 1 FROM "OrderItem" di JOIN "GiftCard" dg ON dg.id = di."giftCardId"

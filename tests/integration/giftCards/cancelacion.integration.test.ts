@@ -309,10 +309,24 @@ describe('B2 · cancelar la venta de una tarjeta de regalo', () => {
     await expect(estadoDeCancelacionDeVenta(venueId, v.orderId)).resolves.toEqual({ allowed: true, reason: null, message: null })
 
     await iniciarCancelacionDeVenta(venueId, v.orderId, { staffId, operationKey: 'cancelar-liberar-0002' })
-    // El reintento TARDÍO de la primera liberación (misma llave) no suelta la cancelación nueva: es la respuesta de la vieja.
-    await liberarCancelacionDeVenta(venueId, v.orderId, { staffId, operationKey: 'liberar-venta-0001', confirmacionNoDevuelto: true })
+    // ⭐ (D4, estado de HOY): el reintento TARDÍO de la primera liberación (misma llave) no suelta la cancelación nueva y tampoco
+    // responde «liberada»: las tarjetas volvieron a bloquearse ⇒ 409 con código, sin escribir nada.
+    const antes = await prisma.giftCardActivity.count({ where: { giftCardId: v.giftCardIds[0] } })
+    await expect(
+      liberarCancelacionDeVenta(venueId, v.orderId, { staffId, operationKey: 'liberar-venta-0001', confirmacionNoDevuelto: true }),
+    ).rejects.toMatchObject({
+      code: 'GIFT_CARD_BLOCKED',
+      statusCode: 409,
+      message:
+        'Esta liberación ya se había hecho, pero después las tarjetas se volvieron a bloquear. Vuelve a abrir la venta para ver su estado.',
+    })
     expect((await prisma.giftCard.findUniqueOrThrow({ where: { id: v.giftCardIds[0] } })).status).toBe('BLOCKED')
+    expect(await prisma.giftCardActivity.count({ where: { giftCardId: v.giftCardIds[0] } })).toBe(antes)
     await issueRefund({ venueId, paymentId: v.pagos[0].id, amount: 50000, reason: 'CANCELLED_ORDER', staffId })
+    // Devuelta la venta, la misma llave vieja tampoco dice «liberada»: dice lo que pasó.
+    await expect(
+      liberarCancelacionDeVenta(venueId, v.orderId, { staffId, operationKey: 'liberar-venta-0001', confirmacionNoDevuelto: true }),
+    ).rejects.toMatchObject({ code: 'GIFT_CARD_SALE_ALREADY_CANCELLED', statusCode: 409 })
     await expect(
       liberarCancelacionDeVenta(venueId, v.orderId, { staffId, operationKey: 'liberar-venta-0002', confirmacionNoDevuelto: true }),
     ).rejects.toMatchObject({

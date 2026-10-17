@@ -117,6 +117,10 @@ describe('B5 · ventas con tarjetas de regalo', () => {
     const r = await getSalesSummary(venueId, { ...rango, reportType: 'days', timezone: 'America/Mexico_City' })
     const suma = (r.byPeriod ?? []).reduce((s, periodo) => s + (periodo.metrics.grossSales ?? 0), 0)
     expect(suma).toBe(r.summary.grossSales)
+    // ⭐ (B5 r1 M-2): los cobros de las barras, como la cabecera, sin los de cuentas de tarjetas (el efectivo y el pagado con saldo).
+    const cobros = (r.byPeriod ?? []).reduce((s, periodo) => s + periodo.metrics.transactionCount, 0)
+    expect(cobros).toBe(r.summary.transactionCount)
+    expect(cobros).toBe(2)
   })
 
   it('con filtro de método no se calculan las cifras de tarjetas (son de la vista completa)', async () => {

@@ -419,8 +419,10 @@ describe('B4 r1 (fix 2) · tarjetas de regalo en el ISR estimado: la diferencia,
       'El ISR estimado no incluye $750.00 de tarjetas de regalo cobradas en el periodo y sí incluye $100.00 pagado con saldo de tarjetas; tu contador debe ajustarlo con el reporte de tarjetas.',
     )
     expect(r.ingresosMesCents).toBe(20_000_00) // 2 locales × $10,000: la base es la de siempre
-    // Una llamada por mes y local, con la MISMA transacción del ISR y el rango del mes.
-    expect(mTarjetas).toHaveBeenCalledTimes(6)
+    // ⭐ (B4 r1): RESICO usa sólo el MES pedido, así que sólo ése se lee (enero y febrero no): una llamada por local, con la MISMA
+    // transacción del ISR y el rango del mes. El resultado es el mismo que cuando se leían los tres meses.
+    expect(mTarjetas).toHaveBeenCalledTimes(2)
+    expect(mTarjetas.mock.calls.every(c => c[2].from === '2026-03-01')).toBe(true)
     expect(new Set(mTarjetas.mock.calls.map(c => c[0])).size).toBe(1)
     expect(mTarjetas.mock.calls[0][0]).toEqual({ foto: 'del ISR' })
     expect(mTarjetas).toHaveBeenCalledWith(
@@ -440,6 +442,7 @@ describe('B4 r1 (fix 2) · tarjetas de regalo en el ISR estimado: la diferencia,
     )
     const r = await getIsrProvisional('v1', '2026-02', 'GENERAL')
     expect([r.tarjetasCobradasNoIncluidasCents, r.pagadoConSaldoIncluidoCents]).toEqual([500_00, 50_00])
+    expect(mTarjetas).toHaveBeenCalledTimes(2) // GENERAL sí lee enero y febrero: su base es acumulada
     expect(r.avisoTarjetasDeRegalo).toBe(
       'El ISR estimado no incluye $500.00 de tarjetas de regalo cobradas en lo que va del ejercicio y sí incluye $50.00 pagado con saldo de tarjetas; tu contador debe ajustarlo con el reporte de tarjetas.',
     )
@@ -452,8 +455,20 @@ describe('B4 r1 (fix 2) · tarjetas de regalo en el ISR estimado: la diferencia,
     )
     const r = await getIsrProvisional('v1', '2026-06', 'RESICO')
     expect(r.tarjetasCobradasNoIncluidasCents).toBe(-300_00)
+    // ⭐ (B4 r1): con monto negativo el aviso dice «devueltas» y el monto en positivo, nunca «no incluye -$300.00 … cobradas».
     expect(r.avisoTarjetasDeRegalo).toBe(
-      'El ISR estimado no incluye -$300.00 de tarjetas de regalo cobradas en el periodo y sí incluye $0.00 pagado con saldo de tarjetas; tu contador debe ajustarlo con el reporte de tarjetas.',
+      'El ISR estimado no descuenta $300.00 de tarjetas de regalo devueltas en el periodo y sí incluye $0.00 pagado con saldo de tarjetas; tu contador debe ajustarlo con el reporte de tarjetas.',
+    )
+  })
+
+  it('⭐ (B4 r1) lo pagado con saldo NEGATIVO (más devoluciones que cobros) también se dice como devuelto', async () => {
+    mIncome.mockResolvedValue(income(10_000_00))
+    mTarjetas.mockImplementation(async (_tx: unknown, _v: unknown, f: { from: string }) =>
+      f.from === '2026-06-01' ? { cargasCents: 200_00, pagadoConSaldoSinIvaCents: -50_00 } : SIN_TARJETAS,
+    )
+    const r = await getIsrProvisional('v1', '2026-06', 'RESICO')
+    expect(r.avisoTarjetasDeRegalo).toBe(
+      'El ISR estimado no incluye $200.00 de tarjetas de regalo cobradas en el periodo y sí resta $50.00 de devoluciones de lo pagado con saldo de tarjetas; tu contador debe ajustarlo con el reporte de tarjetas.',
     )
   })
 })

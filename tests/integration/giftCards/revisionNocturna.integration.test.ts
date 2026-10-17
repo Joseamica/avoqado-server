@@ -146,6 +146,17 @@ describe('B7 · revisión nocturna', () => {
     expect(await anomalia('PAID_WITH_PENDING', venta.orderId)).toBe(1)
   })
 
+  it('⭐ (B7 r1) una cuenta CANCELADA aunque diga PAGADA, con sobres PENDING, no se activa de noche ni deja PAID_WITH_PENDING', async () => {
+    const venta = await cuentaPagadaSinActivar([300])
+    await prisma.$executeRaw`UPDATE "Order" SET status = 'CANCELLED', "updatedAt" = "updatedAt" - interval '1 hour' WHERE id = ${venta.orderId}`
+
+    await noche()
+
+    expect(await estados(venta.giftCardIds)).toEqual(['PENDING'])
+    expect(await prisma.giftCardActivity.count({ where: { giftCardId: venta.giftCardIds[0], type: 'ACTIVATE' } })).toBe(0)
+    expect(await anomalia('PAID_WITH_PENDING', venta.orderId)).toBe(0)
+  })
+
   it('🔴 un cobro con saldo sin su REDEEM deja TENDER_WITHOUT_REDEEM', async () => {
     const { orderId } = await crearCuentaDeMercancia({ venueId, staffId, total: 100 })
     await ensureGiftCardTender(prisma, venueId)

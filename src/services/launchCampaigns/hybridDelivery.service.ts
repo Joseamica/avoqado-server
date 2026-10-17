@@ -11,6 +11,7 @@ import { ensureHybridSchedule } from './hybridSchedule'
 import { hybridOfferDefinition } from './hybridOffer.schema'
 import { executeSeatReconciliation } from '@/services/dashboard/seatReconciliation.service'
 import { settleSeatsAfterHybridDelivery, unsettledCheckoutSeatChoice } from './hybridSeats'
+import { finDelSegundoDeLaFrontera } from './hybridPlanCatchUp'
 
 const idOf = (value: string | { id: string } | null | undefined) => (typeof value === 'string' ? value : value?.id)
 const mismatch = () =>
@@ -128,7 +129,11 @@ async function reconcileInvoice(venueId: string, purchaseId: string, invoiceId: 
           // La última fila vigente al empezar el periodo, contando el SEGUNDO de la frontera: Stripe da segundos enteros y
           // ahí viven las ampliaciones de la puesta al día de funciones de plan (+1 ms…; hybridPlanCatchUp.ts), porque el
           // historial es inmutable por trigger. Ningún otro escritor usa fracciones de segundo.
-          selections: { where: { effectiveAt: { lt: new Date((start + 1) * 1000) } }, orderBy: { effectiveAt: 'desc' }, take: 1 },
+          selections: {
+            where: { effectiveAt: { lt: finDelSegundoDeLaFrontera(new Date(start * 1000)) } },
+            orderBy: { effectiveAt: 'desc' },
+            take: 1,
+          },
         },
         orderBy: { id: 'asc' },
         take: 9,

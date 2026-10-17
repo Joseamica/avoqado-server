@@ -196,12 +196,29 @@ describe('lista', () => {
   it('filtra por estado y por últimos 4 exactos (lo usa el MCP)', async () => {
     prismaMock.giftCard.aggregate.mockResolvedValue({ _count: { _all: 0 }, _sum: { balance: null } })
     prismaMock.giftCard.findMany.mockResolvedValue([])
-    await listGiftCards('v1', { status: ['ACTIVE', 'BLOCKED'], last4: 'gh78', pageSize: 10 })
+    await listGiftCards('v1', { status: ['BLOCKED', 'DEACTIVATED'], last4: 'gh78', pageSize: 10 })
     expect(prismaMock.giftCard.findMany.mock.calls[0][0].where).toEqual({
       venueId: 'v1',
-      status: { in: ['ACTIVE', 'BLOCKED'] },
+      status: { in: ['BLOCKED', 'DEACTIVATED'] },
       codeLast4: 'GH78',
     })
+  })
+
+  it('⭐ (D3 menor 6) ACTIVE = se puede usar hoy: ACTIVE sin vencer (la misma frontera que EXPIRED), dentro de un AND que no choca con la búsqueda', async () => {
+    const ahora = new Date('2026-10-14T18:00:00.000Z')
+    const vigente = { status: 'ACTIVE', OR: [{ expiresAt: null }, { expiresAt: { gt: ahora } }] }
+    prismaMock.giftCard.aggregate.mockResolvedValue({ _count: { _all: 0 }, _sum: { balance: null } })
+    prismaMock.giftCard.findMany.mockResolvedValue([])
+    await listGiftCards('v1', { status: ['ACTIVE'], search: 'Ana María' }, ahora)
+    const where = prismaMock.giftCard.findMany.mock.calls[0][0].where
+    expect(where.AND).toEqual([{ OR: [vigente] }])
+    expect(where).not.toHaveProperty('status')
+    expect(Array.isArray(where.OR)).toBe(true) // la búsqueda sigue en su propio OR
+    expect(prismaMock.giftCard.aggregate.mock.calls[0][0].where).toEqual(where) // total y saldo con el MISMO filtro
+    await listGiftCards('v1', { status: ['ACTIVE', 'BLOCKED', 'EXPIRED'] }, ahora)
+    expect(prismaMock.giftCard.findMany.mock.calls[1][0].where.AND).toEqual([
+      { OR: [{ status: { in: ['BLOCKED'] } }, vigente, { status: 'ACTIVE', expiresAt: { lte: ahora } }] },
+    ])
   })
 
   it('🔴 EXPIRED (decisión 1; r1 #3: una sola frontera, vencida ⇔ expiresAt <= ahora): ACTIVE ya vencida en UTC; mezclado con otro estado, dentro de un AND que no choca con la búsqueda', async () => {

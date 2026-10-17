@@ -74,14 +74,32 @@ describe('lockGiftCardsForUpdate', () => {
     expect(prismaMock.$queryRaw).not.toHaveBeenCalled()
   })
 
-  it('un SELECT … FOR UPDATE en el orden fijo (vencen antes → activados antes → id) y sin ids repetidos', async () => {
+  it('un SELECT … FOR UPDATE en orden de id (inmutable) y sin ids repetidos', async () => {
     prismaMock.$queryRaw.mockResolvedValue([{ ...sobre(), status: 'ACTIVE' }])
     const out = await lockGiftCardsForUpdate(prismaMock, ['gc-1', 'gc-1'])
     expect(out).toEqual([sobre()])
     const sql = (prismaMock.$queryRaw.mock.calls[0][0] as TemplateStringsArray).join('?')
-    expect(sql).toMatch(/ORDER BY "expiresAt" ASC NULLS LAST, "activatedAt" ASC NULLS LAST, id ASC\s+FOR UPDATE/)
+    // ⭐ (A4 menor 2): el candado se toma por una clave que nadie cambia. Ordenar el FOR UPDATE por `expiresAt`/`activatedAt`
+    // (que la activación y el reverso escriben) deja que dos transacciones vean el mismo par en orden distinto ⇒ 40P01.
+    expect(sql).toMatch(/ORDER BY id ASC\s+FOR UPDATE/)
+    expect(sql).not.toMatch(/ORDER BY[^]*"expiresAt"/)
     // r1 (A-1): la huella vigente del código viaja en la fila bloqueada.
     expect(sql).toContain('"codeHash"')
+  })
+
+  it('⭐ devuelve los sobres en el orden de consumo (vencen antes → activados antes → id), ordenados en memoria', async () => {
+    const fila = (id: string, expiresAt: Date | null, activatedAt: Date | null) => ({ ...sobre({ id, expiresAt, activatedAt }) })
+    // La base los entrega por id; el consumo es otro orden.
+    prismaMock.$queryRaw.mockResolvedValue([
+      fila('gc-a', null, new Date('2026-09-01T00:00:00Z')),
+      fila('gc-b', new Date('2026-12-01T00:00:00Z'), new Date('2026-09-02T00:00:00Z')),
+      fila('gc-c', new Date('2026-11-01T00:00:00Z'), new Date('2026-09-03T00:00:00Z')),
+      fila('gc-d', null, null),
+      fila('gc-e', null, new Date('2026-08-01T00:00:00Z')),
+      fila('gc-f', new Date('2026-11-01T00:00:00Z'), new Date('2026-09-03T00:00:00Z')),
+    ])
+    const out = await lockGiftCardsForUpdate(prismaMock, ['gc-a', 'gc-b', 'gc-c', 'gc-d', 'gc-e', 'gc-f'])
+    expect(out.map(c => c.id)).toEqual(['gc-c', 'gc-f', 'gc-b', 'gc-e', 'gc-a', 'gc-d'])
   })
 })
 
@@ -103,7 +121,8 @@ describe('canjearSobresEnTx', () => {
         id: 'gc-pronto',
         venueId: VENUE,
         status: 'ACTIVE',
-        balance: { gte: D(300) },
+        // ⭐ (A4 menor 3): CAS sobre el saldo LEÍDO bajo el candado, el mismo con que se escribe `balanceAfter`.
+        balance: D(300),
         OR: [{ expiresAt: null }, { expiresAt: { gt: AHORA } }],
       },
       data: { balance: { decrement: D(300) } },
@@ -142,11 +161,14 @@ describe('canjearSobresEnTx', () => {
     })
   })
 
-  it('si la escritura condicionada no encuentra la fila (otro la movió), rechaza: la transacción se revierte entera', async () => {
+  it('⭐ si la escritura condicionada no encuentra la fila con ESE saldo (la foto es vieja), 409 de concurrencia: la transacción se revierte entera', async () => {
     prismaMock.giftCard.updateMany.mockResolvedValue({ count: 0 })
     await expect(canjearSobresEnTx(prismaMock, { ...base, amount: D(100), cards: [sobre()] })).rejects.toMatchObject({
-      code: 'GIFT_CARD_INSUFFICIENT_BALANCE',
+      code: 'ORDER_PAYMENT_CONFLICT',
+      statusCode: 409,
+      message: 'El saldo de la tarjeta de regalo cambió mientras se cobraba. Vuelve a intentar con la MISMA llave.',
     })
+    expect(prismaMock.giftCard.updateMany.mock.calls[0][0].where.balance).toEqual(D(1000))
     expect(prismaMock.giftCardActivity.create).not.toHaveBeenCalled()
   })
 

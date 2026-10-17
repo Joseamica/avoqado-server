@@ -27,7 +27,7 @@ export function registerGiftCardTools(server: McpServer, scope: McpScope) {
         .string()
         .regex(DIA, 'Usa AAAA-MM-DD')
         .optional()
-        .describe('First day (YYYY-MM-DD, venue-local). Default: day 1 of the current month'),
+        .describe('First day (YYYY-MM-DD, venue-local). Default: day 1 of the month of toDate (of the current month without toDate)'),
       toDate: z
         .string()
         .regex(DIA, 'Usa AAAA-MM-DD')
@@ -39,8 +39,10 @@ export function registerGiftCardTools(server: McpServer, scope: McpScope) {
       guard.requirePermission('giftCards:read', venueId) // espejo de las rutas del dashboard
       const timezone = await getVenueTimezone(venueId)
       const hoy = formatInVenueTimezone(new Date(), timezone, 'yyyy-MM-dd')
-      const desde = fromDate ?? `${hoy.slice(0, 8)}01`
       const hasta = toDate ?? hoy
+      // ⭐ (C5 menor 4): el inicio por defecto es el día 1 del mes de `hasta`; con sólo un toDate de un mes anterior, el día 1 del
+      // mes actual quedaba después del fin (GIFT_CARD_RANGE_INVALID).
+      const desde = fromDate ?? `${hasta.slice(0, 8)}01`
       const [resumen, antiguedad] = await Promise.all([
         getGiftCardSummary(venueId, { from: desde, to: hasta }),
         getGiftCardLiabilityAging(venueId, hasta),
@@ -51,7 +53,7 @@ export function registerGiftCardTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'gift_card_lookup',
-    'Find gift cards (tarjetas de regalo) of a venue you can access by the LAST 4 characters of their code, or by the customer, recipient or buyer (name, phone or email). For each card: last 4, status (PENDING = sold but not paid yet, ACTIVE, BLOCKED, DEACTIVATED), initial amount and current balance in PESOS, activation and expiry days (venue-local), who it belongs to and its sale ticket. NEVER returns the full code. Up to 10 matches plus the total; if there are more, ask the user to be more specific. Pass venueId and last4 or customer. Requires giftCards:read.',
+    'Find gift cards (tarjetas de regalo) of a venue you can access by the LAST 4 characters of their code, or by the customer, recipient or buyer (name, phone or email). For each card: last 4, status (PENDING = sold but not paid yet, ACTIVE, BLOCKED, DEACTIVATED), expired (true = its expiry already passed: it can NOT be used even if status is ACTIVE), initial amount and current balance in PESOS, activation and expiry days (venue-local), who it belongs to and its sale ticket. NEVER returns the full code. Up to 10 matches plus the total; if there are more, ask the user to be more specific. Pass venueId and last4 or customer. Requires giftCards:read.',
     {
       venueId: z.string().describe('Venue that issued the cards (must be in your scope)'),
       last4: z
@@ -69,6 +71,7 @@ export function registerGiftCardTools(server: McpServer, scope: McpScope) {
       const timezone = await getVenueTimezone(venueId)
       const dia = (instante: string | null) => (instante ? formatInVenueTimezone(new Date(instante), timezone, 'yyyy-MM-dd') : null)
       const pagina = await listGiftCards(venueId, { last4, search: customer, pageSize: MAX_COINCIDENCIAS })
+      const ahora = Date.now()
       if (pagina.total === 0) return text({ found: false, error: 'No encontré tarjetas de regalo con esos datos en este negocio.' })
       return text({
         found: true,
@@ -84,6 +87,9 @@ export function registerGiftCardTools(server: McpServer, scope: McpScope) {
           balance: t.balance,
           activatedOn: dia(t.activatedAt),
           expiresOn: dia(t.expiresAt),
+          // ⭐ (C5 menor 5, aditivo): la misma frontera que el saldo y la lista (vencida ⇔ expiresAt <= ahora), para que la IA nunca
+          // le diga a un cliente que una tarjeta vencida sirve.
+          expired: t.expiresAt !== null && Date.parse(t.expiresAt) <= ahora,
           customer: t.customer?.name ?? null,
           recipient: t.recipientName,
           buyer: t.purchaserName,

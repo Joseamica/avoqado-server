@@ -9,7 +9,7 @@
  */
 import { Prisma, type GiftCardReason, type GiftCardStatus } from '@prisma/client'
 import { addDays, addMonths } from 'date-fns'
-import { BadRequestError } from '@/errors/AppError'
+import { BadRequestError, ConflictError } from '@/errors/AppError'
 import { operationHash } from '@/utils/operationHash'
 import { recordGiftCardAnomaly } from './giftCardAnomaly'
 import {
@@ -68,6 +68,16 @@ function saldoInsuficiente(disponible: Prisma.Decimal): GiftCardError {
   })
 }
 
+/** `null` al final; las fechas, de la más próxima a la más lejana. */
+const fechaAscNullsLast = (a: Date | null, b: Date | null): number =>
+  a === null ? (b === null ? 0 : 1) : b === null ? -1 : a.getTime() - b.getTime()
+
+/**
+ * El candado de los sobres (todos los que toman sobres pasan por aquí). ⭐ (A4 menor 2): el `FOR UPDATE` va en orden de `id`, la
+ * única clave que nadie cambia; ordenarlo por `expiresAt`/`activatedAt` —que la activación y el reverso escriben— dejaba que dos
+ * transacciones vieran el mismo par en orden distinto (40P01). El orden de CONSUMO (vencen antes → activados antes → id), el que
+ * usa el canje, se aplica en memoria con lo leído bajo el candado.
+ */
 export async function lockGiftCardsForUpdate(tx: Tx, ids: string[]): Promise<LockedGiftCard[]> {
   const unicos = [...new Set(ids)]
   if (unicos.length === 0) return []
@@ -88,9 +98,9 @@ export async function lockGiftCardsForUpdate(tx: Tx, ids: string[]): Promise<Loc
     SELECT id, "venueId", "codeHash", status::text AS status, balance, "initialAmount", "expiresAt", "activatedAt", "validityMonths", "customerId"
     FROM "GiftCard"
     WHERE id IN (${Prisma.join(unicos)})
-    ORDER BY "expiresAt" ASC NULLS LAST, "activatedAt" ASC NULLS LAST, id ASC
+    ORDER BY id ASC
     FOR UPDATE`
-  return filas.map(f => ({
+  const bloqueados = filas.map(f => ({
     id: f.id,
     venueId: f.venueId,
     codeHash: f.codeHash,
@@ -102,6 +112,12 @@ export async function lockGiftCardsForUpdate(tx: Tx, ids: string[]): Promise<Loc
     validityMonths: f.validityMonths,
     customerId: f.customerId,
   }))
+  return bloqueados.sort(
+    (a, b) =>
+      fechaAscNullsLast(a.expiresAt, b.expiresAt) ||
+      fechaAscNullsLast(a.activatedAt, b.activatedAt) ||
+      (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+  )
 }
 
 /** Los sobres que un cobro con saldo descontó: un reverso los bloquea ANTES de `writeRefundInTx`. */
@@ -347,17 +363,24 @@ export async function canjearSobresEnTx(
     if (falta.isZero()) break
     if (!esUsable(card, ahora) || !card.balance.greaterThan(0)) continue
     const toma = Prisma.Decimal.min(card.balance, falta)
+    // ⭐ (A4 menor 3): CAS sobre el saldo LEÍDO bajo el candado, el mismo con que se escribe `balanceAfter`. Si la foto es vieja
+    // (no salió del candado de ESTA transacción), no se escribe un saldo inventado: 409 y se reintenta con la misma llave.
     const r = await tx.giftCard.updateMany({
       where: {
         id: card.id,
         venueId: p.venueId,
         status: 'ACTIVE',
-        balance: { gte: toma },
+        balance: card.balance,
         OR: [{ expiresAt: null }, { expiresAt: { gt: ahora } }],
       },
       data: { balance: { decrement: toma } },
     })
-    if (r.count !== 1) throw saldoInsuficiente(disponible.minus(p.amount.minus(falta)))
+    if (r.count !== 1) {
+      throw new ConflictError(
+        'El saldo de la tarjeta de regalo cambió mientras se cobraba. Vuelve a intentar con la MISMA llave.',
+        'ORDER_PAYMENT_CONFLICT',
+      )
+    }
     const balanceAfter = card.balance.minus(toma)
     await tx.giftCardActivity.create({
       data: {

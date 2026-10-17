@@ -176,6 +176,7 @@ describe('operaciones de gerente', () => {
 
   it('🔴 F9: el reintento lo decide la libreta BAJO el candado del sobre (`replay`), no una lectura previa', async () => {
     m(operarSobreDeGerenteEnTx).mockResolvedValueOnce({ activityIds: ['a9'], replay: true })
+    prismaMock.giftCard.findFirst.mockResolvedValueOnce({ status: 'BLOCKED' }) // el estado de hoy: sigue como la dejó
     const r = await operarSobreDeGerente('v1', 'gc1', 's1', {
       operationKey: 'llave-bloq-1',
       tipo: 'BLOQUEAR',
@@ -190,8 +191,29 @@ describe('operaciones de gerente', () => {
     m(operarSobreDeGerenteEnTx)
       .mockResolvedValueOnce({ activityIds: ['a11'], replay: false })
       .mockResolvedValueOnce({ activityIds: ['a11'], replay: true })
+    prismaMock.giftCard.findFirst.mockResolvedValue({ status: 'BLOCKED' })
     const cuerpo = { operationKey: 'llave-bloq-2', tipo: 'BLOQUEAR' as const, reason: 'LOST_CARD' as const }
     const [a, b] = await Promise.all([operarSobreDeGerente('v1', 'gc1', 's1', cuerpo), operarSobreDeGerente('v1', 'gc1', 's1', cuerpo)])
     expect([a.replayed, b.replayed].sort()).toEqual([false, true])
+  })
+
+  it('⭐ (D4, estado de HOY) repetir un bloqueo o un desbloqueo cuyo estado se movió ⇒ 409 GIFT_CARD_BLOCKED; lo nuevo no relee', async () => {
+    m(operarSobreDeGerenteEnTx).mockResolvedValueOnce({ activityIds: ['a12'], replay: true })
+    prismaMock.giftCard.findFirst.mockResolvedValueOnce({ status: 'ACTIVE' })
+    await expect(
+      operarSobreDeGerente('v1', 'gc1', 's1', { operationKey: 'llave-bloq-3', tipo: 'BLOQUEAR', reason: 'SUSPICIOUS_ACTIVITY' }),
+    ).rejects.toMatchObject({ code: 'GIFT_CARD_BLOCKED', statusCode: 409 })
+    expect(prismaMock.giftCard.findFirst).toHaveBeenLastCalledWith({ where: { id: 'gc1', venueId: 'v1' }, select: { status: true } })
+
+    m(operarSobreDeGerenteEnTx).mockResolvedValueOnce({ activityIds: ['a13'], replay: true })
+    prismaMock.giftCard.findFirst.mockResolvedValueOnce({ status: 'BLOCKED' })
+    await expect(
+      operarSobreDeGerente('v1', 'gc1', 's1', { operationKey: 'llave-desb-1', tipo: 'DESBLOQUEAR', reason: 'CUSTOMER_REQUEST' }),
+    ).rejects.toMatchObject({ code: 'GIFT_CARD_BLOCKED', statusCode: 409 })
+
+    prismaMock.giftCard.findFirst.mockClear()
+    m(operarSobreDeGerenteEnTx).mockResolvedValueOnce({ activityIds: ['a14'], replay: false })
+    await operarSobreDeGerente('v1', 'gc1', 's1', { operationKey: 'llave-bloq-4', tipo: 'BLOQUEAR', reason: 'SUSPICIOUS_ACTIVITY' })
+    expect(prismaMock.giftCard.findFirst).not.toHaveBeenCalled()
   })
 })

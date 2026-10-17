@@ -1837,12 +1837,15 @@ async function calculateTimePeriodMetrics(
 
   // Query payment metrics grouped by period — payment-method clause appended
   // before GROUP BY so the filter narrows rows, not groups.
+  // ⭐ Tarjetas de regalo (B5 r1, M-2): sin filtro de método, los cobros de las barras se cuentan como la cabecera —sin los de
+  // cuentas de tarjetas—; con filtro es la vista de dinero y cuentan todos. El monto y la propina no cambian.
+  const cobrosQueCuentan = isFiltered ? '' : ` FILTER (WHERE ${sqlOrdenSinTarjetasTexto('"Payment"."orderId"')})`
   const paymentMetricsQuery = `
     SELECT
       ${groupByExpression} as period,
       COALESCE(SUM(amount), 0) as payment_amount,
       COALESCE(SUM("tipAmount"), 0) as tips,
-      COUNT(*) as transaction_count
+      COUNT(*)${cobrosQueCuentan} as transaction_count
     FROM "Payment"
     WHERE "venueId" = $1
       AND "createdAt" >= $2::timestamp

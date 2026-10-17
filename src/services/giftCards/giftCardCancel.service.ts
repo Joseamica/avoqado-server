@@ -407,8 +407,8 @@ const DESBLOQUEO_DE_CANCELACION: OperacionDeGerente = {
  * Abre la cuenta bajo su candado y comprueba que es de tarjetas; después toma los candados de TODOS sus sobres y devuelve sus ids.
  * Jerarquía fija: Order (la de la VENTA) → sobres, como el reembolso (Order → Payment → sobres → Shift) y el canje (Order de la
  * mercancía → sobres → Shift): nadie que tenga un sobre espera esta Order, así que nunca se cruzan. Nota 3 (A4 menor 2): se REUSA
- * `lockGiftCardsForUpdate`, el mismo helper (y el mismo orden) que el canje y el reembolso; un orden propio aquí (p. ej. por id)
- * sí podría cruzarse con el de ellos.
+ * `lockGiftCardsForUpdate`, el mismo helper (y el mismo orden, por id) que el canje y el reembolso; un orden propio aquí sí podría
+ * cruzarse con el de ellos.
  */
 async function abrirVentaDeTarjetasEnTx(tx: Tx, venueId: string, orderId: string): Promise<string[]> {
   if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw noEsVentaDeTarjetas()
@@ -692,7 +692,6 @@ export async function liberarCancelacionDeVenta(
       ids,
       op: DESBLOQUEO_DE_CANCELACION,
     })
-    if (repetidos.size === ids.length) return []
     const filas = await tx.giftCard.findMany({ where: { id: { in: ids }, venueId }, select: { id: true, status: true }, take: ids.length })
     const estado = new Map(filas.map(s => [s.id, s.status]))
     if (filas.some(s => s.status === 'DEACTIVATED')) {
@@ -701,6 +700,19 @@ export async function liberarCancelacionDeVenta(
         'Esta venta ya se canceló y su dinero ya se devolvió: no hay nada que liberar.',
         409,
       )
+    }
+    if (repetidos.size === ids.length) {
+      // ⭐ (D4, como el reintento de iniciar): la repetición COMPLETA responde según el estado de HOY, bajo el candado de los sobres.
+      // Esa liberación los dejó ACTIVE; si después se volvieron a bloquear (otra cancelación, otro motivo) o se devolvió la venta
+      // (arriba), responder «liberada» le mentiría al panel: 409. Para liberar otra vez, el panel acuña una llave nueva.
+      if (filas.some(s => s.status !== 'ACTIVE')) {
+        throw new GiftCardError(
+          'GIFT_CARD_BLOCKED',
+          'Esta liberación ya se había hecho, pero después las tarjetas se volvieron a bloquear. Vuelve a abrir la venta para ver su estado.',
+          409,
+        )
+      }
+      return []
     }
     const motivos = await motivosDeBloqueoVigentes(tx, ids)
     const hechas: string[] = []

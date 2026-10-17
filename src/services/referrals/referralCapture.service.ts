@@ -3,7 +3,7 @@ import { Referral } from '@prisma/client'
 import { leerSiEsCuentaDeTarjetas, WHERE_ORDEN_SIN_TARJETAS } from '@/services/giftCards/giftCardMarks'
 
 /**
- * Why these four reasons and not Zod-style messages: callers (controllers
+ * Why these six reasons and not Zod-style messages: callers (controllers
  * + TPV widget) need a stable machine-readable discriminator to drive
  * UX. The frontend maps each enum value to its own Spanish copy + CTA
  * (e.g., `EXISTING_CUSTOMER` triggers the "Forzar referido" manager
@@ -49,7 +49,7 @@ export interface ValidateInput {
   newCustomerId: string
   /**
    * The order this very checkout is creating, when the caller already knows
-   * it. Excluded from the "prior paid sale" count — see rule 4 below.
+   * it. Excluded from the "prior paid sale" count — see rule 5 below.
    */
   intendedOrderId?: string
 }
@@ -118,7 +118,10 @@ export async function validateReferralCode(input: ValidateInput): Promise<Valida
     return reject('SELF_REFERRAL')
   }
 
-  if (input.intendedOrderId && (await leerSiEsCuentaDeTarjetas(prisma, input.intendedOrderId))) {
+  // ⭐ (B6 menor 1): la marca se lee sobre el id YA resuelto en este venue. Con el id crudo, un cuid de otro negocio respondía si
+  // aquélla era una venta de tarjetas (oráculo de 1 bit) y /validate y /capture divergían. Otro negocio = como si no viniera.
+  const intendedOrderId = await resolveIntendedOrderId(input.venueId, input.intendedOrderId)
+  if (intendedOrderId && (await leerSiEsCuentaDeTarjetas(prisma, intendedOrderId))) {
     return reject('GIFT_CARD_SALE')
   }
 
@@ -126,7 +129,7 @@ export async function validateReferralCode(input: ValidateInput): Promise<Valida
     where: {
       customerId: input.newCustomerId,
       venueId: input.venueId,
-      ...(input.intendedOrderId ? { id: { not: input.intendedOrderId } } : {}),
+      ...(intendedOrderId ? { id: { not: intendedOrderId } } : {}),
       OR: [{ paymentStatus: 'PAID' }, { payments: { some: { status: 'COMPLETED', type: 'REGULAR' } } }],
       // `AND`, never a top-level key: it must not collide with the `OR` above.
       AND: [WHERE_ORDEN_SIN_TARJETAS],

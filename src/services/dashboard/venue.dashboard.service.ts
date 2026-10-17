@@ -1004,8 +1004,9 @@ export async function convertDemoVenue(
 
   // 🧹 Clean demo data before converting to real venue
   // This removes demo orders, payments, reviews, etc. while keeping menu/products/tables
+  // ⭐ Tarjetas de regalo: si el negocio vendió alguna, no borra nada (`skippedReason: 'GIFT_CARDS'`) y la conversión sigue.
   try {
-    const cleanupResult = await cleanDemoData(venueId)
+    const cleanupResult = await cleanDemoData(venueId, staffId)
     logger.info(`🧹 Demo data cleaned for venue ${venueId}:`, cleanupResult)
   } catch (cleanupError) {
     logger.error(`⚠️ Demo cleanup failed for venue ${venueId}:`, cleanupError)

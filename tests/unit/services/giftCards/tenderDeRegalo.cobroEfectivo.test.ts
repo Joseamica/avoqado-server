@@ -23,9 +23,11 @@ jest.mock('@/services/inventory/inventoryPosting.service', () => ({
 jest.mock('@/services/dashboard/autoReorder.service', () => ({ runAutoReorderForVenue: jest.fn().mockResolvedValue(undefined) }))
 jest.mock('@/services/referrals/referralQualification.service', () => ({ onOrderPaid: jest.fn().mockResolvedValue(undefined) }))
 jest.mock('@/services/shared/loyaltyOnPaidOrder', () => ({ awardLoyaltyForPaidOrder: jest.fn().mockResolvedValue(undefined) }))
+jest.mock('@/services/shared/cashDrawerPosting', () => ({ postCashSaleToDrawer: jest.fn().mockResolvedValue({ posted: true }) }))
 
 import { Decimal } from '@prisma/client/runtime/library'
 import { payCashOrder } from '@/services/mobile/order.mobile.service'
+import { postCashSaleToDrawer } from '@/services/shared/cashDrawerPosting'
 import { prismaMock } from '../../../__helpers__/setup'
 
 function seedOrder() {
@@ -101,5 +103,60 @@ describe('payCashOrder — el tender «Tarjeta de regalo» no se cobra a mano', 
     const r = await payCashOrder('venue-1', 'order-1', { amount: 9000, tip: 0, staffId: 'staff-1' })
     expect(r.status).toBe('COMPLETED')
     expect(prismaMock.payment.create).toHaveBeenCalledTimes(1)
+  })
+})
+
+/**
+ * ⭐ (A7 menor 2) El puente del holder (`tenderState.resolved = paymentResult.tenderResuelto`, order.mobile.service): el núcleo
+ * resuelve el tender y el cajón lo lee de ahí. Sin el puente, un vale (method OTHER, no entra al cajón) mandado por el cobro manual
+ * registraría un movimiento de cajón CASH y la respuesta diría CASH.
+ */
+describe('payCashOrder — un tender del catálogo llega al cajón con SU método', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    seedOrder()
+    prismaMock.venueTenderType.findFirst.mockResolvedValue({
+      id: 'tt-vale',
+      baseMethod: 'OTHER',
+      active: true,
+      revision: 3,
+      name: 'Vale de despensa',
+      systemKind: null,
+    })
+    prismaMock.venueTenderTypeRevision.findFirst.mockResolvedValue({
+      tenderTypeId: 'tt-vale',
+      revision: 3,
+      name: 'Vale de despensa',
+      countsAsPhysicalCash: false,
+      captureTip: false,
+      satFormaPago: '08',
+      commissionPercent: null,
+    })
+    prismaMock.cashDrawerSession.findFirst.mockResolvedValue({ id: 'caja-1' })
+  })
+
+  it('el vale (OTHER, fuera del cajón) se registra y se manda al cajón como OTHER, nunca como CASH', async () => {
+    const r = await payCashOrder('venue-1', 'order-1', {
+      amount: 9000,
+      tip: 0,
+      staffId: 'staff-1',
+      tenderTypeId: 'tt-vale',
+      tenderRevision: 3,
+    })
+
+    expect(r.method).toBe('OTHER')
+    expect(postCashSaleToDrawer).toHaveBeenCalledTimes(1)
+    expect(postCashSaleToDrawer).toHaveBeenCalledWith(
+      expect.objectContaining({
+        venueId: 'venue-1',
+        paymentId: 'payment-1',
+        targetSessionId: 'caja-1',
+        method: 'OTHER',
+        tenderCountsAsCash: false,
+        fundsFlow: 'EXTERNAL_RECORDED',
+        tenderTypeId: 'tt-vale',
+        orderId: 'order-1',
+      }),
+    )
   })
 })

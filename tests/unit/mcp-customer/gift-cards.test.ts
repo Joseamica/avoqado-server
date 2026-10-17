@@ -98,6 +98,16 @@ describe('gift_cards_summary', () => {
     })
   })
 
+  it('⭐ (C5 menor 4) con sólo toDate en un mes anterior, empieza el día 1 del mes de toDate (no del mes actual)', async () => {
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'queueMicrotask', 'setImmediate', 'setTimeout', 'setInterval'] })
+    jest.setSystemTime(new Date('2026-10-15T18:00:00.000Z'))
+    mockSummary.mockResolvedValue(RESUMEN)
+    mockAging.mockResolvedValue(ANTIGUEDAD)
+    await llamar('gift_cards_summary', { venueId: 'v1', toDate: '2026-09-20' })
+    expect(mockSummary).toHaveBeenCalledWith('v1', { from: '2026-09-01', to: '2026-09-20' })
+    expect(mockAging).toHaveBeenCalledWith('v1', '2026-09-20')
+  })
+
   it('respeta el periodo que se le pide; la antigüedad, al cierre del último día', async () => {
     mockSummary.mockResolvedValue(RESUMEN)
     mockAging.mockResolvedValue(ANTIGUEDAD)
@@ -116,6 +126,8 @@ describe('gift_card_lookup', () => {
   })
 
   it('por últimos 4: hasta 10 y el total, pesos, días del negocio y nunca el código', async () => {
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'queueMicrotask', 'setImmediate', 'setTimeout', 'setInterval'] })
+    jest.setSystemTime(new Date('2026-10-15T18:00:00.000Z'))
     mockList.mockResolvedValue({ items: [FILA], page: 1, pageSize: 10, total: 12 })
     const r = await llamar('gift_card_lookup', { venueId: 'v1', last4: 'k7qz' })
     expect(mockList).toHaveBeenCalledWith('v1', { last4: 'k7qz', search: undefined, pageSize: 10 })
@@ -134,6 +146,7 @@ describe('gift_card_lookup', () => {
           balance: 400.5,
           activatedOn: '2026-10-14',
           expiresOn: null,
+          expired: false,
           customer: 'Karla Q',
           recipient: 'Ana',
           buyer: 'Luis',
@@ -153,6 +166,31 @@ describe('gift_card_lookup', () => {
   it('fuera de alcance → no busca', async () => {
     await expect(llamar('gift_card_lookup', { venueId: 'ajeno', last4: 'K7QZ' })).rejects.toThrow('out of scope')
     expect(mockList).not.toHaveBeenCalled()
+  })
+
+  it('⭐ (C5 menor 6) sin giftCards:read → no busca', async () => {
+    await expect(llamar('gift_card_lookup', { venueId: 'sin-permiso', last4: 'K7QZ' })).rejects.toThrow('Forbidden')
+    expect(mockPermiso).toHaveBeenCalledWith('giftCards:read', 'sin-permiso')
+    expect(mockList).not.toHaveBeenCalled()
+  })
+
+  it('⭐ (C5 menor 5) dice si ya venció (`expired`, la misma frontera que el saldo: vence ⇔ expiresAt <= ahora), para que la IA no la ofrezca', async () => {
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'queueMicrotask', 'setImmediate', 'setTimeout', 'setInterval'] })
+    jest.setSystemTime(new Date('2026-10-15T18:00:00.000Z'))
+    mockList.mockResolvedValue({
+      items: [
+        { ...FILA, last4: 'VENC', expiresAt: '2026-10-15T18:00:00.000Z' },
+        { ...FILA, last4: 'VIVA', expiresAt: '2026-10-15T18:00:01.000Z' },
+      ],
+      page: 1,
+      pageSize: 10,
+      total: 2,
+    })
+    const r = await llamar('gift_card_lookup', { venueId: 'v1', customer: 'Karla' })
+    expect(r.cards.map((c: { last4: string; status: string; expired: boolean }) => [c.last4, c.status, c.expired])).toEqual([
+      ['VENC', 'ACTIVE', true],
+      ['VIVA', 'ACTIVE', false],
+    ])
   })
 })
 

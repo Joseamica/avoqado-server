@@ -391,6 +391,16 @@ describe('referralCapture.service', () => {
       })
     })
 
+    it('⭐ (B6 menor 1) una cuenta de OTRO negocio no se mira: la marca se lee sobre el id ya resuelto en ESTE venue (sin oráculo)', async () => {
+      const cuentaAjena = 'cmvco67lo0000sfwa7yzbdluj' // cuid v1 de una cuenta de tarjetas de otro negocio
+      mockedPrisma.order.findFirst.mockResolvedValue(null) // no es de este venue
+      laCuentaEsDeTarjetas()
+      await expect(validateReferralCode({ ...ctx, intendedOrderId: cuentaAjena })).resolves.toMatchObject({ valid: true })
+      expect(mockedPrisma.order.findFirst).toHaveBeenCalledWith({ where: { id: cuentaAjena, venueId: 'venue_1' }, select: { id: true } })
+      expect(mockedPrisma.orderItem.findFirst).not.toHaveBeenCalled()
+      mockedPrisma.orderItem.findFirst.mockReset()
+    })
+
     it('sin venta en curso (validar antes de cobrar) no se lee ninguna marca', async () => {
       await expect(validateReferralCode(ctx)).resolves.toMatchObject({ valid: true })
       expect(mockedPrisma.orderItem.findFirst).not.toHaveBeenCalled()

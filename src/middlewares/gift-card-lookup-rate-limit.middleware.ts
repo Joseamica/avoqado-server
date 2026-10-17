@@ -22,16 +22,6 @@ const VENTANA_MS = 60 * 1000
 const ipDe = (req: Request): string => req.ip || req.socket.remoteAddress || 'desconocida'
 const negocioDe = (req: Request): string => req.params.venueId || 'sin-negocio'
 
-function rechazo(req: Request, res: Response): void {
-  logger.warn('🚨 Límite de consultas de tarjetas de regalo excedido', { venueId: req.params.venueId, ipAddress: req.ip })
-  res.status(429).json({
-    success: false,
-    code: 'GIFT_CARD_LOOKUP_RATE_LIMITED',
-    message: 'Demasiadas consultas de tarjetas de regalo seguidas. Espera un minuto y vuelve a intentar.',
-    retryAfter: 60,
-  })
-}
-
 /**
  * Fábrica (las pruebas la usan con topes chicos); las rutas usan las instancias de abajo. Orden: IP, luego aparato.
  * `soloFallos`: sólo cuentan las respuestas ≥ 400. `prefijo` va al inicio de las dos llaves.
@@ -42,6 +32,27 @@ export function crearLimitadoresDeConsulta(
   opciones: { soloFallos?: boolean; prefijo?: string } = {},
 ): RateLimitRequestHandler[] {
   const prefijo = opciones.prefijo ?? 'gift-card-lookup'
+  // ⭐ (C3 menor 1): el texto y la línea del log son de ESTE limitador. Cobrar con saldo (`soloFallos`) habla de intentos de cobro
+  // —lo ve la cajera—; el `code` es el mismo para los dos (la app ya decide por él).
+  const cobro = opciones.soloFallos === true
+  const rechazo = (req: Request, res: Response): void => {
+    logger.warn(
+      cobro ? '🚨 Límite de intentos de cobro con tarjeta de regalo excedido' : '🚨 Límite de consultas de tarjetas de regalo excedido',
+      {
+        limiter: prefijo,
+        venueId: req.params.venueId,
+        ipAddress: req.ip,
+      },
+    )
+    res.status(429).json({
+      success: false,
+      code: 'GIFT_CARD_LOOKUP_RATE_LIMITED',
+      message: cobro
+        ? 'Demasiados intentos de cobro con tarjeta de regalo seguidos. Espera un minuto y vuelve a intentar.'
+        : 'Demasiadas consultas de tarjetas de regalo seguidas. Espera un minuto y vuelve a intentar.',
+      retryAfter: 60,
+    })
+  }
   const comun = {
     windowMs: VENTANA_MS,
     standardHeaders: true,

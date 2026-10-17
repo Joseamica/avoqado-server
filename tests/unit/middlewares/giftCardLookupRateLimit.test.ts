@@ -6,6 +6,7 @@
  */
 import express from 'express'
 import request from 'supertest'
+import logger from '@/config/logger'
 import {
   crearLimitadoresDeConsulta,
   giftCardLookupRateLimiters,
@@ -74,7 +75,28 @@ describe('límite de intentos FALLIDOS al cobrar con saldo (nota 1: el oráculo 
     for (let i = 0; i < 2; i++) expect((await request(a).post(`${COBRO}?status=404`).set('X-Device-Id', 'caja-1')).status).toBe(404)
     const r = await request(a).post(`${COBRO}?status=200`).set('X-Device-Id', 'caja-1')
     expect(r.status).toBe(429)
-    expect(r.body).toEqual(RECHAZO)
+    // ⭐ (C3 menor 1): lo ve la cajera al COBRAR: habla de intentos de cobro, no de consultas. El `code` es el mismo.
+    expect(r.body).toEqual({
+      ...RECHAZO,
+      message: 'Demasiados intentos de cobro con tarjeta de regalo seguidos. Espera un minuto y vuelve a intentar.',
+    })
+  })
+
+  it('⭐ (C3 menor 1) la línea del log dice qué limitador frenó (`limiter`): la del cobro no se confunde con la de la consulta', async () => {
+    const aviso = jest.spyOn(logger, 'warn').mockImplementation(() => logger)
+    const cobro = appDeCobro(1, 100)
+    await request(cobro).post(`${COBRO}?status=404`).set('X-Device-Id', 'caja-1')
+    await request(cobro).post(`${COBRO}?status=404`).set('X-Device-Id', 'caja-1')
+    const consulta = app(1, 100)
+    await request(consulta).get(CONSULTA).set('X-Device-Id', 'caja-1')
+    await request(consulta).get(CONSULTA).set('X-Device-Id', 'caja-1')
+    const llamadas = aviso.mock.calls as unknown as Array<[string, { limiter?: string }]>
+    const lineas = llamadas.map(([texto, datos]) => [texto, datos.limiter])
+    expect(lineas).toEqual([
+      ['🚨 Límite de intentos de cobro con tarjeta de regalo excedido', 'gift-card-pay'],
+      ['🚨 Límite de consultas de tarjetas de regalo excedido', 'gift-card-lookup'],
+    ])
+    aviso.mockRestore()
   })
 
   it('el fallo se cuenta con la llave del cobro, no con la de la consulta (el prefijo va al inicio de las dos llaves)', async () => {

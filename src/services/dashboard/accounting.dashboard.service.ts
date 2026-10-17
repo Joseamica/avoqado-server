@@ -460,8 +460,9 @@ async function aggregatePeriodPayments(venueId: string, from: Date, to: Date): P
       // Codex r3 R3-5 (respuesta 9): también la orden debe ser de este negocio, como en la enumeración del estado de resultados.
       order: { venueId, status: { not: OrderStatus.CANCELLED } },
       // Tarjetas de regalo (spec §7, B4 r1): lo pagado con saldo no entra a caja ni a banco (ese dinero entró al vender la tarjeta, y esa
-      // venta sí cuenta aquí por su método). NULL-safe: el cobro sin tender sigue contando.
-      ...WHERE_COBRO_NO_ES_SALDO_DE_REGALO,
+      // venta sí cuenta aquí por su método). NULL-safe: el cobro sin tender sigue contando. ⭐ Dentro de un `AND`, nunca esparcido: su
+      // `OR` chocaría en silencio con cualquier otro `OR` que se agregue a este `where`.
+      AND: [WHERE_COBRO_NO_ES_SALDO_DE_REGALO],
     },
     _sum: { amount: true, tipAmount: true, feeAmount: true },
     _count: { _all: true },

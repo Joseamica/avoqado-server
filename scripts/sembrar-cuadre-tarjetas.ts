@@ -3,6 +3,9 @@
  * cargadas (una cancelada y devuelta el mismo día), un cobro con saldo con propina, su reverso parcial y efectivo normal, todo el
  * 12-oct-2026 en la zona del negocio. Así `mcp-money-reconcile.ts` cuadra cifras de verdad, no sólo ceros. Auditoría r2 #3: un
  * cobro en efectivo a las 23:55 hora del negocio (05:55 UTC del 13) debe caer en el día 12; un `Date` suelto lo sacaría.
+ * ⭐ (C5 menor 1) Las dos reglas de B5 r1 y la frontera del resumen: una cuenta de tarjetas PARTIAL con un abono de $200 (dinero en
+ * gross CASH; ni venta en net ni carga en giftCardLoads), un REFUND sobre una carga PAGADA que no se canceló (resta en el dinero y
+ * no cuenta como carga) y una tarjeta activada a las 23:55 del negocio (su libreta cae en el día 12).
  * 🔴 Sólo en la base desechable de integración: aborta si `current_database()` no es `avoqado_tarjetas_test_20261014`.
  * Escribe las filas con Prisma, sin pasar por los servicios (lo que se mide aquí es el CUADRE, no el cobro: el cobro lo prueban
  * las integraciones de A y B). Imprime el venueId en la última línea.
@@ -65,11 +68,10 @@ async function main() {
   const orden = async (
     total: number,
     giftCardId?: string,
-    estado: Pick<Prisma.OrderUncheckedCreateInput, 'status' | 'paymentStatus'> = {},
+    estado: Pick<Prisma.OrderUncheckedCreateInput, 'status' | 'paymentStatus' | 'remainingBalance'> = {},
   ) => {
     const o = await prisma.order.create({
       data: {
-        ...estado,
         venueId,
         orderNumber: `cuadre-${randomUUID()}`,
         source: 'TPV',
@@ -78,6 +80,7 @@ async function main() {
         taxAmount: D(0),
         total: D(total),
         remainingBalance: D(0),
+        ...estado,
       },
     })
     const renglonDeCuenta = giftCardId
@@ -161,9 +164,34 @@ async function main() {
   // 5) Auditoría r2 #3: venta de $50 en efectivo a las 23:55 del negocio (05:55 UTC del 13): cuenta en el día 12.
   const noche = await orden(50)
   await pago(noche, 50, { createdAt: el12('23:55') })
+  // 6) ⭐ Cuenta de tarjetas PARTIAL: tarjeta de $500 sin activar (PENDING) con un abono de $200 en efectivo. Es dinero que entró
+  //    (gross CASH), pero no es venta (net) ni carga (giftCardLoads sólo cuenta cuentas PAGADAS).
+  const C = await sobre({ initialAmount: D(500), balance: D(0), status: 'PENDING' })
+  const parcial = await orden(500, C.id, { status: 'CONFIRMED', paymentStatus: 'PARTIAL', remainingBalance: D(300) })
+  await pago(parcial, 200, { createdAt: el12('14:00') })
+  // 7) ⭐ REFUND sobre una carga PAGADA que NO se canceló (enmienda E1: la terminal devolvió $100 de una tarjeta de $400 y la cuenta
+  //    entera se desactivó; la cuenta sigue PAID y abierta). En el dinero resta en CASH; en giftCardLoads no cuenta como carga.
+  const E = await sobre({
+    initialAmount: D(400),
+    balance: D(0),
+    status: 'DEACTIVATED',
+    activatedAt: el12('15:00'),
+    deactivatedAt: el12('15:30'),
+  })
+  const cargaE = await orden(400, E.id, { status: 'COMPLETED', paymentStatus: 'PAID' })
+  await pago(cargaE, 400, { createdAt: el12('15:00') })
+  const devolucionE = await pago(cargaE, -100, { type: 'REFUND', createdAt: el12('15:30') })
+  await renglon(E.id, 'ACTIVATE', 400, 400, el12('15:00'), { orderId: cargaE })
+  await renglon(E.id, 'DEACTIVATE', 400, 0, el12('15:30'), { orderId: cargaE, refundPaymentId: devolucionE.id, reason: 'SALE_CANCELLED' })
+  // 8) ⭐ Frontera del resumen: tarjeta de $250 cobrada y activada a las 23:55 del negocio (05:55 UTC del 13): su ACTIVATE es del 12.
+  const F = await sobre({ initialAmount: D(250), balance: D(250), status: 'ACTIVE', activatedAt: el12('23:55') })
+  const cargaF = await orden(250, F.id, { status: 'COMPLETED', paymentStatus: 'PAID' })
+  await pago(cargaF, 250, { createdAt: el12('23:55') })
+  await renglon(F.id, 'ACTIVATE', 250, 250, el12('23:55'), { orderId: cargaF })
 
   console.log(
-    'Sembrado el 12-oct-2026: cargas $1,500 (una cancelada: −$500), saldo $400 + $20 de propina, reverso −$100, efectivo $200 y $50 a las 23:55.',
+    'Sembrado el 12-oct-2026: cargas $1,500 (una cancelada: −$500), saldo $400 + $20 de propina, reverso −$100, efectivo $200 y $50 a las 23:55; ' +
+      'cuenta de tarjetas PARCIAL con $200, carga de $400 con REFUND −$100 sin cancelar y carga de $250 a las 23:55.',
   )
   console.log(venueId)
 }
