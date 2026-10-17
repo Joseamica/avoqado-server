@@ -52,6 +52,19 @@ const SITIOS: Array<[string, string, string]> = [
   ['services/delivery-channels/core/deliveryOrderIngestion.service.ts', 'ingestDeliveryOrder', 'createSalePostingInTx('],
 ]
 
+/**
+ * Funciones que crean un vale por donde una cuenta de tarjetas NO puede pasar: no activan, y la razón queda escrita. Si la razón
+ * deja de ser cierta, el sitio pasa a SITIOS y activa como los demás.
+ */
+const NO_APLICAN: Record<string, string> = {
+  // Sitio 12 (develop, R10-1 de sellos tardíos): la constancia SKIPPED (`items: []`) del consumo de la sesión de vales v7.
+  'services/mobile/areaTicketV7.mobile.service.ts#finalizeAreaTicketPaymentInTransaction':
+    'sólo corre con una sesión de vales v7, cuya orden nace en materializeAreaTicketCheckout con los renglones de sus vales y ' +
+    'productos sueltos (ninguno con giftCardId; la sesión sólo toma orden ahí). Las líneas de tarjeta sólo nacen con ' +
+    'createGiftCardOrder y no se agregan después (guardias de A5), unir cuentas con tarjetas o con vales está prohibido (A5, R14-1) ' +
+    'y el cobro con saldo rechaza las ventas con vales.',
+}
+
 /** El cripto crea el vale por una envoltura que lo reintenta; el inventario cuenta la envoltura, y la activación va en su llamador. */
 const ENVOLTURAS: Record<string, string> = {
   'services/b4bit/b4bit.service.ts#crearValeDeInventario': 'services/b4bit/b4bit.service.ts#settleOrderForConfirmedCryptoPayment',
@@ -67,7 +80,7 @@ describe('R8: la activación de sobres acompaña a cada vale de inventario', () 
         if (cuerpo.includes('createSalePostingInTx(')) encontrados.push(ENVOLTURAS[`${rel}#${funcion}`] ?? `${rel}#${funcion}`)
       }
     }
-    expect([...new Set(encontrados)].sort()).toEqual(SITIOS.map(([a, f]) => `${a}#${f}`).sort())
+    expect([...new Set(encontrados)].sort()).toEqual([...SITIOS.map(([a, f]) => `${a}#${f}`), ...Object.keys(NO_APLICAN)].sort())
   })
 
   it.each(SITIOS)('%s#%s activa los sobres con la tx del cobro, DESPUÉS de crear el vale', (archivo, funcion, vale) => {
