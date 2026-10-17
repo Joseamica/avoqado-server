@@ -34,6 +34,8 @@ export const MAX_MENUS = 100
 export const MENU_MAX_PRODUCTS_TOTAL = 400
 export const MENU_MAX_GROUP_LINKS_TOTAL = 2000
 export const MENU_MAX_OPTIONS_TOTAL = 4000
+/** Entradas de opciones en la RESPUESTA: una opción cuenta cada vez que aparece en un platillo (un grupo compartido se repite). */
+export const MENU_MAX_OPTION_ENTRIES_TOTAL = 20000
 /** P2-07: negocios con carta en caché; al pasar el tope sale la guardada hace más tiempo. */
 export const MENU_CACHE_MAX_VENUES = 500
 /** Estados de `Order` que cuentan como «cuenta abierta» (folio sin repetir y desde dónde una transición mueve la `Order`). */

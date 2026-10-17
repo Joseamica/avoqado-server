@@ -59,6 +59,7 @@ function carta(cats: any[]) {
   const productos = cats.flatMap(c => c.products)
   const grupos = new Map<string, any>()
   for (const p of productos) for (const { group: g } of p.modifierGroups) if (!grupos.has(g.id)) grupos.set(g.id, g)
+  const sinOpciones = ({ modifiers: _m, ...g }: any) => g
   prismaMock.menuCategory.findMany.mockImplementation((async (a: any) => cats.slice(0, a.take)) as any)
   prismaMock.product.groupBy.mockImplementation((async (a: any) => {
     const pedida = en(a.where.categoryId.in)
@@ -71,20 +72,27 @@ function carta(cats: any[]) {
       .filter(p => pedida(p.categoryId))
       .sort((x, y) => (x.categoryId < y.categoryId ? -1 : x.categoryId > y.categoryId ? 1 : 0))
       .slice(0, a.take)
-      .map(({ modifierGroups, category: _c, ...p }) => ({ ...p, _count: { modifierGroups: modifierGroups.length } }))
+      .map(({ modifierGroups: _g, category: _c, ...p }) => p)
+  }) as any)
+  prismaMock.productModifierGroup.groupBy.mockImplementation((async (a: any) => {
+    const pedido = en(a.where.productId.in)
+    return productos
+      .filter(p => pedido(p.id) && p.modifierGroups.length > 0)
+      .map(p => ({ productId: p.id, _count: { _all: p.modifierGroups.length } }))
   }) as any)
   prismaMock.productModifierGroup.findMany.mockImplementation((async (a: any) => {
     const pedido = en(a.where.productId.in)
     return productos
       .filter(p => pedido(p.id))
       .sort(porId)
-      .flatMap(p =>
-        p.modifierGroups.map(({ group: { id } }: any) => {
-          const { modifiers, ...g } = grupos.get(id)
-          return { productId: p.id, group: { ...g, _count: { modifiers: modifiers.length } } }
-        }),
-      )
+      .flatMap(p => p.modifierGroups.map(({ group: { id } }: any) => ({ productId: p.id, group: sinOpciones(grupos.get(id)) })))
       .slice(0, a.take)
+  }) as any)
+  prismaMock.modifier.groupBy.mockImplementation((async (a: any) => {
+    const pedido = en(a.where.groupId.in)
+    return [...grupos.values()]
+      .filter(g => pedido(g.id) && g.modifiers.length > 0)
+      .map(g => ({ groupId: g.id, _count: { _all: g.modifiers.length } }))
   }) as any)
   prismaMock.modifier.findMany.mockImplementation((async (a: any) => {
     const pedido = en(a.where.groupId.in)
@@ -103,7 +111,9 @@ beforeEach(() => {
   prismaMock.menuCategory.findMany.mockResolvedValue([])
   prismaMock.product.groupBy.mockResolvedValue([] as any)
   prismaMock.product.findMany.mockResolvedValue([])
+  prismaMock.productModifierGroup.groupBy.mockResolvedValue([] as any)
   prismaMock.productModifierGroup.findMany.mockResolvedValue([])
+  prismaMock.modifier.groupBy.mockResolvedValue([] as any)
   prismaMock.modifier.findMany.mockResolvedValue([])
 })
 
@@ -124,9 +134,15 @@ describe('loadVisibleMenu', () => {
       soldByWeight: false,
       type: { notIn: ['APPOINTMENTS_SERVICE', 'CLASS', 'EVENT', 'DONATION'] },
     })
-    // grupos y opciones se CUENTAN antes de leerse (sólo los activos): se lee sólo lo que cabe, con 1 de más para notar cambios
-    expect(platillos.select._count).toEqual({ select: { modifierGroups: { where: { group: { active: true } } } } })
+    // Grupos y opciones se CUENTAN antes de leerse (sólo los activos), con agregados acotados por `IN` a lo ya leído (nunca un
+    // COUNT de relación: Prisma lo compila como un agregado de toda la tabla); se lee sólo lo que cabe, con 1 de más.
+    expect(platillos.select._count).toBeUndefined()
+    const cuentaVinculos = prismaMock.productModifierGroup.groupBy.mock.calls[0][0] as any
+    expect(cuentaVinculos).toMatchObject({ by: ['productId'], where: { productId: { in: ['p1'] }, group: { active: true } } })
+    const cuentaOpciones = prismaMock.modifier.groupBy.mock.calls[0][0] as any
+    expect(cuentaOpciones).toMatchObject({ by: ['groupId'], where: { groupId: { in: ['g1'] }, active: true } })
     const vinculos = prismaMock.productModifierGroup.findMany.mock.calls[0][0] as any
+    expect(vinculos.select.group.select._count).toBeUndefined()
     expect(vinculos.where).toEqual({ productId: { in: ['p1'] }, group: { active: true } })
     expect(vinculos.take).toBe(2)
     const opciones = prismaMock.modifier.findMany.mock.calls[0][0] as any
@@ -260,11 +276,14 @@ describe('P1-09: presupuesto GLOBAL de la carta (400 platillos · 2,000 vínculo
     Array.from({ length: n }, (_, i) => product(`${cat}-p${String(i).padStart(3, '0')}`, { categoryId: cat, modifierGroups: grupos(i) }))
   const ids = (menu: { categories: Array<{ products: Array<{ id: string }> }> }) => menu.categories.flatMap(c => c.products.map(p => p.id))
   const takes = (m: jest.Mock) => m.mock.calls.map(c => c[0].take)
+  const entradas = (menu: { categories: Array<{ products: Array<{ groups: Array<{ modifiers: unknown[] }> }> }> }) =>
+    menu.categories.reduce((s, c) => s + c.products.reduce((t, p) => t + p.groups.reduce((u, x) => u + x.modifiers.length, 0), 0), 0)
 
   it('con la carta llena, cada consulta trae a lo más su tope + 1: 101 categorías, 401 platillos, 2,001 vínculos y 4,001 opciones', async () => {
-    // 80 grupos de 50 opciones (4,000) repartidos de 5 en 5 entre 400 platillos (2,000 vínculos); una categoría de más no cabe.
-    const g = Array.from({ length: 80 }, (_, i) => opcional(`g${String(i).padStart(2, '0')}`, 50))
-    const cinco = (base: number) => (i: number) => Array.from({ length: 5 }, (_, k) => g[((base + i) * 5 + k) % 80])
+    // 400 grupos de 10 opciones (4,000) repartidos de 5 en 5 entre 400 platillos (2,000 vínculos, cada grupo en 5 platillos):
+    // 20,000 entradas en la respuesta, justo el tope. Una categoría de más no cabe.
+    const g = Array.from({ length: 400 }, (_, i) => opcional(`g${String(i).padStart(3, '0')}`, 10))
+    const cinco = (base: number) => (i: number) => Array.from({ length: 5 }, (_, k) => g[((base + i) * 5 + k) % 400])
     carta([
       category('c0', platillos('c0', 200, cinco(0))),
       category('c1', platillos('c1', 200, cinco(200))),
@@ -275,9 +294,25 @@ describe('P1-09: presupuesto GLOBAL de la carta (400 platillos · 2,000 vínculo
     expect(takes(prismaMock.product.findMany as any)).toEqual([401])
     expect(takes(prismaMock.productModifierGroup.findMany as any)).toEqual([2001])
     expect(takes(prismaMock.modifier.findMany as any)).toEqual([4001])
+    // los conteos van acotados por `IN` a lo ya leído: 400 platillos y 400 grupos distintos
+    expect((prismaMock.productModifierGroup.groupBy.mock.calls[0][0] as any).where.productId.in).toHaveLength(400)
+    expect((prismaMock.modifier.groupBy.mock.calls[0][0] as any).where.groupId.in).toHaveLength(400)
     expect(menu.categories.map(c => c.products.length)).toEqual([200, 200])
-    expect(menu.categories[0].products[0].groups.map(x => x.modifiers.length)).toEqual([50, 50, 50, 50, 50])
+    expect(entradas(menu)).toBe(20_000)
     expect(menu.truncated).toBe(true) // c2 no cupo
+  })
+
+  it('tope de ENTRADAS de la respuesta (20,000; una opción cuenta cada vez que aparece): el platillo que lo pasaría se omite ENTERO', async () => {
+    // 3 grupos compartidos de 50: cada platillo pone 150 entradas. 133 × 150 = 19,950; el 134.º llegaría a 20,100. El siguiente,
+    // con un solo grupo (50), sí cabe: 20,000.
+    const g = ['ga', 'gb', 'gc'].map(id => opcional(id, 50))
+    carta([category('cat1', [...platillos('cat1', 134, () => g), product('cat1-p134', { modifierGroups: [g[0]] })])])
+    const menu = await loadVisibleMenu('v1', NOW)
+    expect(ids(menu)).toHaveLength(134)
+    expect(ids(menu)).not.toContain('cat1-p133')
+    expect(ids(menu)).toContain('cat1-p134')
+    expect(entradas(menu)).toBe(20_000)
+    expect(menu.truncated).toBe(true)
   })
 
   it('400 platillos visibles ⇒ los 400 en el orden de la carta y sin recorte; uno más ⇒ 400 y `truncated`, con el conteo exacto', async () => {
@@ -344,9 +379,9 @@ describe('P1-09: presupuesto GLOBAL de la carta (400 platillos · 2,000 vínculo
 
   it('si la carta cambia entre el conteo y la lectura, el platillo que no se leyó completo no sale (y lo dice)', async () => {
     carta([category('cat1', [product('p1'), product('p2', { modifierGroups: [group('g1'), group('g2')] })])])
-    const leer = prismaMock.product.findMany.getMockImplementation()!
-    prismaMock.product.findMany.mockImplementation((async (a: any) =>
-      ((await leer(a)) as any[]).map(p => (p.id === 'p2' ? { ...p, _count: { modifierGroups: 1 } } : p))) as any) // contó 1; ya son 2
+    const contar = prismaMock.productModifierGroup.groupBy.getMockImplementation()!
+    prismaMock.productModifierGroup.groupBy.mockImplementation((async (a: any) =>
+      ((await contar(a)) as any[]).map(g => (g.productId === 'p2' ? { ...g, _count: { _all: 1 } } : g))) as any) // contó 1; ya son 2
     const menu = await loadVisibleMenu('v1', NOW)
     expect(ids(menu)).toEqual(['p1'])
     expect(menu.truncated).toBe(true)
@@ -398,6 +433,16 @@ describe('getPublicMenu', () => {
     expect(p.price).toBe(93)
     expect(p.soldOut).toBe(false)
     expect(p.modifierGroups[0].modifiers[1]).toEqual({ id: 'm2', name: 'mod-m2', price: 10 })
+  })
+
+  it('un grupo compartido lleva sus opciones UNA vez en memoria (mismo JSON)', async () => {
+    carta([category('cat1', [product('p1'), product('p2')])])
+    const [a, b] = (await getPublicMenu('v1', NOW)).categories[0].products
+    expect(b.modifierGroups[0].modifiers).toBe(a.modifierGroups[0].modifiers)
+    expect(a.modifierGroups[0].modifiers).toEqual([
+      { id: 'm1', name: 'mod-m1', price: 0 },
+      { id: 'm2', name: 'mod-m2', price: 10 },
+    ])
   })
 
   it('cachea 60 s por venue: la segunda lectura no vuelve a la base', async () => {
