@@ -126,3 +126,19 @@ export type CreateTpvBody = {
 export const updateTerminalTpvSettingsSchema = z.object({
   body: z.object({ tipSuggestions: tipSuggestionsRule.optional() }).passthrough(),
 })
+
+/**
+ * PUT …/org-tpv-defaults (stores-analysis y organizations) — LA misma regla de propinas, en `settings`, porque esas dos rutas
+ * guardan y EMPUJAN `settings` a TODAS las terminales de la organización (F0-B, ronda final: I1 / Codex P2-3). Igual que arriba:
+ * sólo esa forma, todo lo demás pasa intacto. `settings` ausente sigue llegando a la ruta, que conserva su propia respuesta.
+ */
+export const updateOrgTpvDefaultsSchema = z.object({
+  body: z
+    .object({
+      settings: z
+        .object({ tipSuggestions: tipSuggestionsRule.optional() }, { invalid_type_error: 'Los ajustes deben ser un objeto' })
+        .passthrough()
+        .optional(),
+    })
+    .passthrough(),
+})

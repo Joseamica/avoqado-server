@@ -24,6 +24,8 @@ import { logAction } from '../../services/dashboard/activity-log.service'
 import { resolveStoresAnalysisVenueIds } from '../../services/organization-dashboard/storesAnalysisScope.service'
 import * as supervisorSalesExportService from '../../services/organization-dashboard/supervisorSalesExport.service'
 import { BadRequestError } from '../../errors/AppError'
+import { validateRequest } from '../../middlewares/validation'
+import { updateOrgTpvDefaultsSchema } from '../../schemas/dashboard/tpv.schema'
 
 // mergeParams: true allows access to :venueId from parent route
 const router = Router({ mergeParams: true })
@@ -1600,26 +1602,32 @@ router.get('/org-tpv-defaults', orgAttendanceAccess, async (req: Request, res: R
  * Saves full TpvSettings JSON and pushes to ALL terminals in the org.
  * kioskDefaultMerchantId is preserved per-terminal.
  */
-router.put('/org-tpv-defaults', orgAttendanceAccess, async (req: Request, res: Response, next: NextFunction) => {
-  try {
-    const venueId = req.params.venueId || (req as any).authContext?.venueId
-    const orgId = await getOrgIdFromVenue(venueId)
+// F0-B (ronda final, I1): el tope de 6 propinas del POS, DESPUÉS del acceso — esto se reparte a todas las terminales.
+router.put(
+  '/org-tpv-defaults',
+  orgAttendanceAccess,
+  validateRequest(updateOrgTpvDefaultsSchema),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const venueId = req.params.venueId || (req as any).authContext?.venueId
+      const orgId = await getOrgIdFromVenue(venueId)
 
-    if (!orgId) {
-      return res.status(404).json({ success: false, error: 'not_found', message: 'Organization not found for this venue' })
+      if (!orgId) {
+        return res.status(404).json({ success: false, error: 'not_found', message: 'Organization not found for this venue' })
+      }
+
+      const { settings } = req.body
+      if (!settings || typeof settings !== 'object') {
+        return res.status(400).json({ success: false, error: 'bad_request', message: 'settings object is required' })
+      }
+
+      const result = await organizationDashboardService.upsertOrgTpvDefaults(orgId, settings)
+      res.json({ success: true, data: result })
+    } catch (error) {
+      next(error)
     }
-
-    const { settings } = req.body
-    if (!settings || typeof settings !== 'object') {
-      return res.status(400).json({ success: false, error: 'bad_request', message: 'settings object is required' })
-    }
-
-    const result = await organizationDashboardService.upsertOrgTpvDefaults(orgId, settings)
-    res.json({ success: true, data: result })
-  } catch (error) {
-    next(error)
-  }
-})
+  },
+)
 
 /**
  * GET /dashboard/venues/:venueId/stores-analysis/org-tpv-defaults/stats
