@@ -357,6 +357,8 @@ export async function verifyPasskeyAssertion(
     accessToken,
     refreshToken,
     staff: sanitizedStaff,
+    // Interno (el controlador no lo manda): la sucursal de la sesión, para dar de alta el aparato al entrar.
+    selectedVenueId: selectedVenue.venueId,
   }
 }
 
@@ -965,6 +967,9 @@ export async function refreshAccessToken(refreshToken: string, requestedVenueId?
   return {
     accessToken: newAccessToken,
     refreshToken: newRefreshToken,
+    // Internos (el controlador no los manda): quién y en qué sucursal quedó la sesión, para el alta del aparato.
+    staffId: staff.id,
+    venueId: selectedVenue.venueId,
   }
 }
 
