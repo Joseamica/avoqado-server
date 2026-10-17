@@ -103,6 +103,13 @@ describe('getOnlineMenuSummary: conteos por categoría', () => {
     expect(prismaMock.product.findMany).not.toHaveBeenCalled()
   })
 
+  it('sin categorías no corre los agregados por categoría (nada de `IN ()`); los totales del negocio sí', async () => {
+    base([], [prod('a')])
+    const r = await getOnlineMenuSummary('v1')
+    expect(r).toEqual({ categories: [], totals: { total: 1, online: 1, onlineWithoutPhoto: 0 }, truncated: false })
+    expect(prismaMock.product.groupBy).not.toHaveBeenCalled()
+  })
+
   it('con 101 categorías devuelve 100 y truncated:true; los totales siguen siendo exactos del negocio', async () => {
     const cats = Array.from({ length: 101 }, (_, i) => ({ id: `c${String(i).padStart(3, '0')}`, name: `Cat ${i}`, active: true }))
     base(cats, [prod('a', { categoryId: 'c000' }), prod('z', { categoryId: 'c100', imageUrl: null })])
@@ -169,6 +176,22 @@ describe('listOnlineMenuProducts: lista paginada', () => {
     expect(a.where).toMatchObject({ venueId: 'v1', categoryId: 'c1', id: { not: 'pb' } })
     // El total no depende de la página.
     expect((prismaMock.product.count.mock.calls[0][0] as any).where.id).toBeUndefined()
+  })
+
+  it('`%`, `_` y `\\` se buscan literales: `contains` de Prisma no los escapa solo', async () => {
+    base([], PRODUCTOS)
+    for (const [busca, patron] of [
+      ['50%', '50\\%'],
+      ['a_b', 'a\\_b'],
+      ['c\\d', 'c\\\\d'],
+    ]) {
+      prismaMock.product.findMany.mockClear()
+      prismaMock.product.count.mockClear()
+      await listOnlineMenuProducts({ venueId: 'v1', search: busca })
+      const a = prismaMock.product.findMany.mock.calls[0][0] as any
+      expect({ busca, contains: a.where.name.contains }).toEqual({ busca, contains: patron })
+      expect((prismaMock.product.count.mock.calls[0][0] as any).where.name.contains).toBe(patron)
+    }
   })
 
   it('búsqueda sin mayúsculas sobre el nombre; el total cuenta la búsqueda', async () => {

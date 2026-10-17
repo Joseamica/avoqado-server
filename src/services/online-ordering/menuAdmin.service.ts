@@ -45,6 +45,7 @@ export async function getOnlineMenuSummary(venueId: string): Promise<{
   const online: Prisma.ProductWhereInput = { ...total, availableOnline: true }
   const sinFoto: Prisma.ProductWhereInput = { ...online, OR: [{ imageUrl: null }, { imageUrl: '' }] }
   const porCategoria = async (where: Prisma.ProductWhereInput) => {
+    if (ids.length === 0) return new Map<string, number>()
     const grupos = await prisma.product.groupBy({
       by: ['categoryId'],
       where: { ...where, categoryId: { in: ids } },
@@ -89,7 +90,8 @@ export async function listOnlineMenuProducts(p: {
     venueId: p.venueId,
     ...VENDIBLE,
     ...(p.categoryId ? { categoryId: p.categoryId } : {}),
-    ...(p.search ? { name: { contains: p.search, mode: 'insensitive' as const } } : {}),
+    // `contains` de Prisma arma `%término%` SIN escapar: `%`, `_` y `\` del usuario se buscan literales (como merma y Shopify).
+    ...(p.search ? { name: { contains: p.search.replace(/[\\%_]/g, '\\$&'), mode: 'insensitive' as const } } : {}),
   }
   const [rows, total] = await Promise.all([
     prisma.product.findMany({
