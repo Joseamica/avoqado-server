@@ -8,7 +8,7 @@
  * dejó cobrada; tampoco revive una que la cancelación existente (`cancelOrder`) canceló. H6: el cobro cae en el turno abierto,
  * un rechazo que espera al cobro pierde, y un CAS perdido dentro de la cancelación revierte la `Order` en Postgres.
  */
-import { OnlineOrderStatus } from '@prisma/client'
+import { OnlineOrderStatus, Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { examinarRenglon } from '@/services/fiscal/cfdi.service'
@@ -101,19 +101,22 @@ describe('Pedidos en línea — ciclo de vida (integration, real DB)', () => {
   const aceptar = (orderId: string) =>
     expect(acceptOnlineOrder({ venueId: venueId!, orderId, staffId: null })).resolves.toMatchObject({ outcome: 'OK', status: 'ACCEPTED' })
   /**
-   * H6: espera a que alguna sesión quede BLOQUEADA por la del cobro (la carrera es real, no secuencial). Se ata al proceso de
-   * Postgres que retiene el candado (`pg_blocking_pids`), no al texto de la consulta. Acotada: si no ocurre, INCONCLUSO.
+   * Espera a que alguna sesión quede BLOQUEADA por el proceso de Postgres `pid` (la carrera es real, no secuencial) y devuelve
+   * el proceso bloqueado. Se ata a quien retiene el candado (`pg_blocking_pids`), no al texto de la consulta. Acotada: si no
+   * ocurre, INCONCLUSO.
    */
-  const esperarQueAlguienEspereAlCobro = async (pidDelCobro: number | undefined) => {
-    for (let i = 0; pidDelCobro !== undefined && i < 100; i++) {
-      const [{ n }] = await prisma.$queryRaw<Array<{ n: number }>>`
-        SELECT count(*)::int AS n FROM pg_stat_activity
-        WHERE wait_event_type = 'Lock' AND ${pidDelCobro}::int = ANY(pg_blocking_pids(pid))`
-      if (n > 0) return
+  const esperarBloqueadoPor = async (pid: number | undefined, queNoPaso: string): Promise<number> => {
+    for (let i = 0; pid !== undefined && i < 100; i++) {
+      const [bloqueado] = await prisma.$queryRaw<Array<{ pid: number }>>`
+        SELECT pid FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND ${pid}::int = ANY(pg_blocking_pids(pid))`
+      if (bloqueado) return bloqueado.pid
       await new Promise(resolve => setTimeout(resolve, 50))
     }
-    throw new Error('INCONCLUSO: el rechazo nunca quedó esperando el candado que retiene el cobro')
+    throw new Error(`INCONCLUSO: ${queNoPaso}`)
   }
+  /** H6: alguna sesión quedó esperando el candado que retiene el cobro. */
+  const esperarQueAlguienEspereAlCobro = (pidDelCobro: number | undefined) =>
+    esperarBloqueadoPor(pidDelCobro, 'el rechazo nunca quedó esperando el candado que retiene el cobro')
 
   const estadoDe = async (onlineOrderId: string) => (await prisma.onlineOrder.findUniqueOrThrow({ where: { id: onlineOrderId } })).status
   /** `logAction` es un simulacro en TODA la integración (`integration-setup.ts`): se miran sus llamadas para ESTE pedido. */
@@ -287,6 +290,65 @@ describe('Pedidos en línea — ciclo de vida (integration, real DB)', () => {
       details: { quote: { total: 206 } },
     })
     expect(await prisma.order.count({ where: { venueId: venueId!, externalId: `web:${key}` } })).toBe(0)
+  })
+
+  it('R2-2: con la tienda ya cerrada, el reintento de una llave cuyo primer envío sigue en su transacción ESPERA y recibe SU pedido', async () => {
+    await beat()
+    const key = nextKey()
+    const phone = nextPhone()
+    const { hours: horarioAntes } = await prisma.onlineOrderingSettings.findUniqueOrThrow({ where: { venueId: venueId! } })
+    const dias = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday']
+    const todoCerrado = Object.fromEntries(dias.map(d => [d, { enabled: false, ranges: [] }]))
+
+    let soltar!: () => void
+    const retenido = new Promise<void>(resolve => (soltar = resolve))
+    let avisarDentro!: () => void
+    const retenedorDentro = new Promise<void>(resolve => (avisarDentro = resolve))
+    let pidDelRetenedor: number | undefined
+    // El retenedor toma la fila del negocio. El primer envío entra a su transacción, toma el candado de admisión, crea la cuenta
+    // (su llave foránea a Venue pide esa fila) y se queda ESPERANDO ahí dentro: su pedido existe sin confirmar.
+    const retenedor = prisma.$transaction(
+      async tx => {
+        pidDelRetenedor = (await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`)[0].pid
+        await tx.$queryRaw`SELECT id FROM "Venue" WHERE id = ${venueId} FOR UPDATE`
+        avisarDentro()
+        await retenido
+      },
+      { timeout: 30_000 },
+    )
+    await Promise.race([retenedorDentro, retenedor])
+
+    const primero = newOrder({ key, phone })
+    let reintento: Promise<Awaited<ReturnType<typeof newOrder>>> | undefined
+    const carrera = (async () => {
+      const pidDelPrimero = await esperarBloqueadoPor(pidDelRetenedor, 'el primer envío nunca quedó retenido dentro de su transacción')
+      // La tienda cierra mientras el primer envío sigue sin confirmar; el comensal reintenta con la MISMA llave y solicitud.
+      await prisma.onlineOrderingSettings.update({ where: { venueId: venueId! }, data: { hours: todoCerrado } })
+      reintento = newOrder({ key, phone })
+      // El reintento queda formado detrás del candado de admisión que retiene el primer envío (no rechaza de inmediato).
+      await Promise.race([esperarBloqueadoPor(pidDelPrimero, 'el reintento nunca esperó el candado de admisión'), reintento])
+    })()
+    // Se suelta pase lo que pase, y todo se espera antes de afirmar: nada queda corriendo ni sin manejar.
+    const [espera, a, b] = await Promise.allSettled([
+      carrera.finally(soltar),
+      primero,
+      carrera.catch(() => undefined).then(() => reintento),
+    ])
+    await retenedor.catch(() => undefined)
+    await prisma.onlineOrderingSettings.update({
+      where: { venueId: venueId! },
+      data: { hours: horarioAntes === null ? Prisma.DbNull : (horarioAntes as Prisma.InputJsonValue) },
+    })
+
+    expect(a).toMatchObject({ status: 'fulfilled', value: { replay: false } })
+    const creado = (a as PromiseFulfilledResult<Awaited<ReturnType<typeof newOrder>>>).value
+    // SU pedido, no ORDERING_CLOSED.
+    expect(b).toEqual({
+      status: 'fulfilled',
+      value: expect.objectContaining({ replay: true, orderId: creado.orderId, trackingToken: creado.trackingToken }),
+    })
+    if (espera.status === 'rejected') throw espera.reason // el reintento nunca quedó esperando: la prueba no probó la carrera
+    expect(await prisma.order.count({ where: { venueId: venueId!, externalId: `web:${key}` } })).toBe(1)
   })
 
   it('dos aparatos aceptando a la vez: exactamente uno gana', async () => {

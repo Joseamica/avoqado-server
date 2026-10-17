@@ -11,7 +11,11 @@ jest.mock('@/middlewares/resolveOperationalVenueBySlug.middleware', () => ({
 }))
 jest.mock('@/middlewares/resolveVenueBySlug.middleware', () => ({
   __esModule: true,
-  resolveVenueBySlug: (_req: any, _res: any, next: any) => next(),
+  // P1-06: crear pedido resuelve el venue con éste (sólo activo); plan y negocio operativo los pide el servicio.
+  resolveVenueBySlug: (req: any, _res: any, next: any) => {
+    req.publicVenue = { id: `id-${req.params.venueSlug}`, slug: req.params.venueSlug }
+    next()
+  },
 }))
 jest.mock('@/middlewares/requirePublicVenueFeatureStrict.middleware', () => ({
   __esModule: true,
