@@ -3,8 +3,12 @@
  *
  * Runs daily at 09:00 America/Mexico_City.
  *
- * Finds active PLAN_PRO VenueFeatures that have a Stripe subscription and emails
- * the venue's notification target a heads-up ~3 days before the next renewal.
+ * Finds active PLAN_PRO / PLAN_PREMIUM VenueFeatures that have a Stripe subscription and emails
+ * the venue's notification target a heads-up before the next charge (`diasParaAvisar`: 0 < days < 9).
+ * With the per-period dedup the first send normally lands 8-9 days out (Visa: ≥7 days before the first
+ * charge after a trial; LFPC 76 Bis VIII: ≥5); a failed run is retried by the next daily runs until the charge.
+ * The amount is what Stripe will really charge (invoice preview), never the list price; without it nothing is
+ * sent or stamped. A trialing subscription gets the "your trial ends" variant.
  *
  * Dedup: `VenueFeature.renewalReminderSentAt` is stamped once per billing period.
  * A reminder is (re-)sent only if it was never sent OR the last send predates the
@@ -26,10 +30,17 @@ import { retry, shouldRetryDbConnectionError } from '@/utils/retry'
 import { subscriptionPeriod } from '@/utils/stripeSubscriptionPeriod'
 import emailService from '@/services/email.service'
 import { resolvePlanNotificationTarget } from '@/services/access/planNotification.service'
+import { montoDelSiguienteCobro, seCancelaAntesDe } from '@/services/billing/siguienteCobro'
 import { billingPageUrl } from '@/utils/dashboardLinks'
 import { scheduleJob } from '../observability/jobContext'
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '')
+
+/** `true` while the charge at `periodEndMs` is less than 9 days (and still in the future) away. */
+export function diasParaAvisar(periodEndMs: number, nowMs: number): boolean {
+  const dias = (periodEndMs - nowMs) / 86400000
+  return dias > 0 && dias < 9
+}
 
 export class PlanRenewalReminderJob {
   private job: CronJob | null = null
@@ -73,21 +84,22 @@ export class PlanRenewalReminderJob {
           where: {
             active: true,
             stripeSubscriptionId: { not: null },
-            feature: { code: 'PLAN_PRO' },
+            feature: { code: { in: ['PLAN_PRO', 'PLAN_PREMIUM'] } },
           },
           select: {
             id: true,
             venueId: true,
             stripeSubscriptionId: true,
             renewalReminderSentAt: true,
-            venue: { select: { slug: true } },
+            feature: { select: { code: true } },
+            venue: { select: { slug: true, timezone: true } },
           },
         }),
       { retries: 2, initialDelay: 1500, shouldRetry: shouldRetryDbConnectionError, context: 'plan-renewal-reminder.findMany' },
     )
 
     if (features.length === 0) {
-      logger.info('✅ No active PLAN_PRO subscriptions to evaluate for renewal reminders')
+      logger.info('✅ No active plan subscriptions to evaluate for renewal reminders')
       return
     }
 
@@ -110,13 +122,14 @@ export class PlanRenewalReminderJob {
         }
         const periodEndMs = period.end.getTime()
         const periodStartMs = period.start.getTime()
-        const daysToRenewal = (periodEndMs - now) / 86400000
 
-        // ~3-day window (2-4 days out).
-        if (daysToRenewal < 2 || daysToRenewal > 4) continue
+        if (!diasParaAvisar(periodEndMs, now)) continue
 
         // Dedup: already reminded this billing period?
         if (vf.renewalReminderSentAt && vf.renewalReminderSentAt.getTime() > periodStartMs) continue
+
+        // Ends without charging (canceled at period end, or cancel_at before it): never announce a charge.
+        if (seCancelaAntesDe(sub, periodEndMs)) continue
 
         const target = await resolvePlanNotificationTarget(vf.venueId)
         if (!target.email) {
@@ -124,17 +137,29 @@ export class PlanRenewalReminderJob {
           continue
         }
 
-        const interval = sub.items.data[0]?.price.recurring?.interval === 'year' ? 'annual' : 'monthly'
-        const amountCents = sub.items.data[0]?.price.unit_amount ?? 0
+        // 🔴 No list-price fallback: unknown amount → no email, no stamp; tomorrow's run (still in the window) retries.
+        const amountCents = await montoDelSiguienteCobro(stripe, vf.stripeSubscriptionId!)
+        if (amountCents === null) continue
 
-        await emailService.sendPlanRenewalReminderEmail(target.email, {
+        const interval = sub.items.data[0]?.price.recurring?.interval === 'year' ? 'annual' : 'monthly'
+
+        const sent = await emailService.sendPlanRenewalReminderEmail(target.email, {
           locale: target.locale,
           venueName: target.venueName,
           interval,
           renewalDate: new Date(periodEndMs),
           amountCents,
           billingPortalUrl: billingPageUrl(vf.venue?.slug),
+          planName: vf.feature?.code === 'PLAN_PREMIUM' ? 'Premium' : 'Pro',
+          isTrialEnd: sub.status === 'trialing',
+          // `||`, not `??`: an empty zone makes toLocaleDateString throw.
+          timeZone: vf.venue?.timezone || 'America/Mexico_City',
         })
+        // Not delivered → no stamp, so the next daily run retries.
+        if (!sent) {
+          logger.warn(`renewal reminder: email not sent for venueFeature ${vf.id}; will retry on the next run`)
+          continue
+        }
 
         await prisma.venueFeature.update({
           where: { id: vf.id },
