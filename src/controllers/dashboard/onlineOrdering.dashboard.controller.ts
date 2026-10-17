@@ -1,4 +1,5 @@
 import type { NextFunction, Request, Response } from 'express'
+import { getOnlineMenuSummary, listOnlineMenuProducts } from '@/services/online-ordering/menuAdmin.service'
 import { setOnlineAvailability } from '@/services/online-ordering/menuAvailability.service'
 import { getAcceptingStatus, storeView } from '@/services/online-ordering/presence.service'
 import { getSettings, storeRequirements, updateSettings } from '@/services/online-ordering/settings.service'
@@ -47,6 +48,28 @@ export const setMenuAvailabilityHandler = async (req: Request, res: Response, ne
       actorStaffId: staffOf(req),
     })
     return res.json({ success: true, data })
+  } catch (e) {
+    return next(e)
+  }
+}
+
+/** 1b: el «menú en línea» del panel: conteos por categoría. */
+export const getMenuCategoriesHandler = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    return res.json({ success: true, data: await getOnlineMenuSummary(req.params.venueId) })
+  } catch (e) {
+    return next(e)
+  }
+}
+
+/** 1b: una página de platillos vendibles. El query ya viene validado por `menuProductsSchema` (`limit` como número). */
+export const listMenuProductsHandler = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { categoryId, search, cursor, limit } = req.query as { categoryId?: string; search?: string; cursor?: string; limit?: number }
+    return res.json({
+      success: true,
+      data: await listOnlineMenuProducts({ venueId: req.params.venueId, categoryId, search, cursor, limit }),
+    })
   } catch (e) {
     return next(e)
   }

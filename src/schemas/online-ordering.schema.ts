@@ -102,6 +102,25 @@ export const rejectSchema = z.object({
   }),
 })
 export const pauseSchema = z.object({ params: venueParams, body: z.object({ minutes: floorPauseMinutes }) })
+/** 1b: el «menú en línea» del panel. El cursor es el `id` del último platillo de la página anterior (`nextCursor`). */
+export const menuCategoryId = safeId('Categoría inválida')
+export const menuCursor = safeId('Cursor inválido')
+export const menuCategoriesSchema = z.object({ params: venueParams })
+export const menuProductsSchema = z.object({
+  params: venueParams,
+  query: z.object({
+    categoryId: menuCategoryId.optional(),
+    search: z.string().trim().min(1, 'Búsqueda inválida').max(80, 'Búsqueda inválida').optional(),
+    cursor: menuCursor.optional(),
+    // Llega como texto en el query; por omisión 50 (lo pone el servicio).
+    limit: z.coerce
+      .number({ invalid_type_error: 'Límite inválido' })
+      .int('Límite inválido')
+      .min(1, 'Límite inválido')
+      .max(100, 'Límite inválido')
+      .optional(),
+  }),
+})
 export const settingsGetSchema = z.object({ params: venueParams })
 export const settingsPatchSchema = z.object({ params: venueParams, body: settingsPatchBody })
 export const menuAvailabilitySchema = z.object({ params: venueParams, body: menuAvailabilityBody })

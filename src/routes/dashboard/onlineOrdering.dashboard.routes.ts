@@ -9,7 +9,10 @@ import {
   acceptSchema,
   inboxSchema,
   menuAvailabilitySchema,
+  menuCategoriesSchema,
+  menuProductsSchema,
   orderActionSchema,
+  pauseSchema,
   rejectSchema,
   settingsGetSchema,
   settingsPatchSchema,
@@ -28,6 +31,16 @@ router.put(
   plan,
   admin.setMenuAvailabilityHandler,
 )
+// 1b: VER el menú en línea no lleva candado de plan (como GET /settings); sólo cambiarlo.
+router.get(
+  '/menu/categories',
+  validateRequest(menuCategoriesSchema),
+  checkPermission('online-orders:manage'),
+  admin.getMenuCategoriesHandler,
+)
+router.get('/menu/products', validateRequest(menuProductsSchema), checkPermission('online-orders:manage'), admin.listMenuProductsHandler)
+// 1b: pausar desde el panel = el MISMO manejador y permiso de las apps (misma respuesta y mismo 400 si no hay ajustes). Sin plan (R14).
+router.post('/pause', validateRequest(pauseSchema), checkPermission('online-orders:pause'), orders.pause)
 
 // La bandeja del panel comparte manejadores con las apps; late sólo si su página de bandeja manda `x-online-orders-tray: 1`
 // (permitida en CORS, H2) y quien mira tiene `orders:update` efectivo (H3).
