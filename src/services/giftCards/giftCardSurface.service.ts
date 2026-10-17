@@ -171,8 +171,9 @@ export async function operarSobreDeGerente(
       const hoy = await tx.giftCard.findFirst({ where: { id: giftCardId, venueId }, select: { status: true } })
       const bloqueo = input.tipo === 'BLOQUEAR'
       if (hoy?.status !== (bloqueo ? 'BLOCKED' : 'ACTIVE')) {
+        // r1 (M2): code propio; `GIFT_CARD_BLOCKED` diría lo contrario del texto («hoy no está bloqueada»).
         throw new GiftCardError(
-          'GIFT_CARD_BLOCKED',
+          'GIFT_CARD_STATE_CHANGED',
           bloqueo
             ? 'Este bloqueo ya se había registrado, pero la tarjeta cambió después: hoy no está bloqueada. Vuelve a abrirla para ver su estado.'
             : 'Este desbloqueo ya se había registrado, pero la tarjeta cambió después: hoy no está activa. Vuelve a abrirla para ver su estado.',

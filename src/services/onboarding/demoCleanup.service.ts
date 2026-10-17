@@ -120,6 +120,9 @@ export async function cleanDemoData(venueId: string, staffId?: string | null): P
   await prisma.$transaction(
     async tx => {
       // ⭐ (C6 concern 1): con una sola tarjeta vendida no se borra nada (ver la cabecera). Dentro de la transacción, antes de borrar.
+      // r1 (R2): primero la fila del negocio en FOR UPDATE (choca con el KEY SHARE que toma la llave foránea de un sobre que se está
+      // vendiendo, como `deleteVenue`); la consulta de tarjetas va en OTRA sentencia y ve la venta que esperamos.
+      await tx.$queryRaw`SELECT 1 FROM "Venue" WHERE id = ${venueId} FOR UPDATE`
       if (await tx.giftCard.findFirst({ where: { venueId }, select: { id: true } })) {
         result.skippedReason = 'GIFT_CARDS'
         return

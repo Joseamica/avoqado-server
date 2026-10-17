@@ -345,6 +345,16 @@ describe('payGiftCardBalanceOnOrder', () => {
       expect(prismaMock.payment.findUnique).toHaveBeenCalledTimes(2) // la consulta rápida y la búsqueda de la ganadora
     })
 
+    it('r1 (M3): sin ganadora, el CAS perdido del núcleo sale como 409 ORDER_PAYMENT_CONFLICT con un texto para la cajera (sin «llave»)', async () => {
+      lockGiftCardsMock.mockResolvedValue([sobreBloqueado()])
+      canjearMock.mockRejectedValueOnce(Object.assign(new Error('PAY_CASH_CAS_LOST'), { code: 'PAY_CASH_CAS_LOST' }))
+      await expect(payGiftCardBalanceOnOrder('venue-1', 'order-1', cobro())).rejects.toMatchObject({
+        code: 'ORDER_PAYMENT_CONFLICT',
+        statusCode: 409,
+        message: 'Otro cobro cambió esta cuenta al mismo tiempo. Intenta otra vez.',
+      })
+    })
+
     it('🔴 la MISMA llave con OTRO monto: IDEMPOTENCY_KEY_REUSED (409)', async () => {
       prismaMock.payment.findUnique.mockResolvedValueOnce({ id: 'payment-1' }).mockResolvedValueOnce(pagoGuardado())
       await expect(payGiftCardBalanceOnOrder('venue-1', 'order-1', cobro({ amount: D(300) }))).rejects.toMatchObject({

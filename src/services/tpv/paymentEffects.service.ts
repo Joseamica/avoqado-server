@@ -64,7 +64,7 @@ export async function enqueuePaymentEffect(tx: Prisma.TransactionClient, input: 
   } satisfies Prisma.PaymentWhereInput
   // Tarjetas de regalo (R1): la marca de la cuenta viaja en esta MISMA lectura (un renglón con `giftCardId` basta: no se mezclan), y
   // sólo para comisión y referido: sin `relationJoins` son 2 SQL más dentro de la transacción del cobro (con el FOR UPDATE tomado).
-  const source: { orderId: string; order?: { items: Array<{ id: string }> } } | null = premiaVenta
+  const source: { orderId: string; order?: { items?: Array<{ id: string }> } } | null = premiaVenta
     ? await tx.payment.findFirst({
         where,
         select: { orderId: true, order: { select: { items: { where: { giftCardId: { not: null } }, select: { id: true }, take: 1 } } } },
@@ -74,7 +74,8 @@ export async function enqueuePaymentEffect(tx: Prisma.TransactionClient, input: 
   // R1 (tarjetas de regalo): VENDER tarjetas no genera comisión ni califica referidos, así que tampoco tiene reversas. Aquí pasan todas
   // esas obligaciones —la comisión congelada de cada cobro, el referido y las reversas de una devolución—. Usar la tarjeta sí comisiona:
   // la cuenta de mercancía pagada con saldo no es de tarjetas.
-  if (premiaVenta && (source.order?.items.length ?? 0) > 0) return
+  // r1 (lote ⭐): el `?.` de `items` NO sobra: el reembolso de la TPV llega con `order` sin `items`.
+  if (premiaVenta && (source.order?.items?.length ?? 0) > 0) return
   await tx.paymentEffect.createMany({ data: [{ ...input, version: 1 }], skipDuplicates: true })
 }
 

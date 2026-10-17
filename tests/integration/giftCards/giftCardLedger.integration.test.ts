@@ -13,6 +13,8 @@ import prisma from '@/utils/prismaClient'
 import { canjearSobresEnTx, lockGiftCardsForUpdate, operarSobreDeGerenteEnTx, revertirCanjeEnTx } from '@/services/giftCards/giftCardLedger'
 import { GiftCardError } from '@/services/giftCards/giftCardErrors'
 import { operarSobreDeGerente } from '@/services/giftCards/giftCardSurface.service'
+// ⭐ (A4 menor 5): la espera filtra por `pg_blocking_pids` del que tiene el candado (ver la siembra).
+import { esperarAQueAlguienEspereA, pidDe } from './sembrarTarjetasDeRegalo'
 
 jest.setTimeout(60000)
 
@@ -54,29 +56,6 @@ async function sobreActivo(monto: number) {
   return s
 }
 
-/** El proceso de Postgres de ESTA transacción: el que sostiene el candado. */
-async function pidDe(tx: Prisma.TransactionClient): Promise<number> {
-  const [{ pid }] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`
-  return pid
-}
-
-/**
- * Espera a que OTRA sesión esté detenida en el candado del sobre que sostiene `pidQueTiene` (la prueba de que la segunda caja de
- * verdad esperó). ⭐ (A4 menor 5): se filtra por `pg_blocking_pids`, así la espera de otra sesión —otra prueba u otro agente en
- * la misma base— nunca la satisface.
- */
-async function esperarAQueAlguienEspereElSobre(pidQueTiene: number): Promise<void> {
-  for (let i = 0; i < 200; i++) {
-    const [fila] = await prisma.$queryRaw<Array<{ n: bigint }>>`
-      SELECT count(*)::bigint AS n FROM pg_stat_activity
-      WHERE datname = current_database() AND ${pidQueTiene}::int = ANY(pg_blocking_pids(pid))
-        AND query LIKE '%FROM "GiftCard"%FOR UPDATE%'`
-    if (Number(fila.n) > 0) return
-    await new Promise(resolve => setTimeout(resolve, 25))
-  }
-  throw new Error('la segunda caja nunca llegó a esperar el candado del sobre')
-}
-
 describe('libreta de tarjetas de regalo · Postgres real', () => {
   it('🔴 dos cajas cobran $600 del MISMO sobre de $1,000 a la vez: una pasa, la otra recibe «quedan $400» y nada queda negativo', async () => {
     const s = await sobreActivo(1000)
@@ -86,7 +65,7 @@ describe('libreta de tarjetas de regalo · Postgres real', () => {
     const cajaUno = prisma.$transaction(async tx => {
       const cards = await lockGiftCardsForUpdate(tx, [s.id])
       avisarQueTieneCandado()
-      await esperarAQueAlguienEspereElSobre(await pidDe(tx))
+      await esperarAQueAlguienEspereA(await pidDe(tx))
       return canjearSobresEnTx(tx, { venueId, orderId: cuid(), paymentId: cuid(), amount: D(600), cards, staffId })
     }, PRESUPUESTO)
     const cajaDos = cajaUnoTieneElCandado.then(() =>
@@ -250,7 +229,7 @@ describe('libreta de tarjetas de regalo · Postgres real', () => {
     const primera = prisma.$transaction(async tx => {
       await lockGiftCardsForUpdate(tx, [s.id])
       avisarQueTieneCandado()
-      await esperarAQueAlguienEspereElSobre(await pidDe(tx)) // la segunda ya pasó su validación y está detenida en el candado
+      await esperarAQueAlguienEspereA(await pidDe(tx)) // la segunda ya pasó su validación y está detenida en el candado
       return operarSobreDeGerenteEnTx(tx, { venueId, giftCardId: s.id, staffId, operationKey: llave, op })
     }, PRESUPUESTO)
     const segunda = primeraTieneElCandado.then(() =>
@@ -277,7 +256,7 @@ describe('libreta de tarjetas de regalo · Postgres real', () => {
     const primero = prisma.$transaction(async tx => {
       await lockGiftCardsForUpdate(tx, [s.id])
       avisarQueTieneCandado()
-      await esperarAQueAlguienEspereElSobre(await pidDe(tx)) // el segundo ya leyó sus canjes y está detenido en el candado
+      await esperarAQueAlguienEspereA(await pidDe(tx)) // el segundo ya leyó sus canjes y está detenido en el candado
       return revertirCanjeEnTx(tx, { venueId, originalPaymentId: pago, refundPaymentId: cuid(), amount: D(300), staffId })
     }, PRESUPUESTO)
     const segundo = primeroTieneElCandado.then(() =>
@@ -318,7 +297,7 @@ describe('panel · bloquear y desbloquear repetidos con la misma llave', () => {
     const antes = await movimientos(s.id)
 
     await expect(bloquear(s.id, llave)).rejects.toMatchObject({
-      code: 'GIFT_CARD_BLOCKED',
+      code: 'GIFT_CARD_STATE_CHANGED',
       statusCode: 409,
       message:
         'Este bloqueo ya se había registrado, pero la tarjeta cambió después: hoy no está bloqueada. Vuelve a abrirla para ver su estado.',
@@ -337,7 +316,7 @@ describe('panel · bloquear y desbloquear repetidos con la misma llave', () => {
     const antes = await movimientos(s.id)
 
     await expect(desbloquear(s.id, llave)).rejects.toMatchObject({
-      code: 'GIFT_CARD_BLOCKED',
+      code: 'GIFT_CARD_STATE_CHANGED',
       statusCode: 409,
       message:
         'Este desbloqueo ya se había registrado, pero la tarjeta cambió después: hoy no está activa. Vuelve a abrirla para ver su estado.',

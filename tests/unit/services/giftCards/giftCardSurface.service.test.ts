@@ -197,19 +197,19 @@ describe('operaciones de gerente', () => {
     expect([a.replayed, b.replayed].sort()).toEqual([false, true])
   })
 
-  it('⭐ (D4, estado de HOY) repetir un bloqueo o un desbloqueo cuyo estado se movió ⇒ 409 GIFT_CARD_BLOCKED; lo nuevo no relee', async () => {
+  it('⭐ (D4, estado de HOY) repetir un bloqueo o un desbloqueo cuyo estado se movió ⇒ 409 GIFT_CARD_STATE_CHANGED (r1 M2: code propio); lo nuevo no relee', async () => {
     m(operarSobreDeGerenteEnTx).mockResolvedValueOnce({ activityIds: ['a12'], replay: true })
     prismaMock.giftCard.findFirst.mockResolvedValueOnce({ status: 'ACTIVE' })
     await expect(
       operarSobreDeGerente('v1', 'gc1', 's1', { operationKey: 'llave-bloq-3', tipo: 'BLOQUEAR', reason: 'SUSPICIOUS_ACTIVITY' }),
-    ).rejects.toMatchObject({ code: 'GIFT_CARD_BLOCKED', statusCode: 409 })
+    ).rejects.toMatchObject({ code: 'GIFT_CARD_STATE_CHANGED', statusCode: 409 })
     expect(prismaMock.giftCard.findFirst).toHaveBeenLastCalledWith({ where: { id: 'gc1', venueId: 'v1' }, select: { status: true } })
 
     m(operarSobreDeGerenteEnTx).mockResolvedValueOnce({ activityIds: ['a13'], replay: true })
     prismaMock.giftCard.findFirst.mockResolvedValueOnce({ status: 'BLOCKED' })
     await expect(
       operarSobreDeGerente('v1', 'gc1', 's1', { operationKey: 'llave-desb-1', tipo: 'DESBLOQUEAR', reason: 'CUSTOMER_REQUEST' }),
-    ).rejects.toMatchObject({ code: 'GIFT_CARD_BLOCKED', statusCode: 409 })
+    ).rejects.toMatchObject({ code: 'GIFT_CARD_STATE_CHANGED', statusCode: 409 })
 
     prismaMock.giftCard.findFirst.mockClear()
     m(operarSobreDeGerenteEnTx).mockResolvedValueOnce({ activityIds: ['a14'], replay: false })

@@ -24,7 +24,33 @@ function archivosTs(dir: string): string[] {
   })
 }
 
-const ESCRIBE_EL_HISTORIAL = /\bhybridContractSelection\s*\.\s*(create|createMany|upsert)\b|INSERT\s+INTO\s+"HybridContractSelection"/
+/**
+ * Escribe el historial: directo (`hybridContractSelection.create|createMany|createManyAndReturn|upsert`), en SQL crudo, o anidado
+ * en una escritura del contrato (`selections: { create|createMany|connectOrCreate|upsert: … }`). Una lectura anidada
+ * (`selections: { where … }`) no cuenta.
+ */
+const ESCRIBE_EL_HISTORIAL =
+  /\bhybridContractSelection\s*\.\s*(create|createMany|createManyAndReturn|upsert)\b|INSERT\s+INTO\s+"HybridContractSelection"|\bselections\s*:\s*\{\s*(create|createMany|connectOrCreate|upsert)\s*:/
+
+describe('la regex de la guarda (r1 M4: también escrituras anidadas y createManyAndReturn)', () => {
+  it.each([
+    'await tx.hybridContractSelection.create({ data })',
+    'prisma.hybridContractSelection . createMany({ data: filas })',
+    'tx.hybridContractSelection.createManyAndReturn({ data })',
+    'tx.hybridContractSelection.upsert({ where, create, update })',
+    'INSERT INTO "HybridContractSelection" (id) VALUES ($1)',
+    'tx.hybridContract.create({ data: { selections: { create: [{ effectiveAt, featureCodes }] } } })',
+    'tx.hybridContract.update({ where, data: { selections: {\n  createMany: { data: filas } } } })',
+    'data: { selections: { connectOrCreate: { where, create } } }',
+    'data: { selections: { upsert: { where, create, update } } }',
+  ])('la ve: %s', fuente => expect(ESCRIBE_EL_HISTORIAL.test(fuente)).toBe(true))
+
+  it.each([
+    'selections: { where: { effectiveAt: { lt: fin } }, orderBy: { effectiveAt: "desc" }, take: 1 }',
+    'tx.hybridContractSelection.findFirst({ where })',
+    'tx.hybridContractSelection.count({ where })',
+  ])('no confunde una lectura: %s', fuente => expect(ESCRIBE_EL_HISTORIAL.test(fuente)).toBe(false))
+})
 
 describe('historial de selección de contratos híbridos', () => {
   it('sólo la entrega y la puesta al día lo escriben (src y scripts)', () => {

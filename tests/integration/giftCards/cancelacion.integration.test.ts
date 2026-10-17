@@ -34,14 +34,15 @@ import {
   crearCobroConSaldoEnTx,
   crearCuentaDeMercancia,
   crearNegocioDePrueba,
+  esperarAQueAlguienEspereA,
   limpiarEfectosDePagoDelNegocio,
+  pidDe,
   sembrarCanje,
   sembrarVentaDeTarjetas,
 } from './sembrarTarjetasDeRegalo'
 
 jest.setTimeout(60000)
 
-const pausa = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 function barrera() {
   let soltar!: () => void
   const promesa = new Promise<void>(resolve => {
@@ -54,16 +55,6 @@ const resultado = <T>(promesa: Promise<T>) =>
     value => ({ value, error: undefined as unknown }),
     error => ({ value: undefined, error: error as unknown }),
   )
-async function alguienEsperaUnSobre() {
-  for (let intento = 0; intento < 100; intento++) {
-    const [{ count }] = await prisma.$queryRaw<Array<{ count: number }>>`
-      SELECT count(*)::int AS count FROM pg_stat_activity
-      WHERE datname = current_database() AND wait_event_type = 'Lock' AND query ILIKE '%"GiftCard"%'`
-    if (count > 0) return
-    await pausa(20)
-  }
-  throw new Error('Nadie esperó el candado del sobre')
-}
 
 describe('B2 · cancelar la venta de una tarjeta de regalo', () => {
   let venueId: string
@@ -185,9 +176,11 @@ describe('B2 · cancelar la venta de una tarjeta de regalo', () => {
     const { orderId: mercancia } = await crearCuentaDeMercancia({ venueId, staffId, total: 200 })
     const tomado = barrera()
     const soltar = barrera()
+    let pidDelCanje = 0
     const canje = prisma.$transaction(async tx => {
       await lockExistingOrderForPayment(tx, { venueId, orderId: mercancia })
       const cards = await lockGiftCardsForUpdate(tx, v.giftCardIds)
+      pidDelCanje = await pidDe(tx)
       tomado.soltar()
       await soltar.promesa
       const pago = await crearCobroConSaldoEnTx(tx, { venueId, orderId: mercancia, monto: 200, staffId })
@@ -195,7 +188,8 @@ describe('B2 · cancelar la venta de una tarjeta de regalo', () => {
     }, ORDER_LOCK_WAIT_BUDGET)
     await tomado.promesa
     const cancelacion = resultado(iniciarCancelacionDeVenta(venueId, v.orderId, { staffId, operationKey: 'cancelar-concurrente-0001' }))
-    await alguienEsperaUnSobre()
+    // r1 (M1): la cancelación espera el candado de ESTE canje (`pg_blocking_pids`), no el de otra sesión de la base.
+    await esperarAQueAlguienEspereA(pidDelCanje)
     soltar.soltar()
     await canje
     const r = await cancelacion

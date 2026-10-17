@@ -364,7 +364,7 @@ export async function canjearSobresEnTx(
     if (!esUsable(card, ahora) || !card.balance.greaterThan(0)) continue
     const toma = Prisma.Decimal.min(card.balance, falta)
     // ⭐ (A4 menor 3): CAS sobre el saldo LEÍDO bajo el candado, el mismo con que se escribe `balanceAfter`. Si la foto es vieja
-    // (no salió del candado de ESTA transacción), no se escribe un saldo inventado: 409 y se reintenta con la misma llave.
+    // (no salió del candado de ESTA transacción), no se escribe un saldo inventado: 409 y la app reintenta con la misma llave.
     const r = await tx.giftCard.updateMany({
       where: {
         id: card.id,
@@ -377,7 +377,8 @@ export async function canjearSobresEnTx(
     })
     if (r.count !== 1) {
       throw new ConflictError(
-        'El saldo de la tarjeta de regalo cambió mientras se cobraba. Vuelve a intentar con la MISMA llave.',
+        // r1 (M3): lo ve la cajera, sin jerga; la app reintenta con la misma idempotencyKey (contrato § 4).
+        'Otro cobro cambió esta cuenta al mismo tiempo. Intenta otra vez.',
         'ORDER_PAYMENT_CONFLICT',
       )
     }

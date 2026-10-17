@@ -18,6 +18,28 @@ import { payCashOrder } from '@/services/mobile/order.mobile.service'
 const D = (pesos: number) => new Prisma.Decimal(pesos)
 const folio = (prefijo: string) => `${prefijo}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
 
+/** El proceso de Postgres de ESTA transacción: el que sostiene el candado que otra sesión va a esperar. */
+export async function pidDe(tx: Prisma.TransactionClient): Promise<number> {
+  const [{ pid }] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`
+  return pid
+}
+
+/**
+ * Espera a que OTRA sesión esté detenida por un candado que sostiene `pidQueTiene` (la prueba de que la segunda transacción de verdad
+ * esperó, no la suerte de un `setTimeout`). Se filtra por `pg_blocking_pids`, así la espera de otra prueba o de otro agente en la misma
+ * base nunca la satisface. Lanza si nadie llega a esperar en ~5 s.
+ */
+export async function esperarAQueAlguienEspereA(pidQueTiene: number): Promise<void> {
+  for (let i = 0; i < 200; i++) {
+    const [fila] = await prisma.$queryRaw<Array<{ n: bigint }>>`
+      SELECT count(*)::bigint AS n FROM pg_stat_activity
+      WHERE datname = current_database() AND ${pidQueTiene}::int = ANY(pg_blocking_pids(pid))`
+    if (Number(fila.n) > 0) return
+    await new Promise(resolve => setTimeout(resolve, 25))
+  }
+  throw new Error(`Nadie llegó a esperar el candado que sostiene el proceso ${pidQueTiene}`)
+}
+
 /** Un negocio propio (organización, sucursal y un cajero) con nombres únicos: ninguna limpieza por nombre de otra suite lo toca. */
 export async function crearNegocioDePrueba(prefijo: string): Promise<{ organizationId: string; venueId: string; staffId: string }> {
   const suf = folio(`${prefijo}-${process.pid}`)

@@ -38,7 +38,9 @@ import { logAction } from '@/services/dashboard/activity-log.service'
 import { avisarOrdenCancelada } from '@/services/shared/orderCancelGuard'
 import {
   crearNegocioDePrueba,
+  esperarAQueAlguienEspereA,
   limpiarEfectosDePagoDelNegocio,
+  pidDe,
   sembrarCanje,
   sembrarVentaDeTarjetas,
   sembrarVentaDeTarjetasSinPagar,
@@ -294,17 +296,21 @@ describe('B1 · reembolsos con tarjetas de regalo', () => {
       amount: new Prisma.Decimal(100),
       staffId,
     }
-    const espera = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
     // El primero escribe su reverso y SOSTIENE el candado sin confirmar; el segundo pasa la primera lectura (vacía) y espera.
+    // r1 (M1): el primero no confirma hasta que el segundo esté DETENIDO en su candado (`pg_blocking_pids`), no por tiempo: así la
+    // prueba siempre ejerce la carrera que cubre la segunda lectura bajo candado.
+    let avisarQueTieneElCandado!: () => void
+    const primeroTieneElCandado = new Promise<void>(resolve => (avisarQueTieneElCandado = resolve))
     const primero = prisma.$transaction(
       async tx => {
         const hecho = await revertirCanjeEnTx(tx, entrada)
-        await espera(1500)
+        avisarQueTieneElCandado()
+        await esperarAQueAlguienEspereA(await pidDe(tx))
         return hecho
       },
       { timeout: 20_000, maxWait: 5_000 },
     )
-    await espera(300)
+    await primeroTieneElCandado
     const segundo = prisma.$transaction(tx => revertirCanjeEnTx(tx, entrada), { timeout: 20_000, maxWait: 5_000 })
     const [a, b] = await Promise.all([primero, segundo])
 

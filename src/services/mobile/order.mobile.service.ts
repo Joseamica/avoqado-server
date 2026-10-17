@@ -4020,7 +4020,8 @@ export async function payGiftCardBalanceOnOrder(
     if (err?.code === 'P2002' || err instanceof CobroYaRegistrado) throw conflicto()
     if (err?.code === 'PAY_CASH_CAS_LOST') {
       throw new ConflictError(
-        'La cuenta cambió mientras se cobraba con saldo. Vuelve a intentar con la MISMA llave.',
+        // r1 (M3): lo ve la cajera, sin jerga; la app reintenta con la misma idempotencyKey (contrato § 4).
+        'Otro cobro cambió esta cuenta al mismo tiempo. Intenta otra vez.',
         'ORDER_PAYMENT_CONFLICT',
       )
     }

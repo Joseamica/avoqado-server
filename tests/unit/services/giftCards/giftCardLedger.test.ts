@@ -166,7 +166,8 @@ describe('canjearSobresEnTx', () => {
     await expect(canjearSobresEnTx(prismaMock, { ...base, amount: D(100), cards: [sobre()] })).rejects.toMatchObject({
       code: 'ORDER_PAYMENT_CONFLICT',
       statusCode: 409,
-      message: 'El saldo de la tarjeta de regalo cambió mientras se cobraba. Vuelve a intentar con la MISMA llave.',
+      // r1 (M3): lo ve la cajera: sin jerga («llave»).
+      message: 'Otro cobro cambió esta cuenta al mismo tiempo. Intenta otra vez.',
     })
     expect(prismaMock.giftCard.updateMany.mock.calls[0][0].where.balance).toEqual(D(1000))
     expect(prismaMock.giftCardActivity.create).not.toHaveBeenCalled()

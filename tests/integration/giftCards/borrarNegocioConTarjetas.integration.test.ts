@@ -14,7 +14,13 @@ import { cleanDemoData } from '@/services/onboarding/demoCleanup.service'
 // `integration-setup.ts` mockea la bitácora (fire-and-forget): se comprueba la llamada, no la fila.
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { encryptGiftCardCode, generateGiftCardCode, generateOpaqueToken, hashGiftCardCode } from '@/services/giftCards/giftCardCode'
-import { crearCuentaDeMercancia, crearNegocioDePrueba, sembrarVentaDeTarjetas } from './sembrarTarjetasDeRegalo'
+import {
+  crearCuentaDeMercancia,
+  crearNegocioDePrueba,
+  esperarAQueAlguienEspereA,
+  pidDe,
+  sembrarVentaDeTarjetas,
+} from './sembrarTarjetasDeRegalo'
 
 jest.mock('@/services/modules/module.service', () => ({
   ...jest.requireActual('@/services/modules/module.service'),
@@ -136,6 +142,46 @@ describe('convertDemoVenue × tarjetas de regalo (limpieza del demo)', () => {
       expect.objectContaining({ staffId: n.staffId, entity: 'Venue', entityId: n.venueId, data: { reason: 'GIFT_CARDS' } }),
       expect.objectContaining({ staffId: n.staffId, entity: 'Venue', entityId: n.venueId, data: { reason: 'GIFT_CARDS' } }),
     ])
+  })
+
+  it('🔴 r1 (R2) una tarjeta que se vende MIENTRAS corre la limpieza: la limpieza espera esa venta y después no borra nada', async () => {
+    const n = await crearNegocioDePrueba('demo-carrera')
+    await crearCuentaDeMercancia({ venueId: n.venueId, staffId: n.staffId, total: 80 })
+    await prisma.venue.update({ where: { id: n.venueId }, data: { status: 'TRIAL' } })
+    const antes = await cuentas(n.venueId)
+    let avisarQueEmpezo!: () => void
+    const ventaEmpezada = new Promise<void>(resolve => (avisarQueEmpezo = resolve))
+    // La venta inserta su sobre (la llave foránea toma la fila del negocio en KEY SHARE) y NO confirma hasta que la limpieza esté
+    // detenida en esa fila (`pg_blocking_pids`, no por tiempo).
+    const venta = prisma.$transaction(
+      async tx => {
+        const c = generateGiftCardCode()
+        await tx.giftCard.create({
+          data: {
+            venueId: n.venueId,
+            organizationId: n.organizationId,
+            codeHash: hashGiftCardCode(c.normalized),
+            codeEnc: encryptGiftCardCode(c.normalized),
+            codeLast4: c.last4,
+            pageToken: generateOpaqueToken(),
+            initialAmount: new Prisma.Decimal(300),
+            balance: new Prisma.Decimal(0),
+            status: 'PENDING',
+            termsVersion: '2026-10-14',
+            deliveryChannel: 'PRINTED',
+          },
+        })
+        avisarQueEmpezo()
+        await esperarAQueAlguienEspereA(await pidDe(tx))
+      },
+      { timeout: 20_000, maxWait: 5_000 },
+    )
+    await ventaEmpezada
+    const [ventaHecha, limpieza] = await Promise.allSettled([venta, cleanDemoData(n.venueId, n.staffId)])
+
+    expect(ventaHecha.status).toBe('fulfilled')
+    expect(limpieza).toMatchObject({ status: 'fulfilled', value: { skippedReason: 'GIFT_CARDS', deletedOrders: 0 } })
+    expect(await cuentas(n.venueId)).toEqual(antes)
   })
 
   it('sin tarjetas, la limpieza borra las cuentas del demo como hoy y la conversión sigue', async () => {
