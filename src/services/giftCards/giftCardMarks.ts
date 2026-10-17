@@ -22,6 +22,23 @@ export async function leerSiEsCuentaDeTarjetas(db: Prisma.TransactionClient | Pr
 
 export const WHERE_ORDEN_DE_TARJETAS = { items: { some: { giftCardId: { not: null } } } } satisfies Prisma.OrderWhereInput
 
+/**
+ * La marca R11 COMPLETA dentro de un `select` de `Order` (⭐ B6 M2 del cierre): un renglón con tarjeta (`take: 1`) y cuántos hay SIN
+ * ella. Una sola lectura, sin consulta nueva, para quien decide dinero o premios sobre la orden que ya está leyendo. Se lee con
+ * `esCuentaDeTarjetasSeleccionada`.
+ */
+export const SELECT_MARCA_DE_CUENTA_DE_TARJETAS = {
+  items: { where: { giftCardId: { not: null } }, select: { id: true }, take: 1 },
+  _count: { select: { items: { where: { giftCardId: null } } } },
+} satisfies Prisma.OrderSelect
+
+/** El gemelo en memoria de `leerSiEsCuentaDeTarjetas` sobre `SELECT_MARCA_DE_CUENTA_DE_TARJETAS`. Sin `_count`, la media regla. */
+export function esCuentaDeTarjetasSeleccionada(
+  orden: { items?: ReadonlyArray<unknown> | null; _count?: { items?: number | null } | null } | null | undefined,
+): boolean {
+  return (orden?.items?.length ?? 0) > 0 && (orden?._count?.items ?? 0) === 0
+}
+
 export const WHERE_ORDEN_SIN_TARJETAS = { items: { none: { giftCardId: { not: null } } } } satisfies Prisma.OrderWhereInput
 
 /**

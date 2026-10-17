@@ -100,6 +100,8 @@ const base = {
   refundPaymentId: 'ref-1',
   amount: new Prisma.Decimal('200'),
   staffId: 's1',
+  // A1 (cierre): por omisión el reembolso devuelve el cobro entero; los casos parciales lo dicen.
+  devuelveTodoElCobro: true,
 }
 
 beforeEach(() => jest.clearAllMocks())
@@ -322,6 +324,53 @@ describe('alRegistrarReembolsoEnTx', () => {
     // No es la salida de «venta sin pagar»: la cuenta no se cancela aquí ni se tocan sobres PENDING.
     expect(tx.order.updateMany).not.toHaveBeenCalled()
     expect(desactivarSobresPendientesDeCuentaEnTx).not.toHaveBeenCalled()
+  })
+
+  describe('A1 (cierre): con la cancelación en curso, una devolución PARCIAL del cobro', () => {
+    const enCurso = () =>
+      txFalso({
+        esDeTarjetas: true,
+        sobres: [
+          { id: 'gc1', status: 'BLOCKED' },
+          { id: 'gc2', status: 'BLOCKED' },
+        ],
+        bloqueos: [
+          { giftCardId: 'gc1', type: 'BLOCK', reason: 'CANCEL_IN_PROGRESS' },
+          { giftCardId: 'gc2', type: 'BLOCK', reason: 'CANCEL_IN_PROGRESS' },
+        ],
+      })
+
+    it('🔴 desde el panel ⇒ 409 GIFT_CARD_SALE_REFUND_MUST_BE_FULL y ningún sobre se toca', async () => {
+      const tx = enCurso()
+      await expect(
+        alRegistrarReembolsoEnTx(tx, { ...base, devuelveTodoElCobro: false, original: { orderId: 'o-gc', tenderSystemKind: null } }),
+      ).rejects.toMatchObject({
+        statusCode: 409,
+        code: 'GIFT_CARD_SALE_REFUND_MUST_BE_FULL',
+        message: 'La venta de tarjetas se devuelve completa: reembolsa el cobro entero.',
+      })
+      expect(desactivarSobresDeCuentaEnTx).not.toHaveBeenCalled()
+      expect(recordGiftCardAnomaly).not.toHaveBeenCalled()
+    })
+
+    it('🔴 desde la terminal (el dinero YA salió, E1) no se rechaza: desactiva y la anomalía dice `parcial`', async () => {
+      const tx = enCurso()
+      ;(lockGiftCardsForUpdate as jest.Mock).mockResolvedValueOnce([
+        bloqueado('gc1', 'BLOCKED', 300, 300),
+        bloqueado('gc2', 'BLOCKED', 200, 200),
+      ])
+      await alRegistrarReembolsoEnTx(tx, {
+        ...base,
+        devuelveTodoElCobro: false,
+        dineroYaDevuelto: true,
+        original: { orderId: 'o-gc', tenderSystemKind: null },
+      })
+      expect(desactivarSobresDeCuentaEnTx).toHaveBeenCalledWith(tx, expect.objectContaining({ dineroYaDevuelto: true }))
+      expect(recordGiftCardAnomaly).toHaveBeenCalledWith(
+        tx,
+        expect.objectContaining({ check: 'REFUND_WITHOUT_CANCEL', detail: expect.objectContaining({ monto: '200', parcial: true }) }),
+      )
+    })
   })
 
   it('🔴 R2: la terminal (dinero ya devuelto) con la cancelación iniciada ⇒ la desactivación normal, sin E1 ni anomalía', async () => {

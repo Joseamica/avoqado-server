@@ -33,7 +33,7 @@ import { getIvaCashflow } from '@/services/fiscal/ivaFlujo.service'
 import {
   crearCuentaDeMercancia,
   crearNegocioDePrueba,
-  limpiarEfectosDePagoDelNegocio,
+  limpiarNegocioDePrueba,
   sembrarCanje,
   sembrarVentaDeTarjetas,
 } from './sembrarTarjetasDeRegalo'
@@ -101,7 +101,7 @@ afterAll(async () => {
   await prisma.journalEntry.deleteMany({ where: { organizationId, rfc } }).catch(() => undefined)
   await prisma.accountMapping.deleteMany({ where: { organizationId, rfc } }).catch(() => undefined)
   await prisma.ledgerAccount.deleteMany({ where: { organizationId, rfc } }).catch(() => undefined)
-  await limpiarEfectosDePagoDelNegocio(venueId)
+  await limpiarNegocioDePrueba(venueId)
 })
 
 describe('contabilidad de tarjetas de regalo · Postgres real', () => {
@@ -213,7 +213,7 @@ describe('contabilidad de tarjetas de regalo · Postgres real', () => {
         undefined,
       ])
     } finally {
-      await limpiarEfectosDePagoDelNegocio(otro.venueId)
+      await limpiarNegocioDePrueba(otro.venueId)
     }
   })
 })
@@ -308,7 +308,7 @@ describe('B4 r1 (fix 3) · WHERE_PAGO_CONTABILIZABLE = lo que el motor admite ·
     await prisma.journalEntry.deleteMany({ where: { organizationId: org2, rfc: rfc2 } }).catch(() => undefined)
     await prisma.accountMapping.deleteMany({ where: { organizationId: org2, rfc: rfc2 } }).catch(() => undefined)
     await prisma.ledgerAccount.deleteMany({ where: { organizationId: org2, rfc: rfc2 } }).catch(() => undefined)
-    await limpiarEfectosDePagoDelNegocio(v2)
+    await limpiarNegocioDePrueba(v2)
   })
 
   it('🔴 las mismas filas, por `isEligible` (sobre la consulta del motor) y por el fragmento: el mismo conjunto, el esperado', async () => {

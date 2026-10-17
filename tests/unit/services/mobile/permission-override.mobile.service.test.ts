@@ -321,6 +321,21 @@ describe('consumePermissionOverride', () => {
     })
   })
 
+  it('🔴 A3 (cierre): consumedRoute se guarda SIN query string (un código de tarjeta en la URL no llega a la base)', async () => {
+    ;(prisma.permissionOverride.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
+    ;(prisma.permissionOverride.findUnique as jest.Mock).mockResolvedValue({ authorizedById: 'sv_manager' })
+    await consumePermissionOverride({
+      token: 'tok_q',
+      venueId: VENUE,
+      permission: 'giftCards:read',
+      route: 'GET /api/v1/mobile/venues/v1/gift-cards/lookup?code=K7QZ-ABCD-EFGH-JKMN-P',
+      now: NOW,
+    })
+    expect((prisma.permissionOverride.updateMany as jest.Mock).mock.calls[0][0].data.consumedRoute).toBe(
+      'GET /api/v1/mobile/venues/v1/gift-cards/lookup',
+    )
+  })
+
   it('🔴 segundo consumo del MISMO token → null (count 0 = otro ganó la carrera)', async () => {
     ;(prisma.permissionOverride.updateMany as jest.Mock).mockResolvedValue({ count: 0 })
     const result = await consumePermissionOverride({

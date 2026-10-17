@@ -21,6 +21,7 @@ import prisma from '@/utils/prismaClient'
 import { createGiftCardOrder } from '@/services/giftCards/giftCardOrder.service'
 import { applyOrderDiscount, cancelOrder } from '@/services/mobile/order.mobile.service'
 import { deleteOrder, updateOrder } from '@/services/dashboard/order.dashboard.service'
+import { limpiarNegocioDePrueba } from './sembrarTarjetasDeRegalo'
 
 jest.setTimeout(60000)
 
@@ -35,6 +36,11 @@ beforeAll(async () => {
   staffId = (await prisma.staff.create({ data: { email: `${SUF}@staff.test`, firstName: 'Caja', lastName: 'QA', active: true } })).id
   await prisma.staffVenue.create({ data: { staffId, venueId, role: 'CASHIER', active: true } })
   await prisma.giftCardSettings.create({ data: { venueId, enabled: true, suggestedAmounts: [500, 1000, 2000] } })
+})
+
+// Cierre (punto 16): sus órdenes no se quedan en la base desechable para el barrido de otras suites.
+afterAll(async () => {
+  await limpiarNegocioDePrueba(venueId)
 })
 
 const venta = (llave: string, montos: number[]) =>

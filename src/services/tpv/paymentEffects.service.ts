@@ -4,6 +4,7 @@ import prisma from '@/utils/prismaClient'
 import { utcTs } from '@/utils/sqlDates'
 import { retry, shouldRetryDbConnectionError } from '@/utils/retry'
 import logger from '@/config/logger'
+import { SELECT_MARCA_DE_CUENTA_DE_TARJETAS, esCuentaDeTarjetasSeleccionada } from '@/services/giftCards/giftCardMarks'
 
 export type PaymentEffectKind = 'REVIEW' | 'RECEIPT' | 'REFERRAL' | 'COMMISSION' | 'TRANSACTION_COST'
 export type PaymentEffectInput = {
@@ -62,20 +63,17 @@ export async function enqueuePaymentEffect(tx: Prisma.TransactionClient, input: 
     orderId: input.orderId ?? undefined,
     status: 'COMPLETED',
   } satisfies Prisma.PaymentWhereInput
-  // Tarjetas de regalo (R1): la marca de la cuenta viaja en esta MISMA lectura (un renglón con `giftCardId` basta: no se mezclan), y
-  // sólo para comisión y referido: sin `relationJoins` son 2 SQL más dentro de la transacción del cobro (con el FOR UPDATE tomado).
-  const source: { orderId: string; order?: { items?: Array<{ id: string }> } } | null = premiaVenta
-    ? await tx.payment.findFirst({
-        where,
-        select: { orderId: true, order: { select: { items: { where: { giftCardId: { not: null } }, select: { id: true }, take: 1 } } } },
-      })
+  // Tarjetas de regalo (R1): la marca COMPLETA de la cuenta (⭐ B6 M2: con tarjeta y sin renglones sin ella) viaja en esta MISMA
+  // lectura, y sólo para comisión y referido: sin `relationJoins` son SQL de más dentro de la transacción del cobro (con el FOR UPDATE).
+  const source: { orderId: string; order?: { items?: Array<{ id: string }>; _count?: { items?: number } } } | null = premiaVenta
+    ? await tx.payment.findFirst({ where, select: { orderId: true, order: { select: SELECT_MARCA_DE_CUENTA_DE_TARJETAS } } })
     : await tx.payment.findFirst({ where, select: { orderId: true } })
   if (!source || source.orderId !== input.orderId) throw new Error('PAYMENT_EFFECT_SOURCE_MISMATCH')
   // R1 (tarjetas de regalo): VENDER tarjetas no genera comisión ni califica referidos, así que tampoco tiene reversas. Aquí pasan todas
   // esas obligaciones —la comisión congelada de cada cobro, el referido y las reversas de una devolución—. Usar la tarjeta sí comisiona:
   // la cuenta de mercancía pagada con saldo no es de tarjetas.
   // r1 (lote ⭐): el `?.` de `items` NO sobra: el reembolso de la TPV llega con `order` sin `items`.
-  if (premiaVenta && (source.order?.items?.length ?? 0) > 0) return
+  if (premiaVenta && esCuentaDeTarjetasSeleccionada(source.order)) return
   await tx.paymentEffect.createMany({ data: [{ ...input, version: 1 }], skipDuplicates: true })
 }
 

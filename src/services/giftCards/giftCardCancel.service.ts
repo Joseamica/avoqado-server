@@ -65,6 +65,13 @@ export interface AlRegistrarReembolsoInput {
    * sin asiento y el sobre vivo: se desactiva y queda una anomalía para revisar.
    */
   dineroYaDevuelto?: boolean
+  /**
+   * A1 (cierre): con ESTE reembolso, ¿el cobro original queda devuelto por completo (venta + propina, nada pendiente)? Lo calcula el
+   * llamador bajo el candado del cobro, con la misma aritmética con que valida lo reembolsable. Una venta de tarjetas con la
+   * cancelación en curso sólo se devuelve completa: una parte desactivaría TODAS sus tarjetas y el negocio se quedaría con dinero sin
+   * respaldo.
+   */
+  devuelveTodoElCobro: boolean
   /** Si el llamador ya lo leyó bajo su candado, no se vuelve a leer. */
   original?: CobroOriginalDeTarjetas
 }
@@ -322,7 +329,18 @@ async function devolverVentaDeTarjetasEnTx(tx: Tx, p: AlRegistrarReembolsoInput,
   // motivo vigente se lee bajo el candado de los sobres que ya tomó esta tx; sólo se consulta si todos están BLOCKED. Con un canje
   // que se coló, o un sobre bloqueado por otro motivo, sigue abajo (ALREADY_USED / CANCEL_NOT_STARTED / E1 de la terminal).
   if (canjes === 0 && sobres.length > 0 && sobres.every(s => s.status === 'BLOCKED')) {
-    if (todosEnCancelacion(sobres, await motivosDeBloqueoVigentes(tx, ids))) {
+    // A1 (cierre): la cancelación en curso sólo termina con el cobro devuelto COMPLETO (con varios cobros, cada uno completo: la
+    // revisión nocturna avisa si falta uno). Desde el panel una parte se rechaza ANTES de tocar un sobre; desde la terminal el dinero
+    // YA salió (E1): no se rechaza, sigue abajo y la anomalía dice `parcial`.
+    const enCancelacion = todosEnCancelacion(sobres, await motivosDeBloqueoVigentes(tx, ids))
+    if (enCancelacion && !p.devuelveTodoElCobro && !p.dineroYaDevuelto) {
+      throw new GiftCardError(
+        'GIFT_CARD_SALE_REFUND_MUST_BE_FULL',
+        'La venta de tarjetas se devuelve completa: reembolsa el cobro entero.',
+        409,
+      )
+    }
+    if (enCancelacion && p.devuelveTodoElCobro) {
       await desactivarSobresDeCuentaEnTx(tx, {
         venueId: p.venueId,
         orderId,
@@ -590,6 +608,39 @@ export async function estadoDeCancelacionDeVenta(venueId: string, orderId: strin
 }
 
 /**
+ * A2 (cierre): abrir en la TERMINAL la devolución de un cobro de una venta de tarjetas PAGADA exige su cancelación iniciada (R2), como
+ * el panel: sin ella la terminal devolvería el dinero y el gancho (`dineroYaDevuelto`, E1) sólo podría apagar las tarjetas y dejar
+ * una anomalía. Un solo punto para la ruta del POS (`POST /terminals/:terminalId/refund-request`) y el MCP `refund_card_on_terminal`.
+ * El rechazo es el de la regla única (`evaluarCancelacionDeVenta`): sin iniciar, ya usada, otro día o una tarjeta bloqueada por otro
+ * motivo. No frena lo que el gancho acepta SIN cancelación: el abono de una venta sin pagar (r1, fix 1) o pagada con TODOS sus sobres
+ * PENDING (B1 r2), y el otro cobro de una venta ya cancelada (todos DEACTIVATED): frenarlos dejaría ese dinero sin salida.
+ */
+export async function exigirCancelacionParaDevolverEnTerminal(venueId: string, orderId: string): Promise<void> {
+  if (!(await leerSiEsCuentaDeTarjetas(prisma, orderId))) return
+  const ids = await sobresDeLaCuenta(prisma, orderId)
+  const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
+  if (!venue || ids.length === 0) return
+  const e = await evaluarCancelacionDeVenta(prisma, {
+    venueId,
+    orderId,
+    ids,
+    timezone: venue.timezone || DEFAULT_TIMEZONE,
+    ahora: new Date(),
+  })
+  if (e.reason === 'IN_PROGRESS') return
+  const todos = (estado: GiftCardStatus) => e.sobres.length > 0 && e.sobres.every(s => s.status === estado)
+  if (todos('PENDING') || todos('DEACTIVATED')) return
+  throw (
+    e.error ??
+    new GiftCardError(
+      'GIFT_CARD_CANCEL_NOT_STARTED',
+      'Para devolver la venta de una tarjeta de regalo primero inicia su cancelación en Tarjetas de regalo › Cancelar venta.',
+      409,
+    )
+  )
+}
+
+/**
  * Paso 1 de cancelar la venta (spec §5.6): bloquea TODOS sus sobres con `CANCEL_IN_PROGRESS` ANTES de pedir el reembolso real, así
  * nadie puede gastarlos mientras se devuelve el dinero. Bajo el candado: mismo día del cobro (zona del venue) y ningún `REDEEM`.
  * Idempotente por `operationKey` (una llave derivada por sobre, `claveDeSobre`): el reintento con la misma llave no escribe nada
@@ -715,6 +766,14 @@ export async function liberarCancelacionDeVenta(
       return []
     }
     const motivos = await motivosDeBloqueoVigentes(tx, ids)
+    // Codex #7 (cierre): liberar saltándose una tarjeta bloqueada por OTRO motivo respondía éxito y el panel anunciaba «se pueden usar».
+    if (filas.some(f => f.status === 'BLOCKED' && motivos.get(f.id) !== GiftCardReason.CANCEL_IN_PROGRESS)) {
+      throw new GiftCardError(
+        'GIFT_CARD_BLOCKED',
+        'Una tarjeta de esta venta está bloqueada por otro motivo; revísala antes de liberar.',
+        409,
+      )
+    }
     const hechas: string[] = []
     for (const id of ids) {
       if (repetidos.has(id) || estado.get(id) !== 'BLOCKED' || motivos.get(id) !== GiftCardReason.CANCEL_IN_PROGRESS) continue

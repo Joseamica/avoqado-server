@@ -53,14 +53,22 @@ export async function crearNegocioDePrueba(prefijo: string): Promise<{ organizat
 }
 
 /**
- * Aislamiento (B1 r1, fix 7): los cobros y reembolsos de una prueba encolan `PaymentEffect`, y un worker que barre TODA la base
- * (p. ej. `webhookPrimerConfirmador.costoReal`) los reclamaría como suyos. Se borran SÓLO los del negocio de la prueba, en su
- * `afterAll`. La libreta (`GiftCardActivity`) nunca se toca.
+ * Aislamiento, en el `afterAll` de cada suite y SÓLO del negocio de la prueba:
+ * - B1 r1 (fix 7): los cobros y reembolsos encolan `PaymentEffect`, y un worker que barre TODA la base (p. ej.
+ *   `webhookPrimerConfirmador.costoReal`) los reclamaría como suyos.
+ * - Cierre (punto 16): sus ÓRDENES (con sus cobros, renglones y asignaciones, en cascada). Cada corrida dejaba ~8 «pagadas pero
+ *   abiertas», y el barrido de otras suites (`area-ticket-v7-venta-cerrada` lee las 50 más viejas de TODA la base) nunca llegaba a la
+ *   suya. Las FK `Restrict` hacia la orden se borran antes; la libreta (`GiftCardActivity`, sólo inserción) y los sobres se quedan: sus
+ *   `orderId`/`paymentId` son referencias blandas.
+ * 🔴 Sin negocio no se borra NADA: un filtro con `venueId` vacío borraría tablas enteras.
  */
-export async function limpiarEfectosDePagoDelNegocio(venueId: string): Promise<number> {
-  if (!venueId) return 0
-  const r = await prisma.paymentEffect.deleteMany({ where: { venueId } })
-  return r.count
+export async function limpiarNegocioDePrueba(venueId: string): Promise<void> {
+  if (!venueId) return
+  await prisma.paymentEffect.deleteMany({ where: { venueId } })
+  await prisma.paymentAllocation.deleteMany({ where: { order: { venueId } } })
+  await prisma.orderItemSelloIva.deleteMany({ where: { orderItem: { order: { venueId } } } })
+  await prisma.cfdiGlobalOrden.deleteMany({ where: { order: { venueId } } })
+  await prisma.order.deleteMany({ where: { venueId } })
 }
 
 /** Un sobre PENDING por monto, cada uno con su renglón en la cuenta (R11: productId nulo, NO_OBJETO, cantidad 1). */

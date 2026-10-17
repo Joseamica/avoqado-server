@@ -28,7 +28,13 @@ export { esCuentaDeTarjetas, rechazarSiEsCuentaDeTarjetas } from './cuentaDeTarj
 
 const LLAVE = /^[A-Za-z0-9_-]{8,64}$/
 const CANALES_FASE_1A = new Set<string>(['WHATSAPP', 'EMAIL', 'PRINTED', 'HANDED_TO_BUYER'])
-const FUENTES = new Set<string>(['AVOQADO_ANDROID', 'AVOQADO_IOS', 'TPV', 'POS'])
+/**
+ * C1 (cierre): NUNCA `POS`. `source = POS` + `externalId` es la marca de una cuenta integrada de SoftRestaurant
+ * (`cierreDelCobroSaldaLaCuenta`): cobrada en la terminal, su cierre —y con él la activación de los sobres— sería de SoftRestaurant.
+ */
+const FUENTES = new Set<string>(['AVOQADO_ANDROID', 'AVOQADO_IOS', 'TPV'])
+/** Sin `source` (o con uno que ya no se acepta), la fuente autónoma de los otros creadores de cuentas propias del POS (vales). */
+const FUENTE_POR_OMISION = 'AVOQADO_ANDROID'
 const TELEFONO = /^\+?\d{10,15}$/
 const CORREO = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 const LINEA = 'Tarjeta de regalo'
@@ -36,7 +42,7 @@ const LINEA = 'Tarjeta de regalo'
 export interface CreateGiftCardOrderInput {
   /** UUID que el POS genera UNA vez por venta y reenvía en cada reintento (8–64 caracteres). */
   idempotencyKey: string
-  source?: 'AVOQADO_ANDROID' | 'AVOQADO_IOS' | 'TPV' | 'POS'
+  source?: 'AVOQADO_ANDROID' | 'AVOQADO_IOS' | 'TPV'
   purchaserName?: string | null
   purchaserContact?: string | null
   sobres: Array<{
@@ -265,7 +271,7 @@ export async function createGiftCardOrder(
     const c = generateGiftCardCode()
     return { ...c, hash: hashGiftCardCode(c.normalized), enc: encryptGiftCardCode(c.normalized), pageToken: generateOpaqueToken() }
   })
-  const fuente = (input.source && FUENTES.has(input.source) ? input.source : 'POS') as OrderSource
+  const fuente = (input.source && FUENTES.has(input.source) ? input.source : FUENTE_POR_OMISION) as OrderSource
 
   try {
     const cuenta = await prisma.$transaction(

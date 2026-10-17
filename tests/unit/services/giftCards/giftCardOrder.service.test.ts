@@ -19,6 +19,7 @@ import { Prisma } from '@prisma/client'
 import { assertGiftCardsSellable } from '@/services/giftCards/giftCardSettings.service'
 import { createGiftCardOrder } from '@/services/giftCards/giftCardOrder.service'
 import { encryptGiftCardCode, generateGiftCardCode, normalizeGiftCardCode } from '@/services/giftCards/giftCardCode'
+import { cierreDelCobroSaldaLaCuenta } from '@/services/shared/orderBalance'
 import { prismaMock } from '../../../__helpers__/setup'
 
 const VENUE = 'venue-1'
@@ -130,6 +131,18 @@ describe('createGiftCardOrder', () => {
       recipientPhone: '5512345678',
       message: '¡Feliz cumpleaños!',
     })
+  })
+
+  it('🔴 C1 (cierre): la cuenta NUNCA nace POS — sin source (o con POS de una app vieja) es AVOQADO_ANDROID, autónoma', async () => {
+    await createGiftCardOrder(VENUE, 'staff-1', pedido())
+    await createGiftCardOrder(VENUE, 'staff-1', pedido({ source: 'POS' }))
+    await createGiftCardOrder(VENUE, 'staff-1', pedido({ source: 'AVOQADO_IOS' }))
+    const fuentes = prismaMock.order.create.mock.calls.map(([a]: any) => a.data.source)
+    expect(fuentes).toEqual(['AVOQADO_ANDROID', 'AVOQADO_ANDROID', 'AVOQADO_IOS'])
+    // `externalId` se queda (deduplica), y con una fuente autónoma el cierre del cobro sigue siendo SU dueño (activa los sobres).
+    for (const [{ data }] of prismaMock.order.create.mock.calls as any[]) {
+      expect(cierreDelCobroSaldaLaCuenta({ source: data.source, externalId: data.externalId, items: [] })).toBe(true)
+    }
   })
 
   it('la cuenta: externalId giftcard:<llave>, sin IVA, una línea NO_OBJETO sin producto por sobre, total = suma', async () => {

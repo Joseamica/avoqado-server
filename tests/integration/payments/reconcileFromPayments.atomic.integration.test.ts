@@ -399,7 +399,7 @@ describe('Codex r6 #1: reasignar un cobro a una cancelada con IVA aparte, con la
           select: { id: true, status: true, type: true, amount: true, tipAmount: true },
           take: 10,
         },
-        items: { select: { areaTicketLineId: true }, take: 10 },
+        items: { select: { areaTicketLineId: true, giftCardId: true }, take: 10 },
       },
     })
     return {
@@ -423,7 +423,7 @@ describe('Codex r6 #1: reasignar un cobro a una cancelada con IVA aparte, con la
     }
   }
   async function cobroFoto(paymentId: string, db: Prisma.TransactionClient | typeof prisma = prisma): Promise<CobroFoto> {
-    const p = await db.payment.findUniqueOrThrow({ where: { id: paymentId } })
+    const p = await db.payment.findUniqueOrThrow({ where: { id: paymentId }, include: { tenderType: { select: { systemKind: true } } } })
     return {
       id: p.id,
       venueId: p.venueId,
@@ -434,6 +434,7 @@ describe('Codex r6 #1: reasignar un cobro a una cancelada con IVA aparte, con la
       tipAmount: p.tipAmount,
       shiftId: p.shiftId,
       createdAt: p.createdAt,
+      tenderSystemKind: p.tenderType?.systemKind ?? null,
     }
   }
   let estadoAlGuardar: string[] = []

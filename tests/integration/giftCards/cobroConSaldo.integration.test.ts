@@ -32,7 +32,7 @@ import { lockGiftCardsForUpdate, operarSobreDeGerenteEnTx, revertirCanjeEnTx } f
 import { ensureGiftCardTender } from '@/services/giftCards/giftCardTender'
 import { payCashOrder, payGiftCardBalanceOnOrder, returnGiftBalanceAndCancelOrder } from '@/services/mobile/order.mobile.service'
 import { writeRefundInTx } from '@/services/shared/writeRefundInTx'
-import { limpiarEfectosDePagoDelNegocio } from './sembrarTarjetasDeRegalo'
+import { limpiarNegocioDePrueba } from './sembrarTarjetasDeRegalo'
 
 jest.setTimeout(90000)
 
@@ -57,7 +57,7 @@ beforeAll(async () => {
 // B1 r1 (fix 7): los `PaymentEffect` de ESTE negocio no se quedan para el worker de otra suite que barre toda la base.
 // La libreta (`GiftCardActivity`) nunca se borra.
 afterAll(async () => {
-  await limpiarEfectosDePagoDelNegocio(venueId)
+  await limpiarNegocioDePrueba(venueId)
 })
 
 /** Un sobre ACTIVE con su código real y su ACTIVATE (saldo = suma de la libreta). */
@@ -512,4 +512,49 @@ describe('cobro con saldo · Postgres real', () => {
     expect(await huella()).toEqual(antes)
     expect((await prisma.order.findUniqueOrThrow({ where: { id: orderId } })).status).toBe('CANCELLED')
   })
+
+  it.each(['SENT', 'UNKNOWN'] as const)(
+    '🔴 Codex #1 (cierre): con un cobro de terminal %s sobre la cuenta ⇒ 409 y el saldo intacto; resuelto, sí cobra',
+    async status => {
+      const t = await tarjeta(1000)
+      const orderId = await cuentaDeMercancia(500)
+      const requestId = `${SUF}-tpr-${status}`
+      // El cobro de la terminal que el banco todavía puede aprobar (su desenlace no está acreditado).
+      await prisma.terminalPaymentRequest.create({
+        data: {
+          requestId,
+          venueId,
+          terminalId: `term-${SUF}`,
+          status,
+          amountCents: 50000,
+          orderId,
+          expiresAt: new Date(Date.now() + 60_000),
+        },
+      })
+      const pedido = (llave: string) => ({
+        idempotencyKey: llave,
+        proof: { kind: 'CODE' as const, code: t.codigo },
+        amount: D(500),
+        tip: D(0),
+        staffId,
+        deviceId: null,
+      })
+      try {
+        await expect(payGiftCardBalanceOnOrder(venueId, orderId, pedido(`${SUF}-vivo-${status}`))).rejects.toMatchObject({
+          statusCode: 409,
+          code: 'ORDER_CANCEL_BLOCKED_BY_TERMINAL_CHARGE',
+          message: 'Hay un cobro en curso en la terminal para esta cuenta. Espera su resultado (o cancélalo) antes de cobrar con saldo.',
+        })
+        expect(await saldoDe(t.id)).toBe('1000.00')
+        expect(await prisma.payment.count({ where: { venueId, orderId } })).toBe(0)
+        // El banco RECHAZÓ ese cobro (código que acredita «sin cobro»): ya no bloquea y el saldo paga.
+        await prisma.terminalPaymentRequest.update({ where: { requestId }, data: { status: 'FAILED', failureCode: 'BANK_DECLINED' } })
+        const r = await payGiftCardBalanceOnOrder(venueId, orderId, pedido(`${SUF}-libre-${status}`))
+        expect(r).toMatchObject({ amount: 500, orderPaymentStatus: 'PAID' })
+        expect(await saldoDe(t.id)).toBe('500.00')
+      } finally {
+        await prisma.terminalPaymentRequest.deleteMany({ where: { requestId } })
+      }
+    },
+  )
 })

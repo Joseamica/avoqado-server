@@ -65,6 +65,28 @@ const NO_APLICAN: Record<string, string> = {
     'y el cobro con saldo rechaza las ventas con vales.',
 }
 
+/**
+ * Cierre (punto 18): un NO_APLICAN no se reconoce sólo por el nombre de su función. Cada `createSalePostingInTx(` que haga debe ser
+ * la constancia SKIPPED de los vales (`items: []` + `skipReason: 'AREA_TICKET_TRANSACTIONAL'`): si algún día ahí nace un vale de
+ * venta de verdad, esta prueba se pone roja y el sitio tiene que pasar a SITIOS (y activar).
+ */
+const LLAMADA_DE_NO_APLICAN = [/\bitems:\s*\[\]/, /\bskipReason:\s*'AREA_TICKET_TRANSACTIONAL'/]
+
+/** Los argumentos de cada llamada `nombre(` del cuerpo, con los paréntesis balanceados. */
+function argumentosDe(cuerpo: string, nombre: string): string[] {
+  const out: string[] = []
+  for (let i = cuerpo.indexOf(nombre); i >= 0; i = cuerpo.indexOf(nombre, i + nombre.length)) {
+    let profundidad = 0
+    let j = i + nombre.length - 1
+    for (; j < cuerpo.length; j++) {
+      if (cuerpo[j] === '(') profundidad++
+      else if (cuerpo[j] === ')' && --profundidad === 0) break
+    }
+    out.push(cuerpo.slice(i + nombre.length, j))
+  }
+  return out
+}
+
 /** El cripto crea el vale por una envoltura que lo reintenta; el inventario cuenta la envoltura, y la activación va en su llamador. */
 const ENVOLTURAS: Record<string, string> = {
   'services/b4bit/b4bit.service.ts#crearValeDeInventario': 'services/b4bit/b4bit.service.ts#settleOrderForConfirmedCryptoPayment',
@@ -81,6 +103,15 @@ describe('R8: la activación de sobres acompaña a cada vale de inventario', () 
       }
     }
     expect([...new Set(encontrados)].sort()).toEqual([...SITIOS.map(([a, f]) => `${a}#${f}`), ...Object.keys(NO_APLICAN)].sort())
+  })
+
+  it.each(Object.keys(NO_APLICAN))('%s sólo deja la constancia SKIPPED (items: [] y AREA_TICKET_TRANSACTIONAL)', sitio => {
+    const [archivo, funcion] = sitio.split('#')
+    const llamadas = argumentosDe(funciones(path.join(SRC, archivo)).get(funcion) ?? '', 'createSalePostingInTx(')
+    expect(llamadas.length).toBeGreaterThan(0)
+    for (const args of llamadas) {
+      expect({ sitio, args: LLAMADA_DE_NO_APLICAN.map(patron => patron.test(args)) }).toEqual({ sitio, args: [true, true] })
+    }
   })
 
   it.each(SITIOS)('%s#%s activa los sobres con la tx del cobro, DESPUÉS de crear el vale', (archivo, funcion, vale) => {

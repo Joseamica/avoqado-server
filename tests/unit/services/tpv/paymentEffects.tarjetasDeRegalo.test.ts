@@ -54,13 +54,28 @@ describe('enqueuePaymentEffect · tarjetas de regalo (R1)', () => {
     expect(tx.payment.findFirst).toHaveBeenCalledTimes(1)
     expect(tx.payment.findFirst.mock.calls[0][0].select).toEqual({
       orderId: true,
-      order: { select: { items: { where: { giftCardId: { not: null } }, select: { id: true }, take: 1 } } },
+      order: {
+        select: {
+          items: { where: { giftCardId: { not: null } }, select: { id: true }, take: 1 },
+          _count: { select: { items: { where: { giftCardId: null } } } },
+        },
+      },
     })
     // B6 r1: sin `relationJoins`, la marca anidada son 2 SQL más dentro de la transacción del cobro (con el FOR UPDATE tomado). Los
     // demás efectos —recibo, reseña, costo— no la usan, así que leen lo de siempre.
     const recibo = txFalso(false)
     await enqueuePaymentEffect(recibo, efecto('RECEIPT'))
     expect(recibo.payment.findFirst.mock.calls[0][0].select).toEqual({ orderId: true })
+  })
+
+  it('⭐ B6 M2 (cierre): la marca COMPLETA de giftCardMarks — una cuenta con un renglón de tarjeta Y otro sin ella NO es de tarjetas', async () => {
+    const tx = txFalso(false)
+    tx.payment.findFirst.mockResolvedValueOnce({ orderId: 'o1', order: { items: [{ id: 'oi-gc' }], _count: { items: 1 } } })
+    await enqueuePaymentEffect(tx, efecto('COMMISSION'))
+    expect(tx.paymentEffect.createMany).toHaveBeenCalledTimes(1)
+    expect(tx.payment.findFirst.mock.calls[0][0].select.order.select._count).toEqual({
+      select: { items: { where: { giftCardId: null } } },
+    })
   })
 
   it('regresión: el doble de Prisma sin `order` (pruebas viejas) se comporta como antes', async () => {

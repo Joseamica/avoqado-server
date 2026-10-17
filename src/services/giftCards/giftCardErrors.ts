@@ -29,6 +29,8 @@ export type GiftCardErrorCode =
   | 'GIFT_CARD_FOLIO_MISMATCH'
   // Lote ⭐ r1 (M2): repetir un bloqueo o un desbloqueo del panel con su llave cuando la tarjeta ya cambió después (aditivo).
   | 'GIFT_CARD_STATE_CHANGED'
+  // Cierre (A1): con la cancelación de la venta en curso, el panel sólo devuelve el cobro COMPLETO (aditivo).
+  | 'GIFT_CARD_SALE_REFUND_MUST_BE_FULL'
 
 export class GiftCardError extends AppError {
   constructor(code: GiftCardErrorCode, mensaje: string, status: 400 | 403 | 404 | 409 | 422, extra?: Record<string, unknown>) {

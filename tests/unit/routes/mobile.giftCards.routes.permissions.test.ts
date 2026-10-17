@@ -46,7 +46,8 @@ const REGRESAR = '/venues/:venueId/orders/:orderId/gift-balance-return-and-cance
 const RUTAS: Array<[string, string, string]> = [
   ['get', '/venues/:venueId/gift-cards/settings', 'giftCards:read'],
   ['post', VENDER, 'giftCards:sell'],
-  ['get', CONSULTAR, 'giftCards:read'],
+  // A3 (cierre): POST con el código en el CUERPO; en la URL lo escribían sin tapar la bitácora y la base.
+  ['post', CONSULTAR, 'giftCards:read'],
   ['post', COBRAR, 'giftCards:redeem'],
   ['get', '/venues/:venueId/gift-cards/payments/:idempotencyKey', 'giftCards:redeem'],
   ['post', REGRESAR, 'giftCards:redeem'],
@@ -114,6 +115,10 @@ describe('rutas del POS de tarjetas de regalo', () => {
 
   it('regresión: el cobro en efectivo sigue con payments:create', () => {
     expect(inspeccionar('post', '/venues/:venueId/orders/:orderId/pay')!.permiso).toBe('payments:create')
+  })
+
+  it('🔴 A3 (cierre): la consulta ya no existe por GET (el código no viaja en la URL)', () => {
+    expect(inspeccionar('get', CONSULTAR)).toBeUndefined()
   })
 
   it('🔴 el código consultado nunca llega al log de la petición', () => {

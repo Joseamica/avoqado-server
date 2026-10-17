@@ -1614,8 +1614,9 @@ router.post(
   exigirPlanDeTarjetas,
   giftCardMobileController.createOrder,
 )
-// El código viaja en la query: `redactUrlSecrets` ya borra `code` de la URL que se escribe en el log.
-router.get(
+// A3 (cierre): POST con el código en el CUERPO. En la query lo escribían sin tapar la bitácora (`checkPermission`) y la base
+// (`PermissionOverride.consumedRoute`); `redactUrlSecrets` sólo cubría el log. Ninguna app la usaba todavía.
+router.post(
   '/venues/:venueId/gift-cards/lookup',
   authenticateTokenMiddleware,
   validateRequest(giftCardMobileSchemas.lookupSchema),

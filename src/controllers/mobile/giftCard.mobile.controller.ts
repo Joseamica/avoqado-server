@@ -34,7 +34,7 @@ export async function createOrder(req: Request, res: Response) {
 
 export async function lookup(req: Request, res: Response) {
   const { venueId } = req.params
-  const data = await lookupGiftCardsByCode(venueId, String(req.query.code), { deviceId: aparatoDe(req) ?? undefined, ip: req.ip })
+  const data = await lookupGiftCardsByCode(venueId, String(req.body.code), { deviceId: aparatoDe(req) ?? undefined, ip: req.ip })
   res.json({ success: true, data })
 }
 

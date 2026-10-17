@@ -1153,6 +1153,8 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
             refundPaymentId,
             amount: centsToDecimal(refundCents),
             staffId: input.staffId ?? null,
+            // A1 (cierre): lo que queda por devolver de este cobro tras ESTE reembolso (la misma cifra que la respuesta).
+            devuelveTodoElCobro: remainingBeforeCents - refundCents <= 0,
             original: { orderId: original.orderId, tenderSystemKind: original.tenderSystemKind },
           })
       const devolverCon = devolverConEfectivo(original, input.refundMethod)

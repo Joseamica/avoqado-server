@@ -35,11 +35,18 @@ import {
 } from '@/services/tpv/shift.tpv.service'
 import { aggregateGiftCardLoads, aggregatePaymentsByMethod } from '@/services/legacy/mergedPayments.service'
 import { registerSalesTools } from '@/mcp/tools/sales'
+import { registerShiftTools } from '@/mcp/tools/shifts'
+import { payCashOrder } from '@/services/mobile/order.mobile.service'
+import {
+  getShiftById as detalleDelTurnoDelPanel,
+  getShifts as turnosDelPanel,
+  getShiftsSummary as resumenDeTurnosDelPanel,
+} from '@/services/dashboard/shift.dashboard.service'
 import type { McpScope } from '@/mcp/scope'
 import { abrirTurno, sembrarCobro } from '../dashboard/sembrarCobroParaReembolso'
 import {
   crearNegocioDePrueba,
-  limpiarEfectosDePagoDelNegocio,
+  limpiarNegocioDePrueba,
   sembrarCanje,
   sembrarVentaDeTarjetas,
   sembrarVentaDeTarjetasSinPagar,
@@ -89,7 +96,7 @@ describe('B5 · ventas con tarjetas de regalo', () => {
   })
 
   afterAll(async () => {
-    await limpiarEfectosDePagoDelNegocio(venueId)
+    await limpiarNegocioDePrueba(venueId)
   })
 
   it('🔴 la mercancía vendida excluye las cuentas de tarjetas; tarjetas cargadas y pagado con saldo van aparte', async () => {
@@ -162,7 +169,7 @@ describe('B5 · un abono devuelto de una venta de tarjetas SIN pagar no resta de
   let venueId: string
 
   afterAll(async () => {
-    await limpiarEfectosDePagoDelNegocio(venueId)
+    await limpiarNegocioDePrueba(venueId)
   })
 
   it('🔴 «tarjetas cargadas» cuenta sólo las ventas PAGADAS y sus cancelaciones: nunca sale negativa', async () => {
@@ -216,7 +223,7 @@ describe('B5 · turno (R3): la venta de tarjetas no es venta del turno; su efect
   })
 
   afterAll(async () => {
-    await limpiarEfectosDePagoDelNegocio(venueId)
+    await limpiarNegocioDePrueba(venueId)
   })
 
   it('🔴 turno abierto (lo que sondea la PAX): una consulta real que excluye la venta de tarjetas', async () => {
@@ -314,7 +321,7 @@ describe('B5 r1 · MCP contra Postgres real: dinero vs ventas (ejemplo del revis
   })
 
   afterAll(async () => {
-    await limpiarEfectosDePagoDelNegocio(venueId)
+    await limpiarNegocioDePrueba(venueId)
   })
 
   it('🔴 daily_sales corre en Postgres: ventas sin la carga, saldo como GIFT_CARD, cargas aparte y el comercio con su dinero', async () => {
@@ -343,5 +350,79 @@ describe('B5 r1 · MCP contra Postgres real: dinero vs ventas (ejemplo del revis
       ],
     })
     expect(out.giftCardLoads).toEqual({ total: 500, count: 1 })
+  })
+})
+
+describe('🔴 Codex #5 (cierre) · R3 en los lectores de turnos del PANEL y del MCP: $1,000 de cargas + $200 de mercancía', () => {
+  let venueId: string
+  let shiftId: string
+  const herramientas = new Map<string, (a: Record<string, unknown>, e: unknown) => Promise<{ content: Array<{ text: string }> }>>()
+  const llamar = async (nombre: string, args: Record<string, unknown>) =>
+    JSON.parse((await herramientas.get(nombre)!(args, {})).content[0].text)
+  const rango = () => ({
+    startTime: new Date(Date.now() - 60 * 60_000).toISOString(),
+    endTime: new Date(Date.now() + 60 * 60_000).toISOString(),
+  })
+
+  beforeAll(async () => {
+    const negocio = await crearNegocioDePrueba('turno-panel')
+    venueId = negocio.venueId
+    const { staffId, organizationId } = negocio
+    shiftId = (await abrirTurno(venueId, staffId)).id
+    // Por el camino REAL de cobro (`payCashOrder`): así el acumulado del turno abierto (`paymentShiftClaim`) también lo cuenta.
+    await sembrarVentaDeTarjetasSinPagar({ venueId, organizationId, staffId, montos: [1000], abonosEnEfectivo: [1000] })
+    const mercancia = await prisma.order.create({
+      data: {
+        venueId,
+        orderNumber: `TP-${Date.now()}`,
+        contratoDePrecio: 'IVA_INCLUIDO',
+        subtotal: D(200),
+        taxAmount: D(0),
+        total: D(200),
+        remainingBalance: D(200),
+        status: 'CONFIRMED',
+        paymentStatus: 'PENDING',
+        items: { create: [{ productName: 'Blusa', quantity: 1, unitPrice: D(200), taxAmount: D(0), total: D(200) }] },
+      },
+    })
+    await payCashOrder(venueId, mercancia.id, { amount: 20000, tip: 0, staffId, idempotencyKey: `tp-blusa-${venueId}`.slice(0, 64) })
+
+    const scope = {
+      staffId,
+      activeOrg: organizationId,
+      scopes: ['mcp:read'],
+      allowedVenueIds: [venueId],
+      perVenueAccess: new Map([[venueId, { role: 'OWNER', corePermissions: ['shifts:read'] }]]),
+    } as unknown as McpScope
+    registerShiftTools({ tool: (...a: unknown[]) => herramientas.set(a[0] as string, a[a.length - 1] as never) } as never, scope)
+  })
+
+  afterAll(async () => {
+    await limpiarNegocioDePrueba(venueId)
+  })
+
+  it('turno ABIERTO: detalle, lista y resumen del panel y list_shifts dicen $200; el efectivo por método, $1,200', async () => {
+    // Precondición: el acumulado del turno abierto SÍ trae la carga (sus escritores no se tocan; los lectores la quitan).
+    expect((await prisma.shift.findUniqueOrThrow({ where: { id: shiftId } })).totalSales.toString()).toBe('1200')
+
+    const detalle = await detalleDelTurnoDelPanel(venueId, shiftId)
+    expect(detalle.totalSales).toBe(200)
+    expect(detalle.paymentMethodBreakdown.find((m: { method: string }) => m.method === 'CASH')).toMatchObject({ total: 1200 })
+    expect(detalle.staffBreakdown.reduce((suma: number, s: { sales: number }) => suma + s.sales, 0)).toBe(200)
+
+    const lista = await turnosDelPanel(venueId, 1, 10, rango())
+    expect(lista.data.find((t: { id: string }) => t.id === shiftId)?.totalSales).toBe(200)
+    expect((await resumenDeTurnosDelPanel(venueId, rango())).summary.totalSales).toBe(200)
+    expect((await llamar('list_shifts', { venueId })).shifts.map((t: { sales: number }) => t.sales)).toEqual([200])
+  })
+
+  it('turno CERRADO: el detalle ya no reemplaza el total firmado por la suma de todos los cobros', async () => {
+    await closeShiftForVenueWithResult(venueId, shiftId, { cashReconciliationAction: 'SKIPPED' })
+    const detalle = await detalleDelTurnoDelPanel(venueId, shiftId)
+    expect(detalle.totalSales).toBe(200)
+    expect(detalle.paymentMethodBreakdown.find((m: { method: string }) => m.method === 'CASH')).toMatchObject({ total: 1200 })
+    expect((await llamar('list_shifts', { venueId, status: 'closed' })).shifts).toEqual([
+      expect.objectContaining({ sales: 200, cash: 1200 }),
+    ])
   })
 })

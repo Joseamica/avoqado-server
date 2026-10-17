@@ -368,7 +368,12 @@ describe('resumen del periodo', () => {
     expect(prismaMock.giftCardActivity.groupBy).toHaveBeenCalledWith(
       expect.objectContaining({
         by: ['type'],
-        where: { venueId: 'v1', createdAt: { gte: new Date('2026-10-01T06:00:00.000Z'), lte: new Date('2026-10-15T05:59:59.999Z') } },
+        where: {
+          venueId: 'v1',
+          createdAt: { gte: new Date('2026-10-01T06:00:00.000Z'), lte: new Date('2026-10-15T05:59:59.999Z') },
+          // M4 (cierre): sin la desactivación de $0 de un sobre que nunca se activó.
+          NOT: { type: 'DEACTIVATE', amount: { lte: 0 }, giftCard: { activities: { none: { type: 'ACTIVATE' } } } },
+        },
       }),
     )
     expect(r).toMatchObject({

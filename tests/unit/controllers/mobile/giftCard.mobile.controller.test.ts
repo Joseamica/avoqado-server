@@ -58,7 +58,7 @@ app.use((req, _res, next) => {
 })
 app.get('/venues/:venueId/gift-cards/settings', validateRequest(soloVenueSchema), venta.getSettings)
 app.post('/venues/:venueId/gift-cards/orders', validateRequest(s.createGiftCardOrderSchema), ctrl.createOrder)
-app.get('/venues/:venueId/gift-cards/lookup', validateRequest(s.lookupSchema), ctrl.lookup)
+app.post('/venues/:venueId/gift-cards/lookup', validateRequest(s.lookupSchema), ctrl.lookup)
 app.post('/venues/:venueId/orders/:orderId/pay-gift-card', validateRequest(s.payGiftCardSchema), ctrl.payWithBalance)
 app.get('/venues/:venueId/gift-cards/payments/:idempotencyKey', validateRequest(s.paymentByKeySchema), ctrl.getPaymentByKey)
 app.post(
@@ -192,6 +192,12 @@ describe('vender (cuenta propia de tarjetas)', () => {
       /Elige a dónde va la tarjeta/,
     ],
     ['sin tarjetas', { idempotencyKey: 'venta-0007-abc', sobres: [] }, /al menos una tarjeta/],
+    [
+      // C1 (cierre): `POS` + `externalId` es la marca de una integrada de SoftRestaurant; una cuenta de tarjetas nunca la lleva.
+      'origen POS',
+      { idempotencyKey: 'venta-0009-abc', source: 'POS', sobres: [{ amount: 500, deliveryChannel: 'PRINTED' }] },
+      /Origen de la venta no reconocido/,
+    ],
     ['llave corta', { idempotencyKey: 'abc', sobres: [{ amount: 500, deliveryChannel: 'PRINTED' }] }, /al menos 8 caracteres/],
     [
       'teléfono con espacios (A5 no lo acepta)',
@@ -229,7 +235,7 @@ describe('consultar por código', () => {
       usableBalance: 400.5,
       cards: [{ giftCardId: 'g1', last4: 'K7QZ', balance: 400.5, status: 'ACTIVE', expiresAt: null, usable: true, notUsableReason: null }],
     })
-    const r = await request(app).get(`${B}/gift-cards/lookup`).query({ code: 'k7qz-abcd-efgh-jkmn-p' }).set('X-Device-Id', 'caja-1')
+    const r = await request(app).post(`${B}/gift-cards/lookup`).send({ code: 'k7qz-abcd-efgh-jkmn-p' }).set('X-Device-Id', 'caja-1')
     expect(r.status).toBe(200)
     expect(r.body.data.usableBalance).toBe(400.5)
     expect(lookupGiftCardsByCode).toHaveBeenCalledWith('v1', 'k7qz-abcd-efgh-jkmn-p', { deviceId: 'caja-1', ip: expect.any(String) })
@@ -240,14 +246,14 @@ describe('consultar por código', () => {
     m(lookupGiftCardsByCode).mockRejectedValue(
       new GiftCardError('GIFT_CARD_NOT_FOUND', 'No encontramos una tarjeta con ese código. Revisa que esté completo.', 404),
     )
-    const r = await request(app).get(`${B}/gift-cards/lookup`).query({ code: 'ZZZZ-ZZZZ-ZZZZ-ZZZZ-Z' })
+    const r = await request(app).post(`${B}/gift-cards/lookup`).send({ code: 'ZZZZ-ZZZZ-ZZZZ-ZZZZ-Z' })
     expect(r.status).toBe(404)
     // Sin extra no hay `details` (A2: «sin extra no inventa details»).
     expect(r.body).toEqual({ code: 'GIFT_CARD_NOT_FOUND', message: 'No encontramos una tarjeta con ese código. Revisa que esté completo.' })
   })
 
   it('sin código → 400', async () => {
-    const r = await request(app).get(`${B}/gift-cards/lookup`)
+    const r = await request(app).post(`${B}/gift-cards/lookup`).send({})
     expect(r.status).toBe(400)
     expect(r.body.message).toMatch(/Falta el código de la tarjeta/)
     expect(lookupGiftCardsByCode).not.toHaveBeenCalled()
@@ -290,7 +296,9 @@ describe('cobrar con saldo', () => {
 
   it('sin propina manda $0', async () => {
     m(payGiftCardBalanceOnOrder).mockResolvedValue(RESULTADO)
-    await request(app).post(`${B}/orders/o9/pay-gift-card`).send({ ...COBRO, tip: undefined })
+    await request(app)
+      .post(`${B}/orders/o9/pay-gift-card`)
+      .send({ ...COBRO, tip: undefined })
     expect(m(payGiftCardBalanceOnOrder).mock.calls[0][2].tip.toString()).toBe('0')
   })
 

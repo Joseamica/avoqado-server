@@ -460,6 +460,12 @@ export async function getGiftCardDetail(
 
 // ── Resumen del periodo ─────────────────────────────────────────────────────────────────────────────────────────────
 
+const WHERE_DESACTIVACION_DE_SOBRE_NUNCA_COBRADO = {
+  type: 'DEACTIVATE',
+  amount: { lte: 0 },
+  giftCard: { activities: { none: { type: 'ACTIVATE' } } },
+} satisfies Prisma.GiftCardActivityWhereInput
+
 export async function getGiftCardSummary(venueId: string, r: { from: string; to: string }): Promise<GiftCardSummary> {
   const timezone = await getVenueTimezone(venueId)
   const { from, to } = rangoDelNegocio(r.from, r.to, timezone)
@@ -468,7 +474,9 @@ export async function getGiftCardSummary(venueId: string, r: { from: string; to:
   const [porTipo, vivo, vencido] = await Promise.all([
     prisma.giftCardActivity.groupBy({
       by: ['type'],
-      where: { venueId, createdAt: { gte: from, lte: to } },
+      // M4 (cierre): la desactivación de $0 de un sobre que nunca se activó (la cuenta se canceló sin pagar) no es una tarjeta
+      // «cancelada»: nunca se vendió. Las de $0 de una tarjeta que sí se activó (se gastó completa) siguen contando.
+      where: { venueId, createdAt: { gte: from, lte: to }, NOT: WHERE_DESACTIVACION_DE_SOBRE_NUNCA_COBRADO },
       _sum: { amount: true },
       _count: { _all: true },
       orderBy: { type: 'asc' },

@@ -44,7 +44,7 @@ import {
 } from '@/services/fiscal/cfdiGlobal.service'
 import { pertenenciaAlEmisor, type Pertenencia } from '@/services/fiscal/globalPorTratamiento'
 import { buildCreateInvoiceParams } from '@/services/fiscal/cfdiPayloadBuilder'
-import { crearCuentaDeMercancia, crearNegocioDePrueba, limpiarEfectosDePagoDelNegocio } from './sembrarTarjetasDeRegalo'
+import { crearCuentaDeMercancia, crearNegocioDePrueba, limpiarNegocioDePrueba } from './sembrarTarjetasDeRegalo'
 
 jest.setTimeout(90000)
 
@@ -74,7 +74,7 @@ beforeAll(async () => {
 })
 
 afterAll(async () => {
-  await limpiarEfectosDePagoDelNegocio(venueId)
+  await limpiarNegocioDePrueba(venueId)
 })
 
 /** Un sobre ACTIVE con su código real y su ACTIVATE (molde de `cobroConSaldo.integration.test.ts`). */

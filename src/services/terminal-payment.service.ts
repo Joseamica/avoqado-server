@@ -53,6 +53,7 @@ import AppError, {
   type TerminalBusyBlockingRequest,
 } from '../errors/AppError'
 import { resolveTerminalRefundTarget } from './tpv/terminalRefundTarget'
+import { exigirCancelacionParaDevolverEnTerminal } from './giftCards/giftCardCancel.service'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { logAction } from './dashboard/activity-log.service'
 import { sendOpsAlert } from './alerts/opsAlert.service'
@@ -5837,7 +5838,17 @@ class TerminalPaymentService {
 
     const payment = await prisma.payment.findUnique({
       where: { id: paymentId },
-      select: { id: true, venueId: true, status: true, method: true, source: true, amount: true, tipAmount: true, processorData: true },
+      select: {
+        id: true,
+        venueId: true,
+        orderId: true,
+        status: true,
+        method: true,
+        source: true,
+        amount: true,
+        tipAmount: true,
+        processorData: true,
+      },
     })
 
     const processorData = (payment?.processorData ?? {}) as { refundedAmount?: number | string }
@@ -5866,6 +5877,8 @@ class TerminalPaymentService {
       })
       throw new BadRequestError(target.message)
     }
+    // A2 (cierre): una venta de tarjetas de regalo pagada sólo se devuelve con su cancelación iniciada (R2), igual que en el panel.
+    if (payment?.orderId) await exigirCancelacionParaDevolverEnTerminal(venueId, payment.orderId)
 
     const terminalEntry = terminalRegistry.getTerminal(terminalId)
     if (!terminalEntry) {
@@ -6405,10 +6418,7 @@ class TerminalPaymentService {
       reconciliacionCandidato?.requestId,
     ].filter(r => r != null)
     const atribuiblePorTerminal =
-      !!candidato &&
-      solicitudesDelPago.length === 0 &&
-      identidadesDelPago.length > 0 &&
-      identidadesDelPago.every(s => s === terminalKey)
+      !!candidato && solicitudesDelPago.length === 0 && identidadesDelPago.length > 0 && identidadesDelPago.every(s => s === terminalKey)
     // 🔴 QA PAX (14-oct): el camino de cobro de la PAX/Blumon no emite `terminal:payment_attempt_opened`, así que su cobro
     // REMOTO nunca tiene vínculo (prod: 0 en 8 cobros remotos de PAX en 30 días) — y su Payment SÍ trae la solicitud. Ninguna
     // rama de arriba lo acreditaba y, tras reiniciar la app, S6 le publicaba una contradicción FALSA («posible cobro doble»).

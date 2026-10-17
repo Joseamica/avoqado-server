@@ -47,6 +47,8 @@ function sumaSello(v: SaleStampPreview | null): { respuesta: 'sí' | 'no' | 'tod
       return { respuesta: 'no', porque: 'no se sabe a qué hora se cobró la venta' }
     case 'WINDOW_EXPIRED':
       return { respuesta: 'no', porque: 'pasaron más de 24 h desde el cobro' }
+    case 'NOT_APPLICABLE':
+      return { respuesta: 'no', porque: 'es una venta de tarjetas de regalo: comprarlas no suma sellos (usarlas para pagar sí)' }
     case 'ELIGIBLE':
       if (v.dailyLimitReached) return { respuesta: 'no', porque: 'ya recibió su sello de hoy' }
       return { respuesta: 'sí', porque: 'está pagada, dentro de las 24 h y sin otro cliente' }

@@ -27,7 +27,7 @@ import {
   listGiftCards,
   listPendingAccountingReview,
 } from '@/services/giftCards/giftCardReports.service'
-import { crearNegocioDePrueba, limpiarEfectosDePagoDelNegocio, sembrarVentaDeTarjetas } from './sembrarTarjetasDeRegalo'
+import { crearNegocioDePrueba, limpiarNegocioDePrueba, sembrarVentaDeTarjetas } from './sembrarTarjetasDeRegalo'
 
 jest.setTimeout(120000)
 
@@ -144,7 +144,7 @@ beforeAll(async () => {
 })
 
 afterAll(async () => {
-  for (const v of negocios) await limpiarEfectosDePagoDelNegocio(v)
+  for (const v of negocios) await limpiarNegocioDePrueba(v)
 })
 
 describe('reportes de tarjetas de regalo contra Postgres', () => {
@@ -359,5 +359,54 @@ describe('reportes de tarjetas de regalo contra Postgres', () => {
     })
     expect(Object.values(r.totals).reduce((t, x) => t + x.amount, 0)).toBe(0)
     expect(r.notice).toMatch(/costo de ventas/)
+  })
+})
+
+describe('M4 (cierre): «canceladas» del resumen sólo cuenta tarjetas que se llegaron a cobrar', () => {
+  it('🔴 la desactivación de $0 de un sobre que nunca se activó (venta sin pagar cancelada) NO cuenta; la de uno activado, sí', async () => {
+    const negocio = await crearNegocioDePrueba('m4-canceladas')
+    negocios.push(negocio.venueId)
+    const base = (k: string) => ({
+      venueId: negocio.venueId,
+      organizationId: negocio.organizationId,
+      codeHash: `m4-hash-${stamp}-${k}`,
+      codeEnc: 'no-se-descifra-en-esta-prueba',
+      codeLast4: `M4${k}0`.slice(0, 4),
+      pageToken: `m4-page-${stamp}-${k}`,
+      termsVersion: '2026-10-14',
+      deliveryChannel: 'PRINTED' as const,
+      initialAmount: D(500),
+      balance: D(0),
+      status: 'DEACTIVATED' as const,
+    })
+    const en = new Date('2026-10-10T18:00:00.000Z')
+    // Nunca cobrada: nació PENDING en $0 y se desactivó al cancelar la cuenta sin pagar.
+    const nunca = await prisma.giftCard.create({ data: base('a') })
+    await prisma.giftCardActivity.create({
+      data: { giftCardId: nunca.id, venueId: negocio.venueId, type: 'DEACTIVATE', amount: D(0), balanceAfter: D(0), createdAt: en },
+    })
+    // Cobrada, gastada completa y después desactivada: también en $0, pero SÍ fue una tarjeta vendida.
+    const gastada = await prisma.giftCard.create({ data: { ...base('b'), activatedAt: new Date('2026-10-09T18:00:00.000Z') } })
+    await prisma.giftCardActivity.create({
+      data: {
+        giftCardId: gastada.id,
+        venueId: negocio.venueId,
+        type: 'ACTIVATE',
+        amount: D(500),
+        balanceAfter: D(500),
+        createdAt: new Date('2026-10-09T18:00:00.000Z'),
+      },
+    })
+    await prisma.giftCardActivity.create({
+      data: { giftCardId: gastada.id, venueId: negocio.venueId, type: 'DEACTIVATE', amount: D(0), balanceAfter: D(0), createdAt: en },
+    })
+    // Cobrada y cancelada con su saldo: cuenta con su monto.
+    const devuelta = await prisma.giftCard.create({ data: base('c') })
+    await prisma.giftCardActivity.create({
+      data: { giftCardId: devuelta.id, venueId: negocio.venueId, type: 'DEACTIVATE', amount: D(300), balanceAfter: D(0), createdAt: en },
+    })
+
+    const r = await getGiftCardSummary(negocio.venueId, { from: '2026-10-01', to: '2026-10-14' })
+    expect(r.cancelled).toEqual({ cards: 2, amount: 300 })
   })
 })

@@ -19,6 +19,7 @@ import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { issueRefund } from '@/services/dashboard/refund.dashboard.service'
 import { recordRefund } from '@/services/tpv/refund.tpv.service'
+import { terminalPaymentService } from '@/services/terminal-payment.service'
 import {
   claveDeSobre,
   estadoDeCancelacionDeVenta,
@@ -35,10 +36,11 @@ import {
   crearCuentaDeMercancia,
   crearNegocioDePrueba,
   esperarAQueAlguienEspereA,
-  limpiarEfectosDePagoDelNegocio,
+  limpiarNegocioDePrueba,
   pidDe,
   sembrarCanje,
   sembrarVentaDeTarjetas,
+  sembrarVentaDeTarjetasSinPagar,
 } from './sembrarTarjetasDeRegalo'
 
 jest.setTimeout(60000)
@@ -70,7 +72,7 @@ describe('B2 · cancelar la venta de una tarjeta de regalo', () => {
 
   // B1 r1 (fix 7): los efectos que encolaron ESTOS cobros y reembolsos no se quedan para el worker de otra suite.
   afterAll(async () => {
-    await limpiarEfectosDePagoDelNegocio(venueId)
+    await limpiarNegocioDePrueba(venueId)
   })
 
   beforeEach(() => (logAction as jest.Mock).mockClear())
@@ -213,6 +215,30 @@ describe('B2 · cancelar la venta de una tarjeta de regalo', () => {
     expect(await prisma.giftCardActivity.count({ where: { giftCardId: v.giftCardIds[0], type: 'REDEEM' } })).toBe(0)
   })
 
+  it('🔴 Codex #7 (cierre): liberar con una tarjeta de la venta bloqueada por OTRO motivo ⇒ 409 GIFT_CARD_BLOCKED (no anuncia «se pueden usar»)', async () => {
+    const v = await venta({ montos: [300, 200] })
+    await iniciarCancelacionDeVenta(venueId, v.orderId, { staffId, operationKey: 'cancelar-otro-motivo-1' })
+    // B libera y después bloquea una tarjeta por actividad sospechosa; A, con el diálogo abierto, confirma con una llave nueva.
+    await liberarCancelacionDeVenta(venueId, v.orderId, { staffId, operationKey: 'liberar-otro-motivo-b', confirmacionNoDevuelto: true })
+    await prisma.$transaction(async tx =>
+      operarSobreDeGerenteEnTx(tx, {
+        venueId,
+        giftCardId: v.giftCardIds[0],
+        staffId,
+        operationKey: 'bloqueo-otro-motivo-0001',
+        op: { tipo: 'BLOQUEAR', reason: 'SUSPICIOUS_ACTIVITY', note: 'Contracargo en revisión' },
+      }),
+    )
+    await expect(
+      liberarCancelacionDeVenta(venueId, v.orderId, { staffId, operationKey: 'liberar-otro-motivo-a', confirmacionNoDevuelto: true }),
+    ).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'GIFT_CARD_BLOCKED',
+      message: 'Una tarjeta de esta venta está bloqueada por otro motivo; revísala antes de liberar.',
+    })
+    expect((await prisma.giftCard.findUniqueOrThrow({ where: { id: v.giftCardIds[0] } })).status).toBe('BLOCKED')
+  })
+
   it('🔴 un sobre bloqueado por OTRO motivo: iniciar ⇒ GIFT_CARD_BLOCKED y el reembolso sigue en GIFT_CARD_CANCEL_NOT_STARTED', async () => {
     const v = await venta()
     await prisma.$transaction(async tx =>
@@ -254,6 +280,97 @@ describe('B2 · cancelar la venta de una tarjeta de regalo', () => {
     expect(desactivaciones).toHaveLength(2)
     expect(desactivaciones.every(d => d.refundPaymentId === r.refundId && d.reason === 'SALE_CANCELLED')).toBe(true)
     expect(await prisma.moneyAnomaly.count({ where: { stripeEventId: `giftcard:REFUND_WITHOUT_CANCEL:${r.refundId}` } })).toBe(0)
+  })
+
+  it('🔴 A1 (cierre): con la cancelación en curso, una devolución PARCIAL del panel ⇒ 409 y nada se escribe (las tarjetas siguen bloqueadas)', async () => {
+    const v = await venta({ montos: [300, 200] })
+    await iniciarCancelacionDeVenta(venueId, v.orderId, { staffId, operationKey: 'cancelar-parcial-0001' })
+    const rechazo = {
+      statusCode: 409,
+      code: 'GIFT_CARD_SALE_REFUND_MUST_BE_FULL',
+      message: 'La venta de tarjetas se devuelve completa: reembolsa el cobro entero.',
+    }
+    // Por importe libre…
+    await expect(
+      issueRefund({ venueId, paymentId: v.pagos[0].id, amount: 30000, reason: 'CANCELLED_ORDER', staffId }),
+    ).rejects.toMatchObject(rechazo)
+    // …y por artículo (una de las dos tarjetas).
+    const renglon = await prisma.orderItem.findFirstOrThrow({ where: { orderId: v.orderId, giftCardId: v.giftCardIds[0] } })
+    await expect(
+      issueRefund({ venueId, paymentId: v.pagos[0].id, items: [{ orderItemId: renglon.id }], reason: 'CANCELLED_ORDER', staffId }),
+    ).rejects.toMatchObject(rechazo)
+    expect(await prisma.payment.count({ where: { orderId: v.orderId, type: 'REFUND' } })).toBe(0)
+    const sobres = await prisma.giftCard.findMany({ where: { id: { in: v.giftCardIds } }, take: 2 })
+    expect(sobres.map(s => [s.status, s.balance.toFixed(2)]).sort()).toEqual([
+      ['BLOCKED', '200.00'],
+      ['BLOCKED', '300.00'],
+    ])
+    // El cobro entero sí cancela la venta.
+    await issueRefund({ venueId, paymentId: v.pagos[0].id, amount: 50000, reason: 'CANCELLED_ORDER', staffId })
+    expect(await prisma.giftCardActivity.count({ where: { giftCardId: { in: v.giftCardIds }, type: 'DEACTIVATE' } })).toBe(2)
+  })
+
+  it('🔴 A1 (cierre): en la TERMINAL el dinero ya salió — la devolución parcial no se rechaza: desactiva y deja la anomalía `parcial`', async () => {
+    const v = await venta({ montos: [400, 600], metodo: 'CREDIT_CARD' })
+    await iniciarCancelacionDeVenta(venueId, v.orderId, { staffId, operationKey: 'cancelar-tpv-parcial-1' })
+    const r = await recordRefund(
+      venueId,
+      {
+        venueId,
+        originalPaymentId: v.pagos[0].id,
+        amount: 40000,
+        reason: 'CUSTOMER_REQUEST',
+        authorizationNumber: 'AUT-GC-P1',
+        referenceNumber: 'REF-GC-P1',
+        isPartialRefund: true,
+        currency: 'MXN',
+        idempotencyKey: 'tpv-gc-parcial-0001',
+      },
+      staffId,
+    )
+    expect(await prisma.giftCardActivity.count({ where: { giftCardId: { in: v.giftCardIds }, type: 'DEACTIVATE' } })).toBe(2)
+    const anomalia = await prisma.moneyAnomaly.findFirst({ where: { stripeEventId: `giftcard:REFUND_WITHOUT_CANCEL:${r.id}` } })
+    expect(anomalia?.observedState).toMatchObject({ parcial: true, monto: '400' })
+  })
+
+  it('🔴 A2 (cierre): abrir la devolución en la TERMINAL (POS y MCP) exige la cancelación iniciada de una venta de tarjetas pagada', async () => {
+    const v = await venta({ montos: [500], metodo: 'CREDIT_CARD' })
+    await prisma.payment.update({ where: { id: v.pagos[0].id }, data: { source: 'TPV' } })
+    const abrir = () =>
+      terminalPaymentService.requestRefundOnTerminal({
+        terminalId: 'AVQD-NO-CONECTADA',
+        venueId,
+        requestedBy: staffId,
+        paymentId: v.pagos[0].id,
+      })
+    await expect(abrir()).rejects.toMatchObject({ statusCode: 409, code: 'GIFT_CARD_CANCEL_NOT_STARTED' })
+    // Con la cancelación iniciada pasa la regla y sigue a la terminal (aquí no hay ninguna conectada).
+    await iniciarCancelacionDeVenta(venueId, v.orderId, { staffId, operationKey: 'cancelar-abrir-tpv-1' })
+    await expect(abrir()).rejects.toThrow(/no está conectada/)
+    // Una tarjeta usada: la regla única dice por qué (ALREADY_USED), también en la terminal.
+    const usada = await venta({ montos: [500], metodo: 'CREDIT_CARD' })
+    await prisma.payment.update({ where: { id: usada.pagos[0].id }, data: { source: 'TPV' } })
+    await sembrarCanje({ venueId, staffId, giftCardIds: usada.giftCardIds, total: 100, conSaldo: 100 })
+    await expect(
+      terminalPaymentService.requestRefundOnTerminal({
+        terminalId: 'AVQD-NO-CONECTADA',
+        venueId,
+        requestedBy: staffId,
+        paymentId: usada.pagos[0].id,
+      }),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'GIFT_CARD_ALREADY_USED' })
+  })
+
+  it('A2 (cierre): la terminal NO frena lo que el gancho acepta sin cancelación — el abono de una venta SIN pagar', async () => {
+    const v = await sembrarVentaDeTarjetasSinPagar({ venueId, organizationId, staffId, montos: [500], abonosConTerminal: [200] })
+    await expect(
+      terminalPaymentService.requestRefundOnTerminal({
+        terminalId: 'AVQD-NO-CONECTADA',
+        venueId,
+        requestedBy: staffId,
+        paymentId: v.abonos[0].id,
+      }),
+    ).rejects.toThrow(/no está conectada/)
   })
 
   it('🔴 Review Focus 5: una venta pagada en dos cobros se devuelve en dos reembolsos; el segundo no rebota ni desactiva otra vez', async () => {

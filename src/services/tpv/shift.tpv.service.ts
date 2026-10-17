@@ -154,22 +154,7 @@ export async function getCurrentShift(venueId: string, _orgId?: string, _posName
     }
   }
 
-  // R3 (r1 B-3, r2 #2): `totalSales` sale de UNA consulta agregada que ya excluye las cuentas de tarjetas de regalo (su dinero sí
-  // entró: los totales por método y el cajón no cambian). Nunca la resta de dos lecturas: una carga que entrara entre ambas dejaría
-  // el total en negativo. Este endpoint lo sondea la PAX: sigue siendo una agregación en la base.
-  // 🔴 `NOT` de la marca, y sin rama `orderId: null`: `Payment.orderId` es obligatorio (Prisma rechaza `null` en ese filtro, medido
-  // el 15-oct), y el SQL que genera es `NOT (EXISTS(renglón con tarjeta) AND la orden existe)`: un cobro cuya orden no se pudiera
-  // unir seguiría contando, nunca se pierde en silencio (memoria «predicado-not-en-sql-con-columnas-null-excluye-en-silencio»).
-  const ventasDelTurno = await prisma.payment.aggregate({
-    where: {
-      venueId,
-      shiftId: shift.id,
-      status: 'COMPLETED',
-      NOT: { order: WHERE_ORDEN_DE_TARJETAS },
-    },
-    _sum: { amount: true },
-  })
-  totalSales = new Decimal(ventasDelTurno?._sum?.amount ?? 0)
+  totalSales = await ventasDelTurnoSinTarjetas(venueId, shift.id)
 
   // Get order count
   const orderCount = await prisma.order.count({
@@ -211,6 +196,32 @@ export async function getCurrentShift(venueId: string, _orgId?: string, _posName
     totalOtherPayments: totalOtherPayments,
     totalProductsSold: totalProductsSold,
   }
+}
+
+/**
+ * R3 (r1 B-3, r2 #2): las ventas de un turno SIN CERRAR, en UNA consulta agregada que ya excluye las cuentas de tarjetas de regalo
+ * (su dinero sí entró: los totales por método y el cajón no cambian). Nunca la resta de dos lecturas: una carga que entrara entre
+ * ambas dejaría el total en negativo. La sondea la PAX (`getCurrentShift`): sigue siendo una agregación en la base.
+ *
+ * Codex #5 (cierre): el acumulado `Shift.totalSales` de un turno abierto lo incrementa CUALQUIER cobro (`paymentShiftClaim`), así
+ * que la lista y el resumen de turnos del panel y `list_shifts` del MCP leen esta cifra para la fila de un turno sin cerrar; el
+ * cierre ya firma el total sin tarjetas (`aggregateShiftPayments`).
+ *
+ * 🔴 `NOT` de la marca, y sin rama `orderId: null`: `Payment.orderId` es obligatorio (Prisma rechaza `null` en ese filtro, medido
+ * el 15-oct), y el SQL que genera es `NOT (EXISTS(renglón con tarjeta) AND la orden existe)`: un cobro cuya orden no se pudiera
+ * unir seguiría contando, nunca se pierde en silencio (memoria «predicado-not-en-sql-con-columnas-null-excluye-en-silencio»).
+ */
+export async function ventasDelTurnoSinTarjetas(venueId: string, shiftId: string): Promise<Decimal> {
+  const ventasDelTurno = await prisma.payment.aggregate({
+    where: {
+      venueId,
+      shiftId,
+      status: 'COMPLETED',
+      NOT: { order: WHERE_ORDEN_DE_TARJETAS },
+    },
+    _sum: { amount: true },
+  })
+  return new Decimal(ventasDelTurno?._sum?.amount ?? 0)
 }
 
 /** Un instante legible, o `null` si el dato falta o no se puede leer. Nunca lanza. */

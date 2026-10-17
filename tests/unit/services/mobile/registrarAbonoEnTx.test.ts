@@ -18,6 +18,7 @@ jest.mock('@/services/mobile/areaTicketV7.mobile.service', () => ({
 }))
 
 import { Prisma } from '@prisma/client'
+import { lockAreaTicketCheckoutForPayment } from '@/services/mobile/areaTicketV7.mobile.service'
 import { registrarAbonoEnTx, type AbonoEnTxEntrada, type CuentaBajoCandado } from '@/services/mobile/order.mobile.service'
 import type { ResolvedTenderCharge } from '@/services/dashboard/tenderType.dashboard.service'
 import { prismaMock } from '../../../__helpers__/setup'
@@ -73,6 +74,25 @@ beforeEach(() => {
   prismaMock.paymentAllocation.create.mockResolvedValue({ id: 'alloc-1' })
   prismaMock.cashDrawerSession.findFirst.mockResolvedValue(null)
   prismaMock.venueTenderType.findFirst.mockReset()
+})
+
+describe('🔴 cierre (punto 17): qué le dice el abono a la sesión de vales sobre el dinero', () => {
+  const capturadoAlPedir = () => (lockAreaTicketCheckoutForPayment as jest.Mock).mock.calls[0][1].dineroCapturado
+  const abonar = (entrada: Partial<AbonoEnTxEntrada>) =>
+    registrarAbonoEnTx(prismaMock, CTX, { amountCents: 30000, tipCents: 0, method: 'CASH', tender: null, ...entrada }, RECONCILIACION)
+
+  it('el cobro con SALDO (tender de sistema ya resuelto) es un cobro NUEVO: dineroCapturado false, como el efectivo en vivo', async () => {
+    await abonar({ method: 'OTHER', idempotencyKey: 'llave-saldo-1', tender: { resuelto: TENDER_DE_REGALO } })
+    expect(capturadoAlPedir()).toBe(false)
+  })
+
+  it('regresión: el efectivo en vivo sigue siendo cobro NUEVO (false) y una tarjeta ajena ya cobrada, capturado (true)', async () => {
+    await abonar({ idempotencyKey: 'llave-efectivo-1' })
+    expect(capturadoAlPedir()).toBe(false)
+    ;(lockAreaTicketCheckoutForPayment as jest.Mock).mockClear()
+    await abonar({ method: 'CREDIT_CARD', externalSource: 'Terminal externa', idempotencyKey: 'llave-externa-1' })
+    expect(capturadoAlPedir()).toBe(true)
+  })
 })
 
 describe('registrarAbonoEnTx', () => {

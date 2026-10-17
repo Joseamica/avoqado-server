@@ -16,11 +16,23 @@ import { logAction } from '@/services/dashboard/activity-log.service'
 import { encryptGiftCardCode, generateGiftCardCode, generateOpaqueToken, hashGiftCardCode } from '@/services/giftCards/giftCardCode'
 import {
   crearCuentaDeMercancia,
-  crearNegocioDePrueba,
+  crearNegocioDePrueba as crearNegocioDePruebaSinRegistrar,
   esperarAQueAlguienEspereA,
+  limpiarNegocioDePrueba,
   pidDe,
   sembrarVentaDeTarjetas,
 } from './sembrarTarjetasDeRegalo'
+
+// Cierre (punto 16): cada negocio de este archivo se registra para borrar sus órdenes al final (los borrados por la prueba no dejan).
+const negocios: string[] = []
+const crearNegocioDePrueba = async (prefijo: string) => {
+  const n = await crearNegocioDePruebaSinRegistrar(prefijo)
+  negocios.push(n.venueId)
+  return n
+}
+afterAll(async () => {
+  for (const venueId of negocios) await limpiarNegocioDePrueba(venueId)
+})
 
 jest.mock('@/services/modules/module.service', () => ({
   ...jest.requireActual('@/services/modules/module.service'),
@@ -52,6 +64,7 @@ async function negocioTrial(sufijo: string): Promise<{ orgId: string; venueId: s
   const producto = await prisma.product.create({
     data: { venueId: venue.id, categoryId: categoria.id, name: 'Café', sku: `${llave}-${sufijo}-cafe`, price: new Prisma.Decimal(45) },
   })
+  negocios.push(venue.id)
   return { orgId: org.id, venueId: venue.id, productId: producto.id }
 }
 

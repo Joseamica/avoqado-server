@@ -23,8 +23,15 @@ jest.mock('@/services/access/basePlan.service', () => ({
   ...jest.requireActual('@/services/access/basePlan.service'),
   venueHasFeatureAccess: jest.fn().mockResolvedValue(true),
 }))
+// C1 (cierre): el comando a SoftRestaurant que manda `recordOrderPayment` a una integrada, contado (nunca sale a RabbitMQ).
+jest.mock('@/communication/rabbitmq/publisher', () => ({
+  ...jest.requireActual('@/communication/rabbitmq/publisher'),
+  publishCommand: jest.fn().mockResolvedValue(undefined),
+}))
 
 import { Prisma } from '@prisma/client'
+import { publishCommand } from '@/communication/rabbitmq/publisher'
+import { recordOrderPayment } from '@/services/tpv/payment.tpv.service'
 import prisma from '@/utils/prismaClient'
 import { createGiftCardOrder } from '@/services/giftCards/giftCardOrder.service'
 import { activarSobresDeCuentaPagadaEnTx } from '@/services/giftCards/giftCardLedger'
@@ -32,7 +39,7 @@ import { cancelOrder, payCashOrder } from '@/services/mobile/order.mobile.servic
 import { settleOrder } from '@/services/dashboard/order.dashboard.service'
 import { lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
 import { settleStandalonePaymentInTx } from '@/services/tpv/payment.tpv.service'
-import { limpiarEfectosDePagoDelNegocio } from './sembrarTarjetasDeRegalo'
+import { limpiarNegocioDePrueba } from './sembrarTarjetasDeRegalo'
 
 jest.setTimeout(60000)
 
@@ -52,7 +59,7 @@ beforeAll(async () => {
 // B1 r1 (fix 7): los `PaymentEffect` de ESTE negocio no se quedan para el worker de otra suite que barre toda la base.
 // La libreta (`GiftCardActivity`) nunca se borra.
 afterAll(async () => {
-  await limpiarEfectosDePagoDelNegocio(venueId)
+  await limpiarNegocioDePrueba(venueId)
 })
 
 async function cuenta(llave: string, montos: number[]) {
@@ -89,6 +96,42 @@ describe('R8 · activación de sobres · Postgres real', () => {
       ],
       activaciones: 2,
     })
+  })
+
+  it('🔴 C1 (cierre): creada SIN source y cobrada en la TERMINAL (`recordOrderPayment`) ⇒ sobres ACTIVE y ningún comando a SoftRestaurant', async () => {
+    const r = await cuenta(`${SUF}-terminal`, [400])
+    const orden = await prisma.order.findUniqueOrThrow({ where: { id: r.orderId }, select: { source: true, externalId: true } })
+    expect(orden.source).not.toBe('POS')
+    expect(orden.externalId).toBe(`giftcard:${SUF}-terminal`)
+    jest.mocked(publishCommand).mockClear()
+
+    await recordOrderPayment(
+      venueId,
+      r.orderId,
+      {
+        venueId,
+        amount: 40000,
+        tip: 0,
+        status: 'COMPLETED',
+        method: 'CASH',
+        source: 'TPV',
+        splitType: 'CUSTOMAMOUNT',
+        tpvId: `tpv-${SUF}`,
+        staffId,
+        paidProductsId: [],
+        idempotencyKey: `${SUF}-cobro-terminal`,
+        currency: 'MXN',
+        isInternational: false,
+      } as never,
+      staffId,
+    )
+
+    expect(await estadoDe([r.sobres[0].id])).toEqual({ sobres: [['ACTIVE', '400.00', true]], activaciones: 1 })
+    expect(await prisma.order.findUniqueOrThrow({ where: { id: r.orderId }, select: { paymentStatus: true } })).toEqual({
+      paymentStatus: 'PAID',
+    })
+    const aSoftRestaurant = jest.mocked(publishCommand).mock.calls.filter(([canal]) => String(canal).startsWith('command.softrestaurant.'))
+    expect(aSoftRestaurant).toEqual([])
   })
 
   it('🔴 PAY_CASH reproducido de una app vieja (dinero real cobrado sin red): se acepta y activa', async () => {

@@ -34,7 +34,7 @@ import {
   crearCobroConSaldoEnTx,
   crearCuentaDeMercancia,
   crearNegocioDePrueba,
-  limpiarEfectosDePagoDelNegocio,
+  limpiarNegocioDePrueba,
   sembrarCanje,
   sembrarVentaDeTarjetas,
   sembrarVentaDeTarjetasSinPagar,
@@ -76,7 +76,7 @@ describe('B7 · revisión nocturna', () => {
   })
 
   afterAll(async () => {
-    await limpiarEfectosDePagoDelNegocio(venueId)
+    await limpiarNegocioDePrueba(venueId)
   })
 
   /** Un pago en efectivo registrado directo (sin el camino del cobro, que activaría): lo que la red nocturna existe para atrapar. */

@@ -17,6 +17,7 @@
  */
 import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
+import { limpiarNegocioDePrueba } from './sembrarTarjetasDeRegalo'
 
 const SUF = `esq-${process.pid}-${Date.now()}`
 let orgId: string
@@ -26,6 +27,11 @@ let n = 0
 beforeAll(async () => {
   orgId = (await prisma.organization.create({ data: { name: SUF, email: `${SUF}@example.test`, phone: '5500000000' } })).id
   venueId = (await prisma.venue.create({ data: { organizationId: orgId, name: SUF, slug: SUF } })).id
+})
+
+// Cierre (punto 16): sus órdenes sí se borran (los sobres y la libreta se quedan, ver arriba).
+afterAll(async () => {
+  await limpiarNegocioDePrueba(venueId)
 })
 
 async function sobre(extra: Partial<Prisma.GiftCardUncheckedCreateInput> = {}) {
@@ -134,6 +140,36 @@ describe('tarjetas de regalo · garantías del esquema', () => {
     )
     // La primera línea sigue dueña del sobre.
     expect(await prisma.orderItem.count({ where: { orderId: primera.id, giftCardId: s.id } })).toBe(1)
+    expect(await prisma.orderItem.count({ where: { giftCardId: s.id } })).toBe(1)
+  })
+
+  it('⭐ A1 (cierre): una línea SIN sobre tampoco lo toma después (UPDATE NULL → id); el INSERT con sobre sigue permitido', async () => {
+    const s = await sobre({ status: 'PENDING', balance: new Prisma.Decimal(0) })
+    const mercancia = await orden([
+      {
+        productName: 'Blusa',
+        quantity: 1,
+        unitPrice: new Prisma.Decimal(500),
+        taxAmount: new Prisma.Decimal(0),
+        total: new Prisma.Decimal(500),
+      },
+    ])
+    await expect(prisma.orderItem.updateMany({ where: { orderId: mercancia.id }, data: { giftCardId: s.id } })).rejects.toThrow(
+      /TARJETA_LINEA_INMUTABLE/,
+    )
+    expect(await prisma.orderItem.count({ where: { giftCardId: s.id } })).toBe(0)
+    // El camino de venta (la línea nace con su sobre) no cambia.
+    await orden([
+      {
+        productName: 'Tarjeta de regalo',
+        quantity: 1,
+        unitPrice: new Prisma.Decimal(500),
+        taxAmount: new Prisma.Decimal(0),
+        total: new Prisma.Decimal(500),
+        ivaTratamiento: 'NO_OBJETO',
+        giftCardId: s.id,
+      },
+    ])
     expect(await prisma.orderItem.count({ where: { giftCardId: s.id } })).toBe(1)
   })
 

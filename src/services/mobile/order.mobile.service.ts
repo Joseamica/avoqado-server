@@ -2820,8 +2820,10 @@ export async function registrarAbonoEnTx(
     method: paymentMethod,
     // 🔴 R12-1 / R13-1: lo ya capturado —la cola sin red, o en vivo una terminal ajena o una transferencia— no recibe 409 de la
     // sesión por su estado (cerrada, en conciliación o cancelada), como en la TPV (`cobroNuevo !== true`). El efectivo de cajón
-    // en vivo sigue siendo cobro NUEVO.
-    dineroCapturado: !cobroNuevo,
+    // en vivo sigue siendo cobro NUEVO. Cierre de tarjetas (punto 17): el cobro con saldo también (su gancho lo dice: «un cobro con
+    // saldo es un cobro NUEVO»); hoy es el único que llega con el tender ya resuelto (`resuelto`). Inalcanzable hoy —el cobro con
+    // saldo rechaza las ventas con vales—, pero falla CERRADO como antes del núcleo compartido.
+    dineroCapturado: !cobroNuevo && !(entrada.tender != null && 'resuelto' in entrada.tender),
   })
   // Vales ya tomaron Order bajo su jerarquía session → tickets → Order;
   // para una orden normal este helper toma el primer lock. En ambos casos
@@ -3932,6 +3934,17 @@ export async function payGiftCardBalanceOnOrder(
           trasCandadoDeOrden: async (txCandado, cuenta) => {
             // Un cobro con saldo es un cobro NUEVO: sobre una cancelada no se registra (el núcleo la reabriría).
             rechazarCobroNuevoSobreCancelada(cuenta.fresh.status)
+            // Codex #1 (cierre): el candado de la Order serializa escrituras, no el desenlace del banco. Con un cobro de terminal
+            // cuyo resultado no está acreditado, el banco todavía puede aprobar ese dinero: descontar el saldo cobraría la venta
+            // dos veces. Las salidas de repetición (la llave que ya cobró, la ganadora de una carrera) siguen antes y en el catch.
+            await assertNoLiveTerminalCharge(
+              txCandado,
+              { venueId, orderId },
+              {
+                mensaje:
+                  'Hay un cobro en curso en la terminal para esta cuenta. Espera su resultado (o cancélalo) antes de cobrar con saldo.',
+              },
+            )
             // D8 / ruling 8: una tarjeta no se paga con saldo de otra (spec: no se compran tarjetas con saldo).
             if (await esCuentaDeTarjetasEnTx(txCandado, orderId)) {
               throw new GiftCardError(

@@ -9,7 +9,8 @@ import { idempotencyKey, montoPositivo, ordenParams, pesos, pesosPositivos, venu
 /** El mismo que valida A5 (`createGiftCardOrder`): 10 a 15 dígitos, con `+` opcional, sin espacios. */
 const TELEFONO = /^\+?\d{10,15}$/
 const DESTINOS = ['WHATSAPP', 'EMAIL', 'PRINTED', 'HANDED_TO_BUYER'] as const
-const FUENTES = ['AVOQADO_ANDROID', 'AVOQADO_IOS', 'TPV', 'POS'] as const
+/** Sin `POS` (C1 del cierre): con `externalId` es la marca de una integrada de SoftRestaurant. Ninguna app la mandaba. */
+const FUENTES = ['AVOQADO_ANDROID', 'AVOQADO_IOS', 'TPV'] as const
 
 const texto = (que: string, maximo: number) =>
   z
@@ -71,10 +72,11 @@ export const createGiftCardOrderSchema = z.object({
   query: z.any().optional(),
 })
 
+/** A3 (cierre): el código va en el CUERPO (`POST …/gift-cards/lookup`), nunca en la URL. */
 export const lookupSchema = z.object({
   params: venueParams,
-  query: z.object({ code: codigo }).passthrough(),
-  body: z.any().optional(),
+  body: z.object({ code: codigo }, { required_error: 'Falta el código de la tarjeta' }).passthrough(),
+  query: z.any().optional(),
 })
 
 export const payGiftCardSchema = z.object({

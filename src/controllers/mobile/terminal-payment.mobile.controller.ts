@@ -19,6 +19,7 @@ import AppError, {
 import { validateStaffVenue } from '../../utils/staff-venue.util'
 import { normalizeRequestedCustomerId } from '../../services/tpv/fastPaymentCustomer'
 import { MAX_TERMINAL_PAYMENT_CENTS } from '../../services/shared/inputCaps'
+import { GiftCardError } from '../../services/giftCards/giftCardErrors'
 
 /** Cota del id de cliente: la misma que `/fast` (`tpv.schema.ts`). */
 const MAX_CUSTOMER_ID_LENGTH = 64
@@ -345,6 +346,11 @@ export async function requestRefundOnTerminal(req: Request, res: Response) {
 
     if (error instanceof BadRequestError) {
       return res.status(400).json({ success: false, message: error.message })
+    }
+    // A2 (cierre de tarjetas 1a): una venta de tarjetas de regalo sin su cancelación iniciada (o ya usada, otro día…) responde el
+    // rechazo de la regla única con su `code`; antes caía al 500 de abajo y la app no sabía que tocaba «Cancelar venta».
+    if (error instanceof GiftCardError) {
+      return res.status(error.statusCode).json({ success: false, code: error.code, message: error.message })
     }
 
     const message = error instanceof Error ? error.message : 'Error desconocido'

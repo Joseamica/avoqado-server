@@ -6,6 +6,7 @@ import { logAction } from './activity-log.service'
 import { lineRevenue } from './lineRevenue'
 import { calculateCashReconciliation, calculateCashReconciliationFromExpected } from '../shared/cashReconciliation.service'
 import { lockShiftLifecycleForVenue } from '../shared/shiftLifecycleLock'
+import { ORDEN_DE_TARJETAS_SELECT, ventasDelTurnoSinTarjetas } from '../tpv/shift.tpv.service'
 
 interface ShiftFilters {
   staffId?: string
@@ -134,6 +135,7 @@ export async function getShifts(
     }),
   ])
 
+  const ventasSinCerrar = await ventasDeTurnosSinCerrar(venueId, shifts)
   const shiftsWithCalculations = shifts.map(shift => {
     // Determine effective status based on time logic
     const now = new Date()
@@ -147,7 +149,7 @@ export async function getShifts(
       endTime: shift.endTime,
       startingCash: Number(shift.startingCash),
       ...serializeShiftCashReconciliation(shift),
-      totalSales: Number(shift.totalSales),
+      totalSales: ventasSinCerrar.get(shift.id) ?? Number(shift.totalSales),
       totalTips: Number(shift.totalTips),
       totalOrders: shift.totalOrders,
       status: effectiveStatus,
@@ -355,6 +357,8 @@ export async function getShiftById(venueId: string, shiftId: string, incluirEspe
           },
           orderId: true,
           createdAt: true,
+          // R3 (Codex #5 del cierre): la marca de cuenta de tarjetas; su cobro no es venta del turno ni del empleado.
+          order: { select: ORDEN_DE_TARJETAS_SELECT },
         },
         orderBy: {
           createdAt: 'desc',
@@ -468,7 +472,8 @@ export async function getShiftById(venueId: string, shiftId: string, incluirEspe
     if (!staffId) continue
 
     const staffName = payment.processedBy ? `${payment.processedBy.firstName} ${payment.processedBy.lastName}` : 'Sin asignar'
-    const amount = Number(payment.amount || 0)
+    // R3: vender tarjetas de regalo no es venta del empleado (el desglose por método sí conserva ese dinero).
+    const amount = esCobroDeCuentaDeTarjetas(payment) ? 0 : Number(payment.amount || 0)
     const tipAmount = Number(payment.tipAmount || 0)
 
     if (staffMap.has(staffId)) {
@@ -597,8 +602,14 @@ export async function getShiftById(venueId: string, shiftId: string, incluirEspe
     createdAt: payment.createdAt,
   }))
 
-  // Use calculated totals if they're more accurate than stored values
-  const finalTotalSales = calculatedTotalSales > 0 ? calculatedTotalSales : Number(shift.totalSales)
+  // Use calculated totals if they're more accurate than stored values. R3 (Codex #5 del cierre): el guardado de un turno SIN cerrar es
+  // el acumulado en vivo, que cuenta las cargas de tarjetas; su respaldo es la agregación que ya las excluye.
+  const finalTotalSales =
+    calculatedTotalSales > 0
+      ? calculatedTotalSales
+      : shift.status === 'CLOSED'
+        ? Number(shift.totalSales)
+        : Number(await ventasDelTurnoSinTarjetas(venueId, shift.id))
   const finalTotalTips = calculatedTotalTips > 0 ? calculatedTotalTips : Number(shift.totalTips)
 
   // P2 (Codex 27-ago): el campo es ADITIVO — si su consulta truena, el endpoint viejo no puede volverse un 500.
@@ -713,8 +724,9 @@ export async function getShiftsSummary(venueId: string, filters: ShiftFilters = 
 
   const staffTipsMap: Map<string, { name: string; amount: number; count: number }> = new Map()
 
+  const ventasSinCerrar = await ventasDeTurnosSinCerrar(venueId, shifts)
   for (const shift of shifts) {
-    totalSales += Number(shift.totalSales)
+    totalSales += ventasSinCerrar.get(shift.id) ?? Number(shift.totalSales)
     totalTips += Number(shift.totalTips)
     totalOrders += shift.totalOrders
 
@@ -999,6 +1011,22 @@ export interface PaymentMethodBreakdownRow {
   children?: Array<{ label: string; total: number; tips: number; count: number }>
 }
 
+/** R3: ¿el cobro es de una cuenta de tarjetas? La misma lectura que el cierre (`aggregateShiftPayments`). */
+function esCobroDeCuentaDeTarjetas(payment: { order?: { items?: ReadonlyArray<unknown> | null } | null }): boolean {
+  return (payment.order?.items?.length ?? 0) > 0
+}
+
+/**
+ * R3 (Codex #5 del cierre): las ventas de las filas de turnos SIN cerrar. Su `totalSales` guardado es el acumulado en vivo, que suma
+ * cualquier cobro (también las cargas de tarjetas); el cierre lo reemplaza por el total firmado. Una agregación por turno abierto
+ * (normalmente uno por negocio).
+ */
+async function ventasDeTurnosSinCerrar(venueId: string, shifts: Array<{ id: string; status: string }>): Promise<Map<string, number>> {
+  const abiertos = shifts.filter(s => s.status !== 'CLOSED')
+  const ventas = await Promise.all(abiertos.map(s => ventasDelTurnoSinTarjetas(venueId, s.id)))
+  return new Map(abiertos.map((s, i) => [s.id, Number(ventas[i])]))
+}
+
 /**
  * Desglose del corte por método de pago REAL + marcas de tarjeta.
  *
@@ -1023,6 +1051,8 @@ export function buildPaymentBreakdown(
     processorData?: unknown
     tenderLabel?: string | null
     externalSource?: string | null
+    /** R3: la marca de cuenta de tarjetas (`ORDEN_DE_TARJETAS_SELECT`). Sin `order`, el cobro cuenta como venta, como siempre. */
+    order?: { items?: ReadonlyArray<unknown> | null } | null
   }>,
 ): {
   paymentMethodBreakdown: PaymentMethodBreakdownRow[]
@@ -1036,13 +1066,17 @@ export function buildPaymentBreakdown(
   const labelMap = new Map<string, Map<string, { total: number; tips: number; count: number }>>()
   const cardBrandMap = new Map<string, { total: number; count: number }>()
   let totalSales = 0
+  // Todo el dinero cobrado: el denominador de los % por método (una carga de tarjetas sí entró, aunque no sea venta).
+  let totalCobrado = 0
   let totalTips = 0
   let cardTotal = 0
 
   for (const payment of payments) {
     const amount = Number(payment.amount || 0)
     const tipAmount = Number(payment.tipAmount || 0)
-    totalSales += amount
+    // R3 (Codex #5 del cierre): la venta de tarjetas de regalo no es venta del turno; su dinero sí va al desglose por método.
+    if (!esCobroDeCuentaDeTarjetas(payment)) totalSales += amount
+    totalCobrado += amount
     totalTips += tipAmount
 
     const method = payment.method || 'OTHER'
@@ -1087,7 +1121,7 @@ export function buildPaymentBreakdown(
     }
   }
 
-  const salesDenominator = totalSales || 1
+  const salesDenominator = totalCobrado || 1
   const cardDenominator = cardTotal || 1
 
   return {

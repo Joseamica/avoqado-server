@@ -1042,6 +1042,8 @@ export async function recordRefund(
             amount: new Decimal(refundData.amount).div(100),
             staffId: userId,
             dineroYaDevuelto: true,
+            // A1 (cierre): la misma aritmética del tope de arriba, en centavos y bajo el candado del cobro.
+            devuelveTodoElCobro: esteReembolsoCents >= lockedRemainingCents,
             original: { orderId: locked.orderId, tenderSystemKind: originalPayment.tenderType?.systemKind ?? null },
           })
         : { cuentaCancelada: false }

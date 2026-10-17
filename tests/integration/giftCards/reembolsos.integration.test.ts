@@ -32,14 +32,17 @@ import { recordRefund } from '@/services/tpv/refund.tpv.service'
 import { activarSobresDeCuentaPagadaEnTx, revertirCanjeEnTx } from '@/services/giftCards/giftCardLedger'
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
 import { postCashRefundToDrawer } from '@/services/shared/cashDrawerPosting'
-import { payCashOrder } from '@/services/mobile/order.mobile.service'
+import { payCashOrder, payGiftCardBalanceOnOrder } from '@/services/mobile/order.mobile.service'
+import { decryptGiftCardCode, formatGiftCardCode } from '@/services/giftCards/giftCardCode'
+import { abrirTurno } from '../dashboard/sembrarCobroParaReembolso'
 // `integration-setup.ts` mockea la bitácora (fire-and-forget): se comprueba la llamada.
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { avisarOrdenCancelada } from '@/services/shared/orderCancelGuard'
 import {
+  crearCuentaDeMercancia,
   crearNegocioDePrueba,
   esperarAQueAlguienEspereA,
-  limpiarEfectosDePagoDelNegocio,
+  limpiarNegocioDePrueba,
   pidDe,
   sembrarCanje,
   sembrarVentaDeTarjetas,
@@ -60,7 +63,7 @@ describe('B1 · reembolsos con tarjetas de regalo', () => {
 
   // Fix 7: los efectos que encolaron ESTOS cobros y reembolsos no se quedan para el worker de otra suite. La libreta no se toca.
   afterAll(async () => {
-    await limpiarEfectosDePagoDelNegocio(venueId)
+    await limpiarNegocioDePrueba(venueId)
   })
 
   const refundsDe = (orderId: string) => prisma.payment.count({ where: { orderId, type: 'REFUND' } })
@@ -550,5 +553,54 @@ describe('B1 · reembolsos con tarjetas de regalo', () => {
       expect([reverso.type, reverso.amount.toFixed(2), reverso.reversesActivityId]).toEqual(['REDEEM_REVERSAL', '220.00', canjeado.id])
       expect((await prisma.giftCard.findUniqueOrThrow({ where: { id: venta.giftCardIds[0] } })).balance.toFixed(2)).toBe('500.00')
     })
+  })
+})
+
+describe('⭐ A8 (cierre): con el turno ABIERTO, pagar con saldo y devolver otro cobro del MISMO sobre a la vez', () => {
+  let venueId: string
+  afterAll(async () => {
+    await limpiarNegocioDePrueba(venueId)
+  })
+
+  it('🔴 sin interbloqueo (40P01), el saldo cuadra y el turno reclama los dos movimientos', async () => {
+    // Negocio propio: su turno abierto no reclama los cobros de las demás pruebas de este archivo.
+    const n = await crearNegocioDePrueba('a8-turno-abierto')
+    venueId = n.venueId
+    const { staffId, organizationId } = n
+    const turno = await abrirTurno(venueId, staffId)
+    const venta = await sembrarVentaDeTarjetas({ venueId, organizationId, staffId, montos: [1000], metodo: 'CASH' })
+    const sobreId = venta.giftCardIds[0]
+    const codigo = formatGiftCardCode(decryptGiftCardCode((await prisma.giftCard.findUniqueOrThrow({ where: { id: sobreId } })).codeEnc))
+    const cobrar = (orderId: string, monto: number, llave: string) =>
+      payGiftCardBalanceOnOrder(venueId, orderId, {
+        idempotencyKey: llave,
+        proof: { kind: 'CODE', code: codigo },
+        amount: new Prisma.Decimal(monto),
+        tip: new Prisma.Decimal(0),
+        staffId,
+        deviceId: null,
+      })
+    const cuentaA = await crearCuentaDeMercancia({ venueId, staffId, total: 300 })
+    const cobroA = await cobrar(cuentaA.orderId, 300, `a8-cobro-a-${venueId}`.slice(0, 64))
+    const cuentaB = await crearCuentaDeMercancia({ venueId, staffId, total: 200 })
+
+    // Cada uno toma Order → sobre → turno (el reembolso: Order → Payment → sobre → turno). A la vez sobre el MISMO sobre y turno.
+    const [pagoB, devolucionA] = await Promise.allSettled([
+      cobrar(cuentaB.orderId, 200, `a8-cobro-b-${venueId}`.slice(0, 64)),
+      issueRefund({ venueId, paymentId: cobroA.paymentId, amount: 30000, reason: 'RETURNED_GOODS', staffId }),
+    ])
+
+    expect([pagoB.status, devolucionA.status]).toEqual(['fulfilled', 'fulfilled'])
+    expect((await prisma.giftCard.findUniqueOrThrow({ where: { id: sobreId } })).balance.toFixed(2)).toBe('800.00')
+    const b = pagoB.status === 'fulfilled' ? pagoB.value : null
+    const r = devolucionA.status === 'fulfilled' ? devolucionA.value : null
+    const turnosDe = await prisma.payment.findMany({
+      where: { id: { in: [cobroA.paymentId, b!.paymentId, r!.refundId] } },
+      select: { id: true, shiftId: true },
+      take: 3,
+    })
+    expect(turnosDe.map(p => p.shiftId)).toEqual([turno.id, turno.id, turno.id])
+    // El acumulado del turno: +$300 (A) − $300 (su devolución) + $200 (B).
+    expect((await prisma.shift.findUniqueOrThrow({ where: { id: turno.id } })).totalSales.toFixed(2)).toBe('200.00')
   })
 })

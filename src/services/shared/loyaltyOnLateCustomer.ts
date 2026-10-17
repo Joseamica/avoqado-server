@@ -10,6 +10,7 @@ import { awardLoyaltyForPaidOrder, type AwardLoyaltyForPaidOrderArgs, type Award
 import { cerrarLealtadDeLaVenta, registrarErrorDeLealtad } from './cierreDeLealtad'
 import { MARCA_LEALTAD_REABIERTA } from './lealtadReabierta'
 import { esVentaYaCobrada, ventaTieneReembolso } from './ligaDeClienteEnVenta'
+import { SELECT_MARCA_DE_CUENTA_DE_TARJETAS, esCuentaDeTarjetasSeleccionada } from '@/services/giftCards/giftCardMarks'
 
 /** La marca de fila que deja la reapertura (ver `lealtadReabierta.ts`). */
 export { MARCA_LEALTAD_REABIERTA }
@@ -49,8 +50,19 @@ export interface SaleStampOutcome {
   rewardReady: boolean
 }
 
-/** Lo que la regla concluye antes de traducirlo al contrato. `OPEN` = cuenta aún no saldada: el sello se decide al saldarla. */
-export type SaleStampDecision = 'OPEN' | 'NOT_PAID' | 'STAMPED' | 'OTHER_CUSTOMER' | 'NO_ANCHOR' | 'WINDOW_EXPIRED' | 'ELIGIBLE'
+/**
+ * Lo que la regla concluye antes de traducirlo al contrato. `OPEN` = cuenta aún no saldada: el sello se decide al saldarla.
+ * `NOT_APPLICABLE` (cierre de tarjetas 1a): venta de tarjetas de regalo — comprarlas no suma sellos (R1/B6), usarlas sí.
+ */
+export type SaleStampDecision =
+  | 'OPEN'
+  | 'NOT_PAID'
+  | 'STAMPED'
+  | 'OTHER_CUSTOMER'
+  | 'NO_ANCHOR'
+  | 'WINDOW_EXPIRED'
+  | 'ELIGIBLE'
+  | 'NOT_APPLICABLE'
 
 export interface SaleStampSnapshot {
   /** El cliente por el que se pregunta. */
@@ -67,6 +79,8 @@ export interface SaleStampSnapshot {
   pointsOwnerCustomerIds: string[]
   /** Cuándo se saldó: `loyaltyEligibleAt` o el último cobro completado. */
   settledAt: Date | null
+  /** La cuenta es de tarjetas de regalo (marca completa R11): el otorgamiento ya no da sello (B6); la regla tampoco lo promete. */
+  esVentaDeTarjetas: boolean
 }
 
 const SIN_VENTA = new Set(['CANCELLED', 'DELETED'])
@@ -77,6 +91,8 @@ const SIN_VENTA = new Set(['CANCELLED', 'DELETED'])
  * demás (saldada, no cancelada, sin reembolso, sin otro dueño) sí.
  */
 export function decideSaleStamp(s: SaleStampSnapshot, nowMs: number, opciones: { ignorarPlazo?: boolean } = {}): SaleStampDecision {
+  // Cierre (punto 15): primero que todo. Abierta o pagada, una venta de tarjetas nunca va a sumar sello: no se promete uno.
+  if (s.esVentaDeTarjetas) return 'NOT_APPLICABLE'
   // 🔴 Un reembolso de la TPV deja la orden en PAID: se mira el dinero devuelto y la reversa del sello, no sólo el estado.
   if (SIN_VENTA.has(s.status) || s.paymentStatus === 'REFUNDED' || s.reembolsada || s.hasReversal) return 'NOT_PAID'
   if (s.paymentStatus !== 'PAID') return 'OPEN'
@@ -132,6 +148,8 @@ const VENTA_SELECT = {
     take: 10,
   },
   loyaltyTransactions: { where: { type: LoyaltyTransactionType.EARN }, select: { customerId: true }, take: 10 },
+  // Cierre (punto 15): la marca COMPLETA de cuenta de tarjetas, en esta MISMA lectura (la de giftCardMarks).
+  ...SELECT_MARCA_DE_CUENTA_DE_TARJETAS,
 } satisfies Prisma.OrderSelect
 
 type Venta = Prisma.OrderGetPayload<{ select: typeof VENTA_SELECT }> & { reembolsada: boolean }
@@ -164,6 +182,7 @@ function fotoPara(venta: Venta, customerId: string): SaleStampSnapshot {
     stampOwnerCustomerId: earn?.stampCard.customerId ?? null,
     pointsOwnerCustomerIds: venta.loyaltyTransactions.map(t => t.customerId),
     settledAt: venta.loyaltyEligibleAt ?? venta.payments[0]?.createdAt ?? null,
+    esVentaDeTarjetas: esCuentaDeTarjetasSeleccionada(venta),
   }
 }
 
@@ -434,6 +453,8 @@ async function motivo(
 ): Promise<SaleStampReason | null> {
   switch (decision) {
     case 'STAMPED':
+    case 'NOT_APPLICABLE':
+      // Venta de tarjetas: no es «no suma por X»; no aplica. Quien llama no le pinta nada a la app (devuelve null).
       return null
     case 'OPEN':
     case 'NOT_PAID':
@@ -628,7 +649,8 @@ export async function awardLoyaltyForLateCustomer(args: {
         },
       })
     }
-    return outcome
+    // Cierre (punto 15): la liga a una venta de tarjetas queda auditada (arriba), pero la app no pinta nada: no aplica.
+    return antes === 'NOT_APPLICABLE' ? null : outcome
   } catch (error) {
     const mensaje = error instanceof Error ? error.message : String(error)
     logger.error('[LEALTAD TARDÍA] falló; el cliente ya quedó ligado a la venta', { venueId, orderId, customerId, error: mensaje })
@@ -720,7 +742,7 @@ export async function describeSaleStampForPayment(args: { venueId: string; payme
   const customerId = venta.orderCustomers[0]?.customerId ?? venta.customerId ?? null
   if (!customerId) return null
   const decision = decideSaleStamp(fotoPara(venta, customerId), nowMs)
-  if (decision === 'OPEN') return null
+  if (decision === 'OPEN' || decision === 'NOT_APPLICABLE') return null
   const sinProcesar = venta.paymentStatus === 'PAID' && venta.loyaltyEligibleAt !== null && venta.loyaltyProcessedAt === null
   if (sinProcesar && decision !== 'STAMPED' && decision !== 'NOT_PAID') {
     return armarResultado(args.venueId, customerId, programa, false, 'PENDING')
