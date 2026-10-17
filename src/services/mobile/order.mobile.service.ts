@@ -60,6 +60,7 @@ import {
 // mismo archivo; volver a llamarla es lo que impide que se separen otra vez.
 import { claseDeEstado, computeOrderBalance, impuestoQueSeCobraAparte, summarizeRefunds, type RefundState } from '../shared/orderBalance'
 import { rechazarSiEsImportada } from '../shared/ordenImportada'
+import { rechazarSiLaCuentaTieneVales } from '../shared/cuentaConVales'
 import { RECIBO_CANONICO } from '../shared/reciboCanonico'
 import type { SaleStampOutcome } from '../shared/loyaltyOnLateCustomer'
 import {
@@ -1788,7 +1789,8 @@ export async function splitOrderItemsInTransaction(
       shiftId: true,
       contratoDePrecio: true,
       originSystem: true,
-      items: { select: { id: true, orderPromotionId: true } },
+      areaTicketCheckoutSession: { select: { id: true } },
+      items: { select: { id: true, orderPromotionId: true, areaTicketLineId: true } },
       orderDiscounts: { select: { id: true } },
       serviceCharges: { select: { id: true, isAutomatic: true } },
     },
@@ -1803,6 +1805,8 @@ export async function splitOrderItemsInTransaction(
   if (source.paymentStatus === 'PAID' || source.paymentStatus === 'PARTIAL') {
     throw new BadRequestError('No se puede separar una cuenta ya pagada')
   }
+  // 🔴 R14-1 (founder, 17-oct): una cuenta con vales de mostrador no se separa; se paga con abonos en la misma cuenta.
+  rechazarSiLaCuentaTieneVales(source)
   // 🔴 MONEY (auditoría): mismos guards que fusionar — un descuento/canje/cargo
   // se calculó sobre la cuenta COMPLETA; partirla cambiaría la base en silencio.
   if (source.orderDiscounts.length > 0) {
@@ -1965,7 +1969,8 @@ export async function splitOrderBySeatInTransaction(tx: Prisma.TransactionClient
       shiftId: true,
       contratoDePrecio: true,
       originSystem: true,
-      items: { select: { id: true, seat: true } },
+      areaTicketCheckoutSession: { select: { id: true } },
+      items: { select: { id: true, seat: true, areaTicketLineId: true } },
       orderDiscounts: { select: { id: true } },
       serviceCharges: { select: { id: true, isAutomatic: true } },
     },
@@ -1980,6 +1985,8 @@ export async function splitOrderBySeatInTransaction(tx: Prisma.TransactionClient
   if (source.paymentStatus === 'PAID' || source.paymentStatus === 'PARTIAL') {
     throw new BadRequestError('No se puede dividir una cuenta ya pagada')
   }
+  // 🔴 R14-1: una cuenta con vales de mostrador no se divide por puesto (mismo guarda que separar).
+  rechazarSiLaCuentaTieneVales(source)
   // 🔴 MONEY (auditoría): mismos guards que fusionar — descuentos/canjes/cargos
   // se calcularon sobre la cuenta completa; dividirla cambiaría la base.
   if (source.orderDiscounts.length > 0) {
@@ -2117,10 +2124,15 @@ export async function mergeOrdersInTransaction(
     }
     throw error
   }
+  // R14-1: lo que dice si un lado es cuenta con vales (su sesión, o un renglón de vale de una cuenta ya dividida antes).
+  const valesDeLaCuenta = {
+    areaTicketCheckoutSession: { select: { id: true } },
+    items: { where: { areaTicketLineId: { not: null } }, select: { areaTicketLineId: true }, take: 1 },
+  } as const
   const [target, source] = await Promise.all([
     tx.order.findFirst({
       where: { id: targetOrderId, venueId },
-      select: { id: true, orderNumber: true, status: true, paymentStatus: true, paidAmount: true, tableId: true },
+      select: { id: true, orderNumber: true, status: true, paymentStatus: true, paidAmount: true, tableId: true, ...valesDeLaCuenta },
     }),
     tx.order.findFirst({
       where: { id: sourceOrderId, venueId },
@@ -2134,6 +2146,7 @@ export async function mergeOrdersInTransaction(
         _count: { select: { items: true } },
         orderDiscounts: { select: { id: true }, take: 1 },
         serviceCharges: { where: { isAutomatic: false }, select: { id: true, isAutomatic: true }, take: 1 },
+        ...valesDeLaCuenta,
       },
     }),
   ])
@@ -2152,6 +2165,9 @@ export async function mergeOrdersInTransaction(
       throw new BadRequestError(`La cuenta ${label} ya tiene pagos; no se puede fusionar`)
     }
   }
+  // 🔴 R14-1 (founder, 17-oct): ni la venta de vales se junta en otra (su sesión quedaba huérfana y sus renglones fuera de su vale) ni
+  // otra cuenta se junta en ella (decisión de esta ronda: la sesión y su saldo lo soportarían, pero la cuenta con vales no se junta).
+  rechazarSiLaCuentaTieneVales(target, source)
 
   if (source._count.items === 0) {
     throw new BadRequestError('La cuenta origen no tiene artículos')
@@ -2810,11 +2826,9 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
     try {
       paymentResult = await prisma.$transaction(async tx => {
         // 🔴 R13-1 (Codex r17 #1): el medio se resuelve ANTES de la sesión de vales (sólo lee; ningún candado), para que ella sepa si
-        // el dinero ya se capturó. Resolver la semántica ANTES de decidir si un exceso es cambio. Una
-        // tarjeta/transferencia externa ya capturada no produjo efectivo para
-        // devolver: recortarla escondería dinero real y rompería conciliación.
-        // (Tarea 6a: sube antes del saldo —sólo lee— porque la admisión de una cancelada
-        // también depende de si es efectivo de cajón.)
+        // el dinero ya se capturó. También va antes del saldo: decide si un exceso es cambio (una tarjeta o transferencia externa ya
+        // capturada no produjo efectivo para devolver: recortarla escondería dinero real y rompería la conciliación) y si se admite
+        // sobre una cuenta cancelada (Tarea 6a: depende de si es efectivo de cajón).
         const resolvedTender =
           input.tenderTypeId != null && input.tenderRevision != null
             ? await resolveTenderForCharge(

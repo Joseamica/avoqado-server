@@ -1246,16 +1246,10 @@ describe('🔴 R10: el registrador de la terminal y la sesión de vales', () => 
     /**
      * 🔴 R13-3 (Codex r17 #5; revierte R12-5): una cuenta de vales de $60 lleva 13 h abierta y un gerente fusiona en ella un pedido
      * reciente de $40. Se capturan los $100, falla la finalización y el rescate llega minutos después. La edad de la CUENTA no decide su
-     * cocina: el rescate marca y arma como siempre, y el planificador del KDS descarta artículo por artículo los de más de 12 h
-     * (`kitchenTicketPlanning.test.ts`, «R13-3»).
+     * cocina (el rescate ya no la lee, así que aquí no hay nada que simular): marca y arma como siempre, y el planificador del KDS
+     * descarta artículo por artículo los de más de 12 h (`kitchenTicketPlanning.test.ts`, «R13-3»).
      */
-    it('🔴 R13-3: rescate de una cuenta de hace 13 h ⇒ marca y comanda UNA vez (el planificador filtra los artículos viejos)', async () => {
-      ;(prisma.areaTicketCheckoutSession.findFirst as jest.Mock).mockResolvedValue({
-        id: 'session-1',
-        status: 'RECONCILIATION_REQUIRED',
-        activePaymentAttemptId: 'attempt-1',
-        order: { createdAt: new Date(Date.now() - 13 * 60 * 60 * 1000) },
-      })
+    it('🔴 R13-3: el rescate marca y comanda UNA vez sin mirar la edad de la cuenta (el planificador filtra los artículos viejos)', async () => {
       finalizeAreaTicketPaymentMock.mockResolvedValue({
         areaTicketOrder: true,
         sessionId: 'session-1',

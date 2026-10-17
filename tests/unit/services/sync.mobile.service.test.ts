@@ -939,6 +939,37 @@ describe('sync.mobile.service processIntents', () => {
     },
   )
 
+  // 🔴 R14-1 (founder, 17-oct): una cuenta con vales de mostrador no se separa ni se junta. Sin red, el intent que choca con ese
+  // guarda es un rechazo de negocio PERMANENTE (cuarentena visible con el aviso), nunca RETRY: reintentarlo no lo arreglaría jamás
+  // y cortaría el FIFO del aparato.
+  it.each([
+    ['SPLIT_ORDER', () => orderMobileService.splitOrderItems, { orderId: 'order-12', itemRefs: [{ id: 'item-1' }] }],
+    ['SPLIT_BY_SEAT', () => orderMobileService.splitOrderBySeat, { orderId: 'order-12' }],
+    ['MERGE_ORDERS', () => orderMobileService.mergeOrders, { orderId: 'order-12', sourceOrderId: 'order-13' }],
+  ] as const)(
+    '🔴 R14-1: %s sobre una cuenta con vales → REJECTED AREA_TICKET_ORDER_NOT_SPLITTABLE con el aviso (no RETRY)',
+    async (type, escritor, payload) => {
+      ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 2, status: 'PENDING', tableId: 't1', servedById: STAFF })
+      ;(prisma.orderItem.findMany as jest.Mock).mockResolvedValue([{ id: 'item-1' }])
+      const { rechazarSiLaCuentaTieneVales, MENSAJE_CUENTA_CON_VALES } = jest.requireActual('@/services/shared/cuentaConVales')
+      let rechazo: unknown
+      try {
+        rechazarSiLaCuentaTieneVales({ areaTicketCheckoutSession: { id: 'sesion-vales' } })
+      } catch (e) {
+        rechazo = e
+      }
+      expect(rechazo).toBeDefined()
+      ;(escritor() as jest.Mock).mockRejectedValueOnce(rechazo)
+      const acks = await processIntents(baseParams([{ id: `i-r14-${type}`, type, payload }]))
+      expect(acks[0]).toEqual({
+        id: `i-r14-${type}`,
+        status: 'REJECTED',
+        errorCode: 'AREA_TICKET_ORDER_NOT_SPLITTABLE',
+        message: MENSAJE_CUENTA_CON_VALES,
+      })
+    },
+  )
+
   it('UPDATE_DETAILS y CANCEL_ORDER delegan en el mismo servicio que online', async () => {
     ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 2, tableId: 't1', servedById: STAFF })
     const acks = await processIntents(

@@ -2361,8 +2361,9 @@ export async function lockAreaTicketCheckoutForPayment(
   // 🔴 R12-1 (ronda 12; Codex recheck-16 #1): $100 recibidos en la TPV, el registro se demora y un gerente cancela la sesión desde el
   // POS. El dinero ya capturado no recibe 409 por eso: sigue la MISMA regla de nivel venta que una venta sin vales cancelada (se registra
   // y la cuenta se reabre, `reabrirSiRecibeDinero`, con su bitácora `ORDER_REOPENED_BY_CAPTURED_PAYMENT`). Por eso `null`: ni intento,
-  // ni sesión (sigue cancelada), ni los vales que la cancelación liberó (no se consumen ni se apropian: `createSalePostingInTx` sólo
-  // toma los renglones cuyo vale sigue siendo de esta venta). El cobro NUEVO sigue rechazado abajo, antes de tomar el dinero.
+  // ni sesión (sigue cancelada), ni los vales que la cancelación liberó (no se consumen ni se apropian: `createSalePostingInTx` deja
+  // fuera el renglón cuyo vale liberó la cancelación o cuya reserva ya se consumió, R13-2). El cobro NUEVO sigue rechazado abajo,
+  // antes de tomar el dinero.
   if (input.dineroCapturado && checkoutStatusIn(session.status, [AreaTicketCheckoutStatus.CANCELLED, AreaTicketCheckoutStatus.EXPIRED])) {
     logger.error(
       '🚨 [AREA TICKETS v7] Dinero capturado sobre una sesión de vales ya cerrada sin cobro: se registra a nivel venta; requiere conciliación',
