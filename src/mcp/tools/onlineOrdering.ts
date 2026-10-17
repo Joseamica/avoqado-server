@@ -8,7 +8,8 @@ import { requireWriteScopeAlways } from '../requireWriteScopeAlways'
 import { planGateMessage } from '../planGate'
 import { getInboxOrder, listInbox } from '@/services/online-ordering/inbox.service'
 import { setOnlineAvailability } from '@/services/online-ordering/menuAvailability.service'
-import { getSettings, pauseOnlineOrdering, updateSettings } from '@/services/online-ordering/settings.service'
+import { getAcceptingStatus, storeView } from '@/services/online-ordering/presence.service'
+import { getSettings, pauseOnlineOrdering, storeRequirements, updateSettings } from '@/services/online-ordering/settings.service'
 import {
   acceptOnlineOrder,
   cancelOnlineOrderByStaff,
@@ -210,13 +211,21 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
 
   server.tool(
     'online_ordering_settings',
-    'Ajustes de la tienda en línea del negocio, sólo lectura: si está encendida, horario, pedido mínimo en pesos, minutos de preparación, pausas y cuándo consultó la bandeja un aparato por última vez.',
+    'Ajustes de la tienda en línea del negocio, sólo lectura: si está encendida, horario, pedido mínimo en pesos, minutos de preparación, pausas, cuándo consultó la bandeja un aparato por última vez, si la tienda está abierta ahora (y por qué no) y qué le falta para poder encenderla (domicilio, teléfono, aviso de privacidad publicado).',
     { venueId: z.string().describe('Venue (debe estar en tu scope)') },
     async ({ venueId }) => {
       guard.venueFilter(venueId)
       guard.requirePermission('orders:read', venueId)
-      const { lastInboxPollAt, ...ajustes } = await getSettings(venueId)
-      return text({ ok: true, ajustes: { ...ajustes, ultimoSondeoDeBandeja: lastInboxPollAt ? lastInboxPollAt.toISOString() : null } })
+      // Lo mismo que `GET /settings` del panel: los ajustes se leen una vez y el estado sale del mismo cálculo que la tienda.
+      const settings = await getSettings(venueId)
+      const [state, requirements] = await Promise.all([getAcceptingStatus(venueId, new Date(), settings), storeRequirements(venueId)])
+      const { lastInboxPollAt, ...ajustes } = settings
+      return text({
+        ok: true,
+        ajustes: { ...ajustes, ultimoSondeoDeBandeja: lastInboxPollAt ? lastInboxPollAt.toISOString() : null },
+        store: storeView(state),
+        requirements,
+      })
     },
   )
 

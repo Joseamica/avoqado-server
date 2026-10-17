@@ -20,6 +20,8 @@ const mockUpdateSettings = jest.fn()
 const mockPause = jest.fn()
 const mockSetAvailability = jest.fn()
 const mockTouch = jest.fn()
+const mockAccepting = jest.fn()
+const mockRequirements = jest.fn()
 const mockAudit = jest.fn()
 
 jest.mock('@/mcp/guard', () => {
@@ -59,11 +61,17 @@ jest.mock('@/services/online-ordering/settings.service', () => ({
   getSettings: (...a: unknown[]) => mockGetSettings(...(a as [])),
   updateSettings: (...a: unknown[]) => mockUpdateSettings(...(a as [])),
   pauseOnlineOrdering: (...a: unknown[]) => mockPause(...(a as [])),
+  storeRequirements: (...a: unknown[]) => mockRequirements(...(a as [])),
 }))
 jest.mock('@/services/online-ordering/menuAvailability.service', () => ({
   setOnlineAvailability: (...a: unknown[]) => mockSetAvailability(...(a as [])),
 }))
-jest.mock('@/services/online-ordering/presence.service', () => ({ touchInboxPoll: (...a: unknown[]) => mockTouch(...(a as [])) }))
+jest.mock('@/services/online-ordering/presence.service', () => ({
+  touchInboxPoll: (...a: unknown[]) => mockTouch(...(a as [])),
+  getAcceptingStatus: (...a: unknown[]) => mockAccepting(...(a as [])),
+  // Ronda 1: el armado del estado es el REAL (el mismo del panel y la bandeja).
+  storeView: jest.requireActual('@/services/online-ordering/presence.service').storeView,
+}))
 
 type Handler = (a: Record<string, unknown>, e: unknown) => Promise<{ content: Array<{ text: string }> }>
 const handlers = new Map<string, Handler>()
@@ -121,6 +129,8 @@ beforeEach(() => {
   mockListInbox.mockResolvedValue({ serverTime: 'x', counts: { pending: 1, active: 1, done: 0 }, orders: [pending], truncated: false })
   mockGetInboxOrder.mockResolvedValue(pending)
   mockGetSettings.mockResolvedValue(AJUSTES)
+  mockAccepting.mockResolvedValue({ status: 'OFFLINE', reason: 'NO_DEVICE', config: { ...AJUSTES } })
+  mockRequirements.mockResolvedValue({ address: true, phone: false, privacyNotice: true })
 })
 
 describe('online_orders_list', () => {
@@ -299,6 +309,15 @@ describe('online_ordering_settings', () => {
     expect(mockRequirePermission).toHaveBeenCalledWith('orders:read', 'v1')
     expect(r).toMatchObject({ ok: true, ajustes: expect.objectContaining({ enabled: true, minOrderAmount: 50 }) })
     expect(mockUpdateSettings).not.toHaveBeenCalled()
+  })
+
+  it('ronda 1 (MCP en sync con el panel): trae el estado de la tienda y qué falta para encenderla, leyendo los ajustes UNA vez', async () => {
+    const r = parse(await call('online_ordering_settings', { venueId: 'v1' }))
+    expect(r.store).toEqual({ status: 'OFFLINE', reason: 'NO_DEVICE', pausedUntil: null, manualPause: false })
+    expect(r.requirements).toEqual({ address: true, phone: false, privacyNotice: true })
+    expect(mockGetSettings).toHaveBeenCalledTimes(1)
+    expect(mockAccepting).toHaveBeenCalledWith('v1', expect.any(Date), AJUSTES)
+    expect(mockRequirements).toHaveBeenCalledWith('v1')
   })
 })
 

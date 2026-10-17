@@ -7,6 +7,8 @@ jest.mock('@/services/online-ordering/presence.service', () => ({
   __esModule: true,
   touchInboxPoll: jest.fn(),
   getAcceptingStatus: jest.fn(),
+  // Ronda 1: el armado del estado es el REAL (uno solo para panel, bandeja y MCP).
+  storeView: jest.requireActual('@/services/online-ordering/presence.service').storeView,
 }))
 jest.mock('@/services/online-ordering/settings.service', () => ({ __esModule: true, pauseOnlineOrdering: jest.fn() }))
 jest.mock('@/services/online-ordering/transitions.service', () => ({

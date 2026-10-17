@@ -85,6 +85,11 @@ describe('storeRequirements', () => {
     conRequisitos({ ...VENUE_COMPLETO, address: null, city: null, state: null, zipCode: null })
     await expect(storeRequirements('v1')).resolves.toMatchObject({ address: false })
   })
+
+  it('ronda 1: el domicilio exige la CALLE; ciudad, estado y CP solos no bastan', async () => {
+    conRequisitos({ ...VENUE_COMPLETO, address: '   ' })
+    await expect(storeRequirements('v1')).resolves.toEqual({ address: false, phone: true, privacyNotice: true })
+  })
 })
 
 describe('settings.service', () => {
@@ -159,25 +164,43 @@ describe('settings.service', () => {
     expect((logAction as jest.Mock).mock.invocationCallOrder[0]).toBeGreaterThan(
       tx.onlineOrderingSettings.upsert.mock.invocationCallOrder[0],
     )
+    // Ronda 1: encender una tienda apagada revisa los requisitos DESPUÉS de tomar el candado (sobre el estado que leyó ahí).
+    expect(prismaMock.venue.findUnique.mock.invocationCallOrder[0]).toBeGreaterThan(
+      tx.onlineOrderingSettings.findUnique.mock.invocationCallOrder[0],
+    )
   })
 
-  it('R18: encender sin teléfono es 400 STORE_REQUIREMENTS_MISSING con lo que falta, y no guarda ni audita nada', async () => {
+  it('R18: encender una tienda APAGADA sin teléfono es 400 STORE_REQUIREMENTS_MISSING con lo que falta, y no guarda ni audita nada', async () => {
     conRequisitos({ ...VENUE_COMPLETO, phone: null })
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(row({ enabled: false }) as any)
     await expect(updateSettings('v1', { enabled: true }, 'staff1')).rejects.toMatchObject({
       statusCode: 400,
       code: 'STORE_REQUIREMENTS_MISSING',
       details: { missing: ['phone'] },
+      message: 'Para encender la tienda falta el teléfono del negocio.',
     })
-    expect(prismaMock.$transaction).not.toHaveBeenCalled()
     expect(prismaMock.onlineOrderingSettings.upsert).not.toHaveBeenCalled()
     expect(logAction).not.toHaveBeenCalled()
   })
 
-  it('R18: sin nada de lo exigido lista los tres faltantes, en orden', async () => {
+  it('R18: sin fila previa (nunca configurada) cuenta como apagada; sin nada de lo exigido lista los tres faltantes, en orden', async () => {
     conRequisitos({ address: null, city: null, state: null, zipCode: null, phone: null }, null)
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(null)
     await expect(updateSettings('v1', { enabled: true, minOrderAmount: 50 }, 'staff1')).rejects.toMatchObject({
       code: 'STORE_REQUIREMENTS_MISSING',
       details: { missing: ['address', 'phone', 'privacyNotice'] },
+      message: 'Para encender la tienda faltan el domicilio del negocio, el teléfono del negocio y el aviso de privacidad publicado.',
+    })
+    expect(prismaMock.onlineOrderingSettings.upsert).not.toHaveBeenCalled()
+  })
+
+  it('ronda 1: sin calle (sólo ciudad, estado y CP) encender una tienda apagada falta el domicilio', async () => {
+    conRequisitos({ ...VENUE_COMPLETO, address: null })
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(row({ enabled: false }) as any)
+    await expect(updateSettings('v1', { enabled: true }, 'staff1')).rejects.toMatchObject({
+      code: 'STORE_REQUIREMENTS_MISSING',
+      details: { missing: ['address'] },
+      message: 'Para encender la tienda falta el domicilio del negocio.',
     })
   })
 
@@ -188,14 +211,16 @@ describe('settings.service', () => {
     expect((prismaMock.onlineOrderingSettings.upsert.mock.calls[0][0] as any).update).toEqual({ enabled: true })
   })
 
-  it('R18: apagar o cambiar otros campos NUNCA exige requisitos (ni los consulta)', async () => {
+  it('R18: apagar, cambiar otros campos o repetir enabled:true en una tienda YA encendida NUNCA exige requisitos (ni los consulta)', async () => {
     conRequisitos({ address: null, city: null, state: null, zipCode: null, phone: null }, null)
-    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(row() as any)
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(row() as any) // encendida
     prismaMock.onlineOrderingSettings.upsert.mockResolvedValue(row() as any)
     await expect(updateSettings('v1', { minOrderAmount: 50 }, 'staff1')).resolves.toBeDefined()
     await expect(updateSettings('v1', { enabled: false }, 'staff1')).resolves.toBeDefined()
     await expect(updateSettings('v1', { manualPause: true, pausedUntil: null }, 'staff1')).resolves.toBeDefined()
-    expect(prismaMock.onlineOrderingSettings.upsert).toHaveBeenCalledTimes(3)
+    // Ronda 1: el panel manda el formulario entero (con enabled:true) al cambiar el mínimo de una tienda que ya estaba encendida.
+    await expect(updateSettings('v1', { enabled: true, minOrderAmount: 60 }, 'staff1')).resolves.toBeDefined()
+    expect(prismaMock.onlineOrderingSettings.upsert).toHaveBeenCalledTimes(4)
     expect(prismaMock.venue.findUnique).not.toHaveBeenCalled()
     expect(prismaMock.privacyNoticeVersion.findFirst).not.toHaveBeenCalled()
   })

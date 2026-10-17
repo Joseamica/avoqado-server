@@ -25,6 +25,11 @@ export async function touchInboxPoll(venueId: string, now: Date = new Date()): P
   return true
 }
 
+/** Lo que el panel, la bandeja y el MCP muestran del estado de la tienda: un solo armado. */
+export function storeView(state: AcceptingState) {
+  return { status: state.status, reason: state.reason, pausedUntil: state.config.pausedUntil, manualPause: state.config.manualPause }
+}
+
 /** `preloaded`: los ajustes que quien llama ya leyó (p. ej. `GET /settings`), para no leerlos dos veces. */
 export async function getAcceptingStatus(
   venueId: string,
