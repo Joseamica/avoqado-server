@@ -75,21 +75,29 @@ describe('Pedidos en línea — ciclo de vida (integration, real DB)', () => {
   // R23: un teléfono distinto (y válido para libphonenumber) por pedido.
   const nextPhone = () => `+5255${40_000_000 + (((RUN % 100_000) * 100 + ++phoneSeq) % 60_000_000)}`
   const ITEMS = () => [{ productId, quantity: 2, modifiers: [{ modifierId }] }]
+  /**
+   * P1-06: `assertCanCreate` es obligatorio. Aquí plan y negocio operativo PASAN a propósito: el fixture no tiene suscripción y
+   * esta suite prueba la admisión contra Postgres; sus rechazos se prueban en las unitarias del servicio, la ruta y los middlewares.
+   */
+  const PLAN_Y_NEGOCIO_PASAN = { assertCanCreate: async () => {} }
 
   const newOrder = (o: { key?: string; phone?: string; expectedTotal?: string; items?: any[]; customer?: string } = {}) => {
     const phone = o.phone ?? nextPhone()
-    return createOnlineOrder({
-      venueId: venueId!,
-      idempotencyKey: o.key ?? nextKey(),
-      items: o.items ?? ITEMS(),
-      paymentMode: 'PAY_AT_PICKUP',
-      expectedTotal: o.expectedTotal ?? '206.00',
-      customer: { name: 'María ITEST', phone },
-      customerId: o.customer ?? customerId,
-      verifiedPhone: phone,
-      note: null,
-      whatsappConsent: false,
-    })
+    return createOnlineOrder(
+      {
+        venueId: venueId!,
+        idempotencyKey: o.key ?? nextKey(),
+        items: o.items ?? ITEMS(),
+        paymentMode: 'PAY_AT_PICKUP',
+        expectedTotal: o.expectedTotal ?? '206.00',
+        customer: { name: 'María ITEST', phone },
+        customerId: o.customer ?? customerId,
+        verifiedPhone: phone,
+        note: null,
+        whatsappConsent: false,
+      },
+      PLAN_Y_NEGOCIO_PASAN,
+    )
   }
   // R23: cada caso que necesita presencia escribe su propio latido.
   const beat = async () => {
@@ -320,8 +328,10 @@ describe('Pedidos en línea — ciclo de vida (integration, real DB)', () => {
 
     const primero = newOrder({ key, phone })
     let reintento: Promise<Awaited<ReturnType<typeof newOrder>>> | undefined
+    let primeroRetenido = false
     const carrera = (async () => {
       const pidDelPrimero = await esperarBloqueadoPor(pidDelRetenedor, 'el primer envío nunca quedó retenido dentro de su transacción')
+      primeroRetenido = true
       // La tienda cierra mientras el primer envío sigue sin confirmar; el comensal reintenta con la MISMA llave y solicitud.
       await prisma.onlineOrderingSettings.update({ where: { venueId: venueId! }, data: { hours: todoCerrado } })
       reintento = newOrder({ key, phone })
@@ -340,6 +350,12 @@ describe('Pedidos en línea — ciclo de vida (integration, real DB)', () => {
       data: { hours: horarioAntes === null ? Prisma.DbNull : (horarioAntes as Prisma.InputJsonValue) },
     })
 
+    // Diagnóstico ANTES de afirmar sobre el reintento: sin el primer envío retenido, la carrera nunca ocurrió.
+    if (!primeroRetenido) {
+      throw new Error(
+        `montaje inconcluso: el primer envío nunca quedó retenido (${espera.status === 'rejected' ? String(espera.reason) : 'sin causa'})`,
+      )
+    }
     expect(a).toMatchObject({ status: 'fulfilled', value: { replay: false } })
     const creado = (a as PromiseFulfilledResult<Awaited<ReturnType<typeof newOrder>>>).value
     // SU pedido, no ORDERING_CLOSED.
