@@ -22,5 +22,8 @@ export interface AcceptingState {
   config: OnlineOrderingConfig
 }
 
+/** A10: cómo se hace la lectura de candidatos de una sincronización (el job la envuelve en su reintento por conexión). */
+export type ReadCandidates = <T>(read: () => Promise<T>) => Promise<T>
+
 /** R12: lo que se puede frenar desde el piso con `online-orders:pause` (D7: gerente para arriba, o con su PIN en el POS). */
 export type FloorPauseMinutes = 15 | 30 | 60

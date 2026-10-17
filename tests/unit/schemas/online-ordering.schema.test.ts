@@ -1,5 +1,5 @@
 // H5 (r2): el Zod de ajustes usa la MISMA validación que la precarga (`isValidOrderingHours`, tarea 3).
-import { pauseSchema, settingsPatchBody } from '@/schemas/online-ordering.schema'
+import { inboxSchema, menuAvailabilityBody, pauseSchema, settingsPatchBody } from '@/schemas/online-ordering.schema'
 
 const dia = (enabled: boolean, ranges: Array<{ open: string; close: string }> = []) => ({ enabled, ranges })
 const semana = (o: Record<string, unknown> = {}) => ({
@@ -49,5 +49,52 @@ describe('pauseSchema (R12: la pausa desde el piso)', () => {
     for (const mal of [45, 0, -15, '30', 30.5, undefined]) expect(pausa(mal).success).toBe(false)
     const r = pausa(45)
     expect(r.success === false && r.error.issues[0].message).toBe('Elige 15, 30 o 60 minutos')
+  })
+})
+
+describe('menuAvailabilityBody: ids seguros (A9)', () => {
+  const marcar = (o: Record<string, unknown>) => menuAvailabilityBody.safeParse({ availableOnline: true, ...o })
+
+  it('acepta ids cuid y los de formato heredado (UUID)', () => {
+    expect(marcar({ productIds: ['cmgq0x0p30001abcd1234efgh', '8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d'] }).success).toBe(true)
+    expect(marcar({ categoryIds: ['cmgq0x0p30001abcd1234efgh'] }).success).toBe(true)
+  })
+
+  it('rechaza ids con bytes de control, espacios o de más de 40 caracteres, con el mensaje en español', () => {
+    for (const mal of ['p1\u0000', 'p\u001b1', 'p 1', 'p'.repeat(41)]) {
+      const r = marcar({ productIds: [mal] })
+      expect(r.success).toBe(false)
+      expect(JSON.stringify(r)).toContain('Platillo inválido')
+      const c = marcar({ categoryIds: [mal] })
+      expect(c.success).toBe(false)
+      expect(JSON.stringify(c)).toContain('Categoría inválida')
+    }
+  })
+})
+
+describe('inboxSchema: cursor de los activos (A8)', () => {
+  const bandeja = (query: Record<string, unknown>) => inboxSchema.safeParse({ params: { venueId: 'v1' }, query })
+  const CURSOR = '2026-10-14T18:30:00.000Z_cmgq0x0p30001abcd1234efgh'
+
+  it('sin cursor responde igual que hoy; con cursor sólo para la lista de activos', () => {
+    expect(bandeja({}).success).toBe(true)
+    expect(bandeja({ status: 'active', cursor: CURSOR }).success).toBe(true)
+  })
+
+  it('un cursor mal formado, con otra lista o con bytes de control se rechaza en español', () => {
+    for (const mal of [
+      'x',
+      '2026-10-14_ord1',
+      `${CURSOR}\u0000`,
+      '2026-99-99T99:99:99.000Z_ord1',
+      `${CURSOR.slice(0, 25)}${'a'.repeat(60)}`,
+    ]) {
+      const r = bandeja({ status: 'active', cursor: mal })
+      expect(r.success).toBe(false)
+      expect(JSON.stringify(r)).toContain('Cursor inválido')
+    }
+    const otraLista = bandeja({ status: 'all', cursor: CURSOR })
+    expect(otraLista.success).toBe(false)
+    expect(JSON.stringify(otraLista)).toContain('El cursor sólo sirve para los pedidos activos (status=active)')
   })
 })

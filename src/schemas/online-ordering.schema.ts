@@ -1,5 +1,7 @@
 import { z } from 'zod'
+import { ACTIVE_CURSOR_PATTERN } from '@/services/online-ordering/constants'
 import { HHMM_PATTERN, isValidOrderingHours, MAX_RANGES_PER_DAY } from '@/services/online-ordering/hours'
+import { safeId } from '@/schemas/public/onlineOrdering.schema'
 
 const venueParams = z.object({ venueId: z.string().min(1, 'Negocio inválido') })
 const orderParams = venueParams.extend({ orderId: z.string().min(1, 'Pedido inválido') })
@@ -52,8 +54,8 @@ export const settingsPatchBody = z
 export const menuAvailabilityBody = z
   .object({
     availableOnline: z.boolean(),
-    productIds: z.array(z.string().min(1)).max(500, 'Máximo 500 platillos por vez').optional(),
-    categoryIds: z.array(z.string().min(1)).max(100, 'Máximo 100 categorías por vez').optional(),
+    productIds: z.array(safeId('Platillo inválido')).max(500, 'Máximo 500 platillos por vez').optional(),
+    categoryIds: z.array(safeId('Categoría inválida')).max(100, 'Máximo 100 categorías por vez').optional(),
     allProducts: z.boolean().optional(),
   })
   .refine(b => b.allProducts === true || (b.productIds?.length ?? 0) > 0 || (b.categoryIds?.length ?? 0) > 0, {
@@ -65,11 +67,25 @@ export const floorPauseMinutes = z
   .union([z.literal(15), z.literal(30), z.literal(60)], { errorMap: () => ({ message: 'Elige 15, 30 o 60 minutos' }) })
   .nullable()
 
+/** A8: el `nextCursor` de la página anterior de pedidos activos («<createdAt ISO>_<id>»). */
+export const activeCursor = z
+  .string()
+  .max(80, 'Cursor inválido')
+  .regex(ACTIVE_CURSOR_PATTERN, 'Cursor inválido')
+  .refine(v => !Number.isNaN(Date.parse(v.slice(0, 24))), 'Cursor inválido')
+
 export const inboxSchema = z.object({
   params: venueParams,
-  query: z.object({
-    status: z.enum(['pending', 'active', 'done', 'all'], { errorMap: () => ({ message: 'Filtro inválido' }) }).optional(),
-  }),
+  query: z
+    .object({
+      status: z.enum(['pending', 'active', 'done', 'all'], { errorMap: () => ({ message: 'Filtro inválido' }) }).optional(),
+      // A8: los activos se paginan por llave estable; sin cursor la bandeja responde igual que antes.
+      cursor: activeCursor.optional(),
+    })
+    .refine(q => q.cursor === undefined || q.status === 'active', {
+      message: 'El cursor sólo sirve para los pedidos activos (status=active)',
+      path: ['cursor'],
+    }),
 })
 export const orderActionSchema = z.object({ params: orderParams })
 export const acceptSchema = z.object({

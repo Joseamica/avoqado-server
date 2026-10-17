@@ -69,6 +69,50 @@ describe('settings.service', () => {
     expect(prismaMock.onlineOrderingSettings.upsert).not.toHaveBeenCalled()
   })
 
+  it('A6: lee, combina, valida y escribe DENTRO de una transacción con el candado del negocio (también la primera vez); la bitácora sale después', async () => {
+    const tx = {
+      $executeRaw: jest.fn().mockResolvedValue(0),
+      onlineOrderingSettings: { findUnique: jest.fn().mockResolvedValue(null), upsert: jest.fn().mockResolvedValue(row()) },
+      reservationSettings: { findUnique: jest.fn().mockResolvedValue(null) },
+    }
+    ;(prismaMock.$transaction as jest.Mock).mockImplementationOnce(async (fn: any) => fn(tx))
+
+    await updateSettings('v1', { enabled: true }, 'staff1')
+
+    expect(tx.$executeRaw).toHaveBeenCalledTimes(1)
+    const [strings, key] = tx.$executeRaw.mock.calls[0]
+    expect((strings as string[]).join('?')).toContain('pg_advisory_xact_lock(hashtext(?))')
+    expect(key).toBe('online-ordering-settings:v1')
+    const lockAt = tx.$executeRaw.mock.invocationCallOrder[0]
+    for (const later of [
+      tx.onlineOrderingSettings.findUnique.mock.invocationCallOrder[0],
+      tx.reservationSettings.findUnique.mock.invocationCallOrder[0],
+      tx.onlineOrderingSettings.upsert.mock.invocationCallOrder[0],
+    ]) {
+      expect(lockAt).toBeLessThan(later)
+    }
+    // Nada de leer-combinar-escribir corre en el cliente raíz, fuera del candado.
+    expect(prismaMock.onlineOrderingSettings.findUnique).not.toHaveBeenCalled()
+    expect(prismaMock.onlineOrderingSettings.upsert).not.toHaveBeenCalled()
+    expect(prismaMock.reservationSettings.findUnique).not.toHaveBeenCalled()
+    expect((logAction as jest.Mock).mock.invocationCallOrder[0]).toBeGreaterThan(
+      tx.onlineOrderingSettings.upsert.mock.invocationCallOrder[0],
+    )
+  })
+
+  it('A6: lo que se rechaza por validación (sin medio de pago) se rechaza bajo el candado y no escribe', async () => {
+    const tx = {
+      $executeRaw: jest.fn().mockResolvedValue(0),
+      onlineOrderingSettings: { findUnique: jest.fn().mockResolvedValue(row({ enabled: true })), upsert: jest.fn() },
+      reservationSettings: { findUnique: jest.fn() },
+    }
+    ;(prismaMock.$transaction as jest.Mock).mockImplementationOnce(async (fn: any) => fn(tx))
+    await expect(updateSettings('v1', { acceptsPayAtPickup: false }, 'staff1')).rejects.toMatchObject({ code: 'NO_PAYMENT_MODE' })
+    expect(tx.$executeRaw).toHaveBeenCalledTimes(1)
+    expect(tx.onlineOrderingSettings.upsert).not.toHaveBeenCalled()
+    expect(logAction).not.toHaveBeenCalled()
+  })
+
   it('la primera vez precarga el horario de reservas si existe y es válido (R16)', async () => {
     prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(null)
     prismaMock.reservationSettings.findUnique.mockResolvedValue({ operatingHours: semana() } as any)

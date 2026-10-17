@@ -133,6 +133,33 @@ describe('API pública de pedidos en línea', () => {
     expect(createOnlineOrder).not.toHaveBeenCalled()
   })
 
+  it('A9: un productId o modifierId con un byte de control o un espacio es 400 en español (nunca llega a la base ni da 500)', async () => {
+    const one = { productId: 'p1', quantity: 1 }
+    for (const items of [
+      [{ ...one, productId: 'p1\u0000' }],
+      [{ ...one, productId: 'p\u001b1' }],
+      [{ ...one, productId: 'p 1' }],
+      [{ ...one, modifiers: [{ modifierId: 'm1\u0000' }] }],
+    ]) {
+      const r = await post({ customer: true, payload: { ...body, items } })
+      expect(r.status).toBe(400)
+      // Este app de prueba no monta el manejador de errores de la API: el mensaje viaja en el texto del 400.
+      expect(r.text).toMatch(/Producto inválido|Opción inválida/)
+    }
+    const quote = await request(app)
+      .post('/venues/flautas/ordering/quote')
+      .send({ items: [{ ...one, productId: 'p1\u0000' }] })
+    expect(quote.status).toBe(400)
+    expect(createOnlineOrder).not.toHaveBeenCalled()
+    expect(quoteCart).not.toHaveBeenCalled()
+  })
+
+  it('A9: un cuid normal sigue pasando', async () => {
+    ;(createOnlineOrder as jest.Mock).mockResolvedValue({ orderId: 'ord1', trackingToken: TOKEN, replay: false })
+    const items = [{ productId: 'cmgq0x0p30001abcd1234efgh', quantity: 1, modifiers: [{ modifierId: 'cmgq0x0p30002abcd1234efgh' }] }]
+    expect((await post({ customer: true, payload: { ...body, items } })).status).toBe(201)
+  })
+
   it('🔴 ESC/POS: un `ESC p` en una nota llega SIN el carácter de control; el salto de línea de una nota se queda', async () => {
     ;(createOnlineOrder as jest.Mock).mockResolvedValue({ orderId: 'ord1', trackingToken: TOKEN, replay: false })
     const r = await post({
@@ -313,6 +340,24 @@ describe('cableado: qué candados corre cada ruta', () => {
     mockRan.length = 0
     expect((await cancel()).status).toBe(200)
     expect(mockRan).toEqual(['plain'])
+  })
+
+  it('A9: un slug con bytes de control, espacios o demasiado largo es 400 ANTES de buscar el negocio, en todas las rutas', async () => {
+    for (const slug of ['flau%00tas', 'flau%1Btas', 'flau%20tas', 'f'.repeat(101)]) {
+      for (const llamar of [
+        () => request(app).get(`/venues/${slug}/ordering/info`),
+        () => request(app).get(`/venues/${slug}/ordering/menu`),
+        () => request(app).post(`/venues/${slug}/ordering/quote`).send({ items: body.items }),
+        () => request(app).post(`/venues/${slug}/ordering/orders`).set('Idempotency-Key', KEY).set('x-test-customer', '1').send(body),
+        () => request(app).get(`/venues/${slug}/ordering/orders/${TOKEN}`),
+        () => request(app).post(`/venues/${slug}/ordering/orders/${TOKEN}/cancel`),
+      ]) {
+        const r = await llamar()
+        expect(r.status).toBe(400)
+        expect(r.text).toContain('Negocio inválido')
+      }
+    }
+    expect(mockRan).toEqual([])
   })
 
   it('un token mal formado se rechaza ANTES de buscar el negocio (no cuesta una consulta)', async () => {

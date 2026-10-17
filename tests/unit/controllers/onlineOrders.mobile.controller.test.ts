@@ -79,6 +79,15 @@ describe('onlineOrders.mobile.controller', () => {
     expect(res.json).toHaveBeenCalledWith({ success: true, data: { ...LISTA, store: { status: 'OPEN', reason: null } } })
   })
 
+  it('A8: el cursor de los activos pasa al servicio y la respuesta trae su nextCursor', async () => {
+    const CURSOR = '2026-10-14T18:30:00.000Z_oo-B099'
+    ;(listInbox as jest.Mock).mockResolvedValue({ ...LISTA, truncated: true, nextCursor: 'siguiente' })
+    const { req, res, next } = mock({ query: { status: 'active', cursor: CURSOR } })
+    await ctrl.inbox(req, res, next)
+    expect(listInbox).toHaveBeenCalledWith({ venueId: 'v1', filter: 'active', activeCursor: CURSOR })
+    expect(res.json).toHaveBeenCalledWith({ success: true, data: expect.objectContaining({ nextCursor: 'siguiente' }) })
+  })
+
   it('sin la cabecera de bandeja (otra vista del panel, un script) no hay latido', async () => {
     const { req, res, next } = mock()
     await ctrl.inbox(req, res, next)
@@ -159,6 +168,14 @@ describe('onlineOrders.mobile.controller', () => {
     await ctrl.delivered(req, res, next)
     expect(res.status).toHaveBeenCalledWith(409)
     expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'PAYMENT_REQUIRED' }))
+  })
+
+  it('A12: entregar lo que ya estaba entregado es 200 (idempotente), no un 409 «ya cambió»', async () => {
+    ;(markOnlineOrderDelivered as jest.Mock).mockResolvedValue({ outcome: 'OK', status: 'COMPLETED', unchanged: true })
+    const { req, res, next } = mock()
+    await ctrl.delivered(req, res, next)
+    expect(res.status).not.toHaveBeenCalled()
+    expect(res.json).toHaveBeenCalledWith({ success: true, data: { status: 'COMPLETED', unchanged: true } })
   })
 
   it('cancelar una cuenta con dinero es 409 ORDER_HAS_PAYMENTS', async () => {

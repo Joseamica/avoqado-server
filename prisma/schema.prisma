@@ -19740,7 +19740,10 @@ model OnlineOrder {
   /// Capacidad de seguimiento (192 bits). En claro, como `Reservation.cancelSecret`: la repetición idempotente de
   /// «crear pedido» devuelve el MISMO token. Lee el estado de ESTE pedido y lo cancela mientras está «por aceptar».
   /// Es un secreto: el logger lo redacta de la ruta (`SECRET_SEGMENT_AFTER`).
-  trackingToken String @unique
+  trackingToken String  @unique
+  /// Huella sha256 de la solicitud con que se creó (carrito, cantidades, opciones, notas, total, modo y cliente). La repetición
+  /// idempotente la compara en vez del total de la cuenta, que la caja puede cambiar. Nula = se trata como solicitud distinta.
+  requestHash   String?
 
   acceptDeadlineAt DateTime
   acceptedAt       DateTime?

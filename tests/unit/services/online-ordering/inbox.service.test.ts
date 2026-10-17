@@ -14,7 +14,7 @@ jest.mock('@/communication/sockets/managers/socketManager', () => ({
 
 import { socketManager } from '@/communication/sockets/managers/socketManager'
 import { notifyOrderEvent } from '@/services/online-ordering/notifications.service'
-import { listInbox } from '@/services/online-ordering/inbox.service'
+import { getInboxOrder, listInbox } from '@/services/online-ordering/inbox.service'
 
 const NOW = new Date('2026-10-14T18:30:00.000Z')
 const row = (id: string, status: string, o: Record<string, unknown> = {}) => ({
@@ -145,7 +145,12 @@ describe('listInbox', () => {
     expect(lecturas[1].where).toMatchObject({ venueId: 'v1', paymentMode: 'PAY_AT_PICKUP' })
     expect(lecturas.slice(2).some(esSincronizacion)).toBe(false)
     expect(prismaMock.onlineOrder.updateMany).toHaveBeenCalledWith({
-      where: { id: 'oo-P', status: 'READY' },
+      // A3: el CAS repite el filtro de la cuenta (pagada, viva y sin reembolsos).
+      where: {
+        id: 'oo-P',
+        status: 'READY',
+        order: { paymentStatus: 'PAID', status: { notIn: ['CANCELLED', 'DELETED'] }, payments: { none: { type: 'REFUND' } } },
+      },
       data: { status: 'COMPLETED', completedAt: NOW },
     })
     expect(logAction).toHaveBeenCalledWith(
@@ -188,5 +193,46 @@ describe('listInbox', () => {
     const r = await listInbox({ venueId: 'v1', filter: 'pending', now: NOW })
     expect(r.truncated).toBe(false)
     expect(r.orders).toHaveLength(100)
+  })
+
+  it('A8: los activos se paginan por llave estable: nextCursor si hay más, y con cursor siguen DESPUÉS del último (createdAt desc, id desc)', async () => {
+    const at = new Date('2026-10-14T17:00:00.000Z')
+    const activos = Array.from({ length: 101 }, (_, i) => row(`B${String(i).padStart(3, '0')}`, 'ACCEPTED', { createdAt: at }))
+    prismaMock.onlineOrder.findMany.mockImplementation((async (a: any) => (esSincronizacion(a) ? [] : activos)) as any)
+
+    const r = await listInbox({ venueId: 'v1', filter: 'active', now: NOW })
+    expect(r.orders).toHaveLength(100)
+    expect(r.truncated).toBe(true)
+    expect(r.nextCursor).toBe(`${at.toISOString()}_oo-B099`)
+
+    prismaMock.onlineOrder.findMany.mockClear()
+    await listInbox({ venueId: 'v1', filter: 'active', activeCursor: r.nextCursor!, now: NOW })
+    const lista = prismaMock.onlineOrder.findMany.mock.calls.map((c: any[]) => c[0]).find((a: any) => !esSincronizacion(a))
+    expect(lista.where).toEqual({
+      venueId: 'v1',
+      status: { in: ['ACCEPTED', 'READY'] },
+      OR: [{ createdAt: { lt: at } }, { createdAt: at, id: { lt: 'oo-B099' } }],
+    })
+    expect(lista.orderBy).toEqual([{ createdAt: 'desc' }, { id: 'desc' }])
+    expect(lista.take).toBe(101)
+  })
+
+  it('A8: sin cursor la bandeja responde igual que antes, con nextCursor null si no recorta', async () => {
+    const r = await listInbox({ venueId: 'v1', now: NOW })
+    expect(r.nextCursor).toBeNull()
+    const activos = prismaMock.onlineOrder.findMany.mock.calls
+      .map((c: any[]) => c[0])
+      .find((a: any) => !esSincronizacion(a) && a.where.status.in.includes('ACCEPTED'))
+    expect(activos.where).toEqual({ venueId: 'v1', status: { in: ['ACCEPTED', 'READY'] } })
+  })
+
+  it('A8: un pedido se busca DIRECTO por { venueId, orderId } (no dentro de una página), con la forma de la bandeja', async () => {
+    prismaMock.onlineOrder.findFirst.mockResolvedValueOnce(row('Z', 'READY') as any)
+    const o = await getInboxOrder({ venueId: 'v1', orderId: 'ord-Z', now: NOW })
+    expect((prismaMock.onlineOrder.findFirst.mock.calls[0][0] as any).where).toEqual({ venueId: 'v1', orderId: 'ord-Z' })
+    expect(o).toMatchObject({ orderId: 'ord-Z', onlineOrderId: 'oo-Z', status: 'READY', orderNumber: 'WZ', total: 186 })
+    prismaMock.onlineOrder.findFirst.mockResolvedValueOnce(null)
+    await expect(getInboxOrder({ venueId: 'v1', orderId: 'de-otro-negocio', now: NOW })).resolves.toBeNull()
+    expect(prismaMock.onlineOrder.findMany).not.toHaveBeenCalled() // ni bandeja ni sincronizaciones
   })
 })

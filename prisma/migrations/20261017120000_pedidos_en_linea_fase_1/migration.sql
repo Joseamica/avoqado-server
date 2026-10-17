@@ -7,9 +7,6 @@ CREATE TYPE "OnlineOrderPaymentMode" AS ENUM ('PAY_AT_PICKUP');
 -- CreateEnum
 CREATE TYPE "OnlineOrderRejectReason" AS ENUM ('OUT_OF_ITEMS', 'CLOSED', 'TOO_BUSY', 'OTHER');
 
--- AlterTable
-ALTER TABLE "Product" ADD COLUMN     "availableOnline" BOOLEAN NOT NULL DEFAULT false;
-
 -- CreateTable
 CREATE TABLE "OnlineOrderingSettings" (
     "id" TEXT NOT NULL,
@@ -36,6 +33,7 @@ CREATE TABLE "OnlineOrder" (
     "status" "OnlineOrderStatus" NOT NULL DEFAULT 'PENDING_ACCEPTANCE',
     "paymentMode" "OnlineOrderPaymentMode" NOT NULL,
     "trackingToken" TEXT NOT NULL,
+    "requestHash" TEXT,
     "acceptDeadlineAt" TIMESTAMP(3) NOT NULL,
     "acceptedAt" TIMESTAMP(3),
     "estimatedReadyAt" TIMESTAMP(3),

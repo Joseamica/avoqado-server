@@ -2,9 +2,10 @@ import type { CronJob } from 'cron'
 import logger from '../config/logger'
 import { scheduleJob } from '../observability/jobContext'
 import { announceCancelledElsewhere, syncOnlineOrdersOfCancelledOrders } from '../services/online-ordering/cancelledOrderSync'
-import { EXPIRY_BATCH_SIZE } from '../services/online-ordering/constants'
+import { EXPIRY_BATCH_SIZE, OPEN_ORDER_STATUSES } from '../services/online-ordering/constants'
 import { announceCollectedAutomatically, syncOnlineOrdersOfPaidPickups } from '../services/online-ordering/paidPickupSync'
 import { expireOnlineOrder } from '../services/online-ordering/transitions.service'
+import type { ReadCandidates } from '../services/online-ordering/types'
 import prisma from '../utils/prismaClient'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { DATABASE_JOB_SCHEDULES } from './jobSchedules'
@@ -27,10 +28,13 @@ interface OnlineOrderAcceptanceExpiryDependencies {
   now: () => Date
   expireOrder: typeof expireOnlineOrder
   retryEntry: typeof retry
-  /** R2: cierra (y anuncia) los pedidos cuya cuenta se canceló por otra vía, en TODOS los negocios, antes de buscar vencidos. */
-  syncCancelled: (now: Date) => Promise<number>
+  /**
+   * R2: cierra (y anuncia) los pedidos cuya cuenta se canceló por otra vía, en TODOS los negocios, antes de buscar vencidos.
+   * A10: `readEntry` reintenta por conexión SÓLO su lectura de candidatos.
+   */
+  syncCancelled: (now: Date, readEntry: ReadCandidates) => Promise<number>
   /** Opción 1 del founder (17-oct): entrega (y anuncia) lo de pagar al recoger que ya quedó pagado, después de R2. */
-  syncPaidPickups: (now: Date) => Promise<number>
+  syncPaidPickups: (now: Date, readEntry: ReadCandidates) => Promise<number>
 }
 
 interface ExpiryResult {
@@ -49,13 +53,13 @@ const defaults: OnlineOrderAcceptanceExpiryDependencies = {
   expireOrder: expireOnlineOrder,
   retryEntry: retry,
   // I-1: el job ya corre fuera de una transacción, así que anuncia a sus ganadores justo después de la llamada.
-  syncCancelled: async now => {
-    const won = await syncOnlineOrdersOfCancelledOrders(prisma, {}, now)
+  syncCancelled: async (now, readEntry) => {
+    const won = await syncOnlineOrdersOfCancelledOrders(prisma, {}, now, readEntry)
     announceCancelledElsewhere(won, now)
     return won.length
   },
-  syncPaidPickups: async now => {
-    const won = await syncOnlineOrdersOfPaidPickups(prisma, {}, now)
+  syncPaidPickups: async (now, readEntry) => {
+    const won = await syncOnlineOrdersOfPaidPickups(prisma, {}, now, readEntry)
     announceCollectedAutomatically(won, now)
     return won.length
   },
@@ -92,6 +96,12 @@ export class OnlineOrderAcceptanceExpiryJob {
     logger.info('Online-order acceptance expiry job stopped')
   }
 
+  /** Lectura de entrada con reintento por conexión (regla cron-jobs.md). Los CAS, las transacciones y los avisos quedan FUERA. */
+  private readEntry(context: string): ReadCandidates {
+    return read =>
+      this.dependencies.retryEntry(read, { retries: 2, initialDelay: 1500, shouldRetry: shouldRetryDbConnectionError, context })
+  }
+
   async checkNow(): Promise<ExpiryResult> {
     if (this.isRunning) {
       logger.warn('[Online-order expiry] tick skipped — previous run still in progress')
@@ -104,15 +114,15 @@ export class OnlineOrderAcceptanceExpiryJob {
     try {
       const now = this.dependencies.now()
 
-      // R2: es una escritura (CAS), así que NO va dentro del reintento de lectura; si falla, la pasada sigue.
+      // R2: sólo su lectura de candidatos va con reintento (A10); sus CAS no. Si falla, la pasada sigue.
       try {
-        synced = await this.dependencies.syncCancelled(now)
+        synced = await this.dependencies.syncCancelled(now, this.readEntry('online-order-acceptance-expiry.syncCancelled'))
       } catch (error) {
         logger.error('Online-order expiry: no se pudieron cerrar los pedidos de cuentas canceladas (la pasada sigue)', { error })
       }
-      // Después de R2 y, igual, fuera del reintento de lectura: también es una escritura (CAS).
+      // Después de R2, con la misma regla: reintento sólo en la lectura.
       try {
-        collected = await this.dependencies.syncPaidPickups(now)
+        collected = await this.dependencies.syncPaidPickups(now, this.readEntry('online-order-acceptance-expiry.syncPaidPickups'))
       } catch (error) {
         logger.error('Online-order expiry: no se pudieron entregar los pedidos ya pagados (la pasada sigue)', { error })
       }
@@ -127,27 +137,20 @@ export class OnlineOrderAcceptanceExpiryJob {
       // terminal incierto lo deja bloqueado): 100 bloqueados delante no detienen a los que siguen.
       for (let page = 0; page < EXPIRY_MAX_PAGES; page++) {
         const after = cursor
-        // Lectura de entrada con reintento por conexión (regla cron-jobs.md). Los avisos y la transacción quedan FUERA.
-        // R1: sólo pedidos sin dinero y cuya cuenta sigue viva: uno ya cobrado no vence.
-        const candidates = (await this.dependencies.retryEntry(
-          () =>
-            this.dependencies.prisma.onlineOrder.findMany({
-              where: {
-                status: 'PENDING_ACCEPTANCE',
-                acceptDeadlineAt: { lte: now },
-                order: { paymentStatus: 'PENDING', status: { notIn: ['CANCELLED', 'DELETED'] } },
-                ...(after ? { OR: [{ acceptDeadlineAt: { gt: after.at } }, { acceptDeadlineAt: after.at, id: { gt: after.id } }] } : {}),
-              },
-              select: { id: true, orderId: true, venueId: true, acceptDeadlineAt: true },
-              orderBy: [{ acceptDeadlineAt: 'asc' }, { id: 'asc' }],
-              take: EXPIRY_BATCH_SIZE,
-            }),
-          {
-            retries: 2,
-            initialDelay: 1500,
-            shouldRetry: shouldRetryDbConnectionError,
-            context: 'online-order-acceptance-expiry.findDue',
-          },
+        // R1: sólo pedidos sin dinero y cuya cuenta sigue ABIERTA (A13): uno ya cobrado no vence, y una cuenta cerrada sin
+        // dinero (cortesía) no se puede cancelar, así que intentarlo en cada pasada sólo gasta un candado.
+        const candidates = (await this.readEntry('online-order-acceptance-expiry.findDue')(() =>
+          this.dependencies.prisma.onlineOrder.findMany({
+            where: {
+              status: 'PENDING_ACCEPTANCE',
+              acceptDeadlineAt: { lte: now },
+              order: { paymentStatus: 'PENDING', status: { in: [...OPEN_ORDER_STATUSES] } },
+              ...(after ? { OR: [{ acceptDeadlineAt: { gt: after.at } }, { acceptDeadlineAt: after.at, id: { gt: after.id } }] } : {}),
+            },
+            select: { id: true, orderId: true, venueId: true, acceptDeadlineAt: true },
+            orderBy: [{ acceptDeadlineAt: 'asc' }, { id: 'asc' }],
+            take: EXPIRY_BATCH_SIZE,
+          }),
         )) as ExpiryCandidate[]
 
         for (const candidate of candidates) {

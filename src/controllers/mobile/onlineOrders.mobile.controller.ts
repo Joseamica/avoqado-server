@@ -75,7 +75,9 @@ export const inbox = async (req: Request, res: Response, next: NextFunction) => 
   try {
     const { venueId } = req.params
     const filter = ((req.query.status as InboxFilter | undefined) ?? 'all') as InboxFilter
-    const data = await listInbox({ venueId, filter })
+    // A8: el Zod de la ruta ya validó el cursor (y que sólo venga con `status=active`).
+    const cursor = typeof req.query.cursor === 'string' ? req.query.cursor : undefined
+    const data = await listInbox({ venueId, filter, ...(cursor ? { activeCursor: cursor } : {}) })
     // R13: el latido va DESPUÉS de listar bien (una bandeja que falla no mantiene abierta la tienda) y sólo desde la pantalla
     // de bandeja en primer plano. H3: y sólo de quien puede contestar; un lector mira sin mantener abierta la tienda. Nunca le
     // cuesta la lista al restaurante.

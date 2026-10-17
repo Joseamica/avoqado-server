@@ -39,4 +39,21 @@ describe('appliesNow (exportada para la tienda en línea, R20)', () => {
     expect(appliesNow(temporada, new Date('2026-10-14T18:00:00Z'), TZ)).toBe(false)
     expect(appliesNow(temporada, new Date('2026-12-10T18:00:00Z'), TZ)).toBe(true)
   })
+
+  it('A7: en una franja que cruza medianoche, lo de DESPUÉS de medianoche cuenta como el día anterior (viernes 22:00–02:00)', () => {
+    const viernesNoche = menu({ availableFrom: '22:00', availableUntil: '02:00', availableDays: ['FRI'] })
+    expect(appliesNow(viernesNoche, new Date('2026-10-17T07:00:00Z'), TZ)).toBe(true) // sábado 01:00 CDMX: sigue la noche del viernes
+    expect(appliesNow(viernesNoche, new Date('2026-10-16T07:00:00Z'), TZ)).toBe(false) // viernes 01:00 CDMX: es la noche del jueves
+    expect(appliesNow(viernesNoche, new Date('2026-10-17T05:00:00Z'), TZ)).toBe(true) // viernes 23:00 CDMX
+    expect(appliesNow(viernesNoche, new Date('2026-10-18T05:00:00Z'), TZ)).toBe(false) // sábado 23:00 CDMX
+  })
+
+  it('A7: la noche del domingo pasa al lunes (vuelta de semana), y una franja de día sigue usando el día de hoy', () => {
+    const domingoNoche = menu({ availableFrom: '22:00', availableUntil: '02:00', availableDays: ['SUN'] })
+    expect(appliesNow(domingoNoche, new Date('2026-10-19T07:00:00Z'), TZ)).toBe(true) // lunes 01:00 CDMX
+    expect(appliesNow(domingoNoche, new Date('2026-10-18T07:00:00Z'), TZ)).toBe(false) // domingo 01:00 CDMX: noche del sábado
+    const viernesManana = menu({ availableFrom: '08:00', availableUntil: '12:00', availableDays: ['FRI'] })
+    expect(appliesNow(viernesManana, new Date('2026-10-16T15:00:00Z'), TZ)).toBe(true) // viernes 09:00 CDMX
+    expect(appliesNow(viernesManana, new Date('2026-10-17T15:00:00Z'), TZ)).toBe(false) // sábado 09:00 CDMX
+  })
 })

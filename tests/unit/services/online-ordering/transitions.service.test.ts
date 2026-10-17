@@ -377,6 +377,29 @@ describe('markOnlineOrderDelivered', () => {
     expect(r).toEqual({ outcome: 'OK', status: 'COMPLETED' })
     expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'ONLINE_ORDER_COLLECTED' }))
   })
+  it('A12: entregar un pedido que YA está entregado responde éxito sin escribir, sin socket ni otra bitácora', async () => {
+    prismaMock.onlineOrder.findFirst.mockResolvedValue(row({ status: 'COMPLETED', order: PAID }) as any)
+    await expect(markOnlineOrderDelivered(base)).resolves.toEqual({ outcome: 'OK', status: 'COMPLETED', unchanged: true })
+    expect(prismaMock.onlineOrder.updateMany).not.toHaveBeenCalled()
+    expect(prismaMock.order.updateMany).not.toHaveBeenCalled()
+    expect(logAction).not.toHaveBeenCalled()
+    expect(socketManager.broadcastToVenue).not.toHaveBeenCalled()
+  })
+
+  it('A12: también si la entrega automática ganó un instante antes (el CAS de «entregado» pierde y relee COMPLETED)', async () => {
+    prismaMock.onlineOrder.findFirst
+      .mockResolvedValueOnce(row({ status: 'READY', order: PAID }) as any)
+      .mockResolvedValueOnce({ status: 'COMPLETED', acceptDeadlineAt: NOW } as any)
+    prismaMock.onlineOrder.updateMany.mockResolvedValue({ count: 0 })
+    await expect(markOnlineOrderDelivered(base)).resolves.toEqual({ outcome: 'OK', status: 'COMPLETED', unchanged: true })
+    expect(prismaMock.order.updateMany).not.toHaveBeenCalled()
+    expect(logAction).not.toHaveBeenCalled()
+  })
+
+  it('A12: entregar algo cancelado o rechazado sigue siendo STALE', async () => {
+    prismaMock.onlineOrder.findFirst.mockResolvedValue(row({ status: 'CANCELLED_BY_STAFF', order: PAID }) as any)
+    await expect(markOnlineOrderDelivered(base)).resolves.toEqual({ outcome: 'STALE', status: 'CANCELLED_BY_STAFF' })
+  })
 })
 
 describe('cancelOnlineOrderByCustomer', () => {

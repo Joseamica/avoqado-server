@@ -12,6 +12,7 @@ import {
   Prisma,
   type OnlineOrderRejectReason,
 } from '@prisma/client'
+import { createHash } from 'node:crypto'
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
 import { BadRequestError, ConflictError, UnauthorizedError } from '@/errors/AppError'
@@ -53,15 +54,48 @@ export interface CreateOnlineOrderResult {
 }
 
 /**
- * Pedido ya creado con esta llave. R8: sólo se repite para QUIEN lo hizo; con otro cliente la llave choca. M-3: y sólo si es el
- * MISMO pedido: con otro total la llave también choca (el comensal creería que pidió lo nuevo).
+ * A1 (P1-01): huella de la solicitud normalizada. La repetición idempotente la compara en vez del total de la cuenta (la caja
+ * puede cambiarlo) y del cliente solo (otro carrito del mismo total pasaría). Renglones en el orden recibido; las opciones de
+ * cada renglón ordenadas por id (sin cantidad = 1); nota recortada; nombre y teléfono tal como se guardan en la cuenta.
+ */
+export function onlineOrderRequestHash(r: {
+  venueId: string
+  customerId: string
+  paymentMode: string
+  expectedTotal: string | Prisma.Decimal
+  items: CartItemInput[]
+  customerName: string
+  customerPhone: string
+}): string {
+  const normalized = {
+    venueId: r.venueId,
+    customerId: r.customerId,
+    paymentMode: r.paymentMode,
+    expectedTotal: new Prisma.Decimal(r.expectedTotal).toFixed(2),
+    items: r.items.map(i => ({
+      productId: i.productId,
+      quantity: i.quantity,
+      note: i.note?.trim() || null,
+      modifiers: (i.modifiers ?? [])
+        .map(m => ({ modifierId: m.modifierId, quantity: m.quantity ?? 1 }))
+        .sort((a, b) => (a.modifierId === b.modifierId ? a.quantity - b.quantity : a.modifierId < b.modifierId ? -1 : 1)),
+    })),
+    customer: { name: r.customerName, phone: r.customerPhone },
+  }
+  return createHash('sha256').update(JSON.stringify(normalized)).digest('hex')
+}
+
+/**
+ * Pedido ya creado con esta llave. R8: sólo se repite para QUIEN lo hizo; con otro cliente la llave choca. M-3/A1: y sólo si es la
+ * MISMA solicitud (su huella): con otro carrito o total la llave también choca (el comensal creería que pidió lo nuevo). Sin
+ * huella guardada, también choca.
  */
 async function findReplay(
   db: Prisma.TransactionClient,
   venueId: string,
   externalId: string,
   customerId: string,
-  expectedTotal: Prisma.Decimal,
+  requestHash: string,
 ): Promise<CreateOnlineOrderResult | null> {
   const existing = await db.order.findUnique({
     where: { venueId_externalId: { venueId, externalId } },
@@ -70,14 +104,14 @@ async function findReplay(
       orderNumber: true,
       total: true,
       customerId: true,
-      onlineOrder: { select: { id: true, status: true, trackingToken: true, acceptDeadlineAt: true } },
+      onlineOrder: { select: { id: true, status: true, trackingToken: true, acceptDeadlineAt: true, requestHash: true } },
     },
   })
   if (!existing?.onlineOrder) return null
   if (existing.customerId !== customerId) {
     throw new ConflictError('Esa llave ya se usó para otro pedido. Vuelve a armar tu pedido.', 'IDEMPOTENCY_KEY_CONFLICT')
   }
-  if (!new Prisma.Decimal(existing.total).equals(expectedTotal)) {
+  if (existing.onlineOrder.requestHash !== requestHash) {
     throw new ConflictError(
       'Ya hiciste un pedido distinto con esta misma solicitud. Recarga la página para empezar uno nuevo.',
       'IDEMPOTENCY_KEY_CONFLICT',
@@ -121,11 +155,21 @@ export async function createOnlineOrder(input: CreateOnlineOrderInput): Promise<
   // R23: la forma canónica de la casa (la misma que compara `phonesMatch`: `+521…` → `+52…`); si no la entiende, «+» y sólo
   // dígitos.
   const phone = canonicalPhoneE164(input.verifiedPhone) ?? `+${input.verifiedPhone.replace(/\D/g, '')}`
-  // R5: el total que vio el comensal (el Zod de la ruta ya validó «206.00»); también decide si una repetición es SU pedido (M-3).
+  // R5: el total que vio el comensal (el Zod de la ruta ya validó «206.00»).
   const expectedTotal = new Prisma.Decimal(input.expectedTotal)
+  // A1: la huella decide si una repetición es SU pedido (M-3); se guarda al crear.
+  const requestHash = onlineOrderRequestHash({
+    venueId: input.venueId,
+    customerId,
+    paymentMode: input.paymentMode,
+    expectedTotal,
+    items: input.items,
+    customerName: input.customer.name,
+    customerPhone: phone,
+  })
 
   // 2. Repetición idempotente (R8). Antes de mirar si la tienda abre: un reintento tras perder la respuesta recibe SU pedido.
-  const replay = await findReplay(prisma, input.venueId, externalId, customerId, expectedTotal)
+  const replay = await findReplay(prisma, input.venueId, externalId, customerId, requestHash)
   if (replay) return replay
 
   // 3. ¿La tienda está recibiendo pedidos?
@@ -165,7 +209,7 @@ export async function createOnlineOrder(input: CreateOnlineOrderInput): Promise<
         //    dos pedidos simultáneos no pasan juntos un tope ni toman el mismo folio. Sin Redis ni tabla de candados.
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'online-order-admission:' + input.venueId}))`
 
-        const again = await findReplay(tx, input.venueId, externalId, customerId, expectedTotal)
+        const again = await findReplay(tx, input.venueId, externalId, customerId, requestHash)
         if (again) return again
 
         const pendingByPhone = await tx.onlineOrder.count({
@@ -253,6 +297,7 @@ export async function createOnlineOrder(input: CreateOnlineOrderInput): Promise<
             status: OnlineOrderStatus.PENDING_ACCEPTANCE,
             paymentMode: OnlineOrderPaymentMode.PAY_AT_PICKUP,
             trackingToken,
+            requestHash,
             acceptDeadlineAt,
             whatsappConsent: input.whatsappConsent === true,
           },
@@ -292,7 +337,7 @@ export async function createOnlineOrder(input: CreateOnlineOrderInput): Promise<
   } catch (error) {
     // Dos peticiones con la misma llave a la vez: gana una, la otra recibe al ganador (si es del mismo cliente, R8).
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
-      const again = await findReplay(prisma, input.venueId, externalId, customerId, expectedTotal)
+      const again = await findReplay(prisma, input.venueId, externalId, customerId, requestHash)
       if (again) return again
     }
     throw error
