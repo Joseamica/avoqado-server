@@ -1,6 +1,8 @@
 // R14 y R15 por ruta: qué permiso exige cada una, dónde va (y dónde NO) el candado de plan, y con qué esquema se valida.
 import express from 'express'
 import request from 'supertest'
+import { Prisma } from '@prisma/client'
+import { prismaMock } from '@tests/__helpers__/setup'
 
 jest.mock('@/middlewares/authenticateToken.middleware', () => ({
   __esModule: true,
@@ -130,5 +132,99 @@ describe('API del restaurante: permiso, candado de plan y esquema por ruta', () 
 
   it('no existe «soltar la impresión» (R20)', async () => {
     expect((await request(app).post(`${M}/ord1/print/release`)).status).toBe(404)
+  })
+})
+
+/**
+ * 1b: lo que el panel LEE y lo que exige para encender, con el controlador y los servicios REALES (Prisma simulado). El manejador
+ * de errores de abajo replica la forma del global de `app.ts` para un `AppError`: `{ message, code, details }`.
+ */
+describe('panel: GET y PUT /settings (controlador real)', () => {
+  const real = jest.requireActual('@/controllers/dashboard/onlineOrdering.dashboard.controller')
+  const panel = express()
+  panel.use(express.json())
+  panel.get('/venues/:venueId/settings', real.getSettingsHandler)
+  panel.put('/venues/:venueId/settings', real.updateSettingsHandler)
+  panel.use((err: any, _req: any, res: any, _next: any) =>
+    res.status(err.statusCode ?? 500).json({ message: err.message, code: err.code, details: err.details }),
+  )
+
+  const NOW = Date.now()
+  const fila = (o: Record<string, unknown> = {}) => ({
+    id: 'set1',
+    venueId: 'v1',
+    enabled: true,
+    minOrderAmount: new Prisma.Decimal('0'),
+    defaultPrepMinutes: 15,
+    acceptsPayAtPickup: true,
+    manualPause: false,
+    pausedUntil: null,
+    hours: null,
+    lastInboxPollAt: new Date(NOW - 10_000),
+    ...o,
+  })
+  const VENUE = {
+    timezone: 'America/Mexico_City',
+    name: 'Flautas',
+    address: 'Av. Coyoacán 123',
+    city: 'CDMX',
+    state: 'CDMX',
+    zipCode: '04000',
+    phone: '5512345678',
+    email: null,
+  }
+  const AVISO = { id: 'pnv1', content: 'Aviso', contentHash: 'h', language: 'es', createdAt: new Date() }
+
+  beforeEach(() => {
+    prismaMock.venue.findUnique.mockResolvedValue(VENUE as any)
+    prismaMock.privacyNoticeVersion.findFirst.mockResolvedValue(AVISO as any)
+    prismaMock.onlineOrder.count.mockResolvedValue(0)
+  })
+
+  it('GET trae el estado de la tienda (mismo cálculo que /info) con sus pausas, y los requisitos; lee los ajustes UNA vez', async () => {
+    const hasta = new Date(NOW + 15 * 60_000)
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(fila({ pausedUntil: hasta }) as any)
+    prismaMock.privacyNoticeVersion.findFirst.mockResolvedValue(null)
+
+    const r = await request(panel).get('/venues/v1/settings')
+
+    expect(r.status).toBe(200)
+    expect(r.body.data.store).toEqual({ status: 'PAUSED', reason: 'MANUAL_PAUSE', pausedUntil: hasta.toISOString(), manualPause: false })
+    expect(r.body.data.requirements).toEqual({ address: true, phone: true, privacyNotice: false })
+    // Lo de antes sigue (campos aditivos).
+    expect(r.body.data).toMatchObject({ enabled: true, minOrderAmount: 0, lastInboxPollAt: new Date(NOW - 10_000).toISOString() })
+    expect(prismaMock.onlineOrderingSettings.findUnique).toHaveBeenCalledTimes(1)
+  })
+
+  it('GET de una tienda abierta: OPEN sin motivo, sin pausa', async () => {
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(fila() as any)
+    const r = await request(panel).get('/venues/v1/settings')
+    expect(r.body.data.store).toEqual({ status: 'OPEN', reason: null, pausedUntil: null, manualPause: false })
+    expect(r.body.data.requirements).toEqual({ address: true, phone: true, privacyNotice: true })
+  })
+
+  it('PUT {enabled:true} sin teléfono: 400 STORE_REQUIREMENTS_MISSING con missing:[phone], y no guarda nada', async () => {
+    prismaMock.venue.findUnique.mockResolvedValue({ ...VENUE, phone: null } as any)
+    const r = await request(panel).put('/venues/v1/settings').send({ enabled: true })
+    expect(r.status).toBe(400)
+    expect(r.body).toMatchObject({ code: 'STORE_REQUIREMENTS_MISSING', details: { missing: ['phone'] } })
+    expect(prismaMock.onlineOrderingSettings.upsert).not.toHaveBeenCalled()
+  })
+
+  it('PUT {enabled:true} con todo: 200', async () => {
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(fila({ enabled: false }) as any)
+    prismaMock.onlineOrderingSettings.upsert.mockResolvedValue(fila() as any)
+    const r = await request(panel).put('/venues/v1/settings').send({ enabled: true })
+    expect(r.status).toBe(200)
+    expect(r.body.data.enabled).toBe(true)
+  })
+
+  it('PUT {minOrderAmount: 50} y PUT {enabled:false} sin requisitos: 200', async () => {
+    prismaMock.venue.findUnique.mockResolvedValue({ ...VENUE, address: null, city: null, state: null, zipCode: null, phone: null } as any)
+    prismaMock.privacyNoticeVersion.findFirst.mockResolvedValue(null)
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(fila() as any)
+    prismaMock.onlineOrderingSettings.upsert.mockResolvedValue(fila() as any)
+    expect((await request(panel).put('/venues/v1/settings').send({ minOrderAmount: 50 })).status).toBe(200)
+    expect((await request(panel).put('/venues/v1/settings').send({ enabled: false })).status).toBe(200)
   })
 })

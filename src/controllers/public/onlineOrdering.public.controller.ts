@@ -6,6 +6,7 @@ import { ACCEPT_TIMEOUT_MINUTES } from '@/services/online-ordering/constants'
 import { getPublicMenu } from '@/services/online-ordering/menu.service'
 import { createOnlineOrder, getTrackingByToken } from '@/services/online-ordering/order.service'
 import { getAcceptingStatus } from '@/services/online-ordering/presence.service'
+import { buildVenueContact } from '@/services/online-ordering/settings.service'
 import { quoteCart, toPublicQuote } from '@/services/online-ordering/quote.service'
 import { cancelOnlineOrderByCustomer } from '@/services/online-ordering/transitions.service'
 
@@ -34,7 +35,20 @@ export async function getInfo(req: Request, res: Response) {
       getAcceptingStatus(venue.id),
       prisma.venue.findUnique({
         where: { id: venue.id },
-        select: { name: true, timezone: true, currency: true, logo: true, logoFull: true, primaryColor: true, secondaryColor: true },
+        select: {
+          name: true,
+          timezone: true,
+          currency: true,
+          logo: true,
+          logoFull: true,
+          primaryColor: true,
+          secondaryColor: true,
+          address: true,
+          city: true,
+          state: true,
+          zipCode: true,
+          phone: true,
+        },
       }),
     ])
     return res.json({
@@ -54,6 +68,10 @@ export async function getInfo(req: Request, res: Response) {
         minOrderAmount: state.config.minOrderAmount,
         estimatedPrepMinutes: state.config.defaultPrepMinutes,
         acceptTimeoutMinutes: ACCEPT_TIMEOUT_MINUTES,
+        // 1b: a quién y dónde reclamar (LFPC 76 Bis) y su aviso integral (LFPDPPP). La ruta es relativa al API público
+        // (`GET /api/v1/public/venues/:venueId/privacy-notice`); la tienda le antepone su base.
+        contact: buildVenueContact(row ?? {}),
+        privacyNoticePath: `/venues/${venue.id}/privacy-notice`,
       },
     })
   } catch (error) {

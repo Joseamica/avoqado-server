@@ -136,10 +136,22 @@ describe('Pedidos en línea — ciclo de vida (integration, real DB)', () => {
       data: { name: 'ITEST Pedidos Org', slug: `itest-pedidos-org-${RUN}`, email: `itest-pedidos-${RUN}@test.com`, phone: '5550000000' },
     })
     orgId = org.id
+    // R18 (1b): encender la tienda exige domicilio, teléfono y aviso de privacidad publicado del negocio.
     const venue = await prisma.venue.create({
-      data: { name: 'ITEST Pedidos Venue', slug: `itest-pedidos-${RUN}`, organizationId: org.id, timezone: 'America/Mexico_City' },
+      data: {
+        name: 'ITEST Pedidos Venue',
+        slug: `itest-pedidos-${RUN}`,
+        organizationId: org.id,
+        timezone: 'America/Mexico_City',
+        address: 'Av. Coyoacán 123',
+        city: 'CDMX',
+        state: 'CDMX',
+        zipCode: '04000',
+        phone: '5512345678',
+      },
     })
     venueId = venue.id
+    await prisma.privacyNoticeVersion.create({ data: { venueId, content: 'Aviso de privacidad ITEST', contentHash: `itest-${RUN}` } })
 
     // H6: un turno de caja ABIERTO del negocio (lo abre una persona). El cobro real lo reclama y estampa `Payment.shiftId`.
     staffId = (
@@ -187,6 +199,7 @@ describe('Pedidos en línea — ciclo de vida (integration, real DB)', () => {
     await prisma.menuCategory.deleteMany({ where: v })
     await prisma.customer.deleteMany({ where: v })
     await prisma.onlineOrderingSettings.deleteMany({ where: v })
+    await prisma.privacyNoticeVersion.deleteMany({ where: v })
     await prisma.venue.deleteMany({ where: { id: venueId } })
     if (staffId) await prisma.staff.deleteMany({ where: { id: staffId } }) // ya sin turnos que la referencien
     if (orgId) await prisma.organization.deleteMany({ where: { id: orgId } })

@@ -67,6 +67,7 @@ jest.mock('@/services/online-ordering/order.service', () => ({
 jest.mock('@/services/online-ordering/transitions.service', () => ({ __esModule: true, cancelOnlineOrderByCustomer: jest.fn() }))
 
 import router from '@/routes/public/onlineOrdering.public.routes'
+import publicRoutes from '@/routes/public.routes'
 import { createOnlineOrder, getTrackingByToken } from '@/services/online-ordering/order.service'
 import { cancelOnlineOrderByCustomer } from '@/services/online-ordering/transitions.service'
 import { getPublicMenu } from '@/services/online-ordering/menu.service'
@@ -262,6 +263,50 @@ describe('API pública de pedidos en línea', () => {
     expect(JSON.stringify(ajeno.body)).not.toContain('OTRO')
   })
 
+  it('1b: GET /info trae el contacto del negocio y la ruta de su aviso de privacidad (relativa al API público)', async () => {
+    ;(getAcceptingStatus as jest.Mock).mockResolvedValue({
+      status: 'OPEN',
+      reason: null,
+      config: { hours: null, acceptsPayAtPickup: true, minOrderAmount: 0, defaultPrepMinutes: 20 },
+    })
+    prismaMock.venue.findUnique.mockResolvedValue({
+      name: 'Flautas Coyoacán',
+      timezone: 'America/Mexico_City',
+      currency: 'MXN',
+      logo: null,
+      logoFull: null,
+      primaryColor: null,
+      secondaryColor: null,
+      address: 'Av. Coyoacán 123',
+      city: 'CDMX',
+      state: 'CDMX',
+      zipCode: '04000',
+      phone: '5512345678',
+    } as any)
+    const r = await request(app).get('/venues/flautas/ordering/info')
+    expect(r.status).toBe(200)
+    expect(r.body.data.contact).toEqual({ address: 'Av. Coyoacán 123, CDMX, CDMX, 04000', phone: '5512345678' })
+    expect(r.body.data.privacyNoticePath).toBe('/venues/v1/privacy-notice')
+    // Lo de antes sigue igual (campos aditivos).
+    expect(r.body.data).toMatchObject({ status: 'OPEN', venue: { slug: 'flautas', name: 'Flautas Coyoacán' }, estimatedPrepMinutes: 20 })
+  })
+
+  it('1b: el seguimiento entrega la zona y el contacto del NEGOCIO tal cual (sin venueId)', async () => {
+    ;(getTrackingByToken as jest.Mock).mockResolvedValue({
+      venueId: 'v1',
+      orderNumber: 'WABCD',
+      venueTimezone: 'America/Mexico_City',
+      venueContact: { address: 'Av. Coyoacán 123, CDMX', phone: '5512345678' },
+    })
+    const r = await request(app).get(`/venues/flautas/ordering/orders/${TOKEN}`)
+    expect(r.status).toBe(200)
+    expect(r.body.data).toEqual({
+      orderNumber: 'WABCD',
+      venueTimezone: 'America/Mexico_City',
+      venueContact: { address: 'Av. Coyoacán 123, CDMX', phone: '5512345678' },
+    })
+  })
+
   it('el seguimiento propio no incluye venueId', async () => {
     ;(getTrackingByToken as jest.Mock).mockResolvedValue({ venueId: 'v1', orderNumber: 'WABCD', status: 'ACCEPTED' })
     const r = await request(app).get(`/venues/flautas/ordering/orders/${TOKEN}`)
@@ -373,5 +418,26 @@ describe('cableado: qué candados corre cada ruta', () => {
     expect(mockRan).toEqual([])
     expect(getTrackingByToken).not.toHaveBeenCalled()
     expect(cancelOnlineOrderByCustomer).not.toHaveBeenCalled()
+  })
+})
+
+describe('CORS de la tienda (montaje REAL de /api/v1/public, sin tocar corsOptions.ts)', () => {
+  const api = express()
+  api.use('/api/v1/public', publicRoutes)
+
+  it('el preflight de crear pedido desde pedidos.avoqado.io permite cualquier origen y las cabeceras de la tienda', async () => {
+    const r = await request(api)
+      .options('/api/v1/public/venues/x/ordering/orders')
+      .set('Origin', 'https://pedidos.avoqado.io')
+      .set('Access-Control-Request-Method', 'POST')
+      .set('Access-Control-Request-Headers', 'idempotency-key,authorization,content-type')
+    expect(r.status).toBe(204)
+    expect(r.headers['access-control-allow-origin']).toBe('*')
+    const permitidas = String(r.headers['access-control-allow-headers'])
+      .toLowerCase()
+      .split(/\s*,\s*/)
+    expect(permitidas).toEqual(expect.arrayContaining(['idempotency-key', 'authorization', 'content-type']))
+    expect(String(r.headers['access-control-allow-methods'])).toContain('POST')
+    expect(mockRan).toEqual([])
   })
 })

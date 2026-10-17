@@ -1,6 +1,7 @@
 import { Prisma, type OnlineOrderingSettings } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { BadRequestError } from '@/errors/AppError'
+import { getCurrentPrivacyNotice } from '@/services/customer/consent.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import type { HorarioSemanal } from '@/services/delivery-channels/core/deliveryHours.service'
 import { isValidOrderingHours } from './hours'
@@ -35,6 +36,49 @@ export async function getSettings(venueId: string): Promise<OnlineOrderingConfig
   return row ? rowToConfig(row) : { ...DEFAULT_CONFIG, lastInboxPollAt: null }
 }
 
+export interface VenueContact {
+  address: string | null
+  phone: string | null
+}
+
+type VenueContactFields = {
+  address?: string | null
+  city?: string | null
+  state?: string | null
+  zipCode?: string | null
+  phone?: string | null
+}
+
+/** Domicilio y teléfono del negocio como los ve el comensal: partes no vacías unidas con «, »; en blanco ⇒ `null`. */
+export function buildVenueContact(venue: VenueContactFields): VenueContact {
+  const address = [venue.address, venue.city, venue.state, venue.zipCode]
+    .map(part => part?.trim())
+    .filter(Boolean)
+    .join(', ')
+  return { address: address || null, phone: venue.phone?.trim() || null }
+}
+
+export type StoreRequirement = 'address' | 'phone' | 'privacyNotice'
+
+/**
+ * R18: encender exige domicilio, teléfono y aviso de privacidad PUBLICADO (LFPC 76 Bis y LFPDPPP: el responsable frente al
+ * comensal es el restaurante). La plantilla de precarga (`esPlantilla: true`) no es un aviso publicado.
+ */
+export async function storeRequirements(venueId: string): Promise<Record<StoreRequirement, boolean>> {
+  const [venue, notice] = await Promise.all([
+    prisma.venue.findUnique({ where: { id: venueId }, select: { address: true, city: true, state: true, zipCode: true, phone: true } }),
+    getCurrentPrivacyNotice(venueId),
+  ])
+  const contact = buildVenueContact(venue ?? {})
+  return { address: contact.address !== null, phone: contact.phone !== null, privacyNotice: notice.esPlantilla === false }
+}
+
+const REQUIREMENT_LABEL: Record<StoreRequirement, string> = {
+  address: 'el domicilio del negocio',
+  phone: 'el teléfono del negocio',
+  privacyNotice: 'el aviso de privacidad publicado',
+}
+
 /**
  * A6 (P1-05): leer, combinar, validar y escribir van en UNA transacción con el candado del negocio (`pg_advisory_xact_lock`, sin
  * Redis): dos cambios simultáneos («encender» y «quitar pagar al recoger») se serializan y el segundo valida sobre el primero, así
@@ -45,6 +89,20 @@ export async function updateSettings(
   patch: OnlineOrderingSettingsPatch,
   actorStaffId: string | null,
 ): Promise<OnlineOrderingConfig> {
+  // R18: sólo cuando se pide ENCENDER; apagar o cambiar otros campos nunca exige requisitos. Antes de la transacción: si falta
+  // algo no se guarda nada. Son datos del negocio, no de estos ajustes, así que el candado de abajo no los protege de todas formas.
+  if (patch.enabled === true) {
+    const met = await storeRequirements(venueId)
+    const missing = (Object.keys(REQUIREMENT_LABEL) as StoreRequirement[]).filter(r => !met[r])
+    if (missing.length > 0) {
+      throw new BadRequestError(
+        `Para encender la tienda en línea falta ${missing.map(r => REQUIREMENT_LABEL[r]).join(', ')}.`,
+        'STORE_REQUIREMENTS_MISSING',
+        { missing },
+      )
+    }
+  }
+
   const { row, preloadHours } = await prisma.$transaction(async tx => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'online-ordering-settings:' + venueId}))`
 

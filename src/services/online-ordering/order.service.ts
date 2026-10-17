@@ -22,6 +22,7 @@ import { canonicalPhoneE164, phonesMatch } from '@/utils/phone'
 import { ACCEPT_TIMEOUT_MINUTES, MAX_PENDING_PER_PHONE, MAX_PENDING_PER_VENUE, OPEN_ORDER_STATUSES } from './constants'
 import { generateOrderNumber } from './orderNumber'
 import { getAcceptingStatus } from './presence.service'
+import { buildVenueContact, type VenueContact } from './settings.service'
 import { quoteCart, toPublicQuote, type CartItemInput } from './quote.service'
 import { generateTrackingToken } from './trackingToken'
 
@@ -351,6 +352,10 @@ export interface PublicTracking {
   venueId: string
   venueName: string
   venueSlug: string
+  /** 1b: zona del negocio para mostrar las horas del seguimiento (por omisión la de CDMX). */
+  venueTimezone: string
+  /** 1b: domicilio y teléfono del NEGOCIO (nunca los del comensal). */
+  venueContact: VenueContact
   items: Array<{ name: string; quantity: number; note: string | null; modifiers: Array<{ name: string; quantity: number }> }>
   total: number
   paid: boolean
@@ -378,7 +383,9 @@ export async function getTrackingByToken(token: string): Promise<PublicTracking 
           orderNumber: true,
           total: true,
           paymentStatus: true,
-          venue: { select: { name: true, slug: true } },
+          venue: {
+            select: { name: true, slug: true, timezone: true, address: true, city: true, state: true, zipCode: true, phone: true },
+          },
           items: {
             take: 100,
             orderBy: [{ sequence: 'asc' }, { id: 'asc' }],
@@ -396,6 +403,8 @@ export async function getTrackingByToken(token: string): Promise<PublicTracking 
     venueId: row.venueId,
     venueName: row.order.venue.name,
     venueSlug: row.order.venue.slug,
+    venueTimezone: row.order.venue.timezone || 'America/Mexico_City',
+    venueContact: buildVenueContact(row.order.venue),
     items: row.order.items.map(i => ({
       name: i.productName ?? '',
       quantity: i.quantity,
