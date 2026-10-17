@@ -110,7 +110,14 @@ export const menuProductsSchema = z.object({
   params: venueParams,
   query: z.object({
     categoryId: menuCategoryId.optional(),
-    search: z.string().trim().min(1, 'Búsqueda inválida').max(80, 'Búsqueda inválida').optional(),
+    // Postgres no guarda el byte nulo en un texto: sin esto sería un 500 en vez de un 400.
+    search: z
+      .string()
+      .trim()
+      .min(1, 'Búsqueda inválida')
+      .max(80, 'Búsqueda inválida')
+      .refine(s => !s.includes('\u0000'), 'Búsqueda inválida')
+      .optional(),
     cursor: menuCursor.optional(),
     // Llega como texto en el query; por omisión 50 (lo pone el servicio).
     limit: z.coerce

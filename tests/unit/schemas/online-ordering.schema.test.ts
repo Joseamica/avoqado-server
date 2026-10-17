@@ -132,7 +132,8 @@ describe('menuProductsSchema: la lista del menú en línea del panel (1b)', () =
     const r = lista({ search: '  tacos  ' })
     expect(r.success && r.data.query.search).toBe('tacos')
     expect(lista({ search: 'x'.repeat(80) }).success).toBe(true)
-    for (const mal of ['   ', 'x'.repeat(81)]) {
+    // Postgres no guarda el byte nulo en un texto: llegaría como 500 si pasara la validación.
+    for (const mal of ['   ', 'x'.repeat(81), '\u0000', 'a\u0000b']) {
       const m = lista({ search: mal })
       expect(m.success).toBe(false)
       expect(JSON.stringify(m)).toContain('Búsqueda inválida')
