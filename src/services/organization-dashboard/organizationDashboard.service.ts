@@ -323,6 +323,22 @@ function asegurarQueNoEsSuPropiaChecada(duenoDeLaChecada: string, quienActua: st
   }
 }
 
+/** Lo único que `upsertOrgAttendanceConfig` acepta del cuerpo (las columnas editables de `OrganizationAttendanceConfig`). */
+const CAMPOS_DE_LA_CONFIG_DE_ASISTENCIA = [
+  'expectedCheckInTime',
+  'latenessThresholdMinutes',
+  'geofenceRadiusMeters',
+  'attendanceTracking',
+  'requireFacadePhoto',
+  'requireDepositPhoto',
+  'enableCashPayments',
+  'enableCardPayments',
+  'enableBarcodeScanner',
+  'trackPromoterLocation',
+  'promoterLocationStartHour',
+  'promoterLocationEndHour',
+]
+
 class OrganizationDashboardService {
   /**
    * Get vision global summary for an organization (aggregate KPIs)
@@ -3469,7 +3485,7 @@ class OrganizationDashboardService {
 
   async upsertOrgAttendanceConfig(
     orgId: string,
-    data: {
+    entrada: {
       expectedCheckInTime?: string
       latenessThresholdMinutes?: number
       geofenceRadiusMeters?: number
@@ -3483,7 +3499,15 @@ class OrganizationDashboardService {
       promoterLocationStartHour?: number
       promoterLocationEndHour?: number
     },
+    performedBy?: string,
+    venueId?: string,
   ) {
+    // 🔴 Sólo los campos de la config. La puerta de la org pasaba el cuerpo CRUDO, y el `...data` del upsert aceptaba
+    // `organizationId`/`id`: escribía la config de OTRA organización (o mudaba ésta). Se filtra aquí, para las dos puertas.
+    const data = Object.fromEntries(
+      Object.entries(entrada ?? {}).filter(([campo]) => CAMPOS_DE_LA_CONFIG_DE_ASISTENCIA.includes(campo)),
+    ) as typeof entrada
+
     // Venue-local capture window for promoter geolocation pings. start inclusive,
     // end exclusive, 0/24 = full 24h. Validate whichever of the pair is provided —
     // a partial update still needs a sane resulting window, so we validate each
@@ -3504,10 +3528,9 @@ class OrganizationDashboardService {
       }
     }
 
-    // Also sync individual columns → settings JSON for consistency
+    // Also sync individual columns → settings JSON for consistency (la fila entera: la bitácora compara contra ella)
     const existing = await prisma.organizationAttendanceConfig.findUnique({
       where: { organizationId: orgId },
-      select: { settings: true },
     })
     const existingSettings = (existing?.settings as Record<string, any>) || {}
     const settingsSync: Record<string, any> = { ...existingSettings }
@@ -3574,11 +3597,20 @@ class OrganizationDashboardService {
       }
     }
 
-    logAction({
+    // Antes sin autor, sin org y sin sucursal (los 7 asientos de prod salen así) y con TODAS las llaves recibidas.
+    const changes: Record<string, { from: any; to: any }> = {}
+    for (const [campo, to] of Object.entries(data)) {
+      const from = (existing as Record<string, any> | null)?.[campo] ?? null
+      if (from !== to) changes[campo] = { from, to }
+    }
+    void logAction({
+      staffId: performedBy ?? null,
+      organizationId: orgId,
+      ...(venueId ? { venueId } : {}),
       action: 'ORG_ATTENDANCE_CONFIG_UPDATED',
       entity: 'OrganizationAttendanceConfig',
       entityId: config.id,
-      data: { changes: Object.keys(data) },
+      data: { changes },
     })
 
     return config
@@ -3669,14 +3701,22 @@ class OrganizationDashboardService {
     return updated
   }
 
-  async deleteOrgAttendanceConfig(orgId: string) {
-    await prisma.organizationAttendanceConfig.deleteMany({
+  // Borra la fila entera, `settings` (los defaults de TPV) incluido. Asiento con autor, org y sucursal; sin asiento si no
+  // había nada que borrar.
+  async deleteOrgAttendanceConfig(orgId: string, performedBy?: string, venueId?: string) {
+    const borrado = await prisma.organizationAttendanceConfig.deleteMany({
       where: { organizationId: orgId },
     })
+    if (!borrado?.count) return
 
-    logAction({
+    void logAction({
+      staffId: performedBy ?? null,
+      organizationId: orgId,
+      ...(venueId ? { venueId } : {}),
       action: 'ORG_ATTENDANCE_CONFIG_DELETED',
       entity: 'OrganizationAttendanceConfig',
+      entityId: orgId,
+      data: { deleted: borrado.count },
     })
   }
 
@@ -3699,10 +3739,14 @@ class OrganizationDashboardService {
    * Save org-level TPV defaults and push to ALL terminals in the org.
    * This overwrites terminal settings with the merged result (system defaults + org defaults).
    * kioskDefaultMerchantId is preserved per-terminal (not overwritten by org push).
+   *
+   * `performedBy` (quién) y `venueId` (la tienda desde cuya pantalla se guardó, si fue así) van a la bitácora.
    */
   async upsertOrgTpvDefaults(
     orgId: string,
     settings: Record<string, any>,
+    performedBy?: string,
+    venueId?: string,
   ): Promise<{ config: Record<string, any>; terminalsUpdated: number }> {
     // 1. Get existing settings to merge
     const existing = await prisma.organizationAttendanceConfig.findUnique({
@@ -3802,10 +3846,20 @@ class OrganizationDashboardService {
       })
     }
 
-    logAction({
+    // Antes salía sin autor, sin org y sin sucursal (ninguna bitácora lo mostraba) y con TODAS las llaves que
+    // manda el panel. Ahora: quién, la org en su columna, la tienda si vino de una, y sólo lo que cambió.
+    const changes: Record<string, { from: any; to: any }> = {}
+    for (const [key, to] of Object.entries(settings)) {
+      if (JSON.stringify(existingSettings[key]) !== JSON.stringify(to)) changes[key] = { from: existingSettings[key] ?? null, to }
+    }
+    void logAction({
+      staffId: performedBy ?? null,
+      organizationId: orgId,
+      ...(venueId ? { venueId } : {}),
       action: 'ORG_TPV_DEFAULTS_UPDATED',
-      entity: 'OrganizationAttendanceConfig',
-      data: { settingsKeys: Object.keys(settings), terminalsUpdated },
+      entity: 'Organization',
+      entityId: orgId,
+      data: { changes, terminalsUpdated },
     })
 
     return { config: mergedSettings, terminalsUpdated }

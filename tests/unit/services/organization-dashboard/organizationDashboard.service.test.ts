@@ -607,3 +607,143 @@ describe('upsertOrgTpvDefaults — cada terminal se escribe dentro de su organiz
     expect(result.terminalsUpdated).toBe(1)
   })
 })
+
+// 🔴 17-oct: el asiento ORG_TPV_DEFAULTS_UPDATED salía sin autor, sin organización y sin sucursal — ninguna
+// pantalla de auditoría lo mostraba (la de la org filtra por `organizationId`, la de la tienda por `venueId`), y
+// sólo decía QUÉ llaves llegaron (el panel manda las 35 siempre), no cuáles cambiaron.
+describe('upsertOrgTpvDefaults — la bitácora dice quién, dónde y qué cambió', () => {
+  const { logAction } = jest.requireMock('@/services/dashboard/activity-log.service') as { logAction: jest.Mock }
+
+  beforeEach(() => {
+    prismaMock.organizationAttendanceConfig.findUnique.mockResolvedValue({
+      settings: { enableCardPayments: true, showTipScreen: true, requireAvoqadoServerForCardPayment: true },
+    } as any)
+    prismaMock.organizationAttendanceConfig.upsert.mockResolvedValue({} as any)
+    prismaMock.terminal.findMany.mockResolvedValue([
+      { id: 't1', config: { settings: {} }, configOverrides: null },
+      { id: 't2', config: { settings: {} }, configOverrides: null },
+    ] as any)
+    prismaMock.terminal.updateMany.mockResolvedValue({ count: 1 } as any)
+    prismaMock.$transaction.mockImplementation(((ops: any) => (Array.isArray(ops) ? Promise.all(ops) : ops(prismaMock))) as any)
+  })
+
+  const AJUSTES = { enableCardPayments: false, showTipScreen: true, requireAvoqadoServerForCardPayment: false }
+
+  it('desde la sucursal: autor, org, sucursal, la org como entidad, sólo lo que cambió y cuántas terminales', async () => {
+    await organizationDashboardService.upsertOrgTpvDefaults(orgId, AJUSTES, 'staff-dueno', 'venue-a')
+
+    expect(logAction).toHaveBeenCalledTimes(1)
+    expect(logAction).toHaveBeenCalledWith({
+      staffId: 'staff-dueno',
+      organizationId: orgId,
+      venueId: 'venue-a',
+      action: 'ORG_TPV_DEFAULTS_UPDATED',
+      entity: 'Organization',
+      entityId: orgId,
+      data: {
+        changes: {
+          enableCardPayments: { from: true, to: false },
+          requireAvoqadoServerForCardPayment: { from: true, to: false },
+        },
+        terminalsUpdated: 2,
+      },
+    })
+  })
+
+  it('desde la org: sin sucursal (la bitácora de la org la encuentra por organizationId)', async () => {
+    await organizationDashboardService.upsertOrgTpvDefaults(orgId, AJUSTES, 'staff-dueno')
+
+    const asiento = logAction.mock.calls[0][0]
+    expect(asiento).toMatchObject({ staffId: 'staff-dueno', organizationId: orgId, entity: 'Organization', entityId: orgId })
+    expect(asiento.venueId).toBeUndefined()
+  })
+
+  it('se escribe DESPUÉS de las transacciones, sin esperarla (no puede deshacer ni frenar el guardado)', async () => {
+    logAction.mockReturnValueOnce(new Promise(() => {})) // una bitácora que nunca contesta
+    const resultado = await organizationDashboardService.upsertOrgTpvDefaults(orgId, AJUSTES, 'staff-dueno', 'venue-a')
+
+    expect(resultado.terminalsUpdated).toBe(2)
+    expect(prismaMock.$transaction.mock.invocationCallOrder[0]).toBeLessThan(logAction.mock.invocationCallOrder[0])
+  })
+})
+
+// Ronda 2 (17-oct): la config de checador de la org — su bitácora tampoco tenía autor, org ni sucursal (en prod los 7
+// asientos ORG_ATTENDANCE_CONFIG_UPDATED salen así), y la puerta de la org le pasaba el cuerpo CRUDO al upsert.
+describe('upsertOrgAttendanceConfig / deleteOrgAttendanceConfig — bitácora y campos', () => {
+  const { logAction } = jest.requireMock('@/services/dashboard/activity-log.service') as { logAction: jest.Mock }
+
+  beforeEach(() => {
+    prismaMock.organizationAttendanceConfig.findUnique.mockResolvedValue({
+      settings: { enableCardPayments: true },
+      attendanceTracking: false,
+      enableCardPayments: true,
+      expectedCheckInTime: '09:00',
+    } as any)
+    prismaMock.organizationAttendanceConfig.upsert.mockResolvedValue({ id: 'cfg-1' } as any)
+  })
+
+  it('el asiento lleva autor, org, sucursal y sólo lo que cambió (de → a)', async () => {
+    await organizationDashboardService.upsertOrgAttendanceConfig(
+      orgId,
+      { attendanceTracking: true, enableCardPayments: true, expectedCheckInTime: '10:00' },
+      'staff-dueno',
+      'venue-a',
+    )
+
+    expect(logAction).toHaveBeenCalledWith({
+      staffId: 'staff-dueno',
+      organizationId: orgId,
+      venueId: 'venue-a',
+      action: 'ORG_ATTENDANCE_CONFIG_UPDATED',
+      entity: 'OrganizationAttendanceConfig',
+      entityId: 'cfg-1',
+      data: {
+        changes: {
+          attendanceTracking: { from: false, to: true },
+          expectedCheckInTime: { from: '09:00', to: '10:00' },
+        },
+      },
+    })
+  })
+
+  it('🔴 un campo que no es de la config (organizationId, id, settings) no llega al upsert: no se escribe la config de OTRA org', async () => {
+    await organizationDashboardService.upsertOrgAttendanceConfig(
+      orgId,
+      { attendanceTracking: true, organizationId: 'org-ajena', id: 'cfg-ajena', settings: { enableCardPayments: false } } as any,
+      'staff-dueno',
+    )
+
+    const { create, update } = prismaMock.organizationAttendanceConfig.upsert.mock.calls[0][0] as any
+    expect(create.organizationId).toBe(orgId)
+    expect(create.id).toBeUndefined()
+    expect(update.organizationId).toBeUndefined()
+    expect(update.id).toBeUndefined()
+    expect(update.attendanceTracking).toBe(true)
+    // `settings` sólo lo arma el servicio a partir de los campos conocidos: el cuerpo no lo pisa.
+    expect(update.settings.enableCardPayments).toBe(true)
+  })
+
+  it('borrar deja asiento con autor, org y sucursal', async () => {
+    prismaMock.organizationAttendanceConfig.deleteMany.mockResolvedValue({ count: 1 } as any)
+
+    await organizationDashboardService.deleteOrgAttendanceConfig(orgId, 'staff-dueno', 'venue-a')
+
+    expect(logAction).toHaveBeenCalledWith({
+      staffId: 'staff-dueno',
+      organizationId: orgId,
+      venueId: 'venue-a',
+      action: 'ORG_ATTENDANCE_CONFIG_DELETED',
+      entity: 'OrganizationAttendanceConfig',
+      entityId: orgId,
+      data: { deleted: 1 },
+    })
+  })
+
+  it('borrar lo que no existe no deja asiento (no-op)', async () => {
+    prismaMock.organizationAttendanceConfig.deleteMany.mockResolvedValue({ count: 0 } as any)
+
+    await organizationDashboardService.deleteOrgAttendanceConfig(orgId, 'staff-dueno')
+
+    expect(logAction).not.toHaveBeenCalled()
+  })
+})

@@ -9,6 +9,7 @@
 import { Router, Request, Response, NextFunction } from 'express'
 import { esSuperadminDeLaSesion, esSuperadminReal } from '@/services/access/rolVigente'
 import { authenticateTokenMiddleware } from '../../middlewares/authenticateToken.middleware'
+import { soloElDuenoDeLaOrgCambia } from '../../middlewares/soloElDuenoDeLaOrgCambiaAjustesDeLaOrg.middleware'
 import { organizationDashboardService } from '../../services/organization-dashboard/organizationDashboard.service'
 import * as goalResolutionService from '../../services/dashboard/commission/goal-resolution.service'
 import { logAction } from '../../services/dashboard/activity-log.service'
@@ -191,11 +192,14 @@ router.get('/org-attendance-config', orgOwnerAccess, async (req: Request, res: R
 
 /**
  * PUT /dashboard/organizations/:orgId/org-attendance-config
+ * 🔴 Sólo el dueño de la ORGANIZACIÓN (o un superadmin de verdad): checador y terminales de TODAS las sucursales. Como en
+ * `org-tpv-defaults`, la regla estrecha REEMPLAZA aquí a `requireOrgOwner` (sólo en este PUT y en el DELETE).
  */
-router.put('/org-attendance-config', orgOwnerAccess, async (req: Request, res: Response, next: NextFunction) => {
+const orgAttendanceWriteAccess = [authenticateTokenMiddleware, soloElDuenoDeLaOrgCambia('ORG_ATTENDANCE_CONFIG')]
+router.put('/org-attendance-config', orgAttendanceWriteAccess, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { orgId } = req.params
-    const config = await organizationDashboardService.upsertOrgAttendanceConfig(orgId, req.body)
+    const config = await organizationDashboardService.upsertOrgAttendanceConfig(orgId, req.body, (req as any).authContext?.userId)
     res.json({ success: true, data: config })
   } catch (error) {
     next(error)
@@ -205,10 +209,10 @@ router.put('/org-attendance-config', orgOwnerAccess, async (req: Request, res: R
 /**
  * DELETE /dashboard/organizations/:orgId/org-attendance-config
  */
-router.delete('/org-attendance-config', orgOwnerAccess, async (req: Request, res: Response, next: NextFunction) => {
+router.delete('/org-attendance-config', orgAttendanceWriteAccess, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { orgId } = req.params
-    await organizationDashboardService.deleteOrgAttendanceConfig(orgId)
+    await organizationDashboardService.deleteOrgAttendanceConfig(orgId, (req as any).authContext?.userId)
     res.json({ success: true, data: { message: 'Org attendance config deleted' } })
   } catch (error) {
     next(error)
@@ -230,12 +234,16 @@ router.get('/org-tpv-defaults', orgOwnerAccess, async (req: Request, res: Respon
 
 /**
  * PUT /dashboard/organizations/:orgId/org-tpv-defaults
+ * 🔴 Sólo el dueño de la ORGANIZACIÓN (o un superadmin de verdad): empuja los ajustes a todas las terminales. La
+ * regla estrecha REEMPLAZA aquí a `requireOrgOwner` (que deja pasar al dueño de una sola tienda y rechaza al dueño
+ * de la org sin fila de dueño en alguna tienda); sólo en este PUT.
  */
-router.put('/org-tpv-defaults', orgOwnerAccess, async (req: Request, res: Response, next: NextFunction) => {
+const orgTpvDefaultsWriteAccess = [authenticateTokenMiddleware, soloElDuenoDeLaOrgCambia('ORG_TPV_DEFAULTS')]
+router.put('/org-tpv-defaults', orgTpvDefaultsWriteAccess, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { orgId } = req.params
     const { settings } = req.body
-    const result = await organizationDashboardService.upsertOrgTpvDefaults(orgId, settings)
+    const result = await organizationDashboardService.upsertOrgTpvDefaults(orgId, settings, (req as any).authContext?.userId)
     res.json({ success: true, data: result })
   } catch (error) {
     next(error)
