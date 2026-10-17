@@ -18,8 +18,15 @@ jest.mock('@/middlewares/validation', () => ({
 }))
 jest.mock('@/middlewares/checkPermission.middleware', () => ({
   __esModule: true,
-  checkPermission: (perm: string) => (req: any, _res: any, next: any) => {
+  checkPermission: (perm: string) => (req: any, res: any, next: any) => {
     req.perms = [...(req.perms ?? []), perm]
+    // Con `x-test-permisos` decide el `hasPermission` REAL para un rol a la medida (VIEWER + esa lista): 403 si no alcanza.
+    const lista = req.headers['x-test-permisos']
+    if (typeof lista === 'string') {
+      const { hasPermission } = jest.requireActual('@/lib/permissions')
+      if (!hasPermission('VIEWER', lista.split(',').filter(Boolean), perm))
+        return res.status(403).json({ error: 'Forbidden', required: perm })
+    }
     next()
   },
 }))
@@ -46,7 +53,8 @@ jest.mock('@/controllers/mobile/onlineOrders.mobile.controller', () => {
     cancel: respond,
     printClaim: respond,
     printConfirm: respond,
-    pause: respond,
+    // Una función propia: así se puede comprobar que el panel monta ESTE manejador y no otro.
+    pause: (req: any, res: any) => respond(req, res),
   }
 })
 jest.mock('@/controllers/dashboard/onlineOrdering.dashboard.controller', () => {
@@ -55,9 +63,17 @@ jest.mock('@/controllers/dashboard/onlineOrdering.dashboard.controller', () => {
     const nombre = (s: unknown) => Object.keys(schemas).find(k => schemas[k] === s) ?? 'DESCONOCIDO'
     res.json({ perms: req.perms ?? [], plans: req.plans ?? [], schemas: (req.schemas ?? []).map(nombre) })
   }
-  return { __esModule: true, getSettingsHandler: respond, updateSettingsHandler: respond, setMenuAvailabilityHandler: respond }
+  return {
+    __esModule: true,
+    getSettingsHandler: respond,
+    updateSettingsHandler: respond,
+    setMenuAvailabilityHandler: respond,
+    getMenuCategoriesHandler: respond,
+    listMenuProductsHandler: respond,
+  }
 })
 
+import * as mobileCtrl from '@/controllers/mobile/onlineOrders.mobile.controller'
 import mobileRouter from '@/routes/mobile/onlineOrders.mobile.routes'
 import dashboardRouter from '@/routes/dashboard/onlineOrdering.dashboard.routes'
 
@@ -132,6 +148,38 @@ describe('API del restaurante: permiso, candado de plan y esquema por ruta', () 
 
   it('no existe «soltar la impresión» (R20)', async () => {
     expect((await request(app).post(`${M}/ord1/print/release`)).status).toBe(404)
+  })
+
+  it('1b: el menú en línea del panel (resumen y lista) exige online-orders:manage, SIN candado de plan, cada uno con su esquema', async () => {
+    const casos: Array<[string, string]> = [
+      ['menu/categories', 'menuCategoriesSchema'],
+      ['menu/products', 'menuProductsSchema'],
+    ]
+    for (const [path, schema] of casos) {
+      const r = await request(app).get(`${P}/${path}`)
+      expect({ path, ...r.body }).toEqual({ path, perms: ['online-orders:manage'], plans: [], schemas: [schema] })
+    }
+  })
+
+  it('1b: sin online-orders:manage el menú en línea responde 403 (aunque tenga pausar y ver pedidos); con él, 200', async () => {
+    for (const path of ['menu/categories', 'menu/products']) {
+      const sin = await request(app).get(`${P}/${path}`).set('x-test-permisos', 'orders:read,online-orders:pause')
+      expect({ path, status: sin.status }).toEqual({ path, status: 403 })
+      const con = await request(app).get(`${P}/${path}`).set('x-test-permisos', 'online-orders:manage')
+      expect({ path, status: con.status }).toEqual({ path, status: 200 })
+    }
+  })
+
+  it('1b: pausar desde el panel usa EL MISMO manejador de la móvil, con online-orders:pause y pauseSchema, sin candado de plan', async () => {
+    const r = await request(app).post(`${P}/pause`)
+    expect(r.body).toEqual({ perms: ['online-orders:pause'], plans: [], schemas: ['pauseSchema'] })
+    const capa = (dashboardRouter as any).stack.find((l: any) => l.route?.path === '/pause' && l.route.methods.post)
+    expect(capa.route.stack[capa.route.stack.length - 1].handle).toBe(mobileCtrl.pause)
+  })
+
+  it('1b: pausar desde el panel con SÓLO online-orders:pause ⇒ 200; sin él ⇒ 403', async () => {
+    expect((await request(app).post(`${P}/pause`).set('x-test-permisos', 'online-orders:pause')).status).toBe(200)
+    expect((await request(app).post(`${P}/pause`).set('x-test-permisos', 'orders:read,orders:update')).status).toBe(403)
   })
 })
 
@@ -240,5 +288,86 @@ describe('panel: GET y PUT /settings (controlador real)', () => {
     prismaMock.onlineOrderingSettings.upsert.mockResolvedValue(fila() as any)
     expect((await request(panel).put('/venues/v1/settings').send({ minOrderAmount: 50 })).status).toBe(200)
     expect((await request(panel).put('/venues/v1/settings').send({ enabled: false })).status).toBe(200)
+  })
+})
+
+/** 1b: el menú en línea y la pausa del panel con la validación, el controlador y los servicios REALES (Prisma simulado). */
+describe('panel: menú en línea y pausa (validación y controladores reales)', () => {
+  const real = jest.requireActual('@/controllers/dashboard/onlineOrdering.dashboard.controller')
+  const movil = jest.requireActual('@/controllers/mobile/onlineOrders.mobile.controller')
+  const { validateRequest } = jest.requireActual('@/middlewares/validation')
+  const schemas = jest.requireActual('@/schemas/online-ordering.schema')
+  const panel = express()
+  panel.use(express.json())
+  panel.get('/venues/:venueId/menu/categories', validateRequest(schemas.menuCategoriesSchema), real.getMenuCategoriesHandler)
+  panel.get('/venues/:venueId/menu/products', validateRequest(schemas.menuProductsSchema), real.listMenuProductsHandler)
+  panel.post('/venues/:venueId/pause', validateRequest(schemas.pauseSchema), movil.pause)
+  panel.use((err: any, _req: any, res: any, _next: any) =>
+    res.status(err.statusCode ?? 500).json({ message: err.message, code: err.code, details: err.details }),
+  )
+
+  it('GET /menu/categories: { success, data: { categories, totals, truncated } }', async () => {
+    prismaMock.menuCategory.findMany.mockResolvedValue([{ id: 'c1', name: 'Tacos', active: true }] as any)
+    prismaMock.product.groupBy.mockResolvedValue([{ categoryId: 'c1', _count: { _all: 2 } }] as any)
+    prismaMock.product.count.mockResolvedValue(2)
+    const r = await request(panel).get('/venues/v1/menu/categories')
+    expect(r.status).toBe(200)
+    expect(r.body).toEqual({
+      success: true,
+      data: {
+        categories: [{ id: 'c1', name: 'Tacos', active: true, total: 2, online: 2, onlineWithoutPhoto: 2 }],
+        totals: { total: 2, online: 2, onlineWithoutPhoto: 2 },
+        truncated: false,
+      },
+    })
+  })
+
+  it('GET /menu/products: el query validado llega al servicio (limit como número) y responde { items, nextCursor, total }', async () => {
+    prismaMock.product.findMany.mockResolvedValue([
+      {
+        id: 'p1',
+        name: 'Flautas',
+        price: new Prisma.Decimal('45.50'),
+        imageUrl: null,
+        active: true,
+        availableOnline: true,
+        categoryId: 'c1',
+      },
+    ] as any)
+    prismaMock.product.count.mockResolvedValue(1)
+    const r = await request(panel).get('/venues/v1/menu/products?categoryId=c1&search=%20flau%20&limit=20&cursor=p0')
+    expect(r.status).toBe(200)
+    expect(r.body).toEqual({
+      success: true,
+      data: {
+        items: [{ id: 'p1', name: 'Flautas', price: 45.5, imageUrl: null, active: true, availableOnline: true, categoryId: 'c1' }],
+        nextCursor: null,
+        total: 1,
+      },
+    })
+    const a = prismaMock.product.findMany.mock.calls[0][0] as any
+    expect(a.take).toBe(21)
+    expect(a.cursor).toEqual({ id: 'p0' })
+    expect(a.where).toMatchObject({ venueId: 'v1', categoryId: 'c1', name: { contains: 'flau', mode: 'insensitive' } })
+  })
+
+  it('GET /menu/products con un cursor inválido ⇒ 400 y no lee nada', async () => {
+    const r = await request(panel).get('/venues/v1/menu/products?cursor=p%201')
+    expect(r.status).toBe(400)
+    expect(r.body.message).toContain('Cursor inválido')
+    expect(prismaMock.product.findMany).not.toHaveBeenCalled()
+  })
+
+  it('POST /pause: la misma respuesta de la móvil, y el mismo 400 ONLINE_ORDERING_NOT_CONFIGURED sin ajustes', async () => {
+    prismaMock.onlineOrderingSettings.updateMany.mockResolvedValue({ count: 0 })
+    const sinAjustes = await request(panel).post('/venues/v1/pause').send({ minutes: 30 })
+    expect(sinAjustes.status).toBe(400)
+    expect(sinAjustes.body.code).toBe('ONLINE_ORDERING_NOT_CONFIGURED')
+
+    prismaMock.onlineOrderingSettings.updateMany.mockResolvedValue({ count: 1 })
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue({ manualPause: false } as any)
+    const ok = await request(panel).post('/venues/v1/pause').send({ minutes: null })
+    expect(ok.status).toBe(200)
+    expect(ok.body).toEqual({ success: true, data: { pausedUntil: null, manualPause: false } })
   })
 })

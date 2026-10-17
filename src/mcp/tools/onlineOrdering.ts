@@ -7,6 +7,7 @@ import { auditMcpWrite } from '../audit'
 import { requireWriteScopeAlways } from '../requireWriteScopeAlways'
 import { planGateMessage } from '../planGate'
 import { getInboxOrder, listInbox } from '@/services/online-ordering/inbox.service'
+import { getOnlineMenuSummary, listOnlineMenuProducts } from '@/services/online-ordering/menuAdmin.service'
 import { setOnlineAvailability } from '@/services/online-ordering/menuAvailability.service'
 import { getAcceptingStatus, storeView } from '@/services/online-ordering/presence.service'
 import { getSettings, pauseOnlineOrdering, storeRequirements, updateSettings } from '@/services/online-ordering/settings.service'
@@ -23,6 +24,8 @@ import {
   activeCursor,
   floorPauseMinutes,
   menuAvailabilityBody,
+  menuCategoryId,
+  menuCursor,
   rejectSchema,
   settingsPatchBody,
 } from '@/schemas/online-ordering.schema'
@@ -226,6 +229,27 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
         store: storeView(state),
         requirements,
       })
+    },
+  )
+
+  server.tool(
+    'online_ordering_menu',
+    'Menú de la tienda en línea, sólo lectura. Sin categoryId: por categoría, cuántos platillos se podrían vender en línea, cuántos ya se ofrecen y cuántos de ésos no tienen foto. Con categoryId: los platillos de esa categoría (precio en pesos, si están activos y si se ofrecen en línea), por páginas con cursor.',
+    {
+      venueId: z.string().describe('Venue (debe estar en tu scope)'),
+      categoryId: menuCategoryId.optional().describe('Categoría cuyos platillos quieres ver; sin ella, el resumen por categoría'),
+      cursor: menuCursor.optional().describe('Sólo con categoryId: el nextCursor de la respuesta anterior, para la página siguiente'),
+      limit: z.number().int().min(1).max(50).optional().describe('Platillos por página (1 a 50; 50 por omisión)'),
+    },
+    async ({ venueId, categoryId, cursor, limit }) => {
+      guard.venueFilter(venueId)
+      // Es lectura aunque el permiso sea `:manage`: sin 'read' el guardia pediría el scope de escritura.
+      guard.requirePermission('online-orders:manage', venueId, 'read')
+      if (!categoryId) {
+        if (cursor) return text({ ok: false, error: 'El cursor sólo sirve con una categoría (categoryId).' })
+        return text({ ok: true, ...(await getOnlineMenuSummary(venueId)) })
+      }
+      return text({ ok: true, ...(await listOnlineMenuProducts({ venueId, categoryId, cursor, limit })) })
     },
   )
 
