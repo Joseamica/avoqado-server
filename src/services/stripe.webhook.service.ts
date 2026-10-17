@@ -13,7 +13,7 @@ import { billingPageUrl } from '@/utils/dashboardLinks'
 import emailService from './email.service'
 import { resolvePlanNotificationTarget } from './access/planNotification.service'
 import { createNotification } from './dashboard/notification.dashboard.service'
-import { NotificationType, NotificationChannel, NotificationPriority, StaffRole } from '@prisma/client'
+import { NotificationType, NotificationChannel, NotificationPriority, StaffRole, Prisma } from '@prisma/client'
 import {
   handlePaymentFailure,
   generateBillingPortalUrl,
@@ -22,8 +22,10 @@ import {
   suscripcionVigente,
   suscripcionVendeElPlan,
   entregarSuscripcionDePlan,
+  stripe,
   type FulfillPlanCheckoutResult,
 } from './stripe.service'
+import { montoDelSiguienteCobro, noHabraCobro } from './billing/siguienteCobro'
 import { PAID_PLAN_TIER_CODES } from './access/basePlan.service'
 import socketManager from '../communication/sockets'
 import { tokenBudgetService } from './dashboard/token-budget.service'
@@ -1040,6 +1042,103 @@ async function sendTrialEndingNotifications(venueId: string, venueName: string, 
 }
 
 /**
+ * `trial_will_end` of a PLAN_PRO / PLAN_PREMIUM subscription (≈3 days before the first charge): the plan trial-end reminder
+ * with the amount Stripe will really charge, instead of the loose-feature "your feature will be deactivated" email.
+ *
+ * - No charge that day (canceled, `cancel_at` before it, collection paused through it): NO email and NO in-app notice
+ *   that speaks of a charge.
+ * - Amount unknown (`null`): no email; the in-app notice goes without an amount (never the list price).
+ * - The in-app notice is IN_APP only: the EMAIL channel of `createNotification` would mail this same text to every
+ *   OWNER/ADMIN on top of the plan email (and would mail it when there is no amount).
+ * - One plan email per subscription (to the resolved recipient), not one per OWNER/ADMIN. Dates use the venue's zone.
+ */
+async function sendPlanTrialEndingNotifications(
+  venueFeature: Prisma.VenueFeatureGetPayload<{ include: { feature: true; venue: true } }>,
+  subscription: Stripe.Subscription,
+  trialEnd: Date,
+): Promise<void> {
+  const { venueId, venue } = venueFeature
+  try {
+    if (noHabraCobro(subscription, trialEnd.getTime())) {
+      logger.info('ℹ️ Webhook: trial ending with no charge to follow; no notice sent', { venueId, subscriptionId: subscription.id })
+      return
+    }
+
+    const amountCents = await montoDelSiguienteCobro(stripe, subscription.id)
+
+    // OWNER/ADMIN of a venue are a handful; `take` is the cap the bounded-queries rule asks for.
+    const staffMembers = await prisma.staffVenue.findMany({
+      where: { venueId, role: { in: [StaffRole.OWNER, StaffRole.ADMIN] } },
+      select: { staff: { select: { id: true, email: true } } },
+      take: 25,
+    })
+    if (staffMembers.length === 0) {
+      logger.warn('⚠️ No OWNER/ADMIN staff found for venue', { venueId })
+      return
+    }
+
+    const planName = venueFeature.feature.code === 'PLAN_PREMIUM' ? 'Premium' : 'Pro'
+    // `||`, not `??`: an empty zone makes toLocaleDateString throw.
+    const timeZone = venue.timezone || 'America/Mexico_City'
+    const billingPortalUrl = billingPageUrl(venue.slug)
+    const fecha = trialEnd.toLocaleDateString('es-MX', { day: 'numeric', month: 'long', year: 'numeric', timeZone })
+    const cobro =
+      amountCents === null
+        ? 'se cobrará'
+        : `cobraremos ${new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN' }).format(amountCents / 100)}`
+
+    for (const { staff } of staffMembers) {
+      try {
+        await createNotification({
+          recipientId: staff.id,
+          venueId,
+          type: NotificationType.SUBSCRIPTION_TRIAL_ENDING,
+          title: `⏰ Prueba gratuita terminando pronto`,
+          message: `Tu prueba de Avoqado ${planName} termina el ${fecha}. Ese día ${cobro} a tu tarjeta; cancela antes desde Facturación si no quieres continuar.`,
+          metadata: {
+            featureName: venueFeature.feature.name,
+            trialEndDate: trialEnd.toISOString(),
+            billingPortalUrl,
+          },
+          channels: [NotificationChannel.IN_APP],
+          priority: NotificationPriority.HIGH,
+        })
+      } catch (notificationError) {
+        logger.error('❌ Failed to create plan trial ending notification', {
+          staffId: staff.id,
+          error: notificationError instanceof Error ? notificationError.message : 'Unknown error',
+        })
+      }
+    }
+
+    if (amountCents === null) {
+      logger.warn('⚠️ Plan trial ending: charge amount unknown; email skipped', { venueId, subscriptionId: subscription.id })
+      return
+    }
+
+    const target = await resolvePlanNotificationTarget(venueId)
+    const emailSent = await emailService.sendPlanRenewalReminderEmail(target.email ?? staffMembers[0].staff.email, {
+      locale: target.locale,
+      venueName: venue.name,
+      interval: subscription.items?.data?.[0]?.price?.recurring?.interval === 'year' ? 'annual' : 'monthly',
+      renewalDate: trialEnd,
+      amountCents,
+      billingPortalUrl,
+      planName,
+      isTrialEnd: true,
+      timeZone,
+    })
+    if (!emailSent) logger.warn('⚠️ Plan trial ending email failed to send', { venueId, subscriptionId: subscription.id })
+  } catch (error) {
+    // Log but don't throw - notifications should not block webhook success
+    logger.error('❌ Failed to send plan trial ending notifications', {
+      venueId,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    })
+  }
+}
+
+/**
  * Handle subscription trial will end event
  * Triggered 3 days before trial ends (configurable in Stripe)
  *
@@ -1083,7 +1182,11 @@ export async function handleSubscriptionTrialWillEnd(subscription: Stripe.Subscr
 
   // Send notifications to venue owners and admins
   if (trialEnd) {
-    await sendTrialEndingNotifications(venueFeature.venueId, venueFeature.venue.name, venueFeature.feature.name, trialEnd)
+    if ((PAID_PLAN_TIER_CODES as readonly string[]).includes(venueFeature.feature.code)) {
+      await sendPlanTrialEndingNotifications(venueFeature, subscription, trialEnd)
+    } else {
+      await sendTrialEndingNotifications(venueFeature.venueId, venueFeature.venue.name, venueFeature.feature.name, trialEnd)
+    }
   }
 }
 
