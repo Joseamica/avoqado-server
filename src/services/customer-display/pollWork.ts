@@ -7,8 +7,8 @@
  *   arranca y la huella se omite hasta el siguiente poll (una huella omitida es «desconocida», nunca un error).
  * - `esperarTodas`: lo que corre en paralelo DENTRO de un lugar. No se asienta hasta que todo lo arrancado se asentó.
  * - `SingleFlightCache`: un solo cálculo por llave; lo guardado vence; un error nunca se guarda; `refresh` anula lo que
- *   estaba en vuelo para que un cálculo VIEJO jamás quede encima de uno nuevo — salvo otro refresh de hace ≤ 2 s, al que
- *   se une (`REFRESH_COALESCE_MS`).
+ *   estaba en vuelo para que un cálculo VIEJO jamás quede encima de uno nuevo — salvo otro refresh que arrancó hace
+ *   ≤ 2 s (`REFRESH_COALESCE_MS`): se une a él si sigue en vuelo, o entrega lo que ya guardó.
  * - `dentroDelPlazo`: espera a lo más `plazoMs` a un grupo de cálculos en paralelo; lo que no llegó se omite, sigue
  *   corriendo para llenar su caché, y su error (si lo hay) se reporta — nunca queda un rechazo sin manejar.
  *
@@ -69,7 +69,7 @@ export class PollWorkLimiter {
   }
 }
 
-/** El tope del proceso. Lo comparten la ficha, el plan, el carrusel y las firmas cuando los pide el poll. */
+/** El tope del proceso. Lo comparten la ficha, el plan, el carrusel, las firmas y la fuente de ajustes (cuando consulta) del poll. */
 export const pollWorkLimiter = new PollWorkLimiter(POLL_WORK_MAX_IN_FLIGHT)
 
 /**
@@ -86,9 +86,11 @@ export async function esperarTodas<T extends readonly unknown[] | []>(promesas: 
 }
 
 /**
- * 🔴 Ruling de la Task 6: la ventana en que un `refresh` se UNE a otro `refresh` de la misma llave que ya está en vuelo.
- * Tras una edición, las N tablets de un venue piden `/promotions` casi a la vez; sin ventana eran N construcciones
- * idénticas fuera del pool. Con ella: a lo más una nueva por llave cada 2 s. La Task 13 la mide.
+ * 🔴 Ruling de la Task 6, completado en la Task 13 (F2): la ventana en que un `refresh` reusa el cálculo de otro `refresh`
+ * de la misma llave que ARRANCÓ hace ≤ 2 s, siga en vuelo o ya esté guardado. Tras una edición, las N tablets de un venue
+ * piden `/promotions` casi a la vez; sin ventana eran N construcciones idénticas fuera del pool. Con ella, `refresh`
+ * arranca a lo más una construcción por llave cada 2 s, salvo que la anterior haya fallado (un error no se guarda) o que su
+ * entrada haya salido por el tope de entradas. Lo que calcula `get` (el poll, con tope) no cuenta: va aparte.
  */
 export const REFRESH_COALESCE_MS = 2_000
 
@@ -102,7 +104,8 @@ interface Vuelo<V> {
 }
 
 export class SingleFlightCache<V> {
-  private readonly entradas = new Map<string, { hasta: number; valor: V }>()
+  /** `refrescoIniciadoEn`: cuándo ARRANCÓ el `refresh` que guardó esta entrada (nada si la guardó un `get`). */
+  private readonly entradas = new Map<string, { hasta: number; valor: V; refrescoIniciadoEn?: number }>()
   private readonly vuelos = new Map<string, Vuelo<V>>()
   private readonly ahora: () => number
 
@@ -134,15 +137,21 @@ export class SingleFlightCache<V> {
    * aparato). Mientras corre, `get` sigue entregando lo guardado antes (si hay algo vigente); sólo sin nada guardado se une
    * a este cálculo. Al terminar, lo nuevo reemplaza a lo guardado.
    *
-   * 🔴 Una excepción (ruling de la Task 6): se UNE a otro `refresh` de la misma llave iniciado hace ≤ `REFRESH_COALESCE_MS`.
-   * Es seguro porque la tablet se entera del cambio por un poll calculado DESPUÉS de la escritura, y el primer refresh
-   * arranca después de ese poll: ya ve la escritura. Si cae OTRA escritura dentro de la ventana, el siguiente poll trae
-   * otra huella y la tablet vuelve a pedir: se corrige sola en ≤ 60 s. Más viejo que la ventana, se anula como siempre.
-   * Un vuelo anulado sale del mapa al anularse: nunca se comparte.
+   * 🔴 Una excepción (ruling de la Task 6; F2 de la Task 13): reusa otro `refresh` de la misma llave que ARRANCÓ hace
+   * ≤ `REFRESH_COALESCE_MS` — se une a él si sigue en vuelo, o entrega lo que ya guardó. Es seguro porque la tablet se
+   * entera del cambio por un poll calculado DESPUÉS de la escritura, y el primer refresh arranca después de ese poll: ya ve
+   * la escritura. Si cae OTRA escritura dentro de la ventana, el siguiente poll trae otra huella y la tablet vuelve a pedir:
+   * se corrige sola en ≤ 60 s. Lo que guardó un `get` nunca se reusa aquí. Más viejo que la ventana, se calcula como
+   * siempre. Un vuelo anulado sale del mapa al anularse: nunca se comparte.
    */
   refresh(llave: string, calcular: () => Promise<V>): Promise<V> {
+    const ahora = this.ahora()
     const vuelo = this.vuelos.get(llave)
-    if (vuelo && vuelo.esRefresh && this.ahora() - vuelo.iniciadoEn <= REFRESH_COALESCE_MS) return vuelo.promesa
+    if (vuelo && vuelo.esRefresh && ahora - vuelo.iniciadoEn <= REFRESH_COALESCE_MS) return vuelo.promesa
+    const entrada = this.entradas.get(llave)
+    if (entrada?.refrescoIniciadoEn !== undefined && ahora - entrada.refrescoIniciadoEn <= REFRESH_COALESCE_MS) {
+      return Promise.resolve(entrada.valor)
+    }
     this.anularVuelo(llave)
     return this.arrancar(llave, calcular, undefined, true)
   }
@@ -176,7 +185,7 @@ export class SingleFlightCache<V> {
         const ahora = this.ahora()
         this.entradas.delete(llave) // que reemplazar no cuente como una entrada de más ni conserve su lugar viejo
         this.purgar(ahora)
-        this.entradas.set(llave, { hasta: ahora + this.opciones.ttlMs, valor })
+        this.entradas.set(llave, { hasta: ahora + this.opciones.ttlMs, valor, ...(esRefresh ? { refrescoIniciadoEn: iniciadoEn } : {}) })
       },
       () => {
         // 🔴 Un error nunca se guarda: quien lo pidió lo recibe por su promesa; la caché sólo suelta el vuelo.

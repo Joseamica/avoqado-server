@@ -4,7 +4,15 @@ import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { fingerprintOf } from './canonicalHash'
 import { getEffectiveDesign, peekEffectiveFingerprint } from './customerDisplayDesign.service'
-import { POLL_BUDGET_MS, PollWorkSaturated, dentroDelPlazo, esperarTodas, pollWorkLimiter, type PollWorkLimiter } from './pollWork'
+import {
+  POLL_BUDGET_MS,
+  PollWorkSaturated,
+  SingleFlightCache,
+  dentroDelPlazo,
+  esperarTodas,
+  pollWorkLimiter,
+  type PollWorkLimiter,
+} from './pollWork'
 import { NO_PROMOTIONS_FINGERPRINT, peekCarouselFingerprint, readCarouselCached } from './promotionCarousel.service'
 import { planFingerprintPart, peekVenuePlanSnapshot, readVenuePlanSnapshot, type VenuePlanSnapshot } from './venuePlanSnapshot'
 import { readVenueSignatures, type VenueSignatures } from './venueSignatures'
@@ -58,22 +66,30 @@ export type FuenteDeAjustes =
   | { propia: true; id: string; aparato: SettingsDeviceRow }
   | { propia: false; respaldo: { id: string; config: Prisma.JsonValue; configOverrides: Prisma.JsonValue } | null }
 
-/** Sin consultar nada en el caso normal (la fila del binding ya trae `status`); UNA consulta sólo si el aparato no es su fuente. */
+/**
+ * Sin consultar nada en el caso normal (la fila del binding ya trae `status`); UNA consulta sólo si el aparato no es su
+ * fuente. Con `limiter` (el poll, F1 de la Task 13) esa consulta ocupa SU lugar del tope y, sin lugar, no corre
+ * (`PollWorkSaturated`); `/settings` la hace sin tope.
+ */
 export async function leerFuenteDeAjustes(
   venueId: string,
   aparato: { id: string; status: TerminalStatus } & SettingsDeviceRow,
+  o: { limiter?: PollWorkLimiter } = {},
 ): Promise<FuenteDeAjustes> {
   if (ESTADOS_DE_FUENTE_PROPIA.includes(aparato.status)) {
     // Sólo las columnas de los ajustes: ni el `status` (lo mueve la vigilancia de latidos) ni la solicitud ni la instalación.
     const propio = Object.fromEntries(COLUMNAS_DEL_APARATO.map(c => [c, aparato[c]])) as SettingsDeviceRow
     return { propia: true, id: aparato.id, aparato: propio }
   }
-  const respaldo = await prisma.terminal.findFirst({
-    where: { venueId, status: TerminalStatus.ACTIVE },
-    orderBy: ORDEN_DEL_RESPALDO,
-    select: { id: true, config: true, configOverrides: true },
-  })
-  return { propia: false, respaldo }
+  const leer = () =>
+    prisma.terminal.findFirst({
+      where: { venueId, status: TerminalStatus.ACTIVE },
+      orderBy: ORDEN_DEL_RESPALDO,
+      select: { id: true, config: true, configOverrides: true },
+    })
+  const respaldo = o.limiter ? o.limiter.intentar(leer) : leer()
+  if (respaldo === null) throw new PollWorkSaturated()
+  return { propia: false, respaldo: await respaldo }
 }
 
 /**
@@ -118,7 +134,7 @@ export interface PollDeps {
   calcularFicha: (venueId: string, terminalId: string, limiter: PollWorkLimiter) => Promise<string>
   peekPlan: (venueId: string) => VenuePlanSnapshot | undefined
   leerPlan: (venueId: string, limiter: PollWorkLimiter) => Promise<VenuePlanSnapshot>
-  leerFuente: (venueId: string, terminal: PollTerminal) => Promise<FuenteDeAjustes>
+  leerFuente: (venueId: string, terminal: PollTerminal, limiter: PollWorkLimiter) => Promise<FuenteDeAjustes>
   leerFirmas: (venueId: string) => Promise<VenueSignatures | null>
   peekCarrusel: (venueId: string) => string | undefined
   leerCarrusel: (venueId: string, limiter: PollWorkLimiter) => Promise<string>
@@ -133,13 +149,26 @@ export const POLL_DEPS_REALES: PollDeps = {
     getEffectiveDesign(venueId, terminalId, { cache: true, limiter }).then(r => r.ficha.fingerprint),
   peekPlan: peekVenuePlanSnapshot,
   leerPlan: (venueId, limiter) => readVenuePlanSnapshot(venueId, { limiter }),
-  leerFuente: leerFuenteDeAjustes,
+  leerFuente: (venueId, terminal, limiter) => leerFuenteDeAjustes(venueId, terminal, { limiter }),
   leerFirmas: readVenueSignatures,
   peekCarrusel: peekCarouselFingerprint,
   leerCarrusel: (venueId, limiter) => readCarouselCached(venueId, { limiter }).then(r => r.fingerprint),
 }
 
 type Fuente = keyof PollFingerprints
+
+/**
+ * 🔴 F1 (Task 13): las firmas del venue, UNA lectura en vuelo por venue con UN lugar del tope (`get` con `limiter`): 50
+ * polls a la vez de un negocio son 1 lectura, no 8 lugares ocupados con la misma consulta mientras la ficha y el plan
+ * esperan. `ttlMs: 0`: sólo se une a lo que sigue EN VUELO, nunca guarda un resultado (una escritura posterior sale en el
+ * siguiente poll — el mismo argumento de la ventana de `refresh`). `maxEntradas: 1` porque lo guardado nunca se entrega.
+ */
+const firmasEnVuelo = new SingleFlightCache<VenueSignatures | null>({ ttlMs: 0, maxEntradas: 1 })
+
+/** Una prueba que truena antes de soltar su lectura no deja a la siguiente unida a un vuelo que nunca termina. */
+export function resetPollSignaturesForTests(): void {
+  firmasEnVuelo.clearForTests()
+}
 
 /** Un `throw` síncrono de una dependencia se vuelve rechazo: así cae en `alFallar` como cualquier otro error. */
 function llamar<T>(trabajo: () => Promise<T>): Promise<T> {
@@ -172,8 +201,8 @@ export async function collectPollFingerprints(
     }
   }
 
-  // 2. Lo que falta, arrancado a la vez. Cada caché aplica el tope por dentro (la ficha y el carrusel, con su plan); a
-  //    `settings` no la cubre ninguna caché: sus lecturas toman su lugar aquí. Nunca un lugar dentro de otro (Codex r1 #2).
+  // 2. Lo que falta, arrancado a la vez. Cada lectura aplica el tope por dentro y sólo si de verdad consulta: la ficha y
+  //    el carrusel con su plan, y las tres de `settings` (abajo). Nunca un lugar dentro de otro (Codex r1 #2).
   const tareas: Partial<Record<Fuente, Promise<string>>> = {}
   if (!huellas.customerDisplay) tareas.customerDisplay = llamar(() => deps.calcularFicha(venueId, terminal.id, deps.limiter))
   if (conPromos && !huellas.promotions) {
@@ -183,20 +212,16 @@ export async function collectPollFingerprints(
     })
   }
   if (!hasRequest) {
-    // Lo que lee la base para `settings` (la fuente —casi siempre sin consulta— y las firmas, UNA tras otra) ocupa SU lugar
-    // hasta terminar; sin lugar, `settings` se omite sin arrancar nada. El plan va por su caché, con su propio lugar.
-    const enSuLugar = deps.limiter.intentar(async () => {
-      const fuente = await deps.leerFuente(venueId, terminal)
-      return { fuente, firmas: await deps.leerFirmas(venueId) }
+    // `settings` lee tres cosas, cada una con SU lugar y sólo si consulta (F1): la fuente (casi nunca consulta: la fila del
+    // binding ya la trae), las firmas (UNA lectura en vuelo por venue, `firmasEnVuelo`) y el plan (su caché). Sin lugar,
+    // lo saturado no arranca y la huella se omite. `esperarTodas`: no se asienta con una lectura viva aunque otra falle.
+    const fuente = llamar(() => deps.leerFuente(venueId, terminal, deps.limiter))
+    const firmas = firmasEnVuelo.get(venueId, () => deps.leerFirmas(venueId), { limiter: deps.limiter })
+    const plan = llamar(() => deps.leerPlan(venueId, deps.limiter))
+    tareas.settings = esperarTodas([fuente, firmas, plan]).then(([fuenteLeida, firmasLeidas, planLeido]) => {
+      if (!firmasLeidas) throw new Error('El negocio ya no existe')
+      return settingsFingerprint({ fuente: fuenteLeida, venue: firmasLeidas, plan: planLeido })
     })
-    if (enSuLugar) {
-      // `esperarTodas`: aunque el plan falle (o se sature) primero, la huella no se asienta con las firmas vivas.
-      const plan = llamar(() => deps.leerPlan(venueId, deps.limiter))
-      tareas.settings = esperarTodas([enSuLugar, plan]).then(([{ fuente, firmas }, planLeido]) => {
-        if (!firmas) throw new Error('El negocio ya no existe')
-        return settingsFingerprint({ fuente, venue: firmas, plan: planLeido })
-      })
-    }
   }
 
   const alFallar = (fuente: Fuente, error: unknown) => {

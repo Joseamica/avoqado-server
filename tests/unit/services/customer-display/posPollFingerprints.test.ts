@@ -6,6 +6,7 @@ import {
   capabilityReportRequested,
   collectPollFingerprints,
   leerFuenteDeAjustes,
+  resetPollSignaturesForTests,
   settingsFingerprint,
   type FuenteDeAjustes,
   type PollDeps,
@@ -147,9 +148,30 @@ describe('leerFuenteDeAjustes — LA regla de /settings (`tpvSettings.mobile.con
       })
     },
   )
+
+  // 🔴 F1 (Task 13): desde el poll, la fuente pide SU lugar del tope sólo cuando de verdad consulta.
+  it('con el tope del poll: la propia no necesita lugar; el respaldo ocupa UNO mientras consulta y, sin lugar, no consulta', async () => {
+    const lleno = new PollWorkLimiter(0)
+    await expect(leerFuenteDeAjustes(VENUE, terminal(), { limiter: lleno })).resolves.toMatchObject({ propia: true })
+    await expect(
+      leerFuenteDeAjustes(VENUE, terminal({ status: 'MAINTENANCE' } as Partial<PollTerminal>), { limiter: lleno }),
+    ).rejects.toBeInstanceOf(PollWorkSaturated)
+    expect(prismaMock.terminal.findFirst).not.toHaveBeenCalled()
+
+    const limiter = new PollWorkLimiter(1)
+    const respaldo = diferida<any>()
+    prismaMock.terminal.findFirst.mockReturnValueOnce(respaldo.promesa as any)
+    const f = leerFuenteDeAjustes(VENUE, terminal({ status: 'MAINTENANCE' } as Partial<PollTerminal>), { limiter })
+    expect(limiter.enVuelo).toBe(1)
+    respaldo.resolver({ id: 't-b', config: {}, configOverrides: null })
+    await expect(f).resolves.toEqual({ propia: false, respaldo: { id: 't-b', config: {}, configOverrides: null } })
+    expect(limiter.enVuelo).toBe(0)
+  })
 })
 
 describe('collectPollFingerprints', () => {
+  afterEach(resetPollSignaturesForTests) // las firmas en vuelo viven en el módulo: una prueba caída no contagia a la siguiente
+
   it('🔴 sin versión reportada: nada, y nada se consulta (decisión 1)', async () => {
     const d = deps()
     expect(
@@ -269,6 +291,30 @@ describe('collectPollFingerprints', () => {
     firmasVivas[0](firmas)
     await vaciar()
     expect(limiter.enVuelo).toBe(7) // se soltó al terminar SU lectura, no antes
+  })
+
+  // 🔴 F1 (Task 13): cada poll tomaba un lugar para leer las MISMAS firmas; una ráfaga de > 8 llenaba el tope y la ficha
+  // y el plan dejaban de rellenarse. Ahora las firmas son UNA lectura en vuelo por venue, con UN lugar.
+  it('🔴 50 polls simultáneos de un venue = 1 lectura de firmas y 1 lugar, y los 50 reciben su huella de ajustes', async () => {
+    const limiter = new PollWorkLimiter(8)
+    const lectura = diferida<typeof firmas>()
+    const d = deps({ limiter, peekFicha: jest.fn(() => 'ficha-guardada'), leerFirmas: jest.fn(() => lectura.promesa) })
+    const polls = Array.from({ length: 50 }, (_, i) =>
+      collectPollFingerprints(
+        { venueId: VENUE, terminal: terminal({ id: `t${i}`, customerDisplayDesignVersion: 1 }), hasRequest: false },
+        d,
+      ),
+    )
+    await vaciar()
+    expect(d.leerFirmas).toHaveBeenCalledTimes(1)
+    expect(limiter.enVuelo).toBe(1)
+    lectura.resolver(firmas)
+    const huellas = await Promise.all(polls)
+    expect(huellas.filter(h => h.settings)).toHaveLength(50)
+    expect(limiter.enVuelo).toBe(0)
+    // Sólo se une a lo que está EN VUELO: el poll siguiente vuelve a leer (una escritura posterior sale ahí).
+    await collectPollFingerprints({ venueId: VENUE, terminal: terminal({ customerDisplayDesignVersion: 1 }), hasRequest: false }, d)
+    expect(d.leerFirmas).toHaveBeenCalledTimes(2)
   })
 
   it('un venue que ya no existe (firmas null) omite settings', async () => {

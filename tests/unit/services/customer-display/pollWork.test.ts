@@ -261,6 +261,21 @@ describe('SingleFlightCache', () => {
       expect(cache.peek('k')).toBe('nuevo')
     })
 
+    // 🔴 F2 (Task 13): unir sólo lo que seguía EN VUELO dejaba 10 refrescos en serie en 10 construcciones. La ventana
+    // también cubre lo que un refresh reciente ya GUARDÓ; la cuenta va desde que ese refresh ARRANCÓ.
+    it.each([
+      [1_900, 1],
+      [2_100, 2],
+    ])('refresh, termina, y otro refresh %p ms después de que arrancó el primero ⇒ %p cálculo(s)', async (transcurrido, calculos) => {
+      const cache = nueva()
+      let n = 0
+      const calcular = jest.fn(async () => `v${++n}`)
+      await expect(cache.refresh('k', calcular)).resolves.toBe('v1')
+      reloj += transcurrido
+      await expect(cache.refresh('k', calcular)).resolves.toBe(`v${calculos}`)
+      expect(calcular).toHaveBeenCalledTimes(calculos)
+    })
+
     it('el error del refresh al que se unieron llega a los DOS y no se guarda', async () => {
       const cache = nueva()
       const d = diferida<string>()

@@ -80,6 +80,10 @@ const COMPLETO = {
       maxSelect: true,
       options: {
         orderBy: [{ displayOrder: 'asc' }, { id: 'asc' }],
+        // ponytail: sin `relationJoins`, este `take` y el de grupos salen como `IN (…)` SIN `LIMIT` y Prisma recorta en
+        // memoria (medido en la Task 13: 220 opciones leídas para usar ≤ 51 por grupo), y el editor no topa grupos ni
+        // opciones (`promotion.schema.ts`). Techo: ≤ 50 promociones × TODAS sus opciones, filas diminutas. Si D3 mide grupos
+        // enormes: topar en la escritura (decisión de producto) o leer las opciones con una ventana por grupo.
         take: MAX_OPCIONES + 1,
         // «Vendible» lo revisa la BASE en el `where` (Codex r1 #7): aquí sólo hace falta el precio de lista.
         select: { quantity: true, chargedQuantity: true, priceDeltaCents: true, product: { select: { price: true } } },
@@ -252,8 +256,10 @@ export type CarouselForDevice =
  * El carrusel que `/promotions` agrega SÓLO para el aparato que lo entiende: POS_ANDROID con binding exacto y versión
  * de diseño ≥ 2 (decisión 1). iOS, las apps viejas y las llamadas sin cabecera reciben el contrato de siempre.
  * Fresco (`refresh`) y escrito a través de la caché: la huella que ve la tablet aquí es la que verá en el poll. Tras una
- * edición, las N tablets del venue llegan casi a la vez: `refresh` se une a la construcción que otra empezó hace ≤ 2 s
- * (`REFRESH_COALESCE_MS`, ruling de la Task 6), así que son ≤ 1 construcción por venue cada 2 s, no N.
+ * edición, las N tablets del venue llegan casi a la vez: `refresh` reusa la construcción que otra ARRANCÓ hace ≤ 2 s
+ * (`REFRESH_COALESCE_MS`, ruling de la Task 6 y F2 de la Task 13) —se une a ella si sigue en vuelo, o entrega lo que ya
+ * guardó—, así que esta ruta arranca a lo más 1 construcción por venue cada 2 s, no N (salvo que la anterior haya fallado:
+ * un error no se guarda). Las que arranca el poll por su caché (`readCarouselCached`) van aparte.
  * 🔴 Contrato para F2: si esta función truena ANTES de su `try` (la búsqueda del aparato), el controlador responde la
  * forma de siempre, SIN `carouselStatus`. Una tablet v2 trata un `carouselStatus` ausente como «no sé» y conserva su
  * último carrusel —igual que contra un servidor viejo—, nunca como «no hay promociones» (revisión de la Task 6, menor 1).
