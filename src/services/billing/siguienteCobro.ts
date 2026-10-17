@@ -21,7 +21,25 @@ export async function montoDelSiguienteCobro(stripe: Stripe, subscriptionId: str
   return null
 }
 
-/** `true` si la suscripción termina sin cobrar al llegar a `finMs` (cancelada al fin del periodo o con `cancel_at` antes). */
-export function seCancelaAntesDe(sub: Stripe.Subscription, finMs: number): boolean {
-  return sub.cancel_at_period_end === true || (typeof sub.cancel_at === 'number' && sub.cancel_at <= finMs / 1000)
+/**
+ * 🔴 Codex N3: la pausa de cobranza vigente de una suscripción. Una pausa SIN `resumes_at` (indefinida) cuenta como
+ * vigente: es la más peligrosa de todas, no la más inocente.
+ */
+export function pausaDe(sub: Stripe.Subscription): Date | null {
+  const pausa = (sub as unknown as { pause_collection?: { resumes_at?: number | null } | null }).pause_collection
+  if (!pausa) return null
+  return pausa.resumes_at ? new Date(pausa.resumes_at * 1000) : new Date(8640000000000000)
+}
+
+/**
+ * `true` si al llegar a `finMs` NO se cobrará: cancelada al fin del periodo, con `cancel_at` antes, o con la cobranza en
+ * pausa (la oferta de retención, `mark_uncollectible`) que no se reanuda antes de esa fecha.
+ */
+export function noHabraCobro(sub: Stripe.Subscription, finMs: number): boolean {
+  const pausadaHasta = pausaDe(sub)
+  return (
+    sub.cancel_at_period_end === true ||
+    (typeof sub.cancel_at === 'number' && sub.cancel_at <= finMs / 1000) ||
+    (pausadaHasta !== null && pausadaHasta.getTime() >= finMs)
+  )
 }
