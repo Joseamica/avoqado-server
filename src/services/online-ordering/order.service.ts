@@ -47,8 +47,9 @@ export interface CreateOnlineOrderOptions {
   /**
    * P1-06: lo que sólo un pedido NUEVO exige (negocio operativo, plan). Corre DESPUÉS de buscar la repetición y ANTES de mirar
    * si la tienda abre: un reintento de un pedido ya creado recibe SU pedido aunque el plan haya vencido o el negocio ya no opere.
+   * OBLIGATORIO: ningún llamador crea un pedido sin decir cómo se revisan plan y negocio.
    */
-  assertCanCreate?: () => Promise<void>
+  assertCanCreate: () => Promise<void>
 }
 
 export interface CreateOnlineOrderResult {
@@ -176,10 +177,7 @@ async function pickOrderNumber(tx: Prisma.TransactionClient, venueId: string): P
   throw new ConflictError('No se pudo asignar un folio. Intenta de nuevo.', 'ORDER_NUMBER_UNAVAILABLE')
 }
 
-export async function createOnlineOrder(
-  input: CreateOnlineOrderInput,
-  opts: CreateOnlineOrderOptions = {},
-): Promise<CreateOnlineOrderResult> {
+export async function createOnlineOrder(input: CreateOnlineOrderInput, opts: CreateOnlineOrderOptions): Promise<CreateOnlineOrderResult> {
   const now = input.now ?? new Date()
   const externalId = `web:${input.idempotencyKey}`
 
@@ -212,7 +210,7 @@ export async function createOnlineOrder(
   let quote: QuoteResult
   try {
     // 3. P1-06: lo que exige un pedido NUEVO (negocio operativo y plan).
-    await opts.assertCanCreate?.()
+    await opts.assertCanCreate()
 
     // 4. ¿La tienda está recibiendo pedidos?
     const state = await getAcceptingStatus(input.venueId, now)
