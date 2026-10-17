@@ -1047,10 +1047,12 @@ async function sendTrialEndingNotifications(venueId: string, venueName: string, 
  *
  * - No charge that day (canceled, `cancel_at` before it, collection paused through it): NO email and NO in-app notice
  *   that speaks of a charge.
+ * - A delayed or replayed event (`trial_end` already ≤ now): the charge already happened, so NO email and NO notice.
  * - Amount unknown (`null`): no email; the in-app notice goes without an amount (never the list price).
  * - The in-app notice is IN_APP only: the EMAIL channel of `createNotification` would mail this same text to every
  *   OWNER/ADMIN on top of the plan email (and would mail it when there is no amount).
- * - One plan email per subscription (to the resolved recipient), not one per OWNER/ADMIN. Dates use the venue's zone.
+ * - One plan email per subscription, to the recipient `resolvePlanNotificationTarget` resolves (skipped only when it has
+ *   none), not one per OWNER/ADMIN: the staff list only decides who gets the in-app notice. Dates use the venue's zone.
  */
 async function sendPlanTrialEndingNotifications(
   venueFeature: Prisma.VenueFeatureGetPayload<{ include: { feature: true; venue: true } }>,
@@ -1059,6 +1061,11 @@ async function sendPlanTrialEndingNotifications(
 ): Promise<void> {
   const { venueId, venue } = venueFeature
   try {
+    if (trialEnd.getTime() <= Date.now()) {
+      logger.info('ℹ️ Webhook: plan trial already ended; late event, no notice sent', { venueId, subscriptionId: subscription.id })
+      return
+    }
+
     if (noHabraCobro(subscription, trialEnd.getTime())) {
       logger.info('ℹ️ Webhook: trial ending with no charge to follow; no notice sent', { venueId, subscriptionId: subscription.id })
       return
@@ -1072,10 +1079,8 @@ async function sendPlanTrialEndingNotifications(
       select: { staff: { select: { id: true, email: true } } },
       take: 25,
     })
-    if (staffMembers.length === 0) {
-      logger.warn('⚠️ No OWNER/ADMIN staff found for venue', { venueId })
-      return
-    }
+    // Sin OWNER/ADMIN no hay a quién avisar en la app, pero el correo del plan no depende de esta lista.
+    if (staffMembers.length === 0) logger.warn('⚠️ No OWNER/ADMIN staff found for venue', { venueId })
 
     const planName = venueFeature.feature.code === 'PLAN_PREMIUM' ? 'Premium' : 'Pro'
     // `||`, not `??`: an empty zone makes toLocaleDateString throw.
@@ -1117,7 +1122,11 @@ async function sendPlanTrialEndingNotifications(
     }
 
     const target = await resolvePlanNotificationTarget(venueId)
-    const emailSent = await emailService.sendPlanRenewalReminderEmail(target.email ?? staffMembers[0].staff.email, {
+    if (!target.email) {
+      logger.warn('⚠️ Plan trial ending: no email recipient resolved; email skipped', { venueId, subscriptionId: subscription.id })
+      return
+    }
+    const emailSent = await emailService.sendPlanRenewalReminderEmail(target.email, {
       locale: target.locale,
       venueName: venue.name,
       interval: subscription.items?.data?.[0]?.price?.recurring?.interval === 'year' ? 'annual' : 'monthly',
