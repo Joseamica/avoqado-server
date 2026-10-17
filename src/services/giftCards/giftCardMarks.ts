@@ -42,6 +42,13 @@ export function esCuentaDeTarjetasSeleccionada(
 export const WHERE_ORDEN_SIN_TARJETAS = { items: { none: { giftCardId: { not: null } } } } satisfies Prisma.OrderWhereInput
 
 /**
+ * R3 (turnos): la marca para el `select` de la orden de un cobro. Un renglón con `giftCardId` basta para saber que la cuenta es de
+ * tarjetas (no se mezclan, A5). Todo `select` que alimente `aggregateShiftPayments` (también el script de reatribución) y el detalle
+ * del turno del panel traen la MISMA marca.
+ */
+export const ORDEN_DE_TARJETAS_SELECT = { items: { where: { giftCardId: { not: null } }, select: { id: true }, take: 1 } } as const
+
+/**
  * Cuenta de tarjetas PAGADA: la única que «carga» tarjetas. Un abono a una venta que no se termina de pagar no carga nada (sus sobres
  * siguen PENDING, en $0); los reportes de «tarjetas cargadas» usan esta población (B5 r1, M-1).
  */

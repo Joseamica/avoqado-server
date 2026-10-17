@@ -6,7 +6,9 @@ import { logAction } from './activity-log.service'
 import { lineRevenue } from './lineRevenue'
 import { calculateCashReconciliation, calculateCashReconciliationFromExpected } from '../shared/cashReconciliation.service'
 import { lockShiftLifecycleForVenue } from '../shared/shiftLifecycleLock'
-import { ORDEN_DE_TARJETAS_SELECT, ventasDelTurnoSinTarjetas } from '../tpv/shift.tpv.service'
+import { ORDEN_DE_TARJETAS_SELECT } from '../giftCards/giftCardMarks'
+import { esCuentaDeTarjetas } from '../giftCards/cuentaDeTarjetas'
+import { ventasDelTurnoSinTarjetas, ventasSinTarjetasPorTurno } from '../shared/ventasDelTurno'
 
 interface ShiftFilters {
   staffId?: string
@@ -403,6 +405,8 @@ export async function getShiftById(venueId: string, shiftId: string, incluirEspe
               // is charged as a whole kilo.
               weightQuantity: true,
               modifiers: { select: { price: true, quantity: true } },
+              // Cierre r1 (R3): la marca de cuenta de tarjetas; no es una orden de venta del turno.
+              giftCardId: true,
               product: {
                 select: {
                   id: true,
@@ -602,6 +606,9 @@ export async function getShiftById(venueId: string, shiftId: string, incluirEspe
     createdAt: payment.createdAt,
   }))
 
+  // Cierre r1 (R3): la cuenta de tarjetas de regalo no es una orden de VENTA del turno: no entra al conteo ni al ticket promedio.
+  const ordenesDeVenta = shift.orders.filter(order => !esCuentaDeTarjetas(order.items)).length
+
   // Use calculated totals if they're more accurate than stored values. R3 (Codex #5 del cierre): el guardado de un turno SIN cerrar es
   // el acumulado en vivo, que cuenta las cargas de tarjetas; su respaldo es la agregación que ya las excluye.
   const finalTotalSales =
@@ -642,7 +649,7 @@ export async function getShiftById(venueId: string, shiftId: string, incluirEspe
     ...serializeShiftCashReconciliation(shift),
     totalSales: finalTotalSales,
     totalTips: finalTotalTips,
-    totalOrders: shift.orders.length,
+    totalOrders: ordenesDeVenta,
     status: effectiveStatus,
     staff: shift.staff,
     venue: shift.venue,
@@ -660,9 +667,9 @@ export async function getShiftById(venueId: string, shiftId: string, incluirEspe
     // Summary stats
     stats: {
       totalPayments: shift.payments.length,
-      totalOrders: shift.orders.length,
+      totalOrders: ordenesDeVenta,
       totalProducts: topProducts.reduce((sum, p) => sum + p.quantity, 0),
-      avgOrderValue: shift.orders.length > 0 ? Number((finalTotalSales / shift.orders.length).toFixed(2)) : 0,
+      avgOrderValue: ordenesDeVenta > 0 ? Number((finalTotalSales / ordenesDeVenta).toFixed(2)) : 0,
       avgTipPercentage: finalTotalSales > 0 ? Number(((finalTotalTips / finalTotalSales) * 100).toFixed(1)) : 0,
     },
   }
@@ -1018,13 +1025,15 @@ function esCobroDeCuentaDeTarjetas(payment: { order?: { items?: ReadonlyArray<un
 
 /**
  * R3 (Codex #5 del cierre): las ventas de las filas de turnos SIN cerrar. Su `totalSales` guardado es el acumulado en vivo, que suma
- * cualquier cobro (también las cargas de tarjetas); el cierre lo reemplaza por el total firmado. Una agregación por turno abierto
- * (normalmente uno por negocio).
+ * cualquier cobro (también las cargas de tarjetas); el cierre lo reemplaza por el total firmado. Cierre r1: UNA consulta agrupada
+ * para todos los turnos sin cerrar de la página o del rango, no una por fila.
  */
 async function ventasDeTurnosSinCerrar(venueId: string, shifts: Array<{ id: string; status: string }>): Promise<Map<string, number>> {
-  const abiertos = shifts.filter(s => s.status !== 'CLOSED')
-  const ventas = await Promise.all(abiertos.map(s => ventasDelTurnoSinTarjetas(venueId, s.id)))
-  return new Map(abiertos.map((s, i) => [s.id, Number(ventas[i])]))
+  const ventas = await ventasSinTarjetasPorTurno(
+    venueId,
+    shifts.filter(s => s.status !== 'CLOSED').map(s => s.id),
+  )
+  return new Map([...ventas].map(([id, v]) => [id, Number(v)]))
 }
 
 /**

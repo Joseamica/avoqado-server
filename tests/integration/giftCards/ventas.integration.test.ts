@@ -370,11 +370,14 @@ describe('🔴 Codex #5 (cierre) · R3 en los lectores de turnos del PANEL y del
     const { staffId, organizationId } = negocio
     shiftId = (await abrirTurno(venueId, staffId)).id
     // Por el camino REAL de cobro (`payCashOrder`): así el acumulado del turno abierto (`paymentShiftClaim`) también lo cuenta.
-    await sembrarVentaDeTarjetasSinPagar({ venueId, organizationId, staffId, montos: [1000], abonosEnEfectivo: [1000] })
+    const carga = await sembrarVentaDeTarjetasSinPagar({ venueId, organizationId, staffId, montos: [1000], abonosEnEfectivo: [1000] })
+    // Las dos órdenes son del turno (el detalle cuenta sus órdenes por `Order.shiftId`).
+    await prisma.order.update({ where: { id: carga.orderId }, data: { shiftId } })
     const mercancia = await prisma.order.create({
       data: {
         venueId,
         orderNumber: `TP-${Date.now()}`,
+        shiftId,
         contratoDePrecio: 'IVA_INCLUIDO',
         subtotal: D(200),
         taxAmount: D(0),
@@ -409,6 +412,8 @@ describe('🔴 Codex #5 (cierre) · R3 en los lectores de turnos del PANEL y del
     expect(detalle.totalSales).toBe(200)
     expect(detalle.paymentMethodBreakdown.find((m: { method: string }) => m.method === 'CASH')).toMatchObject({ total: 1200 })
     expect(detalle.staffBreakdown.reduce((suma: number, s: { sales: number }) => suma + s.sales, 0)).toBe(200)
+    // Cierre r1: la cuenta de tarjetas tampoco es una orden de venta del turno (ticket promedio = $200 / 1, no / 2).
+    expect([detalle.totalOrders, detalle.stats.totalOrders, detalle.stats.avgOrderValue]).toEqual([1, 1, 200])
 
     const lista = await turnosDelPanel(venueId, 1, 10, rango())
     expect(lista.data.find((t: { id: string }) => t.id === shiftId)?.totalSales).toBe(200)

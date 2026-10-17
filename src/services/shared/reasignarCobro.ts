@@ -40,8 +40,9 @@
  */
 import { Prisma } from '@prisma/client'
 import logger from '@/config/logger'
-import { tieneRenglonDeTarjeta } from '@/services/giftCards/cuentaDeTarjetas'
-import { isGiftCardTenderKind } from '@/services/giftCards/giftCardTender'
+// N1 (cierre): de un módulo SIN Prisma. El script de reasignación elige la base antes de cargar el cliente: un import que lo
+// arrastre lo construiría con la URL del .env (`tests/unit/architecture/grafoDeImports.guard.test.ts`).
+import { isGiftCardTenderKind, tieneRenglonDeTarjeta } from '@/services/giftCards/giftCardPredicados'
 import {
   cierreDelCobroSaldaLaCuenta,
   computeOrderBalance,

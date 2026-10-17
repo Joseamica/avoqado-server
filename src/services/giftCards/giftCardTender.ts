@@ -12,9 +12,8 @@ import { GiftCardError } from './giftCardErrors'
 export const NOMBRE_TENDER_DE_REGALO = 'Tarjeta de regalo'
 export const NOMBRE_TENDER_DE_REGALO_ALTERNO = 'Tarjeta de regalo (Avoqado)'
 
-export function isGiftCardTenderKind(systemKind: string | null | undefined): boolean {
-  return systemKind === 'GIFT_CARD'
-}
+// N1 (cierre): vive en un módulo sin Prisma (`giftCardPredicados`) para quien no puede cargar el cliente; aquí se re-exporta.
+export { isGiftCardTenderKind } from './giftCardPredicados'
 
 /** Llamar con el cliente GLOBAL, fuera de transacciones de dinero: el `create` puede chocar en una carrera (P2002). */
 export async function ensureGiftCardTender(
@@ -92,7 +91,11 @@ export async function resolveGiftCardTenderForChargeInTx(tx: Prisma.TransactionC
     where: { tenderTypeId: tender.id, venueId, revision: tender.revision },
   })
   if (!revision) {
-    throw new GiftCardError('GIFT_CARDS_DISABLED', 'El tipo de pago «Tarjeta de regalo» está incompleto. Avísale a soporte de Avoqado.', 409)
+    throw new GiftCardError(
+      'GIFT_CARDS_DISABLED',
+      'El tipo de pago «Tarjeta de regalo» está incompleto. Avísale a soporte de Avoqado.',
+      409,
+    )
   }
   return {
     tenderTypeId: tender.id,

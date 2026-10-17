@@ -15,13 +15,8 @@ export function esCuentaDeTarjetas(items: ReadonlyArray<{ giftCardId: string | n
   return items.length > 0 && items.every(item => item.giftCardId != null)
 }
 
-/**
- * ¿Alguna línea es de tarjeta? Es la versión en memoria de `esCuentaDeTarjetasEnTx` y la que usan las guardias: basta UNA
- * línea de tarjeta para no tocar la cuenta (defensa en profundidad si alguna vez quedara mezclada).
- */
-export function tieneRenglonDeTarjeta(items: ReadonlyArray<{ giftCardId: string | null }>): boolean {
-  return items.some(item => item.giftCardId != null)
-}
+// N1 (cierre): vive en un módulo sin Prisma (`giftCardPredicados`) para quien no puede cargar el cliente; aquí se re-exporta.
+export { tieneRenglonDeTarjeta } from './giftCardPredicados'
 
 /** ¿La cuenta tiene líneas de tarjeta? Las líneas de tarjeta sólo nacen con la cuenta: nunca se agregan después. */
 export async function esCuentaDeTarjetasEnTx(db: Prisma.TransactionClient | PrismaClient, orderId: string): Promise<boolean> {
