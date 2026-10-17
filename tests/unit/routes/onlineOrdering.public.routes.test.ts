@@ -343,7 +343,7 @@ describe('cableado: qué candados corre cada ruta', () => {
   })
 
   it('A9: un slug con bytes de control, espacios o demasiado largo es 400 ANTES de buscar el negocio, en todas las rutas', async () => {
-    for (const slug of ['flau%00tas', 'flau%1Btas', 'flau%20tas', 'f'.repeat(101)]) {
+    for (const slug of ['flau%00tas', 'flau%1Btas', 'flau%20tas', 'f'.repeat(201)]) {
       for (const llamar of [
         () => request(app).get(`/venues/${slug}/ordering/info`),
         () => request(app).get(`/venues/${slug}/ordering/menu`),
@@ -358,6 +358,13 @@ describe('cableado: qué candados corre cada ruta', () => {
       }
     }
     expect(mockRan).toEqual([])
+  })
+
+  it('un slug con sufijo de unicidad (100 + guion + 13 dígitos) pasa la puerta del slug', async () => {
+    const slug = 'f'.repeat(100) + '-' + '1760700000000'
+    expect(slug).toHaveLength(114)
+    const r = await request(app).get(`/venues/${slug}/ordering/info`)
+    expect(r.text).not.toContain('Negocio inválido')
   })
 
   it('un token mal formado se rechaza ANTES de buscar el negocio (no cuesta una consulta)', async () => {

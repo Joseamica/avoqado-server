@@ -26,8 +26,8 @@ const note = sinControl(
  */
 export const safeId = (mensaje: string) => z.string().min(1, mensaje).max(40, mensaje).regex(ID_SEGURO, mensaje)
 
-/** A9: el slug de los negocios de la casa (hasta 100 caracteres, como al crearlo); se valida ANTES de buscar el negocio. */
-export const venueSlug = z.string().min(1, 'Negocio inválido').max(100, 'Negocio inválido').regex(SLUG_SEGURO, 'Negocio inválido')
+/** A9: el slug de los negocios de la casa (hasta 200 caracteres: los de la casa llegan a 100 más un sufijo de unicidad); se valida ANTES de buscar el negocio. */
+export const venueSlug = z.string().min(1, 'Negocio inválido').max(200, 'Negocio inválido').regex(SLUG_SEGURO, 'Negocio inválido')
 
 const slugParams = z.object({ venueSlug })
 /** Para la puerta de la API pública: sólo revisa el slug y deja pasar los demás parámetros (p. ej. el token de seguimiento). */
