@@ -43,8 +43,11 @@ import { extensionCancellableReads, extensionCancellableTransactions } from './r
  *   nothing — there `connection_limit` MUST be 1 and is the operator's call.
  * - `pool_timeout` is left at Prisma's default (10s) on purpose, so the app
  *   fails fast under exhaustion instead of hanging longer.
+ *
+ * Exported so the poll-budget measurement builds its client with THIS recipe
+ * instead of a copy that could drift (tests/integration/customer-display/pollBudget.ts).
  */
-function buildDatasourceUrl(): string | undefined {
+export function buildDatasourceUrl(): string | undefined {
   const base = process.env.DATABASE_URL
   if (!base) return undefined
   if (/[?&]connection_limit=/.test(base) || /[?&]pgbouncer=true/.test(base)) return base
