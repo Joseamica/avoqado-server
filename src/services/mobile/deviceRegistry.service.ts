@@ -107,31 +107,30 @@ const TIPOS_CON_VERSION_DE_APP: ReadonlySet<TerminalType> = new Set([TerminalTyp
 
 /**
  * F0-B (Task 11): el `systemInfo` a escribir para el número de compilación de un POS, mezclado con lo que ya hubiera, o
- * `undefined` si no hay nada que escribir (otro tipo de aparato, el mismo número ya guardado, o sin número y la MISMA versión).
- * `undefined` en un `data` de Prisma no toca la columna.
+ * `undefined` si no se toca (otro tipo de aparato, o una petición sin `x-app-version`). `undefined` en un `data` de Prisma no
+ * toca la columna. `guardado` null = la fila todavía no existe (alta): sin número, nace sin `systemInfo`.
  *
- * 🔴 Codex r1 #10: si la app CAMBIÓ de `x-app-version` y no mandó un número válido, el guardado ya no es de ella (p. ej. volvió
- * a una app vieja): se borra esa llave y el panel vuelve a «Actualiza la app». Lo demás de `systemInfo` se queda.
+ * 🔴 La versión y su número van SIEMPRE juntos, en la MISMA escritura que `version` (ronda final, Codex P2-2): con
+ * `x-app-version` se escribe SU número, o se quita la llave si no lo mandó (Codex r1 #10: ese número ya no es de ella; el panel
+ * vuelve a «Actualiza la app»). Nada se decide contra lo leído: el atajo «mismo número / misma versión ⇒ no escribo» dejaba que
+ * una lectura vieja (otra petición escribió en medio) terminara en «2.24.0 / 56». Sin `x-app-version` no se toca ninguno.
  *
- * ponytail: lee-mezcla-escribe sin CAS; hoy este registro es el ÚNICO escritor de `systemInfo` en filas POS (el latido de
- * `tpv-health` sólo escribe filas TPV). Si otro proceso empieza a escribir aquí, pasar a `jsonb_set` o a un CAS.
+ * ponytail: el RESTO de `systemInfo` se mezcla de lo leído, sin CAS; vale porque este registro es el ÚNICO escritor de
+ * `systemInfo` en filas POS (el latido de `tpv-health` sólo escribe filas TPV) y nunca cambia otra llave. Si otro proceso
+ * empieza a escribir aquí, pasar a `jsonb_set` o a un CAS.
  */
 export function systemInfoConVersionDeLaApp(
   tipo: TerminalType,
-  guardado: { systemInfo: Prisma.JsonValue | null; version: string | null },
+  guardado: { systemInfo: Prisma.JsonValue | null } | null,
   reportado: { appVersion?: string | null; appVersionCode?: number | null },
 ): Prisma.InputJsonValue | undefined {
-  if (!TIPOS_CON_VERSION_DE_APP.has(tipo)) return undefined
+  if (!TIPOS_CON_VERSION_DE_APP.has(tipo) || reportado.appVersion == null) return undefined
+  const codigo = reportado.appVersionCode
+  if (guardado === null) return codigo != null ? { versionCode: codigo } : undefined
   const si = guardado.systemInfo
   const previo = si !== null && typeof si === 'object' && !Array.isArray(si) ? (si as Prisma.JsonObject) : {}
-  if (reportado.appVersionCode != null) {
-    if (previo.versionCode === reportado.appVersionCode) return undefined
-    return { ...previo, versionCode: reportado.appVersionCode } as Prisma.InputJsonValue
-  }
-  const cambioDeVersion = reportado.appVersion != null && reportado.appVersion !== guardado.version
-  if (!cambioDeVersion || !('versionCode' in previo)) return undefined
-  const { versionCode: _deOtraVersion, ...resto } = previo
-  return resto as Prisma.InputJsonValue
+  const { versionCode: _elGuardado, ...resto } = previo
+  return (codigo != null ? { ...resto, versionCode: codigo } : resto) as Prisma.InputJsonValue
 }
 
 /**
@@ -157,7 +156,7 @@ export async function ensureDeviceTerminal(params: {
     // ── ¿Ya existe este dispositivo en este venue? ────────────────────────────────
     const existing = await prisma.terminal.findFirst({
       where: { venueId, deviceUid: identity.deviceUid },
-      select: { id: true, name: true, type: true, systemInfo: true, version: true },
+      select: { id: true, name: true, type: true, systemInfo: true },
     })
 
     if (existing) {
@@ -234,7 +233,7 @@ export async function ensureDeviceTerminal(params: {
         lastHeartbeat: now,
         lastStaffId: staffId,
         // F0-B (Task 11): nace con su número de compilación, si lo mandó.
-        systemInfo: systemInfoConVersionDeLaApp(tipo, { systemInfo: null, version: null }, identity),
+        systemInfo: systemInfoConVersionDeLaApp(tipo, null, identity),
       },
       select: { id: true, name: true },
     })

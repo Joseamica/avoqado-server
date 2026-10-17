@@ -118,6 +118,57 @@ describe('recordCapabilityReport — la ficha cacheada se tira SÓLO tras un rep
     expect(invalidar).not.toHaveBeenCalled()
   })
 
+  // 🔴 Codex P2-1 (ronda final de F0-B): la hora la pone el SERVIDOR al recibir (`observedAt` del controlador), así que dice
+  // qué reporte es más nuevo. Uno más viejo de la MISMA instalación ya no deshace uno más nuevo; el empate se escribe (como
+  // siempre: sin orden que respetar).
+  describe('un reporte más VIEJO que el guardado no lo pisa', () => {
+    const DESPUES = new Date(AHORA.getTime() + 1_000)
+    const masNuevo = (extra: Record<string, unknown> = {}) =>
+      ({
+        customerDisplayInstallationId: 'inst-1',
+        customerDisplayInstallationSwitches: [],
+        capabilitiesObservedAt: DESPUES,
+        ...extra,
+      }) as any
+    const conHora = { OR: [{ capabilitiesObservedAt: null }, { capabilitiesObservedAt: { lte: AHORA } }] }
+
+    it('misma instalación: el CAS exige que lo guardado no sea más nuevo que este reporte', async () => {
+      expect(await recordCapabilityReport(entrada({ customerDisplayDesignVersion: 2, installationId: 'inst-1' }))).toBe('OK')
+      expect(prismaMock.terminal.updateMany.mock.calls[0][0].where).toMatchObject(conHora)
+    })
+
+    it('misma instalación y ya hay uno más nuevo: OK sin escribir ni invalidar', async () => {
+      prismaMock.terminal.findFirst.mockResolvedValue(masNuevo())
+      expect(await recordCapabilityReport(entrada({ customerDisplayDesignVersion: 1, installationId: 'inst-1' }))).toBe('OK')
+      expect(prismaMock.terminal.updateMany).not.toHaveBeenCalled()
+      expect(invalidar).not.toHaveBeenCalled()
+    })
+
+    it('misma instalación, el más nuevo escribe ENTRE la lectura y la escritura: pierde el CAS, relee y no escribe', async () => {
+      prismaMock.terminal.findFirst
+        .mockResolvedValueOnce({ customerDisplayInstallationId: 'inst-1', customerDisplayInstallationSwitches: [] } as any)
+        .mockResolvedValueOnce(masNuevo())
+      prismaMock.terminal.updateMany.mockResolvedValue({ count: 0 } as any)
+      expect(await recordCapabilityReport(entrada({ customerDisplayDesignVersion: 1, installationId: 'inst-1' }))).toBe('OK')
+      expect(prismaMock.terminal.updateMany).toHaveBeenCalledTimes(1)
+      expect(invalidar).not.toHaveBeenCalled()
+    })
+
+    it('DD6: OTRA instalación no se compara por hora — su cambio siempre se cuenta (lo guarda el CAS de la instalación)', async () => {
+      prismaMock.terminal.findFirst.mockResolvedValue(masNuevo())
+      expect(await recordCapabilityReport(entrada({ customerDisplayDesignVersion: 1, installationId: 'inst-2' }))).toBe('OK')
+      expect(prismaMock.terminal.updateMany.mock.calls[0][0].where).not.toHaveProperty('OR')
+    })
+
+    it('app vieja (sin instalación): el mismo CAS por hora, y perderlo contra uno más nuevo es OK, no SIN_BINDING', async () => {
+      prismaMock.terminal.updateMany.mockResolvedValue({ count: 0 } as any)
+      prismaMock.terminal.findFirst.mockResolvedValue({ capabilitiesObservedAt: DESPUES } as any)
+      expect(await recordCapabilityReport(entrada())).toBe('OK')
+      expect(prismaMock.terminal.updateMany.mock.calls[0][0].where).toMatchObject(conHora)
+      expect(invalidar).not.toHaveBeenCalled()
+    })
+  })
+
   it('🔴 otra instalación le gana el CAS dos veces: 409 CUSTOMER_DISPLAY_INSTALLATION_RACE, sin invalidar', async () => {
     prismaMock.terminal.updateMany.mockResolvedValue({ count: 0 } as any)
     await expect(recordCapabilityReport(entrada({ customerDisplayDesignVersion: 1, installationId: 'otra' }))).rejects.toMatchObject({

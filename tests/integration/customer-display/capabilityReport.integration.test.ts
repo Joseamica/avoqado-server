@@ -216,6 +216,50 @@ it('🔴 un reporte retrasado que leyó A no pierde los cambios A → B → A qu
   expect(fila.customerDisplayInstallationSwitches).toHaveLength(3) // con sólo la instalación en el CAS quedaba UNO
 })
 
+// 🔴 Codex P2-1 (ronda final de F0-B), su secuencia: R1 (versión 1, pantalla presente, t1) se detiene antes de escribir; R2
+// (versión 2, pantalla ausente, t2 > t1) guarda; R1 sigue. Antes R1 deshacía a R2 y los dos devolvían OK. La hora es la del
+// SERVIDOR al recibir (el controlador), así que dice cuál es más nuevo.
+it('🔴 un reporte TARDÍO de la MISMA instalación no deshace uno más nuevo', async () => {
+  const INST = 'inst-tardio'
+  const base = Date.now()
+  await reportar(venueA, INST, new Date(base - 5_000))
+  const t1 = new Date(base - 2_000)
+  const t2 = new Date(base - 1_000)
+  const { pid, soltar, transaccion } = await retenerTerminal(terminalId)
+  const r1 = recordCapabilityReport({ venueId: venueA, terminalId, deviceUid: DEVICE, staffId, body: cuerpo(INST, 1), now: t1 })
+  expect(await esperarBloqueado(pid, r1)).toBe('bloqueada') // R1 ya leyó y espera para escribir
+  // Lo que deja R2 (`cuerpo(INST, 2)` con la pantalla ausente), escrito dentro de la transacción que retiene la fila.
+  soltar(async tx => {
+    await tx.terminal.update({
+      where: { id: terminalId },
+      data: {
+        customerDisplayDesignVersion: 2,
+        customerDisplayPresent: false,
+        customerDisplayInvertible: false,
+        capabilitiesObservedAt: t2,
+        lastHeartbeat: t2,
+      },
+    })
+  })
+  await transaccion
+  expect(await r1).toBe('OK')
+  const fila = await prisma.terminal.findUniqueOrThrow({
+    where: { id: terminalId },
+    select: {
+      customerDisplayDesignVersion: true,
+      customerDisplayPresent: true,
+      capabilitiesObservedAt: true,
+      customerDisplayInstallationId: true,
+    },
+  })
+  expect(fila).toEqual({
+    customerDisplayDesignVersion: 2,
+    customerDisplayPresent: false,
+    capabilitiesObservedAt: t2,
+    customerDisplayInstallationId: INST,
+  })
+})
+
 it('🔴 PENDIENTE 2 DE F0-A: la MUDANZA, en el servicio', async () => {
   await reportar(venueA, 'inst-mudanza')
   expect(capabilityReportRequested(await leer())).toBe(false)

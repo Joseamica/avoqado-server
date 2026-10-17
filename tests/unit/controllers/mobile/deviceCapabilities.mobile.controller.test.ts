@@ -173,7 +173,15 @@ describe('PUT /mobile/venues/:venueId/device-capabilities', () => {
     })
     expect(prismaMock.terminal.findFirst).not.toHaveBeenCalled()
     const update = prismaMock.terminal.updateMany.mock.calls[0][0]
-    expect(update.where).toEqual({ id: 'terminal-1', venueId: VENUE, deviceUid: DEVICE_UID, type: 'POS_ANDROID' })
+    // Ronda final de F0-B (Codex P2-1): además del binding, el CAS exige que lo guardado no sea más nuevo que ESTE reporte,
+    // con la MISMA hora del servidor que se escribe.
+    expect(update.where).toEqual({
+      id: 'terminal-1',
+      venueId: VENUE,
+      deviceUid: DEVICE_UID,
+      type: 'POS_ANDROID',
+      OR: [{ capabilitiesObservedAt: null }, { capabilitiesObservedAt: { lte: update.data.capabilitiesObservedAt } }],
+    })
     expect(update.data).toStrictEqual({
       customerDisplayPresent: true,
       customerDisplayInvertible: false,
@@ -214,7 +222,13 @@ describe('PUT /mobile/venues/:venueId/device-capabilities', () => {
 
     expect(response.status).toBe(403)
     expect(prismaMock.terminal.updateMany).toHaveBeenCalledWith({
-      where: { id: 'terminal-1', venueId: VENUE, deviceUid: DEVICE_UID, type: 'POS_ANDROID' },
+      where: {
+        id: 'terminal-1',
+        venueId: VENUE,
+        deviceUid: DEVICE_UID,
+        type: 'POS_ANDROID',
+        OR: [{ capabilitiesObservedAt: null }, { capabilitiesObservedAt: { lte: expect.any(Date) } }],
+      },
       data: expect.objectContaining({
         customerDisplayPresent: true,
         customerDisplayInvertible: false,

@@ -39,6 +39,17 @@ function laMismaLista(leida: Prisma.JsonValue | null): Prisma.TerminalWhereInput
   return leida === null ? { equals: Prisma.AnyNull } : { equals: leida as Prisma.InputJsonValue }
 }
 
+/**
+ * 🔴 Ronda final (Codex P2-1): un reporte nunca pisa a uno MÁS NUEVO. La hora es la del SERVIDOR al recibir (`observedAt` del
+ * controlador; el cuerpo no trae hora), así que ordena los reportes. `lte` y no `lt`: un empate no tiene orden que respetar y
+ * se escribe, como siempre. Sólo para la MISMA instalación y para la app vieja: el reporte de OTRA instalación lo ordena su
+ * propio CAS (DD6: ese cambio siempre se cuenta, aunque llegue tarde).
+ */
+const noMasNuevoQue = (ahora: Date): Prisma.TerminalWhereInput => ({
+  OR: [{ capabilitiesObservedAt: null }, { capabilitiesObservedAt: { lte: ahora } }],
+})
+const esMasNuevo = (guardada: Date | null | undefined, ahora: Date) => guardada != null && guardada > ahora
+
 export function siguienteInstalacion(
   guardada: string | null,
   switchesGuardados: unknown,
@@ -66,7 +77,7 @@ export async function recordCapabilityReport(i: {
   if (version === undefined || installationId === undefined) {
     // App vieja, o una nueva que bajó de versión sin borrar datos: no entiende diseños (spec §5.7.2).
     const r = await prisma.terminal.updateMany({
-      where: binding,
+      where: { ...binding, ...noMasNuevoQue(i.now) },
       data: {
         customerDisplayPresent: customerDisplay.present,
         customerDisplayInvertible: customerDisplay.invertible,
@@ -77,7 +88,11 @@ export async function recordCapabilityReport(i: {
         customerDisplayAck: Prisma.DbNull,
       },
     })
-    if (r.count !== 1) return 'SIN_BINDING'
+    if (r.count !== 1) {
+      // Perder contra un reporte más nuevo no es «sin binding»: lo nuevo ya está guardado.
+      const actual = await prisma.terminal.findFirst({ where: binding, select: { capabilitiesObservedAt: true } })
+      return esMasNuevo(actual?.capabilitiesObservedAt, i.now) ? 'OK' : 'SIN_BINDING'
+    }
     invalidateCustomerDisplayCache(i.terminalId)
     return 'OK'
   }
@@ -85,7 +100,7 @@ export async function recordCapabilityReport(i: {
   for (let intento = 0; intento < 2; intento++) {
     const actual = await prisma.terminal.findFirst({
       where: binding,
-      select: { customerDisplayInstallationId: true, customerDisplayInstallationSwitches: true },
+      select: { customerDisplayInstallationId: true, customerDisplayInstallationSwitches: true, capabilitiesObservedAt: true },
     })
     if (!actual) return 'SIN_BINDING'
     const cambio = siguienteInstalacion(
@@ -94,11 +109,13 @@ export async function recordCapabilityReport(i: {
       installationId,
       i.now,
     )
+    if (cambio.tipo === 'igual' && esMasNuevo(actual.capabilitiesObservedAt, i.now)) return 'OK' // ya está lo más nuevo
     const r = await prisma.terminal.updateMany({
       where: {
         ...binding,
         customerDisplayInstallationId: actual.customerDisplayInstallationId,
         customerDisplayInstallationSwitches: laMismaLista(actual.customerDisplayInstallationSwitches),
+        ...(cambio.tipo === 'igual' ? noMasNuevoQue(i.now) : {}),
       },
       data: {
         customerDisplayPresent: customerDisplay.present,
