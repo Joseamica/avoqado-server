@@ -27,6 +27,15 @@ export const MAX_PRODUCTS_PER_CATEGORY = 200
 export const MAX_GROUPS_PER_PRODUCT = 20
 export const MAX_MODIFIERS_PER_GROUP = 50
 export const MAX_MENUS = 100
+/**
+ * P1-09 (R8 del plan 1b): presupuesto GLOBAL de la carta pública, sin paginación (R17). Ninguna consulta de la carta trae más
+ * de `tope + 1` filas; lo que no cabe se recorta con `truncated:true` y un platillo que no cabe completo no sale.
+ */
+export const MENU_MAX_PRODUCTS_TOTAL = 400
+export const MENU_MAX_GROUP_LINKS_TOTAL = 2000
+export const MENU_MAX_OPTIONS_TOTAL = 4000
+/** P2-07: negocios con carta en caché; al pasar el tope sale la guardada hace más tiempo. */
+export const MENU_CACHE_MAX_VENUES = 500
 /** Estados de `Order` que cuentan como «cuenta abierta» (folio sin repetir y desde dónde una transición mueve la `Order`). */
 export const OPEN_ORDER_STATUSES = ['PENDING', 'CONFIRMED', 'PREPARING', 'READY'] as const
 /**

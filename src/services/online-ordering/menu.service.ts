@@ -9,7 +9,11 @@ import {
   MAX_MENUS,
   MAX_MODIFIERS_PER_GROUP,
   MAX_PRODUCTS_PER_CATEGORY,
+  MENU_CACHE_MAX_VENUES,
   MENU_CACHE_TTL_MS,
+  MENU_MAX_GROUP_LINKS_TOTAL,
+  MENU_MAX_OPTIONS_TOTAL,
+  MENU_MAX_PRODUCTS_TOTAL,
 } from './constants'
 
 /** R17: tipos que no son comida para recoger. */
@@ -249,25 +253,48 @@ export async function loadCategoryVisibility(
   }
 }
 
+/** Lo que la carta lee de cada platillo. Sus grupos activos se CUENTAN aquí y se leen después, sólo si caben (P1-09). */
+const MENU_PRODUCT_SELECT = {
+  id: true,
+  name: true,
+  sku: true,
+  description: true,
+  price: true,
+  imageUrl: true,
+  categoryId: true,
+  _count: { select: { modifierGroups: { where: { group: { active: true } } } } },
+} satisfies Prisma.ProductSelect
+
+/**
+ * Filas leídas «por dueño» (los vínculos de cada platillo, las opciones de cada grupo) con `take` = las contadas + 1, ordenadas
+ * por dueño. Un dueño está completo si trajo exactamente las que se contaron; si llegó la fila de más (alguien agregó entre el
+ * conteo y la lectura), el dueño de esa fila pudo quedar a medias y tampoco cuenta. Devuelve SÓLO los completos ([] si contó 0).
+ */
+function completos<T>(filas: T[], dueno: (f: T) => string, contadas: Map<string, number>): Map<string, T[]> {
+  let total = 0
+  for (const n of contadas.values()) total += n
+  const out = new Map<string, T[]>([...contadas.keys()].map(k => [k, []]))
+  for (const f of filas.slice(0, total)) out.get(dueno(f))?.push(f)
+  const aMedias = filas.length > total ? dueno(filas[total]) : undefined
+  for (const [k, n] of contadas) if (k === aMedias || out.get(k)!.length !== n) out.delete(k)
+  return out
+}
+
 /**
  * La carta que el comensal puede pedir AHORA: categorías activas con platillos vendibles en línea (`ONLINE_PRODUCT_WHERE`),
  * sin las categorías cuyo horario (propio o de sus menús) no aplica, y sin productos que no caben completos. SIN caché.
  * R17: sin paginación en v1; si algo se recorta, `truncated` lo dice (medido con tope + 1, H10), cada categoría trae su
  * `productCount` (agregado) y queda un `logger.warn`.
+ * P1-09: presupuesto GLOBAL por consulta (≤ 101 categorías, ≤ 401 platillos, ≤ 2,001 vínculos, ≤ 4,001 opciones). Cada nivel
+ * se CUENTA antes de leerse y se reparte en el orden de la carta: se lee sólo lo que cabe, y un platillo que no cabe completo
+ * no sale (ni se lee).
  */
 export async function loadVisibleMenu(venueId: string, now: Date = new Date()): Promise<VisibleMenu> {
   const rows = await prisma.menuCategory.findMany({
     where: { venueId, active: true },
     orderBy: [{ displayOrder: 'asc' }, { id: 'asc' }],
     take: MAX_MENU_CATEGORIES + 1,
-    include: {
-      products: {
-        where: ONLINE_PRODUCT_WHERE,
-        orderBy: [{ displayOrder: 'asc' }, { id: 'asc' }],
-        take: MAX_PRODUCTS_PER_CATEGORY + 1,
-        select: ONLINE_PRODUCT_SELECT,
-      },
-    },
+    select: { id: true, name: true, availableFrom: true, availableUntil: true, availableDays: true },
   })
   let truncated = rows.length > MAX_MENU_CATEGORIES
   const categories = rows.slice(0, MAX_MENU_CATEGORIES)
@@ -286,26 +313,141 @@ export async function loadVisibleMenu(venueId: string, now: Date = new Date()): 
   ])
   const productCount = new Map<string, number>(counts.map(g => [g.categoryId, g._count._all]))
 
+  // 1. Platillos. Cada categoría visible lee min(sus platillos, MAX_PRODUCTS_PER_CATEGORY, lo que quede del presupuesto), en el
+  //    orden de la carta y con el conteo exacto. Las que caben enteras van en UNA consulta (+1 para notar si alguien agregó);
+  //    cada recortada lee su parte aparte —a lo más 2: cada una deja el presupuesto en 200 o en 0—, así una categoría enorme no
+  //    se come las filas de las que siguen.
+  const plan = new Map<string, number>()
+  let restantes = MENU_MAX_PRODUCTS_TOTAL
+  for (const c of categories) {
+    const total = productCount.get(c.id) ?? 0
+    if (total === 0 || !isVisibleNow(c.id)) continue
+    const n = Math.min(total, MAX_PRODUCTS_PER_CATEGORY, restantes)
+    if (n < total) truncated = true
+    if (n > 0) plan.set(c.id, n)
+    restantes -= n
+  }
+  const enteras = [...plan.keys()].filter(id => plan.get(id) === productCount.get(id))
+  const recortadas = [...plan.keys()].filter(id => plan.get(id) !== productCount.get(id))
+  const sumaEnteras = enteras.reduce((s, id) => s + plan.get(id)!, 0)
+  const leer = (categoryIds: string[], filas: number) =>
+    prisma.product.findMany({
+      where: { venueId, categoryId: { in: categoryIds }, ...ONLINE_PRODUCT_WHERE },
+      orderBy: [{ categoryId: 'asc' }, { displayOrder: 'asc' }, { id: 'asc' }],
+      take: filas,
+      select: MENU_PRODUCT_SELECT,
+    })
+  type Platillo = Awaited<ReturnType<typeof leer>>[number]
+  const lecturas: Platillo[][] = await Promise.all([
+    enteras.length > 0 ? leer(enteras, sumaEnteras + 1) : Promise.resolve([]),
+    ...recortadas.map(id => leer([id], plan.get(id)!)),
+  ])
+  if (lecturas[0].length > sumaEnteras) truncated = true // cambió entre el conteo y la lectura
+  const platillosDe = new Map<string, Platillo[]>()
+  for (const p of lecturas.flat()) {
+    const lista = platillosDe.get(p.categoryId) ?? []
+    if (lista.length < plan.get(p.categoryId)!) lista.push(p)
+    platillosDe.set(p.categoryId, lista)
+  }
+
+  // 2. Grupos (vínculos platillo↔grupo), repartidos en el orden de la carta con el conteo de cada platillo. El que no cabe
+  //    COMPLETO —más de MAX_GROUPS_PER_PRODUCT o más de lo que queda— no sale, y sus grupos no se leen (R17).
+  const elegidos: Platillo[] = []
+  const gruposContados = new Map<string, number>()
+  let vinculos = 0
+  for (const p of categories.flatMap(c => platillosDe.get(c.id) ?? [])) {
+    const n = p._count.modifierGroups
+    if (n > MAX_GROUPS_PER_PRODUCT || vinculos + n > MENU_MAX_GROUP_LINKS_TOTAL) {
+      truncated = true
+      continue
+    }
+    elegidos.push(p)
+    gruposContados.set(p.id, n)
+    vinculos += n
+  }
+  const filasDeVinculos =
+    vinculos > 0
+      ? await prisma.productModifierGroup.findMany({
+          where: { productId: { in: elegidos.filter(p => gruposContados.get(p.id)! > 0).map(p => p.id) }, group: { active: true } },
+          orderBy: [{ productId: 'asc' }, { displayOrder: 'asc' }, { id: 'asc' }],
+          take: vinculos + 1,
+          select: {
+            productId: true,
+            group: {
+              select: {
+                id: true,
+                name: true,
+                required: true,
+                allowMultiple: true,
+                minSelections: true,
+                maxSelections: true,
+                _count: { select: { modifiers: { where: { active: true } } } },
+              },
+            },
+          },
+        })
+      : []
+  const gruposDe = completos(filasDeVinculos, v => v.productId, gruposContados)
+
+  // 3. Opciones, igual pero por grupo: el grupo que comparten varios platillos se cuenta y se lee una vez.
+  const candidatos: Array<{ p: Platillo; vinculos: typeof filasDeVinculos }> = []
+  const opcionesContadas = new Map<string, number>()
+  let opciones = 0
+  for (const p of elegidos) {
+    const vs = gruposDe.get(p.id)
+    const nuevos = (vs ?? []).filter(v => !opcionesContadas.has(v.group.id))
+    const suma = nuevos.reduce((s, v) => s + v.group._count.modifiers, 0)
+    if (
+      !vs || // cambió entre el conteo y la lectura
+      vs.some(v => v.group._count.modifiers > MAX_MODIFIERS_PER_GROUP) ||
+      opciones + suma > MENU_MAX_OPTIONS_TOTAL
+    ) {
+      truncated = true
+      continue
+    }
+    for (const v of nuevos) opcionesContadas.set(v.group.id, v.group._count.modifiers)
+    opciones += suma
+    candidatos.push({ p, vinculos: vs })
+  }
+  const filasDeOpciones =
+    opciones > 0
+      ? await prisma.modifier.findMany({
+          where: { groupId: { in: [...opcionesContadas].filter(([, n]) => n > 0).map(([id]) => id) }, active: true },
+          orderBy: [{ groupId: 'asc' }, { id: 'asc' }],
+          take: opciones + 1,
+          select: { id: true, name: true, price: true, groupId: true },
+        })
+      : []
+  const opcionesDe = completos(filasDeOpciones, o => o.groupId, opcionesContadas)
+
+  const categoria = new Map(categories.map(c => [c.id, c]))
+  const productos = new Map<string, VisibleProduct[]>()
+  const imposibles = new Map<string, number>()
+  for (const { p, vinculos: vs } of candidatos) {
+    if (vs.some(v => !opcionesDe.has(v.group.id))) {
+      truncated = true // cambió entre el conteo y la lectura
+      continue
+    }
+    const row: OnlineProductRow = {
+      ...p,
+      category: categoria.get(p.categoryId)!,
+      modifierGroups: vs.map(v => ({ group: { ...v.group, modifiers: opcionesDe.get(v.group.id)! } })),
+    }
+    // M-4: no es un recorte (no marca `truncated`): ese platillo hoy no se puede pedir, y tampoco cuenta en la categoría.
+    if (isUnsatisfiable(row)) {
+      imposibles.set(p.categoryId, (imposibles.get(p.categoryId) ?? 0) + 1)
+      continue
+    }
+    const lista = productos.get(p.categoryId) ?? []
+    lista.push(toVisibleProduct(row))
+    productos.set(p.categoryId, lista)
+  }
+
   const out: VisibleCategory[] = []
   for (const c of categories) {
-    if (c.products.length > MAX_PRODUCTS_PER_CATEGORY) truncated = true
-    const products: VisibleProduct[] = []
-    let imposibles = 0
-    for (const p of c.products.slice(0, MAX_PRODUCTS_PER_CATEGORY)) {
-      if (exceedsQueryLimits(p)) {
-        truncated = true
-        continue
-      }
-      // M-4: no es un recorte (no marca `truncated`): ese platillo hoy no se puede pedir, y tampoco cuenta en la categoría.
-      if (isUnsatisfiable(p)) {
-        imposibles += 1
-        continue
-      }
-      products.push(toVisibleProduct(p))
-    }
-    if (products.length === 0 || !isVisibleNow(c.id)) continue
-    const total = productCount.get(c.id)
-    out.push({ id: c.id, name: c.name, productCount: total === undefined ? products.length : total - imposibles, products })
+    const products = productos.get(c.id)
+    if (!products) continue
+    out.push({ id: c.id, name: c.name, productCount: productCount.get(c.id)! - (imposibles.get(c.id) ?? 0), products })
   }
   if (truncated) {
     logger.warn('[OnlineOrdering] la carta pública se recortó por un tope (sin paginación en v1)', {
@@ -314,28 +456,38 @@ export async function loadVisibleMenu(venueId: string, now: Date = new Date()): 
       topes: {
         categorias: MAX_MENU_CATEGORIES,
         platillosPorCategoria: MAX_PRODUCTS_PER_CATEGORY,
+        platillos: MENU_MAX_PRODUCTS_TOTAL,
         gruposPorPlatillo: MAX_GROUPS_PER_PRODUCT,
+        vinculos: MENU_MAX_GROUP_LINKS_TOTAL,
+        opcionesPorGrupo: MAX_MODIFIERS_PER_GROUP,
+        opciones: MENU_MAX_OPTIONS_TOTAL,
       },
     })
   }
   return { categories: out, truncated }
 }
 
+/** P2-07: a lo más MENU_CACHE_MAX_VENUES negocios; el Map guarda el orden de llegada, así el primero es el guardado hace más. */
 const cache = new Map<string, { at: number; value: PublicMenu }>()
+/** P1-09: una sola recarga en curso por negocio; con la caché fría, N peticiones simultáneas comparten una lectura. */
+const recargas = new Map<string, Promise<PublicMenu>>()
 
-/** A11: con `venueId` borra sólo la carta de ESE negocio (lo normal); sin él, todas (pruebas o mantenimiento explícito). */
+/**
+ * A11: con `venueId` borra sólo la carta de ESE negocio (lo normal); sin él, todas (pruebas o mantenimiento explícito). También
+ * descarta la recarga en curso: pudo leer antes del cambio, así que no se guarda y la siguiente petición lee de nuevo.
+ */
 export function clearPublicMenuCache(venueId?: string): void {
-  if (venueId === undefined) cache.clear()
-  else cache.delete(venueId)
+  if (venueId === undefined) {
+    cache.clear()
+    recargas.clear()
+  } else {
+    cache.delete(venueId)
+    recargas.delete(venueId)
+  }
 }
 
-/** La carta para la tienda pública, con caché en memoria de 60 s por venue (una sola instancia, sin Redis). */
-export async function getPublicMenu(venueId: string, now: Date = new Date()): Promise<PublicMenu> {
-  const hit = cache.get(venueId)
-  if (hit && now.getTime() - hit.at < MENU_CACHE_TTL_MS) return hit.value
-
-  const visible = await loadVisibleMenu(venueId, now)
-  const value: PublicMenu = {
+function toPublicMenu(visible: VisibleMenu, now: Date): PublicMenu {
+  return {
     generatedAt: now.toISOString(),
     truncated: visible.truncated,
     categories: visible.categories.map(c => ({
@@ -362,6 +514,31 @@ export async function getPublicMenu(venueId: string, now: Date = new Date()): Pr
       })),
     })),
   }
-  cache.set(venueId, { at: now.getTime(), value })
-  return value
+}
+
+/**
+ * La carta para la tienda pública, con caché en memoria de 60 s por venue (una sola instancia, sin Redis). Una recarga que falla
+ * no se guarda: la rechazan las peticiones que la esperaban y la siguiente vuelve a leer.
+ */
+export async function getPublicMenu(venueId: string, now: Date = new Date()): Promise<PublicMenu> {
+  const hit = cache.get(venueId)
+  if (hit && now.getTime() - hit.at < MENU_CACHE_TTL_MS) return hit.value
+  const enCurso = recargas.get(venueId)
+  if (enCurso) return enCurso
+
+  const recarga: Promise<PublicMenu> = loadVisibleMenu(venueId, now)
+    .then(visible => {
+      const value = toPublicMenu(visible, now)
+      if (recargas.get(venueId) === recarga) {
+        cache.delete(venueId) // al final del orden: el primero del Map sigue siendo el guardado hace más
+        cache.set(venueId, { at: now.getTime(), value })
+        if (cache.size > MENU_CACHE_MAX_VENUES) cache.delete(cache.keys().next().value!)
+      }
+      return value
+    })
+    .finally(() => {
+      if (recargas.get(venueId) === recarga) recargas.delete(venueId)
+    })
+  recargas.set(venueId, recarga)
+  return recarga
 }
