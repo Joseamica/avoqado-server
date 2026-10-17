@@ -116,7 +116,6 @@ describe('quoteCart', () => {
     ['obligatorio sin opciones activas', { modifiers: [] }],
     ['selección única con mínimo de 2', { minSelections: 2, maxSelections: null }],
     ['mínimo mayor que el máximo', { allowMultiple: true, minSelections: 2, maxSelections: 1 }],
-    ['mínimo mayor que las opciones activas', { allowMultiple: true, minSelections: 3, maxSelections: null }],
   ])('M-4: un platillo con un grupo imposible (%s) es PRODUCT_UNAVAILABLE, igual que en la carta', async (_caso, o) => {
     ROWS = [{ ...flautas, modifierGroups: [group(o)] }]
     const q = await quoteCart('v1', [{ productId: 'p-flautas', quantity: 1, modifiers: [{ modifierId: 'm2' }] }])
@@ -124,6 +123,16 @@ describe('quoteCart', () => {
     expect(q.issues).toEqual([
       { code: 'PRODUCT_UNAVAILABLE', productId: 'p-flautas', lineIndex: 0, message: 'Un platillo de tu pedido ya no está disponible.' },
     ])
+  })
+
+  it('M-4: un grupo de VARIAS opciones con mínimo 3 y 2 activas se cotiza si se repite una (verde × 2 + roja × 1)', async () => {
+    ROWS = [{ ...flautas, modifierGroups: [group({ allowMultiple: true, minSelections: 3, maxSelections: null })] }]
+    const q = await quoteCart('v1', [
+      { productId: 'p-flautas', quantity: 1, modifiers: [{ modifierId: 'm1', quantity: 2 }, { modifierId: 'm2' }] },
+    ])
+    expect(q.issues).toEqual([])
+    expect(q.ok).toBe(true)
+    expect(q.lines[0].lineTotal.toFixed(2)).toBe('103.00') // 93 + 0 × 2 + 10
   })
 
   it('M-5: cada aviso dice en qué renglón del carrito está (el mismo platillo puede ir dos veces)', async () => {
