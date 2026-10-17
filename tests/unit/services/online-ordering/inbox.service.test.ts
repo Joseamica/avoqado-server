@@ -84,7 +84,8 @@ describe('listInbox', () => {
 
   it('arma conteos exactos (también los cerrados del periodo, H10), ordena lo pendiente primero y marca needsPrint sólo lo aceptado sin imprimir', async () => {
     const r = await listInbox({ venueId: 'v1', now: NOW })
-    expect(r.counts).toEqual({ pending: 2, active: 4, done: 7 })
+    // 1b: los activos también por etapa (aceptados 1 + listos 3 = 4), del mismo `groupBy` exacto.
+    expect(r.counts).toEqual({ pending: 2, active: 4, done: 7, accepted: 1, ready: 3 })
     const cerrados = (prismaMock.onlineOrder.count.mock.calls[0][0] as any).where
     expect(cerrados).toMatchObject({ venueId: 'v1', createdAt: { gte: new Date(NOW.getTime() - 24 * 3_600_000) } })
     expect(r.orders.map(o => o.orderNumber)).toEqual(['WA', 'WB', 'WC'])
@@ -93,6 +94,12 @@ describe('listInbox', () => {
     expect(byNumber.WB.needsPrint).toBe(true)
     expect(byNumber.WA).toMatchObject({ total: 186, remaining: 186, customerPhone: '+525543453965' })
     expect(byNumber.WA.items[0]).toMatchObject({ name: 'Flautas', quantity: 2, modifiers: [{ name: 'Salsa verde', quantity: 1 }] })
+  })
+
+  it('1b: una etapa sin pedidos cuenta 0 (no desaparece del objeto)', async () => {
+    prismaMock.onlineOrder.groupBy.mockResolvedValueOnce([{ status: 'READY', _count: { _all: 5 } }] as any)
+    const r = await listInbox({ venueId: 'v1', now: NOW })
+    expect(r.counts).toEqual({ pending: 0, active: 5, done: 7, accepted: 0, ready: 5 })
   })
 
   it('`orderId` es el id de la CUENTA (Order.id): la llave de las acciones y del reclamo de impresión; `onlineOrderId` es otro', async () => {

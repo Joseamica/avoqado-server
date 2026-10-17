@@ -83,9 +83,13 @@ export const inbox = async (req: Request, res: Response, next: NextFunction) => 
     // cuesta la lista al restaurante.
     const latido = req.header(ONLINE_ORDERS_TRAY_HEADER) === '1' && (await canAnswerOrders(req, venueId).catch(() => false))
     if (latido) await touchInboxPoll(venueId).catch(() => false)
-    // R13: el restaurante ve si su tienda está abierta, pausada, fuera de horario o sin aparato.
+    // R13: el restaurante ve si su tienda está abierta, pausada, fuera de horario o sin aparato; 1b: y hasta cuándo, o si la
+    // pausa es la del gerente (`manualPause`, que no se va sola).
     const state = await getAcceptingStatus(venueId).catch(() => null)
-    return res.json({ success: true, data: { ...data, store: state ? { status: state.status, reason: state.reason } : null } })
+    const store = state
+      ? { status: state.status, reason: state.reason, pausedUntil: state.config.pausedUntil, manualPause: state.config.manualPause }
+      : null
+    return res.json({ success: true, data: { ...data, store } })
   } catch (e) {
     return next(e)
   }

@@ -25,9 +25,14 @@ export async function touchInboxPoll(venueId: string, now: Date = new Date()): P
   return true
 }
 
-export async function getAcceptingStatus(venueId: string, now: Date = new Date()): Promise<AcceptingState> {
+/** `preloaded`: los ajustes que quien llama ya leyó (p. ej. `GET /settings`), para no leerlos dos veces. */
+export async function getAcceptingStatus(
+  venueId: string,
+  now: Date = new Date(),
+  preloaded?: Awaited<ReturnType<typeof getSettings>>,
+): Promise<AcceptingState> {
   const [settings, venue] = await Promise.all([
-    getSettings(venueId),
+    preloaded ?? getSettings(venueId),
     prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } }),
   ])
   const { lastInboxPollAt, ...config } = settings

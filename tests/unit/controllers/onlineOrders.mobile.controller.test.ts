@@ -38,6 +38,8 @@ import * as ctrl from '@/controllers/mobile/onlineOrders.mobile.controller'
 import mobileRouter from '@/routes/mobile/onlineOrders.mobile.routes'
 
 const LISTA = { serverTime: 'x', counts: { pending: 0, active: 0, done: 0 }, orders: [], truncated: false }
+/** 1b: el estado de la tienda en la bandeja trae también las dos pausas (la del piso con su hora, y la del gerente). */
+const TIENDA_ABIERTA = { status: 'OPEN', reason: null, pausedUntil: null, manualPause: false }
 /** La fila de `StaffVenue` que `resolveUserRoleForVenue` lee para el rol en este negocio. */
 const enElNegocio = (role: string) => ({ role, active: true, permissionSetId: null, permissionSet: null })
 
@@ -59,7 +61,7 @@ function mock(over: { query?: object; body?: object; headers?: Record<string, st
 beforeEach(() => {
   ;(listInbox as jest.Mock).mockResolvedValue(LISTA)
   ;(touchInboxPoll as jest.Mock).mockResolvedValue(true)
-  ;(getAcceptingStatus as jest.Mock).mockResolvedValue({ status: 'OPEN', reason: null, config: {} })
+  ;(getAcceptingStatus as jest.Mock).mockResolvedValue({ status: 'OPEN', reason: null, config: { pausedUntil: null, manualPause: false } })
   // Por defecto: una cajera activa (CASHIER tiene `orders:update`) sin permisos personalizados del negocio.
   prismaMock.staff.findUnique.mockResolvedValue({ active: true } as any)
   prismaMock.staffVenue.findUnique.mockResolvedValue(enElNegocio('CASHIER') as any)
@@ -76,7 +78,28 @@ describe('onlineOrders.mobile.controller', () => {
     expect((touchInboxPoll as jest.Mock).mock.invocationCallOrder[0]).toBeLessThan(
       (getAcceptingStatus as jest.Mock).mock.invocationCallOrder[0],
     )
-    expect(res.json).toHaveBeenCalledWith({ success: true, data: { ...LISTA, store: { status: 'OPEN', reason: null } } })
+    expect(res.json).toHaveBeenCalledWith({ success: true, data: { ...LISTA, store: TIENDA_ABIERTA } })
+  })
+
+  it('1b: la respuesta final de la bandeja dice hasta cuándo está pausada y si la pausa es del gerente', async () => {
+    ;(getAcceptingStatus as jest.Mock).mockResolvedValue({
+      status: 'PAUSED',
+      reason: 'MANUAL_PAUSE',
+      config: { pausedUntil: '2026-10-14T19:00:00.000Z', manualPause: true, enabled: true, hours: null },
+    })
+    const { req, res, next } = mock()
+    await ctrl.inbox(req, res, next)
+    expect(res.json).toHaveBeenCalledWith({
+      success: true,
+      data: { ...LISTA, store: { status: 'PAUSED', reason: 'MANUAL_PAUSE', pausedUntil: '2026-10-14T19:00:00.000Z', manualPause: true } },
+    })
+  })
+
+  it('si no se pudo leer el estado de la tienda, la bandeja igual responde con `store: null`', async () => {
+    ;(getAcceptingStatus as jest.Mock).mockRejectedValue(new Error('db'))
+    const { req, res, next } = mock()
+    await ctrl.inbox(req, res, next)
+    expect(res.json).toHaveBeenCalledWith({ success: true, data: { ...LISTA, store: null } })
   })
 
   it('A8: el cursor de los activos pasa al servicio y la respuesta trae su nextCursor', async () => {
@@ -100,7 +123,7 @@ describe('onlineOrders.mobile.controller', () => {
     const { req, res, next } = mock({ headers: { 'x-online-orders-tray': '1' } })
     await ctrl.inbox(req, res, next)
     expect(touchInboxPoll).not.toHaveBeenCalled()
-    expect(res.json).toHaveBeenCalledWith({ success: true, data: { ...LISTA, store: { status: 'OPEN', reason: null } } })
+    expect(res.json).toHaveBeenCalledWith({ success: true, data: { ...LISTA, store: TIENDA_ABIERTA } })
   })
 
   it('H3: cuentan los permisos personalizados del negocio: un VIEWER al que el negocio le dio orders:update sí late', async () => {
@@ -116,7 +139,7 @@ describe('onlineOrders.mobile.controller', () => {
     req.authContext.isImpersonating = true
     await ctrl.inbox(req, res, next)
     expect(touchInboxPoll).not.toHaveBeenCalled()
-    expect(res.json).toHaveBeenCalledWith({ success: true, data: { ...LISTA, store: { status: 'OPEN', reason: null } } })
+    expect(res.json).toHaveBeenCalledWith({ success: true, data: { ...LISTA, store: TIENDA_ABIERTA } })
   })
 
   it('si la lista falla no hay latido: una bandeja rota no mantiene abierta la tienda', async () => {

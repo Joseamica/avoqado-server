@@ -2,7 +2,14 @@ import { Prisma } from '@prisma/client'
 import { prismaMock } from '@tests/__helpers__/setup'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { isWithinHours } from '@/services/online-ordering/hours'
-import { DEFAULT_CONFIG, getSettings, pauseOnlineOrdering, updateSettings } from '@/services/online-ordering/settings.service'
+import {
+  buildVenueContact,
+  DEFAULT_CONFIG,
+  getSettings,
+  pauseOnlineOrdering,
+  storeRequirements,
+  updateSettings,
+} from '@/services/online-ordering/settings.service'
 
 const row = (o: Record<string, unknown> = {}) => ({
   id: 'set1',
@@ -29,7 +36,61 @@ const semana = () => ({
   sunday: dia(false),
 })
 
+/** Un negocio con domicilio, teléfono y aviso de privacidad PUBLICADO (una versión propia, no la plantilla). */
+const VENUE_COMPLETO = { name: 'Flautas', address: 'Av. Coyoacán 123', city: 'CDMX', state: 'CDMX', zipCode: '04000', phone: '5512345678' }
+const AVISO = { id: 'pnv1', content: 'Aviso', contentHash: 'h', language: 'es', createdAt: new Date('2026-10-01T00:00:00Z') }
+const conRequisitos = (venue: Record<string, unknown> = VENUE_COMPLETO, aviso: unknown = AVISO) => {
+  prismaMock.venue.findUnique.mockResolvedValue(venue as any)
+  prismaMock.privacyNoticeVersion.findFirst.mockResolvedValue(aviso as any)
+}
+
+describe('buildVenueContact', () => {
+  it('une domicilio, ciudad, estado y CP con «, » y recorta el teléfono', () => {
+    expect(buildVenueContact({ address: 'Av. Coyoacán 123', city: 'CDMX', state: 'CDMX', zipCode: '04000', phone: '5512345678' })).toEqual({
+      address: 'Av. Coyoacán 123, CDMX, CDMX, 04000',
+      phone: '5512345678',
+    })
+  })
+
+  it('todo nulo o en blanco ⇒ { address: null, phone: null }', () => {
+    expect(buildVenueContact({ address: null, city: null, state: null, zipCode: null, phone: null })).toEqual({
+      address: null,
+      phone: null,
+    })
+    expect(buildVenueContact({ address: '  ', city: '', state: ' ', zipCode: '', phone: '   ' })).toEqual({ address: null, phone: null })
+  })
+
+  it('salta las partes vacías y recorta cada una', () => {
+    expect(
+      buildVenueContact({ address: '  Av. Coyoacán 123 ', city: '', state: null, zipCode: ' 04000 ', phone: ' 55 1234 5678 ' }),
+    ).toEqual({
+      address: 'Av. Coyoacán 123, 04000',
+      phone: '55 1234 5678',
+    })
+  })
+})
+
+describe('storeRequirements', () => {
+  it('con domicilio, teléfono y una versión PROPIA del aviso, todo se cumple', async () => {
+    conRequisitos()
+    await expect(storeRequirements('v1')).resolves.toEqual({ address: true, phone: true, privacyNotice: true })
+  })
+
+  it('sin teléfono y sólo con la PLANTILLA del aviso (sin versión propia), faltan teléfono y aviso', async () => {
+    conRequisitos({ ...VENUE_COMPLETO, phone: '  ' }, null)
+    await expect(storeRequirements('v1')).resolves.toEqual({ address: true, phone: false, privacyNotice: false })
+  })
+
+  it('sin ningún dato de domicilio falta el domicilio', async () => {
+    conRequisitos({ ...VENUE_COMPLETO, address: null, city: null, state: null, zipCode: null })
+    await expect(storeRequirements('v1')).resolves.toMatchObject({ address: false })
+  })
+})
+
 describe('settings.service', () => {
+  // Los casos que ENCIENDEN la tienda necesitan un negocio que cumpla los requisitos (R18); cada caso puede cambiarlo.
+  beforeEach(() => conRequisitos())
+
   it('sin fila devuelve los defaults: apagado y sin latido', async () => {
     prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(null)
     await expect(getSettings('v1')).resolves.toEqual({ ...DEFAULT_CONFIG, lastInboxPollAt: null })
@@ -98,6 +159,45 @@ describe('settings.service', () => {
     expect((logAction as jest.Mock).mock.invocationCallOrder[0]).toBeGreaterThan(
       tx.onlineOrderingSettings.upsert.mock.invocationCallOrder[0],
     )
+  })
+
+  it('R18: encender sin teléfono es 400 STORE_REQUIREMENTS_MISSING con lo que falta, y no guarda ni audita nada', async () => {
+    conRequisitos({ ...VENUE_COMPLETO, phone: null })
+    await expect(updateSettings('v1', { enabled: true }, 'staff1')).rejects.toMatchObject({
+      statusCode: 400,
+      code: 'STORE_REQUIREMENTS_MISSING',
+      details: { missing: ['phone'] },
+    })
+    expect(prismaMock.$transaction).not.toHaveBeenCalled()
+    expect(prismaMock.onlineOrderingSettings.upsert).not.toHaveBeenCalled()
+    expect(logAction).not.toHaveBeenCalled()
+  })
+
+  it('R18: sin nada de lo exigido lista los tres faltantes, en orden', async () => {
+    conRequisitos({ address: null, city: null, state: null, zipCode: null, phone: null }, null)
+    await expect(updateSettings('v1', { enabled: true, minOrderAmount: 50 }, 'staff1')).rejects.toMatchObject({
+      code: 'STORE_REQUIREMENTS_MISSING',
+      details: { missing: ['address', 'phone', 'privacyNotice'] },
+    })
+  })
+
+  it('R18: con domicilio, teléfono y aviso publicado, encender se guarda', async () => {
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(row({ enabled: false }) as any)
+    prismaMock.onlineOrderingSettings.upsert.mockResolvedValue(row({ enabled: true }) as any)
+    await expect(updateSettings('v1', { enabled: true }, 'staff1')).resolves.toMatchObject({ enabled: true })
+    expect((prismaMock.onlineOrderingSettings.upsert.mock.calls[0][0] as any).update).toEqual({ enabled: true })
+  })
+
+  it('R18: apagar o cambiar otros campos NUNCA exige requisitos (ni los consulta)', async () => {
+    conRequisitos({ address: null, city: null, state: null, zipCode: null, phone: null }, null)
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(row() as any)
+    prismaMock.onlineOrderingSettings.upsert.mockResolvedValue(row() as any)
+    await expect(updateSettings('v1', { minOrderAmount: 50 }, 'staff1')).resolves.toBeDefined()
+    await expect(updateSettings('v1', { enabled: false }, 'staff1')).resolves.toBeDefined()
+    await expect(updateSettings('v1', { manualPause: true, pausedUntil: null }, 'staff1')).resolves.toBeDefined()
+    expect(prismaMock.onlineOrderingSettings.upsert).toHaveBeenCalledTimes(3)
+    expect(prismaMock.venue.findUnique).not.toHaveBeenCalled()
+    expect(prismaMock.privacyNoticeVersion.findFirst).not.toHaveBeenCalled()
   })
 
   it('A6: lo que se rechaza por validación (sin medio de pago) se rechaza bajo el candado y no escribe', async () => {

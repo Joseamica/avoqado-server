@@ -466,13 +466,52 @@ describe('getTrackingByToken', () => {
         total: D('206.00'),
         paymentStatus: 'PENDING',
         items: [{ productName: 'Flautas', quantity: 2, notes: null, modifiers: [{ name: 'Salsa verde', quantity: 1 }] }],
-        venue: { name: 'Flautas Coyoacán', slug: 'flautas-coyoacan' },
+        venue: {
+          name: 'Flautas Coyoacán',
+          slug: 'flautas-coyoacan',
+          timezone: 'America/Tijuana',
+          address: 'Av. Coyoacán 123',
+          city: 'CDMX',
+          state: 'CDMX',
+          zipCode: '04000',
+          phone: ' 5512345678 ',
+        },
       },
     } as any)
 
     const t = await getTrackingByToken('T'.repeat(32))
     expect(t).toMatchObject({ orderNumber: 'WABCD', total: 206, canCancel: true, paid: false, venueSlug: 'flautas-coyoacan' })
     expect(JSON.stringify(t)).not.toMatch(/customerPhone|customerEmail/)
+    // 1b: la zona del negocio (para mostrar las horas) y su contacto (para llamar), nunca los datos del comensal.
+    expect(t).toMatchObject({
+      venueTimezone: 'America/Tijuana',
+      venueContact: { address: 'Av. Coyoacán 123, CDMX, CDMX, 04000', phone: '5512345678' },
+    })
+    const cuenta = (prismaMock.onlineOrder.findUnique.mock.calls[0][0] as any).select.order.select
+    for (const campo of ['customerPhone', 'customerEmail', 'customerName']) expect(cuenta).not.toHaveProperty(campo)
+  })
+
+  it('1b: sin zona en el negocio, el seguimiento usa America/Mexico_City; sin contacto, nulos', async () => {
+    prismaMock.onlineOrder.findUnique.mockResolvedValue({
+      status: 'ACCEPTED',
+      paymentMode: 'PAY_AT_PICKUP',
+      acceptDeadlineAt: NOW,
+      estimatedReadyAt: NOW,
+      rejectReason: null,
+      createdAt: NOW,
+      venueId: 'v1',
+      order: {
+        orderNumber: 'WABCE',
+        total: D('93.00'),
+        paymentStatus: 'PENDING',
+        items: [],
+        venue: { name: 'X', slug: 'x', timezone: '', address: null, city: null, state: null, zipCode: null, phone: null },
+      },
+    } as any)
+    await expect(getTrackingByToken('T'.repeat(32))).resolves.toMatchObject({
+      venueTimezone: 'America/Mexico_City',
+      venueContact: { address: null, phone: null },
+    })
   })
 
   it('un token desconocido devuelve null', async () => {
