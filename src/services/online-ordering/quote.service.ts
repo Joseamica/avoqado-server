@@ -4,6 +4,7 @@ import prisma from '@/utils/prismaClient'
 import { MAX_CART_LINES, MAX_LINE_QUANTITY, NOTE_MAX_LENGTH } from './constants'
 import {
   exceedsQueryLimits,
+  isUnsatisfiable,
   loadCategoryVisibility,
   ONLINE_PRODUCT_SELECT,
   ONLINE_PRODUCT_WHERE,
@@ -58,6 +59,8 @@ export interface QuoteIssue {
   code: QuoteIssueCode
   productId?: string
   groupId?: string
+  /** M-5: índice (desde 0) del renglón del carrito; el mismo platillo puede ir dos veces. Falta en los avisos del carrito entero. */
+  lineIndex?: number
   message: string
 }
 export interface QuoteResult {
@@ -99,7 +102,8 @@ async function loadQuotableProducts(venueId: string, ids: string[], now: Date): 
   }
   const isVisibleNow = await loadCategoryVisibility(venueId, now, [...categories.values()])
   for (const row of rows) {
-    if (isVisibleNow(row.categoryId) && !exceedsQueryLimits(row)) out.set(row.id, toVisibleProduct(row))
+    // M-4: lo que la carta no ofrece por imposible tampoco se cotiza.
+    if (isVisibleNow(row.categoryId) && !exceedsQueryLimits(row) && !isUnsatisfiable(row)) out.set(row.id, toVisibleProduct(row))
   }
   return out
 }
@@ -124,18 +128,24 @@ export async function quoteCart(venueId: string, items: CartItemInput[], opts: {
     getSettings(venueId),
   ])
 
-  for (const item of cart) {
+  for (const [lineIndex, item] of cart.entries()) {
     if (!Number.isInteger(item.quantity) || item.quantity < 1 || item.quantity > MAX_LINE_QUANTITY) {
       issues.push({
         code: 'QUANTITY_INVALID',
         productId: item.productId,
+        lineIndex,
         message: `La cantidad debe ser un entero entre 1 y ${MAX_LINE_QUANTITY}.`,
       })
       continue
     }
     const product = products.get(item.productId)
     if (!product) {
-      issues.push({ code: 'PRODUCT_UNAVAILABLE', productId: item.productId, message: 'Un platillo de tu pedido ya no está disponible.' })
+      issues.push({
+        code: 'PRODUCT_UNAVAILABLE',
+        productId: item.productId,
+        lineIndex,
+        message: 'Un platillo de tu pedido ya no está disponible.',
+      })
       continue
     }
 
@@ -151,7 +161,7 @@ export async function quoteCart(venueId: string, items: CartItemInput[], opts: {
       const qty = sel.quantity ?? 1
       const hit = index.get(sel.modifierId)
       if (!hit || !Number.isInteger(qty) || qty < 1 || qty > MAX_LINE_QUANTITY) {
-        issues.push({ code: 'MODIFIER_INVALID', productId: item.productId, message: 'Una opción de tu pedido ya no es válida.' })
+        issues.push({ code: 'MODIFIER_INVALID', productId: item.productId, lineIndex, message: 'Una opción de tu pedido ya no es válida.' })
         broken = true
         continue
       }
@@ -168,6 +178,7 @@ export async function quoteCart(venueId: string, items: CartItemInput[], opts: {
           code: 'MODIFIER_GROUP_REQUIRED',
           productId: item.productId,
           groupId: g.id,
+          lineIndex,
           message: min > 1 ? `En «${g.name}» elige al menos ${min} opciones.` : `Elige una opción de «${g.name}».`,
         })
         broken = true
@@ -177,6 +188,7 @@ export async function quoteCart(venueId: string, items: CartItemInput[], opts: {
           code: 'MODIFIER_GROUP_SINGLE',
           productId: item.productId,
           groupId: g.id,
+          lineIndex,
           message: `En «${g.name}» sólo puedes elegir una opción.`,
         })
         broken = true
@@ -186,6 +198,7 @@ export async function quoteCart(venueId: string, items: CartItemInput[], opts: {
           code: 'MODIFIER_GROUP_MAX',
           productId: item.productId,
           groupId: g.id,
+          lineIndex,
           message: `En «${g.name}» puedes elegir hasta ${g.maxSelections}.`,
         })
         broken = true

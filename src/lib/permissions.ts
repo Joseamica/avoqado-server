@@ -64,7 +64,9 @@ export const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   'delivery-channels:snooze': ['delivery-channels:snooze'],
   // Pedidos en línea: ajustes y menú en línea. Aceptar y rechazar usan `orders:update` (cocina y caja ya lo tienen); cancelar,
   // `orders:cancel-unpaid`. Quien administra la tienda también puede frenarla un rato (igual que `delivery-channels:manage`).
-  'online-orders:manage': ['online-orders:manage', 'orders:read', 'orders:update', 'products:read', 'menu:read', 'online-orders:pause'],
+  // M-6: NO arrastra `orders:update`: un rol al que sólo le dan la tienda en línea no modifica cualquier cuenta del POS.
+  // Contestar pedidos se le da aparte.
+  'online-orders:manage': ['online-orders:manage', 'orders:read', 'products:read', 'menu:read', 'online-orders:pause'],
   // Pausar desde el piso 15/30/60 min o reanudar (founder, 16-oct: gerente para arriba; en el POS, con el PIN del gerente).
   'online-orders:pause': ['online-orders:pause', 'orders:read'],
 

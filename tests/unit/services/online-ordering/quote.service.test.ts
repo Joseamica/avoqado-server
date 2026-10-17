@@ -112,6 +112,37 @@ describe('quoteCart', () => {
     expect(q.issues[0]).toMatchObject({ code: 'PRODUCT_UNAVAILABLE', productId: 'p-flautas' })
   })
 
+  it.each([
+    ['obligatorio sin opciones activas', { modifiers: [] }],
+    ['selección única con mínimo de 2', { minSelections: 2, maxSelections: null }],
+    ['mínimo mayor que el máximo', { allowMultiple: true, minSelections: 2, maxSelections: 1 }],
+    ['mínimo mayor que las opciones activas', { allowMultiple: true, minSelections: 3, maxSelections: null }],
+  ])('M-4: un platillo con un grupo imposible (%s) es PRODUCT_UNAVAILABLE, igual que en la carta', async (_caso, o) => {
+    ROWS = [{ ...flautas, modifierGroups: [group(o)] }]
+    const q = await quoteCart('v1', [{ productId: 'p-flautas', quantity: 1, modifiers: [{ modifierId: 'm2' }] }])
+    expect(q.ok).toBe(false)
+    expect(q.issues).toEqual([
+      { code: 'PRODUCT_UNAVAILABLE', productId: 'p-flautas', lineIndex: 0, message: 'Un platillo de tu pedido ya no está disponible.' },
+    ])
+  })
+
+  it('M-5: cada aviso dice en qué renglón del carrito está (el mismo platillo puede ir dos veces)', async () => {
+    const q = await quoteCart('v1', [
+      { productId: 'p-flautas', quantity: 1, modifiers: [{ modifierId: 'm2' }] },
+      { productId: 'p-flautas', quantity: 1 }, // le falta la salsa obligatoria
+      { productId: 'p-agua', quantity: 0 },
+      { productId: 'no-existe', quantity: 1 },
+      { productId: 'p-flautas', quantity: 1, modifiers: [{ modifierId: 'de-otro-producto' }, { modifierId: 'm1' }] },
+    ])
+    expect(q.issues.map(i => [i.code, i.lineIndex])).toEqual([
+      ['MODIFIER_GROUP_REQUIRED', 1],
+      ['QUANTITY_INVALID', 2],
+      ['PRODUCT_UNAVAILABLE', 3],
+      ['MODIFIER_INVALID', 4],
+    ])
+    expect((await quoteCart('v1', [])).issues[0]).not.toHaveProperty('lineIndex') // los avisos del carrito entero no llevan renglón
+  })
+
   it('un producto de una categoría cuyo menú no aplica ahora es PRODUCT_UNAVAILABLE', async () => {
     ;(loadCategoryVisibility as jest.Mock).mockResolvedValue(() => false)
     const q = await quoteCart('v1', [{ productId: 'p-agua', quantity: 1 }])

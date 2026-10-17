@@ -1,3 +1,5 @@
+import type { OnlineOrderPaymentMode } from '@prisma/client'
+
 /** Minutos que tiene el restaurante para contestar. Constante, no ajuste (R20): el spec dice «no expuesto». */
 export const ACCEPT_TIMEOUT_MINUTES = 10
 /** Un aparato «cuenta» si su bandeja abierta consultó en los últimos 2 minutos. */
@@ -15,6 +17,8 @@ export const INBOX_PAGE_SIZE = 100
 /** Igual que `PRINT_CLAIM_TTL_MS` de la pantalla de cocina (`kds.mobile.service.ts`). */
 export const PRINT_CLAIM_TTL_MS = 90_000
 export const EXPIRY_BATCH_SIZE = 100
+/** Pedidos por pasada de cada sincronización al leer (R2 y «pagado al recoger»); lo que sobre lo toma la siguiente pasada. */
+export const SYNC_BATCH_SIZE = 100
 export const MENU_CACHE_TTL_MS = 60_000
 export const MAX_MENU_CATEGORIES = 100
 export const MAX_PRODUCTS_PER_CATEGORY = 200
@@ -23,3 +27,8 @@ export const MAX_MODIFIERS_PER_GROUP = 50
 export const MAX_MENUS = 100
 /** Estados de `Order` que cuentan como «cuenta abierta» (folio sin repetir y desde dónde una transición mueve la `Order`). */
 export const OPEN_ORDER_STATUSES = ['PENDING', 'CONFIRMED', 'PREPARING', 'READY'] as const
+/**
+ * M-2: modos de pago que ya llegan COBRADOS al aceptar (fase 2: tarjeta en línea). Vacío en 1a: entregar exige la cuenta pagada
+ * para todo modo que no esté aquí (falla cerrado).
+ */
+export const PREPAID_MODES: readonly OnlineOrderPaymentMode[] = []

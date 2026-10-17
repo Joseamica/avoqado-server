@@ -10,9 +10,12 @@
  */
 import { OnlineOrderStatus } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
+import { logAction } from '@/services/dashboard/activity-log.service'
 import { examinarRenglon } from '@/services/fiscal/cfdi.service'
 import { cancelOrder, payCashOrder } from '@/services/mobile/order.mobile.service'
+import { listInbox } from '@/services/online-ordering/inbox.service'
 import { clearPublicMenuCache } from '@/services/online-ordering/menu.service'
+import * as avisos from '@/services/online-ordering/notifications.service'
 import { createOnlineOrder } from '@/services/online-ordering/order.service'
 import { __resetPresenceDebounceForTests, touchInboxPoll } from '@/services/online-ordering/presence.service'
 import { claimOnlineOrderPrint, confirmOnlineOrderPrinted } from '@/services/online-ordering/printClaim.service'
@@ -110,6 +113,22 @@ describe('Pedidos en línea — ciclo de vida (integration, real DB)', () => {
       await new Promise(resolve => setTimeout(resolve, 50))
     }
     throw new Error('INCONCLUSO: el rechazo nunca quedó esperando el candado que retiene el cobro')
+  }
+
+  const estadoDe = async (onlineOrderId: string) => (await prisma.onlineOrder.findUniqueOrThrow({ where: { id: onlineOrderId } })).status
+  /** `logAction` es un simulacro en TODA la integración (`integration-setup.ts`): se miran sus llamadas para ESTE pedido. */
+  const bitacora = (onlineOrderId: string, action: string) =>
+    (logAction as jest.Mock).mock.calls.map(([p]) => p).filter(p => p.entityId === onlineOrderId && p.action === action)
+  /** Listo para cobrar: aceptado y (si se pide) marcado listo; devuelve también su cuenta. */
+  const pedidoListo = async (o: { ready?: boolean } = {}) => {
+    const created = await newOrder()
+    await aceptar(created.orderId)
+    if (o.ready !== false) {
+      await expect(markOnlineOrderReady({ venueId: venueId!, orderId: created.orderId, staffId: null })).resolves.toMatchObject({
+        outcome: 'OK',
+      })
+    }
+    return created
   }
 
   beforeAll(async () => {
@@ -476,5 +495,114 @@ describe('Pedidos en línea — ciclo de vida (integration, real DB)', () => {
     // `cancelOrder` ya había escrito CANCELLED en la Order dentro de su transacción; el gancho lanzó y TODO se revirtió.
     expect((await prisma.order.findUniqueOrThrow({ where: { id: orderId } })).status).toBe('CONFIRMED')
     expect((await prisma.onlineOrder.findUniqueOrThrow({ where: { id: onlineOrderId } })).status).toBe('ACCEPTED')
+  })
+
+  it('I-1: si el POS cancela la cuenta de un pedido ACEPTADO, la bandeja lo cierra y el comensal recibe el aviso UNA sola vez', async () => {
+    await beat()
+    const { orderId, onlineOrderId } = await newOrder()
+    await aceptar(orderId)
+    const aviso = jest.spyOn(avisos, 'notifyOrderEvent').mockResolvedValue(undefined)
+    try {
+      await cancelOrder(venueId!, orderId) // la cancelación existente del POS: no pasa por la máquina de estados
+      const cancelados = () => aviso.mock.calls.filter(([id, evento]) => id === orderId && evento === 'CANCELLED')
+
+      await listInbox({ venueId: venueId! })
+      expect(await prisma.onlineOrder.findUniqueOrThrow({ where: { id: onlineOrderId } })).toMatchObject({
+        status: OnlineOrderStatus.CANCELLED_BY_STAFF,
+        cancelledBy: 'ORDER_CANCELLED_ELSEWHERE',
+      })
+      expect(cancelados()).toHaveLength(1)
+      expect(bitacora(onlineOrderId, 'ONLINE_ORDER_CANCELLED_BY_STAFF')).toEqual([
+        expect.objectContaining({
+          staffId: null,
+          venueId,
+          entity: 'OnlineOrder',
+          data: expect.objectContaining({ cancelledBy: 'ORDER_CANCELLED_ELSEWHERE' }),
+        }),
+      ])
+
+      await listInbox({ venueId: venueId! }) // la siguiente bandeja ya no lo encuentra abierto: no vuelve a avisar
+      expect(cancelados()).toHaveLength(1)
+      expect(bitacora(onlineOrderId, 'ONLINE_ORDER_CANCELLED_BY_STAFF')).toHaveLength(1)
+    } finally {
+      aviso.mockRestore()
+    }
+  })
+
+  it('opción 1: pagado completo y LISTO ⇒ la bandeja lo entrega sola, con su bitácora automática y sin tocar la cuenta', async () => {
+    await beat()
+    const { orderId, onlineOrderId } = await pedidoListo()
+    await expect(pay(orderId)).resolves.toMatchObject({ status: 'COMPLETED' })
+    const cuenta = await prisma.order.findUniqueOrThrow({ where: { id: orderId } })
+    expect(cuenta.paymentStatus).toBe('PAID')
+
+    await listInbox({ venueId: venueId! })
+    const online = await prisma.onlineOrder.findUniqueOrThrow({ where: { id: onlineOrderId } })
+    expect(online.status).toBe(OnlineOrderStatus.COMPLETED)
+    expect(online.completedAt).not.toBeNull()
+    expect(bitacora(onlineOrderId, 'ONLINE_ORDER_COLLECTED')).toEqual([
+      expect.objectContaining({ staffId: null, venueId, entity: 'OnlineOrder', data: expect.objectContaining({ automatic: true }) }),
+    ])
+    // La cuenta la cerró el cobro: sigue igual.
+    expect(await prisma.order.findUniqueOrThrow({ where: { id: orderId } })).toMatchObject({ status: cuenta.status, paymentStatus: 'PAID' })
+  })
+
+  it('opción 1: con un pago PARCIAL el pedido listo NO se entrega solo', async () => {
+    await beat()
+    const { orderId, onlineOrderId } = await pedidoListo()
+    await payCashOrder(venueId!, orderId, { amount: 10_000, tip: 0, idempotencyKey: `itest-pay-parcial-${orderId}` })
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: orderId } })).paymentStatus).toBe('PARTIAL')
+    await listInbox({ venueId: venueId! })
+    expect(await estadoDe(onlineOrderId)).toBe(OnlineOrderStatus.READY)
+  })
+
+  it('opción 1: ACEPTADO y pagado ANTES de su hora estimada sigue en preparación; pasada la hora, se entrega solo', async () => {
+    await beat()
+    const antes = await pedidoListo({ ready: false })
+    const despues = await pedidoListo({ ready: false })
+    await pay(antes.orderId)
+    await pay(despues.orderId)
+    await prisma.onlineOrder.update({ where: { id: despues.onlineOrderId }, data: { estimatedReadyAt: new Date(Date.now() - 1_000) } })
+
+    await listInbox({ venueId: venueId! })
+    expect(await estadoDe(antes.onlineOrderId)).toBe(OnlineOrderStatus.ACCEPTED)
+    expect(await estadoDe(despues.onlineOrderId)).toBe(OnlineOrderStatus.COMPLETED)
+  })
+
+  it('opción 1: si la cuenta está cancelada gana R2 (cancelado por el negocio), aunque diga pagada', async () => {
+    await beat()
+    const { orderId, onlineOrderId } = await pedidoListo()
+    await pay(orderId)
+    // Estado que ningún flujo de hoy produce (la cancelación existente se niega con dinero): se arma a mano para fijar que el
+    // pedido de una cuenta cancelada NUNCA queda «entregado».
+    await prisma.order.update({ where: { id: orderId }, data: { status: 'CANCELLED' } })
+    await listInbox({ venueId: venueId! })
+    expect(await prisma.onlineOrder.findUniqueOrThrow({ where: { id: onlineOrderId } })).toMatchObject({
+      status: OnlineOrderStatus.CANCELLED_BY_STAFF,
+      cancelledBy: 'ORDER_CANCELLED_ELSEWHERE',
+      completedAt: null,
+    })
+  })
+
+  it('M-1: rechazar o vencer un pedido cuya cuenta ya está cerrada sin dinero (cortesía) no responde OK: Postgres revierte el CAS', async () => {
+    await beat()
+    const { orderId, onlineOrderId } = await newOrder()
+    // Una cortesía: la caja cerró la cuenta sin cobrarla. Ni rechazar ni vencer pueden cancelarla.
+    await prisma.order.update({ where: { id: orderId }, data: { status: 'COMPLETED' } })
+    await expect(rejectOnlineOrder({ venueId: venueId!, orderId, staffId: null, reason: 'TOO_BUSY' })).resolves.toEqual({
+      outcome: 'STALE',
+      status: OnlineOrderStatus.PENDING_ACCEPTANCE,
+    })
+    await prisma.onlineOrder.update({ where: { id: onlineOrderId }, data: { acceptDeadlineAt: new Date(Date.now() - 1_000) } })
+    await expect(expireOnlineOrder({ venueId: venueId!, orderId })).resolves.toEqual({
+      outcome: 'STALE',
+      status: OnlineOrderStatus.PENDING_ACCEPTANCE,
+    })
+    expect(await prisma.onlineOrder.findUniqueOrThrow({ where: { id: onlineOrderId } })).toMatchObject({
+      status: OnlineOrderStatus.PENDING_ACCEPTANCE,
+      rejectedAt: null,
+      expiredAt: null,
+    })
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: orderId } })).status).toBe('COMPLETED')
   })
 })

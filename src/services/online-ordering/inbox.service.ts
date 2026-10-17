@@ -1,8 +1,9 @@
 import { OnlineOrderStatus, Prisma, type OnlineOrderPaymentMode } from '@prisma/client'
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
-import { syncOnlineOrdersOfCancelledOrders } from './cancelledOrderSync'
+import { announceCancelledElsewhere, syncOnlineOrdersOfCancelledOrders } from './cancelledOrderSync'
 import { INBOX_PAGE_SIZE, MAX_CART_LINES } from './constants'
+import { announceCollectedAutomatically, syncOnlineOrdersOfPaidPickups } from './paidPickupSync'
 import { onlineOrderNeedsPrint } from './printClaim.service'
 
 export type InboxFilter = 'pending' | 'active' | 'done' | 'all'
@@ -109,13 +110,21 @@ export async function listInbox(p: { venueId: string; filter?: InboxFilter; now?
   const filter = p.filter ?? 'all'
   const dayAgo = new Date(now.getTime() - 24 * 3_600_000)
 
-  // R2: antes de leer, cierra los pedidos cuya cuenta se canceló por otra vía (POS, panel). Nunca le cuesta la lista.
-  await syncOnlineOrdersOfCancelledOrders(prisma, { venueId: p.venueId }, now).catch(error =>
-    logger.warn('[OnlineOrdering] no se pudieron cerrar los pedidos de cuentas canceladas antes de la bandeja', {
+  // Antes de leer, y en este orden (ninguna le cuesta la lista; cada una anuncia a SUS ganadores, ya fuera de transacción):
+  // R2 cierra los pedidos cuya cuenta se canceló por otra vía (POS, panel); luego, opción 1 del founder (17-oct), se entrega
+  // solo lo de pagar al recoger que ya quedó pagado.
+  const warnSync = (que: string) => (error: unknown) => {
+    logger.warn(`[OnlineOrdering] no se pudieron ${que} antes de la bandeja`, {
       venueId: p.venueId,
       error: error instanceof Error ? error.message : String(error),
-    }),
-  )
+    })
+  }
+  await syncOnlineOrdersOfCancelledOrders(prisma, { venueId: p.venueId }, now)
+    .then(won => announceCancelledElsewhere(won, now))
+    .catch(warnSync('cerrar los pedidos de cuentas canceladas'))
+  await syncOnlineOrdersOfPaidPickups(prisma, { venueId: p.venueId }, now)
+    .then(won => announceCollectedAutomatically(won, now))
+    .catch(warnSync('entregar los pedidos ya pagados'))
 
   const wantPending = filter === 'pending' || filter === 'all'
   const wantActive = filter === 'active' || filter === 'all'
@@ -134,7 +143,8 @@ export async function listInbox(p: { venueId: string; filter?: InboxFilter; now?
     wantActive
       ? prisma.onlineOrder.findMany({
           where: { venueId: p.venueId, status: { in: ACTIVE } },
-          orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+          // I-2: lo más nuevo primero (las apps ordenan en pantalla): si el tope recorta, nunca esconde lo recién aceptado.
+          orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
           take: INBOX_PAGE_SIZE + 1,
           select: SELECT,
         })

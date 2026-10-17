@@ -17,7 +17,7 @@ import {
   rejectOnlineOrder,
   type TransitionResult,
 } from '@/services/online-ordering/transitions.service'
-import { floorPauseMinutes, menuAvailabilityBody, settingsPatchBody } from '@/schemas/online-ordering.schema'
+import { acceptSchema, floorPauseMinutes, menuAvailabilityBody, rejectSchema, settingsPatchBody } from '@/schemas/online-ordering.schema'
 
 const GATE_LABEL = 'Los pedidos en línea'
 
@@ -31,8 +31,8 @@ const PERMISSION: Record<Action, string> = {
   CANCEL: 'orders:cancel-unpaid',
 }
 const LABEL: Record<Action, string> = { ACCEPT: 'ACEPTAR', REJECT: 'RECHAZAR', READY: 'LISTO', DELIVERED: 'ENTREGADO', CANCEL: 'CANCELAR' }
-const EFFECT: Record<Action, string> = {
-  ACCEPT: 'El pedido pasa a preparación y se le avisa al comensal cuándo estará listo.',
+/** ACEPTAR arma su efecto con los minutos (M-13). */
+const EFFECT: Record<Exclude<Action, 'ACCEPT'>, string> = {
   REJECT: 'El pedido se cancela y se le avisa al comensal que no se le cobró nada.',
   READY: 'Se le avisa al comensal que su pedido está listo para recoger.',
   DELIVERED: 'El pedido queda entregado. Debe estar cobrado antes.',
@@ -101,9 +101,10 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
       venueId: z.string().describe('Venue del pedido (debe estar en tu scope)'),
       orderId: z.string().describe('Id del pedido (orderId de la lista de pedidos en línea)'),
       action: z.enum(['ACCEPT', 'REJECT', 'READY', 'DELIVERED', 'CANCEL']),
-      estimatedMinutes: z.number().int().min(1).max(240).optional().describe('Sólo al aceptar: minutos para tenerlo listo'),
-      reason: z.enum(['OUT_OF_ITEMS', 'CLOSED', 'TOO_BUSY', 'OTHER']).optional().describe('Obligatorio al rechazar'),
-      note: z.string().max(200).optional(),
+      // M-13: el MISMO Zod de la API (trim y mensajes en español).
+      estimatedMinutes: acceptSchema.shape.body.shape.estimatedMinutes.describe('Sólo al aceptar: minutos para tenerlo listo'),
+      reason: rejectSchema.shape.body.shape.reason.optional().describe('Obligatorio al rechazar'),
+      note: rejectSchema.shape.body.shape.note.describe('Sólo al rechazar: nota del motivo'),
       confirm: z.boolean().optional().describe('true para ejecutar de verdad'),
     },
     async ({ venueId, orderId, action, estimatedMinutes, reason, note, confirm }) => {
@@ -128,6 +129,8 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
       }
 
       if (!confirm) {
+        // M-13: la vista previa dice lo que se le va a avisar al comensal: los minutos al aceptar, el motivo al rechazar.
+        const minutos = action === 'ACCEPT' ? (estimatedMinutes ?? (await getSettings(venueId)).defaultPrepMinutes) : null
         return text({
           ok: false,
           requiresConfirmation: true,
@@ -137,7 +140,12 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
             cliente: order.customerName,
             total: order.total,
             platillos: order.items.map(i => `${i.quantity} × ${i.name}`),
-            efecto: EFFECT[action],
+            ...(action === 'ACCEPT' ? { minutos } : {}),
+            ...(action === 'REJECT' ? { motivo: reason, nota: note || null } : {}),
+            efecto:
+              action === 'ACCEPT'
+                ? `El pedido pasa a preparación y se le avisa al comensal que estará listo en unos ${minutos} minutos.`
+                : EFFECT[action],
           },
           mensaje: 'Vuelve a llamar con confirm:true para aplicarlo.',
         })
@@ -148,7 +156,7 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
         action === 'ACCEPT'
           ? await acceptOnlineOrder({ venueId, orderId, staffId, estimatedMinutes })
           : action === 'REJECT'
-            ? await rejectOnlineOrder({ venueId, orderId, staffId, reason: reason!, note: note ?? null })
+            ? await rejectOnlineOrder({ venueId, orderId, staffId, reason: reason!, note: note || null })
             : action === 'READY'
               ? await markOnlineOrderReady({ venueId, orderId, staffId })
               : action === 'DELIVERED'
@@ -160,7 +168,7 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
       await auditMcpWrite(scope, {
         action: AUDIT[action],
         entity: 'OnlineOrder',
-        entityId: orderId,
+        entityId: order.onlineOrderId, // M-13: el id de la entidad que se audita, no el de la cuenta
         venueId,
         data: { pedido: order.orderNumber, reason: reason ?? null, estimatedMinutes: estimatedMinutes ?? null },
       })

@@ -147,6 +147,22 @@ export function exceedsQueryLimits(p: OnlineProductRow): boolean {
   return p.modifierGroups.length > MAX_GROUPS_PER_PRODUCT || p.modifierGroups.some(g => g.group.modifiers.length > MAX_MODIFIERS_PER_GROUP)
 }
 
+/**
+ * M-4: un grupo que nadie puede cumplir deja el platillo imposible de pedir (realista: desactivaron todos los sabores agotados de
+ * un obligatorio). La carta no lo ofrece y el cotizador responde `PRODUCT_UNAVAILABLE`. El mínimo efectivo es el del cotizador
+ * (un obligatorio pide al menos 1); las opciones son las activas que trae `ONLINE_PRODUCT_SELECT`.
+ */
+export function isUnsatisfiable(p: OnlineProductRow): boolean {
+  return p.modifierGroups.some(({ group: g }) => {
+    const min = g.required ? Math.max(1, g.minSelections) : g.minSelections
+    return (
+      min > g.modifiers.length || // incluye «obligatorio o con mínimo, y 0 opciones activas»
+      (!g.allowMultiple && min >= 2) ||
+      (g.maxSelections !== null && min > g.maxSelections)
+    )
+  })
+}
+
 export function toVisibleProduct(p: OnlineProductRow): VisibleProduct {
   return {
     id: p.id,
@@ -273,15 +289,22 @@ export async function loadVisibleMenu(venueId: string, now: Date = new Date()): 
   for (const c of categories) {
     if (c.products.length > MAX_PRODUCTS_PER_CATEGORY) truncated = true
     const products: VisibleProduct[] = []
+    let imposibles = 0
     for (const p of c.products.slice(0, MAX_PRODUCTS_PER_CATEGORY)) {
       if (exceedsQueryLimits(p)) {
         truncated = true
         continue
       }
+      // M-4: no es un recorte (no marca `truncated`): ese platillo hoy no se puede pedir, y tampoco cuenta en la categoría.
+      if (isUnsatisfiable(p)) {
+        imposibles += 1
+        continue
+      }
       products.push(toVisibleProduct(p))
     }
     if (products.length === 0 || !isVisibleNow(c.id)) continue
-    out.push({ id: c.id, name: c.name, productCount: productCount.get(c.id) ?? products.length, products })
+    const total = productCount.get(c.id)
+    out.push({ id: c.id, name: c.name, productCount: total === undefined ? products.length : total - imposibles, products })
   }
   if (truncated) {
     logger.warn('[OnlineOrdering] la carta pública se recortó por un tope (sin paginación en v1)', {
