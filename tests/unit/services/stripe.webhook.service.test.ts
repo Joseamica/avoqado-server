@@ -869,6 +869,7 @@ describe('Stripe Webhook Service - Critical Tests', () => {
       createNotification: jest.Mock
     }
     const { montoDelSiguienteCobro } = jest.requireMock('@/services/billing/siguienteCobro') as { montoDelSiguienteCobro: jest.Mock }
+    let nowSpy: jest.SpyInstance
 
     const buildSub = (over: Record<string, unknown> = {}) =>
       ({
@@ -907,7 +908,11 @@ describe('Stripe Webhook Service - Critical Tests', () => {
       emailService.sendPlanRenewalReminderEmail.mockResolvedValue(true)
       emailService.sendTrialEndingEmail.mockResolvedValue(true)
       montoDelSiguienteCobro.mockResolvedValue(115884)
+      // «Ahora» fijo: 18-oct-2026, tres días antes del fin de la prueba (el reloj real haría caducar estas pruebas).
+      nowSpy = jest.spyOn(Date, 'now').mockReturnValue(Date.UTC(2026, 9, 18, 12, 0, 0))
     })
+
+    afterEach(() => nowSpy.mockRestore())
 
     it('PLAN_PRO: manda el aviso de fin de prueba con el monto real y NO el correo de «desactivar»', async () => {
       givenFeature('PLAN_PRO', 'Avoqado Pro')
@@ -1018,6 +1023,79 @@ describe('Stripe Webhook Service - Critical Tests', () => {
       expect(emailService.sendTrialEndingEmail).not.toHaveBeenCalled()
       expect(createNotification).not.toHaveBeenCalled()
       expect(montoDelSiguienteCobro).not.toHaveBeenCalled()
+    })
+
+    it('sin OWNER/ADMIN en la lista el correo del plan sale igual (el destinatario es el del negocio); sólo faltan los avisos en la app', async () => {
+      givenFeature('PLAN_PRO', 'Avoqado Pro')
+      ;(prisma.staffVenue.findMany as jest.Mock).mockResolvedValue([])
+
+      await handleSubscriptionTrialWillEnd(buildSub())
+
+      expect(createNotification).not.toHaveBeenCalled()
+      expect(emailService.sendPlanRenewalReminderEmail).toHaveBeenCalledTimes(1)
+      expect(emailService.sendPlanRenewalReminderEmail).toHaveBeenCalledWith(
+        'negocio@test.com',
+        expect.objectContaining({ amountCents: 115884, isTrialEnd: true }),
+      )
+    })
+
+    it('sin destinatario resuelto (el negocio no tiene correo ni dueño) no hay correo, pero los avisos en la app salen', async () => {
+      givenFeature('PLAN_PRO', 'Avoqado Pro')
+      ;(prisma.venue.findUnique as jest.Mock).mockResolvedValue({
+        name: 'Test Venue',
+        email: null,
+        language: 'es',
+        organization: null,
+        staff: [],
+      })
+
+      await handleSubscriptionTrialWillEnd(buildSub())
+
+      expect(emailService.sendPlanRenewalReminderEmail).not.toHaveBeenCalled()
+      expect(createNotification).toHaveBeenCalledTimes(2)
+    })
+
+    it.each([
+      ['ya pasó (una hora antes de «ahora»)', TRIAL_END_S + 3600],
+      ['termina justo «ahora»', TRIAL_END_S],
+    ])('un evento tardío o repetido (la prueba %s): el cobro ya ocurrió, así que ni correo ni aviso', async (_nombre, ahoraS) => {
+      givenFeature('PLAN_PRO', 'Avoqado Pro')
+      nowSpy.mockReturnValue(ahoraS * 1000)
+
+      await handleSubscriptionTrialWillEnd(buildSub())
+
+      expect(emailService.sendPlanRenewalReminderEmail).not.toHaveBeenCalled()
+      expect(emailService.sendTrialEndingEmail).not.toHaveBeenCalled()
+      expect(createNotification).not.toHaveBeenCalled()
+      expect(montoDelSiguienteCobro).not.toHaveBeenCalled()
+    })
+
+    it('si createNotification rechaza, el correo del plan sale igual y el webhook no revienta', async () => {
+      givenFeature('PLAN_PRO', 'Avoqado Pro')
+      createNotification.mockRejectedValue(new Error('db caída'))
+
+      await expect(handleSubscriptionTrialWillEnd(buildSub())).resolves.toBeUndefined()
+
+      expect(createNotification).toHaveBeenCalledTimes(2)
+      expect(emailService.sendPlanRenewalReminderEmail).toHaveBeenCalledTimes(1)
+    })
+
+    it('si el envío del correo rechaza, el webhook no revienta', async () => {
+      givenFeature('PLAN_PRO', 'Avoqado Pro')
+      emailService.sendPlanRenewalReminderEmail.mockRejectedValue(new Error('SMTP caído'))
+
+      await expect(handleSubscriptionTrialWillEnd(buildSub())).resolves.toBeUndefined()
+
+      expect(createNotification).toHaveBeenCalledTimes(2)
+    })
+
+    it('si montoDelSiguienteCobro lanza, el webhook no revienta', async () => {
+      givenFeature('PLAN_PRO', 'Avoqado Pro')
+      montoDelSiguienteCobro.mockRejectedValue(new Error('Stripe caído'))
+
+      await expect(handleSubscriptionTrialWillEnd(buildSub())).resolves.toBeUndefined()
+
+      expect(emailService.sendPlanRenewalReminderEmail).not.toHaveBeenCalled()
     })
 
     it('regresión: una función suelta sigue por sendTrialEndingEmail, como hoy', async () => {

@@ -27,7 +27,7 @@ const base = {
 
 function enviado() {
   const arg = spy.mock.calls[0][0]
-  return { ...arg, text: arg.text ?? '' }
+  return { ...arg, html: arg.html ?? '', text: arg.text ?? '' }
 }
 
 describe('sendPlanRenewalReminderEmail — fin de prueba (isTrialEnd)', () => {
