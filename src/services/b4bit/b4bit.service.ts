@@ -19,6 +19,7 @@ import { socketManager } from '../../communication/sockets/managers/socketManage
 import { SocketEventType } from '../../communication/sockets/types'
 import logger from '../../config/logger'
 import { BadRequestError, InternalServerError } from '../../errors/AppError'
+import { logAction } from '../dashboard/activity-log.service'
 import prisma from '../../utils/prismaClient'
 import { applySalePosting, createSalePostingInTx } from '../inventory/inventoryPosting.service'
 import { computeOrderBalance, estadoDeCobroAlRecibirDinero } from '../shared/orderBalance'
@@ -920,6 +921,8 @@ interface CryptoSettlementResult {
    * esta ejecución no fue la que saldó la cuenta.
    */
   postingId?: string | null
+  /** R11-8: esta liquidación cerró también la sesión de vales v7 de la venta (dejó de ofrecer «cobrar el resto»). */
+  sesionDeValesCerrada?: boolean
 }
 
 interface IgnoredCryptoSettlementResult {
@@ -984,6 +987,9 @@ async function crearValeDeInventario(
  * transaction: if later order settlement rolls back, neither the payment
  * transition nor the shift totals survive.
  */
+/** R11-8: la sesión de vales que tomó `lockAreaTicketCheckoutHierarchy` (o `null` si la venta no tiene). */
+type ValesBloqueados = Awaited<ReturnType<typeof import('../mobile/areaTicketV7.mobile.service').lockAreaTicketCheckoutHierarchy>>
+
 async function completeAndAttributeB4BitPaymentInTx(
   tx: Prisma.TransactionClient,
   payment: {
@@ -996,7 +1002,7 @@ async function completeAndAttributeB4BitPaymentInTx(
   },
   processorPatch: Prisma.InputJsonObject,
   reconciliationEnabled: boolean,
-): Promise<{ transitioned: boolean; ignoredAsOutOfOrder: boolean; preservedStatus?: string }> {
+): Promise<{ transitioned: boolean; ignoredAsOutOfOrder: boolean; preservedStatus?: string; vales?: ValesBloqueados }> {
   // Task 5t: the release guard reasons over immutable primitives, never over a
   // mutable Prisma result that crossed the helper boundary.
   const paymentId = payment.id
@@ -1006,7 +1012,12 @@ async function completeAndAttributeB4BitPaymentInTx(
   const paymentTipAmount = payment.tipAmount
   const paymentProcessedById = payment.processedById
 
+  let vales: ValesBloqueados = null
   if (paymentOrderId) {
+    // 🔴 R11-8: PRIMERA sentencia, la jerarquía de vales (sesión → vales → venta; `null` sin sesión) ANTES del candado de la venta:
+    // el orden de la finalización y del registrador de la terminal. Quien liquida la usa para cerrar la sesión junto a su vale.
+    const { lockAreaTicketCheckoutHierarchy } = await import('../mobile/areaTicketV7.mobile.service')
+    vales = await lockAreaTicketCheckoutHierarchy(tx, { venueId: paymentVenueId, orderId: paymentOrderId })
     await lockExistingOrderForPayment(tx, { venueId: paymentVenueId, orderId: paymentOrderId })
   }
   await lockB4BitPaymentRow(tx, paymentId, paymentVenueId)
@@ -1020,7 +1031,7 @@ async function completeAndAttributeB4BitPaymentInTx(
   }
 
   const merged = mergeB4BitProcessorData(freshPayment.processorData, processorPatch)
-  if (merged.ignoredAsOutOfOrder) return { transitioned: false, ignoredAsOutOfOrder: true }
+  if (merged.ignoredAsOutOfOrder) return { transitioned: false, ignoredAsOutOfOrder: true, vales }
 
   if (freshPayment.status === 'COMPLETED') {
     // A redelivery may refresh provider metadata, but it must not mention
@@ -1029,11 +1040,11 @@ async function completeAndAttributeB4BitPaymentInTx(
       where: { id: paymentId, venueId: paymentVenueId },
       data: { status: 'COMPLETED', processorData: merged.processorData },
     })
-    return { transitioned: false, ignoredAsOutOfOrder: false }
+    return { transitioned: false, ignoredAsOutOfOrder: false, vales }
   }
 
   if (freshPayment.status !== 'PENDING') {
-    return { transitioned: false, ignoredAsOutOfOrder: false, preservedStatus: freshPayment.status }
+    return { transitioned: false, ignoredAsOutOfOrder: false, preservedStatus: freshPayment.status, vales }
   }
 
   const priorCompletedPaymentCount = paymentOrderId
@@ -1060,11 +1071,11 @@ async function completeAndAttributeB4BitPaymentInTx(
     })
     if (!winner) throw new Error(`B4Bit payment ${paymentId} no longer exists for venue ${paymentVenueId}`)
     if (winner.status !== 'COMPLETED') {
-      return { transitioned: false, ignoredAsOutOfOrder: false, preservedStatus: winner.status }
+      return { transitioned: false, ignoredAsOutOfOrder: false, preservedStatus: winner.status, vales }
     }
 
     const winnerMerge = mergeB4BitProcessorData(winner.processorData, processorPatch)
-    if (winnerMerge.ignoredAsOutOfOrder) return { transitioned: false, ignoredAsOutOfOrder: true }
+    if (winnerMerge.ignoredAsOutOfOrder) return { transitioned: false, ignoredAsOutOfOrder: true, vales }
 
     await tx.payment.update({
       where: { id: paymentId, venueId: paymentVenueId },
@@ -1073,7 +1084,7 @@ async function completeAndAttributeB4BitPaymentInTx(
         processorData: winnerMerge.processorData,
       },
     })
-    return { transitioned: false, ignoredAsOutOfOrder: false }
+    return { transitioned: false, ignoredAsOutOfOrder: false, vales }
   }
 
   // Resolve only after winning the payment transition: a redelivery/concurrent
@@ -1109,7 +1120,7 @@ async function completeAndAttributeB4BitPaymentInTx(
   // FT-GRAVES T2: sólo quien GANÓ la transición a COMPLETED (una reentrega no llega aquí) comisiona, con el MISMO gancho que la
   // terminal y en esta transacción. El esquema decide a quién (quien inició el cobro en la terminal); sin persona, nada.
   await enqueuePaymentCommissionInTx(tx, paymentId)
-  return { transitioned: true, ignoredAsOutOfOrder: false }
+  return { transitioned: true, ignoredAsOutOfOrder: false, vales }
 }
 
 /**
@@ -1356,6 +1367,7 @@ async function settleOrderForConfirmedCryptoPayment(
         // sobre una cuenta que ya estaba PAID descontaría la venta DOS veces.
         const becamePaid = balance.isFullyPaid && !cobro.cerrada
         let postingId: string | null = null
+        let sesionDeValesCerrada = false
         if (becamePaid) {
           // Los renglones se leen con la MISMA tx, no con `prisma`: fuera de ella
           // no verían lo que esta transacción aún no ha commiteado.
@@ -1371,6 +1383,14 @@ async function settleOrderForConfirmedCryptoPayment(
             staffId: payment.processedById,
           })
           postingId = posting?.id ?? null
+          // 🔴 R11-8: este vale ya tomó todos los renglones (también los del vale v7): la sesión deja de presentarse cobrable.
+          if (completion.vales) {
+            const { cerrarSesionDeValesAlCerrarLaVenta } = await import('../mobile/areaTicketV7.mobile.service')
+            sesionDeValesCerrada = await cerrarSesionDeValesAlCerrarLaVenta(tx, completion.vales.session, {
+              venueId: payment.venueId,
+              orderId: payment.orderId,
+            })
+          }
         }
 
         // R9-2: lo que se ESCRIBIÓ (el estado y el saldo conservados de una venta cerrada), no la aritmética, para el log de abajo.
@@ -1382,6 +1402,7 @@ async function settleOrderForConfirmedCryptoPayment(
           paymentStatus: cobro.paymentStatus,
           ventaCerrada: cobro.cerrada,
           postingId,
+          ...(sesionDeValesCerrada ? { sesionDeValesCerrada: true } : {}),
         }
       }, ORDER_LOCK_WAIT_BUDGET)
     } catch (error: any) {
@@ -1586,8 +1607,21 @@ async function handlePaymentConfirmed(
           paidAmount: settlement.paidAmount,
           remainingBalance: settlement.remainingBalance,
           ventaCerrada: settlement.ventaCerrada,
+          ...(settlement.sesionDeValesCerrada ? { sesionDeValesCerrada: true } : {}),
         },
       )
+    }
+    // R11-8: este canal no asienta su cierre en la bitácora; cerrar la sesión de vales sí es un cambio de estado (raro: sólo una
+    // venta de vales que se salda con cripto). Fuera de la transacción y sin poder tumbar nada (`logAction` nunca lanza).
+    if (settlement.sesionDeValesCerrada) {
+      void logAction({
+        staffId: payment.processedById ?? null,
+        venueId: payment.venueId,
+        action: 'AREA_TICKET_SESSION_CLOSED_BY_SALE',
+        entity: 'Order',
+        entityId: payment.orderId,
+        data: { channel: 'b4bit', paymentId: payment.id },
+      })
     }
 
     // 🔴 SE APLICA EL VALE, YA COMMITEADO EL COBRO — y nunca puede tumbarlo.

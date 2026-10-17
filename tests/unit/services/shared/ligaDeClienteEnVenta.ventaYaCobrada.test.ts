@@ -12,6 +12,7 @@ import {
   asegurarCambioDeClienteEnVentaCobrada,
   CODIGO_CLIENTE_DE_VENTA_COBRADA,
   esVentaYaCobrada,
+  ventaYaCobradaBajoCandado,
 } from '@/services/shared/ligaDeClienteEnVenta'
 
 const VENUE = 'venue-r7'
@@ -43,9 +44,9 @@ describe('🔴 R7-2: esVentaYaCobrada — PAID o REFUNDED, nada más', () => {
   })
 })
 
-describe('🔴 R7-2: asegurarCambioDeClienteEnVentaCobrada — síncrona, sin consulta', () => {
+describe('🔴 R7-2: asegurarCambioDeClienteEnVentaCobrada — síncrona, sin consulta (R11-2: recibe el veredicto `cobrada`)', () => {
   const pide = (over: Record<string, unknown> = {}) => ({
-    paymentStatus: 'PARTIAL',
+    cobrada: false,
     clienteActual: null,
     clienteNuevo: 'cust-nuevo',
     puedeCobrar: false,
@@ -56,10 +57,10 @@ describe('🔴 R7-2: asegurarCambioDeClienteEnVentaCobrada — síncrona, sin co
     expect(llamar(pide())).toBeUndefined()
   })
 
-  it.each(['PAID', 'REFUNDED'])('%s + cliente nuevo + sin permiso ⇒ 403 con el código de la regla', paymentStatus => {
+  it('cobrada + cliente nuevo + sin permiso ⇒ 403 con el código de la regla', () => {
     let error: unknown
     try {
-      llamar(pide({ paymentStatus }))
+      llamar(pide({ cobrada: true }))
     } catch (e) {
       error = e
     }
@@ -67,24 +68,116 @@ describe('🔴 R7-2: asegurarCambioDeClienteEnVentaCobrada — síncrona, sin co
     expect(error).toMatchObject({ statusCode: 403, code: CODIGO_CLIENTE_DE_VENTA_COBRADA })
   })
 
-  it('PAID + mismo cliente, o con el permiso ⇒ pasa', () => {
-    expect(llamar(pide({ paymentStatus: 'PAID', clienteActual: 'cust-nuevo' }))).toBeUndefined()
-    expect(llamar(pide({ paymentStatus: 'PAID', puedeCobrar: true }))).toBeUndefined()
+  it('cobrada + mismo cliente, o con el permiso ⇒ pasa', () => {
+    expect(llamar(pide({ cobrada: true, clienteActual: 'cust-nuevo' }))).toBeUndefined()
+    expect(llamar(pide({ cobrada: true, puedeCobrar: true }))).toBeUndefined()
   })
 })
 
-describe('🔴 R7-2: asegurarCambioDeClienteBajoCandado — sólo lee la venta (la `tx` no necesita pagos)', () => {
-  const tx = (paymentStatus: string) => ({ order: { findFirst: jest.fn().mockResolvedValue({ paymentStatus, customerId: null }) } }) as any
+/** La venta de $100 (IVA incluido) y lo que sus cobros capturados suman (sin los reembolsos). */
+const venta = (paymentStatus: string, cobrado: string | null, over: Record<string, unknown> = {}) =>
+  ({
+    order: {
+      findFirst: jest.fn().mockResolvedValue({
+        paymentStatus,
+        customerId: null,
+        status: 'PENDING',
+        subtotal: '100.00',
+        discountAmount: '0.00',
+        serviceChargeAmount: '0.00',
+        contratoDePrecio: 'IVA_INCLUIDO',
+        taxAmount: '0.00',
+        ...over,
+      }),
+    },
+    payment: { aggregate: jest.fn().mockResolvedValue({ _sum: { amount: cobrado, tipAmount: null } }) },
+  }) as any
 
-  it('🔴 cuenta PARTIAL (aunque tenga una devolución) ⇒ pasa sin contar reembolsos', async () => {
+describe('🔴 R7-2 / R11-2: asegurarCambioDeClienteBajoCandado — la regla compartida bajo el candado', () => {
+  const tx = (paymentStatus: string, cobrado: string | null = null) => venta(paymentStatus, cobrado)
+
+  it('🔴 cuenta PARTIAL con un abono que no la cubre (aunque tenga una devolución) ⇒ pasa', async () => {
     await expect(
-      asegurarCambioDeClienteBajoCandado(tx('PARTIAL'), { venueId: VENUE, orderId: ORDER, clienteNuevo: 'cust-nuevo', puedeCobrar: false }),
+      asegurarCambioDeClienteBajoCandado(tx('PARTIAL', '30.00'), {
+        venueId: VENUE,
+        orderId: ORDER,
+        clienteNuevo: 'cust-nuevo',
+        puedeCobrar: false,
+      }),
     ).resolves.toBeUndefined()
+  })
+
+  it('🔴 R11-2: venta PENDING cuyos cobros capturados YA la cubren (la finalización falló) ⇒ 403 sin el permiso', async () => {
+    await expect(
+      asegurarCambioDeClienteBajoCandado(tx('PENDING', '100.00'), {
+        venueId: VENUE,
+        orderId: ORDER,
+        clienteNuevo: 'cust-y',
+        puedeCobrar: false,
+      }),
+    ).rejects.toMatchObject({ statusCode: 403, code: CODIGO_CLIENTE_DE_VENTA_COBRADA })
+  })
+
+  it('con el permiso no lee nada', async () => {
+    const t = tx('PAID')
+    await expect(
+      asegurarCambioDeClienteBajoCandado(t, { venueId: VENUE, orderId: ORDER, clienteNuevo: 'cust-y', puedeCobrar: true }),
+    ).resolves.toBeUndefined()
+    expect(t.order.findFirst).not.toHaveBeenCalled()
   })
 
   it('PAID ⇒ 403', async () => {
     await expect(
       asegurarCambioDeClienteBajoCandado(tx('PAID'), { venueId: VENUE, orderId: ORDER, clienteNuevo: 'cust-nuevo', puedeCobrar: false }),
     ).rejects.toMatchObject({ statusCode: 403, code: CODIGO_CLIENTE_DE_VENTA_COBRADA })
+  })
+})
+
+/**
+ * 🔴 R11-2 (Codex recheck-15 #2): «venta ya cobrada» para la decisión A = cerrada por estado O con cobros capturados que ya cubren
+ * su total. La ventana: la terminal capturó $100, la finalización falló y la venta sigue PENDING; COCINA no puede dejar primario a
+ * un cliente ahí (la recuperación le daría sello y puntos).
+ */
+describe('🔴 R11-2: ventaYaCobradaBajoCandado', () => {
+  const lee = (t: any) => ventaYaCobradaBajoCandado(t, { venueId: VENUE, orderId: ORDER })
+
+  it.each([
+    ['PENDING con $100 capturados de $100', 'PENDING', '100.00', true],
+    ['PARTIAL con $100 capturados (el estado se atrasó)', 'PARTIAL', '100.00', true],
+    ['PENDING con $60 de $100 (abono)', 'PENDING', '60.00', false],
+    ['PENDING sin cobros', 'PENDING', null, false],
+  ])('%s ⇒ cobrada = %s', async (_caso, estado, cobrado, esperado) => {
+    await expect(lee(venta(estado as string, cobrado as string | null))).resolves.toMatchObject({ cobrada: esperado })
+  })
+
+  it.each(['PAID', 'REFUNDED'])('%s ⇒ cobrada, sin leer los cobros', async estado => {
+    const t = venta(estado, null)
+    await expect(lee(t)).resolves.toMatchObject({ cobrada: true })
+    expect(t.payment.aggregate).not.toHaveBeenCalled()
+  })
+
+  it('🔴 suma sólo los cobros capturados que NO son reembolso (con `type` vacío dentro), de ESTA venta y negocio', async () => {
+    const t = venta('PENDING', '100.00')
+    await lee(t)
+    expect(t.payment.aggregate).toHaveBeenCalledWith({
+      where: { orderId: ORDER, venueId: VENUE, status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] },
+      _sum: { amount: true, tipAmount: true },
+    })
+  })
+
+  it('una cortesía total ($0) sin cobros sigue abierta: sin dinero no hay «ya cobrada»', async () => {
+    await expect(lee(venta('PENDING', null, { discountAmount: '100.00' }))).resolves.toMatchObject({ cobrada: false })
+  })
+
+  it('el IVA que va aparte también se debe: $100 + $16 con $100 capturados no está cubierta', async () => {
+    await expect(lee(venta('PENDING', '100.00', { contratoDePrecio: 'IVA_APARTE', taxAmount: '16.00' }))).resolves.toMatchObject({
+      cobrada: false,
+    })
+  })
+
+  it('otra venta o negocio ⇒ null (quien llama responde 404)', async () => {
+    const t = venta('PENDING', null)
+    t.order.findFirst.mockResolvedValue(null)
+    await expect(lee(t)).resolves.toBeNull()
   })
 })

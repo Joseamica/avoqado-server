@@ -820,6 +820,13 @@ const NON_FISCAL_ORDER_WRITERS: Record<string, OrderWriter> = {
   'src/services/mobile/order.mobile.service.ts#cancelOrderInTransaction': CANCEL('assertOrderCancellableUnderLock'),
   'src/services/dashboard/order.dashboard.service.ts#deleteOrder': CANCEL('assertOrderCancellableUnderLock'),
   'src/services/mobile/areaTicketV7.mobile.service.ts#cancelAreaTicketCheckout': CANCEL('assertOrderCancellableUnderLock'),
+  // R11-8 (sellos tardíos): otro canal cerró la venta de vales; la sesión cierra con ella. Sólo suelta el reclamo de la terminal
+  // (`claimedByTerminalId`/`claimedAt`), con la sesión, los vales y la venta ya bloqueados por la jerarquía del cierre.
+  'src/services/mobile/areaTicketV7.mobile.service.ts#cerrarSesionDeValesAlCerrarLaVenta': {
+    class: 'METADATA',
+    why: 'releases the terminal claim on the sale (claimedByTerminalId/claimedAt) under the closer session → tickets → Order hierarchy',
+    markers: ['claimedByTerminalId: null'],
+  },
   'src/services/delivery-channels/core/cancelDeliveryOrder.service.ts#cancelDeliveryOrder': CANCEL('lockExistingOrderForPayment('),
   'src/services/pos-sync/posSyncOrder.service.ts#processPosOrderDeleteEvent': CANCEL('lockExistingOrderForPayment('),
   'src/services/fiscal/confirmarContratoDePrecio.service.ts#confirmarContratoIvaIncluido': {

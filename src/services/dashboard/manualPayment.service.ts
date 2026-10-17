@@ -156,11 +156,21 @@ export async function createManualPayment(
   // asignación dentro del callback async de la transacción a `never`.
   const postingState: { id: string | null } = { id: null }
   const reconciliationEnabled = await resolvePaymentShiftReconciliationEnabled(prisma, venueId)
+  // R11-8: los vales v7 de la venta; se importa ANTES de abrir la transacción (para no cargar módulos dentro de ella).
+  const { lockAreaTicketCheckoutHierarchy, cerrarSesionDeValesAlCerrarLaVenta } = await import(
+    '@/services/mobile/areaTicketV7.mobile.service'
+  )
+  const sesionState: { cerrada: boolean } = { cerrada: false }
 
   // Keep the canonical transaction/budget visible to the financial architecture guards.
   const result = await prisma
     .$transaction(
       async tx => {
+        // 🔴 R11-8: PRIMERA sentencia, la jerarquía de vales (sesión → vales → venta; `null` sin sesión), ANTES del candado de la
+        // venta: el mismo orden que la finalización y el registrador de la terminal. Cerrar aquí la sesión sin ella sería venta →
+        // sesión, al revés, y una terminal que registra a la vez se interbloquearía con este pago.
+        const vales = input.orderId ? await lockAreaTicketCheckoutHierarchy(tx, { venueId, orderId: input.orderId }) : null
+        sesionState.cerrada = false
         const previous = await existingAttempt(tx)
         if (previous) {
           replayed = true
@@ -542,6 +552,9 @@ export async function createManualPayment(
               staffId,
             })
             postingState.id = posting?.id ?? null
+            // 🔴 R11-8: este vale ya tomó todos los renglones (también los del vale v7): la sesión deja de presentarse cobrable.
+            if (vales)
+              sesionState.cerrada = await cerrarSesionDeValesAlCerrarLaVenta(tx, vales.session, { venueId, orderId: anchorOrderId })
           }
         }
         // Reference unused vars so TS doesn't complain — they're captured for
@@ -608,6 +621,8 @@ export async function createManualPayment(
       externalSource: input.externalSource ?? null,
       waiterId: input.waiterId ?? null,
       reason: input.reason ?? null,
+      // R11-8: este pago cerró la venta y con ella su sesión de vales (dejó de ofrecer «cobrar el resto»).
+      ...(sesionState.cerrada ? { sesionDeValesCerrada: true } : {}),
     },
   })
 

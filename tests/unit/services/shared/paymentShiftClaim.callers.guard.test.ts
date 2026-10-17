@@ -3236,6 +3236,34 @@ describe('paymentShiftClaim — inventario AST de carriles de caja', () => {
     }
   })
 
+  // 🔴 R11-8 (ronda 11 de sellos tardíos): los cuatro cierres por otro canal de una venta de vales toman la jerarquía de vales
+  // (sesión → vales → venta) ANTES del candado de la venta —el orden de la finalización y del registrador de la terminal— y cierran
+  // la sesión DESPUÉS de crear su vale SALE, con la sesión que esa jerarquía les devolvió (nunca la toman por primera vez ahí).
+  it('R11-8: pago manual, liquidar, saldo del cliente y cripto: jerarquía de vales → venta, y la sesión se cierra tras su vale', () => {
+    for (const [file, lockFn, closeFn, posting] of [
+      ['src/services/dashboard/manualPayment.service.ts', 'createManualPayment', 'createManualPayment', 'createSalePostingInTx'],
+      ['src/services/dashboard/order.dashboard.service.ts', 'settleOrder', 'settleOrder', 'createSalePostingInTx'],
+      ['src/services/dashboard/customer.dashboard.service.ts', 'settleCustomerBalance', 'settleCustomerBalance', 'createSalePostingInTx'],
+      [
+        'src/services/b4bit/b4bit.service.ts',
+        'completeAndAttributeB4BitPaymentInTx',
+        'settleOrderForConfirmedCryptoPayment',
+        'crearValeDeInventario',
+      ],
+    ] as const) {
+      const calls = parseCalls(file)
+      const jerarquia = callsForFunction(calls, lockFn, 'lockAreaTicketCheckoutHierarchy')[0]
+      const venta = callsForFunction(calls, lockFn, 'lockExistingOrderForPayment')[0]
+      const vale = callsForFunction(calls, closeFn, posting)[0]
+      const cierre = callsForFunction(calls, closeFn, 'cerrarSesionDeValesAlCerrarLaVenta')[0]
+      expect({
+        file,
+        jerarquiaAntesDeLaVenta: Boolean(jerarquia && venta && jerarquia.position < venta.position),
+        cierreDespuesDelVale: Boolean(vale && cierre && vale.position < cierre.position),
+      }).toEqual({ file, jerarquiaAntesDeLaVenta: true, cierreDespuesDelVale: true })
+    }
+  })
+
   // S0 (Codex P1-3, 13-sep): sólo el GANADOR prepara el intento de vales. `lockAreaTicketCheckoutForPayment` rechaza
   // una sesión ya pagada (409): si corriera antes del arbitraje, el segundo intento acreditado quedaría fuera sin
   // evidencia. Orden obligatorio en la TPV: jerarquía de vales → Order → arbitraje → preparación → turno.

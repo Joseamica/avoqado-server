@@ -214,7 +214,11 @@ describe('TPV addCustomerToOrder', () => {
   // ── F1, segunda ola (recheck de Codex, 15-oct-2026): el estado VIGENTE, leído dentro de la transacción ───────────────────
   it('🔴 F1: el estado se lee DENTRO de la transacción, filtrando por negocio, antes de mirar las ligas', async () => {
     await addCustomerToOrder(VENUE, 'order-1', 'cust-1', 'staff-1', CON_PERMISO)
-    expect(prismaMock.order.findFirst).toHaveBeenCalledWith({ where: { id: 'order-1', venueId: VENUE }, select: { paymentStatus: true } })
+    // R11-2: la regla compartida lee también la base del saldo (por si los cobros capturados ya la cubren).
+    expect(prismaMock.order.findFirst).toHaveBeenCalledWith({
+      where: { id: 'order-1', venueId: VENUE },
+      select: expect.objectContaining({ paymentStatus: true, subtotal: true }),
+    })
     expect(lecturasDeEstado).toEqual([true])
     expect(prismaMock.order.findFirst.mock.invocationCallOrder[0]).toBeLessThan(
       prismaMock.orderCustomer.findFirst.mock.invocationCallOrder[0],
@@ -310,6 +314,33 @@ describe('TPV addCustomerToOrder', () => {
       staffId: 'staff-1',
       orderNumber: 'ORD-1',
     })
+  })
+
+  // 🔴 R11-2 (Codex recheck-15 #2): la terminal capturó $100 de $100 pero la finalización falló y la venta sigue PENDING (la recupera
+  // el reenvío o el barrido). COCINA (sin `payments:create`) liga a Y en esa ventana: con el dinero ya adentro es «venta ya cobrada»
+  // y Y entra como ACOMPAÑANTE (la recuperación no le da sello ni puntos); con un abono que no la cubre, la liga de siempre.
+  it.each([
+    ['$100 capturados de $100 (la finalización falló)', '100.00', false],
+    ['$60 de $100 (un abono)', '60.00', true],
+  ])('🔴 R11-2: venta PENDING con %s, sin permiso ⇒ primario = %s', async (_caso, cobrado, primario) => {
+    prismaMock.order.findFirst.mockImplementation((async () => ({
+      paymentStatus: 'PENDING',
+      status: 'PENDING',
+      subtotal: '100.00',
+      discountAmount: '0.00',
+      serviceChargeAmount: '0.00',
+      contratoDePrecio: 'IVA_INCLUIDO',
+      taxAmount: '0.00',
+      customerId: null,
+    })) as never)
+    prismaMock.payment.aggregate.mockResolvedValueOnce({ _sum: { amount: cobrado, tipAmount: null } } as any)
+
+    await addCustomerToOrder(VENUE, 'order-1', 'cust-1', 'staff-1', SIN_PERMISO)
+
+    expect(prismaMock.orderCustomer.create).toHaveBeenCalledWith({
+      data: { orderId: 'order-1', customerId: 'cust-1', isPrimary: primario },
+    })
+    expect(mockReabrir).not.toHaveBeenCalled()
   })
 
   it.each(['REFUNDED'])('F1: venta %s (ya cobrada) sin permiso: también acompañante', async paymentStatus => {

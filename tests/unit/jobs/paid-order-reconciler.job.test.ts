@@ -29,7 +29,8 @@ jest.mock('@/observability/jobContext', () => ({ scheduleJob: jest.fn(() => ({ s
 import logger from '@/config/logger'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { PaidOrderReconcilerJob, defaults } from '@/jobs/paid-order-reconciler.job'
-import { reconcileOrderFromPayments, retomarCobroDeValesAtorado } from '@/services/tpv/payment.tpv.service'
+import { prismaMock } from '../../__helpers__/setup'
+import { findSesionesDeValesAtoradas, reconcileOrderFromPayments, retomarCobroDeValesAtorado } from '@/services/tpv/payment.tpv.service'
 
 const noopCron = { start: jest.fn(), stop: jest.fn() }
 const AHORA = new Date('2026-09-02T20:00:00Z')
@@ -57,6 +58,8 @@ function job(over: Overrides = {}) {
     reconcile: jest.fn().mockResolvedValue({ orderId: 'x', warning: null, written: true }),
     // Sin venta de vales atorada (lo normal): la candidata se cierra de estado como siempre.
     retomarVale: jest.fn().mockResolvedValue(null),
+    // R11-4: sin sesiones de vales atoradas de ventas ya cerradas (lo normal).
+    findSesionesAtoradas: jest.fn().mockResolvedValue([]),
     ...over,
   })
 }
@@ -175,7 +178,7 @@ describe('paid-order-reconciler', () => {
       const retomarVale = jest.fn().mockImplementation(async (_v: string, id: string) => (id === 'a' ? 'PAID' : null))
       const r = await job({ reconcile, retomarVale }).runNow()
 
-      expect(retomarVale).toHaveBeenNthCalledWith(1, 'v1', 'a')
+      expect(retomarVale).toHaveBeenNthCalledWith(1, 'v1', 'a', AHORA)
       expect(reconcile).toHaveBeenCalledTimes(1)
       expect(reconcile).toHaveBeenCalledWith('b')
       expect(r).toMatchObject({ scanned: 2, reconciled: 2, failed: 0 })
@@ -213,6 +216,87 @@ describe('paid-order-reconciler', () => {
 
     it('🔴 retoma por el MISMO camino que el reenvío de la terminal', () => {
       expect(defaults.retomarVale).toBe(retomarCobroDeValesAtorado)
+    })
+  })
+
+  /**
+   * 🔴 R11-4 (Codex recheck-15 #4): cerrar de estado no le quita a la sesión su rescate. La venta ya COMPLETED (el primer rescate
+   * falló y cerró de estado) sale de las candidatas; una segunda pasada acotada retoma su sesión cuando ya se puede.
+   */
+  describe('🔴 R11-4: las sesiones de vales atoradas de ventas ya cerradas', () => {
+    it('una sesión atorada de una venta COMPLETED se retoma y se asienta AREA_TICKET_SESSION_RECOVERED; acotada a 25 por tic', async () => {
+      const findSesionesAtoradas = jest.fn().mockResolvedValue([{ venueId: 'v1', orderId: 'cerrada' }])
+      const retomarVale = jest.fn().mockImplementation(async (_v: string, id: string) => (id === 'cerrada' ? 'PAID' : null))
+      const r = await job({ findCandidates: jest.fn().mockResolvedValue([]), findSesionesAtoradas, retomarVale }).runNow()
+
+      expect(findSesionesAtoradas).toHaveBeenCalledWith({ limit: 25, now: AHORA, since: new Date('2026-08-03T20:00:00.000Z') })
+      expect(retomarVale).toHaveBeenCalledWith('v1', 'cerrada', AHORA)
+      expect(r).toMatchObject({ sessionsRecovered: 1, failed: 0 })
+      expect(logAction).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: 'AREA_TICKET_SESSION_RECOVERED',
+          entityId: 'cerrada',
+          data: expect.objectContaining({ estado: 'PAID', effects: 'AREA_TICKET_SESSION_FINALIZED' }),
+        }),
+      )
+    })
+
+    it('si tampoco ahora se puede (sigue sin existencia) ⇒ sin asiento ni falla: se reintenta más tarde (su espera creció)', async () => {
+      const r = await job({
+        findCandidates: jest.fn().mockResolvedValue([]),
+        findSesionesAtoradas: jest.fn().mockResolvedValue([{ venueId: 'v1', orderId: 'cerrada' }]),
+        retomarVale: jest.fn().mockResolvedValue('RECONCILIATION_REQUIRED'),
+      }).runNow()
+
+      expect(r).toMatchObject({ sessionsRecovered: 0, failed: 0 })
+      expect(logAction).not.toHaveBeenCalled()
+    })
+
+    it('un fallo en una sesión no detiene a las demás y se cuenta', async () => {
+      const retomarVale = jest.fn().mockRejectedValueOnce(new Error('base caída')).mockResolvedValueOnce('PAID')
+      const r = await job({
+        findCandidates: jest.fn().mockResolvedValue([]),
+        findSesionesAtoradas: jest.fn().mockResolvedValue([
+          { venueId: 'v1', orderId: 'x' },
+          { venueId: 'v1', orderId: 'y' },
+        ]),
+        retomarVale,
+      }).runNow()
+
+      expect(r).toMatchObject({ sessionsRecovered: 1, failed: 1 })
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('atorada'), expect.objectContaining({ orderId: 'x' }))
+    })
+
+    it('lo que la primera pasada ya intentó en este tic no se vuelve a intentar', async () => {
+      const retomarVale = jest.fn().mockResolvedValue('RECONCILIATION_REQUIRED')
+      await job({
+        findSesionesAtoradas: jest.fn().mockResolvedValue([{ venueId: 'v1', orderId: 'a' }]),
+        retomarVale,
+      }).runNow()
+
+      expect(retomarVale.mock.calls.filter(([, id]) => id === 'a')).toHaveLength(1)
+    })
+
+    it('el modo simulación no retoma sesiones', async () => {
+      const findSesionesAtoradas = jest.fn().mockResolvedValue([{ venueId: 'v1', orderId: 'cerrada' }])
+      await job({ findSesionesAtoradas }).runNow({ dryRun: true })
+
+      expect(findSesionesAtoradas).not.toHaveBeenCalled()
+    })
+
+    it('🔴 la selección es UNA consulta acotada del servicio de cobros: tope, orden estable, ventana y espera creciente por fallo', async () => {
+      prismaMock.$queryRaw.mockResolvedValue([])
+      await defaults.findSesionesAtoradas({ limit: 25, now: AHORA, since: AHORA })
+
+      expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(1)
+      // Plantilla etiquetada: el primer argumento ES el arreglo de textos.
+      const sql = Array.from(prismaMock.$queryRaw.mock.calls[0][0] as unknown as string[]).join('?')
+      expect(sql).toContain('ORDER BY a."startedAt" ASC, s.id ASC')
+      expect(sql).toContain('LIMIT ?')
+      expect(sql).toContain('"lastCheckedAt"')
+      expect(sql).toMatch(/s\.status = 'RECONCILIATION_REQUIRED' AND a\.status = 'UNKNOWN'/)
+      expect(sql).toMatch(/s\.status = 'PAYMENT_PENDING' AND a\.status IN \('PENDING', 'PREPARED'\)/)
+      expect(findSesionesDeValesAtoradas).toBeDefined()
     })
   })
 })

@@ -43,7 +43,7 @@ import {
   esChoqueDeUnico,
   etiquetaDeReintento,
   motivoDeReintentoDeLiga,
-  esVentaYaCobrada,
+  ventaYaCobradaBajoCandado,
 } from '../shared/ligaDeClienteEnVenta'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
 import { debeMarcarCocina, assertPreparationAuthoringAccess } from '../kds/kitchenDisplayStations'
@@ -2374,8 +2374,10 @@ export async function updateGuestInfo(
       if (!order) {
         throw new NotFoundError('Order not found')
       }
-      // «Cobrada»: la regla compartida.
-      const fijaCliente = guestInfo.customerId !== undefined && (puedeFijarClienteEnVentaCobrada || !esVentaYaCobrada(order))
+      // «Cobrada»: la regla compartida (R11-2: también con los cobros capturados que ya la cubren), sólo cuando decide algo.
+      const fijaCliente =
+        guestInfo.customerId !== undefined &&
+        (puedeFijarClienteEnVentaCobrada || !(await ventaYaCobradaBajoCandado(tx, { venueId, orderId }, order))?.cobrada)
       if (guestInfo.customerId !== undefined && !fijaCliente) {
         logger.info(`🔒 [ORDER SERVICE] Paid order ${orderId}: guest edit without payments:create keeps Order.customerId`)
       }
@@ -3804,9 +3806,10 @@ async function leerVentaBajoCandado(
 ): Promise<{ paymentStatus: PaymentStatus | null; cobrada: boolean }> {
   // R3-2: `FOR NO KEY UPDATE` (ver `bloquearVentaParaLiga`): serializa contra el cobro sin interbloquearse con sus métricas.
   if (!(await bloquearVentaParaLiga(tx, { venueId, orderId }))) throw new NotFoundError('Order not found')
-  const vigente = await tx.order.findFirst({ where: { id: orderId, venueId }, select: { paymentStatus: true } })
-  // «Ya cobrada» para la decisión A: la regla compartida (pagada —también con su lealtad pendiente— o reembolsada).
-  return { paymentStatus: vigente?.paymentStatus ?? null, cobrada: vigente ? esVentaYaCobrada(vigente) : false }
+  // «Ya cobrada» para la decisión A: la regla compartida (pagada —también con su lealtad pendiente— o reembolsada; R11-2: o con
+  // cobros capturados que ya la cubren aunque su estado se haya atrasado).
+  const vigente = await ventaYaCobradaBajoCandado(tx, { venueId, orderId })
+  return { paymentStatus: (vigente?.paymentStatus as PaymentStatus | null | undefined) ?? null, cobrada: vigente?.cobrada ?? false }
 }
 
 /**

@@ -3,7 +3,7 @@ import logger from '../config/logger'
 import { scheduleJob } from '../observability/jobContext'
 import { logAction } from '../services/dashboard/activity-log.service'
 import { findPaidButOpenOrders, type CandidataPagadaAbierta } from '../services/shared/pagadaPeroAbierta'
-import { reconcileOrderFromPayments, retomarCobroDeValesAtorado } from '../services/tpv/payment.tpv.service'
+import { findSesionesDeValesAtoradas, reconcileOrderFromPayments, retomarCobroDeValesAtorado } from '../services/tpv/payment.tpv.service'
 import prisma from '../utils/prismaClient'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { DATABASE_JOB_SCHEDULES } from './jobSchedules'
@@ -49,6 +49,11 @@ import { DATABASE_JOB_SCHEDULES } from './jobSchedules'
  * asiento dice `effects: 'AREA_TICKET_SESSION_FINALIZED'`. Sólo si eso tampoco se puede, se cierra
  * de estado como cualquier otra.
  *
+ * 🔴 Y R11-4 (16-oct-2026): cerrar de estado no le quita a esa sesión su rescate. Una segunda pasada,
+ * acotada, retoma las sesiones con dinero capturado y finalización pendiente AUNQUE la venta ya esté
+ * COMPLETED (`findSesionesDeValesAtoradas`), con una espera que se duplica en cada fallo: cuando se
+ * repone la mercancía, inventario, lealtad y comanda se terminan una vez. Asiento: `AREA_TICKET_SESSION_RECOVERED`.
+ *
  * 🔴 Y cierra SIEMPRE por ese camino, nunca por `computeOrderBalance`: el criterio y el cierre
  * tienen que compartir aritmética, o una orden quedaría elegida por uno y rechazada por el otro
  * en cada pasada, para siempre. Hoy la base del criterio vive en `shared/pagadaPeroAbierta.ts`
@@ -72,6 +77,8 @@ const GRACE_MS = 5 * 60 * 1000
  */
 const LOOKBACK_DAYS = 30
 const BATCH_LIMIT = 50
+/** R11-4: tope de sesiones de vales atoradas por tic (cada una es una finalización: transacción con candados). */
+const SESSION_BATCH_LIMIT = 25
 
 type CronHandle = Pick<CronJob, 'start' | 'stop'>
 
@@ -84,6 +91,8 @@ export interface ReconcileResult {
   skipped: number
   dryRun: boolean
   candidates: CandidataPagadaAbierta[]
+  /** R11-4: sesiones de vales atoradas que esta pasada terminó (la venta ya estaba cerrada de estado). */
+  sessionsRecovered: number
 }
 
 interface Dependencies {
@@ -93,7 +102,9 @@ interface Dependencies {
   findCandidates: (opts: { graceMs: number; limit: number; now: Date; since: Date }) => Promise<CandidataPagadaAbierta[]>
   reconcile: (orderId: string) => Promise<{ orderId: string; warning: unknown; written: boolean }>
   /** R10-3: retoma el cobro capturado de una sesión de vales atorada (el mismo camino que el reenvío); `null` = no hay tal cobro. */
-  retomarVale: (venueId: string, orderId: string) => Promise<string | null>
+  retomarVale: (venueId: string, orderId: string, ahora?: Date) => Promise<string | null>
+  /** R11-4: las sesiones de vales atoradas aunque la venta ya esté COMPLETED (acotadas, con espera creciente por fallo). */
+  findSesionesAtoradas: (opts: { limit: number; now: Date; since: Date }) => Promise<Array<{ venueId: string; orderId: string }>>
 }
 
 export const defaults: Dependencies = {
@@ -102,6 +113,7 @@ export const defaults: Dependencies = {
   findCandidates: opts => findPaidButOpenOrders(prisma, opts),
   reconcile: reconcileOrderFromPayments,
   retomarVale: retomarCobroDeValesAtorado,
+  findSesionesAtoradas: opts => findSesionesDeValesAtoradas(prisma, opts),
 }
 
 export class PaidOrderReconcilerJob {
@@ -142,7 +154,16 @@ export class PaidOrderReconcilerJob {
    */
   async runNow(opts: { dryRun?: boolean; since?: Date } = {}): Promise<ReconcileResult> {
     const dryRun = opts.dryRun === true
-    const empty: ReconcileResult = { scanned: 0, reconciled: 0, notWritten: 0, failed: 0, skipped: 0, dryRun, candidates: [] }
+    const empty: ReconcileResult = {
+      scanned: 0,
+      reconciled: 0,
+      notWritten: 0,
+      failed: 0,
+      skipped: 0,
+      dryRun,
+      candidates: [],
+      sessionsRecovered: 0,
+    }
     if (this.running) return { ...empty, skipped: 1 }
     this.running = true
     try {
@@ -162,7 +183,7 @@ export class PaidOrderReconcilerJob {
           // 🔴 R10-3: una venta de vales cuyo cobro capturado no se pudo finalizar se cierra por SU sesión (consume el inventario y
           // corre una vez cupones, referido, lealtad y comanda con el empleado del cobro), no sólo de estado. Si tampoco ahora se puede
           // (p. ej. sigue sin existencia), se cierra de estado como siempre; su sesión queda en conciliación y un reenvío la recupera.
-          const vale = await this.d.retomarVale(c.venueId, c.id).catch(error => {
+          const vale = await this.d.retomarVale(c.venueId, c.id, now).catch(error => {
             logger.warn('🧾 [paid-order-reconciler] no se pudo retomar el cobro del vale; se cierra sólo de estado', {
               orderId: c.id,
               venueId: c.venueId,
@@ -225,10 +246,49 @@ export class PaidOrderReconcilerJob {
           })
         }
       }
-      if (result.scanned > 0) logger.info('🧾 [paid-order-reconciler] barrido', { ...result, candidates: undefined })
+      await this.retomarSesionesAtoradas(now, since, result, new Set(candidates.map(c => c.id)))
+      if (result.scanned > 0 || result.sessionsRecovered > 0)
+        logger.info('🧾 [paid-order-reconciler] barrido', { ...result, candidates: undefined })
       return result
     } finally {
       this.running = false
+    }
+  }
+
+  /**
+   * 🔴 R11-4: la segunda pasada. Una sesión que falla otra vez (sigue sin existencia) deja su `lastCheckedAt` y espera el doble la
+   * próxima; una que termina se asienta. Un fallo no detiene a las demás. Lo que la primera pasada ya intentó en este tic no se
+   * vuelve a intentar (`yaVistas`).
+   */
+  private async retomarSesionesAtoradas(now: Date, since: Date, result: ReconcileResult, yaVistas: Set<string>): Promise<void> {
+    const sesiones = await this.d.retryEntry(() => this.d.findSesionesAtoradas({ limit: SESSION_BATCH_LIMIT, now, since }), {
+      retries: 2,
+      initialDelay: 1500,
+      shouldRetry: shouldRetryDbConnectionError,
+      context: 'paid-order-reconciler.find-sessions',
+    })
+    for (const s of sesiones) {
+      if (yaVistas.has(s.orderId)) continue
+      try {
+        const estado = await this.d.retomarVale(s.venueId, s.orderId, now)
+        if (estado !== 'PAID' && estado !== 'PARTIALLY_PAID') continue
+        result.sessionsRecovered += 1
+        await logAction({
+          staffId: null,
+          venueId: s.venueId,
+          action: 'AREA_TICKET_SESSION_RECOVERED',
+          entity: 'Order',
+          entityId: s.orderId,
+          data: { sweep: 'paid-order-reconciler', estado, effects: 'AREA_TICKET_SESSION_FINALIZED' },
+        })
+      } catch (error) {
+        result.failed += 1
+        logger.warn('🧾 [paid-order-reconciler] no se pudo retomar la sesión de vales atorada; se reintenta más tarde', {
+          orderId: s.orderId,
+          venueId: s.venueId,
+          error: error instanceof Error ? error.message : String(error),
+        })
+      }
     }
   }
 }

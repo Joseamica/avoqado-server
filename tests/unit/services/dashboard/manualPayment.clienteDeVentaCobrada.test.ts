@@ -11,6 +11,11 @@
  * caso ya no llegaba a esa regla (la venta cobrada se rechaza antes, para todos). R8-3a (ronda 8) la quitó: el servicio ya no
  * recibe el permiso y la lectura bajo el candado sólo pide el estado de cobro.
  */
+// R11-8 (sellos tardíos): el cierre toma la jerarquía de vales ANTES del candado de la venta; esta suite no prueba vales (sin sesión).
+jest.mock('@/services/mobile/areaTicketV7.mobile.service', () => ({
+  lockAreaTicketCheckoutHierarchy: jest.fn().mockResolvedValue(null),
+  cerrarSesionDeValesAlCerrarLaVenta: jest.fn().mockResolvedValue(false),
+}))
 jest.mock('@/services/tpv/paymentEffects.service', () => ({
   ...jest.requireActual('@/services/tpv/paymentEffects.service'),
   enqueuePaymentCommissionInTx: jest.fn().mockResolvedValue(undefined),

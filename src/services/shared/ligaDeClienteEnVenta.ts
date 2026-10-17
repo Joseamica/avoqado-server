@@ -2,7 +2,7 @@ import type { Prisma } from '@prisma/client'
 import { ForbiddenError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { isDeadlockError, isRetryableDbError } from '../../utils/serializableRetry'
-import { esVentaCerrada } from './orderBalance'
+import { computeOrderBalance, esVentaCerrada, type OrderAmountsForBalance } from './orderBalance'
 
 /**
  * La liga de un cliente a una venta (`OrderCustomer`) ante choques de únicos, en UN solo lugar para el POS (móvil y MCP) y la
@@ -92,6 +92,51 @@ export function esVentaYaCobrada(venta: { paymentStatus: string | null | undefin
   return esVentaCerrada(venta.paymentStatus)
 }
 
+/** Los campos de la venta que decide `ventaYaCobradaBajoCandado` (su estado y la base de su saldo). */
+type VentaParaCobrada = OrderAmountsForBalance & { paymentStatus: string | null; customerId: string | null }
+
+/**
+ * 🔴 R11-2 (ronda 11; Codex recheck-15 #2): la decisión «A» con el DINERO real, bajo el candado de quien liga. «Ya cobrada» =
+ * cerrada por estado (`esVentaYaCobrada`) o con cobros capturados (COMPLETED, sin los reembolsos: `computeOrderBalance`, la misma
+ * regla de saldo de los cobros) que ya cubren su total. La ventana que cierra: la terminal captura $100, la finalización falla y
+ * la venta se queda PENDING hasta que la recuperan (reenvío o barrido); si COCINA (`orders:update` sin `payments:create`) liga a un
+ * cliente en esa ventana, ya no queda primario y la recuperación no le da sello ni puntos. Sin cobro (> $0) no hay «ya cobrada»: una
+ * cortesía total sin pagos sigue abierta. `null` = la venta no es de este negocio. `leida`: la venta que quien llama YA leyó
+ * bajo ese mismo candado (con estos campos), para no leerla dos veces.
+ */
+export async function ventaYaCobradaBajoCandado(
+  tx: Pick<Prisma.TransactionClient, 'order' | 'payment'>,
+  venta: { venueId: string; orderId: string },
+  leida?: VentaParaCobrada,
+): Promise<{ paymentStatus: string | null; customerId: string | null; cobrada: boolean } | null> {
+  const orden: VentaParaCobrada | null =
+    leida ??
+    (await tx.order.findFirst({
+      where: { id: venta.orderId, venueId: venta.venueId },
+      select: {
+        paymentStatus: true,
+        customerId: true,
+        status: true,
+        subtotal: true,
+        discountAmount: true,
+        serviceChargeAmount: true,
+        contratoDePrecio: true,
+        taxAmount: true,
+      },
+    }))
+  if (!orden) return null
+  const base = { paymentStatus: orden.paymentStatus ?? null, customerId: orden.customerId ?? null }
+  if (esVentaYaCobrada(orden)) return { ...base, cobrada: true }
+  // Una suma, no la lista de cobros: los REFUND fuera (con `type` NULL dentro, como `COBRO_QUE_CUBRE`); la propina se cancela a
+  // los dos lados del saldo.
+  const cobrado = await tx.payment.aggregate({
+    where: { orderId: venta.orderId, venueId: venta.venueId, status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] },
+    _sum: { amount: true, tipAmount: true },
+  })
+  const saldo = computeOrderBalance(orden, [{ amount: cobrado._sum.amount, tipAmount: cobrado._sum.tipAmount }])
+  return { ...base, cobrada: saldo.paidAmount.greaterThan(0) && saldo.isFullyPaid }
+}
+
 /**
  * ¿Hay un reembolso COMPLETED de esta venta? Conteo EXACTO, sin lista con tope (auditoría A #2). Lo usa la lealtad tardía para decir
  * `NOT_PAID` (una venta con dinero devuelto no da sello). NO decide «cobrada» (R7-2).
@@ -120,36 +165,34 @@ export const CODIGO_CLIENTE_DE_VENTA_COBRADA = 'CUSTOMER_CHANGE_REQUIRES_PAYMENT
  * «guardado» con el cliente viejo. Quien llama lo decide con lo que leyó BAJO el candado de la venta.
  */
 export function asegurarCambioDeClienteEnVentaCobrada(args: {
-  paymentStatus: string | null | undefined
+  /** R11-2: el veredicto de `ventaYaCobradaBajoCandado` (estado cerrado o cobros que ya la cubren). */
+  cobrada: boolean
   clienteActual: string | null
   clienteNuevo: string | null
   puedeCobrar: boolean
 }): void {
   if (args.clienteNuevo === args.clienteActual) return
-  if (!esVentaYaCobrada(args)) return
+  if (!args.cobrada) return
   if (args.puedeCobrar) return
   throw new ForbiddenError(MENSAJE_CLIENTE_DE_VENTA_COBRADA, CODIGO_CLIENTE_DE_VENTA_COBRADA)
 }
 
 /**
- * R4-2: la misma regla, leyendo la venta con `tx` — para los editores de METADATOS de la cuenta que no leen su estado de cobro
- * (el «detalle de la cuenta» del POS, clasificado como escritor de metadatos en `orderFiscalWriters.test.ts`). Quien llama YA
- * tomó el candado de la venta en esa transacción; la lectura de aquí es la vigente. Con el permiso no lee nada. Si la venta no
- * está (no es de este negocio), no decide: quien llama ya responde 404.
+ * R4-2: la misma regla, leyendo la venta con `tx` — la usan el «detalle de la cuenta» del POS (también el MCP y el intent
+ * `UPDATE_DETAILS`) y el PUT del panel. Quien llama YA tomó el candado de la venta en esa transacción; la lectura de aquí es la
+ * vigente (R11-2: con los cobros que ya la cubren). Con el permiso no lee nada. Si la venta no está (no es de este negocio), no
+ * decide: quien llama ya responde 404.
  */
 export async function asegurarCambioDeClienteBajoCandado(
-  tx: Pick<Prisma.TransactionClient, 'order'>,
+  tx: Pick<Prisma.TransactionClient, 'order' | 'payment'>,
   args: { venueId: string; orderId: string; clienteNuevo: string | null; puedeCobrar: boolean },
 ): Promise<void> {
   if (args.puedeCobrar) return
-  const venta = await tx.order.findFirst({
-    where: { id: args.orderId, venueId: args.venueId },
-    select: { paymentStatus: true, customerId: true },
-  })
+  const venta = await ventaYaCobradaBajoCandado(tx, args)
   if (!venta) return
   asegurarCambioDeClienteEnVentaCobrada({
-    paymentStatus: venta.paymentStatus,
-    clienteActual: venta.customerId ?? null,
+    cobrada: venta.cobrada,
+    clienteActual: venta.customerId,
     clienteNuevo: args.clienteNuevo,
     puedeCobrar: false,
   })

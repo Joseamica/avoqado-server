@@ -49,7 +49,16 @@ import {
 } from '@/services/mobile/areaTicketV7.mobile.service'
 import { createManualPayment } from '@/services/dashboard/manualPayment.service'
 import { updatePayment } from '@/services/dashboard/payment.dashboard.service'
-import { markAreaTicketPaymentForReconciliation, reconcileOrderFromPayments, recordOrderPayment } from '@/services/tpv/payment.tpv.service'
+import {
+  findSesionesDeValesAtoradas,
+  markAreaTicketPaymentForReconciliation,
+  reconcileOrderFromPayments,
+  recordOrderPayment,
+  retomarCobroDeValesAtorado,
+} from '@/services/tpv/payment.tpv.service'
+import * as inventoryPostingModule from '@/services/inventory/inventoryPosting.service'
+import * as productInventoryModule from '@/services/dashboard/productInventoryIntegration.service'
+import { issueRefund } from '@/services/dashboard/refund.dashboard.service'
 import { addCustomerToOrder } from '@/services/tpv/order.tpv.service'
 import { PaidOrderReconcilerJob } from '@/jobs/paid-order-reconciler.job'
 import { findPaidButOpenOrders } from '@/services/shared/pagadaPeroAbierta'
@@ -312,12 +321,14 @@ describe('🔴 R9-1: el cobro tardío de la sesión de vales de una venta YA cer
     async (_caso, pesos, pagado) => {
       const venta = await ventaDeValesCerradaPorOtroCanal()
       const antes = await foto(venta)
-      // Precondiciones: el pago manual ya descontó los dos renglones (vale + suelto) con su vale de inventario; R10-2: y soltó la
-      // reserva del vale en esa misma transacción (antes se quedaba ACTIVE para siempre).
+      // Precondiciones: el pago manual ya descontó los dos renglones (vale + suelto) con su vale de inventario; R10-2/R11-7: y su
+      // aplicador soltó la reserva del vale al descontar ese renglón (antes se quedaba ACTIVE para siempre). R11-8: y cerró la sesión
+      // con la venta (antes se quedaba PARTIALLY_PAID e invitaba a «cobrar el resto»).
       expect(antes.inventarios.map((i: { currentStock: string }) => i.currentStock).sort()).toEqual(['9', '9'])
       expect(antes.reservas).toEqual([{ status: 'RELEASED' }])
-      expect(antes.sesion.status).toBe('PARTIALLY_PAID')
+      expect([antes.sesion, antes.vale]).toEqual([{ status: 'PAID', activePaymentAttemptId: null }, { status: AreaTicketStatus.PAID }])
 
+      // R11-8: el cobro tardío llega con llave NUEVA sobre una sesión ya PAID: es dinero capturado y se registra (antes: 409, perdido).
       const respuesta: any = await cobroDeLaTerminal(venta.orderId, pesos)
 
       const despues = await foto(venta)
@@ -588,7 +599,9 @@ describe('🔴 Ronda 10: constancia del consumo, reservas de otro canal y lealta
         cron: { start: jest.fn(), stop: jest.fn() },
         // Pasada la gracia de 5 min del barrido; sólo ESTA venta (otras pruebas comparten la base).
         now: () => new Date(Date.now() + 10 * 60 * 1000),
-        findCandidates: async opts => (await findPaidButOpenOrders(prisma, opts)).filter(c => c.id === venta.orderId),
+        findCandidates: async (opts: any) => (await findPaidButOpenOrders(prisma, opts)).filter(c => c.id === venta.orderId),
+        findSesionesAtoradas: async (opts: any) =>
+          (await findSesionesDeValesAtoradas(prisma, opts)).filter(x => x.orderId === venta.orderId),
       })
 
       const r = await barrido.runNow()
@@ -608,6 +621,387 @@ describe('🔴 Ronda 10: constancia del consumo, reservas de otro canal y lealta
       // Otra pasada no encuentra nada que hacer.
       expect(await barrido.runNow()).toMatchObject({ scanned: 0, reconciled: 0 })
       expect(await lealtadDe(venta.orderId, venta.x)).toEqual({ sellos: 1, puntos: 1 })
+    })
+  })
+})
+
+/**
+ * 🔴 Ronda 11 (Codex recheck-15), todo real contra Postgres. La venta de vales de $100 (vale $60 con su reserva + suelto $40).
+ *   · R11-1: captura → la finalización falla → reembolso → recuperación ⇒ ningún sello ni punto vivo sobre la venta devuelta.
+ *   · R11-2: captura completa → la venta sigue PENDING sin primario → COCINA liga a Y → recuperación ⇒ Y sin sello ni puntos.
+ *   · R11-3: una sesión degradada «a la vieja» (sin vale SALE, intento UNKNOWN con `completedAt`, vales con `paidAt`, el suelto ya
+ *     descontado) → reenvío ⇒ 9 se queda en 9.
+ *   · R11-4: el barrido falla por existencia y cierra de estado; se repone; la siguiente pasada termina inventario y lealtad, una vez.
+ *     Y el intento que se quedó PENDING (el proceso murió antes de marcarlo incierto) también se rescata.
+ *   · R11-7: la reserva se suelta junto al descuento de su renglón; mientras el vale no se aplica (o falla), sigue apartada.
+ *   · R11-8: terminal $50 → pago manual $50 ⇒ la sesión cierra; el registro tardío (dinero capturado, llave nueva) se registra
+ *     como sobrepago, sin doble descuento; una sesión en conciliación también lo recibe; y dos conexiones a la vez no se interbloquean.
+ */
+describe('🔴 Ronda 11: reembolso antes de recuperar, decisión A con el dinero real, consumo viejo, rescate del barrido, reservas y otro canal', () => {
+  const stockDe = async () =>
+    Object.fromEntries(
+      (
+        await prisma.inventory.findMany({
+          where: { id: { in: [valeInventoryId, sueltoInventoryId] } },
+          select: { id: true, currentStock: true },
+          orderBy: { id: 'asc' },
+        })
+      ).map(i => [i.id === valeInventoryId ? 'vale' : 'suelto', Number(i.currentStock)]),
+    )
+  const reiniciarInventario = async (vale: number, suelto = 10) => {
+    await prisma.areaTicketInventoryReservation.updateMany({
+      where: { venueId, inventoryId: valeInventoryId, status: 'ACTIVE' },
+      data: { status: 'RELEASED', releasedAt: new Date() },
+    })
+    await prisma.inventory.update({ where: { id: valeInventoryId }, data: { currentStock: vale } })
+    await prisma.inventory.update({ where: { id: sueltoInventoryId }, data: { currentStock: suelto } })
+  }
+  const lealtadDe = async (orderId: string, customerId: string) => {
+    const [sellos, revertidos, puntos] = await Promise.all([
+      prisma.stampEvent.count({ where: { venueId, orderId, type: 'EARN', stampCard: { customerId } } }),
+      prisma.stampEvent.count({ where: { venueId, orderId, type: { not: 'EARN' }, stampCard: { customerId } } }),
+      prisma.loyaltyTransaction.count({ where: { orderId, customerId } }),
+    ])
+    return { sellos, revertidos, puntos }
+  }
+  const nuevoCliente = async (nombre: string) =>
+    (await prisma.customer.create({ data: { venueId: venueId!, firstName: nombre, phone: `+5255773${String(++n).padStart(5, '0')}` } })).id
+  /** La venta de vales con su cobro de $100 capturado y atorado (la finalización falla: el queso sin existencia). */
+  async function cobroAtorado(llave: string, clienteAntes?: string) {
+    await reiniciarInventario(10)
+    const venta = await ventaDeVales()
+    if (clienteAntes) await prisma.orderCustomer.create({ data: { orderId: venta.orderId, customerId: clienteAntes, isPrimary: true } })
+    await prisma.inventory.update({ where: { id: valeInventoryId }, data: { currentStock: 0 } })
+    const primero: any = await cobroDeLaTerminal(venta.orderId, 100, llave)
+    expect(primero.areaTicketCheckoutState).toBe('RECONCILIATION_REQUIRED')
+    return { ...venta, cobroId: primero.id as string }
+  }
+  const barridoDe = (orderId: string, enMinutos: number) =>
+    new PaidOrderReconcilerJob({
+      cron: { start: jest.fn(), stop: jest.fn() },
+      now: () => new Date(Date.now() + enMinutos * 60 * 1000),
+      findCandidates: async (opts: any) => (await findPaidButOpenOrders(prisma, opts)).filter(c => c.id === orderId),
+      findSesionesAtoradas: async (opts: any) => (await findSesionesDeValesAtoradas(prisma, opts)).filter(x => x.orderId === orderId),
+    })
+
+  it('🔴 R11-1: captura $100 → la finalización falla → reembolso → reenvío ⇒ el cliente NO queda con sello ni puntos vivos', async () => {
+    const x = await nuevoCliente('Cliente R11-1')
+    const llave = `r11-reembolso-${sello}`
+    const venta = await cobroAtorado(llave, x)
+    await issueRefund({
+      venueId: venueId!,
+      paymentId: venta.cobroId,
+      amount: 10000,
+      tipRefundCents: 0,
+      reason: 'CUSTOMER_REQUEST' as never,
+      staffId,
+    })
+    await prisma.inventory.update({ where: { id: valeInventoryId }, data: { currentStock: 10 } })
+
+    const reenvio: any = await cobroDeLaTerminal(venta.orderId, 100, llave)
+
+    expect(reenvio.areaTicketCheckoutState).toBe('PAID')
+    const { sellos, revertidos, puntos } = await lealtadDe(venta.orderId, x)
+    // Ningún sello VIVO (si uno nació, su reversa lo anula) y ningún punto.
+    expect(sellos - revertidos).toBe(0)
+    expect(puntos).toBe(0)
+    // La venta no se reabre por el reembolso (regla del 18-ago) y su lealtad queda cerrada.
+    const orden = await prisma.order.findUniqueOrThrow({
+      where: { id: venta.orderId },
+      select: { paymentStatus: true, remainingBalance: true, loyaltyProcessedAt: true },
+    })
+    expect(orden).toMatchObject({ paymentStatus: 'PAID', loyaltyProcessedAt: expect.any(Date) })
+    expect(Number(orden.remainingBalance)).toBe(0)
+  })
+
+  it('🔴 R11-2: captura completa con la venta aún PENDING y sin primario → COCINA liga a Y → recuperación ⇒ Y sin sello ni puntos', async () => {
+    const llave = `r11-cocina-${sello}`
+    const venta = await cobroAtorado(llave)
+    expect(await prisma.order.findUniqueOrThrow({ where: { id: venta.orderId }, select: { paymentStatus: true } })).toEqual({
+      paymentStatus: 'PENDING',
+    })
+    const y = await nuevoCliente('Cliente Y R11-2')
+
+    await addCustomerToOrder(venueId!, venta.orderId, y, cocinaId, { otorgarLealtad: false })
+
+    // El dinero ya cubre la venta: para la decisión A ya está cobrada ⇒ acompañante.
+    expect(
+      await prisma.orderCustomer.findUniqueOrThrow({
+        where: { orderId_customerId: { orderId: venta.orderId, customerId: y } },
+        select: { isPrimary: true },
+      }),
+    ).toEqual({ isPrimary: false })
+    await prisma.inventory.update({ where: { id: valeInventoryId }, data: { currentStock: 10 } })
+    const reenvio: any = await cobroDeLaTerminal(venta.orderId, 100, llave)
+
+    expect(reenvio.areaTicketCheckoutState).toBe('PAID')
+    expect(await lealtadDe(venta.orderId, y)).toEqual({ sellos: 0, revertidos: 0, puntos: 0 })
+    expect(await stockDe()).toEqual({ vale: 9, suelto: 9 })
+  })
+
+  it('🔴 R11-3: sesión degradada «a la vieja» (sin vale SALE, intento UNKNOWN con completedAt, vales con paidAt) → reenvío ⇒ 9 se queda en 9', async () => {
+    await reiniciarInventario(10)
+    const venta = await ventaDeVales()
+    const llave = `r11-vieja-${sello}`
+    const cobro: any = await cobroDeLaTerminal(venta.orderId, 100, llave)
+    expect(cobro.areaTicketCheckoutState).toBe('PAID')
+    expect(await stockDe()).toEqual({ vale: 9, suelto: 9 })
+    // Lo que dejaba el código de ANTES de R10-1: sin su vale SALE de constancia, y el `catch` viejo degradó la sesión y el intento
+    // (que conserva su `completedAt`); los vales conservan su `paidAt` y los movimientos siguen ahí.
+    await prisma.inventoryPosting.deleteMany({ where: { venueId, orderId: venta.orderId } })
+    const intento = await prisma.areaTicketPaymentAttempt.findFirstOrThrow({
+      where: { checkoutSessionId: venta.sessionId },
+      select: { id: true, completedAt: true },
+    })
+    expect(intento.completedAt).toEqual(expect.any(Date))
+    await prisma.areaTicketPaymentAttempt.update({ where: { id: intento.id }, data: { status: 'UNKNOWN' } })
+    await prisma.areaTicketCheckoutSession.update({
+      where: { id: venta.sessionId },
+      data: { status: 'RECONCILIATION_REQUIRED', activePaymentAttemptId: intento.id },
+    })
+    const movimientosAntes = await prisma.inventoryMovement.count({ where: { inventoryId: { in: [valeInventoryId, sueltoInventoryId] } } })
+
+    const reenvio: any = await cobroDeLaTerminal(venta.orderId, 100, llave)
+
+    expect(reenvio.areaTicketCheckoutState).toBe('PAID')
+    expect(await stockDe()).toEqual({ vale: 9, suelto: 9 })
+    expect(await prisma.inventoryMovement.count({ where: { inventoryId: { in: [valeInventoryId, sueltoInventoryId] } } })).toBe(
+      movimientosAntes,
+    )
+    expect(await estadoDeLaSesion(venta.sessionId)).toBe(AreaTicketCheckoutStatus.PAID)
+    // Queda la constancia: un reenvío más ya no vuelve a preguntar.
+    expect(
+      await prisma.inventoryPosting.findMany({
+        where: { venueId, orderId: venta.orderId },
+        select: { status: true, skipReason: true },
+        take: 5,
+      }),
+    ).toEqual([{ status: 'SKIPPED', skipReason: 'AREA_TICKET_TRANSACTIONAL' }])
+    expect(await prisma.payment.count({ where: { orderId: venta.orderId, status: 'COMPLETED' } })).toBe(1)
+  })
+
+  it('🔴 R11-4: el barrido falla por existencia y cierra de estado → se repone → la siguiente pasada termina inventario y lealtad, UNA vez', async () => {
+    const x = await nuevoCliente('Cliente R11-4')
+    const venta = await cobroAtorado(`r11-barrido-${sello}`, x)
+
+    // 1.ª pasada: no puede retomar la sesión (sigue sin existencia) ⇒ cierra de estado.
+    const primera = await barridoDe(venta.orderId, 10).runNow()
+    expect(primera).toMatchObject({ scanned: 1, reconciled: 1, sessionsRecovered: 0 })
+    expect(await prisma.order.findUniqueOrThrow({ where: { id: venta.orderId }, select: { status: true } })).toEqual({
+      status: 'COMPLETED',
+    })
+    expect(await estadoDeLaSesion(venta.sessionId)).toBe(AreaTicketCheckoutStatus.RECONCILIATION_REQUIRED)
+    expect(await stockDe()).toEqual({ vale: 0, suelto: 10 })
+
+    // Se repone la mercancía; la venta ya COMPLETED no es candidata, pero su sesión sí (pasada su espera).
+    await prisma.inventory.update({ where: { id: valeInventoryId }, data: { currentStock: 10 } })
+    const segunda = await barridoDe(venta.orderId, 120).runNow()
+
+    expect(segunda).toMatchObject({ scanned: 0, sessionsRecovered: 1, failed: 0 })
+    expect(await stockDe()).toEqual({ vale: 9, suelto: 9 })
+    expect(await estadoDeLaSesion(venta.sessionId)).toBe(AreaTicketCheckoutStatus.PAID)
+    expect(await lealtadDe(venta.orderId, x)).toEqual({ sellos: 1, revertidos: 0, puntos: 1 })
+    // El asiento (la integración sustituye `logAction` por un doble: se mira lo que recibió).
+    const { logAction } = jest.requireMock('@/services/dashboard/activity-log.service')
+    expect(
+      (logAction as jest.Mock).mock.calls.filter(([a]) => a?.action === 'AREA_TICKET_SESSION_RECOVERED' && a?.entityId === venta.orderId),
+    ).toHaveLength(1)
+
+    // Otra pasada no repite nada.
+    expect(await barridoDe(venta.orderId, 240).runNow()).toMatchObject({ scanned: 0, sessionsRecovered: 0 })
+    expect(await stockDe()).toEqual({ vale: 9, suelto: 9 })
+    expect(await lealtadDe(venta.orderId, x)).toEqual({ sellos: 1, revertidos: 0, puntos: 1 })
+  })
+
+  it('🔴 R11-4: el intento que se quedó PENDING (el proceso murió antes de marcarlo incierto) se rescata pasada la gracia, no antes', async () => {
+    const venta = await cobroAtorado(`r11-murio-${sello}`)
+    // Como lo deja un proceso que murió entre el registro del dinero y su finalización: intento PENDING sin cobro ligado, sesión
+    // PAYMENT_PENDING con él; el `Payment` (por la llave del intento) ya es COMPLETED.
+    const intento = await prisma.areaTicketPaymentAttempt.findFirstOrThrow({
+      where: { checkoutSessionId: venta.sessionId },
+      select: { id: true },
+    })
+    await prisma.areaTicketPaymentAttempt.update({
+      where: { id: intento.id },
+      data: { status: 'PENDING', paymentId: null, completedAt: null, lastCheckedAt: null },
+    })
+    await prisma.areaTicketCheckoutSession.update({
+      where: { id: venta.sessionId },
+      data: { status: 'PAYMENT_PENDING', activePaymentAttemptId: intento.id },
+    })
+    await prisma.inventory.update({ where: { id: valeInventoryId }, data: { currentStock: 10 } })
+
+    // Dentro de la gracia del cobro en vivo: no se pisa (podría seguir finalizándose).
+    expect(await barridoDe(venta.orderId, 1).runNow()).toMatchObject({ sessionsRecovered: 0 })
+    expect(await estadoDeLaSesion(venta.sessionId)).toBe(AreaTicketCheckoutStatus.PAYMENT_PENDING)
+
+    const pasada = await barridoDe(venta.orderId, 10).runNow()
+
+    expect(pasada).toMatchObject({ reconciled: 1, failed: 0 })
+    expect(await estadoDeLaSesion(venta.sessionId)).toBe(AreaTicketCheckoutStatus.PAID)
+    expect(await stockDe()).toEqual({ vale: 9, suelto: 9 })
+    expect(await prisma.areaTicketPaymentAttempt.findUniqueOrThrow({ where: { id: intento.id }, select: { status: true } })).toEqual({
+      status: 'SUCCEEDED',
+    })
+  })
+
+  describe('R11-7: la reserva se suelta con el descuento de su renglón', () => {
+    afterEach(() => jest.restoreAllMocks())
+    const reservaDe = async (ticketId: string) =>
+      (await prisma.areaTicketInventoryReservation.findFirstOrThrow({ where: { areaTicketId: ticketId }, select: { status: true } })).status
+
+    it('🔴 2 piezas, el vale reserva 1, el pago manual cierra la venta y su vale todavía NO se aplica ⇒ la reserva sigue apartada; al aplicarse, se suelta con el descuento', async () => {
+      await reiniciarInventario(2)
+      const venta = await ventaDeVales()
+      await cobroDeLaTerminal(venta.orderId, 50)
+      // El proceso no alcanza a aplicar el vale después del commit (lo hará el sweeper).
+      const aplicar = jest.spyOn(inventoryPostingModule, 'applySalePosting').mockResolvedValueOnce(null)
+      await createManualPayment(venueId!, staffId, {
+        orderId: venta.orderId,
+        amount: '50.00',
+        tipAmount: '0',
+        method: PaymentMethod.CASH,
+        source: PaymentSource.POS,
+      })
+      expect(aplicar).toHaveBeenCalled()
+      aplicar.mockRestore()
+
+      // Sin descontar todavía: la pieza sigue en el anaquel y la reserva la sigue apartando (antes: RELEASED ya, inflando 2 − 0).
+      expect(await stockDe()).toMatchObject({ vale: 2 })
+      expect(await reservaDe(venta.ticketId)).toBe('ACTIVE')
+
+      const posting = await prisma.inventoryPosting.findFirstOrThrow({ where: { venueId, orderId: venta.orderId }, select: { id: true } })
+      await inventoryPostingModule.applySalePosting(posting.id, null)
+
+      expect(await stockDe()).toMatchObject({ vale: 1 })
+      expect(await reservaDe(venta.ticketId)).toBe('RELEASED')
+    })
+
+    it('🔴 el descuento de ese renglón FALLA ⇒ la reserva sigue apartada; el reintento lo descuenta y entonces la suelta, sin mover stock dos veces', async () => {
+      await reiniciarInventario(2)
+      const venta = await ventaDeVales()
+      await cobroDeLaTerminal(venta.orderId, 50)
+      const original = productInventoryModule.deductInventoryForProduct
+      jest
+        .spyOn(productInventoryModule, 'deductInventoryForProduct')
+        .mockImplementation(async (...args: Parameters<typeof original>) =>
+          args[1] === valeProductId ? Promise.reject(new Error('fallo simulado del descuento')) : original(...args),
+        )
+      await createManualPayment(venueId!, staffId, {
+        orderId: venta.orderId,
+        amount: '50.00',
+        tipAmount: '0',
+        method: PaymentMethod.CASH,
+        source: PaymentSource.POS,
+      })
+      jest.restoreAllMocks()
+
+      expect(await stockDe()).toMatchObject({ vale: 2 })
+      expect(await reservaDe(venta.ticketId)).toBe('ACTIVE')
+
+      const posting = await prisma.inventoryPosting.findFirstOrThrow({ where: { venueId, orderId: venta.orderId }, select: { id: true } })
+      await inventoryPostingModule.applySalePosting(posting.id, null)
+
+      expect(await stockDe()).toMatchObject({ vale: 1 })
+      expect(await reservaDe(venta.ticketId)).toBe('RELEASED')
+    })
+  })
+
+  describe('R11-8: cuando otro canal cierra la venta de vales', () => {
+    it('🔴 terminal $50 → pago manual $50 ⇒ la sesión cierra; el registro tardío (llave nueva) se registra como sobrepago, PAID/0, sin doble descuento', async () => {
+      await reiniciarInventario(10)
+      const venta = await ventaDeVales()
+      await cobroDeLaTerminal(venta.orderId, 50)
+      await createManualPayment(venueId!, staffId, {
+        orderId: venta.orderId,
+        amount: '50.00',
+        tipAmount: '0',
+        method: PaymentMethod.CASH,
+        source: PaymentSource.POS,
+      })
+      // La sesión cierra con la venta: ya no invita a «cobrar el resto».
+      expect(await estadoDeLaSesion(venta.sessionId)).toBe(AreaTicketCheckoutStatus.PAID)
+      expect(await prisma.areaTicket.findUniqueOrThrow({ where: { id: venta.ticketId }, select: { status: true } })).toEqual({
+        status: AreaTicketStatus.PAID,
+      })
+      expect(await stockDe()).toEqual({ vale: 9, suelto: 9 })
+
+      const tardio: any = await cobroDeLaTerminal(venta.orderId, 50)
+
+      expect(tardio.areaTicketCheckoutState).toBe('PAID')
+      expect(await prisma.payment.count({ where: { orderId: venta.orderId, status: 'COMPLETED' } })).toBe(3)
+      const orden = await prisma.order.findUniqueOrThrow({
+        where: { id: venta.orderId },
+        select: { paymentStatus: true, remainingBalance: true, paidAmount: true },
+      })
+      expect([orden.paymentStatus, Number(orden.remainingBalance), Number(orden.paidAmount)]).toEqual(['PAID', 0, 150])
+      expect(await stockDe()).toEqual({ vale: 9, suelto: 9 })
+      expect(
+        await prisma.activityLog.count({ where: { venueId, entityId: venta.orderId, action: 'SOBREPAGO_DETECTADO' } }),
+      ).toBeGreaterThan(0)
+      expect(await estadoDeLaSesion(venta.sessionId)).toBe(AreaTicketCheckoutStatus.PAID)
+    })
+
+    it('🔴 sesión en conciliación (el primer cobro no pudo finalizar) + un cobro NUEVO de la terminal ⇒ se registra (antes: 409) y concilia la venta una vez', async () => {
+      const venta = await cobroAtorado(`r11-rr-${sello}`)
+      await prisma.inventory.update({ where: { id: valeInventoryId }, data: { currentStock: 10 } })
+
+      const nuevo: any = await cobroDeLaTerminal(venta.orderId, 50)
+
+      expect(nuevo.id).toEqual(expect.any(String))
+      expect(await prisma.payment.count({ where: { orderId: venta.orderId, status: 'COMPLETED' } })).toBe(2)
+      expect(await stockDe()).toEqual({ vale: 9, suelto: 9 })
+      expect(await prisma.order.findUniqueOrThrow({ where: { id: venta.orderId }, select: { paymentStatus: true } })).toEqual({
+        paymentStatus: 'PAID',
+      })
+      expect(await estadoDeLaSesion(venta.sessionId)).toBe(AreaTicketCheckoutStatus.PAID)
+      // El intento viejo conserva su identidad y su evidencia (sigue visible como incierto); su dinero ya contó.
+      expect(
+        await prisma.areaTicketPaymentAttempt.findFirstOrThrow({ where: { paymentId: venta.cobroId }, select: { status: true } }),
+      ).toEqual({ status: 'UNKNOWN' })
+    })
+
+    it('🔴 dos conexiones a la vez (pago manual que salda vs registro de la terminal sobre la MISMA venta) ⇒ sin interbloqueo y un solo resultado coherente', async () => {
+      for (let vuelta = 0; vuelta < 3; vuelta++) {
+        await reiniciarInventario(10)
+        const venta = await ventaDeVales()
+        await cobroDeLaTerminal(venta.orderId, 50)
+
+        const [manual, terminal] = await Promise.allSettled([
+          createManualPayment(venueId!, staffId, {
+            orderId: venta.orderId,
+            amount: '50.00',
+            tipAmount: '0',
+            method: PaymentMethod.CASH,
+            source: PaymentSource.POS,
+          }),
+          cobroDeLaTerminal(venta.orderId, 50),
+        ])
+
+        // Ningún interbloqueo (40P01) ni error de serialización sin manejar.
+        for (const r of [manual, terminal]) {
+          if (r.status === 'rejected') expect(String((r.reason as Error)?.message)).not.toMatch(/deadlock|40P01|could not serialize/i)
+        }
+        // El dinero de la terminal ya capturado se registra SIEMPRE.
+        expect(terminal.status).toBe('fulfilled')
+        // Si la terminal saldó primero, el pago manual se rechaza por exceder el saldo (no se cobra dos veces); si no, entra.
+        if (manual.status === 'rejected') expect(String((manual.reason as Error)?.message)).toMatch(/excede el saldo/i)
+        // Si el lado de la terminal quedó en conciliación por la carrera, el barrido la termina.
+        if ((await estadoDeLaSesion(venta.sessionId)) === AreaTicketCheckoutStatus.RECONCILIATION_REQUIRED) {
+          await retomarCobroDeValesAtorado(venueId!, venta.orderId)
+        }
+
+        expect(await stockDe()).toEqual({ vale: 9, suelto: 9 })
+        expect(await estadoDeLaSesion(venta.sessionId)).toBe(AreaTicketCheckoutStatus.PAID)
+        const orden = await prisma.order.findUniqueOrThrow({
+          where: { id: venta.orderId },
+          select: { paymentStatus: true, remainingBalance: true },
+        })
+        expect([orden.paymentStatus, Number(orden.remainingBalance)]).toEqual(['PAID', 0])
+        expect(await prisma.payment.count({ where: { orderId: venta.orderId, status: 'COMPLETED' } })).toBe(
+          manual.status === 'fulfilled' ? 3 : 2,
+        )
+      }
     })
   })
 })

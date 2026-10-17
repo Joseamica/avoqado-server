@@ -1,5 +1,5 @@
 import { lockTableOrderScope } from '@/services/shared/tableOrderLock'
-import { asegurarCambioDeClienteEnVentaCobrada, bloquearVentaParaLiga } from '@/services/shared/ligaDeClienteEnVenta'
+import { asegurarCambioDeClienteBajoCandado, bloquearVentaParaLiga } from '@/services/shared/ligaDeClienteEnVenta'
 // services/dashboard/order.dashboard.service.ts
 
 import { enqueuePaymentCommissionInTx } from '@/services/tpv/paymentEffects.service'
@@ -521,11 +521,12 @@ export async function updateOrder(
 
     // 🔴 R4-2 (ronda 4 post-QA de sellos tardíos; decisión «A»): `Order.customerId` es el respaldo heredado de la lealtad. En
     // una venta COBRADA, CAMBIAR el cliente sin `payments:create` (`orders:update` lo trae COCINA) ⇒ 403 y no se guarda nada
-    // de esta petición. Mismo cliente, venta abierta o con permiso ⇒ como hoy.
+    // de esta petición. Mismo cliente, venta abierta o con permiso ⇒ como hoy. R11-2: «cobrada» es el predicado compartido
+    // (también los cobros capturados que ya la cubren aunque el estado se atrasó), leído bajo este mismo candado.
     if (tocaCliente)
-      asegurarCambioDeClienteEnVentaCobrada({
-        paymentStatus: currentOrder.paymentStatus,
-        clienteActual: currentOrder.customerId ?? null,
+      await asegurarCambioDeClienteBajoCandado(client, {
+        venueId,
+        orderId,
         clienteNuevo: customerId || null,
         puedeCobrar: opciones.puedeCambiarClienteEnVentaCobrada === true,
       })
@@ -779,7 +780,16 @@ export async function settleOrder(
   // que entregan los demás canales (`Math.max(0, total − propina)`).
   let baseParaLealtad = 0
   const reconciliationEnabled = await resolvePaymentShiftReconciliationEnabled(prisma, venueId)
+  // R11-8: los vales v7 de la venta; se importa ANTES de abrir la transacción (para no cargar módulos dentro de ella).
+  const { lockAreaTicketCheckoutHierarchy, cerrarSesionDeValesAlCerrarLaVenta } = await import(
+    '@/services/mobile/areaTicketV7.mobile.service'
+  )
+  let sesionDeValesCerrada = false
   const settledAmount = await prisma.$transaction(async tx => {
+    // 🔴 R11-8: PRIMERA sentencia, la jerarquía de vales (sesión → vales → venta; `null` sin sesión), antes del candado de la venta:
+    // el orden de la finalización y del registrador de la terminal.
+    const vales = await lockAreaTicketCheckoutHierarchy(tx, { venueId, orderId })
+    sesionDeValesCerrada = false
     await lockExistingOrderForPayment(tx, { venueId, orderId })
     const fresh = await tx.order.findFirst({
       where: { id: orderId, venueId },
@@ -903,6 +913,8 @@ export async function settleOrder(
     })
     postingId = posting?.id ?? null
     settlementPaymentId = settlementPayment.id
+    // 🔴 R11-8: este vale ya tomó todos los renglones (también los del vale v7): la sesión deja de presentarse cobrable.
+    if (vales) sesionDeValesCerrada = await cerrarSesionDeValesAlCerrarLaVenta(tx, vales.session, { venueId, orderId })
     // FT-GRAVES T2: el MISMO gancho de comisión que la terminal, con el dinero. El esquema decide a quién; sin persona, nada.
     await enqueuePaymentCommissionInTx(tx, settlementPayment.id)
 
@@ -1003,7 +1015,7 @@ export async function settleOrder(
     action: 'ORDER_SETTLED',
     entity: 'Order',
     entityId: order.id,
-    data: { settledAmount, orderNumber: order.orderNumber },
+    data: { settledAmount, orderNumber: order.orderNumber, ...(sesionDeValesCerrada ? { sesionDeValesCerrada: true } : {}) },
   })
 
   return {

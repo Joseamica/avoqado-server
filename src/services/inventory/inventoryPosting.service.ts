@@ -186,21 +186,10 @@ export async function createSalePostingInTx(
     skipReason ??
     (lines.length > 0 ? undefined : items.length === 0 ? 'NO_ITEMS' : items.some(i => i.productId) ? 'NO_TRACKED_ITEMS' : 'CUSTOM_ITEM')
 
-  // 🔴 R10-2 (ronda 10 post-QA de sellos tardíos; Codex recheck-14 #2): este vale toma la obligación de inventario de TODOS los
-  // renglones, también los de un vale por área v7 con su reserva ACTIVE (la apartó al emitirse y nadie la consumió: otro canal
-  // —pago manual, liquidar desde el panel o el saldo del cliente, cripto— cierra la venta sin conocer la sesión). La reserva se
-  // suelta AQUÍ, en la misma transacción del cierre y SIN mover stock (como al cancelar un vale sin cobrar): si se quedaba, restaba
-  // disponibilidad para siempre y el siguiente vale se rechazaba con mercancía en el anaquel. Con `skipReason` (la sesión o el
-  // efectivo del POS que ya consumieron en su propia transacción) no se toca nada. Sin renglones de vale no hay consulta.
-  const lineasDeVale = [
-    ...new Set(items.map(i => i.areaTicketLineId).filter((id): id is string => typeof id === 'string' && id.length > 0)),
-  ]
-  if (!skipReason && lineasDeVale.length > 0) {
-    await tx.areaTicketInventoryReservation.updateMany({
-      where: { venueId, areaTicketLineId: { in: lineasDeVale }, status: 'ACTIVE' },
-      data: { status: 'RELEASED', releasedAt: new Date() },
-    })
-  }
+  // R10-2 → R11-7 (ronda 11): este vale toma la obligación de inventario de TODOS los renglones, también los de un vale por área v7
+  // con su reserva ACTIVE (otro canal cierra la venta sin conocer la sesión). La reserva YA NO se suelta aquí: se suelta cuando
+  // `applySalePosting` deja APPLIED la línea de ese renglón (abajo). Soltarla al crear el vale inflaba la disponibilidad hasta el
+  // descuento (otro vale apartaba la pieza que iba a salir) y, si la línea fallaba, ya no compensaba el stock que no se descontó.
 
   return await tx.inventoryPosting.create({
     data: {
@@ -216,6 +205,8 @@ export async function createSalePostingInTx(
           productId: i.productId,
           quantity: i.quantity,
           weightQuantity: i.weightQuantity != null ? String(i.weightQuantity) : null,
+          // R11-7: el renglón de vale v7, para soltar su reserva al aplicar aunque el OrderItem vivo ya no exista.
+          ...(i.areaTicketLineId ? { areaTicketLineId: i.areaTicketLineId } : {}),
           // Congelado AL COBRAR: la recuperación post-crash clasifica el grupo
           // de efectos con este valor, no con la relación viva — un modificador
           // borrado después (onDelete: SetNull) haría parecer "sin
@@ -263,6 +254,33 @@ export async function createSalePostingInTx(
  * movimientos hacen seguro el re-claim aunque el worker original siguiera vivo.
  */
 const APPLYING_LEASE_MS = 10 * 60 * 1000
+
+/**
+ * 🔴 R11-7 (ronda 11): la línea queda APPLIED y, en la MISMA transacción, se suelta la reserva ACTIVE de su renglón de vale v7 —sin
+ * mover stock: el descuento de esta línea ya sacó la pieza—. Mientras la línea no se aplique (pendiente, fallida o abandonada), la
+ * reserva sigue apartando lo que todavía no sale. Va con el cambio de la línea y no dentro del descuento porque éste comitea en una
+ * o más transacciones propias (producto, receta, modificadores): entre ese commit y esta escritura la disponibilidad queda CORTA (la
+ * pieza cuenta como vendida y como reservada; un vale simultáneo puede recibir «sin existencia» y se reintenta), nunca inflada.
+ * Si el proceso muere ahí, el reintento recupera la línea por sus movimientos y la suelta entonces.
+ */
+async function marcarLineaAplicada(
+  lineId: string,
+  data: Prisma.InventoryPostingLineUpdateInput,
+  reserva: { venueId: string; areaTicketLineId: string | null | undefined },
+): Promise<void> {
+  const areaTicketLineId = reserva.areaTicketLineId
+  if (!areaTicketLineId) {
+    await prisma.inventoryPostingLine.update({ where: { id: lineId }, data })
+    return
+  }
+  await prisma.$transaction(async tx => {
+    await tx.inventoryPostingLine.update({ where: { id: lineId }, data })
+    await tx.areaTicketInventoryReservation.updateMany({
+      where: { venueId: reserva.venueId, areaTicketLineId, status: 'ACTIVE' },
+      data: { status: 'RELEASED', releasedAt: new Date() },
+    })
+  })
+}
 
 export async function applySalePosting(
   postingId: string,
@@ -323,6 +341,8 @@ export async function applySalePosting(
     // el OrderItem vivo ya no existe (cleanup/edición en la ventana del
     // sweeper), el snapshot basta para deducir — la venta pagada es un hecho.
     const snapshotItem = ((posting.payloadSnapshot as any)?.items ?? []).find((si: any) => si?.id === (line.orderItemId ?? line.effectKey))
+    // R11-7: el renglón de vale v7 de esta línea (su reserva se suelta al quedar APPLIED).
+    const renglonDeVale: string | null = (item as any)?.areaTicketLineId ?? snapshotItem?.areaTicketLineId ?? null
     if ((!item && !snapshotItem) || !line.productId) {
       // Ni la tabla viva NI el snapshot conocen esta línea — se marca VISIBLE,
       // no se inventa. (Antes bastaba que faltara el item vivo para SKIPPED:
@@ -392,10 +412,11 @@ export async function applySalePosting(
         continue
       }
 
-      await prisma.inventoryPostingLine.update({
-        where: { id: line.id },
-        data: { status: 'APPLIED', appliedQuantityBase: line.expectedQuantityBase, reason: 'RECOVERED_FROM_MOVEMENTS' },
-      })
+      await marcarLineaAplicada(
+        line.id,
+        { status: 'APPLIED', appliedQuantityBase: line.expectedQuantityBase, reason: 'RECOVERED_FROM_MOVEMENTS' },
+        { venueId: posting.venueId, areaTicketLineId: renglonDeVale },
+      )
       logger.warn('🩹 [InventoryPosting] Línea recuperada de movimientos existentes — NO se re-deduce', {
         postingId,
         lineId: line.id,
@@ -463,10 +484,11 @@ export async function applySalePosting(
           reason: 'la venta dejó el stock en negativo',
         })
       }
-      await prisma.inventoryPostingLine.update({
-        where: { id: line.id },
-        data: { status: 'APPLIED', appliedQuantityBase: line.expectedQuantityBase, reason: null },
-      })
+      await marcarLineaAplicada(
+        line.id,
+        { status: 'APPLIED', appliedQuantityBase: line.expectedQuantityBase, reason: null },
+        { venueId: posting.venueId, areaTicketLineId: renglonDeVale },
+      )
     } catch (error: any) {
       anyFailed = true
       issues.push({

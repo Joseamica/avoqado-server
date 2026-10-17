@@ -358,6 +358,7 @@ import { deductInventoryForProduct, getProductInventoryStatus } from '../dashboa
 import type { OrderModifierForInventory } from '../dashboard/rawMaterial.service'
 import { parseDateRange } from '@/utils/datetime'
 import { PhaseTimer } from '@/utils/phaseTimer'
+import { utcTs } from '@/utils/sqlDates'
 import { awardLoyaltyForPaidOrder } from '../shared/loyaltyOnPaidOrder'
 import {
   ORDER_LOCK_WAIT_BUDGET,
@@ -1492,6 +1493,12 @@ async function updateOrderTotalsForStandalonePayment(
      * vez cupones, referido, lealtad y comanda (también si el barrido la había cerrado sin ellos); `false`, ninguno.
      */
     primerSaldado?: boolean
+    /**
+     * 🔴 R11-1 (Codex recheck-15 #3): la RECUPERACIÓN de un cobro capturado (reenvío o barrido) corre la lealtad por
+     * `otorgarLealtadRespetandoReembolsos`: entre la captura y la recuperación la venta pudo devolverse (pago REFUND), y el
+     * otorgamiento directo no mira reembolsos (la reversa del reembolso corrió antes de que existiera el sello: éste quedaba vivo).
+     */
+    lealtadRespetandoReembolsos?: boolean
     venueId?: string
     committedSettlement?: CommittedStandaloneSettlement
     /** Internal: this pass already reran once after its inputs moved under the Order lock. */
@@ -2381,7 +2388,7 @@ async function updateOrderTotalsForStandalonePayment(
       }
     }
 
-    await awardLoyaltyForPaidOrder({
+    const lealtad = {
       venueId: updatedOrder.venueId,
       orderId,
       orderTotal: Math.max(0, newTotal - totalTip),
@@ -2389,7 +2396,24 @@ async function updateOrderTotalsForStandalonePayment(
       legacyCustomer: order.customer
         ? { id: order.customer.id, firstName: order.customer.firstName, lastName: order.customer.lastName }
         : null,
-    })
+    }
+    if (options?.lealtadRespetandoReembolsos) {
+      // R11-1: con el actor del cobro (`staffId`), no el de la venta; nunca tumba lo demás (el reconciliador la reintenta: la
+      // finalización dejó `loyaltyEligibleAt`). Cupones y referido siguen como en el cobro en vivo: un reembolso no deshace un
+      // cupón canjeado, y el referido ya anula su calificación si la venta se devolvió completa (`onOrderPaid`).
+      try {
+        const { otorgarLealtadRespetandoReembolsos } = await import('../shared/loyaltyOnLateCustomer')
+        await otorgarLealtadRespetandoReembolsos(lealtad)
+      } catch (loyaltyError) {
+        logger.error('[LEALTAD] la recuperación del cobro no pudo otorgar la lealtad; el reconciliador la reintenta', {
+          orderId,
+          venueId: updatedOrder.venueId,
+          error: loyaltyError instanceof Error ? loyaltyError.message : String(loyaltyError),
+        })
+      }
+    } else {
+      await awardLoyaltyForPaidOrder(lealtad)
+    }
 
     // 🍳 Etapa 3 del KDS: la comanda de pantalla nace al saldar (después del commit; nunca tumba el cobro).
     if (options?.marcarCocina) {
@@ -3125,15 +3149,25 @@ export async function markAreaTicketPaymentForReconciliation(input: {
     await tx.$queryRaw`SELECT id FROM "AreaTicketCheckoutSession" WHERE id = ${input.sessionId} AND "venueId" = ${input.venueId} FOR UPDATE`
     const sesion = await tx.areaTicketCheckoutSession.findFirst({
       where: { id: input.sessionId, venueId: input.venueId },
-      select: { status: true },
+      select: { status: true, activePaymentAttemptId: true },
     })
     const intento = await tx.areaTicketPaymentAttempt.findFirst({
       where: { id: input.attemptId, checkoutSessionId: input.sessionId },
       select: { status: true, paymentId: true },
     })
     const intentoCerrado = intento?.status === 'SUCCEEDED'
-    const cerradaConEsteCobro = intentoCerrado && intento.paymentId === input.paymentId && sesion?.status === 'PARTIALLY_PAID'
-    const sesionCerrada = sesion?.status === 'PAID' || cerradaConEsteCobro
+    // 🔴 R11-6: el intento ya cerró CON ESTE cobro ⇒ no se toca nada (ni la sesión, aunque hoy la tenga otro intento): este cobro
+    // ya quedó aplicado. Se responde lo que dejó: PAID si la sesión cerró, si no, su abono.
+    if (intentoCerrado && intento.paymentId === input.paymentId) {
+      return sesion?.status === 'PAID' ? 'PAID' : 'PARTIALLY_PAID'
+    }
+    const sesionCerrada = sesion?.status === 'PAID'
+    // R11-8: la sesión la tiene OTRO intento todavía vivo (en vuelo o en conciliación): se congela el de este cobro sin quitársela
+    // —su intento conserva identidad y evidencia, y al cerrarla o conciliarla lee todos los cobros capturados, también éste—.
+    const otroIntentoVivo =
+      Boolean(sesion?.activePaymentAttemptId) &&
+      sesion?.activePaymentAttemptId !== input.attemptId &&
+      (sesion?.status === 'PAYMENT_PENDING' || sesion?.status === 'RECONCILIATION_REQUIRED')
     if (!intentoCerrado) {
       await tx.areaTicketPaymentAttempt.updateMany({
         where: { id: input.attemptId, checkoutSessionId: input.sessionId },
@@ -3145,27 +3179,27 @@ export async function markAreaTicketPaymentForReconciliation(input: {
       })
     }
     if (!sesionCerrada) {
-      await tx.areaTicketCheckoutSession.updateMany({
-        where: { id: input.sessionId, venueId: input.venueId },
-        data: {
-          status: 'RECONCILIATION_REQUIRED',
-          activePaymentAttemptId: input.attemptId,
-          version: { increment: 1 },
-        },
-      })
+      if (!otroIntentoVivo) {
+        await tx.areaTicketCheckoutSession.updateMany({
+          where: { id: input.sessionId, venueId: input.venueId },
+          data: {
+            status: 'RECONCILIATION_REQUIRED',
+            activePaymentAttemptId: input.attemptId,
+            version: { increment: 1 },
+          },
+        })
+      }
       return 'RECONCILIATION_REQUIRED'
     }
-    if (!intentoCerrado || intento.paymentId !== input.paymentId) {
-      // La sesión la cerró OTRO cobro: éste queda registrado (su `Payment`) y su intento congelado, sin reabrir la venta.
-      logger.error('🚨 [AREA TICKETS v7] Cobro capturado sobre una sesión ya cerrada por otro cobro: requiere conciliación', {
-        venueId: input.venueId,
-        checkoutSessionId: input.sessionId,
-        paymentAttemptId: input.attemptId,
-        paymentId: input.paymentId,
-        cerradaPorPaymentId: intentoCerrado ? intento.paymentId : null,
-      })
-    }
-    return sesion?.status === 'PAID' ? 'PAID' : 'PARTIALLY_PAID'
+    // La sesión la cerró OTRO cobro: éste queda registrado (su `Payment`) y su intento congelado, sin reabrir la venta.
+    logger.error('🚨 [AREA TICKETS v7] Cobro capturado sobre una sesión ya cerrada por otro cobro: requiere conciliación', {
+      venueId: input.venueId,
+      checkoutSessionId: input.sessionId,
+      paymentAttemptId: input.attemptId,
+      paymentId: input.paymentId,
+      cerradaPorPaymentId: intentoCerrado ? intento.paymentId : null,
+    })
+    return 'PAID'
   })
 }
 
@@ -3264,6 +3298,8 @@ async function resumeCapturedAreaTicketPayment(
             areaTicketAlreadyFinalized: true,
             primerSaldado: true,
             ventaYaCerrada: finalizacion.ventaYaCerrada,
+            // R11-1: la venta pudo devolverse entre la captura y esta recuperación.
+            lealtadRespetandoReembolsos: true,
             venueId,
             marcarCocina: marcarCocina && finalizacion.estado === 'PAID',
           },
@@ -3301,6 +3337,9 @@ async function resumeCapturedAreaTicketPayment(
   }
 }
 
+/** R11-4: el cobro en vivo se finaliza en segundos (la TPV abandona a los 10 s); un intento pendiente más viejo que esto no está vivo. */
+export const GRACIA_DEL_COBRO_EN_VIVO_MS = 5 * 60 * 1000
+
 /**
  * 🔴 R10-3 (Codex recheck-14 #3): el barrido de pagadas-abiertas, ANTES de cerrar sólo el estado de una venta de vales, retoma el
  * cobro capturado cuya finalización falló (sesión RECONCILIATION_REQUIRED con su intento UNKNOWN). Es EL MISMO camino que el reenvío
@@ -3312,23 +3351,85 @@ async function resumeCapturedAreaTicketPayment(
 export async function retomarCobroDeValesAtorado(
   venueId: string,
   orderId: string,
+  ahora: Date = new Date(),
 ): Promise<'PAID' | 'PARTIALLY_PAID' | 'RECONCILIATION_REQUIRED' | null> {
   const sesion = await prisma.areaTicketCheckoutSession.findFirst({
-    where: { venueId, orderId, status: 'RECONCILIATION_REQUIRED' },
-    select: { activePaymentAttemptId: true },
+    where: { venueId, orderId, status: { in: ['RECONCILIATION_REQUIRED', 'PAYMENT_PENDING'] } },
+    select: { status: true, activePaymentAttemptId: true },
   })
   if (!sesion?.activePaymentAttemptId) return null
+  // 🔴 R11-4 (Codex recheck-15 #4): también el intento que se quedó PENDING/PREPARED con su cobro ya COMPLETED (el proceso murió
+  // antes del `catch` que lo marcaba UNKNOWN): su sesión se quedaba PAYMENT_PENDING para siempre. Sólo pasada la gracia del cobro en
+  // vivo (`GRACIA_DEL_COBRO_EN_VIVO_MS`), para no pisar un intento que sigue finalizándose; su cobro es el de su llave.
   const intento = await prisma.areaTicketPaymentAttempt.findFirst({
-    where: { id: sesion.activePaymentAttemptId, orderId, status: 'UNKNOWN' },
+    where:
+      sesion.status === 'RECONCILIATION_REQUIRED'
+        ? { id: sesion.activePaymentAttemptId, orderId, status: 'UNKNOWN' }
+        : {
+            id: sesion.activePaymentAttemptId,
+            orderId,
+            status: { in: ['PENDING', 'PREPARED'] },
+            startedAt: { lt: new Date(ahora.getTime() - GRACIA_DEL_COBRO_EN_VIVO_MS) },
+          },
     select: { paymentId: true, idempotencyKey: true },
   })
-  if (!intento?.paymentId) return null
+  if (!intento) return null
   const cobro = await prisma.payment.findFirst({
-    where: { id: intento.paymentId, venueId, orderId, status: 'COMPLETED' },
+    where: {
+      venueId,
+      orderId,
+      status: 'COMPLETED',
+      ...(intento.paymentId ? { id: intento.paymentId } : { idempotencyKey: intento.idempotencyKey }),
+    },
     select: { id: true, processedById: true, amount: true, tipAmount: true },
   })
   if (!cobro) return null
   return resumeCapturedAreaTicketPayment(venueId, orderId, cobro, intento.idempotencyKey)
+}
+
+/**
+ * 🔴 R11-4 (Codex recheck-15 #4): las sesiones de vales con dinero capturado y la finalización pendiente, AUNQUE la venta ya esté
+ * COMPLETED. El barrido de pagadas-abiertas sólo ve ventas sin cerrar: si su primer rescate fallaba (p. ej. sin existencia) y cerraba de
+ * estado, la venta salía de su criterio y nadie volvía a terminar inventario, lealtad ni comanda. El cierre financiero se conserva; lo
+ * que no se pierde es poder terminar la sesión cuando se pueda (se repuso la mercancía).
+ *
+ * Mismas dos formas que `retomarCobroDeValesAtorado`: RECONCILIATION_REQUIRED con su intento UNKNOWN y su cobro COMPLETED, o
+ * PAYMENT_PENDING con su intento PENDING/PREPARED cuyo cobro (por su llave) ya es COMPLETED y pasó la gracia. Ni canceladas ni
+ * borradas ni reembolsadas (la finalización las rechaza siempre).
+ *
+ * Acotada y estable: tope impuesto por quien llama, orden por (inicio del intento, id de la sesión), una sola consulta. Sin columnas
+ * nuevas, el tope de reintentos sale del propio intento: la ventana `since` (la del barrido) sobre su inicio, y una espera que se
+ * DUPLICA con cada fallo —cada fallo deja `lastCheckedAt` (`markAreaTicketPaymentForReconciliation`) y el siguiente intento espera
+ * lo que ya lleva fallando, mínimo la gracia—. En 30 días son ~13 intentos, no uno cada 10 min para siempre.
+ */
+export async function findSesionesDeValesAtoradas(
+  db: Pick<typeof prisma, '$queryRaw'>,
+  opts: { limit: number; now: Date; since: Date },
+): Promise<Array<{ venueId: string; orderId: string }>> {
+  const gracia = Prisma.raw(`interval '${Math.round(GRACIA_DEL_COBRO_EN_VIVO_MS / 1000)} seconds'`)
+  return db.$queryRaw<Array<{ venueId: string; orderId: string }>>`
+    SELECT s."venueId", s."orderId"
+    FROM "AreaTicketCheckoutSession" s
+    JOIN "AreaTicketPaymentAttempt" a ON a.id = s."activePaymentAttemptId" AND a."checkoutSessionId" = s.id
+    JOIN "Order" o ON o.id = s."orderId" AND o."venueId" = s."venueId"
+    WHERE s."orderId" IS NOT NULL
+      AND (
+        (s.status = 'RECONCILIATION_REQUIRED' AND a.status = 'UNKNOWN' AND EXISTS (
+          SELECT 1 FROM "Payment" p
+          WHERE p.id = a."paymentId" AND p."venueId" = s."venueId" AND p."orderId" = s."orderId" AND p.status = 'COMPLETED'))
+        OR (s.status = 'PAYMENT_PENDING' AND a.status IN ('PENDING', 'PREPARED') AND EXISTS (
+          SELECT 1 FROM "Payment" p
+          WHERE p."venueId" = s."venueId" AND p."idempotencyKey" = a."idempotencyKey" AND p."orderId" = s."orderId"
+            AND p.status = 'COMPLETED'))
+      )
+      AND o.status NOT IN ('CANCELLED', 'DELETED')
+      AND o."paymentStatus" <> 'REFUNDED'
+      AND a."startedAt" >= ${utcTs(opts.since)}
+      AND COALESCE(a."lastCheckedAt", a."startedAt")
+          + GREATEST(COALESCE(a."lastCheckedAt", a."startedAt") - a."startedAt", ${gracia}) <= ${utcTs(opts.now)}
+    ORDER BY a."startedAt" ASC, s.id ASC
+    LIMIT ${opts.limit}
+  `
 }
 
 /**
@@ -3709,6 +3810,9 @@ export async function recordOrderPayment(
             idempotencyKey: paymentData.idempotencyKey,
             amount: new Prisma.Decimal(totalAmount),
             method: classicMethod as PaymentMethod,
+            // 🔴 R11-8: lo que registra la TPV ya se capturó (el banco lo aprobó o el efectivo ya entró): una sesión cerrada por otro
+            // canal, en conciliación o con otro intento vivo lo recibe igual (nunca 409). Sólo el cobro NUEVO se rechaza.
+            dineroCapturado: paymentData.cobroNuevo !== true,
           })
         }
 

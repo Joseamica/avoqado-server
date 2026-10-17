@@ -873,12 +873,23 @@ export async function settleCustomerBalance(
   const settled: Array<{ orderId: string; amount: number; paymentId?: string; baseParaLealtad: number }> = []
   const reconciliationEnabled = await resolvePaymentShiftReconciliationEnabled(prisma, venueId)
   const targetOrderIds = [...new Set(pendingOrders.map(oc => oc.order.id))].sort()
+  // R11-8: los vales v7 de cada venta; se importa ANTES de abrir la transacción (para no cargar módulos dentro de ella).
+  const { lockAreaTicketCheckoutHierarchy, cerrarSesionDeValesAlCerrarLaVenta } = await import(
+    '@/services/mobile/areaTicketV7.mobile.service'
+  )
+  let sesionesDeValesCerradas = 0
   await prisma.$transaction(async tx => {
+    sesionesDeValesCerradas = 0
     // Orden global para writers de dinero sobre Orders EXISTENTES: primero se
     // toma el conjunto completo de Orders en orden estable; sólo después puede
     // tocarse Shift. Así un settle masivo nunca queda con Order A + Shift
     // esperando Order B frente a un writer unitario que ya posee B.
+    // 🔴 R11-8: por cada venta, en el MISMO orden estable, su jerarquía de vales (sesión → vales → venta; `null` sin sesión) ANTES
+    // de su candado: el orden de la finalización. Nadie toma una sesión después de una venta ajena.
+    const sesionesDeVales = new Map<string, NonNullable<Awaited<ReturnType<typeof lockAreaTicketCheckoutHierarchy>>>['session']>()
     for (const orderId of targetOrderIds) {
+      const vales = await lockAreaTicketCheckoutHierarchy(tx, { venueId, orderId })
+      if (vales) sesionesDeVales.set(orderId, vales.session)
       await lockExistingOrderForPayment(tx, { venueId, orderId })
     }
 
@@ -987,6 +998,9 @@ export async function settleCustomerBalance(
         staffId: null,
       })
       if (posting?.id) postingIds.push(posting.id)
+      // 🔴 R11-8: este vale ya tomó todos los renglones (también los del vale v7): la sesión deja de presentarse cobrable.
+      const sesion = sesionesDeVales.get(orderId)
+      if (sesion && (await cerrarSesionDeValesAlCerrarLaVenta(tx, sesion, { venueId, orderId }))) sesionesDeValesCerradas += 1
       // FT-GRAVES T2: el MISMO gancho de comisión que la terminal, con el dinero. El esquema decide a quién; sin persona, nada.
       await enqueuePaymentCommissionInTx(tx, settlementPayment.id)
     }
@@ -1106,7 +1120,7 @@ export async function settleCustomerBalance(
     action: 'CUSTOMER_BALANCE_SETTLED',
     entity: 'Customer',
     entityId: customerId,
-    data: { settledOrderCount, settledAmount },
+    data: { settledOrderCount, settledAmount, ...(sesionesDeValesCerradas > 0 ? { sesionesDeValesCerradas } : {}) },
   })
 
   return {

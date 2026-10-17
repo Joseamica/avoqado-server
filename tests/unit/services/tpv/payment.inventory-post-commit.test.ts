@@ -222,6 +222,11 @@ jest.mock('@/services/shared/loyaltyOnPaidOrder', () => ({
   awardLoyaltyForPaidOrder: jest.fn().mockResolvedValue(undefined),
 }))
 import { awardLoyaltyForPaidOrder } from '@/services/shared/loyaltyOnPaidOrder'
+// R11-1: la RECUPERACIÓN de un cobro capturado otorga por el envoltorio que respeta los reembolsos.
+const otorgarRespetandoReembolsosMock = jest.fn().mockResolvedValue({ complete: true, errors: [], reembolsada: false })
+jest.mock('@/services/shared/loyaltyOnLateCustomer', () => ({
+  otorgarLealtadRespetandoReembolsos: (...a: unknown[]) => otorgarRespetandoReembolsosMock(...a),
+}))
 
 const VENUE_ID = 'venue-123'
 const ORDER_ID = 'order-123'
@@ -1043,7 +1048,7 @@ describe('🔴 R10: el registrador de la terminal y la sesión de vales', () => 
       ],
     })
   const efectosDeSaldar = () => ({
-    lealtad: (awardLoyaltyForPaidOrder as jest.Mock).mock.calls.length,
+    lealtad: (awardLoyaltyForPaidOrder as jest.Mock).mock.calls.length + otorgarRespetandoReembolsosMock.mock.calls.length,
     referido: (onOrderPaid as jest.Mock).mock.calls.length,
     comanda: armarComandasMock.mock.calls.length,
   })
@@ -1217,9 +1222,11 @@ describe('🔴 R10: el registrador de la terminal y la sesión de vales', () => 
       expect(prisma.payment.create).not.toHaveBeenCalled()
       expect(finalizeAreaTicketPaymentMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ staffId: 'staff-del-cobro' }))
       expect(efectosDeSaldar()).toEqual({ lealtad: 1, referido: 1, comanda: 1 })
-      expect(awardLoyaltyForPaidOrder).toHaveBeenCalledWith(
+      // 🔴 R11-1: por el envoltorio que respeta los reembolsos, con el empleado del COBRO; nunca el otorgamiento directo.
+      expect(otorgarRespetandoReembolsosMock).toHaveBeenCalledWith(
         expect.objectContaining({ orderId: ORDER_ID, staffId: 'staff-del-cobro', orderTotal: 100 }),
       )
+      expect(awardLoyaltyForPaidOrder).not.toHaveBeenCalled()
     })
 
     it('🔴 segundo reenvío (ya no es primer saldado: el vale SALE de la primera finalización lo prueba) ⇒ ningún efecto', async () => {
@@ -1251,6 +1258,154 @@ describe('🔴 R10: el registrador de la terminal y la sesión de vales', () => 
       expect(prisma.areaTicketPaymentAttempt.updateMany).not.toHaveBeenCalled()
       expect(prisma.areaTicketCheckoutSession.updateMany).not.toHaveBeenCalled()
       expect(efectosDeSaldar()).toEqual({ lealtad: 0, referido: 0, comanda: 0 })
+    })
+  })
+})
+
+/**
+ * 🔴 Ronda 11 (Codex recheck-15): el registrador, la marca de conciliación y el rescate.
+ *   · R11-1: la recuperación no premia una venta devuelta: la lealtad va por `otorgarLealtadRespetandoReembolsos`.
+ *   · R11-6: intento SUCCEEDED con ESTE cobro ⇒ la marca no toca nada (ni la sesión que hoy tiene otro intento).
+ *   · R11-8: la marca no le quita la sesión a otro intento vivo; el registrador le dice a la sesión que el dinero ya se capturó.
+ *   · R11-4: el rescate también toma el intento PENDING/PREPARED cuyo proceso murió (cobro COMPLETED por su llave), pasada la gracia.
+ */
+describe('🔴 R11: registrador, marca de conciliación y rescate de la sesión de vales', () => {
+  beforeEach(() => {
+    const order = makeOrder({
+      items: [{ ...makeOrder().items[0], id: 'item-vale', productId: 'prod-vale', areaTicketLineId: 'line-1' }],
+    })
+    ;(prisma.order.findUnique as jest.Mock).mockImplementation(async (args: any) =>
+      args?.select?.paymentStatus ? { paymentStatus: 'PENDING' } : order,
+    )
+    ;(prisma.order.update as jest.Mock).mockResolvedValue({ ...order, items: order.items })
+    ;(productInventoryService.getProductInventoryStatus as jest.Mock).mockResolvedValue(STOCK_OK)
+    ;(prisma.areaTicketCheckoutSession.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
+    ;(prisma.areaTicketPaymentAttempt.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
+    // Llave nueva: ningún cobro previo con ella (el describe anterior deja su cobro capturado en este mock).
+    ;(prisma.payment.findUnique as jest.Mock).mockResolvedValue(null)
+  })
+  const registrar = (extra: Record<string, unknown> = {}) =>
+    (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, { ...paymentData, idempotencyKey: 'r11-llave', ...extra }, 'user-1')
+
+  describe('R11-6 / R11-8: el catch de un cobro que no pudo finalizar', () => {
+    beforeEach(() => {
+      lockAreaTicketCheckoutMock.mockResolvedValue({ sessionId: 'session-1', attemptId: 'attempt-1' })
+      finalizeAreaTicketPaymentMock.mockRejectedValue(new Error('could not serialize access due to concurrent update'))
+    })
+
+    it.each(['PAYMENT_PENDING', 'RECONCILIATION_REQUIRED'])(
+      '🔴 R11-6: intento SUCCEEDED con ESTE cobro y la sesión %s de OTRO intento ⇒ no se toca nada (antes: le reescribía el intento activo)',
+      async estado => {
+        ;(prisma.areaTicketCheckoutSession.findFirst as jest.Mock).mockResolvedValue({
+          status: estado,
+          activePaymentAttemptId: 'otro-intento',
+        })
+        ;(prisma.areaTicketPaymentAttempt.findFirst as jest.Mock).mockResolvedValue({ status: 'SUCCEEDED', paymentId: 'payment-1' })
+
+        const result: any = await registrar()
+
+        expect(result.areaTicketCheckoutState).toBe('PARTIALLY_PAID')
+        expect(prisma.areaTicketPaymentAttempt.updateMany).not.toHaveBeenCalled()
+        expect(prisma.areaTicketCheckoutSession.updateMany).not.toHaveBeenCalled()
+      },
+    )
+
+    it('🔴 R11-8: la sesión está en conciliación por OTRO intento ⇒ se congela sólo el de este cobro; la sesión conserva el suyo', async () => {
+      ;(prisma.areaTicketCheckoutSession.findFirst as jest.Mock).mockResolvedValue({
+        status: 'RECONCILIATION_REQUIRED',
+        activePaymentAttemptId: 'intento-viejo',
+      })
+      ;(prisma.areaTicketPaymentAttempt.findFirst as jest.Mock).mockResolvedValue({ status: 'PENDING', paymentId: null })
+
+      const result: any = await registrar()
+
+      expect(result.areaTicketCheckoutState).toBe('RECONCILIATION_REQUIRED')
+      expect(prisma.areaTicketPaymentAttempt.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ status: 'UNKNOWN', paymentId: 'payment-1' }) }),
+      )
+      expect(prisma.areaTicketCheckoutSession.updateMany).not.toHaveBeenCalled()
+      expect(prisma.payment.create).toHaveBeenCalledTimes(1)
+    })
+
+    it('regresión: la sesión es de ESTE intento ⇒ se congela como siempre (RECONCILIATION_REQUIRED con este intento)', async () => {
+      ;(prisma.areaTicketCheckoutSession.findFirst as jest.Mock).mockResolvedValue({
+        status: 'PAYMENT_PENDING',
+        activePaymentAttemptId: 'attempt-1',
+      })
+      ;(prisma.areaTicketPaymentAttempt.findFirst as jest.Mock).mockResolvedValue({ status: 'PENDING', paymentId: null })
+
+      await registrar()
+
+      expect(prisma.areaTicketCheckoutSession.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ status: 'RECONCILIATION_REQUIRED', activePaymentAttemptId: 'attempt-1' }),
+        }),
+      )
+    })
+  })
+
+  describe('R11-8: el registrador le dice a la sesión que el dinero ya se capturó', () => {
+    it('🔴 un cobro de la terminal (dinero capturado) ⇒ `dineroCapturado: true` (la sesión cerrada o en conciliación ya no le responde 409)', async () => {
+      lockAreaTicketCheckoutMock.mockResolvedValue(null)
+
+      await registrar()
+
+      expect(lockAreaTicketCheckoutMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ dineroCapturado: true }))
+    })
+
+    it('regresión: un cobro NUEVO (`cobroNuevo`) no dice que se capturó: se rechaza antes de tomar el dinero', async () => {
+      lockAreaTicketCheckoutMock.mockResolvedValue(null)
+
+      await registrar({ cobroNuevo: true })
+
+      expect(lockAreaTicketCheckoutMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ dineroCapturado: false }))
+    })
+  })
+
+  describe('R11-4: el rescate del intento cuyo proceso murió antes de marcarse incierto', () => {
+    const AHORA = new Date('2026-10-16T20:00:00Z')
+    const cobro = { id: 'payment-pendiente', processedById: 'staff-del-cobro', amount: new Decimal(100), tipAmount: new Decimal(0) }
+    beforeEach(() => {
+      ;(prisma.areaTicketCheckoutSession.findFirst as jest.Mock).mockImplementation(async (a: any) => {
+        const st = a?.where?.status
+        const aceptaPendiente = st === undefined || st === 'PAYMENT_PENDING' || (Array.isArray(st?.in) && st.in.includes('PAYMENT_PENDING'))
+        return aceptaPendiente ? { id: 'session-1', status: 'PAYMENT_PENDING', activePaymentAttemptId: 'attempt-1' } : null
+      })
+      ;(prisma.areaTicketPaymentAttempt.findFirst as jest.Mock).mockImplementation(async (a: any) => {
+        if (a?.where?.OR) return { id: 'attempt-1', status: 'PENDING', paymentId: null, idempotencyKey: 'llave-1' }
+        const st = a?.where?.status
+        return Array.isArray(st?.in) && st.in.includes('PENDING') ? { paymentId: null, idempotencyKey: 'llave-1' } : null
+      })
+      ;(prisma.payment.findFirst as jest.Mock).mockImplementation(async (a: any) =>
+        a?.where?.idempotencyKey === 'llave-1' && a?.where?.status === 'COMPLETED' ? cobro : null,
+      )
+      finalizeAreaTicketPaymentMock.mockResolvedValue({
+        areaTicketOrder: true,
+        sessionId: 'session-1',
+        fullyPaid: true,
+        primerSaldado: false,
+      })
+    })
+
+    it('🔴 sesión PAYMENT_PENDING con su intento PENDING y su cobro COMPLETED (por su llave) ⇒ se finaliza por el camino del reenvío', async () => {
+      const estado = await (paymentService as any).retomarCobroDeValesAtorado(VENUE_ID, ORDER_ID, AHORA)
+
+      expect(estado).toBe('PAID')
+      expect(finalizeAreaTicketPaymentMock).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ paymentId: 'payment-pendiente', locked: { sessionId: 'session-1', attemptId: 'attempt-1' } }),
+      )
+      // Sólo pasada la gracia del cobro en vivo: nunca pisa un intento que sigue finalizándose.
+      expect(prisma.areaTicketPaymentAttempt.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({ where: expect.objectContaining({ startedAt: { lt: new Date(AHORA.getTime() - 5 * 60 * 1000) } }) }),
+      )
+    })
+
+    it('regresión: sin cobro COMPLETED de ese intento ⇒ no hay nada que retomar', async () => {
+      ;(prisma.payment.findFirst as jest.Mock).mockResolvedValue(null)
+
+      await expect((paymentService as any).retomarCobroDeValesAtorado(VENUE_ID, ORDER_ID, AHORA)).resolves.toBeNull()
+      expect(finalizeAreaTicketPaymentMock).not.toHaveBeenCalled()
     })
   })
 })

@@ -17,7 +17,11 @@ const MENSAJE = 'Para cambiar el cliente de una venta ya cobrada necesitas el pe
 function crearTx(orden: Record<string, unknown>, reembolsos = 0) {
   return {
     $queryRaw: jest.fn().mockResolvedValue([{ id: 'order' }]),
-    payment: { count: jest.fn().mockResolvedValue(reembolsos) },
+    // R11-2: la regla compartida suma los cobros capturados de una venta abierta (aquí: ninguno).
+    payment: {
+      count: jest.fn().mockResolvedValue(reembolsos),
+      aggregate: jest.fn().mockResolvedValue({ _sum: { amount: null, tipAmount: null } }),
+    },
     order: {
       findFirst: jest.fn().mockResolvedValue({ id: 'order', status: 'CONFIRMED', customerName: null, ...orden }),
       update: jest.fn().mockImplementation(async (a: { data: Record<string, unknown> }) => ({
