@@ -58,18 +58,20 @@ function harness(
 }
 
 describe('online-order-acceptance-expiry.job', () => {
-  it('primero sincroniza las cuentas canceladas por otra vía, luego lo pagado al recoger, y luego lee sólo lo vencido SIN dinero y no cancelado (R1, R2)', async () => {
+  it('primero sincroniza las cuentas canceladas por otra vía, luego lo pagado al recoger, y luego lee sólo lo vencido SIN dinero y con la cuenta ABIERTA (R1, R2, A13)', async () => {
     const h = harness({ candidates: [] })
     await h.job.checkNow()
-    expect(h.syncCancelled).toHaveBeenCalledWith(NOW)
-    expect(h.syncPaidPickups).toHaveBeenCalledWith(NOW)
+    // A10: cada sincronización recibe el envoltorio de reintento SÓLO para su lectura de candidatos.
+    expect(h.syncCancelled).toHaveBeenCalledWith(NOW, expect.any(Function))
+    expect(h.syncPaidPickups).toHaveBeenCalledWith(NOW, expect.any(Function))
     expect(h.syncCancelled.mock.invocationCallOrder[0]).toBeLessThan(h.syncPaidPickups.mock.invocationCallOrder[0])
     expect(h.syncPaidPickups.mock.invocationCallOrder[0]).toBeLessThan(h.findMany.mock.invocationCallOrder[0])
     expect(h.findMany).toHaveBeenCalledWith({
       where: {
         status: 'PENDING_ACCEPTANCE',
         acceptDeadlineAt: { lte: NOW },
-        order: { paymentStatus: 'PENDING', status: { notIn: ['CANCELLED', 'DELETED'] } },
+        // A13: una cuenta ya cerrada sin dinero (cortesía, COMPLETED) no se vuelve a intentar vencer en cada pasada.
+        order: { paymentStatus: 'PENDING', status: { in: ['PENDING', 'CONFIRMED', 'PREPARING', 'READY'] } },
       },
       select: { id: true, orderId: true, venueId: true, acceptDeadlineAt: true },
       orderBy: [{ acceptDeadlineAt: 'asc' }, { id: 'asc' }],
@@ -134,7 +136,8 @@ describe('online-order-acceptance-expiry.job', () => {
     // La base simulada distingue las tres lecturas de la pasada por su filtro.
     prismaMock.onlineOrder.findMany.mockImplementation((async (a: any) => {
       if (a.where.paymentMode) return [{ id: 'oo-P', orderId: 'ord-P', venueId: 'v2', status: 'READY', order: { orderNumber: 'WP' } }]
-      if (a.where.order?.status?.in) {
+      // R2 lee cuentas CANCELADAS; el vencimiento lee cuentas ABIERTAS (A13): las dos llevan `order.status.in`.
+      if (a.where.order?.status?.in?.includes('CANCELLED')) {
         return [{ id: 'oo-C', orderId: 'ord-C', venueId: 'v1', order: { orderNumber: 'WC', status: 'CANCELLED' } }]
       }
       return []
@@ -149,6 +152,41 @@ describe('online-order-acceptance-expiry.job', () => {
     expect(logAction).toHaveBeenCalledWith(
       expect.objectContaining({ action: 'ONLINE_ORDER_COLLECTED', entityId: 'oo-P', data: { orderNumber: 'WP', automatic: true } }),
     )
+  })
+
+  it('A10: con sus dependencias reales, la lectura de candidatos de cada sincronización se reintenta por conexión; el CAS nunca', async () => {
+    const caida = Object.assign(new Error("Can't reach database server"), { code: 'P1001' })
+    let lecturasR2 = 0
+    let lecturasPagado = 0
+    prismaMock.onlineOrder.findMany.mockImplementation((async (a: any) => {
+      if (a.where.paymentMode) {
+        if (++lecturasPagado === 1) throw caida
+        return [{ id: 'oo-P', orderId: 'ord-P', venueId: 'v2', status: 'READY', order: { orderNumber: 'WP' } }]
+      }
+      if (a.where.order?.status?.in?.includes('CANCELLED')) {
+        if (++lecturasR2 === 1) throw caida
+        return [{ id: 'oo-C', orderId: 'ord-C', venueId: 'v1', order: { orderNumber: 'WC', status: 'CANCELLED' } }]
+      }
+      return []
+    }) as any)
+    // El CAS de R2 se cae por conexión: NO se repite (es una escritura); el de «pagado» sí confirma.
+    prismaMock.onlineOrder.updateMany.mockImplementation((async (a: any) => {
+      if (a.where.id === 'oo-C') throw caida
+      return { count: 1 }
+    }) as any)
+    const retryEntry = jest.fn(retryOnce)
+    const job = new OnlineOrderAcceptanceExpiryJob({
+      cron: { start: jest.fn(), stop: jest.fn() } as never,
+      now: () => NOW,
+      retryEntry: retryEntry as never,
+    })
+
+    await expect(job.checkNow()).resolves.toMatchObject({ synced: 0, collected: 1, errors: 0 })
+    expect(lecturasR2).toBe(2)
+    expect(lecturasPagado).toBe(2)
+    const cas = prismaMock.onlineOrder.updateMany.mock.calls.map((c: any[]) => c[0].where.id)
+    expect(cas).toEqual(['oo-C', 'oo-P'])
+    for (const [, opciones] of retryEntry.mock.calls as any[]) expect(opciones.shouldRetry(caida)).toBe(true)
   })
 
   it('un tick encimado se salta y suelta el candado al terminar', async () => {

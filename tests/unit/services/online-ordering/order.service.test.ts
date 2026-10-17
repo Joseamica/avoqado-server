@@ -17,7 +17,7 @@ import { getAcceptingStatus } from '@/services/online-ordering/presence.service'
 import { quoteCart } from '@/services/online-ordering/quote.service'
 import { socketManager } from '@/communication/sockets/managers/socketManager'
 import { examinarRenglon } from '@/services/fiscal/cfdi.service'
-import { createOnlineOrder, getTrackingByToken } from '@/services/online-ordering/order.service'
+import { createOnlineOrder, getTrackingByToken, onlineOrderRequestHash } from '@/services/online-ordering/order.service'
 
 const D = (v: string) => new Prisma.Decimal(v)
 const NOW = new Date('2026-10-14T18:30:00.000Z')
@@ -61,12 +61,34 @@ const input = (o: Record<string, unknown> = {}) => ({
   ...o,
 })
 
+/** A1: la huella de la solicitud `input(o)` tal como la guarda el servicio (teléfono canónico, nombre tal cual llega). */
+const huella = (o: Record<string, unknown> = {}) => {
+  const i = input(o) as any
+  return onlineOrderRequestHash({
+    venueId: i.venueId,
+    customerId: i.customerId,
+    paymentMode: i.paymentMode,
+    expectedTotal: i.expectedTotal,
+    items: i.items,
+    customerName: i.customer.name,
+    customerPhone: PHONE,
+  })
+}
+/** El pedido en línea ya creado con esta llave; por omisión, con la huella de `input()`. */
+const oo = (o: Record<string, unknown> = {}) => ({
+  id: 'oo1',
+  status: 'ACCEPTED',
+  trackingToken: 'T'.repeat(32),
+  acceptDeadlineAt: NOW,
+  requestHash: huella(),
+  ...o,
+})
 const existing = (o: Record<string, unknown> = {}) => ({
   id: 'ord1',
   orderNumber: 'WABCD',
   total: D('206.00'),
   customerId: 'cust1',
-  onlineOrder: { id: 'oo1', status: 'ACCEPTED', trackingToken: 'T'.repeat(32), acceptDeadlineAt: NOW },
+  onlineOrder: oo(),
   ...o,
 })
 
@@ -167,9 +189,7 @@ describe('createOnlineOrder', () => {
   it('una repetición que aparece ya dentro del candado tampoco crea otro pedido', async () => {
     prismaMock.order.findUnique
       .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce(
-        existing({ onlineOrder: { id: 'oo1', status: 'PENDING_ACCEPTANCE', trackingToken: 'T'.repeat(32), acceptDeadlineAt: NOW } }) as any,
-      )
+      .mockResolvedValueOnce(existing({ onlineOrder: oo({ status: 'PENDING_ACCEPTANCE' }) }) as any)
     const res = await createOnlineOrder(input())
     expect(res).toMatchObject({ replay: true, orderId: 'ord1', status: 'PENDING_ACCEPTANCE' })
     expect(prismaMock.order.create).not.toHaveBeenCalled()
@@ -200,13 +220,15 @@ describe('createOnlineOrder', () => {
     // 180.00 (otro carrito). Fuera del candado aún no existía.
     const otroCarrito = {
       total: D('180.00'),
-      onlineOrder: { id: 'oo1', status: 'PENDING_ACCEPTANCE', trackingToken: 'T'.repeat(32), acceptDeadlineAt: NOW },
+      onlineOrder: oo({ status: 'PENDING_ACCEPTANCE', requestHash: huella({ expectedTotal: '180.00' }) }),
     }
     prismaMock.order.findUnique.mockResolvedValueOnce(null).mockResolvedValueOnce(existing(otroCarrito) as any)
     await expect(createOnlineOrder(input())).rejects.toMatchObject(PEDIDO_DISTINTO)
     expect(prismaMock.order.create).not.toHaveBeenCalled()
 
-    prismaMock.order.findUnique.mockResolvedValueOnce(null).mockResolvedValueOnce(existing({ total: D('180.00') }) as any)
+    prismaMock.order.findUnique
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(existing({ total: D('180.00'), onlineOrder: oo({ requestHash: huella({ expectedTotal: '180.00' }) }) }) as any)
     ;(prismaMock.$transaction as jest.Mock).mockRejectedValueOnce(
       new Prisma.PrismaClientKnownRequestError('dup', { code: 'P2002', clientVersion: 'x' }),
     )
@@ -218,7 +240,7 @@ describe('createOnlineOrder', () => {
       existing({
         id: 'ord9',
         orderNumber: 'WZZZZ',
-        onlineOrder: { id: 'oo9', status: 'PENDING_ACCEPTANCE', trackingToken: 'W'.repeat(32), acceptDeadlineAt: NOW },
+        onlineOrder: oo({ id: 'oo9', status: 'PENDING_ACCEPTANCE', trackingToken: 'W'.repeat(32) }),
       }) as any,
     )
     ;(prismaMock.$transaction as jest.Mock).mockRejectedValueOnce(
@@ -226,6 +248,67 @@ describe('createOnlineOrder', () => {
     )
     const res = await createOnlineOrder(input())
     expect(res).toMatchObject({ replay: true, orderId: 'ord9' })
+  })
+
+  it('A1: al crear guarda la huella de la solicitud (sha256 de 64 caracteres)', async () => {
+    await createOnlineOrder(input())
+    const data = (prismaMock.onlineOrder.create.mock.calls[0][0] as any).data
+    expect(data.requestHash).toMatch(/^[0-9a-f]{64}$/)
+    expect(data.requestHash).toBe(huella())
+  })
+
+  it('A1: la huella cambia con el carrito, la cantidad, las opciones, la nota, el total, el cliente y el negocio; no con el orden de las opciones', () => {
+    const base = huella()
+    const dos = (mods: any[]) => huella({ items: [{ productId: 'p1', quantity: 2, modifiers: mods }] })
+    expect(dos([{ modifierId: 'm2' }])).toBe(base)
+    expect(dos([{ modifierId: 'm2', quantity: 1 }])).toBe(base) // sin cantidad = 1
+    expect(dos([{ modifierId: 'm2' }, { modifierId: 'm1' }])).toBe(dos([{ modifierId: 'm1' }, { modifierId: 'm2' }]))
+    expect(huella({ items: [{ productId: 'p1', quantity: 2, modifiers: [{ modifierId: 'm2' }], note: '  sin crema ' }] })).toBe(
+      huella({ items: [{ productId: 'p1', quantity: 2, modifiers: [{ modifierId: 'm2' }], note: 'sin crema' }] }),
+    )
+    const distintas = [
+      huella({ items: [{ productId: 'p2', quantity: 2, modifiers: [{ modifierId: 'm2' }] }] }),
+      huella({ items: [{ productId: 'p1', quantity: 3, modifiers: [{ modifierId: 'm2' }] }] }),
+      dos([{ modifierId: 'm3' }]),
+      dos([{ modifierId: 'm2', quantity: 2 }]),
+      huella({ items: [{ productId: 'p1', quantity: 2, modifiers: [{ modifierId: 'm2' }], note: 'sin cebolla' }] }),
+      huella({ expectedTotal: '150.00' }),
+      huella({ customerId: 'cust2' }),
+      huella({ customer: { name: 'Otra persona', phone: '55 4345 3965', email: null } }),
+      huella({ venueId: 'v2' }),
+    ]
+    for (const h of distintas) expect(h).not.toBe(base)
+    expect(new Set(distintas).size).toBe(distintas.length)
+  })
+
+  it('A1: la misma llave del MISMO cliente con OTRO carrito del MISMO total es 409: compara la solicitud, no el total', async () => {
+    const otroPlatillo = huella({ items: [{ productId: 'p2', quantity: 2, modifiers: [{ modifierId: 'm2' }] }] })
+    prismaMock.order.findUnique.mockResolvedValue(existing({ onlineOrder: oo({ requestHash: otroPlatillo }) }) as any)
+    const err = await createOnlineOrder(input()).catch((e: unknown) => e)
+    expect(err).toMatchObject(PEDIDO_DISTINTO)
+    expect(JSON.stringify(err) + (err as Error).message).not.toContain('T'.repeat(32))
+    expect(prismaMock.order.create).not.toHaveBeenCalled()
+  })
+
+  it('A1: el reintento IDÉNTICO recibe su pedido aunque la caja ya haya cambiado el total de la cuenta', async () => {
+    prismaMock.order.findUnique.mockResolvedValue(existing({ total: D('250.00') }) as any)
+    const res = await createOnlineOrder(input())
+    expect(res).toMatchObject({ replay: true, orderId: 'ord1', trackingToken: 'T'.repeat(32) })
+    expect(prismaMock.order.create).not.toHaveBeenCalled()
+  })
+
+  it('A1: un pedido guardado SIN huella se trata como solicitud distinta (409), también dentro del candado y en la carrera', async () => {
+    const sinHuella = existing({ onlineOrder: oo({ requestHash: null }) })
+    prismaMock.order.findUnique.mockResolvedValueOnce(sinHuella as any)
+    await expect(createOnlineOrder(input())).rejects.toMatchObject(PEDIDO_DISTINTO)
+    prismaMock.order.findUnique.mockResolvedValueOnce(null).mockResolvedValueOnce(sinHuella as any)
+    await expect(createOnlineOrder(input())).rejects.toMatchObject(PEDIDO_DISTINTO)
+    prismaMock.order.findUnique.mockResolvedValueOnce(null).mockResolvedValueOnce(sinHuella as any)
+    ;(prismaMock.$transaction as jest.Mock).mockRejectedValueOnce(
+      new Prisma.PrismaClientKnownRequestError('dup', { code: 'P2002', clientVersion: 'x' }),
+    )
+    await expect(createOnlineOrder(input())).rejects.toMatchObject(PEDIDO_DISTINTO)
+    expect(prismaMock.order.create).not.toHaveBeenCalled()
   })
 
   it('con la tienda no abierta responde 409 con el estado y el motivo', async () => {
@@ -356,7 +439,7 @@ describe('createOnlineOrder', () => {
       existing({
         id: 'ord9',
         customerId: 'otro-cliente',
-        onlineOrder: { id: 'oo9', status: 'PENDING_ACCEPTANCE', trackingToken: 'W'.repeat(32), acceptDeadlineAt: NOW },
+        onlineOrder: oo({ id: 'oo9', status: 'PENDING_ACCEPTANCE', trackingToken: 'W'.repeat(32) }),
       }) as any,
     )
     ;(prismaMock.$transaction as jest.Mock).mockRejectedValueOnce(

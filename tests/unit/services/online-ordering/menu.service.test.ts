@@ -208,6 +208,14 @@ describe('loadCategoryVisibility (H4)', () => {
   })
 })
 
+describe('A7: horario nocturno en la carta y el cotizador (el mismo evaluador que el POS)', () => {
+  it('una categoría del viernes 22:00–02:00 sigue el sábado a la 01:00 y NO aparece el viernes a la 01:00', async () => {
+    const noche = { id: 'bar', availableFrom: '22:00', availableUntil: '02:00', availableDays: ['FRI'] }
+    expect((await loadCategoryVisibility('v1', new Date('2026-10-17T07:00:00Z'), [noche]))('bar')).toBe(true)
+    expect((await loadCategoryVisibility('v1', new Date('2026-10-16T07:00:00Z'), [noche]))('bar')).toBe(false)
+  })
+})
+
 describe('getPublicMenu', () => {
   it('devuelve precios como números en pesos, `soldOut: false` (1a, R17) y el conteo de la categoría', async () => {
     prismaMock.menuCategory.findMany.mockResolvedValue([category('cat1', [product('p1')])] as any)

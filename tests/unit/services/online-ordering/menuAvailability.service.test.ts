@@ -1,6 +1,6 @@
 import { prismaMock } from '@tests/__helpers__/setup'
 import { logAction } from '@/services/dashboard/activity-log.service'
-import { clearPublicMenuCache } from '@/services/online-ordering/menu.service'
+import { clearPublicMenuCache, getPublicMenu } from '@/services/online-ordering/menu.service'
 import { setOnlineAvailability } from '@/services/online-ordering/menuAvailability.service'
 
 describe('setOnlineAvailability', () => {
@@ -35,10 +35,22 @@ describe('setOnlineAvailability', () => {
     expect(prismaMock.product.updateMany).not.toHaveBeenCalled()
   })
 
-  it('invalida la caché de la carta pública', async () => {
-    const spy = jest.spyOn(require('@/services/online-ordering/menu.service'), 'clearPublicMenuCache')
+  it('A11: invalida la carta en caché SÓLO de ese negocio; la de los demás sigue sirviéndose de la caché', async () => {
+    clearPublicMenuCache()
+    prismaMock.venue.findUnique.mockResolvedValue({ timezone: 'America/Mexico_City' } as any)
+    prismaMock.menuCategory.findMany.mockResolvedValue([])
+    prismaMock.menuCategoryAssignment.findMany.mockResolvedValue([])
+    prismaMock.product.groupBy.mockResolvedValue([] as any)
+    const now = new Date()
+    await getPublicMenu('v1', now)
+    await getPublicMenu('v2', now)
+
     await setOnlineAvailability({ venueId: 'v1', availableOnline: false, productIds: ['p1'], actorStaffId: null })
-    expect(spy).toHaveBeenCalled()
+    await getPublicMenu('v1', now)
+    await getPublicMenu('v2', now)
+
+    const reconstruidas = prismaMock.menuCategory.findMany.mock.calls.map((c: any[]) => c[0].where.venueId)
+    expect(reconstruidas).toEqual(['v1', 'v2', 'v1']) // v2 no se reconstruyó
     clearPublicMenuCache()
   })
 })

@@ -4,6 +4,7 @@ import { logAction } from '@/services/dashboard/activity-log.service'
 import { SYNC_BATCH_SIZE } from './constants'
 import { notifyOrderEvent } from './notifications.service'
 import { emitOnlineOrderUpdated } from './traySocket'
+import type { ReadCandidates } from './types'
 
 /** Estados del pedido en línea que todavía esperan algo del restaurante. */
 export const OPEN_ONLINE_STATUSES: OnlineOrderStatus[] = [
@@ -33,33 +34,47 @@ export interface CancelledElsewhere {
  * I-1: lee con tope (`SYNC_BATCH_SIZE`; lo que sobre lo toma la siguiente pasada) y hace un CAS POR FILA sobre su `status`: si la
  * bandeja y el job chocan, una sola pasada gana cada pedido y sólo ésa lo devuelve. NO avisa: quien la llama anuncia a los
  * ganadores con `announceCancelledElsewhere` después del commit.
+ * A5: el CAS de cada fila va aparte; si uno falla se registra y la pasada sigue (las ganadoras se devuelven y se anuncian). Dentro
+ * de la transacción de `casTransition` (una sola fila) un fallo deja la transacción abortada y su siguiente lectura lanza.
  */
 export async function syncOnlineOrdersOfCancelledOrders(
   db: Pick<Prisma.TransactionClient, 'onlineOrder'>,
   scope: { venueId?: string; orderId?: string },
   now: Date,
+  /** A10: sólo la LECTURA pasa por aquí (el job la reintenta por conexión); los CAS nunca. */
+  readCandidates: ReadCandidates = read => read(),
 ): Promise<CancelledElsewhere[]> {
-  const rows = await db.onlineOrder.findMany({
-    where: {
-      // `!== undefined`: un venueId vacío filtra (y no encuentra nada); nunca se vuelve «todos los negocios».
-      ...(scope.venueId !== undefined ? { venueId: scope.venueId } : {}),
-      ...(scope.orderId !== undefined ? { orderId: scope.orderId } : {}),
-      status: { in: OPEN_ONLINE_STATUSES },
-      order: { status: { in: [OrderStatus.CANCELLED, OrderStatus.DELETED] } },
-    },
-    select: { id: true, orderId: true, venueId: true, order: { select: { orderNumber: true, status: true } } },
-    orderBy: { id: 'asc' },
-    take: SYNC_BATCH_SIZE,
-  })
+  const rows = await readCandidates(() =>
+    db.onlineOrder.findMany({
+      where: {
+        // `!== undefined`: un venueId vacío filtra (y no encuentra nada); nunca se vuelve «todos los negocios».
+        ...(scope.venueId !== undefined ? { venueId: scope.venueId } : {}),
+        ...(scope.orderId !== undefined ? { orderId: scope.orderId } : {}),
+        status: { in: OPEN_ONLINE_STATUSES },
+        order: { status: { in: [OrderStatus.CANCELLED, OrderStatus.DELETED] } },
+      },
+      select: { id: true, orderId: true, venueId: true, order: { select: { orderNumber: true, status: true } } },
+      orderBy: { id: 'asc' },
+      take: SYNC_BATCH_SIZE,
+    }),
+  )
 
   const won: CancelledElsewhere[] = []
   for (const r of rows) {
-    const cas = await db.onlineOrder.updateMany({
-      where: { id: r.id, status: { in: OPEN_ONLINE_STATUSES } },
-      data: { status: OnlineOrderStatus.CANCELLED_BY_STAFF, cancelledAt: now, cancelledBy: CANCELLED_ELSEWHERE },
-    })
-    if (cas.count === 1) {
-      won.push({ id: r.id, orderId: r.orderId, venueId: r.venueId, orderNumber: r.order.orderNumber, orderStatus: r.order.status })
+    try {
+      const cas = await db.onlineOrder.updateMany({
+        where: { id: r.id, status: { in: OPEN_ONLINE_STATUSES } },
+        data: { status: OnlineOrderStatus.CANCELLED_BY_STAFF, cancelledAt: now, cancelledBy: CANCELLED_ELSEWHERE },
+      })
+      if (cas.count === 1) {
+        won.push({ id: r.id, orderId: r.orderId, venueId: r.venueId, orderNumber: r.order.orderNumber, orderStatus: r.order.status })
+      }
+    } catch (error) {
+      logger.error('[OnlineOrdering] no se pudo cerrar un pedido cuya cuenta se canceló (la pasada sigue)', {
+        onlineOrderId: r.id,
+        venueId: r.venueId,
+        error: error instanceof Error ? error.message : String(error),
+      })
     }
   }
   if (won.length > 0) {

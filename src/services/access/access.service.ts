@@ -118,6 +118,10 @@ export const PERMISSION_TO_FEATURE_MAP: Record<string, string> = {
   'orders:write': 'AVOQADO_ORDERS',
   'orders:create': 'AVOQADO_ORDERS',
   'orders:delete': 'AVOQADO_ORDERS',
+  // Pedidos en línea: siguen a la función de pedidos de la marca blanca (no hay un código propio en `enabledFeatures`; uno
+  // inventado dejaría sin permiso a todos). El plan (`ONLINE_ORDERING`) lo revisa aparte `checkFeatureAccess` en la ruta.
+  'online-orders:manage': 'AVOQADO_ORDERS',
+  'online-orders:pause': 'AVOQADO_ORDERS',
 
   // Payments
   'payments:read': 'AVOQADO_PAYMENTS',

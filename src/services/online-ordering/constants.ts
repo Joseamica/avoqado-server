@@ -14,6 +14,8 @@ export const MAX_CART_LINES = 50
 export const MAX_LINE_QUANTITY = 20
 export const NOTE_MAX_LENGTH = 300
 export const INBOX_PAGE_SIZE = 100
+/** A8: cursor de la lista de activos de la bandeja: «<createdAt ISO con milisegundos>_<id del pedido en línea>». */
+export const ACTIVE_CURSOR_PATTERN = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)_([A-Za-z0-9_-]{1,40})$/
 /** Igual que `PRINT_CLAIM_TTL_MS` de la pantalla de cocina (`kds.mobile.service.ts`). */
 export const PRINT_CLAIM_TTL_MS = 90_000
 export const EXPIRY_BATCH_SIZE = 100

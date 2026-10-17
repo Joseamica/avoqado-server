@@ -7,7 +7,13 @@ import { resolveVenueBySlug } from '@/middlewares/resolveVenueBySlug.middleware'
 import { validateRequest } from '@/middlewares/validation'
 import { ipDelCliente } from '@/utils/clientIp'
 import * as ctrl from '@/controllers/public/onlineOrdering.public.controller'
-import { createOrderSchema, publicVenueSchema, quoteSchema, trackingSchema } from '@/schemas/public/onlineOrdering.schema'
+import {
+  createOrderSchema,
+  publicVenueSchema,
+  quoteSchema,
+  trackingSchema,
+  venueSlugGateSchema,
+} from '@/schemas/public/onlineOrdering.schema'
 
 const router = Router({ mergeParams: true })
 
@@ -34,6 +40,10 @@ const createLimit = limiter(5)
 const cancelLimit = limiter(10)
 
 const requireOrdering = requirePublicVenueFeatureStrict('ONLINE_ORDERING', 'Este negocio no recibe pedidos en línea por el momento.')
+
+// A9: el slug se revisa ANTES que todo lo demás (antes de buscar el negocio en la base): un byte de control o un slug gigante es
+// 400 en español, nunca una consulta ni un 500.
+router.use(validateRequest(venueSlugGateSchema))
 
 // Superficie de pedidos NUEVOS: venue operativo (sin demo) → plan en modo cerrado → validación (R14: candado estricto).
 router.get('/info', readLimit, resolveOperationalVenueBySlug, requireOrdering, validateRequest(publicVenueSchema), ctrl.getInfo)

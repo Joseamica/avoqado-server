@@ -7,6 +7,10 @@ import { TRACKING_TOKEN_PATTERN } from '@/services/online-ordering/trackingToken
    (como en `receiptLayout/sanitizeText.ts`). Las notas conservan el salto de línea; el nombre, no. */
 const CONTROL = /[\u0000-\u001F\u007F-\u009F]/g
 const CONTROL_SALVO_SALTO = /[\u0000-\u0009\u000B-\u001F\u007F-\u009F]/g
+/** A9: un id o un slug viajan a una consulta: sin bytes de control (un `\u0000` revienta en Postgres = 500) ni espacios. */
+const ID_SEGURO = /^[^\s\u0000-\u001F\u007F-\u009F]+$/
+/** A9: además, sin diagonales: un slug es UN segmento de la ruta. */
+const SLUG_SEGURO = /^[^\s\u0000-\u001F\u007F-\u009F/\\]+$/
 /* eslint-enable no-control-regex */
 const sinControl = <T extends z.ZodTypeAny>(re: RegExp, schema: T) =>
   z.preprocess(v => (typeof v === 'string' ? v.replace(re, '') : v), schema)
@@ -16,10 +20,21 @@ const note = sinControl(
   z.string().trim().max(NOTE_MAX_LENGTH, `La nota admite hasta ${NOTE_MAX_LENGTH} caracteres`),
 ).optional()
 
-const slugParams = z.object({ venueSlug: z.string().min(1, 'Negocio inválido') })
+/**
+ * A9: un id de producto, opción, categoría… — hasta 40 caracteres (un cuid son 25, un UUID heredado 36), sin bytes de control ni
+ * espacios. Rechazo 400 con el mensaje en español, nunca un 500 de la base. También lo usan los ids de disponibilidad del panel.
+ */
+export const safeId = (mensaje: string) => z.string().min(1, mensaje).max(40, mensaje).regex(ID_SEGURO, mensaje)
+
+/** A9: el slug de los negocios de la casa (hasta 100 caracteres, como al crearlo); se valida ANTES de buscar el negocio. */
+export const venueSlug = z.string().min(1, 'Negocio inválido').max(100, 'Negocio inválido').regex(SLUG_SEGURO, 'Negocio inválido')
+
+const slugParams = z.object({ venueSlug })
+/** Para la puerta de la API pública: sólo revisa el slug y deja pasar los demás parámetros (p. ej. el token de seguimiento). */
+export const venueSlugGateSchema = z.object({ params: slugParams.passthrough() })
 
 const cartItem = z.object({
-  productId: z.string().min(1, 'Producto inválido').max(40, 'Producto inválido'),
+  productId: safeId('Producto inválido'),
   quantity: z
     .number()
     .int('La cantidad debe ser un número entero')
@@ -28,7 +43,7 @@ const cartItem = z.object({
   modifiers: z
     .array(
       z.object({
-        modifierId: z.string().min(1, 'Opción inválida').max(40, 'Opción inválida'),
+        modifierId: safeId('Opción inválida'),
         quantity: z
           .number()
           .int('La cantidad debe ser un número entero')

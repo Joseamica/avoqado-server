@@ -13,7 +13,8 @@ import { getSettings } from './settings.service'
 import { emitOnlineOrderUpdated } from './traySocket'
 
 export type TransitionResult =
-  | { outcome: 'OK'; status: OnlineOrderStatus; estimatedReadyAt?: string | null }
+  /** `unchanged`: ya estaba en ese estado y no se escribió nada (A12: entregar lo ya entregado). */
+  | { outcome: 'OK'; status: OnlineOrderStatus; estimatedReadyAt?: string | null; unchanged?: true }
   | { outcome: 'STALE'; status: OnlineOrderStatus | null }
   | { outcome: 'NOT_FOUND' }
   | { outcome: 'PAYMENT_REQUIRED' }
@@ -392,6 +393,11 @@ export async function markOnlineOrderDelivered(i: {
     // El cobro normalmente ya dejó la Order completada con su `completedAt` real: sólo se completa la que siga abierta.
     orderExtra: now => ({ completedAt: now }),
   })
+  // A12: «entregado» sobre lo que ya se entregó (la bandeja o el job lo cerraron al quedar pagado, o fue un doble toque) es
+  // éxito: la caja pidió justo ese estado. Nada se escribe ni se audita otra vez.
+  if (r.r === 'STALE' && r.status === OnlineOrderStatus.COMPLETED) {
+    return { outcome: 'OK', status: OnlineOrderStatus.COMPLETED, unchanged: true }
+  }
   if (r.r !== 'OK') return settled(r)
 
   emitOnlineOrderUpdated({

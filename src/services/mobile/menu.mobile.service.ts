@@ -32,6 +32,11 @@ export function toMinutes(hhmm?: string | null): number | null {
 /**
  * ¿Este menú aplica en `now` (hora del venue)? Un menú sin horario ni días
  * aplica siempre — así el "Menú Principal" de toda la vida sigue funcionando.
+ *
+ * Una franja que cruza medianoche (22:00–02:00) pertenece al día en que EMPIEZA:
+ * la parte de después de medianoche se evalúa contra el día anterior en
+ * `availableDays` (el viernes 22:00–02:00 sigue el sábado a la 01:00 y no
+ * aplica el viernes a la 01:00). Lo usan el POS y la tienda en línea.
  */
 export function appliesNow(
   menu: {
@@ -47,17 +52,18 @@ export function appliesNow(
   if (menu.startDate && nowUtc < menu.startDate) return false
   if (menu.endDate && nowUtc > menu.endDate) return false
 
-  const dayCode = DAY_CODES[Number(formatInTimeZone(nowUtc, timezone, 'i')) % 7]
-  if (menu.availableDays.length > 0 && !menu.availableDays.includes(dayCode)) return false
-
   const from = toMinutes(menu.availableFrom)
   const until = toMinutes(menu.availableUntil)
-  if (from === null || until === null) return true // sin horario = todo el día
-
   const [h, m] = formatInTimeZone(nowUtc, timezone, 'HH:mm').split(':')
   const nowMinutes = Number(h) * 60 + Number(m)
 
-  // Una franja que cruza medianoche (22:00–02:00) es válida y común en bares.
+  // Una franja que cruza medianoche (22:00–02:00) es válida y común en bares; su madrugada es del día anterior.
+  const afterMidnightOfYesterday = from !== null && until !== null && from > until && nowMinutes < until
+  const todayIdx = Number(formatInTimeZone(nowUtc, timezone, 'i')) % 7
+  const dayCode = DAY_CODES[afterMidnightOfYesterday ? (todayIdx + 6) % 7 : todayIdx]
+  if (menu.availableDays.length > 0 && !menu.availableDays.includes(dayCode)) return false
+
+  if (from === null || until === null) return true // sin horario = todo el día
   return from <= until ? nowMinutes >= from && nowMinutes < until : nowMinutes >= from || nowMinutes < until
 }
 

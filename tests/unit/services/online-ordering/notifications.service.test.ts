@@ -108,6 +108,35 @@ describe('notifyOrderEvent', () => {
     )
   })
 
+  it('A15: un correo mal escrito por el comensal (destinatario imposible, no transitorio) es un warn, no un error del servidor', async () => {
+    ;(emailService.sendEmailWithResult as jest.Mock).mockResolvedValue({
+      ok: false,
+      errorCode: 'UNDELIVERABLE_RECIPIENT',
+      transient: false,
+    })
+    await notifyOrderEvent('ord1', 'ACCEPTED')
+    expect(logger.error).not.toHaveBeenCalled()
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        orderId: 'ord1',
+        event: 'ACCEPTED',
+        channel: 'EMAIL',
+        errorCode: 'UNDELIVERABLE_RECIPIENT',
+        transient: false,
+      }),
+    )
+  })
+
+  it('A15: lo transitorio sigue siendo error (aunque el código sea el del destinatario)', async () => {
+    ;(emailService.sendEmailWithResult as jest.Mock).mockResolvedValue({ ok: false, errorCode: 'UNDELIVERABLE_RECIPIENT', transient: true })
+    await notifyOrderEvent('ord1', 'ACCEPTED')
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ errorCode: 'UNDELIVERABLE_RECIPIENT', transient: true }),
+    )
+  })
+
   it('las variables de la plantilla de WhatsApp van saneadas (sin saltos de línea ni ligas)', async () => {
     process.env.ONLINE_ORDERING_WHATSAPP_ENABLED = 'true'
     prismaMock.order.findUnique.mockResolvedValue({ ...ORDER, customerName: 'Ana\nhttps://malo.example' } as any)

@@ -6,7 +6,7 @@ import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
 import { requireWriteScopeAlways } from '../requireWriteScopeAlways'
 import { planGateMessage } from '../planGate'
-import { listInbox } from '@/services/online-ordering/inbox.service'
+import { getInboxOrder, listInbox } from '@/services/online-ordering/inbox.service'
 import { setOnlineAvailability } from '@/services/online-ordering/menuAvailability.service'
 import { getSettings, pauseOnlineOrdering, updateSettings } from '@/services/online-ordering/settings.service'
 import {
@@ -17,7 +17,14 @@ import {
   rejectOnlineOrder,
   type TransitionResult,
 } from '@/services/online-ordering/transitions.service'
-import { acceptSchema, floorPauseMinutes, menuAvailabilityBody, rejectSchema, settingsPatchBody } from '@/schemas/online-ordering.schema'
+import {
+  acceptSchema,
+  activeCursor,
+  floorPauseMinutes,
+  menuAvailabilityBody,
+  rejectSchema,
+  settingsPatchBody,
+} from '@/schemas/online-ordering.schema'
 
 const GATE_LABEL = 'Los pedidos en línea'
 
@@ -85,11 +92,18 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
         .enum(['pending', 'active', 'done', 'all'])
         .optional()
         .describe('pending = por aceptar · active = en preparación o listos · done = cerrados · all (default)'),
+      cursor: activeCursor
+        .optional()
+        .describe('Sólo con status=active: el nextCursor de la respuesta anterior, para ver los siguientes pedidos activos'),
     },
-    async ({ venueId, status }) => {
+    async ({ venueId, status, cursor }) => {
       guard.venueFilter(venueId)
       guard.requirePermission('orders:read', venueId)
-      const inbox = await listInbox({ venueId, filter: status ?? 'all' })
+      // A8: los activos siguen por llave estable; el cursor no aplica a las demás listas.
+      if (cursor && status !== 'active') {
+        return text({ ok: false, error: 'El cursor sólo sirve para los pedidos activos (status=active).' })
+      }
+      const inbox = await listInbox({ venueId, filter: status ?? 'all', ...(cursor ? { activeCursor: cursor } : {}) })
       return text({ ok: true, ...inbox })
     },
   )
@@ -116,15 +130,23 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
         return text({ ok: false, error: 'Para rechazar indica el motivo: OUT_OF_ITEMS, CLOSED, TOO_BUSY u OTHER.' })
       }
 
+      // A8 (P1-08): el pedido se busca DIRECTO en el negocio por su id, nunca dentro de una página de la bandeja (con más de 100
+      // activos el más viejo no aparecería).
+      const order = await getInboxOrder({ venueId, orderId })
+      if (!order) return text({ ok: false, error: 'Ese pedido no existe en este negocio.' })
+      // A12: entregar lo que ya está entregado es éxito; no se ejecuta ni se audita nada.
+      if (action === 'DELIVERED' && order.status === 'COMPLETED') {
+        return text({ ok: true, status: order.status, estimatedReadyAt: null, sinCambios: true, mensaje: 'El pedido ya estaba entregado.' })
+      }
       const pendingAction = action === 'ACCEPT' || action === 'REJECT'
-      const inbox = await listInbox({ venueId, filter: pendingAction ? 'pending' : 'active' })
-      const order = inbox.orders.find(o => o.orderId === orderId)
-      if (!order) {
+      const vigente: string[] = pendingAction ? ['PENDING_ACCEPTANCE'] : ['ACCEPTED', 'READY']
+      if (!vigente.includes(order.status)) {
         return text({
           ok: false,
+          status: order.status,
           error: pendingAction
-            ? 'Ese pedido no está por aceptar (ya cambió o no existe).'
-            : 'Ese pedido no está en preparación ni listo (ya cambió o no existe).',
+            ? 'Ese pedido ya no está por aceptar; no se aplicó nada.'
+            : 'Ese pedido no está en preparación ni listo; no se aplicó nada.',
         })
       }
 
@@ -164,6 +186,16 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
                 : await cancelOnlineOrderByStaff({ venueId, orderId, staffId })
 
       if (result.outcome !== 'OK') return text(fallo(result))
+      // A12: ya estaba entregado (se entregó solo entre la vista previa y la confirmación): éxito sin otra bitácora.
+      if (result.unchanged) {
+        return text({
+          ok: true,
+          status: result.status,
+          estimatedReadyAt: null,
+          sinCambios: true,
+          mensaje: 'El pedido ya estaba entregado.',
+        })
+      }
 
       await auditMcpWrite(scope, {
         action: AUDIT[action],

@@ -1,5 +1,6 @@
 // tests/unit/services/online-ordering/cancelledOrderSync.test.ts
 import { prismaMock } from '@tests/__helpers__/setup'
+import logger from '@/config/logger'
 import { logAction } from '@/services/dashboard/activity-log.service'
 
 jest.mock('@/services/online-ordering/notifications.service', () => ({
@@ -94,5 +95,24 @@ describe('syncOnlineOrdersOfCancelledOrders (R2)', () => {
     await syncOnlineOrdersOfCancelledOrders(prismaMock, { venueId: '' }, NOW)
     expect((prismaMock.onlineOrder.findMany.mock.calls[2][0] as any).where).toMatchObject({ venueId: '' })
     expect(prismaMock.onlineOrder.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('A5: si el CAS de una fila falla, se registra con su id y la pasada sigue; las que sí cerraron se devuelven y se anuncian', async () => {
+    prismaMock.onlineOrder.findMany.mockResolvedValue([fila('A'), fila('B'), fila('C')] as any)
+    prismaMock.onlineOrder.updateMany
+      .mockResolvedValueOnce({ count: 1 })
+      .mockRejectedValueOnce(new Error('deadlock'))
+      .mockResolvedValueOnce({ count: 1 })
+    const error = jest.spyOn(logger, 'error')
+
+    const won = await syncOnlineOrdersOfCancelledOrders(prismaMock, { venueId: 'v1' }, NOW)
+
+    expect(won.map(w => w.id)).toEqual(['oo-A', 'oo-C'])
+    expect(error).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ onlineOrderId: 'oo-B' }))
+    announceCancelledElsewhere(won, NOW)
+    expect((notifyOrderEvent as jest.Mock).mock.calls).toEqual([
+      ['ord-A', 'CANCELLED'],
+      ['ord-C', 'CANCELLED'],
+    ])
   })
 })

@@ -111,7 +111,9 @@ export async function notifyOrderEvent(orderId: string, event: OrderNotification
           idempotencyKey: `online-order:${orderId}:${event}:EMAIL`,
         })
         if (!r.ok) {
-          logger.error('[OnlineOrdering] el correo del aviso no salió', {
+          // A15: un destinatario imposible y NO transitorio es un correo mal escrito por el comensal, no una falla del servidor.
+          const delComensal = r.errorCode === 'UNDELIVERABLE_RECIPIENT' && r.transient === false
+          logger[delComensal ? 'warn' : 'error']('[OnlineOrdering] el correo del aviso no salió', {
             orderId,
             event,
             channel: 'EMAIL',

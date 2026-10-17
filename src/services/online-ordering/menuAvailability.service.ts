@@ -24,7 +24,7 @@ export async function setOnlineAvailability(p: {
     where: { venueId: p.venueId, deletedAt: null, ...(p.allProducts ? {} : { OR: or }) },
     data: { availableOnline: p.availableOnline },
   })
-  clearPublicMenuCache()
+  clearPublicMenuCache(p.venueId)
 
   void logAction({
     staffId: p.actorStaffId,

@@ -605,4 +605,82 @@ describe('Pedidos en línea — ciclo de vida (integration, real DB)', () => {
     })
     expect((await prisma.order.findUniqueOrThrow({ where: { id: orderId } })).status).toBe('COMPLETED')
   })
+
+  it('A3: una cuenta pagada que tiene un reembolso registrado NO se entrega sola; queda para que una persona decida', async () => {
+    await beat()
+    const { orderId, onlineOrderId } = await pedidoListo()
+    await pay(orderId)
+    // Así queda un reembolso en la casa: un `Payment` REFUND de la cuenta, y la cuenta sigue diciendo PAID.
+    await prisma.payment.create({
+      data: {
+        venueId: venueId!,
+        orderId,
+        amount: -206,
+        method: 'CASH',
+        status: 'COMPLETED',
+        type: 'REFUND',
+        feePercentage: 0,
+        feeAmount: 0,
+        netAmount: -206,
+      },
+    })
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: orderId } })).paymentStatus).toBe('PAID')
+
+    await listInbox({ venueId: venueId! })
+    expect(await estadoDe(onlineOrderId)).toBe(OnlineOrderStatus.READY)
+    expect(bitacora(onlineOrderId, 'ONLINE_ORDER_COLLECTED')).toHaveLength(0)
+  })
+
+  it('A14: dos bandejas A LA VEZ sobre un pedido cuya cuenta se canceló ⇒ un solo aviso al comensal y una sola bitácora', async () => {
+    await beat()
+    const { orderId, onlineOrderId } = await newOrder()
+    await aceptar(orderId)
+    const aviso = jest.spyOn(avisos, 'notifyOrderEvent').mockResolvedValue(undefined)
+    try {
+      await cancelOrder(venueId!, orderId)
+      await Promise.all([listInbox({ venueId: venueId! }), listInbox({ venueId: venueId! })])
+      expect(await estadoDe(onlineOrderId)).toBe(OnlineOrderStatus.CANCELLED_BY_STAFF)
+      expect(aviso.mock.calls.filter(([id, evento]) => id === orderId && evento === 'CANCELLED')).toHaveLength(1)
+      expect(bitacora(onlineOrderId, 'ONLINE_ORDER_CANCELLED_BY_STAFF')).toHaveLength(1)
+    } finally {
+      aviso.mockRestore()
+    }
+  })
+
+  it('A14 y A12: dos bandejas A LA VEZ sobre un pedido pagado y listo ⇒ un solo ONLINE_ORDER_COLLECTED; «entregado» después es éxito sin escribir', async () => {
+    await beat()
+    const { orderId, onlineOrderId } = await pedidoListo()
+    await pay(orderId)
+    await Promise.all([listInbox({ venueId: venueId! }), listInbox({ venueId: venueId! })])
+    expect(await estadoDe(onlineOrderId)).toBe(OnlineOrderStatus.COMPLETED)
+    expect(bitacora(onlineOrderId, 'ONLINE_ORDER_COLLECTED')).toHaveLength(1)
+
+    const antes = await prisma.onlineOrder.findUniqueOrThrow({ where: { id: onlineOrderId } })
+    await expect(markOnlineOrderDelivered({ venueId: venueId!, orderId, staffId: null })).resolves.toMatchObject({
+      outcome: 'OK',
+      status: OnlineOrderStatus.COMPLETED,
+    })
+    expect(await prisma.onlineOrder.findUniqueOrThrow({ where: { id: onlineOrderId } })).toEqual(antes)
+    expect(bitacora(onlineOrderId, 'ONLINE_ORDER_COLLECTED')).toHaveLength(1)
+  })
+
+  it('A6: dos ajustes simultáneos (encender + quitar pagar al recoger) se serializan: el segundo ve al primero y uno se rechaza', async () => {
+    try {
+      for (let ronda = 0; ronda < 5; ronda++) {
+        await updateSettings(venueId!, { enabled: false, acceptsPayAtPickup: true }, null)
+        const r = await Promise.allSettled([
+          updateSettings(venueId!, { enabled: true }, null),
+          updateSettings(venueId!, { acceptsPayAtPickup: false }, null),
+        ])
+        expect(r.filter(x => x.status === 'rejected')).toEqual([
+          expect.objectContaining({ reason: expect.objectContaining({ code: 'NO_PAYMENT_MODE' }) }),
+        ])
+        const fila = await prisma.onlineOrderingSettings.findUniqueOrThrow({ where: { venueId: venueId! } })
+        // Nunca encendida sin medio de pago.
+        expect(fila.enabled && !fila.acceptsPayAtPickup).toBe(false)
+      }
+    } finally {
+      await updateSettings(venueId!, { enabled: true, acceptsPayAtPickup: true }, null)
+    }
+  })
 })

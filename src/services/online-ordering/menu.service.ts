@@ -323,8 +323,10 @@ export async function loadVisibleMenu(venueId: string, now: Date = new Date()): 
 
 const cache = new Map<string, { at: number; value: PublicMenu }>()
 
-export function clearPublicMenuCache(): void {
-  cache.clear()
+/** A11: con `venueId` borra sólo la carta de ESE negocio (lo normal); sin él, todas (pruebas o mantenimiento explícito). */
+export function clearPublicMenuCache(venueId?: string): void {
+  if (venueId === undefined) cache.clear()
+  else cache.delete(venueId)
 }
 
 /** La carta para la tienda pública, con caché en memoria de 60 s por venue (una sola instancia, sin Redis). */
