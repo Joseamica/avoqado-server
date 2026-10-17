@@ -3,8 +3,8 @@ import { prismaMock } from '@tests/__helpers__/setup'
 jest.mock('@/services/access/basePlan.service', () => ({ __esModule: true, venueHasFeatureAccess: jest.fn() }))
 
 import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
-import { resolveOperationalVenueBySlug } from '@/middlewares/resolveOperationalVenueBySlug.middleware'
-import { requirePublicVenueFeatureStrict } from '@/middlewares/requirePublicVenueFeatureStrict.middleware'
+import { assertOperationalVenue, resolveOperationalVenueBySlug } from '@/middlewares/resolveOperationalVenueBySlug.middleware'
+import { assertOrderingPlan, requirePublicVenueFeatureStrict } from '@/middlewares/requirePublicVenueFeatureStrict.middleware'
 
 function res() {
   const r: any = {}
@@ -76,5 +76,48 @@ describe('requirePublicVenueFeatureStrict', () => {
     expect(r.status).toHaveBeenCalledWith(500)
     expect(r.json).toHaveBeenCalledWith({ success: false, code: 'PUBLIC_VENUE_NOT_RESOLVED', error: 'No se pudo identificar el negocio.' })
     expect(next).not.toHaveBeenCalled()
+  })
+})
+
+describe('P1-06: lo que exige un pedido NUEVO, como funciones (el servicio las llama después de buscar la repetición)', () => {
+  it('assertOperationalVenue consulta por id con los MISMOS estados que el middleware: activo, operativo y sin LIVE_DEMO', async () => {
+    prismaMock.venue.findFirst.mockResolvedValue({ id: 'v1' } as any)
+    await expect(assertOperationalVenue('v1')).resolves.toBeUndefined()
+    const where = (prismaMock.venue.findFirst.mock.calls[0][0] as any).where
+    expect(where).toMatchObject({ id: 'v1', active: true })
+    expect(where.status.in).toEqual(['TRIAL', 'ONBOARDING', 'PENDING_ACTIVATION', 'ACTIVE'])
+  })
+
+  it('assertOperationalVenue: un negocio suspendido, de demostración o inexistente lanza 404 VENUE_NOT_FOUND', async () => {
+    prismaMock.venue.findFirst.mockResolvedValue(null)
+    await expect(assertOperationalVenue('v1')).rejects.toMatchObject({
+      statusCode: 404,
+      code: 'VENUE_NOT_FOUND',
+      message: 'Negocio no encontrado',
+    })
+  })
+
+  it('assertOrderingPlan pregunta por ONLINE_ORDERING y pasa si el plan la incluye', async () => {
+    ;(venueHasFeatureAccess as jest.Mock).mockResolvedValue(true)
+    await expect(assertOrderingPlan('v1')).resolves.toBeUndefined()
+    expect(venueHasFeatureAccess).toHaveBeenCalledWith('v1', 'ONLINE_ORDERING')
+  })
+
+  it('assertOrderingPlan sin la función lanza 403 PLAN_REQUIRED con el texto para el comensal (el mismo del middleware)', async () => {
+    ;(venueHasFeatureAccess as jest.Mock).mockResolvedValue(false)
+    await expect(assertOrderingPlan('v1')).rejects.toMatchObject({
+      statusCode: 403,
+      code: 'PLAN_REQUIRED',
+      message: 'Este negocio no recibe pedidos en línea por el momento.',
+    })
+  })
+
+  it('🔴 assertOrderingPlan FALLA CERRADO: si la verificación truena lanza 503 FEATURE_CHECK_UNAVAILABLE', async () => {
+    ;(venueHasFeatureAccess as jest.Mock).mockRejectedValue(new Error('db caída'))
+    await expect(assertOrderingPlan('v1')).rejects.toMatchObject({
+      statusCode: 503,
+      code: 'FEATURE_CHECK_UNAVAILABLE',
+      message: 'No pudimos verificar la disponibilidad. Intenta de nuevo.',
+    })
   })
 })

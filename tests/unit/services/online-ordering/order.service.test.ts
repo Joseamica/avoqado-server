@@ -1,6 +1,7 @@
 // tests/unit/services/online-ordering/order.service.test.ts
 import { Prisma } from '@prisma/client'
 import { prismaMock } from '@tests/__helpers__/setup'
+import { ForbiddenError } from '@/errors/AppError'
 
 jest.mock('@/services/online-ordering/presence.service', () => ({ __esModule: true, getAcceptingStatus: jest.fn() }))
 jest.mock('@/services/online-ordering/quote.service', () => ({
@@ -179,8 +180,10 @@ describe('createOnlineOrder', () => {
 
   it('la repetición del MISMO cliente devuelve el MISMO token sin abrir la tienda ni crear otro pedido', async () => {
     prismaMock.order.findUnique.mockResolvedValue(existing() as any)
-    const res = await createOnlineOrder(input())
+    const assertCanCreate = jest.fn()
+    const res = await createOnlineOrder(input(), { assertCanCreate })
     expect(res).toMatchObject({ replay: true, trackingToken: 'T'.repeat(32), status: 'ACCEPTED', orderId: 'ord1' })
+    expect(assertCanCreate).not.toHaveBeenCalled() // P1-06: ni plan ni negocio operativo para un pedido ya creado
     expect(getAcceptingStatus).not.toHaveBeenCalled()
     expect(prismaMock.$executeRaw).not.toHaveBeenCalled()
     expect(prismaMock.order.create).not.toHaveBeenCalled()
@@ -358,8 +361,11 @@ describe('createOnlineOrder', () => {
       code: 'PRICE_CHANGED',
       details: { quote: { total: 206 } },
     })
-    expect(prismaMock.$executeRaw).not.toHaveBeenCalled()
+    // R2-2: antes de rechazar sólo se buscó la repetición bajo el candado (una vez); ni topes, ni folio, ni escrituras.
+    expect(prismaMock.$executeRaw).toHaveBeenCalledTimes(1)
+    expect(prismaMock.onlineOrder.count).not.toHaveBeenCalled()
     expect(prismaMock.order.create).not.toHaveBeenCalled()
+    expect(prismaMock.onlineOrder.create).not.toHaveBeenCalled()
   })
 
   it('tope de pedidos por aceptar por teléfono, comparado ya normalizado (R23)', async () => {
@@ -448,6 +454,132 @@ describe('createOnlineOrder', () => {
     const err = await createOnlineOrder(input()).catch((e: unknown) => e)
     expect(err).toMatchObject({ statusCode: 409, code: 'IDEMPOTENCY_KEY_CONFLICT' })
     expect(JSON.stringify(err) + (err as Error).message).not.toContain('W'.repeat(32))
+  })
+})
+
+describe('P1-06: plan y negocio operativo se exigen sólo a un pedido NUEVO, después de buscar la repetición', () => {
+  const SIN_PLAN = new ForbiddenError('Este negocio no recibe pedidos en línea por el momento.', 'PLAN_REQUIRED')
+
+  it('una repetición recibe SU pedido sin pasar por assertCanCreate (plan vencido o negocio que ya no opera)', async () => {
+    prismaMock.order.findUnique.mockResolvedValue(existing() as any)
+    const assertCanCreate = jest.fn().mockRejectedValue(SIN_PLAN)
+    const res = await createOnlineOrder(input(), { assertCanCreate })
+    expect(res).toMatchObject({ replay: true, orderId: 'ord1', trackingToken: 'T'.repeat(32), status: 'ACCEPTED' })
+    expect(assertCanCreate).not.toHaveBeenCalled()
+    expect(prismaMock.order.create).not.toHaveBeenCalled()
+  })
+
+  it('un pedido NUEVO corre assertCanCreate DESPUÉS de buscar la repetición y ANTES de mirar la tienda; su rechazo no crea nada', async () => {
+    const assertCanCreate = jest.fn().mockRejectedValue(SIN_PLAN)
+    const err = await createOnlineOrder(input(), { assertCanCreate }).catch((e: unknown) => e)
+    expect(err).toBe(SIN_PLAN)
+    expect(prismaMock.order.findUnique.mock.invocationCallOrder[0]).toBeLessThan(assertCanCreate.mock.invocationCallOrder[0])
+    expect(getAcceptingStatus).not.toHaveBeenCalled()
+    expect(quoteCart).not.toHaveBeenCalled()
+    expect(prismaMock.order.create).not.toHaveBeenCalled()
+  })
+
+  it('con assertCanCreate que pasa, se crea el pedido (y corrió antes de mirar la tienda)', async () => {
+    const assertCanCreate = jest.fn().mockResolvedValue(undefined)
+    await expect(createOnlineOrder(input(), { assertCanCreate })).resolves.toMatchObject({ replay: false, status: 'PENDING_ACCEPTANCE' })
+    expect(assertCanCreate).toHaveBeenCalledTimes(1)
+    expect(assertCanCreate.mock.invocationCallOrder[0]).toBeLessThan((getAcceptingStatus as jest.Mock).mock.invocationCallOrder[0])
+    expect(prismaMock.order.create).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('R2-2: un rechazo nunca adelanta a un primer envío que sigue dentro de su transacción', () => {
+  /** Cada rechazo previo al candado de admisión: [nombre, code, preparar → opciones]. */
+  const RECHAZOS: Array<[string, string, () => { assertCanCreate?: () => Promise<void> }]> = [
+    [
+      'plan (assertCanCreate)',
+      'PLAN_REQUIRED',
+      () => ({ assertCanCreate: jest.fn().mockRejectedValue(new ForbiddenError('x', 'PLAN_REQUIRED')) }),
+    ],
+    [
+      'tienda cerrada',
+      'ORDERING_CLOSED',
+      () => {
+        ;(getAcceptingStatus as jest.Mock).mockResolvedValue({ ...OPEN, status: 'CLOSED', reason: 'OUTSIDE_HOURS' })
+        return {}
+      },
+    ],
+    [
+      'sin pagar al recoger',
+      'PAYMENT_MODE_NOT_ACCEPTED',
+      () => {
+        ;(getAcceptingStatus as jest.Mock).mockResolvedValue({ ...OPEN, config: { ...OPEN.config, acceptsPayAtPickup: false } })
+        return {}
+      },
+    ],
+    [
+      'carta inválida',
+      'CART_INVALID',
+      () => {
+        ;(quoteCart as jest.Mock).mockResolvedValue({ ...QUOTE_OK, ok: false, issues: [{ code: 'PRODUCT_UNAVAILABLE', message: 'x' }] })
+        return {}
+      },
+    ],
+    [
+      'precio cambiado',
+      'PRICE_CHANGED',
+      () => {
+        ;(quoteCart as jest.Mock).mockResolvedValue({ ...QUOTE_OK, total: D('210.00') })
+        return {}
+      },
+    ],
+  ]
+
+  it.each(RECHAZOS)(
+    '%s: si bajo el candado de admisión ya está SU pedido, responde la repetición, no el rechazo',
+    async (_n, _code, preparar) => {
+      const opts = preparar()
+      prismaMock.order.findUnique
+        .mockResolvedValueOnce(null) // fuera del candado el primer envío aún no confirmaba
+        .mockResolvedValueOnce(existing({ onlineOrder: oo({ status: 'PENDING_ACCEPTANCE' }) }) as any)
+      const res = await createOnlineOrder(input(), opts)
+      expect(res).toMatchObject({ replay: true, orderId: 'ord1', trackingToken: 'T'.repeat(32), status: 'PENDING_ACCEPTANCE' })
+      if (opts.assertCanCreate) expect(opts.assertCanCreate).toHaveBeenCalledTimes(1) // sí rechazó: la repetición salió bajo el candado
+      expect(prismaMock.onlineOrder.count).not.toHaveBeenCalled() // ni topes ni folio: no hubo admisión
+      expect(prismaMock.order.create).not.toHaveBeenCalled()
+      expect(socketManager.broadcastToVenue).not.toHaveBeenCalled()
+    },
+  )
+
+  it.each(RECHAZOS)('%s: sin pedido bajo el candado, el rechazo se mantiene y no se crea nada', async (_n, code, preparar) => {
+    const opts = preparar()
+    await expect(createOnlineOrder(input(), opts)).rejects.toMatchObject({ code })
+    expect(prismaMock.$executeRaw).toHaveBeenCalledTimes(1) // la búsqueda bajo el candado sí ocurrió
+    expect(prismaMock.order.findUnique).toHaveBeenCalledTimes(2)
+    expect(prismaMock.order.create).not.toHaveBeenCalled()
+  })
+
+  it('la búsqueda bajo candado toma el MISMO candado de admisión y busca DESPUÉS de tomarlo, en su propia transacción', async () => {
+    ;(getAcceptingStatus as jest.Mock).mockResolvedValue({ ...OPEN, status: 'CLOSED', reason: 'OUTSIDE_HOURS' })
+    const tx = {
+      $executeRaw: jest.fn().mockResolvedValue(0),
+      order: { findUnique: jest.fn().mockResolvedValue(existing({ onlineOrder: oo({ status: 'PENDING_ACCEPTANCE' }) })) },
+    }
+    ;(prismaMock.$transaction as jest.Mock).mockImplementationOnce(async (fn: any) => fn(tx))
+    await expect(createOnlineOrder(input())).resolves.toMatchObject({ replay: true, orderId: 'ord1' })
+    const [strings, key] = tx.$executeRaw.mock.calls[0]
+    expect((strings as string[]).join('?')).toContain('pg_advisory_xact_lock(hashtext(?))')
+    expect(key).toBe('online-order-admission:v1')
+    expect(tx.$executeRaw.mock.invocationCallOrder[0]).toBeLessThan(tx.order.findUnique.mock.invocationCallOrder[0])
+    expect(prismaMock.order.findUnique).toHaveBeenCalledTimes(1) // la de fuera del candado
+  })
+
+  it('si bajo el candado aparece la llave con OTRA solicitud, es 409 IDEMPOTENCY_KEY_CONFLICT, no el rechazo', async () => {
+    ;(getAcceptingStatus as jest.Mock).mockResolvedValue({ ...OPEN, status: 'CLOSED', reason: 'OUTSIDE_HOURS' })
+    prismaMock.order.findUnique
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(existing({ onlineOrder: oo({ requestHash: huella({ expectedTotal: '180.00' }) }) }) as any)
+    await expect(createOnlineOrder(input())).rejects.toMatchObject({ statusCode: 409, code: 'IDEMPOTENCY_KEY_CONFLICT' })
+  })
+
+  it('un 401 PHONE_VERIFICATION_REQUIRED no busca bajo el candado (sin cliente probado no hay repetición posible)', async () => {
+    await expect(createOnlineOrder(input({ verifiedPhone: null }))).rejects.toMatchObject({ code: 'PHONE_VERIFICATION_REQUIRED' })
+    expect(prismaMock.$transaction).not.toHaveBeenCalled()
   })
 })
 

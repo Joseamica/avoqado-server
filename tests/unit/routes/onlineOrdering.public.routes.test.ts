@@ -2,7 +2,7 @@ import express from 'express'
 import request from 'supertest'
 import { prismaMock } from '@tests/__helpers__/setup'
 import logger from '@/config/logger'
-import { ConflictError, UnauthorizedError } from '@/errors/AppError'
+import { ConflictError, ServiceUnavailableError, UnauthorizedError } from '@/errors/AppError'
 import { generateCustomerToken } from '@/jwt.service'
 
 /** Qué candados corrieron, en orden: cada simulacro de abajo se anota aquí (prueba el CABLEADO de cada ruta). */
@@ -16,6 +16,8 @@ jest.mock('express-rate-limit', () => ({
 }))
 jest.mock('@/middlewares/resolveOperationalVenueBySlug.middleware', () => ({
   __esModule: true,
+  // P1-06: `assertOperationalVenue` es el REAL (sobre `prisma.venue.findFirst` simulado); sólo el middleware se anota.
+  ...jest.requireActual('@/middlewares/resolveOperationalVenueBySlug.middleware'),
   resolveOperationalVenueBySlug: (req: any, _res: any, next: any) => {
     mockRan.push('operational')
     req.publicVenue = { id: 'v1', slug: req.params.venueSlug }
@@ -32,6 +34,8 @@ jest.mock('@/middlewares/resolveVenueBySlug.middleware', () => ({
 }))
 jest.mock('@/middlewares/requirePublicVenueFeatureStrict.middleware', () => ({
   __esModule: true,
+  // P1-06: `assertOrderingPlan` es el REAL (sobre `venueHasFeatureAccess` simulado); sólo el middleware se anota.
+  ...jest.requireActual('@/middlewares/requirePublicVenueFeatureStrict.middleware'),
   requirePublicVenueFeatureStrict: (featureCode: string) => (_req: any, _res: any, next: any) => {
     mockRan.push(`strict:${featureCode}`)
     next()
@@ -52,6 +56,11 @@ jest.mock('@/middlewares/customerAuth.middleware', () => {
     },
   }
 })
+jest.mock('@/services/access/basePlan.service', () => ({
+  __esModule: true,
+  ...jest.requireActual('@/services/access/basePlan.service'),
+  venueHasFeatureAccess: jest.fn(),
+}))
 jest.mock('@/services/online-ordering/presence.service', () => ({ __esModule: true, getAcceptingStatus: jest.fn() }))
 jest.mock('@/services/online-ordering/menu.service', () => ({ __esModule: true, getPublicMenu: jest.fn() }))
 jest.mock('@/services/online-ordering/quote.service', () => ({
@@ -73,6 +82,7 @@ import { cancelOnlineOrderByCustomer } from '@/services/online-ordering/transiti
 import { getPublicMenu } from '@/services/online-ordering/menu.service'
 import { getAcceptingStatus } from '@/services/online-ordering/presence.service'
 import { quoteCart } from '@/services/online-ordering/quote.service'
+import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
 
 const app = express()
 app.use(express.json())
@@ -93,6 +103,8 @@ const post = (o: { key?: string | null; customer?: boolean; auth?: string; paylo
   if (o.auth) r = r.set('Authorization', o.auth)
   return r.send(o.payload ?? body)
 }
+/** P1-06: el controlador le pasa al servicio lo que exige un pedido NUEVO (negocio operativo y plan). */
+const PIDE_LO_DE_UN_PEDIDO_NUEVO = expect.objectContaining({ assertCanCreate: expect.any(Function) })
 const cancel = (token = TOKEN) => request(app).post(`/venues/flautas/ordering/orders/${token}/cancel`)
 
 beforeEach(() => {
@@ -201,13 +213,17 @@ describe('API pública de pedidos en línea', () => {
         verifiedPhone: '+525543453965',
         customer: expect.objectContaining({ phone: '55 4345 3965' }),
       }),
+      PIDE_LO_DE_UN_PEDIDO_NUEVO,
     )
   })
 
   it('sin sesión pasa cliente y teléfono vacíos; el 401 PHONE_VERIFICATION_REQUIRED del servicio se propaga', async () => {
     ;(createOnlineOrder as jest.Mock).mockRejectedValue(new UnauthorizedError('Verifica tu teléfono', 'PHONE_VERIFICATION_REQUIRED'))
     const r = await post()
-    expect(createOnlineOrder).toHaveBeenCalledWith(expect.objectContaining({ customerId: null, verifiedPhone: null }))
+    expect(createOnlineOrder).toHaveBeenCalledWith(
+      expect.objectContaining({ customerId: null, verifiedPhone: null }),
+      PIDE_LO_DE_UN_PEDIDO_NUEVO,
+    )
     expect(r.status).toBe(401)
     expect(r.body).toMatchObject({ success: false, code: 'PHONE_VERIFICATION_REQUIRED' })
   })
@@ -216,7 +232,10 @@ describe('API pública de pedidos en línea', () => {
     ;(createOnlineOrder as jest.Mock).mockRejectedValue(new UnauthorizedError('Verifica tu teléfono', 'PHONE_VERIFICATION_REQUIRED'))
     const r = await post({ payload: { ...body, customerId: 'cust1', verifiedPhone: '+525543453965' } })
     expect(r.status).toBe(401)
-    expect(createOnlineOrder).toHaveBeenCalledWith(expect.objectContaining({ customerId: null, verifiedPhone: null }))
+    expect(createOnlineOrder).toHaveBeenCalledWith(
+      expect.objectContaining({ customerId: null, verifiedPhone: null }),
+      PIDE_LO_DE_UN_PEDIDO_NUEVO,
+    )
   })
 
   it('H1: un token de cliente GENERAL no basta para pedir: 401 y no se crea nada', async () => {
@@ -249,6 +268,11 @@ describe('API pública de pedidos en línea', () => {
       expect.any(String),
       expect.objectContaining({ error: 'se cayó la base', name: 'Error', stack: expect.stringContaining('se cayó la base') }),
     )
+    // Sólo FEATURE_CHECK_UNAVAILABLE conserva su código: cualquier otro 503 sigue genérico.
+    ;(createOnlineOrder as jest.Mock).mockRejectedValue(new ServiceUnavailableError('detalle interno', 'OTRO_503'))
+    const otro = await post({ customer: true })
+    expect(otro.status).toBe(503)
+    expect(otro.body).toEqual({ success: false, error: 'No se pudo crear tu pedido' })
   })
 
   it('el seguimiento de OTRO venue es el MISMO 404 que un token inexistente y nunca expone el venueId', async () => {
@@ -374,9 +398,9 @@ describe('cableado: qué candados corre cada ruta', () => {
     expect(mockRan).toEqual(NUEVOS)
   })
 
-  it('POST /orders: venue operativo → token de PEDIDOS → candado de plan, en ese orden', async () => {
+  it('POST /orders: sólo venue ACTIVO → token de PEDIDOS; plan y negocio operativo NO van en la cadena (P1-06: los pide el servicio)', async () => {
     expect((await post({ customer: true })).status).toBe(201)
-    expect(mockRan).toEqual(['operational', 'ordering-auth', 'strict:ONLINE_ORDERING'])
+    expect(mockRan).toEqual(['plain', 'ordering-auth'])
   })
 
   it('seguimiento y cancelar: sólo el venue activo, SIN candado de plan ni exigir operativo (R14)', async () => {
@@ -439,5 +463,96 @@ describe('CORS de la tienda (montaje REAL de /api/v1/public, sin tocar corsOptio
     expect(permitidas).toEqual(expect.arrayContaining(['idempotency-key', 'authorization', 'content-type']))
     expect(String(r.headers['access-control-allow-methods'])).toContain('POST')
     expect(mockRan).toEqual([])
+  })
+})
+
+describe('P1-06: crear pedido busca SU pedido antes de exigir plan y negocio operativo', () => {
+  const REPLAY = { orderId: 'ord1', trackingToken: TOKEN, status: 'ACCEPTED', replay: true }
+  const NUEVO = { orderId: 'ord2', trackingToken: 'N'.repeat(32), status: 'PENDING_ACCEPTANCE', replay: false }
+  /** El contrato del servicio: con pedido previo responde la repetición; si no, corre `assertCanCreate` y sólo entonces crea. */
+  const servicio = (yaExiste: boolean) => {
+    const creado = jest.fn()
+    ;(createOnlineOrder as jest.Mock).mockImplementation(async (_input: unknown, opts?: { assertCanCreate?: () => Promise<void> }) => {
+      if (yaExiste) return REPLAY
+      await opts?.assertCanCreate?.()
+      creado()
+      return NUEVO
+    })
+    return creado
+  }
+
+  beforeEach(() => {
+    prismaMock.venue.findFirst.mockResolvedValue({ id: 'v1' } as any) // negocio operativo
+    ;(venueHasFeatureAccess as jest.Mock).mockResolvedValue(true) // con plan
+  })
+
+  it('repetición con el plan VENCIDO ⇒ 200 con el mismo trackingToken y replay:true', async () => {
+    servicio(true)
+    ;(venueHasFeatureAccess as jest.Mock).mockResolvedValue(false)
+    const r = await post({ customer: true })
+    expect(r.status).toBe(200)
+    expect(r.body).toEqual({ success: true, data: REPLAY })
+    expect(mockRan).toEqual(['plain', 'ordering-auth'])
+  })
+
+  it('repetición con el negocio que ya NO opera ⇒ 200 con su pedido', async () => {
+    servicio(true)
+    prismaMock.venue.findFirst.mockResolvedValue(null)
+    const r = await post({ customer: true })
+    expect(r.status).toBe(200)
+    expect(r.body.data).toMatchObject({ trackingToken: TOKEN, replay: true })
+    expect(mockRan).toEqual(['plain', 'ordering-auth'])
+  })
+
+  it('NUEVO con plan y negocio operativo ⇒ 201', async () => {
+    const creado = servicio(false)
+    expect((await post({ customer: true })).status).toBe(201)
+    expect(creado).toHaveBeenCalledTimes(1)
+  })
+
+  it('NUEVO sin plan ⇒ 403 PLAN_REQUIRED en el sobre público, sin crear nada', async () => {
+    const creado = servicio(false)
+    ;(venueHasFeatureAccess as jest.Mock).mockResolvedValue(false)
+    const r = await post({ customer: true })
+    expect(r.status).toBe(403)
+    expect(r.body).toEqual({ success: false, code: 'PLAN_REQUIRED', error: 'Este negocio no recibe pedidos en línea por el momento.' })
+    expect(venueHasFeatureAccess).toHaveBeenCalledWith('v1', 'ONLINE_ORDERING')
+    expect(creado).not.toHaveBeenCalled()
+  })
+
+  it('NUEVO con el negocio que no opera ⇒ 404 VENUE_NOT_FOUND, sin preguntar por el plan ni crear', async () => {
+    const creado = servicio(false)
+    prismaMock.venue.findFirst.mockResolvedValue(null)
+    const r = await post({ customer: true })
+    expect(r.status).toBe(404)
+    expect(r.body).toMatchObject({ success: false, code: 'VENUE_NOT_FOUND' })
+    const where = (prismaMock.venue.findFirst.mock.calls[0][0] as any).where
+    expect(where).toMatchObject({ id: 'v1', active: true })
+    expect(where.status.in).toEqual(['TRIAL', 'ONBOARDING', 'PENDING_ACTIVATION', 'ACTIVE'])
+    expect(venueHasFeatureAccess).not.toHaveBeenCalled()
+    expect(creado).not.toHaveBeenCalled()
+  })
+
+  it('NUEVO con la verificación de plan caída ⇒ 503 FEATURE_CHECK_UNAVAILABLE CON su code (falla cerrado)', async () => {
+    const creado = servicio(false)
+    ;(venueHasFeatureAccess as jest.Mock).mockRejectedValue(new Error('db caída'))
+    const r = await post({ customer: true })
+    expect(r.status).toBe(503)
+    expect(r.body).toEqual({
+      success: false,
+      code: 'FEATURE_CHECK_UNAVAILABLE',
+      error: 'No pudimos verificar la disponibilidad. Intenta de nuevo.',
+    })
+    expect(creado).not.toHaveBeenCalled()
+  })
+
+  it('la misma llave con OTRO cliente u OTRA solicitud ⇒ 409 IDEMPOTENCY_KEY_CONFLICT, aunque el plan haya vencido', async () => {
+    ;(venueHasFeatureAccess as jest.Mock).mockResolvedValue(false)
+    ;(createOnlineOrder as jest.Mock).mockRejectedValue(
+      new ConflictError('Esa llave ya se usó para otro pedido. Vuelve a armar tu pedido.', 'IDEMPOTENCY_KEY_CONFLICT'),
+    )
+    const r = await post({ customer: true })
+    expect(r.status).toBe(409)
+    expect(r.body).toMatchObject({ success: false, code: 'IDEMPOTENCY_KEY_CONFLICT' })
   })
 })

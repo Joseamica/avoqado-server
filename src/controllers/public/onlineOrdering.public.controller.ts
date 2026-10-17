@@ -2,6 +2,8 @@ import type { Request, Response } from 'express'
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
 import type { CustomerAuthContext } from '@/middlewares/customerAuth.middleware'
+import { assertOrderingPlan } from '@/middlewares/requirePublicVenueFeatureStrict.middleware'
+import { assertOperationalVenue } from '@/middlewares/resolveOperationalVenueBySlug.middleware'
 import { ACCEPT_TIMEOUT_MINUTES } from '@/services/online-ordering/constants'
 import { getPublicMenu } from '@/services/online-ordering/menu.service'
 import { createOnlineOrder, getTrackingByToken } from '@/services/online-ordering/order.service'
@@ -18,12 +20,14 @@ function fail(res: Response, error: any, fallback: string) {
   const status: number = error?.statusCode ?? 500
   // Nombre y pila SÓLO al log del servidor (para diagnosticar un 5xx en producción); al comensal, el texto genérico.
   if (status >= 500) logger.error('[OnlineOrdering] error público', { error: error?.message, name: error?.name, stack: error?.stack })
+  // Un 5xx no expone su código interno (p. ej. el de Prisma). Excepción explícita: «no pudimos verificar el plan» (503 nuestro,
+  // con texto para el comensal) conserva su código: la tienda sabe que puede reintentar.
+  const expose = status < 500 || (status === 503 && error?.code === 'FEATURE_CHECK_UNAVAILABLE')
   return res.status(status).json({
     success: false,
-    // Un 5xx no expone su código interno (p. ej. el de Prisma).
-    code: status >= 500 ? undefined : error?.code,
-    error: status >= 500 ? fallback : error.message,
-    details: status >= 500 ? undefined : error?.details,
+    code: expose ? error?.code : undefined,
+    error: expose ? error.message : fallback,
+    details: expose ? error?.details : undefined,
   })
 }
 
@@ -123,18 +127,22 @@ export async function postOrder(req: Request, res: Response) {
     // exige que el teléfono del pedido sea ése; sin sesión responde 401 PHONE_VERIFICATION_REQUIRED.
     const auth = (req as any).customerAuth as CustomerAuthContext | null
 
-    const result = await createOnlineOrder({
-      venueId: venue.id,
-      idempotencyKey: key,
-      items: body.items,
-      paymentMode: body.paymentMode,
-      expectedTotal: body.expectedTotal,
-      customer: { name: body.customer.name, phone: body.customer.phone, email: body.customer.email ?? null },
-      customerId: auth?.customerId ?? null,
-      verifiedPhone: auth?.verifiedPhone ?? null,
-      note: body.note ?? null,
-      whatsappConsent: body.whatsappConsent === true,
-    })
+    const result = await createOnlineOrder(
+      {
+        venueId: venue.id,
+        idempotencyKey: key,
+        items: body.items,
+        paymentMode: body.paymentMode,
+        expectedTotal: body.expectedTotal,
+        customer: { name: body.customer.name, phone: body.customer.phone, email: body.customer.email ?? null },
+        customerId: auth?.customerId ?? null,
+        verifiedPhone: auth?.verifiedPhone ?? null,
+        note: body.note ?? null,
+        whatsappConsent: body.whatsappConsent === true,
+      },
+      // P1-06: negocio operativo y plan sólo para un pedido NUEVO; el servicio los pide después de buscar la repetición.
+      { assertCanCreate: () => assertOperationalVenue(venue.id).then(() => assertOrderingPlan(venue.id)) },
+    )
     return res.status(result.replay ? 200 : 201).json({ success: true, data: result })
   } catch (error) {
     return fail(res, error, 'No se pudo crear tu pedido')

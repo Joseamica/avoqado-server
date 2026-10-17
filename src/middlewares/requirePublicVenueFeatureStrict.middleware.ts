@@ -7,7 +7,32 @@
  */
 import type { NextFunction, Request, Response } from 'express'
 import logger from '../config/logger'
+import { ForbiddenError, ServiceUnavailableError } from '../errors/AppError'
 import { venueHasFeatureAccess } from '../services/access/basePlan.service'
+
+export const ORDERING_UNAVAILABLE_MESSAGE = 'Este negocio no recibe pedidos en línea por el momento.'
+
+/** Lanza 403 `PLAN_REQUIRED` si el plan no incluye la función, o 503 `FEATURE_CHECK_UNAVAILABLE` si no se pudo verificar. */
+export async function assertPublicVenueFeatureStrict(venueId: string, featureCode: string, customerMessage?: string): Promise<void> {
+  let allowed: boolean
+  try {
+    allowed = await venueHasFeatureAccess(venueId, featureCode)
+  } catch (error) {
+    logger.error('❌ Public feature access check error — failing CLOSED', {
+      featureCode,
+      venueId,
+      error: error instanceof Error ? error.message : String(error),
+    })
+    throw new ServiceUnavailableError('No pudimos verificar la disponibilidad. Intenta de nuevo.', 'FEATURE_CHECK_UNAVAILABLE')
+  }
+  if (!allowed) {
+    throw new ForbiddenError(customerMessage ?? 'Este negocio no tiene esta función disponible en línea por el momento.', 'PLAN_REQUIRED')
+  }
+}
+
+/** P1-06: el plan de un pedido NUEVO. Crear pedido lo pide DESPUÉS de buscar la repetición (un reintento recibe su pedido). */
+export const assertOrderingPlan = (venueId: string) =>
+  assertPublicVenueFeatureStrict(venueId, 'ONLINE_ORDERING', ORDERING_UNAVAILABLE_MESSAGE)
 
 export function requirePublicVenueFeatureStrict(featureCode: string, customerMessage?: string) {
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
@@ -17,27 +42,11 @@ export function requirePublicVenueFeatureStrict(featureCode: string, customerMes
       return
     }
     try {
-      const allowed = await venueHasFeatureAccess(venue.id, featureCode)
-      if (!allowed) {
-        res.status(403).json({
-          success: false,
-          code: 'PLAN_REQUIRED',
-          error: customerMessage ?? 'Este negocio no tiene esta función disponible en línea por el momento.',
-        })
-        return
-      }
-      next()
-    } catch (error) {
-      logger.error('❌ Public feature access check error — failing CLOSED', {
-        featureCode,
-        venueSlug: venue.slug,
-        error: error instanceof Error ? error.message : String(error),
-      })
-      res.status(503).json({
-        success: false,
-        code: 'FEATURE_CHECK_UNAVAILABLE',
-        error: 'No pudimos verificar la disponibilidad. Intenta de nuevo.',
-      })
+      await assertPublicVenueFeatureStrict(venue.id, featureCode, customerMessage)
+    } catch (error: any) {
+      res.status(error.statusCode).json({ success: false, code: error.code, error: error.message })
+      return
     }
+    next()
   }
 }
