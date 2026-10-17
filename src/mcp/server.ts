@@ -36,6 +36,7 @@ import { registerCampaignTools } from './tools/campaigns'
 import { registerReceiptLayoutTools } from './tools/receiptLayout'
 import { registerServiceCourseTools } from './tools/serviceCourses'
 import { registerCreditPackTools } from './tools/creditPacks'
+import { registerGiftCardTools } from './tools/giftCards'
 import { registerShiftTools } from './tools/shifts'
 import { registerDiscountTools } from './tools/discounts'
 import { registerUpsellTools } from './tools/upsell'
@@ -130,6 +131,7 @@ export function registerAllTools(server: McpServer, scope: McpScope, flags: Tool
   registerReceiptLayoutTools(server, scope)
   registerServiceCourseTools(server, scope)
   registerCreditPackTools(server, scope)
+  registerGiftCardTools(server, scope) // sólo lectura; sin candado de plan (el saldo vendido siempre se lee)
   registerShiftTools(server, scope)
   registerDiscountTools(server, scope)
   registerUpsellTools(server, scope)

@@ -143,6 +143,8 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   get_venue_downgrade_preview: 'read',
   get_venue_plan_status: 'read',
   get_venue_seat_status: 'read',
+  gift_card_lookup: 'read',
+  gift_cards_summary: 'read',
   global_invoice_excluded_sales: 'read',
   hybrid_campaign_redemptions: 'read',
   hybrid_contracts: 'read',

@@ -17,6 +17,7 @@ import { venueStartOfDay, venueEndOfDay } from '@/utils/datetime'
 import { registerSalesTools } from '@/mcp/tools/sales'
 import { registerPaymentTools } from '@/mcp/tools/payments'
 import { registerSettlementReportTools } from '@/mcp/tools/settlementReport'
+import { registerGiftCardTools } from '@/mcp/tools/giftCards'
 import { utcTsParam } from '@/utils/sqlDates'
 import type { McpScope } from '@/mcp/scope'
 
@@ -91,6 +92,7 @@ async function main() {
   registerSalesTools(server, scope)
   registerPaymentTools(server, scope)
   registerSettlementReportTools(server, scope)
+  registerGiftCardTools(server, scope)
   const callTool = async (n: string, a: Record<string, unknown>) => {
     const handler = handlers.get(n)
     if (!handler) throw new Error(`Tool ${n} no registrado`)
@@ -100,45 +102,90 @@ async function main() {
 
   // ---- 1) sales_by_payment_method: gross + net, per method ----
   const sbpm = await callTool('sales_by_payment_method', { venueId: VENUE, fromDate: fromStr, toDate: toStr })
+  // Tarjetas de regalo (ruling del coordinador en B5 r1): `grossCollected` es la vista de DINERO —la venta de una tarjeta se
+  // queda en el método con que se pagó y lo pagado CON saldo no entra (no es dinero nuevo)—; `netSales` es la vista de VENTAS
+  // —sin la venta de tarjetas (va aparte en `giftCardLoads`) y con lo pagado con saldo como GIFT_CARD (tender de sistema), nunca
+  // OTHER—. Formulación INDEPENDIENTE de la herramienta (que usa Prisma `items.none`, `tenderTypeId: null OR systemKind: null`
+  // y un groupBy por tender): NOT EXISTS sobre el renglón con giftCardId y `IS DISTINCT FROM` / CASE sobre
+  // VenueTenderType.systemKind. Un REFUND hereda el tender de su cobro, así que su reverso también es GIFT_CARD.
+  const sinCargas = `NOT EXISTS (SELECT 1 FROM "OrderItem" gc_oi WHERE gc_oi."orderId" = p."orderId" AND gc_oi."giftCardId" IS NOT NULL)`
+  const esCarga = `EXISTS (SELECT 1 FROM "OrderItem" gc_oi WHERE gc_oi."orderId" = p."orderId" AND gc_oi."giftCardId" IS NOT NULL)`
+  const metodo = `CASE WHEN gt."systemKind" = 'GIFT_CARD' THEN 'GIFT_CARD' ELSE p.method::text END`
   // Ground truth GROSS = all COMPLETED by method (incl refunds-as-negatives + cancelled) INCLUDING TIPS —
-  // mirrors the dashboard "Métodos de Pago" panel (sum(amount + tipAmount), no type/order filter).
+  // mirrors the dashboard "Métodos de Pago" panel (sum(amount + tipAmount), no type/order filter) — CON las cargas en su
+  // método real y SIN lo pagado con saldo (vista de dinero).
   const grossDb = await prisma.$queryRawUnsafe<{ method: string; c: number; s: number }[]>(
-    `SELECT method, count(*)::int c, COALESCE(sum(amount + COALESCE("tipAmount",0)),0)::float8 s FROM "Payment" WHERE "venueId"=$1 AND status='COMPLETED' AND "createdAt">=$2 AND "createdAt"<=$3 GROUP BY method`,
+    `SELECT p.method::text AS method, count(*)::int c, COALESCE(sum(p.amount + COALESCE(p."tipAmount",0)),0)::float8 s
+       FROM "Payment" p LEFT JOIN "VenueTenderType" gt ON gt.id = p."tenderTypeId"
+      WHERE p."venueId"=$1 AND p.status='COMPLETED' AND p."createdAt">=${utcTsParam(2)} AND p."createdAt"<=${utcTsParam(3)}
+        AND gt."systemKind" IS DISTINCT FROM 'GIFT_CARD'
+      GROUP BY 1`,
     VENUE,
     start,
     end,
   )
   // Ground truth NET = COMPLETED incl refunds-as-negatives (so refunds ARE subtracted), excl cancelled
   // orders, amount only (no tips). Refund rows keep type=REFUND but are NOT filtered out here — that is
-  // exactly what makes netSales "net of refunds".
+  // exactly what makes netSales "net of refunds". Sin las cargas.
   const netDb = await prisma.$queryRawUnsafe<{ method: string; c: number; s: number }[]>(
-    `SELECT p.method, count(*)::int c, COALESCE(sum(p.amount),0)::float8 s FROM "Payment" p LEFT JOIN "Order" o ON o.id=p."orderId"
-     WHERE p."venueId"=$1 AND p.status='COMPLETED' AND (o.status IS NULL OR o.status!='CANCELLED') AND p."createdAt">=$2 AND p."createdAt"<=$3 GROUP BY p.method`,
+    `SELECT ${metodo} AS method, count(*)::int c, COALESCE(sum(p.amount),0)::float8 s
+       FROM "Payment" p LEFT JOIN "Order" o ON o.id=p."orderId" LEFT JOIN "VenueTenderType" gt ON gt.id = p."tenderTypeId"
+      WHERE p."venueId"=$1 AND p.status='COMPLETED' AND (o.status IS NULL OR o.status!='CANCELLED') AND p."createdAt">=${utcTsParam(2)} AND p."createdAt"<=${utcTsParam(3)}
+        AND ${sinCargas}
+      GROUP BY 1`,
     VENUE,
     start,
     end,
   )
+  // Tarjetas cargadas (B5 r1, M-1): los cobros de cuentas de tarjetas PAGADAS, con sus REFUND negativos restando y sin contarse
+  // como carga; mismo filtro de canceladas que `netSales` (la herramienta usa `excludeCancelledOrders: true`).
+  const cargasDb = (
+    await prisma.$queryRawUnsafe<{ c: number; s: number }[]>(
+      `SELECT (count(*) FILTER (WHERE p.type IS DISTINCT FROM 'REFUND'))::int c, COALESCE(sum(p.amount),0)::float8 s
+         FROM "Payment" p JOIN "Order" o ON o.id=p."orderId"
+        WHERE p."venueId"=$1 AND p.status='COMPLETED' AND o.status!='CANCELLED' AND o."paymentStatus"='PAID'
+          AND p."createdAt">=${utcTsParam(2)} AND p."createdAt"<=${utcTsParam(3)} AND ${esCarga}`,
+      VENUE,
+      start,
+      end,
+    )
+  )[0]
+  // r2 #3: las consultas del cuadre usan `utcTsParam` (la base local corre en hora de México; un `Date` suelto corre el
+  // intervalo 6 h). La siembra del cuadre incluye un cobro a las 23:55 hora del negocio, que debe caer en su día.
   console.log('── sales_by_payment_method ──')
   check(
-    'gross total',
+    'gross total (dinero: cargas en su método, sin saldo)',
     sbpm.grossCollected.total,
     grossDb.reduce((sum, r) => sum + r.s, 0),
   )
   check(
-    'net total',
+    'net total (ventas: sin tarjetas cargadas)',
     sbpm.netSales.total,
     netDb.reduce((sum, r) => sum + r.s, 0),
   )
   checkMethods('gross', sbpm.grossCollected.byMethod, grossDb)
   checkMethods('net  ', sbpm.netSales.byMethod, netDb)
+  // Las dos líneas propias de tarjetas: si la herramienta dejara lo pagado con saldo en OTHER, o las cargas dentro de la venta,
+  // descuadran aquí aunque los totales por método coincidieran por casualidad.
+  check(
+    'tarjetas de regalo cargadas (giftCardLoads, aparte)',
+    sbpm.giftCardLoads?.total ?? 0,
+    cargasDb.s,
+    sbpm.giftCardLoads?.count ?? 0,
+    cargasDb.c,
+  )
+  const saldoMcp = sbpm.netSales.byMethod.find((r: { method: string }) => r.method === 'GIFT_CARD') ?? { total: 0, count: 0 }
+  const saldoDb = netDb.find(r => r.method === 'GIFT_CARD') ?? { s: 0, c: 0 }
+  check('pagado con saldo de regalo (GIFT_CARD, net)', saldoMcp.total, saldoDb.s, saldoMcp.count, saldoDb.c)
 
   // ---- 2) list_payments: completed (SALES, refunds excluded) + refunds bucket ----
   // NOTE: since the 2026-07-03 fix, `completed.gross` is COMPLETED minus type=REFUND (true sales),
   // and refunds live in their own bucket (negative). Ground truth must split the same way.
+  // Binds UTC aquí y en staff_tips (r2 #3): con `$2` suelto, el cobro de las 23:55 de la siembra se salía del día (−$50 medido).
   const lp = await callTool('list_payments', { venueId: VENUE, fromDate: fromStr, toDate: toStr, status: 'all' })
   const lpSalesDb = (
     await prisma.$queryRawUnsafe<{ c: number; s: number }[]>(
-      `SELECT count(*)::int c, COALESCE(sum(amount),0)::float8 s FROM "Payment" WHERE "venueId"=$1 AND status='COMPLETED' AND (type IS NULL OR type!='REFUND') AND "createdAt">=$2 AND "createdAt"<=$3`,
+      `SELECT count(*)::int c, COALESCE(sum(amount),0)::float8 s FROM "Payment" WHERE "venueId"=$1 AND status='COMPLETED' AND (type IS NULL OR type!='REFUND') AND "createdAt">=${utcTsParam(2)} AND "createdAt"<=${utcTsParam(3)}`,
       VENUE,
       start,
       end,
@@ -146,7 +193,7 @@ async function main() {
   )[0]
   const lpRefundDb = (
     await prisma.$queryRawUnsafe<{ c: number; s: number }[]>(
-      `SELECT count(*)::int c, COALESCE(sum(amount),0)::float8 s FROM "Payment" WHERE "venueId"=$1 AND (type='REFUND' OR status='REFUNDED') AND "createdAt">=$2 AND "createdAt"<=$3`,
+      `SELECT count(*)::int c, COALESCE(sum(amount),0)::float8 s FROM "Payment" WHERE "venueId"=$1 AND (type='REFUND' OR status='REFUNDED') AND "createdAt">=${utcTsParam(2)} AND "createdAt"<=${utcTsParam(3)}`,
       VENUE,
       start,
       end,
@@ -165,7 +212,7 @@ async function main() {
     `SELECT p."processedById" sid, trim(concat(st."firstName", ' ', st."lastName")) name, count(*)::int c, COALESCE(sum(p."tipAmount"),0)::float8 s
      FROM "Payment" p LEFT JOIN "Order" o ON o.id=p."orderId" LEFT JOIN "Staff" st ON st.id=p."processedById"
      WHERE p."venueId"=$1 AND p.status='COMPLETED' AND p.type!='REFUND' AND (o.status IS NULL OR o.status!='CANCELLED')
-       AND p."tipAmount">0 AND p."createdAt">=$2 AND p."createdAt"<=$3
+       AND p."tipAmount">0 AND p."createdAt">=${utcTsParam(2)} AND p."createdAt"<=${utcTsParam(3)}
      GROUP BY p."processedById", name ORDER BY s DESC`,
     VENUE,
     start,
@@ -257,6 +304,42 @@ async function main() {
   )
   const sinFechaConCosto = sinFecha.filter((i: any) => i.totalComision !== null).length
   check('«Sin calcular» == sin costo + con costo sin regla vigente', sdc.unscheduled?.cobros ?? 0, dbRow.sinTc + sinFechaConCosto)
+
+  // ---- 5) gift_cards_summary: vendido, usado neto y cancelado contra la libreta; saldo vivo contra los sobres; antigüedad
+  //         contra una formulación INDEPENDIENTE (DISTINCT ON en vez del LATERAL de la herramienta) ----
+  console.log('── gift_cards_summary ──')
+  const gc = await callTool('gift_cards_summary', { venueId: VENUE, fromDate: fromStr, toDate: toStr })
+  const libreta = await prisma.$queryRawUnsafe<{ type: string; c: number; s: number }[]>(
+    `SELECT type::text AS type, count(*)::int c, COALESCE(sum(amount),0)::float8 s FROM "GiftCardActivity"
+      WHERE "venueId"=$1 AND "createdAt">=${utcTsParam(2)} AND "createdAt"<=${utcTsParam(3)} GROUP BY type`,
+    VENUE,
+    start,
+    end,
+  )
+  const tipo = (t: string) => libreta.find(r => r.type === t) ?? { c: 0, s: 0 }
+  check('tarjetas vendidas (ACTIVATE)', gc.sold.amount, tipo('ACTIVATE').s, gc.sold.cards, tipo('ACTIVATE').c)
+  check('saldo usado neto (REDEEM − REDEEM_REVERSAL)', gc.redeemed.net, tipo('REDEEM').s - tipo('REDEEM_REVERSAL').s)
+  check('ventas canceladas (DEACTIVATE)', gc.cancelled.amount, tipo('DEACTIVATE').s, gc.cancelled.cards, tipo('DEACTIVATE').c)
+  const vivoDb = (
+    await prisma.$queryRawUnsafe<{ c: number; s: number }[]>(
+      `SELECT count(*)::int c, COALESCE(sum(balance),0)::float8 s FROM "GiftCard" WHERE "venueId"=$1 AND status IN ('ACTIVE','BLOCKED') AND balance > 0`,
+      VENUE,
+    )
+  )[0]
+  check('saldo vivo de hoy', gc.liveBalance.amount, vivoDb.s, gc.liveBalance.cards, vivoDb.c)
+  const corteDb = (
+    await prisma.$queryRawUnsafe<{ c: number; s: number }[]>(
+      `SELECT count(*)::int c, COALESCE(sum(x."balanceAfter"),0)::float8 s FROM (
+         SELECT DISTINCT ON (a."giftCardId") a."balanceAfter"
+           FROM "GiftCardActivity" a JOIN "GiftCard" g ON g.id = a."giftCardId"
+          WHERE a."venueId"=$1 AND a."createdAt"<=${utcTsParam(2)} AND g."activatedAt" IS NOT NULL AND g."activatedAt"<=${utcTsParam(2)}
+          ORDER BY a."giftCardId", a."createdAt" DESC, a.id DESC) x
+       WHERE x."balanceAfter" > 0`,
+      VENUE,
+      end,
+    )
+  )[0]
+  check('antigüedad: saldo al cierre del periodo', gc.aging.total.amount, corteDb.s, gc.aging.total.cards, corteDb.c)
 
   console.log(`\n  ${pass} ✅ / ${fail} ❌  — todo verde = cada cifra del MCP cuadra al centavo con la DB\n`)
   await prisma.$disconnect()

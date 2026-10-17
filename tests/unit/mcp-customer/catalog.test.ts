@@ -192,6 +192,9 @@ const NUNCA_EN_DIRECTORIO = [
   'staff_documents',
   'stamp_payroll_receipts',
   'supplier_invoices',
+  // saldo de tarjetas de regalo: en la fase 1a sólo en el MCP libre; el directorio pide su propia revisión
+  'gift_card_lookup',
+  'gift_cards_summary',
   // mostrar o vender planes de Avoqado
   'get_venue_plan_status',
   'get_venue_seat_status',
@@ -377,4 +380,10 @@ describe('catálogo en bloque (sólo MCP libre)', () => {
   it('ninguna de las cuatro está en una tanda del directorio certificado', () => {
     for (const tanda of DIRECTORY_TIERS) for (const nombre of NOMBRES) expect(tanda.tools).not.toContain(nombre)
   })
+})
+
+it('tarjetas de regalo (fase 1a): dos LECTURAS que sólo viven en el MCP libre, nunca en el directorio', () => {
+  expect(TOOL_EFFECTS.gift_cards_summary).toBe('read')
+  expect(TOOL_EFFECTS.gift_card_lookup).toBe('read')
+  expect(NUNCA_EN_DIRECTORIO).toEqual(expect.arrayContaining(['gift_card_lookup', 'gift_cards_summary']))
 })
