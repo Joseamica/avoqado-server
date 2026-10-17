@@ -19714,7 +19714,7 @@ model OnlineOrderingSettings {
   acceptsPayAtPickup Boolean   @default(true)
   /// Pausa del gerente (ajustes, `online-orders:manage`).
   manualPause        Boolean   @default(false)
-  /// Pausa temporal: la pone el gerente o, desde el piso, cocina y caja (15/30/60 min, `orders:update`).
+  /// Pausa temporal desde el piso (15/30/60 min, `online-orders:pause`: gerente para arriba o con su PIN en el POS).
   pausedUntil        DateTime?
   /// Mismo formato `HorarioSemanal` de `delivery-channels/core/deliveryHours.service.ts`. NULL = sin restricción. Al crear la
   /// fila se precarga el horario de reservas si existe y es válido.

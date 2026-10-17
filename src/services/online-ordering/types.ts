@@ -22,5 +22,5 @@ export interface AcceptingState {
   config: OnlineOrderingConfig
 }
 
-/** R12: lo que cocina y caja pueden frenar desde el piso. */
+/** R12: lo que se puede frenar desde el piso con `online-orders:pause` (D7: gerente para arriba, o con su PIN en el POS). */
 export type FloorPauseMinutes = 15 | 30 | 60

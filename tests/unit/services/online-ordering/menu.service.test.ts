@@ -135,6 +135,40 @@ describe('loadVisibleMenu', () => {
     expect(menu.categories[0].products.map(p => p.id)).toEqual(['p-normal'])
     expect(menu.truncated).toBe(true)
   })
+
+  /** M-4: grupos que nadie puede cumplir (p. ej. desactivaron todos los sabores agotados de un obligatorio). */
+  const IMPOSIBLES: Array<[string, Record<string, unknown>]> = [
+    ['obligatorio sin opciones activas', { required: true, minSelections: 0, modifiers: [] }],
+    ['con mínimo y sin opciones activas', { required: false, minSelections: 1, modifiers: [] }],
+    ['mínimo mayor que las opciones activas', { required: true, allowMultiple: true, minSelections: 3, maxSelections: null }],
+    ['selección única con mínimo de 2', { required: true, allowMultiple: false, minSelections: 2, maxSelections: null }],
+    ['mínimo mayor que el máximo', { required: true, allowMultiple: true, minSelections: 2, maxSelections: 1 }],
+  ]
+
+  it.each(IMPOSIBLES)(
+    'M-4: un platillo con un grupo imposible (%s) no se ofrece, y el conteo de su categoría no lo cuenta',
+    async (_caso, o) => {
+      const imposible = product('p-imposible', { modifierGroups: [{ group: { ...group().group, ...o } }] })
+      prismaMock.menuCategory.findMany.mockResolvedValue([category('cat1', [imposible, product('p-normal')])] as any)
+      prismaMock.product.groupBy.mockResolvedValue([{ categoryId: 'cat1', _count: { _all: 2 } }] as any)
+      const menu = await loadVisibleMenu('v1', NOW)
+      expect(menu.categories[0].products.map(p => p.id)).toEqual(['p-normal'])
+      expect(menu.categories[0].productCount).toBe(1)
+      expect(menu.truncated).toBe(false) // no es un recorte: el platillo no se puede pedir
+    },
+  )
+
+  it('M-4: los grupos que SÍ se pueden cumplir siguen en la carta (opcional sin opciones, mínimo igual a las opciones)', async () => {
+    const opcionalVacio = product('p-a', {
+      modifierGroups: [{ group: { ...group().group, required: false, minSelections: 0, modifiers: [] } }],
+    })
+    const justo = product('p-b', {
+      modifierGroups: [{ group: { ...group().group, allowMultiple: true, minSelections: 2, maxSelections: 2 } }],
+    })
+    prismaMock.menuCategory.findMany.mockResolvedValue([category('cat1', [opcionalVacio, justo])] as any)
+    const menu = await loadVisibleMenu('v1', NOW)
+    expect(menu.categories[0].products.map(p => p.id)).toEqual(['p-a', 'p-b'])
+  })
 })
 
 describe('loadCategoryVisibility (H4)', () => {

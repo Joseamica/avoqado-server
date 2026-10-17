@@ -73,6 +73,7 @@ const existing = (o: Record<string, unknown> = {}) => ({
 beforeEach(() => {
   ;(getAcceptingStatus as jest.Mock).mockResolvedValue(OPEN)
   ;(quoteCart as jest.Mock).mockResolvedValue(QUOTE_OK)
+  prismaMock.order.findUnique.mockReset() // sin lecturas «Once» sobrantes de otra prueba
   prismaMock.order.findUnique.mockResolvedValue(null)
   prismaMock.order.findFirst.mockResolvedValue(null)
   prismaMock.onlineOrder.count.mockResolvedValue(0)
@@ -178,6 +179,38 @@ describe('createOnlineOrder', () => {
   it('la misma llave de OTRO cliente es 409 IDEMPOTENCY_KEY_CONFLICT y no entrega el token (R8)', async () => {
     prismaMock.order.findUnique.mockResolvedValue(existing({ customerId: 'otro-cliente' }) as any)
     await expect(createOnlineOrder(input())).rejects.toMatchObject({ statusCode: 409, code: 'IDEMPOTENCY_KEY_CONFLICT' })
+  })
+
+  const PEDIDO_DISTINTO = {
+    statusCode: 409,
+    code: 'IDEMPOTENCY_KEY_CONFLICT',
+    message: 'Ya hiciste un pedido distinto con esta misma solicitud. Recarga la página para empezar uno nuevo.',
+  }
+
+  it('M-3: la misma llave del MISMO cliente con OTRO total es 409: nunca devuelve el pedido viejo como si fuera el nuevo', async () => {
+    prismaMock.order.findUnique.mockResolvedValue(existing() as any) // se creó por $206.00
+    const err = await createOnlineOrder(input({ expectedTotal: '150.00' })).catch((e: unknown) => e)
+    expect(err).toMatchObject(PEDIDO_DISTINTO)
+    expect(JSON.stringify(err) + (err as Error).message).not.toContain('T'.repeat(32))
+    expect(prismaMock.order.create).not.toHaveBeenCalled()
+  })
+
+  it('M-3: también cuando la repetición aparece dentro del candado o en la carrera (P2002)', async () => {
+    // `quoteCart` (simulado) cotiza 206.00: el comensal confirma 206.00 y otra petición con la MISMA llave ya creó un pedido de
+    // 180.00 (otro carrito). Fuera del candado aún no existía.
+    const otroCarrito = {
+      total: D('180.00'),
+      onlineOrder: { id: 'oo1', status: 'PENDING_ACCEPTANCE', trackingToken: 'T'.repeat(32), acceptDeadlineAt: NOW },
+    }
+    prismaMock.order.findUnique.mockResolvedValueOnce(null).mockResolvedValueOnce(existing(otroCarrito) as any)
+    await expect(createOnlineOrder(input())).rejects.toMatchObject(PEDIDO_DISTINTO)
+    expect(prismaMock.order.create).not.toHaveBeenCalled()
+
+    prismaMock.order.findUnique.mockResolvedValueOnce(null).mockResolvedValueOnce(existing({ total: D('180.00') }) as any)
+    ;(prismaMock.$transaction as jest.Mock).mockRejectedValueOnce(
+      new Prisma.PrismaClientKnownRequestError('dup', { code: 'P2002', clientVersion: 'x' }),
+    )
+    await expect(createOnlineOrder(input())).rejects.toMatchObject(PEDIDO_DISTINTO)
   })
 
   it('una carrera por la misma llave (P2002) se resuelve devolviendo al ganador del mismo cliente', async () => {

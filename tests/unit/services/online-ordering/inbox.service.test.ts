@@ -1,6 +1,19 @@
 import { Prisma } from '@prisma/client'
 import { prismaMock } from '@tests/__helpers__/setup'
 import logger from '@/config/logger'
+import { logAction } from '@/services/dashboard/activity-log.service'
+
+jest.mock('@/services/online-ordering/notifications.service', () => ({
+  __esModule: true,
+  notifyOrderEvent: jest.fn(async () => undefined),
+}))
+jest.mock('@/communication/sockets/managers/socketManager', () => ({
+  __esModule: true,
+  socketManager: { broadcastToVenue: jest.fn() },
+}))
+
+import { socketManager } from '@/communication/sockets/managers/socketManager'
+import { notifyOrderEvent } from '@/services/online-ordering/notifications.service'
 import { listInbox } from '@/services/online-ordering/inbox.service'
 
 const NOW = new Date('2026-10-14T18:30:00.000Z')
@@ -27,9 +40,25 @@ const row = (id: string, status: string, o: Record<string, unknown> = {}) => ({
   ...o,
 })
 
+/** Las dos sincronizaciones al leer (R2 y «pagado al recoger») filtran por su cuenta (`where.order`); las listas, no. */
+const esSincronizacion = (a: any) => a.where.order !== undefined
+let CANCELADAS: any[] = []
+let PAGADAS: any[] = []
+const sync = (id: string, o: Record<string, unknown> = {}) => ({
+  id: `oo-${id}`,
+  orderId: `ord-${id}`,
+  venueId: 'v1',
+  status: 'READY',
+  order: { orderNumber: `W${id}`, status: 'CANCELLED' },
+  ...o,
+})
+
 beforeEach(() => {
+  CANCELADAS = []
+  PAGADAS = []
   prismaMock.onlineOrder.updateMany.mockResolvedValue({ count: 0 })
   prismaMock.onlineOrder.findMany.mockImplementation((async (a: any) => {
+    if (esSincronizacion(a)) return a.where.paymentMode ? PAGADAS : CANCELADAS
     const st = a.where.status.in as string[]
     if (st.includes('PENDING_ACCEPTANCE')) return [row('A', 'PENDING_ACCEPTANCE')]
     if (st.includes('ACCEPTED')) return [row('B', 'ACCEPTED')]
@@ -44,12 +73,12 @@ beforeEach(() => {
 })
 
 describe('listInbox', () => {
-  it('todas las consultas llevan tope (+1, H10) y el venue', async () => {
+  it('todas las consultas llevan tope (+1, H10, en las listas; 100 en las sincronizaciones) y el venue', async () => {
     await listInbox({ venueId: 'v1', now: NOW })
     for (const call of prismaMock.onlineOrder.findMany.mock.calls) {
       const a = call[0] as any
       expect(a.where.venueId).toBe('v1')
-      expect([101, 51]).toContain(a.take)
+      expect(esSincronizacion(a) ? [100] : [101, 51]).toContain(a.take)
     }
   })
 
@@ -73,14 +102,77 @@ describe('listInbox', () => {
 
   it('el filtro `pending` sólo consulta lo pendiente', async () => {
     await listInbox({ venueId: 'v1', filter: 'pending', now: NOW })
-    expect(prismaMock.onlineOrder.findMany).toHaveBeenCalledTimes(1)
+    const listas = prismaMock.onlineOrder.findMany.mock.calls.filter((c: any[]) => !esSincronizacion(c[0]))
+    expect(listas).toHaveLength(1)
   })
 
   it('antes de leer cierra los pedidos de cuentas canceladas por otra vía en este negocio (R2)', async () => {
+    CANCELADAS = [sync('X')]
     await listInbox({ venueId: 'v1', now: NOW })
-    const sync = prismaMock.onlineOrder.updateMany.mock.calls[0][0] as any
-    expect(sync.where).toMatchObject({ venueId: 'v1', order: { status: { in: ['CANCELLED', 'DELETED'] } } })
-    expect(sync.data).toMatchObject({ status: 'CANCELLED_BY_STAFF' })
+    const lectura = prismaMock.onlineOrder.findMany.mock.calls[0][0] as any
+    expect(lectura.where).toMatchObject({ venueId: 'v1', order: { status: { in: ['CANCELLED', 'DELETED'] } } })
+    const cas = prismaMock.onlineOrder.updateMany.mock.calls[0][0] as any
+    expect(cas.where).toEqual({ id: 'oo-X', status: { in: ['PENDING_ACCEPTANCE', 'ACCEPTED', 'READY'] } })
+    expect(cas.data).toMatchObject({ status: 'CANCELLED_BY_STAFF' })
+  })
+
+  it('I-1: el pedido que la bandeja cerró por R2 se avisa UNA vez (comensal, bandeja y bitácora); la siguiente lectura ya no avisa', async () => {
+    CANCELADAS = [sync('X')]
+    prismaMock.onlineOrder.updateMany.mockResolvedValueOnce({ count: 1 })
+    await listInbox({ venueId: 'v1', now: NOW })
+    expect(notifyOrderEvent).toHaveBeenCalledTimes(1)
+    expect(notifyOrderEvent).toHaveBeenCalledWith('ord-X', 'CANCELLED')
+    expect(socketManager.broadcastToVenue).toHaveBeenCalledWith(
+      'v1',
+      'order_updated',
+      expect.objectContaining({ orderId: 'ord-X', onlineStatus: 'CANCELLED_BY_STAFF', status: 'CANCELLED' }),
+    )
+    expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'ONLINE_ORDER_CANCELLED_BY_STAFF', entityId: 'oo-X' }))
+
+    // Ya cerrado: la siguiente bandeja lo vuelve a leer en el `findMany` simulado, pero su CAS da 0 y no avisa.
+    await listInbox({ venueId: 'v1', now: NOW })
+    expect(notifyOrderEvent).toHaveBeenCalledTimes(1)
+  })
+
+  it('opción 1 (founder, 17-oct): en la MISMA pasada y DESPUÉS de R2, entrega solo lo pagado al recoger de este negocio y lo anuncia', async () => {
+    PAGADAS = [sync('P', { order: { orderNumber: 'WP' } })]
+    prismaMock.onlineOrder.updateMany.mockResolvedValueOnce({ count: 1 })
+    await listInbox({ venueId: 'v1', now: NOW })
+
+    // En orden: primero R2, luego pagado al recoger, y sólo después las listas.
+    const lecturas = prismaMock.onlineOrder.findMany.mock.calls.map((c: any[]) => c[0])
+    expect(esSincronizacion(lecturas[0]) && lecturas[0].where.paymentMode === undefined).toBe(true)
+    expect(lecturas[1].where).toMatchObject({ venueId: 'v1', paymentMode: 'PAY_AT_PICKUP' })
+    expect(lecturas.slice(2).some(esSincronizacion)).toBe(false)
+    expect(prismaMock.onlineOrder.updateMany).toHaveBeenCalledWith({
+      where: { id: 'oo-P', status: 'READY' },
+      data: { status: 'COMPLETED', completedAt: NOW },
+    })
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'ONLINE_ORDER_COLLECTED',
+        entityId: 'oo-P',
+        staffId: null,
+        data: { orderNumber: 'WP', automatic: true },
+      }),
+    )
+    expect(notifyOrderEvent).not.toHaveBeenCalled() // el comensal ya está en el mostrador
+  })
+
+  it('I-2: lo activo sale lo MÁS NUEVO primero, así un tope nunca esconde lo recién aceptado o listo', async () => {
+    await listInbox({ venueId: 'v1', filter: 'active', now: NOW })
+    const activos = prismaMock.onlineOrder.findMany.mock.calls.map((c: any[]) => c[0]).find((a: any) => !esSincronizacion(a))
+    expect(activos.where.status).toEqual({ in: ['ACCEPTED', 'READY'] })
+    expect(activos.orderBy).toEqual([{ createdAt: 'desc' }, { id: 'desc' }])
+  })
+
+  it('si una sincronización falla, la bandeja igual se lista', async () => {
+    prismaMock.onlineOrder.findMany.mockImplementation((async (a: any) => {
+      if (esSincronizacion(a)) throw new Error('db')
+      return []
+    }) as any)
+    await expect(listInbox({ venueId: 'v1', now: NOW })).resolves.toMatchObject({ orders: [] })
+    expect(logger.warn).toHaveBeenCalledTimes(2)
   })
 
   it('si un tope recorta la bandeja lo dice (`truncated`, medido con tope + 1) y lo registra (R17, sin paginación en v1)', async () => {

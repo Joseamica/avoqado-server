@@ -1,5 +1,4 @@
-import { OnlineOrderPaymentMode, OnlineOrderStatus, OrderStatus, PaymentStatus, Prisma, type OnlineOrderRejectReason } from '@prisma/client'
-import logger from '@/config/logger'
+import { OnlineOrderStatus, OrderStatus, PaymentStatus, Prisma, type OnlineOrderRejectReason } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import { logAction } from '@/services/dashboard/activity-log.service'
@@ -7,12 +6,11 @@ import { debeMarcarCocina } from '@/services/kds/kitchenDisplayStations'
 import { armarComandasTrasCommit } from '@/services/kds/kitchenTicketAuthoring.service'
 import { findLiveTerminalCharge } from '@/services/shared/orderCancelGuard'
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
-import { socketManager } from '@/communication/sockets/managers/socketManager'
-import { SocketEventType } from '@/communication/sockets/types'
-import { syncOnlineOrdersOfCancelledOrders } from './cancelledOrderSync'
-import { OPEN_ORDER_STATUSES } from './constants'
+import { announceCancelledElsewhere, syncOnlineOrdersOfCancelledOrders, type CancelledElsewhere } from './cancelledOrderSync'
+import { OPEN_ORDER_STATUSES, PREPAID_MODES } from './constants'
 import { notifyOrderEvent } from './notifications.service'
 import { getSettings } from './settings.service'
+import { emitOnlineOrderUpdated } from './traySocket'
 
 export type TransitionResult =
   | { outcome: 'OK'; status: OnlineOrderStatus; estimatedReadyAt?: string | null }
@@ -75,11 +73,33 @@ const RULES: Record<
 }
 
 type CasResult =
-  | { r: 'OK'; now: Date; onlineOrderId: string; orderNumber: string; orderWritten: boolean }
-  | { r: 'STALE'; now: Date; status: OnlineOrderStatus | null; deadlinePassed: boolean }
+  | {
+      r: 'OK'
+      now: Date
+      onlineOrderId: string
+      orderNumber: string
+      orderWritten: boolean
+      /** M-7: el estado al que esta transición movió la cuenta, o `null` si no la escribió. */
+      orderStatus: OrderStatus | null
+    }
+  | {
+      r: 'STALE'
+      now: Date
+      status: OnlineOrderStatus | null
+      deadlinePassed: boolean
+      /** R2: lo que la sincronización cerró en esta transacción; se anuncia después del commit (I-1). */
+      cancelledElsewhere?: CancelledElsewhere[]
+    }
   | { r: 'NOT_FOUND' }
   | { r: 'HAS_PAYMENTS' }
   | { r: 'PAYMENT_REQUIRED' }
+
+/** M-1: la transición cancela pero la cuenta no se escribió: se lanza para que Postgres revierta también el CAS en línea. */
+class OrderNotWritten extends Error {
+  constructor(readonly now: Date) {
+    super('la cuenta no se canceló')
+  }
+}
 
 /**
  * Un solo cambio de estado, bajo el candado de la orden: candado → reloj → relectura de `OnlineOrder` y `Order` → reglas de la
@@ -98,68 +118,87 @@ async function casTransition(a: {
   extraWhere?: (now: Date, hasMoney: boolean) => Prisma.OnlineOrderWhereInput
 }): Promise<CasResult> {
   const rule = RULES[a.kind]
-  return prisma.$transaction(async (tx): Promise<CasResult> => {
-    if (!(await lockExistingOrderForPayment(tx, { venueId: a.venueId, orderId: a.orderId }))) return { r: 'NOT_FOUND' }
-    // R1: el reloj se toma DESPUÉS del candado: esperar la orden no puede convertir una aceptación vencida en válida.
-    const now = a.now ?? new Date()
-    const row = await tx.onlineOrder.findFirst({
-      where: { orderId: a.orderId, venueId: a.venueId },
-      select: {
-        id: true,
-        status: true,
-        paymentMode: true,
-        acceptDeadlineAt: true,
-        order: { select: { orderNumber: true, status: true, paymentStatus: true, paidAmount: true } },
-      },
-    })
-    if (!row) return { r: 'NOT_FOUND' }
-    const stale = (current: OnlineOrderStatus | null, deadlinePassed = false): CasResult => ({
-      r: 'STALE',
-      now,
-      status: current,
-      deadlinePassed,
-    })
+  let result: CasResult
+  try {
+    result = await prisma.$transaction(async (tx): Promise<CasResult> => {
+      if (!(await lockExistingOrderForPayment(tx, { venueId: a.venueId, orderId: a.orderId }))) return { r: 'NOT_FOUND' }
+      // R1: el reloj se toma DESPUÉS del candado: esperar la orden no puede convertir una aceptación vencida en válida.
+      const now = a.now ?? new Date()
+      const row = await tx.onlineOrder.findFirst({
+        where: { orderId: a.orderId, venueId: a.venueId },
+        select: {
+          id: true,
+          status: true,
+          paymentMode: true,
+          acceptDeadlineAt: true,
+          order: { select: { orderNumber: true, status: true, paymentStatus: true, paidAmount: true } },
+        },
+      })
+      if (!row) return { r: 'NOT_FOUND' }
+      const stale = (current: OnlineOrderStatus | null, deadlinePassed = false): Extract<CasResult, { r: 'STALE' }> => ({
+        r: 'STALE',
+        now,
+        status: current,
+        deadlinePassed,
+      })
 
-    // R2: la Order se canceló por otra vía (POS, panel, anular): el pedido se cierra con ella y nada lo revive ni lo «vence».
-    if (row.order.status === OrderStatus.CANCELLED || row.order.status === OrderStatus.DELETED) {
-      await syncOnlineOrdersOfCancelledOrders(tx, { venueId: a.venueId, orderId: a.orderId }, now)
-      const after = await tx.onlineOrder.findFirst({ where: { id: row.id }, select: { status: true } })
-      return stale(after?.status ?? null)
-    }
-    if (!rule.from.includes(row.status)) return stale(row.status)
+      // R2: la Order se canceló por otra vía (POS, panel, anular): el pedido se cierra con ella y nada lo revive ni lo «vence».
+      if (row.order.status === OrderStatus.CANCELLED || row.order.status === OrderStatus.DELETED) {
+        const cancelledElsewhere = await syncOnlineOrdersOfCancelledOrders(tx, { venueId: a.venueId, orderId: a.orderId }, now)
+        const after = await tx.onlineOrder.findFirst({ where: { id: row.id }, select: { status: true } })
+        return { ...stale(after?.status ?? null), cancelledElsewhere }
+      }
+      if (!rule.from.includes(row.status)) return stale(row.status)
 
-    const hasMoney = row.order.paymentStatus !== PaymentStatus.PENDING || new Prisma.Decimal(row.order.paidAmount).gt(0)
-    if (rule.cancels) {
-      // Ninguna cuenta con dinero —ni con un cobro de terminal en curso— se cancela desde aquí: misma regla que
-      // `assertOrderCancellableUnderLock`, sin lanzar (el job y la bandeja necesitan un desenlace, no un error).
-      if (hasMoney) return { r: 'HAS_PAYMENTS' }
-      if (await findLiveTerminalCharge(tx, { venueId: a.venueId, orderId: a.orderId })) return { r: 'HAS_PAYMENTS' }
-    }
-    // Pagar al recoger: se entrega cuando YA se cobró, leído bajo el candado (el cobro lo hace el flujo normal de caja).
-    if (
-      a.kind === 'DELIVER' &&
-      row.paymentMode === OnlineOrderPaymentMode.PAY_AT_PICKUP &&
-      row.order.paymentStatus !== PaymentStatus.PAID
-    ) {
-      return { r: 'PAYMENT_REQUIRED' }
-    }
+      const hasMoney = row.order.paymentStatus !== PaymentStatus.PENDING || new Prisma.Decimal(row.order.paidAmount).gt(0)
+      if (rule.cancels) {
+        // Ninguna cuenta con dinero —ni con un cobro de terminal en curso— se cancela desde aquí: misma regla que
+        // `assertOrderCancellableUnderLock`, sin lanzar (el job y la bandeja necesitan un desenlace, no un error).
+        if (hasMoney) return { r: 'HAS_PAYMENTS' }
+        if (await findLiveTerminalCharge(tx, { venueId: a.venueId, orderId: a.orderId })) return { r: 'HAS_PAYMENTS' }
+      }
+      // Se entrega cuando YA se cobró, leído bajo el candado (el cobro lo hace el flujo normal de caja). M-2: falla CERRADO: sólo
+      // un modo ya cobrado de antemano (`PREPAID_MODES`, vacío en 1a) se libra de exigirlo.
+      if (a.kind === 'DELIVER' && !PREPAID_MODES.includes(row.paymentMode) && row.order.paymentStatus !== PaymentStatus.PAID) {
+        return { r: 'PAYMENT_REQUIRED' }
+      }
 
-    const cas = await tx.onlineOrder.updateMany({
-      where: { id: row.id, status: { in: rule.from }, ...(a.extraWhere?.(now, hasMoney) ?? {}) },
-      data: { status: rule.to, ...a.onlineData(now) },
-    })
-    if (cas.count !== 1) {
-      const current = await tx.onlineOrder.findFirst({ where: { id: row.id }, select: { status: true, acceptDeadlineAt: true } })
-      return stale(current?.status ?? null, !!current && current.acceptDeadlineAt.getTime() <= now.getTime())
-    }
+      const cas = await tx.onlineOrder.updateMany({
+        where: { id: row.id, status: { in: rule.from }, ...(a.extraWhere?.(now, hasMoney) ?? {}) },
+        data: { status: rule.to, ...a.onlineData(now) },
+      })
+      if (cas.count !== 1) {
+        const current = await tx.onlineOrder.findFirst({ where: { id: row.id }, select: { status: true, acceptDeadlineAt: true } })
+        return stale(current?.status ?? null, !!current && current.acceptDeadlineAt.getTime() <= now.getTime())
+      }
 
-    const orderData: Prisma.OrderUncheckedUpdateManyInput = { status: rule.order.to, ...(a.orderExtra?.(now) ?? {}) }
-    const written = await tx.order.updateMany({
-      where: { id: a.orderId, venueId: a.venueId, status: { in: rule.order.when } },
-      data: orderData,
-    })
-    return { r: 'OK', now, onlineOrderId: row.id, orderNumber: row.order.orderNumber, orderWritten: written.count === 1 }
-  }, ORDER_LOCK_WAIT_BUDGET)
+      const orderData: Prisma.OrderUncheckedUpdateManyInput = { status: rule.order.to, ...(a.orderExtra?.(now) ?? {}) }
+      const written = await tx.order.updateMany({
+        where: { id: a.orderId, venueId: a.venueId, status: { in: rule.order.when } },
+        data: orderData,
+      })
+      // M-1: rechazar, vencer o cancelar sin cancelar la cuenta le diría al comensal «rechazado» o «vencido» con la venta viva
+      // (p. ej. una cortesía ya cerrada sin dinero). Se revierte todo y se responde el estado vigente.
+      if (rule.cancels && written.count !== 1) throw new OrderNotWritten(now)
+      const orderWritten = written.count === 1
+      return {
+        r: 'OK',
+        now,
+        onlineOrderId: row.id,
+        orderNumber: row.order.orderNumber,
+        orderWritten,
+        orderStatus: orderWritten ? rule.order.to : null,
+      }
+    }, ORDER_LOCK_WAIT_BUDGET)
+  } catch (error) {
+    if (!(error instanceof OrderNotWritten)) throw error
+    const current = await prisma.onlineOrder.findFirst({ where: { orderId: a.orderId, venueId: a.venueId }, select: { status: true } })
+    return { r: 'STALE', now: error.now, status: current?.status ?? null, deadlinePassed: false }
+  }
+
+  // I-1: lo que cerró la sincronización de R2 se anuncia aquí, ya con la transacción confirmada y sólo si ganó el CAS de la fila.
+  if (result.r === 'STALE' && result.cancelledElsewhere) announceCancelledElsewhere(result.cancelledElsewhere, result.now)
+  return result
 }
 
 function settled(r: Exclude<CasResult, { r: 'OK' }>): TransitionResult {
@@ -172,21 +211,6 @@ function settled(r: Exclude<CasResult, { r: 'OK' }>): TransitionResult {
       return { outcome: 'HAS_PAYMENTS' }
     default:
       return { outcome: 'PAYMENT_REQUIRED' }
-  }
-}
-
-function emitUpdated(venueId: string, orderId: string, orderNumber: string, status: OnlineOrderStatus, now: Date): void {
-  try {
-    socketManager.broadcastToVenue(venueId, SocketEventType.ORDER_UPDATED, {
-      orderId,
-      orderNumber,
-      venueId,
-      onlineStatus: status,
-      eventType: 'updated',
-      timestamp: now.toISOString(),
-    })
-  } catch (error) {
-    logger.error('[OnlineOrdering] socket emit falló (no fatal)', { orderId, error })
   }
 }
 
@@ -226,7 +250,14 @@ export async function acceptOnlineOrder(i: {
   if (r.r !== 'OK') return settled(r)
 
   if (marcarCocina && r.orderWritten) void armarComandasTrasCommit(i.venueId, i.orderId, 'ROUND')
-  emitUpdated(i.venueId, i.orderId, r.orderNumber, OnlineOrderStatus.ACCEPTED, r.now)
+  emitOnlineOrderUpdated({
+    venueId: i.venueId,
+    orderId: i.orderId,
+    orderNumber: r.orderNumber,
+    onlineStatus: OnlineOrderStatus.ACCEPTED,
+    orderStatus: r.orderStatus,
+    now: r.now,
+  })
   void notifyOrderEvent(i.orderId, 'ACCEPTED')
   void logAction({
     staffId: i.staffId,
@@ -260,7 +291,14 @@ export async function rejectOnlineOrder(i: {
   })
   if (r.r !== 'OK') return settled(r)
 
-  emitUpdated(i.venueId, i.orderId, r.orderNumber, OnlineOrderStatus.REJECTED, r.now)
+  emitOnlineOrderUpdated({
+    venueId: i.venueId,
+    orderId: i.orderId,
+    orderNumber: r.orderNumber,
+    onlineStatus: OnlineOrderStatus.REJECTED,
+    orderStatus: r.orderStatus,
+    now: r.now,
+  })
   void notifyOrderEvent(i.orderId, 'REJECTED')
   void logAction({
     staffId: i.staffId,
@@ -284,7 +322,14 @@ export async function expireOnlineOrder(i: { venueId: string; orderId: string; n
   })
   if (r.r !== 'OK') return settled(r)
 
-  emitUpdated(i.venueId, i.orderId, r.orderNumber, OnlineOrderStatus.EXPIRED, r.now)
+  emitOnlineOrderUpdated({
+    venueId: i.venueId,
+    orderId: i.orderId,
+    orderNumber: r.orderNumber,
+    onlineStatus: OnlineOrderStatus.EXPIRED,
+    orderStatus: r.orderStatus,
+    now: r.now,
+  })
   void notifyOrderEvent(i.orderId, 'EXPIRED')
   void logAction({
     staffId: null,
@@ -312,7 +357,14 @@ export async function markOnlineOrderReady(i: {
   })
   if (r.r !== 'OK') return settled(r)
 
-  emitUpdated(i.venueId, i.orderId, r.orderNumber, OnlineOrderStatus.READY, r.now)
+  emitOnlineOrderUpdated({
+    venueId: i.venueId,
+    orderId: i.orderId,
+    orderNumber: r.orderNumber,
+    onlineStatus: OnlineOrderStatus.READY,
+    orderStatus: r.orderStatus,
+    now: r.now,
+  })
   void notifyOrderEvent(i.orderId, 'READY')
   void logAction({
     staffId: i.staffId,
@@ -342,7 +394,14 @@ export async function markOnlineOrderDelivered(i: {
   })
   if (r.r !== 'OK') return settled(r)
 
-  emitUpdated(i.venueId, i.orderId, r.orderNumber, OnlineOrderStatus.COMPLETED, r.now)
+  emitOnlineOrderUpdated({
+    venueId: i.venueId,
+    orderId: i.orderId,
+    orderNumber: r.orderNumber,
+    onlineStatus: OnlineOrderStatus.COMPLETED,
+    orderStatus: r.orderStatus,
+    now: r.now,
+  })
   void logAction({
     staffId: i.staffId,
     venueId: i.venueId,
@@ -371,7 +430,14 @@ export async function cancelOnlineOrderByCustomer(i: { venueId: string; tracking
   })
   if (r.r !== 'OK') return settled(r)
 
-  emitUpdated(i.venueId, found.orderId, r.orderNumber, OnlineOrderStatus.CANCELLED_BY_CUSTOMER, r.now)
+  emitOnlineOrderUpdated({
+    venueId: i.venueId,
+    orderId: found.orderId,
+    orderNumber: r.orderNumber,
+    onlineStatus: OnlineOrderStatus.CANCELLED_BY_CUSTOMER,
+    orderStatus: r.orderStatus,
+    now: r.now,
+  })
   // H9 (r2): sólo el ganador de la transición avisa; la página de seguimiento ya lo muestra, el correo lo confirma.
   void notifyOrderEvent(found.orderId, 'CANCELLED')
   void logAction({
@@ -432,7 +498,14 @@ export async function cancelOnlineOrderByStaff(i: {
     throw error // p. ej. 409 ORDER_CANCEL_BLOCKED_BY_TERMINAL_CHARGE: las apps ya lo conocen
   }
 
-  emitUpdated(i.venueId, i.orderId, row.order.orderNumber, OnlineOrderStatus.CANCELLED_BY_STAFF, cancelledAt)
+  emitOnlineOrderUpdated({
+    venueId: i.venueId,
+    orderId: i.orderId,
+    orderNumber: row.order.orderNumber,
+    onlineStatus: OnlineOrderStatus.CANCELLED_BY_STAFF,
+    // Sin `orderStatus`: la cuenta la canceló `cancelOrder`, que ya publica su propio aviso de cancelación.
+    now: cancelledAt,
+  })
   void notifyOrderEvent(i.orderId, 'CANCELLED')
   void logAction({
     staffId: i.staffId,

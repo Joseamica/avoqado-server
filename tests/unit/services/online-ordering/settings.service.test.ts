@@ -109,9 +109,13 @@ describe('settings.service', () => {
 
   it('pausar desde el piso escribe pausedUntil y audita PAUSED (R12)', async () => {
     prismaMock.onlineOrderingSettings.updateMany.mockResolvedValue({ count: 1 })
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue({ manualPause: false } as any)
     const now = new Date('2026-10-14T18:30:00.000Z')
 
-    await expect(pauseOnlineOrdering('v1', 30, 'staff1', now)).resolves.toEqual({ pausedUntil: '2026-10-14T19:00:00.000Z' })
+    await expect(pauseOnlineOrdering('v1', 30, 'staff1', now)).resolves.toEqual({
+      pausedUntil: '2026-10-14T19:00:00.000Z',
+      manualPause: false,
+    })
 
     expect(prismaMock.onlineOrderingSettings.updateMany).toHaveBeenCalledWith({
       where: { venueId: 'v1' },
@@ -122,9 +126,17 @@ describe('settings.service', () => {
 
   it('reanudar limpia la pausa y audita RESUMED', async () => {
     prismaMock.onlineOrderingSettings.updateMany.mockResolvedValue({ count: 1 })
-    await expect(pauseOnlineOrdering('v1', null, 'staff1')).resolves.toEqual({ pausedUntil: null })
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue({ manualPause: false } as any)
+    await expect(pauseOnlineOrdering('v1', null, 'staff1')).resolves.toEqual({ pausedUntil: null, manualPause: false })
     expect(prismaMock.onlineOrderingSettings.updateMany).toHaveBeenCalledWith({ where: { venueId: 'v1' }, data: { pausedUntil: null } })
     expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'ONLINE_ORDERING_RESUMED' }))
+  })
+
+  it('M-8: reanudar con la pausa del GERENTE puesta lo dice (`manualPause: true`): la tienda sigue frenada aunque `pausedUntil` sea null', async () => {
+    prismaMock.onlineOrderingSettings.updateMany.mockResolvedValue({ count: 1 })
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue({ manualPause: true } as any)
+    await expect(pauseOnlineOrdering('v1', null, 'staff1')).resolves.toEqual({ pausedUntil: null, manualPause: true })
+    expect(prismaMock.onlineOrderingSettings.findUnique).toHaveBeenCalledWith({ where: { venueId: 'v1' }, select: { manualPause: true } })
   })
 
   it('pausar no crea la fila: una tienda nunca configurada responde ONLINE_ORDERING_NOT_CONFIGURED', async () => {

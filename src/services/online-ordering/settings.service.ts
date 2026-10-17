@@ -88,8 +88,9 @@ export async function updateSettings(
 }
 
 /**
- * R12 (decisión F3 del founder): cocina y caja frenan la tienda 15, 30 o 60 minutos —o la reanudan con `null`— con el mismo
- * permiso con que aceptan (`orders:update`). Sólo toca `pausedUntil`; la pausa del gerente (`manualPause`) sigue en ajustes.
+ * R12: se frena la tienda 15, 30 o 60 minutos —o se reanuda con `null`— con el permiso `online-orders:pause` (D7, founder
+ * 16-oct: gerente para arriba por default, otorgable; en el POS, con el PIN del gerente). Sólo toca `pausedUntil`; la pausa del
+ * gerente (`manualPause`) sigue en ajustes, y la respuesta la incluye (M-8): reanudar con ella puesta deja la tienda frenada.
  * No crea la fila: pausar una tienda que nunca se configuró no tiene sentido (y crearla aquí se saltaría la precarga del horario).
  */
 export async function pauseOnlineOrdering(
@@ -97,12 +98,13 @@ export async function pauseOnlineOrdering(
   minutes: FloorPauseMinutes | null,
   actorStaffId: string | null,
   now: Date = new Date(),
-): Promise<{ pausedUntil: string | null }> {
+): Promise<{ pausedUntil: string | null; manualPause: boolean }> {
   const pausedUntil = minutes === null ? null : new Date(now.getTime() + minutes * 60_000)
   const r = await prisma.onlineOrderingSettings.updateMany({ where: { venueId }, data: { pausedUntil } })
   if (r.count === 0) {
     throw new BadRequestError('La tienda en línea de este negocio todavía no está configurada.', 'ONLINE_ORDERING_NOT_CONFIGURED')
   }
+  const current = await prisma.onlineOrderingSettings.findUnique({ where: { venueId }, select: { manualPause: true } })
   void logAction({
     staffId: actorStaffId,
     venueId,
@@ -111,5 +113,5 @@ export async function pauseOnlineOrdering(
     entityId: venueId,
     data: { minutes, pausedUntil: pausedUntil ? pausedUntil.toISOString() : null },
   })
-  return { pausedUntil: pausedUntil ? pausedUntil.toISOString() : null }
+  return { pausedUntil: pausedUntil ? pausedUntil.toISOString() : null, manualPause: current?.manualPause ?? false }
 }

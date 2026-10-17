@@ -22,9 +22,18 @@ describe('permiso online-orders:manage', () => {
 
   it('arrastra lo que hace falta para operar y está en el catálogo individual', () => {
     expect(PERMISSION_DEPENDENCIES['online-orders:manage']).toEqual(
-      expect.arrayContaining(['online-orders:manage', 'orders:read', 'orders:update', 'products:read']),
+      expect.arrayContaining(['online-orders:manage', 'orders:read', 'products:read']),
     )
     expect(INDIVIDUAL_PERMISSIONS_BY_RESOURCE['online-orders']).toEqual(['online-orders:manage', 'online-orders:pause'])
+  })
+
+  it('M-6: administrar la tienda en línea NO implica modificar cuentas del POS (`orders:update`): contestar pedidos se da aparte', () => {
+    expect(PERMISSION_DEPENDENCIES['online-orders:manage']).not.toContain('orders:update')
+    // Un rol a la medida al que sólo le dan la tienda en línea no puede tocar cualquier cuenta del POS…
+    expect(hasPermission(StaffRole.VIEWER, ['online-orders:manage'], 'orders:update')).toBe(false)
+    expect(hasPermission(StaffRole.VIEWER, ['online-orders:manage'], 'online-orders:pause')).toBe(true)
+    // …y a los roles por default no les cambia nada: ya traen `orders:update` por su cuenta.
+    for (const role of GERENTE_PARA_ARRIBA) expect(hasPermission(role, null, 'orders:update')).toBe(true)
   })
 
   it('aceptar usa orders:update, que cocina y caja ya tienen (F3); cancelar pide orders:cancel-unpaid (R15)', () => {

@@ -24,7 +24,8 @@ import { claimOnlineOrderPrint, confirmOnlineOrderPrinted } from '@/services/onl
 import type { FloorPauseMinutes } from '@/services/online-ordering/types'
 
 const staffOf = (req: Request): string | null => (req as any).authContext?.userId ?? null
-const deviceOf = (req: Request): string => (req.header('x-device-id') ?? '').trim()
+/** M-10: con tope de largo; termina guardado en `printClaimedBy`. */
+const deviceOf = (req: Request): string => (req.header('x-device-id') ?? '').trim().slice(0, 100)
 
 function reply(res: Response, r: TransitionResult) {
   switch (r.outcome) {

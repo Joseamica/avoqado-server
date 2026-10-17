@@ -1,4 +1,5 @@
 // tests/unit/mcp-customer/online-ordering.test.ts
+import { z } from 'zod'
 import { registerOnlineOrderingTools } from '../../../src/mcp/tools/onlineOrdering'
 import type { McpScope } from '../../../src/mcp/scope'
 import { settingsPatchBody } from '../../../src/schemas/online-ordering.schema'
@@ -56,7 +57,14 @@ const scope = { staffId: 's1', activeOrg: 'o1', allowedVenueIds: ['v1'], perVenu
 const call = (name: string, args: Record<string, unknown>) => handlers.get(name)!(args, {})
 const parse = (r: { content: Array<{ text: string }> }) => JSON.parse(r.content[0].text)
 
-const pending = { orderId: 'ord1', orderNumber: 'WABCD', customerName: 'María G.', total: 186, items: [{ name: 'Flautas', quantity: 2 }] }
+const pending = {
+  orderId: 'ord1',
+  onlineOrderId: 'oo1',
+  orderNumber: 'WABCD',
+  customerName: 'María G.',
+  total: 186,
+  items: [{ name: 'Flautas', quantity: 2 }],
+}
 const AJUSTES = {
   enabled: true,
   minOrderAmount: 50,
@@ -121,6 +129,40 @@ describe('online_order_respond', () => {
     expect(mockAccept).not.toHaveBeenCalled()
   })
 
+  it('M-13: la vista previa de ACEPTAR dice los minutos que se le avisarán al comensal (los pedidos o los del negocio)', async () => {
+    const pedidos = parse(await call('online_order_respond', { venueId: 'v1', orderId: 'ord1', action: 'ACCEPT', estimatedMinutes: 25 }))
+    expect(pedidos.preview).toMatchObject({ accion: 'ACEPTAR', minutos: 25 })
+    expect(pedidos.preview.efecto).toContain('25 minutos')
+    const delNegocio = parse(await call('online_order_respond', { venueId: 'v1', orderId: 'ord1', action: 'ACCEPT' }))
+    expect(delNegocio.preview).toMatchObject({ minutos: 15 }) // `defaultPrepMinutes` del negocio
+    expect(delNegocio.preview.efecto).toContain('15 minutos')
+  })
+
+  it('M-13: la vista previa de RECHAZAR dice el motivo y la nota', async () => {
+    const r = parse(
+      await call('online_order_respond', { venueId: 'v1', orderId: 'ord1', action: 'REJECT', reason: 'OUT_OF_ITEMS', note: 'sin pollo' }),
+    )
+    expect(r.preview).toMatchObject({ accion: 'RECHAZAR', motivo: 'OUT_OF_ITEMS', nota: 'sin pollo' })
+    expect(mockReject).not.toHaveBeenCalled()
+  })
+
+  it('M-13: `note`, `reason` y los minutos usan el MISMO Zod de la API (trim y mensajes en español)', () => {
+    const esquema = z.object(shapes.get('online_order_respond')!)
+    const base = { venueId: 'v1', orderId: 'ord1', action: 'REJECT' }
+    expect(esquema.parse({ ...base, reason: 'OTHER', note: '  sin pollo  ' }).note).toBe('sin pollo')
+    const largo = esquema.safeParse({ ...base, reason: 'OTHER', note: 'x'.repeat(201) })
+    expect(largo.success).toBe(false)
+    expect(JSON.stringify(largo)).toContain('La nota admite hasta 200 caracteres')
+    expect(JSON.stringify(esquema.safeParse({ ...base, reason: 'NO_SE' }))).toContain('Motivo inválido')
+    expect(JSON.stringify(esquema.safeParse({ ...base, action: 'ACCEPT', estimatedMinutes: 500 }))).toContain('Máximo 240 minutos')
+  })
+
+  it('M-13: rechazar con una nota de puros espacios guarda `null`, como la API', async () => {
+    mockReject.mockResolvedValue({ outcome: 'OK', status: 'REJECTED' })
+    await call('online_order_respond', { venueId: 'v1', orderId: 'ord1', action: 'REJECT', reason: 'OTHER', note: '', confirm: true })
+    expect(mockReject).toHaveBeenCalledWith(expect.objectContaining({ note: null }))
+  })
+
   it('ACCEPT con confirm usa orders:update, acepta y audita', async () => {
     mockAccept.mockResolvedValue({ outcome: 'OK', status: 'ACCEPTED', estimatedReadyAt: 'x' })
     const r = parse(
@@ -130,6 +172,8 @@ describe('online_order_respond', () => {
     expect(mockAccept).toHaveBeenCalledWith({ venueId: 'v1', orderId: 'ord1', staffId: 's1', estimatedMinutes: 20 })
     expect(r).toMatchObject({ ok: true, status: 'ACCEPTED' })
     expect(mockAudit).toHaveBeenCalledWith(scope, expect.objectContaining({ action: 'ONLINE_ORDER_ACCEPTED_VIA_MCP', venueId: 'v1' }))
+    // M-13: la entidad es el pedido en línea, así que su id es el del pedido en línea (no el de la cuenta).
+    expect(mockAudit).toHaveBeenCalledWith(scope, expect.objectContaining({ entity: 'OnlineOrder', entityId: 'oo1' }))
   })
 
   it('CANCEL exige orders:cancel-unpaid, busca entre los activos y usa la cancelación del personal (R15)', async () => {

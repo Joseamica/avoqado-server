@@ -1,8 +1,9 @@
 import type { CronJob } from 'cron'
 import logger from '../config/logger'
 import { scheduleJob } from '../observability/jobContext'
-import { syncOnlineOrdersOfCancelledOrders } from '../services/online-ordering/cancelledOrderSync'
+import { announceCancelledElsewhere, syncOnlineOrdersOfCancelledOrders } from '../services/online-ordering/cancelledOrderSync'
 import { EXPIRY_BATCH_SIZE } from '../services/online-ordering/constants'
+import { announceCollectedAutomatically, syncOnlineOrdersOfPaidPickups } from '../services/online-ordering/paidPickupSync'
 import { expireOnlineOrder } from '../services/online-ordering/transitions.service'
 import prisma from '../utils/prismaClient'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
@@ -26,8 +27,10 @@ interface OnlineOrderAcceptanceExpiryDependencies {
   now: () => Date
   expireOrder: typeof expireOnlineOrder
   retryEntry: typeof retry
-  /** R2: cierra los pedidos cuya cuenta se canceló por otra vía, en TODOS los negocios, antes de buscar vencidos. */
+  /** R2: cierra (y anuncia) los pedidos cuya cuenta se canceló por otra vía, en TODOS los negocios, antes de buscar vencidos. */
   syncCancelled: (now: Date) => Promise<number>
+  /** Opción 1 del founder (17-oct): entrega (y anuncia) lo de pagar al recoger que ya quedó pagado, después de R2. */
+  syncPaidPickups: (now: Date) => Promise<number>
 }
 
 interface ExpiryResult {
@@ -36,6 +39,7 @@ interface ExpiryResult {
   noop: number
   errors: number
   synced: number
+  collected: number
   skipped?: true
 }
 
@@ -44,7 +48,17 @@ const defaults: OnlineOrderAcceptanceExpiryDependencies = {
   now: () => new Date(),
   expireOrder: expireOnlineOrder,
   retryEntry: retry,
-  syncCancelled: now => syncOnlineOrdersOfCancelledOrders(prisma, {}, now),
+  // I-1: el job ya corre fuera de una transacción, así que anuncia a sus ganadores justo después de la llamada.
+  syncCancelled: async now => {
+    const won = await syncOnlineOrdersOfCancelledOrders(prisma, {}, now)
+    announceCancelledElsewhere(won, now)
+    return won.length
+  },
+  syncPaidPickups: async now => {
+    const won = await syncOnlineOrdersOfPaidPickups(prisma, {}, now)
+    announceCollectedAutomatically(won, now)
+    return won.length
+  },
 }
 
 export class OnlineOrderAcceptanceExpiryJob {
@@ -81,10 +95,11 @@ export class OnlineOrderAcceptanceExpiryJob {
   async checkNow(): Promise<ExpiryResult> {
     if (this.isRunning) {
       logger.warn('[Online-order expiry] tick skipped — previous run still in progress')
-      return { scanned: 0, expired: 0, noop: 0, errors: 0, synced: 0, skipped: true }
+      return { scanned: 0, expired: 0, noop: 0, errors: 0, synced: 0, collected: 0, skipped: true }
     }
     this.isRunning = true
     let synced = 0
+    let collected = 0
 
     try {
       const now = this.dependencies.now()
@@ -94,6 +109,12 @@ export class OnlineOrderAcceptanceExpiryJob {
         synced = await this.dependencies.syncCancelled(now)
       } catch (error) {
         logger.error('Online-order expiry: no se pudieron cerrar los pedidos de cuentas canceladas (la pasada sigue)', { error })
+      }
+      // Después de R2 y, igual, fuera del reintento de lectura: también es una escritura (CAS).
+      try {
+        collected = await this.dependencies.syncPaidPickups(now)
+      } catch (error) {
+        logger.error('Online-order expiry: no se pudieron entregar los pedidos ya pagados (la pasada sigue)', { error })
       }
 
       let scanned = 0
@@ -145,10 +166,10 @@ export class OnlineOrderAcceptanceExpiryJob {
         cursor = { at: last.acceptDeadlineAt, id: last.id }
       }
 
-      return { scanned, expired, noop, errors, synced }
+      return { scanned, expired, noop, errors, synced, collected }
     } catch (error) {
       logger.error('Online-order expiry pass failed', { error })
-      return { scanned: 0, expired: 0, noop: 0, errors: 1, synced }
+      return { scanned: 0, expired: 0, noop: 0, errors: 1, synced, collected }
     } finally {
       this.isRunning = false
     }

@@ -208,6 +208,13 @@ describe('onlineOrders.mobile.controller', () => {
     expect(ok.res.json).toHaveBeenCalledWith({ success: true, data: { claimed: true } })
   })
 
+  it('M-10: un x-device-id larguísimo se recorta a 100 caracteres antes de guardarse como dueño del reclamo', async () => {
+    ;(claimOnlineOrderPrint as jest.Mock).mockResolvedValue({ claimed: true })
+    const { req, res, next } = mock({ headers: { 'x-device-id': `  ${'d'.repeat(5_000)}  ` } })
+    await ctrl.printClaim(req, res, next)
+    expect(claimOnlineOrderPrint).toHaveBeenCalledWith('v1', 'ord1', 'd'.repeat(100))
+  })
+
   it('el reclamo usa el `:orderId` de la ruta (Order.id, el `orderId` de la bandeja) como llave `OnlineOrder.orderId`, nunca el id del pedido en línea', async () => {
     const real = jest.requireActual('@/services/online-ordering/printClaim.service')
     ;(claimOnlineOrderPrint as jest.Mock).mockImplementationOnce(real.claimOnlineOrderPrint)
@@ -220,12 +227,12 @@ describe('onlineOrders.mobile.controller', () => {
     expect(res.json).toHaveBeenCalledWith({ success: true, data: { claimed: true } })
   })
 
-  it('pausar desde el piso escribe la pausa con quien la pidió (R12)', async () => {
-    ;(pauseOnlineOrdering as jest.Mock).mockResolvedValue({ pausedUntil: '2026-10-14T19:00:00.000Z' })
+  it('pausar desde el piso escribe la pausa con quien la pidió (R12) y responde también la pausa del gerente (M-8)', async () => {
+    ;(pauseOnlineOrdering as jest.Mock).mockResolvedValue({ pausedUntil: '2026-10-14T19:00:00.000Z', manualPause: false })
     const { req, res, next } = mock({ body: { minutes: 30 } })
     await ctrl.pause(req, res, next)
     expect(pauseOnlineOrdering).toHaveBeenCalledWith('v1', 30, 'staff1')
-    expect(res.json).toHaveBeenCalledWith({ success: true, data: { pausedUntil: '2026-10-14T19:00:00.000Z' } })
+    expect(res.json).toHaveBeenCalledWith({ success: true, data: { pausedUntil: '2026-10-14T19:00:00.000Z', manualPause: false } })
   })
 })
 
