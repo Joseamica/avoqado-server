@@ -217,6 +217,41 @@ export function estadoAlRecibirDinero<S extends string>(status: S, cobrado: Pris
 }
 
 /**
+ * ¿La venta está CERRADA? PAID o REFUNDED: una venta cobrada queda cerrada (founder 16-oct, «como Square»; precedente del 18-ago: el
+ * reembolso no reabre el saldo y la cuenta queda sin botón de cobrar). La ÚNICA definición: `esVentaYaCobrada` (decisión «A», la
+ * liga de un cliente) y `estadoDeCobroAlRecibirDinero` la leen de aquí.
+ */
+export function esVentaCerrada(paymentStatus: string | null | undefined): boolean {
+  return paymentStatus === 'PAID' || paymentStatus === 'REFUNDED'
+}
+
+/**
+ * 🔴 R8-1 (ronda 8 post-QA de sellos tardíos; Codex recheck-12 P2): recibir dinero NUNCA reabre una venta cerrada.
+ *
+ * La cadena de Codex: venta $100 PAID → el panel corrige su cobro a $80 (`updatePayment` no recalcula: sigue PAID) → llega un cobro
+ * de la terminal de $10 (la TPV acepta cobros sobre ventas PAID a propósito: el banco ya cobró) → el recálculo sumaba $90 < $100 y
+ * escribía PARTIAL. Con eso la venta dejaba de contar como cobrada y el pago manual y el PUT del panel (COCINA, sin `payments:create`)
+ * volvían a ligar un cliente con su lealtad.
+ *
+ * Quien escribe el estado de cobro de una venta por la que ENTRA dinero (un cobro nuevo o tardío, por cualquier canal) pasa el
+ * `paymentStatus` que leyó BAJO su candado ANTES de la operación y lo que calculó su aritmética:
+ *   - venta abierta (PENDING/PARTIAL), o no entra dinero (el origen de una reasignación: el cobro no era suyo y vuelve a deber) ⇒
+ *     lo calculado, tal cual (el mismo objeto);
+ *   - venta cerrada + dinero que entra ⇒ conserva su estado, el saldo queda en 0 (una venta cerrada no debe nada) y `cerrada: true`:
+ *     quien llama NO mueve `status` ni `completedAt` y NO repite los efectos de saldar (lealtad, vale de inventario, marca de cocina).
+ * El dinero se registra como hoy: el `Payment`, `paidAmount` y la propina reales, la alerta de sobrepago, la bitácora y el vigilante.
+ * 🔴 No es «cualquier reembolso implica venta cobrada» (la marca de la ronda 6, que bloqueaba cuentas que nunca se saldaron).
+ */
+export function estadoDeCobroAlRecibirDinero<S extends string, R>(
+  previo: string | null | undefined,
+  entraDinero: boolean,
+  calculado: { paymentStatus: S; remainingBalance: R },
+): { paymentStatus: S | 'PAID' | 'REFUNDED'; remainingBalance: R | 0; cerrada: boolean } {
+  if (!entraDinero || !esVentaCerrada(previo)) return { ...calculado, cerrada: false }
+  return { paymentStatus: previo as 'PAID' | 'REFUNDED', remainingBalance: 0, cerrada: true }
+}
+
+/**
  * ¿Es el cierre transaccional del cobro (`settleStandalonePaymentInTx`) el dueño de los efectos de saldar esta cuenta (vale de
  * inventario, lealtad, marca de cocina)? No en una integrada (POS con `externalId`: la salda SoftRestaurant) ni en una con renglones
  * de vale por área (sus reservas ya consumieron el stock y la finaliza otro camino). Un criterio, un lugar: lo usan

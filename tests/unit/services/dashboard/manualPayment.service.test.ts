@@ -3,6 +3,11 @@
 // servicio de venta consulta venue.salesEnabled contra un prismaMock que no lo define.
 // FT-GRAVES T2: este cobro encola su comisión en la transacción, con el MISMO gancho que la terminal. No es objeto de esta
 // suite (sus pruebas son tests/integration/commission/cobrosDelDashboard y cobrosEnLineaYCripto).
+// R11-8 (sellos tardíos): el cierre toma la jerarquía de vales ANTES del candado de la venta; esta suite no prueba vales (sin sesión).
+jest.mock('@/services/mobile/areaTicketV7.mobile.service', () => ({
+  lockAreaTicketCheckoutHierarchy: jest.fn().mockResolvedValue(null),
+  cerrarSesionDeValesAlCerrarLaVenta: jest.fn().mockResolvedValue(false),
+}))
 jest.mock('@/services/tpv/paymentEffects.service', () => ({
   ...jest.requireActual('@/services/tpv/paymentEffects.service'),
   enqueuePaymentCommissionInTx: jest.fn().mockResolvedValue(undefined),
@@ -334,6 +339,35 @@ describe('manualPayment.service', () => {
       expect(createSalePostingInTxMock.mock.calls[0][1]).toEqual(expect.objectContaining({ venueId: VENUE_ID, orderId: ORDER_ID }))
     })
 
+    // 🔴 R11-8: la venta de vales que este pago salda cierra también su sesión (deja de ofrecer «cobrar el resto»), con la sesión
+    // que la jerarquía tomó como PRIMERA sentencia de la transacción; un abono no la toca.
+    it('🔴 R11-8: venta con sesión de vales ⇒ la jerarquía va PRIMERO y la sesión cierra con el vale, sólo al saldar', async () => {
+      const vales = jest.requireMock('@/services/mobile/areaTicketV7.mobile.service')
+      const sesion = { id: 'sesion-1', status: 'PARTIALLY_PAID', activePaymentAttemptId: null, tickets: [] }
+      vales.lockAreaTicketCheckoutHierarchy.mockResolvedValueOnce({ session: sesion })
+      vales.cerrarSesionDeValesAlCerrarLaVenta.mockResolvedValueOnce(true)
+      const txClient = armarTx(ordenConProductos())
+
+      await manualPaymentService.createManualPayment(VENUE_ID, USER_ID, pagoQueSalda)
+
+      expect(vales.lockAreaTicketCheckoutHierarchy).toHaveBeenCalledWith(txClient, { venueId: VENUE_ID, orderId: ORDER_ID })
+      expect(vales.lockAreaTicketCheckoutHierarchy.mock.invocationCallOrder[0]).toBeLessThan(txClient.$queryRaw.mock.invocationCallOrder[0])
+      expect(vales.cerrarSesionDeValesAlCerrarLaVenta).toHaveBeenCalledWith(txClient, sesion, { venueId: VENUE_ID, orderId: ORDER_ID })
+      expect(vales.cerrarSesionDeValesAlCerrarLaVenta.mock.invocationCallOrder[0]).toBeGreaterThan(
+        createSalePostingInTxMock.mock.invocationCallOrder[0],
+      )
+    })
+
+    it('regresión R11-8: un abono que no salda no cierra la sesión', async () => {
+      const vales = jest.requireMock('@/services/mobile/areaTicketV7.mobile.service')
+      vales.lockAreaTicketCheckoutHierarchy.mockResolvedValueOnce({ session: { id: 'sesion-1', status: 'PARTIALLY_PAID' } })
+      armarTx(ordenConProductos())
+
+      await manualPaymentService.createManualPayment(VENUE_ID, USER_ID, { ...pagoQueSalda, amount: '10' })
+
+      expect(vales.cerrarSesionDeValesAlCerrarLaVenta).not.toHaveBeenCalled()
+    })
+
     it('aplicar el vale ocurre DESPUÉS del commit, no dentro de la transacción', async () => {
       const order = ordenConProductos()
       let aplicadoDentroDeLaTx = false
@@ -429,9 +463,11 @@ describe('manualPayment.service', () => {
         }),
       )
 
+      // «Como Square» (founder, 16-oct): una venta PAID está cerrada; lo extra se cobra como venta nueva.
       await expect(manualPaymentService.createManualPayment(VENUE_ID, USER_ID, pagoQueSalda)).rejects.toMatchObject({
         statusCode: 400,
-        message: 'El pago excede el saldo pendiente. Pendiente: 0.00',
+        code: manualPaymentService.CODIGO_VENTA_YA_COBRADA,
+        message: manualPaymentService.MENSAJE_VENTA_YA_COBRADA,
       })
 
       expect(createSalePostingInTxMock).not.toHaveBeenCalled()
@@ -441,7 +477,11 @@ describe('manualPayment.service', () => {
     it('la marca PAID impide otro vale aunque el historial de pagos no cubra todo el total', async () => {
       armarTx(ordenConProductos({ paymentStatus: 'PAID' }))
 
-      await expect(manualPaymentService.createManualPayment(VENUE_ID, USER_ID, pagoQueSalda)).resolves.toBeDefined()
+      // «Como Square»: la marca PAID cierra la venta aunque el historial no cubra el total ⇒ se rechaza, sin vale.
+      await expect(manualPaymentService.createManualPayment(VENUE_ID, USER_ID, pagoQueSalda)).rejects.toMatchObject({
+        statusCode: 400,
+        code: manualPaymentService.CODIGO_VENTA_YA_COBRADA,
+      })
 
       expect(createSalePostingInTxMock).not.toHaveBeenCalled()
       expect(applySalePostingMock).not.toHaveBeenCalled()

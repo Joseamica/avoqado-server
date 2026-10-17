@@ -10,6 +10,7 @@
  */
 import { registerAllTools } from '../../../src/mcp/server'
 import type { McpScope } from '../../../src/mcp/scope'
+import { DIRECTORY_TOOLS } from '../../../src/mcp/directory/catalog'
 
 /** Terms that must never appear in a customer-visible tool description. */
 const FORBIDDEN: Array<[string, RegExp]> = [
@@ -50,6 +51,11 @@ describe('customer tool catalog', () => {
   it('does NOT list avoqado_internal_docs for a non-superadmin, and DOES for a superadmin', () => {
     expect(customer.some(t => t.name === 'avoqado_internal_docs')).toBe(false)
     expect(catalogFor({ isSuperAdmin: true }).some(t => t.name === 'avoqado_internal_docs')).toBe(true)
+  })
+
+  it('attach_customer_to_sale está en el catálogo libre y NO en el certificado (directorio)', () => {
+    expect(customer.some(t => t.name === 'attach_customer_to_sale')).toBe(true)
+    expect(DIRECTORY_TOOLS.has('attach_customer_to_sale')).toBe(false)
   })
 
   it.each(FORBIDDEN)('no customer-visible tool description exposes %s', (_label, pattern) => {

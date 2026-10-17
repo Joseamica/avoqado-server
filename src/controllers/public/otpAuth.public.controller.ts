@@ -40,7 +40,7 @@ export async function verifyOtp(req: Request, res: Response, next: NextFunction)
   try {
     const { venueSlug } = req.params
     const venue = await resolveVenueBySlug(venueSlug)
-    const { phone, email, code, purpose } = req.body
+    const { phone, email, code, purpose, firstName } = req.body
 
     const channel = phone ? 'whatsapp' : 'email'
     const destination = phone ?? email
@@ -50,6 +50,7 @@ export async function verifyOtp(req: Request, res: Response, next: NextFunction)
       channel,
       destination,
       code,
+      firstName,
       ...(purpose === 'ORDERING' ? { purpose: 'ORDERING' as const } : {}),
     })
     // H1: el token de pedidos no sirve para reservar; su respuesta lleva sólo token y cliente. Ni `bookingAccess` ni

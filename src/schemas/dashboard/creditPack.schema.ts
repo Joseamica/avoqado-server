@@ -203,5 +203,8 @@ export const otpVerifySchema = z
     code: z.string().regex(/^\d{6}$/, 'El código debe ser de 6 dígitos'),
     /** R7/H1 (pedidos en línea): verificar para PEDIR no activa la cuenta de reservas y devuelve el token de pedidos. */
     purpose: z.enum(['ORDERING'], { errorMap: () => ({ message: 'Propósito inválido' }) }).optional(),
+    // Nombre del alta en la página de la tarjeta (spec 2026-10-14 §3.3). Opcional para no romper clientes viejos; el widget
+    // lo hace obligatorio. Sólo forma aquí: la regla «nunca pisa un nombre existente» vive en el servicio.
+    firstName: z.string().trim().min(1, 'Escribe tu nombre').max(60, 'Tu nombre no puede pasar de 60 caracteres').optional(),
   })
   .refine(d => Boolean(d.phone) || Boolean(d.email), { message: 'Proporciona teléfono o correo', path: ['phone'] })

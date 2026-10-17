@@ -520,6 +520,10 @@ prismaMock.orderItem.findMany.mockResolvedValue([])
 // (`sincronizarRepartos`). Mismo patrón que `orderItem`: una orden sin filas, salvo que la prueba diga otra cosa.
 prismaMock.orderDiscount.findMany.mockResolvedValue([])
 prismaMock.inventoryPosting.create.mockResolvedValue({ id: 'posting-default', status: 'PENDING' })
+// Sellos tardíos R11-2: la decisión «A» de las ligas de cliente (`ventaYaCobradaBajoCandado`) suma los cobros capturados de
+// una venta abierta. Por default ninguno (la venta abierta sigue abierta), para que las pruebas de ligas que no ejercitan esa
+// ventana no tengan que mockearlo.
+prismaMock.payment.aggregate.mockResolvedValue({ _sum: { amount: null, tipAmount: null } })
 prismaMock.inventoryPosting.updateMany.mockResolvedValue({ count: 0 })
 // IVA por producto: por default el flag está APAGADO (ningún VenueIvaPorProducto sembrado) —
 // el estado real de casi todo negocio hoy. Tests que lo necesitan encendido lo sobrescriben.

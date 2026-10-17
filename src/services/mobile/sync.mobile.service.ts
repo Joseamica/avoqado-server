@@ -658,7 +658,7 @@ export async function processIntents(params: {
         ack = await ackDesdeHuella(venueId, intent, huellaPrevia, localRefMap)
       } else {
         const dejarHuella = marca?.retomable ? dejarHuellaCon(venueId, intent.id, turno, marca) : undefined
-        ack = await applyIntent({ venueId, staffId, deviceId, intent, localRefMap, dejarHuella })
+        ack = await applyIntent({ venueId, staffId, deviceId, intent, localRefMap, dejarHuella, authorizeIntent })
       }
     }
 
@@ -835,8 +835,10 @@ async function applyIntent(ctx: {
   intent: SyncIntentInput
   localRefMap: Map<string, string>
   dejarHuella?: DejarHuella
+  /** El del lote: lo pide UPDATE_DETAILS para saber si quien encoló puede cambiar el cliente de una venta cobrada (R4-2). */
+  authorizeIntent?: (intent: SyncIntentInput, requiredPermission: string) => boolean
 }): Promise<SyncIntentAck> {
-  const { venueId, staffId, intent, localRefMap, dejarHuella } = ctx
+  const { venueId, staffId, intent, localRefMap, dejarHuella, authorizeIntent } = ctx
 
   if (!KNOWN_TYPES.includes(intent.type)) {
     // Cliente más nuevo que el server: no perdemos el intent, lo rechazamos
@@ -859,7 +861,7 @@ async function applyIntent(ctx: {
       case 'CANCEL_ORDER':
       case 'MOVE_ORDER':
       case 'ASSIGN_ORDER':
-        return await applyOrderMutation(venueId, staffId, intent, localRefMap, dejarHuella)
+        return await applyOrderMutation(venueId, staffId, intent, localRefMap, dejarHuella, authorizeIntent)
       case 'CLEAR_TABLE':
         return await applyClearTable(venueId, staffId, intent)
       case 'SPLIT_ORDER':
@@ -1448,6 +1450,7 @@ async function applyOrderMutation(
   intent: SyncIntentInput,
   localRefMap: Map<string, string>,
   dejarHuella?: DejarHuella,
+  authorizeIntent?: (intent: SyncIntentInput, requiredPermission: string) => boolean,
 ): Promise<SyncIntentAck> {
   await assertTableService(venueId)
   const orderId = await resolveOrderId(venueId, intent.payload, localRefMap)
@@ -1479,13 +1482,24 @@ async function applyOrderMutation(
       break
     }
     case 'UPDATE_DETAILS': {
-      await orderMobileService.updateOrderDetails(venueId, orderId, {
-        name: typeof p.name === 'string' ? p.name : undefined,
-        notes: typeof p.notes === 'string' ? p.notes : undefined,
-        covers: typeof p.covers === 'number' ? p.covers : undefined,
-        customerId: typeof p.customerId === 'string' ? p.customerId : undefined,
-        orderType: typeof p.orderType === 'string' ? p.orderType : undefined,
-      } as any)
+      const customerId = typeof p.customerId === 'string' ? p.customerId : undefined
+      // 🔴 R4-2 (ronda 4 post-QA de sellos tardíos; decisión «A»): el MISMO servicio que la ruta online decide, bajo el candado de
+      // la venta, si se puede cambiar el cliente de una venta COBRADA; aquí sólo se le dice si quien encoló tiene
+      // `payments:create` (sin `authorizeIntent`, falla cerrado). Sin red no es puerta trasera.
+      const opciones =
+        customerId !== undefined ? { puedeCambiarClienteEnVentaCobrada: authorizeIntent?.(intent, 'payments:create') === true } : {}
+      await orderMobileService.updateOrderDetails(
+        venueId,
+        orderId,
+        {
+          name: typeof p.name === 'string' ? p.name : undefined,
+          notes: typeof p.notes === 'string' ? p.notes : undefined,
+          covers: typeof p.covers === 'number' ? p.covers : undefined,
+          customerId,
+          orderType: typeof p.orderType === 'string' ? p.orderType : undefined,
+        } as any,
+        opciones,
+      )
       break
     }
     case 'CANCEL_ORDER': {
