@@ -5,6 +5,7 @@ import {
   AreaTicketExternalIncidentKind,
   AreaTicketExternalIncidentStatus,
   AreaTicketExternalSettlementStatus,
+  AreaTicketPaymentAttemptStatus,
   AreaTicketStatus,
   ExternalConfirmationMode,
   ExternalDeliveryTracking,
@@ -38,6 +39,22 @@ import { scopedTerminalWhere, writeScopedTerminal } from '../shared/terminalScop
 // del dominio y el guard de cancelación, no una copia (ver `getOperations`).
 import { YA_COBRADO_AFUERA } from '../mobile/areaTicketV7.mobile.service'
 import { logAction } from './activity-log.service'
+
+/**
+ * 🔴 R12-4 (re-revisión r11): «requiere conciliación» = la sesión en RECONCILIATION_REQUIRED o con algún intento UNKNOWN (p. ej. el
+ * hermano que capturó sin cobro COMPLETED, o el que se congeló después de que otro cobro cerrara la sesión). UN predicado para el
+ * contador del panel, la lista del panel y el MCP `area_ticket_reconciliation_queue`: antes el contador contaba intentos UNKNOWN de
+ * sesiones PAID que ninguna lista mostraba.
+ */
+export function sesionesPorConciliar(venueId: string): Prisma.AreaTicketCheckoutSessionWhereInput {
+  return {
+    venueId,
+    OR: [
+      { status: AreaTicketCheckoutStatus.RECONCILIATION_REQUIRED },
+      { paymentAttempts: { some: { status: AreaTicketPaymentAttemptStatus.UNKNOWN } } },
+    ],
+  }
+}
 
 const DEFAULT_SETTINGS = {
   enabled: false,
@@ -150,12 +167,7 @@ export async function getOverview(venueId: string) {
     prisma.scaleProfile.findMany({ where: { venueId }, orderBy: [{ active: 'desc' }, { name: 'asc' }] }),
     prisma.areaTicket.groupBy({ by: ['status'], where: { venueId }, _count: { _all: true } }),
     prisma.areaTicketCheckoutSession.groupBy({ by: ['status'], where: { venueId }, _count: { _all: true } }),
-    prisma.areaTicketPaymentAttempt.count({
-      where: {
-        checkoutSession: { venueId },
-        OR: [{ status: 'UNKNOWN' }, { checkoutSession: { status: AreaTicketCheckoutStatus.RECONCILIATION_REQUIRED } }],
-      },
-    }),
+    prisma.areaTicketCheckoutSession.count({ where: sesionesPorConciliar(venueId) }),
   ])
 
   return {
@@ -543,7 +555,7 @@ export async function getOperations(venueId: string) {
       },
     }),
     prisma.areaTicketCheckoutSession.findMany({
-      where: { venueId, status: AreaTicketCheckoutStatus.RECONCILIATION_REQUIRED },
+      where: sesionesPorConciliar(venueId),
       orderBy: { updatedAt: 'asc' },
       take: 100,
       include: {

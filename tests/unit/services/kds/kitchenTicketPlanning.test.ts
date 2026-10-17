@@ -79,6 +79,16 @@ describe('planKitchenTickets', () => {
     expect(planKitchenTickets({ ...base, screens: desdeSiempre, order: venta, lines: [tarde] })).toEqual([])
   })
 
+  // 🔴 R13-3 (Codex r17 #5): la edad es la de CADA artículo, no la de la cuenta. Una cuenta de 13 h con un pedido reciente fusionado
+  // (el rescate tardío de su cobro de vales ya no la descarta entera): lo viejo no sale y lo reciente sí.
+  it('R13-3: cuenta de hace 13 h con un artículo reciente fusionado ⇒ sólo el reciente sale', () => {
+    const desdeSiempre = [{ id: 'cocina', since: new Date(0) }]
+    const viejo = linea({ id: 'vale-60', createdAt: new Date(T0.getTime() - 13 * 60 * 60 * 1000) })
+    const reciente = linea({ id: 'fusionado-40', createdAt: new Date(T0.getTime() - 5 * 60 * 1000) })
+    const plans = planKitchenTickets({ ...base, screens: desdeSiempre, order: venta, lines: [viejo, reciente] })
+    expect(plans.map(p => p.lines.map(l => l.id))).toEqual([['fusionado-40']])
+  })
+
   it('sin estaciones con pantalla no se planea nada', () => {
     expect(planKitchenTickets({ ...base, screens: [], order: venta, lines: [linea({ id: 'a' })] })).toEqual([])
   })

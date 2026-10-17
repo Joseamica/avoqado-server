@@ -62,6 +62,7 @@ import * as permissionOverrideMobileController from '../controllers/mobile/permi
 import * as switchUserMobileController from '../controllers/mobile/switch-user.mobile.controller'
 import { createPermissionOverrideSchema } from '../schemas/mobile/permissionOverride.mobile.schema'
 import { switchUserSchema } from '../schemas/mobile/switchUser.mobile.schema'
+import { attachCustomerToLatestPaymentSchema, attachCustomerToPaymentSchema } from '../schemas/mobile/paymentCustomer.mobile.schema'
 import { handoffSchema, confirmExternalSettlementSchema, notChargedSchema } from '../schemas/mobile/areaTicketExternal.schema'
 import { areaTicketResolveRateLimiter } from '../middlewares/area-ticket-rate-limit.middleware'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
@@ -1477,10 +1478,19 @@ router.post('/push/test', authenticateTokenMiddleware, pushMobileController.send
  *         schema:
  *           type: string
  *       - in: query
+ *         name: page
+ *         schema: { type: integer, default: 1 }
+ *       - in: query
+ *         name: pageSize
+ *         schema: { type: integer, default: 20, maximum: 100 }
+ *       - in: query
  *         name: limit
- *         schema:
- *           type: integer
- *           default: 50
+ *         description: Alias de pageSize (clientes viejos). Tope 100. Si vienen los dos, gana pageSize.
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: search
+ *         description: Teléfono (se comparan dígitos; 52/521 sobrantes se ignoran) o palabras de nombre/apellido/correo, sin acentos ni mayúsculas. Con más de 5000 coincidencias se paginan las más nuevas, meta.totalCount = las alcanzables (5000), meta.totalMatches = el total exacto y meta.searchCapped = true.
+ *         schema: { type: string }
  *       - in: query
  *         name: sortBy
  *         schema:
@@ -1492,7 +1502,7 @@ router.post('/push/test', authenticateTokenMiddleware, pushMobileController.send
  *           enum: [asc, desc]
  *     responses:
  *       200:
- *         description: List of customers
+ *         description: "{ data, meta: { totalCount, pageSize, currentPage, totalPages, hasNextPage, hasPrevPage, totalMatches?, searchCapped? } } — totalMatches y searchCapped sólo vienen cuando la búsqueda se topó en 5000."
  */
 router.get('/venues/:venueId/customers', authenticateTokenMiddleware, checkPermission('customers:read'), customerController.getCustomers)
 
@@ -1646,10 +1656,13 @@ router.post(
   paymentMobileController.recordFastPayment,
 )
 
+// BAJO-2 (full-testing, 15-oct-2026): el body se valida (un `customerId` numérico respondía 500). El schema nombra TODOS los
+// campos que lee cada controller: `validateRequest` quita los demás.
 router.post(
   '/venues/:venueId/payments/:paymentId/customer',
   authenticateTokenMiddleware,
   checkPermission('payments:create'),
+  validateRequest(attachCustomerToPaymentSchema),
   paymentMobileController.attachCustomerToPayment,
 )
 
@@ -1657,7 +1670,21 @@ router.post(
   '/venues/:venueId/payments/customer',
   authenticateTokenMiddleware,
   checkPermission('payments:create'),
+  validateRequest(attachCustomerToLatestPaymentSchema),
   paymentMobileController.attachCustomerToLatestPayment,
+)
+
+/**
+ * GET /api/v1/mobile/venues/:venueId/payments/:paymentId/loyalty
+ * Sello de la venta de ese pago para su cliente principal (spec 2026-10-14 §3.1). Sólo lee.
+ * data: { stampsEnabled, stamped, reason, stampsEarned, stampsRequired, rewardReady } | null
+ * Sin checkFeatureAccess a propósito: un negocio sin el plan recibe `stampsEnabled: false` y la app no pinta nada.
+ */
+router.get(
+  '/venues/:venueId/payments/:paymentId/loyalty',
+  authenticateTokenMiddleware,
+  checkPermission('loyalty:read'),
+  paymentMobileController.getPaymentLoyalty,
 )
 
 // ============================================================================

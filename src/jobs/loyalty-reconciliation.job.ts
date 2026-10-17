@@ -1,7 +1,9 @@
 import type { CronJob } from 'cron'
 import logger from '../config/logger'
 import { scheduleJob } from '../observability/jobContext'
-import { awardLoyaltyForPaidOrder } from '../services/shared/loyaltyOnPaidOrder'
+import { MARCA_LEALTAD_REABIERTA } from '../services/shared/lealtadReabierta'
+import { otorgarLealtadRespetandoReembolsos } from '../services/shared/loyaltyOnLateCustomer'
+import type { awardLoyaltyForPaidOrder } from '../services/shared/loyaltyOnPaidOrder'
 import prisma from '../utils/prismaClient'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { DATABASE_JOB_SCHEDULES } from './jobSchedules'
@@ -16,13 +18,17 @@ interface LoyaltyReconciliationDependencies {
   prisma: typeof prisma
   cron?: CronHandle
   now: () => Date
-  award: typeof awardLoyaltyForPaidOrder
+  // Sólo `args`: el reconciliador nunca pasa opciones (el envoltorio de abajo acepta un observador opcional, R3-1).
+  award: (args: Parameters<typeof awardLoyaltyForPaidOrder>[0]) => ReturnType<typeof awardLoyaltyForPaidOrder>
 }
 
 const defaults: LoyaltyReconciliationDependencies = {
   prisma,
   now: () => new Date(),
-  award: awardLoyaltyForPaidOrder,
+  // 🔴 B2 (auditoría de Codex, ronda B, 14-oct-2026): NUNCA `awardLoyaltyForPaidOrder` directo. Esa función no mira
+  // reembolsos: si el intento inmediato fallaba antes del sello y luego se devolvía el pago, este barrido creaba el sello
+  // sobre una venta devuelta. El envoltorio no otorga a una venta reembolsada y revierte si el reembolso entra a media.
+  award: otorgarLealtadRespetandoReembolsos,
 }
 
 /**
@@ -99,6 +105,35 @@ export class LoyaltyReconciliationJob {
       let failed = 0
       let skipped = 0
 
+      /**
+       * Suelta SU reclamo dejando el error, sin pisar la marca de una liga tardía (H2, auditoría de Codex del código +
+       * revisión final Minor 3, 15-oct-2026). Si la fila trae la marca, se suelta el reclamo igual (la siguiente vuelta la
+       * vuelve a tomar) y el error queda sólo en el log: la marca es lo que detiene a un cierre «sin cliente» que espera.
+       */
+      const soltarConError = async (orderId: string, venueId: string, claimStamp: Date, texto: string): Promise<void> => {
+        const escrita = await this.dependencies.prisma.order.updateMany({
+          where: {
+            id: orderId,
+            loyaltyProcessedAt: null,
+            loyaltyProcessingAt: claimStamp,
+            OR: [{ loyaltyLastError: null }, { loyaltyLastError: { not: MARCA_LEALTAD_REABIERTA } }],
+          },
+          data: { loyaltyProcessingAt: null, loyaltyLastError: texto.slice(0, 4000) },
+        })
+        if (escrita.count === 1) return
+        const soltada = await this.dependencies.prisma.order.updateMany({
+          where: { id: orderId, loyaltyProcessedAt: null, loyaltyProcessingAt: claimStamp },
+          data: { loyaltyProcessingAt: null },
+        })
+        if (soltada.count === 1) {
+          logger.warn('Loyalty reconciliation failed on a reopened order; marker kept, error only logged', {
+            orderId,
+            venueId,
+            error: texto.slice(0, 4000),
+          })
+        }
+      }
+
       for (const order of candidates) {
         const claimStamp = new Date(now)
         const claim = await this.dependencies.prisma.order.updateMany({
@@ -107,6 +142,10 @@ export class LoyaltyReconciliationJob {
             loyaltyEligibleAt: { not: null },
             loyaltyProcessedAt: null,
             loyaltyAttempts: { lt: MAX_ATTEMPTS },
+            // 🔴 H5 (auditoría de Codex del código, 15-oct-2026): el reclamo exige el MISMO actor que se leyó. Una liga tardía
+            // guarda a quien agregó al cliente en `loyaltyStaffId`; si lo cambió entre la lectura y este reclamo, esta vuelta
+            // no la toma (sellaría a nombre de quien cobró) y la siguiente lee el valor vigente.
+            loyaltyStaffId: order.loyaltyStaffId,
             OR: [{ loyaltyProcessingAt: null }, { loyaltyProcessingAt: { lt: staleBefore } }],
           },
           data: { loyaltyProcessingAt: claimStamp, loyaltyAttempts: { increment: 1 } },
@@ -122,34 +161,30 @@ export class LoyaltyReconciliationJob {
             orderId: order.id,
             orderTotal: Math.max(0, Number(order.total) - Number(order.tipAmount ?? 0)),
             staffId: order.loyaltyStaffId,
+            // 🔴 H5, segunda ola (recheck de Codex): una liga DESPUÉS de este reclamo cambia el cliente y `loyaltyStaffId` a la
+            // vez. El envoltorio toma el actor de la MISMA lectura que el cliente que acredita; `staffId` de arriba es sólo el
+            // respaldo de un `award` inyectado.
+            actorDeLaVenta: true,
             legacyCustomer: order.customer,
           })
 
           if (result.complete) {
+            // 🔴 B1 (auditoría de Codex, ronda B): sólo SU reclamo. Una liga tardía que reabrió la venta pone
+            // `loyaltyProcessingAt` en null; si este barrido leyó la venta «sin cliente» antes de esa liga, cerrarla aquí
+            // borraría la reapertura y el sello se perdería si el intento de la liga también falla. Antes también se
+            // aceptaba `loyaltyProcessingAt: null`, que justo es lo que escribe la reapertura. Cuando la lealtad sí cerró
+            // la venta (lo normal), esto no cambia nada: `loyaltyProcessedAt` ya no es null.
             await this.dependencies.prisma.order.updateMany({
-              where: {
-                id: order.id,
-                loyaltyProcessedAt: null,
-                OR: [{ loyaltyProcessingAt: claimStamp }, { loyaltyProcessingAt: null }],
-              },
+              where: { id: order.id, loyaltyProcessedAt: null, loyaltyProcessingAt: claimStamp },
               data: { loyaltyProcessedAt: now, loyaltyProcessingAt: null, loyaltyLastError: null },
             })
             applied += 1
           } else {
-            await this.dependencies.prisma.order.updateMany({
-              where: { id: order.id, loyaltyProcessedAt: null, loyaltyProcessingAt: claimStamp },
-              data: { loyaltyProcessingAt: null, loyaltyLastError: result.errors.join(' | ').slice(0, 4000) },
-            })
+            await soltarConError(order.id, order.venueId, claimStamp, result.errors.join(' | '))
             failed += 1
           }
         } catch (error) {
-          await this.dependencies.prisma.order.updateMany({
-            where: { id: order.id, loyaltyProcessedAt: null, loyaltyProcessingAt: claimStamp },
-            data: {
-              loyaltyProcessingAt: null,
-              loyaltyLastError: (error instanceof Error ? error.message : String(error)).slice(0, 4000),
-            },
-          })
+          await soltarConError(order.id, order.venueId, claimStamp, error instanceof Error ? error.message : String(error))
           failed += 1
           logger.error('Loyalty reconciliation candidate failed', { orderId: order.id, venueId: order.venueId, error })
         }

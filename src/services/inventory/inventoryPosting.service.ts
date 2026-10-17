@@ -41,6 +41,8 @@ type SalePostingItem = {
   quantity: number
   weightQuantity?: Prisma.Decimal | number | string | null
   modifiers?: Array<{ quantity: number; modifier: Record<string, unknown> | null }> | null
+  /** El renglón vino de un vale por área v7 (puede tener su reserva de inventario ACTIVE). */
+  areaTicketLineId?: string | null
 }
 
 const itemHasInventoryModifiers = (item: SalePostingItem): boolean =>
@@ -150,6 +152,32 @@ export async function createSalePostingInTx(
     expectedQuantityBase: Prisma.Decimal
   }> = []
 
+  // 🔴 R12-1 (ronda 12; Codex recheck-16 #1): los renglones de vale v7 cuyo vale NO liberó la cancelación. Cancelar la sesión devuelve
+  // sus vales a ISSUED, sin venta (`orderId: null`, el único escritor que lo vacía) y con su reserva ACTIVE; si después llega dinero ya
+  // capturado, la venta cancelada se cobra con la regla de nivel venta (se reabre), pero esos vales ya no son suyos: ni se descuentan aquí
+  // ni se suelta su reserva. R13-2 (Codex r17 #4): NO se exige que el vale sea de ESTA venta: dividir o fusionar mueve el renglón con su
+  // `areaTicketLineId` sin tocar `AreaTicket.orderId`, y ese renglón sí se descuenta en la venta que lo cobra (10 → 9). Salvo que su
+  // reserva ya esté CONSUMED: la sesión de la venta de origen ya lo sacó del stock al cobrarse ella primero (sin esto, 10 → 8). Sin
+  // renglones de vale (o con `skipReason`) no hay consulta.
+  const lineasDeVale = skipReason
+    ? []
+    : [...new Set(items.map(i => i.areaTicketLineId).filter((id): id is string => typeof id === 'string' && id.length > 0))]
+  const lineasPropias = new Set(
+    lineasDeVale.length > 0
+      ? (
+          await tx.areaTicketLine.findMany({
+            where: {
+              id: { in: lineasDeVale },
+              areaTicket: { venueId, orderId: { not: null } },
+              reservations: { none: { status: 'CONSUMED' } },
+            },
+            select: { id: true },
+            take: lineasDeVale.length,
+          })
+        ).map(l => l.id)
+      : [],
+  )
+
   if (!skipReason) {
     // UNA consulta clasifica todos los productos (antes: un findUnique con
     // includes POR ITEM, secuencial, dentro de la tx del cobro — N+1 contra el
@@ -162,6 +190,7 @@ export async function createSalePostingInTx(
     const methods = await getProductInventoryMethods(productIds, tx as any, venueId)
     for (const item of items) {
       if (!item.productId) continue
+      if (item.areaTicketLineId && !lineasPropias.has(item.areaTicketLineId)) continue
       const method = methods.get(item.productId) ?? null
       if (!method && !itemHasInventoryModifiers(item)) continue
       lines.push({
@@ -183,6 +212,20 @@ export async function createSalePostingInTx(
   const resolvedSkip =
     skipReason ??
     (lines.length > 0 ? undefined : items.length === 0 ? 'NO_ITEMS' : items.some(i => i.productId) ? 'NO_TRACKED_ITEMS' : 'CUSTOM_ITEM')
+
+  // 🔴 R10-2 (ronda 10 post-QA de sellos tardíos; Codex recheck-14 #2; de vuelta en R12-2 tras revertir R11-7): este vale toma la
+  // obligación de inventario de TODOS los renglones, también los de un vale por área v7 con su reserva ACTIVE (la apartó al emitirse y
+  // nadie la consumió: otro canal —pago manual, liquidar desde el panel o el saldo del cliente, cripto— cierra la venta sin conocer la
+  // sesión). La reserva se suelta AQUÍ, en la misma transacción del cierre y SIN mover stock (como al cancelar un vale sin cobrar): si se
+  // quedaba, restaba disponibilidad para siempre y el siguiente vale se rechazaba con mercancía en el anaquel. También sin líneas (el
+  // producto dejó de inventariarse: SKIPPED / NO_TRACKED_ITEMS) y aunque una línea falle después (Codex recheck-16 #2 y #3): la obligación
+  // vive en el vale. Con `skipReason` (la sesión o el efectivo del POS que ya consumieron en su propia transacción) no se toca nada.
+  if (lineasPropias.size > 0) {
+    await tx.areaTicketInventoryReservation.updateMany({
+      where: { venueId, areaTicketLineId: { in: [...lineasPropias] }, status: 'ACTIVE' },
+      data: { status: 'RELEASED', releasedAt: new Date() },
+    })
+  }
 
   return await tx.inventoryPosting.create({
     data: {

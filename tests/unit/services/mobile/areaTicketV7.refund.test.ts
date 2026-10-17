@@ -11,9 +11,11 @@
  * "debiendo $X". Modelo Toast/Square, y en México además lo cierra el SAT (la
  * devolución se ampara con un CFDI de Egreso; el de ingreso no se toca).
  *
- * Se prueba con un `tx` falso: el intento de pago se devuelve ya SUCCEEDED con
- * el mismo `paymentId`, lo que hace que la función retorne justo después del
- * bloque de conciliación — que es exactamente lo que esta suite mide.
+ * Se prueba con un `tx` falso que recorre la finalización completa con el intento
+ * PENDIENTE: la venta sin renglones ni reservas no consume nada, así que lo que se
+ * mide es la escritura de la conciliación. (Hasta la ronda 10 el intento llegaba
+ * SUCCEEDED para cortar justo después de esa escritura; R11-5 hizo esa salida de
+ * sólo lectura, antes de escribir nada.)
  */
 
 import { Prisma } from '@prisma/client'
@@ -52,13 +54,26 @@ function makeTx(order: Record<string, any>, payments: FakePayment[]) {
         }))
       }),
     },
-    // Devolver el intento ya SUCCEEDED con ESTE paymentId corta la función justo
-    // después de conciliar: aislamos el cálculo del saldo sin arrastrar el resto.
+    // El intento sigue pendiente: la finalización llega hasta el final (sin renglones ni reservas, no consume nada).
     areaTicketPaymentAttempt: {
-      findFirst: jest.fn().mockResolvedValue({ id: ATTEMPT_ID, status: 'SUCCEEDED', paymentId: PAYMENT_ID }),
+      findFirst: jest.fn().mockResolvedValue({ id: ATTEMPT_ID, status: 'PENDING', paymentId: null }),
       update: jest.fn().mockResolvedValue({}),
+      // R12-4: al cerrar PAID, los intentos UNKNOWN hermanos con su cobro COMPLETED quedan SUCCEEDED (aquí: ninguno).
+      updateMany: jest.fn().mockResolvedValue({ count: 0 }),
     },
-    areaTicketCheckoutSession: { update: jest.fn().mockResolvedValue({}) },
+    areaTicketCheckoutSession: {
+      update: jest.fn().mockResolvedValue({}),
+      findFirst: jest.fn().mockResolvedValue({ status: 'PAYMENT_PENDING', activePaymentAttemptId: ATTEMPT_ID }),
+    },
+    areaTicketInventoryReservation: {
+      findMany: jest.fn().mockResolvedValue([]),
+      count: jest.fn().mockResolvedValue(0),
+      updateMany: jest.fn().mockResolvedValue({ count: 0 }),
+    },
+    orderItem: { findMany: jest.fn().mockResolvedValue([]) },
+    // R10-1/R10-3: con la venta ya cerrada, la finalización mira si alguien tiene su vale de inventario (aquí: nadie); al consumir
+    // deja su constancia (SKIPPED).
+    inventoryPosting: { findUnique: jest.fn().mockResolvedValue(null), create: jest.fn().mockResolvedValue({ id: 'posting-v7' }) },
   }
   return { tx, paymentSelects, orderUpdates }
 }
