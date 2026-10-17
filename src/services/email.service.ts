@@ -4717,7 +4717,9 @@ Equipo de Avoqado`
   }
 
   /**
-   * Plan renewal reminder (Phase 1.5). Sent ~3 days before the next billing period by a daily cron.
+   * Plan reminder before the next charge (renewal, or with `isTrialEnd` the end of the trial). Sent by the daily
+   * `plan-renewal-reminder` job less than 9 days before the charge (first send normally 8-9 days out) and by the Stripe
+   * `trial_will_end` webhook (3 days before).
    */
   async sendPlanRenewalReminderEmail(email: string, data: PlanRenewalReminderEmailData): Promise<boolean> {
     const amount = new Intl.NumberFormat(data.locale === 'en' ? 'en-US' : 'es-MX', {

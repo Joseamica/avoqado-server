@@ -30,7 +30,7 @@ import { retry, shouldRetryDbConnectionError } from '@/utils/retry'
 import { subscriptionPeriod } from '@/utils/stripeSubscriptionPeriod'
 import emailService from '@/services/email.service'
 import { resolvePlanNotificationTarget } from '@/services/access/planNotification.service'
-import { montoDelSiguienteCobro, seCancelaAntesDe } from '@/services/billing/siguienteCobro'
+import { montoDelSiguienteCobro, noHabraCobro } from '@/services/billing/siguienteCobro'
 import { billingPageUrl } from '@/utils/dashboardLinks'
 import { scheduleJob } from '../observability/jobContext'
 
@@ -106,9 +106,13 @@ export class PlanRenewalReminderJob {
     const now = Date.now()
     let sentCount = 0
     let errorCount = 0
+    let sinMonto = 0
+    // One email per subscription per run, even if a residue left two active plan rows on it (PRO + PREMIUM).
+    const avisadas = new Set<string>()
 
     for (const vf of features) {
       try {
+        if (avisadas.has(vf.stripeSubscriptionId!)) continue
         const sub = await stripe.subscriptions.retrieve(vf.stripeSubscriptionId!)
 
         if (sub.status !== 'active' && sub.status !== 'trialing') continue
@@ -128,8 +132,8 @@ export class PlanRenewalReminderJob {
         // Dedup: already reminded this billing period?
         if (vf.renewalReminderSentAt && vf.renewalReminderSentAt.getTime() > periodStartMs) continue
 
-        // Ends without charging (canceled at period end, or cancel_at before it): never announce a charge.
-        if (seCancelaAntesDe(sub, periodEndMs)) continue
+        // No charge at period end (canceled, cancel_at before it, or collection paused through it): never announce one.
+        if (noHabraCobro(sub, periodEndMs)) continue
 
         const target = await resolvePlanNotificationTarget(vf.venueId)
         if (!target.email) {
@@ -139,7 +143,10 @@ export class PlanRenewalReminderJob {
 
         // 🔴 No list-price fallback: unknown amount → no email, no stamp; tomorrow's run (still in the window) retries.
         const amountCents = await montoDelSiguienteCobro(stripe, vf.stripeSubscriptionId!)
-        if (amountCents === null) continue
+        if (amountCents === null) {
+          sinMonto++
+          continue
+        }
 
         const interval = sub.items.data[0]?.price.recurring?.interval === 'year' ? 'annual' : 'monthly'
 
@@ -161,10 +168,18 @@ export class PlanRenewalReminderJob {
           continue
         }
 
-        await prisma.venueFeature.update({
-          where: { id: vf.id },
-          data: { renewalReminderSentAt: new Date() },
-        })
+        avisadas.add(vf.stripeSubscriptionId!)
+
+        // Idempotent stamp, retried on a connection error so a P1001 at 09:00 doesn't re-send tomorrow. The email above
+        // is NOT inside any retry.
+        await retry(
+          () =>
+            prisma.venueFeature.update({
+              where: { id: vf.id },
+              data: { renewalReminderSentAt: new Date() },
+            }),
+          { retries: 2, initialDelay: 1500, shouldRetry: shouldRetryDbConnectionError, context: 'plan-renewal-reminder.stamp' },
+        )
 
         sentCount++
       } catch (err) {
@@ -179,6 +194,7 @@ export class PlanRenewalReminderJob {
     logger.info('✅ Plan renewal reminder check complete', {
       total: features.length,
       sent: sentCount,
+      sinMonto,
       errors: errorCount,
     })
   }

@@ -1,6 +1,8 @@
 import type Stripe from 'stripe'
 import { PlanRenewalReminderJob, diasParaAvisar } from '@/jobs/plan-renewal-reminder.job'
-import { montoDelSiguienteCobro, seCancelaAntesDe } from '@/services/billing/siguienteCobro'
+import { montoDelSiguienteCobro, noHabraCobro } from '@/services/billing/siguienteCobro'
+import logger from '@/config/logger'
+import { retry } from '@/utils/retry'
 import prisma from '@/utils/prismaClient'
 import emailService from '@/services/email.service'
 import * as planNotification from '@/services/access/planNotification.service'
@@ -8,7 +10,7 @@ import * as planNotification from '@/services/access/planNotification.service'
 // Make retry transparent: just invoke the wrapped fn (deterministic, no backoff).
 jest.mock('@/utils/retry', () => ({
   __esModule: true,
-  retry: (fn: () => unknown) => fn(),
+  retry: jest.fn((fn: () => unknown) => fn()),
   shouldRetryDbConnectionError: jest.fn(),
 }))
 
@@ -97,15 +99,22 @@ describe('diasParaAvisar (0 < días < 9)', () => {
   })
 })
 
-describe('seCancelaAntesDe', () => {
+describe('noHabraCobro', () => {
   const finMs = Date.UTC(2026, 10, 16, 18)
-  const sub = (o: Record<string, unknown>) => ({ cancel_at_period_end: false, cancel_at: null, ...o }) as unknown as Stripe.Subscription
+  const finS = finMs / 1000
+  const sub = (o: Record<string, unknown>) =>
+    ({ cancel_at_period_end: false, cancel_at: null, pause_collection: null, ...o }) as unknown as Stripe.Subscription
+  const pausa = (resumes_at: number | null) => ({ pause_collection: { behavior: 'mark_uncollectible', resumes_at } })
 
-  it('cancel_at_period_end → true', () => expect(seCancelaAntesDe(sub({ cancel_at_period_end: true }), finMs)).toBe(true))
-  it('cancel_at exactamente al fin → true', () => expect(seCancelaAntesDe(sub({ cancel_at: finMs / 1000 }), finMs)).toBe(true))
-  it('cancel_at antes del fin → true', () => expect(seCancelaAntesDe(sub({ cancel_at: finMs / 1000 - 1 }), finMs)).toBe(true))
-  it('cancel_at después del fin → false', () => expect(seCancelaAntesDe(sub({ cancel_at: finMs / 1000 + 1 }), finMs)).toBe(false))
-  it('sin cancelación → false', () => expect(seCancelaAntesDe(sub({}), finMs)).toBe(false))
+  it('cancel_at_period_end → true', () => expect(noHabraCobro(sub({ cancel_at_period_end: true }), finMs)).toBe(true))
+  it('cancel_at exactamente al fin → true', () => expect(noHabraCobro(sub({ cancel_at: finS }), finMs)).toBe(true))
+  it('cancel_at antes del fin → true', () => expect(noHabraCobro(sub({ cancel_at: finS - 1 }), finMs)).toBe(true))
+  it('cancel_at después del fin → false', () => expect(noHabraCobro(sub({ cancel_at: finS + 1 }), finMs)).toBe(false))
+  it('cobranza en pausa sin reanudación → true', () => expect(noHabraCobro(sub(pausa(null)), finMs)).toBe(true))
+  it('pausa que reanuda justo al fin → true', () => expect(noHabraCobro(sub(pausa(finS)), finMs)).toBe(true))
+  it('pausa que reanuda después del fin → true', () => expect(noHabraCobro(sub(pausa(finS + 86400)), finMs)).toBe(true))
+  it('pausa que reanuda ANTES del fin → false', () => expect(noHabraCobro(sub(pausa(finS - 1)), finMs)).toBe(false))
+  it('sin cancelación ni pausa → false', () => expect(noHabraCobro(sub({}), finMs)).toBe(false))
 })
 
 describe('montoDelSiguienteCobro', () => {
@@ -343,6 +352,66 @@ describe('PlanRenewalReminderJob.runNow', () => {
     await new PlanRenewalReminderJob().runNow()
 
     expect(sendSpy).not.toHaveBeenCalled()
+  })
+
+  it('paused collection with no resume date at 8 days → no email, no stamp', async () => {
+    mockPrisma.venueFeature.findMany.mockResolvedValue([row()])
+    mockRetrieve.mockResolvedValue(stripeSub(8, { pause_collection: { behavior: 'mark_uncollectible', resumes_at: null } }))
+
+    await new PlanRenewalReminderJob().runNow()
+
+    expect(sendSpy).not.toHaveBeenCalled()
+    expect(mockPrisma.venueFeature.update).not.toHaveBeenCalled()
+  })
+
+  it('paused collection that resumes before the period end → email sent', async () => {
+    mockPrisma.venueFeature.findMany.mockResolvedValue([row()])
+    const sub = stripeSub(8)
+    mockRetrieve.mockResolvedValue({
+      ...sub,
+      pause_collection: { behavior: 'mark_uncollectible', resumes_at: sub.current_period_end - 2 * 24 * 3600 },
+    })
+
+    await new PlanRenewalReminderJob().runNow()
+
+    expect(sendSpy).toHaveBeenCalledTimes(1)
+    expect(mockPrisma.venueFeature.update).toHaveBeenCalledTimes(1)
+  })
+
+  it('two active rows on ONE subscription (PRO + PREMIUM residue) → one email per run', async () => {
+    mockPrisma.venueFeature.findMany.mockResolvedValue([row(), row({ id: 'vf2', feature: { code: 'PLAN_PREMIUM' } })])
+    mockRetrieve.mockResolvedValue(stripeSub(8))
+
+    await new PlanRenewalReminderJob().runNow()
+
+    expect(sendSpy).toHaveBeenCalledTimes(1)
+    expect(mockPrisma.venueFeature.update).toHaveBeenCalledTimes(1)
+  })
+
+  it('summary log counts the rows skipped for lack of an amount (sinMonto)', async () => {
+    mockPrisma.venueFeature.findMany.mockResolvedValue([row(), row({ id: 'vf2', venueId: 'v2', stripeSubscriptionId: 'sub_2' })])
+    mockRetrieve.mockResolvedValue(stripeSub(8))
+    mockCreatePreview.mockRejectedValueOnce(new Error('Stripe 503')).mockResolvedValueOnce({ amount_due: 115884 })
+
+    await new PlanRenewalReminderJob().runNow()
+
+    expect(logger.info).toHaveBeenCalledWith(
+      '✅ Plan renewal reminder check complete',
+      expect.objectContaining({ total: 2, sent: 1, sinMonto: 1, errors: 0 }),
+    )
+  })
+
+  it('only the entry read and the stamp go through retry (never the email)', async () => {
+    mockPrisma.venueFeature.findMany.mockResolvedValue([row()])
+    mockRetrieve.mockResolvedValue(stripeSub(8))
+
+    await new PlanRenewalReminderJob().runNow()
+
+    expect(sendSpy).toHaveBeenCalledTimes(1)
+    expect((retry as jest.Mock).mock.calls.map(c => c[1].context)).toEqual([
+      'plan-renewal-reminder.findMany',
+      'plan-renewal-reminder.stamp',
+    ])
   })
 
   it('renewing in ~10 days → skip (outside the 0-9 day window)', async () => {
