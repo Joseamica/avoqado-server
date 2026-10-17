@@ -276,6 +276,17 @@ describe('SingleFlightCache', () => {
       expect(calcular).toHaveBeenCalledTimes(calculos)
     })
 
+    // F0-B, ronda final (M7): la ventana reusa lo GUARDADO sólo mientras siga vigente. Con un TTL menor que la ventana, lo
+    // vencido no se entrega aunque el refresh que lo guardó haya arrancado hace menos de 2 s.
+    it('🔴 con un TTL menor que la ventana, lo guardado y YA VENCIDO se vuelve a calcular', async () => {
+      const cache = new SingleFlightCache<string>({ ttlMs: 500, maxEntradas: 3, ahora: () => reloj })
+      let n = 0
+      const calcular = jest.fn(async () => `v${++n}`)
+      await expect(cache.refresh('k', calcular)).resolves.toBe('v1')
+      reloj += 1_000 // dentro de la ventana de 2 s, fuera del TTL de 500 ms
+      await expect(cache.refresh('k', calcular)).resolves.toBe('v2')
+    })
+
     it('el error del refresh al que se unieron llega a los DOS y no se guarda', async () => {
       const cache = nueva()
       const d = diferida<string>()

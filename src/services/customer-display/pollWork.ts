@@ -149,7 +149,8 @@ export class SingleFlightCache<V> {
     const vuelo = this.vuelos.get(llave)
     if (vuelo && vuelo.esRefresh && ahora - vuelo.iniciadoEn <= REFRESH_COALESCE_MS) return vuelo.promesa
     const entrada = this.entradas.get(llave)
-    if (entrada?.refrescoIniciadoEn !== undefined && ahora - entrada.refrescoIniciadoEn <= REFRESH_COALESCE_MS) {
+    // Sólo lo que sigue VIGENTE (M7): con un TTL menor que la ventana, lo vencido se calcula de nuevo.
+    if (entrada?.refrescoIniciadoEn !== undefined && ahora - entrada.refrescoIniciadoEn <= REFRESH_COALESCE_MS && entrada.hasta > ahora) {
       return Promise.resolve(entrada.valor)
     }
     this.anularVuelo(llave)

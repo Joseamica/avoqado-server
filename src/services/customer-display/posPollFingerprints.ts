@@ -235,7 +235,16 @@ export async function collectPollFingerprints(
 
   if (hasRequest) {
     // 🔴 Con solicitud de inversión no se espera NADA (spec §5.7.4): lo que arrancó termina para llenar su caché.
-    for (const [fuente, promesa] of Object.entries(tareas) as Array<[Fuente, Promise<string>]>) promesa.catch(e => alFallar(fuente, e))
+    // `alFallar` sólo reporta: si truena (M8), se descarta como en `dentroDelPlazo` — un rechazo sin manejar apaga el servidor.
+    for (const [fuente, promesa] of Object.entries(tareas) as Array<[Fuente, Promise<string>]>) {
+      promesa.catch(e => {
+        try {
+          alFallar(fuente, e)
+        } catch {
+          // descartado a propósito (ver arriba)
+        }
+      })
+    }
     return huellas
   }
 

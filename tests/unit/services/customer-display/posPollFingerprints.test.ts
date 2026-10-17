@@ -236,6 +236,30 @@ describe('collectPollFingerprints', () => {
     expect(d.leerFirmas).not.toHaveBeenCalled() // ni después: settings no arrancó
   })
 
+  // F0-B, ronda final (M8): con solicitud nadie espera las tareas; si el reporte de su fallo truena (el logger, un error que
+  // no se deja convertir a texto), quedaba un rechazo sin manejar — y en producción `server.ts` lo convierte en apagado.
+  it('🔴 con solicitud de inversión, un alFallar que truena no deja un rechazo sin manejar', async () => {
+    const warn = logger.warn as jest.Mock
+    warn.mockImplementationOnce(() => {
+      throw new Error('el logger truena')
+    })
+    const sinManejar: unknown[] = []
+    const oir = (razon: unknown) => sinManejar.push(razon)
+    process.on('unhandledRejection', oir)
+    try {
+      const d = deps({ peekFicha: jest.fn(() => 'ficha-guardada'), leerPlan: jest.fn(async () => Promise.reject(new Error('base caída'))) })
+      expect(await collectPollFingerprints({ venueId: VENUE, terminal: terminal(), hasRequest: true }, d)).toEqual({
+        customerDisplay: 'ficha-guardada',
+      })
+      await vaciar()
+      await vaciar()
+      expect(warn).toHaveBeenCalled() // sí intentó reportar el fallo de las promociones
+      expect(sinManejar).toEqual([])
+    } finally {
+      process.off('unhandledRejection', oir)
+    }
+  })
+
   it('sin PROMOTIONS: la constante, sin armar carrusel', async () => {
     const d = deps({ leerPlan: jest.fn(async () => plan(false)) })
     const r = await collectPollFingerprints({ venueId: VENUE, terminal: terminal(), hasRequest: false }, d)

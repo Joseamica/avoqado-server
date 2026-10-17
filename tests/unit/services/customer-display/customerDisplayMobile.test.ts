@@ -93,6 +93,20 @@ describe('customerDisplayAckSchema', () => {
     expect(r.success).toBe(false)
   })
 
+  // F0-B, ronda final (M1): el 400 se le muestra tal cual a quien depura la tablet; nada de «Expected string, received number»
+  // ni «Unrecognized key(s)». `.strict()` se queda: una app que sume un campo recibe este 400 hasta que el servidor lo conozca.
+  it.each([
+    ['un campo con el tipo equivocado', { installationId: 123 }, ['La instalación debe ser texto']],
+    ['un cuerpo que no es objeto', null, ['El acuse debe ser un objeto']],
+    ['una llave que el servidor no conoce', { extra: true }, ['El acuse trae campos que el servidor no conoce: extra']],
+    // El mapa del objeto sólo cubre lo del objeto: el mensaje de cada campo sigue siendo el suyo.
+    ['un campo que falta', { installationId: undefined }, ['Falta la instalación']],
+  ])('%s: el 400 sale en español', (_caso, cambio, mensajes) => {
+    const r = parse(cambio === null ? null : { ...valido, ...cambio })
+    expect(r.success).toBe(false)
+    if (!r.success) expect(r.error.errors.map(e => e.message)).toEqual(mensajes)
+  })
+
   it('acepta la ventana de Windows como superficie (R1)', () => {
     expect(parse({ ...valido, surface: 'window', shownAt: '2026-09-25T17:00:00.000Z' }).success).toBe(true)
   })
