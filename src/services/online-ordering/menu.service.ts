@@ -149,15 +149,16 @@ export function exceedsQueryLimits(p: OnlineProductRow): boolean {
 
 /**
  * M-4: un grupo que nadie puede cumplir deja el platillo imposible de pedir (realista: desactivaron todos los sabores agotados de
- * un obligatorio). La carta no lo ofrece y el cotizador responde `PRODUCT_UNAVAILABLE`. El mínimo efectivo es el del cotizador
- * (un obligatorio pide al menos 1); las opciones son las activas que trae `ONLINE_PRODUCT_SELECT`.
+ * un obligatorio). La carta no lo ofrece y el cotizador responde `PRODUCT_UNAVAILABLE`. Es exactamente lo que el cotizador no puede
+ * aceptar: el mínimo efectivo es el suyo (un obligatorio pide al menos 1) y él cuenta CANTIDADES, así que un grupo de varias
+ * opciones con mínimo mayor que las activas sí se llena repitiendo una. Las opciones son las activas de `ONLINE_PRODUCT_SELECT`.
  */
 export function isUnsatisfiable(p: OnlineProductRow): boolean {
   return p.modifierGroups.some(({ group: g }) => {
     const min = g.required ? Math.max(1, g.minSelections) : g.minSelections
     return (
-      min > g.modifiers.length || // incluye «obligatorio o con mínimo, y 0 opciones activas»
-      (!g.allowMultiple && min >= 2) ||
+      (min >= 1 && g.modifiers.length === 0) || // ninguna opción activa
+      (!g.allowMultiple && min >= 2) || // la selección única nunca llega a 2
       (g.maxSelections !== null && min > g.maxSelections)
     )
   })

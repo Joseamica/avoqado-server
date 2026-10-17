@@ -140,7 +140,6 @@ describe('loadVisibleMenu', () => {
   const IMPOSIBLES: Array<[string, Record<string, unknown>]> = [
     ['obligatorio sin opciones activas', { required: true, minSelections: 0, modifiers: [] }],
     ['con mínimo y sin opciones activas', { required: false, minSelections: 1, modifiers: [] }],
-    ['mínimo mayor que las opciones activas', { required: true, allowMultiple: true, minSelections: 3, maxSelections: null }],
     ['selección única con mínimo de 2', { required: true, allowMultiple: false, minSelections: 2, maxSelections: null }],
     ['mínimo mayor que el máximo', { required: true, allowMultiple: true, minSelections: 2, maxSelections: 1 }],
   ]
@@ -168,6 +167,16 @@ describe('loadVisibleMenu', () => {
     prismaMock.menuCategory.findMany.mockResolvedValue([category('cat1', [opcionalVacio, justo])] as any)
     const menu = await loadVisibleMenu('v1', NOW)
     expect(menu.categories[0].products.map(p => p.id)).toEqual(['p-a', 'p-b'])
+  })
+
+  it('M-4: un grupo de VARIAS opciones con mínimo mayor que las activas SÍ se ofrece: se llena repitiendo una (el cotizador suma cantidades)', async () => {
+    // «Elige 3 salsas» con sólo 2 activas: verde × 2 + roja × 1 cumple.
+    const repitiendo = product('p-salsas', {
+      modifierGroups: [{ group: { ...group().group, required: true, allowMultiple: true, minSelections: 3, maxSelections: null } }],
+    })
+    prismaMock.menuCategory.findMany.mockResolvedValue([category('cat1', [repitiendo])] as any)
+    const menu = await loadVisibleMenu('v1', NOW)
+    expect(menu.categories[0].products.map(p => p.id)).toEqual(['p-salsas'])
   })
 })
 
