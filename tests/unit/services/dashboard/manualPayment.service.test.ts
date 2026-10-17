@@ -73,6 +73,7 @@ jest.mock('@/services/shared/cashDrawerPosting', () => ({
 import * as manualPaymentService from '@/services/dashboard/manualPayment.service'
 import prisma from '@/utils/prismaClient'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
+import { createManualPaymentSchema } from '@/schemas/dashboard/manualPayment.schema'
 
 const prismaMock = prisma as jest.Mocked<typeof prisma>
 
@@ -415,6 +416,32 @@ describe('manualPayment.service', () => {
       armarTx(ordenConProductos({ payments: [] })) // 30 de 100 → sigue PARTIAL
 
       await manualPaymentService.createManualPayment(VENUE_ID, USER_ID, pagoQueSalda)
+
+      expect(createSalePostingInTxMock).not.toHaveBeenCalled()
+      expect(applySalePostingMock).not.toHaveBeenCalled()
+    })
+
+    it('rechaza otro cobro de una orden ya saldada sin abrir ni aplicar otro vale', async () => {
+      armarTx(
+        ordenConProductos({
+          paymentStatus: 'PAID',
+          payments: [{ amount: new Prisma.Decimal(100), tipAmount: new Prisma.Decimal(0), status: 'COMPLETED' }],
+        }),
+      )
+
+      await expect(manualPaymentService.createManualPayment(VENUE_ID, USER_ID, pagoQueSalda)).rejects.toMatchObject({
+        statusCode: 400,
+        message: 'El pago excede el saldo pendiente. Pendiente: 0.00',
+      })
+
+      expect(createSalePostingInTxMock).not.toHaveBeenCalled()
+      expect(applySalePostingMock).not.toHaveBeenCalled()
+    })
+
+    it('la marca PAID impide otro vale aunque el historial de pagos no cubra todo el total', async () => {
+      armarTx(ordenConProductos({ paymentStatus: 'PAID' }))
+
+      await expect(manualPaymentService.createManualPayment(VENUE_ID, USER_ID, pagoQueSalda)).resolves.toBeDefined()
 
       expect(createSalePostingInTxMock).not.toHaveBeenCalled()
       expect(applySalePostingMock).not.toHaveBeenCalled()
@@ -1854,12 +1881,48 @@ describe('manualPayment.service', () => {
       expect(data.createdById).toBe('admin-id')
     })
 
-    it('AUDIT: source=TPV with externalSource is REJECTED by schema layer (defense in depth)', () => {
-      // Schema's superRefine forbids externalSource when source !== 'OTHER'.
-      // This is a schema-layer test (not service), but we document it here.
-      // Real assertion: schema validation runs in the controller via Zod parse.
-      // Service trusts the input shape — defense in depth = layered validation.
-      expect(true).toBe(true) // placeholder reminder
+    it('el esquema rechaza un proveedor externo cuando el origen del pago es TPV', () => {
+      const result = createManualPaymentSchema.safeParse({
+        body: { amount: '100', method: 'CASH', source: 'TPV', externalSource: 'Proveedor externo' },
+      })
+
+      expect(result.success).toBe(false)
+      if (result.success) throw new Error('El origen TPV no admite un proveedor externo')
+      expect(result.error.issues).toEqual([
+        expect.objectContaining({
+          path: ['body', 'externalSource'],
+          message: 'El proveedor externo solo aplica cuando el origen es OTHER',
+        }),
+      ])
+    })
+
+    it('el esquema acepta un proveedor externo cuando el origen del pago es OTHER', () => {
+      const result = createManualPaymentSchema.safeParse({
+        body: { amount: '100', method: 'CASH', source: 'OTHER', externalSource: 'Proveedor externo' },
+      })
+
+      expect(result.success).toBe(true)
+    })
+
+    it('una orden sombra sin productos no crea ni aplica un vale de inventario', async () => {
+      const orderCreate = jest.fn().mockResolvedValue({ id: 'shadow-sin-inventario' })
+      ;(prismaMock.$transaction as jest.Mock).mockImplementation(
+        txMock({ order: { findFirst: jest.fn(), update: jest.fn(), create: orderCreate } }),
+      )
+
+      await expect(
+        manualPaymentService.createManualPayment(VENUE_ID, USER_ID, {
+          amount: '100',
+          tipAmount: '0',
+          method: 'CASH',
+          source: 'OTHER',
+          externalSource: 'Proveedor externo',
+        }),
+      ).resolves.toBeDefined()
+
+      expect(orderCreate).toHaveBeenCalledTimes(1)
+      expect(createSalePostingInTxMock).not.toHaveBeenCalled()
+      expect(applySalePostingMock).not.toHaveBeenCalled()
     })
 
     it('AUDIT: VenueTransaction is also created in Mode 1 (existing order path)', async () => {
@@ -2344,22 +2407,7 @@ describe('manualPayment.service', () => {
       expect(updateCustomerMetricsMock).not.toHaveBeenCalled()
     })
 
-    it('KNOWN LIMITATION: socket.io broadcast NOT emitted (UX only — not financial descuadre)', () => {
-      // TPV broadcasts PAYMENT_COMPLETED via socketManager so dashboards refresh
-      // in real-time. Manual payments don't emit — admin sees their own action
-      // immediately, other open dashboards need refresh. Documented gap, no impact
-      // on financial data. Future enhancement.
-      expect(true).toBe(true)
-    })
-
-    it('KNOWN LIMITATION: inventory FIFO deduction NOT performed (per service docstring)', () => {
-      // TPV deducts inventory on final payment via SaleVerification flow.
-      // Manual payments are explicitly out-of-scope per the service docstring —
-      // there are no SKU items on shadow orders, so no inventory to deduct.
-      // For Mode 1 (existing order with items), inventory should already have
-      // been handled by the original order flow (e.g., POS sync or TPV).
-      expect(true).toBe(true)
-    })
+    it.todo('LIMITACIÓN DOCUMENTADA: emitir el pago manual por socket para las otras pantallas abiertas')
   })
 
   describe('getExternalSources', () => {

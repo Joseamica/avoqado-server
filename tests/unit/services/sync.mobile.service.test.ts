@@ -563,6 +563,59 @@ describe('sync.mobile.service processIntents', () => {
     )
   })
 
+  // D5 (mesas40, 14-oct): ni la nota larga ni el efectivo gigante son motivo de cuarentena. La cola reproduce algo que
+  // YA ocurrió: la nota pasa entera (el server no la recorta, D5 v5) y el importe se conserva exacto.
+  it('D5: ADD_ITEMS con una nota de 10,038 caracteres ⇒ ACKED (el reducer la pasa; nunca la rechaza)', async () => {
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 3, status: 'PENDING' })
+    ;(orderTpvService.addItemsToOrder as jest.Mock).mockResolvedValue({ version: 4, total: 50 })
+    const notaLarga = 'a'.repeat(499) + '🌮' + 'b'.repeat(9_537)
+
+    const acks = await processIntents(
+      baseParams([
+        {
+          id: 'nota-larga',
+          seq: 1,
+          type: 'ADD_ITEMS',
+          payload: { orderId: 'order-1', items: [{ productId: 'p1', quantity: 1, notes: notaLarga }] },
+        },
+      ]),
+    )
+
+    expect(acks[0]).toMatchObject({ status: 'ACKED', result: { orderId: 'order-1' } })
+    expect(orderTpvService.addItemsToOrder).toHaveBeenCalledWith(
+      VENUE,
+      'order-1',
+      [expect.objectContaining({ productId: 'p1', notes: notaLarga })],
+      3,
+      true,
+      expect.any(Function),
+    )
+  })
+
+  it('D5: PAY_CASH gigante ⇒ ACKED con el importe EXACTO (ni se recorta ni se rechaza)', async () => {
+    const GIGANTE = 999_999_999_999
+    ;(orderMobileService.payCashOrder as jest.Mock).mockResolvedValue({
+      paymentId: 'pay-gigante',
+      orderNumber: 'A-9',
+      digitalReceipt: null,
+      amount: 9000,
+      tipAmount: 0,
+      changeCents: GIGANTE - 9000,
+      method: 'CASH',
+    })
+
+    const acks = await processIntents(
+      baseParams([{ id: 'cash-gigante', type: 'PAY_CASH', payload: { orderId: 'order-5', amountCents: GIGANTE } }]),
+    )
+
+    expect(orderMobileService.payCashOrder).toHaveBeenCalledWith(
+      VENUE,
+      'order-5',
+      expect.objectContaining({ amount: GIGANTE, idempotencyKey: 'cash-gigante', isOfflineReplay: true }),
+    )
+    expect(acks[0]).toMatchObject({ status: 'ACKED', result: { paymentId: 'pay-gigante', amount: 9000, changeCents: GIGANTE - 9000 } })
+  })
+
   it('PAY_CASH zero on an outstanding balance stays REJECTED with the payCashOrder reason', async () => {
     const message = 'Esta cuenta debe 50.00. Un cobro en $0 sólo cierra cuentas cortesiadas al 100%.'
     ;(orderMobileService.payCashOrder as jest.Mock).mockRejectedValue(new BadRequestError(message))

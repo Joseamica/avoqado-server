@@ -142,4 +142,51 @@ describe('payCash — frontera de monto y propina', () => {
       expect(payCashOrderMock).not.toHaveBeenCalled()
     })
   })
+
+  /**
+   * D5 (mesas40, 14-oct): NO hay tope de monto que responda 400. `/pay` registra cobros que YA OCURRIERON fuera de
+   * Avoqado (tarjeta de una terminal ajena, transferencia): rechazarlos perdería ese dinero del registro. El tope vive
+   * en el teclado del aparato; el server sólo grita en el log (`payCashOrder.sobrepago.test.ts`). Éste es el cuerpo
+   * REAL que arma Android (`OrderRepository.recordCashPayment`).
+   */
+  describe('D5: el payload real de Android con un importe gigante sigue en 200', () => {
+    const GIGANTE = 999_999_999_999
+    const cuerpoAndroid = (extra: Record<string, unknown>) => ({
+      venueId,
+      amount: GIGANTE,
+      tip: 0,
+      status: 'COMPLETED',
+      splitType: 'FULLPAYMENT',
+      source: 'AVOQADO_ANDROID',
+      idempotencyKey: 'k-android',
+      ...extra,
+    })
+
+    it.each([
+      ['efectivo', { method: 'CASH' }],
+      ['tarjeta de una terminal externa', { method: 'CREDIT_CARD', externalSource: 'Terminal BBVA' }],
+      ['transferencia', { method: 'BANK_TRANSFER' }],
+    ])('%s ⇒ 200 y el servicio recibe el importe EXACTO', async (_label, extra) => {
+      const res = buildRes()
+      await payCash(buildReq(cuerpoAndroid(extra)), res, next)
+
+      expect(res.statusCode).toBe(200)
+      expect(payCashOrderMock).toHaveBeenCalledWith(
+        venueId,
+        orderId,
+        expect.objectContaining({ amount: GIGANTE, idempotencyKey: 'k-android', ...extra }),
+      )
+    })
+
+    it('el reintento idempotente (misma llave, mismo cuerpo) también ⇒ 200 las dos veces', async () => {
+      const primero = buildRes()
+      const reintento = buildRes()
+      await payCash(buildReq(cuerpoAndroid({ method: 'CASH' })), primero, next)
+      await payCash(buildReq(cuerpoAndroid({ method: 'CASH' })), reintento, next)
+
+      expect([primero.statusCode, reintento.statusCode]).toEqual([200, 200])
+      expect(payCashOrderMock).toHaveBeenCalledTimes(2)
+      expect(next).not.toHaveBeenCalled()
+    })
+  })
 })

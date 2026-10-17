@@ -536,3 +536,70 @@ it('guarda las aclaraciones como needs_input sin confundirlas con fallas', async
     expect.objectContaining({ data: expect.objectContaining({ outcome: 'ok', detail: 'needs_input' }) }),
   )
 })
+
+// Evidencia (founder, 15-oct): si un cliente dice «yo no fui», la bitácora debe decir QUÉ app hizo la llamada.
+describe('instrumentTools — qué app hizo cada llamada', () => {
+  beforeEach(() => jest.clearAllMocks())
+
+  const runWith = async (c: Parameters<typeof instrumentTools>[1], tool: string) => {
+    const { server, original } = makeServer()
+    instrumentTools(server, c)
+    callTool(server, tool, {}, jest.fn().mockResolvedValue(okResult))
+    await (original.mock.calls[0][2] as (...a: unknown[]) => Promise<unknown>)({ venueId: 'v1' }, {})
+    await new Promise(r => setImmediate(r))
+    return mockedPrisma.mcpToolCall.create.mock.calls.at(-1)?.[0]?.data
+  }
+
+  it('la fila de la bitácora lleva el id de la app conectada', async () => {
+    expect(await runWith({ ...ctx, clientId: 'mcp_chatgpt' }, 'set_prices_by_code')).toMatchObject({
+      toolName: 'set_prices_by_code',
+      clientId: 'mcp_chatgpt',
+    })
+  })
+
+  it('sin app identificada la fila queda con clientId null', async () => {
+    expect((await runWith(ctx, 'list_menu'))?.clientId).toBeNull()
+  })
+
+  it('una llamada cortada antes de correr también guarda la app', async () => {
+    recordCancelledToolCall({
+      toolName: 'list_menu',
+      staffId: 'staff-1',
+      orgId: 'org-1',
+      venueId: null,
+      clientId: 'mcp_claude',
+      reason: 'timeout',
+      durationMs: 5,
+    })
+    await new Promise(r => setImmediate(r))
+    expect(mockedPrisma.mcpToolCall.create.mock.calls.at(-1)?.[0]?.data).toMatchObject({ clientId: 'mcp_claude', outcome: 'error' })
+  })
+})
+
+// «needs_input» sólo cuando de verdad falta algo: las herramientas en bloque SIEMPRE traen la lista `ambiguous`, y vacía
+// no es una duda. Antes una lista vacía contaba como verdadera y la vista previa no se distinguía de la confirmación.
+describe('instrumentTools — needs_input sólo cuando de verdad falta algo', () => {
+  beforeEach(() => jest.clearAllMocks())
+
+  const run = async (payload: Record<string, unknown>) => {
+    const { server, original } = makeServer()
+    instrumentTools(server, ctx)
+    const result = { content: [{ type: 'text', text: JSON.stringify(payload) }] }
+    callTool(server, 'find_products_by_code', {}, jest.fn().mockResolvedValue(result))
+    await (original.mock.calls[0][2] as (...a: unknown[]) => Promise<unknown>)({ venueId: 'v1' }, {})
+    await new Promise(r => setImmediate(r))
+    return mockedPrisma.mcpToolCall.create.mock.calls.at(-1)?.[0]?.data
+  }
+
+  it('una lista ambiguous vacía es una llamada ok, sin needs_input', async () => {
+    expect(await run({ ok: true, found: [{ code: 'A' }], ambiguous: [] })).toMatchObject({ outcome: 'ok', detail: null })
+  })
+
+  it('con códigos ambiguos sí es needs_input', async () => {
+    expect(await run({ ok: true, ambiguous: [{ code: 'A', candidates: [] }] })).toMatchObject({ outcome: 'ok', detail: 'needs_input' })
+  })
+
+  it('una vista previa que pide confirmación sigue siendo needs_input aunque traiga ambiguous vacío', async () => {
+    expect(await run({ ok: false, requiresConfirmation: true, ambiguous: [] })).toMatchObject({ outcome: 'ok', detail: 'needs_input' })
+  })
+})

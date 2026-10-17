@@ -1,4 +1,4 @@
-import { CfdiStatus } from '@prisma/client'
+import { CfdiStatus, CfdiType } from '@prisma/client'
 
 import { BadRequestError, ServiceUnavailableError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
@@ -77,7 +77,8 @@ export interface IvaCashflowResult {
   ivaTrasladadoCobradoCents: number
   /** IVA trasladado cobrado DESGLOSADO por tasa (clave = tasa string "0.16"/"0.08"); la declaración lo pide separado. */
   ivaTrasladadoPorTasaCents: Record<string, number>
-  /** Contraste informativo: Σ Cfdi.taxCents timbrados en el periodo (NO es la base). */
+  /** Contraste informativo: Σ Cfdi.taxCents de las facturas timbradas en el periodo MENOS el de las notas de crédito timbradas en el
+   *  mismo periodo (cada comprobante por su propio stampedAt; NO es la base). */
   ivaAmparadoPorCfdiCents: number
   cfdiCount: number
   // ── Lado ENTRADAS (Fase 2 / Buzón de CFDIs) ──
@@ -200,14 +201,26 @@ export async function getIvaCashflow(venueId: string, period: string): Promise<I
     }
   }
 
-  // Contraste (NO base): IVA amparado por los CFDIs timbrados del periodo (eje = stampedAt).
+  // Contraste (NO base): IVA amparado por los CFDIs timbrados del periodo (eje = stampedAt). Las notas de crédito (EGRESO)
+  // RESTAN su IVA (antes se sumaba: una venta extraída de la global contaba tres veces). Un complemento de pago no cuenta.
   const tz = venues.find(v => v.id === venueId)?.timezone || 'America/Mexico_City'
   const { from: fromUtc, to: toUtc } = parseDbDateRange(fromStr, toStr, tz)
-  const cfdiAgg = await prisma.cfdi.aggregate({
-    where: { venueId: { in: venueIds }, status: CfdiStatus.STAMPED, stampedAt: { gte: fromUtc, lte: toUtc } },
+  const cfdiPorTipo = await prisma.cfdi.groupBy({
+    by: ['type'],
+    where: {
+      venueId: { in: venueIds },
+      status: CfdiStatus.STAMPED,
+      type: { in: [CfdiType.INGRESO, CfdiType.EGRESO] },
+      stampedAt: { gte: fromUtc, lte: toUtc },
+    },
     _sum: { taxCents: true },
     _count: { _all: true },
   })
+  const ivaAmparadoPorCfdiCents = cfdiPorTipo.reduce(
+    (s, g) => s + (g.type === CfdiType.EGRESO ? -1 : 1) * (g._sum.taxCents ?? 0),
+    0,
+  )
+  const cfdiCount = cfdiPorTipo.reduce((s, g) => s + g._count._all, 0)
 
   // Lado entradas (Fase 2): IVA acreditable pagado real del periodo (Buzón de CFDIs).
   const acreditable = await getAcreditablePagado(venueId, period)
@@ -236,8 +249,8 @@ export async function getIvaCashflow(venueId: string, period: string): Promise<I
       : undefined,
     ivaTrasladadoCobradoCents,
     ivaTrasladadoPorTasaCents,
-    ivaAmparadoPorCfdiCents: cfdiAgg._sum.taxCents ?? 0,
-    cfdiCount: cfdiAgg._count._all,
+    ivaAmparadoPorCfdiCents,
+    cfdiCount,
     acreditablePagadoCents,
     retencionesCents,
     ivaRetenidoTercerosCents,

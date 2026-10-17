@@ -218,16 +218,19 @@ async function buildServerForIdentity(
   activeOrg: string,
   scopes?: string[],
   profile: McpProfile = 'manual',
+  clientId: string | null = null,
 ): Promise<McpServer> {
   const scope = await resolveScope(staffId, activeOrg)
   // Never discard an explicit empty grant or give legacy tokens implicit write access.
   scope.scopes = scopes ?? ['mcp:read']
+  // Qué app hizo cada escritura (evidencia si un cliente dice «yo no fui»): auditMcpWrite la toma del alcance.
+  if (clientId) scope.clientId = clientId
 
   const isSuperAdmin = scope.isSuperAdmin === true
   const server = createMcpServer(isSuperAdmin, profile)
   // Log every tool call (must run BEFORE registering tools). isSuperAdmin: raw errors for staff,
   // sanitized (generic message + ref) for customers — see sanitizeThrownError.
-  instrumentTools(server, { staffId, org: activeOrg, isSuperAdmin: isSuperAdmin && profile === 'manual' })
+  instrumentTools(server, { staffId, org: activeOrg, isSuperAdmin: isSuperAdmin && profile === 'manual', clientId })
   configureToolCatalog(server, scope, profile)
 
   const [serializedEnabled, whiteLabelEnabled, catalogAccess] = await Promise.all([
@@ -265,6 +268,7 @@ async function handleMcpProfileRequest(req: Request, res: Response, profile: Mcp
     let staffId: string
     let activeOrg: string
     let scopes: string[] | undefined
+    let clientId: string | null = null
     const extra = (req as { auth?: { extra?: Record<string, unknown> } }).auth?.extra
     if (extra && typeof extra.staffId === 'string' && typeof extra.activeOrg === 'string') {
       const resource = (req as Request & { auth?: { resource?: URL } }).auth?.resource
@@ -274,6 +278,7 @@ async function handleMcpProfileRequest(req: Request, res: Response, profile: Mcp
       activeOrg = extra.activeOrg
       // provider.verifyAccessToken threads the token's real granted scopes here.
       if (Array.isArray(extra.scopes)) scopes = extra.scopes.filter((s): s is string => typeof s === 'string')
+      if (typeof extra.clientId === 'string') clientId = extra.clientId
     } else {
       const token = (req.headers.authorization ?? '').replace(/^Bearer\s+/i, '')
       const payload = verifyMcpToken(token, profile) // throws on bad / expired / wrong-audience → 401 below
@@ -283,12 +288,13 @@ async function handleMcpProfileRequest(req: Request, res: Response, profile: Mcp
       staffId = payload.sub
       activeOrg = payload.org
       scopes = payload.scp
+      clientId = payload.cid ?? null
     }
     const message = describeMcpMessage(req.body)
     const isHandshake = message.kind === 'request' && MCP_HANDSHAKE_METHODS.has(message.method ?? '')
     const server = isHandshake
       ? await buildHandshakeServer(staffId, profile)
-      : await buildServerForIdentity(staffId, activeOrg, scopes, profile)
+      : await buildServerForIdentity(staffId, activeOrg, scopes, profile, clientId)
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined })
     res.on('close', () => {
       void transport.close()
@@ -309,6 +315,7 @@ async function handleMcpProfileRequest(req: Request, res: Response, profile: Mcp
           toolName: message.tool,
           staffId: typeof extra?.staffId === 'string' ? extra.staffId : null,
           orgId: typeof extra?.activeOrg === 'string' ? extra.activeOrg : null,
+          clientId: typeof extra?.clientId === 'string' ? extra.clientId : null,
           venueId: message.venueId ?? null,
           reason: err.reason,
           durationMs: Date.now() - startedAt,

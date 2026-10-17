@@ -321,6 +321,18 @@ describe('recordOrderPayment (TPV) — un reembolso previo no reabre saldo', () 
     expect(Number(data.total)).toBe(50)
   })
 
+  it.each([
+    ['descuento excedente sin propina (M13)', 278.3],
+    ['cortesía exacta sin propina', 253],
+  ])('%s deja total cero al cobrar por el servicio real', async (_caso, descuento) => {
+    seedOrder([], { subtotal: new Decimal(253), discountAmount: new Decimal(descuento) })
+
+    await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, paymentData(0), 'user-1')
+
+    expect(Number(lastOrderUpdate().total)).toBe(0)
+    expect(Number(lastOrderUpdate().remainingBalance)).toBe(0)
+  })
+
   it('🔴 P12 antes/después: con IVA aparte, cobrar $100 de una cuenta de $100 + $16 la deja PARCIAL con $16 (hoy la cerraba PAGADA)', async () => {
     seedOrder([], {
       subtotal: new Decimal(100),

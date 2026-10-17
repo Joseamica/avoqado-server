@@ -392,7 +392,7 @@ export async function executeMercadoPagoPaymentForVenue(
 
   // Record Order + Payment on approval (idempotent; IPN also calls this).
   if (optimisticStatus === 'COMPLETED') {
-    await finalizeMercadoPagoCheckout({ sessionId, mpPaymentId: payment.id }).catch(err =>
+    await finalizeMercadoPagoCheckout({ sessionId, mpPaymentId: payment.id, paymentTypeId: payment.payment_type_id }).catch(err =>
       logger.error('finalizeMercadoPagoCheckout failed (venue optimistic path)', {
         sessionId,
         error: err instanceof Error ? err.message : String(err),
