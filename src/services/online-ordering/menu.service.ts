@@ -12,6 +12,7 @@ import {
   MENU_CACHE_MAX_VENUES,
   MENU_CACHE_TTL_MS,
   MENU_MAX_GROUP_LINKS_TOTAL,
+  MENU_MAX_OPTION_ENTRIES_TOTAL,
   MENU_MAX_OPTIONS_TOTAL,
   MENU_MAX_PRODUCTS_TOTAL,
 } from './constants'
@@ -253,7 +254,7 @@ export async function loadCategoryVisibility(
   }
 }
 
-/** Lo que la carta lee de cada platillo. Sus grupos activos se CUENTAN aquí y se leen después, sólo si caben (P1-09). */
+/** Lo que la carta lee de cada platillo (sus grupos se cuentan y se leen después, sólo si caben: P1-09). */
 const MENU_PRODUCT_SELECT = {
   id: true,
   name: true,
@@ -262,7 +263,6 @@ const MENU_PRODUCT_SELECT = {
   price: true,
   imageUrl: true,
   categoryId: true,
-  _count: { select: { modifierGroups: { where: { group: { active: true } } } } },
 } satisfies Prisma.ProductSelect
 
 /**
@@ -285,9 +285,11 @@ function completos<T>(filas: T[], dueno: (f: T) => string, contadas: Map<string,
  * sin las categorías cuyo horario (propio o de sus menús) no aplica, y sin productos que no caben completos. SIN caché.
  * R17: sin paginación en v1; si algo se recorta, `truncated` lo dice (medido con tope + 1, H10), cada categoría trae su
  * `productCount` (agregado) y queda un `logger.warn`.
- * P1-09: presupuesto GLOBAL por consulta (≤ 101 categorías, ≤ 401 platillos, ≤ 2,001 vínculos, ≤ 4,001 opciones). Cada nivel
+ * P1-09: presupuesto GLOBAL por consulta (≤ 101 categorías, ≤ 401 platillos, ≤ 2,001 vínculos, ≤ 4,001 opciones) y de la
+ * respuesta (≤ 20,000 entradas de opciones, contando cada vez que una aparece en un platillo). Cada nivel
  * se CUENTA antes de leerse y se reparte en el orden de la carta: se lee sólo lo que cabe, y un platillo que no cabe completo
- * no sale (ni se lee).
+ * no sale (ni se lee). Los conteos son `groupBy` acotados por `IN` a lo ya leído; nunca un `_count` de relación, que Prisma
+ * compila como un agregado de la tabla entera (de todos los negocios) metido en un JOIN.
  */
 export async function loadVisibleMenu(venueId: string, now: Date = new Date()): Promise<VisibleMenu> {
   const rows = await prisma.menuCategory.findMany({
@@ -352,11 +354,21 @@ export async function loadVisibleMenu(venueId: string, now: Date = new Date()): 
 
   // 2. Grupos (vínculos platillo↔grupo), repartidos en el orden de la carta con el conteo de cada platillo. El que no cabe
   //    COMPLETO —más de MAX_GROUPS_PER_PRODUCT o más de lo que queda— no sale, y sus grupos no se leen (R17).
+  const leidos = categories.flatMap(c => platillosDe.get(c.id) ?? [])
+  const conteoDeVinculos =
+    leidos.length > 0
+      ? await prisma.productModifierGroup.groupBy({
+          by: ['productId'],
+          where: { productId: { in: leidos.map(p => p.id) }, group: { active: true } },
+          _count: { _all: true },
+        })
+      : []
+  const vinculosDe = new Map(conteoDeVinculos.map(g => [g.productId, g._count._all]))
   const elegidos: Platillo[] = []
   const gruposContados = new Map<string, number>()
   let vinculos = 0
-  for (const p of categories.flatMap(c => platillosDe.get(c.id) ?? [])) {
-    const n = p._count.modifierGroups
+  for (const p of leidos) {
+    const n = vinculosDe.get(p.id) ?? 0
     if (n > MAX_GROUPS_PER_PRODUCT || vinculos + n > MENU_MAX_GROUP_LINKS_TOTAL) {
       truncated = true
       continue
@@ -381,7 +393,6 @@ export async function loadVisibleMenu(venueId: string, now: Date = new Date()): 
                 allowMultiple: true,
                 minSelections: true,
                 maxSelections: true,
-                _count: { select: { modifiers: { where: { active: true } } } },
               },
             },
           },
@@ -389,24 +400,36 @@ export async function loadVisibleMenu(venueId: string, now: Date = new Date()): 
       : []
   const gruposDe = completos(filasDeVinculos, v => v.productId, gruposContados)
 
-  // 3. Opciones, igual pero por grupo: el grupo que comparten varios platillos se cuenta y se lee una vez.
+  // 3. Opciones, igual pero por grupo: el grupo que comparten varios platillos se cuenta y se lee una vez. En la respuesta sí se
+  //    repite en cada platillo: esas ENTRADAS tienen su propio tope, y el platillo que lo pasaría tampoco sale.
+  const gruposLeidos = [...new Set([...gruposDe.values()].flat().map(v => v.group.id))]
+  const conteoDeOpciones =
+    gruposLeidos.length > 0
+      ? await prisma.modifier.groupBy({ by: ['groupId'], where: { groupId: { in: gruposLeidos }, active: true }, _count: { _all: true } })
+      : []
+  const opcionesDeGrupo = new Map(conteoDeOpciones.map(g => [g.groupId, g._count._all]))
+  const cuantas = (groupId: string) => opcionesDeGrupo.get(groupId) ?? 0
   const candidatos: Array<{ p: Platillo; vinculos: typeof filasDeVinculos }> = []
   const opcionesContadas = new Map<string, number>()
   let opciones = 0
+  let entradas = 0
   for (const p of elegidos) {
     const vs = gruposDe.get(p.id)
     const nuevos = (vs ?? []).filter(v => !opcionesContadas.has(v.group.id))
-    const suma = nuevos.reduce((s, v) => s + v.group._count.modifiers, 0)
+    const suma = nuevos.reduce((s, v) => s + cuantas(v.group.id), 0)
+    const susEntradas = (vs ?? []).reduce((s, v) => s + cuantas(v.group.id), 0)
     if (
       !vs || // cambió entre el conteo y la lectura
-      vs.some(v => v.group._count.modifiers > MAX_MODIFIERS_PER_GROUP) ||
-      opciones + suma > MENU_MAX_OPTIONS_TOTAL
+      vs.some(v => cuantas(v.group.id) > MAX_MODIFIERS_PER_GROUP) ||
+      opciones + suma > MENU_MAX_OPTIONS_TOTAL ||
+      entradas + susEntradas > MENU_MAX_OPTION_ENTRIES_TOTAL
     ) {
       truncated = true
       continue
     }
-    for (const v of nuevos) opcionesContadas.set(v.group.id, v.group._count.modifiers)
+    for (const v of nuevos) opcionesContadas.set(v.group.id, cuantas(v.group.id))
     opciones += suma
+    entradas += susEntradas
     candidatos.push({ p, vinculos: vs })
   }
   const filasDeOpciones =
@@ -461,6 +484,7 @@ export async function loadVisibleMenu(venueId: string, now: Date = new Date()): 
         vinculos: MENU_MAX_GROUP_LINKS_TOTAL,
         opcionesPorGrupo: MAX_MODIFIERS_PER_GROUP,
         opciones: MENU_MAX_OPTIONS_TOTAL,
+        entradasDeOpciones: MENU_MAX_OPTION_ENTRIES_TOTAL,
       },
     })
   }
@@ -486,7 +510,16 @@ export function clearPublicMenuCache(venueId?: string): void {
   }
 }
 
+type PublicModifiers = PublicMenu['categories'][number]['products'][number]['modifierGroups'][number]['modifiers']
+
 function toPublicMenu(visible: VisibleMenu, now: Date): PublicMenu {
+  // Un grupo compartido lleva sus opciones UNA vez en memoria (mismo JSON): la carta en caché no se multiplica por platillo.
+  const opcionesDe = new Map<string, PublicModifiers>()
+  const opciones = (g: VisibleGroup): PublicModifiers => {
+    let lista = opcionesDe.get(g.id)
+    if (!lista) opcionesDe.set(g.id, (lista = g.modifiers.map(m => ({ id: m.id, name: m.name, price: Number(m.price) }))))
+    return lista
+  }
   return {
     generatedAt: now.toISOString(),
     truncated: visible.truncated,
@@ -509,7 +542,7 @@ function toPublicMenu(visible: VisibleMenu, now: Date): PublicMenu {
           allowMultiple: g.allowMultiple,
           minSelections: g.minSelections,
           maxSelections: g.maxSelections,
-          modifiers: g.modifiers.map(m => ({ id: m.id, name: m.name, price: Number(m.price) })),
+          modifiers: opciones(g),
         })),
       })),
     })),
